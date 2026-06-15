@@ -187,7 +187,7 @@ class LLMProvider:
         model=None   → account's default_model.
         """
         if not self._accounts:
-            raise RuntimeError("No LLM accounts registered. Register one via POST /llms or set LoomeX_LLM_ACCOUNT env.")
+            raise RuntimeError("No LLM accounts registered. Register one via POST /llms or set IPMC_LLM_ACCOUNT env.")
 
         name = account or next(iter(self._accounts))
         acc = self.get_account(name)
@@ -251,24 +251,24 @@ class LLMProvider:
     def bootstrap_from_env(self) -> None:
         """Register a default account from env vars if not already registered.
 
-        Env vars (all prefixed LoomeX_LLM_):
+        Env vars (all prefixed IPMC_LLM_):
           ACCOUNT, STYLE, API_KEY, BASE_URL, MODEL,
           CONTEXT_LIMIT, MAX_OUTPUT_TOKENS, TIMEOUT_SEC
         """
-        name = os.environ.get("LoomeX_LLM_ACCOUNT")
+        name = os.environ.get("IPMC_LLM_ACCOUNT")
         if not name or self.is_registered(name):
             return
 
-        style = os.environ.get("LoomeX_LLM_STYLE", "")
-        api_key = os.environ.get("LoomeX_LLM_API_KEY", "")
+        style = os.environ.get("IPMC_LLM_STYLE", "")
+        api_key = os.environ.get("IPMC_LLM_API_KEY", "")
         if not style or not api_key:
             return
 
-        model = os.environ.get("LoomeX_LLM_MODEL", "")
-        base_url = os.environ.get("LoomeX_LLM_BASE_URL", "")
-        context_limit = int(os.environ.get("LoomeX_LLM_CONTEXT_LIMIT", "128000"))
-        max_output_tokens = int(os.environ.get("LoomeX_LLM_MAX_OUTPUT_TOKENS", "8192"))
-        timeout_sec = int(os.environ.get("LoomeX_LLM_TIMEOUT_SEC", "120"))
+        model = os.environ.get("IPMC_LLM_MODEL", "")
+        base_url = os.environ.get("IPMC_LLM_BASE_URL", "")
+        context_limit = int(os.environ.get("IPMC_LLM_CONTEXT_LIMIT", "128000"))
+        max_output_tokens = int(os.environ.get("IPMC_LLM_MAX_OUTPUT_TOKENS", "8192"))
+        timeout_sec = int(os.environ.get("IPMC_LLM_TIMEOUT_SEC", "120"))
 
         models = (
             [ModelConfig(name=model, context_limit=context_limit, max_output_tokens=max_output_tokens)]

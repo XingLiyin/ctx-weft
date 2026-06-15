@@ -1,4 +1,4 @@
-"""MCPCapabilityProvider：用官方 `mcp` SDK 桥接 MCP server 与 LoomeX-00 capability 接口。
+"""MCPCapabilityProvider：用官方 `mcp` SDK 桥接 MCP server 与 ctx-weft capability 接口。
 
 参照 miniAgents `app/tools` 的做法，直接复用 `mcp.client`（ClientSession +
 stdio_client / streamablehttp_client），不再自行实现 JSON-RPC / SSE。
@@ -62,7 +62,7 @@ class MCPServerConfig:
 
 
 class MCPCapabilityProvider(CapabilityProvider):
-    """Bridges an MCP server to the LoomeX-00 capability interface via the `mcp` SDK."""
+    """Bridges an MCP server to the ctx-weft capability interface via the `mcp` SDK."""
 
     def __init__(
         self,

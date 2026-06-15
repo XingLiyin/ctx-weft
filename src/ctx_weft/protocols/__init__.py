@@ -1,4 +1,4 @@
-"""LoomeX-00 协议层。
+"""ctx-weft 协议层。
 
 定义 V1 的硬契约：
 - KnowledgeProvider（§4.2）

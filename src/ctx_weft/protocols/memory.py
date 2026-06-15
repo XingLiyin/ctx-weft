@@ -1,7 +1,7 @@
 """MemoryProvider 协议（统一）。
 
-定位：LoomeX-00 中唯一的 memory 抽象。承载所有"短期 / 长期 / Blackboard"职能——
-它们在 LoomeX-00 中是**同一概念**。
+定位：ctx-weft 中唯一的 memory 抽象。承载所有"短期 / 长期 / Blackboard"职能——
+它们在 ctx-weft 中是**同一概念**。
 
 核心思想：Provider 是一个**事件摄取 + 多模召回**的黑盒：
 - core 把所有重要事件通过 ingest() 喂给 provider

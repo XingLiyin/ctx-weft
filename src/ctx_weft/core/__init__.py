@@ -1,4 +1,4 @@
-"""LoomeX-00 runtime core."""
+"""ctx-weft runtime core."""
 
 from ctx_weft.core.runtime import CtxWeftRuntime, ProviderRegistry, RunHandle
 

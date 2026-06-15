@@ -1,12 +1,12 @@
-"""LoomeX-00 错误类型。"""
+"""ctx-weft 错误类型。"""
 
 from __future__ import annotations
 
 
 class CtxWeftError(Exception):
-    """所有 LoomeX 异常的基类。"""
+    """所有 CtxWeft 异常的基类。"""
 
-    code: str = "LoomeX_ERROR"
+    code: str = "IPMC_ERROR"
 
     def __init__(self, message: str = "", *, code: str | None = None) -> None:
         super().__init__(message)
