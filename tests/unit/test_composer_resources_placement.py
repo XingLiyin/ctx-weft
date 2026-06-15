@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.assembler.assembler import ContextBlock
-from loomex_core.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.assembler import ContextBlock
+from ctx_weft.core.assembler.composer import DefaultComposer
 
 
 def _cap_block(name: str, kind: str, desc: str) -> ContextBlock:

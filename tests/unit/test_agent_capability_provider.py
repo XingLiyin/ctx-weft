@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from loomex_core.core.orchestrator.agent_capability import (
+from ctx_weft.core.orchestrator.agent_capability import (
     PROVIDER_NAME, TemplateAgentCapabilityProvider,
 )
-from loomex_core.protocols.capability import AgentCapability
-from loomex_core.protocols.context import ProviderContext
-from loomex_core.protocols.template import AgentTemplateSummary
+from ctx_weft.protocols.capability import AgentCapability
+from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.protocols.template import AgentTemplateSummary
 
 
 class _Resolver:

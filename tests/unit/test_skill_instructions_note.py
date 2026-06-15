@@ -1,4 +1,4 @@
-from loomex_core.core.loop.steps.prepare import wrap_skill_instructions
+from ctx_weft.core.loop.steps.prepare import wrap_skill_instructions
 
 
 def test_empty_stays_empty():

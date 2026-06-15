@@ -4,7 +4,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from loomex_core.providers.llm.provider import LLMAccount, LLMProvider, ModelConfig
+from ctx_weft.providers.llm.provider import LLMAccount, LLMProvider, ModelConfig
 
 
 class _FakeStore:

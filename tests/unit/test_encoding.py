@@ -1,4 +1,4 @@
-from loomex_core.providers._encoding import decode_console
+from ctx_weft.providers._encoding import decode_console
 
 
 def test_decodes_plain_utf8():

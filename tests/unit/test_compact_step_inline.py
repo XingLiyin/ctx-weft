@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from loomex_core.core.loop.steps.compact import CompactStep
-from loomex_core.protocols import MemoryEventType as T, MemoryScope
+from ctx_weft.core.loop.steps.compact import CompactStep
+from ctx_weft.protocols import MemoryEventType as T, MemoryScope
 
 
 class _FakeMemory:

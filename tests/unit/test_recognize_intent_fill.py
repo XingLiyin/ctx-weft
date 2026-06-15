@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.loop.steps.recognize_intent import RecognizeIntentStep
-from loomex_core.protocols import LLMChunk, ToolCall
-from loomex_core.protocols.capability import ToolCapability
+from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+from ctx_weft.protocols import LLMChunk, ToolCall
+from ctx_weft.protocols.capability import ToolCapability
 
 
 class _FakeAssembler:

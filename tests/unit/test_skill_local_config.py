@@ -1,5 +1,5 @@
 from pathlib import Path
-from loomex_core.providers.capability_skill_local.provider import LocalSkillCapabilityProvider
+from ctx_weft.providers.capability_skill_local.provider import LocalSkillCapabilityProvider
 
 
 def test_skill_exec_param_defaults(tmp_path: Path):

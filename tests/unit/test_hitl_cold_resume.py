@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
-from loomex_core.core.control.types import HitlRequestView
-from loomex_core.core.orchestrator.hitl_manager import HitlManager
+from ctx_weft.core.control.types import HitlRequestView
+from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 
 
 class _Recorder:

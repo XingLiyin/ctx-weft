@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from loomex_core.protocols.capability import qualify
+from ctx_weft.protocols.capability import qualify
 
 
 def test_qualify_mcp_id() -> None:

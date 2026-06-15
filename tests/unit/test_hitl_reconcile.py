@@ -6,8 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from loomex_core.core.control.reducers import reduce_events, serialize_view, deserialize_view
-from loomex_core.core.events.types import Event, EventType
+from ctx_weft.core.control.reducers import reduce_events, serialize_view, deserialize_view
+from ctx_weft.core.events.types import Event, EventType
 
 pytestmark = pytest.mark.asyncio
 
@@ -69,10 +69,10 @@ class _NullBus:
 async def test_reconcile_invokes_only_dangling_tool_calls() -> None:
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
-    from loomex_core.core.loop.steps.reconcile import ReconcileStep
-    from loomex_core.protocols import MemoryEventType, MemoryScope, ProviderContext
-    from loomex_core.protocols.memory import MemoryEvent
-    from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.core.loop.steps.reconcile import ReconcileStep
+    from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+    from ctx_weft.protocols.memory import MemoryEvent
+    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     mem = InMemoryMemoryProvider()
@@ -111,10 +111,10 @@ async def test_reconcile_invokes_only_dangling_tool_calls() -> None:
 async def test_reconcile_no_dangling_routes_to_prepare() -> None:
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
-    from loomex_core.core.loop.steps.reconcile import ReconcileStep
-    from loomex_core.protocols import MemoryEventType, MemoryScope, ProviderContext
-    from loomex_core.protocols.memory import MemoryEvent
-    from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.core.loop.steps.reconcile import ReconcileStep
+    from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+    from ctx_weft.protocols.memory import MemoryEvent
+    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     mem = InMemoryMemoryProvider()
@@ -140,10 +140,10 @@ async def test_reconcile_no_dangling_routes_to_prepare() -> None:
 
 async def test_resolve_reconcile_detection_helper() -> None:
     from datetime import UTC, datetime, timedelta
-    from loomex_core.core.runtime import _task_has_dangling_tool_call
-    from loomex_core.protocols import MemoryEventType, MemoryScope, ProviderContext
-    from loomex_core.protocols.memory import MemoryEvent
-    from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.core.runtime import _task_has_dangling_tool_call
+    from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+    from ctx_weft.protocols.memory import MemoryEvent
+    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     mem = InMemoryMemoryProvider()

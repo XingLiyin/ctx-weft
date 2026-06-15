@@ -1,0 +1,134 @@
+"""LoomeX-00 协议层。
+
+定义 V1 的硬契约：
+- KnowledgeProvider（§4.2）
+- MemoryProvider（§4.3，统一协议：ingest + recall_* + subscribe + apply_compact）
+- CapabilityProvider（§4.4）
+- AgentTemplate / IdentityFacet / TemplateResolver（§4.6）
+- LLMClient / LLMClientResolver（§11，LLM 接入契约）
+- ProviderContext
+
+零运行时依赖；所有方法 `async def`；所有返回值是 dataclass。
+"""
+
+from ctx_weft.protocols.capability import (
+    AgentCapability,
+    AgentCapabilityProvider,
+    Capability,
+    CapabilityEvent,
+    CapabilityProvider,
+    CapabilityProviderInfo,
+    Purpose,
+    SessionScopedCapabilityProvider,
+    SkillCapability,
+    SkillCapabilityProvider,
+    SkillDefinition,
+    ToolCapability,
+    ToolCapabilityProvider,
+)
+from ctx_weft.protocols.context import ContentPart, Citation, ImagePart, ProviderContext, TextPart
+from ctx_weft.protocols.filesystem import FS_PROVIDER_NAME, FsTool, SpillSink
+from ctx_weft.protocols.llm import (
+    # adapter 契约：实现一个 LLM adapter 所需的全部类型
+    LLMCallError,
+    LLMChunk,
+    LLMClient,
+    LLMMessage,
+    LLMRequest,
+    LLMTool,
+    LLMUsage,
+    ToolCall,
+    # resolver 契约：仅多账号 LLM provider 需要
+    LLMClientResolver,
+)
+from ctx_weft.protocols.knowledge import (
+    KnowledgeDoc,
+    KnowledgeProvider,
+    KnowledgeProviderInfo,
+    KnowledgeQuery,
+)
+from ctx_weft.protocols.memory import (
+    EVENT_LAYER,
+    CompactResult,
+    MemoryEvent,
+    MemoryEventType,
+    MemoryLayer,
+    MemoryProvider,
+    MemoryProviderInfo,
+    MemoryRecord,
+    MemoryScope,
+    Subscription,
+    layer_for_types,
+)
+from ctx_weft.protocols.template import (
+    AgentTemplate,
+    AgentTemplateSummary,
+    CapabilityRef,
+    IdentityFacet,
+    LoopConfig,
+    MemoryConfig,
+    TemplateResolver,
+)
+
+__all__ = [
+    # Capability
+    "AgentCapability",
+    "AgentCapabilityProvider",
+    "Capability",
+    "CapabilityEvent",
+    "CapabilityProvider",
+    "CapabilityProviderInfo",
+    "Purpose",
+    "SessionScopedCapabilityProvider",
+    "SkillCapability",
+    "SkillCapabilityProvider",
+    "SkillDefinition",
+    "ToolCapability",
+    "ToolCapabilityProvider",
+    # Filesystem capability
+    "FS_PROVIDER_NAME",
+    "FsTool",
+    "SpillSink",
+    # Context
+    "ContentPart",
+    "Citation",
+    "ImagePart",
+    "ProviderContext",
+    "TextPart",
+    # LLM — adapter 契约
+    "LLMCallError",
+    "LLMChunk",
+    "LLMClient",
+    "LLMMessage",
+    "LLMRequest",
+    "LLMTool",
+    "LLMUsage",
+    "ToolCall",
+    # LLM — resolver 契约（多账号 provider）
+    "LLMClientResolver",
+    # Knowledge
+    "KnowledgeDoc",
+    "KnowledgeProvider",
+    "KnowledgeProviderInfo",
+    "KnowledgeQuery",
+    # Memory
+    "EVENT_LAYER",
+    "CompactResult",
+    "MemoryEvent",
+    "MemoryEventType",
+    "MemoryLayer",
+    "MemoryProvider",
+    "MemoryProviderInfo",
+    "MemoryRecord",
+    "MemoryScope",
+    "Subscription",
+    "layer_for_types",
+    # Template
+    "AgentTemplate",
+    "AgentTemplateSummary",
+    "CapabilityRef",
+    "IdentityFacet",
+    "LoopConfig",
+    "MemoryConfig",
+    "TemplateResolver",
+]

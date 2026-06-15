@@ -16,10 +16,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from loomex_core.core.events.bus import InProcessEventBus
-from loomex_core.core.events.types import Event, EventType
-from loomex_core.core.orchestrator.session_manager import SessionManager
-from loomex_core.core.state.event_store import InMemoryEventStore
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.core.orchestrator.session_manager import SessionManager
+from ctx_weft.core.state.event_store import InMemoryEventStore
 
 pytestmark = pytest.mark.asyncio
 

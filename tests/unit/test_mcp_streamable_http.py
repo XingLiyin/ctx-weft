@@ -14,9 +14,9 @@ from mcp import types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.shared.memory import create_client_server_memory_streams
 
-from loomex_core.protocols.capability import ToolCapability
-from loomex_core.protocols.context import ProviderContext
-from loomex_core.providers.capability_mcp.provider import (
+from ctx_weft.protocols.capability import ToolCapability
+from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.providers.capability_mcp.provider import (
     MCPCapabilityProvider,
     MCPServerConfig,
 )

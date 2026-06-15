@@ -13,17 +13,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from loomex_core.core.assembler.assembler import AssemblerDeps, ContextRequest
-from loomex_core.core.assembler.composer import DefaultComposer
-from loomex_core.core.assembler.sources.agent_experience import AgentExperienceSource
-from loomex_core.core.assembler.sources.short_memory import RecentMemorySource
-from loomex_core.protocols import (
+from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextRequest
+from ctx_weft.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.sources.agent_experience import AgentExperienceSource
+from ctx_weft.core.assembler.sources.short_memory import RecentMemorySource
+from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
     MemoryScope,
     ProviderContext,
 )
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 
@@ -113,7 +113,7 @@ async def test_composer_merges_two_sources_into_paired_turns() -> None:
 
 async def test_actor_messages_always_end_with_user() -> None:
     """actor prompt 必须以 user 结尾——history 以 assistant 收尾且无 Current Progress 时兜底补 user。"""
-    from loomex_core.core.assembler.assembler import ContextBlock
+    from ctx_weft.core.assembler.assembler import ContextBlock
 
     blocks = [
         ContextBlock(id="b1", source="x", kind="history", target="messages", content="hi",
@@ -130,7 +130,7 @@ async def test_actor_messages_always_end_with_user() -> None:
 
 async def test_observer_reuses_act_conversation_plus_observe_message() -> None:
     """观察者复用 act 风格会话（含全部 task 轮次 + 派发日志），尾部追加 observe 指令消息。"""
-    from loomex_core.core.assembler.assembler import ContextBlock
+    from ctx_weft.core.assembler.assembler import ContextBlock
 
     def _blk(src, role, content, ts):
         return ContextBlock(id=f"b{ts}", source=src, kind="history", target="messages",

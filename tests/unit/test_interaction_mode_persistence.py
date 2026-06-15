@@ -5,17 +5,17 @@
 
 from __future__ import annotations
 
-from loomex_core.core.control.converters import task_from_projection
-from loomex_core.core.control.reducers import (
+from ctx_weft.core.control.converters import task_from_projection
+from ctx_weft.core.control.reducers import (
     deserialize_view,
     reduce_events,
     serialize_view,
 )
-from loomex_core.core.control.types import TaskView
-from loomex_core.core.events.types import Event, EventType
-from loomex_core.core.orchestrator.task_manager import _task_payload
-from loomex_core.core.state.models import Task
-from loomex_core.core.utils import generate_id, now_utc
+from ctx_weft.core.control.types import TaskView
+from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.core.orchestrator.task_manager import _task_payload
+from ctx_weft.core.state.models import Task
+from ctx_weft.core.utils import generate_id, now_utc
 
 
 def _interactive_task() -> Task:

@@ -4,8 +4,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from loomex_core.providers.llm.anthropic import AnthropicAdapter
-from loomex_core.providers.llm.openai import OpenAIAdapter
+from ctx_weft.providers.llm.anthropic import AnthropicAdapter
+from ctx_weft.providers.llm.openai import OpenAIAdapter
 
 
 def _mock_client(handler) -> httpx.AsyncClient:

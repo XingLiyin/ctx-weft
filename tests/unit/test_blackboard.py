@@ -15,18 +15,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from loomex_core.core.assembler.assembler import (
+from ctx_weft.core.assembler.assembler import (
     AssemblerDeps,
     ContextBlock,
     ContextRequest,
 )
-from loomex_core.core.assembler.composer import DefaultComposer
-from loomex_core.core.assembler.sources.blackboard import BlackboardSource
-from loomex_core.core.loop.driver import StepDriver
-from loomex_core.core.orchestrator.task_manager import TaskManager
-from loomex_core.core.state.models import Agent, Session, Task
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from loomex_core.protocols import (
+from ctx_weft.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.sources.blackboard import BlackboardSource
+from ctx_weft.core.loop.driver import StepDriver
+from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.state.models import Agent, Session, Task
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
     MemoryScope,

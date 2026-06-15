@@ -8,12 +8,12 @@
 
 from __future__ import annotations
 
-from loomex_core.core.orchestrator.control_capability import (
+from ctx_weft.core.orchestrator.control_capability import (
     ControlContext,
     finish_task,
     _CONTROL_TOOLS,
 )
-from loomex_core.core.state.models import Task
+from ctx_weft.core.state.models import Task
 
 
 def _ctx(task: Task) -> ControlContext:

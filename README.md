@@ -1,8 +1,8 @@
-# loomex-core
+# ctx-weft
 
 **Protocol-based Agent Runtime Core** — 用于构建可控、可观测 AI Agent 应用的 Python SDK。
 
-loomex-core 只做一件事：把外部系统（知识库、记忆系统、能力系统、LLM、模板）通过协议接入，驱动 LLM 完成任务。它不包含任何数据库代码、HTTP 服务或具体 LLM 实现——这些由上层应用（如 LoomeX-host）提供。
+ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力系统、LLM、模板）通过协议接入，驱动 LLM 完成任务。它不包含任何数据库代码、HTTP 服务或具体 LLM 实现——这些由上层应用（如 LoomeX-host）提供。
 
 > 本文是**使用参考**。想了解循环引擎、任务编排、崩溃恢复等**内部实现逻辑**，见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
@@ -19,7 +19,7 @@ loomex-core 只做一件事：把外部系统（知识库、记忆系统、能�
   - [KnowledgeProvider](#knowledgeprovider)
 - [AgentTemplate 与 TemplateResolver](#agenttemplate-与-templateresolver)
 - [LLM 接入](#llm-接入)
-- [LoomeXRuntime API](#loomexruntime-api)
+- [CtxWeftRuntime API](#loomexruntime-api)
 - [事件系统](#事件系统)
 - [内置 Provider](#内置-provider)
 - [控制面](#控制面)
@@ -33,19 +33,19 @@ loomex-core 只做一件事：把外部系统（知识库、记忆系统、能�
 
 ```bash
 # 核心（零额外依赖）
-pip install loomex-core
+pip install ctx-weft
 
 # 含内置工具（bash / http / file）
-pip install "loomex-core[builtin]"
+pip install "ctx-weft[builtin]"
 
 # 含 MCP bridge
-pip install "loomex-core[mcp]"
+pip install "ctx-weft[mcp]"
 
 # 含远程 skill 同步
-pip install "loomex-core[skills]"
+pip install "ctx-weft[skills]"
 
 # 开发环境（pytest + ruff + mypy）
-pip install "loomex-core[dev]"
+pip install "ctx-weft[dev]"
 ```
 
 Python ≥ 3.11 required（用到 `StrEnum` / `datetime.UTC` / `asyncio.timeout`）。
@@ -53,12 +53,12 @@ Python ≥ 3.11 required（用到 `StrEnum` / `datetime.UTC` / `asyncio.timeout`
 顶层包导出：
 
 ```python
-from loomex_core import (
-    LoomeXRuntime, ProviderRegistry, RunHandle, SessionStartParams, InMemoryEventStore,
+from ctx_weft import (
+    CtxWeftRuntime, ProviderRegistry, RunHandle, SessionStartParams, InMemoryEventStore,
     TaskSettings, NormalTaskSettings, CompactTaskSettings, MetadataFillerTaskSettings,
 )
-# 测试辅助单独放在 loomex_core.testing（不污染生产 API）：
-from loomex_core.testing import MockLLMAdapter, MockResponse, ToolCall
+# 测试辅助单独放在 ctx_weft.testing（不污染生产 API）：
+from ctx_weft.testing import MockLLMAdapter, MockResponse, ToolCall
 ```
 
 ---
@@ -68,7 +68,7 @@ from loomex_core.testing import MockLLMAdapter, MockResponse, ToolCall
 ```
 AgentTemplate        定义 Agent 的身份（SOUL/ROLE）和能力引用
        ↓
-LoomeXRuntime        顶层 API，连接所有组件
+CtxWeftRuntime        顶层 API，连接所有组件
   ├── ProviderRegistry   注册 Memory / Capability / Knowledge / LLM
   ├── TemplateResolver   读取 AgentTemplate（由上层实现）
   └── LLMClient          LLM 调用接口（由上层实现）
@@ -78,7 +78,7 @@ Loop Engine          reason → act → observe → finalize
 EventBus             事件总线，所有状态变更的唯一出口
 ```
 
-这些**协议**是对外的接入面。外部系统只需实现其中一个协议，loomex-core 自动用上（LLM 详见
+这些**协议**是对外的接入面。外部系统只需实现其中一个协议，ctx-weft 自动用上（LLM 详见
 [LLM 接入](#llm-接入) 一节）：
 
 | 协议 | 用途 | Context 落位 | 数量 |
@@ -88,7 +88,7 @@ EventBus             事件总线，所有状态变更的唯一出口
 | `KnowledgeProvider` | 动态检索的参考资料（RAG / Wiki） | messages | 多个 |
 | `LLMClient` / `LLMClientResolver` | LLM 调用 adapter / 多账号 provider | — | **唯一，必需** |
 
-全部协议（含数据类型）均从 `loomex_core.protocols` 导出。
+全部协议（含数据类型）均从 `ctx_weft.protocols` 导出。
 
 > 引擎如何把这些协议拼成 prompt、如何驱动 Step、如何编排子任务，见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
@@ -100,10 +100,10 @@ EventBus             事件总线，所有状态变更的唯一出口
 
 ```python
 import asyncio
-from loomex_core import LoomeXRuntime, ProviderRegistry
-from loomex_core.testing import MockLLMAdapter, MockResponse
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from loomex_core.protocols import AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig
+from ctx_weft import CtxWeftRuntime, ProviderRegistry
+from ctx_weft.testing import MockLLMAdapter, MockResponse
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.protocols import AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig
 
 
 # 1. 实现一个最简 TemplateResolver
@@ -132,7 +132,7 @@ template = AgentTemplate(
 providers = ProviderRegistry()
 providers.register_memory(InMemoryMemoryProvider())
 
-runtime = LoomeXRuntime(
+runtime = CtxWeftRuntime(
     template_resolver=DictTemplateResolver({"my_agent": template}),
     llm=MockLLMAdapter(responses=[MockResponse(text="The answer is 42.")]),
     providers=providers,
@@ -158,7 +158,7 @@ asyncio.run(main())
 **唯一的 memory 抽象**——承载短期对话窗口、长期记忆、blackboard 父子通信。
 
 ```python
-from loomex_core.protocols import (
+from ctx_weft.protocols import (
     MemoryProvider, MemoryEvent, MemoryEventType,
     MemoryScope, MemoryRecord, ProviderContext,
 )
@@ -205,7 +205,7 @@ providers.register_memory(InMemoryMemoryProvider())   # 唯一槽位，重复注
 **Agent 的可调用动作**——tool、skill、sub-agent 三类。
 
 ```python
-from loomex_core.protocols.capability import (
+from ctx_weft.protocols.capability import (
     Capability, ToolCapability, SkillCapability, AgentCapability,
     CapabilityEvent, ToolCapabilityProvider,
 )
@@ -264,7 +264,7 @@ providers.deregister_capability("builtin")   # 按 provider.name 注销
 **动态检索的参考资料**——RAG、Wiki、API 文档。只读，不接受写入。
 
 ```python
-from loomex_core.protocols import KnowledgeProvider, KnowledgeQuery, KnowledgeDoc
+from ctx_weft.protocols import KnowledgeProvider, KnowledgeQuery, KnowledgeDoc
 
 class KnowledgeProvider(Protocol):
     name: str
@@ -290,7 +290,7 @@ providers.register_knowledge(WikiProvider(), priority=10)
 Agent 实例化的蓝图，由上层（LoomeX-host 或用户代码）构建：
 
 ```python
-from loomex_core.protocols import (
+from ctx_weft.protocols import (
     AgentTemplate, IdentityFacet, CapabilityRef, MemoryConfig, LoopConfig,
 )
 
@@ -335,7 +335,7 @@ template = AgentTemplate(
 core 通过 `TemplateResolver` 协议读取 template，由使用方实现：
 
 ```python
-from loomex_core.protocols import (
+from ctx_weft.protocols import (
     TemplateResolver, AgentTemplate, AgentTemplateSummary, ProviderContext,
 )
 
@@ -363,11 +363,11 @@ class MyTemplateResolver(TemplateResolver):
 
 ## LLM 接入
 
-loomex-core 只定义 `LLMClient` 协议，不包含任何真实 LLM SDK。协议与全部数据类型都在
-`loomex_core.protocols`（与 Memory / Capability / Knowledge 同层）：
+ctx-weft 只定义 `LLMClient` 协议，不包含任何真实 LLM SDK。协议与全部数据类型都在
+`ctx_weft.protocols`（与 Memory / Capability / Knowledge 同层）：
 
 ```python
-from loomex_core.protocols import (
+from ctx_weft.protocols import (
     # 写一个 LLM adapter 需要的全部类型：
     LLMClient,                         # 要实现的协议
     LLMRequest, LLMMessage, LLMTool,   # 读：complete() 入参
@@ -385,7 +385,7 @@ from loomex_core.protocols import (
 适合脚本/测试、单一模型：
 
 ```python
-runtime = LoomeXRuntime(template_resolver=resolver, llm=my_adapter)
+runtime = CtxWeftRuntime(template_resolver=resolver, llm=my_adapter)
 ```
 
 `LLMClient` 协议：
@@ -410,9 +410,9 @@ class LLMClient(Protocol):
 `LLMProvider` 实现 `LLMClientResolver`，管理多账号 + 多模型，支持持久化与环境变量自举：
 
 ```python
-from loomex_core.providers.llm import LLMProvider, LLMAccount, ModelConfig
+from ctx_weft.providers.llm import LLMProvider, LLMAccount, ModelConfig
 # 真实 adapter（需 [llm] extra）/ 测试 adapter 也都从同一入口取：
-# from loomex_core.providers.llm import AnthropicAdapter, OpenAIAdapter, MockLLMAdapter
+# from ctx_weft.providers.llm import AnthropicAdapter, OpenAIAdapter, MockLLMAdapter
 
 provider = LLMProvider(store)          # store 实现 LLMAccountStoreProtocol(save/delete/list_all)
 provider.register_account(LLMAccount(
@@ -437,14 +437,14 @@ runtime.providers.register_llm_provider(provider)
 
 ---
 
-## LoomeXRuntime API
+## CtxWeftRuntime API
 
-`LoomeXRuntime` 是使用 loomex-core 的唯一入口。
+`CtxWeftRuntime` 是使用 ctx-weft 的唯一入口。
 
 ### 构造
 
 ```python
-runtime = LoomeXRuntime(
+runtime = CtxWeftRuntime(
     template_resolver=my_resolver,   # 必需
     providers=providers,             # 可选，不传则新建空注册表
     llm=my_llm_adapter,              # 可选，LLM 兜底（未注册 llm provider 时用）
@@ -491,7 +491,7 @@ print(state.transcript[-1].assistant_text)   # 最后一轮 LLM 回复
 **`SessionStartParams`**，用 `.create()` 构造；`start_session` **只接受这一个参数**：
 
 ```python
-from loomex_core import SessionStartParams
+from ctx_weft import SessionStartParams
 
 params = SessionStartParams.create(
     template_id="planner_agent",        # 必需
@@ -592,7 +592,7 @@ class Event:
 
 ### 常用事件类型
 
-事件类型在 `loomex_core.core.events.types.EVENT_TYPES` 中**冻结**（业务代码不得发未登记类型）：
+事件类型在 `ctx_weft.core.events.types.EVENT_TYPES` 中**冻结**（业务代码不得发未登记类型）：
 
 - **Run/Step**：`RunStarted` `RunFinished` `RunCanceled` `RunPaused` `RunResumed` `StepStarted` `StepCompleted` `StepFailed`
 - **Session**：`SessionCreated` `SessionStatusChanged` `SessionFinished` `SessionPausedHitl`
@@ -606,7 +606,7 @@ class Event:
 ### 订阅事件
 
 ```python
-from loomex_core.core.events.types import EventFilter
+from ctx_weft.core.events.types import EventFilter
 
 # 用 handle 订阅本 run
 async for ev in handle.events():
@@ -629,18 +629,18 @@ async for ev in runtime.event_bus.stream(EventFilter(session_id="ses_xxx")):
 零依赖，用于开发/测试：
 
 ```python
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 providers.register_memory(InMemoryMemoryProvider())
 # recall_recent ✓ / recall_topic ✓ / recall_semantic ✗（返空）；线程不安全，仅单进程/测试
 ```
 
 ### BuiltinToolsCapabilityProvider
 
-需要 `pip install "loomex-core[builtin]"`：
+需要 `pip install "ctx-weft[builtin]"`：
 
 ```python
 from pathlib import Path
-from loomex_core.providers.capability_builtin import (
+from ctx_weft.providers.capability_builtin import (
     BuiltinToolsCapabilityProvider, BuiltinToolsConfig,
 )
 
@@ -664,10 +664,10 @@ providers.register_capability(BuiltinToolsCapabilityProvider(
 
 ### MCPCapabilityProvider
 
-桥接任意 MCP server，需要 `pip install "loomex-core[mcp]"`：
+桥接任意 MCP server，需要 `pip install "ctx-weft[mcp]"`：
 
 ```python
-from loomex_core.providers.capability_mcp import MCPCapabilityProvider, MCPServerConfig
+from ctx_weft.providers.capability_mcp import MCPCapabilityProvider, MCPServerConfig
 
 # stdio transport（启动子进程）
 providers.register_capability(MCPCapabilityProvider(MCPServerConfig(
@@ -691,7 +691,7 @@ providers.register_capability(MCPCapabilityProvider(MCPServerConfig(
 
 ```python
 from pathlib import Path
-from loomex_core.providers.capability_skill_local import LocalSkillCapabilityProvider
+from ctx_weft.providers.capability_skill_local import LocalSkillCapabilityProvider
 providers.register_capability(LocalSkillCapabilityProvider(Path("./skills")))
 # 目录结构：skills_dir/<skill_name>/SKILL.md（+ 可选 references/、scripts/）
 # capability id 前缀 local_skill:
@@ -699,11 +699,11 @@ providers.register_capability(LocalSkillCapabilityProvider(Path("./skills")))
 
 ### RemoteSkillCapabilityProvider
 
-从 Git 仓库同步 SKILL.md，需要 `pip install "loomex-core[skills]"`：
+从 Git 仓库同步 SKILL.md，需要 `pip install "ctx-weft[skills]"`：
 
 ```python
 from pathlib import Path
-from loomex_core.providers.capability_skill_remote import (
+from ctx_weft.providers.capability_skill_remote import (
     RemoteSkillCapabilityProvider, GitSkillSyncer,
 )
 
@@ -720,7 +720,7 @@ providers.register_capability(RemoteSkillCapabilityProvider(
 
 ### 内置控制 Capability（ControlCapabilityProvider）
 
-由 `LoomeXRuntime` 自动注册，无需手动添加。向 LLM 暴露：
+由 `CtxWeftRuntime` 自动注册，无需手动添加。向 LLM 暴露：
 
 | capability id | purpose | 描述 |
 |--------------|---------|------|
@@ -758,7 +758,7 @@ runtime.hitl_manager.reject(request_id, reason="不允许该操作")
 给敏感 capability 挂鉴权器，在 invoke 前拦截：
 
 ```python
-from loomex_core.core.auth import (
+from ctx_weft.core.auth import (
     Authorizer, AllowAllAuthorizer, AllowListAuthorizer, HumanConfirmationAuthorizer,
 )
 
@@ -787,7 +787,7 @@ providers.set_capability_authorizer(
 `subscribe_topic` / `list_subscriptions` / `apply_compact` / `count_recent` / `describe`）：
 
 ```python
-from loomex_core.protocols import (
+from ctx_weft.protocols import (
     MemoryProvider, MemoryEvent, MemoryEventType, MemoryScope, MemoryRecord,
     MemoryProviderInfo, CompactResult, Subscription, ProviderContext,
 )
@@ -811,11 +811,11 @@ class MyMemoryProvider(MemoryProvider):
 
 ```python
 from collections.abc import AsyncIterator
-from loomex_core.protocols.capability import (
+from ctx_weft.protocols.capability import (
     ToolCapabilityProvider, Capability, ToolCapability,
     CapabilityEvent, CapabilityProviderInfo,
 )
-from loomex_core.protocols import ProviderContext
+from ctx_weft.protocols import ProviderContext
 
 class DatabaseProvider(ToolCapabilityProvider):
     name = "database"
@@ -852,7 +852,7 @@ class DatabaseProvider(ToolCapabilityProvider):
 
 ```python
 from collections.abc import AsyncIterator
-from loomex_core.protocols import (
+from ctx_weft.protocols import (
     KnowledgeProvider, KnowledgeQuery, KnowledgeDoc, KnowledgeProviderInfo, ProviderContext,
 )
 
@@ -871,7 +871,7 @@ class VectorSearchProvider(KnowledgeProvider):
 
 ```python
 from collections.abc import AsyncIterator
-from loomex_core.protocols import LLMClient, LLMChunk, LLMRequest, LLMUsage
+from ctx_weft.protocols import LLMClient, LLMChunk, LLMRequest, LLMUsage
 
 class MyLLMAdapter(LLMClient):
     @property
@@ -901,7 +901,7 @@ class MyLLMAdapter(LLMClient):
 ### MockLLMAdapter
 
 ```python
-from loomex_core.testing import MockLLMAdapter, MockResponse, ToolCall
+from ctx_weft.testing import MockLLMAdapter, MockResponse, ToolCall
 
 # 纯文本，按队列依次返回
 llm = MockLLMAdapter(responses=[MockResponse(text="pong")])
@@ -922,10 +922,10 @@ assert llm.last_request.system.startswith("You are")
 
 ```python
 import pytest
-from loomex_core import LoomeXRuntime, ProviderRegistry
-from loomex_core.testing import MockLLMAdapter, MockResponse
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from loomex_core.protocols import AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig
+from ctx_weft import CtxWeftRuntime, ProviderRegistry
+from ctx_weft.testing import MockLLMAdapter, MockResponse
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.protocols import AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig
 
 @pytest.fixture
 def echo_template():
@@ -942,7 +942,7 @@ def runtime(echo_template):
         async def list_summaries(self, ctx): return []
     providers = ProviderRegistry()
     providers.register_memory(InMemoryMemoryProvider())
-    return LoomeXRuntime(
+    return CtxWeftRuntime(
         template_resolver=Resolver(),
         llm=MockLLMAdapter([MockResponse(text="pong")]),
         providers=providers,
@@ -962,7 +962,7 @@ async def test_single_task(runtime):
 - **单进程**：EventBus 是进程内实现，不跨进程。多进程需替换为 Redis Streams 等外部总线。
 - **MemoryProvider 单实例**：同一个 `ProviderRegistry` 只能注册一个 MemoryProvider。
 - **LLM 单解析器**：`register_llm_provider` 是唯一槽位；或用 `llm=` 兜底，二者皆无则运行时报错。
-- **core 不做 I/O**：`loomex_core` 内部无文件读写、无网络请求（providers 是外部的）。
+- **core 不做 I/O**：`ctx_weft` 内部无文件读写、无网络请求（providers 是外部的）。
 - **默认单租户**：V1 默认 `tenant_id="default"`，多租户需在上层处理。
 - **Python ≥ 3.11**。
 

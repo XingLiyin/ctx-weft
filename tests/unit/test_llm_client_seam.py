@@ -1,7 +1,7 @@
 import httpx
 
-from loomex_core.providers.llm.anthropic import AnthropicAdapter
-from loomex_core.providers.llm.openai import OpenAIAdapter
+from ctx_weft.providers.llm.anthropic import AnthropicAdapter
+from ctx_weft.providers.llm.openai import OpenAIAdapter
 
 
 def test_openai_make_client_returns_async_client():

@@ -1,4 +1,4 @@
-from loomex_core.providers.llm.openai import OpenAIAdapter
+from ctx_weft.providers.llm.openai import OpenAIAdapter
 
 
 def test_chat_url_default_unchanged():

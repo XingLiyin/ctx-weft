@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.orchestrator.control_capability import update_task_metadata, ControlContext
-from loomex_core.core.state.models import NormalTaskSettings, Task
+from ctx_weft.core.orchestrator.control_capability import update_task_metadata, ControlContext
+from ctx_weft.core.state.models import NormalTaskSettings, Task
 
 
 def _root_task():

@@ -1,5 +1,5 @@
-from loomex_core.providers.llm.anthropic import AnthropicAdapter
-from loomex_core.providers.llm.openai import OpenAIAdapter
+from ctx_weft.providers.llm.anthropic import AnthropicAdapter
+from ctx_weft.providers.llm.openai import OpenAIAdapter
 
 
 def test_adapters_hold_retry():

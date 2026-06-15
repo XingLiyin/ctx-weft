@@ -1,5 +1,5 @@
-from loomex_core.core.control.converters import session_from_projection
-from loomex_core.core.control.types import SessionView
+from ctx_weft.core.control.converters import session_from_projection
+from ctx_weft.core.control.types import SessionView
 
 
 def test_converter_carries_context_limit():

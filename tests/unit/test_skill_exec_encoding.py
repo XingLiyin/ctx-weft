@@ -1,8 +1,8 @@
 import asyncio
 from pathlib import Path
 
-from loomex_core.providers.capability_skill_local.provider import LocalSkillCapabilityProvider
-from loomex_core.protocols.context import ProviderContext
+from ctx_weft.providers.capability_skill_local.provider import LocalSkillCapabilityProvider
+from ctx_weft.protocols.context import ProviderContext
 
 
 def _make_skill(tmp_path: Path, script_body: str) -> Path:

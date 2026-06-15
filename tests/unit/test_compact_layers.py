@@ -11,13 +11,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from loomex_core.core.events.bus import InProcessEventBus
-from loomex_core.core.loop.driver import LoopContext, LoopState
-from loomex_core.core.loop.steps.compact import CompactStep
-from loomex_core.core.loop.steps.finalize import FinalizeStep
-from loomex_core.core.state.models import Task
-from loomex_core.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.loop.driver import LoopContext, LoopState
+from ctx_weft.core.loop.steps.compact import CompactStep
+from ctx_weft.core.loop.steps.finalize import FinalizeStep
+from ctx_weft.core.state.models import Task
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 T = MemoryEventType

@@ -12,26 +12,26 @@ from types import SimpleNamespace
 
 import pytest
 
-from loomex_core.core.events.bus import InProcessEventBus
-from loomex_core.core.loop.capability_gateway import CapabilityGateway
-from loomex_core.core.loop.driver import LoopContext, LoopState
-from loomex_core.core.orchestrator.capability_cache import CapabilityCache
-from loomex_core.core.orchestrator.control_capability import (
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.loop.capability_gateway import CapabilityGateway
+from ctx_weft.core.loop.driver import LoopContext, LoopState
+from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.core.orchestrator.control_capability import (
     PROVIDER_NAME,
     ControlCapabilityProvider,
     ControlContext,
     delegate_plan,
     delegate_task,
 )
-from loomex_core.core.state.models import Session, Task
-from loomex_core.protocols import MemoryEventType, MemoryScope, ProviderContext
-from loomex_core.protocols.capability import (
+from ctx_weft.core.state.models import Session, Task
+from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols.capability import (
     CapabilityEvent,
     CapabilityProviderInfo,
     ToolCapability,
     ToolCapabilityProvider,
 )
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 
 class _FakeTM:

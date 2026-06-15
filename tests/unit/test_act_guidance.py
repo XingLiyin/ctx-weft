@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.loop.steps.act import _build_act_guidance
+from ctx_weft.core.loop.steps.act import _build_act_guidance
 
 
 def _state(title="", description="", mode="auto"):

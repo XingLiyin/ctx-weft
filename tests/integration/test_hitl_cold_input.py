@@ -12,22 +12,22 @@ from types import SimpleNamespace
 
 import pytest
 
-from loomex_core.core.events.bus import InProcessEventBus
-from loomex_core.core.loop.capability_gateway import CapabilityGateway
-from loomex_core.core.loop.driver import LoopContext, LoopState
-from loomex_core.core.loop.steps.reconcile import ReconcileStep
-from loomex_core.core.orchestrator.capability_cache import CapabilityCache
-from loomex_core.core.orchestrator.control_capability import (
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.loop.capability_gateway import CapabilityGateway
+from ctx_weft.core.loop.driver import LoopContext, LoopState
+from ctx_weft.core.loop.steps.reconcile import ReconcileStep
+from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.core.orchestrator.control_capability import (
     PROVIDER_NAME,
     ControlCapabilityProvider,
 )
-from loomex_core.core.orchestrator.hitl_manager import HitlManager
-from loomex_core.core.state.models import Session, Task
-from loomex_core.core.utils import now_utc
-from loomex_core.protocols import MemoryScope, ProviderContext
-from loomex_core.protocols.capability import ToolCapability
-from loomex_core.protocols.memory import MemoryEvent, MemoryEventType
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+from ctx_weft.core.state.models import Session, Task
+from ctx_weft.core.utils import now_utc
+from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols.capability import ToolCapability
+from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 
 @pytest.mark.asyncio

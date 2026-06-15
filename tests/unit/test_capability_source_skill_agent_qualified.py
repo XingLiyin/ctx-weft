@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.assembler.sources.capability import CapabilitySource
-from loomex_core.protocols.capability import AgentCapability, SkillCapability
+from ctx_weft.core.assembler.sources.capability import CapabilitySource
+from ctx_weft.protocols.capability import AgentCapability, SkillCapability
 
 
 async def _blocks(cap):

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from loomex_core.core.orchestrator.skill_executor_capability import (
+from ctx_weft.core.orchestrator.skill_executor_capability import (
     SkillExecutorCapabilityProvider,
 )
-from loomex_core.protocols.capability import (
+from ctx_weft.protocols.capability import (
     Capability, CapabilityProviderInfo, SkillCapability, SkillCapabilityProvider,
     SkillDefinition,
 )
-from loomex_core.protocols.context import ProviderContext
+from ctx_weft.protocols.context import ProviderContext
 
 
 class _FakeSkillProvider(SkillCapabilityProvider):

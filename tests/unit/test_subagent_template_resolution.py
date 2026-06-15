@@ -1,10 +1,10 @@
-"""LoomeXRuntime._resolve_subagent_template maps qualified agent name → template_name."""
+"""CtxWeftRuntime._resolve_subagent_template maps qualified agent name → template_name."""
 
 from __future__ import annotations
 
-from loomex_core.core.runtime import LoomeXRuntime, ProviderRegistry
-from loomex_core.protocols.context import ProviderContext
-from loomex_core.protocols.template import AgentTemplateSummary
+from ctx_weft.core.runtime import CtxWeftRuntime, ProviderRegistry
+from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.protocols.template import AgentTemplateSummary
 
 
 class _Resolver:
@@ -14,8 +14,8 @@ class _Resolver:
         raise NotImplementedError
 
 
-def _runtime() -> LoomeXRuntime:
-    return LoomeXRuntime(template_resolver=_Resolver(), providers=ProviderRegistry())
+def _runtime() -> CtxWeftRuntime:
+    return CtxWeftRuntime(template_resolver=_Resolver(), providers=ProviderRegistry())
 
 
 async def test_qualified_resolves_to_template_name() -> None:

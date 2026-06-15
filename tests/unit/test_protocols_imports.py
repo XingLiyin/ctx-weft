@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 
 def test_imports():
-    from loomex_core.protocols import (
+    from ctx_weft.protocols import (
         AgentTemplate,
         Capability,
         CapabilityProvider,
@@ -38,7 +38,7 @@ def test_imports():
 
 
 def test_template_construction():
-    from loomex_core.protocols import (
+    from ctx_weft.protocols import (
         AgentTemplate,
         CapabilityRef,
         IdentityFacet,

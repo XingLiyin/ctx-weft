@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.loop.steps.recognize_intent import (
+from ctx_weft.core.loop.steps.recognize_intent import (
     RecognizeIntentStep,
     should_recognize_intent,
     launch_recognize_intent,
@@ -27,7 +27,7 @@ async def test_launch_runs_step_on_snapshot(monkeypatch):
     seen = {}
 
     async def _fake_execute(self, state, ctx):
-        from loomex_core.core.loop.driver import StepOutcome
+        from ctx_weft.core.loop.driver import StepOutcome
         seen["run_id"] = state.run_id
         seen["bound"] = state.extra.get("bound_capabilities")
         return StepOutcome(next_step=None)

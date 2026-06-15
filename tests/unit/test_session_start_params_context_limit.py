@@ -1,5 +1,5 @@
 import pytest
-from loomex_core.core.runtime import SessionStartParams
+from ctx_weft.core.runtime import SessionStartParams
 
 
 def test_context_limit_required():

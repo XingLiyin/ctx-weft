@@ -1,7 +1,7 @@
 import asyncio
 
-from loomex_core.providers.capability_filesystem import provider as fsprov
-from loomex_core.protocols.context import ProviderContext
+from ctx_weft.providers.capability_filesystem import provider as fsprov
+from ctx_weft.protocols.context import ProviderContext
 
 
 async def _collect(events):

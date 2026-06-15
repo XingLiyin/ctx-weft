@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.loop.steps.recognize_intent import RecognizeIntentStep
+from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
 
 
 async def test_skips_when_title_present():

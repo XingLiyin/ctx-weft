@@ -1,4 +1,4 @@
-# loomex-core 内部实现逻辑
+# ctx-weft 内部实现逻辑
 
 > 本文讲 **引擎内部如何运转**：循环引擎、Step 流水线、上下文装配、任务编排、记忆写入时机、会话生命周期与崩溃恢复、事件系统内部。
 >
@@ -26,7 +26,7 @@
 
 ```
                          ┌──────────────────────────────────────┐
-                         │            LoomeXRuntime               │
+                         │            CtxWeftRuntime               │
                          │                                        │
  TemplateResolver ──────▶│  LifecycleManager   instantiate_agent  │
                          │  SessionManager     create/resume      │
@@ -52,7 +52,7 @@
                   (InMemoryEventStore)
 ```
 
-**一句话**：`LoomeXRuntime` 把一个 `(Task, Agent, AgentTemplate)` 交给 `_execute_task`，后者组装好
+**一句话**：`CtxWeftRuntime` 把一个 `(Task, Agent, AgentTemplate)` 交给 `_execute_task`，后者组装好
 `LoopContext` 与 `LoopState`，由 `StepDriver` 按 `next_step` 顺序跑 Step；每个 Step 产生
 `StepOutcome`（状态补丁 + 事件），事件全部经 `EventBus` 流出，`EventStore` 默认订阅落盘。
 
@@ -60,32 +60,32 @@
 
 ## 2. 核心组件职责
 
-> 路径均相对 `loomex-core/`，行号对应当前 `master`，可点击跳转。
+> 路径均相对 `ctx-weft/`，行号对应当前 `master`，可点击跳转。
 
 | 组件 | 源码（file:line） | 职责 |
 |------|------------------|------|
-| `LoomeXRuntime` | `src/loomex_core/core/runtime.py:343` | 顶层编排：构造依赖、5 种运行入口、`_execute_task` |
-| `ProviderRegistry` | `src/loomex_core/core/runtime.py:163` | 四类 provider 注册表（memory 唯一 / cap 列表 / knowledge 按 priority / llm 唯一） |
-| `LifecycleManager` | `src/loomex_core/core/orchestrator/lifecycle_manager.py:30` | 从 template 实例化 `Agent`（`instantiate_agent` `:35`，含 spawn_depth / 父子关系） |
-| `SessionManager` | `src/loomex_core/core/orchestrator/session_manager.py:22` | `create_session` `:28` / `resume_session` `:77`，建 Session + root Task + TaskManager |
-| `TaskManager` | `src/loomex_core/core/orchestrator/task_manager.py:41` | 任务队列、`drain()` `:204` 调度、`track_background` `:76`（后台协程登记）、`restore` `:96` |
-| `ContextAssembler` | `src/loomex_core/core/assembler/assembler.py:140` | 多 Source 取数 → budget 裁剪 → composer 拼 prompt |
-| `CapabilityGateway` | `src/loomex_core/core/loop/capability_gateway.py:52` | capability 解析、鉴权、`invoke` `:75`、把调用/结果写 memory + 发事件 |
-| `CapabilityCache` | `src/loomex_core/core/orchestrator/capability_cache.py:21` | per-agent 能力缓存，loop 结束 `evict(agent.id)` |
-| `StepDriver` | `src/loomex_core/core/loop/driver.py:155` | 按 `initial_step` 起步，`run()` `:162` 循环执行 Step，发 StepStarted/Completed/Failed |
-| `EventBus` / `InProcessEventBus` | `src/loomex_core/core/events/bus.py:42` / `:79` | 进程内事件总线，`emit()` `:88` / `stream()` `:142` |
-| `EventStore` / `InMemoryEventStore` | `src/loomex_core/core/state/event_store.py:43` / `:82` | 事件持久化 + `list_active_session_ids` `:113` + 回放支撑 |
-| `HitlManager` | `src/loomex_core/core/orchestrator/hitl_manager.py:40` | 人工介入请求/应答（`approve` `:96` / `reject` `:120`） |
+| `CtxWeftRuntime` | `src/ctx_weft/core/runtime.py:343` | 顶层编排：构造依赖、5 种运行入口、`_execute_task` |
+| `ProviderRegistry` | `src/ctx_weft/core/runtime.py:163` | 四类 provider 注册表（memory 唯一 / cap 列表 / knowledge 按 priority / llm 唯一） |
+| `LifecycleManager` | `src/ctx_weft/core/orchestrator/lifecycle_manager.py:30` | 从 template 实例化 `Agent`（`instantiate_agent` `:35`，含 spawn_depth / 父子关系） |
+| `SessionManager` | `src/ctx_weft/core/orchestrator/session_manager.py:22` | `create_session` `:28` / `resume_session` `:77`，建 Session + root Task + TaskManager |
+| `TaskManager` | `src/ctx_weft/core/orchestrator/task_manager.py:41` | 任务队列、`drain()` `:204` 调度、`track_background` `:76`（后台协程登记）、`restore` `:96` |
+| `ContextAssembler` | `src/ctx_weft/core/assembler/assembler.py:140` | 多 Source 取数 → budget 裁剪 → composer 拼 prompt |
+| `CapabilityGateway` | `src/ctx_weft/core/loop/capability_gateway.py:52` | capability 解析、鉴权、`invoke` `:75`、把调用/结果写 memory + 发事件 |
+| `CapabilityCache` | `src/ctx_weft/core/orchestrator/capability_cache.py:21` | per-agent 能力缓存，loop 结束 `evict(agent.id)` |
+| `StepDriver` | `src/ctx_weft/core/loop/driver.py:155` | 按 `initial_step` 起步，`run()` `:162` 循环执行 Step，发 StepStarted/Completed/Failed |
+| `EventBus` / `InProcessEventBus` | `src/ctx_weft/core/events/bus.py:42` / `:79` | 进程内事件总线，`emit()` `:88` / `stream()` `:142` |
+| `EventStore` / `InMemoryEventStore` | `src/ctx_weft/core/state/event_store.py:43` / `:82` | 事件持久化 + `list_active_session_ids` `:113` + 回放支撑 |
+| `HitlManager` | `src/ctx_weft/core/orchestrator/hitl_manager.py:40` | 人工介入请求/应答（`approve` `:96` / `reject` `:120`） |
 
-**自动注册的内置 Capability**（在 `LoomeXRuntime.__init__`，`src/loomex_core/core/runtime.py:369`）：
-- `ControlCapabilityProvider`（`src/loomex_core/core/orchestrator/control_capability.py:366`）— submit_task / submit_plan / replan / submit_task_assessment / update_task_metadata / request_human_input
-- `SkillExecutorCapabilityProvider`（`src/loomex_core/core/orchestrator/skill_executor_capability.py:124`）— 把 LLM 的 skill 调用路由到对应的 `SkillCapabilityProvider`；`ProviderRegistry` 在 skill provider 增减时调用 `mark_dirty()` 让它重建索引。
+**自动注册的内置 Capability**（在 `CtxWeftRuntime.__init__`，`src/ctx_weft/core/runtime.py:369`）：
+- `ControlCapabilityProvider`（`src/ctx_weft/core/orchestrator/control_capability.py:366`）— submit_task / submit_plan / replan / submit_task_assessment / update_task_metadata / request_human_input
+- `SkillExecutorCapabilityProvider`（`src/ctx_weft/core/orchestrator/skill_executor_capability.py:124`）— 把 LLM 的 skill 调用路由到对应的 `SkillCapabilityProvider`；`ProviderRegistry` 在 skill provider 增减时调用 `mark_dirty()` 让它重建索引。
 
 ---
 
 ## 3. Loop 引擎与 Step 流水线
 
-`StepDriver.run()`（`src/loomex_core/core/loop/driver.py:162`）是引擎心脏。流程：
+`StepDriver.run()`（`src/ctx_weft/core/loop/driver.py:162`）是引擎心脏。流程：
 
 1. **起步前持久化 user_prompt**：若 `task.user_prompt` 未入库，先 `ingest` 一条
    `USER_PROMPT`（拼成 `## Current Task` + `## Current Message`），并置 `user_prompt_in_memory=True`——
@@ -99,17 +99,17 @@
 
 ### Step 注册表与跳转
 
-`_build_step_driver(initial_step)`（`src/loomex_core/core/runtime.py:900`）注册 7 个 Step：
+`_build_step_driver(initial_step)`（`src/ctx_weft/core/runtime.py:900`）注册 7 个 Step：
 
 | Step | 源码（file:line） | 作用 | `next_step` |
 |------|------------------|------|-------------|
-| `reason` | `src/loomex_core/core/loop/steps/reason.py:29` | 装配 prompt（ContextAssembler）；命中阈值则内联直调 CompactStep 后重装配 | `"act"` |
-| `act` | `src/loomex_core/core/loop/steps/act.py:35` | ReAct 循环：调 LLM → 执行 tool_call → 写 memory，直到无工具调用 / max_turns | `"observe"`；若 task 变 `SUSPENDED` 则 `"suspend"` |
-| `observe` | `src/loomex_core/core/loop/steps/observe.py:38` | Observer 评估，产出 `Verdict`（outcome + summary） | `"finalize"` |
-| `finalize` | `src/loomex_core/core/loop/steps/finalize.py:20` | 写 `OBSERVER_SUMMARY`、置 task 终态、发 TaskFinished | `None` |
-| `suspend` | `src/loomex_core/core/loop/steps/suspend.py:18` | 当前 task 等子任务，挂起 | `None`（TaskManager 在子任务完成后重新入队） |
-| `compact` | `src/loomex_core/core/loop/steps/compact.py:30` | 记忆压缩：复用 act 装配 + 尾部压缩指令，产出 `[Context so far]` 摘要、调 `apply_compact`；由 ReasonStep 内联直调（非 task） | `None` |
-| `metadata_filler` | `src/loomex_core/core/loop/steps/metadata_filler.py:25` | 单发步骤：回填 title/description/session goal；由后台协程 `runtime._launch_metadata_filler` 直跑在 root task 上 | `None` |
+| `reason` | `src/ctx_weft/core/loop/steps/reason.py:29` | 装配 prompt（ContextAssembler）；命中阈值则内联直调 CompactStep 后重装配 | `"act"` |
+| `act` | `src/ctx_weft/core/loop/steps/act.py:35` | ReAct 循环：调 LLM → 执行 tool_call → 写 memory，直到无工具调用 / max_turns | `"observe"`；若 task 变 `SUSPENDED` 则 `"suspend"` |
+| `observe` | `src/ctx_weft/core/loop/steps/observe.py:38` | Observer 评估，产出 `Verdict`（outcome + summary） | `"finalize"` |
+| `finalize` | `src/ctx_weft/core/loop/steps/finalize.py:20` | 写 `OBSERVER_SUMMARY`、置 task 终态、发 TaskFinished | `None` |
+| `suspend` | `src/ctx_weft/core/loop/steps/suspend.py:18` | 当前 task 等子任务，挂起 | `None`（TaskManager 在子任务完成后重新入队） |
+| `compact` | `src/ctx_weft/core/loop/steps/compact.py:30` | 记忆压缩：复用 act 装配 + 尾部压缩指令，产出 `[Context so far]` 摘要、调 `apply_compact`；由 ReasonStep 内联直调（非 task） | `None` |
+| `metadata_filler` | `src/ctx_weft/core/loop/steps/metadata_filler.py:25` | 单发步骤：回填 title/description/session goal；由后台协程 `runtime._launch_metadata_filler` 直跑在 root task 上 | `None` |
 
 **典型链路**：`reason → act → observe → finalize → (None)`。
 - `act` 中若 LLM 调了 `submit_task` 等控制工具把当前 task 置 `SUSPENDED`，则走 `act → suspend`。
@@ -185,7 +185,7 @@ ASCII 版（同一张图）：
 
 ### `_run_loop`：生命周期与错误语义
 
-`_run_loop`（`src/loomex_core/core/runtime.py:915`）包裹 driver：
+`_run_loop`（`src/ctx_weft/core/runtime.py:915`）包裹 driver：
 
 - 开始发 `RunStarted`（带 `run_id` + `initial_step`）。
 - `asyncio.CancelledError` → `was_cancelled=True`，task 置 `CANCELED`，发 `RunCanceled` + `TaskCanceled`。
@@ -198,7 +198,7 @@ ASCII 版（同一张图）：
 
 ## 4. LoopState / LoopContext / StepOutcome
 
-> 三者均定义于 `src/loomex_core/core/loop/driver.py`：`StepOutcome` `:38`、`LoopState` `:63`、`LoopContext` `:95`、`make_event` `:124`。
+> 三者均定义于 `src/ctx_weft/core/loop/driver.py`：`StepOutcome` `:38`、`LoopState` `:63`、`LoopContext` `:95`、`make_event` `:124`。
 
 ```python
 @dataclass
@@ -227,7 +227,7 @@ class StepOutcome:               # 每个 Step 的统一返回
     request_pause: bool = False
 ```
 
-`make_event(state, type, payload, ...)`（`src/loomex_core/core/loop/driver.py:124`）：自增
+`make_event(state, type, payload, ...)`（`src/ctx_weft/core/loop/driver.py:124`）：自增
 `state.sequence_counter`，生成 `evt_ULID`，填好 `run_id / session_id / task_id / agent_id / tenant_id`。
 **类型不在 `EVENT_TYPES` 直接 `ValueError`**。
 
@@ -235,10 +235,10 @@ class StepOutcome:               # 每个 Step 的统一返回
 
 ## 5. 上下文装配（ContextAssembler）
 
-`_build_assembler`（`src/loomex_core/core/runtime.py:839`）固定装配 6 个 Source + budget + composer：
+`_build_assembler`（`src/ctx_weft/core/runtime.py:839`）固定装配 6 个 Source + budget + composer：
 
 ```python
-ContextAssembler(                    # src/loomex_core/core/assembler/assembler.py:140
+ContextAssembler(                    # src/ctx_weft/core/assembler/assembler.py:140
     sources=[
         IdentitySource(),            # sources/identity.py:14    → system prompt（SOUL/ROLE）
         CapabilitySource(),          # sources/capability.py:20  → 首条 user message 前缀 + LLM tools
@@ -253,7 +253,7 @@ ContextAssembler(                    # src/loomex_core/core/assembler/assembler.
 )
 ```
 
-> Source 均位于 `src/loomex_core/core/assembler/sources/`，budget/composer 位于 `src/loomex_core/core/assembler/`。
+> Source 均位于 `src/ctx_weft/core/assembler/sources/`，budget/composer 位于 `src/ctx_weft/core/assembler/`。
 
 产物 `AssembledPrompt`：含 `system` 文本、`messages`（通常压成单条 user message，内含
 `## Current Message` 段）、`tools`（LLMTool 列表）、`token_count`。
@@ -265,11 +265,11 @@ ContextAssembler(                    # src/loomex_core/core/assembler/assembler.
 
 ## 6. 能力解析与调用（CapabilityGateway）
 
-`_build_gateway`（`src/loomex_core/core/runtime.py:865`）每次 run 新建一个 `CapabilityGateway`
-（`src/loomex_core/core/loop/capability_gateway.py:52`），注入：`capability_cache`、
+`_build_gateway`（`src/ctx_weft/core/runtime.py:865`）每次 run 新建一个 `CapabilityGateway`
+（`src/ctx_weft/core/loop/capability_gateway.py:52`），注入：`capability_cache`、
 `capability_providers`、`memory`、`event_bus`、`provider_authorizers`。
 
-ActStep 里一次工具调用（`_invoke_tool`，`src/loomex_core/core/loop/steps/act.py:266`，
+ActStep 里一次工具调用（`_invoke_tool`，`src/ctx_weft/core/loop/steps/act.py:266`，
 最终走 `CapabilityGateway.invoke` `:75`）的链路：
 
 1. 按 `tool_call.name` 在已 retrieve 的 capability 中解析出 `capability_id` 与归属 provider。
@@ -290,20 +290,20 @@ ActStep 里一次工具调用（`_invoke_tool`，`src/loomex_core/core/loop/step
 
 ### TaskManager.drain()
 
-`start_session` / `recover_session` 末尾 `_register_and_drain`（`src/loomex_core/core/runtime.py:570`）会：
+`start_session` / `recover_session` 末尾 `_register_and_drain`（`src/ctx_weft/core/runtime.py:570`）会：
 1. 把 session 注册进 `ControlCapabilityProvider`（让控制工具能操作 Task/Session）。
 2. 设置 `session_done_callback`（清理 cancel_token + 注销 session）。
 3. （恢复路径）按条件重新拉起 metadata_filler 后台协程（root title 为空时，`runtime._launch_metadata_filler`）。
 4. `asyncio.create_task(task_manager.drain())` —— 后台调度循环。
 
-`drain()`（`src/loomex_core/core/orchestrator/task_manager.py:153`）从队列取 `PENDING` 任务，受
+`drain()`（`src/ctx_weft/core/orchestrator/task_manager.py:153`）从队列取 `PENDING` 任务，受
 `max_concurrent_tasks` 限制并发，调用 `runner(session_id, task_id)`。子任务由控制工具
 （submit_task/submit_plan）入队；父任务 `SUSPENDED` 等子任务，子任务全部完成后父任务重新入队。
 
 ### `_make_task_runner` 的 `_resolve`
 
-`runner`（`_make_task_runner`，`src/loomex_core/core/runtime.py:602`）拿到 `task_id` 后，
-`_resolve(task, session_id)`（`src/loomex_core/core/runtime.py:640`）依据 `task.settings` 决定
+`runner`（`_make_task_runner`，`src/ctx_weft/core/runtime.py:602`）拿到 `task_id` 后，
+`_resolve(task, session_id)`（`src/ctx_weft/core/runtime.py:640`）依据 `task.settings` 决定
 `(agent, template, initial_step, run_id)`——这是「一个 task 用什么 agent、从哪个 Step 起步」的核心分派：
 
 | `task.settings` | agent 来源 | initial_step |
@@ -316,9 +316,9 @@ metadata_filler 由后台协程 `runtime._launch_metadata_filler` 直跑在 root
 保留为 dataclass（反序列化兼容 + done 检测），但 `_resolve` 已不再据其分派 initial_step。
 
 两个记忆相关副作用（仅子 agent 路径）：
-- `_flush_tracking_memory`（`src/loomex_core/core/runtime.py:108`）：把 `agent.tracking_task_ids`
+- `_flush_tracking_memory`（`src/ctx_weft/core/runtime.py:108`）：把 `agent.tracking_task_ids`
   里前序任务的结果/报告作为 `OBSERVER_SUMMARY` 写入当前 agent scope，写完标记 `fetched`。
-- `_copy_memory_for_inherit`（`src/loomex_core/core/runtime.py:63`，`inherit_memory=True`）：把父
+- `_copy_memory_for_inherit`（`src/ctx_weft/core/runtime.py:63`，`inherit_memory=True`）：把父
   agent scope 的近期 `USER_PROMPT / OBSERVER_SUMMARY / COMPACT_SUMMARY`（≤50 条）快照复制到子 agent scope。
 
 每个 task 起跑前发 `TaskStarted`。run 结束后把终态 `LoopState` 回写 `handle._state`。
@@ -339,7 +339,7 @@ core 在以下时机自动 `ingest`（provider 自由决定是否持久化/索�
 | `COMPACT_SUMMARY` | CompactStep · `loop/steps/compact.py:61` | 压缩产出的 `[Context so far]` |
 | `BLACKBOARD_PUBLISH` | 显式发布 | topic 发布（父子/跨 session 通信） |
 
-> 路径相对 `src/loomex_core/core/`。
+> 路径相对 `src/ctx_weft/core/`。
 
 `apply_compact(scope, summary, keep_last, ctx)`：写入一条 `COMPACT_SUMMARY`，并把 scope 内此事件
 之前、超出 `keep_last` 的事件标记 `superseded`（内存实现物理归档，外部实现可仅更新索引）。
@@ -435,40 +435,40 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 
 ## 会话生命周期与崩溃恢复
 
-### 新建（`start_session` `src/loomex_core/core/runtime.py:491`，`session_id=None`）
+### 新建（`start_session` `src/ctx_weft/core/runtime.py:491`，`session_id=None`）
 
-`SessionManager.create_session`（`src/loomex_core/core/orchestrator/session_manager.py:28`）→ 建
+`SessionManager.create_session`（`src/ctx_weft/core/orchestrator/session_manager.py:28`）→ 建
 `Session` + root `Task` + `TaskManager` → `set_runner(_make_task_runner(...))` → 若 root_task 无标题则
 启动 metadata_filler 后台协程（`runtime._launch_metadata_filler`，经 `track_background` 登记，直跑在 root task 上）→
 `_register_and_drain` 启动 `drain()`。立即返回 `RunHandle`（任务在后台跑）。
 
 ### 恢复续跑（`start_session`，`session_id=<id>`）
 
-`SessionManager.resume_session`（`src/loomex_core/core/orchestrator/session_manager.py:77`）：回放
+`SessionManager.resume_session`（`src/ctx_weft/core/orchestrator/session_manager.py:77`）：回放
 事件重建 Session 状态、找回 `root_agent_id`，把新的 `user_prompt` 作为后续输入，其余同新建路径。
 
 ### 崩溃恢复（进程重启）
 
 两步，通常在应用 lifespan 启动、provider 注册完成、接收新请求之前调用：
 
-1. **`recover(on_session_interrupted)`**（`src/loomex_core/core/runtime.py:794`）：调
-   `event_store.list_active_session_ids()`（`src/loomex_core/core/state/event_store.py:113`，查无终态
+1. **`recover(on_session_interrupted)`**（`src/ctx_weft/core/runtime.py:794`）：调
+   `event_store.list_active_session_ids()`（`src/ctx_weft/core/state/event_store.py:113`，查无终态
    事件的 session，不依赖 host 投影表），逐个回调把它标记/拉起，返回数量。`list_active_session_ids`
    未实现时跳过并告警。
-2. **`recover_session(session_id)`**（`src/loomex_core/core/runtime.py:723`）：
-   - `rebuild_view(event_store, session_id)`（`src/loomex_core/core/control/reducers.py:185`）回放事件成投影。
+2. **`recover_session(session_id)`**（`src/ctx_weft/core/runtime.py:723`）：
+   - `rebuild_view(event_store, session_id)`（`src/ctx_weft/core/control/reducers.py:185`）回放事件成投影。
    - `session_from_projection`（`control/converters.py:13`）/ `task_from_projection`（`control/converters.py:31`）转回 dataclass。
    - 区分终态任务（FINISHED/FAILED/CANCELED）与 `resumable`；无 resumable → `RuntimeError`。
-   - `TaskManager.restore(all_tasks, terminal_ids, parked_task_ids)`（`src/loomex_core/core/orchestrator/task_manager.py:96`）重建队列、重入队 resumable（跳过已废弃的 compact / metadata_filler ephemeral task）。
+   - `TaskManager.restore(all_tasks, terminal_ids, parked_task_ids)`（`src/ctx_weft/core/orchestrator/task_manager.py:96`）重建队列、重入队 resumable（跳过已废弃的 compact / metadata_filler ephemeral task）。
    - 用投影里的 agent 视图预建 `pre_resolved_agents`（保留 spawn_depth / parent）。
    - 条件式恢复：若 root title 仍为空则重启 metadata_filler 后台协程（`_launch_metadata_filler`）。
    - `set_runner(...)` + `_register_and_drain(session, task_manager)` 续跑。
    - 缺 `template_id` / session 不存在 → `RuntimeError`。
 
-### 取消（`interrupt_session` `src/loomex_core/core/runtime.py:402`）
+### 取消（`interrupt_session` `src/ctx_weft/core/runtime.py:402`）
 
 每个 `start_session` / `recover_session` 在 `_cancel_tokens[session_id]` 注册一个 `CancelToken`
-（`src/loomex_core/core/control/tokens.py`）。`interrupt_session` 找到并 `cancel()`，返回 `bool`。
+（`src/ctx_weft/core/control/tokens.py`）。`interrupt_session` 找到并 `cancel()`，返回 `bool`。
 `StepDriver` 每轮检查该 token，已取消则抛出，经 `_run_loop` 转成 `CANCELED` + `RunCanceled`/`TaskCanceled`。
 （`run_single_task` 不注册 token，故对它调用返回 `False`。）
 
@@ -476,14 +476,14 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 
 ## 10. 事件系统内部
 
-- **总线**：`InProcessEventBus`（`src/loomex_core/core/events/bus.py:79`），`emit(event)` `:88`
+- **总线**：`InProcessEventBus`（`src/ctx_weft/core/events/bus.py:79`），`emit(event)` `:88`
   广播给所有匹配 `EventFilter(session_id / run_id / task_id / types)` 的 `stream()` `:142` 订阅者。进程内、不跨进程。
 - **顺序**：`sequence` 来自 `LoopState.sequence_counter`，在同一 `run_id` 内单调递增；
   `id` 是 `evt_ULID`（时间有序、全局唯一）。
-- **白名单冻结**：`EVENT_TYPES`（`src/loomex_core/core/events/types.py:47`）是 V1 冻结集合，`make_event`
+- **白名单冻结**：`EVENT_TYPES`（`src/ctx_weft/core/events/types.py:47`）是 V1 冻结集合，`make_event`
   对未登记类型直接 `ValueError`——保证下游 reducer 的分支封闭。
-- **持久化**：`LoomeXRuntime` 默认用 `InMemoryEventStore(event_bus=...)`
-  （`src/loomex_core/core/state/event_store.py:82`），构造时即订阅总线、落盘所有事件，并支撑
+- **持久化**：`CtxWeftRuntime` 默认用 `InMemoryEventStore(event_bus=...)`
+  （`src/ctx_weft/core/state/event_store.py:82`），构造时即订阅总线、落盘所有事件，并支撑
   `list_active_session_ids` 与回放。传入自定义 `event_store` 时由调用方自行 wire。
 - **因果链**：`causation_id` 串起「哪个事件导致了这个事件」，用于调试与回放重建。
 

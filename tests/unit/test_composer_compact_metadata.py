@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.assembler.assembler import ContextBlock
-from loomex_core.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.assembler import ContextBlock
+from ctx_weft.core.assembler.composer import DefaultComposer
 
 
 def _identity(text):

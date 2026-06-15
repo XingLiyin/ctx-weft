@@ -9,19 +9,19 @@ from __future__ import annotations
 
 import pytest
 
-from loomex_core.core import LoomeXRuntime
-from loomex_core.core.orchestrator.hitl_manager import HitlRequest
-from loomex_core.core.orchestrator.task_manager import TaskManager
-from loomex_core.core.state.models import Session, Task
-from loomex_core.protocols import MemoryEventType, MemoryScope, ProviderContext
-from loomex_core.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.core import CtxWeftRuntime
+from ctx_weft.core.orchestrator.hitl_manager import HitlRequest
+from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.state.models import Session, Task
+from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InMemoryTemplateResolver
 
 pytestmark = pytest.mark.asyncio
 
 
-def _runtime_with_memory() -> tuple[LoomeXRuntime, InMemoryMemoryProvider]:
-    rt = LoomeXRuntime(template_resolver=InMemoryTemplateResolver())
+def _runtime_with_memory() -> tuple[CtxWeftRuntime, InMemoryMemoryProvider]:
+    rt = CtxWeftRuntime(template_resolver=InMemoryTemplateResolver())
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
     return rt, mem

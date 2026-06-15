@@ -8,35 +8,35 @@ pytestmark = pytest.mark.asyncio
 
 
 def test_hitl_park_is_base_exception_not_exception() -> None:
-    from loomex_core.core.loop.park import HitlPark
+    from ctx_weft.core.loop.park import HitlPark
     assert issubclass(HitlPark, BaseException)
     assert not issubclass(HitlPark, Exception)
 
 
 def test_hitl_park_carries_ids() -> None:
-    from loomex_core.core.loop.park import HitlPark
+    from ctx_weft.core.loop.park import HitlPark
     p = HitlPark(request_id="hit_1", tool_call_id="tc1")
     assert p.request_id == "hit_1" and p.tool_call_id == "tc1"
 
 
 def test_authorization_decision_has_defer_default_false() -> None:
-    from loomex_core.core.auth.authorizer import AuthorizationDecision
+    from ctx_weft.core.auth.authorizer import AuthorizationDecision
     assert AuthorizationDecision(allowed=True).defer is False
 
 
 async def test_gateway_defer_raises_park_and_skips_provider() -> None:
     from types import SimpleNamespace
     from collections.abc import AsyncIterator
-    from loomex_core.core.auth import AuthorizationDecision, Authorizer
-    from loomex_core.core.events.bus import InProcessEventBus
-    from loomex_core.core.loop.capability_gateway import CapabilityGateway
-    from loomex_core.core.loop.driver import LoopContext, LoopState
-    from loomex_core.core.loop.park import HitlPark
-    from loomex_core.core.orchestrator.capability_cache import CapabilityCache
-    from loomex_core.protocols import MemoryScope, ProviderContext
-    from loomex_core.protocols.capability import (
+    from ctx_weft.core.auth import AuthorizationDecision, Authorizer
+    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.core.loop.capability_gateway import CapabilityGateway
+    from ctx_weft.core.loop.driver import LoopContext, LoopState
+    from ctx_weft.core.loop.park import HitlPark
+    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.protocols import MemoryScope, ProviderContext
+    from ctx_weft.protocols.capability import (
         CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider)
-    from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
     cap = ToolCapability(id="test:echo", name="echo", description="e")
 
@@ -79,20 +79,20 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
     """_run_loop must catch HitlPark, set task SUSPENDED, and NOT raise (no FAILED)."""
     from collections.abc import AsyncIterator
 
-    from loomex_core.core import LoomeXRuntime, ProviderRegistry
-    from loomex_core.core.events import EventType
-    from loomex_core.core.events.bus import InProcessEventBus
-    from loomex_core.core.loop.driver import LoopContext, LoopState, StepOutcome
-    from loomex_core.core.loop.park import HitlPark
-    from loomex_core.core.orchestrator.capability_cache import CapabilityCache
-    from loomex_core.core.state.models import Agent, LoopGuard, Session, Task
-    from loomex_core.protocols import (
+    from ctx_weft.core import CtxWeftRuntime, ProviderRegistry
+    from ctx_weft.core.events import EventType
+    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
+    from ctx_weft.core.loop.park import HitlPark
+    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.core.state.models import Agent, LoopGuard, Session, Task
+    from ctx_weft.protocols import (
         LoopConfig,
         MemoryConfig,
         MemoryScope,
         ProviderContext,
     )
-    from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import InMemoryTemplateResolver
 
     # ── real objects ──────────────────────────────────────────────────────────
@@ -137,7 +137,7 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
     registry = ProviderRegistry()
     registry.register_memory(InMemoryMemoryProvider())
 
-    rt = LoomeXRuntime(
+    rt = CtxWeftRuntime(
         template_resolver=InMemoryTemplateResolver(),
         providers=registry,
         event_store=None,  # uses InMemoryEventStore default
@@ -189,8 +189,8 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
 
 
 async def test_timeout_evicts_to_cold_keeps_pending() -> None:
-    from loomex_core.core.orchestrator.hitl_manager import HitlManager
-    from loomex_core.core.loop.park import HitlPark
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.core.loop.park import HitlPark
     mgr = HitlManager(timeout_sec=0)
     rid = await mgr.request(kind="input", session_id="s1", task_id="t1", tool_call_id="tc1")
     with pytest.raises(HitlPark):
@@ -203,7 +203,7 @@ async def test_timeout_evicts_to_cold_keeps_pending() -> None:
 
 async def test_answer_before_timeout_is_hot_and_wins() -> None:
     import asyncio
-    from loomex_core.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
     mgr = HitlManager(timeout_sec=None)             # never times out
     rid = await mgr.request(kind="input", session_id="s1", task_id="t1", tool_call_id="tc1")
     waiter = asyncio.create_task(mgr.wait(rid))
@@ -215,10 +215,10 @@ async def test_answer_before_timeout_is_hot_and_wins() -> None:
 
 async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:
     from types import SimpleNamespace
-    from loomex_core.core.auth import HumanConfirmationAuthorizer
-    from loomex_core.core.orchestrator.hitl_manager import HitlManager
-    from loomex_core.protocols import ProviderContext
-    from loomex_core.protocols.capability import ToolCapability
+    from ctx_weft.core.auth import HumanConfirmationAuthorizer
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.protocols.capability import ToolCapability
 
     mgr = HitlManager()
     rid = await mgr.request(kind="approval", session_id="s1", task_id="t1", tool_call_id="tcZ")
@@ -237,11 +237,11 @@ async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:
 async def test_authorize_cold_no_future_does_not_keyerror() -> None:
     """restart 后：rebuild_pending(无 future) + 冷 resolve → authorize 必须短路（否则 wait() KeyError）。"""
     from types import SimpleNamespace
-    from loomex_core.core.auth import HumanConfirmationAuthorizer
-    from loomex_core.core.control.types import HitlRequestView
-    from loomex_core.core.orchestrator.hitl_manager import HitlManager
-    from loomex_core.protocols import ProviderContext
-    from loomex_core.protocols.capability import ToolCapability
+    from ctx_weft.core.auth import HumanConfirmationAuthorizer
+    from ctx_weft.core.control.types import HitlRequestView
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.protocols.capability import ToolCapability
 
     mgr = HitlManager()
     # 模拟 restart：从 view 重建 pending（无 future）

@@ -5,16 +5,16 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from loomex_core.core.assembler.sources.capability import CapabilitySource
-from loomex_core.core.events.bus import InProcessEventBus
-from loomex_core.core.loop.capability_gateway import CapabilityGateway
-from loomex_core.core.loop.driver import LoopContext, LoopState
-from loomex_core.core.orchestrator.capability_cache import CapabilityCache
-from loomex_core.protocols import MemoryScope, ProviderContext
-from loomex_core.protocols.capability import (
+from ctx_weft.core.assembler.sources.capability import CapabilitySource
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.loop.capability_gateway import CapabilityGateway
+from ctx_weft.core.loop.driver import LoopContext, LoopState
+from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols.capability import (
     CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
 )
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 
 class _Server(ToolCapabilityProvider):

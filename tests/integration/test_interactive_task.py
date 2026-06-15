@@ -10,19 +10,19 @@ from __future__ import annotations
 
 import pytest
 
-from loomex_core.core import LoomeXRuntime
-from loomex_core.core.assembler.assembler import AssembledPrompt
-from loomex_core.core.events.bus import InProcessEventBus
-from loomex_core.core.loop.driver import LoopContext, LoopState
-from loomex_core.core.loop.park import HitlPark
-from loomex_core.core.loop.steps.act import ActStep
-from loomex_core.core.orchestrator.hitl_manager import HitlManager
-from loomex_core.core.state.models import Agent, NormalTaskSettings, Session, Task
-from loomex_core.protocols import (
+from ctx_weft.core import CtxWeftRuntime
+from ctx_weft.core.assembler.assembler import AssembledPrompt
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.loop.driver import LoopContext, LoopState
+from ctx_weft.core.loop.park import HitlPark
+from ctx_weft.core.loop.steps.act import ActStep
+from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.protocols import (
     LLMMessage, MemoryEventType, MemoryScope, ProviderContext, ToolCall,
 )
-from loomex_core.providers.llm.mock import MockLLMAdapter, MockResponse
-from loomex_core.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
 
 pytestmark = pytest.mark.asyncio
@@ -95,7 +95,7 @@ async def test_finish_task_finishes_task_end_to_end() -> None:
             id="tc1", name="control__finish_task", arguments={"result": "computed: 42"},
         )]),
     ])
-    runtime = LoomeXRuntime(llm=llm, template_resolver=resolver)
+    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     _handle, state = await runtime.run_single_task(template_id="tpl_echo", user_prompt="compute")
@@ -112,7 +112,7 @@ async def test_guidance_injected_into_prompt_not_memory() -> None:
             id="tc1", name="control__finish_task", arguments={"result": "ok"},
         )]),
     ])
-    runtime = LoomeXRuntime(llm=llm, template_resolver=resolver)
+    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 

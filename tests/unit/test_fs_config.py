@@ -1,4 +1,4 @@
-from loomex_core.providers.capability_filesystem.provider import (
+from ctx_weft.providers.capability_filesystem.provider import (
     FilesystemConfig, FilesystemToolsProvider,
 )
 

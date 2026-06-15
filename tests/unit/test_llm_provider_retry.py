@@ -1,4 +1,4 @@
-from loomex_core.providers.llm.provider import LLMProvider, LLMAccount, ModelConfig
+from ctx_weft.providers.llm.provider import LLMProvider, LLMAccount, ModelConfig
 
 
 class _MemStore:

@@ -9,9 +9,9 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from loomex_core.core import LoomeXRuntime, ProviderRegistry
-from loomex_core.providers.llm.mock import MockLLMAdapter, MockResponse
-from loomex_core.protocols import (
+from ctx_weft.core import CtxWeftRuntime, ProviderRegistry
+from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.protocols import (
     AgentTemplate,
     AgentTemplateSummary,
     CapabilityRef,
@@ -23,7 +23,7 @@ from loomex_core.protocols import (
     ProviderContext,
     TemplateResolver,
 )
-from loomex_core.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 
 
 class InMemoryTemplateResolver(TemplateResolver):
@@ -93,7 +93,7 @@ async def test_minimal_echo_loop() -> None:
         ],
     )
 
-    runtime = LoomeXRuntime(llm=llm, template_resolver=resolver)
+    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     # ── Run ──────────────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ async def test_prompt_structure_matches_miniagents() -> None:
     resolver.register(make_echo_template())
 
     llm = MockLLMAdapter(responses=[MockResponse(text="ack")])
-    runtime = LoomeXRuntime(llm=llm, template_resolver=resolver)
+    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     _handle, _state = await runtime.run_single_task(

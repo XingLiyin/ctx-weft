@@ -1,5 +1,5 @@
 """TDD: MCPCapabilityProvider reconnect params via ctor (Task 1.3)."""
-from loomex_core.providers.capability_mcp.provider import MCPCapabilityProvider, MCPServerConfig
+from ctx_weft.providers.capability_mcp.provider import MCPCapabilityProvider, MCPServerConfig
 
 
 def _cfg() -> MCPServerConfig:

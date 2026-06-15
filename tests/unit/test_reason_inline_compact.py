@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.loop.steps.prepare import PrepareStep
+from ctx_weft.core.loop.steps.prepare import PrepareStep
 
 
 class _SpyCompact:
@@ -12,14 +12,14 @@ class _SpyCompact:
         self.called = False
 
     async def execute(self, state, ctx):
-        from loomex_core.core.loop.driver import StepOutcome
+        from ctx_weft.core.loop.driver import StepOutcome
         self.called = True
         return StepOutcome(next_step=None, events=[])
 
 
 async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
     spy = _SpyCompact()
-    monkeypatch.setattr("loomex_core.core.loop.steps.prepare.CompactStep", lambda: spy)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.CompactStep", lambda: spy)
 
     pushed = []
 
@@ -34,7 +34,7 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
         return True
 
     monkeypatch.setattr(rs, "_estimate_tokens", _est)
-    monkeypatch.setattr("loomex_core.core.loop.steps.prepare.resolve_and_bind", _resolve)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.resolve_and_bind", _resolve)
     monkeypatch.setattr(rs, "_load_skill_instructions", _skill)
     monkeypatch.setattr(rs, "_should_compact", _should)
 
@@ -96,7 +96,7 @@ async def test_reason_stashes_bound_capabilities(monkeypatch):
         return False  # no compaction this run
 
     monkeypatch.setattr(rs, "_estimate_tokens", _est)
-    monkeypatch.setattr("loomex_core.core.loop.steps.prepare.resolve_and_bind", _resolve)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.resolve_and_bind", _resolve)
     monkeypatch.setattr(rs, "_load_skill_instructions", _skill)
     monkeypatch.setattr(rs, "_should_compact", _should)
 

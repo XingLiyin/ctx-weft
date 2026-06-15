@@ -4,7 +4,7 @@ import sys
 
 import psutil
 
-from loomex_core.providers._script_runner import (
+from ctx_weft.providers._script_runner import (
     LivenessSample,
     collect_tree_metrics,
     made_progress,

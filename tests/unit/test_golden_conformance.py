@@ -18,13 +18,13 @@ from typing import Any
 
 import pytest
 
-from loomex_core.core.control.reducers import (
+from ctx_weft.core.control.reducers import (
     apply_events,
     deserialize_view,
     reduce_events,
     serialize_view,
 )
-from loomex_core.core.events.types import Event
+from ctx_weft.core.events.types import Event
 
 _GOLDEN_DIR = Path(__file__).parents[3] / "docs" / "spec" / "golden"
 

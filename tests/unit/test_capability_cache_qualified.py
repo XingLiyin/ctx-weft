@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from loomex_core.core.orchestrator.capability_cache import (
+from ctx_weft.core.orchestrator.capability_cache import (
     CapabilityCache,
     DuplicateCapabilityName,
 )
-from loomex_core.protocols.capability import ToolCapability
+from ctx_weft.protocols.capability import ToolCapability
 
 
 def _cap(cid: str, name: str) -> ToolCapability:

@@ -12,9 +12,9 @@ import asyncio
 
 import pytest
 
-from loomex_core.core.events.types import EVENT_TYPES, EventType
-from loomex_core.core.orchestrator.task_manager import TaskManager
-from loomex_core.core.state.models import Task
+from ctx_weft.core.events.types import EVENT_TYPES, EventType
+from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.state.models import Task
 
 
 def _task(tid: str, parent: str | None = None) -> Task:

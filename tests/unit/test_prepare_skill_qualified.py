@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.loop.steps.prepare import PrepareStep
-from loomex_core.core.orchestrator.capability_cache import CapabilityCache
-from loomex_core.protocols.capability import SkillCapability, SkillDefinition
-from loomex_core.protocols.context import ProviderContext
+from ctx_weft.core.loop.steps.prepare import PrepareStep
+from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.protocols.capability import SkillCapability, SkillDefinition
+from ctx_weft.protocols.context import ProviderContext
 
 
 class _SkillProvider:

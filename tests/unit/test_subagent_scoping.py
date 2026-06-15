@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
-from loomex_core.core.orchestrator.capability_resolver import CapabilityResolver
-from loomex_core.protocols.context import ProviderContext
-from loomex_core.protocols.template import AgentTemplateSummary, CapabilityRef
+from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
+from ctx_weft.core.orchestrator.capability_resolver import CapabilityResolver
+from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.protocols.template import AgentTemplateSummary, CapabilityRef
 
 
 class _Resolver:

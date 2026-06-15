@@ -1,4 +1,4 @@
-from loomex_core.core.config import RuntimeConfig
+from ctx_weft.core.config import RuntimeConfig
 
 
 def test_defaults_match_legacy():

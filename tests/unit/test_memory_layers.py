@@ -12,14 +12,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from loomex_core.protocols import (
+from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
     MemoryLayer,
     MemoryScope,
     ProviderContext,
 )
-from loomex_core.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 

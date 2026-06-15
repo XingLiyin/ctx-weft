@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from loomex_core.core.events.bus import InProcessEventBus
-from loomex_core.core.orchestrator.hitl_manager import HitlManager
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 
 pytestmark = pytest.mark.asyncio
 

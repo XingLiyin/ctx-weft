@@ -13,16 +13,16 @@ from datetime import datetime, timezone
 
 import pytest
 
-from loomex_core.core import LoomeXRuntime
-from loomex_core.core.events.types import Event, EventType
-from loomex_core.protocols import (
+from ctx_weft.core import CtxWeftRuntime
+from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType, MemoryScope, ProviderContext,
 )
-from loomex_core.protocols.capability import (
+from ctx_weft.protocols.capability import (
     CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
 )
-from loomex_core.providers.llm.mock import MockLLMAdapter, MockResponse
-from loomex_core.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
 
 pytestmark = pytest.mark.asyncio
@@ -58,7 +58,7 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="done"), MockResponse(text="done")])
-    runtime = LoomeXRuntime(llm=llm, template_resolver=resolver)
+    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
     tool = _RecordingTool()

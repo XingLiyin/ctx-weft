@@ -1,4 +1,4 @@
-from loomex_core.providers.capability_builtin.provider import (
+from ctx_weft.providers.capability_builtin.provider import (
     BuiltinToolsConfig, BuiltinToolsCapabilityProvider,
 )
 

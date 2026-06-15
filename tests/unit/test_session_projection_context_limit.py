@@ -1,4 +1,4 @@
-from loomex_core.core.control.types import SessionView
+from ctx_weft.core.control.types import SessionView
 
 
 def test_projection_has_context_limit_default():

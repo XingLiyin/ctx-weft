@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from loomex_core.core.orchestrator.control_capability import (
+from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_PLAN_NAME,
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,

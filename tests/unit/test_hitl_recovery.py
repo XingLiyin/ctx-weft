@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from loomex_core.core.control.types import HitlRequestView
-from loomex_core.core.orchestrator.hitl_manager import HitlManager
+from ctx_weft.core.control.types import HitlRequestView
+from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 
 pytestmark = pytest.mark.asyncio
 
@@ -37,8 +37,8 @@ async def test_answer_rebuilt_request_is_cold() -> None:
 
 
 def test_restore_keeps_hitl_parked_task_suspended() -> None:
-    from loomex_core.core.orchestrator.task_manager import TaskManager
-    from loomex_core.core.state.models import Task
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import Task
     tm = TaskManager(session_id="s1")
     parked = Task(id="t1", session_id="s1", status="SUSPENDED")
     tm.restore([parked], terminal_ids=set(), parked_task_ids={"t1"})
@@ -47,8 +47,8 @@ def test_restore_keeps_hitl_parked_task_suspended() -> None:
 
 
 def test_restore_requeues_suspended_on_children_when_all_terminal() -> None:
-    from loomex_core.core.orchestrator.task_manager import TaskManager
-    from loomex_core.core.state.models import Task
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import Task
     tm = TaskManager(session_id="s1")
     parent = Task(id="p", session_id="s1", status="SUSPENDED")
     child = Task(id="c", session_id="s1", status="FINISHED", parent_task_id="p")
@@ -57,8 +57,8 @@ def test_restore_requeues_suspended_on_children_when_all_terminal() -> None:
 
 
 def test_restore_parked_ids_default_none_is_old_behavior() -> None:
-    from loomex_core.core.orchestrator.task_manager import TaskManager
-    from loomex_core.core.state.models import Task
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import Task
     tm = TaskManager(session_id="s1")
     parent = Task(id="p", session_id="s1", status="SUSPENDED")
     tm.restore([parent], terminal_ids=set())   # no parked_task_ids → old behavior: requeue
@@ -68,16 +68,16 @@ def test_restore_parked_ids_default_none_is_old_behavior() -> None:
 async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
     import asyncio
     from datetime import datetime, timezone
-    from loomex_core.core import LoomeXRuntime
-    from loomex_core.core.events.types import Event, EventType
-    from loomex_core.providers.llm.mock import MockLLMAdapter, MockResponse
-    from loomex_core.providers.memory_blackboard import InMemoryMemoryProvider
+    from ctx_weft.core import CtxWeftRuntime
+    from ctx_weft.core.events.types import Event, EventType
+    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
 
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="should not run")])
-    runtime = LoomeXRuntime(llm=llm, template_resolver=resolver)
+    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     ts = datetime(2026, 6, 12, tzinfo=timezone.utc)
@@ -111,10 +111,10 @@ async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
 
 async def test_crash_mid_batch_routes_to_reconcile() -> None:
     from datetime import datetime, timezone, timedelta
-    from loomex_core.core.runtime import _task_has_dangling_tool_call
-    from loomex_core.protocols import MemoryEventType, MemoryScope, ProviderContext
-    from loomex_core.protocols.memory import MemoryEvent
-    from loomex_core.providers.memory_blackboard import InMemoryMemoryProvider
+    from ctx_weft.core.runtime import _task_has_dangling_tool_call
+    from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+    from ctx_weft.protocols.memory import MemoryEvent
+    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 
     base = datetime(2026, 6, 12, tzinfo=timezone.utc)
     mem = InMemoryMemoryProvider()

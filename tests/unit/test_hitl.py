@@ -15,16 +15,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from loomex_core.core.auth import HumanConfirmationAuthorizer
-from loomex_core.core.events.bus import InProcessEventBus
-from loomex_core.core.orchestrator.control_capability import (
+from ctx_weft.core.auth import HumanConfirmationAuthorizer
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.orchestrator.control_capability import (
     PROVIDER_NAME,
     ControlCapabilityProvider,
 )
-from loomex_core.core.orchestrator.hitl_manager import HitlManager
-from loomex_core.core.state.models import Session, Task
-from loomex_core.protocols import ProviderContext
-from loomex_core.protocols.capability import ToolCapability
+from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+from ctx_weft.core.state.models import Session, Task
+from ctx_weft.protocols import ProviderContext
+from ctx_weft.protocols.capability import ToolCapability
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -87,7 +87,7 @@ async def test_answer_input_kind() -> None:
 
 
 async def test_wait_timeout_raises_park_and_keeps_pending() -> None:
-    from loomex_core.core.loop.park import HitlPark
+    from ctx_weft.core.loop.park import HitlPark
     mgr = HitlManager(timeout_sec=0)
     rid = await _request(mgr)
     with pytest.raises(HitlPark):
@@ -96,7 +96,7 @@ async def test_wait_timeout_raises_park_and_keeps_pending() -> None:
 
 
 async def test_answer_after_timeout_resolves_cold() -> None:
-    from loomex_core.core.loop.park import HitlPark
+    from ctx_weft.core.loop.park import HitlPark
     mgr = HitlManager(timeout_sec=0)
     rid = await _request(mgr, kind="input")
     with pytest.raises(HitlPark):
@@ -295,7 +295,7 @@ async def test_ask_user_reject_feeds_message_back() -> None:
 
 
 def test_hitl_cancelled_is_registered_event() -> None:
-    from loomex_core.core.events.types import EVENT_TYPES, EventType
+    from ctx_weft.core.events.types import EVENT_TYPES, EventType
     assert EventType.HITL_CANCELLED == "HitlCancelled"
     assert "HitlCancelled" in EVENT_TYPES
 
@@ -414,17 +414,17 @@ async def test_gc_never_prunes_pending() -> None:
 
 def test_hitl_config_defaults() -> None:
     """RuntimeConfig default leaves hitl_timeout_sec as None (no eviction)."""
-    from loomex_core.core.config import RuntimeConfig
+    from ctx_weft.core.config import RuntimeConfig
     cfg = RuntimeConfig()
     assert cfg.hitl_timeout_sec is None
     assert cfg.hitl_max_resolved == 1000
 
 
 def test_runtime_wires_hitl_timeout() -> None:
-    """LoomeXRuntime injects hitl knobs from RuntimeConfig."""
-    from loomex_core.core.config import RuntimeConfig
-    from loomex_core.core import LoomeXRuntime
+    """CtxWeftRuntime injects hitl knobs from RuntimeConfig."""
+    from ctx_weft.core.config import RuntimeConfig
+    from ctx_weft.core import CtxWeftRuntime
     from tests.integration.test_minimal_loop import InMemoryTemplateResolver
     cfg = RuntimeConfig(hitl_timeout_sec=45)
-    rt = LoomeXRuntime(template_resolver=InMemoryTemplateResolver(), config=cfg)
+    rt = CtxWeftRuntime(template_resolver=InMemoryTemplateResolver(), config=cfg)
     assert rt.hitl_manager._timeout_sec == 45

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from loomex_core.core.loop.steps.observe import ObserveStep
-from loomex_core.core.orchestrator.control_capability import ControlContext, report_task_outcome
-from loomex_core.core.state.models import Task
+from ctx_weft.core.loop.steps.observe import ObserveStep
+from ctx_weft.core.orchestrator.control_capability import ControlContext, report_task_outcome
+from ctx_weft.core.state.models import Task
 
 
 def _task(**kw) -> Task:
