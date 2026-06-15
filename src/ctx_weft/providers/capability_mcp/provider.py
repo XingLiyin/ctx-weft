@@ -40,8 +40,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CLIENT_NAME = "ipmastercowork"
-_CLIENT_VERSION = "0.1.0"
+# MCP clientInfo 默认值：core 自身的中性身份。上层 host 可经 __init__ 注入覆盖
+# （例如注入产品名）。core 不应硬编码任何 host/产品品牌。
+_DEFAULT_CLIENT_NAME = "ctx-weft"
+_DEFAULT_CLIENT_VERSION = "0.1.0"
 _SIDE_EFFECT_KEYWORDS = ("write", "delete", "exec", "create")
 
 
@@ -70,8 +72,12 @@ class MCPCapabilityProvider(CapabilityProvider):
         *,
         max_reconnect_attempts: int = 3,
         reconnect_base_delay_sec: float = 1.0,
+        client_name: str = _DEFAULT_CLIENT_NAME,
+        client_version: str = _DEFAULT_CLIENT_VERSION,
     ) -> None:
         self._cfg = config
+        self._client_name = client_name
+        self._client_version = client_version
         self._max_reconnect_attempts = max_reconnect_attempts
         self._reconnect_base_delay_sec = reconnect_base_delay_sec
         # 退避封顶：base * 2^attempts（默认 1×2^3 = 8s）。失败后冷却时长在此上限内翻倍。
@@ -223,7 +229,7 @@ class MCPCapabilityProvider(CapabilityProvider):
 
     def _client_info(self) -> mcp_types.Implementation:
         from mcp import types as t
-        return t.Implementation(name=_CLIENT_NAME, version=_CLIENT_VERSION)
+        return t.Implementation(name=self._client_name, version=self._client_version)
 
     def _transport_cm(self) -> Any:
         """返回 transport 的 async context manager（yield (read, write, ...)）。
