@@ -61,6 +61,23 @@ def _mode(interactive: bool) -> str:
     return "interactive" if interactive else "auto"
 
 
+def _child_mode(interactive: bool, parent: "Task | None") -> str:
+    """Resolve a delegated child's interaction_mode under its parent.
+
+    interactive 只能沿用户面向链路向下传递：父任务非 interactive（auto=自治）时，子任务即使
+    请求 interactive 也**静默降级为 auto**——自治分支不该凭空长出对话子任务（要用户输入用 ask_user）。
+    否则一个没人盯的自治分支会冷 park 等用户，甚至永不回交父任务而卡死该分支。
+    """
+    mode = _mode(interactive)
+    if mode == "interactive" and parent is not None and parent.interaction_mode != "interactive":
+        logger.warning(
+            "delegate: downgrading interactive sub-task to auto under non-interactive parent task %s",
+            parent.id,
+        )
+        return "auto"
+    return mode
+
+
 # ── ControlMetaKey ────────────────────────────────────────────────────────────
 
 
@@ -168,7 +185,7 @@ def delegate_task(
         description=description,
         user_prompt=task_prompt or description,
         origin_tool_call_id=ctx.tool_call_id or None,
-        interaction_mode=_mode(bool(interactive)),
+        interaction_mode=_child_mode(bool(interactive), ctx.task),
         settings=NormalTaskSettings(
             skill_name=skill_name,
             use_subagent=bool(use_subagent),
@@ -233,7 +250,7 @@ def delegate_plan(
             user_prompt=spec.get("task_prompt") or spec.get("description", ""),
             origin_tool_call_id=ctx.tool_call_id or None,
             tracking_task_ids=list(prev_ids),
-            interaction_mode=_mode(bool(spec.get("interactive", False))),
+            interaction_mode=_child_mode(bool(spec.get("interactive", False)), ctx.task),
             settings=NormalTaskSettings(
                 skill_name=spec.get("skill_name", ""),
                 use_subagent=bool(spec.get("use_subagent", False)),
@@ -467,7 +484,7 @@ def replan(
             user_prompt=spec.get("task_prompt") or spec.get("description", ""),
             origin_tool_call_id=ctx.tool_call_id or None,
             tracking_task_ids=list(prev_ids),
-            interaction_mode=_mode(bool(spec.get("interactive", False))),
+            interaction_mode=_child_mode(bool(spec.get("interactive", False)), ctx.task),
             settings=NormalTaskSettings(
                 skill_name=spec.get("skill_name", ""),
                 use_subagent=bool(spec.get("use_subagent", False)),
