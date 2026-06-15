@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CLIENT_NAME = "LoomeX-host"
+_CLIENT_NAME = "ipmastercowork"
 _CLIENT_VERSION = "0.1.0"
 _SIDE_EFFECT_KEYWORDS = ("write", "delete", "exec", "create")
 

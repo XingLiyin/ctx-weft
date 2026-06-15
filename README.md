@@ -2,7 +2,7 @@
 
 **Protocol-based Agent Runtime Core** — 用于构建可控、可观测 AI Agent 应用的 Python SDK。
 
-ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力系统、LLM、模板）通过协议接入，驱动 LLM 完成任务。它不包含任何数据库代码、HTTP 服务或具体 LLM 实现——这些由上层应用（如 LoomeX-host）提供。
+ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力系统、LLM、模板）通过协议接入，驱动 LLM 完成任务。它不包含任何数据库代码、HTTP 服务或具体 LLM 实现——这些由上层应用（如 ipmastercowork）提供。
 
 > 本文是**使用参考**。想了解循环引擎、任务编排、崩溃恢复等**内部实现逻辑**，见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
@@ -287,7 +287,7 @@ providers.register_knowledge(WikiProvider(), priority=10)
 
 ### AgentTemplate
 
-Agent 实例化的蓝图，由上层（LoomeX-host 或用户代码）构建：
+Agent 实例化的蓝图，由上层（ipmastercowork 或用户代码）构建：
 
 ```python
 from ctx_weft.protocols import (
@@ -357,7 +357,7 @@ class MyTemplateResolver(TemplateResolver):
         ]
 ```
 
-> LoomeX-host 提供了开箱即用的模板解析器（支持从 Markdown 文件解析 SOUL/ROLE）。
+> ipmastercowork 提供了开箱即用的模板解析器（支持从 Markdown 文件解析 SOUL/ROLE）。
 
 ---
 
