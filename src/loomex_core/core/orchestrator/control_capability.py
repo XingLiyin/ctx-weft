@@ -1,0 +1,729 @@
+"""ControlCapabilityProvider：内置控制能力。
+
+工具定义用 @control_tool 装饰器 + Annotated 类型注解声明，
+input_schema 由 extract_schema() 从函数签名自动提取（自动跳过 ctx 参数）。
+
+工具函数体通过注入的 ControlContext 直接操作 Task / TaskManager / Session，
+不再通过 metadata 把控制信号传递给 ActStep。
+"""
+
+from __future__ import annotations
+
+import inspect
+import logging
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Annotated, Any
+
+from loomex_core.core.utils import extract_schema, generate_id, now_utc
+from loomex_core.core.state.models import NormalTaskSettings
+from loomex_core.protocols.capability import (
+    CapabilityEvent,
+    CapabilityProviderInfo,
+    Purpose,
+    SessionScopedCapabilityProvider,
+    ToolCapability,
+    ToolCapabilityProvider,
+    qualify,
+)
+from loomex_core.protocols.context import ProviderContext
+
+if TYPE_CHECKING:
+    from loomex_core.core.orchestrator.hitl_manager import HitlManager
+    from loomex_core.core.orchestrator.task_manager import TaskManager
+    from loomex_core.core.state.models import Session, Task
+
+logger = logging.getLogger(__name__)
+
+PROVIDER_NAME = "control"
+
+# runtime-injected context parameter — excluded from LLM schema and from arguments filtering
+_SKIP: frozenset[str] = frozenset({"ctx"})
+
+# Sentinel capability_id for an act plain-text "wait for user" park (no real tool).
+# Used as the HITL request's capability_id so cold-resume routes the reply to
+# USER_PROMPT injection (act plain-text pause resume), not reconcile.
+WAIT_FOR_USER_CAPABILITY_ID = f"{PROVIDER_NAME}:wait_for_user"
+
+# Qualified (LLM-facing) names for the built-in control tools. Use these anywhere
+# a control tool is named to the LLM (prompts, docstrings shown as descriptions).
+FINISH_TASK_NAME = qualify(f"{PROVIDER_NAME}:finish_task")
+DELEGATE_TASK_NAME = qualify(f"{PROVIDER_NAME}:delegate_task")
+DELEGATE_PLAN_NAME = qualify(f"{PROVIDER_NAME}:delegate_plan")
+ASK_USER_NAME = qualify(f"{PROVIDER_NAME}:ask_user")
+REPLAN_NAME = qualify(f"{PROVIDER_NAME}:replan")
+REPORT_TASK_OUTCOME_NAME = qualify(f"{PROVIDER_NAME}:report_task_outcome")
+UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
+
+
+def _mode(interactive: bool) -> str:
+    """Map the LLM-facing `interactive` bool to Task.interaction_mode."""
+    return "interactive" if interactive else "auto"
+
+
+# ── ControlMetaKey ────────────────────────────────────────────────────────────
+
+
+class ControlMetaKey:
+    """Step 间传递的 metadata key。仅保留仍需通过 metadata 传递的信号。"""
+    CONTROL_ACTION = "control_action"
+    HITL_REQUESTED = "hitl_requested"
+    REOPEN_TASK_IDS = "reopen_task_ids"  # observer review：需重新入队的子任务 id（→ reopen_chain）
+
+
+# ── ControlContext ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ControlContext:
+    """运行时注入到 control tool 函数体的执行上下文（不暴露给 LLM）。"""
+    session_id: str
+    task_id: str
+    agent_id: str
+    task: "Task | None"
+    task_manager: "TaskManager | None"
+    session: "Session | None"
+    tool_call_id: str = ""  # 发起本次调用的 LLM tool_call id（spec/06 §5，委派回填用）
+
+
+# ── ControlResult ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ControlResult:
+    """control tool 函数的返回值。
+
+    content  → 给 LLM 看的确认文本（拼入 tool result message）
+    metadata → 传递给 Step 的附加信号（可选）
+    """
+    content: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# ── @control_tool 装饰器 ──────────────────────────────────────────────────────
+
+# name → (ToolCapability, handler_fn)
+_CONTROL_TOOLS: dict[str, tuple[ToolCapability, Callable[..., ControlResult]]] = {}
+
+
+def control_tool(*, purposes: list[Purpose], input_schema: dict[str, Any] | None = None):
+    """装饰器：声明控制工具的 purposes + 自动提取 input_schema，注册到 _CONTROL_TOOLS。
+
+    input_schema 给定时用它覆盖自动提取——extract_schema 只能生成扁平 schema
+    （list→array 无 items、dict→object 无 properties），需要嵌套对象/数组的工具
+    （如 ask_user 的 questions）须手写 schema 覆盖。
+    """
+    def decorator(fn: Callable[..., ControlResult]) -> Callable[..., ControlResult]:
+        first_line = (fn.__doc__ or "").strip().split("\n")[0].strip()
+        cap = ToolCapability(
+            id=f"{PROVIDER_NAME}:{fn.__name__}",
+            name=fn.__name__,
+            kind="tool",
+            purposes=list(purposes),
+            description=first_line,
+            input_schema=input_schema or extract_schema(fn),  # extract_schema 默认排除 "ctx"
+            side_effects=False,
+        )
+        _CONTROL_TOOLS[fn.__name__] = (cap, fn)
+        return fn
+    return decorator
+
+
+# ── 工具定义 ──────────────────────────────────────────────────────────────────
+
+
+@control_tool(purposes=["act"])
+def delegate_task(
+    title: Annotated[str, "Short imperative title for the sub-task (≤20 chars)"],
+    description: Annotated[str, "WHAT to achieve — not HOW, no tool names"] = "",
+    task_prompt: Annotated[str, "Detailed prompt extracted from the user request for this task"] = "",
+    skill_name: Annotated[str, "Skill to assign to the task, or empty if none"] = "",
+    use_subagent: Annotated[bool, "True if the task should run in a dedicated sub-agent"] = False,
+    subagent_template: Annotated[str, "Template id for the sub-agent; empty = system default"] = "",
+    inherit_memory: Annotated[bool, "True if the sub-agent should inherit session memory"] = True,
+    interactive: Annotated[
+        bool,
+        "True if this sub-task is human-interactive: a plain-text turn pauses and waits "
+        "for the user. Default False = autonomous (the actor must call finish_task "
+        "to finish).",
+    ] = False,
+    inputs: Annotated[dict, "Optional input data for the sub-task"] = None,
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Delegate ONE new sub-task to run separately; the current task suspends until its sub-tasks finish. To finish your OWN task instead, use control__finish_task."""
+    from loomex_core.core.state.models import Task as TaskModel
+
+    if ctx is None or ctx.task_manager is None or ctx.task is None:
+        return ControlResult(content=f"Sub-task '{title}' scheduled.")
+
+    child = TaskModel(
+        id=generate_id("tsk"),
+        session_id=ctx.session_id,
+        status="PENDING",
+        tenant_id=ctx.task.tenant_id,
+        parent_task_id=ctx.task_id,
+        creator_agent_id=ctx.agent_id,
+        title=title,
+        description=description,
+        user_prompt=task_prompt or description,
+        origin_tool_call_id=ctx.tool_call_id or None,
+        interaction_mode=_mode(bool(interactive)),
+        settings=NormalTaskSettings(
+            skill_name=skill_name,
+            use_subagent=bool(use_subagent),
+            subagent_template=subagent_template,
+            inherit_memory=bool(inherit_memory),
+        ),
+        created_at=now_utc(),
+    )
+    ctx.task_manager.stage_task(child, parent_task_id=ctx.task_id)
+
+    if isinstance(ctx.task.settings, NormalTaskSettings):
+        ctx.task.settings.spawn_titles.append(title)
+
+    ctx.task.status = "SUSPENDED"
+    ctx.task.actor_done = True
+    return ControlResult(content=f"Sub-task '{title}' scheduled.")
+
+
+@control_tool(purposes=["act"])
+def delegate_plan(
+    tasks: Annotated[
+        list,
+        (
+            "Ordered list of task specs. Each item: "
+            "title (str), description (str, WHAT not HOW), "
+            "task_prompt (str, detailed prompt), "
+            "skill_name (str, skill to assign or empty), "
+            "use_subagent (bool), subagent_template (str), "
+            "inherit_memory (bool, default true), "
+            "interactive (bool, default false — true makes the task human-interactive: "
+            "a plain-text turn pauses for the user instead of requiring control__finish_task)."
+        ),
+    ],
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Delegate SEVERAL ordered sub-tasks in one call (each runs after the previous); the current task suspends until they all finish. For a single sub-task use control__delegate_task; to finish your OWN task use control__finish_task."""
+    from loomex_core.core.state.models import Task as TaskModel
+
+    if not isinstance(tasks, list):
+        tasks = []
+
+    n = len(tasks)
+    if ctx is None or ctx.task_manager is None or ctx.task is None:
+        return ControlResult(content=f"Plan with {n} task(s) submitted.")
+
+    titles: list[str] = []
+    prev_ids: list[str] = []
+    for spec in tasks:
+        if not isinstance(spec, dict):
+            continue
+        title = spec.get("title", "subtask")
+        child = TaskModel(
+            id=generate_id("tsk"),
+            session_id=ctx.session_id,
+            status="PENDING",
+            tenant_id=ctx.task.tenant_id,
+            parent_task_id=ctx.task_id,
+            creator_agent_id=ctx.agent_id,
+            title=title,
+            description=spec.get("description", ""),
+            user_prompt=spec.get("task_prompt") or spec.get("description", ""),
+            origin_tool_call_id=ctx.tool_call_id or None,
+            tracking_task_ids=list(prev_ids),
+            interaction_mode=_mode(bool(spec.get("interactive", False))),
+            settings=NormalTaskSettings(
+                skill_name=spec.get("skill_name", ""),
+                use_subagent=bool(spec.get("use_subagent", False)),
+                subagent_template=spec.get("subagent_template", ""),
+                inherit_memory=bool(spec.get("inherit_memory", True)),
+            ),
+            created_at=now_utc(),
+        )
+        ctx.task_manager.stage_task(
+            child,
+            parent_task_id=ctx.task_id,
+            blocked_by=[prev_ids[-1]] if prev_ids else None,
+        )
+        prev_ids.append(child.id)
+        titles.append(title)
+
+    if isinstance(ctx.task.settings, NormalTaskSettings):
+        ctx.task.settings.spawn_titles = titles
+    ctx.task.status = "SUSPENDED"
+    ctx.task.actor_done = True
+    return ControlResult(content=f"Plan with {len(titles)} task(s) submitted.")
+
+
+@control_tool(purposes=["act"])
+def finish_task(
+    result: Annotated[
+        str,
+        "The final result/output of the current task. Becomes the task's output, handed off "
+        "to the observer and to whoever delegated this task.",
+    ],
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Finish the CURRENT task and record its final result, then hand off to review. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
+    if ctx is not None and ctx.task is not None:
+        ctx.task.outputs = result
+        # actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe（区别于 delegate_task 的委派挂起）。
+        ctx.task.actor_done = True
+    return ControlResult(content="Task result submitted.")
+
+
+def _collect_reviews(
+    task_reviews: list,
+    ctx: "ControlContext",
+) -> tuple[dict[str, str], str]:
+    """匹配**自己派生的子任务**的 review，返回 ({待 reopen 的子任务 id: reasoning}, 给 LLM 的摘要)。
+
+    每条 review: {task_title, review_status('confirmed'|'reopen'|'skip'), reasoning}。
+
+    权限范围：只有当前 task 直接派生的子任务（children_of）才能被 review / reopen。
+    同 plan 前序仅作只读上下文（observe prompt 的 "Upstream task results" 段），不可在此操作；
+    任何不在子任务集合内的标题都会被拒绝并在摘要里反馈给 LLM。
+
+    本函数**不直接改状态**——仅收集需 reopen 的 FINISHED 子任务及其 reasoning，交由
+    ControlCapabilityProvider 通过 TaskManager.reopen_chain(id, reason) 正规重排
+    （head + 其 plan 后续一并入队 + 重写 user_prompt + 发 TASK_REQUEUED）。reasoning 会成为重做指令。
+    'confirmed' / 'skip' 仅记录摘要。按标题精确匹配。
+    """
+    if not isinstance(task_reviews, list) or ctx.task_manager is None or ctx.task is None:
+        return {}, ""
+
+    child_ids = ctx.task_manager.children_of(ctx.task.id)
+    children = {t.title: t for t in ctx.task_manager.all_tasks() if t.id in child_ids}
+
+    reopen: dict[str, str] = {}
+    applied: list[str] = []
+    denied: list[str] = []
+    for review in task_reviews:
+        if not isinstance(review, dict):
+            continue
+        title = review.get("task_title", "")
+        review_status = review.get("review_status", "")
+        reasoning = review.get("reasoning", "")
+        target = children.get(title)
+        if target is None:
+            denied.append(f"{title!r}")  # 非自己的子任务（含前序 / 其它）→ 越权
+            continue
+        if not reasoning:
+            continue
+        if review_status == "reopen":
+            if target.status == "FINISHED":
+                reopen[target.id] = reasoning
+                applied.append(f"reopened {title!r} (+ its plan successors)")
+            else:
+                # 已是 PENDING/进行中，本来就会跑，无需 reopen
+                applied.append(f"already active {title!r}")
+        elif review_status == "confirmed":
+            applied.append(f"confirmed {title!r}")
+        elif review_status == "skip":
+            applied.append(f"skipped {title!r}")
+
+    parts: list[str] = []
+    if applied:
+        parts.append(f"Reviews applied: {'; '.join(applied)}.")
+    if denied:
+        parts.append(
+            f"Ignored (out of scope — you may only review your own sub-tasks): {'; '.join(denied)}."
+        )
+    summary = ("\n" + " ".join(parts)) if parts else ""
+    return reopen, summary
+
+
+@control_tool(purposes=["observe"])
+def report_task_outcome(
+    task_status: Annotated[
+        str,
+        "Outcome of the current task — one of 'success' | 'retry' | 'fail'. "
+        "Don't over-think — once the situation is clear, call this tool promptly. "
+        "'success' if completed successfully (give a thorough task_process_report of the outcome and key steps); "
+        "'retry' if this attempt fell short but is worth another try (task_process_report describes what is missing, "
+        "next_step_hint the concrete next step); "
+        "'fail' if it cannot be completed and should NOT be retried (task_process_report/task_failure_reason explain why).",
+    ],
+    task_process_report: Annotated[
+        str,
+        "A thorough execution record: describe what was accomplished, what was modified or "
+        "produced, which tools were called and whether any failed, and — if incomplete — what remains and why. "
+        "Written to memory and read by the next actor turn, so be specific and evidence-based.",
+    ],
+    task_failure_reason: Annotated[
+        str,
+        "Required when task_status is 'fail'. "
+        "Explain specifically what went wrong: which step failed, what error or unexpected result was encountered, "
+        "and what the root cause is. Leave empty for non-fail outcomes.",
+    ] = "",
+    task_reviews: Annotated[
+        list,
+        "Optional reviews of YOUR OWN sub-tasks only — exactly those listed under "
+        "'Your sub-task results' in the context. You may NOT review anything under "
+        "'Upstream task results' (those are read-only predecessors) or any other task; "
+        "such entries are rejected. "
+        "Each entry: task_title (str, exact match from 'Your sub-task results'), "
+        "review_status ('confirmed'|'reopen'|'skip'), reasoning (str, required). "
+        "'reopen' re-runs that FINISHED sub-task from scratch: its previous output is "
+        "automatically shown to the re-run and your 'reasoning' becomes the revision "
+        "instruction — so write 'reasoning' as concrete, actionable feedback (what is "
+        "wrong and what must be fixed), not just a verdict. Reopening a sub-task that is "
+        "part of a plan AUTOMATICALLY reopens its later plan steps as well (they will be "
+        "redone against the corrected result), so you only need to reopen the earliest "
+        "step that is wrong. "
+        "'confirmed'/'skip' are recorded only, no re-run. Only FINISHED sub-tasks can be "
+        "reopened. Omit sub-tasks you have no information about; leave empty otherwise.",
+    ] = None,
+    next_step_hint: Annotated[
+        str,
+        "Optional. If there are obvious risks, blockers, or important concerns the next actor turn should be "
+        "aware of, describe them here. Leave empty if nothing notable.",
+    ] = "",
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Record the review verdict for the current task (success / retry / fail), and optionally review your own sub-tasks in the same call."""
+    task = ctx.task if ctx else None
+    # observe 裁决三态。机械退出（max_turns/context_limit）由系统在 ObserveStep 归为 retry。
+    if task_status not in ("success", "retry", "fail"):
+        task_status = "retry"
+    if next_step_hint:
+        task_process_report = f"{task_process_report}\n\nNext Step Hint: {next_step_hint}"
+
+    metadata: dict[str, Any] = {}
+    if task is not None:
+        # 护栏：没有最终产出就不允许判成功，改判 retry（提示下一轮调 finish_task 收尾）。
+        if task_status == "success" and not task.outputs:
+            task_status = "retry"
+            _hint = ("The previous round ended without a final output. Review the process report above "
+                     "and judge whether this task still needs more work. If it does, continue with the "
+                     "necessary tool calls. Once everything required is done, call the `control__finish_task` tool "
+                     "with the final result to complete the task.")
+            task_process_report = f"{task_process_report}\n\n{_hint}" if task_process_report else _hint
+
+        task.process_report = task_process_report
+        task.observer_outcome = task_status
+        if task_status == "success":
+            task.status = "FINISHED"
+            task.actor_done = True
+        elif task_status == "fail":
+            task.status = "FAILED"
+            task.error = task_failure_reason
+            task.actor_done = True
+        else:  # retry
+            task.status = "PENDING"
+            task.actor_done = True
+
+    review_msg = ""
+    if task_reviews and ctx:
+        reopen_map, review_msg = _collect_reviews(task_reviews, ctx)
+        if reopen_map:
+            metadata[ControlMetaKey.REOPEN_TASK_IDS] = reopen_map
+
+    failure_part = f" Failure reason: {task_failure_reason}" if task_status == "fail" and task_failure_reason else ""
+    return ControlResult(
+        content=f"Assessment recorded: outcome={task_status}.{failure_part} {task_process_report}{review_msg}",
+        metadata=metadata,
+    )
+
+
+@control_tool(purposes=["act"])
+def replan(
+    reason: Annotated[str, "Why the original plan needs revision"],
+    tasks: Annotated[
+        list,
+        "New list of remaining task specs (same format as delegate_plan.tasks)",
+    ],
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Replace the remaining sub-tasks of the current plan with a new set. Use after delegate_plan when the plan must change; does not finish the current task."""
+    from loomex_core.core.state.models import Task as TaskModel
+
+    if not isinstance(tasks, list):
+        tasks = []
+
+    if ctx is None or ctx.task_manager is None or ctx.task is None:
+        return ControlResult(content=f"Replanning with {len(tasks)} new task(s). Reason: {reason}")
+
+    titles: list[str] = []
+    prev_ids: list[str] = []
+    for spec in tasks:
+        if not isinstance(spec, dict):
+            continue
+        title = spec.get("title", "subtask")
+        child = TaskModel(
+            id=generate_id("tsk"),
+            session_id=ctx.session_id,
+            status="PENDING",
+            tenant_id=ctx.task.tenant_id,
+            parent_task_id=ctx.task_id,
+            creator_agent_id=ctx.agent_id,
+            title=title,
+            description=spec.get("description", ""),
+            user_prompt=spec.get("task_prompt") or spec.get("description", ""),
+            origin_tool_call_id=ctx.tool_call_id or None,
+            tracking_task_ids=list(prev_ids),
+            interaction_mode=_mode(bool(spec.get("interactive", False))),
+            settings=NormalTaskSettings(
+                skill_name=spec.get("skill_name", ""),
+                use_subagent=bool(spec.get("use_subagent", False)),
+                subagent_template=spec.get("subagent_template", ""),
+                inherit_memory=bool(spec.get("inherit_memory", True)),
+            ),
+            created_at=now_utc(),
+        )
+        ctx.task_manager.stage_task(
+            child,
+            parent_task_id=ctx.task_id,
+            blocked_by=[prev_ids[-1]] if prev_ids else None,
+        )
+        prev_ids.append(child.id)
+        titles.append(title)
+
+    if isinstance(ctx.task.settings, NormalTaskSettings):
+        ctx.task.settings.spawn_titles = titles
+    ctx.task.status = "SUSPENDED"
+    ctx.task.actor_done = True
+    return ControlResult(content=f"Replanning with {len(titles)} new task(s). Reason: {reason}")
+
+
+@control_tool(purposes=["recognize_intent"])
+def update_task_metadata(
+    title: Annotated[str, "Task title: ≤20 chars, start with a verb, summarize the core goal."],
+    description: Annotated[str, "Task description: ≤80 chars, state the outcome to achieve."],
+    session_goal: Annotated[
+        str,
+        "Overall session goal: ≤60 chars. Set on the first fill or when the direction "
+        "changes; otherwise leave empty.",
+    ] = "",
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Set the current task's title and description (and optionally the session goal). Call exactly once, then stop."""
+    if ctx is not None and ctx.task is not None:
+        # recognize_intent 现直跑在 root task 上：直接写当前 task 的 title/description。
+        # 不置 actor_done（会让 root 主 act 循环误判完成；单发步骤本就不读它）。
+        if title:
+            ctx.task.title = title
+        if description:
+            ctx.task.description = description
+    if ctx is not None and ctx.session is not None and session_goal:
+        ctx.session.goal = session_goal
+    return ControlResult(content=f"Metadata updated: title={title!r}")
+
+
+# ask_user 的嵌套结构超出 extract_schema 的扁平表达能力,手写覆盖（见 control_tool）。
+_ASK_USER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "description": (
+                "One or more questions to ask the human. Each is answered independently; "
+                "batch related questions in one call instead of asking one at a time."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question or decision you need from the human.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "description": (
+                            "Predefined choices the human can pick. Omit or leave empty for a "
+                            "free-text-only question; a free-text 'Other' is always offered regardless."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "description": "Short choice text shown on the button."},
+                                "description": {"type": "string", "description": "What this choice means or its trade-off."},
+                                "recommended": {"type": "boolean", "description": "Set on the option you recommend."},
+                            },
+                            "required": ["label"],
+                        },
+                    },
+                    "multi_select": {
+                        "type": "boolean",
+                        "description": "Allow the human to select multiple options.",
+                        "default": False,
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    "required": ["questions"],
+}
+
+
+@control_tool(purposes=["act", "observe"], input_schema=_ASK_USER_SCHEMA)
+def ask_user(
+    questions: Annotated[list, "List of questions to ask the human (see schema)"],
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Ask the user one or more questions and wait for their reply — call this whenever you need information, a decision, a clarification, or a choice that only the user can provide; prefer asking over guessing or assuming. Execution pauses until they answer, then resumes from their reply."""
+    if ctx is not None and ctx.session is not None:
+        ctx.session.status = "PAUSED_HITL"
+    # Async parking until human responds is handled in ControlCapabilityProvider._handle()
+    n = len(questions) if questions else 0
+    return ControlResult(
+        content=f"Human input requested ({n} question(s))",
+        metadata={
+            ControlMetaKey.HITL_REQUESTED: True,
+            "questions": questions or [],
+        },
+    )
+
+
+# ── ControlCapabilityProvider ─────────────────────────────────────────────────
+
+
+class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityProvider):
+    """Exposes task-orchestration control tools to the LLM.
+
+    工具通过 @control_tool 装饰器注册到 _CONTROL_TOOLS；
+    _handle() 构建 ControlContext 并注入，工具函数体直接完成实际变动。
+    """
+
+    name = PROVIDER_NAME
+
+    def __init__(self, hitl_manager: "HitlManager | None" = None) -> None:
+        self._hitl_manager = hitl_manager
+        self._sessions: dict[str, tuple["TaskManager", "Session"]] = {}
+
+    def register_session(
+        self,
+        session_id: str,
+        task_manager: "TaskManager",
+        session: "Session",
+    ) -> None:
+        """注册 session 的 TaskManager + Session，供工具函数体使用。"""
+        self._sessions[session_id] = (task_manager, session)
+
+    def deregister_session(self, session_id: str) -> None:
+        """session 结束后注销，防止内存泄漏。"""
+        self._sessions.pop(session_id, None)
+
+    async def list(self, ctx: ProviderContext) -> list[ToolCapability]:
+        return [cap for cap, _ in _CONTROL_TOOLS.values()]
+
+    def invoke(
+        self,
+        capability_id: str,
+        arguments: dict[str, Any],
+        ctx: ProviderContext,
+    ) -> AsyncIterator[CapabilityEvent]:
+        return self._handle(capability_id, arguments, ctx)
+
+    async def _handle(
+        self,
+        capability_id: str,
+        arguments: dict[str, Any],
+        ctx: ProviderContext,
+    ) -> AsyncIterator[CapabilityEvent]:
+        name = capability_id.split(":")[-1]
+        entry = _CONTROL_TOOLS.get(name)
+        if entry is None:
+            yield CapabilityEvent(
+                kind="error",
+                payload={
+                    "code": "UNKNOWN_CONTROL",
+                    "message": f"Unknown control capability: {capability_id}",
+                },
+            )
+            return
+
+        _, fn = entry
+        tm = None
+        try:
+            sig = inspect.signature(fn)
+            # 过滤掉 LLM arguments 中 schema 未声明的 key
+            valid_keys = set(sig.parameters.keys()) - _SKIP
+            filtered = {k: v for k, v in arguments.items() if k in valid_keys}
+
+            # 构建并注入 ControlContext
+            if "ctx" in sig.parameters:
+                tm, session = self._sessions.get(ctx.session_id, (None, None))
+                task = tm.get_task(ctx.task_id or "") if tm and ctx.task_id else None
+                filtered["ctx"] = ControlContext(
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id or "",
+                    agent_id=ctx.agent_id or "",
+                    task=task,
+                    task_manager=tm,
+                    session=session,
+                    tool_call_id=ctx.extra.get("tool_call_id", ""),
+                )
+
+            result: ControlResult = fn(**filtered)
+        except Exception as e:
+            logger.exception("Control tool %s raised: %s", name, e)
+            yield CapabilityEvent(
+                kind="error",
+                payload={"code": "CONTROL_EXEC_ERROR", "message": str(e)},
+            )
+            return
+
+        K = ControlMetaKey
+
+        # report_task_outcome 的 review：把命中的子任务正规重排（reopen_chain：
+        # head + 其 plan 后续一并入队 + 重写 user_prompt + 发 TASK_REQUEUED）。不在此
+        # drain——下一次 drain（当前 run 返回后）会自然调度，避免 run 内重入。
+        reopen_map = result.metadata.get(K.REOPEN_TASK_IDS)
+        if reopen_map and tm is not None:
+            for tid, reason in reopen_map.items():
+                await tm.reopen_chain(tid, reason)
+
+        # ask_user：park 直到人类响应，把答复作为工具结果返回给 LLM。
+        # cold reconcile 再入（tool_call_id 已有「已解决」HITL）时短路、不再 park（spec/07 §6）。
+        if result.metadata.get(K.HITL_REQUESTED) and self._hitl_manager is not None:
+            tool_call_id = (ctx.extra or {}).get("tool_call_id", "")
+            existing = self._hitl_manager.find_for_tool_call(tool_call_id)
+            if existing is not None and existing.status != "pending":
+                approval = existing                       # 决定缓存命中：直接用
+            else:
+                approval_id = await self._hitl_manager.request(
+                    kind="input",
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id or "",
+                    agent_id=ctx.agent_id or "",
+                    capability_id=capability_id,
+                    arguments=arguments,
+                    questions=result.metadata.get("questions", []),
+                    tool_call_id=tool_call_id,
+                )
+                approval = await self._hitl_manager.wait(approval_id)
+            _, session = self._sessions.get(ctx.session_id, (None, None))
+            if session is not None:
+                session.status = "RUNNING"
+            if approval.status == "rejected":
+                content = f"Human declined: {approval.message}" if approval.message else "Human rejected the request."
+            else:
+                content = approval.message or result.content
+            yield CapabilityEvent(kind="result", payload={"content": content, "metadata": {}})
+            return
+
+        yield CapabilityEvent(
+            kind="result",
+            payload={"content": result.content, "metadata": result.metadata},
+        )
+
+    async def cancel(self, invocation_id: str, ctx: ProviderContext) -> None:
+        pass
+
+    async def describe(self, ctx: ProviderContext) -> CapabilityProviderInfo:
+        return CapabilityProviderInfo(
+            name=self.name,
+            capability_count=len(_CONTROL_TOOLS),
+            supports_streaming=False,
+            supports_cancel=False,
+            description=self.description,
+        )

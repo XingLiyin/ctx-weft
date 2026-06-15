@@ -1,0 +1,82 @@
+"""LifecycleManager：Agent 实例化 + spawn 深度检查。
+
+Capability 解析已移至 PrepareStep（CapabilityResolver），
+此处只负责从 template 创建 Agent 对象。
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+from loomex_core.core.errors import LoomeXError
+from loomex_core.core.state.models import Agent
+from loomex_core.core.utils import generate_id, now_utc
+from loomex_core.protocols.context import ProviderContext
+from loomex_core.protocols.template import AgentTemplate, TemplateResolver
+
+logger = logging.getLogger(__name__)
+
+
+class UnknownCapabilityError(LoomeXError):
+    pass
+
+
+class SpawnDepthExceeded(LoomeXError):
+    pass
+
+
+@dataclass
+class LifecycleManager:
+    """Agent 实例化。不再处理 capability 解析——由 PrepareStep.CapabilityResolver 负责。"""
+
+    template_resolver: TemplateResolver
+
+    async def instantiate_agent(
+        self,
+        template_id: str,
+        session_id: str,
+        tenant_id: str,
+        parent_agent: Agent | None = None,
+        ctx: ProviderContext | None = None,
+        existing_agent_id: str | None = None,
+    ) -> tuple[Agent, AgentTemplate]:
+        """解析 template，创建 Agent 对象。
+
+        bound_capability_ids 留空：PrepareStep 每轮解析后写入 CapabilityCache，
+        agent.bound_capability_ids 仅作元数据记录，不驱动 capability 解析。
+        """
+        resolve_ctx = ctx or ProviderContext(session_id=session_id, tenant_id=tenant_id)
+        template: AgentTemplate = await self.template_resolver.get(
+            template_id, version=None, ctx=resolve_ctx,
+        )
+
+        spawn_depth = 0
+        if parent_agent is not None:
+            spawn_depth = parent_agent.spawn_depth + 1
+            if spawn_depth > template.loop_config.max_spawn_depth:
+                raise SpawnDepthExceeded(
+                    f"Max spawn depth {template.loop_config.max_spawn_depth} exceeded "
+                    f"(current: {spawn_depth})"
+                )
+
+        agent = Agent(
+            id=existing_agent_id or generate_id("agt"),
+            session_id=session_id,
+            template_id=template.id,
+            template_version=template.version,
+            status="IDLE",
+            tenant_id=tenant_id,
+            parent_agent_id=parent_agent.id if parent_agent else None,
+            spawn_depth=spawn_depth,
+            bound_capability_ids=[ref.capability_id for ref in template.capability_refs if ref.mode != "forbidden"],
+            memory_config=template.memory_config,
+            loop_config=template.loop_config,
+            created_at=now_utc(),
+        )
+
+        logger.info(
+            "LifecycleManager: instantiated agent %s (template=%s, depth=%d)",
+            agent.id, template_id, spawn_depth,
+        )
+        return agent, template

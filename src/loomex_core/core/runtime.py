@@ -1,0 +1,1203 @@
+"""LoomeXRuntime：顶层 API。
+
+Phase 4 版本：完整 SessionManager + TaskManager + LifecycleManager 支持；
+同时保留 run_single_task() 兼容 Phase 1 测试。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from typing import Any
+
+from loomex_core.core.auth.authorizer import AllowAllAuthorizer, Authorizer
+from loomex_core.core.control.tokens import CancelToken
+from loomex_core.core.orchestrator.hitl_manager import HitlManager, HitlRequest  # noqa: F401 — re-exported for shell use
+from loomex_core.core.loop.capability_gateway import CapabilityGateway
+from loomex_core.core.assembler import (
+    ContextAssembler,
+    PriorityBudgetStrategy,
+)
+from loomex_core.core.assembler.assembler import AssemblerDeps
+from loomex_core.core.assembler.composer import DefaultComposer
+from loomex_core.core.assembler.sources import (
+    AgentExperienceSource,
+    BlackboardSource,
+    CapabilitySource,
+    IdentitySource,
+    KnowledgeRetrievalSource,
+    RecentMemorySource,
+    SemanticRecallSource,
+)
+from loomex_core.core.events import Event, EventType, InProcessEventBus
+from loomex_core.core.events.bus import EventBus
+from loomex_core.protocols import LLMClient, LLMClientResolver
+from loomex_core.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
+from loomex_core.core.loop.park import HitlPark
+from loomex_core.core.loop.steps import ActStep, FinalizeStep, RecognizeIntentStep, ObserveStep, PrepareStep
+from loomex_core.core.loop.steps.compact import CompactStep
+from loomex_core.core.loop.steps.reconcile import ReconcileStep
+from loomex_core.core.loop.steps.suspend import SuspendStep
+from loomex_core.core.orchestrator.capability_cache import CapabilityCache
+from loomex_core.core.orchestrator.control_capability import ControlCapabilityProvider
+from loomex_core.protocols.capability import SessionScopedCapabilityProvider
+from loomex_core.core.state.models import NormalTaskSettings
+from loomex_core.core.orchestrator.lifecycle_manager import LifecycleManager
+from loomex_core.core.orchestrator.session_manager import SessionManager
+from loomex_core.core.orchestrator.task_manager import TaskManager, TaskRunner, _task_payload
+from loomex_core.core.orchestrator.task_queue import QueueEntry
+from loomex_core.core.state.models import Agent, LoopGuard, Session, Task
+from loomex_core.core.utils import generate_id, now_utc
+from loomex_core.protocols import (
+    AgentTemplate,
+    Capability,
+    KnowledgeProvider,
+    MemoryProvider,
+    MemoryScope,
+    ProviderContext,
+    TemplateResolver,
+)
+from loomex_core.protocols.capability import (
+    AgentCapability,
+    AgentCapabilityProvider,
+    CapabilityProvider,
+    SkillCapabilityProvider,
+    qualify,
+)
+
+logger = logging.getLogger(__name__)
+
+
+async def _copy_memory_for_inherit(
+    parent_task: "Task",
+    child_task: "Task",
+    sub_agent: "Agent",
+    memory: "MemoryProvider",
+    session_id: str,
+    tenant_id: str,
+) -> None:
+    """已停用（spec/06 §12）。
+
+    新分层模型下 child 是黑盒：它有自己的 task 层对话（来自 user_prompt）+ 自己的 agent 经验，
+    parent 的 task 转录**不应**复制进 child。保留函数签名以兼容调用点，直接 no-op 返回。
+    """
+    return
+    # ── 以下为旧行为（跨 task 复制 parent 转录），已按 spec/06 §12 停用 ──
+    parent_agent_id = parent_task.assigned_agent_id  # type: ignore[unreachable]
+    if not parent_agent_id:
+        return
+
+    from loomex_core.protocols import MemoryEvent, MemoryEventType, MemoryScope
+    from loomex_core.protocols.context import ProviderContext
+
+    parent_scope = MemoryScope(session_id=session_id, task_id=parent_task.id, agent_id=parent_agent_id)
+    child_scope = MemoryScope(session_id=session_id, task_id=child_task.id, agent_id=sub_agent.id)
+    ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
+
+    records = await memory.recall_recent(
+        scope=parent_scope,
+        types=[
+            MemoryEventType.USER_PROMPT,
+            MemoryEventType.OBSERVER_SUMMARY,
+            MemoryEventType.COMPACT_SUMMARY,
+        ],
+        limit=50,
+        ctx=ctx,
+    )
+
+    for record in reversed(records):
+        await memory.ingest(
+            MemoryEvent(
+                type=record.type,
+                scope=child_scope,
+                content=record.content,
+                timestamp=record.timestamp,
+                role=record.role,
+                metadata=record.metadata,
+            ),
+            ctx,
+        )
+
+
+async def _flush_tracking_memory(
+    agent: "Agent",
+    task: "Task",
+    task_manager: "TaskManager",
+    memory: "MemoryProvider",
+    session_id: str,
+    tenant_id: str,
+) -> None:
+    """把 agent.tracking_task_ids 中的前序任务结果写入 memory，写完后标记已拉取。"""
+    pending = [tid for tid in agent.tracking_task_ids if tid not in agent.fetched_tracking_ids]
+    if not pending:
+        return
+
+    from loomex_core.protocols import MemoryEvent, MemoryEventType, MemoryScope
+    from loomex_core.protocols.context import ProviderContext
+
+    scope = MemoryScope(session_id=session_id, task_id=task.id, agent_id=agent.id)
+    provider_ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
+
+    for tid in pending:
+        tracked = task_manager.get_task(tid)
+        if tracked is None:
+            agent.fetched_tracking_ids.add(tid)
+            continue
+        result = ""
+        if isinstance(tracked.outputs, list):
+            result = next(
+                (p.get("text", "") for p in tracked.outputs if isinstance(p, dict) and p.get("type") == "text"),
+                "",
+            )
+        elif isinstance(tracked.outputs, str):
+            result = tracked.outputs
+        report = tracked.process_report or ""
+        if result or report:
+            content = f"sub-task '{tracked.title}' completed. \nresult:{result} \nprocess report:{report}"
+            try:
+                await memory.ingest(
+                    MemoryEvent(
+                        type=MemoryEventType.OBSERVER_SUMMARY,
+                        scope=scope,
+                        content=content,
+                        timestamp=now_utc(),
+                        role="assistant",
+                        metadata={"task_id": tid, "outcome": tracked.status.lower()},
+                    ),
+                    provider_ctx,
+                )
+            except Exception:
+                logger.exception("Failed to flush tracking task %s into agent %s memory", tid, agent.id)
+        agent.fetched_tracking_ids.add(tid)
+
+
+# ── ProviderRegistry ──────────────────────────────────────────────────────────
+
+
+class ProviderRegistry:
+    """Provider 注册表。
+
+    四种 provider 类型：
+      memory     — 唯一；重复注册覆盖
+      knowledge  — 有序列表，按 priority 升序（数字小 = 优先级高）
+      capability — 有序列表；SkillCapabilityProvider 注册/注销时通知 SkillExecutorCapabilityProvider
+      llm        — 唯一；重复注册覆盖
+    """
+
+    def __init__(self) -> None:
+        self._memory: MemoryProvider | None = None
+        self._knowledge: list[tuple[int, KnowledgeProvider]] = []  # (priority, provider)
+        self._capabilities: list[CapabilityProvider] = []
+        self._capability_authorizers: dict[str, Authorizer] = {}  # provider_name or capability_id → Authorizer
+        self._llm_provider: LLMClientResolver | None = None
+
+    # ── Memory ────────────────────────────────────────────────────────────────
+
+    def register_memory(self, provider: MemoryProvider) -> None:
+        self._memory = provider
+
+    def get_memory(self) -> MemoryProvider:
+        if self._memory is None:
+            raise RuntimeError("MemoryProvider not registered")
+        return self._memory
+
+    # ── Knowledge ─────────────────────────────────────────────────────────────
+
+    def register_knowledge(self, provider: KnowledgeProvider, *, priority: int = 0) -> None:
+        """注册知识源。priority 升序决定查询顺序（0 最高，数字越小越先查询）。"""
+        self._knowledge.append((priority, provider))
+        self._knowledge.sort(key=lambda t: t[0])
+
+    def get_knowledge_providers(self) -> list[KnowledgeProvider]:
+        return [p for _, p in self._knowledge]
+
+    # ── Capability ────────────────────────────────────────────────────────────
+
+    def register_capability(
+        self,
+        provider: CapabilityProvider,
+        *,
+        authorizer: Authorizer | None = None,
+        tool_authorizers: dict[str, Authorizer] | None = None,
+    ) -> None:
+        self._capabilities.append(provider)
+        if authorizer is not None:
+            self._capability_authorizers[provider.name] = authorizer
+        if tool_authorizers:
+            self._capability_authorizers.update(tool_authorizers)
+        if isinstance(provider, SkillCapabilityProvider):
+            self._notify_skill_executor_dirty()
+
+    def deregister_capability(self, provider_name: str) -> bool:
+        before = len(self._capabilities)
+        removed = [p for p in self._capabilities if p.name == provider_name]
+        self._capabilities = [p for p in self._capabilities if p.name != provider_name]
+        prefix = provider_name + ":"
+        for key in [k for k in self._capability_authorizers if k == provider_name or k.startswith(prefix)]:
+            del self._capability_authorizers[key]
+        if any(isinstance(p, SkillCapabilityProvider) for p in removed):
+            self._notify_skill_executor_dirty()
+        return len(self._capabilities) < before
+
+    def get_capability_providers(self) -> list[CapabilityProvider]:
+        return list(self._capabilities)
+
+    def set_capability_authorizer(self, key: str, authorizer: Authorizer) -> None:
+        """注册或覆盖单个 authorizer，key 可以是 provider_name 或完整 capability_id。"""
+        self._capability_authorizers[key] = authorizer
+
+    def get_capability_authorizers(self) -> dict[str, Authorizer]:
+        """provider_name → Authorizer 映射，供 CapabilityGateway 使用。"""
+        return dict(self._capability_authorizers)
+
+    def _notify_skill_executor_dirty(self) -> None:
+        """SkillCapabilityProvider 增减时通知 SkillExecutorCapabilityProvider 重建索引。"""
+        from loomex_core.core.orchestrator.skill_executor_capability import SkillExecutorCapabilityProvider
+        for p in self._capabilities:
+            if isinstance(p, SkillExecutorCapabilityProvider):
+                p.mark_dirty()
+                break
+
+    # ── LLM ──────────────────────────────────────────────────────────────────
+
+    def register_llm_provider(self, provider: LLMClientResolver) -> None:
+        self._llm_provider = provider
+
+    def get_llm_provider(self) -> LLMClientResolver:
+        if self._llm_provider is None:
+            raise RuntimeError("LLMProvider not registered")
+        return self._llm_provider
+
+    def has_llm_provider(self) -> bool:
+        return self._llm_provider is not None
+
+
+# ── SessionStartParams ────────────────────────────────────────────────────────
+
+
+@dataclass
+class SessionStartParams:
+    """Parameters for start_session(). Construct via SessionStartParams.create().
+
+    resume=False → create a new session. session_id=None lets runtime generate the ID;
+                   session_id=<id> creates a NEW session with a host-provided ID
+                   (so the host can pre-register session-scoped resources, e.g. the
+                   filesystem provider's workspace, before execution starts).
+    resume=True  → resume an existing session (root_agent_id recovered from event store);
+                   session_id must be set.
+    """
+
+    template_id: str
+    user_prompt: str
+    initial_task_settings: NormalTaskSettings
+    context_limit: int
+    session_id: str | None = None
+    tenant_id: str = "default"
+    llm_account: str | None = None
+    llm_model: str | None = None
+    token_budget: int = 200_000
+    resume: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        template_id: str,
+        user_prompt: str,
+        *,
+        context_limit: int,
+        session_id: str | None = None,
+        initial_task: dict | None = None,
+        tenant_id: str = "default",
+        llm_account: str | None = None,
+        llm_model: str | None = None,
+        token_budget: int = 200_000,
+        resume: bool = False,
+    ) -> "SessionStartParams":
+        from loomex_core.core.state.models import deserialize_settings
+        return cls(
+            template_id=template_id,
+            user_prompt=user_prompt,
+            session_id=session_id,
+            initial_task_settings=deserialize_settings(initial_task),
+            context_limit=context_limit,
+            tenant_id=tenant_id,
+            llm_account=llm_account,
+            llm_model=llm_model,
+            token_budget=token_budget,
+            resume=resume,
+        )
+
+
+# ── RunHandle ─────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class RunHandle:
+    """Handle to a running or completed session/task."""
+
+    run_id: str
+    session_id: str
+    task_id: str
+    agent_id: str
+    template_id: str
+    event_bus: EventBus
+    _state: LoopState | None = None
+
+    async def events(self) -> AsyncIterator[Event]:
+        from loomex_core.core.events.types import EventFilter
+        async for ev in self.event_bus.stream(EventFilter(run_id=self.run_id)):
+            yield ev
+
+    async def wait_for_finish(self, timeout: float = 300.0) -> LoopState | None:
+        """Block until RunFinished event or timeout."""
+        try:
+            async with asyncio.timeout(timeout):
+                from loomex_core.core.events.types import EventFilter
+                async for ev in self.event_bus.stream(EventFilter(run_id=self.run_id)):
+                    if ev.type == "RunFinished":
+                        return self._state
+        except TimeoutError:
+            pass
+        return self._state
+
+
+async def _task_has_dangling_tool_call(memory, scope, provider_ctx) -> bool:
+    """该 scope 最近一个 assistant turn 是否存在「有 tool_call、无 TOOL_RESULT」（spec/07 §6）。"""
+    from loomex_core.core.loop.steps.reconcile import _dangling_tool_calls
+    return bool(await _dangling_tool_calls(memory, scope, provider_ctx))
+
+
+
+# ── LoomeXRuntime ─────────────────────────────────────────────────────────────
+
+
+class LoomeXRuntime:
+    """Top-level runtime.
+
+    Supports two modes:
+    - run_single_task(): Phase 1 compat — simple single-task execution
+    - start_session(): Phase 4 orchestration; session_id=None creates, session_id=<id> resumes
+    """
+
+    def __init__(
+        self,
+        template_resolver: TemplateResolver,
+        providers: ProviderRegistry | None = None,
+        llm: LLMClient | None = None,
+        hitl_manager: HitlManager | None = None,
+        event_store: "Any | None" = None,
+        config: "RuntimeConfig | None" = None,
+    ) -> None:
+        from loomex_core.core.config import RuntimeConfig
+        self._config = config or RuntimeConfig()
+        self._llm = llm  # fallback for backward compat / tests
+        self._template_resolver = template_resolver
+        self.providers = providers or ProviderRegistry()
+        self._event_bus = InProcessEventBus()
+        # shell 侧持有此实例，用于 approve() / reject() 响应 HITL 请求
+        self.hitl_manager: HitlManager = hitl_manager or HitlManager(
+            timeout_sec=self._config.hitl_timeout_sec,
+            event_bus=self._event_bus,
+            max_resolved=self._config.hitl_max_resolved,
+        )
+        # 冷应答自触发 session resume —— 热/冷分流在 core 内闭环,host 只转发回复（spec/07 §6/§9）。
+        self.hitl_manager.set_cold_resolve_handler(self._resume_after_cold_hitl)
+        # 默认使用内存版 EventStore，自动订阅 EventBus；传入自定义实现时由调用方自行 wire
+        from loomex_core.core.state.event_store import InMemoryEventStore
+        self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)
+
+        # Auto-register 内置 providers（与用户注册的 providers 无关）
+        control_provider = ControlCapabilityProvider(hitl_manager=self.hitl_manager)
+        self.providers.register_capability(control_provider)
+
+        from loomex_core.core.orchestrator.skill_executor_capability import SkillExecutorCapabilityProvider
+        skill_executor = SkillExecutorCapabilityProvider(self.providers)
+        self.providers.register_capability(skill_executor)
+
+        from loomex_core.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
+        self.providers.register_capability(TemplateAgentCapabilityProvider(self._template_resolver))
+
+        # Capability cache (per-session, shared across all agents in runtime)
+        self._capability_cache = CapabilityCache()
+
+        # Active cancel tokens keyed by session_id
+        self._cancel_tokens: dict[str, CancelToken] = {}
+
+    @property
+    def event_bus(self) -> EventBus:
+        return self._event_bus
+
+    def _resolve_llm(
+        self,
+        llm_account: str | None = None,
+        llm_model: str | None = None,
+    ) -> LLMClient:
+        """Resolve LLMClient: registry first, then fallback to self._llm."""
+        if self.providers.has_llm_provider():
+            return self.providers.get_llm_provider().get_client(llm_account, llm_model)
+        if self._llm is not None:
+            return self._llm
+        raise RuntimeError(
+            "No LLM available. Register an LLMProvider via providers.register_llm_provider() "
+            "or pass llm= to LoomeXRuntime."
+        )
+
+    async def _resolve_subagent_template(self, qualified: str, ctx: ProviderContext) -> str:
+        """Map a qualified sub-agent name (agent__planner) back to its template_name.
+
+        Iterates every registered AgentCapabilityProvider (multi-provider, arbitrary
+        prefix). An unmatched/raw value passes through as a literal template_id.
+        """
+        for p in self.providers.get_capability_providers():
+            if isinstance(p, AgentCapabilityProvider):
+                try:
+                    caps = await p.list(ctx)
+                except Exception:
+                    continue
+                for cap in caps:
+                    if isinstance(cap, AgentCapability) and qualify(cap.id) == qualified:
+                        return cap.template_name
+        return qualified
+
+    def interrupt_session(self, session_id: str) -> bool:
+        """Signal cooperative cancellation for a running session.
+
+        Returns True if the token was found and signaled, False if the session
+        is already finished or was never registered (e.g. run_single_task).
+        """
+        token = self._cancel_tokens.get(session_id)
+        if token is None:
+            return False
+        token.cancel()
+        return True
+
+    # ── Phase 1 compat ───────────────────────────────────────────────────────
+
+    async def run_single_task(
+        self,
+        *,
+        session_id: str | None = None,
+        template_id: str,
+        user_prompt: str,
+        tenant_id: str = "default",
+        llm_account: str | None = None,
+        llm_model: str | None = None,
+    ) -> tuple[RunHandle, LoopState]:
+        """Phase 1 compat: run a single task end-to-end and await completion."""
+        import dataclasses as _dc
+
+        sid = session_id or generate_id("ses")
+        ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
+        llm = self._resolve_llm(llm_account, llm_model)
+        lm = LifecycleManager(template_resolver=self._template_resolver)
+
+        agent, template = await lm.instantiate_agent(
+            template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
+        )
+
+        session = Session(
+            id=sid,
+            user_prompt=user_prompt,
+            status="RUNNING",
+            tenant_id=tenant_id,
+            root_agent_id=agent.id,
+            llm_provider=llm_account or "",
+            created_at=now_utc(),
+        )
+        session.context_limit = llm.context_limit
+        agent = _dc.replace(agent, loop_guard=LoopGuard(context_limit=session.context_limit))
+        task = Task(
+            id=generate_id("tsk"),
+            session_id=sid,
+            status="ACTIVE",
+            tenant_id=tenant_id,
+            assigned_agent_id=agent.id,
+            creator_agent_id=agent.id,
+            title="User Request",
+            description=user_prompt[:200],
+            user_prompt=user_prompt,
+            created_at=now_utc(),
+        )
+
+        task_manager = TaskManager(
+            session_id=sid,
+            event_bus=self._event_bus,
+            max_concurrent=self._config.task_max_concurrent,
+            task_max_retries=self._config.task_max_retries,
+        )
+        task_manager.set_session(session)
+        task_manager.register_task(task)
+
+        for p in self.providers.get_capability_providers():
+            if isinstance(p, ControlCapabilityProvider):
+                p.register_session(sid, task_manager, session)
+                break
+        try:
+            state, handle = await self._execute_task(
+                session=session,
+                task=task,
+                agent=agent,
+                template=template,
+                run_id=generate_id("run"),
+                memory=self.providers.get_memory(),
+                llm_account=llm_account,
+                llm_model=llm_model,
+                task_manager=task_manager,
+            )
+        finally:
+            for p in self.providers.get_capability_providers():
+                if isinstance(p, SessionScopedCapabilityProvider):
+                    p.deregister_session(sid)
+        return handle, state
+
+    # ── Phase 4 full session ─────────────────────────────────────────────────
+
+    async def start_session(self, params: SessionStartParams) -> RunHandle:
+        """Create or resume a session and start execution.
+
+        params.resume is False → new session (session_id=None → runtime generates it;
+                                  session_id=<id> → new session with that host-provided ID).
+        params.resume is True  → resume existing session (root_agent_id recovered from events).
+        """
+        memory = self.providers.get_memory()
+        lm = LifecycleManager(template_resolver=self._template_resolver)
+        sm = SessionManager(
+            lifecycle_manager=lm,
+            event_bus=self._event_bus,
+            task_max_concurrent=self._config.task_max_concurrent,
+            task_max_retries=self._config.task_max_retries,
+            default_task_timeout_ms=self._config.default_task_timeout_ms,
+        )
+
+        if not params.resume:
+            session, root_task, task_manager = await sm.create_session(
+                template_id=params.template_id,
+                user_prompt=params.user_prompt,
+                tenant_id=params.tenant_id,
+                llm_model=params.llm_model,
+                llm_account=params.llm_account,
+                initial_task_settings=params.initial_task_settings,
+                session_id=params.session_id,
+                context_limit=params.context_limit,
+                token_budget=params.token_budget,
+            )
+        else:
+            session, root_task, task_manager = await sm.resume_session(
+                session_id=params.session_id,
+                event_store=self.event_store,
+                user_prompt=params.user_prompt,
+                tenant_id=params.tenant_id,
+                llm_model=params.llm_model,
+                llm_account=params.llm_account,
+                initial_task_settings=params.initial_task_settings,
+            )
+
+        cancel_token = CancelToken()
+        self._cancel_tokens[session.id] = cancel_token
+
+        run_id = generate_id("run")
+        handle = RunHandle(
+            run_id=run_id,
+            session_id=session.id,
+            task_id=root_task.id,
+            agent_id=session.root_agent_id or "",
+            template_id=params.template_id,
+            event_bus=self._event_bus,
+        )
+
+        template = await self._template_resolver.get(
+            params.template_id,
+            version=None,
+            ctx=ProviderContext(session_id=session.id, tenant_id=params.tenant_id),
+        )
+        task_manager.set_runner(self._make_task_runner(
+            session=session,
+            template=template,
+            template_id=params.template_id,
+            lm=lm,
+            memory=memory,
+            llm_account=params.llm_account,
+            llm_model=params.llm_model,
+            task_manager=task_manager,
+            cancel_token=cancel_token,
+            default_run_id=run_id,
+            handle=handle,
+        ))
+        task_manager.set_session(session)
+
+        self._register_and_drain(session, task_manager)
+        return handle
+
+    # ── Internal helpers ─────────────────────────────────────────────────────
+
+    def _register_and_drain(
+        self,
+        session: "Session",
+        task_manager: "TaskManager",
+    ) -> None:
+        """Wire up ControlCapabilityProvider, set done callback, launch drain."""
+        for p in self.providers.get_capability_providers():
+            if isinstance(p, ControlCapabilityProvider):
+                p.register_session(session.id, task_manager, session)
+                break
+
+        async def _on_done() -> None:
+            self._cancel_tokens.pop(session.id, None)
+            # 统一释放 per-session 内存状态：control 的 TaskManager 映射、fs 的 workspace 映射等
+            # （仅传 id，core 不需知道各 provider 各自持有什么）
+            for _p in self.providers.get_capability_providers():
+                if isinstance(_p, SessionScopedCapabilityProvider):
+                    _p.deregister_session(session.id)
+
+        task_manager.set_session_done_callback(_on_done)
+
+        asyncio.create_task(task_manager.drain())
+
+    def _make_task_runner(
+        self,
+        *,
+        session: Session,
+        template: "AgentTemplate",
+        template_id: str,
+        lm: LifecycleManager,
+        memory: MemoryProvider,
+        llm_account: str | None,
+        llm_model: str | None,
+        task_manager: TaskManager,
+        cancel_token: CancelToken,
+        default_run_id: str,
+        handle: "RunHandle | None" = None,
+        pre_resolved_agents: dict[str, "Agent"] | None = None,
+    ) -> TaskRunner:
+        """Return a task runner coroutine shared by start_session and resume_session."""
+        import dataclasses as _dc
+        tenant_id = session.tenant_id
+        root_agent_id = session.root_agent_id or ""
+
+        _resolved_agents: dict[str, Agent] = dict(pre_resolved_agents or {})
+
+        def _default_agent(sess_id: str, agent_id: str | None = None) -> Agent:
+            return Agent(
+                id=agent_id or generate_id("agt"),
+                session_id=sess_id,
+                template_id=template.id,
+                template_version=template.version,
+                status="RUNNING",
+                tenant_id=tenant_id,
+                loop_guard=LoopGuard(context_limit=session.context_limit),
+                memory_config=template.memory_config,
+                loop_config=template.loop_config,
+                created_at=now_utc(),
+            )
+
+        async def _reconcile_or(t: "Task", sess_id: str, agent: "Agent", base: str) -> str:
+            """base initial_step；若该 task 最近 assistant turn 有 dangling tool_call → reconcile。"""
+            from loomex_core.protocols.context import ProviderContext as _PCtx
+            from loomex_core.protocols.memory import MemoryScope as _Scope
+            scope = _Scope(session_id=sess_id, task_id=t.id, agent_id=agent.id)
+            pctx = _PCtx(session_id=sess_id, tenant_id=tenant_id, task_id=t.id, agent_id=agent.id)
+            if await _task_has_dangling_tool_call(memory, scope, pctx):
+                return "reconcile"
+            return base
+
+        async def _resolve(t: Task, sess_id: str) -> tuple[Agent, "AgentTemplate", str, str]:
+            """Resolve (agent, template, initial_step, run_id) for the given task."""
+            match t.settings:
+                case NormalTaskSettings(use_subagent=True) as s:
+                    ctx = ProviderContext(session_id=sess_id, tenant_id=tenant_id)
+                    sub_tmpl_id = (
+                        await self._resolve_subagent_template(s.subagent_template, ctx)
+                        if s.subagent_template else ""
+                    ) or template_id
+                    parent_agent = _resolved_agents.get(t.creator_agent_id) if t.creator_agent_id else None
+                    agent, tmpl = await lm.instantiate_agent(
+                        template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
+                        parent_agent=parent_agent, ctx=ctx,
+                        existing_agent_id=t.assigned_agent_id or None,
+                    )
+                    agent = _dc.replace(agent, loop_guard=LoopGuard(context_limit=session.context_limit))
+                    t.assigned_agent_id = agent.id
+                    await _flush_tracking_memory(agent, t, task_manager, memory, sess_id, tenant_id)
+                    if s.inherit_memory and t.parent_task_id and not t.user_prompt_in_memory:
+                        parent_t = task_manager.get_task(t.parent_task_id)
+                        if parent_t:
+                            await _copy_memory_for_inherit(
+                                parent_task=parent_t, child_task=t, sub_agent=agent,
+                                memory=memory, session_id=sess_id, tenant_id=tenant_id,
+                            )
+                    initial = await _reconcile_or(t, sess_id, agent, "prepare")
+                    return agent, tmpl, initial, generate_id("run")
+
+                case _:
+                    agent = _default_agent(sess_id, t.assigned_agent_id or root_agent_id)
+                    await _flush_tracking_memory(agent, t, task_manager, memory, sess_id, tenant_id)
+                    initial = await _reconcile_or(t, sess_id, agent, "prepare")
+                    return agent, template, initial, default_run_id
+
+        async def run_task(sess_id: str, task_id: str) -> None:
+            t = task_manager.get_task(task_id)
+            if t is None:
+                return
+            agent, tmpl, initial_step, run_id = await _resolve(t, sess_id)
+            _resolved_agents[agent.id] = agent
+            await task_manager._emit(EventType.TASK_STARTED, task_id=task_id, payload={"assigned_agent_id": t.assigned_agent_id or ""})
+            s, _ = await self._execute_task(
+                session=session,
+                task=t,
+                agent=agent,
+                template=tmpl,
+                run_id=run_id,
+                memory=memory,
+                llm_account=llm_account,
+                llm_model=llm_model,
+                initial_step=initial_step,
+                task_manager=task_manager,
+                cancel_token=cancel_token,
+            )
+            if handle is not None and s is not None:
+                handle._state = s
+
+        return run_task
+
+    # ── Crash recovery ───────────────────────────────────────────────────────
+
+    async def recover_session(
+        self, session_id: str, *, user_reply: "HitlRequest | None" = None,
+    ) -> None:
+        """Rebuild TaskManager from event store and resume execution.
+
+        Called by the host on /resume (INTERRUPTED session) and internally on a cold
+        HITL reply. Internally replays events (or loads snapshot + delta) to reconstruct
+        Session/Task state. Raises RuntimeError with a descriptive message on failure.
+
+        ``user_reply``: when a cold reply resolves an act plain-text pause (``wait_for_user``)
+        HITL, reconcile cannot cover it (no dangling tool_call in the task layer), so the
+        user's reply is injected here as a ``USER_PROMPT`` before drain — then the task
+        re-enters act with the reply in the conversation.
+        """
+        from loomex_core.core.control.reducers import rebuild_view
+        view = await rebuild_view(self.event_store, session_id)
+        sess_proj = view.sessions.get(session_id)
+        if sess_proj is None:
+            raise RuntimeError(f"Session {session_id!r} not found in event store")
+
+        template_id = sess_proj.template_id
+        if not template_id:
+            raise RuntimeError(f"Session {session_id!r} has no template_id — cannot recover")
+
+        from loomex_core.core.control.converters import session_from_projection, task_from_projection
+        session = session_from_projection(sess_proj)
+        all_tasks = [task_from_projection(tp) for tp in view.tasks.values()]
+
+        # 重建内存 HitlManager（_futures 空 → 后续应答自动走冷 resume；spec/07 §9）
+        if view.pending_hitl:
+            self.hitl_manager.rebuild_pending(view.pending_hitl)
+        # 有未解决 pending HITL 的 task：restore 时保持 parked、不重排（spec/07 §9.1）
+        parked_task_ids = {h.task_id for h in view.pending_hitl.values() if h.task_id}
+
+        _TERMINAL = {"FINISHED", "FAILED", "CANCELED"}
+        terminal_ids = {t.id for t in all_tasks if t.status in _TERMINAL}
+        resumable = [t for t in all_tasks if t.status not in _TERMINAL]
+
+        if not resumable:
+            raise RuntimeError(f"Session {session_id!r} has no resumable tasks")
+
+        lm = LifecycleManager(template_resolver=self._template_resolver)
+        template = await self._template_resolver.get(
+            template_id, version=None,
+            ctx=ProviderContext(session_id=session.id, tenant_id=session.tenant_id),
+        )
+        cancel_token = CancelToken()
+        self._cancel_tokens[session.id] = cancel_token
+
+        task_manager = TaskManager(
+            session_id=session.id,
+            event_bus=self._event_bus,
+            max_concurrent=self._config.task_max_concurrent,
+            task_max_retries=self._config.task_max_retries,
+        )
+        task_manager.set_session(session)
+        task_manager.restore(all_tasks, terminal_ids, parked_task_ids=parked_task_ids)
+
+        pre_resolved = {
+            av.id: Agent(
+                id=av.id,
+                session_id=session.id,
+                template_id=template_id,
+                template_version=template.version,
+                status="IDLE",
+                tenant_id=session.tenant_id,
+                spawn_depth=av.spawn_depth,
+                parent_agent_id=av.parent_agent_id,
+            )
+            for av in view.agents.values()
+        }
+
+        task_manager.set_runner(self._make_task_runner(
+            session=session,
+            template=template,
+            template_id=template_id,
+            lm=lm,
+            memory=self.providers.get_memory(),
+            llm_account=session.llm_provider,
+            llm_model=session.llm_model,
+            task_manager=task_manager,
+            cancel_token=cancel_token,
+            default_run_id=generate_id("run"),
+            pre_resolved_agents=pre_resolved,
+        ))
+        # act 纯文本暂停（wait_for_user）冷应答：把用户回复注入 task 层并重排（reconcile 覆盖不到,见上）。
+        if user_reply is not None:
+            await self._inject_user_reply(user_reply, session, task_manager)
+
+        self._register_and_drain(session, task_manager)
+
+    async def _resume_after_cold_hitl(self, req: "HitlRequest") -> None:
+        """冷 HITL 应答后恢复 session（HitlManager.on_cold_resolve 回调）。
+
+        act 的纯文本暂停（``wait_for_user``）须把回复注入 task 层（reconcile 覆盖不到——它不在
+        task 层留 dangling tool_call）；act 的 ``ask_user`` / approval 走 reconcile,不在此注入。
+        """
+        is_inject = req.kind == "input" and req.capability_id.endswith(":wait_for_user")
+        await self.recover_session(req.session_id, user_reply=req if is_inject else None)
+
+    async def _inject_user_reply(
+        self, req: "HitlRequest", session: Session, task_manager: TaskManager,
+    ) -> None:
+        """把 act 纯文本暂停（wait_for_user）的用户回复作为 USER_PROMPT 注入 task 层 + 重排。"""
+        from loomex_core.protocols import MemoryEvent, MemoryEventType
+
+        target = task_manager.get_task(req.task_id)
+        if target is None:
+            logger.warning("wait_for_user cold resume: task %s not found for HITL %s", req.task_id, req.id)
+            return
+        if req.status == "rejected":
+            content = f"Human declined: {req.message}" if req.message else "Human rejected the request."
+        else:
+            content = req.message or "(no response)"
+
+        scope = MemoryScope(session_id=session.id, task_id=target.id, agent_id=req.agent_id or "")
+        pctx = ProviderContext(
+            session_id=session.id, tenant_id=session.tenant_id,
+            task_id=target.id, agent_id=req.agent_id or "",
+        )
+        await self.providers.get_memory().ingest(
+            MemoryEvent(
+                type=MemoryEventType.USER_PROMPT,
+                scope=scope,
+                content=content,
+                timestamp=now_utc(),
+                role="user",
+                metadata={"task_id": target.id, "source": "hitl_reply"},
+            ),
+            pctx,
+        )
+        # 清旧进展、置 PENDING（restore 已重排,这里保证状态正确）。
+        target.outputs = None
+        target.process_report = None
+        if target.status not in ("FINISHED", "FAILED", "CANCELED"):
+            target.status = "PENDING"
+
+    async def recover(self) -> int:
+        """Recover every still-active session (SessionCreated, no SessionFinished) after a restart.
+
+        Decision is made **in core, from events** (no host projection, no full replay):
+        a session with an unresolved pending HITL was waiting for a human answer → **only the
+        in-memory HitlManager is rebuilt** (so ``/hitl/pending`` and the reply endpoints work);
+        status stays PAUSED_HITL and **nothing runs** — the task rebuild + drain defers to the
+        reply's ``recover_session``. Otherwise it was actively running at crash → **emit
+        ``SessionStatusChanged(INTERRUPTED)``**.
+
+        So at startup **nothing drains/runs**: PAUSED waits for a reply, INTERRUPTED waits for
+        ``/resume``. No host callback — the interrupt is just an event handled by the host's
+        existing subscribers (projection + SSE). Call in the app lifespan after providers are
+        registered, before serving. Returns the count handled.
+        """
+        try:
+            session_ids = await self.event_store.list_active_session_ids()
+        except NotImplementedError:
+            logger.warning("Recovery: EventStore does not support list_active_session_ids — skipped")
+            return 0
+
+        for session_id in session_ids:
+            try:
+                if await self.rebuild_hitl(session_id):
+                    logger.info("Recovery: rebuilt HITL for paused session %s (drain deferred to reply)", session_id)
+                else:
+                    await self._emit_session_interrupted(session_id)
+                    logger.info("Recovery: session %s → INTERRUPTED (event emitted)", session_id)
+            except Exception:
+                logger.exception("Recovery: failed to recover session %s", session_id)
+
+        return len(session_ids)
+
+    async def rebuild_hitl(self, session_id: str) -> int:
+        """从事件重建该 session 的内存 pending HITL（仅折叠 HITL 类事件,不 drain）,返回 pending 条数。
+
+        幂等,可重复调用。启动 `recover` 用它重建 PAUSED 会话;应答入口也可在内存为空时按需自愈
+        （重启后内存 HitlManager 还没被 recover 填上时,据事件即时重建,避免应答 404；spec/07 §9）。
+        """
+        pending = await self._pending_hitl(session_id)
+        if pending:
+            self.hitl_manager.rebuild_pending(pending)
+        return len(pending)
+
+    async def rebuild_all_pending_hitl(self) -> int:
+        """据事件重建**所有 active session** 的内存 pending HITL（不发中断、不 drain）,返回总条数。
+
+        供只带 approval_id 的应答入口（`/hitl/{id}/*`）自愈:重启后内存 HitlManager 为空、又无 session_id
+        可定位时,重建全部 active pending 后即可按 id 命中。仅在 miss 时调用,成本有界（spec/07 §9）。
+        """
+        try:
+            session_ids = await self.event_store.list_active_session_ids()
+        except NotImplementedError:
+            return 0
+        total = 0
+        for sid in session_ids:
+            try:
+                total += await self.rebuild_hitl(sid)
+            except Exception:
+                logger.exception("rebuild_all_pending_hitl: failed for session %s", sid)
+        return total
+
+    async def _emit_session_interrupted(self, session_id: str) -> None:
+        """发 SessionStatusChanged(INTERRUPTED) —— host 读模型(投影/SSE)按事件自行反映,不走回调。"""
+        await self._event_bus.emit(Event(
+            id=generate_id("evt"),
+            run_id=None,
+            sequence=0,
+            session_id=session_id,
+            type=EventType.SESSION_STATUS_CHANGED,
+            timestamp=now_utc(),
+            payload={"new_status": "INTERRUPTED"},
+        ))
+
+    async def _pending_hitl(self, session_id: str) -> dict:
+        """该 session 仍未解决的 pending HITL（{id: HitlRequestView}）—— 仅折叠 HITL 类事件,不全量回放。"""
+        from loomex_core.core.control.reducers import HITL_STATUS_EVENT_TYPES, fold_pending_hitl
+        try:
+            events = await self.event_store.read_session_events_of_types(session_id, HITL_STATUS_EVENT_TYPES)
+        except NotImplementedError:
+            # 退化（极简 EventStore 未实现轻查询）：全量读后内存过滤,仍正确、只是不省。
+            events = [e for e in await self.event_store.read_by_session(session_id)
+                      if e.type in HITL_STATUS_EVENT_TYPES]
+        return fold_pending_hitl(events)
+
+    # ── Internal execution ───────────────────────────────────────────────────
+
+    def _build_provider_ctx(self, session: Session, task: Task, agent: Agent) -> ProviderContext:
+        return ProviderContext(
+            session_id=session.id,
+            tenant_id=session.tenant_id,
+            task_id=task.id,
+            agent_id=agent.id,
+            timestamp=now_utc(),
+            skill_name=task.settings.skill_name if isinstance(task.settings, NormalTaskSettings) else "",
+        )
+
+    def _skill_provider_index(self) -> dict:
+        # provider_name → SkillCapabilityProvider，供 PrepareStep 加载 Level2 capabilities
+        return {
+            p.name: p
+            for p in self.providers.get_capability_providers()
+            if isinstance(p, SkillCapabilityProvider)
+        }
+
+    def _build_assembler(
+        self,
+        memory: MemoryProvider,
+        provider_ctx: ProviderContext,
+        skill_index: dict,
+    ) -> ContextAssembler:
+        deps = AssemblerDeps(
+            memory=memory,
+            knowledge_providers=self.providers.get_knowledge_providers(),
+            provider_ctx=provider_ctx,
+            skill_provider_index=skill_index,
+            capability_provider_index={
+                p.name: p for p in self.providers.get_capability_providers()
+            },
+        )
+        return ContextAssembler(
+            sources=[
+                IdentitySource(),
+                CapabilitySource(),
+                RecentMemorySource(),
+                AgentExperienceSource(),
+                BlackboardSource(),
+                SemanticRecallSource(),
+                KnowledgeRetrievalSource(),
+            ],
+            budget=PriorityBudgetStrategy(),
+            composer=DefaultComposer(),
+            deps=deps,
+        )
+
+    def _build_gateway(self, memory: MemoryProvider) -> CapabilityGateway:
+        return CapabilityGateway(
+            capability_cache=self._capability_cache,
+            capability_providers=self.providers.get_capability_providers(),
+            memory=memory,
+            event_bus=self._event_bus,
+            provider_authorizers=self.providers.get_capability_authorizers(),
+        )
+
+    def _build_loop_ctx(
+        self,
+        assembler: ContextAssembler,
+        llm: LLMClient,
+        memory: MemoryProvider,
+        provider_ctx: ProviderContext,
+        gateway: CapabilityGateway,
+        skill_index: dict,
+        cancel_token: CancelToken | None,
+        task_manager: "TaskManager | None",
+    ) -> LoopContext:
+        return LoopContext(
+            assembler=assembler,
+            llm=llm,
+            memory=memory,
+            event_bus=self._event_bus,
+            provider_ctx=provider_ctx,
+            capability_cache=self._capability_cache,
+            capability_providers=self.providers.get_capability_providers(),
+            capability_gateway=gateway,
+            template_resolver=self._template_resolver,
+            skill_provider_index=skill_index,
+            cancel_token=cancel_token,
+            task_manager=task_manager,
+            hitl_manager=self.hitl_manager,
+        )
+
+    @staticmethod
+    def _build_step_driver(initial_step: str) -> StepDriver:
+        return StepDriver(
+            steps={
+                "prepare": PrepareStep(),
+                "act": ActStep(),
+                "observe": ObserveStep(),
+                "finalize": FinalizeStep(),
+                "suspend": SuspendStep(),
+                "compact": CompactStep(),
+                "recognize_intent": RecognizeIntentStep(),
+                "reconcile": ReconcileStep(),
+            },
+            initial_step=initial_step,
+        )
+
+    async def _run_loop(
+        self,
+        state: LoopState,
+        loop_ctx: LoopContext,
+        driver: StepDriver,
+        run_id: str,
+        initial_step: str,
+        task: Task,
+        agent: Agent,
+    ) -> LoopState:
+        """Execute the step driver loop; emit lifecycle events; return final state.
+
+        Raises on non-retriable errors (after emitting RunFinished).
+        """
+        await self._event_bus.emit(make_event(state, EventType.RUN_STARTED, payload={
+            "run_id": run_id,
+            "initial_step": initial_step,
+        }))
+
+        run_error: BaseException | None = None
+        was_cancelled = False
+        try:
+            async for outcome in driver.run(state, loop_ctx):
+                if outcome.state_patch:
+                    state = state.apply_patch(outcome.state_patch)
+        except HitlPark:
+            # 热→冷降级 / 显式挂起：干净挂起，不算失败。run_error 保持 None →
+            # finally 发 RUN_FINISHED(SUSPENDED, will_retry=False)，与委派挂起同形；
+            # _run_task 据 task.status==SUSPENDED 走挂起分支（不 requeue）。
+            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
+                task.status = "SUSPENDED"
+            logger.info("_run_loop: task %s parked on HITL", task.id)
+        except asyncio.CancelledError:
+            was_cancelled = True
+            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
+                task.status = "CANCELED"
+        except Exception as exc:
+            run_error = exc
+            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
+                task.status = "FAILED"
+                task.error = str(exc)
+            if getattr(exc, "retriable", False):
+                logger.warning("_run_loop: task %s failed (retriable): %s", task.id, exc)
+            else:
+                logger.exception("_run_loop: run failed for task %s", task.id)
+        finally:
+            self._capability_cache.evict(agent.id)
+            if was_cancelled:
+                await self._event_bus.emit(make_event(state, EventType.RUN_CANCELED, payload={"run_id": run_id}))
+                await self._event_bus.emit(make_event(state, EventType.TASK_CANCELED, payload={}))
+            # will_retry=True suppresses SSE close on the host side.
+            # cancelled → False; retriable=False → TaskManager won't retry anyway.
+            will_retry = (
+                run_error is not None
+                and task.retry_count < task.max_retries
+                and getattr(run_error, "retriable", True)
+            )
+            await self._event_bus.emit(make_event(state, EventType.RUN_FINISHED, payload={
+                "final_status": task.status,
+                "will_retry": will_retry,
+                "total_events": state.sequence_counter,
+                "total_turns": len(state.transcript),
+                "error": str(run_error) if run_error else None,
+                "error_type": type(run_error).__name__ if run_error else None,
+            }))
+
+        if run_error is not None:
+            raise run_error
+
+        return state
+
+    async def _execute_task(
+        self,
+        session: Session,
+        task: Task,
+        agent: Agent,
+        template: AgentTemplate,
+        run_id: str,
+        memory: MemoryProvider,
+        llm_account: str | None = None,
+        llm_model: str | None = None,
+        cancel_token: CancelToken | None = None,
+        initial_step: str = "prepare",
+        task_manager: "TaskManager | None" = None,
+        scope_agent_id: str | None = None,
+    ) -> tuple[LoopState, RunHandle]:
+        provider_ctx = self._build_provider_ctx(session, task, agent)
+        skill_index = self._skill_provider_index()
+        assembler = self._build_assembler(memory, provider_ctx, skill_index)
+        gateway = self._build_gateway(memory)
+        llm = self._resolve_llm(llm_account, llm_model)
+        loop_ctx = self._build_loop_ctx(assembler, llm, memory, provider_ctx, gateway, skill_index, cancel_token, task_manager)
+
+        scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=scope_agent_id or agent.id)
+        state = LoopState(
+            run_id=run_id,
+            session=session,
+            task=task,
+            agent=agent,
+            scope=scope,
+            extra={"template": template},
+        )
+        driver = self._build_step_driver(initial_step)
+        state = await self._run_loop(state, loop_ctx, driver, run_id, initial_step, task, agent)
+        handle = RunHandle(
+            run_id=run_id,
+            session_id=session.id,
+            task_id=task.id,
+            agent_id=agent.id,
+            template_id=template.id,
+            event_bus=self._event_bus,
+            _state=state,
+        )
+        return state, handle

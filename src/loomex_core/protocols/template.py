@@ -1,0 +1,141 @@
+"""AgentTemplate / IdentityFacet / TemplateResolver。
+
+Identity 是 AgentTemplate 的内禀字段（一等公民），不嵌套在 Capability 里。
+Capability 通过 capability_refs 引用外部能力。
+
+详见设计文档 §4.6。
+"""
+
+from __future__ import annotations
+
+from abc import abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, Protocol, runtime_checkable, Literal
+
+from loomex_core.protocols.capability import Purpose
+from loomex_core.protocols.context import ProviderContext
+
+CapabilityMode = Literal["optional", "required", "forbidden"]
+
+
+# ── Identity ──────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class IdentityFacet:
+    """Agent 在某个 purpose 下的身份呈现。
+
+    例：
+      facets["act"] → Actor 阶段的 SOUL（人格、价值观、行为风格）
+      facets["observe"] → Observer 阶段的 ROLE（职责定义、评估准则）
+    """
+
+    text: str  # 该 purpose 下的身份文本（SOUL 或 ROLE 内容）
+    style: str | None = None  # 该 purpose 的输出风格偏好（可选）
+
+
+# ── Capability Reference ──────────────────────────────────────────────────────
+
+
+@dataclass
+class CapabilityRef:
+    """Template 中对外部 capability 的声明引用。"""
+
+    capability_id: str  # 匹配某 provider 返回的 Capability.id
+    mode: CapabilityMode = "optional"
+    # optional  → 由 retrieve(ctx) 决定是否出现
+    # required  → 强制加载，走 list() 精确查找
+    # forbidden → 强制排除，即使 retrieve() 返回也过滤掉
+    # 注：purposes 不在 ref 中——以 Capability 自身声明为准（v0.3 决议）
+
+
+# ── Config 子结构 ──────────────────────────────────────────────────────────────
+
+
+@dataclass
+class MemoryConfig:
+    """Memory 配置（从 template 拷贝到 Agent 实例化时快照）。"""
+
+    short_window_size: int = 20
+    summary_threshold: int = 20
+    use_long_term: bool = True
+    subscribed_blackboard_topics: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LoopConfig:
+    """Loop 配置（从 template 拷贝到 Agent 实例化时快照）。
+
+    完整字段见设计文档 §6.8.2（含 compact 阈值等）。
+    """
+
+    max_turns_per_act: int = 10
+    max_turns_per_observe: int = 5       # ObserveStep ReAct 循环上限
+    max_turns_per_agent: int = 20
+    timeout_per_step_sec: int = 120
+    failure_threshold: int = 3
+    max_spawn_depth: int = 4
+    compact_token_ratio: float = 0.8
+    compact_message_delta: int = 20
+    compact_keep_last: int = 6
+
+
+# ── AgentTemplate ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class AgentTemplate:
+    """Agent 实例化的蓝图。由 host 在 template registration 阶段构建并管理。
+    core 通过 TemplateResolver 协议读取。
+    """
+
+    id: str
+    name: str
+    version: str  # semver；既是 template 版本也是 identity 版本
+
+    # 身份定义（inline，一等字段）
+    identity: dict[Purpose, IdentityFacet]
+    # 外部能力引用：tool / skill / sub-agent
+    capability_refs: list[CapabilityRef]
+
+    # 子配置
+    memory_config: MemoryConfig
+    loop_config: LoopConfig
+    description: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentTemplateSummary:
+    """用于发现/列表场景（如 sub-agent 选择）。"""
+
+    id: str
+    name: str
+    version: str
+    description: str
+
+
+# ── TemplateResolver ──────────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class TemplateResolver(Protocol):
+    """core 与 host 之间关于 template 的唯一接口。host 实现。"""
+
+    @abstractmethod
+    async def get(
+        self,
+        template_id: str,
+        version: str | None,
+        ctx: ProviderContext,
+    ) -> AgentTemplate:
+        """获取 template 定义。version=None 取最新；指定 version 用于实例化时 pin。"""
+        ...
+
+    @abstractmethod
+    async def list_summaries(
+        self,
+        ctx: ProviderContext,
+    ) -> list[AgentTemplateSummary]:
+        """列出可用 template 摘要——用于 sub-agent 发现、admin 界面等。"""
+        ...
