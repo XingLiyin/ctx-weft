@@ -4,9 +4,9 @@ from __future__ import annotations
 
 
 class CtxWeftError(Exception):
-    """所有 CtxWeft 异常的基类。"""
+    """所有 ctx-weft 异常的基类。"""
 
-    code: str = "IPMC_ERROR"
+    code: str = "CTX_WEFT_ERROR"
 
     def __init__(self, message: str = "", *, code: str | None = None) -> None:
         super().__init__(message)
