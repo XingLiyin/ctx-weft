@@ -185,7 +185,7 @@ class LLMProvider:
         model=None   → account's default_model.
         """
         if not self._accounts:
-            raise RuntimeError("No LLM accounts registered. Register an account before resolving a client.")
+            raise RuntimeError("No LLM accounts registered. Register one via LLMProvider.register_account() (or have the host register it) before resolving a client.")
 
         name = account or next(iter(self._accounts))
         acc = self.get_account(name)
@@ -195,7 +195,7 @@ class LLMProvider:
         if not resolved_model:
             raise ValueError(
                 f"No model specified and account '{name}' has no default model. "
-                "Add a model via POST /llms/{name}/models or set default via PUT /llms/{name}/default_model."
+                "Add one via LLMProvider.add_model() or set a default via LLMProvider.set_default_model()."
             )
 
         model_cfg = next((m for m in acc.models if m.name == resolved_model), None)

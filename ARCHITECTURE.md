@@ -26,7 +26,7 @@
 
 ```
                          ┌──────────────────────────────────────┐
-                         │            CtxWeftRuntime               │
+                         │           CtxWeftRuntime              │
                          │                                        │
  TemplateResolver ──────▶│  LifecycleManager   instantiate_agent  │
                          │  SessionManager     create/resume      │
@@ -348,7 +348,7 @@ core 在以下时机自动 `ingest`（provider 自由决定是否持久化/索�
 
 ## Blackboard / Topic 机制
 
-> 核心认知：**CtxWeft 没有独立的 blackboard 存储**。blackboard / 短期记忆 / 长期记忆是
+> 核心认知：**ctx-weft 没有独立的 blackboard 存储**。blackboard / 短期记忆 / 长期记忆是
 > 同一个 `MemoryProvider` 的不同用法。所谓 blackboard，就是「带 `topic` 标签的 memory 事件 + 订阅」。
 
 ### 数据模型

@@ -1,8 +1,7 @@
 """RuntimeConfig — core 运行期可调旋钮，由 host 在实例化时注入。
 
 默认值 = 历史行为，使直连 core / 测试零改动。host 始终注入实际值。
-core 不自读 os.environ 配置（env 文件读取全在 host；LLM 账号自举见
-host 的 LLMProvider.bootstrap_from_env）。
+core 不再自读 os.environ；LLM 凭证/模型的 env 自举（bootstrap_from_env）由 host 子类实现。
 """
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 
 **Protocol-based Agent Runtime Core** — 用于构建可控、可观测 AI Agent 应用的 Python SDK。
 
-ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力系统、LLM、模板）通过协议接入，驱动 LLM 完成任务。它不包含任何数据库代码、HTTP 服务或具体 LLM 实现——这些由上层应用（如 ipmastercowork）提供。
+ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力系统、LLM、模板）通过协议接入，驱动 LLM 完成任务。它不包含任何数据库代码、HTTP 服务或具体 LLM 实现——这些由上层应用（host）提供。
 
 > 本文是**使用参考**。想了解循环引擎、任务编排、崩溃恢复等**内部实现逻辑**，见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
@@ -19,7 +19,7 @@ ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力�
   - [KnowledgeProvider](#knowledgeprovider)
 - [AgentTemplate 与 TemplateResolver](#agenttemplate-与-templateresolver)
 - [LLM 接入](#llm-接入)
-- [CtxWeftRuntime API](#ctx_weftruntime-api)
+- [CtxWeftRuntime API](#ctxweftruntime-api)
 - [事件系统](#事件系统)
 - [内置 Provider](#内置-provider)
 - [控制面](#控制面)
@@ -287,7 +287,7 @@ providers.register_knowledge(WikiProvider(), priority=10)
 
 ### AgentTemplate
 
-Agent 实例化的蓝图，由上层（ipmastercowork 或用户代码）构建：
+Agent 实例化的蓝图，由上层（host 应用或用户代码）构建：
 
 ```python
 from ctx_weft.protocols import (
@@ -357,7 +357,7 @@ class MyTemplateResolver(TemplateResolver):
         ]
 ```
 
-> ipmastercowork 提供了开箱即用的模板解析器（支持从 Markdown 文件解析 SOUL/ROLE）。
+> 上层 host 应用通常提供开箱即用的模板解析器（支持从 Markdown 文件解析 SOUL/ROLE）。
 
 ---
 
@@ -422,15 +422,14 @@ provider.register_account(LLMAccount(
     default_model="claude-sonnet-4-6", timeout_sec=120,
 ))
 provider.load_from_store()             # 从持久化恢复
-provider.bootstrap_from_env()          # 从 IPMC_LLM_* 环境变量自举一个默认账号
 runtime.providers.register_llm_provider(provider)
 ```
 
 账号/模型管理：`register_account` / `delete_account` / `get_account` / `list_accounts` /
 `is_registered` / `add_model` / `remove_model` / `set_default_model` / `get_client(account, model)`。
 
-`bootstrap_from_env` 读取（前缀 `IPMC_LLM_`）：
-`ACCOUNT` `STYLE` `API_KEY` `BASE_URL` `MODEL` `CONTEXT_LIMIT` `MAX_OUTPUT_TOKENS` `TIMEOUT_SEC`。
+> SDK core 不读环境变量。从环境变量自举一个默认账号（`bootstrap_from_env`）由上层应用
+> 在子类中实现（host 的 `LLMProvider` 子类读自己约定前缀的环境变量）。
 
 > 内置 `AnthropicAdapter` / `OpenAIAdapter` 由 `LLMProvider` 按 `style` 自动构造。
 > `run_single_task` / `SessionStartParams` 里的 `llm_account` / `llm_model` 会透传给 `get_client()`。
