@@ -233,7 +233,7 @@ class CapabilityGateway:
 
         # 工具输出过长 → 委托 fs provider 落盘到 workspace，content 改为「截断提示 + 路径 + 预览」。
         # 在 human note / 审计事件 / memory ingest 之前执行，使所有下游拿到的都是截断版本。
-        content = await self._maybe_spill(content, ctx, invocation_id, tool_name)
+        content = await self._maybe_spill(content, ctx, invocation_id, tool_name, cap.spillable)
 
         # 放行时若人类附了备注，并入结果一并回灌给 LLM
         if decision.message:
@@ -295,13 +295,17 @@ class CapabilityGateway:
         ctx: "LoopContext",
         invocation_id: str,
         tool_name: str,
+        spillable: bool = True,
     ) -> str:
         """工具输出超阈值时委托 SpillSink 落盘，返回「截断提示 + 路径 + 头部预览」。
 
+        spillable=False の工具（如 read_file）直接原样返回，不做任何截断或落盘。
         阈值 <=0 或未超出时原样返回。落盘走 SpillSink.spill()——core 不直接碰文件系统。
         无 SpillSink / 该 session 无可落盘位置（spill 抛错）/ 落盘异常时，回退到硬截断
         （保留预览，不丢上下文窗口，但全文不可恢复）。
         """
+        if not spillable:
+            return content
         if self._spill_threshold <= 0 or len(content) <= self._spill_threshold:
             return content
 

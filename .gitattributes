@@ -1,0 +1,6 @@
+# 统一源码文本行尾为 LF：与本地 ctx-weft 对齐，消除 CRLF 噪声、保证跨仓 diff/patch 干净。
+# autocrlf=true 在本仓为真，这里用 eol=lf 覆盖它，避免 worktree 再被转成 CRLF。
+*.py   text eol=lf
+*.sh   text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf

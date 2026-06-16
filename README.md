@@ -659,7 +659,9 @@ providers.register_capability(BuiltinToolsCapabilityProvider(
 | `builtin:http_request` | act | HTTP 请求（仅 http/https；内网地址 SSRF 拦截；剥离敏感 header） |
 | `builtin:read_file` | act, compact | 读文件（≤500KB） |
 | `builtin:write_file` | act | 写文件（自动建父目录） |
-| `builtin:glob` | act, compact | 列出匹配文件 |
+| `builtin:edit_file` | act | 原地替换（old_string→new_string；要求唯一匹配或 replace_all） |
+| `builtin:glob` | act, compact | 列出匹配文件（按文件名） |
+| `builtin:grep` | act, compact | 按内容正则搜索（ripgrep 优先，回退纯 Python；files/content 两种输出模式） |
 
 ### MCPCapabilityProvider
 

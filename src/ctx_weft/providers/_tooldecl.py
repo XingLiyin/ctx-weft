@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 
 from ctx_weft.core.utils import extract_schema
@@ -29,22 +30,24 @@ def make_tool_registry(provider_name: str):
         *,
         purposes: list[Purpose],
         side_effects: bool = False,
+        spillable: bool = True,
         description: str | None = None,
     ):
         """声明并注册工具：提取 schema，存函数体为实现。
 
-        description 缺省取 docstring 首行；传入则覆盖（用于运行时动态生成的描述）。
+        description 缺省取完整 docstring（inspect.cleandoc 去缩进）；传入则覆盖（用于运行时动态生成的描述）。
         """
         def decorator(fn: Callable) -> Callable:
-            first_line = (fn.__doc__ or "").strip().split("\n")[0].strip()
+            doc = inspect.cleandoc(fn.__doc__ or "")
             cap = ToolCapability(
                 id=f"{provider_name}:{fn.__name__}",
                 name=fn.__name__,
                 kind="tool",
                 purposes=list(purposes),
-                description=description or first_line,
+                description=description or doc,
                 input_schema=extract_schema(fn),  # ctx 已在 _SCHEMA_SKIP_DEFAULT 中
                 side_effects=side_effects,
+                spillable=spillable,
             )
             tools[fn.__name__] = cap
             impls[fn.__name__] = fn

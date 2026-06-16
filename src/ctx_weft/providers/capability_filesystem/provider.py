@@ -1,8 +1,8 @@
 """FilesystemToolsProvider：文件系统操作工具集 + per-session workspace 管理。
 
-工具（bash_exec / read_file / write_file / glob）都在 session 的工作目录下运作：
+工具（bash_exec / read_file / write_file / edit_file / glob / grep）都在 session 的工作目录下运作：
   - bash_exec 以 workspace 为 cwd；
-  - read_file / write_file / glob 把相对路径锚定到 workspace。
+  - read_file / write_file / edit_file / glob / grep 把相对路径锚定到 workspace。
 
 workspace 是本 provider 的内部概念，core 不知道它的存在：host 在 session 启动前调用
 register_session(session_id, 绝对路径) 登记，本 provider 维护 session_id → workspace 映射。
@@ -39,6 +39,12 @@ from ctx_weft.protocols.filesystem import FS_PROVIDER_NAME, SpillSink
 from ctx_weft.providers._encoding import decode_console
 from ctx_weft.providers._script_runner import run_with_liveness
 from ctx_weft.providers._tooldecl import make_tool_registry
+from ctx_weft.providers.capability_filesystem._file_reader import (
+    ReadConfig,
+    read_byte_window,
+    read_lines,
+)
+from ctx_weft.providers.capability_filesystem._grep import GrepConfig, run_grep
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +62,12 @@ _BASH_BLACKLIST = frozenset([
 _BASH_IDLE_TIMEOUT_SEC_DEFAULT = 30
 _BASH_HARD_CAP_SEC_DEFAULT = 120
 _BASH_MAX_OUTPUT_BYTES_DEFAULT = 50_000
-_FILE_MAX_READ_BYTES_DEFAULT = 500_000
+_FILE_READ_DEFAULT_LINES = 2000
+_FILE_READ_MAX_BYTES = 262_144
+_FILE_READ_MAX_LINE_BYTES = 4096
+_FILE_READ_COUNT_MAX_BYTES = 5_242_880
 _GLOB_MAX_RESULTS_DEFAULT = 500
+_GREP_MAX_RESULTS_DEFAULT = 1000
 
 
 def _bash_exec_description() -> str:
@@ -130,6 +140,16 @@ def _resolve(path: str, ctx: ProviderContext | None) -> Path:
 
 
 # ── 工具实现 ──────────────────────────────────────────────────────────────────
+
+
+def _read_config(ctx: ProviderContext | None) -> ReadConfig:
+    e = ctx.extra if ctx else {}
+    return ReadConfig(
+        default_lines=e.get("file_read_default_lines") or _FILE_READ_DEFAULT_LINES,
+        max_bytes=e.get("file_read_max_bytes") or _FILE_READ_MAX_BYTES,
+        max_line_bytes=e.get("file_read_max_line_bytes") or _FILE_READ_MAX_LINE_BYTES,
+        count_max_bytes=e.get("file_read_count_max_bytes") or _FILE_READ_COUNT_MAX_BYTES,
+    )
 
 
 @tool(purposes=["act"], side_effects=True, description=_bash_exec_description())
@@ -217,46 +237,83 @@ async def bash_exec(
             runner.cancel()
 
 
-@tool(purposes=["act", "compact"], side_effects=False)
+@tool(purposes=["act", "compact"], side_effects=False, spillable=False)
 async def read_file(
     path: Annotated[str, "File path; relative paths are resolved against the workspace"],
+    offset: Annotated[int | None, "1-based start line (line mode; default 1)"] = None,
+    limit: Annotated[int | None, "Number of lines to read (line mode; default 2000)"] = None,
     *,
+    byte_offset: Annotated[int | None, "Raw byte offset to start at (byte mode; escape hatch for oversized single lines)"] = None,
+    byte_limit: Annotated[int | None, "Max bytes to read in byte mode (clamped to the per-call budget)"] = None,
     ctx: ProviderContext | None = None,
 ) -> AsyncIterator[CapabilityEvent]:
-    """Read the contents of a file and return as text."""
+    """Read a text file, with line numbers, one page at a time.
+
+    Line mode (default): reads from line `offset` (1-based) up to `limit` lines.
+    Large files are paginated — when the result ends with a "Continue:" hint,
+    call read_file again with the suggested `offset` to read the next page.
+    Use `offset`/`limit` to jump to or narrow a range. Do NOT try to read a
+    whole large file at once; follow the pagination hints instead.
+
+    Byte mode: pass `byte_offset` (and optionally `byte_limit`) to read raw bytes
+    starting at a byte position, without line numbers. Use this only as an escape
+    hatch when line mode reports a line was truncated — read that line's remaining
+    bytes by paging `byte_offset` up to the reported `byte_end`, then resume line
+    mode at the next line.
+
+    Line params (`offset`/`limit`) and `byte_offset` are mutually exclusive.
+    """
     if not path:
         yield CapabilityEvent(kind="error", payload={"code": "MISSING_PATH", "message": "path is required"})
         return
 
+    if byte_offset is not None:
+        if offset is not None or limit is not None:
+            yield CapabilityEvent(kind="error", payload={
+                "code": "INVALID_ARGS",
+                "message": "specify either line offset or byte_offset, not both",
+            })
+            return
+        if byte_offset < 0:
+            yield CapabilityEvent(kind="error", payload={
+                "code": "INVALID_ARGS", "message": "byte_offset must be >= 0"})
+            return
+        if byte_limit is not None and byte_limit < 1:
+            yield CapabilityEvent(kind="error", payload={
+                "code": "INVALID_ARGS", "message": "byte_limit must be >= 1"})
+            return
+    else:
+        if offset is not None and offset < 1:
+            yield CapabilityEvent(kind="error", payload={
+                "code": "INVALID_ARGS", "message": "offset is 1-based; must be >= 1"})
+            return
+        if limit is not None and limit < 1:
+            yield CapabilityEvent(kind="error", payload={
+                "code": "INVALID_ARGS", "message": "limit must be >= 1"})
+            return
+
     file_path = _resolve(path, ctx)
     if not _check_path(file_path, _allowed_dirs(ctx)):
-        yield CapabilityEvent(
-            kind="error",
-            payload={"code": "PATH_NOT_ALLOWED", "message": "Path is outside allowed directories"},
-        )
+        yield CapabilityEvent(kind="error", payload={
+            "code": "PATH_NOT_ALLOWED", "message": "Path is outside allowed directories"})
         return
 
     try:
-        if not file_path.exists():
-            yield CapabilityEvent(
-                kind="error",
-                payload={"code": "FILE_NOT_FOUND", "message": f"File not found: {file_path}"},
-            )
+        if not file_path.exists() or not file_path.is_file():
+            yield CapabilityEvent(kind="error", payload={
+                "code": "FILE_NOT_FOUND", "message": f"File not found: {file_path}"})
             return
 
-        _max_read = (ctx.extra.get("file_max_read_bytes") if ctx else None) or _FILE_MAX_READ_BYTES_DEFAULT
-        content = file_path.read_bytes()[:_max_read]
-        yield CapabilityEvent(
-            kind="result",
-            payload={
-                "content": content.decode("utf-8", errors="replace"),
-                "metadata": {
-                    "path": str(file_path),
-                    "size_bytes": file_path.stat().st_size,
-                    "truncated": len(content) == _max_read,
-                },
-            },
-        )
+        cfg = _read_config(ctx)
+        if byte_offset is not None:
+            result = await asyncio.to_thread(read_byte_window, file_path, byte_offset, byte_limit, cfg)
+        else:
+            result = await asyncio.to_thread(read_lines, file_path, offset, limit, cfg)
+
+        yield CapabilityEvent(kind="result", payload={
+            "content": result.content,
+            "metadata": result.metadata,
+        })
     except Exception as e:
         logger.exception("read_file failed: %s", file_path)
         yield CapabilityEvent(kind="error", payload={"code": "READ_ERROR", "message": str(e)})
@@ -297,6 +354,73 @@ async def write_file(
         yield CapabilityEvent(kind="error", payload={"code": "WRITE_ERROR", "message": str(e)})
 
 
+@tool(purposes=["act"], side_effects=True)
+async def edit_file(
+    path: Annotated[str, "File path; relative paths are resolved against the workspace"],
+    old_string: Annotated[str, "Exact text to find"],
+    new_string: Annotated[str, "Replacement text"],
+    *,
+    replace_all: Annotated[bool, "Replace every occurrence instead of requiring a unique match"] = False,
+    ctx: ProviderContext | None = None,
+) -> AsyncIterator[CapabilityEvent]:
+    """Replace an exact `old_string` with `new_string` in a file, in place.
+
+    By default `old_string` must match exactly once — add surrounding context to
+    make it unique, or pass `replace_all=true` to replace every occurrence.
+    """
+    if not path:
+        yield CapabilityEvent(kind="error", payload={"code": "MISSING_PATH", "message": "path is required"})
+        return
+    if old_string == new_string:
+        yield CapabilityEvent(kind="error", payload={
+            "code": "INVALID_ARGS", "message": "old_string and new_string must differ"})
+        return
+
+    file_path = _resolve(path, ctx)
+    if not _check_path(file_path, _allowed_dirs(ctx)):
+        yield CapabilityEvent(
+            kind="error",
+            payload={"code": "PATH_NOT_ALLOWED", "message": "Path is outside allowed directories"},
+        )
+        return
+
+    try:
+        if not file_path.exists() or not file_path.is_file():
+            yield CapabilityEvent(kind="error", payload={
+                "code": "FILE_NOT_FOUND", "message": f"File not found: {file_path}"})
+            return
+
+        text = file_path.read_text(encoding="utf-8")
+        count = text.count(old_string)
+        if count == 0:
+            yield CapabilityEvent(kind="error", payload={
+                "code": "STRING_NOT_FOUND", "message": "old_string not found in file"})
+            return
+        if count > 1 and not replace_all:
+            yield CapabilityEvent(kind="error", payload={
+                "code": "NOT_UNIQUE",
+                "message": (
+                    f"old_string matches {count} times; add surrounding context to make it "
+                    f"unique, or pass replace_all=true"
+                ),
+            })
+            return
+
+        replacements = count if replace_all else 1
+        new_text = text.replace(old_string, new_string) if replace_all else text.replace(old_string, new_string, 1)
+        file_path.write_text(new_text, encoding="utf-8")
+        yield CapabilityEvent(
+            kind="result",
+            payload={
+                "content": f"Replaced {replacements} occurrence(s) in {file_path}",
+                "metadata": {"path": str(file_path), "replacements": replacements, "replace_all": replace_all},
+            },
+        )
+    except Exception as e:
+        logger.exception("edit_file failed: %s", file_path)
+        yield CapabilityEvent(kind="error", payload={"code": "EDIT_ERROR", "message": str(e)})
+
+
 @tool(purposes=["act", "compact"], side_effects=False)
 async def glob(
     pattern: Annotated[str, "Glob pattern relative to base_dir, e.g. '**/*.py'"],
@@ -330,6 +454,65 @@ async def glob(
         yield CapabilityEvent(kind="error", payload={"code": "GLOB_ERROR", "message": str(e)})
 
 
+@tool(purposes=["act", "compact"], side_effects=False)
+async def grep(
+    pattern: Annotated[str, "Regular expression to search for in file contents"],
+    path: Annotated[str, "File or directory to search; relative paths resolved against the workspace"] = ".",
+    file_glob: Annotated[str | None, "Glob to filter which files are searched, e.g. '*.py'"] = None,
+    output_mode: Annotated[str, "'files_with_matches' (default, just paths) or 'content' (matching lines)"] = "files_with_matches",
+    *,
+    ignore_case: Annotated[bool, "Case-insensitive match"] = False,
+    before_context: Annotated[int | None, "Lines of context before each match (content mode)"] = None,
+    after_context: Annotated[int | None, "Lines of context after each match (content mode)"] = None,
+    context: Annotated[int | None, "Lines of context on both sides (content mode); overrides before/after"] = None,
+    ctx: ProviderContext | None = None,
+) -> AsyncIterator[CapabilityEvent]:
+    """Search file contents by regular expression.
+
+    Uses ripgrep when available (skips .gitignored/binary files), else a built-in
+    Python walk (skips non-UTF-8 files). The chosen backend is reported in
+    `metadata.backend`. `output_mode='content'` returns `path:line:text` lines;
+    `before_context`/`after_context`/`context` add neighbor lines in that mode.
+    """
+    if not pattern:
+        yield CapabilityEvent(kind="error", payload={"code": "MISSING_PATTERN", "message": "pattern is required"})
+        return
+    if output_mode not in ("files_with_matches", "content"):
+        yield CapabilityEvent(kind="error", payload={
+            "code": "INVALID_ARGS",
+            "message": "output_mode must be 'files_with_matches' or 'content'",
+        })
+        return
+
+    root = _resolve(path, ctx)
+    if not _check_path(root, _allowed_dirs(ctx)):
+        yield CapabilityEvent(kind="error", payload={
+            "code": "PATH_NOT_ALLOWED", "message": "Path is outside allowed directories"})
+        return
+    if not root.exists():
+        yield CapabilityEvent(kind="error", payload={
+            "code": "PATH_NOT_FOUND", "message": f"Path not found: {root}"})
+        return
+
+    before = context if context is not None else (before_context or 0)
+    after = context if context is not None else (after_context or 0)
+    max_results = (ctx.extra.get("grep_max_results") if ctx else None) or _GREP_MAX_RESULTS_DEFAULT
+
+    try:
+        result = await asyncio.to_thread(
+            run_grep, pattern, root,
+            file_glob=file_glob, output_mode=output_mode, ignore_case=ignore_case,
+            before=before, after=after, cfg=GrepConfig(max_results=max_results),
+        )
+        yield CapabilityEvent(kind="result", payload={
+            "content": result.content, "metadata": result.metadata})
+    except ValueError as e:  # un-compilable regex (Python backend)
+        yield CapabilityEvent(kind="error", payload={"code": "INVALID_ARGS", "message": str(e)})
+    except Exception as e:
+        logger.exception("grep failed: %s", pattern)
+        yield CapabilityEvent(kind="error", payload={"code": "GREP_ERROR", "message": str(e)})
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 
@@ -340,17 +523,21 @@ class FilesystemConfig:
     bash_idle_timeout_sec: int = 30
     bash_hard_cap_sec: int = 120
     bash_max_output_bytes: int = 50_000
-    file_max_read_bytes: int = 500_000
+    file_read_default_lines: int = 2000
+    file_read_max_bytes: int = 262_144
+    file_read_max_line_bytes: int = 4096
+    file_read_count_max_bytes: int = 5_242_880
     glob_max_results: int = 500
+    grep_max_results: int = 1000
 
 
 # ── Provider ──────────────────────────────────────────────────────────────────
 
 
 class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCapabilityProvider):
-    """文件系统工具 provider：bash_exec, read_file, write_file, glob + per-session workspace。
+    """文件系统工具 provider：bash_exec, read_file, write_file, edit_file, glob, grep + per-session workspace。
 
-    实现三个面向 core 的契约：ToolCapabilityProvider（invoke 四个工具）、SpillSink（spill 落盘）、
+    实现三个面向 core 的契约：ToolCapabilityProvider（invoke 六个工具）、SpillSink（spill 落盘）、
     SessionScopedCapabilityProvider（deregister_session 清理）。register_session / workspace_for
     是 host 接线用的自有方法，不属于任何协议——workspace 对 core 不可见。
     """
@@ -425,8 +612,12 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
         extra["bash_idle_timeout_sec"] = self._cfg.bash_idle_timeout_sec
         extra["bash_hard_cap_sec"] = self._cfg.bash_hard_cap_sec
         extra["bash_max_output_bytes"] = self._cfg.bash_max_output_bytes
-        extra["file_max_read_bytes"] = self._cfg.file_max_read_bytes
+        extra["file_read_default_lines"] = self._cfg.file_read_default_lines
+        extra["file_read_max_bytes"] = self._cfg.file_read_max_bytes
+        extra["file_read_max_line_bytes"] = self._cfg.file_read_max_line_bytes
+        extra["file_read_count_max_bytes"] = self._cfg.file_read_count_max_bytes
         extra["glob_max_results"] = self._cfg.glob_max_results
+        extra["grep_max_results"] = self._cfg.grep_max_results
         ctx = dataclasses.replace(ctx, extra=extra)
         return self._dispatch(capability_id, arguments, ctx)
 

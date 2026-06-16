@@ -114,6 +114,7 @@
 **典型链路**：`reason → act → observe → finalize → (None)`。
 - `act` 中若 LLM 调了 `submit_task` 等控制工具把当前 task 置 `SUSPENDED`，则走 `act → suspend`。
 - `reason` 检测到 token 超阈值时，**内联直调** `CompactStep`（不派发 task、不挂起），压缩复用 act 装配 + 尾部压缩指令；压缩后在新 memory 上重装配 prompt，继续 `→ act`。
+- 也可经 `CtxWeftRuntime.compact_session(session_id, *, agent_id=None, task_id="")` **主动**对一个**空闲**（非 draining）session 触发一次 compact-only 操作：重建 session + agent，直接调 `CompactStep().execute()`（不走 step driver、不发 Run 生命周期事件），默认折叠 root agent 的 agent 层；session 正在运行时抛 `SessionBusyError`。
 
 ### Step 状态机
 

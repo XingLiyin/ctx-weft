@@ -854,6 +854,113 @@ class CtxWeftRuntime:
 
         self._register_and_drain(session, task_manager)
 
+    async def compact_session(
+        self,
+        session_id: str,
+        *,
+        agent_id: str | None = None,
+        task_id: str = "",
+    ) -> dict[str, str]:
+        """Run a one-shot, compact-only operation over an IDLE session's memory.
+
+        Folds the agent layer (dispatch log) of ``agent_id`` (default: the session
+        root agent). Pass a real ``task_id`` to also make that task's task layer
+        eligible. Raises ``SessionBusyError`` if the session is currently running.
+
+        Calls ``CompactStep.execute`` directly (no step driver / no Run lifecycle
+        events), so the session's projection status is untouched — only
+        MemoryCompactStarted / MemoryCompacted are emitted (both reducer no-ops).
+
+        Returns ``{"session_id", "agent_id", "task_id"}``. When ``task_id`` is not
+        supplied, the returned ``task_id`` is a transient in-memory carrier id with no
+        event-store record (it only scopes the fold); callers should not try to look it up.
+
+        Note: a concurrent ``interrupt_session`` while a compact is in flight is not
+        honoured mid-compact — ``CompactStep`` does not poll the cancel token — but the
+        idle-guard still prevents a new compact/drain from starting on this session.
+        """
+        import dataclasses as _dc
+
+        from ctx_weft.core.control.converters import session_from_projection
+        from ctx_weft.core.control.reducers import rebuild_view
+        from ctx_weft.core.errors import SessionBusyError
+        from ctx_weft.core.loop.steps.compact import CompactStep
+        from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+        from ctx_weft.core.state.models import LoopGuard, NormalTaskSettings, Task
+        from ctx_weft.protocols import MemoryScope, ProviderContext
+
+        # ── idle-guard: claim the slot synchronously (no await before the claim) ──
+        if session_id in self._cancel_tokens:
+            raise SessionBusyError(session_id)
+        token = CancelToken()
+        self._cancel_tokens[session_id] = token
+        try:
+            view = await rebuild_view(self.event_store, session_id)
+            proj = view.sessions.get(session_id)
+            if proj is None:
+                raise RuntimeError(f"Session {session_id!r} not found in event store")
+            if not proj.template_id:
+                raise RuntimeError(f"Session {session_id!r} has no template_id — cannot compact")
+
+            session = session_from_projection(proj)
+            target_agent_id = agent_id or session.root_agent_id
+            if not target_agent_id:
+                raise RuntimeError(f"Session {session_id!r} has no agent to compact")
+
+            lm = LifecycleManager(template_resolver=self._template_resolver)
+            pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
+            agent, template = await lm.instantiate_agent(
+                template_id=proj.template_id,
+                session_id=session.id,
+                tenant_id=session.tenant_id,
+                existing_agent_id=target_agent_id,
+                ctx=pctx,
+            )
+            agent = _dc.replace(
+                agent,
+                loop_guard=LoopGuard(context_limit=session.context_limit),
+                runtime={"llm_model": session.llm_model or ""},
+            )
+
+            task = Task(
+                id=task_id or generate_id("tsk"),
+                session_id=session.id,
+                status="ACTIVE",
+                tenant_id=session.tenant_id,
+                assigned_agent_id=agent.id,
+                creator_agent_id=agent.id,
+                settings=NormalTaskSettings(),
+                user_prompt_in_memory=True,  # nothing to ingest
+                created_at=now_utc(),
+            )
+
+            memory = self.providers.get_memory()
+            provider_ctx = self._build_provider_ctx(session, task, agent)
+            skill_index = self._skill_provider_index()
+            assembler = self._build_assembler(memory, provider_ctx, skill_index)
+            gateway = self._build_gateway(memory)
+            llm = self._resolve_llm(session.llm_provider, session.llm_model)
+            loop_ctx = self._build_loop_ctx(
+                assembler, llm, memory, provider_ctx, gateway, skill_index, token, None,
+            )
+
+            scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=agent.id)
+            state = LoopState(
+                run_id=generate_id("run"),
+                session=session,
+                task=task,
+                agent=agent,
+                scope=scope,
+                extra={"template": template},
+            )
+            outcome = await CompactStep().execute(state, loop_ctx)
+            for ev in outcome.events:
+                await self._event_bus.emit(ev)
+
+            return {"session_id": session.id, "agent_id": agent.id, "task_id": task.id}
+        finally:
+            self._cancel_tokens.pop(session_id, None)
+
     async def _resume_after_cold_hitl(self, req: "HitlRequest") -> None:
         """冷 HITL 应答后恢复 session（HitlManager.on_cold_resolve 回调）。
 

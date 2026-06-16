@@ -69,3 +69,17 @@ class TaskFailedByObserver(CtxWeftError):
 
 class RunCanceledError(CtxWeftError):
     code = "RUN_CANCELED"
+
+
+# ── Session 状态 ───────────────────────────────────────────────────────────────
+
+
+class SessionBusyError(CtxWeftError):
+    """Raised when an operation needs an idle session but the session is currently
+    running (draining / compacting). The caller should retry once it is idle."""
+
+    code = "SESSION_BUSY"
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        super().__init__(f"Session {session_id!r} is busy (currently running); try again when idle")

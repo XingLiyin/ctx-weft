@@ -58,6 +58,7 @@ class ToolCapability(Capability):
     kind: str = "tool"
     input_schema: dict[str, Any] = field(default_factory=dict)
     side_effects: bool = False
+    spillable: bool = True  # 输出超长时是否允许 gateway 落盘；可重新派生的只读工具置 False
 
 
 @dataclass
