@@ -28,9 +28,9 @@ from typing import TYPE_CHECKING, Any, Literal
 from ctx_weft.protocols.capability import (
     Capability,
     CapabilityEvent,
-    CapabilityProvider,
     CapabilityProviderInfo,
     ToolCapability,
+    ToolCapabilityProvider,
 )
 from ctx_weft.protocols.context import ProviderContext
 
@@ -63,8 +63,14 @@ class MCPServerConfig:
     connect_timeout_sec: int = 10
 
 
-class MCPCapabilityProvider(CapabilityProvider):
-    """Bridges an MCP server to the ctx-weft capability interface via the `mcp` SDK."""
+class MCPCapabilityProvider(ToolCapabilityProvider):
+    """Bridges an MCP server to the ctx-weft capability interface via the `mcp` SDK.
+
+    Must inherit `ToolCapabilityProvider` (not bare `CapabilityProvider`): the gateway
+    builds its router index via `isinstance(p, ToolCapabilityProvider)`, so a bare base
+    would silently drop every MCP tool from routing while the cache still advertises them
+    (→ "no provider found for 'mcp:...'").
+    """
 
     def __init__(
         self,
