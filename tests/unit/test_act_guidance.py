@@ -7,9 +7,12 @@ from types import SimpleNamespace
 from ctx_weft.core.loop.steps.act import _build_act_guidance
 
 
-def _state(title="", description="", mode="auto"):
+def _state(title="", description="", mode="auto", user_prompt=""):
     return SimpleNamespace(
-        task=SimpleNamespace(id="t1", title=title, description=description, interaction_mode=mode)
+        task=SimpleNamespace(
+            id="t1", title=title, description=description,
+            interaction_mode=mode, user_prompt=user_prompt,
+        )
     )
 
 
@@ -23,6 +26,16 @@ def test_no_title_or_description_omits_task_block():
     g = _build_act_guidance(_state(), _ctx())
     assert "## Your current task" not in g
     assert "control__finish_task" in g
+
+
+def test_user_prompt_fallback_when_no_title_or_description():
+    g = _build_act_guidance(_state(user_prompt="please summarize the repo"), _ctx())
+    assert "## Your current task" in g
+    assert "This task was started by the user's request:" in g
+    assert "please summarize the repo" in g
+    # finish reminder restated inside the fallback block
+    assert "control__finish_task" in g
+    assert "proactively call" in g
 
 
 def test_ask_user_reminder_present_in_all_modes():

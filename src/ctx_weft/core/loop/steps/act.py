@@ -367,6 +367,19 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
         if task.description:
             parts.append(f"Description: {task.description}")
         parts.append("")
+    else:
+        up = getattr(task, "user_prompt", None)
+        if up:
+            up_text = up if isinstance(up, str) else str(up)
+            parts.append("## Your current task")
+            parts.append("This task was started by the user's request:")
+            parts.append(up_text)
+            parts.append("")
+            parts.append(
+                f"When you have completed it, proactively call the `{FINISH_TASK_NAME}` "
+                "tool with the final result to finish it."
+            )
+            parts.append("")
 
     succ = _plan_successors(state, ctx)
     if succ:
