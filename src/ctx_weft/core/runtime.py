@@ -1013,7 +1013,7 @@ class CtxWeftRuntime:
         Decision is made **in core, from events** (no host projection, no full replay):
         a session with an unresolved pending HITL was waiting for a human answer → **only the
         in-memory HitlManager is rebuilt** (so ``/hitl/pending`` and the reply endpoints work);
-        status stays PAUSED_HITL and **nothing runs** — the task rebuild + drain defers to the
+        status stays PAUSED_HITL or PAUSED and **nothing runs** — the task rebuild + drain defers to the
         reply's ``recover_session``. Otherwise it was actively running at crash → **emit
         ``SessionStatusChanged(INTERRUPTED)``**.
 

@@ -239,7 +239,8 @@ class ActStep(Step):
                         # 纯文本输出已作为 assistant message 流式呈现,无需再塞进 question 重复展示
                         question="",
                     )
-                    state.session.status = "PAUSED_HITL"
+                    # 纯文本暂停 = 软待命(允许但不强制回复) → PAUSED,区别于 ask_user 的 PAUSED_HITL。
+                    state.session.status = "PAUSED"
                     state.task.status = "SUSPENDED"
                     raise HitlPark(request_id=rid)
                 # auto / 非普通任务 / 无 hitl_manager：旧行为——纯文本即任务产出，路由 observe。

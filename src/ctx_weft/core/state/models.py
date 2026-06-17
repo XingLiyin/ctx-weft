@@ -87,6 +87,7 @@ SessionStatus = Literal[
     "TIMEOUT",
     "CANCELED",
     "PAUSED_HITL",
+    "PAUSED",
 ]
 
 TaskStatus = Literal[

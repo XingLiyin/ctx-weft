@@ -140,7 +140,10 @@ class HitlManager:
             "arguments": dict(arguments or {}),
             "questions": questions or [],
         })
-        await self._emit(EventType.SESSION_PAUSED_HITL, req, payload={})
+        await self._emit(
+            EventType.SESSION_PAUSED_HITL, req,
+            payload={"capability_id": capability_id, "kind": kind},
+        )
         return rid
 
     async def request_parked(

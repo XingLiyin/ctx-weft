@@ -62,6 +62,7 @@ async def test_interactive_plain_text_parks_for_user() -> None:
         await ActStep().execute(state, ctx)
 
     assert task.status == "SUSPENDED"
+    assert state.session.status == "PAUSED"           # 纯文本软待命 = PAUSED（区别于 ask_user 的 PAUSED_HITL）
     assert task.outputs is None                       # 纯文本不是产出
     pend = hitl.list_pending("s1")
     assert len(pend) == 1
