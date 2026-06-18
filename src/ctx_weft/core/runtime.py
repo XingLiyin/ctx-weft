@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
-from ctx_weft.core.control.tokens import CancelToken
+from ctx_weft.core.control.tokens import CancelToken, PauseToken
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager, HitlRequest  # noqa: F401 — re-exported for shell use
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.assembler import (
@@ -424,6 +424,8 @@ class CtxWeftRuntime:
 
         # Active cancel tokens keyed by session_id
         self._cancel_tokens: dict[str, CancelToken] = {}
+        self._pause_tokens: dict[str, PauseToken] = {}
+        self._task_managers: dict[str, TaskManager] = {}
 
     @property
     def event_bus(self) -> EventBus:
@@ -461,16 +463,31 @@ class CtxWeftRuntime:
                         return cap.template_name
         return qualified
 
-    def interrupt_session(self, session_id: str) -> bool:
-        """Signal cooperative cancellation for a running session.
+    def pause_session(self, session_id: str) -> bool:
+        """软打断：pause 该 session 的 PauseToken → act checkpoint park（会话 PAUSED、可续接）。
 
-        Returns True if the token was found and signaled, False if the session
-        is already finished or was never registered (e.g. run_single_task).
+        Returns True if a pause token was found, False if the session is finished or
+        was never registered.
         """
-        token = self._cancel_tokens.get(session_id)
+        token = self._pause_tokens.get(session_id)
         if token is None:
             return False
-        token.cancel()
+        token.pause()
+        return True
+
+    async def cancel_session(self, session_id: str) -> bool:
+        """硬取消：取消在途 task（CancelToken）+ 取消全部后续 task（drain 队列）→ 会话 CANCELED。
+
+        memory 保留。开新对话由调用方另起（新 /messages → 同 session_id 的 new run）。
+        """
+        token = self._cancel_tokens.get(session_id)
+        task_manager = self._task_managers.get(session_id)
+        if token is None and task_manager is None:
+            return False
+        if task_manager is not None:
+            await task_manager.cancel_all(reason="user_cancel")
+        if token is not None:
+            token.cancel()
         return True
 
     # ── Phase 1 compat ───────────────────────────────────────────────────────
@@ -596,6 +613,8 @@ class CtxWeftRuntime:
 
         cancel_token = CancelToken()
         self._cancel_tokens[session.id] = cancel_token
+        pause_token = PauseToken()
+        self._pause_tokens[session.id] = pause_token
 
         run_id = generate_id("run")
         handle = RunHandle(
@@ -622,6 +641,7 @@ class CtxWeftRuntime:
             llm_model=params.llm_model,
             task_manager=task_manager,
             cancel_token=cancel_token,
+            pause_token=pause_token,
             default_run_id=run_id,
             handle=handle,
         ))
@@ -643,8 +663,12 @@ class CtxWeftRuntime:
                 p.register_session(session.id, task_manager, session)
                 break
 
+        self._task_managers[session.id] = task_manager
+
         async def _on_done() -> None:
             self._cancel_tokens.pop(session.id, None)
+            self._pause_tokens.pop(session.id, None)
+            self._task_managers.pop(session.id, None)
             # 统一释放 per-session 内存状态：control 的 TaskManager 映射、fs 的 workspace 映射等
             # （仅传 id，core 不需知道各 provider 各自持有什么）
             for _p in self.providers.get_capability_providers():
@@ -667,6 +691,7 @@ class CtxWeftRuntime:
         llm_model: str | None,
         task_manager: TaskManager,
         cancel_token: CancelToken,
+        pause_token: "PauseToken | None" = None,
         default_run_id: str,
         handle: "RunHandle | None" = None,
         pre_resolved_agents: dict[str, "Agent"] | None = None,
@@ -755,6 +780,7 @@ class CtxWeftRuntime:
                 initial_step=initial_step,
                 task_manager=task_manager,
                 cancel_token=cancel_token,
+                pause_token=pause_token,
             )
             if handle is not None and s is not None:
                 handle._state = s
@@ -764,7 +790,12 @@ class CtxWeftRuntime:
     # ── Crash recovery ───────────────────────────────────────────────────────
 
     async def recover_session(
-        self, session_id: str, *, user_reply: "HitlRequest | None" = None,
+        self,
+        session_id: str,
+        *,
+        user_reply: "HitlRequest | None" = None,
+        llm_account: str | None = None,
+        llm_model: str | None = None,
     ) -> None:
         """Rebuild TaskManager from event store and resume execution.
 
@@ -789,6 +820,12 @@ class CtxWeftRuntime:
 
         from ctx_weft.core.control.converters import session_from_projection, task_from_projection
         session = session_from_projection(sess_proj)
+        # 调用方（host /resume）传入当前所选 LLM 时覆盖投影里的原始 model：用户改了 model 后
+        # 续跑须用新 model，而非 SessionCreated 记录的旧 model（投影不随重配更新）。
+        if llm_account is not None:
+            session.llm_provider = llm_account
+        if llm_model is not None:
+            session.llm_model = llm_model
         all_tasks = [task_from_projection(tp) for tp in view.tasks.values()]
 
         # 重建内存 HitlManager（_futures 空 → 后续应答自动走冷 resume；spec/07 §9）
@@ -811,6 +848,8 @@ class CtxWeftRuntime:
         )
         cancel_token = CancelToken()
         self._cancel_tokens[session.id] = cancel_token
+        pause_token = PauseToken()
+        self._pause_tokens[session.id] = pause_token
 
         task_manager = TaskManager(
             session_id=session.id,
@@ -845,6 +884,7 @@ class CtxWeftRuntime:
             llm_model=session.llm_model,
             task_manager=task_manager,
             cancel_token=cancel_token,
+            pause_token=pause_token,
             default_run_id=generate_id("run"),
             pre_resolved_agents=pre_resolved,
         ))
@@ -875,8 +915,8 @@ class CtxWeftRuntime:
         supplied, the returned ``task_id`` is a transient in-memory carrier id with no
         event-store record (it only scopes the fold); callers should not try to look it up.
 
-        Note: a concurrent ``interrupt_session`` while a compact is in flight is not
-        honoured mid-compact — ``CompactStep`` does not poll the cancel token — but the
+        Note: a concurrent ``pause_session`` while a compact is in flight is not
+        honoured mid-compact — ``CompactStep`` does not poll the pause token — but the
         idle-guard still prevents a new compact/drain from starting on this session.
         """
         import dataclasses as _dc
@@ -968,7 +1008,14 @@ class CtxWeftRuntime:
         task 层留 dangling tool_call）；act 的 ``ask_user`` / approval 走 reconcile,不在此注入。
         """
         is_inject = req.kind == "input" and req.capability_id.endswith(":wait_for_user")
-        await self.recover_session(req.session_id, user_reply=req if is_inject else None)
+        # 应答携带的当前所选模型（host 据 entry 传入）覆盖投影里的旧 model：用户改 model 后
+        # 冷续跑须用新 model。未携带（None）时 recover_session 回退投影。
+        await self.recover_session(
+            req.session_id,
+            user_reply=req if is_inject else None,
+            llm_account=req.resume_llm_account,
+            llm_model=req.resume_llm_model,
+        )
 
     async def _inject_user_reply(
         self, req: "HitlRequest", session: Session, task_manager: TaskManager,
@@ -980,16 +1027,21 @@ class CtxWeftRuntime:
         if target is None:
             logger.warning("wait_for_user cold resume: task %s not found for HITL %s", req.task_id, req.id)
             return
-        if req.status == "rejected":
-            content = f"Human declined: {req.message}" if req.message else "Human rejected the request."
-        else:
-            content = req.message or "(no response)"
 
         scope = MemoryScope(session_id=session.id, task_id=target.id, agent_id=req.agent_id or "")
         pctx = ProviderContext(
             session_id=session.id, tenant_id=session.tenant_id,
             task_id=target.id, agent_id=req.agent_id or "",
         )
+        if req.status == "rejected":
+            content = f"Human declined: {req.message}" if req.message else "Human rejected the request."
+        else:
+            content = req.message or "(no response)"
+            # ① 中途打断（未吐 token）续接：补「上一条请求已取消」说明（context=interrupt:edit）。
+            if req.context == "interrupt:edit":
+                from ctx_weft.core.loop.steps.act import interrupt_edit_note
+                prev = await self._last_user_prompt(scope, pctx)
+                content = interrupt_edit_note(prev, content)
         await self.providers.get_memory().ingest(
             MemoryEvent(
                 type=MemoryEventType.USER_PROMPT,
@@ -1006,6 +1058,17 @@ class CtxWeftRuntime:
         target.process_report = None
         if target.status not in ("FINISHED", "FAILED", "CANCELED"):
             target.status = "PENDING"
+
+    async def _last_user_prompt(self, scope: MemoryScope, pctx: ProviderContext) -> str:
+        """取 scope 内最近一条 USER_PROMPT 内容（供 ① 打断续接的「上一条取消」说明）。"""
+        from ctx_weft.protocols import MemoryEventType
+        try:
+            recs = await self.providers.get_memory().recall_recent(
+                scope, [MemoryEventType.USER_PROMPT], 1, pctx,
+            )
+        except Exception:
+            return ""
+        return (recs[-1].content or "") if recs else ""
 
     async def recover(self) -> int:
         """Recover every still-active session (SessionCreated, no SessionFinished) after a restart.
@@ -1161,6 +1224,7 @@ class CtxWeftRuntime:
         skill_index: dict,
         cancel_token: CancelToken | None,
         task_manager: "TaskManager | None",
+        pause_token: "PauseToken | None" = None,
     ) -> LoopContext:
         return LoopContext(
             assembler=assembler,
@@ -1176,6 +1240,7 @@ class CtxWeftRuntime:
             cancel_token=cancel_token,
             task_manager=task_manager,
             hitl_manager=self.hitl_manager,
+            pause_token=pause_token,
         )
 
     @staticmethod
@@ -1276,6 +1341,7 @@ class CtxWeftRuntime:
         llm_account: str | None = None,
         llm_model: str | None = None,
         cancel_token: CancelToken | None = None,
+        pause_token: "PauseToken | None" = None,
         initial_step: str = "prepare",
         task_manager: "TaskManager | None" = None,
         scope_agent_id: str | None = None,
@@ -1285,7 +1351,7 @@ class CtxWeftRuntime:
         assembler = self._build_assembler(memory, provider_ctx, skill_index)
         gateway = self._build_gateway(memory)
         llm = self._resolve_llm(llm_account, llm_model)
-        loop_ctx = self._build_loop_ctx(assembler, llm, memory, provider_ctx, gateway, skill_index, cancel_token, task_manager)
+        loop_ctx = self._build_loop_ctx(assembler, llm, memory, provider_ctx, gateway, skill_index, cancel_token, task_manager, pause_token=pause_token)
 
         scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=scope_agent_id or agent.id)
         state = LoopState(

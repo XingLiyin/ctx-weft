@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 
 class CancelToken:
-    """Cooperative cancellation token."""
+    """Cooperative cancellation token (hard cancel)."""
 
     def __init__(self) -> None:
         self._event = asyncio.Event()
@@ -55,6 +55,10 @@ class PauseToken:
         """Suspend caller until resumed."""
         if self._paused.is_set():
             await self._resume.wait()
+
+    async def wait_paused(self) -> None:
+        """Resolve once paused (mirror of CancelToken.wait for the soft-stop signal)."""
+        await self._paused.wait()
 
 
 @dataclass

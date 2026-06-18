@@ -76,6 +76,32 @@ async def test_resolved_idempotent_does_not_resume_twice() -> None:
     assert rec.calls == ["s1"]                    # 只 resume 一次
 
 
+async def test_cold_answer_forwards_resume_llm() -> None:
+    """应答携带的当前所选模型随冷应答转发（供 recover_session 用新 model 续跑）。"""
+    captured: list[tuple] = []
+
+    async def handler(req) -> None:
+        captured.append((req.resume_llm_account, req.resume_llm_model))
+
+    mgr = HitlManager(on_cold_resolve=handler)
+    mgr.rebuild_pending({"hit1": HitlRequestView(id="hit1", kind="input", session_id="s1", task_id="t1")})
+    await mgr.answer("hit1", "go", llm_account="acct", llm_model="new-model")
+    assert captured == [("acct", "new-model")]
+
+
+async def test_cold_answer_without_llm_leaves_override_none() -> None:
+    """未携带模型时不写覆盖（recover_session 回退投影）。"""
+    captured: list[tuple] = []
+
+    async def handler(req) -> None:
+        captured.append((req.resume_llm_account, req.resume_llm_model))
+
+    mgr = HitlManager(on_cold_resolve=handler)
+    mgr.rebuild_pending({"hit1": HitlRequestView(id="hit1", kind="input", session_id="s1", task_id="t1")})
+    await mgr.answer("hit1", "go")
+    assert captured == [(None, None)]
+
+
 async def test_setter_binds_handler_late() -> None:
     rec = _Recorder()
     mgr = HitlManager()                           # 无回调构造

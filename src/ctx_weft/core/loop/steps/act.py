@@ -6,6 +6,7 @@ ActStep 只处理 LLM 流 + turn 循环逻辑。
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from dataclasses import dataclass
@@ -60,8 +61,7 @@ class ActStep(Step):
         current_messages = _inject_act_guidance(current_messages, state, ctx)
 
         for turn_num in range(1, max_turns + 1):
-            if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
-                ctx.cancel_token.raise_if_cancelled()
+            await _interrupt_checkpoint(state, ctx)
 
             await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_STARTED, payload={
                 "turn": turn_num,
@@ -96,11 +96,17 @@ class ActStep(Step):
             accumulated_reasoning = ""
             tool_calls: list[ToolCall] = []
             usage = LLMUsage()
+            interrupted = False
 
             async for chunk in ctx.llm.complete(llm_request, stream=True):
-                if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
-                    ctx.cancel_token.raise_if_cancelled()
+                tok = ctx.cancel_token
+                if _interrupt_pending(ctx):
+                    interrupted = True          # ② 软打断：停收 token，下面提交半截
+                    break
+                if tok is not None and tok.is_cancelled:
+                    tok.raise_if_cancelled()    # 硬取消 → CancelledError
                 if chunk.kind == "token":
+                    ctx.run_phase.produced = True
                     accumulated_text += chunk.text
                     await ctx.event_bus.emit(make_event(
                         state, EventType.LLM_TOKEN_STREAMED,
@@ -116,6 +122,15 @@ class ActStep(Step):
                     tool_calls.append(chunk.tool_call)
                 elif chunk.kind == "usage" and chunk.usage is not None:
                     usage = chunk.usage
+
+            if interrupted:
+                # ② 已吐 token：把半截 assistant 文本入 memory 并标注「被用户打断」；
+                # ① 未吐任何内容：不留记录、续接补说明。随后 park 待用户续接。
+                has_partial = bool(accumulated_text.strip() or accumulated_reasoning.strip())
+                await _commit_interrupted_partial(
+                    state, ctx, accumulated_text, accumulated_reasoning, turn_num,
+                )
+                await _park_wait_for_user(state, ctx, source="interrupt", edit=not has_partial)
 
             await ctx.event_bus.emit(make_event(
                 state, EventType.LLM_RESPONSE_FINISHED,
@@ -146,8 +161,9 @@ class ActStep(Step):
                         ],
                         ctx=ctx.provider_ctx,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # best-effort 计数：失败不影响主流程，但记 debug 便于排查（不静默吞）。
+                    logger.debug("count_recent for loop_guard failed: %s", exc)
 
             # 累加 session.token_used（供 token_budget 检查使用）
             state.session.token_used += usage.prompt_tokens + usage.completion_tokens
@@ -230,19 +246,8 @@ class ActStep(Step):
                     await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
                         "turn": turn_num, "reason": "await_user",
                     }))
-                    rid = await ctx.hitl_manager.request_parked(
-                        kind="input",
-                        session_id=state.session.id,
-                        task_id=state.task.id,
-                        agent_id=state.agent.id,
-                        capability_id=WAIT_FOR_USER_CAPABILITY_ID,
-                        # 纯文本输出已作为 assistant message 流式呈现,无需再塞进 question 重复展示
-                        question="",
-                    )
                     # 纯文本暂停 = 软待命(允许但不强制回复) → PAUSED,区别于 ask_user 的 PAUSED_HITL。
-                    state.session.status = "PAUSED"
-                    state.task.status = "SUSPENDED"
-                    raise HitlPark(request_id=rid)
+                    await _park_wait_for_user(state, ctx, source="plain_text")
                 # auto / 非普通任务 / 无 hitl_manager：旧行为——纯文本即任务产出，路由 observe。
                 await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
                     "turn": turn_num, "reason": "stop",
@@ -251,12 +256,32 @@ class ActStep(Step):
 
             # ── Tool calls → CapabilityGateway ───────────────────────────────
             tool_results: list[Any] = []
+            ctx.run_phase.in_tool_loop = True
 
-            for tc in tool_calls:
+            for i, tc in enumerate(tool_calls):
+                # 工具间命中：软打断 → 本 tc 及之后全部「未开始」→ 补「已取消」+ park；硬取消 → CancelledError。
+                if _interrupt_pending(ctx):
+                    for rest in tool_calls[i:]:
+                        await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
+                    ctx.run_phase.in_tool_loop = False
+                    await _park_wait_for_user(state, ctx, source="interrupt")
                 if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
                     ctx.cancel_token.raise_if_cancelled()
+
+                # 可取消地执行在途工具：执行中被打断 → 取消该工具、补「被打断」result。
+                invoke_task = asyncio.ensure_future(_invoke_tool(tc, state, ctx))
+                completed = await _await_tool_or_stop(invoke_task, ctx)
+                if not completed:
+                    if _interrupt_pending(ctx):
+                        await _ingest_synthetic_tool_result(state, ctx, tc, INTERRUPTED_MARK, interrupted=True)
+                        for rest in tool_calls[i + 1:]:
+                            await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
+                        ctx.run_phase.in_tool_loop = False
+                        await _park_wait_for_user(state, ctx, source="interrupt")
+                    if ctx.cancel_token is not None:
+                        ctx.cancel_token.raise_if_cancelled()  # 硬取消
                 try:
-                    result = await _invoke_tool(tc, state, ctx)
+                    result = invoke_task.result()
                 except HitlPark:
                     # 被 park 的工具未执行；task 落 SUSPENDED 并 unwind（spec/07 §7）。
                     state.task.status = "SUSPENDED"
@@ -268,6 +293,8 @@ class ActStep(Step):
                     "result": result.content,
                     "is_error": result.is_error,
                 })
+
+            ctx.run_phase.in_tool_loop = False
 
             # 退出信号延迟到本轮所有 tool 执行完毕后再处理（见循环末尾的 actor_done 检查），
             # 保证同一批次的 delegate_task / delegate_plan 全部投入缓冲、tool_call ↔ result 一一对应。
@@ -336,6 +363,135 @@ async def _invoke_tool(tc: ToolCall, state: LoopState, ctx: LoopContext) -> Any:
         content=f"[Error: CapabilityGateway not configured, tool '{tc.name}' skipped]",
         is_error=True,
     )
+
+
+INTERRUPTED_MARK = "[被用户打断]"
+CANCELLED_MARK = "[已取消]"
+
+
+async def _ingest_synthetic_tool_result(
+    state: LoopState, ctx: LoopContext, tc: ToolCall, content: str, *,
+    interrupted: bool = False, cancelled: bool = False,
+) -> None:
+    """为被打断/未执行的工具补一条 TOOL_RESULT，使 tool_call↔result 一一对应（无 dangling）。"""
+    await ctx.memory.ingest(
+        MemoryEvent(
+            type=MemoryEventType.TOOL_RESULT,
+            scope=state.scope,
+            content=content,
+            timestamp=now_utc(),
+            role="tool",
+            metadata={
+                "tool_name": tc.name,
+                "tool_call_id": tc.id,
+                "is_error": True,
+                "interrupted": interrupted,
+                "cancelled": cancelled,
+            },
+        ),
+        ctx.provider_ctx,
+    )
+
+
+async def _await_tool_or_stop(invoke_task: "asyncio.Future", ctx: LoopContext) -> bool:
+    """运行在途工具；任一停止信号（硬取消 cancel_token / 软打断 pause_token）在执行中触发
+    → 取消该工具并等其清理跑完，返回 False；正常完成返回 True。
+    """
+    waiters: list[asyncio.Future] = []
+    if ctx.cancel_token is not None:
+        waiters.append(asyncio.ensure_future(ctx.cancel_token.wait()))
+    if ctx.pause_token is not None:
+        waiters.append(asyncio.ensure_future(ctx.pause_token.wait_paused()))
+    if not waiters:
+        await asyncio.wait({invoke_task})
+        return True
+    try:
+        await asyncio.wait({invoke_task, *waiters}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for w in waiters:
+            w.cancel()
+        await asyncio.wait(set(waiters))
+    if invoke_task.done():
+        return True
+    invoke_task.cancel()
+    await asyncio.wait({invoke_task})
+    return False
+
+
+def _interrupt_pending(ctx: LoopContext) -> bool:
+    """软打断挂起中：pause_token 被 pause 且有 hitl_manager 可 park。"""
+    tok = ctx.pause_token
+    return (
+        tok is not None
+        and tok.is_paused
+        and ctx.hitl_manager is not None
+    )
+
+
+async def _commit_interrupted_partial(
+    state: LoopState, ctx: LoopContext, text: str, reasoning: str, turn_num: int,
+) -> None:
+    """把被打断的半截 assistant 文本入 memory（标注「被用户打断」）。无内容则不留记录（①）。"""
+    if not (text.strip() or (reasoning or "").strip()):
+        return
+    content = f"{text}\n\n{INTERRUPTED_MARK}" if text.strip() else INTERRUPTED_MARK
+    await ctx.memory.ingest(
+        MemoryEvent(
+            type=MemoryEventType.LLM_RESPONSE,
+            scope=state.scope,
+            content=content,
+            timestamp=now_utc(),
+            role="assistant",
+            metadata={
+                "turn": turn_num,
+                "interrupted": True,
+                "reasoning": reasoning or None,
+            },
+        ),
+        ctx.provider_ctx,
+    )
+
+
+def interrupt_edit_note(prev_request: str, new_input: str) -> str:
+    """① 打断（未吐 token）续接时的说明：上一条请求被取消、改为新请求。空 prev 时原样返回。"""
+    prev = (prev_request or "").strip()
+    if not prev:
+        return new_input
+    return f"（我取消了上一条请求：「{prev}」，改为以下请求。）\n\n{new_input}"
+
+
+async def _park_wait_for_user(
+    state: LoopState, ctx: LoopContext, *, source: str, edit: bool = False,
+) -> None:
+    """起 wait_for_user 冷 park：会话 PAUSED、任务 SUSPENDED，抛 HitlPark。
+
+    ``source`` 标记触发来源（``plain_text`` 纯文本暂停 / ``interrupt`` 中途打断），供前端区分。
+    ``edit=True``（仅 interrupt 的 ① 阶段，未吐 token/未进工具）→ context=``interrupt:edit``，
+    续接时 runtime 补「上一条取消」说明。
+    """
+    context = "interrupt:edit" if (source == "interrupt" and edit) else source
+    rid = await ctx.hitl_manager.request_parked(
+        kind="input",
+        session_id=state.session.id,
+        task_id=state.task.id,
+        agent_id=state.agent.id,
+        capability_id=WAIT_FOR_USER_CAPABILITY_ID,
+        question="",
+        context=context,
+    )
+    state.session.status = "PAUSED"
+    state.task.status = "SUSPENDED"
+    raise HitlPark(request_id=rid)
+
+
+async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
+    """协作式停止点：软打断（pause）→ park；硬取消（cancel）→ CancelledError。"""
+    if _interrupt_pending(ctx):
+        edit = not ctx.run_phase.produced and not ctx.run_phase.in_tool_loop
+        await _park_wait_for_user(state, ctx, source="interrupt", edit=edit)  # raises HitlPark
+    tok = ctx.cancel_token
+    if tok is not None and tok.is_cancelled:
+        tok.raise_if_cancelled()
 
 
 # ── 临时 task guidance 注入（仅发送，不入 memory）──────────────────────────────────

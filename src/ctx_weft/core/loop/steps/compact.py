@@ -19,7 +19,11 @@ from ctx_weft.protocols import MemoryEventType, MemoryLayer
 logger = logging.getLogger(__name__)
 
 # 每层「可折叠」的对话类型；某层 active 条数 > keep_last 才值得 compact（空层守卫）。
-_AGENT_COMPACT_TYPES = [MemoryEventType.TASK_DISPATCH, MemoryEventType.TASK_DISPATCH_RESULT]
+_AGENT_COMPACT_TYPES = [
+    MemoryEventType.TASK_DISPATCH,
+    MemoryEventType.TASK_DISPATCH_RESULT,
+    MemoryEventType.AGENT_CONVERSATION_TURN,  # root self-experience records are agent-layer foldable content
+]
 _TASK_COMPACT_TYPES = [
     MemoryEventType.USER_PROMPT,
     MemoryEventType.LLM_RESPONSE,

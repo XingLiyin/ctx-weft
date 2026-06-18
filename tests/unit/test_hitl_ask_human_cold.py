@@ -88,7 +88,7 @@ async def test_resume_routes_wait_for_user_to_injection(monkeypatch) -> None:
     rt, _ = _runtime_with_memory()
     captured: dict = {}
 
-    async def fake_recover(session_id, *, user_reply=None):
+    async def fake_recover(session_id, *, user_reply=None, llm_account=None, llm_model=None):
         captured["session_id"] = session_id
         captured["user_reply"] = user_reply
 
@@ -104,7 +104,7 @@ async def test_resume_act_ask_user_uses_reconcile(monkeypatch) -> None:
     rt, _ = _runtime_with_memory()
     captured: dict = {}
 
-    async def fake_recover(session_id, *, user_reply=None):
+    async def fake_recover(session_id, *, user_reply=None, llm_account=None, llm_model=None):
         captured["user_reply"] = user_reply
 
     monkeypatch.setattr(rt, "recover_session", fake_recover)
@@ -121,7 +121,7 @@ async def test_resume_approval_uses_reconcile(monkeypatch) -> None:
     rt, _ = _runtime_with_memory()
     captured: dict = {}
 
-    async def fake_recover(session_id, *, user_reply=None):
+    async def fake_recover(session_id, *, user_reply=None, llm_account=None, llm_model=None):
         captured["user_reply"] = user_reply
 
     monkeypatch.setattr(rt, "recover_session", fake_recover)

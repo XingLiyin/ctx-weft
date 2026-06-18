@@ -44,6 +44,7 @@ class MemoryEventType(StrEnum):
     TASK_DISPATCH = "task_dispatch"               # delegate_task/delegate_plan 调用（result 暂挂）
     TASK_DISPATCH_RESULT = "task_dispatch_result"  # child 回填的 output+process_report
     AGENT_COMPACT_SUMMARY = "agent_compact_summary"  # agent compact 产出的 [既往派发摘要]
+    AGENT_CONVERSATION_TURN = "agent_conversation_turn"  # 折叠进 agent 层的 root task 对话回合（few-turns 经验保全）
 
     # ── session / topic ──
     BLACKBOARD_PUBLISH = "blackboard_publish"  # 显式 topic 发布（见 spec/04）
@@ -71,6 +72,7 @@ EVENT_LAYER: dict[MemoryEventType, MemoryLayer] = {
     MemoryEventType.TASK_DISPATCH: MemoryLayer.AGENT,
     MemoryEventType.TASK_DISPATCH_RESULT: MemoryLayer.AGENT,
     MemoryEventType.AGENT_COMPACT_SUMMARY: MemoryLayer.AGENT,
+    MemoryEventType.AGENT_CONVERSATION_TURN: MemoryLayer.AGENT,
     MemoryEventType.BLACKBOARD_PUBLISH: MemoryLayer.SESSION,
     # 过渡期旧类型
     MemoryEventType.OBSERVER_SUMMARY: MemoryLayer.AGENT,

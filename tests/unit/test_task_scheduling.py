@@ -154,6 +154,58 @@ def test_restore_rebuilds_blocked_chain() -> None:
     assert second is not None and second.task_id == "B"
 
 
+async def test_run_layer_failure_emits_task_failed() -> None:
+    """运行层失败（非 observer 判定，如 model 名写错）必须发 TaskFailed。
+
+    否则任务在投影里停留 ACTIVE（TASK_STATUS_BY_EVENT 只认 TASK_* 事件），
+    会被 restore 误当成可恢复任务复活重跑（且用 session 投影里的旧 model）。
+    """
+    bus = _CapturingBus()
+    tm = TaskManager(session_id="s1", event_bus=bus)
+
+    async def runner(_s: str, _t: str) -> None:
+        pass
+
+    tm.set_runner(runner)
+    t = _task("A")
+    tm.register_task(t)
+
+    class _NonRetriable(Exception):
+        retriable = False
+
+    await tm._handle_task_failure("A", error="unknown model", exc=_NonRetriable("boom"))
+
+    failed = [e for e in bus.events if e.type == EventType.TASK_FAILED]
+    assert failed, "run-layer failure must emit TaskFailed"
+    assert failed[0].task_id == "A"
+    assert t.status == "FAILED"
+
+
+async def test_retry_emits_task_requeued() -> None:
+    """可重试失败的重排分支也要发 TaskRequeued，使投影回 PENDING（而非停留 ACTIVE）。"""
+    bus = _CapturingBus()
+    tm = TaskManager(session_id="s1", event_bus=bus)
+    tm._max_concurrent = 0  # drain 空转：不在本测试里真正重跑被重排的任务
+
+    async def runner(_s: str, _t: str) -> None:
+        pass
+
+    tm.set_runner(runner)
+    t = _task("A")
+    tm.register_task(t)
+
+    class _Retriable(Exception):
+        retriable = True
+
+    await tm._handle_task_failure("A", error="transient", exc=_Retriable("boom"))
+
+    requeued = [e for e in bus.events if e.type == EventType.TASK_REQUEUED]
+    assert requeued, "retry must emit TaskRequeued"
+    assert requeued[0].task_id == "A"
+    assert t.status == "PENDING"
+    assert t.retry_count == 1
+
+
 async def test_run_task_discards_staged_on_cancel() -> None:
     tm = TaskManager(session_id="s1")
     parent = _task("P")

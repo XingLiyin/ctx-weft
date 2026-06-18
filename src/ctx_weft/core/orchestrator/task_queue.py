@@ -83,6 +83,15 @@ class TaskQueue:
                 return True
         return False
 
+    def drain_pending(self) -> list[str]:
+        """Remove all queued (pending) entries; return their task ids.
+
+        Does not touch ``_running`` / ``_completed`` — only clears what hasn't started.
+        """
+        ids = [e.task_id for e in self._entries]
+        self._entries.clear()
+        return ids
+
     def pending_count(self) -> int:
         return len(self._entries)
 

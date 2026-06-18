@@ -4,6 +4,7 @@
 - TASK_DISPATCH        → assistant 回合（tool_calls=[delegate_task(id=tool_call_id, args)]）
 - TASK_DISPATCH_RESULT → tool 回合（tool_call_id 配对；delegate_plan 的多 child 结果聚合为一条）
 - AGENT_COMPACT_SUMMARY → assistant 摘要回合
+- AGENT_CONVERSATION_TURN → user/assistant/tool 回合（原样透传；保全的 root task 对话）
 
 未配对的 TASK_DISPATCH（child 未回填）整条隐去，避免悬空 tool_call。
 与 task_conversation 的 blocks 一起按 timestamp 在 composer 归并。
@@ -14,6 +15,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
 from ctx_weft.protocols import MemoryEventType
 from ctx_weft.protocols.capability import qualify
@@ -25,6 +27,7 @@ _AGENT_TYPES = [
     MemoryEventType.TASK_DISPATCH,
     MemoryEventType.TASK_DISPATCH_RESULT,
     MemoryEventType.AGENT_COMPACT_SUMMARY,
+    MemoryEventType.AGENT_CONVERSATION_TURN,
 ]
 
 
@@ -53,6 +56,7 @@ class AgentExperienceSource:
         dispatches: dict[str, object] = {}        # tool_call_id → dispatch record（保最早一条）
         results: dict[str, list] = {}             # tool_call_id → [result records]
         summaries: list = []
+        conversation: list = []
         for r in records:
             if r.type == MemoryEventType.TASK_DISPATCH:
                 tcid = r.metadata.get("tool_call_id")
@@ -64,6 +68,8 @@ class AgentExperienceSource:
                     results.setdefault(tcid, []).append(r)
             elif r.type == MemoryEventType.AGENT_COMPACT_SUMMARY:
                 summaries.append(r)
+            elif r.type == MemoryEventType.AGENT_CONVERSATION_TURN:
+                conversation.append(r)
 
         def _ts(rec) -> str:
             return rec.timestamp.isoformat() if getattr(rec, "timestamp", None) else ""
@@ -82,6 +88,10 @@ class AgentExperienceSource:
                 metadata={"role": "user", "type": s.type, "timestamp": _ts(s),
                           "seq_no": s.metadata.get("seq_no", 0)},
             )
+
+        # AGENT_CONVERSATION_TURN → 原样回合（user/assistant/tool），composer 按 timestamp 归并
+        for idx, c in enumerate(reversed(conversation)):
+            yield record_to_history_block(c, source="agent_experience", idx=idx)
 
         # 配对回合；未配对 dispatch 隐去
         for tcid, d in dispatches.items():

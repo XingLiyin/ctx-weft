@@ -57,6 +57,7 @@ class TaskManager:
         self._max_concurrent = max_concurrent if max_concurrent is not None else _DEFAULT_MAX_CONCURRENT
         self._task_max_retries = task_max_retries if task_max_retries is not None else _DEFAULT_MAX_RETRIES
         self._queue: TaskQueue = TaskQueue()
+        self._cancelled: bool = False
         self._tasks: dict[str, Task] = {}
         # 同一轮（一次 task run）内 delegate_task / delegate_plan / replan 先投这里，
         # runner 正常返回后由 _flush_staged 统一入队，实现「同批次 FIFO」。
@@ -205,6 +206,9 @@ class TaskManager:
         """Pop and run tasks until queue is empty or max_concurrent reached."""
         if self._runner is None:
             raise RuntimeError("No task runner registered")
+
+        if self._cancelled:
+            return
 
         while True:
             async with self._lock:
@@ -404,6 +408,7 @@ class TaskManager:
                 "Task %s non-retriable error (%s), failing immediately: %s",
                 task_id, type(exc).__name__, error,
             )
+            await self._emit_task_failed(task_id, error)
             await self.on_task_finished(task_id, status="FAILED")
             return
 
@@ -421,9 +426,31 @@ class TaskManager:
                 self._queue.unmark_running(task_id)  # 清除 queue._running，使 pop() 能再次调度
                 entry = QueueEntry(task_id=task_id, session_id=self._session_id)
                 self._queue.push(entry)
+            # 重排落事件：使投影从 ACTIVE 回到 PENDING；进程在重试间隙崩溃时
+            # restore 据 PENDING 重排（而非把停留 ACTIVE 的任务误当成可恢复后重跑）。
+            await self._emit(EventType.TASK_REQUEUED, task_id=task_id, payload={
+                "reason": "run_failure_retry",
+                "retry_count": task.retry_count,
+            })
             await self.drain()
         else:
+            await self._emit_task_failed(task_id, error)
             await self.on_task_finished(task_id, status="FAILED")
+
+    async def _emit_task_failed(self, task_id: str, error: str) -> None:
+        """运行层失败（异常退出，未经 observer/FinalizeStep）补发 TaskFailed。
+
+        task 状态投影只认 TASK_* 事件（TASK_STATUS_BY_EVENT）；observer 判失败由
+        FinalizeStep 发 TaskFailed，而运行崩溃这条路（_run_loop 抛异常 → 本方法）此前
+        只发 RunFinished、不发 TaskFailed，导致任务在投影里停留 ACTIVE、被 restore 误复活。
+        本方法独属运行崩溃路径（observer 判失败正常返回、不进 _handle_task_failure），故不与
+        FinalizeStep 重复。"""
+        task = self._tasks.get(task_id)
+        await self._emit(EventType.TASK_FAILED, task_id=task_id, payload={
+            "error_code": "TASK_FAILED_AT_RUN",
+            "error_message": error,
+            "retry_count": task.retry_count if task else 0,
+        })
 
     async def on_task_finished(self, task_id: str, status: TaskStatus) -> None:
         async with self._lock:
@@ -478,6 +505,26 @@ class TaskManager:
             final_status = self._session.status if self._session else "SUCCEEDED"
             await self._emit(EventType.SESSION_STATUS_CHANGED, payload={"new_status": final_status})
             await self._fire_session_done()
+
+    async def cancel_all(self, *, reason: str = "") -> None:
+        """硬取消整条 session 链：清空 pending 队列并标 CANCELED，会话置 CANCELED。
+
+        在途 task 不在此处理——由 CancelToken → act checkpoint → CancelledError →
+        _run_loop 置该 task CANCELED → on_task_finished（其 drain() 被 _cancelled 守卫挡住）。
+        memory 不触碰（保留）。
+        """
+        self._cancelled = True
+        async with self._lock:
+            pending = self._queue.drain_pending()
+        for tid in pending:
+            t = self._tasks.get(tid)
+            if t is not None:
+                t.status = "CANCELED"
+                t.finished_at = now_utc()
+            await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": reason})
+        if self._session is not None:
+            self._session.status = "CANCELED"
+            await self._emit(EventType.SESSION_STATUS_CHANGED, payload={"new_status": "CANCELED"})
 
     async def _emit(
         self,

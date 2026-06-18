@@ -177,3 +177,14 @@ async def test_compactable_layers_none_below_threshold() -> None:
     await _ingest_n(mem, T.LLM_RESPONSE, 1, role="assistant")           # == keep_last，不够折
     layers = await CompactStep()._foldable_layers(state, ctx, keep_last=1)
     assert layers == []
+
+
+async def test_compactable_layers_agent_with_conversation_turns() -> None:
+    """agent 层仅含 AGENT_CONVERSATION_TURN 记录（root 自经验）时能被识别为可折叠。"""
+    mem = InMemoryMemoryProvider()
+    state, _ = _reason_state()
+    ctx = LoopContext(assembler=None, llm=None, memory=mem,
+                      event_bus=InProcessEventBus(), provider_ctx=_pctx())
+    await _ingest_n(mem, T.AGENT_CONVERSATION_TURN, 3, role="user")      # agent 层：只有对话回合
+    layers = await CompactStep()._foldable_layers(state, ctx, keep_last=1)
+    assert layers == ["agent"]

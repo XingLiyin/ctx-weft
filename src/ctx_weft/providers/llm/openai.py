@@ -18,6 +18,9 @@ from ctx_weft.protocols import (
     LLMCallError, LLMChunk, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall, LLMClient,
 )
 from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.providers.llm._finalize import build_finalize_chunks
+from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
+from ctx_weft.providers.llm.text_calls import ContentGate, merge_content as _merge_content
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,7 @@ class OpenAIAdapter(LLMClient):
         max_output_tokens: int = 4096,
         timeout_sec: int = 120,
         max_http_retries: int = 3,
+        tool_choice: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
@@ -47,6 +51,9 @@ class OpenAIAdapter(LLMClient):
         self._max_output_tokens = max_output_tokens
         self._timeout = timeout_sec
         self._max_http_retries = max_http_retries
+        # None = 省略 tool_choice（vLLM 不开 --enable-auto-tool-choice 会拒绝带 "auto" 的请求）。
+        # 显式给 "auto"/"none"/"required" 才发送。
+        self._tool_choice = tool_choice
         self._client = self._make_client()
 
     @property
@@ -69,8 +76,13 @@ class OpenAIAdapter(LLMClient):
         headers = self._headers()
         url = self._chat_url()
 
+        produced = False  # 是否已向消费者吐过 chunk（流已开始）
         for attempt in range(self._max_http_retries):
             tool_call_buffers: dict[int, dict[str, Any]] = {}
+            content_text = ""
+            finish_reason: str | None = None
+            usage: LLMUsage | None = None
+            gate = ContentGate()  # 增量剥离 <think>/<tool_call> 标签
             try:
                 async with self._client.stream("POST", url, headers=headers, json=payload) as resp:
                     if resp.status_code != 200:
@@ -114,31 +126,37 @@ class OpenAIAdapter(LLMClient):
                         except json.JSONDecodeError:
                             continue
 
+                        # usage 可能随 finish_reason 同包，也可能在其后的 choices=[] 尾包里——
+                        # 任何带 usage 的 event 都更新，并读到流尾再产出（不再 finish 即 return）。
+                        usage_data = event.get("usage") or {}
+                        if usage_data:
+                            usage = LLMUsage(
+                                prompt_tokens=usage_data.get("prompt_tokens", 0),
+                                completion_tokens=usage_data.get("completion_tokens", 0),
+                                total_tokens=usage_data.get("total_tokens", 0),
+                            )
+
                         choices = event.get("choices") or []
                         if not choices:
-                            usage_data = event.get("usage") or {}
-                            if usage_data:
-                                yield LLMChunk(
-                                    kind="usage",
-                                    usage=LLMUsage(
-                                        prompt_tokens=usage_data.get("prompt_tokens", 0),
-                                        completion_tokens=usage_data.get("completion_tokens", 0),
-                                        total_tokens=usage_data.get("total_tokens", 0),
-                                    ),
-                                )
                             continue
 
                         choice = choices[0]
                         delta = choice.get("delta") or {}
-                        finish_reason = choice.get("finish_reason")
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
 
                         reasoning = delta.get("reasoning_content") or ""
                         if reasoning:
+                            produced = True
                             yield LLMChunk(kind="reasoning", text=reasoning)
 
                         text = delta.get("content") or ""
                         if text:
-                            yield LLMChunk(kind="token", text=text)
+                            content_text = _merge_content(content_text, text)
+                            tok = gate.feed(content_text)
+                            if tok:
+                                produced = True
+                                yield LLMChunk(kind="token", text=tok)
 
                         for tc_delta in (delta.get("tool_calls") or []):
                             idx = tc_delta.get("index", 0)
@@ -148,30 +166,34 @@ class OpenAIAdapter(LLMClient):
                             if tc_delta.get("id"):
                                 buf["id"] = tc_delta["id"]
                             fn = tc_delta.get("function") or {}
-                            if fn.get("name"):
-                                buf["name"] += fn["name"]
-                            if fn.get("arguments"):
-                                buf["arguments"] += fn["arguments"]
+                            name = fn.get("name")
+                            if name:
+                                buf["name"] += name if isinstance(name, str) else str(name)
+                            args = fn.get("arguments")
+                            if args:
+                                buf["arguments"] += args if isinstance(args, str) else json.dumps(args)
 
-                        if finish_reason:
-                            for buf in tool_call_buffers.values():
-                                try:
-                                    args = json.loads(buf["arguments"]) if buf["arguments"] else {}
-                                except json.JSONDecodeError:
-                                    args = {"_raw": buf["arguments"]}
-                                yield LLMChunk(
-                                    kind="tool_call",
-                                    tool_call=ToolCall(id=buf["id"], name=buf["name"], arguments=args),
-                                )
-                            yield LLMChunk(
-                                kind="done",
-                                finish_reason=finish_reason,
-                            )
-                            return
-
+                    # 流以任何方式结束（[DONE] / 自然结束）→ 统一收尾：截断判定、
+                    # native 规整、文本/思考还原、usage、done（见 _finalize）。
+                    for ch in build_finalize_chunks(
+                        content_text=content_text,
+                        native_tool_calls=_parse_buffers(tool_call_buffers),
+                        had_native_buffer=bool(tool_call_buffers),
+                        saw_terminal=finish_reason is not None,
+                        usage=usage,
+                        finish_reason=finish_reason,
+                        emitted_visible_len=gate.emitted_len,
+                    ):
+                        yield ch
                     return
 
             except httpx.TransportError as exc:
+                # 已吐过 chunk（流中断）→ 不在 adapter 内重试（会重复 token），
+                # 抛 retriable 让 TaskManager 整任务干净重跑。
+                if produced:
+                    raise LLMCallError(
+                        f"LLM stream interrupted mid-flight: {exc}", retriable=True
+                    ) from exc
                 if attempt < self._max_http_retries - 1:
                     delay = float(2 ** attempt)
                     logger.warning(
@@ -221,8 +243,24 @@ class OpenAIAdapter(LLMClient):
             payload["temperature"] = request.temperature
         if request.tools:
             payload["tools"] = _map_tools(request.tools)
-            payload["tool_choice"] = "auto"
+            if self._tool_choice is not None:
+                payload["tool_choice"] = self._tool_choice
         return payload
+
+
+def _parse_buffers(buffers: dict[int, dict[str, Any]]) -> list[ToolCall]:
+    """把累积的 tool_call 缓冲解析成规整 ToolCall：丢弃 id/name 为空者；
+    arguments JSON 解析失败保留 ``{"_raw": ...}`` 交 gateway 报错（不静默丢）。"""
+    calls: list[ToolCall] = []
+    for buf in buffers.values():
+        if not buf["id"] or not buf["name"]:
+            continue
+        try:
+            args = json.loads(buf["arguments"]) if buf["arguments"] else {}
+        except json.JSONDecodeError:
+            args = {"_raw": buf["arguments"]}
+        calls.append(ToolCall(id=buf["id"], name=buf["name"], arguments=args))
+    return calls
 
 
 def _serialize_messages(
@@ -284,7 +322,9 @@ def _map_tools(tools: list[LLMTool]) -> list[dict[str, Any]]:
             "function": {
                 "name": t.name,
                 "description": t.description,
-                "parameters": t.input_schema or {"type": "object", "properties": {}},
+                "parameters": sanitize_boolean_schemas(
+                    t.input_schema or {"type": "object", "properties": {}}
+                ),
             },
         }
         for t in tools

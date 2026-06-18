@@ -63,6 +63,10 @@ class HitlRequest:
     modified_arguments: dict[str, Any] | None = None  # approval kind：改写后的工具参数（暂仅记录，不生效）
     created_at: datetime = field(default_factory=now_utc)
     resolved_at: datetime | None = None
+    # resume-time LLM 覆盖：冷应答触发 session resume 时用的当前所选模型（host 据 entry 传入），
+    # 仅供本次 cold-resolve 转发给 recover_session，不入事件、不持久化（重启后由新一次应答重新带入）。
+    resume_llm_account: str | None = None
+    resume_llm_model: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -200,20 +204,56 @@ class HitlManager:
         *,
         message: str = "",
         modified_arguments: dict[str, Any] | None = None,
+        llm_account: str | None = None,
+        llm_model: str | None = None,
     ) -> HitlRequest:
         """放行一个 approval 请求，可选备注 / 改写参数。accepted + HitlApproved/HitlModified。"""
+        self._stash_resume_llm(request_id, llm_account, llm_model)
         req, _ = await self.resolve_approve(request_id, message=message, modified_arguments=modified_arguments)
         return req
 
-    async def answer(self, request_id: str, text: str) -> HitlRequest:
+    async def answer(
+        self,
+        request_id: str,
+        text: str,
+        *,
+        llm_account: str | None = None,
+        llm_model: str | None = None,
+    ) -> HitlRequest:
         """应答一个 input 请求（人类文字答复）。accepted + HitlAnswered。"""
+        self._stash_resume_llm(request_id, llm_account, llm_model)
         req, _ = await self.resolve_answer(request_id, text)
         return req
 
-    async def reject(self, request_id: str, *, message: str = "") -> HitlRequest:
+    async def reject(
+        self,
+        request_id: str,
+        *,
+        message: str = "",
+        llm_account: str | None = None,
+        llm_model: str | None = None,
+    ) -> HitlRequest:
         """拒绝请求（approval 与 input 通用），可带指导性反馈 message。rejected + HitlRejected。"""
+        self._stash_resume_llm(request_id, llm_account, llm_model)
         req, _ = await self.resolve_reject(request_id, message=message)
         return req
+
+    def _stash_resume_llm(
+        self, request_id: str, llm_account: str | None, llm_model: str | None,
+    ) -> None:
+        """把应答时携带的当前所选模型暂存到 req，供 _resolve 的冷应答路径转发给 recover_session。
+
+        host 在 /messages 应答时据 entry 传入；用户改了 model 后冷续跑（纯文本暂停回复等）须用
+        新 model，而非投影里的旧 model。None 表示未提供、保持不变。"""
+        if llm_account is None and llm_model is None:
+            return
+        req = self._requests.get(request_id)
+        if req is None:
+            return
+        if llm_account is not None:
+            req.resume_llm_account = llm_account
+        if llm_model is not None:
+            req.resume_llm_model = llm_model
 
     async def cancel(self, request_id: str, *, message: str = "") -> HitlRequest:
         """收口一个悬挂 pending（session 关闭 / interrupt / GC）。cancelled + HitlCancelled。

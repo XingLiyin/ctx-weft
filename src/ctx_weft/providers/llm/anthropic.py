@@ -18,6 +18,9 @@ from ctx_weft.protocols import (
     LLMCallError, LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall,
 )
 from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.providers.llm._finalize import build_finalize_chunks
+from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
+from ctx_weft.providers.llm.text_calls import ContentGate, merge_content as _merge_content
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +77,15 @@ class AnthropicAdapter(LLMClient):
         headers = self._headers()
         url = f"{self._base_url}/v1/messages"
 
+        produced = False  # 是否已向消费者吐过 chunk（流已开始）
         for attempt in range(self._max_http_retries):
             tool_blocks: dict[int, dict[str, Any]] = {}
             thinking_blocks: dict[int, str] = {}
             input_tokens: int | None = None
+            content_text = ""
+            finish_reason: str | None = None
+            usage: LLMUsage | None = None
+            gate = ContentGate()  # 增量剥离 <think>/<tool_call> 标签
 
             try:
                 async with self._client.stream("POST", url, headers=headers, json=payload) as resp:
@@ -149,12 +157,17 @@ class AnthropicAdapter(LLMClient):
                             if delta_type == "text_delta":
                                 text = delta.get("text") or ""
                                 if text:
-                                    yield LLMChunk(kind="token", text=text)
+                                    content_text = _merge_content(content_text, text)
+                                    tok = gate.feed(content_text)
+                                    if tok:
+                                        produced = True
+                                        yield LLMChunk(kind="token", text=tok)
 
                             elif delta_type == "thinking_delta":
                                 thinking = delta.get("thinking") or ""
                                 if thinking:
                                     thinking_blocks[idx] = thinking_blocks.get(idx, "") + thinking
+                                    produced = True
                                     yield LLMChunk(kind="reasoning", text=thinking)
 
                             elif delta_type == "input_json_delta":
@@ -172,26 +185,30 @@ class AnthropicAdapter(LLMClient):
                                 completion_tokens=output_tokens,
                                 total_tokens=total,
                             )
-                            for tb in tool_blocks.values():
-                                try:
-                                    args = json.loads(tb["arguments"]) if tb["arguments"] else {}
-                                except json.JSONDecodeError:
-                                    args = {"_raw": tb["arguments"]}
-                                yield LLMChunk(
-                                    kind="tool_call",
-                                    tool_call=ToolCall(id=tb["id"], name=tb["name"], arguments=args),
-                                )
-                            yield LLMChunk(
-                                kind="usage",
-                                usage=usage,
-                                finish_reason=stop_reason or "stop",
-                            )
-                            yield LLMChunk(kind="done", finish_reason=stop_reason or "stop")
-                            return
+                            finish_reason = stop_reason or "stop"
+                            break  # 终止事件 → 跳出循环做统一收尾
 
+                    # 流以任何方式结束（message_delta / 自然结束）→ 统一收尾：
+                    # 截断判定、native 规整、文本/思考还原、usage、done（见 _finalize）。
+                    for ch in build_finalize_chunks(
+                        content_text=content_text,
+                        native_tool_calls=_parse_tool_blocks(tool_blocks),
+                        had_native_buffer=bool(tool_blocks),
+                        saw_terminal=finish_reason is not None,
+                        usage=usage,
+                        finish_reason=finish_reason,
+                        emitted_visible_len=gate.emitted_len,
+                    ):
+                        yield ch
                     return
 
             except httpx.TransportError as exc:
+                # 已吐过 chunk（流中断）→ 不在 adapter 内重试（会重复 token），
+                # 抛 retriable 让 TaskManager 整任务干净重跑。
+                if produced:
+                    raise LLMCallError(
+                        f"LLM stream interrupted mid-flight: {exc}", retriable=True
+                    ) from exc
                 if attempt < self._max_http_retries - 1:
                     delay = float(2 ** attempt)
                     logger.warning(
@@ -235,6 +252,21 @@ class AnthropicAdapter(LLMClient):
         if request.tools:
             payload["tools"] = _map_tools(request.tools)
         return payload
+
+
+def _parse_tool_blocks(blocks: dict[int, dict[str, Any]]) -> list[ToolCall]:
+    """把累积的 tool_use 块解析成规整 ToolCall：丢弃 id/name 为空者；
+    arguments JSON 解析失败保留 ``{"_raw": ...}`` 交 gateway 报错（不静默丢）。"""
+    calls: list[ToolCall] = []
+    for tb in blocks.values():
+        if not tb["id"] or not tb["name"]:
+            continue
+        try:
+            args = json.loads(tb["arguments"]) if tb["arguments"] else {}
+        except json.JSONDecodeError:
+            args = {"_raw": tb["arguments"]}
+        calls.append(ToolCall(id=tb["id"], name=tb["name"], arguments=args))
+    return calls
 
 
 def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
@@ -300,7 +332,9 @@ def _map_tools(tools: list[LLMTool]) -> list[dict[str, Any]]:
         {
             "name": t.name,
             "description": t.description,
-            "input_schema": t.input_schema or {"type": "object", "properties": {}},
+            "input_schema": sanitize_boolean_schemas(
+                t.input_schema or {"type": "object", "properties": {}}
+            ),
         }
         for t in tools
     ]

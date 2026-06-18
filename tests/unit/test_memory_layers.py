@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ctx_weft.protocols import (
+    EVENT_LAYER,
     MemoryEvent,
     MemoryEventType,
     MemoryLayer,
@@ -109,3 +110,8 @@ async def test_mixed_layer_recall_merges_by_timestamp() -> None:
     recs = await m.recall_recent(sc, [T.USER_PROMPT, T.TASK_DISPATCH_RESULT], 10, _ctx())
     # newest-first
     assert [r.content for r in recs] == ["d", "u"]
+
+
+def test_agent_conversation_turn_is_agent_layer() -> None:
+    assert MemoryEventType.AGENT_CONVERSATION_TURN in EVENT_LAYER
+    assert EVENT_LAYER[MemoryEventType.AGENT_CONVERSATION_TURN] is MemoryLayer.AGENT

@@ -62,11 +62,6 @@ class PrepareStep(Step):
         session = state.session
 
         # ── 0. token budget guard ─────────────────────────────────────────────
-        if session.token_budget > 0 and session.token_used >= session.token_budget:
-            raise RuntimeError(
-                f"TOKEN_BUDGET_EXCEEDED: session {session.id} token_used={session.token_used} "
-                f">= token_budget={session.token_budget}"
-            )
 
         # ── 1. token 估算 ─────────────────────────────────────────────────────
         token_estimate, has_baseline = await self._estimate_tokens(state, ctx)
@@ -178,6 +173,7 @@ class PrepareStep(Step):
                     types=[
                         MemoryEventType.TASK_DISPATCH_RESULT,
                         MemoryEventType.AGENT_COMPACT_SUMMARY,
+                        MemoryEventType.AGENT_CONVERSATION_TURN,
                     ],
                     ctx=ctx.provider_ctx,
                 )

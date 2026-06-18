@@ -140,9 +140,19 @@ class ToolCapabilityProvider(CapabilityProvider, ABC):
         arguments: dict[str, Any],
         ctx: ProviderContext,
     ) -> AsyncIterator[CapabilityEvent]: ...
+    # Gateway 注入 ``ctx.invocation_id``（本次执行的唯一 id）：需要支持取消的 provider 应据此登记
+    # 在途句柄（任务/进程/请求），以便后续 cancel(invocation_id) 对应。``ctx.extra["tool_call_id"]``
+    # 是发起本次调用的模型 tool_call id（可重放，用于 §6 配对），与 invocation_id 区别见两者文档。
 
     @abstractmethod
-    async def cancel(self, invocation_id: str, ctx: ProviderContext) -> None: ...
+    async def cancel(self, invocation_id: str, ctx: ProviderContext) -> None:
+        """取消一次在途执行。``invocation_id`` 即 invoke 时经 ``ctx.invocation_id`` 注入的同一个 id。
+
+        多数本地 provider 无需实现（取消经 ``CancelledError`` 传播到 invoke 协程的 finally，如
+        bash 的 terminate_tree 杀进程树）；需要显式取消通知的 provider（如 MCP 远端）按 invocation_id
+        查到登记的句柄并取消。best-effort：被 gateway 在取消路径上调用，不应抛出。
+        """
+        ...
 
 
 class SessionScopedCapabilityProvider(CapabilityProvider, ABC):

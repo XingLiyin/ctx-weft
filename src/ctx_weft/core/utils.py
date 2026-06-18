@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import inspect
+import types
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated, Any, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 from ulid import ULID
 
@@ -65,6 +66,13 @@ def _parse_annotated(ann: Any) -> tuple[str, str]:
         base, desc = args[0], str(args[1]) if len(args) > 1 else ""
     else:
         base, desc = ann, ""
+
+    # Unwrap Optional[T] / T | None → T，否则 union 落不进 _PY_TO_JSON 会被误标成 "string"
+    # （模型据此回传 "3" 等字符串，工具做算术时崩溃）。取首个非 None 成员。
+    if get_origin(base) in (Union, types.UnionType):
+        members = [a for a in get_args(base) if a is not type(None)]
+        if members:
+            base = members[0]
 
     origin = get_origin(base)
     if origin is list:

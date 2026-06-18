@@ -95,6 +95,18 @@ class LoopState:
 
 
 @dataclass
+class RunPhase:
+    """Per-run loop-progress flags (set by ActStep), used to pick the interrupt phase.
+
+    produced      — 本 run 是否吐过 token（区分①未出 token / ②已出 token）。
+    in_tool_loop  — 是否已进入工具调用循环（③）。
+    """
+
+    produced: bool = False
+    in_tool_loop: bool = False
+
+
+@dataclass
 class LoopContext:
     """每次 loop run 一个，包装所有跨 step 的依赖。"""
 
@@ -112,6 +124,8 @@ class LoopContext:
     # 控制令牌（Phase 6）
     cancel_token: CancelToken|None = None
     pause_token: PauseToken|None = None
+    # run 级阶段标记（ActStep 维护；曾挂在 CancelToken 上）
+    run_phase: RunPhase = field(default_factory=RunPhase)
     # 配置
     config: Any = None
     # 模板解析器（Phase 4）
@@ -228,8 +242,11 @@ class StepDriver:
         next_step_name: str | None = self.initial_step
 
         while next_step_name is not None:
-            if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
-                ctx.cancel_token.raise_if_cancelled()
+            # 软打断（interrupt）由 act 的 checkpoint 负责 park，这里不硬取消（否则 step 间命中会误终态）；
+            # 仅硬取消（cancel 模式）在 step 边界抛 CancelledError。
+            tok = ctx.cancel_token
+            if tok is not None and tok.is_cancelled and getattr(tok, "mode", "cancel") == "cancel":
+                tok.raise_if_cancelled()
 
             step = self.steps.get(next_step_name)
             if step is None:
