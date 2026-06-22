@@ -138,28 +138,6 @@ def _shift_markdown_headings(md: str, base_level: int) -> str:
     return "\n".join(out)
 
 
-def _merge_consecutive_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
-    """合并连续相同角色的消息（tool 消息因绑定 tool_call_id 不合并）。"""
-    merged: list[LLMMessage] = []
-    for msg in messages:
-        if (
-            merged
-            and merged[-1].role == msg.role
-            and msg.role != "tool"
-        ):
-            prev = merged[-1]
-            prev_text = prev.content if isinstance(prev.content, str) else content_to_text(prev.content)
-            cur_text = msg.content if isinstance(msg.content, str) else content_to_text(msg.content)
-            merged[-1] = LLMMessage(
-                role=prev.role,
-                content=f"{prev_text}\n\n{cur_text}",
-                tool_calls=prev.tool_calls + msg.tool_calls,
-            )
-        else:
-            merged.append(msg)
-    return merged
-
-
 @runtime_checkable
 class Composer(Protocol):
     """ContextBlock → AssembledPrompt 渲染器。"""
@@ -289,11 +267,13 @@ class DefaultComposer(Composer):
 
         if parts:
             messages.append(LLMMessage(role="user", content="\n\n".join(parts)))
-        merged = _merge_consecutive_messages(messages)
         # 兜底：actor prompt 必须以 user 回合结尾——避免以 assistant/tool 结尾让模型困惑地续写自己。
         # 正常情况下 active/retry 的 Current Progress 已是末条 user；此处仅覆盖 summary 为空等边角。
-        if merged and merged[-1].role != "user":
-            merged.append(LLMMessage(role="user", content="Continue with the task above."))
+        if messages and messages[-1].role != "user":
+            messages.append(LLMMessage(role="user", content="Continue with the task above."))
+        # 连续同角色 / 孤立 tool result 的合法化不在装配层做——统一交由
+        # loop.llm_gateway.stream_llm 在发送前处理，使装配层不反向依赖 loop。
+        merged = messages
         # Resources 注入（仅发送，不入 memory）：
         #   - directive（当前 task 指令）：act 追加到首条 user message 尾部（紧跟 ## Current Task
         #     等任务上下文之后）；其他 purpose 仍与 capabilities 一并前置到首条。
@@ -339,8 +319,9 @@ class DefaultComposer(Composer):
         if extra_sections:
             sections.extend(extra_sections)
 
-        messages.append(LLMMessage(role="user", content="\n\n".join(sections)))
-        return _merge_consecutive_messages(messages)
+        # facet + cue 并入最后一条 user 回合（_build_actor_messages 已保证以 user 收尾），
+        # 就地避免连续 user，不再依赖发送前合并。
+        return self._append_to_last_user(messages, "\n\n".join(sections))
 
     def _build_resources_section(self, blocks: list["ContextBlock"]) -> str:
         """从 capabilities blocks 按 kind 分组渲染（miniAgents 风格）。

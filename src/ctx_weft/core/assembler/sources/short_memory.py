@@ -43,10 +43,18 @@ class RecentMemorySource:
         records = await deps.memory.recall_recent(
             scope=request.scope,
             types=self._types,
-            limit=self._limit,
+            limit=self._resolve_limit(request),
             ctx=deps.provider_ctx,
         )
 
         # records 来自 recall_recent，按 timestamp 倒序；正序产出 block（composer 再按 timestamp 归并）
         for idx, record in enumerate(reversed(records)):
             yield record_to_history_block(record, source="task_conversation", idx=idx)
+
+    def _resolve_limit(self, request: "ContextRequest") -> int:
+        """召回窗口 = 一个 act step 体量（max_turns_per_act）；拿不到 agent 时退构造默认。"""
+        agent = getattr(request, "agent", None)
+        loop_config = getattr(agent, "loop_config", None) if agent is not None else None
+        if loop_config is not None:
+            return loop_config.max_turns_per_act
+        return self._limit

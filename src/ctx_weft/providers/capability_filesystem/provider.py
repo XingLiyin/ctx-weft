@@ -19,7 +19,6 @@ import dataclasses
 import glob as _glob
 import logging
 import os
-import shlex
 import platform
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -39,12 +38,23 @@ from ctx_weft.protocols.filesystem import FS_PROVIDER_NAME, SpillSink
 from ctx_weft.providers._encoding import decode_console
 from ctx_weft.providers._script_runner import run_with_liveness
 from ctx_weft.providers._tooldecl import make_tool_registry
+from ctx_weft.providers.capability_filesystem._bash_safety import (
+    BASH_BLACKLIST,
+    check_command_safety,
+)
 from ctx_weft.providers.capability_filesystem._file_reader import (
     ReadConfig,
     read_byte_window,
     read_lines,
 )
 from ctx_weft.providers.capability_filesystem._grep import GrepConfig, run_grep
+from ctx_weft.providers.capability_filesystem._venv import (
+    VenvError,
+    command_is_python,
+    ensure_venv,
+    venv_env,
+    venv_layout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +62,6 @@ tool, _FS_TOOLS, _FS_IMPLS = make_tool_registry(FS_PROVIDER_NAME)
 
 # ── 共享常量 ──────────────────────────────────────────────────────────────────
 
-_BASH_BLACKLIST = frozenset([
-    "rm", "rmdir", "del", "format", "mkfs", "dd",
-    "shutdown", "reboot", "halt", "poweroff",
-    "passwd", "sudo", "su", "chmod", "chown",
-    "crontab", "at", "nohup",
-    "wget", "curl",
-])
 _BASH_IDLE_TIMEOUT_SEC_DEFAULT = 30
 _BASH_HARD_CAP_SEC_DEFAULT = 120
 _BASH_MAX_OUTPUT_BYTES_DEFAULT = 50_000
@@ -75,14 +78,19 @@ def _bash_exec_description() -> str:
 
     The description states the concrete host OS, which shell the command runs in,
     which command family is available vs unavailable for that OS, and the list of
-    commands that are blocked regardless of OS (``_BASH_BLACKLIST``).
+    commands that are blocked regardless of OS (``BASH_BLACKLIST``).
     """
     system = platform.system()  # 'Windows' | 'Linux' | 'Darwin'
     detail = platform.platform()
-    blocked = ", ".join(sorted(_BASH_BLACKLIST))
+    blocked = ", ".join(sorted(BASH_BLACKLIST))
     blocked_note = (
         f"The following commands are blocked on every OS and will be rejected: {blocked}."
     )
+    venv_note = (
+        " python/pip run inside a .venv that is created automatically in the working "
+        "directory on first use, so installs and runs stay isolated and reproducible."
+    )
+    blocked_note = blocked_note + venv_note
     if system == "Windows":
         return (
             f"Execute a shell command and return stdout/stderr. "
@@ -163,14 +171,11 @@ async def bash_exec(
         yield CapabilityEvent(kind="error", payload={"code": "EMPTY_COMMAND", "message": "command is required"})
         return
 
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
-    if tokens and tokens[0].lower() in _BASH_BLACKLIST:
+    err = check_command_safety(command)
+    if err:
         yield CapabilityEvent(
             kind="error",
-            payload={"code": "COMMAND_BLACKLISTED", "message": f"Command '{tokens[0]}' is not allowed"},
+            payload={"code": "COMMAND_BLACKLISTED", "message": err},
         )
         return
 
@@ -184,6 +189,27 @@ async def bash_exec(
 
     logger.info("bash_exec command (repr): %r", command)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+
+    # Python .venv 引导：检测到 python/pip 类命令时在 workspace 下懒建并「激活」.venv。
+    # 每次 bash_exec 是全新子进程，故只能在子进程 env 层注入（PATH/VIRTUAL_ENV）。
+    auto_venv = ctx.extra.get("bash_auto_venv", True) if ctx else True
+    venv_dir = (ctx.extra.get("bash_venv_dir") if ctx else None) or ".venv"
+    if auto_venv and ws and command_is_python(command):
+        venv_path, _, python_exe = venv_layout(ws, venv_dir)
+        if not python_exe.exists():
+            yield CapabilityEvent(
+                kind="progress",
+                payload={"status": "creating_venv", "path": str(venv_path)},
+            )
+        try:
+            await ensure_venv(ws, venv_dir)
+        except VenvError as e:
+            yield CapabilityEvent(
+                kind="error",
+                payload={"code": "VENV_ERROR", "message": str(e)},
+            )
+            return
+        env = venv_env(env, venv_path)
 
     # The runner streams decoded output via on_output; bridge those callbacks
     # through a queue so this async generator can yield stdout events live.
@@ -523,6 +549,8 @@ class FilesystemConfig:
     bash_idle_timeout_sec: int = 30
     bash_hard_cap_sec: int = 120
     bash_max_output_bytes: int = 50_000
+    bash_auto_venv: bool = True
+    bash_venv_dir: str = ".venv"
     file_read_default_lines: int = 2000
     file_read_max_bytes: int = 262_144
     file_read_max_line_bytes: int = 4096
@@ -612,6 +640,8 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
         extra["bash_idle_timeout_sec"] = self._cfg.bash_idle_timeout_sec
         extra["bash_hard_cap_sec"] = self._cfg.bash_hard_cap_sec
         extra["bash_max_output_bytes"] = self._cfg.bash_max_output_bytes
+        extra["bash_auto_venv"] = self._cfg.bash_auto_venv
+        extra["bash_venv_dir"] = self._cfg.bash_venv_dir
         extra["file_read_default_lines"] = self._cfg.file_read_default_lines
         extra["file_read_max_bytes"] = self._cfg.file_read_max_bytes
         extra["file_read_max_line_bytes"] = self._cfg.file_read_max_line_bytes

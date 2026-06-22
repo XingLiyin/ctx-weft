@@ -13,6 +13,7 @@ import logging
 from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
+from ctx_weft.core.loop.llm_gateway import stream_llm
 from ctx_weft.core.events import EventType
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols.capability import ToolCapability
@@ -128,7 +129,7 @@ class RecognizeIntentStep(Step):
         tool_name = ""
         tool_args: dict[str, Any] = {}
         try:
-            async for chunk in ctx.llm.complete(llm_request, stream=True):
+            async for chunk in stream_llm(ctx.llm, llm_request):
                 if chunk.kind == "tool_call" and chunk.tool_call:
                     tool_name = chunk.tool_call.name
                     tool_args = chunk.tool_call.arguments

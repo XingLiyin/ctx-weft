@@ -74,3 +74,9 @@ async def test_compact_noop_when_nothing_foldable():
     outcome = await CompactStep().execute(_state(), _ctx(mem))
     assert outcome.next_step is None
     assert mem.applied == []
+
+
+async def test_summarize_for_compact_returns_llm_text():
+    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+    out = await summarize_for_compact(_state(), _ctx(_FakeMemory({})))
+    assert out == "SUMMARY"

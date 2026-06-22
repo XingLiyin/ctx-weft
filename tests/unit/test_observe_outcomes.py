@@ -103,3 +103,35 @@ def test_rule_observe_no_transcript_is_fail() -> None:
     v = ObserveStep()._rule_observe(state)
     assert v.task_outcome == "fail"
     assert t.status == "FAILED"
+
+
+# ── _should_use_llm gate tests ────────────────────────────────────────────────
+
+
+def _llm_gate_state(exit_reason: str, parent_task_id, has_role: bool = True):
+    identity = {"observe": SimpleNamespace()} if has_role else {}
+    return SimpleNamespace(
+        extra={"template": SimpleNamespace(identity=identity)},
+        act_exit_reason=exit_reason,
+        task=SimpleNamespace(parent_task_id=parent_task_id),
+    )
+
+
+def test_max_turns_forces_llm_even_for_root() -> None:
+    s = _llm_gate_state("max_turns", None, has_role=True)
+    assert ObserveStep()._should_use_llm(s) is True
+
+
+def test_root_normal_exit_stays_rule() -> None:
+    s = _llm_gate_state("normal", None, has_role=True)
+    assert ObserveStep()._should_use_llm(s) is False
+
+
+def test_no_role_stays_rule_even_at_max_turns() -> None:
+    s = _llm_gate_state("max_turns", None, has_role=False)
+    assert ObserveStep()._should_use_llm(s) is False
+
+
+def test_delegated_normal_exit_uses_llm() -> None:
+    s = _llm_gate_state("normal", "parent1", has_role=True)
+    assert ObserveStep()._should_use_llm(s) is True

@@ -14,6 +14,7 @@ from typing import Any
 from ctx_weft.core.assembler.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
+from ctx_weft.core.loop.llm_gateway import stream_llm
 from ctx_weft.protocols import MemoryEventType, MemoryLayer
 
 logger = logging.getLogger(__name__)
@@ -24,11 +25,43 @@ _AGENT_COMPACT_TYPES = [
     MemoryEventType.TASK_DISPATCH_RESULT,
     MemoryEventType.AGENT_CONVERSATION_TURN,  # root self-experience records are agent-layer foldable content
 ]
-_TASK_COMPACT_TYPES = [
+TASK_COMPACT_TYPES = [
     MemoryEventType.USER_PROMPT,
     MemoryEventType.LLM_RESPONSE,
     MemoryEventType.TOOL_RESULT,
 ]
+
+
+async def summarize_for_compact(state: LoopState, ctx: LoopContext) -> str:
+    """装配 purpose="compact" 上下文 + 一次 LLM 摘要。返回摘要文本（LLM 失败时 ""）。"""
+    agent = state.agent
+    request = ContextRequest(
+        purpose="compact",
+        scope=state.scope,
+        task=state.task,
+        agent=agent,
+        session=state.session,
+        template=state.extra.get("template"),
+        bound_capabilities=state.extra.get("bound_capabilities", []),
+        actor_transcript=state.transcript,
+    )
+    compact_prompt = await ctx.assembler.assemble(request)
+
+    summary_text = ""
+    try:
+        from ctx_weft.protocols import LLMRequest
+        llm_request = LLMRequest(
+            model=agent.runtime.get("llm_model", "mock"),
+            system=compact_prompt.system,
+            messages=compact_prompt.messages,
+            tools=[],
+        )
+        async for chunk in stream_llm(ctx.llm, llm_request):
+            if chunk.kind == "token":
+                summary_text += chunk.text
+    except Exception:
+        logger.exception("summarize_for_compact: LLM failed for agent %s, truncation-only", agent.id)
+    return summary_text
 
 
 class CompactStep(Step):
@@ -50,33 +83,8 @@ class CompactStep(Step):
             "layers": list(layers),
         })]
 
-        # 复用 act 装配 + 末尾压缩指令（composer purpose="compact"）。
-        request = ContextRequest(
-            purpose="compact",
-            scope=state.scope,
-            task=state.task,
-            agent=agent,
-            session=state.session,
-            template=state.extra.get("template"),
-            bound_capabilities=state.extra.get("bound_capabilities", []),
-            actor_transcript=state.transcript,
-        )
-        compact_prompt = await ctx.assembler.assemble(request)
-
-        summary_text = ""
-        try:
-            from ctx_weft.protocols import LLMRequest
-            llm_request = LLMRequest(
-                model=agent.runtime.get("llm_model", "mock"),
-                system=compact_prompt.system,
-                messages=compact_prompt.messages,
-                tools=[],
-            )
-            async for chunk in ctx.llm.complete(llm_request, stream=True):
-                if chunk.kind == "token":
-                    summary_text += chunk.text
-        except Exception:
-            logger.exception("CompactStep: LLM failed for agent %s, truncation-only", agent.id)
+        # 复用可重用的「装配 + 一次摘要」逻辑（observe 回退档也用它）。
+        summary_text = await summarize_for_compact(state, ctx)
 
         for layer_name in layers:
             layer = MemoryLayer(layer_name)
@@ -105,7 +113,7 @@ class CompactStep(Step):
     ) -> list[str]:
         """有足够内容可折叠（active 条数 > keep_last）的层。"""
         layers: list[str] = []
-        for layer, types in (("agent", _AGENT_COMPACT_TYPES), ("task", _TASK_COMPACT_TYPES)):
+        for layer, types in (("agent", _AGENT_COMPACT_TYPES), ("task", TASK_COMPACT_TYPES)):
             try:
                 n = await ctx.memory.count_recent(scope=state.scope, types=types, ctx=ctx.provider_ctx)
             except Exception:

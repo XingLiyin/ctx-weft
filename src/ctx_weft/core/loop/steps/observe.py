@@ -19,8 +19,10 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.events import EventType
-from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage
+from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryLayer
+from ctx_weft.core.loop.steps.compact import TASK_COMPACT_TYPES, summarize_for_compact
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
+from ctx_weft.core.loop.llm_gateway import stream_llm
 from ctx_weft.core.utils import now_utc
 
 if TYPE_CHECKING:
@@ -34,6 +36,7 @@ class Verdict:
     """Observer 输出（三态）。"""
     task_outcome: str   # "retry" | "success" | "fail"
     summary: str        # 本轮工作的简短总结（进入 memory + 父 agent 读取）
+    reported: bool = False  # 本轮是否真的走成 report_task_outcome；压缩摘要据此取信
 
 
 class ObserveStep(Step):
@@ -42,7 +45,8 @@ class ObserveStep(Step):
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
         events: list[Any] = []
 
-        if self._should_use_llm(state):
+        used_llm = self._should_use_llm(state)
+        if used_llm:
             try:
                 verdict = await self._llm_observe(state, ctx, events)
             except Exception as exc:
@@ -52,10 +56,13 @@ class ObserveStep(Step):
             verdict = self._rule_observe(state)
 
         # 机械退出（max_turns/context_limit）：任务未完成、只是耗尽 turn/context，非终态——
-        # 强制 retry 重排（覆盖 success/fail），摘要作为执行记录带入下一轮（受 max_retries 兜底）。
+        # 强制 retry 重排（覆盖 success/fail）；用 replace 保留 summary 与 reported 标记。
         if state.act_exit_reason in ("max_turns", "context_limit") and verdict.task_outcome != "retry":
-            verdict = Verdict(task_outcome="retry", summary=verdict.summary)
+            verdict = dataclasses.replace(verdict, task_outcome="retry")
             self._apply_assessment(state.task, verdict)
+
+        # max_turns 退出：压缩 task 执行层（下一轮召回从摘要 + keep_last 开始）
+        await self._maybe_compact_task(state, ctx, verdict, events)
 
         events.append(make_event(
             state, EventType.OBSERVE_COMPLETED,
@@ -63,7 +70,7 @@ class ObserveStep(Step):
                 "task_id": state.task.id,
                 "outcome": verdict.task_outcome,
                 "summary_length": len(verdict.summary),
-                "used_llm": self._should_use_llm(state),
+                "used_llm": used_llm,
             },
         ))
 
@@ -140,7 +147,7 @@ class ObserveStep(Step):
             tool_calls = []
             usage = LLMUsage()
 
-            async for chunk in ctx.llm.complete(llm_request, stream=True):
+            async for chunk in stream_llm(ctx.llm, llm_request):
                 if chunk.kind == "token":
                     accumulated_text += chunk.text
                     await ctx.event_bus.emit(make_event(
@@ -214,6 +221,7 @@ class ObserveStep(Step):
                 return Verdict(
                     task_outcome=state.task.observer_outcome or "success",
                     summary=state.task.process_report or last_text[:500],
+                    reported=True,
                 )
 
         logger.warning("ObserveStep: LLM did not call report_task_outcome in %d rounds, falling back to rules", max_rounds)
@@ -271,13 +279,72 @@ class ObserveStep(Step):
     # ── 条件判断 ──────────────────────────────────────────────────────────────
 
     def _should_use_llm(self, state: LoopState) -> bool:
-        """规则降级条件（按 task 排除）：root task 或 assigned agent 无 observe ROLE → 跳过 LLM。"""
-        # assigned agent 没有 observe ROLE → 规则降级
+        """规则降级条件（按 task 排除）：无 observe ROLE → 规则；root → 规则，
+        但 max_turns 退出强制 LLM（产出可信 process_report 作压缩摘要）。"""
+        # assigned agent 没有 observe ROLE → 规则降级（无可用 observer 装配）
         template = state.extra.get("template")
         if template is None or template.identity.get("observe") is None:
             return False
-        # root task（无 parent）→ 规则降级；委派出的子任务才需要 LLM observer 给出可上报的裁决
+        # max_turns 退出：即使 root 也要 LLM observe，绕过下面的 root 排除
+        if state.act_exit_reason == "max_turns":
+            return True
+        # root task（无 parent）→ 规则降级；委派出的子任务才需要 LLM observer
         if state.task.parent_task_id is None:
             return False
 
         return True
+
+    async def _maybe_compact_task(
+        self, state: LoopState, ctx: LoopContext, verdict: Verdict, events: list[Any]
+    ) -> None:
+        """max_turns 退出时压缩 task 执行层。
+
+        摘要来源：本轮真走成 report_task_outcome（verdict.reported）→ 复用其可信 report；
+        否则（规则降级 / 未上报）→ 专用压缩 LLM 摘要。不退薄规则文本，也不读会陈旧的持久
+        process_report（持久字段本轮未必更新，复用会丢掉本轮工作）。
+
+        仅 max_turns 在此压缩；context_limit 退出本就 token 高，交由 PrepareStep 的 token 比例
+        触发处理（spec §4），此处不重复。
+        守卫：仅当 task 层可折叠条数 > keep_last 才折（避免插入冗余摘要）。
+        下一轮 prepare 召回即从 [摘要] + keep_last 开始。
+        """
+        if state.act_exit_reason != "max_turns":
+            return
+        keep_last = state.agent.loop_config.compact_keep_last
+        try:
+            n = await ctx.memory.count_recent(
+                scope=state.scope, types=TASK_COMPACT_TYPES, ctx=ctx.provider_ctx
+            )
+        except Exception:
+            n = 0
+        if n <= keep_last:
+            return
+
+        # 来源优先级：本轮可信 report → 专用压缩 LLM 摘要 → 占位
+        if verdict.reported and verdict.summary:
+            summary = verdict.summary
+        else:
+            summary = await summarize_for_compact(state, ctx)
+        summary = summary or "[Context compacted]"
+
+        events.append(make_event(state, EventType.MEMORY_COMPACT_STARTED, payload={
+            "task_id": state.task.id,
+            "agent_id": state.agent.id,
+            "keep_last": keep_last,
+            "layers": ["task"],
+        }))
+        result = await ctx.memory.apply_compact(
+            scope=state.scope,
+            summary=summary,
+            keep_last=keep_last,
+            ctx=ctx.provider_ctx,
+            layer=MemoryLayer.TASK,
+        )
+        events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
+            "events_before": result.events_before,
+            "events_after": result.events_after,
+            "summary_event_id": result.summary_event_id,
+            "summary_length": len(summary),
+            "layer": "task",
+            "trigger": "observe_max_turns",
+        }))
