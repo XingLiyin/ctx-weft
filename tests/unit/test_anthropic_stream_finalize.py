@@ -74,6 +74,26 @@ async def test_native_tool_call_normal():
     assert usage and usage[0].usage.prompt_tokens == 7
 
 
+async def test_tool_call_streaming_emits_partial_heartbeat():
+    # input_json_delta 流式累积期间发 tool_call_partial 心跳；最终完整 tool_call 仍在收尾产出。
+    lines = [
+        _data({"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
+        _data({"type": "content_block_start", "index": 0,
+               "content_block": {"type": "tool_use", "id": "t1", "name": "read"}}),
+        _data({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "input_json_delta", "partial_json": "{\"p\":"}}),
+        _data({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "input_json_delta", "partial_json": " \"/a\"}"}}),
+        _data({"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+               "usage": {"output_tokens": 3}}),
+    ]
+    chunks = await _collect(_adapter(lines))
+    assert any(c.kind == "tool_call_partial" for c in chunks)
+    tcs = [c for c in chunks if c.kind == "tool_call"]
+    assert len(tcs) == 1
+    assert tcs[0].tool_call.arguments == {"p": "/a"}
+
+
 async def test_truncated_tool_call_raises_retriable():
     # tool_use started + partial json, but no message_delta before stream ends.
     lines = [

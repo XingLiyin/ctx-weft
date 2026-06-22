@@ -83,3 +83,34 @@ async def test_anthropic_midstream_failure_raises_retriable_without_internal_ret
         await _drive(a)
     assert exc.value.retriable is True
     assert client.calls == 1
+
+
+async def test_openai_midtoolcall_failure_raises_retriable_without_internal_retry():
+    # 工具调用参数流式中途断流（无可见文本）：现在 produced 计入工具调用进度，
+    # 必须走 retriable（任务层干净整跑），而非静默 inline 重发整个长工具调用。
+    line = "data: " + json.dumps({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "id": "t1", "function": {"name": "read", "arguments": "{\"p\":"}}]},
+        "finish_reason": None}]})
+    client = _CountingClient([line], httpx.ReadTimeout("boom"))
+    a = OpenAIAdapter(api_key="k", max_http_retries=3)
+    a._client = client
+    with pytest.raises(LLMCallError) as exc:
+        await _drive(a)
+    assert exc.value.retriable is True
+    assert client.calls == 1
+
+
+async def test_anthropic_midtoolcall_failure_raises_retriable_without_internal_retry():
+    lines = [
+        "data: " + json.dumps({"type": "content_block_start", "index": 0,
+                               "content_block": {"type": "tool_use", "id": "t1", "name": "read"}}),
+        "data: " + json.dumps({"type": "content_block_delta", "index": 0,
+                               "delta": {"type": "input_json_delta", "partial_json": "{\"p\":"}}),
+    ]
+    client = _CountingClient(lines, httpx.ReadTimeout("boom"))
+    a = AnthropicAdapter(api_key="k", max_http_retries=3)
+    a._client = client
+    with pytest.raises(LLMCallError) as exc:
+        await _drive(a)
+    assert exc.value.retriable is True
+    assert client.calls == 1

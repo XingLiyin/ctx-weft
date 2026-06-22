@@ -69,7 +69,7 @@ class LoopConfig:
     完整字段见设计文档 §6.8.2（含 compact 阈值等）。
     """
 
-    max_turns_per_act: int = 10
+    max_turns_per_act: int = 50
     max_turns_per_observe: int = 5       # ObserveStep ReAct 循环上限
     max_turns_per_agent: int = 20
     timeout_per_step_sec: int = 120

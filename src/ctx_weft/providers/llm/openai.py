@@ -84,7 +84,12 @@ class OpenAIAdapter(LLMClient):
             usage: LLMUsage | None = None
             gate = ContentGate()  # 增量剥离 <think>/<tool_call> 标签
             try:
-                async with self._client.stream("POST", url, headers=headers, json=payload) as resp:
+                # 流式连接禁用 read 超时：长工具调用/思考可能让分片间隔超过常规 read 超时，
+                # 触发 ReadTimeout → 被误当 transport 断流重发整个请求。connect 超时仍保护死端点。
+                async with self._client.stream(
+                    "POST", url, headers=headers, json=payload,
+                    timeout=httpx.Timeout(self._timeout, read=None),
+                ) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
                         err_body = body.decode()
@@ -158,7 +163,8 @@ class OpenAIAdapter(LLMClient):
                                 produced = True
                                 yield LLMChunk(kind="token", text=tok)
 
-                        for tc_delta in (delta.get("tool_calls") or []):
+                        tc_deltas = delta.get("tool_calls") or []
+                        for tc_delta in tc_deltas:
                             idx = tc_delta.get("index", 0)
                             if idx not in tool_call_buffers:
                                 tool_call_buffers[idx] = {"id": "", "name": "", "arguments": ""}
@@ -172,6 +178,13 @@ class OpenAIAdapter(LLMClient):
                             args = fn.get("arguments")
                             if args:
                                 buf["arguments"] += args if isinstance(args, str) else json.dumps(args)
+                        if tc_deltas:
+                            # 工具调用参数流式累积期间不产出 token：消费者的 async-for 会一直挂起，
+                            # act 流式循环顶部的暂停/取消检查点无从触发 → 发个无负载心跳让其有机会运行。
+                            # 同时标记 produced：本轮已在生成工具调用，若此后 transport 断流，走 retriable
+                            # 让任务层干净整跑，而非静默 inline 重发整个长工具调用（见 except 分支）。
+                            produced = True
+                            yield LLMChunk(kind="tool_call_partial")
 
                     # 流以任何方式结束（[DONE] / 自然结束）→ 统一收尾：截断判定、
                     # native 规整、文本/思考还原、usage、done（见 _finalize）。
@@ -191,6 +204,10 @@ class OpenAIAdapter(LLMClient):
                 # 已吐过 chunk（流中断）→ 不在 adapter 内重试（会重复 token），
                 # 抛 retriable 让 TaskManager 整任务干净重跑。
                 if produced:
+                    logger.warning(
+                        "OpenAI stream interrupted mid-flight (tool_call_in_progress=%s): %s",
+                        bool(tool_call_buffers), exc,
+                    )
                     raise LLMCallError(
                         f"LLM stream interrupted mid-flight: {exc}", retriable=True
                     ) from exc

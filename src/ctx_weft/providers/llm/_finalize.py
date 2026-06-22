@@ -9,6 +9,8 @@ adapter 各自把 native 缓冲解析成 ``list[ToolCall]`` 后调本函数，�
 
 from __future__ import annotations
 
+import logging
+
 from ctx_weft.protocols import LLMCallError, LLMChunk, LLMUsage, ToolCall
 from ctx_weft.core.utils import generate_id
 from ctx_weft.providers.llm.text_calls import (
@@ -17,6 +19,8 @@ from ctx_weft.providers.llm.text_calls import (
     extract_think,
     parse_tool_calls_from_text,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def build_finalize_chunks(
@@ -36,6 +40,11 @@ def build_finalize_chunks(
     """
     # D1：缓冲里有半截 tool call，但流没等到终止事件就结束 → 截断，当错误重试。
     if not saw_terminal and had_native_buffer:
+        logger.warning(
+            "LLM stream ended before tool call completed (truncated); retriable rerun. "
+            "parsed_tool_calls=%d finish_reason=%s",
+            len(native_tool_calls), finish_reason,
+        )
         raise LLMCallError(
             "LLM stream ended before tool call completed (truncated response)",
             retriable=True,

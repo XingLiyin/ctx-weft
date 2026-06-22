@@ -88,7 +88,12 @@ class AnthropicAdapter(LLMClient):
             gate = ContentGate()  # 增量剥离 <think>/<tool_call> 标签
 
             try:
-                async with self._client.stream("POST", url, headers=headers, json=payload) as resp:
+                # 流式连接禁用 read 超时：长工具调用/思考可能让分片间隔超过常规 read 超时，
+                # 触发 ReadTimeout → 被误当 transport 断流重发整个请求。connect 超时仍保护死端点。
+                async with self._client.stream(
+                    "POST", url, headers=headers, json=payload,
+                    timeout=httpx.Timeout(self._timeout, read=None),
+                ) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
                         err_body = body.decode()
@@ -174,6 +179,11 @@ class AnthropicAdapter(LLMClient):
                                 partial = delta.get("partial_json") or ""
                                 if idx in tool_blocks:
                                     tool_blocks[idx]["arguments"] += partial
+                                    # 见 openai.py：工具调用参数流式期间发无负载心跳，让 act 流式
+                                    # 循环顶部的暂停/取消检查点有机会运行；并标记 produced 使断流走
+                                    # retriable（任务层干净整跑），而非静默 inline 重发整个长工具调用。
+                                    produced = True
+                                    yield LLMChunk(kind="tool_call_partial")
 
                         elif event_type == "message_delta":
                             stop_reason = event.get("delta", {}).get("stop_reason")
@@ -206,6 +216,10 @@ class AnthropicAdapter(LLMClient):
                 # 已吐过 chunk（流中断）→ 不在 adapter 内重试（会重复 token），
                 # 抛 retriable 让 TaskManager 整任务干净重跑。
                 if produced:
+                    logger.warning(
+                        "Anthropic stream interrupted mid-flight (tool_call_in_progress=%s): %s",
+                        bool(tool_blocks), exc,
+                    )
                     raise LLMCallError(
                         f"LLM stream interrupted mid-flight: {exc}", retriable=True
                     ) from exc

@@ -105,6 +105,23 @@ async def test_truncated_tool_call_raises_retriable():
     assert exc.value.retriable is True
 
 
+async def test_tool_call_streaming_emits_partial_heartbeat():
+    # 工具调用参数流式累积期间发 tool_call_partial 心跳，让 act 流式循环顶部的
+    # 暂停/取消检查点有机会触发；最终完整 tool_call 仍在收尾一次性产出。
+    lines = [
+        _delta({"tool_calls": [{"index": 0, "id": "t1",
+                                "function": {"name": "read", "arguments": "{\"p\":"}}]}),
+        _delta({"tool_calls": [{"index": 0, "function": {"arguments": " \"/a\"}"}}]}),
+        _delta({}, finish_reason="tool_calls"),
+        "data: [DONE]",
+    ]
+    chunks = await _collect(_adapter(lines))
+    assert any(c.kind == "tool_call_partial" for c in chunks)
+    tcs = [c for c in chunks if c.kind == "tool_call"]
+    assert len(tcs) == 1
+    assert tcs[0].tool_call.arguments == {"p": "/a"}
+
+
 async def test_text_embedded_tool_call_recovered():
     payload = '<tool_call>{"name": "write", "arguments": {"p": "/a"}}</tool_call>'
     lines = [

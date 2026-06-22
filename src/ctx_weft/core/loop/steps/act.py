@@ -120,6 +120,10 @@ class ActStep(Step):
                     ))
                 elif chunk.kind == "tool_call" and chunk.tool_call is not None:
                     tool_calls.append(chunk.tool_call)
+                elif chunk.kind == "tool_call_partial":
+                    # 工具调用参数流式期间的心跳：不携带数据，仅为让上面的暂停/取消检查点
+                    # 有机会触发（adapter 累积工具调用参数时不产出 token）。此处刻意不累积。
+                    pass
                 elif chunk.kind == "usage" and chunk.usage is not None:
                     usage = chunk.usage
 
