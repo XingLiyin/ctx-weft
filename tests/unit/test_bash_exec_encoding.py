@@ -45,3 +45,4 @@ async def test_bash_exec_merges_extra_env(monkeypatch):
     await _collect(fsprov.bash_exec("echo hi", ctx=ctx))
 
     assert captured["env"]["SKILL_DIR"] == "X_MARK"
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"  # base key survives the merge

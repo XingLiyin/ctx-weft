@@ -191,7 +191,7 @@ async def bash_exec(
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     # 调用方(如 skill 委托执行)注入的额外环境变量(如 SKILL_DIR)。venv_env 之后会保留这些键。
     _extra_env = ctx.extra.get("extra_env") if ctx else None
-    if _extra_env:
+    if isinstance(_extra_env, dict) and _extra_env:
         env.update(_extra_env)
 
     # Python .venv 引导：检测到 python/pip 类命令时在 workspace 下懒建并「激活」.venv。
