@@ -2,6 +2,7 @@
 
 import os
 import platform
+import sys
 
 import pytest
 
@@ -137,6 +138,59 @@ async def test_ensure_venv_failure_raises(tmp_path, monkeypatch):
         await ensure_venv(tmp_path, ".venv")
 
 
+async def test_ensure_venv_uses_creator_python(tmp_path, monkeypatch):
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    _, _, python_exe = venv_layout(tmp_path, ".venv")
+    seen = {}
+
+    # Create a real file for creator_python so the existence pre-check passes
+    fake_creator = tmp_path / "fake_python"
+    fake_creator.write_text("#!/fake/python")
+    creator_python_path = str(fake_creator)
+
+    async def fake_exec(*args, **kwargs):
+        seen["argv"] = args
+
+        def make_exe():
+            python_exe.parent.mkdir(parents=True, exist_ok=True)
+            python_exe.write_text("#!fake")
+
+        return _FakeProc(0, make_exe)
+
+    monkeypatch.setattr(_venv.asyncio, "create_subprocess_exec", fake_exec)
+
+    created = await ensure_venv(tmp_path, ".venv", creator_python=creator_python_path)
+    assert created is True
+    assert seen["argv"][0] == creator_python_path   # not sys.executable
+    assert seen["argv"][1:3] == ("-m", "venv")
+
+
+async def test_ensure_venv_defaults_to_sys_executable(tmp_path, monkeypatch):
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    _, _, python_exe = venv_layout(tmp_path, ".venv")
+    seen = {}
+
+    async def fake_exec(*args, **kwargs):
+        seen["argv"] = args
+
+        def make_exe():
+            python_exe.parent.mkdir(parents=True, exist_ok=True)
+            python_exe.write_text("#!fake")
+
+        return _FakeProc(0, make_exe)
+
+    monkeypatch.setattr(_venv.asyncio, "create_subprocess_exec", fake_exec)
+
+    await ensure_venv(tmp_path, ".venv")  # creator_python omitted
+    assert seen["argv"][0] == sys.executable
+
+
+async def test_ensure_venv_missing_creator_python_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    with pytest.raises(VenvError, match="creator python not found"):
+        await ensure_venv(tmp_path, ".venv", creator_python="/no/such/python")
+
+
 # ── 集成：bash_exec venv 引导 ───────────────────────────────────────────────────
 
 
@@ -163,7 +217,7 @@ def _spy_shell_env(monkeypatch, captured):
 async def test_bash_exec_python_triggers_venv(tmp_path, monkeypatch):
     calls = {"n": 0}
 
-    async def fake_ensure(workspace, venv_dir):
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
         calls["n"] += 1
         return True
 
@@ -183,7 +237,7 @@ async def test_bash_exec_python_triggers_venv(tmp_path, monkeypatch):
 async def test_bash_exec_python_disabled(tmp_path, monkeypatch):
     calls = {"n": 0}
 
-    async def fake_ensure(workspace, venv_dir):
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
         calls["n"] += 1
         return True
 
@@ -204,7 +258,7 @@ async def test_bash_exec_python_disabled(tmp_path, monkeypatch):
 async def test_bash_exec_non_python_no_venv(tmp_path, monkeypatch):
     calls = {"n": 0}
 
-    async def fake_ensure(workspace, venv_dir):
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
         calls["n"] += 1
         return True
 
@@ -222,7 +276,7 @@ async def test_bash_exec_non_python_no_venv(tmp_path, monkeypatch):
 
 
 async def test_bash_exec_venv_error_surfaced(tmp_path, monkeypatch):
-    async def fake_ensure(workspace, venv_dir):
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
         raise VenvError("disk full")
 
     monkeypatch.setattr(fsprov, "ensure_venv", fake_ensure)
@@ -240,3 +294,23 @@ async def test_bash_exec_blocks_chained_blacklist(tmp_path):
     events = await _collect(fsprov.bash_exec("echo a && rm -rf x", ctx=ctx))
     errors = [e for e in events if e.kind == "error"]
     assert any(e.payload.get("code") == "COMMAND_BLACKLISTED" for e in errors)
+
+
+async def test_bash_exec_forwards_venv_python(tmp_path, monkeypatch):
+    seen = {}
+
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
+        seen["creator_python"] = creator_python
+        return True
+
+    monkeypatch.setattr(fsprov, "ensure_venv", fake_ensure)
+    captured: dict = {}
+    _spy_shell_env(monkeypatch, captured)
+
+    ctx = ProviderContext(session_id="s1", extra={
+        "workspace": str(tmp_path), "bash_auto_venv": True, "bash_venv_dir": ".venv",
+        "bash_venv_python": "/opt/py/bin/python",
+    })
+    await _collect(fsprov.bash_exec("python -V", ctx=ctx))
+
+    assert seen["creator_python"] == "/opt/py/bin/python"

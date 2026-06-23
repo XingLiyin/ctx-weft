@@ -194,6 +194,7 @@ async def bash_exec(
     # 每次 bash_exec 是全新子进程，故只能在子进程 env 层注入（PATH/VIRTUAL_ENV）。
     auto_venv = ctx.extra.get("bash_auto_venv", True) if ctx else True
     venv_dir = (ctx.extra.get("bash_venv_dir") if ctx else None) or ".venv"
+    venv_python = ctx.extra.get("bash_venv_python") if ctx else None
     if auto_venv and ws and command_is_python(command):
         venv_path, _, python_exe = venv_layout(ws, venv_dir)
         if not python_exe.exists():
@@ -202,7 +203,7 @@ async def bash_exec(
                 payload={"status": "creating_venv", "path": str(venv_path)},
             )
         try:
-            await ensure_venv(ws, venv_dir)
+            await ensure_venv(ws, venv_dir, creator_python=venv_python)
         except VenvError as e:
             yield CapabilityEvent(
                 kind="error",
@@ -551,6 +552,7 @@ class FilesystemConfig:
     bash_max_output_bytes: int = 50_000
     bash_auto_venv: bool = True
     bash_venv_dir: str = ".venv"
+    bash_venv_python: str | None = None  # 创建 venv 用的真 Python；None=回退 sys.executable
     file_read_default_lines: int = 2000
     file_read_max_bytes: int = 262_144
     file_read_max_line_bytes: int = 4096
@@ -642,6 +644,7 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
         extra["bash_max_output_bytes"] = self._cfg.bash_max_output_bytes
         extra["bash_auto_venv"] = self._cfg.bash_auto_venv
         extra["bash_venv_dir"] = self._cfg.bash_venv_dir
+        extra["bash_venv_python"] = self._cfg.bash_venv_python
         extra["file_read_default_lines"] = self._cfg.file_read_default_lines
         extra["file_read_max_bytes"] = self._cfg.file_read_max_bytes
         extra["file_read_max_line_bytes"] = self._cfg.file_read_max_line_bytes

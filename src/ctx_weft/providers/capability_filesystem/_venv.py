@@ -75,20 +75,31 @@ def _lock_for(workspace: Path) -> asyncio.Lock:
     return lock
 
 
-async def ensure_venv(workspace: Path, venv_dir: str) -> bool:
-    """懒创建：python_exe 已存在则返回 False（无操作）；否则用宿主 sys.executable -m venv
-    创建，返回 True。锁内二次检查存在性（double-checked）避免并发重复创建。创建失败 raise
-    VenvError。"""
+async def ensure_venv(
+    workspace: Path, venv_dir: str, creator_python: str | None = None
+) -> bool:
+    """懒创建：python_exe 已存在则返回 False（无操作）；否则用 ``creator_python``
+    （未给则回退宿主 ``sys.executable``）跑 ``-m venv`` 创建，返回 True。锁内二次检查
+    存在性（double-checked）避免并发重复创建。创建失败 raise VenvError。
+
+    creator_python：用于创建 venv 的「真 Python」解释器路径。打包（PyInstaller 冻结）
+    形态下 ``sys.executable`` 是 app exe、无法 ``-m venv``，故由 host 注入随包内置的
+    Python。给了但文件不存在 → 直接 VenvError（前置条件，不静默回退）。
+    """
     venv_path, _, python_exe = venv_layout(workspace, venv_dir)
     if python_exe.exists():
         return False
+
+    if creator_python is not None and not Path(creator_python).exists():
+        raise VenvError(f"creator python not found: {creator_python}")
+    python = creator_python or sys.executable
 
     async with _lock_for(workspace):
         if python_exe.exists():  # double-checked：等锁期间别人可能已建好
             return False
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "venv", str(venv_path),
+                python, "-m", "venv", str(venv_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -98,7 +109,9 @@ async def ensure_venv(workspace: Path, venv_dir: str) -> bool:
 
         if proc.returncode != 0:
             detail = (stderr or b"").decode("utf-8", errors="replace").strip()
-            raise VenvError(f"venv creation failed (exit {proc.returncode}): {detail}")
+            raise VenvError(
+                f"venv creation failed (exit {proc.returncode}) using {python}: {detail}"
+            )
         if not python_exe.exists():
             raise VenvError(f"venv creation did not produce {python_exe}")
         return True
