@@ -51,10 +51,14 @@ EXEC_SCRIPT_NAME = qualify(f"{PROVIDER_NAME}:exec_script")
 _SKILL_EXECUTOR_TOOLS: dict[str, tuple[ToolCapability, Callable, frozenset[str]]] = {}
 
 
-def skill_executor_tool(fn: Callable) -> Callable:
+def skill_executor_tool(fn: Callable | None = None, *, spillable: bool = True) -> Callable:
     """装饰器：从 Annotated 注解提取 schema，注册到 _SKILL_EXECUTOR_TOOLS。
     runtime-injected 参数（ctx / skill_provider / skill_name）从 schema 排除。
+    spillable=False 的只读工具（read_file / list_files）输出原样返回，不截断/落盘。
+    支持裸用 @skill_executor_tool 与带参 @skill_executor_tool(spillable=False)。
     """
+    if fn is None:
+        return lambda f: skill_executor_tool(f, spillable=spillable)
     first_line = (fn.__doc__ or "").strip().split("\n")[0].strip()
     cap = ToolCapability(
         id=f"{PROVIDER_NAME}:{fn.__name__}",
@@ -64,6 +68,7 @@ def skill_executor_tool(fn: Callable) -> Callable:
         description=first_line,
         input_schema=extract_schema(fn, exclude=_SKIP),
         side_effects=False,
+        spillable=spillable,
     )
     valid_keys = frozenset(inspect.signature(fn).parameters.keys()) - _SKIP
     _SKILL_EXECUTOR_TOOLS[fn.__name__] = (cap, fn, valid_keys)
@@ -80,7 +85,7 @@ class SkillResult:
 
 # ── 工具定义 ──────────────────────────────────────────────────────────────────
 
-@skill_executor_tool
+@skill_executor_tool(spillable=False)
 async def list_files(
     pattern: Annotated[str, "Glob pattern to match files within the skill directory (default '**/*')"] = "**/*",
     limit: Annotated[int, "Maximum number of results to return (default 200)"] = 200,
@@ -94,7 +99,7 @@ async def list_files(
     return SkillResult(content=content)
 
 
-@skill_executor_tool
+@skill_executor_tool(spillable=False)
 async def read_file(
     path: Annotated[str, "Relative path to a file within the skill directory"],
     *,
