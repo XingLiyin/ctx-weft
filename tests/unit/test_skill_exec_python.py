@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+
+from ctx_weft.protocols.capability import CapabilityEvent
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.providers._script_runner import RunResult
 from ctx_weft.providers.capability_skill_local import provider as skillprov
@@ -72,10 +75,6 @@ async def test_exec_script_appends_args(tmp_path, monkeypatch):
     assert captured["command"].endswith('run.py" --flag x')
 
 
-import pytest
-from ctx_weft.protocols.capability import CapabilityEvent
-
-
 def _result_runner(content="OUT", exit_code=0):
     async def runner(command, ctx):
         runner.command = command
@@ -95,6 +94,16 @@ async def test_exec_script_delegates_to_bash_runner(tmp_path):
     assert runner.command.endswith('run.py" --x 1')
     assert runner.extra["extra_env"]["SKILL_DIR"].endswith("py-skill")
     assert runner.extra["bash_hard_cap_sec"] == 600  # skill's own default
+
+
+async def test_exec_script_preserves_existing_extra_env(tmp_path):
+    skills_dir = _make_skill(tmp_path, "scripts/run.py", "print('hi')\n")
+    runner = _result_runner("OUT")
+    prov = LocalSkillCapabilityProvider(skills_dir, bash_runner=runner)
+    ctx = ProviderContext(session_id="s1", extra={"extra_env": {"FOO": "bar"}})
+    await prov.exec_script("py-skill", "scripts/run.py", "", ctx)
+    assert runner.extra["extra_env"]["FOO"] == "bar"          # pre-existing key kept
+    assert runner.extra["extra_env"]["SKILL_DIR"].endswith("py-skill")
 
 
 async def test_exec_script_non_py_delegates_without_python(tmp_path):

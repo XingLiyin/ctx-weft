@@ -217,7 +217,9 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
             return await self._exec_via_bash(skill_root, resolved, args, ctx)
         return await self._exec_direct(skill_root, resolved, args)
 
-    async def _exec_via_bash(self, skill_root, resolved, args, ctx) -> str:
+    async def _exec_via_bash(
+        self, skill_root: Path, resolved: Path, args: str, ctx: ProviderContext
+    ) -> str:
         """委托给 bash_exec 流水线:.py 用裸 python(由 venv 激活解析),脚本走绝对路径。
         注入 SKILL_DIR 与 skill 自己的超时;收集 result/error 事件转成返回值/异常。"""
         base = f'python "{resolved}"' if resolved.suffix == ".py" else f'"{resolved}"'
@@ -245,7 +247,7 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
             raise RuntimeError(f"script exited with code {exit_code}\n{content[: self._output_limit_chars]}")
         return content[: self._output_limit_chars]
 
-    async def _exec_direct(self, skill_root, resolved, args) -> str:
+    async def _exec_direct(self, skill_root: Path, resolved: Path, args: str) -> str:
         """无 bash_runner 时的回退:本地直跑,cwd=skill_dir,解释器用内置/裸 python。"""
         if resolved.suffix == ".py":
             interp = self._python_executable or "python"
