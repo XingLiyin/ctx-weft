@@ -52,3 +52,28 @@ def test_invoke_injects_venv_config(tmp_path):
     assert captured["extra"]["bash_auto_venv"] is False
     assert captured["extra"]["bash_venv_dir"] == "venv"
     assert captured["extra"]["bash_venv_python"] == "/x/py"
+
+
+def test_invoke_lets_caller_override_timeouts(tmp_path):
+    p = FilesystemToolsProvider(FilesystemConfig(bash_hard_cap_sec=120))
+    p.register_session("s1", str(tmp_path))
+    captured = {}
+
+    async def fake_dispatch(cap_id, args, ctx):
+        captured["extra"] = ctx.extra
+        return
+        yield  # pragma: no cover — make it an async generator
+
+    p._dispatch = fake_dispatch  # type: ignore[method-assign]
+    ctx = ProviderContext(session_id="s1", extra={"bash_hard_cap_sec": 999})
+    gen = p.invoke("fs:bash_exec", {"command": "echo hi"}, ctx)
+
+    import asyncio
+
+    async def drain():
+        async for _ in gen:
+            pass
+
+    asyncio.run(drain())
+    assert captured["extra"]["bash_hard_cap_sec"] == 999          # caller value preserved
+    assert captured["extra"]["bash_venv_python"] is None          # fs-forced key still set

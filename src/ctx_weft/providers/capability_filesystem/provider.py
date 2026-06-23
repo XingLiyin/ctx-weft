@@ -643,9 +643,10 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
             extra["workspace"] = ws
         if self._cfg.allowed_dirs:
             extra["allowed_dirs"] = self._cfg.allowed_dirs
-        extra["bash_idle_timeout_sec"] = self._cfg.bash_idle_timeout_sec
-        extra["bash_hard_cap_sec"] = self._cfg.bash_hard_cap_sec
-        extra["bash_max_output_bytes"] = self._cfg.bash_max_output_bytes
+        # 限额类:调用方(如 skill 委托)可经 ctx.extra 覆盖;未给才用 fs 配置。
+        extra.setdefault("bash_idle_timeout_sec", self._cfg.bash_idle_timeout_sec)
+        extra.setdefault("bash_hard_cap_sec", self._cfg.bash_hard_cap_sec)
+        extra.setdefault("bash_max_output_bytes", self._cfg.bash_max_output_bytes)
         extra["bash_auto_venv"] = self._cfg.bash_auto_venv
         extra["bash_venv_dir"] = self._cfg.bash_venv_dir
         extra["bash_venv_python"] = self._cfg.bash_venv_python
