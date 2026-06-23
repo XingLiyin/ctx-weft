@@ -1,3 +1,5 @@
+import asyncio
+
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.providers.capability_filesystem.provider import (
     FilesystemConfig,
@@ -26,54 +28,57 @@ def test_fs_provider_holds_config():
     assert p._cfg.glob_max_results == 5
 
 
+def _capture_invoke_extra(provider, ctx) -> dict:
+    """跑一次 invoke,捕获派发时的 ctx.extra(用 fake _dispatch,不真执行工具)。"""
+    captured = {}
+
+    async def fake_dispatch(cap_id, args, ctx):
+        captured["extra"] = ctx.extra
+        return
+        yield  # pragma: no cover — make it an async generator
+
+    provider._dispatch = fake_dispatch  # type: ignore[method-assign]
+    gen = provider.invoke("fs:bash_exec", {"command": "echo hi"}, ctx)
+
+    async def drain():
+        async for _ in gen:
+            pass
+
+    asyncio.run(drain())
+    return captured["extra"]
+
+
 def test_invoke_injects_venv_config(tmp_path):
     p = FilesystemToolsProvider(FilesystemConfig(
         bash_auto_venv=False, bash_venv_dir="venv", bash_venv_python="/x/py"
     ))
     p.register_session("s1", str(tmp_path))
-    captured = {}
+    extra = _capture_invoke_extra(p, ProviderContext(session_id="s1"))
+    assert extra["bash_auto_venv"] is False
+    assert extra["bash_venv_dir"] == "venv"
+    assert extra["bash_venv_python"] == "/x/py"
 
-    async def fake_dispatch(cap_id, args, ctx):
-        captured["extra"] = ctx.extra
-        return
-        yield  # pragma: no cover — make it an async generator
 
-    p._dispatch = fake_dispatch  # type: ignore[method-assign]
-    ctx = ProviderContext(session_id="s1")
-    gen = p.invoke("fs:bash_exec", {"command": "echo hi"}, ctx)
-
-    import asyncio
-
-    async def drain():
-        async for _ in gen:
-            pass
-
-    asyncio.run(drain())
-    assert captured["extra"]["bash_auto_venv"] is False
-    assert captured["extra"]["bash_venv_dir"] == "venv"
-    assert captured["extra"]["bash_venv_python"] == "/x/py"
+def test_invoke_fills_limit_defaults_from_config(tmp_path):
+    # 调用方未给限额 → 用 fs 配置(此处即默认值)。
+    p = FilesystemToolsProvider(FilesystemConfig())
+    p.register_session("s1", str(tmp_path))
+    extra = _capture_invoke_extra(p, ProviderContext(session_id="s1"))
+    assert extra["bash_idle_timeout_sec"] == 30
+    assert extra["bash_hard_cap_sec"] == 120
+    assert extra["bash_max_output_bytes"] == 50_000
 
 
 def test_invoke_lets_caller_override_timeouts(tmp_path):
-    p = FilesystemToolsProvider(FilesystemConfig(bash_hard_cap_sec=120))
+    p = FilesystemToolsProvider(FilesystemConfig())  # config defaults 30/120/50000
     p.register_session("s1", str(tmp_path))
-    captured = {}
-
-    async def fake_dispatch(cap_id, args, ctx):
-        captured["extra"] = ctx.extra
-        return
-        yield  # pragma: no cover — make it an async generator
-
-    p._dispatch = fake_dispatch  # type: ignore[method-assign]
-    ctx = ProviderContext(session_id="s1", extra={"bash_hard_cap_sec": 999})
-    gen = p.invoke("fs:bash_exec", {"command": "echo hi"}, ctx)
-
-    import asyncio
-
-    async def drain():
-        async for _ in gen:
-            pass
-
-    asyncio.run(drain())
-    assert captured["extra"]["bash_hard_cap_sec"] == 999          # caller value preserved
-    assert captured["extra"]["bash_venv_python"] is None          # fs-forced key still set
+    ctx = ProviderContext(session_id="s1", extra={
+        "bash_idle_timeout_sec": 11,
+        "bash_hard_cap_sec": 999,
+        "bash_max_output_bytes": 123,
+    })
+    extra = _capture_invoke_extra(p, ctx)
+    assert extra["bash_idle_timeout_sec"] == 11          # all three overridable
+    assert extra["bash_hard_cap_sec"] == 999
+    assert extra["bash_max_output_bytes"] == 123
+    assert extra["bash_venv_python"] is None             # fs-forced key still set

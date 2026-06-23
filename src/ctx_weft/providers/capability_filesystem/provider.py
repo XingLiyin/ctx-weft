@@ -647,6 +647,7 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
         extra.setdefault("bash_idle_timeout_sec", self._cfg.bash_idle_timeout_sec)
         extra.setdefault("bash_hard_cap_sec", self._cfg.bash_hard_cap_sec)
         extra.setdefault("bash_max_output_bytes", self._cfg.bash_max_output_bytes)
+        # 以下为 fs 强制(不可被调用方覆盖):workspace/venv 引导/读取与搜索限额。
         extra["bash_auto_venv"] = self._cfg.bash_auto_venv
         extra["bash_venv_dir"] = self._cfg.bash_venv_dir
         extra["bash_venv_python"] = self._cfg.bash_venv_python
