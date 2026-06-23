@@ -191,6 +191,27 @@ async def test_ensure_venv_missing_creator_python_raises(tmp_path, monkeypatch):
         await ensure_venv(tmp_path, ".venv", creator_python="/no/such/python")
 
 
+async def test_ensure_venv_hides_console_window(tmp_path, monkeypatch):
+    """建 venv 拉起 python.exe 时不应闪黑窗：须传 creationflags（Windows=CREATE_NO_WINDOW）。"""
+    import subprocess
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    _, _, python_exe = venv_layout(tmp_path, ".venv")
+    seen = {}
+
+    async def fake_exec(*args, **kwargs):
+        seen["kwargs"] = kwargs
+
+        def make_exe():
+            python_exe.parent.mkdir(parents=True, exist_ok=True)
+            python_exe.write_text("#!fake")
+
+        return _FakeProc(0, make_exe)
+
+    monkeypatch.setattr(_venv.asyncio, "create_subprocess_exec", fake_exec)
+    await ensure_venv(tmp_path, ".venv")
+    assert seen["kwargs"].get("creationflags") == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 # ── 集成：bash_exec venv 引导 ───────────────────────────────────────────────────
 
 

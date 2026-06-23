@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -20,6 +21,11 @@ from dataclasses import dataclass, field
 import psutil
 
 logger = logging.getLogger(__name__)
+
+# 冻结态 GUI 后端（console=False）派生控制台子进程（cmd/python/rg…）时，Windows 会
+# 闪一个黑窗。输出都走管道、子进程不需要控制台，故建进程时禁建窗口。非 Windows 无此
+# 常量 → 取 0（subprocess.Popen 各平台都接受 creationflags，POSIX 上忽略）。
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 # ── liveness primitives ───────────────────────────────────────────────────────
@@ -165,6 +171,7 @@ async def spawn_contained(command: str, *, cwd: str | None, env: dict | None):
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
+            creationflags=_CREATE_NO_WINDOW,
         )
         h_job = _make_windows_job()
         if h_job is not None:

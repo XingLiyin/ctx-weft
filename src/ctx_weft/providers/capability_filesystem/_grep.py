@@ -117,6 +117,8 @@ def _rg_base_args(pattern: str, root: Path, file_glob: str | None, ignore_case: 
 def _run_rg(rg: str, args: list[str]) -> subprocess.CompletedProcess:
     proc = subprocess.run(
         [rg, *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+        # 冻结态 GUI 后端拉起 rg.exe 时 Windows 会闪黑窗；输出走管道、不需控制台。
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if proc.returncode >= 2:  # 0=有命中 1=无命中 2+=错误
         raise RuntimeError(proc.stderr.strip() or f"ripgrep exited {proc.returncode}")

@@ -1,8 +1,11 @@
 import asyncio
 import os
+import platform
+import subprocess
 import sys
 
 import psutil
+import pytest
 
 from ctx_weft.providers._script_runner import (
     LivenessSample,
@@ -57,6 +60,24 @@ def test_collect_tree_metrics_dead_pid():
 
 
 # ── containment + termination ─────────────────────────────────────────────────
+
+
+async def test_spawn_contained_hides_console_window_on_windows(monkeypatch):
+    """冻结态 GUI 后端派生 cmd 时不应闪黑窗：Windows 分支须带 CREATE_NO_WINDOW。"""
+    if platform.system() != "Windows":
+        pytest.skip("console-window flag is Windows-only")
+    captured = {}
+    real = asyncio.create_subprocess_shell
+
+    async def spy(cmd, **kw):
+        captured["creationflags"] = kw.get("creationflags")
+        return await real(cmd, **kw)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", spy)
+    proc, handle = await spawn_contained("echo hi", cwd=None, env=None)
+    await proc.communicate()
+    await terminate_tree(proc, handle)
+    assert captured["creationflags"] & subprocess.CREATE_NO_WINDOW
 
 
 async def test_terminate_tree_kills_child_and_grandchild():
