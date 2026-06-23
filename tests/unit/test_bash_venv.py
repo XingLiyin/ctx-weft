@@ -314,8 +314,3 @@ async def test_bash_exec_forwards_venv_python(tmp_path, monkeypatch):
     await _collect(fsprov.bash_exec("python -V", ctx=ctx))
 
     assert seen["creator_python"] == "/opt/py/bin/python"
-
-
-def test_filesystem_config_has_venv_python_default_none():
-    cfg = fsprov.FilesystemConfig()
-    assert cfg.bash_venv_python is None

@@ -17,6 +17,7 @@ def test_fs_config_defaults():
     assert c.glob_max_results == 500
     assert c.bash_auto_venv is True
     assert c.bash_venv_dir == ".venv"
+    assert c.bash_venv_python is None
     assert not hasattr(c, "file_max_read_bytes")
 
 
@@ -26,7 +27,9 @@ def test_fs_provider_holds_config():
 
 
 def test_invoke_injects_venv_config(tmp_path):
-    p = FilesystemToolsProvider(FilesystemConfig(bash_auto_venv=False, bash_venv_dir="venv"))
+    p = FilesystemToolsProvider(FilesystemConfig(
+        bash_auto_venv=False, bash_venv_dir="venv", bash_venv_python="/x/py"
+    ))
     p.register_session("s1", str(tmp_path))
     captured = {}
 
@@ -48,3 +51,4 @@ def test_invoke_injects_venv_config(tmp_path):
     asyncio.run(drain())
     assert captured["extra"]["bash_auto_venv"] is False
     assert captured["extra"]["bash_venv_dir"] == "venv"
+    assert captured["extra"]["bash_venv_python"] == "/x/py"
