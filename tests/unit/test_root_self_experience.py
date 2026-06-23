@@ -131,6 +131,51 @@ async def test_many_turns_writes_dispatch_pair() -> None:
     assert turns == []
 
 
+async def test_conversation_appends_clean_final_answer() -> None:
+    """finish_task 收尾的 root：经验末尾须补一条 role=assistant、内容=task.outputs、不含 Process Report。
+
+    答复经 finish_task 进 task.outputs（SILENT，不入 task 层），那轮 LLM_RESPONSE content 为空，
+    所以 conversation 重建本来只剩 USER_PROMPT。修复后须补回最终答复，且只放纯答复（不带 report
+    格式，避免带偏后续 assistant 回复风格）。
+    """
+    mem = InMemoryMemoryProvider()
+    scope = _sc()
+    # task layer: user prompt + one EMPTY finish turn (answer lives in task.outputs)
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=scope, content="who are you?",
+                                 timestamp=_BASE, role="user"), _ctx())
+    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=scope, content="",
+                                 timestamp=_BASE + timedelta(seconds=1), role="assistant",
+                                 metadata={"tool_calls": []}), _ctx())
+    task = _root_task()
+    task.outputs = "I am your assistant."
+    mem_content = "I am your assistant.\n\nProcess Report: greeted the user"
+
+    result = await record_root_self_experience(mem, scope, task, mem_content, "success", _ctx())
+    assert result["mode"] == "conversation"
+
+    turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    answers = [r for r in turns if r.role == "assistant" and r.metadata.get("final_answer")]
+    assert len(answers) == 1, "expected exactly one appended final-answer assistant turn"
+    assert answers[0].content == "I am your assistant."
+    assert "Process Report" not in answers[0].content
+    # the final answer must be the chronologically last turn (latest timestamp)
+    newest = max(turns, key=lambda r: r.timestamp)
+    assert newest.metadata.get("final_answer") is True
+
+
+async def test_conversation_no_final_answer_when_no_output() -> None:
+    """没有 outputs（如 fail 收尾无产出）时不追加空答复回合。"""
+    mem = InMemoryMemoryProvider()
+    scope = _sc()
+    await _seed_task_conversation(mem, scope, n_assistant=2)
+    task = _root_task()  # outputs left as default (None)
+
+    await record_root_self_experience(mem, scope, task, "summary only", "fail", _ctx())
+
+    turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    assert not any(r.metadata.get("final_answer") for r in turns)
+
+
 async def test_threshold_boundary() -> None:
     assert ROOT_SELF_EXPERIENCE_TURN_LIMIT == 3
     # exactly 3 → conversation

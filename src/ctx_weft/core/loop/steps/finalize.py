@@ -129,6 +129,23 @@ async def _preserve_conversation(memory, scope, task, provider_ctx) -> int:
             provider_ctx,
         )
         count += 1
+    # finish_task 的最终答复进了 task.outputs（SILENT，不入 task 层），上面的逐轮重建捞不到它，
+    # 重建结果会缺答案。补一条干净的 assistant 收尾回合：只放纯答复（不带 "Process Report" 等
+    # 格式，role=assistant，避免带偏后续 root 的回复风格）。timestamp 取 now → 排在对话末尾。
+    answer = _output_text(task.outputs)
+    if answer:
+        await memory.ingest(
+            MemoryEvent(
+                type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                scope=scope,
+                content=answer,
+                timestamp=now_utc(),
+                role="assistant",
+                metadata={"origin_task_id": task.id, "final_answer": True},
+            ),
+            provider_ctx,
+        )
+        count += 1
     return count
 
 
@@ -314,20 +331,23 @@ class FinalizeStep(Step):
         return StepOutcome(next_step=None, state_patch={}, events=events)
 
 
+def _output_text(outputs: Any) -> str:
+    """Extract the plain answer text from task.outputs (str or [{type:text,text:...}])."""
+    if isinstance(outputs, list):
+        return next(
+            (p.get("text", "") for p in outputs if isinstance(p, dict) and p.get("type") == "text"),
+            "",
+        )
+    if isinstance(outputs, str):
+        return outputs
+    return ""
+
+
 def _build_memory_content(outputs: Any, summary: str) -> str:
     """合并 task outputs 和 observer summary，对齐 miniAgents _write_execution_memory。
 
     格式："{output_text}\\n\\nProcess Report: {summary}"
     只有 summary 时："{summary}"
     """
-    output_text = ""
-    if isinstance(outputs, list):
-        output_text = next(
-            (p.get("text", "") for p in outputs if isinstance(p, dict) and p.get("type") == "text"),
-            "",
-        )
-    elif isinstance(outputs, str):
-        output_text = outputs
-
-    parts = [p for p in [output_text, summary] if p]
+    parts = [p for p in [_output_text(outputs), summary] if p]
     return "\n\nProcess Report: ".join(parts)
