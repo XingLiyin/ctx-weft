@@ -2,6 +2,7 @@
 
 import os
 import platform
+import sys
 
 import pytest
 
@@ -165,7 +166,6 @@ async def test_ensure_venv_uses_creator_python(tmp_path, monkeypatch):
 
 
 async def test_ensure_venv_defaults_to_sys_executable(tmp_path, monkeypatch):
-    import sys
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     _, _, python_exe = venv_layout(tmp_path, ".venv")
     seen = {}
