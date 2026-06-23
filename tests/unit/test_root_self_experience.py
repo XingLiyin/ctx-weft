@@ -126,9 +126,28 @@ async def test_many_turns_writes_dispatch_pair() -> None:
     assert res[0].metadata["tool_call_id"] == tcid              # paired
     assert disp[0].metadata["arguments"]["task_prompt"] == "hello, who are you?"
     assert "final out" in res[0].content
-    # 没有写 conversation turns
+    # 原始 user prompt 作为一条 user 回合补回（否则经验里看不到"用户问的是什么"）
     turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    assert turns == []
+    assert len(turns) == 1 and turns[0].role == "user"
+    assert "hello, who are you?" in turns[0].content
+
+
+async def test_dispatch_pair_includes_original_user_prompt() -> None:
+    """>3-turn root: the synthesized experience must surface the original user prompt as a
+    user turn, not only buried inside the delegate_task arguments."""
+    mem = InMemoryMemoryProvider()
+    scope = _sc()
+    await _seed_task_conversation(mem, scope, n_assistant=5)  # >3 → dispatch path
+
+    result = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
+    assert result["mode"] == "dispatch"
+
+    # the user turn must precede the synthesized dispatch pair (so it renders as [user][assistant][tool])
+    user_turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    disp = await mem.recall_recent(_sc(task_id="t2"), [T.TASK_DISPATCH], 100, _ctx())
+    assert len(user_turns) == 1 and user_turns[0].role == "user"
+    assert "hello, who are you?" in user_turns[0].content
+    assert user_turns[0].timestamp <= disp[0].timestamp
 
 
 async def test_conversation_appends_clean_final_answer() -> None:

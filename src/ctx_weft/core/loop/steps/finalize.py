@@ -150,7 +150,30 @@ async def _preserve_conversation(memory, scope, task, provider_ctx) -> int:
 
 
 async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, provider_ctx) -> None:
-    """Write a synthesized delegate_task↔result pair representing a long root task."""
+    """Write a synthesized delegate_task↔result pair representing a long root task.
+
+    Prefixed by the original user prompt as a user turn (same content the conversation path
+    preserves): otherwise the prompt only lives inside the delegate_task arguments and never
+    renders as a user message, so the experience hides "what the user asked".
+    """
+    # 1) 原始 user prompt → user 回合，置于 dispatch 对之前（取最旧的一条 USER_PROMPT = 原始问题）
+    prompts = await memory.recall_recent(
+        scope, [MemoryEventType.USER_PROMPT], 2000, provider_ctx,
+    )
+    if prompts:
+        original = prompts[-1]  # recall is newest-first → last is the oldest (original) prompt
+        await memory.ingest(
+            MemoryEvent(
+                type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                scope=scope,
+                content=original.content,
+                timestamp=original.timestamp,
+                role="user",
+                metadata={"origin_task_id": task.id},
+            ),
+            provider_ctx,
+        )
+    # 2) synthesized delegate_task ↔ result
     tool_call_id = generate_id("tcall")
     ts = now_utc()
     await memory.ingest(
