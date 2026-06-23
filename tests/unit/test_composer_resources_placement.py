@@ -285,6 +285,37 @@ def _history_block(role: str, content: str, ts: str) -> ContextBlock:
                         metadata={"role": role, "timestamp": ts})
 
 
+def _experience_block(role: str, content: str, ts: str) -> ContextBlock:
+    return ContextBlock(id=f"e-{ts}", source="agent_experience", kind="history",
+                        target="messages", content=content, priority=3, token_estimate=1,
+                        metadata={"role": role, "timestamp": ts})
+
+
+def test_act_directive_targets_current_task_not_prior_experience() -> None:
+    """The current task's skill directive must ride the current task's first user message
+    (task_conversation), not an earlier cross-task agent_experience turn that happens to be
+    the first user message of the whole list."""
+    blocks = [
+        _identity_block("SOUL TEXT"),
+        _directive_block("Do the thing"),
+        # cross-task experience (older) — must NOT receive the current task's directive
+        _experience_block("user", "prior task ask", "1"),
+        _experience_block("assistant", "prior task work", "2"),
+        # the current task's own conversation (newer)
+        _history_block("user", "## Current Message\nthe current ask", "3"),
+    ]
+    task = SimpleNamespace(user_prompt_in_memory=True, process_report=None,
+                           title="T", description="D", user_prompt="the current ask")
+    msgs = DefaultComposer()._build_actor_messages(blocks, SimpleNamespace(task=task, purpose="act"))
+    user_msgs = [m for m in msgs if m.role == "user"]
+    prior = next(m for m in user_msgs if "prior task ask" in m.content)
+    current = next(m for m in user_msgs if "the current ask" in m.content)
+    # directive rides the current task's first user message, not the prior experience turn
+    assert "## Instructions for the current task" not in prior.content
+    assert "## Instructions for the current task" in current.content
+    assert "Do the thing" in current.content
+
+
 def test_resumed_task_directive_on_history_capabilities_on_progress() -> None:
     """Resumed act task: the directive attaches to the first (history-derived) user message;
     capabilities ride the trailing Current Progress message (recency)."""

@@ -8,8 +8,9 @@ Actor system prompt（用 --- 分隔，仅 soul + 项目背景，per-task 资源
   ## Project Background\n\n{background}
 
 Actor messages（多轮 LLMMessage：history 轮次在前，最后一条 user 含任务上下文）。
-resources（skills/tools/agents）+ 当前 task 的 skill 指令以前缀形式拼到**首条** user
-message 之前（仅发送，不入 memory）：
+resources（skills/tools/agents）+ 当前 task 的 skill 指令以前缀形式拼到**当前 task 的首条** user
+message（首条 task_conversation 来源的 user 回合；fresh task 时即末尾任务上下文那条，而非整个
+列表里更早的跨 task agent_experience 回合）之前（仅发送，不入 memory）：
   ### Available Skills / ### Available Tools / ### Available Sub-Agents
   ## Instructions for the current task\n\n{skill_instructions / directive}
   ---
@@ -233,7 +234,15 @@ class DefaultComposer(Composer):
         ]
         history_blocks = [b for b in blocks if b.kind == "history"]
 
-        messages: list[LLMMessage] = self._history_to_messages(history_blocks)
+        history_pairs = self._history_to_messages_with_sources(history_blocks)
+        messages: list[LLMMessage] = [m for m, _src in history_pairs]
+        # 当前 task 的首条 user 回合（directive 的落点）：history 里首条 task_conversation 来源的
+        # user message。找不到（fresh task）则留到下方追加的当前任务上下文 user message。
+        current_task_user_idx = next(
+            (i for i, (m, src) in enumerate(history_pairs)
+             if m.role == "user" and src == "task_conversation"),
+            None,
+        )
 
         task = request.task
         parts: list[str] = []
@@ -269,6 +278,10 @@ class DefaultComposer(Composer):
                 )
 
         if parts:
+            # 这条实时构建的当前任务上下文也是「当前 task」回合；history 里没有 task_conversation
+            # user 时（fresh task），directive 落到它身上。
+            if current_task_user_idx is None:
+                current_task_user_idx = len(messages)
             messages.append(LLMMessage(role="user", content="\n\n".join(parts)))
         # 兜底：actor prompt 必须以 user 回合结尾——避免以 assistant/tool 结尾让模型困惑地续写自己。
         # 正常情况下 active/retry 的 Current Progress 已是末条 user；此处仅覆盖 summary 为空等边角。
@@ -285,7 +298,12 @@ class DefaultComposer(Composer):
         directive_text = self._build_directive_section(blocks)
         capabilities_text = self._build_capabilities_section(blocks)
         if getattr(request, "purpose", None) == "act":
-            merged = self._append_to_first_user(merged, directive_text)
+            # directive 落到「当前 task」的首条 user message（紧跟任务上下文之后），而不是整个
+            # message 列表的第一条 user——后者可能是更早的跨 task agent_experience 回合。兜底退回末条 user。
+            target_idx = current_task_user_idx
+            if target_idx is None:
+                target_idx = self._last_user_index(merged)
+            merged = self._append_to_user_at(merged, target_idx, directive_text)
             merged = self._append_to_last_user(merged, capabilities_text)
         else:
             preamble = "\n\n".join(p for p in (capabilities_text, directive_text) if p)
@@ -458,20 +476,24 @@ class DefaultComposer(Composer):
                 return out
         return out
 
-    def _append_to_first_user(
-        self, messages: list[LLMMessage], text: str
+    def _append_to_user_at(
+        self, messages: list[LLMMessage], idx: int | None, text: str
     ) -> list[LLMMessage]:
-        """把 text 拼到首条 user message 内容尾部（任务上下文之后）。空 text 为 no-op。"""
-        if not text:
+        """把 text 拼到 messages[idx]（应为 user 回合）内容尾部。idx 越界/None 或空 text 为 no-op。"""
+        if not text or idx is None or not (0 <= idx < len(messages)):
             return messages
         out = list(messages)
-        for i, m in enumerate(out):
-            if m.role == "user":
-                base = m.content if isinstance(m.content, str) else content_to_text(m.content)
-                out[i] = dataclasses.replace(m, content=f"{base}\n\n{text}")
-                return out
-        out.append(LLMMessage(role="user", content=text))
+        m = out[idx]
+        base = m.content if isinstance(m.content, str) else content_to_text(m.content)
+        out[idx] = dataclasses.replace(m, content=f"{base}\n\n{text}")
         return out
+
+    def _last_user_index(self, messages: list[LLMMessage]) -> int | None:
+        """末条 user message 的下标；无 user 时返回 None。"""
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].role == "user":
+                return i
+        return None
 
     def _append_to_last_user(
         self, messages: list[LLMMessage], text: str
@@ -493,11 +515,21 @@ class DefaultComposer(Composer):
 
         跨层（task_conversation + agent_experience）按 timestamp 正序归并，seq_no 作 tiebreak。
         """
+        return [m for m, _src in self._history_to_messages_with_sources(history_blocks)]
+
+    def _history_to_messages_with_sources(
+        self, history_blocks: list["ContextBlock"]
+    ) -> list[tuple[LLMMessage, str]]:
+        """同 _history_to_messages，但每条 message 附带其来源 block.source。
+
+        来源用于区分「当前 task 自有对话」（source="task_conversation"）与跨 task 的
+        agent_experience 回合——directive 注入需定位到当前 task 的首条 user 回合。
+        """
         sorted_blocks = sorted(
             history_blocks,
             key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)),
         )
-        messages: list[LLMMessage] = []
+        out: list[tuple[LLMMessage, str]] = []
         for b in sorted_blocks:
             role = b.metadata.get("role", "user")
             content = content_to_text(b.content)
@@ -505,23 +537,24 @@ class DefaultComposer(Composer):
             if not content and not tool_calls:
                 continue  # 空文本且无 tool_call 才跳过（保留仅含 tool_call 的 assistant 回合）
             if role == "assistant":
-                messages.append(LLMMessage(
+                msg = LLMMessage(
                     role="assistant",
                     content=content,
                     tool_calls=[
                         {"id": tc.get("id", ""), "name": tc.get("name", ""), "input": tc.get("input", {})}
                         for tc in tool_calls
                     ],
-                ))
+                )
             elif role == "tool":
-                messages.append(LLMMessage(
+                msg = LLMMessage(
                     role="tool",
                     content=content,
                     tool_call_id=b.metadata.get("tool_call_id", ""),
-                ))
+                )
             else:
-                messages.append(LLMMessage(role="user", content=content))
-        return messages
+                msg = LLMMessage(role="user", content=content)
+            out.append((msg, b.source))
+        return out
 
     # ── Observer ──────────────────────────────────────────────────────────────
 

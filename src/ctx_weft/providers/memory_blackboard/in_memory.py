@@ -252,6 +252,20 @@ class InMemoryMemoryProvider(MemoryProvider):
             summary_event_id=compact_id,
         )
 
+    async def supersede(
+        self,
+        event_ids: list[str],
+        ctx: ProviderContext,
+    ) -> int:
+        wanted = set(event_ids)
+        n = 0
+        async with self._lock:
+            for s in self._events:
+                if s.id in wanted and not s.is_superseded:
+                    s.is_superseded = True
+                    n += 1
+        return n
+
     # ── Utilities ─────────────────────────────────────────────────────────────
 
     async def count_recent(

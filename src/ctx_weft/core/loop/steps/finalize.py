@@ -31,6 +31,63 @@ _ROOT_CONVERSATION_TYPES = [
 ]
 
 
+def _is_agent_root_task(task, agent_id: str | None) -> bool:
+    """task 是否为 agent_id 的 root task。
+
+    判据(无标签、无 parent 链上溯,只看 task 自身的 creator/assigned):
+      - parent_task_id is None → session 根;或
+      - assigned_agent_id == agent_id 且 creator != assigned → 被别的 agent 派进来交给它的根。
+    同 agent 内派生(use_subagent=False:creator==assigned)、派给别的 agent 的子任务
+    (use_subagent=True:assigned!=agent_id)都不满足 → 视为 sub-task。
+    """
+    if task.parent_task_id is None:
+        return True
+    return (
+        task.assigned_agent_id == agent_id
+        and task.creator_agent_id != task.assigned_agent_id
+    )
+
+
+async def fold_root_subtree(memory, agent_scope, root_task, get_task, provider_ctx) -> int:
+    """root finalize 时,把本次 root 子树的 dispatch 记录在 agent 层折掉(supersede)。
+
+    保留判据:一条 TASK_DISPATCH/RESULT 指向的 child task 若本身是该 agent 的 root
+    (_is_agent_root_task)则保留——这正是 root 自身的 self-experience pair,以及顺序
+    跑过的更早 root 的经验;否则(两类 sub-task)折掉。child task 经 child_task_id 用
+    get_task 查得;DISPATCH 无 child_task_id,按 tool_call_id 配到 RESULT 取。
+    返回 superseded 的条数。get_task 缺失/查不到的记录一律不动(降级安全)。
+    """
+    agent_id = root_task.assigned_agent_id
+    records = await memory.recall_recent(
+        agent_scope,
+        [MemoryEventType.TASK_DISPATCH, MemoryEventType.TASK_DISPATCH_RESULT],
+        2000, provider_ctx,
+    )
+    # tool_call_id → child_task_id（来自 RESULT；DISPATCH 据此回查）
+    child_by_tcid: dict[str, str] = {}
+    for r in records:
+        if r.type == MemoryEventType.TASK_DISPATCH_RESULT:
+            tcid = r.metadata.get("tool_call_id")
+            cid = r.metadata.get("child_task_id")
+            if tcid and cid:
+                child_by_tcid[tcid] = cid
+
+    to_supersede: list[str] = []
+    for r in records:
+        cid = r.metadata.get("child_task_id") or child_by_tcid.get(r.metadata.get("tool_call_id"))
+        if not cid:
+            continue  # 未配对 / 无法定位 child → 不动
+        child = get_task(cid) if get_task else None
+        if child is None:
+            continue
+        if not _is_agent_root_task(child, agent_id):
+            to_supersede.append(r.id)
+
+    if to_supersede:
+        await memory.supersede(to_supersede, provider_ctx)
+    return len(to_supersede)
+
+
 async def record_root_self_experience(memory, scope, task, mem_content, outcome, provider_ctx) -> dict:
     """Write a finished root task's experience into the root agent's agent layer.
 
@@ -136,10 +193,13 @@ class FinalizeStep(Step):
         terminal = outcome in ("success", "fail")
         mem_content = _build_memory_content(task.outputs, summary)
 
-        # 1) 经验写入：success/fail 终结才写（spec/06 §5/§6）。
-        # 委派回填：child 的 output+report 作为 TASK_DISPATCH_RESULT 写进 parent 的 agent 层。
-        # 例外（root self-experience）：root task（无 parent）把自身完成的对话/结果写进
-        # 自己的 agent 层——root agent 直接做事而非派发时也应积累经验（偏离 spec/06 §4.2 零合成）。
+        # 1) 经验写入：success/fail 终结才写（spec/06 §5/§6）。两类写入对「子 agent 的 root
+        # task」是并存的（不再互斥）：
+        #   (a) 委派回填：child 的 output+report 作为 TASK_DISPATCH_RESULT 写进 parent 的 agent 层
+        #       ——父级把整棵子树看成一条结果。
+        #   (b) self-experience：本 task 若是其自身 agent 的 root（session 根，或被别的 agent 派进来
+        #       的根），把自身对话/结果折进自己的 agent 层，并把本次 root 子树的 dispatch 记录折掉
+        #       （fold_root_subtree）——日后作为 experience 召回时只见 root 经验、不见逐个 sub-task。
         if terminal and task.parent_task_id and task.origin_tool_call_id and mem_content:
             parent_scope = MemoryScope(
                 session_id=state.scope.session_id,
@@ -167,8 +227,20 @@ class FinalizeStep(Step):
                 },
             ))
 
-        # NEW: root task (no parent) → self-experience into the root agent's agent layer
-        elif terminal and not task.parent_task_id and mem_content:
+        # (b) self-experience：本 task 是其自身 agent 的 root 时触发（不再仅限 session 根）。
+        if terminal and mem_content and _is_agent_root_task(task, task.assigned_agent_id):
+            # 先折子树（supersede 本次 root 期间派生的 sub-task dispatch 记录），再写 root 经验，
+            # 使新写的经验记录不被本次 fold 命中。
+            get_task = ctx.task_manager.get_task if ctx.task_manager else None
+            folded = await fold_root_subtree(
+                ctx.memory, state.scope, task, get_task, ctx.provider_ctx,
+            )
+            if folded:
+                events.append(make_event(
+                    state, EventType.MEMORY_COMPACTED,
+                    payload={"source": "root_subtree_fold", "superseded_count": folded,
+                             "layer": "agent"},
+                ))
             info = await record_root_self_experience(
                 ctx.memory, state.scope, task, mem_content, outcome, ctx.provider_ctx,
             )

@@ -278,6 +278,20 @@ class MemoryProvider(Protocol):
         """
         ...
 
+    @abstractmethod
+    async def supersede(
+        self,
+        event_ids: list[str],
+        ctx: ProviderContext,
+    ) -> int:
+        """把给定 event id 标记为 superseded（此后不再被 recall）。返回实际标记的条数。
+
+        root-task fold 用：root finalize 时把该 agent 层中属于本次 root 子树的
+        TASK_DISPATCH/RESULT 折掉（哪些属于子树由 core 判定后传入 id 列表）。
+        已 superseded / 不存在的 id 跳过。
+        """
+        ...
+
     # ── 工具 ──
 
     @abstractmethod
