@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,6 +22,10 @@ from ctx_weft.providers.capability_filesystem._bash_safety import (
 )
 
 PYTHON_COMMANDS: frozenset[str] = frozenset({"python", "python3", "py", "pip", "pip3"})
+
+# 冻结态 GUI 后端建 venv 时会拉起 python.exe；Windows 上会闪黑窗。输出走管道、
+# 子进程不需要控制台，故禁建窗口。非 Windows 无此常量 → 0（POSIX 忽略 creationflags）。
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # 按 workspace 串行化创建，避免并发 python 调用同时建同一个 .venv。
 _VENV_LOCKS: dict[str, asyncio.Lock] = {}
@@ -102,6 +107,7 @@ async def ensure_venv(
                 python, "-m", "venv", str(venv_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                creationflags=_CREATE_NO_WINDOW,
             )
             _, stderr = await proc.communicate()
         except Exception as e:  # 统一包成 VenvError 上抛
