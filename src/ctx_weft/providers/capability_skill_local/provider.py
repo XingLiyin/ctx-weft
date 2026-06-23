@@ -82,6 +82,7 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
         idle_timeout_sec: float = 90,
         hard_cap_sec: float = 600,
         output_limit_chars: int = 65536,
+        python_executable: str | None = None,
     ) -> None:
         self._dir = skills_dir
         self._index: dict[str, _SkillEntry] | None = None
@@ -89,6 +90,9 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
         self._idle_timeout_sec = idle_timeout_sec
         self._hard_cap_sec = hard_cap_sec
         self._output_limit_chars = output_limit_chars
+        # 运行 .py 脚本用的解释器；None=用 PATH 上的裸 `python`。打包（冻结）形态下
+        # PATH 上通常没有 Python，由 host 注入随包内置的解释器路径（同 bash venv 那份）。
+        self._python_executable = python_executable
 
     def _get_index(self) -> dict[str, _SkillEntry]:
         if self._index is None:
@@ -201,7 +205,13 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
 
         # 用引号包裹脚本路径（处理路径中的空格），args 原样追加到命令字符串，
         # 不能放进列表再 join，否则含空格的多参数串会被整体加引号变成单参数。
-        base = f'python "{resolved}"' if resolved.suffix == ".py" else f'"{resolved}"'
+        # .py 用配置的解释器（None→裸 python）；解释器路径也加引号（内置 runtime
+        # 可能落在带空格的目录，如 Program Files）。
+        if resolved.suffix == ".py":
+            interp = self._python_executable or "python"
+            base = f'"{interp}" "{resolved}"'
+        else:
+            base = f'"{resolved}"'
         cmd = f"{base} {args}" if args else base
 
         env = {**os.environ, "SKILL_DIR": str(skill_root), "PYTHONIOENCODING": "utf-8"}
