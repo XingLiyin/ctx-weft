@@ -137,6 +137,60 @@ async def test_ensure_venv_failure_raises(tmp_path, monkeypatch):
         await ensure_venv(tmp_path, ".venv")
 
 
+async def test_ensure_venv_uses_creator_python(tmp_path, monkeypatch):
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    _, _, python_exe = venv_layout(tmp_path, ".venv")
+    seen = {}
+
+    # Create a real file for creator_python so the existence pre-check passes
+    fake_creator = tmp_path / "fake_python"
+    fake_creator.write_text("#!/fake/python")
+    creator_python_path = str(fake_creator)
+
+    async def fake_exec(*args, **kwargs):
+        seen["argv"] = args
+
+        def make_exe():
+            python_exe.parent.mkdir(parents=True, exist_ok=True)
+            python_exe.write_text("#!fake")
+
+        return _FakeProc(0, make_exe)
+
+    monkeypatch.setattr(_venv.asyncio, "create_subprocess_exec", fake_exec)
+
+    created = await ensure_venv(tmp_path, ".venv", creator_python=creator_python_path)
+    assert created is True
+    assert seen["argv"][0] == creator_python_path   # not sys.executable
+    assert seen["argv"][1:3] == ("-m", "venv")
+
+
+async def test_ensure_venv_defaults_to_sys_executable(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    _, _, python_exe = venv_layout(tmp_path, ".venv")
+    seen = {}
+
+    async def fake_exec(*args, **kwargs):
+        seen["argv"] = args
+
+        def make_exe():
+            python_exe.parent.mkdir(parents=True, exist_ok=True)
+            python_exe.write_text("#!fake")
+
+        return _FakeProc(0, make_exe)
+
+    monkeypatch.setattr(_venv.asyncio, "create_subprocess_exec", fake_exec)
+
+    await ensure_venv(tmp_path, ".venv")  # creator_python omitted
+    assert seen["argv"][0] == sys.executable
+
+
+async def test_ensure_venv_missing_creator_python_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    with pytest.raises(VenvError, match="creator python not found"):
+        await ensure_venv(tmp_path, ".venv", creator_python="/no/such/python")
+
+
 # ── 集成：bash_exec venv 引导 ───────────────────────────────────────────────────
 
 
