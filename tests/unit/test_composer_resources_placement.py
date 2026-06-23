@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextBlock
@@ -327,7 +328,10 @@ def test_resumed_task_directive_on_history_capabilities_on_progress() -> None:
         _history_block("user", "## Current Message\nthe original ask", "1"),
         _history_block("assistant", "did some work", "2"),
     ]
+    # process_report_at present → Current Progress renders as a timestamped history block that
+    # sorts after the prior turns (string "2026-..." > "2"), so it is the last user message.
     task = SimpleNamespace(user_prompt_in_memory=True, process_report="halfway done",
+                           process_report_at=datetime(2026, 1, 1, tzinfo=UTC),
                            title="T", description="D", user_prompt="the original ask")
     msgs = DefaultComposer()._build_actor_messages(blocks, SimpleNamespace(task=task, purpose="act"))
     user_msgs = [m for m in msgs if m.role == "user"]

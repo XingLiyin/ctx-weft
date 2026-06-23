@@ -425,6 +425,7 @@ def report_task_outcome(
             task_process_report = f"{task_process_report}\n\n{_hint}" if task_process_report else _hint
 
         task.process_report = task_process_report
+        task.process_report_at = now_utc()
         task.observer_outcome = task_status
         if task_status == "success":
             task.status = "FINISHED"

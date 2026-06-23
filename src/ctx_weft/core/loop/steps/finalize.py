@@ -297,6 +297,7 @@ class FinalizeStep(Step):
             # 机械退出（max_turns/context_limit）也归到这里：重排再跑，受 max_retries 兜底。
             task.outputs = None
             task.process_report = summary
+            task.process_report_at = now_utc()  # 落在本 attempt 之后、下一 attempt 之前 → 装配按时间戳归位
             task.retry_count += 1
             events.append(make_event(
                 state, EventType.TASK_REQUEUED,

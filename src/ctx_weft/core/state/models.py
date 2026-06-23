@@ -193,6 +193,9 @@ class Task:
     interaction_mode: TaskInteractionMode = "auto"
     outputs: Any | None = None
     process_report: str | None = None
+    # 何时设置 process_report（= 上一轮 observe 产出反馈的时刻，落在该 attempt 之后、下一 attempt 之前）。
+    # 装配时据此把 "## Current Progress" 按时间戳归并到正确位置（见 composer._progress_history_block）。
+    process_report_at: datetime | None = None
 
     retry_count: int = 0
     max_retries: int = 3

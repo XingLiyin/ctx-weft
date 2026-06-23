@@ -1056,6 +1056,7 @@ class CtxWeftRuntime:
         # 清旧进展、置 PENDING（restore 已重排,这里保证状态正确）。
         target.outputs = None
         target.process_report = None
+        target.process_report_at = None
         if target.status not in ("FINISHED", "FAILED", "CANCELED"):
             target.status = "PENDING"
 
