@@ -1,0 +1,145 @@
+"""Gateway 参数校验（spec B）：只拦 required/type/enum，忽略 additionalProperties/format。"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
+
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.loop.capability_gateway import CapabilityGateway, _validate_args
+from ctx_weft.core.loop.driver import LoopContext, LoopState
+from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols.capability import (
+    CapabilityEvent,
+    CapabilityProviderInfo,
+    ToolCapability,
+    ToolCapabilityProvider,
+)
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+
+
+class _Echo(ToolCapabilityProvider):
+    name = "mcp:a"
+
+    def __init__(self, schema: dict | None = None) -> None:
+        self.invoked = False
+        self.received: dict | None = None
+        self._schema = schema or {}
+
+    def _cap(self) -> ToolCapability:
+        return ToolCapability(
+            id="mcp:a:search", name="search", description="s",
+            input_schema=self._schema,
+        )
+
+    async def list(self, ctx): return [self._cap()]
+    async def retrieve(self, ctx): return [self._cap()]
+    async def describe(self, ctx): return CapabilityProviderInfo(name=self.name, capability_count=1)
+
+    def invoke(self, capability_id, arguments, ctx) -> AsyncIterator[CapabilityEvent]:
+        async def _run():
+            self.invoked = True
+            self.received = dict(arguments)
+            yield CapabilityEvent(kind="result", payload={"content": "ok"})
+        return _run()
+
+    async def cancel(self, invocation_id, ctx) -> None: return None
+
+
+def _state_ctx():
+    mem = InMemoryMemoryProvider()
+    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    state = LoopState(
+        run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
+        task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
+        scope=scope,
+    )
+    ctx = LoopContext(
+        assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),
+        provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1"),
+    )
+    return mem, state, ctx
+
+
+def _gw(provider, mem):
+    cache = CapabilityCache()
+    cache.put("agt_1", [provider._cap()])
+    return CapabilityGateway(
+        capability_cache=cache, capability_providers=[provider],
+        memory=mem, event_bus=InProcessEventBus(),
+    )
+
+
+# ── _validate_args 纯函数 ──────────────────────────────────────────────────────
+
+
+def test_missing_required_reported() -> None:
+    schema = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+    assert _validate_args({}, schema) is not None
+
+
+def test_type_mismatch_reported() -> None:
+    schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
+    assert _validate_args({"count": "abc"}, schema) is not None
+
+
+def test_enum_out_of_range_reported() -> None:
+    schema = {"type": "object", "properties": {"mode": {"enum": ["r", "w"]}}}
+    assert _validate_args({"mode": "x"}, schema) is not None
+
+
+def test_additional_properties_ignored() -> None:
+    # additionalProperties:false 故意不拦 —— 多余 key 放行（spec B）
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": False}
+    assert _validate_args({"a": "ok", "extra": 1}, schema) is None
+
+
+def test_format_ignored() -> None:
+    # format 不开 checker，天然不查
+    schema = {"type": "object", "properties": {"email": {"type": "string", "format": "email"}}}
+    assert _validate_args({"email": "not-an-email"}, schema) is None
+
+
+def test_empty_schema_passes() -> None:
+    assert _validate_args({"anything": 1}, {}) is None
+    assert _validate_args({"anything": 1}, None) is None
+
+
+def test_valid_args_pass() -> None:
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}
+    assert _validate_args({"q": "hi"}, schema) is None
+
+
+def test_malformed_schema_fails_open() -> None:
+    # 畸形 schema 不该让校验崩，fail-open 放行
+    assert _validate_args({"a": 1}, {"properties": {"a": {"type": 123}}}) is None
+
+
+# ── 经 gateway.invoke 的端到端接线 ─────────────────────────────────────────────
+
+
+async def test_invoke_blocks_invalid_and_skips_provider() -> None:
+    p = _Echo({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]})
+    mem, state, ctx = _state_ctx()
+    res = await _gw(p, mem).invoke("mcp__a__search", {}, state, ctx)
+    assert res.is_error is True
+    assert "invalid arguments" in res.content
+    assert p.invoked is False  # 安全不变式：非法参数绝不下发到 provider
+
+
+async def test_invoke_passes_valid_args() -> None:
+    p = _Echo({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})
+    mem, state, ctx = _state_ctx()
+    res = await _gw(p, mem).invoke("mcp__a__search", {"q": "x"}, state, ctx)
+    assert res.is_error is False
+    assert p.invoked is True
+
+
+async def test_invoke_coerces_then_validates() -> None:
+    # "3" 先被 _coerce_args 收敛成 int，再校验 → 通过，且 provider 收到的是 int
+    p = _Echo({"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]})
+    mem, state, ctx = _state_ctx()
+    res = await _gw(p, mem).invoke("mcp__a__search", {"n": "3"}, state, ctx)
+    assert res.is_error is False
+    assert p.received == {"n": 3}

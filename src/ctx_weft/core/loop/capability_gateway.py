@@ -20,6 +20,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import jsonschema
+
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer  # noqa: F401
 from ctx_weft.core.events import EventType
 from ctx_weft.core.events.bus import EventBus
@@ -146,8 +148,17 @@ class CapabilityGateway:
             return self._error_result(invocation_id, tool_name, content)
 
         # 3. Sanitize arguments（改写参数生效，None → 原参；仍走脱敏）
+        schema = getattr(cap, "input_schema", None)
         effective_args = decision.modified_arguments if decision.modified_arguments is not None else arguments
-        effective_args = _coerce_args(effective_args, getattr(cap, "input_schema", None))
+        effective_args = _coerce_args(effective_args, schema)
+        # 参数校验：放在 coerce 之后，看到的是收敛后的类型（3 而非 "3"），不会假阳性。
+        # 只拦 required/type/enum（见 _validate_args），失败回灌 LLM 让其改参重试，与 unknown-tool 同出口。
+        err = _validate_args(effective_args, schema)
+        if err is not None:
+            return self._error_result(
+                invocation_id, tool_name,
+                f"[Error: invalid arguments for '{tool_name}': {err}]",
+            )
         sanitized = _sanitize(effective_args)
 
         # 4. Find provider
@@ -387,6 +398,33 @@ def _coerce_args(arguments: dict[str, Any], schema: dict[str, Any] | None) -> di
         if isinstance(decl, dict):
             out[key] = _coerce_scalar(value, decl.get("type"))
     return out
+
+
+# 只在这三类约束上拦截（spec B）：required 缺失 / type 不符 / enum 越界。
+# additionalProperties / format / pattern 等故意忽略，避免未打磨的 schema 误伤现有工具。
+_ENFORCED_KEYWORDS = frozenset({"required", "type", "enum"})
+
+
+def _validate_args(arguments: dict[str, Any], schema: dict[str, Any] | None) -> str | None:
+    """按 input_schema 校验入参，返回人读得懂的错误信息（可回灌 LLM）或 None（放行）。
+
+    借 jsonschema 的成熟语义，但只对 required/type/enum 报错（见 _ENFORCED_KEYWORDS）；
+    不开 format_checker，故 format 天然不查。schema 缺失/无 properties → 放行。
+    任何校验自身异常（含畸形 schema）一律 fail-open，绝不让 loop 因校验崩。
+    """
+    if not schema or not schema.get("properties"):
+        return None
+    try:
+        validator = jsonschema.Draft202012Validator(schema)
+        messages = [
+            err.message
+            for err in validator.iter_errors(arguments)
+            if err.validator in _ENFORCED_KEYWORDS
+        ]
+    except Exception:
+        logger.exception("CapabilityGateway: arg validation crashed; allowing through")
+        return None
+    return "; ".join(messages) if messages else None
 
 
 def _sanitize(arguments: dict[str, Any]) -> dict[str, Any]:
