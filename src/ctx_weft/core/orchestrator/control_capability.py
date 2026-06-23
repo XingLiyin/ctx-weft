@@ -278,13 +278,15 @@ def delegate_plan(
 def finish_task(
     result: Annotated[
         str,
-        "The final result/output of the current task. Becomes the task's output, handed off "
-        "to the observer and to whoever delegated this task.",
+        "The final result/output of the current task. This text is shown to the user as a "
+        "normal chat message (and is also handed off to the observer and to whoever delegated "
+        "this task), so write it directly to the user in your usual tone — there's no need to "
+        "separately announce or repeat it in an earlier message.",
     ],
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Finish the CURRENT task and record its final result, then hand off to review. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
+    """Finish the CURRENT task and hand off to review. Put your final reply to the user in `result` — it is shown to them as your message. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
     if ctx is not None and ctx.task is not None:
         ctx.task.outputs = result
         # actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe（区别于 delegate_task 的委派挂起）。
