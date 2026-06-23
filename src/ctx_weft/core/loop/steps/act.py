@@ -547,23 +547,21 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
         parts.append("")
 
     finish_core = (
-        f"When this task is complete, finish it by calling the `{FINISH_TASK_NAME}` tool with "
-        "your final reply to the user as the `result`, written in your usual tone — the user "
-        "reads it as your message."
-    )
-    no_preface = (
-        " You don't need to also send that reply as a separate plain-text message first."
+        f"When you're done, finish the task by calling the `{FINISH_TASK_NAME}` tool with your "
+        "final reply to the user as `result` (in your usual tone) — `result` is shown to the "
+        "user as your message. Don't write that reply as ordinary text first and then call the "
+        "tool; put it only in `result`, or the user will see it twice."
     )
     if task.interaction_mode == "interactive":
         parts.append(
             finish_core
-            + " If you reply in plain text instead, execution pauses and waits for the "
-            "user's next message."
+            + " (Replying in plain text without this tool pauses the task and waits for the "
+            "user, instead of finishing.)"
         )
     elif succ:
-        parts.append(finish_core + no_preface + " Do not start the queued tasks yourself.")
+        parts.append(finish_core + " Do not start the queued tasks yourself.")
     else:
-        parts.append(finish_core + no_preface)
+        parts.append(finish_core)
     # 始终提示：需要用户输入/决策/澄清时主动调 ask_user（各完成方式下都加）。
     parts.append(
         f"Whenever you need information, a decision, or a clarification that only the user "
