@@ -217,7 +217,7 @@ def _spy_shell_env(monkeypatch, captured):
 async def test_bash_exec_python_triggers_venv(tmp_path, monkeypatch):
     calls = {"n": 0}
 
-    async def fake_ensure(workspace, venv_dir):
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
         calls["n"] += 1
         return True
 
@@ -237,7 +237,7 @@ async def test_bash_exec_python_triggers_venv(tmp_path, monkeypatch):
 async def test_bash_exec_python_disabled(tmp_path, monkeypatch):
     calls = {"n": 0}
 
-    async def fake_ensure(workspace, venv_dir):
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
         calls["n"] += 1
         return True
 
@@ -258,7 +258,7 @@ async def test_bash_exec_python_disabled(tmp_path, monkeypatch):
 async def test_bash_exec_non_python_no_venv(tmp_path, monkeypatch):
     calls = {"n": 0}
 
-    async def fake_ensure(workspace, venv_dir):
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
         calls["n"] += 1
         return True
 
@@ -276,7 +276,7 @@ async def test_bash_exec_non_python_no_venv(tmp_path, monkeypatch):
 
 
 async def test_bash_exec_venv_error_surfaced(tmp_path, monkeypatch):
-    async def fake_ensure(workspace, venv_dir):
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
         raise VenvError("disk full")
 
     monkeypatch.setattr(fsprov, "ensure_venv", fake_ensure)
@@ -294,3 +294,28 @@ async def test_bash_exec_blocks_chained_blacklist(tmp_path):
     events = await _collect(fsprov.bash_exec("echo a && rm -rf x", ctx=ctx))
     errors = [e for e in events if e.kind == "error"]
     assert any(e.payload.get("code") == "COMMAND_BLACKLISTED" for e in errors)
+
+
+async def test_bash_exec_forwards_venv_python(tmp_path, monkeypatch):
+    seen = {}
+
+    async def fake_ensure(workspace, venv_dir, creator_python=None):
+        seen["creator_python"] = creator_python
+        return True
+
+    monkeypatch.setattr(fsprov, "ensure_venv", fake_ensure)
+    captured: dict = {}
+    _spy_shell_env(monkeypatch, captured)
+
+    ctx = ProviderContext(session_id="s1", extra={
+        "workspace": str(tmp_path), "bash_auto_venv": True, "bash_venv_dir": ".venv",
+        "bash_venv_python": "/opt/py/bin/python",
+    })
+    await _collect(fsprov.bash_exec("python -V", ctx=ctx))
+
+    assert seen["creator_python"] == "/opt/py/bin/python"
+
+
+def test_filesystem_config_has_venv_python_default_none():
+    cfg = fsprov.FilesystemConfig()
+    assert cfg.bash_venv_python is None
