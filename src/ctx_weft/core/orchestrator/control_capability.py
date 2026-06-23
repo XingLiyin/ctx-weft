@@ -278,15 +278,15 @@ def delegate_plan(
 def finish_task(
     result: Annotated[
         str,
-        "The final result/output of the current task. This text is shown to the user as a "
-        "normal chat message (and is also handed off to the observer and to whoever delegated "
-        "this task), so write it directly to the user in your usual tone — there's no need to "
-        "separately announce or repeat it in an earlier message.",
+        "Your final reply to the user. `result` IS the message shown to them (it is also "
+        "handed to the observer and to whoever delegated this task). Write it directly to the "
+        "user in your usual tone, and put the WHOLE reply here only — do not also write it as "
+        "ordinary message text before or alongside this call, or the user sees it twice.",
     ],
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Finish the CURRENT task and hand off to review. Put your final reply to the user in `result` — it is shown to them as your message. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
+    """Finish the CURRENT task and hand off to review. Your final reply to the user goes in `result` and is shown to them as your message — put it there only; do not also write it as ordinary text (or it shows twice). When done, call this directly instead of first replying in prose. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
     if ctx is not None and ctx.task is not None:
         ctx.task.outputs = result
         # actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe（区别于 delegate_task 的委派挂起）。
@@ -420,7 +420,8 @@ def report_task_outcome(
             _hint = ("The previous round ended without a final output. Review the process report above "
                      "and judge whether this task still needs more work. If it does, continue with the "
                      "necessary tool calls. Once everything required is done, call the `control__finish_task` tool "
-                     "with the final result to complete the task.")
+                     "with your final reply to the user as `result` to complete the task — put the reply in "
+                     "`result` only, don't repeat it as plain text.")
             task_process_report = f"{task_process_report}\n\n{_hint}" if task_process_report else _hint
 
         task.process_report = task_process_report
