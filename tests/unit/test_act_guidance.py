@@ -33,9 +33,9 @@ def test_user_prompt_fallback_when_no_title_or_description():
     assert "## Your current task" in g
     assert "This task was started by the user's request:" in g
     assert "please summarize the repo" in g
-    # finish reminder restated inside the fallback block
+    # finish reminder present (unified finish section below the task block)
     assert "control__finish_task" in g
-    assert "proactively call" in g
+    assert "final reply to the user" in g
 
 
 def test_ask_user_reminder_present_in_all_modes():

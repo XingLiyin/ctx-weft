@@ -537,11 +537,6 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
             parts.append("This task was started by the user's request:")
             parts.append(up_text)
             parts.append("")
-            parts.append(
-                f"When you have completed it, proactively call the `{FINISH_TASK_NAME}` "
-                "tool with the final result to finish it."
-            )
-            parts.append("")
 
     succ = _plan_successors(state, ctx)
     if succ:
@@ -551,22 +546,24 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
             parts.append(f"{i}. {t.title}{d}")
         parts.append("")
 
+    finish_core = (
+        f"When this task is complete, finish it by calling the `{FINISH_TASK_NAME}` tool with "
+        "your final reply to the user as the `result`, written in your usual tone — the user "
+        "reads it as your message."
+    )
+    no_preface = (
+        " You don't need to also send that reply as a separate plain-text message first."
+    )
     if task.interaction_mode == "interactive":
         parts.append(
-            f"When this task is complete, call the `{FINISH_TASK_NAME}` tool with the final "
-            "result to finish it. If you instead reply in plain text, execution pauses and "
-            "waits for the user's next message."
+            finish_core
+            + " If you reply in plain text instead, execution pauses and waits for the "
+            "user's next message."
         )
     elif succ:
-        parts.append(
-            f"When this task is complete, call the `{FINISH_TASK_NAME}` tool with the final "
-            "result to finish it. Do not start the queued tasks yourself."
-        )
+        parts.append(finish_core + no_preface + " Do not start the queued tasks yourself.")
     else:
-        parts.append(
-            f"When this task is complete, call the `{FINISH_TASK_NAME}` tool with the final "
-            "result to finish it."
-        )
+        parts.append(finish_core + no_preface)
     # 始终提示：需要用户输入/决策/澄清时主动调 ask_user（各完成方式下都加）。
     parts.append(
         f"Whenever you need information, a decision, or a clarification that only the user "
