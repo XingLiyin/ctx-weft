@@ -263,7 +263,10 @@ class DefaultComposer(Composer):
                     if isinstance(task.user_prompt, str)
                     else content_to_text(task.user_prompt)
                 )
-                parts.append(f"## Current Message\n{user_prompt_text}")
+                parts.append(
+                    f"## Current Message\n{user_prompt_text}\n\n"
+                    "（Reply in the same language as the Current Message above.）"
+                )
 
         if parts:
             messages.append(LLMMessage(role="user", content="\n\n".join(parts)))

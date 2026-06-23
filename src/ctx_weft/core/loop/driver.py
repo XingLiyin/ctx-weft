@@ -221,7 +221,10 @@ class StepDriver:
                 content_parts.append(f"## Current Task\n{task.title}\n{task.description}")
             elif task.title:
                 content_parts.append(f"## Current Task\n{task.title}")
-            content_parts.append(f"## Current Message\n{task.user_prompt}")
+            content_parts.append(
+                f"## Current Message\n{task.user_prompt}\n\n"
+                "（Reply in the same language as the Current Message above.）"
+            )
             await ctx.memory.ingest(
                 MemoryEvent(
                     type=MemoryEventType.USER_PROMPT,
