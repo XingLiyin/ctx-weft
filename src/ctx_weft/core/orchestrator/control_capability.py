@@ -278,8 +278,10 @@ def delegate_plan(
 def finish_task(
     result: Annotated[
         str,
-        "The final result/output of the current task. Becomes the task's output, handed off "
-        "to the observer and to whoever delegated this task.",
+        "The final result/output of the current task. This text is shown to the user as a "
+        "normal chat message (and is also handed off to the observer and to whoever delegated "
+        "this task), so write it directly to the user in your usual tone — there's no need to "
+        "separately announce or repeat it in an earlier message.",
     ],
     *,
     ctx: ControlContext = None,
