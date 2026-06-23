@@ -26,6 +26,12 @@ from ctx_weft.protocols.capability import (
     SkillCapabilityProvider,
     SkillDefinition,
 )
+from collections.abc import AsyncIterator, Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ctx_weft.protocols.capability import CapabilityEvent
+
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.providers._encoding import decode_console
 from ctx_weft.providers._script_runner import run_with_liveness
@@ -83,6 +89,7 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
         hard_cap_sec: float = 600,
         output_limit_chars: int = 65536,
         python_executable: str | None = None,
+        bash_runner: "Callable[[str, ProviderContext], AsyncIterator[CapabilityEvent]] | None" = None,
     ) -> None:
         self._dir = skills_dir
         self._index: dict[str, _SkillEntry] | None = None
@@ -93,6 +100,9 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
         # 运行 .py 脚本用的解释器；None=用 PATH 上的裸 `python`。打包（冻结）形态下
         # PATH 上通常没有 Python，由 host 注入随包内置的解释器路径（同 bash venv 那份）。
         self._python_executable = python_executable
+        # 注入后,.py 执行委托给 bash_exec 流水线(workspace venv/安全/超时/隐藏窗口)。
+        # None → 回退本地直跑(_exec_direct)。
+        self._bash_runner = bash_runner
 
     def _get_index(self) -> dict[str, _SkillEntry]:
         if self._index is None:
@@ -203,10 +213,42 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
         if not resolved.is_file():
             raise FileNotFoundError(f"script '{script_path}' not found in skill '{skill_name}'")
 
-        # 用引号包裹脚本路径（处理路径中的空格），args 原样追加到命令字符串，
-        # 不能放进列表再 join，否则含空格的多参数串会被整体加引号变成单参数。
-        # .py 用配置的解释器（None→裸 python）；解释器路径也加引号（内置 runtime
-        # 可能落在带空格的目录，如 Program Files）。
+        if self._bash_runner is not None:
+            return await self._exec_via_bash(skill_root, resolved, args, ctx)
+        return await self._exec_direct(skill_root, resolved, args)
+
+    async def _exec_via_bash(
+        self, skill_root: Path, resolved: Path, args: str, ctx: ProviderContext
+    ) -> str:
+        """委托给 bash_exec 流水线:.py 用裸 python(由 venv 激活解析),脚本走绝对路径。
+        注入 SKILL_DIR 与 skill 自己的超时;收集 result/error 事件转成返回值/异常。"""
+        base = f'python "{resolved}"' if resolved.suffix == ".py" else f'"{resolved}"'
+        cmd = f"{base} {args}" if args else base
+
+        extra = {
+            **ctx.extra,
+            "extra_env": {**(ctx.extra.get("extra_env") or {}), "SKILL_DIR": str(skill_root)},
+            "bash_idle_timeout_sec": self._idle_timeout_sec,
+            "bash_hard_cap_sec": self._hard_cap_sec,
+            "bash_max_output_bytes": self._output_limit_chars,
+        }
+        ctx2 = dataclasses.replace(ctx, extra=extra)
+
+        content = ""
+        exit_code = 0
+        async for ev in self._bash_runner(cmd, ctx2):
+            if ev.kind == "error":
+                msg = ev.payload.get("message") or ev.payload.get("code") or "skill exec failed"
+                raise RuntimeError(msg)
+            if ev.kind == "result":
+                content = ev.payload.get("content", "")
+                exit_code = (ev.payload.get("metadata") or {}).get("exit_code", 0)
+        if exit_code != 0:
+            raise RuntimeError(f"script exited with code {exit_code}\n{content[: self._output_limit_chars]}")
+        return content[: self._output_limit_chars]
+
+    async def _exec_direct(self, skill_root: Path, resolved: Path, args: str) -> str:
+        """无 bash_runner 时的回退:本地直跑,cwd=skill_dir,解释器用内置/裸 python。"""
         if resolved.suffix == ".py":
             interp = self._python_executable or "python"
             base = f'"{interp}" "{resolved}"'
@@ -217,7 +259,7 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
         env = {**os.environ, "SKILL_DIR": str(skill_root), "PYTHONIOENCODING": "utf-8"}
         result = await run_with_liveness(
             cmd,
-            cwd=str(skill_root),   # 在 skill 目录下运行，脚本内相对路径可直接使用
+            cwd=str(skill_root),
             env=env,
             idle_timeout_sec=self._idle_timeout_sec,
             hard_cap_sec=self._hard_cap_sec,

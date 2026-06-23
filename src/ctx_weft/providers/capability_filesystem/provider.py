@@ -189,6 +189,10 @@ async def bash_exec(
 
     logger.info("bash_exec command (repr): %r", command)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    # 调用方(如 skill 委托执行)注入的额外环境变量(如 SKILL_DIR)。venv_env 之后会保留这些键。
+    _extra_env = ctx.extra.get("extra_env") if ctx else None
+    if isinstance(_extra_env, dict) and _extra_env:
+        env.update(_extra_env)
 
     # Python .venv 引导：检测到 python/pip 类命令时在 workspace 下懒建并「激活」.venv。
     # 每次 bash_exec 是全新子进程，故只能在子进程 env 层注入（PATH/VIRTUAL_ENV）。
@@ -639,9 +643,11 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
             extra["workspace"] = ws
         if self._cfg.allowed_dirs:
             extra["allowed_dirs"] = self._cfg.allowed_dirs
-        extra["bash_idle_timeout_sec"] = self._cfg.bash_idle_timeout_sec
-        extra["bash_hard_cap_sec"] = self._cfg.bash_hard_cap_sec
-        extra["bash_max_output_bytes"] = self._cfg.bash_max_output_bytes
+        # 限额类:调用方(如 skill 委托)可经 ctx.extra 覆盖;未给才用 fs 配置。
+        extra.setdefault("bash_idle_timeout_sec", self._cfg.bash_idle_timeout_sec)
+        extra.setdefault("bash_hard_cap_sec", self._cfg.bash_hard_cap_sec)
+        extra.setdefault("bash_max_output_bytes", self._cfg.bash_max_output_bytes)
+        # 以下为 fs 强制(不可被调用方覆盖):workspace/venv 引导/读取与搜索限额。
         extra["bash_auto_venv"] = self._cfg.bash_auto_venv
         extra["bash_venv_dir"] = self._cfg.bash_venv_dir
         extra["bash_venv_python"] = self._cfg.bash_venv_python

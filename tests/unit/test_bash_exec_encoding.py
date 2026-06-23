@@ -30,3 +30,19 @@ def test_description_has_path_guidance():
     import platform
     if platform.system() == "Windows":
         assert "double-escape" in desc.lower()
+
+
+async def test_bash_exec_merges_extra_env(monkeypatch):
+    captured = {}
+    real = asyncio.create_subprocess_shell
+
+    async def spy(cmd, **kw):
+        captured["env"] = kw.get("env")
+        return await real(cmd, **kw)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", spy)
+    ctx = ProviderContext(session_id="s1", extra={"extra_env": {"SKILL_DIR": "X_MARK"}})
+    await _collect(fsprov.bash_exec("echo hi", ctx=ctx))
+
+    assert captured["env"]["SKILL_DIR"] == "X_MARK"
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"  # base key survives the merge
