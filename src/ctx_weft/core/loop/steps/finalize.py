@@ -53,10 +53,14 @@ async def fold_root_subtree(memory, agent_scope, root_task, get_task, provider_c
 
     保留判据:一条 TASK_DISPATCH/RESULT 指向的 child task 若本身是该 agent 的 root
     (_is_agent_root_task)则保留——这正是 root 自身的 self-experience pair,以及顺序
-    跑过的更早 root 的经验;否则(两类 sub-task)折掉。child task 经 child_task_id 用
-    get_task 查得;DISPATCH 无 child_task_id,按 tool_call_id 配到 RESULT 取。
-    返回 superseded 的条数。get_task 缺失/查不到的记录一律不动(降级安全)。
+    跑过的更早 root 的经验;否则(两类 sub-task)折掉。
+
+    子任务 backfill(block a)的 RESULT 自带 `parent_task_id`,据此即可判定"本 root 的直接
+    子任务回填"——**不依赖 get_task**,所以 restore 重排、child 不在 task_manager 时也能折
+    (否则 backfill 会和 self-experience 重复)。get_task 仅作回退(无 parent_task_id 的旧/测试
+    记录)。返回 superseded 的条数。
     """
+    root_id = root_task.id
     agent_id = root_task.assigned_agent_id
     records = await memory.recall_recent(
         agent_scope,
@@ -65,24 +69,31 @@ async def fold_root_subtree(memory, agent_scope, root_task, get_task, provider_c
     )
     # tool_call_id → child_task_id（来自 RESULT；DISPATCH 据此回查）
     child_by_tcid: dict[str, str] = {}
+    # 本 root 直接子任务回填的 tool_call_id：RESULT.parent_task_id == root（不依赖 get_task）
+    subtree_tcids: set[str] = set()
     for r in records:
         if r.type == MemoryEventType.TASK_DISPATCH_RESULT:
             tcid = r.metadata.get("tool_call_id")
             cid = r.metadata.get("child_task_id")
             if tcid and cid:
                 child_by_tcid[tcid] = cid
+            if tcid and r.metadata.get("parent_task_id") == root_id:
+                subtree_tcids.add(tcid)
 
-    to_supersede: list[str] = []
-    for r in records:
-        cid = r.metadata.get("child_task_id") or child_by_tcid.get(r.metadata.get("tool_call_id"))
+    def _is_subtask(r) -> bool:
+        tcid = r.metadata.get("tool_call_id")
+        if tcid and tcid in subtree_tcids:
+            return True  # 回填自带 parent_task_id == root → 必是本 root 子任务
+        # 回退:靠 task store 判定;查不到 child(restore 等)时保守不折,避免误删前序 root 经验
+        cid = r.metadata.get("child_task_id") or child_by_tcid.get(tcid)
         if not cid:
-            continue  # 未配对 / 无法定位 child → 不动
+            return False
         child = get_task(cid) if get_task else None
         if child is None:
-            continue
-        if not _is_agent_root_task(child, agent_id):
-            to_supersede.append(r.id)
+            return False
+        return not _is_agent_root_task(child, agent_id)
 
+    to_supersede = [r.id for r in records if _is_subtask(r)]
     if to_supersede:
         await memory.supersede(to_supersede, provider_ctx)
     return len(to_supersede)
@@ -94,7 +105,23 @@ async def record_root_self_experience(memory, scope, task, mem_content, outcome,
     ≤ ROOT_SELF_EXPERIENCE_TURN_LIMIT assistant turns → preserve the whole
     conversation as AGENT_CONVERSATION_TURN records; otherwise → one synthesized
     delegate_task↔result pair. Returns {"mode": ..., "count": ...} for eventing.
+
+    Idempotent: finalize can re-enter (re-dispatch / restore), and a second write would
+    duplicate the experience (fold never removes a root's own records). If this root's
+    experience already exists in its agent layer, skip.
     """
+    existing = await memory.recall_recent(
+        scope,
+        [MemoryEventType.AGENT_CONVERSATION_TURN, MemoryEventType.TASK_DISPATCH_RESULT],
+        2000, provider_ctx,
+    )
+    if any(
+        r.metadata.get("origin_task_id") == task.id  # conversation turns / synthesized user turn
+        or r.metadata.get("child_task_id") == task.id  # synthesized dispatch result
+        for r in existing
+    ):
+        return {"mode": "skipped", "count": 0}
+
     n_assistant = await memory.count_recent(
         scope, [MemoryEventType.LLM_RESPONSE], provider_ctx,
     )

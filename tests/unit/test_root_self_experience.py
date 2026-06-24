@@ -195,6 +195,32 @@ async def test_conversation_no_final_answer_when_no_output() -> None:
     assert not any(r.metadata.get("final_answer") for r in turns)
 
 
+async def test_self_experience_idempotent_dispatch() -> None:
+    """finalize 重入：再调一次 record_root_self_experience 不得重复写合成 dispatch 对。"""
+    mem = InMemoryMemoryProvider()
+    scope = _sc()
+    await _seed_task_conversation(mem, scope, n_assistant=5)  # >3 → dispatch
+    await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
+    second = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
+
+    assert second["mode"] == "skipped"
+    res = await mem.recall_recent(_sc(task_id="t2"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
+    assert len(res) == 1  # 不重复
+
+
+async def test_self_experience_idempotent_conversation() -> None:
+    """≤3 档同样幂等：重入不得让对话回合翻倍。"""
+    mem = InMemoryMemoryProvider()
+    scope = _sc()
+    await _seed_task_conversation(mem, scope, n_assistant=2)  # ≤3 → conversation
+    first = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
+    second = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
+
+    assert second["mode"] == "skipped"
+    turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    assert len(turns) == first["count"]  # 只有第一次的回合，没翻倍
+
+
 async def test_threshold_boundary() -> None:
     assert ROOT_SELF_EXPERIENCE_TURN_LIMIT == 3
     # exactly 3 → conversation

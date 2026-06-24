@@ -128,3 +128,29 @@ async def test_fold_supersedes_both_subtask_kinds_keeps_prior_root() -> None:
     # only the prior root's pair survives
     tcids = {r.metadata.get("tool_call_id") for r in remaining}
     assert tcids == {"tcRk"}
+
+
+async def test_fold_supersedes_backfill_by_parent_id_without_task_store() -> None:
+    """restore re-run: the child is not in the (rebuilt) task_manager → get_task→None, but the
+    real backfill carries parent_task_id == root, so fold must still supersede it.
+
+    Without this, the child's backfill survives and duplicates the root's self-experience."""
+    mem = InMemoryMemoryProvider()
+    R = _task("R", parent=None, assigned="A", creator="A")
+    agent_scope = _sc("R", "A")
+
+    # real backfill (finalize block a): DISPATCH (gateway, no parent) + RESULT carrying parent_task_id
+    await mem.ingest(MemoryEvent(type=T.TASK_DISPATCH, scope=agent_scope, content="delegate",
+                                 timestamp=_BASE, role="assistant",
+                                 metadata={"tool_call_id": "tc1"}), _ctx())
+    await mem.ingest(MemoryEvent(type=T.TASK_DISPATCH_RESULT, scope=agent_scope, content="child out",
+                                 timestamp=_BASE + timedelta(seconds=1), role="tool",
+                                 metadata={"tool_call_id": "tc1", "child_task_id": "C",
+                                           "parent_task_id": "R"}), _ctx())
+
+    # get_task can't find the child (evicted / not in restore's manager)
+    n = await fold_root_subtree(mem, agent_scope, R, lambda _id: None, _ctx())
+
+    assert n == 2  # both the gateway DISPATCH and the backfill RESULT folded
+    remaining = await mem.recall_recent(agent_scope, [T.TASK_DISPATCH, T.TASK_DISPATCH_RESULT], 100, _ctx())
+    assert remaining == []

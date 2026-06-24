@@ -68,6 +68,20 @@ async def test_task_conversation_carries_tool_call_links() -> None:
     assert by_type[T.TOOL_RESULT].metadata["tool_call_id"] == "tc1"
 
 
+async def test_recent_source_recalls_all_active_not_just_recency_window() -> None:
+    """All non-superseded task-layer records must be recalled (bound = compaction + budget,
+    NOT a recency cap). The original USER_PROMPT must survive a long task; truncating by a
+    recency window would silently drop non-compacted records."""
+    mem = InMemoryMemoryProvider()
+    await mem.ingest(_ev(T.USER_PROMPT, "THE ORIGINAL ASK", 0, role="user"), _ctx())
+    for i in range(60):  # well past the old default recency window
+        await mem.ingest(_ev(T.LLM_RESPONSE, f"turn {i}", i + 1, role="assistant", tool_calls=[]), _ctx())
+
+    blocks = await _collect(RecentMemorySource(), mem)
+    assert any("THE ORIGINAL ASK" in b.content for b in blocks), "original USER_PROMPT must be recalled"
+    assert len(blocks) == 61  # all active records, nothing truncated
+
+
 async def test_agent_experience_pairs_and_hides_unpaired() -> None:
     mem = InMemoryMemoryProvider()
     await mem.ingest(_ev(T.TASK_DISPATCH, "delegate_task(...)", 0, role="assistant",

@@ -26,13 +26,19 @@ DEFAULT_RECENT_TYPES = [
 ]
 
 
+# 召回**所有**未 superseded 的 task 层记录。体量边界由「压缩」(把旧轮 supersede 成 summary)
+# + BudgetStrategy(按 token 预算、priority-aware 裁剪)负责，**不**在召回处按 recency 截断——
+# 那会把没被压缩的记录(如任务跑长后最旧的 USER_PROMPT)悄悄丢掉，导致 prompt 丢失任务框架。
+# 2000 是代码库「实际等价于全部」的约定(见 fold / _preserve_conversation)，真实任务不会触顶。
+_RECALL_ALL = 2000
+
+
 class RecentMemorySource:
-    """按 recall_recent 拉取 task 层最近 N 条，重建为结构化回合 blocks。"""
+    """召回 task 层全部未 superseded 记录，重建为结构化回合 blocks。"""
 
     name = "task_conversation"
 
-    def __init__(self, limit: int = 40, types: list[MemoryEventType] | None = None) -> None:
-        self._limit = limit
+    def __init__(self, types: list[MemoryEventType] | None = None) -> None:
         self._types = types or DEFAULT_RECENT_TYPES
 
     async def fetch(
@@ -43,18 +49,10 @@ class RecentMemorySource:
         records = await deps.memory.recall_recent(
             scope=request.scope,
             types=self._types,
-            limit=self._resolve_limit(request),
+            limit=_RECALL_ALL,
             ctx=deps.provider_ctx,
         )
 
         # records 来自 recall_recent，按 timestamp 倒序；正序产出 block（composer 再按 timestamp 归并）
         for idx, record in enumerate(reversed(records)):
             yield record_to_history_block(record, source="task_conversation", idx=idx)
-
-    def _resolve_limit(self, request: "ContextRequest") -> int:
-        """召回窗口 = 一个 act step 体量（max_turns_per_act）；拿不到 agent 时退构造默认。"""
-        agent = getattr(request, "agent", None)
-        loop_config = getattr(agent, "loop_config", None) if agent is not None else None
-        if loop_config is not None:
-            return loop_config.max_turns_per_act
-        return self._limit
