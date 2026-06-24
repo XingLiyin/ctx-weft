@@ -43,7 +43,7 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
         loop_config=SimpleNamespace(compact_keep_last=2, compact_token_ratio=0.8,
                                     compact_message_delta=0),
         loop_guard=SimpleNamespace(context_limit=1000, context_tokens=0,
-                                   context_message_count=0, last_compact_at_message=0),
+                                   context_message_count=0),
     )
     session = SimpleNamespace(id="s1", tenant_id="te1", token_budget=0, token_used=0,
                               context_limit=1000)
@@ -105,7 +105,7 @@ async def test_reason_stashes_bound_capabilities(monkeypatch):
         loop_config=SimpleNamespace(compact_keep_last=2, compact_token_ratio=0.8,
                                     compact_message_delta=0),
         loop_guard=SimpleNamespace(context_limit=1000, context_tokens=0,
-                                   context_message_count=0, last_compact_at_message=0),
+                                   context_message_count=0),
     )
     session = SimpleNamespace(id="s1", tenant_id="te1", token_budget=0, token_used=0,
                               context_limit=1000)

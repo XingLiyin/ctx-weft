@@ -345,3 +345,34 @@ def test_resumed_task_directive_on_history_capabilities_on_progress() -> None:
     assert "## Current Progress" in last and "halfway done" in last
     assert "### Available Tools" in last
     assert first is not last
+
+
+def test_observer_capabilities_on_last_user_not_front() -> None:
+    """Observe (with conversation history) must place the Capabilities block on the LAST user
+    message — same as act — not prepended to the first user message (which would bury the task
+    under the full skills/tools/sub-agents listing)."""
+    blocks = [
+        _identity_block("OBSERVER ROLE"),  # purpose=observe → identity block is the ROLE
+        _cap_block("report_task_outcome", "tool", "report the outcome"),
+        _cap_block("docx", "skill", "make a docx"),
+        _cap_block("planner", "agent", "a planning subagent"),
+        _history_block("user", "## Current Message\nthe original ask", "1"),
+        _history_block("assistant", "did some work", "2"),
+    ]
+    task = SimpleNamespace(title="T", description="d", user_prompt="the original ask",
+                           user_prompt_in_memory=True, process_report=None, outputs=None)
+    request = SimpleNamespace(task=task)  # no purpose attr → non-act (observe) path
+    msgs = DefaultComposer()._build_observer_messages(blocks, request)
+    user_msgs = [m for m in msgs if m.role == "user"]
+    assert len(user_msgs) >= 2
+    first, last = user_msgs[0].content, user_msgs[-1].content
+    # the first (history-derived) user message stays clean — no capabilities front-loaded
+    assert "the original ask" in first
+    assert "## Capabilities" not in first
+    assert "### Available Tools" not in first
+    assert "### Available Skills" not in first
+    assert "### Available Sub-Agents" not in first
+    # capabilities ride the trailing user message, alongside the observer ROLE + judgment cue
+    assert "## Capabilities" in last
+    assert "### Available Tools" in last
+    assert "OBSERVER ROLE" in last

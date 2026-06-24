@@ -4,9 +4,10 @@ token 估算对齐 miniAgents Reasoner._fetch_base：
   - 有真实基线（loop_guard.context_tokens > 0）→ 增量估算：基线 + 新增消息估算
   - 无基线 → 用装配后的 prompt.token_count（全量估算）
 
-compact 触发两个维度（任一满足，对齐 miniAgents should_summarize）：
+compact 触发两个维度（任一满足）：
   - context_tokens >= context_limit * compact_token_ratio
-  - 自上次 compact 以来的新消息数 >= compact_message_delta
+  - agent 层 / task 层任一的可折叠 active 条数 >= compact_message_delta（绝对条数，
+    非「自上次 compact 起的增量」——见 _should_compact）
 """
 
 from __future__ import annotations
@@ -22,7 +23,11 @@ from ctx_weft.core.orchestrator.skill_executor_capability import (
     LIST_FILES_NAME,
     READ_FILE_NAME,
 )
-from ctx_weft.core.loop.steps.compact import CompactStep
+from ctx_weft.core.loop.steps.compact import (
+    _AGENT_COMPACT_TYPES,
+    TASK_COMPACT_TYPES,
+    CompactStep,
+)
 from ctx_weft.core.loop.steps.recognize_intent import (
     launch_recognize_intent,
     should_recognize_intent,
@@ -165,22 +170,22 @@ class PrepareStep(Step):
             if token_estimate / context_limit >= loop_config.compact_token_ratio:
                 return True
 
+        # 累积增长触发：agent 层（派发日志）与 task 层（执行对话）**分别**按可折叠 active
+        # 条数触发，任一达 compact_message_delta 即压（CompactStep 再逐层判 > keep_last 决定折哪层）。
+        # 用**绝对条数**而非「自上次 compact 起的增量」：loop_guard 在冷 resume 后归零，
+        # delta-from-baseline 永远点不着（HITL park 任务每次 resume 都重进 prepare）；而压缩会把
+        # active 条数降到 keep_last 以下，绝对阈值天然自纠偏、不会反复触发。
+        # 类型对齐 CompactStep._foldable_layers 所折的层，使「触发」与「实折」一致。
         if loop_config.compact_message_delta > 0:
-            try:
-                # agent compact 按 agent 层（派发日志）增长触发（spec/06 §7）
-                msg_count = await ctx.memory.count_recent(
-                    scope=state.scope,
-                    types=[
-                        MemoryEventType.TASK_DISPATCH_RESULT,
-                        MemoryEventType.AGENT_COMPACT_SUMMARY,
-                        MemoryEventType.AGENT_CONVERSATION_TURN,
-                    ],
-                    ctx=ctx.provider_ctx,
-                )
-                if msg_count - loop_guard.last_compact_at_message >= loop_config.compact_message_delta:
+            for types in (_AGENT_COMPACT_TYPES, TASK_COMPACT_TYPES):
+                try:
+                    msg_count = await ctx.memory.count_recent(
+                        scope=state.scope, types=types, ctx=ctx.provider_ctx,
+                    )
+                except Exception:
+                    continue
+                if msg_count >= loop_config.compact_message_delta:
                     return True
-            except Exception:
-                pass
 
         return False
 

@@ -125,7 +125,6 @@ class LoopGuard:
     context_tokens: int = 0
     context_message_count: int = 0
     context_limit: int = 180_000
-    last_compact_at_message: int = 0
 
 
 # ── Session ───────────────────────────────────────────────────────────────────

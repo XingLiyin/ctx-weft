@@ -303,9 +303,10 @@ class DefaultComposer(Composer):
         merged = messages
         # Resources 注入（仅发送，不入 memory）：
         #   - directive（当前 task 指令）：act 追加到首条 user message 尾部（紧跟 ## Current Task
-        #     等任务上下文之后）；其他 purpose 仍与 capabilities 一并前置到首条。
-        #   - capabilities（skills/tools/agents）：act 放到末条 user message，紧邻 act guidance /
-        #     finish_task，提升工具调用积极性；其他 purpose 前置到首条。
+        #     等任务上下文之后）；其他 purpose 仍前置到首条。
+        #   - capabilities（skills/tools/agents）：所有 purpose 一律放到末条 user message——
+        #     act 紧邻 guidance / finish_task 提升工具调用积极性；observe/compact/recognize_intent
+        #     也放末条，避免把整段能力清单压在任务消息之前喧宾夺主（与 act 一致）。
         directive_text = self._build_directive_section(blocks)
         capabilities_text = self._build_capabilities_section(blocks)
         if getattr(request, "purpose", None) == "act":
@@ -315,10 +316,10 @@ class DefaultComposer(Composer):
             if target_idx is None:
                 target_idx = self._last_user_index(merged)
             merged = self._append_to_user_at(merged, target_idx, directive_text)
-            merged = self._append_to_last_user(merged, capabilities_text)
         else:
-            preamble = "\n\n".join(p for p in (capabilities_text, directive_text) if p)
-            merged = self._prepend_to_first_user(merged, preamble)
+            if directive_text:
+                merged = self._prepend_to_first_user(merged, directive_text)
+        merged = self._append_to_last_user(merged, capabilities_text)
         return merged
 
     def _build_facet_trailing_messages(

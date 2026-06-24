@@ -33,9 +33,13 @@ class CapabilitySource:
         agents: list[AgentCapability] = []
 
         for cap in request.bound_capabilities:
+            # purpose 门控对三类能力一致：tool / skill / agent 都按 cap.purposes 过滤。
+            # skill / agent 默认 purposes=["act"]（委派只发生在 act），故 observe / compact /
+            # recognize_intent 不再看到 "Available Skills" / "Available Sub-Agents"。
+            if request.purpose not in cap.purposes:
+                continue
             if isinstance(cap, ToolCapability):
-                if request.purpose in cap.purposes:
-                    tools.append(cap)
+                tools.append(cap)
             elif isinstance(cap, SkillCapability):
                 skills.append(cap)
             elif isinstance(cap, AgentCapability):
