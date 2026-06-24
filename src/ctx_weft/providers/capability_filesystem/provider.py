@@ -171,7 +171,8 @@ async def bash_exec(
         yield CapabilityEvent(kind="error", payload={"code": "EMPTY_COMMAND", "message": "command is required"})
         return
 
-    err = check_command_safety(command)
+    _blacklist = ctx.extra.get("bash_blacklist") if ctx else None
+    err = check_command_safety(command, _blacklist) if _blacklist is not None else check_command_safety(command)
     if err:
         yield CapabilityEvent(
             kind="error",
@@ -557,6 +558,7 @@ class FilesystemConfig:
     bash_auto_venv: bool = True
     bash_venv_dir: str = ".venv"
     bash_venv_python: str | None = None  # 创建 venv 用的真 Python；None=回退 sys.executable
+    bash_blacklist: frozenset[str] | None = None  # host 收窄硬黑名单；None=用 _bash_safety 默认集
     file_read_default_lines: int = 2000
     file_read_max_bytes: int = 262_144
     file_read_max_line_bytes: int = 4096
@@ -651,6 +653,8 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
         extra["bash_auto_venv"] = self._cfg.bash_auto_venv
         extra["bash_venv_dir"] = self._cfg.bash_venv_dir
         extra["bash_venv_python"] = self._cfg.bash_venv_python
+        if self._cfg.bash_blacklist is not None:
+            extra["bash_blacklist"] = self._cfg.bash_blacklist
         extra["file_read_default_lines"] = self._cfg.file_read_default_lines
         extra["file_read_max_bytes"] = self._cfg.file_read_max_bytes
         extra["file_read_max_line_bytes"] = self._cfg.file_read_max_line_bytes
