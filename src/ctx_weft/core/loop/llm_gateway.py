@@ -25,10 +25,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import random
 from collections.abc import AsyncIterator
+from time import monotonic
 from typing import TYPE_CHECKING
 
-from ctx_weft.protocols import LLMMessage, TextPart
+from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
+from ctx_weft.core.events.types import EventType
+from ctx_weft.core.loop.driver import make_event
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
@@ -89,3 +94,118 @@ async def stream_llm(
     request.messages = merge_consecutive_messages(drop_orphan_tool_results(request.messages))
     async for chunk in llm.complete(request, stream=stream):
         yield chunk
+
+
+# ── 自愈退避包装 ───────────────────────────────────────────────────────────────
+
+# 默认值（ctx.config 缺省时回退；与 RuntimeConfig 默认一致）
+_DEFAULT_MAX_ATTEMPTS = 8
+_DEFAULT_MAX_DURATION_SEC = 300.0
+_DEFAULT_BASE_DELAY_SEC = 2.0
+_DEFAULT_MAX_INTERVAL_SEC = 60.0
+
+
+def _cfg_val(ctx, name: str, default: float) -> float:
+    cfg = getattr(ctx, "config", None)
+    return getattr(cfg, name, default) if cfg is not None else default
+
+
+def _is_outage(e: BaseException) -> bool:
+    return bool(getattr(e, "outage", False))
+
+
+def _compute_delay(
+    attempt: int,
+    *,
+    base: float,
+    max_interval: float,
+    retry_after: "float | None",
+) -> float:
+    """指数退避延迟（attempt 1-based）；优先采用 Retry-After；上限 max_interval。"""
+    if retry_after is not None and retry_after > 0:
+        return min(retry_after, max_interval)
+    return min(base * (2 ** (attempt - 1)), max_interval)
+
+
+async def _sleep_cancellable(delay: float, tok) -> None:
+    """Sleep up to *delay* seconds; if *tok* cancels first, raise CancelledError."""
+    if tok is None:
+        await asyncio.sleep(delay)
+        return
+    waiter = asyncio.ensure_future(tok.wait())
+    try:
+        await asyncio.wait({waiter}, timeout=delay)
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+    tok.raise_if_cancelled()
+
+
+async def _emit_retry(
+    ctx,
+    state,
+    attempt: int,
+    max_attempts: int,
+    delay: float,
+    error: BaseException,
+) -> None:
+    bus = getattr(ctx, "event_bus", None)
+    if bus is None or state is None:
+        return
+    await bus.emit(make_event(state, EventType.LLM_RETRY_TRIGGERED, payload={
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "next_delay_sec": delay,
+        "error_code": getattr(error, "status_code", 0),
+        "error": str(error),
+    }))
+
+
+async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]:
+    """退避自愈包装：把 retriable+outage 的 LLM 调用在进程内指数退避重试。
+
+    - 仅当本次尝试**尚未 yield 任何 chunk** 时重试（避免重复 token / 污染累积）。
+    - 已 yield 后断流（中途 outage）→ 直接 LLMOutageError（靠 /resume 重驱动）。
+    - 非 outage 的 retriable（如 _finalize 截断）与永久错 → 原样抛出（保留既有语义）。
+    - 预算（max_attempts / max_duration）耗尽 → LLMOutageError。
+    - 退避期间尊重 cancel_token。
+    """
+    from ctx_weft.protocols import LLMCallError  # local to avoid re-export confusion
+
+    max_attempts = int(_cfg_val(ctx, "llm_self_heal_max_attempts", _DEFAULT_MAX_ATTEMPTS))
+    max_duration = _cfg_val(ctx, "llm_self_heal_max_duration_sec", _DEFAULT_MAX_DURATION_SEC)
+    base = _cfg_val(ctx, "llm_self_heal_base_delay_sec", _DEFAULT_BASE_DELAY_SEC)
+    max_interval = _cfg_val(ctx, "llm_self_heal_max_interval_sec", _DEFAULT_MAX_INTERVAL_SEC)
+
+    deadline = monotonic() + max_duration
+    tok = getattr(ctx, "cancel_token", None)
+    attempt = 0
+    while True:
+        yielded_anything = False
+        try:
+            async for chunk in stream_llm(ctx.llm, request):
+                yielded_anything = True
+                yield chunk
+            return  # success
+        except LLMCallError as e:
+            if not getattr(e, "retriable", True) or not _is_outage(e):
+                raise  # 永久错 / 非 outage retriable → 原样抛出
+            if yielded_anything:
+                raise LLMOutageError(f"LLM outage mid-stream: {e}") from e
+            if tok is not None:
+                tok.raise_if_cancelled()
+            attempt += 1
+            if attempt >= max_attempts or monotonic() >= deadline:
+                raise LLMOutageError(
+                    f"LLM self-heal exhausted after {attempt} attempt(s): {e}",
+                    status_code=getattr(e, "status_code", 0),
+                ) from e
+            delay = _compute_delay(
+                attempt,
+                base=base,
+                max_interval=max_interval,
+                retry_after=getattr(e, "retry_after_sec", None),
+            )
+            delay += random.uniform(0, delay * 0.1)  # jitter
+            await _emit_retry(ctx, state, attempt, max_attempts, delay, e)
+            await _sleep_cancellable(delay, tok)

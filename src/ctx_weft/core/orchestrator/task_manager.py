@@ -248,6 +248,7 @@ class TaskManager:
             if task and task.status == "SUSPENDED":
                 # 子任务已由 control tool 推入队列；parent 等待所有子任务完成后
                 # 由 _try_resume_parent 重新入队，此处只需移出 running set 并 drain。
+                # 注：LLM 故障中断（_run_loop except LLMOutageError）也置 SUSPENDED 到此挂起，无子任务，待 /resume 由 restore 重排。
                 async with self._lock:
                     self._running_tasks.discard(task_id)
                     self._queue.unmark_running(task_id)

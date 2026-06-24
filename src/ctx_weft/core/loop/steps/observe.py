@@ -22,7 +22,7 @@ from ctx_weft.core.events import EventType
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryLayer
 from ctx_weft.core.loop.steps.compact import TASK_COMPACT_TYPES, summarize_for_compact
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import stream_llm
+from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
 from ctx_weft.core.utils import now_utc
 
 if TYPE_CHECKING:
@@ -147,7 +147,7 @@ class ObserveStep(Step):
             tool_calls = []
             usage = LLMUsage()
 
-            async for chunk in stream_llm(ctx.llm, llm_request):
+            async for chunk in stream_llm_resilient(ctx, state, llm_request):
                 if chunk.kind == "token":
                     accumulated_text += chunk.text
                     await ctx.event_bus.emit(make_event(

@@ -16,3 +16,8 @@ class RuntimeConfig:
     task_max_retries: int = 3
     default_token_budget: int = 200_000
     default_task_timeout_ms: int = 60_000
+    # LLM 瞬时故障自愈预算（stream_llm_resilient 读取；默认=历史安全值）
+    llm_self_heal_max_attempts: int = 8
+    llm_self_heal_max_duration_sec: float = 300.0
+    llm_self_heal_base_delay_sec: float = 2.0
+    llm_self_heal_max_interval_sec: float = 60.0

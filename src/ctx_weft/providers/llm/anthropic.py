@@ -88,11 +88,13 @@ class AnthropicAdapter(LLMClient):
             gate = ContentGate()  # 增量剥离 <think>/<tool_call> 标签
 
             try:
-                # 流式连接禁用 read 超时：长工具调用/思考可能让分片间隔超过常规 read 超时，
-                # 触发 ReadTimeout → 被误当 transport 断流重发整个请求。connect 超时仍保护死端点。
+                # 流式 read 超时 = 闲置(自上一字节起)超时,而非整段时长上限:正常流(token/思考/
+                # 工具参数分片,以及 Anthropic 周期性 ping)持续来字节会不断重置计时器,故长工具调用/
+                # 长思考不会误触发。仅当连接静默(中途断网/死 socket,无字节无 RST)超过 timeout 才触发
+                # ReadTimeout(TransportError)→ produced=True 时抛 outage → INTERRUPTED;否则会永久挂起。
                 async with self._client.stream(
                     "POST", url, headers=headers, json=payload,
-                    timeout=httpx.Timeout(self._timeout, read=None),
+                    timeout=httpx.Timeout(self._timeout, read=self._timeout),
                 ) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
@@ -118,10 +120,18 @@ class AnthropicAdapter(LLMClient):
                             await asyncio.sleep(delay)
                             continue
 
+                        retry_after_hdr = resp.headers.get("retry-after")
+                        try:
+                            retry_after_val = float(retry_after_hdr) if retry_after_hdr else None
+                        except (ValueError, TypeError):
+                            retry_after_val = None
+                        is_retriable = resp.status_code in _RETRIABLE_CODES
                         raise LLMCallError(
                             f"Anthropic API error {resp.status_code}: {err_body}",
                             status_code=resp.status_code,
-                            retriable=resp.status_code in _RETRIABLE_CODES,
+                            retriable=is_retriable,
+                            outage=is_retriable,
+                            retry_after_sec=retry_after_val,
                         )
 
                     async for line in resp.aiter_lines():
@@ -221,7 +231,7 @@ class AnthropicAdapter(LLMClient):
                         bool(tool_blocks), exc,
                     )
                     raise LLMCallError(
-                        f"LLM stream interrupted mid-flight: {exc}", retriable=True
+                        f"LLM stream interrupted mid-flight: {exc}", retriable=True, outage=True,
                     ) from exc
                 if attempt < self._max_http_retries - 1:
                     delay = float(2 ** attempt)

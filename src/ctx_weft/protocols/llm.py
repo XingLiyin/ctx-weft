@@ -43,12 +43,49 @@ class LLMCallError(RuntimeError):
 
     retriable=False 时 TaskManager 不应重试（如 401 认证失败、transport 重试耗尽）。
     retriable=True  时 TaskManager 可按策略重试（如 429 限流、5xx 服务器错误）。
+    outage=True     标记"基础设施类瞬时故障"（网络/连接/transport/5xx/429），供自愈层
+                    （stream_llm_resilient）与 _run_loop 据此走 INTERRUPTED 而非 FAILED。
+                    截断/退化响应等"内容类" retriable 错不应打此标。
+    retry_after_sec 若 provider 给了 Retry-After，自愈退避优先采用。
     """
 
-    def __init__(self, message: str, *, status_code: int = 0, retriable: bool = True) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 0,
+        retriable: bool = True,
+        outage: bool = False,
+        retry_after_sec: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.retriable = retriable
+        self.outage = outage
+        self.retry_after_sec = retry_after_sec
+
+
+class LLMOutageError(LLMCallError):
+    """瞬时 LLM 基础设施故障，应按可恢复中断（INTERRUPTED）处理，**不是** task 失败。
+
+    自愈层在"预算耗尽"或"已吐 chunk 后中途断流"时抛此异常；_run_loop 用
+    ``except LLMOutageError`` 干净分流到 INTERRUPTED 路径。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 0,
+        retry_after_sec: float | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=status_code,
+            retriable=True,
+            outage=True,
+            retry_after_sec=retry_after_sec,
+        )
 
 
 # ── Message ───────────────────────────────────────────────────────────────────

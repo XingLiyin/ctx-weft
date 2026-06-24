@@ -14,8 +14,8 @@ from typing import Any
 from ctx_weft.core.assembler.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import stream_llm
-from ctx_weft.protocols import MemoryEventType, MemoryLayer
+from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
+from ctx_weft.protocols import LLMRequest, MemoryEventType, MemoryLayer
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,12 @@ TASK_COMPACT_TYPES = [
 
 
 async def summarize_for_compact(state: LoopState, ctx: LoopContext) -> str:
-    """装配 purpose="compact" 上下文 + 一次 LLM 摘要。返回摘要文本（LLM 失败时 ""）。"""
+    """装配 purpose="compact" 上下文 + 一次 LLM 摘要，返回摘要文本。
+
+    LLM 摘要是 compact 的硬依赖（compact + observe 回退档共用本函数）：瞬时故障由
+    stream_llm_resilient 自愈，自愈耗尽抛 LLMOutageError → 走 INTERRUPTED。**不再**在
+    LLM 失败时静默退化为纯截断（旧的 except Exception 兜底已移除）。
+    """
     agent = state.agent
     request = ContextRequest(
         purpose="compact",
@@ -47,20 +52,16 @@ async def summarize_for_compact(state: LoopState, ctx: LoopContext) -> str:
     )
     compact_prompt = await ctx.assembler.assemble(request)
 
+    llm_request = LLMRequest(
+        model=agent.runtime.get("llm_model", "mock"),
+        system=compact_prompt.system,
+        messages=compact_prompt.messages,
+        tools=[],
+    )
     summary_text = ""
-    try:
-        from ctx_weft.protocols import LLMRequest
-        llm_request = LLMRequest(
-            model=agent.runtime.get("llm_model", "mock"),
-            system=compact_prompt.system,
-            messages=compact_prompt.messages,
-            tools=[],
-        )
-        async for chunk in stream_llm(ctx.llm, llm_request):
-            if chunk.kind == "token":
-                summary_text += chunk.text
-    except Exception:
-        logger.exception("summarize_for_compact: LLM failed for agent %s, truncation-only", agent.id)
+    async for chunk in stream_llm_resilient(ctx, state, llm_request):
+        if chunk.kind == "token":
+            summary_text += chunk.text
     return summary_text
 
 

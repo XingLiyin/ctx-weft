@@ -159,6 +159,7 @@ EVENT_TYPES: frozenset[str] = frozenset(EventType)
 TRANSIENT_EVENT_TYPES: frozenset[str] = frozenset({
     EventType.LLM_TOKEN_STREAMED,
     EventType.LLM_REASONING_STREAMED,
+    EventType.LLM_RETRY_TRIGGERED,
 })
 
 
