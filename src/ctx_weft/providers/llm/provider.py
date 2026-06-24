@@ -12,12 +12,16 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from ctx_weft.protocols import LLMClient, LLMRequest
+from ctx_weft.protocols import LLMClient, LLMMessage, LLMRequest
 from ctx_weft.providers.llm.store import LLMAccountStoreProtocol
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_STYLES = {"anthropic", "openai"}
+
+# 模型可用性探测的补全预算。不用 1：个别推理模型对极小 max_tokens 会直接拒绝，
+# 取一个小而安全的值——只需请求被接受、流能跑完，不关心实际产出多少 token。
+_PROBE_MAX_TOKENS = 16
 
 
 @dataclass
@@ -227,6 +231,42 @@ class LLMProvider:
         """Probe a registered account; returns latency in ms. Raises on failure."""
         t0 = time.perf_counter()
         await self.fetch_models_for_account(name)
+        return (time.perf_counter() - t0) * 1000.0
+
+    async def _probe_model(self, adapter: LLMClient, model: str) -> None:
+        """Send one minimal completion with `model` and drain the stream.
+
+        Validates that the model name exists AND the account has permission to
+        call it: a bad/unauthorized model makes the adapter raise LLMCallError
+        (HTTP 4xx) instead of merely listing models. Unlike fetch_models/ping,
+        this actually exercises the configured model.
+        """
+        request = LLMRequest(
+            model=model,
+            system="",
+            messages=[LLMMessage(role="user", content="ping")],
+            max_tokens=_PROBE_MAX_TOKENS,
+        )
+        async for _ in adapter.complete(request, stream=True):
+            pass
+
+    async def verify_model(self, style: str, api_key: str, base_url: str = "", *, model: str) -> float:
+        """Verify a model is callable with ad-hoc credentials; returns latency in ms.
+
+        Builds a transient adapter and runs a minimal completion. Raises on failure
+        (unsupported style, bad credentials, unknown model, no permission)."""
+        probe = LLMAccount(name="_probe", style=style, api_key=api_key, base_url=base_url)
+        adapter = self._build_adapter(probe)  # raises ValueError on unsupported style
+        t0 = time.perf_counter()
+        await self._probe_model(adapter, model)
+        return (time.perf_counter() - t0) * 1000.0
+
+    async def verify_model_for_account(self, name: str, model: str) -> float:
+        """Verify a model is callable for a registered account (reuses its live adapter);
+        returns latency in ms. Raises KeyError if missing, or on call failure."""
+        self.get_account(name)  # raises KeyError if missing
+        t0 = time.perf_counter()
+        await self._probe_model(self._adapters[name], model)
         return (time.perf_counter() - t0) * 1000.0
 
     # ── Persistence ───────────────────────────────────────────────────────────
