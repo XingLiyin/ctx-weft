@@ -1134,8 +1134,14 @@ class CtxWeftRuntime:
                 logger.exception("rebuild_all_pending_hitl: failed for session %s", sid)
         return total
 
-    async def _emit_session_interrupted(self, session_id: str) -> None:
-        """发 SessionStatusChanged(INTERRUPTED) —— host 读模型(投影/SSE)按事件自行反映,不走回调。"""
+    async def _emit_session_interrupted(self, session_id: str, reason: str | None = None) -> None:
+        """发 SessionStatusChanged(INTERRUPTED) —— host 读模型(投影/SSE)按事件自行反映,不走回调。
+
+        reason 标记中断成因（如 "llm_outage"）供前端区分 LLM 故障中断 vs 通用中断(重启等)。
+        """
+        payload: dict = {"new_status": "INTERRUPTED"}
+        if reason:
+            payload["reason"] = reason
         await self._event_bus.emit(Event(
             id=generate_id("evt"),
             run_id=None,
@@ -1143,7 +1149,7 @@ class CtxWeftRuntime:
             session_id=session_id,
             type=EventType.SESSION_STATUS_CHANGED,
             timestamp=now_utc(),
-            payload={"new_status": "INTERRUPTED"},
+            payload=payload,
         ))
 
     async def _pending_hitl(self, session_id: str) -> dict:
@@ -1306,7 +1312,7 @@ class CtxWeftRuntime:
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
                 task.status = "SUSPENDED"
             logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
-            await self._emit_session_interrupted(state.session.id)
+            await self._emit_session_interrupted(state.session.id, reason="llm_outage")
         except Exception as exc:
             run_error = exc
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
