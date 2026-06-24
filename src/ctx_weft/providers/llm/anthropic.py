@@ -118,10 +118,18 @@ class AnthropicAdapter(LLMClient):
                             await asyncio.sleep(delay)
                             continue
 
+                        retry_after_hdr = resp.headers.get("retry-after")
+                        try:
+                            retry_after_val = float(retry_after_hdr) if retry_after_hdr else None
+                        except (ValueError, TypeError):
+                            retry_after_val = None
+                        is_retriable = resp.status_code in _RETRIABLE_CODES
                         raise LLMCallError(
                             f"Anthropic API error {resp.status_code}: {err_body}",
                             status_code=resp.status_code,
-                            retriable=resp.status_code in _RETRIABLE_CODES,
+                            retriable=is_retriable,
+                            outage=is_retriable,
+                            retry_after_sec=retry_after_val,
                         )
 
                     async for line in resp.aiter_lines():
@@ -221,7 +229,7 @@ class AnthropicAdapter(LLMClient):
                         bool(tool_blocks), exc,
                     )
                     raise LLMCallError(
-                        f"LLM stream interrupted mid-flight: {exc}", retriable=True
+                        f"LLM stream interrupted mid-flight: {exc}", retriable=True, outage=True,
                     ) from exc
                 if attempt < self._max_http_retries - 1:
                     delay = float(2 ** attempt)

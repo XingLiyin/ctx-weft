@@ -15,7 +15,7 @@ from typing import Any
 
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import stream_llm
+from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import (
@@ -99,7 +99,7 @@ class ActStep(Step):
             usage = LLMUsage()
             interrupted = False
 
-            async for chunk in stream_llm(ctx.llm, llm_request):
+            async for chunk in stream_llm_resilient(ctx, state, llm_request):
                 tok = ctx.cancel_token
                 if _interrupt_pending(ctx):
                     interrupted = True          # ② 软打断：停收 token，下面提交半截

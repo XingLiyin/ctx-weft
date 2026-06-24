@@ -54,6 +54,7 @@ from ctx_weft.protocols import (
     AgentTemplate,
     Capability,
     KnowledgeProvider,
+    LLMOutageError,
     MemoryProvider,
     MemoryScope,
     ProviderContext,
@@ -1242,6 +1243,7 @@ class CtxWeftRuntime:
             task_manager=task_manager,
             hitl_manager=self.hitl_manager,
             pause_token=pause_token,
+            config=self._config,
         )
 
     @staticmethod
@@ -1296,6 +1298,15 @@ class CtxWeftRuntime:
             was_cancelled = True
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
                 task.status = "CANCELED"
+        except LLMOutageError as exc:
+            # 瞬时 LLM 故障自愈耗尽 / 中途断流 → 可恢复中断，**不是** task 失败。
+            # task 置 SUSPENDED（非终态，与 HitlPark 同形）→ _run_task 走挂起分支不判 FINISHED，
+            # restore() 在 /resume 时据非终态重排；不发 TASK_FAILED；不增 failure_counter；
+            # run_error 保持 None → finally 不再抛出（不经 _handle_task_failure）。
+            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
+                task.status = "SUSPENDED"
+            logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
+            await self._emit_session_interrupted(state.session.id)
         except Exception as exc:
             run_error = exc
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
