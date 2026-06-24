@@ -69,16 +69,18 @@ def command_word(segment: str) -> str | None:
     return lowered or None
 
 
-def check_command_safety(command: str) -> str | None:
+def check_command_safety(
+    command: str, blacklist: frozenset[str] = BASH_BLACKLIST
+) -> str | None:
     """返回错误消息字符串（命中）或 None（放行）。
 
     - 含命令替换 ``$(...)`` 或反引号 → 返回拦截原因
-    - 逐段取命令词，命中 ``BASH_BLACKLIST`` → 返回 ``Command '<word>' is not allowed``
+    - 逐段取命令词，命中 ``blacklist`` → 返回 ``Command '<word>' is not allowed``
     """
     if _CMD_SUBST.search(command):
         return "Command substitution ($(...) or backticks) is not allowed"
     for segment in split_segments(command):
         word = command_word(segment)
-        if word and word in BASH_BLACKLIST:
+        if word and word in blacklist:
             return f"Command '{word}' is not allowed"
     return None
