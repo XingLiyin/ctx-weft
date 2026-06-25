@@ -192,6 +192,12 @@ class LLMProvider:
             raise RuntimeError("No LLM accounts registered. Register one via LLMProvider.register_account() (or have the host register it) before resolving a client.")
 
         name = account or next(iter(self._accounts))
+        if name not in self._accounts:
+            # 账号可能已被删除（会话/任务仍钉着旧账号名）→ 回退到默认账号 + 默认模型，
+            # 而不是直接 KeyError 让任务失败。沿用旧模型名会落到默认账号上不匹配，故置空。
+            logger.warning("LLM account '%s' not found; falling back to default account.", name)
+            name = next(iter(self._accounts))
+            model = None
         acc = self.get_account(name)
         adapter = self._adapters[name]
 
