@@ -279,21 +279,17 @@ async def read_file(
     byte_limit: Annotated[int | None, "Max bytes to read in byte mode (clamped to the per-call budget)"] = None,
     ctx: ProviderContext | None = None,
 ) -> AsyncIterator[CapabilityEvent]:
-    """Read a text file, with line numbers, one page at a time.
-
-    Line mode (default): reads from line `offset` (1-based) up to `limit` lines.
-    Large files are paginated — when the result ends with a "Continue:" hint,
-    call read_file again with the suggested `offset` to read the next page.
-    Use `offset`/`limit` to jump to or narrow a range. Do NOT try to read a
-    whole large file at once; follow the pagination hints instead.
-
-    Byte mode: pass `byte_offset` (and optionally `byte_limit`) to read raw bytes
-    starting at a byte position, without line numbers. Use this only as an escape
-    hatch when line mode reports a line was truncated — read that line's remaining
-    bytes by paging `byte_offset` up to the reported `byte_end`, then resume line
-    mode at the next line.
-
-    Line params (`offset`/`limit`) and `byte_offset` are mutually exclusive.
+    """Read a plain-text file, with line numbers, one page at a time.
+    Plain-text only (code, .txt, .md, .json, .csv, config). Does NOT decode
+    binary/document formats (.pptx, .docx, .xlsx, .pdf, images, etc.) — those
+    yield garbled bytes; use a format-specific tool or convert to text first.
+    Line mode (default): reads `limit` lines from line `offset` (1-based). Large
+    files paginate — when the result ends with a "Continue:" hint, call again
+    with the suggested `offset` for the next page; don't try to read it all at once.
+    Byte mode: `byte_offset` (+ optional `byte_limit`) reads raw bytes without
+    line numbers. Escape hatch for when line mode reports a truncated line: page
+    `byte_offset` up to the reported `byte_end`, then resume line mode at the next line.
+    `offset`/`limit` and `byte_offset` are mutually exclusive.
     """
     if not path:
         yield CapabilityEvent(kind="error", payload={"code": "MISSING_PATH", "message": "path is required"})
@@ -396,7 +392,6 @@ async def edit_file(
     ctx: ProviderContext | None = None,
 ) -> AsyncIterator[CapabilityEvent]:
     """Replace an exact `old_string` with `new_string` in a file, in place.
-
     By default `old_string` must match exactly once — add surrounding context to
     make it unique, or pass `replace_all=true` to replace every occurrence.
     """
