@@ -61,6 +61,10 @@ class MCPServerConfig:
     capability_purpose_override: dict[str, list[str]] = field(default_factory=dict)
     timeout_per_call_sec: int = 60
     connect_timeout_sec: int = 10
+    # 仅 http/streamable_http 有意义：底层 httpx 客户端是否信任环境变量
+    # （HTTP_PROXY/HTTPS_PROXY/NO_PROXY/SSL_CERT_FILE/NETRC…）。默认 False＝直连、忽略
+    # 系统代理与证书设置（内网部署常态）。core 自身不消费此字段，由 host 的 transport 实现读取。
+    trust_env: bool = False
 
 
 class MCPCapabilityProvider(ToolCapabilityProvider):
