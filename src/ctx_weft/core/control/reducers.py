@@ -315,7 +315,13 @@ def _apply(view: RunStateView, ev: Event) -> None:
         view.task_status = "ACTIVE"
         view.session_status = "RUNNING"
     elif t == EventType.RUN_FINISHED:
-        view.session_status = p.get("final_status", "FINISHED")
+        # final_status 是**任务级** run 终态（FINISHED/SUSPENDED/FAILED/CANCELED）。SUSPENDED
+        # 是 HITL park / LLM 中断的任务挂起态，不是会话状态——落到 session_status 会污染投影
+        # （会话级状态只由 SESSION_* 事件驱动；park 已先发 SESSION_PAUSED_HITL，outage 已先发
+        # SESSION_STATUS_CHANGED(INTERRUPTED)）。其余终态保留旧行为。
+        final_status = p.get("final_status", "FINISHED")
+        if final_status != "SUSPENDED":
+            view.session_status = final_status
 
     # ── Session projection ────────────────────────────────────────────────────
     elif t == EventType.SESSION_CREATED:
@@ -349,6 +355,17 @@ def _apply(view: RunStateView, ev: Event) -> None:
             sess = view.sessions.get(ev.session_id)
             if sess is not None:
                 sess.status = new_status
+
+    elif t == EventType.SESSION_PAUSED_HITL:
+        # 纯文本暂停(wait_for_user)= 软待命 PAUSED；ask_user/审批 = PAUSED_HITL。
+        # 与 ProjectionUpdater 同语义（单一真相），补齐 reducer 此前漏处理导致的会话状态失真。
+        from ctx_weft.core.orchestrator.control_capability import WAIT_FOR_USER_CAPABILITY_ID
+        cap = p.get("capability_id", "")
+        status = "PAUSED" if cap == WAIT_FOR_USER_CAPABILITY_ID else "PAUSED_HITL"
+        view.session_status = status
+        sess = view.sessions.get(ev.session_id)
+        if sess is not None:
+            sess.status = status
 
     elif t == EventType.SESSION_FINISHED:
         final_status = p.get("final_status", "SUCCEEDED")
@@ -461,3 +478,10 @@ def _apply(view: RunStateView, ev: Event) -> None:
         EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
     ):
         view.pending_hitl.pop(p.get("approval_id", ""), None)
+        # HITL 解决 → 会话回 RUNNING（仅当仍处暂停态，避免覆盖已到的终态）。与 ProjectionUpdater
+        # _update_session_if_status 同语义。
+        if view.session_status in ("PAUSED", "PAUSED_HITL"):
+            view.session_status = "RUNNING"
+        sess = view.sessions.get(ev.session_id)
+        if sess is not None and sess.status in ("PAUSED", "PAUSED_HITL"):
+            sess.status = "RUNNING"

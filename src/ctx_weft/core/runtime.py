@@ -485,10 +485,17 @@ class CtxWeftRuntime:
         task_manager = self._task_managers.get(session_id)
         if token is None and task_manager is None:
             return False
+        # 取消前判定会话是否已空闲挂起（无在跑任务）。RUNNING：在途 task 经 CancelToken→checkpoint
+        # 协作取消→on_task_finished→is_done→_fire_session_done→_on_done 自行回收，故此处不抢着回收。
+        idle = task_manager is not None and task_manager.is_done()
         if task_manager is not None:
             await task_manager.cancel_all(reason="user_cancel")
         if token is not None:
             token.cancel()
+        if idle:
+            # 已暂停/中断（无在跑 task）的会话被取消：cancel_all 不经 _fire_session_done，_on_done
+            # 不会触发，故显式回收 runtime 侧 per-session 状态（含较重的 TaskManager），避免滞留。
+            self._release_session(session_id)
         return True
 
     # ── Phase 1 compat ───────────────────────────────────────────────────────
@@ -667,18 +674,34 @@ class CtxWeftRuntime:
         self._task_managers[session.id] = task_manager
 
         async def _on_done() -> None:
+            self._release_session(session.id)
+
+        async def _on_idle() -> None:
+            # 会话 park/suspend 进入空闲（非终结，待续接）：只回收按 run 计的 pause/cancel token
+            # （续跑由 recover_session 重建全新 token）。**保留** task_manager——/cancel 一个已暂停
+            # 会话仍要用它走 cancel_all；它在下次 recover 的 _register_and_drain 处被覆盖，或在
+            # 终结(_on_done)/取消空闲会话(cancel_session)时由 _release_session 回收。
             self._cancel_tokens.pop(session.id, None)
             self._pause_tokens.pop(session.id, None)
-            self._task_managers.pop(session.id, None)
-            # 统一释放 per-session 内存状态：control 的 TaskManager 映射、fs 的 workspace 映射等
-            # （仅传 id，core 不需知道各 provider 各自持有什么）
-            for _p in self.providers.get_capability_providers():
-                if isinstance(_p, SessionScopedCapabilityProvider):
-                    _p.deregister_session(session.id)
 
         task_manager.set_session_done_callback(_on_done)
+        task_manager.set_session_idle_callback(_on_idle)
 
         asyncio.create_task(task_manager.drain())
+
+    def _release_session(self, session_id: str) -> None:
+        """回收 runtime 侧全部 per-session 内存状态：pause/cancel token + TaskManager 映射 +
+        scoped providers（fs workspace、control 的 TaskManager 注册等）。幂等。
+
+        会话终结(_on_done) 或取消一个**已空闲挂起**的会话(cancel_session) 时调用——后者 cancel_all
+        不经 on_task_finished/_fire_session_done，故不会自动触发 _on_done，须显式回收避免 TaskManager 滞留。
+        """
+        self._cancel_tokens.pop(session_id, None)
+        self._pause_tokens.pop(session_id, None)
+        self._task_managers.pop(session_id, None)
+        for _p in self.providers.get_capability_providers():
+            if isinstance(_p, SessionScopedCapabilityProvider):
+                _p.deregister_session(session_id)
 
     def _make_task_runner(
         self,

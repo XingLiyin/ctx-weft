@@ -71,6 +71,7 @@ class TaskManager:
         self._session: Session | None = None  # 注入后供 failure_counter 维护使用
         self._event_bus: "EventBus | None" = event_bus
         self._on_session_done: Callable[[], Coroutine[Any, Any, None]] | None = None
+        self._on_session_idle: Callable[[], Coroutine[Any, Any, None]] | None = None
         self._session_done_fired: bool = False
         self._background_asyncio_tasks: set[asyncio.Task] = set()
 
@@ -90,6 +91,15 @@ class TaskManager:
         """session 真正结束（所有任务处理完、无重试待执行）时调用的回调。只调用一次。"""
         self._on_session_done = cb
         self._session_done_fired = False
+
+    def set_session_idle_callback(self, cb: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        """session 进入**空闲挂起**（有任务 park/suspend 且无其它在跑任务、非终结）时调用的回调。
+
+        区别于 `_on_session_done`：那是终结回调（FINISHED/FAILED/CANCELED，回收全部 per-session 状态）；
+        这是「会话暂停、待续接」的信号，供 runtime 回收按 run 计、续跑会重建的控制信号（pause/cancel token）。
+        可多次触发（每次 park 一次）；回调须幂等。
+        """
+        self._on_session_idle = cb
 
     def register_task(self, task: Task) -> None:
         self._tasks[task.id] = task
@@ -253,6 +263,11 @@ class TaskManager:
                     self._running_tasks.discard(task_id)
                     self._queue.unmark_running(task_id)
                 await self.drain()
+                # 整个会话因 park/suspend 进入空闲（无在跑任务、无待派子任务）→ 通知 runtime 回收
+                # 按 run 计的控制信号。注意是 is_done（而非"本 task 挂起"）：父等子时子仍在跑，
+                # is_done 为 False、不触发，待子完成 resume 父；只有全会话静止才算空闲挂起。
+                if self.is_done():
+                    await self._fire_session_idle()
                 return
             if task and task.status == "PENDING":
                 # Observer 判 retry（本轮未完成，含机械退出）：重新入队（retry_count 已在 finalize +1）。
@@ -551,6 +566,14 @@ class TaskManager:
             task_id=task_id,
             payload=payload or {},
         ))
+
+    async def _fire_session_idle(self) -> None:
+        """会话空闲挂起（park/suspend，非终结）：通知 runtime 回收 per-run 控制信号。不发事件。"""
+        if self._on_session_idle is not None:
+            try:
+                await self._on_session_idle()
+            except Exception:
+                logger.exception("TaskManager: session_idle callback failed")
 
     async def _fire_session_done(self) -> None:
         """触发 session 结束：发 SessionFinished 事件 + 可选回调，保证只执行一次。"""

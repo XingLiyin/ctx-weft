@@ -39,14 +39,21 @@ from ctx_weft.protocols.context import ContentPart
 
 
 class LLMCallError(RuntimeError):
-    """LLM API 调用错误，携带 HTTP 状态码和可重试性标志。
+    """LLM API 调用错误，携带 HTTP 状态码与分类标志。
 
-    retriable=False 时 TaskManager 不应重试（如 401 认证失败、transport 重试耗尽）。
-    retriable=True  时 TaskManager 可按策略重试（如 429 限流、5xx 服务器错误）。
-    outage=True     标记"基础设施类瞬时故障"（网络/连接/transport/5xx/429），供自愈层
-                    （stream_llm_resilient）与 _run_loop 据此走 INTERRUPTED 而非 FAILED。
-                    截断/退化响应等"内容类" retriable 错不应打此标。
-    retry_after_sec 若 provider 给了 Retry-After，自愈退避优先采用。
+    三类故障各走不同路径（retriable × outage 组合）：
+
+    retriable=False              永久错（401 认证 / 400 参数 / 404 模型 / transport 重试耗尽）
+                                 → 立即 FAILED，重试无意义。
+    retriable=True, outage=True  基础设施类瞬时故障（429 限流 / 5xx / 网络 / transport 断流）
+                                 → 由自愈层（stream_llm_resilient）进程内退避等待 LLM 恢复；
+                                 预算耗尽则 _run_loop 走 INTERRUPTED（可 /resume）。**不**经
+                                 TaskManager 重试、**不**增 failure_counter——LLM 宕机不是任务失败。
+    retriable=True, outage=False 内容类可重试错（_finalize 截断 / 半截 tool call / 空响应）：
+                                 LLM 在线但本轮输出退化 → 由 TaskManager 有界重试该任务（重跑一轮
+                                 通常即可），不当作基础设施中断。outage 标志由 adapter 在抛错点按
+                                 来源设置（只有 adapter 能区分"断流"与"内容截断"），核心层只读不猜。
+    retry_after_sec              provider 给了 Retry-After 时，自愈退避优先采用。
     """
 
     def __init__(

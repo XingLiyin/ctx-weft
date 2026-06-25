@@ -37,6 +37,9 @@ async def test_cancel_session_cancels_token_and_drains_queue():
     drained = {"called": False}
 
     class _TM:
+        def is_done(self):
+            return False          # active drain in flight → _on_done reclaims after cancel completes
+
         async def cancel_all(self, *, reason=""):
             drained["called"] = True
 
