@@ -127,6 +127,10 @@ class InMemoryEventStore(EventStore):
             t = event.type
             if t == "SessionFinished":
                 self._active.discard(sid)
+            elif t == "SessionResumed":
+                # 多轮会话每轮结束发 SessionFinished、下一条消息发 SessionResumed 重新激活；
+                # 故 resume 后须重新计入 active，否则崩溃恢复会漏掉已对话过的会话。
+                self._active.add(sid)
             elif t == "SessionStatusChanged":
                 new_status = (event.payload or {}).get("new_status", "")
                 if new_status in _TERMINAL_STATUSES:
