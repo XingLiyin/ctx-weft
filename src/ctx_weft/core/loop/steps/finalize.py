@@ -223,38 +223,57 @@ async def close_finished_short_tasks(memory, state, ctx) -> list:
 
 
 async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, provider_ctx) -> None:
-    """Write a synthesized delegate_task↔result pair representing a long root task.
+    """Write a synthesized root self-experience capsule when a long root task closes.
 
-    Prefixed by the original user prompt as a user turn (same content the conversation path
-    preserves): otherwise the prompt only lives inside the delegate_task arguments and never
-    renders as a user message, so the experience hides "what the user asked".
+    胶囊四件套（共享 now_utc()，ingest 顺序即 seq_no 顺序，composer 按 (timestamp, seq_no) 渲染）：
+      [user]      task.user_prompt           —— 稳定原始诉求（不读 memory，免受 compaction superseded 影响）
+      [assistant] <task_compact_summary>      —— 仅当 task 被 compact 过；承载「会话目标/已完成工作」
+      [assistant] delegate_task(tool_call)    —— 把整个 root task 表示成一次派发
+      [tool]      mem_content                 —— outputs + process report
     """
-    # 1) 原始 user prompt → user 回合，置于 dispatch 对之前（取最旧的一条 USER_PROMPT = 原始问题）
-    prompts = await memory.recall_recent(
-        scope, [MemoryEventType.USER_PROMPT], 2000, provider_ctx,
+    base = now_utc()
+    # 1) 原始 user prompt → user 回合（来源 = task.user_prompt，稳定）
+    user_text = (
+        task.user_prompt if isinstance(task.user_prompt, str)
+        else content_to_text(task.user_prompt or "")
     )
-    if prompts:
-        original = prompts[-1]  # recall is newest-first → last is the oldest (original) prompt
+    if user_text:
         await memory.ingest(
             MemoryEvent(
                 type=MemoryEventType.AGENT_CONVERSATION_TURN,
                 scope=scope,
-                content=original.content,
-                timestamp=original.timestamp,
+                content=user_text,
+                timestamp=base,
                 role="user",
                 metadata={"origin_task_id": task.id},
             ),
             provider_ctx,
         )
-    # 2) synthesized delegate_task ↔ result
+    # 2) compaction summary（若有）→ assistant 回合（承载「会话目标/已完成工作」）
+    summaries = await memory.recall_recent(
+        scope, [MemoryEventType.TASK_COMPACT_SUMMARY], 2000, provider_ctx,
+    )
+    if summaries:
+        latest = summaries[0]  # recall 是 newest-first
+        await memory.ingest(
+            MemoryEvent(
+                type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                scope=scope,
+                content=latest.content,
+                timestamp=base,
+                role="assistant",
+                metadata={"origin_task_id": task.id},
+            ),
+            provider_ctx,
+        )
+    # 3) synthesized delegate_task ↔ result
     tool_call_id = generate_id("tcall")
-    ts = now_utc()
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.TASK_DISPATCH,
             scope=scope,
             content="",
-            timestamp=ts,
+            timestamp=base,
             role="assistant",
             metadata={
                 "tool_call_id": tool_call_id,
@@ -273,7 +292,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
             type=MemoryEventType.TASK_DISPATCH_RESULT,
             scope=scope,
             content=mem_content,
-            timestamp=ts,
+            timestamp=base,
             role="tool",
             metadata={
                 "tool_call_id": tool_call_id,
