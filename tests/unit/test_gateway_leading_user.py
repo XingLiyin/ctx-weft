@@ -41,8 +41,8 @@ def test_mid_conversation_tool_result_not_touched():
     assert ensure_leading_user(msgs) == msgs
 
 
-import pytest
 from ctx_weft.core.loop.llm_gateway import drop_orphan_tool_results, merge_consecutive_messages
+
 
 def test_pipeline_leading_assistant_then_orphan_cleaned():
     # ensure_leading_user 丢前导 assistant → 暴露的 tool 成孤儿 → drop_orphan 清掉
