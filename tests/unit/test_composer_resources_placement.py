@@ -281,9 +281,12 @@ def test_observer_messages_inject_resources_and_keep_role() -> None:
 
 
 def _history_block(role: str, content: str, ts: str) -> ContextBlock:
+    # mem_type="user_prompt" for user blocks so _frame_current_message and
+    # current_task_user_idx detection work correctly (they now use mtype, not source).
+    mem_type = "user_prompt" if role == "user" else "llm_response"
     return ContextBlock(id=f"h-{ts}", source="task_conversation", kind="history",
                         target="messages", content=content, priority=3, token_estimate=1,
-                        metadata={"role": role, "timestamp": ts})
+                        metadata={"role": role, "timestamp": ts, "type": mem_type})
 
 
 def _experience_block(role: str, content: str, ts: str) -> ContextBlock:

@@ -25,14 +25,18 @@ def _task(in_mem=True, title="PPTX转PDF", desc="转 PDF", prompt="把这个 ppt
 
 
 def test_frame_only_latest_user_turn():
-    """多轮：只有最近一条 task_conversation user 被框，历史 user 裸。"""
+    """多轮：只有最近一条 USER_PROMPT user 被框，历史 user 裸。
+
+    history_pairs 现在是 (msg, src, mem_type) 三元组；
+    _frame_current_message 依据 mem_type=="user_prompt" 识别当前消息。
+    """
     comp = _comp()
     history_pairs = [
-        (_u("检查工作目录"), "task_conversation"),
-        (_a("好的"), "task_conversation"),
-        (_u("把这个 ppt 转 pdf"), "task_conversation"),
+        (_u("检查工作目录"), "agent_recall", "user_prompt"),
+        (_a("好的"), "agent_recall", "llm_response"),
+        (_u("把这个 ppt 转 pdf"), "agent_recall", "user_prompt"),
     ]
-    messages = [m for m, _ in history_pairs]
+    messages = [m for m, _src, _mtype in history_pairs]
     comp._frame_current_message(messages, history_pairs, _task())
     assert messages[0].content == "检查工作目录"                    # 历史裸
     assert "## Current Message" in messages[2].content            # 最近被框
@@ -42,22 +46,27 @@ def test_frame_only_latest_user_turn():
 
 
 def test_frame_ignores_agent_experience_user():
-    """agent_experience 来源的 user 回合不被当作当前消息。"""
+    """agent_experience/agent_conversation_turn 来源的 user 回合不被当作当前消息。
+
+    AGENT_CONVERSATION_TURN（从之前 root task 折叠进 agent 层的经验）的 mtype 不是
+    "user_prompt"，因此不会被 _frame_current_message 误认为当前消息。
+    """
     comp = _comp()
     history_pairs = [
-        (_u("旧自经验"), "agent_experience"),
-        (_u("当前消息"), "task_conversation"),
+        (_u("旧自经验"), "agent_recall", "agent_conversation_turn"),
+        (_u("当前消息"), "agent_recall", "user_prompt"),
     ]
-    messages = [m for m, _ in history_pairs]
+    messages = [m for m, _src, _mtype in history_pairs]
     comp._frame_current_message(messages, history_pairs, _task())
     assert messages[0].content == "旧自经验"
     assert "## Current Message" in messages[1].content
 
 
 def test_frame_noop_when_no_task_conversation_user():
+    """无 user_prompt 类型的 user 消息时，frame 为 noop。"""
     comp = _comp()
-    history_pairs = [(_a("only assistant"), "task_conversation")]
-    messages = [m for m, _ in history_pairs]
+    history_pairs = [(_a("only assistant"), "agent_recall", "llm_response")]
+    messages = [m for m, _src, _mtype in history_pairs]
     comp._frame_current_message(messages, history_pairs, _task())
     assert messages[0].content == "only assistant"
 

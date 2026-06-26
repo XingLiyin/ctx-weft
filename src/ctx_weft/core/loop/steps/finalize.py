@@ -250,8 +250,15 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
             provider_ctx,
         )
     # 2) compaction summary（若有）→ assistant 回合（承载「会话目标/已完成工作」）
+    # TASK_COMPACT_SUMMARY 是 task 层事件；须用 task scope（含 task_id）召回，
+    # 而非 agent scope（task_id=None），否则 scope_key 不匹配导致漏读。
+    task_scope = MemoryScope(
+        session_id=scope.session_id,
+        task_id=task.id,
+        agent_id=scope.agent_id,
+    )
     summaries = await memory.recall_recent(
-        scope, [MemoryEventType.TASK_COMPACT_SUMMARY], 2000, provider_ctx,
+        task_scope, [MemoryEventType.TASK_COMPACT_SUMMARY], 2000, provider_ctx,
     )
     if summaries:
         latest = summaries[0]  # recall 是 newest-first
