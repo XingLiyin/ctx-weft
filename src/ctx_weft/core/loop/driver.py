@@ -167,6 +167,28 @@ def make_event(
     )
 
 
+async def _persist_user_prompt(state, ctx) -> None:
+    """task 启动时持久化 raw user_prompt（呈现态框架由 composer 渲染期生成，不落库）。"""
+    task = state.task
+    if not task.user_prompt or task.user_prompt_in_memory:
+        return
+    from ctx_weft.core.utils import content_to_text, now_utc
+    text = (task.user_prompt if isinstance(task.user_prompt, str)
+            else content_to_text(task.user_prompt))
+    await ctx.memory.ingest(
+        MemoryEvent(
+            type=MemoryEventType.USER_PROMPT,
+            scope=state.scope,
+            content=text,
+            timestamp=now_utc(),
+            role="user",
+            metadata={"task_id": task.id},
+        ),
+        ctx.provider_ctx,
+    )
+    task.user_prompt_in_memory = True
+
+
 # ── StepDriver ────────────────────────────────────────────────────────────────
 
 
@@ -213,30 +235,9 @@ class StepDriver:
     ) -> AsyncIterator[StepOutcome]:
         state = initial_state
 
-        # 任务启动时立即持久化 user_prompt，保证 resume 时对话上下文完整可重建
-        task = state.task
-        if task.user_prompt and not task.user_prompt_in_memory:
-            content_parts: list[str] = []
-            if task.title and task.description:
-                content_parts.append(f"## Current Task\n{task.title}\n{task.description}")
-            elif task.title:
-                content_parts.append(f"## Current Task\n{task.title}")
-            content_parts.append(
-                f"## Current Message\n{task.user_prompt}\n\n"
-                "（Reply in the same language as the Current Message above.）"
-            )
-            await ctx.memory.ingest(
-                MemoryEvent(
-                    type=MemoryEventType.USER_PROMPT,
-                    scope=state.scope,
-                    content="\n\n".join(content_parts),
-                    timestamp=now_utc(),
-                    role="user",
-                    metadata={"task_id": task.id},
-                ),
-                ctx.provider_ctx,
-            )
-            task.user_prompt_in_memory = True
+        # 任务启动时立即持久化 raw user_prompt，保证 resume 时对话上下文完整可重建
+        # （呈现态框架 ## Current Task/Message 由 composer 渲染期生成，不落库）
+        await _persist_user_prompt(state, ctx)
 
         # Blackboard 订阅：本 task 订阅相关任务的结果 topic，下一次 reason 即可感知。
         # 幂等，每次 run 都执行：① 同 plan 前序（tracking_task_ids）② 已派生的子任务。

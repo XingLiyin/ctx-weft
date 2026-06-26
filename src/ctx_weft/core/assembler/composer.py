@@ -287,6 +287,9 @@ class DefaultComposer(Composer):
                     f"## Current Message\n{user_prompt_text}\n\n"
                     "（Reply in the same language as the Current Message above.）"
                 )
+        else:
+            # in-memory：渲染期就地装饰最近一条 task_conversation user 回合
+            self._frame_current_message(messages, history_pairs, task)
 
         if parts:
             # 这条实时构建的当前任务上下文也是「当前 task」回合；history 里没有 task_conversation
@@ -321,6 +324,26 @@ class DefaultComposer(Composer):
                 merged = self._prepend_to_first_user(merged, directive_text)
         merged = self._append_to_last_user(merged, capabilities_text)
         return merged
+
+    def _frame_current_message(self, messages, history_pairs, task) -> None:
+        """In-memory 路径：把最近一条 task_conversation user message 包成当前消息框架（不落库）。"""
+        target = None
+        for i, (m, src) in enumerate(history_pairs):
+            if m.role == "user" and src == "task_conversation":
+                target = i
+        if target is None:
+            return
+        raw = content_to_text(messages[target].content)
+        prefix = ""
+        if task.title and task.description:
+            prefix = f"## Current Task\n{task.title}\n{task.description}\n\n"
+        elif task.title:
+            prefix = f"## Current Task\n{task.title}\n\n"
+        framed = (
+            f"{prefix}## Current Message\n{raw}\n\n"
+            "（Reply in the same language as the Current Message above.）"
+        )
+        messages[target] = LLMMessage(role="user", content=framed)
 
     def _build_facet_trailing_messages(
         self,
