@@ -12,10 +12,20 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
+from ctx_weft.protocols import MemoryEventType
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import ContextBlock
     from ctx_weft.protocols import MemoryRecord
+
+COMPACT_SUMMARY_WRAPPER_PREFIX = (
+    "［以下是先前对话/经验的压缩摘要，供你延续工作参考；并非用户的新指令］\n"
+)
+
+
+def wrap_compact_summary(text: str) -> str:
+    """给 compaction summary 文本套显式包装前缀（渲染期，不落库）。"""
+    return f"{COMPACT_SUMMARY_WRAPPER_PREFIX}{text}"
 
 
 def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "ContextBlock":
@@ -23,6 +33,8 @@ def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "C
     from ctx_weft.core.assembler.assembler import ContextBlock
 
     text = content_to_text(record.content) if not isinstance(record.content, str) else record.content
+    if record.type == MemoryEventType.TASK_COMPACT_SUMMARY:
+        text = wrap_compact_summary(text)
     role = record.role or "user"
     md = {
         "role": role,

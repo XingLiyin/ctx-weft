@@ -1,0 +1,63 @@
+"""compaction summary 渲染期包装（§2.4）：渲染带前缀，存储不含。"""
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import pytest
+
+from ctx_weft.core.assembler.sources._history import (
+    COMPACT_SUMMARY_WRAPPER_PREFIX, record_to_history_block, wrap_compact_summary,
+)
+from ctx_weft.protocols import MemoryEventType, MemoryRecord
+
+T = MemoryEventType
+
+
+def _rec(type_, content, role="user"):
+    return MemoryRecord(id="m1", type=type_, content=content,
+                        timestamp=datetime(2026, 1, 1, tzinfo=UTC), role=role,
+                        topic=None, metadata={"seq_no": 1})
+
+
+def test_wrap_helper_prefixes():
+    out = wrap_compact_summary("### 会话目标\nX")
+    assert out.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
+    assert "### 会话目标" in out
+
+
+def test_task_compact_summary_block_wrapped():
+    blk = record_to_history_block(_rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX"), "task_conversation", 0)
+    assert blk.content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
+
+
+def test_plain_user_prompt_not_wrapped():
+    blk = record_to_history_block(_rec(T.USER_PROMPT, "你好"), "task_conversation", 0)
+    assert blk.content == "你好"
+
+
+def test_agent_conversation_turn_not_wrapped():
+    """胶囊里的 assistant summary 是 AGENT_CONVERSATION_TURN，不应被包装。"""
+    blk = record_to_history_block(_rec(T.AGENT_CONVERSATION_TURN, "### 会话目标\nX", role="assistant"),
+                                  "agent_experience", 0)
+    assert blk.content == "### 会话目标\nX"
+
+
+from ctx_weft.core.assembler.sources.agent_experience import AgentExperienceSource
+from ctx_weft.protocols import ProviderContext
+
+pytestmark = pytest.mark.asyncio
+
+
+class _Mem:
+    def __init__(self, recs): self._recs = recs
+    async def recall_recent(self, scope, types, limit, ctx): return self._recs
+
+
+async def test_agent_compact_summary_rendered_wrapped():
+    rec = _rec(T.AGENT_COMPACT_SUMMARY, "### 既往派发摘要\nY")
+    deps = SimpleNamespace(memory=_Mem([rec]), provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
+    req = SimpleNamespace(scope=SimpleNamespace())
+    blocks = [b async for b in AgentExperienceSource().fetch(req, deps)]
+    summ = [b for b in blocks if b.metadata.get("type") == T.AGENT_COMPACT_SUMMARY]
+    assert summ and summ[0].content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)

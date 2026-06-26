@@ -74,9 +74,11 @@ class AgentExperienceSource:
         def _ts(rec) -> str:
             return rec.timestamp.isoformat() if getattr(rec, "timestamp", None) else ""
 
-        # AGENT_COMPACT_SUMMARY → assistant 摘要回合
+        # AGENT_COMPACT_SUMMARY → user 摘要回合（渲染期套包装前缀，消歧义）
+        from ctx_weft.core.assembler.sources._history import wrap_compact_summary
         for s in summaries:
             text = content_to_text(s.content) if not isinstance(s.content, str) else s.content
+            text = wrap_compact_summary(text)
             yield ContextBlock(
                 id=generate_id("blk"),
                 source="agent_experience",
