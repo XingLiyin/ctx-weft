@@ -116,6 +116,27 @@ class InMemoryMemoryProvider(MemoryProvider):
         recent = matching[-limit:] if limit and limit > 0 else matching
         return [self._to_record(s) for s in reversed(recent)]
 
+    async def recall_recent_by_agent(
+        self,
+        agent_scope: MemoryScope,
+        types: list[MemoryEventType],
+        limit: int,
+        ctx: ProviderContext,
+    ) -> list[MemoryRecord]:
+        type_set = set(types)
+        aid = agent_scope.agent_id
+        matching = [
+            s for s in self._events
+            if not s.is_superseded
+            and s.event.type in type_set
+            and s.event.scope.session_id == agent_scope.session_id
+            and s.event.scope.agent_id == aid
+            and EVENT_LAYER[s.event.type] is MemoryLayer.TASK
+        ]
+        matching.sort(key=lambda s: s.event.timestamp)
+        recent = matching[-limit:] if limit and limit > 0 else matching
+        return [self._to_record(s) for s in reversed(recent)]
+
     async def recall_topic(
         self,
         topic: str,
@@ -320,5 +341,6 @@ class InMemoryMemoryProvider(MemoryProvider):
                 **stored.event.metadata,
                 "seq_no": stored.seq_no,
                 "topic_seq_no": stored.topic_seq_no,
+                "task_id": stored.event.scope.task_id or "",
             },
         )

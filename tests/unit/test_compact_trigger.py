@@ -43,7 +43,7 @@ async def _ingest_n(mem, type_, n: int, role: str) -> None:
 
 
 def _ctx(mem):
-    return SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    return SimpleNamespace(memory=mem, provider_ctx=_pctx(), task_manager=None)
 
 
 def _state(*, delta=20, ratio=0.8, context_limit=100000):

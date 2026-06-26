@@ -23,12 +23,11 @@ from ctx_weft.core.assembler import (
 from ctx_weft.core.assembler.assembler import AssemblerDeps
 from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources import (
-    AgentExperienceSource,
+    AgentRecallSource,
     BlackboardSource,
     CapabilitySource,
     IdentitySource,
     KnowledgeRetrievalSource,
-    RecentMemorySource,
     SemanticRecallSource,
 )
 from ctx_weft.core.events import Event, EventType, InProcessEventBus
@@ -79,44 +78,46 @@ async def _copy_memory_for_inherit(
     session_id: str,
     tenant_id: str,
 ) -> None:
-    """已停用（spec/06 §12）。
+    """spawn 时把 parent agent 的当前召回快照复制进 child agent scope（spec 2026-06-23 §跨 agent）。
 
-    新分层模型下 child 是黑盒：它有自己的 task 层对话（来自 user_prompt）+ 自己的 agent 经验，
-    parent 的 task 转录**不应**复制进 child。保留函数签名以兼容调用点，直接 no-op 返回。
+    复制 parent 名下所有 OPEN task 的对话（按 agent_id 跨 task 召回），作为
+    AGENT_CONVERSATION_TURN 写入 child scope，作 child 的起始记忆；之后两边各自演进。
     """
-    return
-    # ── 以下为旧行为（跨 task 复制 parent 转录），已按 spec/06 §12 停用 ──
-    parent_agent_id = parent_task.assigned_agent_id  # type: ignore[unreachable]
-    if not parent_agent_id:
-        return
-
+    # Snapshots the parent agent's OPEN-task conversation only (not its closed-task residues or
+    # AGENT_COMPACT_SUMMARY) — a deliberate narrowing of "current recall": residues are the parent's
+    # black-box dispatch log, of little use to a child. [2026-06-23]
     from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope
-    from ctx_weft.protocols.context import ProviderContext
 
+    parent_agent_id = parent_task.assigned_agent_id or parent_task.creator_agent_id
     parent_scope = MemoryScope(session_id=session_id, task_id=parent_task.id, agent_id=parent_agent_id)
-    child_scope = MemoryScope(session_id=session_id, task_id=child_task.id, agent_id=sub_agent.id)
     ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
 
-    records = await memory.recall_recent(
-        scope=parent_scope,
+    records = await memory.recall_recent_by_agent(
+        agent_scope=parent_scope,
         types=[
             MemoryEventType.USER_PROMPT,
-            MemoryEventType.OBSERVER_SUMMARY,
-            MemoryEventType.COMPACT_SUMMARY,
+            MemoryEventType.LLM_RESPONSE,
+            MemoryEventType.TOOL_RESULT,
+            MemoryEventType.TASK_COMPACT_SUMMARY,
         ],
-        limit=50,
+        limit=2000,
         ctx=ctx,
     )
-
-    for record in reversed(records):
+    child_scope = MemoryScope(session_id=session_id, task_id=child_task.id, agent_id=sub_agent.id)
+    for r in reversed(records):  # newest-first → re-ingest chronologically
+        md = {"inherited_from_task_id": parent_task.id}
+        if r.role == "assistant" and r.metadata.get("tool_calls"):
+            md["tool_calls"] = r.metadata["tool_calls"]
+        if r.role == "tool" and r.metadata.get("tool_call_id"):
+            md["tool_call_id"] = r.metadata["tool_call_id"]
         await memory.ingest(
             MemoryEvent(
-                type=record.type,
+                type=MemoryEventType.AGENT_CONVERSATION_TURN,
                 scope=child_scope,
-                content=record.content,
-                timestamp=record.timestamp,
-                role=record.role,
-                metadata=record.metadata,
+                content=r.content,
+                timestamp=r.timestamp,
+                role=r.role,
+                metadata=md,
             ),
             ctx,
         )
@@ -1225,8 +1226,7 @@ class CtxWeftRuntime:
             sources=[
                 IdentitySource(),
                 CapabilitySource(),
-                RecentMemorySource(),
-                AgentExperienceSource(),
+                AgentRecallSource(),
                 BlackboardSource(),
                 SemanticRecallSource(),
                 KnowledgeRetrievalSource(),

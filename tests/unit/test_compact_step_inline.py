@@ -18,6 +18,12 @@ class _FakeMemory:
     async def count_recent(self, scope, types, ctx):
         return self._counts.get(frozenset(types), 0)
 
+    async def recall_recent(self, scope, types, limit, ctx):
+        return []  # no residues / no records by default
+
+    async def recall_recent_by_agent(self, scope, types, limit, ctx):
+        return []  # no cross-task records by default
+
     async def apply_compact(self, scope, summary, keep_last, ctx, layer):
         self.applied.append((layer.value, summary))
         return SimpleNamespace(events_before=10, events_after=keep_last,
@@ -51,7 +57,7 @@ def _state():
 
 def _ctx(memory):
     return SimpleNamespace(memory=memory, assembler=_FakeAssembler(), llm=_FakeLLM(),
-                           provider_ctx=SimpleNamespace())
+                           provider_ctx=SimpleNamespace(), task_manager=None)
 
 
 async def test_compact_folds_overbudget_layers_with_one_summary():

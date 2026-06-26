@@ -207,6 +207,21 @@ class MemoryProvider(Protocol):
         ...
 
     @abstractmethod
+    async def recall_recent_by_agent(
+        self,
+        agent_scope: MemoryScope,
+        types: list[MemoryEventType],
+        limit: int,
+        ctx: ProviderContext,
+    ) -> list[MemoryRecord]:
+        """召回某 agent 名下**所有 task** 的 task 层记录（按 agent_id 跨 task，忽略 task_id）。
+
+        统一 AgentRecall 装配路径用：OPEN task 的对话据此还原（CLOSED task 的对话已被
+        close 时 supersede，不会返回）。按 timestamp 倒序，每条 metadata["task_id"] 标来源。
+        """
+        ...
+
+    @abstractmethod
     async def recall_topic(
         self,
         topic: str,

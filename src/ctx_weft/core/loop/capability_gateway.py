@@ -128,7 +128,10 @@ class CapabilityGateway:
         # 1. Lookup capability（只处理 kind="tool"）
         cap = self._cache.get_by_qualified_name(state.agent.id, tool_name)
         if cap is None or cap.kind != "tool":
-            return self._error_result(invocation_id, tool_name, f"[Error: unknown tool '{tool_name}']")
+            return await self._error_and_record(
+                state, ctx, tool_name, invocation_id,
+                f"[Error: unknown tool '{tool_name}']", is_dispatch, is_silent, tool_call_id,
+            )
 
         # 2. Authorization：按 cap.id 前缀取 per-provider authorizer，无则用 default
         authorizer = self._get_authorizer(cap.id)
@@ -145,7 +148,9 @@ class CapabilityGateway:
                 f"[Blocked by human: {decision.message}]" if decision.message
                 else f"[Error: capability '{tool_name}' not authorized]"
             )
-            return self._error_result(invocation_id, tool_name, content)
+            return await self._error_and_record(
+                state, ctx, tool_name, invocation_id, content, is_dispatch, is_silent, tool_call_id,
+            )
 
         # 3. Sanitize arguments（改写参数生效，None → 原参；仍走脱敏）
         schema = getattr(cap, "input_schema", None)
@@ -155,16 +160,20 @@ class CapabilityGateway:
         # 只拦 required/type/enum（见 _validate_args），失败回灌 LLM 让其改参重试，与 unknown-tool 同出口。
         err = _validate_args(effective_args, schema)
         if err is not None:
-            return self._error_result(
-                invocation_id, tool_name,
+            return await self._error_and_record(
+                state, ctx, tool_name, invocation_id,
                 f"[Error: invalid arguments for '{tool_name}': {err}]",
+                is_dispatch, is_silent, tool_call_id,
             )
         sanitized = _sanitize(effective_args)
 
         # 4. Find provider
         provider = self._find_provider(cap.id)
         if provider is None:
-            return self._error_result(invocation_id, tool_name, f"[Error: no provider found for '{cap.id}']")
+            return await self._error_and_record(
+                state, ctx, tool_name, invocation_id,
+                f"[Error: no provider found for '{cap.id}']", is_dispatch, is_silent, tool_call_id,
+            )
 
         # 5. 记录 invocation（事件 + TOOL_INVOCATION/TASK_DISPATCH 入 memory）
         await self._record_invocation(state, ctx, tool_name, cap, invocation_id, sanitized, is_dispatch, is_silent, tool_call_id)
@@ -197,6 +206,31 @@ class CapabilityGateway:
     @staticmethod
     def _error_result(invocation_id: str, tool_name: str, content: str) -> InvocationResult:
         return InvocationResult(invocation_id=invocation_id, tool_name=tool_name, content=content, is_error=True)
+
+    async def _error_and_record(
+        self, state, ctx, tool_name, invocation_id, content, is_dispatch, is_silent, tool_call_id,
+    ) -> InvocationResult:
+        """执行前错误出口（未知工具 / 未授权 / 非法参数 / 无 provider）：返回 error_result 的同时，
+        补一条配对 TOOL_RESULT 入 task 对话，使 act 在派发前已落库的 assistant LLM_RESPONSE.tool_call
+        不悬挂（spec/06 §4 无损重建）。否则纯从 memory 重组 prompt（observe at max_turns / resume 恢复）
+        时会出现 assistant(tool_calls=[id]) 无配对 tool 消息 → provider 400。
+        派发(submit_*)/SILENT 工具的 tool_call 本就不入 task 层 LLM_RESPONSE、不会悬挂，故跳过落库
+        （与 _record_result 的 is_dispatch/is_silent 处理一致）。
+        """
+        if not is_dispatch and not is_silent:
+            await self._memory.ingest(
+                MemoryEvent(
+                    type=MemoryEventType.TOOL_RESULT,
+                    scope=_tool_scope(state),
+                    content=content,
+                    timestamp=now_utc(),
+                    role="tool",
+                    metadata={"invocation_id": invocation_id, "tool_name": tool_name,
+                              "tool_call_id": tool_call_id, "is_error": True},
+                ),
+                ctx.provider_ctx,
+            )
+        return self._error_result(invocation_id, tool_name, content)
 
     async def _record_invocation(
         self, state, ctx, tool_name, cap, invocation_id, sanitized, is_dispatch, is_silent, tool_call_id,
