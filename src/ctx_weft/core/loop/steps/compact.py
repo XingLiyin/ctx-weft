@@ -21,12 +21,6 @@ from ctx_weft.protocols import LLMRequest, MemoryEvent, MemoryEventType, MemoryL
 
 logger = logging.getLogger(__name__)
 
-# 每层「可折叠」的对话类型；某层 active 条数 > keep_last 才值得 compact（空层守卫）。
-_AGENT_COMPACT_TYPES = [
-    MemoryEventType.TASK_DISPATCH,
-    MemoryEventType.TASK_DISPATCH_RESULT,
-    MemoryEventType.AGENT_CONVERSATION_TURN,  # root self-experience records are agent-layer foldable content
-]
 TASK_COMPACT_TYPES = [
     MemoryEventType.USER_PROMPT,
     MemoryEventType.LLM_RESPONSE,
@@ -109,7 +103,7 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     recs = await memory.recall_recent(
         state.scope,
         [MemoryEventType.TASK_DISPATCH, MemoryEventType.TASK_DISPATCH_RESULT,
-         MemoryEventType.AGENT_COMPACT_SUMMARY],
+         MemoryEventType.AGENT_COMPACT_SUMMARY, MemoryEventType.AGENT_CONVERSATION_TURN],
         2000, ctx.provider_ctx,
     )
     recs = list(reversed(recs))  # recall newest-first → chronological
@@ -123,6 +117,7 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     fold = root_results if keep_last <= 0 else root_results[:-keep_last]
     kept = [] if keep_last <= 0 else root_results[-keep_last:]
     fold_tcids = {r.metadata.get("tool_call_id") for r in fold}
+    fold_task_ids = {r.metadata.get("child_task_id") for r in fold}
     ids = [r.id for r in fold]
     for r in recs:
         if (r.type == MemoryEventType.TASK_DISPATCH
@@ -130,6 +125,9 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
             ids.append(r.id)
         elif r.type == MemoryEventType.AGENT_COMPACT_SUMMARY:
             ids.append(r.id)  # 旧摘要并入新摘要
+        elif (r.type == MemoryEventType.AGENT_CONVERSATION_TURN
+                and r.metadata.get("origin_task_id") in fold_task_ids):
+            ids.append(r.id)  # 被折胶囊的 user / assistant-summary 回合一并折叠，避免落单
     await memory.supersede(ids, ctx.provider_ctx)
     anchor_ts = min((r.timestamp for r in kept), default=now_utc())
     # Truncation-only on summary-LLM failure (summary_text=="" → "[Experience compacted]"):
