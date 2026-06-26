@@ -1,7 +1,7 @@
 """current-message 框架：存 raw（driver）+ 渲染期只贴最近一条 user（composer）（§2.6）。"""
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -71,8 +71,7 @@ def test_frame_noop_when_no_task_conversation_user():
     assert messages[0].content == "only assistant"
 
 
-pytestmark = pytest.mark.asyncio
-
+@pytest.mark.asyncio
 async def test_driver_persists_raw_user_prompt():
     from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext

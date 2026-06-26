@@ -43,21 +43,21 @@ def test_agent_conversation_turn_not_wrapped():
     assert blk.content == "### 会话目标\nX"
 
 
-from ctx_weft.core.assembler.sources.agent_experience import AgentExperienceSource
+from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.protocols import ProviderContext
-
-pytestmark = pytest.mark.asyncio
 
 
 class _Mem:
     def __init__(self, recs): self._recs = recs
     async def recall_recent(self, scope, types, limit, ctx): return self._recs
+    async def recall_recent_by_agent(self, agent_scope, types, limit, ctx): return []
 
 
+@pytest.mark.asyncio
 async def test_agent_compact_summary_rendered_wrapped():
     rec = _rec(T.AGENT_COMPACT_SUMMARY, "### 既往派发摘要\nY")
     deps = SimpleNamespace(memory=_Mem([rec]), provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
     req = SimpleNamespace(scope=SimpleNamespace())
-    blocks = [b async for b in AgentExperienceSource().fetch(req, deps)]
+    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     summ = [b for b in blocks if b.metadata.get("type") == T.AGENT_COMPACT_SUMMARY]
     assert summ and summ[0].content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)

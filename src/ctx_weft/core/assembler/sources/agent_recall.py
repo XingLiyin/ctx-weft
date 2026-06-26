@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.assembler.sources._history import record_to_history_block
+from ctx_weft.core.assembler.sources._history import record_to_history_block, wrap_compact_summary
 from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
 from ctx_weft.protocols import MemoryEventType
 from ctx_weft.protocols.capability import qualify
@@ -98,6 +98,7 @@ class AgentRecallSource:
 
         for s in summaries:
             text = content_to_text(s.content) if not isinstance(s.content, str) else s.content
+            text = wrap_compact_summary(text)
             yield ContextBlock(
                 id=generate_id("blk"),
                 source="agent_recall",
