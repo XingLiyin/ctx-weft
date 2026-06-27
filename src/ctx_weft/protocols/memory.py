@@ -282,6 +282,7 @@ class MemoryProvider(Protocol):
         keep_last: int,
         ctx: ProviderContext,
         layer: MemoryLayer = MemoryLayer.AGENT,
+        protect_types: tuple[MemoryEventType, ...] = (),
     ) -> CompactResult:
         """折叠指定 layer 的 scope（spec/06 §7）。
 
