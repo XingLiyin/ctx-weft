@@ -1,15 +1,17 @@
-"""Task 5: 在交互 / finish 段边界接线 launch_background_observe 的接线单测。
+"""Task 5 & 13: 在交互 / finish 段边界接线 launch_background_observe 的接线单测。
 
-测试三个触发点（均为 root-gated）：
+测试四个触发点（均为 root-gated）：
   1. observe.py ask_human 边界（act_exit_reason="normal"，root task）→ 触发一次
   2. observe.py root normal-exit finish（act_exit_reason="actor_done"，root task）→ 触发一次
   3. act.py 软打断 park（source="interrupt"，root task）→ 触发一次
-  4. 子任务（parent_task_id 非空、同 agent）走相同路径 → 不触发
+  4. act.py 纯文本暂停 park（source="plain_text"，root task）→ 触发一次（Task 13）
+  5. 子任务（parent_task_id 非空、同 agent）走相同路径 → 不触发
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -330,3 +332,97 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
         await ActStep().execute(state, ctx)
 
     assert len(launched) == 0, f"Expected 0 launches for child soft-interrupt, got {len(launched)}"
+
+
+# ── act.py: plain-text pause fires for root (Task 13) ───────────────────────
+
+
+async def test_act_plain_text_pause_fires_for_root(monkeypatch):
+    """act plain-text pause (source='plain_text', root task, interactive) → launch_background_observe called once."""
+    from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.core.events.bus import InProcessEventBus
+
+    launched = []
+
+    def fake_launch(state, ctx):
+        launched.append((state.task.id,))
+        return asyncio.ensure_future(asyncio.sleep(0))
+
+    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    monkeypatch.setattr(bo_mod, "_task_pending", {})
+    monkeypatch.setattr(
+        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        fake_launch,
+        raising=False,
+    )
+
+    bus = InProcessEventBus()
+    mem = InMemoryMemoryProvider()
+    hitl = HitlManager(event_bus=bus)
+
+    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    task = dataclasses.replace(_make_root_task(status="ACTIVE"), interaction_mode="interactive")
+    agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
+    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
+
+    state = LoopState(
+        run_id="r1", session=session, task=task, agent=agent, scope=scope,
+    )
+    ctx = LoopContext(
+        assembler=None, llm=None, memory=mem, event_bus=bus,
+        provider_ctx=pctx, hitl_manager=hitl,
+    )
+
+    with pytest.raises(HitlPark):
+        await _finish_plain_text_turn(state, ctx, turn_num=1)
+
+    assert len(launched) == 1, f"Expected 1 launch for root plain-text pause, got {len(launched)}"
+
+
+# ── act.py: plain-text pause does NOT fire for child (Task 13) ──────────────
+
+
+async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
+    """act plain-text pause with child task → launch_background_observe NOT called."""
+    from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.core.events.bus import InProcessEventBus
+
+    launched = []
+
+    def fake_launch(state, ctx):
+        launched.append((state.task.id,))
+        return asyncio.ensure_future(asyncio.sleep(0))
+
+    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    monkeypatch.setattr(bo_mod, "_task_pending", {})
+    monkeypatch.setattr(
+        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        fake_launch,
+        raising=False,
+    )
+
+    bus = InProcessEventBus()
+    mem = InMemoryMemoryProvider()
+    hitl = HitlManager(event_bus=bus)
+
+    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    child = dataclasses.replace(_make_child_task(status="ACTIVE"), interaction_mode="interactive")
+    agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
+    scope = MemoryScope(session_id="s1", task_id="t2", agent_id="ag1")
+    pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t2", agent_id="ag1")
+
+    state = LoopState(
+        run_id="r1", session=session, task=child, agent=agent, scope=scope,
+    )
+    ctx = LoopContext(
+        assembler=None, llm=None, memory=mem, event_bus=bus,
+        provider_ctx=pctx, hitl_manager=hitl,
+    )
+
+    with pytest.raises(HitlPark):
+        await _finish_plain_text_turn(state, ctx, turn_num=1)
+
+    assert len(launched) == 0, f"Expected 0 launches for child plain-text pause, got {len(launched)}"

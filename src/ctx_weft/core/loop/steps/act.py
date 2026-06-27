@@ -385,6 +385,9 @@ async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: 
         await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
             "turn": turn_num, "reason": "await_user"}))
         # 纯文本暂停 = 软待命(允许但不强制回复) → PAUSED,区别于 ask_user 的 PAUSED_HITL。
+        if _is_own_root(state.task):
+            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+            launch_background_observe(state, ctx)
         await _park_wait_for_user(state, ctx, source="plain_text")
     await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
         "turn": turn_num, "reason": "stop"}))
