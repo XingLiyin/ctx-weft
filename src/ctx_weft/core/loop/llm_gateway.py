@@ -5,20 +5,29 @@
 只负责构造逻辑消息结构，不做合法化；连续同角色 / 孤立 tool result 一律在这里、发送前
 统一处理。
 
-合法化三条不变式（:func:`stream_llm` 内顺序：先丢前导非 user，再丢孤立 tool result，最后合并连续同角色）：
-  1. :func:`ensure_leading_user` —— 丢弃开头 role != "user" 的消息直到首条为 user（Anthropic
+合法化五条不变式（:func:`stream_llm` 内顺序：剥离悬挂 tool_call → 删空 content → 丢前导
+非 user → 丢孤立 tool result → 合并连续同角色）：
+  1. :func:`drop_dangling_tool_calls` —— 剥离无后继 tool_result 配对的 assistant tool_call。
+     reconcile/act 正常已补齐 dangling（见模块尾注），此处是发送前最后**防御性**兜底：只删
+     不补、命中即打 ERROR 日志（说明上游对账漏了）。Anthropic 对悬挂 tool_use 直接 400。
+  2. :func:`remove_empty_messages` —— 删除内容为空且无 tool_calls 的 user/assistant 消息
+     （Anthropic 对空 content 块 400）。同为防御性兜底，命中打 ERROR 日志。① 把全悬挂的
+     assistant 剥成空消息后，正好由此清理。tool 消息即便空也不在此删（删了会制造悬挂）。
+  3. :func:`ensure_leading_user` —— 丢弃开头 role != "user" 的消息直到首条为 user（Anthropic
      硬规则，否则 400）。丢弃前导 assistant 后其配对 tool 会成孤儿，由下一步清理。
-  2. :func:`drop_orphan_tool_results` —— 丢弃 tool_call_id 无前序 assistant tool_call
+  4. :func:`drop_orphan_tool_results` —— 丢弃 tool_call_id 无前序 assistant tool_call
      配对的 ``role="tool"`` 消息。compact 丢弃 assistant 但保留 TOOL_RESULT、recall 窗口
      在 assistant↔result 之间截断、跨层按 timestamp 归并错位等都会产生此类孤儿，会被
      Anthropic / OpenAI 直接 400。
-  3. :func:`merge_consecutive_messages` —— 合并连续同角色消息（多模态安全）。
+  5. :func:`merge_consecutive_messages` —— 合并连续同角色消息（多模态安全）。
 
 本模块仅依赖 protocols，且只被本 loop 层的 step import；故置于 ``core/loop`` 下。若将来
 装配等下层也需复用这些合法化函数，应改为下沉到 ``core`` 根，避免下层反向依赖 loop。
 
-注：本关口仅处理「孤立 tool result」；反向的「悬挂 assistant tool_call（无后继 result）」
-不在此处理。adapter 不应重复实现以上不变式——已在 core 层集中保证。
+注：「悬挂 assistant tool_call（无后继 result）」的**正路**是上游对账补 TOOL_RESULT
+（resume 前的 ReconcileStep 重跑工具、act 为被打断工具补 result），本关口的
+:func:`drop_dangling_tool_calls` 只是发送前防 400 的兜底，命中打 ERROR 提示上游漏补。
+adapter 不应重复实现以上不变式——已在 core 层集中保证。
 
 另注：「prompt 必须以 user 收尾」不下沉到此处——那是 act 装配期的语义兜底（注入具体
 文案、且 provider 并不强制），若在此每个 turn 强制，会在工具循环里于 tool result 之后误
@@ -28,6 +37,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from collections.abc import AsyncIterator
 from time import monotonic
@@ -39,6 +49,68 @@ from ctx_weft.core.loop.driver import make_event
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
+
+logger = logging.getLogger(__name__)
+
+
+def drop_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """剥离无后继 tool_result 配对的 assistant tool_call（防御性，命中打 ERROR 日志）。
+
+    正路是上游对账补齐（reconcile/act）；此处仅发送前兜底，只删不补——保证不 400，但打
+    ERROR 提示上游漏补。多 tool_call 的 assistant 只剥悬挂的那几个，保留有 result 的；全悬挂
+    则剥成空 tool_calls（随后由 :func:`remove_empty_messages` 清理）。绝不动有 result 的调用，
+    故不会反向制造孤立 tool result。
+    """
+    resolved = {m.tool_call_id for m in messages if m.role == "tool" and m.tool_call_id}
+    out: list[LLMMessage] = []
+    for m in messages:
+        if m.role == "assistant" and m.tool_calls:
+            kept = [tc for tc in m.tool_calls if tc.get("id") in resolved]
+            if len(kept) != len(m.tool_calls):
+                dangling = [tc.get("id") for tc in m.tool_calls if tc.get("id") not in resolved]
+                logger.error(
+                    "stream_llm: dropping %d dangling tool_call(s) with no tool_result "
+                    "(上游对账漏补？): %s",
+                    len(dangling), dangling,
+                )
+                m = LLMMessage(
+                    role=m.role, content=m.content, tool_calls=kept,
+                    tool_call_id=m.tool_call_id, reasoning_content=m.reasoning_content,
+                )
+        out.append(m)
+    return out
+
+
+def _is_empty_content(content: "str | list[ContentPart]") -> bool:
+    """内容是否为「空」：空串/纯空白，或空列表/仅含空白 TextPart。非文本块（图片等）视为有内容。"""
+    if isinstance(content, str):
+        return not content.strip()
+    if not content:
+        return True
+    for p in content:
+        if isinstance(p, TextPart):
+            if p.text and p.text.strip():
+                return False
+        else:
+            return False
+    return True
+
+
+def remove_empty_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """删除内容为空且无 tool_calls 的 user/assistant 消息（防御性，命中打 ERROR 日志）。
+
+    Anthropic 对空 content 块直接 400。只管 user/assistant：纯 tool_use 的 assistant（有
+    tool_calls、无文本）合法须保留；tool 消息即便空也不删（删了会制造悬挂 tool_call）。
+    """
+    out: list[LLMMessage] = []
+    for m in messages:
+        if m.role in ("user", "assistant") and not m.tool_calls and _is_empty_content(m.content):
+            logger.error(
+                "stream_llm: dropping empty-content %s message (no text, no tool_calls)", m.role
+            )
+            continue
+        out.append(m)
+    return out
 
 
 def drop_orphan_tool_results(messages: list[LLMMessage]) -> list[LLMMessage]:
@@ -107,7 +179,11 @@ async def stream_llm(
 ) -> AsyncIterator["LLMChunk"]:
     """发送前合法化 ``request.messages``，再流式转发 ``llm.complete`` 的 chunk。"""
     request.messages = merge_consecutive_messages(
-        drop_orphan_tool_results(ensure_leading_user(request.messages))
+        drop_orphan_tool_results(
+            ensure_leading_user(
+                remove_empty_messages(drop_dangling_tool_calls(request.messages))
+            )
+        )
     )
     async for chunk in llm.complete(request, stream=stream):
         yield chunk
