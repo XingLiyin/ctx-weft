@@ -132,18 +132,26 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
 
     # 1) bubble 到 parent scope（dispatch marker 所在 scope）
     if task.parent_task_id and task.origin_tool_call_id and mem_content:
-        do_bubble = cross_agent or (same_agent and not short)
-        if do_bubble:
-            parent_scope = MemoryScope(
-                session_id=state.scope.session_id,
-                task_id=task.parent_task_id,
-                agent_id=task.creator_agent_id,
-            )
+        if cross_agent:
+            do_bubble = True
+            result_content = mem_content
+        elif same_agent and not short:
+            do_bubble = True
+            result_content = f"Sub-task '{task.title}' scheduled."
+        else:
+            do_bubble = False
+            result_content = ""
+        parent_scope = MemoryScope(
+            session_id=state.scope.session_id,
+            task_id=task.parent_task_id,
+            agent_id=task.creator_agent_id,
+        )
+        if do_bubble and result_content:
             await memory.ingest(
                 MemoryEvent(
                     type=MemoryEventType.TASK_DISPATCH_RESULT,
                     scope=parent_scope,
-                    content=mem_content,
+                    content=result_content,
                     timestamp=now_utc(),
                     role="tool",
                     metadata={"tool_call_id": task.origin_tool_call_id, "child_task_id": task.id,
@@ -155,8 +163,12 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             events.append(make_event(
                 state, EventType.MEMORY_INGESTED,
                 payload={"memory_event_type": MemoryEventType.TASK_DISPATCH_RESULT.value,
-                         "source": "dispatch_result", "content_length": len(mem_content)},
+                         "source": "dispatch_result", "content_length": len(result_content)},
             ))
+        # 同 agent non-short：额外把 child 交互胶囊写进共享 agent scope（嵌套）
+        if same_agent and not short:
+            await _synthesize_dispatch_pair(
+                memory, parent_scope, task, mem_content, outcome, ctx.provider_ctx)
 
     # 2) 自身残留：own root（session 根或跨 agent 根）且 close 时，在 own scope 合成派发对
     if is_own_root and mem_content and not short:
