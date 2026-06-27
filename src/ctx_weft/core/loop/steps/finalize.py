@@ -223,91 +223,97 @@ async def close_finished_short_tasks(memory, state, ctx) -> list:
 
 
 async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, provider_ctx) -> None:
-    """Write a synthesized root self-experience capsule when a long root task closes.
+    """close 合成交错时间线胶囊（spec §3.3）：快照幸存 task 对话 → AGENT_CONVERSATION_TURN
+    （保留原始 timestamp）+ 末尾合成 finish 对。
 
-    胶囊四件套（共享 now_utc()，ingest 顺序即 seq_no 顺序，composer 按 (timestamp, seq_no) 渲染）：
-      [user]      task.user_prompt           —— 稳定原始诉求（不读 memory，免受 compaction superseded 影响）
-      [assistant] <task_compact_summary>      —— 仅当 task 被 compact 过；承载「会话目标/已完成工作」
-      [assistant] delegate_task(tool_call)    —— 把整个 root task 表示成一次派发
-      [tool]      mem_content                 —— outputs + process report
+    step1: 等本 task 的后台 observe 完成（强一致）。
+    step2: 镜像幸存 task 层事件到 agent 层 AGENT_CONVERSATION_TURN，保留原始 timestamp/role/tool 元数据。
+           角色映射：USER_PROMPT→user, TASK_COMPACT_SUMMARY→assistant（覆盖 DB 存储的 role=user）,
+           LLM_RESPONSE→assistant（携带 tool_calls），TOOL_RESULT→tool（携带 tool_call_id）。
+    step3: 追加合成 finish 对（assistant finish_task tool_call + tool Process Report）。
     """
+    from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
+    from ctx_weft.core.utils import content_to_text
+
+    # step1：强一致——等本 task 的后台 observe（末段摘要）跑完（spec §3.3 step1，方案乙）
+    await await_pending_background_observe(task.id)
+
+    # step2：召回幸存 task 层对话，逐条镜像成 agent 层 AGENT_CONVERSATION_TURN
+    task_scope = MemoryScope(session_id=scope.session_id, task_id=task.id, agent_id=scope.agent_id)
+    survivors = await memory.recall_recent(
+        task_scope,
+        [MemoryEventType.USER_PROMPT, MemoryEventType.TASK_COMPACT_SUMMARY,
+         MemoryEventType.LLM_RESPONSE, MemoryEventType.TOOL_RESULT],
+        2000, provider_ctx,
+    )
+    survivors = list(reversed(survivors))  # newest-first → 时间序（oldest first）
+
+    for r in survivors:
+        # 角色映射（任务指令修正版）：TASK_COMPACT_SUMMARY 覆盖存储的 role="user" → "assistant"
+        if r.type == MemoryEventType.USER_PROMPT:
+            role = "user"
+        elif r.type == MemoryEventType.TASK_COMPACT_SUMMARY:
+            role = "assistant"
+        else:
+            role = r.role or "user"  # LLM_RESPONSE→assistant, TOOL_RESULT→tool 已在记录上
+
+        md: dict = {"origin_task_id": task.id}
+        if role == "assistant":
+            md["tool_calls"] = r.metadata.get("tool_calls", [])
+        elif role == "tool":
+            md["tool_call_id"] = r.metadata.get("tool_call_id", "")
+
+        await memory.ingest(
+            MemoryEvent(
+                type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                scope=scope,
+                content=r.content,
+                timestamp=r.timestamp,
+                role=role,
+                metadata=md,
+            ),
+            provider_ctx,
+        )
+
+    # step3：合成 finish 对（末尾承载，spec §3.3 step3 + §3.5）
     base = now_utc()
-    # 1) 原始 user prompt → user 回合（来源 = task.user_prompt，稳定）
-    user_text = (
-        task.user_prompt if isinstance(task.user_prompt, str)
-        else content_to_text(task.user_prompt or "")
-    )
-    if user_text:
-        await memory.ingest(
-            MemoryEvent(
-                type=MemoryEventType.AGENT_CONVERSATION_TURN,
-                scope=scope,
-                content=user_text,
-                timestamp=base,
-                role="user",
-                metadata={"origin_task_id": task.id},
-            ),
-            provider_ctx,
-        )
-    # 2) compaction summary（若有）→ assistant 回合（承载「会话目标/已完成工作」）
-    # TASK_COMPACT_SUMMARY 是 task 层事件；须用 task scope（含 task_id）召回，
-    # 而非 agent scope（task_id=None），否则 scope_key 不匹配导致漏读。
-    task_scope = MemoryScope(
-        session_id=scope.session_id,
-        task_id=task.id,
-        agent_id=scope.agent_id,
-    )
-    summaries = await memory.recall_recent(
-        task_scope, [MemoryEventType.TASK_COMPACT_SUMMARY], 2000, provider_ctx,
-    )
-    if summaries:
-        latest = summaries[0]  # recall 是 newest-first
-        await memory.ingest(
-            MemoryEvent(
-                type=MemoryEventType.AGENT_CONVERSATION_TURN,
-                scope=scope,
-                content=latest.content,
-                timestamp=base,
-                role="assistant",
-                metadata={"origin_task_id": task.id},
-            ),
-            provider_ctx,
-        )
-    # 3) synthesized delegate_task ↔ result
     tool_call_id = generate_id("tcall")
+    outputs_text = (
+        task.outputs if isinstance(task.outputs, str)
+        else content_to_text(task.outputs or "")
+    ) or ("(无最终产出)" if outcome == "fail" else "")
+
+    report_prefix = "[outcome=fail] " if outcome == "fail" else ""
+    # mem_content 格式为 "{outputs}\n\nProcess Report: {summary}" 或仅 "{summary}"
+    report_only = (
+        mem_content.split("Process Report: ", 1)[-1]
+        if "Process Report: " in mem_content
+        else mem_content
+    )
+
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.TASK_DISPATCH,
+            type=MemoryEventType.AGENT_CONVERSATION_TURN,
             scope=scope,
             content="",
             timestamp=base,
             role="assistant",
-            metadata={
-                "tool_call_id": tool_call_id,
-                "tool_name": qualify("control:delegate_task"),
-                "arguments": {
-                    "title": task.title,
-                    "task_prompt": task.user_prompt,
-                    "description": task.description,
-                },
-            },
+            metadata={"origin_task_id": task.id, "tool_calls": [{
+                "id": tool_call_id,
+                "name": qualify("control:finish_task"),
+                "input": {"result": outputs_text},
+            }]},
         ),
         provider_ctx,
     )
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.TASK_DISPATCH_RESULT,
+            type=MemoryEventType.AGENT_CONVERSATION_TURN,
             scope=scope,
-            content=mem_content,
+            content=f"{report_prefix}Process Report: {report_only}",
             timestamp=base,
             role="tool",
-            metadata={
-                "tool_call_id": tool_call_id,
-                "child_task_id": task.id,
-                "title": task.title,
-                "outcome": outcome,
-                "parent_task_id": None,
-            },
+            metadata={"origin_task_id": task.id, "tool_call_id": tool_call_id},
         ),
         provider_ctx,
     )

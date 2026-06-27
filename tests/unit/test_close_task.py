@@ -97,11 +97,13 @@ async def test_long_root_leaf_closes_into_residue() -> None:
     await finalize_task_memory(mem, _state(task, scope, cfg, _FakeTM()),
                                task, "final out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # own conversation superseded; a synthesized dispatch pair (residue) exists
+    # own conversation superseded; a synthesized capsule (AGENT_CONVERSATION_TURN finish pair) exists
     convs = await mem.recall_recent(scope, [T.USER_PROMPT, T.LLM_RESPONSE], 100, _ctx())
     assert convs == []
-    residues = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert any(r.content == "final out" for r in residues)
+    # new shape: finish pair written as AGENT_CONVERSATION_TURN (tool role holds Process Report)
+    caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    finish_tools = [r for r in caps if r.role == "tool" and r.metadata.get("origin_task_id") == "t1"]
+    assert finish_tools, "expected finish-pair tool turn in agent capsule"
 
 
 async def test_root_close_gcs_subtree_residues() -> None:
@@ -221,7 +223,9 @@ async def test_root_close_gcs_deep_nested_subtree() -> None:
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
     assert "A out" not in contents and "A1 out" not in contents   # whole subtree (incl grandchild) GC'd
-    assert any(r.metadata.get("parent_task_id") is None for r in results)  # root self-residue survives
+    # root self-residue now written as AGENT_CONVERSATION_TURN (finish pair), not TASK_DISPATCH_RESULT
+    caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    assert any(r.metadata.get("origin_task_id") == "t1" for r in caps)  # root capsule survives
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
     assert all(r.metadata.get("task_id") != "A1" for r in convs)   # grandchild conversation gone
 
@@ -269,7 +273,9 @@ async def test_root_close_gcs_multichild_plan() -> None:
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
     assert not ({"A out", "B out", "C out"} & contents)          # all plan children GC'd
-    assert any(r.metadata.get("parent_task_id") is None for r in results)  # root self-residue remains
+    # root self-residue now written as AGENT_CONVERSATION_TURN finish pair
+    caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    assert any(r.metadata.get("origin_task_id") == "t1" for r in caps)  # root capsule remains
 
 
 async def test_root_close_gcs_mixed_same_and_cross_agent_children() -> None:
