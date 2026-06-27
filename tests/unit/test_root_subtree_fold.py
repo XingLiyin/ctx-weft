@@ -50,6 +50,19 @@ async def _seed_capsule(mem, scope, task_id: str, t0: int):
                          tool_call_id=tcid, child_task_id=task_id, parent_task_id=None), _pctx())
 
 
+async def _seed_capsule_offset(mem, scope, task_id: str, turn_t: int, result_t: int):
+    """多回合胶囊：AGENT_CONVERSATION_TURN 在 turn_t（早），TASK_DISPATCH_RESULT 在 result_t（晚）。
+    用于验证 anchor_ts 必须扫描全部元素（不能只看 result）。"""
+    tcid = f"tc_{task_id}"
+    await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, scope, f"prompt {task_id}", turn_t, role="user",
+                         origin_task_id=task_id), _pctx())
+    await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, scope, f"summary {task_id}", turn_t + 1, role="assistant",
+                         origin_task_id=task_id), _pctx())
+    await mem.ingest(_ev(T.TASK_DISPATCH, scope, "", result_t - 1, role="assistant", tool_call_id=tcid), _pctx())
+    await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, scope, f"result {task_id}", result_t, role="tool",
+                         tool_call_id=tcid, child_task_id=task_id, parent_task_id=None), _pctx())
+
+
 async def _alive(mem, scope, type_, role=None):
     recs = await mem.recall_recent(scope, [type_], 2000, _pctx())
     return [r for r in recs if role is None or r.role == role]
@@ -105,3 +118,31 @@ async def test_nothing_to_fold_returns_zero():
     assert n == 0
     turns = await _alive(mem, scope, T.AGENT_CONVERSATION_TURN)
     assert {r.metadata.get("origin_task_id") for r in turns} == {"task0"}
+
+
+async def test_anchor_ts_covers_all_kept_capsule_elements():
+    """anchor_ts 必须扫描保留胶囊的全部元素（含 AGENT_CONVERSATION_TURN），
+    不能只看 TASK_DISPATCH_RESULT。
+
+    构造：2 个胶囊，keep_last=1（折掉第 1 个，保留第 2 个）。
+    第 2 个（被保留）胶囊的 AGENT_CONVERSATION_TURN 时间戳（turn_t=5）
+    早于其 TASK_DISPATCH_RESULT（result_t=20）。
+    正确 anchor = _BASE + 5s - 1µs；旧实现 anchor = _BASE + 20s - 1µs（错误）。
+    断言：AGENT_COMPACT_SUMMARY.timestamp < _BASE + timedelta(seconds=5)。
+    """
+    mem = InMemoryMemoryProvider()
+    scope = _sc()
+    # 第 1 个胶囊（会被折掉）
+    await _seed_capsule_offset(mem, scope, "task0", turn_t=0, result_t=3)
+    # 第 2 个胶囊（会被保留）：turn 在 t=5，result 在 t=20
+    await _seed_capsule_offset(mem, scope, "task1", turn_t=5, result_t=20)
+    await fold_root_experience(_state(scope), _ctx(mem), keep_last=1, summary_text="compacted")
+    summ = await _alive(mem, scope, T.AGENT_COMPACT_SUMMARY)
+    assert len(summ) == 1
+    # anchor_ts must be based on min of ALL kept elements (turn at t=5), not just result (t=20)
+    kept_turn_earliest = _BASE + timedelta(seconds=5)
+    assert summ[0].timestamp < kept_turn_earliest, (
+        f"AGENT_COMPACT_SUMMARY.timestamp={summ[0].timestamp} should be < {kept_turn_earliest} "
+        f"(min of kept capsule's AGENT_CONVERSATION_TURN), but anchor was computed only from "
+        f"TASK_DISPATCH_RESULT (t=20)"
+    )

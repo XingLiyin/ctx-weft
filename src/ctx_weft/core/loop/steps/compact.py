@@ -129,7 +129,11 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
                 and r.metadata.get("origin_task_id") in fold_task_ids):
             ids.append(r.id)  # 被折胶囊的 user / assistant-summary 回合一并折叠，避免落单
     await memory.supersede(ids, ctx.provider_ctx)
-    anchor_ts = min((r.timestamp for r in kept), default=now_utc())
+    kept_task_ids = {r.metadata.get("child_task_id") for r in kept}
+    kept_elements_ts = [r.timestamp for r in recs
+                        if r.metadata.get("child_task_id") in kept_task_ids
+                        or r.metadata.get("origin_task_id") in kept_task_ids]
+    anchor_ts = (min(kept_elements_ts) if kept_elements_ts else now_utc())
     # Truncation-only on summary-LLM failure (summary_text=="" → "[Experience compacted]"):
     # the fold still supersedes prior root experience so compaction bounds the agent layer
     # even without the LLM. Consistent with task-layer apply_compact; accepted edge
