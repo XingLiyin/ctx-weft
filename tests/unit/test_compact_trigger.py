@@ -63,9 +63,22 @@ async def test_task_layer_growth_triggers_compaction() -> None:
 
 
 async def test_agent_layer_growth_still_triggers() -> None:
-    """回归：agent 层派发日志达 delta 仍触发。"""
+    """回归：agent 层 root 胶囊达 delta 仍触发（新格式：AGENT_CONVERSATION_TURN, parent=None）。"""
     mem = InMemoryMemoryProvider()
-    await _ingest_n(mem, T.TASK_DISPATCH_RESULT, 20, role="tool")
+    # 每组 2 条 AGENT_CONVERSATION_TURN 组成一个 root 胶囊（20 组 = 20 顶层单元）
+    for i in range(20):
+        await mem.ingest(
+            MemoryEvent(type=T.AGENT_CONVERSATION_TURN, scope=_scope(), content=f"user {i}",
+                        timestamp=_BASE + timedelta(seconds=i * 10), role="user",
+                        metadata={"origin_task_id": f"root{i}", "parent_task_id": None}),
+            _pctx(),
+        )
+        await mem.ingest(
+            MemoryEvent(type=T.AGENT_CONVERSATION_TURN, scope=_scope(), content=f"asst {i}",
+                        timestamp=_BASE + timedelta(seconds=i * 10 + 1), role="assistant",
+                        metadata={"origin_task_id": f"root{i}", "parent_task_id": None}),
+            _pctx(),
+        )
     assert await PrepareStep()._should_compact(_state(delta=20), _ctx(mem), token_estimate=10) is True
 
 

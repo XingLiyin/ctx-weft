@@ -77,14 +77,24 @@ async def test_task_compact_writes_task_summary() -> None:
 
 
 async def test_agent_compact_writes_agent_summary() -> None:
+    """新格式：用 AGENT_CONVERSATION_TURN（parent=None）作 root 胶囊触发 agent 层压缩。"""
     mem = InMemoryMemoryProvider()
-    await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, "r1", 0, "tool"), _pctx())
-    await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, "r2", 1, "tool"), _pctx())
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    # 植入 2 组 AGENT_CONVERSATION_TURN（keep_last=1 → 折最旧 1 组）
+    for grp, t0 in enumerate([0, 10]):
+        oid = f"root{grp}"
+        for role, dt in [("user", 0), ("assistant", 1)]:
+            await mem.ingest(MemoryEvent(
+                type=T.AGENT_CONVERSATION_TURN, scope=_scope(),
+                content=f"turn {oid} {role}",
+                timestamp=base + timedelta(seconds=t0 + dt), role=role,
+                metadata={"origin_task_id": oid, "parent_task_id": None},
+            ), _pctx())
 
     await _run_compact(mem)
 
     recs = await mem.recall_recent(
-        _scope(), [T.TASK_DISPATCH_RESULT, T.AGENT_COMPACT_SUMMARY], 10, _pctx()
+        _scope(), [T.AGENT_CONVERSATION_TURN, T.AGENT_COMPACT_SUMMARY], 10, _pctx()
     )
     assert any(r.type == T.AGENT_COMPACT_SUMMARY and r.content == "SUMMARY" for r in recs)
 

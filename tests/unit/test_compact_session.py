@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -74,16 +74,21 @@ async def test_compact_session_folds_agent_layer() -> None:
                  "llm_model": "mock", "context_limit": 180000},
     ))
 
-    # Seed the agent layer (dispatch log) — scope key ignores task_id, uses agent_id.
+    # 新格式：用 AGENT_CONVERSATION_TURN（parent=None）作 root 胶囊触发 agent 层压缩。
+    # scope key ignores task_id, uses agent_id.
     scope = MemoryScope(session_id=sid, task_id="t_seed", agent_id=aid)
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id="t_seed", agent_id=aid)
     for i in range(5):
         await mem.ingest(MemoryEvent(
-            type=MemoryEventType.TASK_DISPATCH, scope=scope, content=f"dispatch {i}",
-            timestamp=ts, role="assistant", metadata={"tool_call_id": f"tc{i}"}), pctx)
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+            content=f"user prompt {i}", role="user",
+            timestamp=ts + timedelta(seconds=i * 10),
+            metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
         await mem.ingest(MemoryEvent(
-            type=MemoryEventType.TASK_DISPATCH_RESULT, scope=scope, content=f"result {i}",
-            timestamp=ts, role="tool", metadata={"tool_call_id": f"tc{i}"}), pctx)
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+            content=f"assistant summary {i}", role="assistant",
+            timestamp=ts + timedelta(seconds=i * 10 + 1),
+            metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
 
     result = await rt.compact_session(sid)
 

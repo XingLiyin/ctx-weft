@@ -249,7 +249,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
         else:
             role = r.role or "user"  # LLM_RESPONSE→assistant, TOOL_RESULT→tool 已在记录上
 
-        md: dict = {"origin_task_id": task.id}
+        md: dict = {"origin_task_id": task.id, "parent_task_id": task.parent_task_id}
         if role == "assistant":
             md["tool_calls"] = r.metadata.get("tool_calls", [])
         elif role == "tool":
@@ -287,11 +287,12 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
             content="",
             timestamp=base,
             role="assistant",
-            metadata={"origin_task_id": task.id, "tool_calls": [{
-                "id": tool_call_id,
-                "name": qualify("control:finish_task"),
-                "input": {"result": outputs_text},
-            }]},
+            metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
+                      "tool_calls": [{
+                          "id": tool_call_id,
+                          "name": qualify("control:finish_task"),
+                          "input": {"result": outputs_text},
+                      }]},
         ),
         provider_ctx,
     )
@@ -302,7 +303,8 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
             content=f"{report_prefix}Process Report: {report_only}",
             timestamp=base,
             role="tool",
-            metadata={"origin_task_id": task.id, "tool_call_id": tool_call_id},
+            metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
+                      "tool_call_id": tool_call_id},
         ),
         provider_ctx,
     )
