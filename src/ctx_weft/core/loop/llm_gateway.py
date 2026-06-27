@@ -5,12 +5,14 @@
 只负责构造逻辑消息结构，不做合法化；连续同角色 / 孤立 tool result 一律在这里、发送前
 统一处理。
 
-合法化两条不变式（:func:`stream_llm` 内顺序：先丢孤立 tool result，再合并连续同角色）：
-  1. :func:`drop_orphan_tool_results` —— 丢弃 tool_call_id 无前序 assistant tool_call
+合法化三条不变式（:func:`stream_llm` 内顺序：先丢前导非 user，再丢孤立 tool result，最后合并连续同角色）：
+  1. :func:`ensure_leading_user` —— 丢弃开头 role != "user" 的消息直到首条为 user（Anthropic
+     硬规则，否则 400）。丢弃前导 assistant 后其配对 tool 会成孤儿，由下一步清理。
+  2. :func:`drop_orphan_tool_results` —— 丢弃 tool_call_id 无前序 assistant tool_call
      配对的 ``role="tool"`` 消息。compact 丢弃 assistant 但保留 TOOL_RESULT、recall 窗口
      在 assistant↔result 之间截断、跨层按 timestamp 归并错位等都会产生此类孤儿，会被
      Anthropic / OpenAI 直接 400。
-  2. :func:`merge_consecutive_messages` —— 合并连续同角色消息（多模态安全）。
+  3. :func:`merge_consecutive_messages` —— 合并连续同角色消息（多模态安全）。
 
 本模块仅依赖 protocols，且只被本 loop 层的 step import；故置于 ``core/loop`` 下。若将来
 装配等下层也需复用这些合法化函数，应改为下沉到 ``core`` 根，避免下层反向依赖 loop。
@@ -67,6 +69,19 @@ def _merge_message_content(
     return as_parts(prev) + as_parts(cur)
 
 
+def ensure_leading_user(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """丢弃开头 role != "user" 的消息直到首条为 user（Anthropic 首条必须 user，否则 400）。
+
+    只动头部、不注入文案——与「以 user 收尾」语义兜底（保留在 composer）不同，对正常工具
+    循环（中段 tool result 之后无 user）无影响。前导 assistant 被丢后其配对 tool 会成孤儿，
+    由随后的 drop_orphan_tool_results 清理（见 stream_llm 串联顺序）。
+    """
+    i = 0
+    while i < len(messages) and messages[i].role != "user":
+        i += 1
+    return messages[i:] if i else messages
+
+
 def merge_consecutive_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
     """合并连续相同角色的消息（tool 消息因绑定 tool_call_id 不合并）。"""
     merged: list[LLMMessage] = []
@@ -91,7 +106,9 @@ async def stream_llm(
     llm: "LLMClient", request: "LLMRequest", *, stream: bool = True
 ) -> AsyncIterator["LLMChunk"]:
     """发送前合法化 ``request.messages``，再流式转发 ``llm.complete`` 的 chunk。"""
-    request.messages = merge_consecutive_messages(drop_orphan_tool_results(request.messages))
+    request.messages = merge_consecutive_messages(
+        drop_orphan_tool_results(ensure_leading_user(request.messages))
+    )
     async for chunk in llm.complete(request, stream=stream):
         yield chunk
 
