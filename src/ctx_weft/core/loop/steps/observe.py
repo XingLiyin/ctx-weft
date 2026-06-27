@@ -31,6 +31,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_own_root(task) -> bool:
+    """root task 判定（与 finalize._close_one 保持一致）。
+
+    True  → session root（parent_task_id is None）或跨 agent own-root（cross_agent）。
+    False → 同 agent 子任务（parent 非空且 creator==assigned）。
+    非 root 不触发后台 observe（它们用 LLM observe 向 parent 上报，max_turns 同步 compact）。
+    """
+    same_agent = task.creator_agent_id == task.assigned_agent_id
+    cross_agent = bool(task.parent_task_id) and not same_agent
+    return task.parent_task_id is None or cross_agent
+
+
 @dataclass
 class Verdict:
     """Observer 输出（三态）。"""
@@ -63,6 +75,13 @@ class ObserveStep(Step):
 
         # max_turns 退出：压缩 task 执行层（下一轮召回从摘要 + keep_last 开始）
         await self._maybe_compact_task(state, ctx, verdict, events)
+
+        # 交互/finish 段边界：root task 在 normal（ask_human 后 / 纯文本暂停前） 或
+        # actor_done（finish_task 收尾）时触发后台异步 observe，产段摘要 + 折 raw。
+        # max_turns/context_limit 走同步 _maybe_compact_task；非 root 不触发（它们走 LLM observe）。
+        if state.act_exit_reason in ("normal", "actor_done") and _is_own_root(state.task):
+            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+            launch_background_observe(state, ctx)
 
         events.append(make_event(
             state, EventType.OBSERVE_COMPLETED,

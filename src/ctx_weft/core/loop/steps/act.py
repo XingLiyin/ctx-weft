@@ -214,6 +214,9 @@ async def _run_llm_turn(
         # ① 未吐任何内容：不留记录、续接补说明。随后 park 待用户续接。
         has_partial = bool(text.strip() or reasoning.strip())
         await _commit_interrupted_partial(state, ctx, text, reasoning, turn_num)
+        if _is_own_root(state.task):
+            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+            launch_background_observe(state, ctx)
         await _park_wait_for_user(state, ctx, source="interrupt", edit=not has_partial)
 
     await ctx.event_bus.emit(make_event(
@@ -327,6 +330,9 @@ async def _execute_tool_calls(
             for rest in tool_calls[i:]:
                 await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
             ctx.run_phase.in_tool_loop = False
+            if _is_own_root(state.task):
+                from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+                launch_background_observe(state, ctx)
             await _park_wait_for_user(state, ctx, source="interrupt")
         if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
             ctx.cancel_token.raise_if_cancelled()
@@ -340,6 +346,9 @@ async def _execute_tool_calls(
                 for rest in tool_calls[i + 1:]:
                     await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
                 ctx.run_phase.in_tool_loop = False
+                if _is_own_root(state.task):
+                    from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+                    launch_background_observe(state, ctx)
                 await _park_wait_for_user(state, ctx, source="interrupt")
             if ctx.cancel_token is not None:
                 ctx.cancel_token.raise_if_cancelled()  # 硬取消
@@ -466,6 +475,17 @@ def _interrupt_pending(ctx: LoopContext) -> bool:
     )
 
 
+def _is_own_root(task) -> bool:
+    """root task 判定（与 observe._is_own_root / finalize._close_one 保持一致）。
+
+    True  → session root（parent_task_id is None）或跨 agent own-root。
+    False → 同 agent 子任务（parent 非空且 creator==assigned）。
+    """
+    same_agent = task.creator_agent_id == task.assigned_agent_id
+    cross_agent = bool(task.parent_task_id) and not same_agent
+    return task.parent_task_id is None or cross_agent
+
+
 async def _commit_interrupted_partial(
     state: LoopState, ctx: LoopContext, text: str, reasoning: str, turn_num: int,
 ) -> None:
@@ -526,6 +546,9 @@ async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
     """协作式停止点：软打断（pause）→ park；硬取消（cancel）→ CancelledError。"""
     if _interrupt_pending(ctx):
         edit = not ctx.run_phase.produced and not ctx.run_phase.in_tool_loop
+        if _is_own_root(state.task):
+            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+            launch_background_observe(state, ctx)
         await _park_wait_for_user(state, ctx, source="interrupt", edit=edit)  # raises HitlPark
     tok = ctx.cancel_token
     if tok is not None and tok.is_cancelled:
