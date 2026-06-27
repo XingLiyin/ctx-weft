@@ -148,7 +148,7 @@ async def test_A1_single_segment_finish() -> None:
     # 2. 最后两条是 finish pair（assistant finish_task + tool Process Report）
     # 3. 无 TASK_COMPACT_SUMMARY 镜像的 role=assistant 段摘要（tool_calls=[] 且 content 含摘要字样的回合）
 
-    assert len(caps) >= 3, f"expected ≥3 capsule turns (user + finish pair), got {len(caps)}"
+    assert len(caps) == 5, f"expected exactly 5 capsule turns (UP + LLM + TOOL + finish pair), got {len(caps)}"
 
     # 首条 user
     assert caps[0].role == "user", f"first turn must be user, got {caps[0].role}"
@@ -432,7 +432,7 @@ async def test_A10_short_task_no_capsule() -> None:
     agent 层无 AGENT_CONVERSATION_TURN 写入（task 层对话也不被 supersede）。
 
     判定 short: LLM_RESPONSE turns ≤ turn_cap AND token_est ≤ threshold。
-    LoopConfig 默认 short_task_turn_cap=2, short_task_token_threshold=5000。
+    LoopConfig 默认 short_task_turn_cap=3, short_task_token_threshold=2000。
     此处构造极短对话确保 is_short=True。
     """
     mem = InMemoryMemoryProvider()
