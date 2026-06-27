@@ -235,3 +235,28 @@ async def test_no_task_records_still_writes_finish_pair():
     assert len(caps) == 2, f"expected 2 (finish pair only), got {len(caps)}"
     assert caps[-2].role == "assistant"
     assert caps[-1].role == "tool"
+
+
+# ── 回归：dict-list outputs 须正确写入 finish result（不得为空）───────────────
+
+async def test_finish_result_dict_list_outputs():
+    """回归：task.outputs=[{"type":"text","text":...}] 时，finish tool_call input["result"]
+    须等于文本内容，不能为空（旧 content_to_text 返回 "" 的 bug）。"""
+    mem = InMemoryMemoryProvider()
+    asc = _agent_scope()
+    task = _task()
+    task.outputs = [{"type": "text", "text": "结构化答复"}]
+
+    await _synthesize_dispatch_pair(
+        mem, asc, task, "结构化答复\n\nProcess Report: rpt", "success", _ctx()
+    )
+
+    caps = await _caps(mem, asc)
+    finish_assistant = caps[-2]
+    tool_calls = finish_assistant.metadata.get("tool_calls", [])
+    assert len(tool_calls) == 1
+    result = tool_calls[0]["input"]["result"]
+    assert result == "结构化答复", (
+        f"finish result must be '结构化答复' but got {result!r}; "
+        "old content_to_text bug would yield ''"
+    )

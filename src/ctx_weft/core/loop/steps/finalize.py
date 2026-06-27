@@ -233,7 +233,6 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
     step3: 追加合成 finish 对（assistant finish_task tool_call + tool Process Report）。
     """
     from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
-    from ctx_weft.core.utils import content_to_text
 
     # step1：强一致——等本 task 的后台 observe（末段摘要）跑完（spec §3.3 step1，方案乙）
     await await_pending_background_observe(task.id)
@@ -278,10 +277,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
     # step3：合成 finish 对（末尾承载，spec §3.3 step3 + §3.5）
     base = now_utc()
     tool_call_id = generate_id("tcall")
-    outputs_text = (
-        task.outputs if isinstance(task.outputs, str)
-        else content_to_text(task.outputs or "")
-    ) or ("(无最终产出)" if outcome == "fail" else "")
+    outputs_text = _output_text(task.outputs) or ("(无最终产出)" if outcome == "fail" else "")
 
     report_prefix = "[outcome=fail] " if outcome == "fail" else ""
     # mem_content 格式为 "{outputs}\n\nProcess Report: {summary}" 或仅 "{summary}"
