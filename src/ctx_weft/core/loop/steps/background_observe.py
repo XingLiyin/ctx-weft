@@ -23,6 +23,12 @@ _task_pending: dict[str, asyncio.Task] = {}
 _orphan_tasks: set[asyncio.Task] = set()
 
 
+def _clear_pending(t: asyncio.Task, tid: str) -> None:
+    """Compare-and-clear: only remove _task_pending[tid] if it still refers to this task."""
+    if _task_pending.get(tid) is t:
+        del _task_pending[tid]
+
+
 def _lock_for(task_id: str) -> asyncio.Lock:
     lock = _task_locks.get(task_id)
     if lock is None:
@@ -57,7 +63,7 @@ def launch_background_observe(state: "LoopState", ctx: "LoopContext") -> asyncio
     else:
         _orphan_tasks.add(task)
         task.add_done_callback(_orphan_tasks.discard)
-    task.add_done_callback(lambda _t, tid=state.task.id: _task_pending.pop(tid, None) and None)
+    task.add_done_callback(lambda t, tid=state.task.id: _clear_pending(t, tid))
     return task
 
 
