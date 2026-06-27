@@ -182,7 +182,8 @@ async def _compact_scope(
     if fold_task:
         result = await ctx.memory.apply_compact(
             scope=state.scope, summary=summary_text or "[Context compacted]",
-            keep_last=keep_last, ctx=ctx.provider_ctx, layer=MemoryLayer.TASK)
+            keep_last=keep_last, ctx=ctx.provider_ctx, layer=MemoryLayer.TASK,
+            protect_types=(MemoryEventType.USER_PROMPT,))
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "events_before": result.events_before, "events_after": result.events_after,
             "summary_event_id": result.summary_event_id, "layer": "task",

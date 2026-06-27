@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.events import EventType
-from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryLayer
+from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryLayer
 from ctx_weft.core.loop.steps.compact import TASK_COMPACT_TYPES, summarize_for_compact
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
@@ -339,6 +339,7 @@ class ObserveStep(Step):
             keep_last=keep_last,
             ctx=ctx.provider_ctx,
             layer=MemoryLayer.TASK,
+            protect_types=(MemoryEventType.USER_PROMPT,),
         )
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "events_before": result.events_before,
