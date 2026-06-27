@@ -260,3 +260,41 @@ async def test_finish_result_dict_list_outputs():
         f"finish result must be '结构化答复' but got {result!r}; "
         "old content_to_text bug would yield ''"
     )
+
+
+async def test_embedded_process_report_in_outputs():
+    """outputs 文本本身包含 "Process Report: " 时，必须用 full separator rsplit
+    从最后一个分隔符切割，防止误切。
+
+    示例：
+      outputs = "I wrote a Process Report: draft"
+      summary = "real report"
+      mem_content = "I wrote a Process Report: draft\\n\\nProcess Report: real report"
+
+    旧代码用 split("Process Report: ", 1)[-1] 取第一个分隔符后的内容：
+      "draft\\n\\nProcess Report: real report"  (错误，report 被 outputs 污染)
+
+    新代码用 rsplit("\\n\\nProcess Report: ", 1)[-1] 从最后分隔符切割：
+      "real report"  (正确)
+    """
+    mem = InMemoryMemoryProvider()
+    asc = _agent_scope()
+    task = _task()
+    task.outputs = "I wrote a Process Report: draft"
+
+    # _build_memory_content 会拼成：
+    # "I wrote a Process Report: draft\\n\\nProcess Report: real report"
+    mem_content = "I wrote a Process Report: draft\n\nProcess Report: real report"
+
+    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _ctx())
+
+    caps = await _caps(mem, asc)
+    finish_tool = caps[-1]
+
+    # 验证 tool content 从完整分隔符后切割，即只含 "real report"
+    # 而非 "draft\\n\\nProcess Report: real report"
+    tool_content = finish_tool.content
+    assert tool_content == "Process Report: real report", (
+        f"tool content should be 'Process Report: real report' but got {tool_content!r}; "
+        "old split logic would include embedded separator content"
+    )

@@ -274,9 +274,10 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
 
     report_prefix = "[outcome=fail] " if outcome == "fail" else ""
     # mem_content 格式为 "{outputs}\n\nProcess Report: {summary}" 或仅 "{summary}"
+    _SEP = "\n\nProcess Report: "
     report_only = (
-        mem_content.split("Process Report: ", 1)[-1]
-        if "Process Report: " in mem_content
+        mem_content.rsplit(_SEP, 1)[-1]
+        if _SEP in mem_content
         else mem_content
     )
 
