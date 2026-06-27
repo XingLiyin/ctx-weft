@@ -69,34 +69,15 @@ async def _supersede_own_conversation(memory, scope, ctx) -> int:
 
 
 async def _gc_subtree(memory, agent_scope, descendants: set[str], ctx) -> int:
-    """软删本 agent scope 内所有「后代 task」的记录（残留 + 任何未关对话）。"""
+    """软删后代 task 的自身 task 层 raw 残留（派发对/嵌入子胶囊保留，由 parent 胶囊管理）。"""
     if not descendants:
         return 0
     ids: list[str] = []
-    # 后代 task 的 task 层对话（按 agent 跨 task 召回后按 task_id 过滤）
     task_recs = await memory.recall_recent_by_agent(
         agent_scope, _OWN_CONV_TYPES, 2000, ctx.provider_ctx,
     )
     for r in task_recs:
         if r.metadata.get("task_id") in descendants:
-            ids.append(r.id)
-    # 后代 task 的 agent 层残留（dispatch ↔ result 配对）
-    agent_recs = await memory.recall_recent(
-        agent_scope,
-        [MemoryEventType.TASK_DISPATCH, MemoryEventType.TASK_DISPATCH_RESULT],
-        2000, ctx.provider_ctx,
-    )
-    child_tcids: set[str] = set()
-    for r in agent_recs:
-        if (r.type == MemoryEventType.TASK_DISPATCH_RESULT
-                and r.metadata.get("child_task_id") in descendants):
-            ids.append(r.id)
-            tcid = r.metadata.get("tool_call_id")
-            if tcid:
-                child_tcids.add(tcid)
-    for r in agent_recs:
-        if (r.type == MemoryEventType.TASK_DISPATCH
-                and r.metadata.get("tool_call_id") in child_tcids):
             ids.append(r.id)
     return await memory.supersede(ids, ctx.provider_ctx) if ids else 0
 

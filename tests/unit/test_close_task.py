@@ -123,9 +123,9 @@ async def test_root_close_gcs_subtree_residues() -> None:
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), tm),
                                task, "final out", "success", _loop_ctx(mem, tm))
 
-    # t2's residue + t2's conversation are GC'd; only the root's own residue remains
+    # t2's task-layer conversation GC'd; dispatch pair PRESERVED (managed by parent capsule)
     all_results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert all(r.content != "t2 out" for r in all_results)
+    assert any(r.content == "t2 out" for r in all_results), "dispatch pair must be preserved"
     t2_conv = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
     assert all(r.metadata.get("task_id") != "t2" for r in t2_conv)
 
@@ -220,9 +220,10 @@ async def test_root_close_gcs_deep_nested_subtree() -> None:
     task = _root_task()
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), tm),
                                task, "final out", "success", _loop_ctx(mem, tm))
+    # dispatch pairs for A and A1 PRESERVED (managed by parent capsule, not GC'd by _gc_subtree)
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
-    assert "A out" not in contents and "A1 out" not in contents   # whole subtree (incl grandchild) GC'd
+    assert "A out" in contents and "A1 out" in contents, "dispatch pairs must be preserved"
     # root self-residue now written as AGENT_CONVERSATION_TURN (finish pair), not TASK_DISPATCH_RESULT
     caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
     assert any(r.metadata.get("origin_task_id") == "t1" for r in caps)  # root capsule survives
@@ -250,7 +251,8 @@ async def test_intermediate_close_collapses_grandchild() -> None:
     await finalize_task_memory(mem, _state(A, a_scope, LoopConfig(), tm),
                                A, "A out", "success", _loop_ctx(mem, tm))
     results = await mem.recall_recent(_sc("any", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert all(r.content != "A1 out" for r in results)            # grandchild residue collapsed at A's close
+    # A1 dispatch pair PRESERVED (not GC'd by _gc_subtree, managed by A's capsule)
+    assert any(r.content == "A1 out" for r in results), "A1 dispatch pair must be preserved"
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
     assert all(r.metadata.get("task_id") != "A1" for r in convs)  # grandchild conv gone
     assert any(r.metadata.get("tool_call_id") == "ocA" and r.metadata.get("parent_task_id") == "t1"
@@ -272,7 +274,8 @@ async def test_root_close_gcs_multichild_plan() -> None:
                                task, "final out", "success", _loop_ctx(mem, tm))
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
-    assert not ({"A out", "B out", "C out"} & contents)          # all plan children GC'd
+    # dispatch pairs PRESERVED (not GC'd by _gc_subtree, managed by parent capsule)
+    assert {"A out", "B out", "C out"} <= contents, "all plan-child dispatch pairs must be preserved"
     # root self-residue now written as AGENT_CONVERSATION_TURN finish pair
     caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
     assert any(r.metadata.get("origin_task_id") == "t1" for r in caps)  # root capsule remains
@@ -299,7 +302,8 @@ async def test_root_close_gcs_mixed_same_and_cross_agent_children() -> None:
                                task, "final out", "success", _loop_ctx(mem, tm))
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
-    assert not ({"S out", "X out"} & contents)                   # both children residues GC'd
+    # dispatch pairs PRESERVED (not GC'd by _gc_subtree, managed by parent capsule)
+    assert {"S out", "X out"} <= contents, "both children dispatch pairs must be preserved"
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
     assert all(r.metadata.get("task_id") != "S" for r in convs)  # same-agent child conv GC'd
 
