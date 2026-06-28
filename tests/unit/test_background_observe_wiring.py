@@ -136,7 +136,7 @@ async def test_observe_ask_human_boundary_fires_for_root(monkeypatch):
     """root task, act_exit_reason='normal' → launch_background_observe called once."""
     launched = []
 
-    def fake_launch(state, ctx):
+    def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id,))
         fut = asyncio.get_event_loop().create_future()
         fut.set_result(None)
@@ -168,7 +168,7 @@ async def test_observe_finish_fires_for_root(monkeypatch):
     """root task, act_exit_reason='actor_done' → launch_background_observe called once."""
     launched = []
 
-    def fake_launch(state, ctx):
+    def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
@@ -195,7 +195,7 @@ async def test_observe_child_task_does_not_fire(monkeypatch):
     """child task (parent_task_id set, same agent) → launch_background_observe NOT called."""
     launched = []
 
-    def fake_launch(state, ctx):
+    def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
@@ -229,7 +229,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
 
     launched = []
 
-    def fake_launch(state, ctx):
+    def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
@@ -289,7 +289,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
 
     launched = []
 
-    def fake_launch(state, ctx):
+    def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
@@ -345,7 +345,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
 
     launched = []
 
-    def fake_launch(state, ctx):
+    def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
@@ -392,7 +392,7 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
 
     launched = []
 
-    def fake_launch(state, ctx):
+    def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 

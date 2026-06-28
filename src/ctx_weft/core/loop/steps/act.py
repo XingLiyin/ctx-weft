@@ -216,7 +216,7 @@ async def _run_llm_turn(
         await _commit_interrupted_partial(state, ctx, text, reasoning, turn_num)
         if _is_own_root(state.task):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-            launch_background_observe(state, ctx)
+            launch_background_observe(state, ctx, boundary="interrupt")
         await _park_wait_for_user(state, ctx, source="interrupt", edit=not has_partial)
 
     await ctx.event_bus.emit(make_event(
@@ -332,7 +332,7 @@ async def _execute_tool_calls(
             ctx.run_phase.in_tool_loop = False
             if _is_own_root(state.task):
                 from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-                launch_background_observe(state, ctx)
+                launch_background_observe(state, ctx, boundary="interrupt")
             await _park_wait_for_user(state, ctx, source="interrupt")
         if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
             ctx.cancel_token.raise_if_cancelled()
@@ -348,7 +348,7 @@ async def _execute_tool_calls(
                 ctx.run_phase.in_tool_loop = False
                 if _is_own_root(state.task):
                     from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-                    launch_background_observe(state, ctx)
+                    launch_background_observe(state, ctx, boundary="interrupt")
                 await _park_wait_for_user(state, ctx, source="interrupt")
             if ctx.cancel_token is not None:
                 ctx.cancel_token.raise_if_cancelled()  # 硬取消
@@ -387,7 +387,7 @@ async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: 
         # 纯文本暂停 = 软待命(允许但不强制回复) → PAUSED,区别于 ask_user 的 PAUSED_HITL。
         if _is_own_root(state.task):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-            launch_background_observe(state, ctx)
+            launch_background_observe(state, ctx, boundary="plain_text")
         await _park_wait_for_user(state, ctx, source="plain_text")
     await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
         "turn": turn_num, "reason": "stop"}))
@@ -551,7 +551,7 @@ async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
         edit = not ctx.run_phase.produced and not ctx.run_phase.in_tool_loop
         if _is_own_root(state.task):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-            launch_background_observe(state, ctx)
+            launch_background_observe(state, ctx, boundary="interrupt")
         await _park_wait_for_user(state, ctx, source="interrupt", edit=edit)  # raises HitlPark
     tok = ctx.cancel_token
     if tok is not None and tok.is_cancelled:

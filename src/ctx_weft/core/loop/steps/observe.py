@@ -212,7 +212,8 @@ class ObserveStep(Step):
         # max_turns/context_limit 走同步 _maybe_compact_task；非 root 不触发（它们走 LLM observe）。
         if state.act_exit_reason in ("normal", "actor_done") and _is_own_root(state.task):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-            launch_background_observe(state, ctx)
+            boundary = "finish" if state.act_exit_reason == "actor_done" else "normal"
+            launch_background_observe(state, ctx, boundary=boundary)
 
         events.append(make_event(
             state, EventType.OBSERVE_COMPLETED,
