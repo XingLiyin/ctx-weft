@@ -432,7 +432,7 @@ async def test_A10_short_task_no_capsule() -> None:
     agent 层无 AGENT_CONVERSATION_TURN 写入（task 层对话也不被 supersede）。
 
     判定 short: LLM_RESPONSE turns ≤ turn_cap AND token_est ≤ threshold。
-    LoopConfig 默认 short_task_turn_cap=3, short_task_token_threshold=2000。
+    LoopConfig 默认 short_task_turn_cap=2, short_task_token_threshold=1000。
     此处构造极短对话确保 is_short=True。
     """
     mem = InMemoryMemoryProvider()
@@ -446,7 +446,7 @@ async def test_A10_short_task_no_capsule() -> None:
     task = _make_task(outputs="hi", prompt="hello")
     # task 无 parent → is_own_root=True；但 is_short_leaf=True → _synthesize_dispatch_pair 不调
 
-    loop_config = LoopConfig()  # 默认 short_task_turn_cap=2, short_task_token_threshold=5000
+    loop_config = LoopConfig()  # 默认 short_task_turn_cap=2, short_task_token_threshold=1000
 
     await finalize_task_memory(
         mem, _state(task, tsc, loop_config),
