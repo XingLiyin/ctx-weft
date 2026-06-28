@@ -180,7 +180,6 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
     # A1: 机会性取 _close_report 槽；槽空则用薄占位
     from ctx_weft.core.loop.steps.background_observe import (
         pop_close_report, register_close_synth, _replace_finish_report,
-        _fold_final_segment_raw,
     )
     base = now_utc()
     tool_call_id = generate_id("tcall")
@@ -231,7 +230,6 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
         await _replace_finish_report(
             memory, provider_ctx, scope, task.id, tool_call_id, bg_report, outcome,
         )
-        await _fold_final_segment_raw(memory, provider_ctx, scope, task.id)
     else:
         # background 尚未完成 → 登记待异步替换（sync，无 await）
         register_close_synth(task.id, tool_call_id, scope, outcome)

@@ -187,7 +187,6 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     kept_full_top = [] if keep_last <= 0 else top[-keep_last:]    # 保 L0
     l1_set = _expand(l1_top)        # 删 body 的单元（含其子树）
     l2_set = _expand(l2_top)        # 连 finish 对一并删的单元（含其子树）
-    kept_set = _expand(kept_full_top)
 
     ids: list = []
 
