@@ -147,6 +147,20 @@ def control_tool(*, purposes: list[Purpose], input_schema: dict[str, Any] | None
     return decorator
 
 
+def control_tool_capability(qualified_name: str) -> ToolCapability | None:
+    """按 LLM 所见的 qualified 名全局查找控制工具能力（不依赖 per-agent cache）。
+
+    控制工具是 session 全局的（每个 agent 经 list() 都拿到全部），非 per-agent 可逐出资源。
+    gateway 在 per-agent cache 命中失败时用此兜底——典型场景：fire-and-forget 的 background
+    observe 在其 run 结束、cache 被逐出后才调 collect_process_report（其 LLM 调用慢于 run 收尾）。
+    匹配键与 cache 一致（qualify(cap.id)），故兜底解析与 cache 命中行为完全一致。
+    """
+    for cap, _ in _CONTROL_TOOLS.values():
+        if qualify(cap.id) == qualified_name:
+            return cap
+    return None
+
+
 # ── 工具定义 ──────────────────────────────────────────────────────────────────
 
 

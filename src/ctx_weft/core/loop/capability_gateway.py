@@ -127,6 +127,12 @@ class CapabilityGateway:
 
         # 1. Lookup capability（只处理 kind="tool"）
         cap = self._cache.get_by_qualified_name(state.agent.id, tool_name)
+        if cap is None:
+            # per-agent cache 命中失败时，控制工具走全局兜底：控制工具是 session 全局的、
+            # 非 per-agent 可逐出资源。fire-and-forget 的 background observe 可能在 run 结束、
+            # agent cache 被逐出后才调 collect_process_report——此时仍应解析成功。
+            from ctx_weft.core.orchestrator.control_capability import control_tool_capability
+            cap = control_tool_capability(tool_name)
         if cap is None or cap.kind != "tool":
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,

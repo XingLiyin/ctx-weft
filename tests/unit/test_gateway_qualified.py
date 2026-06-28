@@ -90,3 +90,40 @@ def test_classification_sets_are_qualified() -> None:
     assert "control__delegate_task" in DISPATCH_TOOLS
     assert "control__finish_task" in SILENT_TOOLS
     assert "delegate_task" not in DISPATCH_TOOLS  # bare no longer matches
+
+
+async def test_control_tool_resolves_when_cache_evicted() -> None:
+    """Control tools are session-global: the gateway resolves them even when the per-agent
+    capability cache is empty (e.g. a fire-and-forget background observe invoking
+    collect_process_report AFTER its run ended and the per-agent cache was evicted).
+    """
+    from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
+
+    mem, state, ctx = _state_ctx()
+    provider = ControlCapabilityProvider()
+    cache = CapabilityCache()  # EMPTY — agent binding evicted (run already finished)
+    gw = CapabilityGateway(
+        capability_cache=cache, capability_providers=[provider],
+        memory=mem, event_bus=InProcessEventBus(),
+    )
+    res = await gw.invoke(
+        "control__collect_process_report",
+        {"task_process_report": "段总结X"}, state, ctx,
+    )
+    assert res.is_error is False, f"expected resolved via global fallback, got: {res.content}"
+    assert res.content == "段总结X"
+
+
+async def test_non_control_tool_still_unknown_when_uncached() -> None:
+    """The global fallback is control-tools-only: a non-control (skill/mcp) tool that is NOT
+    in the per-agent cache must still be unknown (no per-agent gating bypass)."""
+    p = _Echo()
+    mem, state, ctx = _state_ctx()
+    cache = CapabilityCache()  # empty — provider exists but agent not bound to it
+    gw = CapabilityGateway(
+        capability_cache=cache, capability_providers=[p],
+        memory=mem, event_bus=InProcessEventBus(),
+    )
+    res = await gw.invoke("mcp__a__search", {}, state, ctx)
+    assert res.is_error is True
+    assert "unknown tool" in res.content
