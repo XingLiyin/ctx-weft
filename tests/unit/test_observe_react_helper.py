@@ -1,4 +1,4 @@
-"""run_observe_react：跑 ReAct，返回最后一个控制工具的 content；不写 task 状态。"""
+"""run_observe_react：跑 ReAct，仅 terminal_tool_name 被调用时终止；不写 task 状态。"""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -137,6 +137,7 @@ async def test_helper_returns_tool_content_when_control_tool_called(monkeypatch)
         tools=[],
         request_id_prefix="test",
         max_rounds=3,
+        terminal_tool_name="report_task_outcome",
     )
 
     assert tool_content == "REPORT"
@@ -161,6 +162,7 @@ async def test_helper_returns_none_when_no_tool_called(monkeypatch):
         tools=[],
         request_id_prefix="test",
         max_rounds=3,
+        terminal_tool_name="report_task_outcome",
     )
 
     assert tool_content is None
@@ -187,6 +189,7 @@ async def test_helper_last_text_from_final_round(monkeypatch):
         tools=[],
         request_id_prefix="test",
         max_rounds=3,
+        terminal_tool_name="report_task_outcome",
     )
 
     assert tool_content == "DONE"
@@ -212,6 +215,48 @@ async def test_helper_token_accounting(monkeypatch):
         tools=[],
         request_id_prefix="test",
         max_rounds=1,
+        terminal_tool_name="report_task_outcome",
     )
 
     assert state.session.token_used == 28  # 20 + 8
+
+
+async def test_ask_user_does_not_terminate_loop(monkeypatch):
+    """ask_user（非 terminal 工具）被调用时不应终止循环、不返回其 ControlResult。
+
+    场景：max_rounds=1，round 0 仅调用 ask_user（非 terminal），
+    helper 应返回 (None, last_text) 而非 ask_user 的 content。
+
+    这是 Task 5 重构引入的回归：旧代码对任意控制工具终止，修复后只对
+    terminal_tool_name 终止。
+    """
+
+    ASK_USER_TOOL = "control__ask_user"
+    TERMINAL_TOOL = "control__report_task_outcome"
+
+    async def _fake_stream(ctx, state, request):
+        yield _make_token_chunk("thinking about user question")
+        yield _make_tool_call_chunk(ASK_USER_TOOL, call_id="tc_ask")
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+
+    state = _make_state()
+    ctx = _make_ctx(tool_content="ASK_USER_RESULT")
+
+    tool_content, last_text = await run_observe_react(
+        state, ctx,
+        system="SYS",
+        messages=[LLMMessage(role="user", content="observe this")],
+        tools=[],
+        request_id_prefix="test",
+        max_rounds=1,
+        terminal_tool_name=TERMINAL_TOOL,
+    )
+
+    # ask_user's ControlResult must NOT be returned as terminal content
+    assert tool_content is None, (
+        f"Expected None (ask_user is not terminal), got {tool_content!r}. "
+        "Bug: run_observe_react terminated on non-terminal ask_user call."
+    )
+    assert last_text == "thinking about user question"

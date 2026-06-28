@@ -23,6 +23,7 @@ from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType
 from ctx_weft.core.loop.steps.compact import TASK_COMPACT_TYPES, summarize_for_compact
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
+from ctx_weft.core.orchestrator.control_capability import REPORT_TASK_OUTCOME_NAME
 from ctx_weft.core.utils import now_utc
 
 if TYPE_CHECKING:
@@ -43,12 +44,14 @@ async def run_observe_react(
     tools: "Any",
     request_id_prefix: str,
     max_rounds: int,
+    terminal_tool_name: str,
 ) -> "tuple[str | None, str]":
-    """共用 observe/background ReAct：跑多轮 LLM，任一轮调用控制工具即取其 ControlResult.content 终止。
+    """共用 observe/background ReAct：跑多轮 LLM，指定 terminal_tool 被调用时取其 ControlResult.content 终止。
 
-    返回 (last_tool_content, last_text)：
-      last_tool_content — 最后一个被调用控制工具返回的 ControlResult.content（无工具调用则 None）。
-      last_text         — 最后一轮的纯文本。
+    返回 (terminal_tool_content, last_text)：
+      terminal_tool_content — terminal_tool_name 被调用时返回的 ControlResult.content（未调用则 None）。
+      last_text             — 最后一轮的纯文本。
+    非 terminal 控制工具（如 ask_user）只执行副作用，不终止循环。
     不解读 verdict、不写 task 状态（状态写是工具副作用，由调用方绑定的工具决定）。
     """
     agent = state.agent
@@ -129,7 +132,7 @@ async def run_observe_react(
             tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls],
         ))
 
-        tool_content = None
+        terminal_content = None
         for tc in tool_calls:
             if ctx.capability_gateway is not None:
                 result = await ctx.capability_gateway.invoke(
@@ -140,7 +143,8 @@ async def run_observe_react(
                     tool_call_id=tc.id,
                 )
                 content = result.content
-                tool_content = content
+                if tc.name == terminal_tool_name:
+                    terminal_content = content
             else:
                 logger.warning(
                     "run_observe_react: no CapabilityGateway for tool '%s'", tc.name
@@ -152,8 +156,8 @@ async def run_observe_react(
                 tool_call_id=tc.id,
             ))
 
-        if tool_content is not None:
-            return tool_content, last_text
+        if terminal_content is not None:
+            return terminal_content, last_text
 
     return None, last_text
 
@@ -268,6 +272,7 @@ class ObserveStep(Step):
             tools=prompt.tools,
             request_id_prefix=f"obs_{agent.id}_{state.sequence_counter}",
             max_rounds=max_rounds,
+            terminal_tool_name=REPORT_TASK_OUTCOME_NAME,
         )
 
         if tool_content is not None:
