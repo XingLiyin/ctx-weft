@@ -63,10 +63,16 @@ async def test_task_layer_growth_triggers_compaction() -> None:
 
 
 async def test_agent_layer_growth_still_triggers() -> None:
-    """回归：agent 层 root 胶囊达 delta 仍触发（新格式：AGENT_CONVERSATION_TURN, parent=None）。"""
+    """回归：agent 层 root 胶囊达 delta 仍触发（Task-4：L0 单元 = task 层 body + finish 对）。"""
     mem = InMemoryMemoryProvider()
-    # 每组 2 条 AGENT_CONVERSATION_TURN 组成一个 root 胶囊（20 组 = 20 顶层单元）
+    # 每组 = task 层 body（task_id=root{i}）+ 2 条 AGENT_CONVERSATION_TURN（20 组 = 20 L0 单元）
     for i in range(20):
+        body_scope = MemoryScope(session_id="s1", task_id=f"root{i}", agent_id="a1")
+        await mem.ingest(
+            MemoryEvent(type=T.USER_PROMPT, scope=body_scope, content=f"body {i}",
+                        timestamp=_BASE + timedelta(seconds=i * 10), role="user"),
+            _pctx(),
+        )
         await mem.ingest(
             MemoryEvent(type=T.AGENT_CONVERSATION_TURN, scope=_scope(), content=f"user {i}",
                         timestamp=_BASE + timedelta(seconds=i * 10), role="user",

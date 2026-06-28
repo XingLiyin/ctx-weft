@@ -27,6 +27,16 @@ TASK_COMPACT_TYPES = [
     MemoryEventType.TOOL_RESULT,
 ]
 
+# task 层 body 类型（跨层 fold 的 L0→L1 删除目标，spec 2026-06-28 §4）。
+# 按 agent 跨-task 召回（recall_recent_by_agent），每条 metadata["task_id"] 标来源 task。
+_TASK_BODY_TYPES = [
+    MemoryEventType.USER_PROMPT,
+    MemoryEventType.LLM_RESPONSE,
+    MemoryEventType.TOOL_INVOCATION,
+    MemoryEventType.TOOL_RESULT,
+    MemoryEventType.TASK_COMPACT_SUMMARY,
+]
+
 
 async def summarize_for_compact(state: LoopState, ctx: LoopContext) -> str:
     """装配 purpose="compact" 上下文 + 一次 LLM 摘要，返回摘要文本。
@@ -85,9 +95,12 @@ async def maybe_compact_before_dispatch(
 
 
 async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
-    """本 agent scope 内顶层折叠单元数：按 origin_task_id 分组的 AGENT_CONVERSATION_TURN 胶囊，
-    其 parent_task_id 为 None 或不在本 scope origin 集内（cross-agent 子胶囊在自己 scope 当顶层）。
-    取代旧的「数 TASK_DISPATCH_RESULT(parent_task_id is None)」（spec §3.11）。"""
+    """本 agent scope 内「仍有 task 层 body 的结束顶层单元」数（= L0 单元数，spec 2026-06-28 §4）。
+
+    顶层单元 = 按 origin_task_id 分组的 finish 对（AGENT_CONVERSATION_TURN），其 parent_task_id
+    为 None 或不在本 scope origin 集内。L0 ⟺ 该单元 task 层 body（USER_PROMPT/LLM_RESPONSE/…）
+    尚未被 fold L0→L1 删除（仍可 recall_recent_by_agent 召回）。L1（已删 body）/L2 不计——它们
+    不再驱动 token 压力的 fold。"""
     recs = await ctx.memory.recall_recent(
         state.scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx,
     )
@@ -97,18 +110,35 @@ async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
         if oid is not None and oid not in parent_of:
             parent_of[oid] = r.metadata.get("parent_task_id")
     origins = set(parent_of)
-    return sum(1 for oid, pid in parent_of.items() if pid is None or pid not in origins)
+    top = {oid for oid, pid in parent_of.items() if pid is None or pid not in origins}
+    if not top:
+        return 0
+    # 哪些顶层单元仍有 body：跨-task 按 agent 召回 task 层 body，看其 task_id 是否落在 top 集
+    body = await ctx.memory.recall_recent_by_agent(
+        state.scope, _TASK_BODY_TYPES, 2000, ctx.provider_ctx,
+    )
+    with_body = {r.metadata.get("task_id") for r in body} & top
+    return len(with_body)
 
 
 async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: int,
                                summary_text: str) -> int:
-    """折叠最老的已结束 root 胶囊（agent 层），保留最近 keep_last 个顶层单元。
+    """跨层三级降级 fold（spec 2026-06-28 §4）。
 
-    折叠单元 = 一组同 origin_task_id 的 AGENT_CONVERSATION_TURN（spec §3.11）。顶层单元 =
-    parent_task_id is None 或 parent_task_id ∉ 本 scope origin 集。折某顶层单元时连其后代组
-    （parent 链）+ 配对 cross-agent 派发对一并 supersede。返回 superseded 条数。
+    顶层折叠单元 = 一组同 origin_task_id 的 finish 对（AGENT_CONVERSATION_TURN，agent 层）+
+    其 task 层 body（USER_PROMPT/LLM_RESPONSE/…，按 task_id 关联）。顶层 = parent_task_id is
+    None 或 parent_task_id ∉ 本 scope origin 集；折某顶层时沿 parent 链纳后代子树。三级：
+
+    - L0（完整）：最近 keep_full(=keep_last) 个顶层单元 → 不动（body + finish 对都留）。
+    - L1（黑盒）：超 keep_full 的单元 → **删 task 层 body**（supersede），仅剩 agent 层 finish 对。
+    - L2（文本）：超 keep_pair（更老）的单元 → **连 finish 对 + 配对派发对 + 旧 AGENT_COMPACT_SUMMARY
+      也 supersede**，折成一条新 AGENT_COMPACT_SUMMARY（锚保留集最早 ts − 1µs，不变量 A）。
+
+    跨层 supersede 一次原子提交（ids 跨 task 层 body + agent 层 finish 对，provider 按 id 生效、
+    不按 scope 过滤）。返回 supersede 的总条数。
     """
     memory = ctx.memory
+    keep_pair = getattr(state.agent.loop_config, "compact_keep_pair", 30)
     recs = await memory.recall_recent(
         state.scope,
         [MemoryEventType.TASK_DISPATCH, MemoryEventType.TASK_DISPATCH_RESULT,
@@ -116,8 +146,12 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
         2000, ctx.provider_ctx,
     )
     recs = list(reversed(recs))  # newest-first → chronological
+    # task 层 body（跨 task 按 agent 召回，每条 metadata["task_id"] 标来源单元）
+    body_recs = await memory.recall_recent_by_agent(
+        state.scope, _TASK_BODY_TYPES, 2000, ctx.provider_ctx,
+    )
 
-    # 按 origin 分组胶囊 + 记 parent + 最早 ts
+    # 按 origin 分组 finish 对 + 记 parent + 最早 ts（仅 finish 对定义顶层单元集）
     parent_of: dict[str, Any] = {}
     first_ts: dict[str, Any] = {}
     for r in recs:
@@ -134,8 +168,6 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     if len(top) <= keep_last:
         return 0
     top.sort(key=lambda oid: first_ts[oid])
-    fold_top = top if keep_last <= 0 else top[:-keep_last]
-    kept_top = [] if keep_last <= 0 else top[-keep_last:]
 
     def _expand(roots: list) -> set:
         """从顶层 origin 出发，沿 parent 链纳入所有后代组（同 agent 内嵌子胶囊）。"""
@@ -149,38 +181,59 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
                     changed = True
         return out
 
-    fold_set = _expand(fold_top)
-    kept_set = _expand(kept_top)
+    # 顶层分桶：超 keep_full → L1+；超 keep_pair → L2（keep_pair ≥ keep_full）
+    l1_top = top if keep_last <= 0 else top[:-keep_last]          # 超 keep_full（含 L2）
+    l2_top = top if keep_pair <= 0 else top[:-keep_pair]          # 超 keep_pair（最老）
+    kept_full_top = [] if keep_last <= 0 else top[-keep_last:]    # 保 L0
+    l1_set = _expand(l1_top)        # 删 body 的单元（含其子树）
+    l2_set = _expand(l2_top)        # 连 finish 对一并删的单元（含其子树）
+    kept_set = _expand(kept_full_top)
 
     ids: list = []
+
+    # L0→L1：删 l1_set 单元的 task 层 body（跨层 supersede）
+    for r in body_recs:
+        if r.metadata.get("task_id") in l1_set:
+            ids.append(r.id)
+
+    # L1→L2：l2_set 单元的 finish 对 + 旧 AGENT_COMPACT_SUMMARY → supersede
     for r in recs:
         if (r.type == MemoryEventType.AGENT_CONVERSATION_TURN
-                and r.metadata.get("origin_task_id") in fold_set):
+                and r.metadata.get("origin_task_id") in l2_set):
             ids.append(r.id)
         elif r.type == MemoryEventType.AGENT_COMPACT_SUMMARY:
             ids.append(r.id)  # 旧摘要并入新摘要
-    # 配对 cross-agent / 同 agent scheduled 派发对：delegating task（parent_task_id）在折叠集内
-    fold_tcids: set = set()
+    # 配对 cross-agent / 同 agent scheduled 派发对：delegating task ∈ l2_set
+    l2_tcids: set = set()
     for r in recs:
         if (r.type == MemoryEventType.TASK_DISPATCH_RESULT
-                and r.metadata.get("parent_task_id") in fold_set):
+                and r.metadata.get("parent_task_id") in l2_set):
             ids.append(r.id)
             tc = r.metadata.get("tool_call_id")
             if tc:
-                fold_tcids.add(tc)
+                l2_tcids.add(tc)
     for r in recs:
         if (r.type == MemoryEventType.TASK_DISPATCH
-                and r.metadata.get("tool_call_id") in fold_tcids):
+                and r.metadata.get("tool_call_id") in l2_tcids):
             ids.append(r.id)
+
+    if not ids:
+        return 0
     await memory.supersede(ids, ctx.provider_ctx)
 
-    # anchor = 保留单元全部记录（回合 + 其派发对）最早 ts − 1µs
+    # L2 折出新摘要：仅当确有单元降到 L2 时写
+    if not l2_top:
+        return len(ids)
+
+    # anchor = L2 之外仍存的最早单元（L1 黑盒/L0 完整）的 finish 对 ts − 1µs。
+    # （新摘要须排在所有保留 finish 对/派发对之前 → 不变量 A）
+    surviving = origins - l2_set
     kept_ts: list = []
     for r in recs:
         oid = r.metadata.get("origin_task_id")
         pid = r.metadata.get("parent_task_id")
-        if ((r.type == MemoryEventType.AGENT_CONVERSATION_TURN and oid in kept_set)
-                or (r.type == MemoryEventType.TASK_DISPATCH_RESULT and pid in kept_set)):
+        if ((r.type == MemoryEventType.AGENT_CONVERSATION_TURN and oid in surviving)
+                or (r.type == MemoryEventType.TASK_DISPATCH_RESULT and pid in surviving)):
             kept_ts.append(r.timestamp)
     anchor_ts = (min(kept_ts) if kept_ts else now_utc())
     await memory.ingest(
@@ -190,7 +243,8 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
             content=summary_text or "[Experience compacted]",
             timestamp=anchor_ts - timedelta(microseconds=1),
             role="user",
-            metadata={"keep_last": keep_last, "folded_count": len(fold_top)},
+            metadata={"keep_last": keep_last, "keep_pair": keep_pair,
+                      "folded_count": len(l2_top)},
         ),
         ctx.provider_ctx,
     )

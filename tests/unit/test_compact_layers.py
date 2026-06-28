@@ -50,7 +50,7 @@ async def _run_compact(mem) -> None:
     task = SimpleNamespace(id="C1", status="ACTIVE")
     agent = SimpleNamespace(
         id="ag1", runtime={"llm_model": "mock"},
-        loop_config=SimpleNamespace(compact_keep_last=1),
+        loop_config=SimpleNamespace(compact_keep_last=1, compact_keep_pair=1),
     )
     session = SimpleNamespace(id="s1", tenant_id="default", goal="")
     state = LoopState(run_id="r1", session=session, task=task, agent=agent,
@@ -80,9 +80,15 @@ async def test_agent_compact_writes_agent_summary() -> None:
     """新格式：用 AGENT_CONVERSATION_TURN（parent=None）作 root 胶囊触发 agent 层压缩。"""
     mem = InMemoryMemoryProvider()
     base = datetime(2026, 1, 1, tzinfo=UTC)
-    # 植入 2 组 AGENT_CONVERSATION_TURN（keep_last=1 → 折最旧 1 组）
+    # 植入 2 个 L0 单元 = task 层 body（task_id=root{grp}）+ AGENT_CONVERSATION_TURN finish 对
+    # （keep_last=keep_pair=1 → 折最旧 1 个到 L2）
     for grp, t0 in enumerate([0, 10]):
         oid = f"root{grp}"
+        await mem.ingest(MemoryEvent(
+            type=T.USER_PROMPT,
+            scope=MemoryScope(session_id="s1", task_id=oid, agent_id=_scope().agent_id),
+            content=f"body {oid}", timestamp=base + timedelta(seconds=t0), role="user",
+        ), _pctx())
         for role, dt in [("user", 0), ("assistant", 1)]:
             await mem.ingest(MemoryEvent(
                 type=T.AGENT_CONVERSATION_TURN, scope=_scope(),

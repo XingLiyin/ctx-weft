@@ -33,8 +33,13 @@ def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
                        timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta)
 
 
-def _state(scope):
-    agent = SimpleNamespace(id=scope.agent_id, loop_config=LoopConfig())
+def _state(scope, keep_pair: int = 0):
+    """Task-4 跨层 fold：这些既有用例验证 L2 语义（finish 对 supersede + 摘要）。新模型下
+    finish 对仅在「超 keep_pair」时降 L2，故令 keep_pair == 调用方传的 keep_last，使
+    「超 keep_last → 直接 L2」（等价旧单层行为）。`_seed_root_capsule` 只在 agent 层造 finish
+    对（无独立 task 层 body），故 L1 删 body 对它们是 no-op。"""
+    agent = SimpleNamespace(id=scope.agent_id,
+                            loop_config=LoopConfig(compact_keep_pair=keep_pair))
     session = SimpleNamespace(id="s1", tenant_id="default")
     return SimpleNamespace(run_id="run1", sequence_counter=0, session=session,
                            scope=scope, task=SimpleNamespace(id="cur"), agent=agent)
@@ -45,11 +50,17 @@ def _ctx(mem):
 
 
 async def _seed_root_capsule(mem, scope, task_id: str, t0: int, parent_task_id=None):
-    """新 Task-6 格式：一份 root 胶囊 = 4x AGENT_CONVERSATION_TURN（parent_task_id=None for root）。
+    """Task-4 task-resident：一份结束单元 = task 层 body（task_id scope 的 USER_PROMPT）
+    + agent 层 finish 对（4x AGENT_CONVERSATION_TURN，parent_task_id=None for root）。
 
-    user prompt → assistant summary → assistant finish_task tool_call → tool result
+    body → user prompt → assistant summary → assistant finish_task tool_call → tool result
+    （L1 删 task 层 body；L2 连 finish 对一并删）。
     """
     tcid = f"tc_{task_id}"
+    # task 层 body（按 origin task_id 的 task scope，同 agent_id 供 recall_recent_by_agent 召回）
+    body_scope = MemoryScope(session_id="s1", task_id=task_id, agent_id=scope.agent_id)
+    await mem.ingest(_ev(T.USER_PROMPT, body_scope, f"body prompt {task_id}", t0,
+                         role="user"), _pctx())
     await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, scope, f"user prompt {task_id}", t0,
                          role="user", origin_task_id=task_id, parent_task_id=parent_task_id), _pctx())
     await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, scope, f"assistant summary {task_id}", t0 + 1,
@@ -99,7 +110,7 @@ async def test_folded_capsule_conversation_turns_superseded():
     # keep_last=1 → 3 个胶囊中折掉最旧 2 个
     for i, t in enumerate([0, 10, 20]):
         await _seed_root_capsule(mem, scope, f"task{i}", t * 10)
-    n = await fold_root_experience(_state(scope), _ctx(mem), keep_last=1, summary_text="folded")
+    n = await fold_root_experience(_state(scope, keep_pair=1), _ctx(mem), keep_last=1, summary_text="folded")
     assert n > 0
     turns = await _alive(mem, scope, T.AGENT_CONVERSATION_TURN)
     alive_tasks = {r.metadata.get("origin_task_id") for r in turns}
@@ -112,7 +123,7 @@ async def test_kept_capsule_intact():
     scope = _sc()
     for i, t in enumerate([0, 10, 20]):
         await _seed_root_capsule(mem, scope, f"task{i}", t * 10)
-    await fold_root_experience(_state(scope), _ctx(mem), keep_last=2, summary_text="folded")
+    await fold_root_experience(_state(scope, keep_pair=2), _ctx(mem), keep_last=2, summary_text="folded")
     turns = await _alive(mem, scope, T.AGENT_CONVERSATION_TURN)
     alive_tasks = {r.metadata.get("origin_task_id") for r in turns}
     assert alive_tasks == {"task1", "task2"}
@@ -124,7 +135,7 @@ async def test_compact_summary_sorts_before_kept_capsule():
     scope = _sc()
     for i, t in enumerate([0, 10, 20]):
         await _seed_root_capsule(mem, scope, f"task{i}", t * 10)
-    await fold_root_experience(_state(scope), _ctx(mem), keep_last=1, summary_text="folded")
+    await fold_root_experience(_state(scope, keep_pair=1), _ctx(mem), keep_last=1, summary_text="folded")
     summ = await _alive(mem, scope, T.AGENT_COMPACT_SUMMARY)
     assert len(summ) == 1
     # 保留胶囊 task2 的最早回合在 t=200s
@@ -156,7 +167,7 @@ async def test_anchor_ts_covers_all_kept_capsule_elements():
     await _seed_capsule_offset(mem, scope, "task0", turn_t=0, result_t=3)
     # 第 2 个胶囊（会被保留）：首 user 回合在 t=5，finish 对在 t=20/21
     await _seed_capsule_offset(mem, scope, "task1", turn_t=5, result_t=20)
-    await fold_root_experience(_state(scope), _ctx(mem), keep_last=1, summary_text="compacted")
+    await fold_root_experience(_state(scope, keep_pair=1), _ctx(mem), keep_last=1, summary_text="compacted")
     summ = await _alive(mem, scope, T.AGENT_COMPACT_SUMMARY)
     assert len(summ) == 1
     kept_turn_earliest = _BASE + timedelta(seconds=5)
@@ -171,10 +182,11 @@ async def test_anchor_ts_covers_all_kept_capsule_elements():
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def test_count_root_residues_detection():
-    """_count_root_residues 正确计数 AGENT_CONVERSATION_TURN 胶囊组（parent=None）。
+    """_count_root_residues 数「仍有 task 层 body 的结束顶层单元」（L0 单元，Task-4 §4）。
 
-    keep_last+2 个 root 胶囊 → count == keep_last+2。
-    fold 后 2 个最旧被 supersede，count == keep_last，AGENT_COMPACT_SUMMARY 存在（role=user）。
+    keep_last+2 个结束单元 → count == keep_last+2。fold（keep_full=keep_pair=keep_last=2）后，
+    最旧 2 个降 L2（body + finish 对均 supersede），count == keep_last，AGENT_COMPACT_SUMMARY
+    存在（role=user）。
     """
     keep_last = 2
     total = keep_last + 2
@@ -182,7 +194,7 @@ async def test_count_root_residues_detection():
     scope = _sc()
     for i in range(total):
         await _seed_root_capsule(mem, scope, f"R{i}", i * 20)
-    state = _state(scope)
+    state = _state(scope, keep_pair=keep_last)
     ctx = _ctx(mem)
 
     count_before = await _count_root_residues(state, ctx)
@@ -210,7 +222,7 @@ async def test_same_agent_nested_child_folded_with_parent():
     await _seed_root_capsule(mem, scope, "R1", 40, parent_task_id=None)
 
     # keep_last=1 → 折 R0（R0 是最旧顶层），R0 的后代 C1 也应被折
-    n = await fold_root_experience(_state(scope), _ctx(mem), keep_last=1, summary_text="folded")
+    n = await fold_root_experience(_state(scope, keep_pair=1), _ctx(mem), keep_last=1, summary_text="folded")
     assert n > 0
 
     turns = await _alive(mem, scope, T.AGENT_CONVERSATION_TURN)
@@ -235,7 +247,7 @@ async def test_cross_agent_dispatch_pair_folded_with_parent():
     # R1：另一个顶层 root，t=40（保留）
     await _seed_root_capsule(mem, scope, "R1", 40, parent_task_id=None)
 
-    n = await fold_root_experience(_state(scope), _ctx(mem), keep_last=1, summary_text="folded")
+    n = await fold_root_experience(_state(scope, keep_pair=1), _ctx(mem), keep_last=1, summary_text="folded")
     assert n > 0
 
     # TASK_DISPATCH_RESULT(C2) 应被 supersede
@@ -285,7 +297,7 @@ async def test_anchor_ordering_before_all_kept_capsule_elements():
     await _seed_root_capsule(mem, scope, "R1", 100)  # earliest kept: t=100
     await _seed_root_capsule(mem, scope, "R2", 200)
 
-    await fold_root_experience(_state(scope), _ctx(mem), keep_last=2, summary_text="anchor test")
+    await fold_root_experience(_state(scope, keep_pair=2), _ctx(mem), keep_last=2, summary_text="anchor test")
 
     summ = await _alive(mem, scope, T.AGENT_COMPACT_SUMMARY)
     assert len(summ) == 1
