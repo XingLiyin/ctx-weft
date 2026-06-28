@@ -20,6 +20,7 @@ from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import (
     ASK_USER_NAME,
+    DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
     WAIT_FOR_USER_CAPABILITY_ID,
 )
@@ -657,6 +658,18 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
         parts.append(finish_core + " Do not start the queued tasks yourself.")
     else:
         parts.append(finish_core)
+    # 任务切换：用户最新请求与当前任务无关时，先 finish 收尾、再 delegate 新任务（可同轮）。
+    parts.append(
+        f"If the user's latest message is about something unrelated to THIS task (a new, "
+        f"different request — not a follow-up, correction, or continuation of it), do not "
+        f"pivot this task onto it. In a SINGLE response, emit BOTH tool calls together: "
+        f"`{FINISH_TASK_NAME}` (wrap up this task) AND `{DELEGATE_TASK_NAME}` (dispatch the "
+        f"new request as a separate task). Always issue them together — do NOT call only "
+        f"finish and stop, intending to delegate on the next turn: once finish takes effect "
+        f"this task ends and there is no next turn, so the new request would be lost. Their "
+        f"order does not matter (finish wraps up this task; the new request runs as an "
+        f"independent task)."
+    )
     # 始终提示：需要用户输入/决策/澄清时主动调 ask_user（各完成方式下都加）。
     parts.append(
         f"Whenever you need information, a decision, or a clarification that only the user "
