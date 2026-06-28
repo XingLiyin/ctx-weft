@@ -130,7 +130,9 @@ def _lock_for(task_id: str) -> asyncio.Lock:
 
 async def _run_background_observe(state: "LoopState", ctx: "LoopContext", boundary: str) -> None:
     from ctx_weft.core.assembler import ContextRequest
-    from ctx_weft.core.loop.steps.observe import run_observe_react
+    from ctx_weft.core.loop.steps.observe import (
+        BACKGROUND_OBSERVE_REACT_EVENTS, run_observe_react,
+    )
     from ctx_weft.core.orchestrator.control_capability import BACKGROUND_PROCESS_REPORT_NAME
 
     async with _lock_for(state.task.id):
@@ -161,6 +163,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 request_id_prefix=f"bgobs_{state.task.id}",
                 max_rounds=agent.loop_config.max_turns_per_observe,
                 terminal_tool_name=BACKGROUND_PROCESS_REPORT_NAME,
+                event_types=BACKGROUND_OBSERVE_REACT_EVENTS,  # 后台 LLM 交互发独立类型，host 决定不进前端
             )
             report = content or "[Context compacted]"
             if boundary in _CLOSE_BOUNDARIES:

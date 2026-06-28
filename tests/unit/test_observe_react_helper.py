@@ -6,9 +6,21 @@ from types import SimpleNamespace
 import pytest
 
 import ctx_weft.core.loop.steps.observe as _obs_mod
-from ctx_weft.core.loop.steps.observe import run_observe_react
+from ctx_weft.core.events import EventType
+from ctx_weft.core.loop.steps.observe import (
+    BACKGROUND_OBSERVE_REACT_EVENTS, run_observe_react,
+)
 from ctx_weft.core.orchestrator.control_capability import ControlResult
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryScope
+
+_LLM_EVENT_TYPES = {
+    EventType.LLM_REQUEST_STARTED, EventType.LLM_PROMPT_SENT,
+    EventType.LLM_TOKEN_STREAMED, EventType.LLM_RESPONSE_FINISHED,
+}
+_BACKGROUND_EVENT_TYPES = {
+    EventType.BACKGROUND_OBSERVE_REQUEST_STARTED, EventType.BACKGROUND_OBSERVE_PROMPT_SENT,
+    EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED, EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED,
+}
 
 pytestmark = pytest.mark.asyncio
 
@@ -19,6 +31,16 @@ pytestmark = pytest.mark.asyncio
 class _FakeEventBus:
     async def emit(self, event) -> None:
         pass
+
+
+class _RecordingEventBus:
+    """Records emitted event types so tests can assert which events fired."""
+
+    def __init__(self):
+        self.types = []
+
+    async def emit(self, event) -> None:
+        self.types.append(event.type)
 
 
 class _FakeGateway:
@@ -86,7 +108,7 @@ def _make_state():
     return state
 
 
-def _make_ctx(tool_content: str):
+def _make_ctx(tool_content: str, event_bus=None):
     from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import ProviderContext
     mem = InMemoryMemoryProvider()
@@ -106,7 +128,7 @@ def _make_ctx(tool_content: str):
         assembler=_FakeAssembler(),
         llm=_FakeLLM(),
         memory=mem,
-        event_bus=_FakeEventBus(),
+        event_bus=event_bus or _FakeEventBus(),
         provider_ctx=pctx,
         capability_gateway=_FakeGateway(tool_content),
     )
@@ -260,3 +282,70 @@ async def test_ask_user_does_not_terminate_loop(monkeypatch):
         "Bug: run_observe_react terminated on non-terminal ask_user call."
     )
     assert last_text == "thinking about user question"
+
+
+async def test_background_event_types_emit_background_not_llm(monkeypatch):
+    """background path (event_types=BACKGROUND_OBSERVE_REACT_EVENTS): emits BackgroundObserve*
+    events, NEVER the generic LLM_* events.
+
+    core 不感知前端可见性——只发独立类型；host 据此决定后台 observe 的 LLM 交互不进前端对话流。
+    """
+
+    async def _fake_stream(ctx, state, request):
+        yield _make_token_chunk("thinking")
+        yield _make_tool_call_chunk("collect_process_report")
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+
+    bus = _RecordingEventBus()
+    state = _make_state()
+    ctx = _make_ctx(tool_content="REPORT", event_bus=bus)
+
+    await run_observe_react(
+        state, ctx,
+        system="SYS",
+        messages=[],
+        tools=[],
+        request_id_prefix="bgobs",
+        max_rounds=1,
+        terminal_tool_name="collect_process_report",
+        event_types=BACKGROUND_OBSERVE_REACT_EVENTS,
+    )
+
+    emitted_llm = [t for t in bus.types if t in _LLM_EVENT_TYPES]
+    emitted_bg = [t for t in bus.types if t in _BACKGROUND_EVENT_TYPES]
+    assert emitted_llm == [], f"background path must emit NO LLM_* events, got {emitted_llm}"
+    assert EventType.BACKGROUND_OBSERVE_PROMPT_SENT in emitted_bg
+    assert EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED in emitted_bg
+
+
+async def test_default_event_types_emit_llm(monkeypatch):
+    """observe path (default event_types): emits the generic LLM_* events (regression guard)."""
+
+    async def _fake_stream(ctx, state, request):
+        yield _make_token_chunk("thinking")
+        yield _make_tool_call_chunk("report_task_outcome")
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+
+    bus = _RecordingEventBus()
+    state = _make_state()
+    ctx = _make_ctx(tool_content="REPORT", event_bus=bus)
+
+    await run_observe_react(
+        state, ctx,
+        system="SYS",
+        messages=[],
+        tools=[],
+        request_id_prefix="obs",
+        max_rounds=1,
+        terminal_tool_name="report_task_outcome",
+    )  # event_types defaults to OBSERVE_REACT_EVENTS
+
+    emitted_llm = [t for t in bus.types if t in _LLM_EVENT_TYPES]
+    emitted_bg = [t for t in bus.types if t in _BACKGROUND_EVENT_TYPES]
+    assert EventType.LLM_PROMPT_SENT in emitted_llm
+    assert EventType.LLM_RESPONSE_FINISHED in emitted_llm
+    assert emitted_bg == [], f"observe path must emit NO BackgroundObserve* events, got {emitted_bg}"

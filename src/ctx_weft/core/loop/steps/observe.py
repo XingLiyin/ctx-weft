@@ -35,6 +35,33 @@ logger = logging.getLogger(__name__)
 # ── Shared ReAct helper ───────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class ReactEventTypes:
+    """run_observe_react 每轮发的 LLM 交互事件类型组（请求/prompt/token/响应）。
+
+    observe 用 LLM_* 组；background observe 用 BACKGROUND_OBSERVE_* 组——同形不同类型，
+    供 host 区分前端是否渲染。core 只发类型，不感知前端可见性。
+    """
+    request_started: EventType
+    prompt_sent: EventType
+    token_streamed: EventType
+    response_finished: EventType
+
+
+OBSERVE_REACT_EVENTS = ReactEventTypes(
+    EventType.LLM_REQUEST_STARTED,
+    EventType.LLM_PROMPT_SENT,
+    EventType.LLM_TOKEN_STREAMED,
+    EventType.LLM_RESPONSE_FINISHED,
+)
+BACKGROUND_OBSERVE_REACT_EVENTS = ReactEventTypes(
+    EventType.BACKGROUND_OBSERVE_REQUEST_STARTED,
+    EventType.BACKGROUND_OBSERVE_PROMPT_SENT,
+    EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED,
+    EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED,
+)
+
+
 async def run_observe_react(
     state: "Any",
     ctx: "Any",
@@ -45,6 +72,7 @@ async def run_observe_react(
     request_id_prefix: str,
     max_rounds: int,
     terminal_tool_name: str,
+    event_types: ReactEventTypes = OBSERVE_REACT_EVENTS,
 ) -> "tuple[str | None, str]":
     """共用 observe/background ReAct：跑多轮 LLM，指定 terminal_tool 被调用时取其 ControlResult.content 终止。
 
@@ -53,6 +81,10 @@ async def run_observe_react(
       last_text             — 最后一轮的纯文本。
     非 terminal 控制工具（如 ask_user）只执行副作用，不终止循环。
     不解读 verdict、不写 task 状态（状态写是工具副作用，由调用方绑定的工具决定）。
+
+    event_types：每轮 LLM 交互事件的类型组。observe 默认 OBSERVE_REACT_EVENTS（LLM_*）；
+      background observe 传 BACKGROUND_OBSERVE_REACT_EVENTS——core 只发不同类型，由 host 决定
+      前端是否渲染（background 后台交互不应进前端对话流）。
     """
     agent = state.agent
     current_messages = list(messages)
@@ -60,7 +92,7 @@ async def run_observe_react(
 
     for round_num in range(max_rounds):
         req_id = f"{request_id_prefix}_r{round_num}"
-        await ctx.event_bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={
+        await ctx.event_bus.emit(make_event(state, event_types.request_started, payload={
             "request_id": req_id,
             "model": agent.runtime.get("llm_model", "mock"),
             "round": round_num,
@@ -73,7 +105,7 @@ async def run_observe_react(
             tools=tools,
         )
 
-        await ctx.event_bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
+        await ctx.event_bus.emit(make_event(state, event_types.prompt_sent, payload={
             "request_id": req_id,
             "round": round_num,
             "system": system,
@@ -92,7 +124,7 @@ async def run_observe_react(
             if chunk.kind == "token":
                 accumulated_text += chunk.text
                 await ctx.event_bus.emit(make_event(
-                    state, EventType.LLM_TOKEN_STREAMED,
+                    state, event_types.token_streamed,
                     payload={"request_id": req_id, "delta": chunk.text},
                 ))
             elif chunk.kind == "tool_call" and chunk.tool_call is not None:
@@ -112,7 +144,7 @@ async def run_observe_react(
         state.session.token_used += usage.prompt_tokens + usage.completion_tokens
 
         await ctx.event_bus.emit(make_event(
-            state, EventType.LLM_RESPONSE_FINISHED,
+            state, event_types.response_finished,
             payload={
                 "request_id": req_id,
                 "content": accumulated_text,
