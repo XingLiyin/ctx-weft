@@ -222,3 +222,56 @@ async def test_a1_no_await_blocking(monkeypatch) -> None:
         f"_synthesize_dispatch_pair must NOT call await_pending_background_observe (A1 non-blocking); "
         f"called with: {called}"
     )
+
+
+# ─── TEST 4/5: 方案2 最终段 raw 折叠 ───────────────────────────────────────────
+
+async def _ingest_user_plus_raw(mem: InMemoryMemoryProvider, tsc: MemoryScope) -> None:
+    """task 层：user 锚点 + 最终段 raw（LLM_RESPONSE + TOOL_RESULT，close 边界未折）。"""
+    await mem.ingest(_ev(T.USER_PROMPT, tsc, "初始请求", 1, role="user"), _pctx())
+    await mem.ingest(_ev(T.LLM_RESPONSE, tsc, "我在读目录…", 2, role="assistant"), _pctx())
+    await mem.ingest(_ev(T.TOOL_RESULT, tsc, "目录内容…", 3, role="tool"), _pctx())
+
+
+async def test_fold_final_segment_raw_on_real_report() -> None:
+    """close 路径 background 成功（slot hit）→ 最终段 raw 镜像被折（方案2，不变量4）：
+    胶囊收敛为 [user 锚点][finish 对]，无 final_segment_raw 镜像残留。"""
+    mem = InMemoryMemoryProvider()
+    tsc = _task_scope("t1")
+    asc = _agent_scope()
+    await _ingest_user_plus_raw(mem, tsc)
+
+    task = _make_task()
+    mem_content = "最终答复\n\nProcess Report: 占位摘要"
+    bg_mod._close_report["t1"] = "真实段总结"  # background 先完成
+
+    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+
+    recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
+    raw_mirrors = [r for r in recs if r.metadata.get("final_segment_raw")]
+    assert raw_mirrors == [], (
+        f"real report 到位 → 最终段 raw 镜像必须被折；残留 {[r.content for r in raw_mirrors]}"
+    )
+    finish_tool = await _get_finish_tool(mem, asc)
+    assert finish_tool.content == "Process Report: 真实段总结"
+    assert any(r.role == "user" and "初始请求" in r.content for r in recs), "user 锚点必须保留"
+
+
+async def test_degraded_keeps_final_segment_raw() -> None:
+    """background 失败/未完成（槽空，无回调）→ 最终段 raw 镜像保留（§3.6 降级保 raw）。"""
+    mem = InMemoryMemoryProvider()
+    tsc = _task_scope("t1")
+    asc = _agent_scope()
+    await _ingest_user_plus_raw(mem, tsc)
+
+    task = _make_task()
+    mem_content = "最终答复\n\nProcess Report: 占位摘要"
+    # 槽空 → 占位 + register，不折
+
+    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+
+    recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
+    raw_mirrors = [r for r in recs if r.metadata.get("final_segment_raw")]
+    assert len(raw_mirrors) == 2, (
+        f"降级（无 real report）→ 最终段 raw 必须保留；got {len(raw_mirrors)}"
+    )

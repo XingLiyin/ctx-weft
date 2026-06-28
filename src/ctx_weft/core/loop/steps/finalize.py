@@ -247,6 +247,10 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
             role = r.role or "user"
 
         md: dict = {"origin_task_id": task.id, "parent_task_id": task.parent_task_id}
+        if r.type in (MemoryEventType.LLM_RESPONSE, MemoryEventType.TOOL_RESULT):
+            # 最终段 raw（close 边界不写 TASK_COMPACT_SUMMARY 故未折）；real process_report 到位后
+            # 由 _fold_final_segment_raw 折掉（方案2）。background 失败降级则保留（§3.6）。
+            md["final_segment_raw"] = True
         if role == "assistant":
             md["tool_calls"] = r.metadata.get("tool_calls", [])
         elif role == "tool":
@@ -268,6 +272,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
     # A1: 机会性取 _close_report 槽；槽空则用薄占位
     from ctx_weft.core.loop.steps.background_observe import (
         pop_close_report, register_close_synth, _replace_finish_report,
+        _fold_final_segment_raw,
     )
     base = now_utc()
     tool_call_id = generate_id("tcall")
@@ -314,10 +319,11 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
     # A1: 机会性替换或登记异步替换（pop + register 之间无 await，关闭竞态窗口）
     bg_report = pop_close_report(task.id)
     if bg_report is not None:
-        # background 已先完成（少见）→ 立即替换占位
+        # background 已先完成（少见）→ 立即替换占位 + 折最终段 raw（real report 到位）
         await _replace_finish_report(
             memory, provider_ctx, scope, task.id, tool_call_id, bg_report, outcome,
         )
+        await _fold_final_segment_raw(memory, provider_ctx, scope, task.id)
     else:
         # background 尚未完成 → 登记待异步替换（sync，无 await）
         register_close_synth(task.id, tool_call_id, scope, outcome)

@@ -114,6 +114,26 @@ async def _replace_finish_report(
     )
 
 
+async def _fold_final_segment_raw(memory, provider_ctx, scope, task_id: str) -> None:
+    """real process_report 到位后，折掉最终段 raw（方案2）。
+
+    close 边界不写 TASK_COMPACT_SUMMARY（boundary 分流），故最终段的 LLM_RESPONSE/TOOL_RESULT
+    被 finalize 原样镜像进胶囊（标 final_segment_raw）。一旦 background observe 产出真实
+    process_report（已由 finish 对 Process Report 承载该段，不变量4），这些 raw 镜像冗余 →
+    supersede 之，胶囊收敛为 [user 锚点][段摘要s][finish 对]。
+    background 失败降级时本函数不被调用 → raw 镜像保留（§3.6）。
+    """
+    from ctx_weft.protocols import MemoryEventType
+    turns = await memory.recall_recent(
+        scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, provider_ctx)
+    ids = [
+        r.id for r in turns
+        if r.metadata.get("final_segment_raw") and r.metadata.get("origin_task_id") == task_id
+    ]
+    if ids:
+        await memory.supersede(ids, provider_ctx)
+
+
 def _clear_pending(t: asyncio.Task, tid: str) -> None:
     """Compare-and-clear: only remove _task_pending[tid] if it still refers to this task."""
     if _task_pending.get(tid) is t:
@@ -174,6 +194,9 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                         ctx.memory, ctx.provider_ctx, scope, state.task.id,
                         tool_call_id, report, outcome,
                     )
+                    # real report 到位 → 折最终段 raw 镜像（方案2，不变量4）
+                    await _fold_final_segment_raw(
+                        ctx.memory, ctx.provider_ctx, scope, state.task.id)
                 else:
                     # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
                     # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。
