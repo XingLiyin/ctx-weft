@@ -172,6 +172,8 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                         tool_call_id, report, outcome,
                     )
                 else:
+                    # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
+                    # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。
                     _close_report[state.task.id] = report  # 不写 memory（不变量 3）
             else:
                 await ctx.memory.apply_compact(

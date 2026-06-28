@@ -207,8 +207,11 @@ class ObserveStep(Step):
         # max_turns 退出：压缩 task 执行层（下一轮召回从摘要 + keep_last 开始）
         await self._maybe_compact_task(state, ctx, verdict, events)
 
-        # 交互/finish 段边界：root task 在 normal（ask_human 后 / 纯文本暂停前） 或
-        # actor_done（finish_task 收尾）时触发后台异步 observe，产段摘要 + 折 raw。
+        # close 边界：root task 在 actor_done（finish_task 收尾 → boundary="finish"）或
+        # normal（actor 产出最终文本正常结束 → boundary="normal"）时触发后台异步 observe，
+        # 产段摘要 + 折 raw。两者均由 _rule_observe 映射为 success/fail，属于 root 的
+        # 单次终结点——task 只 close 一次，_close_report 槽写一次、弹一次，不存在乱序复用。
+        # 注：纯文本暂停（plain_text 边界）由 act.py:_finish_plain_text_turn 单独触发，不经此处。
         # max_turns/context_limit 走同步 _maybe_compact_task；非 root 不触发（它们走 LLM observe）。
         if state.act_exit_reason in ("normal", "actor_done") and _is_own_root(state.task):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe

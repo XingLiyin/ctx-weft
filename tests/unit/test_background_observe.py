@@ -45,7 +45,6 @@ def _make_tool_call_chunk(name: str, call_id: str = "tc1"):
 
 
 def _make_token_chunk(text: str):
-    from ctx_weft.protocols import LLMUsage
     return SimpleNamespace(kind="token", text=text, tool_call=None, usage=None)
 
 
