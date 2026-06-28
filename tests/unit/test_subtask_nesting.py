@@ -97,9 +97,9 @@ async def test_same_agent_child_bubble_content_is_scheduled() -> None:
     )
 
 
-async def test_same_agent_child_capsule_written_into_parent_scope() -> None:
-    """同 agent non-short child: child 的 AGENT_CONVERSATION_TURN (origin_task_id=child.id)
-    写入 parent agent scope，排在 dispatch pair 之后。"""
+async def test_same_agent_child_finish_pair_written_into_parent_scope() -> None:
+    """task-resident：同 agent child 的 finish 对（AGENT_CONVERSATION_TURN, origin_task_id=child.id）
+    写入 parent agent scope；**不镜像 body**（无 user 锚点），child raw body 留 child task 层。"""
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
     await _seed_conv_nonshort(mem, child_scope)
@@ -117,14 +117,17 @@ async def test_same_agent_child_capsule_written_into_parent_scope() -> None:
 
     parent_scope = _sc("p1", "ag1")
 
-    # child capsule turns (AGENT_CONVERSATION_TURN, origin_task_id=child.id) must exist in parent scope
+    # child finish pair (AGENT_CONVERSATION_TURN, origin_task_id=child.id) must exist in parent scope
     caps = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
     child_turns = [r for r in caps if r.metadata.get("origin_task_id") == "c1"]
-    assert child_turns, "expected child capsule AGENT_CONVERSATION_TURN in parent scope"
+    assert len(child_turns) == 2, (
+        f"expected child finish pair (2 turns) in parent scope; got {[(r.role, r.content[:30]) for r in child_turns]}"
+    )
 
-    # must include user anchor (user role)
-    user_turns = [r for r in child_turns if r.role == "user"]
-    assert user_turns, "expected user anchor turn in parent scope capsule"
+    # task-resident: NO body mirror (no user anchor)
+    assert not any(r.role == "user" for r in child_turns), (
+        "task-resident: child finish pair must NOT mirror body (no user anchor)"
+    )
 
     # must include finish pair: tool role with Process Report
     finish_tool = [r for r in child_turns if r.role == "tool"]
@@ -133,16 +136,11 @@ async def test_same_agent_child_capsule_written_into_parent_scope() -> None:
         f"expected Process Report in finish tool, got: {finish_tool[0].content!r}"
     )
 
-    # capsule turns must come AFTER the dispatch pair (by timestamp)
-    results = await mem.recall_recent(parent_scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    bubble = [r for r in results if r.metadata.get("tool_call_id") == "oc1"]
-    assert bubble, "dispatch result must exist to compare timestamps"
-    dispatch_ts = bubble[0].timestamp
-
-    # finish pair (step3 in _synthesize_dispatch_pair) uses now_utc() → after dispatch_ts
-    # (dispatch_ts = now_utc() at close time, finish pair also at now_utc(), may be equal or after)
-    # At minimum, no capsule turn should be from before the child's conversation started
-    assert any(r.timestamp >= _BASE for r in child_turns), "capsule turns should have valid timestamps"
+    # child raw body stays in child task layer (not mirrored/superseded)
+    child_body = await mem.recall_recent(child_scope, [T.USER_PROMPT, T.LLM_RESPONSE], 100, _ctx())
+    assert any(r.role == "user" and "hello child" in r.content for r in child_body), (
+        "child raw body (user anchor) must stay in child task layer"
+    )
 
 
 async def test_cross_agent_child_bubble_content_is_mem_content() -> None:

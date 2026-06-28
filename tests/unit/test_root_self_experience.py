@@ -1,11 +1,13 @@
-"""root 自经验胶囊（新形态）：交错时间线镜像 + finish_task 对（spec §3.3）。
+"""root 自经验胶囊（task-resident，spec 2026-06-28 §3.1）：close 只写 finish 对、不镜像 body。
 
-新行为（Task 6 重写后）：
-- 镜像幸存 task 层 USER_PROMPT/TASK_COMPACT_SUMMARY/LLM_RESPONSE/TOOL_RESULT
-  → agent 层 AGENT_CONVERSATION_TURN，保留原始 timestamp。
-- TASK_COMPACT_SUMMARY 渲染 role=assistant（继承存储 role=assistant）。
-- 末尾追加 finish 对（assistant finish_task tool_call + tool Process Report）。
-- user_prompt 来自 task 层幸存记录（不再从 task.user_prompt 字段静态取）。
+行为翻转（Task 1）：
+- `_synthesize_dispatch_pair` **不再镜像** task 层 USER_PROMPT/TASK_COMPACT_SUMMARY/
+  LLM_RESPONSE/TOOL_RESULT 进 agent 层——body 留各自 task 层（即胶囊）。
+- agent 层每 task 只写 **finish 对**（assistant finish_task tool_call + tool Process Report）。
+- 召回时 task 层 body 与 agent 层 finish 对按 (timestamp, seq_no) 归并（见 assembler 测试）。
+
+注：原「交错时间线镜像」相关断言（UP/段摘要镜像、镜像顺序）随 mirror 删除而移除——其验证的
+机制已不存在；body-保留改由 task 层召回验证（见 test_close_task / test_capsule_golden）。
 """
 from __future__ import annotations
 
@@ -56,51 +58,9 @@ async def _agent_turns(mem, agent_scope):
     return list(reversed(recs))
 
 
-async def test_user_turn_from_surviving_task_layer_record():
-    """幸存 task 层 USER_PROMPT 被镜像为 user 回合；superseded 的不出现。
-
-    新行为：user_prompt 来自 task 层幸存记录（非 task.user_prompt 字段）。
-    """
-    mem = InMemoryMemoryProvider()
-    tsc = _task_sc()
-    asc = _agent_sc()
-    # 原始 prompt 已被 supersede
-    orig = await mem.ingest(_ev(T.USER_PROMPT, tsc, "帮我把这个ppt写成pdf", 0, role="user"), _ctx())
-    await mem.supersede([orig], _ctx())
-    # 幸存的 UP（HITL 打断语）
-    await mem.ingest(_ev(T.USER_PROMPT, tsc, "你为什么不使用技能呢", 5, role="user"), _ctx())
-    task = _task(prompt="帮我把这个ppt写成pdf")
-
-    await _synthesize_dispatch_pair(mem, asc, task, "## PDF 已完成", "success", _ctx())
-
-    turns = await _agent_turns(mem, asc)
-    users = [r for r in turns if r.role == "user"]
-    # 只有幸存的 HITL prompt 被镜像
-    assert len(users) == 1
-    assert users[0].content == "你为什么不使用技能呢"
-    assert users[0].metadata.get("origin_task_id") == "t1"
-
-
-async def test_assistant_summary_turn_carries_compaction_summary():
-    """存活的 task_compact_summary 被镜像成 assistant 回合（继承存储 role=assistant）。"""
-    mem = InMemoryMemoryProvider()
-    tsc = _task_sc()
-    asc = _agent_sc()
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "### 会话目标\n转 PDF\n### 已完成工作\n- 试过 COM", 1, role="assistant"), _ctx())
-    task = _task()
-
-    await _synthesize_dispatch_pair(mem, asc, task, "## PDF 已完成", "success", _ctx())
-
-    turns = await _agent_turns(mem, asc)
-    summ = [r for r in turns if r.role == "assistant" and "会话目标" in r.content]
-    assert len(summ) == 1, f"expected 1 summary assistant turn, got {len(summ)}: {[(r.role, r.content[:40]) for r in turns]}"
-    assert summ[0].metadata.get("origin_task_id") == "t1"
-
-
-async def test_capsule_order_user_summary_finish_pair():
-    """胶囊渲染序（新形态）：
-    user(UP) → assistant(TASK_COMPACT_SUMMARY) → assistant(finish_task) → tool(Process Report)。
-    全部为 AGENT_CONVERSATION_TURN（不再有 TASK_DISPATCH/TASK_DISPATCH_RESULT）。
+async def test_synthesize_writes_only_finish_pair_no_body_mirror():
+    """task-resident：task 层有 UP + 段摘要时，agent 层仍只写 finish 对（不镜像 body）。
+    body（UP/段摘要）留 task 层、原样保留。
     """
     mem = InMemoryMemoryProvider()
     tsc = _task_sc()
@@ -112,61 +72,21 @@ async def test_capsule_order_user_summary_finish_pair():
     await _synthesize_dispatch_pair(mem, asc, task, "## PDF 已完成", "success", _ctx())
 
     turns = await _agent_turns(mem, asc)
+    # 只有 finish 对（assistant finish_task + tool Process Report）
     roles = [r.role for r in turns]
-    # 4 turns: user(UP) + assistant(summary) + assistant(finish_task) + tool(Process Report)
-    assert roles == ["user", "assistant", "assistant", "tool"], f"got roles={roles}"
-    # all AGENT_CONVERSATION_TURN
+    assert roles == ["assistant", "tool"], f"task-resident: only finish pair expected; got roles={roles}"
     assert all(r.type == T.AGENT_CONVERSATION_TURN for r in turns)
-    # finish pair at end
     assert turns[-2].metadata.get("tool_calls", [{}])[0].get("name", "").endswith("finish_task")
     assert turns[-1].content.startswith("Process Report:")
+    assert all(r.metadata.get("origin_task_id") == "t1" for r in turns)
+
+    # body 留 task 层（UP + 段摘要原样保留，未被镜像/supersede）
+    body = await mem.recall_recent(tsc, [T.USER_PROMPT, T.TASK_COMPACT_SUMMARY], 100, _ctx())
+    assert {r.content for r in body} == {"帮我转", "### 会话目标\n转 PDF"}
 
 
-async def test_no_compaction_no_summary_turn():
-    """没被 compact（无 task_compact_summary）→ 不写 assistant summary 回合，
-    只有 user(UP) + assistant(finish_task) + tool。
-    """
-    mem = InMemoryMemoryProvider()
-    tsc = _task_sc()
-    asc = _agent_sc()
-    await mem.ingest(_ev(T.USER_PROMPT, tsc, "帮我转", 0, role="user"), _ctx())
-    task = _task()
-
-    await _synthesize_dispatch_pair(mem, asc, task, "## PDF 已完成", "success", _ctx())
-
-    turns = await _agent_turns(mem, asc)
-    roles = [r.role for r in turns]
-    assert roles == ["user", "assistant", "tool"], f"got roles={roles}"
-    assert all(r.type == T.AGENT_CONVERSATION_TURN for r in turns)
-
-
-async def test_all_compact_summaries_mirrored_in_order():
-    """多条 task_compact_summary 时全部按时间序镜像（非只取最新）。"""
-    mem = InMemoryMemoryProvider()
-    tsc = _task_sc()
-    asc = _agent_sc()
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "旧摘要", 1, role="assistant"), _ctx())
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "新摘要", 9, role="assistant"), _ctx())
-    task = _task()
-
-    await _synthesize_dispatch_pair(mem, asc, task, "out", "success", _ctx())
-
-    turns = await _agent_turns(mem, asc)
-    summ = [r for r in turns if r.role == "assistant" and r.metadata.get("tool_calls", None) is None or
-            (r.role == "assistant" and not r.metadata.get("tool_calls"))]
-    # 过滤掉 finish_task assistant turn（有 tool_calls）
-    summary_turns = [r for r in turns
-                     if r.role == "assistant" and not any(
-                         tc.get("name", "").endswith("finish_task")
-                         for tc in r.metadata.get("tool_calls", [])
-                     )]
-    assert len(summary_turns) == 2, f"expected 2 summary turns, got {summary_turns}"
-    assert summary_turns[0].content == "旧摘要"
-    assert summary_turns[1].content == "新摘要"
-
-
-async def test_empty_user_prompt_in_task_scope_means_no_user_mirror():
-    """task 层无 USER_PROMPT → 无 user mirror 回合（只 finish pair）。"""
+async def test_no_task_layer_body_still_writes_finish_pair():
+    """task 层无任何 body → agent 层仍写 finish 对（2 条）。"""
     mem = InMemoryMemoryProvider()
     asc = _agent_sc()
     task = _task(prompt="")
@@ -174,9 +94,30 @@ async def test_empty_user_prompt_in_task_scope_means_no_user_mirror():
     await _synthesize_dispatch_pair(mem, asc, task, "out", "success", _ctx())
 
     turns = await _agent_turns(mem, asc)
-    users = [r for r in turns if r.role == "user"]
-    assert users == []
-    # finish pair still written
     assert len(turns) == 2
     assert turns[-2].role == "assistant"
     assert turns[-1].role == "tool"
+    # 无 user 镜像（无 body）
+    assert not any(r.role == "user" for r in turns)
+
+
+async def test_finish_pair_result_and_report():
+    """finish 对：assistant.tool_calls[0].input.result = outputs；tool content = Process Report。"""
+    mem = InMemoryMemoryProvider()
+    tsc = _task_sc()
+    asc = _agent_sc()
+    await mem.ingest(_ev(T.USER_PROMPT, tsc, "帮我转", 0, role="user"), _ctx())
+    task = _task()
+    task.outputs = "## PDF 已完成"  # finish result 取自 task.outputs
+
+    mem_content = "## PDF 已完成\n\nProcess Report: 成功转换"
+    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _ctx())
+
+    turns = await _agent_turns(mem, asc)
+    assert [r.role for r in turns] == ["assistant", "tool"]
+    tcs = turns[-2].metadata.get("tool_calls", [])
+    assert len(tcs) == 1 and tcs[0]["name"].endswith("finish_task")
+    assert tcs[0]["input"]["result"] == "## PDF 已完成"
+    assert "Process Report: 成功转换" in turns[-1].content
+    # tool_call 配对
+    assert turns[-1].metadata.get("tool_call_id") == tcs[0]["id"]

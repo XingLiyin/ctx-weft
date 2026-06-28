@@ -1,4 +1,9 @@
-"""close(task)：短任务保留、长任务残留、子树 GC（spec 2026-06-23）。"""
+"""close(task) — task-resident（spec 2026-06-28 §3/§5）：
+
+每个结束 task = task 层 raw body（不被 supersede、不 GC 子树）+ agent 层 finish 对。
+own-root/cross-agent root 写自己的 finish 对；same-agent 子任务无条件 bubble「…scheduled」
+TASK_DISPATCH_RESULT + 自己的 finish 对。short 不再 gate 合成/supersede。
+"""
 
 from __future__ import annotations
 
@@ -71,7 +76,14 @@ def _root_task(task_id="t1", agent="ag1") -> Task:
                 title="Root", user_prompt="hello", settings=NormalTaskSettings())
 
 
-async def test_short_root_leaf_keeps_full_conversation() -> None:
+async def _finish_tools(mem, scope, origin: str) -> list:
+    """召回 agent 层属于 origin 的 finish-pair tool 回合（content 含 Process Report）。"""
+    caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    return [r for r in caps if r.role == "tool" and r.metadata.get("origin_task_id") == origin]
+
+
+async def test_short_root_leaf_keeps_body_and_synthesizes_finish_pair() -> None:
+    """task-resident：短 root 叶子 close 也合成 finish 对（取消 short 延迟），body 原样留。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_conv(mem, scope, n_assistant=2)  # few turns, small → short
@@ -80,14 +92,17 @@ async def test_short_root_leaf_keeps_full_conversation() -> None:
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), _FakeTM()),
                                task, "final out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # conversation NOT superseded; no synthesized residue written
+    # body kept (task-resident)
     convs = await mem.recall_recent(scope, [T.USER_PROMPT, T.LLM_RESPONSE], 100, _ctx())
     assert {c.content for c in convs} >= {"hello", "reply 0", "reply 1"}
+    # own-root finish pair synthesized (agent layer), no TASK_DISPATCH_RESULT (root never bubbles)
+    assert await _finish_tools(mem, scope, "t1"), "short root leaf must synthesize finish pair"
     residues = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     assert residues == []
 
 
-async def test_long_root_leaf_closes_into_residue() -> None:
+async def test_long_root_leaf_keeps_body_and_synthesizes_finish_pair() -> None:
+    """task-resident：长 root 叶子 close 写 finish 对；body 留 task 层（不再 supersede）。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)  # >turn_cap and big → not short
@@ -97,16 +112,15 @@ async def test_long_root_leaf_closes_into_residue() -> None:
     await finalize_task_memory(mem, _state(task, scope, cfg, _FakeTM()),
                                task, "final out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # own conversation superseded; a synthesized capsule (AGENT_CONVERSATION_TURN finish pair) exists
+    # body kept (task-resident: body is the capsule)
     convs = await mem.recall_recent(scope, [T.USER_PROMPT, T.LLM_RESPONSE], 100, _ctx())
-    assert convs == []
-    # new shape: finish pair written as AGENT_CONVERSATION_TURN (tool role holds Process Report)
-    caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    finish_tools = [r for r in caps if r.role == "tool" and r.metadata.get("origin_task_id") == "t1"]
-    assert finish_tools, "expected finish-pair tool turn in agent capsule"
+    assert convs != [], "task-layer body must stay (not superseded)"
+    # finish pair written as AGENT_CONVERSATION_TURN (tool role holds Process Report)
+    assert await _finish_tools(mem, scope, "t1"), "expected finish-pair tool turn in agent capsule"
 
 
-async def test_root_close_gcs_subtree_residues() -> None:
+async def test_root_close_keeps_subtree_bodies() -> None:
+    """task-resident：root close 不 GC 子树——同 agent 子任务 body 留各自 task 层。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)
@@ -123,11 +137,13 @@ async def test_root_close_gcs_subtree_residues() -> None:
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), tm),
                                task, "final out", "success", _loop_ctx(mem, tm))
 
-    # t2's task-layer conversation GC'd; dispatch pair PRESERVED (managed by parent capsule)
+    # dispatch pair preserved; t2's task-layer body NOT GC'd (task-resident)
     all_results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     assert any(r.content == "t2 out" for r in all_results), "dispatch pair must be preserved"
     t2_conv = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
-    assert all(r.metadata.get("task_id") != "t2" for r in t2_conv)
+    assert any(r.metadata.get("task_id") == "t2" for r in t2_conv), (
+        "subtree body must stay (task-resident: no _gc_subtree)"
+    )
 
 
 async def test_cross_agent_child_bubbles_unconditionally_even_when_short() -> None:
@@ -149,12 +165,13 @@ async def test_cross_agent_child_bubbles_unconditionally_even_when_short() -> No
     parent_scope = _sc("p1", "ag1")
     res = await mem.recall_recent(parent_scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     assert any(r.metadata.get("tool_call_id") == "oc1" and r.content == "child out" for r in res)
-    # child's own conversation preserved (short, own scope) for potential reentry
+    # child's own conversation preserved (task-resident: body stays)
     own = await mem.recall_recent(child_scope, [T.LLM_RESPONSE], 100, _ctx())
     assert own != []
 
 
-async def test_same_agent_short_leaf_no_bubble_no_close() -> None:
+async def test_same_agent_short_leaf_bubbles_scheduled_keeps_body() -> None:
+    """task-resident：same-agent 子任务（即使 short）也无条件 bubble「…scheduled」，body 留 task 层。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t2", "ag1")
     await _seed_conv(mem, scope, n_assistant=1)  # short leaf
@@ -169,14 +186,16 @@ async def test_same_agent_short_leaf_no_bubble_no_close() -> None:
     await finalize_task_memory(mem, _state(child, scope, LoopConfig(), _FakeTM()),
                                child, "t2 out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # no residue written (same-agent short = keep open), conversation preserved
+    # same-agent unconditionally bubbles a paired "scheduled" residue
     res = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert all(r.metadata.get("tool_call_id") != "oc2" for r in res)
+    bubble = [r for r in res if r.metadata.get("tool_call_id") == "oc2"]
+    assert bubble and "scheduled" in bubble[0].content
+    # body kept (task-resident)
     own = await mem.recall_recent(scope, [T.LLM_RESPONSE], 100, _ctx())
     assert own != []
 
 
-async def test_same_agent_nonshort_child_bubbles_without_self_residue() -> None:
+async def test_same_agent_nonshort_child_bubbles_keeps_body() -> None:
     mem = InMemoryMemoryProvider()
     scope = _sc("t2", "ag1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)  # over turn cap → not short
@@ -194,15 +213,15 @@ async def test_same_agent_nonshort_child_bubbles_without_self_residue() -> None:
     res = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
     bubble = [r for r in res if r.metadata.get("tool_call_id") == "oc2"]
     assert bubble and bubble[0].metadata.get("parent_task_id") == "t1"
-    # own conversation superseded (not short → closed)
+    # own conversation kept (task-resident: body stays)
     own = await mem.recall_recent(scope, [T.LLM_RESPONSE], 100, _ctx())
-    assert own == []
-    # NO self-residue: agent scope must contain no residue with parent_task_id is None
+    assert own != []
+    # NO self-residue: agent scope must contain no TASK_DISPATCH_RESULT with parent_task_id is None
     agent_res = await mem.recall_recent(_sc("t2", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
     assert all(r.metadata.get("parent_task_id") is not None for r in agent_res)
 
 
-async def test_root_close_gcs_deep_nested_subtree() -> None:
+async def test_root_close_keeps_deep_nested_subtree_bodies() -> None:
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)
@@ -220,18 +239,18 @@ async def test_root_close_gcs_deep_nested_subtree() -> None:
     task = _root_task()
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), tm),
                                task, "final out", "success", _loop_ctx(mem, tm))
-    # dispatch pairs for A and A1 PRESERVED (managed by parent capsule, not GC'd by _gc_subtree)
+    # dispatch pairs for A and A1 preserved
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
     assert "A out" in contents and "A1 out" in contents, "dispatch pairs must be preserved"
-    # root self-residue now written as AGENT_CONVERSATION_TURN (finish pair), not TASK_DISPATCH_RESULT
-    caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    assert any(r.metadata.get("origin_task_id") == "t1" for r in caps)  # root capsule survives
+    # root self finish pair written as AGENT_CONVERSATION_TURN
+    assert await _finish_tools(mem, scope, "t1"), "root finish pair must exist"
+    # grandchild body NOT GC'd (task-resident)
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
-    assert all(r.metadata.get("task_id") != "A1" for r in convs)   # grandchild conversation gone
+    assert any(r.metadata.get("task_id") == "A1" for r in convs), "grandchild body must stay"
 
 
-async def test_intermediate_close_collapses_grandchild() -> None:
+async def test_intermediate_close_keeps_grandchild_body() -> None:
     mem = InMemoryMemoryProvider()
     a_scope = _sc("A", "ag1")
     await _seed_conv(mem, a_scope, n_assistant=5, big=True)  # A's own conversation (not short)
@@ -251,15 +270,16 @@ async def test_intermediate_close_collapses_grandchild() -> None:
     await finalize_task_memory(mem, _state(A, a_scope, LoopConfig(), tm),
                                A, "A out", "success", _loop_ctx(mem, tm))
     results = await mem.recall_recent(_sc("any", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    # A1 dispatch pair PRESERVED (not GC'd by _gc_subtree, managed by A's capsule)
+    # A1 dispatch pair preserved
     assert any(r.content == "A1 out" for r in results), "A1 dispatch pair must be preserved"
+    # grandchild body kept (task-resident)
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
-    assert all(r.metadata.get("task_id") != "A1" for r in convs)  # grandchild conv gone
+    assert any(r.metadata.get("task_id") == "A1" for r in convs), "grandchild body must stay"
     assert any(r.metadata.get("tool_call_id") == "ocA" and r.metadata.get("parent_task_id") == "t1"
                for r in results)                                  # A bubbles its own residue to t1
 
 
-async def test_root_close_gcs_multichild_plan() -> None:
+async def test_root_close_multichild_plan_preserves_dispatch_pairs() -> None:
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)
@@ -274,14 +294,13 @@ async def test_root_close_gcs_multichild_plan() -> None:
                                task, "final out", "success", _loop_ctx(mem, tm))
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
-    # dispatch pairs PRESERVED (not GC'd by _gc_subtree, managed by parent capsule)
+    # dispatch pairs preserved
     assert {"A out", "B out", "C out"} <= contents, "all plan-child dispatch pairs must be preserved"
-    # root self-residue now written as AGENT_CONVERSATION_TURN finish pair
-    caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    assert any(r.metadata.get("origin_task_id") == "t1" for r in caps)  # root capsule remains
+    # root self finish pair written as AGENT_CONVERSATION_TURN
+    assert await _finish_tools(mem, scope, "t1"), "root finish pair must exist"
 
 
-async def test_root_close_gcs_mixed_same_and_cross_agent_children() -> None:
+async def test_root_close_mixed_same_and_cross_agent_children_keeps_bodies() -> None:
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)
@@ -302,10 +321,11 @@ async def test_root_close_gcs_mixed_same_and_cross_agent_children() -> None:
                                task, "final out", "success", _loop_ctx(mem, tm))
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
-    # dispatch pairs PRESERVED (not GC'd by _gc_subtree, managed by parent capsule)
+    # dispatch pairs preserved
     assert {"S out", "X out"} <= contents, "both children dispatch pairs must be preserved"
+    # same-agent child body kept (task-resident)
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
-    assert all(r.metadata.get("task_id") != "S" for r in convs)  # same-agent child conv GC'd
+    assert any(r.metadata.get("task_id") == "S" for r in convs), "same-agent child body must stay"
 
 
 async def test_descendant_task_ids_multilevel_bfs() -> None:

@@ -7,7 +7,6 @@ miniAgents 对齐版：
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 from typing import Any
 
@@ -61,31 +60,11 @@ async def _is_short_leaf(memory, scope, task, loop_config, ctx, has_descendants:
     return estimate_tokens(text) <= loop_config.short_task_token_threshold
 
 
-async def _supersede_own_conversation(memory, scope, ctx) -> int:
-    """软删本 task 自身的 task 层对话（close 的一步）。"""
-    records = await memory.recall_recent(scope, _OWN_CONV_TYPES, 2000, ctx.provider_ctx)
-    ids = [r.id for r in records]
-    return await memory.supersede(ids, ctx.provider_ctx) if ids else 0
-
-
-async def _gc_subtree(memory, agent_scope, descendants: set[str], ctx) -> int:
-    """软删后代 task 的自身 task 层 raw 残留（派发对/嵌入子胶囊保留，由 parent 胶囊管理）。"""
-    if not descendants:
-        return 0
-    ids: list[str] = []
-    task_recs = await memory.recall_recent_by_agent(
-        agent_scope, _OWN_CONV_TYPES, 2000, ctx.provider_ctx,
-    )
-    for r in task_recs:
-        if r.metadata.get("task_id") in descendants:
-            ids.append(r.id)
-    return await memory.supersede(ids, ctx.provider_ctx) if ids else 0
-
-
 async def finalize_task_memory(memory, state, task, mem_content: str, outcome: str, ctx) -> list:
     """finish 时调用：算 short / descendants 后委派 _close_one。返回事件列表。
 
-    见 spec 2026-06-23 §压缩原语 与本计划 Task 4 的决策矩阵。
+    task-resident（spec 2026-06-28）：short 不再 gate 合成/supersede——每个结束 task 都写
+    finish 对、body 留 task 层。`short` 仅算出后透传给 _close_one（Task 2 用于 body raw-vs-压末段）。
     """
     descendants = _descendant_task_ids(task.id, ctx.task_manager)
     short = await _is_short_leaf(
@@ -98,10 +77,10 @@ async def finalize_task_memory(memory, state, task, mem_content: str, outcome: s
 
 async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                      *, short: bool, descendants: set[str]) -> list:
-    """close 主体：bubble / 自身残留 / 软删自身对话 / GC 子树。
+    """close 主体（task-resident，spec 2026-06-28）：bubble / 写 finish 对（不镜像 body）。
 
-    short / descendants 由调用方给定——finish 时由 finalize_task_memory 算得；压力下强制
-    回收短 task 时由 close_finished_short_tasks 传 short=False（Task 5）。返回事件列表。
+    每个结束 task 无条件写 finish 对、body 留 task 层（不 supersede、不 GC 子树）。`short`
+    参数本 task 不再影响合成/supersede（Task 2 重新用于 body raw-vs-压末段决策）。返回事件列表。
     """
     # Terminal finalize is single-entry by construction (retry is non-terminal; restore reschedules
     # only non-terminal tasks; re-dispatch uses a new task id), so the residue/bubble writes here
@@ -116,7 +95,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
         if cross_agent:
             do_bubble = True
             result_content = mem_content
-        elif same_agent and not short:
+        elif same_agent:
             do_bubble = True
             result_content = f"Sub-task '{task.title}' scheduled."
         else:
@@ -146,13 +125,13 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                 payload={"memory_event_type": MemoryEventType.TASK_DISPATCH_RESULT.value,
                          "source": "dispatch_result", "content_length": len(result_content)},
             ))
-        # 同 agent non-short：额外把 child 交互胶囊写进共享 agent scope（嵌套）
-        if same_agent and not short:
+        # 同 agent 子任务：额外合成子自己的 finish 对（写进共享 agent scope，嵌套）
+        if same_agent:
             await _synthesize_dispatch_pair(
                 memory, parent_scope, task, mem_content, outcome, ctx.provider_ctx)
 
-    # 2) 自身残留：own root（session 根或跨 agent 根）且 close 时，在 own scope 合成派发对
-    if is_own_root and mem_content and not short:
+    # 2) 自身 finish 对：own root（session 根或跨 agent 根）close 时无条件在 own scope 合成
+    if is_own_root and mem_content:
         await _synthesize_dispatch_pair(memory, state.scope, task, mem_content, outcome, ctx.provider_ctx)
         events.append(make_event(
             state, EventType.MEMORY_INGESTED,
@@ -160,115 +139,20 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                      "source": "root_dispatch", "content_length": len(mem_content)},
         ))
 
-    # 3) 软删自身对话（close 时）
-    if not short:
-        n = await _supersede_own_conversation(memory, state.scope, ctx)
-        if n:
-            events.append(make_event(
-                state, EventType.MEMORY_COMPACTED,
-                payload={"source": "close_own_conversation", "superseded_count": n, "layer": "task"},
-            ))
-
-    # 4) GC 子树（无条件；叶子时为空）
-    g = await _gc_subtree(memory, state.scope, descendants, ctx)
-    if g:
-        events.append(make_event(
-            state, EventType.MEMORY_COMPACTED,
-            payload={"source": "subtree_gc", "superseded_count": g, "layer": "agent"},
-        ))
-
-    return events
-
-
-async def close_finished_short_tasks(memory, state, ctx) -> list:
-    """压力下回收：对本 agent 名下所有 status==FINISHED 的短 task 强制 close（坍缩成残留）。
-
-    短 task finish 时维持 OPEN；压缩触发时调用本函数把它们 close 掉腾空间。挂起祖先 task
-    （status != FINISHED）的对话绝不触碰（spec 2026-06-23 §3）。返回事件列表。
-    """
-    if ctx.task_manager is None:
-        return []
-    records = await memory.recall_recent_by_agent(
-        state.scope, _OWN_CONV_TYPES, 2000, ctx.provider_ctx,
-    )
-    task_ids = {
-        tid for r in records
-        if (tid := r.metadata.get("task_id")) and tid != state.task.id
-    }
-    events: list[Any] = []
-    for tid in task_ids:
-        t = ctx.task_manager.get_task(tid)
-        if t is None or t.status != "FINISHED":
-            continue  # 挂起祖先 / 未知 → 保留
-        mem_content = _build_memory_content(t.outputs, t.process_report or "")
-        if not mem_content:
-            continue
-        sub_scope = MemoryScope(
-            session_id=state.scope.session_id, task_id=tid, agent_id=state.scope.agent_id,
-        )
-        sub_state = dataclasses.replace(state, scope=sub_scope, task=t)
-        descendants = _descendant_task_ids(tid, ctx.task_manager)  # 短=叶 → 空
-        events += await _close_one(
-            memory, sub_state, t, mem_content, t.observer_outcome or "success", ctx,
-            short=False, descendants=descendants,
-        )
+    # task-resident：body 留 task 层（不 supersede 自身对话、不 GC 子树）——见 spec 2026-06-28 §5。
     return events
 
 
 async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, provider_ctx) -> None:
-    """close 合成交错时间线胶囊（spec §3.3）：快照幸存 task 对话 → AGENT_CONVERSATION_TURN
-    （保留原始 timestamp）+ 末尾合成 finish 对。
+    """close 合成 agent 层 finish 对（task-resident，spec 2026-06-28 §3.1）：只写
+    finish 对（assistant finish_task tool_call + tool Process Report），**不镜像 body**——
+    body 留各 task 自身 task 层，召回时按 (timestamp, seq_no) 与 finish 对一起归并。
 
-    step1: 非阻塞——close 边界 bg observe 已不写 memory（结果落 _close_report 槽），
-           survivors 快照不依赖它；A1 设计下不再 await await_pending_background_observe。
-    step2: 镜像幸存 task 层事件到 agent 层 AGENT_CONVERSATION_TURN，保留原始 timestamp/role/tool 元数据。
-           角色映射：USER_PROMPT→user, TASK_COMPACT_SUMMARY→assistant（继承存储 role）,
-           LLM_RESPONSE→assistant（携带 tool_calls），TOOL_RESULT→tool（携带 tool_call_id）。
-    step3: 追加合成 finish 对（assistant finish_task tool_call + tool Process Report）。
-           A1：机会性取 _close_report 槽；槽空则用薄占位 + 登记 _close_synth 待 bg 异步替换。
+    finish 对 timestamp 锚到 close 时刻（base=now_utc()，符合不变量 A）。
+    A1：机会性取 _close_report 槽；槽空则用薄占位 + 登记 _close_synth 待 bg 异步替换。
     """
 
-    # step2：召回幸存 task 层对话，逐条镜像成 agent 层 AGENT_CONVERSATION_TURN
-    task_scope = MemoryScope(session_id=scope.session_id, task_id=task.id, agent_id=scope.agent_id)
-    survivors = await memory.recall_recent(
-        task_scope,
-        [MemoryEventType.USER_PROMPT, MemoryEventType.TASK_COMPACT_SUMMARY,
-         MemoryEventType.LLM_RESPONSE, MemoryEventType.TOOL_RESULT],
-        2000, provider_ctx,
-    )
-    survivors = list(reversed(survivors))  # newest-first → 时间序（oldest first）
-
-    for r in survivors:
-        if r.type == MemoryEventType.USER_PROMPT:
-            role = "user"
-        else:
-            # TASK_COMPACT_SUMMARY 存储即 assistant；LLM_RESPONSE→assistant、TOOL_RESULT→tool
-            # 均已在记录 role 上，直接继承。
-            role = r.role or "user"
-
-        md: dict = {"origin_task_id": task.id, "parent_task_id": task.parent_task_id}
-        if r.type in (MemoryEventType.LLM_RESPONSE, MemoryEventType.TOOL_RESULT):
-            # 最终段 raw（close 边界不写 TASK_COMPACT_SUMMARY 故未折）；real process_report 到位后
-            # 由 _fold_final_segment_raw 折掉（方案2）。background 失败降级则保留（§3.6）。
-            md["final_segment_raw"] = True
-        if role == "assistant":
-            md["tool_calls"] = r.metadata.get("tool_calls", [])
-        elif role == "tool":
-            md["tool_call_id"] = r.metadata.get("tool_call_id", "")
-
-        await memory.ingest(
-            MemoryEvent(
-                type=MemoryEventType.AGENT_CONVERSATION_TURN,
-                scope=scope,
-                content=r.content,
-                timestamp=r.timestamp,
-                role=role,
-                metadata=md,
-            ),
-            provider_ctx,
-        )
-
-    # step3：合成 finish 对（末尾承载，spec §3.3 step3 + §3.5）
+    # 合成 finish 对（末尾承载，spec §3.3 step3 + §3.5）
     # A1: 机会性取 _close_report 槽；槽空则用薄占位
     from ctx_weft.core.loop.steps.background_observe import (
         pop_close_report, register_close_synth, _replace_finish_report,

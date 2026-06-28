@@ -1,14 +1,11 @@
-"""Task 6 TDD：_synthesize_dispatch_pair 交错时间线胶囊。
+"""_synthesize_dispatch_pair 合成 finish 对（task-resident，spec 2026-06-28 §3.1）。
 
-形态：镜像幸存 task 层对话（USER_PROMPT/TASK_COMPACT_SUMMARY/LLM_RESPONSE/TOOL_RESULT）
-→ agent 层 AGENT_CONVERSATION_TURN（保留原始 timestamp + role + tool 元数据），
-末尾追加合成 finish 对（assistant finish_task tool_call + tool Process Report）。
+形态翻转（Task 1）：close **不再镜像** task 层 body 进 agent 层——只写 finish 对
+（assistant finish_task tool_call + tool Process Report）。body 留各自 task 层。
 
-spec §3.3 step1-3，角色映射约定：
-  USER_PROMPT         → role="user"
-  TASK_COMPACT_SUMMARY→ role="assistant"  (继承存储 role)
-  LLM_RESPONSE        → role="assistant"
-  TOOL_RESULT         → role="tool"
+本文件原「交错时间线镜像」相关测试（镜像顺序/原始 timestamp/LLM 与 TOOL 元数据保留/段摘要
+role 映射）随 mirror 删除而移除——其验证的镜像机制已不存在。保留 finish-对结构/配对/result
+切割/fail 前缀等仍适用于新模型的断言。
 """
 from __future__ import annotations
 
@@ -64,21 +61,21 @@ async def _caps(mem, agent_scope):
     return list(reversed(recs))
 
 
-# ── 主场景：完整交错时间线 ────────────────────────────────────────────────
+# ── task-resident：合成只写 finish 对、不镜像 body ────────────────────────────
 
-async def test_interleaved_capsule_order_and_roles():
-    """情况 2/5 形态：[user UP1][assistant 段①][user HITL][assistant 段②]
-    + [assistant finish_task(tool_calls)] [tool Process Report]。
+async def test_synthesize_writes_only_finish_pair():
+    """task-resident：task 层有 UP/段摘要/LLM/TOOL 时，agent 层仍只写 finish 对（2 条）。
+    body 不镜像、留 task 层。
     """
     mem = InMemoryMemoryProvider()
     tsc = _task_scope()
     asc = _agent_scope()
 
-    # task 层：模拟后台 observe 已折好后的幸存事件
+    # task 层：模拟后台 observe 已折好后的幸存事件（不会被镜像）
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "UP1原文", 1, role="user"), _ctx())
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段①摘要", 2, role="assistant"), _ctx())   # apply_compact 存 role=assistant
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段①摘要", 2, role="assistant"), _ctx())
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "HITL原文", 3, role="user"), _ctx())
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段②摘要", 4, role="assistant"), _ctx())   # apply_compact 存 role=assistant
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段②摘要", 4, role="assistant"), _ctx())
 
     task = _task(prompt="UP1原文")
     mem_content = "最终答复\n\nProcess Report: 过程报告"
@@ -86,105 +83,42 @@ async def test_interleaved_capsule_order_and_roles():
 
     caps = await _caps(mem, asc)
 
-    # 6 turns total: 4 mirrored + 2 finish pair
-    assert len(caps) == 6, f"expected 6 turns, got {len(caps)}: {[(c.role, c.content[:30]) for c in caps]}"
-
-    assert caps[0].role == "user" and caps[0].content == "UP1原文"
-    assert caps[1].role == "assistant" and "段①" in caps[1].content
-    assert caps[2].role == "user" and caps[2].content == "HITL原文"
-    assert caps[3].role == "assistant" and "段②" in caps[3].content
-
-    # finish pair
+    # 仅 finish 对（assistant finish_task + tool Process Report）
+    assert len(caps) == 2, f"expected only finish pair; got {[(c.role, c.content[:30]) for c in caps]}"
     assert caps[-2].role == "assistant"
     tool_calls = caps[-2].metadata.get("tool_calls", [])
     assert len(tool_calls) == 1
     assert tool_calls[0]["name"].endswith("finish_task")
     assert tool_calls[0]["input"]["result"] == "最终答复"
-
     assert caps[-1].role == "tool"
     assert caps[-1].content.startswith("Process Report:")
-
-    # all have origin_task_id
     assert all(c.metadata.get("origin_task_id") == "t1" for c in caps)
 
+    # body 不镜像、留 task 层
+    body = await mem.recall_recent(tsc, [T.USER_PROMPT, T.TASK_COMPACT_SUMMARY], 100, _ctx())
+    assert len(body) == 4, "task-layer body must stay (not mirrored/superseded)"
 
-# ── 原始 timestamp 保留 ───────────────────────────────────────────────────
 
-async def test_original_timestamps_preserved():
-    """镜像记录保留原始 timestamp，finish 对用 now_utc()。"""
+async def test_finish_pair_timestamp_anchors_close():
+    """finish 对 timestamp 锚 close 时刻（now_utc），落在 task 层 body 之后。"""
     mem = InMemoryMemoryProvider()
     tsc = _task_scope()
     asc = _agent_scope()
 
-    t1 = _BASE + timedelta(seconds=10)
     t2 = _BASE + timedelta(seconds=20)
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=tsc, content="q", timestamp=t1, role="user"), _ctx())
-    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tsc, content="s", timestamp=t2, role="assistant"), _ctx())
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=tsc, content="q",
+                                 timestamp=_BASE + timedelta(seconds=10), role="user"), _ctx())
+    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tsc, content="s",
+                                 timestamp=t2, role="assistant"), _ctx())
 
     task = _task(prompt="q")
     await _synthesize_dispatch_pair(mem, asc, task, "出了\n\nProcess Report: r", "success", _ctx())
 
     caps = await _caps(mem, asc)
-    assert caps[0].timestamp == t1
-    assert caps[1].timestamp == t2
+    assert len(caps) == 2
     # finish pair timestamps >= t2 (now_utc at call time, after the task events)
     assert caps[-2].timestamp >= t2
     assert caps[-1].timestamp >= t2
-
-
-# ── LLM_RESPONSE / TOOL_RESULT 携带工具元数据 ────────────────────────────
-
-async def test_llm_response_and_tool_result_metadata_preserved():
-    """LLM_RESPONSE → assistant with tool_calls; TOOL_RESULT → tool with tool_call_id。"""
-    mem = InMemoryMemoryProvider()
-    tsc = _task_scope()
-    asc = _agent_scope()
-
-    tc_calls = [{"id": "tc1", "name": "some_tool", "input": {}}]
-    await mem.ingest(MemoryEvent(
-        type=T.LLM_RESPONSE, scope=tsc, content="", timestamp=_BASE + timedelta(seconds=1),
-        role="assistant", metadata={"tool_calls": tc_calls},
-    ), _ctx())
-    await mem.ingest(MemoryEvent(
-        type=T.TOOL_RESULT, scope=tsc, content="tool out", timestamp=_BASE + timedelta(seconds=2),
-        role="tool", metadata={"tool_call_id": "tc1"},
-    ), _ctx())
-
-    task = _task(prompt="q")
-    await _synthesize_dispatch_pair(mem, asc, task, "o\n\nProcess Report: r", "success", _ctx())
-
-    caps = await _caps(mem, asc)
-    # caps[0] = user (from task.user_prompt — but UP1 not in memory, so no UP mirror)
-    # Actually no UP in task scope → only 2 mirrored + 2 finish = 4
-    llm = [c for c in caps if c.role == "assistant" and c.metadata.get("tool_calls") and
-           any(tc.get("name") == "some_tool" for tc in c.metadata["tool_calls"])]
-    assert len(llm) == 1
-    assert llm[0].metadata["tool_calls"] == tc_calls
-
-    tool_r = [c for c in caps if c.role == "tool" and c.metadata.get("tool_call_id") == "tc1"]
-    assert len(tool_r) == 1
-    assert tool_r[0].content == "tool out"
-
-
-# ── TASK_COMPACT_SUMMARY role 映射：继承存储 role=assistant → 渲染 "assistant" ─
-
-async def test_task_compact_summary_renders_as_assistant_not_user():
-    """TASK_COMPACT_SUMMARY 存储 role='assistant'，镜像后仍为 role='assistant'。"""
-    mem = InMemoryMemoryProvider()
-    tsc = _task_scope()
-    asc = _agent_scope()
-
-    # apply_compact 存 role=assistant
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段摘要文本", 1, role="assistant"), _ctx())
-    task = _task()
-
-    await _synthesize_dispatch_pair(mem, asc, task, "o\n\nProcess Report: r", "success", _ctx())
-
-    caps = await _caps(mem, asc)
-    summary_turn = next(c for c in caps if "段摘要文本" in c.content)
-    assert summary_turn.role == "assistant", (
-        f"TASK_COMPACT_SUMMARY must mirror as assistant, got role={summary_turn.role!r}"
-    )
 
 
 # ── finish 对的 tool_call_id 配对 ─────────────────────────────────────────

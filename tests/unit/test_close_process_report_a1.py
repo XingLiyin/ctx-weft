@@ -233,9 +233,13 @@ async def _ingest_user_plus_raw(mem: InMemoryMemoryProvider, tsc: MemoryScope) -
     await mem.ingest(_ev(T.TOOL_RESULT, tsc, "目录内容…", 3, role="tool"), _pctx())
 
 
-async def test_fold_final_segment_raw_on_real_report() -> None:
-    """close 路径 background 成功（slot hit）→ 最终段 raw 镜像被折（方案2，不变量4）：
-    胶囊收敛为 [user 锚点][finish 对]，无 final_segment_raw 镜像残留。"""
+async def test_slot_hit_replaces_report_no_raw_mirror() -> None:
+    """task-resident：close 不镜像 body（无 final_segment_raw 镜像）；slot hit 时 finish tool
+    用真实 report；user 锚点 + 最终段 raw 留 task 层（不进 agent 层）。
+
+    注：原「方案2 折最终段 raw 镜像」随 mirror 删除而失效——agent 层从不写 final_segment_raw，
+    body raw 留 task 层（长任务压缩由 Task 2 处理）。
+    """
     mem = InMemoryMemoryProvider()
     tsc = _task_scope("t1")
     asc = _agent_scope()
@@ -248,17 +252,21 @@ async def test_fold_final_segment_raw_on_real_report() -> None:
     await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
 
     recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
-    raw_mirrors = [r for r in recs if r.metadata.get("final_segment_raw")]
-    assert raw_mirrors == [], (
-        f"real report 到位 → 最终段 raw 镜像必须被折；残留 {[r.content for r in raw_mirrors]}"
-    )
+    # agent 层从不写 final_segment_raw 镜像（task-resident）
+    assert [r for r in recs if r.metadata.get("final_segment_raw")] == []
+    # agent 层只有 finish 对（无 body 镜像）
+    assert len(recs) == 2 and {r.role for r in recs} == {"assistant", "tool"}
     finish_tool = await _get_finish_tool(mem, asc)
     assert finish_tool.content == "Process Report: 真实段总结"
-    assert any(r.role == "user" and "初始请求" in r.content for r in recs), "user 锚点必须保留"
+    # user 锚点 + 最终段 raw 留 task 层
+    body = await mem.recall_recent(tsc, [T.USER_PROMPT, T.LLM_RESPONSE, T.TOOL_RESULT], 500, _pctx())
+    assert any(r.role == "user" and "初始请求" in r.content for r in body), "user 锚点留 task 层"
+    assert len(body) == 3, "最终段 raw body 留 task 层（task-resident）"
 
 
-async def test_degraded_keeps_final_segment_raw() -> None:
-    """background 失败/未完成（槽空，无回调）→ 最终段 raw 镜像保留（§3.6 降级保 raw）。"""
+async def test_degraded_keeps_task_layer_raw_body() -> None:
+    """task-resident：close 不镜像 body——降级（槽空）时 agent 层仍只 finish 对，
+    最终段 raw body 留 task 层（不被 supersede）。"""
     mem = InMemoryMemoryProvider()
     tsc = _task_scope("t1")
     asc = _agent_scope()
@@ -266,12 +274,14 @@ async def test_degraded_keeps_final_segment_raw() -> None:
 
     task = _make_task()
     mem_content = "最终答复\n\nProcess Report: 占位摘要"
-    # 槽空 → 占位 + register，不折
+    # 槽空 → 占位 + register
 
     await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
 
     recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
-    raw_mirrors = [r for r in recs if r.metadata.get("final_segment_raw")]
-    assert len(raw_mirrors) == 2, (
-        f"降级（无 real report）→ 最终段 raw 必须保留；got {len(raw_mirrors)}"
-    )
+    # 无 final_segment_raw 镜像（agent 层不再镜像 body）
+    assert [r for r in recs if r.metadata.get("final_segment_raw")] == []
+    assert len(recs) == 2 and {r.role for r in recs} == {"assistant", "tool"}
+    # 最终段 raw body 留 task 层
+    body = await mem.recall_recent(tsc, [T.LLM_RESPONSE, T.TOOL_RESULT], 500, _pctx())
+    assert len(body) == 2, "降级时最终段 raw body 留 task 层（task-resident）"

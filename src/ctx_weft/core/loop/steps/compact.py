@@ -200,19 +200,19 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
 async def _compact_scope(
     state: LoopState, ctx: LoopContext, *, trigger: str = "compact"
 ) -> list[Any]:
-    """对 state.scope 跑一次压缩：回收 finished 短 task(b) + task 层 fold_task(a) +
-    agent 层 fold_root(c)，三者共享单次 summary。
+    """对 state.scope 跑一次压缩：task 层 fold_task(a) + agent 层 fold_root(c)，
+    两者共享单次 summary。
 
     trigger 标记触发来源（"compact" = PrepareStep 内联；"pre_dispatch" = 派发前），透传进
-    event payload 供遥测区分。无可折时只返回 close 产生的事件（可能为空），不空跑 summary LLM。
-    """
-    from ctx_weft.core.loop.steps.finalize import close_finished_short_tasks
+    event payload 供遥测区分。无可折时返回空事件列表，不空跑 summary LLM。
 
+    task-resident（spec 2026-06-28 §5）：取消「压力下回收 finished 短 task」——结束 task 的
+    body 留 task 层（即胶囊），由跨层 fold 管理，不再 close_finished_short_tasks 坍缩。
+    """
     agent = state.agent
     keep_last = agent.loop_config.compact_keep_last
 
-    # (b) 压力下回收 finished 短 task（交给 task close 机制）
-    events: list[Any] = await close_finished_short_tasks(ctx.memory, state, ctx)
+    events: list[Any] = []
 
     # (a) 活跃 task 长对话；(c) 已结束 root 残留
     task_n = await ctx.memory.count_recent(
