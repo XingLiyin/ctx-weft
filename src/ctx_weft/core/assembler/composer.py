@@ -97,12 +97,41 @@ _BACKGROUND_BOUNDARY_DESC = {
 }
 
 
+# close 段（finish/normal）：actor 以 finish_task 收尾，其 result 落 task.outputs。
+# 与 loop.steps.background_observe._CLOSE_BOUNDARIES 保持一致（此处避免跨层 import）。
+_CLOSE_BOUNDARIES = {"finish", "normal"}
+
+
 def _background_observe_cue(boundary: str) -> str:
     desc = _BACKGROUND_BOUNDARY_DESC.get(boundary, _BACKGROUND_BOUNDARY_DESC["normal"])
     return (
         f"当前 task 的状态：{desc}。请基于以上执行过程，总结这一段的处理进展，"
         "调用 `collect_process_report` 一次给出 `task_process_report`。"
         "只需总结进展、给出 process report，无需判断 success/retry/fail，不要调用其他工具。"
+    )
+
+
+def _finish_result_section(request) -> str:
+    """close 段（finish/normal）把 actor 的最终产出（task.outputs）注入 prompt。
+
+    finish_task 是 SILENT 工具：其 result 进 task.outputs，**不写任务层对话**；delegate_task
+    是 DISPATCH 工具、也排除出对话重建。若某段仅由 finish(+delegate) 组成，从记忆重建的对话里
+    看不到任何 actor 动作，观察者会**虚构**一段完成叙述。把 task.outputs 显式喂进来，让它据实总结。
+    返回空串表示无产出可注入（保持原行为）。
+    """
+    task = getattr(request, "task", None)
+    outputs = getattr(task, "outputs", None) if task is not None else None
+    if not outputs:
+        return ""
+    text = outputs if isinstance(outputs, str) else content_to_text(outputs)
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return (
+        "## Actor 的最终产出（已通过 finish_task 收尾本段）\n\n"
+        f"{text}\n\n"
+        "（上面是 actor 提交的最终结果，是本段唯一权威的产出依据。请据此如实总结本段进展，"
+        "不要臆测未实际发生的工具调用、步骤或产物。）"
     )
 
 
@@ -725,10 +754,20 @@ class DefaultComposer(Composer):
         )
 
     def _build_background_observe_messages(self, blocks, request):
-        """act 风格会话 + 尾部 background-observe cue（ROLE facet + boundary 状态 + 只给 process_report）。"""
+        """act 风格会话 + 尾部 background-observe cue（ROLE facet + boundary 状态 + 只给 process_report）。
+
+        close 段（finish/normal）额外把 actor 的最终产出（task.outputs）注入 cue 之前——否则仅由
+        finish(+delegate) 组成的段在对话重建里无 actor 动作可见，观察者会虚构完成叙述。
+        """
         boundary = (getattr(request, "extra", {}) or {}).get("observe_boundary", "normal")
+        pre_cue: list[str] | None = None
+        if boundary in _CLOSE_BOUNDARIES:
+            section = _finish_result_section(request)
+            if section:
+                pre_cue = [section]
         return self._build_facet_trailing_messages(
             blocks, request, _background_observe_cue(boundary),
+            pre_cue_sections=pre_cue,
             facet_fallback=_OBSERVER_ROLE_FALLBACK,
         )
 

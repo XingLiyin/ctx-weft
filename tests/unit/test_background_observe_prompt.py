@@ -22,10 +22,10 @@ def _blocks():
     ]
 
 
-def _req(boundary):
+def _req(boundary, outputs=""):
     return SimpleNamespace(purpose="background_observe", task=SimpleNamespace(
         id="t1", user_prompt_in_memory=True, title="", description="", user_prompt="x",
-        outputs="", process_report="", process_report_at=None, tracking_task_ids=[],
+        outputs=outputs, process_report="", process_report_at=None, tracking_task_ids=[],
         parent_task_id=None), session=SimpleNamespace(user_prompt="x"),
         template=None, bound_capabilities=[], actor_transcript=[],
         extra={"observe_boundary": boundary})
@@ -44,3 +44,35 @@ def test_background_cue_injects_each_boundary(boundary):
     msgs = DefaultComposer()._build_background_observe_messages(_blocks(), _req(boundary))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert _BACKGROUND_BOUNDARY_DESC[boundary] in joined
+
+
+_FINISH_RESULT = "工作目录现状：仅一个 即兴演讲训练.pptx，无活跃项目。"
+
+
+@pytest.mark.parametrize("boundary", ["finish", "normal"])
+def test_close_boundary_injects_finish_result(boundary):
+    """close 段把 actor 最终产出注入 prompt，使观察者据实总结、不虚构。"""
+    msgs = DefaultComposer()._build_background_observe_messages(
+        _blocks(), _req(boundary, outputs=_FINISH_RESULT))
+    joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
+    assert _FINISH_RESULT in joined
+    assert "Actor 的最终产出" in joined
+    # 注入段在 cue 之前（先看产出，再被要求总结）
+    assert joined.index(_FINISH_RESULT) < joined.index("collect_process_report")
+
+
+@pytest.mark.parametrize("boundary", ["interrupt", "plain_text"])
+def test_non_close_boundary_does_not_inject_finish_result(boundary):
+    """非 close 段有真实 actor 动作可见，不注入 finish 产出。"""
+    msgs = DefaultComposer()._build_background_observe_messages(
+        _blocks(), _req(boundary, outputs=_FINISH_RESULT))
+    joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
+    assert "Actor 的最终产出" not in joined
+
+
+def test_close_boundary_no_outputs_no_injection():
+    """close 段但无产出（task.outputs 空）→ 不注入，保持原行为。"""
+    msgs = DefaultComposer()._build_background_observe_messages(
+        _blocks(), _req("finish", outputs=""))
+    joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
+    assert "Actor 的最终产出" not in joined

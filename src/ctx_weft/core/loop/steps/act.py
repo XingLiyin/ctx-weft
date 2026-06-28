@@ -111,6 +111,9 @@ class ActStep(Step):
             await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
                 "turn": turn_num, "reason": "tool_calls_processed"}))
 
+            # finish_task 与 delegate/replan 同批：finish 胜出（派发改投为独立后继）。
+            _reconcile_finish_vs_dispatch(state, ctx, turn.tool_calls)
+
             if state.task.actor_done:
                 exit_reason = "actor_done"
                 break
@@ -368,6 +371,39 @@ async def _execute_tool_calls(
 
     ctx.run_phase.in_tool_loop = False
     return tool_results
+
+
+def _reconcile_finish_vs_dispatch(
+    state: LoopState, ctx: LoopContext, tool_calls: list[ToolCall],
+) -> None:
+    """finish_task 与 delegate_task / delegate_plan / replan 同批出现时仲裁：finish 胜出。
+
+    两类工具语义互斥——一个要当前 task 收尾(→observe)，一个要它挂起等子任务(→suspend)。
+    用户意图是「我做完了，顺手派生独立后续」：故 finish 胜出，被派发任务从「当前 task 的
+    阻塞子任务」改投为「当前 task 的 parent 名下的独立后继」(当前是 root 则为顶层)，自行调度。
+
+    - detach_staged：把本轮 staged 子任务改挂到 parent，切断与收尾 task 的阻塞链。
+    - status 复位为 ACTIVE：撤销 delegate 置的 SUSPENDED，使路由走 observe(task.outputs
+      已由 finish_task 写好)。
+    - 清 spawn_titles：避免 SuspendStep 误报(虽已不路由到 suspend，仍清掉防脏状态)。
+
+    顺序无关：只看本批最终是否两类工具都出现。
+    """
+    from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS
+    if ctx.task_manager is None:
+        return
+    names = {tc.name for tc in tool_calls}
+    if FINISH_TASK_NAME not in names or not any(n in DISPATCH_TOOLS for n in names):
+        return
+    ctx.task_manager.detach_staged(state.task.id, state.task.parent_task_id)
+    state.task.status = "ACTIVE"
+    if isinstance(state.task.settings, NormalTaskSettings):
+        state.task.settings.spawn_titles = []
+    logger.info(
+        "act: finish_task + dispatch in same batch on task %s — finishing it; "
+        "detaching delegated work to parent %s",
+        state.task.id, state.task.parent_task_id,
+    )
 
 
 async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: int) -> None:
