@@ -92,16 +92,18 @@ def test_classification_sets_are_qualified() -> None:
     assert "delegate_task" not in DISPATCH_TOOLS  # bare no longer matches
 
 
-async def test_control_tool_resolves_when_cache_evicted() -> None:
-    """Control tools are session-global: the gateway resolves them even when the per-agent
-    capability cache is empty (e.g. a fire-and-forget background observe invoking
-    collect_process_report AFTER its run ended and the per-agent cache was evicted).
+async def test_control_tool_resolves_from_global_region_when_agent_uncached() -> None:
+    """Control tools live in the cache's session-global region (register_global), so the gateway
+    resolves them even when the per-agent snapshot is empty — e.g. a fire-and-forget background
+    observe invoking collect_process_report AFTER its run ended and the per-agent cache was evicted.
     """
     from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
 
     mem, state, ctx = _state_ctx()
     provider = ControlCapabilityProvider()
-    cache = CapabilityCache()  # EMPTY — agent binding evicted (run already finished)
+    cache = CapabilityCache()
+    cache.register_global(await provider.list(ctx.provider_ctx))  # session 全局区
+    # 不 put(agent_1) —— 模拟 per-agent 快照被 evict 后为空
     gw = CapabilityGateway(
         capability_cache=cache, capability_providers=[provider],
         memory=mem, event_bus=InProcessEventBus(),
@@ -110,7 +112,7 @@ async def test_control_tool_resolves_when_cache_evicted() -> None:
         "control__collect_process_report",
         {"task_process_report": "段总结X"}, state, ctx,
     )
-    assert res.is_error is False, f"expected resolved via global fallback, got: {res.content}"
+    assert res.is_error is False, f"expected resolved via global region, got: {res.content}"
     assert res.content == "段总结X"
 
 

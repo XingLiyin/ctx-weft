@@ -46,8 +46,18 @@ async def resolve_capabilities(state, ctx) -> list:
 
 
 async def resolve_and_bind(state, ctx) -> list:
-    """解析 capability 并写入 per-agent cache，返回绑定列表。"""
+    """解析 capability 并写入 cache，返回绑定列表。
+
+    控制工具是 session 全局的（每个 agent 都拿全部、生命周期为 session），注册到 cache 全局区
+    （register_global，不随 per-run evict 逐出）；其余 per-run 解析的能力（skill/mcp/agent）按
+    per-agent put。返回的 bound 仍含全部（供本 run 的 assembly）。
+    """
+    from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as _CONTROL
     bound = await resolve_capabilities(state, ctx)
     if ctx.capability_cache is not None:
-        ctx.capability_cache.put(state.agent.id, bound)
+        _control_prefix = f"{_CONTROL}:"
+        control = [c for c in bound if c.id.startswith(_control_prefix)]
+        other = [c for c in bound if not c.id.startswith(_control_prefix)]
+        ctx.capability_cache.register_global(control)
+        ctx.capability_cache.put(state.agent.id, other)
     return bound

@@ -125,14 +125,9 @@ class CapabilityGateway:
         is_dispatch = tool_name in DISPATCH_TOOLS
         is_silent = tool_name in SILENT_TOOLS  # 不入 task 对话的编排/裁决工具
 
-        # 1. Lookup capability（只处理 kind="tool"）
+        # 1. Lookup capability（只处理 kind="tool"）。控制工具的全局可达性由 CapabilityCache 的
+        # session 全局区保证（get_by_qualified_name 回退），gateway 无需特殊逻辑。
         cap = self._cache.get_by_qualified_name(state.agent.id, tool_name)
-        if cap is None:
-            # per-agent cache 命中失败时，控制工具走全局兜底：控制工具是 session 全局的、
-            # 非 per-agent 可逐出资源。fire-and-forget 的 background observe 可能在 run 结束、
-            # agent cache 被逐出后才调 collect_process_report——此时仍应解析成功。
-            from ctx_weft.core.orchestrator.control_capability import control_tool_capability
-            cap = control_tool_capability(tool_name)
         if cap is None or cap.kind != "tool":
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,
