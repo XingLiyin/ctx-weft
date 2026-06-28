@@ -1,11 +1,19 @@
-"""AgentRecallSource：统一装配路径（spec 2026-06-23 重构）。
+"""AgentRecallSource：统一装配路径（spec 2026-06-23 重构；task-resident 语义 2026-06-28）。
 
 agent 是上下文组织单元：一次召回 = 本 agent 名下所有 task 的记录，按 timestamp 归并。
-- OPEN task → 完整对话（task 层 USER_PROMPT/LLM_RESPONSE/TOOL_RESULT/TASK_COMPACT_SUMMARY，
-  按 agent_id 跨 task 召回；CLOSED task 的对话已 supersede，不会返回）。
-- CLOSED task → 残留：TASK_DISPATCH ↔ TASK_DISPATCH_RESULT 配对（未配对 dispatch 隐去，
-  避免悬空 tool_call）。AGENT_COMPACT_SUMMARY → user 摘要回合（与 apply_compact 写入的 role=user 一致）；
-  AGENT_CONVERSATION_TURN → 原样回合（inherit_memory 快照载体）。
+
+task-resident（spec 2026-06-28）：
+- **未折叠 task body**（ALL tasks，无论是否结束）→ task 层记录
+  （USER_PROMPT/LLM_RESPONSE/TOOL_RESULT/TASK_COMPACT_SUMMARY），按 agent_id 跨 task 召回。
+  body 不因 close 而 supersede（旧的「CLOSED body 已 supersede 故不返回」假设已失效）。
+- **结束 task 的 finish 对**（AGENT_CONVERSATION_TURN：assistant finish_task + tool Process Report）
+  → agent 层；按 (timestamp, seq_no) 与 body 归并 → `[body][finish 对]`。
+- **运行中/暂停 task**（status ≠ FINISHED，无 finish 对）→ 只有 body，无 finish 对 → `[body]`。
+- OPEN/CLOSED 判据：task.status（或等价地：finish 对是否存在），不依赖 supersession 状态。
+
+agent 层另含：TASK_DISPATCH ↔ TASK_DISPATCH_RESULT 配对（未配对 dispatch 隐去，避免悬空
+tool_call）；AGENT_COMPACT_SUMMARY → user 摘要回合；AGENT_CONVERSATION_TURN（finish 对 +
+inherit_memory 快照载体）→ 原样回合。
 
 取代旧的 RecentMemorySource + AgentExperienceSource 双源。
 """
@@ -23,7 +31,8 @@ from ctx_weft.protocols.capability import qualify
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
 
-# OPEN task 对话类型（task 层，按 agent_id 跨 task 召回）
+# task 层 body 类型（ALL 未折叠 task，含已结束的；按 agent_id 跨 task 召回）
+# task-resident：body 不因 close 而 supersede，OPEN/CLOSED 由 task.status / finish 对判，不靠 supersession。
 _TASK_TYPES = [
     MemoryEventType.USER_PROMPT,
     MemoryEventType.LLM_RESPONSE,
@@ -43,7 +52,11 @@ _RECALL_ALL = 2000
 
 
 class AgentRecallSource:
-    """单一装配源：OPEN task 全对话 + CLOSED 残留，按 timestamp 在 composer 归并。"""
+    """単一装配源（task-resident，spec 2026-06-28）：
+    ① task 层 body（所有未折叠 task，含已结束的）+ ② agent 层 finish 对/dispatch 对/经验，
+    按 (timestamp, seq_no) 在 composer 归并。
+    结束 task → `[body][finish 对]`；运行中/暂停 task → `[body]`（无 finish 对）。
+    """
 
     name = "agent_recall"
 
@@ -57,7 +70,7 @@ class AgentRecallSource:
     ) -> AsyncIterator["ContextBlock"]:
         from ctx_weft.core.assembler.assembler import ContextBlock
 
-        # ── 1) OPEN task 对话：按 agent_id 跨 task 召回 ──
+        # ── 1) task 层 body：按 agent_id 跨 task 召回（ALL 未折叠 task，含已结束的） ──
         task_records = await deps.memory.recall_recent_by_agent(
             agent_scope=request.scope,
             types=_TASK_TYPES,
