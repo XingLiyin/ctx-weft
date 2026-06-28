@@ -23,11 +23,13 @@ def _clear_module_state():
     bo._task_pending.clear()
     bo._orphan_tasks.clear()
     bo._close_report.clear()
+    bo._close_synth.clear()
     yield
     bo._task_locks.clear()
     bo._task_pending.clear()
     bo._orphan_tasks.clear()
     bo._close_report.clear()
+    bo._close_synth.clear()
 
 
 # ── helpers shared by new ReAct-based tests ───────────────────────────────────

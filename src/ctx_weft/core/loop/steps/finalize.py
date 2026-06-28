@@ -219,16 +219,14 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
     """close 合成交错时间线胶囊（spec §3.3）：快照幸存 task 对话 → AGENT_CONVERSATION_TURN
     （保留原始 timestamp）+ 末尾合成 finish 对。
 
-    step1: 等本 task 的后台 observe 完成（强一致）。
+    step1: 非阻塞——close 边界 bg observe 已不写 memory（结果落 _close_report 槽），
+           survivors 快照不依赖它；A1 设计下不再 await await_pending_background_observe。
     step2: 镜像幸存 task 层事件到 agent 层 AGENT_CONVERSATION_TURN，保留原始 timestamp/role/tool 元数据。
            角色映射：USER_PROMPT→user, TASK_COMPACT_SUMMARY→assistant（继承存储 role）,
            LLM_RESPONSE→assistant（携带 tool_calls），TOOL_RESULT→tool（携带 tool_call_id）。
     step3: 追加合成 finish 对（assistant finish_task tool_call + tool Process Report）。
+           A1：机会性取 _close_report 槽；槽空则用薄占位 + 登记 _close_synth 待 bg 异步替换。
     """
-    from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
-
-    # step1：强一致——等本 task 的后台 observe（末段摘要）跑完（spec §3.3 step1，方案乙）
-    await await_pending_background_observe(task.id)
 
     # step2：召回幸存 task 层对话，逐条镜像成 agent 层 AGENT_CONVERSATION_TURN
     task_scope = MemoryScope(session_id=scope.session_id, task_id=task.id, agent_id=scope.agent_id)
@@ -267,6 +265,10 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
         )
 
     # step3：合成 finish 对（末尾承载，spec §3.3 step3 + §3.5）
+    # A1: 机会性取 _close_report 槽；槽空则用薄占位
+    from ctx_weft.core.loop.steps.background_observe import (
+        pop_close_report, register_close_synth, _replace_finish_report,
+    )
     base = now_utc()
     tool_call_id = generate_id("tcall")
     outputs_text = _output_text(task.outputs) or ("(无最终产出)" if outcome == "fail" else "")
@@ -308,6 +310,17 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
         ),
         provider_ctx,
     )
+
+    # A1: 机会性替换或登记异步替换（pop + register 之间无 await，关闭竞态窗口）
+    bg_report = pop_close_report(task.id)
+    if bg_report is not None:
+        # background 已先完成（少见）→ 立即替换占位
+        await _replace_finish_report(
+            memory, provider_ctx, scope, task.id, tool_call_id, bg_report, outcome,
+        )
+    else:
+        # background 尚未完成 → 登记待异步替换（sync，无 await）
+        register_close_synth(task.id, tool_call_id, scope, outcome)
 
 
 class FinalizeStep(Step):

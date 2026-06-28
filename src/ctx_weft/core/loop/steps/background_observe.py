@@ -28,12 +28,90 @@ _orphan_tasks: set[asyncio.Task] = set()
 # close 路径结果槽：task_id → process_report（finalize Task 8 通过 pop_close_report 取用）
 _close_report: dict[str, str] = {}
 
+# close 路径合成槽：task_id → (tool_call_id, scope, outcome)
+# finalize 先到时登记，bg 回调后替换 finish tool 记录
+_close_synth: dict[str, tuple] = {}
+
 _CLOSE_BOUNDARIES = {"finish", "normal"}
 
 
 def pop_close_report(task_id: str) -> str | None:
     """取走 close 路径产出的 process_report；不存在则返回 None。"""
     return _close_report.pop(task_id, None)
+
+
+def register_close_synth(task_id: str, tool_call_id: str, scope, outcome: str) -> None:
+    """finalize 先到时登记：finish 对已合成，待 bg 回调替换 Process Report。"""
+    _close_synth[task_id] = (tool_call_id, scope, outcome)
+
+
+def pop_close_synth(task_id: str) -> tuple | None:
+    """bg 回调取走合成登记；不存在则返回 None。"""
+    return _close_synth.pop(task_id, None)
+
+
+async def _replace_finish_report(
+    memory,
+    provider_ctx,
+    scope,
+    task_id: str,
+    tool_call_id: str,
+    report: str,
+    outcome: str,
+) -> None:
+    """supersede 旧 finish tool 记录，ingest 新记录（同 tool_call_id，更新后的 report）。
+
+    spec §3.6 最佳努力：若找不到匹配记录则 log + no-op。
+    """
+    from ctx_weft.core.utils import now_utc
+    from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope
+
+    # 召回 agent scope 内所有 AGENT_CONVERSATION_TURN
+    turns = await memory.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 500, provider_ctx)
+
+    # 找 role=="tool"、origin_task_id==task_id、content 以 "Process Report:" 开头的记录
+    matching = [
+        r for r in turns
+        if r.role == "tool"
+        and r.metadata.get("origin_task_id") == task_id
+        and isinstance(r.content, str)
+        and "Process Report:" in r.content
+        and r.metadata.get("tool_call_id") == tool_call_id
+    ]
+    if not matching:
+        logger.warning(
+            "A1 _replace_finish_report: no matching finish tool record found for task_id=%s "
+            "tool_call_id=%s; skipping replacement (best-effort §3.7)",
+            task_id, tool_call_id,
+        )
+        return
+
+    # supersede 旧记录（可能多条，保守全删）
+    old_ids = [r.id for r in matching]
+    await memory.supersede(old_ids, provider_ctx)
+
+    # 取第一条的元数据作为模板
+    old_meta = matching[0].metadata
+    old_ts = matching[0].timestamp
+
+    report_prefix = "[outcome=fail] " if outcome == "fail" else ""
+    new_content = f"{report_prefix}Process Report: {report}"
+
+    await memory.ingest(
+        MemoryEvent(
+            type=MemoryEventType.AGENT_CONVERSATION_TURN,
+            scope=scope,
+            content=new_content,
+            timestamp=old_ts,
+            role="tool",
+            metadata={
+                "origin_task_id": task_id,
+                "parent_task_id": old_meta.get("parent_task_id"),
+                "tool_call_id": tool_call_id,
+            },
+        ),
+        provider_ctx,
+    )
 
 
 def _clear_pending(t: asyncio.Task, tid: str) -> None:
@@ -86,7 +164,15 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
             )
             report = content or "[Context compacted]"
             if boundary in _CLOSE_BOUNDARIES:
-                _close_report[state.task.id] = report  # 不写 memory（不变量 3）
+                synth = pop_close_synth(state.task.id)  # sync check-and-clear（无 await）
+                if synth is not None:
+                    tool_call_id, scope, outcome = synth
+                    await _replace_finish_report(
+                        ctx.memory, ctx.provider_ctx, scope, state.task.id,
+                        tool_call_id, report, outcome,
+                    )
+                else:
+                    _close_report[state.task.id] = report  # 不写 memory（不变量 3）
             else:
                 await ctx.memory.apply_compact(
                     scope=state.scope,
