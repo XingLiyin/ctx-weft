@@ -101,8 +101,9 @@ async def test_short_root_leaf_keeps_body_and_synthesizes_finish_pair() -> None:
     assert residues == []
 
 
-async def test_long_root_leaf_keeps_body_and_synthesizes_finish_pair() -> None:
-    """task-resident：长 root 叶子 close 写 finish 对；body 留 task 层（不再 supersede）。"""
+async def test_long_root_leaf_supersedes_final_raw_keeps_anchor_and_finish_pair() -> None:
+    """Task 2（spec 2026-06-28 §3.2）：长 root 叶子 close 写 finish 对，且 supersede 末 raw 段
+    （active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点保留。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)  # >turn_cap and big → not short
@@ -112,9 +113,11 @@ async def test_long_root_leaf_keeps_body_and_synthesizes_finish_pair() -> None:
     await finalize_task_memory(mem, _state(task, scope, cfg, _FakeTM()),
                                task, "final out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # body kept (task-resident: body is the capsule)
-    convs = await mem.recall_recent(scope, [T.USER_PROMPT, T.LLM_RESPONSE], 100, _ctx())
-    assert convs != [], "task-layer body must stay (not superseded)"
+    # Task 2: 末 raw 段 supersede（active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点留
+    llm = await mem.recall_recent(scope, [T.LLM_RESPONSE], 100, _ctx())
+    assert llm == [], "long task: final raw LLM_RESPONSE must be superseded"
+    anchors = await mem.recall_recent(scope, [T.USER_PROMPT], 100, _ctx())
+    assert anchors != [], "USER_PROMPT anchor must survive"
     # finish pair written as AGENT_CONVERSATION_TURN (tool role holds Process Report)
     assert await _finish_tools(mem, scope, "t1"), "expected finish-pair tool turn in agent capsule"
 
@@ -195,7 +198,9 @@ async def test_same_agent_short_leaf_bubbles_scheduled_keeps_body() -> None:
     assert own != []
 
 
-async def test_same_agent_nonshort_child_bubbles_keeps_body() -> None:
+async def test_same_agent_nonshort_child_bubbles_supersedes_final_raw() -> None:
+    """Task 2（spec 2026-06-28 §3.2）：长 same-agent 子任务 close supersede 末 raw 段
+    （active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点保留；bubble 派发对照旧。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t2", "ag1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)  # over turn cap → not short
@@ -213,9 +218,11 @@ async def test_same_agent_nonshort_child_bubbles_keeps_body() -> None:
     res = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
     bubble = [r for r in res if r.metadata.get("tool_call_id") == "oc2"]
     assert bubble and bubble[0].metadata.get("parent_task_id") == "t1"
-    # own conversation kept (task-resident: body stays)
+    # Task 2: 长任务末 raw 段被 supersede（active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点留
     own = await mem.recall_recent(scope, [T.LLM_RESPONSE], 100, _ctx())
-    assert own != []
+    assert own == [], "long task: final raw LLM_RESPONSE must be superseded"
+    anchors = await mem.recall_recent(scope, [T.USER_PROMPT], 100, _ctx())
+    assert anchors != [], "USER_PROMPT anchor must survive"
     # NO self-residue: agent scope must contain no TASK_DISPATCH_RESULT with parent_task_id is None
     agent_res = await mem.recall_recent(_sc("t2", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
     assert all(r.metadata.get("parent_task_id") is not None for r in agent_res)

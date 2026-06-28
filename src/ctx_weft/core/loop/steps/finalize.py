@@ -27,6 +27,13 @@ _OWN_CONV_TYPES = [
     MemoryEventType.TASK_COMPACT_SUMMARY,
 ]
 
+# 长任务 close 时 supersede 的 task 层「末 raw 段」类型（保留 USER_PROMPT / TASK_COMPACT_SUMMARY 锚点）
+_FINAL_RAW_TYPES = [
+    MemoryEventType.LLM_RESPONSE,
+    MemoryEventType.TOOL_INVOCATION,
+    MemoryEventType.TOOL_RESULT,
+]
+
 
 def _descendant_task_ids(root_id: str, task_manager) -> set[str]:
     """BFS over children_of → 该 task 名下所有后代 task_id（不含自身）。"""
@@ -71,16 +78,30 @@ async def finalize_task_memory(memory, state, task, mem_content: str, outcome: s
         memory, state.scope, task, state.agent.loop_config, ctx, bool(descendants),
     )
     return await _close_one(
-        memory, state, task, mem_content, outcome, ctx, short=short, descendants=descendants,
+        memory, state, task, mem_content, outcome, ctx, short=short,
     )
 
 
+async def _supersede_final_raw_segment(memory, scope, ctx) -> None:
+    """长任务 close：supersede task 层末 raw 段（active LLM_RESPONSE/TOOL_INVOCATION/TOOL_RESULT），
+    保留 USER_PROMPT + TASK_COMPACT_SUMMARY 锚点（spec 2026-06-28 §3.2）。
+
+    中间段已在各自边界由后台 observe 折成 TASK_COMPACT_SUMMARY（折时 supersede 了对应 raw），
+    故此刻 active 的 raw 即「末段」。末段已由 finish 对的 Process Report 承载（不变量 4）→
+    直接 supersede、**不另产新 TASK_COMPACT_SUMMARY**（避免与 finish 对重复）。
+    """
+    records = await memory.recall_recent(scope, _FINAL_RAW_TYPES, 2000, ctx.provider_ctx)
+    ids = [r.id for r in records]
+    if ids:
+        await memory.supersede(ids, ctx.provider_ctx)
+
+
 async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
-                     *, short: bool, descendants: set[str]) -> list:
+                     *, short: bool) -> list:
     """close 主体（task-resident，spec 2026-06-28）：bubble / 写 finish 对（不镜像 body）。
 
-    每个结束 task 无条件写 finish 对、body 留 task 层（不 supersede、不 GC 子树）。`short`
-    参数本 task 不再影响合成/supersede（Task 2 重新用于 body raw-vs-压末段决策）。返回事件列表。
+    每个结束 task 无条件写 finish 对、body 留 task 层（不 GC 子树）。长任务额外 supersede 末 raw
+    段（短任务留全 raw）——`short` 决定 body raw-vs-压末段（spec §3.2）。返回事件列表。
     """
     # Terminal finalize is single-entry by construction (retry is non-terminal; restore reschedules
     # only non-terminal tasks; re-dispatch uses a new task id), so the residue/bubble writes here
@@ -139,7 +160,10 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                      "source": "root_dispatch", "content_length": len(mem_content)},
         ))
 
-    # task-resident：body 留 task 层（不 supersede 自身对话、不 GC 子树）——见 spec 2026-06-28 §5。
+    # task-resident（spec 2026-06-28 §3.2）：body 留 task 层、不 GC 子树。
+    # 长任务额外 supersede 末 raw 段（保留 USER_PROMPT/TASK_COMPACT_SUMMARY 锚点）；短任务留全 raw。
+    if not short:
+        await _supersede_final_raw_segment(memory, state.scope, ctx)
     return events
 
 
