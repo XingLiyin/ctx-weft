@@ -301,14 +301,16 @@ class DefaultComposer(Composer):
 
         history_pairs = self._history_to_messages_with_sources(history_blocks)
         messages: list[LLMMessage] = [m for m, _src, _mtype in history_pairs]
-        # 当前 task 的首条 user 回合（directive 的落点）：history 里首条 USER_PROMPT 来源的
+        # 当前 task 的 user 回合（directive 的落点）：history 里**最后**一条 USER_PROMPT 来源的
         # user message（task_conversation / agent_recall 两种 source 均可能承载）。
+        # task-resident 胶囊下，先前已结束 task 的 raw body（含其 USER_PROMPT）也会经 agent_recall
+        # 召回进 history，故同时存在多条 user_prompt；当前 task 的永远是最近一条——取末条而非首条，
+        # 与 _frame_current_message（同样取末条作 "## Current Message"）保持一致。
         # 找不到（fresh task）则留到下方追加的当前任务上下文 user message。
-        current_task_user_idx = next(
-            (i for i, (m, src, mtype) in enumerate(history_pairs)
-             if m.role == "user" and mtype == "user_prompt"),
-            None,
-        )
+        current_task_user_idx = None
+        for i, (m, src, mtype) in enumerate(history_pairs):
+            if m.role == "user" and mtype == "user_prompt":
+                current_task_user_idx = i
 
         task = request.task
         parts: list[str] = []
@@ -363,8 +365,9 @@ class DefaultComposer(Composer):
         directive_text = self._build_directive_section(blocks)
         capabilities_text = self._build_capabilities_section(blocks)
         if getattr(request, "purpose", None) == "act":
-            # directive 落到「当前 task」的首条 user message（紧跟任务上下文之后），而不是整个
-            # message 列表的第一条 user——后者可能是更早的跨 task agent_experience 回合。兜底退回末条 user。
+            # directive 落到「当前 task」的 user message（紧跟任务上下文之后），即 history 里末条
+            # user_prompt——而不是整个 message 列表的第一条 user（可能是更早的、经 agent_recall
+            # 召回的已结束 task 回合）。兜底退回末条 user。
             target_idx = current_task_user_idx
             if target_idx is None:
                 target_idx = self._last_user_index(merged)
