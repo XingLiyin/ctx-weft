@@ -53,6 +53,7 @@ DELEGATE_PLAN_NAME = qualify(f"{PROVIDER_NAME}:delegate_plan")
 ASK_USER_NAME = qualify(f"{PROVIDER_NAME}:ask_user")
 REPLAN_NAME = qualify(f"{PROVIDER_NAME}:replan")
 REPORT_TASK_OUTCOME_NAME = qualify(f"{PROVIDER_NAME}:report_task_outcome")
+BACKGROUND_PROCESS_REPORT_NAME = qualify(f"{PROVIDER_NAME}:collect_process_report")
 UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
 
 
@@ -449,6 +450,22 @@ def report_task_outcome(
         content=f"Assessment recorded: outcome={task_status}.{failure_part} {task_process_report}{review_msg}",
         metadata=metadata,
     )
+
+
+@control_tool(purposes=["background_observe"])
+def collect_process_report(
+    task_process_report: Annotated[
+        str,
+        "A thorough execution record: describe what was accomplished, what was modified or "
+        "produced, which tools were called and whether any failed, and — if incomplete — what remains and why. "
+        "Written to memory and read by the next actor turn, so be specific and evidence-based.",
+    ],
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Summarize the current segment's progress as a process report. Zero state write:
+    this tool never touches task.status / observer_outcome / actor_done / process_report / error."""
+    return ControlResult(content=task_process_report)
 
 
 @control_tool(purposes=["act"])
