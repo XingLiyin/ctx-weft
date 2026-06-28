@@ -29,7 +29,12 @@ class IdentitySource:
         template = request.template
         if template is None:
             return
-        facet = template.identity.get(request.purpose) or template.identity.get("act")
+        # background_observe 复用 observe 的 ROLE facet；缺 observe 再回退 act。
+        facet = (
+            template.identity.get(request.purpose)
+            or (template.identity.get("observe") if request.purpose == "background_observe" else None)
+            or template.identity.get("act")
+        )
         if facet is None:
             return
 
