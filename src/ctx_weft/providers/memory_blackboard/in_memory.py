@@ -249,12 +249,15 @@ class InMemoryMemoryProvider(MemoryProvider):
             self._seq_counters[scope_key] = self._seq_counters.get(scope_key, 0) + 1
             summary_seq = self._seq_counters[scope_key]
 
+        # task 层段摘要 = LLM 对前段的自述（role=assistant）；agent 层折叠摘要是 prompt
+        # 首条、Anthropic 首条 assistant 会 400，故保持 role=user。
+        summary_role = "assistant" if layer is MemoryLayer.TASK else "user"
         compact_event = MemoryEvent(
             type=summary_type,
             scope=scope,
             content=summary,
             timestamp=summary_ts,
-            role="user",
+            role=summary_role,
             metadata={"keep_last": keep_last, "archived_count": len(to_archive)},
         )
         async with self._lock:

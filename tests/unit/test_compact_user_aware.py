@@ -54,3 +54,35 @@ async def test_apply_compact_task_protects_user_prompt():
     up1_idx = kinds.index((MemoryEventType.USER_PROMPT, "原始诉求"))
     up2_idx = kinds.index((MemoryEventType.USER_PROMPT, "HITL回复"))
     assert up1_idx < summary_idx < up2_idx
+
+
+@pytest.mark.asyncio
+async def test_apply_compact_task_summary_role_is_assistant():
+    """task 层段摘要 = LLM 自述 → role=assistant。"""
+    p = InMemoryMemoryProvider()
+    base = datetime(2026, 6, 27, 10, 0, 0, tzinfo=UTC)
+    await _ingest(p, MemoryEventType.USER_PROMPT, "原始诉求", base, "user")
+    await _ingest(p, MemoryEventType.LLM_RESPONSE, "想法", base + timedelta(seconds=1), "assistant")
+    await p.apply_compact(
+        scope=_scope(), summary="段摘要", keep_last=0, ctx=_ctx(),
+        layer=MemoryLayer.TASK, protect_types=(MemoryEventType.USER_PROMPT,),
+    )
+    recs = await p.recall_recent(_scope(), [MemoryEventType.TASK_COMPACT_SUMMARY], 100, _ctx())
+    assert len(recs) == 1
+    assert recs[0].role == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_apply_compact_agent_summary_role_stays_user():
+    """agent 层折叠摘要是 prompt 首条，必须 role=user（B 不动）。"""
+    p = InMemoryMemoryProvider()
+    base = datetime(2026, 6, 27, 10, 0, 0, tzinfo=UTC)
+    await _ingest(p, MemoryEventType.TASK_DISPATCH, "delegate", base, "assistant")
+    await _ingest(p, MemoryEventType.TASK_DISPATCH_RESULT, "done", base + timedelta(seconds=1), "tool")
+    await p.apply_compact(
+        scope=_scope(), summary="派发摘要", keep_last=0, ctx=_ctx(),
+        layer=MemoryLayer.AGENT,
+    )
+    recs = await p.recall_recent(_scope(), [MemoryEventType.AGENT_COMPACT_SUMMARY], 100, _ctx())
+    assert len(recs) == 1
+    assert recs[0].role == "user"
