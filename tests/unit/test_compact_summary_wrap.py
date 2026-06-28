@@ -31,6 +31,16 @@ def test_task_compact_summary_block_wrapped():
     assert blk.content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
 
 
+def test_task_compact_summary_assistant_not_wrapped():
+    """role=assistant 的段摘要 = 自述，不套「并非用户新指令」包装。"""
+    blk = record_to_history_block(
+        _rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX", role="assistant"),
+        "task_conversation", 0,
+    )
+    assert blk.content == "### 会话目标\nX"
+    assert blk.metadata["role"] == "assistant"
+
+
 def test_plain_user_prompt_not_wrapped():
     blk = record_to_history_block(_rec(T.USER_PROMPT, "你好"), "task_conversation", 0)
     assert blk.content == "你好"

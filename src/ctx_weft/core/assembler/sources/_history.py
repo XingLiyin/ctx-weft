@@ -33,9 +33,12 @@ def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "C
     from ctx_weft.core.assembler.assembler import ContextBlock
 
     text = content_to_text(record.content) if not isinstance(record.content, str) else record.content
-    if record.type == MemoryEventType.TASK_COMPACT_SUMMARY:
-        text = wrap_compact_summary(text)
     role = record.role or "user"
+    # 包装是给「以 user 身份呈现」的摘要消歧义；assistant 自述无需。新数据段摘要恒 assistant
+    # → 不套；旧数据若残留 role=user 仍套（防御）。AGENT_COMPACT_SUMMARY 在 agent_experience/
+    # agent_recall 自行包装，不走此分支。
+    if record.type == MemoryEventType.TASK_COMPACT_SUMMARY and role == "user":
+        text = wrap_compact_summary(text)
     md = {
         "role": role,
         "type": record.type,
