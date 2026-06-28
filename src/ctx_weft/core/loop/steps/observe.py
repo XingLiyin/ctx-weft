@@ -31,6 +31,133 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── Shared ReAct helper ───────────────────────────────────────────────────────
+
+
+async def run_observe_react(
+    state: "Any",
+    ctx: "Any",
+    *,
+    system: str,
+    messages: "list[LLMMessage]",
+    tools: "Any",
+    request_id_prefix: str,
+    max_rounds: int,
+) -> "tuple[str | None, str]":
+    """共用 observe/background ReAct：跑多轮 LLM，任一轮调用控制工具即取其 ControlResult.content 终止。
+
+    返回 (last_tool_content, last_text)：
+      last_tool_content — 最后一个被调用控制工具返回的 ControlResult.content（无工具调用则 None）。
+      last_text         — 最后一轮的纯文本。
+    不解读 verdict、不写 task 状态（状态写是工具副作用，由调用方绑定的工具决定）。
+    """
+    agent = state.agent
+    current_messages = list(messages)
+    last_text = ""
+
+    for round_num in range(max_rounds):
+        req_id = f"{request_id_prefix}_r{round_num}"
+        await ctx.event_bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={
+            "request_id": req_id,
+            "model": agent.runtime.get("llm_model", "mock"),
+            "round": round_num,
+        }))
+
+        llm_request = LLMRequest(
+            model=agent.runtime.get("llm_model", "mock"),
+            system=system,
+            messages=list(current_messages),
+            tools=tools,
+        )
+
+        await ctx.event_bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
+            "request_id": req_id,
+            "round": round_num,
+            "system": system,
+            "messages": [
+                {"role": m.role, "content": m.content if isinstance(m.content, str) else str(m.content)}
+                for m in current_messages
+            ],
+            "tool_names": [t.name for t in tools],
+        }))
+
+        accumulated_text = ""
+        tool_calls = []
+        usage = LLMUsage()
+
+        async for chunk in stream_llm_resilient(ctx, state, llm_request):
+            if chunk.kind == "token":
+                accumulated_text += chunk.text
+                await ctx.event_bus.emit(make_event(
+                    state, EventType.LLM_TOKEN_STREAMED,
+                    payload={"request_id": req_id, "delta": chunk.text},
+                ))
+            elif chunk.kind == "tool_call" and chunk.tool_call is not None:
+                tool_calls.append(chunk.tool_call)
+            elif chunk.kind == "usage" and chunk.usage is not None:
+                usage = chunk.usage
+
+        if accumulated_text:
+            last_text = accumulated_text
+
+        # 更新 loop_guard（对齐 miniAgents _run_observer：取 actor/observer 的最大值）
+        if usage.prompt_tokens > 0:
+            agent.loop_guard.context_tokens = max(
+                agent.loop_guard.context_tokens, usage.prompt_tokens
+            )
+        # 同步累加 session.token_used
+        state.session.token_used += usage.prompt_tokens + usage.completion_tokens
+
+        await ctx.event_bus.emit(make_event(
+            state, EventType.LLM_RESPONSE_FINISHED,
+            payload={
+                "request_id": req_id,
+                "content": accumulated_text,
+                "tool_calls": [{"name": tc.name} for tc in tool_calls],
+                "usage": dataclasses.asdict(usage),
+                "round": round_num,
+            },
+        ))
+
+        if not tool_calls:
+            # LLM returned only text — no more rounds needed
+            break
+
+        current_messages.append(LLMMessage(
+            role="assistant",
+            content=accumulated_text,
+            tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls],
+        ))
+
+        tool_content = None
+        for tc in tool_calls:
+            if ctx.capability_gateway is not None:
+                result = await ctx.capability_gateway.invoke(
+                    tool_name=tc.name,
+                    arguments=tc.arguments,
+                    state=state,
+                    ctx=ctx,
+                    tool_call_id=tc.id,
+                )
+                content = result.content
+                tool_content = content
+            else:
+                logger.warning(
+                    "run_observe_react: no CapabilityGateway for tool '%s'", tc.name
+                )
+                content = f"[Error: CapabilityGateway not configured, tool '{tc.name}' skipped]"
+            current_messages.append(LLMMessage(
+                role="tool",
+                content=content,
+                tool_call_id=tc.id,
+            ))
+
+        if tool_content is not None:
+            return tool_content, last_text
+
+    return None, last_text
+
+
 def _is_own_root(task) -> bool:
     """root task 判定（与 finalize._close_one 保持一致）。
 
@@ -133,115 +260,23 @@ class ObserveStep(Step):
             actor_transcript=state.transcript,
         )
         prompt = await ctx.assembler.assemble(request)
-        current_messages = list(prompt.messages)
-        last_text = ""
 
-        for round_num in range(max_rounds):
-            req_id = f"obs_{agent.id}_{state.sequence_counter}_r{round_num}"
-            await ctx.event_bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={
-                "request_id": req_id,
-                "model": agent.runtime.get("llm_model", "mock"),
-                "round": round_num,
-            }))
+        tool_content, last_text = await run_observe_react(
+            state, ctx,
+            system=prompt.system,
+            messages=list(prompt.messages),
+            tools=prompt.tools,
+            request_id_prefix=f"obs_{agent.id}_{state.sequence_counter}",
+            max_rounds=max_rounds,
+        )
 
-            llm_request = LLMRequest(
-                model=agent.runtime.get("llm_model", "mock"),
-                system=prompt.system,
-                messages=list(current_messages),
-                tools=prompt.tools,
+        if tool_content is not None:
+            # report_task_outcome already wrote task.observer_outcome / task.process_report
+            return Verdict(
+                task_outcome=state.task.observer_outcome or "success",
+                summary=state.task.process_report or last_text[:500],
+                reported=True,
             )
-
-            await ctx.event_bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
-                "request_id": req_id,
-                "round": round_num,
-                "system": prompt.system,
-                "messages": [
-                    {"role": m.role, "content": m.content if isinstance(m.content, str) else str(m.content)}
-                    for m in current_messages
-                ],
-                "tool_names": [t.name for t in prompt.tools],
-            }))
-
-            accumulated_text = ""
-            tool_calls = []
-            usage = LLMUsage()
-
-            async for chunk in stream_llm_resilient(ctx, state, llm_request):
-                if chunk.kind == "token":
-                    accumulated_text += chunk.text
-                    await ctx.event_bus.emit(make_event(
-                        state, EventType.LLM_TOKEN_STREAMED,
-                        payload={"request_id": req_id, "delta": chunk.text},
-                    ))
-                elif chunk.kind == "tool_call" and chunk.tool_call is not None:
-                    tool_calls.append(chunk.tool_call)
-                elif chunk.kind == "usage" and chunk.usage is not None:
-                    usage = chunk.usage
-
-            if accumulated_text:
-                last_text = accumulated_text
-
-            # 更新 loop_guard（对齐 miniAgents _run_observer：取 actor/observer 的最大值）
-            if usage.prompt_tokens > 0:
-                agent.loop_guard.context_tokens = max(
-                    agent.loop_guard.context_tokens, usage.prompt_tokens
-                )
-            # 同步累加 session.token_used
-            state.session.token_used += usage.prompt_tokens + usage.completion_tokens
-
-            await ctx.event_bus.emit(make_event(
-                state, EventType.LLM_RESPONSE_FINISHED,
-                payload={
-                    "request_id": req_id,
-                    "content": accumulated_text,
-                    "tool_calls": [{"name": tc.name} for tc in tool_calls],
-                    "usage": dataclasses.asdict(usage),
-                    "round": round_num,
-                },
-            ))
-
-            if not tool_calls:
-                # LLM returned only text — no more rounds needed
-                break
-
-            current_messages.append(LLMMessage(
-                role="assistant",
-                content=accumulated_text,
-                tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls],
-            ))
-
-            terminate_result = None
-            for tc in tool_calls:
-                if ctx.capability_gateway is not None:
-                    status_before = state.task.status
-                    result = await ctx.capability_gateway.invoke(
-                        tool_name=tc.name,
-                        arguments=tc.arguments,
-                        state=state,
-                        ctx=ctx,
-                        tool_call_id=tc.id,
-                    )
-                    content = result.content
-                    if state.task.status != status_before:
-                        terminate_result = result
-                else:
-                    logger.warning(
-                        "ObserveStep: no CapabilityGateway for tool '%s'", tc.name
-                    )
-                    content = f"[Error: CapabilityGateway not configured, tool '{tc.name}' skipped]"
-                current_messages.append(LLMMessage(
-                    role="tool",
-                    content=content,
-                    tool_call_id=tc.id,
-                ))
-
-            if terminate_result is not None:
-                # report_task_outcome 已把三态裁决写入 task.observer_outcome
-                return Verdict(
-                    task_outcome=state.task.observer_outcome or "success",
-                    summary=state.task.process_report or last_text[:500],
-                    reported=True,
-                )
 
         logger.warning("ObserveStep: LLM did not call report_task_outcome in %d rounds, falling back to rules", max_rounds)
         return self._rule_observe(state)
