@@ -237,7 +237,7 @@ async def test_A3_mid_stream_interrupt_annotation() -> None:
         scope=tsc,
         content="〔段①·被用户打断〕正用 PyJWT 写 login() 签发，写到一半被打断。",
         timestamp=_BASE + timedelta(seconds=2),
-        role="user",  # apply_compact 写入时 role=user，_synthesize_dispatch_pair 会纠正为 assistant
+        role="assistant",  # apply_compact 存 role=assistant
         metadata={},
     )
     await mem.ingest(summary_event, _pctx())
@@ -604,7 +604,7 @@ async def test_H4_cross_agent_isolation() -> None:
     # 这里为简化直接写摘要+留 LLM_RESPONSE（不 supersede，保持对话可 snapshot）
     await mem.ingest(_ev(
         T.TASK_COMPACT_SUMMARY, child_scope,
-        "〔子段①〕检索 5 源、下载并清洗…", 5, role="user",  # apply_compact stores as role=user
+        "〔子段①〕检索 5 源、下载并清洗…", 5, role="assistant",  # apply_compact 存 role=assistant
     ), _pctx())
 
     child_task = _make_task(

@@ -221,7 +221,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
 
     step1: 等本 task 的后台 observe 完成（强一致）。
     step2: 镜像幸存 task 层事件到 agent 层 AGENT_CONVERSATION_TURN，保留原始 timestamp/role/tool 元数据。
-           角色映射：USER_PROMPT→user, TASK_COMPACT_SUMMARY→assistant（覆盖 DB 存储的 role=user）,
+           角色映射：USER_PROMPT→user, TASK_COMPACT_SUMMARY→assistant（继承存储 role）,
            LLM_RESPONSE→assistant（携带 tool_calls），TOOL_RESULT→tool（携带 tool_call_id）。
     step3: 追加合成 finish 对（assistant finish_task tool_call + tool Process Report）。
     """
@@ -241,13 +241,12 @@ async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, p
     survivors = list(reversed(survivors))  # newest-first → 时间序（oldest first）
 
     for r in survivors:
-        # 角色映射（任务指令修正版）：TASK_COMPACT_SUMMARY 覆盖存储的 role="user" → "assistant"
         if r.type == MemoryEventType.USER_PROMPT:
             role = "user"
-        elif r.type == MemoryEventType.TASK_COMPACT_SUMMARY:
-            role = "assistant"
         else:
-            role = r.role or "user"  # LLM_RESPONSE→assistant, TOOL_RESULT→tool 已在记录上
+            # TASK_COMPACT_SUMMARY 存储即 assistant；LLM_RESPONSE→assistant、TOOL_RESULT→tool
+            # 均已在记录 role 上，直接继承。
+            role = r.role or "user"
 
         md: dict = {"origin_task_id": task.id, "parent_task_id": task.parent_task_id}
         if role == "assistant":

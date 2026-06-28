@@ -37,6 +37,8 @@ async def test_launch_produces_summary_and_folds(monkeypatch, fake_state_ctx):
         100, ctx.provider_ctx)
     types = {r.type for r in recs}
     assert MT.TASK_COMPACT_SUMMARY in types
+    summary = next(r for r in recs if r.type == MT.TASK_COMPACT_SUMMARY)
+    assert summary.role == "assistant", "后台 observe 真实 apply_compact 应产 assistant 段摘要"
     assert MT.USER_PROMPT in types
     assert MT.LLM_RESPONSE not in types
 

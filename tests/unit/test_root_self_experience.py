@@ -3,7 +3,7 @@
 新行为（Task 6 重写后）：
 - 镜像幸存 task 层 USER_PROMPT/TASK_COMPACT_SUMMARY/LLM_RESPONSE/TOOL_RESULT
   → agent 层 AGENT_CONVERSATION_TURN，保留原始 timestamp。
-- TASK_COMPACT_SUMMARY 渲染 role=assistant（覆盖存储的 role=user）。
+- TASK_COMPACT_SUMMARY 渲染 role=assistant（继承存储 role=assistant）。
 - 末尾追加 finish 对（assistant finish_task tool_call + tool Process Report）。
 - user_prompt 来自 task 层幸存记录（不再从 task.user_prompt 字段静态取）。
 """
@@ -82,11 +82,11 @@ async def test_user_turn_from_surviving_task_layer_record():
 
 
 async def test_assistant_summary_turn_carries_compaction_summary():
-    """存活的 task_compact_summary 被镜像成 assistant 回合（覆盖存储的 role=user）。"""
+    """存活的 task_compact_summary 被镜像成 assistant 回合（继承存储 role=assistant）。"""
     mem = InMemoryMemoryProvider()
     tsc = _task_sc()
     asc = _agent_sc()
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "### 会话目标\n转 PDF\n### 已完成工作\n- 试过 COM", 1, role="user"), _ctx())
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "### 会话目标\n转 PDF\n### 已完成工作\n- 试过 COM", 1, role="assistant"), _ctx())
     task = _task()
 
     await _synthesize_dispatch_pair(mem, asc, task, "## PDF 已完成", "success", _ctx())
@@ -106,7 +106,7 @@ async def test_capsule_order_user_summary_finish_pair():
     tsc = _task_sc()
     asc = _agent_sc()
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "帮我转", 0, role="user"), _ctx())
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "### 会话目标\n转 PDF", 1, role="user"), _ctx())
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "### 会话目标\n转 PDF", 1, role="assistant"), _ctx())
     task = _task()
 
     await _synthesize_dispatch_pair(mem, asc, task, "## PDF 已完成", "success", _ctx())
@@ -145,8 +145,8 @@ async def test_all_compact_summaries_mirrored_in_order():
     mem = InMemoryMemoryProvider()
     tsc = _task_sc()
     asc = _agent_sc()
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "旧摘要", 1, role="user"), _ctx())
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "新摘要", 9, role="user"), _ctx())
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "旧摘要", 1, role="assistant"), _ctx())
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "新摘要", 9, role="assistant"), _ctx())
     task = _task()
 
     await _synthesize_dispatch_pair(mem, asc, task, "out", "success", _ctx())

@@ -4,9 +4,9 @@
 → agent 层 AGENT_CONVERSATION_TURN（保留原始 timestamp + role + tool 元数据），
 末尾追加合成 finish 对（assistant finish_task tool_call + tool Process Report）。
 
-spec §3.3 step1-3，角色映射约定（任务指令修正版）：
+spec §3.3 step1-3，角色映射约定：
   USER_PROMPT         → role="user"
-  TASK_COMPACT_SUMMARY→ role="assistant"  (覆盖 DB 存的 role="user")
+  TASK_COMPACT_SUMMARY→ role="assistant"  (继承存储 role)
   LLM_RESPONSE        → role="assistant"
   TOOL_RESULT         → role="tool"
 """
@@ -76,9 +76,9 @@ async def test_interleaved_capsule_order_and_roles():
 
     # task 层：模拟后台 observe 已折好后的幸存事件
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "UP1原文", 1, role="user"), _ctx())
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段①摘要", 2, role="user"), _ctx())   # stored as user, must render assistant
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段①摘要", 2, role="assistant"), _ctx())   # apply_compact 存 role=assistant
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "HITL原文", 3, role="user"), _ctx())
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段②摘要", 4, role="user"), _ctx())   # ditto
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段②摘要", 4, role="assistant"), _ctx())   # apply_compact 存 role=assistant
 
     task = _task(prompt="UP1原文")
     mem_content = "最终答复\n\nProcess Report: 过程报告"
@@ -119,7 +119,7 @@ async def test_original_timestamps_preserved():
     t1 = _BASE + timedelta(seconds=10)
     t2 = _BASE + timedelta(seconds=20)
     await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=tsc, content="q", timestamp=t1, role="user"), _ctx())
-    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tsc, content="s", timestamp=t2, role="user"), _ctx())
+    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tsc, content="s", timestamp=t2, role="assistant"), _ctx())
 
     task = _task(prompt="q")
     await _synthesize_dispatch_pair(mem, asc, task, "出了\n\nProcess Report: r", "success", _ctx())
@@ -166,16 +166,16 @@ async def test_llm_response_and_tool_result_metadata_preserved():
     assert tool_r[0].content == "tool out"
 
 
-# ── TASK_COMPACT_SUMMARY role 映射：覆盖存储值 role="user" → 渲染 "assistant" ─
+# ── TASK_COMPACT_SUMMARY role 映射：继承存储 role=assistant → 渲染 "assistant" ─
 
 async def test_task_compact_summary_renders_as_assistant_not_user():
-    """TASK_COMPACT_SUMMARY 存储 role='user' 但必须镜像成 role='assistant'。"""
+    """TASK_COMPACT_SUMMARY 存储 role='assistant'，镜像后仍为 role='assistant'。"""
     mem = InMemoryMemoryProvider()
     tsc = _task_scope()
     asc = _agent_scope()
 
-    # store with role="user" as apply_compact does
-    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段摘要文本", 1, role="user"), _ctx())
+    # apply_compact 存 role=assistant
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段摘要文本", 1, role="assistant"), _ctx())
     task = _task()
 
     await _synthesize_dispatch_pair(mem, asc, task, "o\n\nProcess Report: r", "success", _ctx())

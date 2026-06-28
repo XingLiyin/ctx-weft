@@ -51,7 +51,7 @@ async def test_capsule_renders_interleaved_turns_and_finish_pair():
                                  content="把 ppt 转 pdf", timestamp=_BASE, role="user",
                                  metadata={}), _pctx())
     await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tscope,
-                                 content="### 会话目标\n转 PDF", timestamp=_BASE, role="user",
+                                 content="### 会话目标\n转 PDF", timestamp=_BASE, role="assistant",
                                  metadata={}), _pctx())
     # 在 agent scope 合成胶囊（新形态）
     await _synthesize_dispatch_pair(mem, scope, _task(), "## PDF 已完成", "success", _pctx())
