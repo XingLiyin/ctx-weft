@@ -89,6 +89,22 @@ _RECOGNIZE_INTENT_INSTRUCTION = (
     "Call no other tools."
 )
 
+_BACKGROUND_BOUNDARY_DESC = {
+    "interrupt": "本段被用户打断（中途打断）",
+    "plain_text": "你以散文回复后让位用户、暂停等待用户输入",
+    "finish": "任务已通过 finish_task 收尾",
+    "normal": "任务以最终产出正常结束",
+}
+
+
+def _background_observe_cue(boundary: str) -> str:
+    desc = _BACKGROUND_BOUNDARY_DESC.get(boundary, _BACKGROUND_BOUNDARY_DESC["normal"])
+    return (
+        f"当前 task 的状态：{desc}。请基于以上执行过程，总结这一段的处理进展，"
+        "调用 `collect_process_report` 一次给出 `task_process_report`。"
+        "只需总结进展、给出 process report，无需判断 success/retry/fail，不要调用其他工具。"
+    )
+
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s")
 
@@ -179,6 +195,10 @@ class DefaultComposer(Composer):
         elif request.purpose == "recognize_intent":
             system = self._build_act_system(blocks, request)
             messages = self._build_facet_trailing_messages(blocks, request, _RECOGNIZE_INTENT_INSTRUCTION)
+            tools = self._collect_llm_tools(blocks)
+        elif request.purpose == "background_observe":
+            system = self._build_act_system(blocks, request)
+            messages = self._build_background_observe_messages(blocks, request)
             tools = self._collect_llm_tools(blocks)
         else:  # compact
             system = self._build_act_system(blocks, request)
@@ -701,6 +721,14 @@ class DefaultComposer(Composer):
             _OBSERVE_JUDGMENT_CUE,
             extra_sections=extra_sections,
             pre_cue_sections=pre_cue_sections,
+            facet_fallback=_OBSERVER_ROLE_FALLBACK,
+        )
+
+    def _build_background_observe_messages(self, blocks, request):
+        """act 风格会话 + 尾部 background-observe cue（ROLE facet + boundary 状态 + 只给 process_report）。"""
+        boundary = (getattr(request, "extra", {}) or {}).get("observe_boundary", "normal")
+        return self._build_facet_trailing_messages(
+            blocks, request, _background_observe_cue(boundary),
             facet_fallback=_OBSERVER_ROLE_FALLBACK,
         )
 
