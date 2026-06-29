@@ -212,7 +212,7 @@ async def test_paused_task_recall_yields_body_no_finish_pair() -> None:
 
 async def test_cross_agent_child_body_isolated_from_parent() -> None:
     """(c) G4/G6：跨 agent 子任务 body 在子 agent 的 task 层（不同 agent_id）；
-    父 agent AgentRecallSource 召回按 agent_id 过滤：看不到子 body（只见 TASK_DISPATCH_RESULT）。
+    父 agent AgentRecallSource 召回按 agent_id 过滤：看不到子 body（只见 dispatch result 黑盒）。
     验证隔离自然涌现于 recall_recent_by_agent 的 agent_id 过滤。
     """
     mem = InMemoryMemoryProvider()
@@ -265,13 +265,17 @@ async def test_cross_agent_child_body_isolated_from_parent() -> None:
         f"parent recall must NOT surface child's TASK_COMPACT_SUMMARY (cross-agent isolation)"
     )
 
-    # 父可见 TASK_DISPATCH_RESULT（黑盒 bubble），包含 mem_content
-    parent_task_recs = await mem.recall_recent(parent_tsc, [T.TASK_DISPATCH_RESULT], 100, _pctx())
-    cross_results = [r for r in parent_task_recs if r.metadata.get("child_task_id") == child_task_id]
-    assert cross_results, "cross-agent child must bubble TASK_DISPATCH_RESULT to parent task scope"
+    # 父可见 dispatch result（黑盒 bubble，conversation turn），含 mem_content、配对 oc_cross、归 parent 单元
+    parent_task_recs = await mem.recall_recent(parent_tsc, [T.AGENT_CONVERSATION_TURN], 100, _pctx())
+    cross_results = [r for r in parent_task_recs
+                     if r.role == "tool" and r.metadata.get("tool_call_id") == "oc_cross"]
+    assert cross_results, "cross-agent child must bubble dispatch result (conversation turn) to parent"
+    assert cross_results[0].metadata.get("origin_task_id") == parent_task_id
     assert "Process Report:" in cross_results[0].content, (
         f"bubble content must be mem_content; got {cross_results[0].content!r}"
     )
+    # 不再写 legacy enum
+    assert await mem.recall_recent(parent_tsc, [T.TASK_DISPATCH_RESULT], 100, _pctx()) == []
 
     # 子 body 在子 task 层，不因 finalize 被 supersede（task-resident：body 留原处）
     child_body = await mem.recall_recent(child_tsc, [T.USER_PROMPT, T.TASK_COMPACT_SUMMARY], 100, _pctx())

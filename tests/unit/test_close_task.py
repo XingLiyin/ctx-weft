@@ -82,6 +82,27 @@ async def _finish_tools(mem, scope, origin: str) -> list:
     return [r for r in caps if r.role == "tool" and r.metadata.get("origin_task_id") == origin]
 
 
+async def _seed_delegate(mem, scope, origin: str, tcid: str, parent=None,
+                         name="delegate_task", args=None) -> None:
+    """模拟 gateway 写的 delegate assistant 回合（新表示：AGENT_CONVERSATION_TURN，spec §2.3）。"""
+    await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, scope, "", 0, role="assistant",
+                         origin_task_id=origin, parent_task_id=parent,
+                         tool_calls=[{"id": tcid, "name": name, "input": args or {}}]), _ctx())
+
+
+async def _delegate_turns(mem, scope, tcid: str) -> list:
+    """召回 agent 层 delegate assistant 回合（tool_calls 含 tcid）。"""
+    caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
+    return [r for r in caps if r.role == "assistant"
+            and any(tc.get("id") == tcid for tc in (r.metadata.get("tool_calls") or []))]
+
+
+async def _dispatch_results(mem, scope, tcid: str) -> list:
+    """召回 agent 层 dispatch result tool 回合（tool_call_id==tcid，新表示）。"""
+    caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
+    return [r for r in caps if r.role == "tool" and r.metadata.get("tool_call_id") == tcid]
+
+
 async def test_short_root_leaf_keeps_body_and_synthesizes_finish_pair() -> None:
     """task-resident：短 root 叶子 close 也合成 finish 对（取消 short 延迟），body 原样留。"""
     mem = InMemoryMemoryProvider()
@@ -153,9 +174,8 @@ async def test_cross_agent_child_bubbles_unconditionally_even_when_short() -> No
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", agent_id="ag2")
     await _seed_conv(mem, child_scope, n_assistant=1)  # short leaf
-    # parent dispatch marker lives in ag1's agent layer
-    await mem.ingest(_ev(T.TASK_DISPATCH, _sc("p1", "ag1"), "", 0, role="assistant",
-                         tool_call_id="oc1", tool_name="delegate_task", arguments={}), _ctx())
+    # parent delegate turn lives in ag1's agent layer (gateway-written, §2.3)
+    await _seed_delegate(mem, _sc("p1", "ag1"), origin="p1", tcid="oc1", parent=None)
     child = Task(id="c1", session_id="s1", status="FINISHED", tenant_id="default",
                  assigned_agent_id="ag2", creator_agent_id="ag1", parent_task_id="p1",
                  origin_tool_call_id="oc1", title="Child", user_prompt="sub",
@@ -164,10 +184,12 @@ async def test_cross_agent_child_bubbles_unconditionally_even_when_short() -> No
     await finalize_task_memory(mem, _state(child, child_scope, LoopConfig(), _FakeTM()),
                                child, "child out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # parent (ag1) received the bubble even though the child was short
+    # parent (ag1) received the dispatch result as a tool conversation turn even though child was short;
+    # origin=delegating task(p1) → folds with that unit (§2.3)
     parent_scope = _sc("p1", "ag1")
-    res = await mem.recall_recent(parent_scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert any(r.metadata.get("tool_call_id") == "oc1" and r.content == "child out" for r in res)
+    res = await _dispatch_results(mem, parent_scope, "oc1")
+    assert any(r.content == "child out" and r.metadata.get("origin_task_id") == "p1" for r in res)
+    assert await mem.recall_recent(parent_scope, [T.TASK_DISPATCH_RESULT], 100, _ctx()) == []
     # child's own conversation preserved (task-resident: body stays)
     own = await mem.recall_recent(child_scope, [T.LLM_RESPONSE], 100, _ctx())
     assert own != []
@@ -175,13 +197,12 @@ async def test_cross_agent_child_bubbles_unconditionally_even_when_short() -> No
 
 async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> None:
     """§2.1（spec 2026-06-28）：same-agent 子任务 close 不再 bubble「…scheduled」占位，且
-    supersede 掉 gateway 早先写的孤立 TASK_DISPATCH——由嵌套 finish 对全权承载。body 留 task 层。"""
+    supersede 掉 gateway 早先写的孤立 delegate 回合——由嵌套 finish 对全权承载。body 留 task 层。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t2", "ag1")
     await _seed_conv(mem, scope, n_assistant=1)  # short leaf
-    # dispatch marker for t2 in the shared ag1 scope (written by gateway at delegate time)
-    await mem.ingest(_ev(T.TASK_DISPATCH, _sc("t1", "ag1"), "", 0, role="assistant",
-                         tool_call_id="oc2", tool_name="delegate_task", arguments={}), _ctx())
+    # delegate turn for t2 in the shared ag1 scope (written by gateway at delegate time)
+    await _seed_delegate(mem, _sc("t1", "ag1"), origin="t1", tcid="oc2", parent=None)
     child = Task(id="t2", session_id="s1", status="FINISHED", tenant_id="default",
                  assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="t1",
                  origin_tool_call_id="oc2", title="Sub", user_prompt="sub",
@@ -190,12 +211,10 @@ async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> N
     await finalize_task_memory(mem, _state(child, scope, LoopConfig(), _FakeTM()),
                                child, "t2 out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # no "scheduled" placeholder bubble for oc2
-    res = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert [r for r in res if r.metadata.get("tool_call_id") == "oc2"] == []
-    # orphan TASK_DISPATCH (oc2) superseded
-    disp = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH], 100, _ctx())
-    assert [r for r in disp if r.metadata.get("tool_call_id") == "oc2"] == []
+    # no dispatch result bubble for oc2 (same-agent never bubbles)
+    assert await _dispatch_results(mem, _sc("t1", "ag1"), "oc2") == []
+    # orphan delegate turn (oc2) superseded
+    assert await _delegate_turns(mem, _sc("t1", "ag1"), "oc2") == []
     # nested finish pair synthesized (carries real content)
     assert await _finish_tools(mem, scope, "t2"), "nested finish pair must exist"
     # body kept (task-resident)
@@ -205,13 +224,12 @@ async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> N
 
 async def test_same_agent_nonshort_child_no_bubble_supersedes_final_raw_and_orphan() -> None:
     """§2.1 + Task 2（spec 2026-06-28）：长 same-agent 子任务 close——(a) 不 bubble 占位、
-    supersede 孤立 TASK_DISPATCH；(b) supersede 末 raw 段、保留 USER_PROMPT 锚点；(c) 嵌套 finish 对承载。"""
+    supersede 孤立 delegate 回合；(b) supersede 末 raw 段、保留 USER_PROMPT 锚点；(c) 嵌套 finish 对承载。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t2", "ag1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)  # over turn cap → not short
-    # dispatch marker for t2 lives in the shared ag1 agent scope (parent t1)
-    await mem.ingest(_ev(T.TASK_DISPATCH, _sc("t1", "ag1"), "", 0, role="assistant",
-                         tool_call_id="oc2", tool_name="delegate_task", arguments={}), _ctx())
+    # delegate turn for t2 lives in the shared ag1 agent scope (parent t1)
+    await _seed_delegate(mem, _sc("t1", "ag1"), origin="t1", tcid="oc2", parent=None)
     child = Task(id="t2", session_id="s1", status="FINISHED", tenant_id="default",
                  assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="t1",
                  origin_tool_call_id="oc2", title="Sub", user_prompt="sub",
@@ -219,11 +237,9 @@ async def test_same_agent_nonshort_child_no_bubble_supersedes_final_raw_and_orph
     await finalize_task_memory(mem, _state(child, scope, LoopConfig(), _FakeTM()),
                                child, "t2 out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # (a) no placeholder bubble + orphan dispatch superseded
-    res = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert [r for r in res if r.metadata.get("tool_call_id") == "oc2"] == []
-    disp = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH], 100, _ctx())
-    assert [r for r in disp if r.metadata.get("tool_call_id") == "oc2"] == []
+    # (a) no placeholder bubble + orphan delegate turn superseded
+    assert await _dispatch_results(mem, _sc("t1", "ag1"), "oc2") == []
+    assert await _delegate_turns(mem, _sc("t1", "ag1"), "oc2") == []
     # (b) 长任务末 raw 段被 supersede（active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点留
     own = await mem.recall_recent(scope, [T.LLM_RESPONSE], 100, _ctx())
     assert own == [], "long task: final raw LLM_RESPONSE must be superseded"
@@ -266,14 +282,12 @@ async def test_intermediate_close_keeps_grandchild_body() -> None:
     mem = InMemoryMemoryProvider()
     a_scope = _sc("A", "ag1")
     await _seed_conv(mem, a_scope, n_assistant=5, big=True)  # A's own conversation (not short)
-    # parent t1's dispatch marker for A (so A's bubble pairs)
-    await mem.ingest(_ev(T.TASK_DISPATCH, _sc("t1", "ag1"), "", 0, role="assistant",
-                         tool_call_id="ocA", tool_name="delegate_task", arguments={}), _ctx())
-    # A1 residue (child A1, parent A) + A1 conv
-    await mem.ingest(_ev(T.TASK_DISPATCH, a_scope, "", 5, role="assistant",
-                         tool_call_id="dA1", tool_name="delegate_task", arguments={}), _ctx())
-    await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, a_scope, "A1 out", 6, role="tool",
-                         tool_call_id="dA1", child_task_id="A1", parent_task_id="A"), _ctx())
+    # parent t1's delegate turn for A (so A's orphan delegate gets superseded)
+    await _seed_delegate(mem, _sc("t1", "ag1"), origin="t1", tcid="ocA", parent=None)
+    # A1 dispatch pair (delegate + result, origin=A) + A1 conv
+    await _seed_delegate(mem, a_scope, origin="A", tcid="dA1", parent="t1")
+    await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, a_scope, "A1 out", 6, role="tool",
+                         origin_task_id="A", tool_call_id="dA1"), _ctx())
     await mem.ingest(_ev(T.LLM_RESPONSE, _sc("A1", "ag1"), "A1 work", 7, role="assistant"), _ctx())
     A = Task(id="A", session_id="s1", status="FINISHED", tenant_id="default",
              assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="t1",
@@ -281,18 +295,17 @@ async def test_intermediate_close_keeps_grandchild_body() -> None:
     tm = _FakeTM({"A": {"A1"}})
     await finalize_task_memory(mem, _state(A, a_scope, LoopConfig(), tm),
                                A, "A out", "success", _loop_ctx(mem, tm))
-    results = await mem.recall_recent(_sc("any", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    # A1 dispatch pair preserved
-    assert any(r.content == "A1 out" for r in results), "A1 dispatch pair must be preserved"
+    # A1 dispatch result preserved (conversation turn, origin=A)
+    assert any(r.content == "A1 out" for r in await _dispatch_results(mem, a_scope, "dA1")), \
+        "A1 dispatch pair must be preserved"
     # grandchild body kept (task-resident)
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
     assert any(r.metadata.get("task_id") == "A1" for r in convs), "grandchild body must stay"
-    # §2.1: A (same-agent) no longer bubbles a placeholder; its orphan TASK_DISPATCH (ocA) is superseded
-    assert [r for r in results if r.metadata.get("tool_call_id") == "ocA"] == [], \
+    # §2.1: A (same-agent) no longer bubbles a placeholder; its orphan delegate turn (ocA) is superseded
+    assert await _dispatch_results(mem, _sc("t1", "ag1"), "ocA") == [], \
         "same-agent A must not bubble placeholder residue"
-    disp = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH], 100, _ctx())
-    assert [r for r in disp if r.metadata.get("tool_call_id") == "ocA"] == [], \
-        "orphan ocA dispatch must be superseded"
+    assert await _delegate_turns(mem, _sc("t1", "ag1"), "ocA") == [], \
+        "orphan ocA delegate turn must be superseded"
     # A's own finish pair synthesized (nested, agent layer)
     assert await _finish_tools(mem, a_scope, "A"), "A's nested finish pair must exist"
 

@@ -227,20 +227,25 @@ async def test_fold_root_residues_keep_last_and_subtask_survive() -> None:
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
     await _seed_root_residues(mem, sc, 5)
-    for i in range(2):  # sub-task residues (working set) — must NOT fold
-        await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, f"sub res {i}", 200 + i, role="tool",
-                             tool_call_id=f"sd{i}", child_task_id=f"st{i}", parent_task_id="t1"), _ctx())
+    # active delegating task t1 的在途 dispatch 对（working set，§2.3）：有 dispatch 回合、无 finish
+    # 对 → active → 不可折。表示为 delegate assistant + result tool conversation turn（origin=t1）。
+    for i in range(2):
+        tc = f"sd{i}"
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, "", 200 + i * 2, role="assistant",
+                             origin_task_id="t1", parent_task_id=None,
+                             tool_calls=[{"id": tc, "name": "control:delegate_task", "input": {}}]), _ctx())
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, f"sub res {i}", 201 + i * 2, role="tool",
+                             origin_task_id="t1", tool_call_id=tc), _ctx())
 
-    n = await fold_root_experience(_state(_active_task(), LoopConfig(compact_keep_pair=1)),
+    n = await fold_root_experience(_state(_active_task(), LoopConfig()),
                                    _loop_ctx(mem, _FakeTM({})), keep_last=1, summary_text="SUM")
     assert n > 0
-    # 新格式：存活记录在 AGENT_CONVERSATION_TURN + AGENT_COMPACT_SUMMARY + TASK_DISPATCH_RESULT(working set)
     turns = await mem.recall_recent(sc, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
     alive_origins = {r.metadata.get("origin_task_id") for r in turns}
-    assert alive_origins == {"rt4"}                      # newest keep_last=1 root kept
-    results = await mem.recall_recent(sc, [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    sub_contents = {r.content for r in results}
-    assert {"sub res 0", "sub res 1"} <= sub_contents    # working set survives
+    assert alive_origins == {"rt4", "t1"}                 # newest root kept + active working set t1
+    # working set（t1 的 dispatch 结果）survives
+    sub_contents = {r.content for r in turns if r.role == "tool"}
+    assert {"sub res 0", "sub res 1"} <= sub_contents
     summ = await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx())
     assert any(r.content == "SUM" for r in summ)
 
@@ -250,7 +255,7 @@ async def test_fold_paired_dispatch_superseded_no_dangling() -> None:
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
     await _seed_root_residues(mem, sc, 4)
-    await fold_root_experience(_state(_active_task(), LoopConfig(compact_keep_pair=1)),
+    await fold_root_experience(_state(_active_task(), LoopConfig()),
                                _loop_ctx(mem, _FakeTM({})), keep_last=1, summary_text="SUM")
     # 新格式无 TASK_DISPATCH；检查 AGENT_CONVERSATION_TURN：只剩 rt3 的回合
     turns = await mem.recall_recent(sc, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
@@ -264,7 +269,7 @@ async def test_fold_rolls_old_summary_into_new() -> None:
     # an existing AGENT_COMPACT_SUMMARY from a prior fold
     await mem.ingest(_ev(T.AGENT_COMPACT_SUMMARY, sc, "OLD SUMMARY", 0, role="user"), _ctx())
     await _seed_root_residues(mem, sc, 3, start_t=10)
-    await fold_root_experience(_state(_active_task(), LoopConfig(compact_keep_pair=1)),
+    await fold_root_experience(_state(_active_task(), LoopConfig()),
                                _loop_ctx(mem, _FakeTM({})), keep_last=1, summary_text="NEW")
     summaries = await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx())
     contents = {s.content for s in summaries}
@@ -286,7 +291,7 @@ async def test_fold_summary_anchored_before_kept_window() -> None:
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
     await _seed_root_residues(mem, sc, 3)
-    await fold_root_experience(_state(_active_task(), LoopConfig(compact_keep_pair=1)),
+    await fold_root_experience(_state(_active_task(), LoopConfig()),
                                _loop_ctx(mem, _FakeTM({})), keep_last=1, summary_text="SUM")
     # summary must be chronologically before all kept AGENT_CONVERSATION_TURN records
     turns = await mem.recall_recent(sc, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
@@ -325,7 +330,7 @@ async def test_execute_folds_task_and_root() -> None:
         await mem.ingest(_ev(T.LLM_RESPONSE, sc, f"turn {i}", i, role="assistant"), _ctx())
     await _seed_root_residues(mem, sc, 4, start_t=100)  # root residues > keep_last
 
-    state = _state(_active_task(), LoopConfig(compact_keep_last=1, compact_keep_pair=1))
+    state = _state(_active_task(), LoopConfig(compact_keep_last=1))
     await CompactStep().execute(state, _loop_ctx(mem, _FakeTM({}), with_assembler=True))
 
     task_recs = await mem.recall_recent(sc, [T.LLM_RESPONSE, T.TASK_COMPACT_SUMMARY], 100, _ctx())
@@ -365,7 +370,7 @@ async def test_execute_keeps_finished_short_body_then_folds_root() -> None:
     await _seed_root_residues(mem, sc, 4, start_t=100)
     tm = _FakeTM({"t1": _active_task(), "t2": _finished_short("t2", oc="oc2")})
 
-    state = _state(_active_task(), LoopConfig(compact_keep_last=1, compact_keep_pair=1))
+    state = _state(_active_task(), LoopConfig(compact_keep_last=1))
     await CompactStep().execute(state, _loop_ctx(mem, tm, with_assembler=True))
 
     # task-resident：short task t2 的 body 留 task 层（不被 CompactStep 回收）
@@ -404,7 +409,7 @@ async def test_predispatch_folds_task_and_agent_layers() -> None:
         await mem.ingest(_ev(T.LLM_RESPONSE, sc, f"turn {i}", i, role="assistant"), _ctx())
     await _seed_root_residues(mem, sc, 4, start_t=100)  # completed root residues > keep_last
 
-    cfg = LoopConfig(compact_keep_last=1, compact_keep_pair=1, predispatch_compact_token_ratio=0.6)
+    cfg = LoopConfig(compact_keep_last=1, predispatch_compact_token_ratio=0.6)
     state = _state(_active_task(), cfg, context_limit=1000)
     # 800 / 1000 = 0.8 >= 0.6 → 门控通过
     events = await maybe_compact_before_dispatch(

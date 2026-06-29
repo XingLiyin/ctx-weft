@@ -119,33 +119,41 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             agent_id=task.creator_agent_id,
         )
         if cross_agent:
-            # 跨 agent：bubble 真实结果（黑盒），与 gateway 写的 TASK_DISPATCH 配对
+            # 跨 agent（spec 2026-06-28 §2.3）：dispatch result 写成 agent 层普通 conversation turn
+            # （tool 回合），与 gateway 写的 delegate assistant 回合靠 tool_call_id 配对。
+            # origin_task_id=delegating task → 与同单元 finish 对同 origin、同命运（一起 L2 折）。
+            report_prefix = "[outcome=fail] " if outcome == "fail" else ""
             await memory.ingest(
                 MemoryEvent(
-                    type=MemoryEventType.TASK_DISPATCH_RESULT,
+                    type=MemoryEventType.AGENT_CONVERSATION_TURN,
                     scope=parent_scope,
-                    content=mem_content,
+                    content=f"{report_prefix}{mem_content}",
                     timestamp=now_utc(),
                     role="tool",
-                    metadata={"tool_call_id": task.origin_tool_call_id, "child_task_id": task.id,
-                              "title": task.title, "outcome": outcome,
-                              "parent_task_id": task.parent_task_id},
+                    # origin_task_id=delegating task → 归该单元；parent_task_id 不在此设定（单元的
+                    # parent 由 gateway 的 delegate assistant 回合权威给出，见 fold 的 prefer-non-None）。
+                    metadata={"origin_task_id": task.parent_task_id,
+                              "tool_call_id": task.origin_tool_call_id},
                 ),
                 ctx.provider_ctx,
             )
             events.append(make_event(
                 state, EventType.MEMORY_INGESTED,
-                payload={"memory_event_type": MemoryEventType.TASK_DISPATCH_RESULT.value,
+                payload={"memory_event_type": MemoryEventType.AGENT_CONVERSATION_TURN.value,
                          "source": "dispatch_result", "content_length": len(mem_content)},
             ))
         elif same_agent:
             # 同 agent（spec 2026-06-28 §2.1）：不 bubble 占位 result；supersede 掉 gateway 早先写的
-            # 那条孤立 TASK_DISPATCH（按 origin_tool_call_id 在 parent_scope 定位），由嵌套 finish 对
-            # 全权承载——gateway 写 TASK_DISPATCH 时无法判定 same/cross，故在此补偿回收。
+            # 那条孤立 delegate conversation turn（按 origin_tool_call_id 在 parent_scope 定位），
+            # 由嵌套 finish 对全权承载——gateway 写 delegate turn 时无法判定 same/cross，故在此补偿回收。
             dispatches = await memory.recall_recent(
-                parent_scope, [MemoryEventType.TASK_DISPATCH], 2000, ctx.provider_ctx)
-            orphan_ids = [r.id for r in dispatches
-                          if r.metadata.get("tool_call_id") == task.origin_tool_call_id]
+                parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
+            orphan_ids = [
+                r.id for r in dispatches
+                if r.role == "assistant"
+                and any(tc.get("id") == task.origin_tool_call_id
+                        for tc in (r.metadata.get("tool_calls") or []))
+            ]
             if orphan_ids:
                 await memory.supersede(orphan_ids, ctx.provider_ctx)
             # 嵌套合成子自己的 finish 对（写进共享 agent scope）
@@ -157,8 +165,8 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
         await _synthesize_dispatch_pair(memory, state.scope, task, mem_content, outcome, ctx.provider_ctx)
         events.append(make_event(
             state, EventType.MEMORY_INGESTED,
-            payload={"memory_event_type": MemoryEventType.TASK_DISPATCH_RESULT.value,
-                     "source": "root_dispatch", "content_length": len(mem_content)},
+            payload={"memory_event_type": MemoryEventType.AGENT_CONVERSATION_TURN.value,
+                     "source": "root_finish_pair", "content_length": len(mem_content)},
         ))
 
     # task-resident（spec 2026-06-28 §3.2）：body 留 task 层、不 GC 子树。

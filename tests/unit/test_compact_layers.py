@@ -50,7 +50,7 @@ async def _run_compact(mem) -> None:
     task = SimpleNamespace(id="C1", status="ACTIVE")
     agent = SimpleNamespace(
         id="ag1", runtime={"llm_model": "mock"},
-        loop_config=SimpleNamespace(compact_keep_last=1, compact_keep_pair=1),
+        loop_config=SimpleNamespace(compact_keep_last=1),
     )
     session = SimpleNamespace(id="s1", tenant_id="default", goal="")
     state = LoopState(run_id="r1", session=session, task=task, agent=agent,

@@ -59,7 +59,7 @@ async def test_compact_session_folds_agent_layer() -> None:
     resolver = InMemoryTemplateResolver()
     # small keep_last so a handful of dispatch pairs is over budget
     tmpl = dataclasses.replace(make_echo_template(),
-                               loop_config=LoopConfig(compact_keep_last=2, compact_keep_pair=2))
+                               loop_config=LoopConfig(compact_keep_last=2))
     resolver.register(tmpl)
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
     rt = CtxWeftRuntime(llm=llm, template_resolver=resolver)

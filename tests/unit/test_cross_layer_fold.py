@@ -1,9 +1,9 @@
-"""跨层 fold L0→L1→L2（spec 2026-06-28 §4）。
+"""跨层 fold（spec 2026-06-29，删 L1，单一阈值 keep_last）。
 
-通过 finalize_task_memory 造真实 L0 单元（task 层 body + agent 层 finish 对），
-再调 fold_root_experience 验证三级降级：
-- L1（超 keep_full）：删该单元 task 层 body（supersede、不再 recall），finish 对仍在。
-- L2（超 keep_pair）：连 finish 对也 supersede，折成一条 AGENT_COMPACT_SUMMARY。
+通过 finalize_task_memory 造真实结束单元（task 层胶囊 + agent 层 finish 对），再调
+fold_root_experience 验证：超 keep_last 的最老单元**整体折成摘要**——task 层胶囊 + finish 对
+一起 supersede + 一条 AGENT_COMPACT_SUMMARY；未超的保留为完整胶囊（不存在「body 删、finish
+留」的 L1 中间态）。
 """
 from __future__ import annotations
 
@@ -120,79 +120,73 @@ async def test_l0_units_have_body_and_finish_pair() -> None:
     assert await _alive_finish_pair(mem, "R0"), "L0 unit must have agent-layer finish pair"
 
 
-async def test_l1_drops_body_keeps_finish_pair() -> None:
-    """L0→L1：超 keep_full 的最老单元 task 层 body 被 supersede、finish 对仍在。"""
+async def test_fold_drops_whole_unit_body_and_finish() -> None:
+    """超 keep_last 的最老单元**整体**折成摘要：task 层胶囊 + finish 对一起 supersede（不再有
+    「body 删、finish 留」的 L1 中间态）；未超的保留完整胶囊。"""
     mem = InMemoryMemoryProvider()
-    # keep_full=2，开 4 个结束 root → 最老 2 个降 L1
+    # keep_last=2，开 4 个结束 root → 最老 2 个折成摘要
     for i in range(4):
         await _make_l0_unit(mem, f"R{i}", i * 10)
-    cfg = LoopConfig(compact_keep_last=2, compact_keep_pair=30)
+    cfg = LoopConfig(compact_keep_last=2)
     await fold_root_experience(_fold_state(cfg), _fold_ctx(mem),
                                cfg.compact_keep_last, "folded")
 
-    # 最老 2 个（R0,R1）：body 删、finish 对留
+    # 最老 2 个（R0,R1）：body + finish 对都没了（整单元折掉）
     for old in ("R0", "R1"):
-        assert await _alive_body(mem, old) == [], f"{old}: L1 task-layer body must be superseded"
-        assert await _alive_finish_pair(mem, old), f"{old}: L1 finish pair must survive"
-    # 最新 2 个（R2,R3）：body + finish 对都在
+        assert await _alive_body(mem, old) == [], f"{old}: body must be folded"
+        assert await _alive_finish_pair(mem, old) == [], f"{old}: finish pair must be folded"
+    # 最新 2 个（R2,R3）：完整胶囊 body + finish 对都在
     for kept in ("R2", "R3"):
-        assert await _alive_body(mem, kept), f"{kept}: kept (L0) body must survive"
+        assert await _alive_body(mem, kept), f"{kept}: kept capsule body must survive"
         assert await _alive_finish_pair(mem, kept), f"{kept}: kept finish pair must survive"
-    # keep_pair=30 → 无单元降 L2 → 无新摘要
-    assert await _alive_summaries(mem) == [], "no L2 fold yet → no AGENT_COMPACT_SUMMARY"
-
-
-async def test_l2_drops_finish_pair_writes_summary() -> None:
-    """L1→L2：超 keep_pair 的最老单元连 finish 对也 supersede + 一条 AGENT_COMPACT_SUMMARY。"""
-    mem = InMemoryMemoryProvider()
-    # keep_full=1, keep_pair=2，开 4 个 → R0 降 L2，R1 降 L2... 实为 top[:-keep_pair] 降 L2
-    for i in range(4):
-        await _make_l0_unit(mem, f"R{i}", i * 10)
-    cfg = LoopConfig(compact_keep_last=1, compact_keep_pair=2)
-    await fold_root_experience(_fold_state(cfg), _fold_ctx(mem),
-                               cfg.compact_keep_last, "folded")
-
-    # 超 keep_pair=2 的最老（R0,R1）：finish 对也被 supersede
-    for l2 in ("R0", "R1"):
-        assert await _alive_body(mem, l2) == [], f"{l2}: L2 body superseded"
-        assert await _alive_finish_pair(mem, l2) == [], f"{l2}: L2 finish pair must be superseded"
-    # keep_pair 窗内但超 keep_full（R2）：body 删、finish 对留（L1）
-    assert await _alive_body(mem, "R2") == [], "R2: beyond keep_full → body superseded"
-    assert await _alive_finish_pair(mem, "R2"), "R2: within keep_pair → finish pair survives"
-    # 最新（R3）：完整 L0
-    assert await _alive_body(mem, "R3"), "R3: L0 body survives"
-    assert await _alive_finish_pair(mem, "R3"), "R3: L0 finish pair survives"
-    # 一条新 AGENT_COMPACT_SUMMARY
+    # 折出一条摘要
     summ = await _alive_summaries(mem)
-    assert len(summ) == 1, "exactly one AGENT_COMPACT_SUMMARY for L2 fold"
+    assert len(summ) == 1, "exactly one AGENT_COMPACT_SUMMARY"
     assert summ[0].role == "user"
 
 
-async def test_count_root_residues_counts_l0_units() -> None:
-    """_count_root_residues 数「有 body 的结束顶层单元」（L0 单元）。"""
+async def test_fold_keeps_only_keep_last_capsules() -> None:
+    """keep_last=1，开 4 个 → 最老 3 个整体折成一条摘要，仅最新 1 个保留为完整胶囊。"""
     mem = InMemoryMemoryProvider()
     for i in range(4):
         await _make_l0_unit(mem, f"R{i}", i * 10)
-    cfg = LoopConfig(compact_keep_last=2, compact_keep_pair=30)
+    cfg = LoopConfig(compact_keep_last=1)
+    await fold_root_experience(_fold_state(cfg), _fold_ctx(mem),
+                               cfg.compact_keep_last, "folded")
+
+    for folded in ("R0", "R1", "R2"):
+        assert await _alive_body(mem, folded) == [], f"{folded}: body folded"
+        assert await _alive_finish_pair(mem, folded) == [], f"{folded}: finish pair folded"
+    assert await _alive_body(mem, "R3"), "R3: kept capsule body survives"
+    assert await _alive_finish_pair(mem, "R3"), "R3: kept finish pair survives"
+    assert len(await _alive_summaries(mem)) == 1
+
+
+async def test_count_root_residues_counts_capsules() -> None:
+    """_count_root_residues 数「结束顶层单元（胶囊）」；折成摘要的单元不计。"""
+    mem = InMemoryMemoryProvider()
+    for i in range(4):
+        await _make_l0_unit(mem, f"R{i}", i * 10)
+    cfg = LoopConfig(compact_keep_last=2)
     state, ctx = _fold_state(cfg), _fold_ctx(mem)
 
-    assert await _count_root_residues(state, ctx) == 4, "4 L0 units before fold"
+    assert await _count_root_residues(state, ctx) == 4, "4 capsules before fold"
     await fold_root_experience(state, ctx, cfg.compact_keep_last, "folded")
-    # L1 删了 R0/R1 的 body → 只剩 R2/R3 有 body
-    assert await _count_root_residues(state, ctx) == 2, "after L1 fold, 2 units still have body"
+    # 最老 2 个折成摘要 → 只剩 R2/R3 两个胶囊
+    assert await _count_root_residues(state, ctx) == 2, "after fold, 2 capsules remain"
 
 
-async def test_l2_summary_anchored_before_kept() -> None:
-    """L2 摘要锚到保留集最早 ts − 1µs（不变量 A）。"""
+async def test_summary_anchored_before_kept() -> None:
+    """摘要锚到保留胶囊最早 ts − 1µs（不变量 A）。"""
     mem = InMemoryMemoryProvider()
     for i in range(4):
         await _make_l0_unit(mem, f"R{i}", i * 100)
-    cfg = LoopConfig(compact_keep_last=1, compact_keep_pair=2)
+    cfg = LoopConfig(compact_keep_last=1)
     await fold_root_experience(_fold_state(cfg), _fold_ctx(mem),
                                cfg.compact_keep_last, "folded")
     summ = await _alive_summaries(mem)
     assert len(summ) == 1
-    # 保留集（R2 finish 对 + R3 全部）最早 ts；摘要须早于之
-    kept_finish = await _alive_finish_pair(mem, "R2")
+    # 保留胶囊 R3 的最早 ts；摘要须早于之
+    kept_finish = await _alive_finish_pair(mem, "R3")
     kept_min = min(r.timestamp for r in kept_finish)
-    assert summ[0].timestamp < kept_min, "L2 summary must anchor before kept set"
+    assert summ[0].timestamp < kept_min, "summary must anchor before kept capsule"

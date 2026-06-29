@@ -119,7 +119,9 @@ class _DispatchProvider(ToolCapabilityProvider):
 
 
 @pytest.mark.asyncio
-async def test_gateway_dispatch_writes_task_dispatch_not_tool_result() -> None:
+async def test_gateway_dispatch_writes_delegate_conversation_turn_not_tool_result() -> None:
+    """§2.3：gateway 把 delegate 调用写成 agent 层 delegate conversation turn（assistant,
+    tool_calls 承载调用，origin=delegating task），不写 TASK_DISPATCH enum、不写即时 TOOL_RESULT。"""
     mem = InMemoryMemoryProvider()
     cache = CapabilityCache()
     cap = ToolCapability(id="control:delegate_task", name="delegate_task", description="dispatch")
@@ -134,7 +136,7 @@ async def test_gateway_dispatch_writes_task_dispatch_not_tool_result() -> None:
     state = LoopState(
         run_id="run_1",
         session=SimpleNamespace(id="s1", tenant_id="default"),
-        task=SimpleNamespace(id="tsk_1"),
+        task=SimpleNamespace(id="tsk_1", parent_task_id=None),
         agent=SimpleNamespace(id="agt_1", template_id="t"),
         scope=scope,
     )
@@ -146,11 +148,14 @@ async def test_gateway_dispatch_writes_task_dispatch_not_tool_result() -> None:
     await gw.invoke("control__delegate_task", {"title": "c"}, state, ctx, tool_call_id="tc_d")
 
     pctx = ProviderContext(session_id="s1", tenant_id="default")
-    dispatched = await mem.recall_recent(scope, [MemoryEventType.TASK_DISPATCH], 10, pctx)
-    tool_results = await mem.recall_recent(scope, [MemoryEventType.TOOL_RESULT], 10, pctx)
-    assert len(dispatched) == 1
-    assert dispatched[0].metadata.get("tool_call_id") == "tc_d"
-    assert tool_results == []  # 即时 result 暂挂，不写 task 层
+    turns = await mem.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 10, pctx)
+    delegate = [r for r in turns if r.role == "assistant"
+                and any(tc.get("id") == "tc_d" for tc in (r.metadata.get("tool_calls") or []))]
+    assert len(delegate) == 1
+    assert delegate[0].metadata.get("origin_task_id") == "tsk_1"
+    # 不写 legacy TASK_DISPATCH enum、不写即时 TOOL_RESULT
+    assert await mem.recall_recent(scope, [MemoryEventType.TASK_DISPATCH], 10, pctx) == []
+    assert await mem.recall_recent(scope, [MemoryEventType.TOOL_RESULT], 10, pctx) == []
 
 
 class _AssessProvider(ToolCapabilityProvider):

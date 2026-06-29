@@ -551,8 +551,8 @@ async def test_H3_recursive_nesting_grandchild() -> None:
 async def test_H4_cross_agent_isolation() -> None:
     """情况 8 / H4: root 委派跨 agent 子任务（use_subagent=True，creator≠assigned）。
 
-    (a) parent scope 的 TASK_DISPATCH_RESULT content = mem_content（含 Process Report:）
-        而非 "Sub-task '…' scheduled."
+    (a) parent scope 的 dispatch result = mem_content tool conversation turn（含 Process Report:），
+        origin=delegating task(p1)（§2.3：dispatch 对 = 普通 conversation message）
     (b) parent agent scope 无 origin_task_id=child.id 的 AGENT_CONVERSATION_TURN
         （子 agent finish 对在 ag2 层，按 agent_id 对 parent 不可见）
     (c) 子 agent scope（ag2）有自己的 finish 对（task-resident：仅 finish 对，body 留子 task 层）
@@ -600,20 +600,25 @@ async def test_H4_cross_agent_isolation() -> None:
     parent_scope_agent = _agent_scope(parent_agent)
     child_scope_agent = _agent_scope(child_agent)
 
-    # (a) parent TASK_DISPATCH_RESULT = mem_content（含 Process Report:）
+    # (a) parent dispatch result = mem_content tool conversation turn（配对 oc_cross、归 p1 单元）
     parent_results = await mem.recall_recent(
-        parent_scope_task, [T.TASK_DISPATCH_RESULT], 200, _pctx(),
+        parent_scope_agent, [T.AGENT_CONVERSATION_TURN], 200, _pctx(),
     )
-    cross_results = [r for r in parent_results if r.metadata.get("child_task_id") == child_id]
-    assert cross_results, "cross-agent child must bubble TASK_DISPATCH_RESULT to parent scope"
+    cross_results = [r for r in parent_results
+                     if r.role == "tool" and r.metadata.get("tool_call_id") == "oc_cross"]
+    assert cross_results, "cross-agent child must bubble dispatch result (conversation turn) to parent"
     assert "Process Report:" in cross_results[0].content, (
         f"cross-agent bubble content must be mem_content (with Process Report:); "
         f"got {cross_results[0].content!r}"
     )
     assert cross_results[0].content == child_mem_content, (
-        f"cross-agent bubble must equal full mem_content; "
-        f"got {cross_results[0].content!r}"
+        f"cross-agent bubble must equal full mem_content; got {cross_results[0].content!r}"
     )
+    assert cross_results[0].metadata.get("origin_task_id") == parent_id, (
+        "dispatch result 须归 delegating task(p1) 单元（与 finish 对同 origin、同命运）"
+    )
+    # 不再写 legacy TASK_DISPATCH_RESULT enum
+    assert await mem.recall_recent(parent_scope_task, [T.TASK_DISPATCH_RESULT], 200, _pctx()) == []
 
     # (b) parent agent scope 无 origin=child.id 的 AGENT_CONVERSATION_TURN（隔离）
     parent_agent_turns = await mem.recall_recent(
@@ -668,10 +673,10 @@ async def test_H4_cross_agent_isolation() -> None:
 
 async def test_H8_short_same_agent_child_no_bubble_supersedes_orphan() -> None:
     """H8（§2.1, spec 2026-06-28）: 短同 agent 子任务 close **不再 bubble**「…scheduled」占位，
-    且 supersede 掉 gateway 写的孤立 TASK_DISPATCH（oc_short）——由嵌套 finish 对全权承载。
+    且 supersede 掉 gateway 写的孤立 delegate 回合（oc_short）——由嵌套 finish 对全权承载。
 
-    场景：parent 在 agent scope 有 TASK_DISPATCH（oc_short），短 child close。
-    断言：oc_short 的占位 result 不存在、孤立 TASK_DISPATCH 被 supersede；child 合成 finish 对；
+    场景：parent 在 agent scope 有 delegate 回合（oc_short），短 child close。
+    断言：oc_short 的 result 不存在、孤立 delegate 回合被 supersede；child 合成 finish 对；
     child raw body 留 child task 层。
     """
     mem = InMemoryMemoryProvider()
@@ -680,13 +685,14 @@ async def test_H8_short_same_agent_child_no_bubble_supersedes_orphan() -> None:
     parent_id = "p1"
     child_id = "c_short"
 
-    # parent 的 agent scope 有一个 TASK_DISPATCH（派发了短子任务）
+    # parent 的 agent scope 有一个 delegate 回合（派发了短子任务，新表示：AGENT_CONVERSATION_TURN）
     parent_agent_scope = _task_scope(parent_id, parent_agent)
     tc_short = "oc_short"
     await mem.ingest(_ev(
-        T.TASK_DISPATCH, parent_agent_scope, "", 10,
-        role="assistant", tool_call_id=tc_short, tool_name="control__delegate_task",
-        arguments={"title": "短子任务", "description": "x"},
+        T.AGENT_CONVERSATION_TURN, parent_agent_scope, "", 10, role="assistant",
+        origin_task_id=parent_id, parent_task_id=None,
+        tool_calls=[{"id": tc_short, "name": "control__delegate_task",
+                     "input": {"title": "短子任务", "description": "x"}}],
     ), _pctx())
 
     # 短 child：极短对话（确保 is_short=True）
@@ -707,20 +713,19 @@ async def test_H8_short_same_agent_child_no_bubble_supersedes_orphan() -> None:
         child_task, "ok\n\nProcess Report: 短任务", "success", _loop_ctx(mem),
     )
 
-    # §2.1：parent scope 无 oc_short 的占位 bubble；孤立 TASK_DISPATCH 被 supersede
-    parent_results = await mem.recall_recent(
-        parent_agent_scope, [T.TASK_DISPATCH_RESULT], 200, _pctx(),
+    # §2.1：parent scope 无 oc_short 的 result bubble；孤立 delegate 回合被 supersede
+    parent_caps = await mem.recall_recent(parent_agent_scope, [T.AGENT_CONVERSATION_TURN], 200, _pctx())
+    assert [r for r in parent_caps
+            if r.role == "tool" and r.metadata.get("tool_call_id") == tc_short] == [], (
+        "§2.1: same-agent child must NOT bubble a dispatch result"
     )
-    assert [r for r in parent_results if r.metadata.get("tool_call_id") == tc_short] == [], (
-        "§2.1: same-agent child must NOT bubble a placeholder TASK_DISPATCH_RESULT"
-    )
-    parent_disp = await mem.recall_recent(parent_agent_scope, [T.TASK_DISPATCH], 200, _pctx())
-    assert [r for r in parent_disp if r.metadata.get("tool_call_id") == tc_short] == [], (
-        "§2.1: orphan TASK_DISPATCH (oc_short) must be superseded"
+    assert [r for r in parent_caps if r.role == "assistant"
+            and any(tc.get("id") == tc_short for tc in (r.metadata.get("tool_calls") or []))] == [], (
+        "§2.1: orphan delegate turn (oc_short) must be superseded"
     )
 
     # child 自己合成 finish 对（同 agent scope）
-    child_caps = await mem.recall_recent(parent_agent_scope, [T.AGENT_CONVERSATION_TURN], 200, _pctx())
+    child_caps = parent_caps
     child_finish = [r for r in child_caps if r.metadata.get("origin_task_id") == child_id]
     assert child_finish, "short same-agent child must synthesize its own finish pair"
 

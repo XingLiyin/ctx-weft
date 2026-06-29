@@ -275,8 +275,9 @@ async def _ingest_assistant_turn(
 ) -> list[dict]:
     """把本轮 assistant 回合入 task 层 memory；返回完整 tool_call dicts 供 message 重建。
 
-    派发(submit_*)/silent 工具的 tool_call 排除出 LLM_RESPONSE.metadata（落 agent 层
-    TASK_DISPATCH 或结果不入对话），避免无配对 TOOL_RESULT 的悬挂调用破坏无损重建（spec/06 §4）。
+    派发(submit_*)/silent 工具的 tool_call 排除出 LLM_RESPONSE.metadata（派发落 agent 层
+    delegate conversation turn、silent 结果不入对话），避免无配对 TOOL_RESULT 的悬挂调用破坏
+    无损重建（spec 2026-06-28 §2.3）。
     """
     from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS, SILENT_TOOLS
     asst_tool_dicts = [{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls]
@@ -306,7 +307,7 @@ async def _maybe_predispatch_compact(
 ) -> None:
     """本轮含派发调用且越过 predispatch 阈值 → 派发执行前先走一遍 compact（同 CompactStep）。
 
-    在 gateway 写 TASK_DISPATCH / 子 spawn-inherit 之前完成，使子继承到压缩后的记忆；每轮至多一次。
+    在 gateway 写 delegate conversation turn / 子 spawn-inherit 之前完成，使子继承到压缩后的记忆；每轮至多一次。
     随后 dispatch 执行（父转 SUSPENDED）→ 本 Act 末尾路由到 SuspendStep。usage.prompt_tokens 是本轮真实计数。
     """
     from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS

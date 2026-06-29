@@ -72,13 +72,14 @@ async def _seed_conv_nonshort(mem, scope) -> None:
 
 
 async def test_same_agent_child_no_bubble_supersedes_orphan_dispatch() -> None:
-    """§2.1：同 agent child 不再 bubble「scheduled」占位；supersede 掉 gateway 写的孤立 TASK_DISPATCH。"""
+    """§2.1：同 agent child 不再 bubble「scheduled」占位；supersede 掉 gateway 写的孤立 delegate 回合。"""
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
     await _seed_conv_nonshort(mem, child_scope)
-    # gateway-written dispatch marker for c1 in parent scope
-    await mem.ingest(_ev(T.TASK_DISPATCH, _sc("p1", "ag1"), "", 0, role="assistant",
-                         tool_call_id="oc1", tool_name="delegate_task", arguments={}), _ctx())
+    # gateway-written delegate turn for c1 in parent scope (新表示：AGENT_CONVERSATION_TURN, §2.3)
+    await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, _sc("p1", "ag1"), "", 0, role="assistant",
+                         origin_task_id="p1", parent_task_id=None,
+                         tool_calls=[{"id": "oc1", "name": "delegate_task", "input": {}}]), _ctx())
 
     child = Task(id="c1", session_id="s1", status="FINISHED", tenant_id="default",
                  assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="p1",
@@ -92,15 +93,16 @@ async def test_same_agent_child_no_bubble_supersedes_orphan_dispatch() -> None:
     )
 
     parent_scope = _sc("p1", "ag1")
-    # no placeholder bubble for oc1
-    results = await mem.recall_recent(parent_scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert [r for r in results if r.metadata.get("tool_call_id") == "oc1"] == [], (
-        "§2.1: same-agent child must NOT bubble a placeholder TASK_DISPATCH_RESULT"
+    turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    # no dispatch result bubble for oc1 (same-agent never bubbles)
+    assert [r for r in turns
+            if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"] == [], (
+        "§2.1: same-agent child must NOT bubble a dispatch result"
     )
-    # orphan TASK_DISPATCH (oc1) superseded
-    disp = await mem.recall_recent(parent_scope, [T.TASK_DISPATCH], 100, _ctx())
-    assert [r for r in disp if r.metadata.get("tool_call_id") == "oc1"] == [], (
-        "§2.1: orphan TASK_DISPATCH (oc1) must be superseded"
+    # orphan delegate turn (oc1) superseded
+    assert [r for r in turns if r.role == "assistant"
+            and any(tc.get("id") == "oc1" for tc in (r.metadata.get("tool_calls") or []))] == [], (
+        "§2.1: orphan delegate turn (oc1) must be superseded"
     )
 
 
@@ -150,8 +152,10 @@ async def test_same_agent_child_finish_pair_written_into_parent_scope() -> None:
     )
 
 
-async def test_cross_agent_child_bubble_content_is_mem_content() -> None:
-    """跨 agent child: TASK_DISPATCH_RESULT content == mem_content (含 Process Report:)。"""
+async def test_cross_agent_child_bubble_is_conversation_turn() -> None:
+    """§2.3：跨 agent child 的 dispatch result 写成 AGENT_CONVERSATION_TURN（tool 回合），
+    与 gateway 写的 delegate assistant 回合靠 tool_call_id 配对；origin_task_id=delegating
+    task（与同单元 finish 对同 origin、同命运一起折）；不再写 TASK_DISPATCH_RESULT enum。"""
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c2", "ag2")
     # cross-agent child: short is fine since cross_agent always bubbles
@@ -171,15 +175,20 @@ async def test_cross_agent_child_bubble_content_is_mem_content() -> None:
     )
 
     parent_scope = _sc("p1", "ag1")
-    results = await mem.recall_recent(parent_scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    bubble = [r for r in results if r.metadata.get("tool_call_id") == "oc2"]
-    assert bubble, "expected TASK_DISPATCH_RESULT bubbled for cross-agent child"
-    assert "Process Report:" in bubble[0].content, (
-        f"expected mem_content with Process Report:, got: {bubble[0].content!r}"
+    # dispatch result == 普通 conversation turn（tool），配对 oc2、归 delegating task(p1) 单元
+    turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    result = [r for r in turns
+              if r.role == "tool" and r.metadata.get("tool_call_id") == "oc2"]
+    assert result, "expected dispatch result as AGENT_CONVERSATION_TURN (tool) paired with oc2"
+    assert result[0].metadata.get("origin_task_id") == "p1", (
+        "dispatch result 须归 delegating task 单元（与 finish 对同 origin、同命运）"
     )
-    assert bubble[0].content == mem_content, (
-        f"expected full mem_content, got: {bubble[0].content!r}"
+    assert result[0].content == mem_content, (
+        f"expected full mem_content (black box), got: {result[0].content!r}"
     )
+    # 不再写 legacy TASK_DISPATCH_RESULT enum
+    legacy = await mem.recall_recent(parent_scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
+    assert legacy == [], "cross-agent dispatch result must not write TASK_DISPATCH_RESULT enum"
 
 
 async def test_cross_agent_child_no_nested_capsule_in_parent_scope() -> None:
