@@ -194,27 +194,30 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     for r in body_recs:
         if r.metadata.get("task_id") in l1_set:
             ids.append(r.id)
+    # §2.2（spec 2026-06-28）：dispatch 对是 delegating task 对话里的一次工具调用，随其单元在 L1
+    # 一起删——其 result 已被该单元 finish 对的 Process Report 吸收。归属 = delegating task =
+    # TASK_DISPATCH_RESULT.parent_task_id ∈ l1_set；配对的 TASK_DISPATCH 靠 tool_call_id 跟随。
+    l1_tcids: set = set()
+    for r in recs:
+        if (r.type == MemoryEventType.TASK_DISPATCH_RESULT
+                and r.metadata.get("parent_task_id") in l1_set):
+            ids.append(r.id)
+            tc = r.metadata.get("tool_call_id")
+            if tc:
+                l1_tcids.add(tc)
+    for r in recs:
+        if (r.type == MemoryEventType.TASK_DISPATCH
+                and r.metadata.get("tool_call_id") in l1_tcids):
+            ids.append(r.id)
 
     # L1→L2：l2_set 单元的 finish 对 + 旧 AGENT_COMPACT_SUMMARY → supersede
+    # （dispatch 对已在上面 L1 随 body 删，L2 不再单独处理它）
     for r in recs:
         if (r.type == MemoryEventType.AGENT_CONVERSATION_TURN
                 and r.metadata.get("origin_task_id") in l2_set):
             ids.append(r.id)
         elif r.type == MemoryEventType.AGENT_COMPACT_SUMMARY:
             ids.append(r.id)  # 旧摘要并入新摘要
-    # 配对 cross-agent / 同 agent scheduled 派发对：delegating task ∈ l2_set
-    l2_tcids: set = set()
-    for r in recs:
-        if (r.type == MemoryEventType.TASK_DISPATCH_RESULT
-                and r.metadata.get("parent_task_id") in l2_set):
-            ids.append(r.id)
-            tc = r.metadata.get("tool_call_id")
-            if tc:
-                l2_tcids.add(tc)
-    for r in recs:
-        if (r.type == MemoryEventType.TASK_DISPATCH
-                and r.metadata.get("tool_call_id") in l2_tcids):
-            ids.append(r.id)
 
     if not ids:
         return 0
@@ -232,7 +235,7 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
         oid = r.metadata.get("origin_task_id")
         pid = r.metadata.get("parent_task_id")
         if ((r.type == MemoryEventType.AGENT_CONVERSATION_TURN and oid in surviving)
-                or (r.type == MemoryEventType.TASK_DISPATCH_RESULT and pid in surviving)):
+                or (r.type == MemoryEventType.TASK_DISPATCH_RESULT and pid not in l1_set)):
             kept_ts.append(r.timestamp)
     anchor_ts = (min(kept_ts) if kept_ts else now_utc())
     await memory.ingest(

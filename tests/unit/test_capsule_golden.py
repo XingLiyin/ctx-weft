@@ -666,13 +666,13 @@ async def test_H4_cross_agent_isolation() -> None:
 
 # ─── H8: 短同 agent 子任务未配对隐去 ──────────────────────────────────────────
 
-async def test_H8_short_same_agent_child_bubbles_and_pairs() -> None:
-    """H8（task-resident）: 短同 agent 子任务**也无条件 bubble**「…scheduled」TASK_DISPATCH_RESULT
-    （取消 short 延迟）→ 派发对配对完整 → agent_recall 渲染该 dispatch（不再隐去）。
+async def test_H8_short_same_agent_child_no_bubble_supersedes_orphan() -> None:
+    """H8（§2.1, spec 2026-06-28）: 短同 agent 子任务 close **不再 bubble**「…scheduled」占位，
+    且 supersede 掉 gateway 写的孤立 TASK_DISPATCH（oc_short）——由嵌套 finish 对全权承载。
 
-    场景：parent 在 agent scope 有 TASK_DISPATCH（oc_short），短 child close 时 do_bubble=True
-    （same-agent 无条件），写出与 oc_short 配对的 TASK_DISPATCH_RESULT；child 自己也合成 finish 对。
-    断言：派发对配对存在；child raw body 留 child task 层。
+    场景：parent 在 agent scope 有 TASK_DISPATCH（oc_short），短 child close。
+    断言：oc_short 的占位 result 不存在、孤立 TASK_DISPATCH 被 supersede；child 合成 finish 对；
+    child raw body 留 child task 层。
     """
     mem = InMemoryMemoryProvider()
 
@@ -707,16 +707,16 @@ async def test_H8_short_same_agent_child_bubbles_and_pairs() -> None:
         child_task, "ok\n\nProcess Report: 短任务", "success", _loop_ctx(mem),
     )
 
-    # 断言：parent scope 有与 oc_short 配对的 TASK_DISPATCH_RESULT（「…scheduled」）
+    # §2.1：parent scope 无 oc_short 的占位 bubble；孤立 TASK_DISPATCH 被 supersede
     parent_results = await mem.recall_recent(
         parent_agent_scope, [T.TASK_DISPATCH_RESULT], 200, _pctx(),
     )
-    short_result = [r for r in parent_results if r.metadata.get("tool_call_id") == tc_short]
-    assert short_result, (
-        "task-resident: short same-agent child must bubble a paired TASK_DISPATCH_RESULT"
+    assert [r for r in parent_results if r.metadata.get("tool_call_id") == tc_short] == [], (
+        "§2.1: same-agent child must NOT bubble a placeholder TASK_DISPATCH_RESULT"
     )
-    assert "scheduled" in short_result[0].content, (
-        f"same-agent bubble must be the '…scheduled' marker; got {short_result[0].content!r}"
+    parent_disp = await mem.recall_recent(parent_agent_scope, [T.TASK_DISPATCH], 200, _pctx())
+    assert [r for r in parent_disp if r.metadata.get("tool_call_id") == tc_short] == [], (
+        "§2.1: orphan TASK_DISPATCH (oc_short) must be superseded"
     )
 
     # child 自己合成 finish 对（同 agent scope）

@@ -261,6 +261,41 @@ async def test_cross_agent_dispatch_pair_folded_with_parent():
     assert tc not in alive_tcids, "cross-agent TASK_DISPATCH for C2 should be superseded"
 
 
+async def test_cross_agent_dispatch_pair_folded_at_l1_with_body():
+    """§2.2：delegating 单元只降 L1（body 删、finish 对留、未到 L2）时，其 cross-agent dispatch 对
+    随 body 一并 supersede（不再等到 L2）。"""
+    mem = InMemoryMemoryProvider()
+    scope = _sc()
+    await _seed_root_capsule(mem, scope, "R0", 0, parent_task_id=None)
+    tc = "tc_C2"
+    await mem.ingest(_ev(T.TASK_DISPATCH, scope, "", 10, role="assistant", tool_call_id=tc), _pctx())
+    await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, scope, "child result", 11, role="tool",
+                         tool_call_id=tc, child_task_id="C2", parent_task_id="R0"), _pctx())
+    await _seed_root_capsule(mem, scope, "R1", 40, parent_task_id=None)
+    await _seed_root_capsule(mem, scope, "R2", 80, parent_task_id=None)
+
+    # keep_last=1 → R0,R1 降 L1（body 删、finish 留）；keep_pair=3 → 无单元降 L2
+    await fold_root_experience(_state(scope, keep_pair=3), _ctx(mem), keep_last=1, summary_text="folded")
+
+    # R0 body 被删（L1）
+    body = await mem.recall_recent_by_agent(scope, [T.USER_PROMPT], 2000, _pctx())
+    assert "R0" not in {r.metadata.get("task_id") for r in body}, "R0 body must be superseded at L1"
+    # R0 的 dispatch 对随 body 在 L1 一起删（§2.2 新行为）
+    results = await _alive(mem, scope, T.TASK_DISPATCH_RESULT)
+    assert "C2" not in {r.metadata.get("child_task_id") for r in results}, \
+        "dispatch result must fold at L1 with body"
+    dispatches = await _alive(mem, scope, T.TASK_DISPATCH)
+    assert tc not in {r.metadata.get("tool_call_id") for r in dispatches}, \
+        "dispatch tool_call must fold at L1 with body"
+    # R0 finish 对仍在（证明只到 L1、没到 L2）
+    finish = await _alive(mem, scope, T.AGENT_CONVERSATION_TURN)
+    assert "R0" in {r.metadata.get("origin_task_id") for r in finish}, \
+        "R0 finish pair must survive at L1"
+    # 无单元降 L2 → 无 AGENT_COMPACT_SUMMARY
+    summ = await _alive(mem, scope, T.AGENT_COMPACT_SUMMARY)
+    assert summ == [], "no L2 fold → no summary"
+
+
 async def test_cross_agent_child_counts_as_top_level_in_own_scope():
     """在 child agent 的 scope 内，胶囊 origin=C2, parent=R（R 不在该 scope origin 集）→ 算 1 顶层单元。
 

@@ -173,12 +173,13 @@ async def test_cross_agent_child_bubbles_unconditionally_even_when_short() -> No
     assert own != []
 
 
-async def test_same_agent_short_leaf_bubbles_scheduled_keeps_body() -> None:
-    """task-resident：same-agent 子任务（即使 short）也无条件 bubble「…scheduled」，body 留 task 层。"""
+async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> None:
+    """§2.1（spec 2026-06-28）：same-agent 子任务 close 不再 bubble「…scheduled」占位，且
+    supersede 掉 gateway 早先写的孤立 TASK_DISPATCH——由嵌套 finish 对全权承载。body 留 task 层。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t2", "ag1")
     await _seed_conv(mem, scope, n_assistant=1)  # short leaf
-    # dispatch marker for t2 in the shared ag1 scope
+    # dispatch marker for t2 in the shared ag1 scope (written by gateway at delegate time)
     await mem.ingest(_ev(T.TASK_DISPATCH, _sc("t1", "ag1"), "", 0, role="assistant",
                          tool_call_id="oc2", tool_name="delegate_task", arguments={}), _ctx())
     child = Task(id="t2", session_id="s1", status="FINISHED", tenant_id="default",
@@ -189,18 +190,22 @@ async def test_same_agent_short_leaf_bubbles_scheduled_keeps_body() -> None:
     await finalize_task_memory(mem, _state(child, scope, LoopConfig(), _FakeTM()),
                                child, "t2 out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # same-agent unconditionally bubbles a paired "scheduled" residue
+    # no "scheduled" placeholder bubble for oc2
     res = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    bubble = [r for r in res if r.metadata.get("tool_call_id") == "oc2"]
-    assert bubble and "scheduled" in bubble[0].content
+    assert [r for r in res if r.metadata.get("tool_call_id") == "oc2"] == []
+    # orphan TASK_DISPATCH (oc2) superseded
+    disp = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH], 100, _ctx())
+    assert [r for r in disp if r.metadata.get("tool_call_id") == "oc2"] == []
+    # nested finish pair synthesized (carries real content)
+    assert await _finish_tools(mem, scope, "t2"), "nested finish pair must exist"
     # body kept (task-resident)
     own = await mem.recall_recent(scope, [T.LLM_RESPONSE], 100, _ctx())
     assert own != []
 
 
-async def test_same_agent_nonshort_child_bubbles_supersedes_final_raw() -> None:
-    """Task 2（spec 2026-06-28 §3.2）：长 same-agent 子任务 close supersede 末 raw 段
-    （active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点保留；bubble 派发对照旧。"""
+async def test_same_agent_nonshort_child_no_bubble_supersedes_final_raw_and_orphan() -> None:
+    """§2.1 + Task 2（spec 2026-06-28）：长 same-agent 子任务 close——(a) 不 bubble 占位、
+    supersede 孤立 TASK_DISPATCH；(b) supersede 末 raw 段、保留 USER_PROMPT 锚点；(c) 嵌套 finish 对承载。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t2", "ag1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)  # over turn cap → not short
@@ -214,18 +219,18 @@ async def test_same_agent_nonshort_child_bubbles_supersedes_final_raw() -> None:
     await finalize_task_memory(mem, _state(child, scope, LoopConfig(), _FakeTM()),
                                child, "t2 out", "success", _loop_ctx(mem, _FakeTM()))
 
-    # bubble residue written, paired with oc2, marked as a SUB-task residue (parent_task_id="t1")
+    # (a) no placeholder bubble + orphan dispatch superseded
     res = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    bubble = [r for r in res if r.metadata.get("tool_call_id") == "oc2"]
-    assert bubble and bubble[0].metadata.get("parent_task_id") == "t1"
-    # Task 2: 长任务末 raw 段被 supersede（active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点留
+    assert [r for r in res if r.metadata.get("tool_call_id") == "oc2"] == []
+    disp = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH], 100, _ctx())
+    assert [r for r in disp if r.metadata.get("tool_call_id") == "oc2"] == []
+    # (b) 长任务末 raw 段被 supersede（active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点留
     own = await mem.recall_recent(scope, [T.LLM_RESPONSE], 100, _ctx())
     assert own == [], "long task: final raw LLM_RESPONSE must be superseded"
     anchors = await mem.recall_recent(scope, [T.USER_PROMPT], 100, _ctx())
     assert anchors != [], "USER_PROMPT anchor must survive"
-    # NO self-residue: agent scope must contain no TASK_DISPATCH_RESULT with parent_task_id is None
-    agent_res = await mem.recall_recent(_sc("t2", "ag1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert all(r.metadata.get("parent_task_id") is not None for r in agent_res)
+    # (c) nested finish pair synthesized
+    assert await _finish_tools(mem, scope, "t2"), "nested finish pair must exist"
 
 
 async def test_root_close_keeps_deep_nested_subtree_bodies() -> None:
@@ -282,8 +287,14 @@ async def test_intermediate_close_keeps_grandchild_body() -> None:
     # grandchild body kept (task-resident)
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
     assert any(r.metadata.get("task_id") == "A1" for r in convs), "grandchild body must stay"
-    assert any(r.metadata.get("tool_call_id") == "ocA" and r.metadata.get("parent_task_id") == "t1"
-               for r in results)                                  # A bubbles its own residue to t1
+    # §2.1: A (same-agent) no longer bubbles a placeholder; its orphan TASK_DISPATCH (ocA) is superseded
+    assert [r for r in results if r.metadata.get("tool_call_id") == "ocA"] == [], \
+        "same-agent A must not bubble placeholder residue"
+    disp = await mem.recall_recent(_sc("t1", "ag1"), [T.TASK_DISPATCH], 100, _ctx())
+    assert [r for r in disp if r.metadata.get("tool_call_id") == "ocA"] == [], \
+        "orphan ocA dispatch must be superseded"
+    # A's own finish pair synthesized (nested, agent layer)
+    assert await _finish_tools(mem, a_scope, "A"), "A's nested finish pair must exist"
 
 
 async def test_root_close_multichild_plan_preserves_dispatch_pairs() -> None:

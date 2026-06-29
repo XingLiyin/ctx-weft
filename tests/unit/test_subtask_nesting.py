@@ -71,11 +71,14 @@ async def _seed_conv_nonshort(mem, scope) -> None:
         await mem.ingest(_ev(T.LLM_RESPONSE, scope, big_text, i + 2, role="assistant"), _ctx())
 
 
-async def test_same_agent_child_bubble_content_is_scheduled() -> None:
-    """同 agent non-short child: TASK_DISPATCH_RESULT content = 'Sub-task ... scheduled.'"""
+async def test_same_agent_child_no_bubble_supersedes_orphan_dispatch() -> None:
+    """§2.1：同 agent child 不再 bubble「scheduled」占位；supersede 掉 gateway 写的孤立 TASK_DISPATCH。"""
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
     await _seed_conv_nonshort(mem, child_scope)
+    # gateway-written dispatch marker for c1 in parent scope
+    await mem.ingest(_ev(T.TASK_DISPATCH, _sc("p1", "ag1"), "", 0, role="assistant",
+                         tool_call_id="oc1", tool_name="delegate_task", arguments={}), _ctx())
 
     child = Task(id="c1", session_id="s1", status="FINISHED", tenant_id="default",
                  assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="p1",
@@ -89,11 +92,15 @@ async def test_same_agent_child_bubble_content_is_scheduled() -> None:
     )
 
     parent_scope = _sc("p1", "ag1")
+    # no placeholder bubble for oc1
     results = await mem.recall_recent(parent_scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    bubble = [r for r in results if r.metadata.get("tool_call_id") == "oc1"]
-    assert bubble, "expected TASK_DISPATCH_RESULT bubbled to parent scope"
-    assert bubble[0].content == "Sub-task 'My Sub Task' scheduled.", (
-        f"expected scheduled marker, got: {bubble[0].content!r}"
+    assert [r for r in results if r.metadata.get("tool_call_id") == "oc1"] == [], (
+        "§2.1: same-agent child must NOT bubble a placeholder TASK_DISPATCH_RESULT"
+    )
+    # orphan TASK_DISPATCH (oc1) superseded
+    disp = await mem.recall_recent(parent_scope, [T.TASK_DISPATCH], 100, _ctx())
+    assert [r for r in disp if r.metadata.get("tool_call_id") == "oc1"] == [], (
+        "§2.1: orphan TASK_DISPATCH (oc1) must be superseded"
     )
 
 
