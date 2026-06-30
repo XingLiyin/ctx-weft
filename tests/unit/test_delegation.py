@@ -64,10 +64,12 @@ def test_delegate_task_records_origin_tool_call_id() -> None:
     assert tm.staged[0].parent_task_id == "p1"
 
 
-def test_delegate_plan_records_origin_on_all_children() -> None:
+def test_delegate_plan_records_distinct_origin_per_child() -> None:
     tm = _FakeTM()
     delegate_plan(tasks=[{"title": "a"}, {"title": "b"}], ctx=_ctx(tm, "tc_99"))
-    assert [c.origin_tool_call_id for c in tm.staged] == ["tc_99", "tc_99"]
+    ids = [c.origin_tool_call_id for c in tm.staged]
+    assert len(set(ids)) == 2, f"each plan child needs its own origin_tool_call_id, got {ids}"
+    assert "tc_99" not in ids, "plan children must NOT reuse the delegate_plan call id"
 
 
 @pytest.mark.asyncio

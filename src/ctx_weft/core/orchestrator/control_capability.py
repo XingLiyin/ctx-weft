@@ -249,7 +249,7 @@ def delegate_plan(
             title=title,
             description=spec.get("description", ""),
             user_prompt=spec.get("task_prompt") or spec.get("description", ""),
-            origin_tool_call_id=ctx.tool_call_id or None,
+            origin_tool_call_id=generate_id("tcall"),
             tracking_task_ids=list(prev_ids),
             interaction_mode=_child_mode(bool(spec.get("interactive", False)), ctx.task),
             settings=NormalTaskSettings(
@@ -516,7 +516,7 @@ def replan(
             title=title,
             description=spec.get("description", ""),
             user_prompt=spec.get("task_prompt") or spec.get("description", ""),
-            origin_tool_call_id=ctx.tool_call_id or None,
+            origin_tool_call_id=generate_id("tcall"),
             tracking_task_ids=list(prev_ids),
             interaction_mode=_child_mode(bool(spec.get("interactive", False)), ctx.task),
             settings=NormalTaskSettings(
