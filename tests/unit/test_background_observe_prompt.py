@@ -76,3 +76,13 @@ def test_close_boundary_no_outputs_no_injection():
         _blocks(), _req("finish", outputs=""))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "Actor 的最终产出" not in joined
+
+
+def test_observe_cue_mentions_both_fields():
+    from ctx_weft.core.assembler.composer import _OBSERVE_JUDGMENT_CUE, _background_observe_cue
+    assert "act_recap" in _OBSERVE_JUDGMENT_CUE
+    assert "task_summary" in _OBSERVE_JUDGMENT_CUE
+    close_cue = _background_observe_cue("finish")
+    assert "act_recap" in close_cue and "task_summary" in close_cue
+    # 综合子任务结果的引导
+    assert "sub-task" in close_cue.lower() or "子任务" in close_cue

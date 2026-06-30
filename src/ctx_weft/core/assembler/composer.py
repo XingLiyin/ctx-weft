@@ -70,10 +70,11 @@ _OBSERVER_ROLE_FALLBACK = "You are an objective observer evaluating task executi
 # 尾部 observe user message 的判定提示（拼在 ROLE 之后）。
 _OBSERVE_JUDGMENT_CUE = (
     "Now act as the observer for the current task. Based on the execution above, judge the "
-    f"task's completion status and call `{REPORT_TASK_OUTCOME_NAME}` exactly once: give a `task_status` "
-    "of `success` (fully accomplished), `retry` (needs another attempt), or `fail` (cannot be "
-    "completed), plus a thorough, evidence-based `task_process_report`. Optionally review your "
-    "own sub-tasks via `task_reviews`. Call no other tools."
+    f"task's completion status and call `{REPORT_TASK_OUTCOME_NAME}` exactly once with: a `task_status` "
+    "of `success` / `retry` / `fail`; an `act_recap` honestly recapping what the last act phase did; "
+    "and — when status is success/fail — a concise `task_summary`: the important steps and lessons of the "
+    "whole task (a process report, not verbose, and NOT the final output), incorporating the results of any "
+    "sub-tasks you dispatched. Optionally review your own sub-tasks via `task_reviews`. Call no other tools."
 )
 
 _COMPACTION_INSTRUCTION = (
@@ -104,10 +105,16 @@ _CLOSE_BOUNDARIES = {"finish", "normal"}
 
 def _background_observe_cue(boundary: str) -> str:
     desc = _BACKGROUND_BOUNDARY_DESC.get(boundary, _BACKGROUND_BOUNDARY_DESC["normal"])
+    is_close = boundary in _CLOSE_BOUNDARIES
+    summary_ask = (
+        " 并给出 `task_summary`：整个 task 执行历程的简洁 process report（点出重要步骤与经验，不琐碎；"
+        "不是最终输出），须综合已完成子任务（sub-task）的结果。"
+        if is_close else ""
+    )
     return (
-        f"当前 task 的状态：{desc}。请基于以上执行过程，总结这一段的处理进展，"
-        "调用 `collect_process_report` 一次给出 `task_process_report`。"
-        "只需总结进展、给出 process report，无需判断 success/retry/fail，不要调用其他工具。"
+        f"当前 task 的状态：{desc}。请基于以上执行过程，调用 `collect_process_report` 一次："
+        "给出 `act_recap`（诚实复述上一段 act 做了什么）" + summary_ask +
+        " 只需总结，无需判断 success/retry/fail，不要调用其他工具。"
     )
 
 
