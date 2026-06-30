@@ -244,6 +244,48 @@ async def test_same_agent_keeps_delegate_and_writes_backdated_ack() -> None:
     }, "ack content must only appear in the paired tool_call_id record"
 
 
+async def test_cross_agent_result_carries_outputs_and_task_summary() -> None:
+    """Task 5: 跨 agent dispatch result（cross_agent bubble, mem_content）须含 outputs + task_summary，
+    不掺 act_recap（mem_content 的 report 部分改用 task_summary）。"""
+    from ctx_weft.core.loop.steps.finalize import FinalizeStep
+    from ctx_weft.core.loop.steps.observe import Verdict
+
+    mem = InMemoryMemoryProvider()
+    child_scope = _sc("c99", "ag2")
+
+    # seed minimal conv so FinalizeStep can run
+    await mem.ingest(_ev(T.USER_PROMPT, child_scope, "do cross", 1, role="user"), _ctx())
+    await mem.ingest(_ev(T.LLM_RESPONSE, child_scope, "done", 2, role="assistant"), _ctx())
+
+    child = Task(id="c99", session_id="s1", status="FINISHED", tenant_id="default",
+                 assigned_agent_id="ag2", creator_agent_id="ag1",  # cross-agent
+                 parent_task_id="p99", origin_tool_call_id="oc99",
+                 title="Cross Agent Child", user_prompt="do cross",
+                 settings=NormalTaskSettings())
+    child.outputs = "最终产出给 user"
+
+    verdict = Verdict(task_outcome="success", act_recap="本段", task_summary="综合 process report")
+
+    agent = SimpleNamespace(id="ag2", loop_config=LoopConfig())
+    session = SimpleNamespace(id="s1", tenant_id="default")
+    state = SimpleNamespace(
+        run_id="run99", sequence_counter=0, session=session,
+        scope=child_scope, task=child, agent=agent, verdict=verdict,
+    )
+
+    await FinalizeStep().execute(state, _loop_ctx(mem))
+
+    parent_scope = _sc("p99", "ag1")
+    turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    result = [r for r in turns if r.role == "tool"
+              and r.metadata.get("tool_call_id") == "oc99"]
+    assert result
+    body = result[0].content
+    assert "最终产出给 user" in body          # 最终输出
+    assert "综合 process report" in body       # task_summary 承载 process report
+    assert "本段" not in body                   # 不掺 act_recap
+
+
 async def test_cross_agent_child_no_nested_capsule_in_parent_scope() -> None:
     """跨 agent child: parent scope 无 origin_task_id=child.id 的 AGENT_CONVERSATION_TURN。"""
     mem = InMemoryMemoryProvider()

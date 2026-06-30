@@ -115,8 +115,8 @@ async def test_finished_root_task_recall_yields_body_and_finish_pair() -> None:
 
     # close：写 finish 对到 agent 层（task-resident：body 留 task 层）
     task = _make_task(task_id="t1", status="FINISHED", outputs="切换 JWT 完成")
-    mem_content = "切换 JWT 完成\n\nProcess Report: 成功。3 处改完，8 测试通过。"
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+    task_summary_text = "成功。3 处改完，8 测试通过。"
+    await _synthesize_dispatch_pair(mem, asc, task, "已完成 JWT 改造", task_summary_text, "success", _pctx())
 
     blocks = await _recall_blocks(mem, asc)
     types = [b.metadata.get("type") for b in blocks]
@@ -140,9 +140,9 @@ async def test_finished_root_task_recall_yields_body_and_finish_pair() -> None:
         f"finish pair assistant must have finish_task tool_call; got {finish_tc}"
     )
 
-    # Process Report 在 tool 回合
-    assert "Process Report:" in act_blocks[1].content, (
-        f"finish pair tool must contain 'Process Report:'; got {act_blocks[1].content!r}"
+    # task_summary（process report）在 tool 回合
+    assert task_summary_text in act_blocks[1].content, (
+        f"finish pair tool must contain task_summary; got {act_blocks[1].content!r}"
     )
 
     # 验证判据：body 在 task 层未被 supersede（task-resident 设计）
@@ -245,6 +245,7 @@ async def test_cross_agent_child_body_isolated_from_parent() -> None:
     await finalize_task_memory(
         mem, _state(child_task, child_tsc),
         child_task, child_mem_content, "success", _loop_ctx(mem),
+        act_recap="成功。", task_summary="",
     )
 
     # 父 agent AgentRecallSource 召回

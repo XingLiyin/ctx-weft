@@ -253,7 +253,8 @@ class FinalizeStep(Step):
         task = state.task
         verdict = state.verdict
         outcome = verdict.task_outcome if verdict else "fail"
-        summary = verdict.act_recap if verdict else ""
+        summary = verdict.act_recap if verdict else ""            # → task.process_report（retry Current Progress）
+        task_summary = verdict.task_summary if verdict else ""    # → 汇报给 parent 的 process report
         events: list[Any] = []
 
         # retry 超过上限 → 降级 fail（不再重试）
@@ -263,13 +264,15 @@ class FinalizeStep(Step):
             task.observer_outcome = "fail"
 
         terminal = outcome in ("success", "fail")
-        mem_content = _build_memory_content(task.outputs, summary)
+        # 汇报给 parent（blackboard + cross_agent bubble）= 最终输出 + task_summary（process report 作用）；
+        # task_summary 空时回退 act_recap。
+        mem_content = _build_memory_content(task.outputs, task_summary or summary)
 
         # 1) 统一 close：bubble / 自身残留 / 软删自身对话 / GC 子树（spec 2026-06-23）。
         if terminal and mem_content:
             events.extend(await finalize_task_memory(
                 ctx.memory, state, task, mem_content, outcome, ctx,
-                act_recap=summary, task_summary=(verdict.task_summary if verdict else ""),
+                act_recap=summary, task_summary=task_summary,
             ))
 
         # 2) 按 outcome 分派（task.status 已由 ObserveStep 设置）

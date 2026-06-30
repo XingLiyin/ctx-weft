@@ -55,7 +55,8 @@ async def test_capsule_renders_body_and_finish_pair():
                                  content="### 会话目标\n转 PDF", timestamp=_BASE, role="assistant",
                                  metadata={}), _pctx())
     # 在 agent scope 合成 finish 对（task-resident：不镜像 body）
-    await _synthesize_dispatch_pair(mem, scope, _task(), "## PDF 已完成", "success", _pctx())
+    _task_summary = "综合进度：PDF 转换完成"
+    await _synthesize_dispatch_pair(mem, scope, _task(), "## PDF 已完成", _task_summary, "success", _pctx())
 
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=scope)
@@ -85,5 +86,5 @@ async def test_capsule_renders_body_and_finish_pair():
     # finish_task tool_call (agent layer finish pair)
     finish_tc = history[2].metadata.get("tool_calls", [])
     assert finish_tc and finish_tc[0].get("name", "").endswith("finish_task")
-    # Process Report (agent layer)
-    assert history[3].content.startswith("Process Report:")
+    # task_summary（process report）in tool 回合（agent layer）
+    assert _task_summary in history[3].content
