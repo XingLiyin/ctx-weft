@@ -39,6 +39,7 @@ async def test_close_writes_finish_pair_keeps_body() -> None:
     await finalize_task_memory(
         mem, _state(task, tsc, LoopConfig()), task,
         "完成\n\nProcess Report: 成功", "success", _loop_ctx(mem),
+        act_recap="成功", task_summary="",
     )
     # agent 层：恰 2 条 finish 对
     caps = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
@@ -69,6 +70,7 @@ async def test_short_close_keeps_active_raw() -> None:
     await finalize_task_memory(
         mem, _state(task, tsc, LoopConfig()), task,
         "完成\n\nProcess Report: 成功", "success", _loop_ctx(mem),
+        act_recap="成功", task_summary="",
     )
     # 短任务：active LLM_RESPONSE/TOOL_RESULT 仍被 recall（未 supersede）
     raw = await mem.recall_recent(tsc, [T.LLM_RESPONSE, T.TOOL_RESULT], 500, _pctx())
@@ -106,6 +108,7 @@ async def test_long_close_supersedes_final_raw_keeps_anchors() -> None:
     await finalize_task_memory(
         mem, _state(task, tsc, cfg), task,
         "大功告成\n\nProcess Report: 成功收尾", "success", _loop_ctx(mem),
+        act_recap="成功收尾", task_summary="",
     )
 
     # 末 raw 段被 supersede（active LLM/TOOL/INVOCATION 不再 recall）

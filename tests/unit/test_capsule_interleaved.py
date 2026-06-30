@@ -10,10 +10,13 @@ role 映射）随 mirror 删除而移除——其验证的镜像机制已不存�
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
+from ctx_weft.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
+from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, _DISPATCH_ACK
 from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -232,3 +235,131 @@ async def test_embedded_process_report_in_outputs():
         f"tool content should be 'Process Report: real report' but got {tool_content!r}; "
         "old split logic would include embedded separator content"
     )
+
+
+# ── 端到端相邻性守护：同 agent 派发对 + 子任务胶囊 ────────────────────────────
+
+async def test_e2e_same_agent_subtask_no_400() -> None:
+    """端到端相邻性守护（spec 2026-06-30 §2.5）：parent delegate 同 agent 子任务，close 后经
+    AgentRecallSource + DefaultComposer 归并，每个 tool message 紧跟其 assistant tool_call，
+    且 delegate → _DISPATCH_ACK 严格相邻、子 body 排在 ack 之后、finish 对相邻。
+    Guards the 400 fix end-to-end.
+    """
+    pctx = _ctx()
+    mem = InMemoryMemoryProvider()
+
+    def _ts(t):
+        return _BASE + timedelta(seconds=t)
+
+    p_tsc = _task_scope("P")     # parent task scope
+    c_tsc = _task_scope("C")     # child task scope (same agent ag1)
+    asc = _agent_scope()          # agent scope (task_id=None, agent_id=ag1)
+
+    origin_tcid = "oc_adj_1"
+
+    # T=1-2: Parent body (task layer)
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=p_tsc, content="parent task",
+                                 timestamp=_ts(1), role="user"), pctx)
+    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=p_tsc, content="delegating to child",
+                                 timestamp=_ts(2), role="assistant"), pctx)
+
+    # T=3: Delegate assistant turn (agent layer, as written by gateway)
+    await mem.ingest(MemoryEvent(
+        type=T.AGENT_CONVERSATION_TURN, scope=asc,
+        content="", timestamp=_ts(3), role="assistant",
+        metadata={
+            "origin_task_id": "P", "parent_task_id": None,
+            "tool_calls": [{"id": origin_tcid, "name": "control__delegate_task",
+                            "input": {"title": "child task"}}],
+        },
+    ), pctx)
+
+    # T=4-5: Child body (task layer - same agent, thus recalled by AgentRecallSource)
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=c_tsc, content="child task",
+                                 timestamp=_ts(4), role="user"), pctx)
+    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=c_tsc, content="doing child work",
+                                 timestamp=_ts(5), role="assistant"), pctx)
+
+    # T=3 (back-dated): _DISPATCH_ACK tool result, same timestamp as delegate → strictly adjacent
+    await mem.ingest(MemoryEvent(
+        type=T.AGENT_CONVERSATION_TURN, scope=asc,
+        content=_DISPATCH_ACK, timestamp=_ts(3), role="tool",
+        metadata={
+            "origin_task_id": "P",
+            "tool_call_id": origin_tcid,
+        },
+    ), pctx)
+
+    # T=6: Child finish pair (agent layer)
+    finish_tcid = "ftcall_adj_1"
+    await mem.ingest(MemoryEvent(
+        type=T.AGENT_CONVERSATION_TURN, scope=asc,
+        content="child act recap", timestamp=_ts(6), role="assistant",
+        metadata={
+            "origin_task_id": "C", "parent_task_id": "P",
+            "tool_calls": [{"id": finish_tcid, "name": "control__finish_task",
+                            "input": {"result": "child done"}}],
+        },
+    ), pctx)
+    await mem.ingest(MemoryEvent(
+        type=T.AGENT_CONVERSATION_TURN, scope=asc,
+        content="child task summary", timestamp=_ts(6), role="tool",
+        metadata={
+            "origin_task_id": "C", "parent_task_id": "P",
+            "tool_call_id": finish_tcid,
+        },
+    ), pctx)
+
+    # Compose messages via real AgentRecallSource + DefaultComposer
+    deps = SimpleNamespace(memory=mem, provider_ctx=pctx)
+    req = SimpleNamespace(scope=asc)
+    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    triples = DefaultComposer()._history_to_messages_with_sources(blocks)
+    messages = [m for m, _src, _mt in triples]
+
+    # ── Helper: every tool message must immediately follow an assistant with matching tool_call ──
+    def _assert_tool_follows_call(msgs):
+        for i, m in enumerate(msgs):
+            if m.role == "tool":
+                prev = msgs[i - 1]
+                assert prev.role == "assistant" and any(
+                    tc["id"] == m.tool_call_id for tc in (prev.tool_calls or [])
+                ), f"tool@{i} (id={m.tool_call_id!r}) 未紧跟其 assistant tool_call"
+
+    _assert_tool_follows_call(messages)
+
+    # ── delegate → _DISPATCH_ACK strictly adjacent ──
+    delegate_idx = next(
+        i for i, m in enumerate(messages)
+        if m.role == "assistant" and any(
+            tc.get("id") == origin_tcid for tc in (m.tool_calls or [])
+        )
+    )
+    ack_idx = delegate_idx + 1
+    assert messages[ack_idx].role == "tool", (
+        f"expected tool (_DISPATCH_ACK) at {ack_idx}, got role={messages[ack_idx].role!r}"
+    )
+    assert messages[ack_idx].content == _DISPATCH_ACK, (
+        f"expected _DISPATCH_ACK after delegate, got {messages[ack_idx].content!r}"
+    )
+    assert messages[ack_idx].tool_call_id == origin_tcid
+
+    # ── child body comes AFTER the ack ──
+    child_body_indices = [
+        i for i, m in enumerate(messages)
+        if m.role == "user" and "child" in (m.content or "")
+    ]
+    assert child_body_indices, "child body (user message) must appear in composed messages"
+    assert all(ci > ack_idx for ci in child_body_indices), (
+        f"child body must come after _DISPATCH_ACK @{ack_idx}; got child at {child_body_indices}"
+    )
+
+    # ── finish pair adjacent ──
+    finish_call_idx = next(
+        i for i, m in enumerate(messages)
+        if m.role == "assistant" and any(
+            tc.get("id") == finish_tcid for tc in (m.tool_calls or [])
+        )
+    )
+    assert messages[finish_call_idx + 1].role == "tool", "finish pair tool must follow finish assistant"
+    assert messages[finish_call_idx + 1].tool_call_id == finish_tcid, "finish pair tool_call_id must match"

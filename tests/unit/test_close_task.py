@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps.finalize import finalize_task_memory, _descendant_task_ids
+from ctx_weft.core.loop.steps.finalize import finalize_task_memory, _descendant_task_ids, _DISPATCH_ACK
 from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryEvent,
@@ -111,7 +111,8 @@ async def test_short_root_leaf_keeps_body_and_synthesizes_finish_pair() -> None:
     task = _root_task()
 
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), _FakeTM()),
-                               task, "final out", "success", _loop_ctx(mem, _FakeTM()))
+                               task, "final out", "success", _loop_ctx(mem, _FakeTM()),
+                               act_recap="test recap", task_summary="test summary")
 
     # body kept (task-resident)
     convs = await mem.recall_recent(scope, [T.USER_PROMPT, T.LLM_RESPONSE], 100, _ctx())
@@ -132,7 +133,8 @@ async def test_long_root_leaf_supersedes_final_raw_keeps_anchor_and_finish_pair(
     cfg = LoopConfig()
 
     await finalize_task_memory(mem, _state(task, scope, cfg, _FakeTM()),
-                               task, "final out", "success", _loop_ctx(mem, _FakeTM()))
+                               task, "final out", "success", _loop_ctx(mem, _FakeTM()),
+                               act_recap="test recap", task_summary="test summary")
 
     # Task 2: 末 raw 段 supersede（active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点留
     llm = await mem.recall_recent(scope, [T.LLM_RESPONSE], 100, _ctx())
@@ -159,7 +161,8 @@ async def test_root_close_keeps_subtree_bodies() -> None:
     tm = _FakeTM({"t1": {"t2"}})
     task = _root_task()  # non-leaf via tm
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), tm),
-                               task, "final out", "success", _loop_ctx(mem, tm))
+                               task, "final out", "success", _loop_ctx(mem, tm),
+                               act_recap="test recap", task_summary="test summary")
 
     # dispatch pair preserved; t2's task-layer body NOT GC'd (task-resident)
     all_results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
@@ -182,7 +185,8 @@ async def test_cross_agent_child_bubbles_unconditionally_even_when_short() -> No
                  settings=NormalTaskSettings())
 
     await finalize_task_memory(mem, _state(child, child_scope, LoopConfig(), _FakeTM()),
-                               child, "child out", "success", _loop_ctx(mem, _FakeTM()))
+                               child, "child out", "success", _loop_ctx(mem, _FakeTM()),
+                               act_recap="child recap", task_summary="child summary")
 
     # parent (ag1) received the dispatch result as a tool conversation turn even though child was short;
     # origin=delegating task(p1) → folds with that unit (§2.3)
@@ -196,8 +200,9 @@ async def test_cross_agent_child_bubbles_unconditionally_even_when_short() -> No
 
 
 async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> None:
-    """§2.1（spec 2026-06-28）：same-agent 子任务 close 不再 bubble「…scheduled」占位，且
-    supersede 掉 gateway 早先写的孤立 delegate 回合——由嵌套 finish 对全权承载。body 留 task 层。"""
+    """§2.5（spec 2026-06-30）：same-agent 子任务 close 不再 supersede delegate 回合，改写一条
+    配对的静态 tool result（_DISPATCH_ACK），timestamp back-date 到 delegate 时刻 → 与 delegate
+    严格相邻。嵌套 finish 对承载真实内容。body 留 task 层。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t2", "ag1")
     await _seed_conv(mem, scope, n_assistant=1)  # short leaf
@@ -209,12 +214,18 @@ async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> N
                  settings=NormalTaskSettings())
 
     await finalize_task_memory(mem, _state(child, scope, LoopConfig(), _FakeTM()),
-                               child, "t2 out", "success", _loop_ctx(mem, _FakeTM()))
+                               child, "t2 out", "success", _loop_ctx(mem, _FakeTM()),
+                               act_recap="t2 recap", task_summary="t2 summary")
 
-    # no dispatch result bubble for oc2 (same-agent never bubbles)
-    assert await _dispatch_results(mem, _sc("t1", "ag1"), "oc2") == []
-    # orphan delegate turn (oc2) superseded
-    assert await _delegate_turns(mem, _sc("t1", "ag1"), "oc2") == []
+    # same-agent: static _DISPATCH_ACK written (not bubbled dispatch result with outcome)
+    results = await _dispatch_results(mem, _sc("t1", "ag1"), "oc2")
+    assert len(results) == 1, f"expected 1 _DISPATCH_ACK result; got {results}"
+    assert results[0].content == _DISPATCH_ACK, (
+        f"same-agent dispatch result must be _DISPATCH_ACK; got {results[0].content!r}"
+    )
+    # delegate turn KEPT (not superseded, spec 2026-06-30 §2.5)
+    delegates = await _delegate_turns(mem, _sc("t1", "ag1"), "oc2")
+    assert len(delegates) == 1, "orphan delegate turn must be KEPT (not superseded)"
     # nested finish pair synthesized (carries real content)
     assert await _finish_tools(mem, scope, "t2"), "nested finish pair must exist"
     # body kept (task-resident)
@@ -223,8 +234,9 @@ async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> N
 
 
 async def test_same_agent_nonshort_child_no_bubble_supersedes_final_raw_and_orphan() -> None:
-    """§2.1 + Task 2（spec 2026-06-28）：长 same-agent 子任务 close——(a) 不 bubble 占位、
-    supersede 孤立 delegate 回合；(b) supersede 末 raw 段、保留 USER_PROMPT 锚点；(c) 嵌套 finish 对承载。"""
+    """§2.5 + Task 2（spec 2026-06-30 / 2026-06-28）：长 same-agent 子任务 close——
+    (a) 写 _DISPATCH_ACK 配对 result、保留 delegate 回合（不再 supersede）；
+    (b) supersede 末 raw 段、保留 USER_PROMPT 锚点；(c) 嵌套 finish 对承载。"""
     mem = InMemoryMemoryProvider()
     scope = _sc("t2", "ag1")
     await _seed_conv(mem, scope, n_assistant=5, big=True)  # over turn cap → not short
@@ -235,11 +247,16 @@ async def test_same_agent_nonshort_child_no_bubble_supersedes_final_raw_and_orph
                  origin_tool_call_id="oc2", title="Sub", user_prompt="sub",
                  settings=NormalTaskSettings())
     await finalize_task_memory(mem, _state(child, scope, LoopConfig(), _FakeTM()),
-                               child, "t2 out", "success", _loop_ctx(mem, _FakeTM()))
+                               child, "t2 out", "success", _loop_ctx(mem, _FakeTM()),
+                               act_recap="t2 recap", task_summary="t2 summary")
 
-    # (a) no placeholder bubble + orphan delegate turn superseded
-    assert await _dispatch_results(mem, _sc("t1", "ag1"), "oc2") == []
-    assert await _delegate_turns(mem, _sc("t1", "ag1"), "oc2") == []
+    # (a) same-agent: _DISPATCH_ACK written + delegate turn KEPT (not superseded)
+    results = await _dispatch_results(mem, _sc("t1", "ag1"), "oc2")
+    assert len(results) == 1 and results[0].content == _DISPATCH_ACK, (
+        f"expected _DISPATCH_ACK; got {[r.content for r in results]}"
+    )
+    delegates = await _delegate_turns(mem, _sc("t1", "ag1"), "oc2")
+    assert len(delegates) == 1, "delegate turn must be KEPT (not superseded)"
     # (b) 长任务末 raw 段被 supersede（active LLM_RESPONSE 不再 recall），USER_PROMPT 锚点留
     own = await mem.recall_recent(scope, [T.LLM_RESPONSE], 100, _ctx())
     assert own == [], "long task: final raw LLM_RESPONSE must be superseded"
@@ -266,7 +283,8 @@ async def test_root_close_keeps_deep_nested_subtree_bodies() -> None:
     tm = _FakeTM({"t1": {"A"}, "A": {"A1"}})
     task = _root_task()
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), tm),
-                               task, "final out", "success", _loop_ctx(mem, tm))
+                               task, "final out", "success", _loop_ctx(mem, tm),
+                               act_recap="test recap", task_summary="test summary")
     # dispatch pairs for A and A1 preserved
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
@@ -294,18 +312,21 @@ async def test_intermediate_close_keeps_grandchild_body() -> None:
              origin_tool_call_id="ocA", title="A", user_prompt="a", settings=NormalTaskSettings())
     tm = _FakeTM({"A": {"A1"}})
     await finalize_task_memory(mem, _state(A, a_scope, LoopConfig(), tm),
-                               A, "A out", "success", _loop_ctx(mem, tm))
+                               A, "A out", "success", _loop_ctx(mem, tm),
+                               act_recap="A recap", task_summary="A summary")
     # A1 dispatch result preserved (conversation turn, origin=A)
     assert any(r.content == "A1 out" for r in await _dispatch_results(mem, a_scope, "dA1")), \
         "A1 dispatch pair must be preserved"
     # grandchild body kept (task-resident)
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
     assert any(r.metadata.get("task_id") == "A1" for r in convs), "grandchild body must stay"
-    # §2.1: A (same-agent) no longer bubbles a placeholder; its orphan delegate turn (ocA) is superseded
-    assert await _dispatch_results(mem, _sc("t1", "ag1"), "ocA") == [], \
-        "same-agent A must not bubble placeholder residue"
-    assert await _delegate_turns(mem, _sc("t1", "ag1"), "ocA") == [], \
-        "orphan ocA delegate turn must be superseded"
+    # §2.5: A (same-agent) writes _DISPATCH_ACK result + keeps delegate turn (not superseded)
+    results_ocA = await _dispatch_results(mem, _sc("t1", "ag1"), "ocA")
+    assert len(results_ocA) == 1 and results_ocA[0].content == _DISPATCH_ACK, (
+        f"same-agent A must write _DISPATCH_ACK; got {[r.content for r in results_ocA]}"
+    )
+    delegates_ocA = await _delegate_turns(mem, _sc("t1", "ag1"), "ocA")
+    assert len(delegates_ocA) == 1, "ocA delegate turn must be KEPT (not superseded)"
     # A's own finish pair synthesized (nested, agent layer)
     assert await _finish_tools(mem, a_scope, "A"), "A's nested finish pair must exist"
 
@@ -322,7 +343,8 @@ async def test_root_close_multichild_plan_preserves_dispatch_pairs() -> None:
     tm = _FakeTM({"t1": {"A", "B", "C"}})
     task = _root_task()
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), tm),
-                               task, "final out", "success", _loop_ctx(mem, tm))
+                               task, "final out", "success", _loop_ctx(mem, tm),
+                               act_recap="test recap", task_summary="test summary")
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
     # dispatch pairs preserved
@@ -349,7 +371,8 @@ async def test_root_close_mixed_same_and_cross_agent_children_keeps_bodies() -> 
     tm = _FakeTM({"t1": {"S", "X"}})
     task = _root_task()
     await finalize_task_memory(mem, _state(task, scope, LoopConfig(), tm),
-                               task, "final out", "success", _loop_ctx(mem, tm))
+                               task, "final out", "success", _loop_ctx(mem, tm),
+                               act_recap="test recap", task_summary="test summary")
     results = await mem.recall_recent(scope, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     contents = {r.content for r in results}
     # dispatch pairs preserved

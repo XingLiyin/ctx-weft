@@ -116,7 +116,8 @@ async def test_finalize_retry_carries_progress_no_user_message() -> None:
         task=task,
         agent=SimpleNamespace(id="ag1", loop_config=SimpleNamespace(compact_keep_last=6)),
         scope=MemoryScope(session_id="s1", task_id="T1", agent_id="ag1"),
-        verdict=SimpleNamespace(task_outcome="retry", act_recap="missing X; do Y next"),
+        verdict=SimpleNamespace(task_outcome="retry", act_recap="missing X; do Y next",
+                                task_summary=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem,

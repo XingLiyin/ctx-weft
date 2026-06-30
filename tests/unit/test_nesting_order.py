@@ -332,7 +332,7 @@ async def test_anchoring_discipline_finish_pair_anchors_close_time() -> None:
     asc = _agent_scope("ag1")
     task = _make_task("P", "ag1", outputs="完成")
     await _synthesize_dispatch_pair(
-        mem, asc, task, "完成\n\nProcess Report: ok", "success", _pctx())
+        mem, asc, task, "完成了任务", "整体执行总结：ok", "success", _pctx())
 
     recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 100, _pctx())
     assert len(recs) == 2, f"finish pair = 2 records; got {len(recs)}"

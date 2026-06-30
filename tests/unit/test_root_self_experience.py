@@ -69,15 +69,17 @@ async def test_synthesize_writes_only_finish_pair_no_body_mirror():
     await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "### 会话目标\n转 PDF", 1, role="assistant"), _ctx())
     task = _task()
 
-    await _synthesize_dispatch_pair(mem, asc, task, "## PDF 已完成", "success", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "PDF转换执行过程：成功转换了文件", "PDF成功完成转换", "success", _ctx())
 
     turns = await _agent_turns(mem, asc)
-    # 只有 finish 对（assistant finish_task + tool Process Report）
+    # 只有 finish 对（assistant finish_task + tool task_summary）
     roles = [r.role for r in turns]
     assert roles == ["assistant", "tool"], f"task-resident: only finish pair expected; got roles={roles}"
     assert all(r.type == T.AGENT_CONVERSATION_TURN for r in turns)
     assert turns[-2].metadata.get("tool_calls", [{}])[0].get("name", "").endswith("finish_task")
-    assert turns[-1].content.startswith("Process Report:")
+    # 新形态：assistant.content == act_recap，tool.content == task_summary（无 "Process Report:" 前缀）
+    assert turns[-2].content == "PDF转换执行过程：成功转换了文件"
+    assert turns[-1].content == "PDF成功完成转换"
     assert all(r.metadata.get("origin_task_id") == "t1" for r in turns)
 
     # body 留 task 层（UP + 段摘要原样保留，未被镜像/supersede）
@@ -91,7 +93,7 @@ async def test_no_task_layer_body_still_writes_finish_pair():
     asc = _agent_sc()
     task = _task(prompt="")
 
-    await _synthesize_dispatch_pair(mem, asc, task, "out", "success", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "out", "", "success", _ctx())
 
     turns = await _agent_turns(mem, asc)
     assert len(turns) == 2
@@ -110,14 +112,15 @@ async def test_finish_pair_result_and_report():
     task = _task()
     task.outputs = "## PDF 已完成"  # finish result 取自 task.outputs
 
-    mem_content = "## PDF 已完成\n\nProcess Report: 成功转换"
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "PDF转换执行过程摘要", "成功转换", "success", _ctx())
 
     turns = await _agent_turns(mem, asc)
     assert [r.role for r in turns] == ["assistant", "tool"]
     tcs = turns[-2].metadata.get("tool_calls", [])
     assert len(tcs) == 1 and tcs[0]["name"].endswith("finish_task")
-    assert tcs[0]["input"]["result"] == "## PDF 已完成"
-    assert "Process Report: 成功转换" in turns[-1].content
+    assert tcs[0]["input"]["result"] == "## PDF 已完成"   # 从 task.outputs 取，不变
+    # 新形态：assistant.content == act_recap，tool.content == task_summary（无前缀）
+    assert turns[-2].content == "PDF转换执行过程摘要"
+    assert turns[-1].content == "成功转换"
     # tool_call 配对
     assert turns[-1].metadata.get("tool_call_id") == tcs[0]["id"]

@@ -90,7 +90,8 @@ async def _make_l0_unit(mem, task_id: str, t0: int) -> None:
     await mem.ingest(_ev(T.LLM_RESPONSE, scope, f"reply {task_id}", t0 + 1, role="assistant"), _pctx())
     task = _root_task(task_id)
     state = _finalize_state(task, scope, LoopConfig())
-    await finalize_task_memory(mem, state, task, f"out {task_id}", "success", _finalize_ctx(mem))
+    await finalize_task_memory(mem, state, task, f"out {task_id}", "success", _finalize_ctx(mem),
+                               act_recap=f"act recap {task_id}", task_summary=f"summary {task_id}")
 
 
 async def _alive_body(mem, task_id: str):

@@ -112,7 +112,7 @@ async def test_control_tool_resolves_from_global_region_when_agent_uncached() ->
     )
     res = await gw.invoke(
         "control__collect_process_report",
-        {"task_process_report": "段总结X"}, state, ctx,
+        {"act_recap": "段总结X"}, state, ctx,
     )
     assert res.is_error is False, f"expected resolved via global region, got: {res.content}"
     assert res.content == "段总结X"
@@ -135,7 +135,7 @@ async def test_collect_process_report_silent_no_task_ingest() -> None:
     )
     res = await gw.invoke(
         "control__collect_process_report",
-        {"task_process_report": "段总结Y"}, state, ctx,
+        {"act_recap": "段总结Y"}, state, ctx,
     )
     assert res.is_error is False
     assert res.content == "段总结Y"  # 返回值不受 SILENT 影响
