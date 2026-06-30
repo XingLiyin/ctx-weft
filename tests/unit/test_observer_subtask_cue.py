@@ -14,7 +14,7 @@ def _req(extra):
     return ContextRequest(
         purpose="observe", scope=MemoryScope(session_id="s1", task_id="p1", agent_id="ag1"),
         task=task, agent=agent, session=session, template=None, bound_capabilities=[],
-        extra=extra, actor_transcript=[],
+        extra=extra,
     )
 
 

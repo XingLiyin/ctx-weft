@@ -164,7 +164,6 @@ async def test_observer_reuses_act_conversation_plus_observe_message() -> None:
         task=SimpleNamespace(title="T", description="d", user_prompt="up",
                              user_prompt_in_memory=True, process_report=None),
         session=SimpleNamespace(user_prompt="up"),
-        actor_transcript=[],
     )
     msgs = DefaultComposer()._build_observer_messages(blocks, request)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))

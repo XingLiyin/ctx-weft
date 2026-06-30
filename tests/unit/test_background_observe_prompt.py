@@ -27,7 +27,7 @@ def _req(boundary, outputs=""):
         id="t1", user_prompt_in_memory=True, title="", description="", user_prompt="x",
         outputs=outputs, process_report="", process_report_at=None, tracking_task_ids=[],
         parent_task_id=None), session=SimpleNamespace(user_prompt="x"),
-        template=None, bound_capabilities=[], actor_transcript=[],
+        template=None, bound_capabilities=[],
         extra={"observe_boundary": boundary})
 
 

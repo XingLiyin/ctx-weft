@@ -54,7 +54,7 @@ async def test_observe_progress_before_next_attempt() -> None:
         _hist("assistant", "ATTEMPT2 did Y", 10),  # this attempt's turn (already in memory at observe)
     ]
     req = SimpleNamespace(purpose="observe", task=_task(), session=SimpleNamespace(user_prompt="do X"),
-                          template=None, actor_transcript=[])
+                          template=None)
     msgs = DefaultComposer()._build_observer_messages(blocks, req)
 
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
@@ -84,7 +84,7 @@ async def test_observe_includes_finish_output_labeled() -> None:
         _hist("assistant", "ATTEMPT2 did Y", 10),
     ]
     req = SimpleNamespace(purpose="observe", task=_task(), session=SimpleNamespace(user_prompt="do X"),
-                          template=None, actor_transcript=[])
+                          template=None)
     msgs = DefaultComposer()._build_observer_messages(blocks, req)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "THE FINAL ANSWER" in joined
@@ -148,7 +148,7 @@ async def test_observe_no_progress_without_timestamp() -> None:
         _hist("assistant", "ATTEMPT2 did Y", 10),
     ]
     req = SimpleNamespace(purpose="observe", task=_task(process_report_at=None),
-                          session=SimpleNamespace(user_prompt="do X"), template=None, actor_transcript=[])
+                          session=SimpleNamespace(user_prompt="do X"), template=None)
     msgs = DefaultComposer()._build_observer_messages(blocks, req)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     # 无 process_report_at → 不渲染进度块；进度内容(FEEDBACK)缺席即证（"Progress So Far" 字样

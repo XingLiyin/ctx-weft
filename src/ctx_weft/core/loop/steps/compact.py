@@ -55,7 +55,6 @@ async def summarize_for_compact(state: LoopState, ctx: LoopContext) -> str:
         session=state.session,
         template=state.extra.get("template"),
         bound_capabilities=state.extra.get("bound_capabilities", []),
-        actor_transcript=state.transcript,
     )
     compact_prompt = await ctx.assembler.assemble(request)
 

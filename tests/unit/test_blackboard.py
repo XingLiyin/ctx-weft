@@ -242,9 +242,7 @@ async def test_composer_renders_subtask_results_with_title() -> None:
     # (a) Blackboard block alone — old section must be absent.
     req_no_extra = ContextRequest(
         purpose="observe", scope=MemoryScope(session_id="s1", task_id="T", agent_id="a"),
-        task=task, agent=None, session=session, template=None, bound_capabilities=[],
-        actor_transcript=[],
-    )
+        task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     msgs = comp._build_observer_messages([block], req_no_extra)
     text = msgs[-1].content
     assert "Your sub-task results (you may confirm / reopen these):" not in text, (
@@ -254,9 +252,7 @@ async def test_composer_renders_subtask_results_with_title() -> None:
     # (b) New path: extra["subtask_reviews"] still renders the cue.
     req_with_extra = ContextRequest(
         purpose="observe", scope=MemoryScope(session_id="s1", task_id="T", agent_id="a"),
-        task=task, agent=None, session=session, template=None, bound_capabilities=[],
-        actor_transcript=[],
-        extra={"subtask_reviews": [{"task_id": "K1", "title": "Build report", "outcome": "success"}]},
+        task=task, agent=None, session=session, template=None, bound_capabilities=[],        extra={"subtask_reviews": [{"task_id": "K1", "title": "Build report", "outcome": "success"}]},
     )
     msgs2 = comp._build_observer_messages([block], req_with_extra)
     text2 = msgs2[-1].content
@@ -275,9 +271,7 @@ async def test_composer_splits_subtask_and_predecessor_sections() -> None:
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
         purpose="observe", scope=MemoryScope(session_id="s1", task_id="T", agent_id="a"),
-        task=task, agent=None, session=session, template=None, bound_capabilities=[],
-        actor_transcript=[],
-    )
+        task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     sub = ContextBlock(
         id="b1", source="blackboard:K1", kind="blackboard", target="messages",
         content="child output", priority=2, token_estimate=5,
@@ -308,9 +302,7 @@ async def test_composer_no_related_results_when_empty() -> None:
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
         purpose="observe", scope=MemoryScope(session_id="s1", task_id="T", agent_id="a"),
-        task=task, agent=None, session=session, template=None, bound_capabilities=[],
-        actor_transcript=[],
-    )
+        task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     msgs = comp._build_observer_messages([], req)
     joined = " ".join(m.content for m in msgs if isinstance(m.content, str))
     assert "Your sub-task results" not in joined   # Phase 3: old blackboard heading removed

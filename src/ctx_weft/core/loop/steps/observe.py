@@ -310,7 +310,6 @@ class ObserveStep(Step):
             session=state.session,
             template=state.extra.get("template"),
             bound_capabilities=bound_caps,
-            actor_transcript=state.transcript,
             extra={"subtask_reviews": subtask_reviews},
         )
         prompt = await ctx.assembler.assemble(request)

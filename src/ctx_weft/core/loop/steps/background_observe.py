@@ -129,7 +129,6 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 session=state.session,
                 template=state.extra.get("template"),
                 bound_capabilities=bound_caps,
-                actor_transcript=state.transcript,
                 extra={"observe_boundary": boundary},
             )
             prompt = await ctx.assembler.assemble(request)
