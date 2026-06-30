@@ -346,7 +346,7 @@ def test_resumed_task_directive_on_history_capabilities_on_progress() -> None:
     assert first.index("the original ask") < first.index("## Instructions for the current task")
     assert "### Available Tools" not in first
     # the trailing dynamic-context message carries the progress AND the capabilities
-    assert "## Current Progress" in last and "halfway done" in last
+    assert "## Progress So Far" in last and "halfway done" in last
     assert "### Available Tools" in last
     assert first is not last
 

@@ -101,28 +101,32 @@ async def test_act_no_progress_without_timestamp() -> None:
     msgs = DefaultComposer()._build_actor_messages(blocks, req)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "FEEDBACK:" not in joined
-    assert "Current Progress" not in joined
+    assert "Progress So Far" not in joined
 
 
 async def test_progress_deduped_when_in_task_compact_summary() -> None:
-    """max_turns round: the compact summary already carries process_report (same string), so the
-    separate Current Progress block must be suppressed — the report should appear only once."""
+    """max_turns round: the compact summary already carries process_report (now headed with
+    '## Progress So Far' via _history for role=assistant/task_conversation), so the separate
+    progress block must be suppressed — the report and heading should appear only once."""
+    from ctx_weft.core.assembler.sources._history import PROGRESS_SO_FAR_HEADING
     report = _task().process_report  # exact string the composer compares against
     blocks = [
-        _hist("user", report, 0, type=MemoryEventType.TASK_COMPACT_SUMMARY),  # compact summary == report
+        # 直接构造段摘要的 _history 渲染态：role=assistant、冠 PROGRESS_SO_FAR_HEADING。
+        _hist("assistant", f"{PROGRESS_SO_FAR_HEADING}\n{report}", 0,
+              type=MemoryEventType.TASK_COMPACT_SUMMARY),
         _hist("assistant", "kept turn", 2),
     ]
     req = SimpleNamespace(purpose="act", task=_task(), session=SimpleNamespace(user_prompt="do X"),
                           template=None, bound_capabilities=[])
     msgs = DefaultComposer()._build_actor_messages(blocks, req)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
-    assert "## Current Progress" not in joined          # no separate progress block
+    assert joined.count(PROGRESS_SO_FAR_HEADING) == 1   # no separate progress block (deduped)
     assert joined.count("FEEDBACK:") == 1               # only the compact summary carries it
 
 
 async def test_progress_rendered_when_compact_summary_differs() -> None:
     """A TASK_COMPACT_SUMMARY with DIFFERENT content (rule-path dedicated summary) must NOT
-    suppress Current Progress — they are complementary, not duplicate."""
+    suppress Progress So Far — they are complementary, not duplicate."""
     blocks = [
         _hist("user", "[Context so far] neutral conversation summary", 0,
               type=MemoryEventType.TASK_COMPACT_SUMMARY),
@@ -132,7 +136,7 @@ async def test_progress_rendered_when_compact_summary_differs() -> None:
                           template=None, bound_capabilities=[])
     msgs = DefaultComposer()._build_actor_messages(blocks, req)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
-    assert "## Current Progress" in joined
+    assert "## Progress So Far" in joined
     assert "FEEDBACK:" in joined
 
 
@@ -147,5 +151,6 @@ async def test_observe_no_progress_without_timestamp() -> None:
                           session=SimpleNamespace(user_prompt="do X"), template=None, actor_transcript=[])
     msgs = DefaultComposer()._build_observer_messages(blocks, req)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
+    # 无 process_report_at → 不渲染进度块；进度内容(FEEDBACK)缺席即证（"Progress So Far" 字样
+    # 本身会出现在 observe 判定提示里，故不以标题字样判定）。
     assert "FEEDBACK:" not in joined
-    assert "Current Progress" not in joined

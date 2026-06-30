@@ -253,7 +253,7 @@ class FinalizeStep(Step):
         task = state.task
         verdict = state.verdict
         outcome = verdict.task_outcome if verdict else "fail"
-        summary = verdict.act_recap if verdict else ""            # → task.process_report（retry Current Progress）
+        summary = verdict.act_recap if verdict else ""            # → task.process_report（retry Progress So Far）
         task_summary = verdict.task_summary if verdict else ""    # → 汇报给 parent 的 process report
         events: list[Any] = []
 
@@ -296,7 +296,7 @@ class FinalizeStep(Step):
             ))
         elif outcome == "retry":
             # 不重复注入 user message——原始任务消息一开始就在 task 层。observe 的新增信息 =
-            # 对本轮 process 的分析 + next step hint，作为 process_report → 下一轮 Current Progress。
+            # 对本轮 process 的分析 + next step hint，作为 process_report → 下一轮 Progress So Far。
             # 机械退出（max_turns/context_limit）也归到这里：重排再跑，受 max_retries 兜底。
             task.outputs = None
             task.process_report = summary

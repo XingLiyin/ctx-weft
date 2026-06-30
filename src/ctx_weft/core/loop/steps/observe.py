@@ -210,7 +210,7 @@ def _is_own_root(task) -> bool:
 class Verdict:
     """Observer 输出（三态）。"""
     task_outcome: str   # "retry" | "success" | "fail"
-    act_recap: str      # 诚实复述上一轮 act 做了什么 → finish 对 assistant；retry 作 Current Progress
+    act_recap: str      # 诚实复述本段 act 做了什么 → finish 对 assistant；retry 作 Progress So Far
     task_summary: str = ""  # 整段综合总结（执行历程+结果）→ finish 对 tool 槽（仅终态有意义）
     reported: bool = False  # 本轮是否真的走成 report_task_outcome；压缩摘要据此取信
 

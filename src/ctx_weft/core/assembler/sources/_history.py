@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
+from ctx_weft.core.utils import (
+    PROGRESS_SO_FAR_HEADING, content_to_text, estimate_tokens, generate_id,
+)
 from ctx_weft.protocols import MemoryEventType
 
 if TYPE_CHECKING:
@@ -39,6 +41,15 @@ def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "C
     # agent_recall 自行包装，不走此分支。
     if record.type == MemoryEventType.TASK_COMPACT_SUMMARY and role == "user":
         text = wrap_compact_summary(text)
+    elif (
+        record.type == MemoryEventType.TASK_COMPACT_SUMMARY
+        and role == "assistant"
+        and source == "task_conversation"
+    ):
+        # 当前任务的「上一段执行复述」（max_turns / 边界 compact 复用 act_recap）：冠以统一标题，
+        # 与 composer 非压缩 retry 进度对齐；胶囊召回（agent_recall/agent_experience）不加此标题，
+        # 避免改动跨任务重建形态。
+        text = f"{PROGRESS_SO_FAR_HEADING}\n{text}"
     md = {
         "role": role,
         "type": record.type,

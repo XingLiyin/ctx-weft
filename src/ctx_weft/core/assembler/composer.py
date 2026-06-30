@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ctx_weft.protocols import LLMMessage, LLMTool
 from ctx_weft.protocols.capability import qualify
-from ctx_weft.core.utils import content_to_text, estimate_tokens
+from ctx_weft.core.utils import content_to_text, estimate_tokens, PROGRESS_SO_FAR_HEADING
 from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
@@ -71,8 +71,11 @@ _OBSERVER_ROLE_FALLBACK = "You are an objective observer evaluating task executi
 _OBSERVE_JUDGMENT_CUE = (
     "Now act as the observer for the current task. Based on the execution above, judge the "
     f"task's completion status and call `{REPORT_TASK_OUTCOME_NAME}` exactly once with: a `task_status` "
-    "of `success` / `retry` / `fail`; an `act_recap` honestly recapping what the last act phase did; "
-    "and — when status is success/fail — a concise `task_summary`: the important steps and lessons of the "
+    "of `success` / `retry` / `fail`; an `act_recap` honestly recapping ONLY this act segment — the actor's "
+    "execution AFTER the most recent `## Progress So Far` section (that section is the previous observation's "
+    "recap; if there is none this is the first observation, so start after `## Current Task` / the user's "
+    "message). Don't re-narrate anything before that point. "
+    "And — when status is success/fail — a concise `task_summary`: the important steps and lessons of the "
     "whole task (a process report, not verbose, and NOT the final output), incorporating the results of any "
     "sub-tasks you dispatched. Optionally review your own sub-tasks via `task_reviews`. Call no other tools."
 )
@@ -113,7 +116,9 @@ def _background_observe_cue(boundary: str) -> str:
     )
     return (
         f"当前 task 的状态：{desc}。请基于以上执行过程，调用 `collect_process_report` 一次："
-        "给出 `act_recap`（诚实复述上一段 act 做了什么）" + summary_ask +
+        "给出 `act_recap`（只复述本段 act——对话里最后一个 `## Progress So Far` 之后 actor 新做的执行；"
+        "若没有该标题则为首次观察，从 `## Current Task` / 用户消息之后算起；该点之前不要回头重述）"
+        + summary_ask +
         " 只需总结，无需判断 success/retry/fail，不要调用其他工具。"
     )
 
@@ -279,7 +284,7 @@ class DefaultComposer(Composer):
 
         结构：
           [0..N-1] 历史轮次：user / assistant / tool 各自独立的 LLMMessage
-          [N]      user: Task Background + Current Task + Current Progress + Current Message
+          [N]      user: Task Background + Current Task + Progress So Far + Current Message
         """
         # Task Background 只放跨 plan 前序（predecessor / tracking 等）结果；
         # 排除 subtask——自己派发的子任务结果已通过 agent_experience(tool result) 呈现，
@@ -290,7 +295,7 @@ class DefaultComposer(Composer):
         ]
         history_blocks = [b for b in blocks if b.kind == "history"]
 
-        # Current Progress (retry feedback): render as a chronologically-placed history
+        # Progress So Far (retry feedback): render as a chronologically-placed history
         # user-block (via task.process_report_at) so it sits right after the attempt that
         # produced it and before the next one — instead of floating to the end (which confusingly
         # re-states stale progress after the new attempt in the observe prompt). Send-only (not
@@ -298,7 +303,7 @@ class DefaultComposer(Composer):
         # fallback) so it can never be mis-placed; in practice the timestamp is always set
         # alongside process_report, so this only affects unexpected/legacy timestamp-less data.
         # max_turns 那轮 compact 直接复用 process_report 作 TASK_COMPACT_SUMMARY → 报告已在 task 层
-        # 历史里，跳过单独的 Current Progress block，避免同一份报告渲染两遍（Option A 去重）。
+        # 历史里，跳过单独的 Progress So Far block，避免同一份报告渲染两遍（Option A 去重）。
         progress_as_history = (
             None if self._progress_already_in_compact(request.task, history_blocks)
             else self._progress_history_block(request.task)
@@ -335,7 +340,7 @@ class DefaultComposer(Composer):
             elif task.title:
                 parts.append(f"## Current Task\n{task.title}")
             if getattr(task, "process_report", None):
-                parts.append(f"## Current Progress\n{task.process_report}")
+                parts.append(f"{PROGRESS_SO_FAR_HEADING}\n{task.process_report}")
             if task.user_prompt:
                 user_prompt_text = (
                     task.user_prompt
@@ -357,7 +362,7 @@ class DefaultComposer(Composer):
                 current_task_user_idx = len(messages)
             messages.append(LLMMessage(role="user", content="\n\n".join(parts)))
         # 兜底：actor prompt 必须以 user 回合结尾——避免以 assistant/tool 结尾让模型困惑地续写自己。
-        # 正常情况下 active/retry 的 Current Progress 已是末条 user；此处仅覆盖 summary 为空等边角。
+        # 正常情况下 active/retry 的 Progress So Far 已是末条 user；此处仅覆盖 summary 为空等边角。
         if messages and messages[-1].role != "user":
             messages.append(LLMMessage(role="user", content="Continue with the task above."))
         # 连续同角色 / 孤立 tool result 的合法化不在装配层做——统一交由
@@ -623,12 +628,14 @@ class DefaultComposer(Composer):
             if b.metadata.get("type") != MemoryEventType.TASK_COMPACT_SUMMARY:
                 continue
             content = b.content if isinstance(b.content, str) else content_to_text(b.content)
-            if content == progress:
+            # 段摘要经 _history 渲染后可能冠了 PROGRESS_SO_FAR_HEADING（role=assistant、task_conversation
+            # 来源）；裸串与带标题串都算"已在 compact 里"，避免漏判导致进度块重复渲染。
+            if content == progress or content == f"{PROGRESS_SO_FAR_HEADING}\n{progress}":
                 return True
         return False
 
     def _progress_history_block(self, task) -> "ContextBlock | None":
-        """Current Progress 作为带时间戳的 history user-block；缺时间戳/无 progress 时返回 None
+        """Progress So Far 作为带时间戳的 history user-block；缺时间戳/无 progress 时返回 None
         （由调用方退回"追加末尾"的 legacy 行为）。"""
         if not getattr(task, "user_prompt_in_memory", False):
             return None
@@ -638,7 +645,7 @@ class DefaultComposer(Composer):
             return None
         from ctx_weft.core.assembler.assembler import ContextBlock
         from ctx_weft.core.utils import generate_id
-        text = f"## Current Progress\n{progress}"
+        text = f"{PROGRESS_SO_FAR_HEADING}\n{progress}"
         return ContextBlock(
             id=generate_id("blk"), source="current_progress", kind="history", target="messages",
             content=text, priority=3, token_estimate=estimate_tokens(text),
