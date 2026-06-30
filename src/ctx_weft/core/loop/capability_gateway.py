@@ -28,7 +28,7 @@ from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.capability import CapabilityProvider, ToolCapabilityProvider, qualify
-from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL
+from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL, _PLAN_DISPATCH_ACK
 from ctx_weft.protocols.filesystem import SpillSink
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType, MemoryProvider, MemoryScope
 
@@ -44,6 +44,13 @@ _REDACT_HEADERS = frozenset({"authorization", "cookie", "x-api-key", "x-auth-tok
 # （同 origin=delegating task）。普通工具仍走 task 层 TOOL_INVOCATION/RESULT。
 DISPATCH_TOOLS = frozenset({
     qualify(f"{CONTROL}:delegate_task"),
+    qualify(f"{CONTROL}:delegate_plan"),
+    qualify(f"{CONTROL}:replan"),
+})
+
+# 计划型派发工具：除写 delegate conversation turn 外，还需写一条配对的 ack tool result，
+# 避免该 plan 框悬挂（被 legalize 剥掉）。由 child finalize 补写的 result 仅针对 start_task 子框。
+_PLAN_DISPATCH_TOOLS = frozenset({
     qualify(f"{CONTROL}:delegate_plan"),
     qualify(f"{CONTROL}:replan"),
 })
@@ -270,6 +277,21 @@ class CapabilityGateway:
                 ),
                 ctx.provider_ctx,
             )
+            if tool_name in _PLAN_DISPATCH_TOOLS:
+                # envelope: 给 plan 框写一条配对的 ack tool result，避免该框悬挂(被 legalize 剥掉)。
+                await self._memory.ingest(
+                    MemoryEvent(
+                        type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                        scope=_tool_scope(state),
+                        content=_PLAN_DISPATCH_ACK,
+                        timestamp=now_utc(),
+                        role="tool",
+                        metadata={"origin_task_id": state.task.id,
+                                  "parent_task_id": state.task.parent_task_id,
+                                  "tool_call_id": tool_call_id},
+                    ),
+                    ctx.provider_ctx,
+                )
         elif not is_silent:
             await self._memory.ingest(
                 MemoryEvent(

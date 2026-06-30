@@ -56,6 +56,9 @@ REPORT_TASK_OUTCOME_NAME = qualify(f"{PROVIDER_NAME}:report_task_outcome")
 BACKGROUND_PROCESS_REPORT_NAME = qualify(f"{PROVIDER_NAME}:collect_process_report")
 UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
 
+# delegate_plan / replan 的 actor-visible ack 及 gateway 配对 tool result 内容。
+_PLAN_DISPATCH_ACK = "计划已生成，接下来会通过 start_task 逐个启动各子任务。"
+
 
 def _mode(interactive: bool) -> str:
     """Map the LLM-facing `interactive` bool to Task.interaction_mode."""
@@ -231,7 +234,7 @@ def delegate_plan(
 
     n = len(tasks)
     if ctx is None or ctx.task_manager is None or ctx.task is None:
-        return ControlResult(content=f"Plan with {n} task(s) submitted.")
+        return ControlResult(content=_PLAN_DISPATCH_ACK)
 
     titles: list[str] = []
     prev_ids: list[str] = []
@@ -272,7 +275,7 @@ def delegate_plan(
         ctx.task.settings.spawn_titles = titles
     ctx.task.status = "SUSPENDED"
     ctx.task.actor_done = True
-    return ControlResult(content=f"Plan with {len(titles)} task(s) submitted.")
+    return ControlResult(content=_PLAN_DISPATCH_ACK)
 
 
 @control_tool(purposes=["act"])
@@ -498,7 +501,7 @@ def replan(
         tasks = []
 
     if ctx is None or ctx.task_manager is None or ctx.task is None:
-        return ControlResult(content=f"Replanning with {len(tasks)} new task(s). Reason: {reason}")
+        return ControlResult(content=_PLAN_DISPATCH_ACK)
 
     titles: list[str] = []
     prev_ids: list[str] = []
@@ -539,7 +542,7 @@ def replan(
         ctx.task.settings.spawn_titles = titles
     ctx.task.status = "SUSPENDED"
     ctx.task.actor_done = True
-    return ControlResult(content=f"Replanning with {len(titles)} new task(s). Reason: {reason}")
+    return ControlResult(content=_PLAN_DISPATCH_ACK)
 
 
 @control_tool(purposes=["recognize_intent"])

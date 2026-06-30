@@ -186,6 +186,14 @@ class _AssessProvider(ToolCapabilityProvider):
 
 
 @pytest.mark.asyncio
+async def test_delegate_plan_returns_envelope_ack() -> None:
+    from ctx_weft.core.orchestrator.control_capability import delegate_plan, _PLAN_DISPATCH_ACK
+    tm = _FakeTM()
+    res = delegate_plan(tasks=[{"title": "a"}, {"title": "b"}], ctx=_ctx(tm, "tc_plan"))
+    assert res.content == _PLAN_DISPATCH_ACK
+
+
+@pytest.mark.asyncio
 async def test_gateway_silent_tool_writes_nothing_to_task_layer() -> None:
     """report_task_outcome（编排/裁决）不入 task 对话——其 HITL 回复改由 finalize 注入。"""
     mem = InMemoryMemoryProvider()
