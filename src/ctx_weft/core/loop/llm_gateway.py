@@ -5,21 +5,24 @@
 只负责构造逻辑消息结构，不做合法化；连续同角色 / 孤立 tool result 一律在这里、发送前
 统一处理。
 
-合法化五条不变式（:func:`stream_llm` 内顺序：剥离悬挂 tool_call → 删空 content → 丢前导
-非 user → 丢孤立 tool result → 合并连续同角色）：
+合法化六条不变式（:func:`legalize_messages` 内顺序：剥离悬挂 tool_call → 把 tool result 挪到
+其 tool_call 之后 → 删空 content → 丢前导非 user → 丢孤立 tool result → 合并连续同角色）：
   1. :func:`drop_dangling_tool_calls` —— 剥离无后继 tool_result 配对的 assistant tool_call。
      reconcile/act 正常已补齐 dangling（见模块尾注），此处是发送前最后**防御性**兜底：只删
      不补、命中即打 ERROR 日志（说明上游对账漏了）。Anthropic 对悬挂 tool_use 直接 400。
-  2. :func:`remove_empty_messages` —— 删除内容为空且无 tool_calls 的 user/assistant 消息
+  2. :func:`reorder_tool_results_after_calls` —— 把每条 tool result 紧挪到其 assistant
+     tool_call 之后。跨层按 timestamp 归并会把 user 回合插进 assistant↔result 之间（OpenAI
+     兼容端点据此 400），集合级配对查不出这种错位——本步按 owner 重排消除中间夹角色。只搬不删。
+  3. :func:`remove_empty_messages` —— 删除内容为空且无 tool_calls 的 user/assistant 消息
      （Anthropic 对空 content 块 400）。同为防御性兜底，命中打 ERROR 日志。① 把全悬挂的
      assistant 剥成空消息后，正好由此清理。tool 消息即便空也不在此删（删了会制造悬挂）。
-  3. :func:`ensure_leading_user` —— 丢弃开头 role != "user" 的消息直到首条为 user（Anthropic
+  4. :func:`ensure_leading_user` —— 丢弃开头 role != "user" 的消息直到首条为 user（Anthropic
      硬规则，否则 400）。丢弃前导 assistant 后其配对 tool 会成孤儿，由下一步清理。
-  4. :func:`drop_orphan_tool_results` —— 丢弃 tool_call_id 无前序 assistant tool_call
+  5. :func:`drop_orphan_tool_results` —— 丢弃 tool_call_id 无前序 assistant tool_call
      配对的 ``role="tool"`` 消息。compact 丢弃 assistant 但保留 TOOL_RESULT、recall 窗口
      在 assistant↔result 之间截断、跨层按 timestamp 归并错位等都会产生此类孤儿，会被
      Anthropic / OpenAI 直接 400。
-  5. :func:`merge_consecutive_messages` —— 合并连续同角色消息（多模态安全）。
+  6. :func:`merge_consecutive_messages` —— 合并连续同角色消息（多模态安全）。
 
 本模块仅依赖 protocols，且只被本 loop 层的 step import；故置于 ``core/loop`` 下。若将来
 装配等下层也需复用这些合法化函数，应改为下沉到 ``core`` 根，避免下层反向依赖 loop。
@@ -154,6 +157,41 @@ def ensure_leading_user(messages: list[LLMMessage]) -> list[LLMMessage]:
     return messages[i:] if i else messages
 
 
+def reorder_tool_results_after_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """把每条 tool result 紧挪到其 assistant tool_call 之后，消除中间夹着的非 tool 消息。
+
+    OpenAI 兼容端点要求 ``role="tool"`` 紧跟在 ``role="assistant"(tool_calls)`` 之后、按
+    ``tool_call_id`` 配对，中间不得夹其它角色（夹了即 400「insufficient tool messages
+    following tool_calls message」）。跨层历史按 timestamp 归并会把 user 回合插进
+    assistant↔tool_result 之间，甚至让 result 落到 call 之前；集合级配对
+    （:func:`drop_dangling_tool_calls` / :func:`drop_orphan_tool_results`）只校验「id 是否
+    存在」查不出这种**错位**。本步按 owner 把每个 tool result 移到其 assistant tool_call 之后，
+    并按该 assistant 的 ``tool_calls`` 顺序排列。无 owner（没有任何 assistant 调用该 id）的
+    孤儿 tool 原地保留，交 :func:`drop_orphan_tool_results` 处理；只搬不删、不补。
+    """
+    owned_ids = {
+        tc.get("id")
+        for m in messages
+        if m.role == "assistant"
+        for tc in m.tool_calls
+        if tc.get("id")
+    }
+    results_by_id: dict[str, list[LLMMessage]] = {}
+    for m in messages:
+        if m.role == "tool" and m.tool_call_id in owned_ids:
+            results_by_id.setdefault(m.tool_call_id, []).append(m)
+
+    out: list[LLMMessage] = []
+    for m in messages:
+        if m.role == "tool" and m.tool_call_id in owned_ids:
+            continue  # 由其 owner assistant 之后统一发出（见下）
+        out.append(m)
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                out.extend(results_by_id.get(tc.get("id"), ()))
+    return out
+
+
 def merge_consecutive_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
     """合并连续相同角色的消息（tool 消息因绑定 tool_call_id 不合并）。"""
     merged: list[LLMMessage] = []
@@ -174,17 +212,29 @@ def merge_consecutive_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
     return merged
 
 
+def legalize_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """发送前把消息序列规整为 provider 合法形态（六条不变式，见模块 docstring）。
+
+    纯函数、不依赖 llm/网络，便于单测全链路。``stream_llm`` 在发送前调用一次。
+    """
+    return merge_consecutive_messages(
+        drop_orphan_tool_results(
+            ensure_leading_user(
+                remove_empty_messages(
+                    reorder_tool_results_after_calls(
+                        drop_dangling_tool_calls(messages)
+                    )
+                )
+            )
+        )
+    )
+
+
 async def stream_llm(
     llm: "LLMClient", request: "LLMRequest", *, stream: bool = True
 ) -> AsyncIterator["LLMChunk"]:
     """发送前合法化 ``request.messages``，再流式转发 ``llm.complete`` 的 chunk。"""
-    request.messages = merge_consecutive_messages(
-        drop_orphan_tool_results(
-            ensure_leading_user(
-                remove_empty_messages(drop_dangling_tool_calls(request.messages))
-            )
-        )
-    )
+    request.messages = legalize_messages(request.messages)
     async for chunk in llm.complete(request, stream=stream):
         yield chunk
 
