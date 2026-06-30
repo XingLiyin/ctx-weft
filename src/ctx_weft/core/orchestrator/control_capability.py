@@ -425,7 +425,7 @@ def report_task_outcome(
         # 护栏：没有最终产出就不允许判成功，改判 retry（提示下一轮调 finish_task 收尾）。
         if task_status == "success" and not task.outputs:
             task_status = "retry"
-            _hint = ("The previous round ended without a final output. Review the process report above "
+            _hint = ("The previous round ended without a final output. Review the recap above "
                      "and judge whether this task still needs more work. If it does, continue with the "
                      "necessary tool calls. Once everything required is done, call the `control__finish_task` tool "
                      "with your final reply to the user as `result` to complete the task — put the reply in "

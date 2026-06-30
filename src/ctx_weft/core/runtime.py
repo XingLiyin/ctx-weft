@@ -155,7 +155,7 @@ async def _flush_tracking_memory(
             )
         elif isinstance(tracked.outputs, str):
             result = tracked.outputs
-        report = tracked.process_report or ""
+        report = tracked.task_summary or tracked.process_report or ""
         if result or report:
             content = f"sub-task '{tracked.title}' completed. \nresult:{result} \nprocess report:{report}"
             try:
