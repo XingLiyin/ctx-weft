@@ -679,12 +679,11 @@ async def test_H4_cross_agent_isolation() -> None:
 
 # ─── H8: 短同 agent 子任务未配对隐去 ──────────────────────────────────────────
 
-async def test_H8_short_same_agent_child_no_bubble_supersedes_orphan() -> None:
-    """H8（§2.1, spec 2026-06-28）: 短同 agent 子任务 close **不再 bubble**「…scheduled」占位，
-    且 supersede 掉 gateway 写的孤立 delegate 回合（oc_short）——由嵌套 finish 对全权承载。
+async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None:
+    """H8（§2.5）：短同 agent 子任务 close 保留 delegate 回合、配对写入静态 ack（back-dated to delegate timestamp）。
 
     场景：parent 在 agent scope 有 delegate 回合（oc_short），短 child close。
-    断言：oc_short 的 result 不存在、孤立 delegate 回合被 supersede；child 合成 finish 对；
+    断言：delegate 回合保留（未被 supersede）、ack 配对写入；child 合成 finish 对；
     child raw body 留 child task 层。
     """
     mem = InMemoryMemoryProvider()

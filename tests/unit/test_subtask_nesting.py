@@ -71,8 +71,8 @@ async def _seed_conv_nonshort(mem, scope) -> None:
         await mem.ingest(_ev(T.LLM_RESPONSE, scope, big_text, i + 2, role="assistant"), _ctx())
 
 
-async def test_same_agent_child_no_bubble_supersedes_orphan_dispatch() -> None:
-    """§2.1：同 agent child 不再 bubble「scheduled」占位；supersede 掉 gateway 写的孤立 delegate 回合。"""
+async def test_same_agent_child_keeps_delegate_and_writes_ack() -> None:
+    """§2.5：同 agent child close 保留 delegate 回合、配对写入静态 ack（back-dated to delegate timestamp）。"""
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
     await _seed_conv_nonshort(mem, child_scope)
@@ -236,6 +236,12 @@ async def test_same_agent_keeps_delegate_and_writes_backdated_ack() -> None:
     ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == child.origin_tool_call_id]
     assert ack and ack[0].content == _DISPATCH_ACK, f"expected static ack with content={_DISPATCH_ACK!r}, got {[r.content for r in ack]}"
     assert ack[0].timestamp == delegate[0].timestamp, f"ack.timestamp={ack[0].timestamp} must equal delegate.timestamp={delegate[0].timestamp}"
+
+    # stray-ack guard：no OTHER tool record carries ack content
+    assert _DISPATCH_ACK not in {
+        r.content for r in turns
+        if r.metadata.get("tool_call_id") != child.origin_tool_call_id
+    }, "ack content must only appear in the paired tool_call_id record"
 
 
 async def test_cross_agent_child_no_nested_capsule_in_parent_scope() -> None:
