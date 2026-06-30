@@ -242,6 +242,7 @@ class CapabilityGateway:
             "capability_name": tool_name,
             "capability_id": cap.id,
             "arguments": sanitized,
+            "tool_call_id": tool_call_id,
         }))
         if is_dispatch or not is_silent:
             await self._memory.ingest(
@@ -309,6 +310,7 @@ class CapabilityGateway:
             "outcome": "error" if is_error else "success",
             "result": content[:8000],
             "result_length": len(content),
+            "tool_call_id": tool_call_id,
         }))
         if not is_dispatch and not is_silent:
             await self._memory.ingest(
