@@ -37,6 +37,43 @@ _FINAL_RAW_TYPES = [
 # 同 agent 派发：派发对 tool 结果的静态文案（不含任何子任务结果，永不回填，spec 2026-06-30 §2.5）。
 _DISPATCH_ACK = "任务派发成功，以下是执行记录："
 
+# 派发框的叙事工具名（仅出现在重建历史的 tool_calls 里，非可调用能力）。
+START_TASK_NAME = qualify("control:start_task")
+
+
+async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
+    """确保 parent scope 有一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，返回其时间戳。
+
+    delegate_task(单): gateway 执行前已写好框 → 找到即返回其 timestamp。
+    delegate_plan/replan 子: gateway 只写了 plan 框、没有 per-child 框 → 此处补铸一条 start_task 框，
+    时间戳回拨到 task.created_at，使其排在子 body 之前、与配对结果相邻。origin_task_id 留父(留 plan task)。
+    """
+    existing = await memory.recall_recent(
+        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
+    frame = next(
+        (r for r in existing
+         if r.role == "assistant"
+         and any(tc.get("id") == task.origin_tool_call_id
+                 for tc in (r.metadata.get("tool_calls") or []))),
+        None,
+    )
+    if frame is not None:
+        return frame.timestamp
+    ts = task.created_at or now_utc()
+    await memory.ingest(
+        MemoryEvent(
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
+            content="", timestamp=ts, role="assistant",
+            metadata={"origin_task_id": task.parent_task_id,
+                      "parent_task_id": task.parent_task_id,
+                      "tool_calls": [{"id": task.origin_tool_call_id,
+                                      "name": START_TASK_NAME,
+                                      "input": {"title": task.title}}]},
+        ),
+        ctx.provider_ctx,
+    )
+    return ts
+
 
 def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
     """finish 对 tool 槽内容 = task_summary（process report）。R2 兜底：空则退 act_recap，
@@ -135,18 +172,16 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
         )
         if cross_agent:
             # 跨 agent（spec 2026-06-28 §2.3）：dispatch result 写成 agent 层普通 conversation turn
-            # （tool 回合），与 gateway 写的 delegate assistant 回合靠 tool_call_id 配对。
-            # origin_task_id=delegating task → 与同单元 finish 对同 origin、同命运（一起 L2 折）。
+            # （tool 回合），与 start_task / delegate 框靠 tool_call_id 配对、时间戳对齐保证相邻。
             report_prefix = "[outcome=fail] " if outcome == "fail" else ""
+            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx)
             await memory.ingest(
                 MemoryEvent(
                     type=MemoryEventType.AGENT_CONVERSATION_TURN,
                     scope=parent_scope,
                     content=f"{report_prefix}{mem_content}",
-                    timestamp=now_utc(),
+                    timestamp=frame_ts,
                     role="tool",
-                    # origin_task_id=delegating task → 归该单元；parent_task_id 不在此设定（单元的
-                    # parent 由 gateway 的 delegate assistant 回合权威给出，见 fold 的 prefer-non-None）。
                     metadata={"origin_task_id": task.parent_task_id,
                               "tool_call_id": task.origin_tool_call_id},
                 ),
@@ -158,23 +193,13 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                          "source": "dispatch_result", "content_length": len(mem_content)},
             ))
         elif same_agent:
-            # 同 agent（spec 2026-06-30 §2.5）：保留 delegate 回合（不再 supersede），改写一条配对的
-            # 静态 tool result，timestamp back-date 到 delegate 回合时刻 → 与 delegate 严格相邻、排在
-            # 子 body 之前。子任务真实产出由内联胶囊 body + 嵌套 finish 对承载。
-            dispatches = await memory.recall_recent(
-                parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
-            delegate_turn = next(
-                (r for r in dispatches
-                 if r.role == "assistant"
-                 and any(tc.get("id") == task.origin_tool_call_id
-                         for tc in (r.metadata.get("tool_calls") or []))),
-                None,
-            )
-            delegate_ts = delegate_turn.timestamp if delegate_turn else now_utc()
+            # 同 agent（spec 2026-06-30 §2.5）：确保/补铸派发框，写一条配对静态 tool result，
+            # 时间戳对齐框 → 严格相邻、排在子 body 之前。子真实产出由内联胶囊 body + 嵌套 finish 对承载。
+            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx)
             await memory.ingest(
                 MemoryEvent(
                     type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
-                    content=_DISPATCH_ACK, timestamp=delegate_ts, role="tool",
+                    content=_DISPATCH_ACK, timestamp=frame_ts, role="tool",
                     metadata={"origin_task_id": task.parent_task_id,
                               "tool_call_id": task.origin_tool_call_id},
                 ),

@@ -528,11 +528,15 @@ async def test_H3_recursive_nesting_grandchild() -> None:
 
     # 每层 finish 对各 2 条（assistant finish_task + tool Process Report），无 body 镜像
     # §2.5: same-agent dispatch acks (content=_DISPATCH_ACK) 排除后仅剩 finish 对
-    from ctx_weft.core.loop.steps.finalize import _DISPATCH_ACK
+    # Task 2: also exclude minted start_task frames (dispatch infrastructure, not finish pairs)
+    from ctx_weft.core.loop.steps.finalize import _DISPATCH_ACK, START_TASK_NAME
     for origin in (child_id, gc_id):
         layer_caps = [r for r in all_caps if r.metadata.get("origin_task_id") == origin]
         finish_pair = [r for r in layer_caps
-                       if not (r.role == "tool" and r.content == _DISPATCH_ACK)]
+                       if not (r.role == "tool" and r.content == _DISPATCH_ACK)
+                       and not (r.role == "assistant"
+                                and any(tc.get("name") == START_TASK_NAME
+                                        for tc in (r.metadata.get("tool_calls") or [])))]
         assert len(finish_pair) == 2, (
             f"task-resident: each task must contribute exactly the finish pair (2 turns); "
             f"origin={origin} got {[(c.role, (c.content or '')[:40]) for c in finish_pair]}"

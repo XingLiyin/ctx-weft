@@ -286,6 +286,42 @@ async def test_cross_agent_result_carries_outputs_and_task_summary() -> None:
     assert "本段" not in body                   # 不掺 act_recap
 
 
+async def test_plan_child_mints_start_task_frame_when_absent() -> None:
+    """delegate_plan 子: parent scope 无预置框 → finalize 补铸 start_task 框，bubble/ACK 配对其 id。"""
+    from ctx_weft.core.loop.steps.finalize import _close_one, START_TASK_NAME
+    from datetime import timedelta
+
+    mem = InMemoryMemoryProvider()
+    parent_scope = _sc("p1", "ag1")
+    child_scope = _sc("c1", "ag1")
+    created = _BASE + timedelta(seconds=0)
+
+    # NOTE: deliberately seed NO delegate frame in parent scope.
+    child = Task(id="c1", session_id="s1", status="FINISHED", tenant_id="default",
+                 assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="p1",
+                 origin_tool_call_id="tcall_plan_c1", title="向 Lily 问好",
+                 user_prompt="hi lily", created_at=created, settings=NormalTaskSettings())
+    state = _state(child, child_scope, LoopConfig())
+
+    await _close_one(mem, state, child, "out\n\nProcess Report: r", "success", _loop_ctx(mem),
+                     short=True, act_recap="本段做了 X", task_summary="整段总结")
+
+    turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+
+    # a minted start_task frame exists, carrying the child's origin_tool_call_id
+    frame = [r for r in turns if r.role == "assistant"
+             and any(tc.get("id") == "tcall_plan_c1" and tc.get("name") == START_TASK_NAME
+                     for tc in (r.metadata.get("tool_calls") or []))]
+    assert frame, "a start_task frame must be minted for the plan child"
+    assert frame[0].metadata.get("origin_task_id") == "p1", "frame stays in delegating(p1) unit (留父)"
+    assert frame[0].timestamp == created, "frame back-dated to child.created_at for adjacency"
+
+    # the paired ACK result shares the frame's tool_call_id and timestamp
+    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "tcall_plan_c1"]
+    assert ack, "paired result must carry the same tool_call_id"
+    assert ack[0].timestamp == frame[0].timestamp, "result adjacent to its frame"
+
+
 async def test_cross_agent_child_no_nested_capsule_in_parent_scope() -> None:
     """跨 agent child: parent scope 无 origin_task_id=child.id 的 AGENT_CONVERSATION_TURN。"""
     mem = InMemoryMemoryProvider()
