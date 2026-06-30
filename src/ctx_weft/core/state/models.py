@@ -207,6 +207,8 @@ class Task:
     actor_done: bool = False
     # observe 裁决（三态）：success|retry|fail。retry 置 status=PENDING 重排（机械退出也归 retry）。
     observer_outcome: str | None = None
+    # observer 产出的整段综合总结（执行历程+结果）→ finish 对 tool 槽（spec 2026-06-30）。
+    task_summary: str | None = None
     # 发起本任务的 parent delegate_task/delegate_plan 的 tool_call_id（spec/06 §5）。
     # finalize 据此把 output+report 作为 TASK_DISPATCH_RESULT 回填 parent agent 层、按它配对。
     origin_tool_call_id: str | None = None

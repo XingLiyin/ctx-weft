@@ -135,3 +135,21 @@ def test_no_role_stays_rule_even_at_max_turns() -> None:
 def test_delegated_normal_exit_uses_llm() -> None:
     s = _llm_gate_state("normal", "parent1", has_role=True)
     assert ObserveStep()._should_use_llm(s) is True
+
+
+def test_verdict_has_act_recap_and_task_summary_fields():
+    from ctx_weft.core.loop.steps.observe import Verdict
+    v = Verdict(task_outcome="success", act_recap="did X", task_summary="whole journey")
+    assert v.act_recap == "did X"
+    assert v.task_summary == "whole journey"
+    assert v.reported is False
+    # task_summary 默认空
+    assert Verdict(task_outcome="retry", act_recap="r").task_summary == ""
+
+
+def test_task_model_has_task_summary_field():
+    from ctx_weft.core.state.models import Task
+    t = Task(id="t1", session_id="s1", status="ACTIVE")
+    assert t.task_summary is None
+    t.task_summary = "comprehensive"
+    assert t.task_summary == "comprehensive"

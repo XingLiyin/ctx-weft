@@ -251,7 +251,7 @@ class FinalizeStep(Step):
         task = state.task
         verdict = state.verdict
         outcome = verdict.task_outcome if verdict else "fail"
-        summary = verdict.summary if verdict else ""
+        summary = verdict.act_recap if verdict else ""
         events: list[Any] = []
 
         # retry 超过上限 → 降级 fail（不再重试）

@@ -205,7 +205,7 @@ async def test_maybe_compact_task_passes_protect_types_and_user_prompts_survive(
     await _seed_events(mem)
 
     events: list = []
-    verdict = Verdict(task_outcome="retry", summary="段摘要", reported=True)
+    verdict = Verdict(task_outcome="retry", act_recap="段摘要", reported=True)
 
     with patch(
         "ctx_weft.core.loop.steps.observe.summarize_for_compact",

@@ -210,7 +210,8 @@ def _is_own_root(task) -> bool:
 class Verdict:
     """Observer 输出（三态）。"""
     task_outcome: str   # "retry" | "success" | "fail"
-    summary: str        # 本轮工作的简短总结（进入 memory + 父 agent 读取）
+    act_recap: str      # 诚实复述上一轮 act 做了什么 → finish 对 assistant；retry 作 Current Progress
+    task_summary: str = ""  # 整段综合总结（执行历程+结果）→ finish 对 tool 槽（仅终态有意义）
     reported: bool = False  # 本轮是否真的走成 report_task_outcome；压缩摘要据此取信
 
 
@@ -255,7 +256,7 @@ class ObserveStep(Step):
             payload={
                 "task_id": state.task.id,
                 "outcome": verdict.task_outcome,
-                "summary_length": len(verdict.summary),
+                "summary_length": len(verdict.act_recap),
                 "used_llm": used_llm,
             },
         ))
@@ -315,7 +316,8 @@ class ObserveStep(Step):
             # report_task_outcome already wrote task.observer_outcome / task.process_report
             return Verdict(
                 task_outcome=state.task.observer_outcome or "success",
-                summary=state.task.process_report or last_text[:500],
+                act_recap=state.task.process_report or last_text[:500],
+                task_summary=state.task.task_summary or "",
                 reported=True,
             )
 
@@ -333,7 +335,7 @@ class ObserveStep(Step):
         exit_reason = state.act_exit_reason
 
         if not transcript:
-            verdict = Verdict(task_outcome="fail", summary="[No actor execution recorded]")
+            verdict = Verdict(task_outcome="fail", act_recap="[No actor execution recorded]")
             self._apply_assessment(state.task, verdict)
             return verdict
 
@@ -354,7 +356,7 @@ class ObserveStep(Step):
             lines.append("Task completed.")
             outcome = "success"
 
-        verdict = Verdict(task_outcome=outcome, summary=" ".join(lines))
+        verdict = Verdict(task_outcome=outcome, act_recap=" ".join(lines))
         self._apply_assessment(state.task, verdict)
         return verdict
 
@@ -416,8 +418,8 @@ class ObserveStep(Step):
             return
 
         # 来源优先级：本轮可信 report → 专用压缩 LLM 摘要 → 占位
-        if verdict.reported and verdict.summary:
-            summary = verdict.summary
+        if verdict.reported and verdict.act_recap:
+            summary = verdict.act_recap
         else:
             summary = await summarize_for_compact(state, ctx)
         summary = summary or "[Context compacted]"
