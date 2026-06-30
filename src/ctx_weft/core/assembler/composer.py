@@ -748,6 +748,16 @@ class DefaultComposer(Composer):
                 "Upstream task results (read-only context):\n" + self._render_bb(pred_blocks)
             )
 
+        # Phase 3: reviewable sub-tasks come from task_manager via request.extra (not blackboard).
+        # The observer reads each child's RESULT from the conversation (Phase 2); this clause only
+        # surfaces the actionable handles (task_id/title/outcome) so it can confirm/reopen via task_reviews.
+        reviews = (getattr(request, "extra", {}) or {}).get("subtask_reviews") or []
+        if reviews:
+            lines = ["## Your sub-tasks (confirm / reopen via `task_reviews`, referencing the task_id):"]
+            for r in reviews:
+                lines.append(f"- {r['task_id']} — {r.get('title', '')} [{r.get('outcome', '')}]")
+            extra_sections.append("\n".join(lines))
+
         # finish_task 的产出走 SILENT，不入 task 层、不在重建的对话里——但 observer 须看到 actor
         # 最终提交了什么。显式补一段并标注来源（act 阶段调用 finish_task 的结果），置于判定提示之前。
         pre_cue_sections: list[str] = []

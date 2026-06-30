@@ -290,6 +290,18 @@ class ObserveStep(Step):
             if cache is not None and cache.has_agent(agent.id)
             else []
         )
+        subtask_reviews: list[dict] = []
+        tm = ctx.task_manager
+        if tm is not None:
+            for cid in tm.children_of(state.task.id):
+                child = tm.get_task(cid)
+                if child is None:
+                    continue
+                subtask_reviews.append({
+                    "task_id": child.id,
+                    "title": child.title or "",
+                    "outcome": (child.status or "").lower(),
+                })
         request = ContextRequest(
             purpose="observe",
             scope=state.scope,
@@ -299,6 +311,7 @@ class ObserveStep(Step):
             template=state.extra.get("template"),
             bound_capabilities=bound_caps,
             actor_transcript=state.transcript,
+            extra={"subtask_reviews": subtask_reviews},
         )
         prompt = await ctx.assembler.assemble(request)
 
