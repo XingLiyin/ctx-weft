@@ -1,7 +1,7 @@
 """FinalizeStep：task 收尾——写 memory + blackboard publish + 更新 task 状态。
 
 miniAgents 对齐版：
-- memory 内容 = task.outputs + "\\n\\nProcess Report: " + verdict.summary（合并写入）
+- memory 内容 = task.outputs + "\\n\\nProcess Report: " + verdict.act_recap（合并写入）
 - 新增 BLACKBOARD_PUBLISH：让父 agent 通过 recall_topic(task.id) 读到子任务结果
 """
 

@@ -607,7 +607,7 @@ class DefaultComposer(Composer):
 
     def _progress_already_in_compact(self, task, history_blocks: list["ContextBlock"]) -> bool:
         """process_report 是否已作为本轮 TASK_COMPACT_SUMMARY 出现在历史里（max_turns compact 复用
-        了它）。内容精确相等才算（二者同出 verdict.summary）；规则降级的独立摘要内容不同，不会误删。"""
+        了它）。内容精确相等才算（二者同出 verdict.act_recap）；规则降级的独立摘要内容不同，不会误删。"""
         progress = getattr(task, "process_report", None)
         if not progress:
             return False

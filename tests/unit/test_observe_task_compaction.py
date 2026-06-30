@@ -70,7 +70,7 @@ def _ctx_empty_llm(mem):
 
 
 async def test_max_turns_reuses_reported_summary():
-    # 本轮真上报：复用 verdict.summary（可信 report），不调 summarize_for_compact
+    # 本轮真上报：复用 verdict.act_recap（可信 report），不调 summarize_for_compact
     mem = _FakeMem(count=10)
     events = []
     verdict = Verdict(task_outcome="retry", act_recap="REPORT", reported=True)
