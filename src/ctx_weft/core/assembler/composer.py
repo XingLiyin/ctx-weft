@@ -16,8 +16,6 @@ message（首条 task_conversation 来源的 user 回合；fresh task 时即末�
   ---
   {该首条 user message 原内容}
 后续任务上下文 user message：
-  ## Task Background
-  - {blackboard_snippets}
   ## Current Task
   {task.title}
   {task.description}
@@ -27,6 +25,8 @@ message（首条 task_conversation 来源的 user 回合；fresh task 时即末�
   User: {content}
   Assistant: {content} + tool_calls
   Tool: {result}
+
+（Phase 3 2026-06-30: ## Task Background blackboard 段已移除；predecessor 结果经 memory recall 获取。）
 
 Observer system prompt（与 act 同构）：
   role/soul（act identity）
@@ -38,8 +38,8 @@ message），再追加一条尾部 user message（仅发送，不入 memory）�
   {observe ROLE（identity）}
   ---
   {判定提示}
-  Your sub-task results / Upstream task results:
-  - {blackboard_snippets}
+  ## Your sub-tasks（当有 extra["subtask_reviews"] 时）:
+  - {task_id} — {title} [{outcome}]
 """
 
 from __future__ import annotations
@@ -284,15 +284,10 @@ class DefaultComposer(Composer):
 
         结构：
           [0..N-1] 历史轮次：user / assistant / tool 各自独立的 LLMMessage
-          [N]      user: Task Background + Current Task + Progress So Far + Current Message
+          [N]      user: Current Task + Progress So Far + Current Message
         """
-        # Task Background 只放跨 plan 前序（predecessor / tracking 等）结果；
-        # 排除 subtask——自己派发的子任务结果已通过 agent_experience(tool result) 呈现，
-        # 避免与之重复（spec/06 §12）。
-        bb_blocks = [
-            b for b in blocks
-            if b.kind == "blackboard" and b.metadata.get("intent") != "subtask"
-        ]
+        # Phase 3 (2026-06-30): ## Task Background (blackboard predecessor blocks) removed.
+        # Predecessors now surface via memory recall (Phase 2 inherit/recall); no bb_blocks needed.
         history_blocks = [b for b in blocks if b.kind == "history"]
 
         # Progress So Far (retry feedback): render as a chronologically-placed history
@@ -326,12 +321,6 @@ class DefaultComposer(Composer):
 
         task = request.task
         parts: list[str] = []
-
-        if bb_blocks:
-            lines = ["## Task Background"]
-            for b in bb_blocks:
-                lines.append(f"- {content_to_text(b.content)}")
-            parts.append("\n".join(lines))
 
         if not task.user_prompt_in_memory:
             # daemon 或尚未持久化的路径：实时构建完整的用户消息
@@ -733,20 +722,12 @@ class DefaultComposer(Composer):
         复用 _build_facet_trailing_messages：observe facet（ROLE）+ 判定提示 + 可复核清单。
         subtask 可 confirm/reopen，predecessor 只读。
         """
-        bb_blocks = [b for b in blocks if b.kind == "blackboard"]
-        subtask_blocks = [b for b in bb_blocks if b.metadata.get("intent") == "subtask"]
-        pred_blocks = [b for b in bb_blocks if b.metadata.get("intent") == "predecessor"]
+        # Phase 3 (2026-06-30): blackboard subtask/predecessor block rendering removed.
+        # Predecessor results surface via memory recall (Phase 2); subtask review handles come
+        # from task_manager via request.extra["subtask_reviews"] (Task 1 below).
+        # The blackboard mechanism (subscribe_topic/recall_topic/BlackboardSource) is kept intact.
 
         extra_sections: list[str] = []
-        if subtask_blocks:
-            extra_sections.append(
-                "Your sub-task results (you may confirm / reopen these):\n"
-                + self._render_bb(subtask_blocks)
-            )
-        if pred_blocks:
-            extra_sections.append(
-                "Upstream task results (read-only context):\n" + self._render_bb(pred_blocks)
-            )
 
         # Phase 3: reviewable sub-tasks come from task_manager via request.extra (not blackboard).
         # The observer reads each child's RESULT from the conversation (Phase 2); this clause only

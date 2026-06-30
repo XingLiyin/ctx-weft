@@ -200,33 +200,15 @@ class StepDriver:
     initial_step: str = "prepare"
 
     async def _ensure_blackboard_subscriptions(self, state: LoopState, ctx: LoopContext) -> None:
-        """本 task 订阅相关任务结果 topic（幂等）。
+        """No-op since Phase 3 (2026-06-30).
 
-        分两类 intent，使 observe 渲染时能区分可操作范围：
-          - predecessor：同 plan 前序（tracking_task_ids）——只读上下文
-          - subtask：已派生的子任务（children_of）——可被 review / reopen
+        Predecessor results now reach a task via memory recall (Phase 2 inherit/recall), and the
+        observer's own-children review affordance is surfaced in the observe cue from task_manager
+        (see ObserveStep). The blackboard mechanism (subscribe_topic/recall_topic/BlackboardSource/
+        BLACKBOARD_PUBLISH) and `tracking_task_ids` are intentionally kept; only the subscription
+        wiring is removed.
         """
-        tm = ctx.task_manager
-        if tm is None:
-            return
-        task = state.task
-        predecessors = set(task.tracking_task_ids or [])
-        children = tm.children_of(task.id)
-        predecessors.discard(task.id)
-        children.discard(task.id)
-        children -= predecessors  # 同一 topic 不重复订阅；前序优先按只读处理
-        for intent, topics in (("predecessor", predecessors), ("subtask", children)):
-            for topic in topics:
-                try:
-                    await ctx.memory.subscribe_topic(
-                        session_id=task.session_id,
-                        topic=topic,
-                        intent=intent,  # type: ignore[arg-type]
-                        ctx=ctx.provider_ctx,
-                        task_id=task.id,
-                    )
-                except Exception:
-                    logger.exception("blackboard subscribe failed: task=%s topic=%s", task.id, topic)
+        return
 
     async def run(
         self,
