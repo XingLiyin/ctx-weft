@@ -240,6 +240,7 @@ async def test_cross_agent_child_body_isolated_from_parent() -> None:
         status="FINISHED", outputs="收集到 5 份数据集",
     )
     child_task.origin_tool_call_id = "oc_cross"
+    # Intentionally pre-built mem_content for cross-agent isolation test; actual shape tested elsewhere
     child_mem_content = "收集到 5 份数据集\n\nProcess Report: 成功。"
 
     await finalize_task_memory(

@@ -55,7 +55,6 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
                                  outcome: str) -> None:
     """supersede finish 对的 assistant + tool 两条占位，按新 act_recap / task_summary 重写。
     按 (tool_call_id + origin_task_id) 定位，不再靠 'Process Report:' 文本（spec 2026-06-30 §2.4）。"""
-    from ctx_weft.core.utils import now_utc  # noqa: F401  (timestamp 复用旧记录)
     from ctx_weft.protocols import MemoryEvent, MemoryEventType
     from ctx_weft.protocols.capability import qualify
 

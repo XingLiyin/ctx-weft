@@ -343,6 +343,7 @@ async def test_synthesize_dispatch_pair_two_segments() -> None:
     assert asst[0].timestamp == tool[0].timestamp
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestWarning")
 def test_finish_tool_text_falls_back():
     """_finish_tool_text 优先用 task_summary；空则退 act_recap；都空给占位（不掺 outputs）。"""
     from ctx_weft.core.loop.steps.finalize import _finish_tool_text

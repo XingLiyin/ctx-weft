@@ -80,7 +80,7 @@ async def test_max_turns_reuses_reported_summary():
 
 
 async def test_max_turns_uses_dedicated_summary_when_not_reported():
-    # 本轮未上报（规则降级）：用 summarize_for_compact，不退薄 verdict.summary
+    # 本轮未上报（规则降级）：用 summarize_for_compact，不退薄 verdict.act_recap
     mem = _FakeMem(count=10)
     events = []
     verdict = Verdict(task_outcome="retry", act_recap="thin rule text", reported=False)
