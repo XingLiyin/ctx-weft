@@ -130,7 +130,7 @@ async def test_A1_single_segment_finish() -> None:
     task = _make_task(outputs="已切到 JWT：三处改完，8 测试全过")
     mem_content = "已切到 JWT：三处改完，8 测试全过\n\nProcess Report: 成功。读 session.py 确认 3 处改 jwt，补 8 测试。"
 
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "", "success", _pctx())
 
     caps = await _caps(mem, asc)
 
@@ -229,7 +229,7 @@ async def test_A3_mid_stream_interrupt_annotation() -> None:
                       outputs="改用 authlib 重写签发/校验，3 处改完")
     mem_content = "改用 authlib 重写签发/校验，3 处改完\n\nProcess Report: 成功。改用 authlib 重写签发/校验，3 处改完。"
 
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "", "success", _pctx())
 
     caps = await _caps(mem, asc)
 
@@ -302,7 +302,7 @@ async def test_A4_edit_interrupt_adjacent_anchors() -> None:
                       outputs="按 OAuth2 实现完成")
     mem_content = "按 OAuth2 实现完成\n\nProcess Report: 成功。按 OAuth2 实现…"
 
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "", "success", _pctx())
 
     caps = await _caps(mem, asc)
 
@@ -361,9 +361,9 @@ async def test_A6_fail_outcome() -> None:
     ), _pctx())
 
     task = _make_task(outputs=None)  # fail → no outputs
-    mem_content = "失败报告"  # 无 outputs，仅 process report
+    mem_content = "Process Report: 失败报告"  # 无 outputs，仅 process report
 
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "fail", _pctx())
+    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "", "fail", _pctx())
 
     caps = await _caps(mem, asc)
 
@@ -428,6 +428,7 @@ async def test_A10_short_task_synthesizes_finish_pair_keeps_body() -> None:
     await finalize_task_memory(
         mem, _state(task, tsc, loop_config),
         task, "hi\n\nProcess Report: 极短任务", "success", _loop_ctx(mem),
+        act_recap="hi\n\nProcess Report: 极短任务", task_summary="",
     )
 
     # 断言：agent 层有 finish 对（2 条：assistant finish_task + tool Process Report）
@@ -485,6 +486,7 @@ async def test_H3_recursive_nesting_grandchild() -> None:
     await finalize_task_memory(
         mem, _state(gc_task, gc_scope),
         gc_task, gc_mem_content, "success", _loop_ctx(mem),
+        act_recap=gc_mem_content, task_summary="",
     )
 
     # ── Child（子）──
@@ -510,6 +512,7 @@ async def test_H3_recursive_nesting_grandchild() -> None:
     await finalize_task_memory(
         mem, _state(child_task, child_scope),
         child_task, child_mem_content, "success", _loop_ctx(mem, child_tm),
+        act_recap=child_mem_content, task_summary="",
     )
 
     # task-resident：finish 对都落 ag1 agent 层（AGENT_CONVERSATION_TURN 按 agent_id 召回、
@@ -524,14 +527,18 @@ async def test_H3_recursive_nesting_grandchild() -> None:
     )
 
     # 每层 finish 对各 2 条（assistant finish_task + tool Process Report），无 body 镜像
+    # §2.5: same-agent dispatch acks (content=_DISPATCH_ACK) 排除后仅剩 finish 对
+    from ctx_weft.core.loop.steps.finalize import _DISPATCH_ACK
     for origin in (child_id, gc_id):
         layer_caps = [r for r in all_caps if r.metadata.get("origin_task_id") == origin]
-        assert len(layer_caps) == 2, (
+        finish_pair = [r for r in layer_caps
+                       if not (r.role == "tool" and r.content == _DISPATCH_ACK)]
+        assert len(finish_pair) == 2, (
             f"task-resident: each task must contribute exactly the finish pair (2 turns); "
-            f"origin={origin} got {[(c.role, (c.content or '')[:40]) for c in layer_caps]}"
+            f"origin={origin} got {[(c.role, (c.content or '')[:40]) for c in finish_pair]}"
         )
-        assert {c.role for c in layer_caps} == {"assistant", "tool"}
-        tool_turn = [c for c in layer_caps if c.role == "tool"][0]
+        assert {c.role for c in finish_pair} == {"assistant", "tool"}
+        tool_turn = [c for c in finish_pair if c.role == "tool"][0]
         assert "Process Report:" in tool_turn.content
 
     # body 留各自 task 层：child / grandchild 的 user 锚点仍在各自 task 层（未被镜像/supersede）
@@ -594,6 +601,7 @@ async def test_H4_cross_agent_isolation() -> None:
     await finalize_task_memory(
         mem, _state(child_task, child_scope),
         child_task, child_mem_content, "success", _loop_ctx(mem),
+        act_recap=child_mem_content, task_summary="",
     )
 
     parent_scope_task = _task_scope(parent_id, parent_agent)
@@ -711,17 +719,21 @@ async def test_H8_short_same_agent_child_no_bubble_supersedes_orphan() -> None:
     await finalize_task_memory(
         mem, _state(child_task, child_scope),
         child_task, "ok\n\nProcess Report: 短任务", "success", _loop_ctx(mem),
+        act_recap="短任务", task_summary="",
     )
 
-    # §2.1：parent scope 无 oc_short 的 result bubble；孤立 delegate 回合被 supersede
+    # §2.5：delegate 回合保留 + 配对静态 ack
+    from ctx_weft.core.loop.steps.finalize import _DISPATCH_ACK
     parent_caps = await mem.recall_recent(parent_agent_scope, [T.AGENT_CONVERSATION_TURN], 200, _pctx())
-    assert [r for r in parent_caps
-            if r.role == "tool" and r.metadata.get("tool_call_id") == tc_short] == [], (
-        "§2.1: same-agent child must NOT bubble a dispatch result"
+    delegate = [r for r in parent_caps if r.role == "assistant"
+                and any(tc.get("id") == tc_short for tc in (r.metadata.get("tool_calls") or []))]
+    assert delegate, "§2.5: delegate turn must be KEPT (not superseded)"
+    ack = [r for r in parent_caps if r.role == "tool" and r.metadata.get("tool_call_id") == tc_short]
+    assert ack and ack[0].content == _DISPATCH_ACK, (
+        f"§2.5: static ack must be written with content={_DISPATCH_ACK!r}; got {[r.content for r in ack]}"
     )
-    assert [r for r in parent_caps if r.role == "assistant"
-            and any(tc.get("id") == tc_short for tc in (r.metadata.get("tool_calls") or []))] == [], (
-        "§2.1: orphan delegate turn (oc_short) must be superseded"
+    assert ack[0].timestamp == delegate[0].timestamp, (
+        f"§2.5: ack.timestamp must equal delegate.timestamp; ack={ack[0].timestamp}, delegate={delegate[0].timestamp}"
     )
 
     # child 自己合成 finish 对（同 agent scope）

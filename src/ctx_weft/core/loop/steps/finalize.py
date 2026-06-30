@@ -34,6 +34,9 @@ _FINAL_RAW_TYPES = [
     MemoryEventType.TOOL_RESULT,
 ]
 
+# 同 agent 派发：派发对 tool 结果的静态文案（不含任何子任务结果，永不回填，spec 2026-06-30 §2.5）。
+_DISPATCH_ACK = "任务派发成功，以下是执行记录："
+
 
 def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
     """finish 对 tool 槽内容 = task_summary（process report）。R2 兜底：空则退 act_recap，
@@ -155,20 +158,29 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                          "source": "dispatch_result", "content_length": len(mem_content)},
             ))
         elif same_agent:
-            # 同 agent（spec 2026-06-28 §2.1）：不 bubble 占位 result；supersede 掉 gateway 早先写的
-            # 那条孤立 delegate conversation turn（按 origin_tool_call_id 在 parent_scope 定位），
-            # 由嵌套 finish 对全权承载——gateway 写 delegate turn 时无法判定 same/cross，故在此补偿回收。
+            # 同 agent（spec 2026-06-30 §2.5）：保留 delegate 回合（不再 supersede），改写一条配对的
+            # 静态 tool result，timestamp back-date 到 delegate 回合时刻 → 与 delegate 严格相邻、排在
+            # 子 body 之前。子任务真实产出由内联胶囊 body + 嵌套 finish 对承载。
             dispatches = await memory.recall_recent(
                 parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
-            orphan_ids = [
-                r.id for r in dispatches
-                if r.role == "assistant"
-                and any(tc.get("id") == task.origin_tool_call_id
-                        for tc in (r.metadata.get("tool_calls") or []))
-            ]
-            if orphan_ids:
-                await memory.supersede(orphan_ids, ctx.provider_ctx)
-            # 嵌套合成子自己的 finish 对（写进共享 agent scope）
+            delegate_turn = next(
+                (r for r in dispatches
+                 if r.role == "assistant"
+                 and any(tc.get("id") == task.origin_tool_call_id
+                         for tc in (r.metadata.get("tool_calls") or []))),
+                None,
+            )
+            delegate_ts = delegate_turn.timestamp if delegate_turn else now_utc()
+            await memory.ingest(
+                MemoryEvent(
+                    type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
+                    content=_DISPATCH_ACK, timestamp=delegate_ts, role="tool",
+                    metadata={"origin_task_id": task.parent_task_id,
+                              "tool_call_id": task.origin_tool_call_id},
+                ),
+                ctx.provider_ctx,
+            )
+            # 嵌套合成子自己的 finish 对（写进共享 agent scope，@close 时刻）
             await _synthesize_dispatch_pair(
                 memory, parent_scope, task, act_recap, task_summary, outcome, ctx.provider_ctx)
 
@@ -199,6 +211,8 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     base = now_utc()
     tool_call_id = generate_id("tcall")
     outputs_text = _output_text(task.outputs)   # 进 finish_task 的 input.result（给 user 看）
+    if not outputs_text and outcome == "fail":
+        outputs_text = "(无最终产出)"
     report_prefix = "[outcome=fail] " if outcome == "fail" else ""
     summary_text = _finish_tool_text(task_summary, act_recap, outcome)   # tool 槽 = process report
 

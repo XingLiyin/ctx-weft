@@ -79,7 +79,7 @@ async def test_synthesize_writes_only_finish_pair():
 
     task = _task(prompt="UP1原文")
     mem_content = "最终答复\n\nProcess Report: 过程报告"
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "最终答复", "Process Report: 过程报告", "success", _ctx())
 
     caps = await _caps(mem, asc)
 
@@ -112,7 +112,7 @@ async def test_finish_pair_timestamp_anchors_close():
                                  timestamp=t2, role="assistant"), _ctx())
 
     task = _task(prompt="q")
-    await _synthesize_dispatch_pair(mem, asc, task, "出了\n\nProcess Report: r", "success", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "出了\n\nProcess Report: r", "", "success", _ctx())
 
     caps = await _caps(mem, asc)
     assert len(caps) == 2
@@ -129,7 +129,7 @@ async def test_finish_pair_tool_call_id_matches():
     asc = _agent_scope()
     task = _task()
 
-    await _synthesize_dispatch_pair(mem, asc, task, "ans\n\nProcess Report: rpt", "success", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "ans\n\nProcess Report: rpt", "", "success", _ctx())
 
     caps = await _caps(mem, asc)
     finish_assistant = caps[-2]
@@ -147,7 +147,7 @@ async def test_fail_outcome_prefix_in_tool_content():
     task = _task()
     task.outputs = None
 
-    await _synthesize_dispatch_pair(mem, asc, task, "失败报告", "fail", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "失败报告", "", "fail", _ctx())
 
     caps = await _caps(mem, asc)
     tool_content = caps[-1].content
@@ -163,7 +163,7 @@ async def test_no_task_records_still_writes_finish_pair():
     task = _task(prompt="")  # empty prompt means no UP mirror either
     task.outputs = "答"
 
-    await _synthesize_dispatch_pair(mem, asc, task, "答\n\nProcess Report: r", "success", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "答\n\nProcess Report: r", "", "success", _ctx())
 
     caps = await _caps(mem, asc)
     assert len(caps) == 2, f"expected 2 (finish pair only), got {len(caps)}"
@@ -182,7 +182,7 @@ async def test_finish_result_dict_list_outputs():
     task.outputs = [{"type": "text", "text": "结构化答复"}]
 
     await _synthesize_dispatch_pair(
-        mem, asc, task, "结构化答复\n\nProcess Report: rpt", "success", _ctx()
+        mem, asc, task, "结构化答复\n\nProcess Report: rpt", "", "success", _ctx()
     )
 
     caps = await _caps(mem, asc)
@@ -220,7 +220,7 @@ async def test_embedded_process_report_in_outputs():
     # "I wrote a Process Report: draft\\n\\nProcess Report: real report"
     mem_content = "I wrote a Process Report: draft\n\nProcess Report: real report"
 
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "I wrote a Process Report: draft", "Process Report: real report", "success", _ctx())
 
     caps = await _caps(mem, asc)
     finish_tool = caps[-1]
