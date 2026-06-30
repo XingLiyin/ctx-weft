@@ -90,6 +90,7 @@ async def test_same_agent_child_no_bubble_supersedes_orphan_dispatch() -> None:
     await finalize_task_memory(
         mem, _state(child, child_scope, LoopConfig()),
         child, mem_content, "success", _loop_ctx(mem),
+        act_recap="sub summary", task_summary="",
     )
 
     parent_scope = _sc("p1", "ag1")
@@ -122,6 +123,7 @@ async def test_same_agent_child_finish_pair_written_into_parent_scope() -> None:
     await finalize_task_memory(
         mem, _state(child, child_scope, LoopConfig()),
         child, mem_content, "success", _loop_ctx(mem),
+        act_recap="sub summary", task_summary="",
     )
 
     parent_scope = _sc("p1", "ag1")
@@ -138,11 +140,11 @@ async def test_same_agent_child_finish_pair_written_into_parent_scope() -> None:
         "task-resident: child finish pair must NOT mirror body (no user anchor)"
     )
 
-    # must include finish pair: tool role with Process Report
+    # must include finish pair: tool role (content = act_recap fallback since task_summary="")
     finish_tool = [r for r in child_turns if r.role == "tool"]
-    assert finish_tool, "expected finish-pair tool turn (Process Report) in parent scope capsule"
-    assert "Process Report:" in finish_tool[0].content, (
-        f"expected Process Report in finish tool, got: {finish_tool[0].content!r}"
+    assert finish_tool, "expected finish-pair tool turn in parent scope capsule"
+    assert finish_tool[0].content, (
+        f"finish tool content must be non-empty, got: {finish_tool[0].content!r}"
     )
 
     # child raw body stays in child task layer (not mirrored/superseded)
@@ -172,6 +174,7 @@ async def test_cross_agent_child_bubble_is_conversation_turn() -> None:
     await finalize_task_memory(
         mem, _state(child, child_scope, LoopConfig()),
         child, mem_content, "success", _loop_ctx(mem),
+        act_recap="cross summary", task_summary="",
     )
 
     parent_scope = _sc("p1", "ag1")
@@ -208,6 +211,7 @@ async def test_cross_agent_child_no_nested_capsule_in_parent_scope() -> None:
     await finalize_task_memory(
         mem, _state(child, child_scope, LoopConfig()),
         child, mem_content, "success", _loop_ctx(mem),
+        act_recap="cross summary", task_summary="",
     )
 
     parent_scope = _sc("p1", "ag1")

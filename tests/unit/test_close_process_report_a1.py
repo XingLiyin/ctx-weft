@@ -71,6 +71,13 @@ async def _get_finish_tool(mem: InMemoryMemoryProvider, scope: MemoryScope) -> M
     return tool_recs[0] if tool_recs else None  # recall_recent returns newest-first
 
 
+async def _get_finish_asst(mem: InMemoryMemoryProvider, scope: MemoryScope) -> MemoryEvent | None:
+    """取 agent scope 内最新的 assistant role AGENT_CONVERSATION_TURN（finish 记录）。"""
+    recs = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
+    asst_recs = [r for r in recs if r.role == "assistant"]
+    return asst_recs[0] if asst_recs else None
+
+
 # ─── autouse fixture：清 module-level 字典 ─────────────────────────────────────
 
 @pytest.fixture(autouse=True)
@@ -88,8 +95,8 @@ def _clear_bg_dicts():
 # ─── TEST 1: slot hit ─────────────────────────────────────────────────────────
 
 async def test_a1_slot_hit_uses_background_report() -> None:
-    """bg 先完成：_close_report[task.id] 预置 "好报告"；
-    _synthesize_dispatch_pair 合成的 finish tool 内容 == "Process Report: 好报告"。
+    """bg 先完成：_close_report[task.id] 预置 ("好报告_act", "好报告_sum")；
+    _synthesize_dispatch_pair 合成后立即替换：finish tool == "好报告_sum"，assistant == "好报告_act"。
     无后续替换（slot 命中即直接用）。
     """
     mem = InMemoryMemoryProvider()
@@ -99,17 +106,21 @@ async def test_a1_slot_hit_uses_background_report() -> None:
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "初始请求", 1, role="user"), _pctx())
 
     task = _make_task()
-    mem_content = "最终答复\n\nProcess Report: 占位摘要"  # placeholder from observer
 
-    # 预置 bg 结果（background 先到）
-    bg_mod._close_report["t1"] = "好报告"
+    # 预置 bg 结果（background 先到）——两段化 tuple
+    bg_mod._close_report["t1"] = ("好报告_act", "好报告_sum")
 
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "占位 act_recap", "占位 task_summary", "success", _pctx())
 
     finish_tool = await _get_finish_tool(mem, asc)
     assert finish_tool is not None, "finish tool record must exist"
-    assert finish_tool.content == "Process Report: 好报告", (
-        f"slot hit: finish tool content must be 'Process Report: 好报告'; got {finish_tool.content!r}"
+    assert finish_tool.content == "好报告_sum", (
+        f"slot hit: finish tool content must be '好报告_sum'; got {finish_tool.content!r}"
+    )
+    finish_asst = await _get_finish_asst(mem, asc)
+    assert finish_asst is not None, "finish assistant record must exist"
+    assert finish_asst.content == "好报告_act", (
+        f"slot hit: finish assistant content must be '好报告_act'; got {finish_asst.content!r}"
     )
 
     # slot 已被 pop，无残留
@@ -126,9 +137,9 @@ async def test_a1_slot_hit_uses_background_report() -> None:
 
 async def test_a1_placeholder_then_async_replace() -> None:
     """槽空 → finalize 先合成用占位 + 登记 _close_synth；
-    随后 bg 回调（直接调 _replace_finish_report）替换 finish tool 记录：
-    - 旧记录被 supersede（不再出现）
-    - 新记录 content == "Process Report: 好报告"
+    随后 bg 回调（直接调 _replace_finish_report）替换 finish 对（assistant + tool 两条）：
+    - 旧两条被 supersede（不再出现）
+    - 新 tool 记录 content == "好报告_sum"，新 assistant content == "好报告_act"
     - tool_call_id 配对相同（不产生悬空 pair）
     """
     mem = InMemoryMemoryProvider()
@@ -138,19 +149,22 @@ async def test_a1_placeholder_then_async_replace() -> None:
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "初始请求", 1, role="user"), _pctx())
 
     task = _make_task()
-    mem_content = "最终答复\n\nProcess Report: 占位摘要"
 
     # 槽空（_close_report 为空）→ 占位路径
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "占位 act_recap", "占位 task_summary", "success", _pctx())
 
-    # 占位记录已写入
+    # 占位记录已写入（assistant + tool 两条）
     finish_tool_placeholder = await _get_finish_tool(mem, asc)
     assert finish_tool_placeholder is not None, "placeholder finish tool must exist"
-    assert "Process Report:" in finish_tool_placeholder.content, (
-        f"placeholder must contain 'Process Report:'; got {finish_tool_placeholder.content!r}"
-    )
+    assert finish_tool_placeholder.content, "placeholder tool content must be non-empty"
     placeholder_tool_call_id = finish_tool_placeholder.metadata.get("tool_call_id")
     assert placeholder_tool_call_id, "placeholder finish tool must have tool_call_id"
+
+    finish_asst_placeholder = await _get_finish_asst(mem, asc)
+    assert finish_asst_placeholder is not None, "placeholder finish assistant must exist"
+    assert finish_asst_placeholder.content == "占位 act_recap", (
+        f"placeholder assistant content must be '占位 act_recap'; got {finish_asst_placeholder.content!r}"
+    )
 
     # _close_synth 已登记
     assert hasattr(bg_mod, "_close_synth"), "background_observe must have _close_synth dict"
@@ -171,19 +185,27 @@ async def test_a1_placeholder_then_async_replace() -> None:
     p_tool_call_id, p_scope, p_outcome = popped
     await _replace_finish_report(
         mem, _pctx(), p_scope, "t1",
-        p_tool_call_id, "好报告", p_outcome,
+        p_tool_call_id, "好报告_act", "好报告_sum", p_outcome,
     )
 
-    # 旧占位记录应被 supersede（不再出现）
-    all_tool_recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
-    active_tool_recs = [r for r in all_tool_recs if r.role == "tool"]
+    # 旧两条占位记录应被 supersede（不再出现）
+    all_recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
+    active_tool_recs = [r for r in all_recs if r.role == "tool"]
+    active_asst_recs = [r for r in all_recs if r.role == "assistant"]
     assert len(active_tool_recs) == 1, (
         f"after replace, exactly 1 active finish tool record expected; got {len(active_tool_recs)}: "
         f"{[r.content for r in active_tool_recs]}"
     )
+    assert len(active_asst_recs) == 1, (
+        f"after replace, exactly 1 active finish assistant record expected; got {len(active_asst_recs)}"
+    )
     new_finish_tool = active_tool_recs[0]
-    assert new_finish_tool.content == "Process Report: 好报告", (
-        f"new finish tool content must be 'Process Report: 好报告'; got {new_finish_tool.content!r}"
+    new_finish_asst = active_asst_recs[0]
+    assert new_finish_tool.content == "好报告_sum", (
+        f"new finish tool content must be '好报告_sum'; got {new_finish_tool.content!r}"
+    )
+    assert new_finish_asst.content == "好报告_act", (
+        f"new finish assistant content must be '好报告_act'; got {new_finish_asst.content!r}"
     )
     assert new_finish_tool.metadata.get("tool_call_id") == placeholder_tool_call_id, (
         "replaced record must keep same tool_call_id for proper pair matching"
@@ -214,9 +236,8 @@ async def test_a1_no_await_blocking(monkeypatch) -> None:
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "初始请求", 1, role="user"), _pctx())
 
     task = _make_task()
-    mem_content = "最终答复\n\nProcess Report: 摘要"
 
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "act_recap", "task_summary", "success", _pctx())
 
     assert called == [], (
         f"_synthesize_dispatch_pair must NOT call await_pending_background_observe (A1 non-blocking); "
@@ -246,10 +267,9 @@ async def test_slot_hit_replaces_report_no_raw_mirror() -> None:
     await _ingest_user_plus_raw(mem, tsc)
 
     task = _make_task()
-    mem_content = "最终答复\n\nProcess Report: 占位摘要"
-    bg_mod._close_report["t1"] = "真实段总结"  # background 先完成
+    bg_mod._close_report["t1"] = ("真实段_act", "真实段总结")  # background 先完成（两段化 tuple）
 
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "占位_act", "占位_sum", "success", _pctx())
 
     recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
     # agent 层从不写 final_segment_raw 镜像（task-resident）
@@ -257,7 +277,13 @@ async def test_slot_hit_replaces_report_no_raw_mirror() -> None:
     # agent 层只有 finish 对（无 body 镜像）
     assert len(recs) == 2 and {r.role for r in recs} == {"assistant", "tool"}
     finish_tool = await _get_finish_tool(mem, asc)
-    assert finish_tool.content == "Process Report: 真实段总结"
+    assert finish_tool.content == "真实段总结", (
+        f"slot hit: tool content must be '真实段总结'; got {finish_tool.content!r}"
+    )
+    finish_asst = await _get_finish_asst(mem, asc)
+    assert finish_asst.content == "真实段_act", (
+        f"slot hit: assistant content must be '真实段_act'; got {finish_asst.content!r}"
+    )
     # user 锚点 + 最终段 raw 留 task 层
     body = await mem.recall_recent(tsc, [T.USER_PROMPT, T.LLM_RESPONSE, T.TOOL_RESULT], 500, _pctx())
     assert any(r.role == "user" and "初始请求" in r.content for r in body), "user 锚点留 task 层"
@@ -273,10 +299,9 @@ async def test_degraded_keeps_task_layer_raw_body() -> None:
     await _ingest_user_plus_raw(mem, tsc)
 
     task = _make_task()
-    mem_content = "最终答复\n\nProcess Report: 占位摘要"
     # 槽空 → 占位 + register
 
-    await _synthesize_dispatch_pair(mem, asc, task, mem_content, "success", _pctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "占位_act", "占位_sum", "success", _pctx())
 
     recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
     # 无 final_segment_raw 镜像（agent 层不再镜像 body）
@@ -285,3 +310,44 @@ async def test_degraded_keeps_task_layer_raw_body() -> None:
     # 最终段 raw body 留 task 层
     body = await mem.recall_recent(tsc, [T.LLM_RESPONSE, T.TOOL_RESULT], 500, _pctx())
     assert len(body) == 2, "降级时最终段 raw body 留 task 层（task-resident）"
+
+
+# ─── TDD: 两段化核心行为 ────────────────────────────────────────────────────────
+
+async def test_synthesize_dispatch_pair_two_segments() -> None:
+    """_synthesize_dispatch_pair 写两段化 finish 对：
+    assistant content = act_recap，tool content = task_summary；
+    finish_task input.result = task.outputs（不与 task_summary 混）。
+    """
+    from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
+    mem = InMemoryMemoryProvider()
+    tsc = _task_scope("t1")
+    asc = _agent_scope()
+    await mem.ingest(_ev(T.USER_PROMPT, tsc, "初始请求", 1, role="user"), _pctx())
+
+    task = _make_task(outputs="最终产出文本")
+    await _synthesize_dispatch_pair(mem, asc, task, "本段我做了 A、B", "整段：A→B→验证，已就绪", "success", _pctx())
+
+    turns = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 50, _pctx())
+    asst = [r for r in turns if r.role == "assistant"]
+    tool = [r for r in turns if r.role == "tool"]
+    assert asst and asst[0].content == "本段我做了 A、B"
+    call = asst[0].metadata["tool_calls"][0]
+    assert call["name"].endswith("finish_task")
+    # finish_task 的 input.result = task.outputs（给 user 看的最终输出，与 task_summary 分置）
+    assert call["input"]["result"] == "最终产出文本"
+    assert tool and tool[0].content == "整段：A→B→验证，已就绪"  # tool 槽 = task_summary（process report）
+    # 同 tool_call_id、同 timestamp（相邻）
+    tcid = asst[0].metadata["tool_calls"][0]["id"]
+    assert tool[0].metadata["tool_call_id"] == tcid
+    assert asst[0].timestamp == tool[0].timestamp
+
+
+def test_finish_tool_text_falls_back():
+    """_finish_tool_text 优先用 task_summary；空则退 act_recap；都空给占位（不掺 outputs）。"""
+    from ctx_weft.core.loop.steps.finalize import _finish_tool_text
+    # task_summary（process report）优先；空则退 act_recap；都空给占位（不掺 outputs——outputs 在 call 入参）
+    assert _finish_tool_text("综合 process report", "recap", "success") == "综合 process report"
+    assert _finish_tool_text("", "recap", "success") == "recap"
+    assert _finish_tool_text("", "", "success") == "(本段无更多总结)"
+    assert _finish_tool_text("", "", "fail") == "(无最终产出)"

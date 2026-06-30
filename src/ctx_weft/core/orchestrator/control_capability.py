@@ -462,18 +462,23 @@ def report_task_outcome(
 
 @control_tool(purposes=["background_observe"])
 def collect_process_report(
-    task_process_report: Annotated[
+    act_recap: Annotated[
         str,
-        "A thorough execution record: describe what was accomplished, what was modified or "
-        "produced, which tools were called and whether any failed, and — if incomplete — what remains and why. "
-        "Written to memory and read by the next actor turn, so be specific and evidence-based.",
+        "Honest recap of what the LAST act phase actually did: what was changed/produced, which tools "
+        "were called and whether any failed. First-person, faithful to the transcript, this segment only.",
     ],
+    task_summary: Annotated[
+        str,
+        "For a close (finish/normal) segment: a CONCISE process report of the WHOLE task — important steps "
+        "and lessons, incorporating any sub-task results. High-signal, not verbose. NOT the final output "
+        "(that is the actor's finish_task result). Leave empty for non-close segments.",
+    ] = "",
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Summarize the current segment's progress as a process report. Zero state write:
-    this tool never touches task.status / observer_outcome / actor_done / process_report / error."""
-    return ControlResult(content=task_process_report)
+    """Summarize the current segment. Zero state write: never touches task.status / process_report / etc.
+    Returns act_recap as content + task_summary in metadata for the close-out finish 对."""
+    return ControlResult(content=act_recap, metadata={"task_summary": task_summary})
 
 
 @control_tool(purposes=["act"])
