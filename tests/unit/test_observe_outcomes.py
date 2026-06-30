@@ -32,7 +32,7 @@ def _ctx(task: Task) -> ControlContext:
 
 def test_assessment_success() -> None:
     t = _task(outputs="done")
-    report_task_outcome(task_status="success", task_process_report="ok", ctx=_ctx(t))
+    report_task_outcome(task_status="success", act_recap="ok", ctx=_ctx(t))
     assert t.observer_outcome == "success"
     assert t.status == "FINISHED"
 
@@ -40,7 +40,7 @@ def test_assessment_success() -> None:
 def test_assessment_fail() -> None:
     t = _task(outputs="x")
     report_task_outcome(
-        task_status="fail", task_process_report="bad", task_failure_reason="root cause", ctx=_ctx(t)
+        task_status="fail", act_recap="bad", task_failure_reason="root cause", ctx=_ctx(t)
     )
     assert t.observer_outcome == "fail"
     assert t.status == "FAILED"
@@ -50,7 +50,7 @@ def test_assessment_fail() -> None:
 def test_assessment_retry() -> None:
     t = _task(outputs="partial")
     report_task_outcome(
-        task_status="retry", task_process_report="more needed", next_step_hint="do X", ctx=_ctx(t)
+        task_status="retry", act_recap="more needed", next_step_hint="do X", ctx=_ctx(t)
     )
     assert t.observer_outcome == "retry"
     assert t.status == "PENDING"
@@ -59,14 +59,14 @@ def test_assessment_retry() -> None:
 
 def test_assessment_success_without_outputs_downgrades_to_retry() -> None:
     t = _task(outputs=None)
-    report_task_outcome(task_status="success", task_process_report="claims done", ctx=_ctx(t))
+    report_task_outcome(task_status="success", act_recap="claims done", ctx=_ctx(t))
     assert t.observer_outcome == "retry"  # 护栏：无终稿 → 重试
     assert t.status == "PENDING"
 
 
 def test_assessment_invalid_defaults_to_retry() -> None:
     t = _task(outputs="x")
-    report_task_outcome(task_status="active", task_process_report="r", ctx=_ctx(t))
+    report_task_outcome(task_status="active", act_recap="r", ctx=_ctx(t))
     assert t.observer_outcome == "retry"  # 'active' 不在工具允许集
 
 
@@ -153,3 +153,17 @@ def test_task_model_has_task_summary_field():
     assert t.task_summary is None
     t.task_summary = "comprehensive"
     assert t.task_summary == "comprehensive"
+
+
+def test_report_task_outcome_writes_act_recap_and_task_summary() -> None:
+    task = _task(outputs="done")
+    ctx = _ctx(task)
+    report_task_outcome(
+        task_status="success",
+        act_recap="本轮我创建了 skill 文件并验证",
+        task_summary="整段：看模板→写 SKILL.md→写脚本→验证，已就绪",
+        ctx=ctx,
+    )
+    assert task.process_report == "本轮我创建了 skill 文件并验证"
+    assert task.task_summary == "整段：看模板→写 SKILL.md→写脚本→验证，已就绪"
+    assert task.observer_outcome == "success"

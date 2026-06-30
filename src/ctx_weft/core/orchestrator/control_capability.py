@@ -362,17 +362,24 @@ def report_task_outcome(
         str,
         "Outcome of the current task — one of 'success' | 'retry' | 'fail'. "
         "Don't over-think — once the situation is clear, call this tool promptly. "
-        "'success' if completed successfully (give a thorough task_process_report of the outcome and key steps); "
-        "'retry' if this attempt fell short but is worth another try (task_process_report describes what is missing, "
+        "'success' if completed successfully (give a thorough act_recap of the outcome and key steps); "
+        "'retry' if this attempt fell short but is worth another try (act_recap describes what is missing, "
         "next_step_hint the concrete next step); "
-        "'fail' if it cannot be completed and should NOT be retried (task_process_report/task_failure_reason explain why).",
+        "'fail' if it cannot be completed and should NOT be retried (act_recap/task_failure_reason explain why).",
     ],
-    task_process_report: Annotated[
+    act_recap: Annotated[
         str,
-        "A thorough execution record: describe what was accomplished, what was modified or "
-        "produced, which tools were called and whether any failed, and — if incomplete — what remains and why. "
-        "Written to memory and read by the next actor turn, so be specific and evidence-based.",
+        "诚实复述上一轮 act 做了什么：改了/产出了什么、调了哪些工具、是否失败。"
+        "第一人称、忠于实际执行，只管最后这一段。"
+        "Written to memory，retry 时作下一轮 Current Progress。",
     ],
+    task_summary: Annotated[
+        str,
+        "Required when task_status is 'success' or 'fail': a CONCISE process report of the WHOLE task — "
+        "the important steps taken and lessons/experience, incorporating any sub-task results. "
+        "Keep it high-signal, NOT a verbose blow-by-blow. This is NOT the final output: the final "
+        "deliverable shown to the user goes in finish_task's `result`, not here. Leave empty for 'retry'.",
+    ] = "",
     task_failure_reason: Annotated[
         str,
         "Required when task_status is 'fail'. "
@@ -411,7 +418,7 @@ def report_task_outcome(
     if task_status not in ("success", "retry", "fail"):
         task_status = "retry"
     if next_step_hint:
-        task_process_report = f"{task_process_report}\n\nNext Step Hint: {next_step_hint}"
+        act_recap = f"{act_recap}\n\nNext Step Hint: {next_step_hint}"
 
     metadata: dict[str, Any] = {}
     if task is not None:
@@ -423,9 +430,10 @@ def report_task_outcome(
                      "necessary tool calls. Once everything required is done, call the `control__finish_task` tool "
                      "with your final reply to the user as `result` to complete the task — put the reply in "
                      "`result` only, don't repeat it as plain text.")
-            task_process_report = f"{task_process_report}\n\n{_hint}" if task_process_report else _hint
+            act_recap = f"{act_recap}\n\n{_hint}" if act_recap else _hint
 
-        task.process_report = task_process_report
+        task.process_report = act_recap
+        task.task_summary = task_summary
         task.process_report_at = now_utc()
         task.observer_outcome = task_status
         if task_status == "success":
@@ -447,7 +455,7 @@ def report_task_outcome(
 
     failure_part = f" Failure reason: {task_failure_reason}" if task_status == "fail" and task_failure_reason else ""
     return ControlResult(
-        content=f"Assessment recorded: outcome={task_status}.{failure_part} {task_process_report}{review_msg}",
+        content=f"Assessment recorded: outcome={task_status}.{failure_part} {act_recap}{review_msg}",
         metadata=metadata,
     )
 

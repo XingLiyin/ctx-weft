@@ -155,7 +155,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 extra={"observe_boundary": boundary},
             )
             prompt = await ctx.assembler.assemble(request)
-            content, _ = await run_observe_react(
+            result, _ = await run_observe_react(
                 state, ctx,
                 system=prompt.system,
                 messages=list(prompt.messages),
@@ -165,6 +165,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 terminal_tool_name=BACKGROUND_PROCESS_REPORT_NAME,
                 event_types=BACKGROUND_OBSERVE_REACT_EVENTS,  # 后台 LLM 交互发独立类型，host 决定不进前端
             )
+            content = result.content if result else None
             report = content or "[Context compacted]"
             if boundary in _CLOSE_BOUNDARIES:
                 synth = pop_close_synth(state.task.id)  # sync check-and-clear（无 await）

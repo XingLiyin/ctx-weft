@@ -162,7 +162,8 @@ async def test_helper_returns_tool_content_when_control_tool_called(monkeypatch)
         terminal_tool_name="report_task_outcome",
     )
 
-    assert tool_content == "REPORT"
+    assert tool_content is not None
+    assert tool_content.content == "REPORT"
 
 
 async def test_helper_returns_none_when_no_tool_called(monkeypatch):
@@ -214,7 +215,8 @@ async def test_helper_last_text_from_final_round(monkeypatch):
         terminal_tool_name="report_task_outcome",
     )
 
-    assert tool_content == "DONE"
+    assert tool_content is not None
+    assert tool_content.content == "DONE"
     assert last_text == "final thinking"
 
 
@@ -318,6 +320,62 @@ async def test_background_event_types_emit_background_not_llm(monkeypatch):
     assert emitted_llm == [], f"background path must emit NO LLM_* events, got {emitted_llm}"
     assert EventType.BACKGROUND_OBSERVE_PROMPT_SENT in emitted_bg
     assert EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED in emitted_bg
+
+
+async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
+    """Terminal tool call returns the full ControlResult (not just content string)."""
+
+    TERMINAL = "report_task_outcome"
+
+    async def _fake_stream(ctx, state, request):
+        yield _make_token_chunk("thinking")
+        yield _make_tool_call_chunk(TERMINAL)
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+
+    class _RichGateway:
+        async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
+            return ControlResult(content="recap", metadata={"task_summary": "sum"})
+
+    state = _make_state()
+    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.core.loop.driver import LoopContext
+
+    mem = InMemoryMemoryProvider()
+    pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
+
+    class _FakeAssembler2:
+        async def assemble(self, req):
+            return SimpleNamespace(system="SYS", messages=[], tools=[])
+
+    class _FakeLLM2:
+        async def complete(self, req, stream=True):
+            return
+            yield
+
+    ctx = LoopContext(
+        assembler=_FakeAssembler2(),
+        llm=_FakeLLM2(),
+        memory=mem,
+        event_bus=_FakeEventBus(),
+        provider_ctx=pctx,
+        capability_gateway=_RichGateway(),
+    )
+
+    result, last_text = await run_observe_react(
+        state, ctx,
+        system="SYS",
+        messages=[LLMMessage(role="user", content="observe this")],
+        tools=[],
+        request_id_prefix="test",
+        max_rounds=3,
+        terminal_tool_name=TERMINAL,
+    )
+    assert result is not None
+    assert result.content == "recap"
+    assert result.metadata.get("task_summary") == "sum"
 
 
 async def test_default_event_types_emit_llm(monkeypatch):
