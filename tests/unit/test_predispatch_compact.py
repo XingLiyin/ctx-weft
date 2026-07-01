@@ -156,3 +156,24 @@ async def test_skips_when_no_context_limit():
     assert out == []
     assert mem.ingested == []
     assert mem.superseded == []
+
+
+async def test_predispatch_uses_escalating_compact(monkeypatch):
+    """端到端接线断言：门控通过后 maybe_compact_before_dispatch 委派 escalating_compact，
+    并原样透传 token_estimate + trigger="pre_dispatch"（Task 6 已接线，本用例防回归）。"""
+    from ctx_weft.core.loop.steps import compact as cm
+
+    seen = {}
+
+    async def _fake_esc(state, ctx, *, token_estimate, trigger):
+        seen["trigger"] = trigger
+        seen["est"] = token_estimate
+        return []
+
+    monkeypatch.setattr(cm, "escalating_compact", _fake_esc)
+    mem = _FakeMemory(task_count=10)
+    out = await cm.maybe_compact_before_dispatch(
+        _state(ratio=0.5), _ctx(mem), prompt_tokens=800)
+    assert seen["trigger"] == "pre_dispatch"
+    assert seen["est"] == 800
+    assert out == []
