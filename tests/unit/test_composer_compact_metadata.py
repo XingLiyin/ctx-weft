@@ -42,7 +42,7 @@ async def test_compact_system_is_act_facet_and_persona_in_trailing():
 
     last_user = [m for m in prompt.messages if m.role == "user"][-1].content
     assert "## Your Current Role\n\nCOMPACT-PERSONA" in last_user  # persona under a heading
-    assert "[Context so far]" in last_user          # compaction cue present
+    assert "act as a memory compactor" in last_user  # compaction cue present
     assert "do the thing" in last_user              # actor conversation reused
     assert prompt.tools == []
 
