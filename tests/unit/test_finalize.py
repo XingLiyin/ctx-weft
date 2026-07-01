@@ -110,6 +110,34 @@ def test_text_embedded_tool_call_is_recovered():
     assert chunks[0].tool_call.id  # non-empty generated id
 
 
+def test_minimax_text_tool_call_is_recovered():
+    # MiniMax 把工具调用写成 <minimax:tool_call> 文本 → 收尾还原成 tool_call，
+    # 且可见正文尾部（"好的\n"）补吐时不带那坨 XML。
+    text = (
+        "好的\n<minimax:tool_call>"
+        '<invoke name="delegate">'
+        '<parameter name="title">迁移</parameter>'
+        '<parameter name="task_prompt">line1\nline2</parameter>'
+        "</invoke></minimax:tool_call>"
+    )
+    chunks = build_finalize_chunks(
+        content_text=text,
+        native_tool_calls=[],
+        had_native_buffer=False,
+        saw_terminal=True,
+        usage=None,
+        finish_reason="stop",
+        emitted_visible_len=0,   # nothing streamed yet → tail flushed here
+    )
+    assert _kinds(chunks) == ["token", "tool_call", "done"]
+    assert chunks[0].text == "好的\n"          # 可见尾部补吐
+    assert "<minimax" not in chunks[0].text     # XML 未泄露进正文
+    tc = chunks[1].tool_call
+    assert tc.name == "delegate"
+    assert tc.arguments == {"title": "迁移", "task_prompt": "line1\nline2"}
+    assert tc.id                                # 生成了非空 id
+
+
 def test_inline_think_extracted_as_reasoning():
     chunks = build_finalize_chunks(
         content_text="<think>thinking</think>answer",

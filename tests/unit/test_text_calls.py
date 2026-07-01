@@ -3,8 +3,10 @@
 from ctx_weft.providers.llm.text_calls import (
     ContentGate,
     clean_visible,
+    contains_minimax_tool_call,
     contains_tool_call_tag,
     merge_content,
+    parse_minimax_tool_calls,
     parse_tool_calls_from_text,
     extract_think,
 )
@@ -136,6 +138,66 @@ def test_clean_visible_cuts_tool_call():
 
 def test_clean_visible_withholds_trailing_partial_tag():
     assert clean_visible("ab<to") == "ab"
+
+
+def test_clean_visible_cuts_minimax_tool_call():
+    # <minimax:tool_call> 也要从可见正文里扣掉，别把 XML 泄露给用户
+    assert clean_visible("答案是\n<minimax:tool_call><invoke name=\"f\"></invoke></minimax:tool_call>") == "答案是\n"
+
+
+# ── MiniMax 风格 tool call ─────────────────────────────────────────────────────
+
+_MINIMAX = """好的
+<minimax:tool_call>
+<invoke name="control__delegate_task">
+<parameter name="title">迁移规则</parameter>
+<parameter name="task_prompt">第一行
+
+第二段
+1. 步骤一
+2. 步骤二</parameter>
+<parameter name="description">迁移</parameter>
+</invoke>
+</minimax:tool_call>"""
+
+
+def test_contains_minimax_tool_call():
+    assert contains_minimax_tool_call(_MINIMAX)
+    assert not contains_minimax_tool_call("plain <tool_call>{}</tool_call>")
+
+
+def test_parse_minimax_tool_call():
+    calls = parse_minimax_tool_calls(_MINIMAX)
+    assert len(calls) == 1
+    c = calls[0]
+    assert c.name == "control__delegate_task"
+    assert c.arguments["title"] == "迁移规则"
+    assert c.arguments["description"] == "迁移"
+    # 多行参数值：内部换行保留
+    assert "第二段" in c.arguments["task_prompt"]
+    assert "\n" in c.arguments["task_prompt"]
+
+
+def test_parse_minimax_multiple_invokes():
+    text = (
+        "<minimax:tool_call>"
+        '<invoke name="a"><parameter name="x">1</parameter></invoke>'
+        '<invoke name="b"><parameter name="y">2</parameter></invoke>'
+        "</minimax:tool_call>"
+    )
+    calls = parse_minimax_tool_calls(text)
+    assert [c.name for c in calls] == ["a", "b"]
+    assert calls[0].arguments == {"x": "1"}
+    assert calls[1].arguments == {"y": "2"}
+
+
+def test_parse_minimax_unclosed_block_lenient():
+    # 流式截断：缺 </invoke> / </minimax:tool_call> 也要能解析出来
+    text = '<minimax:tool_call><invoke name="f"><parameter name="p">v</parameter>'
+    calls = parse_minimax_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "f"
+    assert calls[0].arguments == {"p": "v"}
     assert clean_visible("ab<") == "ab"
 
 
