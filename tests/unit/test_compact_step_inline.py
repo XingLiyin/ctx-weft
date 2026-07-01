@@ -113,7 +113,8 @@ async def test_compact_noop_when_nothing_foldable():
     })
     outcome = await CompactStep().execute(_state(), _ctx(mem))
     assert outcome.next_step is None
-    assert mem.applied == []
+    assert mem.ingested == []
+    assert mem.superseded == []
 
 
 async def test_summarize_for_compact_returns_llm_text():

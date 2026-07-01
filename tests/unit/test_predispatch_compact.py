@@ -97,7 +97,8 @@ async def test_disabled_when_ratio_zero():
     mem = _FakeMemory(task_count=50)  # plenty foldable, but feature off
     out = await maybe_compact_before_dispatch(_state(ratio=0.0), _ctx(mem), prompt_tokens=999)
     assert out == []
-    assert mem.applied == []
+    assert mem.ingested == []
+    assert mem.superseded == []
 
 
 async def test_skips_when_below_threshold():
@@ -105,14 +106,16 @@ async def test_skips_when_below_threshold():
     # 500 / 1000 = 0.5 < ratio 0.6
     out = await maybe_compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=500)
     assert out == []
-    assert mem.applied == []
+    assert mem.ingested == []
+    assert mem.superseded == []
 
 
 async def test_skips_when_nothing_foldable():
     mem = _FakeMemory(task_count=2)  # <= keep_last=2 → 不空跑 LLM
     out = await maybe_compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=800)
     assert out == []
-    assert mem.applied == []
+    assert mem.ingested == []
+    assert mem.superseded == []
 
 
 async def test_compacts_task_layer_once_when_over_threshold_and_foldable():
@@ -121,6 +124,7 @@ async def test_compacts_task_layer_once_when_over_threshold_and_foldable():
     # task layer collapsed once via collapse_task_layer → one ingested collapsed USER_PROMPT
     assert len(mem.ingested) == 1
     assert mem.ingested[0].metadata.get("collapsed") is True
+    assert "SUMMARY" in mem.ingested[0].content
     # 发 started + compacted，均标 pre_dispatch
     assert [e.type for e in out] == ["MemoryCompactStarted", "MemoryCompacted"]
     assert [e.payload.get("trigger") for e in out] == ["pre_dispatch", "pre_dispatch"]
@@ -143,4 +147,5 @@ async def test_skips_when_no_context_limit():
     out = await maybe_compact_before_dispatch(
         _state(ratio=0.6, context_limit=0), _ctx(mem), prompt_tokens=800)
     assert out == []
-    assert mem.applied == []
+    assert mem.ingested == []
+    assert mem.superseded == []
