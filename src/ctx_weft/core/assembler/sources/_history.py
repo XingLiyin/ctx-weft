@@ -1,7 +1,7 @@
 """Shared conversation-record → history block mapping (spec/06 §4.1).
 
-Used by RecentMemorySource (task-layer records) and AgentExperienceSource
-(agent-layer AGENT_CONVERSATION_TURN records) so a memory record renders
+Used by AgentRecallSource (task-layer body + agent-layer AGENT_CONVERSATION_TURN
+records) so a memory record renders
 identically wherever it is recalled from. Tool fidelity is keyed off role:
 assistant→tool_calls, tool→tool_call_id (matches how LLM_RESPONSE/TOOL_RESULT
 are ingested).

@@ -379,7 +379,7 @@ class DefaultComposer(Composer):
         """In-memory 路径：把最近一条 USER_PROMPT user message 包成当前消息框架（不落库）。
 
         history_pairs 是 _history_to_messages_with_sources 返回的 (msg, src, mem_type) 三元组。
-        兼容 agent_recall（AgentRecallSource）和旧 task_conversation（RecentMemorySource）来源。
+        识别当前消息只依赖 mem_type=="user_prompt"，与来源无关（兼容 agent_recall 及历史 task_conversation 标签）。
         spec（title/description）取自 task_spec block 的 metadata（无块时回退直读 task）。
         """
         target = None
