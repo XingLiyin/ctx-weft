@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps.finalize import finalize_task_memory, _descendant_task_ids, _DISPATCH_ACK
+from ctx_weft.core.loop.steps.finalize import finalize_task_memory, _descendant_task_ids, _dispatch_ack
 from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryEvent,
@@ -217,11 +217,11 @@ async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> N
                                child, "t2 out", "success", _loop_ctx(mem, _FakeTM()),
                                act_recap="t2 recap", task_summary="t2 summary")
 
-    # same-agent: static _DISPATCH_ACK written (not bubbled dispatch result with outcome)
+    # same-agent: static dispatch ack written (not bubbled dispatch result with outcome)
     results = await _dispatch_results(mem, _sc("t1", "ag1"), "oc2")
-    assert len(results) == 1, f"expected 1 _DISPATCH_ACK result; got {results}"
-    assert results[0].content == _DISPATCH_ACK, (
-        f"same-agent dispatch result must be _DISPATCH_ACK; got {results[0].content!r}"
+    assert len(results) == 1, f"expected 1 dispatch ack result; got {results}"
+    assert results[0].content == _dispatch_ack(child.title), (
+        f"same-agent dispatch result must be _dispatch_ack(title); got {results[0].content!r}"
     )
     # delegate turn KEPT (not superseded, spec 2026-06-30 §2.5)
     delegates = await _delegate_turns(mem, _sc("t1", "ag1"), "oc2")
@@ -250,10 +250,10 @@ async def test_same_agent_nonshort_child_no_bubble_supersedes_final_raw_and_orph
                                child, "t2 out", "success", _loop_ctx(mem, _FakeTM()),
                                act_recap="t2 recap", task_summary="t2 summary")
 
-    # (a) same-agent: _DISPATCH_ACK written + delegate turn KEPT (not superseded)
+    # (a) same-agent: dispatch ack written + delegate turn KEPT (not superseded)
     results = await _dispatch_results(mem, _sc("t1", "ag1"), "oc2")
-    assert len(results) == 1 and results[0].content == _DISPATCH_ACK, (
-        f"expected _DISPATCH_ACK; got {[r.content for r in results]}"
+    assert len(results) == 1 and results[0].content == _dispatch_ack(child.title), (
+        f"expected _dispatch_ack(title); got {[r.content for r in results]}"
     )
     delegates = await _delegate_turns(mem, _sc("t1", "ag1"), "oc2")
     assert len(delegates) == 1, "delegate turn must be KEPT (not superseded)"
@@ -320,10 +320,10 @@ async def test_intermediate_close_keeps_grandchild_body() -> None:
     # grandchild body kept (task-resident)
     convs = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
     assert any(r.metadata.get("task_id") == "A1" for r in convs), "grandchild body must stay"
-    # §2.5: A (same-agent) writes _DISPATCH_ACK result + keeps delegate turn (not superseded)
+    # §2.5: A (same-agent) writes dispatch ack result + keeps delegate turn (not superseded)
     results_ocA = await _dispatch_results(mem, _sc("t1", "ag1"), "ocA")
-    assert len(results_ocA) == 1 and results_ocA[0].content == _DISPATCH_ACK, (
-        f"same-agent A must write _DISPATCH_ACK; got {[r.content for r in results_ocA]}"
+    assert len(results_ocA) == 1 and results_ocA[0].content == _dispatch_ack(A.title), (
+        f"same-agent A must write _dispatch_ack(title); got {[r.content for r in results_ocA]}"
     )
     delegates_ocA = await _delegate_turns(mem, _sc("t1", "ag1"), "ocA")
     assert len(delegates_ocA) == 1, "ocA delegate turn must be KEPT (not superseded)"

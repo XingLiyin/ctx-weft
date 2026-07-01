@@ -812,6 +812,11 @@ class CtxWeftRuntime:
                 return
             agent, tmpl, initial_step, run_id = await _resolve(t, sess_id)
             _resolved_agents[agent.id] = agent
+            # 回填「真正用于执行的 agent id」到 task——非 subagent 分支 _resolve 不写它（同 agent 派发
+            # 靠 creator==assigned 判定，None 会误判为 cross）；此处对齐 subagent 分支，且经 TASK_STARTED
+            # reducer 持久化。同时记录真实启动时刻，供派发框锚定。
+            t.assigned_agent_id = agent.id
+            t.started_at = now_utc()
             await task_manager._emit(EventType.TASK_STARTED, task_id=task_id, payload={"assigned_agent_id": t.assigned_agent_id or ""})
             s, _ = await self._execute_task(
                 session=session,

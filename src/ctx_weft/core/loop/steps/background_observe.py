@@ -80,6 +80,8 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
 
     report_prefix = "[outcome=fail] " if outcome == "fail" else ""
     summary_text = task_summary if (task_summary and task_summary.strip()) else act_recap
+    # finish 对 assistant 槽 = act_recap（过程复述，≠ 答复）：答复由内联 body / blackboard 承载，
+    # 避免与之重复（spec 2026-07-01 反转契约）。
     await memory.ingest(MemoryEvent(
         type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
         content=act_recap, timestamp=ts, role="assistant",

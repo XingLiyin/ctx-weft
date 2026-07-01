@@ -57,7 +57,8 @@ _PLAN_DISPATCH_TOOLS = frozenset({
 
 # 编排/裁决型控制工具：其结果是状态信号、不入 task 对话——例如 report_task_outcome 的 HITL 回复
 # 改由 finalize 以 role=user 注入。（ask_user 的人类答复是 actor 输入，仍写 task 层。）
-# finish_task 同理：其 result 的 canonical 出口是 task.outputs，不入 task 对话。
+# finish_task 同理：反转契约后它是无参收尾标记，最终答复即助手消息正文、canonical 出口是
+# task.outputs（ActStep 收尾时合成），标记本身不入 task 对话。
 # collect_process_report 是 background observe 的终止工具：result 由 run_observe_react 取出落
 # close report 槽（→ Process Report），且 background observe 在 task close 后才跑，若入 task 对话
 # 会污染已冻结的对话且不被 supersede（泄漏进后续 task prompt）。

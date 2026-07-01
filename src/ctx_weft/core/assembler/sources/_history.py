@@ -56,6 +56,10 @@ def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "C
         "timestamp": record.timestamp.isoformat() if record.timestamp else "",
         "seq_no": record.metadata.get("seq_no", idx),
         "memory_event_id": record.id,
+        # 承载来源 task（USER_PROMPT 记录带 metadata={"task_id": task.id}，见 driver）——
+        # composer 据此把 ## Current Task/Message 框贴到「当前 task」自己的 user 回合，
+        # 而非召回历史里最后一条（同 agent 子 body 更新时会误顶 parent 的头）。
+        "task_id": record.metadata.get("task_id", ""),
     }
     # 无损重建：assistant 携 tool_calls；tool 携 tool_call_id
     if role == "assistant":

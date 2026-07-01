@@ -95,15 +95,15 @@ async def test_same_agent_child_keeps_delegate_and_writes_ack() -> None:
 
     parent_scope = _sc("p1", "ag1")
     turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    from ctx_weft.core.loop.steps.finalize import _DISPATCH_ACK
+    from ctx_weft.core.loop.steps.finalize import _dispatch_ack
     # §2.5: delegate turn KEPT (not superseded)
     delegate = [r for r in turns if r.role == "assistant"
                 and any(tc.get("id") == "oc1" for tc in (r.metadata.get("tool_calls") or []))]
     assert delegate, "§2.5: delegate turn must be KEPT (not superseded)"
-    # §2.5: static ack written, paired with oc1, content=_DISPATCH_ACK, timestamp=delegate ts
+    # §2.5: static ack written, paired with oc1, content=_dispatch_ack(title), timestamp=delegate ts
     ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
-    assert ack and ack[0].content == _DISPATCH_ACK, (
-        f"§2.5: static ack must be written with content={_DISPATCH_ACK!r}; got {[r.content for r in ack]}"
+    assert ack and ack[0].content == _dispatch_ack(child.title), (
+        f"§2.5: static ack must be written with content={_dispatch_ack(child.title)!r}; got {[r.content for r in ack]}"
     )
     assert ack[0].timestamp == delegate[0].timestamp, (
         f"§2.5: ack timestamp must equal delegate turn timestamp; "
@@ -200,7 +200,7 @@ async def test_cross_agent_child_bubble_is_conversation_turn() -> None:
 
 async def test_same_agent_keeps_delegate_and_writes_backdated_ack() -> None:
     """§2.5：同 agent close：delegate 回合保留（不 supersede）+ 配对静态 ack（timestamp = delegate 时刻）。"""
-    from ctx_weft.core.loop.steps.finalize import _close_one, _DISPATCH_ACK
+    from ctx_weft.core.loop.steps.finalize import _close_one, _dispatch_ack
 
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
@@ -232,13 +232,13 @@ async def test_same_agent_keeps_delegate_and_writes_backdated_ack() -> None:
                 and any(tc.get("id") == child.origin_tool_call_id for tc in (r.metadata.get("tool_calls") or []))]
     assert delegate, "delegate 回合不应被 supersede"
 
-    # 配对静态 result：content=_DISPATCH_ACK、tool_call_id 配对、timestamp == delegate 时刻
+    # 配对静态 result：content=_dispatch_ack(title)、tool_call_id 配对、timestamp == delegate 时刻
     ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == child.origin_tool_call_id]
-    assert ack and ack[0].content == _DISPATCH_ACK, f"expected static ack with content={_DISPATCH_ACK!r}, got {[r.content for r in ack]}"
+    assert ack and ack[0].content == _dispatch_ack(child.title), f"expected static ack with content={_dispatch_ack(child.title)!r}, got {[r.content for r in ack]}"
     assert ack[0].timestamp == delegate[0].timestamp, f"ack.timestamp={ack[0].timestamp} must equal delegate.timestamp={delegate[0].timestamp}"
 
     # stray-ack guard：no OTHER tool record carries ack content
-    assert _DISPATCH_ACK not in {
+    assert _dispatch_ack(child.title) not in {
         r.content for r in turns
         if r.metadata.get("tool_call_id") != child.origin_tool_call_id
     }, "ack content must only appear in the paired tool_call_id record"
@@ -320,6 +320,37 @@ async def test_plan_child_mints_start_task_frame_when_absent() -> None:
     ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "tcall_plan_c1"]
     assert ack, "paired result must carry the same tool_call_id"
     assert ack[0].timestamp == frame[0].timestamp, "result adjacent to its frame"
+
+
+async def test_plan_child_frame_anchors_at_started_at() -> None:
+    """时间戳锚 = task.started_at（task manager 真正启动 task 时），优先于 created_at。"""
+    from ctx_weft.core.loop.steps.finalize import _close_one, START_TASK_NAME
+
+    mem = InMemoryMemoryProvider()
+    parent_scope = _sc("p1", "ag1")
+    child_scope = _sc("c1", "ag1")
+    created = _BASE + timedelta(seconds=0)
+    started = _BASE + timedelta(seconds=5)   # 真正启动晚于创建
+
+    child = Task(id="c1", session_id="s1", status="FINISHED", tenant_id="default",
+                 assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="p1",
+                 origin_tool_call_id="tcall_plan_c1", title="向 Lily 问好",
+                 user_prompt="hi lily", created_at=created, started_at=started,
+                 settings=NormalTaskSettings())
+    state = _state(child, child_scope, LoopConfig())
+
+    await _close_one(mem, state, child, "out\n\nProcess Report: r", "success", _loop_ctx(mem),
+                     short=True, act_recap="本段做了 X", task_summary="整段总结")
+
+    turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    frame = [r for r in turns if r.role == "assistant"
+             and any(tc.get("id") == "tcall_plan_c1" and tc.get("name") == START_TASK_NAME
+                     for tc in (r.metadata.get("tool_calls") or []))]
+    assert frame, "a start_task frame must be minted for the plan child"
+    assert frame[0].timestamp == started, "frame 须锚在 started_at（task manager 真正启动时），非 created_at"
+
+    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "tcall_plan_c1"]
+    assert ack and ack[0].timestamp == started, "paired ack 须与 frame 同锚 started_at"
 
 
 async def test_cross_agent_child_no_nested_capsule_in_parent_scope() -> None:

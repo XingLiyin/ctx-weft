@@ -156,7 +156,13 @@ def control_tool(*, purposes: list[Purpose], input_schema: dict[str, Any] | None
 @control_tool(purposes=["act"])
 def delegate_task(
     title: Annotated[str, "Short imperative title for the sub-task (≤20 chars)"],
-    description: Annotated[str, "WHAT to achieve — not HOW, no tool names"] = "",
+    description: Annotated[
+        str,
+        "WHAT the sub-task must achieve — its goal/content only. No HOW, no tool names, and do NOT "
+        "restate dispatch/orchestration choices such as 'use subagent' / 'inherit memory' / which "
+        "skill (those go in the use_subagent / inherit_memory / skill_name params). This text becomes "
+        "the sub-task's own `## Current Task`, so anything off-goal will mislead it when it runs.",
+    ] = "",
     task_prompt: Annotated[str, "Detailed prompt extracted from the user request for this task"] = "",
     skill_name: Annotated[str, "Skill to assign to the task, or empty if none"] = "",
     use_subagent: Annotated[bool, "True if the task should run in a dedicated sub-agent"] = False,
@@ -214,8 +220,11 @@ def delegate_plan(
         list,
         (
             "Ordered list of task specs. Each item: "
-            "title (str), description (str, WHAT not HOW), "
-            "task_prompt (str, detailed prompt), "
+            "title (str, the sub-task's goal only — no dispatch flags), "
+            "description (str, WHAT the sub-task must achieve — its goal only; no HOW, and do NOT "
+            "restate use_subagent/inherit_memory/skill in the text: it becomes the sub-task's own "
+            "`## Current Task` and off-goal words mislead it), "
+            "task_prompt (str, detailed prompt — goal/content only, same rule as description), "
             "skill_name (str, skill to assign or empty), "
             "use_subagent (bool), subagent_template (str), "
             "inherit_memory (bool, default true), "
@@ -280,22 +289,23 @@ def delegate_plan(
 
 @control_tool(purposes=["act"])
 def finish_task(
-    result: Annotated[
+    deliverables_summary: Annotated[
         str,
-        "Your final reply to the user. `result` IS the message shown to them (it is also "
-        "handed to the observer and to whoever delegated this task). Write it directly to the "
-        "user in your usual tone, and put the WHOLE reply here only — do not also write it as "
-        "ordinary message text before or alongside this call, or the user sees it twice.",
-    ],
+        "OPTIONAL. A brief recap of the concrete deliverables of this task (e.g. the key files "
+        "changed / artifacts produced), for the observer and whoever delegated this task. This "
+        "is NOT your reply to the user — write your final reply as your normal message text in "
+        "this same turn; that message is what the user sees AND the deliverable handed off. "
+        "Leave this empty when there is nothing concrete to itemize.",
+    ] = "",
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Finish the CURRENT task and hand off to review. Your final reply to the user goes in `result` and is shown to them as your message — put it there only; do not also write it as ordinary text (or it shows twice). When done, call this directly instead of first replying in prose. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
+    """Finish the CURRENT task and hand off to review. Write your final reply to the user as your normal message text in this same turn — that message IS the reply shown to the user and the deliverable handed off; this tool just ends the task. The optional `deliverables_summary` is a brief recap of concrete artifacts for the reviewer, NOT your answer. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
     if ctx is not None and ctx.task is not None:
-        ctx.task.outputs = result
-        # actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe（区别于 delegate_task 的委派挂起）。
+        # task.outputs 由 ActStep 收尾时合成（收尾回合正文 + deliverables_summary，spec 2026-07-01）；
+        # 此处不写 outputs。actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe。
         ctx.task.actor_done = True
-    return ControlResult(content="Task result submitted.")
+    return ControlResult(content="Task finished.")
 
 
 def _collect_reviews(
@@ -430,9 +440,9 @@ def report_task_outcome(
             task_status = "retry"
             _hint = ("The previous round ended without a final output. Review the recap above "
                      "and judge whether this task still needs more work. If it does, continue with the "
-                     "necessary tool calls. Once everything required is done, call the `control__finish_task` tool "
-                     "with your final reply to the user as `result` to complete the task — put the reply in "
-                     "`result` only, don't repeat it as plain text.")
+                     "necessary tool calls. Once everything required is done, write your final reply to "
+                     "the user as your normal message text and then call the `control__finish_task` tool "
+                     "to complete the task — your message text is the reply and the deliverable.")
             act_recap = f"{act_recap}\n\n{_hint}" if act_recap else _hint
 
         task.process_report = act_recap

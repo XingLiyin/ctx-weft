@@ -76,11 +76,26 @@ def build_finalize_chunks(
     if native_tool_calls:
         out.extend(LLMChunk(kind="tool_call", tool_call=tc) for tc in native_tool_calls)
     elif contains_tool_call_tag(content_text):
-        for p in parse_tool_calls_from_text(content_text).tool_calls:
-            out.append(LLMChunk(
+        # D2：正文里出现了 tool call 标签,但一个都没解析出来（截断的未闭合标签 /
+        # 畸形 JSON/XML / 缺 name）。若放行,上层会把这轮当「纯文本让位用户」误暂停,
+        # 工具动作被静默吞掉、UI 卡在 llm_pending。标 outage=True 走退避自愈：进程内
+        # 同 prompt 退避重抽（格式抖动/流截断通常一两次即恢复）,预算耗尽再转 LLMOutageError
+        # → session 可恢复 INTERRUPTED（靠 /resume 重驱动）,而非整任务重跑 3 次后硬 FAILED。
+        parsed = parse_tool_calls_from_text(content_text).tool_calls
+        if not parsed:
+            raise LLMCallError(
+                "LLM emitted a tool call tag that parsed to zero tool calls "
+                "(truncated or malformed text tool call)",
+                retriable=True,
+                outage=True,
+            )
+        out.extend(
+            LLMChunk(
                 kind="tool_call",
                 tool_call=ToolCall(id=generate_id("call"), name=p.name, arguments=p.arguments),
-            ))
+            )
+            for p in parsed
+        )
 
     out.append(LLMChunk(kind="done", finish_reason=finish_reason or "stop"))
     return out

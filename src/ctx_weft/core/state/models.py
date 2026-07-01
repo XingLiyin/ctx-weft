@@ -215,6 +215,9 @@ class Task:
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # task manager 真正启动本 task（本 attempt）的时刻。派发框（start_task/dispatch 对）以此为锚，
+    # 排在子 body 之前、反映真实启动顺序（避免 created_at 的兄弟碰撞/乱序）。每次 run 重置。
+    started_at: datetime | None = None
     finished_at: datetime | None = None
 
 

@@ -307,19 +307,14 @@ class DefaultComposer(Composer):
             history_blocks = [*history_blocks, progress_as_history]
 
         history_pairs = self._history_to_messages_with_sources(history_blocks)
-        messages: list[LLMMessage] = [m for m, _src, _mtype in history_pairs]
-        # 当前 task 的 user 回合（directive 的落点）：history 里**最后**一条 USER_PROMPT 来源的
-        # user message（task_conversation / agent_recall 两种 source 均可能承载）。
-        # task-resident 胶囊下，先前已结束 task 的 raw body（含其 USER_PROMPT）也会经 agent_recall
-        # 召回进 history，故同时存在多条 user_prompt；当前 task 的永远是最近一条——取末条而非首条，
-        # 与 _frame_current_message（同样取末条作 "## Current Message"）保持一致。
-        # 找不到（fresh task）则留到下方追加的当前任务上下文 user message。
-        current_task_user_idx = None
-        for i, (m, src, mtype) in enumerate(history_pairs):
-            if m.role == "user" and mtype == "user_prompt":
-                current_task_user_idx = i
-
+        messages: list[LLMMessage] = [m for m, _src, _mtype, _tid in history_pairs]
         task = request.task
+        # 当前 task 的 user 回合（directive 的落点 + ## Current Message 框的落点）：定位到 task_id ==
+        # 当前 task 的那条 USER_PROMPT。task-resident 胶囊下，先前/并行 task 的 raw body（含其
+        # USER_PROMPT）也经 agent_recall 召回进 history，故同时存在多条 user_prompt；不能简单取末条
+        # （parent resume 后同 agent 子 body 的 user_prompt 更新，会误顶 parent 头）。task_id 匹配不到
+        # （fresh task / 旧数据无 task_id）时回退末条 user_prompt。
+        current_task_user_idx = self._current_task_user_index(history_pairs, getattr(task, "id", ""))
         spec_title, spec_desc, spec_prompt = self._task_spec_fields(blocks, task)
         parts: list[str] = []
 
@@ -375,17 +370,30 @@ class DefaultComposer(Composer):
         merged = self._append_to_last_user(merged, capabilities_text)
         return merged
 
-    def _frame_current_message(self, messages, history_pairs, task, blocks=None) -> None:
-        """In-memory 路径：把最近一条 USER_PROMPT user message 包成当前消息框架（不落库）。
+    @staticmethod
+    def _current_task_user_index(history_pairs, task_id) -> int | None:
+        """定位「当前 task」的 user_prompt 回合下标：优先 task_id 精确匹配，回退最后一条 user_prompt。
 
-        history_pairs 是 _history_to_messages_with_sources 返回的 (msg, src, mem_type) 三元组。
-        识别当前消息只依赖 mem_type=="user_prompt"，与来源无关（兼容 agent_recall 及历史 task_conversation 标签）。
+        history_pairs 是 _history_to_messages_with_sources 的 (msg, src, mem_type, task_id) 四元组。
+        parent resume 后召回里存在多条 user_prompt（parent 自己 + 更新的同 agent 子 body）——按 task_id
+        精确贴到当前 task，避免子 body 顶着 parent 的 ## Current Task 头；task_id 缺失（旧数据）时回退末条。
+        """
+        match = last = None
+        for i, (m, _src, mtype, tid) in enumerate(history_pairs):
+            if m.role == "user" and mtype == "user_prompt":
+                last = i
+                if task_id and tid == task_id:
+                    match = i
+        return match if match is not None else last
+
+    def _frame_current_message(self, messages, history_pairs, task, blocks=None) -> None:
+        """In-memory 路径：把「当前 task」的 USER_PROMPT user message 包成当前消息框架（不落库）。
+
+        history_pairs 是 _history_to_messages_with_sources 返回的 (msg, src, mem_type, task_id) 四元组。
+        当前消息按 task_id == task.id 定位（回退末条 user_prompt）——兼容 agent_recall 及历史 task_conversation 标签。
         spec（title/description）取自 task_spec block 的 metadata（无块时回退直读 task）。
         """
-        target = None
-        for i, (m, src, mtype) in enumerate(history_pairs):
-            if m.role == "user" and mtype == "user_prompt":
-                target = i
+        target = self._current_task_user_index(history_pairs, getattr(task, "id", ""))
         if target is None:
             return
         raw = content_to_text(messages[target].content)
@@ -645,25 +653,28 @@ class DefaultComposer(Composer):
 
         跨层（task_conversation + agent_experience）按 timestamp 正序归并，seq_no 作 tiebreak。
         """
-        return [m for m, _src, _mtype in self._history_to_messages_with_sources(history_blocks)]
+        return [m for m, _src, _mtype, _tid in self._history_to_messages_with_sources(history_blocks)]
 
     def _history_to_messages_with_sources(
         self, history_blocks: list["ContextBlock"]
-    ) -> list[tuple[LLMMessage, str, str]]:
-        """同 _history_to_messages，但每条 message 附带来源 block.source 和 memory event type。
+    ) -> list[tuple[LLMMessage, str, str, str]]:
+        """同 _history_to_messages，但每条 message 附带来源 block.source、memory event type、task_id。
 
-        返回 (LLMMessage, source, mem_type) 三元组。
+        返回 (LLMMessage, source, mem_type, task_id) 四元组。
         - source: 来源标识（"agent_recall" / "task_conversation" / "agent_experience" 等）
         - mem_type: MemoryEventType str（如 "user_prompt" / "agent_conversation_turn"）；
           无 type 的合成 block（如 capabilities / progress）传空字符串。
+        - task_id: 记录所属 task（USER_PROMPT 记录带；其余可空）。用于把 ## Current Message 框架
+          精确定位到「当前 task（request.task.id）」自己的 user_prompt 回合——而非召回历史里最后
+          一条 user_prompt（parent resume 后，同 agent 子 body 的 user_prompt 更新，会误顶 parent 头）。
         用于区分「当前 task 自有对话」（USER_PROMPT）与跨 task 的 agent_experience 回合——
-        directive 注入和 ## Current Message 框架需定位到当前 task 的首条 user_prompt 回合。
+        directive 注入和 ## Current Message 框架需定位到当前 task 的 user_prompt 回合。
         """
         sorted_blocks = sorted(
             history_blocks,
             key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)),
         )
-        out: list[tuple[LLMMessage, str, str]] = []
+        out: list[tuple[LLMMessage, str, str, str]] = []
         for b in sorted_blocks:
             role = b.metadata.get("role", "user")
             content = content_to_text(b.content)
@@ -688,7 +699,7 @@ class DefaultComposer(Composer):
             else:
                 msg = LLMMessage(role="user", content=content)
             mem_type = str(b.metadata.get("type", ""))
-            out.append((msg, b.source, mem_type))
+            out.append((msg, b.source, mem_type, str(b.metadata.get("task_id", ""))))
         return out
 
     # ── Observer ──────────────────────────────────────────────────────────────

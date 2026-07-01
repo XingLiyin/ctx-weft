@@ -115,8 +115,9 @@ def _loop_ctx(mem: InMemoryMemoryProvider, tm=None):
 
 async def test_A1_single_segment_finish() -> None:
     """情况 1（task-resident）: task 层原始 UP + LLM/TOOL 处理（无段摘要），close 后
-    agent 层 = 仅 finish 对（assistant finish_task(result=outputs) + tool Process Report，2 条），
+    agent 层 = 仅 finish 对（assistant act_recap + finish_task() 标记 + tool Process Report，2 条），
     **不镜像 body**；task 层 body（UP/LLM/TOOL）原样留、未被 supersede。
+    反转契约（spec 2026-07-01）：finish_task 无参标记（答复由内联 body / blackboard 承载）。
     """
     mem = InMemoryMemoryProvider()
     tsc = _task_scope("t1")
@@ -147,8 +148,9 @@ async def test_A1_single_segment_finish() -> None:
     assert len(tcs) == 1 and tcs[0]["name"].endswith("finish_task"), (
         f"finish assistant must have finish_task tool_call, got tool_calls={tcs}"
     )
-    assert tcs[0]["input"]["result"] == "已切到 JWT：三处改完，8 测试全过", (
-        f"finish result must equal task.outputs; got {tcs[0]['input']['result']!r}"
+    # 反转契约：finish_task 无参标记（input={}）；答复由内联 body / blackboard 承载，不在 finish 对重复
+    assert tcs[0]["input"] == {}, (
+        f"finish_task must be a no-arg marker (input={{}}); got {tcs[0]['input']!r}"
     )
     assert "Process Report:" in finish_tool.content, (
         f"finish tool must contain 'Process Report:'; got {finish_tool.content!r}"
@@ -349,8 +351,8 @@ async def test_A4_edit_interrupt_adjacent_anchors() -> None:
 
 async def test_A6_fail_outcome() -> None:
     """情况 6: outcome=fail，task.outputs 为空。
-    断言 finish 对 = [assistant finish_task(result="(无最终产出)")][tool "[outcome=fail] Process Report: …"]。
-    tool_call 配对不悬挂。
+    断言 finish 对 = [assistant act_recap + finish_task()][tool "[outcome=fail] Process Report: …"]。
+    反转契约：finish_task 无参标记；tool_call 配对不悬挂。
     """
     mem = InMemoryMemoryProvider()
     tsc = _task_scope("t1")
@@ -377,12 +379,12 @@ async def test_A6_fail_outcome() -> None:
     assert finish_asst.role == "assistant", f"finish pair[0] must be assistant, got {finish_asst.role}"
     assert finish_tool.role == "tool", f"finish pair[1] must be tool, got {finish_tool.role}"
 
-    # finish tool_call: result = "(无最终产出)"
+    # 反转契约：finish_task 无参标记（答复不在 finish 对；tool 槽承载 [outcome=fail] 过程报告）
     tcs = finish_asst.metadata.get("tool_calls", [])
     assert len(tcs) == 1, f"finish assistant must have exactly 1 tool_call; got {tcs}"
     assert tcs[0]["name"].endswith("finish_task"), f"tool name must end with finish_task; got {tcs[0]['name']}"
-    assert tcs[0]["input"]["result"] == "(无最终产出)", (
-        f"fail task with no outputs must use '(无最终产出)' placeholder; got {tcs[0]['input']['result']!r}"
+    assert tcs[0]["input"] == {}, (
+        f"finish_task must be a no-arg marker (input={{}}); got {tcs[0]['input']!r}"
     )
 
     # tool content: "[outcome=fail] Process Report: ..."
@@ -527,13 +529,19 @@ async def test_H3_recursive_nesting_grandchild() -> None:
     )
 
     # 每层 finish 对各 2 条（assistant finish_task + tool Process Report），无 body 镜像
-    # §2.5: same-agent dispatch acks (content=_DISPATCH_ACK) 排除后仅剩 finish 对
+    # §2.5: same-agent dispatch acks（配对 start_task 框的 tool 回合）排除后仅剩 finish 对
     # Task 2: also exclude minted start_task frames (dispatch infrastructure, not finish pairs)
-    from ctx_weft.core.loop.steps.finalize import _DISPATCH_ACK, START_TASK_NAME
+    from ctx_weft.core.loop.steps.finalize import START_TASK_NAME
+    start_task_tcids = {
+        tc.get("id")
+        for r in all_caps if r.role == "assistant"
+        for tc in (r.metadata.get("tool_calls") or [])
+        if tc.get("name") == START_TASK_NAME
+    }
     for origin in (child_id, gc_id):
         layer_caps = [r for r in all_caps if r.metadata.get("origin_task_id") == origin]
         finish_pair = [r for r in layer_caps
-                       if not (r.role == "tool" and r.content == _DISPATCH_ACK)
+                       if not (r.role == "tool" and r.metadata.get("tool_call_id") in start_task_tcids)
                        and not (r.role == "assistant"
                                 and any(tc.get("name") == START_TASK_NAME
                                         for tc in (r.metadata.get("tool_calls") or [])))]
@@ -726,14 +734,14 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
     )
 
     # §2.5：delegate 回合保留 + 配对静态 ack
-    from ctx_weft.core.loop.steps.finalize import _DISPATCH_ACK
+    from ctx_weft.core.loop.steps.finalize import _dispatch_ack
     parent_caps = await mem.recall_recent(parent_agent_scope, [T.AGENT_CONVERSATION_TURN], 200, _pctx())
     delegate = [r for r in parent_caps if r.role == "assistant"
                 and any(tc.get("id") == tc_short for tc in (r.metadata.get("tool_calls") or []))]
     assert delegate, "§2.5: delegate turn must be KEPT (not superseded)"
     ack = [r for r in parent_caps if r.role == "tool" and r.metadata.get("tool_call_id") == tc_short]
-    assert ack and ack[0].content == _DISPATCH_ACK, (
-        f"§2.5: static ack must be written with content={_DISPATCH_ACK!r}; got {[r.content for r in ack]}"
+    assert ack and ack[0].content == _dispatch_ack(child_task.title), (
+        f"§2.5: static ack must be written with content={_dispatch_ack(child_task.title)!r}; got {[r.content for r in ack]}"
     )
     assert ack[0].timestamp == delegate[0].timestamp, (
         f"§2.5: ack.timestamp must equal delegate.timestamp; ack={ack[0].timestamp}, delegate={delegate[0].timestamp}"

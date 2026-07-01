@@ -77,7 +77,7 @@ async def test_synthesize_writes_only_finish_pair_no_body_mirror():
     assert roles == ["assistant", "tool"], f"task-resident: only finish pair expected; got roles={roles}"
     assert all(r.type == T.AGENT_CONVERSATION_TURN for r in turns)
     assert turns[-2].metadata.get("tool_calls", [{}])[0].get("name", "").endswith("finish_task")
-    # 新形态：assistant.content == act_recap，tool.content == task_summary（无 "Process Report:" 前缀）
+    # 反转契约：finish 对 assistant.content = act_recap（过程复述，≠ 答复）；tool.content = task_summary
     assert turns[-2].content == "PDF转换执行过程：成功转换了文件"
     assert turns[-1].content == "PDF成功完成转换"
     assert all(r.metadata.get("origin_task_id") == "t1" for r in turns)
@@ -103,14 +103,15 @@ async def test_no_task_layer_body_still_writes_finish_pair():
     assert not any(r.role == "user" for r in turns)
 
 
-async def test_finish_pair_result_and_report():
-    """finish 对：assistant.tool_calls[0].input.result = outputs；tool content = Process Report。"""
+async def test_finish_pair_marker_and_report():
+    """finish 对（反转契约）：assistant.content = act_recap（过程复述，≠ 答复）、finish_task 无参标记；
+    tool content = task_summary（过程报告）。答复由内联 body / blackboard 承载，不在 finish 对。"""
     mem = InMemoryMemoryProvider()
     tsc = _task_sc()
     asc = _agent_sc()
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "帮我转", 0, role="user"), _ctx())
     task = _task()
-    task.outputs = "## PDF 已完成"  # finish result 取自 task.outputs
+    task.outputs = "## PDF 已完成"  # 答复走 blackboard / 内联 body，不进 finish 对
 
     await _synthesize_dispatch_pair(mem, asc, task, "PDF转换执行过程摘要", "成功转换", "success", _ctx())
 
@@ -118,8 +119,8 @@ async def test_finish_pair_result_and_report():
     assert [r.role for r in turns] == ["assistant", "tool"]
     tcs = turns[-2].metadata.get("tool_calls", [])
     assert len(tcs) == 1 and tcs[0]["name"].endswith("finish_task")
-    assert tcs[0]["input"]["result"] == "## PDF 已完成"   # 从 task.outputs 取，不变
-    # 新形态：assistant.content == act_recap，tool.content == task_summary（无前缀）
+    assert tcs[0]["input"] == {}   # finish_task 无参收尾标记
+    # 反转契约：assistant.content = act_recap（过程复述），tool.content = task_summary
     assert turns[-2].content == "PDF转换执行过程摘要"
     assert turns[-1].content == "成功转换"
     # tool_call 配对

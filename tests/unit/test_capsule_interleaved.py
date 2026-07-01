@@ -16,7 +16,7 @@ import pytest
 
 from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
-from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, _DISPATCH_ACK
+from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, _dispatch_ack
 from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -92,7 +92,9 @@ async def test_synthesize_writes_only_finish_pair():
     tool_calls = caps[-2].metadata.get("tool_calls", [])
     assert len(tool_calls) == 1
     assert tool_calls[0]["name"].endswith("finish_task")
-    assert tool_calls[0]["input"]["result"] == "最终答复"
+    # finish 对 assistant 槽 = act_recap（此处 4th 参传入 "最终答复"）；finish_task 无参标记
+    assert caps[-2].content == "最终答复"
+    assert tool_calls[0]["input"] == {}
     assert caps[-1].role == "tool"
     assert caps[-1].content.startswith("Process Report:")
     assert all(c.metadata.get("origin_task_id") == "t1" for c in caps)
@@ -174,27 +176,17 @@ async def test_no_task_records_still_writes_finish_pair():
     assert caps[-1].role == "tool"
 
 
-# ── 回归：dict-list outputs 须正确写入 finish result（不得为空）───────────────
+# ── 回归：dict-list outputs 须正确提取进 blackboard mem_content（不得为空）─────────
 
-async def test_finish_result_dict_list_outputs():
-    """回归：task.outputs=[{"type":"text","text":...}] 时，finish tool_call input["result"]
-    须等于文本内容，不能为空（旧 content_to_text 返回 "" 的 bug）。"""
-    mem = InMemoryMemoryProvider()
-    asc = _agent_scope()
-    task = _task()
-    task.outputs = [{"type": "text", "text": "结构化答复"}]
-
-    await _synthesize_dispatch_pair(
-        mem, asc, task, "结构化答复\n\nProcess Report: rpt", "", "success", _ctx()
-    )
-
-    caps = await _caps(mem, asc)
-    finish_assistant = caps[-2]
-    tool_calls = finish_assistant.metadata.get("tool_calls", [])
-    assert len(tool_calls) == 1
-    result = tool_calls[0]["input"]["result"]
-    assert result == "结构化答复", (
-        f"finish result must be '结构化答复' but got {result!r}; "
+async def test_dict_list_outputs_extracted_in_memory_content():
+    """回归：task.outputs=[{"type":"text","text":...}] 时，_build_memory_content 须提取文本
+    （blackboard 汇报给 parent 的内容），不能为空（旧 content_to_text 返回 "" 的 bug）。
+    反转契约后答复不再进 finish 对，改由 blackboard mem_content / 内联 body 承载。"""
+    from ctx_weft.core.loop.steps.finalize import _build_memory_content
+    outputs = [{"type": "text", "text": "结构化答复"}]
+    mc = _build_memory_content(outputs, "过程报告")
+    assert mc.startswith("结构化答复"), (
+        f"dict-list outputs must extract text into mem_content; got {mc!r}; "
         "old content_to_text bug would yield ''"
     )
 
@@ -280,10 +272,10 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
     await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=c_tsc, content="doing child work",
                                  timestamp=_ts(5), role="assistant"), pctx)
 
-    # T=3 (back-dated): _DISPATCH_ACK tool result, same timestamp as delegate → strictly adjacent
+    # T=3 (back-dated): dispatch ack tool result, same timestamp as delegate → strictly adjacent
     await mem.ingest(MemoryEvent(
         type=T.AGENT_CONVERSATION_TURN, scope=asc,
-        content=_DISPATCH_ACK, timestamp=_ts(3), role="tool",
+        content=_dispatch_ack("child task"), timestamp=_ts(3), role="tool",
         metadata={
             "origin_task_id": "P",
             "tool_call_id": origin_tcid,
@@ -315,7 +307,7 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
     req = SimpleNamespace(scope=asc)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     triples = DefaultComposer()._history_to_messages_with_sources(blocks)
-    messages = [m for m, _src, _mt in triples]
+    messages = [m for m, *_ in triples]
 
     # ── Helper: every tool message must immediately follow an assistant with matching tool_call ──
     def _assert_tool_follows_call(msgs):
@@ -337,10 +329,10 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
     )
     ack_idx = delegate_idx + 1
     assert messages[ack_idx].role == "tool", (
-        f"expected tool (_DISPATCH_ACK) at {ack_idx}, got role={messages[ack_idx].role!r}"
+        f"expected tool (dispatch ack) at {ack_idx}, got role={messages[ack_idx].role!r}"
     )
-    assert messages[ack_idx].content == _DISPATCH_ACK, (
-        f"expected _DISPATCH_ACK after delegate, got {messages[ack_idx].content!r}"
+    assert messages[ack_idx].content == _dispatch_ack("child task"), (
+        f"expected dispatch ack after delegate, got {messages[ack_idx].content!r}"
     )
     assert messages[ack_idx].tool_call_id == origin_tcid
 

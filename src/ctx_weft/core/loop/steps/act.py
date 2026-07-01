@@ -128,12 +128,18 @@ class ActStep(Step):
         # task.status == "SUSPENDED" 表示本 task 在等子任务，路由到 SuspendStep
         next_step = "suspend" if state.task.status == "SUSPENDED" else "observe"
 
-        # ── task.outputs：把 actor 最终文本写回（对齐 miniAgents _run_actor）──
-        # exit_reason == "normal" 时，最后一轮的文本即任务输出
-        if exit_reason == "normal" and transcript:
-            last_text = transcript[-1].assistant_text
-            if last_text:
-                state.task.outputs = last_text
+        # ── task.outputs：收尾时合成最终交付物（spec 2026-07-01 反转契约）──
+        # 收尾路径 = 纯文本收尾(normal) 或 finish_task 收尾(actor_done 且未挂起)；答复即消息正文，
+        # finish_task 的 deliverables_summary 为可选产出小结。max_turns / context_limit /
+        # delegate-suspend 不在此列（不产最终输出，维持现状）。
+        if (
+            exit_reason in ("normal", "actor_done")
+            and state.task.status != "SUSPENDED"
+            and transcript
+        ):
+            outputs = _compose_final_outputs(transcript)
+            if outputs:
+                state.task.outputs = outputs
 
         return StepOutcome(
             next_step=next_step,
@@ -142,6 +148,32 @@ class ActStep(Step):
                 "act_exit_reason": exit_reason,
             },
         )
+
+
+def _compose_final_outputs(transcript: list[TurnRecord]) -> str:
+    """合成收尾交付物 = 收尾回合正文 + finish_task 的 deliverables_summary（spec 2026-07-01）。
+
+    body = 收尾回合(transcript[-1])正文；空则回溯本段最近一段非空 assistant_text（兼容模型把
+    答复写在上一回合、收尾回合只调 finish_task 的情况）。summary = 收尾回合 finish_task 调用的
+    deliverables_summary（可空）。两段按存在情况拼接；全空返回 "" → 交给 observer 护栏。
+    """
+    last = transcript[-1]
+    body = (last.assistant_text or "").strip()
+    if not body:
+        body = next(
+            (t.assistant_text.strip() for t in reversed(transcript)
+             if (t.assistant_text or "").strip()),
+            "",
+        )
+    summary = ""
+    for tc in last.tool_calls:
+        if tc.name == FINISH_TASK_NAME:
+            val = (tc.arguments or {}).get("deliverables_summary", "")
+            summary = val.strip() if isinstance(val, str) else ""
+            break
+    if body and summary:
+        return f"{body}\n\n{summary}"
+    return body or summary
 
 
 @dataclass
@@ -644,10 +676,12 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
         parts.append("")
 
     finish_core = (
-        f"When you're done, finish the task by calling the `{FINISH_TASK_NAME}` tool with your "
-        "final reply to the user as `result` (in your usual tone) — `result` is shown to the "
-        "user as your message. Don't write that reply as ordinary text first and then call the "
-        "tool; put it only in `result`, or the user will see it twice."
+        "When your work is done, write your final reply to the user as your normal message "
+        f"text, then call the `{FINISH_TASK_NAME}` tool to end the task. Your message text is "
+        "the reply the user sees and the deliverable handed to whoever delegated this task — "
+        "write it as your message, not inside the tool. The tool takes an optional "
+        "`deliverables_summary` (a brief recap of concrete artifacts, e.g. key files changed, "
+        "for the reviewer) — that is NOT your answer; leave it empty if there is nothing to itemize."
     )
     if task.interaction_mode == "interactive":
         parts.append(

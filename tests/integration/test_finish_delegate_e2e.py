@@ -153,6 +153,16 @@ async def test_finish_plus_delegate_same_batch_e2e():
         f"detached follow-up must be top-level (no parent), got parent={child.parent_task_id!r}"
     )
 
+    # The non-subagent task must record its real execution agent id at start (run_task),
+    # so same/cross-agent classification compares creator==assigned instead of creator==None.
+    assert child.assigned_agent_id, (
+        "non-subagent task must get its execution agent id recorded at start"
+    )
+    assert child.assigned_agent_id == child.creator_agent_id, (
+        f"non-subagent runs in creator's agent → same-agent; got "
+        f"assigned={child.assigned_agent_id!r} creator={child.creator_agent_id!r}"
+    )
+
     # finish WON: the root must never have been suspended by the delegate.
     suspended = [e for e in seen if getattr(e, "type", None) == EventType.TASK_SUSPENDED]
     assert not suspended, (

@@ -123,7 +123,7 @@ async def _compose_messages(mem, agent_scope):
     req = SimpleNamespace(scope=agent_scope)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     triples = DefaultComposer()._history_to_messages_with_sources(blocks)
-    return [m for m, _src, _mt in triples]
+    return [m for m, *_ in triples]
 
 
 def _make_task(task_id, agent_id, *, parent_task_id=None, creator_agent_id=None,

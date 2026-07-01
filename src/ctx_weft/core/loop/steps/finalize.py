@@ -35,7 +35,9 @@ _FINAL_RAW_TYPES = [
 ]
 
 # 同 agent 派发：派发对 tool 结果的静态文案（不含任何子任务结果，永不回填，spec 2026-06-30 §2.5）。
-_DISPATCH_ACK = "任务派发成功，以下是执行记录："
+# 只写「任务已开始」的套话——子真实产出由内联胶囊 body + 嵌套 finish 对承载。
+def _dispatch_ack(title: str) -> str:
+    return f"Task '{title}' started."
 
 # 派发框的叙事工具名（仅出现在重建历史的 tool_calls 里，非可调用能力）。
 START_TASK_NAME = qualify("control:start_task")
@@ -59,7 +61,9 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
     )
     if frame is not None:
         return frame.timestamp
-    ts = task.created_at or now_utc()
+    # 锚在 task manager 真正启动 task 的时刻（started_at）——反映真实启动顺序、排在子 body 之前；
+    # 回退 created_at（历史/无 started_at 时）再回退 now。
+    ts = task.started_at or task.created_at or now_utc()
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
@@ -199,7 +203,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             await memory.ingest(
                 MemoryEvent(
                     type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
-                    content=_DISPATCH_ACK, timestamp=frame_ts, role="tool",
+                    content=_dispatch_ack(task.title), timestamp=frame_ts, role="tool",
                     metadata={"origin_task_id": task.parent_task_id,
                               "tool_call_id": task.origin_tool_call_id},
                 ),
@@ -235,11 +239,11 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     )
     base = now_utc()
     tool_call_id = generate_id("tcall")
-    outputs_text = _output_text(task.outputs)   # 进 finish_task 的 input.result（给 user 看）
-    if not outputs_text and outcome == "fail":
-        outputs_text = "(无最终产出)"
+    # 反转契约（spec 2026-07-01）：答复正文由「内联的 task 层 body / blackboard mem_content」承载，
+    # 故 finish 对的 assistant 槽用 act_recap（过程复述，≠ 答复），避免与内联 body 的答复重复；
+    # finish_task 退化为无参收尾标记（不再把答复塞进 input.result）。tool 槽 = task_summary（process report）。
     report_prefix = "[outcome=fail] " if outcome == "fail" else ""
-    summary_text = _finish_tool_text(task_summary, act_recap, outcome)   # tool 槽 = process report
+    summary_text = _finish_tool_text(task_summary, act_recap, outcome)
 
     await memory.ingest(
         MemoryEvent(
@@ -248,7 +252,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
             metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
                       "tool_calls": [{"id": tool_call_id,
                                       "name": qualify("control:finish_task"),
-                                      "input": {"result": outputs_text}}]},
+                                      "input": {}}]},
         ),
         provider_ctx,
     )
