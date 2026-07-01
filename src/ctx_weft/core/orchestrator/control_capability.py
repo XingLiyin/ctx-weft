@@ -495,12 +495,15 @@ def collect_process_report(
 
 @control_tool(purposes=["recognize_intent"])
 def update_task_metadata(
-    title: Annotated[str, "Task title: ≤20 chars, start with a verb, summarize the core goal."],
-    description: Annotated[str, "Task description: ≤80 chars, state the outcome to achieve."],
+    title: Annotated[str, "Task title (REQUIRED, must be non-empty): ≤20 chars, start with a verb, "
+                          "summarize the core goal. Never pass an empty string — make a best effort even "
+                          "if the instruction is short or vague."],
+    description: Annotated[str, "Task description (REQUIRED, must be non-empty): ≤80 chars, state the "
+                               "outcome to achieve. Never pass an empty string."],
     session_goal: Annotated[
         str,
-        "Overall session goal: ≤60 chars. Set on the first fill or when the direction "
-        "changes; otherwise leave empty.",
+        "Overall session goal: ≤60 chars. The only optional field. Set it on the first fill or when "
+        "the direction changes; leave empty ONLY to keep the existing goal.",
     ] = "",
     *,
     ctx: ControlContext = None,

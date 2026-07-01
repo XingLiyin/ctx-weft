@@ -100,9 +100,10 @@ _AGENT_COMPACTION_INSTRUCTION = (
 )
 
 _RECOGNIZE_INTENT_INSTRUCTION = (
-    "Now set this task's metadata: call `control__update_task_metadata` exactly once with a concise "
-    "title and description (and the session goal if the direction is now clear), then stop. "
-    "Call no other tools."
+    "Now set this task's metadata: call `control__update_task_metadata` exactly once. Both `title` and "
+    "`description` are REQUIRED and must be non-empty — always provide a best-effort value even if the "
+    "instruction is short or vague; never pass empty strings. Add `session_goal` only if the direction "
+    "is now clear (it is the only optional field). Then stop and call no other tools."
 )
 
 _BACKGROUND_BOUNDARY_DESC = {
