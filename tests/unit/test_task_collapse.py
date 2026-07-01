@@ -120,3 +120,26 @@ async def test_compact_scope_task_uses_collapse_keep_last(monkeypatch):
     assert calls == ["task"]
     assert kept_arg["keep_last"] == 2
     assert any(e.payload.get("source") == "collapse" for e in events)
+
+
+async def test_collapsed_user_prompt_gets_current_task_frame():
+    from ctx_weft.core.assembler.assembler import ContextBlock
+    from ctx_weft.core.assembler.composer import DefaultComposer
+    from ctx_weft.core.utils import content_to_text
+
+    collapsed = f"原始请求：做 X{COLLAPSE_DELIM}已完成 step1/step2"
+    blk = ContextBlock(id="u", source="agent_recall", kind="history", target="messages",
+                       content=collapsed, priority=3, token_estimate=1,
+                       metadata={"role": "user", "type": "user_prompt", "timestamp": "1",
+                                 "task_id": "t1"})
+    task = SimpleNamespace(id="t1", title="任务标题", description="", user_prompt="做 X",
+                           user_prompt_in_memory=True, process_report=None,
+                           process_report_at=None, outputs=None)
+    req = SimpleNamespace(task=task, purpose="act")
+
+    msgs = DefaultComposer()._build_actor_messages([blk], req)
+    framed = content_to_text(msgs[-1].content) if msgs else ""
+    joined = "\n".join(content_to_text(m.content) for m in msgs)
+    assert "## Current Task" in joined and "任务标题" in joined
+    assert "原始请求：做 X" in joined          # 原始节
+    assert "已完成 step1/step2" in joined      # 摘要节
