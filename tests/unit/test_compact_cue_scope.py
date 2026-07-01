@@ -53,3 +53,30 @@ async def test_default_scope_is_task():
     text = await _last_user(None)
     assert _COMPACTION_INSTRUCTION in text
     assert _AGENT_COMPACTION_INSTRUCTION not in text
+
+
+async def test_summarize_for_compact_threads_scope(monkeypatch):
+    """summarize_for_compact 把 scope 透传成 extra['compact_scope']。"""
+    from ctx_weft.core.loop.steps import compact as compact_mod
+
+    seen = {}
+
+    class _FakeAssembler:
+        async def assemble(self, request):
+            seen["compact_scope"] = request.extra.get("compact_scope")
+            return SimpleNamespace(system="", messages=[])
+
+    async def _fake_stream(ctx, state, req):
+        if False:
+            yield None  # 空流
+        return
+
+    agent = SimpleNamespace(runtime={}, )
+    state = SimpleNamespace(
+        agent=agent, scope=SimpleNamespace(), task=SimpleNamespace(), session=SimpleNamespace(),
+        extra={})
+    ctx = SimpleNamespace(assembler=_FakeAssembler())
+    monkeypatch.setattr(compact_mod, "stream_llm_resilient", _fake_stream)
+
+    await compact_mod.summarize_for_compact(state, ctx, scope="agent")
+    assert seen["compact_scope"] == "agent"

@@ -39,8 +39,13 @@ _TASK_BODY_TYPES = [
 ]
 
 
-async def summarize_for_compact(state: LoopState, ctx: LoopContext) -> str:
+async def summarize_for_compact(
+    state: LoopState, ctx: LoopContext, *, scope: str = "task"
+) -> str:
     """装配 purpose="compact" 上下文 + 一次 LLM 摘要，返回摘要文本。
+
+    scope 选 cue（composer 据 extra["compact_scope"] 分流）："task"=整段执行摘要（默认，
+    observe 兜底与坍缩共用）；"agent"=派发经验摘要。
 
     LLM 摘要是 compact 的硬依赖（compact + observe 回退档共用本函数）：瞬时故障由
     stream_llm_resilient 自愈，自愈耗尽抛 LLMOutageError → 走 INTERRUPTED。**不再**在
@@ -55,6 +60,7 @@ async def summarize_for_compact(state: LoopState, ctx: LoopContext) -> str:
         session=state.session,
         template=state.extra.get("template"),
         bound_capabilities=state.extra.get("bound_capabilities", []),
+        extra={"compact_scope": scope},
     )
     compact_prompt = await ctx.assembler.assemble(request)
 
