@@ -80,11 +80,23 @@ _OBSERVE_JUDGMENT_CUE = (
     "sub-tasks you dispatched. Optionally review your own sub-tasks via `task_reviews`. Call no other tools."
 )
 
+# task compact cue：整体式——坍缩会替掉原始 prompt + 之前所有 `## Progress So Far`，故须概括
+# 整段 task-so-far（不是逐段 recap；逐段 act_recap 契约在 ROLE.md，属 observer）。
 _COMPACTION_INSTRUCTION = (
-    "Now act as a memory compactor. Summarize the conversation above into a concise "
-    "[Context so far] section that preserves: key user intents, important facts discovered, "
-    "decisions made, tool results, and any unfinished threads. Output only the summary text, "
-    "no preamble."
+    "Now act as a memory compactor. Summarize the ENTIRE task execution so far — from the "
+    "user's original request through everything done since — into one concise progress digest "
+    "a future turn can continue from. Preserve: the task goal, key facts discovered, decisions "
+    "made, important tool results, current state, and any unfinished threads. This replaces the "
+    "earlier turns, so fold in whatever matters. Output only the digest text, no preamble."
+)
+
+# agent compact cue：概括本 agent 的派发历史（每个子任务做了什么、结果/关键产出/教训），
+# 忽略当前 task 自身的执行细节，只压派发记录。
+_AGENT_COMPACTION_INSTRUCTION = (
+    "Now act as a memory compactor for this agent's delegation history. Summarize the dispatched "
+    "sub-tasks so far — for each: what it was asked to do and its outcome / key results / lessons "
+    "— into one concise digest the agent can rely on later. Ignore the current task's own "
+    "execution detail; focus on the delegation record. Output only the digest text, no preamble."
 )
 
 _RECOGNIZE_INTENT_INSTRUCTION = (
@@ -243,7 +255,10 @@ class DefaultComposer(Composer):
             tools = self._collect_llm_tools(blocks)
         else:  # compact
             system = self._build_act_system(blocks, request)
-            messages = self._build_facet_trailing_messages(blocks, request, _COMPACTION_INSTRUCTION)
+            cue = (_AGENT_COMPACTION_INSTRUCTION
+                   if (getattr(request, "extra", None) or {}).get("compact_scope") == "agent"
+                   else _COMPACTION_INSTRUCTION)
+            messages = self._build_facet_trailing_messages(blocks, request, cue)
             tools = []
 
         token_count = estimate_tokens(system) + sum(
