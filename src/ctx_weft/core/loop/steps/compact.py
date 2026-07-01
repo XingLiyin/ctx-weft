@@ -481,8 +481,10 @@ async def escalating_compact(
         return events
 
     # L3 · 坍缩当前 task（段摘要坍成更少，保 collapse_keep 条；仅当有 task 层材料可折）
+    # 计数须用 _TASK_LAYER_TYPES（含 TASK_COMPACT_SUMMARY）——与 collapse_task_layer 实际所折
+    # 一致：retry 累积的是段摘要，用 TASK_COMPACT_TYPES（仅 raw）会漏计、L3 永不触发。
     task_n = await ctx.memory.count_recent(
-        scope=state.scope, types=TASK_COMPACT_TYPES, ctx=ctx.provider_ctx)
+        scope=state.scope, types=_TASK_LAYER_TYPES, ctx=ctx.provider_ctx)
     if task_n > collapse_keep:
         summary_task = await summarize_for_compact(state, ctx, scope="task")
         n, freed = await _apply(collapse_task_layer(state, ctx, collapse_keep, summary_task))

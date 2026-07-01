@@ -126,6 +126,42 @@ async def test_escalating_compact_l3_uses_collapse_keep_last(monkeypatch):
     assert any(e.payload.get("source") == "collapse" for e in events)
 
 
+async def test_escalating_l3_fires_on_segment_only_accumulation(monkeypatch):
+    """回归 Fix 2：retry 累积后 task 层只有 USER_PROMPT + 段摘要（无 raw）。L3 守卫须用
+    _TASK_LAYER_TYPES 计数（含 TASK_COMPACT_SUMMARY）才会触发；旧守卫用 TASK_COMPACT_TYPES
+    只数到 1 条 USER_PROMPT → L3 永不触发 → 累积段摘要坍缩不了。"""
+    from ctx_weft.core.loop.steps import compact as cm
+
+    async def _fake_summ(state, ctx, *, scope="task"):
+        return "坍缩摘要"
+    monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)  # 免真实 LLM；collapse 用真的
+
+    mem = InMemoryBlackboard()
+    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    await _ingest(mem, scope, T.USER_PROMPT, "原始请求：做 X", 0)
+    for i in range(3):  # 3 条段摘要（无任何 raw），collapse_keep_last=2 → 3+1 > 2 触发
+        await _ingest(mem, scope, T.TASK_COMPACT_SUMMARY, f"段摘要{i}", i + 1, role="assistant")
+
+    agent = SimpleNamespace(
+        id="a", loop_config=SimpleNamespace(
+            compact_keep_last=6, collapse_keep_last=2,
+            compact_token_ratio=0.1, compact_target_ratio=0.01),
+        loop_guard=SimpleNamespace(context_limit=1000, context_tokens=1000))
+    state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"), agent=agent,
+                            session=SimpleNamespace(id="s", tenant_id="tn"),
+                            extra={}, run_id="r1", sequence_counter=0)
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx(), task_manager=None, event_bus=None)
+
+    events = await cm.escalating_compact(state, ctx, token_estimate=1000, trigger="compact")
+
+    # L3 真的坍缩了：产出带 COLLAPSE_DELIM 的 USER_PROMPT，段摘要收敛到 collapse_keep_last
+    assert any(e.payload.get("source") == "collapse" for e in events), "L3 应触发"
+    ups = await mem.recall_recent(scope, [T.USER_PROMPT], 100, _ctx())
+    assert any(COLLAPSE_DELIM in u.content and "原始请求：做 X" in u.content for u in ups)
+    segs = await mem.recall_recent(scope, [T.TASK_COMPACT_SUMMARY], 100, _ctx())
+    assert len(segs) == 2, "坍缩后段摘要保留 collapse_keep_last=2 条"
+
+
 async def test_collapsed_user_prompt_gets_current_task_frame():
     from ctx_weft.core.assembler.assembler import ContextBlock
     from ctx_weft.core.assembler.composer import DefaultComposer

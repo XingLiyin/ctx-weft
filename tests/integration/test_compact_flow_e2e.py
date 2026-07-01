@@ -14,7 +14,14 @@ from ctx_weft.protocols import (
     AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
     MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext,
 )
+import dataclasses as _dc
 from ctx_weft.core.loop.steps import compact as cm
+from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
+from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
+from ctx_weft.core.state.models import LoopGuard, Session, Task
+from ctx_weft.core.utils import now_utc
 from tests.integration.test_minimal_loop import InMemoryTemplateResolver
 
 pytestmark = pytest.mark.asyncio
@@ -71,6 +78,66 @@ async def test_normal_finish_still_works_e2e():
 
     assert state.task.status == "FINISHED"
     assert state.verdict.task_outcome == "success"
+
+
+async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
+    """真 runtime 多轮 retry：每轮 context_limit 命中 → observe 折段（累积，不替换）→ 下一轮
+    prepare 预算门开 → 段摘要攒够(> collapse_keep_last) → L3 坍缩出带 COLLAPSE_DELIM 的 USER_PROMPT。
+    钉住「已压缩会话中再压缩」整链：坍缩摘要打桩免真实 LLM，collapse/accumulate 全走真实路径。
+    旧行为（段摘要替换 / L3 守卫只数 raw）下 L3 永不触发 → 无 COLLAPSE_DELIM → 本测试失败。"""
+    async def _fake_summ(state, ctx, *, scope="task"):
+        return "坍缩执行摘要"
+    monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
+
+    resolver = InMemoryTemplateResolver()
+    tpl = _act_only_template()
+    tpl = _dc.replace(tpl, id="tpl_mr", loop_config=LoopConfig(
+        collapse_keep_last=2, compact_target_ratio=0.01))
+    resolver.register(tpl)
+    llm = MockLLMAdapter(responses=[MockResponse(text="partial work, not done yet")] * 30,
+                         context_limit=20)
+    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    mem = InMemoryMemoryProvider()
+    runtime.providers.register_memory(mem)
+
+    # 复刻 run_single_task 脚手架，但在同一 task 上循环 _execute_task（同 scope → 段摘要累积）
+    sid = "ses_mr"
+    pctx = ProviderContext(session_id=sid, tenant_id="default")
+    lm = LifecycleManager(template_resolver=resolver)
+    agent, template = await lm.instantiate_agent(
+        template_id="tpl_mr", session_id=sid, tenant_id="default", ctx=pctx)
+    session = Session(id=sid, user_prompt="do a long task", status="RUNNING",
+                      tenant_id="default", root_agent_id=agent.id, llm_provider="",
+                      created_at=now_utc())
+    session.context_limit = llm.context_limit
+    agent = _dc.replace(agent, loop_guard=LoopGuard(context_limit=session.context_limit))
+    task = Task(id="tsk_mr", session_id=sid, status="ACTIVE", tenant_id="default",
+                assigned_agent_id=agent.id, creator_agent_id=agent.id, title="User Request",
+                description="do a long task", user_prompt="do a long task", created_at=now_utc())
+    tm = TaskManager(session_id=sid, event_bus=runtime._event_bus,
+                     max_concurrent=1, task_max_retries=99)
+    tm.set_session(session)
+    tm.register_task(task)
+    for p in runtime.providers.get_capability_providers():
+        if isinstance(p, ControlCapabilityProvider):
+            p.register_session(sid, tm, session)
+            break
+
+    state = None
+    for r in range(4):
+        task.status = "ACTIVE"       # 复位（finalize 上一轮把它标成 PENDING/retry）
+        task.retry_count = 0         # 由本循环掌控轮数，不让 max_retries 提前收尾
+        state, _ = await runtime._execute_task(
+            session=session, task=task, agent=agent, template=template,
+            run_id=f"run{r}", memory=mem, task_manager=tm)
+        assert state.verdict is not None and state.verdict.task_outcome == "retry"
+
+    ups = await mem.recall_recent(state.scope, [T.USER_PROMPT], 100, pctx)
+    collapsed = [u.content for u in ups if COLLAPSE_DELIM in u.content]
+    assert collapsed, "多轮累积段摘要后 L3 应坍缩出带 COLLAPSE_DELIM 的 USER_PROMPT"
+    assert all(c.count("do a long task") <= 1 for c in collapsed), "原始节有界，不嵌套膨胀"
+    segs = await mem.recall_recent(state.scope, [T.TASK_COMPACT_SUMMARY], 100, pctx)
+    assert 1 <= len(segs) <= 3, "L3 把累积段摘要控在 collapse_keep_last 量级"
 
 
 async def test_escalating_compact_shrinks_real_memory(monkeypatch):

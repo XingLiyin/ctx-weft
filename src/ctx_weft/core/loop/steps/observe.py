@@ -411,7 +411,9 @@ class ObserveStep(Step):
         self, state: LoopState, ctx: LoopContext, verdict: Verdict, events: list[Any]
     ) -> None:
         """retry 前台同步段折：本轮 attempt raw → 一条 TASK_COMPACT_SUMMARY（复用 act_recap），
-        supersede 本轮全部 raw（keep_last=0），保 USER_PROMPT 锚。无 keep_last 门、无额外 LLM。
+        supersede 本轮全部 raw（keep_last=0），保 USER_PROMPT 锚 + 既往段摘要（累积）。
+        protect TASK_COMPACT_SUMMARY → 多轮 retry 段摘要累积（不替换），由 L3 按 collapse_keep_last
+        坍缩控界。无 keep_last 门、无额外 LLM。
 
         仅当 verdict.task_outcome=="retry" 才折（三来源：max_turns/context_limit/observer-retry）；
         其余 outcome 不折，no-op。
@@ -429,7 +431,8 @@ class ObserveStep(Step):
             keep_last=0,
             ctx=ctx.provider_ctx,
             layer=MemoryLayer.TASK,
-            protect_types=(MemoryEventType.USER_PROMPT,),
+            protect_types=(MemoryEventType.USER_PROMPT,
+                           MemoryEventType.TASK_COMPACT_SUMMARY),
         )
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "events_before": result.events_before,

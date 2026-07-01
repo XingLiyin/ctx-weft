@@ -49,6 +49,39 @@ async def test_retry_folds_current_attempt_and_deletes_raw():
     assert len(summ) == 1 and summ[0].content == "本段摘要：调了工具X" and summ[0].role == "assistant"
 
 
+async def test_retry_accumulates_prior_segments():
+    """多轮 retry：本轮折只删本轮 raw，之前的段摘要保留累积（protect TASK_COMPACT_SUMMARY）。
+    N 轮后 task 层 = USER_PROMPT + N 条段摘要（L3 再据 collapse_keep_last 坍缩），不是替换成 1 条。"""
+    mem = InMemoryMemoryProvider()
+    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    await _ingest(mem, scope, T.USER_PROMPT, "原始请求", 0)
+    # 上一轮 retry 已折出的段摘要①（assistant role，与前台折产物同形）
+    await _ingest(mem, scope, T.TASK_COMPACT_SUMMARY, "段摘要①", 1, role="assistant")
+    # 本轮 attempt 的 raw
+    await _ingest(mem, scope, T.LLM_RESPONSE, "本轮回复", 2, role="assistant")
+    await _ingest(mem, scope, T.TOOL_RESULT, "本轮工具结果", 3, role="tool")
+
+    state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"),
+                            agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(compact_keep_last=6)),
+                            session=SimpleNamespace(id="s", tenant_id="tn"),
+                            run_id="r1", sequence_counter=0)
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要②", reported=False)
+
+    events = []
+    await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
+
+    recs = await mem.recall_recent(scope, [T.USER_PROMPT, T.LLM_RESPONSE,
+                                           T.TOOL_RESULT, T.TASK_COMPACT_SUMMARY], 100, _pctx())
+    types = {r.type for r in recs}
+    assert T.LLM_RESPONSE not in types and T.TOOL_RESULT not in types  # 本轮 raw 折掉
+    assert T.USER_PROMPT in types                                       # 锚保留
+    summ = sorted((r for r in recs if r.type == T.TASK_COMPACT_SUMMARY),
+                  key=lambda r: r.timestamp)
+    contents = [r.content for r in summ]
+    assert contents == ["段摘要①", "段摘要②"], "旧段摘要须保留，新段摘要追加（累积而非替换）"
+
+
 async def test_non_retry_outcome_does_not_fold():
     mem = InMemoryMemoryProvider()
     scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")

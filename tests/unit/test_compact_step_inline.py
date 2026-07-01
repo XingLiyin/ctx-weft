@@ -99,8 +99,10 @@ def _ctx(memory):
 
 async def test_compact_folds_overbudget_layers_with_one_summary():
     # task layer has 5 foldable (> keep_last=2); agent layer has 0
+    # L3 guard 计数用 _TASK_LAYER_TYPES（含 TOOL_INVOCATION/TASK_COMPACT_SUMMARY）——key 须匹配全集
     mem = _FakeMemory({
-        frozenset([T.USER_PROMPT, T.LLM_RESPONSE, T.TOOL_RESULT]): 5,
+        frozenset([T.USER_PROMPT, T.LLM_RESPONSE, T.TOOL_INVOCATION,
+                   T.TOOL_RESULT, T.TASK_COMPACT_SUMMARY]): 5,
         frozenset([T.TASK_DISPATCH, T.TASK_DISPATCH_RESULT]): 0,
     })
     outcome = await CompactStep().execute(_state(), _ctx(mem))
