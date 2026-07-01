@@ -1,9 +1,12 @@
 """CompactStep：长对话压缩，由 PrepareStep 内联直调（不再以 task 形式调度）。
 
   - 作用域 = 当前 state.scope（当前 task + agent）。
-  - 计算可折叠层（agent 派发日志 / task 对话），任一层 active 条数 > keep_last 才折。
-  - 复用 act 装配内容 + 末尾压缩指令（composer purpose="compact"），一次 summary。
-  - 对每个超额层 apply_compact 同一份 summary。
+  - 两层各自阈值与摘要：task 层超 collapse_keep_last → collapse_task_layer 把早期回合
+    坍缩成一条 USER_PROMPT（原始消息 + 执行摘要两节）；agent 层超 compact_keep_last →
+    fold_root_experience 折派发经验成 AGENT_COMPACT_SUMMARY。
+  - 每层各产各的 summary（task/agent 两条 cue），且仅在本层确需折叠时才调 LLM。
+  - 注：observe(max_turns) 与 background_observe 仍走 apply_compact 写 TASK_COMPACT_SUMMARY
+    形成胶囊，不在此文件改动范围内。
 """
 
 from __future__ import annotations
