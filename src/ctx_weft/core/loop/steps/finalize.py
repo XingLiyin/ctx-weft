@@ -1,7 +1,7 @@
 """FinalizeStep：task 收尾——写 memory + blackboard publish + 更新 task 状态。
 
 miniAgents 对齐版：
-- memory 内容 = task.outputs + "\\n\\nProcess Report: " + verdict.summary（合并写入）
+- memory 内容 = task.outputs + "\\n\\nProcess Report: " + verdict.act_recap（合并写入）
 - 新增 BLACKBOARD_PUBLISH：让父 agent 通过 recall_topic(task.id) 读到子任务结果
 """
 
@@ -12,233 +12,267 @@ from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.events import EventType
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id, now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope
 from ctx_weft.protocols.capability import qualify
 
 logger = logging.getLogger(__name__)
 
-# few-turns 阈值：root task 的 assistant 轮次（LLM_RESPONSE）≤ 此值 → 保全整段对话；
-# 超过 → 折叠为单个合成 delegate_task↔result 派发对。
-ROOT_SELF_EXPERIENCE_TURN_LIMIT = 3
-
-# root task 对话保全时拉取的 task 层类型（与 RecentMemorySource 一致）
-_ROOT_CONVERSATION_TYPES = [
+# close 时软删/折叠的 task 层类型（OPEN task 对话的全部）
+_OWN_CONV_TYPES = [
     MemoryEventType.USER_PROMPT,
     MemoryEventType.LLM_RESPONSE,
+    MemoryEventType.TOOL_INVOCATION,
     MemoryEventType.TOOL_RESULT,
     MemoryEventType.TASK_COMPACT_SUMMARY,
 ]
 
+# 长任务 close 时 supersede 的 task 层「末 raw 段」类型（保留 USER_PROMPT / TASK_COMPACT_SUMMARY 锚点）
+_FINAL_RAW_TYPES = [
+    MemoryEventType.LLM_RESPONSE,
+    MemoryEventType.TOOL_INVOCATION,
+    MemoryEventType.TOOL_RESULT,
+]
 
-def _is_agent_root_task(task, agent_id: str | None) -> bool:
-    """task 是否为 agent_id 的 root task。
+# 同 agent 派发：派发对 tool 结果的静态文案（不含任何子任务结果，永不回填，spec 2026-06-30 §2.5）。
+# 只写「任务已开始」的套话——子真实产出由内联胶囊 body + 嵌套 finish 对承载。
+def _dispatch_ack(title: str) -> str:
+    return f"Task '{title}' started."
 
-    判据(无标签、无 parent 链上溯,只看 task 自身的 creator/assigned):
-      - parent_task_id is None → session 根;或
-      - assigned_agent_id == agent_id 且 creator != assigned → 被别的 agent 派进来交给它的根。
-    同 agent 内派生(use_subagent=False:creator==assigned)、派给别的 agent 的子任务
-    (use_subagent=True:assigned!=agent_id)都不满足 → 视为 sub-task。
-    """
-    if task.parent_task_id is None:
-        return True
-    return (
-        task.assigned_agent_id == agent_id
-        and task.creator_agent_id != task.assigned_agent_id
-    )
+# 派发框的叙事工具名（仅出现在重建历史的 tool_calls 里，非可调用能力）。
+START_TASK_NAME = qualify("control:start_task")
 
 
-async def fold_root_subtree(memory, agent_scope, root_task, get_task, provider_ctx) -> int:
-    """root finalize 时,把本次 root 子树的 dispatch 记录在 agent 层折掉(supersede)。
+async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
+    """确保 parent scope 有一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，返回其时间戳。
 
-    保留判据:一条 TASK_DISPATCH/RESULT 指向的 child task 若本身是该 agent 的 root
-    (_is_agent_root_task)则保留——这正是 root 自身的 self-experience pair,以及顺序
-    跑过的更早 root 的经验;否则(两类 sub-task)折掉。
-
-    子任务 backfill(block a)的 RESULT 自带 `parent_task_id`,据此即可判定"本 root 的直接
-    子任务回填"——**不依赖 get_task**,所以 restore 重排、child 不在 task_manager 时也能折
-    (否则 backfill 会和 self-experience 重复)。get_task 仅作回退(无 parent_task_id 的旧/测试
-    记录)。返回 superseded 的条数。
-    """
-    root_id = root_task.id
-    agent_id = root_task.assigned_agent_id
-    records = await memory.recall_recent(
-        agent_scope,
-        [MemoryEventType.TASK_DISPATCH, MemoryEventType.TASK_DISPATCH_RESULT],
-        2000, provider_ctx,
-    )
-    # tool_call_id → child_task_id（来自 RESULT；DISPATCH 据此回查）
-    child_by_tcid: dict[str, str] = {}
-    # 本 root 直接子任务回填的 tool_call_id：RESULT.parent_task_id == root（不依赖 get_task）
-    subtree_tcids: set[str] = set()
-    for r in records:
-        if r.type == MemoryEventType.TASK_DISPATCH_RESULT:
-            tcid = r.metadata.get("tool_call_id")
-            cid = r.metadata.get("child_task_id")
-            if tcid and cid:
-                child_by_tcid[tcid] = cid
-            if tcid and r.metadata.get("parent_task_id") == root_id:
-                subtree_tcids.add(tcid)
-
-    def _is_subtask(r) -> bool:
-        tcid = r.metadata.get("tool_call_id")
-        if tcid and tcid in subtree_tcids:
-            return True  # 回填自带 parent_task_id == root → 必是本 root 子任务
-        # 回退:靠 task store 判定;查不到 child(restore 等)时保守不折,避免误删前序 root 经验
-        cid = r.metadata.get("child_task_id") or child_by_tcid.get(tcid)
-        if not cid:
-            return False
-        child = get_task(cid) if get_task else None
-        if child is None:
-            return False
-        return not _is_agent_root_task(child, agent_id)
-
-    to_supersede = [r.id for r in records if _is_subtask(r)]
-    if to_supersede:
-        await memory.supersede(to_supersede, provider_ctx)
-    return len(to_supersede)
-
-
-async def record_root_self_experience(memory, scope, task, mem_content, outcome, provider_ctx) -> dict:
-    """Write a finished root task's experience into the root agent's agent layer.
-
-    ≤ ROOT_SELF_EXPERIENCE_TURN_LIMIT assistant turns → preserve the whole
-    conversation as AGENT_CONVERSATION_TURN records; otherwise → one synthesized
-    delegate_task↔result pair. Returns {"mode": ..., "count": ...} for eventing.
-
-    Idempotent: finalize can re-enter (re-dispatch / restore), and a second write would
-    duplicate the experience (fold never removes a root's own records). If this root's
-    experience already exists in its agent layer, skip.
+    delegate_task(单): gateway 执行前已写好框 → 找到即返回其 timestamp。
+    delegate_plan 子: gateway 只写了 plan 框、没有 per-child 框 → 此处补铸一条 start_task 框，
+    时间戳回拨到 task.created_at，使其排在子 body 之前、与配对结果相邻。origin_task_id 留父(留 plan task)。
     """
     existing = await memory.recall_recent(
-        scope,
-        [MemoryEventType.AGENT_CONVERSATION_TURN, MemoryEventType.TASK_DISPATCH_RESULT],
-        2000, provider_ctx,
+        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
+    frame = next(
+        (r for r in existing
+         if r.role == "assistant"
+         and any(tc.get("id") == task.origin_tool_call_id
+                 for tc in (r.metadata.get("tool_calls") or []))),
+        None,
     )
-    if any(
-        r.metadata.get("origin_task_id") == task.id  # conversation turns / synthesized user turn
-        or r.metadata.get("child_task_id") == task.id  # synthesized dispatch result
-        for r in existing
-    ):
-        return {"mode": "skipped", "count": 0}
+    if frame is not None:
+        return frame.timestamp
+    # 锚在 task manager 真正启动 task 的时刻（started_at）——反映真实启动顺序、排在子 body 之前；
+    # 回退 created_at（历史/无 started_at 时）再回退 now。
+    ts = task.started_at or task.created_at or now_utc()
+    await memory.ingest(
+        MemoryEvent(
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
+            content="", timestamp=ts, role="assistant",
+            metadata={"origin_task_id": task.parent_task_id,
+                      "parent_task_id": task.parent_task_id,
+                      "tool_calls": [{"id": task.origin_tool_call_id,
+                                      "name": START_TASK_NAME,
+                                      "input": {"title": task.title}}]},
+        ),
+        ctx.provider_ctx,
+    )
+    return ts
 
+
+def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
+    """finish 对 tool 槽内容 = task_summary（process report）。R2 兜底：空则退 act_recap，
+    再空给占位。**不掺 outputs**——最终输出在 finish_task 的 result 入参，tool 槽不重复它。
+    绝不返回空串（避免空 tool 回合 / 400）。"""
+    for cand in (task_summary, act_recap):
+        if cand and cand.strip():
+            return cand
+    return "(无最终产出)" if outcome == "fail" else "(本段无更多总结)"
+
+
+def _descendant_task_ids(root_id: str, task_manager) -> set[str]:
+    """BFS over children_of → 该 task 名下所有后代 task_id（不含自身）。"""
+    if task_manager is None:
+        return set()
+    out: set[str] = set()
+    stack = [root_id]
+    while stack:
+        cur = stack.pop()
+        for cid in task_manager.children_of(cur):
+            if cid not in out:
+                out.add(cid)
+                stack.append(cid)
+    return out
+
+
+async def _is_short_leaf(memory, scope, task, loop_config, ctx, has_descendants: bool) -> bool:
+    """叶子(无后代) 且 对话 token ≤ threshold 且 LLM_RESPONSE 轮次 ≤ turn_cap → short。"""
+    if has_descendants:
+        return False  # 非叶（委派过子任务）永不 short
     n_assistant = await memory.count_recent(
-        scope, [MemoryEventType.LLM_RESPONSE], provider_ctx,
+        scope, [MemoryEventType.LLM_RESPONSE], ctx.provider_ctx,
     )
-    if n_assistant <= ROOT_SELF_EXPERIENCE_TURN_LIMIT:
-        count = await _preserve_conversation(memory, scope, task, provider_ctx)
-        return {"mode": "conversation", "count": count}
-    await _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, provider_ctx)
-    return {"mode": "dispatch", "count": 1}
-
-
-async def _preserve_conversation(memory, scope, task, provider_ctx) -> int:
-    """Copy this task's task-layer conversation into the agent layer (faithful, ordered)."""
-    records = await memory.recall_recent(
-        scope, _ROOT_CONVERSATION_TYPES, 2000, provider_ctx,
+    if n_assistant > loop_config.short_task_turn_cap:
+        return False
+    records = await memory.recall_recent(scope, _OWN_CONV_TYPES, 2000, ctx.provider_ctx)
+    text = " ".join(
+        content_to_text(r.content) if not isinstance(r.content, str) else r.content
+        for r in records
     )
-    count = 0
-    for r in reversed(records):  # recall is newest-first → re-ingest chronologically
-        md = {"origin_task_id": task.id}
-        if r.role == "assistant" and r.metadata.get("tool_calls"):
-            md["tool_calls"] = r.metadata["tool_calls"]
-        if r.role == "tool" and r.metadata.get("tool_call_id"):
-            md["tool_call_id"] = r.metadata["tool_call_id"]
-        await memory.ingest(
-            MemoryEvent(
-                type=MemoryEventType.AGENT_CONVERSATION_TURN,
-                scope=scope,
-                content=r.content,
-                timestamp=r.timestamp,   # preserve original order/anchor
-                role=r.role,
-                metadata=md,
-            ),
-            provider_ctx,
-        )
-        count += 1
-    # finish_task 的最终答复进了 task.outputs（SILENT，不入 task 层），上面的逐轮重建捞不到它，
-    # 重建结果会缺答案。补一条干净的 assistant 收尾回合：只放纯答复（不带 "Process Report" 等
-    # 格式，role=assistant，避免带偏后续 root 的回复风格）。timestamp 取 now → 排在对话末尾。
-    answer = _output_text(task.outputs)
-    if answer:
-        await memory.ingest(
-            MemoryEvent(
-                type=MemoryEventType.AGENT_CONVERSATION_TURN,
-                scope=scope,
-                content=answer,
-                timestamp=now_utc(),
-                role="assistant",
-                metadata={"origin_task_id": task.id, "final_answer": True},
-            ),
-            provider_ctx,
-        )
-        count += 1
-    return count
+    return estimate_tokens(text) <= loop_config.short_task_token_threshold
 
 
-async def _synthesize_dispatch_pair(memory, scope, task, mem_content, outcome, provider_ctx) -> None:
-    """Write a synthesized delegate_task↔result pair representing a long root task.
+async def finalize_task_memory(memory, state, task, mem_content: str, outcome: str, ctx,
+                               *, act_recap: str, task_summary: str) -> list:
+    """finish 时调用：算 short / descendants 后委派 _close_one。返回事件列表。
 
-    Prefixed by the original user prompt as a user turn (same content the conversation path
-    preserves): otherwise the prompt only lives inside the delegate_task arguments and never
-    renders as a user message, so the experience hides "what the user asked".
+    task-resident（spec 2026-06-28）：short 不再 gate 合成/supersede——每个结束 task 都写
+    finish 对、body 留 task 层。`short` 仅算出后透传给 _close_one（Task 2 用于 body raw-vs-压末段）。
     """
-    # 1) 原始 user prompt → user 回合，置于 dispatch 对之前（取最旧的一条 USER_PROMPT = 原始问题）
-    prompts = await memory.recall_recent(
-        scope, [MemoryEventType.USER_PROMPT], 2000, provider_ctx,
+    descendants = _descendant_task_ids(task.id, ctx.task_manager)
+    short = await _is_short_leaf(
+        memory, state.scope, task, state.agent.loop_config, ctx, bool(descendants),
     )
-    if prompts:
-        original = prompts[-1]  # recall is newest-first → last is the oldest (original) prompt
-        await memory.ingest(
-            MemoryEvent(
-                type=MemoryEventType.AGENT_CONVERSATION_TURN,
-                scope=scope,
-                content=original.content,
-                timestamp=original.timestamp,
-                role="user",
-                metadata={"origin_task_id": task.id},
-            ),
-            provider_ctx,
+    return await _close_one(
+        memory, state, task, mem_content, outcome, ctx,
+        short=short, act_recap=act_recap, task_summary=task_summary,
+    )
+
+
+async def _supersede_final_raw_segment(memory, scope, ctx) -> None:
+    """长任务 close：supersede task 层末 raw 段（active LLM_RESPONSE/TOOL_INVOCATION/TOOL_RESULT），
+    保留 USER_PROMPT + TASK_COMPACT_SUMMARY 锚点（spec 2026-06-28 §3.2）。
+
+    中间段已在各自边界由后台 observe 折成 TASK_COMPACT_SUMMARY（折时 supersede 了对应 raw），
+    故此刻 active 的 raw 即「末段」。末段已由 finish 对的 Process Report 承载（不变量 4）→
+    直接 supersede、**不另产新 TASK_COMPACT_SUMMARY**（避免与 finish 对重复）。
+    """
+    records = await memory.recall_recent(scope, _FINAL_RAW_TYPES, 2000, ctx.provider_ctx)
+    ids = [r.id for r in records]
+    if ids:
+        await memory.supersede(ids, ctx.provider_ctx)
+
+
+async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
+                     *, short: bool, act_recap: str, task_summary: str) -> list:
+    """close 主体（task-resident，spec 2026-06-28）：bubble / 写 finish 对（不镜像 body）。
+
+    每个结束 task 无条件写 finish 对、body 留 task 层（不 GC 子树）。长任务额外 supersede 末 raw
+    段（短任务留全 raw）——`short` 决定 body raw-vs-压末段（spec §3.2）。返回事件列表。
+    """
+    # Terminal finalize is single-entry by construction (retry is non-terminal; restore reschedules
+    # only non-terminal tasks; re-dispatch uses a new task id), so the residue/bubble writes here
+    # need no idempotency guard. [2026-06-23]
+    events: list[Any] = []
+    same_agent = task.creator_agent_id == task.assigned_agent_id
+    cross_agent = bool(task.parent_task_id) and not same_agent
+    is_own_root = (task.parent_task_id is None) or cross_agent
+
+    # 1) bubble 到 parent scope（dispatch marker 所在 scope）
+    if task.parent_task_id and task.origin_tool_call_id and mem_content:
+        parent_scope = MemoryScope(
+            session_id=state.scope.session_id,
+            task_id=task.parent_task_id,
+            agent_id=task.creator_agent_id,
         )
-    # 2) synthesized delegate_task ↔ result
+        if cross_agent:
+            # 跨 agent（spec 2026-06-28 §2.3）：dispatch result 写成 agent 层普通 conversation turn
+            # （tool 回合），与 start_task / delegate 框靠 tool_call_id 配对、时间戳对齐保证相邻。
+            report_prefix = "[outcome=fail] " if outcome == "fail" else ""
+            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx)
+            await memory.ingest(
+                MemoryEvent(
+                    type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                    scope=parent_scope,
+                    content=f"{report_prefix}{mem_content}",
+                    timestamp=frame_ts,
+                    role="tool",
+                    metadata={"origin_task_id": task.parent_task_id,
+                              "tool_call_id": task.origin_tool_call_id},
+                ),
+                ctx.provider_ctx,
+            )
+            events.append(make_event(
+                state, EventType.MEMORY_INGESTED,
+                payload={"memory_event_type": MemoryEventType.AGENT_CONVERSATION_TURN.value,
+                         "source": "dispatch_result", "content_length": len(mem_content)},
+            ))
+        elif same_agent:
+            # 同 agent（spec 2026-06-30 §2.5）：确保/补铸派发框，写一条配对静态 tool result，
+            # 时间戳对齐框 → 严格相邻、排在子 body 之前。子真实产出由内联胶囊 body + 嵌套 finish 对承载。
+            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx)
+            await memory.ingest(
+                MemoryEvent(
+                    type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
+                    content=_dispatch_ack(task.title), timestamp=frame_ts, role="tool",
+                    metadata={"origin_task_id": task.parent_task_id,
+                              "tool_call_id": task.origin_tool_call_id},
+                ),
+                ctx.provider_ctx,
+            )
+            # 嵌套合成子自己的 finish 对（写进共享 agent scope，@close 时刻）
+            await _synthesize_dispatch_pair(
+                memory, parent_scope, task, act_recap, task_summary, outcome, ctx.provider_ctx)
+
+    # 2) 自身 finish 对：own root（session 根或跨 agent 根）close 时无条件在 own scope 合成
+    if is_own_root and mem_content:
+        await _synthesize_dispatch_pair(memory, state.scope, task, act_recap, task_summary, outcome, ctx.provider_ctx)
+        events.append(make_event(
+            state, EventType.MEMORY_INGESTED,
+            payload={"memory_event_type": MemoryEventType.AGENT_CONVERSATION_TURN.value,
+                     "source": "root_finish_pair", "content_length": len(mem_content)},
+        ))
+
+    # task-resident（spec 2026-06-28 §3.2）：body 留 task 层、不 GC 子树。
+    # 长任务额外 supersede 末 raw 段（保留 USER_PROMPT/TASK_COMPACT_SUMMARY 锚点）；短任务留全 raw。
+    if not short:
+        await _supersede_final_raw_segment(memory, state.scope, ctx)
+    return events
+
+
+async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_summary: str,
+                                    outcome: str, provider_ctx) -> None:
+    """close 合成 agent 层 finish 对（spec 2026-06-30 两段化）：
+    assistant{content=act_recap + finish_task 调用} / tool{content=task_summary 综合总结}。
+    own-root：占位先写，bg close observe 产新两段后经 _replace_finish_report 替换（A1）。"""
+    from ctx_weft.core.loop.steps.background_observe import (
+        pop_close_report, register_close_synth, _replace_finish_report,
+    )
+    base = now_utc()
     tool_call_id = generate_id("tcall")
-    ts = now_utc()
+    # 反转契约（spec 2026-07-01）：答复正文由「内联的 task 层 body / blackboard mem_content」承载，
+    # 故 finish 对的 assistant 槽用 act_recap（过程复述，≠ 答复），避免与内联 body 的答复重复；
+    # finish_task 退化为无参收尾标记（不再把答复塞进 input.result）。tool 槽 = task_summary（process report）。
+    report_prefix = "[outcome=fail] " if outcome == "fail" else ""
+    summary_text = _finish_tool_text(task_summary, act_recap, outcome)
+
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.TASK_DISPATCH,
-            scope=scope,
-            content="",
-            timestamp=ts,
-            role="assistant",
-            metadata={
-                "tool_call_id": tool_call_id,
-                "tool_name": qualify("control:delegate_task"),
-                "arguments": {
-                    "title": task.title,
-                    "task_prompt": task.user_prompt,
-                    "description": task.description,
-                },
-            },
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+            content=act_recap, timestamp=base, role="assistant",
+            metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
+                      "tool_calls": [{"id": tool_call_id,
+                                      "name": qualify("control:finish_task"),
+                                      "input": {}}]},
         ),
         provider_ctx,
     )
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.TASK_DISPATCH_RESULT,
-            scope=scope,
-            content=mem_content,
-            timestamp=ts,
-            role="tool",
-            metadata={
-                "tool_call_id": tool_call_id,
-                "child_task_id": task.id,
-                "title": task.title,
-                "outcome": outcome,
-                "parent_task_id": None,
-            },
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+            content=f"{report_prefix}{summary_text}", timestamp=base, role="tool",
+            metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
+                      "tool_call_id": tool_call_id},
         ),
         provider_ctx,
     )
+
+    bg = pop_close_report(task.id)
+    if bg is not None:
+        bg_recap, bg_summary = bg
+        await _replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
+                                     bg_recap, bg_summary, outcome)
+    else:
+        register_close_synth(task.id, tool_call_id, scope, outcome)
 
 
 class FinalizeStep(Step):
@@ -248,7 +282,8 @@ class FinalizeStep(Step):
         task = state.task
         verdict = state.verdict
         outcome = verdict.task_outcome if verdict else "fail"
-        summary = verdict.summary if verdict else ""
+        summary = verdict.act_recap if verdict else ""            # → task.process_report（retry Progress So Far）
+        task_summary = verdict.task_summary if verdict else ""    # → 汇报给 parent 的 process report
         events: list[Any] = []
 
         # retry 超过上限 → 降级 fail（不再重试）
@@ -258,68 +293,15 @@ class FinalizeStep(Step):
             task.observer_outcome = "fail"
 
         terminal = outcome in ("success", "fail")
-        mem_content = _build_memory_content(task.outputs, summary)
+        # 汇报给 parent（blackboard + cross_agent bubble）= 最终输出 + task_summary（process report 作用）；
+        # task_summary 空时回退 act_recap。
+        mem_content = _build_memory_content(task.outputs, task_summary or summary)
 
-        # 1) 经验写入：success/fail 终结才写（spec/06 §5/§6）。两类写入对「子 agent 的 root
-        # task」是并存的（不再互斥）：
-        #   (a) 委派回填：child 的 output+report 作为 TASK_DISPATCH_RESULT 写进 parent 的 agent 层
-        #       ——父级把整棵子树看成一条结果。
-        #   (b) self-experience：本 task 若是其自身 agent 的 root（session 根，或被别的 agent 派进来
-        #       的根），把自身对话/结果折进自己的 agent 层，并把本次 root 子树的 dispatch 记录折掉
-        #       （fold_root_subtree）——日后作为 experience 召回时只见 root 经验、不见逐个 sub-task。
-        if terminal and task.parent_task_id and task.origin_tool_call_id and mem_content:
-            parent_scope = MemoryScope(
-                session_id=state.scope.session_id,
-                task_id=task.parent_task_id,
-                agent_id=task.creator_agent_id,
-            )
-            await ctx.memory.ingest(
-                MemoryEvent(
-                    type=MemoryEventType.TASK_DISPATCH_RESULT,
-                    scope=parent_scope,
-                    content=mem_content,
-                    timestamp=now_utc(),
-                    role="tool",
-                    metadata={"tool_call_id": task.origin_tool_call_id, "child_task_id": task.id,
-                              "title": task.title, "outcome": outcome, "parent_task_id": task.parent_task_id},
-                ),
-                ctx.provider_ctx,
-            )
-            events.append(make_event(
-                state, EventType.MEMORY_INGESTED,
-                payload={
-                    "memory_event_type": MemoryEventType.TASK_DISPATCH_RESULT.value,
-                    "source": "dispatch_result",
-                    "content_length": len(mem_content),
-                },
-            ))
-
-        # (b) self-experience：本 task 是其自身 agent 的 root 时触发（不再仅限 session 根）。
-        if terminal and mem_content and _is_agent_root_task(task, task.assigned_agent_id):
-            # 先折子树（supersede 本次 root 期间派生的 sub-task dispatch 记录），再写 root 经验，
-            # 使新写的经验记录不被本次 fold 命中。
-            get_task = ctx.task_manager.get_task if ctx.task_manager else None
-            folded = await fold_root_subtree(
-                ctx.memory, state.scope, task, get_task, ctx.provider_ctx,
-            )
-            if folded:
-                events.append(make_event(
-                    state, EventType.MEMORY_COMPACTED,
-                    payload={"source": "root_subtree_fold", "superseded_count": folded,
-                             "layer": "agent"},
-                ))
-            info = await record_root_self_experience(
-                ctx.memory, state.scope, task, mem_content, outcome, ctx.provider_ctx,
-            )
-            events.append(make_event(
-                state, EventType.MEMORY_INGESTED,
-                payload={
-                    "memory_event_type": MemoryEventType.AGENT_CONVERSATION_TURN.value
-                    if info["mode"] == "conversation"
-                    else MemoryEventType.TASK_DISPATCH_RESULT.value,
-                    "source": "root_conversation" if info["mode"] == "conversation" else "root_dispatch",
-                    "content_length": len(mem_content),
-                },
+        # 1) 统一 close：bubble / 自身残留 / 软删自身对话 / GC 子树（spec 2026-06-23）。
+        if terminal and mem_content:
+            events.extend(await finalize_task_memory(
+                ctx.memory, state, task, mem_content, outcome, ctx,
+                act_recap=summary, task_summary=task_summary,
             ))
 
         # 2) 按 outcome 分派（task.status 已由 ObserveStep 设置）
@@ -343,7 +325,7 @@ class FinalizeStep(Step):
             ))
         elif outcome == "retry":
             # 不重复注入 user message——原始任务消息一开始就在 task 层。observe 的新增信息 =
-            # 对本轮 process 的分析 + next step hint，作为 process_report → 下一轮 Current Progress。
+            # 对本轮 process 的分析 + next step hint，作为 process_report → 下一轮 Progress So Far。
             # 机械退出（max_turns/context_limit）也归到这里：重排再跑，受 max_retries 兜底。
             task.outputs = None
             task.process_report = summary

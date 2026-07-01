@@ -16,7 +16,7 @@ from ctx_weft.protocols import LoopConfig, MemoryConfig
 class NormalTaskSettings:
     """Settings for a regular reasoning task.
 
-    Created by delegate_task / delegate_plan / replan control tools, or supplied
+    Created by delegate_task / delegate_plan control tools, or supplied
     as initial_task_settings to start_session() / create_session().
     """
 
@@ -193,7 +193,7 @@ class Task:
     outputs: Any | None = None
     process_report: str | None = None
     # 何时设置 process_report（= 上一轮 observe 产出反馈的时刻，落在该 attempt 之后、下一 attempt 之前）。
-    # 装配时据此把 "## Current Progress" 按时间戳归并到正确位置（见 composer._progress_history_block）。
+    # 装配时据此把 "## Progress So Far" 按时间戳归并到正确位置（见 composer._progress_history_block）。
     process_report_at: datetime | None = None
 
     retry_count: int = 0
@@ -207,12 +207,17 @@ class Task:
     actor_done: bool = False
     # observe 裁决（三态）：success|retry|fail。retry 置 status=PENDING 重排（机械退出也归 retry）。
     observer_outcome: str | None = None
+    # observer 产出的整段综合总结（执行历程+结果）→ finish 对 tool 槽（spec 2026-06-30）。
+    task_summary: str | None = None
     # 发起本任务的 parent delegate_task/delegate_plan 的 tool_call_id（spec/06 §5）。
     # finalize 据此把 output+report 作为 TASK_DISPATCH_RESULT 回填 parent agent 层、按它配对。
     origin_tool_call_id: str | None = None
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # task manager 真正启动本 task（本 attempt）的时刻。派发框（start_task/dispatch 对）以此为锚，
+    # 排在子 body 之前、反映真实启动顺序（避免 created_at 的兄弟碰撞/乱序）。每次 run 重置。
+    started_at: datetime | None = None
     finished_at: datetime | None = None
 
 

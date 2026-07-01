@@ -1,23 +1,26 @@
-"""Root-task self-experience: agent-layer rendering + finalize writes."""
+"""root 自经验胶囊（task-resident，spec 2026-06-28 §3.1）：close 只写 finish 对、不镜像 body。
 
+行为翻转（Task 1）：
+- `_synthesize_dispatch_pair` **不再镜像** task 层 USER_PROMPT/TASK_COMPACT_SUMMARY/
+  LLM_RESPONSE/TOOL_RESULT 进 agent 层——body 留各自 task 层（即胶囊）。
+- agent 层每 task 只写 **finish 对**（assistant finish_task tool_call + tool Process Report）。
+- 召回时 task 层 body 与 agent 层 finish 对按 (timestamp, seq_no) 归并（见 assembler 测试）。
+
+注：原「交错时间线镜像」相关断言（UP/段摘要镜像、镜像顺序）随 mirror 删除而移除——其验证的
+机制已不存在；body-保留改由 task 层召回验证（见 test_close_task / test_capsule_golden）。
+"""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextRequest
-from ctx_weft.core.assembler.sources.agent_experience import AgentExperienceSource
-from ctx_weft.protocols import (
-    MemoryEvent,
-    MemoryEventType,
-    MemoryScope,
-    ProviderContext,
-)
+from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
+from ctx_weft.core.state.models import NormalTaskSettings, Task
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
-
 T = MemoryEventType
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -26,224 +29,99 @@ def _ctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
 
 
-def _sc(task_id: str = "t1", agent_id: str = "ag1") -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id=task_id, agent_id=agent_id)
+def _task_sc(task_id="t1", agent="ag1") -> MemoryScope:
+    """task 层 scope（含 task_id）——写入 task 层事件用。"""
+    return MemoryScope(session_id="s1", task_id=task_id, agent_id=agent)
 
 
-def _conv_ev(content, t, role, **meta) -> MemoryEvent:
-    return MemoryEvent(
-        type=T.AGENT_CONVERSATION_TURN, scope=_sc(), content=content,
-        timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta,
-    )
+def _agent_sc(agent="ag1") -> MemoryScope:
+    """agent 层 scope（task_id=None）——_synthesize_dispatch_pair 写入目标。"""
+    return MemoryScope(session_id="s1", task_id=None, agent_id=agent)
 
 
-async def _collect(source, mem) -> list:
-    deps = AssemblerDeps(memory=mem, knowledge_providers=[], provider_ctx=_ctx())
-    req = ContextRequest(
-        purpose="act", scope=_sc(task_id="t2"), task=None, agent=None, session=None,
-        template=None, bound_capabilities=[],
-    )
-    return [b async for b in source.fetch(req, deps)]
+def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
+    return MemoryEvent(type=type_, scope=scope, content=content,
+                       timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta)
 
 
-async def test_agent_experience_renders_conversation_turns() -> None:
-    mem = InMemoryMemoryProvider()
-    # 上一个 root task 的对话被保全为 AGENT_CONVERSATION_TURN（agent 层，按 agent_id 跨 task）
-    await mem.ingest(_conv_ev("hi there", 0, "user"), _ctx())
-    await mem.ingest(_conv_ev("on it", 1, "assistant",
-                              tool_calls=[{"id": "tc1", "name": "web", "input": {"q": "x"}}]), _ctx())
-    await mem.ingest(_conv_ev("search out", 2, "tool", tool_call_id="tc1"), _ctx())
-
-    blocks = await _collect(AgentExperienceSource(), mem)
-    by_role = {}
-    for b in blocks:
-        by_role.setdefault(b.metadata["role"], []).append(b)
-
-    assert by_role["user"][0].content == "hi there"
-    assert by_role["assistant"][0].metadata["tool_calls"][0]["id"] == "tc1"
-    assert by_role["tool"][0].metadata["tool_call_id"] == "tc1"
+def _task(task_id="t1", agent="ag1", prompt="帮我把这个ppt写成pdf") -> Task:
+    return Task(id=task_id, session_id="s1", status="FINISHED", tenant_id="default",
+                assigned_agent_id=agent, creator_agent_id=agent, parent_task_id=None,
+                title="PPTX转PDF", description="转换为 PDF", user_prompt=prompt,
+                settings=NormalTaskSettings())
 
 
-# ---------------------------------------------------------------------------
-# record_root_self_experience tests
-# ---------------------------------------------------------------------------
-
-from ctx_weft.core.loop.steps.finalize import (
-    ROOT_SELF_EXPERIENCE_TURN_LIMIT,
-    record_root_self_experience,
-)
-from ctx_weft.core.state.models import NormalTaskSettings, Task
+async def _agent_turns(mem, agent_scope):
+    """返回 agent scope 的 AGENT_CONVERSATION_TURN 记录（chronological）。"""
+    recs = await mem.recall_recent(
+        agent_scope, [T.AGENT_CONVERSATION_TURN], 2000, _ctx())
+    return list(reversed(recs))
 
 
-def _root_task(task_id: str = "t1") -> Task:
-    return Task(
-        id=task_id, session_id="s1", status="ACTIVE", tenant_id="default",
-        assigned_agent_id="ag1", creator_agent_id="ag1",
-        title="Greet", description="", user_prompt="hello, who are you?",
-        settings=NormalTaskSettings(),
-    )
-
-
-async def _seed_task_conversation(mem, scope, n_assistant: int) -> None:
-    """Ingest USER_PROMPT + n_assistant LLM_RESPONSE into the task layer."""
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=scope, content="hello, who are you?",
-                                 timestamp=_BASE, role="user"), _ctx())
-    for i in range(n_assistant):
-        await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=scope, content=f"reply {i}",
-                                     timestamp=_BASE + timedelta(seconds=i + 1), role="assistant",
-                                     metadata={"tool_calls": []}), _ctx())
-
-
-async def test_few_turns_preserves_conversation() -> None:
-    mem = InMemoryMemoryProvider()
-    scope = _sc()
-    await _seed_task_conversation(mem, scope, n_assistant=2)  # ≤3 → preserve
-
-    result = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
-
-    assert result["mode"] == "conversation"
-    turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    # 1 user + 2 assistant = 3 copied turns, recalled across task boundary (same agent_id)
-    assert len(turns) == 3
-    assert {r.role for r in turns} == {"user", "assistant"}
-    # 没有写 dispatch pair
-    pair = await mem.recall_recent(_sc(task_id="t2"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert pair == []
-
-
-async def test_many_turns_writes_dispatch_pair() -> None:
-    mem = InMemoryMemoryProvider()
-    scope = _sc()
-    await _seed_task_conversation(mem, scope, n_assistant=5)  # >3 → pair
-
-    result = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
-
-    assert result["mode"] == "dispatch"
-    disp = await mem.recall_recent(_sc(task_id="t2"), [T.TASK_DISPATCH], 100, _ctx())
-    res = await mem.recall_recent(_sc(task_id="t2"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert len(disp) == 1 and len(res) == 1
-    tcid = disp[0].metadata["tool_call_id"]
-    assert res[0].metadata["tool_call_id"] == tcid              # paired
-    assert disp[0].metadata["arguments"]["task_prompt"] == "hello, who are you?"
-    assert "final out" in res[0].content
-    # 原始 user prompt 作为一条 user 回合补回（否则经验里看不到"用户问的是什么"）
-    turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    assert len(turns) == 1 and turns[0].role == "user"
-    assert "hello, who are you?" in turns[0].content
-
-
-async def test_dispatch_pair_includes_original_user_prompt() -> None:
-    """>3-turn root: the synthesized experience must surface the original user prompt as a
-    user turn, not only buried inside the delegate_task arguments."""
-    mem = InMemoryMemoryProvider()
-    scope = _sc()
-    await _seed_task_conversation(mem, scope, n_assistant=5)  # >3 → dispatch path
-
-    result = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
-    assert result["mode"] == "dispatch"
-
-    # the user turn must precede the synthesized dispatch pair (so it renders as [user][assistant][tool])
-    user_turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    disp = await mem.recall_recent(_sc(task_id="t2"), [T.TASK_DISPATCH], 100, _ctx())
-    assert len(user_turns) == 1 and user_turns[0].role == "user"
-    assert "hello, who are you?" in user_turns[0].content
-    assert user_turns[0].timestamp <= disp[0].timestamp
-
-
-async def test_conversation_appends_clean_final_answer() -> None:
-    """finish_task 收尾的 root：经验末尾须补一条 role=assistant、内容=task.outputs、不含 Process Report。
-
-    答复经 finish_task 进 task.outputs（SILENT，不入 task 层），那轮 LLM_RESPONSE content 为空，
-    所以 conversation 重建本来只剩 USER_PROMPT。修复后须补回最终答复，且只放纯答复（不带 report
-    格式，避免带偏后续 assistant 回复风格）。
+async def test_synthesize_writes_only_finish_pair_no_body_mirror():
+    """task-resident：task 层有 UP + 段摘要时，agent 层仍只写 finish 对（不镜像 body）。
+    body（UP/段摘要）留 task 层、原样保留。
     """
     mem = InMemoryMemoryProvider()
-    scope = _sc()
-    # task layer: user prompt + one EMPTY finish turn (answer lives in task.outputs)
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=scope, content="who are you?",
-                                 timestamp=_BASE, role="user"), _ctx())
-    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=scope, content="",
-                                 timestamp=_BASE + timedelta(seconds=1), role="assistant",
-                                 metadata={"tool_calls": []}), _ctx())
-    task = _root_task()
-    task.outputs = "I am your assistant."
-    mem_content = "I am your assistant.\n\nProcess Report: greeted the user"
+    tsc = _task_sc()
+    asc = _agent_sc()
+    await mem.ingest(_ev(T.USER_PROMPT, tsc, "帮我转", 0, role="user"), _ctx())
+    await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "### 会话目标\n转 PDF", 1, role="assistant"), _ctx())
+    task = _task()
 
-    result = await record_root_self_experience(mem, scope, task, mem_content, "success", _ctx())
-    assert result["mode"] == "conversation"
+    await _synthesize_dispatch_pair(mem, asc, task, "PDF转换执行过程：成功转换了文件", "PDF成功完成转换", "success", _ctx())
 
-    turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    answers = [r for r in turns if r.role == "assistant" and r.metadata.get("final_answer")]
-    assert len(answers) == 1, "expected exactly one appended final-answer assistant turn"
-    assert answers[0].content == "I am your assistant."
-    assert "Process Report" not in answers[0].content
-    # the final answer must be the chronologically last turn (latest timestamp)
-    newest = max(turns, key=lambda r: r.timestamp)
-    assert newest.metadata.get("final_answer") is True
+    turns = await _agent_turns(mem, asc)
+    # 只有 finish 对（assistant finish_task + tool task_summary）
+    roles = [r.role for r in turns]
+    assert roles == ["assistant", "tool"], f"task-resident: only finish pair expected; got roles={roles}"
+    assert all(r.type == T.AGENT_CONVERSATION_TURN for r in turns)
+    assert turns[-2].metadata.get("tool_calls", [{}])[0].get("name", "").endswith("finish_task")
+    # 反转契约：finish 对 assistant.content = act_recap（过程复述，≠ 答复）；tool.content = task_summary
+    assert turns[-2].content == "PDF转换执行过程：成功转换了文件"
+    assert turns[-1].content == "PDF成功完成转换"
+    assert all(r.metadata.get("origin_task_id") == "t1" for r in turns)
+
+    # body 留 task 层（UP + 段摘要原样保留，未被镜像/supersede）
+    body = await mem.recall_recent(tsc, [T.USER_PROMPT, T.TASK_COMPACT_SUMMARY], 100, _ctx())
+    assert {r.content for r in body} == {"帮我转", "### 会话目标\n转 PDF"}
 
 
-async def test_conversation_no_final_answer_when_no_output() -> None:
-    """没有 outputs（如 fail 收尾无产出）时不追加空答复回合。"""
+async def test_no_task_layer_body_still_writes_finish_pair():
+    """task 层无任何 body → agent 层仍写 finish 对（2 条）。"""
     mem = InMemoryMemoryProvider()
-    scope = _sc()
-    await _seed_task_conversation(mem, scope, n_assistant=2)
-    task = _root_task()  # outputs left as default (None)
+    asc = _agent_sc()
+    task = _task(prompt="")
 
-    await record_root_self_experience(mem, scope, task, "summary only", "fail", _ctx())
+    await _synthesize_dispatch_pair(mem, asc, task, "out", "", "success", _ctx())
 
-    turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    assert not any(r.metadata.get("final_answer") for r in turns)
+    turns = await _agent_turns(mem, asc)
+    assert len(turns) == 2
+    assert turns[-2].role == "assistant"
+    assert turns[-1].role == "tool"
+    # 无 user 镜像（无 body）
+    assert not any(r.role == "user" for r in turns)
 
 
-async def test_self_experience_idempotent_dispatch() -> None:
-    """finalize 重入：再调一次 record_root_self_experience 不得重复写合成 dispatch 对。"""
+async def test_finish_pair_marker_and_report():
+    """finish 对（反转契约）：assistant.content = act_recap（过程复述，≠ 答复）、finish_task 无参标记；
+    tool content = task_summary（过程报告）。答复由内联 body / blackboard 承载，不在 finish 对。"""
     mem = InMemoryMemoryProvider()
-    scope = _sc()
-    await _seed_task_conversation(mem, scope, n_assistant=5)  # >3 → dispatch
-    await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
-    second = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
+    tsc = _task_sc()
+    asc = _agent_sc()
+    await mem.ingest(_ev(T.USER_PROMPT, tsc, "帮我转", 0, role="user"), _ctx())
+    task = _task()
+    task.outputs = "## PDF 已完成"  # 答复走 blackboard / 内联 body，不进 finish 对
 
-    assert second["mode"] == "skipped"
-    res = await mem.recall_recent(_sc(task_id="t2"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert len(res) == 1  # 不重复
+    await _synthesize_dispatch_pair(mem, asc, task, "PDF转换执行过程摘要", "成功转换", "success", _ctx())
 
-
-async def test_self_experience_idempotent_conversation() -> None:
-    """≤3 档同样幂等：重入不得让对话回合翻倍。"""
-    mem = InMemoryMemoryProvider()
-    scope = _sc()
-    await _seed_task_conversation(mem, scope, n_assistant=2)  # ≤3 → conversation
-    first = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
-    second = await record_root_self_experience(mem, scope, _root_task(), "final out", "success", _ctx())
-
-    assert second["mode"] == "skipped"
-    turns = await mem.recall_recent(_sc(task_id="t2"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    assert len(turns) == first["count"]  # 只有第一次的回合，没翻倍
-
-
-async def test_threshold_boundary() -> None:
-    assert ROOT_SELF_EXPERIENCE_TURN_LIMIT == 3
-    # exactly 3 → conversation
-    mem = InMemoryMemoryProvider()
-    await _seed_task_conversation(mem, _sc(), n_assistant=3)
-    r3 = await record_root_self_experience(mem, _sc(), _root_task(), "out", "success", _ctx())
-    assert r3["mode"] == "conversation"
-    # exactly 4 → dispatch
-    mem4 = InMemoryMemoryProvider()
-    await _seed_task_conversation(mem4, _sc(), n_assistant=4)
-    r4 = await record_root_self_experience(mem4, _sc(), _root_task(), "out", "success", _ctx())
-    assert r4["mode"] == "dispatch"
-
-
-async def test_conversation_turns_count_toward_agent_compact() -> None:
-    """AGENT_CONVERSATION_TURN records count in the agent-compact trigger set."""
-    mem = InMemoryMemoryProvider()
-    await mem.ingest(_conv_ev("u", 0, "user"), _ctx())
-    await mem.ingest(_conv_ev("a", 1, "assistant", tool_calls=[]), _ctx())
-
-    n = await mem.count_recent(
-        _sc(task_id="t2"),
-        [T.TASK_DISPATCH_RESULT, T.AGENT_COMPACT_SUMMARY, T.AGENT_CONVERSATION_TURN],
-        _ctx(),
-    )
-    assert n == 2
+    turns = await _agent_turns(mem, asc)
+    assert [r.role for r in turns] == ["assistant", "tool"]
+    tcs = turns[-2].metadata.get("tool_calls", [])
+    assert len(tcs) == 1 and tcs[0]["name"].endswith("finish_task")
+    assert tcs[0]["input"] == {}   # finish_task 无参收尾标记
+    # 反转契约：assistant.content = act_recap（过程复述），tool.content = task_summary
+    assert turns[-2].content == "PDF转换执行过程摘要"
+    assert turns[-1].content == "成功转换"
+    # tool_call 配对
+    assert turns[-1].metadata.get("tool_call_id") == tcs[0]["id"]

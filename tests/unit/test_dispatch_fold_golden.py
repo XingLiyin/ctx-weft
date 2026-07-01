@@ -1,230 +1,90 @@
-"""Golden scenarios for root-task experience fold across dispatch topologies.
+"""端到端：root task close 后，AgentRecallSource 渲染序符合 task-resident 胶囊形态。
 
-Verifies "nothing gets lost": across self-work, use_subagent=False/True children,
-nested sub-agents, and an agent running multiple sequential roots —
-  - live (before root finalize): a child's dispatch result is recallable;
-  - after root finalize: the root's own experience survives; its sub-tasks are
-    folded (superseded); other roots' experiences are NOT collateral-folded.
-
-Drives the real finalize-order (fold_root_subtree → record_root_self_experience)
-against InMemoryMemoryProvider with a fake task store. >3 assistant turns is used
-so self-experience takes the synthesized dispatch-pair form — the case that shares
-a type with the records being folded, hence the one most at risk of loss.
+task-resident（spec 2026-06-28 §3.3）：
+  body 留 task 层（USER_PROMPT / TASK_COMPACT_SUMMARY，由 recall_recent_by_agent 读）
+  + agent 层 finish 对（AGENT_CONVERSATION_TURN assistant finish_task + tool Process Report）
+  → composer 按 (timestamp, seq_no) 归并出 [user][assistant 摘要][finish 对]。
+不再镜像 body 进 agent 层，也不写 TASK_DISPATCH / TASK_DISPATCH_RESULT 作为 root 自残留。
 """
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps.finalize import (
-    fold_root_subtree,
-    record_root_self_experience,
+from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
+from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
+from ctx_weft.protocols import (
+    MemoryEvent, MemoryEventType, MemoryScope, ProviderContext,
 )
 from ctx_weft.core.state.models import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-
-pytestmark = pytest.mark.asyncio
 
 T = MemoryEventType
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _ctx() -> ProviderContext:
-    return ProviderContext(session_id="s1", tenant_id="default")
+def _pctx(): return ProviderContext(session_id="s1", tenant_id="default")
+def _sc(agent="ag1"): return MemoryScope(session_id="s1", task_id=None, agent_id=agent)
 
 
-def _sc(task_id: str, agent_id: str) -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id=task_id, agent_id=agent_id)
+def _task():
+    return Task(id="t1", session_id="s1", status="FINISHED", tenant_id="default",
+                assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id=None,
+                title="PPTX转PDF", description="转 PDF", user_prompt="把 ppt 转 pdf",
+                settings=NormalTaskSettings())
 
 
-@dataclass
-class World:
-    """A tiny task tree + the shared memory, enough to drive finalize realistically."""
-
-    mem: InMemoryMemoryProvider
-    tasks: dict[str, Task] = field(default_factory=dict)
-    _t: int = 0
-
-    def task(self, tid: str, *, parent: str | None, assigned: str, creator: str) -> Task:
-        t = Task(
-            id=tid, session_id="s1", status="ACTIVE", tenant_id="default",
-            assigned_agent_id=assigned, creator_agent_id=creator, parent_task_id=parent,
-            title=tid, description="", user_prompt=f"do {tid}", settings=NormalTaskSettings(),
-        )
-        self.tasks[tid] = t
-        return t
-
-    def get(self, tid: str) -> Task | None:
-        return self.tasks.get(tid)
-
-    def _tick(self) -> int:
-        self._t += 1
-        return self._t
-
-    async def report_child(self, parent_agent: str, parent_task: str, child_id: str) -> None:
-        """A child finished and reported back into the parent agent's layer (dispatch pair)."""
-        scope = _sc(parent_task, parent_agent)
-        tcid = f"tc-{child_id}"
-        await self.mem.ingest(MemoryEvent(type=T.TASK_DISPATCH, scope=scope, content="delegate",
-                                          timestamp=_BASE + timedelta(seconds=self._tick()),
-                                          role="assistant", metadata={"tool_call_id": tcid}), _ctx())
-        await self.mem.ingest(MemoryEvent(type=T.TASK_DISPATCH_RESULT, scope=scope, content=f"{child_id} out",
-                                          timestamp=_BASE + timedelta(seconds=self._tick()), role="tool",
-                                          metadata={"tool_call_id": tcid, "child_task_id": child_id}), _ctx())
-
-    async def seed_conversation(self, root: Task, n_assistant: int) -> None:
-        scope = _sc(root.id, root.assigned_agent_id)
-        await self.mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=scope, content=root.user_prompt,
-                                          timestamp=_BASE + timedelta(seconds=self._tick()), role="user"), _ctx())
-        for _ in range(n_assistant):
-            await self.mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=scope, content="reply",
-                                              timestamp=_BASE + timedelta(seconds=self._tick()),
-                                              role="assistant", metadata={"tool_calls": []}), _ctx())
-
-    async def finalize_root(self, root: Task, n_assistant: int = 5) -> tuple[int, dict]:
-        """Mirror FinalizeStep order for an agent root: fold subtree, then record self-experience."""
-        await self.seed_conversation(root, n_assistant)
-        scope = _sc(root.id, root.assigned_agent_id)
-        folded = await fold_root_subtree(self.mem, scope, root, self.get, _ctx())
-        info = await record_root_self_experience(self.mem, scope, root, f"{root.id} out", "success", _ctx())
-        return folded, info
-
-
-async def _agent_result_children(mem, agent_id: str) -> list[str]:
-    """child_task_id of the non-superseded TASK_DISPATCH_RESULT records in an agent's layer."""
-    recs = await mem.recall_recent(_sc("ignored", agent_id), [T.TASK_DISPATCH_RESULT], 1000, _ctx())
-    return sorted(r.metadata.get("child_task_id") for r in recs)
-
-
-# ── Scenario 1: agent does the work itself, no sub-tasks ─────────────────────
-
-
-async def test_self_work_only_records_experience_folds_nothing() -> None:
+@pytest.mark.asyncio
+async def test_capsule_renders_body_and_finish_pair():
+    """task-resident：root task close 后：
+    task 层 USER_PROMPT + TASK_COMPACT_SUMMARY 留 task 层（由 recall_recent_by_agent 读），
+    agent 层只写 finish 对（assistant finish_task + tool Process Report）。
+    composer 按 (timestamp, seq_no) 归并 → [user][assistant 摘要][finish 对]。
+    不再镜像 body，也不写 TASK_DISPATCH / TASK_DISPATCH_RESULT 作为 root 自残留。
+    """
     mem = InMemoryMemoryProvider()
-    w = World(mem)
-    R = w.task("R", parent=None, assigned="A", creator="A")  # session root
+    scope = _sc()
+    # task 层：一条 UP + 一条 TASK_COMPACT_SUMMARY（留 task 层，供 AgentRecallSource 读）
+    tscope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=tscope,
+                                 content="把 ppt 转 pdf", timestamp=_BASE, role="user",
+                                 metadata={}), _pctx())
+    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tscope,
+                                 content="### 会话目标\n转 PDF", timestamp=_BASE, role="assistant",
+                                 metadata={}), _pctx())
+    # 在 agent scope 合成 finish 对（task-resident：不镜像 body）
+    _task_summary = "综合进度：PDF 转换完成"
+    await _synthesize_dispatch_pair(mem, scope, _task(), "## PDF 已完成", _task_summary, "success", _pctx())
 
-    folded, info = await w.finalize_root(R, n_assistant=5)
+    deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    req = SimpleNamespace(scope=scope)
+    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks.sort(key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)))
+    types = [b.metadata.get("type") for b in blocks]
 
-    assert folded == 0
-    assert info["mode"] == "dispatch"  # >3 turns → synthesized self pair
-    # R's own experience is present (nothing lost), and it points at R itself
-    assert await _agent_result_children(mem, "A") == ["R"]
+    # task 层 body 类型仍由 AgentRecallSource 读到（recall_recent_by_agent）
+    assert T.USER_PROMPT in types
+    assert T.TASK_COMPACT_SUMMARY in types
 
+    # finish 对在 agent 层（AGENT_CONVERSATION_TURN）；无 TASK_DISPATCH root 自残留
+    assert T.AGENT_CONVERSATION_TURN in types
+    assert T.TASK_DISPATCH not in types, "root self-residue must not use TASK_DISPATCH anymore"
 
-# ── Scenario 2: live visibility, then fold of use_subagent=False children ────
+    # 归并序：user(UP) → assistant(summary) → assistant(finish_task) → tool(Process Report)
+    history = [b for b in blocks if b.metadata.get("type") in (
+        T.USER_PROMPT, T.TASK_COMPACT_SUMMARY, T.AGENT_CONVERSATION_TURN)]
+    roles = [b.metadata.get("role") for b in history]
+    assert len(history) == 4, f"expected 4 history blocks (body + finish pair), got {len(history)}: {roles}"
+    assert roles == ["user", "assistant", "assistant", "tool"], f"got roles={roles}"
 
-
-async def test_subagent_false_children_visible_live_then_folded() -> None:
-    mem = InMemoryMemoryProvider()
-    w = World(mem)
-    R = w.task("R", parent=None, assigned="A", creator="A")
-    w.task("C1", parent="R", assigned="A", creator="A")
-    w.task("C2", parent="R", assigned="A", creator="A")
-    await w.report_child("A", "R", "C1")
-    await w.report_child("A", "R", "C2")
-
-    # live: both children's results are visible to the agent
-    assert await _agent_result_children(mem, "A") == ["C1", "C2"]
-
-    folded, _ = await w.finalize_root(R, n_assistant=5)
-
-    assert folded == 4  # C1 + C2, dispatch & result each
-    # after finalize: only R's own experience remains
-    assert await _agent_result_children(mem, "A") == ["R"]
-
-
-# ── Scenario 3: use_subagent=True child folded from creator's layer ──────────
-
-
-async def test_subagent_true_child_folded_from_parent_layer() -> None:
-    mem = InMemoryMemoryProvider()
-    w = World(mem)
-    R = w.task("R", parent=None, assigned="A", creator="A")
-    w.task("D", parent="R", assigned="B", creator="A")  # ran on sub-agent B
-    await w.report_child("A", "R", "D")
-
-    assert await _agent_result_children(mem, "A") == ["D"]
-    folded, _ = await w.finalize_root(R, n_assistant=5)
-    assert folded == 2
-    assert await _agent_result_children(mem, "A") == ["R"]
-
-
-# ── Scenario 4: nested sub-agent recursion ──────────────────────────────────
-
-
-async def test_nested_subagent_each_layer_keeps_own_root() -> None:
-    mem = InMemoryMemoryProvider()
-    w = World(mem)
-    # A's root R delegates D to sub-agent B; D (B's root) delegates E to itself on B
-    R = w.task("R", parent=None, assigned="A", creator="A")
-    D = w.task("D", parent="R", assigned="B", creator="A")
-    w.task("E", parent="D", assigned="B", creator="B")
-
-    # E reported into B's layer; D reported up into A's layer
-    await w.report_child("B", "D", "E")
-    await w.report_child("A", "R", "D")
-
-    # D (B's root) finalizes: fold E in B's layer, record D self-experience in B's layer
-    folded_b, _ = await w.finalize_root(D, n_assistant=5)
-    assert folded_b == 2  # E folded
-    assert await _agent_result_children(mem, "B") == ["D"]  # B keeps its own root D, not E
-
-    # R (A's root) finalizes: D is A's sub-task → folded from A's layer
-    folded_a, _ = await w.finalize_root(R, n_assistant=5)
-    assert folded_a == 2  # D folded
-    assert await _agent_result_children(mem, "A") == ["R"]
-    # B's layer is untouched by A's fold — D's experience still there
-    assert await _agent_result_children(mem, "B") == ["D"]
-
-
-# ── Scenario 5: one agent runs multiple sequential roots ─────────────────────
-
-
-async def test_sequential_roots_keep_each_others_experience() -> None:
-    mem = InMemoryMemoryProvider()
-    w = World(mem)
-    # A is a sub-agent that receives two root tasks R1, R2 from parent P
-    R1 = w.task("R1", parent="p1", assigned="A", creator="P")
-    R2 = w.task("R2", parent="p2", assigned="A", creator="P")
-    w.task("C1", parent="R1", assigned="A", creator="A")
-    w.task("C2", parent="R2", assigned="A", creator="A")
-
-    # R1's child, then R1 finalizes
-    await w.report_child("A", "R1", "C1")
-    folded1, _ = await w.finalize_root(R1, n_assistant=5)
-    assert folded1 == 2  # C1 folded
-    assert await _agent_result_children(mem, "A") == ["R1"]  # R1 experience kept
-
-    # R2's child, then R2 finalizes — must NOT collateral-fold R1's experience
-    await w.report_child("A", "R2", "C2")
-    assert await _agent_result_children(mem, "A") == ["C2", "R1"]  # live: C2 + kept R1
-    folded2, _ = await w.finalize_root(R2, n_assistant=5)
-    assert folded2 == 2  # only C2 folded
-    # both roots' experiences survive; neither child remains
-    assert await _agent_result_children(mem, "A") == ["R1", "R2"]
-
-
-# ── Scenario 6: short root preserves conversation (not a dispatch pair) ──────
-
-
-async def test_short_root_preserves_conversation_and_folds_children() -> None:
-    mem = InMemoryMemoryProvider()
-    w = World(mem)
-    R = w.task("R", parent=None, assigned="A", creator="A")
-    w.task("C1", parent="R", assigned="A", creator="A")
-    await w.report_child("A", "R", "C1")
-
-    folded, info = await w.finalize_root(R, n_assistant=2)  # ≤3 → preserve conversation
-
-    assert folded == 2
-    assert info["mode"] == "conversation"
-    # child dispatch result folded; no leftover dispatch results
-    assert await _agent_result_children(mem, "A") == []
-    # but the preserved conversation survives as agent-layer experience
-    turns = await mem.recall_recent(_sc("ignored", "A"), [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    assert len(turns) == 3  # 1 user + 2 assistant
+    # user block carries original prompt (task layer)
+    assert "把 ppt 转 pdf" in history[0].content
+    # assistant summary block carries compaction content (TASK_COMPACT_SUMMARY, task layer)
+    assert "会话目标" in history[1].content
+    # finish_task tool_call (agent layer finish pair)
+    finish_tc = history[2].metadata.get("tool_calls", [])
+    assert finish_tc and finish_tc[0].get("name", "").endswith("finish_task")
+    # task_summary（process report）in tool 回合（agent layer）
+    assert _task_summary in history[3].content

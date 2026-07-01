@@ -14,6 +14,13 @@ if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
 
+# 当前任务「上一段执行复述」的统一渲染标题：composer 的非压缩 retry 进度块、以及压缩复用
+# act_recap 的 task 层段摘要（role=assistant、task_conversation 来源）都冠以此标题，确保
+# 观察者/actor 总能识别"先前进度"锚点。放在 leaf utils 里供 composer 与 _history 共享（避免
+# 经 sources 包 __init__ 触发循环 import）。
+PROGRESS_SO_FAR_HEADING = "## Progress So Far"
+
+
 def now_utc() -> datetime:
     """UTC current time."""
     return datetime.now(UTC)

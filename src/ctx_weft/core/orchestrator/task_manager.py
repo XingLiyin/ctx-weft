@@ -59,7 +59,7 @@ class TaskManager:
         self._queue: TaskQueue = TaskQueue()
         self._cancelled: bool = False
         self._tasks: dict[str, Task] = {}
-        # 同一轮（一次 task run）内 delegate_task / delegate_plan / replan 先投这里，
+        # 同一轮（一次 task run）内 delegate_task / delegate_plan 先投这里，
         # runner 正常返回后由 _flush_staged 统一入队，实现「同批次 FIFO」。
         # key = 正在运行的 task_id（即被 spawn 子任务的 parent_task_id）。
         self._staged: dict[str, list[tuple[Task, list[str] | None, str | None]]] = {}
@@ -198,6 +198,29 @@ class TaskManager:
         key = parent_task_id or ""
         self._staged.setdefault(key, []).append((task, blocked_by, parent_task_id))
         logger.debug("TaskManager.stage_task: %s under parent=%s", task.id, key)
+
+    def detach_staged(self, from_parent_id: str, to_parent_id: str | None) -> None:
+        """把 from_parent_id 本轮 staged 的子任务改投到 to_parent_id 名下（独立后续）。
+
+        用于 finish_task 与 delegate_* 同批出现时：当前 task 收尾，被派发任务
+        不再做它的阻塞子任务，而改挂到它的 parent（当前是 root 则为 None→顶层）独立调度。
+
+        只改写 tuple 的 parent_task_id（驱动 _flush_staged 时 push_task 的归属）与
+        task.parent_task_id，**不搬桶**——桶 key 仍是当前运行 task 的 id，_flush_staged
+        才能在本 run 结束时正常弹桶入队。plan 内部兄弟间的 blocked_by 顺序链原样保留。
+        """
+        bucket = self._staged.get(from_parent_id)
+        if not bucket:
+            return
+        rewritten: list[tuple[Task, list[str] | None, str | None]] = []
+        for task, blocked_by, _ in bucket:
+            task.parent_task_id = to_parent_id
+            rewritten.append((task, blocked_by, to_parent_id))
+        self._staged[from_parent_id] = rewritten
+        logger.debug(
+            "TaskManager.detach_staged: %d staged task(s) re-parented %s → %s",
+            len(rewritten), from_parent_id, to_parent_id,
+        )
 
     async def _flush_staged(self, task_id: str) -> None:
         """run 正常结束时把缓冲区的子任务入队。

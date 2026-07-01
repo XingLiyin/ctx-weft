@@ -43,7 +43,7 @@ async def _ingest_n(mem, type_, n: int, role: str) -> None:
 
 
 def _ctx(mem):
-    return SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    return SimpleNamespace(memory=mem, provider_ctx=_pctx(), task_manager=None)
 
 
 def _state(*, delta=20, ratio=0.8, context_limit=100000):
@@ -63,9 +63,28 @@ async def test_task_layer_growth_triggers_compaction() -> None:
 
 
 async def test_agent_layer_growth_still_triggers() -> None:
-    """回归：agent 层派发日志达 delta 仍触发。"""
+    """回归：agent 层 root 胶囊达 delta 仍触发（Task-4：L0 单元 = task 层 body + finish 对）。"""
     mem = InMemoryMemoryProvider()
-    await _ingest_n(mem, T.TASK_DISPATCH_RESULT, 20, role="tool")
+    # 每组 = task 层 body（task_id=root{i}）+ 2 条 AGENT_CONVERSATION_TURN（20 组 = 20 L0 单元）
+    for i in range(20):
+        body_scope = MemoryScope(session_id="s1", task_id=f"root{i}", agent_id="a1")
+        await mem.ingest(
+            MemoryEvent(type=T.USER_PROMPT, scope=body_scope, content=f"body {i}",
+                        timestamp=_BASE + timedelta(seconds=i * 10), role="user"),
+            _pctx(),
+        )
+        await mem.ingest(
+            MemoryEvent(type=T.AGENT_CONVERSATION_TURN, scope=_scope(), content=f"user {i}",
+                        timestamp=_BASE + timedelta(seconds=i * 10), role="user",
+                        metadata={"origin_task_id": f"root{i}", "parent_task_id": None}),
+            _pctx(),
+        )
+        await mem.ingest(
+            MemoryEvent(type=T.AGENT_CONVERSATION_TURN, scope=_scope(), content=f"asst {i}",
+                        timestamp=_BASE + timedelta(seconds=i * 10 + 1), role="assistant",
+                        metadata={"origin_task_id": f"root{i}", "parent_task_id": None}),
+            _pctx(),
+        )
     assert await PrepareStep()._should_compact(_state(delta=20), _ctx(mem), token_estimate=10) is True
 
 

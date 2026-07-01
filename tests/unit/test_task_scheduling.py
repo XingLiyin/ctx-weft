@@ -239,3 +239,59 @@ async def test_run_task_flushes_staged_on_normal_return() -> None:
 
     assert tm._staged == {}                 # P 的缓冲已 flush 清空
     assert tm.get_task("child") is not None  # child 已 flush 入队并登记
+
+
+# ── detach_staged：finish_task 与 delegate 同批时把派发改投为独立后继 ────────────────
+
+
+async def test_detach_staged_reparents_to_grandparent() -> None:
+    """把 P 本轮 staged 的子任务改投到 P 的 parent(G)，flush 后归属记到 G。"""
+    tm = TaskManager(session_id="s1")
+    tm.stage_task(_task("A", parent="P"), parent_task_id="P")
+    tm.stage_task(_task("B", parent="P"), parent_task_id="P")
+
+    tm.detach_staged("P", "G")
+    assert "P" in tm._staged                 # 不搬桶：flush key 仍是当前运行 task 的 id
+
+    await tm._flush_staged("P")
+    assert tm.get_task("A").parent_task_id == "G"
+    assert tm.get_task("B").parent_task_id == "G"
+    assert tm._parent_map["A"] == "G" and tm._parent_map["B"] == "G"
+    assert tm._children_of["G"] == {"A", "B"}
+    assert "P" not in tm._children_of        # 不再是收尾 task 的子任务
+
+
+async def test_detach_staged_to_root_makes_independent() -> None:
+    """当前 task 是 root（parent=None）→ 改投任务成独立顶层 root。"""
+    tm = TaskManager(session_id="s1")
+    tm.stage_task(_task("A", parent="P"), parent_task_id="P")
+
+    tm.detach_staged("P", None)
+    await tm._flush_staged("P")
+
+    assert tm.get_task("A").parent_task_id is None
+    assert "A" not in tm._parent_map         # 无父 → 独立 root
+
+
+async def test_detach_staged_preserves_blocked_chain() -> None:
+    """delegate_plan 改投后，兄弟间 blocked_by 顺序链原样保留，只是父变了。"""
+    tm = TaskManager(session_id="s1")
+    tm.stage_task(_task("A", parent="P"), parent_task_id="P")
+    tm.stage_task(_task("B", parent="P"), parent_task_id="P", blocked_by=["A"])
+
+    tm.detach_staged("P", "G")
+    await tm._flush_staged("P")
+
+    first = tm._queue.pop()
+    assert first is not None and first.task_id == "A"
+    assert tm._queue.pop() is None           # B 仍被 A 阻塞
+    tm._queue.mark_complete("A")
+    second = tm._queue.pop()
+    assert second is not None and second.task_id == "B"
+    assert tm._parent_map["B"] == "G"
+
+
+def test_detach_staged_noop_when_no_bucket() -> None:
+    tm = TaskManager(session_id="s1")
+    tm.detach_staged("P", "G")               # 没有缓冲：静默 no-op，不抛
+    assert tm._staged == {}

@@ -16,8 +16,6 @@ message（首条 task_conversation 来源的 user 回合；fresh task 时即末�
   ---
   {该首条 user message 原内容}
 后续任务上下文 user message：
-  ## Task Background
-  - {blackboard_snippets}
   ## Current Task
   {task.title}
   {task.description}
@@ -27,6 +25,8 @@ message（首条 task_conversation 来源的 user 回合；fresh task 时即末�
   User: {content}
   Assistant: {content} + tool_calls
   Tool: {result}
+
+（Phase 3 2026-06-30: ## Task Background blackboard 段已移除；predecessor 结果经 memory recall 获取。）
 
 Observer system prompt（与 act 同构）：
   role/soul（act identity）
@@ -38,8 +38,8 @@ message），再追加一条尾部 user message（仅发送，不入 memory）�
   {observe ROLE（identity）}
   ---
   {判定提示}
-  Your sub-task results / Upstream task results:
-  - {blackboard_snippets}
+  ## Your sub-tasks（当有 extra["subtask_reviews"] 时）:
+  - {task_id} — {title} [{outcome}]
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ctx_weft.protocols import LLMMessage, LLMTool
 from ctx_weft.protocols.capability import qualify
-from ctx_weft.core.utils import content_to_text, estimate_tokens
+from ctx_weft.core.utils import content_to_text, estimate_tokens, PROGRESS_SO_FAR_HEADING
 from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
@@ -70,10 +70,14 @@ _OBSERVER_ROLE_FALLBACK = "You are an objective observer evaluating task executi
 # 尾部 observe user message 的判定提示（拼在 ROLE 之后）。
 _OBSERVE_JUDGMENT_CUE = (
     "Now act as the observer for the current task. Based on the execution above, judge the "
-    f"task's completion status and call `{REPORT_TASK_OUTCOME_NAME}` exactly once: give a `task_status` "
-    "of `success` (fully accomplished), `retry` (needs another attempt), or `fail` (cannot be "
-    "completed), plus a thorough, evidence-based `task_process_report`. Optionally review your "
-    "own sub-tasks via `task_reviews`. Call no other tools."
+    f"task's completion status and call `{REPORT_TASK_OUTCOME_NAME}` exactly once with: a `task_status` "
+    "of `success` / `retry` / `fail`; an `act_recap` honestly recapping ONLY this act segment — the actor's "
+    "execution AFTER the most recent `## Progress So Far` section (that section is the previous observation's "
+    "recap; if there is none this is the first observation, so start after `## Current Task` / the user's "
+    "message). Don't re-narrate anything before that point. "
+    "And — when status is success/fail — a concise `task_summary`: the important steps and lessons of the "
+    "whole task (a process report, not verbose, and NOT the final output), incorporating the results of any "
+    "sub-tasks you dispatched. Optionally review your own sub-tasks via `task_reviews`. Call no other tools."
 )
 
 _COMPACTION_INSTRUCTION = (
@@ -88,6 +92,59 @@ _RECOGNIZE_INTENT_INSTRUCTION = (
     "title and description (and the session goal if the direction is now clear), then stop. "
     "Call no other tools."
 )
+
+_BACKGROUND_BOUNDARY_DESC = {
+    "interrupt": "本段被用户打断（中途打断）",
+    "plain_text": "你以散文回复后让位用户、暂停等待用户输入",
+    "finish": "任务已通过 finish_task 收尾",
+    "normal": "任务以最终产出正常结束",
+}
+
+
+# close 段（finish/normal）：actor 以 finish_task 收尾，其 result 落 task.outputs。
+# 与 loop.steps.background_observe._CLOSE_BOUNDARIES 保持一致（此处避免跨层 import）。
+_CLOSE_BOUNDARIES = {"finish", "normal"}
+
+
+def _background_observe_cue(boundary: str) -> str:
+    desc = _BACKGROUND_BOUNDARY_DESC.get(boundary, _BACKGROUND_BOUNDARY_DESC["normal"])
+    is_close = boundary in _CLOSE_BOUNDARIES
+    summary_ask = (
+        " 并给出 `task_summary`：整个 task 执行历程的简洁 process report（点出重要步骤与经验，不琐碎；"
+        "不是最终输出），须综合已完成子任务（sub-task）的结果。"
+        if is_close else ""
+    )
+    return (
+        f"当前 task 的状态：{desc}。请基于以上执行过程，调用 `collect_process_report` 一次："
+        "给出 `act_recap`（只复述本段 act——对话里最后一个 `## Progress So Far` 之后 actor 新做的执行；"
+        "若没有该标题则为首次观察，从 `## Current Task` / 用户消息之后算起；该点之前不要回头重述）"
+        + summary_ask +
+        " 只需总结，无需判断 success/retry/fail，不要调用其他工具。"
+    )
+
+
+def _finish_result_section(request) -> str:
+    """close 段（finish/normal）把 actor 的最终产出（task.outputs）注入 prompt。
+
+    finish_task 是 SILENT 工具：其 result 进 task.outputs，**不写任务层对话**；delegate_task
+    是 DISPATCH 工具、也排除出对话重建。若某段仅由 finish(+delegate) 组成，从记忆重建的对话里
+    看不到任何 actor 动作，观察者会**虚构**一段完成叙述。把 task.outputs 显式喂进来，让它据实总结。
+    返回空串表示无产出可注入（保持原行为）。
+    """
+    task = getattr(request, "task", None)
+    outputs = getattr(task, "outputs", None) if task is not None else None
+    if not outputs:
+        return ""
+    text = outputs if isinstance(outputs, str) else content_to_text(outputs)
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return (
+        "## Actor 的最终产出（已通过 finish_task 收尾本段）\n\n"
+        f"{text}\n\n"
+        "（上面是 actor 提交的最终结果，是本段唯一权威的产出依据。请据此如实总结本段进展，"
+        "不要臆测未实际发生的工具调用、步骤或产物。）"
+    )
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s")
@@ -180,6 +237,10 @@ class DefaultComposer(Composer):
             system = self._build_act_system(blocks, request)
             messages = self._build_facet_trailing_messages(blocks, request, _RECOGNIZE_INTENT_INSTRUCTION)
             tools = self._collect_llm_tools(blocks)
+        elif request.purpose == "background_observe":
+            system = self._build_act_system(blocks, request)
+            messages = self._build_background_observe_messages(blocks, request)
+            tools = self._collect_llm_tools(blocks)
         else:  # compact
             system = self._build_act_system(blocks, request)
             messages = self._build_facet_trailing_messages(blocks, request, _COMPACTION_INSTRUCTION)
@@ -223,18 +284,13 @@ class DefaultComposer(Composer):
 
         结构：
           [0..N-1] 历史轮次：user / assistant / tool 各自独立的 LLMMessage
-          [N]      user: Task Background + Current Task + Current Progress + Current Message
+          [N]      user: Current Task + Progress So Far + Current Message
         """
-        # Task Background 只放跨 plan 前序（predecessor / tracking 等）结果；
-        # 排除 subtask——自己派发的子任务结果已通过 agent_experience(tool result) 呈现，
-        # 避免与之重复（spec/06 §12）。
-        bb_blocks = [
-            b for b in blocks
-            if b.kind == "blackboard" and b.metadata.get("intent") != "subtask"
-        ]
+        # Phase 3 (2026-06-30): ## Task Background (blackboard predecessor blocks) removed.
+        # Predecessors now surface via memory recall (Phase 2 inherit/recall); no bb_blocks needed.
         history_blocks = [b for b in blocks if b.kind == "history"]
 
-        # Current Progress (retry feedback): render as a chronologically-placed history
+        # Progress So Far (retry feedback): render as a chronologically-placed history
         # user-block (via task.process_report_at) so it sits right after the attempt that
         # produced it and before the next one — instead of floating to the end (which confusingly
         # re-states stale progress after the new attempt in the observe prompt). Send-only (not
@@ -242,7 +298,7 @@ class DefaultComposer(Composer):
         # fallback) so it can never be mis-placed; in practice the timestamp is always set
         # alongside process_report, so this only affects unexpected/legacy timestamp-less data.
         # max_turns 那轮 compact 直接复用 process_report 作 TASK_COMPACT_SUMMARY → 报告已在 task 层
-        # 历史里，跳过单独的 Current Progress block，避免同一份报告渲染两遍（Option A 去重）。
+        # 历史里，跳过单独的 Progress So Far block，避免同一份报告渲染两遍（Option A 去重）。
         progress_as_history = (
             None if self._progress_already_in_compact(request.task, history_blocks)
             else self._progress_history_block(request.task)
@@ -251,42 +307,33 @@ class DefaultComposer(Composer):
             history_blocks = [*history_blocks, progress_as_history]
 
         history_pairs = self._history_to_messages_with_sources(history_blocks)
-        messages: list[LLMMessage] = [m for m, _src in history_pairs]
-        # 当前 task 的首条 user 回合（directive 的落点）：history 里首条 task_conversation 来源的
-        # user message。找不到（fresh task）则留到下方追加的当前任务上下文 user message。
-        current_task_user_idx = next(
-            (i for i, (m, src) in enumerate(history_pairs)
-             if m.role == "user" and src == "task_conversation"),
-            None,
-        )
-
+        messages: list[LLMMessage] = [m for m, _src, _mtype, _tid in history_pairs]
         task = request.task
+        # 当前 task 的 user 回合（directive 的落点 + ## Current Message 框的落点）：定位到 task_id ==
+        # 当前 task 的那条 USER_PROMPT。task-resident 胶囊下，先前/并行 task 的 raw body（含其
+        # USER_PROMPT）也经 agent_recall 召回进 history，故同时存在多条 user_prompt；不能简单取末条
+        # （parent resume 后同 agent 子 body 的 user_prompt 更新，会误顶 parent 头）。task_id 匹配不到
+        # （fresh task / 旧数据无 task_id）时回退末条 user_prompt。
+        current_task_user_idx = self._current_task_user_index(history_pairs, getattr(task, "id", ""))
+        spec_title, spec_desc, spec_prompt = self._task_spec_fields(blocks, task)
         parts: list[str] = []
 
-        if bb_blocks:
-            lines = ["## Task Background"]
-            for b in bb_blocks:
-                lines.append(f"- {content_to_text(b.content)}")
-            parts.append("\n".join(lines))
-
         if not task.user_prompt_in_memory:
-            # daemon 或尚未持久化的路径：实时构建完整的用户消息
-            if task.title and task.description:
-                parts.append(f"## Current Task\n{task.title}\n{task.description}")
-            elif task.title:
-                parts.append(f"## Current Task\n{task.title}")
+            # daemon 或尚未持久化的路径：实时构建完整的用户消息（spec 取自 task_spec block）
+            if spec_title and spec_desc:
+                parts.append(f"## Current Task\n{spec_title}\n{spec_desc}")
+            elif spec_title:
+                parts.append(f"## Current Task\n{spec_title}")
             if getattr(task, "process_report", None):
-                parts.append(f"## Current Progress\n{task.process_report}")
-            if task.user_prompt:
-                user_prompt_text = (
-                    task.user_prompt
-                    if isinstance(task.user_prompt, str)
-                    else content_to_text(task.user_prompt)
-                )
+                parts.append(f"{PROGRESS_SO_FAR_HEADING}\n{task.process_report}")
+            if spec_prompt:
                 parts.append(
-                    f"## Current Message\n{user_prompt_text}\n\n"
+                    f"## Current Message\n{spec_prompt}\n\n"
                     "（Reply in the same language as the Current Message above.）"
                 )
+        else:
+            # in-memory：渲染期就地装饰最近一条 task_conversation user 回合
+            self._frame_current_message(messages, history_pairs, task, blocks)
 
         if parts:
             # 这条实时构建的当前任务上下文也是「当前 task」回合；history 里没有 task_conversation
@@ -295,7 +342,7 @@ class DefaultComposer(Composer):
                 current_task_user_idx = len(messages)
             messages.append(LLMMessage(role="user", content="\n\n".join(parts)))
         # 兜底：actor prompt 必须以 user 回合结尾——避免以 assistant/tool 结尾让模型困惑地续写自己。
-        # 正常情况下 active/retry 的 Current Progress 已是末条 user；此处仅覆盖 summary 为空等边角。
+        # 正常情况下 active/retry 的 Progress So Far 已是末条 user；此处仅覆盖 summary 为空等边角。
         if messages and messages[-1].role != "user":
             messages.append(LLMMessage(role="user", content="Continue with the task above."))
         # 连续同角色 / 孤立 tool result 的合法化不在装配层做——统一交由
@@ -310,8 +357,9 @@ class DefaultComposer(Composer):
         directive_text = self._build_directive_section(blocks)
         capabilities_text = self._build_capabilities_section(blocks)
         if getattr(request, "purpose", None) == "act":
-            # directive 落到「当前 task」的首条 user message（紧跟任务上下文之后），而不是整个
-            # message 列表的第一条 user——后者可能是更早的跨 task agent_experience 回合。兜底退回末条 user。
+            # directive 落到「当前 task」的 user message（紧跟任务上下文之后），即 history 里末条
+            # user_prompt——而不是整个 message 列表的第一条 user（可能是更早的、经 agent_recall
+            # 召回的已结束 task 回合）。兜底退回末条 user。
             target_idx = current_task_user_idx
             if target_idx is None:
                 target_idx = self._last_user_index(merged)
@@ -321,6 +369,45 @@ class DefaultComposer(Composer):
                 merged = self._prepend_to_first_user(merged, directive_text)
         merged = self._append_to_last_user(merged, capabilities_text)
         return merged
+
+    @staticmethod
+    def _current_task_user_index(history_pairs, task_id) -> int | None:
+        """定位「当前 task」的 user_prompt 回合下标：优先 task_id 精确匹配，回退最后一条 user_prompt。
+
+        history_pairs 是 _history_to_messages_with_sources 的 (msg, src, mem_type, task_id) 四元组。
+        parent resume 后召回里存在多条 user_prompt（parent 自己 + 更新的同 agent 子 body）——按 task_id
+        精确贴到当前 task，避免子 body 顶着 parent 的 ## Current Task 头；task_id 缺失（旧数据）时回退末条。
+        """
+        match = last = None
+        for i, (m, _src, mtype, tid) in enumerate(history_pairs):
+            if m.role == "user" and mtype == "user_prompt":
+                last = i
+                if task_id and tid == task_id:
+                    match = i
+        return match if match is not None else last
+
+    def _frame_current_message(self, messages, history_pairs, task, blocks=None) -> None:
+        """In-memory 路径：把「当前 task」的 USER_PROMPT user message 包成当前消息框架（不落库）。
+
+        history_pairs 是 _history_to_messages_with_sources 返回的 (msg, src, mem_type, task_id) 四元组。
+        当前消息按 task_id == task.id 定位（回退末条 user_prompt）——兼容 agent_recall 及历史 task_conversation 标签。
+        spec（title/description）取自 task_spec block 的 metadata（无块时回退直读 task）。
+        """
+        target = self._current_task_user_index(history_pairs, getattr(task, "id", ""))
+        if target is None:
+            return
+        raw = content_to_text(messages[target].content)
+        spec_title, spec_desc, _ = self._task_spec_fields(blocks, task)
+        prefix = ""
+        if spec_title and spec_desc:
+            prefix = f"## Current Task\n{spec_title}\n{spec_desc}\n\n"
+        elif spec_title:
+            prefix = f"## Current Task\n{spec_title}\n\n"
+        framed = (
+            f"{prefix}## Current Message\n{raw}\n\n"
+            "（Reply in the same language as the Current Message above.）"
+        )
+        messages[target] = LLMMessage(role="user", content=framed)
 
     def _build_facet_trailing_messages(
         self,
@@ -527,7 +614,7 @@ class DefaultComposer(Composer):
 
     def _progress_already_in_compact(self, task, history_blocks: list["ContextBlock"]) -> bool:
         """process_report 是否已作为本轮 TASK_COMPACT_SUMMARY 出现在历史里（max_turns compact 复用
-        了它）。内容精确相等才算（二者同出 verdict.summary）；规则降级的独立摘要内容不同，不会误删。"""
+        了它）。内容精确相等才算（二者同出 verdict.act_recap）；规则降级的独立摘要内容不同，不会误删。"""
         progress = getattr(task, "process_report", None)
         if not progress:
             return False
@@ -536,12 +623,14 @@ class DefaultComposer(Composer):
             if b.metadata.get("type") != MemoryEventType.TASK_COMPACT_SUMMARY:
                 continue
             content = b.content if isinstance(b.content, str) else content_to_text(b.content)
-            if content == progress:
+            # 段摘要经 _history 渲染后可能冠了 PROGRESS_SO_FAR_HEADING（role=assistant、task_conversation
+            # 来源）；裸串与带标题串都算"已在 compact 里"，避免漏判导致进度块重复渲染。
+            if content == progress or content == f"{PROGRESS_SO_FAR_HEADING}\n{progress}":
                 return True
         return False
 
     def _progress_history_block(self, task) -> "ContextBlock | None":
-        """Current Progress 作为带时间戳的 history user-block；缺时间戳/无 progress 时返回 None
+        """Progress So Far 作为带时间戳的 history user-block；缺时间戳/无 progress 时返回 None
         （由调用方退回"追加末尾"的 legacy 行为）。"""
         if not getattr(task, "user_prompt_in_memory", False):
             return None
@@ -551,7 +640,7 @@ class DefaultComposer(Composer):
             return None
         from ctx_weft.core.assembler.assembler import ContextBlock
         from ctx_weft.core.utils import generate_id
-        text = f"## Current Progress\n{progress}"
+        text = f"{PROGRESS_SO_FAR_HEADING}\n{progress}"
         return ContextBlock(
             id=generate_id("blk"), source="current_progress", kind="history", target="messages",
             content=text, priority=3, token_estimate=estimate_tokens(text),
@@ -564,21 +653,28 @@ class DefaultComposer(Composer):
 
         跨层（task_conversation + agent_experience）按 timestamp 正序归并，seq_no 作 tiebreak。
         """
-        return [m for m, _src in self._history_to_messages_with_sources(history_blocks)]
+        return [m for m, _src, _mtype, _tid in self._history_to_messages_with_sources(history_blocks)]
 
     def _history_to_messages_with_sources(
         self, history_blocks: list["ContextBlock"]
-    ) -> list[tuple[LLMMessage, str]]:
-        """同 _history_to_messages，但每条 message 附带其来源 block.source。
+    ) -> list[tuple[LLMMessage, str, str, str]]:
+        """同 _history_to_messages，但每条 message 附带来源 block.source、memory event type、task_id。
 
-        来源用于区分「当前 task 自有对话」（source="task_conversation"）与跨 task 的
-        agent_experience 回合——directive 注入需定位到当前 task 的首条 user 回合。
+        返回 (LLMMessage, source, mem_type, task_id) 四元组。
+        - source: 来源标识（"agent_recall" / "task_conversation" / "agent_experience" 等）
+        - mem_type: MemoryEventType str（如 "user_prompt" / "agent_conversation_turn"）；
+          无 type 的合成 block（如 capabilities / progress）传空字符串。
+        - task_id: 记录所属 task（USER_PROMPT 记录带；其余可空）。用于把 ## Current Message 框架
+          精确定位到「当前 task（request.task.id）」自己的 user_prompt 回合——而非召回历史里最后
+          一条 user_prompt（parent resume 后，同 agent 子 body 的 user_prompt 更新，会误顶 parent 头）。
+        用于区分「当前 task 自有对话」（USER_PROMPT）与跨 task 的 agent_experience 回合——
+        directive 注入和 ## Current Message 框架需定位到当前 task 的 user_prompt 回合。
         """
         sorted_blocks = sorted(
             history_blocks,
             key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)),
         )
-        out: list[tuple[LLMMessage, str]] = []
+        out: list[tuple[LLMMessage, str, str, str]] = []
         for b in sorted_blocks:
             role = b.metadata.get("role", "user")
             content = content_to_text(b.content)
@@ -602,7 +698,8 @@ class DefaultComposer(Composer):
                 )
             else:
                 msg = LLMMessage(role="user", content=content)
-            out.append((msg, b.source))
+            mem_type = str(b.metadata.get("type", ""))
+            out.append((msg, b.source, mem_type, str(b.metadata.get("task_id", ""))))
         return out
 
     # ── Observer ──────────────────────────────────────────────────────────────
@@ -634,20 +731,22 @@ class DefaultComposer(Composer):
         复用 _build_facet_trailing_messages：observe facet（ROLE）+ 判定提示 + 可复核清单。
         subtask 可 confirm/reopen，predecessor 只读。
         """
-        bb_blocks = [b for b in blocks if b.kind == "blackboard"]
-        subtask_blocks = [b for b in bb_blocks if b.metadata.get("intent") == "subtask"]
-        pred_blocks = [b for b in bb_blocks if b.metadata.get("intent") == "predecessor"]
+        # Phase 3 (2026-06-30): blackboard subtask/predecessor block rendering removed.
+        # Predecessor results surface via memory recall (Phase 2); subtask review handles come
+        # from task_manager via request.extra["subtask_reviews"] (Task 1 below).
+        # The blackboard mechanism (subscribe_topic/recall_topic/BlackboardSource) is kept intact.
 
         extra_sections: list[str] = []
-        if subtask_blocks:
-            extra_sections.append(
-                "Your sub-task results (you may confirm / reopen these):\n"
-                + self._render_bb(subtask_blocks)
-            )
-        if pred_blocks:
-            extra_sections.append(
-                "Upstream task results (read-only context):\n" + self._render_bb(pred_blocks)
-            )
+
+        # Phase 3: reviewable sub-tasks come from task_manager via request.extra (not blackboard).
+        # The observer reads each child's RESULT from the conversation (Phase 2); this clause only
+        # surfaces the actionable handles (task_id/title/outcome) so it can confirm/reopen via task_reviews.
+        reviews = (getattr(request, "extra", {}) or {}).get("subtask_reviews") or []
+        if reviews:
+            lines = ["## Your sub-tasks (confirm / reopen via `task_reviews`, referencing the task_id):"]
+            for r in reviews:
+                lines.append(f"- {r['task_id']} — {r.get('title', '')} [{r.get('outcome', '')}]")
+            extra_sections.append("\n".join(lines))
 
         # finish_task 的产出走 SILENT，不入 task 层、不在重建的对话里——但 observer 须看到 actor
         # 最终提交了什么。显式补一段并标注来源（act 阶段调用 finish_task 的结果），置于判定提示之前。
@@ -668,6 +767,24 @@ class DefaultComposer(Composer):
             _OBSERVE_JUDGMENT_CUE,
             extra_sections=extra_sections,
             pre_cue_sections=pre_cue_sections,
+            facet_fallback=_OBSERVER_ROLE_FALLBACK,
+        )
+
+    def _build_background_observe_messages(self, blocks, request):
+        """act 风格会话 + 尾部 background-observe cue（ROLE facet + boundary 状态 + 只给 process_report）。
+
+        close 段（finish/normal）额外把 actor 的最终产出（task.outputs）注入 cue 之前——否则仅由
+        finish(+delegate) 组成的段在对话重建里无 actor 动作可见，观察者会虚构完成叙述。
+        """
+        boundary = (getattr(request, "extra", {}) or {}).get("observe_boundary", "normal")
+        pre_cue: list[str] | None = None
+        if boundary in _CLOSE_BOUNDARIES:
+            section = _finish_result_section(request)
+            if section:
+                pre_cue = [section]
+        return self._build_facet_trailing_messages(
+            blocks, request, _background_observe_cue(boundary),
+            pre_cue_sections=pre_cue,
             facet_fallback=_OBSERVER_ROLE_FALLBACK,
         )
 
@@ -694,6 +811,27 @@ class DefaultComposer(Composer):
             if b.kind == kind:
                 return b
         return None
+
+    def _task_spec_fields(self, blocks, task) -> tuple[str, str, str]:
+        """当前 task 的 spec 字段 (title, description, user_prompt)。
+
+        优先取 TaskSpecSource 产的 task_spec block 的 metadata；无块时回退直读 task
+        （兼容手构 blocks / 未注册 TaskSpecSource 的调用）。block 是元数据载体，
+        composer 用它去就地装饰当前消息，而非把它当独立消息渲染。
+        """
+        blk = self._first_kind(blocks, "task_spec") if blocks else None
+        if blk is not None:
+            md = blk.metadata
+            return (
+                md.get("title", "") or "",
+                md.get("description", "") or "",
+                md.get("user_prompt", "") or "",
+            )
+        title = task.title or ""
+        description = task.description or ""
+        up = task.user_prompt
+        user_prompt = up if isinstance(up, str) else (content_to_text(up) if up else "")
+        return title, description, user_prompt
 
     def _collect_llm_tools(self, blocks: list["ContextBlock"]) -> list[LLMTool]:
         """从 capabilities blocks 抽出 LLMTool 数组传给 LLM API。"""
