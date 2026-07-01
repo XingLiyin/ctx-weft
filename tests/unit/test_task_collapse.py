@@ -8,6 +8,7 @@ from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvide
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext,
 )
+from ctx_weft.core.events import EventType
 
 pytestmark = pytest.mark.asyncio
 
@@ -80,3 +81,42 @@ async def test_recollapse_keeps_original_bounded():
     assert newest.count("原始请求：做 X") == 1     # 原始节没有嵌套膨胀
     assert "旧摘要" not in newest                   # 旧摘要节被新摘要替掉
     assert "新摘要含 step3" in newest
+
+
+async def test_compact_scope_task_uses_collapse_keep_last(monkeypatch):
+    from ctx_weft.core.loop.steps import compact as cm
+
+    calls = []
+    kept_arg = {}
+
+    async def _fake_summ(state, ctx, *, scope="task"):
+        calls.append(scope)
+        return f"summary-{scope}"
+
+    async def _fake_collapse(state, ctx, keep_last, summary_text):
+        kept_arg["keep_last"] = keep_last
+        return 3
+
+    monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
+    monkeypatch.setattr(cm, "collapse_task_layer", _fake_collapse)
+
+    mem = InMemoryBlackboard()
+    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    for i in range(6):  # 6 条 TASK_COMPACT_TYPES > collapse_keep_last(2)
+        await _ingest(mem, scope, T.LLM_RESPONSE, f"turn{i}", i, role="assistant")
+
+    agent = SimpleNamespace(
+        loop_config=SimpleNamespace(compact_keep_last=6, collapse_keep_last=2),
+        id="a", loop_guard=SimpleNamespace())
+    state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"), agent=agent,
+                            session=SimpleNamespace(id="s", tenant_id="tn"),
+                            extra={}, run_id="run1", sequence_counter=0)
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx(),
+                          task_manager=None, event_bus=None)
+
+    events = await cm._compact_scope(state, ctx, trigger="compact")
+
+    # 只有 task 层可折（无派发对）→ 只产 task 摘要、坍缩用 collapse_keep_last(2)
+    assert calls == ["task"]
+    assert kept_arg["keep_last"] == 2
+    assert any(e.payload.get("source") == "collapse" for e in events)
