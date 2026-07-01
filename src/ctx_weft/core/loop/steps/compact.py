@@ -1,16 +1,21 @@
 """CompactStep：长对话压缩，由 PrepareStep 内联直调（不再以 task 形式调度）。
 
   - 作用域 = 当前 state.scope（当前 task + agent）。
-  - 两层各自阈值与摘要：task 层超 collapse_keep_last → collapse_task_layer 把早期回合
-    坍缩成一条 USER_PROMPT（原始消息 + 执行摘要两节）；agent 层超 compact_keep_last →
-    fold_root_experience 折派发经验成 AGENT_COMPACT_SUMMARY。
-  - 每层各产各的 summary（task/agent 两条 cue），且仅在本层确需折叠时才调 LLM。
+  - escalating_compact：预算驱动的 L1→L2→L3 升级编排（替旧的双阈值并行折 _compact_scope）。
+    传入 token_estimate，未达 compact_target_ratio（回退 compact_token_ratio）× context_limit
+    时空跑；否则按序试 L1 fold_root_experience（agent 层折叠成 AGENT_COMPACT_SUMMARY）→
+    L2 demote_kept_capsules（L1 保留胶囊里 rich→lean 降级，无 LLM）→ L3 collapse_task_layer
+    （当前 task 层坍缩成一条 USER_PROMPT，原始消息 + 执行摘要两节）；级间用 _active_memory_tokens
+    的增量从估算里累减，降到 target 以下即停。
+  - L1/L2 各有可折性 guard（无可折对象则跳过）；L3 无 guard，只要预算门开就会试（内部
+    collapse_task_layer 自己在 ≤keep_last 时 noop）。
   - 注：observe(max_turns) 与 background_observe 仍走 apply_compact 写 TASK_COMPACT_SUMMARY
     形成胶囊，不在此文件改动范围内。
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import timedelta
 from typing import Any
@@ -20,7 +25,7 @@ from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
 from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
-from ctx_weft.core.utils import content_to_text, now_utc
+from ctx_weft.core.utils import content_to_text, now_utc, estimate_tokens
 from ctx_weft.protocols import LLMRequest, MemoryEvent, MemoryEventType
 
 logger = logging.getLogger(__name__)
@@ -155,7 +160,7 @@ async def maybe_compact_before_dispatch(
     对父 scope 跑一次完整压缩（task 层 fold_task + agent 层 fold_root + 回收 finished 短 task，
     共享单次 summary），使父 resume 更精简、inherit 快照为压缩后版本。
 
-    与 PrepareStep 的 compact 同构（复用 _compact_scope），区别只在触发条件：这里由独立的
+    与 PrepareStep 的 compact 同构（复用 escalating_compact），区别只在触发条件：这里由独立的
     predispatch token 阈值门控，且仅在本轮含派发调用时由 ActStep 调用。门控不满足返回空列表。
     """
     agent = state.agent
@@ -168,7 +173,7 @@ async def maybe_compact_before_dispatch(
         return []
     if tokens / context_limit < ratio:
         return []
-    return await _compact_scope(state, ctx, trigger="pre_dispatch")
+    return await escalating_compact(state, ctx, token_estimate=tokens, trigger="pre_dispatch")
 
 
 def _dispatch_finish_sets(recs) -> tuple[set, set]:
@@ -190,6 +195,26 @@ def _dispatch_finish_sets(recs) -> tuple[set, set]:
             elif name.endswith("delegate_task") or name.endswith("delegate_plan"):
                 has_dispatch.add(oid)
     return has_dispatch, has_finish
+
+
+_AGENT_LAYER_TYPES = [
+    MemoryEventType.AGENT_CONVERSATION_TURN,
+    MemoryEventType.AGENT_COMPACT_SUMMARY,
+]
+
+
+async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
+    """当前 scope 活跃记忆的 token 代理：task 层 body（跨 task 按 agent 召回）+ agent 层对话/摘要，
+    逐条 content 求 estimate_tokens 之和。用于升级 compact 级间的 before/after 增量粗估（非精确装配）。"""
+    total = 0
+    body = await ctx.memory.recall_recent_by_agent(
+        state.scope, _TASK_BODY_TYPES, 2000, ctx.provider_ctx)
+    agent_recs = await ctx.memory.recall_recent(
+        state.scope, _AGENT_LAYER_TYPES, 2000, ctx.provider_ctx)
+    for r in [*body, *agent_recs]:
+        text = r.content if isinstance(r.content, str) else content_to_text(r.content)
+        total += estimate_tokens(text)
+    return total
 
 
 async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
@@ -337,62 +362,138 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     return len(ids)
 
 
-async def _compact_scope(
-    state: LoopState, ctx: LoopContext, *, trigger: str = "compact"
+async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: set) -> int:
+    """L2：把 origin_ids 里本 agent 亲做的 rich 胶囊降级成 sub-agent lean 表示。
+    - 删该 task 的 task 层 body（USER_PROMPT/段摘要/raw，metadata['task_id'] in origin_ids）。
+    - agent 层 finish 对：supersede assistant 槽（act_recap + finish 调用），保留 tool 槽（综合总结回填）
+      作 lean 表示。已无 assistant 槽（已 lean / 纯 dispatch 对）的单元跳过。
+    无 LLM。返回 supersede 条数。"""
+    memory = ctx.memory
+    body = await memory.recall_recent_by_agent(state.scope, _TASK_BODY_TYPES, 2000, ctx.provider_ctx)
+    turns = await memory.recall_recent(
+        state.scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
+    has_dispatch, has_finish = _dispatch_finish_sets(turns)
+
+    ids: list = []
+    for r in body:
+        if r.metadata.get("task_id") in origin_ids:
+            ids.append(r.id)   # 删 task 层 body（降级核心：丢交互细节）
+    for r in turns:
+        oid = r.metadata.get("origin_task_id")
+        if oid not in origin_ids:
+            continue
+        # 仅降级「本 agent 亲做」单元（有 finish 回合）；纯 dispatch 对本就 lean，不动
+        if oid in has_finish and r.role == "assistant":
+            ids.append(r.id)   # 折 finish 对 assistant 槽，仅留 tool 槽回填
+    if not ids:
+        return 0
+    await memory.supersede(ids, ctx.provider_ctx)
+    return len(ids)
+
+
+async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -> set:
+    """L1 折后仍保留的最近 keep_last 个顶层单元的 origin_task_id（L2 的降级对象）。"""
+    recs = await ctx.memory.recall_recent(
+        state.scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
+    recs = normalize_legacy_dispatch(list(reversed(recs)))
+    parent_of, first_ts = {}, {}
+    has_dispatch, has_finish = _dispatch_finish_sets(recs)
+    for r in recs:
+        if r.type != MemoryEventType.AGENT_CONVERSATION_TURN:
+            continue
+        oid = r.metadata.get("origin_task_id")
+        if oid is None:
+            continue
+        p = r.metadata.get("parent_task_id")
+        if oid not in parent_of or (parent_of[oid] is None and p is not None):
+            parent_of[oid] = p
+        if oid not in first_ts or r.timestamp < first_ts[oid]:
+            first_ts[oid] = r.timestamp
+    origins = set(parent_of)
+    active = {oid for oid in has_dispatch if oid not in has_finish}
+    top = [oid for oid, pid in parent_of.items()
+           if oid not in active and (pid is None or pid not in origins)]
+    top.sort(key=lambda oid: first_ts[oid])
+    return set(top[-keep_last:]) if keep_last > 0 else set()
+
+
+async def escalating_compact(
+    state: LoopState, ctx: LoopContext, *, token_estimate: int, trigger: str = "compact"
 ) -> list[Any]:
-    """对 state.scope 跑一次压缩：task 层 fold_task(a) + agent 层 fold_root(c)，
-    各用各阈值与各自 summary（两份摘要按需产生）。
-
-    trigger 标记触发来源（"compact" = PrepareStep 内联；"pre_dispatch" = 派发前），透传进
-    event payload 供遥测区分。无可折时返回空事件列表，不空跑 summary LLM。
-
-    双阈值：
-      collapse_keep（来自 loop_config.collapse_keep_last，默认=compact_keep_last）控制
-      task 层坍缩（collapse_task_layer）；
-      keep_last（来自 loop_config.compact_keep_last）控制 agent 层折叠（fold_root_experience）。
-
-    task-resident（spec 2026-06-28 §5）：取消「压力下回收 finished 短 task」——结束 task 的
-    body 留 task 层（即胶囊），由跨层 fold 管理，不再 close_finished_short_tasks 坍缩。
-    """
+    """预算驱动升级式 compact（替 _compact_scope）：L1 agent 折 → L2 rich→lean → L3 坍当前 task，
+    每级后用 _active_memory_tokens 的增量从 token_estimate 累减，降到 target 以下即停。
+    级间不完整重装配（Q4=c，调用方进 act 前重装配一次校正）。无 context_limit 或已达标 → []。"""
     agent = state.agent
-    keep_last = agent.loop_config.compact_keep_last                               # agent 折叠：胶囊数
-    collapse_keep = getattr(agent.loop_config, "collapse_keep_last", keep_last)   # task 坍缩：回合数
+    lc = agent.loop_config
+    context_limit = agent.loop_guard.context_limit
+    if context_limit <= 0:
+        return []
+    target_ratio = lc.compact_target_ratio if getattr(lc, "compact_target_ratio", 0.0) > 0 \
+        else lc.compact_token_ratio
+    target_tokens = int(context_limit * target_ratio)
+    keep_last = lc.compact_keep_last
+    collapse_keep = getattr(lc, "collapse_keep_last", keep_last)
 
-    events: list[Any] = []
+    est = token_estimate
+    if est < target_tokens:
+        return []
+    events: list[Any] = [make_event(state, EventType.MEMORY_COMPACT_STARTED, payload={
+        "task_id": state.task.id, "agent_id": agent.id, "trigger": trigger,
+        "token_estimate": est, "target_tokens": target_tokens})]
 
-    # (a) 活跃 task 长对话（按 collapse 阈值）；(c) 已结束 root 残留（按胶囊阈值）
-    task_n = await ctx.memory.count_recent(
-        scope=state.scope, types=TASK_COMPACT_TYPES, ctx=ctx.provider_ctx)
-    fold_task = task_n > collapse_keep
-    fold_root = await _count_root_residues(state, ctx) > keep_last
-    if not fold_task and not fold_root:
-        return events
+    last_tokens: int | None = None
 
-    events.append(make_event(state, EventType.MEMORY_COMPACT_STARTED, payload={
-        "task_id": state.task.id, "agent_id": agent.id,
-        "collapse_keep_last": collapse_keep, "compact_keep_last": keep_last,
-        "fold_task": fold_task, "fold_root": fold_root, "trigger": trigger,
-    }))
+    async def _apply(level_coro):
+        """跑一级折叠，用活跃 token before/after 增量累减 est。返回 (superseded_count, freed)。
 
-    # 按需产两份摘要：task 坍缩用 collapse_keep、agent 折叠用 keep_last；各用各 cue、各只在本层折时调 LLM。
-    if fold_task:
-        summary_task = await summarize_for_compact(state, ctx, scope="task")
-        n_task = await collapse_task_layer(state, ctx, collapse_keep, summary_task)
-        if n_task:
-            events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
-                "superseded_count": n_task, "layer": "task", "source": "collapse",
-                "trigger": trigger, "used_llm": bool(summary_task)}))
+        before 惰性复用上一级的 after（相邻级间省一次重复测量）；首次或跳级后重新测量。"""
+        nonlocal est, last_tokens
+        # 不变量：前一级的 after 直接当这一级的 before 复用，只在 _active_memory_tokens 是纯快照读、
+        # 且两次 _apply 之间没有其他改动内存的操作时才成立。未来若在级间插入其他写操作，须重新测量。
+        before = last_tokens if last_tokens is not None else await _active_memory_tokens(state, ctx)
+        n = await level_coro if inspect.isawaitable(level_coro) else level_coro
+        after = await _active_memory_tokens(state, ctx)
+        freed = max(0, before - after)
+        est -= freed
+        last_tokens = after
+        return n, freed
 
-    if fold_root:
+    # L1 · agent 折（仅当有可折顶层单元）
+    if await _count_root_residues(state, ctx) > keep_last:
         summary_agent = await summarize_for_compact(state, ctx, scope="agent")
-        n = await fold_root_experience(state, ctx, keep_last, summary_agent)
+        n, freed = await _apply(fold_root_experience(state, ctx, keep_last, summary_agent))
         if n:
             events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
                 "superseded_count": n, "layer": "agent", "source": "root_experience",
-                "trigger": trigger, "used_llm": bool(summary_agent)}))
+                "trigger": trigger, "freed_tokens": freed}))
+    if est < target_tokens:
+        return events
 
-    logger.info("compact[%s]: agent=%s task=%s fold_task=%s(keep=%d) fold_root=%s(keep=%d)",
-                trigger, agent.id, state.task.id, fold_task, collapse_keep, fold_root, keep_last)
+    # L2 · 保留的同 agent rich 胶囊降级 lean（无 LLM）
+    kept = await _kept_origin_ids(state, ctx, keep_last)
+    if kept:
+        n, freed = await _apply(demote_kept_capsules(state, ctx, kept))
+        if n:
+            events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
+                "superseded_count": n, "layer": "agent", "source": "demote_lean",
+                "trigger": trigger, "freed_tokens": freed}))
+    if est < target_tokens:
+        return events
+
+    # L3 · 坍缩当前 task（段摘要坍成更少，保 collapse_keep 条；仅当有 task 层材料可折）
+    # 计数须用 _TASK_LAYER_TYPES（含 TASK_COMPACT_SUMMARY）——与 collapse_task_layer 实际所折
+    # 一致：retry 累积的是段摘要，用 TASK_COMPACT_TYPES（仅 raw）会漏计、L3 永不触发。
+    task_n = await ctx.memory.count_recent(
+        scope=state.scope, types=_TASK_LAYER_TYPES, ctx=ctx.provider_ctx)
+    if task_n > collapse_keep:
+        summary_task = await summarize_for_compact(state, ctx, scope="task")
+        n, freed = await _apply(collapse_task_layer(state, ctx, collapse_keep, summary_task))
+        if n:
+            events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
+                "superseded_count": n, "layer": "task", "source": "collapse",
+                "trigger": trigger, "freed_tokens": freed}))
+    logger.info("escalating_compact[%s]: agent=%s task=%s est→%d target=%d",
+                trigger, agent.id, state.task.id, est, target_tokens)
     return events
 
 
@@ -404,5 +505,7 @@ class CompactStep(Step):
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
         return StepOutcome(
             next_step=None,
-            events=await _compact_scope(state, ctx, trigger="compact"),
+            events=await escalating_compact(
+                state, ctx, token_estimate=state.agent.loop_guard.context_tokens,
+                trigger="compact"),
         )

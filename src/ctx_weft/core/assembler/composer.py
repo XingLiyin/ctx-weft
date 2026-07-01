@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ctx_weft.protocols import LLMMessage, LLMTool
 from ctx_weft.protocols.capability import qualify
-from ctx_weft.core.utils import content_to_text, estimate_tokens, PROGRESS_SO_FAR_HEADING
+from ctx_weft.core.utils import content_to_text, estimate_tokens
 from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
@@ -305,22 +305,8 @@ class DefaultComposer(Composer):
         # Predecessors now surface via memory recall (Phase 2 inherit/recall); no bb_blocks needed.
         history_blocks = [b for b in blocks if b.kind == "history"]
 
-        # Progress So Far (retry feedback): render as a chronologically-placed history
-        # user-block (via task.process_report_at) so it sits right after the attempt that
-        # produced it and before the next one — instead of floating to the end (which confusingly
-        # re-states stale progress after the new attempt in the observe prompt). Send-only (not
-        # persisted to memory). Without a timestamp it is NOT rendered at all (no trailing
-        # fallback) so it can never be mis-placed; in practice the timestamp is always set
-        # alongside process_report, so this only affects unexpected/legacy timestamp-less data.
-        # max_turns 那轮 compact 直接复用 process_report 作 TASK_COMPACT_SUMMARY → 报告已在 task 层
-        # 历史里，跳过单独的 Progress So Far block，避免同一份报告渲染两遍（Option A 去重）。
-        progress_as_history = (
-            None if self._progress_already_in_compact(request.task, history_blocks)
-            else self._progress_history_block(request.task)
-        )
-        if progress_as_history is not None:
-            history_blocks = [*history_blocks, progress_as_history]
-
+        # Progress So Far 改由 task 层 TASK_COMPACT_SUMMARY 段摘要承载（_history 冠标题渲染），
+        # 不再据 task.process_report 单独渲染 → 无重复、来源单一（spec 2026-07-01 §3.7）。
         history_pairs = self._history_to_messages_with_sources(history_blocks)
         messages: list[LLMMessage] = [m for m, _src, _mtype, _tid in history_pairs]
         task = request.task
@@ -339,8 +325,6 @@ class DefaultComposer(Composer):
                 parts.append(f"## Current Task\n{spec_title}\n{spec_desc}")
             elif spec_title:
                 parts.append(f"## Current Task\n{spec_title}")
-            if getattr(task, "process_report", None):
-                parts.append(f"{PROGRESS_SO_FAR_HEADING}\n{task.process_report}")
             if spec_prompt:
                 parts.append(
                     f"## Current Message\n{spec_prompt}\n\n"
@@ -626,42 +610,6 @@ class DefaultComposer(Composer):
                 return out
         out.append(LLMMessage(role="user", content=text))
         return out
-
-    def _progress_already_in_compact(self, task, history_blocks: list["ContextBlock"]) -> bool:
-        """process_report 是否已作为本轮 TASK_COMPACT_SUMMARY 出现在历史里（max_turns compact 复用
-        了它）。内容精确相等才算（二者同出 verdict.act_recap）；规则降级的独立摘要内容不同，不会误删。"""
-        progress = getattr(task, "process_report", None)
-        if not progress:
-            return False
-        from ctx_weft.protocols import MemoryEventType
-        for b in history_blocks:
-            if b.metadata.get("type") != MemoryEventType.TASK_COMPACT_SUMMARY:
-                continue
-            content = b.content if isinstance(b.content, str) else content_to_text(b.content)
-            # 段摘要经 _history 渲染后可能冠了 PROGRESS_SO_FAR_HEADING（role=assistant、task_conversation
-            # 来源）；裸串与带标题串都算"已在 compact 里"，避免漏判导致进度块重复渲染。
-            if content == progress or content == f"{PROGRESS_SO_FAR_HEADING}\n{progress}":
-                return True
-        return False
-
-    def _progress_history_block(self, task) -> "ContextBlock | None":
-        """Progress So Far 作为带时间戳的 history user-block；缺时间戳/无 progress 时返回 None
-        （由调用方退回"追加末尾"的 legacy 行为）。"""
-        if not getattr(task, "user_prompt_in_memory", False):
-            return None
-        progress = getattr(task, "process_report", None)
-        progress_at = getattr(task, "process_report_at", None)
-        if not progress or progress_at is None:
-            return None
-        from ctx_weft.core.assembler.assembler import ContextBlock
-        from ctx_weft.core.utils import generate_id
-        text = f"{PROGRESS_SO_FAR_HEADING}\n{progress}"
-        return ContextBlock(
-            id=generate_id("blk"), source="current_progress", kind="history", target="messages",
-            content=text, priority=3, token_estimate=estimate_tokens(text),
-            # seq_no 取大值：万一 process_report_at 与某轮 timestamp 相等，也排在该轮之后。
-            metadata={"role": "user", "timestamp": progress_at.isoformat(), "seq_no": 10**9},
-        )
 
     def _history_to_messages(self, history_blocks: list["ContextBlock"]) -> list[LLMMessage]:
         """将 history blocks 转换为真实多轮 LLMMessage 列表。

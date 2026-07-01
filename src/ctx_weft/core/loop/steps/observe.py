@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryLayer
-from ctx_weft.core.loop.steps.compact import TASK_COMPACT_TYPES, summarize_for_compact
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
 from ctx_weft.core.orchestrator.control_capability import REPORT_TASK_OUTCOME_NAME, ControlResult
@@ -237,16 +236,20 @@ class ObserveStep(Step):
             verdict = dataclasses.replace(verdict, task_outcome="retry")
             self._apply_assessment(state.task, verdict)
 
-        # max_turns 退出：压缩 task 执行层（下一轮召回从摘要 + keep_last 开始）
-        await self._maybe_compact_task(state, ctx, verdict, events)
+        # retry（三来源：max_turns/context_limit/observer-retry）→ 前台同步段折：
+        # 本轮 attempt raw 折成一条 TASK_COMPACT_SUMMARY（复用 act_recap），删本轮 raw。
+        # 「马上要重跑」故同步做好，下个 run 一进 prepare 即见折后段摘要。
+        if verdict.task_outcome == "retry":
+            await self._fold_retry_segment(state, ctx, verdict, events)
 
         # close 边界：root task 在 actor_done（finish_task 收尾 → boundary="finish"）或
         # normal（actor 产出最终文本正常结束 → boundary="normal"）时触发后台异步 observe，
         # 产段摘要 + 折 raw。两者均由 _rule_observe 映射为 success/fail，属于 root 的
         # 单次终结点——task 只 close 一次，_close_report 槽写一次、弹一次，不存在乱序复用。
         # 注：纯文本暂停（plain_text 边界）由 act.py:_finish_plain_text_turn 单独触发，不经此处。
-        # max_turns/context_limit 走同步 _maybe_compact_task；非 root 不触发（它们走 LLM observe）。
-        if state.act_exit_reason in ("normal", "actor_done") and _is_own_root(state.task):
+        # max_turns/context_limit 走同步 _fold_retry_segment；非 root 不触发（它们走 LLM observe）。
+        if (state.act_exit_reason in ("normal", "actor_done")
+                and verdict.task_outcome != "retry" and _is_own_root(state.task)):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
             boundary = "finish" if state.act_exit_reason == "actor_done" else "normal"
             launch_background_observe(state, ctx, boundary=boundary)
@@ -390,13 +393,13 @@ class ObserveStep(Step):
 
     def _should_use_llm(self, state: LoopState) -> bool:
         """规则降级条件（按 task 排除）：无 observe ROLE → 规则；root → 规则，
-        但 max_turns 退出强制 LLM（产出可信 process_report 作压缩摘要）。"""
+        但 max_turns/context_limit 机械退出强制 LLM（产出可信 act_recap 作压缩摘要）。"""
         # assigned agent 没有 observe ROLE → 规则降级（无可用 observer 装配）
         template = state.extra.get("template")
         if template is None or template.identity.get("observe") is None:
             return False
-        # max_turns 退出：即使 root 也要 LLM observe，绕过下面的 root 排除
-        if state.act_exit_reason == "max_turns":
+        # 机械退出（max_turns/context_limit）：即使 root 也要 LLM observe，产有质量 act_recap 作段摘要
+        if state.act_exit_reason in ("max_turns", "context_limit"):
             return True
         # root task（无 parent）→ 规则降级；委派出的子任务才需要 LLM observer
         if state.task.parent_task_id is None:
@@ -404,52 +407,32 @@ class ObserveStep(Step):
 
         return True
 
-    async def _maybe_compact_task(
+    async def _fold_retry_segment(
         self, state: LoopState, ctx: LoopContext, verdict: Verdict, events: list[Any]
     ) -> None:
-        """max_turns 退出时压缩 task 执行层。
+        """retry 前台同步段折：本轮 attempt raw → 一条 TASK_COMPACT_SUMMARY（复用 act_recap），
+        supersede 本轮全部 raw（keep_last=0），保 USER_PROMPT 锚 + 既往段摘要（累积）。
+        protect TASK_COMPACT_SUMMARY → 多轮 retry 段摘要累积（不替换），由 L3 按 collapse_keep_last
+        坍缩控界。无 keep_last 门、无额外 LLM。
 
-        摘要来源：本轮真走成 report_task_outcome（verdict.reported）→ 复用其可信 report；
-        否则（规则降级 / 未上报）→ 专用压缩 LLM 摘要。不退薄规则文本，也不读会陈旧的持久
-        process_report（持久字段本轮未必更新，复用会丢掉本轮工作）。
+        仅当 verdict.task_outcome=="retry" 才折（三来源：max_turns/context_limit/observer-retry）；
+        其余 outcome 不折，no-op。
 
-        仅 max_turns 在此压缩；context_limit 退出本就 token 高，交由 PrepareStep 的 token 比例
-        触发处理（spec §4），此处不重复。
-        守卫：仅当 task 层可折叠条数 > keep_last 才折（避免插入冗余摘要）。
-        下一轮 prepare 召回即从 [摘要] + keep_last 开始。
+        act_recap 来源：本轮真走成 report_task_outcome（reported）用其可信 report，否则用 verdict.act_recap
+        （root 机械退出经 _should_use_llm 强制 LLM 已产出）。空则占位。
         """
-        if state.act_exit_reason != "max_turns":
+        if verdict.task_outcome != "retry":
             return
-        keep_last = state.agent.loop_config.compact_keep_last
-        try:
-            n = await ctx.memory.count_recent(
-                scope=state.scope, types=TASK_COMPACT_TYPES, ctx=ctx.provider_ctx
-            )
-        except Exception:
-            n = 0
-        if n <= keep_last:
-            return
-
-        # 来源优先级：本轮可信 report → 专用压缩 LLM 摘要 → 占位
-        if verdict.reported and verdict.act_recap:
-            summary = verdict.act_recap
-        else:
-            summary = await summarize_for_compact(state, ctx)
-        summary = summary or "[Context compacted]"
-
-        events.append(make_event(state, EventType.MEMORY_COMPACT_STARTED, payload={
-            "task_id": state.task.id,
-            "agent_id": state.agent.id,
-            "keep_last": keep_last,
-            "layers": ["task"],
-        }))
+        summary = (verdict.act_recap if (verdict.act_recap and verdict.act_recap.strip())
+                   else "[Context compacted]")
         result = await ctx.memory.apply_compact(
             scope=state.scope,
             summary=summary,
-            keep_last=keep_last,
+            keep_last=0,
             ctx=ctx.provider_ctx,
             layer=MemoryLayer.TASK,
-            protect_types=(MemoryEventType.USER_PROMPT,),
+            protect_types=(MemoryEventType.USER_PROMPT,
+                           MemoryEventType.TASK_COMPACT_SUMMARY),
         )
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "events_before": result.events_before,
@@ -457,5 +440,5 @@ class ObserveStep(Step):
             "summary_event_id": result.summary_event_id,
             "summary_length": len(summary),
             "layer": "task",
-            "trigger": "observe_max_turns",
+            "trigger": "observe_retry",
         }))

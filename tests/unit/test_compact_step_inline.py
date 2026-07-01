@@ -72,9 +72,14 @@ class _FakeLLM:
         yield SimpleNamespace(kind="token", text="SUMMARY", usage=None, tool_call=None)
 
 
-def _state():
-    agent = SimpleNamespace(id="agt1", loop_config=SimpleNamespace(compact_keep_last=2),
-                            runtime={"llm_model": "mock"})
+def _state(context_tokens=1000):
+    agent = SimpleNamespace(
+        id="agt1",
+        loop_config=SimpleNamespace(
+            compact_keep_last=2, collapse_keep_last=2,
+            compact_token_ratio=0.1, compact_target_ratio=0.0),
+        loop_guard=SimpleNamespace(context_limit=1000, context_tokens=context_tokens),
+        runtime={"llm_model": "mock"})
     return SimpleNamespace(
         run_id="r1",
         agent=agent,
@@ -94,8 +99,10 @@ def _ctx(memory):
 
 async def test_compact_folds_overbudget_layers_with_one_summary():
     # task layer has 5 foldable (> keep_last=2); agent layer has 0
+    # L3 guard 计数用 _TASK_LAYER_TYPES（含 TOOL_INVOCATION/TASK_COMPACT_SUMMARY）——key 须匹配全集
     mem = _FakeMemory({
-        frozenset([T.USER_PROMPT, T.LLM_RESPONSE, T.TOOL_RESULT]): 5,
+        frozenset([T.USER_PROMPT, T.LLM_RESPONSE, T.TOOL_INVOCATION,
+                   T.TOOL_RESULT, T.TASK_COMPACT_SUMMARY]): 5,
         frozenset([T.TASK_DISPATCH, T.TASK_DISPATCH_RESULT]): 0,
     })
     outcome = await CompactStep().execute(_state(), _ctx(mem))

@@ -193,7 +193,7 @@ class Task:
     outputs: Any | None = None
     process_report: str | None = None
     # 何时设置 process_report（= 上一轮 observe 产出反馈的时刻，落在该 attempt 之后、下一 attempt 之前）。
-    # 装配时据此把 "## Progress So Far" 按时间戳归并到正确位置（见 composer._progress_history_block）。
+    # process_report/process_report_at 现仅服务终态 finish 对 / 子任务 bubble；retry 进度已改由 task 层 TASK_COMPACT_SUMMARY 段摘要承载（spec 2026-07-01 §3.7）。
     process_report_at: datetime | None = None
 
     retry_count: int = 0

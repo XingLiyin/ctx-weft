@@ -50,7 +50,10 @@ async def _run_compact(mem) -> None:
     task = SimpleNamespace(id="C1", status="ACTIVE")
     agent = SimpleNamespace(
         id="ag1", runtime={"llm_model": "mock"},
-        loop_config=SimpleNamespace(compact_keep_last=1),
+        loop_config=SimpleNamespace(
+            compact_keep_last=1, collapse_keep_last=1,
+            compact_token_ratio=0.1, compact_target_ratio=0.0),
+        loop_guard=SimpleNamespace(context_limit=1000, context_tokens=1000),
     )
     session = SimpleNamespace(id="s1", tenant_id="default", goal="")
     state = LoopState(run_id="r1", session=session, task=task, agent=agent,
@@ -109,8 +112,9 @@ async def test_agent_compact_writes_agent_summary() -> None:
     assert any(r.type == T.AGENT_COMPACT_SUMMARY and r.content == "SUMMARY" for r in recs)
 
 
-async def test_finalize_retry_carries_progress_no_user_message() -> None:
-    """retry：observe 分析 → process_report(Current Progress)；不注入 user message。"""
+async def test_finalize_retry_no_process_report_no_user_message() -> None:
+    """retry：observe 分析结果已由折叠出的 TASK_COMPACT_SUMMARY 段摘要承载；finalize 不再写
+    process_report/process_report_at，也不注入 user message（spec 2026-07-01 §3.1）。"""
     task = Task(id="T1", session_id="s1", status="PENDING", title="X")
     task.observer_outcome = "retry"
     mem = InMemoryMemoryProvider()
@@ -129,7 +133,8 @@ async def test_finalize_retry_carries_progress_no_user_message() -> None:
     )
     await FinalizeStep().execute(state, ctx)
 
-    assert task.process_report == "missing X; do Y next"  # → Current Progress
+    assert task.process_report is None  # 不再写 process_report（旧 Progress So Far 字段路径已废）
+    assert task.process_report_at is None
     assert task.retry_count == 1
     recs = await mem.recall_recent(
         MemoryScope(session_id="s1", task_id="T1", agent_id="ag1"), [T.USER_PROMPT], 10, _pctx()

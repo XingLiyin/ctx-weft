@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextBlock
@@ -321,9 +320,14 @@ def test_act_directive_targets_current_task_not_prior_experience() -> None:
     assert "Do the thing" in current.content
 
 
-def test_resumed_task_directive_on_history_capabilities_on_progress() -> None:
+def test_resumed_task_directive_on_history_capabilities_on_fallback() -> None:
     """Resumed act task: the directive attaches to the first (history-derived) user message;
-    capabilities ride the trailing Current Progress message (recency)."""
+    capabilities ride the trailing fallback "Continue with the task above." message (recency).
+
+    Progress So Far no longer has a separate process_report-driven render path (retired 2026-07-01
+    Task 3 — retry feedback is now carried by the TASK_COMPACT_SUMMARY segment summary instead), so
+    a resumed task with only history blocks + a trailing non-user turn falls back to the generic
+    "Continue with the task above." user message as the trailing dynamic-context slot."""
     blocks = [
         _identity_block("SOUL TEXT"),
         _background_block("BG TEXT"),
@@ -332,10 +336,7 @@ def test_resumed_task_directive_on_history_capabilities_on_progress() -> None:
         _history_block("user", "## Current Message\nthe original ask", "1"),
         _history_block("assistant", "did some work", "2"),
     ]
-    # process_report_at present → Current Progress renders as a timestamped history block that
-    # sorts after the prior turns (string "2026-..." > "2"), so it is the last user message.
-    task = SimpleNamespace(user_prompt_in_memory=True, process_report="halfway done",
-                           process_report_at=datetime(2026, 1, 1, tzinfo=UTC),
+    task = SimpleNamespace(user_prompt_in_memory=True, process_report=None, process_report_at=None,
                            title="T", description="D", user_prompt="the original ask")
     msgs = DefaultComposer()._build_actor_messages(blocks, SimpleNamespace(task=task, purpose="act"))
     user_msgs = [m for m in msgs if m.role == "user"]
@@ -345,8 +346,8 @@ def test_resumed_task_directive_on_history_capabilities_on_progress() -> None:
     assert "the original ask" in first
     assert first.index("the original ask") < first.index("## Instructions for the current task")
     assert "### Available Tools" not in first
-    # the trailing dynamic-context message carries the progress AND the capabilities
-    assert "## Progress So Far" in last and "halfway done" in last
+    # the trailing dynamic-context (fallback) message carries the capabilities
+    assert "Continue with the task above." in last
     assert "### Available Tools" in last
     assert first is not last
 

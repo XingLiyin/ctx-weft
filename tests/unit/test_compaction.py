@@ -79,10 +79,15 @@ def _agent(cfg: LoopConfig, context_limit: int = 1000) -> Agent:
     return a
 
 
-def _state(active: Task, cfg: LoopConfig, context_limit: int = 1000) -> LoopState:
+def _state(active: Task, cfg: LoopConfig, context_limit: int = 1000,
+           context_tokens: int | None = None) -> LoopState:
     session = Session(id="s1", user_prompt="u", status="RUNNING")
+    agent = _agent(cfg, context_limit)
+    # escalating_compact 的预算门用 loop_guard.context_tokens；缺省=context_limit（视作已满,
+    # 门总是打开）——迁移自旧 count-based _compact_scope 的测试显式传本参数模拟"未达预算"。
+    agent.loop_guard.context_tokens = context_limit if context_tokens is None else context_tokens
     return LoopState(run_id="run1", session=session, task=active,
-                     agent=_agent(cfg, context_limit), scope=_sc(active.id, "ag1"))
+                     agent=agent, scope=_sc(active.id, "ag1"))
 
 
 def _loop_ctx(mem, tm, *, with_assembler: bool = False):
@@ -150,71 +155,11 @@ async def test_trigger_no_division_when_limit_or_estimate_zero() -> None:
     assert await step._should_compact(s1, _loop_ctx(mem, _FakeTM({})), token_estimate=0) is False
 
 
-async def test_trigger_growth_active_task_conversation() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    for i in range(3):
-        await mem.ingest(_ev(T.LLM_RESPONSE, _sc("t1"), f"turn {i}", i, role="assistant"), _ctx())
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is True
-
-
-async def test_trigger_growth_root_residues() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    sc = _sc("t1")
-    # 新格式：AGENT_CONVERSATION_TURN（parent=None）触发 root residue 计数
-    await _seed_root_residues(mem, sc, 4)
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is True
-
-
-async def test_trigger_growth_finished_short_convs() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    tasks = {"t1": _active_task()}
-    for i in range(4):
-        tid = f"s{i}"
-        await mem.ingest(_ev(T.LLM_RESPONSE, _sc(tid), f"short {i}", i, role="assistant"), _ctx())
-        tasks[tid] = _finished_short(tid)
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM(tasks)), token_estimate=1) is True
-
-
-async def test_trigger_subtask_residues_do_not_trigger() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    sc = _sc("t1")
-    # many sub-task residues (parent_task_id set) → working set, must NOT trigger
-    for i in range(10):
-        await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, f"sub {i}", i, role="tool",
-                             tool_call_id=f"sd{i}", parent_task_id="t1"), _ctx())
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is False
-
-
-async def test_trigger_suspended_ancestor_conv_not_counted() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    # ancestor (SUSPENDED) has many conv turns, but they're not "finished short" → not counted
-    for i in range(5):
-        await mem.ingest(_ev(T.LLM_RESPONSE, _sc("anc"), f"anc {i}", i, role="assistant"), _ctx())
-    anc = Task(id="anc", session_id="s1", status="SUSPENDED", assigned_agent_id="ag1",
-               creator_agent_id="ag1", title="Anc", settings=NormalTaskSettings())
-    state = _state(_active_task(), cfg)
-    ctx = _loop_ctx(mem, _FakeTM({"anc": anc, "t1": _active_task()}))
-    assert await PrepareStep()._should_compact(state, ctx, token_estimate=1) is False
-
-
-async def test_trigger_delta_zero_disables_growth() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=0)
-    sc = _sc("t1")
-    for i in range(10):
-        await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, f"r{i}", i, role="tool",
-                             tool_call_id=f"rd{i}", parent_task_id=None), _ctx())
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is False
+# 消息条数增长触发（compact_message_delta）已废（spec 2026-07-01 §3.6：compact 改纯预算
+# 驱动）。旧的 growth-trigger 用例（active task conversation / root residues / finished
+# short convs / subtask residues / suspended ancestor / delta==0）随之删除——那些场景现在
+# 一律不触发（token 比率之外无其他触发维度），已由 test_trigger_token_ratio_over_and_under
+# 与 test_trigger_no_division_when_limit_or_estimate_zero 覆盖纯预算契约。
 
 
 # ═══════════════════ (b) close_finished_short_tasks — 删除（task-resident） ══════
@@ -316,9 +261,10 @@ async def test_count_root_residues_excludes_subtask() -> None:
 
 # ═══════════════════ CompactStep.execute orchestration ═══════════════════
 
-async def test_execute_noop_when_nothing_foldable() -> None:
+async def test_execute_noop_when_budget_gate_closed() -> None:
+    """预算门未开（token_estimate 低于 target）时，escalating_compact 空跑，不摸任何记录。"""
     mem = InMemoryMemoryProvider()
-    state = _state(_active_task(), LoopConfig(compact_keep_last=1))
+    state = _state(_active_task(), LoopConfig(compact_keep_last=1), context_tokens=0)
     outcome = await CompactStep().execute(state, _loop_ctx(mem, _FakeTM({}), with_assembler=True))
     assert outcome.events == []
     assert await mem.recall_recent(_sc("t1"), [T.TASK_COMPACT_SUMMARY, T.AGENT_COMPACT_SUMMARY], 100, _ctx()) == []
@@ -388,14 +334,19 @@ async def test_execute_keeps_finished_short_body_then_folds_root() -> None:
 
 
 async def test_execute_idempotent_second_run_noop() -> None:
+    """第一次跑（预算门开）真折一轮；折后负载回落，第二次预算门不开（context_tokens 低于
+    target）→ 空跑不摸记录（escalating_compact 门未过时连 STARTED 都不发,见 gate 语义）。"""
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
     await _seed_root_residues(mem, sc, 4)
     state = _state(_active_task(), LoopConfig(compact_keep_last=1))
     ctx = _loop_ctx(mem, _FakeTM({}), with_assembler=True)
 
-    await CompactStep().execute(state, ctx)
+    out1 = await CompactStep().execute(state, ctx)
+    assert out1.events != []  # first run actually did work (root residues > keep_last)
     after_first = await mem.recall_recent(sc, [T.TASK_DISPATCH_RESULT], 100, _ctx())
+    # simulate settled load post-compaction: budget gate no longer open
+    state.agent.loop_guard.context_tokens = 0
     out2 = await CompactStep().execute(state, ctx)  # nothing new to fold (root residues now ≤ keep_last)
     after_second = await mem.recall_recent(sc, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     assert out2.events == []
@@ -416,9 +367,10 @@ async def test_predispatch_folds_task_and_agent_layers() -> None:
 
     cfg = LoopConfig(compact_keep_last=1, predispatch_compact_token_ratio=0.6)
     state = _state(_active_task(), cfg, context_limit=1000)
-    # 800 / 1000 = 0.8 >= 0.6 → 门控通过
+    # 950 / 1000 = 0.95 >= 0.6 → 门控通过；留足预算余量使 L1 折后仍在 target(800) 之上，续入
+    # L2/L3（escalating_compact 每级折后即测：低于 target 就提前停,此处要打穿到 L3 才折 task 层）。
     events = await maybe_compact_before_dispatch(
-        state, _loop_ctx(mem, _FakeTM({}), with_assembler=True), prompt_tokens=800)
+        state, _loop_ctx(mem, _FakeTM({}), with_assembler=True), prompt_tokens=950)
 
     compacted = [e for e in events if e.type == "MemoryCompacted"]
     assert {e.payload.get("layer") for e in compacted} == {"task", "agent"}      # 两层都折

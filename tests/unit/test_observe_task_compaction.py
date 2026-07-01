@@ -1,4 +1,10 @@
-"""ObserveStep compacts the task layer on max_turns exit (spec 2026-06-22)."""
+"""ObserveStep folds the current attempt's task-layer raw when verdict.task_outcome=="retry"
+(spec 2026-07-01 reshape of the old max_turns-only _maybe_compact_task).
+
+New contract: _fold_retry_segment is unconditional (no keep_last gate) whenever
+task_outcome=="retry" — always keep_last=0, always reuse verdict.act_recap (no dedicated
+summarize_for_compact LLM call). Non-retry outcomes are a no-op.
+"""
 
 from __future__ import annotations
 
@@ -22,22 +28,6 @@ class _FakeMem:
         return SimpleNamespace(events_before=10, events_after=keep_last, summary_event_id="s1")
 
 
-class _FakeAssembler:
-    async def assemble(self, request):
-        return SimpleNamespace(system="SYS", messages=[], tools=[])
-
-
-class _FakeLLM:
-    async def complete(self, request, stream=True):
-        yield SimpleNamespace(kind="token", text="FRESH", usage=None, tool_call=None)
-
-
-class _EmptyLLM:
-    async def complete(self, request, stream=True):
-        return
-        yield  # makes this an empty async generator
-
-
 def _state(exit_reason, process_report):
     agent = SimpleNamespace(
         id="a1",
@@ -58,68 +48,58 @@ def _state(exit_reason, process_report):
 
 
 def _ctx(mem):
-    return SimpleNamespace(
-        memory=mem, assembler=_FakeAssembler(), llm=_FakeLLM(), provider_ctx=SimpleNamespace()
-    )
+    return SimpleNamespace(memory=mem, provider_ctx=SimpleNamespace())
 
 
-def _ctx_empty_llm(mem):
-    return SimpleNamespace(
-        memory=mem, assembler=_FakeAssembler(), llm=_EmptyLLM(), provider_ctx=SimpleNamespace()
-    )
-
-
-async def test_max_turns_reuses_reported_summary():
-    # 本轮真上报：复用 verdict.act_recap（可信 report），不调 summarize_for_compact
+async def test_retry_reuses_act_recap_unconditionally():
+    # 本轮真上报：复用 verdict.act_recap（可信 report）；keep_last 固定 0，不看 compact_keep_last
     mem = _FakeMem(count=10)
     events = []
     verdict = Verdict(task_outcome="retry", act_recap="REPORT", reported=True)
-    await ObserveStep()._maybe_compact_task(_state("max_turns", "REPORT"), _ctx(mem), verdict, events)
-    assert mem.applied == [("task", "REPORT", 2)]
-    assert [e.type for e in events] == [EventType.MEMORY_COMPACT_STARTED, EventType.MEMORY_COMPACTED]
+    await ObserveStep()._fold_retry_segment(_state("max_turns", "REPORT"), _ctx(mem), verdict, events)
+    assert mem.applied == [("task", "REPORT", 0)]
+    assert [e.type for e in events] == [EventType.MEMORY_COMPACTED]
 
 
-async def test_max_turns_uses_dedicated_summary_when_not_reported():
-    # 本轮未上报（规则降级）：用 summarize_for_compact，不退薄 verdict.act_recap
+async def test_retry_reuses_act_recap_even_when_not_reported():
+    # 规则降级（未上报）：仍复用 verdict.act_recap，不再调 summarize_for_compact
     mem = _FakeMem(count=10)
     events = []
     verdict = Verdict(task_outcome="retry", act_recap="thin rule text", reported=False)
-    await ObserveStep()._maybe_compact_task(_state("max_turns", ""), _ctx(mem), verdict, events)
-    assert mem.applied == [("task", "FRESH", 2)]
-    assert [e.type for e in events] == [EventType.MEMORY_COMPACT_STARTED, EventType.MEMORY_COMPACTED]
+    await ObserveStep()._fold_retry_segment(_state("max_turns", ""), _ctx(mem), verdict, events)
+    assert mem.applied == [("task", "thin rule text", 0)]
 
 
-async def test_max_turns_ignores_stale_persisted_process_report():
-    # 关键回归：未上报时，即使持久 process_report 非空（陈旧），也不复用它 —— 走 summarize_for_compact
-    mem = _FakeMem(count=10)
-    events = []
-    verdict = Verdict(task_outcome="retry", act_recap="thin rule text", reported=False)
-    await ObserveStep()._maybe_compact_task(_state("max_turns", "STALE-PRIOR-ROUND"), _ctx(mem), verdict, events)
-    assert mem.applied == [("task", "FRESH", 2)]
-
-
-async def test_no_compact_when_task_layer_at_or_below_keep_last():
-    mem = _FakeMem(count=2)  # <= compact_keep_last
+async def test_retry_folds_regardless_of_layer_size():
+    # 新契约无 keep_last 门控：即使可折条数很少也无条件折
+    mem = _FakeMem(count=1)
     events = []
     verdict = Verdict(task_outcome="retry", act_recap="REPORT", reported=True)
-    await ObserveStep()._maybe_compact_task(_state("max_turns", "REPORT"), _ctx(mem), verdict, events)
+    await ObserveStep()._fold_retry_segment(_state("max_turns", "REPORT"), _ctx(mem), verdict, events)
+    assert mem.applied == [("task", "REPORT", 0)]
+
+
+async def test_retry_folds_on_context_limit_and_observer_retry_too():
+    # 三来源：max_turns/context_limit/observer-retry 均由 task_outcome=="retry" 统一驱动
+    mem = _FakeMem(count=10)
+    events = []
+    verdict = Verdict(task_outcome="retry", act_recap="ctx-limit recap", reported=True)
+    await ObserveStep()._fold_retry_segment(_state("context_limit", "REPORT"), _ctx(mem), verdict, events)
+    assert mem.applied == [("task", "ctx-limit recap", 0)]
+
+
+async def test_no_fold_on_non_retry_outcome():
+    mem = _FakeMem(count=10)
+    events = []
+    verdict = Verdict(task_outcome="success", act_recap="REPORT", reported=True)
+    await ObserveStep()._fold_retry_segment(_state("normal", "REPORT"), _ctx(mem), verdict, events)
     assert mem.applied == []
     assert events == []
 
 
-async def test_no_compact_on_non_max_turns_exit():
+async def test_retry_falls_back_to_placeholder_when_act_recap_empty():
     mem = _FakeMem(count=10)
     events = []
-    verdict = Verdict(task_outcome="retry", act_recap="REPORT", reported=True)
-    await ObserveStep()._maybe_compact_task(_state("normal", "REPORT"), _ctx(mem), verdict, events)
-    assert mem.applied == []
-    assert events == []
-
-
-async def test_max_turns_ultimate_fallback_placeholder_when_not_reported_and_empty_llm():
-    # 未上报 + LLM 无 token → summarize_for_compact 返回 "" → 落到 "[Context compacted]"
-    mem = _FakeMem(count=10)
-    events = []
-    verdict = Verdict(task_outcome="retry", act_recap="thin rule text", reported=False)
-    await ObserveStep()._maybe_compact_task(_state("max_turns", ""), _ctx_empty_llm(mem), verdict, events)
-    assert mem.applied == [("task", "[Context compacted]", 2)]
+    verdict = Verdict(task_outcome="retry", act_recap="", reported=False)
+    await ObserveStep()._fold_retry_segment(_state("max_turns", ""), _ctx(mem), verdict, events)
+    assert mem.applied == [("task", "[Context compacted]", 0)]

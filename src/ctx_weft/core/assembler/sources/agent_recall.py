@@ -61,9 +61,6 @@ class AgentRecallSource:
 
     name = "agent_recall"
 
-    def __init__(self, limit: int = 50) -> None:
-        self._limit = limit
-
     async def fetch(
         self,
         request: "ContextRequest",
@@ -82,10 +79,12 @@ class AgentRecallSource:
             yield record_to_history_block(record, source="agent_recall", idx=idx)
 
         # ── 2) agent 层残留 / 经验 ──
+        # 全召回未 superseded（同 task 层）：体量交给 supersede + BudgetStrategy 的 token 守卫，
+        # 不在召回处按条数截断——否则滚动 AGENT_COMPACT_SUMMARY（锚在最早）会被截出窗、丢经验。
         agent_records = await deps.memory.recall_recent(
             scope=request.scope,
             types=_AGENT_TYPES,
-            limit=self._limit,
+            limit=_RECALL_ALL,
             ctx=deps.provider_ctx,
         )
         # §5.5：存量 legacy dispatch 对在读侧归一化成 conversation turn，下面统一走 conversation 渲染。
