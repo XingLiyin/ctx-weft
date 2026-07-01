@@ -29,7 +29,7 @@ def _req(purpose):
     task = SimpleNamespace(user_prompt_in_memory=False, process_report=None,
                            title="T", description="D", user_prompt="do the thing")
     template = SimpleNamespace(identity={"act": SimpleNamespace(text="ACT-SOUL", style=None)})
-    return SimpleNamespace(purpose=purpose, task=task, template=template)
+    return SimpleNamespace(purpose=purpose, task=task, template=template, extra={})
 
 
 async def test_compact_system_is_act_facet_and_persona_in_trailing():

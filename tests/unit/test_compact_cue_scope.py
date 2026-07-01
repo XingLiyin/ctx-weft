@@ -52,3 +52,4 @@ async def test_agent_scope_uses_agent_cue():
 async def test_default_scope_is_task():
     text = await _last_user(None)
     assert _COMPACTION_INSTRUCTION in text
+    assert _AGENT_COMPACTION_INSTRUCTION not in text
