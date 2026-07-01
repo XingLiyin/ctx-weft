@@ -65,8 +65,8 @@ tool, _FS_TOOLS, _FS_IMPLS = make_tool_registry(FS_PROVIDER_NAME)
 _BASH_IDLE_TIMEOUT_SEC_DEFAULT = 30
 _BASH_HARD_CAP_SEC_DEFAULT = 120
 _BASH_MAX_OUTPUT_BYTES_DEFAULT = 50_000
-_FILE_READ_DEFAULT_LINES = 2000
-_FILE_READ_MAX_BYTES = 262_144
+_FILE_READ_DEFAULT_LINES = 500
+_FILE_READ_MAX_BYTES = 20_480
 _FILE_READ_MAX_LINE_BYTES = 4096
 _FILE_READ_COUNT_MAX_BYTES = 5_242_880
 _GLOB_MAX_RESULTS_DEFAULT = 500
@@ -273,7 +273,7 @@ async def bash_exec(
 async def read_file(
     path: Annotated[str, "File path; relative paths are resolved against the workspace"],
     offset: Annotated[int | None, "1-based start line (line mode; default 1)"] = None,
-    limit: Annotated[int | None, "Number of lines to read (line mode; default 2000)"] = None,
+    limit: Annotated[int | None, "Number of lines to read (line mode; default 500)"] = None,
     *,
     byte_offset: Annotated[int | None, "Raw byte offset to start at (byte mode; escape hatch for oversized single lines)"] = None,
     byte_limit: Annotated[int | None, "Max bytes to read in byte mode (clamped to the per-call budget)"] = None,
@@ -554,8 +554,8 @@ class FilesystemConfig:
     bash_venv_dir: str = ".venv"
     bash_venv_python: str | None = None  # 创建 venv 用的真 Python；None=回退 sys.executable
     bash_blacklist: frozenset[str] | None = None  # host 收窄硬黑名单；None=用 _bash_safety 默认集
-    file_read_default_lines: int = 2000
-    file_read_max_bytes: int = 262_144
+    file_read_default_lines: int = 500
+    file_read_max_bytes: int = 20_480
     file_read_max_line_bytes: int = 4096
     file_read_count_max_bytes: int = 5_242_880
     glob_max_results: int = 500

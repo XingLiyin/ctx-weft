@@ -16,6 +16,9 @@ class RuntimeConfig:
     task_max_retries: int = 3
     default_token_budget: int = 200_000
     default_task_timeout_ms: int = 60_000
+    # 工具输出落盘（spill）阈值：CapabilityGateway 读取。host 可覆盖。
+    spill_threshold: int = 4000
+    spill_preview_chars: int = 1000
     # LLM 瞬时故障自愈预算（stream_llm_resilient 读取；默认=历史安全值）
     llm_self_heal_max_attempts: int = 8
     llm_self_heal_max_duration_sec: float = 300.0

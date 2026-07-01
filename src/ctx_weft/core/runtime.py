@@ -1269,6 +1269,8 @@ class CtxWeftRuntime:
             memory=memory,
             event_bus=self._event_bus,
             provider_authorizers=self.providers.get_capability_authorizers(),
+            spill_threshold=self._config.spill_threshold,
+            spill_preview_chars=self._config.spill_preview_chars,
         )
 
     def _build_loop_ctx(

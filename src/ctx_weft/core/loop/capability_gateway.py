@@ -96,7 +96,7 @@ class CapabilityGateway:
         event_bus: EventBus,
         provider_authorizers: dict[str, Authorizer] | None = None,
         default_authorizer: Authorizer | None = None,
-        spill_threshold: int = 8000,
+        spill_threshold: int = 4000,
         spill_preview_chars: int = 1000,
     ) -> None:
         self._cache = capability_cache
