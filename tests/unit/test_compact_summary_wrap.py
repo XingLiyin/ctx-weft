@@ -85,3 +85,27 @@ async def test_agent_compact_summary_rendered_wrapped():
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     summ = [b for b in blocks if b.metadata.get("type") == T.AGENT_COMPACT_SUMMARY]
     assert summ and summ[0].content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
+
+
+@pytest.mark.asyncio
+async def test_agent_layer_recall_not_count_capped():
+    """agent 层召回不设小条数上限（体量交给 token 守卫）：否则滚动 AGENT_COMPACT_SUMMARY
+    锚在最早、被条数窗截出 → 再折时总结看不到旧摘要 → 丢经验。"""
+    from ctx_weft.core.assembler.sources.agent_recall import _AGENT_TYPES, _RECALL_ALL
+
+    seen = {}
+
+    class _SpyMem:
+        async def recall_recent(self, scope, types, limit, ctx):
+            if list(types) == list(_AGENT_TYPES):
+                seen["limit"] = limit
+            return []
+
+        async def recall_recent_by_agent(self, agent_scope, types, limit, ctx):
+            return []
+
+    deps = SimpleNamespace(memory=_SpyMem(),
+                           provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
+    req = SimpleNamespace(scope=SimpleNamespace())
+    _ = [b async for b in AgentRecallSource().fetch(req, deps)]
+    assert seen.get("limit") == _RECALL_ALL, "agent 层召回须全召回，不按条数截断"
