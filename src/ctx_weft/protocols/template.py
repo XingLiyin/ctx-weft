@@ -76,9 +76,12 @@ class LoopConfig:
     failure_threshold: int = 3
     max_spawn_depth: int = 4
     compact_token_ratio: float = 0.8
-    compact_message_delta: int = 20
-    compact_keep_last: int = 6           # agent 折叠保留的胶囊数（结束顶层单元）；更老的折成摘要（spec 2026-06-29）
-    collapse_keep_last: int = 3          # task 坍缩保留的最近回合数（task 层，与胶囊数分离）
+    # 压缩「压到」目标比率（滞后区下沿）：触发后一路升级直到 token 估算 < 此比率 * context_limit。
+    # 0 = 无滞后，回退等于 compact_token_ratio（压到刚低于触发比率即停）。应设得比 compact_token_ratio 低。
+    compact_target_ratio: float = 0.0
+    compact_message_delta: int = 20      # DEPRECATED（2026-07-01）：compact 改纯预算驱动，本字段不再被读
+    compact_keep_last: int = 6           # 保留底线（非触发门）：agent 层折叠保留的胶囊数；更老的折成摘要
+    collapse_keep_last: int = 3          # 保留底线（非触发门）：task 坍缩保留的最近段摘要条数
     # 派发前压缩阈值：派发工具调用执行前，若本轮 prompt token / context_limit >= 此值，
     # 先对父自身 task 层对话压缩一次（fold_task），使父 resume 更精简、inherit 快照为
     # 压缩后版本。0 = 关闭（默认）。通常设得比 compact_token_ratio 更早触发。
