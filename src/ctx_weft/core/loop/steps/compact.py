@@ -20,7 +20,7 @@ from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
 from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
-from ctx_weft.core.utils import content_to_text, now_utc
+from ctx_weft.core.utils import content_to_text, now_utc, estimate_tokens
 from ctx_weft.protocols import LLMRequest, MemoryEvent, MemoryEventType
 
 logger = logging.getLogger(__name__)
@@ -190,6 +190,26 @@ def _dispatch_finish_sets(recs) -> tuple[set, set]:
             elif name.endswith("delegate_task") or name.endswith("delegate_plan"):
                 has_dispatch.add(oid)
     return has_dispatch, has_finish
+
+
+_AGENT_LAYER_TYPES = [
+    MemoryEventType.AGENT_CONVERSATION_TURN,
+    MemoryEventType.AGENT_COMPACT_SUMMARY,
+]
+
+
+async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
+    """当前 scope 活跃记忆的 token 代理：task 层 body（跨 task 按 agent 召回）+ agent 层对话/摘要，
+    逐条 content 求 estimate_tokens 之和。用于升级 compact 级间的 before/after 增量粗估（非精确装配）。"""
+    total = 0
+    body = await ctx.memory.recall_recent_by_agent(
+        state.scope, _TASK_BODY_TYPES, 2000, ctx.provider_ctx)
+    agent_recs = await ctx.memory.recall_recent(
+        state.scope, _AGENT_LAYER_TYPES, 2000, ctx.provider_ctx)
+    for r in [*body, *agent_recs]:
+        text = r.content if isinstance(r.content, str) else content_to_text(r.content)
+        total += estimate_tokens(text)
+    return total
 
 
 async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
