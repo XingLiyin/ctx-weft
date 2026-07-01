@@ -1,4 +1,4 @@
-"""PrepareStep compacts inline (no compact Task pushed) and still routes to act."""
+"""PrepareStep compacts inline (calls escalating_compact directly) and still routes to act."""
 
 from __future__ import annotations
 
@@ -7,19 +7,20 @@ from types import SimpleNamespace
 from ctx_weft.core.loop.steps.prepare import PrepareStep
 
 
-class _SpyCompact:
+class _SpyEscalatingCompact:
     def __init__(self):
         self.called = False
+        self.kwargs = None
 
-    async def execute(self, state, ctx):
-        from ctx_weft.core.loop.driver import StepOutcome
+    async def __call__(self, state, ctx, **kwargs):
         self.called = True
-        return StepOutcome(next_step=None, events=[])
+        self.kwargs = kwargs
+        return []
 
 
 async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
-    spy = _SpyCompact()
-    monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.CompactStep", lambda: spy)
+    spy = _SpyEscalatingCompact()
+    monkeypatch.setattr("ctx_weft.core.loop.steps.compact.escalating_compact", spy)
 
     pushed = []
 
@@ -73,7 +74,8 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
                           memory=SimpleNamespace(), provider_ctx=SimpleNamespace())
 
     outcome = await rs.execute(state, ctx)
-    assert spy.called is True          # compaction ran inline
+    assert spy.called is True          # escalating_compact ran inline
+    assert spy.kwargs["trigger"] == "compact"
     assert pushed == []                # no compact Task pushed
     assert outcome.next_step == "act"  # still proceeds to act
     assert asm.calls == 2              # assembled once, then re-assembled after compaction

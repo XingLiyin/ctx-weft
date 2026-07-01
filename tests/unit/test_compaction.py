@@ -155,71 +155,11 @@ async def test_trigger_no_division_when_limit_or_estimate_zero() -> None:
     assert await step._should_compact(s1, _loop_ctx(mem, _FakeTM({})), token_estimate=0) is False
 
 
-async def test_trigger_growth_active_task_conversation() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    for i in range(3):
-        await mem.ingest(_ev(T.LLM_RESPONSE, _sc("t1"), f"turn {i}", i, role="assistant"), _ctx())
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is True
-
-
-async def test_trigger_growth_root_residues() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    sc = _sc("t1")
-    # 新格式：AGENT_CONVERSATION_TURN（parent=None）触发 root residue 计数
-    await _seed_root_residues(mem, sc, 4)
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is True
-
-
-async def test_trigger_growth_finished_short_convs() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    tasks = {"t1": _active_task()}
-    for i in range(4):
-        tid = f"s{i}"
-        await mem.ingest(_ev(T.LLM_RESPONSE, _sc(tid), f"short {i}", i, role="assistant"), _ctx())
-        tasks[tid] = _finished_short(tid)
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM(tasks)), token_estimate=1) is True
-
-
-async def test_trigger_subtask_residues_do_not_trigger() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    sc = _sc("t1")
-    # many sub-task residues (parent_task_id set) → working set, must NOT trigger
-    for i in range(10):
-        await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, f"sub {i}", i, role="tool",
-                             tool_call_id=f"sd{i}", parent_task_id="t1"), _ctx())
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is False
-
-
-async def test_trigger_suspended_ancestor_conv_not_counted() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
-    # ancestor (SUSPENDED) has many conv turns, but they're not "finished short" → not counted
-    for i in range(5):
-        await mem.ingest(_ev(T.LLM_RESPONSE, _sc("anc"), f"anc {i}", i, role="assistant"), _ctx())
-    anc = Task(id="anc", session_id="s1", status="SUSPENDED", assigned_agent_id="ag1",
-               creator_agent_id="ag1", title="Anc", settings=NormalTaskSettings())
-    state = _state(_active_task(), cfg)
-    ctx = _loop_ctx(mem, _FakeTM({"anc": anc, "t1": _active_task()}))
-    assert await PrepareStep()._should_compact(state, ctx, token_estimate=1) is False
-
-
-async def test_trigger_delta_zero_disables_growth() -> None:
-    mem = InMemoryMemoryProvider()
-    cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=0)
-    sc = _sc("t1")
-    for i in range(10):
-        await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, f"r{i}", i, role="tool",
-                             tool_call_id=f"rd{i}", parent_task_id=None), _ctx())
-    state = _state(_active_task(), cfg)
-    assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is False
+# 消息条数增长触发（compact_message_delta）已废（spec 2026-07-01 §3.6：compact 改纯预算
+# 驱动）。旧的 growth-trigger 用例（active task conversation / root residues / finished
+# short convs / subtask residues / suspended ancestor / delta==0）随之删除——那些场景现在
+# 一律不触发（token 比率之外无其他触发维度），已由 test_trigger_token_ratio_over_and_under
+# 与 test_trigger_no_division_when_limit_or_estimate_zero 覆盖纯预算契约。
 
 
 # ═══════════════════ (b) close_finished_short_tasks — 删除（task-resident） ══════

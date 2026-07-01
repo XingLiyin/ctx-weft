@@ -4,10 +4,9 @@ token 估算对齐 miniAgents Reasoner._fetch_base：
   - 有真实基线（loop_guard.context_tokens > 0）→ 增量估算：基线 + 新增消息估算
   - 无基线 → 用装配后的 prompt.token_count（全量估算）
 
-compact 触发两个维度（任一满足）：
-  - context_tokens >= context_limit * compact_token_ratio
-  - agent 层 / task 层任一的可折叠 active 条数 >= compact_message_delta（绝对条数，
-    非「自上次 compact 起的增量」——见 _should_compact）
+compact 触发（纯预算，spec 2026-07-01 §3.6）：
+  - token_estimate / context_limit >= compact_token_ratio
+  命中后调 escalating_compact 升级式压缩，再完整重装配一次 prompt（Q4=c 校正）。
 """
 
 from __future__ import annotations
@@ -22,10 +21,6 @@ from ctx_weft.core.orchestrator.skill_executor_capability import (
     EXEC_SCRIPT_NAME,
     LIST_FILES_NAME,
     READ_FILE_NAME,
-)
-from ctx_weft.core.loop.steps.compact import (
-    TASK_COMPACT_TYPES,
-    CompactStep,
 )
 from ctx_weft.core.loop.steps.recognize_intent import (
     launch_recognize_intent,
@@ -100,11 +95,10 @@ class PrepareStep(Step):
         if token_estimate == 0:
             token_estimate = prompt.token_count
 
-        # ── 5. compact 触发：命中则内联直调 CompactStep，再在压缩后的 memory 上重装配 ──
-        should_compact = await self._should_compact(state, ctx, token_estimate)
-        if should_compact:
-            compact_outcome = await CompactStep().execute(state, ctx)
-            for ev in compact_outcome.events:
+        # ── 5. compact 触发：命中则跑升级式 compact，再在压缩后 memory 上重装配一次（Q4=c 校正）──
+        if await self._should_compact(state, ctx, token_estimate):
+            from ctx_weft.core.loop.steps.compact import escalating_compact
+            for ev in await escalating_compact(state, ctx, token_estimate=token_estimate, trigger="compact"):
                 await ctx.event_bus.emit(ev)
             prompt = await _assemble()
 
@@ -161,49 +155,12 @@ class PrepareStep(Step):
     async def _should_compact(
         self, state: LoopState, ctx: LoopContext, token_estimate: int
     ) -> bool:
+        """纯预算触发（spec 2026-07-01 §3.6）：token 估算 / context_limit ≥ compact_token_ratio。
+        消息条数门控（compact_message_delta）已废。"""
         loop_config = state.agent.loop_config
-        loop_guard = state.agent.loop_guard
-        context_limit = loop_guard.context_limit
-
+        context_limit = state.agent.loop_guard.context_limit
         if context_limit > 0 and token_estimate > 0:
-            if token_estimate / context_limit >= loop_config.compact_token_ratio:
-                return True
-
-        delta = loop_config.compact_message_delta
-        if delta > 0:
-            # (a) 活跃 task 对话
-            try:
-                if await ctx.memory.count_recent(
-                        state.scope, TASK_COMPACT_TYPES, ctx.provider_ctx) >= delta:
-                    return True
-            except Exception:
-                pass
-            # (c) 已结束 root 残留（新格式：按 origin_task_id 分组 AGENT_CONVERSATION_TURN 胶囊，
-            #     parent_task_id is None 或不在 scope origin 集内；spec §3.11）
-            try:
-                from ctx_weft.core.loop.steps.compact import _count_root_residues
-                if await _count_root_residues(state, ctx) >= delta:
-                    return True
-            except Exception:
-                pass
-            # (b) finished 短 task 对话（同-agent 短叶子不写残留、不进 dispatch 计数）
-            if ctx.task_manager is not None:
-                try:
-                    recs = await ctx.memory.recall_recent_by_agent(
-                        state.scope, TASK_COMPACT_TYPES, 2000, ctx.provider_ctx)
-                except Exception:
-                    recs = []
-                finished_other = 0
-                for r in recs:
-                    tid = r.metadata.get("task_id")
-                    if not tid or tid == state.task.id:
-                        continue
-                    t = ctx.task_manager.get_task(tid)
-                    if t is not None and t.status == "FINISHED":
-                        finished_other += 1
-                if finished_other >= delta:
-                    return True
-
+            return token_estimate / context_limit >= loop_config.compact_token_ratio
         return False
 
     async def _estimate_tokens(
