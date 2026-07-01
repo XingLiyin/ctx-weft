@@ -324,12 +324,10 @@ class FinalizeStep(Step):
                 },
             ))
         elif outcome == "retry":
-            # 不重复注入 user message——原始任务消息一开始就在 task 层。observe 的新增信息 =
-            # 对本轮 process 的分析 + next step hint，作为 process_report → 下一轮 Progress So Far。
+            # retry 反馈由 observe 前台段折写的 TASK_COMPACT_SUMMARY 承载（spec 2026-07-01 §3.1）；
+            # 不再写 process_report/process_report_at（旧 Progress So Far 字段路径已废）。
             # 机械退出（max_turns/context_limit）也归到这里：重排再跑，受 max_retries 兜底。
             task.outputs = None
-            task.process_report = summary
-            task.process_report_at = now_utc()  # 落在本 attempt 之后、下一 attempt 之前 → 装配按时间戳归位
             task.retry_count += 1
             events.append(make_event(
                 state, EventType.TASK_REQUEUED,
