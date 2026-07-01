@@ -1,0 +1,131 @@
+"""Shared pytest fixtures for ctx-weft unit tests."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from ctx_weft.core.loop.driver import LoopContext, LoopState
+from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.protocols import (
+    MemoryEvent,
+    MemoryEventType,
+    MemoryScope,
+    ProviderContext,
+)
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+
+
+def _ts(offset_us: int) -> datetime:
+    base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    return base + timedelta(microseconds=offset_us)
+
+
+@pytest.fixture
+def fake_state_ctx():
+    """Minimal LoopState + LoopContext with a real InMemoryMemoryProvider.
+
+    The task layer is pre-seeded with [USER_PROMPT, LLM_RESPONSE, TOOL_RESULT].
+    ctx.task_manager has a no-op track_background.
+    """
+    mem = InMemoryMemoryProvider()
+    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="a1")
+    pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
+
+    async def _seed():
+        events = [
+            MemoryEvent(
+                type=MemoryEventType.USER_PROMPT,
+                scope=scope,
+                content="hello user",
+                timestamp=_ts(1),
+                role="user",
+            ),
+            MemoryEvent(
+                type=MemoryEventType.LLM_RESPONSE,
+                scope=scope,
+                content="hello llm",
+                timestamp=_ts(2),
+                role="assistant",
+            ),
+            MemoryEvent(
+                type=MemoryEventType.TOOL_RESULT,
+                scope=scope,
+                content="tool result",
+                timestamp=_ts(3),
+                role="tool",
+            ),
+        ]
+        for ev in events:
+            await mem.ingest(ev, pctx)
+
+    asyncio.get_event_loop().run_until_complete(_seed())
+
+    # Minimal agent with required attributes
+    agent = SimpleNamespace(
+        id="a1",
+        loop_config=SimpleNamespace(compact_keep_last=2),
+        runtime={"llm_model": "mock"},
+        loop_guard=SimpleNamespace(context_limit=100000, context_tokens=1000),
+    )
+
+    # Minimal task
+    task = SimpleNamespace(
+        id="t1",
+        parent_task_id=None,
+        title="",
+        user_prompt="hello user",
+        user_prompt_in_memory=True,
+        process_report="",
+        session_id="s1",
+        tracking_task_ids=[],
+    )
+
+    # Minimal session
+    session = SimpleNamespace(id="s1", tenant_id="default")
+
+    # LoopState is a real dataclass (supports dataclasses.replace)
+    state = LoopState(
+        run_id="run-test-1",
+        session=session,
+        task=task,
+        agent=agent,
+        scope=scope,
+        extra={"template": None, "bound_capabilities": []},
+    )
+
+    # Fake task_manager with no-op track_background
+    class _FakeTaskManager:
+        def track_background(self, t: asyncio.Task) -> None:
+            pass  # no-op
+
+        def children_of(self, task_id: str):
+            return set()
+
+    # Minimal assembler and LLM (won't be called — summarize_for_compact is monkeypatched)
+    class _FakeAssembler:
+        async def assemble(self, request: Any) -> Any:
+            return SimpleNamespace(system="SYS", messages=[], tools=[])
+
+    class _FakeLLM:
+        async def complete(self, request: Any, stream: bool = True):
+            yield SimpleNamespace(kind="token", text="摘要", usage=None, tool_call=None)
+
+    class _FakeEventBus:
+        async def emit(self, event: Any) -> None:
+            pass
+
+    ctx = LoopContext(
+        assembler=_FakeAssembler(),
+        llm=_FakeLLM(),
+        memory=mem,
+        event_bus=_FakeEventBus(),
+        provider_ctx=pctx,
+        task_manager=_FakeTaskManager(),
+    )
+
+    return state, ctx

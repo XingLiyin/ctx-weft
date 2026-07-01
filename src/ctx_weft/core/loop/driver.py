@@ -167,6 +167,28 @@ def make_event(
     )
 
 
+async def _persist_user_prompt(state, ctx) -> None:
+    """task 启动时持久化 raw user_prompt（呈现态框架由 composer 渲染期生成，不落库）。"""
+    task = state.task
+    if not task.user_prompt or task.user_prompt_in_memory:
+        return
+    from ctx_weft.core.utils import content_to_text, now_utc
+    text = (task.user_prompt if isinstance(task.user_prompt, str)
+            else content_to_text(task.user_prompt))
+    await ctx.memory.ingest(
+        MemoryEvent(
+            type=MemoryEventType.USER_PROMPT,
+            scope=state.scope,
+            content=text,
+            timestamp=now_utc(),
+            role="user",
+            metadata={"task_id": task.id},
+        ),
+        ctx.provider_ctx,
+    )
+    task.user_prompt_in_memory = True
+
+
 # ── StepDriver ────────────────────────────────────────────────────────────────
 
 
@@ -178,33 +200,15 @@ class StepDriver:
     initial_step: str = "prepare"
 
     async def _ensure_blackboard_subscriptions(self, state: LoopState, ctx: LoopContext) -> None:
-        """本 task 订阅相关任务结果 topic（幂等）。
+        """No-op since Phase 3 (2026-06-30).
 
-        分两类 intent，使 observe 渲染时能区分可操作范围：
-          - predecessor：同 plan 前序（tracking_task_ids）——只读上下文
-          - subtask：已派生的子任务（children_of）——可被 review / reopen
+        Predecessor results now reach a task via memory recall (Phase 2 inherit/recall), and the
+        observer's own-children review affordance is surfaced in the observe cue from task_manager
+        (see ObserveStep). The blackboard mechanism (subscribe_topic/recall_topic/BlackboardSource/
+        BLACKBOARD_PUBLISH) and `tracking_task_ids` are intentionally kept; only the subscription
+        wiring is removed.
         """
-        tm = ctx.task_manager
-        if tm is None:
-            return
-        task = state.task
-        predecessors = set(task.tracking_task_ids or [])
-        children = tm.children_of(task.id)
-        predecessors.discard(task.id)
-        children.discard(task.id)
-        children -= predecessors  # 同一 topic 不重复订阅；前序优先按只读处理
-        for intent, topics in (("predecessor", predecessors), ("subtask", children)):
-            for topic in topics:
-                try:
-                    await ctx.memory.subscribe_topic(
-                        session_id=task.session_id,
-                        topic=topic,
-                        intent=intent,  # type: ignore[arg-type]
-                        ctx=ctx.provider_ctx,
-                        task_id=task.id,
-                    )
-                except Exception:
-                    logger.exception("blackboard subscribe failed: task=%s topic=%s", task.id, topic)
+        return
 
     async def run(
         self,
@@ -213,30 +217,9 @@ class StepDriver:
     ) -> AsyncIterator[StepOutcome]:
         state = initial_state
 
-        # 任务启动时立即持久化 user_prompt，保证 resume 时对话上下文完整可重建
-        task = state.task
-        if task.user_prompt and not task.user_prompt_in_memory:
-            content_parts: list[str] = []
-            if task.title and task.description:
-                content_parts.append(f"## Current Task\n{task.title}\n{task.description}")
-            elif task.title:
-                content_parts.append(f"## Current Task\n{task.title}")
-            content_parts.append(
-                f"## Current Message\n{task.user_prompt}\n\n"
-                "（Reply in the same language as the Current Message above.）"
-            )
-            await ctx.memory.ingest(
-                MemoryEvent(
-                    type=MemoryEventType.USER_PROMPT,
-                    scope=state.scope,
-                    content="\n\n".join(content_parts),
-                    timestamp=now_utc(),
-                    role="user",
-                    metadata={"task_id": task.id},
-                ),
-                ctx.provider_ctx,
-            )
-            task.user_prompt_in_memory = True
+        # 任务启动时立即持久化 raw user_prompt，保证 resume 时对话上下文完整可重建
+        # （呈现态框架 ## Current Task/Message 由 composer 渲染期生成，不落库）
+        await _persist_user_prompt(state, ctx)
 
         # Blackboard 订阅：本 task 订阅相关任务的结果 topic，下一次 reason 即可感知。
         # 幂等，每次 run 都执行：① 同 plan 前序（tracking_task_ids）② 已派生的子任务。

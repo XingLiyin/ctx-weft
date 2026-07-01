@@ -32,7 +32,7 @@ def _ctx(task: Task) -> ControlContext:
 
 def test_assessment_success() -> None:
     t = _task(outputs="done")
-    report_task_outcome(task_status="success", task_process_report="ok", ctx=_ctx(t))
+    report_task_outcome(task_status="success", act_recap="ok", ctx=_ctx(t))
     assert t.observer_outcome == "success"
     assert t.status == "FINISHED"
 
@@ -40,7 +40,7 @@ def test_assessment_success() -> None:
 def test_assessment_fail() -> None:
     t = _task(outputs="x")
     report_task_outcome(
-        task_status="fail", task_process_report="bad", task_failure_reason="root cause", ctx=_ctx(t)
+        task_status="fail", act_recap="bad", task_failure_reason="root cause", ctx=_ctx(t)
     )
     assert t.observer_outcome == "fail"
     assert t.status == "FAILED"
@@ -50,7 +50,7 @@ def test_assessment_fail() -> None:
 def test_assessment_retry() -> None:
     t = _task(outputs="partial")
     report_task_outcome(
-        task_status="retry", task_process_report="more needed", next_step_hint="do X", ctx=_ctx(t)
+        task_status="retry", act_recap="more needed", next_step_hint="do X", ctx=_ctx(t)
     )
     assert t.observer_outcome == "retry"
     assert t.status == "PENDING"
@@ -59,14 +59,14 @@ def test_assessment_retry() -> None:
 
 def test_assessment_success_without_outputs_downgrades_to_retry() -> None:
     t = _task(outputs=None)
-    report_task_outcome(task_status="success", task_process_report="claims done", ctx=_ctx(t))
+    report_task_outcome(task_status="success", act_recap="claims done", ctx=_ctx(t))
     assert t.observer_outcome == "retry"  # 护栏：无终稿 → 重试
     assert t.status == "PENDING"
 
 
 def test_assessment_invalid_defaults_to_retry() -> None:
     t = _task(outputs="x")
-    report_task_outcome(task_status="active", task_process_report="r", ctx=_ctx(t))
+    report_task_outcome(task_status="active", act_recap="r", ctx=_ctx(t))
     assert t.observer_outcome == "retry"  # 'active' 不在工具允许集
 
 
@@ -135,3 +135,109 @@ def test_no_role_stays_rule_even_at_max_turns() -> None:
 def test_delegated_normal_exit_uses_llm() -> None:
     s = _llm_gate_state("normal", "parent1", has_role=True)
     assert ObserveStep()._should_use_llm(s) is True
+
+
+def test_verdict_has_act_recap_and_task_summary_fields():
+    from ctx_weft.core.loop.steps.observe import Verdict
+    v = Verdict(task_outcome="success", act_recap="did X", task_summary="whole journey")
+    assert v.act_recap == "did X"
+    assert v.task_summary == "whole journey"
+    assert v.reported is False
+    # task_summary 默认空
+    assert Verdict(task_outcome="retry", act_recap="r").task_summary == ""
+
+
+def test_task_model_has_task_summary_field():
+    from ctx_weft.core.state.models import Task
+    t = Task(id="t1", session_id="s1", status="ACTIVE")
+    assert t.task_summary is None
+    t.task_summary = "comprehensive"
+    assert t.task_summary == "comprehensive"
+
+
+def test_report_task_outcome_writes_act_recap_and_task_summary() -> None:
+    task = _task(outputs="done")
+    ctx = _ctx(task)
+    report_task_outcome(
+        task_status="success",
+        act_recap="本轮我创建了 skill 文件并验证",
+        task_summary="整段：看模板→写 SKILL.md→写脚本→验证，已就绪",
+        ctx=ctx,
+    )
+    assert task.process_report == "本轮我创建了 skill 文件并验证"
+    assert task.task_summary == "整段：看模板→写 SKILL.md→写脚本→验证，已就绪"
+    assert task.observer_outcome == "success"
+
+
+# ── persona prompt 守护 ───────────────────────────────────────────────────────
+
+
+def test_default_role_prompt_uses_two_fields():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[3]  # ctx-weft/tests/unit → repo root
+    for rel in ["resources/agents/default/ROLE.md",
+                "packaging/default_data/agents/default/ROLE.md"]:
+        text = (root / rel).read_text(encoding="utf-8")
+        assert "act_recap" in text and "task_summary" in text, f"missing new fields in {rel}"
+        assert "task_process_report" not in text, f"old field still present in {rel}"
+
+
+# ── tracking 汇报 task_summary 测试 ───────────────────────────────────────────
+
+
+import asyncio
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_tracking_report_uses_task_summary():
+    """_flush_tracking_memory 应用 task_summary（若有）而非 process_report。"""
+    from types import SimpleNamespace
+    from ctx_weft.core.runtime import _flush_tracking_memory
+    from ctx_weft.protocols import MemoryEventType, MemoryScope
+    from ctx_weft.protocols.context import ProviderContext
+    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+
+    mem = InMemoryMemoryProvider()
+
+    # 前序 tracked 任务：有 task_summary 和 process_report
+    tracked_task = SimpleNamespace(
+        id="tracked1",
+        title="子任务标题",
+        outputs="最终输出",
+        task_summary="综合 report",
+        process_report="本段 recap",
+        status="FINISHED",
+    )
+
+    # 执行中的主任务（依赖 tracking）
+    main_task = SimpleNamespace(id="main_task", session_id="s1")
+
+    # agent 正在追踪 tracked1
+    agent = SimpleNamespace(
+        id="agent1",
+        tracking_task_ids=["tracked1"],
+        fetched_tracking_ids=set(),
+    )
+
+    class FakeTaskManager:
+        def get_task(self, tid):
+            return tracked_task if tid == "tracked1" else None
+
+    scope = MemoryScope(session_id="s1", task_id="main_task", agent_id="agent1")
+    pctx = ProviderContext(session_id="s1", tenant_id="default")
+
+    await _flush_tracking_memory(
+        agent=agent,
+        task=main_task,
+        task_manager=FakeTaskManager(),
+        memory=mem,
+        session_id="s1",
+        tenant_id="default",
+    )
+
+    records = await mem.recall_recent(scope, [MemoryEventType.OBSERVER_SUMMARY], 10, pctx)
+    assert records, "OBSERVER_SUMMARY not ingested"
+    body = records[0].content
+    assert "综合 report" in body, f"task_summary missing from body: {body!r}"
+    assert "本段 recap" not in body, f"process_report leaked into body: {body!r}"

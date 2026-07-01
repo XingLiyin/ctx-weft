@@ -51,8 +51,6 @@ class ContextRequest:
     template: AgentTemplate | None  # 实例化时绑定的 template（pin 了 version）；None 时 IdentitySource 跳过
     bound_capabilities: list[Any]  # list[Capability]，但避免循环导入
     extra: dict[str, Any] = field(default_factory=dict)
-    # ObserveStep 装配时需要本轮 Actor 的执行 transcript
-    actor_transcript: list[Any] | None = None  # list[ConversationTurn]
 
 
 # ── ContextBlock ──────────────────────────────────────────────────────────────
@@ -69,7 +67,6 @@ BlockKind = Literal[
     "blackboard",  # subtask / predecessor topic / 长期 project_log
     "summary",  # semantic recall 结果
     "reference",  # knowledge retrieval 结果
-    "transcript",  # observe 用：actor transcript
     "task_spec",  # 当前 task 描述
 ]
 

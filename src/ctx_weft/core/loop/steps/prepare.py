@@ -24,7 +24,6 @@ from ctx_weft.core.orchestrator.skill_executor_capability import (
     READ_FILE_NAME,
 )
 from ctx_weft.core.loop.steps.compact import (
-    _AGENT_COMPACT_TYPES,
     TASK_COMPACT_TYPES,
     CompactStep,
 )
@@ -170,21 +169,39 @@ class PrepareStep(Step):
             if token_estimate / context_limit >= loop_config.compact_token_ratio:
                 return True
 
-        # 累积增长触发：agent 层（派发日志）与 task 层（执行对话）**分别**按可折叠 active
-        # 条数触发，任一达 compact_message_delta 即压（CompactStep 再逐层判 > keep_last 决定折哪层）。
-        # 用**绝对条数**而非「自上次 compact 起的增量」：loop_guard 在冷 resume 后归零，
-        # delta-from-baseline 永远点不着（HITL park 任务每次 resume 都重进 prepare）；而压缩会把
-        # active 条数降到 keep_last 以下，绝对阈值天然自纠偏、不会反复触发。
-        # 类型对齐 CompactStep._foldable_layers 所折的层，使「触发」与「实折」一致。
-        if loop_config.compact_message_delta > 0:
-            for types in (_AGENT_COMPACT_TYPES, TASK_COMPACT_TYPES):
+        delta = loop_config.compact_message_delta
+        if delta > 0:
+            # (a) 活跃 task 对话
+            try:
+                if await ctx.memory.count_recent(
+                        state.scope, TASK_COMPACT_TYPES, ctx.provider_ctx) >= delta:
+                    return True
+            except Exception:
+                pass
+            # (c) 已结束 root 残留（新格式：按 origin_task_id 分组 AGENT_CONVERSATION_TURN 胶囊，
+            #     parent_task_id is None 或不在 scope origin 集内；spec §3.11）
+            try:
+                from ctx_weft.core.loop.steps.compact import _count_root_residues
+                if await _count_root_residues(state, ctx) >= delta:
+                    return True
+            except Exception:
+                pass
+            # (b) finished 短 task 对话（同-agent 短叶子不写残留、不进 dispatch 计数）
+            if ctx.task_manager is not None:
                 try:
-                    msg_count = await ctx.memory.count_recent(
-                        scope=state.scope, types=types, ctx=ctx.provider_ctx,
-                    )
+                    recs = await ctx.memory.recall_recent_by_agent(
+                        state.scope, TASK_COMPACT_TYPES, 2000, ctx.provider_ctx)
                 except Exception:
-                    continue
-                if msg_count >= loop_config.compact_message_delta:
+                    recs = []
+                finished_other = 0
+                for r in recs:
+                    tid = r.metadata.get("task_id")
+                    if not tid or tid == state.task.id:
+                        continue
+                    t = ctx.task_manager.get_task(tid)
+                    if t is not None and t.status == "FINISHED":
+                        finished_other += 1
+                if finished_other >= delta:
                     return True
 
         return False

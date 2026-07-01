@@ -136,6 +136,40 @@ def test_minimax_text_tool_call_is_recovered():
     assert tc.name == "delegate"
     assert tc.arguments == {"title": "迁移", "task_prompt": "line1\nline2"}
     assert tc.id                                # 生成了非空 id
+def test_truncated_text_tool_call_raises_retriable():
+    # Text-mode tool call cut off mid-tag (has_open_tag): no native buffer, so D1
+    # doesn't fire and content is non-empty so N4 doesn't fire. Must NOT be dropped
+    # to plain text (which would strand the UI in llm_pending) — retry instead.
+    text = 'ok<tool_call>{"name": "write", "argum'
+    with pytest.raises(LLMCallError) as exc:
+        build_finalize_chunks(
+            content_text=text,
+            native_tool_calls=[],
+            had_native_buffer=False,
+            saw_terminal=True,
+            usage=None,
+            finish_reason="stop",
+            emitted_visible_len=len("ok"),
+        )
+    assert exc.value.retriable is True
+    assert exc.value.outage is True  # routed through self-heal backoff, not task-level retry
+
+
+def test_malformed_text_tool_call_raises_retriable():
+    # Tool-call tag present and closed but unparseable (bad JSON, no name/XML fallback)
+    # → parse yields zero calls. Same trap: must retry, not fall through to plain text.
+    text = "<tool_call>not json and not xml</tool_call>"
+    with pytest.raises(LLMCallError) as exc:
+        build_finalize_chunks(
+            content_text=text,
+            native_tool_calls=[],
+            had_native_buffer=False,
+            saw_terminal=True,
+            usage=None,
+            finish_reason="stop",
+        )
+    assert exc.value.retriable is True
+    assert exc.value.outage is True  # routed through self-heal backoff, not task-level retry
 
 
 def test_inline_think_extracted_as_reasoning():

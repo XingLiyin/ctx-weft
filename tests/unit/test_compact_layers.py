@@ -1,7 +1,6 @@
-"""两类 compact 走同一 CompactStep，由数据驱动的 _foldable_layers 决定折叠哪些层（spec/06 §7）。
+"""两类 compact 走同一 CompactStep，按层折叠（spec/06 §7）。
 
-无 layer setting：CompactStep._foldable_layers 列出可折叠层；折叠 task 层写
-TASK_COMPACT_SUMMARY、折叠 agent 层写 AGENT_COMPACT_SUMMARY。
+折叠 task 层写 TASK_COMPACT_SUMMARY、折叠 agent 层写 AGENT_COMPACT_SUMMARY。
 """
 
 from __future__ import annotations
@@ -78,14 +77,30 @@ async def test_task_compact_writes_task_summary() -> None:
 
 
 async def test_agent_compact_writes_agent_summary() -> None:
+    """新格式：用 AGENT_CONVERSATION_TURN（parent=None）作 root 胶囊触发 agent 层压缩。"""
     mem = InMemoryMemoryProvider()
-    await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, "r1", 0, "tool"), _pctx())
-    await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, "r2", 1, "tool"), _pctx())
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    # 植入 2 个 L0 单元 = task 层 body（task_id=root{grp}）+ AGENT_CONVERSATION_TURN finish 对
+    # （keep_last=keep_pair=1 → 折最旧 1 个到 L2）
+    for grp, t0 in enumerate([0, 10]):
+        oid = f"root{grp}"
+        await mem.ingest(MemoryEvent(
+            type=T.USER_PROMPT,
+            scope=MemoryScope(session_id="s1", task_id=oid, agent_id=_scope().agent_id),
+            content=f"body {oid}", timestamp=base + timedelta(seconds=t0), role="user",
+        ), _pctx())
+        for role, dt in [("user", 0), ("assistant", 1)]:
+            await mem.ingest(MemoryEvent(
+                type=T.AGENT_CONVERSATION_TURN, scope=_scope(),
+                content=f"turn {oid} {role}",
+                timestamp=base + timedelta(seconds=t0 + dt), role=role,
+                metadata={"origin_task_id": oid, "parent_task_id": None},
+            ), _pctx())
 
     await _run_compact(mem)
 
     recs = await mem.recall_recent(
-        _scope(), [T.TASK_DISPATCH_RESULT, T.AGENT_COMPACT_SUMMARY], 10, _pctx()
+        _scope(), [T.AGENT_CONVERSATION_TURN, T.AGENT_COMPACT_SUMMARY], 10, _pctx()
     )
     assert any(r.type == T.AGENT_COMPACT_SUMMARY and r.content == "SUMMARY" for r in recs)
 
@@ -101,7 +116,8 @@ async def test_finalize_retry_carries_progress_no_user_message() -> None:
         task=task,
         agent=SimpleNamespace(id="ag1", loop_config=SimpleNamespace(compact_keep_last=6)),
         scope=MemoryScope(session_id="s1", task_id="T1", agent_id="ag1"),
-        verdict=SimpleNamespace(task_outcome="retry", summary="missing X; do Y next"),
+        verdict=SimpleNamespace(task_outcome="retry", act_recap="missing X; do Y next",
+                                task_summary=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem,
@@ -117,74 +133,3 @@ async def test_finalize_retry_carries_progress_no_user_message() -> None:
     assert recs == []  # 不注入 user message
 
 
-
-
-# ── CompactStep._foldable_layers：到达限制时同时压两层 + 空层守卫 ──────────────────────────────
-
-def _reason_scope() -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id="RT", agent_id="rag")
-
-
-def _reason_state() -> tuple[LoopState, Task]:
-    task = Task(id="RT", session_id="s1", status="ACTIVE", title="X")
-    state = LoopState(
-        run_id="r1",
-        session=SimpleNamespace(id="s1", tenant_id="default"),
-        task=task,
-        agent=SimpleNamespace(id="rag", loop_config=SimpleNamespace(compact_keep_last=1)),
-        scope=_reason_scope(),
-        extra={},
-    )
-    return state, task
-
-
-async def _ingest_n(mem, type_, n: int, role: str) -> None:
-    for i in range(n):
-        await mem.ingest(
-            MemoryEvent(type=type_, scope=_reason_scope(), content=f"c{i}",
-                        timestamp=_BASE + timedelta(seconds=i), role=role),
-            ProviderContext(session_id="s1", tenant_id="default"),
-        )
-
-
-async def test_compactable_layers_skips_empty_layer() -> None:
-    """task 层有 3 条(>keep_last=1)→入选；agent 层空→被守卫跳过。"""
-    mem = InMemoryMemoryProvider()
-    state, _ = _reason_state()
-    ctx = LoopContext(assembler=None, llm=None, memory=mem,
-                      event_bus=InProcessEventBus(), provider_ctx=_pctx())
-    await _ingest_n(mem, T.LLM_RESPONSE, 3, role="assistant")
-    layers = await CompactStep()._foldable_layers(state, ctx, keep_last=1)
-    assert layers == ["task"]
-
-
-async def test_compactable_layers_both_when_both_have_content() -> None:
-    mem = InMemoryMemoryProvider()
-    state, _ = _reason_state()
-    ctx = LoopContext(assembler=None, llm=None, memory=mem,
-                      event_bus=InProcessEventBus(), provider_ctx=_pctx())
-    await _ingest_n(mem, T.LLM_RESPONSE, 3, role="assistant")           # task 层
-    await _ingest_n(mem, T.TASK_DISPATCH_RESULT, 3, role="tool")        # agent 层
-    layers = await CompactStep()._foldable_layers(state, ctx, keep_last=1)
-    assert layers == ["agent", "task"]
-
-
-async def test_compactable_layers_none_below_threshold() -> None:
-    mem = InMemoryMemoryProvider()
-    state, _ = _reason_state()
-    ctx = LoopContext(assembler=None, llm=None, memory=mem,
-                      event_bus=InProcessEventBus(), provider_ctx=_pctx())
-    await _ingest_n(mem, T.LLM_RESPONSE, 1, role="assistant")           # == keep_last，不够折
-    layers = await CompactStep()._foldable_layers(state, ctx, keep_last=1)
-    assert layers == []
-
-
-async def test_compactable_layers_agent_with_conversation_turns() -> None:
-    """agent 层仅含 AGENT_CONVERSATION_TURN 记录（root 自经验）时能被识别为可折叠。"""
-    mem = InMemoryMemoryProvider()
-    state, _ = _reason_state()
-    ctx = LoopContext(assembler=None, llm=None, memory=mem,
-                      event_bus=InProcessEventBus(), provider_ctx=_pctx())
-    await _ingest_n(mem, T.AGENT_CONVERSATION_TURN, 3, role="user")      # agent 层：只有对话回合
-    layers = await CompactStep()._foldable_layers(state, ctx, keep_last=1)
-    assert layers == ["agent"]

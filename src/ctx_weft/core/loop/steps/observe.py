@@ -19,10 +19,11 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.events import EventType
-from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryLayer
+from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryLayer
 from ctx_weft.core.loop.steps.compact import TASK_COMPACT_TYPES, summarize_for_compact
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
+from ctx_weft.core.orchestrator.control_capability import REPORT_TASK_OUTCOME_NAME, ControlResult
 from ctx_weft.core.utils import now_utc
 
 if TYPE_CHECKING:
@@ -31,11 +32,186 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── Shared ReAct helper ───────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ReactEventTypes:
+    """run_observe_react 每轮发的 LLM 交互事件类型组（请求/prompt/token/响应）。
+
+    observe 用 LLM_* 组；background observe 用 BACKGROUND_OBSERVE_* 组——同形不同类型，
+    供 host 区分前端是否渲染。core 只发类型，不感知前端可见性。
+    """
+    request_started: EventType
+    prompt_sent: EventType
+    token_streamed: EventType
+    response_finished: EventType
+
+
+OBSERVE_REACT_EVENTS = ReactEventTypes(
+    EventType.LLM_REQUEST_STARTED,
+    EventType.LLM_PROMPT_SENT,
+    EventType.LLM_TOKEN_STREAMED,
+    EventType.LLM_RESPONSE_FINISHED,
+)
+BACKGROUND_OBSERVE_REACT_EVENTS = ReactEventTypes(
+    EventType.BACKGROUND_OBSERVE_REQUEST_STARTED,
+    EventType.BACKGROUND_OBSERVE_PROMPT_SENT,
+    EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED,
+    EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED,
+)
+
+
+async def run_observe_react(
+    state: "Any",
+    ctx: "Any",
+    *,
+    system: str,
+    messages: "list[LLMMessage]",
+    tools: "Any",
+    request_id_prefix: str,
+    max_rounds: int,
+    terminal_tool_name: str,
+    event_types: ReactEventTypes = OBSERVE_REACT_EVENTS,
+) -> "tuple[ControlResult | None, str]":
+    """共用 observe/background ReAct：跑多轮 LLM，指定 terminal_tool 被调用时返回其完整 ControlResult 终止。
+
+    返回 (terminal_result, last_text)：
+      terminal_result — terminal_tool_name 被调用时的完整 ControlResult（未调用则 None）。
+      last_text       — 最后一轮的纯文本。
+    非 terminal 控制工具（如 ask_user）只执行副作用，不终止循环。
+    不解读 verdict、不写 task 状态（状态写是工具副作用，由调用方绑定的工具决定）。
+
+    event_types：每轮 LLM 交互事件的类型组。observe 默认 OBSERVE_REACT_EVENTS（LLM_*）；
+      background observe 传 BACKGROUND_OBSERVE_REACT_EVENTS——core 只发不同类型，由 host 决定
+      前端是否渲染（background 后台交互不应进前端对话流）。
+    """
+    agent = state.agent
+    current_messages = list(messages)
+    last_text = ""
+
+    for round_num in range(max_rounds):
+        req_id = f"{request_id_prefix}_r{round_num}"
+        await ctx.event_bus.emit(make_event(state, event_types.request_started, payload={
+            "request_id": req_id,
+            "model": agent.runtime.get("llm_model", "mock"),
+            "round": round_num,
+        }))
+
+        llm_request = LLMRequest(
+            model=agent.runtime.get("llm_model", "mock"),
+            system=system,
+            messages=list(current_messages),
+            tools=tools,
+        )
+
+        await ctx.event_bus.emit(make_event(state, event_types.prompt_sent, payload={
+            "request_id": req_id,
+            "round": round_num,
+            "system": system,
+            "messages": [
+                {"role": m.role, "content": m.content if isinstance(m.content, str) else str(m.content)}
+                for m in current_messages
+            ],
+            "tool_names": [t.name for t in tools],
+        }))
+
+        accumulated_text = ""
+        tool_calls = []
+        usage = LLMUsage()
+
+        async for chunk in stream_llm_resilient(ctx, state, llm_request):
+            if chunk.kind == "token":
+                accumulated_text += chunk.text
+                await ctx.event_bus.emit(make_event(
+                    state, event_types.token_streamed,
+                    payload={"request_id": req_id, "delta": chunk.text},
+                ))
+            elif chunk.kind == "tool_call" and chunk.tool_call is not None:
+                tool_calls.append(chunk.tool_call)
+            elif chunk.kind == "usage" and chunk.usage is not None:
+                usage = chunk.usage
+
+        if accumulated_text:
+            last_text = accumulated_text
+
+        # 更新 loop_guard（对齐 miniAgents _run_observer：取 actor/observer 的最大值）
+        if usage.prompt_tokens > 0:
+            agent.loop_guard.context_tokens = max(
+                agent.loop_guard.context_tokens, usage.prompt_tokens
+            )
+        # 同步累加 session.token_used
+        state.session.token_used += usage.prompt_tokens + usage.completion_tokens
+
+        await ctx.event_bus.emit(make_event(
+            state, event_types.response_finished,
+            payload={
+                "request_id": req_id,
+                "content": accumulated_text,
+                "tool_calls": [{"name": tc.name} for tc in tool_calls],
+                "usage": dataclasses.asdict(usage),
+                "round": round_num,
+            },
+        ))
+
+        if not tool_calls:
+            # LLM returned only text — no more rounds needed
+            break
+
+        current_messages.append(LLMMessage(
+            role="assistant",
+            content=accumulated_text,
+            tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls],
+        ))
+
+        terminal_result = None
+        for tc in tool_calls:
+            if ctx.capability_gateway is not None:
+                result = await ctx.capability_gateway.invoke(
+                    tool_name=tc.name,
+                    arguments=tc.arguments,
+                    state=state,
+                    ctx=ctx,
+                    tool_call_id=tc.id,
+                )
+                content = result.content
+                if tc.name == terminal_tool_name:
+                    terminal_result = result
+            else:
+                logger.warning(
+                    "run_observe_react: no CapabilityGateway for tool '%s'", tc.name
+                )
+                content = f"[Error: CapabilityGateway not configured, tool '{tc.name}' skipped]"
+            current_messages.append(LLMMessage(
+                role="tool",
+                content=content,
+                tool_call_id=tc.id,
+            ))
+
+        if terminal_result is not None:
+            return terminal_result, last_text
+
+    return None, last_text
+
+
+def _is_own_root(task) -> bool:
+    """root task 判定（与 finalize._close_one 保持一致）。
+
+    True  → session root（parent_task_id is None）或跨 agent own-root（cross_agent）。
+    False → 同 agent 子任务（parent 非空且 creator==assigned）。
+    非 root 不触发后台 observe（它们用 LLM observe 向 parent 上报，max_turns 同步 compact）。
+    """
+    same_agent = task.creator_agent_id == task.assigned_agent_id
+    cross_agent = bool(task.parent_task_id) and not same_agent
+    return task.parent_task_id is None or cross_agent
+
+
 @dataclass
 class Verdict:
     """Observer 输出（三态）。"""
     task_outcome: str   # "retry" | "success" | "fail"
-    summary: str        # 本轮工作的简短总结（进入 memory + 父 agent 读取）
+    act_recap: str      # 诚实复述本段 act 做了什么 → finish 对 assistant；retry 作 Progress So Far
+    task_summary: str = ""  # 整段综合总结（执行历程+结果）→ finish 对 tool 槽（仅终态有意义）
     reported: bool = False  # 本轮是否真的走成 report_task_outcome；压缩摘要据此取信
 
 
@@ -64,12 +240,23 @@ class ObserveStep(Step):
         # max_turns 退出：压缩 task 执行层（下一轮召回从摘要 + keep_last 开始）
         await self._maybe_compact_task(state, ctx, verdict, events)
 
+        # close 边界：root task 在 actor_done（finish_task 收尾 → boundary="finish"）或
+        # normal（actor 产出最终文本正常结束 → boundary="normal"）时触发后台异步 observe，
+        # 产段摘要 + 折 raw。两者均由 _rule_observe 映射为 success/fail，属于 root 的
+        # 单次终结点——task 只 close 一次，_close_report 槽写一次、弹一次，不存在乱序复用。
+        # 注：纯文本暂停（plain_text 边界）由 act.py:_finish_plain_text_turn 单独触发，不经此处。
+        # max_turns/context_limit 走同步 _maybe_compact_task；非 root 不触发（它们走 LLM observe）。
+        if state.act_exit_reason in ("normal", "actor_done") and _is_own_root(state.task):
+            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+            boundary = "finish" if state.act_exit_reason == "actor_done" else "normal"
+            launch_background_observe(state, ctx, boundary=boundary)
+
         events.append(make_event(
             state, EventType.OBSERVE_COMPLETED,
             payload={
                 "task_id": state.task.id,
                 "outcome": verdict.task_outcome,
-                "summary_length": len(verdict.summary),
+                "summary_length": len(verdict.act_recap),
                 "used_llm": used_llm,
             },
         ))
@@ -103,6 +290,18 @@ class ObserveStep(Step):
             if cache is not None and cache.has_agent(agent.id)
             else []
         )
+        subtask_reviews: list[dict] = []
+        tm = ctx.task_manager
+        if tm is not None:
+            for cid in tm.children_of(state.task.id):
+                child = tm.get_task(cid)
+                if child is None:
+                    continue
+                subtask_reviews.append({
+                    "task_id": child.id,
+                    "title": child.title or "",
+                    "outcome": (child.status or "").lower(),
+                })
         request = ContextRequest(
             purpose="observe",
             scope=state.scope,
@@ -111,118 +310,28 @@ class ObserveStep(Step):
             session=state.session,
             template=state.extra.get("template"),
             bound_capabilities=bound_caps,
-            actor_transcript=state.transcript,
+            extra={"subtask_reviews": subtask_reviews},
         )
         prompt = await ctx.assembler.assemble(request)
-        current_messages = list(prompt.messages)
-        last_text = ""
 
-        for round_num in range(max_rounds):
-            req_id = f"obs_{agent.id}_{state.sequence_counter}_r{round_num}"
-            await ctx.event_bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={
-                "request_id": req_id,
-                "model": agent.runtime.get("llm_model", "mock"),
-                "round": round_num,
-            }))
+        terminal_result, last_text = await run_observe_react(
+            state, ctx,
+            system=prompt.system,
+            messages=list(prompt.messages),
+            tools=prompt.tools,
+            request_id_prefix=f"obs_{agent.id}_{state.sequence_counter}",
+            max_rounds=max_rounds,
+            terminal_tool_name=REPORT_TASK_OUTCOME_NAME,
+        )
 
-            llm_request = LLMRequest(
-                model=agent.runtime.get("llm_model", "mock"),
-                system=prompt.system,
-                messages=list(current_messages),
-                tools=prompt.tools,
+        if terminal_result is not None:
+            # report_task_outcome 已写 task.observer_outcome / task.process_report / task.task_summary
+            return Verdict(
+                task_outcome=state.task.observer_outcome or "success",
+                act_recap=state.task.process_report or last_text[:500],
+                task_summary=state.task.task_summary or "",
+                reported=True,
             )
-
-            await ctx.event_bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
-                "request_id": req_id,
-                "round": round_num,
-                "system": prompt.system,
-                "messages": [
-                    {"role": m.role, "content": m.content if isinstance(m.content, str) else str(m.content)}
-                    for m in current_messages
-                ],
-                "tool_names": [t.name for t in prompt.tools],
-            }))
-
-            accumulated_text = ""
-            tool_calls = []
-            usage = LLMUsage()
-
-            async for chunk in stream_llm_resilient(ctx, state, llm_request):
-                if chunk.kind == "token":
-                    accumulated_text += chunk.text
-                    await ctx.event_bus.emit(make_event(
-                        state, EventType.LLM_TOKEN_STREAMED,
-                        payload={"request_id": req_id, "delta": chunk.text},
-                    ))
-                elif chunk.kind == "tool_call" and chunk.tool_call is not None:
-                    tool_calls.append(chunk.tool_call)
-                elif chunk.kind == "usage" and chunk.usage is not None:
-                    usage = chunk.usage
-
-            if accumulated_text:
-                last_text = accumulated_text
-
-            # 更新 loop_guard（对齐 miniAgents _run_observer：取 actor/observer 的最大值）
-            if usage.prompt_tokens > 0:
-                agent.loop_guard.context_tokens = max(
-                    agent.loop_guard.context_tokens, usage.prompt_tokens
-                )
-            # 同步累加 session.token_used
-            state.session.token_used += usage.prompt_tokens + usage.completion_tokens
-
-            await ctx.event_bus.emit(make_event(
-                state, EventType.LLM_RESPONSE_FINISHED,
-                payload={
-                    "request_id": req_id,
-                    "content": accumulated_text,
-                    "tool_calls": [{"name": tc.name} for tc in tool_calls],
-                    "usage": dataclasses.asdict(usage),
-                    "round": round_num,
-                },
-            ))
-
-            if not tool_calls:
-                # LLM returned only text — no more rounds needed
-                break
-
-            current_messages.append(LLMMessage(
-                role="assistant",
-                content=accumulated_text,
-                tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls],
-            ))
-
-            terminate_result = None
-            for tc in tool_calls:
-                if ctx.capability_gateway is not None:
-                    status_before = state.task.status
-                    result = await ctx.capability_gateway.invoke(
-                        tool_name=tc.name,
-                        arguments=tc.arguments,
-                        state=state,
-                        ctx=ctx,
-                        tool_call_id=tc.id,
-                    )
-                    content = result.content
-                    if state.task.status != status_before:
-                        terminate_result = result
-                else:
-                    logger.warning(
-                        "ObserveStep: no CapabilityGateway for tool '%s'", tc.name
-                    )
-                    content = f"[Error: CapabilityGateway not configured, tool '{tc.name}' skipped]"
-                current_messages.append(LLMMessage(
-                    role="tool",
-                    content=content,
-                    tool_call_id=tc.id,
-                ))
-
-            if terminate_result is not None:
-                # report_task_outcome 已把三态裁决写入 task.observer_outcome
-                return Verdict(
-                    task_outcome=state.task.observer_outcome or "success",
-                    summary=state.task.process_report or last_text[:500],
-                    reported=True,
-                )
 
         logger.warning("ObserveStep: LLM did not call report_task_outcome in %d rounds, falling back to rules", max_rounds)
         return self._rule_observe(state)
@@ -238,7 +347,7 @@ class ObserveStep(Step):
         exit_reason = state.act_exit_reason
 
         if not transcript:
-            verdict = Verdict(task_outcome="fail", summary="[No actor execution recorded]")
+            verdict = Verdict(task_outcome="fail", act_recap="[No actor execution recorded]")
             self._apply_assessment(state.task, verdict)
             return verdict
 
@@ -259,7 +368,7 @@ class ObserveStep(Step):
             lines.append("Task completed.")
             outcome = "success"
 
-        verdict = Verdict(task_outcome=outcome, summary=" ".join(lines))
+        verdict = Verdict(task_outcome=outcome, act_recap=" ".join(lines))
         self._apply_assessment(state.task, verdict)
         return verdict
 
@@ -274,6 +383,7 @@ class ObserveStep(Step):
             task.status = "FAILED"
         else:  # retry
             task.status = "PENDING"
+        task.task_summary = verdict.task_summary
         task.actor_done = True
 
     # ── 条件判断 ──────────────────────────────────────────────────────────────
@@ -321,8 +431,8 @@ class ObserveStep(Step):
             return
 
         # 来源优先级：本轮可信 report → 专用压缩 LLM 摘要 → 占位
-        if verdict.reported and verdict.summary:
-            summary = verdict.summary
+        if verdict.reported and verdict.act_recap:
+            summary = verdict.act_recap
         else:
             summary = await summarize_for_compact(state, ctx)
         summary = summary or "[Context compacted]"
@@ -339,6 +449,7 @@ class ObserveStep(Step):
             keep_last=keep_last,
             ctx=ctx.provider_ctx,
             layer=MemoryLayer.TASK,
+            protect_types=(MemoryEventType.USER_PROMPT,),
         )
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "events_before": result.events_before,
