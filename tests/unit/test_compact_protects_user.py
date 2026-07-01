@@ -1,11 +1,11 @@
 """USER_PROMPT anchor protection: apply_compact must not fold USER_PROMPT events when
-protect_types=(USER_PROMPT,) is passed; and the production callers (_maybe_compact_task,
+protect_types=(USER_PROMPT,) is passed; and the production callers (_fold_retry_segment,
 _compact_scope) must pass that kwarg.
 
 Two levels of tests:
 1. Behavioral: InMemoryMemoryProvider.apply_compact directly — USER_PROMPT events survive,
    LLM/TOOL events fold, TASK_COMPACT_SUMMARY is inserted.
-2. Caller wiring: _maybe_compact_task and _compact_scope pass protect_types=(USER_PROMPT,)
+2. Caller wiring: _fold_retry_segment and _compact_scope pass protect_types=(USER_PROMPT,)
    to apply_compact (verified via a spy wrapper on the real provider).
 """
 
@@ -199,20 +199,15 @@ def _ctx(mem: InMemoryMemoryProvider) -> SimpleNamespace:
     )
 
 
-async def test_maybe_compact_task_passes_protect_types_and_user_prompts_survive():
-    """_maybe_compact_task must pass protect_types=(USER_PROMPT,) and USER_PROMPs must survive."""
+async def test_fold_retry_segment_passes_protect_types_and_user_prompts_survive():
+    """_fold_retry_segment must pass protect_types=(USER_PROMPT,) and USER_PROMPs must survive."""
     mem = _SpyProvider()
     await _seed_events(mem)
 
     events: list = []
     verdict = Verdict(task_outcome="retry", act_recap="段摘要", reported=True)
 
-    with patch(
-        "ctx_weft.core.loop.steps.observe.summarize_for_compact",
-        new_callable=AsyncMock,
-        return_value="段摘要",
-    ):
-        await ObserveStep()._maybe_compact_task(_state("max_turns"), _ctx(mem), verdict, events)
+    await ObserveStep()._fold_retry_segment(_state("max_turns"), _ctx(mem), verdict, events)
 
     # Verify protect_types was passed
     task_calls = [c for c in mem.compact_calls if c["layer"] is MemoryLayer.TASK]
