@@ -320,29 +320,25 @@ class DefaultComposer(Composer):
                 current_task_user_idx = i
 
         task = request.task
+        spec_title, spec_desc, spec_prompt = self._task_spec_fields(blocks, task)
         parts: list[str] = []
 
         if not task.user_prompt_in_memory:
-            # daemon 或尚未持久化的路径：实时构建完整的用户消息
-            if task.title and task.description:
-                parts.append(f"## Current Task\n{task.title}\n{task.description}")
-            elif task.title:
-                parts.append(f"## Current Task\n{task.title}")
+            # daemon 或尚未持久化的路径：实时构建完整的用户消息（spec 取自 task_spec block）
+            if spec_title and spec_desc:
+                parts.append(f"## Current Task\n{spec_title}\n{spec_desc}")
+            elif spec_title:
+                parts.append(f"## Current Task\n{spec_title}")
             if getattr(task, "process_report", None):
                 parts.append(f"{PROGRESS_SO_FAR_HEADING}\n{task.process_report}")
-            if task.user_prompt:
-                user_prompt_text = (
-                    task.user_prompt
-                    if isinstance(task.user_prompt, str)
-                    else content_to_text(task.user_prompt)
-                )
+            if spec_prompt:
                 parts.append(
-                    f"## Current Message\n{user_prompt_text}\n\n"
+                    f"## Current Message\n{spec_prompt}\n\n"
                     "（Reply in the same language as the Current Message above.）"
                 )
         else:
             # in-memory：渲染期就地装饰最近一条 task_conversation user 回合
-            self._frame_current_message(messages, history_pairs, task)
+            self._frame_current_message(messages, history_pairs, task, blocks)
 
         if parts:
             # 这条实时构建的当前任务上下文也是「当前 task」回合；history 里没有 task_conversation
@@ -379,11 +375,12 @@ class DefaultComposer(Composer):
         merged = self._append_to_last_user(merged, capabilities_text)
         return merged
 
-    def _frame_current_message(self, messages, history_pairs, task) -> None:
+    def _frame_current_message(self, messages, history_pairs, task, blocks=None) -> None:
         """In-memory 路径：把最近一条 USER_PROMPT user message 包成当前消息框架（不落库）。
 
         history_pairs 是 _history_to_messages_with_sources 返回的 (msg, src, mem_type) 三元组。
         兼容 agent_recall（AgentRecallSource）和旧 task_conversation（RecentMemorySource）来源。
+        spec（title/description）取自 task_spec block 的 metadata（无块时回退直读 task）。
         """
         target = None
         for i, (m, src, mtype) in enumerate(history_pairs):
@@ -392,11 +389,12 @@ class DefaultComposer(Composer):
         if target is None:
             return
         raw = content_to_text(messages[target].content)
+        spec_title, spec_desc, _ = self._task_spec_fields(blocks, task)
         prefix = ""
-        if task.title and task.description:
-            prefix = f"## Current Task\n{task.title}\n{task.description}\n\n"
-        elif task.title:
-            prefix = f"## Current Task\n{task.title}\n\n"
+        if spec_title and spec_desc:
+            prefix = f"## Current Task\n{spec_title}\n{spec_desc}\n\n"
+        elif spec_title:
+            prefix = f"## Current Task\n{spec_title}\n\n"
         framed = (
             f"{prefix}## Current Message\n{raw}\n\n"
             "（Reply in the same language as the Current Message above.）"
@@ -802,6 +800,27 @@ class DefaultComposer(Composer):
             if b.kind == kind:
                 return b
         return None
+
+    def _task_spec_fields(self, blocks, task) -> tuple[str, str, str]:
+        """当前 task 的 spec 字段 (title, description, user_prompt)。
+
+        优先取 TaskSpecSource 产的 task_spec block 的 metadata；无块时回退直读 task
+        （兼容手构 blocks / 未注册 TaskSpecSource 的调用）。block 是元数据载体，
+        composer 用它去就地装饰当前消息，而非把它当独立消息渲染。
+        """
+        blk = self._first_kind(blocks, "task_spec") if blocks else None
+        if blk is not None:
+            md = blk.metadata
+            return (
+                md.get("title", "") or "",
+                md.get("description", "") or "",
+                md.get("user_prompt", "") or "",
+            )
+        title = task.title or ""
+        description = task.description or ""
+        up = task.user_prompt
+        user_prompt = up if isinstance(up, str) else (content_to_text(up) if up else "")
+        return title, description, user_prompt
 
     def _collect_llm_tools(self, blocks: list["ContextBlock"]) -> list[LLMTool]:
         """从 capabilities blocks 抽出 LLMTool 数组传给 LLM API。"""

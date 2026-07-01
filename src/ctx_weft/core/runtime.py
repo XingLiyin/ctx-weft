@@ -29,6 +29,7 @@ from ctx_weft.core.assembler.sources import (
     IdentitySource,
     KnowledgeRetrievalSource,
     SemanticRecallSource,
+    TaskSpecSource,
 )
 from ctx_weft.core.events import Event, EventType, InProcessEventBus
 from ctx_weft.core.events.bus import EventBus
@@ -1245,6 +1246,7 @@ class CtxWeftRuntime:
             sources=[
                 IdentitySource(),
                 CapabilitySource(),
+                TaskSpecSource(),
                 AgentRecallSource(),
                 BlackboardSource(),
                 SemanticRecallSource(),

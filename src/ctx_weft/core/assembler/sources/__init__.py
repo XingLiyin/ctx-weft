@@ -8,7 +8,7 @@
 | blackboard | background / blackboard | MemoryProvider.recall_topic + 订阅 | system / messages |
 | long_memory | summary | MemoryProvider.recall_semantic | messages |
 | knowledge | reference | KnowledgeProvider.retrieve | messages |
-| task_spec | task_spec | 当前 task 描述 | messages（由 Composer 注入） |
+| task_spec | task_spec | 当前 task spec（metadata）| Composer 读 metadata 装饰当前消息 |
 
 注：short_memory (RecentMemorySource) 和 agent_experience (AgentExperienceSource) 已被 agent_recall 取代，暂保留。
 """
