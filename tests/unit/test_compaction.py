@@ -11,6 +11,7 @@ import pytest
 from ctx_weft.core.assembler.assembler import AssembledPrompt
 from ctx_weft.core.loop.driver import LoopState
 from ctx_weft.core.loop.steps.compact import (
+    COLLAPSE_DELIM,
     CompactStep,
     _count_root_residues,
     fold_root_experience,
@@ -333,8 +334,11 @@ async def test_execute_folds_task_and_root() -> None:
     state = _state(_active_task(), LoopConfig(compact_keep_last=1))
     await CompactStep().execute(state, _loop_ctx(mem, _FakeTM({}), with_assembler=True))
 
-    task_recs = await mem.recall_recent(sc, [T.LLM_RESPONSE, T.TASK_COMPACT_SUMMARY], 100, _ctx())
-    assert any(r.type == T.TASK_COMPACT_SUMMARY for r in task_recs)          # (a) task folded
+    # (a) task layer collapsed into a USER_PROMPT with collapsed=True metadata and COLLAPSE_DELIM
+    task_ups = await mem.recall_recent(sc, [T.USER_PROMPT], 100, _ctx())
+    collapsed = [r for r in task_ups if r.metadata.get("collapsed")]
+    assert collapsed, "task layer should be collapsed into a USER_PROMPT"
+    assert COLLAPSE_DELIM in collapsed[0].content
     agent_recs = await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx())
     assert agent_recs != []                                                  # (c) root folded
 
@@ -351,8 +355,9 @@ async def test_execute_task_fold_untouches_subtask_residues() -> None:
     state = _state(_active_task(), LoopConfig(compact_keep_last=1))
     await CompactStep().execute(state, _loop_ctx(mem, _FakeTM({}), with_assembler=True))
 
-    assert any(r.type == T.TASK_COMPACT_SUMMARY
-               for r in await mem.recall_recent(sc, [T.TASK_COMPACT_SUMMARY], 100, _ctx()))
+    # task layer collapsed into a USER_PROMPT with collapsed=True (not a TASK_COMPACT_SUMMARY)
+    task_ups = await mem.recall_recent(sc, [T.USER_PROMPT], 100, _ctx())
+    assert any(r.metadata.get("collapsed") for r in task_ups), "task layer should be collapsed"
     subs = await mem.recall_recent(sc, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     assert {r.content for r in subs} == {"sub 0", "sub 1", "sub 2"}          # working set survives
     assert await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx()) == []  # no root fold
@@ -418,8 +423,9 @@ async def test_predispatch_folds_task_and_agent_layers() -> None:
     compacted = [e for e in events if e.type == "MemoryCompacted"]
     assert {e.payload.get("layer") for e in compacted} == {"task", "agent"}      # 两层都折
     assert all(e.payload.get("trigger") == "pre_dispatch" for e in events)
-    assert any(r.type == T.TASK_COMPACT_SUMMARY
-               for r in await mem.recall_recent(sc, [T.TASK_COMPACT_SUMMARY], 100, _ctx()))
+    # task layer collapsed into a USER_PROMPT with collapsed=True (not a TASK_COMPACT_SUMMARY)
+    task_ups = await mem.recall_recent(sc, [T.USER_PROMPT], 100, _ctx())
+    assert any(r.metadata.get("collapsed") for r in task_ups), "task layer should be collapsed"
     assert await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx()) != []
 
 

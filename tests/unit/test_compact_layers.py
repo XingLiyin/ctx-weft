@@ -12,7 +12,7 @@ import pytest
 
 from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.loop.steps.compact import CompactStep
+from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, CompactStep
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.state.models import Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
@@ -69,11 +69,15 @@ async def test_task_compact_writes_task_summary() -> None:
 
     await _run_compact(mem)
 
-    recs = await mem.recall_recent(
-        _scope(), [T.USER_PROMPT, T.LLM_RESPONSE, T.TASK_COMPACT_SUMMARY], 10, _pctx()
-    )
-    assert any(r.type == T.TASK_COMPACT_SUMMARY and r.content == "SUMMARY" for r in recs)
-    assert "a2" in [r.content for r in recs]  # keep_last=1
+    # Task layer is now collapsed into a USER_PROMPT (not TASK_COMPACT_SUMMARY)
+    up_recs = await mem.recall_recent(_scope(), [T.USER_PROMPT], 10, _pctx())
+    collapsed = [r for r in up_recs if r.metadata.get("collapsed")]
+    assert collapsed, "Expected a collapsed USER_PROMPT from collapse_task_layer"
+    assert "SUMMARY" in collapsed[0].content   # LLM summary is embedded after COLLAPSE_DELIM
+    assert COLLAPSE_DELIM in collapsed[0].content
+    # keep_last=1: LLM "a2" survives as the kept record
+    llm_recs = await mem.recall_recent(_scope(), [T.LLM_RESPONSE], 10, _pctx())
+    assert "a2" in [r.content for r in llm_recs]  # keep_last=1
 
 
 async def test_agent_compact_writes_agent_summary() -> None:

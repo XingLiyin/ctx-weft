@@ -7,30 +7,55 @@ test_compaction.py::test_predispatch_folds_task_and_agent_layers。
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
 from ctx_weft.protocols import MemoryEventType as T, MemoryScope  # noqa: F401
 
 
+_BASE_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
 class _FakeMemory:
     def __init__(self, task_count):
         self._task_count = task_count
-        self.applied = []  # (layer, summary)
+        self.applied = []    # kept for backward-compat (no longer populated)
+        self.ingested = []   # collapsed USER_PROMPT events written by collapse_task_layer
+        self.superseded = []
 
     async def count_recent(self, scope, types, ctx):
         return self._task_count
 
     async def recall_recent(self, scope, types, limit, ctx):
-        return []
+        # Return empty for agent-layer queries (no root residues in these unit tests)
+        if T.AGENT_CONVERSATION_TURN in types:
+            return []
+        # Return fake USER_PROMPT records (newest-first) for task-layer type queries
+        return list(reversed([
+            SimpleNamespace(
+                id=str(i), type=T.USER_PROMPT, content=f"msg {i}", role="user",
+                metadata={},
+                timestamp=_BASE_DT + timedelta(seconds=i),
+            )
+            for i in range(self._task_count)
+        ]))
 
     async def recall_recent_by_agent(self, scope, types, limit, ctx):
         return []
 
     async def apply_compact(self, scope, summary, keep_last, ctx, layer, protect_types=()):
+        # No longer called by _compact_scope; kept for interface completeness
         self.applied.append((layer.value, summary))
         return SimpleNamespace(events_before=10, events_after=keep_last,
                                summary_event_id="s1")
+
+    async def supersede(self, ids, ctx):
+        self.superseded.extend(ids)
+
+    async def ingest(self, event, ctx):
+        self.ingested.append(event)
+        return event
 
 
 class _FakeAssembler:
@@ -93,9 +118,9 @@ async def test_skips_when_nothing_foldable():
 async def test_compacts_task_layer_once_when_over_threshold_and_foldable():
     mem = _FakeMemory(task_count=10)  # > keep_last=2
     out = await maybe_compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=800)
-    # 只折 task 层一次，摘要来自 LLM
-    assert [layer for layer, _ in mem.applied] == ["task"]
-    assert mem.applied[0][1] == "SUMMARY"
+    # task layer collapsed once via collapse_task_layer → one ingested collapsed USER_PROMPT
+    assert len(mem.ingested) == 1
+    assert mem.ingested[0].metadata.get("collapsed") is True
     # 发 started + compacted，均标 pre_dispatch
     assert [e.type for e in out] == ["MemoryCompactStarted", "MemoryCompacted"]
     assert [e.payload.get("trigger") for e in out] == ["pre_dispatch", "pre_dispatch"]
@@ -107,7 +132,9 @@ async def test_falls_back_to_loop_guard_tokens_when_prompt_tokens_zero():
     mem = _FakeMemory(task_count=10)
     out = await maybe_compact_before_dispatch(
         _state(ratio=0.6, context_tokens=800), _ctx(mem), prompt_tokens=0)
-    assert [layer for layer, _ in mem.applied] == ["task"]
+    # fallback to context_tokens=800 triggers compact → collapsed USER_PROMPT ingested
+    assert len(mem.ingested) == 1
+    assert mem.ingested[0].metadata.get("collapsed") is True
     assert len(out) == 2
 
 
