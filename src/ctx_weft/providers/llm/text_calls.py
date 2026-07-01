@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 THINK_START = "<think>"
 THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
+# MiniMax 把工具调用写成 Anthropic 风格 XML，外套 <minimax:tool_call>：
+#   <minimax:tool_call>
+#     <invoke name="tool_name">
+#       <parameter name="arg">value</parameter>
+#     </invoke>
+#   </minimax:tool_call>
+MINIMAX_TOOL_CALL_START = "<minimax:tool_call>"
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
@@ -32,6 +39,19 @@ _XML_FUNC_LENIENT_RE = re.compile(
 _XML_PARAM_LENIENT_RE = re.compile(
     r"<parameter=([^>]+)>(.*?)"
     r"(?=<parameter=|</parameter>|<function=|</function>|\Z)",
+    re.DOTALL,
+)
+
+# MiniMax 格式：<minimax:tool_call> 块内含一个/多个 <invoke name="...">，每个含
+# 若干 <parameter name="...">value</parameter>。invoke/parameter 均用宽松匹配，
+# 容忍缺失闭合标签（流式截断残尾）；值多为多行文本。
+_MINIMAX_BLOCK_RE = re.compile(r"<minimax:tool_call>\s*(.*?)\s*</minimax:tool_call>", re.DOTALL)
+_MINIMAX_INVOKE_RE = re.compile(
+    r'<invoke\s+name="([^"]+)"\s*>(.*?)(?=</invoke>|<invoke\s|</minimax:tool_call>|\Z)',
+    re.DOTALL,
+)
+_MINIMAX_PARAM_RE = re.compile(
+    r'<parameter\s+name="([^"]+)"\s*>(.*?)(?=</parameter>|<parameter\s|</invoke>|\Z)',
     re.DOTALL,
 )
 
@@ -153,7 +173,40 @@ def parse_tool_calls_from_text(text: str) -> TextScan:
     return TextScan(text_before=text_before, tool_calls=tool_calls, has_open_tag=has_open_tag)
 
 
-_VISIBLE_MARKERS = (THINK_START, TOOL_CALL_START, "<function=")
+def contains_minimax_tool_call(text: str) -> bool:
+    """快速子串判断：正文里是否含 MiniMax 风格 <minimax:tool_call> 标签。"""
+    return MINIMAX_TOOL_CALL_START in text
+
+
+def parse_minimax_tool_calls(text: str) -> list[ParsedToolCall]:
+    """抽取 <minimax:tool_call> 块里的所有 <invoke>（每个含若干 <parameter>）。
+
+    支持一个块内多个 invoke、多个块；块未闭合（流式截断）时取起始标签之后的内容兜底。
+    """
+    blocks = _MINIMAX_BLOCK_RE.findall(text)
+    if not blocks:
+        start = text.find(MINIMAX_TOOL_CALL_START)
+        if start == -1:
+            return []
+        blocks = [text[start + len(MINIMAX_TOOL_CALL_START):]]
+
+    calls: list[ParsedToolCall] = []
+    for body in blocks:
+        for inv in _MINIMAX_INVOKE_RE.finditer(body):
+            name = inv.group(1).strip()
+            if not name:
+                continue
+            arguments = {
+                p.group(1).strip(): p.group(2).strip()
+                for p in _MINIMAX_PARAM_RE.finditer(inv.group(2))
+            }
+            calls.append(ParsedToolCall(name, arguments, json.dumps(arguments, ensure_ascii=False)))
+    if not calls:
+        logger.warning("Found <minimax:tool_call> but parsed no invoke: %.200s", text)
+    return calls
+
+
+_VISIBLE_MARKERS = (THINK_START, TOOL_CALL_START, "<function=", MINIMAX_TOOL_CALL_START)
 
 
 def merge_content(acc: str, chunk: str) -> str:

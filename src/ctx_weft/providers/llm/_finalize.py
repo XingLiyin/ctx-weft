@@ -15,8 +15,10 @@ from ctx_weft.protocols import LLMCallError, LLMChunk, LLMUsage, ToolCall
 from ctx_weft.core.utils import generate_id
 from ctx_weft.providers.llm.text_calls import (
     clean_visible,
+    contains_minimax_tool_call,
     contains_tool_call_tag,
     extract_think,
+    parse_minimax_tool_calls,
     parse_tool_calls_from_text,
 )
 
@@ -93,6 +95,14 @@ def build_finalize_chunks(
             LLMChunk(
                 kind="tool_call",
                 tool_call=ToolCall(id=generate_id("call"), name=p.name, arguments=p.arguments),
+            ))
+    elif contains_minimax_tool_call(content_text):
+        # MiniMax 把工具调用写成 <minimax:tool_call><invoke name=...><parameter name=...> 文本。
+        for p in parse_minimax_tool_calls(content_text):
+            out.append(LLMChunk(
+                kind="tool_call",
+                tool_call=ToolCall(id=generate_id("call"), name=p.name, arguments=p.arguments),
+            ))
             )
             for p in parsed
         )
