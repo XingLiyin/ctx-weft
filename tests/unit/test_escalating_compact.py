@@ -46,8 +46,10 @@ async def test_escalates_l1_l2_l3(monkeypatch):
     monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o: (calls.append("L2") or 2))
     monkeypatch.setattr(cm, "collapse_task_layer", lambda s, c, k, t: (calls.append("L3") or 4))
     monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const({"c1"}))
+    # L3 现有可折性 guard：collapse_keep_last=3，须让 count_recent 报 > 3 条 task 层材料，L3 才会跑。
+    memory = SimpleNamespace(count_recent=lambda scope, types, ctx: _const(10))
 
-    await cm.escalating_compact(_state(), SimpleNamespace(memory=None, provider_ctx=None),
+    await cm.escalating_compact(_state(), SimpleNamespace(memory=memory, provider_ctx=None),
                                 token_estimate=900, trigger="compact")
     assert calls == ["L1", "L2", "L3"]
 

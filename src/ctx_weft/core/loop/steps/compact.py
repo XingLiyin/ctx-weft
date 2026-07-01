@@ -448,6 +448,8 @@ async def escalating_compact(
 
         before 惰性复用上一级的 after（相邻级间省一次重复测量）；首次或跳级后重新测量。"""
         nonlocal est, last_tokens
+        # 不变量：前一级的 after 直接当这一级的 before 复用，只在 _active_memory_tokens 是纯快照读、
+        # 且两次 _apply 之间没有其他改动内存的操作时才成立。未来若在级间插入其他写操作，须重新测量。
         before = last_tokens if last_tokens is not None else await _active_memory_tokens(state, ctx)
         n = await level_coro if inspect.isawaitable(level_coro) else level_coro
         after = await _active_memory_tokens(state, ctx)
@@ -478,13 +480,16 @@ async def escalating_compact(
     if est < target_tokens:
         return events
 
-    # L3 · 坍缩当前 task（段摘要坍成更少，保 collapse_keep 条）
-    summary_task = await summarize_for_compact(state, ctx, scope="task")
-    n, freed = await _apply(collapse_task_layer(state, ctx, collapse_keep, summary_task))
-    if n:
-        events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
-            "superseded_count": n, "layer": "task", "source": "collapse",
-            "trigger": trigger, "freed_tokens": freed}))
+    # L3 · 坍缩当前 task（段摘要坍成更少，保 collapse_keep 条；仅当有 task 层材料可折）
+    task_n = await ctx.memory.count_recent(
+        scope=state.scope, types=TASK_COMPACT_TYPES, ctx=ctx.provider_ctx)
+    if task_n > collapse_keep:
+        summary_task = await summarize_for_compact(state, ctx, scope="task")
+        n, freed = await _apply(collapse_task_layer(state, ctx, collapse_keep, summary_task))
+        if n:
+            events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
+                "superseded_count": n, "layer": "task", "source": "collapse",
+                "trigger": trigger, "freed_tokens": freed}))
     logger.info("escalating_compact[%s]: agent=%s task=%s est→%d target=%d",
                 trigger, agent.id, state.task.id, est, target_tokens)
     return events

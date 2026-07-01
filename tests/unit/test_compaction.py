@@ -321,7 +321,7 @@ async def test_count_root_residues_excludes_subtask() -> None:
 
 # ═══════════════════ CompactStep.execute orchestration ═══════════════════
 
-async def test_execute_noop_when_nothing_foldable() -> None:
+async def test_execute_noop_when_budget_gate_closed() -> None:
     """预算门未开（token_estimate 低于 target）时，escalating_compact 空跑，不摸任何记录。"""
     mem = InMemoryMemoryProvider()
     state = _state(_active_task(), LoopConfig(compact_keep_last=1), context_tokens=0)
