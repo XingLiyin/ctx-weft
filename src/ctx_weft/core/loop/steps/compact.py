@@ -357,6 +357,35 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     return len(ids)
 
 
+async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: set) -> int:
+    """L2：把 origin_ids 里本 agent 亲做的 rich 胶囊降级成 sub-agent lean 表示。
+    - 删该 task 的 task 层 body（USER_PROMPT/段摘要/raw，metadata['task_id'] in origin_ids）。
+    - agent 层 finish 对：supersede assistant 槽（act_recap + finish 调用），保留 tool 槽（综合总结回填）
+      作 lean 表示。已无 assistant 槽（已 lean / 纯 dispatch 对）的单元跳过。
+    无 LLM。返回 supersede 条数。"""
+    memory = ctx.memory
+    body = await memory.recall_recent_by_agent(state.scope, _TASK_BODY_TYPES, 2000, ctx.provider_ctx)
+    turns = await memory.recall_recent(
+        state.scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
+    has_dispatch, has_finish = _dispatch_finish_sets(turns)
+
+    ids: list = []
+    for r in body:
+        if r.metadata.get("task_id") in origin_ids:
+            ids.append(r.id)   # 删 task 层 body（降级核心：丢交互细节）
+    for r in turns:
+        oid = r.metadata.get("origin_task_id")
+        if oid not in origin_ids:
+            continue
+        # 仅降级「本 agent 亲做」单元（有 finish 回合）；纯 dispatch 对本就 lean，不动
+        if oid in has_finish and r.role == "assistant":
+            ids.append(r.id)   # 折 finish 对 assistant 槽，仅留 tool 槽回填
+    if not ids:
+        return 0
+    await memory.supersede(ids, ctx.provider_ctx)
+    return len(ids)
+
+
 async def _compact_scope(
     state: LoopState, ctx: LoopContext, *, trigger: str = "compact"
 ) -> list[Any]:
