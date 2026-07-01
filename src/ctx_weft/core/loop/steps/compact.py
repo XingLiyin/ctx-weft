@@ -17,7 +17,7 @@ from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
 from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.utils import content_to_text, now_utc
 from ctx_weft.protocols import LLMRequest, MemoryEvent, MemoryEventType, MemoryLayer
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,74 @@ async def summarize_for_compact(
         if chunk.kind == "token":
             summary_text += chunk.text
     return summary_text
+
+
+# 坍缩 USER_PROMPT 的两节分隔标记；再坍缩时据此切出「原始消息」节，保持有界。
+COLLAPSE_DELIM = "\n\n---\n## 执行摘要（先前对话已压缩）\n"
+
+# task 层可折类型（当前 task 私有执行对话；TOOL_INVOCATION 仅审计，但一并 supersede）。
+_TASK_LAYER_TYPES = [
+    MemoryEventType.USER_PROMPT,
+    MemoryEventType.LLM_RESPONSE,
+    MemoryEventType.TOOL_INVOCATION,
+    MemoryEventType.TOOL_RESULT,
+    MemoryEventType.TASK_COMPACT_SUMMARY,
+]
+
+
+def _original_section(content: str) -> str:
+    """取（可能已坍缩过的）USER_PROMPT 的「原始消息」节：有分隔标记取其前段，否则整体即原文。"""
+    idx = content.find(COLLAPSE_DELIM)
+    return content[:idx] if idx != -1 else content
+
+
+async def collapse_task_layer(
+    state, ctx, keep_last: int, summary_text: str
+) -> int:
+    """task compact（二级压缩）：把当前 task 层超过 keep_last 的早期回合（含原始 USER_PROMPT
+    与 observer 的 `## Progress So Far`）整体坍缩成一条新 USER_PROMPT，content = 原始消息 +
+    COLLAPSE_DELIM + 执行摘要；保留最近 keep_last 条 raw。返回 supersede 条数（≤keep_last → 0）。
+
+    坍缩物是 USER_PROMPT 而非 assistant 摘要：composer 据 mtype=="user_prompt"+task_id 定位当前
+    task 贴 `## Current Task/## Current Message` 框，故当前运行 task 坍缩后框架不丢；已结束胶囊被
+    跨 task 召回时它就是一条背景 message。
+    """
+    memory = ctx.memory
+    recs = await memory.recall_recent(state.scope, _TASK_LAYER_TYPES, 2000, ctx.provider_ctx)
+    recs = list(reversed(recs))  # newest-first → chronological
+    if len(recs) <= keep_last:
+        return 0
+
+    fold = recs if keep_last <= 0 else recs[:-keep_last]
+    kept = [] if keep_last <= 0 else recs[-keep_last:]
+
+    # 「原始消息」节 = 折区最早一条 USER_PROMPT 的原文（已坍缩过则取其原始节，保持有界）
+    original = ""
+    for r in fold:
+        if r.type == MemoryEventType.USER_PROMPT:
+            text = r.content if isinstance(r.content, str) else content_to_text(r.content)
+            original = _original_section(text)
+            break
+
+    # 锚：新 USER_PROMPT 须排在所有保留回合之前
+    anchor_src = kept[0] if kept else fold[0]
+    anchor_ts = anchor_src.timestamp - timedelta(microseconds=1)
+
+    ids = [r.id for r in fold]
+    await memory.supersede(ids, ctx.provider_ctx)
+    await memory.ingest(
+        MemoryEvent(
+            type=MemoryEventType.USER_PROMPT,
+            scope=state.scope,
+            content=f"{original}{COLLAPSE_DELIM}{summary_text or '[Context compacted]'}",
+            timestamp=anchor_ts,
+            role="user",
+            metadata={"task_id": state.scope.task_id, "collapsed": True,
+                      "keep_last": keep_last, "folded_count": len(fold)},
+        ),
+        ctx.provider_ctx,
+    )
+    return len(ids)
 
 
 async def maybe_compact_before_dispatch(
