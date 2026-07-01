@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.assembler.sources._history import (
-    COMPACT_SUMMARY_WRAPPER_PREFIX, record_to_history_block, wrap_compact_summary,
+    COMPACT_SUMMARY_WRAPPER_PREFIX, PROGRESS_SO_FAR_HEADING,
+    record_to_history_block, wrap_compact_summary,
 )
 from ctx_weft.protocols import MemoryEventType, MemoryRecord
 
@@ -29,6 +30,29 @@ def test_wrap_helper_prefixes():
 def test_task_compact_summary_block_wrapped():
     blk = record_to_history_block(_rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX"), "task_conversation", 0)
     assert blk.content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
+
+
+def test_task_compact_summary_assistant_gets_progress_heading():
+    """role=assistant 的 task_conversation 段摘要 = 上一段执行复述：不套「并非用户新指令」包装，
+    而是冠以 PROGRESS_SO_FAR_HEADING，作为统一的"先前进度"锚点。"""
+    blk = record_to_history_block(
+        _rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX", role="assistant"),
+        "task_conversation", 0,
+    )
+    assert not blk.content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
+    assert blk.content == f"{PROGRESS_SO_FAR_HEADING}\n### 会话目标\nX"
+    assert blk.metadata["role"] == "assistant"
+
+
+def test_task_compact_summary_assistant_no_heading_for_capsule_source():
+    """胶囊召回（非 task_conversation 来源）的 task 段摘要不冠 Progress So Far 标题——
+    标题只用于当前任务的上一段复述，不改跨任务重建形态。"""
+    blk = record_to_history_block(
+        _rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX", role="assistant"),
+        "agent_recall", 0,
+    )
+    assert blk.content == "### 会话目标\nX"
+    assert PROGRESS_SO_FAR_HEADING not in blk.content
 
 
 def test_plain_user_prompt_not_wrapped():

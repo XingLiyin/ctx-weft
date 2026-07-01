@@ -24,7 +24,7 @@ class _FakeMemory:
     async def recall_recent_by_agent(self, scope, types, limit, ctx):
         return []  # no cross-task records by default
 
-    async def apply_compact(self, scope, summary, keep_last, ctx, layer):
+    async def apply_compact(self, scope, summary, keep_last, ctx, layer, protect_types=()):
         self.applied.append((layer.value, summary))
         return SimpleNamespace(events_before=10, events_after=keep_last,
                                summary_event_id="s1")

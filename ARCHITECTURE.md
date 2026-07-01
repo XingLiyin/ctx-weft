@@ -236,17 +236,18 @@ class StepOutcome:               # 每个 Step 的统一返回
 
 ## 5. 上下文装配（ContextAssembler）
 
-`_build_assembler`（`src/ctx_weft/core/runtime.py:839`）固定装配 6 个 Source + budget + composer：
+`_build_assembler`（`src/ctx_weft/core/runtime.py`）固定装配 7 个 Source + budget + composer：
 
 ```python
-ContextAssembler(                    # src/ctx_weft/core/assembler/assembler.py:140
+ContextAssembler(                    # src/ctx_weft/core/assembler/assembler.py
     sources=[
-        IdentitySource(),            # sources/identity.py:14    → system prompt（SOUL/ROLE）
-        CapabilitySource(),          # sources/capability.py:20  → 首条 user message 前缀 + LLM tools
-        RecentMemorySource(),        # sources/short_memory.py:26 → messages（recall_recent）
-        BlackboardSource(),          # sources/blackboard.py:21   → messages（订阅 topic）
-        SemanticRecallSource(),      # sources/long_memory.py:17  → messages（recall_semantic）
-        KnowledgeRetrievalSource(),  # sources/knowledge.py:15    → messages（user 引用块）
+        IdentitySource(),            # sources/identity.py       → system prompt（SOUL/ROLE）
+        CapabilitySource(),          # sources/capability.py     → 首条 user message 前缀 + LLM tools
+        TaskSpecSource(),            # sources/task_spec.py      → task_spec block（composer 读 metadata 装饰当前消息）
+        AgentRecallSource(),         # sources/agent_recall.py   → messages（task 层 body + agent 层胶囊）
+        BlackboardSource(),          # sources/blackboard.py     → messages（订阅 topic；Phase 3 起无订阅）
+        SemanticRecallSource(),      # sources/long_memory.py    → messages（recall_semantic）
+        KnowledgeRetrievalSource(),  # sources/knowledge.py      → messages（user 引用块）
     ],
     budget=PriorityBudgetStrategy(),  # assembler/budget.py:32   按 priority 填充，超预算裁剪
     composer=DefaultComposer(),       # assembler/composer.py:99 拼成单条 user message + system

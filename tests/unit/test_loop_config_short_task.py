@@ -7,8 +7,8 @@ from ctx_weft.protocols.template import LoopConfig
 
 def test_short_task_defaults() -> None:
     cfg = LoopConfig()
-    assert cfg.short_task_token_threshold == 2000
-    assert cfg.short_task_turn_cap == 3
+    assert cfg.short_task_token_threshold == 1000
+    assert cfg.short_task_turn_cap == 2
 
 
 def test_short_task_overridable() -> None:

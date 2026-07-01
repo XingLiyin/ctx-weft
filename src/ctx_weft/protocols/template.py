@@ -77,15 +77,15 @@ class LoopConfig:
     max_spawn_depth: int = 4
     compact_token_ratio: float = 0.8
     compact_message_delta: int = 20
-    compact_keep_last: int = 6
+    compact_keep_last: int = 6           # 保留的胶囊数（结束顶层单元）；更老的折成摘要（spec 2026-06-29）
     # 派发前压缩阈值：派发工具调用执行前，若本轮 prompt token / context_limit >= 此值，
     # 先对父自身 task 层对话压缩一次（fold_task），使父 resume 更精简、inherit 快照为
     # 压缩后版本。0 = 关闭（默认）。通常设得比 compact_token_ratio 更早触发。
     predispatch_compact_token_ratio: float = 0.0
     # 短任务（叶子）保留阈值（spec 2026-06-23）：finish 时 task 层对话 token ≤ threshold
     # 且 LLM_RESPONSE 轮次 ≤ turn_cap → 不 close（保留完整对话）；否则 close 成残留。
-    short_task_token_threshold: int = 2000
-    short_task_turn_cap: int = 3
+    short_task_token_threshold: int = 1000
+    short_task_turn_cap: int = 2
 
 
 # ── AgentTemplate ─────────────────────────────────────────────────────────────

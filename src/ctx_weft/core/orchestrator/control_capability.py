@@ -51,9 +51,12 @@ FINISH_TASK_NAME = qualify(f"{PROVIDER_NAME}:finish_task")
 DELEGATE_TASK_NAME = qualify(f"{PROVIDER_NAME}:delegate_task")
 DELEGATE_PLAN_NAME = qualify(f"{PROVIDER_NAME}:delegate_plan")
 ASK_USER_NAME = qualify(f"{PROVIDER_NAME}:ask_user")
-REPLAN_NAME = qualify(f"{PROVIDER_NAME}:replan")
 REPORT_TASK_OUTCOME_NAME = qualify(f"{PROVIDER_NAME}:report_task_outcome")
+BACKGROUND_PROCESS_REPORT_NAME = qualify(f"{PROVIDER_NAME}:collect_process_report")
 UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
+
+# delegate_plan 的 actor-visible ack 及 gateway 配对 tool result 内容。
+_PLAN_DISPATCH_ACK = "计划已生成，接下来会通过 start_task 逐个启动各子任务。"
 
 
 def _mode(interactive: bool) -> str:
@@ -152,7 +155,13 @@ def control_tool(*, purposes: list[Purpose], input_schema: dict[str, Any] | None
 @control_tool(purposes=["act"])
 def delegate_task(
     title: Annotated[str, "Short imperative title for the sub-task (≤20 chars)"],
-    description: Annotated[str, "WHAT to achieve — not HOW, no tool names"] = "",
+    description: Annotated[
+        str,
+        "WHAT the sub-task must achieve — its goal/content only. No HOW, no tool names, and do NOT "
+        "restate dispatch/orchestration choices such as 'use subagent' / 'inherit memory' / which "
+        "skill (those go in the use_subagent / inherit_memory / skill_name params). This text becomes "
+        "the sub-task's own `## Current Task`, so anything off-goal will mislead it when it runs.",
+    ] = "",
     task_prompt: Annotated[str, "Detailed prompt extracted from the user request for this task"] = "",
     skill_name: Annotated[str, "Skill to assign to the task, or empty if none"] = "",
     use_subagent: Annotated[bool, "True if the task should run in a dedicated sub-agent"] = False,
@@ -210,8 +219,11 @@ def delegate_plan(
         list,
         (
             "Ordered list of task specs. Each item: "
-            "title (str), description (str, WHAT not HOW), "
-            "task_prompt (str, detailed prompt), "
+            "title (str, the sub-task's goal only — no dispatch flags), "
+            "description (str, WHAT the sub-task must achieve — its goal only; no HOW, and do NOT "
+            "restate use_subagent/inherit_memory/skill in the text: it becomes the sub-task's own "
+            "`## Current Task` and off-goal words mislead it), "
+            "task_prompt (str, detailed prompt — goal/content only, same rule as description), "
             "skill_name (str, skill to assign or empty), "
             "use_subagent (bool), subagent_template (str), "
             "inherit_memory (bool, default true), "
@@ -230,7 +242,7 @@ def delegate_plan(
 
     n = len(tasks)
     if ctx is None or ctx.task_manager is None or ctx.task is None:
-        return ControlResult(content=f"Plan with {n} task(s) submitted.")
+        return ControlResult(content=_PLAN_DISPATCH_ACK)
 
     titles: list[str] = []
     prev_ids: list[str] = []
@@ -248,7 +260,7 @@ def delegate_plan(
             title=title,
             description=spec.get("description", ""),
             user_prompt=spec.get("task_prompt") or spec.get("description", ""),
-            origin_tool_call_id=ctx.tool_call_id or None,
+            origin_tool_call_id=generate_id("tcall"),
             tracking_task_ids=list(prev_ids),
             interaction_mode=_child_mode(bool(spec.get("interactive", False)), ctx.task),
             settings=NormalTaskSettings(
@@ -271,27 +283,28 @@ def delegate_plan(
         ctx.task.settings.spawn_titles = titles
     ctx.task.status = "SUSPENDED"
     ctx.task.actor_done = True
-    return ControlResult(content=f"Plan with {len(titles)} task(s) submitted.")
+    return ControlResult(content=_PLAN_DISPATCH_ACK)
 
 
 @control_tool(purposes=["act"])
 def finish_task(
-    result: Annotated[
+    deliverables_summary: Annotated[
         str,
-        "Your final reply to the user. `result` IS the message shown to them (it is also "
-        "handed to the observer and to whoever delegated this task). Write it directly to the "
-        "user in your usual tone, and put the WHOLE reply here only — do not also write it as "
-        "ordinary message text before or alongside this call, or the user sees it twice.",
-    ],
+        "OPTIONAL. A brief recap of the concrete deliverables of this task (e.g. the key files "
+        "changed / artifacts produced), for the observer and whoever delegated this task. This "
+        "is NOT your reply to the user — write your final reply as your normal message text in "
+        "this same turn; that message is what the user sees AND the deliverable handed off. "
+        "Leave this empty when there is nothing concrete to itemize.",
+    ] = "",
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Finish the CURRENT task and hand off to review. Your final reply to the user goes in `result` and is shown to them as your message — put it there only; do not also write it as ordinary text (or it shows twice). When done, call this directly instead of first replying in prose. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
+    """Finish the CURRENT task and hand off to review. Write your final reply to the user as your normal message text in this same turn — that message IS the reply shown to the user and the deliverable handed off; this tool just ends the task. The optional `deliverables_summary` is a brief recap of concrete artifacts for the reviewer, NOT your answer. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
     if ctx is not None and ctx.task is not None:
-        ctx.task.outputs = result
-        # actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe（区别于 delegate_task 的委派挂起）。
+        # task.outputs 由 ActStep 收尾时合成（收尾回合正文 + deliverables_summary，spec 2026-07-01）；
+        # 此处不写 outputs。actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe。
         ctx.task.actor_done = True
-    return ControlResult(content="Task result submitted.")
+    return ControlResult(content="Task finished.")
 
 
 def _collect_reviews(
@@ -361,17 +374,24 @@ def report_task_outcome(
         str,
         "Outcome of the current task — one of 'success' | 'retry' | 'fail'. "
         "Don't over-think — once the situation is clear, call this tool promptly. "
-        "'success' if completed successfully (give a thorough task_process_report of the outcome and key steps); "
-        "'retry' if this attempt fell short but is worth another try (task_process_report describes what is missing, "
+        "'success' if completed successfully (give a thorough act_recap of the outcome and key steps); "
+        "'retry' if this attempt fell short but is worth another try (act_recap describes what is missing, "
         "next_step_hint the concrete next step); "
-        "'fail' if it cannot be completed and should NOT be retried (task_process_report/task_failure_reason explain why).",
+        "'fail' if it cannot be completed and should NOT be retried (act_recap/task_failure_reason explain why).",
     ],
-    task_process_report: Annotated[
+    act_recap: Annotated[
         str,
-        "A thorough execution record: describe what was accomplished, what was modified or "
-        "produced, which tools were called and whether any failed, and — if incomplete — what remains and why. "
-        "Written to memory and read by the next actor turn, so be specific and evidence-based.",
+        "诚实复述本段 act 做了什么：改了/产出了什么、调了哪些工具、是否失败。第一人称、忠于实际执行。"
+        "范围 = 对话里最后一个 `## Progress So Far` 之后 actor 新做的执行（首次观察则从任务开头算起），"
+        "该点之前不要回头重述。Written to memory，retry 时作下一轮 `## Progress So Far`。",
     ],
+    task_summary: Annotated[
+        str,
+        "Required when task_status is 'success' or 'fail': a CONCISE process report of the WHOLE task — "
+        "the important steps taken and lessons/experience, incorporating any sub-task results. "
+        "Keep it high-signal, NOT a verbose blow-by-blow. This is NOT the final output: the final "
+        "deliverable shown to the user goes in finish_task's `result`, not here. Leave empty for 'retry'.",
+    ] = "",
     task_failure_reason: Annotated[
         str,
         "Required when task_status is 'fail'. "
@@ -410,21 +430,22 @@ def report_task_outcome(
     if task_status not in ("success", "retry", "fail"):
         task_status = "retry"
     if next_step_hint:
-        task_process_report = f"{task_process_report}\n\nNext Step Hint: {next_step_hint}"
+        act_recap = f"{act_recap}\n\nNext Step Hint: {next_step_hint}"
 
     metadata: dict[str, Any] = {}
     if task is not None:
         # 护栏：没有最终产出就不允许判成功，改判 retry（提示下一轮调 finish_task 收尾）。
         if task_status == "success" and not task.outputs:
             task_status = "retry"
-            _hint = ("The previous round ended without a final output. Review the process report above "
+            _hint = ("The previous round ended without a final output. Review the recap above "
                      "and judge whether this task still needs more work. If it does, continue with the "
-                     "necessary tool calls. Once everything required is done, call the `control__finish_task` tool "
-                     "with your final reply to the user as `result` to complete the task — put the reply in "
-                     "`result` only, don't repeat it as plain text.")
-            task_process_report = f"{task_process_report}\n\n{_hint}" if task_process_report else _hint
+                     "necessary tool calls. Once everything required is done, write your final reply to "
+                     "the user as your normal message text and then call the `control__finish_task` tool "
+                     "to complete the task — your message text is the reply and the deliverable.")
+            act_recap = f"{act_recap}\n\n{_hint}" if act_recap else _hint
 
-        task.process_report = task_process_report
+        task.process_report = act_recap
+        task.task_summary = task_summary
         task.process_report_at = now_utc()
         task.observer_outcome = task_status
         if task_status == "success":
@@ -446,70 +467,30 @@ def report_task_outcome(
 
     failure_part = f" Failure reason: {task_failure_reason}" if task_status == "fail" and task_failure_reason else ""
     return ControlResult(
-        content=f"Assessment recorded: outcome={task_status}.{failure_part} {task_process_report}{review_msg}",
+        content=f"Assessment recorded: outcome={task_status}.{failure_part} {act_recap}{review_msg}",
         metadata=metadata,
     )
 
 
-@control_tool(purposes=["act"])
-def replan(
-    reason: Annotated[str, "Why the original plan needs revision"],
-    tasks: Annotated[
-        list,
-        "New list of remaining task specs (same format as delegate_plan.tasks)",
+@control_tool(purposes=["background_observe"])
+def collect_process_report(
+    act_recap: Annotated[
+        str,
+        "Honest recap of what the LAST act phase actually did: what was changed/produced, which tools "
+        "were called and whether any failed. First-person, faithful to the transcript, this segment only.",
     ],
+    task_summary: Annotated[
+        str,
+        "For a close (finish/normal) segment: a CONCISE process report of the WHOLE task — important steps "
+        "and lessons, incorporating any sub-task results. High-signal, not verbose. NOT the final output "
+        "(that is the actor's finish_task result). Leave empty for non-close segments.",
+    ] = "",
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Replace the remaining sub-tasks of the current plan with a new set. Use after delegate_plan when the plan must change; does not finish the current task."""
-    from ctx_weft.core.state.models import Task as TaskModel
-
-    if not isinstance(tasks, list):
-        tasks = []
-
-    if ctx is None or ctx.task_manager is None or ctx.task is None:
-        return ControlResult(content=f"Replanning with {len(tasks)} new task(s). Reason: {reason}")
-
-    titles: list[str] = []
-    prev_ids: list[str] = []
-    for spec in tasks:
-        if not isinstance(spec, dict):
-            continue
-        title = spec.get("title", "subtask")
-        child = TaskModel(
-            id=generate_id("tsk"),
-            session_id=ctx.session_id,
-            status="PENDING",
-            tenant_id=ctx.task.tenant_id,
-            parent_task_id=ctx.task_id,
-            creator_agent_id=ctx.agent_id,
-            title=title,
-            description=spec.get("description", ""),
-            user_prompt=spec.get("task_prompt") or spec.get("description", ""),
-            origin_tool_call_id=ctx.tool_call_id or None,
-            tracking_task_ids=list(prev_ids),
-            interaction_mode=_child_mode(bool(spec.get("interactive", False)), ctx.task),
-            settings=NormalTaskSettings(
-                skill_name=spec.get("skill_name", ""),
-                use_subagent=bool(spec.get("use_subagent", False)),
-                subagent_template=spec.get("subagent_template", ""),
-                inherit_memory=bool(spec.get("inherit_memory", True)),
-            ),
-            created_at=now_utc(),
-        )
-        ctx.task_manager.stage_task(
-            child,
-            parent_task_id=ctx.task_id,
-            blocked_by=[prev_ids[-1]] if prev_ids else None,
-        )
-        prev_ids.append(child.id)
-        titles.append(title)
-
-    if isinstance(ctx.task.settings, NormalTaskSettings):
-        ctx.task.settings.spawn_titles = titles
-    ctx.task.status = "SUSPENDED"
-    ctx.task.actor_done = True
-    return ControlResult(content=f"Replanning with {len(titles)} new task(s). Reason: {reason}")
+    """Summarize the current segment. Zero state write: never touches task.status / process_report / etc.
+    Returns act_recap as content + task_summary in metadata for the close-out finish 对."""
+    return ControlResult(content=act_recap, metadata={"task_summary": task_summary})
 
 
 @control_tool(purposes=["recognize_intent"])

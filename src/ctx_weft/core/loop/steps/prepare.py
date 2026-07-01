@@ -178,11 +178,11 @@ class PrepareStep(Step):
                     return True
             except Exception:
                 pass
-            # (c) 已结束 root 残留（parent_task_id is None；sub-task 残留不计入）
+            # (c) 已结束 root 残留（新格式：按 origin_task_id 分组 AGENT_CONVERSATION_TURN 胶囊，
+            #     parent_task_id is None 或不在 scope origin 集内；spec §3.11）
             try:
-                rr = await ctx.memory.recall_recent(
-                    state.scope, [MemoryEventType.TASK_DISPATCH_RESULT], 2000, ctx.provider_ctx)
-                if sum(1 for r in rr if r.metadata.get("parent_task_id") is None) >= delta:
+                from ctx_weft.core.loop.steps.compact import _count_root_residues
+                if await _count_root_residues(state, ctx) >= delta:
                     return True
             except Exception:
                 pass

@@ -50,7 +50,7 @@ class MemoryEventType(StrEnum):
     BLACKBOARD_PUBLISH = "blackboard_publish"  # 显式 topic 发布（见 spec/04）
 
     # ── 过渡期保留（spec/06 落地后移除；EVENT_LAYER 仍映射，旧调用点未迁移前可用）──
-    OBSERVER_SUMMARY = "observer_summary"  # 旧 verdict.summary 通道 → 被 TASK_DISPATCH_RESULT 取代
+    OBSERVER_SUMMARY = "observer_summary"  # 旧 verdict.act_recap（曾名 summary）通道 → 被 TASK_DISPATCH_RESULT 取代
     COMPACT_SUMMARY = "compact_summary"    # 旧 compact 通道 → 拆为 TASK/AGENT_COMPACT_SUMMARY
 
 
@@ -282,6 +282,7 @@ class MemoryProvider(Protocol):
         keep_last: int,
         ctx: ProviderContext,
         layer: MemoryLayer = MemoryLayer.AGENT,
+        protect_types: tuple[MemoryEventType, ...] = (),
     ) -> CompactResult:
         """折叠指定 layer 的 scope（spec/06 §7）。
 

@@ -20,6 +20,7 @@ from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import (
     ASK_USER_NAME,
+    DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
     WAIT_FOR_USER_CAPABILITY_ID,
 )
@@ -111,6 +112,9 @@ class ActStep(Step):
             await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
                 "turn": turn_num, "reason": "tool_calls_processed"}))
 
+            # finish_task 与 delegate 同批：finish 胜出（派发改投为独立后继）。
+            _reconcile_finish_vs_dispatch(state, ctx, turn.tool_calls)
+
             if state.task.actor_done:
                 exit_reason = "actor_done"
                 break
@@ -124,12 +128,18 @@ class ActStep(Step):
         # task.status == "SUSPENDED" 表示本 task 在等子任务，路由到 SuspendStep
         next_step = "suspend" if state.task.status == "SUSPENDED" else "observe"
 
-        # ── task.outputs：把 actor 最终文本写回（对齐 miniAgents _run_actor）──
-        # exit_reason == "normal" 时，最后一轮的文本即任务输出
-        if exit_reason == "normal" and transcript:
-            last_text = transcript[-1].assistant_text
-            if last_text:
-                state.task.outputs = last_text
+        # ── task.outputs：收尾时合成最终交付物（spec 2026-07-01 反转契约）──
+        # 收尾路径 = 纯文本收尾(normal) 或 finish_task 收尾(actor_done 且未挂起)；答复即消息正文，
+        # finish_task 的 deliverables_summary 为可选产出小结。max_turns / context_limit /
+        # delegate-suspend 不在此列（不产最终输出，维持现状）。
+        if (
+            exit_reason in ("normal", "actor_done")
+            and state.task.status != "SUSPENDED"
+            and transcript
+        ):
+            outputs = _compose_final_outputs(transcript)
+            if outputs:
+                state.task.outputs = outputs
 
         return StepOutcome(
             next_step=next_step,
@@ -138,6 +148,32 @@ class ActStep(Step):
                 "act_exit_reason": exit_reason,
             },
         )
+
+
+def _compose_final_outputs(transcript: list[TurnRecord]) -> str:
+    """合成收尾交付物 = 收尾回合正文 + finish_task 的 deliverables_summary（spec 2026-07-01）。
+
+    body = 收尾回合(transcript[-1])正文；空则回溯本段最近一段非空 assistant_text（兼容模型把
+    答复写在上一回合、收尾回合只调 finish_task 的情况）。summary = 收尾回合 finish_task 调用的
+    deliverables_summary（可空）。两段按存在情况拼接；全空返回 "" → 交给 observer 护栏。
+    """
+    last = transcript[-1]
+    body = (last.assistant_text or "").strip()
+    if not body:
+        body = next(
+            (t.assistant_text.strip() for t in reversed(transcript)
+             if (t.assistant_text or "").strip()),
+            "",
+        )
+    summary = ""
+    for tc in last.tool_calls:
+        if tc.name == FINISH_TASK_NAME:
+            val = (tc.arguments or {}).get("deliverables_summary", "")
+            summary = val.strip() if isinstance(val, str) else ""
+            break
+    if body and summary:
+        return f"{body}\n\n{summary}"
+    return body or summary
 
 
 @dataclass
@@ -214,6 +250,9 @@ async def _run_llm_turn(
         # ① 未吐任何内容：不留记录、续接补说明。随后 park 待用户续接。
         has_partial = bool(text.strip() or reasoning.strip())
         await _commit_interrupted_partial(state, ctx, text, reasoning, turn_num)
+        if _is_own_root(state.task):
+            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+            launch_background_observe(state, ctx, boundary="interrupt")
         await _park_wait_for_user(state, ctx, source="interrupt", edit=not has_partial)
 
     await ctx.event_bus.emit(make_event(
@@ -268,8 +307,9 @@ async def _ingest_assistant_turn(
 ) -> list[dict]:
     """把本轮 assistant 回合入 task 层 memory；返回完整 tool_call dicts 供 message 重建。
 
-    派发(submit_*)/silent 工具的 tool_call 排除出 LLM_RESPONSE.metadata（落 agent 层
-    TASK_DISPATCH 或结果不入对话），避免无配对 TOOL_RESULT 的悬挂调用破坏无损重建（spec/06 §4）。
+    派发(submit_*)/silent 工具的 tool_call 排除出 LLM_RESPONSE.metadata（派发落 agent 层
+    delegate conversation turn、silent 结果不入对话），避免无配对 TOOL_RESULT 的悬挂调用破坏
+    无损重建（spec 2026-06-28 §2.3）。
     """
     from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS, SILENT_TOOLS
     asst_tool_dicts = [{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls]
@@ -299,7 +339,7 @@ async def _maybe_predispatch_compact(
 ) -> None:
     """本轮含派发调用且越过 predispatch 阈值 → 派发执行前先走一遍 compact（同 CompactStep）。
 
-    在 gateway 写 TASK_DISPATCH / 子 spawn-inherit 之前完成，使子继承到压缩后的记忆；每轮至多一次。
+    在 gateway 写 delegate conversation turn / 子 spawn-inherit 之前完成，使子继承到压缩后的记忆；每轮至多一次。
     随后 dispatch 执行（父转 SUSPENDED）→ 本 Act 末尾路由到 SuspendStep。usage.prompt_tokens 是本轮真实计数。
     """
     from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS
@@ -327,6 +367,9 @@ async def _execute_tool_calls(
             for rest in tool_calls[i:]:
                 await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
             ctx.run_phase.in_tool_loop = False
+            if _is_own_root(state.task):
+                from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+                launch_background_observe(state, ctx, boundary="interrupt")
             await _park_wait_for_user(state, ctx, source="interrupt")
         if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
             ctx.cancel_token.raise_if_cancelled()
@@ -340,6 +383,9 @@ async def _execute_tool_calls(
                 for rest in tool_calls[i + 1:]:
                     await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
                 ctx.run_phase.in_tool_loop = False
+                if _is_own_root(state.task):
+                    from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+                    launch_background_observe(state, ctx, boundary="interrupt")
                 await _park_wait_for_user(state, ctx, source="interrupt")
             if ctx.cancel_token is not None:
                 ctx.cancel_token.raise_if_cancelled()  # 硬取消
@@ -361,6 +407,39 @@ async def _execute_tool_calls(
     return tool_results
 
 
+def _reconcile_finish_vs_dispatch(
+    state: LoopState, ctx: LoopContext, tool_calls: list[ToolCall],
+) -> None:
+    """finish_task 与 delegate_task / delegate_plan 同批出现时仲裁：finish 胜出。
+
+    两类工具语义互斥——一个要当前 task 收尾(→observe)，一个要它挂起等子任务(→suspend)。
+    用户意图是「我做完了，顺手派生独立后续」：故 finish 胜出，被派发任务从「当前 task 的
+    阻塞子任务」改投为「当前 task 的 parent 名下的独立后继」(当前是 root 则为顶层)，自行调度。
+
+    - detach_staged：把本轮 staged 子任务改挂到 parent，切断与收尾 task 的阻塞链。
+    - status 复位为 ACTIVE：撤销 delegate 置的 SUSPENDED，使路由走 observe(task.outputs
+      已由 finish_task 写好)。
+    - 清 spawn_titles：避免 SuspendStep 误报(虽已不路由到 suspend，仍清掉防脏状态)。
+
+    顺序无关：只看本批最终是否两类工具都出现。
+    """
+    from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS
+    if ctx.task_manager is None:
+        return
+    names = {tc.name for tc in tool_calls}
+    if FINISH_TASK_NAME not in names or not any(n in DISPATCH_TOOLS for n in names):
+        return
+    ctx.task_manager.detach_staged(state.task.id, state.task.parent_task_id)
+    state.task.status = "ACTIVE"
+    if isinstance(state.task.settings, NormalTaskSettings):
+        state.task.settings.spawn_titles = []
+    logger.info(
+        "act: finish_task + dispatch in same batch on task %s — finishing it; "
+        "detaching delegated work to parent %s",
+        state.task.id, state.task.parent_task_id,
+    )
+
+
 async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: int) -> None:
     """纯文本回合（无 tool call）收尾。
 
@@ -376,6 +455,9 @@ async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: 
         await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
             "turn": turn_num, "reason": "await_user"}))
         # 纯文本暂停 = 软待命(允许但不强制回复) → PAUSED,区别于 ask_user 的 PAUSED_HITL。
+        if _is_own_root(state.task):
+            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+            launch_background_observe(state, ctx, boundary="plain_text")
         await _park_wait_for_user(state, ctx, source="plain_text")
     await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
         "turn": turn_num, "reason": "stop"}))
@@ -466,6 +548,17 @@ def _interrupt_pending(ctx: LoopContext) -> bool:
     )
 
 
+def _is_own_root(task) -> bool:
+    """root task 判定（与 observe._is_own_root / finalize._close_one 保持一致）。
+
+    True  → session root（parent_task_id is None）或跨 agent own-root。
+    False → 同 agent 子任务（parent 非空且 creator==assigned）。
+    """
+    same_agent = task.creator_agent_id == task.assigned_agent_id
+    cross_agent = bool(task.parent_task_id) and not same_agent
+    return task.parent_task_id is None or cross_agent
+
+
 async def _commit_interrupted_partial(
     state: LoopState, ctx: LoopContext, text: str, reasoning: str, turn_num: int,
 ) -> None:
@@ -526,6 +619,9 @@ async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
     """协作式停止点：软打断（pause）→ park；硬取消（cancel）→ CancelledError。"""
     if _interrupt_pending(ctx):
         edit = not ctx.run_phase.produced and not ctx.run_phase.in_tool_loop
+        if _is_own_root(state.task):
+            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+            launch_background_observe(state, ctx, boundary="interrupt")
         await _park_wait_for_user(state, ctx, source="interrupt", edit=edit)  # raises HitlPark
     tok = ctx.cancel_token
     if tok is not None and tok.is_cancelled:
@@ -580,10 +676,12 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
         parts.append("")
 
     finish_core = (
-        f"When you're done, finish the task by calling the `{FINISH_TASK_NAME}` tool with your "
-        "final reply to the user as `result` (in your usual tone) — `result` is shown to the "
-        "user as your message. Don't write that reply as ordinary text first and then call the "
-        "tool; put it only in `result`, or the user will see it twice."
+        "When your work is done, write your final reply to the user as your normal message "
+        f"text, then call the `{FINISH_TASK_NAME}` tool to end the task. Your message text is "
+        "the reply the user sees and the deliverable handed to whoever delegated this task — "
+        "write it as your message, not inside the tool. The tool takes an optional "
+        "`deliverables_summary` (a brief recap of concrete artifacts, e.g. key files changed, "
+        "for the reviewer) — that is NOT your answer; leave it empty if there is nothing to itemize."
     )
     if task.interaction_mode == "interactive":
         parts.append(
@@ -595,6 +693,18 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
         parts.append(finish_core + " Do not start the queued tasks yourself.")
     else:
         parts.append(finish_core)
+    # 任务切换：用户最新请求与当前任务无关时，先 finish 收尾、再 delegate 新任务（可同轮）。
+    parts.append(
+        f"If the user's latest message is about something unrelated to THIS task (a new, "
+        f"different request — not a follow-up, correction, or continuation of it), do not "
+        f"pivot this task onto it. In a SINGLE response, emit BOTH tool calls together: "
+        f"`{FINISH_TASK_NAME}` (wrap up this task) AND `{DELEGATE_TASK_NAME}` (dispatch the "
+        f"new request as a separate task). Always issue them together — do NOT call only "
+        f"finish and stop, intending to delegate on the next turn: once finish takes effect "
+        f"this task ends and there is no next turn, so the new request would be lost. Their "
+        f"order does not matter (finish wraps up this task; the new request runs as an "
+        f"independent task)."
+    )
     # 始终提示：需要用户输入/决策/澄清时主动调 ask_user（各完成方式下都加）。
     parts.append(
         f"Whenever you need information, a decision, or a clarification that only the user "

@@ -15,7 +15,6 @@ from ctx_weft.core.loop.steps.compact import (
     _count_root_residues,
     fold_root_experience,
 )
-from ctx_weft.core.loop.steps.finalize import close_finished_short_tasks
 from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
@@ -107,12 +106,24 @@ def _finished_short(tid: str, parent="t1", oc=None) -> Task:
 
 
 async def _seed_root_residues(mem, sc, n: int, start_t: int = 0) -> None:
+    """Task-4 task-resident：每个结束单元 = task 层 body（task_id=rt{i} scope 的 USER_PROMPT）
+    + agent 层 finish 对（4x AGENT_CONVERSATION_TURN，parent_task_id=None）。L1 删 body，L2 连
+    finish 对一并删。"""
     for i in range(n):
-        t0 = start_t + 2 * i
-        await mem.ingest(_ev(T.TASK_DISPATCH, sc, "", t0, role="assistant",
-                             tool_call_id=f"rd{i}", tool_name="delegate_task", arguments={}), _ctx())
-        await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, f"root res {i}", t0 + 1, role="tool",
-                             tool_call_id=f"rd{i}", child_task_id=f"rt{i}", parent_task_id=None), _ctx())
+        t0 = start_t + 4 * i
+        tcid = f"rd{i}"
+        body_scope = MemoryScope(session_id="s1", task_id=f"rt{i}", agent_id=sc.agent_id)
+        await mem.ingest(_ev(T.USER_PROMPT, body_scope, f"body rt{i}", t0, role="user"), _ctx())
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, f"user prompt rt{i}", t0,
+                             role="user", origin_task_id=f"rt{i}", parent_task_id=None), _ctx())
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, f"root res {i}", t0 + 1,
+                             role="assistant", origin_task_id=f"rt{i}", parent_task_id=None), _ctx())
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, "", t0 + 2,
+                             role="assistant", origin_task_id=f"rt{i}", parent_task_id=None,
+                             tool_calls=[{"id": tcid, "name": "control:finish_task", "input": {}}]), _ctx())
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, f"Process Report: done rt{i}", t0 + 3,
+                             role="tool", origin_task_id=f"rt{i}", parent_task_id=None,
+                             tool_call_id=tcid), _ctx())
 
 
 # ═══════════════════ _should_compact triggers ═══════════════════
@@ -151,9 +162,8 @@ async def test_trigger_growth_root_residues() -> None:
     mem = InMemoryMemoryProvider()
     cfg = LoopConfig(compact_token_ratio=0.99, compact_message_delta=3)
     sc = _sc("t1")
-    for i in range(4):
-        await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, f"r{i}", i, role="tool",
-                             tool_call_id=f"rd{i}", parent_task_id=None), _ctx())
+    # 新格式：AGENT_CONVERSATION_TURN（parent=None）触发 root residue 计数
+    await _seed_root_residues(mem, sc, 4)
     state = _state(_active_task(), cfg)
     assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is True
 
@@ -206,95 +216,9 @@ async def test_trigger_delta_zero_disables_growth() -> None:
     assert await PrepareStep()._should_compact(state, _loop_ctx(mem, _FakeTM({})), token_estimate=1) is False
 
 
-# ═══════════════════ (b) close_finished_short_tasks ═══════════════════
-
-async def test_close_finished_short_task_collapses_to_residue() -> None:
-    mem = InMemoryMemoryProvider()
-    await mem.ingest(_ev(T.TASK_DISPATCH, _sc("t1"), "", 0, role="assistant",
-                         tool_call_id="oc2", tool_name="delegate_task", arguments={}), _ctx())
-    await mem.ingest(_ev(T.USER_PROMPT, _sc("t2"), "sub prompt", 1, role="user"), _ctx())
-    await mem.ingest(_ev(T.LLM_RESPONSE, _sc("t2"), "sub reply", 2, role="assistant"), _ctx())
-
-    t2 = _finished_short("t2", oc="oc2")
-    tm = _FakeTM({"t1": _active_task(), "t2": t2})
-    await close_finished_short_tasks(mem, _state(_active_task(), LoopConfig()), _loop_ctx(mem, tm))
-
-    conv = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
-    assert all(r.metadata.get("task_id") != "t2" for r in conv)   # conversation superseded
-    res = await mem.recall_recent(_sc("t1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert any(r.metadata.get("tool_call_id") == "oc2" for r in res)  # residue written
-
-
-async def test_close_suspended_ancestor_untouched() -> None:
-    mem = InMemoryMemoryProvider()
-    await mem.ingest(_ev(T.LLM_RESPONSE, _sc("anc"), "ancestor work", 0, role="assistant"), _ctx())
-    anc = Task(id="anc", session_id="s1", status="SUSPENDED", assigned_agent_id="ag1",
-               creator_agent_id="ag1", title="Anc", settings=NormalTaskSettings())
-    tm = _FakeTM({"anc": anc, "t1": _active_task()})
-    await close_finished_short_tasks(mem, _state(_active_task(), LoopConfig()), _loop_ctx(mem, tm))
-
-    conv = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
-    assert any(r.metadata.get("task_id") == "anc" for r in conv)
-
-
-async def test_close_active_task_never_closed() -> None:
-    mem = InMemoryMemoryProvider()
-    await mem.ingest(_ev(T.LLM_RESPONSE, _sc("t1"), "active work", 0, role="assistant"), _ctx())
-    # even if active task were marked FINISHED, it must not be closed by this pass
-    active = _active_task()
-    active.status = "FINISHED"
-    tm = _FakeTM({"t1": active})
-    await close_finished_short_tasks(mem, _state(active, LoopConfig()), _loop_ctx(mem, tm))
-
-    conv = await mem.recall_recent(_sc("t1"), [T.LLM_RESPONSE], 100, _ctx())
-    assert [r.content for r in conv] == ["active work"]  # untouched (task_id == active)
-
-
-async def test_close_multiple_finished_short_tasks() -> None:
-    mem = InMemoryMemoryProvider()
-    tasks = {"t1": _active_task()}
-    for i in range(3):
-        tid = f"s{i}"
-        await mem.ingest(_ev(T.TASK_DISPATCH, _sc("t1"), "", i, role="assistant",
-                             tool_call_id=f"oc{i}", tool_name="delegate_task", arguments={}), _ctx())
-        await mem.ingest(_ev(T.LLM_RESPONSE, _sc(tid), f"s{i} work", 10 + i, role="assistant"), _ctx())
-        tasks[tid] = _finished_short(tid, oc=f"oc{i}")
-    await close_finished_short_tasks(mem, _state(_active_task(), LoopConfig()), _loop_ctx(mem, _FakeTM(tasks)))
-
-    conv = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
-    assert conv == []  # all three short tasks' conversations superseded
-    res = await mem.recall_recent(_sc("t1"), [T.TASK_DISPATCH_RESULT], 100, _ctx())
-    assert {r.metadata.get("tool_call_id") for r in res} == {"oc0", "oc1", "oc2"}
-
-
-async def test_close_empty_mem_content_skipped() -> None:
-    mem = InMemoryMemoryProvider()
-    await mem.ingest(_ev(T.LLM_RESPONSE, _sc("t2"), "work", 0, role="assistant"), _ctx())
-    t2 = _finished_short("t2", oc="oc2")
-    t2.outputs = None
-    t2.process_report = None  # → mem_content empty → skip
-    tm = _FakeTM({"t1": _active_task(), "t2": t2})
-    events = await close_finished_short_tasks(mem, _state(_active_task(), LoopConfig()), _loop_ctx(mem, tm))
-    assert events == []
-    conv = await mem.recall_recent(_sc("t2"), [T.LLM_RESPONSE], 100, _ctx())
-    assert [r.content for r in conv] == ["work"]  # left intact (nothing to collapse to)
-
-
-async def test_close_no_task_manager_noop() -> None:
-    mem = InMemoryMemoryProvider()
-    await mem.ingest(_ev(T.LLM_RESPONSE, _sc("t2"), "work", 0, role="assistant"), _ctx())
-    ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx(), task_manager=None, llm=None)
-    assert await close_finished_short_tasks(mem, _state(_active_task(), LoopConfig()), ctx) == []
-
-
-async def test_close_unknown_task_skipped() -> None:
-    mem = InMemoryMemoryProvider()
-    await mem.ingest(_ev(T.LLM_RESPONSE, _sc("ghost"), "work", 0, role="assistant"), _ctx())
-    tm = _FakeTM({"t1": _active_task()})  # 'ghost' not in store
-    events = await close_finished_short_tasks(mem, _state(_active_task(), LoopConfig()), _loop_ctx(mem, tm))
-    assert events == []
-    conv = await mem.recall_recent(_sc("ghost"), [T.LLM_RESPONSE], 100, _ctx())
-    assert [r.content for r in conv] == ["work"]
+# ═══════════════════ (b) close_finished_short_tasks — 删除（task-resident） ══════
+# spec 2026-06-28 §5：取消「压力下回收 finished 短 task」。结束 task 的 body 留 task 层
+# （即胶囊），由跨层 fold 管理。close_finished_short_tasks 函数已删，本节执行测试随之移除。
 
 
 # ═══════════════════ (c) fold_root_experience ═══════════════════
@@ -303,31 +227,40 @@ async def test_fold_root_residues_keep_last_and_subtask_survive() -> None:
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
     await _seed_root_residues(mem, sc, 5)
-    for i in range(2):  # sub-task residues (working set) — must NOT fold
-        await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, f"sub res {i}", 100 + i, role="tool",
-                             tool_call_id=f"sd{i}", child_task_id=f"st{i}", parent_task_id="t1"), _ctx())
+    # active delegating task t1 的在途 dispatch 对（working set，§2.3）：有 dispatch 回合、无 finish
+    # 对 → active → 不可折。表示为 delegate assistant + result tool conversation turn（origin=t1）。
+    for i in range(2):
+        tc = f"sd{i}"
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, "", 200 + i * 2, role="assistant",
+                             origin_task_id="t1", parent_task_id=None,
+                             tool_calls=[{"id": tc, "name": "control:delegate_task", "input": {}}]), _ctx())
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, f"sub res {i}", 201 + i * 2, role="tool",
+                             origin_task_id="t1", tool_call_id=tc), _ctx())
 
     n = await fold_root_experience(_state(_active_task(), LoopConfig()),
                                    _loop_ctx(mem, _FakeTM({})), keep_last=1, summary_text="SUM")
     assert n > 0
-    results = await mem.recall_recent(sc, [T.TASK_DISPATCH_RESULT, T.AGENT_COMPACT_SUMMARY], 100, _ctx())
-    contents = {r.content for r in results}
-    assert {"sub res 0", "sub res 1"} <= contents       # working set survives
-    assert "root res 0" not in contents and "root res 3" not in contents
-    assert "root res 4" in contents                     # newest keep_last=1 kept
-    assert any(r.type == T.AGENT_COMPACT_SUMMARY and r.content == "SUM" for r in results)
+    turns = await mem.recall_recent(sc, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    alive_origins = {r.metadata.get("origin_task_id") for r in turns}
+    assert alive_origins == {"rt4", "t1"}                 # newest root kept + active working set t1
+    # working set（t1 的 dispatch 结果）survives
+    sub_contents = {r.content for r in turns if r.role == "tool"}
+    assert {"sub res 0", "sub res 1"} <= sub_contents
+    summ = await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx())
+    assert any(r.content == "SUM" for r in summ)
 
 
 async def test_fold_paired_dispatch_superseded_no_dangling() -> None:
+    """新格式：所有已折胶囊的 AGENT_CONVERSATION_TURN 消失，最新 keep_last=1 的 origin=rt3 保留。"""
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
     await _seed_root_residues(mem, sc, 4)
     await fold_root_experience(_state(_active_task(), LoopConfig()),
                                _loop_ctx(mem, _FakeTM({})), keep_last=1, summary_text="SUM")
-    # the folded results' paired TASK_DISPATCH are gone too (no dangling tool_call)
-    disp = await mem.recall_recent(sc, [T.TASK_DISPATCH], 100, _ctx())
-    live_tcids = {d.metadata.get("tool_call_id") for d in disp}
-    assert live_tcids <= {"rd3"}  # only the kept root's dispatch remains
+    # 新格式无 TASK_DISPATCH；检查 AGENT_CONVERSATION_TURN：只剩 rt3 的回合
+    turns = await mem.recall_recent(sc, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    alive_origins = {r.metadata.get("origin_task_id") for r in turns}
+    assert alive_origins == {"rt3"}  # only the kept root's turns remain
 
 
 async def test_fold_rolls_old_summary_into_new() -> None:
@@ -360,18 +293,21 @@ async def test_fold_summary_anchored_before_kept_window() -> None:
     await _seed_root_residues(mem, sc, 3)
     await fold_root_experience(_state(_active_task(), LoopConfig()),
                                _loop_ctx(mem, _FakeTM({})), keep_last=1, summary_text="SUM")
-    # recall is newest-first; summary must come AFTER the kept newest root residue in that order
-    recs = await mem.recall_recent(sc, [T.TASK_DISPATCH_RESULT, T.AGENT_COMPACT_SUMMARY], 100, _ctx())
-    ordered = list(reversed(recs))  # chronological
-    types_seq = [r.type for r in ordered]
-    assert types_seq[0] == T.AGENT_COMPACT_SUMMARY            # summary anchored first
-    assert types_seq[-1] == T.TASK_DISPATCH_RESULT            # kept root residue last
+    # summary must be chronologically before all kept AGENT_CONVERSATION_TURN records
+    turns = await mem.recall_recent(sc, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    summ = await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx())
+    assert len(summ) == 1
+    min_kept_ts = min(r.timestamp for r in turns)
+    assert summ[0].timestamp < min_kept_ts            # summary anchored before kept window
 
 
 async def test_count_root_residues_excludes_subtask() -> None:
+    """新格式：root 胶囊（AGENT_CONVERSATION_TURN, parent=None）计 3；
+    TASK_DISPATCH_RESULT(parent=t1) 为 working set，_count_root_residues 不计此类型。"""
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
     await _seed_root_residues(mem, sc, 3)
+    # working set: cross-agent TASK_DISPATCH_RESULT with parent_task_id set (不是 AGENT_CONVERSATION_TURN)
     await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, "sub", 99, role="tool",
                          tool_call_id="sd", parent_task_id="t1"), _ctx())
     assert await _count_root_residues(_state(_active_task(), LoopConfig()), _loop_ctx(mem, _FakeTM({}))) == 3
@@ -422,7 +358,9 @@ async def test_execute_task_fold_untouches_subtask_residues() -> None:
     assert await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx()) == []  # no root fold
 
 
-async def test_execute_closes_short_then_folds_root() -> None:
+async def test_execute_keeps_finished_short_body_then_folds_root() -> None:
+    """task-resident（spec 2026-06-28 §5）：CompactStep 不再回收 finished 短 task——其 body 留
+    task 层（即胶囊，由跨层 fold 管理）；root residues 仍照常 fold。"""
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
     # a finished short same-agent leaf + enough root residues to fold
@@ -435,9 +373,12 @@ async def test_execute_closes_short_then_folds_root() -> None:
     state = _state(_active_task(), LoopConfig(compact_keep_last=1))
     await CompactStep().execute(state, _loop_ctx(mem, tm, with_assembler=True))
 
-    # short task t2 closed (conversation gone), root residues folded
+    # task-resident：short task t2 的 body 留 task 层（不被 CompactStep 回收）
     conv = await mem.recall_recent_by_agent(_sc("x", "ag1"), [T.LLM_RESPONSE], 100, _ctx())
-    assert all(r.metadata.get("task_id") != "t2" for r in conv)
+    assert any(r.metadata.get("task_id") == "t2" for r in conv), (
+        "finished short task body must stay (task-resident: no pressure-collapse)"
+    )
+    # root residues 仍 fold
     assert await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx()) != []
 
 

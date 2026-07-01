@@ -1,8 +1,8 @@
 """interactive vs auto task + finish_task + 临时 guidance 注入。
 
 - interactive 任务 actor 纯文本 → HITL input 冷 park（等用户），不产出、不完成。
-- auto 任务 actor 纯文本 → 旧行为：文本即 outputs，路由 observe。
-- finish_task → 写 outputs + 完成（端到端经 gateway/observe/finalize）。
+- auto 任务 actor 纯文本 → 文本即 outputs，路由 observe。
+- finish_task 收尾标记 → 答复正文即 outputs + 完成（端到端经 gateway/observe/finalize）。
 - 临时 guidance（title/description/后继/完成方式）只进发送的 prompt，不入 memory。
 """
 
@@ -91,9 +91,10 @@ async def test_auto_plain_text_completes() -> None:
 async def test_finish_task_finishes_task_end_to_end() -> None:
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
+    # 反转契约：答复写在消息正文，finish_task 无参收尾标记 → outputs = 正文
     llm = MockLLMAdapter(responses=[
-        MockResponse(tool_calls=[ToolCall(
-            id="tc1", name="control__finish_task", arguments={"result": "computed: 42"},
+        MockResponse(text="computed: 42", tool_calls=[ToolCall(
+            id="tc1", name="control__finish_task", arguments={},
         )]),
     ])
     runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
@@ -109,8 +110,8 @@ async def test_guidance_injected_into_prompt_not_memory() -> None:
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[
-        MockResponse(tool_calls=[ToolCall(
-            id="tc1", name="control__finish_task", arguments={"result": "ok"},
+        MockResponse(text="ok", tool_calls=[ToolCall(
+            id="tc1", name="control__finish_task", arguments={},
         )]),
     ])
     runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)

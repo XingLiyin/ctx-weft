@@ -28,7 +28,7 @@ from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.capability import CapabilityProvider, ToolCapabilityProvider, qualify
-from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL
+from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL, _PLAN_DISPATCH_ACK
 from ctx_weft.protocols.filesystem import SpillSink
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType, MemoryProvider, MemoryScope
 
@@ -39,21 +39,32 @@ logger = logging.getLogger(__name__)
 
 _REDACT_HEADERS = frozenset({"authorization", "cookie", "x-api-key", "x-auth-token"})
 
-# 派发型控制工具（spec/06 §5）：其 tool_call 落 agent 层 TASK_DISPATCH，即时 result 暂挂，
-# 由 child finalize 回填 TASK_DISPATCH_RESULT 配对。普通工具仍走 task 层 TOOL_INVOCATION/RESULT。
+# 派发型控制工具（spec 2026-06-28 §2.3）：其 tool_call 落 agent 层 delegate conversation turn
+# （AGENT_CONVERSATION_TURN, assistant），即时 result 暂挂，由 child finalize 回填配对的 tool 回合
+# （同 origin=delegating task）。普通工具仍走 task 层 TOOL_INVOCATION/RESULT。
 DISPATCH_TOOLS = frozenset({
     qualify(f"{CONTROL}:delegate_task"),
     qualify(f"{CONTROL}:delegate_plan"),
-    qualify(f"{CONTROL}:replan"),
+})
+
+# 计划型派发工具：除写 delegate conversation turn 外，还需写一条配对的 ack tool result，
+# 避免该 plan 框悬挂（被 legalize 剥掉）。由 child finalize 补写的 result 仅针对 start_task 子框。
+_PLAN_DISPATCH_TOOLS = frozenset({
+    qualify(f"{CONTROL}:delegate_plan"),
 })
 
 # 编排/裁决型控制工具：其结果是状态信号、不入 task 对话——例如 report_task_outcome 的 HITL 回复
 # 改由 finalize 以 role=user 注入。（ask_user 的人类答复是 actor 输入，仍写 task 层。）
-# finish_task 同理：其 result 的 canonical 出口是 task.outputs，不入 task 对话。
+# finish_task 同理：反转契约后它是无参收尾标记，最终答复即助手消息正文、canonical 出口是
+# task.outputs（ActStep 收尾时合成），标记本身不入 task 对话。
+# collect_process_report 是 background observe 的终止工具：result 由 run_observe_react 取出落
+# close report 槽（→ Process Report），且 background observe 在 task close 后才跑，若入 task 对话
+# 会污染已冻结的对话且不被 supersede（泄漏进后续 task prompt）。
 SILENT_TOOLS = frozenset({
     qualify(f"{CONTROL}:report_task_outcome"),
     qualify(f"{CONTROL}:update_task_metadata"),
     qualify(f"{CONTROL}:finish_task"),
+    qualify(f"{CONTROL}:collect_process_report"),
 })
 
 
@@ -125,7 +136,8 @@ class CapabilityGateway:
         is_dispatch = tool_name in DISPATCH_TOOLS
         is_silent = tool_name in SILENT_TOOLS  # 不入 task 对话的编排/裁决工具
 
-        # 1. Lookup capability（只处理 kind="tool"）
+        # 1. Lookup capability（只处理 kind="tool"）。控制工具的全局可达性由 CapabilityCache 的
+        # session 全局区保证（get_by_qualified_name 回退），gateway 无需特殊逻辑。
         cap = self._cache.get_by_qualified_name(state.agent.id, tool_name)
         if cap is None or cap.kind != "tool":
             return await self._error_and_record(
@@ -175,7 +187,7 @@ class CapabilityGateway:
                 f"[Error: no provider found for '{cap.id}']", is_dispatch, is_silent, tool_call_id,
             )
 
-        # 5. 记录 invocation（事件 + TOOL_INVOCATION/TASK_DISPATCH 入 memory）
+        # 5. 记录 invocation（事件 + TOOL_INVOCATION / delegate conversation turn 入 memory）
         await self._record_invocation(state, ctx, tool_name, cap, invocation_id, sanitized, is_dispatch, is_silent, tool_call_id)
 
         # 6. 执行（流式）。透传 invocation_id（provider 据此登记在途句柄，供 cancel 对应）与
@@ -235,26 +247,60 @@ class CapabilityGateway:
     async def _record_invocation(
         self, state, ctx, tool_name, cap, invocation_id, sanitized, is_dispatch, is_silent, tool_call_id,
     ) -> None:
-        """发 CapabilityInvoked + ingest TOOL_INVOCATION（派发→TASK_DISPATCH；SILENT 不入 task 对话）。"""
+        """发 CapabilityInvoked + ingest（派发→agent 层 delegate conversation turn；
+        普通→task 层 TOOL_INVOCATION；SILENT 普通工具不入对话）。"""
         from ctx_weft.core.loop.driver import make_event
         await self._event_bus.emit(make_event(state, EventType.CAPABILITY_INVOKED, payload={
             "invocation_id": invocation_id,
             "capability_name": tool_name,
             "capability_id": cap.id,
             "arguments": sanitized,
+            "tool_call_id": tool_call_id,
         }))
-        if is_dispatch or not is_silent:
+        if is_dispatch:
+            # 派发（spec 2026-06-28 §2.3）：delegate 调用写成 agent 层普通 conversation turn
+            # （assistant 回合，tool_calls 承载 delegate 调用），origin_task_id=delegating task。
+            # 其 result 由 child close 时（finalize）写成配对的 tool 回合 → 二者构成 delegating task
+            # 对话里的一组普通 message，与该单元 finish 对同 origin、同命运（一起 L2 折）。
             await self._memory.ingest(
                 MemoryEvent(
-                    type=MemoryEventType.TASK_DISPATCH if is_dispatch else MemoryEventType.TOOL_INVOCATION,
+                    type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                    scope=_tool_scope(state),
+                    content="",
+                    timestamp=now_utc(),
+                    role="assistant",
+                    metadata={"origin_task_id": state.task.id,
+                              "parent_task_id": state.task.parent_task_id,
+                              "tool_calls": [{"id": tool_call_id, "name": tool_name,
+                                              "input": sanitized}]},
+                ),
+                ctx.provider_ctx,
+            )
+            if tool_name in _PLAN_DISPATCH_TOOLS:
+                # envelope: 给 plan 框写一条配对的 ack tool result，避免该框悬挂(被 legalize 剥掉)。
+                await self._memory.ingest(
+                    MemoryEvent(
+                        type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                        scope=_tool_scope(state),
+                        content=_PLAN_DISPATCH_ACK,
+                        timestamp=now_utc(),
+                        role="tool",
+                        metadata={"origin_task_id": state.task.id,
+                                  "parent_task_id": state.task.parent_task_id,
+                                  "tool_call_id": tool_call_id},
+                    ),
+                    ctx.provider_ctx,
+                )
+        elif not is_silent:
+            await self._memory.ingest(
+                MemoryEvent(
+                    type=MemoryEventType.TOOL_INVOCATION,
                     scope=_tool_scope(state),
                     content=f"{tool_name}({sanitized})",
                     timestamp=now_utc(),
                     role="assistant",
                     metadata={"invocation_id": invocation_id, "tool_name": tool_name,
-                              "tool_call_id": tool_call_id,
-                              # 派发调用保留 arguments，供 agent_experience 重建 delegate_task tool_call
-                              **({"arguments": sanitized} if is_dispatch else {})},
+                              "tool_call_id": tool_call_id},
                 ),
                 ctx.provider_ctx,
             )
@@ -309,6 +355,7 @@ class CapabilityGateway:
             "outcome": "error" if is_error else "success",
             "result": content[:8000],
             "result_length": len(content),
+            "tool_call_id": tool_call_id,
         }))
         if not is_dispatch and not is_silent:
             await self._memory.ingest(

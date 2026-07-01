@@ -107,10 +107,10 @@ async def test_minimal_echo_loop() -> None:
     assert state.task.user_prompt == "say hello"
     assert state.verdict is not None
     assert state.verdict.task_outcome == "success"
-    # root agent 正常结束走规则降级 observer：summary 是机械总结，不回显文本
-    assert "conversation round" in state.verdict.summary
+    # root agent 正常结束走规则降级 observer：act_recap 是机械总结，不回显文本
+    assert "conversation round" in state.verdict.act_recap
 
-    # transcript 应有 1 个 turn；assistant 文本回显在 transcript（而非 verdict.summary）
+    # transcript 应有 1 个 turn；assistant 文本回显在 transcript（而非 verdict.act_recap）
     assert len(state.transcript) == 1
     assert "Hello" in state.transcript[0].assistant_text
 

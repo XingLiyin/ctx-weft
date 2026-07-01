@@ -1,11 +1,20 @@
-"""AgentRecallSource：统一装配路径（spec 2026-06-23 重构）。
+"""AgentRecallSource：统一装配路径（spec 2026-06-23 重构；task-resident 语义 2026-06-28）。
 
 agent 是上下文组织单元：一次召回 = 本 agent 名下所有 task 的记录，按 timestamp 归并。
-- OPEN task → 完整对话（task 层 USER_PROMPT/LLM_RESPONSE/TOOL_RESULT/TASK_COMPACT_SUMMARY，
-  按 agent_id 跨 task 召回；CLOSED task 的对话已 supersede，不会返回）。
-- CLOSED task → 残留：TASK_DISPATCH ↔ TASK_DISPATCH_RESULT 配对（未配对 dispatch 隐去，
-  避免悬空 tool_call）。AGENT_COMPACT_SUMMARY → user 摘要回合（与 apply_compact 写入的 role=user 一致）；
-  AGENT_CONVERSATION_TURN → 原样回合（inherit_memory 快照载体）。
+
+task-resident（spec 2026-06-28）：
+- **未折叠 task body**（ALL tasks，无论是否结束）→ task 层记录
+  （USER_PROMPT/LLM_RESPONSE/TOOL_RESULT/TASK_COMPACT_SUMMARY），按 agent_id 跨 task 召回。
+  body 不因 close 而 supersede（旧的「CLOSED body 已 supersede 故不返回」假设已失效）。
+- **结束 task 的 finish 对**（AGENT_CONVERSATION_TURN：assistant finish_task + tool Process Report）
+  → agent 层；按 (timestamp, seq_no) 与 body 归并 → `[body][finish 对]`。
+- **运行中/暂停 task**（status ≠ FINISHED，无 finish 对）→ 只有 body，无 finish 对 → `[body]`。
+- OPEN/CLOSED 判据：task.status（或等价地：finish 对是否存在），不依赖 supersession 状态。
+
+agent 层另含：AGENT_CONVERSATION_TURN（finish 对 + dispatch 对 + inherit_memory 快照载体）
+→ 原样按时序渲染（dispatch 对 = delegating task 对话里的一组普通 message，spec 2026-06-28 §2.3）；
+AGENT_COMPACT_SUMMARY → user 摘要回合。存量 legacy TASK_DISPATCH/RESULT 由 normalize_legacy_dispatch
+在读侧归一化成 conversation turn（§5.5），核心渲染只面对单一表示。
 
 取代旧的 RecentMemorySource + AgentExperienceSource 双源。
 """
@@ -16,14 +25,15 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.sources._history import record_to_history_block, wrap_compact_summary
+from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
 from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
 from ctx_weft.protocols import MemoryEventType
-from ctx_weft.protocols.capability import qualify
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
 
-# OPEN task 对话类型（task 层，按 agent_id 跨 task 召回）
+# task 层 body 类型（ALL 未折叠 task，含已结束的；按 agent_id 跨 task 召回）
+# task-resident：body 不因 close 而 supersede，OPEN/CLOSED 由 task.status / finish 对判，不靠 supersession。
 _TASK_TYPES = [
     MemoryEventType.USER_PROMPT,
     MemoryEventType.LLM_RESPONSE,
@@ -43,7 +53,11 @@ _RECALL_ALL = 2000
 
 
 class AgentRecallSource:
-    """单一装配源：OPEN task 全对话 + CLOSED 残留，按 timestamp 在 composer 归并。"""
+    """単一装配源（task-resident，spec 2026-06-28）：
+    ① task 层 body（所有未折叠 task，含已结束的）+ ② agent 层 finish 对/dispatch 对/经验，
+    按 (timestamp, seq_no) 在 composer 归并。
+    结束 task → `[body][finish 对]`；运行中/暂停 task → `[body]`（无 finish 对）。
+    """
 
     name = "agent_recall"
 
@@ -57,7 +71,7 @@ class AgentRecallSource:
     ) -> AsyncIterator["ContextBlock"]:
         from ctx_weft.core.assembler.assembler import ContextBlock
 
-        # ── 1) OPEN task 对话：按 agent_id 跨 task 召回 ──
+        # ── 1) task 层 body：按 agent_id 跨 task 召回（ALL 未折叠 task，含已结束的） ──
         task_records = await deps.memory.recall_recent_by_agent(
             agent_scope=request.scope,
             types=_TASK_TYPES,
@@ -74,21 +88,13 @@ class AgentRecallSource:
             limit=self._limit,
             ctx=deps.provider_ctx,
         )
+        # §5.5：存量 legacy dispatch 对在读侧归一化成 conversation turn，下面统一走 conversation 渲染。
+        agent_records = normalize_legacy_dispatch(agent_records)
 
-        dispatches: dict[str, object] = {}   # tool_call_id → dispatch record
-        results: dict[str, list] = {}        # tool_call_id → [result records]
         summaries: list = []
         conversation: list = []
         for r in agent_records:
-            if r.type == MemoryEventType.TASK_DISPATCH:
-                tcid = r.metadata.get("tool_call_id")
-                if tcid:
-                    dispatches[tcid] = r
-            elif r.type == MemoryEventType.TASK_DISPATCH_RESULT:
-                tcid = r.metadata.get("tool_call_id")
-                if tcid:
-                    results.setdefault(tcid, []).append(r)
-            elif r.type == MemoryEventType.AGENT_COMPACT_SUMMARY:
+            if r.type == MemoryEventType.AGENT_COMPACT_SUMMARY:
                 summaries.append(r)
             elif r.type == MemoryEventType.AGENT_CONVERSATION_TURN:
                 conversation.append(r)
@@ -111,42 +117,8 @@ class AgentRecallSource:
                           "seq_no": s.metadata.get("seq_no", 0)},
             )
 
+        # finish 对 + dispatch 对（均为 AGENT_CONVERSATION_TURN）统一按时序渲染：assistant 携
+        # tool_calls、tool 携 tool_call_id（record_to_history_block 据 role 无损重建）。悬空 tool_call
+        # （在途 dispatch 尚无 result）由 llm_gateway 的 drop_dangling_tool_calls 兜底。
         for idx, c in enumerate(reversed(conversation)):
             yield record_to_history_block(c, source="agent_recall", idx=idx)
-
-        # 配对回合；未配对 dispatch 隐去（避免悬空 tool_call）
-        for tcid, d in dispatches.items():
-            res = results.get(tcid)
-            if not res:
-                continue
-            tool_name = d.metadata.get("tool_name", qualify("control:delegate_task"))
-            args = d.metadata.get("arguments", {})
-            ts = _ts(d)
-            seq = d.metadata.get("seq_no", 0)
-            yield ContextBlock(
-                id=generate_id("blk"),
-                source="agent_recall",
-                kind="history",
-                target="messages",
-                content="",
-                priority=3,
-                token_estimate=estimate_tokens(str(args)),
-                metadata={"role": "assistant", "type": d.type, "timestamp": ts, "seq_no": seq,
-                          "tool_calls": [{"id": tcid, "name": tool_name, "input": args}]},
-            )
-            res_sorted = sorted(res, key=_ts)
-            combined = "\n\n".join(
-                content_to_text(rr.content) if not isinstance(rr.content, str) else rr.content
-                for rr in res_sorted
-            )
-            yield ContextBlock(
-                id=generate_id("blk"),
-                source="agent_recall",
-                kind="history",
-                target="messages",
-                content=combined,
-                priority=3,
-                token_estimate=estimate_tokens(combined),
-                metadata={"role": "tool", "type": MemoryEventType.TASK_DISPATCH_RESULT,
-                          "timestamp": ts, "seq_no": seq, "tool_call_id": tcid},
-            )

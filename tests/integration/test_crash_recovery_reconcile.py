@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from unittest import mock
 
 import pytest
 
@@ -93,11 +94,15 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
         timestamp=ts, role="assistant",
         metadata={"tool_calls": [{"id": tcid, "name": "test__web", "input": {"url": "x"}}]}), pctx)
 
-    await runtime.recover_session(sid)
-    for _ in range(50):
-        if tool.invoked:
-            break
-        await asyncio.sleep(0.02)
+    with mock.patch(
+        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        return_value=None,
+    ):
+        await runtime.recover_session(sid)
+        for _ in range(50):
+            if tool.invoked:
+                break
+            await asyncio.sleep(0.02)
 
     # reconcile 重跑了 dangling 工具(而非裸重发 LLM)
     assert tool.invoked, "dangling tool 'web' should be re-invoked by ReconcileStep on crash recovery"

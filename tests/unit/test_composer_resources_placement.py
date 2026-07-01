@@ -302,9 +302,10 @@ def test_act_directive_targets_current_task_not_prior_experience() -> None:
     blocks = [
         _identity_block("SOUL TEXT"),
         _directive_block("Do the thing"),
-        # cross-task experience (older) — must NOT receive the current task's directive
-        _experience_block("user", "prior task ask", "1"),
-        _experience_block("assistant", "prior task work", "2"),
+        # prior FINISHED task recalled via agent_recall as a real user_prompt (task-resident
+        # capsule) — mtype="user_prompt" yet must NOT receive the current task's directive.
+        _history_block("user", "prior task ask", "1"),
+        _history_block("assistant", "prior task work", "2"),
         # the current task's own conversation (newer)
         _history_block("user", "## Current Message\nthe current ask", "3"),
     ]
@@ -345,7 +346,7 @@ def test_resumed_task_directive_on_history_capabilities_on_progress() -> None:
     assert first.index("the original ask") < first.index("## Instructions for the current task")
     assert "### Available Tools" not in first
     # the trailing dynamic-context message carries the progress AND the capabilities
-    assert "## Current Progress" in last and "halfway done" in last
+    assert "## Progress So Far" in last and "halfway done" in last
     assert "### Available Tools" in last
     assert first is not last
 

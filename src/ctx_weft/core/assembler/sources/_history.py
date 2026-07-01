@@ -1,7 +1,7 @@
 """Shared conversation-record → history block mapping (spec/06 §4.1).
 
-Used by RecentMemorySource (task-layer records) and AgentExperienceSource
-(agent-layer AGENT_CONVERSATION_TURN records) so a memory record renders
+Used by AgentRecallSource (task-layer body + agent-layer AGENT_CONVERSATION_TURN
+records) so a memory record renders
 identically wherever it is recalled from. Tool fidelity is keyed off role:
 assistant→tool_calls, tool→tool_call_id (matches how LLM_RESPONSE/TOOL_RESULT
 are ingested).
@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
+from ctx_weft.core.utils import (
+    PROGRESS_SO_FAR_HEADING, content_to_text, estimate_tokens, generate_id,
+)
 from ctx_weft.protocols import MemoryEventType
 
 if TYPE_CHECKING:
@@ -33,15 +35,31 @@ def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "C
     from ctx_weft.core.assembler.assembler import ContextBlock
 
     text = content_to_text(record.content) if not isinstance(record.content, str) else record.content
-    if record.type == MemoryEventType.TASK_COMPACT_SUMMARY:
-        text = wrap_compact_summary(text)
     role = record.role or "user"
+    # 包装是给「以 user 身份呈现」的摘要消歧义；assistant 自述无需。新数据段摘要恒 assistant
+    # → 不套；旧数据若残留 role=user 仍套（防御）。AGENT_COMPACT_SUMMARY 在 agent_experience/
+    # agent_recall 自行包装，不走此分支。
+    if record.type == MemoryEventType.TASK_COMPACT_SUMMARY and role == "user":
+        text = wrap_compact_summary(text)
+    elif (
+        record.type == MemoryEventType.TASK_COMPACT_SUMMARY
+        and role == "assistant"
+        and source == "task_conversation"
+    ):
+        # 当前任务的「上一段执行复述」（max_turns / 边界 compact 复用 act_recap）：冠以统一标题，
+        # 与 composer 非压缩 retry 进度对齐；胶囊召回（agent_recall/agent_experience）不加此标题，
+        # 避免改动跨任务重建形态。
+        text = f"{PROGRESS_SO_FAR_HEADING}\n{text}"
     md = {
         "role": role,
         "type": record.type,
         "timestamp": record.timestamp.isoformat() if record.timestamp else "",
         "seq_no": record.metadata.get("seq_no", idx),
         "memory_event_id": record.id,
+        # 承载来源 task（USER_PROMPT 记录带 metadata={"task_id": task.id}，见 driver）——
+        # composer 据此把 ## Current Task/Message 框贴到「当前 task」自己的 user 回合，
+        # 而非召回历史里最后一条（同 agent 子 body 更新时会误顶 parent 的头）。
+        "task_id": record.metadata.get("task_id", ""),
     }
     # 无损重建：assistant 携 tool_calls；tool 携 tool_call_id
     if role == "assistant":

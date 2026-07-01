@@ -16,6 +16,7 @@ from ctx_weft.core.assembler.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
+from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import LLMRequest, MemoryEvent, MemoryEventType, MemoryLayer
 
@@ -25,6 +26,16 @@ TASK_COMPACT_TYPES = [
     MemoryEventType.USER_PROMPT,
     MemoryEventType.LLM_RESPONSE,
     MemoryEventType.TOOL_RESULT,
+]
+
+# task 层 body 类型（跨层 fold 的 L0→L1 删除目标，spec 2026-06-28 §4）。
+# 按 agent 跨-task 召回（recall_recent_by_agent），每条 metadata["task_id"] 标来源 task。
+_TASK_BODY_TYPES = [
+    MemoryEventType.USER_PROMPT,
+    MemoryEventType.LLM_RESPONSE,
+    MemoryEventType.TOOL_INVOCATION,
+    MemoryEventType.TOOL_RESULT,
+    MemoryEventType.TASK_COMPACT_SUMMARY,
 ]
 
 
@@ -44,7 +55,6 @@ async def summarize_for_compact(state: LoopState, ctx: LoopContext) -> str:
         session=state.session,
         template=state.extra.get("template"),
         bound_capabilities=state.extra.get("bound_capabilities", []),
-        actor_transcript=state.transcript,
     )
     compact_prompt = await ctx.assembler.assemble(request)
 
@@ -84,20 +94,72 @@ async def maybe_compact_before_dispatch(
     return await _compact_scope(state, ctx, trigger="pre_dispatch")
 
 
+def _dispatch_finish_sets(recs) -> tuple[set, set]:
+    """扫 conversation turn，按 origin 标记：has_dispatch（有 delegate/delegate_plan 调用回合）、
+    has_finish（有 finish_task 调用回合）。`active = has_dispatch − has_finish` = 未结束的
+    delegating task（在途 working set，不可折，spec §2.3）。"""
+    has_dispatch: set = set()
+    has_finish: set = set()
+    for r in recs:
+        if r.type != MemoryEventType.AGENT_CONVERSATION_TURN or r.role != "assistant":
+            continue
+        oid = r.metadata.get("origin_task_id")
+        if oid is None:
+            continue
+        for tc in (r.metadata.get("tool_calls") or []):
+            name = str(tc.get("name", ""))
+            if name.endswith("finish_task"):
+                has_finish.add(oid)
+            elif name.endswith("delegate_task") or name.endswith("delegate_plan"):
+                has_dispatch.add(oid)
+    return has_dispatch, has_finish
+
+
 async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
-    """本 agent scope 内已结束 root task 的残留数（parent_task_id is None）。"""
+    """本 agent scope 内「结束顶层单元（胶囊）」数（spec 2026-06-29，驱动 fold 触发阈值）。
+
+    顶层单元 = 按 origin_task_id 分组的 conversation turn（finish 对 + dispatch 对），其
+    parent_task_id 为 None 或不在本 scope origin 集内。删 L1 后,结束单元就是胶囊（仍含 task 层
+    胶囊 + agent 对话），折成摘要的单元已 supersede、不在此集。active delegating task（有 dispatch
+    回合无 finish 对 = 未结束）是在途 working set,不计入。"""
     recs = await ctx.memory.recall_recent(
-        state.scope, [MemoryEventType.TASK_DISPATCH_RESULT], 2000, ctx.provider_ctx,
+        state.scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx,
     )
-    return sum(1 for r in recs if r.metadata.get("parent_task_id") is None)
+    # parent prefer-non-None：dispatch result 回合不带 parent（None），不得覆盖权威 parent。
+    parent_of: dict[str, Any] = {}
+    has_dispatch, has_finish = _dispatch_finish_sets(recs)
+    for r in recs:
+        oid = r.metadata.get("origin_task_id")
+        if oid is None:
+            continue
+        p = r.metadata.get("parent_task_id")
+        if oid not in parent_of or (parent_of[oid] is None and p is not None):
+            parent_of[oid] = p
+    origins = set(parent_of)
+    active = {oid for oid in has_dispatch if oid not in has_finish}
+    top = {oid for oid, pid in parent_of.items()
+           if oid not in active and (pid is None or pid not in origins)}
+    return len(top)
 
 
 async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: int,
                                summary_text: str) -> int:
-    """折叠已结束 root task 的残留（agent 层，parent_task_id is None），保留最近 keep_last 个。
+    """跨层折叠 fold：task 的详细度只 3 级（spec 2026-06-29 重订，删 L1 黑盒中间态）。
 
-    当前 root 进行中派生的 sub-task 残留（parent_task_id 有值）**不折**——那是工作集，由
-    close/GC 管理（spec 2026-06-23 §3c）。返回 superseded 条数。
+    - **执行中**：RUNNING/SUSPENDED → task 层 raw（每条工具调用展开），不在本函数管辖。
+    - **胶囊**：close 时自动形成（`finalize._supersede_final_raw_segment` 删末 raw 段、留
+      USER_PROMPT + TASK_COMPACT_SUMMARY）= task 层胶囊 + agent 层 finish 对（+ dispatch 对）。
+      胶囊**只软删、不做 L1 压缩**——一直完整保留,直到超 keep_last 才整体折成摘要。
+    - **总结**：超 keep_last 的最老顶层单元 → 连同其 task 层胶囊 + agent 层 finish/dispatch 对 +
+      旧 AGENT_COMPACT_SUMMARY 一并 supersede,折成一条新 AGENT_COMPACT_SUMMARY（锚保留集最早
+      ts − 1µs，不变量 A）。
+
+    顶层折叠单元 = 一组同 origin_task_id 的 conversation turn（finish 对 + dispatch 对）；顶层 =
+    parent_task_id is None 或 ∉ 本 scope origin 集；折某顶层时沿 parent 链纳后代子树。active
+    delegating task（有 dispatch 回合无 finish 对 = 未结束）是在途 working set,不当可折顶层单元。
+
+    跨层 supersede 一次原子提交（ids 跨 task 层胶囊 + agent 层对话,provider 按 id 生效、不按
+    scope 过滤）。返回 supersede 的总条数。
     """
     memory = ctx.memory
     recs = await memory.recall_recent(
@@ -106,42 +168,92 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
          MemoryEventType.AGENT_COMPACT_SUMMARY, MemoryEventType.AGENT_CONVERSATION_TURN],
         2000, ctx.provider_ctx,
     )
-    recs = list(reversed(recs))  # recall newest-first → chronological
-    root_results = [
-        r for r in recs
-        if r.type == MemoryEventType.TASK_DISPATCH_RESULT
-        and r.metadata.get("parent_task_id") is None
-    ]
-    if len(root_results) <= keep_last:
-        return 0
-    fold = root_results if keep_last <= 0 else root_results[:-keep_last]
-    kept = [] if keep_last <= 0 else root_results[-keep_last:]
-    fold_tcids = {r.metadata.get("tool_call_id") for r in fold}
-    fold_task_ids = {r.metadata.get("child_task_id") for r in fold}
-    ids = [r.id for r in fold]
+    # §5.5：存量 legacy dispatch 对在读侧归一化成 conversation turn，下面只需面对单一表示。
+    recs = normalize_legacy_dispatch(recs)
+    recs = list(reversed(recs))  # newest-first → chronological
+    # task 层胶囊（跨 task 按 agent 召回，每条 metadata["task_id"] 标来源单元）
+    body_recs = await memory.recall_recent_by_agent(
+        state.scope, _TASK_BODY_TYPES, 2000, ctx.provider_ctx,
+    )
+
+    # 按 origin 分组 conversation turn（finish 对 + dispatch 对同 origin）+ 记 parent + 最早 ts。
+    # parent prefer-non-None：单元 parent 由权威回合（gateway delegate / finish 对）给出，dispatch
+    # result 回合不带 parent（None），不得覆盖真实 parent。
+    parent_of: dict[str, Any] = {}
+    first_ts: dict[str, Any] = {}
+    has_dispatch, has_finish = _dispatch_finish_sets(recs)
     for r in recs:
-        if (r.type == MemoryEventType.TASK_DISPATCH
-                and r.metadata.get("tool_call_id") in fold_tcids):
+        if r.type != MemoryEventType.AGENT_CONVERSATION_TURN:
+            continue
+        oid = r.metadata.get("origin_task_id")
+        if oid is None:
+            continue
+        p = r.metadata.get("parent_task_id")
+        if oid not in parent_of or (parent_of[oid] is None and p is not None):
+            parent_of[oid] = p
+        if oid not in first_ts or r.timestamp < first_ts[oid]:
+            first_ts[oid] = r.timestamp
+    origins = set(parent_of)
+    active = {oid for oid in has_dispatch if oid not in has_finish}  # 未结束 delegating task
+    top = [oid for oid, pid in parent_of.items()
+           if oid not in active and (pid is None or pid not in origins)]
+    if len(top) <= keep_last:
+        return 0
+    top.sort(key=lambda oid: first_ts[oid])
+
+    def _expand(roots: list) -> set:
+        """从顶层 origin 出发，沿 parent 链纳入所有后代组（同 agent 内嵌子胶囊）。"""
+        out = set(roots)
+        changed = True
+        while changed:
+            changed = False
+            for oid, pid in parent_of.items():
+                if pid in out and oid not in out:
+                    out.add(oid)
+                    changed = True
+        return out
+
+    # 单一阈值：保最近 keep_last 个胶囊（完整：task 层胶囊 + agent 对话），更老的整体折成摘要。
+    fold_top = top if keep_last <= 0 else top[:-keep_last]
+    fold_set = _expand(fold_top)        # 整体折成摘要的单元（含其子树）
+
+    ids: list = []
+    # 折掉 fold_set 单元的 task 层胶囊（USER_PROMPT + TASK_COMPACT_SUMMARY 等）
+    for r in body_recs:
+        if r.metadata.get("task_id") in fold_set:
+            ids.append(r.id)
+    # + 其 agent 层 conversation turn（finish 对 + dispatch 对，同 origin 同命运）+ 旧摘要
+    for r in recs:
+        if (r.type == MemoryEventType.AGENT_CONVERSATION_TURN
+                and r.metadata.get("origin_task_id") in fold_set):
             ids.append(r.id)
         elif r.type == MemoryEventType.AGENT_COMPACT_SUMMARY:
             ids.append(r.id)  # 旧摘要并入新摘要
-        elif (r.type == MemoryEventType.AGENT_CONVERSATION_TURN
-                and r.metadata.get("origin_task_id") in fold_task_ids):
-            ids.append(r.id)  # 被折胶囊的 user / assistant-summary 回合一并折叠，避免落单
+
+    if not ids:
+        return 0
     await memory.supersede(ids, ctx.provider_ctx)
-    anchor_ts = min((r.timestamp for r in kept), default=now_utc())
-    # Truncation-only on summary-LLM failure (summary_text=="" → "[Experience compacted]"):
-    # the fold still supersedes prior root experience so compaction bounds the agent layer
-    # even without the LLM. Consistent with task-layer apply_compact; accepted edge
-    # (rare LLM failure replaces root-experience text with the placeholder marker). [2026-06-23]
+
+    # 折出新摘要：仅当确有单元被折时写
+    if not fold_top:
+        return len(ids)
+
+    # anchor = 仍保留单元（胶囊）的最早 conversation turn ts − 1µs（新摘要须排在所有保留胶囊之前）
+    surviving = origins - fold_set
+    kept_ts: list = []
+    for r in recs:
+        oid = r.metadata.get("origin_task_id")
+        if r.type == MemoryEventType.AGENT_CONVERSATION_TURN and oid in surviving:
+            kept_ts.append(r.timestamp)
+    anchor_ts = (min(kept_ts) if kept_ts else now_utc())
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.AGENT_COMPACT_SUMMARY,
             scope=state.scope,
             content=summary_text or "[Experience compacted]",
-            timestamp=anchor_ts - timedelta(microseconds=1),  # 逻辑置于保留窗口之前
+            timestamp=anchor_ts - timedelta(microseconds=1),
             role="user",
-            metadata={"keep_last": keep_last, "folded_count": len(fold)},
+            metadata={"keep_last": keep_last, "folded_count": len(fold_top)},
         ),
         ctx.provider_ctx,
     )
@@ -151,19 +263,19 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
 async def _compact_scope(
     state: LoopState, ctx: LoopContext, *, trigger: str = "compact"
 ) -> list[Any]:
-    """对 state.scope 跑一次压缩：回收 finished 短 task(b) + task 层 fold_task(a) +
-    agent 层 fold_root(c)，三者共享单次 summary。
+    """对 state.scope 跑一次压缩：task 层 fold_task(a) + agent 层 fold_root(c)，
+    两者共享单次 summary。
 
     trigger 标记触发来源（"compact" = PrepareStep 内联；"pre_dispatch" = 派发前），透传进
-    event payload 供遥测区分。无可折时只返回 close 产生的事件（可能为空），不空跑 summary LLM。
-    """
-    from ctx_weft.core.loop.steps.finalize import close_finished_short_tasks
+    event payload 供遥测区分。无可折时返回空事件列表，不空跑 summary LLM。
 
+    task-resident（spec 2026-06-28 §5）：取消「压力下回收 finished 短 task」——结束 task 的
+    body 留 task 层（即胶囊），由跨层 fold 管理，不再 close_finished_short_tasks 坍缩。
+    """
     agent = state.agent
     keep_last = agent.loop_config.compact_keep_last
 
-    # (b) 压力下回收 finished 短 task（交给 task close 机制）
-    events: list[Any] = await close_finished_short_tasks(ctx.memory, state, ctx)
+    events: list[Any] = []
 
     # (a) 活跃 task 长对话；(c) 已结束 root 残留
     task_n = await ctx.memory.count_recent(
@@ -182,7 +294,8 @@ async def _compact_scope(
     if fold_task:
         result = await ctx.memory.apply_compact(
             scope=state.scope, summary=summary_text or "[Context compacted]",
-            keep_last=keep_last, ctx=ctx.provider_ctx, layer=MemoryLayer.TASK)
+            keep_last=keep_last, ctx=ctx.provider_ctx, layer=MemoryLayer.TASK,
+            protect_types=(MemoryEventType.USER_PROMPT,))
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "events_before": result.events_before, "events_after": result.events_after,
             "summary_event_id": result.summary_event_id, "layer": "task",

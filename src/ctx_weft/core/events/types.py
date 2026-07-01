@@ -142,6 +142,12 @@ class EventType(StrEnum):
     RECOGNIZE_INTENT_COMPLETED = "RecognizeIntentCompleted"
     RECOGNIZE_INTENT_TOOL_CALL = "RecognizeIntentToolCall"
     RECOGNIZE_INTENT_SKIPPED = "RecognizeIntentSkipped"
+    # ── BackgroundObserve 域（root 后台异步 observe 的 LLM 交互；与 LLM_* 同形但独立类型，
+    #     host 据此区分前端是否渲染——core 不感知前端可见性，只发不同类型）──
+    BACKGROUND_OBSERVE_REQUEST_STARTED = "BackgroundObserveRequestStarted"
+    BACKGROUND_OBSERVE_PROMPT_SENT = "BackgroundObservePromptSent"
+    BACKGROUND_OBSERVE_TOKEN_STREAMED = "BackgroundObserveTokenStreamed"
+    BACKGROUND_OBSERVE_RESPONSE_FINISHED = "BackgroundObserveResponseFinished"
     # ── System / 元事件 ──
     EVENTS_DROPPED = "EventsDropped"
     SNAPSHOT_CREATED = "SnapshotCreated"
@@ -160,6 +166,7 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = frozenset({
     EventType.LLM_TOKEN_STREAMED,
     EventType.LLM_REASONING_STREAMED,
     EventType.LLM_RETRY_TRIGGERED,
+    EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED,
 })
 
 

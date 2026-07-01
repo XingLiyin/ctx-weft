@@ -1,4 +1,11 @@
-"""端到端：compact 过的 root task close 后，agent 层渲染序符合 §2.2。"""
+"""端到端：root task close 后，AgentRecallSource 渲染序符合 task-resident 胶囊形态。
+
+task-resident（spec 2026-06-28 §3.3）：
+  body 留 task 层（USER_PROMPT / TASK_COMPACT_SUMMARY，由 recall_recent_by_agent 读）
+  + agent 层 finish 对（AGENT_CONVERSATION_TURN assistant finish_task + tool Process Report）
+  → composer 按 (timestamp, seq_no) 归并出 [user][assistant 摘要][finish 对]。
+不再镜像 body 进 agent 层，也不写 TASK_DISPATCH / TASK_DISPATCH_RESULT 作为 root 自残留。
+"""
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -30,38 +37,54 @@ def _task():
 
 
 @pytest.mark.asyncio
-async def test_capsule_renders_user_summary_dispatch_result_in_order():
+async def test_capsule_renders_body_and_finish_pair():
+    """task-resident：root task close 后：
+    task 层 USER_PROMPT + TASK_COMPACT_SUMMARY 留 task 层（由 recall_recent_by_agent 读），
+    agent 层只写 finish 对（assistant finish_task + tool Process Report）。
+    composer 按 (timestamp, seq_no) 归并 → [user][assistant 摘要][finish 对]。
+    不再镜像 body，也不写 TASK_DISPATCH / TASK_DISPATCH_RESULT 作为 root 自残留。
+    """
     mem = InMemoryMemoryProvider()
     scope = _sc()
-    # task scope 有一条存活 compaction summary
+    # task 层：一条 UP + 一条 TASK_COMPACT_SUMMARY（留 task 层，供 AgentRecallSource 读）
     tscope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
-    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tscope,
-                                 content="### 会话目标\n转 PDF", timestamp=_BASE, role="user",
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=tscope,
+                                 content="把 ppt 转 pdf", timestamp=_BASE, role="user",
                                  metadata={}), _pctx())
-    # 在 agent scope 合成胶囊
-    await _synthesize_dispatch_pair(mem, scope, _task(), "## PDF 已完成", "success", _pctx())
+    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tscope,
+                                 content="### 会话目标\n转 PDF", timestamp=_BASE, role="assistant",
+                                 metadata={}), _pctx())
+    # 在 agent scope 合成 finish 对（task-resident：不镜像 body）
+    _task_summary = "综合进度：PDF 转换完成"
+    await _synthesize_dispatch_pair(mem, scope, _task(), "## PDF 已完成", _task_summary, "success", _pctx())
 
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=scope)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     blocks.sort(key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)))
-    roles = [b.metadata.get("role") for b in blocks]
     types = [b.metadata.get("type") for b in blocks]
-    # AgentRecallSource 分两路：
-    #   recall_recent_by_agent → task 层 TASK_COMPACT_SUMMARY（wrapped user）
-    #   recall_recent → agent 层胶囊四件套：user(原始诉求) → assistant(summary) → assistant(delegate) → tool(result)
-    # TASK_COMPACT_SUMMARY 时间戳最早（_BASE），胶囊各件为 now_utc()
+
+    # task 层 body 类型仍由 AgentRecallSource 读到（recall_recent_by_agent）
+    assert T.USER_PROMPT in types
     assert T.TASK_COMPACT_SUMMARY in types
+
+    # finish 对在 agent 层（AGENT_CONVERSATION_TURN）；无 TASK_DISPATCH root 自残留
     assert T.AGENT_CONVERSATION_TURN in types
-    assert T.TASK_DISPATCH in types
-    assert T.TASK_DISPATCH_RESULT in types
-    # 胶囊中的 user(原始诉求) 和 assistant(summary) 来自 AGENT_CONVERSATION_TURN
-    turn_blocks = [b for b in blocks if b.metadata.get("type") == T.AGENT_CONVERSATION_TURN]
-    assert len(turn_blocks) == 2
-    user_turn = next(b for b in turn_blocks if b.metadata.get("role") == "user")
-    asst_turn = next(b for b in turn_blocks if b.metadata.get("role") == "assistant")
-    assert "把 ppt 转 pdf" in user_turn.content
-    assert "会话目标" in asst_turn.content
-    # 结果回合
-    result_block = next(b for b in blocks if b.metadata.get("type") == T.TASK_DISPATCH_RESULT)
-    assert result_block.content.startswith("## PDF 已完成")
+    assert T.TASK_DISPATCH not in types, "root self-residue must not use TASK_DISPATCH anymore"
+
+    # 归并序：user(UP) → assistant(summary) → assistant(finish_task) → tool(Process Report)
+    history = [b for b in blocks if b.metadata.get("type") in (
+        T.USER_PROMPT, T.TASK_COMPACT_SUMMARY, T.AGENT_CONVERSATION_TURN)]
+    roles = [b.metadata.get("role") for b in history]
+    assert len(history) == 4, f"expected 4 history blocks (body + finish pair), got {len(history)}: {roles}"
+    assert roles == ["user", "assistant", "assistant", "tool"], f"got roles={roles}"
+
+    # user block carries original prompt (task layer)
+    assert "把 ppt 转 pdf" in history[0].content
+    # assistant summary block carries compaction content (TASK_COMPACT_SUMMARY, task layer)
+    assert "会话目标" in history[1].content
+    # finish_task tool_call (agent layer finish pair)
+    finish_tc = history[2].metadata.get("tool_calls", [])
+    assert finish_tc and finish_tc[0].get("name", "").endswith("finish_task")
+    # task_summary（process report）in tool 回合（agent layer）
+    assert _task_summary in history[3].content

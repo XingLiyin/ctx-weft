@@ -209,6 +209,7 @@ class InMemoryMemoryProvider(MemoryProvider):
         keep_last: int,
         ctx: ProviderContext,
         layer: MemoryLayer = MemoryLayer.AGENT,
+        protect_types: tuple[MemoryEventType, ...] = (),
     ) -> CompactResult:
         scope_key = self._scope_key(scope, ctx.tenant_id, layer)
 
@@ -223,50 +224,50 @@ class InMemoryMemoryProvider(MemoryProvider):
         events_before = len(active)
         active.sort(key=lambda s: s.seq_no)
 
-        # 标记除最后 keep_last 条以外的为 superseded
-        # TODO(spec/06 §7 step6)：AGENT 层应按「完整派发对」keep_last，避免切断 tool_call/result。
-        to_archive = active[:-keep_last] if keep_last > 0 else active
-        kept = active[-keep_last:] if keep_last > 0 else []
+        # protect_types 永不进 archive；keep_last 只对可折类型计
+        archivable = [s for s in active if s.event.type not in protect_types]
+        to_archive = archivable[:-keep_last] if keep_last > 0 else archivable
         for s in to_archive:
             s.is_superseded = True
 
-        # 摘要类型按层（spec/06 §3）
         summary_type = (
             MemoryEventType.TASK_COMPACT_SUMMARY
             if layer is MemoryLayer.TASK
             else MemoryEventType.AGENT_COMPACT_SUMMARY
         )
-        # seq_no + timestamp 都插在保留窗口之前，保证摘要排在最近 N 条消息前面
-        # （recall 按 timestamp DESC 取；摘要 wall-clock 虽最新，须逻辑置前）
-        summary_ts = (
-            min(s.event.timestamp for s in kept) - timedelta(microseconds=1)
-            if kept else datetime.now(UTC)
-        )
+        # 摘要落在「被折区块之后、其后第一条幸存事件之前」→ [UP1][summary][UP2][kept]
+        # 找「归档起点」：第一条被折事件的 seq_no；摘要插在该起点之后第一条幸存事件之前
+        archived_min_seq = min((s.seq_no for s in to_archive), default=-1)
+        # 第一条幸存且 seq_no >= archived_min_seq 的事件即为 anchor
+        following = [s for s in active if s.seq_no >= archived_min_seq and not s.is_superseded]
+        if following:
+            anchor = min(following, key=lambda s: (s.event.timestamp, s.seq_no))
+            summary_ts = anchor.event.timestamp - timedelta(microseconds=1)
+            summary_seq = anchor.seq_no - 1
+        else:
+            summary_ts = datetime.now(UTC)
+            self._seq_counters[scope_key] = self._seq_counters.get(scope_key, 0) + 1
+            summary_seq = self._seq_counters[scope_key]
+
+        # task 层段摘要 = LLM 对前段的自述（role=assistant）；agent 层折叠摘要是 prompt
+        # 首条、Anthropic 首条 assistant 会 400，故保持 role=user。
+        summary_role = "assistant" if layer is MemoryLayer.TASK else "user"
         compact_event = MemoryEvent(
             type=summary_type,
             scope=scope,
             content=summary,
             timestamp=summary_ts,
-            role="user",  # 注入给下一轮 act loop 的上下文统一 role=user
+            role=summary_role,
             metadata={"keep_last": keep_last, "archived_count": len(to_archive)},
         )
         async with self._lock:
             self._next_id += 1
             compact_id = f"mev_{self._next_id:08d}"
-            if kept:
-                summary_seq = min(s.seq_no for s in kept) - 1
-            else:
-                self._seq_counters[scope_key] = self._seq_counters.get(scope_key, 0) + 1
-                summary_seq = self._seq_counters[scope_key]
             self._events.append(_StoredEvent(
-                id=compact_id,
-                event=compact_event,
-                seq_no=summary_seq,
-                topic_seq_no=0,
+                id=compact_id, event=compact_event, seq_no=summary_seq, topic_seq_no=0,
             ))
 
         events_after = sum(1 for s in self._events if _in_scope(s))
-
         return CompactResult(
             events_before=events_before,
             events_after=events_after,

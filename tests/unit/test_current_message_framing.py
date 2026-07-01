@@ -32,17 +32,38 @@ def test_frame_only_latest_user_turn():
     """
     comp = _comp()
     history_pairs = [
-        (_u("检查工作目录"), "agent_recall", "user_prompt"),
-        (_a("好的"), "agent_recall", "llm_response"),
-        (_u("把这个 ppt 转 pdf"), "agent_recall", "user_prompt"),
+        (_u("检查工作目录"), "agent_recall", "user_prompt", "t1"),
+        (_a("好的"), "agent_recall", "llm_response", "t1"),
+        (_u("把这个 ppt 转 pdf"), "agent_recall", "user_prompt", "t1"),
     ]
-    messages = [m for m, _src, _mtype in history_pairs]
+    messages = [m for m, *_ in history_pairs]
     comp._frame_current_message(messages, history_pairs, _task())
     assert messages[0].content == "检查工作目录"                    # 历史裸
     assert "## Current Message" in messages[2].content            # 最近被框
     assert "## Current Task" in messages[2].content
     assert "Reply in the same language" in messages[2].content
     assert "把这个 ppt 转 pdf" in messages[2].content
+
+
+def test_frame_targets_current_task_by_id_not_latest():
+    """parent resume 后装配：召回里有 parent 自己的 user_prompt（task_id=t1）+ 更新的同 agent
+    子 body user_prompt（task_id=c1）。框架须按 task_id 贴到 **当前 task（t1）**，而非最后一条
+    （子 body），否则子 body 会顶着 parent 的 ## Current Task 头。tuple 第 4 元 = task_id。"""
+    comp = _comp()
+    history_pairs = [
+        (_u("现在提交一个plan"), "agent_recall", "user_prompt", "t1"),   # parent 自己（当前 task）
+        (_a("好的"), "agent_recall", "llm_response", "t1"),
+        (_u("请向 Lily 打个招呼"), "agent_recall", "user_prompt", "c1"),  # 同 agent 子 body（更新）
+        (_a("你好 Lily"), "agent_recall", "llm_response", "c1"),
+    ]
+    messages = [m for m, *_ in history_pairs]
+    comp._frame_current_message(messages, history_pairs, _task())  # _task().id == "t1"
+    # 当前 task（t1）自己的消息被框
+    assert "## Current Message" in messages[0].content
+    assert "现在提交一个plan" in messages[0].content
+    # 子 body（c1）保持裸——不被误当作当前消息
+    assert messages[2].content == "请向 Lily 打个招呼"
+    assert "## Current" not in messages[2].content
 
 
 def test_frame_ignores_agent_experience_user():
@@ -53,10 +74,10 @@ def test_frame_ignores_agent_experience_user():
     """
     comp = _comp()
     history_pairs = [
-        (_u("旧自经验"), "agent_recall", "agent_conversation_turn"),
-        (_u("当前消息"), "agent_recall", "user_prompt"),
+        (_u("旧自经验"), "agent_recall", "agent_conversation_turn", "old"),
+        (_u("当前消息"), "agent_recall", "user_prompt", "t1"),
     ]
-    messages = [m for m, _src, _mtype in history_pairs]
+    messages = [m for m, *_ in history_pairs]
     comp._frame_current_message(messages, history_pairs, _task())
     assert messages[0].content == "旧自经验"
     assert "## Current Message" in messages[1].content
@@ -65,8 +86,8 @@ def test_frame_ignores_agent_experience_user():
 def test_frame_noop_when_no_task_conversation_user():
     """无 user_prompt 类型的 user 消息时，frame 为 noop。"""
     comp = _comp()
-    history_pairs = [(_a("only assistant"), "agent_recall", "llm_response")]
-    messages = [m for m, _src, _mtype in history_pairs]
+    history_pairs = [(_a("only assistant"), "agent_recall", "llm_response", "t1")]
+    messages = [m for m, *_ in history_pairs]
     comp._frame_current_message(messages, history_pairs, _task())
     assert messages[0].content == "only assistant"
 

@@ -1,7 +1,7 @@
 """interactive 只能沿用户面向链路下传：auto 父任务派生的子任务即使请求 interactive
 也静默降级为 auto；interactive 父任务则保留子任务的 interactive。
 
-覆盖 delegate_task / delegate_plan / replan 三处委派入口。
+覆盖 delegate_task / delegate_plan 两处委派入口。
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from ctx_weft.core.orchestrator.control_capability import (
     ControlContext,
     delegate_plan,
     delegate_task,
-    replan,
 )
 from ctx_weft.core.state.models import Task
 
@@ -65,9 +64,3 @@ def test_interactive_parent_keeps_delegate_plan() -> None:
         ctx=_ctx(tm, "interactive"),
     )
     assert [c.interaction_mode for c in tm.staged] == ["interactive", "auto"]
-
-
-def test_auto_parent_downgrades_replan() -> None:
-    tm = _FakeTM()
-    replan(reason="changed", tasks=[{"title": "a", "interactive": True}], ctx=_ctx(tm, "auto"))
-    assert tm.staged[0].interaction_mode == "auto"

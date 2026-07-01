@@ -29,6 +29,7 @@ from ctx_weft.core.assembler.sources import (
     IdentitySource,
     KnowledgeRetrievalSource,
     SemanticRecallSource,
+    TaskSpecSource,
 )
 from ctx_weft.core.events import Event, EventType, InProcessEventBus
 from ctx_weft.core.events.bus import EventBus
@@ -78,21 +79,30 @@ async def _copy_memory_for_inherit(
     session_id: str,
     tenant_id: str,
 ) -> None:
-    """spawn 时把 parent agent 的当前召回快照复制进 child agent scope（spec 2026-06-23 §跨 agent）。
+    """spawn 时把 parent agent 的当前召回视图复制进 child agent scope（spec Phase 2 2026-06-30）。
 
-    复制 parent 名下所有 OPEN task 的对话（按 agent_id 跨 task 召回），作为
-    AGENT_CONVERSATION_TURN 写入 child scope，作 child 的起始记忆；之后两边各自演进。
+    镜像父此刻 AgentRecallSource 的两路召回：task 层 body（父自身 + 同 agent 兄弟，按 agent_id 跨 task）
+    + agent 层对话回合（Phase 1 写的 start_task 框 / 跨 agent bubble / 同 agent finish 对）。二者按
+    (timestamp, seq_no) 归并后写入 child scope，作 child 的起始记忆；之后两边各自演进。
+    同 agent 兄弟 body 因此带框（不再裸泄漏），跨 agent 兄弟以 bubble 呈现。
     """
-    # Snapshots the parent agent's OPEN-task conversation only (not its closed-task residues or
-    # AGENT_COMPACT_SUMMARY) — a deliberate narrowing of "current recall": residues are the parent's
-    # black-box dispatch log, of little use to a child. [2026-06-23]
+    # AGENT_COMPACT_SUMMARY（父的黑盒折叠派发日志）仍排除——对子无用（沿用 2026-06-23 的窄化意图，
+    # 只是现在改为 mirror 而非「仅 OPEN-task body」）。
     from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope
 
     parent_agent_id = parent_task.assigned_agent_id or parent_task.creator_agent_id
     parent_scope = MemoryScope(session_id=session_id, task_id=parent_task.id, agent_id=parent_agent_id)
     ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
 
-    records = await memory.recall_recent_by_agent(
+    # Mirror the parent agent's current recall view (spec Phase 2, 2026-06-30):
+    #   (a) task-layer body — parent's own turns + same-agent siblings' bodies (by agent_id), and
+    #   (b) agent-layer dispatch turns — the start_task frames, cross-agent bubbles, and same-agent
+    #       finish pairs that Phase 1 writes into the parent agent scope.
+    # Merging both by (timestamp, seq_no) means inherited same-agent sibling bodies arrive FRAMED
+    # (their start_task frame precedes them, so no naked leak) and cross-agent siblings arrive as
+    # bubbles. AGENT_COMPACT_SUMMARY is still excluded — the parent's folded black-box dispatch log
+    # is of little use to a child.
+    body_records = await memory.recall_recent_by_agent(
         agent_scope=parent_scope,
         types=[
             MemoryEventType.USER_PROMPT,
@@ -103,8 +113,18 @@ async def _copy_memory_for_inherit(
         limit=2000,
         ctx=ctx,
     )
+    frame_records = await memory.recall_recent(
+        scope=parent_scope,
+        types=[MemoryEventType.AGENT_CONVERSATION_TURN],
+        limit=2000,
+        ctx=ctx,
+    )
+    combined = sorted(
+        [*body_records, *frame_records],
+        key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)),
+    )
     child_scope = MemoryScope(session_id=session_id, task_id=child_task.id, agent_id=sub_agent.id)
-    for r in reversed(records):  # newest-first → re-ingest chronologically
+    for r in combined:  # chronological → re-ingest preserves order via fresh per-scope seq_no
         md = {"inherited_from_task_id": parent_task.id}
         if r.role == "assistant" and r.metadata.get("tool_calls"):
             md["tool_calls"] = r.metadata["tool_calls"]
@@ -155,7 +175,7 @@ async def _flush_tracking_memory(
             )
         elif isinstance(tracked.outputs, str):
             result = tracked.outputs
-        report = tracked.process_report or ""
+        report = tracked.task_summary or tracked.process_report or ""
         if result or report:
             content = f"sub-task '{tracked.title}' completed. \nresult:{result} \nprocess report:{report}"
             try:
@@ -792,6 +812,11 @@ class CtxWeftRuntime:
                 return
             agent, tmpl, initial_step, run_id = await _resolve(t, sess_id)
             _resolved_agents[agent.id] = agent
+            # 回填「真正用于执行的 agent id」到 task——非 subagent 分支 _resolve 不写它（同 agent 派发
+            # 靠 creator==assigned 判定，None 会误判为 cross）；此处对齐 subagent 分支，且经 TASK_STARTED
+            # reducer 持久化。同时记录真实启动时刻，供派发框锚定。
+            t.assigned_agent_id = agent.id
+            t.started_at = now_utc()
             await task_manager._emit(EventType.TASK_STARTED, task_id=task_id, payload={"assigned_agent_id": t.assigned_agent_id or ""})
             s, _ = await self._execute_task(
                 session=session,
@@ -1226,6 +1251,7 @@ class CtxWeftRuntime:
             sources=[
                 IdentitySource(),
                 CapabilitySource(),
+                TaskSpecSource(),
                 AgentRecallSource(),
                 BlackboardSource(),
                 SemanticRecallSource(),
