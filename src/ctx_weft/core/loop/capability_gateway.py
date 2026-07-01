@@ -45,14 +45,12 @@ _REDACT_HEADERS = frozenset({"authorization", "cookie", "x-api-key", "x-auth-tok
 DISPATCH_TOOLS = frozenset({
     qualify(f"{CONTROL}:delegate_task"),
     qualify(f"{CONTROL}:delegate_plan"),
-    qualify(f"{CONTROL}:replan"),
 })
 
 # 计划型派发工具：除写 delegate conversation turn 外，还需写一条配对的 ack tool result，
 # 避免该 plan 框悬挂（被 legalize 剥掉）。由 child finalize 补写的 result 仅针对 start_task 子框。
 _PLAN_DISPATCH_TOOLS = frozenset({
     qualify(f"{CONTROL}:delegate_plan"),
-    qualify(f"{CONTROL}:replan"),
 })
 
 # 编排/裁决型控制工具：其结果是状态信号、不入 task 对话——例如 report_task_outcome 的 HITL 回复

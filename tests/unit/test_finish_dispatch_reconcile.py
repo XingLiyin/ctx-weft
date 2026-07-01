@@ -1,4 +1,4 @@
-"""finish_task 与 delegate/replan 同批出现时的批末仲裁：finish 胜出。
+"""finish_task 与 delegate 同批出现时的批末仲裁：finish 胜出。
 
 锁定 ActStep._reconcile_finish_vs_dispatch：
 - 两类工具都出现 → 当前 task 复位为非 SUSPENDED（路由走 observe 收尾），

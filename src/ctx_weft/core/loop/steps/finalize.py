@@ -47,7 +47,7 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
     """确保 parent scope 有一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，返回其时间戳。
 
     delegate_task(单): gateway 执行前已写好框 → 找到即返回其 timestamp。
-    delegate_plan/replan 子: gateway 只写了 plan 框、没有 per-child 框 → 此处补铸一条 start_task 框，
+    delegate_plan 子: gateway 只写了 plan 框、没有 per-child 框 → 此处补铸一条 start_task 框，
     时间戳回拨到 task.created_at，使其排在子 body 之前、与配对结果相邻。origin_task_id 留父(留 plan task)。
     """
     existing = await memory.recall_recent(

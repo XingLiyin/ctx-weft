@@ -51,12 +51,11 @@ FINISH_TASK_NAME = qualify(f"{PROVIDER_NAME}:finish_task")
 DELEGATE_TASK_NAME = qualify(f"{PROVIDER_NAME}:delegate_task")
 DELEGATE_PLAN_NAME = qualify(f"{PROVIDER_NAME}:delegate_plan")
 ASK_USER_NAME = qualify(f"{PROVIDER_NAME}:ask_user")
-REPLAN_NAME = qualify(f"{PROVIDER_NAME}:replan")
 REPORT_TASK_OUTCOME_NAME = qualify(f"{PROVIDER_NAME}:report_task_outcome")
 BACKGROUND_PROCESS_REPORT_NAME = qualify(f"{PROVIDER_NAME}:collect_process_report")
 UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
 
-# delegate_plan / replan 的 actor-visible ack 及 gateway 配对 tool result 内容。
+# delegate_plan 的 actor-visible ack 及 gateway 配对 tool result 内容。
 _PLAN_DISPATCH_ACK = "计划已生成，接下来会通过 start_task 逐个启动各子任务。"
 
 
@@ -492,67 +491,6 @@ def collect_process_report(
     """Summarize the current segment. Zero state write: never touches task.status / process_report / etc.
     Returns act_recap as content + task_summary in metadata for the close-out finish 对."""
     return ControlResult(content=act_recap, metadata={"task_summary": task_summary})
-
-
-@control_tool(purposes=["act"])
-def replan(
-    reason: Annotated[str, "Why the original plan needs revision"],
-    tasks: Annotated[
-        list,
-        "New list of remaining task specs (same format as delegate_plan.tasks)",
-    ],
-    *,
-    ctx: ControlContext = None,
-) -> ControlResult:
-    """Replace the remaining sub-tasks of the current plan with a new set. Use after delegate_plan when the plan must change; does not finish the current task."""
-    from ctx_weft.core.state.models import Task as TaskModel
-
-    if not isinstance(tasks, list):
-        tasks = []
-
-    if ctx is None or ctx.task_manager is None or ctx.task is None:
-        return ControlResult(content=_PLAN_DISPATCH_ACK)
-
-    titles: list[str] = []
-    prev_ids: list[str] = []
-    for spec in tasks:
-        if not isinstance(spec, dict):
-            continue
-        title = spec.get("title", "subtask")
-        child = TaskModel(
-            id=generate_id("tsk"),
-            session_id=ctx.session_id,
-            status="PENDING",
-            tenant_id=ctx.task.tenant_id,
-            parent_task_id=ctx.task_id,
-            creator_agent_id=ctx.agent_id,
-            title=title,
-            description=spec.get("description", ""),
-            user_prompt=spec.get("task_prompt") or spec.get("description", ""),
-            origin_tool_call_id=generate_id("tcall"),
-            tracking_task_ids=list(prev_ids),
-            interaction_mode=_child_mode(bool(spec.get("interactive", False)), ctx.task),
-            settings=NormalTaskSettings(
-                skill_name=spec.get("skill_name", ""),
-                use_subagent=bool(spec.get("use_subagent", False)),
-                subagent_template=spec.get("subagent_template", ""),
-                inherit_memory=bool(spec.get("inherit_memory", True)),
-            ),
-            created_at=now_utc(),
-        )
-        ctx.task_manager.stage_task(
-            child,
-            parent_task_id=ctx.task_id,
-            blocked_by=[prev_ids[-1]] if prev_ids else None,
-        )
-        prev_ids.append(child.id)
-        titles.append(title)
-
-    if isinstance(ctx.task.settings, NormalTaskSettings):
-        ctx.task.settings.spawn_titles = titles
-    ctx.task.status = "SUSPENDED"
-    ctx.task.actor_done = True
-    return ControlResult(content=_PLAN_DISPATCH_ACK)
 
 
 @control_tool(purposes=["recognize_intent"])

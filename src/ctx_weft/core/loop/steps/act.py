@@ -112,7 +112,7 @@ class ActStep(Step):
             await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
                 "turn": turn_num, "reason": "tool_calls_processed"}))
 
-            # finish_task 与 delegate/replan 同批：finish 胜出（派发改投为独立后继）。
+            # finish_task 与 delegate 同批：finish 胜出（派发改投为独立后继）。
             _reconcile_finish_vs_dispatch(state, ctx, turn.tool_calls)
 
             if state.task.actor_done:
@@ -410,7 +410,7 @@ async def _execute_tool_calls(
 def _reconcile_finish_vs_dispatch(
     state: LoopState, ctx: LoopContext, tool_calls: list[ToolCall],
 ) -> None:
-    """finish_task 与 delegate_task / delegate_plan / replan 同批出现时仲裁：finish 胜出。
+    """finish_task 与 delegate_task / delegate_plan 同批出现时仲裁：finish 胜出。
 
     两类工具语义互斥——一个要当前 task 收尾(→observe)，一个要它挂起等子任务(→suspend)。
     用户意图是「我做完了，顺手派生独立后续」：故 finish 胜出，被派发任务从「当前 task 的

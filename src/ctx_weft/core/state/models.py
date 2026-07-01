@@ -16,7 +16,7 @@ from ctx_weft.protocols import LoopConfig, MemoryConfig
 class NormalTaskSettings:
     """Settings for a regular reasoning task.
 
-    Created by delegate_task / delegate_plan / replan control tools, or supplied
+    Created by delegate_task / delegate_plan control tools, or supplied
     as initial_task_settings to start_session() / create_session().
     """
 

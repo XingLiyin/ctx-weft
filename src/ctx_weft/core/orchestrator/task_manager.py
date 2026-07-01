@@ -59,7 +59,7 @@ class TaskManager:
         self._queue: TaskQueue = TaskQueue()
         self._cancelled: bool = False
         self._tasks: dict[str, Task] = {}
-        # 同一轮（一次 task run）内 delegate_task / delegate_plan / replan 先投这里，
+        # 同一轮（一次 task run）内 delegate_task / delegate_plan 先投这里，
         # runner 正常返回后由 _flush_staged 统一入队，实现「同批次 FIFO」。
         # key = 正在运行的 task_id（即被 spawn 子任务的 parent_task_id）。
         self._staged: dict[str, list[tuple[Task, list[str] | None, str | None]]] = {}
@@ -202,7 +202,7 @@ class TaskManager:
     def detach_staged(self, from_parent_id: str, to_parent_id: str | None) -> None:
         """把 from_parent_id 本轮 staged 的子任务改投到 to_parent_id 名下（独立后续）。
 
-        用于 finish_task 与 delegate_* / replan 同批出现时：当前 task 收尾，被派发任务
+        用于 finish_task 与 delegate_* 同批出现时：当前 task 收尾，被派发任务
         不再做它的阻塞子任务，而改挂到它的 parent（当前是 root 则为 None→顶层）独立调度。
 
         只改写 tuple 的 parent_task_id（驱动 _flush_staged 时 push_task 的归属）与
