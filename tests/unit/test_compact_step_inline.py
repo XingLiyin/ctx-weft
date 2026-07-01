@@ -72,9 +72,14 @@ class _FakeLLM:
         yield SimpleNamespace(kind="token", text="SUMMARY", usage=None, tool_call=None)
 
 
-def _state():
-    agent = SimpleNamespace(id="agt1", loop_config=SimpleNamespace(compact_keep_last=2),
-                            runtime={"llm_model": "mock"})
+def _state(context_tokens=1000):
+    agent = SimpleNamespace(
+        id="agt1",
+        loop_config=SimpleNamespace(
+            compact_keep_last=2, collapse_keep_last=2,
+            compact_token_ratio=0.1, compact_target_ratio=0.0),
+        loop_guard=SimpleNamespace(context_limit=1000, context_tokens=context_tokens),
+        runtime={"llm_model": "mock"})
     return SimpleNamespace(
         run_id="r1",
         agent=agent,

@@ -1,11 +1,11 @@
 """USER_PROMPT anchor protection: apply_compact must not fold USER_PROMPT events when
 protect_types=(USER_PROMPT,) is passed; and the production callers (_fold_retry_segment,
-_compact_scope) must pass that kwarg.
+escalating_compact) must pass that kwarg.
 
 Two levels of tests:
 1. Behavioral: InMemoryMemoryProvider.apply_compact directly — USER_PROMPT events survive,
    LLM/TOOL events fold, TASK_COMPACT_SUMMARY is inserted.
-2. Caller wiring: _fold_retry_segment and _compact_scope pass protect_types=(USER_PROMPT,)
+2. Caller wiring: _fold_retry_segment and escalating_compact pass protect_types=(USER_PROMPT,)
    to apply_compact (verified via a spy wrapper on the real provider).
 """
 
@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, _compact_scope
+from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, escalating_compact
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
 from ctx_weft.protocols import (
     CompactResult,
@@ -146,7 +146,9 @@ async def test_apply_compact_without_protect_folds_user_prompts():
 def _state(exit_reason: str = "max_turns") -> SimpleNamespace:
     agent = SimpleNamespace(
         id="a1",
-        loop_config=SimpleNamespace(compact_keep_last=2),
+        loop_config=SimpleNamespace(
+            compact_keep_last=2, compact_token_ratio=0.1, compact_target_ratio=0.0),
+        loop_guard=SimpleNamespace(context_limit=10000, context_tokens=10000),
         runtime={"llm_model": "mock"},
     )
     return SimpleNamespace(
@@ -227,8 +229,8 @@ async def test_fold_retry_segment_passes_protect_types_and_user_prompts_survive(
     assert summary_contents, "No TASK_COMPACT_SUMMARY was created"
 
 
-async def test_compact_scope_passes_protect_types_and_user_prompts_survive():
-    """_compact_scope uses collapse_task_layer (not apply_compact) for the task layer.
+async def test_escalating_compact_passes_protect_types_and_user_prompts_survive():
+    """escalating_compact's L3 uses collapse_task_layer (not apply_compact) for the task layer.
 
     The 'original' USER_PROMPT content ("原始") is preserved in the collapsed UP's first
     section (before COLLAPSE_DELIM), and "HITL" UP (within the keep window) survives as
@@ -242,9 +244,10 @@ async def test_compact_scope_passes_protect_types_and_user_prompts_survive():
         new_callable=AsyncMock,
         return_value="段摘要",
     ):
-        await _compact_scope(_state("normal"), _ctx(mem), trigger="test")
+        # 无 agent 层派发对 → L1/L2 天然跳过，直落 L3 坍缩当前 task。
+        await escalating_compact(_state("normal"), _ctx(mem), token_estimate=10000, trigger="test")
 
-    # _compact_scope now uses collapse_task_layer, not apply_compact, for the task layer
+    # escalating_compact 的 L3 用 collapse_task_layer，不用 apply_compact，折 task 层
     task_calls = [c for c in mem.compact_calls if c["layer"] is MemoryLayer.TASK]
     assert not task_calls, (
         "apply_compact should NOT be called for task layer (collapse_task_layer is used instead)"

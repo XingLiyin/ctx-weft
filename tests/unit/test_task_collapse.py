@@ -83,7 +83,9 @@ async def test_recollapse_keeps_original_bounded():
     assert "新摘要含 step3" in newest
 
 
-async def test_compact_scope_task_uses_collapse_keep_last(monkeypatch):
+async def test_escalating_compact_l3_uses_collapse_keep_last(monkeypatch):
+    """迁移自旧 _compact_scope 用例（双阈值并行折已废）：只有 task 层可折（无 agent 层派发对）
+    → L1/L2 天然跳过（无 root residue / 无 kept origin），落到 L3 用 collapse_keep_last(2)。"""
     from ctx_weft.core.loop.steps import compact as cm
 
     calls = []
@@ -106,17 +108,19 @@ async def test_compact_scope_task_uses_collapse_keep_last(monkeypatch):
         await _ingest(mem, scope, T.LLM_RESPONSE, f"turn{i}", i, role="assistant")
 
     agent = SimpleNamespace(
-        loop_config=SimpleNamespace(compact_keep_last=6, collapse_keep_last=2),
-        id="a", loop_guard=SimpleNamespace())
+        loop_config=SimpleNamespace(
+            compact_keep_last=6, collapse_keep_last=2,
+            compact_token_ratio=0.1, compact_target_ratio=0.0),
+        id="a", loop_guard=SimpleNamespace(context_limit=1000, context_tokens=1000))
     state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"), agent=agent,
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             extra={}, run_id="run1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx(),
                           task_manager=None, event_bus=None)
 
-    events = await cm._compact_scope(state, ctx, trigger="compact")
+    events = await cm.escalating_compact(state, ctx, token_estimate=1000, trigger="compact")
 
-    # 只有 task 层可折（无派发对）→ 只产 task 摘要、坍缩用 collapse_keep_last(2)
+    # 无 agent 层派发对 → 无 root residue / 无 kept origin → L1/L2 天然跳过 → 只产 task 摘要
     assert calls == ["task"]
     assert kept_arg["keep_last"] == 2
     assert any(e.payload.get("source") == "collapse" for e in events)

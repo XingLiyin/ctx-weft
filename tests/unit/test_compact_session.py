@@ -61,7 +61,9 @@ async def test_compact_session_folds_agent_layer() -> None:
     tmpl = dataclasses.replace(make_echo_template(),
                                loop_config=LoopConfig(compact_keep_last=2))
     resolver.register(tmpl)
-    llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
+    # escalating_compact 预算门总开（compact_session 强制立即压）→ L1 折后仍会继续试 L3（task
+    # 层坍缩,即便本例任务层无内容可折）,两级各调一次 summarize_for_compact → 2 条 mock 响应。
+    llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY"), MockResponse(text="SUMMARY")])
     rt = CtxWeftRuntime(llm=llm, template_resolver=resolver)
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)

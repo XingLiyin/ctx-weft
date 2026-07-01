@@ -1006,9 +1006,15 @@ class CtxWeftRuntime:
                 existing_agent_id=target_agent_id,
                 ctx=pctx,
             )
+            # 手动 compact_session 是「强制立即压」的一次性操作，不受预算门控（escalating_compact
+            # 按 token_estimate vs target_tokens 判断是否需要压）——context_tokens=context_limit
+            # 使门总是打开，交给各级内部的可折性判断决定实际动多少。
             agent = _dc.replace(
                 agent,
-                loop_guard=LoopGuard(context_limit=session.context_limit),
+                loop_guard=LoopGuard(
+                    context_limit=session.context_limit,
+                    context_tokens=session.context_limit,
+                ),
                 runtime={"llm_model": session.llm_model or ""},
             )
 

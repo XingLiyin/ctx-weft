@@ -79,10 +79,15 @@ def _agent(cfg: LoopConfig, context_limit: int = 1000) -> Agent:
     return a
 
 
-def _state(active: Task, cfg: LoopConfig, context_limit: int = 1000) -> LoopState:
+def _state(active: Task, cfg: LoopConfig, context_limit: int = 1000,
+           context_tokens: int | None = None) -> LoopState:
     session = Session(id="s1", user_prompt="u", status="RUNNING")
+    agent = _agent(cfg, context_limit)
+    # escalating_compact 的预算门用 loop_guard.context_tokens；缺省=context_limit（视作已满,
+    # 门总是打开）——迁移自旧 count-based _compact_scope 的测试显式传本参数模拟"未达预算"。
+    agent.loop_guard.context_tokens = context_limit if context_tokens is None else context_tokens
     return LoopState(run_id="run1", session=session, task=active,
-                     agent=_agent(cfg, context_limit), scope=_sc(active.id, "ag1"))
+                     agent=agent, scope=_sc(active.id, "ag1"))
 
 
 def _loop_ctx(mem, tm, *, with_assembler: bool = False):
@@ -317,8 +322,9 @@ async def test_count_root_residues_excludes_subtask() -> None:
 # ═══════════════════ CompactStep.execute orchestration ═══════════════════
 
 async def test_execute_noop_when_nothing_foldable() -> None:
+    """预算门未开（token_estimate 低于 target）时，escalating_compact 空跑，不摸任何记录。"""
     mem = InMemoryMemoryProvider()
-    state = _state(_active_task(), LoopConfig(compact_keep_last=1))
+    state = _state(_active_task(), LoopConfig(compact_keep_last=1), context_tokens=0)
     outcome = await CompactStep().execute(state, _loop_ctx(mem, _FakeTM({}), with_assembler=True))
     assert outcome.events == []
     assert await mem.recall_recent(_sc("t1"), [T.TASK_COMPACT_SUMMARY, T.AGENT_COMPACT_SUMMARY], 100, _ctx()) == []
@@ -388,14 +394,19 @@ async def test_execute_keeps_finished_short_body_then_folds_root() -> None:
 
 
 async def test_execute_idempotent_second_run_noop() -> None:
+    """第一次跑（预算门开）真折一轮；折后负载回落，第二次预算门不开（context_tokens 低于
+    target）→ 空跑不摸记录（escalating_compact 门未过时连 STARTED 都不发,见 gate 语义）。"""
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
     await _seed_root_residues(mem, sc, 4)
     state = _state(_active_task(), LoopConfig(compact_keep_last=1))
     ctx = _loop_ctx(mem, _FakeTM({}), with_assembler=True)
 
-    await CompactStep().execute(state, ctx)
+    out1 = await CompactStep().execute(state, ctx)
+    assert out1.events != []  # first run actually did work (root residues > keep_last)
     after_first = await mem.recall_recent(sc, [T.TASK_DISPATCH_RESULT], 100, _ctx())
+    # simulate settled load post-compaction: budget gate no longer open
+    state.agent.loop_guard.context_tokens = 0
     out2 = await CompactStep().execute(state, ctx)  # nothing new to fold (root residues now ≤ keep_last)
     after_second = await mem.recall_recent(sc, [T.TASK_DISPATCH_RESULT], 100, _ctx())
     assert out2.events == []
@@ -416,9 +427,10 @@ async def test_predispatch_folds_task_and_agent_layers() -> None:
 
     cfg = LoopConfig(compact_keep_last=1, predispatch_compact_token_ratio=0.6)
     state = _state(_active_task(), cfg, context_limit=1000)
-    # 800 / 1000 = 0.8 >= 0.6 → 门控通过
+    # 950 / 1000 = 0.95 >= 0.6 → 门控通过；留足预算余量使 L1 折后仍在 target(800) 之上，续入
+    # L2/L3（escalating_compact 每级折后即测：低于 target 就提前停,此处要打穿到 L3 才折 task 层）。
     events = await maybe_compact_before_dispatch(
-        state, _loop_ctx(mem, _FakeTM({}), with_assembler=True), prompt_tokens=800)
+        state, _loop_ctx(mem, _FakeTM({}), with_assembler=True), prompt_tokens=950)
 
     compacted = [e for e in events if e.type == "MemoryCompacted"]
     assert {e.payload.get("layer") for e in compacted} == {"task", "agent"}      # 两层都折
