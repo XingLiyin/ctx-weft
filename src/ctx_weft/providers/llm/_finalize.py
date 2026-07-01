@@ -95,17 +95,26 @@ def build_finalize_chunks(
             LLMChunk(
                 kind="tool_call",
                 tool_call=ToolCall(id=generate_id("call"), name=p.name, arguments=p.arguments),
-            ))
+            )
+            for p in parsed
+        )
     elif contains_minimax_tool_call(content_text):
         # MiniMax 把工具调用写成 <minimax:tool_call><invoke name=...><parameter name=...> 文本。
-        for p in parse_minimax_tool_calls(content_text):
+        # 与 D2 同理：标签出现但一个都没解析出来（截断/畸形）→ 标 outage=True 走退避自愈,
+        # 别放行让上层把这轮当「纯文本让位用户」误暂停、工具动作被静默吞掉。
+        parsed = parse_minimax_tool_calls(content_text)
+        if not parsed:
+            raise LLMCallError(
+                "LLM emitted a MiniMax tool call tag that parsed to zero tool calls "
+                "(truncated or malformed text tool call)",
+                retriable=True,
+                outage=True,
+            )
+        for p in parsed:
             out.append(LLMChunk(
                 kind="tool_call",
                 tool_call=ToolCall(id=generate_id("call"), name=p.name, arguments=p.arguments),
             ))
-            )
-            for p in parsed
-        )
 
     out.append(LLMChunk(kind="done", finish_reason=finish_reason or "stop"))
     return out
