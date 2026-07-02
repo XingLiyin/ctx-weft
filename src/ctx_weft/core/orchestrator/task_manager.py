@@ -74,6 +74,10 @@ class TaskManager:
         self._on_session_idle: Callable[[], Coroutine[Any, Any, None]] | None = None
         self._session_done_fired: bool = False
         self._background_asyncio_tasks: set[asyncio.Task] = set()
+        # 归属权谓词：runtime 注入，返回本 TM 是否仍是该 session 的当前 owner。
+        # None = 不受管（永远视为 current，保持旧行为）。被同 session 上更新的 TM
+        # 顶替后返回 False → 迟到的收尾变 no-op（不发 SessionFinished、不 _release_session）。
+        self._is_current: Callable[[], bool] | None = None
 
     def track_background(self, t: "asyncio.Task") -> None:
         """Track a fire-and-forget background coroutine so the session awaits it before close."""
@@ -82,6 +86,10 @@ class TaskManager:
 
     def set_runner(self, runner: TaskRunner) -> None:
         self._runner = runner
+
+    def set_is_current(self, predicate: "Callable[[], bool]") -> None:
+        """注入归属权谓词：本 TM 是否仍是该 session 的当前 owner（见 `_is_current`）。"""
+        self._is_current = predicate
 
     def set_session(self, session: Session) -> None:
         """注入 Session 对象，供 failure_counter 维护使用。"""
@@ -606,6 +614,14 @@ class TaskManager:
         # 等待所有后台协程完成，确保 RecognizeIntent 等事件全部 emit 后再关闭 SSE 流
         if self._background_asyncio_tasks:
             await asyncio.gather(*list(self._background_asyncio_tasks), return_exceptions=True)
+        # 归属权判定放在 gather **之后**：顶替可能发生在等待后台任务期间（旧 TM 的
+        # background observe 拖久了，用户已开启下一轮、新 TM 接管了 session）。此时本 TM
+        # 已非 owner → 收尾变 no-op，绝不发 SessionFinished、绝不触发 _release_session，
+        # 否则会冲掉新一轮的 HITL 挂起态、把任务卡在 ACTIVE。
+        if self._is_current is not None and not self._is_current():
+            logger.info("TaskManager(%s): superseded during session-done; skip SessionFinished + callback",
+                        self._session_id)
+            return
         if self._event_bus is not None:
             final_status = self._session.status if self._session else "FINISHED"
             tenant_id = self._session.tenant_id if self._session else "default"

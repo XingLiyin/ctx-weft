@@ -694,8 +694,17 @@ class CtxWeftRuntime:
 
         self._task_managers[session.id] = task_manager
 
+        # 归属权谓词：多轮对话里每次 resume 都新建 TM 并覆盖此映射。旧 TM 的收尾若迟到
+        # （被其慢的 background observe 拖住），必须认出自己已被顶替、变 no-op，否则会
+        # 冲掉新一轮的会话状态（详见 TaskManager._is_current）。
+        task_manager.set_is_current(
+            lambda tm=task_manager: self._task_managers.get(session.id) is tm
+        )
+
         async def _on_done() -> None:
-            self._release_session(session.id)
+            # compare-and-clear：仅当本 TM 仍是当前 owner 才回收，避免顶替它的新 TM 被误释放。
+            if self._task_managers.get(session.id) is task_manager:
+                self._release_session(session.id)
 
         async def _on_idle() -> None:
             # 会话 park/suspend 进入空闲（非终结，待续接）：只回收按 run 计的 pause/cancel token
