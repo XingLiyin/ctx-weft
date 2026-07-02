@@ -220,16 +220,19 @@ async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
 async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
     """本 agent scope 内「结束顶层单元（胶囊）」数（spec 2026-06-29，驱动 fold 触发阈值）。
 
-    顶层单元 = 按 origin_task_id 分组的 conversation turn（finish 对 + dispatch 对），其
-    parent_task_id 为 None 或不在本 scope origin 集内。删 L1 后,结束单元就是胶囊（仍含 task 层
-    胶囊 + agent 对话），折成摘要的单元已 supersede、不在此集。active delegating task（有 dispatch
-    回合无 finish 对 = 未结束）是在途 working set,不计入。"""
+    顶层单元 = 按 origin_task_id 分组的 conversation turn。一个 root task **无论当前 agent 亲自
+    执行（finish 对 → has_finish）、还是派给别的 agent 执行且结果已回（dispatch + result/tool 回合
+    → has_result）**，都是「已完成顶层单元」，计入 keep_last。真·在途（active，不计）= 派出但结果
+    未回：has_dispatch 且既无 has_finish 也无 has_result。当前正在跑的 task 永不当完成单元。"""
     recs = await ctx.memory.recall_recent(
         state.scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx,
     )
     # parent prefer-non-None：dispatch result 回合不带 parent（None），不得覆盖权威 parent。
     parent_of: dict[str, Any] = {}
     has_dispatch, has_finish = _dispatch_finish_sets(recs)
+    # has_result：该 origin 有返回结果（result/tool 回合）——派发型 root task 的「完成」标志。
+    has_result = {r.metadata.get("origin_task_id") for r in recs
+                  if r.role == "tool" and r.metadata.get("origin_task_id") is not None}
     for r in recs:
         oid = r.metadata.get("origin_task_id")
         if oid is None:
@@ -238,9 +241,10 @@ async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
         if oid not in parent_of or (parent_of[oid] is None and p is not None):
             parent_of[oid] = p
     origins = set(parent_of)
-    active = {oid for oid in has_dispatch if oid not in has_finish}
+    active = has_dispatch - has_finish - has_result  # 派出且结果已回=完成；仅结果未回才算在途
+    current = getattr(state.scope, "task_id", None)   # 当前正在跑的 task 不算可折完成单元
     top = {oid for oid, pid in parent_of.items()
-           if oid not in active and (pid is None or pid not in origins)}
+           if oid != current and oid not in active and (pid is None or pid not in origins)}
     return len(top)
 
 
@@ -296,9 +300,14 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
         if oid not in first_ts or r.timestamp < first_ts[oid]:
             first_ts[oid] = r.timestamp
     origins = set(parent_of)
-    active = {oid for oid in has_dispatch if oid not in has_finish}  # 未结束 delegating task
+    # 完成的顶层单元（保留/折叠的对象）= 同 agent 亲做（has_finish）或派给别的 agent 且结果已回
+    # （has_result：有 result/tool 回合）。仅「派出但结果未回」才是真·在途 active，不作可折胶囊。
+    has_result = {r.metadata.get("origin_task_id") for r in recs
+                  if r.role == "tool" and r.metadata.get("origin_task_id") is not None}
+    active = has_dispatch - has_finish - has_result
+    current = getattr(state.scope, "task_id", None)  # 当前正在跑的 task 不折
     top = [oid for oid, pid in parent_of.items()
-           if oid not in active and (pid is None or pid not in origins)]
+           if oid != current and oid not in active and (pid is None or pid not in origins)]
     if len(top) <= keep_last:
         return 0
     top.sort(key=lambda oid: first_ts[oid])
@@ -340,12 +349,19 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     if not fold_top:
         return len(ids)
 
-    # anchor = 仍保留单元（胶囊）的最早 conversation turn ts − 1µs（新摘要须排在所有保留胶囊之前）
+    # anchor = 仍保留单元的最早足迹 ts − 1µs（新摘要须排在所有保留胶囊之前）。足迹 = agent 层
+    # conversation turn **加** task 层胶囊：健康数据里 user 回合与 task 层 user_prompt 同 ts，只看
+    # 回合即够；但存量数据可能 user 回合被折而 task 层 user_prompt 存活（跨层折叠不同步），此时只看
+    # 回合会漏掉更早的胶囊 ts、令摘要排到该胶囊之后。并入 body_recs ts 对健康数据是 no-op、对该
+    # 类 split 令锚点回到最早（防御）。
     surviving = origins - fold_set
     kept_ts: list = []
     for r in recs:
         oid = r.metadata.get("origin_task_id")
         if r.type == MemoryEventType.AGENT_CONVERSATION_TURN and oid in surviving:
+            kept_ts.append(r.timestamp)
+    for r in body_recs:
+        if r.metadata.get("task_id") in surviving:
             kept_ts.append(r.timestamp)
     anchor_ts = (min(kept_ts) if kept_ts else now_utc())
     await memory.ingest(
@@ -410,9 +426,13 @@ async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -
         if oid not in first_ts or r.timestamp < first_ts[oid]:
             first_ts[oid] = r.timestamp
     origins = set(parent_of)
-    active = {oid for oid in has_dispatch if oid not in has_finish}
+    # 与 fold_root_experience 同口径：完成单元 = has_finish 或 has_result（结果已回）；当前 task 除外。
+    has_result = {r.metadata.get("origin_task_id") for r in recs
+                  if r.role == "tool" and r.metadata.get("origin_task_id") is not None}
+    active = has_dispatch - has_finish - has_result
+    current = getattr(state.scope, "task_id", None)
     top = [oid for oid, pid in parent_of.items()
-           if oid not in active and (pid is None or pid not in origins)]
+           if oid != current and oid not in active and (pid is None or pid not in origins)]
     top.sort(key=lambda oid: first_ts[oid])
     return set(top[-keep_last:]) if keep_last > 0 else set()
 

@@ -196,6 +196,28 @@ async def test_fold_root_residues_keep_last_and_subtask_survive() -> None:
     assert any(r.content == "SUM" for r in summ)
 
 
+async def test_fold_retains_delegated_with_result_by_keep_last() -> None:
+    """派给别的 agent 的 root task（dispatch + result 已回）是完成胶囊——按 keep_last 保留/折叠，
+    不再因 has_dispatch 无 finish 被当在途豁免。当前 task 不在其中,故这些单元正常参与 keep_last。"""
+    mem = InMemoryMemoryProvider()
+    sc = _sc("cur")  # 当前 task="cur"，不在被折 origin 集内
+    for i in range(3):  # 3 个完成的派发型 root task D0,D1,D2
+        tc = f"dd{i}"
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, "", 10 * i, role="assistant",
+                             origin_task_id=f"D{i}", parent_task_id=None,
+                             tool_calls=[{"id": tc, "name": "control:delegate_task", "input": {}}]), _ctx())
+        await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, f"res {i}", 10 * i + 1, role="tool",
+                             origin_task_id=f"D{i}", tool_call_id=tc), _ctx())
+    cur = Task(id="cur", session_id="s1", status="ACTIVE", assigned_agent_id="ag1",
+               creator_agent_id="ag1", title="cur", user_prompt="c", settings=NormalTaskSettings())
+    n = await fold_root_experience(_state(cur, LoopConfig()), _loop_ctx(mem, _FakeTM({})),
+                                   keep_last=1, summary_text="SUM")
+    assert n > 0
+    turns = await mem.recall_recent(sc, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+    alive = {r.metadata.get("origin_task_id") for r in turns}
+    assert alive == {"D2"}  # keep_last=1 → 仅最新的派发型完成胶囊保留，D0/D1 折入摘要
+
+
 async def test_fold_paired_dispatch_superseded_no_dangling() -> None:
     """新格式：所有已折胶囊的 AGENT_CONVERSATION_TURN 消失，最新 keep_last=1 的 origin=rt3 保留。"""
     mem = InMemoryMemoryProvider()
@@ -220,6 +242,28 @@ async def test_fold_rolls_old_summary_into_new() -> None:
     summaries = await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx())
     contents = {s.content for s in summaries}
     assert "OLD SUMMARY" not in contents and "NEW" in contents  # rolled into one
+
+
+async def test_fold_anchor_precedes_surviving_body_capsule() -> None:
+    """防御锚点：存活单元的 user 回合被折、task 层 user_prompt 却存活（跨层 split，存量数据）时，
+    新摘要仍锚在该 user_prompt 之前——不只看 agent 回合的最早 ts。"""
+    mem = InMemoryMemoryProvider()
+    sc = _sc("t1")
+    await _seed_root_residues(mem, sc, 3)  # rt0/rt1/rt2 → 老单元被折
+    # 存活单元 rtS：task 层 user_prompt 很早（t=1），但唯一 live 的 agent 回合很晚（t=50）
+    body_scope = MemoryScope(session_id="s1", task_id="rtS", agent_id="ag1")
+    early_up = _ev(T.USER_PROMPT, body_scope, "body rtS", 1, role="user")
+    await mem.ingest(early_up, _ctx())
+    await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, "late turn rtS", 50, role="assistant",
+                         origin_task_id="rtS", parent_task_id=None), _ctx())
+
+    await fold_root_experience(_state(_active_task(), LoopConfig()),
+                               _loop_ctx(mem, _FakeTM({})), keep_last=1, summary_text="SUM")
+    summ = [s for s in await mem.recall_recent(sc, [T.AGENT_COMPACT_SUMMARY], 100, _ctx())
+            if s.content == "SUM"]
+    assert summ, "new summary written"
+    # 锚点须早于存活单元的 task 层胶囊 ts（t=1），否则该胶囊会排到摘要之前
+    assert summ[0].timestamp < early_up.timestamp
 
 
 async def test_fold_at_or_below_keep_last_is_noop() -> None:
@@ -257,6 +301,41 @@ async def test_count_root_residues_excludes_subtask() -> None:
     await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, "sub", 99, role="tool",
                          tool_call_id="sd", parent_task_id="t1"), _ctx())
     assert await _count_root_residues(_state(_active_task(), LoopConfig()), _loop_ctx(mem, _FakeTM({}))) == 3
+
+
+def _delegate_pair(sc, oid: str, t: int, *, with_result: bool):
+    """派发型 root task 的 dispatch 对：delegate assistant 回合（+可选 result tool 回合，同 origin）。"""
+    evs = [_ev(T.AGENT_CONVERSATION_TURN, sc, "", t, role="assistant",
+               origin_task_id=oid, parent_task_id=None,
+               tool_calls=[{"id": f"d_{oid}", "name": "control:delegate_task", "input": {}}])]
+    if with_result:
+        evs.append(_ev(T.AGENT_CONVERSATION_TURN, sc, f"result {oid}", t + 1, role="tool",
+                       origin_task_id=oid, parent_task_id=None, tool_call_id=f"d_{oid}"))
+    return evs
+
+
+async def test_count_root_residues_counts_delegated_with_result() -> None:
+    """派给别的 agent 的 root task：结果已回（result/tool 回合）→ 计入完成；仅 dispatch 无 result → 在途不计。"""
+    mem = InMemoryMemoryProvider()
+    sc = _sc("cur")  # 当前 task="cur"，不在下面 origin 集内
+    for e in _delegate_pair(sc, "P", 0, with_result=True):    # 完成的派发型 root task
+        await mem.ingest(e, _ctx())
+    for e in _delegate_pair(sc, "Q", 5, with_result=False):   # 在途（结果未回）
+        await mem.ingest(e, _ctx())
+    cur = Task(id="cur", session_id="s1", status="ACTIVE", assigned_agent_id="ag1",
+               creator_agent_id="ag1", title="cur", user_prompt="c", settings=NormalTaskSettings())
+    assert await _count_root_residues(_state(cur, LoopConfig()), _loop_ctx(mem, _FakeTM({}))) == 1
+
+
+async def test_count_root_residues_excludes_current_task_even_with_result() -> None:
+    """当前正在跑的 task 即使 dispatch+result 齐全,也不算可折完成单元（当前任务不能折）。"""
+    mem = InMemoryMemoryProvider()
+    sc = _sc("cur")
+    for e in _delegate_pair(sc, "cur", 0, with_result=True):  # origin==当前 task
+        await mem.ingest(e, _ctx())
+    cur = Task(id="cur", session_id="s1", status="ACTIVE", assigned_agent_id="ag1",
+               creator_agent_id="ag1", title="cur", user_prompt="c", settings=NormalTaskSettings())
+    assert await _count_root_residues(_state(cur, LoopConfig()), _loop_ctx(mem, _FakeTM({}))) == 0
 
 
 # ═══════════════════ CompactStep.execute orchestration ═══════════════════
