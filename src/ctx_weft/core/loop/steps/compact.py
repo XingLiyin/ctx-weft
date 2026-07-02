@@ -437,9 +437,17 @@ async def escalating_compact(
     est = token_estimate
     if est < target_tokens:
         return []
-    events: list[Any] = [make_event(state, EventType.MEMORY_COMPACT_STARTED, payload={
+    # MemoryCompactStarted：有 event_bus 时立即 live 发（folds 含 LLM 摘要、耗时数秒；随批次事后发
+    # 会让前端状态条错过整个「压缩中」窗口）。无 bus（单测）时退回塞进返回批次，保持既有契约与用例。
+    started = make_event(state, EventType.MEMORY_COMPACT_STARTED, payload={
         "task_id": state.task.id, "agent_id": agent.id, "trigger": trigger,
-        "token_estimate": est, "target_tokens": target_tokens})]
+        "token_estimate": est, "target_tokens": target_tokens})
+    bus = getattr(ctx, "event_bus", None)
+    events: list[Any] = []
+    if bus is not None:
+        await bus.emit(started)
+    else:
+        events.append(started)
 
     def _finish(evts: list[Any]) -> list[Any]:
         """收尾：聚合本轮各级 MemoryCompacted，追加一条 MemoryCompactFinished。"""

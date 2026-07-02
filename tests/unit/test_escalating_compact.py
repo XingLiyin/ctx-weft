@@ -107,6 +107,30 @@ async def test_finished_emitted_when_nothing_folded(monkeypatch):
     assert events[-1].payload["levels"] == []
 
 
+async def test_started_emitted_live_via_bus(monkeypatch):
+    # 有 event_bus 时：Started 立即 live 发（进 bus），不出现在返回批次；Finished 仍在返回批次。
+    seq = iter([900, 500])
+    monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
+    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
+    monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
+    monkeypatch.setattr(cm, "fold_root_experience", lambda s, c, k, t: 5)
+
+    emitted = []
+    class _Bus:
+        async def emit(self, ev):
+            emitted.append(ev)
+    ctx = SimpleNamespace(memory=None, provider_ctx=None, event_bus=_Bus())
+
+    events = await cm.escalating_compact(_state(), ctx, token_estimate=900, trigger="compact")
+
+    # live-emitted Started reached the bus
+    assert [e.type for e in emitted] == ["MemoryCompactStarted"]
+    # returned batch has NO Started, but ends with Finished
+    returned_types = [e.type for e in events]
+    assert "MemoryCompactStarted" not in returned_types
+    assert returned_types[-1] == "MemoryCompactFinished"
+
+
 # 测试辅助：把常量/序列包装成 awaitable
 async def _const(v):
     return v
