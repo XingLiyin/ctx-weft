@@ -117,10 +117,10 @@ async def test_skips_when_below_threshold():
 async def test_skips_when_nothing_foldable():
     """escalating_compact 到达 L3（无 root residue 可折,L1/L2 均跳过）仍会试摘要 + 坍缩,
     但 task_count=2 <= keep_last=2 时 collapse_task_layer 内部判定无可折,不摸任何记录
-    （STARTED 事件仍可能发出——预算门本身已过,只是最终无 MemoryCompacted）。"""
+    （STARTED 事件仍可能发出——预算门本身已过,只是最终无 MemoryCompacted，收尾仍发 Finished）。"""
     mem = _FakeMemory(task_count=2)  # <= keep_last=2 → collapse 内部 noop
     out = await maybe_compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=800)
-    assert [e.type for e in out] == ["MemoryCompactStarted"]  # 无 MemoryCompacted
+    assert [e.type for e in out] == ["MemoryCompactStarted", "MemoryCompactFinished"]  # 无 MemoryCompacted
     assert mem.ingested == []
     assert mem.superseded == []
 
@@ -132,9 +132,9 @@ async def test_compacts_task_layer_once_when_over_threshold_and_foldable():
     assert len(mem.ingested) == 1
     assert mem.ingested[0].metadata.get("collapsed") is True
     assert "SUMMARY" in mem.ingested[0].content
-    # 发 started + compacted，均标 pre_dispatch
-    assert [e.type for e in out] == ["MemoryCompactStarted", "MemoryCompacted"]
-    assert [e.payload.get("trigger") for e in out] == ["pre_dispatch", "pre_dispatch"]
+    # 发 started + compacted + finished（收尾聚合），均标 pre_dispatch
+    assert [e.type for e in out] == ["MemoryCompactStarted", "MemoryCompacted", "MemoryCompactFinished"]
+    assert [e.payload.get("trigger") for e in out] == ["pre_dispatch", "pre_dispatch", "pre_dispatch"]
     assert out[1].payload["layer"] == "task"
     assert out[1].payload["superseded_count"] == 8  # 10 - collapse_keep_last(2)
 
@@ -146,7 +146,7 @@ async def test_falls_back_to_loop_guard_tokens_when_prompt_tokens_zero():
     # fallback to context_tokens=800 triggers compact → collapsed USER_PROMPT ingested
     assert len(mem.ingested) == 1
     assert mem.ingested[0].metadata.get("collapsed") is True
-    assert len(out) == 2
+    assert len(out) == 3  # started + compacted + finished（收尾聚合）
 
 
 async def test_skips_when_no_context_limit():

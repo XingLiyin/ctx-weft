@@ -61,6 +61,52 @@ async def test_noop_when_no_context_limit(monkeypatch):
     assert events == []
 
 
+async def test_finished_event_aggregates(monkeypatch):
+    # L1 折 5 条、活跃 token 900→500（freed=400）→ 达标即停
+    seq = iter([900, 500])
+    monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
+    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
+    monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
+    monkeypatch.setattr(cm, "fold_root_experience", lambda s, c, k, t: 5)
+
+    events = await cm.escalating_compact(
+        _state(), SimpleNamespace(memory=None, provider_ctx=None),
+        token_estimate=900, trigger="compact")
+
+    types = [e.type for e in events]
+    assert types[0] == "MemoryCompactStarted"
+    assert types[-1] == "MemoryCompactFinished"
+    fin = events[-1].payload
+    assert fin["total_superseded"] == 5
+    assert fin["freed_tokens"] == 400
+    assert fin["levels"] == ["root_experience"]
+    assert fin["est_before"] == 900 and fin["target_tokens"] == 600
+
+
+async def test_no_started_no_finished_when_under_target():
+    # est 500 < target 600 → 顶部早退，无 Started/Finished
+    events = await cm.escalating_compact(
+        _state(), SimpleNamespace(memory=None, provider_ctx=None),
+        token_estimate=500, trigger="compact")
+    assert events == []
+
+
+async def test_finished_emitted_when_nothing_folded(monkeypatch):
+    # est 达标但各级 guard 全跳过 → 仍发 Started+Finished，total_superseded=0
+    monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _const(900))
+    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(0))       # L1 guard fail
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const(set())) # L2 no kept
+    memory = SimpleNamespace(count_recent=lambda scope, types, ctx: _const(0))    # L3 no material
+
+    events = await cm.escalating_compact(
+        _state(), SimpleNamespace(memory=memory, provider_ctx=None),
+        token_estimate=900, trigger="compact")
+
+    assert [e.type for e in events] == ["MemoryCompactStarted", "MemoryCompactFinished"]
+    assert events[-1].payload["total_superseded"] == 0
+    assert events[-1].payload["levels"] == []
+
+
 # 测试辅助：把常量/序列包装成 awaitable
 async def _const(v):
     return v
