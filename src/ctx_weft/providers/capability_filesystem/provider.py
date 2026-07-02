@@ -63,7 +63,7 @@ tool, _FS_TOOLS, _FS_IMPLS = make_tool_registry(FS_PROVIDER_NAME)
 # ── 共享常量 ──────────────────────────────────────────────────────────────────
 
 _BASH_IDLE_TIMEOUT_SEC_DEFAULT = 30
-_BASH_HARD_CAP_SEC_DEFAULT = 120
+_BASH_HARD_CAP_SEC_DEFAULT = 3600
 _BASH_MAX_OUTPUT_BYTES_DEFAULT = 50_000
 _FILE_READ_DEFAULT_LINES = 500
 _FILE_READ_MAX_BYTES = 20_480
@@ -548,7 +548,7 @@ class FilesystemConfig:
     """Provider 运行时配置。权限控制由 auth 层负责，不在此处理。"""
     allowed_dirs: list[Path] = field(default_factory=list)
     bash_idle_timeout_sec: int = 30
-    bash_hard_cap_sec: int = 120
+    bash_hard_cap_sec: int = 3600
     bash_max_output_bytes: int = 50_000
     bash_auto_venv: bool = True
     bash_venv_dir: str = ".venv"
