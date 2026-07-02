@@ -437,9 +437,28 @@ async def escalating_compact(
     est = token_estimate
     if est < target_tokens:
         return []
-    events: list[Any] = [make_event(state, EventType.MEMORY_COMPACT_STARTED, payload={
+    # MemoryCompactStarted：有 event_bus 时立即 live 发（folds 含 LLM 摘要、耗时数秒；随批次事后发
+    # 会让前端状态条错过整个「压缩中」窗口）。无 bus（单测）时退回塞进返回批次，保持既有契约与用例。
+    started = make_event(state, EventType.MEMORY_COMPACT_STARTED, payload={
         "task_id": state.task.id, "agent_id": agent.id, "trigger": trigger,
-        "token_estimate": est, "target_tokens": target_tokens})]
+        "token_estimate": est, "target_tokens": target_tokens})
+    bus = getattr(ctx, "event_bus", None)
+    events: list[Any] = []
+    if bus is not None:
+        await bus.emit(started)
+    else:
+        events.append(started)
+
+    def _finish(evts: list[Any]) -> list[Any]:
+        """收尾：聚合本轮各级 MemoryCompacted，追加一条 MemoryCompactFinished。"""
+        folded = [e for e in evts if e.type == EventType.MEMORY_COMPACTED]
+        evts.append(make_event(state, EventType.MEMORY_COMPACT_FINISHED, payload={
+            "task_id": state.task.id, "agent_id": agent.id, "trigger": trigger,
+            "total_superseded": sum(e.payload.get("superseded_count", 0) for e in folded),
+            "freed_tokens": sum(e.payload.get("freed_tokens", 0) for e in folded),
+            "levels": [e.payload.get("source", "") for e in folded],
+            "est_before": token_estimate, "est_after": est, "target_tokens": target_tokens}))
+        return evts
 
     last_tokens: int | None = None
 
@@ -467,7 +486,7 @@ async def escalating_compact(
                 "superseded_count": n, "layer": "agent", "source": "root_experience",
                 "trigger": trigger, "freed_tokens": freed}))
     if est < target_tokens:
-        return events
+        return _finish(events)
 
     # L2 · 保留的同 agent rich 胶囊降级 lean（无 LLM）
     kept = await _kept_origin_ids(state, ctx, keep_last)
@@ -478,7 +497,7 @@ async def escalating_compact(
                 "superseded_count": n, "layer": "agent", "source": "demote_lean",
                 "trigger": trigger, "freed_tokens": freed}))
     if est < target_tokens:
-        return events
+        return _finish(events)
 
     # L3 · 坍缩当前 task（段摘要坍成更少，保 collapse_keep 条；仅当有 task 层材料可折）
     # 计数须用 _TASK_LAYER_TYPES（含 TASK_COMPACT_SUMMARY）——与 collapse_task_layer 实际所折
@@ -494,7 +513,7 @@ async def escalating_compact(
                 "trigger": trigger, "freed_tokens": freed}))
     logger.info("escalating_compact[%s]: agent=%s task=%s est→%d target=%d",
                 trigger, agent.id, state.task.id, est, target_tokens)
-    return events
+    return _finish(events)
 
 
 class CompactStep(Step):

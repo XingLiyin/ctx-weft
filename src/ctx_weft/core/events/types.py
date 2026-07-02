@@ -118,6 +118,7 @@ class EventType(StrEnum):
     COMPACT_DISPATCHED = "CompactDispatched"
     MEMORY_COMPACT_STARTED = "MemoryCompactStarted"
     MEMORY_COMPACTED = "MemoryCompacted"
+    MEMORY_COMPACT_FINISHED = "MemoryCompactFinished"   # 一轮压缩收尾聚合（总折叠数/省 token/各级），供前端落一条持久标记
     MEMORY_COMPACT_FAILED_FALLBACK = "MemoryCompactFailedFallback"
     BLACKBOARD_SUBSCRIBED = "BlackboardSubscribed"
     # ── HITL 域 ──
