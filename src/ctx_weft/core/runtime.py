@@ -14,6 +14,7 @@ from typing import Any
 
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken
+from ctx_weft.core.errors import ContextOverflowError
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager, HitlRequest  # noqa: F401 — re-exported for shell use
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.assembler import (
@@ -1394,6 +1395,20 @@ class CtxWeftRuntime:
                 task.status = "SUSPENDED"
             logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
             await self._emit_session_interrupted(state.session.id, reason="llm_outage")
+        except ContextOverflowError as exc:
+            # 非瞬时：resume 会重装配同批 block 再溢出 → 终态 FAILED，不 SUSPEND、不 interrupted。
+            # 走标准 FAILED 计数（复用 finally / _handle_task_failure），仅定制 error_code 与文案。
+            msg = (
+                f"上下文超出模型可用窗口：保护槽位（角色设定 + 当前任务/消息）约 {exc.required} tokens，"
+                f"已超过为输出预留后的可用窗口 effective_limit={exc.effective_limit}"
+                f"（= 模型窗口 {exc.context_limit} − 输出预留 {exc.reserved_output_tokens}）。"
+                "请改用更大上下文窗口的模型，或缩短当前消息 / 任务描述。"
+            )
+            run_error = exc
+            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
+                task.status = "FAILED"
+                task.error = msg
+            logger.warning("_run_loop: task %s context overflow: %s", task.id, msg)
         except Exception as exc:
             run_error = exc
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
