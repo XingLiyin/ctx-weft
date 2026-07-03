@@ -21,6 +21,7 @@ def session_from_projection(proj: SessionView) -> Session:
         root_agent_id=proj.root_agent_id or None,
         token_budget=proj.token_budget,
         context_limit=proj.context_limit,
+        reserved_output_tokens=getattr(proj, "reserved_output_tokens", 8192),
         failure_counter=proj.failure_counter,
         llm_provider=proj.llm_account or None,
         llm_model=proj.llm_model or None,

@@ -25,6 +25,7 @@ class SessionView:
     tenant_id: str = "default"
     token_budget: int = 200_000
     context_limit: int = 180_000
+    reserved_output_tokens: int = 8192
     failure_counter: int = 0
     created_at: datetime | None = None
 

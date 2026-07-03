@@ -125,6 +125,7 @@ class LoopGuard:
     context_tokens: int = 0
     context_message_count: int = 0
     context_limit: int = 180_000
+    reserved_output_tokens: int = 8192
 
 
 # ── Session ───────────────────────────────────────────────────────────────────
@@ -144,6 +145,7 @@ class Session:
     token_budget: int = 200_000
     token_used: int = 0
     context_limit: int = 180_000
+    reserved_output_tokens: int = 8192
     max_concurrent_tasks: int = 8
     max_concurrent_agents: int = 4
     failure_counter: int = 0

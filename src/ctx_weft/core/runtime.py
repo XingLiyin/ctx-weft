@@ -320,6 +320,7 @@ class SessionStartParams:
     llm_account: str | None = None
     llm_model: str | None = None
     token_budget: int = 200_000
+    reserved_output_tokens: int = 8192
     resume: bool = False
 
     @classmethod
@@ -335,6 +336,7 @@ class SessionStartParams:
         llm_account: str | None = None,
         llm_model: str | None = None,
         token_budget: int = 200_000,
+        reserved_output_tokens: int = 8192,
         resume: bool = False,
     ) -> "SessionStartParams":
         from ctx_weft.core.state.models import deserialize_settings
@@ -348,6 +350,7 @@ class SessionStartParams:
             llm_account=llm_account,
             llm_model=llm_model,
             token_budget=token_budget,
+            reserved_output_tokens=reserved_output_tokens,
             resume=resume,
         )
 
@@ -553,7 +556,11 @@ class CtxWeftRuntime:
             created_at=now_utc(),
         )
         session.context_limit = llm.context_limit
-        agent = _dc.replace(agent, loop_guard=LoopGuard(context_limit=session.context_limit))
+        session.reserved_output_tokens = llm.max_output_tokens
+        agent = _dc.replace(agent, loop_guard=LoopGuard(
+            context_limit=session.context_limit,
+            reserved_output_tokens=session.reserved_output_tokens,
+        ))
         task = Task(
             id=generate_id("tsk"),
             session_id=sid,
@@ -628,6 +635,7 @@ class CtxWeftRuntime:
                 session_id=params.session_id,
                 context_limit=params.context_limit,
                 token_budget=params.token_budget,
+                reserved_output_tokens=params.reserved_output_tokens,
             )
         else:
             session, root_task, task_manager = await sm.resume_session(
@@ -765,7 +773,10 @@ class CtxWeftRuntime:
                 template_version=template.version,
                 status="RUNNING",
                 tenant_id=tenant_id,
-                loop_guard=LoopGuard(context_limit=session.context_limit),
+                loop_guard=LoopGuard(
+                    context_limit=session.context_limit,
+                    reserved_output_tokens=session.reserved_output_tokens,
+                ),
                 memory_config=template.memory_config,
                 loop_config=template.loop_config,
                 created_at=now_utc(),
@@ -796,7 +807,10 @@ class CtxWeftRuntime:
                         parent_agent=parent_agent, ctx=ctx,
                         existing_agent_id=t.assigned_agent_id or None,
                     )
-                    agent = _dc.replace(agent, loop_guard=LoopGuard(context_limit=session.context_limit))
+                    agent = _dc.replace(agent, loop_guard=LoopGuard(
+                        context_limit=session.context_limit,
+                        reserved_output_tokens=session.reserved_output_tokens,
+                    ))
                     t.assigned_agent_id = agent.id
                     await _flush_tracking_memory(agent, t, task_manager, memory, sess_id, tenant_id)
                     if s.inherit_memory and t.parent_task_id and not t.user_prompt_in_memory:
@@ -1023,6 +1037,7 @@ class CtxWeftRuntime:
                 loop_guard=LoopGuard(
                     context_limit=session.context_limit,
                     context_tokens=session.context_limit,
+                    reserved_output_tokens=session.reserved_output_tokens,
                 ),
                 runtime={"llm_model": session.llm_model or ""},
             )

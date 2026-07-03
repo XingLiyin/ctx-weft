@@ -37,6 +37,7 @@ class SessionManager:
         llm_model: str | None = None,
         llm_account: str | None = None,
         token_budget: int = 200_000,
+        reserved_output_tokens: int = 8192,
         session_id: str | None = None,
         initial_task_settings: NormalTaskSettings | None = None,
     ) -> tuple[Session, Task, TaskManager]:
@@ -56,6 +57,7 @@ class SessionManager:
             root_agent_id=agent.id,
             llm_provider=llm_account or "",
             context_limit=context_limit,
+            reserved_output_tokens=reserved_output_tokens,
             created_at=now_utc(),
         )
         logger.info("Session %s created (template=%s, agent=%s)", sid, template_id, agent.id)
@@ -74,6 +76,7 @@ class SessionManager:
             "tenant_id": tenant_id,
             "token_budget": token_budget,
             "context_limit": context_limit,
+            "reserved_output_tokens": reserved_output_tokens,
         })
         await self._emit(EventType.AGENT_INSTANTIATED, sid, tenant_id, timestamp=ts, agent_id=agent.id, payload={
             "template_id": template.id,
@@ -112,6 +115,7 @@ class SessionManager:
             root_agent_id=sess_proj.root_agent_id,
             llm_provider=llm_account or "",
             context_limit=sess_proj.context_limit,
+            reserved_output_tokens=getattr(sess_proj, "reserved_output_tokens", 8192),
             created_at=now_utc(),
         )
         root_task, task_manager = await self._make_root_task_manager(session, user_prompt, initial_task_settings)

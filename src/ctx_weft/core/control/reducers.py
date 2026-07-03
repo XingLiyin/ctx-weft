@@ -94,6 +94,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "tenant_id": s.tenant_id,
                 "token_budget": s.token_budget,
                 "context_limit": s.context_limit,
+                "reserved_output_tokens": s.reserved_output_tokens,
                 "failure_counter": s.failure_counter,
                 "created_at": _dt(s.created_at),
             }
@@ -163,6 +164,7 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             tenant_id=s.get("tenant_id", "default"),
             token_budget=s.get("token_budget", 200_000),
             context_limit=s.get("context_limit", 180_000),
+            reserved_output_tokens=s.get("reserved_output_tokens", 8192),
             failure_counter=s.get("failure_counter", 0),
             created_at=_dt(s.get("created_at")),
         )
@@ -335,6 +337,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
             tenant_id=p.get("tenant_id", ev.tenant_id),
             token_budget=p.get("token_budget", 200_000),
             context_limit=p.get("context_limit", 180_000),
+            reserved_output_tokens=p.get("reserved_output_tokens", 8192),
             status="RUNNING",
             created_at=ev.timestamp,
         )
