@@ -25,7 +25,7 @@ from ctx_weft.core.orchestrator.control_capability import (
     WAIT_FOR_USER_CAPABILITY_ID,
 )
 from ctx_weft.core.state.models import NormalTaskSettings
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.utils import effective_limit, now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryEventType
 
 logger = logging.getLogger(__name__)
@@ -294,10 +294,12 @@ async def _account_tokens(state: LoopState, ctx: LoopContext, usage: LLMUsage) -
     state.session.token_used += usage.prompt_tokens + usage.completion_tokens
 
     context_limit = agent.loop_guard.context_limit
+    reserve = getattr(agent.loop_guard, "reserved_output_tokens", 0)
+    eff = effective_limit(context_limit, reserve)
     return (
-        context_limit > 0
+        eff > 0
         and usage.prompt_tokens > 0
-        and usage.prompt_tokens >= int(context_limit * 0.8)
+        and usage.prompt_tokens >= int(eff * 0.8)
     )
 
 

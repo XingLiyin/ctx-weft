@@ -76,6 +76,10 @@ def _agent(cfg: LoopConfig, context_limit: int = 1000) -> Agent:
     a = Agent(id="ag1", session_id="s1", template_id="tpl", template_version="1",
               status="RUNNING", loop_config=cfg)
     a.loop_guard.context_limit = context_limit
+    # 本文件用小尺度 context_limit（如 1000）模拟 token 预算比率，与真实 reserved_output_tokens
+    # 默认值 8192 不在同一量纲（会把 effective_limit 吞成 0）；清零以保留 eff == context_limit
+    # 的既有测试口径（Task 8：compact 触发/目标改用 effective_limit 后需要此项显式对齐）。
+    a.loop_guard.reserved_output_tokens = 0
     return a
 
 

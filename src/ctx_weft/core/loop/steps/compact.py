@@ -25,7 +25,7 @@ from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
 from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
-from ctx_weft.core.utils import content_to_text, now_utc, estimate_tokens
+from ctx_weft.core.utils import content_to_text, effective_limit, now_utc, estimate_tokens
 from ctx_weft.protocols import LLMRequest, MemoryEvent, MemoryEventType
 
 logger = logging.getLogger(__name__)
@@ -168,10 +168,12 @@ async def maybe_compact_before_dispatch(
     if ratio <= 0:
         return []
     context_limit = agent.loop_guard.context_limit
+    reserve = getattr(agent.loop_guard, "reserved_output_tokens", 0)
+    eff = effective_limit(context_limit, reserve)
     tokens = prompt_tokens or agent.loop_guard.context_tokens
-    if context_limit <= 0 or tokens <= 0:
+    if eff <= 0 or tokens <= 0:
         return []
-    if tokens / context_limit < ratio:
+    if tokens / eff < ratio:
         return []
     return await escalating_compact(state, ctx, token_estimate=tokens, trigger="pre_dispatch")
 
@@ -446,11 +448,13 @@ async def escalating_compact(
     agent = state.agent
     lc = agent.loop_config
     context_limit = agent.loop_guard.context_limit
-    if context_limit <= 0:
+    reserve = getattr(agent.loop_guard, "reserved_output_tokens", 0)
+    eff = effective_limit(context_limit, reserve)
+    if eff <= 0:
         return []
     target_ratio = lc.compact_target_ratio if getattr(lc, "compact_target_ratio", 0.0) > 0 \
         else lc.compact_token_ratio
-    target_tokens = int(context_limit * target_ratio)
+    target_tokens = int(eff * target_ratio)
     keep_last = lc.compact_keep_last
     collapse_keep = getattr(lc, "collapse_keep_last", keep_last)
 

@@ -112,7 +112,9 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
                       created_at=now_utc())
     session.context_limit = llm.context_limit
     session.reserved_output_tokens = llm.max_output_tokens
-    agent = _dc.replace(agent, loop_guard=LoopGuard(context_limit=session.context_limit))
+    agent = _dc.replace(agent, loop_guard=LoopGuard(
+        context_limit=session.context_limit,
+        reserved_output_tokens=session.reserved_output_tokens))
     task = Task(id="tsk_mr", session_id=sid, status="ACTIVE", tenant_id="default",
                 assigned_agent_id=agent.id, creator_agent_id=agent.id, title="User Request",
                 description="do a long task", user_prompt="do a long task", created_at=now_utc())
