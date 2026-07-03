@@ -13,7 +13,40 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from ctx_weft.protocols.llm import RAW_ARGS_KEY
+
 logger = logging.getLogger(__name__)
+
+
+def unwrap_raw_arguments(args: dict) -> dict:
+    """把 ``{"_raw": "<json>"}`` 兜底哨兵解包回真实参数（内层是合法 JSON 对象时）。
+
+    ``_raw`` 是 adapter 对「native 工具参数没解析成 JSON」的兜底键（见 ``_parse_buffers`` /
+    ``_parse_tool_blocks``）。两种来源都应还原：
+
+      1. 兜底原文其实合法（罕见的流式拼接抖动）——救回来直接能用；
+      2. **模型把 ``_raw`` 误当参数名照抄** ``{"_raw": "<合法json>"}``——一旦回灌历史里出现过
+         ``_raw``（前一次真畸形被兜底），模型就会模仿它，反复把参数包进 ``_raw``、gateway 反复
+         报「必填项缺失」，自我强化成死循环。解包即斩断这个环。
+
+    内层无法解析成 dict（真畸形 / 非对象）→ **原样返回同一对象**（``is`` 不变），交 gateway 报错。
+    最多解 3 层，防病态嵌套 ``_raw``。
+    """
+    for _ in range(3):
+        if not (
+            isinstance(args, dict)
+            and list(args) == [RAW_ARGS_KEY]
+            and isinstance(args[RAW_ARGS_KEY], str)
+        ):
+            return args
+        try:
+            inner = json.loads(args[RAW_ARGS_KEY])
+        except (json.JSONDecodeError, TypeError):
+            return args
+        if not isinstance(inner, dict):
+            return args
+        args = inner
+    return args
 
 THINK_START = "<think>"
 THINK_END = "</think>"

@@ -9,6 +9,7 @@ from ctx_weft.providers.llm.text_calls import (
     parse_minimax_tool_calls,
     parse_tool_calls_from_text,
     extract_think,
+    unwrap_raw_arguments,
 )
 
 
@@ -220,3 +221,46 @@ def test_content_gate_withholds_then_releases_after_think():
     assert g.feed("a<think>b") == "a"
     assert g.feed("a<think>b</think>c") == "c"
     assert g.emitted_len == 2
+
+
+# ── unwrap_raw_arguments (_raw 兜底哨兵解包 / doom-loop 修复) ────────────────────
+
+
+def test_unwrap_raw_promotes_valid_inner_json():
+    # 模型把 `_raw` 误当参数名照抄 {"_raw": "<合法json>"} → 解包回真实参数。
+    args = {"_raw": '{"questions": [{"question": "q?"}]}'}
+    assert unwrap_raw_arguments(args) == {"questions": [{"question": "q?"}]}
+
+
+def test_unwrap_raw_leaves_unparseable_untouched_same_object():
+    # 真畸形（缺逗号）→ 原样返回同一对象，交 gateway 报错。
+    args = {"_raw": '{"questions": [{"question": "q?" "x": 1}]}'}
+    assert unwrap_raw_arguments(args) is args
+
+
+def test_unwrap_raw_leaves_non_wrapper_same_object():
+    # 正常参数（无 _raw）→ 同一对象返回，保证 finalize 处的身份不变（无谓 replace）。
+    args = {"questions": [{"question": "q?"}]}
+    assert unwrap_raw_arguments(args) is args
+
+
+def test_unwrap_raw_ignores_extra_keys():
+    # 有 _raw 但不是「唯一键」→ 不动（顶层已带真参，不该解包覆盖）。
+    args = {"_raw": "{}", "questions": []}
+    assert unwrap_raw_arguments(args) is args
+
+
+def test_unwrap_raw_ignores_non_string_value():
+    args = {"_raw": {"already": "dict"}}
+    assert unwrap_raw_arguments(args) is args
+
+
+def test_unwrap_raw_inner_not_object_left_untouched():
+    # 内层是合法 JSON 但不是对象（数组/标量）→ 不解包（工具参数必须是对象）。
+    args = {"_raw": "[1, 2, 3]"}
+    assert unwrap_raw_arguments(args) is args
+
+
+def test_unwrap_raw_handles_double_wrap():
+    args = {"_raw": '{"_raw": "{\\"questions\\": []}"}'}
+    assert unwrap_raw_arguments(args) == {"questions": []}

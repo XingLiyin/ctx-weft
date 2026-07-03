@@ -15,7 +15,8 @@ from typing import Any
 import httpx
 
 from ctx_weft.protocols import (
-    LLMCallError, LLMChunk, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall, LLMClient,
+    LLMCallError, LLMChunk, LLMMessage, LLMRequest, LLMTool, LLMUsage, RAW_ARGS_KEY, ToolCall,
+    LLMClient,
 )
 from ctx_weft.core.utils import estimate_tokens
 from ctx_weft.providers.llm._finalize import build_finalize_chunks
@@ -285,9 +286,21 @@ def _parse_buffers(buffers: dict[int, dict[str, Any]]) -> list[ToolCall]:
         try:
             args = json.loads(buf["arguments"]) if buf["arguments"] else {}
         except json.JSONDecodeError:
-            args = {"_raw": buf["arguments"]}
+            args = {RAW_ARGS_KEY: buf["arguments"]}
         calls.append(ToolCall(id=buf["id"], name=buf["name"], arguments=args))
     return calls
+
+
+def _dump_tool_arguments(args: Any) -> str:
+    """把 assistant tool_call 的参数序列化回给模型（OpenAI 要求 arguments 为字符串）。
+
+    兜底 ``{"_raw": <原文>}``（真畸形、finalize 没能解包）→ **回吐模型原始文本**，绝不把 ``_raw``
+    哨兵当参数名喂回去，否则模型会照抄 ``_raw``、陷入死循环（可解析的 _raw 已在 finalize 解包，
+    走不到这）。
+    """
+    if isinstance(args, dict) and list(args) == [RAW_ARGS_KEY] and isinstance(args[RAW_ARGS_KEY], str):
+        return args[RAW_ARGS_KEY]
+    return json.dumps(args)
 
 
 def _serialize_messages(
@@ -306,7 +319,7 @@ def _serialize_messages(
                     "type": "function",
                     "function": {
                         "name": tc.get("name", ""),
-                        "arguments": json.dumps(tc.get("arguments", tc.get("input", {}))),
+                        "arguments": _dump_tool_arguments(tc.get("arguments", tc.get("input", {}))),
                     },
                 }
                 for tc in (m.tool_calls or [])

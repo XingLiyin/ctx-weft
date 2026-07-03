@@ -15,12 +15,15 @@ from typing import Any
 import httpx
 
 from ctx_weft.protocols import (
-    LLMCallError, LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall,
+    LLMCallError, LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, RAW_ARGS_KEY,
+    ToolCall,
 )
 from ctx_weft.core.utils import estimate_tokens
 from ctx_weft.providers.llm._finalize import build_finalize_chunks
 from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
-from ctx_weft.providers.llm.text_calls import ContentGate, merge_content as _merge_content
+from ctx_weft.providers.llm.text_calls import (
+    ContentGate, merge_content as _merge_content, unwrap_raw_arguments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +291,7 @@ def _parse_tool_blocks(blocks: dict[int, dict[str, Any]]) -> list[ToolCall]:
         try:
             args = json.loads(tb["arguments"]) if tb["arguments"] else {}
         except json.JSONDecodeError:
-            args = {"_raw": tb["arguments"]}
+            args = {RAW_ARGS_KEY: tb["arguments"]}
         calls.append(ToolCall(id=tb["id"], name=tb["name"], arguments=args))
     return calls
 
@@ -311,7 +314,9 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                     "type": "tool_use",
                     "id": tc.get("id", ""),
                     "name": tc.get("name", ""),
-                    "input": tc.get("input", tc.get("arguments", {})),
+                    # 兜底 {"_raw": ...} 解包回真实参数（Anthropic 的 input 必须是对象，无法像
+                    # OpenAI 那样回吐原始文本）；真畸形无法解包时保持原样，交 gateway 报错。
+                    "input": unwrap_raw_arguments(tc.get("input", tc.get("arguments", {}))),
                 })
             result.append({"role": "assistant", "content": content_blocks or text})
             i += 1

@@ -9,6 +9,7 @@ adapter 各自把 native 缓冲解析成 ``list[ToolCall]`` 后调本函数，�
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 from ctx_weft.protocols import LLMCallError, LLMChunk, LLMUsage, ToolCall
@@ -20,9 +21,20 @@ from ctx_weft.providers.llm.text_calls import (
     extract_think,
     parse_minimax_tool_calls,
     parse_tool_calls_from_text,
+    unwrap_raw_arguments,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _unwrap_tc(tc: ToolCall) -> ToolCall:
+    """解包 tool call 的 ``{"_raw": ...}`` 兜底哨兵（见 unwrap_raw_arguments）。
+
+    参数没变时原样返回（保 ``is`` 身份，不做无谓 replace）。这是所有 native/文本 tool call
+    汇入的收尾口，在此解包能保证下游（gateway 执行、memory 落库、回灌历史）都拿到干净参数。
+    """
+    new_args = unwrap_raw_arguments(tc.arguments)
+    return tc if new_args is tc.arguments else dataclasses.replace(tc, arguments=new_args)
 
 
 def build_finalize_chunks(
@@ -76,7 +88,7 @@ def build_finalize_chunks(
         out.append(LLMChunk(kind="usage", usage=usage, finish_reason=finish_reason or "stop"))
 
     if native_tool_calls:
-        out.extend(LLMChunk(kind="tool_call", tool_call=tc) for tc in native_tool_calls)
+        out.extend(LLMChunk(kind="tool_call", tool_call=_unwrap_tc(tc)) for tc in native_tool_calls)
     elif contains_tool_call_tag(content_text):
         # D2：正文里出现了 tool call 标签,但一个都没解析出来（截断的未闭合标签 /
         # 畸形 JSON/XML / 缺 name）。若放行,上层会把这轮当「纯文本让位用户」误暂停,
@@ -94,7 +106,10 @@ def build_finalize_chunks(
         out.extend(
             LLMChunk(
                 kind="tool_call",
-                tool_call=ToolCall(id=generate_id("call"), name=p.name, arguments=p.arguments),
+                tool_call=ToolCall(
+                    id=generate_id("call"), name=p.name,
+                    arguments=unwrap_raw_arguments(p.arguments),
+                ),
             )
             for p in parsed
         )
@@ -113,7 +128,10 @@ def build_finalize_chunks(
         for p in parsed:
             out.append(LLMChunk(
                 kind="tool_call",
-                tool_call=ToolCall(id=generate_id("call"), name=p.name, arguments=p.arguments),
+                tool_call=ToolCall(
+                    id=generate_id("call"), name=p.name,
+                    arguments=unwrap_raw_arguments(p.arguments),
+                ),
             ))
 
     out.append(LLMChunk(kind="done", finish_reason=finish_reason or "stop"))

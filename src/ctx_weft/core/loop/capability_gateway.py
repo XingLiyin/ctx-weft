@@ -28,6 +28,7 @@ from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.capability import CapabilityProvider, ToolCapabilityProvider, qualify
+from ctx_weft.protocols.llm import RAW_ARGS_KEY
 from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL, _PLAN_DISPATCH_ACK
 from ctx_weft.protocols.filesystem import SpillSink
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType, MemoryProvider, MemoryScope
@@ -168,6 +169,16 @@ class CapabilityGateway:
         schema = getattr(cap, "input_schema", None)
         effective_args = decision.modified_arguments if decision.modified_arguments is not None else arguments
         effective_args = _coerce_args(effective_args, schema)
+        # 兜底 {"_raw": <无法解析文本>}：adapter 对「参数没解析成 JSON」的哨兵（可解析的已在
+        # finalize 解包）。给直白报错，别让 _validate_args 报误导性的「必填项缺失」——那会诱导
+        # 模型把参数照抄进 _raw、陷入死循环（见 protocols.llm.RAW_ARGS_KEY）。
+        if list(effective_args) == [RAW_ARGS_KEY]:
+            return await self._error_and_record(
+                state, ctx, tool_name, invocation_id,
+                f"[Error: invalid arguments for '{tool_name}': arguments were not valid JSON "
+                f"and could not be parsed; re-send the call with a well-formed JSON arguments object]",
+                is_dispatch, is_silent, tool_call_id,
+            )
         # 参数校验：放在 coerce 之后，看到的是收敛后的类型（3 而非 "3"），不会假阳性。
         # 只拦 required/type/enum（见 _validate_args），失败回灌 LLM 让其改参重试，与 unknown-tool 同出口。
         err = _validate_args(effective_args, schema)

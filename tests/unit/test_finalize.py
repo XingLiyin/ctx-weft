@@ -199,3 +199,44 @@ def test_native_tool_calls_take_precedence_over_text():
     )
     names = [c.tool_call.name for c in chunks if c.kind == "tool_call"]
     assert names == ["native"]
+
+
+def test_native_raw_wrapper_is_unwrapped():
+    # 模型把 `_raw` 当参数名照抄 {"_raw": "<合法json>"}（adapter json.loads 成功、原样透传）
+    # → finalize 解包回真实参数，否则 gateway 会误报 "questions 缺失" 并陷入死循环。
+    tc = ToolCall(id="t1", name="control__ask_user",
+                  arguments={"_raw": '{"questions": [{"question": "q?"}]}'})
+    chunks = build_finalize_chunks(
+        content_text="",
+        native_tool_calls=[tc],
+        had_native_buffer=True,
+        saw_terminal=True,
+        usage=None,
+        finish_reason="tool_use",
+    )
+    out = [c.tool_call for c in chunks if c.kind == "tool_call"]
+    assert out[0].arguments == {"questions": [{"question": "q?"}]}
+    assert out[0].name == "control__ask_user" and out[0].id == "t1"
+
+
+def test_native_unparseable_raw_left_for_gateway():
+    # 真畸形（json.loads 失败的兜底 _raw）→ 不动，留给 gateway 报清晰错误。
+    tc = ToolCall(id="t1", name="control__ask_user", arguments={"_raw": "{not json"})
+    chunks = build_finalize_chunks(
+        content_text="", native_tool_calls=[tc], had_native_buffer=True,
+        saw_terminal=True, usage=None, finish_reason="tool_use",
+    )
+    out = [c.tool_call for c in chunks if c.kind == "tool_call"]
+    assert out[0].arguments == {"_raw": "{not json"}
+
+
+def test_text_raw_wrapper_is_unwrapped():
+    # 文本 tool-call 路径同样解包 _raw。
+    text = ('<tool_call>{"name": "control__ask_user", '
+            '"arguments": {"_raw": "{\\"questions\\": []}"}}</tool_call>')
+    chunks = build_finalize_chunks(
+        content_text=text, native_tool_calls=[], had_native_buffer=False,
+        saw_terminal=True, usage=None, finish_reason="stop",
+    )
+    out = [c.tool_call for c in chunks if c.kind == "tool_call"]
+    assert out[0].arguments == {"questions": []}

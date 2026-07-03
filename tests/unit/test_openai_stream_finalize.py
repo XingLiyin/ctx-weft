@@ -5,7 +5,7 @@ import json
 import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMMessage, LLMRequest, LLMTool
-from ctx_weft.providers.llm.openai import OpenAIAdapter
+from ctx_weft.providers.llm.openai import OpenAIAdapter, _serialize_messages
 
 
 # ── Fake httpx streaming client ────────────────────────────────────────────────
@@ -174,3 +174,25 @@ def test_payload_omits_tool_choice_auto_by_default():
     payload = a._build_payload(req)
     assert "tools" in payload
     assert "tool_choice" not in payload
+
+
+def test_serialize_does_not_echo_raw_sentinel_back_to_model():
+    # 回灌历史里的 assistant tool_call 若带兜底 {"_raw": <原文>}（真畸形 JSON），
+    # 序列化时应回吐模型原始文本，而不是把 `_raw` 当参数名喂回去——否则模型照抄 _raw、死循环。
+    msg = LLMMessage(
+        role="assistant", content="",
+        tool_calls=[{"id": "c1", "name": "control__ask_user",
+                     "arguments": {"_raw": "{broken json"}}],
+    )
+    out = _serialize_messages("", [msg])
+    assert out[0]["tool_calls"][0]["function"]["arguments"] == "{broken json"
+    assert "_raw" not in out[0]["tool_calls"][0]["function"]["arguments"]
+
+
+def test_serialize_normal_arguments_still_json_dumped():
+    msg = LLMMessage(
+        role="assistant", content="",
+        tool_calls=[{"id": "c1", "name": "read", "arguments": {"path": "/a"}}],
+    )
+    out = _serialize_messages("", [msg])
+    assert json.loads(out[0]["tool_calls"][0]["function"]["arguments"]) == {"path": "/a"}

@@ -128,6 +128,13 @@ class LLMTool:
 # ── Tool call（LLM 返回）───────────────────────────────────────────────────────
 
 
+# adapter 在「native 工具参数没解析成 JSON」时的兜底哨兵：把原始未解析文本原样塞进此键
+# （见 providers/llm 的 _parse_buffers/_parse_tool_blocks），不静默丢、交 gateway 报错。
+# finalize 会尝试解包（unwrap_raw_arguments）；gateway 见到残留的它则给直白报错。
+# 注意别把这个 key 回灌进模型上下文——否则模型会误当参数名照抄，陷入 doom loop。
+RAW_ARGS_KEY = "_raw"
+
+
 @dataclass
 class ToolCall:
     """LLM 返回的一次工具调用。"""

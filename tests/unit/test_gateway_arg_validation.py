@@ -143,3 +143,16 @@ async def test_invoke_coerces_then_validates() -> None:
     res = await _gw(p, mem).invoke("mcp__a__search", {"n": "3"}, state, ctx)
     assert res.is_error is False
     assert p.received == {"n": 3}
+
+
+async def test_invoke_raw_wrapper_gets_clear_error_not_required_property() -> None:
+    # adapter 兜底的 {"_raw": <无法解析文本>}（可解析的已在 finalize 解包）走到 gateway
+    # → 给「参数不是合法 JSON」的直白报错，而不是误导性的 "'x' is a required property"
+    # （后者会诱导模型照抄 _raw、陷入死循环）。且绝不下发到 provider。
+    p = _Echo({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})
+    mem, state, ctx = _state_ctx()
+    res = await _gw(p, mem).invoke("mcp__a__search", {"_raw": "{not json"}, state, ctx)
+    assert res.is_error is True
+    assert "not valid JSON" in res.content
+    assert "required property" not in res.content
+    assert p.invoked is False
