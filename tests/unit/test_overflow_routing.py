@@ -20,7 +20,7 @@ class _OverflowLLM(MockLLMAdapter):
         self.last_request = request
         async def _gen():
             raise ContextOverflowError(
-                "overflow", required=200_000, effective_limit=171_808,
+                required=200_000, effective_limit=171_808,
                 context_limit=180_000, reserved_output_tokens=8192,
             )
             yield  # pragma: no cover  (make this an async generator)

@@ -75,7 +75,6 @@ class PriorityBudgetStrategy(BudgetStrategy):
             required = sum(b.token_estimate for b in blocks if eff_prio[b.id] == 0)
             sess = getattr(request, "session", None)
             raise ContextOverflowError(
-                f"Context overflow: protected floor={required} tokens > effective_limit={token_limit}",
                 required=required,
                 effective_limit=token_limit,
                 context_limit=getattr(sess, "context_limit", 0),
