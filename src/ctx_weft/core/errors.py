@@ -54,6 +54,23 @@ class BudgetExceededError(CtxWeftError):
 
 class ContextOverflowError(CtxWeftError):
     code = "CONTEXT_OVERFLOW"
+    retriable = False  # 非瞬时：同批 block 重装配必再溢出，不可 resume（spec §4.5）
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        code: str | None = None,
+        required: int = 0,
+        effective_limit: int = 0,
+        context_limit: int = 0,
+        reserved_output_tokens: int = 0,
+    ) -> None:
+        super().__init__(message, code=code)
+        self.required = required
+        self.effective_limit = effective_limit
+        self.context_limit = context_limit
+        self.reserved_output_tokens = reserved_output_tokens
 
 
 class MaxTurnsExceeded(CtxWeftError):
