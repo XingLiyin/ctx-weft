@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils import (
     PROGRESS_SO_FAR_HEADING, content_to_text, estimate_tokens, generate_id,
 )
@@ -60,6 +61,8 @@ def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "C
         # composer 据此把 ## Current Task/Message 框贴到「当前 task」自己的 user 回合，
         # 而非召回历史里最后一条（同 agent 子 body 更新时会误顶 parent 的头）。
         "task_id": record.metadata.get("task_id", ""),
+        # budget 层据此判「agent 层回合」归属哪个 task（finish/dispatch 对来自哪个已结束 task）。
+        "origin_task_id": record.metadata.get("origin_task_id", ""),
     }
     # 无损重建：assistant 携 tool_calls；tool 携 tool_call_id
     if role == "assistant":
@@ -72,7 +75,7 @@ def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "C
         kind="history",
         target="messages",
         content=text,
-        priority=3,
+        priority=slot_priority("history", str(record.type)),
         token_estimate=record.metadata.get("token_count") or estimate_tokens(text),
         metadata=md,
     )

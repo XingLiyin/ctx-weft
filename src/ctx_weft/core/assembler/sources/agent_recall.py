@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.assembler.sources._history import record_to_history_block, wrap_compact_summary
 from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
 from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
@@ -110,7 +111,7 @@ class AgentRecallSource:
                 kind="history",
                 target="messages",
                 content=text,
-                priority=3,
+                priority=slot_priority("history", "agent_compact_summary"),
                 token_estimate=estimate_tokens(text),
                 metadata={"role": "user", "type": s.type, "timestamp": _ts(s),
                           "seq_no": s.metadata.get("seq_no", 0)},

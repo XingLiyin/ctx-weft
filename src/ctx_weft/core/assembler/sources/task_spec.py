@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
 
 if TYPE_CHECKING:
@@ -47,7 +48,7 @@ class TaskSpecSource:
             kind="task_spec",
             target="messages",
             content=content,
-            priority=0,  # 不可裁
+            priority=slot_priority("task_spec"),  # 不可裁
             token_estimate=estimate_tokens(content),
             metadata={
                 "task_id": task.id,

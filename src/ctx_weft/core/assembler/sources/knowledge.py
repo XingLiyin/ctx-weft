@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
 from ctx_weft.protocols import KnowledgeQuery
 
@@ -56,7 +57,7 @@ class KnowledgeRetrievalSource:
                     kind="reference",
                     target="messages",
                     content=doc.content,
-                    priority=4,
+                    priority=slot_priority("reference"),
                     token_estimate=estimate_tokens(doc.content),
                     metadata={
                         "doc_id": doc.id,

@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils import estimate_tokens, generate_id
 from ctx_weft.protocols.capability import AgentCapability, SkillCapability, ToolCapability, qualify
 
@@ -70,7 +71,7 @@ class CapabilitySource:
                 kind="capabilities",
                 target="system",
                 content=cap.description,
-                priority=1,
+                priority=slot_priority("capabilities"),
                 token_estimate=estimate_tokens(cap.description),
                 metadata={
                     "capability_id": cap.id,
@@ -93,7 +94,7 @@ class CapabilitySource:
                 kind="capabilities",
                 target="system",
                 content=cap.description,
-                priority=2,
+                priority=slot_priority("capabilities"),
                 token_estimate=estimate_tokens(cap.description),
                 metadata={
                     "capability_id": cap.id,
@@ -113,7 +114,7 @@ class CapabilitySource:
                 kind="capabilities",
                 target="system",
                 content=cap.description,
-                priority=2,
+                priority=slot_priority("capabilities"),
                 token_estimate=estimate_tokens(cap.description),
                 metadata={
                     "capability_id": cap.id,

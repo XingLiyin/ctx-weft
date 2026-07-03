@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
 
 if TYPE_CHECKING:
@@ -46,15 +47,12 @@ class BlackboardSource:
             if sub.intent == "long_term_background":
                 target = "system"
                 kind = "background"
-                priority = 1
             elif sub.intent == "long_term_project_log":
                 target = "messages"
                 kind = "blackboard"
-                priority = 2
             else:  # subtask / predecessor — 相关任务结果，intent 透传给 composer 分段渲染
                 target = "messages"
                 kind = "blackboard"
-                priority = 2
 
             records, _new_cursor = await deps.memory.recall_topic(
                 topic=sub.topic,
@@ -75,7 +73,7 @@ class BlackboardSource:
                     kind=kind,  # type: ignore[arg-type]
                     target=target,  # type: ignore[arg-type]
                     content=text,
-                    priority=priority,
+                    priority=slot_priority("blackboard"),
                     token_estimate=estimate_tokens(text),
                     metadata={
                         "topic": sub.topic,

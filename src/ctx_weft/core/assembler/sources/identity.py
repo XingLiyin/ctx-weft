@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils import estimate_tokens, generate_id
 
 if TYPE_CHECKING:
@@ -45,7 +46,7 @@ class IdentitySource:
             kind="identity",
             target="system",
             content=text,
-            priority=0,  # 最高，几乎不可裁
+            priority=slot_priority("identity"),  # 最高，几乎不可裁
             token_estimate=estimate_tokens(text),
             metadata={
                 "template_id": template.id,
@@ -64,7 +65,7 @@ class IdentitySource:
                 kind="directive",
                 target="system",
                 content=skill_instructions,
-                priority=1,
+                priority=slot_priority("directive"),
                 token_estimate=estimate_tokens(skill_instructions),
                 metadata={
                     "kind": "skill_instructions",
