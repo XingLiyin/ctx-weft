@@ -24,6 +24,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     Purpose,
 )
+from ctx_weft.core.utils import effective_limit
 from ctx_weft.protocols.knowledge import KnowledgeProvider
 
 if TYPE_CHECKING:
@@ -155,7 +156,9 @@ class ContextAssembler:
             all_blocks.extend(f.result())
 
         # budget
-        token_limit = request.session.context_limit
+        token_limit = effective_limit(
+            request.session.context_limit, request.session.reserved_output_tokens
+        )
         kept = await self.budget.apply(all_blocks, token_limit, request)
 
         # compose
