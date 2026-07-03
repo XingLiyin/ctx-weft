@@ -30,7 +30,10 @@ class BudgetStrategy(Protocol):
 
 
 class PriorityBudgetStrategy(BudgetStrategy):
-    """V1 默认策略：按 priority 升序保留；同 priority 内按 token_estimate 降序裁剪。"""
+    """按 eff_priority 保留（0 永不丢，丢序大→小）；同档按最老先丢、再按体积。
+    eff_priority = slot_priority 静态基线 + budget 动态覆盖（当前 user_prompt→0 pin，
+    当前 task 内容→4 提级）。tool_call↔tool_result 配对成 DropUnit 原子丢弃；
+    priority-0 地板超限抛富信息 ContextOverflowError。详见 spec §4.2 / §4.2.1。"""
 
     async def apply(
         self,
@@ -42,26 +45,93 @@ class PriorityBudgetStrategy(BudgetStrategy):
         if total <= token_limit:
             return blocks
 
-        # 排序：priority 升序优先保留；同 priority 内 token 大的先裁
-        # 即：要裁掉的目标顺序是 (priority desc, token desc)
-        sorted_for_drop = sorted(
-            blocks,
-            key=lambda b: (-b.priority, -b.token_estimate),
-        )
+        eff_prio = {b.id: self._effective_priority(b, request) for b in blocks}
+        units = self._coalesce_tool_pairs(blocks)
 
-        kept_ids: set[str] = {b.id for b in blocks}
-        for blk in sorted_for_drop:
+        def _unit_prio(u: list["ContextBlock"]) -> int:
+            return max(eff_prio[b.id] for b in u)  # 配对成员同 task 同层 → 一致，max 无碍
+
+        def _unit_sort_key(u: list["ContextBlock"]):
+            # 统一键：(-priority, 最老 ts, -总 token)。无 subrank。
+            # -p 降序 → priority 大先丢；ts 升序 → 最老先丢；-tok → 无 ts 档（能力等）大先丢。
+            p = _unit_prio(u)
+            ts = min((b.metadata.get("timestamp", "") for b in u), default="")
+            tok = sum(b.token_estimate for b in u)
+            return (-p, ts, -tok)
+
+        droppable = sorted(units, key=_unit_sort_key)
+        kept_ids = {b.id for b in blocks}
+        for unit in droppable:
             if total <= token_limit:
                 break
-            if blk.priority == 0:
-                # priority=0 不可裁；其他都裁完仍超限 → overflow
-                continue
-            kept_ids.discard(blk.id)
-            total -= blk.token_estimate
+            if _unit_prio(unit) == 0:
+                continue  # priority-0 地板永不丢
+            for b in unit:
+                if b.id in kept_ids:
+                    kept_ids.discard(b.id)
+                    total -= b.token_estimate
 
         if total > token_limit:
+            required = sum(b.token_estimate for b in blocks if eff_prio[b.id] == 0)
+            sess = getattr(request, "session", None)
             raise ContextOverflowError(
-                f"Context overflow: total={total} tokens > limit={token_limit}"
+                f"Context overflow: protected floor={required} tokens > effective_limit={token_limit}",
+                required=required,
+                effective_limit=token_limit,
+                context_limit=getattr(sess, "context_limit", 0),
+                reserved_output_tokens=getattr(sess, "reserved_output_tokens", 0),
             )
 
         return [b for b in blocks if b.id in kept_ids]
+
+    @staticmethod
+    def _effective_priority(b: "ContextBlock", request: "ContextRequest") -> int:
+        """slot_priority 静态基线 + 两个动态覆盖（依赖 request.task.id）：
+        ① pin：当前 task 的 user_prompt → 0（不可裁，当前消息锚）；
+        ② 当前 task 内容（task_id 或 origin_task_id == 当前）→ 4（比已完成 5/6 更保）。"""
+        task = getattr(request, "task", None)
+        cur = getattr(task, "id", None) if task is not None else None
+        md = b.metadata or {}
+        if cur is not None:
+            if md.get("task_id") == cur and str(md.get("type", "")) == "user_prompt":
+                return 0
+            if md.get("task_id") == cur or md.get("origin_task_id") == cur:
+                return 4
+        return b.priority
+
+    @staticmethod
+    def _coalesce_tool_pairs(blocks: list["ContextBlock"]) -> list[list["ContextBlock"]]:
+        """把 assistant(tool_calls) 与其 tool(tool_call_id) 聚成同生共死单元；
+        其余 block 各自单元素单元。仅按 id 配对，不改顺序。"""
+        by_id = {b.id: b for b in blocks}
+        # tool_call_id -> 拥有它的 assistant block id
+        owner: dict[str, str] = {}
+        for b in blocks:
+            if b.metadata.get("role") == "assistant":
+                for tc in (b.metadata.get("tool_calls") or []):
+                    tcid = tc.get("id")
+                    if tcid:
+                        owner[tcid] = b.id
+        # 归组：assistant id -> [assistant, *其 tool results]
+        groups: dict[str, list[str]] = {}
+        grouped: set[str] = set()
+        for b in blocks:
+            if b.metadata.get("role") == "assistant" and b.metadata.get("tool_calls"):
+                groups.setdefault(b.id, [b.id])
+                grouped.add(b.id)
+        for b in blocks:
+            if b.metadata.get("role") == "tool":
+                tcid = b.metadata.get("tool_call_id", "")
+                oid = owner.get(tcid)
+                if oid is not None and oid in groups:
+                    groups[oid].append(b.id)
+                    grouped.add(b.id)
+        units: list[list["ContextBlock"]] = []
+        for b in blocks:
+            if b.id in grouped and b.id not in groups:
+                continue  # tool result 已并入其 owner 单元
+            if b.id in groups:
+                units.append([by_id[i] for i in groups[b.id]])
+            else:
+                units.append([b])
+        return units
