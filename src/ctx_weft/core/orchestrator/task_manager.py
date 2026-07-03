@@ -18,6 +18,7 @@ from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.state.models import (
     CompactTaskSettings,
     MetadataFillerTaskSettings,
+    NormalTaskSettings,
     Session,
     Task,
     TaskStatus,
@@ -243,8 +244,29 @@ class TaskManager:
         for task, blocked_by, parent_task_id in reversed(staged):
             await self.push_task(task, blocked_by=blocked_by, parent_task_id=parent_task_id)
 
+    def _effective_agent(self, task: "Task | None") -> str:
+        """任务实际执行所在的 agent id —— 同 agent 串行判定的键。
+
+        - subagent 任务：每次实例化独立 agent（assigned 未定时用 task.id 造唯一 token），
+          彼此永不冲突，跨 subagent 并行度完全保留。
+        - 其余（root task 与普通非 subagent 子任务）：`assigned_agent_id` 回退 session.root_agent_id
+          —— 它们都跑在同一个 root agent 上，故按同一键串行。root/assigned 皆空时退回 per-task
+          token，避免把"未知 agent"的任务误并成一桶而过度串行。
+        """
+        if task is None:
+            return ""
+        s = task.settings
+        if isinstance(s, NormalTaskSettings) and s.use_subagent:
+            return task.assigned_agent_id or f"__sub__{task.id}"
+        root = self._session.root_agent_id if self._session else ""
+        return task.assigned_agent_id or root or f"__task__{task.id}"
+
     async def drain(self) -> None:
-        """Pop and run tasks until queue is empty or max_concurrent reached."""
+        """Pop and run tasks until queue is empty or max_concurrent reached.
+
+        同 agent 不并发：跳过"目标 agent 正忙（已有同 agent 任务在跑）"的队列条目，
+        它们留在队列里，等该 agent 空闲（某任务完成 → on_task_finished → 再 drain）时被选中。
+        """
         if self._runner is None:
             raise RuntimeError("No task runner registered")
 
@@ -255,7 +277,13 @@ class TaskManager:
             async with self._lock:
                 if len(self._running_tasks) >= self._max_concurrent:
                     break
-                entry = self._queue.pop()
+                busy_agents = {
+                    self._effective_agent(self._tasks.get(tid))
+                    for tid in self._running_tasks
+                }
+                entry = self._queue.pop(
+                    skip=lambda e: self._effective_agent(self._tasks.get(e.task_id)) in busy_agents
+                )
                 if entry is None:
                     break
                 self._running_tasks.add(entry.task_id)
@@ -646,24 +674,32 @@ class TaskManager:
         if parent_id is None:
             return
 
-        siblings = self._children_of.get(parent_id, set())
-        all_done = all(
-            self._tasks.get(tid, Task(id="x", session_id="", status="PENDING")).status
-            in ("FINISHED", "FAILED", "CANCELED")
-            for tid in siblings
-        )
-        if all_done:
+        # 判定 all_done → 翻转 SUSPENDED→ACTIVE → push 三步必须在同一临界区内完成：
+        # 否则两个（同 agent）子任务并发完成时会各自读到 all_done=True + status==SUSPENDED，
+        # 双双 push/resume 父任务（父在同一 scope 上并发跑两遍，污染 memory）。drain 留到锁外。
+        resumed = False
+        async with self._lock:
+            siblings = self._children_of.get(parent_id, set())
+            # 空集守卫：无已登记子任务时绝不 resume（all([]) 恒为 True 的 vacuous-truth 防御）。
+            all_done = bool(siblings) and all(
+                (self._tasks[tid].status if tid in self._tasks else "PENDING")
+                in ("FINISHED", "FAILED", "CANCELED")
+                for tid in siblings
+            )
+            if all_done:
+                parent_task = self._tasks.get(parent_id)
+                if parent_task and parent_task.status == "SUSPENDED":
+                    parent_task.status = "ACTIVE"
+                    self._queue.push(QueueEntry(
+                        task_id=parent_id,
+                        session_id=self._session_id,
+                    ))
+                    resumed = True
+
+        if resumed:
             logger.info("All children of %s done, resuming parent", parent_id)
-            parent_task = self._tasks.get(parent_id)
-            if parent_task and parent_task.status == "SUSPENDED":
-                parent_task.status = "ACTIVE"
-                entry = QueueEntry(
-                    task_id=parent_id,
-                    session_id=self._session_id,
-                )
-                self._queue.push(entry)
-                await self.drain()
-                await self._emit(EventType.TASK_RESUMED, task_id=parent_id)
+            await self.drain()
+            await self._emit(EventType.TASK_RESUMED, task_id=parent_id)
 
     def get_task(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)

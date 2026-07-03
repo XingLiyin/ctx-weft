@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -41,16 +42,25 @@ class TaskQueue:
         self._entries.append(entry)
         logger.debug("TaskQueue.push: %s (blocked_by=%s)", entry.task_id, entry.blocked_by)
 
-    def pop(self) -> QueueEntry | None:
-        """Return the topmost non-blocked, non-running task (LIFO)."""
+    def pop(self, skip: Callable[[QueueEntry], bool] | None = None) -> QueueEntry | None:
+        """Return the topmost non-blocked, non-running task (LIFO).
+
+        ``skip``: optional predicate. Entries for which it returns True are left in
+        the queue (not popped) — used for same-agent no-concurrency: skip a task whose
+        target agent is currently busy. Such entries get picked up on a later pop() once
+        the agent frees (a running task completing triggers another drain).
+        """
         for i in range(len(self._entries) - 1, -1, -1):
             entry = self._entries[i]
             # Refresh: remove deps that have since completed
             entry.blocked_by -= self._completed
-            if not entry.blocked_by and entry.task_id not in self._running:
-                self._entries.pop(i)
-                self._running.add(entry.task_id)
-                return entry
+            if entry.blocked_by or entry.task_id in self._running:
+                continue
+            if skip is not None and skip(entry):
+                continue
+            self._entries.pop(i)
+            self._running.add(entry.task_id)
+            return entry
         return None
 
     def mark_running(self, task_id: str) -> None:

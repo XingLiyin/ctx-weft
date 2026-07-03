@@ -246,6 +246,31 @@ async def test_same_agent_keeps_delegate_and_anchors_ack_at_started_at() -> None
     }, "ack content must only appear in the paired tool_call_id record"
 
 
+async def test_ensure_dispatch_frame_mixed_tz_no_crash() -> None:
+    """派发框 timestamp 为 naive（事件重放 / DB 反序列化丢 tz），task.started_at 为 aware：
+    _ensure_dispatch_frame 归一 tz 后比较，返回 started_at，绝不 TypeError（回归 2026-07-03）。"""
+    from ctx_weft.core.loop.steps.finalize import _ensure_dispatch_frame
+
+    mem = InMemoryMemoryProvider()
+    parent_scope = _sc("p1", "ag1")
+    naive_dispatch = datetime(2026, 1, 1)          # naive（无 tzinfo）
+    await mem.ingest(MemoryEvent(
+        type=T.AGENT_CONVERSATION_TURN, scope=parent_scope, content="",
+        timestamp=naive_dispatch, role="assistant",
+        metadata={"origin_task_id": "p1", "parent_task_id": None,
+                  "tool_calls": [{"id": "oc1", "name": "delegate_task", "input": {}}]},
+    ), _ctx())
+
+    started = _BASE + timedelta(seconds=5)          # aware
+    child = Task(id="c1", session_id="s1", status="FINISHED", tenant_id="default",
+                 assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="p1",
+                 origin_tool_call_id="oc1", title="My Sub Task", user_prompt="do sub",
+                 started_at=started, settings=NormalTaskSettings())
+
+    ts = await _ensure_dispatch_frame(mem, parent_scope, child, _loop_ctx(mem))
+    assert ts == started, "aware started_at 应胜出（> naive 派发框），且不抛 TypeError"
+
+
 async def test_cross_agent_result_carries_outputs_and_task_summary() -> None:
     """Task 5: 跨 agent dispatch result（cross_agent bubble, mem_content）须含 outputs + task_summary，
     不掺 act_recap（mem_content 的 report 部分改用 task_summary）。"""
