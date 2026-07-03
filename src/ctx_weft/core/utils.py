@@ -41,6 +41,11 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def effective_limit(context_limit: int, reserved_output_tokens: int) -> int:
+    """装配/压缩预算的有效上限：为 LLM 输出预留余量后的可用输入窗口。"""
+    return max(0, context_limit - max(0, reserved_output_tokens))
+
+
 def content_to_text(content: "str | list[ContentPart]") -> str:
     """Render ContentPart list as plain text (images skipped)."""
     if isinstance(content, str):
