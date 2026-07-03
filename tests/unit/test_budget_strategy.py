@@ -100,3 +100,5 @@ async def test_overflow_when_floor_exceeds_limit():
         await PriorityBudgetStrategy().apply([floor], token_limit=100, request=_req("cur"))
     assert ei.value.required >= 200
     assert ei.value.effective_limit == 100
+    assert ei.value.context_limit == 180_000
+    assert ei.value.reserved_output_tokens == 8192
