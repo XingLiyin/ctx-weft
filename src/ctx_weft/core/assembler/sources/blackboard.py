@@ -73,7 +73,7 @@ class BlackboardSource:
                     kind=kind,  # type: ignore[arg-type]
                     target=target,  # type: ignore[arg-type]
                     content=text,
-                    priority=slot_priority("blackboard"),
+                    priority=slot_priority(kind),
                     token_estimate=estimate_tokens(text),
                     metadata={
                         "topic": sub.topic,

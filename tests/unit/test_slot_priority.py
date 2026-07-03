@@ -6,9 +6,10 @@ def test_structural_floor():
     assert slot_priority("task_spec") == 0
 
 
-def test_capabilities_and_directive_tier1():
+def test_capabilities_directive_background_tier1():
     assert slot_priority("capabilities") == 1
     assert slot_priority("directive") == 1
+    assert slot_priority("background") == 1
 
 
 def test_agent_compact_summary_tier2():

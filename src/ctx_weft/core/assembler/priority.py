@@ -13,8 +13,8 @@ def slot_priority(kind: str, mem_type: str | None = None) -> int:
     数字越小越受保护；0 永不裁。丢序 7→1。"""
     if kind in ("identity", "task_spec"):
         return 0
-    if kind in ("capabilities", "directive"):
-        return 1
+    if kind in ("capabilities", "directive", "background"):
+        return 1  # 项目背景=系统提示内容，与能力同档（原 blackboard.py priority 1）
     if mem_type == "agent_compact_summary":
         return 2  # agent 层跨 task 折叠（受保护）
     if kind == "blackboard":
