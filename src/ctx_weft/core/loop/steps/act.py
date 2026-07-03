@@ -633,48 +633,91 @@ async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
 # ── 临时 task guidance 注入（仅发送，不入 memory）──────────────────────────────────
 
 
-def _plan_successors(state: LoopState, ctx: LoopContext) -> list:
-    """本 task 的 plan 后继（tracking_task_ids 含本 task id 的任务），按创建时间升序。"""
+_TERMINAL_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELED"})
+_TASK_LABEL_MAX = 80
+
+
+def _task_label(t) -> str:
+    """任务树里一行的标签：title 优先；无 title 用开启该 task 的 prompt 首行（截断）；再无回退 id。"""
+    title = (t.title or "").strip()
+    if title:
+        return title
+    prompt = (getattr(t, "user_prompt", None) or "").strip()
+    if prompt:
+        first = prompt.splitlines()[0].strip()
+        return first[:_TASK_LABEL_MAX] + "…" if len(first) > _TASK_LABEL_MAX else first
+    return f"(untitled {t.id[:6]})"
+
+
+def _nonterminal_tasks(ctx: LoopContext) -> list:
+    """session 内非终态 task（PENDING/ACTIVE/SUSPENDED/TO_BE_OBSERVED），无 task_manager 时空表。"""
     if ctx.task_manager is None:
         return []
-    tid = state.task.id
+    return [t for t in ctx.task_manager.all_tasks() if t.status not in _TERMINAL_STATUSES]
+
+
+def _has_other_open_tasks(state: LoopState, ctx: LoopContext) -> bool:
+    """当前 task 之外是否还有其它非终态 task（决定是否提示「别自己做其它任务」）。"""
+    cur = state.task.id
+    return any(t.id != cur for t in _nonterminal_tasks(ctx))
+
+
+def _session_task_tree(state: LoopState, ctx: LoopContext) -> str:
+    """把 session 内**非终态** task 渲染成缩进任务树，当前 task 以 ``▶`` 标注。
+
+    - 仅列非终态（PENDING/ACTIVE/SUSPENDED/TO_BE_OBSERVED）——终态不刷屏、只留「还没做完的活」。
+    - 按 parent_task_id 建树；父节点被过滤掉（终态/缺失）的非终态 task 提升到 root 层，避免孤儿丢失。
+      roots 及同层子节点按 created_at 升序。
+    - 只要有 ≥1 个非终态 task 就出树（含 root 独自 act 时只列它自己一行）——root 派生子任务后即转
+      SUSPENDED 停止 act，故「单节点」唯一对应 root 独自 act 的情形，让它也能看到自己的定位。
+    """
+    tasks = _nonterminal_tasks(ctx)
+    if not tasks:
+        return ""
+    ids = {t.id for t in tasks}
     epoch = datetime.min.replace(tzinfo=timezone.utc)
-    succ = [t for t in ctx.task_manager.all_tasks() if tid in (t.tracking_task_ids or [])]
-    succ.sort(key=lambda t: t.created_at or epoch)
-    return succ
+    children: dict[str | None, list] = {}
+    for t in tasks:
+        parent = t.parent_task_id if t.parent_task_id in ids else None
+        children.setdefault(parent, []).append(t)
+    for lst in children.values():
+        lst.sort(key=lambda t: t.created_at or epoch)
+
+    current_id = state.task.id
+    lines: list[str] = []
+
+    def _walk(node_id: str | None, depth: int) -> None:
+        for t in children.get(node_id, []):
+            indent = "  " * depth
+            marker = "▶ " if t.id == current_id else ""
+            lines.append(f"{indent}- [{t.status}] {marker}{_task_label(t)}")
+            _walk(t.id, depth + 1)
+
+    _walk(None, 0)
+    return "\n".join(lines)
 
 
 def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
-    """构造拼到最后一条 user message 的临时 guidance（title/description + 后继 + 完成方式）。
+    """构造拼到最后一条 user message 的临时 guidance（session 任务树 + 完成方式）。
 
-    - title/description 都为空时，整个「## Your current task」块不出现。
-    - 没有后继任务时，后继段整段不出现（不再提示 "No tasks are queued"）。
+    - 当前任务的 title/description 由 composer 的 ``## Current Task`` 框承载，此处不再重复渲染；
+      本段只提供 session 非终态任务树（含当前 task 的 ``▶`` 定位）+ 完成方式/任务切换/ask_user。
+    - session 仅剩当前 task 一个非终态节点时，任务树整段不出现。
     """
     task = state.task
     parts: list[str] = ["---"]
 
-    if task.title or task.description:
-        parts.append("## Your current task")
-        if task.title:
-            parts.append(f"Title: {task.title}")
-        if task.description:
-            parts.append(f"Description: {task.description}")
-        parts.append("")
-    else:
-        up = getattr(task, "user_prompt", None)
-        if up:
-            up_text = up if isinstance(up, str) else str(up)
-            parts.append("## Your current task")
-            parts.append("This task was started by the user's request:")
-            parts.append(up_text)
-            parts.append("")
-
-    succ = _plan_successors(state, ctx)
-    if succ:
-        parts.append("## Tasks queued after this one (do NOT do them yourself):")
-        for i, t in enumerate(succ, 1):
-            d = f" — {t.description}" if t.description else ""
-            parts.append(f"{i}. {t.title}{d}")
+    tree = _session_task_tree(state, ctx)
+    has_other_tasks = _has_other_open_tasks(state, ctx)
+    if tree:
+        header = (
+            "## The overall plan (▶ = your current task; the rest are handled separately "
+            "— do NOT do them yourself):"
+            if has_other_tasks
+            else "## The overall plan (▶ = your current task):"
+        )
+        parts.append(header)
+        parts.append(tree)
         parts.append("")
 
     finish_core = (
@@ -691,8 +734,8 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
             + " (Replying in plain text without this tool pauses the task and waits for the "
             "user, instead of finishing.)"
         )
-    elif succ:
-        parts.append(finish_core + " Do not start the queued tasks yourself.")
+    elif has_other_tasks:
+        parts.append(finish_core + " Do not start the other tasks yourself.")
     else:
         parts.append(finish_core)
     # 任务切换：用户最新请求与当前任务无关时，先 finish 收尾、再 delegate 新任务（可同轮）。

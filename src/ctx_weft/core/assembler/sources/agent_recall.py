@@ -76,8 +76,13 @@ class AgentRecallSource:
             limit=_RECALL_ALL,
             ctx=deps.provider_ctx,
         )
+        # 当前 task 的段摘要冠 ## Progress So Far（record_to_history_block 按 task_id 匹配）；
+        # 跨 task 胶囊不冠。current_task_id 取正在装配的 scope.task_id。
+        current_task_id = getattr(request.scope, "task_id", None)
         for idx, record in enumerate(reversed(task_records)):
-            yield record_to_history_block(record, source="agent_recall", idx=idx)
+            yield record_to_history_block(
+                record, source="agent_recall", idx=idx, current_task_id=current_task_id
+            )
 
         # ── 2) agent 层残留 / 经验 ──
         # 全召回未 superseded（同 task 层）：体量交给 supersede + BudgetStrategy 的 token 守卫，

@@ -72,6 +72,25 @@ from ctx_weft.protocols.capability import (
 logger = logging.getLogger(__name__)
 
 
+def _latest_prior_root_task(task_manager: "TaskManager", t: "Task") -> "Task | None":
+    """The most recent prior root task (no parent) in the session — the inherit source
+    for a root user-turn dispatched straight to a sub-agent.
+
+    Such a task has ``use_subagent=True`` + ``inherit_memory=True`` but no
+    ``parent_task_id`` (root turns have none), so the parent-based copy in ``_resolve``
+    has nothing to copy from. We fall back to the previous root task: because
+    ``_copy_memory_for_inherit`` recalls by ``agent_id``, sourcing from it pulls the
+    prior root agent's whole conversation so far, restoring cross-turn continuity.
+    """
+    prior = [
+        x for x in task_manager.all_tasks()
+        if not x.parent_task_id and x.id != t.id
+        and x.created_at is not None and t.created_at is not None
+        and x.created_at < t.created_at
+    ]
+    return max(prior, key=lambda x: x.created_at, default=None)
+
+
 async def _copy_memory_for_inherit(
     parent_task: "Task",
     child_task: "Task",
@@ -814,11 +833,17 @@ class CtxWeftRuntime:
                     ))
                     t.assigned_agent_id = agent.id
                     await _flush_tracking_memory(agent, t, task_manager, memory, sess_id, tenant_id)
-                    if s.inherit_memory and t.parent_task_id and not t.user_prompt_in_memory:
-                        parent_t = task_manager.get_task(t.parent_task_id)
-                        if parent_t:
+                    if s.inherit_memory and not t.user_prompt_in_memory:
+                        # Parented sub-tasks copy from their parent; a root turn dispatched
+                        # straight to a sub-agent has no parent_task_id, so fall back to the
+                        # previous root task (else its sub-agent starts blank — no session memory).
+                        src_t = (
+                            task_manager.get_task(t.parent_task_id) if t.parent_task_id
+                            else _latest_prior_root_task(task_manager, t)
+                        )
+                        if src_t:
                             await _copy_memory_for_inherit(
-                                parent_task=parent_t, child_task=t, sub_agent=agent,
+                                parent_task=src_t, child_task=t, sub_agent=agent,
                                 memory=memory, session_id=sess_id, tenant_id=tenant_id,
                             )
                     initial = await _reconcile_or(t, sess_id, agent, "prepare")

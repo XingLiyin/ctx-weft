@@ -44,12 +44,21 @@ START_TASK_NAME = qualify("control:start_task")
 
 
 async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
-    """确保 parent scope 有一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，返回其时间戳。
+    """确保 parent scope 有一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，
+    返回配对 tool result 应锚定的时间戳 = task 真正开始执行的时刻（started_at）。
 
-    delegate_task(单): gateway 执行前已写好框 → 找到即返回其 timestamp。
+    锚点取 started_at（task manager 真正启动 task 的时刻），反映「任务已开始执行」而非「派发」——
+    这也是用户在重建历史里看到的 `Task '…' started.` 应带的时间戳。回退 created_at（历史/无 started_at）
+    再回退 now。started_at 晚于派发框、早于子 body（body 由 driver 在启动后才 ingest USER_PROMPT），
+    故「派发框 → started ack → 子 body」顺序天然成立。
+
+    delegate_task(单): gateway 执行前已写好框（时间戳=派发时刻）→ 复用它；但配对结果仍锚 started_at，
+      并 clamp 到 ≥ 框时间戳，保证结果绝不会排到其 tool_use 之前（provider 配对不变式）。
     delegate_plan 子: gateway 只写了 plan 框、没有 per-child 框 → 此处补铸一条 start_task 框，
-    时间戳回拨到 task.created_at，使其排在子 body 之前、与配对结果相邻。origin_task_id 留父(留 plan task)。
+      锚在 started_at、排在子 body 之前、与配对结果相邻。origin_task_id 留父(留 plan task)。
     """
+    # 配对结果锚点：task 真正启动执行的时刻。回退 created_at（历史/无 started_at 时）再回退 now。
+    ts = task.started_at or task.created_at or now_utc()
     existing = await memory.recall_recent(
         parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
     frame = next(
@@ -60,10 +69,8 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
         None,
     )
     if frame is not None:
-        return frame.timestamp
-    # 锚在 task manager 真正启动 task 的时刻（started_at）——反映真实启动顺序、排在子 body 之前；
-    # 回退 created_at（历史/无 started_at 时）再回退 now。
-    ts = task.started_at or task.created_at or now_utc()
+        # 已有派发框（gateway 于派发时刻写）→ 结果锚 started_at，但夹到 ≥ 框时刻防排到 tool_use 之前。
+        return max(ts, frame.timestamp)
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,

@@ -233,6 +233,70 @@ async def test_background_close_no_memory_writes_slot(monkeypatch, fake_state_ct
 
 
 @pytest.mark.asyncio
+async def test_two_plain_text_observes_accumulate_both_summaries(monkeypatch, fake_state_ctx):
+    """Regression: two plain_text-boundary observes on the same task must each leave their
+    OWN TASK_COMPACT_SUMMARY capsule, ordered [UP1, S1, UP2, S2].
+
+    Bug: plain_text apply_compact protected only USER_PROMPT (not TASK_COMPACT_SUMMARY), so the
+    2nd observe superseded the 1st's summary (S1 lost) and anchored S2 before UP2 (S2 landed in
+    S1's slot between the two user prompts) — exactly the observed symptom.
+    """
+    from datetime import UTC, datetime
+
+    from ctx_weft.protocols import MemoryEvent
+    from ctx_weft.protocols import MemoryEventType as MT
+
+    state, ctx = fake_state_ctx  # task 层预置 [UP1, LLM, TOOL]
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+
+    class _CountingGateway:
+        """Distinct report per observe so we can tell S1 from S2."""
+
+        def __init__(self):
+            self.n = 0
+
+        async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
+            self.n += 1
+            return ControlResult(content=f"S{self.n}")
+
+    ctx.capability_gateway = _CountingGateway()
+
+    # ── observe1：折掉预置 [LLM, TOOL]，留 UP1，产 S1 ──
+    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+
+    s1 = await ctx.memory.recall_recent(state.scope, [MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
+    assert len(s1) == 1 and s1[0].content == "S1"
+
+    # ── 用户回复(UP2) + 第二轮纯文本(LLM reply2)；用真实 now 保证时序单调 ──
+    await asyncio.sleep(0.005)
+    await ctx.memory.ingest(MemoryEvent(
+        type=MT.USER_PROMPT, scope=state.scope, content="user2",
+        timestamp=datetime.now(UTC), role="user"), ctx.provider_ctx)
+    await asyncio.sleep(0.005)
+    await ctx.memory.ingest(MemoryEvent(
+        type=MT.LLM_RESPONSE, scope=state.scope, content="reply2",
+        timestamp=datetime.now(UTC), role="assistant"), ctx.provider_ctx)
+    await asyncio.sleep(0.005)
+
+    # ── observe2：折掉 reply2，留 UP1/UP2/S1，产 S2 ──
+    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+
+    recs = await ctx.memory.recall_recent(
+        state.scope, [MT.USER_PROMPT, MT.LLM_RESPONSE, MT.TOOL_RESULT, MT.TASK_COMPACT_SUMMARY],
+        100, ctx.provider_ctx)
+    chrono = list(reversed(recs))  # recall 是 newest-first
+    summaries = [r for r in chrono if r.type == MT.TASK_COMPACT_SUMMARY]
+
+    assert len(summaries) == 2, f"两段 plain_text 胶囊都应存活；实得 {[s.content for s in summaries]}"
+    assert [s.content for s in summaries] == ["S1", "S2"]
+    assert [r.type for r in chrono] == [
+        MT.USER_PROMPT, MT.TASK_COMPACT_SUMMARY, MT.USER_PROMPT, MT.TASK_COMPACT_SUMMARY,
+    ], "顺序应为 [UP1, S1, UP2, S2]"
+
+
+@pytest.mark.asyncio
 async def test_background_zero_state_pollution(monkeypatch, fake_state_ctx):
     """跑 background observe 前后，task.status/actor_done/observer_outcome 不变"""
     state, ctx = fake_state_ctx

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ctx_weft.core.runtime import _copy_memory_for_inherit
+from ctx_weft.core.runtime import _copy_memory_for_inherit, _latest_prior_root_task
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryEvent,
@@ -54,6 +54,49 @@ async def test_inherit_copies_parent_recall_into_child_scope() -> None:
     # original parent events untouched
     parent_recs = await mem.recall_recent(parent_scope, [T.USER_PROMPT, T.LLM_RESPONSE], 100, _ctx())
     assert len(parent_recs) == 2
+
+
+class _FakeTM:
+    """Minimal stand-in exposing only all_tasks(), which is all the helper needs."""
+
+    def __init__(self, tasks: list[Task]) -> None:
+        self._tasks = tasks
+
+    def all_tasks(self) -> list[Task]:
+        return list(self._tasks)
+
+
+def _root(id_: str, t: int) -> Task:
+    return Task(id=id_, session_id="s1", status="FINISHED", title=id_,
+                created_at=_BASE + timedelta(seconds=t), settings=NormalTaskSettings())
+
+
+def _child(id_: str, parent: str, t: int) -> Task:
+    return Task(id=id_, session_id="s1", status="FINISHED", title=id_, parent_task_id=parent,
+                created_at=_BASE + timedelta(seconds=t), settings=NormalTaskSettings())
+
+
+async def test_latest_prior_root_picks_most_recent_earlier_root() -> None:
+    """无 parent 的根子 agent 任务，回退继承源=created_at 最近的前序根任务。"""
+    root1 = _root("r1", 0)
+    root2 = _root("r2", 10)          # the most recent prior root
+    sub = _child("sub", "r1", 5)     # not a root — must be ignored
+    current = _root("cur", 20)       # the task being dispatched (a root subagent turn)
+    later = _root("later", 30)       # created after current — must be ignored
+    tm = _FakeTM([root1, root2, sub, current, later])
+
+    picked = _latest_prior_root_task(tm, current)
+
+    assert picked is root2
+
+
+async def test_latest_prior_root_returns_none_when_no_prior_root() -> None:
+    """首轮即 subagent 根任务，无前序根 → None（跳过继承，行为同现状）。"""
+    current = _root("cur", 20)
+    sub = _child("sub", "cur", 25)
+    tm = _FakeTM([current, sub])
+
+    assert _latest_prior_root_task(tm, current) is None
 
 
 async def test_inherit_preserves_assistant_segment_summary() -> None:

@@ -71,9 +71,9 @@ async def test_interactive_plain_text_parks_for_user() -> None:
 
     # 临时 guidance 只在发送的 prompt，不入 memory
     sent = llm.last_request.messages[-1].content
-    assert "## Your current task" in sent and "finish_task" in sent
+    assert "final reply to the user" in sent and "finish_task" in sent
     recs = await mem.recall_recent(state.scope, [MemoryEventType.LLM_RESPONSE], 10, ctx.provider_ctx)
-    assert recs and all("## Your current task" not in (r.content or "") for r in recs)
+    assert recs and all("final reply to the user" not in (r.content or "") for r in recs)
 
 
 async def test_auto_plain_text_completes() -> None:

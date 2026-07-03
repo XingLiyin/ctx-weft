@@ -692,10 +692,10 @@ async def test_H4_cross_agent_isolation() -> None:
 # ─── H8: 短同 agent 子任务未配对隐去 ──────────────────────────────────────────
 
 async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None:
-    """H8（§2.5）：短同 agent 子任务 close 保留 delegate 回合、配对写入静态 ack（back-dated to delegate timestamp）。
+    """H8（§2.5）：短同 agent 子任务 close 保留 delegate 回合、配对写入静态 ack（锚 task.started_at）。
 
     场景：parent 在 agent scope 有 delegate 回合（oc_short），短 child close。
-    断言：delegate 回合保留（未被 supersede）、ack 配对写入；child 合成 finish 对；
+    断言：delegate 回合保留（未被 supersede）、ack 配对写入并锚 started_at；child 合成 finish 对；
     child raw body 留 child task 层。
     """
     mem = InMemoryMemoryProvider()
@@ -725,6 +725,8 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
         prompt="短子任务", outputs="ok", title="短子任务",
     )
     child_task.origin_tool_call_id = tc_short
+    started = _BASE + timedelta(seconds=11)  # 真正启动执行晚于派发（delegate 在 t=10）
+    child_task.started_at = started
     # task-resident：same-agent child → do_bubble=True（无条件，不再看 short）
 
     await finalize_task_memory(
@@ -743,8 +745,9 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
     assert ack and ack[0].content == _dispatch_ack(child_task.title), (
         f"§2.5: static ack must be written with content={_dispatch_ack(child_task.title)!r}; got {[r.content for r in ack]}"
     )
-    assert ack[0].timestamp == delegate[0].timestamp, (
-        f"§2.5: ack.timestamp must equal delegate.timestamp; ack={ack[0].timestamp}, delegate={delegate[0].timestamp}"
+    assert ack[0].timestamp == started, (
+        f"§2.5: ack.timestamp must equal task.started_at (execution start, not dispatch); "
+        f"ack={ack[0].timestamp}, started_at={started}"
     )
 
     # child 自己合成 finish 对（同 agent scope）

@@ -33,24 +33,24 @@ def test_task_compact_summary_block_wrapped():
 
 
 def test_task_compact_summary_assistant_gets_progress_heading():
-    """role=assistant 的 task_conversation 段摘要 = 上一段执行复述：不套「并非用户新指令」包装，
-    而是冠以 PROGRESS_SO_FAR_HEADING，作为统一的"先前进度"锚点。"""
-    blk = record_to_history_block(
-        _rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX", role="assistant"),
-        "task_conversation", 0,
-    )
+    """role=assistant 的段摘要 = 当前 task 上一段执行复述：不套「并非用户新指令」包装，
+    而是冠以 PROGRESS_SO_FAR_HEADING（当 record 归属当前 task 时）。判据按 task_id 匹配。"""
+    rec = MemoryRecord(id="m1", type=T.TASK_COMPACT_SUMMARY, content="### 会话目标\nX",
+                       timestamp=datetime(2026, 1, 1, tzinfo=UTC), role="assistant",
+                       topic=None, metadata={"seq_no": 1, "task_id": "t_cur"})
+    blk = record_to_history_block(rec, "agent_recall", 0, current_task_id="t_cur")
     assert not blk.content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
     assert blk.content == f"{PROGRESS_SO_FAR_HEADING}\n### 会话目标\nX"
     assert blk.metadata["role"] == "assistant"
 
 
-def test_task_compact_summary_assistant_no_heading_for_capsule_source():
-    """胶囊召回（非 task_conversation 来源）的 task 段摘要不冠 Progress So Far 标题——
+def test_task_compact_summary_assistant_no_heading_for_cross_task_capsule():
+    """跨 task 胶囊（record 的 task_id != 当前 task）不冠 Progress So Far 标题——
     标题只用于当前任务的上一段复述，不改跨任务重建形态。"""
-    blk = record_to_history_block(
-        _rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX", role="assistant"),
-        "agent_recall", 0,
-    )
+    rec = MemoryRecord(id="m1", type=T.TASK_COMPACT_SUMMARY, content="### 会话目标\nX",
+                       timestamp=datetime(2026, 1, 1, tzinfo=UTC), role="assistant",
+                       topic=None, metadata={"seq_no": 1, "task_id": "t_other"})
+    blk = record_to_history_block(rec, "agent_recall", 0, current_task_id="t_cur")
     assert blk.content == "### 会话目标\nX"
     assert PROGRESS_SO_FAR_HEADING not in blk.content
 
@@ -68,7 +68,38 @@ def test_agent_conversation_turn_not_wrapped():
 
 
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
-from ctx_weft.protocols import ProviderContext
+from ctx_weft.protocols import MemoryScope, ProviderContext
+
+
+def _rec_task(type_, content, task_id, role="assistant"):
+    return MemoryRecord(id=f"m-{task_id}", type=type_, content=content,
+                        timestamp=datetime(2026, 1, 1, tzinfo=UTC), role=role,
+                        topic=None, metadata={"seq_no": 1, "task_id": task_id})
+
+
+@pytest.mark.asyncio
+async def test_agent_recall_heading_only_for_current_task_summary():
+    """真实装配回归（526859f）：AgentRecallSource 统一召回后，当前 task 的段摘要须冠
+    ## Progress So Far，跨 task 胶囊不冠。彼时 source 由 task_conversation 改为 agent_recall，
+    _history 的标题条件成死码——单靠 source 名区分不出「当前 task 自己的段摘要」。"""
+    cur = _rec_task(T.TASK_COMPACT_SUMMARY, "本段进度X", task_id="t_cur")
+    other = _rec_task(T.TASK_COMPACT_SUMMARY, "别的task进度Y", task_id="t_other")
+
+    class _M:
+        async def recall_recent(self, scope, types, limit, ctx):
+            return []
+
+        async def recall_recent_by_agent(self, agent_scope, types, limit, ctx):
+            return [cur, other]
+
+    deps = SimpleNamespace(memory=_M(),
+                           provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
+    req = SimpleNamespace(scope=MemoryScope(session_id="s1", task_id="t_cur", agent_id="a1"))
+    contents = {b.content for b in [x async for x in AgentRecallSource().fetch(req, deps)]}
+
+    assert f"{PROGRESS_SO_FAR_HEADING}\n本段进度X" in contents, "当前 task 段摘要须冠 Progress So Far"
+    assert "别的task进度Y" in contents, "跨 task 胶囊仍应渲染"
+    assert f"{PROGRESS_SO_FAR_HEADING}\n别的task进度Y" not in contents, "跨 task 胶囊不应冠标题"
 
 
 class _Mem:

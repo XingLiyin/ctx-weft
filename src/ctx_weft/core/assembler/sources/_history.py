@@ -31,8 +31,15 @@ def wrap_compact_summary(text: str) -> str:
     return f"{COMPACT_SUMMARY_WRAPPER_PREFIX}{text}"
 
 
-def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "ContextBlock":
-    """Map one MemoryRecord to a history ContextBlock (newest-first callers pass idx)."""
+def record_to_history_block(
+    record: "MemoryRecord", source: str, idx: int, *, current_task_id: str | None = None
+) -> "ContextBlock":
+    """Map one MemoryRecord to a history ContextBlock (newest-first callers pass idx).
+
+    current_task_id：正在装配的 task。TASK_COMPACT_SUMMARY 段摘要仅当归属该 task（record 的
+    scope task_id == current_task_id）时冠 ## Progress So Far 标题——即「当前任务的上一段复述」；
+    跨 task 胶囊（别的 task_id）不冠，不改跨任务重建形态。None → 一律不冠（防御）。
+    """
     from ctx_weft.core.assembler.assembler import ContextBlock
 
     text = content_to_text(record.content) if not isinstance(record.content, str) else record.content
@@ -45,11 +52,13 @@ def record_to_history_block(record: "MemoryRecord", source: str, idx: int) -> "C
     elif (
         record.type == MemoryEventType.TASK_COMPACT_SUMMARY
         and role == "assistant"
-        and source == "task_conversation"
+        and current_task_id is not None
+        and record.metadata.get("task_id") == current_task_id
     ):
-        # 当前任务的「上一段执行复述」（max_turns / 边界 compact 复用 act_recap）：冠以统一标题，
-        # 与 composer 非压缩 retry 进度对齐；胶囊召回（agent_recall/agent_experience）不加此标题，
-        # 避免改动跨任务重建形态。
+        # 当前任务的「上一段执行复述」（max_turns / 边界 compact / plain_text 复用 act_recap）：
+        # 冠以统一标题，与 composer 非压缩 retry 进度对齐。判据按 task_id 匹配当前 task，而非
+        # source 名——AgentRecallSource（526859f 起统一召回）用同一 source="agent_recall" 承载
+        # 当前 task 段摘要与跨 task 胶囊，只有 task_id 能区分二者；跨 task 胶囊不冠此标题。
         text = f"{PROGRESS_SO_FAR_HEADING}\n{text}"
     md = {
         "role": role,

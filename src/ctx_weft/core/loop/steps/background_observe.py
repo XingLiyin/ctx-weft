@@ -165,7 +165,11 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                     keep_last=0,
                     ctx=ctx.provider_ctx,
                     layer=MemoryLayer.TASK,
-                    protect_types=(MemoryEventType.USER_PROMPT,),
+                    # 同时护 TASK_COMPACT_SUMMARY：多段交互（多轮 plain_text）各产一段胶囊须累积，
+                    # 否则后一段折会 supersede 前一段摘要（前段丢失）、且新摘要锚到 UP 前 1μs 抢占前段
+                    # 位置。与 observe._fold_retry_segment 的 protect_types 一致。
+                    protect_types=(MemoryEventType.USER_PROMPT,
+                                   MemoryEventType.TASK_COMPACT_SUMMARY),
                 )
         except Exception:
             logger.exception("background observe failed (ignored); segment kept raw")
