@@ -120,10 +120,70 @@ class _DispatchProvider(ToolCapabilityProvider):
         return None
 
 
+class _PlanDispatchProvider(ToolCapabilityProvider):
+    name = "control"
+
+    def _cap(self) -> ToolCapability:
+        return ToolCapability(id="control:delegate_plan", name="delegate_plan", description="plan")
+
+    async def list(self, ctx):
+        return [self._cap()]
+
+    async def retrieve(self, ctx):
+        return [self._cap()]
+
+    async def describe(self, ctx):
+        return CapabilityProviderInfo(name=self.name, capability_count=1)
+
+    def invoke(self, capability_id, arguments, ctx) -> AsyncIterator[CapabilityEvent]:
+        async def _run():
+            yield CapabilityEvent(kind="result", payload={"content": "Plan scheduled."})
+        return _run()
+
+    async def cancel(self, invocation_id, ctx) -> None:
+        return None
+
+
 @pytest.mark.asyncio
-async def test_gateway_dispatch_writes_delegate_conversation_turn_not_tool_result() -> None:
-    """§2.3：gateway 把 delegate 调用写成 agent 层 delegate conversation turn（assistant,
-    tool_calls 承载调用，origin=delegating task），不写 TASK_DISPATCH enum、不写即时 TOOL_RESULT。"""
+async def test_gateway_delegate_plan_still_eager_writes_envelope() -> None:
+    """delegate_plan 的 envelope 框 + 配对 ack 仍由 gateway eager 写（per-child 框才走 finalize 铸）——
+    2026-07-03 只移除了 delegate_task 的 eager 写，plan envelope 不受影响。"""
+    from ctx_weft.core.orchestrator.control_capability import _PLAN_DISPATCH_ACK
+    mem = InMemoryMemoryProvider()
+    cache = CapabilityCache()
+    cap = ToolCapability(id="control:delegate_plan", name="delegate_plan", description="plan")
+    cache.put("agt_1", [cap])
+    gw = CapabilityGateway(
+        capability_cache=cache, capability_providers=[_PlanDispatchProvider()],
+        memory=mem, event_bus=InProcessEventBus(),
+    )
+    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    state = LoopState(
+        run_id="run_1", session=SimpleNamespace(id="s1", tenant_id="default"),
+        task=SimpleNamespace(id="tsk_1", parent_task_id=None),
+        agent=SimpleNamespace(id="agt_1", template_id="t"), scope=scope,
+    )
+    ctx = LoopContext(
+        assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),
+        provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1"),
+    )
+
+    await gw.invoke("control__delegate_plan", {"tasks": []}, state, ctx, tool_call_id="tc_plan")
+
+    pctx = ProviderContext(session_id="s1", tenant_id="default")
+    turns = await mem.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 10, pctx)
+    frame = [r for r in turns if r.role == "assistant"
+             and any(tc.get("id") == "tc_plan" for tc in (r.metadata.get("tool_calls") or []))]
+    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "tc_plan"]
+    assert len(frame) == 1, "plan envelope 框须 eager 写"
+    assert ack and ack[0].content == _PLAN_DISPATCH_ACK, "plan envelope 配对 ack 须 eager 写"
+
+
+@pytest.mark.asyncio
+async def test_gateway_delegate_task_defers_frame_to_finalize() -> None:
+    """§2.3(2026-07-03 修订)：gateway 对 delegate_task **不再 eager 写框**——框由 child finalize 铸、
+    与 result 同锚 task.started_at。故 gateway invoke 后 parent scope 无任何 memory 写入
+    （无 AGENT_CONVERSATION_TURN 框、无 TASK_DISPATCH、无即时 TOOL_RESULT）。"""
     mem = InMemoryMemoryProvider()
     cache = CapabilityCache()
     cap = ToolCapability(id="control:delegate_task", name="delegate_task", description="dispatch")
@@ -150,12 +210,8 @@ async def test_gateway_dispatch_writes_delegate_conversation_turn_not_tool_resul
     await gw.invoke("control__delegate_task", {"title": "c"}, state, ctx, tool_call_id="tc_d")
 
     pctx = ProviderContext(session_id="s1", tenant_id="default")
-    turns = await mem.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 10, pctx)
-    delegate = [r for r in turns if r.role == "assistant"
-                and any(tc.get("id") == "tc_d" for tc in (r.metadata.get("tool_calls") or []))]
-    assert len(delegate) == 1
-    assert delegate[0].metadata.get("origin_task_id") == "tsk_1"
-    # 不写 legacy TASK_DISPATCH enum、不写即时 TOOL_RESULT
+    # delegate_task 不 eager 写框（改由 finalize 铸）；也不写 legacy TASK_DISPATCH / 即时 TOOL_RESULT
+    assert await mem.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 10, pctx) == []
     assert await mem.recall_recent(scope, [MemoryEventType.TASK_DISPATCH], 10, pctx) == []
     assert await mem.recall_recent(scope, [MemoryEventType.TOOL_RESULT], 10, pctx) == []
 

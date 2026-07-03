@@ -51,21 +51,24 @@ def _as_utc(dt: datetime) -> datetime:
 
 
 async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
-    """确保 parent scope 有一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，
-    返回配对 tool result 应锚定的时间戳 = task 真正开始执行的时刻（started_at）。
+    """在 parent scope 铸一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，
+    返回它 == 配对 tool result 应锚定的时间戳 = task 真正开始执行的时刻（started_at）。
 
-    锚点取 started_at（task manager 真正启动 task 的时刻），反映「任务已开始执行」而非「派发」——
-    这也是用户在重建历史里看到的 `Task '…' started.` 应带的时间戳。回退 created_at（历史/无 started_at）
-    再回退 now。started_at 晚于派发框、早于子 body（body 由 driver 在启动后才 ingest USER_PROMPT），
-    故「派发框 → started ack → 子 body」顺序天然成立。
+    **框与 result 同锚 started_at**：二者共用同一时间戳 → 按 (timestamp, seq_no) 排序时严格相邻
+    （框先写 seq 小、result 后写 seq 大），且落在「任务开始执行」这条时间线上（而非派发时刻）。
+    started_at 晚于 actor 派发那一轮、早于子 body（body 由 driver 在启动后才 ingest USER_PROMPT），
+    故「派发框 → Task started/result → 子 body → finish 对」顺序天然成立、胶囊连续。回退 created_at
+    （历史/无 started_at）再回退 now，统一归一为 aware(UTC)。
 
-    delegate_task(单): gateway 执行前已写好框（时间戳=派发时刻）→ 复用它；但配对结果仍锚 started_at，
-      并 clamp 到 ≥ 框时间戳，保证结果绝不会排到其 tool_use 之前（provider 配对不变式）。
-    delegate_plan 子: gateway 只写了 plan 框、没有 per-child 框 → 此处补铸一条 start_task 框，
-      锚在 started_at、排在子 body 之前、与配对结果相邻。origin_task_id 留父(留 plan task)。
+    delegate_task 与 delegate_plan 子统一走此铸框路径（gateway 不再为 delegate_task eager 写框——
+    eager 框只能带派发时刻，无法落在 started_at 时间线上，见 capability_gateway._record_invocation）。
+    框的 tool name 取 task.origin_tool_name（保真）：delegate_task 子 = 真名 control__delegate_task
+    （actor 确实调过）；delegate_plan 子 = None → 回退 START_TASK_NAME 叙事名（无 per-child 真实调用）。
+    幂等：若同 id 的框已存在（终态 finalize 单入本不会重入，此为防御），直接返回 ts、不重复铸。
+    origin_task_id 留父（delegate_task 的父 = 派发 task；delegate_plan 子 = 留 plan task）。
     """
-    # 配对结果锚点：task 真正启动执行的时刻。回退 created_at（历史/无 started_at 时）再回退 now。
-    # 归一为 aware(UTC)：started_at/created_at 可能来自事件重放而为 naive。
+    # 框与 result 的公共锚点：task 真正启动执行的时刻。归一为 aware(UTC)：started_at/created_at
+    # 可能来自事件重放而为 naive（历史无 started_at 时回退 created_at 再回退 now）。
     ts = _as_utc(task.started_at or task.created_at or now_utc())
     existing = await memory.recall_recent(
         parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
@@ -77,9 +80,7 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
         None,
     )
     if frame is not None:
-        # 已有派发框（gateway 于派发时刻写）→ 结果锚 started_at，但夹到 ≥ 框时刻防排到 tool_use 之前。
-        # frame.timestamp 归一 tz 后再比较（可能 naive）；ts 已 aware。
-        return max(ts, _as_utc(frame.timestamp))
+        return ts  # 幂等：框已铸（同锚 ts）→ 直接复用锚点，不重复铸框
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
@@ -87,8 +88,9 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
             metadata={"origin_task_id": task.parent_task_id,
                       "parent_task_id": task.parent_task_id,
                       "tool_calls": [{"id": task.origin_tool_call_id,
-                                      "name": START_TASK_NAME,
-                                      "input": {"title": task.title}}]},
+                                      "name": task.origin_tool_name or START_TASK_NAME,
+                                      "input": {"title": task.title,
+                                                "description": task.description or ""}}]},
         ),
         ctx.provider_ctx,
     )

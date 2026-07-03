@@ -71,21 +71,22 @@ async def _seed_conv_nonshort(mem, scope) -> None:
         await mem.ingest(_ev(T.LLM_RESPONSE, scope, big_text, i + 2, role="assistant"), _ctx())
 
 
-async def test_same_agent_child_keeps_delegate_and_writes_ack() -> None:
-    """§2.5：同 agent child close 保留 delegate 回合、配对写入静态 ack（锚 task.started_at，非派发时刻）。"""
+async def test_same_agent_child_mints_frame_and_writes_ack() -> None:
+    """§2.5(2026-07-03)：同 agent child close → finalize **铸**派发框 + 配对静态 ack，二者**同锚
+    task.started_at**（gateway 不再为 delegate_task eager 写框）→ 框与 result 严格相邻、落在「任务开始
+    执行」时间线上。框名取 task.origin_tool_name（delegate_task 子 = 真名，保真）。"""
+    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
     await _seed_conv_nonshort(mem, child_scope)
-    # gateway-written delegate turn for c1 in parent scope (新表示：AGENT_CONVERSATION_TURN, §2.3)
-    await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, _sc("p1", "ag1"), "", 0, role="assistant",
-                         origin_task_id="p1", parent_task_id=None,
-                         tool_calls=[{"id": "oc1", "name": "delegate_task", "input": {}}]), _ctx())
+    # 不 seed eager 框：delegate_task 的框由 finalize 铸（见 _ensure_dispatch_frame）
 
-    started = _BASE + timedelta(seconds=5)  # task manager 真正启动子任务的时刻（晚于派发 t=0）
+    started = _BASE + timedelta(seconds=5)  # task manager 真正启动子任务的时刻
     child = Task(id="c1", session_id="s1", status="FINISHED", tenant_id="default",
                  assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="p1",
-                 origin_tool_call_id="oc1", title="My Sub Task", user_prompt="do sub",
-                 started_at=started, settings=NormalTaskSettings())
+                 origin_tool_call_id="oc1", origin_tool_name=DELEGATE_TASK_NAME,
+                 title="My Sub Task", description="do the sub work",
+                 user_prompt="do sub", started_at=started, settings=NormalTaskSettings())
 
     mem_content = "sub outputs\n\nProcess Report: sub summary"
     await finalize_task_memory(
@@ -97,18 +98,19 @@ async def test_same_agent_child_keeps_delegate_and_writes_ack() -> None:
     parent_scope = _sc("p1", "ag1")
     turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
     from ctx_weft.core.loop.steps.finalize import _dispatch_ack
-    # §2.5: delegate turn KEPT (not superseded)
-    delegate = [r for r in turns if r.role == "assistant"
-                and any(tc.get("id") == "oc1" for tc in (r.metadata.get("tool_calls") or []))]
-    assert delegate, "§2.5: delegate turn must be KEPT (not superseded)"
-    # §2.5: static ack written, paired with oc1, content=_dispatch_ack(title), timestamp=started_at
+    # 铸出的派发框（携 oc1，真名 delegate_task），锚 started_at
+    frame = [r for r in turns if r.role == "assistant"
+             and any(tc.get("id") == "oc1" and tc.get("name") == DELEGATE_TASK_NAME
+                     for tc in (r.metadata.get("tool_calls") or []))]
+    assert frame, "finalize 须为 delegate_task 子铸一条派发框（真名 delegate_task）"
+    assert frame[0].timestamp == started, "框须锚 started_at"
+    # 配对静态 ack，同锚 started_at → 与框同时间戳（严格相邻）
     ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
     assert ack and ack[0].content == _dispatch_ack(child.title), (
-        f"§2.5: static ack must be written with content={_dispatch_ack(child.title)!r}; got {[r.content for r in ack]}"
+        f"§2.5: static ack content must be {_dispatch_ack(child.title)!r}; got {[r.content for r in ack]}"
     )
-    assert ack[0].timestamp == started, (
-        f"§2.5: ack timestamp must equal task.started_at (execution start, not dispatch); "
-        f"ack={ack[0].timestamp}, started_at={started}"
+    assert ack[0].timestamp == started == frame[0].timestamp, (
+        f"框与 result 须同锚 started_at（相邻）；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"
     )
 
 
@@ -199,28 +201,22 @@ async def test_cross_agent_child_bubble_is_conversation_turn() -> None:
     assert legacy == [], "cross-agent dispatch result must not write TASK_DISPATCH_RESULT enum"
 
 
-async def test_same_agent_keeps_delegate_and_anchors_ack_at_started_at() -> None:
-    """§2.5：同 agent close：delegate 回合保留（不 supersede）+ 配对静态 ack（timestamp = task.started_at）。"""
+async def test_same_agent_close_mints_frame_and_ack_co_anchored() -> None:
+    """§2.5(2026-07-03)：同 agent close（_close_one）铸派发框 + 配对静态 ack，
+    框与 ack 同锚 task.started_at（同时间戳 → 相邻），无 eager 框预置；框名取真名 delegate_task。"""
     from ctx_weft.core.loop.steps.finalize import _close_one, _dispatch_ack
+    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
 
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
     parent_scope = _sc("p1", "ag1")
     await _seed_conv_nonshort(mem, child_scope)
 
-    delegate_ts = _BASE + timedelta(seconds=0)
-    started = _BASE + timedelta(seconds=5)  # 真正启动执行晚于派发
-    # seed delegate assistant turn in parent scope
-    await mem.ingest(MemoryEvent(
-        type=T.AGENT_CONVERSATION_TURN, scope=parent_scope,
-        content="", timestamp=delegate_ts, role="assistant",
-        metadata={"origin_task_id": "p1", "parent_task_id": None,
-                  "tool_calls": [{"id": "oc1", "name": "delegate_task", "input": {}}]},
-    ), _ctx())
-
+    started = _BASE + timedelta(seconds=5)
     child = Task(id="c1", session_id="s1", status="FINISHED", tenant_id="default",
                  assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="p1",
-                 origin_tool_call_id="oc1", title="My Sub Task", user_prompt="do sub",
+                 origin_tool_call_id="oc1", origin_tool_name=DELEGATE_TASK_NAME,
+                 title="My Sub Task", user_prompt="do sub",
                  started_at=started, settings=NormalTaskSettings())
     state = _state(child, child_scope, LoopConfig())
 
@@ -229,15 +225,18 @@ async def test_same_agent_keeps_delegate_and_anchors_ack_at_started_at() -> None
 
     turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
 
-    # delegate 回合仍在（未被 supersede）
-    delegate = [r for r in turns if r.role == "assistant"
-                and any(tc.get("id") == child.origin_tool_call_id for tc in (r.metadata.get("tool_calls") or []))]
-    assert delegate, "delegate 回合不应被 supersede"
+    # 铸出的派发框（真名 delegate_task）
+    frame = [r for r in turns if r.role == "assistant"
+             and any(tc.get("id") == "oc1" and tc.get("name") == DELEGATE_TASK_NAME
+                     for tc in (r.metadata.get("tool_calls") or []))]
+    assert frame, "_close_one 须铸派发框（真名 delegate_task）"
 
-    # 配对静态 result：content=_dispatch_ack(title)、tool_call_id 配对、timestamp == task.started_at
-    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == child.origin_tool_call_id]
-    assert ack and ack[0].content == _dispatch_ack(child.title), f"expected static ack with content={_dispatch_ack(child.title)!r}, got {[r.content for r in ack]}"
-    assert ack[0].timestamp == started, f"ack.timestamp={ack[0].timestamp} must equal task.started_at={started} (execution start, not dispatch {delegate_ts})"
+    # 配对静态 result：content=_dispatch_ack(title)、tool_call_id 配对、与框同锚 started_at
+    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
+    assert ack and ack[0].content == _dispatch_ack(child.title), f"expected static ack {_dispatch_ack(child.title)!r}, got {[r.content for r in ack]}"
+    assert frame[0].timestamp == started == ack[0].timestamp, (
+        f"框与 ack 须同锚 started_at；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"
+    )
 
     # stray-ack guard：no OTHER tool record carries ack content
     assert _dispatch_ack(child.title) not in {
@@ -269,6 +268,67 @@ async def test_ensure_dispatch_frame_mixed_tz_no_crash() -> None:
 
     ts = await _ensure_dispatch_frame(mem, parent_scope, child, _loop_ctx(mem))
     assert ts == started, "aware started_at 应胜出（> naive 派发框），且不抛 TypeError"
+
+
+async def test_concurrent_same_agent_dispatch_pairs_stay_adjacent() -> None:
+    """多个同 agent delegate_task 各自 close：每对 frame+ack 同锚各自 started_at → 按 composer 的
+    (timestamp, seq_no) 排序严格成对相邻（F0,R0,F1,R1,F2,R2），不再 F,F,F,R,R,R 堆叠错序。
+    再过 legalize_messages 确认 provider 合法（每 assistant tool_use 紧跟其 tool result）。"""
+    from ctx_weft.core.loop.llm_gateway import legalize_messages
+    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+    from ctx_weft.protocols import LLMMessage
+
+    mem = InMemoryMemoryProvider()
+    parent_scope = _sc("p1", "ag1")
+    for i, secs in enumerate((5, 10, 15)):          # started_at 递增（串行执行）
+        cscope = _sc(f"c{i}", "ag1")
+        await _seed_conv_nonshort(mem, cscope)
+        child = Task(id=f"c{i}", session_id="s1", status="FINISHED", tenant_id="default",
+                     assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="p1",
+                     origin_tool_call_id=f"oc{i}", origin_tool_name=DELEGATE_TASK_NAME,
+                     title=f"T{i}", user_prompt="x",
+                     started_at=_BASE + timedelta(seconds=secs), settings=NormalTaskSettings())
+        await finalize_task_memory(
+            mem, _state(child, cscope, LoopConfig()), child,
+            f"out{i}\n\nProcess Report: r{i}", "success", _loop_ctx(mem),
+            act_recap=f"recap{i}", task_summary="")
+
+    recs = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 500, _ctx())
+    recs = sorted(recs, key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))  # 同 composer 排序
+
+    dispatch_ids = {"oc0", "oc1", "oc2"}
+
+    def _tc_id(r):
+        if r.role == "assistant":
+            for tc in (r.metadata.get("tool_calls") or []):
+                if tc.get("id") in dispatch_ids and tc.get("name") == DELEGATE_TASK_NAME:
+                    return tc["id"]
+        if r.role == "tool" and r.metadata.get("tool_call_id") in dispatch_ids:
+            return r.metadata["tool_call_id"]
+        return None
+
+    seq = [(r.role, _tc_id(r)) for r in recs if _tc_id(r) is not None]
+    assert seq == [("assistant", "oc0"), ("tool", "oc0"),
+                   ("assistant", "oc1"), ("tool", "oc1"),
+                   ("assistant", "oc2"), ("tool", "oc2")], f"派发对未成对相邻/未按 started_at 有序: {seq}"
+
+    # 过 legalize：整条(含 finish 对)重建为 LLMMessage 后仍合法（无悬挂/无孤儿/配对紧邻）
+    msgs = [LLMMessage(role="user", content="root")]
+    for r in recs:
+        if r.role == "assistant":
+            tcs = [{"id": tc["id"], "name": tc.get("name", ""), "input": tc.get("input", {})}
+                   for tc in (r.metadata.get("tool_calls") or [])]
+            msgs.append(LLMMessage(role="assistant", content=r.content or "", tool_calls=tcs))
+        elif r.role == "tool":
+            msgs.append(LLMMessage(role="tool", content=r.content or "(x)",
+                                   tool_call_id=r.metadata.get("tool_call_id", "")))
+    out = legalize_messages(msgs)
+    seen: set[str] = set()
+    for m in out:
+        if m.role == "assistant":
+            seen.update(tc.get("id") for tc in m.tool_calls)
+        if m.role == "tool":
+            assert m.tool_call_id in seen, f"tool result {m.tool_call_id} 未紧跟其 tool_use"
 
 
 async def test_cross_agent_result_carries_outputs_and_task_summary() -> None:

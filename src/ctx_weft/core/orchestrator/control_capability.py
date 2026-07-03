@@ -194,6 +194,7 @@ def delegate_task(
         description=description,
         user_prompt=task_prompt or description,
         origin_tool_call_id=ctx.tool_call_id or None,
+        origin_tool_name=DELEGATE_TASK_NAME,  # 保真：actor 确实调了 delegate_task → finalize 铸框用真名
         interaction_mode=_child_mode(bool(interactive), ctx.task),
         settings=NormalTaskSettings(
             skill_name=skill_name,

@@ -214,6 +214,11 @@ class Task:
     # 发起本任务的 parent delegate_task/delegate_plan 的 tool_call_id（spec/06 §5）。
     # finalize 据此把 output+report 作为 TASK_DISPATCH_RESULT 回填 parent agent 层、按它配对。
     origin_tool_call_id: str | None = None
+    # 发起本任务的派发工具的**限定名**，finalize 铸派发框时用作 tool_calls[].name（保真）。
+    # delegate_task → 真名 control__delegate_task（actor 确实调过）；delegate_plan 子 → None
+    # （actor 只调过一次 delegate_plan、无 per-child 调用）→ finalize 回退 start_task 叙事名。
+    # 纯瞬态字段（与 origin_tool_call_id 同：不入 payload/表，重放后为 None → 回退 start_task）。
+    origin_tool_name: str | None = None
 
     created_at: datetime | None = None
     updated_at: datetime | None = None

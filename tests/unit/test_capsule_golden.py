@@ -692,27 +692,19 @@ async def test_H4_cross_agent_isolation() -> None:
 # ─── H8: 短同 agent 子任务未配对隐去 ──────────────────────────────────────────
 
 async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None:
-    """H8（§2.5）：短同 agent 子任务 close 保留 delegate 回合、配对写入静态 ack（锚 task.started_at）。
+    """H8（§2.5, 2026-07-03）：短同 agent 子任务 close → finalize 铸派发框 + 配对静态 ack，
+    框与 ack 同锚 task.started_at；框名取真名 delegate_task；child 合成 finish 对；child raw body 留 child 层。
 
-    场景：parent 在 agent scope 有 delegate 回合（oc_short），短 child close。
-    断言：delegate 回合保留（未被 supersede）、ack 配对写入并锚 started_at；child 合成 finish 对；
-    child raw body 留 child task 层。
+    场景：无 eager 框（delegate_task 不再 eager 写），短 child close。
     """
+    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
     mem = InMemoryMemoryProvider()
 
     parent_agent = "ag1"
     parent_id = "p1"
     child_id = "c_short"
-
-    # parent 的 agent scope 有一个 delegate 回合（派发了短子任务，新表示：AGENT_CONVERSATION_TURN）
     parent_agent_scope = _task_scope(parent_id, parent_agent)
     tc_short = "oc_short"
-    await mem.ingest(_ev(
-        T.AGENT_CONVERSATION_TURN, parent_agent_scope, "", 10, role="assistant",
-        origin_task_id=parent_id, parent_task_id=None,
-        tool_calls=[{"id": tc_short, "name": "control__delegate_task",
-                     "input": {"title": "短子任务", "description": "x"}}],
-    ), _pctx())
 
     # 短 child：极短对话（确保 is_short=True）
     child_scope = _task_scope(child_id, parent_agent)
@@ -725,7 +717,8 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
         prompt="短子任务", outputs="ok", title="短子任务",
     )
     child_task.origin_tool_call_id = tc_short
-    started = _BASE + timedelta(seconds=11)  # 真正启动执行晚于派发（delegate 在 t=10）
+    child_task.origin_tool_name = DELEGATE_TASK_NAME  # 真名 → 框铸为 delegate_task
+    started = _BASE + timedelta(seconds=1)  # started_at 早于 child body（更贴近真实顺序）
     child_task.started_at = started
     # task-resident：same-agent child → do_bubble=True（无条件，不再看 short）
 
@@ -735,19 +728,19 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
         act_recap="短任务", task_summary="",
     )
 
-    # §2.5：delegate 回合保留 + 配对静态 ack
+    # §2.5(2026-07-03)：铸派发框（真名 delegate_task）+ 配对静态 ack，二者同锚 started_at
     from ctx_weft.core.loop.steps.finalize import _dispatch_ack
     parent_caps = await mem.recall_recent(parent_agent_scope, [T.AGENT_CONVERSATION_TURN], 200, _pctx())
-    delegate = [r for r in parent_caps if r.role == "assistant"
-                and any(tc.get("id") == tc_short for tc in (r.metadata.get("tool_calls") or []))]
-    assert delegate, "§2.5: delegate turn must be KEPT (not superseded)"
+    frame = [r for r in parent_caps if r.role == "assistant"
+             and any(tc.get("id") == tc_short and tc.get("name") == DELEGATE_TASK_NAME
+                     for tc in (r.metadata.get("tool_calls") or []))]
+    assert frame, "finalize 须铸派发框（真名 delegate_task）"
     ack = [r for r in parent_caps if r.role == "tool" and r.metadata.get("tool_call_id") == tc_short]
     assert ack and ack[0].content == _dispatch_ack(child_task.title), (
-        f"§2.5: static ack must be written with content={_dispatch_ack(child_task.title)!r}; got {[r.content for r in ack]}"
+        f"§2.5: static ack must be {_dispatch_ack(child_task.title)!r}; got {[r.content for r in ack]}"
     )
-    assert ack[0].timestamp == started, (
-        f"§2.5: ack.timestamp must equal task.started_at (execution start, not dispatch); "
-        f"ack={ack[0].timestamp}, started_at={started}"
+    assert frame[0].timestamp == started == ack[0].timestamp, (
+        f"框与 ack 须同锚 started_at；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"
     )
 
     # child 自己合成 finish 对（同 agent scope）

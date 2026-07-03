@@ -258,25 +258,26 @@ class CapabilityGateway:
             "tool_call_id": tool_call_id,
         }))
         if is_dispatch:
-            # 派发（spec 2026-06-28 §2.3）：delegate 调用写成 agent 层普通 conversation turn
-            # （assistant 回合，tool_calls 承载 delegate 调用），origin_task_id=delegating task。
-            # 其 result 由 child close 时（finalize）写成配对的 tool 回合 → 二者构成 delegating task
-            # 对话里的一组普通 message，与该单元 finish 对同 origin、同命运（一起 L2 折）。
-            await self._memory.ingest(
-                MemoryEvent(
-                    type=MemoryEventType.AGENT_CONVERSATION_TURN,
-                    scope=_tool_scope(state),
-                    content="",
-                    timestamp=now_utc(),
-                    role="assistant",
-                    metadata={"origin_task_id": state.task.id,
-                              "parent_task_id": state.task.parent_task_id,
-                              "tool_calls": [{"id": tool_call_id, "name": tool_name,
-                                              "input": sanitized}]},
-                ),
-                ctx.provider_ctx,
-            )
+            # 派发（spec 2026-06-28 §2.3；2026-07-03 修订）：**只有 delegate_plan 的 envelope 框**
+            # 在此 eager 写（plan 框 + 配对 ack，避免 plan 框悬挂被 legalize 剥掉）。
+            # **delegate_task 不再 eager 写框**——eager 框只能带「派发时刻」，无法落在「任务开始执行」
+            # 时间线上；改由 child finalize 的 _ensure_dispatch_frame 铸框，框与 result 同锚 task.started_at
+            # → 二者严格相邻、且在 started_at 时间线上（并发多派发也各自成对、不再堆叠错序）。
             if tool_name in _PLAN_DISPATCH_TOOLS:
+                await self._memory.ingest(
+                    MemoryEvent(
+                        type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                        scope=_tool_scope(state),
+                        content="",
+                        timestamp=now_utc(),
+                        role="assistant",
+                        metadata={"origin_task_id": state.task.id,
+                                  "parent_task_id": state.task.parent_task_id,
+                                  "tool_calls": [{"id": tool_call_id, "name": tool_name,
+                                                  "input": sanitized}]},
+                    ),
+                    ctx.provider_ctx,
+                )
                 # envelope: 给 plan 框写一条配对的 ack tool result，避免该框悬挂(被 legalize 剥掉)。
                 await self._memory.ingest(
                     MemoryEvent(
