@@ -296,13 +296,11 @@ class TaskManager:
         if task is not None:
             task.status = "ACTIVE"
             task.actor_done = False
-            # 本 task 开始执行（创建已在 push_task 落盘）。每次首段都发，
-            # 体现 retry / resume 后的「重新 active」；reducer 将其映射为 ACTIVE。
-            await self._emit(
-                EventType.TASK_STARTED,
-                task_id=task_id,
-                payload={"assigned_agent_id": task.assigned_agent_id or ""},
-            )
+            # TASK_STARTED 由 runner（_make_task_runner 的 run_task）在 _resolve 之后发一条——那时
+            # assigned_agent_id 才是真正执行的 agent（reducer 只落非空 id；见 spec/07）。这里**不再**自发，
+            # 否则与 runner 双发（每 task 两条 TaskStarted）。契约：TaskManager 的 runner 必须发 TASK_STARTED
+            # （生产恒为 _make_task_runner；仅测试用 stub runner 时需自行补发）。每次派发（含 retry/resume）
+            # runner 都会被调用一次 → 一条 TaskStarted。
         try:
             try:
                 await self._runner(self._session_id, task_id)

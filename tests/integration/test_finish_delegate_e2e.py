@@ -163,6 +163,17 @@ async def test_finish_plus_delegate_same_batch_e2e():
         f"assigned={child.assigned_agent_id!r} creator={child.creator_agent_id!r}"
     )
 
+    # 每个 task 的 TaskStarted 恰好一条：防止 _run_task(派发前) 与 run_task(_resolve 后) 双发回归。
+    # 权威那条由 run_task 发（带 resolved agent id，见上 child.assigned_agent_id 断言）。
+    from collections import Counter
+    started = Counter(
+        e.task_id for e in seen if getattr(e, "type", None) == EventType.TASK_STARTED
+    )
+    assert started, "expected at least one TaskStarted"
+    assert all(c == 1 for c in started.values()), (
+        f"TaskStarted must fire exactly once per task, got {dict(started)}"
+    )
+
     # finish WON: the root must never have been suspended by the delegate.
     suspended = [e for e in seen if getattr(e, "type", None) == EventType.TASK_SUSPENDED]
     assert not suspended, (
