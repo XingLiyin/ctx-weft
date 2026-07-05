@@ -109,6 +109,217 @@ async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
     assert llm.last_request is None             # parked task did not run
 
 
+def test_restore_keeps_active_parked_task_out_of_queue() -> None:
+    """缺陷 A：审批热等的任务恒为 ACTIVE；有未决 HITL 时 restore 必须保持挂起、不重排入队。
+
+    park 判据应看"有无未决 HITL"（parked_task_ids），而非 task.status==SUSPENDED。
+    """
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import Task
+    tm = TaskManager(session_id="s1")
+    parked = Task(id="t1", session_id="s1", status="ACTIVE")   # 审批热等 → ACTIVE
+    tm.restore([parked], terminal_ids=set(), parked_task_ids={"t1"})
+    assert not tm._queue.has_pending(), "ACTIVE+parked 任务不应被重排入队"
+    assert tm.get_task("t1").status == "ACTIVE", "parked 任务状态不应被改成 PENDING"
+
+
+async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
+    """多任务：一个任务完成、另一个仍 parked 等审批 → 会话不得结束（is_done 感知 pending-HITL）。"""
+    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.core.events.types import EventType
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+
+    bus = InProcessEventBus()
+    finished: list = []
+
+    async def _cap(ev):
+        finished.append(ev)
+
+    bus.subscribe(EventType.SESSION_FINISHED, _cap)
+    tm = TaskManager(session_id="s1", event_bus=bus, max_concurrent=1)
+    tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING", token_budget=0))
+
+    async def _noop_runner(_sid, _tid):
+        return None
+
+    tm.set_runner(_noop_runner)
+    tm.set_has_pending_hitl(lambda: True)   # 仍有未决 HITL（B parked）
+    tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
+    tm.register_task(Task(id="B", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
+    tm._running_tasks.add("A")
+    await tm.on_task_finished("A", status="FINISHED")
+    assert finished == [], "仍有 parked HITL 任务时会话不应 SESSION_FINISHED"
+
+
+async def test_session_finishes_when_no_pending_hitl() -> None:
+    """对照：无 pending HITL 时，任务完成正常结束会话。"""
+    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.core.events.types import EventType
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+
+    bus = InProcessEventBus()
+    finished: list = []
+
+    async def _cap(ev):
+        finished.append(ev)
+
+    bus.subscribe(EventType.SESSION_FINISHED, _cap)
+    tm = TaskManager(session_id="s1", event_bus=bus, max_concurrent=1)
+    tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING", token_budget=0))
+
+    async def _noop_runner(_sid, _tid):
+        return None
+
+    tm.set_runner(_noop_runner)
+    tm.set_has_pending_hitl(lambda: False)
+    tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
+    tm._running_tasks.add("A")
+    await tm.on_task_finished("A", status="FINISHED")
+    assert len(finished) == 1, "无 pending HITL 时会话应正常结束"
+
+
+async def test_recover_emits_paused_hitl_for_pending_session() -> None:
+    """缺陷 C：启动恢复时，有 pending HITL 的会话应 emit SESSION_STATUS_CHANGED(PAUSED_HITL)，
+    让投影如实反映"等待人工"，而非停在崩溃前的 RUNNING。"""
+    from datetime import datetime, timezone
+    from ctx_weft.core import CtxWeftRuntime
+    from ctx_weft.core.events.types import Event, EventType
+    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+
+    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    statuses: list = []
+
+    async def _cap(ev):
+        statuses.append(ev.payload.get("new_status"))
+
+    runtime.event_bus.subscribe(EventType.SESSION_STATUS_CHANGED, _cap)
+
+    ts = datetime(2026, 6, 12, tzinfo=timezone.utc)
+
+    def ev(seq, type_, **payload):
+        task_id = payload.pop("task_id", None)
+        return Event(id=f"e{seq}", run_id="r1", sequence=seq, session_id="ses_1", type=type_,
+                     timestamp=ts, task_id=task_id, payload=payload)
+
+    seed = [
+        ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
+        ev(2, EventType.RUN_STARTED),
+        ev(3, EventType.TASK_STARTED, task_id="t1", assigned_agent_id="agt"),
+        ev(4, EventType.HITL_REQUIRED, task_id="t1", approval_id="h1", kind="approval",
+           capability_id="fs:bash_exec", tool_call_id="tc1", question="ok?"),
+    ]
+    for e in seed:
+        await runtime.event_store.append(e)
+
+    await runtime.recover()
+    assert "PAUSED_HITL" in statuses, "有 pending HITL 的会话恢复应反映 PAUSED_HITL"
+
+
+async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
+    """方案 II：已有活 TM 正在跑 X 时，recover 建的新 TM 不得重排 X（否则跨 TM 双跑）。
+
+    构造：老 TM alive 且 _running_tasks={X}，X 在事件里是 ACTIVE、非 parked、非终态。
+    没有 inflight 过滤时 recover 会重新派发 X（echo 模板 → MockLLM 被调用）；有过滤则 X 被跳过。
+    """
+    import asyncio
+    from datetime import datetime, timezone
+    from ctx_weft.core import CtxWeftRuntime
+    from ctx_weft.core.events.types import Event, EventType
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+
+    resolver = InMemoryTemplateResolver()
+    resolver.register(make_echo_template())
+    llm = MockLLMAdapter(responses=[MockResponse(text="should not run")])
+    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+
+    # 老 TM：alive，正在跑 X
+    old_tm = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
+    old_tm.set_is_current(lambda: True)
+    old_tm._running_tasks.add("tsk_X")
+    runtime._task_managers["ses_1"] = old_tm
+
+    ts = datetime(2026, 6, 12, tzinfo=timezone.utc)
+
+    def ev(seq, type_, **payload):
+        task_id = payload.pop("task_id", None)
+        return Event(id=f"e{seq}", run_id="r1", sequence=seq, session_id="ses_1", type=type_,
+                     timestamp=ts, task_id=task_id, payload=payload)
+
+    seed = [
+        ev(1, EventType.SESSION_CREATED, user_prompt="do it", template_id="tpl_echo", root_agent_id="agt_root"),
+        ev(2, EventType.RUN_STARTED),
+        ev(3, EventType.TASK_CREATED, task={
+            "id": "tsk_X", "status": "ACTIVE", "title": "X",
+            "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"}),
+        ev(4, EventType.TASK_STARTED, task_id="tsk_X", assigned_agent_id="agt_root"),
+    ]
+    for e in seed:
+        await runtime.event_store.append(e)
+
+    await runtime.recover_session("ses_1")
+    await asyncio.sleep(0)
+
+    assert llm.last_request is None, "X 正被老 TM 执行，新 TM 不应重复派发"
+
+
+async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) -> None:
+    """单 owner 架构：冷 HITL 应答且存活 owner 拥有该 task → 就地重驱、**不重建 TM**。
+
+    验证：(1) rebuild_view 未被调用(走复用而非重建)；(2) 被应答的 task 重新派发；
+    (3) 本轮 model 写回 owner 的 session（run_task seam 会据它 dispatch）；(4) owner TM 未被顶替。
+    """
+    import asyncio
+    from ctx_weft.core import CtxWeftRuntime
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+
+    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+
+    rebuild_calls: list = []
+    import ctx_weft.core.control.reducers as _reducers
+    _orig = _reducers.rebuild_view
+
+    async def _spy(*a, **k):
+        rebuild_calls.append(1)
+        return await _orig(*a, **k)
+
+    monkeypatch.setattr(_reducers, "rebuild_view", _spy)
+
+    session = Session(id="ses_1", tenant_id="default", user_prompt="x", status="RUNNING",
+                      root_agent_id="agt", llm_provider="acct1", llm_model="m1", token_budget=0)
+    tm = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
+    tm.set_session(session)
+    tm.set_is_current(lambda: runtime._task_managers.get("ses_1") is tm)
+
+    ran: list = []
+
+    async def _runner(_sid, tid):
+        ran.append(tid)
+        tm.get_task(tid).status = "SUSPENDED"   # 重新 park，避免 stub 无限重排；owner 保持存活
+
+    tm.set_runner(_runner)
+    tm.register_task(Task(id="tsk_A", session_id="ses_1", status="SUSPENDED", settings=NormalTaskSettings()))
+    runtime._task_managers["ses_1"] = tm
+
+    await runtime.recover_session("ses_1", resumed_task_id="tsk_A", llm_account="acct2", llm_model="m2")
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert rebuild_calls == [], "复用路径不应调用 rebuild_view（未重建 TM）"
+    assert ran == ["tsk_A"], "被应答的 task 应就地重新派发"
+    assert session.llm_model == "m2" and session.llm_provider == "acct2", "本轮 model/account 应写回 owner session"
+    assert runtime._task_managers["ses_1"] is tm, "owner TM 不应被顶替/替换"
+
+
 async def test_crash_mid_batch_routes_to_reconcile() -> None:
     from datetime import datetime, timezone, timedelta
     from ctx_weft.core.runtime import _task_has_dangling_tool_call

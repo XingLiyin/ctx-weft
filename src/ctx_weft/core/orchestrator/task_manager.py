@@ -79,6 +79,10 @@ class TaskManager:
         # None = 不受管（永远视为 current，保持旧行为）。被同 session 上更新的 TM
         # 顶替后返回 False → 迟到的收尾变 no-op（不发 SessionFinished、不 _release_session）。
         self._is_current: Callable[[], bool] | None = None
+        # 该 session 是否仍有未决 pending HITL —— runtime 注入（查 HitlManager）。完成判定据此：
+        # 有未决 HITL 的 parked 任务时，会话是"空闲等应答"而非"完成"，绝不发 SESSION_FINISHED
+        # 把 parked 任务孤立（真相以 pending-HITL 为准，spec/07 §9.1）。None = 退回旧行为。
+        self._has_pending_hitl: Callable[[], bool] | None = None
 
     def track_background(self, t: "asyncio.Task") -> None:
         """Track a fire-and-forget background coroutine so the session awaits it before close."""
@@ -92,9 +96,18 @@ class TaskManager:
         """注入归属权谓词：本 TM 是否仍是该 session 的当前 owner（见 `_is_current`）。"""
         self._is_current = predicate
 
+    def set_has_pending_hitl(self, predicate: "Callable[[], bool]") -> None:
+        """注入"该 session 是否仍有未决 pending HITL"谓词（runtime 查 HitlManager）。"""
+        self._has_pending_hitl = predicate
+
     def set_session(self, session: Session) -> None:
         """注入 Session 对象，供 failure_counter 维护使用。"""
         self._session = session
+
+    @property
+    def session(self) -> "Session | None":
+        """注入的 Session 对象（复用路径据它读/写本轮 llm 参数——model=会话状态）。"""
+        return self._session
 
     def set_session_done_callback(self, cb: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """session 真正结束（所有任务处理完、无重试待执行）时调用的回调。只调用一次。"""
@@ -146,9 +159,12 @@ class TaskManager:
                 continue
             if isinstance(t.settings, (CompactTaskSettings, MetadataFillerTaskSettings)):
                 continue  # obsolete ephemeral helpers — never re-scheduled (recovery is condition-based)
+            # HITL-park：有未决 HITL → 保持挂起、不入队，**不论 ACTIVE 还是 SUSPENDED**。
+            # 审批热等的任务恒为 ACTIVE（不会走 SUSPENDED 分支）；park 判据是"有无未决 HITL"
+            # （parked_task_ids，源自 fold_pending_hitl），而非 task.status（spec/07 §9.1，缺陷 A）。
+            if t.id in parked:
+                continue
             if t.status == "SUSPENDED":
-                if t.id in parked:
-                    continue                       # HITL-park：保持挂起，不入队（spec/07 §9.1）
                 children = self._children_of.get(t.id, set())
                 if all(cid in terminal_ids for cid in children):
                     t.status = "PENDING"
@@ -249,9 +265,11 @@ class TaskManager:
 
         - subagent 任务：每次实例化独立 agent（assigned 未定时用 task.id 造唯一 token），
           彼此永不冲突，跨 subagent 并行度完全保留。
-        - 其余（root task 与普通非 subagent 子任务）：`assigned_agent_id` 回退 session.root_agent_id
-          —— 它们都跑在同一个 root agent 上，故按同一键串行。root/assigned 皆空时退回 per-task
-          token，避免把"未知 agent"的任务误并成一桶而过度串行。
+        - 其余（非 subagent 任务）：`assigned_agent_id or creator_agent_id or root` —— 非 subagent
+          任务在**创建者**的 agent scope 上跑（延续创建者对话）；未派发（assigned 空）时以 creator
+          预测该 scope。creator 也空（初始 root task 已预 assign 到 root，故不走此兜底）才退 root，
+          三者皆空再退 per-task token，避免把"未知 agent"误并成一桶而过度串行。须与 runtime._resolve
+          的 `assigned or creator or root` 保持一致，否则串行键与真实执行 scope 漂移。
         """
         if task is None:
             return ""
@@ -259,7 +277,7 @@ class TaskManager:
         if isinstance(s, NormalTaskSettings) and s.use_subagent:
             return task.assigned_agent_id or f"__sub__{task.id}"
         root = self._session.root_agent_id if self._session else ""
-        return task.assigned_agent_id or root or f"__task__{task.id}"
+        return task.assigned_agent_id or task.creator_agent_id or root or f"__task__{task.id}"
 
     async def drain(self) -> None:
         """Pop and run tasks until queue is empty or max_concurrent reached.
@@ -274,6 +292,11 @@ class TaskManager:
             return
 
         while True:
+            # 被同一 session 上更新的 TM 顶替（recover_session 覆盖了 _task_managers 映射）→
+            # 立即停止派发，无声（不发事件、不改状态）。避免重叠 resume 下两套 drain 并行派发
+            # 同一批任务；在跑协程照旧靠 _fire_session_done 处的 _is_current 收敛（spec/07 §9）。
+            if self._is_current is not None and not self._is_current():
+                return
             async with self._lock:
                 if len(self._running_tasks) >= self._max_concurrent:
                     break
@@ -571,13 +594,18 @@ class TaskManager:
         # 若 queue 已空且无任务在运行，通知 session 真正结束
         # （有重试时 drain() 会把重试任务入队，is_done() 为 False，不触发）
         if self.is_done():
-            # 立即更新 session 终态并通知前端，SSE 保持开放直到后台协程完成
-            if self._session is not None and self._session.status not in ("FAILED", "CANCELED"):
-                # failure_counter > 0 表示本轮有任务失败（成功时会被重置为 0）
-                self._session.status = "FAILED" if self._session.failure_counter > 0 else "SUCCEEDED"
-            final_status = self._session.status if self._session else "SUCCEEDED"
-            await self._emit(EventType.SESSION_STATUS_CHANGED, payload={"new_status": final_status})
-            await self._fire_session_done()
+            # queue 空、无在跑任务；但若仍有未决 HITL 的 parked 任务，会话是"空闲等应答"而非"完成"
+            # ——绝不能发 SESSION_FINISHED 把 parked 任务孤立（真相以 pending-HITL 为准，spec/07 §9.1）。
+            if self._has_pending_hitl is not None and self._has_pending_hitl():
+                await self._fire_session_idle()
+            else:
+                # 立即更新 session 终态并通知前端，SSE 保持开放直到后台协程完成
+                if self._session is not None and self._session.status not in ("FAILED", "CANCELED"):
+                    # failure_counter > 0 表示本轮有任务失败（成功时会被重置为 0）
+                    self._session.status = "FAILED" if self._session.failure_counter > 0 else "SUCCEEDED"
+                final_status = self._session.status if self._session else "SUCCEEDED"
+                await self._emit(EventType.SESSION_STATUS_CHANGED, payload={"new_status": final_status})
+                await self._fire_session_done()
 
     async def cancel_all(self, *, reason: str = "") -> None:
         """硬取消整条 session 链：清空 pending 队列并标 CANCELED，会话置 CANCELED。
@@ -712,6 +740,38 @@ class TaskManager:
     def is_done(self) -> bool:
         """True when queue is empty and nothing is running."""
         return not self._queue.has_pending() and not self._running_tasks
+
+    def resume_task(self, task_id: str) -> None:
+        """重排一个被 HITL 应答唤醒的 task：置 PENDING 并入队，供**复用活 owner**的就地续跑路径。
+
+        不重建 TM——直接把该 task 塞回本 owner 的队列。已终结/在跑/已在队列的任务不重复入队。
+        wait_for_user 冷应答已由 `_inject_user_reply` 置 PENDING，这里补入队；approval 走此路径重排后
+        由 reconcile 重放 dangling tool_call。
+        """
+        t = self._tasks.get(task_id)
+        if t is None or t.status in ("FINISHED", "FAILED", "CANCELED"):
+            return
+        if task_id in self._running_tasks:
+            return
+        if any(e.task_id == task_id for e in self._queue.peek_all()):
+            return
+        t.status = "PENDING"
+        self._queue.push(QueueEntry(
+            task_id=task_id, session_id=self._session_id, priority=t.priority,
+        ))
+
+    def is_alive(self) -> bool:
+        """本 TM 是否仍在驱动该 session（未终结、且仍是当前 owner）。
+
+        供 recover_session 判断"是否有活 TM 正在跑"，以决定新 TM 是否要跳过其在跑任务。
+        """
+        if self._session_done_fired:
+            return False
+        return self._is_current is None or self._is_current()
+
+    def running_task_ids(self) -> set[str]:
+        """当前正在执行（已派发、_run_task 未返回）的 task id 集合。"""
+        return set(self._running_tasks)
 
 
 def _outputs_to_text(outputs: Any) -> str:

@@ -138,6 +138,98 @@ async def test_register_and_drain_marks_older_tm_not_current() -> None:
     assert tm_new._is_current is not None and tm_new._is_current() is True
 
 
+async def test_superseded_tm_drain_does_not_dispatch() -> None:
+    """被顶替的 TM（_is_current()==False）的 drain 不派发任何任务——防重叠 resume 下两套 drain。"""
+    tm = _tm(InProcessEventBus())
+    started: list = []
+
+    async def runner(_sid, tid):
+        started.append(tid)
+
+    tm.set_runner(runner)
+    tm.set_is_current(lambda: False)  # 已被同 session 上更新的 TM 顶替
+    await tm.push_task(Task(id="A", session_id="s1", status="PENDING",
+                            assigned_agent_id="a", creator_agent_id="a",
+                            settings=NormalTaskSettings()))
+    await tm.drain()
+    await asyncio.sleep(0)  # 若误 create_task(_run_task) 给它跑的机会
+    assert started == [], "被顶替的 TM 的 drain 不应派发任务"
+
+
+async def test_current_tm_drain_dispatches() -> None:
+    """对照：current TM（_is_current()==True）的 drain 正常派发。"""
+    tm = _tm(InProcessEventBus())
+    started: list = []
+    release = asyncio.Event()
+
+    async def runner(_sid, tid):
+        started.append(tid)
+        await release.wait()  # park 住，避免收尾级联干扰断言
+
+    tm.set_runner(runner)
+    tm.set_is_current(lambda: True)
+    await tm.push_task(Task(id="A", session_id="s1", status="PENDING",
+                            assigned_agent_id="a", creator_agent_id="a",
+                            settings=NormalTaskSettings()))
+    await tm.drain()
+    await asyncio.sleep(0)
+    assert started == ["A"]
+    release.set()
+    await asyncio.sleep(0)
+
+
+async def test_recover_session_serialized_per_session(monkeypatch) -> None:
+    """per-session resume 锁：同一 session 的两次并发 recover_session 串行执行（不并发建两套 drain）。
+
+    用一个在闸门处阻塞的 fake rebuild_view 观测并发度：有锁 → 峰值并发 1；无锁 → 2。
+    """
+    rt = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]),
+                        template_resolver=InMemoryTemplateResolver())
+    active = {"n": 0, "max": 0}
+    gate = asyncio.Event()
+
+    async def fake_rebuild_view(_store, _sid):
+        active["n"] += 1
+        active["max"] = max(active["max"], active["n"])
+        await gate.wait()
+        active["n"] -= 1
+        raise RuntimeError("stop after gate")  # 短路 recover 余下步骤，释放锁
+
+    monkeypatch.setattr("ctx_weft.core.control.reducers.rebuild_view", fake_rebuild_view)
+
+    t1 = asyncio.create_task(rt.recover_session("s1"))
+    t2 = asyncio.create_task(rt.recover_session("s1"))
+    await asyncio.sleep(0.02)  # 两个都尝试进入锁
+    assert active["max"] == 1, "per-session 锁应串行化两次 recover（峰值并发=1）"
+    gate.set()
+    res = await asyncio.gather(t1, t2, return_exceptions=True)
+    assert all(isinstance(r, RuntimeError) for r in res)
+
+
+async def test_recover_session_different_sessions_not_serialized(monkeypatch) -> None:
+    """不同 session 之间不应被 resume 锁串行化（各自独立锁，可并发）。"""
+    rt = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]),
+                        template_resolver=InMemoryTemplateResolver())
+    active = {"n": 0, "max": 0}
+    gate = asyncio.Event()
+
+    async def fake_rebuild_view(_store, _sid):
+        active["n"] += 1
+        active["max"] = max(active["max"], active["n"])
+        await gate.wait()
+        active["n"] -= 1
+        raise RuntimeError("stop after gate")
+
+    monkeypatch.setattr("ctx_weft.core.control.reducers.rebuild_view", fake_rebuild_view)
+
+    t1 = asyncio.create_task(rt.recover_session("sA"))
+    t2 = asyncio.create_task(rt.recover_session("sB"))
+    await asyncio.sleep(0.02)
+    assert active["max"] == 2, "不同 session 的 recover 应能并发（峰值并发=2）"
+    gate.set()
+    await asyncio.gather(t1, t2, return_exceptions=True)
+
+
 async def test_slow_prior_turn_bg_observe_does_not_clobber_next_turn() -> None:
     """端到端复现：第 N 轮 finish_task 后其 background observe 拖久了，第 N+1 轮已开启并
     进入 HITL 挂起；旧 TM 迟到的收尾必须 no-op——不释放新 TM、不发 SessionFinished。"""

@@ -187,6 +187,12 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
     task_failed_events = [e for e in collected if e.type == "TaskFailed"]
     assert task_failed_events == [], f"unexpected TaskFailed events: {task_failed_events}"
 
+    # Phase 3：冷 park 也补发 TASK_SUSPENDED，使 task 投影状态 = 内存状态(SUSPENDED)，
+    # 消除"投影停在 ACTIVE、与在等人脱节"的漂移。
+    task_suspended = [e for e in collected if e.type == EventType.TASK_SUSPENDED]
+    assert len(task_suspended) == 1, f"expected one TASK_SUSPENDED, got {len(task_suspended)}"
+    assert task_suspended[0].task_id == "tsk_park_1"
+
 
 async def test_timeout_evicts_to_cold_keeps_pending() -> None:
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager

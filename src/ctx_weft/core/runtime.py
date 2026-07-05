@@ -471,6 +471,10 @@ class CtxWeftRuntime:
         self._cancel_tokens: dict[str, CancelToken] = {}
         self._pause_tokens: dict[str, PauseToken] = {}
         self._task_managers: dict[str, TaskManager] = {}
+        # Per-session resume 锁：串行化同一 session 的 recover_session，避免重叠的冷 HITL 应答 /
+        # /resume 并发建出两个 TaskManager、两套 drain 竞争派发（spec/07 §9）。惰性建、不回收
+        # （体量微小、按 session 数有界）。
+        self._resume_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def event_bus(self) -> EventBus:
@@ -728,6 +732,11 @@ class CtxWeftRuntime:
         task_manager.set_is_current(
             lambda tm=task_manager: self._task_managers.get(session.id) is tm
         )
+        # 完成判定的"未决 HITL"真相：查内存 HitlManager。有 parked（未决 HITL）任务时，
+        # 会话算"空闲等应答"而非"完成"，避免另一任务收尾时把 parked 任务孤立（spec/07 §9.1）。
+        task_manager.set_has_pending_hitl(
+            lambda sid=session.id: bool(self.hitl_manager.list_pending(session_id=sid))
+        )
 
         async def _on_done() -> None:
             # compare-and-clear：仅当本 TM 仍是当前 owner 才回收，避免顶替它的新 TM 被误释放。
@@ -850,7 +859,11 @@ class CtxWeftRuntime:
                     return agent, tmpl, initial, generate_id("run")
 
                 case _:
-                    agent = _default_agent(sess_id, t.assigned_agent_id or root_agent_id)
+                    # 非 subagent 任务在**创建者**的 agent scope 上跑（延续创建者对话），
+                    # 而非一律 root——否则 subagent 派生的非 subagent 子会跑进 root scope、丢失
+                    # 创建者上下文并污染 root。creator 空（如初始 root task）才退 root。须与
+                    # TaskManager._effective_agent 的 `assigned or creator or root` 一致。
+                    agent = _default_agent(sess_id, t.assigned_agent_id or t.creator_agent_id or root_agent_id)
                     await _flush_tracking_memory(agent, t, task_manager, memory, sess_id, tenant_id)
                     initial = await _reconcile_or(t, sess_id, agent, "prepare")
                     return agent, template, initial, default_run_id
@@ -867,6 +880,9 @@ class CtxWeftRuntime:
             t.assigned_agent_id = agent.id
             t.started_at = now_utc()
             await task_manager._emit(EventType.TASK_STARTED, task_id=task_id, payload={"assigned_agent_id": t.assigned_agent_id or ""})
+            # 单 owner 架构 seam：本轮执行资源在**派发时**从可变的 per-session 源读取，而非闭包捕获，
+            # 这样"复用活 owner"续跑时能用上新一轮的 model / cancel-pause token（"参数是消息，不焊进
+            # owner"）。均带闭包兜底 → start_session / 崩溃重建路径行为不变（dict/session 值即闭包值）。
             s, _ = await self._execute_task(
                 session=session,
                 task=t,
@@ -874,12 +890,12 @@ class CtxWeftRuntime:
                 template=tmpl,
                 run_id=run_id,
                 memory=memory,
-                llm_account=llm_account,
-                llm_model=llm_model,
+                llm_account=session.llm_provider or llm_account,
+                llm_model=session.llm_model or llm_model,
                 initial_step=initial_step,
                 task_manager=task_manager,
-                cancel_token=cancel_token,
-                pause_token=pause_token,
+                cancel_token=self._cancel_tokens.get(sess_id) or cancel_token,
+                pause_token=self._pause_tokens.get(sess_id) or pause_token,
             )
             if handle is not None and s is not None:
                 handle._state = s
@@ -895,8 +911,33 @@ class CtxWeftRuntime:
         user_reply: "HitlRequest | None" = None,
         llm_account: str | None = None,
         llm_model: str | None = None,
+        resumed_task_id: str | None = None,
     ) -> None:
-        """Rebuild TaskManager from event store and resume execution.
+        """Serialize resume per session, then reuse the live owner or rebuild + drain.
+
+        单 owner 架构：若该 session 已有**存活的 owner TM** 且拥有被应答的 ``resumed_task_id``，
+        就把应答作为消息投递给它、就地重驱（``_resume_in_existing_tm``），**不重建 TM**——从根上
+        消除"多 TM 顶替/跨 TM 双跑"。仅当无存活 owner（真崩溃冷启动 / ``/resume`` / 活 TM 不含该
+        task）才从事件日志重建。per-session 锁把整段过程串行化。
+        """
+        lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            await self._recover_session_locked(
+                session_id, user_reply=user_reply,
+                llm_account=llm_account, llm_model=llm_model,
+                resumed_task_id=resumed_task_id,
+            )
+
+    async def _recover_session_locked(
+        self,
+        session_id: str,
+        *,
+        user_reply: "HitlRequest | None" = None,
+        llm_account: str | None = None,
+        llm_model: str | None = None,
+        resumed_task_id: str | None = None,
+    ) -> None:
+        """Reuse the live owner TM, or rebuild it from the event store, then resume.
 
         Called by the host on /resume (INTERRUPTED session) and internally on a cold
         HITL reply. Internally replays events (or loads snapshot + delta) to reconstruct
@@ -907,6 +948,19 @@ class CtxWeftRuntime:
         user's reply is injected here as a ``USER_PROMPT`` before drain — then the task
         re-enters act with the reply in the conversation.
         """
+        # ── 复用活 owner（单 owner 架构主路径）─────────────────────────────────────
+        # 冷 HITL 应答且已有存活 TM 拥有该 task → 就地重驱，不重建。避免每次冷应答造新 TM →
+        # 顶替 → 跨 TM 双跑（根因 II）。/resume（无 resumed_task_id）与崩溃冷启动仍走重建。
+        existing = self._task_managers.get(session_id)
+        if (resumed_task_id is not None and existing is not None
+                and existing.is_alive() and existing.get_task(resumed_task_id) is not None):
+            await self._resume_in_existing_tm(
+                existing, user_reply=user_reply,
+                llm_account=llm_account, llm_model=llm_model,
+                resumed_task_id=resumed_task_id,
+            )
+            return
+
         from ctx_weft.core.control.reducers import rebuild_view
         view = await rebuild_view(self.event_store, session_id)
         sess_proj = view.sessions.get(session_id)
@@ -957,7 +1011,15 @@ class CtxWeftRuntime:
             task_max_retries=self._config.task_max_retries,
         )
         task_manager.set_session(session)
-        task_manager.restore(all_tasks, terminal_ids, parked_task_ids=parked_task_ids)
+        # 方案 II：若已有活 TM 正在跑（如崩溃后多次冷应答、或进程内 idle-park 后应答），它被本次
+        # 顶替后 drain 会停（_is_current），但其已派发、在跑的协程仍会跑完。新 TM 不得重排这些
+        # 在跑任务，否则同一 task 跨 TM 双跑。把它们并入 restore 的"不派发"集合，交由旧 TM 收尾。
+        existing_tm = self._task_managers.get(session.id)
+        inflight = existing_tm.running_task_ids() if existing_tm is not None and existing_tm.is_alive() else set()
+        if inflight:
+            logger.info("Recovery: session %s has a live TM running %s; new TM will not re-dispatch them",
+                        session.id, sorted(inflight))
+        task_manager.restore(all_tasks, terminal_ids, parked_task_ids=parked_task_ids | inflight)
 
         pre_resolved = {
             av.id: Agent(
@@ -992,6 +1054,37 @@ class CtxWeftRuntime:
             await self._inject_user_reply(user_reply, session, task_manager)
 
         self._register_and_drain(session, task_manager)
+
+    async def _resume_in_existing_tm(
+        self,
+        tm: "TaskManager",
+        *,
+        user_reply: "HitlRequest | None",
+        llm_account: str | None,
+        llm_model: str | None,
+        resumed_task_id: str,
+    ) -> None:
+        """把冷 HITL 应答作为消息投递给**存活的 owner TM**，就地重驱——不重建 TM（单 owner 架构）。
+
+        - model = 会话状态：把本轮所选 model 写回 owner 的 session，下次 dispatch 经 run_task seam 生效。
+        - cancel/pause token：idle 时已回收，这里重建并存入 per-session dict → runner 经 seam 读到，
+          使 ``/cancel``、``/pause`` 对续跑生效。
+        - wait_for_user 冷应答注入用户回复到 task 层；approval 走 reconcile。
+        - 重排被应答的 task 并重新 drain（``_register_and_drain`` 对同一 TM 幂等：重挂回调 + 派发）。
+        """
+        session = tm.session
+        if session is None:  # 防御：存活 owner 一定注入过 session
+            raise RuntimeError("live TaskManager has no session — cannot resume in place")
+        if llm_account is not None:
+            session.llm_provider = llm_account
+        if llm_model is not None:
+            session.llm_model = llm_model
+        self._cancel_tokens[session.id] = CancelToken()
+        self._pause_tokens[session.id] = PauseToken()
+        if user_reply is not None:
+            await self._inject_user_reply(user_reply, session, tm)
+        tm.resume_task(resumed_task_id)
+        self._register_and_drain(session, tm)
 
     async def compact_session(
         self,
@@ -1116,11 +1209,13 @@ class CtxWeftRuntime:
         is_inject = req.kind == "input" and req.capability_id.endswith(":wait_for_user")
         # 应答携带的当前所选模型（host 据 entry 传入）覆盖投影里的旧 model：用户改 model 后
         # 冷续跑须用新 model。未携带（None）时 recover_session 回退投影。
+        # resumed_task_id：被应答的 task——若存活 owner 拥有它，recover_session 就地重驱不重建。
         await self.recover_session(
             req.session_id,
             user_reply=req if is_inject else None,
             llm_account=req.resume_llm_account,
             llm_model=req.resume_llm_model,
+            resumed_task_id=req.task_id,
         )
 
     async def _inject_user_reply(
@@ -1200,8 +1295,11 @@ class CtxWeftRuntime:
 
         for session_id in session_ids:
             try:
-                if await self.rebuild_hitl(session_id):
-                    logger.info("Recovery: rebuilt HITL for paused session %s (drain deferred to reply)", session_id)
+                n = await self.rebuild_hitl(session_id)
+                if n:
+                    # 有未决 HITL → 如实反映"等待人工"（否则投影停在崩溃前的 RUNNING，看着在跑却卡住）。
+                    await self._emit_session_status(session_id, "PAUSED_HITL")
+                    logger.info("Recovery: session %s → PAUSED_HITL (%d pending, drain deferred to reply)", session_id, n)
                 else:
                     await self._emit_session_interrupted(session_id)
                     logger.info("Recovery: session %s → INTERRUPTED (event emitted)", session_id)
@@ -1255,6 +1353,21 @@ class CtxWeftRuntime:
             type=EventType.SESSION_STATUS_CHANGED,
             timestamp=now_utc(),
             payload=payload,
+        ))
+
+    async def _emit_session_status(self, session_id: str, new_status: str) -> None:
+        """发 SessionStatusChanged(new_status) —— host 读模型据事件反映，不走回调。
+
+        供恢复时把有未决 HITL 的会话如实标为 PAUSED_HITL（否则投影停在崩溃前的 RUNNING）。
+        """
+        await self._event_bus.emit(Event(
+            id=generate_id("evt"),
+            run_id=None,
+            sequence=0,
+            session_id=session_id,
+            type=EventType.SESSION_STATUS_CHANGED,
+            timestamp=now_utc(),
+            payload={"new_status": new_status},
         ))
 
     async def _pending_hitl(self, session_id: str) -> dict:
@@ -1406,6 +1519,12 @@ class CtxWeftRuntime:
             # _run_task 据 task.status==SUSPENDED 走挂起分支（不 requeue）。
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
                 task.status = "SUSPENDED"
+                # Phase 3：补发 TASK_SUSPENDED，使 task 投影状态 = 内存状态(SUSPENDED)。冷 park 此前
+                # 只改内存、不发此事件 → 投影停在 ACTIVE，与"在等人"脱节（restore/host UI 都被误导）。
+                # parked-set 保证 restore 不会据此错误重排（spec/07 §9.1）；与委派挂起(SuspendStep)同形。
+                await self._event_bus.emit(make_event(
+                    state, EventType.TASK_SUSPENDED, payload={"reason": "hitl_park"},
+                ))
             logger.info("_run_loop: task %s parked on HITL", task.id)
         except asyncio.CancelledError:
             was_cancelled = True
