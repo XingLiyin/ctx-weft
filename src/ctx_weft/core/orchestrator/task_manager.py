@@ -802,6 +802,12 @@ class TaskManager:
         return self._running_agents.get(task_id)
 
     def set_pause_abandon(self, flag: bool) -> None:
+        """置位/复位 pause 弃子窗口标志。
+
+        置位期间产生两个效果：① CANCELED 任务不再连带把 session 状态改成 CANCELED（会话去向留给
+        root park 决定，见 _on_task_finished 里的判断）；② run 结束时本轮新 staged 出的子任务直接丢弃、
+        不入队派发（见 _flush_staged），防止弃子清队后又漏网新任务被派发。
+        """
         self._pause_abandon = flag
 
     async def abandon_pending(self, *, reason: str = "pause_abandon") -> list[str]:

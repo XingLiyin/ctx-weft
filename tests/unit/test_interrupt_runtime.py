@@ -1,4 +1,5 @@
-"""Runtime: pause_session = soft (pause 全部在途 run), cancel_session = hard (cancel 全部在途 run + cancel-all)."""
+"""Runtime: pause_session = 弃子（只留 root agent 那一轮继续跑，其余在途 run 与排队子任务全部弃）；
+cancel_session = 硬取消（cancel 全部在途 run + cancel-all，会话终态 CANCELED）。"""
 
 from types import SimpleNamespace
 
