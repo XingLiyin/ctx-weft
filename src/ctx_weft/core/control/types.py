@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from ctx_weft.core.state.models import HitlRequest
+
 
 @dataclass
 class SessionView:
@@ -67,20 +69,6 @@ class AgentView:
 
 
 @dataclass
-class HitlRequestView:
-    """未解决 HITL 请求的轻量投影（恢复用，spec/07 §9）。仅 pending 留存。"""
-
-    id: str
-    kind: str = "approval"        # approval | input
-    session_id: str = ""
-    task_id: str = ""
-    capability_id: str = ""
-    tool_call_id: str = ""
-    question: str = ""
-    context: str = ""
-
-
-@dataclass
 class RunStateView:
     """Point-in-time view of a run's state for inspect/replay."""
 
@@ -110,4 +98,4 @@ class RunStateView:
     agents: dict[str, AgentView] = field(default_factory=dict)
 
     # Pending HITL requests folded from events (only unresolved; spec/07 §9)
-    pending_hitl: dict[str, "HitlRequestView"] = field(default_factory=dict)
+    pending_hitl: dict[str, "HitlRequest"] = field(default_factory=dict)

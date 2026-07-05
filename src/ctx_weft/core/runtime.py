@@ -1103,10 +1103,10 @@ class CtxWeftRuntime:
     async def _resume_after_cold_hitl(self, req: "HitlRequest") -> None:
         """冷 HITL 应答后恢复 session（HitlManager.on_cold_resolve 回调）。
 
-        act 的纯文本暂停（``wait_for_user``）须把回复注入 task 层（reconcile 覆盖不到——它不在
+        act 的纯文本暂停（form=wait）须把回复注入 task 层（reconcile 覆盖不到——它不在
         task 层留 dangling tool_call）；act 的 ``ask_user`` / approval 走 reconcile,不在此注入。
         """
-        is_inject = req.kind == "input" and req.capability_id.endswith(":wait_for_user")
+        is_inject = req.form == "wait"
         # 应答携带的当前所选模型（host 据 entry 传入）覆盖投影里的旧 model：用户改 model 后
         # 冷续跑须用新 model。未携带（None）时 recover_session 回退投影。
         # resumed_task_id：被应答的 task——若存活 owner 拥有它，recover_session 就地重驱不重建。
@@ -1222,7 +1222,7 @@ class CtxWeftRuntime:
     async def rebuild_all_pending_hitl(self) -> int:
         """据事件重建**所有 active session** 的内存 pending HITL（不发中断、不 drain）,返回总条数。
 
-        供只带 approval_id 的应答入口（`/hitl/{id}/*`）自愈:重启后内存 HitlManager 为空、又无 session_id
+        供只带 hitl_id 的应答入口（`/hitl/{id}/*`）自愈:重启后内存 HitlManager 为空、又无 session_id
         可定位时,重建全部 active pending 后即可按 id 命中。仅在 miss 时调用,成本有界（spec/07 §9）。
         """
         try:
@@ -1271,7 +1271,7 @@ class CtxWeftRuntime:
         ))
 
     async def _pending_hitl(self, session_id: str) -> dict:
-        """该 session 仍未解决的 pending HITL（{id: HitlRequestView}）—— 仅折叠 HITL 类事件,不全量回放。"""
+        """该 session 仍未解决的 pending HITL（{id: HitlRequest}）—— 仅折叠 HITL 类事件,不全量回放。"""
         from ctx_weft.core.control.reducers import HITL_STATUS_EVENT_TYPES, fold_pending_hitl
         try:
             events = await self.event_store.read_session_events_of_types(session_id, HITL_STATUS_EVENT_TYPES)

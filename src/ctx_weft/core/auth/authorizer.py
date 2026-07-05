@@ -111,8 +111,8 @@ class HumanConfirmationAuthorizer(Authorizer):
         if existing is not None and existing.status != "pending":
             approval = existing                       # 决定缓存命中（cold reconcile，spec/07 §6）
         else:
-            approval_id = await self.hitl_manager.request(
-                kind="approval",
+            hitl_id = await self.hitl_manager.request(
+                form="approval",
                 session_id=agent.session_id,
                 task_id=task.id if task else "",
                 agent_id=agent.id,
@@ -122,7 +122,7 @@ class HumanConfirmationAuthorizer(Authorizer):
                 context=capability.description,
                 tool_call_id=tool_call_id,
             )
-            approval = await self.hitl_manager.wait(approval_id)   # may raise HitlPark on eviction
+            approval = await self.hitl_manager.wait(hitl_id)   # may raise HitlPark on eviction
         if approval.accepted:
             return AuthorizationDecision(
                 allowed=True,

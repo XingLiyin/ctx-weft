@@ -696,8 +696,8 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
             if existing is not None and existing.status != "pending":
                 approval = existing                       # 决定缓存命中：直接用
             else:
-                approval_id = await self._hitl_manager.request(
-                    kind="input",
+                hitl_id = await self._hitl_manager.request(
+                    form="question",
                     session_id=ctx.session_id,
                     task_id=ctx.task_id or "",
                     agent_id=ctx.agent_id or "",
@@ -706,7 +706,7 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
                     questions=result.metadata.get("questions", []),
                     tool_call_id=tool_call_id,
                 )
-                approval = await self._hitl_manager.wait(approval_id)
+                approval = await self._hitl_manager.wait(hitl_id)
             _, session = self._sessions.get(ctx.session_id, (None, None))
             if session is not None:
                 session.status = "RUNNING"

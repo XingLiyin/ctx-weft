@@ -604,7 +604,7 @@ async def _park_wait_for_user(
     """
     context = "interrupt:edit" if (source == "interrupt" and edit) else source
     rid = await ctx.hitl_manager.request_parked(
-        kind="input",
+        form="wait",
         session_id=state.session.id,
         task_id=state.task.id,
         agent_id=state.agent.id,
@@ -614,7 +614,7 @@ async def _park_wait_for_user(
     )
     state.session.status = "PAUSED"
     state.task.status = "SUSPENDED"
-    raise HitlPark(request_id=rid)
+    raise HitlPark(hitl_id=rid)
 
 
 async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
