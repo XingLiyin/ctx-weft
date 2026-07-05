@@ -571,6 +571,16 @@ class CtxWeftRuntime:
             tm.set_pause_abandon(False)
         return True
 
+    def pause_task(self, session_id: str, task_id: str) -> bool:
+        """定向暂停（spec 2026-07-05 §2.3）：pause 指定在途 task 的 run → 它在检查点 park
+        自己的 wait 气泡，经多 pending 面板回复续跑。不在跑（无本 run 令牌）→ False。
+        只停该 task 本身的 run，不涉及其子任务。"""
+        tokens = self._run_tokens.get(session_id, {}).get(task_id)
+        if tokens is None:
+            return False
+        tokens.pause.pause()
+        return True
+
     async def cancel_session(self, session_id: str) -> bool:
         """硬取消：取消全部在途 run（per-run CancelToken）+ 全部后续 task（drain 队列）→ 会话 CANCELED。
 

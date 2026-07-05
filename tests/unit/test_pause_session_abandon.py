@@ -85,3 +85,13 @@ async def test_pause_session_idle_session_is_noop_false():
     _wire(rt)   # TM 存在但无在跑、无排队 → is_done
     assert await rt.pause_session("s1") is False
     assert "s1" not in rt._pausing
+
+
+async def test_pause_task_targets_single_run():
+    # 定向暂停单个在途 task，其他 task 不受影响；task 不在跑→False
+    rt = _rt()
+    a = rt._register_run_tokens("s1", "ta")
+    b = rt._register_run_tokens("s1", "tb")
+    assert rt.pause_task("s1", "ta") is True
+    assert a.pause.is_paused and not b.pause.is_paused
+    assert rt.pause_task("s1", "nope") is False    # 不在跑 → False
