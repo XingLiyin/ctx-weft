@@ -47,7 +47,8 @@ from ctx_weft.protocols.capability import SessionScopedCapabilityProvider
 from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.session_manager import SessionManager
-from ctx_weft.core.orchestrator.task_manager import TaskManager, TaskRunner, _task_payload
+from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
+from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.state.models import Agent, LoopGuard, Session, Task
 from ctx_weft.core.utils import generate_id, now_utc
@@ -786,121 +787,15 @@ class CtxWeftRuntime:
         default_run_id: str,
         handle: "RunHandle | None" = None,
         pre_resolved_agents: dict[str, "Agent"] | None = None,
-    ) -> TaskRunner:
-        """Return a task runner coroutine shared by start_session and resume_session."""
-        import dataclasses as _dc
-        tenant_id = session.tenant_id
-        root_agent_id = session.root_agent_id or ""
-
-        _resolved_agents: dict[str, Agent] = dict(pre_resolved_agents or {})
-
-        def _default_agent(sess_id: str, agent_id: str | None = None) -> Agent:
-            return Agent(
-                id=agent_id or generate_id("agt"),
-                session_id=sess_id,
-                template_id=template.id,
-                template_version=template.version,
-                status="RUNNING",
-                tenant_id=tenant_id,
-                loop_guard=LoopGuard(
-                    context_limit=session.context_limit,
-                    reserved_output_tokens=session.reserved_output_tokens,
-                ),
-                memory_config=template.memory_config,
-                loop_config=template.loop_config,
-                created_at=now_utc(),
-            )
-
-        async def _reconcile_or(t: "Task", sess_id: str, agent: "Agent", base: str) -> str:
-            """base initial_step；若该 task 最近 assistant turn 有 dangling tool_call → reconcile。"""
-            from ctx_weft.protocols.context import ProviderContext as _PCtx
-            from ctx_weft.protocols.memory import MemoryScope as _Scope
-            scope = _Scope(session_id=sess_id, task_id=t.id, agent_id=agent.id)
-            pctx = _PCtx(session_id=sess_id, tenant_id=tenant_id, task_id=t.id, agent_id=agent.id)
-            if await _task_has_dangling_tool_call(memory, scope, pctx):
-                return "reconcile"
-            return base
-
-        async def _resolve(t: Task, sess_id: str) -> tuple[Agent, "AgentTemplate", str, str]:
-            """Resolve (agent, template, initial_step, run_id) for the given task."""
-            match t.settings:
-                case NormalTaskSettings(use_subagent=True) as s:
-                    ctx = ProviderContext(session_id=sess_id, tenant_id=tenant_id)
-                    sub_tmpl_id = (
-                        await self._resolve_subagent_template(s.subagent_template, ctx)
-                        if s.subagent_template else ""
-                    ) or template_id
-                    parent_agent = _resolved_agents.get(t.creator_agent_id) if t.creator_agent_id else None
-                    agent, tmpl = await lm.instantiate_agent(
-                        template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
-                        parent_agent=parent_agent, ctx=ctx,
-                        existing_agent_id=t.assigned_agent_id or None,
-                    )
-                    agent = _dc.replace(agent, loop_guard=LoopGuard(
-                        context_limit=session.context_limit,
-                        reserved_output_tokens=session.reserved_output_tokens,
-                    ))
-                    t.assigned_agent_id = agent.id
-                    await _flush_tracking_memory(agent, t, task_manager, memory, sess_id, tenant_id)
-                    if s.inherit_memory and not t.user_prompt_in_memory:
-                        # Parented sub-tasks copy from their parent; a root turn dispatched
-                        # straight to a sub-agent has no parent_task_id, so fall back to the
-                        # previous root task (else its sub-agent starts blank — no session memory).
-                        src_t = (
-                            task_manager.get_task(t.parent_task_id) if t.parent_task_id
-                            else _latest_prior_root_task(task_manager, t)
-                        )
-                        if src_t:
-                            await _copy_memory_for_inherit(
-                                parent_task=src_t, child_task=t, sub_agent=agent,
-                                memory=memory, session_id=sess_id, tenant_id=tenant_id,
-                            )
-                    initial = await _reconcile_or(t, sess_id, agent, "prepare")
-                    return agent, tmpl, initial, generate_id("run")
-
-                case _:
-                    # 非 subagent 任务在**创建者**的 agent scope 上跑（延续创建者对话），
-                    # 而非一律 root——否则 subagent 派生的非 subagent 子会跑进 root scope、丢失
-                    # 创建者上下文并污染 root。creator 空（如初始 root task）才退 root。须与
-                    # TaskManager._effective_agent 的 `assigned or creator or root` 一致。
-                    agent = _default_agent(sess_id, t.assigned_agent_id or t.creator_agent_id or root_agent_id)
-                    await _flush_tracking_memory(agent, t, task_manager, memory, sess_id, tenant_id)
-                    initial = await _reconcile_or(t, sess_id, agent, "prepare")
-                    return agent, template, initial, default_run_id
-
-        async def run_task(sess_id: str, task_id: str) -> None:
-            t = task_manager.get_task(task_id)
-            if t is None:
-                return
-            agent, tmpl, initial_step, run_id = await _resolve(t, sess_id)
-            _resolved_agents[agent.id] = agent
-            # 回填「真正用于执行的 agent id」到 task——非 subagent 分支 _resolve 不写它（同 agent 派发
-            # 靠 creator==assigned 判定，None 会误判为 cross）；此处对齐 subagent 分支，且经 TASK_STARTED
-            # reducer 持久化。同时记录真实启动时刻，供派发框锚定。
-            t.assigned_agent_id = agent.id
-            t.started_at = now_utc()
-            await task_manager._emit(EventType.TASK_STARTED, task_id=task_id, payload={"assigned_agent_id": t.assigned_agent_id or ""})
-            # 单 owner 架构 seam：本轮执行资源在**派发时**从可变的 per-session 源读取，而非闭包捕获，
-            # 这样"复用活 owner"续跑时能用上新一轮的 model / cancel-pause token（"参数是消息，不焊进
-            # owner"）。均带闭包兜底 → start_session / 崩溃重建路径行为不变（dict/session 值即闭包值）。
-            s, _ = await self._execute_task(
-                session=session,
-                task=t,
-                agent=agent,
-                template=tmpl,
-                run_id=run_id,
-                memory=memory,
-                llm_account=session.llm_provider or llm_account,
-                llm_model=session.llm_model or llm_model,
-                initial_step=initial_step,
-                task_manager=task_manager,
-                cancel_token=self._cancel_tokens.get(sess_id) or cancel_token,
-                pause_token=self._pause_tokens.get(sess_id) or pause_token,
-            )
-            if handle is not None and s is not None:
-                handle._state = s
-
-        return run_task
+    ) -> "_SessionTaskRunner":
+        """构造本 session/run 的两阶段 runner（原闭包工厂的显式化）。"""
+        return _SessionTaskRunner(
+            runtime=self, session=session, template=template, template_id=template_id,
+            lm=lm, memory=memory, llm_account=llm_account, llm_model=llm_model,
+            task_manager=task_manager, cancel_token=cancel_token, pause_token=pause_token,
+            default_run_id=default_run_id, handle=handle,
+            pre_resolved_agents=pre_resolved_agents,
+        )
 
     # ── Crash recovery ───────────────────────────────────────────────────────
 
@@ -1627,3 +1522,164 @@ class CtxWeftRuntime:
             _state=state,
         )
         return state, handle
+
+
+class _SessionTaskRunner:
+    """两阶段 TaskRunner（每个 owner-TM 一个实例）：assemble 装配执行 agent，execute 驱动 step loop。
+
+    原 _make_task_runner 闭包的显式化：闭包捕获 → 实例字段；_resolved_agents
+    闭包缓存 → 实例属性（恢复播种 = 构造参数 pre_resolved_agents）。
+    assigned_agent_id 回填 / started_at / TASK_STARTED 均归 TaskManager（两阶段契约）。
+    """
+
+    def __init__(
+        self,
+        *,
+        runtime: "CtxWeftRuntime",
+        session: Session,
+        template: "AgentTemplate",
+        template_id: str,
+        lm: LifecycleManager,
+        memory: MemoryProvider,
+        llm_account: str | None,
+        llm_model: str | None,
+        task_manager: TaskManager,
+        cancel_token: CancelToken,
+        pause_token: "PauseToken | None" = None,
+        default_run_id: str,
+        handle: "RunHandle | None" = None,
+        pre_resolved_agents: dict[str, "Agent"] | None = None,
+    ) -> None:
+        self._runtime = runtime
+        self._session = session
+        self._template = template
+        self._template_id = template_id
+        self._lm = lm
+        self._memory = memory
+        self._llm_account = llm_account
+        self._llm_model = llm_model
+        self._task_manager = task_manager
+        self._cancel_token = cancel_token
+        self._pause_token = pause_token
+        self._default_run_id = default_run_id
+        self._handle = handle
+        self._resolved_agents: dict[str, Agent] = dict(pre_resolved_agents or {})
+
+    # ── 阶段 1：装配 ─────────────────────────────────────────────────────────
+
+    async def assemble(self, task_id: str) -> "AgentBinding | None":
+        """决定并实例化执行 agent + memory 预备 + reconcile 探测（原 _resolve）。"""
+        import dataclasses as _dc
+
+        t = self._task_manager.get_task(task_id)
+        if t is None:
+            return None
+        sess_id = self._session.id
+        tenant_id = self._session.tenant_id
+
+        match t.settings:
+            case NormalTaskSettings(use_subagent=True) as s:
+                ctx = ProviderContext(session_id=sess_id, tenant_id=tenant_id)
+                sub_tmpl_id = (
+                    await self._runtime._resolve_subagent_template(s.subagent_template, ctx)
+                    if s.subagent_template else ""
+                ) or self._template_id
+                parent_agent = self._resolved_agents.get(t.creator_agent_id) if t.creator_agent_id else None
+                agent, tmpl = await self._lm.instantiate_agent(
+                    template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
+                    parent_agent=parent_agent, ctx=ctx,
+                    existing_agent_id=t.assigned_agent_id or None,
+                )
+                agent = _dc.replace(agent, loop_guard=LoopGuard(
+                    context_limit=self._session.context_limit,
+                    reserved_output_tokens=self._session.reserved_output_tokens,
+                ))
+                t.assigned_agent_id = agent.id
+                await _flush_tracking_memory(agent, t, self._task_manager, self._memory, sess_id, tenant_id)
+                if s.inherit_memory and not t.user_prompt_in_memory:
+                    # Parented sub-tasks copy from their parent; a root turn dispatched
+                    # straight to a sub-agent has no parent_task_id, so fall back to the
+                    # previous root task (else its sub-agent starts blank — no session memory).
+                    src_t = (
+                        self._task_manager.get_task(t.parent_task_id) if t.parent_task_id
+                        else _latest_prior_root_task(self._task_manager, t)
+                    )
+                    if src_t:
+                        await _copy_memory_for_inherit(
+                            parent_task=src_t, child_task=t, sub_agent=agent,
+                            memory=self._memory, session_id=sess_id, tenant_id=tenant_id,
+                        )
+                initial = await self._reconcile_or(t, agent, "prepare")
+                self._resolved_agents[agent.id] = agent
+                return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
+                                    initial_step=initial, run_id=generate_id("run"))
+
+            case _:
+                # 非 subagent 任务在**创建者**的 agent scope 上跑（延续创建者对话），
+                # 而非一律 root——否则 subagent 派生的非 subagent 子会跑进 root scope、丢失
+                # 创建者上下文并污染 root。scope 键与调度串行判定共用 effective_agent_id 单一真相。
+                agent = self._default_agent(
+                    effective_agent_id(t, self._session.root_agent_id or ""),
+                )
+                await _flush_tracking_memory(agent, t, self._task_manager, self._memory, sess_id, tenant_id)
+                initial = await self._reconcile_or(t, agent, "prepare")
+                self._resolved_agents[agent.id] = agent
+                return AgentBinding(agent_id=agent.id, agent=agent, template=self._template,
+                                    initial_step=initial, run_id=self._default_run_id)
+
+    # ── 阶段 2：执行 ─────────────────────────────────────────────────────────
+
+    async def execute(self, binding: "AgentBinding", task_id: str) -> None:
+        t = self._task_manager.get_task(task_id)
+        if t is None:
+            return
+        # 单 owner 架构 seam：本轮执行资源在**派发时**从可变的 per-session 源读取，而非
+        # 构造时捕获，这样"复用活 owner"续跑时能用上新一轮的 model / cancel-pause token
+        # （"参数是消息，不焊进 owner"）。均带实例字段兜底 → start_session / 崩溃重建路径行为不变。
+        s, _ = await self._runtime._execute_task(
+            session=self._session,
+            task=t,
+            agent=binding.agent,
+            template=binding.template,
+            run_id=binding.run_id,
+            memory=self._memory,
+            llm_account=self._session.llm_provider or self._llm_account,
+            llm_model=self._session.llm_model or self._llm_model,
+            initial_step=binding.initial_step,
+            task_manager=self._task_manager,
+            cancel_token=self._runtime._cancel_tokens.get(self._session.id) or self._cancel_token,
+            pause_token=self._runtime._pause_tokens.get(self._session.id) or self._pause_token,
+        )
+        if self._handle is not None and s is not None:
+            self._handle._state = s
+
+    # ── helpers（原闭包内嵌函数）───────────────────────────────────────────────
+
+    def _default_agent(self, agent_id: str | None = None) -> Agent:
+        return Agent(
+            id=agent_id or generate_id("agt"),
+            session_id=self._session.id,
+            template_id=self._template.id,
+            template_version=self._template.version,
+            status="RUNNING",
+            tenant_id=self._session.tenant_id,
+            loop_guard=LoopGuard(
+                context_limit=self._session.context_limit,
+                reserved_output_tokens=self._session.reserved_output_tokens,
+            ),
+            memory_config=self._template.memory_config,
+            loop_config=self._template.loop_config,
+            created_at=now_utc(),
+        )
+
+    async def _reconcile_or(self, t: "Task", agent: "Agent", base: str) -> str:
+        """base initial_step；若该 task 最近 assistant turn 有 dangling tool_call → reconcile。"""
+        from ctx_weft.protocols.context import ProviderContext as _PCtx
+        from ctx_weft.protocols.memory import MemoryScope as _Scope
+        sess_id = self._session.id
+        scope = _Scope(session_id=sess_id, task_id=t.id, agent_id=agent.id)
+        pctx = _PCtx(session_id=sess_id, tenant_id=self._session.tenant_id,
+                     task_id=t.id, agent_id=agent.id)
+        if await _task_has_dangling_tool_call(self._memory, scope, pctx):
+            return "reconcile"
+        return base
