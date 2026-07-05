@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.control.tokens import PauseToken
 from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.events.types import Event, EventType
 from ctx_weft.core.orchestrator.task_manager import TaskManager
@@ -262,15 +261,14 @@ async def test_slow_prior_turn_bg_observe_does_not_clobber_next_turn() -> None:
     # ── 第 N+1 轮 "7"：新 TM 接管；模拟其 HITL 挂起（runtime 侧保留 pause token）──
     sess7 = Session(id=sid, tenant_id="default", user_prompt="7", status="RUNNING", token_budget=0)
     tm7 = _running_tm(rt, sess7, "t7")
-    pause7 = PauseToken()
-    rt._pause_tokens[sid] = pause7
+    rt._pausing.add(sid)
 
     # ── 旧轮的慢 bg observe 现在才跑完 → tm6._fire_session_done 从 gather 恢复 ──
     release.set()
     await done6
 
     assert rt._task_managers[sid] is tm7, "被顶替的旧 TM 不得释放掉接管的新 TM"
-    assert rt._pause_tokens.get(sid) is pause7, "新一轮的 pause token 不得被旧 TM 回收"
+    assert sid in rt._pausing, "新一轮的 pause 闩锁不得被旧 TM 迟到收尾清除"
     assert finished == [], "被顶替的旧 TM 不得发 SessionFinished"
 
 
@@ -301,14 +299,13 @@ async def test_probe_prior_turn_finishing_after_supersession() -> None:
     # 新轮先接管（顶替），旧轮的任务此后才结束
     sess7 = Session(id=sid, tenant_id="default", user_prompt="7", status="RUNNING", token_budget=0)
     tm7 = _running_tm(rt, sess7, "t7")
-    pause7 = PauseToken()
-    rt._pause_tokens[sid] = pause7
+    rt._pausing.add(sid)
 
     await tm6.on_task_finished("t6", status="FINISHED")
 
     # 关键不变量：迟到的旧轮收尾不得造成不可恢复的破坏——不释放新 TM、不发 SessionFinished。
     assert rt._task_managers[sid] is tm7
-    assert rt._pause_tokens.get(sid) is pause7
+    assert sid in rt._pausing, "新一轮的 pause 闩锁不得被旧 TM 迟到收尾清除"
     assert finished == [], "被顶替的旧 TM 不得发 SessionFinished"
 
     # 已知残留（有意不修）：on_task_finished 的 is_done 分支（task_manager.py line 545）仍会

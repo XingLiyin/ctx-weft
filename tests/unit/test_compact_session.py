@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.control.tokens import CancelToken
 from ctx_weft.core.errors import SessionBusyError
 from ctx_weft.core.events.types import Event, EventType
 from ctx_weft.protocols import (
@@ -44,7 +43,7 @@ def test_session_busy_error_carries_session_id() -> None:
 
 async def test_compact_session_rejects_busy_session() -> None:
     rt = _runtime()
-    rt._cancel_tokens["ses_busy"] = CancelToken()  # simulate an active drain
+    rt._busy_sessions.add("ses_busy")  # simulate an active drain
     with pytest.raises(SessionBusyError):
         await rt.compact_session("ses_busy")
 
@@ -110,4 +109,4 @@ async def test_compact_session_folds_agent_layer() -> None:
         types=[MemoryEventType.AGENT_COMPACT_SUMMARY], limit=10, ctx=pctx,
     )
     assert len(summaries) >= 1
-    assert sid not in rt._cancel_tokens
+    assert sid not in rt._busy_sessions

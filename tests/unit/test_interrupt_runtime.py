@@ -1,11 +1,10 @@
-"""Runtime: pause_session = soft (PauseToken), cancel_session = hard (CancelToken + cancel-all)."""
+"""Runtime: pause_session = soft (pause 全部在途 run), cancel_session = hard (cancel 全部在途 run + cancel-all)."""
 
 from types import SimpleNamespace
 
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.control.tokens import CancelToken, PauseToken
 from ctx_weft.core.orchestrator.hitl_manager import HitlRequest
 from ctx_weft.core.state.models import Session
 from ctx_weft.core.utils import now_utc
@@ -22,18 +21,17 @@ def _runtime():
     return CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
 
 
-async def test_pause_session_pauses_pause_token():
+async def test_pause_session_pauses_all_live_run_tokens():
     rt = _runtime()
-    pause = PauseToken()
-    rt._pause_tokens["s1"] = pause
-    assert rt.pause_session("s1") is True
-    assert pause.is_paused is True
+    a = rt._register_run_tokens("s1", "t1")
+    b = rt._register_run_tokens("s1", "t2")
+    assert await rt.pause_session("s1") is True
+    assert a.pause.is_paused and b.pause.is_paused
 
 
-async def test_cancel_session_cancels_token_and_drains_queue():
+async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
     rt = _runtime()
-    tok = CancelToken()
-    rt._cancel_tokens["s1"] = tok
+    tokens = rt._register_run_tokens("s1", "t1")
     drained = {"called": False}
 
     class _TM:
@@ -45,13 +43,13 @@ async def test_cancel_session_cancels_token_and_drains_queue():
 
     rt._task_managers["s1"] = _TM()
     assert await rt.cancel_session("s1") is True
-    assert tok.is_cancelled is True
+    assert tokens.cancel.is_cancelled is True
     assert drained["called"] is True
 
 
 async def test_unknown_session_returns_false():
     rt = _runtime()
-    assert rt.pause_session("nope") is False
+    assert await rt.pause_session("nope") is False
     assert await rt.cancel_session("nope") is False
 
 
