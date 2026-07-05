@@ -6,6 +6,7 @@ import pytest
 
 from ctx_weft.core.control.types import HitlRequestView
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
 
@@ -143,7 +144,7 @@ async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
     async def _noop_runner(_sid, _tid):
         return None
 
-    tm.set_runner(_noop_runner)
+    tm.set_runner(StubRunner(tm, _noop_runner))
     tm.set_has_pending_hitl(lambda: True)   # 仍有未决 HITL（B parked）
     tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
     tm.register_task(Task(id="B", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
@@ -172,7 +173,7 @@ async def test_session_finishes_when_no_pending_hitl() -> None:
     async def _noop_runner(_sid, _tid):
         return None
 
-    tm.set_runner(_noop_runner)
+    tm.set_runner(StubRunner(tm, _noop_runner))
     tm.set_has_pending_hitl(lambda: False)
     tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
     tm._running_tasks.add("A")
@@ -306,7 +307,7 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
         ran.append(tid)
         tm.get_task(tid).status = "SUSPENDED"   # 重新 park，避免 stub 无限重排；owner 保持存活
 
-    tm.set_runner(_runner)
+    tm.set_runner(StubRunner(tm, _runner))
     tm.register_task(Task(id="tsk_A", session_id="ses_1", status="SUSPENDED", settings=NormalTaskSettings()))
     runtime._task_managers["ses_1"] = tm
 

@@ -15,6 +15,7 @@ from ctx_weft.core.utils import generate_id, now_utc
 
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
+from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.state.models import (
     CompactTaskSettings,
     MetadataFillerTaskSettings,
@@ -29,9 +30,6 @@ if TYPE_CHECKING:
     from ctx_weft.core.events.bus import EventBus
 
 logger = logging.getLogger(__name__)
-
-# Callback type: (session_id, task_id) → None
-TaskRunner = Callable[[str, str], Coroutine[Any, Any, None]]
 
 # 默认值；实际值由 host 经 RuntimeConfig → TaskManager 构造参数注入。
 _DEFAULT_MAX_RETRIES    = 3
@@ -68,6 +66,9 @@ class TaskManager:
         self._children_of: dict[str, set[str]] = {}  # parent_task_id → set[child_task_ids]
         self._runner: TaskRunner | None = None
         self._running_tasks: set[str] = set()
+        # 派发后登记的「真实执行 agent id」（task_id → binding.agent_id）——
+        # 同 agent 串行判定对在跑任务用真值，只有队列候选才走 effective_agent_id 预测。
+        self._running_agents: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._session: Session | None = None  # 注入后供 failure_counter 维护使用
         self._event_bus: "EventBus | None" = event_bus
@@ -261,23 +262,9 @@ class TaskManager:
             await self.push_task(task, blocked_by=blocked_by, parent_task_id=parent_task_id)
 
     def _effective_agent(self, task: "Task | None") -> str:
-        """任务实际执行所在的 agent id —— 同 agent 串行判定的键。
-
-        - subagent 任务：每次实例化独立 agent（assigned 未定时用 task.id 造唯一 token），
-          彼此永不冲突，跨 subagent 并行度完全保留。
-        - 其余（非 subagent 任务）：`assigned_agent_id or creator_agent_id or root` —— 非 subagent
-          任务在**创建者**的 agent scope 上跑（延续创建者对话）；未派发（assigned 空）时以 creator
-          预测该 scope。creator 也空（初始 root task 已预 assign 到 root，故不走此兜底）才退 root，
-          三者皆空再退 per-task token，避免把"未知 agent"误并成一桶而过度串行。须与 runtime._resolve
-          的 `assigned or creator or root` 保持一致，否则串行键与真实执行 scope 漂移。
-        """
-        if task is None:
-            return ""
-        s = task.settings
-        if isinstance(s, NormalTaskSettings) and s.use_subagent:
-            return task.assigned_agent_id or f"__sub__{task.id}"
+        """任务实际执行所在的 agent id——同 agent 串行判定的键（单一真相见 effective_agent_id）。"""
         root = self._session.root_agent_id if self._session else ""
-        return task.assigned_agent_id or task.creator_agent_id or root or f"__task__{task.id}"
+        return effective_agent_id(task, root)
 
     async def drain(self) -> None:
         """Pop and run tasks until queue is empty or max_concurrent reached.
@@ -301,7 +288,7 @@ class TaskManager:
                 if len(self._running_tasks) >= self._max_concurrent:
                     break
                 busy_agents = {
-                    self._effective_agent(self._tasks.get(tid))
+                    self._running_agents.get(tid) or self._effective_agent(self._tasks.get(tid))
                     for tid in self._running_tasks
                 }
                 entry = self._queue.pop(
@@ -319,14 +306,36 @@ class TaskManager:
         if task is not None:
             task.status = "ACTIVE"
             task.actor_done = False
-            # TASK_STARTED 由 runner（_make_task_runner 的 run_task）在 _resolve 之后发一条——那时
-            # assigned_agent_id 才是真正执行的 agent（reducer 只落非空 id；见 spec/07）。这里**不再**自发，
-            # 否则与 runner 双发（每 task 两条 TaskStarted）。契约：TaskManager 的 runner 必须发 TASK_STARTED
-            # （生产恒为 _make_task_runner；仅测试用 stub runner 时需自行补发）。每次派发（含 retry/resume）
-            # runner 都会被调用一次 → 一条 TaskStarted。
+
+        # ── 阶段 1：装配（assemble）────────────────────────────────────────
+        # 失败发生在 TASK_STARTED 之前 → 投影不会出现幽灵 ACTIVE；与执行失败
+        # 共用重试路径，但 TASK_REQUEUED.reason=assembly_failure 可区分。
+        try:
+            binding = await self._runner.assemble(task_id)
+        except Exception as e:
+            logger.exception("Task %s assembly failed: %s", task_id, e)
+            await self._handle_task_failure(
+                task_id, error=str(e), exc=e, reason="assembly_failure",
+            )
+            return
+        if binding is None:
+            # task 已不存在（装配空转）：镜像旧行为（runner 首行 get_task None 即返回）
+            await self.on_task_finished(task_id, status="FINISHED")
+            return
+
+        # 回填「真正用于执行的 agent id」+ 真实启动时刻；TASK_STARTED 由 TM 发，
+        # 每次派发（含 retry/resume）恰好一条（reducer 只落非空 id；见 spec/07）。
+        if task is not None:
+            task.assigned_agent_id = binding.agent_id
+            task.started_at = now_utc()
+        self._running_agents[task_id] = binding.agent_id
+        await self._emit(EventType.TASK_STARTED, task_id=task_id,
+                         payload={"assigned_agent_id": binding.agent_id})
+
+        # ── 阶段 2：执行（execute）────────────────────────────────────────
         try:
             try:
-                await self._runner(self._session_id, task_id)
+                await self._runner.execute(binding, task_id)
             except BaseException:
                 # cancel(CancelledError) / 异常退出：丢弃未 flush 的缓冲，
                 # 防止泄漏或日后 resume 时被误入队。再交回外层原有处理。
@@ -341,6 +350,7 @@ class TaskManager:
                 # 注：LLM 故障中断（_run_loop except LLMOutageError）也置 SUSPENDED 到此挂起，无子任务，待 /resume 由 restore 重排。
                 async with self._lock:
                     self._running_tasks.discard(task_id)
+                    self._running_agents.pop(task_id, None)
                     self._queue.unmark_running(task_id)
                 await self.drain()
                 # 整个会话因 park/suspend 进入空闲（无在跑任务、无待派子任务）→ 通知 runtime 回收
@@ -353,6 +363,7 @@ class TaskManager:
                 # Observer 判 retry（本轮未完成，含机械退出）：重新入队（retry_count 已在 finalize +1）。
                 async with self._lock:
                     self._running_tasks.discard(task_id)
+                    self._running_agents.pop(task_id, None)
                     self._queue.unmark_running(task_id)
                     self._queue.push(QueueEntry(task_id=task_id, session_id=self._session_id))
                 await self.drain()
@@ -491,7 +502,8 @@ class TaskManager:
         return True
 
     async def _handle_task_failure(
-        self, task_id: str, error: str = "", exc: BaseException | None = None
+        self, task_id: str, error: str = "", exc: BaseException | None = None,
+        reason: str = "run_failure_retry",
     ) -> None:
         """task 失败时：先尝试 retry，超出 max_retries 才真正失败。
 
@@ -519,13 +531,14 @@ class TaskManager:
             )
             async with self._lock:
                 self._running_tasks.discard(task_id)
+                self._running_agents.pop(task_id, None)
                 self._queue.unmark_running(task_id)  # 清除 queue._running，使 pop() 能再次调度
                 entry = QueueEntry(task_id=task_id, session_id=self._session_id)
                 self._queue.push(entry)
             # 重排落事件：使投影从 ACTIVE 回到 PENDING；进程在重试间隙崩溃时
             # restore 据 PENDING 重排（而非把停留 ACTIVE 的任务误当成可恢复后重跑）。
             await self._emit(EventType.TASK_REQUEUED, task_id=task_id, payload={
-                "reason": "run_failure_retry",
+                "reason": reason,
                 "retry_count": task.retry_count,
             })
             await self.drain()
@@ -551,6 +564,7 @@ class TaskManager:
     async def on_task_finished(self, task_id: str, status: TaskStatus) -> None:
         async with self._lock:
             self._running_tasks.discard(task_id)
+            self._running_agents.pop(task_id, None)
             if status == "FAILED":
                 self._queue.mark_failed(task_id)
             else:

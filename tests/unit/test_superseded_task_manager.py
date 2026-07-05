@@ -22,6 +22,7 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
 
@@ -33,7 +34,7 @@ async def _noop_runner(_sid, _tid):
 def _running_tm(rt: CtxWeftRuntime, session: Session, task_id: str) -> TaskManager:
     """构造一个「有一个在跑任务」的 TaskManager，并经 runtime 真实 wiring 注册。"""
     tm = TaskManager(session_id=session.id, event_bus=rt._event_bus, max_concurrent=1)
-    tm.set_runner(_noop_runner)
+    tm.set_runner(StubRunner(tm, _noop_runner))
     tm.set_session(session)
     tm.register_task(Task(id=task_id, session_id=session.id, status="ACTIVE",
                           assigned_agent_id="a", creator_agent_id="a",
@@ -127,9 +128,9 @@ async def test_register_and_drain_marks_older_tm_not_current() -> None:
         return None
 
     tm_old = TaskManager(session_id="s1", event_bus=rt._event_bus, max_concurrent=1)
-    tm_old.set_runner(_noop_runner)
+    tm_old.set_runner(StubRunner(tm_old, _noop_runner))
     tm_new = TaskManager(session_id="s1", event_bus=rt._event_bus, max_concurrent=1)
-    tm_new.set_runner(_noop_runner)
+    tm_new.set_runner(StubRunner(tm_new, _noop_runner))
 
     rt._register_and_drain(sess, tm_old)
     rt._register_and_drain(sess, tm_new)
@@ -146,7 +147,7 @@ async def test_superseded_tm_drain_does_not_dispatch() -> None:
     async def runner(_sid, tid):
         started.append(tid)
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     tm.set_is_current(lambda: False)  # 已被同 session 上更新的 TM 顶替
     await tm.push_task(Task(id="A", session_id="s1", status="PENDING",
                             assigned_agent_id="a", creator_agent_id="a",
@@ -166,7 +167,7 @@ async def test_current_tm_drain_dispatches() -> None:
         started.append(tid)
         await release.wait()  # park 住，避免收尾级联干扰断言
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     tm.set_is_current(lambda: True)
     await tm.push_task(Task(id="A", session_id="s1", status="PENDING",
                             assigned_agent_id="a", creator_agent_id="a",
