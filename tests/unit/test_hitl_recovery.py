@@ -339,3 +339,19 @@ async def test_crash_mid_batch_routes_to_reconcile() -> None:
     await mem.ingest(MemoryEvent(type=MemoryEventType.TOOL_RESULT, scope=sc, content="r1",
         timestamp=base + timedelta(seconds=2), role="tool", metadata={"tool_call_id": "x1"}), pctx)
     assert await _task_has_dangling_tool_call(mem, sc, pctx) is True   # x2 dangling → reconcile
+
+
+def test_rebuild_pending_stores_hitl_request_directly():
+    """合并实体后 rebuild_pending 直存 HitlRequest,不再做字段搬运。"""
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.core.state.models import HitlRequest
+
+    mgr = HitlManager()
+    req = HitlRequest(id="hit_1", form="question", session_id="s1", task_id="t1",
+                      questions=[{"question": "q?"}], arguments={"a": 1})
+    mgr.rebuild_pending({"hit_1": req})
+    got = mgr.get("hit_1")
+    assert got is req                      # 直存同一对象
+    assert got.status == "pending"
+    assert got.questions == [{"question": "q?"}] and got.arguments == {"a": 1}  # 不再丢字段
+    assert mgr.list_pending(session_id="s1") == [req]
