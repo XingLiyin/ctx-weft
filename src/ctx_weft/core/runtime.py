@@ -481,6 +481,11 @@ class CtxWeftRuntime:
     def event_bus(self) -> EventBus:
         return self._event_bus
 
+    @property
+    def template_resolver(self) -> TemplateResolver:
+        """构造时注入的 TemplateResolver（公开只读，host 列模板等场景用，勿绕私有属性）。"""
+        return self._template_resolver
+
     def _resolve_llm(
         self,
         llm_account: str | None = None,
