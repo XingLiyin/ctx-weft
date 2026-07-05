@@ -15,6 +15,7 @@ import asyncio
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+from tests.unit._stub_runner import StubRunner
 
 
 def _session(root_agent_id: str) -> Session:
@@ -100,7 +101,7 @@ async def test_same_agent_tasks_do_not_run_concurrently() -> None:
         start[tid].set()
         await release[tid].wait()
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     await tm.push_task(_task("A"))
     await tm.push_task(_task("B"))
 
@@ -138,7 +139,7 @@ async def test_distinct_subagents_run_in_parallel() -> None:
         start[tid].set()
         await release[tid].wait()
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     await tm.push_task(_subagent_task("A"))
     await tm.push_task(_subagent_task("B"))
 
@@ -170,7 +171,7 @@ async def test_resume_parent_when_all_children_terminal() -> None:
     async def runner(_s: str, _t: str) -> None:
         pass
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     await tm._try_resume_parent("B")
 
     assert parent.status == "ACTIVE"
@@ -190,7 +191,7 @@ async def test_resume_parent_blocked_by_running_sibling() -> None:
     async def runner(_s: str, _t: str) -> None:
         pass
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     await tm._try_resume_parent("A")
 
     assert parent.status == "SUSPENDED", "有子任务在跑时父不得 resume"
@@ -207,7 +208,7 @@ async def test_resume_parent_empty_children_set_no_resume() -> None:
     async def runner(_s: str, _t: str) -> None:
         pass
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     await tm._try_resume_parent("C")
 
     assert parent.status == "SUSPENDED"
@@ -228,7 +229,7 @@ async def test_resume_parent_not_double_resumed() -> None:
     async def runner(_s: str, _t: str) -> None:
         pass
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     await tm._try_resume_parent("A")
     assert parent.status == "ACTIVE"
     n_after_first = tm._queue.pending_count()

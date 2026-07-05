@@ -15,6 +15,7 @@ import pytest
 from ctx_weft.core.events.types import EVENT_TYPES, EventType
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Task
+from tests.unit._stub_runner import StubRunner
 
 
 def _task(tid: str, parent: str | None = None) -> Task:
@@ -116,22 +117,17 @@ async def test_push_task_persists_before_run() -> None:
     assert bus.events[0].task_id == "A"
 
 
-async def test_run_task_started_via_runner_not_created() -> None:
+async def test_run_task_started_by_tm_exactly_once() -> None:
     bus = _CapturingBus()
     tm = TaskManager(session_id="s1", event_bus=bus)
     parent = _task("P")
     tm.register_task(parent)
+    tm.set_runner(StubRunner(tm))
 
-    async def runner(_session_id: str, task_id: str) -> None:
-        # TASK_STARTED 由 runner 发（契约）——_run_task 不再自发以免双发；真实 _make_task_runner
-        # 在 _resolve 后发，带 resolved agent id。这里镜像该契约。
-        await tm._emit(EventType.TASK_STARTED, task_id=task_id, payload={"assigned_agent_id": "ag1"})
-
-    tm.set_runner(runner)
     await tm._run_task("P")
 
     types = [e.type for e in bus.events]
-    # 每次派发恰好一条 TaskStarted（由 runner），不发 TaskCreated（创建由 push_task 负责）
+    # 每次派发恰好一条 TaskStarted（由 TM 在 assemble 后发），不发 TaskCreated（创建由 push_task 负责）
     assert types.count("TaskStarted") == 1
     assert "TaskCreated" not in types
 
@@ -168,7 +164,7 @@ async def test_run_layer_failure_emits_task_failed() -> None:
     async def runner(_s: str, _t: str) -> None:
         pass
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     t = _task("A")
     tm.register_task(t)
 
@@ -192,7 +188,7 @@ async def test_retry_emits_task_requeued() -> None:
     async def runner(_s: str, _t: str) -> None:
         pass
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     t = _task("A")
     tm.register_task(t)
 
@@ -217,7 +213,7 @@ async def test_run_task_discards_staged_on_cancel() -> None:
         tm.stage_task(_task("child", parent="P"), parent_task_id="P")
         raise asyncio.CancelledError()
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
 
     with pytest.raises(asyncio.CancelledError):
         await tm._run_task("P")
@@ -236,7 +232,7 @@ async def test_run_task_flushes_staged_on_normal_return() -> None:
         if task_id == "P":
             tm.stage_task(_task("child", parent="P"), parent_task_id="P")
 
-    tm.set_runner(runner)
+    tm.set_runner(StubRunner(tm, runner))
     await tm._run_task("P")
 
     assert tm._staged == {}                 # P 的缓冲已 flush 清空

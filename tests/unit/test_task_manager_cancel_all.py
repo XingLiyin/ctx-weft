@@ -6,6 +6,7 @@ from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
 
@@ -34,7 +35,7 @@ async def test_cancel_all_cancels_pending_and_session():
 
 async def test_drain_is_a_noop_after_cancel_all():
     tm = _tm()
-    tm.set_runner(lambda sid, tid: None)        # would be called if drain scheduled
+    tm.set_runner(StubRunner(tm))               # would be called if drain scheduled
     tm.register_task(Task(id="a", session_id="s1", status="PENDING",
                           settings=NormalTaskSettings()))
     tm._queue.push(QueueEntry(task_id="a", session_id="s1"))
