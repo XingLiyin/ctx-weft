@@ -4,6 +4,8 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.task_runner import AgentBinding
+from ctx_weft.core.runtime import _SessionTaskRunner
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.providers.llm.mock import MockLLMAdapter
@@ -85,6 +87,103 @@ async def test_pause_session_idle_session_is_noop_false():
     _wire(rt)   # TM 存在但无在跑、无排队 → is_done
     assert await rt.pause_session("s1") is False
     assert "s1" not in rt._pausing
+
+
+# ── I-1：assemble 窗口内到达的信号，在 execute 派发点补投 ────────────────────────
+
+
+class _StubExecTM:
+    """最小 TaskManager 替身：只提供 execute 补偿逻辑要用的 get_task / is_cancelled。"""
+
+    def __init__(self, *, cancelled: bool = False):
+        self._cancelled = cancelled
+        self._task = _task("t1", status="ACTIVE")
+
+    def get_task(self, tid):
+        return self._task
+
+    def is_cancelled(self):
+        return self._cancelled
+
+
+def _exec_runner(rt, tm, *, root_agent_id="agr") -> _SessionTaskRunner:
+    sess = Session(id="s1", tenant_id="default", user_prompt="x",
+                   status="RUNNING", token_budget=0, root_agent_id=root_agent_id)
+    return _SessionTaskRunner(
+        runtime=rt, session=sess, template=None, template_id="tmpl",
+        lm=None, memory=None, llm_account=None, llm_model=None,
+        task_manager=tm, default_run_id="run1", handle=None,
+    )
+
+
+async def _run_execute(rt, runner, *, agent_id):
+    """经真实 execute 路径跑一次派发；拦下 _execute_task（loop）只记录收到的令牌。"""
+    captured: dict = {}
+
+    async def _fake_exec(**kw):
+        captured["cancel"] = kw.get("cancel_token")
+        captured["pause"] = kw.get("pause_token")
+        return (None, None)
+
+    rt._execute_task = _fake_exec
+    await runner.execute(AgentBinding(agent_id=agent_id), "t1")
+    return captured
+
+
+async def test_execute_born_cancel_when_tm_cancelled():
+    # TM 已整体取消（cancel_all 置 _cancelled）→ 之后经 execute 派发的 run 出生即取消
+    rt = _rt()
+    runner = _exec_runner(rt, _StubExecTM(cancelled=True))
+    cap = await _run_execute(rt, runner, agent_id="agr")
+    assert cap["cancel"].is_cancelled is True
+
+
+async def test_execute_born_cancel_for_non_root_run_during_pause():
+    # _pausing 中、派发 agent 非 root → 弃子窗口内的迟到 run born-cancel（不额外 park 第二气泡）
+    rt = _rt()
+    rt._pausing.add("s1")
+    runner = _exec_runner(rt, _StubExecTM(), root_agent_id="agr")
+    cap = await _run_execute(rt, runner, agent_id="ag_sub")
+    assert cap["cancel"].is_cancelled is True
+
+
+async def test_execute_root_run_stays_born_paused_during_pause():
+    # _pausing 中、派发 agent == root → 保持 born-paused（补偿逻辑不得把它 cancel）
+    rt = _rt()
+    rt._pausing.add("s1")
+    runner = _exec_runner(rt, _StubExecTM(), root_agent_id="agr")
+    cap = await _run_execute(rt, runner, agent_id="agr")
+    assert cap["cancel"].is_cancelled is False
+    assert cap["pause"].is_paused is True
+
+
+# ── I-2（runtime 级）：pause 恰逢 root 任务已入队未派发 → 保留、不随全清取消 ───────────
+
+
+async def test_pause_session_keeps_queued_root_task():
+    rt = _rt()
+    tm = TaskManager(session_id="s1", max_concurrent=1)
+    sess = Session(id="s1", tenant_id="default", user_prompt="x",
+                   status="RUNNING", token_budget=0, root_agent_id="agr")
+    tm.set_session(sess)
+    tm.set_runner(_StubRunner())
+    rt._task_managers["s1"] = tm
+    # 子 agent run 在跑，占满单并发槽（drain 补 no-op）
+    tm.register_task(_task("t_sub", status="ACTIVE"))
+    tm._running_tasks.add("t_sub")
+    tm._running_agents["t_sub"] = "ag_sub"
+    sub_tokens = rt._register_run_tokens("s1", "t_sub")
+    # root agent 任务仅入队、未派发
+    root_task = _task("t_root")
+    root_task.assigned_agent_id = "agr"
+    await tm.push_task(root_task)
+
+    assert await rt.pause_session("s1") is True
+    # root 未被弃子取消、仍在队列待派发
+    assert tm.get_task("t_root").status != "CANCELED"
+    assert any(e.task_id == "t_root" for e in tm._queue.peek_all())
+    # 子 run 被 cancel
+    assert sub_tokens.cancel.is_cancelled is True
 
 
 async def test_pause_task_targets_single_run():

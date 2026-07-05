@@ -618,6 +618,11 @@ class TaskManager:
         # 若 queue 已空且无任务在运行，通知 session 真正结束
         # （有重试时 drain() 会把重试任务入队，is_done() 为 False，不触发）
         if self.is_done():
+            # 被顶替旧 TM 的迟到收尾不得代表会话发终态/空闲信号——新 owner 的状态才是真相。
+            # runtime 侧回调本就 compare-and-check，这里连事件（stale SESSION_STATUS_CHANGED /
+            # SESSION_FINISHED）也一并静默，避免污染事件流的 host 显示与重放。
+            if self._is_current is not None and not self._is_current():
+                return
             # queue 空、无在跑任务；但若仍有未决 HITL 的 parked 任务，会话是"空闲等应答"而非"完成"
             # ——绝不能发 SESSION_FINISHED 把 parked 任务孤立（真相以 pending-HITL 为准，spec/07 §9.1）。
             if self._has_pending_hitl is not None and self._has_pending_hitl():
@@ -784,6 +789,10 @@ class TaskManager:
             task_id=task_id, session_id=self._session_id, priority=t.priority,
         ))
 
+    def is_cancelled(self) -> bool:
+        """本 TM 是否已被硬取消（cancel_all 置 _cancelled）——供派发点补投 born-cancel 判定。"""
+        return self._cancelled
+
     def is_alive(self) -> bool:
         """本 TM 是否仍在驱动该 session（未终结、且仍是当前 owner）。
 
@@ -810,21 +819,39 @@ class TaskManager:
         """
         self._pause_abandon = flag
 
-    async def abandon_pending(self, *, reason: str = "pause_abandon") -> list[str]:
-        """放弃全部排队中任务（标 CANCELED、发 TASK_CANCELED），不触碰 session 状态。
+    async def abandon_pending(
+        self, *, reason: str = "pause_abandon", keep_agent: str | None = None,
+    ) -> list[str]:
+        """放弃排队中任务（标 CANCELED、发 TASK_CANCELED），不触碰 session 状态。
 
-        与 cancel_all 的差异：不置 _cancelled（弃子后 _try_resume_parent 重排 root agent
-        任务仍需 drain 派发）、不把 session 置 CANCELED（pause 弃子不是用户取消）。
+        ``keep_agent`` 非 None **且该 agent 当前没有在途 run** 时：effective agent 等于它的
+        排队条目保留在队列（相对顺序不变）、不放弃——pause 弃子须保留 root agent 已入队未派发
+        的那一条（root run 尚未派发、无可 pause 的对象），交由调用方补 drain 派发成为唯一续跑点；
+        否则它随全清被误取消，会话既无在途 run 又无排队条目、无气泡 → 永久滞留 RUNNING。
+        keep_agent 已有在途 run（那一轮已被 pause→park 成续跑点）或为 None 时，root-scope 排队
+        条目照旧全清——保证「一次暂停恰一个续跑点」，与全清行为一致。
+
+        与 cancel_all 的差异：不置 _cancelled（弃子后仍需 drain 派发保留/重排的任务）、
+        不把 session 置 CANCELED（pause 弃子不是用户取消）。
         """
         async with self._lock:
-            pending = self._queue.drain_pending()
-        for tid in pending:
+            entries = self._queue.peek_all()
+            self._queue.drain_pending()
+            busy_agents = set(self._running_agents.values())
+            keep = keep_agent is not None and keep_agent not in busy_agents
+            cancelled: list[str] = []
+            for e in entries:
+                if keep and self._effective_agent(self._tasks.get(e.task_id)) == keep_agent:
+                    self._queue.push(e)  # 保留：相对顺序按原队列顺序回填
+                else:
+                    cancelled.append(e.task_id)
+        for tid in cancelled:
             t = self._tasks.get(tid)
             if t is not None:
                 t.status = "CANCELED"
                 t.finished_at = now_utc()
             await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": reason})
-        return pending
+        return cancelled
 
 
 def _outputs_to_text(outputs: Any) -> str:

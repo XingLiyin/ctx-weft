@@ -46,6 +46,22 @@ async def test_abandon_pending_cancels_queue_without_touching_session():
     assert tm.is_done() is True          # 队列已空、无在跑
 
 
+async def test_abandon_pending_keeps_root_agent_queued_task():
+    # keep_agent：root agent scope 的排队条目保留（不随全清取消），供 pause 补 drain 派发。
+    tm, sess = _tm_with_session()   # root_agent_id="agr"
+    root_task = _task("t_root")
+    root_task.assigned_agent_id = "agr"          # 在 root agent scope
+    other = _task("t_other")
+    other.assigned_agent_id = "ag_sub"           # 非 root
+    await tm.push_task(root_task)
+    await tm.push_task(other)
+    cancelled = await tm.abandon_pending(keep_agent="agr")
+    assert cancelled == ["t_other"]
+    assert any(e.task_id == "t_root" for e in tm._queue.peek_all())
+    assert tm.get_task("t_root").status != "CANCELED"
+    assert tm.get_task("t_other").status == "CANCELED"
+
+
 async def test_pause_abandon_guard_keeps_session_status_on_cancel():
     tm, sess = _tm_with_session()
     tm.register_task(_task("t1", status="ACTIVE"))

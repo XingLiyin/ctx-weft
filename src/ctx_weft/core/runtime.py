@@ -559,12 +559,17 @@ class CtxWeftRuntime:
         if tm is not None:
             tm.set_pause_abandon(True)
             root_agent = (tm.session.root_agent_id or "") if tm.session is not None else ""
-            await tm.abandon_pending(reason="pause_abandon")
+            # 保留 root agent 已入队未派发的那一条（keep_agent），其余排队任务弃子。
+            await tm.abandon_pending(reason="pause_abandon", keep_agent=root_agent or None)
         for task_id, tokens in list(per.items()):
             if root_agent and tm is not None and tm.running_agent_of(task_id) == root_agent:
                 tokens.pause.pause()
             else:
                 tokens.cancel.cancel()
+        # 补 drain：把保留的 root 排队条目派发出去——它出生即 paused → act 首检查点 park 出唯一
+        # 气泡，成为本次暂停的续跑点。对空队列 / 满并发是安全 no-op。放在信号循环后、兜底前。
+        if tm is not None:
+            await tm.drain()
         # 竞态兜底：信号发完会话已静止（root 恰好收尾、无可 park 对象）→ 立即清闩锁防残留。
         if tm is not None and tm.is_done():
             self._pausing.discard(session_id)
@@ -1668,6 +1673,14 @@ class _SessionTaskRunner:
         # 单 owner 架构 seam：model 在派发时从可变 session 读取；控制令牌 per-run 发放——
         # 随本次派发登记进 runtime registry、run 结束注销，pause/cancel 经 registry 必达在途 run。
         tokens = self._runtime._register_run_tokens(self._session.id, task_id)
+        # assemble 窗口补偿：令牌到派发点才发放，窗口内到达的 cancel/pause 信号在此按
+        # 会话当前状态补投——TM 已整体取消 → 本 run 出生即取消；pause 弃子窗口内非
+        # root agent 的迟到 run 按弃子处理（born-cancel），保证一次暂停恰一个续跑点。
+        if self._task_manager.is_cancelled():
+            tokens.cancel.cancel()
+        elif (self._session.id in self._runtime._pausing
+                and binding.agent_id != (self._session.root_agent_id or "")):
+            tokens.cancel.cancel()
         try:
             s, _ = await self._runtime._execute_task(
                 session=self._session,
