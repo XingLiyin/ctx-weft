@@ -17,7 +17,7 @@ pytestmark = pytest.mark.asyncio
 async def test_request_parked_registers_pending_without_live_future() -> None:
     mgr = HitlManager(event_bus=InProcessEventBus())
     rid = await mgr.request_parked(
-        kind="input", session_id="s1", task_id="t1", agent_id="ag1",
+        form="wait", session_id="s1", task_id="t1", agent_id="ag1",
         capability_id="control:wait_for_user", question="anything else?",
     )
     # pending 已登记（供 /hitl/pending 与崩溃恢复重建）
@@ -35,7 +35,7 @@ async def test_parked_answer_triggers_cold_resolve() -> None:
 
     mgr = HitlManager(event_bus=InProcessEventBus(), on_cold_resolve=on_cold)
     rid = await mgr.request_parked(
-        kind="input", session_id="s1", task_id="t1", agent_id="ag1",
+        form="wait", session_id="s1", task_id="t1", agent_id="ag1",
         capability_id="control:wait_for_user", question="q",
     )
 

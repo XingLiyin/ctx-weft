@@ -15,8 +15,8 @@ def test_hitl_park_is_base_exception_not_exception() -> None:
 
 def test_hitl_park_carries_ids() -> None:
     from ctx_weft.core.loop.park import HitlPark
-    p = HitlPark(request_id="hit_1", tool_call_id="tc1")
-    assert p.request_id == "hit_1" and p.tool_call_id == "tc1"
+    p = HitlPark(hitl_id="hit_1", tool_call_id="tc1")
+    assert p.hitl_id == "hit_1" and p.tool_call_id == "tc1"
 
 
 def test_authorization_decision_has_defer_default_false() -> None:
@@ -129,7 +129,7 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
         async def run(
             self, initial_state: LoopState, ctx: LoopContext
         ) -> AsyncIterator[StepOutcome]:
-            raise HitlPark(request_id="req_park", tool_call_id="tc_park")
+            raise HitlPark(hitl_id="req_park", tool_call_id="tc_park")
             yield  # make it an async generator
 
     # ── runtime wired with real bus + memory (no LLM needed) ─────────────────
@@ -198,7 +198,7 @@ async def test_timeout_evicts_to_cold_keeps_pending() -> None:
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
     from ctx_weft.core.loop.park import HitlPark
     mgr = HitlManager(timeout_sec=0)
-    rid = await mgr.request(kind="input", session_id="s1", task_id="t1", tool_call_id="tc1")
+    rid = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tc1")
     with pytest.raises(HitlPark):
         await mgr.wait(rid)
     assert mgr.get(rid).status == "pending"        # 仍 pending（hot→cold，不是 timeout 终态）
@@ -211,7 +211,7 @@ async def test_answer_before_timeout_is_hot_and_wins() -> None:
     import asyncio
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
     mgr = HitlManager(timeout_sec=None)             # never times out
-    rid = await mgr.request(kind="input", session_id="s1", task_id="t1", tool_call_id="tc1")
+    rid = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tc1")
     waiter = asyncio.create_task(mgr.wait(rid))
     await asyncio.sleep(0)
     resolved, was_hot = await mgr.resolve_answer(rid, "answered")
@@ -227,7 +227,7 @@ async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:
     from ctx_weft.protocols.capability import ToolCapability
 
     mgr = HitlManager()
-    rid = await mgr.request(kind="approval", session_id="s1", task_id="t1", tool_call_id="tcZ")
+    rid = await mgr.request(form="approval", session_id="s1", task_id="t1", tool_call_id="tcZ")
     await mgr.approve(rid, modified_arguments={"command": "ls -la"})
 
     authz = HumanConfirmationAuthorizer(hitl_manager=mgr)
@@ -244,7 +244,7 @@ async def test_authorize_cold_no_future_does_not_keyerror() -> None:
     """restart 后：rebuild_pending(无 future) + 冷 resolve → authorize 必须短路（否则 wait() KeyError）。"""
     from types import SimpleNamespace
     from ctx_weft.core.auth import HumanConfirmationAuthorizer
-    from ctx_weft.core.control.types import HitlRequestView
+    from ctx_weft.core.state.models import HitlRequest
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
     from ctx_weft.protocols import ProviderContext
     from ctx_weft.protocols.capability import ToolCapability
@@ -252,8 +252,8 @@ async def test_authorize_cold_no_future_does_not_keyerror() -> None:
     mgr = HitlManager()
     # 模拟 restart：从 view 重建 pending（无 future）
     mgr.rebuild_pending({
-        "hit_1": HitlRequestView(id="hit_1", kind="approval", session_id="s1",
-                                 task_id="t1", capability_id="fs:bash_exec", tool_call_id="tcR"),
+        "hit_1": HitlRequest(id="hit_1", form="approval", session_id="s1",
+                             task_id="t1", capability_id="fs:bash_exec", tool_call_id="tcR"),
     })
     # 冷应答（无 future → was_hot False）
     _resolved, was_hot = await mgr.resolve_approve("hit_1", modified_arguments={"command": "ls -la"})

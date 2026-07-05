@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from ctx_weft.core.control.types import HitlRequestView
+from ctx_weft.core.state.models import HitlRequest
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 
 
@@ -23,16 +23,16 @@ class _Recorder:
         self.calls.append(req.session_id)
 
 
-def _cold_mgr(rec: _Recorder, *, kind: str = "input", session_id: str = "s1") -> HitlManager:
+def _cold_mgr(rec: _Recorder, *, form: str = "question", session_id: str = "s1") -> HitlManager:
     """重启后状态：rebuild_pending 重建 pending 但不建 future → 应答必走冷。"""
     mgr = HitlManager(on_cold_resolve=rec)
-    mgr.rebuild_pending({"hit1": HitlRequestView(id="hit1", kind=kind, session_id=session_id, task_id="t1")})
+    mgr.rebuild_pending({"hit1": HitlRequest(id="hit1", form=form, session_id=session_id, task_id="t1")})
     return mgr
 
 
 async def test_cold_answer_resumes() -> None:
     rec = _Recorder()
-    mgr = _cold_mgr(rec, kind="input")
+    mgr = _cold_mgr(rec, form="question")
     req = await mgr.answer("hit1", "use postgres")
     assert req.status == "accepted"
     assert rec.calls == ["s1"]
@@ -40,14 +40,14 @@ async def test_cold_answer_resumes() -> None:
 
 async def test_cold_approve_resumes() -> None:
     rec = _Recorder()
-    mgr = _cold_mgr(rec, kind="approval")
+    mgr = _cold_mgr(rec, form="approval")
     await mgr.approve("hit1")
     assert rec.calls == ["s1"]
 
 
 async def test_cold_reject_resumes() -> None:
     rec = _Recorder()
-    mgr = _cold_mgr(rec, kind="approval")
+    mgr = _cold_mgr(rec, form="approval")
     await mgr.reject("hit1", message="no")
     assert rec.calls == ["s1"]
 
@@ -55,14 +55,14 @@ async def test_cold_reject_resumes() -> None:
 async def test_hot_answer_does_not_resume() -> None:
     rec = _Recorder()
     mgr = HitlManager(on_cold_resolve=rec)
-    rid = await mgr.request(kind="input", session_id="s1", task_id="t1", tool_call_id="tc1")  # 建 future → 热
+    rid = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tc1")  # 建 future → 热
     await mgr.answer(rid, "hi")
     assert rec.calls == []
 
 
 async def test_cancel_never_resumes() -> None:
     rec = _Recorder()
-    mgr = _cold_mgr(rec, kind="input")
+    mgr = _cold_mgr(rec, form="question")
     await mgr.cancel("hit1")
     assert mgr.get("hit1").status == "cancelled"
     assert rec.calls == []                       # 终态,不 requeue,不 resume
@@ -70,7 +70,7 @@ async def test_cancel_never_resumes() -> None:
 
 async def test_resolved_idempotent_does_not_resume_twice() -> None:
     rec = _Recorder()
-    mgr = _cold_mgr(rec, kind="input")
+    mgr = _cold_mgr(rec, form="question")
     await mgr.answer("hit1", "first")
     await mgr.answer("hit1", "second")           # 已 accepted → 幂等 no-op
     assert rec.calls == ["s1"]                    # 只 resume 一次
@@ -84,7 +84,7 @@ async def test_cold_answer_forwards_resume_llm() -> None:
         captured.append((req.resume_llm_account, req.resume_llm_model))
 
     mgr = HitlManager(on_cold_resolve=handler)
-    mgr.rebuild_pending({"hit1": HitlRequestView(id="hit1", kind="input", session_id="s1", task_id="t1")})
+    mgr.rebuild_pending({"hit1": HitlRequest(id="hit1", form="question", session_id="s1", task_id="t1")})
     await mgr.answer("hit1", "go", llm_account="acct", llm_model="new-model")
     assert captured == [("acct", "new-model")]
 
@@ -97,7 +97,7 @@ async def test_cold_answer_without_llm_leaves_override_none() -> None:
         captured.append((req.resume_llm_account, req.resume_llm_model))
 
     mgr = HitlManager(on_cold_resolve=handler)
-    mgr.rebuild_pending({"hit1": HitlRequestView(id="hit1", kind="input", session_id="s1", task_id="t1")})
+    mgr.rebuild_pending({"hit1": HitlRequest(id="hit1", form="question", session_id="s1", task_id="t1")})
     await mgr.answer("hit1", "go")
     assert captured == [(None, None)]
 
@@ -106,6 +106,6 @@ async def test_setter_binds_handler_late() -> None:
     rec = _Recorder()
     mgr = HitlManager()                           # 无回调构造
     mgr.set_cold_resolve_handler(rec)            # 晚绑定（Runtime 绑 recover_session 的方式）
-    mgr.rebuild_pending({"hit1": HitlRequestView(id="hit1", kind="input", session_id="s9", task_id="t1")})
+    mgr.rebuild_pending({"hit1": HitlRequest(id="hit1", form="question", session_id="s9", task_id="t1")})
     await mgr.answer("hit1", "x")
     assert rec.calls == ["s9"]

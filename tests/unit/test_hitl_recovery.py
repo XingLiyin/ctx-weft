@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.control.types import HitlRequestView
+from ctx_weft.core.state.models import HitlRequest
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from tests.unit._stub_runner import StubRunner
 
@@ -14,8 +14,8 @@ pytestmark = pytest.mark.asyncio
 def test_rebuild_pending_restores_requests_without_futures() -> None:
     mgr = HitlManager()
     mgr.rebuild_pending({
-        "hit_1": HitlRequestView(
-            id="hit_1", kind="input", session_id="s1", task_id="t1",
+        "hit_1": HitlRequest(
+            id="hit_1", form="question", session_id="s1", task_id="t1",
             capability_id="control:rhi", tool_call_id="tc1", question="Which DB?",
         ),
     })
@@ -29,8 +29,8 @@ def test_rebuild_pending_restores_requests_without_futures() -> None:
 async def test_answer_rebuilt_request_is_cold() -> None:
     mgr = HitlManager()
     mgr.rebuild_pending({
-        "hit_1": HitlRequestView(id="hit_1", kind="input", session_id="s1",
-                                 task_id="t1", tool_call_id="tc1"),
+        "hit_1": HitlRequest(id="hit_1", form="question", session_id="s1",
+                             task_id="t1", tool_call_id="tc1"),
     })
     resolved, was_hot = await mgr.resolve_answer("hit_1", "use postgres")
     assert resolved.status == "accepted" and resolved.message == "use postgres"
@@ -95,7 +95,7 @@ async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
             "id": "tsk_1", "status": "PENDING", "title": "T1",
             "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"}),
         ev(4, EventType.TASK_STARTED, task_id="tsk_1", assigned_agent_id="agt_root"),
-        ev(5, EventType.HITL_REQUIRED, task_id="tsk_1", approval_id="hit_1", kind="input",
+        ev(5, EventType.HITL_REQUIRED, task_id="tsk_1", hitl_id="hit_1", form="question",
            capability_id="control:ask_user", tool_call_id="tcA", question="Which DB?"),
         ev(6, EventType.TASK_SUSPENDED, task_id="tsk_1"),
     ]
@@ -209,7 +209,7 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
         ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
         ev(2, EventType.RUN_STARTED),
         ev(3, EventType.TASK_STARTED, task_id="t1", assigned_agent_id="agt"),
-        ev(4, EventType.HITL_REQUIRED, task_id="t1", approval_id="h1", kind="approval",
+        ev(4, EventType.HITL_REQUIRED, task_id="t1", hitl_id="h1", form="approval",
            capability_id="fs:bash_exec", tool_call_id="tc1", question="ok?"),
     ]
     for e in seed:

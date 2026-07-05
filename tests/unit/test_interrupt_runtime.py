@@ -71,7 +71,7 @@ async def test_inject_user_reply_phase1_adds_edit_note():
     ), pctx)
 
     req = HitlRequest(
-        id="h1", kind="input", session_id="s1", task_id="t1", agent_id="ag1",
+        id="h1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
         capability_id="control:wait_for_user", context="interrupt:edit",
         status="accepted", message="新请求Y",
     )
@@ -96,7 +96,7 @@ async def test_inject_user_reply_non_edit_has_no_note():
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
     req = HitlRequest(
-        id="h1", kind="input", session_id="s1", task_id="t1", agent_id="ag1",
+        id="h1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
         capability_id="control:wait_for_user", context="interrupt",  # ② not edit
         status="accepted", message="just continue",
     )

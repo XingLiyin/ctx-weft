@@ -45,7 +45,7 @@ async def _recall_user_prompts(mem: InMemoryMemoryProvider) -> list:
 
 def _wait_for_user_req(status: str = "accepted", message: str = "ship it") -> HitlRequest:
     return HitlRequest(
-        id="hit1", kind="input", session_id="s1", task_id="t1", agent_id="ag1",
+        id="hit1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
         capability_id="control:wait_for_user", status=status, message=message,
     )
 
@@ -112,7 +112,7 @@ async def test_resume_act_ask_user_uses_reconcile(monkeypatch) -> None:
 
     monkeypatch.setattr(rt, "recover_session", fake_recover)
     req = HitlRequest(
-        id="h2", kind="input", session_id="s1", task_id="t1",
+        id="h2", form="question", session_id="s1", task_id="t1",
         capability_id="control:ask_user", status="accepted", message="postgres",
     )
     await rt._resume_after_cold_hitl(req)
@@ -130,7 +130,7 @@ async def test_resume_approval_uses_reconcile(monkeypatch) -> None:
 
     monkeypatch.setattr(rt, "recover_session", fake_recover)
     req = HitlRequest(
-        id="h3", kind="approval", session_id="s1", task_id="t1",
+        id="h3", form="approval", session_id="s1", task_id="t1",
         capability_id="bash:run", status="accepted",
     )
     await rt._resume_after_cold_hitl(req)

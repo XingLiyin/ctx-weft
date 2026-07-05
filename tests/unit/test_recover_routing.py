@@ -39,11 +39,11 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
 
     # A: 有未解决 pending HITL → 只重建 HitlManager
     await store.append(_ev(1, "A", EventType.SESSION_CREATED, template_id="t"))
-    await store.append(_ev(2, "A", EventType.HITL_REQUIRED, approval_id="hA", kind="input", tool_call_id="tcA"))
+    await store.append(_ev(2, "A", EventType.HITL_REQUIRED, hitl_id="hA", form="question", tool_call_id="tcA"))
     # B: HITL 已答复 → 无 pending → interrupt(event)
     await store.append(_ev(1, "B", EventType.SESSION_CREATED, template_id="t"))
-    await store.append(_ev(2, "B", EventType.HITL_REQUIRED, approval_id="hB", kind="input"))
-    await store.append(_ev(3, "B", EventType.HITL_ANSWERED, approval_id="hB"))
+    await store.append(_ev(2, "B", EventType.HITL_REQUIRED, hitl_id="hB", form="question"))
+    await store.append(_ev(3, "B", EventType.HITL_ANSWERED, hitl_id="hB"))
     # C: 从无 HITL → interrupt(event)
     await store.append(_ev(1, "C", EventType.SESSION_CREATED, template_id="t"))
 
@@ -69,9 +69,9 @@ async def test_recover_multi_hitl_partial_resolve_still_pending() -> None:
     runtime = CtxWeftRuntime(template_resolver=InMemoryTemplateResolver())
     store = runtime.event_store
     await store.append(_ev(1, "M", EventType.SESSION_CREATED, template_id="t"))
-    await store.append(_ev(2, "M", EventType.HITL_REQUIRED, approval_id="h1", kind="input"))
-    await store.append(_ev(3, "M", EventType.HITL_REQUIRED, approval_id="h2", kind="approval"))
-    await store.append(_ev(4, "M", EventType.HITL_ANSWERED, approval_id="h1"))
+    await store.append(_ev(2, "M", EventType.HITL_REQUIRED, hitl_id="h1", form="question"))
+    await store.append(_ev(3, "M", EventType.HITL_REQUIRED, hitl_id="h2", form="approval"))
+    await store.append(_ev(4, "M", EventType.HITL_ANSWERED, hitl_id="h1"))
 
     interrupted = _capture_interrupts(runtime)
     await runtime.recover()

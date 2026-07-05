@@ -29,9 +29,9 @@ from ctx_weft.protocols.capability import ToolCapability
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
 
-async def _request(mgr: HitlManager, kind: str = "approval") -> str:
+async def _request(mgr: HitlManager, form: str = "approval") -> str:
     return await mgr.request(
-        kind=kind, session_id="s1", task_id="tsk_1", capability_id="fs:bash_exec",
+        form=form, session_id="s1", task_id="tsk_1", capability_id="fs:bash_exec",
         arguments={"command": "ls"}, question="Allow bash?", context="runs shell",
     )
 
@@ -53,7 +53,7 @@ async def test_request_then_approve() -> None:
     mgr = HitlManager()
     rid = await _request(mgr)
     assert mgr.list_pending() and mgr.list_pending()[0].id == rid
-    assert mgr.get(rid).kind == "approval" and mgr.get(rid).status == "pending"
+    assert mgr.get(rid).form == "approval" and mgr.get(rid).status == "pending"
 
     await mgr.approve(rid)
     req = await mgr.wait(rid)
@@ -80,7 +80,7 @@ async def test_approve_with_modified_arguments() -> None:
 
 async def test_answer_input_kind() -> None:
     mgr = HitlManager()
-    rid = await _request(mgr, kind="input")
+    rid = await _request(mgr, form="question")
     await mgr.answer(rid, "use postgres")
     req = await mgr.wait(rid)
     assert req.status == "accepted" and req.message == "use postgres"
@@ -98,7 +98,7 @@ async def test_wait_timeout_raises_park_and_keeps_pending() -> None:
 async def test_answer_after_timeout_resolves_cold() -> None:
     from ctx_weft.core.loop.park import HitlPark
     mgr = HitlManager(timeout_sec=0)
-    rid = await _request(mgr, kind="input")
+    rid = await _request(mgr, form="question")
     with pytest.raises(HitlPark):
         await mgr.wait(rid)
     resolved, was_hot = await mgr.resolve_answer(rid, "late")
@@ -113,8 +113,8 @@ async def test_wait_unknown_id_raises() -> None:
 
 async def test_list_pending_filters_by_session() -> None:
     mgr = HitlManager()
-    a1 = await mgr.request(kind="input", session_id="s1", task_id="", question="q1")
-    await mgr.request(kind="input", session_id="s2", task_id="", question="q2")
+    a1 = await mgr.request(form="question", session_id="s1", task_id="", question="q1")
+    await mgr.request(form="question", session_id="s2", task_id="", question="q2")
     assert [p.id for p in mgr.list_pending(session_id="s1")] == [a1]
 
 
@@ -132,7 +132,7 @@ async def test_resolution_events_per_kind() -> None:
 
     await mgr.approve(await _request(mgr))                                  # HitlApproved
     await mgr.approve(await _request(mgr), modified_arguments={"x": 1})     # HitlModified
-    await mgr.answer(await _request(mgr, kind="input"), "ans")             # HitlAnswered
+    await mgr.answer(await _request(mgr, form="question"), "ans")             # HitlAnswered
     await mgr.reject(await _request(mgr))                                   # HitlRejected
 
     for t in ("HitlApproved", "HitlModified", "HitlAnswered", "HitlRejected"):
@@ -157,7 +157,7 @@ async def _filter_with_response(mgr: HitlManager, respond) -> list:
         authorizer.filter([_cap()], _agent(), SimpleNamespace(id="tsk_1"), ctx, {"command": "ls"})
     )
     req = await _await_pending(mgr)
-    assert req.kind == "approval"
+    assert req.form == "approval"
     await respond(req.id)
     return await ftask
 
@@ -243,7 +243,7 @@ async def test_ask_user_returns_answer() -> None:
         provider, "ask_user", {"questions": [{"question": "Which DB?"}]}
     )
     req = await _await_pending(mgr)
-    assert req.kind == "input"
+    assert req.form == "question"
     assert session.status == "PAUSED_HITL"      # park 期间会话挂起
     await mgr.answer(req.id, "use postgres")
     await task_h
@@ -303,7 +303,7 @@ def test_hitl_cancelled_is_registered_event() -> None:
 async def test_request_stores_tool_call_id() -> None:
     mgr = HitlManager()
     rid = await mgr.request(
-        kind="approval", session_id="s1", task_id="t1",
+        form="approval", session_id="s1", task_id="t1",
         capability_id="fs:bash_exec", tool_call_id="tc_42", question="ok?",
     )
     assert mgr.get(rid).tool_call_id == "tc_42"
@@ -313,7 +313,7 @@ async def test_cancel_moves_to_cancelled_and_emits() -> None:
     bus = InProcessEventBus()
     seen = _collect(bus)
     mgr = HitlManager(event_bus=bus)
-    rid = await _request(mgr, kind="input")
+    rid = await _request(mgr, form="question")
     await mgr.cancel(rid)
     assert mgr.get(rid).status == "cancelled"
     assert mgr.list_pending() == []
@@ -322,7 +322,7 @@ async def test_cancel_moves_to_cancelled_and_emits() -> None:
 
 async def test_cancel_is_idempotent_after_resolve() -> None:
     mgr = HitlManager()
-    rid = await _request(mgr, kind="input")
+    rid = await _request(mgr, form="question")
     await mgr.answer(rid, "done")
     await mgr.cancel(rid)                 # 已解决 → no-op
     assert mgr.get(rid).status == "accepted"
@@ -330,18 +330,18 @@ async def test_cancel_is_idempotent_after_resolve() -> None:
 
 async def test_request_idempotent_by_tool_call_id_pending() -> None:
     mgr = HitlManager()
-    rid1 = await mgr.request(kind="input", session_id="s1", task_id="t1", tool_call_id="tcX")
-    rid2 = await mgr.request(kind="input", session_id="s1", task_id="t1", tool_call_id="tcX")
+    rid1 = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tcX")
+    rid2 = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tcX")
     assert rid1 == rid2                      # 同一请求，不新建
     assert len(mgr.list_pending()) == 1
 
 
 async def test_request_idempotent_by_tool_call_id_resolved_no_future() -> None:
     mgr = HitlManager()
-    rid = await mgr.request(kind="input", session_id="s1", task_id="t1", tool_call_id="tcY")
+    rid = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tcY")
     await mgr.answer(rid, "answered")
     # 重新请求同一 tool_call_id（cold reconcile 再入）：返回已解决记录、不重置状态
-    rid2 = await mgr.request(kind="input", session_id="s1", task_id="t1", tool_call_id="tcY")
+    rid2 = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tcY")
     assert rid2 == rid
     assert mgr.get(rid2).status == "accepted" and mgr.get(rid2).message == "answered"
 
@@ -353,8 +353,8 @@ def test_find_for_tool_call_returns_latest() -> None:
 
 async def test_request_no_tool_call_id_not_deduped() -> None:
     mgr = HitlManager()
-    r1 = await mgr.request(kind="input", session_id="s1", task_id="t1")  # 空 tool_call_id
-    r2 = await mgr.request(kind="input", session_id="s1", task_id="t1")
+    r1 = await mgr.request(form="question", session_id="s1", task_id="t1")  # 空 tool_call_id
+    r2 = await mgr.request(form="question", session_id="s1", task_id="t1")
     assert r1 != r2                          # 空 id 不去重
 
 
@@ -373,7 +373,7 @@ async def test_ask_user_short_circuits_resolved_hitl() -> None:
     """cold reconcile 再入：tool_call_id 已有 answered HITL → 直接用答复、不再 park。"""
     mgr = HitlManager()
     provider, session, _ = _control_provider(mgr)
-    rid = await mgr.request(kind="input", session_id="s1", task_id="tsk_1", tool_call_id="tc_re")
+    rid = await mgr.request(form="question", session_id="s1", task_id="tsk_1", tool_call_id="tc_re")
     await mgr.answer(rid, "use postgres")
     task_h, parts = await _invoke_control_with_tcid(
         provider, "ask_user", {"questions": [{"question": "Which DB?"}]}, "tc_re",
@@ -388,11 +388,11 @@ async def test_ask_user_short_circuits_resolved_hitl() -> None:
 
 async def test_resolved_requests_are_gc_pruned() -> None:
     mgr = HitlManager(max_resolved=2)
-    r1 = await mgr.request(kind="input", session_id="s", task_id="t", tool_call_id="a")
+    r1 = await mgr.request(form="question", session_id="s", task_id="t", tool_call_id="a")
     await mgr.answer(r1, "x")
-    r2 = await mgr.request(kind="input", session_id="s", task_id="t", tool_call_id="b")
+    r2 = await mgr.request(form="question", session_id="s", task_id="t", tool_call_id="b")
     await mgr.answer(r2, "x")
-    r3 = await mgr.request(kind="input", session_id="s", task_id="t", tool_call_id="c")
+    r3 = await mgr.request(form="question", session_id="s", task_id="t", tool_call_id="c")
     await mgr.answer(r3, "x")
     # max_resolved=2 → 最旧的已解决（r1）被裁剪，近两条保留
     assert mgr.get(r1) is None
@@ -401,11 +401,11 @@ async def test_resolved_requests_are_gc_pruned() -> None:
 
 async def test_gc_never_prunes_pending() -> None:
     mgr = HitlManager(max_resolved=1)
-    p1 = await mgr.request(kind="input", session_id="s", task_id="t", tool_call_id="p1")
-    p2 = await mgr.request(kind="input", session_id="s", task_id="t", tool_call_id="p2")
-    r1 = await mgr.request(kind="input", session_id="s", task_id="t", tool_call_id="r1")
+    p1 = await mgr.request(form="question", session_id="s", task_id="t", tool_call_id="p1")
+    p2 = await mgr.request(form="question", session_id="s", task_id="t", tool_call_id="p2")
+    r1 = await mgr.request(form="question", session_id="s", task_id="t", tool_call_id="r1")
     await mgr.answer(r1, "x")
-    r2 = await mgr.request(kind="input", session_id="s", task_id="t", tool_call_id="r2")
+    r2 = await mgr.request(form="question", session_id="s", task_id="t", tool_call_id="r2")
     await mgr.answer(r2, "x")
     # pending 永不裁剪；已解决裁到 1
     assert mgr.get(p1) is not None and mgr.get(p2) is not None
