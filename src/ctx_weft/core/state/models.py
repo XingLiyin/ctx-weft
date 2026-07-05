@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from ctx_weft.protocols import LoopConfig, MemoryConfig
 
+from ctx_weft.core.utils import now_utc
+
 
 # ── TaskSettings ──────────────────────────────────────────────────────────────
 
@@ -260,3 +262,48 @@ class Agent:
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+# ── HITL ──────────────────────────────────────────────────────────────────────
+
+# 三种等待形态（spec 2026-07-05，替代旧 kind + capability_id sentinel 拼判）：
+#   approval — 审批门控：放行/拒绝一次工具调用（HumanConfirmationAuthorizer 触发）
+#   question — ask_user 结构化提问，答复回灌 LLM
+#   wait     — act 纯文本暂停 / 软打断（wait_for_user 冷 park）
+HitlForm = Literal["approval", "question", "wait"]
+HitlStatus = Literal["pending", "accepted", "rejected", "cancelled"]
+
+
+@dataclass
+class HitlRequest:
+    """一次 HITL 请求（含其解析结果）。内存态与事件回放投影共用的单一实体。
+
+    form 决定语义与应答形态：approval 用 approve/reject；question/wait 用 answer/reject。
+    host 据 form 决定 UI（批准/拒绝按钮 vs 答题输入框 vs 普通输入框）。
+    """
+
+    id: str                                       # 全局唯一，即 hitl_id
+    form: HitlForm
+    session_id: str
+    task_id: str
+    agent_id: str = ""
+    capability_id: str = ""                       # approval: 被门控的工具；question: 触发提问的工具；wait: 保留 sentinel 值仅作信息
+    tool_call_id: str = ""                        # 发起本次调用的 LLM tool_call id（短路门控的键）
+    arguments: dict[str, Any] = field(default_factory=dict)
+    question: str = ""                            # 展示给人类的问题（approval / wait 用）
+    context: str = ""                             # wait 形态的来源（plain_text / interrupt / interrupt:edit）
+    questions: list[dict[str, Any]] = field(default_factory=list)  # ask_user 的结构化批量问题（含 options/multi_select）
+    status: HitlStatus = "pending"
+    # 解析载荷
+    message: str = ""                             # 人类附带的自由文本：答复 / 拒绝理由 / 备注
+    modified_arguments: dict[str, Any] | None = None  # approval form：改写后的工具参数（暂仅记录，不生效）
+    created_at: datetime = field(default_factory=now_utc)
+    resolved_at: datetime | None = None
+    # resume-time LLM 覆盖：冷应答触发 session resume 时用的当前所选模型（host 据 entry 传入），
+    # 仅供本次 cold-resolve 转发给 recover_session，不入事件、不持久化。
+    resume_llm_account: str | None = None
+    resume_llm_model: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return self.status == "accepted"
