@@ -541,15 +541,34 @@ class CtxWeftRuntime:
             self._run_tokens.pop(session_id, None)
 
     async def pause_session(self, session_id: str) -> bool:
-        """软打断：pause 该 session 全部在途 run → act checkpoint park。
+        """软打断（spec 2026-07-05）：放弃其余在途/排队任务，只留 root agent 当前那一轮。
 
-        Returns True if any live run was signalled.
+        - 置 _pausing 闩锁：其间新派发 run 出生即 paused（root agent 任务被 _try_resume_parent
+          重排后，新 run 在 act 首个 checkpoint park，不烧 LLM）。
+        - 排队任务全部放弃（abandon_pending：标 CANCELED，不动 session 状态、不封 drain）。
+        - 在途 run 按真实执行 agent 划分：== root agent 的那一轮（同 agent 串行 ≤1）pause →
+          park 一个 wait 气泡；其余（含被顶替旧 TM 的 inflight）cancel → 协作取消终态。
+        - 闩锁由 _on_idle（root park 后会话空闲）或 _release_session 清除。
         """
-        per = self._run_tokens.get(session_id)
-        if not per:
+        per = self._run_tokens.get(session_id, {})
+        tm = self._task_managers.get(session_id)
+        if not per and (tm is None or tm.is_done()):
             return False
-        for tokens in per.values():
-            tokens.pause.pause()
+        self._pausing.add(session_id)
+        root_agent = ""
+        if tm is not None:
+            tm.set_pause_abandon(True)
+            root_agent = (tm.session.root_agent_id or "") if tm.session is not None else ""
+            await tm.abandon_pending(reason="pause_abandon")
+        for task_id, tokens in list(per.items()):
+            if root_agent and tm is not None and tm.running_agent_of(task_id) == root_agent:
+                tokens.pause.pause()
+            else:
+                tokens.cancel.cancel()
+        # 竞态兜底：信号发完会话已静止（root 恰好收尾、无可 park 对象）→ 立即清闩锁防残留。
+        if tm is not None and tm.is_done():
+            self._pausing.discard(session_id)
+            tm.set_pause_abandon(False)
         return True
 
     async def cancel_session(self, session_id: str) -> bool:

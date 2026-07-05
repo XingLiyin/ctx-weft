@@ -21,12 +21,13 @@ def _runtime():
     return CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
 
 
-async def test_pause_session_pauses_all_live_run_tokens():
+async def test_pause_session_without_tm_cancels_all_runs():
+    # 无 TM（纯 registry 残留）：无法辨认 root agent → 全部按"其余"cancel，返回 True
     rt = _runtime()
     a = rt._register_run_tokens("s1", "t1")
     b = rt._register_run_tokens("s1", "t2")
     assert await rt.pause_session("s1") is True
-    assert a.pause.is_paused and b.pause.is_paused
+    assert a.cancel.is_cancelled and b.cancel.is_cancelled
 
 
 async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
