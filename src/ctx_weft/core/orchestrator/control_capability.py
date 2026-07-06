@@ -692,10 +692,11 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
         # cold reconcile 再入（tool_call_id 已有「已解决」HITL）时短路、不再 park（spec/07 §6）。
         if result.metadata.get(K.HITL_REQUESTED) and self._hitl_manager is not None:
             tool_call_id = (ctx.extra or {}).get("tool_call_id", "")
-            existing = self._hitl_manager.find_for_tool_call(tool_call_id)
-            if existing is not None and existing.status != "pending":
-                approval = existing                       # 决定缓存命中：直接用
-            else:
+            # 决定缓存命中直接用——内存优先,未命中回落事件日志（否则跨重启再入会把同一
+            # 问题重新问一遍,丢掉用户已给的答案）;内存 pending 由 request() 幂等复用。
+            approval = await self._hitl_manager.find_resolved_for_tool_call(
+                ctx.session_id, tool_call_id)
+            if approval is None:
                 hitl_id = await self._hitl_manager.request(
                     form="question",
                     session_id=ctx.session_id,

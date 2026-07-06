@@ -450,6 +450,8 @@ class CtxWeftRuntime:
         )
         # 冷应答自触发 session resume —— 热/冷分流在 core 内闭环,host 只转发回复（spec/07 §6/§9）。
         self.hitl_manager.set_cold_resolve_handler(self._resume_after_cold_hitl)
+        # 冷决定查询：reconcile 短路的跨重启回落（内存缓存重启后不含已解决,不查日志会重问）。
+        self.hitl_manager.set_cold_decision_lookup(self._cold_hitl_decision)
         # 默认使用内存版 EventStore，自动订阅 EventBus；传入自定义实现时由调用方自行 wire
         from ctx_weft.core.state.event_store import InMemoryEventStore
         self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)
@@ -1349,6 +1351,20 @@ class CtxWeftRuntime:
             events = [e for e in await self.event_store.read_by_session(session_id)
                       if e.type in HITL_STATUS_EVENT_TYPES]
         return fold_pending_hitl(events)
+
+    async def _cold_hitl_decision(self, session_id: str, tool_call_id: str):
+        """冷决定查询（HitlManager 绑定）：从事件日志折出该 tool_call 的可用人工决定。
+
+        reconcile 短路门控的跨重启回落——内存决定缓存重启后只重建 pending、不含已解决,
+        不查日志就会把已答过的问题重新问一遍、丢掉答案（spec/07 §6）。仅折 HITL 类事件。
+        """
+        from ctx_weft.core.control.reducers import HITL_STATUS_EVENT_TYPES, fold_cold_hitl_decision
+        try:
+            events = await self.event_store.read_session_events_of_types(session_id, HITL_STATUS_EVENT_TYPES)
+        except NotImplementedError:
+            events = [e for e in await self.event_store.read_by_session(session_id)
+                      if e.type in HITL_STATUS_EVENT_TYPES]
+        return fold_cold_hitl_decision(events, tool_call_id)
 
     # ── Internal execution ───────────────────────────────────────────────────
 

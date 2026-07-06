@@ -59,6 +59,11 @@ class HitlManager:
         # 保留的「已解决」请求上限：决定缓存（find_for_tool_call）只需近期的，超限裁剪最旧者
         # 防止长跑进程里 _requests 无界增长。pending 永不裁剪。
         self._max_resolved = max_resolved
+        # 冷决定查询（Runtime 绑定,挂事件日志折叠）：决定缓存的跨重启回落。重启后内存只重建
+        # pending、不重建已解决,find_for_tool_call 未命中不等于"没答过"——不查日志就会重问。
+        self._cold_decision_lookup: (
+            "Callable[[str, str], Awaitable[HitlRequest | None]] | None"
+        ) = None
         self._requests: dict[str, HitlRequest] = {}
         self._futures: dict[str, asyncio.Future[HitlRequest]] = {}
         self._lock = asyncio.Lock()
@@ -244,6 +249,31 @@ class HitlManager:
             return None
         return max(matches, key=lambda r: r.created_at)
 
+    def set_cold_decision_lookup(
+        self, handler: "Callable[[str, str], Awaitable[HitlRequest | None]]",
+    ) -> None:
+        """绑定冷决定查询 async (session_id, tool_call_id) → HitlRequest | None。
+
+        Runtime 挂事件日志折叠（fold_cold_hitl_decision）,供构造后晚绑定。"""
+        self._cold_decision_lookup = handler
+
+    async def find_resolved_for_tool_call(
+        self, session_id: str, tool_call_id: str,
+    ) -> HitlRequest | None:
+        """决定缓存查询的跨重启版（reconcile 短路门控用,spec/07 §6）。
+
+        内存已解决 → 直接用;内存 pending（活的等待）→ None,交 request() 幂等复用,不得用
+        日志里的旧决定盖掉活请求;内存无记录 → 回落事件日志冷查询（缺可用内容时仍 None,
+        调用方重新问）。空 tool_call_id / 未绑定冷查询 → None。"""
+        if not tool_call_id:
+            return None
+        mem = self.find_for_tool_call(tool_call_id)
+        if mem is not None:
+            return mem if mem.status != "pending" else None
+        if self._cold_decision_lookup is None:
+            return None
+        return await self._cold_decision_lookup(session_id, tool_call_id)
+
     def list_pending(self, session_id: str | None = None) -> list[HitlRequest]:
         return [
             r for r in self._requests.values()
@@ -307,7 +337,14 @@ class HitlManager:
             was_hot = future is not None and not future.done()
             if was_hot:
                 future.set_result(req)
-        await self._emit(event_type, req, payload={"hitl_id": req.id})
+        # 解析载荷进事件：message/改参是"决定的内容",不落盘则冷决定查询（跨重启的 reconcile
+        # 短路）还原不出答案 → 只能重问、丢掉用户已给的回复。
+        payload: dict = {"hitl_id": req.id}
+        if req.message:
+            payload["message"] = req.message
+        if req.modified_arguments is not None:
+            payload["modified_arguments"] = req.modified_arguments
+        await self._emit(event_type, req, payload=payload)
         self._gc_resolved()
         # 冷应答：活协程已驱逐 / 重启后无 future,无法就地唤醒 → 触发该 session resume（spec/07 §6/§9）。
         # 仅 answer/approve/reject（resume_on_cold=True）；cancel 是终态、不 requeue。Runtime 据请求

@@ -52,6 +52,56 @@ def unresolved_hitl_ids(events: list[Event]) -> set[str]:
     return set(fold_pending_hitl(events))
 
 
+def fold_cold_hitl_decision(events: list[Event], tool_call_id: str) -> HitlRequest | None:
+    """折出某 tool_call 的**可用**人工决定（冷决定查询,reconcile 短路的跨重启版,spec/07 §6）。
+
+    热路径决定缓存（HitlManager.find_for_tool_call）是纯内存：重启后只重建 pending、不重建
+    已解决,"回答 → 续跑到 reconcile"之间夹一次重启,再入就会把同一问题重新问一遍、丢掉已给
+    的答案。本折叠让短路以事件日志为准。
+
+    "可用"= 事件里记全了执行所需内容：Approved/Rejected 本身即决定;Answered 须带 message
+    （旧事件只有 hitl_id,还原不出答案 → 不可用,调用方重新问、绝不臆造）;Modified 须带
+    modified_arguments（缺了会拿原参执行,违背改参意图）;Cancelled 不是决定。同 tool_call_id
+    多条 Required（重问副本）时,最后一条可用决定胜出。无可用决定 → None。
+    """
+    if not tool_call_id:
+        return None
+    reqs: dict[str, HitlRequest] = {}
+    decided: HitlRequest | None = None
+    for ev in events:
+        p = ev.payload or {}
+        rid = p.get("hitl_id", "")
+        if not rid:
+            continue
+        if ev.type == EventType.HITL_REQUIRED:
+            if p.get("tool_call_id", "") == tool_call_id:
+                reqs[rid] = HitlRequest(
+                    id=rid, form=p.get("form", "approval"),
+                    session_id=ev.session_id, task_id=ev.task_id or "",
+                    capability_id=p.get("capability_id", ""), tool_call_id=tool_call_id,
+                    question=p.get("question", ""), context=p.get("context", ""),
+                    arguments=p.get("arguments") or {}, questions=p.get("questions") or [],
+                )
+            continue
+        req = reqs.get(rid)
+        if req is None:
+            continue
+        if ev.type == EventType.HITL_ANSWERED and p.get("message"):
+            req.status, req.message = "accepted", p["message"]
+        elif ev.type == EventType.HITL_APPROVED:
+            req.status, req.message = "accepted", p.get("message", "")
+        elif ev.type == EventType.HITL_MODIFIED and p.get("modified_arguments") is not None:
+            req.status, req.message = "accepted", p.get("message", "")
+            req.modified_arguments = p["modified_arguments"]
+        elif ev.type == EventType.HITL_REJECTED:
+            req.status, req.message = "rejected", p.get("message", "")
+        else:
+            continue  # Cancelled / 缺 message 的 Answered / 缺改参的 Modified → 不可用
+        req.resolved_at = ev.timestamp
+        decided = req
+    return decided
+
+
 def apply_events(events: list[Event], view: RunStateView) -> RunStateView:
     """在已有 RunStateView 上增量应用事件列表（快照恢复后的 delta replay）。"""
     for ev in events:
