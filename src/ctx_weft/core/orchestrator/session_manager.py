@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
@@ -106,6 +107,19 @@ class SessionManager:
                 f"Cannot resume session {session_id!r}: "
                 "no SessionCreated event found in event store."
             )
+
+        # 弃轮禁止：仍有未终结任务时不许开新轮（本方法只建带新 root task 的全新 TM,滞留
+        # 任务会被无声遗弃,之后 recover_session 全量重建又把它们复活重跑）。调用方应走
+        # 恢复路径续跑/收尾。辅助任务（compact/metadata）豁免——restore 也从不重排它们,
+        # 阻塞会把会话永久锁死（与 TaskManager.restore 的跳过口径一致）。
+        unfinished = [
+            tid for tid, t in view.tasks.items()
+            if t.status not in ("FINISHED", "FAILED", "CANCELED")
+            and (t.settings_raw or {}).get("_type") not in (
+                "CompactTaskSettings", "MetadataFillerTaskSettings")
+        ]
+        if unfinished:
+            raise UnfinishedTasksError(session_id, unfinished)
 
         session = Session(
             id=session_id,

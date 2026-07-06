@@ -84,6 +84,9 @@ class TaskManager:
         # 有未决 HITL 的 parked 任务时，会话是"空闲等应答"而非"完成"，绝不发 SESSION_FINISHED
         # 把 parked 任务孤立（真相以 pending-HITL 为准，spec/07 §9.1）。None = 退回旧行为。
         self._has_pending_hitl: Callable[[], bool] | None = None
+        # pause 弃子窗口标记（runtime.pause_session 置位、_on_idle/_release 复位）：
+        # 置位期间任务取消不改 session 状态、run 收尾 staged 直接丢弃。
+        self._pause_abandon = False
 
     def track_background(self, t: "asyncio.Task") -> None:
         """Track a fire-and-forget background coroutine so the session awaits it before close."""
@@ -257,6 +260,11 @@ class TaskManager:
         """
         staged = self._staged.pop(task_id, None)
         if not staged:
+            return
+        if self._pause_abandon:
+            # pause 弃子窗口：本轮 staged 的子任务直接丢弃（push 时才发 TASK_CREATED，无投影残留），
+            # 防止弃子清队后又有漏网新任务入队被派发。
+            logger.info("pause_abandon: dropping %d staged task(s) of %s", len(staged), task_id)
             return
         for task, blocked_by, parent_task_id in reversed(staged):
             await self.push_task(task, blocked_by=blocked_by, parent_task_id=parent_task_id)
@@ -597,8 +605,10 @@ class TaskManager:
             elif status == "FINISHED":
                 self._session.failure_counter = 0  # 成功时重置
             elif status == "CANCELED":
-                # 用户主动中断：标记 session 为 CANCELED，防止 is_done() 误判为 SUCCEEDED
-                self._session.status = "CANCELED"
+                # 用户主动中断：标记 session 为 CANCELED，防止 is_done() 误判为 SUCCEEDED。
+                # pause 弃子（_pause_abandon）除外：连带取消不定会话去向，由 root park 决定。
+                if not self._pause_abandon:
+                    self._session.status = "CANCELED"
 
         # Try to resume parent
         await self._try_resume_parent(task_id)
@@ -608,6 +618,11 @@ class TaskManager:
         # 若 queue 已空且无任务在运行，通知 session 真正结束
         # （有重试时 drain() 会把重试任务入队，is_done() 为 False，不触发）
         if self.is_done():
+            # 被顶替旧 TM 的迟到收尾不得代表会话发终态/空闲信号——新 owner 的状态才是真相。
+            # runtime 侧回调本就 compare-and-check，这里连事件（stale SESSION_STATUS_CHANGED /
+            # SESSION_FINISHED）也一并静默，避免污染事件流的 host 显示与重放。
+            if self._is_current is not None and not self._is_current():
+                return
             # queue 空、无在跑任务；但若仍有未决 HITL 的 parked 任务，会话是"空闲等应答"而非"完成"
             # ——绝不能发 SESSION_FINISHED 把 parked 任务孤立（真相以 pending-HITL 为准，spec/07 §9.1）。
             if self._has_pending_hitl is not None and self._has_pending_hitl():
@@ -774,6 +789,10 @@ class TaskManager:
             task_id=task_id, session_id=self._session_id, priority=t.priority,
         ))
 
+    def is_cancelled(self) -> bool:
+        """本 TM 是否已被硬取消（cancel_all 置 _cancelled）——供派发点补投 born-cancel 判定。"""
+        return self._cancelled
+
     def is_alive(self) -> bool:
         """本 TM 是否仍在驱动该 session（未终结、且仍是当前 owner）。
 
@@ -786,6 +805,59 @@ class TaskManager:
     def running_task_ids(self) -> set[str]:
         """当前正在执行（已派发、_run_task 未返回）的 task id 集合。"""
         return set(self._running_tasks)
+
+    def running_agent_of(self, task_id: str) -> str | None:
+        """在跑 run 的真实执行 agent id（无此在跑任务 → None）。pause 弃子划分的真相源。"""
+        return self._running_agents.get(task_id)
+
+    def set_pause_abandon(self, flag: bool) -> None:
+        """置位/复位 pause 弃子窗口标志。
+
+        置位期间产生两个效果：① CANCELED 任务不再连带把 session 状态改成 CANCELED（会话去向留给
+        root park 决定，见 _on_task_finished 里的判断）；② run 结束时本轮新 staged 出的子任务直接丢弃、
+        不入队派发（见 _flush_staged），防止弃子清队后又漏网新任务被派发。
+        """
+        self._pause_abandon = flag
+
+    async def abandon_pending(
+        self, *, reason: str = "pause_abandon", keep_agent: str | None = None,
+    ) -> list[str]:
+        """放弃排队中任务（标 CANCELED、发 TASK_CANCELED），不触碰 session 状态。
+
+        ``keep_agent`` 非 None **且该 agent 当前没有在途 run** 时：effective agent 等于它的
+        排队条目保留在队列（相对顺序不变）、不放弃——pause 弃子须保留 root agent 已入队未派发
+        的那一条（root run 尚未派发、无可 pause 的对象），交由调用方补 drain 派发成为唯一续跑点；
+        否则它随全清被误取消，会话既无在途 run 又无排队条目、无气泡 → 永久滞留 RUNNING。
+        keep_agent 已有在途 run（那一轮已被 pause→park 成续跑点）或为 None 时，root-scope 排队
+        条目照旧全清——保证「一次暂停恰一个续跑点」，与全清行为一致。
+
+        与 cancel_all 的差异：不置 _cancelled（弃子后仍需 drain 派发保留/重排的任务）、
+        不把 session 置 CANCELED（pause 弃子不是用户取消）。
+        """
+        async with self._lock:
+            entries = self._queue.peek_all()
+            self._queue.drain_pending()
+            busy_agents = set(self._running_agents.values())
+            keep = keep_agent is not None and keep_agent not in busy_agents
+            cancelled: list[str] = []
+            for e in entries:
+                if keep and self._effective_agent(self._tasks.get(e.task_id)) == keep_agent:
+                    self._queue.push(e)  # 保留：相对顺序按原队列顺序回填
+                else:
+                    cancelled.append(e.task_id)
+        for tid in cancelled:
+            t = self._tasks.get(tid)
+            if t is not None:
+                t.status = "CANCELED"
+                t.finished_at = now_utc()
+            await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": reason})
+        # 队列弃子不经 on_task_finished，不会自动触发父任务重排：若某 SUSPENDED 父任务的
+        # 子任务此刻**全部**还在排队（无一在途），无人调用 _try_resume_parent → 父任务永不
+        # 重排、会话滞留 RUNNING 且无续跑点。此处对每个被弃子任务补触发重排检查（幂等：
+        # 兄弟仍在途时 all_done 不成立、由其 on_task_finished 接力；父已 ACTIVE 不二次入队）。
+        for tid in cancelled:
+            await self._try_resume_parent(tid)
+        return cancelled
 
 
 def _outputs_to_text(outputs: Any) -> str:

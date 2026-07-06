@@ -58,7 +58,7 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
     # ── HitlManager + pre-answered HITL ─────────────────────────────────────────
     mgr = HitlManager(event_bus=bus)
     rid = await mgr.request(
-        kind="input",
+        form="question",
         session_id=session_id,
         task_id=task_id,
         tool_call_id=tool_call_id,

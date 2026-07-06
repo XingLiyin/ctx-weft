@@ -25,16 +25,16 @@ def test_reducer_folds_pending_then_removes_on_resolve() -> None:
     events = [
         _ev(EventType.SESSION_CREATED, {"template_id": "tpl"}, 0),
         _ev(EventType.HITL_REQUIRED, {
-            "approval_id": "hit_1", "kind": "input", "capability_id": "control:rhi",
+            "hitl_id": "hit_1", "form": "question", "capability_id": "control:rhi",
             "tool_call_id": "tc1", "question": "Which DB?",
         }, 1),
     ]
     view = reduce_events(events, run_id="s1")
     assert "hit_1" in view.pending_hitl
     hr = view.pending_hitl["hit_1"]
-    assert hr.kind == "input" and hr.tool_call_id == "tc1" and hr.task_id == "t1"
+    assert hr.form == "question" and hr.tool_call_id == "tc1" and hr.task_id == "t1"
 
-    events.append(_ev(EventType.HITL_ANSWERED, {"approval_id": "hit_1"}, 2))
+    events.append(_ev(EventType.HITL_ANSWERED, {"hitl_id": "hit_1"}, 2))
     view2 = reduce_events(events, run_id="s1")
     assert "hit_1" not in view2.pending_hitl
 
@@ -43,7 +43,7 @@ def test_reducer_pending_survives_snapshot_roundtrip() -> None:
     events = [
         _ev(EventType.SESSION_CREATED, {"template_id": "tpl"}, 0),
         _ev(EventType.HITL_REQUIRED, {
-            "approval_id": "hit_2", "kind": "approval", "capability_id": "fs:bash",
+            "hitl_id": "hit_2", "form": "approval", "capability_id": "fs:bash",
             "tool_call_id": "tc2", "question": "ok?",
         }, 1),
     ]
@@ -55,8 +55,8 @@ def test_reducer_pending_survives_snapshot_roundtrip() -> None:
 
 def test_reducer_cancelled_removes_pending() -> None:
     events = [
-        _ev(EventType.HITL_REQUIRED, {"approval_id": "h3", "kind": "input", "tool_call_id": "tc3"}, 0),
-        _ev(EventType.HITL_CANCELLED, {"approval_id": "h3"}, 1),
+        _ev(EventType.HITL_REQUIRED, {"hitl_id": "h3", "form": "question", "tool_call_id": "tc3"}, 0),
+        _ev(EventType.HITL_CANCELLED, {"hitl_id": "h3"}, 1),
     ]
     view = reduce_events(events, run_id="s1")
     assert "h3" not in view.pending_hitl

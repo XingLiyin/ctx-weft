@@ -107,12 +107,13 @@ class HumanConfirmationAuthorizer(Authorizer):
     hitl_manager: "HitlManager"
 
     async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
-        existing = self.hitl_manager.find_for_tool_call(tool_call_id)
-        if existing is not None and existing.status != "pending":
-            approval = existing                       # 决定缓存命中（cold reconcile，spec/07 §6）
-        else:
-            approval_id = await self.hitl_manager.request(
-                kind="approval",
+        # 决定缓存命中直接用（cold reconcile，spec/07 §6）——内存优先,未命中回落事件日志
+        # （否则跨重启再入会重新求批一遍）;内存 pending 由 request() 幂等复用。
+        approval = await self.hitl_manager.find_resolved_for_tool_call(
+            agent.session_id, tool_call_id)
+        if approval is None:
+            hitl_id = await self.hitl_manager.request(
+                form="approval",
                 session_id=agent.session_id,
                 task_id=task.id if task else "",
                 agent_id=agent.id,
@@ -122,7 +123,7 @@ class HumanConfirmationAuthorizer(Authorizer):
                 context=capability.description,
                 tool_call_id=tool_call_id,
             )
-            approval = await self.hitl_manager.wait(approval_id)   # may raise HitlPark on eviction
+            approval = await self.hitl_manager.wait(hitl_id)   # may raise HitlPark on eviction
         if approval.accepted:
             return AuthorizationDecision(
                 allowed=True,

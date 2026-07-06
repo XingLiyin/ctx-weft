@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
-from ctx_weft.core.control.tokens import CancelToken, PauseToken
+from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
 from ctx_weft.core.errors import ContextOverflowError
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager, HitlRequest  # noqa: F401 — re-exported for shell use
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
@@ -450,6 +450,8 @@ class CtxWeftRuntime:
         )
         # 冷应答自触发 session resume —— 热/冷分流在 core 内闭环,host 只转发回复（spec/07 §6/§9）。
         self.hitl_manager.set_cold_resolve_handler(self._resume_after_cold_hitl)
+        # 冷决定查询：reconcile 短路的跨重启回落（内存缓存重启后不含已解决,不查日志会重问）。
+        self.hitl_manager.set_cold_decision_lookup(self._cold_hitl_decision)
         # 默认使用内存版 EventStore，自动订阅 EventBus；传入自定义实现时由调用方自行 wire
         from ctx_weft.core.state.event_store import InMemoryEventStore
         self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)
@@ -468,9 +470,19 @@ class CtxWeftRuntime:
         # Capability cache (per-session, shared across all agents in runtime)
         self._capability_cache = CapabilityCache()
 
-        # Active cancel tokens keyed by session_id
-        self._cancel_tokens: dict[str, CancelToken] = {}
-        self._pause_tokens: dict[str, PauseToken] = {}
+        # Per-run 控制信号 registry：session_id → {task_id → RunTokens}。随派发登记、随 run
+        # 注销（_SessionTaskRunner.execute），被顶替旧 TM 的 inflight 一样在册——pause/cancel
+        # 经 registry 必达全部在途 run（spec 2026-07-05）。
+        self._run_tokens: dict[str, dict[str, RunTokens]] = {}
+        # pause 弃子进行中的 session：新派发 run 的 PauseToken 出生即 paused
+        # （root agent 任务被重排后，新 run 在 act 首个 checkpoint 立即 park）。
+        self._pausing: set[str] = set()
+        # 本轮暂停的续跑点名额（一次性）：pause_session pause 到在途 root run、或闩锁窗口内
+        # 第一个 root run born-pause 时认领；此后窗口内再派发的 root run 一律 born-cancel。
+        # 与 _pausing 同生命周期（_on_idle / _release_session / pause_session 兜底一起清）。
+        self._pause_claimed: set[str] = set()
+        # compact 等一次性操作的忙位（原先借 _cancel_tokens dict 占位）。
+        self._busy_sessions: set[str] = set()
         self._task_managers: dict[str, TaskManager] = {}
         # Per-session resume 锁：串行化同一 session 的 recover_session，避免重叠的冷 HITL 应答 /
         # /resume 并发建出两个 TaskManager、两套 drain 竞争派发（spec/07 §9）。惰性建、不回收
@@ -518,34 +530,107 @@ class CtxWeftRuntime:
                         return cap.template_name
         return qualified
 
-    def pause_session(self, session_id: str) -> bool:
-        """软打断：pause 该 session 的 PauseToken → act checkpoint park（会话 PAUSED、可续接）。
+    def _register_run_tokens(
+        self, session_id: str, task_id: str, *, root_run: bool = True,
+    ) -> RunTokens:
+        """为一次派发发放控制信号对；pause 弃子窗口内按执行 agent 分流出生信号：
 
-        Returns True if a pause token was found, False if the session is finished or
-        was never registered.
+        - root agent 的 run 出生即 paused → act 首检查点 park 成唯一续跑点。名额一次性
+          （_pause_claimed）：root agent 同时有多个任务（后继任务/多条消息）时，第一个
+          root run 认领后，窗口内再派发的 root run（如子任务死光被重排的 SUSPENDED root
+          任务）一律 born-cancel——"一次暂停恰一个续跑点"。park 中的 run 非终态，其祖先
+          不会被 _try_resume_parent 重排，合法等待中的父任务不受此规则误伤。
+        - 非 root run 出生即 cancelled（M-1）——检查点 pause 先于 cancel，若两信号齐置，
+          多级委派中被 _try_resume_parent 重排的中间父任务会 park 出气泡抢走续跑点；
+          born-cancel 使其协作取消，再经 _try_resume_parent 逐级级联到 root agent 的任务。
         """
-        token = self._pause_tokens.get(session_id)
-        if token is None:
+        tokens = RunTokens(cancel=CancelToken(), pause=PauseToken())
+        if session_id in self._pausing:
+            if root_run and session_id not in self._pause_claimed:
+                self._pause_claimed.add(session_id)
+                tokens.pause.pause()
+            else:
+                tokens.cancel.cancel()
+        self._run_tokens.setdefault(session_id, {})[task_id] = tokens
+        return tokens
+
+    def _deregister_run_tokens(self, session_id: str, task_id: str) -> None:
+        per = self._run_tokens.get(session_id)
+        if per is None:
+            return
+        per.pop(task_id, None)
+        if not per:
+            self._run_tokens.pop(session_id, None)
+
+    async def pause_session(self, session_id: str) -> bool:
+        """软打断（spec 2026-07-05）：放弃其余在途/排队任务，只留 root agent 当前那一轮。
+
+        - 置 _pausing 闩锁：其间新派发的 root agent run 出生即 paused（被 _try_resume_parent
+          重排后在 act 首检查点 park，不烧 LLM）——但续跑点名额一次性（_pause_claimed）：
+          在途 root run 被 pause 或首个 root run born-pause 即认领，窗口内其后的 root run
+          一律 born-cancel；非 root run 出生即 cancelled（多级委派的中间父任务协作取消后
+          逐级级联，气泡最终必落 root agent，M-1）。
+        - 排队任务全部放弃（abandon_pending：标 CANCELED，不动 session 状态、不封 drain）。
+        - 在途 run 按真实执行 agent 划分：== root agent 的那一轮（同 agent 串行 ≤1）pause →
+          park 一个 wait 气泡；其余（含被顶替旧 TM 的 inflight）cancel → 协作取消终态。
+        - 闩锁由 _on_idle（root park 后会话空闲）或 _release_session 清除。
+        """
+        per = self._run_tokens.get(session_id, {})
+        tm = self._task_managers.get(session_id)
+        if not per and (tm is None or tm.is_done()):
             return False
-        token.pause()
+        self._pausing.add(session_id)
+        root_agent = ""
+        if tm is not None:
+            tm.set_pause_abandon(True)
+            root_agent = (tm.session.root_agent_id or "") if tm.session is not None else ""
+            # 保留 root agent 已入队未派发的那一条（keep_agent），其余排队任务弃子。
+            await tm.abandon_pending(reason="pause_abandon", keep_agent=root_agent or None)
+        for task_id, tokens in list(per.items()):
+            if root_agent and tm is not None and tm.running_agent_of(task_id) == root_agent:
+                tokens.pause.pause()
+                # 在途 root run 即唯一续跑点：认领名额，闩锁窗口内此后派发的 root scope
+                # 任务（如被 _try_resume_parent 重排的 SUSPENDED root 任务）born-cancel。
+                self._pause_claimed.add(session_id)
+            else:
+                tokens.cancel.cancel()
+        # 补 drain：把保留的 root 排队条目派发出去——它出生即 paused → act 首检查点 park 出唯一
+        # 气泡，成为本次暂停的续跑点。对空队列 / 满并发是安全 no-op。放在信号循环后、兜底前。
+        if tm is not None:
+            await tm.drain()
+        # 竞态兜底：信号发完会话已静止（root 恰好收尾、无可 park 对象）→ 立即清闩锁防残留。
+        if tm is not None and tm.is_done():
+            self._pausing.discard(session_id)
+            self._pause_claimed.discard(session_id)
+            tm.set_pause_abandon(False)
+        return True
+
+    def pause_task(self, session_id: str, task_id: str) -> bool:
+        """定向暂停（spec 2026-07-05 §2.3）：pause 指定在途 task 的 run → 它在检查点 park
+        自己的 wait 气泡，经多 pending 面板回复续跑。不在跑（无本 run 令牌）→ False。
+        只停该 task 本身的 run，不涉及其子任务。"""
+        tokens = self._run_tokens.get(session_id, {}).get(task_id)
+        if tokens is None:
+            return False
+        tokens.pause.pause()
         return True
 
     async def cancel_session(self, session_id: str) -> bool:
-        """硬取消：取消在途 task（CancelToken）+ 取消全部后续 task（drain 队列）→ 会话 CANCELED。
+        """硬取消：取消全部在途 run（per-run CancelToken）+ 全部后续 task（drain 队列）→ 会话 CANCELED。
 
         memory 保留。开新对话由调用方另起（新 /messages → 同 session_id 的 new run）。
         """
-        token = self._cancel_tokens.get(session_id)
+        per = self._run_tokens.get(session_id, {})
         task_manager = self._task_managers.get(session_id)
-        if token is None and task_manager is None:
+        if not per and task_manager is None:
             return False
         # 取消前判定会话是否已空闲挂起（无在跑任务）。RUNNING：在途 task 经 CancelToken→checkpoint
         # 协作取消→on_task_finished→is_done→_fire_session_done→_on_done 自行回收，故此处不抢着回收。
         idle = task_manager is not None and task_manager.is_done()
         if task_manager is not None:
             await task_manager.cancel_all(reason="user_cancel")
-        if token is not None:
-            token.cancel()
+        for tokens in per.values():
+            tokens.cancel.cancel()
         if idle:
             # 已暂停/中断（无在跑 task）的会话被取消：cancel_all 不经 _fire_session_done，_on_done
             # 不会触发，故显式回收 runtime 侧 per-session 状态（含较重的 TaskManager），避免滞留。
@@ -678,11 +763,6 @@ class CtxWeftRuntime:
                 initial_task_settings=params.initial_task_settings,
             )
 
-        cancel_token = CancelToken()
-        self._cancel_tokens[session.id] = cancel_token
-        pause_token = PauseToken()
-        self._pause_tokens[session.id] = pause_token
-
         run_id = generate_id("run")
         handle = RunHandle(
             run_id=run_id,
@@ -707,8 +787,6 @@ class CtxWeftRuntime:
             llm_account=params.llm_account,
             llm_model=params.llm_model,
             task_manager=task_manager,
-            cancel_token=cancel_token,
-            pause_token=pause_token,
             default_run_id=run_id,
             handle=handle,
         ))
@@ -750,12 +828,12 @@ class CtxWeftRuntime:
                 self._release_session(session.id)
 
         async def _on_idle() -> None:
-            # 会话 park/suspend 进入空闲（非终结，待续接）：只回收按 run 计的 pause/cancel token
-            # （续跑由 recover_session 重建全新 token）。**保留** task_manager——/cancel 一个已暂停
-            # 会话仍要用它走 cancel_all；它在下次 recover 的 _register_and_drain 处被覆盖，或在
-            # 终结(_on_done)/取消空闲会话(cancel_session)时由 _release_session 回收。
-            self._cancel_tokens.pop(session.id, None)
-            self._pause_tokens.pop(session.id, None)
+            # per-run token 生命周期已随 run 对齐（execute finally 注销），无需在此回收。
+            # 只清 pause 弃子闩锁；compare-and-check 防被顶替旧 TM 的迟到 idle 误清新一轮闩锁。
+            if self._task_managers.get(session.id) is task_manager:
+                self._pausing.discard(session.id)
+                self._pause_claimed.discard(session.id)
+                task_manager.set_pause_abandon(False)
 
         task_manager.set_session_done_callback(_on_done)
         task_manager.set_session_idle_callback(_on_idle)
@@ -763,14 +841,15 @@ class CtxWeftRuntime:
         asyncio.create_task(task_manager.drain())
 
     def _release_session(self, session_id: str) -> None:
-        """回收 runtime 侧全部 per-session 内存状态：pause/cancel token + TaskManager 映射 +
-        scoped providers（fs workspace、control 的 TaskManager 注册等）。幂等。
+        """回收 runtime 侧全部 per-session 内存状态：per-run 令牌 registry 残余 + pause 闩锁 +
+        TaskManager 映射 + scoped providers（fs workspace、control 的 TaskManager 注册等）。幂等。
 
         会话终结(_on_done) 或取消一个**已空闲挂起**的会话(cancel_session) 时调用——后者 cancel_all
         不经 on_task_finished/_fire_session_done，故不会自动触发 _on_done，须显式回收避免 TaskManager 滞留。
         """
-        self._cancel_tokens.pop(session_id, None)
-        self._pause_tokens.pop(session_id, None)
+        self._run_tokens.pop(session_id, None)
+        self._pausing.discard(session_id)
+        self._pause_claimed.discard(session_id)
         self._task_managers.pop(session_id, None)
         for _p in self.providers.get_capability_providers():
             if isinstance(_p, SessionScopedCapabilityProvider):
@@ -787,8 +866,6 @@ class CtxWeftRuntime:
         llm_account: str | None,
         llm_model: str | None,
         task_manager: TaskManager,
-        cancel_token: CancelToken,
-        pause_token: "PauseToken | None" = None,
         default_run_id: str,
         handle: "RunHandle | None" = None,
         pre_resolved_agents: dict[str, "Agent"] | None = None,
@@ -797,7 +874,7 @@ class CtxWeftRuntime:
         return _SessionTaskRunner(
             runtime=self, session=session, template=template, template_id=template_id,
             lm=lm, memory=memory, llm_account=llm_account, llm_model=llm_model,
-            task_manager=task_manager, cancel_token=cancel_token, pause_token=pause_token,
+            task_manager=task_manager,
             default_run_id=default_run_id, handle=handle,
             pre_resolved_agents=pre_resolved_agents,
         )
@@ -899,11 +976,6 @@ class CtxWeftRuntime:
             template_id, version=None,
             ctx=ProviderContext(session_id=session.id, tenant_id=session.tenant_id),
         )
-        cancel_token = CancelToken()
-        self._cancel_tokens[session.id] = cancel_token
-        pause_token = PauseToken()
-        self._pause_tokens[session.id] = pause_token
-
         task_manager = TaskManager(
             session_id=session.id,
             event_bus=self._event_bus,
@@ -944,8 +1016,6 @@ class CtxWeftRuntime:
             llm_account=session.llm_provider,
             llm_model=session.llm_model,
             task_manager=task_manager,
-            cancel_token=cancel_token,
-            pause_token=pause_token,
             default_run_id=generate_id("run"),
             pre_resolved_agents=pre_resolved,
         ))
@@ -967,8 +1037,7 @@ class CtxWeftRuntime:
         """把冷 HITL 应答作为消息投递给**存活的 owner TM**，就地重驱——不重建 TM（单 owner 架构）。
 
         - model = 会话状态：把本轮所选 model 写回 owner 的 session，下次 dispatch 经 run_task seam 生效。
-        - cancel/pause token：idle 时已回收，这里重建并存入 per-session dict → runner 经 seam 读到，
-          使 ``/cancel``、``/pause`` 对续跑生效。
+        - 控制令牌随 run 在派发时发放（per-run registry），无需在此重建。
         - wait_for_user 冷应答注入用户回复到 task 层；approval 走 reconcile。
         - 重排被应答的 task 并重新 drain（``_register_and_drain`` 对同一 TM 幂等：重挂回调 + 派发）。
         """
@@ -979,8 +1048,6 @@ class CtxWeftRuntime:
             session.llm_provider = llm_account
         if llm_model is not None:
             session.llm_model = llm_model
-        self._cancel_tokens[session.id] = CancelToken()
-        self._pause_tokens[session.id] = PauseToken()
         if user_reply is not None:
             await self._inject_user_reply(user_reply, session, tm)
         tm.resume_task(resumed_task_id)
@@ -1022,10 +1089,10 @@ class CtxWeftRuntime:
         from ctx_weft.protocols import MemoryScope, ProviderContext
 
         # ── idle-guard: claim the slot synchronously (no await before the claim) ──
-        if session_id in self._cancel_tokens:
+        if session_id in self._busy_sessions or self._run_tokens.get(session_id):
             raise SessionBusyError(session_id)
+        self._busy_sessions.add(session_id)
         token = CancelToken()
-        self._cancel_tokens[session_id] = token
         try:
             view = await rebuild_view(self.event_store, session_id)
             proj = view.sessions.get(session_id)
@@ -1098,15 +1165,15 @@ class CtxWeftRuntime:
 
             return {"session_id": session.id, "agent_id": agent.id, "task_id": task.id}
         finally:
-            self._cancel_tokens.pop(session_id, None)
+            self._busy_sessions.discard(session_id)
 
     async def _resume_after_cold_hitl(self, req: "HitlRequest") -> None:
         """冷 HITL 应答后恢复 session（HitlManager.on_cold_resolve 回调）。
 
-        act 的纯文本暂停（``wait_for_user``）须把回复注入 task 层（reconcile 覆盖不到——它不在
+        act 的纯文本暂停（form=wait）须把回复注入 task 层（reconcile 覆盖不到——它不在
         task 层留 dangling tool_call）；act 的 ``ask_user`` / approval 走 reconcile,不在此注入。
         """
-        is_inject = req.kind == "input" and req.capability_id.endswith(":wait_for_user")
+        is_inject = req.form == "wait"
         # 应答携带的当前所选模型（host 据 entry 传入）覆盖投影里的旧 model：用户改 model 后
         # 冷续跑须用新 model。未携带（None）时 recover_session 回退投影。
         # resumed_task_id：被应答的 task——若存活 owner 拥有它，recover_session 就地重驱不重建。
@@ -1198,8 +1265,12 @@ class CtxWeftRuntime:
                 n = await self.rebuild_hitl(session_id)
                 if n:
                     # 有未决 HITL → 如实反映"等待人工"（否则投影停在崩溃前的 RUNNING，看着在跑却卡住）。
-                    await self._emit_session_status(session_id, "PAUSED_HITL")
-                    logger.info("Recovery: session %s → PAUSED_HITL (%d pending, drain deferred to reply)", session_id, n)
+                    # wait-only（纯文本软待命）= PAUSED、其余 = PAUSED_HITL——与 SESSION_PAUSED_HITL
+                    # 的 reducer/投影语义一致（form=wait 无 HITL 面板，误标会让前端等一个不存在的面板）。
+                    pend = self.hitl_manager.list_pending(session_id=session_id)
+                    status = "PAUSED" if pend and all(r.form == "wait" for r in pend) else "PAUSED_HITL"
+                    await self._emit_session_status(session_id, status)
+                    logger.info("Recovery: session %s → %s (%d pending, drain deferred to reply)", session_id, status, n)
                 else:
                     await self._emit_session_interrupted(session_id)
                     logger.info("Recovery: session %s → INTERRUPTED (event emitted)", session_id)
@@ -1222,7 +1293,7 @@ class CtxWeftRuntime:
     async def rebuild_all_pending_hitl(self) -> int:
         """据事件重建**所有 active session** 的内存 pending HITL（不发中断、不 drain）,返回总条数。
 
-        供只带 approval_id 的应答入口（`/hitl/{id}/*`）自愈:重启后内存 HitlManager 为空、又无 session_id
+        供只带 hitl_id 的应答入口（`/hitl/{id}/*`）自愈:重启后内存 HitlManager 为空、又无 session_id
         可定位时,重建全部 active pending 后即可按 id 命中。仅在 miss 时调用,成本有界（spec/07 §9）。
         """
         try:
@@ -1271,7 +1342,7 @@ class CtxWeftRuntime:
         ))
 
     async def _pending_hitl(self, session_id: str) -> dict:
-        """该 session 仍未解决的 pending HITL（{id: HitlRequestView}）—— 仅折叠 HITL 类事件,不全量回放。"""
+        """该 session 仍未解决的 pending HITL（{id: HitlRequest}）—— 仅折叠 HITL 类事件,不全量回放。"""
         from ctx_weft.core.control.reducers import HITL_STATUS_EVENT_TYPES, fold_pending_hitl
         try:
             events = await self.event_store.read_session_events_of_types(session_id, HITL_STATUS_EVENT_TYPES)
@@ -1280,6 +1351,20 @@ class CtxWeftRuntime:
             events = [e for e in await self.event_store.read_by_session(session_id)
                       if e.type in HITL_STATUS_EVENT_TYPES]
         return fold_pending_hitl(events)
+
+    async def _cold_hitl_decision(self, session_id: str, tool_call_id: str):
+        """冷决定查询（HitlManager 绑定）：从事件日志折出该 tool_call 的可用人工决定。
+
+        reconcile 短路门控的跨重启回落——内存决定缓存重启后只重建 pending、不含已解决,
+        不查日志就会把已答过的问题重新问一遍、丢掉答案（spec/07 §6）。仅折 HITL 类事件。
+        """
+        from ctx_weft.core.control.reducers import HITL_STATUS_EVENT_TYPES, fold_cold_hitl_decision
+        try:
+            events = await self.event_store.read_session_events_of_types(session_id, HITL_STATUS_EVENT_TYPES)
+        except NotImplementedError:
+            events = [e for e in await self.event_store.read_by_session(session_id)
+                      if e.type in HITL_STATUS_EVENT_TYPES]
+        return fold_cold_hitl_decision(events, tool_call_id)
 
     # ── Internal execution ───────────────────────────────────────────────────
 
@@ -1549,8 +1634,6 @@ class _SessionTaskRunner:
         llm_account: str | None,
         llm_model: str | None,
         task_manager: TaskManager,
-        cancel_token: CancelToken,
-        pause_token: "PauseToken | None" = None,
         default_run_id: str,
         handle: "RunHandle | None" = None,
         pre_resolved_agents: dict[str, "Agent"] | None = None,
@@ -1564,8 +1647,6 @@ class _SessionTaskRunner:
         self._llm_account = llm_account
         self._llm_model = llm_model
         self._task_manager = task_manager
-        self._cancel_token = cancel_token
-        self._pause_token = pause_token
         self._default_run_id = default_run_id
         self._handle = handle
         self._resolved_agents: dict[str, Agent] = dict(pre_resolved_agents or {})
@@ -1638,23 +1719,34 @@ class _SessionTaskRunner:
         t = self._task_manager.get_task(task_id)
         if t is None:
             return
-        # 单 owner 架构 seam：本轮执行资源在**派发时**从可变的 per-session 源读取，而非
-        # 构造时捕获，这样"复用活 owner"续跑时能用上新一轮的 model / cancel-pause token
-        # （"参数是消息，不焊进 owner"）。均带实例字段兜底 → start_session / 崩溃重建路径行为不变。
-        s, _ = await self._runtime._execute_task(
-            session=self._session,
-            task=t,
-            agent=binding.agent,
-            template=binding.template,
-            run_id=binding.run_id,
-            memory=self._memory,
-            llm_account=self._session.llm_provider or self._llm_account,
-            llm_model=self._session.llm_model or self._llm_model,
-            initial_step=binding.initial_step,
-            task_manager=self._task_manager,
-            cancel_token=self._runtime._cancel_tokens.get(self._session.id) or self._cancel_token,
-            pause_token=self._runtime._pause_tokens.get(self._session.id) or self._pause_token,
+        # 单 owner 架构 seam：model 在派发时从可变 session 读取；控制令牌 per-run 发放——
+        # 随本次派发登记进 runtime registry、run 结束注销，pause/cancel 经 registry 必达在途 run。
+        # 出生信号在登记点按执行 agent 分流：pause 弃子窗口内 root run born-pause、
+        # 非 root run born-cancel（一次暂停恰一个续跑点，且气泡必落 root agent）。
+        tokens = self._runtime._register_run_tokens(
+            self._session.id, task_id,
+            root_run=binding.agent_id == (self._session.root_agent_id or ""),
         )
+        # assemble 窗口补偿：TM 已整体取消（cancel_all 在 assemble 期间到达）→ 本 run 出生即取消。
+        if self._task_manager.is_cancelled():
+            tokens.cancel.cancel()
+        try:
+            s, _ = await self._runtime._execute_task(
+                session=self._session,
+                task=t,
+                agent=binding.agent,
+                template=binding.template,
+                run_id=binding.run_id,
+                memory=self._memory,
+                llm_account=self._session.llm_provider or self._llm_account,
+                llm_model=self._session.llm_model or self._llm_model,
+                initial_step=binding.initial_step,
+                task_manager=self._task_manager,
+                cancel_token=tokens.cancel,
+                pause_token=tokens.pause,
+            )
+        finally:
+            self._runtime._deregister_run_tokens(self._session.id, task_id)
         if self._handle is not None and s is not None:
             self._handle._state = s
 

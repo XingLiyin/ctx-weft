@@ -97,9 +97,11 @@ async def test_no_fold_on_non_retry_outcome():
     assert events == []
 
 
-async def test_retry_falls_back_to_placeholder_when_act_recap_empty():
+async def test_retry_skips_fold_when_act_recap_empty():
+    # 空 recap 不再写 "[Context compacted]" 占位折叠：保 raw、不折、不发事件
     mem = _FakeMem(count=10)
     events = []
     verdict = Verdict(task_outcome="retry", act_recap="", reported=False)
     await ObserveStep()._fold_retry_segment(_state("max_turns", ""), _ctx(mem), verdict, events)
-    assert mem.applied == [("task", "[Context compacted]", 0)]
+    assert mem.applied == []
+    assert events == []

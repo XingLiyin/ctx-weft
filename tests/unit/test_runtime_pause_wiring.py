@@ -13,7 +13,7 @@ def _rt():
 
 def test_runtime_has_pause_and_task_manager_maps():
     rt = _rt()
-    assert rt._pause_tokens == {}
+    assert rt._run_tokens == {}
     assert rt._task_managers == {}
 
 

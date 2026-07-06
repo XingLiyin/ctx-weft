@@ -26,11 +26,16 @@ def _ts(offset_us: int) -> datetime:
 
 
 @pytest.fixture
-def fake_state_ctx():
+async def fake_state_ctx():
     """Minimal LoopState + LoopContext with a real InMemoryMemoryProvider.
 
     The task layer is pre-seeded with [USER_PROMPT, LLM_RESPONSE, TOOL_RESULT].
     ctx.task_manager has a no-op track_background.
+
+    async fixture（asyncio_mode=auto）：seed 在测试同一事件循环里跑——
+    get_event_loop().run_until_complete 在 pytest-asyncio 清理过循环后会
+    RuntimeError('There is no current event loop')，且跨循环 seed 会让 provider
+    内部 asyncio.Lock 绑定到错误的循环。
     """
     mem = InMemoryMemoryProvider()
     scope = MemoryScope(session_id="s1", task_id="t1", agent_id="a1")
@@ -63,7 +68,7 @@ def fake_state_ctx():
         for ev in events:
             await mem.ingest(ev, pctx)
 
-    asyncio.get_event_loop().run_until_complete(_seed())
+    await _seed()
 
     # Minimal agent with required attributes
     agent = SimpleNamespace(

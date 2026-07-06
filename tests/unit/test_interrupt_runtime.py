@@ -1,11 +1,11 @@
-"""Runtime: pause_session = soft (PauseToken), cancel_session = hard (CancelToken + cancel-all)."""
+"""Runtime: pause_session = 弃子（只留 root agent 那一轮继续跑，其余在途 run 与排队子任务全部弃）；
+cancel_session = 硬取消（cancel 全部在途 run + cancel-all，会话终态 CANCELED）。"""
 
 from types import SimpleNamespace
 
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.control.tokens import CancelToken, PauseToken
 from ctx_weft.core.orchestrator.hitl_manager import HitlRequest
 from ctx_weft.core.state.models import Session
 from ctx_weft.core.utils import now_utc
@@ -22,18 +22,18 @@ def _runtime():
     return CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
 
 
-async def test_pause_session_pauses_pause_token():
+async def test_pause_session_without_tm_cancels_all_runs():
+    # 无 TM（纯 registry 残留）：无法辨认 root agent → 全部按"其余"cancel，返回 True
     rt = _runtime()
-    pause = PauseToken()
-    rt._pause_tokens["s1"] = pause
-    assert rt.pause_session("s1") is True
-    assert pause.is_paused is True
+    a = rt._register_run_tokens("s1", "t1")
+    b = rt._register_run_tokens("s1", "t2")
+    assert await rt.pause_session("s1") is True
+    assert a.cancel.is_cancelled and b.cancel.is_cancelled
 
 
-async def test_cancel_session_cancels_token_and_drains_queue():
+async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
     rt = _runtime()
-    tok = CancelToken()
-    rt._cancel_tokens["s1"] = tok
+    tokens = rt._register_run_tokens("s1", "t1")
     drained = {"called": False}
 
     class _TM:
@@ -45,13 +45,13 @@ async def test_cancel_session_cancels_token_and_drains_queue():
 
     rt._task_managers["s1"] = _TM()
     assert await rt.cancel_session("s1") is True
-    assert tok.is_cancelled is True
+    assert tokens.cancel.is_cancelled is True
     assert drained["called"] is True
 
 
 async def test_unknown_session_returns_false():
     rt = _runtime()
-    assert rt.pause_session("nope") is False
+    assert await rt.pause_session("nope") is False
     assert await rt.cancel_session("nope") is False
 
 
@@ -71,7 +71,7 @@ async def test_inject_user_reply_phase1_adds_edit_note():
     ), pctx)
 
     req = HitlRequest(
-        id="h1", kind="input", session_id="s1", task_id="t1", agent_id="ag1",
+        id="h1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
         capability_id="control:wait_for_user", context="interrupt:edit",
         status="accepted", message="新请求Y",
     )
@@ -96,7 +96,7 @@ async def test_inject_user_reply_non_edit_has_no_note():
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
     req = HitlRequest(
-        id="h1", kind="input", session_id="s1", task_id="t1", agent_id="ag1",
+        id="h1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
         capability_id="control:wait_for_user", context="interrupt",  # ② not edit
         status="accepted", message="just continue",
     )

@@ -154,8 +154,19 @@ async def run_observe_react(
         ))
 
         if not tool_calls:
-            # LLM returned only text — no more rounds needed
-            break
+            # 纯文本轮不直接放弃：observer 常把复述写成正文而忘了调 terminal 工具——
+            # 还有剩余轮次时催促其改用工具提交后重试；耗尽轮次才返回 (None, last_text)。
+            if round_num + 1 >= max_rounds:
+                break
+            current_messages.append(LLMMessage(
+                role="assistant", content=accumulated_text or "(no reply)",
+            ))
+            current_messages.append(LLMMessage(
+                role="user",
+                content=(f"请调用 `{terminal_tool_name}` 工具提交上述总结"
+                         "（把内容放进工具参数），不要用纯文本回复。"),
+            ))
+            continue
 
         current_messages.append(LLMMessage(
             role="assistant",
@@ -419,12 +430,17 @@ class ObserveStep(Step):
         其余 outcome 不折，no-op。
 
         act_recap 来源：本轮真走成 report_task_outcome（reported）用其可信 report，否则用 verdict.act_recap
-        （root 机械退出经 _should_use_llm 强制 LLM 已产出）。空则占位。
+        （root 机械退出经 _should_use_llm 强制 LLM 已产出）。空则不折、段保 raw（不写占位摘要）。
         """
         if verdict.task_outcome != "retry":
             return
-        summary = (verdict.act_recap if (verdict.act_recap and verdict.act_recap.strip())
-                   else "[Context compacted]")
+        summary = (verdict.act_recap or "").strip()
+        if not summary:
+            logger.warning(
+                "_fold_retry_segment: empty act_recap for task=%s; skip fold, segment kept raw",
+                state.task.id,
+            )
+            return
         result = await ctx.memory.apply_compact(
             scope=state.scope,
             summary=summary,

@@ -66,7 +66,7 @@ async def test_interactive_plain_text_parks_for_user() -> None:
     assert task.outputs is None                       # 纯文本不是产出
     pend = hitl.list_pending("s1")
     assert len(pend) == 1
-    assert pend[0].kind == "input"
+    assert pend[0].form == "wait"
     assert pend[0].capability_id.endswith(":wait_for_user")
 
     # 临时 guidance 只在发送的 prompt，不入 memory

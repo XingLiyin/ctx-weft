@@ -31,31 +31,58 @@ class MemoryEventType(StrEnum):
     继承 StrEnum 以保持 JSON / 字符串语义。
 
     分层见 spec/06 §3：每个类型由 EVENT_LAYER 唯一映射到一层（task / agent / session）。
+
+    【目标形态·待重构】完整设计见 docs/superpowers/specs/2026-07-06-memory-protocol-v2-design.md。
+    一句话：**记忆按 scope 归档、按 address 定位**。要点：现状 type 承担双重职责（归属路由 +
+    内容筛选）且两套回合编码并存（task 层 type 区分 / agent 层 role+metadata 区分），框架机制
+    演进屡次穿透协议铸新类型、事后僵尸化。v2 沿「内容种类」慢轴重画，方法面 11 → 8：
+      kind:  CONVERSATION_TURN | SUMMARY | TOOL_AUDIT | PUBLICATION（封死，永不为新机制扩）
+      scope: TASK | AGENT | SESSION —— 归属范围（原 MemoryLayer 更名；"层"误导纵向堆叠，实为
+        横向归属分区），MemoryEvent 显式字段，EVENT_LAYER 退役为 legacy 兜底；可随执行模型
+        缓慢生长（如将来的 USER/TENANT）
+      address: MemoryAddress（原 MemoryScope 数据类更名——它是坐标不是范围）：全址 = ingest
+        归档地址，半址 = 过滤模式（None 字段 = 通配，非法字段抛 ValueError）
+      role:  user | assistant | tool —— 回合按 LLM message 模型编码，机制住 metadata（约定注册表）
+      读 = 三种记忆动作：load_view(address, scope, kinds=None) 全量幸存视图、时间正序、无
+        limit/count（22 调用点普查：limit 是伪能力兼丢最老端的潜伏 bug）/ recall_topic /
+        recall_semantic；recall_recent_by_agent 消解为半址 MemoryAddress(agent_id=A)。
+      写 = ingest + fold(supersede_ids, replacements)：遗忘+补偿原子完成（修徒手 supersede+
+        ingest 的崩溃丢摘要窗口）；keep_last/protect_types 策展政策上移框架侧，apply_compact 消亡。
+    演进规则：新框架机制 = 新 metadata 约定，永不铸新 kind；存量旧类型零数据迁移、读侧统一归一
+    （legacy_dispatch shim 届时并入唯一归一化模块；postgres 列名 layer 不改，provider 内部映射）。
     """
 
     # ── task 层（一次 task 的私有执行对话）──
     USER_PROMPT = "user_prompt"            # 用户任务输入；retry 时也追加于此
     LLM_RESPONSE = "llm_response"          # actor LLM 一轮的完整输出（metadata.tool_calls 供无损重建）
-    TOOL_INVOCATION = "tool_invocation"    # actor 一次「真实能力」工具调用（仅审计）
+    TOOL_INVOCATION = "tool_invocation"    # actor 一次「真实能力」工具调用（仅审计，不进装配）
     TOOL_RESULT = "tool_result"            # 「真实能力」工具返回值
     TASK_COMPACT_SUMMARY = "task_compact_summary"    # task compact（observe active）产出的 [Context so far]
 
-    # ── agent 层（该 agent 的派发日志，跨 task 持久）──
-    TASK_DISPATCH = "task_dispatch"               # delegate_task/delegate_plan 调用（result 暂挂）
-    TASK_DISPATCH_RESULT = "task_dispatch_result"  # child 回填的 output+process_report
-    AGENT_COMPACT_SUMMARY = "agent_compact_summary"  # agent compact 产出的 [既往派发摘要]
-    AGENT_CONVERSATION_TURN = "agent_conversation_turn"  # 折叠进 agent 层的 root task 对话回合（few-turns 经验保全）
+    # ── agent 层（该 agent 的对话日志，跨 task 持久）──
+    AGENT_COMPACT_SUMMARY = "agent_compact_summary"  # agent compact 折叠超龄单元产出的滚动经验摘要
+    # agent 层统一对话回合：dispatch 框/result（gateway plan 框 + finalize 铸框/回填）、finish 对
+    # （finalize 合成、bg observe 替换）、inherit 快照（spawn 镜像父视图）。与 task 层同构——
+    # 靠 role（assistant/tool）+ metadata（tool_calls/tool_call_id/origin_task_id/parent_task_id）
+    # 区分回合并无损重建，不再按事件类型区分。
+    AGENT_CONVERSATION_TURN = "agent_conversation_turn"
 
     # ── session / topic ──
     BLACKBOARD_PUBLISH = "blackboard_publish"  # 显式 topic 发布（见 spec/04）
 
-    # ── 过渡期保留（spec/06 落地后移除；EVENT_LAYER 仍映射，旧调用点未迁移前可用）──
-    OBSERVER_SUMMARY = "observer_summary"  # 旧 verdict.act_recap（曾名 summary）通道 → 被 TASK_DISPATCH_RESULT 取代
-    COMPACT_SUMMARY = "compact_summary"    # 旧 compact 通道 → 拆为 TASK/AGENT_COMPACT_SUMMARY
+    # ── legacy（§5.0 枚举永不物理删除；写侧已死，仅读侧兼容存量数据）──
+    TASK_DISPATCH = "task_dispatch"               # legacy：新数据不再写；读侧 normalize_legacy_dispatch 归一为 AGENT_CONVERSATION_TURN（assistant 回合）
+    TASK_DISPATCH_RESULT = "task_dispatch_result"  # legacy：同上（tool 回合）；线上无存量后删 legacy_dispatch 模块即可日落
+    OBSERVER_SUMMARY = "observer_summary"  # 半僵尸：尚存两个写点（runtime tracking flush / suspend 挂起摘要）但不进装配，仅影响计数/估算口径
+    COMPACT_SUMMARY = "compact_summary"    # 死类型：已无写点（apply_compact 按层写 TASK/AGENT_COMPACT_SUMMARY）；读侧仅 prepare 估算仍带到
 
 
 class MemoryLayer(StrEnum):
-    """Memory 分层（spec/06 §2）。scope key 与 seq 计数按层分区。"""
+    """Memory 分层（spec/06 §2）。scope key 与 seq 计数按层分区。
+
+    【目标形态更名 MemoryScope】"层"误导为纵向抽象堆叠，实为横向归属分区（这条记忆归谁：
+    task-scoped 私有转录 / agent-scoped 跨 task 经验 / session-scoped 共享黑板）；
+    见 v2 设计 §2 命名注记。"""
 
     TASK = "task"        # tenant|session|task|<task_id>
     AGENT = "agent"      # tenant|session|agent|<agent_id>
@@ -63,18 +90,20 @@ class MemoryLayer(StrEnum):
 
 
 # 事件类型 → 层（spec/06 §3）。唯一映射，ingest/recall 据此选 scope key。
+# 注：「type 唯一决定层」已在松动——apply_compact 显式传 layer、provider recall 宽容混层；
+# 目标形态下 layer 是 MemoryEvent 显式字段，本映射仅为 legacy 类型兜底（见 MemoryEventType docstring）。
 EVENT_LAYER: dict[MemoryEventType, MemoryLayer] = {
     MemoryEventType.USER_PROMPT: MemoryLayer.TASK,
     MemoryEventType.LLM_RESPONSE: MemoryLayer.TASK,
     MemoryEventType.TOOL_INVOCATION: MemoryLayer.TASK,
     MemoryEventType.TOOL_RESULT: MemoryLayer.TASK,
     MemoryEventType.TASK_COMPACT_SUMMARY: MemoryLayer.TASK,
-    MemoryEventType.TASK_DISPATCH: MemoryLayer.AGENT,
-    MemoryEventType.TASK_DISPATCH_RESULT: MemoryLayer.AGENT,
     MemoryEventType.AGENT_COMPACT_SUMMARY: MemoryLayer.AGENT,
     MemoryEventType.AGENT_CONVERSATION_TURN: MemoryLayer.AGENT,
     MemoryEventType.BLACKBOARD_PUBLISH: MemoryLayer.SESSION,
-    # 过渡期旧类型
+    # legacy 类型（写侧已死，读侧兼容存量）
+    MemoryEventType.TASK_DISPATCH: MemoryLayer.AGENT,
+    MemoryEventType.TASK_DISPATCH_RESULT: MemoryLayer.AGENT,
     MemoryEventType.OBSERVER_SUMMARY: MemoryLayer.AGENT,
     MemoryEventType.COMPACT_SUMMARY: MemoryLayer.AGENT,
 }
@@ -93,7 +122,11 @@ def layer_for_types(types: list[MemoryEventType]) -> MemoryLayer:
 
 @dataclass
 class MemoryScope:
-    """记忆范围限定。"""
+    """记忆范围限定。
+
+    【目标形态更名 MemoryAddress】它是坐标不是范围：全址 = ingest 归档地址，
+    半址 = load_view 过滤模式（None 字段 = 通配）；"scope" 一名让位给归属范围枚举
+    （原 MemoryLayer）。见 v2 设计 §3。"""
 
     session_id: str
     task_id: str | None = None
@@ -151,8 +184,8 @@ class CompactResult:
     """apply_compact 返回。"""
 
     events_before: int  # apply_compact 之前未 superseded 的事件数
-    events_after: int  # 之后未 superseded 的事件数（含新写入的 COMPACT_SUMMARY）
-    summary_event_id: str  # 新写入的 COMPACT_SUMMARY 事件 id
+    events_after: int  # 之后未 superseded 的事件数（含新写入的 TASK/AGENT_COMPACT_SUMMARY）
+    summary_event_id: str  # 新写入的 TASK/AGENT_COMPACT_SUMMARY 事件 id（按 layer 定类型）
 
 
 @dataclass
@@ -218,6 +251,11 @@ class MemoryProvider(Protocol):
 
         统一 AgentRecall 装配路径用：OPEN task 的对话据此还原（CLOSED task 的对话已被
         close 时 supersede，不会返回）。按 timestamp 倒序，每条 metadata["task_id"] 标来源。
+
+        【目标形态下消解】本方法与 recall_recent 在两个 provider 里都是同一条查询、仅差
+        匹配 task_id 还是 agent_id；layer 显式化 + selector 语义后并入统一 recall（见
+        MemoryEventType docstring），过渡期留薄包装。迁移时注意：现有三个调用点传的是带
+        task_id 的全量 scope，须显式改为 task_id=None 的 selector。
         """
         ...
 
@@ -302,9 +340,9 @@ class MemoryProvider(Protocol):
     ) -> int:
         """把给定 event id 标记为 superseded（此后不再被 recall）。返回实际标记的条数。
 
-        root-task fold 用：root finalize 时把该 agent 层中属于本次 root 子树的
-        TASK_DISPATCH/RESULT 折掉（哪些属于子树由 core 判定后传入 id 列表）。
-        已 superseded / 不存在的 id 跳过。
+        语义判定留框架、provider 只按 id 执行。主要调用方：finalize 折 task 层末 raw 段、
+        fold_root_experience 折超 keep_last 顶层单元（agent 层 conversation turn + task 层
+        胶囊跨层一并折）、bg observe 替换 finish 对占位。已 superseded / 不存在的 id 跳过。
         """
         ...
 

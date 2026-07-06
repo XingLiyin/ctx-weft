@@ -11,7 +11,7 @@ from __future__ import annotations
 class HitlPark(BaseException):
     """携带挂起所需的最小信息。"""
 
-    def __init__(self, request_id: str = "", tool_call_id: str = "") -> None:
-        super().__init__(f"HITL park: request={request_id} tool_call={tool_call_id}")
-        self.request_id = request_id
+    def __init__(self, hitl_id: str = "", tool_call_id: str = "") -> None:
+        super().__init__(f"HITL park: hitl={hitl_id} tool_call={tool_call_id}")
+        self.hitl_id = hitl_id
         self.tool_call_id = tool_call_id

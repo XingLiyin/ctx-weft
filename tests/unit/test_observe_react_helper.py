@@ -166,8 +166,52 @@ async def test_helper_returns_tool_content_when_control_tool_called(monkeypatch)
     assert tool_content.content == "REPORT"
 
 
+async def test_plain_text_round_nudged_then_terminal(monkeypatch):
+    """round 0 纯文本（无 tool call）→ 不应立即放弃：追加催促消息再试一轮；
+    round 1 调 terminal 工具 → 返回其 ControlResult。
+
+    催促轮的请求消息里须带上 round 0 的 assistant 文本 + 一条点名 terminal 工具的 user 催促。
+    """
+
+    requests = []
+
+    async def _fake_stream(ctx, state, request):
+        requests.append(request)
+        if len(requests) == 1:
+            yield _make_token_chunk("prose recap")
+            yield _make_usage_chunk()
+        else:
+            yield _make_tool_call_chunk("collect_process_report")
+            yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+
+    state = _make_state()
+    ctx = _make_ctx(tool_content="REPORT")
+
+    result, last_text = await run_observe_react(
+        state, ctx,
+        system="SYS",
+        messages=[LLMMessage(role="user", content="observe this")],
+        tools=[],
+        request_id_prefix="test",
+        max_rounds=3,
+        terminal_tool_name="collect_process_report",
+    )
+
+    assert result is not None, "纯文本轮后应催促重试而非直接返回 None"
+    assert result.content == "REPORT"
+    assert len(requests) == 2
+    msgs2 = requests[1].messages
+    assert any(m.role == "assistant" and "prose recap" in (m.content or "") for m in msgs2), \
+        "催促轮请求须携带上一轮的 assistant 文本"
+    assert any(m.role == "user" and "collect_process_report" in str(m.content) for m in msgs2), \
+        "催促消息须点名 terminal 工具"
+
+
 async def test_helper_returns_none_when_no_tool_called(monkeypatch):
-    """LLM returns only text (no tool_calls); helper returns (None, last_text)."""
+    """LLM returns only text (no tool_calls) every round; helper exhausts max_rounds
+    then returns (None, last_text)."""
 
     async def _fake_stream(ctx, state, request):
         yield _make_token_chunk("just text")

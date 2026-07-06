@@ -341,10 +341,24 @@ class DefaultComposer(Composer):
             if current_task_user_idx is None:
                 current_task_user_idx = len(messages)
             messages.append(LLMMessage(role="user", content="\n\n".join(parts)))
-        # 兜底：actor prompt 必须以 user 回合结尾——避免以 assistant/tool 结尾让模型困惑地续写自己。
-        # 正常情况下 active/retry 的 Progress So Far 已是末条 user；此处仅覆盖 summary 为空等边角。
-        if messages and messages[-1].role != "user":
-            messages.append(LLMMessage(role="user", content="Continue with the task above."))
+        # 续跑兜底（仅 act）：历史以 assistant/tool 收尾时垫一条续跑 user 回合——锚定当前任务、
+        # 先盘点已完成再只做剩余（典型命中：挂起父任务恢复、段中崩溃 recover、retry 摘要为空）。
+        # facet purpose（observe/compact/recognize_intent/background_observe）不垫续跑句——
+        # 它们的 trailing cue 自带角色行为定义；末条非 user 时由 _append_to_last_user 新建
+        # user 回合承载 capabilities / cue（不回溯粘中部 user，避免指令沉进对话中部失效）。
+        if (
+            getattr(request, "purpose", None) == "act"
+            and messages
+            and messages[-1].role != "user"
+        ):
+            task_ref = f"the task: {spec_title}" if spec_title else "the task above"
+            messages.append(LLMMessage(role="user", content=(
+                f"You are still working on {task_ref}, resuming from the state recorded "
+                "above. First review the conversation above to see what has already been "
+                "completed — do not redo or re-delegate completed work (including finished "
+                "sub-tasks; build on their results). Then identify what is still missing to "
+                "finish the task, and continue with only that remaining work."
+            )))
         # 连续同角色 / 孤立 tool result 的合法化不在装配层做——统一交由
         # loop.llm_gateway.stream_llm 在发送前处理，使装配层不反向依赖 loop。
         merged = messages
@@ -442,8 +456,8 @@ class DefaultComposer(Composer):
         if extra_sections:
             sections.extend(extra_sections)
 
-        # facet + cue 并入最后一条 user 回合（_build_actor_messages 已保证以 user 收尾），
-        # 就地避免连续 user，不再依赖发送前合并。
+        # facet + cue 落到对话末尾：末条是 user 就地并入（避免连续 user），否则新建一条 user
+        # 回合承载（续跑兜底仅 purpose=act 注入，facet 的历史可以 assistant/tool 收尾）。
         return self._append_to_last_user(messages, "\n\n".join(sections))
 
     def _build_resources_section(self, blocks: list["ContextBlock"]) -> str:
@@ -600,15 +614,20 @@ class DefaultComposer(Composer):
     def _append_to_last_user(
         self, messages: list[LLMMessage], text: str
     ) -> list[LLMMessage]:
-        """把 text 拼到末条 user message 内容尾部。无 user message 时追加一条。空 text 为 no-op。"""
+        """把 text 拼到**末条** message（须为 user）尾部；末条非 user / 无消息时新建一条 user 回合。
+
+        刻意不回溯到更早的 user：facet purpose 的历史可以 assistant/tool 收尾（续跑兜底仅
+        act 注入），此时把 text 粘到中部的 user 会让 capabilities / facet cue 沉进对话中部、
+        被其后的 assistant/tool 回合淹没。空 text 为 no-op。
+        """
         if not text:
             return messages
         out = list(messages)
-        for i in range(len(out) - 1, -1, -1):
-            if out[i].role == "user":
-                base = out[i].content if isinstance(out[i].content, str) else content_to_text(out[i].content)
-                out[i] = dataclasses.replace(out[i], content=f"{base}\n\n{text}")
-                return out
+        if out and out[-1].role == "user":
+            last = out[-1]
+            base = last.content if isinstance(last.content, str) else content_to_text(last.content)
+            out[-1] = dataclasses.replace(last, content=f"{base}\n\n{text}")
+            return out
         out.append(LLMMessage(role="user", content=text))
         return out
 

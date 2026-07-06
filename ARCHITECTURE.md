@@ -469,8 +469,9 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 
 ### 取消（`interrupt_session` `src/ctx_weft/core/runtime.py:402`）
 
-每个 `start_session` / `recover_session` 在 `_cancel_tokens[session_id]` 注册一个 `CancelToken`
-（`src/ctx_weft/core/control/tokens.py`）。`interrupt_session` 找到并 `cancel()`，返回 `bool`。
+每次任务派发（`_SessionTaskRunner.execute`）在 per-run registry `_run_tokens[session_id][task_id]`
+登记一对 `RunTokens`（`CancelToken` + `PauseToken`，`src/ctx_weft/core/control/tokens.py`），run 结束随即注销。
+取消时遍历该 session 名下全部在途 run 的 token 并 `cancel()`，返回 `bool`。
 `StepDriver` 每轮检查该 token，已取消则抛出，经 `_run_loop` 转成 `CANCELED` + `RunCanceled`/`TaskCanceled`。
 （`run_single_task` 不注册 token，故对它调用返回 `False`。）
 
