@@ -139,12 +139,15 @@ async def test_execute_born_cancel_when_tm_cancelled():
 
 
 async def test_execute_born_cancel_for_non_root_run_during_pause():
-    # _pausing 中、派发 agent 非 root → 弃子窗口内的迟到 run born-cancel（不额外 park 第二气泡）
+    # _pausing 中、派发 agent 非 root → 弃子窗口内的迟到 run born-cancel（不额外 park 第二气泡）。
+    # M-1：且**不得** born-pause——act 检查点 pause 先于 cancel，双信号会让多级委派中被
+    # 重排的中间 agent 父任务 park 出气泡、气泡归属中间 agent 而非 root。
     rt = _rt()
     rt._pausing.add("s1")
     runner = _exec_runner(rt, _StubExecTM(), root_agent_id="agr")
     cap = await _run_execute(rt, runner, agent_id="ag_sub")
     assert cap["cancel"].is_cancelled is True
+    assert cap["pause"].is_paused is False
 
 
 async def test_execute_root_run_stays_born_paused_during_pause():

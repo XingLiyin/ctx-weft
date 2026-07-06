@@ -524,11 +524,22 @@ class CtxWeftRuntime:
                         return cap.template_name
         return qualified
 
-    def _register_run_tokens(self, session_id: str, task_id: str) -> RunTokens:
-        """为一次派发发放控制信号对；pause 弃子窗口内出生即 paused。"""
+    def _register_run_tokens(
+        self, session_id: str, task_id: str, *, root_run: bool = True,
+    ) -> RunTokens:
+        """为一次派发发放控制信号对；pause 弃子窗口内按执行 agent 分流出生信号：
+
+        - root agent 的 run 出生即 paused → act 首检查点 park 成唯一续跑点；
+        - 非 root run 出生即 cancelled（M-1）——检查点 pause 先于 cancel，若两信号齐置，
+          多级委派中被 _try_resume_parent 重排的中间父任务会 park 出气泡抢走续跑点；
+          born-cancel 使其协作取消，再经 _try_resume_parent 逐级级联到 root agent 的任务。
+        """
         tokens = RunTokens(cancel=CancelToken(), pause=PauseToken())
         if session_id in self._pausing:
-            tokens.pause.pause()
+            if root_run:
+                tokens.pause.pause()
+            else:
+                tokens.cancel.cancel()
         self._run_tokens.setdefault(session_id, {})[task_id] = tokens
         return tokens
 
@@ -543,8 +554,9 @@ class CtxWeftRuntime:
     async def pause_session(self, session_id: str) -> bool:
         """软打断（spec 2026-07-05）：放弃其余在途/排队任务，只留 root agent 当前那一轮。
 
-        - 置 _pausing 闩锁：其间新派发 run 出生即 paused（root agent 任务被 _try_resume_parent
-          重排后，新 run 在 act 首个 checkpoint park，不烧 LLM）。
+        - 置 _pausing 闩锁：其间新派发的 root agent run 出生即 paused（被 _try_resume_parent
+          重排后在 act 首检查点 park，不烧 LLM）；非 root run 出生即 cancelled（多级委派的
+          中间父任务协作取消后逐级级联，气泡最终必落 root agent，M-1）。
         - 排队任务全部放弃（abandon_pending：标 CANCELED，不动 session 状态、不封 drain）。
         - 在途 run 按真实执行 agent 划分：== root agent 的那一轮（同 agent 串行 ≤1）pause →
           park 一个 wait 气泡；其余（含被顶替旧 TM 的 inflight）cancel → 协作取消终态。
@@ -1672,14 +1684,14 @@ class _SessionTaskRunner:
             return
         # 单 owner 架构 seam：model 在派发时从可变 session 读取；控制令牌 per-run 发放——
         # 随本次派发登记进 runtime registry、run 结束注销，pause/cancel 经 registry 必达在途 run。
-        tokens = self._runtime._register_run_tokens(self._session.id, task_id)
-        # assemble 窗口补偿：令牌到派发点才发放，窗口内到达的 cancel/pause 信号在此按
-        # 会话当前状态补投——TM 已整体取消 → 本 run 出生即取消；pause 弃子窗口内非
-        # root agent 的迟到 run 按弃子处理（born-cancel），保证一次暂停恰一个续跑点。
+        # 出生信号在登记点按执行 agent 分流：pause 弃子窗口内 root run born-pause、
+        # 非 root run born-cancel（一次暂停恰一个续跑点，且气泡必落 root agent）。
+        tokens = self._runtime._register_run_tokens(
+            self._session.id, task_id,
+            root_run=binding.agent_id == (self._session.root_agent_id or ""),
+        )
+        # assemble 窗口补偿：TM 已整体取消（cancel_all 在 assemble 期间到达）→ 本 run 出生即取消。
         if self._task_manager.is_cancelled():
-            tokens.cancel.cancel()
-        elif (self._session.id in self._runtime._pausing
-                and binding.agent_id != (self._session.root_agent_id or "")):
             tokens.cancel.cancel()
         try:
             s, _ = await self._runtime._execute_task(
