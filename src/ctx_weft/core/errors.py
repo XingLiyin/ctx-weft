@@ -107,3 +107,22 @@ class SessionBusyError(CtxWeftError):
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
         super().__init__(f"Session {session_id!r} is busy (currently running); try again when idle")
+
+
+class UnfinishedTasksError(CtxWeftError):
+    """开新一轮（resume_session）被拒：事件里仍有未终结任务。
+
+    弃轮（不恢复、直接开新轮）会把滞留的非终态任务永久遗弃在事件库,之后任何
+    recover_session 全量重建又会把它们复活重跑（僵尸重跑）。调用方应引导用户走
+    恢复路径（/resume → recover_session）续跑或收尾这些任务。"""
+
+    code = "SESSION_HAS_UNFINISHED_TASKS"
+
+    def __init__(self, session_id: str, task_ids: list[str]) -> None:
+        self.session_id = session_id
+        self.task_ids = list(task_ids)
+        shown = ", ".join(self.task_ids[:5]) + ("…" if len(self.task_ids) > 5 else "")
+        super().__init__(
+            f"Session {session_id!r} still has {len(self.task_ids)} unfinished task(s) "
+            f"({shown}); resume the session instead of starting a new turn"
+        )
