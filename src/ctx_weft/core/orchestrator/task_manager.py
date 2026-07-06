@@ -851,6 +851,12 @@ class TaskManager:
                 t.status = "CANCELED"
                 t.finished_at = now_utc()
             await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": reason})
+        # 队列弃子不经 on_task_finished，不会自动触发父任务重排：若某 SUSPENDED 父任务的
+        # 子任务此刻**全部**还在排队（无一在途），无人调用 _try_resume_parent → 父任务永不
+        # 重排、会话滞留 RUNNING 且无续跑点。此处对每个被弃子任务补触发重排检查（幂等：
+        # 兄弟仍在途时 all_done 不成立、由其 on_task_finished 接力；父已 ACTIVE 不二次入队）。
+        for tid in cancelled:
+            await self._try_resume_parent(tid)
         return cancelled
 
 

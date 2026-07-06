@@ -62,6 +62,47 @@ async def test_abandon_pending_keeps_root_agent_queued_task():
     assert tm.get_task("t_other").status == "CANCELED"
 
 
+async def test_abandon_pending_resumes_suspended_parent_of_queued_children():
+    # 队列弃子不经 on_task_finished，不会自动触发父任务重排：若 SUSPENDED 父任务的
+    # 子任务在暂停瞬间**全部**还在排队（无一在途），无人调用 _try_resume_parent →
+    # 父任务永不重排、会话滞留 RUNNING 且无气泡。abandon_pending 须补触发重排检查。
+    tm = TaskManager(session_id="s1", max_concurrent=0)   # drain 空转，便于观察队列
+    sess = Session(id="s1", tenant_id="default", user_prompt="x",
+                   status="RUNNING", token_budget=0, root_agent_id="agr")
+    tm.set_session(sess)
+    tm.set_runner(_StubRunner())
+    tm.register_task(_task("tp", status="SUSPENDED"))
+    await tm.push_task(_task("tc1"), parent_task_id="tp")
+    await tm.push_task(_task("tc2"), parent_task_id="tp")
+
+    cancelled = await tm.abandon_pending()
+    assert set(cancelled) == {"tc1", "tc2"}
+    # 父任务被重排为唯一续跑点候选（派发后按出生信号 park/级联）
+    assert tm.get_task("tp").status == "ACTIVE"
+    assert any(e.task_id == "tp" for e in tm._queue.peek_all())
+
+
+async def test_abandon_pending_no_resume_while_sibling_still_running():
+    # 兄弟仍在途：弃子只清排队的那部分，父任务重排留给在途兄弟的 on_task_finished 接力。
+    tm = TaskManager(session_id="s1", max_concurrent=0)
+    sess = Session(id="s1", tenant_id="default", user_prompt="x",
+                   status="RUNNING", token_budget=0, root_agent_id="agr")
+    tm.set_session(sess)
+    tm.set_runner(_StubRunner())
+    tm.register_task(_task("tp", status="SUSPENDED"))
+    running = _task("tc_run", status="ACTIVE")
+    tm.register_task(running)
+    tm._parent_map["tc_run"] = "tp"
+    tm._children_of.setdefault("tp", set()).add("tc_run")
+    tm._running_tasks.add("tc_run")
+    tm._running_agents["tc_run"] = "ag_sub"
+    await tm.push_task(_task("tc_q"), parent_task_id="tp")
+
+    cancelled = await tm.abandon_pending()
+    assert cancelled == ["tc_q"]
+    assert tm.get_task("tp").status == "SUSPENDED"   # 在途兄弟未终态 → 不得提前重排
+
+
 async def test_pause_abandon_guard_keeps_session_status_on_cancel():
     tm, sess = _tm_with_session()
     tm.register_task(_task("t1", status="ACTIVE"))
