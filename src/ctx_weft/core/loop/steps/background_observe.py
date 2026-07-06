@@ -134,7 +134,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 extra={"observe_boundary": boundary},
             )
             prompt = await ctx.assembler.assemble(request)
-            result, _ = await run_observe_react(
+            result, last_text = await run_observe_react(
                 state, ctx,
                 system=prompt.system,
                 messages=list(prompt.messages),
@@ -144,8 +144,18 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 terminal_tool_name=BACKGROUND_PROCESS_REPORT_NAME,
                 event_types=BACKGROUND_OBSERVE_REACT_EVENTS,  # 后台 LLM 交互发独立类型，host 决定不进前端
             )
-            act_recap = (result.content if result else None) or "[Context compacted]"
+            # 报告取值：terminal 工具产出 → 纯文本复述兜底（observer 把复述写成正文而没调工具）。
+            act_recap = ((result.content if result else "") or last_text or "").strip()
             task_summary = (result.metadata or {}).get("task_summary", "") if result else ""
+            if not act_recap:
+                # 无任何可用报告：与异常路径同语义——段保 raw，不写占位摘要、不动 finish 对。
+                if boundary in _CLOSE_BOUNDARIES:
+                    pop_close_synth(state.task.id)  # 弹掉登记防泄漏；finalize 占位 finish 对保持原样
+                logger.warning(
+                    "background observe produced no usable report (task=%s boundary=%s); "
+                    "segment kept raw", state.task.id, boundary,
+                )
+                return
             if boundary in _CLOSE_BOUNDARIES:
                 synth = pop_close_synth(state.task.id)  # sync check-and-clear（无 await）
                 if synth is not None:

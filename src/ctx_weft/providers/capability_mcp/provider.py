@@ -33,6 +33,7 @@ from ctx_weft.protocols.capability import (
     ToolCapabilityProvider,
 )
 from ctx_weft.protocols.context import ProviderContext
+import httpx
 
 if TYPE_CHECKING:
     from mcp import ClientSession
@@ -65,6 +66,7 @@ class MCPServerConfig:
     # （HTTP_PROXY/HTTPS_PROXY/NO_PROXY/SSL_CERT_FILE/NETRC…）。默认 False＝直连、忽略
     # 系统代理与证书设置（内网部署常态）。core 自身不消费此字段，由 host 的 transport 实现读取。
     trust_env: bool = False
+    ssl_verify: bool | str = False  # True / False / CA bundle path
 
 
 class MCPCapabilityProvider(ToolCapabilityProvider):
@@ -256,11 +258,17 @@ class MCPCapabilityProvider(ToolCapabilityProvider):
                 args=list(self._cfg.command[1:]),
                 env={**os.environ, **self._cfg.env} if self._cfg.env else None,
             ))
-        from mcp.client.streamable_http import streamablehttp_client
-        return streamablehttp_client(
+        from mcp.client.streamable_http import streamable_http_client
+        http_client = httpx.AsyncClient(
+            base_url=self._cfg.url,
+            headers=self._cfg.headers,
+            timeout=self._cfg.timeout_per_call_sec,
+            trust_env=self._cfg.trust_env,
+            verify=self._cfg.ssl_verify
+        )
+        return streamable_http_client(
             url=self._cfg.url,
-            headers=self._cfg.headers or None,
-            timeout=self._cfg.connect_timeout_sec,
+            http_client=http_client
         )
 
     async def _teardown_runner(self) -> None:

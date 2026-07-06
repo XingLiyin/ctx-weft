@@ -297,6 +297,114 @@ async def test_two_plain_text_observes_accumulate_both_summaries(monkeypatch, fa
 
 
 @pytest.mark.asyncio
+async def test_plain_text_reply_falls_back_to_last_text(monkeypatch, fake_state_ctx):
+    """observer 全程纯文本、始终不调 collect_process_report：不得丢弃其文本换占位符，
+    应把最后一轮纯文本当作段摘要写入 TASK_COMPACT_SUMMARY。"""
+    state, ctx = fake_state_ctx
+    ctx.capability_gateway = _FakeGateway("unused")
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=2)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+
+    async def _text_only(c, s, req):
+        yield _make_token_chunk("纯文本复述")
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _text_only)
+    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+
+    recs = await ctx.memory.recall_recent(
+        state.scope, [MemoryEventType.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
+    assert len(recs) == 1
+    assert recs[0].content == "纯文本复述", \
+        f"应采纳 observer 的纯文本复述，实得 {recs[0].content!r}"
+
+
+@pytest.mark.asyncio
+async def test_no_usable_report_keeps_raw(monkeypatch, fake_state_ctx):
+    """observer 既没调工具也没产出任何文本：不写占位摘要、不折叠——段保 raw
+    （与异常路径同语义）。"""
+    state, ctx = fake_state_ctx  # task 层预置 [UP, LLM, TOOL]
+    ctx.capability_gateway = _FakeGateway("unused")
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=2)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+
+    async def _empty(c, s, req):
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
+    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+
+    from ctx_weft.protocols import MemoryEventType as MT
+    recs = await ctx.memory.recall_recent(
+        state.scope, [MT.USER_PROMPT, MT.LLM_RESPONSE, MT.TOOL_RESULT, MT.TASK_COMPACT_SUMMARY],
+        100, ctx.provider_ctx)
+    types = [r.type for r in recs]
+    assert MT.TASK_COMPACT_SUMMARY not in types, "无可用报告不得写占位摘要"
+    assert MT.LLM_RESPONSE in types and MT.TOOL_RESULT in types, "raw 必须保留"
+
+
+@pytest.mark.asyncio
+async def test_no_usable_report_close_does_not_fill_slot(monkeypatch, fake_state_ctx):
+    """close 边界、无 synth 登记、无可用报告：不得把占位符塞进 _close_report 槽
+    （否则 finalize 会用它合成 finish 对）。"""
+    state, ctx = fake_state_ctx
+    ctx.capability_gateway = _FakeGateway("unused")
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=2)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+
+    async def _empty(c, s, req):
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
+    await bo.launch_background_observe(state, ctx, boundary="finish")
+
+    assert bo.pop_close_report(state.task.id) is None, "无可用报告不得占用 close_report 槽"
+
+
+@pytest.mark.asyncio
+async def test_no_usable_report_close_preserves_existing_finish_pair(monkeypatch, fake_state_ctx):
+    """close 边界、synth 已登记、无可用报告：finalize 合成的 finish 对须保持原样，
+    不得被占位符重写；synth 登记要弹掉防泄漏。"""
+    from datetime import UTC, datetime
+
+    from ctx_weft.protocols import MemoryEvent
+    from ctx_weft.protocols import MemoryEventType as MT
+
+    state, ctx = fake_state_ctx
+    ctx.capability_gateway = _FakeGateway("unused")
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=2)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+
+    # 预置 finalize 合成的 finish 对（assistant + tool，tool_call_id=tc9）
+    ts = datetime.now(UTC)
+    await ctx.memory.ingest(MemoryEvent(
+        type=MT.AGENT_CONVERSATION_TURN, scope=state.scope, content="finalize recap",
+        timestamp=ts, role="assistant",
+        metadata={"origin_task_id": state.task.id,
+                  "tool_calls": [{"id": "tc9", "name": "control__finish_task", "input": {}}]},
+    ), ctx.provider_ctx)
+    await ctx.memory.ingest(MemoryEvent(
+        type=MT.AGENT_CONVERSATION_TURN, scope=state.scope, content="finalize summary",
+        timestamp=ts, role="tool",
+        metadata={"origin_task_id": state.task.id, "tool_call_id": "tc9"},
+    ), ctx.provider_ctx)
+
+    async def _empty(c, s, req):
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
+    bo.register_close_synth(state.task.id, "tc9", state.scope, "success")
+    await bo.launch_background_observe(state, ctx, boundary="finish")
+
+    turns = await ctx.memory.recall_recent(
+        state.scope, [MT.AGENT_CONVERSATION_TURN], 100, ctx.provider_ctx)
+    contents = sorted(r.content for r in turns)
+    assert contents == ["finalize recap", "finalize summary"], \
+        f"finish 对不得被占位符重写，实得 {contents}"
+    assert bo._close_synth == {}, "close_synth 登记须被弹掉防泄漏"
+
+
+@pytest.mark.asyncio
 async def test_background_zero_state_pollution(monkeypatch, fake_state_ctx):
     """跑 background observe 前后，task.status/actor_done/observer_outcome 不变"""
     state, ctx = fake_state_ctx

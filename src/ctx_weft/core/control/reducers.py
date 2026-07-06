@@ -383,6 +383,15 @@ def _apply(view: RunStateView, ev: Event) -> None:
             sess = view.sessions.get(ev.session_id)
             if sess is not None:
                 sess.goal = goal
+        # root task 创建时 title 为空、由 recognize_intent 并发补填——回放须同样补进
+        # TaskView，否则导入/重启重建的投影里 root task 永远无名。空值不覆盖已有值。
+        if ev.task_id:
+            task = view.tasks.get(ev.task_id)
+            if task is not None:
+                if p.get("title"):
+                    task.title = p["title"]
+                if p.get("description"):
+                    task.description = p["description"]
 
     elif t == EventType.FAILURE_THRESHOLD_HIT:
         sess = view.sessions.get(ev.session_id)
@@ -448,12 +457,6 @@ def _apply(view: RunStateView, ev: Event) -> None:
             task.outputs = p.get("outputs")
             task.error = p.get("error")
             task.finished_at = ev.timestamp
-
-    elif t == EventType.BLACKBOARD_PUBLISHED and ev.task_id:
-        task = view.tasks.get(ev.task_id)
-        if task is not None:
-            task.title = p.get("title", task.title)
-            task.description = p.get("description", task.description)
 
     # ── LLM / Context ─────────────────────────────────────────────────────────
     elif t == EventType.PREPARE_COMPLETED:

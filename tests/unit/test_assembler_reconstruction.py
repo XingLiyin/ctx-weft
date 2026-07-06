@@ -1,6 +1,7 @@
 """Composer 对重建后 history blocks 的收尾整形。
 
-- actor prompt 必须以 user 结尾（history 以 assistant 收尾且无 Current Progress 时兜底补 user）
+- act purpose 的 actor prompt 必须以 user 结尾（history 以 assistant 收尾且无 Current Progress
+  时垫续跑兜底 user；facet purpose 不垫，由各自 trailing cue 收尾）
 - observer 复用 act 风格会话（含全部 task 轮次 + 派发日志），尾部追加 observe 指令消息
 
 注：原 RecentMemorySource / AgentExperienceSource 的记录→回合重建单测已随两源删除；其活体
@@ -19,7 +20,8 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_actor_messages_always_end_with_user() -> None:
-    """actor prompt 必须以 user 结尾——history 以 assistant 收尾且无 Current Progress 时兜底补 user。"""
+    """act purpose 的 actor prompt 必须以 user 结尾——history 以 assistant 收尾且无 Current
+    Progress 时垫续跑兜底 user（锚定任务 + 盘点已完成/只做剩余）。"""
     blocks = [
         ContextBlock(id="b1", source="x", kind="history", target="messages", content="hi",
                      priority=3, token_estimate=1, metadata={"role": "user", "timestamp": "1"}),
@@ -28,9 +30,10 @@ async def test_actor_messages_always_end_with_user() -> None:
     ]
     task = SimpleNamespace(user_prompt_in_memory=True, process_report=None,
                            title="X", description="", user_prompt="hi")
-    request = SimpleNamespace(task=task)
+    request = SimpleNamespace(task=task, purpose="act")
     msgs = DefaultComposer()._build_actor_messages(blocks, request)
     assert msgs[-1].role == "user"
+    assert "You are still working on the task: X" in msgs[-1].content
 
 
 async def test_observer_reuses_act_conversation_plus_observe_message() -> None:

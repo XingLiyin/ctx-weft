@@ -140,6 +140,43 @@ def test_untitled_task_no_prompt_falls_back_to_id_prefix():
     assert "(untitled abcdef)" in g
 
 
+def test_finished_children_listed_with_no_redo_emphasis():
+    # 挂起恢复场景：完成的子任务不在树里，但要在「已完成」清单里点名 + 强调勿重做。
+    parent = _task("t1", "Parent", "ACTIVE")
+    c1 = _task("t2", "Research", "FINISHED", parent="t1")
+    c2 = _task("t3", "Draft", "FINISHED", parent="t1")
+    g = _build_act_guidance(_state(id="t1"), _ctx(tasks=[parent, c1, c2]))
+    assert "ALREADY COMPLETED" in g
+    assert "Do NOT redo their work" in g
+    assert "- [FINISHED] Research" in g
+    assert "- [FINISHED] Draft" in g
+    # 树里仍只有非终态节点
+    assert "▶ Parent" in g
+    assert "  - [FINISHED]" not in g.split("## Sub-tasks")[0]
+
+
+def test_finished_children_of_other_tasks_not_listed():
+    # 别的 task 的完成子任务、以及无 parent 的完成 task，都不进当前 task 的清单。
+    cur = _task("t1", "Current", "ACTIVE")
+    other_child = _task("t2", "OtherChild", "FINISHED", parent="tX")
+    orphan_done = _task("t3", "OrphanDone", "FINISHED")
+    g = _build_act_guidance(_state(id="t1"), _ctx(tasks=[cur, other_child, orphan_done]))
+    assert "ALREADY COMPLETED" not in g
+    assert "OtherChild" not in g
+    assert "OrphanDone" not in g
+
+
+def test_failed_canceled_children_not_listed_as_completed():
+    # FAILED/CANCELED 子任务可能需要重派，不得标成「已完成勿重做」。
+    parent = _task("t1", "Parent", "ACTIVE")
+    failed = _task("t2", "FailedChild", "FAILED", parent="t1")
+    canceled = _task("t3", "CanceledChild", "CANCELED", parent="t1")
+    g = _build_act_guidance(_state(id="t1"), _ctx(tasks=[parent, failed, canceled]))
+    assert "ALREADY COMPLETED" not in g
+    assert "FailedChild" not in g
+    assert "CanceledChild" not in g
+
+
 def test_interactive_mode_keeps_pause_note_with_tree():
     cur = _task("t1", "Cur", "ACTIVE")
     sib = _task("t2", "Other", "PENDING")

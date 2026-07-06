@@ -322,12 +322,13 @@ def test_act_directive_targets_current_task_not_prior_experience() -> None:
 
 def test_resumed_task_directive_on_history_capabilities_on_fallback() -> None:
     """Resumed act task: the directive attaches to the first (history-derived) user message;
-    capabilities ride the trailing fallback "Continue with the task above." message (recency).
+    capabilities ride the trailing fallback continue message (recency).
 
     Progress So Far no longer has a separate process_report-driven render path (retired 2026-07-01
     Task 3 — retry feedback is now carried by the TASK_COMPACT_SUMMARY segment summary instead), so
     a resumed task with only history blocks + a trailing non-user turn falls back to the generic
-    "Continue with the task above." user message as the trailing dynamic-context slot."""
+    resume user message (task title + review-completed/do-remaining wording) as the trailing
+    dynamic-context slot (act purpose only)."""
     blocks = [
         _identity_block("SOUL TEXT"),
         _background_block("BG TEXT"),
@@ -346,10 +347,40 @@ def test_resumed_task_directive_on_history_capabilities_on_fallback() -> None:
     assert "the original ask" in first
     assert first.index("the original ask") < first.index("## Instructions for the current task")
     assert "### Available Tools" not in first
-    # the trailing dynamic-context (fallback) message carries the capabilities
-    assert "Continue with the task above." in last
+    # the trailing dynamic-context (fallback) message carries the capabilities;
+    # the fallback declares the current task, asks to review what's done, and to do only the rest
+    assert "You are still working on the task: T" in last
+    assert "do not redo or re-delegate completed work" in last
+    assert "still missing to finish the task" in last
     assert "### Available Tools" in last
     assert first is not last
+
+
+def test_facet_purpose_gets_no_resume_filler_cue_rides_new_trailing_user() -> None:
+    """Non-act purposes must NOT get the act resume filler. With a non-user-ending history,
+    the facet cue (+capabilities) rides a NEW trailing user message appended at the END —
+    never glued onto an earlier mid-conversation user turn."""
+    blocks = [
+        _identity_block("OBSERVER ROLE"),
+        _cap_block("report_task_outcome", "tool", "report the outcome"),
+        _history_block("user", "## Current Message\nthe original ask", "1"),
+        _history_block("assistant", "did some work", "2"),
+        _history_block("tool", "big tool result", "3"),
+    ]
+    task = SimpleNamespace(title="T", description="d", user_prompt="the original ask",
+                           user_prompt_in_memory=True, process_report=None, outputs=None)
+    request = SimpleNamespace(task=task, purpose="observe")
+    msgs = DefaultComposer()._build_observer_messages(blocks, request)
+    # no act resume filler anywhere
+    assert all("You are still working on" not in (m.content or "") for m in msgs)
+    # the cue message is the LAST message of the list (nothing after it)
+    assert msgs[-1].role == "user"
+    assert "OBSERVER ROLE" in msgs[-1].content
+    assert "## Capabilities" in msgs[-1].content
+    # the mid-conversation user turn stays clean
+    first_user = next(m for m in msgs if m.role == "user")
+    assert "OBSERVER ROLE" not in first_user.content
+    assert "## Capabilities" not in first_user.content
 
 
 def test_observer_capabilities_on_last_user_not_front() -> None:

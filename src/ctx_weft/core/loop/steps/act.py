@@ -662,6 +662,23 @@ def _has_other_open_tasks(state: LoopState, ctx: LoopContext) -> bool:
     return any(t.id != cur for t in _nonterminal_tasks(ctx))
 
 
+def _finished_subtasks(state: LoopState, ctx: LoopContext) -> list:
+    """当前 task 的 FINISHED 直接子任务，created_at 升序。
+
+    只列 FINISHED：FAILED/CANCELED 的子任务可能需要重派/另行处理，不适合标成
+    「已完成勿重做」。挂起恢复时任务树只剩非终态节点，完成的子任务从树里消失——
+    这份清单把它们显式钉出来，防止 parent 把子任务的活自己再做一遍或重复派发。
+    """
+    if ctx.task_manager is None:
+        return []
+    cur = state.task.id
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    done = [t for t in ctx.task_manager.all_tasks()
+            if t.parent_task_id == cur and t.status == "FINISHED"]
+    done.sort(key=lambda t: t.created_at or epoch)
+    return done
+
+
 def _session_task_tree(state: LoopState, ctx: LoopContext) -> str:
     """把 session 内**非终态** task 渲染成缩进任务树，当前 task 以 ``▶`` 标注。
 
@@ -701,8 +718,11 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
     """构造拼到最后一条 user message 的临时 guidance（session 任务树 + 完成方式）。
 
     - 当前任务的 title/description 由 composer 的 ``## Current Task`` 框承载，此处不再重复渲染；
-      本段只提供 session 非终态任务树（含当前 task 的 ``▶`` 定位）+ 完成方式/任务切换/ask_user。
+      本段只提供 session 非终态任务树（含当前 task 的 ``▶`` 定位）+ 已完成子任务清单 +
+      完成方式/任务切换/ask_user。
     - session 仅剩当前 task 一个非终态节点时，任务树整段不出现。
+    - 当前 task 有 FINISHED 子任务时（典型：挂起恢复），显式列出并强调勿重做/勿重派——
+      它们已从任务树消失，但其完整执行过程就摊在对话上文里，是重复劳动的高危源。
     """
     task = state.task
     parts: list[str] = ["---"]
@@ -718,6 +738,17 @@ def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
         )
         parts.append(header)
         parts.append(tree)
+        parts.append("")
+
+    done = _finished_subtasks(state, ctx)
+    if done:
+        parts.append(
+            "## Sub-tasks of your current task that are ALREADY COMPLETED — their results "
+            "are in the conversation above. Do NOT redo their work yourself and do NOT "
+            "delegate them again; build on their results:"
+        )
+        for t in done:
+            parts.append(f"- [FINISHED] {_task_label(t)}")
         parts.append("")
 
     finish_core = (

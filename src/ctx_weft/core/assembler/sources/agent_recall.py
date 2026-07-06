@@ -41,7 +41,7 @@ _TASK_TYPES = [
     MemoryEventType.TOOL_RESULT,
     MemoryEventType.TASK_COMPACT_SUMMARY,
 ]
-# 残留 / 经验类型（agent 层）
+# agent 层对话 / 经验类型；前两个为 legacy（写侧已死），召回后经 normalize_legacy_dispatch 归一
 _AGENT_TYPES = [
     MemoryEventType.TASK_DISPATCH,
     MemoryEventType.TASK_DISPATCH_RESULT,
