@@ -475,6 +475,10 @@ class CtxWeftRuntime:
         # pause 弃子进行中的 session：新派发 run 的 PauseToken 出生即 paused
         # （root agent 任务被重排后，新 run 在 act 首个 checkpoint 立即 park）。
         self._pausing: set[str] = set()
+        # 本轮暂停的续跑点名额（一次性）：pause_session pause 到在途 root run、或闩锁窗口内
+        # 第一个 root run born-pause 时认领；此后窗口内再派发的 root run 一律 born-cancel。
+        # 与 _pausing 同生命周期（_on_idle / _release_session / pause_session 兜底一起清）。
+        self._pause_claimed: set[str] = set()
         # compact 等一次性操作的忙位（原先借 _cancel_tokens dict 占位）。
         self._busy_sessions: set[str] = set()
         self._task_managers: dict[str, TaskManager] = {}
@@ -529,14 +533,19 @@ class CtxWeftRuntime:
     ) -> RunTokens:
         """为一次派发发放控制信号对；pause 弃子窗口内按执行 agent 分流出生信号：
 
-        - root agent 的 run 出生即 paused → act 首检查点 park 成唯一续跑点；
+        - root agent 的 run 出生即 paused → act 首检查点 park 成唯一续跑点。名额一次性
+          （_pause_claimed）：root agent 同时有多个任务（后继任务/多条消息）时，第一个
+          root run 认领后，窗口内再派发的 root run（如子任务死光被重排的 SUSPENDED root
+          任务）一律 born-cancel——"一次暂停恰一个续跑点"。park 中的 run 非终态，其祖先
+          不会被 _try_resume_parent 重排，合法等待中的父任务不受此规则误伤。
         - 非 root run 出生即 cancelled（M-1）——检查点 pause 先于 cancel，若两信号齐置，
           多级委派中被 _try_resume_parent 重排的中间父任务会 park 出气泡抢走续跑点；
           born-cancel 使其协作取消，再经 _try_resume_parent 逐级级联到 root agent 的任务。
         """
         tokens = RunTokens(cancel=CancelToken(), pause=PauseToken())
         if session_id in self._pausing:
-            if root_run:
+            if root_run and session_id not in self._pause_claimed:
+                self._pause_claimed.add(session_id)
                 tokens.pause.pause()
             else:
                 tokens.cancel.cancel()
@@ -555,8 +564,10 @@ class CtxWeftRuntime:
         """软打断（spec 2026-07-05）：放弃其余在途/排队任务，只留 root agent 当前那一轮。
 
         - 置 _pausing 闩锁：其间新派发的 root agent run 出生即 paused（被 _try_resume_parent
-          重排后在 act 首检查点 park，不烧 LLM）；非 root run 出生即 cancelled（多级委派的
-          中间父任务协作取消后逐级级联，气泡最终必落 root agent，M-1）。
+          重排后在 act 首检查点 park，不烧 LLM）——但续跑点名额一次性（_pause_claimed）：
+          在途 root run 被 pause 或首个 root run born-pause 即认领，窗口内其后的 root run
+          一律 born-cancel；非 root run 出生即 cancelled（多级委派的中间父任务协作取消后
+          逐级级联，气泡最终必落 root agent，M-1）。
         - 排队任务全部放弃（abandon_pending：标 CANCELED，不动 session 状态、不封 drain）。
         - 在途 run 按真实执行 agent 划分：== root agent 的那一轮（同 agent 串行 ≤1）pause →
           park 一个 wait 气泡；其余（含被顶替旧 TM 的 inflight）cancel → 协作取消终态。
@@ -576,6 +587,9 @@ class CtxWeftRuntime:
         for task_id, tokens in list(per.items()):
             if root_agent and tm is not None and tm.running_agent_of(task_id) == root_agent:
                 tokens.pause.pause()
+                # 在途 root run 即唯一续跑点：认领名额，闩锁窗口内此后派发的 root scope
+                # 任务（如被 _try_resume_parent 重排的 SUSPENDED root 任务）born-cancel。
+                self._pause_claimed.add(session_id)
             else:
                 tokens.cancel.cancel()
         # 补 drain：把保留的 root 排队条目派发出去——它出生即 paused → act 首检查点 park 出唯一
@@ -585,6 +599,7 @@ class CtxWeftRuntime:
         # 竞态兜底：信号发完会话已静止（root 恰好收尾、无可 park 对象）→ 立即清闩锁防残留。
         if tm is not None and tm.is_done():
             self._pausing.discard(session_id)
+            self._pause_claimed.discard(session_id)
             tm.set_pause_abandon(False)
         return True
 
@@ -815,6 +830,7 @@ class CtxWeftRuntime:
             # 只清 pause 弃子闩锁；compare-and-check 防被顶替旧 TM 的迟到 idle 误清新一轮闩锁。
             if self._task_managers.get(session.id) is task_manager:
                 self._pausing.discard(session.id)
+                self._pause_claimed.discard(session.id)
                 task_manager.set_pause_abandon(False)
 
         task_manager.set_session_done_callback(_on_done)
@@ -831,6 +847,7 @@ class CtxWeftRuntime:
         """
         self._run_tokens.pop(session_id, None)
         self._pausing.discard(session_id)
+        self._pause_claimed.discard(session_id)
         self._task_managers.pop(session_id, None)
         for _p in self.providers.get_capability_providers():
             if isinstance(_p, SessionScopedCapabilityProvider):

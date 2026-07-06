@@ -69,6 +69,23 @@ async def test_pause_session_partitions_root_run_vs_rest():
     assert sess.status == "RUNNING"
 
 
+async def test_pause_session_inflight_root_run_claims_resume_point():
+    # 在途 root run 被 pause → 名额已认领：闩锁窗口内此后派发的 root scope 任务（如
+    # 子任务死光被 _try_resume_parent 重排的 SUSPENDED root 任务）born-cancel，不出第二气泡。
+    rt = _rt()
+    tm, _ = _wire(rt)
+    tm.register_task(_task("t_root", status="ACTIVE"))
+    tm._running_tasks.add("t_root")
+    tm._running_agents["t_root"] = "agr"
+    root_tokens = rt._register_run_tokens("s1", "t_root")
+
+    assert await rt.pause_session("s1") is True
+    assert root_tokens.pause.is_paused is True           # 在途那一轮 = 唯一续跑点
+    late = rt._register_run_tokens("s1", "t_requeued", root_run=True)
+    assert late.cancel.is_cancelled is True
+    assert late.pause.is_paused is False
+
+
 async def test_pause_session_unknown_task_runs_are_cancelled():
     # 旧 TM inflight：registry 在册但当前 TM 的 _running_agents 不认识 → 按"非 root 那一轮"cancel
     rt = _rt()
