@@ -219,6 +219,73 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     assert "PAUSED_HITL" in statuses, "有 pending HITL 的会话恢复应反映 PAUSED_HITL"
 
 
+def _recover_runtime_with_status_capture():
+    """构造带 SESSION_STATUS_CHANGED 捕获的 runtime（recover 状态语义测试共用）。"""
+    from ctx_weft.core import CtxWeftRuntime
+    from ctx_weft.core.events.types import EventType
+    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+
+    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    statuses: list = []
+
+    async def _cap(ev):
+        statuses.append(ev.payload.get("new_status"))
+
+    runtime.event_bus.subscribe(EventType.SESSION_STATUS_CHANGED, _cap)
+    return runtime, statuses
+
+
+def _mk_ev(seq, type_, **payload):
+    from datetime import datetime, timezone
+    from ctx_weft.core.events.types import Event
+    task_id = payload.pop("task_id", None)
+    return Event(id=f"e{seq}", run_id="r1", sequence=seq, session_id="ses_1", type=type_,
+                 timestamp=datetime(2026, 6, 12, tzinfo=timezone.utc), task_id=task_id, payload=payload)
+
+
+async def test_recover_emits_paused_for_wait_only_pending() -> None:
+    """wait-only pending（纯文本软待命）恢复应 PAUSED 而非 PAUSED_HITL——与
+    SESSION_PAUSED_HITL 的 reducer/投影语义一致（form=wait → PAUSED，无 HITL 面板）。"""
+    from ctx_weft.core.events.types import EventType
+
+    runtime, statuses = _recover_runtime_with_status_capture()
+    seed = [
+        _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
+        _mk_ev(2, EventType.RUN_STARTED),
+        _mk_ev(3, EventType.TASK_STARTED, task_id="t1", assigned_agent_id="agt"),
+        _mk_ev(4, EventType.HITL_REQUIRED, task_id="t1", hitl_id="h1", form="wait",
+               capability_id="control:wait_for_user", tool_call_id="tc1"),
+    ]
+    for e in seed:
+        await runtime.event_store.append(e)
+
+    await runtime.recover()
+    assert "PAUSED" in statuses, "wait-only pending 恢复应反映 PAUSED（软待命）"
+    assert "PAUSED_HITL" not in statuses, "wait-only 不应误标 PAUSED_HITL（前端会等一个不存在的面板）"
+
+
+async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None:
+    """混合 pending（wait + question/approval）恢复仍应 PAUSED_HITL——有面板可答。"""
+    from ctx_weft.core.events.types import EventType
+
+    runtime, statuses = _recover_runtime_with_status_capture()
+    seed = [
+        _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
+        _mk_ev(2, EventType.RUN_STARTED),
+        _mk_ev(3, EventType.TASK_STARTED, task_id="t1", assigned_agent_id="agt"),
+        _mk_ev(4, EventType.HITL_REQUIRED, task_id="t1", hitl_id="h1", form="wait",
+               capability_id="control:wait_for_user", tool_call_id="tc1"),
+        _mk_ev(5, EventType.HITL_REQUIRED, task_id="t1", hitl_id="h2", form="question",
+               capability_id="control:ask_user", tool_call_id="tc2", question="which?"),
+    ]
+    for e in seed:
+        await runtime.event_store.append(e)
+
+    await runtime.recover()
+    assert "PAUSED_HITL" in statuses, "混合 pending 恢复应反映 PAUSED_HITL"
+
+
 async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     """方案 II：已有活 TM 正在跑 X 时，recover 建的新 TM 不得重排 X（否则跨 TM 双跑）。
 

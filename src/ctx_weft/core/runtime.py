@@ -1263,8 +1263,12 @@ class CtxWeftRuntime:
                 n = await self.rebuild_hitl(session_id)
                 if n:
                     # 有未决 HITL → 如实反映"等待人工"（否则投影停在崩溃前的 RUNNING，看着在跑却卡住）。
-                    await self._emit_session_status(session_id, "PAUSED_HITL")
-                    logger.info("Recovery: session %s → PAUSED_HITL (%d pending, drain deferred to reply)", session_id, n)
+                    # wait-only（纯文本软待命）= PAUSED、其余 = PAUSED_HITL——与 SESSION_PAUSED_HITL
+                    # 的 reducer/投影语义一致（form=wait 无 HITL 面板，误标会让前端等一个不存在的面板）。
+                    pend = self.hitl_manager.list_pending(session_id=session_id)
+                    status = "PAUSED" if pend and all(r.form == "wait" for r in pend) else "PAUSED_HITL"
+                    await self._emit_session_status(session_id, status)
+                    logger.info("Recovery: session %s → %s (%d pending, drain deferred to reply)", session_id, status, n)
                 else:
                     await self._emit_session_interrupted(session_id)
                     logger.info("Recovery: session %s → INTERRUPTED (event emitted)", session_id)
