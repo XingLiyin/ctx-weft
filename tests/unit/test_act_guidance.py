@@ -209,7 +209,15 @@ def test_interactive_mode_keeps_pause_note_with_tree():
     sib = _task("t2", "Other", "PENDING")
     g = build_act_guidance(_cur(mode="interactive", id="t1"), _tm(tasks=[cur, sib]))
     assert "## The overall plan" in g
-    assert "pauses the task and waits" in g
+    assert "keeps the task open" in g
+
+
+def test_finish_reminder_leads_with_completion_gate():
+    # 判据在前：仅目标完全达成才 finish，措辞不得以收尾为默认动作。
+    for mode in ("interactive", "autonomous"):
+        g = build_act_guidance(_cur(mode=mode), _tm())
+        assert "ONLY once the task goal is fully achieved" in g
+        assert "keep working instead of finishing" in g
 
 
 # ── 装配管线：GuidanceSource + composer 落位 ──────────────────────────────────

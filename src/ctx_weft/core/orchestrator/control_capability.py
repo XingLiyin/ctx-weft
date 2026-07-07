@@ -300,7 +300,7 @@ def finish_task(
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Finish the CURRENT task and hand off to review. Write your final reply to the user as your normal message text in this same turn — that message IS the reply shown to the user and the deliverable handed off; this tool just ends the task. The optional `deliverables_summary` is a brief recap of concrete artifacts for the reviewer, NOT your answer. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
+    """Finish the CURRENT task and hand off to review — call ONLY when the task goal is fully achieved; if work remains, keep working instead. Write your final reply to the user as your normal message text in this same turn — that message IS the reply shown to the user and the deliverable handed off; this tool just ends the task. The optional `deliverables_summary` is a brief recap of concrete artifacts for the reviewer, NOT your answer. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
     if ctx is not None and ctx.task is not None:
         # task.outputs 由 ActStep 收尾时合成（收尾回合正文 + deliverables_summary，spec 2026-07-01）；
         # 此处不写 outputs。actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe。

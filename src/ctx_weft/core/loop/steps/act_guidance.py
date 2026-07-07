@@ -177,15 +177,19 @@ def build_act_guidance(task, task_manager) -> str:
         parts.append("")
 
     # 静态提醒（指针级）：完整语义在工具 description / SOUL / observer 护栏，这里只钉最易违反的三条。
+    # finish 提醒判据在前——此段处于每回合尾部 recency 最强位，措辞若以收尾为默认会放大过早 finish。
     finish_core = (
-        "When your work here is done, write the final reply to the user as your normal "
-        f"message text and call `{FINISH_TASK_NAME}` in that same turn — the message text is "
+        f"Call `{FINISH_TASK_NAME}` ONLY once the task goal is fully achieved — if work "
+        "remains, keep working instead of finishing. To finish, write the final reply to the "
+        "user as your normal message text and call it in that same turn; the message text is "
         "the reply and the deliverable, not the tool arguments (details in the tool description)."
     )
     if task.interaction_mode == "interactive":
         parts.append(
             finish_core
-            + " (Plain text without it pauses the task and waits for the user instead of finishing.)"
+            + " In this interactive task a plain-text reply keeps the task open and hands "
+            "the floor to the user — the right move mid-conversation; finish only when the "
+            "whole request is served."
         )
     elif has_other_tasks:
         parts.append(finish_core + " Do not start the other tasks yourself.")
