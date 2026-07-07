@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 # 经 sources 包 __init__ 触发循环 import）。
 PROGRESS_SO_FAR_HEADING = "## Progress So Far"
 
+# observe prompt 里「可 review 子任务清单」段的标题前缀：composer 渲染、
+# report_task_outcome 的 task_reviews schema 引用（跨层字符串契约，勿散写字面量）。
+SUBTASKS_REVIEW_HEADING = "## Your sub-tasks"
+
 
 def now_utc() -> datetime:
     """UTC current time."""

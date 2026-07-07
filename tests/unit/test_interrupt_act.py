@@ -94,7 +94,7 @@ def test_interrupt_edit_note_wraps_prev_and_new():
     note = interrupt_edit_note("do X", "do Y instead")
     assert "do X" in note
     assert "do Y instead" in note
-    assert "取消" in note
+    assert "cancelled" in note
 
 
 def test_interrupt_edit_note_empty_prev_returns_new():

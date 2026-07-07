@@ -163,8 +163,9 @@ async def run_observe_react(
             ))
             current_messages.append(LLMMessage(
                 role="user",
-                content=(f"请调用 `{terminal_tool_name}` 工具提交上述总结"
-                         "（把内容放进工具参数），不要用纯文本回复。"),
+                content=(f"Submit the summary above by calling the `{terminal_tool_name}` "
+                         "tool (put the content in the tool arguments); do not reply in "
+                         "plain text."),
             ))
             continue
 

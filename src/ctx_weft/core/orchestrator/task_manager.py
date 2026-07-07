@@ -473,7 +473,7 @@ class TaskManager:
             parts.append(
                 f"## Upstream task revised\n"
                 f"Predecessor '{head_title}' was reopened (reason: {head_reason}). "
-                f"Its updated result is shown under \"Upstream task results\" above. "
+                f"Its updated result appears in the conversation above. "
                 f"Redo this task based on the updated result."
             )
         elif reason:

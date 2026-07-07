@@ -588,7 +588,10 @@ def interrupt_edit_note(prev_request: str, new_input: str) -> str:
     prev = (prev_request or "").strip()
     if not prev:
         return new_input
-    return f"（我取消了上一条请求：「{prev}」，改为以下请求。）\n\n{new_input}"
+    return (
+        f'(I cancelled my previous request: "{prev}" — replacing it with the request below.)'
+        f"\n\n{new_input}"
+    )
 
 
 async def _park_wait_for_user(

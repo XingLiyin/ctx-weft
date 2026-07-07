@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any
 
-from ctx_weft.core.utils import extract_schema, generate_id, now_utc
+from ctx_weft.core.utils import SUBTASKS_REVIEW_HEADING, extract_schema, generate_id, now_utc
 from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
@@ -317,7 +317,7 @@ def _collect_reviews(
     每条 review: {task_title, review_status('confirmed'|'reopen'|'skip'), reasoning}。
 
     权限范围：只有当前 task 直接派生的子任务（children_of）才能被 review / reopen。
-    同 plan 前序仅作只读上下文（observe prompt 的 "Upstream task results" 段），不可在此操作；
+    同 plan 前序仅作只读上下文（经 memory recall 以对话形态出现，无专门段），不可在此操作；
     任何不在子任务集合内的标题都会被拒绝并在摘要里反馈给 LLM。
 
     本函数**不直接改状态**——仅收集需 reopen 的 FINISHED 子任务及其 reasoning，交由
@@ -401,11 +401,11 @@ def report_task_outcome(
     ] = "",
     task_reviews: Annotated[
         list,
-        "Optional reviews of YOUR OWN sub-tasks only — exactly those listed under "
-        "'Your sub-task results' in the context. You may NOT review anything under "
-        "'Upstream task results' (those are read-only predecessors) or any other task; "
+        "Optional reviews of YOUR OWN sub-tasks only — exactly those listed under the "
+        f"'{SUBTASKS_REVIEW_HEADING}' section in the context. You may NOT review anything "
+        "else (upstream/predecessor tasks appear as read-only conversation context); "
         "such entries are rejected. "
-        "Each entry: task_title (str, exact match from 'Your sub-task results'), "
+        f"Each entry: task_title (str, exact match of the title shown in '{SUBTASKS_REVIEW_HEADING}'), "
         "review_status ('confirmed'|'reopen'|'skip'), reasoning (str, required). "
         "'reopen' re-runs that FINISHED sub-task from scratch: its previous output is "
         "automatically shown to the re-run and your 'reasoning' becomes the revision "

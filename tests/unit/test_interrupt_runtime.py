@@ -79,7 +79,7 @@ async def test_inject_user_reply_phase1_adds_edit_note():
 
     recs = await mem.recall_recent(scope, [MemoryEventType.USER_PROMPT], 10, pctx)
     assert any(
-        "原始请求X" in (r.content or "") and "新请求Y" in (r.content or "") and "取消" in (r.content or "")
+        "原始请求X" in (r.content or "") and "新请求Y" in (r.content or "") and "cancelled" in (r.content or "")
         for r in recs
     )
 
@@ -103,4 +103,4 @@ async def test_inject_user_reply_non_edit_has_no_note():
     await rt._inject_user_reply(req, session, tm)
     recs = await mem.recall_recent(scope, [MemoryEventType.USER_PROMPT], 10, pctx)
     assert any(r.content == "just continue" for r in recs)
-    assert all("取消" not in (r.content or "") for r in recs)
+    assert all("cancelled" not in (r.content or "") for r in recs)

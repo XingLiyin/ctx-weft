@@ -93,7 +93,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ctx_weft.protocols import LLMMessage, LLMTool
 from ctx_weft.protocols.capability import qualify
-from ctx_weft.core.utils import content_to_text, estimate_tokens
+from ctx_weft.core.utils import SUBTASKS_REVIEW_HEADING, content_to_text, estimate_tokens
 from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
@@ -782,7 +782,7 @@ class DefaultComposer(Composer):
         # surfaces the actionable handles (task_id/title/outcome) so it can confirm/reopen via task_reviews.
         reviews = (getattr(request, "extra", {}) or {}).get("subtask_reviews") or []
         if reviews:
-            lines = ["## Your sub-tasks (confirm / reopen via `task_reviews`, referencing the exact task_title):"]
+            lines = [f"{SUBTASKS_REVIEW_HEADING} (confirm / reopen via `task_reviews`, referencing the exact task_title):"]
             for r in reviews:
                 lines.append(f"- {r['task_id']} — {r.get('title', '')} [{r.get('outcome', '')}]")
             extra_sections.append("\n".join(lines))
