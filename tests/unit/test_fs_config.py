@@ -10,7 +10,7 @@ from ctx_weft.providers.capability_filesystem.provider import (
 def test_fs_config_defaults():
     c = FilesystemConfig()
     assert c.bash_idle_timeout_sec == 30
-    assert c.bash_hard_cap_sec == 120
+    assert c.bash_hard_cap_sec == 3600
     assert c.bash_max_output_bytes == 50_000
     assert c.file_read_default_lines == 500
     assert c.file_read_max_bytes == 20_480
@@ -65,12 +65,12 @@ def test_invoke_fills_limit_defaults_from_config(tmp_path):
     p.register_session("s1", str(tmp_path))
     extra = _capture_invoke_extra(p, ProviderContext(session_id="s1"))
     assert extra["bash_idle_timeout_sec"] == 30
-    assert extra["bash_hard_cap_sec"] == 120
+    assert extra["bash_hard_cap_sec"] == 3600
     assert extra["bash_max_output_bytes"] == 50_000
 
 
 def test_invoke_lets_caller_override_timeouts(tmp_path):
-    p = FilesystemToolsProvider(FilesystemConfig())  # config defaults 30/120/50000
+    p = FilesystemToolsProvider(FilesystemConfig())  # config defaults 30/3600/50000
     p.register_session("s1", str(tmp_path))
     ctx = ProviderContext(session_id="s1", extra={
         "bash_idle_timeout_sec": 11,
