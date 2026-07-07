@@ -3,7 +3,9 @@
 - interactive 任务 actor 纯文本 → HITL input 冷 park（等用户），不产出、不完成。
 - auto 任务 actor 纯文本 → 文本即 outputs，路由 observe。
 - finish_task 收尾标记 → 答复正文即 outputs + 完成（端到端经 gateway/observe/finalize）。
-- 临时 guidance（title/description/后继/完成方式）只进发送的 prompt，不入 memory。
+- 运行时 guidance 现由装配管线注入（PrepareStep → extra["act_guidance"] →
+  GuidanceSource → composer 末条 user 尾部）；本文件 fixture 按该形态预拼进
+  assembled prompt，验证 ActStep 原样发送、guidance 不入 memory。
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep
+from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import (
@@ -40,8 +43,11 @@ def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
     )
     agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
     scope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    # composer 形态：guidance 已拼在末条 user 尾部（ActStep 不再自行注入）。
+    guidance = build_act_guidance(task, None)
     prompt = AssembledPrompt(
-        system="", messages=[LLMMessage(role="user", content="hi")], tools=[], token_count=1,
+        system="", messages=[LLMMessage(role="user", content=f"hi\n\n{guidance}")],
+        tools=[], token_count=1,
     )
     state = LoopState(
         run_id="r1", session=session, task=task, agent=agent, scope=scope, assembled_prompt=prompt,
@@ -69,7 +75,7 @@ async def test_interactive_plain_text_parks_for_user() -> None:
     assert pend[0].form == "wait"
     assert pend[0].capability_id.endswith(":wait_for_user")
 
-    # 临时 guidance 只在发送的 prompt，不入 memory
+    # guidance 只在发送的 prompt（装配期已拼入），不入 memory
     sent = llm.last_request.messages[-1].content
     assert "final reply to the user" in sent and "finish_task" in sent
     recs = await mem.recall_recent(state.scope, [MemoryEventType.LLM_RESPONSE], 10, ctx.provider_ctx)

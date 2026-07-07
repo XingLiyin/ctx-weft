@@ -347,11 +347,11 @@ def test_resumed_task_directive_on_history_capabilities_on_fallback() -> None:
     assert "the original ask" in first
     assert first.index("the original ask") < first.index("## Instructions for the current task")
     assert "### Available Tools" not in first
-    # the trailing dynamic-context (fallback) message carries the capabilities;
-    # the fallback declares the current task, asks to review what's done, and to do only the rest
+    # the trailing dynamic-context message carries the capabilities; without
+    # extra["act_resume_cue"] the composer's structural fallback line anchors the task
+    # and asks to continue with the remaining work (canonical cue lives in act_guidance.py)
     assert "You are still working on the task: T" in last
-    assert "do not redo or re-delegate completed work" in last
-    assert "still missing to finish the task" in last
+    assert "continue with only the remaining work" in last
     assert "### Available Tools" in last
     assert first is not last
 

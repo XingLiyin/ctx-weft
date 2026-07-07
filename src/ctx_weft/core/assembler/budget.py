@@ -31,9 +31,17 @@ class BudgetStrategy(Protocol):
 
 class PriorityBudgetStrategy(BudgetStrategy):
     """按 eff_priority 保留（0 永不丢，丢序大→小）；同档按最老先丢、再按体积。
-    eff_priority = slot_priority 静态基线 + budget 动态覆盖（当前 user_prompt→0 pin，
-    当前 task 内容→4 提级）。tool_call↔tool_result 配对成 DropUnit 原子丢弃；
-    priority-0 地板超限抛富信息 ContextOverflowError。详见 spec §4.2 / §4.2.1。"""
+
+    eff_priority = slot_priority 静态阶梯（见 priority.py 的槽位表）+ 两个动态覆盖：
+
+        静态基线 5/6（history）──┬─ task_id == 当前 且 type=user_prompt ──→ 0（pin，不可裁）
+                                 ├─ task_id / origin_task_id == 当前 ────→ 4（提级）
+                                 └─ 其余（已完成 task）───────────────────→ 维持 5/6
+
+    丢弃流程：tool_call↔tool_result 先聚成同生共死单元（防孤立 tool result）
+    → 按 (-priority, 最老 timestamp, -token) 排序逐单元丢 → 丢到限内为止；
+    只剩 priority-0 地板仍超限时抛富信息 ContextOverflowError。
+    详见 spec §4.2 / §4.2.1。"""
 
     async def apply(
         self,

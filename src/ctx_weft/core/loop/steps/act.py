@@ -10,7 +10,6 @@ import asyncio
 import dataclasses
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
@@ -19,8 +18,6 @@ from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import (
-    ASK_USER_NAME,
-    DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
     WAIT_FOR_USER_CAPABILITY_ID,
 )
@@ -58,8 +55,9 @@ class ActStep(Step):
         transcript: list[TurnRecord] = []
         exit_reason = "normal"
 
-        # 临时拼上 task title/description + 后继任务 + 完成方式（仅发送，不入 memory）。
-        current_messages = _inject_act_guidance(list(prompt.messages), state, ctx)
+        # 运行时态势 guidance（任务树/已完成子任务/收尾提醒）已随装配管线注入
+        # （PrepareStep → GuidanceSource → composer 末条 user 尾部），此处不再修饰。
+        current_messages = list(prompt.messages)
 
         for turn_num in range(1, max_turns + 1):
             await _interrupt_checkpoint(state, ctx)
@@ -628,183 +626,3 @@ async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
     tok = ctx.cancel_token
     if tok is not None and tok.is_cancelled:
         tok.raise_if_cancelled()
-
-
-# ── 临时 task guidance 注入（仅发送，不入 memory）──────────────────────────────────
-
-
-_TERMINAL_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELED"})
-_TASK_LABEL_MAX = 80
-
-
-def _task_label(t) -> str:
-    """任务树里一行的标签：title 优先；无 title 用开启该 task 的 prompt 首行（截断）；再无回退 id。"""
-    title = (t.title or "").strip()
-    if title:
-        return title
-    prompt = (getattr(t, "user_prompt", None) or "").strip()
-    if prompt:
-        first = prompt.splitlines()[0].strip()
-        return first[:_TASK_LABEL_MAX] + "…" if len(first) > _TASK_LABEL_MAX else first
-    return f"(untitled {t.id[:6]})"
-
-
-def _nonterminal_tasks(ctx: LoopContext) -> list:
-    """session 内非终态 task（PENDING/ACTIVE/SUSPENDED/TO_BE_OBSERVED），无 task_manager 时空表。"""
-    if ctx.task_manager is None:
-        return []
-    return [t for t in ctx.task_manager.all_tasks() if t.status not in _TERMINAL_STATUSES]
-
-
-def _has_other_open_tasks(state: LoopState, ctx: LoopContext) -> bool:
-    """当前 task 之外是否还有其它非终态 task（决定是否提示「别自己做其它任务」）。"""
-    cur = state.task.id
-    return any(t.id != cur for t in _nonterminal_tasks(ctx))
-
-
-def _finished_subtasks(state: LoopState, ctx: LoopContext) -> list:
-    """当前 task 的 FINISHED 直接子任务，created_at 升序。
-
-    只列 FINISHED：FAILED/CANCELED 的子任务可能需要重派/另行处理，不适合标成
-    「已完成勿重做」。挂起恢复时任务树只剩非终态节点，完成的子任务从树里消失——
-    这份清单把它们显式钉出来，防止 parent 把子任务的活自己再做一遍或重复派发。
-    """
-    if ctx.task_manager is None:
-        return []
-    cur = state.task.id
-    epoch = datetime.min.replace(tzinfo=timezone.utc)
-    done = [t for t in ctx.task_manager.all_tasks()
-            if t.parent_task_id == cur and t.status == "FINISHED"]
-    done.sort(key=lambda t: t.created_at or epoch)
-    return done
-
-
-def _session_task_tree(state: LoopState, ctx: LoopContext) -> str:
-    """把 session 内**非终态** task 渲染成缩进任务树，当前 task 以 ``▶`` 标注。
-
-    - 仅列非终态（PENDING/ACTIVE/SUSPENDED/TO_BE_OBSERVED）——终态不刷屏、只留「还没做完的活」。
-    - 按 parent_task_id 建树；父节点被过滤掉（终态/缺失）的非终态 task 提升到 root 层，避免孤儿丢失。
-      roots 及同层子节点按 created_at 升序。
-    - 只要有 ≥1 个非终态 task 就出树（含 root 独自 act 时只列它自己一行）——root 派生子任务后即转
-      SUSPENDED 停止 act，故「单节点」唯一对应 root 独自 act 的情形，让它也能看到自己的定位。
-    """
-    tasks = _nonterminal_tasks(ctx)
-    if not tasks:
-        return ""
-    ids = {t.id for t in tasks}
-    epoch = datetime.min.replace(tzinfo=timezone.utc)
-    children: dict[str | None, list] = {}
-    for t in tasks:
-        parent = t.parent_task_id if t.parent_task_id in ids else None
-        children.setdefault(parent, []).append(t)
-    for lst in children.values():
-        lst.sort(key=lambda t: t.created_at or epoch)
-
-    current_id = state.task.id
-    lines: list[str] = []
-
-    def _walk(node_id: str | None, depth: int) -> None:
-        for t in children.get(node_id, []):
-            indent = "  " * depth
-            marker = "▶ " if t.id == current_id else ""
-            lines.append(f"{indent}- [{t.status}] {marker}{_task_label(t)}")
-            _walk(t.id, depth + 1)
-
-    _walk(None, 0)
-    return "\n".join(lines)
-
-
-def _build_act_guidance(state: LoopState, ctx: LoopContext) -> str:
-    """构造拼到最后一条 user message 的临时 guidance（session 任务树 + 完成方式）。
-
-    - 当前任务的 title/description 由 composer 的 ``## Current Task`` 框承载，此处不再重复渲染；
-      本段只提供 session 非终态任务树（含当前 task 的 ``▶`` 定位）+ 已完成子任务清单 +
-      完成方式/任务切换/ask_user。
-    - session 仅剩当前 task 一个非终态节点时，任务树整段不出现。
-    - 当前 task 有 FINISHED 子任务时（典型：挂起恢复），显式列出并强调勿重做/勿重派——
-      它们已从任务树消失，但其完整执行过程就摊在对话上文里，是重复劳动的高危源。
-    """
-    task = state.task
-    parts: list[str] = ["---"]
-
-    tree = _session_task_tree(state, ctx)
-    has_other_tasks = _has_other_open_tasks(state, ctx)
-    if tree:
-        header = (
-            "## The overall plan (▶ = your current task; the rest are handled separately "
-            "— do NOT do them yourself):"
-            if has_other_tasks
-            else "## The overall plan (▶ = your current task):"
-        )
-        parts.append(header)
-        parts.append(tree)
-        parts.append("")
-
-    done = _finished_subtasks(state, ctx)
-    if done:
-        parts.append(
-            "## Sub-tasks of your current task that are ALREADY COMPLETED — their results "
-            "are in the conversation above. Do NOT redo their work yourself and do NOT "
-            "delegate them again; build on their results:"
-        )
-        for t in done:
-            parts.append(f"- [FINISHED] {_task_label(t)}")
-        parts.append("")
-
-    finish_core = (
-        "When your work is done, write your final reply to the user as your normal message "
-        f"text, then call the `{FINISH_TASK_NAME}` tool to end the task. Your message text is "
-        "the reply the user sees and the deliverable handed to whoever delegated this task — "
-        "write it as your message, not inside the tool. The tool takes an optional "
-        "`deliverables_summary` (a brief recap of concrete artifacts, e.g. key files changed, "
-        "for the reviewer) — that is NOT your answer; leave it empty if there is nothing to itemize."
-    )
-    if task.interaction_mode == "interactive":
-        parts.append(
-            finish_core
-            + " (Replying in plain text without this tool pauses the task and waits for the "
-            "user, instead of finishing.)"
-        )
-    elif has_other_tasks:
-        parts.append(finish_core + " Do not start the other tasks yourself.")
-    else:
-        parts.append(finish_core)
-    # 任务切换：用户最新请求与当前任务无关时，先 finish 收尾、再 delegate 新任务（可同轮）。
-    parts.append(
-        f"If the user's latest message is about something unrelated to THIS task (a new, "
-        f"different request — not a follow-up, correction, or continuation of it), do not "
-        f"pivot this task onto it. In a SINGLE response, emit BOTH tool calls together: "
-        f"`{FINISH_TASK_NAME}` (wrap up this task) AND `{DELEGATE_TASK_NAME}` (dispatch the "
-        f"new request as a separate task). Always issue them together — do NOT call only "
-        f"finish and stop, intending to delegate on the next turn: once finish takes effect "
-        f"this task ends and there is no next turn, so the new request would be lost. Their "
-        f"order does not matter (finish wraps up this task; the new request runs as an "
-        f"independent task)."
-    )
-    # 始终提示：需要用户输入/决策/澄清时主动调 ask_user（各完成方式下都加）。
-    parts.append(
-        f"Whenever you need information, a decision, or a clarification that only the user "
-        f"can provide, call the `{ASK_USER_NAME}` tool to ask them — prefer asking over guessing."
-    )
-    return "\n".join(parts)
-
-
-def _inject_act_guidance(
-    messages: list[LLMMessage], state: LoopState, ctx: LoopContext
-) -> list[LLMMessage]:
-    """把临时 guidance 拼到最后一条 user message 内容尾部，返回新列表。
-
-    仅普通任务（NormalTaskSettings）注入；compact/recognize_intent 等跳过。仅影响发送给 LLM 的
-    messages，不写 memory。无 user message 时追加一条。
-    """
-    if not isinstance(state.task.settings, NormalTaskSettings):
-        return messages
-    guidance = _build_act_guidance(state, ctx)
-    out = list(messages)
-    for i in range(len(out) - 1, -1, -1):
-        if out[i].role == "user":
-            base = out[i].content if isinstance(out[i].content, str) else str(out[i].content)
-            out[i] = dataclasses.replace(out[i], content=f"{base}\n\n{guidance}")
-            return out
-    out.append(LLMMessage(role="user", content=guidance))
-    return out

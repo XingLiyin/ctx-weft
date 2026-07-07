@@ -17,6 +17,7 @@ from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
+from ctx_weft.core.loop.steps.act_guidance import build_act_guidance, build_resume_cue
 from ctx_weft.core.orchestrator.skill_executor_capability import (
     EXEC_SCRIPT_NAME,
     LIST_FILES_NAME,
@@ -79,6 +80,16 @@ class PrepareStep(Step):
         # ── 4. 装配 prompt ────────────────────────────────────────────────────
         purpose = settings.purpose if isinstance(settings, NormalTaskSettings) else "act"
 
+        # 运行时态势文本（仅 act + 普通任务；authorship 见 act_guidance.py）：
+        # guidance 经 extra → GuidanceSource → composer 恒拼末条 user 尾部；
+        # resume cue 经 extra → composer 在历史以 assistant/tool 收尾时垫续跑回合。
+        if purpose == "act" and isinstance(settings, NormalTaskSettings):
+            act_guidance = build_act_guidance(state.task, ctx.task_manager)
+            act_resume_cue = build_resume_cue(state.task, ctx.task_manager)
+        else:
+            act_guidance = ""
+            act_resume_cue = ""
+
         def _assemble():
             return ctx.assembler.assemble(ContextRequest(
                 purpose=purpose,
@@ -88,7 +99,12 @@ class PrepareStep(Step):
                 session=session,
                 template=template,
                 bound_capabilities=bound_capabilities,
-                extra={"skill_instructions": skill_instructions, "skill_name": skill_name},
+                extra={
+                    "skill_instructions": skill_instructions,
+                    "skill_name": skill_name,
+                    "act_guidance": act_guidance,
+                    "act_resume_cue": act_resume_cue,
+                },
             ))
 
         prompt = await _assemble()

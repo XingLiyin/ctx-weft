@@ -9,11 +9,13 @@
 | long_memory | summary | MemoryProvider.recall_semantic | messages |
 | knowledge | reference | KnowledgeProvider.retrieve | messages |
 | task_spec | task_spec | 当前 task spec（metadata）| Composer 读 metadata 装饰当前消息 |
+| guidance | guidance | request.extra["act_guidance"]（PrepareStep 构建）| 末条 user 尾部（仅 act）|
 """
 
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.assembler.sources.blackboard import BlackboardSource
 from ctx_weft.core.assembler.sources.capability import CapabilitySource
+from ctx_weft.core.assembler.sources.guidance import GuidanceSource
 from ctx_weft.core.assembler.sources.identity import IdentitySource
 from ctx_weft.core.assembler.sources.knowledge import KnowledgeRetrievalSource
 from ctx_weft.core.assembler.sources.long_memory import SemanticRecallSource
@@ -23,6 +25,7 @@ __all__ = [
     "AgentRecallSource",
     "BlackboardSource",
     "CapabilitySource",
+    "GuidanceSource",
     "IdentitySource",
     "KnowledgeRetrievalSource",
     "SemanticRecallSource",

@@ -1,45 +1,87 @@
 """Composer：把 ContextBlock 渲染成最终 AssembledPrompt。
 
-格式与 miniAgents prompt_builder.py 完全对齐——这是 refactor 不是 redesign。
+═══ 槽位总览：所有 purpose 共用同一副「底盘」，差异全在尾部注入与工具面 ═══
 
-Actor system prompt（用 --- 分隔，仅 soul + 项目背景，per-task 资源不入此处）：
-  soul（identity）
-  ---
-  ## Project Background\n\n{background}
+system —— 恒为 act 面孔（--- 分隔）。purpose 专属人格不进 system，由尾部 user
+message 就近覆盖（_build_actor_system / _build_act_system 同构）：
 
-Actor messages（多轮 LLMMessage：history 轮次在前，最后一条 user 含任务上下文）。
-resources（skills/tools/agents）+ 当前 task 的 skill 指令以前缀形式拼到**当前 task 的首条** user
-message（首条 task_conversation 来源的 user 回合；fresh task 时即末尾任务上下文那条，而非整个
-列表里更早的跨 task agent_experience 回合）之前（仅发送，不入 memory）：
-  ### Available Skills / ### Available Tools / ### Available Sub-Agents
-  ## Instructions for the current task\n\n{skill_instructions / directive}
-  ---
-  {该首条 user message 原内容}
-后续任务上下文 user message：
-  ## Current Task
-  {task.title}
-  {task.description}
-  ## Current Message
-  {task.user_prompt}
-  历史轮次（独立 LLMMessage）：
-  User: {content}
-  Assistant: {content} + tool_calls
-  Tool: {result}
+    ┌──────────────────────────────────────────────┐
+    │ identity(act)          ← SOUL.md 正文         │
+    │ ---                                           │
+    │ ## Project Background  ← background block     │
+    └──────────────────────────────────────────────┘
 
-（Phase 3 2026-06-30: ## Task Background blackboard 段已移除；predecessor 结果经 memory recall 获取。）
+messages —— 组装步骤（_build_actor_messages）：
 
-Observer system prompt（与 act 同构）：
-  role/soul（act identity）
-  ---
-  ## Project Background\n\n{background}
+    ① history 多轮重建：agent_recall 归并所有未折叠 task body + agent 层
+       finish/dispatch 对 + 折叠摘要，按 (timestamp, seq_no) 正序（见
+       sources/_history.py）。当前 task 段摘要已冠 ## Progress So Far，
+       user 身份摘要已套「压缩摘要」消歧前缀。
+    ② 当前 task 的 user_prompt 回合就地装饰（按 task_id 定位，缺失回退末条）：
+       ## Current Task / ## Current Message 框 + 同语言回复提示；
+       directive（skill 指令）仅 act 拼在此回合尾部。
+    ③ 仅 act：末条以 assistant/tool 收尾时垫续跑衔接 user 回合
+       （extra["act_resume_cue"]；缺失时结构兜底一句，保证以 user 收尾）。
+    ④ 末条 user 尾部依次拼（_append_to_last_user；末条非 user 则新建，
+       绝不回溯粘中部）：guidance（仅 act）→ ## Capabilities →
+       facet 尾注（仅 facet purpose）。
 
-Observer messages：复用 actor messages（同样把 resources + skill 指令注入首条 user
-message），再追加一条尾部 user message（仅发送，不入 memory）：
-  {observe ROLE（identity）}
-  ---
-  {判定提示}
-  ## Your sub-tasks（当有 extra["subtask_reviews"] 时）:
-  - {task_id} — {title} [{outcome}]
+═══ act 末条 user 的三种形态（开场三选一；「--- 以下」的收尾恒同）═══
+
+  A. fresh / 当前消息回合 —— 末条就是当前 task 的 user_prompt 回合：
+       ## Current Task {title}\n{description}
+       ## Current Message {user_prompt}（+ 同语言回复提示）
+       ## Instructions for the current task (skill: x)   ← 绑 skill 时
+       ---（guidance 起，见下）
+  B. 续跑回合 —— 历史以 assistant/tool 收尾（挂起父任务恢复、段中崩溃
+     recover、retry 摘要为空）：
+       {resume cue：仍在做任务 X、盘点已完成、只做剩余
+        + 确有 FINISHED 子任务时一句「清单见下方态势注记」}
+       ---（guidance 起，见下）
+  C. 追问回合 —— interactive 任务里用户新消息本身是末条 user：
+       {用户消息原文}
+       ---（guidance 起；此形态下 Current Task 框远在历史深处，
+           guidance 的锚定行是生成点附近唯一的任务锚）
+
+  三种形态共用的收尾（guidance + capabilities）：
+       ---
+       Current task: {title}                    ← 任务锚定行（恒有）
+       ## The overall plan（▶ 定位当前 task）   ← ≥1 非终态 task 才出
+       ## Sub-tasks ... ALREADY COMPLETED       ← 有 FINISHED 子任务才出
+       finish / 无关新请求双发 / ask_user 三条指针级提醒
+       ## Capabilities                          ← 殿后，工具清单紧贴生成点
+
+  guidance 与 resume cue 同源 loop/steps/act_guidance.py（PrepareStep 构建，
+  经 extra["act_guidance"] / extra["act_resume_cue"] 传入；guidance 走
+  GuidanceSource 成块、参与预算与 token 记账）。
+
+═══ facet purpose（observe/compact/recognize_intent/background_observe）═══
+
+  无续跑 cue、无 guidance。末条 user（历史末条是 user 就并入，否则新建）：
+       {原内容（如有）}
+       ## Capabilities（skill/agent 段因 purpose 门控通常不出现）
+       ## Your Current Role + facet 正文（ROLE/COMPACT/METADATA.md）
+       ---
+       cue（各 purpose 专属，见下表）
+
+═══ 各 facet 的 cue 与工具面（act 的 tools = act-purpose 全量）═══
+
+  observe            ROLE facet → [## Final output ← task.outputs（finish 为
+                     SILENT 工具，对话里不可见，须显式回填）] → 裁决 cue
+                     (_OBSERVE_JUDGMENT_CUE) → [## Your sub-tasks 可 review 清单
+                     ← extra["subtask_reviews"]]。tools = report_task_outcome。
+  background_observe ROLE facet → [## Actor 的最终产出（仅 close 边界）] →
+                     边界 cue（interrupt / plain_text / finish / normal）。
+                     tools = collect_process_report。
+  compact            COMPACT facet → 压缩 cue，按 extra["compact_scope"] 二选一：
+                     task 域=概括整个 task 至今；agent 域=只压派发历史。
+                     tools = []（纯文本输出）。
+  recognize_intent   METADATA facet → 元数据 cue（update_task_metadata 恰一次）。
+                     tools = update_task_metadata。
+
+历史沿革：格式源自 miniAgents prompt_builder.py（refactor 非 redesign）；
+Phase 3 (2026-06-30) 移除 ## Task Background blackboard 段，predecessor 结果
+改经 memory recall 浮现。裁剪保护阶梯见 priority.py；预算裁剪见 budget.py。
 """
 
 from __future__ import annotations
@@ -341,8 +383,12 @@ class DefaultComposer(Composer):
             if current_task_user_idx is None:
                 current_task_user_idx = len(messages)
             messages.append(LLMMessage(role="user", content="\n\n".join(parts)))
-        # 续跑兜底（仅 act）：历史以 assistant/tool 收尾时垫一条续跑 user 回合——锚定当前任务、
+        # 续跑衔接（仅 act）：历史以 assistant/tool 收尾时垫一条续跑 user 回合——锚定当前任务、
         # 先盘点已完成再只做剩余（典型命中：挂起父任务恢复、段中崩溃 recover、retry 摘要为空）。
+        # 文本与 guidance 同源（loop/steps/act_guidance.py 的 build_resume_cue，经
+        # extra["act_resume_cue"] 传入）——两者共同构成 act 的态势感知层：cue 开场、
+        # guidance（任务树/已完成清单/收尾提醒）收口，勿重做的具体清单只在 guidance 展开。
+        # extra 缺失（手构请求/单测）时用结构兜底一句，保证 act prompt 恒以 user 收尾。
         # facet purpose（observe/compact/recognize_intent/background_observe）不垫续跑句——
         # 它们的 trailing cue 自带角色行为定义；末条非 user 时由 _append_to_last_user 新建
         # user 回合承载 capabilities / cue（不回溯粘中部 user，避免指令沉进对话中部失效）。
@@ -351,14 +397,15 @@ class DefaultComposer(Composer):
             and messages
             and messages[-1].role != "user"
         ):
-            task_ref = f"the task: {spec_title}" if spec_title else "the task above"
-            messages.append(LLMMessage(role="user", content=(
-                f"You are still working on {task_ref}, resuming from the state recorded "
-                "above. First review the conversation above to see what has already been "
-                "completed — do not redo or re-delegate completed work (including finished "
-                "sub-tasks; build on their results). Then identify what is still missing to "
-                "finish the task, and continue with only that remaining work."
-            )))
+            cue = (getattr(request, "extra", None) or {}).get("act_resume_cue", "")
+            if not cue:
+                task_ref = f"the task: {spec_title}" if spec_title else "the task above"
+                cue = (
+                    f"You are still working on {task_ref}, resuming from the state recorded "
+                    "above. Review what has already been done and continue with only the "
+                    "remaining work."
+                )
+            messages.append(LLMMessage(role="user", content=cue))
         # 连续同角色 / 孤立 tool result 的合法化不在装配层做——统一交由
         # loop.llm_gateway.stream_llm 在发送前处理，使装配层不反向依赖 loop。
         merged = messages
@@ -381,6 +428,15 @@ class DefaultComposer(Composer):
         else:
             if directive_text:
                 merged = self._prepend_to_first_user(merged, directive_text)
+        # 末条 user 的收尾次序（act）：guidance（任务锚定/plan 全景/已完成清单/
+        # 静态指针）在前，## Capabilities 殿后——工具清单紧贴生成点，模型读完
+        # 态势再看可用手段。动态内容居尾不打穿 prompt cache 前缀。仅 act 渲染
+        # guidance（facet purpose 的 extra 本就不带 act_guidance，此处双保险）；
+        # facet 的 role/cue 由 _build_facet_trailing_messages 追加在 capabilities 之后。
+        if getattr(request, "purpose", None) == "act":
+            guidance = self._first_kind(blocks, "guidance")
+            if guidance is not None:
+                merged = self._append_to_last_user(merged, content_to_text(guidance.content))
         merged = self._append_to_last_user(merged, capabilities_text)
         return merged
 
@@ -726,7 +782,7 @@ class DefaultComposer(Composer):
         # surfaces the actionable handles (task_id/title/outcome) so it can confirm/reopen via task_reviews.
         reviews = (getattr(request, "extra", {}) or {}).get("subtask_reviews") or []
         if reviews:
-            lines = ["## Your sub-tasks (confirm / reopen via `task_reviews`, referencing the task_id):"]
+            lines = ["## Your sub-tasks (confirm / reopen via `task_reviews`, referencing the exact task_title):"]
             for r in reviews:
                 lines.append(f"- {r['task_id']} — {r.get('title', '')} [{r.get('outcome', '')}]")
             extra_sections.append("\n".join(lines))

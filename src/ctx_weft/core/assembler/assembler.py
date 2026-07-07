@@ -3,6 +3,27 @@
 ContextRequest 是装配入口；ContextBlock 是中间表示；AssembledPrompt 是最终输出。
 ContextSource 是数据获取接口。
 
+═══ 流水线 ═══
+
+  sources（并发 fetch，每个产 0..N 个 block）
+    IdentitySource        identity + directive
+    CapabilitySource      capabilities（tools/skills/agents 三路）
+    TaskSpecSource        task_spec（metadata 载体）
+    AgentRecallSource     history（task body + agent 层回合）
+    BlackboardSource      blackboard + background
+    SemanticRecallSource  summary
+    KnowledgeRetrieval…   reference
+    GuidanceSource        guidance（act 态势，extra["act_guidance"]）
+          │
+          ▼  ContextBlock[]（kind / target / priority / token_estimate）
+    BudgetStrategy.apply  超限时按保护阶梯裁剪（阶梯见 priority.py，
+          │               动态覆盖与配对丢弃见 budget.py）
+          ▼  kept blocks
+    Composer.compose      按 request.purpose 渲染（槽位布局见 composer.py）
+          │
+          ▼
+    AssembledPrompt（system / messages / tools / token_count）
+
 详见设计文档 §5.2。
 """
 
@@ -58,17 +79,20 @@ class ContextRequest:
 
 
 BlockKind = Literal[
-    # → system prompt
-    "identity",
-    "background",  # 项目背景（订阅 long_term_background topic 的内容）
-    "capabilities",
-    "directive",  # skill_instructions
-    # → messages
-    "history",  # short-term recent messages
-    "blackboard",  # subtask / predecessor topic / 长期 project_log
-    "summary",  # semantic recall 结果
-    "reference",  # knowledge retrieval 结果
-    "task_spec",  # 当前 task 描述
+    # ── 渲染进 system ──
+    "identity",  # SOUL / facet 正文（IdentitySource）
+    "background",  # ## Project Background（BlackboardSource long_term_background topic）
+    # ── 注入段：composer 拼进 user 回合（不进 system，也不是独立消息）──
+    "capabilities",  # ## Capabilities → 末条 user 尾部（CapabilitySource）
+    "directive",  # ## Instructions for the current task → 当前 task 的 user 回合（skill_instructions）
+    "guidance",  # act 运行时态势 guidance → 末条 user 最尾部，Capabilities 之后（GuidanceSource）
+    # ── 渲染进 messages ──
+    "history",  # 多轮对话无损重建（AgentRecallSource）
+    "blackboard",  # 相关任务 topic 通信 / 长期 project_log（BlackboardSource）
+    "summary",  # 语义召回结果（SemanticRecallSource）
+    "reference",  # 知识检索结果（KnowledgeRetrievalSource）
+    "task_spec",  # 当前 task spec 的 metadata 载体（TaskSpecSource）——composer 读其
+    #              metadata 去装饰当前 user 回合（## Current Task/Message 框），不独立渲染
 ]
 
 BlockTarget = Literal["system", "messages"]

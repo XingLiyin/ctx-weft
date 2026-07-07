@@ -1,8 +1,13 @@
-"""CapabilitySource：按 cap.kind 分三路渲染 bound capabilities。
+"""CapabilitySource：按 cap.kind 分三路产出 capabilities blocks。
 
-  kind="tool"   → LLMTool block（当前 LLM 可直接调用）
-  kind="skill"  → "Available Skills" 文本块注入 system prompt
-  kind="agent"  → "Available Sub-Agents" 文本块注入 system prompt
+  kind="tool"   → 携 LLMTool 的 block（进 AssembledPrompt.tools，LLM 可直接调用）
+  kind="skill"  → "### Available Skills" 条目
+  kind="agent"  → "### Available Sub-Agents" 条目
+
+三路最终都由 composer 渲染进 "## Capabilities" 段、拼到**末条 user message 尾部**
+（所有 purpose 一致；不进 system——见 composer.py 槽位总览）。
+purpose 门控：三类能力都按 cap.purposes 过滤；skill/agent 默认 purposes=["act"]，
+故 observe / compact / recognize_intent 看不到 Skills / Sub-Agents 段。
 """
 
 from __future__ import annotations
