@@ -24,10 +24,15 @@ FS_PROVIDER_NAME = "fs"
 class FsTool:
     """文件系统工具的标准 capability id（前缀在协议层钉死，模板/授权按此引用）。"""
 
-    BASH_EXEC = f"{FS_PROVIDER_NAME}:bash_exec"
+    SHELL = f"{FS_PROVIDER_NAME}:shell"
     READ_FILE = f"{FS_PROVIDER_NAME}:read_file"
     WRITE_FILE = f"{FS_PROVIDER_NAME}:write_file"
     GLOB = f"{FS_PROVIDER_NAME}:glob"
+
+    # 兼容别名：工具原名 bash_exec，v0.4.23 更名为 shell（名字更诚实——实际跑 cmd.exe / /bin/sh，
+    # 从不是 bash）。存量数据（暂停会话的 HITL 行、AppData 里 SOUL.md 的授权）仍写旧 id，
+    # 故保留此常量并在 loader/provider/授权注册处按别名兜底。新代码一律用 SHELL。
+    BASH_EXEC = f"{FS_PROVIDER_NAME}:bash_exec"
 
 
 class SpillSink(ABC):

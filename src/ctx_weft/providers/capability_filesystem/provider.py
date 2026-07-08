@@ -1,7 +1,7 @@
 """FilesystemToolsProvider：文件系统操作工具集 + per-session workspace 管理。
 
-工具（bash_exec / read_file / write_file / edit_file / glob / grep）都在 session 的工作目录下运作：
-  - bash_exec 以 workspace 为 cwd；
+工具（shell / read_file / write_file / edit_file / glob / grep）都在 session 的工作目录下运作：
+  - shell 以 workspace 为 cwd；
   - read_file / write_file / edit_file / glob / grep 把相对路径锚定到 workspace。
 
 workspace 是本 provider 的内部概念，core 不知道它的存在：host 在 session 启动前调用
@@ -73,7 +73,7 @@ _GLOB_MAX_RESULTS_DEFAULT = 500
 _GREP_MAX_RESULTS_DEFAULT = 1000
 
 
-def _bash_exec_description() -> str:
+def _shell_description() -> str:
     """Build a platform-aware description so the LLM picks the right shell syntax.
 
     The description states the concrete host OS, which shell the command runs in,
@@ -83,6 +83,12 @@ def _bash_exec_description() -> str:
     system = platform.system()  # 'Windows' | 'Linux' | 'Darwin'
     detail = platform.platform()
     blocked = ", ".join(sorted(BASH_BLACKLIST))
+    # Steer the model away from using the shell as a general-purpose file tool.
+    steer = (
+        "Run a program or command (build/test/lint, git, package managers, scripts) "
+        "and return its stdout/stderr. Do not use this tool to read, write, edit, or "
+        "search files — use read_file / write_file / edit_file / glob / grep for that. "
+    )
     blocked_note = (
         f"The following commands are blocked on every OS and will be rejected: {blocked}."
     )
@@ -93,7 +99,7 @@ def _bash_exec_description() -> str:
     blocked_note = blocked_note + venv_note
     if system == "Windows":
         return (
-            f"Execute a shell command and return stdout/stderr. "
+            f"{steer}"
             f"Host OS is Windows ({detail}); commands run via cmd.exe. "
             f"Use Windows commands (e.g. dir, type, copy, findstr, where); "
             f"Linux/Unix commands such as ls, cat, grep are NOT available. "
@@ -107,7 +113,7 @@ def _bash_exec_description() -> str:
         )
     shell_kind = "macOS" if system == "Darwin" else "Linux"
     return (
-        f"Execute a shell command and return stdout/stderr. "
+        f"{steer}"
         f"Host OS is {shell_kind} ({detail}); commands run via /bin/sh. "
         f"Use POSIX shell commands (e.g. ls, cat, grep, find); "
         f"Windows-only commands such as dir, type, findstr are NOT available. "
@@ -160,8 +166,8 @@ def _read_config(ctx: ProviderContext | None) -> ReadConfig:
     )
 
 
-@tool(purposes=["act"], side_effects=True, description=_bash_exec_description())
-async def bash_exec(
+@tool(purposes=["act"], side_effects=True, description=_shell_description())
+async def shell(
     command: Annotated[str, "Shell command to execute"],
     *,
     ctx: ProviderContext | None = None,
@@ -188,7 +194,7 @@ async def bash_exec(
     hard = (ctx.extra.get("bash_hard_cap_sec") if ctx else None) or _BASH_HARD_CAP_SEC_DEFAULT
     max_out = (ctx.extra.get("bash_max_output_bytes") if ctx else None) or _BASH_MAX_OUTPUT_BYTES_DEFAULT
 
-    logger.info("bash_exec command (repr): %r", command)
+    logger.info("shell command (repr): %r", command)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     # 调用方(如 skill 委托执行)注入的额外环境变量(如 SKILL_DIR)。venv_env 之后会保留这些键。
     _extra_env = ctx.extra.get("extra_env") if ctx else None
@@ -242,7 +248,7 @@ async def bash_exec(
             if kind == "out":
                 yield CapabilityEvent(kind="stdout", payload={"data": payload})
             elif kind == "exc":
-                logger.exception("bash_exec failed: %s", command)
+                logger.exception("shell failed: %s", command)
                 yield CapabilityEvent(kind="error", payload={"code": "EXEC_ERROR", "message": str(payload)})
                 return
             elif kind == "done":
@@ -354,7 +360,10 @@ async def write_file(
     *,
     ctx: ProviderContext | None = None,
 ) -> AsyncIterator[CapabilityEvent]:
-    """Write content to a file, overwriting if it already exists."""
+    """Create a file, or overwrite it entirely if it already exists.
+    Parent directories are auto-created. To change part of an existing file,
+    use edit_file instead.
+    """
     if not path:
         yield CapabilityEvent(kind="error", payload={"code": "MISSING_PATH", "message": "path is required"})
         return
@@ -455,7 +464,9 @@ async def glob(
     *,
     ctx: ProviderContext | None = None,
 ) -> AsyncIterator[CapabilityEvent]:
-    """List files matching a glob pattern."""
+    """Find files by name/path pattern (e.g. '**/*.py').
+    To search file *contents* instead, use grep.
+    """
     if not pattern:
         yield CapabilityEvent(kind="error", payload={"code": "MISSING_PATTERN", "message": "pattern is required"})
         return
@@ -566,7 +577,7 @@ class FilesystemConfig:
 
 
 class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCapabilityProvider):
-    """文件系统工具 provider：bash_exec, read_file, write_file, edit_file, glob, grep + per-session workspace。
+    """文件系统工具 provider：shell, read_file, write_file, edit_file, glob, grep + per-session workspace。
 
     实现三个面向 core 的契约：ToolCapabilityProvider（invoke 六个工具）、SpillSink（spill 落盘）、
     SessionScopedCapabilityProvider（deregister_session 清理）。register_session / workspace_for
@@ -575,16 +586,31 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
 
     name = FS_PROVIDER_NAME
 
+    # Rendered as the header paragraph for this whole tool group in the LLM prompt
+    # (composer 把它写在 "#### filesystem tools" 标题下)。用来给整组工具定策略：
+    # 文件读写/查找有专用工具，别拿 shell 当万能文件工具。
+    description = (
+        "Tools scoped to the session workspace; relative paths resolve against it. "
+        "For files, use these rather than shell: read_file, write_file, edit_file, "
+        "glob (find by name), grep (search contents). Use shell only to run programs "
+        "— build/test/lint, git, package managers, scripts."
+    )
+
     def __init__(self, config: FilesystemConfig | None = None) -> None:
         self._cfg = config or FilesystemConfig()
         self._invokers = self._build_invokers()
         self._workspaces: dict[str, str] = {}  # session_id → 绝对路径
 
     def _build_invokers(self) -> dict[str, Callable]:
-        return {
+        invokers = {
             name: (lambda f: lambda args, ctx: f(**args, ctx=ctx))(fn)
             for name, fn in _FS_IMPLS.items()
         }
+        # 兼容别名：旧 capability id `fs:bash_exec` 仍派发到更名后的 shell 实现，
+        # 保住存量会话/授权数据（详见 FsTool.BASH_EXEC 注释）。
+        if "shell" in invokers:
+            invokers.setdefault("bash_exec", invokers["shell"])
+        return invokers
 
     # ── workspace 生命周期 ────────────────────────────────────────────────────
 

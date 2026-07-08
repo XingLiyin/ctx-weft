@@ -249,7 +249,7 @@ async def test_bash_exec_python_triggers_venv(tmp_path, monkeypatch):
     ctx = ProviderContext(session_id="s1", extra={
         "workspace": str(tmp_path), "bash_auto_venv": True, "bash_venv_dir": ".venv",
     })
-    await _collect(fsprov.bash_exec("python -V", ctx=ctx))
+    await _collect(fsprov.shell("python -V", ctx=ctx))
 
     assert calls["n"] == 1
     assert captured["env"]["VIRTUAL_ENV"] == str(tmp_path / ".venv")
@@ -269,7 +269,7 @@ async def test_bash_exec_python_disabled(tmp_path, monkeypatch):
     ctx = ProviderContext(session_id="s1", extra={
         "workspace": str(tmp_path), "bash_auto_venv": False,
     })
-    await _collect(fsprov.bash_exec("python -V", ctx=ctx))
+    await _collect(fsprov.shell("python -V", ctx=ctx))
 
     assert calls["n"] == 0
     # 不注入我们的 venv（继承的 os.environ 可能已带外层 VIRTUAL_ENV，故比对路径而非缺省）
@@ -290,7 +290,7 @@ async def test_bash_exec_non_python_no_venv(tmp_path, monkeypatch):
     ctx = ProviderContext(session_id="s1", extra={
         "workspace": str(tmp_path), "bash_auto_venv": True,
     })
-    await _collect(fsprov.bash_exec("echo hi", ctx=ctx))
+    await _collect(fsprov.shell("echo hi", ctx=ctx))
 
     assert calls["n"] == 0
     assert captured["env"].get("VIRTUAL_ENV") != str(tmp_path / ".venv")
@@ -305,14 +305,14 @@ async def test_bash_exec_venv_error_surfaced(tmp_path, monkeypatch):
     ctx = ProviderContext(session_id="s1", extra={
         "workspace": str(tmp_path), "bash_auto_venv": True,
     })
-    events = await _collect(fsprov.bash_exec("python -V", ctx=ctx))
+    events = await _collect(fsprov.shell("python -V", ctx=ctx))
     errors = [e for e in events if e.kind == "error"]
     assert any(e.payload.get("code") == "VENV_ERROR" for e in errors)
 
 
 async def test_bash_exec_blocks_chained_blacklist(tmp_path):
     ctx = ProviderContext(session_id="s1", extra={"workspace": str(tmp_path)})
-    events = await _collect(fsprov.bash_exec("echo a && rm -rf x", ctx=ctx))
+    events = await _collect(fsprov.shell("echo a && rm -rf x", ctx=ctx))
     errors = [e for e in events if e.kind == "error"]
     assert any(e.payload.get("code") == "COMMAND_BLACKLISTED" for e in errors)
 
@@ -332,6 +332,6 @@ async def test_bash_exec_forwards_venv_python(tmp_path, monkeypatch):
         "workspace": str(tmp_path), "bash_auto_venv": True, "bash_venv_dir": ".venv",
         "bash_venv_python": "/opt/py/bin/python",
     })
-    await _collect(fsprov.bash_exec("python -V", ctx=ctx))
+    await _collect(fsprov.shell("python -V", ctx=ctx))
 
     assert seen["creator_python"] == "/opt/py/bin/python"
