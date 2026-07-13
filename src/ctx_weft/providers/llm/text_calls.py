@@ -158,7 +158,7 @@ def _parse_xml_tool_call(raw: str) -> ParsedToolCall | None:
 
 
 def _parse_single_tool_call(raw: str) -> ParsedToolCall | None:
-    """解析一个 ``<tool_call>`` 块的内容：JSON → 严格 XML → 宽松 XML。"""
+    """解析一个 ``<tool_call>``/``<tool_code>`` 块的内容：JSON → 严格 XML → 宽松 XML。"""
     stripped = raw.strip()
     try:
         data = json.loads(stripped)
@@ -211,8 +211,8 @@ def _parse_minimax(text: str) -> list[ParsedToolCall]:
 class TextToolCallDialect:
     """一种「工具调用写进正文文本」的方言：起始标签集 + 解析器。
 
-    ``open_markers`` 一处三用：detect（是否命中本方言）、可见门 ``_VISIBLE_MARKERS``
-    （从正文里扣掉标签）、以及块正则的锚点。加新方言只需往 ``DIALECTS`` 加一项。
+    ``open_markers`` 一处两用：detect（是否命中本方言）、可见门 ``_VISIBLE_MARKERS``
+    （从正文里扣掉标签）。加新方言只需往 ``DIALECTS`` 加一项。
     """
 
     name: str
@@ -302,9 +302,7 @@ def parse_minimax_tool_calls(text: str) -> list[ParsedToolCall]:
     return calls
 
 
-_VISIBLE_MARKERS = (THINK_START,) + tuple(
-    m for dialect in DIALECTS for m in dialect.open_markers
-)
+_VISIBLE_MARKERS = (THINK_START, *(m for dialect in DIALECTS for m in dialect.open_markers))
 
 
 def merge_content(acc: str, chunk: str) -> str:
