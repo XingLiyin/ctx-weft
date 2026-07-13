@@ -149,6 +149,10 @@ class EventType(StrEnum):
     BACKGROUND_OBSERVE_PROMPT_SENT = "BackgroundObservePromptSent"
     BACKGROUND_OBSERVE_TOKEN_STREAMED = "BackgroundObserveTokenStreamed"
     BACKGROUND_OBSERVE_RESPONSE_FINISHED = "BackgroundObserveResponseFinished"
+    # ── TaskRecap 域（background observe 的持久化生命周期标记；崩溃恢复据此重跑，
+    #     与逐轮 BACKGROUND_OBSERVE_* 流式事件不同——这两条是"整段 recap 起/止"的记账）──
+    TASK_RECAP_STARTED = "TaskRecapStarted"   # payload: {task_id, boundary, agent_id}
+    TASK_RECAP_DONE = "TaskRecapDone"         # payload: {task_id}
     # ── System / 元事件 ──
     EVENTS_DROPPED = "EventsDropped"
     SNAPSHOT_CREATED = "SnapshotCreated"
