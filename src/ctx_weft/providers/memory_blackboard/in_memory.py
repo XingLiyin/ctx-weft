@@ -244,6 +244,15 @@ class InMemoryMemoryProvider(MemoryProvider):
             anchor = min(following, key=lambda s: (s.event.timestamp, s.seq_no))
             summary_ts = anchor.event.timestamp - timedelta(microseconds=1)
             summary_seq = anchor.seq_no - 1
+        elif to_archive:
+            # 段尾无后继幸存事件（典型：单段 plain_text 折叠 [UP, LLM]）→ 锚到被折段最后一条
+            # 事件的位置，**不用 now()**。否则脱管的后台 observe 迟到收尾时，now() 可能晚于同刻
+            # 注入的下一轮 USER_PROMPT，摘要越到新消息之后 → 下一轮装配误判为「续跑」（尾部非
+            # user）并拼 continue cue、埋掉新消息（多轮对话空白回复 bug）。锚在原段时间位置后，
+            # 后到的 USER_PROMPT（now_utc 更晚）天然排在其后。
+            last = max(to_archive, key=lambda s: (s.event.timestamp, s.seq_no))
+            summary_ts = last.event.timestamp
+            summary_seq = last.seq_no
         else:
             summary_ts = datetime.now(UTC)
             self._seq_counters[scope_key] = self._seq_counters.get(scope_key, 0) + 1

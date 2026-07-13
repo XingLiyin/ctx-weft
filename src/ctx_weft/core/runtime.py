@@ -1272,11 +1272,19 @@ class CtxWeftRuntime:
     ) -> None:
         """把 act 纯文本暂停（wait_for_user）的用户回复作为 USER_PROMPT 注入 task 层 + 重排。"""
         from ctx_weft.protocols import MemoryEvent, MemoryEventType
+        from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
 
         target = task_manager.get_task(req.task_id)
         if target is None:
             logger.warning("wait_for_user cold resume: task %s not found for HITL %s", req.task_id, req.id)
             return
+
+        # 强一致屏障：上一轮 plain_text/interrupt park 甩出的后台 observe（fire-and-forget 段折叠）
+        # 可能仍在跑。先等它落库，再注入本轮 USER_PROMPT——保证折叠摘要的时间戳早于新消息，
+        # 否则迟到的摘要会越到新消息之后、令下一轮装配误判「续跑」并埋掉新输入（见
+        # background_observe.apply_compact 的段尾锚点 + composer 续跑 cue）。同进程有在跑 fold 才等；
+        # 真崩溃冷启动 _task_pending 为空 → no-op。
+        await await_pending_background_observe(req.task_id)
 
         scope = MemoryScope(session_id=session.id, task_id=target.id, agent_id=req.agent_id or "")
         pctx = ProviderContext(
