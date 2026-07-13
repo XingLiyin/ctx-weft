@@ -770,6 +770,18 @@ class TaskManager:
         """True when queue is empty and nothing is running."""
         return not self._queue.has_pending() and not self._running_tasks
 
+    async def finalize_idle_session(self, status: str) -> None:
+        """恢复专用：会话所有 task 已终态但 session 因崩溃未落终态 —— 设终态并复用
+        _fire_session_done（先 gather 重跑的后台 recap，再发 SESSION_FINISHED + 回调）。
+
+        镜像 on_task_finished 的会话收尾：先 SESSION_STATUS_CHANGED，再 _fire_session_done。
+        幂等：_fire_session_done 的 _session_done_fired 守卫保证只发一次。
+        """
+        if self._session is not None:
+            self._session.status = status
+        await self._emit(EventType.SESSION_STATUS_CHANGED, payload={"new_status": status})
+        await self._fire_session_done()
+
     def resume_task(self, task_id: str) -> None:
         """重排一个被 HITL 应答唤醒的 task：置 PENDING 并入队，供**复用活 owner**的就地续跑路径。
 
