@@ -104,7 +104,7 @@ class HitlManager:
         logger.info("HITL requested [%s]: %s (%s)", form, rid, question[:80])
         await self._emit(EventType.HITL_REQUIRED, req, payload={
             "hitl_id": rid, "form": form, "capability_id": capability_id,
-            "tool_call_id": tool_call_id,
+            "tool_call_id": tool_call_id, "agent_id": agent_id,
             "question": question, "context": context,
             "arguments": dict(arguments or {}),
             "questions": questions or [],

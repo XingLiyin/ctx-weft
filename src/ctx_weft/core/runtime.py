@@ -1286,10 +1286,17 @@ class CtxWeftRuntime:
         # 真崩溃冷启动 _task_pending 为空 → no-op。
         await await_pending_background_observe(req.task_id)
 
-        scope = MemoryScope(session_id=session.id, task_id=target.id, agent_id=req.agent_id or "")
+        # agent_id 必须是本 task 对话真正所在的 agent scope——AgentRecallSource 用
+        # recall_recent_by_agent 按 scope.agent_id 过滤召回 task body（≠ recall_recent 的 task_id 键）。
+        # 冷重启从事件日志重建的 HITL 丢了 agent_id（HITL_REQUIRED 投影未持久化它，见 reducers），
+        # req.agent_id="" 会把回复写进空 agent scope → 对 actor 装配不可见 → 续跑 cue → 空白回复
+        # （重启后「第一句」丢失）。回退到 task 的真实 agent（assigned/creator），与首条 USER_PROMPT
+        # 落库时同 scope。
+        agent_id = req.agent_id or target.assigned_agent_id or target.creator_agent_id or ""
+        scope = MemoryScope(session_id=session.id, task_id=target.id, agent_id=agent_id)
         pctx = ProviderContext(
             session_id=session.id, tenant_id=session.tenant_id,
-            task_id=target.id, agent_id=req.agent_id or "",
+            task_id=target.id, agent_id=agent_id,
         )
         if req.status == "rejected":
             content = f"Human declined: {req.message}" if req.message else "Human rejected the request."

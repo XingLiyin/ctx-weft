@@ -38,6 +38,7 @@ def fold_pending_hitl(events: list[Event]) -> dict[str, HitlRequest]:
             pending[rid] = HitlRequest(
                 id=rid, form=p.get("form", "approval"),
                 session_id=ev.session_id, task_id=ev.task_id or "",
+                agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
                 capability_id=p.get("capability_id", ""), tool_call_id=p.get("tool_call_id", ""),
                 question=p.get("question", ""), context=p.get("context", ""),
                 arguments=p.get("arguments") or {}, questions=p.get("questions") or [],
@@ -208,7 +209,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
         "pending_hitl": {
             rid: {
                 "id": h.id, "form": h.form, "session_id": h.session_id,
-                "task_id": h.task_id, "capability_id": h.capability_id,
+                "task_id": h.task_id, "agent_id": h.agent_id, "capability_id": h.capability_id,
                 "tool_call_id": h.tool_call_id, "question": h.question, "context": h.context,
             }
             for rid, h in view.pending_hitl.items()
@@ -279,7 +280,8 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
         pending_hitl[rid] = HitlRequest(
             # 旧快照无 form（inspect/replay 工具数据,非恢复真相源）→ 缺省按 approval 降级读。
             id=h["id"], form=h.get("form", "approval"), session_id=h.get("session_id", ""),
-            task_id=h.get("task_id", ""), capability_id=h.get("capability_id", ""),
+            task_id=h.get("task_id", ""), agent_id=h.get("agent_id", ""),
+            capability_id=h.get("capability_id", ""),
             tool_call_id=h.get("tool_call_id", ""), question=h.get("question", ""),
             context=h.get("context", ""),
         )
@@ -542,6 +544,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
                 form=p.get("form", "approval"),
                 session_id=ev.session_id,
                 task_id=ev.task_id or "",
+                agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
                 capability_id=p.get("capability_id", ""),
                 tool_call_id=p.get("tool_call_id", ""),
                 question=p.get("question", ""),
