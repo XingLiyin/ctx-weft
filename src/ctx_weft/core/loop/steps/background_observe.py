@@ -6,6 +6,12 @@
 boundary 分流（Task 6）：
   - finish / normal → 结果落 _close_report 槽，不写 memory（finalize Task 8 取用）
   - 其他（interrupt、plain_text 等）→ apply_compact 写 TASK_COMPACT_SUMMARY
+
+崩溃恢复的已知 best-effort 竞态（spec §5.1/§3.6）：`recover_session` 对一个 SUSPENDED-且-有
+待完成 interrupt/plain_text 段 recap 的 task，会同时（a）经 TaskManager.restore 重排该 task 的
+新一轮 run，（b）经 `_relaunch_task_recap` 重跑被打断的段 recap。本函数虽以 `_lock_for(task_id)`
+把同一 task 的多个 recap 串行化，但重排出的新 run 写 raw 时并不持有这把锁——两者可并发。
+这是接受的降级：最坏情形该段摘要保留 raw（不折叠），不影响正确性，无需修复。
 """
 from __future__ import annotations
 
