@@ -29,11 +29,6 @@ class FsTool:
     WRITE_FILE = f"{FS_PROVIDER_NAME}:write_file"
     GLOB = f"{FS_PROVIDER_NAME}:glob"
 
-    # 兼容别名：工具原名 bash_exec，v0.4.23 更名为 shell（名字更诚实——实际跑 cmd.exe / /bin/sh，
-    # 从不是 bash）。存量数据（暂停会话的 HITL 行、AppData 里 SOUL.md 的授权）仍写旧 id，
-    # 故保留此常量并在 loader/provider/授权注册处按别名兜底。新代码一律用 SHELL。
-    BASH_EXEC = f"{FS_PROVIDER_NAME}:bash_exec"
-
 
 class SpillSink(ABC):
     """core 的「落盘 sink」契约：把超长内容落盘到某持久位置，返回落盘路径。

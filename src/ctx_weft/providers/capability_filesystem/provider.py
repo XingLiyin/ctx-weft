@@ -606,10 +606,6 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
             name: (lambda f: lambda args, ctx: f(**args, ctx=ctx))(fn)
             for name, fn in _FS_IMPLS.items()
         }
-        # 兼容别名：旧 capability id `fs:bash_exec` 仍派发到更名后的 shell 实现，
-        # 保住存量会话/授权数据（详见 FsTool.BASH_EXEC 注释）。
-        if "shell" in invokers:
-            invokers.setdefault("bash_exec", invokers["shell"])
         return invokers
 
     # ── workspace 生命周期 ────────────────────────────────────────────────────

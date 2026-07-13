@@ -38,7 +38,7 @@ def _capture_invoke_extra(provider, ctx) -> dict:
         yield  # pragma: no cover — make it an async generator
 
     provider._dispatch = fake_dispatch  # type: ignore[method-assign]
-    gen = provider.invoke("fs:bash_exec", {"command": "echo hi"}, ctx)
+    gen = provider.invoke("fs:shell", {"command": "echo hi"}, ctx)
 
     async def drain():
         async for _ in gen:
