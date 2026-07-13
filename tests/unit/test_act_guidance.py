@@ -182,6 +182,22 @@ def test_finished_children_listed_with_no_redo_emphasis():
     assert "  - [FINISHED]" not in g.split("## Sub-tasks")[0]
 
 
+def test_mixed_naive_aware_created_at_does_not_crash_sort():
+    # 崩溃恢复回归：restore 重建的 task 带 naive created_at（事件重放 / DB 丢 tz），与
+    # 活任务的 aware created_at 混入同一注册表；排序须归一 tz，不得抛 naive/aware 比较错。
+    from datetime import datetime, timezone
+    naive = datetime(2026, 7, 13, 10, 0, 0)                    # 恢复重建：无 tz
+    aware = datetime(2026, 7, 13, 11, 0, 0, tzinfo=timezone.utc)  # 活任务：aware
+    parent = _task("t1", "Parent", "ACTIVE")
+    c_recovered = _task("t2", "Recovered", "FINISHED", parent="t1", created_at=naive)
+    c_live = _task("t3", "Live", "FINISHED", parent="t1", created_at=aware)
+    # 两序都跑一遍，确保比较两侧混排都归一（naive<aware 与 aware<naive 各触发一次）。
+    for tasks in ([parent, c_recovered, c_live], [parent, c_live, c_recovered]):
+        g = build_act_guidance(_cur(id="t1"), _tm(tasks=tasks))
+        assert "- [FINISHED] Recovered" in g
+        assert "- [FINISHED] Live" in g
+
+
 def test_finished_children_of_other_tasks_not_listed():
     # 别的 task 的完成子任务、以及无 parent 的完成 task，都不进当前 task 的清单。
     cur = _task("t1", "Current", "ACTIVE")

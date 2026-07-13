@@ -30,6 +30,13 @@ def now_utc() -> datetime:
     return datetime.now(UTC)
 
 
+def as_utc(dt: datetime) -> datetime:
+    """把可能 naive 的 datetime 归一为 aware(UTC)——事件重放 / DB 反序列化可能丢 tz
+    （Postgres timestamp-without-tz、裸 isoformat 等），naive 与 aware 直接比较会抛
+    TypeError。统一在此把无 tz 者按 UTC 补齐，供跨来源 datetime 排序 / 比较前调用。"""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 def generate_id(prefix: str) -> str:
     """Generate a ULID-based primary key (time-sortable + globally unique).
 

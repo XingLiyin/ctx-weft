@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
@@ -415,7 +415,7 @@ class TaskManager:
                 and t.status == "FINISHED"
                 and head_id in (t.tracking_task_ids or [])
             ),
-            key=lambda t: t.created_at or _epoch,
+            key=lambda t: as_utc(t.created_at) if t.created_at else _epoch,
         )
         head_title = head.title or head_id
 

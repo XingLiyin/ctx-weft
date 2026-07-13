@@ -33,6 +33,7 @@ from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
 )
+from ctx_weft.core.utils import as_utc
 
 _TERMINAL_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELED"})
 _TASK_LABEL_MAX = 80
@@ -74,7 +75,9 @@ def _finished_subtasks(task, task_manager) -> list:
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     done = [t for t in task_manager.all_tasks()
             if t.parent_task_id == task.id and t.status == "FINISHED"]
-    done.sort(key=lambda t: t.created_at or epoch)
+    # created_at 归一为 aware(UTC)：崩溃恢复重建的 task 可能带 naive 时间，与活任务的
+    # aware 时间混排会抛 naive/aware 比较错（边界已在 converters 补齐，此处防御兜底）。
+    done.sort(key=lambda t: as_utc(t.created_at) if t.created_at else epoch)
     return done
 
 
@@ -97,7 +100,7 @@ def _session_task_tree(task, task_manager) -> str:
         parent = t.parent_task_id if t.parent_task_id in ids else None
         children.setdefault(parent, []).append(t)
     for lst in children.values():
-        lst.sort(key=lambda t: t.created_at or epoch)
+        lst.sort(key=lambda t: as_utc(t.created_at) if t.created_at else epoch)
 
     lines: list[str] = []
 

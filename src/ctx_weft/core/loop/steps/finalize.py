@@ -8,12 +8,11 @@ miniAgents 对齐版：
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.events import EventType
-from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id, now_utc
+from ctx_weft.core.utils import as_utc, content_to_text, estimate_tokens, generate_id, now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope
 from ctx_weft.protocols.capability import qualify
 
@@ -44,10 +43,9 @@ def _dispatch_ack(title: str) -> str:
 START_TASK_NAME = qualify("control:start_task")
 
 
-def _as_utc(dt: datetime) -> datetime:
-    """把可能 naive 的 datetime 归一为 aware(UTC)——事件重放 / DB 反序列化可能丢 tz，
-    比较前统一，避免 naive 与 aware 直接比较报 TypeError。"""
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+# 归一可能 naive 的 datetime 为 aware(UTC)——事件重放 / DB 反序列化可能丢 tz，
+# 比较前统一，避免 naive 与 aware 直接比较报 TypeError。统一实现见 utils.as_utc。
+_as_utc = as_utc
 
 
 async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
