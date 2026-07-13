@@ -125,7 +125,12 @@ async def test_serialized_per_task(monkeypatch, fake_state_ctx):
         yield _make_usage_chunk()
         order.append("end")
 
+    async def mock_count_recent(scope, types, pctx):
+        # Return > 0 to ensure guard doesn't skip (normal path: raw count > 0)
+        return 1 if MemoryEventType.LLM_RESPONSE in types else 0
+
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", slow_stream)
+    monkeypatch.setattr(ctx.memory, "count_recent", mock_count_recent)
     t1 = bo.launch_background_observe(state, ctx, boundary="interrupt")
     t2 = bo.launch_background_observe(state, ctx, boundary="interrupt")
     await asyncio.gather(t1, t2)
@@ -158,7 +163,12 @@ async def test_await_pending_waits_for_latest_when_two_launched(monkeypatch, fak
         yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
         yield _make_usage_chunk()
 
+    async def mock_count_recent(scope, types, pctx):
+        # Return > 0 to ensure guard doesn't skip (normal path: raw count > 0)
+        return 1 if MemoryEventType.LLM_RESPONSE in types else 0
+
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", vary_speed)
+    monkeypatch.setattr(ctx.memory, "count_recent", mock_count_recent)
 
     t1 = bo.launch_background_observe(state, ctx, boundary="interrupt")
     t2 = bo.launch_background_observe(state, ctx, boundary="interrupt")

@@ -122,6 +122,19 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
     ))
     try:
         async with _lock_for(state.task.id):
+            # 重跑幂等护栏（恢复重跑时才生效）：非 close 边界若该段已无 active raw，说明上次
+            # 崩溃前已折叠（raw 被 supersede），再折会产冗余胶囊 → 跳过（finally 仍发 DONE）。
+            # 正常运行时该段刚产生 raw、计数 > 0，护栏为 no-op。
+            if boundary not in _CLOSE_BOUNDARIES:
+                n_raw = await ctx.memory.count_recent(
+                    state.scope, [MemoryEventType.LLM_RESPONSE], ctx.provider_ctx,
+                )
+                if n_raw == 0:
+                    logger.info(
+                        "task recap re-fold guard: segment already folded (task=%s); skip",
+                        state.task.id,
+                    )
+                    return
             try:
                 agent = state.agent
                 bound_caps = (
