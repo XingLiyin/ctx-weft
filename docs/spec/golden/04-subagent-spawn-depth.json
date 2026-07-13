@@ -1,0 +1,36 @@
+{
+  "name": "subagent-spawn-depth",
+  "description": "root agent 派生子任务（use_subagent=true），子任务的 agent 应被推算为 spawnDepth=1、parent=root。验证 _rebuild_agents 的子 agent 推算。",
+  "runId": "s1",
+  "events": [
+    {
+      "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
+      "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
+      "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" }
+    },
+    {
+      "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
+      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:02Z",
+      "payload": { "task": {
+        "id": "tsk_parent", "status": "PENDING", "title": "Parent",
+        "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"
+      } }
+    },
+    {
+      "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1",
+      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:03Z",
+      "payload": { "task": {
+        "id": "tsk_child", "status": "PENDING", "title": "Child",
+        "assigned_agent_id": "agt_child", "creator_agent_id": "agt_root",
+        "settings": { "use_subagent": true }
+      } }
+    }
+  ],
+  "expected": {
+    "sessionStatus": "RUNNING",
+    "agents": {
+      "agt_root": { "spawnDepth": 0, "parentAgentId": null },
+      "agt_child": { "spawnDepth": 1, "parentAgentId": "agt_root" }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "step-and-context-progress",
+  "description": "RunStarted/StepStarted/StepCompleted → currentStep；PrepareCompleted → assembledPromptTokens；ActTurnCompleted → transcriptTurns。覆盖 Run/Step/Context 分支。",
+  "runId": "s1",
+  "events": [
+    { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
+      "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
+      "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
+    { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
+      "type": "RunStarted", "timestamp": "2026-06-05T00:00:02Z", "payload": {} },
+    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1",
+      "type": "StepStarted", "timestamp": "2026-06-05T00:00:03Z", "payload": { "step_name": "reason" } },
+    { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1",
+      "type": "PrepareCompleted", "timestamp": "2026-06-05T00:00:04Z", "payload": { "assembled_token_count": 1234 } },
+    { "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1",
+      "type": "StepCompleted", "timestamp": "2026-06-05T00:00:05Z", "payload": { "next_step": "act" } },
+    { "id": "evt_0006", "runId": "run_1", "sequence": 6, "sessionId": "s1",
+      "type": "StepStarted", "timestamp": "2026-06-05T00:00:06Z", "payload": { "step_name": "act" } },
+    { "id": "evt_0007", "runId": "run_1", "sequence": 7, "sessionId": "s1",
+      "type": "ActTurnCompleted", "timestamp": "2026-06-05T00:00:07Z", "payload": { "turn": 3 } },
+    { "id": "evt_0008", "runId": "run_1", "sequence": 8, "sessionId": "s1",
+      "type": "StepCompleted", "timestamp": "2026-06-05T00:00:08Z", "payload": { "next_step": "observe" } }
+  ],
+  "expected": {
+    "sessionStatus": "RUNNING",
+    "taskStatus": "ACTIVE",
+    "currentStep": "observe",
+    "assembledPromptTokens": 1234,
+    "transcriptTurns": 3
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "name": "compact-task",
+  "description": "记忆压缩子任务作为普通 task 被跟踪（CompactTaskSettings）；compact 域事件（CompactTriggered/Dispatched/MemoryCompactStarted/MemoryCompacted）对投影是 no-op。主任务状态不受影响。",
+  "runId": "s1",
+  "events": [
+    { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
+      "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
+      "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
+    { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
+      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:02Z",
+      "payload": { "task": { "id": "tsk_main", "status": "PENDING", "title": "Main", "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root" } } },
+    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1", "taskId": "tsk_main",
+      "type": "CompactTriggered", "timestamp": "2026-06-05T00:00:03Z", "payload": { "token_ratio": 0.85 } },
+    { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1", "taskId": "tsk_main",
+      "type": "CompactDispatched", "timestamp": "2026-06-05T00:00:04Z", "payload": {} },
+    { "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1",
+      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:05Z",
+      "payload": { "task": { "id": "tsk_compact", "status": "PENDING", "title": "Compact", "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root", "settings": { "_type": "CompactTaskSettings" } } } },
+    { "id": "evt_0006", "runId": "run_1", "sequence": 6, "sessionId": "s1", "taskId": "tsk_compact",
+      "type": "TaskStarted", "timestamp": "2026-06-05T00:00:06Z", "payload": { "assigned_agent_id": "agt_root" } },
+    { "id": "evt_0007", "runId": "run_1", "sequence": 7, "sessionId": "s1", "taskId": "tsk_compact",
+      "type": "MemoryCompactStarted", "timestamp": "2026-06-05T00:00:07Z", "payload": {} },
+    { "id": "evt_0008", "runId": "run_1", "sequence": 8, "sessionId": "s1", "taskId": "tsk_compact",
+      "type": "MemoryCompacted", "timestamp": "2026-06-05T00:00:08Z", "payload": { "kept_last": 6 } },
+    { "id": "evt_0009", "runId": "run_1", "sequence": 9, "sessionId": "s1", "taskId": "tsk_compact",
+      "type": "TaskFinished", "timestamp": "2026-06-05T00:00:09Z", "payload": {} }
+  ],
+  "expected": {
+    "tasks": {
+      "tsk_main": { "status": "PENDING" },
+      "tsk_compact": { "status": "FINISHED" }
+    }
+  }
+}

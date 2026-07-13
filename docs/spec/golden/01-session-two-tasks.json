@@ -1,0 +1,60 @@
+{
+  "name": "session-two-tasks",
+  "description": "建会话 → 跑完 tsk_1 → tsk_2 仍在进行；验证 TASK_STATUS 映射、root agent 推算、快照(前6条)+增量 == 全量回放。",
+  "runId": "s1",
+  "snapshotAt": 6,
+  "events": [
+    {
+      "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
+      "type": "SessionCreated", "timestamp": "2026-06-05T00:00:00Z",
+      "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" }
+    },
+    {
+      "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
+      "type": "RunStarted", "timestamp": "2026-06-05T00:00:00Z", "payload": {}
+    },
+    {
+      "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1",
+      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:00Z",
+      "payload": { "task": {
+        "id": "tsk_1", "status": "PENDING", "title": "T1",
+        "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"
+      } }
+    },
+    {
+      "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1", "taskId": "tsk_1",
+      "type": "TaskStarted", "timestamp": "2026-06-05T00:00:00Z",
+      "payload": { "assigned_agent_id": "agt_root" }
+    },
+    {
+      "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1", "taskId": "tsk_1",
+      "type": "TaskFinished", "timestamp": "2026-06-05T00:00:00Z", "payload": {}
+    },
+    {
+      "id": "evt_0006", "runId": "run_1", "sequence": 6, "sessionId": "s1",
+      "type": "RunFinished", "timestamp": "2026-06-05T00:00:00Z",
+      "payload": { "final_status": "FINISHED" }
+    },
+    {
+      "id": "evt_0007", "runId": "run_1", "sequence": 7, "sessionId": "s1",
+      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:00Z",
+      "payload": { "task": {
+        "id": "tsk_2", "status": "PENDING", "title": "T2",
+        "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"
+      } }
+    },
+    {
+      "id": "evt_0008", "runId": "run_1", "sequence": 8, "sessionId": "s1", "taskId": "tsk_2",
+      "type": "TaskStarted", "timestamp": "2026-06-05T00:00:00Z",
+      "payload": { "assigned_agent_id": "agt_root" }
+    }
+  ],
+  "expected": {
+    "sessionStatus": "FINISHED",
+    "tasks": {
+      "tsk_1": { "status": "FINISHED" },
+      "tsk_2": { "status": "ACTIVE" }
+    },
+    "agents": ["agt_root"]
+  }
+}

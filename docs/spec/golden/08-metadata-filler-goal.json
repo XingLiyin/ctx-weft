@@ -1,0 +1,24 @@
+{
+  "name": "metadata-filler-goal",
+  "description": "守护任务 RecognizeIntentToolCall 回填 session.goal。覆盖 metadata_filler 对投影的唯一作用。",
+  "runId": "s1",
+  "events": [
+    { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
+      "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
+      "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
+    { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
+      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:02Z",
+      "payload": { "task": {
+        "id": "tsk_meta", "status": "PENDING", "title": "",
+        "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root",
+        "settings": { "_type": "MetadataFillerTaskSettings" }
+      } } },
+    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1", "taskId": "tsk_meta",
+      "type": "RecognizeIntentToolCall", "timestamp": "2026-06-05T00:00:03Z",
+      "payload": { "session_goal": "Build a quantum computing report" } }
+  ],
+  "expected": {
+    "sessions": { "s1": { "goal": "Build a quantum computing report" } },
+    "tasks": { "tsk_meta": { "status": "PENDING" } }
+  }
+}

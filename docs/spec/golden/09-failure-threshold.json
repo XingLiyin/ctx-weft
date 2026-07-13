@@ -1,0 +1,20 @@
+{
+  "name": "failure-threshold",
+  "description": "FailureThresholdHit 累加 session.failureCounter（验证跨快照边界的累加）。",
+  "runId": "s1",
+  "snapshotAt": 2,
+  "events": [
+    { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
+      "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
+      "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
+    { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
+      "type": "FailureThresholdHit", "timestamp": "2026-06-05T00:00:02Z", "payload": {} },
+    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1",
+      "type": "FailureThresholdHit", "timestamp": "2026-06-05T00:00:03Z", "payload": {} },
+    { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1",
+      "type": "FailureThresholdHit", "timestamp": "2026-06-05T00:00:04Z", "payload": {} }
+  ],
+  "expected": {
+    "sessions": { "s1": { "failureCounter": 3 } }
+  }
+}

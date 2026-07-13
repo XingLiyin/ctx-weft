@@ -1,0 +1,23 @@
+{
+  "name": "recognize-intent-metadata",
+  "description": "RecognizeIntentToolCall 用补填的 title/description 更新 task 投影、session_goal 更新 session.goal（root task 创建时 title 为空，recognize_intent 并发补填；空值不覆盖已有值）。",
+  "runId": "s1",
+  "events": [
+    { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
+      "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
+      "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
+    { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
+      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:02Z",
+      "payload": { "task": { "id": "tsk_1", "status": "PENDING", "title": "", "description": "", "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root" } } },
+    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1", "taskId": "tsk_1",
+      "type": "RecognizeIntentToolCall", "timestamp": "2026-06-05T00:00:03Z",
+      "payload": { "title": "Refined title", "description": "Refined description", "session_goal": "Overall goal" } },
+    { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1", "taskId": "tsk_1",
+      "type": "RecognizeIntentToolCall", "timestamp": "2026-06-05T00:00:04Z",
+      "payload": { "title": "", "description": "", "session_goal": "" } }
+  ],
+  "expected": {
+    "sessions": { "s1": { "goal": "Overall goal" } },
+    "tasks": { "tsk_1": { "status": "PENDING", "title": "Refined title", "description": "Refined description" } }
+  }
+}
