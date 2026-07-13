@@ -39,6 +39,7 @@ from ctx_weft.protocols import LLMClient, LLMClientResolver
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps import ActStep, FinalizeStep, RecognizeIntentStep, ObserveStep, PrepareStep
+from ctx_weft.core.loop.steps.background_observe import launch_background_observe, register_close_synth
 from ctx_weft.core.loop.steps.compact import CompactStep
 from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
@@ -1025,6 +1026,61 @@ class CtxWeftRuntime:
             await self._inject_user_reply(user_reply, session, task_manager)
 
         self._register_and_drain(session, task_manager)
+
+    async def _find_finish_pair_tool_call_id(
+        self, memory: MemoryProvider, scope: MemoryScope, task_id: str, pctx: ProviderContext,
+    ) -> str | None:
+        """从 memory 找该 task close 时写的占位 finish 对 assistant turn，返回其 finish_task tool_call id。"""
+        from ctx_weft.protocols import MemoryEventType
+        fin = qualify("control:finish_task")
+        turns = await memory.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 500, pctx)
+        for r in turns:
+            if r.role == "assistant" and r.metadata.get("origin_task_id") == task_id:
+                for tc in (r.metadata.get("tool_calls") or []):
+                    if tc.get("name") == fin and tc.get("id"):
+                        return tc["id"]
+        return None
+
+    async def _relaunch_task_recap(
+        self, *, session: Session, template: "AgentTemplate", template_id: str,
+        task_manager: TaskManager, task: Task, agent_id: str, boundary: str,
+    ) -> None:
+        """恢复：重建 LoopState 重跑一个被崩溃打断的段 recap，登记到传入 TM（track_background）。
+
+        close 边界（finish/normal）：先从 memory 读占位 finish 对 tool_call_id + 据 task 状态定 outcome，
+        register_close_synth，使重跑经 _replace_finish_report 替换占位对。best-effort：任何一步失败记日志、跳过。
+        """
+        from ctx_weft.core.loop.steps.background_observe import _CLOSE_BOUNDARIES
+        try:
+            lm = LifecycleManager(template_resolver=self._template_resolver)
+            pctx0 = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
+            agent, _tmpl = await lm.instantiate_agent(
+                template_id=template_id,
+                session_id=session.id, tenant_id=session.tenant_id,
+                existing_agent_id=agent_id, ctx=pctx0,
+            )
+            memory = self.providers.get_memory()
+            scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=agent.id)
+            provider_ctx = self._build_provider_ctx(session, task, agent)
+            skill_index = self._skill_provider_index()
+            assembler = self._build_assembler(memory, provider_ctx, skill_index)
+            gateway = self._build_gateway(memory)
+            llm = self._resolve_llm(session.llm_provider, session.llm_model)
+            loop_ctx = self._build_loop_ctx(
+                assembler, llm, memory, provider_ctx, gateway, skill_index, None, task_manager,
+            )
+            state = LoopState(
+                run_id=generate_id("run"), session=session, task=task, agent=agent,
+                scope=scope, extra={"template": template},
+            )
+            if boundary in _CLOSE_BOUNDARIES:
+                tcid = await self._find_finish_pair_tool_call_id(memory, scope, task.id, provider_ctx)
+                if tcid is not None:
+                    outcome = "fail" if task.status == "FAILED" else "success"
+                    register_close_synth(task.id, tcid, scope, outcome)
+            launch_background_observe(state, loop_ctx, boundary=boundary)
+        except Exception:
+            logger.exception("recover: failed to relaunch task recap for task=%s", task.id)
 
     async def _resume_in_existing_tm(
         self,

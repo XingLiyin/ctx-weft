@@ -1,0 +1,146 @@
+"""Task 6: runtime 重跑 recap 辅助方法（_find_finish_pair_tool_call_id / _relaunch_task_recap）。"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+import ctx_weft.core.runtime as rt_mod
+from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols.capability import qualify
+from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+
+pytestmark = pytest.mark.asyncio
+
+
+def _make_runtime_and_session():
+    from ctx_weft.core import CtxWeftRuntime
+    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+
+    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    memory = InMemoryMemoryProvider()
+    runtime.providers.register_memory(memory)
+
+    session = Session(
+        id="ses_1", tenant_id="default", user_prompt="x", status="RUNNING",
+        root_agent_id="agt_1", llm_provider="acct1", llm_model="m1", token_budget=0,
+    )
+    task = Task(
+        id="tsk_1", session_id="ses_1", status="ACTIVE", tenant_id="default",
+        assigned_agent_id="agt_1", creator_agent_id="agt_1", settings=NormalTaskSettings(),
+    )
+    task_manager = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
+    task_manager.set_session(session)
+
+    template = object()  # 具体属性不参与本方法逻辑；仅作为不透明句柄经 state.extra 透传
+    agent_id = "agt_1"
+    return runtime, session, template, task_manager, task, agent_id, memory
+
+
+async def _seed_finish_pair(memory: InMemoryMemoryProvider, session: Session, task: Task, agent_id: str) -> str:
+    from datetime import UTC, datetime
+
+    tcid = "tc_finish_1"
+    scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=agent_id)
+    pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id, task_id=task.id, agent_id=agent_id)
+    await memory.ingest(
+        MemoryEvent(
+            type=MemoryEventType.AGENT_CONVERSATION_TURN,
+            scope=scope,
+            content="",
+            timestamp=datetime(2026, 6, 12, tzinfo=UTC),
+            role="assistant",
+            metadata={
+                "origin_task_id": task.id,
+                "tool_calls": [{"id": tcid, "name": qualify("control:finish_task"), "input": {}}],
+            },
+        ),
+        pctx,
+    )
+    return tcid
+
+
+@pytest.fixture
+def minimal_runtime_with_session():
+    runtime, session, template, task_manager, task, agent_id, memory = _make_runtime_and_session()
+    return runtime, session, template, task_manager, task, agent_id, memory
+
+
+async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_session, monkeypatch):
+    """close 边界重跑：从 memory 读到 finish 对 tool_call_id 后 register_close_synth，并以该 boundary 重跑。"""
+    runtime, session, template, task_manager, task, agent_id, memory = minimal_runtime_with_session
+    tcid = await _seed_finish_pair(memory, session, task, agent_id)
+    task.status = "FINISHED"
+
+    async def _fake_instantiate(self, *, template_id, session_id, tenant_id, existing_agent_id, ctx, parent_agent=None):
+        agent = Agent(id=existing_agent_id, session_id=session_id, template_id=template_id,
+                      template_version="v1", status="IDLE", tenant_id=tenant_id)
+        return agent, template
+
+    monkeypatch.setattr(LifecycleManager, "instantiate_agent", _fake_instantiate)
+
+    captured = {}
+
+    def _fake_register(task_id, tool_call_id, scope, outcome):
+        captured.update(task_id=task_id, tool_call_id=tool_call_id, outcome=outcome)
+
+    monkeypatch.setattr(rt_mod, "register_close_synth", _fake_register, raising=False)
+
+    launched = {}
+
+    def _fake_launch(state, ctx, *, boundary):
+        launched["boundary"] = boundary
+        return asyncio.create_task(asyncio.sleep(0))
+
+    monkeypatch.setattr(rt_mod, "launch_background_observe", _fake_launch, raising=False)
+
+    await runtime._relaunch_task_recap(
+        session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
+        task=task, agent_id=agent_id, boundary="finish",
+    )
+    await asyncio.sleep(0)
+
+    assert captured["task_id"] == task.id
+    assert captured["tool_call_id"] == tcid
+    assert captured["outcome"] == "success"
+    assert launched["boundary"] == "finish"
+
+
+async def test_relaunch_is_best_effort_swallows_errors(minimal_runtime_with_session, monkeypatch):
+    """任何一步失败：不得抛出，只记日志跳过（best-effort）。"""
+    runtime, session, template, task_manager, task, agent_id, memory = minimal_runtime_with_session
+
+    async def _boom(self, *args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(LifecycleManager, "instantiate_agent", _boom)
+
+    await runtime._relaunch_task_recap(
+        session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
+        task=task, agent_id=agent_id, boundary="finish",
+    )  # 不应抛出
+
+
+async def test_find_finish_pair_tool_call_id_found_and_none():
+    _, session, _, _, task, agent_id, memory = _make_runtime_and_session()
+    scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=agent_id)
+    pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id, task_id=task.id, agent_id=agent_id)
+
+    from ctx_weft.core import CtxWeftRuntime
+    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+
+    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+
+    # 无占位 finish 对 → None
+    got_none = await runtime._find_finish_pair_tool_call_id(memory, scope, task.id, pctx)
+    assert got_none is None
+
+    tcid = await _seed_finish_pair(memory, session, task, agent_id)
+    got = await runtime._find_finish_pair_tool_call_id(memory, scope, task.id, pctx)
+    assert got == tcid
