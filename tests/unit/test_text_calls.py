@@ -1,7 +1,9 @@
 """Parser for tool calls / <think> embedded in model text output."""
 
 from ctx_weft.providers.llm.text_calls import (
+    DIALECTS,
     ContentGate,
+    TextToolCallDialect,
     clean_visible,
     contains_minimax_tool_call,
     contains_tool_call_tag,
@@ -9,6 +11,7 @@ from ctx_weft.providers.llm.text_calls import (
     parse_minimax_tool_calls,
     parse_tool_calls_from_text,
     extract_think,
+    scan_text_tool_calls,
     unwrap_raw_arguments,
 )
 
@@ -264,3 +267,81 @@ def test_unwrap_raw_inner_not_object_left_untouched():
 def test_unwrap_raw_handles_double_wrap():
     args = {"_raw": '{"_raw": "{\\"questions\\": []}"}'}
     assert unwrap_raw_arguments(args) == {"questions": []}
+
+
+# ── scan_text_tool_calls (dialect entry point) ─────────────────────────────────
+
+
+def test_scan_wrapped_json_tool_call():
+    name, calls = scan_text_tool_calls(
+        'ok<tool_call>{"name": "read", "arguments": {"path": "/a"}}</tool_call>'
+    )
+    assert name == "wrapped"
+    assert calls[0].name == "read"
+    assert calls[0].arguments == {"path": "/a"}
+
+
+def test_scan_tool_code_json_tool_and_args_keys():
+    # <tool_code> uses {tool, args} instead of {name, arguments}.
+    name, calls = scan_text_tool_calls(
+        'ok<tool_code>{"tool": "read", "args": {"path": "/a"}}</tool_code>'
+    )
+    assert name == "wrapped"
+    assert calls[0].name == "read"
+    assert calls[0].arguments == {"path": "/a"}
+
+
+def test_scan_tool_code_empty_args_kept():
+    # args == {} is valid and must not be dropped by a truthiness check.
+    _, calls = scan_text_tool_calls('<tool_code>{"tool": "ping", "args": {}}</tool_code>')
+    assert calls[0].name == "ping"
+    assert calls[0].arguments == {}
+
+
+def test_scan_tool_code_xml_fallback_equivalent():
+    # <tool_code> supports the same XML degradation path as <tool_call>.
+    text = (
+        "<tool_code><function=write>"
+        "<parameter=path>/tmp/a</parameter>"
+        "<parameter=content>hello</parameter>"
+        "</function></tool_code>"
+    )
+    _, calls = scan_text_tool_calls(text)
+    assert calls[0].name == "write"
+    assert calls[0].arguments == {"path": "/tmp/a", "content": "hello"}
+
+
+def test_scan_mixed_tool_call_and_tool_code_blocks():
+    text = (
+        '<tool_call>{"name": "a", "arguments": {}}</tool_call>'
+        '<tool_code>{"tool": "b", "args": {}}</tool_code>'
+    )
+    _, calls = scan_text_tool_calls(text)
+    assert [c.name for c in calls] == ["a", "b"]
+
+
+def test_scan_minimax_dialect():
+    name, calls = scan_text_tool_calls(_MINIMAX)
+    assert name == "minimax"
+    assert calls[0].name == "control__delegate_task"
+
+
+def test_scan_no_tag_returns_none():
+    assert scan_text_tool_calls("just a plain answer") is None
+
+
+def test_scan_tag_present_but_zero_parsed():
+    # Malformed content: dialect detects, parse yields nothing → (name, []).
+    name, calls = scan_text_tool_calls("<tool_call>not json and not xml</tool_call>")
+    assert name == "wrapped"
+    assert calls == []
+
+
+def test_clean_visible_cuts_tool_code():
+    assert clean_visible("答案是\n<tool_code>{...}") == "答案是\n"
+
+
+def test_dialects_order_wrapped_before_minimax():
+    # Global constraint: WRAPPED must precede MINIMAX (preserves _finalize's detection order).
+    assert [d.name for d in DIALECTS] == ["wrapped", "minimax"]
+    assert all(isinstance(d, TextToolCallDialect) for d in DIALECTS)

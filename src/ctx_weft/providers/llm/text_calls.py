@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ctx_weft.protocols.llm import RAW_ARGS_KEY
@@ -88,6 +89,10 @@ _MINIMAX_PARAM_RE = re.compile(
     re.DOTALL,
 )
 
+# <tool_code> 与 <tool_call> 完全对等（同一「wrapped」方言的两套 JSON 键别名）。
+# 反向引用保证开闭标签配对，不会 <tool_call> 开、</tool_code> 闭混匹配。
+_WRAPPED_BLOCK_RE = re.compile(r"<(tool_call|tool_code)>\s*(.*?)\s*</\1>", re.DOTALL)
+
 
 @dataclass
 class ParsedToolCall:
@@ -161,11 +166,17 @@ def _parse_single_tool_call(raw: str) -> ParsedToolCall | None:
         data = None
 
     if isinstance(data, dict):
-        name = data.get("name", "")
+        # <tool_call> uses name/arguments; <tool_code> uses tool/args. Accept both.
+        name = data.get("name") or data.get("tool") or ""
         if not name:
-            logger.warning("Text tool call missing 'name': %.200s", stripped)
+            logger.warning("Text tool call missing 'name'/'tool': %.200s", stripped)
             return None
-        arguments = data.get("arguments", {})
+        if "arguments" in data:
+            arguments = data["arguments"]
+        elif "args" in data:
+            arguments = data["args"]
+        else:
+            arguments = {}
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
@@ -179,6 +190,58 @@ def _parse_single_tool_call(raw: str) -> ParsedToolCall | None:
     if result is None:
         logger.warning("Failed to parse text tool call: %.200s", stripped)
     return result
+
+
+def _parse_wrapped(text: str) -> list[ParsedToolCall]:
+    """抽取所有 <tool_call>/<tool_code> 块，每块按 JSON → 严格 XML → 宽松 XML 解析。"""
+    calls: list[ParsedToolCall] = []
+    for m in _WRAPPED_BLOCK_RE.finditer(text):
+        parsed = _parse_single_tool_call(m.group(2))
+        if parsed is not None:
+            calls.append(parsed)
+    return calls
+
+
+def _parse_minimax(text: str) -> list[ParsedToolCall]:
+    """抽取 <minimax:tool_call> 块里的所有 <invoke>（见 parse_minimax_tool_calls）。"""
+    return parse_minimax_tool_calls(text)
+
+
+@dataclass(frozen=True)
+class TextToolCallDialect:
+    """一种「工具调用写进正文文本」的方言：起始标签集 + 解析器。
+
+    ``open_markers`` 一处三用：detect（是否命中本方言）、可见门 ``_VISIBLE_MARKERS``
+    （从正文里扣掉标签）、以及块正则的锚点。加新方言只需往 ``DIALECTS`` 加一项。
+    """
+
+    name: str
+    open_markers: tuple[str, ...]
+    parse: Callable[[str], list[ParsedToolCall]]
+
+    def detect(self, text: str) -> bool:
+        return any(m in text for m in self.open_markers)
+
+
+WRAPPED_DIALECT = TextToolCallDialect(
+    "wrapped", ("<tool_call>", "<tool_code>", "<function="), _parse_wrapped
+)
+MINIMAX_DIALECT = TextToolCallDialect(
+    "minimax", ("<minimax:tool_call>",), _parse_minimax
+)
+# 顺序即 _finalize 的检测优先级：wrapped 先于 minimax。
+DIALECTS: tuple[TextToolCallDialect, ...] = (WRAPPED_DIALECT, MINIMAX_DIALECT)
+
+
+def scan_text_tool_calls(text: str) -> tuple[str, list[ParsedToolCall]] | None:
+    """首个 detect 命中的方言 → ``(name, calls)``；都不命中 → ``None``。
+
+    ``(name, [])`` 表示「标签在但零解析」（截断/畸形）——供 finalize 判 outage 退避自愈。
+    """
+    for dialect in DIALECTS:
+        if dialect.detect(text):
+            return dialect.name, dialect.parse(text)
+    return None
 
 
 def parse_tool_calls_from_text(text: str) -> TextScan:
@@ -239,7 +302,9 @@ def parse_minimax_tool_calls(text: str) -> list[ParsedToolCall]:
     return calls
 
 
-_VISIBLE_MARKERS = (THINK_START, TOOL_CALL_START, "<function=", MINIMAX_TOOL_CALL_START)
+_VISIBLE_MARKERS = (THINK_START,) + tuple(
+    m for dialect in DIALECTS for m in dialect.open_markers
+)
 
 
 def merge_content(acc: str, chunk: str) -> str:
