@@ -14,6 +14,9 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.events import EventType
+from ctx_weft.core.loop.driver import make_event
+from ctx_weft.core.loop.steps.observe import run_observe_react
 from ctx_weft.protocols import MemoryEventType, MemoryLayer
 
 if TYPE_CHECKING:
@@ -110,79 +113,86 @@ def _lock_for(task_id: str) -> asyncio.Lock:
 
 async def _run_background_observe(state: "LoopState", ctx: "LoopContext", boundary: str) -> None:
     from ctx_weft.core.assembler import ContextRequest
-    from ctx_weft.core.loop.steps.observe import (
-        BACKGROUND_OBSERVE_REACT_EVENTS, run_observe_react,
-    )
+    from ctx_weft.core.loop.steps.observe import BACKGROUND_OBSERVE_REACT_EVENTS
     from ctx_weft.core.orchestrator.control_capability import BACKGROUND_PROCESS_REPORT_NAME
 
-    async with _lock_for(state.task.id):
-        try:
-            agent = state.agent
-            bound_caps = (
-                ctx.capability_cache.get(agent.id)
-                if ctx.capability_cache is not None and ctx.capability_cache.has_agent(agent.id)
-                else []
-            )
-            request = ContextRequest(
-                purpose="background_observe",
-                scope=state.scope,
-                task=state.task,
-                agent=agent,
-                session=state.session,
-                template=state.extra.get("template"),
-                bound_capabilities=bound_caps,
-                extra={"observe_boundary": boundary},
-            )
-            prompt = await ctx.assembler.assemble(request)
-            result, last_text = await run_observe_react(
-                state, ctx,
-                system=prompt.system,
-                messages=list(prompt.messages),
-                tools=prompt.tools,
-                request_id_prefix=f"bgobs_{state.task.id}",
-                max_rounds=agent.loop_config.max_turns_per_observe,
-                terminal_tool_name=BACKGROUND_PROCESS_REPORT_NAME,
-                event_types=BACKGROUND_OBSERVE_REACT_EVENTS,  # 后台 LLM 交互发独立类型，host 决定不进前端
-            )
-            # 报告取值：terminal 工具产出 → 纯文本复述兜底（observer 把复述写成正文而没调工具）。
-            act_recap = ((result.content if result else "") or last_text or "").strip()
-            task_summary = (result.metadata or {}).get("task_summary", "") if result else ""
-            if not act_recap:
-                # 无任何可用报告：与异常路径同语义——段保 raw，不写占位摘要、不动 finish 对。
-                if boundary in _CLOSE_BOUNDARIES:
-                    pop_close_synth(state.task.id)  # 弹掉登记防泄漏；finalize 占位 finish 对保持原样
-                logger.warning(
-                    "background observe produced no usable report (task=%s boundary=%s); "
-                    "segment kept raw", state.task.id, boundary,
+    await ctx.event_bus.emit(make_event(
+        state, EventType.TASK_RECAP_STARTED,
+        payload={"task_id": state.task.id, "boundary": boundary, "agent_id": state.agent.id},
+    ))
+    try:
+        async with _lock_for(state.task.id):
+            try:
+                agent = state.agent
+                bound_caps = (
+                    ctx.capability_cache.get(agent.id)
+                    if ctx.capability_cache is not None and ctx.capability_cache.has_agent(agent.id)
+                    else []
                 )
-                return
-            if boundary in _CLOSE_BOUNDARIES:
-                synth = pop_close_synth(state.task.id)  # sync check-and-clear（无 await）
-                if synth is not None:
-                    tool_call_id, scope, outcome = synth
-                    await _replace_finish_report(
-                        ctx.memory, ctx.provider_ctx, scope, state.task.id,
-                        tool_call_id, act_recap, task_summary, outcome,
-                    )
-                else:
-                    # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
-                    # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。
-                    _close_report[state.task.id] = (act_recap, task_summary)  # 不写 memory（不变量 3）
-            else:
-                await ctx.memory.apply_compact(
+                request = ContextRequest(
+                    purpose="background_observe",
                     scope=state.scope,
-                    summary=act_recap,
-                    keep_last=0,
-                    ctx=ctx.provider_ctx,
-                    layer=MemoryLayer.TASK,
-                    # 同时护 TASK_COMPACT_SUMMARY：多段交互（多轮 plain_text）各产一段胶囊须累积，
-                    # 否则后一段折会 supersede 前一段摘要（前段丢失）、且新摘要锚到 UP 前 1μs 抢占前段
-                    # 位置。与 observe._fold_retry_segment 的 protect_types 一致。
-                    protect_types=(MemoryEventType.USER_PROMPT,
-                                   MemoryEventType.TASK_COMPACT_SUMMARY),
+                    task=state.task,
+                    agent=agent,
+                    session=state.session,
+                    template=state.extra.get("template"),
+                    bound_capabilities=bound_caps,
+                    extra={"observe_boundary": boundary},
                 )
-        except Exception:
-            logger.exception("background observe failed (ignored); segment kept raw")
+                prompt = await ctx.assembler.assemble(request)
+                result, last_text = await run_observe_react(
+                    state, ctx,
+                    system=prompt.system,
+                    messages=list(prompt.messages),
+                    tools=prompt.tools,
+                    request_id_prefix=f"bgobs_{state.task.id}",
+                    max_rounds=agent.loop_config.max_turns_per_observe,
+                    terminal_tool_name=BACKGROUND_PROCESS_REPORT_NAME,
+                    event_types=BACKGROUND_OBSERVE_REACT_EVENTS,  # 后台 LLM 交互发独立类型，host 决定不进前端
+                )
+                # 报告取值：terminal 工具产出 → 纯文本复述兜底（observer 把复述写成正文而没调工具）。
+                act_recap = ((result.content if result else "") or last_text or "").strip()
+                task_summary = (result.metadata or {}).get("task_summary", "") if result else ""
+                if not act_recap:
+                    # 无任何可用报告：与异常路径同语义——段保 raw，不写占位摘要、不动 finish 对。
+                    if boundary in _CLOSE_BOUNDARIES:
+                        pop_close_synth(state.task.id)  # 弹掉登记防泄漏；finalize 占位 finish 对保持原样
+                    logger.warning(
+                        "background observe produced no usable report (task=%s boundary=%s); "
+                        "segment kept raw", state.task.id, boundary,
+                    )
+                    return
+                if boundary in _CLOSE_BOUNDARIES:
+                    synth = pop_close_synth(state.task.id)  # sync check-and-clear（无 await）
+                    if synth is not None:
+                        tool_call_id, scope, outcome = synth
+                        await _replace_finish_report(
+                            ctx.memory, ctx.provider_ctx, scope, state.task.id,
+                            tool_call_id, act_recap, task_summary, outcome,
+                        )
+                    else:
+                        # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
+                        # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。
+                        _close_report[state.task.id] = (act_recap, task_summary)  # 不写 memory（不变量 3）
+                else:
+                    await ctx.memory.apply_compact(
+                        scope=state.scope,
+                        summary=act_recap,
+                        keep_last=0,
+                        ctx=ctx.provider_ctx,
+                        layer=MemoryLayer.TASK,
+                        # 同时护 TASK_COMPACT_SUMMARY：多段交互（多轮 plain_text）各产一段胶囊须累积，
+                        # 否则后一段折会 supersede 前一段摘要（前段丢失）、且新摘要锚到 UP 前 1μs 抢占前段
+                        # 位置。与 observe._fold_retry_segment 的 protect_types 一致。
+                        protect_types=(MemoryEventType.USER_PROMPT,
+                                       MemoryEventType.TASK_COMPACT_SUMMARY),
+                    )
+            except Exception:
+                logger.exception("background observe failed (ignored); segment kept raw")
+    finally:
+        await ctx.event_bus.emit(make_event(
+            state, EventType.TASK_RECAP_DONE, payload={"task_id": state.task.id},
+        ))
 
 
 def launch_background_observe(

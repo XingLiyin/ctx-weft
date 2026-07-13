@@ -121,8 +121,11 @@ async def fake_state_ctx():
             yield SimpleNamespace(kind="token", text="摘要", usage=None, tool_call=None)
 
     class _FakeEventBus:
+        def __init__(self) -> None:
+            self.emitted: list = []
+
         async def emit(self, event: Any) -> None:
-            pass
+            self.emitted.append(event)
 
     ctx = LoopContext(
         assembler=_FakeAssembler(),
