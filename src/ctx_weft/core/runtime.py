@@ -970,7 +970,13 @@ class CtxWeftRuntime:
         terminal_ids = {t.id for t in all_tasks if t.status in _TERMINAL}
         resumable = [t for t in all_tasks if t.status not in _TERMINAL]
 
-        if not resumable:
+        # 折出被崩溃打断的段 recap（started 无 done）——覆盖全部 observe 段边界。
+        from ctx_weft.core.control.reducers import fold_pending_task_recap
+        events_all = await self.event_store.read_by_session(session_id)
+        pending_recap = fold_pending_task_recap(events_all)
+
+        # 既无可恢复 task 又无 task（空/损坏投影）→ 确无事可做，保留原抛错。
+        if not resumable and not all_tasks:
             raise RuntimeError(f"Session {session_id!r} has no resumable tasks")
 
         lm = LifecycleManager(template_resolver=self._template_resolver)
@@ -1025,7 +1031,26 @@ class CtxWeftRuntime:
         if user_reply is not None:
             await self._inject_user_reply(user_reply, session, task_manager)
 
+        # 重跑被崩溃打断的段 recap（登记到新 TM；close 边界补 register_close_synth 替换占位 finish 对）。
+        tasks_by_id = {t.id: t for t in all_tasks}
+        for tid, info in pending_recap.items():
+            t = tasks_by_id.get(tid)
+            if t is None:
+                continue
+            await self._relaunch_task_recap(
+                session=session, template=template, template_id=template_id,
+                task_manager=task_manager, task=t,
+                agent_id=info.get("agent_id") or t.assigned_agent_id or "",
+                boundary=info.get("boundary") or "finish",
+            )
+
         self._register_and_drain(session, task_manager)
+
+        # 无可恢复 task（所有 task 已终态）但 session 因崩溃未落终态 → 显式收尾：
+        # gather 重跑的后台 recap 后发 SESSION_FINISHED（终态镜像 on_task_finished）。
+        if not resumable:
+            final_status = "FAILED" if session.failure_counter > 0 else "SUCCEEDED"
+            await task_manager.finalize_idle_session(final_status)
 
     async def _find_finish_pair_tool_call_id(
         self, memory: MemoryProvider, scope: MemoryScope, task_id: str, pctx: ProviderContext,
