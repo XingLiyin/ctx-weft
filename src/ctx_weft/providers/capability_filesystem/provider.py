@@ -363,6 +363,18 @@ async def write_file(
     """Create a file, or overwrite it entirely if it already exists.
     Parent directories are auto-created. To change part of an existing file,
     use edit_file instead.
+
+    When writing longer files, build them incrementally instead of in one pass:
+    1. First use write_file to create a minimal skeleton — structure only
+       (function signatures, section headers, key placeholder comments),
+       kept under a few dozen lines.
+    2. Then use edit_file to fill in one logical block at a time.
+    3. After each edit, confirm the previous change landed before continuing.
+
+    Why: each output stays short (less truncation/error risk); when something
+    goes wrong you redo one small block, not the whole file.
+    Rule of thumb: use this approach when a file has more than 2 independent
+    logical blocks, or is likely to exceed ~300 lines of code / ~100 lines of prose.
     """
     if not path:
         yield CapabilityEvent(kind="error", payload={"code": "MISSING_PATH", "message": "path is required"})
