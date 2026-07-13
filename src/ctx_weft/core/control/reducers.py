@@ -52,6 +52,25 @@ def unresolved_hitl_ids(events: list[Event]) -> set[str]:
     return set(fold_pending_hitl(events))
 
 
+def fold_pending_task_recap(events: list[Event]) -> dict[str, dict]:
+    """折叠 TaskRecap 事件 → 仍未完成的 {task_id: {"boundary", "agent_id"}}（started 减去 done）。
+
+    某 task 有 TASK_RECAP_STARTED 而无其后的 TASK_RECAP_DONE，说明该段 background observe 的
+    memory 写未持久完成（崩溃在中途）——恢复据此重跑。同 task_id last-write-wins（仿 fold_pending_hitl）。
+    """
+    pending: dict[str, dict] = {}
+    for ev in events:
+        p = ev.payload or {}
+        tid = p.get("task_id", "")
+        if not tid:
+            continue
+        if ev.type == EventType.TASK_RECAP_STARTED:
+            pending[tid] = {"boundary": p.get("boundary", ""), "agent_id": p.get("agent_id", "")}
+        elif ev.type == EventType.TASK_RECAP_DONE:
+            pending.pop(tid, None)
+    return pending
+
+
 def fold_cold_hitl_decision(events: list[Event], tool_call_id: str) -> HitlRequest | None:
     """折出某 tool_call 的**可用**人工决定（冷决定查询,reconcile 短路的跨重启版,spec/07 §6）。
 
