@@ -110,6 +110,23 @@ def test_text_embedded_tool_call_is_recovered():
     assert chunks[0].tool_call.id  # non-empty generated id
 
 
+def test_text_embedded_tool_code_is_recovered():
+    # <tool_code> {tool, args} recovered into a tool_call chunk, same as <tool_call>.
+    text = 'ok<tool_code>{"tool": "write", "args": {"p": "/a"}}</tool_code>'
+    chunks = build_finalize_chunks(
+        content_text=text,
+        native_tool_calls=[],
+        had_native_buffer=False,
+        saw_terminal=True,
+        usage=None,
+        finish_reason="stop",
+        emitted_visible_len=len("ok"),  # "ok" already streamed
+    )
+    assert _kinds(chunks) == ["tool_call", "done"]
+    assert chunks[0].tool_call.name == "write"
+    assert chunks[0].tool_call.arguments == {"p": "/a"}
+
+
 def test_minimax_text_tool_call_is_recovered():
     # MiniMax 把工具调用写成 <minimax:tool_call> 文本 → 收尾还原成 tool_call，
     # 且可见正文尾部（"好的\n"）补吐时不带那坨 XML。
