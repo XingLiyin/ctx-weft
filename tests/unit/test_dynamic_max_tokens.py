@@ -40,7 +40,7 @@ def test_first_turn_context_tokens_zero():
 # ── 网关 helper ────────────────────────────────────────────────────────────────
 from types import SimpleNamespace
 
-from ctx_weft.protocols import LLMMessage, LLMRequest, LLMTool
+from ctx_weft.protocols import LLMMessage, LLMRequest
 from ctx_weft.core.loop.llm_gateway import (
     apply_dynamic_max_tokens,
     _estimate_request_tokens,

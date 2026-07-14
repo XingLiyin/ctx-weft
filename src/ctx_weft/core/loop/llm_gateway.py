@@ -40,13 +40,13 @@ adapter 不应重复实现以上不变式——已在 core 层集中保证。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 from collections.abc import AsyncIterator
 from time import monotonic
 from typing import TYPE_CHECKING
 
-import json
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
 from ctx_weft.core.events.types import EventType
 from ctx_weft.core.loop.driver import make_event
