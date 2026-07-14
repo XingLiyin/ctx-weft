@@ -215,6 +215,8 @@ def test_scan_minimax_dialect():
     name, calls = scan_text_tool_calls(_MINIMAX)
     assert name == "minimax"
     assert calls[0].name == "control__delegate_task"
+    assert "第二段" in calls[0].arguments["task_prompt"]
+    assert "\n" in calls[0].arguments["task_prompt"]
 
 
 def test_scan_no_tag_returns_none():
@@ -224,6 +226,13 @@ def test_scan_no_tag_returns_none():
 def test_scan_tag_present_but_zero_parsed():
     # Malformed content: dialect detects, parse yields nothing → (name, []).
     name, calls = scan_text_tool_calls("<tool_call>not json and not xml</tool_call>")
+    assert name == "wrapped"
+    assert calls == []
+
+
+def test_scan_bare_function_tag_detected_but_zero_parsed():
+    # 裸 <function=> 未包在 <tool_call> 里：命中 wrapped 方言，但块正则不匹配 → (name, [])
+    name, calls = scan_text_tool_calls("call <function=foo></function>")
     assert name == "wrapped"
     assert calls == []
 
