@@ -211,6 +211,33 @@ def test_scan_mixed_tool_call_and_tool_code_blocks():
     assert [c.name for c in calls] == ["a", "b"]
 
 
+def test_scan_tool_code_pretty_multiline_json_with_escaped_quotes():
+    # 真实样本：<tool_code> 里是缩进多行 JSON，值含转义引号 \" 与中文；
+    # 前面还有正文。要点：块正则的 \s*(.*?)\s* 吃掉换行/缩进，json.loads 还原转义引号，
+    # clean_visible 把整块从可见正文里扣掉（前置正文保留）。
+    text = (
+        "前面一些正文\n"
+        "<tool_code>\n"
+        "{\n"
+        '  "tool": "collect_process_report",\n'
+        '  "args": {\n'
+        '    "act_recap": "responded to greeting \\"你好\\" with a welcome",\n'
+        '    "task_summary": "用户多次发送\\"你好\\"，actor 每次以中文回应"\n'
+        "  }\n"
+        "}\n"
+        "</tool_code>"
+    )
+    name, calls = scan_text_tool_calls(text)
+    assert name == "wrapped"
+    assert len(calls) == 1
+    assert calls[0].name == "collect_process_report"
+    # 转义引号被 json.loads 正确还原为字面量双引号
+    assert '"你好"' in calls[0].arguments["act_recap"]
+    assert calls[0].arguments["task_summary"].startswith('用户多次发送"你好"')
+    # 整块不泄露进可见正文，仅保留标签前的正文
+    assert clean_visible(text) == "前面一些正文\n"
+
+
 def test_scan_minimax_dialect():
     name, calls = scan_text_tool_calls(_MINIMAX)
     assert name == "minimax"
