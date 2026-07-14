@@ -17,7 +17,8 @@ guidance 内容分两类（composer 把它排在 ## Capabilities 之前——态
 - **动态段**（只能运行时生成）：当前任务锚定行（每个 act 回合都有，长对话里
   ## Current Task 框远在历史深处时的就近锚）、session 非终态任务树（▶ 定位
   当前 task）、当前 task 已完成子任务清单（防重做/重派——它们已从任务树消失，
-  但完整执行过程摊在对话上文里）。
+  每条附结果摘要 outputs→task_summary，完整结果仍摊在对话上文里，摘要防上文被
+  压缩/淹没时丢失）。
 - **静态段**（指针级，刻意压缩）：finish 收尾、无关新请求 finish+delegate 双发、
   ask_user 三条只留一句提醒。完整协议已有三处承载——SOUL、工具 description、
   以及机械兜底（observer 的 success-without-outputs→retry 护栏、interactive
@@ -33,10 +34,11 @@ from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
 )
-from ctx_weft.core.utils import as_utc
+from ctx_weft.core.utils import as_utc, content_to_text
 
 _TERMINAL_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELED"})
 _TASK_LABEL_MAX = 80
+_SUBTASK_RESULT_MAX = 150
 
 
 def _task_label(t) -> str:
@@ -79,6 +81,24 @@ def _finished_subtasks(task, task_manager) -> list:
     # aware 时间混排会抛 naive/aware 比较错（边界已在 converters 补齐，此处防御兜底）。
     done.sort(key=lambda t: as_utc(t.created_at) if t.created_at else epoch)
     return done
+
+
+def _subtask_result_snippet(t) -> str:
+    """完成子任务的结果摘要：outputs（成果物）优先，回退 task_summary；折叠单行、截断到 _SUBTASK_RESULT_MAX。
+
+    parent 「build on their results」需要的是子任务的实际产出——outputs 是 finish_task 提交的
+    deliverable（str 或 ContentPart 列表，content_to_text 归一）；outputs 空时回退 observer 的
+    task_summary（整段综合总结）。多行折叠成单行，避免多行结果撑开每回合尾部的 guidance。
+    两者皆空返回 ""（回退到只列 title，保持向后兼容）。
+    """
+    outputs = getattr(t, "outputs", None)
+    text = outputs if isinstance(outputs, str) else (content_to_text(outputs) if outputs else "")
+    if not (text or "").strip():
+        text = getattr(t, "task_summary", None) or ""
+    text = " ".join((text or "").split())  # 折叠所有空白（含换行）成单空格
+    if not text:
+        return ""
+    return text[:_SUBTASK_RESULT_MAX] + "…" if len(text) > _SUBTASK_RESULT_MAX else text
 
 
 def _session_task_tree(task, task_manager) -> str:
@@ -171,12 +191,15 @@ def build_act_guidance(task, task_manager) -> str:
     done = _finished_subtasks(task, task_manager)
     if done:
         parts.append(
-            "## Sub-tasks of your current task that are ALREADY COMPLETED — their results "
-            "are in the conversation above. Do NOT redo their work yourself and do NOT "
-            "delegate them again; build on their results:"
+            "## Sub-tasks of your current task that are ALREADY COMPLETED — a result digest "
+            "is below (full results are in the conversation above). Do NOT redo their work "
+            "yourself and do NOT delegate them again; build on their results:"
         )
         for t in done:
             parts.append(f"- [FINISHED] {_task_label(t)}")
+            snippet = _subtask_result_snippet(t)
+            if snippet:
+                parts.append(f"    → {snippet}")
         parts.append("")
 
     # 静态提醒（指针级）：完整语义在工具 description / SOUL / observer 护栏，这里只钉最易违反的三条。

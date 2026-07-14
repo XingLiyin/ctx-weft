@@ -18,10 +18,11 @@ from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
 
 
 def _task(id, title="", status="PENDING", parent=None, description="", created_at=None,
-          user_prompt=""):
+          user_prompt="", outputs=None, task_summary=None):
     return SimpleNamespace(
         id=id, title=title, description=description, status=status,
         parent_task_id=parent, created_at=created_at, user_prompt=user_prompt,
+        outputs=outputs, task_summary=task_summary,
     )
 
 
@@ -180,6 +181,69 @@ def test_finished_children_listed_with_no_redo_emphasis():
     # 树里仍只有非终态节点
     assert "▶ Parent" in g
     assert "  - [FINISHED]" not in g.split("## Sub-tasks")[0]
+
+
+def test_finished_child_renders_outputs_result_snippet():
+    # 完成子任务的 outputs（成果物）作为结果摘要拼在 title 下的缩进 → 行。
+    parent = _task("t1", "Parent", "ACTIVE")
+    c1 = _task("t2", "Research", "FINISHED", parent="t1", outputs="Found 3 key sources on X.")
+    g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
+    assert "- [FINISHED] Research" in g
+    assert "    → Found 3 key sources on X." in g
+
+
+def test_finished_child_falls_back_to_task_summary_when_no_outputs():
+    # outputs 空 → 回退 task_summary。
+    parent = _task("t1", "Parent", "ACTIVE")
+    c1 = _task("t2", "Draft", "FINISHED", parent="t1",
+               outputs=None, task_summary="Drafted intro and outline.")
+    g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
+    assert "    → Drafted intro and outline." in g
+
+
+def test_finished_child_outputs_preferred_over_task_summary():
+    parent = _task("t1", "Parent", "ACTIVE")
+    c1 = _task("t2", "Draft", "FINISHED", parent="t1",
+               outputs="THE DELIVERABLE", task_summary="the process digest")
+    g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
+    assert "    → THE DELIVERABLE" in g
+    assert "the process digest" not in g
+
+
+def test_finished_child_no_result_renders_title_only():
+    # 两者皆空 → 仅 title 行，无 → 行（保持向后兼容）。
+    parent = _task("t1", "Parent", "ACTIVE")
+    c1 = _task("t2", "Research", "FINISHED", parent="t1")
+    g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
+    assert "- [FINISHED] Research" in g
+    assert "→" not in g.split("## Sub-tasks")[1]
+
+
+def test_finished_child_result_truncated():
+    parent = _task("t1", "Parent", "ACTIVE")
+    long_out = "y" * 300
+    c1 = _task("t2", "Research", "FINISHED", parent="t1", outputs=long_out)
+    g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
+    assert ("y" * 150 + "…") in g
+    assert ("y" * 151) not in g
+
+
+def test_finished_child_result_multiline_collapsed_to_single_line():
+    # 多行结果折叠成单行，避免撑开每回合尾部的 guidance。
+    parent = _task("t1", "Parent", "ACTIVE")
+    c1 = _task("t2", "Research", "FINISHED", parent="t1",
+               outputs="line one\n\nline two\n  line three")
+    g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
+    assert "    → line one line two line three" in g
+
+
+def test_finished_child_outputs_as_content_part_list():
+    # outputs 是 ContentPart 列表 → content_to_text 归一。
+    parent = _task("t1", "Parent", "ACTIVE")
+    c1 = _task("t2", "Research", "FINISHED", parent="t1",
+               outputs=[SimpleNamespace(text="part A "), SimpleNamespace(text="part B")])
+    g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
+    assert "    → part A part B" in g
 
 
 def test_mixed_naive_aware_created_at_does_not_crash_sort():
