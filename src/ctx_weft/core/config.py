@@ -25,5 +25,8 @@ class RuntimeConfig:
     llm_self_heal_base_delay_sec: float = 2.0
     llm_self_heal_max_interval_sec: float = 60.0
     # 动态 max_tokens（apply_dynamic_max_tokens 读取；默认=安全值）
-    dynamic_max_tokens_margin: int = 4096
+    # margin=8192：覆盖本轮新增尾段估算的残余 CJK 低估（len//4 对汉字系统性偏低），
+    # 并与输入侧 reserved_output_tokens=8192 对称。仅在贴近满窗时才实质压小输出（届时已近
+    # compact），常态下几万量级的输出预算无感。
+    dynamic_max_tokens_margin: int = 8192
     dynamic_max_tokens_floor: int = 1024

@@ -110,7 +110,7 @@ def _llm(context_limit=200_000, output_ceiling=None):
 def test_apply_uses_request_estimate():
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(_ctx(_llm()), req, _guard(context_tokens=0))
-    assert req.max_tokens == 200_000 - 100 - 4096
+    assert req.max_tokens == 200_000 - 100 - 8192  # 默认 margin
 
 
 def test_apply_noop_when_estimate_missing():
@@ -137,7 +137,7 @@ def test_apply_ceiling_fallback_to_context_limit():
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(
         _ctx(_llm(context_limit=50_000, output_ceiling=None)), req, _guard(context_limit=50_000))
-    assert req.max_tokens == 50_000 - 100 - 4096
+    assert req.max_tokens == 50_000 - 100 - 8192
 
 
 def test_apply_ceiling_clamps_when_configured():

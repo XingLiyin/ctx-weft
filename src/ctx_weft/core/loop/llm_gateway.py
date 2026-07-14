@@ -281,7 +281,7 @@ def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
     if used is None:
         return
     llm = ctx.llm
-    margin = int(_cfg_val(ctx, "dynamic_max_tokens_margin", 4096))
+    margin = int(_cfg_val(ctx, "dynamic_max_tokens_margin", 8192))
     floor = int(_cfg_val(ctx, "dynamic_max_tokens_floor", 1024))
     ceiling = getattr(llm, "output_ceiling", None) or llm.context_limit
     request.max_tokens = dynamic_max_tokens(

@@ -62,7 +62,7 @@ def dynamic_max_tokens(
     used: int,
     ceiling: int,
     *,
-    margin: int = 4096,
+    margin: int = 8192,
     floor: int = 1024,
 ) -> int:
     """按当前窗口占用实时算请求 max_tokens：clamp(context_limit − used − margin, floor, ceiling)。
