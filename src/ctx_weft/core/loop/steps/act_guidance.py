@@ -151,8 +151,10 @@ def build_resume_cue(task, task_manager) -> str:
     )
     if _finished_subtasks(task, task_manager):
         cue += (
-            " Sub-tasks already completed are listed in the situational notes below — "
-            "build on their results instead of redoing or re-delegating them."
+            " Parts of it have ALREADY been delegated to sub-tasks that are now complete — "
+            "they are listed with their results in the situational notes below. Never execute "
+            "that work a second time: instead of redoing or re-delegating it, build on those "
+            "results and judge what, if anything, still remains."
         )
     return cue
 
@@ -191,9 +193,12 @@ def build_act_guidance(task, task_manager) -> str:
     done = _finished_subtasks(task, task_manager)
     if done:
         parts.append(
-            "## Sub-tasks of your current task that are ALREADY COMPLETED — a result digest "
-            "is below (full results are in the conversation above). Do NOT redo their work "
-            "yourself and do NOT delegate them again; build on their results:"
+            "## Your current task has ALREADY been delegated to the sub-tasks below, and they "
+            "are ALREADY COMPLETED — the digest under each is what it produced (full results "
+            "are in the conversation above). That work is done and must never be executed a "
+            "second time: Do NOT redo their work yourself and do NOT delegate them again. Your "
+            "next step is to judge whether any work still remains for the task goal beyond "
+            "these results — if it does, do only that part, building on what they produced:"
         )
         for t in done:
             parts.append(f"- [FINISHED] {_task_label(t)}")

@@ -180,7 +180,7 @@ def test_finished_children_listed_with_no_redo_emphasis():
     assert "- [FINISHED] Draft" in g
     # 树里仍只有非终态节点
     assert "▶ Parent" in g
-    assert "  - [FINISHED]" not in g.split("## Sub-tasks")[0]
+    assert "  - [FINISHED]" not in g.split("ALREADY COMPLETED")[0]
 
 
 def test_finished_child_renders_outputs_result_snippet():
@@ -216,7 +216,7 @@ def test_finished_child_no_result_renders_title_only():
     c1 = _task("t2", "Research", "FINISHED", parent="t1")
     g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
     assert "- [FINISHED] Research" in g
-    assert "→" not in g.split("## Sub-tasks")[1]
+    assert "→" not in g.split("ALREADY COMPLETED")[1]
 
 
 def test_finished_child_result_truncated():

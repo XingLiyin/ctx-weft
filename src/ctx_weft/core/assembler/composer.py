@@ -47,7 +47,7 @@ messages —— 组装步骤（_build_actor_messages）：
        ---
        Current task: {title}                    ← 任务锚定行（恒有）
        ## The overall plan（▶ 定位当前 task）   ← ≥1 非终态 task 才出
-       ## Sub-tasks ... ALREADY COMPLETED       ← 有 FINISHED 子任务才出
+       ## 已派发且 ALREADY COMPLETED 的子任务   ← 有 FINISHED 子任务才出
        finish / 无关新请求双发 / ask_user 三条指针级提醒
        ## Capabilities                          ← 殿后，工具清单紧贴生成点
 
