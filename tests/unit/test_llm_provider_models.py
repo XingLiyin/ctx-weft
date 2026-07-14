@@ -128,3 +128,27 @@ async def test_verify_model_for_account_unknown_raises():
     p = _provider()
     with pytest.raises(KeyError):
         await p.verify_model_for_account("nope", "m")
+
+
+def _acc_with_no_models(p: LLMProvider) -> None:
+    p.register_account(
+        LLMAccount(name="acc", style="openai", api_key="sk", base_url="https://api.openai.com",
+                   models=[], default_model=""),
+        persist=False,
+    )
+
+
+def test_add_model_threads_output_ceiling():
+    p = _provider()
+    _acc_with_no_models(p)
+    p.add_model("acc", "claude-x", context_limit=200_000, max_output_tokens=8192, output_ceiling=64_000)
+    m = next(m for m in p.get_account("acc").models if m.name == "claude-x")
+    assert m.output_ceiling == 64_000
+
+
+def test_add_model_output_ceiling_defaults_none():
+    p = _provider()
+    _acc_with_no_models(p)
+    p.add_model("acc", "gpt-4o", context_limit=128_000)
+    m = next(m for m in p.get_account("acc").models if m.name == "gpt-4o")
+    assert m.output_ceiling is None

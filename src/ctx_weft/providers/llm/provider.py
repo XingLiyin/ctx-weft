@@ -154,6 +154,7 @@ class LLMProvider:
         model: str,
         context_limit: int | None = None,
         max_output_tokens: int | None = None,
+        output_ceiling: int | None = None,
     ) -> LLMAccount:
         account = self.get_account(name)
         if not any(m.name == model for m in account.models):
@@ -161,6 +162,7 @@ class LLMProvider:
                 name=model,
                 context_limit=context_limit or 128_000,
                 max_output_tokens=max_output_tokens or 8192,
+                output_ceiling=output_ceiling,  # None → 网关回退 context_limit（不设默认值）
             ))
         if not account.default_model:
             account.default_model = model
