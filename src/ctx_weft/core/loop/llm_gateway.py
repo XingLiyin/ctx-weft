@@ -46,9 +46,11 @@ from collections.abc import AsyncIterator
 from time import monotonic
 from typing import TYPE_CHECKING
 
+import json
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
 from ctx_weft.core.events.types import EventType
 from ctx_weft.core.loop.driver import make_event
+from ctx_weft.core.utils import content_to_text, dynamic_max_tokens, estimate_tokens
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
@@ -230,6 +232,43 @@ def legalize_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
     )
 
 
+def _estimate_request_tokens(request: "LLMRequest") -> int:
+    """估算本次待发 prompt 的 token（system + 全部 messages + tools schema）。
+
+    遍历**全部** messages，含本轮新加的 role="tool" result——这是 loop_guard.context_tokens
+    （上一轮真实值）漏掉的增量，"取大"逻辑正靠它补齐。len//4 口径不变（低估已知）。
+    """
+    total = estimate_tokens(request.system or "")
+    for m in request.messages:
+        total += estimate_tokens(content_to_text(m.content))
+    for t in request.tools:
+        total += estimate_tokens(t.name) + estimate_tokens(t.description or "")
+        total += estimate_tokens(json.dumps(t.input_schema, ensure_ascii=False))
+    return total
+
+
+def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
+    """发送前按窗口就地写入 request.max_tokens。
+
+    仅当未显式设值（None）且有 loop_guard 时生效。天花板取 llm.output_ceiling（duck-type，
+    缺省/None → 回退 llm.context_limit）。margin/floor 从 ctx.config 取，缺省回退安全值。
+    """
+    if request.max_tokens is not None or loop_guard is None:
+        return
+    llm = ctx.llm
+    margin = int(_cfg_val(ctx, "dynamic_max_tokens_margin", 4096))
+    floor = int(_cfg_val(ctx, "dynamic_max_tokens_floor", 1024))
+    ceiling = getattr(llm, "output_ceiling", None) or llm.context_limit
+    request.max_tokens = dynamic_max_tokens(
+        loop_guard.context_limit,
+        loop_guard.context_tokens,
+        _estimate_request_tokens(request),
+        ceiling,
+        margin=margin,
+        floor=floor,
+    )
+
+
 async def stream_llm(
     llm: "LLMClient", request: "LLMRequest", *, stream: bool = True
 ) -> AsyncIterator["LLMChunk"]:
@@ -314,6 +353,9 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
     - 退避期间尊重 cancel_token。
     """
     from ctx_weft.protocols import LLMCallError  # local to avoid re-export confusion
+
+    loop_guard = getattr(getattr(state, "agent", None), "loop_guard", None)
+    apply_dynamic_max_tokens(ctx, request, loop_guard)
 
     max_attempts = int(_cfg_val(ctx, "llm_self_heal_max_attempts", _DEFAULT_MAX_ATTEMPTS))
     max_duration = _cfg_val(ctx, "llm_self_heal_max_duration_sec", _DEFAULT_MAX_DURATION_SEC)

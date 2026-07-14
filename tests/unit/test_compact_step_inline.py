@@ -68,6 +68,8 @@ class _FakeAssembler:
 
 
 class _FakeLLM:
+    context_limit = 1_000_000  # apply_dynamic_max_tokens ceiling fallback (Task 2 网关接线)
+
     async def complete(self, request, stream=True):
         yield SimpleNamespace(kind="token", text="SUMMARY", usage=None, tool_call=None)
 

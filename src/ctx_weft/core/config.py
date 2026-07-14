@@ -24,3 +24,6 @@ class RuntimeConfig:
     llm_self_heal_max_duration_sec: float = 300.0
     llm_self_heal_base_delay_sec: float = 2.0
     llm_self_heal_max_interval_sec: float = 60.0
+    # 动态 max_tokens（apply_dynamic_max_tokens 读取；默认=安全值）
+    dynamic_max_tokens_margin: int = 4096
+    dynamic_max_tokens_floor: int = 1024

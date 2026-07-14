@@ -63,6 +63,8 @@ class _FakeAssembler:
 class _FakeLLM:
     """summarize_for_compact 经 stream_llm_resilient 调 LLM 出摘要（compact 硬依赖 LLM，无截断兜底）。"""
 
+    context_limit = 1_000_000  # apply_dynamic_max_tokens ceiling fallback (Task 2 网关接线)
+
     def __init__(self, text: str = "SUM"):
         self._text = text
 
