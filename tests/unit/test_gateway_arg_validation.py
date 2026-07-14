@@ -156,3 +156,26 @@ async def test_invoke_raw_wrapper_gets_clear_error_not_required_property() -> No
     assert "not valid JSON" in res.content
     assert "required property" not in res.content
     assert p.invoked is False
+
+
+async def test_invoke_raw_wrapper_error_echoes_malformed_text() -> None:
+    # gateway 的 _raw 报错要带上畸形原文，模型下一轮读 tool_result 才看得到自己写错了什么、
+    # 据此自纠（线上 arguments 那格已被降级成合法 "{}"，原文只能靠这条 error 传回）。
+    p = _Echo({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})
+    mem, state, ctx = _state_ctx()
+    res = await _gw(p, mem).invoke(
+        "mcp__a__search", {"_raw": '{"q": "hi" "extra": 1}'}, state, ctx)
+    assert res.is_error is True
+    assert '{"q": "hi" "extra": 1}' in res.content
+    assert p.invoked is False
+
+
+async def test_invoke_raw_wrapper_error_truncates_huge_text() -> None:
+    # 畸形原文可能是大 write_file 的几 KB 内容；报错里截断，别把整段回灌炸 context。
+    p = _Echo({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})
+    mem, state, ctx = _state_ctx()
+    huge = "x" * 5000
+    res = await _gw(p, mem).invoke("mcp__a__search", {"_raw": huge}, state, ctx)
+    assert res.is_error is True
+    assert len(res.content) < 2000  # 截断，不整段回灌
+    assert "truncated" in res.content

@@ -66,6 +66,21 @@ async def _collect(adapter):
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 
+def test_serialize_malformed_raw_arguments_stays_valid_json():
+    # 复现 OpenAI API 400 "Expecting ',' delimiter"：真畸形 native 参数被兜底成
+    # {"_raw": "<非法JSON>"} 回灌历史后，序列化出的 arguments 若原样回吐畸形串，
+    # 严格 OpenAI 兼容端会对其 json.loads(arguments) → JSONDecodeError → 400。
+    # 不变式：发出去的 arguments 必须永远是合法 JSON，服务端二次解析不得抛错。
+    msg = LLMMessage(
+        role="assistant", content="",
+        tool_calls=[{"id": "c1", "name": "write_file",
+                     "arguments": {"_raw": '{"path": "/a" "content": "x"}'}}],  # 缺逗号
+    )
+    out = _serialize_messages("", [msg])
+    arguments = out[0]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(arguments) == {}  # 服务端会 json.loads(arguments)；畸形 → 发合法空对象
+
+
 async def test_native_tool_call_normal():
     lines = [
         _delta({"tool_calls": [{"index": 0, "id": "t1",
@@ -177,16 +192,28 @@ def test_payload_omits_tool_choice_auto_by_default():
 
 
 def test_serialize_does_not_echo_raw_sentinel_back_to_model():
-    # 回灌历史里的 assistant tool_call 若带兜底 {"_raw": <原文>}（真畸形 JSON），
-    # 序列化时应回吐模型原始文本，而不是把 `_raw` 当参数名喂回去——否则模型照抄 _raw、死循环。
+    # 回灌历史里的 assistant tool_call 若带兜底 {"_raw": <原文>}（真畸形 JSON），序列化时既
+    # 不能把 `_raw` 当参数名喂回去（模型会照抄、死循环），也不能逐字回吐畸形串（严格服务端
+    # json.loads(arguments) → 400）。→ 发合法空对象 "{}"；畸形原文另由 gateway error 文案带给模型。
     msg = LLMMessage(
         role="assistant", content="",
         tool_calls=[{"id": "c1", "name": "control__ask_user",
                      "arguments": {"_raw": "{broken json"}}],
     )
     out = _serialize_messages("", [msg])
-    assert out[0]["tool_calls"][0]["function"]["arguments"] == "{broken json"
+    assert out[0]["tool_calls"][0]["function"]["arguments"] == "{}"
     assert "_raw" not in out[0]["tool_calls"][0]["function"]["arguments"]
+
+
+def test_serialize_valid_raw_still_echoed():
+    # 罕见但合法的 _raw（流式拼接抖动救回、finalize 未解包的非 dict 合法 JSON）→ 照发，
+    # 因为它本就是合法 JSON，服务端二次解析不会 400。
+    msg = LLMMessage(
+        role="assistant", content="",
+        tool_calls=[{"id": "c1", "name": "read", "arguments": {"_raw": '{"path": "/a"}'}}],
+    )
+    out = _serialize_messages("", [msg])
+    assert json.loads(out[0]["tool_calls"][0]["function"]["arguments"]) == {"path": "/a"}
 
 
 def test_serialize_normal_arguments_still_json_dumped():

@@ -292,14 +292,26 @@ def _parse_buffers(buffers: dict[int, dict[str, Any]]) -> list[ToolCall]:
 
 
 def _dump_tool_arguments(args: Any) -> str:
-    """把 assistant tool_call 的参数序列化回给模型（OpenAI 要求 arguments 为字符串）。
+    """把 assistant tool_call 的参数序列化回给模型（OpenAI 要求 arguments 为 JSON 字符串）。
 
-    兜底 ``{"_raw": <原文>}``（真畸形、finalize 没能解包）→ **回吐模型原始文本**，绝不把 ``_raw``
-    哨兵当参数名喂回去，否则模型会照抄 ``_raw``、陷入死循环（可解析的 _raw 已在 finalize 解包，
-    走不到这）。
+    不变式：**发出去的 arguments 必须永远是合法 JSON**——严格 OpenAI 兼容端（vLLM 等）会对
+    历史 tool_call 的 arguments 再做一次 ``json.loads``，非法 JSON 直接 400
+    （``Expecting ',' delimiter``）。
+
+    兜底 ``{"_raw": <原文>}``（真畸形、finalize 没能解包）绝不把 ``_raw`` 哨兵当参数名喂回去
+    （模型会照抄 ``_raw`` 死循环），也绝不逐字回吐畸形串（严格服务端会二次解析 → 400）：
+      - 原文本身是合法 JSON（罕见的流式拼接抖动救回、finalize 未解包的非 dict）→ 照发（服务端能解析）。
+      - 原文畸形 → 降级成合法空对象 ``"{}"``。畸形调用仍以 tool_call 形态流经 gateway，gateway 回一条
+        带原文的 error tool_result 驱动模型下轮自纠（见 capability_gateway ``_raw`` 出口）；本处只需
+        保证线上 arguments 合法，畸形原文不靠这格传回。
     """
     if isinstance(args, dict) and list(args) == [RAW_ARGS_KEY] and isinstance(args[RAW_ARGS_KEY], str):
-        return args[RAW_ARGS_KEY]
+        raw = args[RAW_ARGS_KEY]
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError:
+            return "{}"
+        return raw
     return json.dumps(args)
 
 

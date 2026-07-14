@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 
 _REDACT_HEADERS = frozenset({"authorization", "cookie", "x-api-key", "x-auth-token"})
 
+# 畸形 {"_raw": ...} 报错里回吐原文的上限：畸形原文可能是大 write_file 的几 KB 内容，
+# 整段回灌会炸 context，超长截断。
+_RAW_ERROR_MAX_LEN = 800
+
 # 派发型控制工具（spec 2026-06-28 §2.3）：其 tool_call 落 agent 层 delegate conversation turn
 # （AGENT_CONVERSATION_TURN, assistant），即时 result 暂挂，由 child finalize 回填配对的 tool 回合
 # （同 origin=delegating task）。普通工具仍走 task 层 TOOL_INVOCATION/RESULT。
@@ -173,10 +177,16 @@ class CapabilityGateway:
         # finalize 解包）。给直白报错，别让 _validate_args 报误导性的「必填项缺失」——那会诱导
         # 模型把参数照抄进 _raw、陷入死循环（见 protocols.llm.RAW_ARGS_KEY）。
         if list(effective_args) == [RAW_ARGS_KEY]:
+            # 带上畸形原文（截断防炸 context）：模型下轮读这条 tool_result 才看得到自己写错了什么
+            # → 据此自纠。线上 arguments 那格已被降级成合法 "{}"（见 openai._dump_tool_arguments），
+            # 原文只能靠这条 error 传回。
+            raw = str(effective_args[RAW_ARGS_KEY])
+            excerpt = raw if len(raw) <= _RAW_ERROR_MAX_LEN else raw[:_RAW_ERROR_MAX_LEN] + " …(truncated)"
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,
                 f"[Error: invalid arguments for '{tool_name}': arguments were not valid JSON "
-                f"and could not be parsed; re-send the call with a well-formed JSON arguments object]",
+                f"and could not be parsed. You sent: {excerpt} — re-send the call with a "
+                f"well-formed JSON arguments object]",
                 is_dispatch, is_silent, tool_call_id,
             )
         # 参数校验：放在 coerce 之后，看到的是收敛后的类型（3 而非 "3"），不会假阳性。
