@@ -57,6 +57,27 @@ def effective_limit(context_limit: int, reserved_output_tokens: int) -> int:
     return max(0, context_limit - max(0, reserved_output_tokens))
 
 
+def dynamic_max_tokens(
+    context_limit: int,
+    context_tokens: int,
+    prompt_estimate: int,
+    ceiling: int,
+    *,
+    margin: int = 4096,
+    floor: int = 1024,
+) -> int:
+    """按当前窗口占用实时算请求 max_tokens。
+
+    used = max(上轮 provider 真实 prompt_tokens, 本次 prompt 估算)——真实值抗 CJK 低估、
+    本次估算抓本轮新增 tool result，取大更保守。max_tokens = context_limit − used − margin，
+    夹到 [floor, ceiling]。ceiling 默认由调用方传 context_limit（剩余窗口全给输出）；配小
+    则作收紧上限（如 Anthropic 硬输出上限）。
+    """
+    used = max(context_tokens, prompt_estimate)
+    remaining = context_limit - used - margin
+    return max(floor, min(ceiling, remaining))
+
+
 def content_to_text(content: "str | list[ContentPart]") -> str:
     """Render ContentPart list as plain text (images skipped)."""
     if isinstance(content, str):
