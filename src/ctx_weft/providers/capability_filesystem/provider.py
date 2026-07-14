@@ -361,20 +361,19 @@ async def write_file(
     ctx: ProviderContext | None = None,
 ) -> AsyncIterator[CapabilityEvent]:
     """Create a file, or overwrite it entirely if it already exists.
-    Parent directories are auto-created. To change part of an existing file,
+    Parent directories are auto-created; to change part of an existing file,
     use edit_file instead.
-
-    When writing longer files, build them incrementally instead of in one pass:
-    1. First use write_file to create a minimal skeleton — structure only
-       (function signatures, section headers, key placeholder comments),
-       kept under a few dozen lines.
-    2. Then use edit_file to fill in one logical block at a time.
-    3. After each edit, confirm the previous change landed before continuing.
-
-    Why: each output stays short (less truncation/error risk); when something
-    goes wrong you redo one small block, not the whole file.
-    Rule of thumb: use this approach when a file has more than 2 independent
-    logical blocks, or is likely to exceed ~300 lines of code / ~100 lines of prose.
+    ALWAYS build every non-trivial file incrementally — this is an absolute
+    rule that holds in EVERY scenario and for EVERY task: whenever you use this
+    tool for a large file, you MUST follow it, no exceptions. Never dump a whole
+    file body into one write_file call, no matter how short or obvious the
+    content seems, or how confident you are in the final result.
+    Steps: (1) write_file a minimal skeleton — structure only (signatures,
+    section headers, key placeholder comments, kept under a few dozen lines);
+    (2) edit_file to fill in ONE logical block at a time; (3) confirm each edit
+    landed before continuing.
+    Why: each output stays short (less truncation/error risk), and when
+    something goes wrong you redo one small block, not the whole file.
     """
     if not path:
         yield CapabilityEvent(kind="error", payload={"code": "MISSING_PATH", "message": "path is required"})
@@ -518,7 +517,6 @@ async def grep(
     ctx: ProviderContext | None = None,
 ) -> AsyncIterator[CapabilityEvent]:
     """Search file contents by regular expression.
-
     Uses ripgrep when available (skips .gitignored/binary files), else a built-in
     Python walk (skips non-UTF-8 files). The chosen backend is reported in
     `metadata.backend`. `output_mode='content'` returns `path:line:text` lines;
