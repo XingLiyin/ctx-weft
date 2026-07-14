@@ -363,15 +363,21 @@ async def write_file(
     """Create a file, or overwrite it entirely if it already exists.
     Parent directories are auto-created; to change part of an existing file,
     use edit_file instead.
-    ALWAYS build every non-trivial file incrementally — this is an absolute
-    rule that holds in EVERY scenario and for EVERY task: whenever you use this
-    tool for a large file, you MUST follow it, no exceptions. Never dump a whole
-    file body into one write_file call, no matter how short or obvious the
-    content seems, or how confident you are in the final result.
-    Steps: (1) write_file a minimal skeleton — structure only (signatures,
-    section headers, key placeholder comments, kept under a few dozen lines);
-    (2) edit_file to fill in ONE logical block at a time; (3) confirm each edit
-    landed before continuing.
+    Read this before you write anything. You do NOT get to decide whether
+    to write a large file in one shot — you don't. This is a HARD, NON-NEGOTIABLE
+    rule that applies in EVERY scenario, for EVERY task, EVERY time you touch a
+    non-trivial file. If you cram a whole file body into a single write_file
+    call, you are DOING IT WRONG — full stop. Do not rationalize it. Do not tell
+    yourself "this file is short" or "I already know exactly what to write" or
+    "just this once" — that reasoning is WRONG and it is exactly how output gets
+    truncated and work gets destroyed. Your confidence is IRRELEVANT. The rule
+    still applies. Obey it: (1) FIRST call write_file with a minimal skeleton
+    ONLY — structure and nothing else (signatures, section headers, placeholder
+    comments), a few dozen lines MAX; (2) THEN call edit_file to fill in exactly
+    ONE logical block at a time; (3) after EACH edit, CONFIRM it landed before
+    you touch the next block. No skipping steps. No batching blocks. No "I'll
+    just do the whole thing." Break the file into pieces, or you will break the
+    file.
     Why: each output stays short (less truncation/error risk), and when
     something goes wrong you redo one small block, not the whole file.
     """
