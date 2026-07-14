@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from ctx_weft.protocols.llm import RAW_ARGS_KEY
 
@@ -50,7 +51,6 @@ def unwrap_raw_arguments(args: dict) -> dict:
 
 THINK_START = "<think>"
 THINK_END = "</think>"
-TOOL_CALL_START = "<tool_call>"
 # MiniMax 把工具调用写成 Anthropic 风格 XML，外套 <minimax:tool_call>：
 #   <minimax:tool_call>
 #     <invoke name="tool_name">
@@ -60,7 +60,6 @@ TOOL_CALL_START = "<tool_call>"
 MINIMAX_TOOL_CALL_START = "<minimax:tool_call>"
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 
 # 严格 XML：<function=name>...</function>
 _XML_FUNC_RE = re.compile(r"<function=([^>]+)>(.*?)</function>", re.DOTALL)
@@ -88,6 +87,10 @@ _MINIMAX_PARAM_RE = re.compile(
     re.DOTALL,
 )
 
+# <tool_code> 与 <tool_call> 完全对等（同一「wrapped」方言的两套 JSON 键别名）。
+# 反向引用保证开闭标签配对，不会 <tool_call> 开、</tool_code> 闭混匹配。
+_WRAPPED_BLOCK_RE = re.compile(r"<(tool_call|tool_code)>\s*(.*?)\s*</\1>", re.DOTALL)
+
 
 @dataclass
 class ParsedToolCall:
@@ -96,20 +99,6 @@ class ParsedToolCall:
     name: str
     arguments: dict
     raw_arguments: str
-
-
-@dataclass
-class TextScan:
-    """``parse_tool_calls_from_text`` 的结果。"""
-
-    text_before: str = ""
-    tool_calls: list[ParsedToolCall] = field(default_factory=list)
-    has_open_tag: bool = False
-
-
-def contains_tool_call_tag(text: str) -> bool:
-    """快速子串判断：正文里是否含 tool call 标签。"""
-    return TOOL_CALL_START in text or "<function=" in text
 
 
 def _extract_params_lenient(body: str) -> dict:
@@ -153,7 +142,7 @@ def _parse_xml_tool_call(raw: str) -> ParsedToolCall | None:
 
 
 def _parse_single_tool_call(raw: str) -> ParsedToolCall | None:
-    """解析一个 ``<tool_call>`` 块的内容：JSON → 严格 XML → 宽松 XML。"""
+    """解析一个 ``<tool_call>``/``<tool_code>`` 块的内容：JSON → 严格 XML → 宽松 XML。"""
     stripped = raw.strip()
     try:
         data = json.loads(stripped)
@@ -161,11 +150,17 @@ def _parse_single_tool_call(raw: str) -> ParsedToolCall | None:
         data = None
 
     if isinstance(data, dict):
-        name = data.get("name", "")
+        # <tool_call> uses name/arguments; <tool_code> uses tool/args. Accept both.
+        name = data.get("name") or data.get("tool") or ""
         if not name:
-            logger.warning("Text tool call missing 'name': %.200s", stripped)
+            logger.warning("Text tool call missing 'name'/'tool': %.200s", stripped)
             return None
-        arguments = data.get("arguments", {})
+        if "arguments" in data:
+            arguments = data["arguments"]
+        elif "args" in data:
+            arguments = data["args"]
+        else:
+            arguments = {}
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
@@ -181,37 +176,17 @@ def _parse_single_tool_call(raw: str) -> ParsedToolCall | None:
     return result
 
 
-def parse_tool_calls_from_text(text: str) -> TextScan:
-    """抽取所有 ``<tool_call>...</tool_call>`` 块。
-
-    返回标签前正文、解析出的 tool calls，以及是否存在未闭合标签（流式残留）。
-    """
-    matches = list(_TOOL_CALL_RE.finditer(text))
-    if not matches:
-        open_idx = text.rfind(TOOL_CALL_START)
-        if open_idx != -1:
-            return TextScan(text_before=text[:open_idx].rstrip(), has_open_tag=True)
-        return TextScan(text_before=text)
-
-    text_before = text[: matches[0].start()].rstrip()
-    remaining = text[matches[-1].end():]
-    has_open_tag = TOOL_CALL_START in remaining
-
-    tool_calls: list[ParsedToolCall] = []
-    for m in matches:
-        parsed = _parse_single_tool_call(m.group(1))
+def _parse_wrapped(text: str) -> list[ParsedToolCall]:
+    """抽取所有 <tool_call>/<tool_code> 块，每块按 JSON → 严格 XML → 宽松 XML 解析。"""
+    calls: list[ParsedToolCall] = []
+    for m in _WRAPPED_BLOCK_RE.finditer(text):
+        parsed = _parse_single_tool_call(m.group(2))
         if parsed is not None:
-            tool_calls.append(parsed)
-
-    return TextScan(text_before=text_before, tool_calls=tool_calls, has_open_tag=has_open_tag)
-
-
-def contains_minimax_tool_call(text: str) -> bool:
-    """快速子串判断：正文里是否含 MiniMax 风格 <minimax:tool_call> 标签。"""
-    return MINIMAX_TOOL_CALL_START in text
+            calls.append(parsed)
+    return calls
 
 
-def parse_minimax_tool_calls(text: str) -> list[ParsedToolCall]:
+def _parse_minimax(text: str) -> list[ParsedToolCall]:
     """抽取 <minimax:tool_call> 块里的所有 <invoke>（每个含若干 <parameter>）。
 
     支持一个块内多个 invoke、多个块；块未闭合（流式截断）时取起始标签之后的内容兜底。
@@ -239,7 +214,44 @@ def parse_minimax_tool_calls(text: str) -> list[ParsedToolCall]:
     return calls
 
 
-_VISIBLE_MARKERS = (THINK_START, TOOL_CALL_START, "<function=", MINIMAX_TOOL_CALL_START)
+@dataclass(frozen=True)
+class TextToolCallDialect:
+    """一种「工具调用写进正文文本」的方言：起始标签集 + 解析器。
+
+    ``open_markers`` 一处两用：detect（是否命中本方言）、可见门 ``_VISIBLE_MARKERS``
+    （从正文里扣掉标签）。加新方言只需往 ``DIALECTS`` 加一项。
+    """
+
+    name: str
+    open_markers: tuple[str, ...]
+    parse: Callable[[str], list[ParsedToolCall]]
+
+    def detect(self, text: str) -> bool:
+        return any(m in text for m in self.open_markers)
+
+
+WRAPPED_DIALECT = TextToolCallDialect(
+    "wrapped", ("<tool_call>", "<tool_code>", "<function="), _parse_wrapped
+)
+MINIMAX_DIALECT = TextToolCallDialect(
+    "minimax", ("<minimax:tool_call>",), _parse_minimax
+)
+# 顺序即 _finalize 的检测优先级：wrapped 先于 minimax。
+DIALECTS: tuple[TextToolCallDialect, ...] = (WRAPPED_DIALECT, MINIMAX_DIALECT)
+
+
+def scan_text_tool_calls(text: str) -> tuple[str, list[ParsedToolCall]] | None:
+    """首个 detect 命中的方言 → ``(name, calls)``；都不命中 → ``None``。
+
+    ``(name, [])`` 表示「标签在但零解析」（截断/畸形）——供 finalize 判 outage 退避自愈。
+    """
+    for dialect in DIALECTS:
+        if dialect.detect(text):
+            return dialect.name, dialect.parse(text)
+    return None
+
+
+_VISIBLE_MARKERS = (THINK_START, *(m for dialect in DIALECTS for m in dialect.open_markers))
 
 
 def merge_content(acc: str, chunk: str) -> str:
@@ -257,7 +269,7 @@ def clean_visible(raw: str) -> str:
     """返回当前可安全作为「可见正文」吐出的部分。
 
     - 闭合的 ``<think>...</think>`` 整块移除（思考不进正文）。
-    - 从首个未闭合 ``<think>`` / ``<tool_call>`` / ``<function=`` 处截断（其后内容延后处理）。
+    - 从首个未闭合的方言起始标签（``_VISIBLE_MARKERS``：``<think>`` + 各方言 ``open_markers``）处截断，其后内容延后处理。
     - 末尾若是某标签的部分前缀（如 ``<to``）则一并扣下，待后续增量补全。
     随累积文本增长，本函数返回值单调地以前次结果为前缀延展。
     """
