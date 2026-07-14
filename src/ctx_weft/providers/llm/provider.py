@@ -29,6 +29,7 @@ class ModelConfig:
     name: str
     context_limit: int
     max_output_tokens: int = 8192
+    output_ceiling: int | None = None  # 单次输出收紧上限；None → 网关回退 context_limit
 
 
 @dataclass
@@ -56,11 +57,13 @@ class _FixedModelClient:
         model: str,
         context_limit: int,
         max_output_tokens: int,
+        output_ceiling: int | None = None,
     ) -> None:
         self._adapter = adapter
         self._model = model
         self._context_limit = context_limit
         self._max_output_tokens = max_output_tokens
+        self._output_ceiling = output_ceiling
 
     @property
     def context_limit(self) -> int:
@@ -69,6 +72,10 @@ class _FixedModelClient:
     @property
     def max_output_tokens(self) -> int:
         return self._max_output_tokens
+
+    @property
+    def output_ceiling(self) -> int | None:
+        return self._output_ceiling
 
     @property
     def supports_tool_calling(self) -> bool:
@@ -211,8 +218,9 @@ class LLMProvider:
         model_cfg = next((m for m in acc.models if m.name == resolved_model), None)
         ctx_limit = model_cfg.context_limit if model_cfg else 128_000
         max_out = model_cfg.max_output_tokens if model_cfg else 8192
+        ceiling = model_cfg.output_ceiling if model_cfg else None
 
-        return _FixedModelClient(adapter, resolved_model, ctx_limit, max_out)
+        return _FixedModelClient(adapter, resolved_model, ctx_limit, max_out, ceiling)
 
     # ── Model discovery / connectivity (host-facing; not on the protocol) ──────
 

@@ -105,3 +105,26 @@ def test_apply_ceiling_clamps_when_configured():
     req = _req()
     apply_dynamic_max_tokens(_ctx(_llm(output_ceiling=8192)), req, _guard(context_tokens=0))
     assert req.max_tokens == 8192
+
+
+# ── output_ceiling 配置透传 ─────────────────────────────────────────────────────
+from ctx_weft.providers.llm.provider import ModelConfig, _FixedModelClient
+from ctx_weft.providers.llm.mock import MockLLMAdapter
+
+
+def test_fixed_model_client_exposes_output_ceiling():
+    adapter = MockLLMAdapter(responses=[])
+    client = _FixedModelClient(adapter, "m", context_limit=200_000, max_output_tokens=8192, output_ceiling=64_000)
+    assert client.output_ceiling == 64_000
+
+
+def test_fixed_model_client_output_ceiling_defaults_none():
+    adapter = MockLLMAdapter(responses=[])
+    client = _FixedModelClient(adapter, "m", context_limit=200_000, max_output_tokens=8192)
+    assert client.output_ceiling is None
+
+
+def test_model_config_has_output_ceiling_field():
+    cfg = ModelConfig(name="m", context_limit=200_000, output_ceiling=32_000)
+    assert cfg.output_ceiling == 32_000
+    assert ModelConfig(name="m2", context_limit=100_000).output_ceiling is None

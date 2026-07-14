@@ -204,6 +204,10 @@ class LLMClient(Protocol):
         """LLM 单次输出 token 上限。"""
         ...
 
+    # 可选（duck-typed，非协议必需）：output_ceiling -> int | None
+    #   单次输出的收紧上限。网关经 getattr 读取，缺省/None → 回退 context_limit。
+    #   实现方（_FixedModelClient）可提供；未提供者网关自动回退。
+
     @property
     @abstractmethod
     def supports_tool_calling(self) -> bool:
