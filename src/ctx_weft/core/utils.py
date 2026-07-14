@@ -59,21 +59,18 @@ def effective_limit(context_limit: int, reserved_output_tokens: int) -> int:
 
 def dynamic_max_tokens(
     context_limit: int,
-    context_tokens: int,
-    prompt_estimate: int,
+    used: int,
     ceiling: int,
     *,
     margin: int = 4096,
     floor: int = 1024,
 ) -> int:
-    """按当前窗口占用实时算请求 max_tokens。
+    """按当前窗口占用实时算请求 max_tokens：clamp(context_limit − used − margin, floor, ceiling)。
 
-    used = max(上轮 provider 真实 prompt_tokens, 本次 prompt 估算)——真实值抗 CJK 低估、
-    本次估算抓本轮新增 tool result，取大更保守。max_tokens = context_limit − used − margin，
-    夹到 [floor, ceiling]。ceiling 默认由调用方传 context_limit（剩余窗口全给输出）；配小
-    则作收紧上限（如 Anthropic 硬输出上限）。
+    used = caller 估算的本请求真实 prompt token（真实基线 + 本轮增量，见
+    gateway.request_prompt_estimate）——纯算术在此，不做估算。ceiling 默认由调用方传
+    context_limit（剩余窗口全给输出）；配小则作收紧上限（如 Anthropic 硬输出上限）。
     """
-    used = max(context_tokens, prompt_estimate)
     remaining = context_limit - used - margin
     return max(floor, min(ceiling, remaining))
 

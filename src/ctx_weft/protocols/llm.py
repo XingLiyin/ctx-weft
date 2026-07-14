@@ -168,6 +168,10 @@ class LLMRequest:
     messages: list[LLMMessage]
     tools: list[LLMTool] = field(default_factory=list)
     max_tokens: int | None = None
+    # caller 估算的本请求真实 prompt token（used）：真实基线 + 本轮增量，由
+    # gateway.request_prompt_estimate 算好、网关据此实时算 max_tokens。瞬态字段，
+    # 各 adapter 显式挑字段拼 payload，不入线上请求体。
+    prompt_token_estimate: int | None = None
     temperature: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)  # trace_id / run_id / 计费标签
 

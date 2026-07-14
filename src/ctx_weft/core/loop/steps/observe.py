@@ -21,7 +21,7 @@ from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryLayer
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
+from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
 from ctx_weft.core.orchestrator.control_capability import REPORT_TASK_OUTCOME_NAME, ControlResult
 from ctx_weft.core.utils import now_utc
 
@@ -88,6 +88,8 @@ async def run_observe_react(
     agent = state.agent
     current_messages = list(messages)
     last_text = ""
+    # 动态 max_tokens 的增量基线：上一轮实际发送条数（本轮 usage 对应的真实 prompt 基线）。
+    baseline_msg_count: int | None = None
 
     for round_num in range(max_rounds):
         req_id = f"{request_id_prefix}_r{round_num}"
@@ -97,12 +99,15 @@ async def run_observe_react(
             "round": round_num,
         }))
 
+        sent_msg_count = len(current_messages)  # 本轮发送条数（append 前）→ 下轮增量基线
         llm_request = LLMRequest(
             model=agent.runtime.get("llm_model", "mock"),
             system=system,
             messages=list(current_messages),
             tools=tools,
         )
+        llm_request.prompt_token_estimate = request_prompt_estimate(
+            llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
 
         await ctx.event_bus.emit(make_event(state, event_types.prompt_sent, payload={
             "request_id": req_id,
@@ -139,6 +144,7 @@ async def run_observe_react(
             agent.loop_guard.context_tokens = max(
                 agent.loop_guard.context_tokens, usage.prompt_tokens
             )
+            baseline_msg_count = sent_msg_count  # 真实刷新才前移基线（否则下轮退回整份估算）
         # 同步累加 session.token_used
         state.session.token_used += usage.prompt_tokens + usage.completion_tokens
 

@@ -247,25 +247,45 @@ def _estimate_request_tokens(request: "LLMRequest") -> int:
     return total
 
 
-def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
-    """发送前按窗口就地写入 request.max_tokens。
+def request_prompt_estimate(request: "LLMRequest", loop_guard, baseline_msg_count: "int | None") -> int:
+    """算 caller 侧的 used（本请求真实 prompt token 的最佳估算），供各 step 挂到 request。
 
-    仅当未显式设值（None）且有 loop_guard 时生效。天花板取 llm.output_ceiling（duck-type，
-    缺省/None → 回退 llm.context_limit）。margin/floor 从 ctx.config 取，缺省回退安全值。
+    - **增量**（``baseline_msg_count`` 非 None 且有真实基线 ``context_tokens>0``）：
+      真实基线 + 仅 ``messages[baseline_msg_count:]``（本轮新增尾段，如工具结果）的估算。
+      基线前的历史采信 provider 真实测量值、不重估——避免 len//4 对 CJK 历史大头系统性低估
+      （正是它把整份重估压到基线之下、漏掉本轮增量而导致 max_tokens 过大 400 的根因）。
+    - **首次 / 一次性**（无循环内基线）：``max(整份估算, context_tokens)``——整份估算打底，
+      并不低于上一步真实测量值（更保守，永不 400；上步后若发生压缩，偏大只是少给输出）。
+    """
+    ctx_tokens = getattr(loop_guard, "context_tokens", 0) if loop_guard is not None else 0
+    if baseline_msg_count is not None and ctx_tokens > 0:
+        delta = sum(
+            estimate_tokens(content_to_text(m.content))
+            for m in request.messages[baseline_msg_count:]
+        )
+        return ctx_tokens + delta
+    return max(_estimate_request_tokens(request), ctx_tokens)
+
+
+def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
+    """发送前按窗口就地写入 request.max_tokens（纯消费者，不自估）。
+
+    仅当未显式设值（``max_tokens is None``）、有 loop_guard、且 caller 已挂
+    ``prompt_token_estimate``（used，由 :func:`request_prompt_estimate` 算好）时生效——
+    三者缺一即不动 max_tokens。天花板取 llm.output_ceiling（duck-type，缺省/None → 回退
+    llm.context_limit）；margin/floor 从 ctx.config 取，缺省回退安全值。
     """
     if request.max_tokens is not None or loop_guard is None:
+        return
+    used = request.prompt_token_estimate
+    if used is None:
         return
     llm = ctx.llm
     margin = int(_cfg_val(ctx, "dynamic_max_tokens_margin", 4096))
     floor = int(_cfg_val(ctx, "dynamic_max_tokens_floor", 1024))
     ceiling = getattr(llm, "output_ceiling", None) or llm.context_limit
     request.max_tokens = dynamic_max_tokens(
-        loop_guard.context_limit,
-        loop_guard.context_tokens,
-        _estimate_request_tokens(request),
-        ceiling,
-        margin=margin,
-        floor=floor,
+        loop_guard.context_limit, used, ceiling, margin=margin, floor=floor,
     )
 
 

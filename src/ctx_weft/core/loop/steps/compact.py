@@ -23,7 +23,7 @@ from typing import Any
 from ctx_weft.core.assembler.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
+from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
 from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
 from ctx_weft.core.utils import content_to_text, effective_limit, now_utc, estimate_tokens
 from ctx_weft.protocols import LLMRequest, MemoryEvent, MemoryEventType
@@ -78,6 +78,9 @@ async def summarize_for_compact(
         messages=compact_prompt.messages,
         tools=[],
     )
+    # 一次性调用（无循环内基线）→ baseline=None，走 max(整份估算, context_tokens)。
+    llm_request.prompt_token_estimate = request_prompt_estimate(
+        llm_request, getattr(agent, "loop_guard", None), None)
     summary_text = ""
     async for chunk in stream_llm_resilient(ctx, state, llm_request):
         if chunk.kind == "token":

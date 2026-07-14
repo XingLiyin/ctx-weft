@@ -14,7 +14,7 @@ from typing import Any
 
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
+from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import (
@@ -58,6 +58,9 @@ class ActStep(Step):
         # 运行时态势 guidance（任务树/已完成子任务/收尾提醒）已随装配管线注入
         # （PrepareStep → GuidanceSource → composer 末条 user 尾部），此处不再修饰。
         current_messages = list(prompt.messages)
+        # 动态 max_tokens 的增量基线：上一轮实际发送的 message 条数（= 本轮 usage 对应的真实
+        # prompt 基线）。None=本轮无循环内真实基线（首轮）→ request_prompt_estimate 走整份估算。
+        baseline_msg_count: int | None = None
 
         for turn_num in range(1, max_turns + 1):
             await _interrupt_checkpoint(state, ctx)
@@ -65,10 +68,15 @@ class ActStep(Step):
                 state, EventType.ACT_TURN_STARTED, payload={"turn": turn_num}))
 
             # 1) 单轮 LLM：流式累积文本 / reasoning / tool_calls / usage（软打断在内部 park）
-            turn = await _run_llm_turn(state, ctx, prompt, current_messages, turn_num)
+            sent_msg_count = len(current_messages)  # 本轮发送条数（append 前）→ 下轮增量基线
+            turn = await _run_llm_turn(state, ctx, prompt, current_messages, turn_num, baseline_msg_count)
 
             # 2) token 记账 + context_limit 判定
             context_limit_hit = await _account_tokens(state, ctx, turn.usage)
+            # 仅当本轮真实刷新了 context_tokens（usage>0）才前移基线；否则保持旧值/None，
+            # 让下一轮退回整份估算（更保守），避免基线与陈旧 context_tokens 错配。
+            if turn.usage.prompt_tokens > 0:
+                baseline_msg_count = sent_msg_count
 
             # 3) assistant 回合落 memory + 接回 message 历史 + 记 transcript
             asst_tool_dicts = await _ingest_assistant_turn(
@@ -186,7 +194,7 @@ class _LLMTurnOutput:
 
 async def _run_llm_turn(
     state: LoopState, ctx: LoopContext, prompt: Any, current_messages: list[LLMMessage],
-    turn_num: int,
+    turn_num: int, baseline_msg_count: int | None = None,
 ) -> _LLMTurnOutput:
     """发请求事件 → 流式累积 token/reasoning/tool_calls/usage → 处理软打断 → 发 RESPONSE_FINISHED。
 
@@ -201,6 +209,8 @@ async def _run_llm_turn(
 
     llm_request = LLMRequest(
         model=model, system=prompt.system, messages=list(current_messages), tools=prompt.tools)
+    llm_request.prompt_token_estimate = request_prompt_estimate(
+        llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
 
     await ctx.event_bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
         "request_id": req_id, "turn": turn_num, "system": prompt.system,

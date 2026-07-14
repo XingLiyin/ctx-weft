@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import stream_llm, apply_dynamic_max_tokens
+from ctx_weft.core.loop.llm_gateway import stream_llm, apply_dynamic_max_tokens, request_prompt_estimate
 from ctx_weft.core.events import EventType
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols.capability import ToolCapability
@@ -129,7 +129,9 @@ class RecognizeIntentStep(Step):
         tool_name = ""
         tool_args: dict[str, Any] = {}
         try:
-            apply_dynamic_max_tokens(ctx, llm_request, getattr(state.agent, "loop_guard", None))
+            _guard = getattr(state.agent, "loop_guard", None)
+            llm_request.prompt_token_estimate = request_prompt_estimate(llm_request, _guard, None)
+            apply_dynamic_max_tokens(ctx, llm_request, _guard)
             async for chunk in stream_llm(ctx.llm, llm_request):
                 if chunk.kind == "tool_call" and chunk.tool_call:
                     tool_name = chunk.tool_call.name
