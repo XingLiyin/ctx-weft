@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 import types
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -45,11 +46,34 @@ def generate_id(prefix: str) -> str:
     return f"{prefix}_{ULID()}"
 
 
+# CJK 表意字 / 假名 / 谚文 / 全角标点等：这些脚本 len//4 会严重低估（真实约 0.6~1 token/字），
+# 单列出来按更保守的每字 1.5 token 估。ASCII 起始都 < 0x3000，findall 走 C 级、对大文本仍快。
+_CJK_RE = re.compile(
+    "["
+    "　-〿"      # CJK 标点
+    "぀-ヿ"      # 平假名 + 片假名
+    "㐀-䶿"      # CJK 扩展 A
+    "一-鿿"      # CJK 统一表意
+    "가-힯"      # 谚文音节
+    "豈-﫿"      # CJK 兼容表意
+    "＀-￯"      # 全角/半角形式
+    "\U00020000-\U0002fa1f"  # CJK 扩展 B–F + 兼容补充
+    "]"
+)
+
+
 def estimate_tokens(text: str) -> int:
-    """Rough token estimation (4 chars ~ 1 token)."""
+    """Token 粗估：中英文分开、刻意往大了估（避免 len//4 对 CJK 系统性低估触发 provider 400）。
+
+    CJK 表意字/假名/谚文等每字按 ``ceil(1.5*n)`` token（真实约 0.6~1，取上界最保守）；其余
+    （ASCII/拉丁/数字/标点/空白）按 ``ceil(len/3)`` token（比传统 //4 大约 33%）。两段相加、
+    非空至少 1。刻意高估：宁可 compaction 早触发、max_tokens 偏保守，也不冒低估致 400 的险。
+    """
     if not text:
         return 0
-    return max(1, len(text) // 4)
+    cjk = len(_CJK_RE.findall(text))
+    other = len(text) - cjk
+    return max(1, (3 * cjk + 1) // 2 + (other + 2) // 3)
 
 
 def effective_limit(context_limit: int, reserved_output_tokens: int) -> int:

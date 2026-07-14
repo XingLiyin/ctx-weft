@@ -76,8 +76,8 @@ def test_estimate_incremental_baseline_plus_delta():
         LLMMessage(role="tool", content="R" * 4000, tool_call_id="t1"),  # 新增，计
     ])
     est = request_prompt_estimate(req, _guard(context_tokens=50_000), 2)
-    # 50_000（真实基线）+ ~1000（4000 字符 tool result ≈ 1000 token）；历史大 user 不被重估
-    assert 50_900 <= est <= 51_100
+    # 50_000（真实基线）+ ceil(4000/3)=1334（4000 字符 ASCII tool result）；历史大 user 不被重估
+    assert est == 50_000 + 1334
 
 
 def test_estimate_incremental_falls_back_without_real_baseline():
