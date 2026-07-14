@@ -264,3 +264,17 @@ def test_scan_minimax_unclosed_block_lenient():
     assert name == "minimax"
     assert calls[0].name == "f"
     assert calls[0].arguments == {"p": "v"}
+
+
+def test_scan_minimax_multiple_invokes():
+    text = (
+        "<minimax:tool_call>"
+        '<invoke name="a"><parameter name="x">1</parameter></invoke>'
+        '<invoke name="b"><parameter name="y">2</parameter></invoke>'
+        "</minimax:tool_call>"
+    )
+    name, calls = scan_text_tool_calls(text)
+    assert name == "minimax"
+    assert [c.name for c in calls] == ["a", "b"]
+    assert calls[0].arguments == {"x": "1"}
+    assert calls[1].arguments == {"y": "2"}
