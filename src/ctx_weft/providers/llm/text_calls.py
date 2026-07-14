@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ctx_weft.protocols.llm import RAW_ARGS_KEY
 
@@ -51,7 +51,6 @@ def unwrap_raw_arguments(args: dict) -> dict:
 
 THINK_START = "<think>"
 THINK_END = "</think>"
-TOOL_CALL_START = "<tool_call>"
 # MiniMax 把工具调用写成 Anthropic 风格 XML，外套 <minimax:tool_call>：
 #   <minimax:tool_call>
 #     <invoke name="tool_name">
@@ -61,7 +60,6 @@ TOOL_CALL_START = "<tool_call>"
 MINIMAX_TOOL_CALL_START = "<minimax:tool_call>"
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 
 # 严格 XML：<function=name>...</function>
 _XML_FUNC_RE = re.compile(r"<function=([^>]+)>(.*?)</function>", re.DOTALL)
@@ -101,20 +99,6 @@ class ParsedToolCall:
     name: str
     arguments: dict
     raw_arguments: str
-
-
-@dataclass
-class TextScan:
-    """``parse_tool_calls_from_text`` 的结果。"""
-
-    text_before: str = ""
-    tool_calls: list[ParsedToolCall] = field(default_factory=list)
-    has_open_tag: bool = False
-
-
-def contains_tool_call_tag(text: str) -> bool:
-    """快速子串判断：正文里是否含 tool call 标签。"""
-    return TOOL_CALL_START in text or "<function=" in text
 
 
 def _extract_params_lenient(body: str) -> dict:
@@ -203,8 +187,31 @@ def _parse_wrapped(text: str) -> list[ParsedToolCall]:
 
 
 def _parse_minimax(text: str) -> list[ParsedToolCall]:
-    """抽取 <minimax:tool_call> 块里的所有 <invoke>（见 parse_minimax_tool_calls）。"""
-    return parse_minimax_tool_calls(text)
+    """抽取 <minimax:tool_call> 块里的所有 <invoke>（每个含若干 <parameter>）。
+
+    支持一个块内多个 invoke、多个块；块未闭合（流式截断）时取起始标签之后的内容兜底。
+    """
+    blocks = _MINIMAX_BLOCK_RE.findall(text)
+    if not blocks:
+        start = text.find(MINIMAX_TOOL_CALL_START)
+        if start == -1:
+            return []
+        blocks = [text[start + len(MINIMAX_TOOL_CALL_START):]]
+
+    calls: list[ParsedToolCall] = []
+    for body in blocks:
+        for inv in _MINIMAX_INVOKE_RE.finditer(body):
+            name = inv.group(1).strip()
+            if not name:
+                continue
+            arguments = {
+                p.group(1).strip(): p.group(2).strip()
+                for p in _MINIMAX_PARAM_RE.finditer(inv.group(2))
+            }
+            calls.append(ParsedToolCall(name, arguments, json.dumps(arguments, ensure_ascii=False)))
+    if not calls:
+        logger.warning("Found <minimax:tool_call> but parsed no invoke: %.200s", text)
+    return calls
 
 
 @dataclass(frozen=True)
@@ -242,64 +249,6 @@ def scan_text_tool_calls(text: str) -> tuple[str, list[ParsedToolCall]] | None:
         if dialect.detect(text):
             return dialect.name, dialect.parse(text)
     return None
-
-
-def parse_tool_calls_from_text(text: str) -> TextScan:
-    """抽取所有 ``<tool_call>...</tool_call>`` 块。
-
-    返回标签前正文、解析出的 tool calls，以及是否存在未闭合标签（流式残留）。
-    """
-    matches = list(_TOOL_CALL_RE.finditer(text))
-    if not matches:
-        open_idx = text.rfind(TOOL_CALL_START)
-        if open_idx != -1:
-            return TextScan(text_before=text[:open_idx].rstrip(), has_open_tag=True)
-        return TextScan(text_before=text)
-
-    text_before = text[: matches[0].start()].rstrip()
-    remaining = text[matches[-1].end():]
-    has_open_tag = TOOL_CALL_START in remaining
-
-    tool_calls: list[ParsedToolCall] = []
-    for m in matches:
-        parsed = _parse_single_tool_call(m.group(1))
-        if parsed is not None:
-            tool_calls.append(parsed)
-
-    return TextScan(text_before=text_before, tool_calls=tool_calls, has_open_tag=has_open_tag)
-
-
-def contains_minimax_tool_call(text: str) -> bool:
-    """快速子串判断：正文里是否含 MiniMax 风格 <minimax:tool_call> 标签。"""
-    return MINIMAX_TOOL_CALL_START in text
-
-
-def parse_minimax_tool_calls(text: str) -> list[ParsedToolCall]:
-    """抽取 <minimax:tool_call> 块里的所有 <invoke>（每个含若干 <parameter>）。
-
-    支持一个块内多个 invoke、多个块；块未闭合（流式截断）时取起始标签之后的内容兜底。
-    """
-    blocks = _MINIMAX_BLOCK_RE.findall(text)
-    if not blocks:
-        start = text.find(MINIMAX_TOOL_CALL_START)
-        if start == -1:
-            return []
-        blocks = [text[start + len(MINIMAX_TOOL_CALL_START):]]
-
-    calls: list[ParsedToolCall] = []
-    for body in blocks:
-        for inv in _MINIMAX_INVOKE_RE.finditer(body):
-            name = inv.group(1).strip()
-            if not name:
-                continue
-            arguments = {
-                p.group(1).strip(): p.group(2).strip()
-                for p in _MINIMAX_PARAM_RE.finditer(inv.group(2))
-            }
-            calls.append(ParsedToolCall(name, arguments, json.dumps(arguments, ensure_ascii=False)))
-    if not calls:
-        logger.warning("Found <minimax:tool_call> but parsed no invoke: %.200s", text)
-    return calls
 
 
 _VISIBLE_MARKERS = (THINK_START, *(m for dialect in DIALECTS for m in dialect.open_markers))

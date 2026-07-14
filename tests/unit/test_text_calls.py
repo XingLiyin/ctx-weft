@@ -5,85 +5,11 @@ from ctx_weft.providers.llm.text_calls import (
     ContentGate,
     TextToolCallDialect,
     clean_visible,
-    contains_minimax_tool_call,
-    contains_tool_call_tag,
     merge_content,
-    parse_minimax_tool_calls,
-    parse_tool_calls_from_text,
     extract_think,
     scan_text_tool_calls,
     unwrap_raw_arguments,
 )
-
-
-def test_contains_tool_call_tag_detects_tool_call():
-    assert contains_tool_call_tag("hi <tool_call>{}</tool_call>")
-    assert contains_tool_call_tag("call <function=foo></function>")
-    assert not contains_tool_call_tag("just plain text")
-
-
-def test_parse_json_tool_call():
-    text = 'before<tool_call>{"name": "read", "arguments": {"path": "/a"}}</tool_call>'
-    scan = parse_tool_calls_from_text(text)
-    assert scan.text_before == "before"
-    assert len(scan.tool_calls) == 1
-    assert scan.tool_calls[0].name == "read"
-    assert scan.tool_calls[0].arguments == {"path": "/a"}
-
-
-def test_parse_json_tool_call_arguments_as_string():
-    # Some models put a JSON string in "arguments".
-    text = '<tool_call>{"name": "x", "arguments": "{\\"k\\": 1}"}</tool_call>'
-    scan = parse_tool_calls_from_text(text)
-    assert scan.tool_calls[0].arguments == {"k": 1}
-
-
-def test_parse_strict_xml_tool_call():
-    text = (
-        "<tool_call><function=write>"
-        "<parameter=path>/tmp/a</parameter>"
-        "<parameter=content>hello</parameter>"
-        "</function></tool_call>"
-    )
-    scan = parse_tool_calls_from_text(text)
-    assert scan.tool_calls[0].name == "write"
-    assert scan.tool_calls[0].arguments == {"path": "/tmp/a", "content": "hello"}
-
-
-def test_parse_lenient_xml_no_closing_tags():
-    text = (
-        "<tool_call><function=write>"
-        "<parameter=path>/tmp/a"
-        "<parameter=content>hello"
-        "</tool_call>"
-    )
-    scan = parse_tool_calls_from_text(text)
-    assert scan.tool_calls[0].name == "write"
-    assert scan.tool_calls[0].arguments == {"path": "/tmp/a", "content": "hello"}
-
-
-def test_parse_multiple_tool_calls():
-    text = (
-        '<tool_call>{"name": "a", "arguments": {}}</tool_call>'
-        '<tool_call>{"name": "b", "arguments": {}}</tool_call>'
-    )
-    scan = parse_tool_calls_from_text(text)
-    assert [tc.name for tc in scan.tool_calls] == ["a", "b"]
-
-
-def test_unclosed_tool_call_tag_marks_open():
-    text = 'keep this <tool_call>{"name": "a"'
-    scan = parse_tool_calls_from_text(text)
-    assert scan.has_open_tag is True
-    assert scan.text_before == "keep this"
-    assert scan.tool_calls == []
-
-
-def test_no_tool_call_returns_text_as_before():
-    scan = parse_tool_calls_from_text("plain answer")
-    assert scan.text_before == "plain answer"
-    assert scan.tool_calls == []
-    assert scan.has_open_tag is False
 
 
 def test_extract_think_closed_block():
@@ -165,43 +91,8 @@ _MINIMAX = """好的
 </minimax:tool_call>"""
 
 
-def test_contains_minimax_tool_call():
-    assert contains_minimax_tool_call(_MINIMAX)
-    assert not contains_minimax_tool_call("plain <tool_call>{}</tool_call>")
-
-
-def test_parse_minimax_tool_call():
-    calls = parse_minimax_tool_calls(_MINIMAX)
-    assert len(calls) == 1
-    c = calls[0]
-    assert c.name == "control__delegate_task"
-    assert c.arguments["title"] == "迁移规则"
-    assert c.arguments["description"] == "迁移"
-    # 多行参数值：内部换行保留
-    assert "第二段" in c.arguments["task_prompt"]
-    assert "\n" in c.arguments["task_prompt"]
-
-
-def test_parse_minimax_multiple_invokes():
-    text = (
-        "<minimax:tool_call>"
-        '<invoke name="a"><parameter name="x">1</parameter></invoke>'
-        '<invoke name="b"><parameter name="y">2</parameter></invoke>'
-        "</minimax:tool_call>"
-    )
-    calls = parse_minimax_tool_calls(text)
-    assert [c.name for c in calls] == ["a", "b"]
-    assert calls[0].arguments == {"x": "1"}
-    assert calls[1].arguments == {"y": "2"}
-
-
-def test_parse_minimax_unclosed_block_lenient():
-    # 流式截断：缺 </invoke> / </minimax:tool_call> 也要能解析出来
-    text = '<minimax:tool_call><invoke name="f"><parameter name="p">v</parameter>'
-    calls = parse_minimax_tool_calls(text)
-    assert len(calls) == 1
-    assert calls[0].name == "f"
-    assert calls[0].arguments == {"p": "v"}
+def test_clean_visible_trailing_bare_lt_withheld():
+    # 末尾裸 "<" 也是所有标记的合法前缀 → 一并扣下待补全（原埋在旧 minimax 测试里的断言）。
     assert clean_visible("ab<") == "ab"
 
 
@@ -345,3 +236,31 @@ def test_dialects_order_wrapped_before_minimax():
     # Global constraint: WRAPPED must precede MINIMAX (preserves _finalize's detection order).
     assert [d.name for d in DIALECTS] == ["wrapped", "minimax"]
     assert all(isinstance(d, TextToolCallDialect) for d in DIALECTS)
+
+
+def test_scan_json_arguments_as_string():
+    # Some models put a JSON string in "arguments".
+    _, calls = scan_text_tool_calls('<tool_call>{"name": "x", "arguments": "{\\"k\\": 1}"}</tool_call>')
+    assert calls[0].arguments == {"k": 1}
+
+
+def test_scan_lenient_xml_no_closing_tags():
+    text = (
+        "<tool_call><function=write>"
+        "<parameter=path>/tmp/a"
+        "<parameter=content>hello"
+        "</tool_call>"
+    )
+    _, calls = scan_text_tool_calls(text)
+    assert calls[0].name == "write"
+    assert calls[0].arguments == {"path": "/tmp/a", "content": "hello"}
+
+
+def test_scan_minimax_unclosed_block_lenient():
+    # 流式截断：缺 </invoke> / </minimax:tool_call> 也要能解析出来
+    name, calls = scan_text_tool_calls(
+        '<minimax:tool_call><invoke name="f"><parameter name="p">v</parameter>'
+    )
+    assert name == "minimax"
+    assert calls[0].name == "f"
+    assert calls[0].arguments == {"p": "v"}
