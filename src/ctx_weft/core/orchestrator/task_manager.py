@@ -513,19 +513,20 @@ class TaskManager:
         self, task_id: str, error: str = "", exc: BaseException | None = None,
         reason: str = "run_failure_retry",
     ) -> None:
-        """task 失败时：先尝试 retry，超出 max_retries 才真正失败。
+        """运行层失败：先尝试自动 retry，耗尽或不可重试 → 挂起等恢复（绝不落终态 FAILED）。
 
-        exc.retriable=False（如 LLMCallError 401 认证失败、transport 重试耗尽）时跳过重试直接失败，
-        避免对永久性错误做无效重试。
+        运行层崩溃（异常退出，未经 observer/FinalizeStep）是**可恢复中断**，不是任务失败：
+        真失败只有 observer 判 fail 一条路（FinalizeStep 闭合胶囊、发 TaskFailed、回传父亲）。
+        exc.retriable=False（如 LLMCallError 401 认证失败、CONTEXT_OVERFLOW）时跳过重试直接挂起，
+        避免对确定性错误做无效重试。
         """
-        # 不可重试的错误（如认证失败），直接判定失败
+        # 不可重试的错误（如认证失败 / 上下文溢出），不重试、直接挂起等恢复
         if exc is not None and not getattr(exc, "retriable", True):
             logger.warning(
-                "Task %s non-retriable error (%s), failing immediately: %s",
+                "Task %s non-retriable error (%s), suspending for recovery: %s",
                 task_id, type(exc).__name__, error,
             )
-            await self._emit_task_failed(task_id, error)
-            await self.on_task_finished(task_id, status="FAILED")
+            await self._suspend_task_interrupted(task_id, error, exc)
             return
 
         task = self._tasks.get(task_id)
@@ -551,23 +552,48 @@ class TaskManager:
             })
             await self.drain()
         else:
-            await self._emit_task_failed(task_id, error)
-            await self.on_task_finished(task_id, status="FAILED")
+            await self._suspend_task_interrupted(task_id, error, exc)
 
-    async def _emit_task_failed(self, task_id: str, error: str) -> None:
-        """运行层失败（异常退出，未经 observer/FinalizeStep）补发 TaskFailed。
+    async def _suspend_task_interrupted(
+        self, task_id: str, error: str, exc: BaseException | None,
+    ) -> None:
+        """运行层崩溃的终局：挂起等 /resume，**不是失败**。
 
-        task 状态投影只认 TASK_* 事件（TASK_STATUS_BY_EVENT）；observer 判失败由
-        FinalizeStep 发 TaskFailed，而运行崩溃这条路（_run_loop 抛异常 → 本方法）此前
-        只发 RunFinished、不发 TaskFailed，导致任务在投影里停留 ACTIVE、被 restore 误复活。
-        本方法独属运行崩溃路径（observer 判失败正常返回、不进 _handle_task_failure），故不与
-        FinalizeStep 重复。"""
+        置 SUSPENDED（非终态）+ 发 TASK_SUSPENDED——投影只认 TASK_* 事件
+        （TASK_STATUS_BY_EVENT），不发则任务停留 ACTIVE、restore 语义错位（此前
+        由已删除的 _emit_task_failed 发 TaskFailed 兜这一点，现由本事件顶上）。
+        再发 SessionStatusChanged(INTERRUPTED)（形状对齐 runtime._emit_session_interrupted，
+        reason=错误码——如 CONTEXT_OVERFLOW，host 据此提示换更大窗口的模型恢复）。
+        不发 TASK_FAILED、不增 failure_counter、不闭合胶囊：真失败只有 observer 判 fail
+        一条路。恢复由 /resume → restore() 据非终态重排（重排时 retry_count 归零）。
+        """
         task = self._tasks.get(task_id)
-        await self._emit(EventType.TASK_FAILED, task_id=task_id, payload={
-            "error_code": "TASK_FAILED_AT_RUN",
+        error_code = (getattr(exc, "code", None)
+                      or (type(exc).__name__ if exc is not None else "RUN_CRASH"))
+        if task is not None:
+            task.status = "SUSPENDED"
+            task.error = error
+            task.error_code = error_code
+        async with self._lock:
+            self._running_tasks.discard(task_id)
+            self._running_agents.pop(task_id, None)
+            self._queue.unmark_running(task_id)
+        if self._session is not None and self._session.status == "RUNNING":
+            self._session.status = "INTERRUPTED"
+        await self._emit(EventType.TASK_SUSPENDED, task_id=task_id, payload={
+            "reason": "run_crash",
+            "error_code": error_code,
             "error_message": error,
             "retry_count": task.retry_count if task else 0,
         })
+        await self._emit(EventType.SESSION_STATUS_CHANGED, payload={
+            "new_status": "INTERRUPTED",
+            "reason": error_code,
+        })
+        # 其它 agent 的排队任务照常派发；全会话静止则通知 runtime 回收 per-run 控制信号
+        await self.drain()
+        if self.is_done():
+            await self._fire_session_idle()
 
     async def on_task_finished(self, task_id: str, status: TaskStatus) -> None:
         async with self._lock:
