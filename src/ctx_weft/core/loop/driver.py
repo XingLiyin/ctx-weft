@@ -217,6 +217,14 @@ class StepDriver:
     ) -> AsyncIterator[StepOutcome]:
         state = initial_state
 
+        # 子任务真正开始执行 → 在派发方 scope 铸派发框 + running ack（同锚 started_at）。
+        # 须在 _persist_user_prompt 之前概念上成立（框 @ started_at < 子 body @ now），实际由
+        # 时间戳排序保证，与写入先后无关。刻意不在派发时刻铸——那时子任务生死未定，弃子/staged
+        # 丢弃会留下永远 pending 的孤儿框（详见 steps.finalize.ensure_dispatch_frame_at_start）。
+        # 函数级 import：steps.finalize 在模块级 import 本模块，反向模块级 import 会成环。
+        from ctx_weft.core.loop.steps.finalize import ensure_dispatch_frame_at_start
+        await ensure_dispatch_frame_at_start(state, ctx)
+
         # 任务启动时立即持久化 raw user_prompt，保证 resume 时对话上下文完整可重建
         # （呈现态框架 ## Current Task/Message 由 composer 渲染期生成，不落库）
         await _persist_user_prompt(state, ctx)

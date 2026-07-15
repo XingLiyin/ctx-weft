@@ -114,6 +114,103 @@ async def test_same_agent_child_mints_frame_and_writes_ack() -> None:
     )
 
 
+# ── start 时铸框 + running ack（driver.run 钩子）────────────────────────────
+
+def _child_task(started, *, parent="p1", tcid="oc1", agent="ag1") -> Task:
+    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+    return Task(id="c1", session_id="s1", status="ACTIVE", tenant_id="default",
+                assigned_agent_id=agent, creator_agent_id=agent, parent_task_id=parent,
+                origin_tool_call_id=tcid, origin_tool_name=DELEGATE_TASK_NAME,
+                title="My Sub Task", description="do the sub work",
+                user_prompt="do sub", started_at=started, settings=NormalTaskSettings())
+
+
+async def _turns(mem, scope):
+    return await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
+
+
+async def test_start_hook_mints_frame_and_running_ack_at_started_at() -> None:
+    """子任务 start 时（driver.run）即铸框 + running ack，同锚 started_at。
+
+    执行期间唯一的读者是子任务自己——同 agent 时父挂起、不装配。有了这一对，子任务才看得见
+    自己的来历，那条 task_prompt 的 user 回合不再像用户凭空插话。
+    """
+    from ctx_weft.core.loop.steps.finalize import ensure_dispatch_frame_at_start
+    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+
+    mem = InMemoryMemoryProvider()
+    started = _BASE + timedelta(seconds=5)
+    child = _child_task(started)
+
+    await ensure_dispatch_frame_at_start(_state(child, _sc("c1"), LoopConfig()), _loop_ctx(mem))
+
+    turns = await _turns(mem, _sc("p1"))
+    frame = [r for r in turns if r.role == "assistant"
+             and any(tc.get("id") == "oc1" and tc.get("name") == DELEGATE_TASK_NAME
+                     for tc in (r.metadata.get("tool_calls") or []))]
+    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
+    assert frame, "start 时须铸出派发框"
+    assert ack, "start 时须写配对 running ack（否则框悬挂、被 legalize 剥掉）"
+    assert frame[0].timestamp == started == ack[0].timestamp, "框与 ack 须同锚 started_at"
+    assert "running" in ack[0].content, f"start 态 ack 须表明在跑；got {ack[0].content!r}"
+
+
+async def test_start_hook_noop_without_parent() -> None:
+    """root task（无 parent / 无 origin_tool_call_id）没有派发方，不铸框。"""
+    from ctx_weft.core.loop.steps.finalize import ensure_dispatch_frame_at_start
+    mem = InMemoryMemoryProvider()
+    root = _child_task(_BASE, parent=None, tcid=None)
+
+    await ensure_dispatch_frame_at_start(_state(root, _sc("c1"), LoopConfig()), _loop_ctx(mem))
+
+    assert await _turns(mem, _sc("p1")) == [], "root task 不得铸框"
+
+
+async def test_start_hook_idempotent_across_reruns() -> None:
+    """retry / resume 会重跑 driver.run：框与 ack 都不得重复，且 ts 不被改写。"""
+    from ctx_weft.core.loop.steps.finalize import ensure_dispatch_frame_at_start
+    mem = InMemoryMemoryProvider()
+    started = _BASE + timedelta(seconds=5)
+    child = _child_task(started)
+    state, lctx = _state(child, _sc("c1"), LoopConfig()), _loop_ctx(mem)
+
+    await ensure_dispatch_frame_at_start(state, lctx)
+    child.started_at = _BASE + timedelta(seconds=99)   # TM 每次派发都刷新 started_at
+    await ensure_dispatch_frame_at_start(state, lctx)
+
+    turns = await _turns(mem, _sc("p1"))
+    assert len([r for r in turns if r.role == "assistant"]) == 1, f"框不得重复；got {turns}"
+    assert len([r for r in turns if r.role == "tool"]) == 1, f"ack 不得重复；got {turns}"
+    assert turns[-1].timestamp == started, "重跑不得改写原锚点"
+
+
+async def test_close_replaces_running_ack_with_terminal() -> None:
+    """close 时 running ack 被终态**替换**（不是新增）——同一 tool_call_id 恒只有一条 active
+    result，否则 reorder 会把两条都排到框后。"""
+    from ctx_weft.core.loop.steps.finalize import _dispatch_ack, ensure_dispatch_frame_at_start
+
+    mem = InMemoryMemoryProvider()
+    started = _BASE + timedelta(seconds=5)
+    child = _child_task(started)
+    child_scope = _sc("c1")
+    await _seed_conv_nonshort(mem, child_scope)
+
+    await ensure_dispatch_frame_at_start(_state(child, child_scope, LoopConfig()), _loop_ctx(mem))
+    child.status = "FINISHED"
+    await finalize_task_memory(
+        mem, _state(child, child_scope, LoopConfig()),
+        child, "sub outputs\n\nProcess Report: sub summary", "success", _loop_ctx(mem),
+        act_recap="sub summary", task_summary="",
+    )
+
+    acks = [r for r in await _turns(mem, _sc("p1"))
+            if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
+    assert len(acks) == 1, f"同一 tool_call_id 只能有一条 active result；got {[a.content for a in acks]}"
+    assert acks[0].content == _dispatch_ack(child.title, "success")
+    assert "running" not in acks[0].content, "running 态须被终态替换掉"
+    assert acks[0].timestamp == started, "替换后仍须锚 started_at（与框相邻）"
+
+
 async def test_same_agent_child_finish_pair_written_into_parent_scope() -> None:
     """task-resident：同 agent child 的 finish 对（AGENT_CONVERSATION_TURN, origin_task_id=child.id）
     写入 parent agent scope；**不镜像 body**（无 user 锚点），child raw body 留 child task 层。"""
