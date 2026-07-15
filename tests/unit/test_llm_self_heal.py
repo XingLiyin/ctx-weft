@@ -23,7 +23,7 @@ class _FakeLLM:
     @property
     def context_limit(self): return 1000
     @property
-    def max_output_tokens(self): return 100
+    def output_reserve(self): return 100
     @property
     def supports_tool_calling(self): return True
     async def count_tokens(self, text): return len(text)

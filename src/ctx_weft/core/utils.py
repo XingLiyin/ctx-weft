@@ -82,6 +82,16 @@ def effective_limit(context_limit: int, reserved_output_tokens: int) -> int:
     return max(0, context_limit - max(0, reserved_output_tokens))
 
 
+def default_output_reserve(context_limit: int) -> int:
+    """未显式配置时的输出预留默认 = max(context_limit // 16, 4096)。
+
+    按窗口尺寸取（固定 6.25% 比例）而非固定值：小上下文模型不至被固定 8192 吞光
+    （effective_limit 归零），大模型自动放大；固定比例 → compact 触发点在各模型上统一
+    （约 75% 原始窗口）。下限 4096 与输出软顶 output_min 对齐。
+    """
+    return max(context_limit // 16, 4096)
+
+
 def dynamic_max_tokens(
     context_limit: int,
     used: int,

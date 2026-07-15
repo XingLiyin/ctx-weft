@@ -28,12 +28,12 @@ class MockLLMAdapter(LLMClient):
         self,
         responses: list[MockResponse],
         context_limit: int = 100_000,
-        max_output_tokens: int = 4096,
+        output_reserve: int = 4096,
     ) -> None:
         self._responses = list(responses)
         self._idx = 0
         self._context_limit = context_limit
-        self._max_output_tokens = max_output_tokens
+        self._output_reserve = output_reserve
         # 记录最近一次调用的 request（供测试断言）
         self.last_request: LLMRequest | None = None
 
@@ -42,8 +42,8 @@ class MockLLMAdapter(LLMClient):
         return self._context_limit
 
     @property
-    def max_output_tokens(self) -> int:
-        return self._max_output_tokens
+    def output_reserve(self) -> int:
+        return self._output_reserve
 
     @property
     def supports_tool_calling(self) -> bool:

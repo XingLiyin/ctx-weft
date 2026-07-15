@@ -673,7 +673,10 @@ class CtxWeftRuntime:
             created_at=now_utc(),
         )
         session.context_limit = llm.context_limit
-        session.reserved_output_tokens = llm.max_output_tokens
+        # 真实 client 必有 output_reserve；duck-type 桩缺失则保留 session 既有默认（8192）。
+        _reserve = getattr(llm, "output_reserve", None)
+        if _reserve is not None:
+            session.reserved_output_tokens = _reserve
         agent = _dc.replace(agent, loop_guard=LoopGuard(
             context_limit=session.context_limit,
             reserved_output_tokens=session.reserved_output_tokens,

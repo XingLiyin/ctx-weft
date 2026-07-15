@@ -223,24 +223,63 @@ def test_prompt_token_estimate_not_in_payload():
     assert payload["max_tokens"] == 100
 
 
-# ── output_ceiling 配置透传（不变）───────────────────────────────────────────────
-from ctx_weft.providers.llm.provider import ModelConfig, _FixedModelClient
+# ── output_reserve / output_ceiling 配置透传 ─────────────────────────────────────
+from ctx_weft.providers.llm.provider import ModelConfig, LLMProvider, _FixedModelClient
 from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.core.utils import default_output_reserve
 
 
-def test_fixed_model_client_exposes_output_ceiling():
+def test_fixed_model_client_exposes_reserve_and_ceiling():
     adapter = MockLLMAdapter(responses=[])
-    client = _FixedModelClient(adapter, "m", context_limit=200_000, max_output_tokens=8192, output_ceiling=64_000)
+    client = _FixedModelClient(adapter, "m", context_limit=200_000, output_reserve=8192, output_ceiling=64_000)
+    assert client.output_reserve == 8192
     assert client.output_ceiling == 64_000
 
 
 def test_fixed_model_client_output_ceiling_defaults_none():
     adapter = MockLLMAdapter(responses=[])
-    client = _FixedModelClient(adapter, "m", context_limit=200_000, max_output_tokens=8192)
+    client = _FixedModelClient(adapter, "m", context_limit=200_000, output_reserve=8192)
     assert client.output_ceiling is None
 
 
-def test_model_config_has_output_ceiling_field():
-    cfg = ModelConfig(name="m", context_limit=200_000, output_ceiling=32_000)
+def test_model_config_fields_default_none():
+    cfg = ModelConfig(name="m", context_limit=200_000, output_reserve=16_000, output_ceiling=32_000)
+    assert cfg.output_reserve == 16_000
     assert cfg.output_ceiling == 32_000
-    assert ModelConfig(name="m2", context_limit=100_000).output_ceiling is None
+    m2 = ModelConfig(name="m2", context_limit=100_000)
+    assert m2.output_reserve is None and m2.output_ceiling is None
+
+
+def test_default_output_reserve_scales_with_window():
+    # max(L//16, 4096)：小窗兜到 4096、大窗按比例放大
+    assert default_output_reserve(8_000) == 4096       # 8000//16=500 → 4096 兜底
+    assert default_output_reserve(128_000) == 8_000    # 128000//16
+    assert default_output_reserve(1_000_000) == 62_500
+
+
+class _StoreStub:
+    def save(self, a): ...
+    def delete(self, n): return True
+    def list_all(self): return []
+
+
+def test_get_client_resolves_none_reserve_by_window():
+    from ctx_weft.providers.llm.provider import LLMAccount
+    p = LLMProvider(_StoreStub())
+    p.register_account(LLMAccount(name="a", style="openai", api_key="k",
+                                  base_url="https://x/v1",
+                                  models=[ModelConfig("m", context_limit=200_000)],  # output_reserve=None
+                                  default_model="m"), persist=False)
+    client = p.get_client("a", "m")
+    assert client.output_reserve == default_output_reserve(200_000) == 12_500
+
+
+def test_get_client_honors_explicit_zero_reserve():
+    from ctx_weft.providers.llm.provider import LLMAccount
+    p = LLMProvider(_StoreStub())
+    p.register_account(LLMAccount(name="a", style="openai", api_key="k",
+                                  base_url="https://x/v1",
+                                  models=[ModelConfig("m", context_limit=200_000, output_reserve=0)],
+                                  default_model="m"), persist=False)
+    # 显式 0 不被"按尺寸默认"覆盖（is not None 判定）
+    assert p.get_client("a", "m").output_reserve == 0

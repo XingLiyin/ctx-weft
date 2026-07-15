@@ -395,7 +395,7 @@ class LLMClient(Protocol):
     @property
     def context_limit(self) -> int: ...
     @property
-    def max_output_tokens(self) -> int: ...
+    def output_reserve(self) -> int: ...   # 输入侧输出预留（→ reserved_output_tokens）
     @property
     def supports_tool_calling(self) -> bool: ...
     def complete(self, request: LLMRequest, stream: bool = True) -> AsyncIterator[LLMChunk]: ...
@@ -418,7 +418,7 @@ provider = LLMProvider(store)          # store 实现 LLMAccountStoreProtocol(sa
 provider.register_account(LLMAccount(
     name="claude", style="anthropic",  # 仅支持 "anthropic" / "openai"
     api_key="sk-...", base_url="",      # base_url 留空走各家默认
-    models=[ModelConfig(name="claude-sonnet-4-6", context_limit=200_000, max_output_tokens=8192)],
+    models=[ModelConfig(name="claude-sonnet-4-6", context_limit=200_000)],  # output_reserve 缺省=按窗口尺寸
     default_model="claude-sonnet-4-6", timeout_sec=120,
 ))
 provider.load_from_store()             # 从持久化恢复
@@ -878,7 +878,7 @@ class MyLLMAdapter(LLMClient):
     @property
     def context_limit(self) -> int: return 128_000
     @property
-    def max_output_tokens(self) -> int: return 4096
+    def output_reserve(self) -> int: return 4096
     @property
     def supports_tool_calling(self) -> bool: return True
 

@@ -141,9 +141,10 @@ def _acc_with_no_models(p: LLMProvider) -> None:
 def test_add_model_threads_output_ceiling():
     p = _provider()
     _acc_with_no_models(p)
-    p.add_model("acc", "claude-x", context_limit=200_000, max_output_tokens=8192, output_ceiling=64_000)
+    p.add_model("acc", "claude-x", context_limit=200_000, output_reserve=8192, output_ceiling=64_000)
     m = next(m for m in p.get_account("acc").models if m.name == "claude-x")
     assert m.output_ceiling == 64_000
+    assert m.output_reserve == 8192
 
 
 def test_add_model_output_ceiling_defaults_none():

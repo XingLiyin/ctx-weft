@@ -40,7 +40,7 @@ class OpenAIAdapter(LLMClient):
         model: str = "gpt-4o",
         base_url: str = _OPENAI_API_URL,
         context_limit: int = 128_000,
-        max_output_tokens: int = 4096,
+        output_reserve: int = 4096,
         timeout_sec: int = 120,
         max_http_retries: int = 3,
         tool_choice: str | None = None,
@@ -49,7 +49,7 @@ class OpenAIAdapter(LLMClient):
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._context_limit = context_limit
-        self._max_output_tokens = max_output_tokens
+        self._output_reserve = output_reserve
         self._timeout = timeout_sec
         self._max_http_retries = max_http_retries
         # None = 省略 tool_choice（vLLM 不开 --enable-auto-tool-choice 会拒绝带 "auto" 的请求）。
@@ -62,8 +62,8 @@ class OpenAIAdapter(LLMClient):
         return self._context_limit
 
     @property
-    def max_output_tokens(self) -> int:
-        return self._max_output_tokens
+    def output_reserve(self) -> int:
+        return self._output_reserve
 
     @property
     def supports_tool_calling(self) -> bool:

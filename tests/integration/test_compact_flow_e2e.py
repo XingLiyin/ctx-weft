@@ -42,9 +42,9 @@ async def test_context_limit_retry_folds_segment_e2e():
     resolver = InMemoryTemplateResolver()
     resolver.register(_act_only_template())
     # context_limit=20 → 0.8*20=16 tokens 阈值，真实 prompt 必超 → act turn1 context_limit 命中
-    # max_output_tokens=0：effective_limit 不为 reserved_output_tokens 吞光（Task 4 引入）
+    # output_reserve=0：effective_limit 不为 reserved_output_tokens 吞光（Task 4 引入）
     llm = MockLLMAdapter(responses=[MockResponse(text="partial work, not done yet")],
-                         context_limit=20, max_output_tokens=0)
+                         context_limit=20, output_reserve=0)
     runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
@@ -96,7 +96,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
         collapse_keep_last=2, compact_target_ratio=0.01))
     resolver.register(tpl)
     llm = MockLLMAdapter(responses=[MockResponse(text="partial work, not done yet")] * 30,
-                         context_limit=20, max_output_tokens=0)
+                         context_limit=20, output_reserve=0)
     runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
@@ -111,7 +111,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
                       tenant_id="default", root_agent_id=agent.id, llm_provider="",
                       created_at=now_utc())
     session.context_limit = llm.context_limit
-    session.reserved_output_tokens = llm.max_output_tokens
+    session.reserved_output_tokens = llm.output_reserve
     agent = _dc.replace(agent, loop_guard=LoopGuard(
         context_limit=session.context_limit,
         reserved_output_tokens=session.reserved_output_tokens))

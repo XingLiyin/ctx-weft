@@ -43,7 +43,7 @@ class AnthropicAdapter(LLMClient):
         model: str = "claude-sonnet-4-6",
         base_url: str = _ANTHROPIC_API_URL,
         context_limit: int = 200_000,
-        max_output_tokens: int = 8192,
+        output_reserve: int = 8192,
         timeout_sec: int = 120,
         max_http_retries: int = 3,
     ) -> None:
@@ -51,7 +51,7 @@ class AnthropicAdapter(LLMClient):
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._context_limit = context_limit
-        self._max_output_tokens = max_output_tokens
+        self._output_reserve = output_reserve
         self._timeout = timeout_sec
         self._max_http_retries = max_http_retries
         self._client = self._make_client()
@@ -65,8 +65,8 @@ class AnthropicAdapter(LLMClient):
         return self._context_limit
 
     @property
-    def max_output_tokens(self) -> int:
-        return self._max_output_tokens
+    def output_reserve(self) -> int:
+        return self._output_reserve
 
     @property
     def supports_tool_calling(self) -> bool:
@@ -270,7 +270,8 @@ class AnthropicAdapter(LLMClient):
             "model": model,
             "messages": messages,
             "stream": True,
-            "max_tokens": request.max_tokens or self._max_output_tokens,
+            # 必填字段：网关一般已算好 request.max_tokens；缺时兜底用 output_reserve（预期输出量）。
+            "max_tokens": request.max_tokens or self._output_reserve,
         }
         if request.system:
             payload["system"] = request.system

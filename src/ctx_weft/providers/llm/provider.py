@@ -12,6 +12,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from ctx_weft.core.utils import default_output_reserve
 from ctx_weft.protocols import LLMClient, LLMMessage, LLMRequest
 from ctx_weft.providers.llm.store import LLMAccountStoreProtocol
 
@@ -28,7 +29,9 @@ _PROBE_MAX_TOKENS = 16
 class ModelConfig:
     name: str
     context_limit: int
-    max_output_tokens: int = 8192
+    # 输入侧输出预留：None → get_client 按窗口尺寸取默认(default_output_reserve)。喂
+    # reserved_output_tokens，不参与 per-request 输出上限（那是 output_ceiling）。
+    output_reserve: int | None = None
     output_ceiling: int | None = None  # 单次输出收紧上限；None → 网关回退 context_limit
 
 
@@ -56,13 +59,13 @@ class _FixedModelClient:
         adapter: LLMClient,
         model: str,
         context_limit: int,
-        max_output_tokens: int,
+        output_reserve: int,
         output_ceiling: int | None = None,
     ) -> None:
         self._adapter = adapter
         self._model = model
         self._context_limit = context_limit
-        self._max_output_tokens = max_output_tokens
+        self._output_reserve = output_reserve
         self._output_ceiling = output_ceiling
 
     @property
@@ -70,8 +73,8 @@ class _FixedModelClient:
         return self._context_limit
 
     @property
-    def max_output_tokens(self) -> int:
-        return self._max_output_tokens
+    def output_reserve(self) -> int:
+        return self._output_reserve
 
     @property
     def output_ceiling(self) -> int | None:
@@ -153,7 +156,7 @@ class LLMProvider:
         name: str,
         model: str,
         context_limit: int | None = None,
-        max_output_tokens: int | None = None,
+        output_reserve: int | None = None,
         output_ceiling: int | None = None,
     ) -> LLMAccount:
         account = self.get_account(name)
@@ -161,8 +164,8 @@ class LLMProvider:
             account.models.append(ModelConfig(
                 name=model,
                 context_limit=context_limit or 128_000,
-                max_output_tokens=max_output_tokens or 8192,
-                output_ceiling=output_ceiling,  # None → 网关回退 context_limit（不设默认值）
+                output_reserve=output_reserve,     # None → get_client 按窗口尺寸取默认
+                output_ceiling=output_ceiling,     # None → 网关回退 context_limit
             ))
         if not account.default_model:
             account.default_model = model
@@ -219,10 +222,12 @@ class LLMProvider:
 
         model_cfg = next((m for m in acc.models if m.name == resolved_model), None)
         ctx_limit = model_cfg.context_limit if model_cfg else 128_000
-        max_out = model_cfg.max_output_tokens if model_cfg else 8192
+        # output_reserve 未配（None）→ 按窗口尺寸取默认；显式值（含 0）原样采用。
+        cfg_reserve = model_cfg.output_reserve if model_cfg else None
+        reserve = cfg_reserve if cfg_reserve is not None else default_output_reserve(ctx_limit)
         ceiling = model_cfg.output_ceiling if model_cfg else None
 
-        return _FixedModelClient(adapter, resolved_model, ctx_limit, max_out, ceiling)
+        return _FixedModelClient(adapter, resolved_model, ctx_limit, reserve, ceiling)
 
     # ── Model discovery / connectivity (host-facing; not on the protocol) ──────
 

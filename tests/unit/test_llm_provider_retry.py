@@ -12,7 +12,7 @@ def _acct(style):
         name="a",
         style=style,
         api_key="k",
-        models=[ModelConfig(name="m", context_limit=1000, max_output_tokens=100)],
+        models=[ModelConfig(name="m", context_limit=1000, output_reserve=100)],
         default_model="m",
     )
 

@@ -204,13 +204,16 @@ class LLMClient(Protocol):
 
     @property
     @abstractmethod
-    def max_output_tokens(self) -> int:
-        """LLM 单次输出 token 上限。"""
+    def output_reserve(self) -> int:
+        """输入侧为输出预留的 token 量 → 喂 session.reserved_output_tokens
+        （→ effective_limit → 装配预算 / compact 触发 / 限额停机）。**不**参与 per-request
+        的输出上限（那是 output_ceiling）。经 ModelConfig 配置，未配时按窗口尺寸取默认
+        （core.utils.default_output_reserve）。"""
         ...
 
     # 可选（duck-typed，非协议必需）：output_ceiling -> int | None
-    #   单次输出的收紧上限。网关经 getattr 读取，缺省/None → 回退 context_limit。
-    #   实现方（_FixedModelClient）可提供；未提供者网关自动回退。
+    #   单次输出的收紧上限（per-request max_tokens 的硬天花板）。网关经 getattr 读取，
+    #   缺省/None → 回退 context_limit。实现方（_FixedModelClient）可提供；未提供者网关自动回退。
 
     @property
     @abstractmethod

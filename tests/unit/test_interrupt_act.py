@@ -26,7 +26,7 @@ class _PauseMidStream:
         return 100_000
 
     @property
-    def max_output_tokens(self) -> int:
+    def output_reserve(self) -> int:
         return 4096
 
     @property
