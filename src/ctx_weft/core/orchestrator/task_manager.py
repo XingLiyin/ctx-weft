@@ -172,6 +172,7 @@ class TaskManager:
                 children = self._children_of.get(t.id, set())
                 if all(cid in terminal_ids for cid in children):
                     t.status = "PENDING"
+                    t.retry_count = 0  # 崩溃挂起带着耗尽的计数；恢复重跑从零重计
                     self._queue.push(QueueEntry(
                         task_id=t.id, session_id=self._session_id, priority=t.priority,
                     ))
@@ -829,6 +830,7 @@ class TaskManager:
         if any(e.task_id == task_id for e in self._queue.peek_all()):
             return
         t.status = "PENDING"
+        t.retry_count = 0  # 挂起期间的旧计数不带入新一轮 attempt
         self._queue.push(QueueEntry(
             task_id=task_id, session_id=self._session_id, priority=t.priority,
         ))

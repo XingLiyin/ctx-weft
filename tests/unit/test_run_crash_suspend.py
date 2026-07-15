@@ -132,3 +132,28 @@ async def test_crash_suspended_task_blocks_session_finish() -> None:
 
     assert EventType.SESSION_FINISHED not in _types(bus)
     assert session.status == "INTERRUPTED"  # 不被 SUCCEEDED/FAILED 覆盖
+
+
+def test_restore_requeues_crash_suspended_with_fresh_retries() -> None:
+    """崩溃挂起的任务带着耗尽的 retry_count；restore 重排必须归零，否则恢复后一崩即再挂。"""
+    tm = TaskManager(session_id="s1")
+    t = Task(id="A", session_id="s1", status="SUSPENDED", retry_count=3)
+
+    tm.restore([t], terminal_ids=set())
+
+    assert t.status == "PENDING"
+    assert t.retry_count == 0
+    entry = tm._queue.pop()
+    assert entry is not None and entry.task_id == "A"
+
+
+def test_resume_task_resets_retry_count() -> None:
+    """就地续跑路径（resume_task）同样归零：挂起期间的旧计数不带入新一轮 attempt。"""
+    tm = TaskManager(session_id="s1")
+    t = Task(id="A", session_id="s1", status="SUSPENDED", retry_count=2)
+    tm.register_task(t)
+
+    tm.resume_task("A")
+
+    assert t.status == "PENDING"
+    assert t.retry_count == 0
