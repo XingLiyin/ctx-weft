@@ -14,7 +14,6 @@ from typing import Any
 
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
-from ctx_weft.core.errors import ContextOverflowError
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager, HitlRequest  # noqa: F401 — re-exported for shell use
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.assembler import (
@@ -1625,19 +1624,15 @@ class CtxWeftRuntime:
                 task.status = "SUSPENDED"
             logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
             await self._emit_session_interrupted(state.session.id, reason="llm_outage")
-        except ContextOverflowError as exc:
-            # 非瞬时：resume 会重装配同批 block 再溢出 → 终态 FAILED，不 SUSPEND、不 interrupted。
-            # 走标准 FAILED 计数（复用 finally / _handle_task_failure）。
-            # 文案集中在异常本身，随 str(exc) 经 TaskManager → TASK_FAILED.error_message 抵达 host。
-            run_error = exc
-            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
-                task.status = "FAILED"
-                task.error = str(exc)
-            logger.warning("_run_loop: task %s context overflow: %s", task.id, exc)
         except Exception as exc:
             run_error = exc
+            # 运行层崩溃 = 可恢复中断的临时标记（非终态）：re-raise 交 _handle_task_failure
+            # 定夺——原地重试（翻回 PENDING）或挂起等 /resume（保持 SUSPENDED + 发事件）。
+            # 真失败只有 observer 判 fail 一条路（FinalizeStep 闭合胶囊、回传父亲）。
+            # ContextOverflowError 不再特判终态：retriable=False 使其跳过重试直接挂起，
+            # 溢出文案随 task.error / TASK_SUSPENDED.error_message 抵达 host（提示换大窗口模型）。
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
-                task.status = "FAILED"
+                task.status = "SUSPENDED"
                 task.error = str(exc)
             if getattr(exc, "retriable", False):
                 logger.warning("_run_loop: task %s failed (retriable): %s", task.id, exc)
