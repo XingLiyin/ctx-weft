@@ -860,6 +860,11 @@ class CtxWeftRuntime:
             lambda root, ack_tasks, failures, sess=session: self._finalize_threshold_memory(
                 sess, root, ack_tasks, failures)
         )
+        # 统一取消胶囊闭合（Task 14）：cancel_all / 熔断清场（已启动挂起排队） / 在途协作取消
+        # funnel 三处调用点共用同一注入点。
+        task_manager.set_cancel_finalizer(
+            lambda tasks, reason, sess=session: self._finalize_cancel_memory(sess, tasks, reason)
+        )
 
         async def _on_done() -> None:
             # compare-and-clear：仅当本 TM 仍是当前 owner 才回收，避免顶替它的新 TM 被误释放。
@@ -995,6 +1000,29 @@ class CtxWeftRuntime:
                 logger.exception(
                     "_finalize_threshold_memory: root finish pair failed for task %s", root_task.id,
                 )
+
+    async def _finalize_cancel_memory(
+        self, session: Session, tasks: list[Task], reason: str,
+    ) -> None:
+        """统一取消胶囊闭合（Task 14）：cancel_all / 熔断清场（已启动挂起排队） / 在途协作取消
+        funnel（`on_task_finished(CANCELED)`）三处调用点的公共落点，逐任务调用
+        `synthesize_cancel_closure`（ack 终态化 + `[outcome=cancelled]` finish 对，find-only
+        对 born-cancel 未铸框的子任务整体跳过）。
+
+        best-effort per task：单条异常记日志、不阻断其余（与 `_finalize_threshold_memory` 同一惯例）。
+        """
+        from ctx_weft.core.loop.steps.finalize import synthesize_cancel_closure
+
+        memory = self.providers.get_memory()
+        for t in tasks:
+            try:
+                provider_ctx = ProviderContext(
+                    session_id=session.id, tenant_id=session.tenant_id,
+                    task_id=t.id, agent_id=t.assigned_agent_id or t.creator_agent_id,
+                )
+                await synthesize_cancel_closure(memory, session.id, t, provider_ctx, reason)
+            except Exception:
+                logger.exception("_finalize_cancel_memory: closure failed for task %s", t.id)
 
     def _make_task_runner(
         self,

@@ -179,7 +179,11 @@ async def test_late_canceled_does_not_override_failed_session_status() -> None:
 
 
 async def test_ack_tasks_and_failures_passed_to_finalizer() -> None:
-    """ack_tasks（已启动带框的任务）与 failures 清单正确传给 threshold_finalizer。"""
+    """ack_tasks（Task 14 起：只含在途、终态未坐实的已启动带框任务）与 failures 清单正确传给
+    threshold_finalizer。已经直接标 CANCELED 的挂起任务（framed_susp）改走 cancel_finalizer
+    整对闭合（见 test_suspended_started_task_routed_to_cancel_finalizer），不再进 ack_tasks——
+    threshold_finalizer 的 ack_tasks 现在专指「发了信号但还没收尾」的在途任务。
+    """
     bus = _CapturingBus()
     tm, _session = _tm(bus)
     root = _root(started_at=now_utc())
@@ -191,7 +195,7 @@ async def test_ack_tasks_and_failures_passed_to_finalizer() -> None:
         origin_tool_call_id="call-1",
     )
     tm.register_task(framed_susp)
-    unframed_susp = _child("unframed_susp", status="SUSPENDED")  # 未启动/无框——不应进 ack_tasks
+    unframed_susp = _child("unframed_susp", status="SUSPENDED")  # 未启动/无框——不应进任何闭合路径
     tm.register_task(unframed_susp)
 
     framed_inflight = _child(
@@ -216,9 +220,42 @@ async def test_ack_tasks_and_failures_passed_to_finalizer() -> None:
     await _fail_n_times(tm, ["d1", "d2", "d3"])
 
     assert captured["root"] is root
-    assert captured["ack_ids"] == ["framed_inflight", "framed_susp"]
+    # framed_susp 已终态坐实（直接 CANCELED）→ 不再经 threshold_finalizer 的 ack_tasks；
+    # framed_inflight 仍在途（只发了协作取消信号）→ 保留在 ack_tasks 做 eager ack 替换。
+    assert captured["ack_ids"] == ["framed_inflight"]
     assert len(captured["failures"]) == 3
     assert all(isinstance(f, tuple) and len(f) == 2 for f in captured["failures"])
+
+
+async def test_suspended_started_task_routed_to_cancel_finalizer() -> None:
+    """Task 14：挂起中已启动的任务被熔断清场标 CANCELED 后，立即经 cancel_finalizer 整对闭合
+    （不再等 threshold_finalizer 的 ack-only 半闭合——它已经是终态，没有后续收尾会补 finish 对）。
+    """
+    bus = _CapturingBus()
+    tm, _session = _tm(bus)
+    root = _root(started_at=now_utc())
+    tm.register_task(root)
+
+    framed_susp = _child(
+        "framed_susp", status="SUSPENDED",
+        started_at=now_utc(),
+        origin_tool_call_id="call-1",
+    )
+    tm.register_task(framed_susp)
+    for tid in ("d1", "d2", "d3"):
+        tm.register_task(_child(tid))
+
+    captured: dict = {}
+
+    async def _cancel_finalizer(tasks, reason):
+        captured["ids"] = sorted(t.id for t in tasks)
+        captured["reason"] = reason
+
+    tm.set_cancel_finalizer(_cancel_finalizer)
+    await _fail_n_times(tm, ["d1", "d2", "d3"])
+
+    assert captured["ids"] == ["framed_susp"]
+    assert captured["reason"] == "failure_threshold"
 
 
 async def test_cancel_inflight_called_for_inflight_non_root_and_root() -> None:

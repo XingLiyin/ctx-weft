@@ -100,6 +100,11 @@ class TaskManager:
         self._threshold_finalizer: (
             Callable[["Task | None", list[Task], list[tuple[str, str]]], Coroutine[Any, Any, None]] | None
         ) = None
+        # 统一取消胶囊闭合（Task 14）：cancel_all / 熔断清场（已启动挂起排队） / 在途协作取消 funnel
+        # 三处调用点共用同一注入点。None-tolerant：缺注入时三处调用点自身各自跳过、不崩溃。
+        self._cancel_finalizer: (
+            Callable[[list[Task], str], Coroutine[Any, Any, None]] | None
+        ) = None
 
     def track_background(self, t: "asyncio.Task") -> None:
         """Track a fire-and-forget background coroutine so the session awaits it before close."""
@@ -142,6 +147,17 @@ class TaskManager:
         （SSE 关闭）之前；异常只记日志不阻断终结。
         """
         self._threshold_finalizer = cb
+
+    def set_cancel_finalizer(
+        self, cb: Callable[[list[Task], str], Coroutine[Any, Any, None]],
+    ) -> None:
+        """注入统一取消胶囊闭合回调：(tasks, reason) -> None（Task 14）。
+
+        调用点：`cancel_all`（reason="user_cancel"）、`_trip_failure_threshold` 清场步骤对
+        已启动的挂起/排队任务（reason="failure_threshold"）、`on_task_finished` 的 CANCELED
+        分支（在途协作取消 funnel，reason 取 task.error 回退通用文案）。异常记日志不阻断。
+        """
+        self._cancel_finalizer = cb
 
     def set_session(self, session: Session) -> None:
         """注入 Session 对象，供 failure_counter 维护使用。"""
@@ -652,6 +668,20 @@ class TaskManager:
                 task.status = status
                 task.finished_at = now_utc()
 
+        # ── 取消胶囊闭合 funnel（Task 14）───────────────────────────────────────
+        # 在途协作取消的任务：发信号时（cancel_all 的 CancelToken / 熔断的 cancel_inflight）
+        # 只做了 ack 替换（幂等自愈），finish 对要等这里——终态真正坐实（_run_loop 退出把
+        # task.status 置 CANCELED）——才补写。正常收尾的任务走 FinalizeStep，永不落到这个分支
+        # （status 只会是 FINISHED/FAILED，与本 if 互斥）。未真正 start 过的任务（started_at 为
+        # 空）不会有派发框/own scope 可闭，交由 synthesize_cancel_closure 的 find-only 兜底判定
+        # 即可，这里额外用 started_at 提前短路只是省一次无意义调用。
+        if status == "CANCELED" and task is not None and task.started_at \
+                and self._cancel_finalizer is not None:
+            try:
+                await self._cancel_finalizer([task], task.error or "cancelled")
+            except Exception:
+                logger.exception("TaskManager: cancel_finalizer callback failed for %s", task_id)
+
         # ── failure_counter 维护 ──────────────────────────────────────────────
         if self._session is not None:
             if status == "FAILED":
@@ -748,13 +778,20 @@ class TaskManager:
             except Exception:
                 logger.exception("TaskManager: cancel_pending_hitl callback failed")
 
+        # ack_tasks：只收在途（未终结、仅发了协作取消信号）的已启动带框任务——它们的
+        # finish 对要等 on_task_finished(CANCELED) 终态坐实后由取消胶囊闭合 funnel 补写
+        # （Task 14），threshold_finalizer 这里只做 eager ack 替换（幂等自愈）。
+        # cancel_now_tasks：已经直接标 CANCELED 的任务（清队 + 挂起），终态已坐实，
+        # 经 _cancel_finalizer 立即整对闭合（ack + finish 对一次写完）。
         ack_tasks: list[Task] = []
+        cancel_now_tasks: list[Task] = []
 
         def _has_dispatch_frame(t: Task) -> bool:
             return bool(t.started_at and t.origin_tool_call_id and t.parent_task_id)
 
-        # 4) 清队：非 root 条目 → CANCELED + TASK_CANCELED；root 条目直接丢弃
-        #    （它的去向是第 6 步的 root 判死，不在此处发事件）。
+        # 4) 清队：非 root 条目 → CANCELED + TASK_CANCELED（已启动者收进 cancel_now_tasks，
+        #    经 _cancel_finalizer 闭合）；root 条目直接丢弃（它的去向是第 6 步的 root 判死，
+        #    不在此处发事件）。
         async with self._lock:
             pending = self._queue.drain_pending()
         for tid in pending:
@@ -764,10 +801,15 @@ class TaskManager:
             t.status = "CANCELED"
             t.finished_at = now_utc()
             await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": "failure_threshold"})
+            if t.started_at:
+                cancel_now_tasks.append(t)
 
-        # 5) 取消挂起：SUSPENDED 且非 root → CANCELED + 事件（已启动带框者收进 ack_tasks）；
+        # 5) 取消挂起：SUSPENDED 且非 root → CANCELED + 事件（已启动者收进 cancel_now_tasks，
+        #    立即整对闭合——不再走 ack_tasks/threshold_finalizer 的 ack-only 半闭合，因为它已经
+        #    是终态，没有后续 on_task_finished 会来补 finish 对）；
         #    在途非 root run → 只发协作取消信号，不发事件（其 TASK_CANCELED 由 _run_loop
-        #    退出路径发；已启动带框者同样收进 ack_tasks）。
+        #    退出路径发，finish 对交由 on_task_finished 的取消胶囊闭合 funnel；已启动带框者
+        #    收进 ack_tasks，供 threshold_finalizer 做 eager ack 替换）。
         for t in list(self._tasks.values()):
             if t.parent_task_id is None:
                 continue
@@ -777,8 +819,8 @@ class TaskManager:
                 await self._emit(
                     EventType.TASK_CANCELED, task_id=t.id, payload={"reason": "failure_threshold"},
                 )
-                if _has_dispatch_frame(t):
-                    ack_tasks.append(t)
+                if t.started_at:
+                    cancel_now_tasks.append(t)
             elif t.id in self._running_tasks:
                 if self._cancel_inflight is not None:
                     try:
@@ -787,6 +829,14 @@ class TaskManager:
                         logger.exception("TaskManager: cancel_inflight callback failed for %s", t.id)
                 if _has_dispatch_frame(t):
                     ack_tasks.append(t)
+
+        # 5.5) 立即整对闭合已终态的取消任务（清队 + 挂起，均已启动）——替代 Task 10 里对这批
+        #    任务的 ack-only 处理；在途任务保持 eager ack（上面 ack_tasks）+ funnel finish 对。
+        if cancel_now_tasks and self._cancel_finalizer is not None:
+            try:
+                await self._cancel_finalizer(cancel_now_tasks, "failure_threshold")
+            except Exception:
+                logger.exception("TaskManager: cancel_finalizer callback failed (threshold cleanup)")
 
         # 6) root 判 FAILED：所有 parent_task_id is None 且非终态的任务判死；
         #    已终态的 root（自己就是第 N 败，FinalizeStep 已闭合；或时序尾巴已 FINISHED）
@@ -836,18 +886,31 @@ class TaskManager:
         """硬取消整条 session 链：清空 pending 队列并标 CANCELED，会话置 CANCELED。
 
         在途 task 不在此处理——由 CancelToken → act checkpoint → CancelledError →
-        _run_loop 置该 task CANCELED → on_task_finished（其 drain() 被 _cancelled 守卫挡住）。
-        memory 不触碰（保留）。
+        _run_loop 置该 task CANCELED → on_task_finished（其 drain() 被 _cancelled 守卫挡住，
+        finish 对经 on_task_finished 的取消胶囊闭合 funnel 补写，见 Task 14）。
+
+        标态后立即对已启动的任务（`started_at` 非空——含 root：root 没有 origin_tool_call_id，
+        但 synthesize_cancel_closure 的 own-root 形态不需要框，仍要闭合自己的 scope）经
+        `_cancel_finalizer` 闭合胶囊（ack 终态化 + `[outcome=cancelled]` finish 对）。未启动
+        的任务从未铸框/写过任何 memory，跳过——零 memory 写。
         """
         self._cancelled = True
         async with self._lock:
             pending = self._queue.drain_pending()
+        to_close: list[Task] = []
         for tid in pending:
             t = self._tasks.get(tid)
             if t is not None:
                 t.status = "CANCELED"
                 t.finished_at = now_utc()
+                if t.started_at:
+                    to_close.append(t)
             await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": reason})
+        if to_close and self._cancel_finalizer is not None:
+            try:
+                await self._cancel_finalizer(to_close, reason or "user_cancel")
+            except Exception:
+                logger.exception("TaskManager: cancel_finalizer callback failed (cancel_all)")
         if self._session is not None:
             self._session.status = "CANCELED"
             await self._emit(EventType.SESSION_STATUS_CHANGED, payload={"new_status": "CANCELED"})
