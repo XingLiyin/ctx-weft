@@ -149,10 +149,32 @@ def _llm(context_limit=200_000, output_ceiling=None):
     return SimpleNamespace(context_limit=context_limit, output_ceiling=output_ceiling)
 
 
-def test_apply_uses_request_estimate():
+def test_apply_soft_cap_binds_when_window_has_room():
+    # 窗口有余量：ceiling = 软顶 0.2*200k = 40k（不再整窗放输出）
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(_ctx(_llm()), req, _guard(context_tokens=0))
-    assert req.max_tokens == 200_000 - 100 - 8192  # 默认 margin
+    assert req.max_tokens == 40_000
+
+
+def test_apply_tail_regime_when_window_tight():
+    # used 大到 L-used-margin 跌破软顶 → 回落紧缩段 context-used-margin
+    req = _req(prompt_token_estimate=170_000)
+    apply_dynamic_max_tokens(_ctx(_llm()), req, _guard(context_tokens=0))
+    assert req.max_tokens == 200_000 - 170_000 - 8192  # 21808 < 40k 软顶
+
+
+def test_apply_output_min_floors_soft_cap_on_small_window():
+    # 小窗口：0.2*16k=3200 < 4096 → 软顶兜到 4096
+    req = _req(prompt_token_estimate=100)
+    apply_dynamic_max_tokens(_ctx(_llm(context_limit=16_000)), req, _guard(context_limit=16_000))
+    assert req.max_tokens == 4096
+
+
+def test_apply_hard_ceiling_above_soft_clamped_to_soft():
+    # 显式 output_ceiling 高于软顶 → 被软顶夹下（min 语义）
+    req = _req(prompt_token_estimate=100)
+    apply_dynamic_max_tokens(_ctx(_llm(output_ceiling=64_000)), req, _guard(context_tokens=0))
+    assert req.max_tokens == 40_000  # min(64k, 0.2*200k)
 
 
 def test_apply_noop_when_estimate_missing():
@@ -174,15 +196,16 @@ def test_apply_noop_when_loop_guard_none():
     assert req.max_tokens is None
 
 
-def test_apply_ceiling_fallback_to_context_limit():
-    # output_ceiling 缺省(None) → 回退 context_limit，不被夹到小值
+def test_apply_soft_cap_default_when_ceiling_unset():
+    # output_ceiling 缺省(None) → ceiling = 软顶 0.2*50k = 10k（不再是整窗）
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(
         _ctx(_llm(context_limit=50_000, output_ceiling=None)), req, _guard(context_limit=50_000))
-    assert req.max_tokens == 50_000 - 100 - 8192
+    assert req.max_tokens == 10_000
 
 
-def test_apply_ceiling_clamps_when_configured():
+def test_apply_hard_ceiling_below_soft_wins():
+    # 硬上限 8192 低于软顶 40k → 取硬上限（Anthropic 场景）
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(_ctx(_llm(output_ceiling=8192)), req, _guard(context_tokens=0))
     assert req.max_tokens == 8192

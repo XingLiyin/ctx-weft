@@ -30,3 +30,9 @@ class RuntimeConfig:
     # compact），常态下几万量级的输出预算无感。
     dynamic_max_tokens_margin: int = 8192
     dynamic_max_tokens_floor: int = 1024
+    # 输出软顶：常态下不把整个剩余窗口都放给输出，按 context_limit 的比例封顶（但不低于
+    # output_min）。ceiling = min(output_ceiling or context_limit, max(ratio*L, output_min))。
+    # 好处：没人需要单轮几万 token 输出；且直接降低"max_tokens 超模型真实输出上限"的 400。
+    # used 越过 ~(1-ratio) 后软顶不再绑定，回落到 L-used-margin 的紧缩段。
+    dynamic_max_tokens_output_ratio: float = 0.2
+    dynamic_max_tokens_output_min: int = 4096

@@ -302,7 +302,14 @@ def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
     llm = ctx.llm
     margin = int(_cfg_val(ctx, "dynamic_max_tokens_margin", 8192))
     floor = int(_cfg_val(ctx, "dynamic_max_tokens_floor", 1024))
-    ceiling = getattr(llm, "output_ceiling", None) or llm.context_limit
+    # 软顶：按 context_limit 比例封顶（不低于 output_min），再与硬上限 output_ceiling 取小。
+    # 常态封住"整窗放输出"（省 token + 防 max_tokens 超模型输出上限的 400）；used 越大到
+    # L-used-margin 跌破软顶时自然回落到紧缩段。
+    ratio = float(_cfg_val(ctx, "dynamic_max_tokens_output_ratio", 0.2))
+    min_out = int(_cfg_val(ctx, "dynamic_max_tokens_output_min", 4096))
+    soft_cap = max(int(ratio * llm.context_limit), min_out)
+    hard_cap = getattr(llm, "output_ceiling", None) or llm.context_limit
+    ceiling = min(hard_cap, soft_cap)
     request.max_tokens = dynamic_max_tokens(
         loop_guard.context_limit, used, ceiling, margin=margin, floor=floor,
     )
