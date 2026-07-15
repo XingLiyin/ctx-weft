@@ -87,6 +87,19 @@ class TaskManager:
         # pause 弃子窗口标记（runtime.pause_session 置位、_on_idle/_release 复位）：
         # 置位期间任务取消不改 session 状态、run 收尾 staged 直接丢弃。
         self._pause_abandon = False
+        # ── 熔断真终结（failure threshold trip）状态 ──────────────────────────────
+        # 幂等闩：trip 后在途任务再失败会重进 FAILED 分支，没有它会重复清场 + 重复发事件。
+        self._threshold_tripped: bool = False
+        # (title, reason) 随 failure_counter 同步积累（FAILED 追加、FINISHED 清空）；
+        # 供 FAILURE_THRESHOLD_HIT payload 与 threshold_finalizer 引用。跨崩溃恢复不重建，接受。
+        self._recent_failures: list[tuple[str, str]] = []
+        # 三个 trip 序列的注入点（接线方式镜像 set_has_pending_hitl）：None = 该副作用跳过，
+        # trip 序列本身永远不因缺注入而崩溃。runtime 侧实现见 Task 10。
+        self._cancel_pending_hitl: Callable[[], Coroutine[Any, Any, None]] | None = None
+        self._cancel_inflight: Callable[[str], bool] | None = None
+        self._threshold_finalizer: (
+            Callable[["Task | None", list[Task], list[tuple[str, str]]], Coroutine[Any, Any, None]] | None
+        ) = None
 
     def track_background(self, t: "asyncio.Task") -> None:
         """Track a fire-and-forget background coroutine so the session awaits it before close."""
@@ -103,6 +116,32 @@ class TaskManager:
     def set_has_pending_hitl(self, predicate: "Callable[[], bool]") -> None:
         """注入"该 session 是否仍有未决 pending HITL"谓词（runtime 查 HitlManager）。"""
         self._has_pending_hitl = predicate
+
+    def set_cancel_pending_hitl(self, cb: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        """注入"取消该 session 所有未决 pending HITL"回调（runtime 侧遍历 HitlManager.cancel）。
+
+        trip 序列第 3 步 best-effort 调用；HitlCancelled 需全部先于会话终态发出。
+        """
+        self._cancel_pending_hitl = cb
+
+    def set_cancel_inflight(self, cb: Callable[[str], bool]) -> None:
+        """注入"对指定在途 task 发协作取消信号"回调（runtime 侧查 _run_tokens 发 cancel）。
+
+        只发信号不代表任务立即终结——该任务的 TASK_CANCELED（非 root）由 _run_loop
+        退出路径发；root 则由 trip 序列自己先标 FAILED（顺序见 _trip_failure_threshold）。
+        """
+        self._cancel_inflight = cb
+
+    def set_threshold_finalizer(
+        self,
+        cb: Callable[["Task | None", list[Task], list[tuple[str, str]]], Coroutine[Any, Any, None]],
+    ) -> None:
+        """注入熔断收尾回调：(root_we_failed_and_started|None, ack_tasks, failures) -> None。
+
+        trip 序列第 7 步内联 await（不是后台甩），保证 memory 落盘发生在 SESSION_FINISHED
+        （SSE 关闭）之前；异常只记日志不阻断终结。
+        """
+        self._threshold_finalizer = cb
 
     def set_session(self, session: Session) -> None:
         """注入 Session 对象，供 failure_counter 维护使用。"""
@@ -262,10 +301,12 @@ class TaskManager:
         staged = self._staged.pop(task_id, None)
         if not staged:
             return
-        if self._pause_abandon:
-            # pause 弃子窗口：本轮 staged 的子任务直接丢弃（push 时才发 TASK_CREATED，无投影残留），
-            # 防止弃子清队后又有漏网新任务入队被派发。
-            logger.info("pause_abandon: dropping %d staged task(s) of %s", len(staged), task_id)
+        if self._pause_abandon or self._cancelled:
+            # pause 弃子窗口 / 硬取消（含熔断 trip 封闸）：本轮 staged 的子任务直接丢弃
+            # （push 时才发 TASK_CREATED，无投影残留），防止清队后又有漏网新任务入队被派发——
+            # _cancelled 分支专堵在途 run 收尾迟到的 staged 子任务变成新的搁浅任务。
+            logger.info("staged tasks of %s dropped (pause_abandon=%s cancelled=%s): %d",
+                        task_id, self._pause_abandon, self._cancelled, len(staged))
             return
         for task, blocked_by, parent_task_id in reversed(staged):
             await self.push_task(task, blocked_by=blocked_by, parent_task_id=parent_task_id)
@@ -615,26 +656,27 @@ class TaskManager:
         if self._session is not None:
             if status == "FAILED":
                 self._session.failure_counter += 1
+                self._recent_failures.append((
+                    (task.title if task and task.title else task_id),
+                    ((task.error or task.process_report or "") if task else "")[:200],
+                ))
                 threshold = self._session.failure_threshold
-                if threshold > 0 and self._session.failure_counter >= threshold:
-                    logger.warning(
-                        "Session %s failure_counter=%d reached threshold=%d → FAILED",
-                        self._session_id, self._session.failure_counter, threshold,
-                    )
-                    self._session.status = "FAILED"
-                    await self._emit(EventType.FAILURE_THRESHOLD_HIT, payload={
-                        "failure_counter": self._session.failure_counter,
-                        "threshold": threshold,
-                    })
-                    await self._emit(EventType.SESSION_STATUS_CHANGED, payload={"new_status": "FAILED"})
-                    await self._fire_session_done()
+                if (
+                    threshold > 0
+                    and self._session.failure_counter >= threshold
+                    and not self._threshold_tripped
+                ):
+                    await self._trip_failure_threshold()
                     return
             elif status == "FINISHED":
                 self._session.failure_counter = 0  # 成功时重置
+                self._recent_failures.clear()  # 随 counter 同步清空
             elif status == "CANCELED":
                 # 用户主动中断：标记 session 为 CANCELED，防止 is_done() 误判为 SUCCEEDED。
                 # pause 弃子（_pause_abandon）除外：连带取消不定会话去向，由 root park 决定。
-                if not self._pause_abandon:
+                # _threshold_tripped 除外：熔断已判会话 FAILED，在途任务迟到的协作取消收尾
+                # 绝不能把终态盖回 CANCELED（trip 序列已先手，见 _trip_failure_threshold）。
+                if not self._pause_abandon and not self._threshold_tripped:
                     self._session.status = "CANCELED"
 
         # Try to resume parent
@@ -645,6 +687,11 @@ class TaskManager:
         # 若 queue 已空且无任务在运行，通知 session 真正结束
         # （有重试时 drain() 会把重试任务入队，is_done() 为 False，不触发）
         if self.is_done():
+            # 会话已终结（如熔断 trip 已发 SESSION_FINISHED）：在途/迟到的收尾路径重入此块
+            # 绝不能重复发 SESSION_STATUS_CHANGED——_fire_session_done 内部虽已幂等，但它
+            # 之前的 emit 语句不受它保护，须在此前置拦下。
+            if self._session_done_fired:
+                return
             # 被顶替旧 TM 的迟到收尾不得代表会话发终态/空闲信号——新 owner 的状态才是真相。
             # runtime 侧回调本就 compare-and-check，这里连事件（stale SESSION_STATUS_CHANGED /
             # SESSION_FINISHED）也一并静默，避免污染事件流的 host 显示与重放。
@@ -668,6 +715,122 @@ class TaskManager:
                 final_status = self._session.status if self._session else "SUCCEEDED"
                 await self._emit(EventType.SESSION_STATUS_CHANGED, payload={"new_status": final_status})
                 await self._fire_session_done()
+
+    async def _trip_failure_threshold(self) -> None:
+        """连败达阈值：真终结——清场 + root 判死 + 会话终态，而非裸终结。
+
+        从 on_task_finished 的 FAILED 分支进入（其 `not _threshold_tripped` 前置保证只进一次）。
+        步骤对应机制设计「trip 序列」1-8；顺序是定案，改动前请对照 task-9-brief.md。
+        """
+        # 1) 幂等闩置位；_cancelled 封闸——drain 守卫白拿，_flush_staged 的
+        #    `_pause_abandon or _cancelled` 丢弃条件也据此堵住在途 run 迟到的 staged 子任务。
+        self._threshold_tripped = True
+        self._cancelled = True
+        threshold = self._session.failure_threshold if self._session else 0
+        counter = self._session.failure_counter if self._session else 0
+        logger.warning(
+            "Session %s failure_counter=%d reached threshold=%d → 熔断真终结",
+            self._session_id, counter, threshold,
+        )
+
+        # 2) FAILURE_THRESHOLD_HIT，payload 带本轮已知连败清单
+        await self._emit(EventType.FAILURE_THRESHOLD_HIT, payload={
+            "failure_counter": counter,
+            "threshold": threshold,
+            "failures": [{"title": title, "reason": reason} for title, reason in self._recent_failures],
+        })
+
+        # 3) 取消该 session 所有未决 pending HITL（best-effort）：HitlCancelled 须全部
+        #    先于会话终态发出，防止 host 投影翻态早于 hitl 侧收尾。
+        if self._cancel_pending_hitl is not None:
+            try:
+                await self._cancel_pending_hitl()
+            except Exception:
+                logger.exception("TaskManager: cancel_pending_hitl callback failed")
+
+        ack_tasks: list[Task] = []
+
+        def _has_dispatch_frame(t: Task) -> bool:
+            return bool(t.started_at and t.origin_tool_call_id and t.parent_task_id)
+
+        # 4) 清队：非 root 条目 → CANCELED + TASK_CANCELED；root 条目直接丢弃
+        #    （它的去向是第 6 步的 root 判死，不在此处发事件）。
+        async with self._lock:
+            pending = self._queue.drain_pending()
+        for tid in pending:
+            t = self._tasks.get(tid)
+            if t is None or t.parent_task_id is None:
+                continue
+            t.status = "CANCELED"
+            t.finished_at = now_utc()
+            await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": "failure_threshold"})
+
+        # 5) 取消挂起：SUSPENDED 且非 root → CANCELED + 事件（已启动带框者收进 ack_tasks）；
+        #    在途非 root run → 只发协作取消信号，不发事件（其 TASK_CANCELED 由 _run_loop
+        #    退出路径发；已启动带框者同样收进 ack_tasks）。
+        for t in list(self._tasks.values()):
+            if t.parent_task_id is None:
+                continue
+            if t.status == "SUSPENDED":
+                t.status = "CANCELED"
+                t.finished_at = now_utc()
+                await self._emit(
+                    EventType.TASK_CANCELED, task_id=t.id, payload={"reason": "failure_threshold"},
+                )
+                if _has_dispatch_frame(t):
+                    ack_tasks.append(t)
+            elif t.id in self._running_tasks:
+                if self._cancel_inflight is not None:
+                    try:
+                        self._cancel_inflight(t.id)
+                    except Exception:
+                        logger.exception("TaskManager: cancel_inflight callback failed for %s", t.id)
+                if _has_dispatch_frame(t):
+                    ack_tasks.append(t)
+
+        # 6) root 判 FAILED：所有 parent_task_id is None 且非终态的任务判死；
+        #    已终态的 root（自己就是第 N 败，FinalizeStep 已闭合；或时序尾巴已 FINISHED）
+        #    不改状态、不发事件——闭合跳过。**先标 FAILED 再**对在跑的 root 调 cancel_inflight
+        #    （顺序保证 _run_loop 的终态守卫接得住，见 Task 10）。
+        root_we_failed_and_started: Task | None = None
+        for t in list(self._tasks.values()):
+            if t.parent_task_id is not None:
+                continue
+            if t.status in ("FINISHED", "FAILED", "CANCELED"):
+                continue
+            t.status = "FAILED"
+            t.error_code = "TASK_FAILED_BY_THRESHOLD"
+            t.error = f"Session failure threshold reached ({counter} consecutive sub-task failures)."
+            t.finished_at = now_utc()
+            await self._emit(EventType.TASK_FAILED, task_id=t.id, payload={
+                "error_code": "TASK_FAILED_BY_THRESHOLD",
+                "error_message": t.error,
+            })
+            if t.started_at is not None:
+                root_we_failed_and_started = t
+            if t.id in self._running_tasks and self._cancel_inflight is not None:
+                try:
+                    self._cancel_inflight(t.id)
+                except Exception:
+                    logger.exception("TaskManager: cancel_inflight callback failed for root %s", t.id)
+
+        # 7) finalizer：内联 await（不是后台甩），保证 memory 落盘先于 SESSION_FINISHED（SSE 关闭）；
+        #    异常只记日志不阻断终结。
+        if self._threshold_finalizer is not None:
+            try:
+                await self._threshold_finalizer(
+                    root_we_failed_and_started, ack_tasks, list(self._recent_failures),
+                )
+            except Exception:
+                logger.exception("TaskManager: threshold_finalizer callback failed")
+
+        # 8) 会话终态 + 收尾事件
+        if self._session is not None:
+            self._session.status = "FAILED"
+        await self._emit(EventType.SESSION_STATUS_CHANGED, payload={
+            "new_status": "FAILED", "reason": "failure_threshold",
+        })
+        await self._fire_session_done()
 
     async def cancel_all(self, *, reason: str = "") -> None:
         """硬取消整条 session 链：清空 pending 队列并标 CANCELED，会话置 CANCELED。
