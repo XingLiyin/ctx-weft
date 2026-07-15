@@ -113,3 +113,22 @@ async def test_context_overflow_suspends_without_retry() -> None:
     ]
     assert interrupted and interrupted[0].payload.get("reason") == "CONTEXT_OVERFLOW"
     assert t.status == "SUSPENDED"
+
+
+async def test_crash_suspended_task_blocks_session_finish() -> None:
+    """A 崩溃挂起后 B 正常完成：会话不得终结（等 /resume），否则挂起任务被孤立。
+
+    与 pending-HITL 守卫同理：queue 空、无在跑任务 ≠ 会话完成——中断待恢复的任务
+    也是"会话未完"的真相源。合法的"父等子"SUSPENDED 到不了这条守卫：子未终态时
+    is_done() 为 False；子全终态时父已被 _try_resume_parent 重排回队列。
+    """
+    bus = _CapturingBus()
+    tm, session, _a = _tm(bus)
+    b = Task(id="B", session_id="s1", status="ACTIVE")
+    tm.register_task(b)
+
+    await tm._handle_task_failure("A", error="boom", exc=_NonRetriable("boom"))
+    await tm.on_task_finished("B", status="FINISHED")
+
+    assert EventType.SESSION_FINISHED not in _types(bus)
+    assert session.status == "INTERRUPTED"  # 不被 SUCCEEDED/FAILED 覆盖

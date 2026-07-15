@@ -653,6 +653,12 @@ class TaskManager:
             # ——绝不能发 SESSION_FINISHED 把 parked 任务孤立（真相以 pending-HITL 为准，spec/07 §9.1）。
             if self._has_pending_hitl is not None and self._has_pending_hitl():
                 await self._fire_session_idle()
+            elif any(t.status == "SUSPENDED" for t in self._tasks.values()):
+                # 崩溃/LLM 故障挂起（INTERRUPTED）的任务在等 /resume：会话是"中断待恢复"
+                # 而非"完成"——绝不发 SESSION_FINISHED 把挂起任务孤立（与 pending-HITL 同理）。
+                # 合法的"父等子"SUSPENDED 到不了这里：子未终态时 is_done() 为 False；
+                # 子全终态时父已在上方 _try_resume_parent 重排回队列（不再 SUSPENDED）。
+                await self._fire_session_idle()
             else:
                 # 立即更新 session 终态并通知前端，SSE 保持开放直到后台协程完成
                 if self._session is not None and self._session.status not in ("FAILED", "CANCELED"):
