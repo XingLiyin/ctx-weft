@@ -54,7 +54,13 @@ def test_assessment_retry() -> None:
     )
     assert t.observer_outcome == "retry"
     assert t.status == "PENDING"
-    assert "do X" in t.process_report  # next_step_hint 并入 report
+    # 生命周期分离：act_recap 是永久记录（→ 段摘要 / finish 对），恒为纯复述；
+    # next_step_hint 是只对下一次 attempt 有效的一次性转向 → 单独字段 → guidance（不入 memory）。
+    assert t.process_report == "more needed", (
+        f"process_report must stay a pure recap, no one-shot hint mixed in; got {t.process_report!r}"
+    )
+    # 保留 "Next Step Hint: " 标签：与护栏文案并存时同处一个 guidance 标题下，靠标签区分来源。
+    assert t.next_step_hint == "Next Step Hint: do X"
 
 
 def test_assessment_success_without_outputs_downgrades_to_retry() -> None:
@@ -62,6 +68,34 @@ def test_assessment_success_without_outputs_downgrades_to_retry() -> None:
     report_task_outcome(task_status="success", act_recap="claims done", ctx=_ctx(t))
     assert t.observer_outcome == "retry"  # 护栏：无终稿 → 重试
     assert t.status == "PENDING"
+
+
+def test_guardrail_hint_goes_to_next_step_hint_not_process_report() -> None:
+    """success-without-outputs 护栏文案是给下一轮的一次性指令 → 落 next_step_hint，
+    不得混进 act_recap（否则会随段摘要永久留在已完成任务的历史里）。"""
+    t = _task(outputs=None)
+    report_task_outcome(task_status="success", act_recap="claims done", ctx=_ctx(t))
+    assert t.process_report == "claims done", (
+        f"guardrail text must not pollute the permanent recap; got {t.process_report!r}"
+    )
+    assert t.next_step_hint and "final output" in t.next_step_hint
+
+
+def test_next_step_hint_and_guardrail_combine_in_hint_field() -> None:
+    """两处一次性文本（observer 的 hint + 护栏）并存时都落 next_step_hint，act_recap 仍纯净。"""
+    t = _task(outputs=None)
+    report_task_outcome(
+        task_status="success", act_recap="claims done", next_step_hint="do X", ctx=_ctx(t)
+    )
+    assert t.process_report == "claims done"
+    assert "do X" in t.next_step_hint and "final output" in t.next_step_hint
+
+
+def test_no_hint_leaves_field_empty() -> None:
+    """无一次性转向时 next_step_hint 为空——guidance 不出该段。"""
+    t = _task(outputs="done")
+    report_task_outcome(task_status="success", act_recap="ok", ctx=_ctx(t))
+    assert not t.next_step_hint
 
 
 def test_assessment_invalid_defaults_to_retry() -> None:

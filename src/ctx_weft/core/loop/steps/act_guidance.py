@@ -18,7 +18,11 @@ guidance 内容分两类（composer 把它排在 ## Capabilities 之前——态
   ## Current Task 框远在历史深处时的就近锚）、session 非终态任务树（▶ 定位
   当前 task）、当前 task 已完成子任务清单（防重做/重派——它们已从任务树消失，
   每条附结果摘要 outputs→task_summary，完整结果仍摊在对话上文里，摘要防上文被
-  压缩/淹没时丢失）。
+  压缩/淹没时丢失）、上一轮复核的一次性转向（task.next_step_hint = observer 的
+  next_step_hint + success-without-outputs 护栏文案）。
+  转向段走 guidance 而非并进 act_recap，是刻意的生命周期分离：act_recap 会进永久
+  记忆（段摘要 / finish 对），一次性指令混进去会在任务完成后仍留在历史里；guidance
+  只发不入 memory，随任务终结自然消失，且 priority 1 比段摘要（动态档 4）更难被预算裁掉。
 - **静态段**（指针级，刻意压缩）：finish 收尾、无关新请求 finish+delegate 双发、
   ask_user 三条只留一句提醒。完整协议已有三处承载——SOUL、工具 description、
   以及机械兜底（observer 的 success-without-outputs→retry 护栏、interactive
@@ -205,6 +209,12 @@ def build_act_guidance(task, task_manager) -> str:
             snippet = _subtask_result_snippet(t)
             if snippet:
                 parts.append(f"    → {snippet}")
+        parts.append("")
+
+    hint = (getattr(task, "next_step_hint", None) or "").strip()
+    if hint:
+        parts.append("## Note from the review of your previous attempt:")
+        parts.append(hint)
         parts.append("")
 
     # 静态提醒（指针级）：完整语义在工具 description / SOUL / observer 护栏，这里只钉最易违反的三条。

@@ -26,11 +26,11 @@ def _task(id, title="", status="PENDING", parent=None, description="", created_a
     )
 
 
-def _cur(title="", description="", mode="auto", id="t1"):
+def _cur(title="", description="", mode="auto", id="t1", next_step_hint=None):
     """当前 task（build_act_guidance 第一参）。"""
     return SimpleNamespace(
         id=id, title=title, description=description,
-        interaction_mode=mode, user_prompt="",
+        interaction_mode=mode, user_prompt="", next_step_hint=next_step_hint,
     )
 
 
@@ -46,6 +46,28 @@ def test_no_task_manager_omits_tree_but_keeps_finish():
     assert "## The overall plan" not in g
     assert "control__finish_task" in g
     assert "final reply to the user" in g
+
+
+# ── 上一轮复核的一次性转向（next_step_hint）────────────────────────────────────
+
+def test_next_step_hint_rendered_when_present():
+    """observer 的一次性转向经 guidance 投递（不入 memory），故随任务终结自然消失。"""
+    g = build_act_guidance(_cur(title="T", next_step_hint="先拆 TokenStore"), _tm())
+    assert "先拆 TokenStore" in g
+    assert "## Note from the review of your previous attempt" in g
+
+
+def test_no_hint_omits_the_section_entirely():
+    g = build_act_guidance(_cur(title="T"), _tm())
+    assert "## Note from the review of your previous attempt" not in g
+
+
+def test_hint_section_absent_for_task_without_the_field():
+    """旧数据 / 替身 task 无该字段 → getattr 兜底，不炸、不出段。"""
+    legacy = SimpleNamespace(id="t1", title="T", description="",
+                             interaction_mode="auto", user_prompt="")
+    g = build_act_guidance(legacy, _tm())
+    assert "## Note from the review of your previous attempt" not in g
 
 
 def test_lone_root_still_shows_itself_in_tree():

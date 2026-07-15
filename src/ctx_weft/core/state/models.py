@@ -199,6 +199,13 @@ class Task:
     # 何时设置 process_report（= 上一轮 observe 产出反馈的时刻，落在该 attempt 之后、下一 attempt 之前）。
     # process_report/process_report_at 现仅服务终态 finish 对 / 子任务 bubble；retry 进度已改由 task 层 TASK_COMPACT_SUMMARY 段摘要承载（spec 2026-07-01 §3.7）。
     process_report_at: datetime | None = None
+    # observer 给「下一次 act attempt」的一次性转向：next_step_hint + success-without-outputs
+    # 护栏文案（见 control_capability.report_task_outcome）。
+    # **刻意不并进 process_report/act_recap**：后者是永久记录（→ TASK_COMPACT_SUMMARY 段摘要、
+    # finish 对 assistant 槽），一次性指令混进去会在任务完成后仍留在历史里，跨 task 召回时表现为
+    # 「一句已经过期的 Next Step Hint 夹在已完成任务的对话中间」。本字段改由 act_guidance 渲染进
+    # 每轮 guidance（只发不入 memory、priority 1 受保护），随任务终结自然消失。
+    next_step_hint: str | None = None
 
     retry_count: int = 0
     max_retries: int = 3

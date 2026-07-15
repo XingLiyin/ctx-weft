@@ -430,8 +430,10 @@ def report_task_outcome(
     # observe 裁决三态。机械退出（max_turns/context_limit）由系统在 ObserveStep 归为 retry。
     if task_status not in ("success", "retry", "fail"):
         task_status = "retry"
-    if next_step_hint:
-        act_recap = f"{act_recap}\n\nNext Step Hint: {next_step_hint}"
+    # 一次性转向（只对下一次 attempt 有效）与永久记录（act_recap）分开累积：act_recap 会经
+    # process_report → 段摘要 / finish 对进永久记忆，把 hint 拌进去会让它在任务完成后仍留在
+    # 历史里（过期的 Next Step Hint）。hint 走 task.next_step_hint → guidance，不入 memory。
+    hint = f"Next Step Hint: {next_step_hint}" if next_step_hint else ""
 
     metadata: dict[str, Any] = {}
     if task is not None:
@@ -443,9 +445,10 @@ def report_task_outcome(
                      "necessary tool calls. Once everything required is done, write your final reply to "
                      "the user as your normal message text and then call the `control__finish_task` tool "
                      "to complete the task — your message text is the reply and the deliverable.")
-            act_recap = f"{act_recap}\n\n{_hint}" if act_recap else _hint
+            hint = f"{hint}\n\n{_hint}" if hint else _hint
 
         task.process_report = act_recap
+        task.next_step_hint = hint or None
         task.task_summary = task_summary
         task.process_report_at = now_utc()
         task.observer_outcome = task_status
