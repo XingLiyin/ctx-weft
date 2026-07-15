@@ -211,6 +211,44 @@ async def test_close_replaces_running_ack_with_terminal() -> None:
     assert acks[0].timestamp == started, "替换后仍须锚 started_at（与框相邻）"
 
 
+async def test_close_ack_stays_co_anchored_with_frame_after_retry() -> None:
+    """retry 会刷新 task.started_at（TM 每次派发都写）。close 替换 ack 时须沿用**框自己的**
+    时间戳，而不是按当下的 started_at 重算——否则框停在首次 started_at、ack 落到末次，
+    「框与 result 同锚、严格相邻」的不变量断裂，ack 在原始存储里漂进子 body 中间。
+    """
+    from ctx_weft.core.loop.steps.finalize import ensure_dispatch_frame_at_start
+
+    mem = InMemoryMemoryProvider()
+    first_start = _BASE + timedelta(seconds=5)
+    child = _child_task(first_start)
+    child_scope = _sc("c1")
+    await _seed_conv_nonshort(mem, child_scope)
+
+    await ensure_dispatch_frame_at_start(_state(child, child_scope, LoopConfig()), _loop_ctx(mem))
+
+    # 第一轮撞 max_turns → retry → TM 重新派发，刷新 started_at
+    child.started_at = _BASE + timedelta(seconds=900)
+    await ensure_dispatch_frame_at_start(_state(child, child_scope, LoopConfig()), _loop_ctx(mem))
+
+    child.status = "FINISHED"
+    await finalize_task_memory(
+        mem, _state(child, child_scope, LoopConfig()),
+        child, "sub outputs\n\nProcess Report: sub summary", "success", _loop_ctx(mem),
+        act_recap="sub summary", task_summary="",
+    )
+
+    turns = await _turns(mem, _sc("p1"))
+    frame = [r for r in turns if r.role == "assistant"
+             and any(tc.get("id") == "oc1" for tc in (r.metadata.get("tool_calls") or []))]
+    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
+    assert len(frame) == 1 and len(ack) == 1
+    assert frame[0].timestamp == first_start, "框须保持首次 started_at，不被 retry 改写"
+    assert ack[0].timestamp == frame[0].timestamp, (
+        f"终态 ack 须与框同锚；frame={frame[0].timestamp} ack={ack[0].timestamp} "
+        f"(retry 后的 started_at={child.started_at})"
+    )
+
+
 async def test_same_agent_child_finish_pair_written_into_parent_scope() -> None:
     """task-resident：同 agent child 的 finish 对（AGENT_CONVERSATION_TURN, origin_task_id=child.id）
     写入 parent agent scope；**不镜像 body**（无 user 锚点），child raw body 留 child task 层。"""
@@ -344,7 +382,15 @@ async def test_same_agent_close_mints_frame_and_ack_co_anchored() -> None:
 
 async def test_ensure_dispatch_frame_mixed_tz_no_crash() -> None:
     """派发框 timestamp 为 naive（事件重放 / DB 反序列化丢 tz），task.started_at 为 aware：
-    _ensure_dispatch_frame 归一 tz 后比较，返回 started_at，绝不 TypeError（回归 2026-07-03）。"""
+    _ensure_dispatch_frame 归一 tz 后返回**框自己的** ts，绝不 TypeError（回归 2026-07-03）。
+
+    返回值的唯一用途是给配对 ack 定锚，而要求是「ack 必须贴着框」——故框在哪就返回哪，
+    返回 started_at 只在「框恰好就在 started_at」时才成立。框已铸的分支从前是永不触发的防御
+    （框与 ack 在 close 同一次调用里写、必然同锚），现在是常态路径（框由子 start 时铸），
+    且 TaskManager 每次派发都刷新 started_at，retry 后二者必然分叉——见
+    test_close_ack_stays_co_anchored_with_frame_after_retry。对遗留的 eager 框（锚在派发时刻）
+    也同理：返回框自己的 ts 才能让这一对重新贴合。
+    """
     from ctx_weft.core.loop.steps.finalize import _ensure_dispatch_frame
 
     mem = InMemoryMemoryProvider()
@@ -364,7 +410,10 @@ async def test_ensure_dispatch_frame_mixed_tz_no_crash() -> None:
                  started_at=started, settings=NormalTaskSettings())
 
     ts = await _ensure_dispatch_frame(mem, parent_scope, child, _loop_ctx(mem))
-    assert ts == started, "aware started_at 应胜出（> naive 派发框），且不抛 TypeError"
+    assert ts == naive_dispatch.replace(tzinfo=UTC), (
+        f"须返回框自己的 ts（归一为 aware），而非 started_at；got {ts!r}"
+    )
+    assert ts.tzinfo is not None, "naive 框 ts 须被归一为 aware，否则调用方与 aware 比较时 TypeError"
 
 
 async def test_concurrent_same_agent_dispatch_pairs_stay_adjacent() -> None:

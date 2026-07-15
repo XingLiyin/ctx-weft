@@ -102,7 +102,14 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
         None,
     )
     if frame is not None:
-        return ts  # 幂等：框已铸（同锚 ts）→ 直接复用锚点，不重复铸框
+        # 幂等：框已铸（常态——ensure_dispatch_frame_at_start 在子 start 时就铸好了）。
+        # **返回框自己的 ts，而不是上面按当下 started_at 重算的 ts**：TaskManager 每次派发都刷新
+        # task.started_at，故 retry 过的子任务在 close 时算出的是**末次**派发时刻，而框停在首次。
+        # 用重算值会把终态 ack 写到框之外（漂进子 body 中间），断掉「框与 result 同锚、严格相邻」
+        # 的不变量——渲染虽有 reorder_tool_results_after_calls 兜底，但那是把正确性转嫁给 legalize。
+        # 同样经 _as_utc 归一：框可能来自事件重放 / DB 反序列化而丢 tz（naive），直接返回会让
+        # 调用方拿它与 aware 时间比较时炸 TypeError。
+        return _as_utc(frame.timestamp)
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
