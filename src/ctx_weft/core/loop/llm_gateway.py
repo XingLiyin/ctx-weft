@@ -232,15 +232,51 @@ def legalize_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
     )
 
 
-def _estimate_request_tokens(request: "LLMRequest") -> int:
-    """估算本次待发 prompt 的 token（system + 全部 messages + tools schema）。
+# 估算里文本 content 之外的补偿项（都往大了取，堵"单轮低估击穿 margin 致 400"的洞）：
+_MSG_FRAMING_TOKENS = 4       # 每条消息的角色/分隔 framing 开销（provider 计费、文本之外）
+_IMAGE_PART_TOKENS = 1600     # 每个图片 part 的保守 token 数（真实随分辨率浮动；不按 base64 长度算，
+                              # 否则一张图几万字符会反向严重高估）
 
-    遍历**全部** messages，含本轮新加的 role="tool" result——这是 loop_guard.context_tokens
-    （上一轮真实值）漏掉的增量，"取大"逻辑正靠它补齐。len//4 口径不变（低估已知）。
+
+def _args_text(args) -> str:
+    """tool_call 参数 → 供估算的文本：dict/list 走 json.dumps，str 原样，其余 str()。"""
+    if isinstance(args, str):
+        return args
+    try:
+        return json.dumps(args, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(args)
+
+
+def _estimate_message_tokens(m: LLMMessage) -> int:
+    """单条消息的 provider 计费估算（往大了估）：文本 content + tool_calls 参数 +
+    reasoning_content + 图片 part + 每条固定 framing 开销。
+
+    tool_calls 的 arguments、reasoning_content、图片 part 此前都没计入（``content_to_text``
+    只抽 ``.text``），是"单轮新增里一坨数不到的东西 > margin"致 400 的洞（典型如一次超大
+    write_file 调用把内容塞在 arguments 里）。图片按固定保守常数计。
+    """
+    total = _MSG_FRAMING_TOKENS
+    total += estimate_tokens(content_to_text(m.content))
+    if not isinstance(m.content, str):
+        total += _IMAGE_PART_TOKENS * sum(1 for p in m.content if not hasattr(p, "text"))
+    for tc in (m.tool_calls or []):
+        total += estimate_tokens(str(tc.get("name", "")))
+        total += estimate_tokens(_args_text(tc.get("arguments", tc.get("input", {}))))
+    if m.reasoning_content:
+        total += estimate_tokens(m.reasoning_content)
+    return total
+
+
+def _estimate_request_tokens(request: "LLMRequest") -> int:
+    """估算整份待发 prompt 的 token（system + 全部 messages + tools schema）。
+
+    每条消息经 :func:`_estimate_message_tokens` 计全部计费项（文本 + tool_calls 参数 +
+    reasoning + 图片 + framing）。含本轮新加的 role="tool" result。
     """
     total = estimate_tokens(request.system or "")
     for m in request.messages:
-        total += estimate_tokens(content_to_text(m.content))
+        total += _estimate_message_tokens(m)
     for t in request.tools:
         total += estimate_tokens(t.name) + estimate_tokens(t.description or "")
         total += estimate_tokens(json.dumps(t.input_schema, ensure_ascii=False))
@@ -260,7 +296,7 @@ def request_prompt_estimate(request: "LLMRequest", loop_guard, baseline_msg_coun
     ctx_tokens = getattr(loop_guard, "context_tokens", 0) if loop_guard is not None else 0
     if baseline_msg_count is not None and ctx_tokens > 0:
         delta = sum(
-            estimate_tokens(content_to_text(m.content))
+            _estimate_message_tokens(m)
             for m in request.messages[baseline_msg_count:]
         )
         return ctx_tokens + delta

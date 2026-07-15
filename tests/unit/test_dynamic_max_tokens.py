@@ -13,7 +13,9 @@ from ctx_weft.core.loop.llm_gateway import (
     apply_dynamic_max_tokens,
     request_prompt_estimate,
     _estimate_request_tokens,
+    _estimate_message_tokens,
 )
+from ctx_weft.protocols.context import ImagePart, TextPart
 
 
 # ── 纯算术：dynamic_max_tokens(context_limit, used, ceiling) ────────────────────
@@ -76,8 +78,8 @@ def test_estimate_incremental_baseline_plus_delta():
         LLMMessage(role="tool", content="R" * 4000, tool_call_id="t1"),  # 新增，计
     ])
     est = request_prompt_estimate(req, _guard(context_tokens=50_000), 2)
-    # 50_000（真实基线）+ ceil(4000/3)=1334（4000 字符 ASCII tool result）；历史大 user 不被重估
-    assert est == 50_000 + 1334
+    # 50_000（真实基线）+ 每条消息估算：framing(4) + ceil(4000/3)=1334；历史大 user 不被重估
+    assert est == 50_000 + 4 + 1334
 
 
 def test_estimate_incremental_falls_back_without_real_baseline():
@@ -95,6 +97,46 @@ def test_estimate_includes_tool_result_messages():
     ])
     est = _estimate_request_tokens(req)
     assert est >= 1000
+
+
+# ── 此前数不到的几类：tool_calls 参数 / reasoning / 图片 / framing ─────────────────
+
+def test_message_counts_tool_call_arguments():
+    # 纯工具调用回合：content 空，体量全在 tool_calls 的 arguments 里——必须计入（旧口径 ≈0 → 400 洞）
+    big = "x" * 6000
+    m = LLMMessage(role="assistant", content="",
+                   tool_calls=[{"id": "c1", "name": "write_file", "input": {"content": big}}])
+    assert _estimate_message_tokens(m) >= 2000  # ceil(~6000/3) 量级，远超旧的 ~0
+
+
+def test_message_counts_reasoning_content():
+    with_r = _estimate_message_tokens(
+        LLMMessage(role="assistant", content="hi", reasoning_content="R" * 3000))
+    without = _estimate_message_tokens(LLMMessage(role="assistant", content="hi"))
+    assert with_r - without >= 900  # ceil(3000/3)=1000
+
+
+def test_message_counts_image_parts_by_fixed_constant():
+    # 图片按固定保守常数（~1600），不是 base64 的 10 万字符（否则反向严重高估）
+    m = LLMMessage(role="user", content=[
+        TextPart(text="见图"),
+        ImagePart(data="A" * 100_000, media_type="image/png"),
+    ])
+    assert 1500 <= _estimate_message_tokens(m) <= 2200
+
+
+def test_message_framing_overhead_added():
+    # 空 content 消息也有固定 framing 开销（provider 每条消息都要计）
+    assert _estimate_message_tokens(LLMMessage(role="user", content="")) >= 4
+
+
+def test_tool_call_args_counted_in_request_estimate():
+    # 整份估算里也要含 tool_calls 参数
+    req = _req(messages=[
+        LLMMessage(role="assistant", content="",
+                   tool_calls=[{"id": "c1", "name": "w", "input": {"c": "x" * 9000}}]),
+    ])
+    assert _estimate_request_tokens(req) >= 3000  # ceil(~9000/3)
 
 
 # ── 网关消费者：apply_dynamic_max_tokens 读 request.prompt_token_estimate ─────────
