@@ -73,6 +73,56 @@ async def test_resume_in_existing_tm_no_override_keeps_window(monkeypatch) -> No
     assert session.context_limit == 64_000
 
 
+async def test_resume_in_existing_tm_account_only_syncs_window(monkeypatch) -> None:
+    """仅换账号（不换 model）同样要同步窗口：or 条件的另一分支，账号可能指向不同尺寸的部署。"""
+    runtime = _runtime(monkeypatch)
+    session = Session(id="s1", user_prompt="", status="RUNNING", context_limit=64_000)
+    tm = TaskManager(session_id="s1", event_bus=runtime.event_bus)
+    tm.set_session(session)
+    tm.register_task(Task(id="A", session_id="s1", status="SUSPENDED"))
+    monkeypatch.setattr(runtime, "_register_and_drain", lambda s, m: None)
+
+    await runtime._resume_in_existing_tm(
+        tm, user_reply=None, llm_account="acc2", llm_model=None, resumed_task_id="A")
+
+    assert session.llm_provider == "acc2"
+    assert session.context_limit == 400_000
+
+
+def test_sync_window_resolve_failure_keeps_values(monkeypatch) -> None:
+    """解析失败（如未注册 provider）不阻断恢复：只记日志，窗口参数沿用原值。"""
+    runtime = _runtime(monkeypatch)
+
+    def _boom(a=None, m=None):
+        raise RuntimeError("no provider")
+
+    monkeypatch.setattr(runtime, "_resolve_llm", _boom)
+    session = Session(id="s1", user_prompt="", status="RUNNING",
+                      context_limit=64_000, reserved_output_tokens=8_192)
+
+    runtime._sync_session_llm_window(session)  # 不应抛出
+
+    assert session.context_limit == 64_000
+    assert session.reserved_output_tokens == 8_192
+
+
+def test_sync_window_bare_client_keeps_values(monkeypatch) -> None:
+    """duck-type 桩 client 缺 context_limit / output_reserve 属性时保持会话原值。"""
+
+    class _BareClient:
+        pass
+
+    runtime = _runtime(monkeypatch)
+    monkeypatch.setattr(runtime, "_resolve_llm", lambda a=None, m=None: _BareClient())
+    session = Session(id="s1", user_prompt="", status="RUNNING",
+                      context_limit=64_000, reserved_output_tokens=8_192)
+
+    runtime._sync_session_llm_window(session)
+
+    assert session.context_limit == 64_000
+    assert session.reserved_output_tokens == 8_192
+
+
 async def test_recover_session_model_switch_syncs_window(monkeypatch) -> None:
     runtime = _runtime(monkeypatch)
     tmpl = make_echo_template()
