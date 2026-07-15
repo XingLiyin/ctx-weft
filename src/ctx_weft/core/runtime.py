@@ -514,6 +514,29 @@ class CtxWeftRuntime:
             "or pass llm= to CtxWeftRuntime."
         )
 
+    def _sync_session_llm_window(self, session: Session) -> None:
+        """换模型/账号续跑后，把会话窗口参数对齐新模型（context_limit / reserved_output_tokens）。
+
+        只在恢复方显式传入 llm 覆盖时调用：CONTEXT_OVERFLOW 挂起的会话换更大窗口的模型
+        恢复，若窗口仍沿用投影里旧模型的值，重装配会原样再溢出，切换等于无效。
+        duck-type 读取（镜像 run_single_task）：桩 client 缺属性时保持会话原值；解析失败
+        （如未注册 provider）不阻断恢复，只记日志、沿用原值。
+        """
+        try:
+            llm = self._resolve_llm(session.llm_provider or None, session.llm_model or None)
+        except Exception:
+            logger.warning(
+                "model-switch resume: cannot resolve LLM client for session %s; "
+                "keeping projected window params", session.id,
+            )
+            return
+        limit = getattr(llm, "context_limit", None)
+        if limit:
+            session.context_limit = limit
+        reserve = getattr(llm, "output_reserve", None)
+        if reserve is not None:
+            session.reserved_output_tokens = reserve
+
     async def _resolve_subagent_template(self, qualified: str, ctx: ProviderContext) -> str:
         """Map a qualified sub-agent name (agent__planner) back to its template_name.
 
@@ -960,6 +983,9 @@ class CtxWeftRuntime:
             session.llm_provider = llm_account
         if llm_model is not None:
             session.llm_model = llm_model
+        if llm_account is not None or llm_model is not None:
+            # 换模型恢复：窗口参数须随新模型，否则 CONTEXT_OVERFLOW 挂起换大模型也照旧溢出
+            self._sync_session_llm_window(session)
         all_tasks = [task_from_projection(tp) for tp in view.tasks.values()]
 
         # 重建内存 HitlManager（_futures 空 → 后续应答自动走冷 resume；spec/07 §9）
@@ -1132,6 +1158,9 @@ class CtxWeftRuntime:
             session.llm_provider = llm_account
         if llm_model is not None:
             session.llm_model = llm_model
+        if llm_account is not None or llm_model is not None:
+            # 同 recover_session：换模型就地续跑也要对齐窗口参数
+            self._sync_session_llm_window(session)
         if user_reply is not None:
             await self._inject_user_reply(user_reply, session, tm)
         tm.resume_task(resumed_task_id)
