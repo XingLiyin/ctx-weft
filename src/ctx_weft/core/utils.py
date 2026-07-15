@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 import types
 from collections.abc import Callable
@@ -108,6 +109,43 @@ def content_to_text(content: "str | list[ContentPart]") -> str:
         if hasattr(item, "text"):
             parts.append(item.text)
     return "".join(parts)
+
+
+# 一条消息/记录里文本 content 之外的计费补偿项（都往大了取，堵低估致 400 的洞）。
+# 供 gateway（LLMMessage）与 prepare/composer（memory 记录 / 装配消息）共用，单一真源。
+_MSG_FRAMING_TOKENS = 4       # 每条消息的角色/分隔 framing 开销（provider 计费、文本之外）
+_IMAGE_PART_TOKENS = 1600     # 每个非文本 part（图片）的保守 token 数（不按 base64 长度算，
+                              # 否则一张图几万字符会反向严重高估）
+
+
+def _dumps_for_estimate(obj: Any) -> str:
+    """把 tool_call 参数序列化成供估算的文本；dict/list 走 json，异常回退 str。"""
+    if isinstance(obj, str):
+        return obj
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(obj)
+
+
+def estimate_content_tokens(content: "str | list[ContentPart]") -> int:
+    """一条 content 的估算：文本 + 图片 part 固定常数 + 每条 framing 开销。往大了估。"""
+    total = _MSG_FRAMING_TOKENS + estimate_tokens(content_to_text(content))
+    if not isinstance(content, str):
+        total += _IMAGE_PART_TOKENS * sum(1 for p in content if not hasattr(p, "text"))
+    return total
+
+
+def estimate_tool_calls_tokens(tool_calls: "list[dict] | None") -> int:
+    """tool_calls（[{name, arguments|input}]）的估算：名字 + 参数 JSON。往大了估。
+
+    纯工具回合 content 常为空、体量全在 arguments 里——不数就会严重低估（致 400 / compact 欠触发）。
+    """
+    total = 0
+    for tc in tool_calls or []:
+        total += estimate_tokens(str(tc.get("name", "")))
+        total += estimate_tokens(_dumps_for_estimate(tc.get("arguments", tc.get("input", {}))))
+    return total
 
 
 # ── JSON Schema extraction ────────────────────────────────────────────────────

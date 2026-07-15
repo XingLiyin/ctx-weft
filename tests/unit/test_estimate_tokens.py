@@ -63,3 +63,38 @@ def test_matches_documented_formula():
     cjk = sum(1 for c in txt if c in "混合测试，！")
     other = len(txt) - cjk
     assert estimate_tokens(txt) == ceil(1.5 * cjk) + ceil(other / 3)
+
+
+# ── estimate_content_tokens / estimate_tool_calls_tokens（gateway 与 prepare/composer 共用）──
+from ctx_weft.core.utils import estimate_content_tokens, estimate_tool_calls_tokens
+from ctx_weft.protocols.context import ImagePart, TextPart
+
+
+def test_content_tokens_adds_framing_even_when_empty():
+    assert estimate_content_tokens("") == 4  # 仅 framing
+
+
+def test_content_tokens_text_plus_framing():
+    # "hello world"(ceil(11/3)=4) + framing(4)
+    assert estimate_content_tokens("hello world") == 4 + 4
+
+
+def test_content_tokens_image_by_fixed_constant():
+    c = [TextPart(text="x"), ImagePart(data="A" * 99_999, media_type="image/png")]
+    # framing(4) + estimate("x")=1 + 图片常数(1600)；不含 base64 长度
+    assert 1600 <= estimate_content_tokens(c) <= 1700
+
+
+def test_tool_calls_tokens_counts_name_and_args():
+    assert estimate_tool_calls_tokens([{"name": "write_file", "input": {"content": "x" * 6000}}]) >= 2000
+
+
+def test_tool_calls_tokens_empty_is_zero():
+    assert estimate_tool_calls_tokens(None) == 0
+    assert estimate_tool_calls_tokens([]) == 0
+
+
+def test_tool_calls_tokens_accepts_both_arguments_and_input_keys():
+    a = estimate_tool_calls_tokens([{"name": "w", "arguments": {"c": "x" * 3000}}])
+    b = estimate_tool_calls_tokens([{"name": "w", "input": {"c": "x" * 3000}}])
+    assert a == b >= 900

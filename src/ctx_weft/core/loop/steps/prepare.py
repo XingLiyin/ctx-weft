@@ -11,6 +11,7 @@ compact 触发（纯预算，spec 2026-07-01 §3.6）：
 
 from __future__ import annotations
 
+import json
 import logging
 
 from ctx_weft.core.assembler import ContextRequest
@@ -28,7 +29,12 @@ from ctx_weft.core.loop.steps.recognize_intent import (
     should_recognize_intent,
 )
 from ctx_weft.core.state.models import NormalTaskSettings
-from ctx_weft.core.utils import effective_limit, estimate_tokens
+from ctx_weft.core.utils import (
+    effective_limit,
+    estimate_content_tokens,
+    estimate_tokens,
+    estimate_tool_calls_tokens,
+)
 from ctx_weft.protocols import MemoryEventType
 from ctx_weft.protocols.capability import SkillCapability
 
@@ -52,6 +58,38 @@ def wrap_skill_instructions(instructions: str) -> str:
     if not instructions:
         return ""
     return f"{instructions}\n\n{_SKILL_SCRIPT_RUNTIME_NOTE}"
+
+
+def _estimate_record_tokens(r) -> int:
+    """一条 memory 记录的 compact 估算：content + tool_calls 参数（在 metadata）+ reasoning。
+
+    与 gateway._estimate_message_tokens 同口径（同 core.utils 计费项），使 prepare 的触发估算
+    不再漏 tool_calls 参数/图片/framing（此前只 join content 文本、且丢弃非 str content）。
+    """
+    md = getattr(r, "metadata", None) or {}
+    total = estimate_content_tokens(r.content) + estimate_tool_calls_tokens(md.get("tool_calls"))
+    reasoning = md.get("reasoning")
+    if reasoning:
+        total += estimate_tokens(str(reasoning))
+    return total
+
+
+def _estimate_assembled_tokens(prompt) -> int:
+    """无真实基线（首轮/一次性）时对整份装配 prompt 的估算：system + 每条消息（含 tool_calls
+    参数/图片/framing）+ tools schema。
+
+    比 composer 的 ``prompt.token_count``（纯文本、且不含 tools）更全，与 gateway 首次估算同口径——
+    tools schema 是每个 act prompt 的固定占用，composer 完全没数，此处补上。
+    """
+    total = estimate_tokens(prompt.system or "")
+    for m in prompt.messages:
+        total += estimate_content_tokens(m.content) + estimate_tool_calls_tokens(m.tool_calls)
+        if getattr(m, "reasoning_content", None):
+            total += estimate_tokens(m.reasoning_content)
+    for t in getattr(prompt, "tools", None) or []:
+        total += estimate_tokens(t.name) + estimate_tokens(t.description or "")
+        total += estimate_tokens(json.dumps(t.input_schema, ensure_ascii=False))
+    return total
 
 
 class PrepareStep(Step):
@@ -109,7 +147,7 @@ class PrepareStep(Step):
 
         prompt = await _assemble()
         if token_estimate == 0:
-            token_estimate = prompt.token_count
+            token_estimate = _estimate_assembled_tokens(prompt)
 
         # ── 5. compact 触发：命中则跑升级式 compact，再在压缩后 memory 上重装配一次（Q4=c 校正）──
         if await self._should_compact(state, ctx, token_estimate):
@@ -205,11 +243,8 @@ class PrepareStep(Step):
                     ctx=ctx.provider_ctx,
                 )
                 new_records = recent[:max(0, len(recent) - guard.context_message_count)]
-                new_text = " ".join(
-                    r.content if isinstance(r.content, str) else ""
-                    for r in new_records
-                )
-                return guard.context_tokens + estimate_tokens(new_text), True
+                delta = sum(_estimate_record_tokens(r) for r in new_records)
+                return guard.context_tokens + delta, True
             except Exception:
                 pass
 

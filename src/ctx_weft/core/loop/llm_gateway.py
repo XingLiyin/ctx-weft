@@ -50,7 +50,12 @@ from typing import TYPE_CHECKING
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
 from ctx_weft.core.events.types import EventType
 from ctx_weft.core.loop.driver import make_event
-from ctx_weft.core.utils import content_to_text, dynamic_max_tokens, estimate_tokens
+from ctx_weft.core.utils import (
+    dynamic_max_tokens,
+    estimate_content_tokens,
+    estimate_tokens,
+    estimate_tool_calls_tokens,
+)
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
@@ -232,37 +237,15 @@ def legalize_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
     )
 
 
-# 估算里文本 content 之外的补偿项（都往大了取，堵"单轮低估击穿 margin 致 400"的洞）：
-_MSG_FRAMING_TOKENS = 4       # 每条消息的角色/分隔 framing 开销（provider 计费、文本之外）
-_IMAGE_PART_TOKENS = 1600     # 每个图片 part 的保守 token 数（真实随分辨率浮动；不按 base64 长度算，
-                              # 否则一张图几万字符会反向严重高估）
-
-
-def _args_text(args) -> str:
-    """tool_call 参数 → 供估算的文本：dict/list 走 json.dumps，str 原样，其余 str()。"""
-    if isinstance(args, str):
-        return args
-    try:
-        return json.dumps(args, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(args)
-
-
 def _estimate_message_tokens(m: LLMMessage) -> int:
-    """单条消息的 provider 计费估算（往大了估）：文本 content + tool_calls 参数 +
-    reasoning_content + 图片 part + 每条固定 framing 开销。
+    """单条消息的 provider 计费估算（往大了估）：文本 content + 图片 part + framing +
+    tool_calls 参数 + reasoning_content。
 
-    tool_calls 的 arguments、reasoning_content、图片 part 此前都没计入（``content_to_text``
-    只抽 ``.text``），是"单轮新增里一坨数不到的东西 > margin"致 400 的洞（典型如一次超大
-    write_file 调用把内容塞在 arguments 里）。图片按固定保守常数计。
+    计费项定义在 core.utils（``estimate_content_tokens`` / ``estimate_tool_calls_tokens``）——
+    单一真源，prepare/composer 对 memory 记录/装配消息共用同口径。tool_calls 的 arguments、
+    reasoning、图片此前都没计入，是"单轮新增里一坨数不到的东西 > margin"致 400 的洞。
     """
-    total = _MSG_FRAMING_TOKENS
-    total += estimate_tokens(content_to_text(m.content))
-    if not isinstance(m.content, str):
-        total += _IMAGE_PART_TOKENS * sum(1 for p in m.content if not hasattr(p, "text"))
-    for tc in (m.tool_calls or []):
-        total += estimate_tokens(str(tc.get("name", "")))
-        total += estimate_tokens(_args_text(tc.get("arguments", tc.get("input", {}))))
+    total = estimate_content_tokens(m.content) + estimate_tool_calls_tokens(m.tool_calls)
     if m.reasoning_content:
         total += estimate_tokens(m.reasoning_content)
     return total
