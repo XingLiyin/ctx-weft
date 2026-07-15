@@ -848,6 +848,18 @@ class CtxWeftRuntime:
         task_manager.set_has_pending_hitl(
             lambda sid=session.id: bool(self.hitl_manager.list_pending(session_id=sid))
         )
+        # 熔断真终结（Task 10）三处注入：cancel 挂起 HITL / 协作取消在途 run / memory 闭合。
+        # 均 best-effort——trip 序列本身不因这三者缺失或异常而崩溃（TaskManager 侧已兜底）。
+        task_manager.set_cancel_pending_hitl(
+            lambda sid=session.id: self._cancel_session_hitl(sid)
+        )
+        task_manager.set_cancel_inflight(
+            lambda tid, sid=session.id: self._cancel_run_token(sid, tid)
+        )
+        task_manager.set_threshold_finalizer(
+            lambda root, ack_tasks, failures, sess=session: self._finalize_threshold_memory(
+                sess, root, ack_tasks, failures)
+        )
 
         async def _on_done() -> None:
             # compare-and-clear：仅当本 TM 仍是当前 owner 才回收，避免顶替它的新 TM 被误释放。
@@ -881,6 +893,108 @@ class CtxWeftRuntime:
         for _p in self.providers.get_capability_providers():
             if isinstance(_p, SessionScopedCapabilityProvider):
                 _p.deregister_session(session_id)
+
+    # ── 熔断真终结（Task 10 runtime 侧）───────────────────────────────────────
+
+    async def _cancel_session_hitl(self, session_id: str) -> None:
+        """trip 序列第 3 步注入：取消该 session 全部未决 pending HITL（best-effort，逐个 cancel）。
+
+        单条取消失败不阻断其余——HitlCancelled 需尽量全部先于会话终态发出，但这不是硬要求。
+        """
+        for req in list(self.hitl_manager.list_pending(session_id=session_id)):
+            try:
+                await self.hitl_manager.cancel(req.id, message="failure_threshold")
+            except Exception:
+                logger.exception(
+                    "_cancel_session_hitl: cancel failed for session=%s hitl=%s", session_id, req.id,
+                )
+
+    def _cancel_run_token(self, session_id: str, task_id: str) -> bool:
+        """trip 序列第 5/6 步注入：对指定在途 task 发协作取消信号（查 `_run_tokens`）。
+
+        只发信号，不代表任务立即终结：本 run 收尾时是否发 TASK_CANCELED 由 `_run_loop`
+        finally 的 was_cancelled 守卫按 task.status 判定（熔断已先手标 FAILED 的不发）。
+        找不到 token（该 task 此刻并不在跑）→ False。
+        """
+        tokens = self._run_tokens.get(session_id, {}).get(task_id)
+        if tokens is None:
+            return False
+        tokens.cancel.cancel()
+        return True
+
+    async def _finalize_threshold_memory(
+        self,
+        session: Session,
+        root_task: "Task | None",
+        ack_tasks: list[Task],
+        failures: list[tuple[str, str]],
+    ) -> None:
+        """trip 序列第 7 步注入：memory 闭合（内联 await，落在 SESSION_FINISHED/SSE 关闭之前）。
+
+        - ack_tasks（已启动带框、被熔断打断的子任务）：把它们的派发对 tool 槽替换为「取消
+          文案」——若某条在途任务恰好赶在取消信号前正常收尾，FinalizeStep 的 replace=True
+          会再次替换为真实终态，自愈为真相，本次替换不是最后写者也无妨。
+        - root finish 对：仅当熔断亲手把 root 判 FAILED 且它已经 started_at（有胶囊可闭）时才写；
+          root 已经是别的路径判的终态（比如 FinalizeStep 已闭合）时 caller 传 None，此处直接跳过。
+        best-effort per item：单条异常记日志、不阻断其余写入（TaskManager 侧对整个回调的异常
+        也已兜底，这里的粒度是"一个坏任务不能拖累其它任务"）。
+        """
+        from ctx_weft.core.loop.steps.finalize import (
+            _ensure_dispatch_frame,
+            _put_dispatch_result,
+            _synthesize_dispatch_pair,
+        )
+
+        memory = self.providers.get_memory()
+
+        for t in ack_tasks:
+            try:
+                parent_scope = MemoryScope(
+                    session_id=session.id, task_id=t.parent_task_id, agent_id=t.creator_agent_id,
+                )
+                provider_ctx = ProviderContext(
+                    session_id=session.id, tenant_id=session.tenant_id,
+                    task_id=t.parent_task_id, agent_id=t.creator_agent_id,
+                )
+                ts = await _ensure_dispatch_frame(memory, parent_scope, t, provider_ctx)
+                await _put_dispatch_result(
+                    memory, parent_scope, t,
+                    f"Sub-task '{t.title}' was cancelled mid-run (session failure threshold hit); "
+                    f"its partial execution below is incomplete.",
+                    ts, provider_ctx, replace=True,
+                )
+            except Exception:
+                logger.exception(
+                    "_finalize_threshold_memory: ack replace failed for task %s", t.id,
+                )
+
+        if root_task is not None and root_task.started_at:
+            try:
+                scope = MemoryScope(
+                    session_id=session.id, task_id=root_task.id, agent_id=session.root_agent_id,
+                )
+                provider_ctx = ProviderContext(
+                    session_id=session.id, tenant_id=session.tenant_id,
+                    task_id=root_task.id, agent_id=session.root_agent_id,
+                )
+                summary = "Failure threshold hit — consecutive failures: " + "; ".join(
+                    f"{i}) {title}: {reason}" for i, (title, reason) in enumerate(failures, start=1)
+                )
+                await _synthesize_dispatch_pair(
+                    memory, scope, root_task,
+                    act_recap=(
+                        "Session failure threshold was hit (N consecutive sub-task failures); "
+                        "terminating this task."
+                    ),
+                    task_summary=summary,
+                    outcome="fail",
+                    provider_ctx=provider_ctx,
+                    register_bg=False,
+                )
+            except Exception:
+                logger.exception(
+                    "_finalize_threshold_memory: root finish pair failed for task %s", root_task.id,
+                )
 
     def _make_task_runner(
         self,
@@ -1669,7 +1783,13 @@ class CtxWeftRuntime:
                 logger.exception("_run_loop: run failed for task %s", task.id)
         finally:
             self._capability_cache.evict(agent.id)
-            if was_cancelled:
+            # A1 守卫：was_cancelled 只在 task 真的落在 CANCELED（本 run 自己置的取消态）时才发
+            # RUN_CANCELED + TASK_CANCELED。熔断 trip 序列会先把 root 判 FAILED 再对在跑 root 发
+            # 协作取消（_cancel_inflight）——那是内部清场手段，task.status 已是 FAILED（except
+            # asyncio.CancelledError 分支的 `if task.status not in (...)` 挡住了覆写），若仍照发
+            # 这两条事件，host/postgres 投影会把已经写定的 FAILED 盖回 CANCELED。RUN_FINISHED
+            # 不受此守卫约束，无论如何都要发（关 SSE）。
+            if was_cancelled and task.status == "CANCELED":
                 await self._event_bus.emit(make_event(state, EventType.RUN_CANCELED, payload={"run_id": run_id}))
                 await self._event_bus.emit(make_event(state, EventType.TASK_CANCELED, payload={}))
             # will_retry=True suppresses SSE close on the host side.

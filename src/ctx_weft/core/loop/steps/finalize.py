@@ -72,7 +72,7 @@ START_TASK_NAME = qualify("control:start_task")
 _as_utc = as_utc
 
 
-async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
+async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     """在 parent scope 铸一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，
     返回它 == 配对 tool result 应锚定的时间戳 = task 真正开始执行的时刻（started_at）。
 
@@ -93,7 +93,7 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
     # 可能来自事件重放而为 naive（历史无 started_at 时回退 created_at 再回退 now）。
     ts = _as_utc(task.started_at or task.created_at or now_utc())
     existing = await memory.recall_recent(
-        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
+        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, provider_ctx)
     frame = next(
         (r for r in existing
          if r.role == "assistant"
@@ -121,7 +121,7 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
                                       "input": {"title": task.title,
                                                 "description": task.description or ""}}]},
         ),
-        ctx.provider_ctx,
+        provider_ctx,
     )
     return ts
 
@@ -135,7 +135,7 @@ def _parent_scope_of(state, task) -> MemoryScope:
     )
 
 
-async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, ctx,
+async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, provider_ctx,
                                *, replace: bool) -> None:
     """写派发对的 tool 槽（按 origin_tool_call_id 与框配对）。
 
@@ -146,13 +146,13 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, ctx
       都排到框之后，于是「在跑」和「已完成」并列出现。
     """
     recs = await memory.recall_recent(
-        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
+        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, provider_ctx)
     stale = [r.id for r in recs
              if r.role == "tool" and r.metadata.get("tool_call_id") == task.origin_tool_call_id]
     if stale:
         if not replace:
             return
-        await memory.supersede(stale, ctx.provider_ctx)
+        await memory.supersede(stale, provider_ctx)
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
@@ -160,7 +160,7 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, ctx
             metadata={"origin_task_id": task.parent_task_id,
                       "tool_call_id": task.origin_tool_call_id},
         ),
-        ctx.provider_ctx,
+        provider_ctx,
     )
 
 
@@ -186,9 +186,10 @@ async def ensure_dispatch_frame_at_start(state, ctx) -> None:
     if not (task.parent_task_id and task.origin_tool_call_id):
         return  # root task：无派发方，没有框可铸
     parent_scope = _parent_scope_of(state, task)
-    ts = await _ensure_dispatch_frame(ctx.memory, parent_scope, task, ctx)
+    ts = await _ensure_dispatch_frame(ctx.memory, parent_scope, task, ctx.provider_ctx)
     await _put_dispatch_result(
-        ctx.memory, parent_scope, task, _dispatch_running_ack(task.title), ts, ctx, replace=False,
+        ctx.memory, parent_scope, task, _dispatch_running_ack(task.title), ts, ctx.provider_ctx,
+        replace=False,
     )
 
 
@@ -312,10 +313,10 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             # 跨 agent（spec 2026-06-28 §2.3）：dispatch result 写成 agent 层普通 conversation turn
             # （tool 回合），与 start_task / delegate 框靠 tool_call_id 配对、时间戳对齐保证相邻。
             report_prefix = "[outcome=fail] " if outcome == "fail" else ""
-            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx)
+            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx.provider_ctx)
             await _put_dispatch_result(
-                memory, parent_scope, task, f"{report_prefix}{mem_content}", frame_ts, ctx,
-                replace=True,
+                memory, parent_scope, task, f"{report_prefix}{mem_content}", frame_ts,
+                ctx.provider_ctx, replace=True,
             )
             events.append(make_event(
                 state, EventType.MEMORY_INGESTED,
@@ -325,10 +326,10 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
         elif same_agent:
             # 同 agent（spec 2026-06-30 §2.5）：配对 tool result 换终态文案，时间戳对齐框 → 严格
             # 相邻、排在子 body 之前。子真实产出由内联胶囊 body + 嵌套 finish 对承载。
-            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx)
+            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx.provider_ctx)
             await _put_dispatch_result(
-                memory, parent_scope, task, _dispatch_ack(task.title, outcome), frame_ts, ctx,
-                replace=True,
+                memory, parent_scope, task, _dispatch_ack(task.title, outcome), frame_ts,
+                ctx.provider_ctx, replace=True,
             )
             # 嵌套合成子自己的 finish 对（写进共享 agent scope，@close 时刻）
             await _synthesize_dispatch_pair(
@@ -351,10 +352,15 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
 
 
 async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_summary: str,
-                                    outcome: str, provider_ctx) -> None:
+                                    outcome: str, provider_ctx, *, register_bg: bool = True) -> None:
     """close 合成 agent 层 finish 对（spec 2026-06-30 两段化）：
     assistant{content=act_recap + finish_task 调用} / tool{content=task_summary 综合总结}。
-    own-root：占位先写，bg close observe 产新两段后经 _replace_finish_report 替换（A1）。"""
+    own-root：占位先写，bg close observe 产新两段后经 _replace_finish_report 替换（A1）。
+
+    register_bg=False（熔断收尾等 runtime 侧一次性合成路径）：跳过 pop_close_report /
+    register_close_synth / _replace_finish_report 整段 bg-observe 联动——这条 finish 对不是
+    正常 close 流程产生的、没有对应的后台 observe 会来替换它，登记只会累积永不消费的状态。
+    """
     from ctx_weft.core.loop.steps.background_observe import (
         pop_close_report, register_close_synth, _replace_finish_report,
     )
@@ -387,13 +393,14 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
         provider_ctx,
     )
 
-    bg = pop_close_report(task.id)
-    if bg is not None:
-        bg_recap, bg_summary = bg
-        await _replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
-                                     bg_recap, bg_summary, outcome, task.title or "")
-    else:
-        register_close_synth(task.id, tool_call_id, scope, outcome)
+    if register_bg:
+        bg = pop_close_report(task.id)
+        if bg is not None:
+            bg_recap, bg_summary = bg
+            await _replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
+                                         bg_recap, bg_summary, outcome, task.title or "")
+        else:
+            register_close_synth(task.id, tool_call_id, scope, outcome)
 
 
 class FinalizeStep(Step):
