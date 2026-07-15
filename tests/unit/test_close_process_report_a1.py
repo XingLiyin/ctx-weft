@@ -115,8 +115,8 @@ async def test_a1_slot_hit_uses_background_report() -> None:
 
     finish_tool = await _get_finish_tool(mem, asc)
     assert finish_tool is not None, "finish tool record must exist"
-    assert finish_tool.content == "好报告_sum", (
-        f"slot hit: finish tool content must be '好报告_sum'; got {finish_tool.content!r}"
+    assert finish_tool.content == "[task: 测试任务] 好报告_sum", (
+        f"slot hit: finish tool content must be '好报告_sum' (+ task marker); got {finish_tool.content!r}"
     )
     finish_asst = await _get_finish_asst(mem, asc)
     assert finish_asst is not None, "finish assistant record must exist"
@@ -187,7 +187,7 @@ async def test_a1_placeholder_then_async_replace() -> None:
     p_tool_call_id, p_scope, p_outcome = popped
     await _replace_finish_report(
         mem, _pctx(), p_scope, "t1",
-        p_tool_call_id, "好报告_act", "好报告_sum", p_outcome,
+        p_tool_call_id, "好报告_act", "好报告_sum", p_outcome, task.title,
     )
 
     # 旧两条占位记录应被 supersede（不再出现）
@@ -203,8 +203,11 @@ async def test_a1_placeholder_then_async_replace() -> None:
     )
     new_finish_tool = active_tool_recs[0]
     new_finish_asst = active_asst_recs[0]
-    assert new_finish_tool.content == "好报告_sum", (
-        f"new finish tool content must be '好报告_sum'; got {new_finish_tool.content!r}"
+    # 归属前缀须**存活**替换：_replace_finish_report 整条重写 tool 槽，漏传 title 就会把
+    # finalize 合成占位时打上的 `[task: …]` 标记抹掉。
+    assert new_finish_tool.content == "[task: 测试任务] 好报告_sum", (
+        f"new finish tool content must be '好报告_sum' (+ task marker preserved across the "
+        f"bg replace); got {new_finish_tool.content!r}"
     )
     # 反转契约：finish 对 assistant 槽 = act_recap（bg 刷新后的 "好报告_act"，≠ 答复）
     assert new_finish_asst.content == "好报告_act", (
@@ -280,8 +283,8 @@ async def test_slot_hit_replaces_report_no_raw_mirror() -> None:
     # agent 层只有 finish 对（无 body 镜像）
     assert len(recs) == 2 and {r.role for r in recs} == {"assistant", "tool"}
     finish_tool = await _get_finish_tool(mem, asc)
-    assert finish_tool.content == "真实段总结", (
-        f"slot hit: tool content must be '真实段总结'; got {finish_tool.content!r}"
+    assert finish_tool.content == "[task: 测试任务] 真实段总结", (
+        f"slot hit: tool content must be '真实段总结' (+ task marker); got {finish_tool.content!r}"
     )
     finish_asst = await _get_finish_asst(mem, asc)
     # 反转契约：finish 对 assistant 槽 = act_recap（"真实段_act"，≠ 答复）
@@ -341,7 +344,8 @@ async def test_synthesize_dispatch_pair_two_segments() -> None:
     assert call["name"].endswith("finish_task")
     # finish_task 退化为无参收尾标记（不再塞 input.result）
     assert call["input"] == {}
-    assert tool and tool[0].content == "整段：A→B→验证，已就绪"  # tool 槽 = task_summary（process report）
+    # tool 槽 = `[task: <title>] ` 归属前缀 + task_summary（process report）
+    assert tool and tool[0].content == "[task: 测试任务] 整段：A→B→验证，已就绪"
     # 同 tool_call_id、同 timestamp（相邻）
     tcid = asst[0].metadata["tool_calls"][0]["id"]
     assert tool[0].metadata["tool_call_id"] == tcid

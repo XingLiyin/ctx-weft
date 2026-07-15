@@ -34,10 +34,26 @@ _FINAL_RAW_TYPES = [
     MemoryEventType.TOOL_RESULT,
 ]
 
-# 同 agent 派发：派发对 tool 结果的静态文案（不含任何子任务结果，永不回填，spec 2026-06-30 §2.5）。
-# 只写「任务已开始」的套话——子真实产出由内联胶囊 body + 嵌套 finish 对承载。
-def _dispatch_ack(title: str) -> str:
-    return f"Task '{title}' started."
+# 同 agent 派发：派发对 tool 结果（不含任何子任务结果，spec 2026-06-30 §2.5）。
+def _dispatch_ack(title: str, outcome: str) -> str:
+    """同 agent 派发对的 tool 槽：终态 + 内联导读，**绝不含子任务产出**。
+
+    「不回填真实结果」是结构性的，不是保守：llm_gateway.reorder_tool_results_after_calls 会把
+    每条 tool result 强行挪到其 assistant tool_call 之后（OpenAI 兼容端点要求二者相邻，否则
+    400），所以本条**必定**渲染在子 body 之前——无论它的 timestamp 是什么。塞进真实产出就成了
+    「先结论、后过程」的倒叙，且与内联 body + 嵌套 finish 对重复。
+
+    但本条是在 close 时刻才写的，**已知 outcome**，故可以带两样位置正确的前向信息：
+      ① 终态——让 delegate_task 这个调用真正解析出结果，而不是永远停在「started」；
+      ② 导读——告诉读者子任务的完整执行内联在下方、以自己的 finish_task 收尾。导读同时解释了
+         紧随其后的 user 回合（子任务的 task_prompt，非用户发言），否则易被读成用户插话。
+    刻意保持指针级长度：每个派发都会复读一份。
+    """
+    verdict = "FAILED" if outcome == "fail" else "completed"
+    return (
+        f"Sub-task '{title}' ran here — outcome: {verdict}. Its execution is inlined "
+        f"below, ending with its own {qualify('control:finish_task')}."
+    )
 
 # 派发框的叙事工具名（仅出现在重建历史的 tool_calls 里，非可调用能力）。
 START_TASK_NAME = qualify("control:start_task")
@@ -93,6 +109,28 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
         ctx.provider_ctx,
     )
     return ts
+
+
+def _finish_report_prefix(title: str, outcome: str) -> str:
+    """finish 对 tool 槽的前缀：`[task: <title>] ` 标明归属（+ fail 标记）。
+
+    归属标记的必要性：finish 对的 assistant 槽是**无参**收尾标记（`finish_task{}`，反转契约），
+    自身不带任何归属信息。派发侧不存在这个问题——框带 `input:{title, description}` 自描述；
+    收尾侧此前没有对称物，于是同 agent 嵌套（孙→子相继 close）时，父重建出的对话里会出现两组
+    完全同形的 `[assistant finish_task{}][tool …]`，只能靠正文猜是哪个 task 收的尾。
+
+    标记落 tool 槽而非 `input`：`input` 受 finish_task 的 schema 约束，而
+    ControlCapabilityProvider._handle 会过滤 schema 未声明的 key（见 control_capability.py），
+    塞进去只会被静默丢弃；且历史里出现未声明参数会诱导模型照此形状调用。tool 槽是自由文本，
+    与既有 `[outcome=fail]` 前缀同一惯例。归属在前、fail 在后；title 为空则不产空标记。
+    """
+    parts: list[str] = []
+    title = (title or "").strip()
+    if title:
+        parts.append(f"[task: {title}]")
+    if outcome == "fail":
+        parts.append("[outcome=fail]")
+    return "".join(f"{p} " for p in parts)
 
 
 def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
@@ -219,7 +257,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             await memory.ingest(
                 MemoryEvent(
                     type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
-                    content=_dispatch_ack(task.title), timestamp=frame_ts, role="tool",
+                    content=_dispatch_ack(task.title, outcome), timestamp=frame_ts, role="tool",
                     metadata={"origin_task_id": task.parent_task_id,
                               "tool_call_id": task.origin_tool_call_id},
                 ),
@@ -258,7 +296,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     # 反转契约（spec 2026-07-01）：答复正文由「内联的 task 层 body / blackboard mem_content」承载，
     # 故 finish 对的 assistant 槽用 act_recap（过程复述，≠ 答复），避免与内联 body 的答复重复；
     # finish_task 退化为无参收尾标记（不再把答复塞进 input.result）。tool 槽 = task_summary（process report）。
-    report_prefix = "[outcome=fail] " if outcome == "fail" else ""
+    report_prefix = _finish_report_prefix(task.title, outcome)
     summary_text = _finish_tool_text(task_summary, act_recap, outcome)
 
     await memory.ingest(
@@ -286,7 +324,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     if bg is not None:
         bg_recap, bg_summary = bg
         await _replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
-                                     bg_recap, bg_summary, outcome)
+                                     bg_recap, bg_summary, outcome, task.title or "")
     else:
         register_close_synth(task.id, tool_call_id, scope, outcome)
 

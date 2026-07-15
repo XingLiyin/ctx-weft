@@ -220,7 +220,7 @@ async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> N
     # same-agent: static dispatch ack written (not bubbled dispatch result with outcome)
     results = await _dispatch_results(mem, _sc("t1", "ag1"), "oc2")
     assert len(results) == 1, f"expected 1 dispatch ack result; got {results}"
-    assert results[0].content == _dispatch_ack(child.title), (
+    assert results[0].content == _dispatch_ack(child.title, "success"), (
         f"same-agent dispatch result must be _dispatch_ack(title); got {results[0].content!r}"
     )
     # delegate turn KEPT (not superseded, spec 2026-06-30 §2.5)
@@ -252,7 +252,7 @@ async def test_same_agent_nonshort_child_no_bubble_supersedes_final_raw_and_orph
 
     # (a) same-agent: dispatch ack written + delegate turn KEPT (not superseded)
     results = await _dispatch_results(mem, _sc("t1", "ag1"), "oc2")
-    assert len(results) == 1 and results[0].content == _dispatch_ack(child.title), (
+    assert len(results) == 1 and results[0].content == _dispatch_ack(child.title, "success"), (
         f"expected _dispatch_ack(title); got {[r.content for r in results]}"
     )
     delegates = await _delegate_turns(mem, _sc("t1", "ag1"), "oc2")
@@ -322,7 +322,7 @@ async def test_intermediate_close_keeps_grandchild_body() -> None:
     assert any(r.metadata.get("task_id") == "A1" for r in convs), "grandchild body must stay"
     # §2.5: A (same-agent) writes dispatch ack result + keeps delegate turn (not superseded)
     results_ocA = await _dispatch_results(mem, _sc("t1", "ag1"), "ocA")
-    assert len(results_ocA) == 1 and results_ocA[0].content == _dispatch_ack(A.title), (
+    assert len(results_ocA) == 1 and results_ocA[0].content == _dispatch_ack(A.title, "success"), (
         f"same-agent A must write _dispatch_ack(title); got {[r.content for r in results_ocA]}"
     )
     delegates_ocA = await _delegate_turns(mem, _sc("t1", "ag1"), "ocA")

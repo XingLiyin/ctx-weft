@@ -106,8 +106,8 @@ async def test_same_agent_child_mints_frame_and_writes_ack() -> None:
     assert frame[0].timestamp == started, "框须锚 started_at"
     # 配对静态 ack，同锚 started_at → 与框同时间戳（严格相邻）
     ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
-    assert ack and ack[0].content == _dispatch_ack(child.title), (
-        f"§2.5: static ack content must be {_dispatch_ack(child.title)!r}; got {[r.content for r in ack]}"
+    assert ack and ack[0].content == _dispatch_ack(child.title, "success"), (
+        f"§2.5: static ack content must be {_dispatch_ack(child.title, 'success')!r}; got {[r.content for r in ack]}"
     )
     assert ack[0].timestamp == started == frame[0].timestamp, (
         f"框与 result 须同锚 started_at（相邻）；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"
@@ -233,13 +233,13 @@ async def test_same_agent_close_mints_frame_and_ack_co_anchored() -> None:
 
     # 配对静态 result：content=_dispatch_ack(title)、tool_call_id 配对、与框同锚 started_at
     ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
-    assert ack and ack[0].content == _dispatch_ack(child.title), f"expected static ack {_dispatch_ack(child.title)!r}, got {[r.content for r in ack]}"
+    assert ack and ack[0].content == _dispatch_ack(child.title, "success"), f"expected static ack {_dispatch_ack(child.title, 'success')!r}, got {[r.content for r in ack]}"
     assert frame[0].timestamp == started == ack[0].timestamp, (
         f"框与 ack 须同锚 started_at；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"
     )
 
     # stray-ack guard：no OTHER tool record carries ack content
-    assert _dispatch_ack(child.title) not in {
+    assert _dispatch_ack(child.title, "success") not in {
         r.content for r in turns
         if r.metadata.get("tool_call_id") != child.origin_tool_call_id
     }, "ack content must only appear in the paired tool_call_id record"

@@ -736,8 +736,8 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
                      for tc in (r.metadata.get("tool_calls") or []))]
     assert frame, "finalize 须铸派发框（真名 delegate_task）"
     ack = [r for r in parent_caps if r.role == "tool" and r.metadata.get("tool_call_id") == tc_short]
-    assert ack and ack[0].content == _dispatch_ack(child_task.title), (
-        f"§2.5: static ack must be {_dispatch_ack(child_task.title)!r}; got {[r.content for r in ack]}"
+    assert ack and ack[0].content == _dispatch_ack(child_task.title, "success"), (
+        f"§2.5: static ack must be {_dispatch_ack(child_task.title, 'success')!r}; got {[r.content for r in ack]}"
     )
     assert frame[0].timestamp == started == ack[0].timestamp, (
         f"框与 ack 须同锚 started_at；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"

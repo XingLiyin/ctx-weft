@@ -61,9 +61,13 @@ def pop_close_synth(task_id: str) -> tuple | None:
 
 async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
                                  tool_call_id: str, act_recap: str, task_summary: str,
-                                 outcome: str) -> None:
+                                 outcome: str, title: str) -> None:
     """supersede finish 对的 assistant + tool 两条占位，按新 act_recap / task_summary 重写。
-    按 (tool_call_id + origin_task_id) 定位，不再靠 'Process Report:' 文本（spec 2026-06-30 §2.4）。"""
+    按 (tool_call_id + origin_task_id) 定位，不再靠 'Process Report:' 文本（spec 2026-06-30 §2.4）。
+
+    title：归属 task 的标题，用于重建 tool 槽的 `[task: …]` 前缀（与 finalize 合成占位时同源，
+    见 finalize._finish_report_prefix）。本函数整条重写 tool 槽，不传就会把占位里的归属标记抹掉。"""
+    from ctx_weft.core.loop.steps.finalize import _finish_report_prefix
     from ctx_weft.protocols import MemoryEvent, MemoryEventType
     from ctx_weft.protocols.capability import qualify
 
@@ -87,7 +91,7 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
 
     await memory.supersede([r.id for r in (*asst, *tool)], provider_ctx)
 
-    report_prefix = "[outcome=fail] " if outcome == "fail" else ""
+    report_prefix = _finish_report_prefix(title, outcome)
     summary_text = task_summary if (task_summary and task_summary.strip()) else act_recap
     # finish 对 assistant 槽 = act_recap（过程复述，≠ 答复）：答复由内联 body / blackboard 承载，
     # 避免与之重复（spec 2026-07-01 反转契约）。
@@ -188,6 +192,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                         await _replace_finish_report(
                             ctx.memory, ctx.provider_ctx, scope, state.task.id,
                             tool_call_id, act_recap, task_summary, outcome,
+                            state.task.title or "",
                         )
                     else:
                         # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
