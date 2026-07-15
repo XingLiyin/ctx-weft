@@ -73,7 +73,7 @@ def estimate_tokens(text: str) -> int:
         return 0
     cjk = len(_CJK_RE.findall(text))
     other = len(text) - cjk
-    return max(1, (3 * cjk + 1) // 2 + (other + 2) // 3)
+    return max(1, 2 * cjk + (other + 1) // 2)
 
 
 def effective_limit(context_limit: int, reserved_output_tokens: int) -> int:
