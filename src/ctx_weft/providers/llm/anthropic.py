@@ -85,6 +85,8 @@ class AnthropicAdapter(LLMClient):
             tool_blocks: dict[int, dict[str, Any]] = {}
             thinking_blocks: dict[int, str] = {}
             input_tokens: int | None = None
+            cache_read = 0
+            cache_write = 0
             content_text = ""
             finish_reason: str | None = None
             usage: LLMUsage | None = None
@@ -153,6 +155,8 @@ class AnthropicAdapter(LLMClient):
                         if event_type == "message_start":
                             usage_data = (event.get("message") or {}).get("usage") or {}
                             input_tokens = usage_data.get("input_tokens")
+                            cache_read = usage_data.get("cache_read_input_tokens") or 0
+                            cache_write = usage_data.get("cache_creation_input_tokens") or 0
 
                         elif event_type == "content_block_start":
                             block = event.get("content_block") or {}
@@ -202,11 +206,26 @@ class AnthropicAdapter(LLMClient):
                             stop_reason = event.get("delta", {}).get("stop_reason")
                             usage_data = event.get("usage") or {}
                             output_tokens = usage_data.get("output_tokens", 0)
-                            total = (input_tokens or 0) + output_tokens
+                            # 部分代理在尾包重发输入侧字段——带了就覆盖（以尾包为准）
+                            if usage_data.get("input_tokens") is not None:
+                                input_tokens = usage_data.get("input_tokens")
+                            if usage_data.get("cache_read_input_tokens") is not None:
+                                cache_read = usage_data.get("cache_read_input_tokens") or 0
+                            if usage_data.get("cache_creation_input_tokens") is not None:
+                                cache_write = usage_data.get("cache_creation_input_tokens") or 0
+                            # Anthropic 的 input_tokens 不含缓存部分 → 归一为「全部输入」口径，
+                            # 保证 core 的 context 阈值/预算拿到真实上下文规模（开缓存后不失真）
+                            uncached = input_tokens or 0
+                            prompt_total = uncached + cache_read + cache_write
                             usage = LLMUsage(
-                                prompt_tokens=input_tokens or 0,
+                                prompt_tokens=prompt_total,
                                 completion_tokens=output_tokens,
-                                total_tokens=total,
+                                total_tokens=prompt_total + output_tokens,
+                                cache_read_tokens=cache_read,
+                                cache_write_tokens=cache_write,
+                                input_tokens=uncached,
+                                # reasoning_tokens 恒 0：thinking 计入 output_tokens 无单列，
+                                # 不用流式 thinking 文本估算——估算值混进计费口径就是错账
                             )
                             finish_reason = stop_reason or "stop"
                             break  # 终止事件 → 跳出循环做统一收尾
