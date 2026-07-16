@@ -5,7 +5,9 @@
 
 boundary 分流（Task 6）：
   - finish / normal → 结果落 _close_report 槽，不写 memory（finalize Task 8 取用）
-  - 其他（interrupt、plain_text 等）→ apply_compact 写 TASK_COMPACT_SUMMARY
+  - 其他（interrupt、plain_text 等）→ apply_compact 写 TASK_COMPACT_SUMMARY；
+    但本段 active raw token ≤ short_task_token_threshold 时**免折**（短段保 raw，
+    不跑后台 LLM——「短 → 原文成胶囊」决策在段边界的延伸；raw 跨边界累积，超阈值再折）
 
 崩溃恢复的已知 best-effort 竞态（spec §5.1/§3.6）：`recover_session` 对一个 SUSPENDED-且-有
 待完成 interrupt/plain_text 段 recap 的 task，会同时（a）经 TaskManager.restore 重排该 task 的
@@ -23,6 +25,7 @@ from typing import TYPE_CHECKING
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
+from ctx_weft.core.utils import content_to_text, estimate_tokens
 from ctx_weft.protocols import MemoryEventType, MemoryLayer
 
 if TYPE_CHECKING:
@@ -42,6 +45,14 @@ _close_report: dict[str, tuple[str, str]] = {}
 _close_synth: dict[str, tuple] = {}
 
 _CLOSE_BOUNDARIES = {"finish", "normal"}
+
+# 段边界折叠会 supersede 的 raw 类型（= apply_compact 的非保护类型；与 finalize._FINAL_RAW_TYPES
+# 同构，本地定义避免与 finalize 交叉 import——finalize 已反向 import 本模块的 pop_close_report）
+_SEGMENT_RAW_TYPES = [
+    MemoryEventType.LLM_RESPONSE,
+    MemoryEventType.TOOL_INVOCATION,
+    MemoryEventType.TOOL_RESULT,
+]
 
 
 def pop_close_report(task_id: str) -> tuple[str, str] | None:
@@ -145,6 +156,28 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                         state.task.id,
                     )
                     return
+                # 短段免折（finalize._is_short_leaf「短 → 原文成胶囊」决策在段边界的延伸）：
+                # 本段 active raw token ≤ short_task_token_threshold（与短任务同一旋钮）时跳过
+                # 折叠——花一次后台 LLM 调用换一段常比原文还长的摘要不划算。跳过 = 段保 raw，
+                # 与观察失败的降级同语义；raw 跨边界累积，下次边界重估的是累积后的 active raw，
+                # 超阈值即一并折叠。配置缺失（手构 state / 单测）时门关闭。
+                threshold = getattr(
+                    state.agent.loop_config, "short_task_token_threshold", 0,
+                )
+                if threshold > 0:
+                    records = await ctx.memory.recall_recent(
+                        state.scope, _SEGMENT_RAW_TYPES, 2000, ctx.provider_ctx,
+                    )
+                    seg_text = " ".join(
+                        r.content if isinstance(r.content, str) else content_to_text(r.content)
+                        for r in records
+                    )
+                    if estimate_tokens(seg_text) <= threshold:
+                        logger.info(
+                            "short segment kept raw (task=%s boundary=%s <=%d tokens); skip fold",
+                            state.task.id, boundary, threshold,
+                        )
+                        return
             try:
                 agent = state.agent
                 bound_caps = (

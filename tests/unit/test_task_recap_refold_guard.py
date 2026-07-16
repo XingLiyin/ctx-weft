@@ -48,6 +48,80 @@ async def test_close_boundary_not_guarded(fake_state_ctx, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_short_segment_kept_raw_no_llm_call(fake_state_ctx, monkeypatch):
+    """短段免折：本段 active raw token ≤ short_task_token_threshold → 不跑后台 LLM、
+    不折叠（raw 保持 active、无 TASK_COMPACT_SUMMARY），finally 仍发 TASK_RECAP_DONE。"""
+    state, ctx = fake_state_ctx
+    state.agent.loop_config = SimpleNamespace(
+        compact_keep_last=2, max_turns_per_observe=3,
+        short_task_token_threshold=1000,  # 种子 raw（hello llm / tool result）远低于此
+    )
+    called = {"react": False}
+    async def _react(*a, **k):
+        called["react"] = True
+        return None, ""
+    monkeypatch.setattr(bo, "run_observe_react", _react)
+
+    await bo._run_background_observe(state, ctx, boundary="plain_text")
+
+    assert called["react"] is False  # 短段直接跳过，连 LLM 都不跑
+    n_raw = await ctx.memory.count_recent(
+        state.scope, [MemoryEventType.LLM_RESPONSE], ctx.provider_ctx,
+    )
+    assert n_raw == 1, "短段的 raw 应保持 active（未被 supersede）"
+    n_summary = await ctx.memory.count_recent(
+        state.scope, [MemoryEventType.TASK_COMPACT_SUMMARY], ctx.provider_ctx,
+    )
+    assert n_summary == 0, "短段不应产 TASK_COMPACT_SUMMARY"
+    done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
+    assert len(done_events) == 1  # finally 无条件发 DONE，跳过不影响收尾
+
+
+@pytest.mark.asyncio
+async def test_segment_over_threshold_folds_as_before(fake_state_ctx, monkeypatch):
+    """超过阈值的段照常折叠（门只放行短段）。"""
+    state, ctx = fake_state_ctx
+    state.agent.loop_config = SimpleNamespace(
+        compact_keep_last=2, max_turns_per_observe=3,
+        short_task_token_threshold=1,  # 种子 raw 必然超过
+    )
+    from ctx_weft.core.orchestrator.control_capability import ControlResult
+    called = {"react": False}
+    async def _react(*a, **k):
+        called["react"] = True
+        return ControlResult(content="segment recap", metadata={}), ""
+    monkeypatch.setattr(bo, "run_observe_react", _react)
+
+    await bo._run_background_observe(state, ctx, boundary="plain_text")
+
+    assert called["react"] is True
+    n_raw = await ctx.memory.count_recent(
+        state.scope, [MemoryEventType.LLM_RESPONSE], ctx.provider_ctx,
+    )
+    assert n_raw == 0, "超阈值段应照常折叠（raw 被 supersede）"
+
+
+@pytest.mark.asyncio
+async def test_close_boundary_ignores_short_segment_gate(fake_state_ctx, monkeypatch):
+    """close 边界（finish/normal）不受短段门影响：finish 对的 Process Report 与段大小无关。"""
+    state, ctx = fake_state_ctx
+    state.agent.loop_config = SimpleNamespace(
+        compact_keep_last=2, max_turns_per_observe=3,
+        short_task_token_threshold=10**9,  # 巨大阈值也拦不住 close 路径
+    )
+    from ctx_weft.core.orchestrator.control_capability import ControlResult
+    called = {"react": False}
+    async def _react(*a, **k):
+        called["react"] = True
+        return ControlResult(content="r", metadata={}), ""
+    monkeypatch.setattr(bo, "run_observe_react", _react)
+
+    await bo._run_background_observe(state, ctx, boundary="finish")
+
+    assert called["react"] is True
+
+
+@pytest.mark.asyncio
 async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guard(
     fake_state_ctx, monkeypatch,
 ):

@@ -88,6 +88,8 @@ class LoopConfig:
     predispatch_compact_token_ratio: float = 0.0
     # 短任务（叶子）保留阈值（spec 2026-06-23）：finish 时 task 层对话 token ≤ threshold
     # 且 LLM_RESPONSE 轮次 ≤ turn_cap → 不 close（保留完整对话）；否则 close 成残留。
+    # token_threshold 同时门控段边界折叠（background_observe）：interactive/interrupt 段的
+    # active raw ≤ threshold 时免折保 raw（同一「多短算短」旋钮，不跑后台 LLM）。
     short_task_token_threshold: int = 1000
     short_task_turn_cap: int = 2
 
