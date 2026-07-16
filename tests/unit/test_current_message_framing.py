@@ -1,4 +1,9 @@
-"""current-message 框架：存 raw（driver）+ 渲染期只贴最近一条 user（composer）（§2.6）。"""
+"""current-message 框架：存 raw（driver）+ 渲染期只框当前 task 的**首条** user_prompt（composer）。
+
+（2026-06-26 spec §2.6 曾定为「贴最近一条」；interactive 多轮下框随新消息漂移、
+每轮打穿 cache 前缀，已改为钉在开启该 task 的首条消息上——追问回合保持原文，
+生成点附近的任务锚由 act guidance 锚定行承担。）
+"""
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -24,11 +29,11 @@ def _task(in_mem=True, title="PPTX转PDF", desc="转 PDF", prompt="把这个 ppt
                            user_prompt=prompt, process_report=None, id="t1")
 
 
-def test_frame_only_latest_user_turn():
-    """多轮：只有最近一条 USER_PROMPT user 被框，历史 user 裸。
+def test_frame_only_first_user_prompt_of_task():
+    """多轮（interactive 同 task 累积多条 user_prompt）：只有**首条**被框，追问回合保持原文。
 
-    history_pairs 现在是 (msg, src, mem_type) 三元组；
-    _frame_current_message 依据 mem_type=="user_prompt" 识别当前消息。
+    框随新消息漂移会让上一轮被装饰的回合在下一轮重建时恢复原文，cache 前缀每轮被打穿；
+    追问回合的就近任务锚由 act guidance 锚定行承担。
     """
     comp = _comp()
     history_pairs = [
@@ -38,11 +43,11 @@ def test_frame_only_latest_user_turn():
     ]
     messages = [m for m, *_ in history_pairs]
     comp._frame_current_message(messages, history_pairs, _task())
-    assert messages[0].content == "检查工作目录"                    # 历史裸
-    assert "## Current Message" in messages[2].content            # 最近被框
-    assert "## Current Task" in messages[2].content
-    assert "Reply in the same language" in messages[2].content
-    assert "把这个 ppt 转 pdf" in messages[2].content
+    assert "## Current Message" in messages[0].content            # 首条被框
+    assert "## Current Task" in messages[0].content
+    assert "Reply in the same language" in messages[0].content
+    assert "检查工作目录" in messages[0].content
+    assert messages[2].content == "把这个 ppt 转 pdf"              # 追问裸
 
 
 def test_frame_targets_current_task_by_id_not_latest():

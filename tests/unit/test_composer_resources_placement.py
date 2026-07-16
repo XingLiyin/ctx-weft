@@ -294,6 +294,46 @@ def _experience_block(role: str, content: str, ts: str) -> ContextBlock:
                         metadata={"role": role, "timestamp": ts})
 
 
+def _task_history_block(role: str, content: str, ts: str, task_id: str) -> ContextBlock:
+    mem_type = "user_prompt" if role == "user" else "llm_response"
+    return ContextBlock(id=f"h-{ts}", source="task_conversation", kind="history",
+                        target="messages", content=content, priority=3, token_estimate=1,
+                        metadata={"role": role, "timestamp": ts, "type": mem_type,
+                                  "task_id": task_id})
+
+
+def test_interactive_task_anchors_first_user_prompt_not_latest() -> None:
+    """Interactive task: the user's follow-up messages accumulate as USER_PROMPTs with the SAME
+    task_id. The ## Current Task frame + directive must pin to the FIRST (task-opening) user
+    message and never drift onto the latest one — drifting re-decorates a different turn every
+    round, reverting the previous turn's bytes and breaking the prompt-cache prefix. Follow-up
+    messages stay raw (form C); the near-generation task anchor is the guidance anchor line.
+    Capabilities keep riding the trailing user message (current layout)."""
+    blocks = [
+        _identity_block("SOUL TEXT"),
+        _cap_block("web_search", "tool", "search the web"),
+        _directive_block("Do the thing"),
+        _task_history_block("user", "你好", "1", "tsk_1"),
+        _task_history_block("assistant", "你好！有什么可以帮你？", "2", "tsk_1"),
+        _task_history_block("user", "你是谁", "3", "tsk_1"),
+    ]
+    task = SimpleNamespace(id="tsk_1", user_prompt_in_memory=True, process_report=None,
+                           title="打招呼", description="回应问候", user_prompt="你好")
+    msgs = DefaultComposer()._build_actor_messages(blocks, SimpleNamespace(task=task, purpose="act"))
+    user_msgs = [m for m in msgs if m.role == "user"]
+    first = user_msgs[0].content
+    latest = user_msgs[-1].content
+    # frame + directive pin to the task-opening message
+    assert "## Current Task" in first and "## Current Message" in first and "你好" in first
+    assert "## Instructions for the current task" in first
+    # the latest (follow-up) message keeps its raw content, no frame/directive drift;
+    # capabilities ride the trailing user message (current layout)
+    assert "你是谁" in latest
+    assert "## Current Task" not in latest
+    assert "## Instructions for the current task" not in latest
+    assert "## Capabilities" in latest
+
+
 def test_act_directive_targets_current_task_not_prior_experience() -> None:
     """The current task's skill directive must ride the current task's first user message
     (task_conversation), not an earlier cross-task agent_experience turn that happens to be

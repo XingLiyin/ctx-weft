@@ -17,7 +17,8 @@ messages —— 组装步骤（_build_actor_messages）：
        finish/dispatch 对 + 折叠摘要，按 (timestamp, seq_no) 正序（见
        sources/_history.py）。当前 task 段摘要已冠 ## Progress So Far，
        user 身份摘要已套「压缩摘要」消歧前缀。
-    ② 当前 task 的 user_prompt 回合就地装饰（按 task_id 定位，缺失回退末条）：
+    ② 当前 task 的 user_prompt 回合就地装饰（按 task_id 定位**首条**——interactive
+       多轮里框不随新消息漂移；匹配不到回退末条）：
        ## Current Task / ## Current Message 框 + 同语言回复提示；
        directive（skill 指令）仅 act 拼在此回合尾部。
     ③ 仅 act：末条以 assistant/tool 收尾时垫续跑衔接 user 回合
@@ -442,17 +443,23 @@ class DefaultComposer(Composer):
 
     @staticmethod
     def _current_task_user_index(history_pairs, task_id) -> int | None:
-        """定位「当前 task」的 user_prompt 回合下标：优先 task_id 精确匹配，回退最后一条 user_prompt。
+        """定位「当前 task」的 user_prompt 回合下标：task_id 精确匹配取**首条**，回退最后一条 user_prompt。
 
         history_pairs 是 _history_to_messages_with_sources 的 (msg, src, mem_type, task_id) 四元组。
-        parent resume 后召回里存在多条 user_prompt（parent 自己 + 更新的同 agent 子 body）——按 task_id
-        精确贴到当前 task，避免子 body 顶着 parent 的 ## Current Task 头；task_id 缺失（旧数据）时回退末条。
+        - 匹配取首条：interactive 任务同一 task 会累积多条 user_prompt（用户每条新消息一条），
+          ## Current Task 框 / directive 须钉在**开启该 task 的首条消息**上（C 形态：
+          追问消息保持原文，生成点附近的任务锚由 guidance 锚定行承担）。取末条会让框和随框注入的
+          内容跟着每条新消息漂移——上一轮被装饰的回合在下一轮重建时恢复原文，cache 前缀每轮被打穿。
+          （2026-06-26 spec §2.6 曾定为「贴最近一条」，该决策被本行为取代。）
+        - parent resume 后召回里存在其它 task 的 user_prompt（更新的同 agent 子 body 等）——task_id
+          过滤保证不误顶 parent 头。
+        - task_id 匹配不到（fresh task / 旧数据无 task_id）时回退末条 user_prompt。
         """
         match = last = None
         for i, (m, _src, mtype, tid) in enumerate(history_pairs):
             if m.role == "user" and mtype == "user_prompt":
                 last = i
-                if task_id and tid == task_id:
+                if match is None and task_id and tid == task_id:
                     match = i
         return match if match is not None else last
 
@@ -460,8 +467,10 @@ class DefaultComposer(Composer):
         """In-memory 路径：把「当前 task」的 USER_PROMPT user message 包成当前消息框架（不落库）。
 
         history_pairs 是 _history_to_messages_with_sources 返回的 (msg, src, mem_type, task_id) 四元组。
-        当前消息按 task_id == task.id 定位（回退末条 user_prompt）——兼容 agent_recall 及历史 task_conversation 标签。
-        spec（title/description）取自 task_spec block 的 metadata（无块时回退直读 task）。
+        按 task_id == task.id 定位**首条**（开启该 task 的消息；interactive 追问回合保持原文，
+        框不随新消息漂移；匹配不到回退末条 user_prompt）——兼容 agent_recall 及历史
+        task_conversation 标签。spec（title/description）取自 task_spec block 的 metadata
+        （无块时回退直读 task）。
         """
         target = self._current_task_user_index(history_pairs, getattr(task, "id", ""))
         if target is None:
