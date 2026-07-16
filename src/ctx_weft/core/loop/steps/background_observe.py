@@ -55,6 +55,27 @@ _SEGMENT_RAW_TYPES = [
 ]
 
 
+async def is_short_segment(state: "LoopState", ctx: "LoopContext") -> bool:
+    """短段免折门：本段 active raw token ≤ short_segment_token_threshold？
+
+    「短 → 原文成胶囊」决策（finalize._is_short_leaf）在段级的判定，
+    `_run_background_observe`（interactive/interrupt 边界）与
+    `observe._fold_retry_segment`（retry 段折）共用。配置缺失（手构 state /
+    单测）→ False = 门关闭，照常折叠。
+    """
+    threshold = getattr(state.agent.loop_config, "short_segment_token_threshold", 0)
+    if threshold <= 0:
+        return False
+    records = await ctx.memory.recall_recent(
+        state.scope, _SEGMENT_RAW_TYPES, 2000, ctx.provider_ctx,
+    )
+    seg_text = " ".join(
+        r.content if isinstance(r.content, str) else content_to_text(r.content)
+        for r in records
+    )
+    return estimate_tokens(seg_text) <= threshold
+
+
 def pop_close_report(task_id: str) -> tuple[str, str] | None:
     """取走 close 路径产出的 (act_recap, task_summary)；不存在则返回 None。"""
     return _close_report.pop(task_id, None)
@@ -156,28 +177,16 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                         state.task.id,
                     )
                     return
-                # 短段免折（finalize._is_short_leaf「短 → 原文成胶囊」决策在段边界的延伸）：
-                # 本段 active raw token ≤ short_segment_token_threshold 时跳过折叠——花一次
+                # 短段免折（is_short_segment）：本段 active raw 低于阈值时跳过折叠——花一次
                 # 后台 LLM 调用换一段常比原文还长的摘要不划算。跳过 = 段保 raw，与观察失败的
                 # 降级同语义；raw 跨边界累积，下次边界重估的是累积后的 active raw，超阈值即
-                # 一并折叠。配置缺失（手构 state / 单测）时门关闭。
-                threshold = getattr(
-                    state.agent.loop_config, "short_segment_token_threshold", 0,
-                )
-                if threshold > 0:
-                    records = await ctx.memory.recall_recent(
-                        state.scope, _SEGMENT_RAW_TYPES, 2000, ctx.provider_ctx,
+                # 一并折叠。
+                if await is_short_segment(state, ctx):
+                    logger.info(
+                        "short segment kept raw (task=%s boundary=%s); skip fold",
+                        state.task.id, boundary,
                     )
-                    seg_text = " ".join(
-                        r.content if isinstance(r.content, str) else content_to_text(r.content)
-                        for r in records
-                    )
-                    if estimate_tokens(seg_text) <= threshold:
-                        logger.info(
-                            "short segment kept raw (task=%s boundary=%s <=%d tokens); skip fold",
-                            state.task.id, boundary, threshold,
-                        )
-                        return
+                    return
             try:
                 agent = state.agent
                 bound_caps = (

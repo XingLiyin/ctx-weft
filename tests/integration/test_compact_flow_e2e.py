@@ -40,7 +40,11 @@ def _act_only_template() -> AgentTemplate:
 
 async def test_context_limit_retry_folds_segment_e2e():
     resolver = InMemoryTemplateResolver()
-    resolver.register(_act_only_template())
+    # 本测试钉「retry 段折」路径本体：关短段免折门（mock 段仅几 token，
+    # 默认阈值 400 下会免折保 raw——那是另一条已单测的路径）。
+    tpl = _dc.replace(_act_only_template(),
+                      loop_config=LoopConfig(short_segment_token_threshold=0))
+    resolver.register(tpl)
     # context_limit=20 → 0.8*20=16 tokens 阈值，真实 prompt 必超 → act turn1 context_limit 命中
     # output_reserve=0：effective_limit 不为 reserved_output_tokens 吞光（Task 4 引入）
     llm = MockLLMAdapter(responses=[MockResponse(text="partial work, not done yet")],
@@ -93,7 +97,8 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     resolver = InMemoryTemplateResolver()
     tpl = _act_only_template()
     tpl = _dc.replace(tpl, id="tpl_mr", loop_config=LoopConfig(
-        collapse_keep_last=2, compact_target_ratio=0.01))
+        collapse_keep_last=2, compact_target_ratio=0.01,
+        short_segment_token_threshold=0))  # 关短段免折门：mock 段极小，留门则段摘要永不累积
     resolver.register(tpl)
     llm = MockLLMAdapter(responses=[MockResponse(text="partial work, not done yet")] * 30,
                          context_limit=20, output_reserve=0)

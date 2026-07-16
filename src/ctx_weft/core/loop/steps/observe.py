@@ -445,13 +445,24 @@ class ObserveStep(Step):
 
         act_recap 来源：本轮真走成 report_task_outcome（reported）用其可信 report，否则用 verdict.act_recap
         （root 机械退出经 _should_use_llm 强制 LLM 已产出）。空则不折、段保 raw（不写占位摘要）。
+        短段免折（background_observe.is_short_segment，与段边界折叠同门）：本段 active raw 低于
+        short_segment_token_threshold 时不折——recap 常比短原文更长，raw 原样留给下个 attempt
+        反而信息更全；raw 跨 attempt 累积，超阈值后下一次 retry 一并折叠。
         """
+        from ctx_weft.core.loop.steps.background_observe import is_short_segment
+
         if verdict.task_outcome != "retry":
             return
         summary = (verdict.act_recap or "").strip()
         if not summary:
             logger.warning(
                 "_fold_retry_segment: empty act_recap for task=%s; skip fold, segment kept raw",
+                state.task.id,
+            )
+            return
+        if await is_short_segment(state, ctx):
+            logger.info(
+                "_fold_retry_segment: short segment kept raw (task=%s); skip fold",
                 state.task.id,
             )
             return

@@ -82,6 +82,55 @@ async def test_retry_accumulates_prior_segments():
     assert contents == ["段摘要①", "段摘要②"], "旧段摘要须保留，新段摘要追加（累积而非替换）"
 
 
+async def test_retry_short_segment_kept_raw():
+    """短段免折（与段边界折叠同门 is_short_segment）：本轮 attempt 的 active raw 低于
+    short_segment_token_threshold → 不折、不写段摘要，raw 原样留给下个 attempt
+    （recap 常比短原文更长，原文信息反而更全）。"""
+    mem = InMemoryMemoryProvider()
+    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    await _ingest(mem, scope, T.USER_PROMPT, "原始请求", 0)
+    await _ingest(mem, scope, T.LLM_RESPONSE, "一句话回复", 1, role="assistant")
+
+    state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"),
+                            agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(
+                                compact_keep_last=6, short_segment_token_threshold=400)),
+                            session=SimpleNamespace(id="s", tenant_id="tn"),
+                            run_id="r1", sequence_counter=0)
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要：短段不该写我", reported=False)
+
+    events = []
+    await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
+
+    recs = await mem.recall_recent(scope, [T.LLM_RESPONSE, T.TASK_COMPACT_SUMMARY], 100, _pctx())
+    assert any(r.type == T.LLM_RESPONSE for r in recs), "短段 raw 应保留（未被 supersede）"
+    assert not any(r.type == T.TASK_COMPACT_SUMMARY for r in recs), "短段不应写段摘要"
+    assert events == []  # 未折 → 不发 MEMORY_COMPACTED
+
+
+async def test_retry_long_segment_still_folds_when_threshold_set():
+    """超过阈值的 attempt 照常折（门只放行短段）。"""
+    mem = InMemoryMemoryProvider()
+    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    await _ingest(mem, scope, T.USER_PROMPT, "原始请求", 0)
+    await _ingest(mem, scope, T.LLM_RESPONSE, "本轮回复", 1, role="assistant")
+
+    state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"),
+                            agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(
+                                compact_keep_last=6, short_segment_token_threshold=1)),
+                            session=SimpleNamespace(id="s", tenant_id="tn"),
+                            run_id="r1", sequence_counter=0)
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要", reported=False)
+
+    events = []
+    await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
+
+    recs = await mem.recall_recent(scope, [T.LLM_RESPONSE, T.TASK_COMPACT_SUMMARY], 100, _pctx())
+    assert not any(r.type == T.LLM_RESPONSE for r in recs), "超阈值段应照常折叠"
+    assert any(r.type == T.TASK_COMPACT_SUMMARY for r in recs)
+
+
 async def test_non_retry_outcome_does_not_fold():
     mem = InMemoryMemoryProvider()
     scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
