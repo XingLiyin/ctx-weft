@@ -254,6 +254,13 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                                        MemoryEventType.TASK_COMPACT_SUMMARY),
                     )
             except Exception:
+                # close 边界防泄漏：finalize 可能已 register_close_synth，本次失败后永远无人
+                # 消费（task_id 唯一 + close 单入口），弹掉——与「无可用报告」分支对称。
+                # 已知残余窗口（接受，不另引状态同步）：bg 比 finalize 先死时登记发生在 pop
+                # 之后，仍漏一条；对称地，bg 先写 _close_report 而 finalize 异常中止也漏。
+                # 两者触发概率与单次代价（几百字节/次）都低一个量级。
+                if boundary in _CLOSE_BOUNDARIES:
+                    pop_close_synth(state.task.id)
                 logger.exception("background observe failed (ignored); segment kept raw")
     finally:
         await ctx.event_bus.emit(make_event(

@@ -48,6 +48,26 @@ async def test_close_boundary_not_guarded(fake_state_ctx, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_close_boundary_exception_pops_close_synth(fake_state_ctx, monkeypatch):
+    """close 边界 bg observe 抛异常时须弹掉 finalize 已登记的 _close_synth 槽
+    ——登记此后永远无人消费（task_id 唯一 + close 单入口），不弹即模块级 dict 泄漏。
+    异常被吞（不外抛），finally 仍发 TASK_RECAP_DONE。"""
+    state, ctx = fake_state_ctx
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
+    bo.register_close_synth(state.task.id, "tcall_x", state.scope, "success")
+
+    async def _boom(*a, **k):
+        raise RuntimeError("llm outage")
+    monkeypatch.setattr(bo, "run_observe_react", _boom)
+
+    await bo._run_background_observe(state, ctx, boundary="finish")  # 不应外抛
+
+    assert bo.pop_close_synth(state.task.id) is None, "异常路径应弹掉登记（防泄漏）"
+    done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
+    assert len(done_events) == 1
+
+
+@pytest.mark.asyncio
 async def test_short_segment_kept_raw_no_llm_call(fake_state_ctx, monkeypatch):
     """短段免折：本段 active raw token ≤ short_segment_token_threshold → 不跑后台 LLM、
     不折叠（raw 保持 active、无 TASK_COMPACT_SUMMARY），finally 仍发 TASK_RECAP_DONE。"""
