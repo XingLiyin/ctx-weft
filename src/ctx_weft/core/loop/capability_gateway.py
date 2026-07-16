@@ -189,6 +189,9 @@ class CapabilityGateway:
                 f"well-formed JSON arguments object]",
                 is_dispatch, is_silent, tool_call_id,
             )
+        # 剥掉 schema 未声明的顶层键（对任意调用生效）。放在 _raw 兜底之后，避免把哨兵剥空
+        # 而丢掉「参数非法」信号；放在 required 校验之前，使「只发了未知键」被剥空后照样触发 required。
+        effective_args = _strip_unknown_keys(effective_args, schema)
         # 参数校验：放在 coerce 之后，看到的是收敛后的类型（3 而非 "3"），不会假阳性。
         # 只拦 required/type/enum（见 _validate_args），失败回灌 LLM 让其改参重试，与 unknown-tool 同出口。
         err = _validate_args(effective_args, schema)
@@ -501,6 +504,36 @@ def _coerce_args(arguments: dict[str, Any], schema: dict[str, Any] | None) -> di
         if isinstance(decl, dict):
             out[key] = _coerce_scalar(value, decl.get("type"))
     return out
+
+
+def _strip_unknown_keys(arguments: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
+    """丢弃 input_schema.properties 未声明的顶层键（对任意调用生效）。
+
+    模型偶尔臆造 schema 里没有的键；畸形缓冲救援也可能抠出带杂键的对象（如把嵌套内层
+    ``{"b": 2}`` 当参数）。剥掉它们，只把 schema 声明的参数交给工具，避免杂键流进工具实现，
+    也避免错碎片被当成合法调用执行。
+
+    仅当能明确「什么是已知键」时才剥（否则 fail-open 原样返回）：
+      - schema 非 dict / 无 ``properties`` → 不剥；
+      - 含组合关键字 ``allOf/anyOf/oneOf/not`` 或顶层 ``$ref`` → 键可能由子 schema 声明，不剥；
+      - ``additionalProperties`` 显式为 ``True`` 或子 schema（schema 主动允许附加属性）→ 不剥。
+    仅剥顶层，不递归进嵌套对象（组合/``$ref`` 下递归易误删）。
+    """
+    if not isinstance(schema, dict):
+        return arguments
+    props = schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return arguments
+    if any(k in schema for k in ("allOf", "anyOf", "oneOf", "not", "$ref")):
+        return arguments
+    ap = schema.get("additionalProperties")
+    if ap is True or isinstance(ap, dict):
+        return arguments
+    unknown = [k for k in arguments if k not in props]
+    if not unknown:
+        return arguments
+    logger.info("CapabilityGateway: dropping arg keys not declared in schema: %s", unknown)
+    return {k: v for k, v in arguments.items() if k in props}
 
 
 # 只在这三类约束上拦截（spec B）：required 缺失 / type 不符 / enum 越界。

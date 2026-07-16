@@ -145,6 +145,25 @@ async def test_invoke_coerces_then_validates() -> None:
     assert p.received == {"n": 3}
 
 
+async def test_invoke_strips_unknown_keys_before_provider() -> None:
+    # schema 未声明的键在下发前被剥掉，provider 只收到声明过的参数。
+    p = _Echo({"type": "object", "properties": {"q": {"type": "string"}}})
+    mem, state, ctx = _state_ctx()
+    res = await _gw(p, mem).invoke("mcp__a__search", {"q": "x", "junk": 99}, state, ctx)
+    assert res.is_error is False
+    assert p.received == {"q": "x"}  # junk 已剥
+
+
+async def test_invoke_all_unknown_then_required_fails() -> None:
+    # 只发了未知键（如救援抠出的错碎片 {"b": 2}）→ 剥成空 → required 校验失败 → 报错、不下发。
+    p = _Echo({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})
+    mem, state, ctx = _state_ctx()
+    res = await _gw(p, mem).invoke("mcp__a__search", {"b": 2}, state, ctx)
+    assert res.is_error is True
+    assert "invalid arguments" in res.content
+    assert p.invoked is False
+
+
 async def test_invoke_raw_wrapper_gets_clear_error_not_required_property() -> None:
     # adapter 兜底的 {"_raw": <无法解析文本>}（可解析的已在 finalize 解包）走到 gateway
     # → 给「参数不是合法 JSON」的直白报错，而不是误导性的 "'x' is a required property"
