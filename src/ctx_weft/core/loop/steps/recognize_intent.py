@@ -9,6 +9,7 @@ Skips entirely if the title is already set or no recognize_intent tool is bound.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from typing import Any
 
@@ -104,7 +105,7 @@ class RecognizeIntentStep(Step):
         )
         prompt = await ctx.assembler.assemble(request)
 
-        from ctx_weft.protocols import LLMRequest
+        from ctx_weft.protocols import LLMRequest, LLMUsage
 
         llm_request = LLMRequest(
             model=state.agent.runtime.get("llm_model", "mock"),
@@ -128,6 +129,7 @@ class RecognizeIntentStep(Step):
 
         tool_name = ""
         tool_args: dict[str, Any] = {}
+        usage = LLMUsage()
         try:
             _guard = getattr(state.agent, "loop_guard", None)
             llm_request.prompt_token_estimate = request_prompt_estimate(llm_request, _guard, None)
@@ -136,6 +138,8 @@ class RecognizeIntentStep(Step):
                 if chunk.kind == "tool_call" and chunk.tool_call:
                     tool_name = chunk.tool_call.name
                     tool_args = chunk.tool_call.arguments
+                elif chunk.kind == "usage" and chunk.usage is not None:
+                    usage = chunk.usage
         except Exception as exc:
             if getattr(exc, "retriable", False):
                 logger.warning("RecognizeIntentStep: LLM call failed for task %s: %s", target_task_id, exc)
@@ -160,6 +164,8 @@ class RecognizeIntentStep(Step):
             "title": tool_args.get("title", ""),
             "description": tool_args.get("description", ""),
             "session_goal": tool_args.get("session_goal", ""),
+            # 只透出不记账：意图识别 LLM 开销此前无账可查（spec 2026-07-16 §5.7）
+            "usage": dataclasses.asdict(usage),
         }))
 
         return StepOutcome(next_step=None)
