@@ -38,7 +38,8 @@ usage 直接丢弃——意图识别的 LLM 开销目前无账可查。
      - **总输入** `prompt_tokens`（含缓存读/写，口径跨 provider 归一）
      - **缓存命中** `cache_read_tokens`
      - **缓存写入** `cache_write_tokens`（Anthropic 独有计费项，1.25x/2x）
-     - **实际未缓存输入** `uncached_prompt_tokens`（显式落盘；未显式给出时构造期自动派生）
+     - **实际未缓存输入** `input_tokens`（显式落盘；未显式给出时构造期自动派生。
+       命名与 Anthropic API 的 `input_tokens` 同名同义——其原生口径即未缓存部分）
    - 输出侧拆分：
      - **推理输出** `reasoning_tokens`（completion 中属于推理/thinking 的子集；
        provider 无单列时为 0）
@@ -74,19 +75,22 @@ class LLMUsage:
     """token 使用统计。
 
     口径（跨 provider 归一，由各 adapter 负责翻译）：
-      输入侧：prompt_tokens          — 本次请求的全部输入（含缓存读/写部分）
-             cache_read_tokens      — 输入中命中缓存的部分
-             cache_write_tokens     — 输入中本次写入缓存的部分
-                                      （Anthropic cache_creation；OpenAI 系恒 0）
-             uncached_prompt_tokens — 实际未缓存输入（全价计费部分）
-      输出侧：completion_tokens      — 全部输出
-             reasoning_tokens       — 输出中属于推理/thinking 的子集
-                                      （OpenAI/DeepSeek 单列；Anthropic 无单列恒 0）
+      输入侧：prompt_tokens     — 本次请求的全部输入（含缓存读/写部分）
+             cache_read_tokens — 输入中命中缓存的部分
+             cache_write_tokens— 输入中本次写入缓存的部分
+                                 （Anthropic cache_creation；OpenAI 系恒 0）
+             input_tokens      — 实际未缓存输入（全价计费部分）。
+                                 ⚠ 与 prompt_tokens 的区分：prompt 是「总输入」，
+                                 input 是「实际输入」；命名对齐 Anthropic API 的
+                                 input_tokens（其原生口径即未缓存部分）。
+      输出侧：completion_tokens — 全部输出
+             reasoning_tokens  — 输出中属于推理/thinking 的子集
+                                 （OpenAI/DeepSeek 单列；Anthropic 无单列恒 0）
     不变式：
-      prompt_tokens = uncached_prompt_tokens + cache_read_tokens + cache_write_tokens
+      prompt_tokens = input_tokens + cache_read_tokens + cache_write_tokens
       reasoning_tokens ≤ completion_tokens
       total_tokens = prompt_tokens + completion_tokens
-    uncached_prompt_tokens 未显式给出（哨兵 -1）时在 __post_init__ 按不变式自动派生，
+    input_tokens 未显式给出（哨兵 -1）时在 __post_init__ 按不变式自动派生，
     保证任何构造写法下账目自洽。
     """
 
@@ -95,12 +99,12 @@ class LLMUsage:
     total_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
-    uncached_prompt_tokens: int = -1  # 实际输入；未显式给出时自动派生
+    input_tokens: int = -1  # 实际输入；未显式给出时自动派生
     reasoning_tokens: int = 0
 
     def __post_init__(self) -> None:
-        if self.uncached_prompt_tokens < 0:
-            self.uncached_prompt_tokens = max(
+        if self.input_tokens < 0:
+            self.input_tokens = max(
                 0,
                 self.prompt_tokens - self.cache_read_tokens - self.cache_write_tokens,
             )
@@ -132,7 +136,7 @@ Anthropic streaming 的 usage 分布：`message_start` 带
 3. 组装 `LLMUsage` 时归一化：
 
 ```python
-uncached = input_tokens or 0                       # Anthropic input_tokens 即未缓存部分（权威值）
+uncached = api_input_tokens or 0                   # API 的 input_tokens 即未缓存部分（权威值）
 prompt_total = uncached + cache_read + cache_write # 归一为「全部输入」口径
 usage = LLMUsage(
     prompt_tokens=prompt_total,
@@ -140,7 +144,7 @@ usage = LLMUsage(
     total_tokens=prompt_total + output_tokens,
     cache_read_tokens=cache_read,
     cache_write_tokens=cache_write,
-    uncached_prompt_tokens=uncached,               # 显式记 provider 原值，不经派生
+    input_tokens=uncached,                         # 显式记 provider 原值，不经派生
     # reasoning_tokens 恒 0：Anthropic thinking 计入 output_tokens 无单列；
     # 不用流式 thinking 文本自行估算——估算值混进计费口径就是错账。
 )
@@ -163,7 +167,7 @@ usage = LLMUsage(
     total_tokens=usage_data.get("total_tokens", 0),
     cache_read_tokens=cache_read or 0,
     cache_write_tokens=0,   # OpenAI 系不区分/不计费缓存写入
-    # uncached_prompt_tokens 不传 → __post_init__ 派生 prompt − cached
+    # input_tokens 不传 → __post_init__ 派生 prompt − cached
     # （OpenAI 只报 cached 子集，无未缓存原始值可记）
     reasoning_tokens=completion_details.get("reasoning_tokens", 0) or 0,
 )
@@ -184,7 +188,7 @@ cache 字段应 ≤ 估算值（测试自行保证）。
 
 - `act.py` / `observe.py`（含 background observe）均以 `dataclasses.asdict(usage)` 入
   payload → `LLMResponseFinished` / `BackgroundObserveResponseFinished` 的 `usage` 自动
-  多四个键（`cache_read_tokens` / `cache_write_tokens` / `uncached_prompt_tokens` /
+  多四个键（`cache_read_tokens` / `cache_write_tokens` / `input_tokens` /
   `reasoning_tokens`）。memory ingest 的 `metadata["usage"]` 同理。
 - `_finalize.py` 只透传 usage 对象，不改。
 - **`schema_version` 保持 1**：纯增量加键；replay 旧事件时消费端 `.get(..., 0)` 兜底。
@@ -215,27 +219,27 @@ cache 字段应 ≤ 估算值（测试自行保证）。
 | 事件 payload | 纯增键；reducer 不消费 usage，投影/快照/恢复不受影响 |
 | 现有测试 | 均按单字段断言（无 usage dict 全等断言，已核对），全绿预期 |
 | host 旧版本 | 忽略新键，无部署顺序约束 |
-| replay 旧事件 | usage dict 缺新键：cache 两键 `.get` 兜底 0，`uncached_prompt_tokens` 兜底回退 `prompt_tokens`（旧事件无缓存拆分即全额实际输入） |
+| replay 旧事件 | usage dict 缺新键：cache 两键 `.get` 兜底 0，`input_tokens` 兜底回退 `prompt_tokens`（旧事件无缓存拆分即全额实际输入） |
 
 ## 7. 测试计划
 
 1. **LLMUsage 构造语义**（新增或并入协议测试）：
-   - 不传 `uncached_prompt_tokens` → 自动派生 `prompt − read − write`；
-   - 无缓存信息 `LLMUsage(prompt_tokens=100)` → `uncached == 100`（旧写法自洽）；
+   - 不传 `input_tokens` → 自动派生 `prompt − read − write`；
+   - 无缓存信息 `LLMUsage(prompt_tokens=100)` → `input_tokens == 100`（旧写法自洽）；
    - 显式传入 → 原样保留不派生；异常账（cached > prompt）派生结果钳 0。
 2. **anthropic 单测**（test_anthropic_stream_finalize.py 扩展）：
    - `message_start` usage 带 `input_tokens=7, cache_read_input_tokens=100,
      cache_creation_input_tokens=20` → 断言 `prompt_tokens == 127`、
      `cache_read_tokens == 100`、`cache_write_tokens == 20`、
-     `uncached_prompt_tokens == 7`（显式记原值）、`total_tokens == 127 + output`、
+     `input_tokens == 7`（显式记原值）、`total_tokens == 127 + output`、
      `reasoning_tokens == 0`（Anthropic 无单列）。
    - 不带缓存字段的现有夹具 → 行为与现状全等（回归）。
    - `message_delta` 尾包重发输入侧字段 → 覆盖生效。
 3. **openai 单测**（test_openai_stream_finalize.py 扩展）：
-   - `prompt_tokens_details.cached_tokens` 路径（断言派生的 uncached = prompt − cached）；
+   - `prompt_tokens_details.cached_tokens` 路径（断言派生的 `input_tokens` = prompt − cached）；
    - DeepSeek `prompt_cache_hit_tokens` 回退路径；
    - `completion_tokens_details.reasoning_tokens` → `reasoning_tokens`；
-   - 无 details 的现有夹具回归（cache/reasoning 字段为 0，uncached = prompt）。
+   - 无 details 的现有夹具回归（cache/reasoning 字段为 0，`input_tokens` = prompt）。
 4. **事件层**：act 流程用 mock adapter 带缓存字段 → `LLMResponseFinished.payload["usage"]`
    含七键且值正确、满足不变式；memory metadata 同步。
 5. **recognize_intent**：usage chunk 进 `RECOGNIZE_INTENT_COMPLETED` payload。
@@ -243,15 +247,19 @@ cache 字段应 ≤ 估算值（测试自行保证）。
 
 ## 8. host 对接指引（LoomeX，另仓实施，informative）
 
-- `session.py`（事件翻译器）在 `LLM_RESPONSE_FINISHED` 分支扩展累加：
-  `cache_read_used += usage.get("cache_read_tokens", 0)`、
-  `cache_write_used += ...`、
-  `actual_input_used += usage.get("uncached_prompt_tokens", usage.get("prompt_tokens", 0))`
-  （新键直接可用，回退兜住 replay 旧事件）。
-- `token_update` SSE 帧增加 `cache_read_tokens_used` / `cache_write_tokens_used` /
-  `actual_input_tokens_used`；会话快照 dict 与 `session_update` 帧同步携带。
+- **「累计输入」口径变更（已决策，非建议）**：`session.py` 现有的
+  `self.input_tokens` 累加器从 `Σ prompt_tokens` 改为
+  `Σ usage.get("input_tokens", usage.get("prompt_tokens", 0))`——
+  即累计**实际未缓存输入**，不再累计总输入（回退兜住 replay 旧事件）。
+  前端「↑ 输入」随之自然变为真实成本口径，消除每轮全量 prompt 重复累加的高估。
+- 新增累加器与 SSE 键：`cache_read_used` / `cache_write_used` 分别累计
+  `cache_read_tokens` / `cache_write_tokens`；`token_update` 帧增加
+  `cache_read_tokens_used` / `cache_write_tokens_used` 两键，会话快照 dict 与
+  `session_update` 帧同步携带。若需「累计总输入」视图，由三者相加派生，不单独累计。
+- 不受影响的口径：`context_tokens`（当前窗口）继续取单轮 `prompt_tokens`
+  （窗口规模与缓存无关）；预算进度条继续用 `output_tokens_used / token_budget`。
 - 建议顺带把 `BACKGROUND_OBSERVE_RESPONSE_FINISHED` 纳入统计（现为盲区）。
-- 前端 `SessionStats` 展示建议：「↑ 输入 xk（命中缓存 yk · 实际 zk）」，输出可附
+- 前端 `SessionStats` 展示建议：「↑ 输入 xk（命中缓存 yk）」，输出可附
   「（推理 rk）」；计费估算 = 实际输入×单价 + 命中×0.1x + 写入×1.25x + 输出×单价
   （价格表在 host 配置）。
 
