@@ -83,9 +83,9 @@ BlockKind = Literal[
     "identity",  # SOUL / facet 正文（IdentitySource）
     "background",  # ## Project Background（BlackboardSource long_term_background topic）
     # ── 注入段：composer 拼进 user 回合（不进 system，也不是独立消息）──
-    "capabilities",  # ## Capabilities → 末条 user 尾部（CapabilitySource）
+    "capabilities",  # ## Capabilities → 当前 task 的 user 回合尾部，末条留一行指针（CapabilitySource）
     "directive",  # ## Instructions for the current task → 当前 task 的 user 回合（skill_instructions）
-    "guidance",  # act 运行时态势 guidance → 末条 user 最尾部，Capabilities 之后（GuidanceSource）
+    "guidance",  # act 运行时态势 guidance → 末条 user 最尾部（GuidanceSource）
     # ── 渲染进 messages ──
     "history",  # 多轮对话无损重建（AgentRecallSource）
     "blackboard",  # 相关任务 topic 通信 / 长期 project_log（BlackboardSource）

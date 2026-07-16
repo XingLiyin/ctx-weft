@@ -84,7 +84,7 @@ def test_actor_system_has_only_soul_and_background() -> None:
     assert "Do the thing" not in system
 
 
-def test_act_directive_on_first_capabilities_on_last() -> None:
+def test_act_directive_and_capabilities_on_current_task_turn() -> None:
     blocks = [
         _identity_block("SOUL TEXT"),
         _background_block("BG TEXT"),
@@ -99,15 +99,20 @@ def test_act_directive_on_first_capabilities_on_last() -> None:
     msgs = DefaultComposer()._build_actor_messages(blocks, SimpleNamespace(task=task, purpose="act"))
     user_msgs = [m for m in msgs if m.role == "user"]
     first, last = user_msgs[0].content, user_msgs[-1].content
-    # directive rides the first (history-derived) user message
+    # directive AND capabilities both ride the current task's user message
+    # (stable in the reconstructed history → inside the prompt-cache prefix)
     assert "## Instructions for the current task" in first
     assert "Do the thing" in first
     assert "the original ask" in first
-    assert "### Available Tools" not in first
-    # capabilities relocated to the trailing user message (recency, next to act guidance)
-    assert "## Capabilities" in last
-    assert "### Available Tools" in last
-    assert "### Available Sub-Agents" in last
+    assert "## Capabilities" in first
+    assert "### Available Tools" in first
+    assert "### Available Sub-Agents" in first
+    # order: task content → directive → capabilities
+    assert first.index("the original ask") < first.index("## Instructions for the current task") \
+        < first.index("## Capabilities")
+    # the trailing user message carries only a one-line pointer, not the full listing
+    assert "### Available Tools" not in last
+    assert "Capabilities section of the current task message above" in last
 
 
 def test_act_directive_follows_current_task() -> None:
@@ -304,11 +309,11 @@ def _task_history_block(role: str, content: str, ts: str, task_id: str) -> Conte
 
 def test_interactive_task_anchors_first_user_prompt_not_latest() -> None:
     """Interactive task: the user's follow-up messages accumulate as USER_PROMPTs with the SAME
-    task_id. The ## Current Task frame + directive must pin to the FIRST (task-opening) user
-    message and never drift onto the latest one — drifting re-decorates a different turn every
-    round, reverting the previous turn's bytes and breaking the prompt-cache prefix. Follow-up
-    messages stay raw (form C); the near-generation task anchor is the guidance anchor line.
-    Capabilities keep riding the trailing user message (current layout)."""
+    task_id. The ## Current Task frame + directive + capabilities must pin to the FIRST
+    (task-opening) user message and never drift onto the latest one — drifting re-decorates a
+    different turn every round, reverting the previous turn's bytes and breaking the prompt-cache
+    prefix. Follow-up messages stay raw (form C); the near-generation anchors are the guidance
+    anchor line and the capabilities pointer."""
     blocks = [
         _identity_block("SOUL TEXT"),
         _cap_block("web_search", "tool", "search the web"),
@@ -323,15 +328,16 @@ def test_interactive_task_anchors_first_user_prompt_not_latest() -> None:
     user_msgs = [m for m in msgs if m.role == "user"]
     first = user_msgs[0].content
     latest = user_msgs[-1].content
-    # frame + directive pin to the task-opening message
+    # frame + directive + capabilities all pin to the task-opening message
     assert "## Current Task" in first and "## Current Message" in first and "你好" in first
     assert "## Instructions for the current task" in first
-    # the latest (follow-up) message keeps its raw content, no frame/directive drift;
-    # capabilities ride the trailing user message (current layout)
+    assert "## Capabilities" in first
+    # the latest (follow-up) message stays raw + tail pointer only
     assert "你是谁" in latest
     assert "## Current Task" not in latest
     assert "## Instructions for the current task" not in latest
-    assert "## Capabilities" in latest
+    assert "## Capabilities" not in latest
+    assert "Capabilities section of the current task message above" in latest
 
 
 def test_act_directive_targets_current_task_not_prior_experience() -> None:
@@ -360,9 +366,10 @@ def test_act_directive_targets_current_task_not_prior_experience() -> None:
     assert "Do the thing" in current.content
 
 
-def test_resumed_task_directive_on_history_capabilities_on_fallback() -> None:
-    """Resumed act task: the directive attaches to the first (history-derived) user message;
-    capabilities ride the trailing fallback continue message (recency).
+def test_resumed_task_directive_and_capabilities_on_history_pointer_on_fallback() -> None:
+    """Resumed act task: directive AND capabilities attach to the first (history-derived,
+    current-task) user message; the trailing fallback continue message carries only the
+    one-line capabilities pointer.
 
     Progress So Far no longer has a separate process_report-driven render path (retired 2026-07-01
     Task 3 — retry feedback is now carried by the TASK_COMPACT_SUMMARY segment summary instead), so
@@ -382,24 +389,27 @@ def test_resumed_task_directive_on_history_capabilities_on_fallback() -> None:
     msgs = DefaultComposer()._build_actor_messages(blocks, SimpleNamespace(task=task, purpose="act"))
     user_msgs = [m for m in msgs if m.role == "user"]
     first, last = user_msgs[0].content, user_msgs[-1].content
-    # directive on the first (history-derived) user message, AFTER the task content
+    # directive then capabilities on the first (history-derived) user message, AFTER the task content
     assert "## Instructions for the current task" in first
     assert "the original ask" in first
-    assert first.index("the original ask") < first.index("## Instructions for the current task")
-    assert "### Available Tools" not in first
-    # the trailing dynamic-context message carries the capabilities; without
-    # extra["act_resume_cue"] the composer's structural fallback line anchors the task
-    # and asks to continue with the remaining work (canonical cue lives in act_guidance.py)
+    assert "## Capabilities" in first and "### Available Tools" in first
+    assert first.index("the original ask") < first.index("## Instructions for the current task") \
+        < first.index("## Capabilities")
+    # the trailing dynamic-context message: without extra["act_resume_cue"] the composer's
+    # structural fallback line anchors the task and asks to continue with the remaining work
+    # (canonical cue lives in act_guidance.py); the full listing stays off it — pointer only
     assert "You are still working on the task: T" in last
     assert "continue with only the remaining work" in last
-    assert "### Available Tools" in last
+    assert "### Available Tools" not in last
+    assert "Capabilities section of the current task message above" in last
     assert first is not last
 
 
 def test_facet_purpose_gets_no_resume_filler_cue_rides_new_trailing_user() -> None:
     """Non-act purposes must NOT get the act resume filler. With a non-user-ending history,
-    the facet cue (+capabilities) rides a NEW trailing user message appended at the END —
-    never glued onto an earlier mid-conversation user turn."""
+    the facet cue (+capabilities pointer) rides a NEW trailing user message appended at the
+    END — never glued onto an earlier mid-conversation user turn. The full capabilities
+    listing rides the current-task user turn (cache prefix), same as act."""
     blocks = [
         _identity_block("OBSERVER ROLE"),
         _cap_block("report_task_outcome", "tool", "report the outcome"),
@@ -416,17 +426,21 @@ def test_facet_purpose_gets_no_resume_filler_cue_rides_new_trailing_user() -> No
     # the cue message is the LAST message of the list (nothing after it)
     assert msgs[-1].role == "user"
     assert "OBSERVER ROLE" in msgs[-1].content
-    assert "## Capabilities" in msgs[-1].content
-    # the mid-conversation user turn stays clean
+    # trailing message carries the pointer, not the full listing
+    assert "Capabilities section of the current task message above" in msgs[-1].content
+    assert "### Available Tools" not in msgs[-1].content
+    # the full listing rides the current-task user turn; the ROLE facet stays off it
     first_user = next(m for m in msgs if m.role == "user")
     assert "OBSERVER ROLE" not in first_user.content
-    assert "## Capabilities" not in first_user.content
+    assert "## Capabilities" in first_user.content
+    assert "### Available Tools" in first_user.content
 
 
-def test_observer_capabilities_on_last_user_not_front() -> None:
-    """Observe (with conversation history) must place the Capabilities block on the LAST user
-    message — same as act — not prepended to the first user message (which would bury the task
-    under the full skills/tools/sub-agents listing)."""
+def test_observer_capabilities_on_current_task_turn_not_prepended() -> None:
+    """Observe (with conversation history) must place the Capabilities block on the current-task
+    user turn — appended AFTER the task content, same as act — never prepended before it (which
+    would bury the task under the full skills/tools/sub-agents listing). The trailing user
+    message keeps only the one-line pointer alongside the ROLE + judgment cue."""
     blocks = [
         _identity_block("OBSERVER ROLE"),  # purpose=observe → identity block is the ROLE
         _cap_block("report_task_outcome", "tool", "report the outcome"),
@@ -442,13 +456,14 @@ def test_observer_capabilities_on_last_user_not_front() -> None:
     user_msgs = [m for m in msgs if m.role == "user"]
     assert len(user_msgs) >= 2
     first, last = user_msgs[0].content, user_msgs[-1].content
-    # the first (history-derived) user message stays clean — no capabilities front-loaded
+    # capabilities ride the current-task user turn, AFTER the task content (not front-loaded)
     assert "the original ask" in first
-    assert "## Capabilities" not in first
-    assert "### Available Tools" not in first
-    assert "### Available Skills" not in first
-    assert "### Available Sub-Agents" not in first
-    # capabilities ride the trailing user message, alongside the observer ROLE + judgment cue
-    assert "## Capabilities" in last
-    assert "### Available Tools" in last
+    assert "## Capabilities" in first
+    assert "### Available Tools" in first
+    assert "### Available Skills" in first
+    assert "### Available Sub-Agents" in first
+    assert first.index("the original ask") < first.index("## Capabilities")
+    # the trailing user message: pointer only, alongside the observer ROLE + judgment cue
+    assert "### Available Tools" not in last
+    assert "Capabilities section of the current task message above" in last
     assert "OBSERVER ROLE" in last

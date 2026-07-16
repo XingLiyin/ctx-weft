@@ -20,12 +20,13 @@ messages —— 组装步骤（_build_actor_messages）：
     ② 当前 task 的 user_prompt 回合就地装饰（按 task_id 定位**首条**——interactive
        多轮里框不随新消息漂移；匹配不到回退末条）：
        ## Current Task / ## Current Message 框 + 同语言回复提示；
-       directive（skill 指令）仅 act 拼在此回合尾部。
+       directive（skill 指令）仅 act 拼在此回合尾部；## Capabilities 全文
+       （所有 purpose）拼在 directive 之后——随此稳定回合落在 cache 前缀内。
     ③ 仅 act：末条以 assistant/tool 收尾时垫续跑衔接 user 回合
        （extra["act_resume_cue"]；缺失时结构兜底一句，保证以 user 收尾）。
     ④ 末条 user 尾部依次拼（_append_to_last_user；末条非 user 则新建，
-       绝不回溯粘中部）：guidance（仅 act）→ ## Capabilities →
-       facet 尾注（仅 facet purpose）。
+       绝不回溯粘中部）：guidance（仅 act）→ Capabilities 指针（一行，
+       清单不在末条时才补）→ facet 尾注（仅 facet purpose）。
 
 ═══ act 末条 user 的三种形态（开场三选一；「--- 以下」的收尾恒同）═══
 
@@ -33,7 +34,8 @@ messages —— 组装步骤（_build_actor_messages）：
        ## Current Task {title}\n{description}
        ## Current Message {user_prompt}（+ 同语言回复提示）
        ## Instructions for the current task (skill: x)   ← 绑 skill 时
-       ---（guidance 起，见下）
+       ## Capabilities                                   ← 清单全文随此稳定回合
+       ---（guidance 起，见下；清单已在末条，不再补指针）
   B. 续跑回合 —— 历史以 assistant/tool 收尾（挂起父任务恢复、段中崩溃
      recover、retry 摘要为空）：
        {resume cue：仍在做任务 X、盘点已完成、只做剩余
@@ -44,13 +46,14 @@ messages —— 组装步骤（_build_actor_messages）：
        ---（guidance 起；此形态下 Current Task 框远在历史深处，
            guidance 的锚定行是生成点附近唯一的任务锚）
 
-  三种形态共用的收尾（guidance + capabilities）：
+  三种形态共用的收尾（guidance + capabilities 指针）：
        ---
        Current task: {title}                    ← 任务锚定行（恒有）
        ## The overall plan（▶ 定位当前 task）   ← ≥1 非终态 task 才出
        ## 已派发且 ALREADY COMPLETED 的子任务   ← 有 FINISHED 子任务才出
        finish / 无关新请求双发 / ask_user 三条指针级提醒
-       ## Capabilities                          ← 殿后，工具清单紧贴生成点
+       Capabilities 指针（一行）                ← 清单全文在当前 task 回合
+                                                  （cache 前缀内），B/C 形态补此行
 
   guidance 与 resume cue 同源 loop/steps/act_guidance.py（PrepareStep 构建，
   经 extra["act_guidance"] / extra["act_resume_cue"] 传入；guidance 走
@@ -58,9 +61,10 @@ messages —— 组装步骤（_build_actor_messages）：
 
 ═══ facet purpose（observe/compact/recognize_intent/background_observe）═══
 
-  无续跑 cue、无 guidance。末条 user（历史末条是 user 就并入，否则新建）：
+  无续跑 cue、无 guidance。清单全文同样随当前 task 回合；末条 user
+  （历史末条是 user 就并入，否则新建）：
        {原内容（如有）}
-       ## Capabilities（skill/agent 段因 purpose 门控通常不出现）
+       Capabilities 指针（一行；清单不在末条时才补）
        ## Your Current Role + facet 正文（ROLE/COMPACT/METADATA.md）
        ---
        cue（各 purpose 专属，见下表）
@@ -140,6 +144,14 @@ _AGENT_COMPACTION_INSTRUCTION = (
     "sub-tasks so far — for each: what it was asked to do and its outcome / key results / lessons "
     "— into one concise digest the agent can rely on later. Ignore the current task's own "
     "execution detail; focus on the delegation record. Output only the digest text, no preamble."
+)
+
+# Capabilities 指针：清单全文随「当前 task」user 回合（cache 前缀内稳定），末条 user 只留
+# 这一行就近提醒，不再每回合随动态尾部重付整段清单的 token。措辞避开 "## Capabilities"
+# 字面量，免与清单标题的存在性断言/检索混淆。
+_CAPABILITIES_POINTER = (
+    "(Your available capabilities — tools / skills / sub-agents — are listed in the "
+    "Capabilities section of the current task message above.)"
 )
 
 _RECOGNIZE_INTENT_INSTRUCTION = (
@@ -413,9 +425,10 @@ class DefaultComposer(Composer):
         # Resources 注入（仅发送，不入 memory）：
         #   - directive（当前 task 指令）：act 追加到首条 user message 尾部（紧跟 ## Current Task
         #     等任务上下文之后）；其他 purpose 仍前置到首条。
-        #   - capabilities（skills/tools/agents）：所有 purpose 一律放到末条 user message——
-        #     act 紧邻 guidance / finish_task 提升工具调用积极性；observe/compact/recognize_intent
-        #     也放末条，避免把整段能力清单压在任务消息之前喧宾夺主（与 act 一致）。
+        #   - capabilities（skills/tools/agents）：所有 purpose 一律拼到「当前 task」user 回合
+        #     尾部（directive 之后）——该回合在重建历史里位置/内容稳定，清单落在 prompt cache
+        #     前缀内，不再每回合随动态末条重付整段 token；末条只留一行 _CAPABILITIES_POINTER
+        #     保住生成点附近的 recency 提示（tools 的可调用性另有 API tools 参数兜底）。
         directive_text = self._build_directive_section(blocks)
         capabilities_text = self._build_capabilities_section(blocks)
         if getattr(request, "purpose", None) == "act":
@@ -429,16 +442,29 @@ class DefaultComposer(Composer):
         else:
             if directive_text:
                 merged = self._prepend_to_first_user(merged, directive_text)
-        # 末条 user 的收尾次序（act）：guidance（任务锚定/plan 全景/已完成清单/
-        # 静态指针）在前，## Capabilities 殿后——工具清单紧贴生成点，模型读完
-        # 态势再看可用手段。动态内容居尾不打穿 prompt cache 前缀。仅 act 渲染
-        # guidance（facet purpose 的 extra 本就不带 act_guidance，此处双保险）；
-        # facet 的 role/cue 由 _build_facet_trailing_messages 追加在 capabilities 之后。
+        # capabilities 全文 → 当前 task user 回合（缺失兜底末条 user；连兜底都没有时
+        # 新建末条 user 承载——此时清单已在末条，后续不再补指针）。
+        cap_idx: int | None = None
+        if capabilities_text:
+            cap_idx = current_task_user_idx
+            if cap_idx is None:
+                cap_idx = self._last_user_index(merged)
+            if cap_idx is not None:
+                merged = self._append_to_user_at(merged, cap_idx, capabilities_text)
+            else:
+                merged = self._append_to_last_user(merged, capabilities_text)
+                cap_idx = len(merged) - 1
+        # 末条 user 收尾（act）：guidance（任务锚定/plan 全景/已完成清单/静态指针）——
+        # 动态内容居尾不打穿 prompt cache 前缀。仅 act 渲染 guidance（facet purpose 的
+        # extra 本就不带 act_guidance，此处双保险）；facet 的 role/cue 由
+        # _build_facet_trailing_messages 追加在其后。
         if getattr(request, "purpose", None) == "act":
             guidance = self._first_kind(blocks, "guidance")
             if guidance is not None:
                 merged = self._append_to_last_user(merged, content_to_text(guidance.content))
-        merged = self._append_to_last_user(merged, capabilities_text)
+        # Capabilities 指针：清单不是最末条消息时补一行（fresh 单消息回合清单本就在末条，不补）。
+        if cap_idx is not None and cap_idx != len(merged) - 1:
+            merged = self._append_to_last_user(merged, _CAPABILITIES_POINTER)
         return merged
 
     @staticmethod
@@ -447,7 +473,7 @@ class DefaultComposer(Composer):
 
         history_pairs 是 _history_to_messages_with_sources 的 (msg, src, mem_type, task_id) 四元组。
         - 匹配取首条：interactive 任务同一 task 会累积多条 user_prompt（用户每条新消息一条），
-          ## Current Task 框 / directive 须钉在**开启该 task 的首条消息**上（C 形态：
+          ## Current Task 框 / directive / capabilities 须钉在**开启该 task 的首条消息**上（C 形态：
           追问消息保持原文，生成点附近的任务锚由 guidance 锚定行承担）。取末条会让框和随框注入的
           内容跟着每条新消息漂移——上一轮被装饰的回合在下一轮重建时恢复原文，cache 前缀每轮被打穿。
           （2026-06-26 spec §2.6 曾定为「贴最近一条」，该决策被本行为取代。）

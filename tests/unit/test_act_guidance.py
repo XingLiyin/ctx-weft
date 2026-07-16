@@ -3,7 +3,8 @@
 内容契约（loop/steps/act_guidance.py）：session 任务树 + 已完成子任务清单（动态段）
 + finish/切换/ask_user 指针级提醒（静态段，完整协议在工具 description/SOUL/observer 护栏）。
 装配契约：PrepareStep → extra["act_guidance"] → GuidanceSource（kind="guidance"）→
-composer 恒拼末条 user 最尾部（Capabilities 之后；仅 act purpose）。
+composer 恒拼末条 user 最尾部（仅 act purpose；其后至多再补一行 Capabilities 指针，
+清单全文随当前 task 回合落在 cache 前缀内）。
 """
 
 from __future__ import annotations
@@ -363,14 +364,16 @@ def _act_request() -> SimpleNamespace:
     return SimpleNamespace(task=task, purpose="act", extra={})
 
 
-def test_composer_places_guidance_before_capabilities_at_tail():
-    # 末条 user 收尾次序：guidance（态势）在前，## Capabilities 殿后紧贴生成点。
+def test_composer_places_capabilities_before_guidance_at_tail():
+    # fresh 单消息回合：清单全文随当前 task 回合（cache 前缀内），guidance 殿后
+    # 紧贴生成点；清单已在末条消息里，不补指针。
     msgs = DefaultComposer()._build_actor_messages(
         [_cap_block(), _guidance_block("GUIDE TEXT")], _act_request())
     last = msgs[-1].content
     assert "GUIDE TEXT" in last and "## Capabilities" in last
-    assert last.index("GUIDE TEXT") < last.index("## Capabilities")
-    assert last.rstrip().endswith("web_search: search the web")
+    assert last.index("## Capabilities") < last.index("GUIDE TEXT")
+    assert last.rstrip().endswith("GUIDE TEXT")
+    assert "Capabilities section of the current task message above" not in last
 
 
 def test_resume_cue_anchors_task_and_remaining_work():
@@ -394,11 +397,11 @@ def test_resume_cue_points_to_completed_list_only_when_children_finished():
 
 
 def test_composer_uses_extra_resume_cue_as_turn_opener():
-    # 历史以 assistant 收尾 → 垫续跑回合，内容取 extra["act_resume_cue"]，
-    # capabilities/guidance 随后拼进同一回合。
+    # 历史以 assistant 收尾 → 垫续跑回合，内容取 extra["act_resume_cue"]；
+    # guidance + Capabilities 指针随后拼进同一回合（清单全文在当前 task 回合）。
     hist_user = ContextBlock(id="h1", source="x", kind="history", target="messages",
                              content="hi", priority=3, token_estimate=1,
-                             metadata={"role": "user", "timestamp": "1"})
+                             metadata={"role": "user", "timestamp": "1", "type": "user_prompt"})
     hist_asst = ContextBlock(id="h2", source="x", kind="history", target="messages",
                              content="working...", priority=3, token_estimate=1,
                              metadata={"role": "assistant", "timestamp": "2"})
@@ -407,10 +410,14 @@ def test_composer_uses_extra_resume_cue_as_turn_opener():
     req = SimpleNamespace(task=task, purpose="act", extra={"act_resume_cue": "RESUME CUE"})
     msgs = DefaultComposer()._build_actor_messages(
         [hist_user, hist_asst, _cap_block(), _guidance_block("GUIDE TEXT")], req)
+    first = msgs[0].content
     last = msgs[-1].content
     assert msgs[-1].role == "user"
+    assert "## Capabilities" in first  # 清单全文随当前 task 回合
     assert last.startswith("RESUME CUE")
-    assert last.index("RESUME CUE") < last.index("GUIDE TEXT") < last.index("## Capabilities")
+    assert "## Capabilities" not in last
+    assert last.index("RESUME CUE") < last.index("GUIDE TEXT") \
+        < last.index("Capabilities section of the current task message above")
 
 
 def test_composer_ignores_guidance_for_non_act_purpose():

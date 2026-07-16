@@ -12,8 +12,8 @@
   guidance 承载"已完成子任务"的具体清单后，cue 只留通用续跑框架 +
   （确有已完成子任务时）一句指向清单的提示，不再重复展开。
 
-guidance 内容分两类（composer 把它排在 ## Capabilities 之前——态势在前、
-工具清单殿后紧贴生成点）：
+guidance 内容分两类（composer 拼在末条 user 尾部；## Capabilities 全文随
+当前 task 回合落在 cache 前缀内，其后至多再补一行清单指针）：
 - **动态段**（只能运行时生成）：当前任务锚定行（每个 act 回合都有，长对话里
   ## Current Task 框远在历史深处时的就近锚）、session 非终态任务树（▶ 定位
   当前 task）、当前 task 已完成子任务清单（防重做/重派——它们已从任务树消失，
