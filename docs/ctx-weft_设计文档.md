@@ -3808,9 +3808,9 @@ class Event:
 
 | Type | 触发时机 | Reducer | 关键 payload 字段 |
 |------|---------|--------|----------------|
-| `LLMRequestStarted` | LLMClient.complete 调用入口 | O | `request_id`, `model`, `prompt_tokens_estimate` |
+| `LLMRequestStarted` | LLMClient.complete 调用入口 | O | `request_id`, `model`（实际使用的模型，session 真值）, `llm_account`（实际使用的账号）, `prompt_tokens_estimate` |
 | `LLMTokenStreamed` | 每个 LLM stream chunk | O | `request_id`, `delta`（token 增量文本） |
-| `LLMResponseFinished` | LLMClient.complete 流结束 | **M**+**S** | `request_id`, `content`（完整 LLM 输出文本）, `tool_calls`（结构化 tool_call 列表）, `usage`（prompt_tokens / completion_tokens / total_tokens） — **payload 必须完整携带，replay 用** |
+| `LLMResponseFinished` | LLMClient.complete 流结束 | **M**+**S** | `request_id`, `content`（完整 LLM 输出文本）, `tool_calls`（结构化 tool_call 列表）, `usage`（七字段拆分：prompt/completion/total/cache_read/cache_write/input/reasoning）, `llm_model`/`llm_account`（本次调用实际使用的模型/账号，host 计费上报按此计账） — **payload 必须完整携带，replay 用** |
 | `LLMRetryTriggered` | LLM 网络/格式错误后重试 | O | `request_id`, `attempt`, `error_code` |
 
 > ⚠ `LLMResponseFinished` 是 replay 关键事件——payload 必须含**完整 content 和 tool_calls**，否则 replay 无法重建 ActStep 当时的 turn record。
@@ -4035,14 +4035,18 @@ class LLMResponseFinishedPayload(TypedDict):
     content: str                         # 完整 LLM 文本输出
     tool_calls: list[dict]               # 结构化 tool_call 列表：
                                          #   [{id, name, arguments}]
-    usage: LLMUsageDict                  # {prompt_tokens, completion_tokens, total_tokens}
+    usage: LLMUsageDict                  # 七字段拆分，见下
     finish_reason: str                   # "stop" / "tool_use" / "length" / ...
 
 
 class LLMUsageDict(TypedDict):
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
+    prompt_tokens: int        # 总输入（含缓存读/写；跨 provider 归一口径）
+    completion_tokens: int    # 全部输出
+    total_tokens: int         # prompt + completion
+    cache_read_tokens: int    # 缓存命中
+    cache_write_tokens: int   # 缓存写入（Anthropic cache_creation；OpenAI 系恒 0）
+    input_tokens: int         # 实际未缓存输入（= prompt − read − write）
+    reasoning_tokens: int     # 输出中的推理子集
 
 
 class CapabilityFinishedPayload(TypedDict):

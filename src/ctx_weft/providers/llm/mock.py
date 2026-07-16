@@ -19,6 +19,10 @@ class MockResponse:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     chunk_size: int = 16  # streaming 时每个 chunk 的字符数
+    # usage 拆分模拟（事件层/联调测试用；cache 之和应 ≤ 估算的 prompt_tokens，测试自行保证）
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 class MockLLMAdapter(LLMClient):
@@ -94,6 +98,10 @@ class MockLLMAdapter(LLMClient):
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
+                cache_read_tokens=response.cache_read_tokens,
+                cache_write_tokens=response.cache_write_tokens,
+                reasoning_tokens=response.reasoning_tokens,
+                # input_tokens 自动派生 = prompt − read − write
             ),
         )
 

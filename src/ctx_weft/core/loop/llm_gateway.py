@@ -63,6 +63,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def resolve_llm_identity(state) -> tuple[str, str]:
+    """本次 LLM 调用实际使用的 ``(model, account)``。
+
+    真值取 ``session.llm_model / llm_provider``——运行时正是用这两个字段解析
+    ``ctx.llm``（runtime._resolve_llm），切换模型/账号也同步更新它们；agent.runtime
+    仅作回退（模板注入场景），最后兜底 ``"mock"``（未配置/测试场景，adapter 会用
+    自身配置的 model 替换）。account 无兜底语义，缺省空串。
+
+    背景：此前请求事件只报 ``agent.runtime.get("llm_model", "mock")``（runtime 从不
+    填 llm_model → 恒为 "mock"），host 云端上报又在响应处理时读「当前会话账号」，
+    与「该次调用实际账号」存在切换竞态——事件自带真值后两处都有账可对。
+    """
+    session = state.session
+    model = (
+        getattr(session, "llm_model", None)
+        or state.agent.runtime.get("llm_model", "mock")
+    )
+    account = getattr(session, "llm_provider", None) or ""
+    return model, account
+
+
 def drop_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
     """剥离无后继 tool_result 配对的 assistant tool_call（防御性，命中打 ERROR 日志）。
 

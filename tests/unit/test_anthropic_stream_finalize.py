@@ -94,6 +94,26 @@ async def test_tool_call_streaming_emits_partial_heartbeat():
     assert tcs[0].tool_call.arguments == {"p": "/a"}
 
 
+async def test_cumulative_input_json_prefix_resend_not_doubled():
+    # 若上游把 partial_json 以字符级前缀重发（而非纯增量），旧逻辑 += 会翻倍成畸形；
+    # 用 merge_content 的前缀检测应替换而非追加。
+    lines = [
+        _data({"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
+        _data({"type": "content_block_start", "index": 0,
+               "content_block": {"type": "tool_use", "id": "t1", "name": "read"}}),
+        _data({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "input_json_delta", "partial_json": "{\"p\":"}}),
+        _data({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "input_json_delta", "partial_json": "{\"p\": \"/a\"}"}}),
+        _data({"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+               "usage": {"output_tokens": 3}}),
+    ]
+    chunks = await _collect(_adapter(lines))
+    tcs = [c for c in chunks if c.kind == "tool_call"]
+    assert len(tcs) == 1
+    assert tcs[0].tool_call.arguments == {"p": "/a"}
+
+
 async def test_truncated_tool_call_raises_retriable():
     # tool_use started + partial json, but no message_delta before stream ends.
     lines = [
@@ -149,3 +169,56 @@ async def test_plain_text_with_message_delta_does_not_raise():
     chunks = await _collect(_adapter(lines))
     assert [c for c in chunks if c.kind == "tool_call"] == []
     assert any(c.kind == "done" for c in chunks)
+
+
+async def test_usage_cache_split_normalized():
+    # Anthropic 的 input_tokens 不含缓存部分：prompt 归一为三者之和，input 显式记原值。
+    lines = [
+        _data({"type": "message_start", "message": {"usage": {
+            "input_tokens": 7, "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 20}}}),
+        _data({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "text_delta", "text": "hi"}}),
+        _data({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+               "usage": {"output_tokens": 3}}),
+    ]
+    chunks = await _collect(_adapter(lines))
+    u = [c for c in chunks if c.kind == "usage"][0].usage
+    assert u.prompt_tokens == 127
+    assert u.cache_read_tokens == 100
+    assert u.cache_write_tokens == 20
+    assert u.input_tokens == 7
+    assert u.total_tokens == 130
+    assert u.reasoning_tokens == 0
+
+
+async def test_usage_no_cache_fields_regression():
+    # 不带缓存字段的现状流：prompt == input，cache 全 0，与旧行为全等。
+    lines = [
+        _data({"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
+        _data({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "text_delta", "text": "hi"}}),
+        _data({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+               "usage": {"output_tokens": 3}}),
+    ]
+    chunks = await _collect(_adapter(lines))
+    u = [c for c in chunks if c.kind == "usage"][0].usage
+    assert u.prompt_tokens == 7 and u.input_tokens == 7
+    assert u.cache_read_tokens == 0 and u.cache_write_tokens == 0
+
+
+async def test_message_delta_overrides_input_side():
+    # 部分代理在尾包重发输入侧字段 → 以尾包为准。
+    lines = [
+        _data({"type": "message_start", "message": {"usage": {"input_tokens": 1}}}),
+        _data({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "text_delta", "text": "hi"}}),
+        _data({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+               "usage": {"output_tokens": 3, "input_tokens": 7,
+                         "cache_read_input_tokens": 100}}),
+    ]
+    chunks = await _collect(_adapter(lines))
+    u = [c for c in chunks if c.kind == "usage"][0].usage
+    assert u.prompt_tokens == 107
+    assert u.input_tokens == 7
+    assert u.cache_read_tokens == 100

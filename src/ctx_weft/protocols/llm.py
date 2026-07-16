@@ -149,11 +149,42 @@ class ToolCall:
 
 @dataclass
 class LLMUsage:
-    """token 使用统计。"""
+    """token 使用统计。
+
+    口径（跨 provider 归一，由各 adapter 负责翻译）：
+      输入侧：prompt_tokens      — 本次请求的全部输入（含缓存读/写部分）
+             cache_read_tokens  — 输入中命中缓存的部分
+             cache_write_tokens — 输入中本次写入缓存的部分
+                                  （Anthropic cache_creation；OpenAI 系恒 0）
+             input_tokens       — 实际未缓存输入（全价计费部分）。
+                                  ⚠ 与 prompt_tokens 的区分：prompt 是「总输入」，
+                                  input 是「实际输入」；命名对齐 Anthropic API 的
+                                  input_tokens（其原生口径即未缓存部分）。
+      输出侧：completion_tokens  — 全部输出
+             reasoning_tokens   — 输出中属于推理/thinking 的子集
+                                  （OpenAI/DeepSeek 单列；Anthropic 无单列恒 0）
+    不变式：
+      prompt_tokens = input_tokens + cache_read_tokens + cache_write_tokens
+      reasoning_tokens ≤ completion_tokens
+      total_tokens = prompt_tokens + completion_tokens
+    input_tokens 未显式给出（哨兵 -1）时在 __post_init__ 按不变式自动派生
+    （异常账钳 0），保证任何构造写法下账目自洽；显式传入的值原样保留、不钳制。
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    input_tokens: int = -1  # 实际输入；未显式给出时自动派生
+    reasoning_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        if self.input_tokens < 0:
+            self.input_tokens = max(
+                0,
+                self.prompt_tokens - self.cache_read_tokens - self.cache_write_tokens,
+            )
 
 
 # ── Request / 流式 chunk ──────────────────────────────────────────────────────

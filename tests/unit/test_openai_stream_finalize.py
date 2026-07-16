@@ -5,7 +5,7 @@ import json
 import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMMessage, LLMRequest, LLMTool
-from ctx_weft.providers.llm.openai import OpenAIAdapter, _serialize_messages
+from ctx_weft.providers.llm.openai import OpenAIAdapter, _resolve_tc_index, _serialize_messages
 
 
 # ── Fake httpx streaming client ────────────────────────────────────────────────
@@ -79,6 +79,94 @@ def test_serialize_malformed_raw_arguments_stays_valid_json():
     out = _serialize_messages("", [msg])
     arguments = out[0]["tool_calls"][0]["function"]["arguments"]
     assert json.loads(arguments) == {}  # 服务端会 json.loads(arguments)；畸形 → 发合法空对象
+
+
+# ── _resolve_tc_index: 缺失 index 时的分桶 ──────────────────────────────────────
+
+
+def test_resolve_index_explicit_is_used():
+    assert _resolve_tc_index({"index": 2}, {}, None) == 2
+
+
+def test_resolve_index_missing_no_id_continues_last_bucket():
+    # 参数续传 delta 常缺 index 且不带 id → 归到最后活跃桶（延续同一调用）。
+    assert _resolve_tc_index({"function": {"arguments": ",\"b\":2"}}, {0: {}}, 0) == 0
+
+
+def test_resolve_index_missing_no_id_no_last_defaults_zero():
+    assert _resolve_tc_index({"function": {"arguments": "{"}}, {}, None) == 0
+
+
+def test_resolve_index_missing_new_id_opens_new_bucket():
+    # 缺 index 但带「新」id（与现有桶都不同）→ 另开一个新桶，别并进桶 0。
+    buffers = {0: {"id": "a", "name": "f", "arguments": "{\"x\":1}"}}
+    assert _resolve_tc_index({"id": "b", "function": {"name": "g"}}, buffers, 0) == 1
+
+
+def test_resolve_index_missing_same_id_reuses_bucket():
+    # 缺 index 但 id 与现有桶相同（有的端每片都回带 id）→ 复用该桶，不新开。
+    buffers = {0: {"id": "a", "name": "f", "arguments": "{\"x\":"}}
+    assert _resolve_tc_index({"id": "a", "function": {"arguments": "1}"}}, buffers, 0) == 0
+
+
+# ── 分桶回归：两个 tool call，第二个漏发 index（fix 2）─────────────────────────
+
+
+async def test_second_tool_call_missing_index_not_merged():
+    # 有的 OpenAI 兼容端在第二个 tool call 的首 delta 漏发 index。旧逻辑 get("index",0)
+    # 把它并进桶 0 → 名字/参数首尾相接成畸形。按 id 分桶后应得两个独立合法调用。
+    lines = [
+        _delta({"tool_calls": [{"index": 0, "id": "a",
+                                "function": {"name": "f", "arguments": "{\"x\": 1}"}}]}),
+        _delta({"tool_calls": [{"id": "b",  # 无 index
+                                "function": {"name": "g", "arguments": "{\"y\": 2}"}}]}),
+        _delta({}, finish_reason="tool_calls"),
+        "data: [DONE]",
+    ]
+    chunks = await _collect(_adapter(lines))
+    tcs = [c for c in chunks if c.kind == "tool_call"]
+    assert len(tcs) == 2
+    assert {tcs[0].tool_call.name, tcs[1].tool_call.name} == {"f", "g"}
+    assert {json.dumps(t.tool_call.arguments, sort_keys=True) for t in tcs} == {
+        '{"x": 1}', '{"y": 2}'}
+
+
+# ── 累积防御：cumulative 前缀重发（fix 1）──────────────────────────────────────
+
+
+async def test_cumulative_tool_arguments_prefix_resend_not_doubled():
+    # 少数端不发增量而重发「至今全部参数」（字符级前缀增长）。旧逻辑 += 翻倍成畸形；
+    # 用 merge_content 的前缀检测应替换而非追加。
+    lines = [
+        _delta({"tool_calls": [{"index": 0, "id": "a",
+                                "function": {"name": "read", "arguments": "{\"path\":"}}]}),
+        _delta({"tool_calls": [{"index": 0,
+                                "function": {"arguments": "{\"path\": \"/a\"}"}}]}),
+        _delta({}, finish_reason="tool_calls"),
+        "data: [DONE]",
+    ]
+    chunks = await _collect(_adapter(lines))
+    tcs = [c for c in chunks if c.kind == "tool_call"]
+    assert len(tcs) == 1
+    assert tcs[0].tool_call.arguments == {"path": "/a"}
+
+
+async def test_concatenated_dup_arguments_rescued_to_valid_call():
+    # 端到端复现观测畸形：同一桶两股参数流拼接（紧凑截断 + 完整）→ 收尾救援出完整对象，
+    # 不再以 {"_raw": <畸形串>} 形态飘到 gateway/UI。
+    lines = [
+        _delta({"tool_calls": [{"index": 0, "id": "a", "function": {"name": "search",
+                "arguments": '{"limit":10,"query":"intrusion detection DDoS protection"'}}]}),
+        _delta({"tool_calls": [{"index": 0, "function": {
+                "arguments": '{"limit": 10, "query": "intrusion detection DDoS protection"}'}}]}),
+        _delta({}, finish_reason="tool_calls"),
+        "data: [DONE]",
+    ]
+    chunks = await _collect(_adapter(lines))
+    tcs = [c for c in chunks if c.kind == "tool_call"]
+    assert len(tcs) == 1
+    assert tcs[0].tool_call.arguments == {
+        "limit": 10, "query": "intrusion detection DDoS protection"}
 
 
 async def test_native_tool_call_normal():
@@ -223,3 +311,53 @@ def test_serialize_normal_arguments_still_json_dumped():
     )
     out = _serialize_messages("", [msg])
     assert json.loads(out[0]["tool_calls"][0]["function"]["arguments"]) == {"path": "/a"}
+
+
+# ── usage 拆分读取：cached_tokens / reasoning_tokens ─────────────────────────────
+
+
+async def test_usage_cached_tokens_split():
+    lines = [
+        _delta({"content": "hello"}, finish_reason="stop"),
+        _data({"choices": [], "usage": {
+            "prompt_tokens": 110, "completion_tokens": 9, "total_tokens": 119,
+            "prompt_tokens_details": {"cached_tokens": 100},
+            "completion_tokens_details": {"reasoning_tokens": 4}}}),
+        "data: [DONE]",
+    ]
+    chunks = await _collect(_adapter(lines))
+    u = [c for c in chunks if c.kind == "usage"][0].usage
+    assert u.prompt_tokens == 110
+    assert u.cache_read_tokens == 100
+    assert u.cache_write_tokens == 0
+    assert u.input_tokens == 10   # 派生：prompt − cached
+    assert u.reasoning_tokens == 4
+
+
+async def test_usage_deepseek_dialect_fallback():
+    lines = [
+        _delta({"content": "hello"}, finish_reason="stop"),
+        _data({"choices": [], "usage": {
+            "prompt_tokens": 110, "completion_tokens": 9, "total_tokens": 119,
+            "prompt_cache_hit_tokens": 100, "prompt_cache_miss_tokens": 10}}),
+        "data: [DONE]",
+    ]
+    chunks = await _collect(_adapter(lines))
+    u = [c for c in chunks if c.kind == "usage"][0].usage
+    assert u.cache_read_tokens == 100
+    assert u.input_tokens == 10
+
+
+async def test_usage_no_details_regression():
+    lines = [
+        _delta({"content": "hello"}, finish_reason="stop"),
+        _data({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 3,
+                                        "total_tokens": 13}}),
+        "data: [DONE]",
+    ]
+    chunks = await _collect(_adapter(lines))
+    u = [c for c in chunks if c.kind == "usage"][0].usage
+    assert u.cache_read_tokens == 0 and u.cache_write_tokens == 0
+    assert u.input_tokens == 10 and u.reasoning_tokens == 0
+
+

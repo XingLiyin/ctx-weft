@@ -3,11 +3,48 @@
 import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMUsage, ToolCall
-from ctx_weft.providers.llm._finalize import build_finalize_chunks
+from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
 
 
 def _kinds(chunks):
     return [c.kind for c in chunks]
+
+
+# ── parse_tool_arguments: 累积 native 参数字符串 → dict（含畸形救援）──────────────
+
+
+def test_parse_tool_arguments_normal_object():
+    assert parse_tool_arguments('{"a": 1, "b": "x"}') == {"a": 1, "b": "x"}
+
+
+def test_parse_tool_arguments_empty_is_empty_dict():
+    assert parse_tool_arguments("") == {}
+
+
+def test_parse_tool_arguments_rescues_trailing_complete_object():
+    # 观测到的畸形：同一 index 桶被两股参数流首尾相接——前段截断(无闭合)、后段完整。
+    # 救援应挑出「解析到串尾的完整对象」= 后段。
+    raw = ('{"limit":10,"query":"intrusion detection DDoS protection"'
+           '{"limit": 10, "query": "intrusion detection DDoS protection"}')
+    assert parse_tool_arguments(raw) == {
+        "limit": 10, "query": "intrusion detection DDoS protection"}
+
+
+def test_parse_tool_arguments_rescues_leading_object_with_trailing_junk():
+    # 完整对象在前、尾部有垃圾 token → 取干净的前缀对象。
+    assert parse_tool_arguments('{"a": 1} trailing garbage') == {"a": 1}
+
+
+def test_parse_tool_arguments_unrecoverable_falls_back_to_raw():
+    # 真畸形（无任何完整对象可救）→ 兜底 {"_raw": raw}，交 gateway 报错（不静默丢）。
+    from ctx_weft.protocols import RAW_ARGS_KEY
+    assert parse_tool_arguments("{not json at all") == {RAW_ARGS_KEY: "{not json at all"}
+
+
+def test_parse_tool_arguments_non_object_json_falls_back_to_raw():
+    # 合法但非对象（数组/标量）→ 工具参数必须是对象 → 兜底 _raw。
+    from ctx_weft.protocols import RAW_ARGS_KEY
+    assert parse_tool_arguments("[1, 2, 3]") == {RAW_ARGS_KEY: "[1, 2, 3]"}
 
 
 def test_native_tool_calls_emit_usage_then_calls_then_done():

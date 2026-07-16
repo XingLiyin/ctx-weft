@@ -451,3 +451,47 @@ async def test_default_event_types_emit_llm(monkeypatch):
     assert EventType.LLM_PROMPT_SENT in emitted_llm
     assert EventType.LLM_RESPONSE_FINISHED in emitted_llm
     assert emitted_bg == [], f"observe path must emit NO BackgroundObserve* events, got {emitted_bg}"
+
+
+class _RecordingBusFull:
+    """Records full events (not just types) for payload assertions."""
+
+    def __init__(self):
+        self.events = []
+
+    async def emit(self, event) -> None:
+        self.events.append(event)
+
+
+async def test_response_finished_payload_carries_usage_split(monkeypatch):
+    """LLM_RESPONSE_FINISHED 的 payload["usage"] 经 asdict 自动携带七字段拆分。"""
+
+    async def _fake_stream(ctx, state, request):
+        yield SimpleNamespace(
+            kind="usage",
+            usage=LLMUsage(prompt_tokens=127, completion_tokens=5, total_tokens=132,
+                           cache_read_tokens=100, cache_write_tokens=20),
+            tool_call=None, text="",
+        )
+        yield _make_tool_call_chunk("report_task_outcome")
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+
+    bus = _RecordingBusFull()
+    state = _make_state()
+    ctx = _make_ctx(tool_content="DONE", event_bus=bus)
+
+    await run_observe_react(
+        state, ctx, system="SYS", messages=[], tools=[],
+        request_id_prefix="test", max_rounds=1,
+        terminal_tool_name="report_task_outcome",
+    )
+
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    assert finished
+    u = finished[0].payload["usage"]
+    assert u["prompt_tokens"] == 127
+    assert u["cache_read_tokens"] == 100
+    assert u["cache_write_tokens"] == 20
+    assert u["input_tokens"] == 7
+    assert u["reasoning_tokens"] == 0

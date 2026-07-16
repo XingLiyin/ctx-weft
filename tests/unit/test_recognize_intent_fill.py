@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
-from ctx_weft.protocols import LLMChunk, ToolCall
+from ctx_weft.protocols import LLMChunk, LLMUsage, ToolCall
 from ctx_weft.protocols.capability import ToolCapability
 
 
@@ -26,6 +26,10 @@ class _FakeLLM:
         yield LLMChunk(
             kind="tool_call",
             tool_call=ToolCall(id="tc1", name="update_task_metadata", arguments=self._args),
+        )
+        yield LLMChunk(
+            kind="usage",
+            usage=LLMUsage(prompt_tokens=50, completion_tokens=8, total_tokens=58),
         )
 
 
@@ -108,3 +112,31 @@ async def test_skips_when_no_metadata_tool_in_bound_set():
     assert outcome.next_step is None
     assert "RecognizeIntentSkipped" in [ev.type for ev in emitted]
     assert ctx.assembler.calls == []  # never assembled
+
+
+async def test_completed_payload_carries_usage():
+    """意图识别的 LLM 开销此前无账可查——usage 透进 COMPLETED payload（只透出不记账）。"""
+    args = {"title": "T", "description": "D", "session_goal": "G"}
+    cap = ToolCapability(id="cap1", name="update_task_metadata", purposes=["recognize_intent"])
+
+    emitted = []
+
+    async def _emit(ev):
+        emitted.append(ev)
+
+    ctx = SimpleNamespace(
+        provider_ctx=SimpleNamespace(),
+        capability_cache=None,
+        assembler=_FakeAssembler(),
+        llm=_FakeLLM(args),
+        capability_gateway=_FakeGateway(),
+        event_bus=SimpleNamespace(emit=_emit),
+    )
+    await RecognizeIntentStep().execute(_state([cap]), ctx)
+
+    completed = [ev for ev in emitted if ev.type == "RecognizeIntentCompleted"]
+    assert completed
+    u = completed[0].payload["usage"]
+    assert u["prompt_tokens"] == 50
+    assert u["input_tokens"] == 50   # 无缓存信息 → 派生 = prompt
+    assert u["completion_tokens"] == 8
