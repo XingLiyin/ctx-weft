@@ -21,7 +21,9 @@ from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryLayer
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
+from ctx_weft.core.loop.llm_gateway import (
+    request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
+)
 from ctx_weft.core.orchestrator.control_capability import REPORT_TASK_OUTCOME_NAME, ControlResult
 from ctx_weft.core.utils import now_utc
 
@@ -86,6 +88,7 @@ async def run_observe_react(
       前端是否渲染（background 后台交互不应进前端对话流）。
     """
     agent = state.agent
+    model, llm_account = resolve_llm_identity(state)
     current_messages = list(messages)
     last_text = ""
     # 动态 max_tokens 的增量基线：上一轮实际发送条数（本轮 usage 对应的真实 prompt 基线）。
@@ -95,13 +98,14 @@ async def run_observe_react(
         req_id = f"{request_id_prefix}_r{round_num}"
         await ctx.event_bus.emit(make_event(state, event_types.request_started, payload={
             "request_id": req_id,
-            "model": agent.runtime.get("llm_model", "mock"),
+            "model": model,
+            "llm_account": llm_account,
             "round": round_num,
         }))
 
         sent_msg_count = len(current_messages)  # 本轮发送条数（append 前）→ 下轮增量基线
         llm_request = LLMRequest(
-            model=agent.runtime.get("llm_model", "mock"),
+            model=model,
             system=system,
             messages=list(current_messages),
             tools=tools,
@@ -155,6 +159,9 @@ async def run_observe_react(
                 "content": accumulated_text,
                 "tool_calls": [{"name": tc.name} for tc in tool_calls],
                 "usage": dataclasses.asdict(usage),
+                # 本次调用实际使用的模型/账号（host 云端上报按此计账，不受切换竞态影响）
+                "llm_model": model,
+                "llm_account": llm_account,
                 "round": round_num,
             },
         ))

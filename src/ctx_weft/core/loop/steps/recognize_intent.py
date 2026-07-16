@@ -14,7 +14,9 @@ import logging
 from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import stream_llm, apply_dynamic_max_tokens, request_prompt_estimate
+from ctx_weft.core.loop.llm_gateway import (
+    stream_llm, apply_dynamic_max_tokens, request_prompt_estimate, resolve_llm_identity,
+)
 from ctx_weft.core.events import EventType
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols.capability import ToolCapability
@@ -108,7 +110,7 @@ class RecognizeIntentStep(Step):
         from ctx_weft.protocols import LLMRequest, LLMUsage
 
         llm_request = LLMRequest(
-            model=state.agent.runtime.get("llm_model", "mock"),
+            model=resolve_llm_identity(state)[0],
             system=prompt.system,
             messages=prompt.messages,
             tools=prompt.tools,

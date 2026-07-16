@@ -3808,9 +3808,9 @@ class Event:
 
 | Type | 触发时机 | Reducer | 关键 payload 字段 |
 |------|---------|--------|----------------|
-| `LLMRequestStarted` | LLMClient.complete 调用入口 | O | `request_id`, `model`, `prompt_tokens_estimate` |
+| `LLMRequestStarted` | LLMClient.complete 调用入口 | O | `request_id`, `model`（实际使用的模型，session 真值）, `llm_account`（实际使用的账号）, `prompt_tokens_estimate` |
 | `LLMTokenStreamed` | 每个 LLM stream chunk | O | `request_id`, `delta`（token 增量文本） |
-| `LLMResponseFinished` | LLMClient.complete 流结束 | **M**+**S** | `request_id`, `content`（完整 LLM 输出文本）, `tool_calls`（结构化 tool_call 列表）, `usage`（七字段拆分：prompt/completion/total/cache_read/cache_write/input/reasoning） — **payload 必须完整携带，replay 用** |
+| `LLMResponseFinished` | LLMClient.complete 流结束 | **M**+**S** | `request_id`, `content`（完整 LLM 输出文本）, `tool_calls`（结构化 tool_call 列表）, `usage`（七字段拆分：prompt/completion/total/cache_read/cache_write/input/reasoning）, `llm_model`/`llm_account`（本次调用实际使用的模型/账号，host 计费上报按此计账） — **payload 必须完整携带，replay 用** |
 | `LLMRetryTriggered` | LLM 网络/格式错误后重试 | O | `request_id`, `attempt`, `error_code` |
 
 > ⚠ `LLMResponseFinished` 是 replay 关键事件——payload 必须含**完整 content 和 tool_calls**，否则 replay 无法重建 ActStep 当时的 turn record。

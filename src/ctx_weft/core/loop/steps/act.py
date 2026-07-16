@@ -14,7 +14,9 @@ from typing import Any
 
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
+from ctx_weft.core.loop.llm_gateway import (
+    request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
+)
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import (
@@ -202,10 +204,10 @@ async def _run_llm_turn(
     CancelledError。正常结束返回 _LLMTurnOutput。
     """
     agent = state.agent
-    model = agent.runtime.get("llm_model", "mock")
+    model, llm_account = resolve_llm_identity(state)
     req_id = f"req_{agent.id}_{state.sequence_counter}"
     await ctx.event_bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={
-        "request_id": req_id, "model": model, "turn": turn_num}))
+        "request_id": req_id, "model": model, "llm_account": llm_account, "turn": turn_num}))
 
     llm_request = LLMRequest(
         model=model, system=prompt.system, messages=list(current_messages), tools=prompt.tools)
@@ -271,6 +273,8 @@ async def _run_llm_turn(
                 {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls
             ],
             "usage": dataclasses.asdict(usage),
+            # 本次调用实际使用的模型/账号（host 云端上报按此计账，不再受切换竞态影响）
+            "llm_model": model, "llm_account": llm_account,
             "finish_reason": "tool_use" if tool_calls else "stop", "turn": turn_num}))
 
     return _LLMTurnOutput(text=text, reasoning=reasoning, tool_calls=tool_calls, usage=usage)
