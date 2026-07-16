@@ -152,14 +152,16 @@ def test_restore_rebuilds_blocked_chain() -> None:
     assert second is not None and second.task_id == "B"
 
 
-async def test_run_layer_failure_emits_task_failed() -> None:
-    """运行层失败（非 observer 判定，如 model 名写错）必须发 TaskFailed。
+async def test_run_layer_failure_suspends_not_fails() -> None:
+    """运行层失败（非 observer 判定，如 model 名写错）挂起等恢复，不落终态。
 
-    否则任务在投影里停留 ACTIVE（TASK_STATUS_BY_EVENT 只认 TASK_* 事件），
-    会被 restore 误当成可恢复任务复活重跑（且用 session 投影里的旧 model）。
+    仍须发 TASK_* 事件对齐投影（TASK_STATUS_BY_EVENT 只认 TASK_* 事件）——
+    现在是 TaskSuspended：任务在投影为 SUSPENDED，restore 会把它当可恢复任务重排，
+    这正是期望语义（真失败只有 observer 判 fail 一条路）。
     """
     bus = _CapturingBus()
     tm = TaskManager(session_id="s1", event_bus=bus)
+    tm._max_concurrent = 0
 
     async def runner(_s: str, _t: str) -> None:
         pass
@@ -173,10 +175,11 @@ async def test_run_layer_failure_emits_task_failed() -> None:
 
     await tm._handle_task_failure("A", error="unknown model", exc=_NonRetriable("boom"))
 
-    failed = [e for e in bus.events if e.type == EventType.TASK_FAILED]
-    assert failed, "run-layer failure must emit TaskFailed"
-    assert failed[0].task_id == "A"
-    assert t.status == "FAILED"
+    assert not [e for e in bus.events if e.type == EventType.TASK_FAILED]
+    suspended = [e for e in bus.events if e.type == EventType.TASK_SUSPENDED]
+    assert suspended, "run-layer failure must emit TaskSuspended (projection alignment)"
+    assert suspended[0].task_id == "A"
+    assert t.status == "SUSPENDED"
 
 
 async def test_retry_emits_task_requeued() -> None:

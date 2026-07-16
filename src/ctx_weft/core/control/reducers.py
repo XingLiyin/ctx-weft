@@ -464,11 +464,6 @@ def _apply(view: RunStateView, ev: Event) -> None:
                 if p.get("description"):
                     task.description = p["description"]
 
-    elif t == EventType.FAILURE_THRESHOLD_HIT:
-        sess = view.sessions.get(ev.session_id)
-        if sess is not None:
-            sess.failure_counter += 1
-
     # ── Task projection ───────────────────────────────────────────────────────
     elif t == EventType.TASK_CREATED:
         task_data: dict = p.get("task", {})
@@ -521,6 +516,18 @@ def _apply(view: RunStateView, ev: Event) -> None:
                 if assigned:
                     task.assigned_agent_id = assigned
         view.task_status = TASK_STATUS_BY_EVENT[t]
+
+        # ── failure_counter 折叠（Task 11）──
+        # TASK_FAILED：普通失败 +1（熔断失败 TASK_FAILED_BY_THRESHOLD 不计，它是聚合结果非新失败）
+        # TASK_FINISHED：成功清零（连败语义）
+        if t == EventType.TASK_FAILED:
+            sess = view.sessions.get(ev.session_id)
+            if sess is not None and (p or {}).get("error_code") != "TASK_FAILED_BY_THRESHOLD":
+                sess.failure_counter += 1
+        elif t == EventType.TASK_FINISHED:
+            sess = view.sessions.get(ev.session_id)
+            if sess is not None:
+                sess.failure_counter = 0
 
     elif t == EventType.TASK_FINALIZED and ev.task_id:
         task = view.tasks.get(ev.task_id)

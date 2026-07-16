@@ -72,7 +72,30 @@ START_TASK_NAME = qualify("control:start_task")
 _as_utc = as_utc
 
 
-async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
+async def _find_dispatch_frame(memory, parent_scope, task, provider_ctx):
+    """在 parent scope 只查已存在的派发框（tool_call_id==task.origin_tool_call_id 的 assistant
+    回合），不铸新框。找到 → 返回框自己的时间戳（归一 aware UTC）；没有 → None。
+
+    供 `_ensure_dispatch_frame`（find+create）与 `synthesize_cancel_closure`（find-only，
+    born-cancel 未铸框时整体跳过、不补铸）共用。
+    """
+    existing = await memory.recall_recent(
+        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, provider_ctx)
+    frame = next(
+        (r for r in existing
+         if r.role == "assistant"
+         and any(tc.get("id") == task.origin_tool_call_id
+                 for tc in (r.metadata.get("tool_calls") or []))),
+        None,
+    )
+    if frame is None:
+        return None
+    # 归一：框可能来自事件重放 / DB 反序列化而丢 tz（naive），直接返回会让调用方拿它与
+    # aware 时间比较时炸 TypeError。
+    return _as_utc(frame.timestamp)
+
+
+async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     """在 parent scope 铸一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，
     返回它 == 配对 tool result 应锚定的时间戳 = task 真正开始执行的时刻（started_at）。
 
@@ -88,28 +111,20 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
     （actor 确实调过）；delegate_plan 子 = None → 回退 START_TASK_NAME 叙事名（无 per-child 真实调用）。
     幂等：若同 id 的框已存在（终态 finalize 单入本不会重入，此为防御），直接返回 ts、不重复铸。
     origin_task_id 留父（delegate_task 的父 = 派发 task；delegate_plan 子 = 留 plan task）。
+
+    find + create：find 部分委托 `_find_dispatch_frame`（与 cancel closure 的 find-only 用法共用）。
     """
-    # 框与 result 的公共锚点：task 真正启动执行的时刻。归一为 aware(UTC)：started_at/created_at
-    # 可能来自事件重放而为 naive（历史无 started_at 时回退 created_at 再回退 now）。
-    ts = _as_utc(task.started_at or task.created_at or now_utc())
-    existing = await memory.recall_recent(
-        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
-    frame = next(
-        (r for r in existing
-         if r.role == "assistant"
-         and any(tc.get("id") == task.origin_tool_call_id
-                 for tc in (r.metadata.get("tool_calls") or []))),
-        None,
-    )
-    if frame is not None:
+    found = await _find_dispatch_frame(memory, parent_scope, task, provider_ctx)
+    if found is not None:
         # 幂等：框已铸（常态——ensure_dispatch_frame_at_start 在子 start 时就铸好了）。
-        # **返回框自己的 ts，而不是上面按当下 started_at 重算的 ts**：TaskManager 每次派发都刷新
+        # **返回框自己的 ts，而不是按当下 started_at 重算的 ts**：TaskManager 每次派发都刷新
         # task.started_at，故 retry 过的子任务在 close 时算出的是**末次**派发时刻，而框停在首次。
         # 用重算值会把终态 ack 写到框之外（漂进子 body 中间），断掉「框与 result 同锚、严格相邻」
         # 的不变量——渲染虽有 reorder_tool_results_after_calls 兜底，但那是把正确性转嫁给 legalize。
-        # 同样经 _as_utc 归一：框可能来自事件重放 / DB 反序列化而丢 tz（naive），直接返回会让
-        # 调用方拿它与 aware 时间比较时炸 TypeError。
-        return _as_utc(frame.timestamp)
+        return found
+    # 框与 result 的公共锚点：task 真正启动执行的时刻。归一为 aware(UTC)：started_at/created_at
+    # 可能来自事件重放而为 naive（历史无 started_at 时回退 created_at 再回退 now）。
+    ts = _as_utc(task.started_at or task.created_at or now_utc())
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
@@ -121,7 +136,7 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, ctx):
                                       "input": {"title": task.title,
                                                 "description": task.description or ""}}]},
         ),
-        ctx.provider_ctx,
+        provider_ctx,
     )
     return ts
 
@@ -135,7 +150,7 @@ def _parent_scope_of(state, task) -> MemoryScope:
     )
 
 
-async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, ctx,
+async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, provider_ctx,
                                *, replace: bool) -> None:
     """写派发对的 tool 槽（按 origin_tool_call_id 与框配对）。
 
@@ -146,13 +161,13 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, ctx
       都排到框之后，于是「在跑」和「已完成」并列出现。
     """
     recs = await memory.recall_recent(
-        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx.provider_ctx)
+        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, provider_ctx)
     stale = [r.id for r in recs
              if r.role == "tool" and r.metadata.get("tool_call_id") == task.origin_tool_call_id]
     if stale:
         if not replace:
             return
-        await memory.supersede(stale, ctx.provider_ctx)
+        await memory.supersede(stale, provider_ctx)
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
@@ -160,7 +175,7 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, ctx
             metadata={"origin_task_id": task.parent_task_id,
                       "tool_call_id": task.origin_tool_call_id},
         ),
-        ctx.provider_ctx,
+        provider_ctx,
     )
 
 
@@ -186,9 +201,10 @@ async def ensure_dispatch_frame_at_start(state, ctx) -> None:
     if not (task.parent_task_id and task.origin_tool_call_id):
         return  # root task：无派发方，没有框可铸
     parent_scope = _parent_scope_of(state, task)
-    ts = await _ensure_dispatch_frame(ctx.memory, parent_scope, task, ctx)
+    ts = await _ensure_dispatch_frame(ctx.memory, parent_scope, task, ctx.provider_ctx)
     await _put_dispatch_result(
-        ctx.memory, parent_scope, task, _dispatch_running_ack(task.title), ts, ctx, replace=False,
+        ctx.memory, parent_scope, task, _dispatch_running_ack(task.title), ts, ctx.provider_ctx,
+        replace=False,
     )
 
 
@@ -203,7 +219,10 @@ def _finish_report_prefix(title: str, outcome: str) -> str:
     标记落 tool 槽而非 `input`：`input` 受 finish_task 的 schema 约束，而
     ControlCapabilityProvider._handle 会过滤 schema 未声明的 key（见 control_capability.py），
     塞进去只会被静默丢弃；且历史里出现未声明参数会诱导模型照此形状调用。tool 槽是自由文本，
-    与既有 `[outcome=fail]` 前缀同一惯例。归属在前、fail 在后；title 为空则不产空标记。
+    与既有 `[outcome=fail]` 前缀同一惯例。归属在前、outcome 标记在后；title 为空则不产空标记。
+
+    `outcome == "cancelled"`（统一取消胶囊闭合，见 synthesize_cancel_closure）→ `[outcome=cancelled]`，
+    与既有 `[outcome=fail]` 同一惯例，标明这条 finish 对是取消收尾而非正常/失败终态。
     """
     parts: list[str] = []
     title = (title or "").strip()
@@ -211,6 +230,8 @@ def _finish_report_prefix(title: str, outcome: str) -> str:
         parts.append(f"[task: {title}]")
     if outcome == "fail":
         parts.append("[outcome=fail]")
+    elif outcome == "cancelled":
+        parts.append("[outcome=cancelled]")
     return "".join(f"{p} " for p in parts)
 
 
@@ -312,10 +333,10 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             # 跨 agent（spec 2026-06-28 §2.3）：dispatch result 写成 agent 层普通 conversation turn
             # （tool 回合），与 start_task / delegate 框靠 tool_call_id 配对、时间戳对齐保证相邻。
             report_prefix = "[outcome=fail] " if outcome == "fail" else ""
-            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx)
+            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx.provider_ctx)
             await _put_dispatch_result(
-                memory, parent_scope, task, f"{report_prefix}{mem_content}", frame_ts, ctx,
-                replace=True,
+                memory, parent_scope, task, f"{report_prefix}{mem_content}", frame_ts,
+                ctx.provider_ctx, replace=True,
             )
             events.append(make_event(
                 state, EventType.MEMORY_INGESTED,
@@ -325,10 +346,10 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
         elif same_agent:
             # 同 agent（spec 2026-06-30 §2.5）：配对 tool result 换终态文案，时间戳对齐框 → 严格
             # 相邻、排在子 body 之前。子真实产出由内联胶囊 body + 嵌套 finish 对承载。
-            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx)
+            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx.provider_ctx)
             await _put_dispatch_result(
-                memory, parent_scope, task, _dispatch_ack(task.title, outcome), frame_ts, ctx,
-                replace=True,
+                memory, parent_scope, task, _dispatch_ack(task.title, outcome), frame_ts,
+                ctx.provider_ctx, replace=True,
             )
             # 嵌套合成子自己的 finish 对（写进共享 agent scope，@close 时刻）
             await _synthesize_dispatch_pair(
@@ -350,11 +371,81 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     return events
 
 
+async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx, reason_text: str) -> None:
+    """统一取消胶囊闭合（Task 14）：所有 CANCELED 终态的公共收尾——父 ack 终态化 +
+    `[outcome=cancelled]` finish 对。镜像 `_close_one` 的分支，但没有 LoopState，用
+    `session_id` + task 字段直接推导 scope。
+
+    调用点（TaskManager → runtime 侧 `_finalize_cancel_memory`）：
+      - `cancel_all` 清队（reason="user_cancel"）；
+      - 熔断清场对已启动的挂起/排队任务（reason="failure_threshold"）；
+      - `on_task_finished(CANCELED)` funnel：在途协作取消终态坐实后（reason=task.error or 通用文案）。
+
+    分支（同 `_close_one`）：
+      ① task 有 parent_task_id + origin_tool_call_id → 父 scope 的派发对 tool 槽终态化替换为
+         取消文案。**find-only**：找不到框（born-cancel，子任务从未真正 start 过、从未铸框）→
+         整体跳过、不补铸（`_find_dispatch_frame`，不用 `_ensure_dispatch_frame`）。
+      ② 同 agent（`creator_agent_id == assigned_agent_id`）→ 嵌套合成子自己的 finish 对，写进
+         ①的父 scope（同 agent 共享 scope）。
+      ③ 跨 agent 子任务 / root（`parent_task_id is None`）→ 在自己的 agent scope 合成 finish 对：
+         `MemoryScope(session_id, task.id, task.assigned_agent_id or task.creator_agent_id)`。
+    finish 对 `register_bg=False`：这不是正常 close 流程产生的，没有对应的后台 observe 会来替换它，
+    登记只会累积永不消费的状态（同熔断收尾路径的既有惯例）。
+    """
+    same_agent = task.creator_agent_id == task.assigned_agent_id
+    cross_agent = bool(task.parent_task_id) and not same_agent
+    is_own_root = (task.parent_task_id is None) or cross_agent
+
+    act_recap = "Task was cancelled before completion."
+    task_summary = (
+        f"Cancelled ({reason_text}) — no final output was produced; "
+        f"the partial execution above is all that ran."
+    )
+
+    if task.parent_task_id and task.origin_tool_call_id:
+        parent_scope = MemoryScope(
+            session_id=session_id, task_id=task.parent_task_id, agent_id=task.creator_agent_id,
+        )
+        frame_ts = await _find_dispatch_frame(memory, parent_scope, task, provider_ctx)
+        if frame_ts is None:
+            # born-cancel：子任务从未真正 start（未走 ensure_dispatch_frame_at_start）、无框可闭——
+            # 整体跳过，不补铸空框（补铸出的框只会带取消时刻，与「派发框=started_at」的不变量矛盾）。
+            return
+        ack_text = (
+            f"Sub-task '{task.title}' was cancelled before completion ({reason_text}); "
+            f"its partial execution below is incomplete."
+        )
+        await _put_dispatch_result(
+            memory, parent_scope, task, ack_text, frame_ts, provider_ctx, replace=True,
+        )
+        if same_agent:
+            await _synthesize_dispatch_pair(
+                memory, parent_scope, task, act_recap, task_summary, "cancelled", provider_ctx,
+                register_bg=False,
+            )
+            return
+
+    if is_own_root:
+        own_scope = MemoryScope(
+            session_id=session_id, task_id=task.id,
+            agent_id=task.assigned_agent_id or task.creator_agent_id,
+        )
+        await _synthesize_dispatch_pair(
+            memory, own_scope, task, act_recap, task_summary, "cancelled", provider_ctx,
+            register_bg=False,
+        )
+
+
 async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_summary: str,
-                                    outcome: str, provider_ctx) -> None:
+                                    outcome: str, provider_ctx, *, register_bg: bool = True) -> None:
     """close 合成 agent 层 finish 对（spec 2026-06-30 两段化）：
     assistant{content=act_recap + finish_task 调用} / tool{content=task_summary 综合总结}。
-    own-root：占位先写，bg close observe 产新两段后经 _replace_finish_report 替换（A1）。"""
+    own-root：占位先写，bg close observe 产新两段后经 _replace_finish_report 替换（A1）。
+
+    register_bg=False（熔断收尾等 runtime 侧一次性合成路径）：跳过 pop_close_report /
+    register_close_synth / _replace_finish_report 整段 bg-observe 联动——这条 finish 对不是
+    正常 close 流程产生的、没有对应的后台 observe 会来替换它，登记只会累积永不消费的状态。
+    """
     from ctx_weft.core.loop.steps.background_observe import (
         pop_close_report, register_close_synth, _replace_finish_report,
     )
@@ -387,13 +478,14 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
         provider_ctx,
     )
 
-    bg = pop_close_report(task.id)
-    if bg is not None:
-        bg_recap, bg_summary = bg
-        await _replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
-                                     bg_recap, bg_summary, outcome, task.title or "")
-    else:
-        register_close_synth(task.id, tool_call_id, scope, outcome)
+    if register_bg:
+        bg = pop_close_report(task.id)
+        if bg is not None:
+            bg_recap, bg_summary = bg
+            await _replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
+                                         bg_recap, bg_summary, outcome, task.title or "")
+        else:
+            register_close_synth(task.id, tool_call_id, scope, outcome)
 
 
 class FinalizeStep(Step):

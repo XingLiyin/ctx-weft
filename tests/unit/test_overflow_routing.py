@@ -1,4 +1,8 @@
-"""_run_loop routes ContextOverflowError to terminal FAILED, not SUSPENDED."""
+"""_run_loop routes ContextOverflowError to recoverable SUSPENDED (interrupted), not terminal FAILED.
+
+溢出不再终态：retriable=False → 不重试、挂起等 /resume；用户换更大窗口的模型恢复
+（recover_session 的 llm_model 覆盖 + 窗口参数同步）。错误文案仍随 task.error 抵达 host。
+"""
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
@@ -27,7 +31,7 @@ class _OverflowLLM(MockLLMAdapter):
         return _gen()
 
 
-async def test_overflow_marks_task_failed_not_suspended():
+async def test_overflow_marks_task_suspended_not_failed():
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
     runtime = CtxWeftRuntime(
@@ -61,18 +65,23 @@ async def test_overflow_marks_task_failed_not_suspended():
         TaskManager.register_task = orig_register
 
     task = registered["task"]
-    # task must be terminal FAILED, not SUSPENDED
-    assert task.status == "FAILED"
-    assert task.status != "SUSPENDED"
+    # 溢出 = 可恢复中断：挂起等 /resume，不是终态失败
+    assert task.status == "SUSPENDED"
     assert "171808" in task.error or "171,808" in task.error
 
-    # no SessionStatusChanged(INTERRUPTED) must have been emitted
+    # 本 harness 直驱 _execute_task/_run_loop，不经 TaskManager._run_task；
+    # SessionStatusChanged(INTERRUPTED) 由 TaskManager._suspend_task_interrupted 挂起终局发，
+    # 不在本层——此处仍应为空（该事件由 test_run_crash_suspend.py 覆盖）。
     status_events = [
         e for e in seen
         if getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
         and (e.payload or {}).get("new_status") == "INTERRUPTED"
     ]
-    assert not status_events, "did not expect SessionStatusChanged(INTERRUPTED)"
-    # RUN_FINISHED must reflect the terminal FAILED status (not a retry/suspend)
+    assert not status_events, "INTERRUPTED 由 TaskManager 挂起终局发，不在本层"
+    # 不发 TASK_FAILED；TaskSuspended + SessionStatusChanged(INTERRUPTED) 由
+    # TaskManager._suspend_task_interrupted 发（tests/unit/test_run_crash_suspend.py 覆盖）
+    assert not [e for e in seen if getattr(e, "type", None) == EventType.TASK_FAILED]
+    # RUN_FINISHED 反映挂起（可恢复中断），且不再自动重试
     finished = [e for e in seen if getattr(e, "type", None) == EventType.RUN_FINISHED]
-    assert finished and finished[-1].payload.get("final_status") == "FAILED"
+    assert finished and finished[-1].payload.get("final_status") == "SUSPENDED"
+    assert finished[-1].payload.get("will_retry") is False
