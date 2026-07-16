@@ -94,6 +94,26 @@ async def test_tool_call_streaming_emits_partial_heartbeat():
     assert tcs[0].tool_call.arguments == {"p": "/a"}
 
 
+async def test_cumulative_input_json_prefix_resend_not_doubled():
+    # 若上游把 partial_json 以字符级前缀重发（而非纯增量），旧逻辑 += 会翻倍成畸形；
+    # 用 merge_content 的前缀检测应替换而非追加。
+    lines = [
+        _data({"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
+        _data({"type": "content_block_start", "index": 0,
+               "content_block": {"type": "tool_use", "id": "t1", "name": "read"}}),
+        _data({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "input_json_delta", "partial_json": "{\"p\":"}}),
+        _data({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "input_json_delta", "partial_json": "{\"p\": \"/a\"}"}}),
+        _data({"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+               "usage": {"output_tokens": 3}}),
+    ]
+    chunks = await _collect(_adapter(lines))
+    tcs = [c for c in chunks if c.kind == "tool_call"]
+    assert len(tcs) == 1
+    assert tcs[0].tool_call.arguments == {"p": "/a"}
+
+
 async def test_truncated_tool_call_raises_retriable():
     # tool_use started + partial json, but no message_delta before stream ends.
     lines = [

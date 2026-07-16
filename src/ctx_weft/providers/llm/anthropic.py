@@ -15,11 +15,10 @@ from typing import Any
 import httpx
 
 from ctx_weft.protocols import (
-    LLMCallError, LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, RAW_ARGS_KEY,
-    ToolCall,
+    LLMCallError, LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall,
 )
 from ctx_weft.core.utils import estimate_tokens
-from ctx_weft.providers.llm._finalize import build_finalize_chunks
+from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
 from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
 from ctx_weft.providers.llm.text_calls import (
     ContentGate, merge_content as _merge_content, unwrap_raw_arguments,
@@ -195,7 +194,10 @@ class AnthropicAdapter(LLMClient):
                             elif delta_type == "input_json_delta":
                                 partial = delta.get("partial_json") or ""
                                 if idx in tool_blocks:
-                                    tool_blocks[idx]["arguments"] += partial
+                                    # merge_content：兼容增量与「字符级前缀重发」两种流式语义，
+                                    # 避免重发被盲拼成畸形（同 content 的 N5 防御）。
+                                    tool_blocks[idx]["arguments"] = _merge_content(
+                                        tool_blocks[idx]["arguments"], partial)
                                     # 见 openai.py：工具调用参数流式期间发无负载心跳，让 act 流式
                                     # 循环顶部的暂停/取消检查点有机会运行；并标记 produced 使断流走
                                     # retriable（任务层干净整跑），而非静默 inline 重发整个长工具调用。
@@ -303,15 +305,12 @@ class AnthropicAdapter(LLMClient):
 
 def _parse_tool_blocks(blocks: dict[int, dict[str, Any]]) -> list[ToolCall]:
     """把累积的 tool_use 块解析成规整 ToolCall：丢弃 id/name 为空者；
-    arguments JSON 解析失败保留 ``{"_raw": ...}`` 交 gateway 报错（不静默丢）。"""
+    arguments 解析失败先试畸形救援，仍不行才保留 ``{"_raw": ...}`` 交 gateway 报错（不静默丢）。"""
     calls: list[ToolCall] = []
     for tb in blocks.values():
         if not tb["id"] or not tb["name"]:
             continue
-        try:
-            args = json.loads(tb["arguments"]) if tb["arguments"] else {}
-        except json.JSONDecodeError:
-            args = {RAW_ARGS_KEY: tb["arguments"]}
+        args = parse_tool_arguments(tb["arguments"])
         calls.append(ToolCall(id=tb["id"], name=tb["name"], arguments=args))
     return calls
 

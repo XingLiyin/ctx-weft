@@ -10,9 +10,11 @@ adapter 各自把 native 缓冲解析成 ``list[ToolCall]`` 后调本函数，�
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
+from typing import Any
 
-from ctx_weft.protocols import LLMCallError, LLMChunk, LLMUsage, ToolCall
+from ctx_weft.protocols import LLMCallError, LLMChunk, LLMUsage, RAW_ARGS_KEY, ToolCall
 from ctx_weft.core.utils import generate_id
 from ctx_weft.providers.llm.text_calls import (
     clean_visible,
@@ -22,6 +24,60 @@ from ctx_weft.providers.llm.text_calls import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _rescue_json_object(raw: str) -> dict | None:
+    """从一段畸形串里救出一个完整 JSON 对象；救不出返回 None。
+
+    两个 adapter 累积 native 工具参数时按 index 分桶盲拼（``+=``）。若同一桶被两股参数流
+    首尾相接（上游漏发 index / 重发 / 抖动），拼出的串整体非法，但里面往往嵌着一个可用的
+    完整对象。策略：
+      - 先试「干净前缀对象」：从头 ``raw_decode``，成功即取（丢尾部垃圾，覆盖「完整对象+尾巴」）。
+      - 再试「干净后缀对象」：从最后一个 ``{`` 起逐个回退，取「恰好解析到串尾」的完整对象
+        （覆盖「前段截断 + 后段完整」，即观测到的畸形）。
+    """
+    s = raw.strip()
+    if not s:
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        val, _ = decoder.raw_decode(s)
+        if isinstance(val, dict):
+            return val
+    except json.JSONDecodeError:
+        pass
+    starts = [i for i, ch in enumerate(s) if ch == "{"]
+    for i in reversed(starts):
+        try:
+            val, end = decoder.raw_decode(s[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(val, dict) and i + end == len(s):
+            return val
+    return None
+
+
+def parse_tool_arguments(raw: str) -> dict:
+    """把累积的 native 工具参数字符串解析成 dict（含畸形救援）。
+
+    正常路径直接 ``json.loads``。整体非法时尝试从串里救出一个完整对象（见
+    ``_rescue_json_object``，覆盖同一 index 桶被两股参数流拼接的情况）。仍救不出、或解析出
+    的是非对象（数组/标量）→ 兜底 ``{"_raw": raw}`` 交 gateway 报错（不静默丢）。
+    """
+    if not raw:
+        return {}
+    try:
+        val: Any = json.loads(raw)
+    except json.JSONDecodeError:
+        val = _rescue_json_object(raw)
+        if val is not None:
+            logger.warning(
+                "Rescued a valid JSON object from a malformed tool-argument buffer "
+                "(len=%d); upstream likely concatenated two argument streams.", len(raw),
+            )
+    if isinstance(val, dict):
+        return val
+    return {RAW_ARGS_KEY: raw}
 
 
 def _unwrap_tc(tc: ToolCall) -> ToolCall:

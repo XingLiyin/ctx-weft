@@ -19,7 +19,7 @@ from ctx_weft.protocols import (
     LLMClient,
 )
 from ctx_weft.core.utils import estimate_tokens
-from ctx_weft.providers.llm._finalize import build_finalize_chunks
+from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
 from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
 from ctx_weft.providers.llm.text_calls import ContentGate, merge_content as _merge_content
 
@@ -80,6 +80,7 @@ class OpenAIAdapter(LLMClient):
         produced = False  # 是否已向消费者吐过 chunk（流已开始）
         for attempt in range(self._max_http_retries):
             tool_call_buffers: dict[int, dict[str, Any]] = {}
+            last_tc_idx: int | None = None  # 供缺 index 的续传 delta 归到最后活跃桶
             content_text = ""
             finish_reason: str | None = None
             usage: LLMUsage | None = None
@@ -176,7 +177,8 @@ class OpenAIAdapter(LLMClient):
 
                         tc_deltas = delta.get("tool_calls") or []
                         for tc_delta in tc_deltas:
-                            idx = tc_delta.get("index", 0)
+                            idx = _resolve_tc_index(tc_delta, tool_call_buffers, last_tc_idx)
+                            last_tc_idx = idx
                             if idx not in tool_call_buffers:
                                 tool_call_buffers[idx] = {"id": "", "name": "", "arguments": ""}
                             buf = tool_call_buffers[idx]
@@ -188,7 +190,10 @@ class OpenAIAdapter(LLMClient):
                                 buf["name"] += name if isinstance(name, str) else str(name)
                             args = fn.get("arguments")
                             if args:
-                                buf["arguments"] += args if isinstance(args, str) else json.dumps(args)
+                                args = args if isinstance(args, str) else json.dumps(args)
+                                # merge_content：兼容增量与「字符级前缀重发」两种流式语义，
+                                # 避免重发被盲拼成畸形（同 content 的 N5 防御）。
+                                buf["arguments"] = _merge_content(buf["arguments"], args)
                         if tc_deltas:
                             # 工具调用参数流式累积期间不产出 token：消费者的 async-for 会一直挂起，
                             # act 流式循环顶部的暂停/取消检查点无从触发 → 发个无负载心跳让其有机会运行。
@@ -276,17 +281,40 @@ class OpenAIAdapter(LLMClient):
         return payload
 
 
+def _resolve_tc_index(
+    tc_delta: dict[str, Any], buffers: dict[int, dict[str, Any]], last_idx: int | None,
+) -> int:
+    """决定本条 tool_call delta 该并入哪个 index 桶（容忍上游漏发 index）。
+
+    OpenAI 流式协议里，一个 tool call 的首 delta 带 ``index``+``id``+``name``，其后的参数
+    续传 delta 只带 ``index``。部分兼容端（vLLM/国产模型）在续传 delta 甚至第二个 call 上漏发
+    ``index``；旧逻辑一律 ``get("index", 0)`` 会把它们错并进桶 0，参数首尾相接成畸形。规则：
+
+      - 显式带 ``index`` → 用它（协议正道）。
+      - 缺 ``index`` 但带 ``id``：id 命中现有桶 → 复用该桶（有的端每片都回带 id）；否则是
+        「新 call」→ 另开一个新桶（现有最大 index + 1）。
+      - 缺 ``index`` 且不带 ``id`` → 纯参数续传 → 归最后活跃桶（``last_idx``，无则 0）。
+    """
+    raw_idx = tc_delta.get("index")
+    if raw_idx is not None:
+        return raw_idx
+    tc_id = tc_delta.get("id")
+    if tc_id:
+        for k, buf in buffers.items():
+            if buf.get("id") == tc_id:
+                return k
+        return max(buffers) + 1 if buffers else 0
+    return last_idx if last_idx is not None else 0
+
+
 def _parse_buffers(buffers: dict[int, dict[str, Any]]) -> list[ToolCall]:
     """把累积的 tool_call 缓冲解析成规整 ToolCall：丢弃 id/name 为空者；
-    arguments JSON 解析失败保留 ``{"_raw": ...}`` 交 gateway 报错（不静默丢）。"""
+    arguments 解析失败先试畸形救援，仍不行才保留 ``{"_raw": ...}`` 交 gateway 报错（不静默丢）。"""
     calls: list[ToolCall] = []
     for buf in buffers.values():
         if not buf["id"] or not buf["name"]:
             continue
-        try:
-            args = json.loads(buf["arguments"]) if buf["arguments"] else {}
-        except json.JSONDecodeError:
-            args = {RAW_ARGS_KEY: buf["arguments"]}
+        args = parse_tool_arguments(buf["arguments"])
         calls.append(ToolCall(id=buf["id"], name=buf["name"], arguments=args))
     return calls
 
