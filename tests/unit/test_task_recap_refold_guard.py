@@ -49,12 +49,12 @@ async def test_close_boundary_not_guarded(fake_state_ctx, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_short_segment_kept_raw_no_llm_call(fake_state_ctx, monkeypatch):
-    """短段免折：本段 active raw token ≤ short_task_token_threshold → 不跑后台 LLM、
+    """短段免折：本段 active raw token ≤ short_segment_token_threshold → 不跑后台 LLM、
     不折叠（raw 保持 active、无 TASK_COMPACT_SUMMARY），finally 仍发 TASK_RECAP_DONE。"""
     state, ctx = fake_state_ctx
     state.agent.loop_config = SimpleNamespace(
         compact_keep_last=2, max_turns_per_observe=3,
-        short_task_token_threshold=1000,  # 种子 raw（hello llm / tool result）远低于此
+        short_segment_token_threshold=400,  # 种子 raw（hello llm / tool result）远低于此
     )
     called = {"react": False}
     async def _react(*a, **k):
@@ -83,7 +83,7 @@ async def test_segment_over_threshold_folds_as_before(fake_state_ctx, monkeypatc
     state, ctx = fake_state_ctx
     state.agent.loop_config = SimpleNamespace(
         compact_keep_last=2, max_turns_per_observe=3,
-        short_task_token_threshold=1,  # 种子 raw 必然超过
+        short_segment_token_threshold=1,  # 种子 raw 必然超过
     )
     from ctx_weft.core.orchestrator.control_capability import ControlResult
     called = {"react": False}
@@ -107,7 +107,7 @@ async def test_close_boundary_ignores_short_segment_gate(fake_state_ctx, monkeyp
     state, ctx = fake_state_ctx
     state.agent.loop_config = SimpleNamespace(
         compact_keep_last=2, max_turns_per_observe=3,
-        short_task_token_threshold=10**9,  # 巨大阈值也拦不住 close 路径
+        short_segment_token_threshold=10**9,  # 巨大阈值也拦不住 close 路径
     )
     from ctx_weft.core.orchestrator.control_capability import ControlResult
     called = {"react": False}

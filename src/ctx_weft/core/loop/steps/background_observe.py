@@ -6,7 +6,7 @@
 boundary 分流（Task 6）：
   - finish / normal → 结果落 _close_report 槽，不写 memory（finalize Task 8 取用）
   - 其他（interrupt、plain_text 等）→ apply_compact 写 TASK_COMPACT_SUMMARY；
-    但本段 active raw token ≤ short_task_token_threshold 时**免折**（短段保 raw，
+    但本段 active raw token ≤ short_segment_token_threshold 时**免折**（短段保 raw，
     不跑后台 LLM——「短 → 原文成胶囊」决策在段边界的延伸；raw 跨边界累积，超阈值再折）
 
 崩溃恢复的已知 best-effort 竞态（spec §5.1/§3.6）：`recover_session` 对一个 SUSPENDED-且-有
@@ -157,12 +157,12 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                     )
                     return
                 # 短段免折（finalize._is_short_leaf「短 → 原文成胶囊」决策在段边界的延伸）：
-                # 本段 active raw token ≤ short_task_token_threshold（与短任务同一旋钮）时跳过
-                # 折叠——花一次后台 LLM 调用换一段常比原文还长的摘要不划算。跳过 = 段保 raw，
-                # 与观察失败的降级同语义；raw 跨边界累积，下次边界重估的是累积后的 active raw，
-                # 超阈值即一并折叠。配置缺失（手构 state / 单测）时门关闭。
+                # 本段 active raw token ≤ short_segment_token_threshold 时跳过折叠——花一次
+                # 后台 LLM 调用换一段常比原文还长的摘要不划算。跳过 = 段保 raw，与观察失败的
+                # 降级同语义；raw 跨边界累积，下次边界重估的是累积后的 active raw，超阈值即
+                # 一并折叠。配置缺失（手构 state / 单测）时门关闭。
                 threshold = getattr(
-                    state.agent.loop_config, "short_task_token_threshold", 0,
+                    state.agent.loop_config, "short_segment_token_threshold", 0,
                 )
                 if threshold > 0:
                     records = await ctx.memory.recall_recent(
