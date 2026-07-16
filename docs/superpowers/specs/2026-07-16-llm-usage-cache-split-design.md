@@ -2,7 +2,8 @@
 
 日期：2026-07-16
 状态：待评审
-范围：ctx-weft（core + providers）；host（LoomeX 系）仅给对接指引，另仓实施
+范围：ctx-weft（core + providers）+ host（IpMasterCoworkPy，本次一并实施；
+core 经 vendored wheel 交付，用 `scripts/revendor-core.ps1` 一条龙 re-vendor）
 
 ## 1. 背景与问题
 
@@ -54,7 +55,10 @@ usage 直接丢弃——意图识别的 LLM 开销目前无账可查。
   每次调用的事件层，host 自行累计。
 - 给 Anthropic adapter 启用 `cache_control`（prompt caching）——另行立项；本设计为其
   铺平口径，使届时零统计改动。
-- host 仓库（LoomeX）的实施——本文 §8 给对接指引。
+- 云端上报 spool 增加拆分键（cache/reasoning）——已决策本次只切 `input_tokens` 口径，
+  拆分键另行立项。
+- 前端新增 token 展示 UI——frontend-desktop 目前没有任何 token 展示组件，本次只把
+  新键接进类型与 SSE 合并逻辑，不做新 UI。
 - 计费金额换算——core 只出 token 数，价格表是 host/前端的事。
 
 ## 4. 方案选型
@@ -244,24 +248,50 @@ cache 字段应 ≤ 估算值（测试自行保证）。
    含七键且值正确、满足不变式；memory metadata 同步。
 5. **recognize_intent**：usage chunk 进 `RECOGNIZE_INTENT_COMPLETED` payload。
 6. **全量回归**：现有 finalize / golden / threshold / observe 套件不动全绿。
+7. **host 侧（IpMasterCoworkPy）**：`SessionEntry.translate_event` 单测——
+   usage 带拆分键 → `input_tokens` 按实际输入累计、`token_update` 帧含
+   `cache_read_tokens_used` / `cache_write_tokens_used`；旧 usage（无 `input_tokens`
+   键）回退 `prompt_tokens` 累计；`_report_token_usage` 上报值取实际输入口径。
+   host 现有测试套件全量回归。
 
-## 8. host 对接指引（LoomeX，另仓实施，informative）
+## 8. host 实施（IpMasterCoworkPy，本次范围内）
 
-- **「累计输入」口径变更（已决策，非建议）**：`session.py` 现有的
+host 仓库：`C:\Users\Xing\Documents\codes\IpMasterCoworkPy`（FastAPI shell，
+core 以 vendored wheel 交付）。交付顺序：core 改完 → `scripts\revendor-core.ps1`
+re-vendor → host 改动。
+
+### 8.1 SessionEntry 累计口径切换（src/ipmastercowork/api/models/session.py）
+
+- **「累计输入」口径变更**：`LLM_RESPONSE_FINISHED` 分支（现 :334）的
   `self.input_tokens` 累加器从 `Σ prompt_tokens` 改为
   `Σ usage.get("input_tokens", usage.get("prompt_tokens", 0))`——
   即累计**实际未缓存输入**，不再累计总输入（回退兜住 replay 旧事件）。
-  前端「↑ 输入」随之自然变为真实成本口径，消除每轮全量 prompt 重复累加的高估。
-- 新增累加器与 SSE 键：`cache_read_used` / `cache_write_used` 分别累计
+  消除每轮全量 prompt 重复累加的高估。
+- 新增累加器与 SSE 键：`self.cache_read_used` / `self.cache_write_used` 分别累计
   `cache_read_tokens` / `cache_write_tokens`；`token_update` 帧增加
   `cache_read_tokens_used` / `cache_write_tokens_used` 两键，会话快照 dict 与
   `session_update` 帧同步携带。若需「累计总输入」视图，由三者相加派生，不单独累计。
 - 不受影响的口径：`context_tokens`（当前窗口）继续取单轮 `prompt_tokens`
-  （窗口规模与缓存无关）；预算进度条继续用 `output_tokens_used / token_budget`。
-- 建议顺带把 `BACKGROUND_OBSERVE_RESPONSE_FINISHED` 纳入统计（现为盲区）。
-- 前端 `SessionStats` 展示建议：「↑ 输入 xk（命中缓存 yk）」，输出可附
-  「（推理 rk）」；计费估算 = 实际输入×单价 + 命中×0.1x + 写入×1.25x + 输出×单价
-  （价格表在 host 配置）。
+  （窗口规模与缓存无关）；预算类展示继续用 `output_tokens_used / token_budget`。
+- 可选顺带：把 `BACKGROUND_OBSERVE_RESPONSE_FINISHED` 纳入统计（现为盲区，
+  后台 recap 的 token 对 host 统计不可见）。
+
+### 8.2 云端用量上报口径（已决策：只切口径，不加键）
+
+`_report_token_usage`（session.py :239）传给
+`token_usage_subscriber.report_token_usage` 的输入侧取值从
+`usage.get("prompt_tokens")` 改为 `usage.get("input_tokens", usage.get("prompt_tokens", 0))`
+——spool（token-usage-spool.jsonl）的 `input_tokens` 从此为**实际输入**口径。
+cache/reasoning 拆分键本次不上报（见 §3 非目标）；云端消费端需同步知会口径变化
+（上报量将小于旧口径，属预期的高估修正）。
+
+### 8.3 前端（frontend-desktop，现役；v2 休眠不动）
+
+- `src/types/index.ts`：Session 类型增加
+  `cache_read_tokens_used` / `cache_write_tokens_used`（number）。
+- `src/hooks/useSessionSSE.ts`（token_update 合并，现 :357）：合并两个新键。
+- `input_tokens_used` 的语义随 host 切换自动变为实际输入，前端无感知；
+  目前无 token 展示组件，不新增 UI（见 §3 非目标）。
 
 ## 9. 风险与边界
 
