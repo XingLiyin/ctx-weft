@@ -38,3 +38,17 @@ def test_asdict_carries_seven_keys():
         "cache_read_tokens", "cache_write_tokens", "input_tokens", "reasoning_tokens",
     }
     assert d["input_tokens"] == 10
+
+
+async def test_mock_adapter_carries_cache_split():
+    from ctx_weft.protocols import LLMMessage, LLMRequest
+    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+
+    adapter = MockLLMAdapter([MockResponse(text="hi", cache_read_tokens=3, reasoning_tokens=1)])
+    req = LLMRequest(model="mock", system="sys prompt",
+                     messages=[LLMMessage(role="user", content="question")])
+    chunks = [c async for c in adapter.complete(req)]
+    u = [c for c in chunks if c.kind == "usage"][0].usage
+    assert u.cache_read_tokens == 3
+    assert u.reasoning_tokens == 1
+    assert u.input_tokens == u.prompt_tokens - 3  # 自动派生
