@@ -33,11 +33,15 @@ usage 直接丢弃——意图识别的 LLM 开销目前无账可查。
 
 ## 2. 目标
 
-1. 每次 LLM 调用的 usage 拆分为四个可统计量（均为显式字段）：
-   - **总输入** `prompt_tokens`（含缓存读/写，口径跨 provider 归一）
-   - **缓存命中** `cache_read_tokens`
-   - **缓存写入** `cache_write_tokens`（Anthropic 独有计费项，1.25x/2x）
-   - **实际未缓存输入** `uncached_prompt_tokens`（显式落盘；未显式给出时构造期自动派生）
+1. 每次 LLM 调用的 usage 拆分为以下可统计量（均为显式字段）：
+   - 输入侧四分账：
+     - **总输入** `prompt_tokens`（含缓存读/写，口径跨 provider 归一）
+     - **缓存命中** `cache_read_tokens`
+     - **缓存写入** `cache_write_tokens`（Anthropic 独有计费项，1.25x/2x）
+     - **实际未缓存输入** `uncached_prompt_tokens`（显式落盘；未显式给出时构造期自动派生）
+   - 输出侧拆分：
+     - **推理输出** `reasoning_tokens`（completion 中属于推理/thinking 的子集；
+       provider 无单列时为 0）
 2. 拆分明细随现有事件 payload 透出（SSE 消费端按需聚合），**纯增量改动**：
    事件类型清单不动、`schema_version` 不动、reducer/投影/恢复不动。
 3. 保护 core 记账语义：context 阈值 / token 预算继续基于「真实总输入」，
@@ -56,7 +60,7 @@ usage 直接丢弃——意图识别的 LLM 开销目前无账可查。
 
 | 方案 | 说明 | 结论 |
 |---|---|---|
-| **A. 扩展 LLMUsage + adapter 内归一化** | 协议层加三个显式字段（缓存读/写缺省 0，实际输入哨兵自动派生），各 adapter 负责把自家方言翻译成统一口径 | **选定**：改动最小、口径唯一、事件自动透传 |
+| **A. 扩展 LLMUsage + adapter 内归一化** | 协议层加四个显式字段（缓存读/写、推理输出缺省 0，实际输入哨兵自动派生），各 adapter 负责把自家方言翻译成统一口径 | **选定**：改动最小、口径唯一、事件自动透传 |
 | B. LLMUsage 加 `provider_usage: dict` 原样透传 | 灵活，但把口径歧义推给每个消费端，payload 结构不稳定，replay 契约弱化 | 否 |
 | C. 新增独立统计事件（TokenUsageReported） | 统计流与业务流分离 | 否（需扩 V1 冻结事件清单；用户已确认不需要） |
 
@@ -70,11 +74,18 @@ class LLMUsage:
     """token 使用统计。
 
     口径（跨 provider 归一，由各 adapter 负责翻译）：
-      prompt_tokens          — 本次请求的全部输入（含缓存读/写部分）
-      cache_read_tokens      — 输入中命中缓存的部分
-      cache_write_tokens     — 输入中本次写入缓存的部分（Anthropic cache_creation；OpenAI 系恒 0）
-      uncached_prompt_tokens — 实际未缓存输入（全价计费部分）
-    不变式：prompt_tokens = uncached_prompt_tokens + cache_read_tokens + cache_write_tokens。
+      输入侧：prompt_tokens          — 本次请求的全部输入（含缓存读/写部分）
+             cache_read_tokens      — 输入中命中缓存的部分
+             cache_write_tokens     — 输入中本次写入缓存的部分
+                                      （Anthropic cache_creation；OpenAI 系恒 0）
+             uncached_prompt_tokens — 实际未缓存输入（全价计费部分）
+      输出侧：completion_tokens      — 全部输出
+             reasoning_tokens       — 输出中属于推理/thinking 的子集
+                                      （OpenAI/DeepSeek 单列；Anthropic 无单列恒 0）
+    不变式：
+      prompt_tokens = uncached_prompt_tokens + cache_read_tokens + cache_write_tokens
+      reasoning_tokens ≤ completion_tokens
+      total_tokens = prompt_tokens + completion_tokens
     uncached_prompt_tokens 未显式给出（哨兵 -1）时在 __post_init__ 按不变式自动派生，
     保证任何构造写法下账目自洽。
     """
@@ -85,6 +96,7 @@ class LLMUsage:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     uncached_prompt_tokens: int = -1  # 实际输入；未显式给出时自动派生
+    reasoning_tokens: int = 0
 
     def __post_init__(self) -> None:
         if self.uncached_prompt_tokens < 0:
@@ -129,6 +141,8 @@ usage = LLMUsage(
     cache_read_tokens=cache_read,
     cache_write_tokens=cache_write,
     uncached_prompt_tokens=uncached,               # 显式记 provider 原值，不经派生
+    # reasoning_tokens 恒 0：Anthropic thinking 计入 output_tokens 无单列；
+    # 不用流式 thinking 文本自行估算——估算值混进计费口径就是错账。
 )
 ```
 
@@ -140,8 +154,9 @@ usage = LLMUsage(
 OpenAI 的 `prompt_tokens` 已含缓存命中，无需归一，只补拆分：
 
 ```python
-details = usage_data.get("prompt_tokens_details") or {}
-cache_read = details.get("cached_tokens") or usage_data.get("prompt_cache_hit_tokens", 0)
+prompt_details = usage_data.get("prompt_tokens_details") or {}
+completion_details = usage_data.get("completion_tokens_details") or {}
+cache_read = prompt_details.get("cached_tokens") or usage_data.get("prompt_cache_hit_tokens", 0)
 usage = LLMUsage(
     prompt_tokens=usage_data.get("prompt_tokens", 0),
     completion_tokens=usage_data.get("completion_tokens", 0),
@@ -150,28 +165,31 @@ usage = LLMUsage(
     cache_write_tokens=0,   # OpenAI 系不区分/不计费缓存写入
     # uncached_prompt_tokens 不传 → __post_init__ 派生 prompt − cached
     # （OpenAI 只报 cached 子集，无未缓存原始值可记）
+    reasoning_tokens=completion_details.get("reasoning_tokens", 0) or 0,
 )
 ```
 
-回退顺序：标准 `prompt_tokens_details.cached_tokens` → DeepSeek 方言
-`prompt_cache_hit_tokens` → 0。方言差异全部封死在 adapter 内。
+回退顺序：缓存命中取标准 `prompt_tokens_details.cached_tokens` → DeepSeek 方言
+`prompt_cache_hit_tokens` → 0；推理输出取标准 `completion_tokens_details.reasoning_tokens`
+（DeepSeek R1 系同名同位）→ 0。方言差异全部封死在 adapter 内。
 
 ### 5.4 Mock adapter（providers/llm/mock.py）
 
-`MockResponse` 增加可选 `cache_read_tokens: int = 0`、`cache_write_tokens: int = 0`，
-usage chunk 原样带出。用途：事件层单测与 host/前端联调可模拟缓存命中场景。
-注意 mock 的 `prompt_tokens` 是估算总输入，模拟时 cache 字段应 ≤ 估算值（测试自行保证）。
+`MockResponse` 增加可选 `cache_read_tokens: int = 0`、`cache_write_tokens: int = 0`、
+`reasoning_tokens: int = 0`，usage chunk 原样带出。用途：事件层单测与 host/前端联调
+可模拟缓存命中/推理输出场景。注意 mock 的 `prompt_tokens` 是估算总输入，模拟时
+cache 字段应 ≤ 估算值（测试自行保证）。
 
 ### 5.5 事件与 payload：零代码改动，自动透传
 
 - `act.py` / `observe.py`（含 background observe）均以 `dataclasses.asdict(usage)` 入
   payload → `LLMResponseFinished` / `BackgroundObserveResponseFinished` 的 `usage` 自动
-  多三个键（`cache_read_tokens` / `cache_write_tokens` / `uncached_prompt_tokens`）。
-  memory ingest 的 `metadata["usage"]` 同理。
+  多四个键（`cache_read_tokens` / `cache_write_tokens` / `uncached_prompt_tokens` /
+  `reasoning_tokens`）。memory ingest 的 `metadata["usage"]` 同理。
 - `_finalize.py` 只透传 usage 对象，不改。
 - **`schema_version` 保持 1**：纯增量加键；replay 旧事件时消费端 `.get(..., 0)` 兜底。
 - 文档同步：`docs/ctx-weft_设计文档.md` §9 的 `LLMResponseFinished` payload 表与
-  `LLMUsageDict` TypedDict 增补三字段。
+  `LLMUsageDict` TypedDict 增补四字段。
 
 ### 5.6 core 记账语义：不变，且被本设计保护
 
@@ -209,15 +227,17 @@ usage chunk 原样带出。用途：事件层单测与 host/前端联调可模�
    - `message_start` usage 带 `input_tokens=7, cache_read_input_tokens=100,
      cache_creation_input_tokens=20` → 断言 `prompt_tokens == 127`、
      `cache_read_tokens == 100`、`cache_write_tokens == 20`、
-     `uncached_prompt_tokens == 7`（显式记原值）、`total_tokens == 127 + output`。
+     `uncached_prompt_tokens == 7`（显式记原值）、`total_tokens == 127 + output`、
+     `reasoning_tokens == 0`（Anthropic 无单列）。
    - 不带缓存字段的现有夹具 → 行为与现状全等（回归）。
    - `message_delta` 尾包重发输入侧字段 → 覆盖生效。
 3. **openai 单测**（test_openai_stream_finalize.py 扩展）：
    - `prompt_tokens_details.cached_tokens` 路径（断言派生的 uncached = prompt − cached）；
    - DeepSeek `prompt_cache_hit_tokens` 回退路径；
-   - 无 details 的现有夹具回归（cache 字段为 0，uncached = prompt）。
+   - `completion_tokens_details.reasoning_tokens` → `reasoning_tokens`；
+   - 无 details 的现有夹具回归（cache/reasoning 字段为 0，uncached = prompt）。
 4. **事件层**：act 流程用 mock adapter 带缓存字段 → `LLMResponseFinished.payload["usage"]`
-   含六键且值正确、满足不变式；memory metadata 同步。
+   含七键且值正确、满足不变式；memory metadata 同步。
 5. **recognize_intent**：usage chunk 进 `RECOGNIZE_INTENT_COMPLETED` payload。
 6. **全量回归**：现有 finalize / golden / threshold / observe 套件不动全绿。
 
@@ -231,8 +251,9 @@ usage chunk 原样带出。用途：事件层单测与 host/前端联调可模�
 - `token_update` SSE 帧增加 `cache_read_tokens_used` / `cache_write_tokens_used` /
   `actual_input_tokens_used`；会话快照 dict 与 `session_update` 帧同步携带。
 - 建议顺带把 `BACKGROUND_OBSERVE_RESPONSE_FINISHED` 纳入统计（现为盲区）。
-- 前端 `SessionStats` 展示建议：「↑ 输入 xk（命中缓存 yk · 实际 zk）」；
-  计费估算 = 实际输入×单价 + 命中×0.1x + 写入×1.25x + 输出×单价（价格表在 host 配置）。
+- 前端 `SessionStats` 展示建议：「↑ 输入 xk（命中缓存 yk · 实际 zk）」，输出可附
+  「（推理 rk）」；计费估算 = 实际输入×单价 + 命中×0.1x + 写入×1.25x + 输出×单价
+  （价格表在 host 配置）。
 
 ## 9. 风险与边界
 
