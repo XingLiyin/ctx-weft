@@ -147,10 +147,21 @@ class OpenAIAdapter(LLMClient):
                         # 任何带 usage 的 event 都更新，并读到流尾再产出（不再 finish 即 return）。
                         usage_data = event.get("usage") or {}
                         if usage_data:
+                            prompt_details = usage_data.get("prompt_tokens_details") or {}
+                            completion_details = usage_data.get("completion_tokens_details") or {}
+                            # 缓存命中：标准 prompt_tokens_details.cached_tokens →
+                            # DeepSeek 方言 prompt_cache_hit_tokens → 0（方言封死在 adapter 内）
+                            cache_read = (prompt_details.get("cached_tokens")
+                                          or usage_data.get("prompt_cache_hit_tokens") or 0)
                             usage = LLMUsage(
                                 prompt_tokens=usage_data.get("prompt_tokens", 0),
                                 completion_tokens=usage_data.get("completion_tokens", 0),
                                 total_tokens=usage_data.get("total_tokens", 0),
+                                cache_read_tokens=cache_read,
+                                cache_write_tokens=0,  # OpenAI 系不区分/不计费缓存写入
+                                # input_tokens 不传 → __post_init__ 派生 prompt − cached
+                                # （OpenAI 只报 cached 子集，无未缓存原始值可记）
+                                reasoning_tokens=completion_details.get("reasoning_tokens", 0) or 0,
                             )
 
                         choices = event.get("choices") or []
