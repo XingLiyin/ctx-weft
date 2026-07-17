@@ -94,8 +94,11 @@ run 有两个入口（`initial_step="prepare"` 常规 / `"reconcile"` dangling t
 
 - recap LLM 失败 / 无可用报告 → 段保 raw，log 后吞掉（降级 = 不折叠，spec §3.6）；
   dispatch ∉ `_CLOSE_BOUNDARIES`，不触碰 `_close_synth`/`_close_report`，无泄漏面。
-- run 启动 await 处的 recap 异常：`_run_background_observe` 自吞异常、任务必然正常结束，
-  `await_pending_background_observe` 不会向 run 抛错；shield 保证 run 被取消时不牵连 recap。
+- run 启动 await 处的 recap 异常（实现期修正，2026-07-16）：`_run_background_observe`
+  只对 LLM/装配/apply_compact 主体自吞异常；护栏区（幂等护栏、短段门、事件 emit）在
+  自吞 try 之外，recap task 可能以异常终结、await 会 re-raise。故 run 启动 await 外包
+  防御 try/except（吞掉并 log，降级 = 不等待、段保 raw——与模块降级语义一致），保证
+  run 不因 recap 异常在 RUN_STARTED 之前无声崩掉；shield 保证 run 被取消时不牵连 recap。
 - 非 root scope 跑 `purpose="background_observe"` 装配若因模板/能力缓存缺失抛错 → 落入
   既有 except 分支，段保 raw——sub-agent 最坏退化为现状，不会更糟。
 
