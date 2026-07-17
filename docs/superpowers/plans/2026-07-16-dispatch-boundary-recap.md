@@ -157,7 +157,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `bo.launch_background_observe`、conftest `fake_state_ctx`
-- Produces: 契约断言——dispatch 边界写 `TASK_COMPACT_SUMMARY`、折掉 `OBSERVER_SUMMARY`（挂起摘要不特护）、短段免折门与幂等护栏生效。
+- Produces: 契约断言——dispatch 边界写 `TASK_COMPACT_SUMMARY`、`OBSERVER_SUMMARY` 层级隔离不受折叠影响（AGENT 层半僵尸类型、不进装配，见 spec §1 事实修正）、短段免折门与幂等护栏生效。
 
 - [ ] **Step 1: 追加三个特征测试**
 
@@ -166,9 +166,10 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 
 @pytest.mark.asyncio
-async def test_dispatch_boundary_folds_segment_and_observer_summary(monkeypatch, fake_state_ctx):
-    """boundary="dispatch"：走非 close 分支写段摘要；SuspendStep 的挂起摘要
-    （OBSERVER_SUMMARY）随段折叠、不特护（spec §1）。UP 保留。"""
+async def test_dispatch_boundary_folds_segment(monkeypatch, fake_state_ctx):
+    """boundary="dispatch"：走非 close 分支写段摘要、折派发前 raw、UP 保留；
+    SuspendStep 的挂起摘要（OBSERVER_SUMMARY，AGENT 层半僵尸类型、不进装配）
+    层级隔离——TASK 层折叠不动它（spec §1 事实修正）。"""
     from datetime import UTC, datetime
 
     from ctx_weft.protocols import MemoryEvent
@@ -178,7 +179,7 @@ async def test_dispatch_boundary_folds_segment_and_observer_summary(monkeypatch,
     ctx.capability_gateway = _FakeGateway("dispatch段摘要")
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
-    # 模拟 SuspendStep 已写的挂起摘要
+    # 模拟 SuspendStep 已写的挂起摘要（AGENT 层）
     await ctx.memory.ingest(MemoryEvent(
         type=MT.OBSERVER_SUMMARY, scope=state.scope,
         content="Delegated to sub-task(s): 'x'. Awaiting completion.",
@@ -190,14 +191,16 @@ async def test_dispatch_boundary_folds_segment_and_observer_summary(monkeypatch,
 
     recs = await ctx.memory.recall_recent(
         state.scope,
-        [MT.USER_PROMPT, MT.LLM_RESPONSE, MT.TOOL_RESULT, MT.OBSERVER_SUMMARY,
-         MT.TASK_COMPACT_SUMMARY],
+        [MT.USER_PROMPT, MT.LLM_RESPONSE, MT.TOOL_RESULT, MT.TASK_COMPACT_SUMMARY],
         100, ctx.provider_ctx)
     types = {r.type for r in recs}
     assert MT.TASK_COMPACT_SUMMARY in types, "dispatch 边界必须写段摘要"
     assert MT.USER_PROMPT in types, "UP 受 protect_types 保护"
     assert MT.LLM_RESPONSE not in types, "派发前 raw 必须折掉"
-    assert MT.OBSERVER_SUMMARY not in types, "挂起摘要随段折叠、不特护（spec §1）"
+    # 层级隔离：AGENT 层的挂起摘要不受 TASK 层折叠影响（单独召回，混层召回会抛错）
+    obs = await ctx.memory.recall_recent(
+        state.scope, [MT.OBSERVER_SUMMARY], 100, ctx.provider_ctx)
+    assert len(obs) == 1, "OBSERVER_SUMMARY 层级隔离，折叠后应原样留存"
 
 
 @pytest.mark.asyncio
