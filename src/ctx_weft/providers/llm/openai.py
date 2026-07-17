@@ -58,6 +58,13 @@ class OpenAIAdapter(LLMClient):
         self._client = self._make_client()
 
     @property
+    def model(self) -> str:
+        """构造时配置的模型名（duck-typed，非协议必需）：host 裸 adapter 直传时，
+        runtime 执行前经 getattr 读取回填 session.llm_model——实际调用一直用它替换
+        "mock"（见 _build_payload），事件账面须与之同源。"""
+        return self._model
+
+    @property
     def context_limit(self) -> int:
         return self._context_limit
 

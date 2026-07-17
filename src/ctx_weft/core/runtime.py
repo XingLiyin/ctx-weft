@@ -692,6 +692,7 @@ class CtxWeftRuntime:
             tenant_id=tenant_id,
             root_agent_id=agent.id,
             llm_provider=llm_account or "",
+            llm_model=llm_model or "",
             created_at=now_utc(),
         )
         session.context_limit = llm.context_limit
@@ -1862,6 +1863,15 @@ class CtxWeftRuntime:
         assembler = self._build_assembler(memory, provider_ctx, skill_index)
         gateway = self._build_gateway(memory)
         llm = self._resolve_llm(llm_account, llm_model)
+        # 回填 session 真值（只补空缺，不覆盖切换恢复已写入的值）：创建路径不写
+        # llm_model/llm_provider，且 host 依赖账号 default_model 时连入参都为空——
+        # 实际身份只有解析出的 client 知道（_FixedModelClient 公开 model/account，
+        # duck-typed，裸 adapter 缺属性则维持原状走 "mock" 兜底）。事件层
+        # resolve_llm_identity 以 session 为真值，空则误报 "mock"。
+        if not session.llm_model:
+            session.llm_model = llm_model or getattr(llm, "model", "") or ""
+        if not session.llm_provider:
+            session.llm_provider = llm_account or getattr(llm, "account", "") or ""
         loop_ctx = self._build_loop_ctx(assembler, llm, memory, provider_ctx, gateway, skill_index, cancel_token, task_manager, pause_token=pause_token)
 
         scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=scope_agent_id or agent.id)

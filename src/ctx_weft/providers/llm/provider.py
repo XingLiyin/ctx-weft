@@ -61,12 +61,26 @@ class _FixedModelClient:
         context_limit: int,
         output_reserve: int,
         output_ceiling: int | None = None,
+        account: str = "",
     ) -> None:
         self._adapter = adapter
         self._model = model
         self._context_limit = context_limit
         self._output_reserve = output_reserve
         self._output_ceiling = output_ceiling
+        self._account = account
+
+    @property
+    def model(self) -> str:
+        """实际解析出的模型名（account/model 缺省经 default 解析后的真值）。
+        duck-typed 非协议必需：runtime 执行前经 getattr 读取回填 session.llm_model，
+        事件层（resolve_llm_identity）才有真值可报，不落 "mock" 兜底。"""
+        return self._model
+
+    @property
+    def account(self) -> str:
+        """实际解析出的账号名（同上，回填 session.llm_provider）。"""
+        return self._account
 
     @property
     def context_limit(self) -> int:
@@ -227,7 +241,7 @@ class LLMProvider:
         reserve = cfg_reserve if cfg_reserve is not None else default_output_reserve(ctx_limit)
         ceiling = model_cfg.output_ceiling if model_cfg else None
 
-        return _FixedModelClient(adapter, resolved_model, ctx_limit, reserve, ceiling)
+        return _FixedModelClient(adapter, resolved_model, ctx_limit, reserve, ceiling, account=name)
 
     # ── Model discovery / connectivity (host-facing; not on the protocol) ──────
 
