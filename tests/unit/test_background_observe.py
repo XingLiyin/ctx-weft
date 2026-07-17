@@ -434,3 +434,87 @@ async def test_background_zero_state_pollution(monkeypatch, fake_state_ctx):
     t = bo.launch_background_observe(state, ctx, boundary="finish")
     await t
     assert (state.task.status, state.task.actor_done, state.task.observer_outcome) == before
+
+
+# ── dispatch 边界（spec 2026-07-16）：非 close 分支契约特征测试 ────────────────
+
+
+@pytest.mark.asyncio
+async def test_dispatch_boundary_folds_segment(monkeypatch, fake_state_ctx):
+    """boundary="dispatch"：走非 close 分支写段摘要、折派发前 raw、UP 保留；
+    SuspendStep 的挂起摘要（OBSERVER_SUMMARY，AGENT 层半僵尸类型、不进装配）
+    层级隔离——TASK 层折叠不动它（spec §1 事实修正）。"""
+    from datetime import UTC, datetime
+
+    from ctx_weft.protocols import MemoryEvent
+    from ctx_weft.protocols import MemoryEventType as MT
+
+    state, ctx = fake_state_ctx  # task 层预置 [UP, LLM, TOOL]
+    ctx.capability_gateway = _FakeGateway("dispatch段摘要")
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+    # 模拟 SuspendStep 已写的挂起摘要（AGENT 层）
+    await ctx.memory.ingest(MemoryEvent(
+        type=MT.OBSERVER_SUMMARY, scope=state.scope,
+        content="Delegated to sub-task(s): 'x'. Awaiting completion.",
+        timestamp=datetime.now(UTC), role="assistant",
+        metadata={"task_id": state.task.id, "outcome": "suspended"}), ctx.provider_ctx)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+
+    await bo.launch_background_observe(state, ctx, boundary="dispatch")
+
+    recs = await ctx.memory.recall_recent(
+        state.scope,
+        [MT.USER_PROMPT, MT.LLM_RESPONSE, MT.TOOL_RESULT, MT.TASK_COMPACT_SUMMARY],
+        100, ctx.provider_ctx)
+    types = {r.type for r in recs}
+    assert MT.TASK_COMPACT_SUMMARY in types, "dispatch 边界必须写段摘要"
+    assert MT.USER_PROMPT in types, "UP 受 protect_types 保护"
+    assert MT.LLM_RESPONSE not in types, "派发前 raw 必须折掉"
+    # 层级隔离：AGENT 层的挂起摘要不受 TASK 层折叠影响（单独召回，混层召回会抛错）
+    obs = await ctx.memory.recall_recent(
+        state.scope, [MT.OBSERVER_SUMMARY], 100, ctx.provider_ctx)
+    assert len(obs) == 1, "OBSERVER_SUMMARY 层级隔离，折叠后应原样留存"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_boundary_short_segment_kept_raw(monkeypatch, fake_state_ctx):
+    """boundary="dispatch"：段 raw 低于 short_segment_token_threshold → 免折保 raw。"""
+    state, ctx = fake_state_ctx
+    ctx.capability_gateway = _FakeGateway("unused")
+    state.agent.loop_config = SimpleNamespace(
+        compact_keep_last=2, max_turns_per_observe=3,
+        short_segment_token_threshold=100_000)  # 远超预置 raw → 门必命中
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+
+    await bo.launch_background_observe(state, ctx, boundary="dispatch")
+
+    from ctx_weft.protocols import MemoryEventType as MT
+    recs = await ctx.memory.recall_recent(
+        state.scope, [MT.LLM_RESPONSE, MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
+    types = [r.type for r in recs]
+    assert MT.TASK_COMPACT_SUMMARY not in types, "短段必须免折"
+    assert MT.LLM_RESPONSE in types, "raw 必须保留"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_boundary_refold_guard_skips(monkeypatch, fake_state_ctx):
+    """boundary="dispatch"：段内无 active LLM_RESPONSE（恢复重跑已折过）→ 幂等护栏跳过。"""
+    state, ctx = fake_state_ctx
+    ctx.capability_gateway = _FakeGateway("unused")
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+
+    async def zero_count(scope, types, pctx):
+        return 0
+
+    monkeypatch.setattr(ctx.memory, "count_recent", zero_count)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+
+    await bo.launch_background_observe(state, ctx, boundary="dispatch")
+
+    from ctx_weft.protocols import MemoryEventType as MT
+    recs = await ctx.memory.recall_recent(
+        state.scope, [MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
+    assert recs == [], "护栏命中不得产冗余胶囊"
