@@ -144,3 +144,38 @@ async def test_find_finish_pair_tool_call_id_found_and_none():
     tcid = await _seed_finish_pair(memory, session, task, agent_id)
     got = await runtime._find_finish_pair_tool_call_id(memory, scope, task.id, pctx)
     assert got == tcid
+
+
+async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_session, monkeypatch):
+    """非 close 边界（dispatch，spec 2026-07-16）重跑：按原 boundary 重跑、
+    不 register_close_synth（那是 close 边界替换占位 finish 对的专属动作）。"""
+    runtime, session, template, task_manager, task, agent_id, memory = minimal_runtime_with_session
+    task.status = "SUSPENDED"  # 委派挂起中崩溃的形态
+
+    async def _fake_instantiate(self, *, template_id, session_id, tenant_id, existing_agent_id, ctx, parent_agent=None):
+        agent = Agent(id=existing_agent_id, session_id=session_id, template_id=template_id,
+                      template_version="v1", status="IDLE", tenant_id=tenant_id)
+        return agent, template
+
+    monkeypatch.setattr(LifecycleManager, "instantiate_agent", _fake_instantiate)
+
+    registered = []
+    monkeypatch.setattr(rt_mod, "register_close_synth",
+                        lambda *a, **k: registered.append(a), raising=False)
+
+    launched = {}
+
+    def _fake_launch(state, ctx, *, boundary):
+        launched["boundary"] = boundary
+        return asyncio.create_task(asyncio.sleep(0))
+
+    monkeypatch.setattr(rt_mod, "launch_background_observe", _fake_launch, raising=False)
+
+    await runtime._relaunch_task_recap(
+        session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
+        task=task, agent_id=agent_id, boundary="dispatch",
+    )
+    await asyncio.sleep(0)
+
+    assert launched["boundary"] == "dispatch"
+    assert registered == [], "dispatch 边界不得登记 close_synth"
