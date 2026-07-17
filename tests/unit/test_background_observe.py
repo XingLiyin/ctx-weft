@@ -471,7 +471,10 @@ async def test_dispatch_boundary_folds_segment(monkeypatch, fake_state_ctx):
     assert MT.TASK_COMPACT_SUMMARY in types, "dispatch 边界必须写段摘要"
     assert MT.USER_PROMPT in types, "UP 受 protect_types 保护"
     assert MT.LLM_RESPONSE not in types, "派发前 raw 必须折掉"
-    # 层级隔离：AGENT 层的挂起摘要不受 TASK 层折叠影响（单独召回，混层召回会抛错）
+    assert MT.TOOL_RESULT not in types, "TOOL_RESULT 同属段 raw，必须折掉"
+    # 层级隔离：AGENT 层的挂起摘要不受 TASK 层折叠影响。单独召回——遵循
+    # spec/06 §8 同层约定（layer_for_types 混层抛错；in-memory provider 过渡期宽容，
+    # 但测试不依赖这种宽容）。
     obs = await ctx.memory.recall_recent(
         state.scope, [MT.OBSERVER_SUMMARY], 100, ctx.provider_ctx)
     assert len(obs) == 1, "OBSERVER_SUMMARY 层级隔离，折叠后应原样留存"
