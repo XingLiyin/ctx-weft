@@ -521,3 +521,31 @@ async def test_dispatch_boundary_refold_guard_skips(monkeypatch, fake_state_ctx)
     recs = await ctx.memory.recall_recent(
         state.scope, [MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
     assert recs == [], "护栏命中不得产冗余胶囊"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_recap_completes_benignly_after_cancel(monkeypatch, fake_state_ctx):
+    """SUSPENDED 期间被取消：在途 dispatch recap 事后完成——不抛错、照常折段、
+    不回写 task 状态（spec 2026-07-16 §2 并发边界：接受，不加同步）。"""
+    state, ctx = fake_state_ctx
+    ctx.capability_gateway = _FakeGateway("段总结X")
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+
+    async def slow_stream(c, s, req):
+        await asyncio.sleep(0.02)  # 给取消留出交叉窗口
+        yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", slow_stream)
+
+    t = bo.launch_background_observe(state, ctx, boundary="dispatch")
+    state.task.status = "CANCELED"  # recap 在跑时取消坐实
+    await t
+
+    assert t.exception() is None, "取消交叉不得让 recap 抛错"
+    assert state.task.status == "CANCELED", "recap 不得回写 task 状态"
+    from ctx_weft.protocols import MemoryEventType as MT
+    recs = await ctx.memory.recall_recent(
+        state.scope, [MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
+    assert len(recs) == 1, "折的是取消前已存在的 raw——照常成段摘要（良性）"
