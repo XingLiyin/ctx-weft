@@ -189,9 +189,15 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                     return
             try:
                 agent = state.agent
+                # 不能像 observe._llm_observe 那样用 has_agent() 短路：background observe 是
+                # fire-and-forget（launch_background_observe → asyncio.create_task），常在
+                # 本 run 的 _run_loop finally evict(agent.id) 之后才真正跑到这——per-agent 快照
+                # 已被逐出，has_agent 为 False。控制工具（collect_process_report 等）是 session
+                # 全局区（register_global，不随 evict 逐出），故这里应始终尝试 .get()（内部自动
+                # 合并全局区），不能因 per-agent 快照缺失就整体清零、连全局控制工具也丢了。
                 bound_caps = (
                     ctx.capability_cache.get(agent.id)
-                    if ctx.capability_cache is not None and ctx.capability_cache.has_agent(agent.id)
+                    if ctx.capability_cache is not None
                     else []
                 )
                 request = ContextRequest(
