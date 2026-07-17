@@ -291,7 +291,9 @@ def launch_background_observe(
 
 
 async def await_pending_background_observe(task_id: str) -> None:
-    """供 finalize 强一致：若该 task 有在跑的后台 observe，等它完成（spec §3.3 step 1）。"""
+    """等该 task 在途后台 observe 完成（强一致）。调用点：`_run_loop` 入口（覆盖常规
+    `prepare` 与 `reconcile` dangling tool_call 重放两条 resume 路径，`runtime.py`）、
+    用户冷应答注入（`_inject_user_reply`，`runtime.py`）。"""
     pending = _task_pending.get(task_id)
     if pending is not None and not pending.done():
         await asyncio.shield(pending)

@@ -154,6 +154,7 @@ _BACKGROUND_BOUNDARY_DESC = {
     "plain_text": "你以散文回复后让位用户、暂停等待用户输入",
     "finish": "任务已通过 finish_task 收尾",
     "normal": "任务以最终产出正常结束",
+    "dispatch": "你已将子任务委派出去，任务挂起等待子任务完成",
 }
 
 
