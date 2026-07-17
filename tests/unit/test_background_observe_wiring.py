@@ -21,6 +21,7 @@ import pytest
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.observe import ObserveStep
+from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.state.models import (
     Agent,
     NormalTaskSettings,
@@ -426,3 +427,76 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
         await _finish_plain_text_turn(state, ctx, turn_num=1)
 
     assert len(launched) == 0, f"Expected 0 launches for child plain-text pause, got {len(launched)}"
+
+
+# ── suspend.py: dispatch boundary (spec 2026-07-16) fires for all delegate parents ──
+
+
+def _make_suspend_state_ctx(task: Task):
+    """Minimal LoopState + LoopContext for SuspendStep.execute()."""
+    mem = InMemoryMemoryProvider()
+    scope = MemoryScope(session_id="s1", task_id=task.id, agent_id="ag1")
+    pctx = ProviderContext(session_id="s1", tenant_id="default", task_id=task.id, agent_id="ag1")
+    session = Session(id="s1", tenant_id="default", user_prompt="hello", status="RUNNING")
+    agent = SimpleNamespace(id="ag1")
+
+    state = LoopState(
+        run_id="r1", session=session, task=task, agent=agent, scope=scope,
+        extra={"template": None},
+    )
+
+    class _FakeEventBus:
+        async def emit(self, event: Any) -> None:
+            pass
+
+    ctx = LoopContext(
+        assembler=None, llm=None, memory=mem, event_bus=_FakeEventBus(),
+        provider_ctx=pctx,
+    )
+    return state, ctx
+
+
+async def test_suspend_step_fires_dispatch_boundary_for_root(monkeypatch):
+    """root task delegate suspend → launch_background_observe(boundary='dispatch') once."""
+    launched = []
+
+    def fake_launch(state, ctx, *, boundary=""):
+        launched.append((state.task.id, boundary))
+        return asyncio.ensure_future(asyncio.sleep(0))
+
+    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    monkeypatch.setattr(bo_mod, "_task_pending", {})
+    monkeypatch.setattr(
+        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        fake_launch, raising=False,
+    )
+
+    task = _make_root_task(status="SUSPENDED")
+    state, ctx = _make_suspend_state_ctx(task)
+
+    await SuspendStep().execute(state, ctx)
+
+    assert launched == [("t1", "dispatch")], f"Expected one dispatch launch, got {launched}"
+
+
+async def test_suspend_step_fires_dispatch_boundary_for_child(monkeypatch):
+    """non-root delegate parent fires same way (spec: no _is_own_root gating)."""
+    launched = []
+
+    def fake_launch(state, ctx, *, boundary=""):
+        launched.append((state.task.id, boundary))
+        return asyncio.ensure_future(asyncio.sleep(0))
+
+    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    monkeypatch.setattr(bo_mod, "_task_pending", {})
+    monkeypatch.setattr(
+        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        fake_launch, raising=False,
+    )
+
+    child = _make_child_task(status="SUSPENDED")
+    state, ctx = _make_suspend_state_ctx(child)
+
+    await SuspendStep().execute(state, ctx)
+
+    assert launched == [("t2", "dispatch")], f"Expected one dispatch launch, got {launched}"

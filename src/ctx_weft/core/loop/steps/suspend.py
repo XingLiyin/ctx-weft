@@ -73,6 +73,12 @@ class SuspendStep(Step):
             },
         ))
 
+        # dispatch 段边界（spec 2026-07-16）：父坐实 SUSPENDED 后 fire-and-forget 后台
+        # recap，折派发前 raw——挂起空窗跑 LLM。所有委派父生效（不加 _is_own_root 门控）；
+        # resume 竞态由 _run_loop 入口 await_pending_background_observe 封死。
+        from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+        launch_background_observe(state, ctx, boundary="dispatch")
+
         return StepOutcome(
             next_step=None,  # loop stops; TaskManager will re-queue when children done
             state_patch={"act_exit_reason": "suspended"},

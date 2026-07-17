@@ -5,7 +5,7 @@
 
 boundary 分流（Task 6）：
   - finish / normal → 结果落 _close_report 槽，不写 memory（finalize Task 8 取用）
-  - 其他（interrupt、plain_text 等）→ apply_compact 写 TASK_COMPACT_SUMMARY；
+  - 其他（interrupt、plain_text、dispatch 等）→ apply_compact 写 TASK_COMPACT_SUMMARY；
     但本段 active raw token ≤ short_segment_token_threshold 时**免折**（短段保 raw，
     不跑后台 LLM——「短 → 原文成胶囊」决策在段边界的延伸；raw 跨边界累积，超阈值再折）
 
