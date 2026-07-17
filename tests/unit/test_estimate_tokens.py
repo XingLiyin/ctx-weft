@@ -74,6 +74,12 @@ def test_content_tokens_adds_framing_even_when_empty():
     assert estimate_content_tokens("") == 4  # 仅 framing
 
 
+def test_content_tokens_none_is_framing_only():
+    # 回归：content 为 None（旧/导入 memory 记录、None 工具结果等）时，estimate_content_tokens
+    # 曾在 `for p in content` 迭代 None 崩溃（prepare 的 token 估算路径）。应与 "" 同为仅 framing。
+    assert estimate_content_tokens(None) == 4
+
+
 def test_content_tokens_text_plus_framing():
     # "hello world"(ceil(11/3)=4) + framing(4)
     assert estimate_content_tokens("hello world") == 4 + 4

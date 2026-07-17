@@ -51,6 +51,13 @@ class Capability:
     description: str = ""
     purposes: list[Purpose] = field(default_factory=lambda: ["act"])
 
+    def __post_init__(self) -> None:
+        # 归一 description：声明为 str，但 provider 可能透传 None（如无描述的 MCP 工具 /
+        # sub-agent 模板）。None 会经 CapabilitySource 落成 ContextBlock.content=None，
+        # 装配期 content_to_text 迭代 None 崩溃。在唯一构造入口堵住，覆盖所有子类/provider。
+        if self.description is None:
+            self.description = ""
+
 
 @dataclass
 class ToolCapability(Capability):

@@ -110,8 +110,14 @@ def dynamic_max_tokens(
     return max(floor, min(ceiling, remaining))
 
 
-def content_to_text(content: "str | list[ContentPart]") -> str:
-    """Render ContentPart list as plain text (images skipped)."""
+def content_to_text(content: "str | list[ContentPart] | None") -> str:
+    """Render ContentPart list as plain text (images skipped).
+
+    None/空按空文本处理（与 estimate_tokens 对齐）——契约上 content 应为 str | list，但
+    个别 provider 可能透传 None（如无描述的能力块），装配期须容错而非 raise。
+    """
+    if not content:
+        return ""
     if isinstance(content, str):
         return content
     parts: list[str] = []
@@ -138,10 +144,14 @@ def _dumps_for_estimate(obj: Any) -> str:
         return str(obj)
 
 
-def estimate_content_tokens(content: "str | list[ContentPart]") -> int:
-    """一条 content 的估算：文本 + 图片 part 固定常数 + 每条 framing 开销。往大了估。"""
+def estimate_content_tokens(content: "str | list[ContentPart] | None") -> int:
+    """一条 content 的估算：文本 + 图片 part 固定常数 + 每条 framing 开销。往大了估。
+
+    None/空同样容错（与 content_to_text 对齐）：契约上 content 应为 str | list，但个别路径
+    （旧/导入的 memory 记录、None 工具结果等）可能透传 None，估算期须容错而非迭代 None 崩溃。
+    """
     total = _MSG_FRAMING_TOKENS + estimate_tokens(content_to_text(content))
-    if not isinstance(content, str):
+    if content and not isinstance(content, str):
         total += _IMAGE_PART_TOKENS * sum(1 for p in content if not hasattr(p, "text"))
     return total
 
