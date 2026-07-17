@@ -9,11 +9,11 @@ boundary 分流（Task 6）：
     但本段 active raw token ≤ short_segment_token_threshold 时**免折**（短段保 raw，
     不跑后台 LLM——「短 → 原文成胶囊」决策在段边界的延伸；raw 跨边界累积，超阈值再折）
 
-崩溃恢复的已知 best-effort 竞态（spec §5.1/§3.6）：`recover_session` 对一个 SUSPENDED-且-有
-待完成 interrupt/plain_text 段 recap 的 task，会同时（a）经 TaskManager.restore 重排该 task 的
-新一轮 run，（b）经 `_relaunch_task_recap` 重跑被打断的段 recap。本函数虽以 `_lock_for(task_id)`
-把同一 task 的多个 recap 串行化，但重排出的新 run 写 raw 时并不持有这把锁——两者可并发。
-这是接受的降级：最坏情形该段摘要保留 raw（不折叠），不影响正确性，无需修复。
+崩溃恢复竞态（spec §5.1/§3.6；2026-07-16 起同进程内闭合）：`recover_session` 对一个
+SUSPENDED-且-有待完成段 recap 的 task，会（a）经 TaskManager.restore 重排该 task 的新一轮
+run，（b）经 `_relaunch_task_recap` 重跑被打断的段 recap。relaunch 先于 register_and_drain
+发生，且 `_run_loop` 入口 await_pending_background_observe——新 run 开跑前必等 recap 完成，
+两者不再并发写同一段。跨进程/其他极端时序仍是 best-effort：最坏该段保 raw，不影响正确性。
 """
 from __future__ import annotations
 

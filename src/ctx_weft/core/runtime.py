@@ -38,7 +38,11 @@ from ctx_weft.protocols import LLMClient, LLMClientResolver
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps import ActStep, FinalizeStep, RecognizeIntentStep, ObserveStep, PrepareStep
-from ctx_weft.core.loop.steps.background_observe import launch_background_observe, register_close_synth
+from ctx_weft.core.loop.steps.background_observe import (
+    await_pending_background_observe,
+    launch_background_observe,
+    register_close_synth,
+)
 from ctx_weft.core.loop.steps.compact import CompactStep
 from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
@@ -1759,6 +1763,12 @@ class CtxWeftRuntime:
 
         Raises on non-retriable errors (after emitting RunFinished).
         """
+        # 段 recap 强一致（spec 2026-07-16 §2）：本 task 若有在途后台 recap
+        # （dispatch/interrupt/plain_text 边界），先等它折完再开跑——run 的一切
+        # memory 读写都落在折叠结果之上。无 pending 零开销直通。recap 自吞异常
+        # 必正常结束，此处不会抛；shield 保证 run 被取消时不牵连 recap。
+        await await_pending_background_observe(task.id)
+
         await self._event_bus.emit(make_event(state, EventType.RUN_STARTED, payload={
             "run_id": run_id,
             "initial_step": initial_step,
