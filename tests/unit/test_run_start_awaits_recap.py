@@ -95,3 +95,25 @@ async def test_run_start_passthrough_without_pending():
     )
 
     assert order == ["driver_started"]
+
+
+async def test_run_start_swallows_errored_recap():
+    """在途 recap 以异常终结：run 启动 await 防御吞掉，driver 照常执行（段保 raw 降级）。"""
+    order: list = []
+
+    async def errored_recap():
+        raise RuntimeError("guard region boom")
+
+    state, task, agent = _make_state_and_task()
+    bo._task_pending[task.id] = asyncio.create_task(errored_recap())
+    # 注意：不 sleep(0) 先驱动 task——一旦它先落异常终态，
+    # await_pending_background_observe 的 `not pending.done()` 短路会跳过 shield，
+    # 异常永不出这个函数，测试就测不到 _run_loop 这层的防御。保持 task 未跑完时进入
+    # _run_loop，让 shield-await 在途中真正接住异常。
+
+    await CtxWeftRuntime._run_loop(
+        _fake_runtime_self(), state, None, _RecordingDriver(order),
+        "r1", "prepare", task, agent,
+    )
+
+    assert order == ["driver_started"], "recap 异常不得阻断 run"
