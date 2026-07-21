@@ -48,3 +48,20 @@ async def test_mock_usage_via_own_tokenizer():
             usage = ch.usage
     expected = adapter.tokenizer.count("SYS" + "\n".join(["hello world"]))
     assert usage.prompt_tokens == expected
+
+
+async def test_mock_usage_buckets_by_request_model_not_own_tokenizer():
+    # _FixedModelClient(adapter, "mx") 路径下 core 用 "mx" 桶取估算；usage 生成必须走同一
+    # 桶（request.model="mx"），否则 mock 自洽承诺在 provider 路径破（Minor）。
+    adapter = MockLLMAdapter(responses=[MockResponse(text="ok")])
+    from ctx_weft.protocols import LLMMessage, LLMRequest
+    req = LLMRequest(model="mx", system="SYS",
+                      messages=[LLMMessage(role="user", content="hello world")])
+    # 先让 "mx" 桶学到不同于默认 "mock" 桶的校准因子，制造分桶错位若存在即可暴露的场景。
+    adapter.tokenizer_for("mx").observe(1000, 2000)
+    usage = None
+    async for ch in adapter.complete(req):
+        if ch.kind == "usage":
+            usage = ch.usage
+    expected = adapter.tokenizer_for("mx").count("SYS" + "\n".join(["hello world"]))
+    assert usage.prompt_tokens == expected

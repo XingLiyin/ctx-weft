@@ -101,8 +101,9 @@ class MockLLMAdapter(LLMClient):
             (m.content if isinstance(m.content, str) else "")
             for m in request.messages
         )
-        prompt_tokens = self.tokenizer.count(prompt_text)
-        completion_tokens = self.tokenizer.count(text)
+        tok = self.tokenizer_for(request.model or "mock")
+        prompt_tokens = tok.count(prompt_text)
+        completion_tokens = tok.count(text)
         yield LLMChunk(
             kind="usage",
             usage=LLMUsage(
