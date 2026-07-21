@@ -103,8 +103,9 @@ class _FixedModelClient:
             dataclasses.replace(request, model=self._model), stream
         )
 
-    async def count_tokens(self, text: str) -> int:
-        return await self._adapter.count_tokens(text)
+    @property
+    def tokenizer(self):
+        return self._adapter.tokenizer_for(self._model)
 
 
 # ── LLMProvider ───────────────────────────────────────────────────────────────

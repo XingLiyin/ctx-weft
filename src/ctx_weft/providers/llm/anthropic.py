@@ -17,12 +17,12 @@ import httpx
 from ctx_weft.protocols import (
     LLMCallError, LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall,
 )
-from ctx_weft.core.utils import estimate_tokens
 from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
 from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
 from ctx_weft.providers.llm.text_calls import (
     ContentGate, merge_content as _merge_content, unwrap_raw_arguments,
 )
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,17 @@ class AnthropicAdapter(LLMClient):
         self._timeout = timeout_sec
         self._max_http_retries = max_http_retries
         self._client = self._make_client()
+        self._tokenizers: dict[str, HeuristicTokenizer] = {}
+
+    def tokenizer_for(self, model: str) -> HeuristicTokenizer:
+        """按 model 惰性分桶的校准 tokenizer（_FixedModelClient 经此取绑定模型那只）。"""
+        if model not in self._tokenizers:
+            self._tokenizers[model] = HeuristicTokenizer()
+        return self._tokenizers[model]
+
+    @property
+    def tokenizer(self) -> HeuristicTokenizer:
+        return self.tokenizer_for(self._model)
 
     def _make_client(self) -> httpx.AsyncClient:
         """Build the httpx client. Overridable to inject SSL verification."""
@@ -273,9 +284,6 @@ class AnthropicAdapter(LLMClient):
                     await asyncio.sleep(delay)
                     continue
                 raise LLMCallError(str(exc), retriable=False) from exc
-
-    async def count_tokens(self, text: str) -> int:
-        return estimate_tokens(text)
 
     async def list_models(self) -> list[str]:
         """List available model ids via GET {base}/v1/models. Raises on HTTP error."""

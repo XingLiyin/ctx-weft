@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 from ctx_weft.protocols import LLMChunk, LLMClient, LLMRequest, LLMUsage, ToolCall
-from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 
 @dataclass
@@ -40,6 +40,17 @@ class MockLLMAdapter(LLMClient):
         self._output_reserve = output_reserve
         # 记录最近一次调用的 request（供测试断言）
         self.last_request: LLMRequest | None = None
+        self._tokenizers: dict[str, HeuristicTokenizer] = {}
+
+    def tokenizer_for(self, model: str) -> HeuristicTokenizer:
+        """按 model 惰性分桶的校准 tokenizer（_FixedModelClient 经此取绑定模型那只）。"""
+        if model not in self._tokenizers:
+            self._tokenizers[model] = HeuristicTokenizer()
+        return self._tokenizers[model]
+
+    @property
+    def tokenizer(self) -> HeuristicTokenizer:
+        return self.tokenizer_for("mock")
 
     @property
     def context_limit(self) -> int:
@@ -90,8 +101,8 @@ class MockLLMAdapter(LLMClient):
             (m.content if isinstance(m.content, str) else "")
             for m in request.messages
         )
-        prompt_tokens = estimate_tokens(prompt_text)
-        completion_tokens = estimate_tokens(text)
+        prompt_tokens = self.tokenizer.count(prompt_text)
+        completion_tokens = self.tokenizer.count(text)
         yield LLMChunk(
             kind="usage",
             usage=LLMUsage(
@@ -109,6 +120,3 @@ class MockLLMAdapter(LLMClient):
             kind="done",
             finish_reason="tool_use" if response.tool_calls else "stop",
         )
-
-    async def count_tokens(self, text: str) -> int:
-        return estimate_tokens(text)

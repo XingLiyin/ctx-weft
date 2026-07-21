@@ -12,6 +12,7 @@ Knowledge / Template 并列）。包含两个**相互独立**的扩展点：
   - ToolCall      — chunk.kind == "tool_call" 的 payload
   - LLMUsage      — chunk.kind == "usage" 的 payload
   - LLMCallError  — 错误/重试契约（TaskManager 读 .retriable 决定是否重试）
+  - Tokenizer     — LLMClient.tokenizer 绑定的同步 token 计数 + 真实用量回喂协议
   多模态 adapter 还会用到 protocols.context.ContentPart（LLMMessage.content 的元素）。
 
 [Resolver 契约] 仅"多账号 LLM provider"需要，与写单个 adapter 无关：
@@ -224,6 +225,19 @@ class LLMChunk:
 
 
 @runtime_checkable
+class Tokenizer(Protocol):
+    """同步、纯本地的 token 计数 + 真实用量回喂。禁止网络调用。
+
+    count 返回**已校准**估算（内部校准结构对 core 不可见）；observe 由循环在真实
+    usage 到达后回喂 (估算段, 真实段)，实现据此自校准（如伺服 EMA）。
+    """
+
+    def count(self, text: str) -> int: ...
+
+    def observe(self, estimated: int, actual: int) -> None: ...
+
+
+@runtime_checkable
 class LLMClient(Protocol):
     """LLM 调用统一门面。adapter 实现这个协议；core 只依赖此抽象。"""
 
@@ -264,9 +278,10 @@ class LLMClient(Protocol):
         """
         ...
 
+    @property
     @abstractmethod
-    async def count_tokens(self, text: str) -> int:
-        """估算文本的 token 数。"""
+    def tokenizer(self) -> "Tokenizer":
+        """该 client 绑定模型的 tokenizer。count 已含校准；observe 回喂真实用量。"""
         ...
 
 

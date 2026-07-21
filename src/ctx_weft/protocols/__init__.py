@@ -40,6 +40,7 @@ from ctx_weft.protocols.llm import (
     LLMUsage,
     RAW_ARGS_KEY,
     ToolCall,
+    Tokenizer,
     # resolver 契约：仅多账号 LLM provider 需要
     LLMClientResolver,
 )
@@ -108,6 +109,7 @@ __all__ = [
     "LLMUsage",
     "RAW_ARGS_KEY",
     "ToolCall",
+    "Tokenizer",
     # LLM — resolver 契约（多账号 provider）
     "LLMClientResolver",
     # Knowledge
