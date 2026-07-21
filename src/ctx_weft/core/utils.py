@@ -153,27 +153,34 @@ def _dumps_for_estimate(obj: Any) -> str:
         return str(obj)
 
 
-def estimate_content_tokens(content: "str | list[ContentPart] | None") -> int:
+def estimate_content_tokens(content: "str | list[ContentPart] | None", *, count: Callable[[str], int] | None = None) -> int:
     """一条 content 的估算：文本 + 图片 part 固定常数 + 每条 framing 开销。往大了估。
 
     None/空同样容错（与 content_to_text 对齐）：契约上 content 应为 str | list，但个别路径
     （旧/导入的 memory 记录、None 工具结果等）可能透传 None，估算期须容错而非迭代 None 崩溃。
+
+    count：文本费率经 count 回调走 tokenizer；None 回退未校准启发式（纯单测/无 llm 场景）。
+    framing 常数不过回调。
     """
-    total = _MSG_FRAMING_TOKENS + estimate_tokens(content_to_text(content))
+    count = count or estimate_tokens
+    total = _MSG_FRAMING_TOKENS + count(content_to_text(content))
     if content and not isinstance(content, str):
         total += _IMAGE_PART_TOKENS * sum(1 for p in content if not hasattr(p, "text"))
     return total
 
 
-def estimate_tool_calls_tokens(tool_calls: "list[dict] | None") -> int:
+def estimate_tool_calls_tokens(tool_calls: "list[dict] | None", *, count: Callable[[str], int] | None = None) -> int:
     """tool_calls（[{name, arguments|input}]）的估算：名字 + 参数 JSON。往大了估。
 
     纯工具回合 content 常为空、体量全在 arguments 里——不数就会严重低估（致 400 / compact 欠触发）。
+
+    count：文本费率经 count 回调走 tokenizer；None 回退未校准启发式（纯单测/无 llm 场景）。
     """
+    count = count or estimate_tokens
     total = 0
     for tc in tool_calls or []:
-        total += estimate_tokens(str(tc.get("name", "")))
-        total += estimate_tokens(_dumps_for_estimate(tc.get("arguments", tc.get("input", {}))))
+        total += count(str(tc.get("name", "")))
+        total += count(_dumps_for_estimate(tc.get("arguments", tc.get("input", {}))))
     return total
 
 
