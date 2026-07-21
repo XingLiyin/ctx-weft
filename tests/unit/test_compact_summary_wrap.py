@@ -10,9 +10,14 @@ from ctx_weft.core.assembler.sources._history import (
     COMPACT_SUMMARY_WRAPPER_PREFIX, PROGRESS_SO_FAR_HEADING,
     record_to_history_block, wrap_compact_summary,
 )
+from ctx_weft.core.utils import estimate_tokens
 from ctx_weft.protocols import MemoryEventType, MemoryRecord
 
 T = MemoryEventType
+
+
+def _req() -> SimpleNamespace:
+    return SimpleNamespace(token_counter=estimate_tokens)
 
 
 def _rec(type_, content, role="user"):
@@ -28,7 +33,7 @@ def test_wrap_helper_prefixes():
 
 
 def test_task_compact_summary_block_wrapped():
-    blk = record_to_history_block(_rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX"), "task_conversation", 0)
+    blk = record_to_history_block(_rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX"), "task_conversation", 0, request=_req())
     assert blk.content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
 
 
@@ -38,7 +43,7 @@ def test_task_compact_summary_assistant_gets_progress_heading():
     rec = MemoryRecord(id="m1", type=T.TASK_COMPACT_SUMMARY, content="### 会话目标\nX",
                        timestamp=datetime(2026, 1, 1, tzinfo=UTC), role="assistant",
                        topic=None, metadata={"seq_no": 1, "task_id": "t_cur"})
-    blk = record_to_history_block(rec, "agent_recall", 0, current_task_id="t_cur")
+    blk = record_to_history_block(rec, "agent_recall", 0, request=_req(), current_task_id="t_cur")
     assert not blk.content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
     assert blk.content == f"{PROGRESS_SO_FAR_HEADING}\n### 会话目标\nX"
     assert blk.metadata["role"] == "assistant"
@@ -50,20 +55,20 @@ def test_task_compact_summary_assistant_no_heading_for_cross_task_capsule():
     rec = MemoryRecord(id="m1", type=T.TASK_COMPACT_SUMMARY, content="### 会话目标\nX",
                        timestamp=datetime(2026, 1, 1, tzinfo=UTC), role="assistant",
                        topic=None, metadata={"seq_no": 1, "task_id": "t_other"})
-    blk = record_to_history_block(rec, "agent_recall", 0, current_task_id="t_cur")
+    blk = record_to_history_block(rec, "agent_recall", 0, request=_req(), current_task_id="t_cur")
     assert blk.content == "### 会话目标\nX"
     assert PROGRESS_SO_FAR_HEADING not in blk.content
 
 
 def test_plain_user_prompt_not_wrapped():
-    blk = record_to_history_block(_rec(T.USER_PROMPT, "你好"), "task_conversation", 0)
+    blk = record_to_history_block(_rec(T.USER_PROMPT, "你好"), "task_conversation", 0, request=_req())
     assert blk.content == "你好"
 
 
 def test_agent_conversation_turn_not_wrapped():
     """胶囊里的 assistant summary 是 AGENT_CONVERSATION_TURN，不应被包装。"""
     blk = record_to_history_block(_rec(T.AGENT_CONVERSATION_TURN, "### 会话目标\nX", role="assistant"),
-                                  "agent_experience", 0)
+                                  "agent_experience", 0, request=_req())
     assert blk.content == "### 会话目标\nX"
 
 
@@ -94,7 +99,8 @@ async def test_agent_recall_heading_only_for_current_task_summary():
 
     deps = SimpleNamespace(memory=_M(),
                            provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
-    req = SimpleNamespace(scope=MemoryScope(session_id="s1", task_id="t_cur", agent_id="a1"))
+    req = SimpleNamespace(scope=MemoryScope(session_id="s1", task_id="t_cur", agent_id="a1"),
+                          token_counter=estimate_tokens)
     contents = {b.content for b in [x async for x in AgentRecallSource().fetch(req, deps)]}
 
     assert f"{PROGRESS_SO_FAR_HEADING}\n本段进度X" in contents, "当前 task 段摘要须冠 Progress So Far"
@@ -112,7 +118,7 @@ class _Mem:
 async def test_agent_compact_summary_rendered_wrapped():
     rec = _rec(T.AGENT_COMPACT_SUMMARY, "### 既往派发摘要\nY")
     deps = SimpleNamespace(memory=_Mem([rec]), provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
-    req = SimpleNamespace(scope=SimpleNamespace())
+    req = SimpleNamespace(scope=SimpleNamespace(), token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     summ = [b for b in blocks if b.metadata.get("type") == T.AGENT_COMPACT_SUMMARY]
     assert summ and summ[0].content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
@@ -137,6 +143,6 @@ async def test_agent_layer_recall_not_count_capped():
 
     deps = SimpleNamespace(memory=_SpyMem(),
                            provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
-    req = SimpleNamespace(scope=SimpleNamespace())
+    req = SimpleNamespace(scope=SimpleNamespace(), token_counter=estimate_tokens)
     _ = [b async for b in AgentRecallSource().fetch(req, deps)]
     assert seen.get("limit") == _RECALL_ALL, "agent 层召回须全召回，不按条数截断"

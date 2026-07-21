@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
+from ctx_weft.core.utils import content_to_text, generate_id
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
@@ -60,7 +60,7 @@ class SemanticRecallSource:
                 target="messages",
                 content=text,
                 priority=slot_priority("summary"),
-                token_estimate=estimate_tokens(text),
+                token_estimate=request.token_counter(text),
                 metadata={
                     "score": record.score,
                     "memory_event_id": record.id,

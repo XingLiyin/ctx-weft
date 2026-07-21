@@ -104,6 +104,7 @@ class RecognizeIntentStep(Step):
             session=state.session,
             template=state.extra.get("template"),
             bound_capabilities=bound,
+            token_counter=ctx.llm.tokenizer.count,
         )
         prompt = await ctx.assembler.assemble(request)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.prepare import PrepareStep
+from ctx_weft.core.utils import estimate_tokens
 
 
 class _SpyEscalatingCompact:
@@ -71,7 +72,8 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
 
     asm = _Assembler()
     ctx = SimpleNamespace(assembler=asm, task_manager=_TM(), event_bus=_Bus(),
-                          memory=SimpleNamespace(), provider_ctx=SimpleNamespace())
+                          memory=SimpleNamespace(), provider_ctx=SimpleNamespace(),
+                          llm=SimpleNamespace(tokenizer=SimpleNamespace(count=estimate_tokens)))
 
     outcome = await rs.execute(state, ctx)
     assert spy.called is True          # escalating_compact ran inline
@@ -126,7 +128,8 @@ async def test_reason_stashes_bound_capabilities(monkeypatch):
             pass
 
     ctx = SimpleNamespace(assembler=_Assembler(), task_manager=None, event_bus=_Bus(),
-                          memory=SimpleNamespace(), provider_ctx=SimpleNamespace())
+                          memory=SimpleNamespace(), provider_ctx=SimpleNamespace(),
+                          llm=SimpleNamespace(tokenizer=SimpleNamespace(count=estimate_tokens)))
 
     await rs.execute(state, ctx)
     assert state.extra["bound_capabilities"] is sentinel

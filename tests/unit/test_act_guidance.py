@@ -15,6 +15,7 @@ from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.guidance import GuidanceSource
 from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
+from ctx_weft.core.utils import estimate_tokens
 
 
 def _task(id, title="", status="PENDING", parent=None, description="", created_at=None,
@@ -332,7 +333,7 @@ def _collect(source, request):
 
 
 def test_guidance_source_yields_block_from_extra():
-    req = SimpleNamespace(extra={"act_guidance": "GUIDE TEXT"})
+    req = SimpleNamespace(extra={"act_guidance": "GUIDE TEXT"}, token_counter=estimate_tokens)
     blocks = _collect(GuidanceSource(), req)
     assert len(blocks) == 1
     b = blocks[0]

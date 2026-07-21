@@ -147,6 +147,7 @@ class PrepareStep(Step):
                 session=session,
                 template=template,
                 bound_capabilities=bound_capabilities,
+                token_counter=ctx.llm.tokenizer.count,
                 extra={
                     "skill_instructions": skill_instructions,
                     "skill_name": skill_name,

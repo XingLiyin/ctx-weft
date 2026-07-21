@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.assembler.sources.identity import IdentitySource
+from ctx_weft.core.utils import estimate_tokens
 
 
 def _facet(text): return SimpleNamespace(text=text, style="")
@@ -16,7 +17,7 @@ def _template(identity: dict):
 
 
 def _req(purpose, template):
-    return SimpleNamespace(purpose=purpose, template=template, extra={})
+    return SimpleNamespace(purpose=purpose, template=template, extra={}, token_counter=estimate_tokens)
 
 
 async def _facets(req):

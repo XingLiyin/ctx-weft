@@ -43,6 +43,16 @@ def _request_for(task_id: str, m: InMemoryMemoryProvider) -> tuple[ContextReques
     return req, deps
 
 
+def _bare_request() -> ContextRequest:
+    task = Task(id="t", session_id="s1", status="ACTIVE")
+    agent = Agent(id="a", session_id="s1", template_id="t", template_version="1", status="IDLE")
+    session = Session(id="s1", user_prompt="go", status="RUNNING")
+    return ContextRequest(
+        purpose="observe", scope=MemoryScope(session_id="s1", task_id="t", agent_id="a"),
+        task=task, agent=agent, session=session, template=None, bound_capabilities=[],
+    )
+
+
 def _rec(type_, content, role="user", metadata=None):
     return MemoryRecord(
         id="m1",
@@ -57,14 +67,14 @@ def _rec(type_, content, role="user", metadata=None):
 
 def test_history_block_priority_wired_to_slot_priority_llm_response():
     rec = _rec(T.LLM_RESPONSE, "hello", role="assistant")
-    blk = record_to_history_block(rec, "task_conversation", 0)
+    blk = record_to_history_block(rec, "task_conversation", 0, request=_bare_request())
     assert blk.priority == slot_priority("history", str(rec.type))
     assert blk.priority == 6
 
 
 def test_history_block_priority_wired_to_slot_priority_agent_compact_summary():
     rec = _rec(T.AGENT_COMPACT_SUMMARY, "summary text", role="assistant")
-    blk = record_to_history_block(rec, "agent_recall", 0)
+    blk = record_to_history_block(rec, "agent_recall", 0, request=_bare_request())
     assert blk.priority == slot_priority("history", str(rec.type))
     assert blk.priority == 2
 
@@ -76,13 +86,13 @@ def test_history_block_carries_origin_task_id_from_record_metadata():
         role="user",
         metadata={"seq_no": 1, "task_id": "T1", "origin_task_id": "T9"},
     )
-    blk = record_to_history_block(rec, "task_conversation", 0)
+    blk = record_to_history_block(rec, "task_conversation", 0, request=_bare_request())
     assert blk.metadata["origin_task_id"] == "T9"
 
 
 def test_history_block_origin_task_id_defaults_empty_when_absent():
     rec = _rec(T.USER_PROMPT, "do the thing", role="user", metadata={"seq_no": 1})
-    blk = record_to_history_block(rec, "task_conversation", 0)
+    blk = record_to_history_block(rec, "task_conversation", 0, request=_bare_request())
     assert blk.metadata["origin_task_id"] == ""
 
 

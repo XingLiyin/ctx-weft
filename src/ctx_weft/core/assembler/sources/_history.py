@@ -13,12 +13,12 @@ from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils import (
-    PROGRESS_SO_FAR_HEADING, content_to_text, estimate_tokens, generate_id,
+    PROGRESS_SO_FAR_HEADING, content_to_text, generate_id,
 )
 from ctx_weft.protocols import MemoryEventType
 
 if TYPE_CHECKING:
-    from ctx_weft.core.assembler.assembler import ContextBlock
+    from ctx_weft.core.assembler.assembler import ContextBlock, ContextRequest
     from ctx_weft.protocols import MemoryRecord
 
 COMPACT_SUMMARY_WRAPPER_PREFIX = (
@@ -32,7 +32,12 @@ def wrap_compact_summary(text: str) -> str:
 
 
 def record_to_history_block(
-    record: "MemoryRecord", source: str, idx: int, *, current_task_id: str | None = None
+    record: "MemoryRecord",
+    source: str,
+    idx: int,
+    *,
+    request: "ContextRequest",
+    current_task_id: str | None = None,
 ) -> "ContextBlock":
     """Map one MemoryRecord to a history ContextBlock (newest-first callers pass idx).
 
@@ -85,6 +90,6 @@ def record_to_history_block(
         target="messages",
         content=text,
         priority=slot_priority("history", str(record.type)),
-        token_estimate=record.metadata.get("token_count") or estimate_tokens(text),
+        token_estimate=record.metadata.get("token_count") or request.token_counter(text),
         metadata=md,
     )

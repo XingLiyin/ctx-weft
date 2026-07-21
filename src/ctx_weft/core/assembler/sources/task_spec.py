@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
+from ctx_weft.core.utils import content_to_text, generate_id
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
@@ -49,7 +49,7 @@ class TaskSpecSource:
             target="messages",
             content=content,
             priority=slot_priority("task_spec"),  # 不可裁
-            token_estimate=estimate_tokens(content),
+            token_estimate=request.token_counter(content),
             metadata={
                 "task_id": task.id,
                 "title": title,

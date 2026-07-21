@@ -68,6 +68,7 @@ async def summarize_for_compact(
         session=state.session,
         template=state.extra.get("template"),
         bound_capabilities=state.extra.get("bound_capabilities", []),
+        token_counter=ctx.llm.tokenizer.count,
         extra={"compact_scope": scope},
     )
     compact_prompt = await ctx.assembler.assemble(request)

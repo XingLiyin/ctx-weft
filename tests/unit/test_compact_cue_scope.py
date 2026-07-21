@@ -6,7 +6,7 @@ from ctx_weft.core.assembler.composer import (
     DefaultComposer, _AGENT_COMPACTION_INSTRUCTION, _COMPACTION_INSTRUCTION,
 )
 from ctx_weft.core.assembler.assembler import ContextBlock
-from ctx_weft.core.utils import content_to_text
+from ctx_weft.core.utils import content_to_text, estimate_tokens
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio
@@ -30,7 +30,8 @@ def _req(scope: str | None):
     extra = {"compact_scope": scope} if scope is not None else {}
     tmpl = SimpleNamespace(identity={"act": SimpleNamespace(text="SOUL", style=None),
                                      "compact": SimpleNamespace(text="COMPACTOR", style=None)})
-    return SimpleNamespace(purpose="compact", task=task, template=tmpl, extra=extra)
+    return SimpleNamespace(purpose="compact", task=task, template=tmpl, extra=extra,
+                           token_counter=estimate_tokens)
 
 
 async def _last_user(scope):

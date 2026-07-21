@@ -5,11 +5,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.sources.capability import CapabilitySource
+from ctx_weft.core.utils import estimate_tokens
 from ctx_weft.protocols.capability import AgentCapability, SkillCapability
 
 
 async def _blocks(cap):
-    request = SimpleNamespace(bound_capabilities=[cap], purpose="act")
+    request = SimpleNamespace(bound_capabilities=[cap], purpose="act", token_counter=estimate_tokens)
     return [b async for b in CapabilitySource().fetch(request, deps=None)]
 
 
@@ -29,7 +30,7 @@ async def test_agent_block_name_qualified() -> None:
 
 
 async def _blocks_for(cap, purpose):
-    request = SimpleNamespace(bound_capabilities=[cap], purpose=purpose)
+    request = SimpleNamespace(bound_capabilities=[cap], purpose=purpose, token_counter=estimate_tokens)
     return [b async for b in CapabilitySource().fetch(request, deps=None)]
 
 
