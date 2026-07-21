@@ -145,3 +145,28 @@ def test_tool_calls_tokens_accepts_both_arguments_and_input_keys():
     a = estimate_tool_calls_tokens([{"name": "w", "arguments": {"c": "x" * 3000}}])
     b = estimate_tool_calls_tokens([{"name": "w", "input": {"c": "x" * 3000}}])
     assert a == b >= 900
+
+
+# ── Step 1: count 回调测试 ──────────────────────────────────────────────
+
+
+def test_content_tokens_routes_text_through_count_callback():
+    # 文本费率经回调；framing 常数不过回调
+    assert estimate_content_tokens("hello world", count=lambda t: 100) == 4 + 100
+
+
+def test_content_tokens_callback_default_is_heuristic():
+    assert estimate_content_tokens("hello world") == estimate_content_tokens(
+        "hello world", count=estimate_tokens
+    )
+
+
+def test_tool_calls_tokens_routes_through_count_callback():
+    tc = [{"name": "w", "input": {"c": "x"}}]
+    assert estimate_tool_calls_tokens(tc, count=lambda t: 10) == 20  # name + args 各 10
+
+
+def test_image_constant_not_routed_through_callback():
+    c = [TextPart(text="x"), ImagePart(data="A" * 100, media_type="image/png")]
+    got = estimate_content_tokens(c, count=lambda t: 0)
+    assert got == 4 + 0 + 1600
