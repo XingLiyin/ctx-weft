@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.observe import ObserveStep
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext
 
@@ -14,6 +15,10 @@ _BASE = datetime(2026, 7, 1, tzinfo=UTC)
 
 def _pctx():
     return ProviderContext(session_id="s", tenant_id="tn")
+
+
+def _llm():
+    return SimpleNamespace(tokenizer=HeuristicTokenizer())
 
 
 async def _ingest(mem, scope, typ, content, i, role="user"):
@@ -33,7 +38,7 @@ async def test_retry_folds_current_attempt_and_deletes_raw():
                             agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(compact_keep_last=6)),
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
-    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
     verdict = SimpleNamespace(task_outcome="retry", act_recap="本段摘要：调了工具X", reported=False)
 
     events = []
@@ -65,7 +70,7 @@ async def test_retry_accumulates_prior_segments():
                             agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(compact_keep_last=6)),
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
-    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
     verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要②", reported=False)
 
     events = []
@@ -96,7 +101,7 @@ async def test_retry_short_segment_kept_raw():
                                 compact_keep_last=6, short_segment_token_threshold=400)),
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
-    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
     verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要：短段不该写我", reported=False)
 
     events = []
@@ -120,7 +125,7 @@ async def test_retry_long_segment_still_folds_when_threshold_set():
                                 compact_keep_last=6, short_segment_token_threshold=1)),
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
-    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
     verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要", reported=False)
 
     events = []
@@ -138,7 +143,7 @@ async def test_non_retry_outcome_does_not_fold():
     state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"),
                             agent=SimpleNamespace(loop_config=SimpleNamespace(compact_keep_last=6)),
                             session=SimpleNamespace())
-    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
     verdict = SimpleNamespace(task_outcome="success", act_recap="done", reported=True)
     events = []
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)

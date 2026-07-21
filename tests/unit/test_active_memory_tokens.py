@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.compact import _active_memory_tokens
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext
 
@@ -23,7 +24,8 @@ async def test_active_tokens_sums_and_drops_after_supersede():
                                      timestamp=_BASE + timedelta(seconds=i), role="assistant",
                                      metadata={"task_id": "t1"}), _pctx())
     state = SimpleNamespace(scope=scope, agent=SimpleNamespace())
-    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx())
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(),
+                          llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
     before = await _active_memory_tokens(state, ctx)
     assert before > 0
     # supersede 掉最老一条后总量下降

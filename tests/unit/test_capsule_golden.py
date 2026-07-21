@@ -32,6 +32,7 @@ from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, finaliz
 from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
@@ -108,6 +109,7 @@ def _loop_ctx(mem: InMemoryMemoryProvider, tm=None):
     return SimpleNamespace(
         memory=mem, provider_ctx=_pctx(),
         task_manager=tm or _FakeTM(),
+        llm=SimpleNamespace(tokenizer=HeuristicTokenizer()),
     )
 
 

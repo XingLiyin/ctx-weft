@@ -4307,13 +4307,14 @@ class LLMClient(Protocol):
         stream: bool = True,
     ) -> AsyncIterator[LLMChunk]: ...
 
-    async def count_tokens(self, text: str) -> int: ...
-
     @property
     def context_limit(self) -> int: ...
 
     @property
     def supports_tool_calling(self) -> bool: ...
+
+    @property
+    def tokenizer(self) -> Tokenizer: ...  # count 已含校准；observe 回喂真实用量
 ```
 
 ### 11.2 LLMRequest 统一格式
