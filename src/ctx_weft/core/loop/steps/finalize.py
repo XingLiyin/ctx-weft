@@ -278,11 +278,16 @@ async def _is_short_leaf(memory, scope, task, loop_config, ctx, has_descendants:
 
 
 async def finalize_task_memory(memory, state, task, mem_content: str, outcome: str, ctx,
-                               *, act_recap: str, task_summary: str) -> list:
+                               *, act_recap: str, task_summary: str,
+                               has_llm_summary: bool = True) -> list:
     """finish 时调用：算 short / descendants 后委派 _close_one。返回事件列表。
 
     task-resident（spec 2026-06-28）：short 不再 gate 合成/supersede——每个结束 task 都写
     finish 对、body 留 task 层。`short` 仅算出后透传给 _close_one（Task 2 用于 body raw-vs-压末段）。
+
+    has_llm_summary（spec 2026-07-20 延迟折叠）：close 时刻 finish 对内容是否已是 LLM 真摘要
+    （= verdict.reported）。False = 规则 observe 占位 → 末段 raw 不在 close 时删，推迟到
+    bg 替换真摘要落地后补删（默认 True 保守 = 旧行为，close 即折）。
     """
     descendants = _descendant_task_ids(task.id, ctx.task_manager)
     short = await _is_short_leaf(
@@ -291,29 +296,37 @@ async def finalize_task_memory(memory, state, task, mem_content: str, outcome: s
     return await _close_one(
         memory, state, task, mem_content, outcome, ctx,
         short=short, act_recap=act_recap, task_summary=task_summary,
+        has_llm_summary=has_llm_summary,
     )
 
 
-async def _supersede_final_raw_segment(memory, scope, ctx) -> None:
+async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
     """长任务 close：supersede task 层末 raw 段（active LLM_RESPONSE/TOOL_INVOCATION/TOOL_RESULT），
     保留 USER_PROMPT + TASK_COMPACT_SUMMARY 锚点（spec 2026-06-28 §3.2）。
 
     中间段已在各自边界由后台 observe 折成 TASK_COMPACT_SUMMARY（折时 supersede 了对应 raw），
-    故此刻 active 的 raw 即「末段」。末段已由 finish 对的 Process Report 承载（不变量 4）→
-    直接 supersede、**不另产新 TASK_COMPACT_SUMMARY**（避免与 finish 对重复）。
+    故此刻 active 的 raw 即「末段」。调用时机（spec 2026-07-20 修订的不变量：末段 raw 与
+    「真实 Process Report」至少存其一）：finish 对已承载 LLM 真摘要 → close 时同步删；
+    占位 finish 对 → 推迟到 bg 替换真摘要后补删（background_observe close 回调）。
+    **不另产新 TASK_COMPACT_SUMMARY**（避免与 finish 对重复）。幂等：raw 已删则 no-op。
     """
-    records = await memory.recall_recent(scope, _FINAL_RAW_TYPES, 2000, ctx.provider_ctx)
+    records = await memory.recall_recent(scope, _FINAL_RAW_TYPES, 2000, provider_ctx)
     ids = [r.id for r in records]
     if ids:
-        await memory.supersede(ids, ctx.provider_ctx)
+        await memory.supersede(ids, provider_ctx)
 
 
 async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
-                     *, short: bool, act_recap: str, task_summary: str) -> list:
+                     *, short: bool, act_recap: str, task_summary: str,
+                     has_llm_summary: bool = True) -> list:
     """close 主体（task-resident，spec 2026-06-28）：bubble / 写 finish 对（不镜像 body）。
 
     每个结束 task 无条件写 finish 对、body 留 task 层（不 GC 子树）。长任务额外 supersede 末 raw
     段（短任务留全 raw）——`short` 决定 body raw-vs-压末段（spec §3.2）。返回事件列表。
+
+    延迟折叠（spec 2026-07-20）：`has_llm_summary=False`（规则 observe 占位）时末段 raw 不在
+    close 时删，`raw_fold_scope` 随 finish 对合成登记下去，bg 替换真摘要后补删；bg 失败则
+    raw 永久保留（降级 = 保 raw，信息不丢）。
     """
     # Terminal finalize is single-entry by construction (retry is non-terminal; restore reschedules
     # only non-terminal tasks; re-dispatch uses a new task id), so the residue/bubble writes here
@@ -322,6 +335,8 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     same_agent = task.creator_agent_id == task.assigned_agent_id
     cross_agent = bool(task.parent_task_id) and not same_agent
     is_own_root = (task.parent_task_id is None) or cross_agent
+    # raw 所在层恒为本 task 的 task scope（≠ 嵌套 finish 对的 parent scope）
+    raw_fold_scope = state.scope if (not short and not has_llm_summary) else None
 
     # 1) bubble 到 parent scope（dispatch marker 所在 scope）
     if task.parent_task_id and task.origin_tool_call_id and mem_content:
@@ -353,11 +368,13 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             )
             # 嵌套合成子自己的 finish 对（写进共享 agent scope，@close 时刻）
             await _synthesize_dispatch_pair(
-                memory, parent_scope, task, act_recap, task_summary, outcome, ctx.provider_ctx)
+                memory, parent_scope, task, act_recap, task_summary, outcome, ctx.provider_ctx,
+                raw_fold_scope=raw_fold_scope)
 
     # 2) 自身 finish 对：own root（session 根或跨 agent 根）close 时无条件在 own scope 合成
     if is_own_root and mem_content:
-        await _synthesize_dispatch_pair(memory, state.scope, task, act_recap, task_summary, outcome, ctx.provider_ctx)
+        await _synthesize_dispatch_pair(memory, state.scope, task, act_recap, task_summary, outcome, ctx.provider_ctx,
+                                        raw_fold_scope=raw_fold_scope)
         events.append(make_event(
             state, EventType.MEMORY_INGESTED,
             payload={"memory_event_type": MemoryEventType.AGENT_CONVERSATION_TURN.value,
@@ -365,9 +382,11 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
         ))
 
     # task-resident（spec 2026-06-28 §3.2）：body 留 task 层、不 GC 子树。
-    # 长任务额外 supersede 末 raw 段（保留 USER_PROMPT/TASK_COMPACT_SUMMARY 锚点）；短任务留全 raw。
-    if not short:
-        await _supersede_final_raw_segment(memory, state.scope, ctx)
+    # 长任务 supersede 末 raw 段（保留 USER_PROMPT/TASK_COMPACT_SUMMARY 锚点）；短任务留全 raw。
+    # 仅当 finish 对已承载 LLM 真摘要时同步删；占位（has_llm_summary=False）由 raw_fold_scope
+    # 走延迟折叠——slot 命中在 _synthesize_dispatch_pair 内已补删，登记路径等 bg 替换后补删。
+    if not short and has_llm_summary:
+        await _supersede_final_raw_segment(memory, state.scope, ctx.provider_ctx)
     return events
 
 
@@ -437,7 +456,8 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
 
 
 async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_summary: str,
-                                    outcome: str, provider_ctx, *, register_bg: bool = True) -> None:
+                                    outcome: str, provider_ctx, *, register_bg: bool = True,
+                                    raw_fold_scope=None) -> None:
     """close 合成 agent 层 finish 对（spec 2026-06-30 两段化）：
     assistant{content=act_recap + finish_task 调用} / tool{content=task_summary 综合总结}。
     own-root：占位先写，bg close observe 产新两段后经 _replace_finish_report 替换（A1）。
@@ -445,6 +465,11 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     register_bg=False（熔断收尾等 runtime 侧一次性合成路径）：跳过 pop_close_report /
     register_close_synth / _replace_finish_report 整段 bg-observe 联动——这条 finish 对不是
     正常 close 流程产生的、没有对应的后台 observe 会来替换它，登记只会累积永不消费的状态。
+
+    raw_fold_scope（spec 2026-07-20 延迟折叠）：非 None = close 时占位、末段 raw 尚未删，
+    此 scope 即 raw 所在 task 层。slot 命中（bg 真摘要已到）→ 替换后立即补删；否则随
+    register_close_synth 登记，bg 替换成功后补删。register_bg=False 路径忽略（取消/熔断
+    收尾从不折 raw）。
     """
     from ctx_weft.core.loop.steps.background_observe import (
         pop_close_report, register_close_synth, _replace_finish_report,
@@ -484,8 +509,11 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
             bg_recap, bg_summary = bg
             await _replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
                                          bg_recap, bg_summary, outcome, task.title or "")
+            if raw_fold_scope is not None:
+                # 真摘要已落地（slot 命中替换完成）→ 立即补删末段 raw（延迟折叠的即时分支）
+                await _supersede_final_raw_segment(memory, raw_fold_scope, provider_ctx)
         else:
-            register_close_synth(task.id, tool_call_id, scope, outcome)
+            register_close_synth(task.id, tool_call_id, scope, outcome, raw_fold_scope)
 
 
 class FinalizeStep(Step):
@@ -511,10 +539,13 @@ class FinalizeStep(Step):
         mem_content = _build_memory_content(task.outputs, task_summary or summary)
 
         # 1) 统一 close：bubble / 自身残留 / 软删自身对话 / GC 子树（spec 2026-06-23）。
+        # has_llm_summary=verdict.reported：规则 observe 占位 close 不即折末段 raw，
+        # 等 bg 真摘要落地后补删（spec 2026-07-20 延迟折叠）。
         if terminal and mem_content:
             events.extend(await finalize_task_memory(
                 ctx.memory, state, task, mem_content, outcome, ctx,
                 act_recap=summary, task_summary=task_summary,
+                has_llm_summary=bool(verdict and verdict.reported),
             ))
 
         # 2) 按 outcome 分派（task.status 已由 ObserveStep 设置）

@@ -40,8 +40,9 @@ _orphan_tasks: set[asyncio.Task] = set()
 # close 路径结果槽：task_id → (act_recap, task_summary)（finalize Task 8 通过 pop_close_report 取用）
 _close_report: dict[str, tuple[str, str]] = {}
 
-# close 路径合成槽：task_id → (tool_call_id, scope, outcome)
-# finalize 先到时登记，bg 回调后替换 finish tool 记录
+# close 路径合成槽：task_id → (tool_call_id, scope, outcome, raw_fold_scope)
+# finalize 先到时登记，bg 回调后替换 finish tool 记录；raw_fold_scope 非 None 时
+# 替换成功后按它补删末段 raw（spec 2026-07-20 延迟折叠——占位 close 不即折）。
 _close_synth: dict[str, tuple] = {}
 
 _CLOSE_BOUNDARIES = {"finish", "normal"}
@@ -81,9 +82,13 @@ def pop_close_report(task_id: str) -> tuple[str, str] | None:
     return _close_report.pop(task_id, None)
 
 
-def register_close_synth(task_id: str, tool_call_id: str, scope, outcome: str) -> None:
-    """finalize 先到时登记：finish 对已合成，待 bg 回调替换 Process Report。"""
-    _close_synth[task_id] = (tool_call_id, scope, outcome)
+def register_close_synth(task_id: str, tool_call_id: str, scope, outcome: str,
+                         raw_fold_scope=None) -> None:
+    """finalize 先到时登记：finish 对已合成，待 bg 回调替换 Process Report。
+
+    raw_fold_scope 非 None = close 时是占位 finish 对、末段 raw 未删（task scope），
+    bg 替换成功后按它补删；bg 失败/无报告 → 不删（降级 = 保 raw）。"""
+    _close_synth[task_id] = (tool_call_id, scope, outcome, raw_fold_scope)
 
 
 def pop_close_synth(task_id: str) -> tuple | None:
@@ -236,12 +241,20 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 if boundary in _CLOSE_BOUNDARIES:
                     synth = pop_close_synth(state.task.id)  # sync check-and-clear（无 await）
                     if synth is not None:
-                        tool_call_id, scope, outcome = synth
+                        tool_call_id, scope, outcome, raw_fold_scope = synth
                         await _replace_finish_report(
                             ctx.memory, ctx.provider_ctx, scope, state.task.id,
                             tool_call_id, act_recap, task_summary, outcome,
                             state.task.title or "",
                         )
+                        if raw_fold_scope is not None:
+                            # 真摘要已替换进 finish 对 → 补删末段 raw（延迟折叠收口，
+                            # spec 2026-07-20：占位 close 不即折，真报告落地才折）。
+                            from ctx_weft.core.loop.steps.finalize import (
+                                _supersede_final_raw_segment,
+                            )
+                            await _supersede_final_raw_segment(
+                                ctx.memory, raw_fold_scope, ctx.provider_ctx)
                     else:
                         # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
                         # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。

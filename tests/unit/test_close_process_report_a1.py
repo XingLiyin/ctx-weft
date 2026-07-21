@@ -184,7 +184,8 @@ async def test_a1_placeholder_then_async_replace() -> None:
     from ctx_weft.core.loop.steps.background_observe import pop_close_synth
     popped = pop_close_synth("t1")
     assert popped is not None, "pop_close_synth must return the registered synth"
-    p_tool_call_id, p_scope, p_outcome = popped
+    p_tool_call_id, p_scope, p_outcome, p_raw_fold_scope = popped
+    assert p_raw_fold_scope is None, "未传 raw_fold_scope 时登记应为 None（无延迟折叠）"
     await _replace_finish_report(
         mem, _pctx(), p_scope, "t1",
         p_tool_call_id, "好报告_act", "好报告_sum", p_outcome, task.title,

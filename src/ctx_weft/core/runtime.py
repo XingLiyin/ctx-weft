@@ -1277,7 +1277,9 @@ class CtxWeftRuntime:
                 tcid = await self._find_finish_pair_tool_call_id(memory, scope, task.id, provider_ctx)
                 if tcid is not None:
                     outcome = "fail" if task.status == "FAILED" else "success"
-                    register_close_synth(task.id, tcid, scope, outcome)
+                    # raw_fold_scope=scope：pending close recap 只在规则 observe 占位 close 时
+                    # 存在（延迟折叠，raw 尚 active），重跑替换成功后补删；对已折 raw 是幂等 no-op。
+                    register_close_synth(task.id, tcid, scope, outcome, scope)
             launch_background_observe(state, loop_ctx, boundary=boundary)
         except Exception:
             logger.exception("recover: failed to relaunch task recap for task=%s", task.id)
