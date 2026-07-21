@@ -39,11 +39,23 @@ def test_background_cue_only_process_report_no_verdict():
     assert _BACKGROUND_BOUNDARY_DESC["interrupt"] in joined
 
 
-@pytest.mark.parametrize("boundary", ["interrupt", "plain_text", "finish", "normal"])
+@pytest.mark.parametrize("boundary", ["interrupt", "plain_text", "finish", "normal", "dispatch"])
 def test_background_cue_injects_each_boundary(boundary):
     msgs = DefaultComposer()._build_background_observe_messages(_blocks(), _req(boundary))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert _BACKGROUND_BOUNDARY_DESC[boundary] in joined
+
+
+def test_dispatch_boundary_cue_is_not_normal_close_wording():
+    """dispatch 段：父挂起等子任务完成，不是"正常结束"——不该落回 normal 的兜底文案。"""
+    from ctx_weft.core.assembler.composer import _background_observe_cue
+    dispatch_cue = _background_observe_cue("dispatch")
+    assert _BACKGROUND_BOUNDARY_DESC["normal"] not in dispatch_cue
+    assert "dispatch" in _BACKGROUND_BOUNDARY_DESC
+    assert _BACKGROUND_BOUNDARY_DESC["dispatch"] in dispatch_cue
+    # 语义：委派出去 + 挂起等待，而非"正常结束"
+    assert "委派" in _BACKGROUND_BOUNDARY_DESC["dispatch"]
+    assert "挂起" in _BACKGROUND_BOUNDARY_DESC["dispatch"]
 
 
 _FINISH_RESULT = "工作目录现状：仅一个 即兴演讲训练.pptx，无活跃项目。"

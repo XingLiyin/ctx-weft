@@ -56,10 +56,14 @@ class CapabilityCache:
             self._by_qualified[(agent_id, qualify(cap.id))] = cap  # qualified: LLM tool calls
 
     def get(self, agent_id: str) -> list[Capability]:
-        """获取 agent 的完整 capability 列表（per-agent 快照 + session 全局控制工具）。"""
-        caps = self._store.get(agent_id)
-        if caps is None:
-            raise KeyError(f"No capability snapshot for agent {agent_id}")
+        """获取 agent 的完整 capability 列表（per-agent 快照 + session 全局控制工具）。
+
+        per-agent 快照缺失（未 put 过，或已被 evict）时不再 raise：退化为「只有全局控制工具」而
+        非整体报错——调用方（如 fire-and-forget 的 background observe）常在 evict 之后才真正跑到
+        这里，此时仍应能解析全局控制工具（register_global 不随 evict 逐出，见 get_by_qualified_name
+        同一注释）。
+        """
+        caps = self._store.get(agent_id, [])
         if not self._global_by_qualified:
             return list(caps)
         seen = {c.id for c in caps}

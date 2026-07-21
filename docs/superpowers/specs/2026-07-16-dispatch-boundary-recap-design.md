@@ -45,13 +45,13 @@ launch_background_observe(state, ctx, boundary="dispatch")
 3. `apply_compact(layer=TASK, keep_last=0, protect_types=(USER_PROMPT, TASK_COMPACT_SUMMARY))`
    写段摘要——与 interrupt 边界同参数
 
-**挂起摘要的去留**：SuspendStep 写的 `OBSERVER_SUMMARY`（"Delegated to sub-task(s)…
-Awaiting completion"）随段折叠，不特护。理由：
-
-1. 派发事实已由 agent 层派发框独立承载，不丢；
-2. observer LLM 跑 recap 时窗口里看得到这条挂起摘要，复述自然覆盖「委派了什么、在等什么」；
-3. 若把 `OBSERVER_SUMMARY` 加进 protect_types，历史段里其他 observer 摘要也被连带保护，
-   破坏与 interrupt 边界的一致性。
+**挂起摘要的去留**（实现期事实修正，2026-07-16）：SuspendStep 写的 `OBSERVER_SUMMARY`
+（"Delegated to sub-task(s)…Awaiting completion"）**不参与本折叠，也无需参与**。
+`OBSERVER_SUMMARY` 是半僵尸类型（`protocols/memory.py:76` 枚举注释）：`EVENT_LAYER`
+映射为 AGENT 层——TASK 层的 `apply_compact` 按层过滤、折不到它；且它**不进装配**、
+仅影响计数/估算口径。原设计目标「resume 后窗口不残留挂起摘要」天然成立：派发事实由
+agent 层派发框承载，recap 复述覆盖过程叙事。特征测试改为断言层级隔离（折叠后
+`OBSERVER_SUMMARY` 原样留存、不受 TASK 层折叠影响）。
 
 **恢复语义**（spec §5.1 对齐）：挂起期间进程崩溃 → `recover_session` 对 SUSPENDED-且-有
 未完成 recap 的 task 走既有 `_relaunch_task_recap` 路径重跑（`boundary` 从持久化 info 取，
@@ -94,8 +94,11 @@ run 有两个入口（`initial_step="prepare"` 常规 / `"reconcile"` dangling t
 
 - recap LLM 失败 / 无可用报告 → 段保 raw，log 后吞掉（降级 = 不折叠，spec §3.6）；
   dispatch ∉ `_CLOSE_BOUNDARIES`，不触碰 `_close_synth`/`_close_report`，无泄漏面。
-- run 启动 await 处的 recap 异常：`_run_background_observe` 自吞异常、任务必然正常结束，
-  `await_pending_background_observe` 不会向 run 抛错；shield 保证 run 被取消时不牵连 recap。
+- run 启动 await 处的 recap 异常（实现期修正，2026-07-16）：`_run_background_observe`
+  只对 LLM/装配/apply_compact 主体自吞异常；护栏区（幂等护栏、短段门、事件 emit）在
+  自吞 try 之外，recap task 可能以异常终结、await 会 re-raise。故 run 启动 await 外包
+  防御 try/except（吞掉并 log，降级 = 不等待、段保 raw——与模块降级语义一致），保证
+  run 不因 recap 异常在 RUN_STARTED 之前无声崩掉；shield 保证 run 被取消时不牵连 recap。
 - 非 root scope 跑 `purpose="background_observe"` 装配若因模板/能力缓存缺失抛错 → 落入
   既有 except 分支，段保 raw——sub-agent 最坏退化为现状，不会更糟。
 

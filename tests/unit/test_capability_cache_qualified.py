@@ -64,10 +64,36 @@ def test_get_merges_global_control_tools() -> None:
 
 
 def test_global_does_not_leak_across_evict_into_store() -> None:
-    """全局区独立于 per-agent _store：evict 不动全局，且全局工具不污染另一未绑定 agent 的 get。"""
+    """全局区独立于 per-agent _store：evict 不动全局，全局工具经 get_by_qualified_name 可解析。
+
+    降级契约（24a3174 起）：get() 对未绑定/已 evict 的 agent 不再抛 KeyError，而是
+    退化返回「[] + 全局控制工具」——这正是背景 recap 在 `_run_loop` finally evict
+    之后仍能装配控制工具集的前提，见下面 test_get_degrades_for_unknown_or_evicted_agent。
+    """
     cache = CapabilityCache()
     cache.register_global([_cap("control:finish_task", "finish_task")])
     cache.put("agt_1", [_cap("mcp:a:search", "search")])
     cache.evict("agt_1")
-    # agt_2 从未 put → get 抛 KeyError（has_agent 守卫前置），但 get_by_qualified_name 仍可解析全局
+    # agt_2 从未 put，get_by_qualified_name 仍可解析全局
     assert cache.get_by_qualified_name("agt_2", "control__finish_task").id == "control:finish_task"
+
+
+def test_get_degrades_for_unknown_or_evicted_agent() -> None:
+    """降级契约锁定：get() 对未知/已 evict 的 agent 不抛 KeyError，退化为「仅全局控制工具」。
+
+    24a3174 之前 get() 会对未 put 过的 agent 抛 KeyError；现在改为容错退化，因为
+    `_run_loop` 的 finally 会 evict 已收尾 task 的 agent，而随后在途的后台 recap
+    （background_observe）仍可能对该 agent 调 get() 装配控制工具——退化契约保证
+    这条路径不因 evict 竞态而抛错。
+    """
+    cache = CapabilityCache()
+    cache.register_global([_cap("control:finish_task", "finish_task")])
+    global_ids = {"control:finish_task"}
+
+    # 从未 put 过的 agent：get() 直接退化为全局集合，不抛 KeyError
+    assert {c.id for c in cache.get("agt_2")} == global_ids
+
+    # put 过又被 evict 的 agent：同样退化为全局集合
+    cache.put("agt_1", [_cap("mcp:a:search", "search")])
+    cache.evict("agt_1")
+    assert {c.id for c in cache.get("agt_1")} == global_ids

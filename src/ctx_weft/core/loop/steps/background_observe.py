@@ -5,15 +5,15 @@
 
 boundary 分流（Task 6）：
   - finish / normal → 结果落 _close_report 槽，不写 memory（finalize Task 8 取用）
-  - 其他（interrupt、plain_text 等）→ apply_compact 写 TASK_COMPACT_SUMMARY；
+  - 其他（interrupt、plain_text、dispatch 等）→ apply_compact 写 TASK_COMPACT_SUMMARY；
     但本段 active raw token ≤ short_segment_token_threshold 时**免折**（短段保 raw，
     不跑后台 LLM——「短 → 原文成胶囊」决策在段边界的延伸；raw 跨边界累积，超阈值再折）
 
-崩溃恢复的已知 best-effort 竞态（spec §5.1/§3.6）：`recover_session` 对一个 SUSPENDED-且-有
-待完成 interrupt/plain_text 段 recap 的 task，会同时（a）经 TaskManager.restore 重排该 task 的
-新一轮 run，（b）经 `_relaunch_task_recap` 重跑被打断的段 recap。本函数虽以 `_lock_for(task_id)`
-把同一 task 的多个 recap 串行化，但重排出的新 run 写 raw 时并不持有这把锁——两者可并发。
-这是接受的降级：最坏情形该段摘要保留 raw（不折叠），不影响正确性，无需修复。
+崩溃恢复竞态（spec §5.1/§3.6；2026-07-16 起同进程内闭合）：`recover_session` 对一个
+SUSPENDED-且-有待完成段 recap 的 task，会（a）经 TaskManager.restore 重排该 task 的新一轮
+run，（b）经 `_relaunch_task_recap` 重跑被打断的段 recap。relaunch 先于 register_and_drain
+发生，且 `_run_loop` 入口 await_pending_background_observe——新 run 开跑前必等 recap 完成，
+两者不再并发写同一段。跨进程/其他极端时序仍是 best-effort：最坏该段保 raw，不影响正确性。
 """
 from __future__ import annotations
 
@@ -189,9 +189,15 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                     return
             try:
                 agent = state.agent
+                # 不能像 observe._llm_observe 那样用 has_agent() 短路：background observe 是
+                # fire-and-forget（launch_background_observe → asyncio.create_task），常在
+                # 本 run 的 _run_loop finally evict(agent.id) 之后才真正跑到这——per-agent 快照
+                # 已被逐出，has_agent 为 False。控制工具（collect_process_report 等）是 session
+                # 全局区（register_global，不随 evict 逐出），故这里应始终尝试 .get()（内部自动
+                # 合并全局区），不能因 per-agent 快照缺失就整体清零、连全局控制工具也丢了。
                 bound_caps = (
                     ctx.capability_cache.get(agent.id)
-                    if ctx.capability_cache is not None and ctx.capability_cache.has_agent(agent.id)
+                    if ctx.capability_cache is not None
                     else []
                 )
                 request = ContextRequest(
@@ -285,7 +291,9 @@ def launch_background_observe(
 
 
 async def await_pending_background_observe(task_id: str) -> None:
-    """供 finalize 强一致：若该 task 有在跑的后台 observe，等它完成（spec §3.3 step 1）。"""
+    """等该 task 在途后台 observe 完成（强一致）。调用点：`_run_loop` 入口（覆盖常规
+    `prepare` 与 `reconcile` dangling tool_call 重放两条 resume 路径，`runtime.py`）、
+    用户冷应答注入（`_inject_user_reply`，`runtime.py`）。"""
     pending = _task_pending.get(task_id)
     if pending is not None and not pending.done():
         await asyncio.shield(pending)
