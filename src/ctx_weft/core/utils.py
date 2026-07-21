@@ -63,27 +63,39 @@ _CJK_RE = re.compile(
 )
 
 
-# 高熵 ASCII 长串：URL 段/UUID/哈希/hex/base64 等"随机字符"实测（cl100k/o200k）约 2 字符/token，
-# len/3 对它们系统性低估 35-40%（工具结果里的 id/哈希/base64 击穿 margin 的洞）。≥20 连续才算：
-# 正常英文单词/短标识符达不到，散文不受影响；超长 snake_case 标识符会被略高估（方向安全）。
+# 高熵 ASCII 长串：URL 段/UUID/哈希/hex/base64 等"随机字符"实测（cl100k/o200k）约 0.51~0.54
+# token/字符。费率取 0.6 而非 0.5：保证冷启动单边高估（校准系数常态 <1、只向下回收窗口浪费，
+# 不向上追赶低估缺口——追赶的过渡期就是 400 风险窗口）。≥20 连续才算：正常英文单词/短标识符
+# 达不到，散文不受影响；超长 snake_case 标识符会被略高估（方向安全）。
 _DENSE_ASCII_RE = re.compile(r"[A-Za-z0-9+/=_-]{20,}")
+
+# 非 ASCII 字符（CJK 之外落此桶：emoji/西里尔/阿拉伯文/组合符等）：真实 1~3 token/字，
+# len/3 严重低估（emoji 混排实测 est/real=0.96）。按 1/字计，方向安全。
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7f]")
 
 
 def estimate_tokens(text: str) -> int:
-    """Token 粗估：按脚本/熵分三段、刻意往大了估（避免低估触发 provider 400）。
+    """Token 粗估：按脚本/熵分四段、**保证单边高估**（估算只许偏高，低估会触发 provider 400；
+    偏高的浪费由 tokenizer 校准系数向下回收——系数常态 <1，收敛前的误差方向恒安全）。
 
-    CJK 表意字/假名/谚文等每字按 ``ceil(1.5*n)`` token（真实约 0.6~1，取上界最保守）；
-    高熵 ASCII 长串（≥20 连续 [A-Za-z0-9+/=_-]，URL 段/哈希/base64）按 ``ceil(len/2)``
-    （实测约 2 字符/token，len/3 会低估 35-40%）；其余（散文/标点/空白）按 ``ceil(len/3)``
-    （比传统 //4 大约 33%）。三段相加、非空至少 1。刻意高估：宁可 compaction 早触发、
-    max_tokens 偏保守，也不冒低估致 400 的险。
+    费率：CJK 表意字/假名/谚文每字 ``ceil(1.5*n)``（真实约 0.6~1.3）；高熵 ASCII 长串
+    （≥20 连续 [A-Za-z0-9+/=_-]，URL 段/哈希/base64）``ceil(0.6*n)``（真实约 0.51~0.54）；
+    其余非 ASCII（emoji/西里尔等）每字 1（真实约 0.5~2，混排下 ≥1.1x）；ASCII 散文/标点
+    ``ceil(len/3)``（真实约 0.25~0.33）。四段相加、非空至少 1。
     """
     if not text:
         return 0
     cjk = len(_CJK_RE.findall(text))
     dense = sum(len(m) for m in _DENSE_ASCII_RE.findall(text))
-    other = len(text) - cjk - dense
-    return max(1, (3 * cjk + 1) // 2 + (dense + 1) // 2 + (other + 2) // 3)
+    non_ascii_other = len(_NON_ASCII_RE.findall(text)) - cjk
+    ascii_other = len(text) - cjk - dense - non_ascii_other
+    return max(
+        1,
+        (3 * cjk + 1) // 2
+        + (3 * dense + 4) // 5
+        + non_ascii_other
+        + (ascii_other + 2) // 3,
+    )
 
 
 def effective_limit(context_limit: int, reserved_output_tokens: int) -> int:
