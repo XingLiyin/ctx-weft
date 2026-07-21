@@ -301,17 +301,26 @@ async def finalize_task_memory(memory, state, task, mem_content: str, outcome: s
 
 
 async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
-    """长任务 close：supersede task 层末 raw 段（active LLM_RESPONSE/TOOL_INVOCATION/TOOL_RESULT），
-    保留 USER_PROMPT + TASK_COMPACT_SUMMARY 锚点（spec 2026-06-28 §3.2）。
+    """长任务 close：supersede task 层**末段** raw（active LLM_RESPONSE/TOOL_INVOCATION/
+    TOOL_RESULT），保留 USER_PROMPT + TASK_COMPACT_SUMMARY 锚点（spec 2026-06-28 §3.2）。
 
-    中间段已在各自边界由后台 observe 折成 TASK_COMPACT_SUMMARY（折时 supersede 了对应 raw），
-    故此刻 active 的 raw 即「末段」。调用时机（spec 2026-07-20 修订的不变量：末段 raw 与
-    「真实 Process Report」至少存其一）：finish 对已承载 LLM 真摘要 → close 时同步删；
-    占位 finish 对 → 推迟到 bg 替换真摘要后补删（background_observe close 回调）。
-    **不另产新 TASK_COMPACT_SUMMARY**（避免与 finish 对重复）。幂等：raw 已删则 no-op。
+    段作用域（2026-07-21）：末段 = 最后一条 active USER_PROMPT 之后。此前假设「active raw
+    即末段」（中间段在各自边界已折），但短段免折（background_observe.is_short_segment）会让
+    前段 raw 以 active 状态残留——它们无胶囊代表，删了即信息丢失（其 UP 失去回答位），故保留
+    （「短 → 原文成胶囊」）。无 UP（防御）→ 全删（旧行为）。
+
+    调用时机（spec 2026-07-20 修订的不变量：末段 raw 与「真实 Process Report」至少存其一）：
+    finish 对已承载 LLM 真摘要 → close 时同步删；占位 finish 对 → 推迟到 bg 替换真摘要后
+    补删（background_observe close 回调）。**不另产新 TASK_COMPACT_SUMMARY**（避免与 finish
+    对重复）。幂等：raw 已删则 no-op。
     """
-    records = await memory.recall_recent(scope, _FINAL_RAW_TYPES, 2000, provider_ctx)
-    ids = [r.id for r in records]
+    records = await memory.recall_recent(
+        scope, [*_FINAL_RAW_TYPES, MemoryEventType.USER_PROMPT], 2000, provider_ctx)
+    ids = []  # newest-first 迭代，遇到第一条 UP 即达段界
+    for r in records:
+        if r.type is MemoryEventType.USER_PROMPT:
+            break
+        ids.append(r.id)
     if ids:
         await memory.supersede(ids, provider_ctx)
 

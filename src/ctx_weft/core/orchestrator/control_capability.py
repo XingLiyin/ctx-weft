@@ -383,8 +383,9 @@ def report_task_outcome(
     act_recap: Annotated[
         str,
         "诚实复述本段 act 做了什么：改了/产出了什么、调了哪些工具、是否失败。第一人称、忠于实际执行。"
-        "范围 = 对话里最后一个 `## Progress So Far` 之后 actor 新做的执行（首次观察则从任务开头算起），"
-        "该点之前不要回头重述。Written to memory，retry 时作下一轮 `## Progress So Far`。",
+        "范围 = 对话里最后一个 `## Progress So Far` 或最后一条用户消息（取更晚者）之后 actor 新做的执行"
+        "（首次观察则从任务开头算起），该点之前不要回头重述。Written to memory，retry 时作下一轮 "
+        "`## Progress So Far`。",
     ],
     task_summary: Annotated[
         str,

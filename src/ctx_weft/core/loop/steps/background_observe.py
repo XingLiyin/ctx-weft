@@ -6,8 +6,10 @@
 boundary 分流（Task 6）：
   - finish / normal → 结果落 _close_report 槽，不写 memory（finalize Task 8 取用）
   - 其他（interrupt、plain_text、dispatch 等）→ apply_compact 写 TASK_COMPACT_SUMMARY；
-    但本段 active raw token ≤ short_segment_token_threshold 时**免折**（短段保 raw，
-    不跑后台 LLM——「短 → 原文成胶囊」决策在段边界的延伸；raw 跨边界累积，超阈值再折）
+    但**当前段**（末条 UP 之后）active raw token ≤ short_segment_token_threshold 时
+    **免折**（短段保 raw，不跑后台 LLM——「短 → 原文成胶囊」决策在段边界的延伸）。
+    免折的段 raw **永久保 raw**：折叠带 since_last=USER_PROMPT 只折当前段，前段残留
+    从不跨段合折（否则合并摘要会锚到前一条 UP 之前，UP 失去回答位，2026-07-21）
 
 崩溃恢复竞态（spec §5.1/§3.6；2026-07-16 起同进程内闭合）：`recover_session` 对一个
 SUSPENDED-且-有待完成段 recap 的 task，会（a）经 TaskManager.restore 重排该 task 的新一轮
@@ -57,22 +59,33 @@ _SEGMENT_RAW_TYPES = [
 
 
 async def is_short_segment(state: "LoopState", ctx: "LoopContext") -> bool:
-    """短段免折门：本段 active raw token ≤ short_segment_token_threshold？
+    """短段免折门：**当前段**（最后一条 active USER_PROMPT 之后）的 raw token ≤
+    short_segment_token_threshold？
 
     「短 → 原文成胶囊」决策（finalize._is_short_leaf）在段级的判定，
     `_run_background_observe`（interactive/interrupt 边界）与
     `observe._fold_retry_segment`（retry 段折）共用。配置缺失（手构 state /
     单测）→ False = 门关闭，照常折叠。
+
+    段作用域（2026-07-21）：只数末条 UP 之后的 raw，与折叠的 since_last=USER_PROMPT
+    对齐——免折残留的前段 raw 不计入，否则「前段累积 + 当前段极短」会被误判为可折，
+    而折叠又只折当前段，产出比原文还长的摘要。
     """
     threshold = getattr(state.agent.loop_config, "short_segment_token_threshold", 0)
     if threshold <= 0:
         return False
     records = await ctx.memory.recall_recent(
-        state.scope, _SEGMENT_RAW_TYPES, 2000, ctx.provider_ctx,
+        state.scope, [*_SEGMENT_RAW_TYPES, MemoryEventType.USER_PROMPT], 2000,
+        ctx.provider_ctx,
     )
+    seg_records = []  # newest-first 迭代，遇到第一条 UP 即达段界
+    for r in records:
+        if r.type is MemoryEventType.USER_PROMPT:
+            break
+        seg_records.append(r)
     seg_text = " ".join(
         r.content if isinstance(r.content, str) else content_to_text(r.content)
-        for r in records
+        for r in seg_records
     )
     return ctx.llm.tokenizer.count(seg_text) <= threshold
 
@@ -182,10 +195,10 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                         state.task.id,
                     )
                     return
-                # 短段免折（is_short_segment）：本段 active raw 低于阈值时跳过折叠——花一次
-                # 后台 LLM 调用换一段常比原文还长的摘要不划算。跳过 = 段保 raw，与观察失败的
-                # 降级同语义；raw 跨边界累积，下次边界重估的是累积后的 active raw，超阈值即
-                # 一并折叠。
+                # 短段免折（is_short_segment）：当前段（末条 UP 之后）active raw 低于阈值时
+                # 跳过折叠——花一次后台 LLM 调用换一段常比原文还长的摘要不划算。跳过 = 该段
+                # **永久**保 raw（与观察失败的降级同语义）：后续折叠带 since_last=USER_PROMPT
+                # 只折各自的当前段，免折残留不会被跨段合折。
                 if await is_short_segment(state, ctx):
                     logger.info(
                         "short segment kept raw (task=%s boundary=%s); skip fold",
@@ -272,6 +285,10 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                         # 位置。与 observe._fold_retry_segment 的 protect_types 一致。
                         protect_types=(MemoryEventType.USER_PROMPT,
                                        MemoryEventType.TASK_COMPACT_SUMMARY),
+                        # 段作用域（2026-07-21）：只折当前段（末条 UP 之后）。短段免折残留的
+                        # 前段 raw 永久保 raw（「短 → 原文成胶囊」），不被跨段合折——否则合并
+                        # 摘要会锚到前一条 UP 之前，UP 失去回答位、时序倒置。
+                        since_last=MemoryEventType.USER_PROMPT,
                     )
             except Exception:
                 # close 边界防泄漏：finalize 可能已 register_close_synth，本次失败后永远无人

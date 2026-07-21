@@ -210,6 +210,7 @@ class InMemoryMemoryProvider(MemoryProvider):
         ctx: ProviderContext,
         layer: MemoryLayer = MemoryLayer.AGENT,
         protect_types: tuple[MemoryEventType, ...] = (),
+        since_last: MemoryEventType | None = None,
     ) -> CompactResult:
         scope_key = self._scope_key(scope, ctx.tenant_id, layer)
 
@@ -224,8 +225,22 @@ class InMemoryMemoryProvider(MemoryProvider):
         events_before = len(active)
         active.sort(key=lambda s: s.seq_no)
 
+        # since_last：归档池限定在「最后一条 active 该类型记录之后」（段作用域折叠，
+        # 2026-07-21）。短段免折残留的更早 raw 落在该点之前 → 永不跨段折入本摘要；
+        # 且被折区从该点之后起算 → 锚点走「段尾」分支，不会抢到前一条 UP 之前。
+        # 该类型记录不存在 → 不限定（整 scope 照旧）。
+        pool = active
+        if since_last is not None:
+            boundary_idx = next(
+                (i for i in range(len(active) - 1, -1, -1)
+                 if active[i].event.type is since_last),
+                None,
+            )
+            if boundary_idx is not None:
+                pool = active[boundary_idx + 1:]
+
         # protect_types 永不进 archive；keep_last 只对可折类型计
-        archivable = [s for s in active if s.event.type not in protect_types]
+        archivable = [s for s in pool if s.event.type not in protect_types]
         to_archive = archivable[:-keep_last] if keep_last > 0 else archivable
         for s in to_archive:
             s.is_superseded = True
