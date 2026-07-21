@@ -17,6 +17,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome,
 from ctx_weft.core.loop.llm_gateway import (
     request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
 )
+from ctx_weft.core.loop.token_calibration import observe_request_outcome
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import (
@@ -264,6 +265,9 @@ async def _run_llm_turn(
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
             launch_background_observe(state, ctx, boundary="interrupt")
         await _park_wait_for_user(state, ctx, source="interrupt", edit=not has_partial)
+
+    # token 自校准回喂：真实 usage 与发送前挂在 metadata 的原始估算段作比，更新该模型 EMA
+    observe_request_outcome(llm_request, usage)
 
     await ctx.event_bus.emit(make_event(
         state, EventType.LLM_RESPONSE_FINISHED,

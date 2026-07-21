@@ -56,6 +56,11 @@ from ctx_weft.core.utils import (
     estimate_tokens,
     estimate_tool_calls_tokens,
 )
+from ctx_weft.core.loop.token_calibration import (
+    PROMPT_EST_BASE_KEY,
+    PROMPT_EST_RAW_KEY,
+    calibration_factor,
+)
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
@@ -296,15 +301,24 @@ def request_prompt_estimate(request: "LLMRequest", loop_guard, baseline_msg_coun
       （正是它把整份重估压到基线之下、漏掉本轮增量而导致 max_tokens 过大 400 的根因）。
     - **首次 / 一次性**（无循环内基线）：``max(整份估算, context_tokens)``——整份估算打底，
       并不低于上一步真实测量值（更保守，永不 400；上步后若发生压缩，偏大只是少给输出）。
+
+    估算段（非真实基线部分）乘按模型自校准的 factor（token_calibration EMA，默认 1.0），
+    并把 (基线, 原始估算段) 记进 ``request.metadata`` 供 usage 到达后回喂 EMA。
     """
+    factor = calibration_factor(request.model)
     ctx_tokens = getattr(loop_guard, "context_tokens", 0) if loop_guard is not None else 0
     if baseline_msg_count is not None and ctx_tokens > 0:
         delta = sum(
             _estimate_message_tokens(m)
             for m in request.messages[baseline_msg_count:]
         )
-        return ctx_tokens + delta
-    return max(_estimate_request_tokens(request), ctx_tokens)
+        request.metadata[PROMPT_EST_BASE_KEY] = ctx_tokens
+        request.metadata[PROMPT_EST_RAW_KEY] = delta
+        return ctx_tokens + int(delta * factor)
+    full = _estimate_request_tokens(request)
+    request.metadata[PROMPT_EST_BASE_KEY] = 0
+    request.metadata[PROMPT_EST_RAW_KEY] = full
+    return max(int(full * factor), ctx_tokens)
 
 
 def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
@@ -321,7 +335,11 @@ def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
     if used is None:
         return
     llm = ctx.llm
-    margin = int(_cfg_val(ctx, "dynamic_max_tokens_margin", 8192))
+    # margin 比例制：固定值只兜小 prompt 的估算残差，误差随体量按比例放大 → margin 也按比例。
+    margin = max(
+        int(_cfg_val(ctx, "dynamic_max_tokens_margin", 8192)),
+        int(_cfg_val(ctx, "dynamic_max_tokens_margin_ratio", 0.05) * used),
+    )
     floor = int(_cfg_val(ctx, "dynamic_max_tokens_floor", 1024))
     # 软顶：按 context_limit 比例封顶（不低于 output_min），再与硬上限 output_ceiling 取小。
     # 常态封住"整窗放输出"（省 token + 防 max_tokens 超模型输出上限的 400）；used 越大到

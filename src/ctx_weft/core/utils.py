@@ -63,18 +63,27 @@ _CJK_RE = re.compile(
 )
 
 
-def estimate_tokens(text: str) -> int:
-    """Token 粗估：中英文分开、刻意往大了估（避免 len//4 对 CJK 系统性低估触发 provider 400）。
+# 高熵 ASCII 长串：URL 段/UUID/哈希/hex/base64 等"随机字符"实测（cl100k/o200k）约 2 字符/token，
+# len/3 对它们系统性低估 35-40%（工具结果里的 id/哈希/base64 击穿 margin 的洞）。≥20 连续才算：
+# 正常英文单词/短标识符达不到，散文不受影响；超长 snake_case 标识符会被略高估（方向安全）。
+_DENSE_ASCII_RE = re.compile(r"[A-Za-z0-9+/=_-]{20,}")
 
-    CJK 表意字/假名/谚文等每字按 ``ceil(1.5*n)`` token（真实约 0.6~1，取上界最保守）；其余
-    （ASCII/拉丁/数字/标点/空白）按 ``ceil(len/3)`` token（比传统 //4 大约 33%）。两段相加、
-    非空至少 1。刻意高估：宁可 compaction 早触发、max_tokens 偏保守，也不冒低估致 400 的险。
+
+def estimate_tokens(text: str) -> int:
+    """Token 粗估：按脚本/熵分三段、刻意往大了估（避免低估触发 provider 400）。
+
+    CJK 表意字/假名/谚文等每字按 ``ceil(1.5*n)`` token（真实约 0.6~1，取上界最保守）；
+    高熵 ASCII 长串（≥20 连续 [A-Za-z0-9+/=_-]，URL 段/哈希/base64）按 ``ceil(len/2)``
+    （实测约 2 字符/token，len/3 会低估 35-40%）；其余（散文/标点/空白）按 ``ceil(len/3)``
+    （比传统 //4 大约 33%）。三段相加、非空至少 1。刻意高估：宁可 compaction 早触发、
+    max_tokens 偏保守，也不冒低估致 400 的险。
     """
     if not text:
         return 0
     cjk = len(_CJK_RE.findall(text))
-    other = len(text) - cjk
-    return max(1, (3 * cjk + 1) // 2 + (other + 2) // 3)
+    dense = sum(len(m) for m in _DENSE_ASCII_RE.findall(text))
+    other = len(text) - cjk - dense
+    return max(1, (3 * cjk + 1) // 2 + (dense + 1) // 2 + (other + 2) // 3)
 
 
 def effective_limit(context_limit: int, reserved_output_tokens: int) -> int:

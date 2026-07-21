@@ -28,6 +28,8 @@ from ctx_weft.core.loop.steps.recognize_intent import (
     launch_recognize_intent,
     should_recognize_intent,
 )
+from ctx_weft.core.loop.llm_gateway import resolve_llm_identity
+from ctx_weft.core.loop.token_calibration import calibration_factor
 from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.core.utils import (
     effective_limit,
@@ -74,9 +76,9 @@ def _estimate_record_tokens(r) -> int:
     return total
 
 
-def _estimate_assembled_tokens(prompt) -> int:
+def _estimate_assembled_tokens(prompt, model: str) -> int:
     """无真实基线（首轮/一次性）时对整份装配 prompt 的估算：system + 每条消息（含 tool_calls
-    参数/图片/framing）+ tools schema。
+    参数/图片/framing）+ tools schema，乘该模型的自校准 factor（token_calibration EMA）。
 
     比 composer 的 ``prompt.token_count``（纯文本、且不含 tools）更全，与 gateway 首次估算同口径——
     tools schema 是每个 act prompt 的固定占用，composer 完全没数，此处补上。
@@ -89,7 +91,7 @@ def _estimate_assembled_tokens(prompt) -> int:
     for t in getattr(prompt, "tools", None) or []:
         total += estimate_tokens(t.name) + estimate_tokens(t.description or "")
         total += estimate_tokens(json.dumps(t.input_schema, ensure_ascii=False))
-    return total
+    return int(total * calibration_factor(model))
 
 
 class PrepareStep(Step):
@@ -147,7 +149,7 @@ class PrepareStep(Step):
 
         prompt = await _assemble()
         if token_estimate == 0:
-            token_estimate = _estimate_assembled_tokens(prompt)
+            token_estimate = _estimate_assembled_tokens(prompt, resolve_llm_identity(state)[0])
 
         # ── 5. compact 触发：命中则跑升级式 compact，再在压缩后 memory 上重装配一次（Q4=c 校正）──
         if await self._should_compact(state, ctx, token_estimate):
@@ -244,7 +246,9 @@ class PrepareStep(Step):
                 )
                 new_records = recent[:max(0, len(recent) - guard.context_message_count)]
                 delta = sum(_estimate_record_tokens(r) for r in new_records)
-                return guard.context_tokens + delta, True
+                # 增量段乘自校准 factor（真实基线不乘），与 gateway 增量路径同口径
+                factor = calibration_factor(resolve_llm_identity(state)[0])
+                return guard.context_tokens + int(delta * factor), True
             except Exception:
                 pass
 

@@ -65,6 +65,47 @@ def test_matches_documented_formula():
     assert estimate_tokens(txt) == ceil(1.5 * cjk) + ceil(other / 3)
 
 
+# ── 高熵长串（URL 段/UUID/哈希/base64/hex）按 len/2 计费 ───────────────────────
+# 实测（tiktoken cl100k/o200k）：这类"随机 ASCII"真实约 2 字符/token，旧 len/3 系统性
+# 低估 35-40%——正是工具结果里 id/哈希/base64 击穿 margin 致 400 的洞。
+
+
+def test_dense_ascii_run_billed_at_half():
+    # 40 连续 [A-Za-z0-9+/=_-] → ceil(40/2)=20（旧 ceil(40/3)=14）
+    assert estimate_tokens("Ab3dEf6hIj9lMnOpQr2tUv5xYz8Ab3dEf6hIj9lM") == 20
+
+
+def test_sha256_hex_billed_at_half():
+    h = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"  # 64 hex
+    assert estimate_tokens(h) == 32
+
+
+def test_base64_billed_at_half():
+    b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"  # 44 chars
+    assert estimate_tokens(b64) == 22
+
+
+def test_run_below_threshold_keeps_len_over_3():
+    # 19 连续字符未达 20 阈值 → 仍按 len/3
+    assert estimate_tokens("a" * 19) == ceil(19 / 3)
+
+
+def test_run_at_threshold_switches_to_half():
+    assert estimate_tokens("a" * 20) == 10
+
+
+def test_prose_with_spaces_unaffected():
+    # 空格切断长串：散文/正常词不受高熵费率影响（回归）
+    assert estimate_tokens("hello world") == 4
+
+
+def test_mixed_cjk_dense_other_formula():
+    # CJK ceil(1.5n) + 高熵段 ceil(len/2) + 其余 ceil(len/3) 三段相加
+    txt = "哈希是e3b0c44298fc1c149afbf4c8996fb924，请核对。"
+    # 8 CJK → 12；32 hex（≥20 连续）→ 16；other 0
+    assert estimate_tokens(txt) == 12 + 16
+
+
 # ── estimate_content_tokens / estimate_tool_calls_tokens（gateway 与 prepare/composer 共用）──
 from ctx_weft.core.utils import estimate_content_tokens, estimate_tool_calls_tokens
 from ctx_weft.protocols.context import ImagePart, TextPart

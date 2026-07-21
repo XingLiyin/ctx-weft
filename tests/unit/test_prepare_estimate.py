@@ -43,7 +43,7 @@ def test_assembled_counts_tool_calls_and_tools_schema():
                                input_schema={"type": "object", "properties": {"a": {"type": "string"}}})],
         token_count=0,
     )
-    assert _estimate_assembled_tokens(prompt) >= 2000
+    assert _estimate_assembled_tokens(prompt, "mock") >= 2000
 
 
 def test_assembled_tools_schema_counted_even_without_messages():
@@ -56,4 +56,4 @@ def test_assembled_tools_schema_counted_even_without_messages():
                                              "properties": {p: {"type": "string"} for p in "abcdefgh"}})],
         token_count=0,
     )
-    assert _estimate_assembled_tokens(prompt) > 0
+    assert _estimate_assembled_tokens(prompt, "mock") > 0
