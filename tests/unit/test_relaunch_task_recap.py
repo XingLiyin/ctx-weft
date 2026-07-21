@@ -86,8 +86,9 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
 
     captured = {}
 
-    def _fake_register(task_id, tool_call_id, scope, outcome):
-        captured.update(task_id=task_id, tool_call_id=tool_call_id, outcome=outcome)
+    def _fake_register(task_id, tool_call_id, scope, outcome, raw_fold_scope=None):
+        captured.update(task_id=task_id, tool_call_id=tool_call_id, outcome=outcome,
+                        raw_fold_scope=raw_fold_scope, scope=scope)
 
     monkeypatch.setattr(rt_mod, "register_close_synth", _fake_register, raising=False)
 
@@ -108,6 +109,8 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
     assert captured["task_id"] == task.id
     assert captured["tool_call_id"] == tcid
     assert captured["outcome"] == "success"
+    # 延迟折叠（spec 2026-07-20）：重跑替换成功后按 task scope 补删末段 raw
+    assert captured["raw_fold_scope"] == captured["scope"]
     assert launched["boundary"] == "finish"
 
 

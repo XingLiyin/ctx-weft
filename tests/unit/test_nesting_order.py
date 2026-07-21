@@ -380,9 +380,8 @@ async def test_g3_long_task_body_is_compacted_anchors_only() -> None:
     await _ingest(mem, T.LLM_RESPONSE, tsc, "末段 raw：最后清理", 3, role="assistant")
     await _ingest(mem, T.TOOL_RESULT, tsc, "末段 raw：测试通过", 4, role="tool")
 
-    # 长任务 close → supersede 末 raw 段
-    ctx = SimpleNamespace(provider_ctx=_pctx())
-    await _supersede_final_raw_segment(mem, tsc, ctx)
+    # 长任务 close → supersede 末 raw 段（签名收 provider_ctx，spec 2026-07-20 起 bg 侧共用）
+    await _supersede_final_raw_segment(mem, tsc, _pctx())
 
     body = await mem.recall_recent(
         tsc, [T.USER_PROMPT, T.TASK_COMPACT_SUMMARY, T.LLM_RESPONSE, T.TOOL_RESULT], 100, _pctx())
