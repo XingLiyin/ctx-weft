@@ -290,6 +290,18 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                         # 摘要会锚到前一条 UP 之前，UP 失去回答位、时序倒置。
                         since_last=MemoryEventType.USER_PROMPT,
                     )
+            except TypeError:
+                # 契约错误（典型：provider 的 apply_compact 缺 since_last 参数/签名过旧）。
+                # 与运行时故障同降级（段保 raw、不抛），但 ERROR 显式指出协议不匹配——
+                # 静默吞掉曾让 provider 不兼容运行数日无人察觉（spec 2026-07-21）。
+                if boundary in _CLOSE_BOUNDARIES:
+                    pop_close_synth(state.task.id)
+                logger.error(
+                    "background observe contract error: apply_compact 协议不匹配"
+                    "（provider 缺 since_last 参数或签名过旧？见 spec 2026-07-21）; "
+                    "segment kept raw (task=%s boundary=%s)",
+                    state.task.id, boundary, exc_info=True,
+                )
             except Exception:
                 # close 边界防泄漏：finalize 可能已 register_close_synth，本次失败后永远无人
                 # 消费（task_id 唯一 + close 单入口），弹掉——与「无可用报告」分支对称。
