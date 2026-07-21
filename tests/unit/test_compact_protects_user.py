@@ -174,14 +174,17 @@ class _SpyProvider(InMemoryMemoryProvider):
         super().__init__()
         self.compact_calls: list[dict] = []
 
-    async def apply_compact(self, scope, summary, keep_last, ctx, layer=MemoryLayer.AGENT, protect_types=()):
+    async def apply_compact(self, scope, summary, keep_last, ctx, layer=MemoryLayer.AGENT,
+                            protect_types=(), since_last=None):
         self.compact_calls.append({
             "layer": layer,
             "summary": summary,
             "keep_last": keep_last,
             "protect_types": protect_types,
+            "since_last": since_last,
         })
-        return await super().apply_compact(scope, summary, keep_last, ctx, layer, protect_types)
+        return await super().apply_compact(scope, summary, keep_last, ctx, layer,
+                                           protect_types, since_last)
 
 
 def _ctx(mem: InMemoryMemoryProvider) -> SimpleNamespace:

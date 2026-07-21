@@ -115,9 +115,9 @@ _OBSERVE_JUDGMENT_CUE = (
     "Now act as the observer for the current task. Based on the execution above, judge the "
     f"task's completion status and call `{REPORT_TASK_OUTCOME_NAME}` exactly once with: a `task_status` "
     "of `success` / `retry` / `fail`; an `act_recap` honestly recapping ONLY this act segment — the actor's "
-    "execution AFTER the most recent `## Progress So Far` section (that section is the previous observation's "
-    "recap; if there is none this is the first observation, so start after `## Current Task` / the user's "
-    "message). Don't re-narrate anything before that point. "
+    "execution AFTER the most recent `## Progress So Far` section OR the latest user message, whichever "
+    "comes later (`## Progress So Far` is the previous observation's recap; if neither exists this is the "
+    "first observation, so start after `## Current Task`). Don't re-narrate anything before that point. "
     "And — when status is success/fail — a concise `task_summary`: the important steps and lessons of the "
     "whole task (a process report, not verbose, and NOT the final output), incorporating the results of any "
     "sub-tasks you dispatched. Optionally review your own sub-tasks via `task_reviews`. Call no other tools."
@@ -173,8 +173,9 @@ def _background_observe_cue(boundary: str) -> str:
     )
     return (
         f"当前 task 的状态：{desc}。请基于以上执行过程，调用 `collect_process_report` 一次："
-        "给出 `act_recap`（只复述本段 act——对话里最后一个 `## Progress So Far` 之后 actor 新做的执行；"
-        "若没有该标题则为首次观察，从 `## Current Task` / 用户消息之后算起；该点之前不要回头重述）"
+        "给出 `act_recap`（只复述本段 act——对话里最后一个 `## Progress So Far` 或**最后一条用户"
+        "消息**（取更晚者）之后 actor 新做的执行；两者都没有则为首次观察，从 `## Current Task` "
+        "之后算起；该点之前不要回头重述）"
         + summary_ask +
         " 只需总结，无需判断 success/retry/fail，不要调用其他工具。"
     )

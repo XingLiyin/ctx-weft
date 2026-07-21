@@ -23,7 +23,8 @@ class _FakeMem:
     async def count_recent(self, scope, types, ctx):
         return self._count
 
-    async def apply_compact(self, scope, summary, keep_last, ctx, layer, protect_types=()):
+    async def apply_compact(self, scope, summary, keep_last, ctx, layer, protect_types=(),
+                            since_last=None):
         self.applied.append((layer.value, summary, keep_last))
         return SimpleNamespace(events_before=10, events_after=keep_last, summary_event_id="s1")
 

@@ -321,6 +321,7 @@ class MemoryProvider(Protocol):
         ctx: ProviderContext,
         layer: MemoryLayer = MemoryLayer.AGENT,
         protect_types: tuple[MemoryEventType, ...] = (),
+        since_last: MemoryEventType | None = None,
     ) -> CompactResult:
         """折叠指定 layer 的 scope（spec/06 §7）。
 
@@ -329,6 +330,10 @@ class MemoryProvider(Protocol):
 
         把该 layer scope 内、超出 keep_last 范围的事件标记 superseded
         （core 默认实现物理 archive；外部实现可能仅更新索引）。
+
+        since_last（段作用域折叠，2026-07-21）：非 None 时归档池限定在「最后一条 active
+        该类型记录之后」——段边界折叠传 USER_PROMPT，短段免折残留的前段 raw 不被跨段
+        折入本摘要（防合并摘要抢锚到前一条 UP 之前）。该类型记录不存在 → 不限定。
         """
         ...
 

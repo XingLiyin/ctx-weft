@@ -446,9 +446,11 @@ class ObserveStep(Step):
 
         act_recap 来源：本轮真走成 report_task_outcome（reported）用其可信 report，否则用 verdict.act_recap
         （root 机械退出经 _should_use_llm 强制 LLM 已产出）。空则不折、段保 raw（不写占位摘要）。
-        短段免折（background_observe.is_short_segment，与段边界折叠同门）：本段 active raw 低于
-        short_segment_token_threshold 时不折——recap 常比短原文更长，raw 原样留给下个 attempt
-        反而信息更全；raw 跨 attempt 累积，超阈值后下一次 retry 一并折叠。
+        短段免折（background_observe.is_short_segment，与段边界折叠同门）：当前段（末条 UP
+        之后）active raw 低于 short_segment_token_threshold 时不折——recap 常比短原文更长，
+        raw 原样留给下个 attempt 反而信息更全；attempt 之间无新 UP，raw 在段内跨 attempt
+        累积，超阈值后下一次 retry 一并折叠。折叠带 since_last=USER_PROMPT（段作用域，
+        2026-07-21）：交互任务中若有免折残留的前段 raw，不被跨段合折。
         """
         from ctx_weft.core.loop.steps.background_observe import is_short_segment
 
@@ -475,6 +477,9 @@ class ObserveStep(Step):
             layer=MemoryLayer.TASK,
             protect_types=(MemoryEventType.USER_PROMPT,
                            MemoryEventType.TASK_COMPACT_SUMMARY),
+            # 段作用域（2026-07-21，与 bg 段折同门）：只折当前段（末条 UP 之后），
+            # 短段免折残留的前段 raw 不跨段合折。
+            since_last=MemoryEventType.USER_PROMPT,
         )
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "events_before": result.events_before,
