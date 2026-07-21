@@ -20,6 +20,16 @@ from ctx_weft.protocols import (
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 
+@pytest.fixture(autouse=True)
+def _reset_token_calibration():
+    """token 自校准是进程级全局 EMA——每测前后清空，防止跨测试污染估算断言。"""
+    from ctx_weft.core.loop.token_calibration import reset_calibration
+
+    reset_calibration()
+    yield
+    reset_calibration()
+
+
 def _ts(offset_us: int) -> datetime:
     base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     return base + timedelta(microseconds=offset_us)

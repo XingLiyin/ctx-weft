@@ -29,6 +29,9 @@ class RuntimeConfig:
     # 并与输入侧 reserved_output_tokens=8192 对称。仅在贴近满窗时才实质压小输出（届时已近
     # compact），常态下几万量级的输出预算无感。
     dynamic_max_tokens_margin: int = 8192
+    # margin 比例制：实际 margin = max(margin, ratio*estimate)。固定 8192 只兜得住小 prompt 的
+    # 估算残差；估算误差按比例放大（10 万 token 的 5% 是 5000），margin 也须随体量放大。
+    dynamic_max_tokens_margin_ratio: float = 0.05
     dynamic_max_tokens_floor: int = 1024
     # 输出软顶：常态下不把整个剩余窗口都放给输出，按 context_limit 的比例封顶（但不低于
     # output_min）。ceiling = min(output_ceiling or context_limit, max(ratio*L, output_min))。

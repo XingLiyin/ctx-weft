@@ -78,8 +78,9 @@ def test_estimate_incremental_baseline_plus_delta():
         LLMMessage(role="tool", content="R" * 4000, tool_call_id="t1"),  # 新增，计
     ])
     est = request_prompt_estimate(req, _guard(context_tokens=50_000), 2)
-    # 50_000（真实基线）+ 每条消息估算：framing(4) + ceil(4000/3)=1334；历史大 user 不被重估
-    assert est == 50_000 + 4 + 1334
+    # 50_000（真实基线）+ 每条消息估算：framing(4) + ceil(4000/2)=2000（连续 R 串按高熵费率）；
+    # 历史大 user 不被重估
+    assert est == 50_000 + 4 + 2000
 
 
 def test_estimate_incremental_falls_back_without_real_baseline():
@@ -157,10 +158,26 @@ def test_apply_soft_cap_binds_when_window_has_room():
 
 
 def test_apply_tail_regime_when_window_tight():
-    # used 大到 L-used-margin 跌破软顶 → 回落紧缩段 context-used-margin
+    # used 大到 L-used-margin 跌破软顶 → 回落紧缩段 context-used-margin；
+    # margin 比例制：max(8192, 5%*170_000=8500) = 8500
     req = _req(prompt_token_estimate=170_000)
     apply_dynamic_max_tokens(_ctx(_llm()), req, _guard(context_tokens=0))
-    assert req.max_tokens == 200_000 - 170_000 - 8192  # 21808 < 40k 软顶
+    assert req.max_tokens == 200_000 - 170_000 - 8500  # 21500 < 40k 软顶
+
+
+def test_apply_fixed_margin_floors_when_ratio_smaller():
+    # 5%*155_000=7750 < 8192 → 固定 margin 兜底
+    req = _req(prompt_token_estimate=155_000)
+    apply_dynamic_max_tokens(_ctx(_llm()), req, _guard(context_tokens=0))
+    assert req.max_tokens == 200_000 - 155_000 - 8192  # 36808 < 40k 软顶
+
+
+def test_apply_margin_ratio_configurable():
+    # config 提高比例 → margin 随之放大
+    cfg = SimpleNamespace(dynamic_max_tokens_margin_ratio=0.1)
+    req = _req(prompt_token_estimate=170_000)
+    apply_dynamic_max_tokens(_ctx(_llm(), config=cfg), req, _guard(context_tokens=0))
+    assert req.max_tokens == 200_000 - 170_000 - 17_000
 
 
 def test_apply_output_min_floors_soft_cap_on_small_window():
