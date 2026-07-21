@@ -334,6 +334,14 @@ class MemoryProvider(Protocol):
         since_last（段作用域折叠，2026-07-21）：非 None 时归档池限定在「最后一条 active
         该类型记录之后」——段边界折叠传 USER_PROMPT，短段免折残留的前段 raw 不被跨段
         折入本摘要（防合并摘要抢锚到前一条 UP 之前）。该类型记录不存在 → 不限定。
+
+        排序契约（2026-07-21，实现方必须遵守）：段界搜索、归档池切分、锚点判定一律按
+        **渲染序 (timestamp, seq_no)**，与 recall 的 timestamp 序一致。不得用裸 seq_no——
+        存在 timestamp 回填、seq 更高的合法记录（L3 坍缩 UP，见 collapse_task_layer），
+        seq 序会把段界推到所有 raw 之后（摘要照写、raw 不折）。
+
+        锚点语义：摘要落「被折区起点之后第一条幸存事件之前」；段尾无幸存者则锚到被折段
+        末条事件位置（不用 now()，防迟到摘要越过新 USER_PROMPT）。
         """
         ...
 
