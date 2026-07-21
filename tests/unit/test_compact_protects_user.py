@@ -26,6 +26,7 @@ from ctx_weft.protocols import (
     ProviderContext,
 )
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -189,6 +190,8 @@ def _ctx(mem: InMemoryMemoryProvider) -> SimpleNamespace:
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 
     class _FakeLLM:
+        tokenizer = HeuristicTokenizer()
+
         async def complete(self, request, stream=True):
             yield SimpleNamespace(kind="token", text="段摘要", usage=None, tool_call=None)
 

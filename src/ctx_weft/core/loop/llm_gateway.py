@@ -53,19 +53,17 @@ from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.utils import (
     dynamic_max_tokens,
     estimate_content_tokens,
-    estimate_tokens,
     estimate_tool_calls_tokens,
-)
-from ctx_weft.core.loop.token_calibration import (
-    PROMPT_EST_BASE_KEY,
-    PROMPT_EST_RAW_KEY,
-    calibration_factor,
 )
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
 
 logger = logging.getLogger(__name__)
+
+# request.metadata 瞬态键：request_prompt_estimate 写入的估算基线（真实 context_tokens 或 0），
+# 供 act 回喂时算「估算段 = prompt_token_estimate − 基线」「真实段 = usage.prompt_tokens − 基线」。
+PROMPT_EST_BASE_KEY = "prompt_est_base"
 
 
 def resolve_llm_identity(state) -> tuple[str, str]:
@@ -263,36 +261,40 @@ def legalize_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
     )
 
 
-def _estimate_message_tokens(m: LLMMessage) -> int:
+def _estimate_message_tokens(m: LLMMessage, count) -> int:
     """单条消息的 provider 计费估算（往大了估）：文本 content + 图片 part + framing +
     tool_calls 参数 + reasoning_content。
 
     计费项定义在 core.utils（``estimate_content_tokens`` / ``estimate_tool_calls_tokens``）——
     单一真源，prepare/composer 对 memory 记录/装配消息共用同口径。tool_calls 的 arguments、
     reasoning、图片此前都没计入，是"单轮新增里一坨数不到的东西 > margin"致 400 的洞。
+
+    ``count``：文本费率回调，caller 传 ``tokenizer.count``（已校准）。
     """
-    total = estimate_content_tokens(m.content) + estimate_tool_calls_tokens(m.tool_calls)
+    total = estimate_content_tokens(m.content, count=count) \
+        + estimate_tool_calls_tokens(m.tool_calls, count=count)
     if m.reasoning_content:
-        total += estimate_tokens(m.reasoning_content)
+        total += count(m.reasoning_content)
     return total
 
 
-def _estimate_request_tokens(request: "LLMRequest") -> int:
+def _estimate_request_tokens(request: "LLMRequest", count) -> int:
     """估算整份待发 prompt 的 token（system + 全部 messages + tools schema）。
 
     每条消息经 :func:`_estimate_message_tokens` 计全部计费项（文本 + tool_calls 参数 +
-    reasoning + 图片 + framing）。含本轮新加的 role="tool" result。
+    reasoning + 图片 + framing）。含本轮新加的 role="tool" result。``count``：文本费率
+    回调，caller 传 ``tokenizer.count``（已校准）。
     """
-    total = estimate_tokens(request.system or "")
+    total = count(request.system or "")
     for m in request.messages:
-        total += _estimate_message_tokens(m)
+        total += _estimate_message_tokens(m, count)
     for t in request.tools:
-        total += estimate_tokens(t.name) + estimate_tokens(t.description or "")
-        total += estimate_tokens(json.dumps(t.input_schema, ensure_ascii=False))
+        total += count(t.name) + count(t.description or "")
+        total += count(json.dumps(t.input_schema, ensure_ascii=False))
     return total
 
 
-def request_prompt_estimate(request: "LLMRequest", loop_guard, baseline_msg_count: "int | None") -> int:
+def request_prompt_estimate(tokenizer, request: "LLMRequest", loop_guard, baseline_msg_count: "int | None") -> int:
     """算 caller 侧的 used（本请求真实 prompt token 的最佳估算），供各 step 挂到 request。
 
     - **增量**（``baseline_msg_count`` 非 None 且有真实基线 ``context_tokens>0``）：
@@ -302,23 +304,22 @@ def request_prompt_estimate(request: "LLMRequest", loop_guard, baseline_msg_coun
     - **首次 / 一次性**（无循环内基线）：``max(整份估算, context_tokens)``——整份估算打底，
       并不低于上一步真实测量值（更保守，永不 400；上步后若发生压缩，偏大只是少给输出）。
 
-    估算段（非真实基线部分）乘按模型自校准的 factor（token_calibration EMA，默认 1.0），
-    并把 (基线, 原始估算段) 记进 ``request.metadata`` 供 usage 到达后回喂 EMA。
+    估算全经 ``tokenizer.count``（已校准值）；不再有 raw/factor 概念——伺服校准下沉到
+    adapter 的 ``LLMClient.tokenizer`` 内部（见 providers.llm.tokenizer.HeuristicTokenizer）。
+    metadata 只记 :data:`PROMPT_EST_BASE_KEY`（估算基线），供 usage 到达后 act 回喂
+    ``tokenizer.observe`` 算估算段/真实段。
     """
-    factor = calibration_factor(request.model)
     ctx_tokens = getattr(loop_guard, "context_tokens", 0) if loop_guard is not None else 0
     if baseline_msg_count is not None and ctx_tokens > 0:
         delta = sum(
-            _estimate_message_tokens(m)
+            _estimate_message_tokens(m, tokenizer.count)
             for m in request.messages[baseline_msg_count:]
         )
         request.metadata[PROMPT_EST_BASE_KEY] = ctx_tokens
-        request.metadata[PROMPT_EST_RAW_KEY] = delta
-        return ctx_tokens + int(delta * factor)
-    full = _estimate_request_tokens(request)
+        return ctx_tokens + delta
+    full = _estimate_request_tokens(request, tokenizer.count)
     request.metadata[PROMPT_EST_BASE_KEY] = 0
-    request.metadata[PROMPT_EST_RAW_KEY] = full
-    return max(int(full * factor), ctx_tokens)
+    return max(full, ctx_tokens)
 
 
 def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:

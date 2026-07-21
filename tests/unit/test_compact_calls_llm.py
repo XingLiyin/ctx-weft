@@ -8,6 +8,7 @@ import pytest
 
 from ctx_weft.protocols import LLMChunk, LLMOutageError
 from ctx_weft.core.loop.steps import compact as compact_mod
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio
 
@@ -21,7 +22,7 @@ def _state_ctx():
     agent = SimpleNamespace(runtime={"llm_model": "mock"})
     state = SimpleNamespace(agent=agent, scope=None, task=None, session=None,
                             extra={}, transcript=[])
-    ctx = SimpleNamespace(assembler=_Assembler(), llm=None,
+    ctx = SimpleNamespace(assembler=_Assembler(), llm=SimpleNamespace(tokenizer=HeuristicTokenizer()),
                           cancel_token=None, event_bus=None, config=None)
     return state, ctx
 

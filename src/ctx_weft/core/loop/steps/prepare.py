@@ -29,7 +29,6 @@ from ctx_weft.core.loop.steps.recognize_intent import (
     should_recognize_intent,
 )
 from ctx_weft.core.loop.llm_gateway import resolve_llm_identity
-from ctx_weft.core.loop.token_calibration import calibration_factor
 from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.core.utils import (
     effective_limit,
@@ -78,10 +77,13 @@ def _estimate_record_tokens(r) -> int:
 
 def _estimate_assembled_tokens(prompt, model: str) -> int:
     """无真实基线（首轮/一次性）时对整份装配 prompt 的估算：system + 每条消息（含 tool_calls
-    参数/图片/framing）+ tools schema，乘该模型的自校准 factor（token_calibration EMA）。
+    参数/图片/framing）+ tools schema。
 
     比 composer 的 ``prompt.token_count``（纯文本、且不含 tools）更全，与 gateway 首次估算同口径——
     tools schema 是每个 act prompt 的固定占用，composer 完全没数，此处补上。
+
+    ``model`` 暂未使用（此前接过程级校准单例的 EMA，随该单例删除而摘除；
+    Task 5 会把此函数改道 ``ctx.llm.tokenizer.count`` counter，届时该参数一并替换）。
     """
     total = estimate_tokens(prompt.system or "")
     for m in prompt.messages:
@@ -91,7 +93,7 @@ def _estimate_assembled_tokens(prompt, model: str) -> int:
     for t in getattr(prompt, "tools", None) or []:
         total += estimate_tokens(t.name) + estimate_tokens(t.description or "")
         total += estimate_tokens(json.dumps(t.input_schema, ensure_ascii=False))
-    return int(total * calibration_factor(model))
+    return total
 
 
 class PrepareStep(Step):
@@ -246,9 +248,9 @@ class PrepareStep(Step):
                 )
                 new_records = recent[:max(0, len(recent) - guard.context_message_count)]
                 delta = sum(_estimate_record_tokens(r) for r in new_records)
-                # 增量段乘自校准 factor（真实基线不乘），与 gateway 增量路径同口径
-                factor = calibration_factor(resolve_llm_identity(state)[0])
-                return guard.context_tokens + int(delta * factor), True
+                # 增量段此前乘自校准 factor（过程级校准单例 EMA，随该单例删除而摘除）；
+                # Task 5 会把此处改道 ctx.llm.tokenizer.count（已校准），届时恢复等价语义。
+                return guard.context_tokens + delta, True
             except Exception:
                 pass
 

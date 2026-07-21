@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
 from ctx_weft.protocols import LLMChunk, LLMUsage, ToolCall
 from ctx_weft.protocols.capability import ToolCapability
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 
 class _FakeAssembler:
@@ -21,6 +22,7 @@ class _FakeAssembler:
 class _FakeLLM:
     def __init__(self, args):
         self._args = args
+        self.tokenizer = HeuristicTokenizer()
 
     async def complete(self, request, stream=True):
         yield LLMChunk(

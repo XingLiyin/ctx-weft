@@ -16,6 +16,7 @@ from ctx_weft.core.loop.llm_gateway import resolve_llm_identity
 from ctx_weft.core.loop.steps.act import _run_llm_turn
 from ctx_weft.core.loop.steps.observe import run_observe_react
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryScope
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 
 # ── minimal fakes（与 test_observe_react_helper 同构，自包含避免跨测试文件 import）──
@@ -87,6 +88,8 @@ def _make_ctx(event_bus):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 
     class _FakeLLM:
+        tokenizer = HeuristicTokenizer()
+
         async def complete(self, req, stream=True):
             return
             yield  # unreachable; stream_llm_resilient is monkeypatched

@@ -7,6 +7,7 @@ from ctx_weft.core.assembler.composer import (
 )
 from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.utils import content_to_text
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio
 
@@ -75,7 +76,7 @@ async def test_summarize_for_compact_threads_scope(monkeypatch):
     state = SimpleNamespace(
         agent=agent, scope=SimpleNamespace(), task=SimpleNamespace(), session=SimpleNamespace(),
         extra={})
-    ctx = SimpleNamespace(assembler=_FakeAssembler())
+    ctx = SimpleNamespace(assembler=_FakeAssembler(), llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
     monkeypatch.setattr(compact_mod, "stream_llm_resilient", _fake_stream)
 
     await compact_mod.summarize_for_compact(state, ctx, scope="agent")

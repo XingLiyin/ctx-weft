@@ -67,6 +67,8 @@ class _FakeLLM:
 
     def __init__(self, text: str = "SUM"):
         self._text = text
+        from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+        self.tokenizer = HeuristicTokenizer()
 
     async def complete(self, request, *, stream: bool = True):
         from ctx_weft.protocols import LLMChunk

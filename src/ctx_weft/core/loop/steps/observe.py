@@ -111,7 +111,7 @@ async def run_observe_react(
             tools=tools,
         )
         llm_request.prompt_token_estimate = request_prompt_estimate(
-            llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
+            ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
 
         await ctx.event_bus.emit(make_event(state, event_types.prompt_sent, payload={
             "request_id": req_id,

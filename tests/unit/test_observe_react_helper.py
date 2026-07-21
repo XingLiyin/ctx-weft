@@ -12,6 +12,7 @@ from ctx_weft.core.loop.steps.observe import (
 )
 from ctx_weft.core.orchestrator.control_capability import ControlResult
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryScope
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 _LLM_EVENT_TYPES = {
     EventType.LLM_REQUEST_STARTED, EventType.LLM_PROMPT_SENT,
@@ -119,6 +120,8 @@ def _make_ctx(tool_content: str, event_bus=None):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 
     class _FakeLLM:
+        tokenizer = HeuristicTokenizer()
+
         async def complete(self, req, stream=True):
             return
             yield  # unreachable; stream_llm_resilient is monkeypatched in tests
@@ -395,6 +398,8 @@ async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 
     class _FakeLLM2:
+        tokenizer = HeuristicTokenizer()
+
         async def complete(self, req, stream=True):
             return
             yield

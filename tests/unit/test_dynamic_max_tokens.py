@@ -7,15 +7,24 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ctx_weft.core.utils import dynamic_max_tokens
+from ctx_weft.core.utils import dynamic_max_tokens, estimate_tokens
 from ctx_weft.protocols import LLMMessage, LLMRequest
 from ctx_weft.core.loop.llm_gateway import (
     apply_dynamic_max_tokens,
     request_prompt_estimate,
     _estimate_request_tokens,
     _estimate_message_tokens,
+    PROMPT_EST_BASE_KEY,
 )
 from ctx_weft.protocols.context import ImagePart, TextPart
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+
+
+def _tok(factor_from: "tuple[int, int] | None" = None) -> HeuristicTokenizer:
+    t = HeuristicTokenizer()
+    if factor_from:
+        t.observe(*factor_from)
+    return t
 
 
 # ── 纯算术：dynamic_max_tokens(context_limit, used, ceiling) ────────────────────
@@ -58,15 +67,15 @@ def _guard(context_limit=200_000, context_tokens=0):
 def test_estimate_first_call_uses_full_when_larger():
     # baseline=None → max(整份估算, context_tokens)；整份更大时用整份
     req = _req(messages=[LLMMessage(role="user", content="X" * 40_000)])
-    est = request_prompt_estimate(req, _guard(context_tokens=0), None)
-    assert est == _estimate_request_tokens(req)
+    est = request_prompt_estimate(_tok(), req, _guard(context_tokens=0), None)
+    assert est == _estimate_request_tokens(req, estimate_tokens)
     assert est >= 10_000
 
 
 def test_estimate_first_call_floors_at_context_tokens():
     # baseline=None、上步真实 context_tokens 更大 → 不低于它（更保守，永不 400）
     req = _req(messages=[LLMMessage(role="user", content="hi")])
-    est = request_prompt_estimate(req, _guard(context_tokens=90_000), None)
+    est = request_prompt_estimate(_tok(), req, _guard(context_tokens=90_000), None)
     assert est == 90_000
 
 
@@ -77,7 +86,7 @@ def test_estimate_incremental_baseline_plus_delta():
         LLMMessage(role="assistant", content="prev"),                    # 基线内，不计
         LLMMessage(role="tool", content="R" * 4000, tool_call_id="t1"),  # 新增，计
     ])
-    est = request_prompt_estimate(req, _guard(context_tokens=50_000), 2)
+    est = request_prompt_estimate(_tok(), req, _guard(context_tokens=50_000), 2)
     # 50_000（真实基线）+ 每条消息估算：framing(4) + ceil(4000/2)=2000（连续 R 串按高熵费率）；
     # 历史大 user 不被重估
     assert est == 50_000 + 4 + 2000
@@ -86,8 +95,8 @@ def test_estimate_incremental_baseline_plus_delta():
 def test_estimate_incremental_falls_back_without_real_baseline():
     # context_tokens=0（无真实基线）即使给了 baseline_msg_count 也退回首次分支
     req = _req(messages=[LLMMessage(role="tool", content="R" * 4000, tool_call_id="t1")])
-    est = request_prompt_estimate(req, _guard(context_tokens=0), 0)
-    assert est == max(_estimate_request_tokens(req), 0)
+    est = request_prompt_estimate(_tok(), req, _guard(context_tokens=0), 0)
+    assert est == max(_estimate_request_tokens(req, estimate_tokens), 0)
 
 
 def test_estimate_includes_tool_result_messages():
@@ -96,8 +105,29 @@ def test_estimate_includes_tool_result_messages():
         LLMMessage(role="user", content="hi"),
         LLMMessage(role="tool", content="X" * 4000, tool_call_id="t1"),
     ])
-    est = _estimate_request_tokens(req)
+    est = _estimate_request_tokens(req, estimate_tokens)
     assert est >= 1000
+
+
+def test_estimate_incremental_delta_calibrated():
+    # tokenizer 学到 2x → 增量段 ×2、真实基线不乘
+    req = _req(messages=[
+        LLMMessage(role="user", content="old"),
+        LLMMessage(role="assistant", content="prev"),
+        LLMMessage(role="tool", content="R" * 4000, tool_call_id="t1"),
+    ])
+    est = request_prompt_estimate(_tok((1000, 2000)), req, _guard(context_tokens=50_000), 2)
+    # delta = framing(4，常数不乘) + count("R"*4000)=4000（2000×2） = 4004
+    assert est == 50_000 + 4 + 4000
+    assert req.metadata[PROMPT_EST_BASE_KEY] == 50_000
+
+
+def test_estimate_full_path_calibrated_and_base_zero():
+    req = _req(messages=[LLMMessage(role="user", content="X" * 40_000)])
+    tok = _tok((1000, 2000))
+    est = request_prompt_estimate(tok, req, _guard(context_tokens=0), None)
+    assert est == _estimate_request_tokens(req, tok.count)
+    assert req.metadata[PROMPT_EST_BASE_KEY] == 0
 
 
 # ── 此前数不到的几类：tool_calls 参数 / reasoning / 图片 / framing ─────────────────
@@ -107,13 +137,13 @@ def test_message_counts_tool_call_arguments():
     big = "x" * 6000
     m = LLMMessage(role="assistant", content="",
                    tool_calls=[{"id": "c1", "name": "write_file", "input": {"content": big}}])
-    assert _estimate_message_tokens(m) >= 2000  # ceil(~6000/3) 量级，远超旧的 ~0
+    assert _estimate_message_tokens(m, estimate_tokens) >= 2000  # ceil(~6000/3) 量级，远超旧的 ~0
 
 
 def test_message_counts_reasoning_content():
     with_r = _estimate_message_tokens(
-        LLMMessage(role="assistant", content="hi", reasoning_content="R" * 3000))
-    without = _estimate_message_tokens(LLMMessage(role="assistant", content="hi"))
+        LLMMessage(role="assistant", content="hi", reasoning_content="R" * 3000), estimate_tokens)
+    without = _estimate_message_tokens(LLMMessage(role="assistant", content="hi"), estimate_tokens)
     assert with_r - without >= 900  # ceil(3000/3)=1000
 
 
@@ -123,12 +153,12 @@ def test_message_counts_image_parts_by_fixed_constant():
         TextPart(text="见图"),
         ImagePart(data="A" * 100_000, media_type="image/png"),
     ])
-    assert 1500 <= _estimate_message_tokens(m) <= 2200
+    assert 1500 <= _estimate_message_tokens(m, estimate_tokens) <= 2200
 
 
 def test_message_framing_overhead_added():
     # 空 content 消息也有固定 framing 开销（provider 每条消息都要计）
-    assert _estimate_message_tokens(LLMMessage(role="user", content="")) >= 4
+    assert _estimate_message_tokens(LLMMessage(role="user", content=""), estimate_tokens) >= 4
 
 
 def test_tool_call_args_counted_in_request_estimate():
@@ -137,7 +167,7 @@ def test_tool_call_args_counted_in_request_estimate():
         LLMMessage(role="assistant", content="",
                    tool_calls=[{"id": "c1", "name": "w", "input": {"c": "x" * 9000}}]),
     ])
-    assert _estimate_request_tokens(req) >= 3000  # ceil(~9000/3)
+    assert _estimate_request_tokens(req, estimate_tokens) >= 3000  # ceil(~9000/3)
 
 
 # ── 网关消费者：apply_dynamic_max_tokens 读 request.prompt_token_estimate ─────────

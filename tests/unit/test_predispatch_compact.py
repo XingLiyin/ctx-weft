@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
 from ctx_weft.protocols import MemoryEventType as T, MemoryScope  # noqa: F401
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 
 _BASE_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -65,6 +66,7 @@ class _FakeAssembler:
 
 class _FakeLLM:
     context_limit = 1_000_000  # apply_dynamic_max_tokens ceiling fallback (Task 2 网关接线)
+    tokenizer = HeuristicTokenizer()
 
     async def complete(self, request, stream=True):
         yield SimpleNamespace(kind="token", text="SUMMARY", usage=None, tool_call=None)

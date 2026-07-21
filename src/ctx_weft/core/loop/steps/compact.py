@@ -80,7 +80,7 @@ async def summarize_for_compact(
     )
     # 一次性调用（无循环内基线）→ baseline=None，走 max(整份估算, context_tokens)。
     llm_request.prompt_token_estimate = request_prompt_estimate(
-        llm_request, getattr(agent, "loop_guard", None), None)
+        ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), None)
     summary_text = ""
     async for chunk in stream_llm_resilient(ctx, state, llm_request):
         if chunk.kind == "token":
