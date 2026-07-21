@@ -88,9 +88,9 @@ def test_estimate_incremental_baseline_plus_delta():
         LLMMessage(role="tool", content="R" * 4000, tool_call_id="t1"),  # 新增，计
     ])
     est = request_prompt_estimate(_tok(), req, _guard(context_tokens=50_000), 2)
-    # 50_000（真实基线）+ 每条消息估算：framing(4) + ceil(4000/2)=2000（连续 R 串按高熵费率）；
+    # 50_000（真实基线）+ 每条消息估算：framing(4) + ceil(0.6*4000)=2400（连续 R 串按高熵费率）；
     # 历史大 user 不被重估
-    assert est == 50_000 + 4 + 2000
+    assert est == 50_000 + 4 + 2400
 
 
 def test_estimate_incremental_falls_back_without_real_baseline():
@@ -118,8 +118,8 @@ def test_estimate_incremental_delta_calibrated():
         LLMMessage(role="tool", content="R" * 4000, tool_call_id="t1"),
     ])
     est = request_prompt_estimate(_tok((1000, 2000)), req, _guard(context_tokens=50_000), 2)
-    # delta = framing(4，常数不乘) + count("R"*4000)=4000（2000×2） = 4004
-    assert est == 50_000 + 4 + 4000
+    # delta = framing(4，常数不乘) + count("R"*4000)=4800（2400×2） = 4804
+    assert est == 50_000 + 4 + 4800
     assert req.metadata[PROMPT_EST_BASE_KEY] == 50_000
 
 

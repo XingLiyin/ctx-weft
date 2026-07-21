@@ -31,8 +31,8 @@ def test_first_sample_seeds_factor_directly():
 def test_count_applies_learned_factor():
     t = HeuristicTokenizer()
     t.observe(1000, 2000)  # factor=2.0
-    # "R"*4000 → 启发式(高熵段) 2000 → ×2
-    assert t.count("R" * 4000) == 4000
+    # "R"*4000 → 启发式(高熵段 0.6/字符) 2400 → ×2
+    assert t.count("R" * 4000) == 4800
 
 
 def test_subsequent_samples_damped_by_alpha():
