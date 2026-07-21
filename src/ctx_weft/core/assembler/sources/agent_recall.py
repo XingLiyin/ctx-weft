@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.assembler.sources._history import record_to_history_block, wrap_compact_summary
 from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
-from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
+from ctx_weft.core.utils import content_to_text, generate_id
 from ctx_weft.protocols import MemoryEventType
 
 if TYPE_CHECKING:
@@ -81,7 +81,7 @@ class AgentRecallSource:
         current_task_id = getattr(request.scope, "task_id", None)
         for idx, record in enumerate(reversed(task_records)):
             yield record_to_history_block(
-                record, source="agent_recall", idx=idx, current_task_id=current_task_id
+                record, source="agent_recall", idx=idx, request=request, current_task_id=current_task_id
             )
 
         # ── 2) agent 层残留 / 经验 ──
@@ -117,7 +117,7 @@ class AgentRecallSource:
                 target="messages",
                 content=text,
                 priority=slot_priority("history", "agent_compact_summary"),
-                token_estimate=estimate_tokens(text),
+                token_estimate=request.token_counter(text),
                 metadata={"role": "user", "type": s.type, "timestamp": _ts(s),
                           "seq_no": s.metadata.get("seq_no", 0)},
             )
@@ -126,4 +126,4 @@ class AgentRecallSource:
         # tool_calls、tool 携 tool_call_id（record_to_history_block 据 role 无损重建）。悬空 tool_call
         # （在途 dispatch 尚无 result）由 llm_gateway 的 drop_dangling_tool_calls 兜底。
         for idx, c in enumerate(reversed(conversation)):
-            yield record_to_history_block(c, source="agent_recall", idx=idx)
+            yield record_to_history_block(c, source="agent_recall", idx=idx, request=request)

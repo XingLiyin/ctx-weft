@@ -10,6 +10,7 @@ from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.core.utils import estimate_tokens
 from ctx_weft.protocols import MemoryScope, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
@@ -47,7 +48,8 @@ async def test_two_servers_same_tool_name_coexist_and_route() -> None:
     cache.put("agt_1", [a._cap(), b._cap()])
 
     # 2. The LLM sees two distinct qualified names.
-    request = SimpleNamespace(bound_capabilities=[a._cap(), b._cap()], purpose="act")
+    request = SimpleNamespace(bound_capabilities=[a._cap(), b._cap()], purpose="act",
+                              token_counter=estimate_tokens)
     names = {blk.metadata["llm_tool"].name async for blk in CapabilitySource().fetch(request, deps=None)}
     assert names == {"mcp__a__search", "mcp__b__search"}
 

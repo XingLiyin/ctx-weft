@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils import content_to_text, estimate_tokens, generate_id
+from ctx_weft.core.utils import content_to_text, generate_id
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
@@ -74,7 +74,7 @@ class BlackboardSource:
                     target=target,  # type: ignore[arg-type]
                     content=text,
                     priority=slot_priority(kind),
-                    token_estimate=estimate_tokens(text),
+                    token_estimate=request.token_counter(text),
                     metadata={
                         "topic": sub.topic,
                         "intent": sub.intent,

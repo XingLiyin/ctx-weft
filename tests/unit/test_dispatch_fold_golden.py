@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+from ctx_weft.core.utils import estimate_tokens
+
 import pytest
 
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
@@ -59,7 +61,7 @@ async def test_capsule_renders_body_and_finish_pair():
     await _synthesize_dispatch_pair(mem, scope, _task(), "## PDF 已完成", _task_summary, "success", _pctx())
 
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
-    req = SimpleNamespace(scope=scope)
+    req = SimpleNamespace(scope=scope, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     blocks.sort(key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)))
     types = [b.metadata.get("type") for b in blocks]

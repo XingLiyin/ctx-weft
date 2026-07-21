@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+from ctx_weft.core.utils import estimate_tokens
+
 import pytest
 
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
@@ -49,7 +51,7 @@ def _mirrored(type_: MemoryEventType, scope: MemoryScope, content: str, t_offset
 async def _recall_blocks(mem: InMemoryMemoryProvider, agent_scope: MemoryScope) -> list:
     """Drive AgentRecallSource.fetch and return blocks sorted by (timestamp, seq_no)."""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
-    req = SimpleNamespace(scope=agent_scope)
+    req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     blocks.sort(key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)))
     return blocks

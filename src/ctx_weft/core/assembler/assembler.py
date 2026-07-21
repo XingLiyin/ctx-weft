@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -45,7 +45,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     Purpose,
 )
-from ctx_weft.core.utils import effective_limit
+from ctx_weft.core.utils import effective_limit, estimate_tokens
 from ctx_weft.protocols.knowledge import KnowledgeProvider
 
 if TYPE_CHECKING:
@@ -72,6 +72,9 @@ class ContextRequest:
     session: "Session"
     template: AgentTemplate | None  # 实例化时绑定的 template（pin 了 version）；None 时 IdentitySource 跳过
     bound_capabilities: list[Any]  # list[Capability]，但避免循环导入
+    # token 计数回调：生产由 step 构造时传 ctx.llm.tokenizer.count（已校准、随当次模型）；
+    # 默认回退未校准启发式（测试/无 llm 场景）。sources/composer 统一经它计数。
+    token_counter: Callable[[str], int] = estimate_tokens
     extra: dict[str, Any] = field(default_factory=dict)
 
 

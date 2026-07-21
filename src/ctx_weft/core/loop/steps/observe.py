@@ -338,6 +338,7 @@ class ObserveStep(Step):
             session=state.session,
             template=state.extra.get("template"),
             bound_capabilities=bound_caps,
+            token_counter=ctx.llm.tokenizer.count,
             extra={"subtask_reviews": subtask_reviews},
         )
         prompt = await ctx.assembler.assemble(request)

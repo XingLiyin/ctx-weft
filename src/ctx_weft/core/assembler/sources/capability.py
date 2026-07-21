@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils import estimate_tokens, generate_id
+from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols.capability import AgentCapability, SkillCapability, ToolCapability, qualify
 
 if TYPE_CHECKING:
@@ -77,7 +77,7 @@ class CapabilitySource:
                 target="system",
                 content=cap.description,
                 priority=slot_priority("capabilities"),
-                token_estimate=estimate_tokens(cap.description),
+                token_estimate=request.token_counter(cap.description),
                 metadata={
                     "capability_id": cap.id,
                     "capability_name": qname,  # qualified: rendered into "Available Tools" prose
@@ -100,7 +100,7 @@ class CapabilitySource:
                 target="system",
                 content=cap.description,
                 priority=slot_priority("capabilities"),
-                token_estimate=estimate_tokens(cap.description),
+                token_estimate=request.token_counter(cap.description),
                 metadata={
                     "capability_id": cap.id,
                     "capability_name": qualify(cap.id),
@@ -120,7 +120,7 @@ class CapabilitySource:
                 target="system",
                 content=cap.description,
                 priority=slot_priority("capabilities"),
-                token_estimate=estimate_tokens(cap.description),
+                token_estimate=request.token_counter(cap.description),
                 metadata={
                     "capability_id": cap.id,
                     "capability_name": qualify(cap.id),

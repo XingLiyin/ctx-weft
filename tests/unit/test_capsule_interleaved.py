@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+from ctx_weft.core.utils import estimate_tokens
+
 import pytest
 
 from ctx_weft.core.assembler.composer import DefaultComposer
@@ -404,7 +406,7 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
 
     # Compose messages via real AgentRecallSource + DefaultComposer
     deps = SimpleNamespace(memory=mem, provider_ctx=pctx)
-    req = SimpleNamespace(scope=asc)
+    req = SimpleNamespace(scope=asc, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     triples = DefaultComposer()._history_to_messages_with_sources(blocks)
     messages = [m for m, *_ in triples]

@@ -28,6 +28,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+from ctx_weft.core.utils import estimate_tokens
+
 import pytest
 
 from ctx_weft.core.assembler.composer import DefaultComposer
@@ -120,7 +122,7 @@ async def _ingest_finish_pair(mem, scope, *, task_id, parent_task_id, outputs,
 async def _compose_messages(mem, agent_scope):
     """REAL AgentRecallSource.fetch → REAL DefaultComposer 排序/重建 → list[LLMMessage]."""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
-    req = SimpleNamespace(scope=agent_scope)
+    req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     triples = DefaultComposer()._history_to_messages_with_sources(blocks)
     return [m for m, *_ in triples]
@@ -289,7 +291,7 @@ async def test_g1_naive_seqno_primary_would_misorder() -> None:
                               outputs="C done", report="C ok", close_t=8)
 
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
-    req = SimpleNamespace(scope=asc)
+    req = SimpleNamespace(scope=asc, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
 
     # 正确排序（timestamp-primary）：C finish 在 P 续跑(t=9) 之前

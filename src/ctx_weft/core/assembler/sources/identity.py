@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils import estimate_tokens, generate_id
+from ctx_weft.core.utils import generate_id
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
@@ -47,7 +47,7 @@ class IdentitySource:
             target="system",
             content=text,
             priority=slot_priority("identity"),  # 最高，几乎不可裁
-            token_estimate=estimate_tokens(text),
+            token_estimate=request.token_counter(text),
             metadata={
                 "template_id": template.id,
                 "template_version": template.version,
@@ -66,7 +66,7 @@ class IdentitySource:
                 target="system",
                 content=skill_instructions,
                 priority=slot_priority("directive"),
-                token_estimate=estimate_tokens(skill_instructions),
+                token_estimate=request.token_counter(skill_instructions),
                 metadata={
                     "kind": "skill_instructions",
                     "skill_name": request.extra.get("skill_name", ""),
