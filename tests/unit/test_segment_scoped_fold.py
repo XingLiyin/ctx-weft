@@ -266,6 +266,45 @@ async def test_supersede_final_raw_segment_keeps_previous_segment_raw():
         f"末段 raw 应被删（finish 对已承载其 recap）: {contents}"
 
 
+async def test_apply_compact_since_last_after_collapsed_up_still_folds():
+    """L3 坍缩 UP 是「timestamp 回填（保留区之前）、seq 最高（后 ingest）」的记录。
+    since_last 段界若按 seq 找最后一条 UP，会把段界推到所有 raw 之后 → 归档池空 →
+    摘要照写、raw 一条不折。段界必须按渲染序（timestamp, seq_no）判定。"""
+    from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, collapse_task_layer
+
+    mem = InMemoryMemoryProvider()
+    seed = [
+        (MT.USER_PROMPT,  "UP1 原始问题", 10, "user"),
+        (MT.LLM_RESPONSE, "A1 早期回合", 20, "assistant"),
+        (MT.LLM_RESPONSE, "A2 保留raw",  30, "assistant"),
+        (MT.LLM_RESPONSE, "A3 保留raw",  40, "assistant"),
+    ]
+    for typ, content, off, role in seed:
+        await mem.ingest(MemoryEvent(type=typ, scope=_SCOPE, content=content,
+                                     timestamp=_ts(off), role=role), _PCTX)
+
+    # 真实 L3 坍缩：折 [UP1, A1]，坍缩 UP 锚在保留区之前（ts 回填）、seq 最高
+    state = SimpleNamespace(scope=_SCOPE)
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_PCTX)
+    folded = await collapse_task_layer(state, ctx, keep_last=2, summary_text="坍缩摘要")
+    assert folded == 2
+
+    # 段边界折叠：坍缩 UP 之后的 raw（A2/A3）是当前段，必须被折
+    await mem.apply_compact(
+        scope=_SCOPE, summary="S", keep_last=0, ctx=_PCTX, layer=MemoryLayer.TASK,
+        protect_types=(MT.USER_PROMPT, MT.TASK_COMPACT_SUMMARY),
+        since_last=MT.USER_PROMPT,
+    )
+
+    chrono = await _chrono(mem)
+    contents = [r.content for r in chrono]
+    assert not any(c in ("A2 保留raw", "A3 保留raw") for c in contents), \
+        f"坍缩 UP 在场时段折叠失效——raw 未被替换: {contents}"
+    assert len(chrono) == 2 and chrono[0].type is MT.USER_PROMPT \
+        and COLLAPSE_DELIM in chrono[0].content and chrono[1].content == "S", \
+        f"期望 [坍缩UP, S]，实得: {[(r.type.value, r.content[:20]) for r in chrono]}"
+
+
 async def test_supersede_final_raw_segment_without_up_supersedes_all():
     """scope 内无 UP（防御路径）→ 回退旧行为：全部 active raw 照删。"""
     from ctx_weft.core.loop.steps.finalize import _supersede_final_raw_segment
