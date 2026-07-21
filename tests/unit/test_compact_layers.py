@@ -17,6 +17,7 @@ from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.state.models import Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio
 T = MemoryEventType
@@ -30,6 +31,7 @@ class _FakeAssembler:
 
 class _FakeLLM:
     context_limit = 1_000_000  # apply_dynamic_max_tokens ceiling fallback (Task 2 网关接线)
+    tokenizer = HeuristicTokenizer()
 
     async def complete(self, req, stream=True):
         yield SimpleNamespace(kind="token", text="SUMMARY")

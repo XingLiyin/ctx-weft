@@ -134,7 +134,8 @@ class RecognizeIntentStep(Step):
         usage = LLMUsage()
         try:
             _guard = getattr(state.agent, "loop_guard", None)
-            llm_request.prompt_token_estimate = request_prompt_estimate(llm_request, _guard, None)
+            llm_request.prompt_token_estimate = request_prompt_estimate(
+                ctx.llm.tokenizer, llm_request, _guard, None)
             apply_dynamic_max_tokens(ctx, llm_request, _guard)
             async for chunk in stream_llm(ctx.llm, llm_request):
                 if chunk.kind == "tool_call" and chunk.tool_call:

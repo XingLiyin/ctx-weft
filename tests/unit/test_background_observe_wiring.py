@@ -35,6 +35,7 @@ from ctx_weft.protocols import (
     ProviderContext,
 )
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio
 
@@ -113,6 +114,7 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
     class _FakeLLM:
         context_limit = 100_000
         output_reserve = 4096
+        tokenizer = HeuristicTokenizer()
 
         async def complete(self, request: Any, stream: bool = True):
             yield LLMChunk(kind="token", text="summary")

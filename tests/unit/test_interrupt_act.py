@@ -9,6 +9,7 @@ from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep, interrupt_edit_note
 from ctx_weft.protocols import LLMChunk, MemoryEventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.integration.test_interactive_task import _act_state_ctx
 
 pytestmark = pytest.mark.asyncio
@@ -20,6 +21,7 @@ class _PauseMidStream:
     def __init__(self, token: PauseToken, text: str = "partial reply") -> None:
         self._token = token
         self._text = text
+        self.tokenizer = HeuristicTokenizer()
 
     @property
     def context_limit(self) -> int:

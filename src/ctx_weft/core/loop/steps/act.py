@@ -15,9 +15,8 @@ from typing import Any
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
-    request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
+    PROMPT_EST_BASE_KEY, request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
 )
-from ctx_weft.core.loop.token_calibration import observe_request_outcome
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import (
@@ -213,7 +212,7 @@ async def _run_llm_turn(
     llm_request = LLMRequest(
         model=model, system=prompt.system, messages=list(current_messages), tools=prompt.tools)
     llm_request.prompt_token_estimate = request_prompt_estimate(
-        llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
+        ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
 
     await ctx.event_bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
         "request_id": req_id, "turn": turn_num, "system": prompt.system,
@@ -266,8 +265,11 @@ async def _run_llm_turn(
             launch_background_observe(state, ctx, boundary="interrupt")
         await _park_wait_for_user(state, ctx, source="interrupt", edit=not has_partial)
 
-    # token 自校准回喂：真实 usage 与发送前挂在 metadata 的原始估算段作比，更新该模型 EMA
-    observe_request_outcome(llm_request, usage)
+    # token 自校准回喂：真实 usage 与发送前估算段作比（基线不参与），喂给该模型 tokenizer
+    base = llm_request.metadata.get(PROMPT_EST_BASE_KEY)
+    if usage.prompt_tokens > 0 and llm_request.prompt_token_estimate and base is not None:
+        ctx.llm.tokenizer.observe(
+            llm_request.prompt_token_estimate - base, usage.prompt_tokens - base)
 
     await ctx.event_bus.emit(make_event(
         state, EventType.LLM_RESPONSE_FINISHED,
