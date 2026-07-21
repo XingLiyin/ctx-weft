@@ -223,7 +223,12 @@ class InMemoryMemoryProvider(MemoryProvider):
 
         active = [s for s in self._events if _in_scope(s)]
         events_before = len(active)
-        active.sort(key=lambda s: s.seq_no)
+        # 全函数统一按**渲染序** (timestamp, seq_no) 排（与 recall/装配一致；2026-07-21）。
+        # 不能按 seq_no：L3 坍缩 UP 等「timestamp 回填、seq 最高」的记录会在 seq 序里
+        # 排到所有 raw 之后——段界被推到末尾 → 归档池空 → 摘要照写而 raw 一条不折；
+        # 锚点判定同理会把摘要错插到坍缩 UP 之前。
+        _key = lambda s: (s.event.timestamp, s.seq_no)  # noqa: E731
+        active.sort(key=_key)
 
         # since_last：归档池限定在「最后一条 active 该类型记录之后」（段作用域折叠，
         # 2026-07-21）。短段免折残留的更早 raw 落在该点之前 → 永不跨段折入本摘要；
@@ -251,10 +256,11 @@ class InMemoryMemoryProvider(MemoryProvider):
             else MemoryEventType.AGENT_COMPACT_SUMMARY
         )
         # 摘要落在「被折区块之后、其后第一条幸存事件之前」→ [UP1][summary][UP2][kept]
-        # 找「归档起点」：第一条被折事件的 seq_no；摘要插在该起点之后第一条幸存事件之前
-        archived_min_seq = min((s.seq_no for s in to_archive), default=-1)
-        # 第一条幸存且 seq_no >= archived_min_seq 的事件即为 anchor
-        following = [s for s in active if s.seq_no >= archived_min_seq and not s.is_superseded]
+        # 找「归档起点」：第一条被折事件的渲染位；摘要插在该起点之后第一条幸存事件之前
+        archived_min_key = min((_key(s) for s in to_archive), default=None)
+        # 第一条幸存且渲染位 >= 归档起点的事件即为 anchor
+        following = ([] if archived_min_key is None
+                     else [s for s in active if _key(s) >= archived_min_key and not s.is_superseded])
         if following:
             anchor = min(following, key=lambda s: (s.event.timestamp, s.seq_no))
             summary_ts = anchor.event.timestamp - timedelta(microseconds=1)
