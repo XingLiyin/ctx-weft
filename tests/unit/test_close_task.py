@@ -21,6 +21,7 @@ from ctx_weft.protocols import (
     ProviderContext,
 )
 from ctx_weft.protocols.template import LoopConfig
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
@@ -55,7 +56,8 @@ def _state(task: Task, scope: MemoryScope, loop_config: LoopConfig, tm: _FakeTM)
 
 
 def _loop_ctx(mem, tm: _FakeTM):
-    return SimpleNamespace(memory=mem, provider_ctx=_ctx(), task_manager=tm)
+    return SimpleNamespace(memory=mem, provider_ctx=_ctx(), task_manager=tm,
+                           llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
 
 
 def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:

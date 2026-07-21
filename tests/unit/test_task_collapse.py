@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, collapse_task_layer
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider as InMemoryBlackboard
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext,
@@ -116,7 +117,8 @@ async def test_escalating_compact_l3_uses_collapse_keep_last(monkeypatch):
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             extra={}, run_id="run1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx(),
-                          task_manager=None, event_bus=None)
+                          task_manager=None, event_bus=None,
+                          llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
 
     events = await cm.escalating_compact(state, ctx, token_estimate=1000, trigger="compact")
 
@@ -150,7 +152,8 @@ async def test_escalating_l3_fires_on_segment_only_accumulation(monkeypatch):
     state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"), agent=agent,
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             extra={}, run_id="r1", sequence_counter=0)
-    ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx(), task_manager=None, event_bus=None)
+    ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx(), task_manager=None, event_bus=None,
+                          llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
 
     events = await cm.escalating_compact(state, ctx, token_estimate=1000, trigger="compact")
 

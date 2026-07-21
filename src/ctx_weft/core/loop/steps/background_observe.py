@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
-from ctx_weft.core.utils import content_to_text, estimate_tokens
+from ctx_weft.core.utils import content_to_text
 from ctx_weft.protocols import MemoryEventType, MemoryLayer
 
 if TYPE_CHECKING:
@@ -74,7 +74,7 @@ async def is_short_segment(state: "LoopState", ctx: "LoopContext") -> bool:
         r.content if isinstance(r.content, str) else content_to_text(r.content)
         for r in records
     )
-    return estimate_tokens(seg_text) <= threshold
+    return ctx.llm.tokenizer.count(seg_text) <= threshold
 
 
 def pop_close_report(task_id: str) -> tuple[str, str] | None:

@@ -22,6 +22,7 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
 from ctx_weft.core.state.models import LoopGuard, Session, Task
 from ctx_weft.core.utils import now_utc
+from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.integration.test_minimal_loop import InMemoryTemplateResolver
 
 pytestmark = pytest.mark.asyncio
@@ -180,7 +181,8 @@ async def test_escalating_compact_shrinks_real_memory(monkeypatch):
     state = SimpleNamespace(run_id="run1", sequence_counter=0, scope=scope,
                             task=SimpleNamespace(id="root"), agent=agent,
                             session=session, extra={})
-    ctx = SimpleNamespace(memory=mem, provider_ctx=pctx, event_bus=None, task_manager=None)
+    ctx = SimpleNamespace(memory=mem, provider_ctx=pctx, event_bus=None, task_manager=None,
+                          llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
 
     before = await cm._active_memory_tokens(state, ctx)
     events = await cm.escalating_compact(state, ctx, token_estimate=before, trigger="compact")
