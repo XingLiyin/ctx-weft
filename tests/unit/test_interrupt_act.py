@@ -38,9 +38,6 @@ class _PauseMidStream:
         self._token.pause()                          # soft interrupt fires mid-stream
         yield LLMChunk(kind="token", text=" MORE")   # should not be consumed
 
-    async def count_tokens(self, text: str) -> int:
-        return len(text)
-
 
 async def test_interrupt_parks_instead_of_cancel():
     llm = MockLLMAdapter(responses=[MockResponse(text="hello")])

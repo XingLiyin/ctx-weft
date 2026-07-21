@@ -26,7 +26,6 @@ class _FakeLLM:
     def output_reserve(self): return 100
     @property
     def supports_tool_calling(self): return True
-    async def count_tokens(self, text): return len(text)
 
     def complete(self, request, stream=True):
         action = self._script[min(self.calls, len(self._script) - 1)]

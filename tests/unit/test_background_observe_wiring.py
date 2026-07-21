@@ -117,9 +117,6 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
         async def complete(self, request: Any, stream: bool = True):
             yield LLMChunk(kind="token", text="summary")
 
-        async def count_tokens(self, text: str) -> int:
-            return len(text)
-
     ctx = LoopContext(
         assembler=_FakeAssembler(),
         llm=_FakeLLM(),
