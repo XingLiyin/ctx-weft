@@ -15,6 +15,7 @@ from ctx_weft.core.loop.llm_gateway import (
     _estimate_request_tokens,
     _estimate_message_tokens,
     PROMPT_EST_BASE_KEY,
+    PROMPT_EST_SEG_KEY,
 )
 from ctx_weft.protocols.context import ImagePart, TextPart
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -128,6 +129,18 @@ def test_estimate_full_path_calibrated_and_base_zero():
     est = request_prompt_estimate(tok, req, _guard(context_tokens=0), None)
     assert est == _estimate_request_tokens(req, tok.count)
     assert req.metadata[PROMPT_EST_BASE_KEY] == 0
+
+
+def test_estimate_full_path_floored_seg_key_stays_uncalibrated_estimate():
+    # 整份路径被 floor（真实 context_tokens 远大于整份估算）时，返回值是 floor 后的
+    # ctx_tokens；但 metadata[PROMPT_EST_SEG_KEY] 必须仍是 floor 前的估算段（tokenizer.count
+    # 直接产出），供 act 回喂使用——否则回喂会用 floor 后的假值污染伺服校准（I1）。
+    req = _req(messages=[LLMMessage(role="user", content="hi")])
+    tok = _tok()
+    est = request_prompt_estimate(tok, req, _guard(context_tokens=90_000), None)
+    assert est == 90_000  # floor 生效
+    assert req.metadata[PROMPT_EST_SEG_KEY] == _estimate_request_tokens(req, tok.count)
+    assert req.metadata[PROMPT_EST_SEG_KEY] != est
 
 
 # ── 此前数不到的几类：tool_calls 参数 / reasoning / 图片 / framing ─────────────────

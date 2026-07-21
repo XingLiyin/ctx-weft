@@ -62,8 +62,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # request.metadata 瞬态键：request_prompt_estimate 写入的估算基线（真实 context_tokens 或 0），
-# 供 act 回喂时算「估算段 = prompt_token_estimate − 基线」「真实段 = usage.prompt_tokens − 基线」。
+# 供 act 回喂时算「真实段 = usage.prompt_tokens − 基线」。
 PROMPT_EST_BASE_KEY = "prompt_est_base"
+
+# request.metadata 瞬态键：本次请求的「估算段」——增量路径为 delta、整份路径为 full，两者都是
+# tokenizer.count 的直接产出（未经 max(..., context_tokens) 的 floor）。act 回喂必须用这个值而
+# 非返回值：返回值在整份路径上可能被 floor 成上一轮的真实 context_tokens（当启发式低估、被
+# 真实基线 floor 时），若拿 floor 后的返回值回喂，ratio≈1 的假样本会把伺服系统性拖向 1——
+# floor 只应影响 max_tokens 的保守性，不应污染校准。
+PROMPT_EST_SEG_KEY = "prompt_est_seg"
 
 
 def resolve_llm_identity(state) -> tuple[str, str]:
@@ -306,8 +313,11 @@ def request_prompt_estimate(tokenizer, request: "LLMRequest", loop_guard, baseli
 
     估算全经 ``tokenizer.count``（已校准值）；不再有 raw/factor 概念——伺服校准下沉到
     adapter 的 ``LLMClient.tokenizer`` 内部（见 providers.llm.tokenizer.HeuristicTokenizer）。
-    metadata 只记 :data:`PROMPT_EST_BASE_KEY`（估算基线），供 usage 到达后 act 回喂
-    ``tokenizer.observe`` 算估算段/真实段。
+    metadata 记两个瞬态键：:data:`PROMPT_EST_BASE_KEY`（估算基线）与 :data:`PROMPT_EST_SEG_KEY`
+    （本次估算段，未经 floor 的 tokenizer.count 直接产出），供 usage 到达后 act 回喂
+    ``tokenizer.observe`` 用——整份路径的返回值可能被 ``max(full, ctx_tokens)`` floor 成上一轮
+    的真实值（正是本函数存在的校准动机场景：启发式低估、被真实基线兜住），若回喂用 floor 后
+    的返回值会产出 ratio≈1 的假样本、把伺服系统性拖向 1；估算段是 floor 前的值，不受污染。
     """
     ctx_tokens = getattr(loop_guard, "context_tokens", 0) if loop_guard is not None else 0
     if baseline_msg_count is not None and ctx_tokens > 0:
@@ -316,9 +326,11 @@ def request_prompt_estimate(tokenizer, request: "LLMRequest", loop_guard, baseli
             for m in request.messages[baseline_msg_count:]
         )
         request.metadata[PROMPT_EST_BASE_KEY] = ctx_tokens
+        request.metadata[PROMPT_EST_SEG_KEY] = delta
         return ctx_tokens + delta
     full = _estimate_request_tokens(request, tokenizer.count)
     request.metadata[PROMPT_EST_BASE_KEY] = 0
+    request.metadata[PROMPT_EST_SEG_KEY] = full
     return max(full, ctx_tokens)
 
 

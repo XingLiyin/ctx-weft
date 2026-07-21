@@ -15,7 +15,8 @@ from typing import Any
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
-    PROMPT_EST_BASE_KEY, request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
+    PROMPT_EST_BASE_KEY, PROMPT_EST_SEG_KEY, request_prompt_estimate, resolve_llm_identity,
+    stream_llm_resilient,
 )
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.park import HitlPark
@@ -265,11 +266,14 @@ async def _run_llm_turn(
             launch_background_observe(state, ctx, boundary="interrupt")
         await _park_wait_for_user(state, ctx, source="interrupt", edit=not has_partial)
 
-    # token 自校准回喂：真实 usage 与发送前估算段作比（基线不参与），喂给该模型 tokenizer
+    # token 自校准回喂：真实 usage 与发送前估算段作比（基线不参与），喂给该模型 tokenizer。
+    # 估算段取 PROMPT_EST_SEG_KEY（tokenizer.count 直接产出）而非
+    # prompt_token_estimate − base——整份路径上返回值可能被 max(full, ctx_tokens) floor 成
+    # 上一轮真实值，拿 floor 后的值回喂会产出 ratio≈1 的假样本，把伺服系统性拖向 1。
     base = llm_request.metadata.get(PROMPT_EST_BASE_KEY)
-    if usage.prompt_tokens > 0 and llm_request.prompt_token_estimate and base is not None:
-        ctx.llm.tokenizer.observe(
-            llm_request.prompt_token_estimate - base, usage.prompt_tokens - base)
+    est_seg = llm_request.metadata.get(PROMPT_EST_SEG_KEY)
+    if usage.prompt_tokens > 0 and est_seg is not None and base is not None:
+        ctx.llm.tokenizer.observe(est_seg, usage.prompt_tokens - base)
 
     await ctx.event_bus.emit(make_event(
         state, EventType.LLM_RESPONSE_FINISHED,
