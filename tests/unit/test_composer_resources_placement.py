@@ -307,13 +307,13 @@ def _task_history_block(role: str, content: str, ts: str, task_id: str) -> Conte
                                   "task_id": task_id})
 
 
-def test_interactive_task_anchors_first_user_prompt_not_latest() -> None:
+def test_interactive_task_pins_task_frame_first_current_message_follows_latest() -> None:
     """Interactive task: the user's follow-up messages accumulate as USER_PROMPTs with the SAME
-    task_id. The ## Current Task frame + directive + capabilities must pin to the FIRST
-    (task-opening) user message and never drift onto the latest one — drifting re-decorates a
-    different turn every round, reverting the previous turn's bytes and breaking the prompt-cache
-    prefix. Follow-up messages stay raw (form C); the near-generation anchors are the guidance
-    anchor line and the capabilities pointer."""
+    task_id. The ## Current Task frame + directive + capabilities pin to the FIRST (task-opening)
+    user message — drifting them re-decorates a different turn every round, reverting the previous
+    turn's bytes and breaking the prompt-cache prefix. The ## Current Message frame (+ same-language
+    reply hint) instead follows the LATEST user message of the task — "current message" semantically
+    IS the newest one; pinning it first would mislabel a stale message as current."""
     blocks = [
         _identity_block("SOUL TEXT"),
         _cap_block("web_search", "tool", "search the web"),
@@ -328,12 +328,18 @@ def test_interactive_task_anchors_first_user_prompt_not_latest() -> None:
     user_msgs = [m for m in msgs if m.role == "user"]
     first = user_msgs[0].content
     latest = user_msgs[-1].content
-    # frame + directive + capabilities all pin to the task-opening message
-    assert "## Current Task" in first and "## Current Message" in first and "你好" in first
-    assert "## Instructions for the current task" in first
+    # task frame + directive + capabilities pin to the task-opening message;
+    # the raw opening text gets its own ## Opening Message heading
+    assert "## Current Task" in first and "你好" in first
+    assert "## Opening Message" in first
+    assert first.index("## Current Task") < first.index("## Opening Message") \
+        < first.index("## Instructions for the current task")
+    assert "## Current Message" not in first
     assert "## Capabilities" in first
-    # the latest (follow-up) message stays raw + tail pointer only
-    assert "你是谁" in latest
+    # the latest (follow-up) message carries the current-message frame + language hint
+    # + tail pointer only — none of the task-level bulk
+    assert "## Current Message" in latest and "你是谁" in latest
+    assert "Reply in the same language" in latest
     assert "## Current Task" not in latest
     assert "## Instructions for the current task" not in latest
     assert "## Capabilities" not in latest
