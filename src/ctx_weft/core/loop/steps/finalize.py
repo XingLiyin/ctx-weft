@@ -572,7 +572,11 @@ class FinalizeStep(Step):
                 state, EventType.TASK_FAILED,
                 payload={
                     "error_code": "TASK_FAILED_BY_OBSERVER",
-                    "error_message": summary,
+                    # 真死因：task.error = observer 的 task_failure_reason（report_task_outcome
+                    # 判 fail 时写入）。无死因（规则 observe 判死等）置空——act_recap 是过程
+                    # 复述，不冒充死因；host 拿 error_message 当 session_notice.reason_text
+                    # 展示，空串由 host 按 error_code 补固定提示文案。
+                    "error_message": task.error or "",
                     "retry_count": task.retry_count,
                 },
             ))
