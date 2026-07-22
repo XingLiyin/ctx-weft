@@ -2,8 +2,9 @@
 
 Every step (observe / compact / recognize_intent) builds on the SAME act-base
 message list — the reconstructed conversation (user / assistant / tool turns) — and
-only adds its own role facet + cue on the trailing user message, with capabilities
-also on the trailing user message (same as act). Switching steps must therefore
+only adds its own role facet + cue on the trailing user message; the full capabilities
+listing rides the current-task user turn (cache prefix) with only a one-line pointer on
+the trailing user message (same as act). Switching steps must therefore
 leave the preceding messages essentially unchanged: the assistant/tool conversation
 turns are byte-identical across steps, and among the non-act steps everything except
 the last user message is identical.
@@ -51,9 +52,11 @@ def _directive_block(text: str) -> ContextBlock:
 
 
 def _user_block(content: str, ts: str) -> ContextBlock:
+    # type="user_prompt"：与真实召回数据一致，让 current_task_user_idx 定位/
+    # ## Current Message 装饰/capabilities 落位都走真实路径。
     return ContextBlock(id=f"u-{ts}", source="task_conversation", kind="history",
                         target="messages", content=content, priority=3, token_estimate=1,
-                        metadata={"role": "user", "timestamp": ts})
+                        metadata={"role": "user", "timestamp": ts, "type": "user_prompt"})
 
 
 def _assistant_block(content: str, tcid: str, ts: str) -> ContextBlock:
@@ -165,18 +168,19 @@ def test_each_step_appends_its_role_and_cue_on_last_user() -> None:
         assert cue in last, f"{p} missing its cue on last user"
 
 
-def test_capabilities_on_last_user_for_every_step() -> None:
+def test_capabilities_on_current_task_turn_for_every_step() -> None:
     blocks = _multi_turn_blocks()
     for p in PURPOSES:
         user_msgs = [m for m in _build_for_purpose(blocks, p) if m.role == "user"]
         first, last = user_msgs[0].content, user_msgs[-1].content
-        # capabilities ride the trailing user message...
-        assert "## Capabilities" in last, f"{p}: capabilities not on last user"
-        assert "### Available Tools" in last, f"{p}: tools not on last user"
-        # ...never front-loaded onto the (history-derived) first user message
+        # the full capabilities listing rides the current-task user turn (cache prefix)...
         assert "the original ask" in first
-        assert "## Capabilities" not in first, f"{p}: capabilities front-loaded onto first user"
-        assert "### Available Tools" not in first
+        assert "## Capabilities" in first, f"{p}: capabilities not on current-task turn"
+        assert "### Available Tools" in first, f"{p}: tools not on current-task turn"
+        # ...the trailing user message carries only the one-line pointer, never the listing
+        assert "### Available Tools" not in last, f"{p}: full listing duplicated on last user"
+        assert "Capabilities section of the current task message above" in last, \
+            f"{p}: capabilities pointer missing on last user"
 
 
 def test_only_observe_carries_observe_cue() -> None:
