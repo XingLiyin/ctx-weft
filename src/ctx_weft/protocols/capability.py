@@ -8,7 +8,7 @@
 三种 provider 子类：
   ToolCapabilityProvider  — 实现 invoke() / cancel()
   SkillCapabilityProvider — 实现 Level2 load_definition() + Level3 list_files/load_resource/exec_script
-  AgentCapabilityProvider — list() 返回 AgentCapability，无额外方法
+  AgentCapabilityProvider — list() 发现 + get_template() 加载，发现与加载同源
 """
 
 from __future__ import annotations
