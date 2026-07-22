@@ -59,6 +59,20 @@ class InMemoryTemplateResolver(TemplateResolver):
         ]
 
 
+def make_runtime(**kwargs) -> CtxWeftRuntime:
+    """测试构造入口：把 template_resolver 参数包装成 TemplateAgentCapabilityProvider 注册。
+
+    协议改造（spec 2026-07-22）后 CtxWeftRuntime 不再收 template_resolver——
+    存量测试经本助手做最小迁移：实参形状与旧构造完全一致。
+    """
+    from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
+    from ctx_weft.core.runtime import ProviderRegistry
+    resolver = kwargs.pop("template_resolver")
+    providers = kwargs.pop("providers", None) or ProviderRegistry()
+    providers.register_capability(TemplateAgentCapabilityProvider(resolver))
+    return CtxWeftRuntime(providers=providers, **kwargs)
+
+
 def make_echo_template() -> AgentTemplate:
     """构造一个最简的 echo agent template。"""
     return AgentTemplate(
@@ -93,12 +107,12 @@ async def test_minimal_echo_loop() -> None:
         ],
     )
 
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     # ── Run ──────────────────────────────────────────────────────────────────
     handle, state = await runtime.run_single_task(
-        template_id="tpl_echo",
+        template_id="agent:tpl_echo",
         user_prompt="say hello",
     )
 
@@ -149,11 +163,11 @@ async def test_prompt_structure_matches_miniagents() -> None:
     resolver.register(make_echo_template())
 
     llm = MockLLMAdapter(responses=[MockResponse(text="ack")])
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     _handle, _state = await runtime.run_single_task(
-        template_id="tpl_echo",
+        template_id="agent:tpl_echo",
         user_prompt="hello there",
     )
 

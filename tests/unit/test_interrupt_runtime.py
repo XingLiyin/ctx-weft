@@ -13,13 +13,13 @@ from ctx_weft.protocols import MemoryScope, ProviderContext
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
 
 def _runtime():
-    return CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    return make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
 
 
 async def test_pause_session_without_tm_cancels_all_runs():

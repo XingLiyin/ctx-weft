@@ -22,6 +22,7 @@ from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
     InMemoryTemplateResolver,
     make_echo_template,
+    make_runtime,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -31,7 +32,7 @@ def _runtime() -> CtxWeftRuntime:
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
-    rt = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    rt = make_runtime(llm=llm, template_resolver=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
     return rt
 
@@ -64,7 +65,7 @@ async def test_compact_session_folds_agent_layer() -> None:
     # summarize_for_compact；本例 task_id="" 的当前 task 层无材料可折，L3 guard 拦下、不再空调
     # 第二次 LLM，故只需 1 条 mock 响应。
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
-    rt = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    rt = make_runtime(llm=llm, template_resolver=resolver)
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
 
@@ -73,7 +74,7 @@ async def test_compact_session_folds_agent_layer() -> None:
     await rt.event_store.append(Event(
         id="evt_0001", run_id="run_1", sequence=1, session_id=sid,
         type=EventType.SESSION_CREATED, timestamp=ts,
-        payload={"template_id": tmpl.id, "user_prompt": "x", "root_agent_id": aid,
+        payload={"template_id": f"agent:{tmpl.id}", "user_prompt": "x", "root_agent_id": aid,
                  "llm_model": "mock", "context_limit": 180000},
     ))
 

@@ -18,7 +18,7 @@ from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -26,7 +26,7 @@ pytestmark = pytest.mark.asyncio
 def _runtime() -> CtxWeftRuntime:
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
-    runtime = CtxWeftRuntime(template_resolver=resolver)
+    runtime = make_runtime(template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
     return runtime
 

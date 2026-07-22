@@ -1,5 +1,5 @@
 from ctx_weft.core.config import RuntimeConfig
-from ctx_weft.core.runtime import CtxWeftRuntime
+from tests.integration.test_minimal_loop import make_runtime
 
 
 class _StubResolver:
@@ -8,11 +8,11 @@ class _StubResolver:
 
 def test_runtime_injects_hitl_knobs():
     cfg = RuntimeConfig(hitl_timeout_sec=42, hitl_max_resolved=7)
-    rt = CtxWeftRuntime(template_resolver=_StubResolver(), config=cfg)
+    rt = make_runtime(template_resolver=_StubResolver(), config=cfg)
     assert rt.hitl_manager._timeout_sec == 42
     assert rt.hitl_manager._max_resolved == 7
 
 
 def test_runtime_default_config():
-    rt = CtxWeftRuntime(template_resolver=_StubResolver())
+    rt = make_runtime(template_resolver=_StubResolver())
     assert rt._config.task_max_concurrent == 4

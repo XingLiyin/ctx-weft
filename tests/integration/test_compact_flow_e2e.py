@@ -17,13 +17,16 @@ from ctx_weft.protocols import (
 import dataclasses as _dc
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
+from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+from ctx_weft.core.runtime import ProviderRegistry
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
 from ctx_weft.core.state.models import LoopGuard, Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
 pytestmark = pytest.mark.asyncio
 _BASE = datetime(2026, 7, 1, tzinfo=UTC)
@@ -50,11 +53,11 @@ async def test_context_limit_retry_folds_segment_e2e():
     # output_reserve=0：effective_limit 不为 reserved_output_tokens 吞光（Task 4 引入）
     llm = MockLLMAdapter(responses=[MockResponse(text="partial work, not done yet")],
                          context_limit=20, output_reserve=0)
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     handle, state = await runtime.run_single_task(
-        template_id="tpl_actonly", user_prompt="do a long task")
+        template_id="agent:tpl_actonly", user_prompt="do a long task")
 
     # 机械退出 → retry（非终态），本轮 attempt 折成段摘要、raw 删除、USER_PROMPT 保留
     assert state.verdict is not None and state.verdict.task_outcome == "retry"
@@ -76,11 +79,11 @@ async def test_normal_finish_still_works_e2e():
     resolver = InMemoryTemplateResolver()
     resolver.register(_act_only_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="Here is the final answer.")])  # 正常 context_limit
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     handle, state = await runtime.run_single_task(
-        template_id="tpl_actonly", user_prompt="say hi")
+        template_id="agent:tpl_actonly", user_prompt="say hi")
 
     assert state.task.status == "FINISHED"
     assert state.verdict.task_outcome == "success"
@@ -103,16 +106,18 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     resolver.register(tpl)
     llm = MockLLMAdapter(responses=[MockResponse(text="partial work, not done yet")] * 30,
                          context_limit=20, output_reserve=0)
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 
     # 复刻 run_single_task 脚手架，但在同一 task 上循环 _execute_task（同 scope → 段摘要累积）
     sid = "ses_mr"
     pctx = ProviderContext(session_id=sid, tenant_id="default")
-    lm = LifecycleManager(template_resolver=resolver)
+    _reg = ProviderRegistry()
+    _reg.register_capability(TemplateAgentCapabilityProvider(resolver))
+    lm = LifecycleManager(template_lookup=TemplateLookup(_reg))
     agent, template = await lm.instantiate_agent(
-        template_id="tpl_mr", session_id=sid, tenant_id="default", ctx=pctx)
+        template_id="agent:tpl_mr", session_id=sid, tenant_id="default", ctx=pctx)
     session = Session(id=sid, user_prompt="do a long task", status="RUNNING",
                       tenant_id="default", root_agent_id=agent.id, llm_provider="",
                       created_at=now_utc())

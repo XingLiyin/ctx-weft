@@ -12,7 +12,7 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from ctx_weft.core.events.types import EventType
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -34,7 +34,7 @@ class _OverflowLLM(MockLLMAdapter):
 async def test_overflow_marks_task_suspended_not_failed():
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
-    runtime = CtxWeftRuntime(
+    runtime = make_runtime(
         llm=_OverflowLLM(responses=[]),
         template_resolver=resolver,
         config=RuntimeConfig(),
@@ -60,7 +60,7 @@ async def test_overflow_marks_task_suspended_not_failed():
     TaskManager.register_task = _spy_register
     try:
         with pytest.raises(ContextOverflowError):
-            await runtime.run_single_task(template_id="tpl_echo", user_prompt="hi")
+            await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
     finally:
         TaskManager.register_task = orig_register
 

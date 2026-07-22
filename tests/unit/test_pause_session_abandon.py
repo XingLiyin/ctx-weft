@@ -9,7 +9,7 @@ from ctx_weft.core.runtime import _SessionTaskRunner
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.providers.llm.mock import MockLLMAdapter
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -23,7 +23,7 @@ class _StubRunner:
 
 
 def _rt():
-    return CtxWeftRuntime(llm=MockLLMAdapter(responses=[]),
+    return make_runtime(llm=MockLLMAdapter(responses=[]),
                           template_resolver=InMemoryTemplateResolver())
 
 

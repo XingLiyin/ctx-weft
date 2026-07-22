@@ -73,12 +73,12 @@ async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
     from ctx_weft.core.events.types import Event, EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
 
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="should not run")])
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     ts = datetime(2026, 6, 12, tzinfo=timezone.utc)
@@ -88,7 +88,7 @@ async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
                      type=type_, timestamp=ts, task_id=task_id, payload=payload)
 
     seed = [
-        ev(1, EventType.SESSION_CREATED, user_prompt="do it", template_id="tpl_echo",
+        ev(1, EventType.SESSION_CREATED, user_prompt="do it", template_id="agent:tpl_echo",
            root_agent_id="agt_root"),
         ev(2, EventType.RUN_STARTED),
         ev(3, EventType.TASK_CREATED, task={
@@ -188,9 +188,9 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.core.events.types import Event, EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
-    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
     statuses: list = []
 
     async def _cap(ev):
@@ -224,9 +224,9 @@ def _recover_runtime_with_status_capture():
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.core.events.types import EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
-    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
     statuses: list = []
 
     async def _cap(ev):
@@ -299,12 +299,12 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     from ctx_weft.core.orchestrator.task_manager import TaskManager
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
 
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="should not run")])
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     # 老 TM：alive，正在跑 X
@@ -321,7 +321,7 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
                      timestamp=ts, task_id=task_id, payload=payload)
 
     seed = [
-        ev(1, EventType.SESSION_CREATED, user_prompt="do it", template_id="tpl_echo", root_agent_id="agt_root"),
+        ev(1, EventType.SESSION_CREATED, user_prompt="do it", template_id="agent:tpl_echo", root_agent_id="agt_root"),
         ev(2, EventType.RUN_STARTED),
         ev(3, EventType.TASK_CREATED, task={
             "id": "tsk_X", "status": "ACTIVE", "title": "X",
@@ -348,9 +348,9 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     from ctx_weft.core.orchestrator.task_manager import TaskManager
     from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
-    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
 
     rebuild_calls: list = []
     import ctx_weft.core.control.reducers as _reducers

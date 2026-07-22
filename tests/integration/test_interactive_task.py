@@ -26,7 +26,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -103,10 +103,10 @@ async def test_finish_task_finishes_task_end_to_end() -> None:
             id="tc1", name="control__finish_task", arguments={},
         )]),
     ])
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
-    _handle, state = await runtime.run_single_task(template_id="tpl_echo", user_prompt="compute")
+    _handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="compute")
 
     assert state.task.status == "FINISHED"
     assert state.task.outputs == "computed: 42"
@@ -120,11 +120,11 @@ async def test_guidance_injected_into_prompt_not_memory() -> None:
             id="tc1", name="control__finish_task", arguments={},
         )]),
     ])
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 
-    _handle, state = await runtime.run_single_task(template_id="tpl_echo", user_prompt="hello")
+    _handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hello")
 
     # 发送的 prompt 含 guidance
     sent = llm.last_request.messages[-1].content

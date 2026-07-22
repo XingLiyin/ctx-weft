@@ -1,13 +1,13 @@
-"""runtime 公开只读访问器：host 不得绕私有属性（template_resolver 曾被 host 直取 _template_resolver）。"""
+"""runtime 构造期硬校验：模板通道唯一入口是 AgentCapabilityProvider（无 template_resolver 参数）。"""
 
 from __future__ import annotations
 
-from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.providers.llm.mock import MockLLMAdapter
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+import pytest
+
+from ctx_weft.core.runtime import CtxWeftRuntime, ProviderRegistry
 
 
-def test_template_resolver_is_public_readonly() -> None:
-    resolver = InMemoryTemplateResolver()
-    rt = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=resolver)
-    assert rt.template_resolver is resolver
+def test_runtime_requires_agent_capability_provider() -> None:
+    """构造期硬校验：registry 无 AgentCapabilityProvider → ValueError（fail-fast）。"""
+    with pytest.raises(ValueError, match="AgentCapabilityProvider"):
+        CtxWeftRuntime(providers=ProviderRegistry())

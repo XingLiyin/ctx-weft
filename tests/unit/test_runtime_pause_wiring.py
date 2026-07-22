@@ -3,11 +3,11 @@
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.tokens import CancelToken, PauseToken
 from ctx_weft.providers.llm.mock import MockLLMAdapter
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
 
 def _rt():
-    return CtxWeftRuntime(llm=MockLLMAdapter(responses=[]),
+    return make_runtime(llm=MockLLMAdapter(responses=[]),
                            template_resolver=InMemoryTemplateResolver())
 
 

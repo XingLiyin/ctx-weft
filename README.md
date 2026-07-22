@@ -103,6 +103,7 @@ import asyncio
 from ctx_weft import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.testing import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
 from ctx_weft.protocols import AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig
 
 
@@ -128,20 +129,24 @@ template = AgentTemplate(
     loop_config=LoopConfig(),
 )
 
-# 3. 组装 Runtime
+# 3. 组装 Runtime：模板进入 core 的唯一通道是 AgentCapabilityProvider——
+#    先把 TemplateResolver 包成 provider 注册，再构造（发现与加载同源，spec 2026-07-22）。
 providers = ProviderRegistry()
 providers.register_memory(InMemoryMemoryProvider())
+providers.register_capability(
+    TemplateAgentCapabilityProvider(DictTemplateResolver({"my_agent": template}))
+)
 
 runtime = CtxWeftRuntime(
-    template_resolver=DictTemplateResolver({"my_agent": template}),
     llm=MockLLMAdapter(responses=[MockResponse(text="The answer is 42.")]),
     providers=providers,
 )
 
-# 4. 运行一个任务
+# 4. 运行一个任务：template_id 须为规范形式 provider:name——本 provider 自动注册的
+#    前缀是 "agent"（TemplateAgentCapabilityProvider.name），故 "my_agent" → "agent:my_agent"。
 async def main():
     handle, state = await runtime.run_single_task(
-        template_id="my_agent",
+        template_id="agent:my_agent",
         user_prompt="What is the meaning of life?",
     )
     print(state.verdict.summary)        # "The answer is 42."
@@ -385,7 +390,9 @@ from ctx_weft.protocols import (
 适合脚本/测试、单一模型：
 
 ```python
-runtime = CtxWeftRuntime(template_resolver=resolver, llm=my_adapter)
+providers = ProviderRegistry()
+providers.register_capability(TemplateAgentCapabilityProvider(resolver))
+runtime = CtxWeftRuntime(providers=providers, llm=my_adapter)
 ```
 
 `LLMClient` 协议：
@@ -443,12 +450,16 @@ runtime.providers.register_llm_provider(provider)
 ### 构造
 
 ```python
+# 模板进入 core 的唯一通道是 AgentCapabilityProvider——构造前先注册（发现与加载同源）；
+# registry 里一个 AgentCapabilityProvider 都没有会在构造期抛 ValueError（fail-fast）。
+providers = providers or ProviderRegistry()
+providers.register_capability(TemplateAgentCapabilityProvider(my_resolver))
+
 runtime = CtxWeftRuntime(
-    template_resolver=my_resolver,   # 必需
-    providers=providers,             # 可选，不传则新建空注册表
-    llm=my_llm_adapter,              # 可选，LLM 兜底（未注册 llm provider 时用）
-    hitl_manager=None,               # 可选，默认自动创建
-    event_store=None,                # 可选，默认 InMemoryEventStore（自动订阅 event_bus）
+    providers=providers,              # 必需含至少一个 AgentCapabilityProvider
+    llm=my_llm_adapter,               # 可选，LLM 兜底（未注册 llm provider 时用）
+    hitl_manager=None,                # 可选，默认自动创建
+    event_store=None,                 # 可选，默认 InMemoryEventStore（自动订阅 event_bus）
 )
 ```
 
@@ -472,7 +483,7 @@ runtime = CtxWeftRuntime(
 
 ```python
 handle, state = await runtime.run_single_task(
-    template_id="my_agent",          # 必需
+    template_id="agent:my_agent",    # 必需；规范形式 provider:name（见下方 AgentCapabilityProvider）
     user_prompt="总结这份文档：...",   # 必需
     session_id=None,                 # 可选，不传则自动生成 ses_xxx
     tenant_id="default",
@@ -493,7 +504,7 @@ print(state.transcript[-1].assistant_text)   # 最后一轮 LLM 回复
 from ctx_weft import SessionStartParams
 
 params = SessionStartParams.create(
-    template_id="planner_agent",        # 必需
+    template_id="agent:planner_agent",  # 必需；规范形式 provider:name
     user_prompt="研究并撰写量子计算报告", # 必需
     session_id=None,                    # None=新建；传 id=恢复（见下）
     initial_task=None,                  # 可选，dict → 反序列化为 TaskSettings（见下）
@@ -510,7 +521,7 @@ final_state = await handle.wait_for_finish(timeout=300.0)
 
 ```python
 params = SessionStartParams.create(
-    template_id="planner_agent",
+    template_id="agent:planner_agent",
     user_prompt="补充一节关于纠错码的内容",
     session_id="ses_01HXXXX",          # 复用已有 session
 )
@@ -847,7 +858,8 @@ class DatabaseProvider(ToolCapabilityProvider):
 ```
 
 > 还可继承 `SkillCapabilityProvider`（`load_definition` / `list_files` / `load_resource` /
-> `exec_script`）或 `AgentCapabilityProvider`（仅 `list()` 返回 `AgentCapability`）。
+> `exec_script`）或 `AgentCapabilityProvider`（发现与加载同源：`list()` 返回 `AgentCapability`，
+> `get_template()` 按 cap.id 前缀路由加载对应 `AgentTemplate`——模板进入 core 的唯一通道）。
 
 ### 自定义 KnowledgeProvider
 
@@ -915,7 +927,7 @@ llm = MockLLMAdapter(responses=[
 ])
 
 # 断言收到的请求
-_, state = await runtime.run_single_task(template_id="echo", user_prompt="ping")
+_, state = await runtime.run_single_task(template_id="agent:echo", user_prompt="ping")
 assert llm.last_request.system.startswith("You are")
 ```
 
@@ -926,6 +938,7 @@ import pytest
 from ctx_weft import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.testing import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
 from ctx_weft.protocols import AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig
 
 @pytest.fixture
@@ -943,15 +956,15 @@ def runtime(echo_template):
         async def list_summaries(self, ctx): return []
     providers = ProviderRegistry()
     providers.register_memory(InMemoryMemoryProvider())
+    providers.register_capability(TemplateAgentCapabilityProvider(Resolver()))
     return CtxWeftRuntime(
-        template_resolver=Resolver(),
         llm=MockLLMAdapter([MockResponse(text="pong")]),
         providers=providers,
     )
 
 @pytest.mark.asyncio
 async def test_single_task(runtime):
-    handle, state = await runtime.run_single_task(template_id="echo", user_prompt="ping")
+    handle, state = await runtime.run_single_task(template_id="agent:echo", user_prompt="ping")
     assert state.verdict.task_outcome == "success"
     assert state.transcript[-1].assistant_text == "pong"
 ```

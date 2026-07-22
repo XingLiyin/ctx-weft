@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from ctx_weft.core.orchestrator import CapabilityCache, TaskManager
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
     from ctx_weft.protocols.capability import CapabilityProvider
-    from ctx_weft.protocols.template import TemplateResolver
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +127,6 @@ class LoopContext:
     run_phase: RunPhase = field(default_factory=RunPhase)
     # 配置
     config: Any = None
-    # 模板解析器（Phase 4）
-    template_resolver: TemplateResolver|None = None
     # TaskManager 引用（Phase 5+）；PrepareStep compact dispatch 用；None 时退化为 inline compact
     task_manager: TaskManager|None = None
     # HitlManager 引用；ActStep interactive 任务纯文本 park 等用户用；None 时降级为旧的自动完成

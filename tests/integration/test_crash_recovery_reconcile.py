@@ -24,7 +24,7 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -59,7 +59,7 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="done"), MockResponse(text="done")])
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
     tool = _RecordingTool()
@@ -74,7 +74,7 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
                      type=type_, timestamp=ts, task_id=task_id, payload=payload)
 
     seed = [
-        ev(1, EventType.SESSION_CREATED, user_prompt="fetch it", template_id="tpl_echo",
+        ev(1, EventType.SESSION_CREATED, user_prompt="fetch it", template_id="agent:tpl_echo",
            root_agent_id=aid),
         ev(2, EventType.RUN_STARTED),
         ev(3, EventType.TASK_CREATED, task={

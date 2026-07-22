@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.events.types import EventType
+from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.session_manager import SessionManager
+from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+from ctx_weft.core.runtime import ProviderRegistry
 from ctx_weft.protocols import (
     AgentTemplate,
     IdentityFacet,
@@ -48,11 +51,14 @@ async def test_session_created_emitted_before_task_created() -> None:
         order.append(ev.type)
 
     bus.subscribe(None, rec)
+    resolver = _Resolver(_template())
+    _reg = ProviderRegistry()
+    _reg.register_capability(TemplateAgentCapabilityProvider(resolver))
     sm = SessionManager(
-        lifecycle_manager=LifecycleManager(template_resolver=_Resolver(_template())),
+        lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(_reg)),
         event_bus=bus,
     )
-    await sm.create_session(template_id="tpl", user_prompt="你好", context_limit=1000)
+    await sm.create_session(template_id="agent:tpl", user_prompt="你好", context_limit=1000)
 
     assert EventType.SESSION_CREATED in order
     assert EventType.TASK_CREATED in order

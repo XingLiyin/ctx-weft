@@ -65,10 +65,8 @@ from ctx_weft.protocols import (
     MemoryProvider,
     MemoryScope,
     ProviderContext,
-    TemplateResolver,
 )
 from ctx_weft.protocols.capability import (
-    AgentCapability,
     AgentCapabilityProvider,
     CapabilityProvider,
     SkillCapabilityProvider,
@@ -434,7 +432,6 @@ class CtxWeftRuntime:
 
     def __init__(
         self,
-        template_resolver: TemplateResolver,
         providers: ProviderRegistry | None = None,
         llm: LLMClient | None = None,
         hitl_manager: HitlManager | None = None,
@@ -444,7 +441,6 @@ class CtxWeftRuntime:
         from ctx_weft.core.config import RuntimeConfig
         self._config = config or RuntimeConfig()
         self._llm = llm  # fallback for backward compat / tests
-        self._template_resolver = template_resolver
         self.providers = providers or ProviderRegistry()
         self._event_bus = InProcessEventBus()
         # shell 侧持有此实例，用于 approve() / reject() 响应 HITL 请求
@@ -469,8 +465,20 @@ class CtxWeftRuntime:
         skill_executor = SkillExecutorCapabilityProvider(self.providers)
         self.providers.register_capability(skill_executor)
 
-        from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
-        self.providers.register_capability(TemplateAgentCapabilityProvider(self._template_resolver))
+        # 模板通道硬校验（spec 2026-07-22）：模板进入 core 的唯一通道是
+        # AgentCapabilityProvider；缺失则 root agent 都无法实例化，构造即失败。
+        agent_provider_names = [
+            p.name for p in self.providers.get_capability_providers()
+            if isinstance(p, AgentCapabilityProvider)
+        ]
+        if not agent_provider_names:
+            raise ValueError(
+                "CtxWeftRuntime requires at least one AgentCapabilityProvider in the "
+                "ProviderRegistry — register one before constructing, e.g. "
+                "providers.register_capability(TemplateAgentCapabilityProvider(resolver))"
+            )
+        from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+        self._template_lookup = TemplateLookup(self.providers)
 
         # Capability cache (per-session, shared across all agents in runtime)
         self._capability_cache = CapabilityCache()
@@ -497,11 +505,6 @@ class CtxWeftRuntime:
     @property
     def event_bus(self) -> EventBus:
         return self._event_bus
-
-    @property
-    def template_resolver(self) -> TemplateResolver:
-        """构造时注入的 TemplateResolver（公开只读，host 列模板等场景用，勿绕私有属性）。"""
-        return self._template_resolver
 
     def _resolve_llm(
         self,
@@ -540,23 +543,6 @@ class CtxWeftRuntime:
         reserve = getattr(llm, "output_reserve", None)
         if reserve is not None:
             session.reserved_output_tokens = reserve
-
-    async def _resolve_subagent_template(self, qualified: str, ctx: ProviderContext) -> str:
-        """Map a qualified sub-agent name (agent__planner) back to its template_name.
-
-        Iterates every registered AgentCapabilityProvider (multi-provider, arbitrary
-        prefix). An unmatched/raw value passes through as a literal template_id.
-        """
-        for p in self.providers.get_capability_providers():
-            if isinstance(p, AgentCapabilityProvider):
-                try:
-                    caps = await p.list(ctx)
-                except Exception:
-                    continue
-                for cap in caps:
-                    if isinstance(cap, AgentCapability) and qualify(cap.id) == qualified:
-                        return cap.template_name
-        return qualified
 
     def _register_run_tokens(
         self, session_id: str, task_id: str, *, root_run: bool = True,
@@ -683,7 +669,7 @@ class CtxWeftRuntime:
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
         llm = self._resolve_llm(llm_account, llm_model)
-        lm = LifecycleManager(template_resolver=self._template_resolver)
+        lm = LifecycleManager(template_lookup=self._template_lookup)
 
         agent, template = await lm.instantiate_agent(
             template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
@@ -762,7 +748,7 @@ class CtxWeftRuntime:
         params.resume is True  → resume existing session (root_agent_id recovered from events).
         """
         memory = self.providers.get_memory()
-        lm = LifecycleManager(template_resolver=self._template_resolver)
+        lm = LifecycleManager(template_lookup=self._template_lookup)
         sm = SessionManager(
             lifecycle_manager=lm,
             event_bus=self._event_bus,
@@ -805,9 +791,9 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
         )
 
-        template = await self._template_resolver.get(
+        template = await self._template_lookup.get_template(
             params.template_id,
-            version=None,
+            None,
             ctx=ProviderContext(session_id=session.id, tenant_id=params.tenant_id),
         )
         task_manager.set_runner(self._make_task_runner(
@@ -1154,9 +1140,9 @@ class CtxWeftRuntime:
         if not resumable and not all_tasks:
             raise RuntimeError(f"Session {session_id!r} has no resumable tasks")
 
-        lm = LifecycleManager(template_resolver=self._template_resolver)
-        template = await self._template_resolver.get(
-            template_id, version=None,
+        lm = LifecycleManager(template_lookup=self._template_lookup)
+        template = await self._template_lookup.get_template(
+            template_id, None,
             ctx=ProviderContext(session_id=session.id, tenant_id=session.tenant_id),
         )
         task_manager = TaskManager(
@@ -1252,7 +1238,7 @@ class CtxWeftRuntime:
         """
         from ctx_weft.core.loop.steps.background_observe import _CLOSE_BOUNDARIES
         try:
-            lm = LifecycleManager(template_resolver=self._template_resolver)
+            lm = LifecycleManager(template_lookup=self._template_lookup)
             pctx0 = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
             agent, _tmpl = await lm.instantiate_agent(
                 template_id=template_id,
@@ -1368,7 +1354,7 @@ class CtxWeftRuntime:
             if not target_agent_id:
                 raise RuntimeError(f"Session {session_id!r} has no agent to compact")
 
-            lm = LifecycleManager(template_resolver=self._template_resolver)
+            lm = LifecycleManager(template_lookup=self._template_lookup)
             pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
             agent, template = await lm.instantiate_agent(
                 template_id=proj.template_id,
@@ -1726,7 +1712,6 @@ class CtxWeftRuntime:
             capability_cache=self._capability_cache,
             capability_providers=self.providers.get_capability_providers(),
             capability_gateway=gateway,
-            template_resolver=self._template_resolver,
             skill_provider_index=skill_index,
             cancel_token=cancel_token,
             task_manager=task_manager,
@@ -1967,7 +1952,7 @@ class _SessionTaskRunner:
             case NormalTaskSettings(use_subagent=True) as s:
                 ctx = ProviderContext(session_id=sess_id, tenant_id=tenant_id)
                 sub_tmpl_id = (
-                    await self._runtime._resolve_subagent_template(s.subagent_template, ctx)
+                    await self._runtime._template_lookup.resolve_qualified(s.subagent_template, ctx)
                     if s.subagent_template else ""
                 ) or self._template_id
                 parent_agent = self._resolved_agents.get(t.creator_agent_id) if t.creator_agent_id else None

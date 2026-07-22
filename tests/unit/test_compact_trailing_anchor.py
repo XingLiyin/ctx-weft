@@ -114,7 +114,7 @@ async def test_user_prompt_after_trailing_fold_sorts_newest():
 async def test_inject_user_reply_awaits_pending_background_observe(monkeypatch):
     """_inject_user_reply must await the resumed task's in-flight background observe before
     ingesting the new USER_PROMPT, so the fold's write precedes the new turn's prompt."""
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
     from ctx_weft.core import CtxWeftRuntime
     import ctx_weft.core.loop.steps.background_observe as bo
 
@@ -126,7 +126,7 @@ async def test_inject_user_reply_awaits_pending_background_observe(monkeypatch):
                 order.append("ingest")
             return await super().ingest(event, ctx)
 
-    runtime = CtxWeftRuntime(template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(template_resolver=InMemoryTemplateResolver())
     mem = _RecordingMem()
     runtime.providers.register_memory(mem)
 

@@ -18,7 +18,7 @@ from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import MemoryScope, ProviderContext
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -33,7 +33,7 @@ class _CancelingDriver:
 
 def _runtime() -> CtxWeftRuntime:
     resolver = InMemoryTemplateResolver()
-    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=resolver)
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
     return runtime
 

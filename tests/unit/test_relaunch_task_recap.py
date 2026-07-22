@@ -20,9 +20,9 @@ pytestmark = pytest.mark.asyncio
 def _make_runtime_and_session():
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
-    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
@@ -136,9 +136,9 @@ async def test_find_finish_pair_tool_call_id_found_and_none():
 
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver
+    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
 
-    runtime = CtxWeftRuntime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
 
     # 无占位 finish 对 → None
     got_none = await runtime._find_finish_pair_tool_call_id(memory, scope, task.id, pctx)

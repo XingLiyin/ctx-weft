@@ -30,7 +30,7 @@ from ctx_weft.protocols import (
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -48,7 +48,7 @@ def _make_runtime() -> tuple[CtxWeftRuntime, InMemoryMemoryProvider, list]:
     # Enough plain-text responses to outlast the observe ReAct loop
     # (max_turns_per_observe defaults to 5) without exhausting the mock.
     llm = MockLLMAdapter(responses=[MockResponse(text="recovered recap") for _ in range(8)])
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 
@@ -84,7 +84,7 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
 
     seed = [
         _ev(1, EventType.SESSION_CREATED, user_prompt="do it",
-            template_id="tpl_echo", root_agent_id=aid),
+            template_id="agent:tpl_echo", root_agent_id=aid),
         _ev(2, EventType.RUN_STARTED),
         _ev(3, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
@@ -168,7 +168,7 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
 
     seed = [
         _ev(1, EventType.SESSION_CREATED, user_prompt="do it",
-            template_id="tpl_echo", root_agent_id=aid),
+            template_id="agent:tpl_echo", root_agent_id=aid),
         _ev(2, EventType.RUN_STARTED),
         _ev(3, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
@@ -292,7 +292,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
 
     seed = [
         _ev(1, EventType.SESSION_CREATED, user_prompt="do it",
-            template_id="tpl_echo", root_agent_id=aid),
+            template_id="agent:tpl_echo", root_agent_id=aid),
         _ev(2, EventType.RUN_STARTED),
         _ev(3, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
@@ -385,7 +385,7 @@ async def test_no_tasks_at_all_still_raises() -> None:
 
     await runtime.event_store.append(_ev(
         1, EventType.SESSION_CREATED, user_prompt="do it",
-        template_id="tpl_echo", root_agent_id=aid))
+        template_id="agent:tpl_echo", root_agent_id=aid))
 
     with pytest.raises(RuntimeError, match="no resumable tasks"):
         await runtime.recover_session(sid)

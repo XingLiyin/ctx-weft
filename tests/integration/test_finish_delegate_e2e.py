@@ -28,6 +28,7 @@ from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
     InMemoryTemplateResolver, make_echo_template,
+    make_runtime,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -95,7 +96,7 @@ class _RouterLLM(MockLLMAdapter):
 def _make_runtime(llm: _RouterLLM) -> CtxWeftRuntime:
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
     return runtime
 
@@ -131,7 +132,7 @@ async def test_finish_plus_delegate_same_batch_e2e():
 
     handle = await runtime.start_session(
         SessionStartParams.create(
-            template_id="tpl_echo", user_prompt="root request", context_limit=100_000,
+            template_id="agent:tpl_echo", user_prompt="root request", context_limit=100_000,
         )
     )
     session_id = handle.session_id

@@ -17,7 +17,7 @@ API contract (confirmed by reading runtime.py):
 Self-heal budget note
 --------------------
 ``stream_llm_resilient`` reads budget config from ``ctx.config`` (the LoopContext).
-We inject ``RuntimeConfig(llm_self_heal_max_attempts=1, ...)`` into ``CtxWeftRuntime(config=...)`` directly.
+We inject ``RuntimeConfig(llm_self_heal_max_attempts=1, ...)`` into ``make_runtime(config=...)`` directly.
 This also proves the production wiring: if ``ctx.config`` were still ``None``, the 8-attempt / 2s-base-delay
 defaults would make these tests take minutes instead of completing instantly.
 """
@@ -35,7 +35,7 @@ from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import LLMOutageError, ToolCall
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -115,7 +115,7 @@ def _make_runtime(flaky_llm: _FlakyLLM) -> CtxWeftRuntime:
         llm_self_heal_max_interval_sec=0.0,
         llm_self_heal_max_duration_sec=0.1,
     )
-    runtime = CtxWeftRuntime(
+    runtime = make_runtime(
         llm=flaky_llm,
         template_resolver=resolver,
         config=config,
@@ -127,7 +127,7 @@ def _make_runtime(flaky_llm: _FlakyLLM) -> CtxWeftRuntime:
 def _new_params(prompt: str = "hi") -> SessionStartParams:
     """Build SessionStartParams for a new session using the echo template."""
     return SessionStartParams.create(
-        template_id="tpl_echo",
+        template_id="agent:tpl_echo",
         user_prompt=prompt,
         context_limit=_MOCK_CONTEXT_LIMIT,
     )

@@ -19,6 +19,7 @@ from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
     InMemoryTemplateResolver, make_echo_template,
+    make_runtime,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -98,13 +99,13 @@ async def test_dispatch_boundary_recap_e2e():
     # 关短段免折门：本测试的 raw 只有几十 token，默认阈值(400)下必免折、断言不到折叠
     template.loop_config.short_segment_token_threshold = 0
     resolver.register(template)
-    runtime = CtxWeftRuntime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, template_resolver=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
     handle = await runtime.start_session(
         SessionStartParams.create(
-            template_id="tpl_echo", user_prompt="delegate then finish",
+            template_id="agent:tpl_echo", user_prompt="delegate then finish",
             context_limit=100_000,
         )
     )

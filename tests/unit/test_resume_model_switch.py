@@ -13,7 +13,7 @@ from ctx_weft.core.control.types import RunStateView, SessionView, TaskView
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template
+from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -26,7 +26,7 @@ class _BigClient:
 def _runtime(monkeypatch) -> CtxWeftRuntime:
     resolver = InMemoryTemplateResolver()
     resolver.register(make_echo_template())
-    runtime = CtxWeftRuntime(template_resolver=resolver)
+    runtime = make_runtime(template_resolver=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
     monkeypatch.setattr(runtime, "_resolve_llm", lambda a=None, m=None: _BigClient())
     return runtime
@@ -128,7 +128,7 @@ async def test_recover_session_model_switch_syncs_window(monkeypatch) -> None:
     tmpl = make_echo_template()
     view = RunStateView(
         run_id="", session_id="s1", task_id="", agent_id="",
-        sessions={"s1": SessionView(id="s1", template_id=tmpl.id,
+        sessions={"s1": SessionView(id="s1", template_id=f"agent:{tmpl.id}",
                                     root_agent_id="agt_root", context_limit=64_000)},
         tasks={"A": TaskView(id="A", session_id="s1", status="SUSPENDED")},
     )

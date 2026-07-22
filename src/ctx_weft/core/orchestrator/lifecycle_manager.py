@@ -10,10 +10,11 @@ import logging
 from dataclasses import dataclass
 
 from ctx_weft.core.errors import CtxWeftError
+from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.state.models import Agent
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.context import ProviderContext
-from ctx_weft.protocols.template import AgentTemplate, TemplateResolver
+from ctx_weft.protocols.template import AgentTemplate
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ class SpawnDepthExceeded(CtxWeftError):
 class LifecycleManager:
     """Agent 实例化。不再处理 capability 解析——由 PrepareStep.CapabilityResolver 负责。"""
 
-    template_resolver: TemplateResolver
+    template_lookup: "TemplateLookup"
 
     async def instantiate_agent(
         self,
@@ -43,12 +44,14 @@ class LifecycleManager:
     ) -> tuple[Agent, AgentTemplate]:
         """解析 template，创建 Agent 对象。
 
+        template_id 须为规范形式 provider:name；裸 id 由 TemplateLookup 抛 TemplateNotFoundError。
+
         bound_capability_ids 留空：PrepareStep 每轮解析后写入 CapabilityCache，
         agent.bound_capability_ids 仅作元数据记录，不驱动 capability 解析。
         """
         resolve_ctx = ctx or ProviderContext(session_id=session_id, tenant_id=tenant_id)
-        template: AgentTemplate = await self.template_resolver.get(
-            template_id, version=None, ctx=resolve_ctx,
+        template: AgentTemplate = await self.template_lookup.get_template(
+            template_id, None, ctx=resolve_ctx,
         )
 
         spawn_depth = 0

@@ -25,6 +25,7 @@ from ctx_weft.protocols import (
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.provider import LLMAccount, LLMProvider, ModelConfig, _FixedModelClient
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from tests.integration.test_minimal_loop import make_runtime
 
 
 # ── minimal fakes（自包含，避免跨测试文件 import）─────────────────────────────
@@ -84,7 +85,7 @@ class _OneAccountResolver:
 def _make_runtime(resolver_llm: _OneAccountResolver) -> CtxWeftRuntime:
     templates = _InMemoryTemplateResolver()
     templates.register(_echo_template())
-    runtime = CtxWeftRuntime(template_resolver=templates)
+    runtime = make_runtime(template_resolver=templates)
     runtime.providers.register_memory(InMemoryMemoryProvider())
     runtime.providers.register_llm_provider(resolver_llm)
     return runtime
@@ -135,7 +136,7 @@ async def test_events_carry_resolved_default_model():
     events = _collect_llm_events(runtime)
 
     _handle, state = await runtime.run_single_task(
-        template_id="tpl_echo", user_prompt="say hello",
+        template_id="agent:tpl_echo", user_prompt="say hello",
     )
 
     assert state.task.status == "FINISHED"
@@ -161,7 +162,7 @@ async def test_events_carry_explicit_model():
     events = _collect_llm_events(runtime)
 
     await runtime.run_single_task(
-        template_id="tpl_echo", user_prompt="say hello",
+        template_id="agent:tpl_echo", user_prompt="say hello",
         llm_account="acct-b", llm_model="explicit-y",
     )
 
@@ -196,14 +197,14 @@ async def test_events_carry_bare_adapter_model():
 
     templates = _InMemoryTemplateResolver()
     templates.register(_echo_template())
-    runtime = CtxWeftRuntime(
+    runtime = make_runtime(
         llm=_ModelMock(responses=[MockResponse(text="hi")]), template_resolver=templates,
     )
     runtime.providers.register_memory(InMemoryMemoryProvider())
     events = _collect_llm_events(runtime)
 
     _handle, state = await runtime.run_single_task(
-        template_id="tpl_echo", user_prompt="say hello",
+        template_id="agent:tpl_echo", user_prompt="say hello",
     )
 
     started = [e for e in events if e.type == EventType.LLM_REQUEST_STARTED]
@@ -220,7 +221,7 @@ async def test_backfill_keeps_explicit_session_values():
     runtime = _make_runtime(resolver)
 
     _handle, state = await runtime.run_single_task(
-        template_id="tpl_echo", user_prompt="say hello",
+        template_id="agent:tpl_echo", user_prompt="say hello",
         llm_account="acct-b", llm_model="explicit-y",
     )
     assert state.session.llm_model == "explicit-y"
