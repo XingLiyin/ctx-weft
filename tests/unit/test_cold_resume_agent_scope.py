@@ -43,13 +43,13 @@ _TS = datetime(2026, 7, 13, tzinfo=UTC)
 async def test_inject_user_reply_reply_visible_to_agent_recall(monkeypatch):
     """When the rebuilt HitlRequest lost agent_id, the reply must still be recallable via
     recall_recent_by_agent (the actor's history path), which filters by scope.agent_id."""
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     from ctx_weft.core import CtxWeftRuntime
     import ctx_weft.core.loop.steps.background_observe as bo
 
     monkeypatch.setattr(bo, "_task_pending", {})
 
-    runtime = make_runtime(template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 

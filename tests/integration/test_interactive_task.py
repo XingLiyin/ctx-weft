@@ -26,7 +26,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -95,7 +95,7 @@ async def test_auto_plain_text_completes() -> None:
 
 
 async def test_finish_task_finishes_task_end_to_end() -> None:
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     # 反转契约：答复写在消息正文，finish_task 无参收尾标记 → outputs = 正文
     llm = MockLLMAdapter(responses=[
@@ -103,7 +103,7 @@ async def test_finish_task_finishes_task_end_to_end() -> None:
             id="tc1", name="control__finish_task", arguments={},
         )]),
     ])
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     _handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="compute")
@@ -113,14 +113,14 @@ async def test_finish_task_finishes_task_end_to_end() -> None:
 
 
 async def test_guidance_injected_into_prompt_not_memory() -> None:
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[
         MockResponse(text="ok", tool_calls=[ToolCall(
             id="tc1", name="control__finish_task", arguments={},
         )]),
     ])
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 

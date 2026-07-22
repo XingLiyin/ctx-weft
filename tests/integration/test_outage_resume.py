@@ -35,7 +35,7 @@ from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import LLMOutageError, ToolCall
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -107,7 +107,7 @@ class _FlakyLLM(MockLLMAdapter):
 
 
 def _make_runtime(flaky_llm: _FlakyLLM) -> CtxWeftRuntime:
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     config = RuntimeConfig(
         llm_self_heal_max_attempts=1,
@@ -117,7 +117,7 @@ def _make_runtime(flaky_llm: _FlakyLLM) -> CtxWeftRuntime:
     )
     runtime = make_runtime(
         llm=flaky_llm,
-        template_resolver=resolver,
+        agent_provider=resolver,
         config=config,
     )
     runtime.providers.register_memory(InMemoryMemoryProvider())

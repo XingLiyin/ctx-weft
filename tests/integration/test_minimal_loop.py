@@ -12,8 +12,10 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.protocols import (
+    AgentCapability,
+    AgentCapabilityProvider,
     AgentTemplate,
-    AgentTemplateSummary,
+    CapabilityProviderInfo,
     CapabilityRef,
     IdentityFacet,
     LoopConfig,
@@ -21,13 +23,19 @@ from ctx_weft.protocols import (
     MemoryEventType,
     MemoryScope,
     ProviderContext,
-    TemplateResolver,
 )
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 
 
-class InMemoryTemplateResolver(TemplateResolver):
-    """测试用：内存 dict 装 template。"""
+class InlineAgentTemplateProvider(AgentCapabilityProvider):
+    """测试私有桩：内存 dict 装 template。
+
+    core src 不 ship in-memory provider（spec 方案 B 决策 4）——32 个测试文件的
+    fixture 是内联 AgentTemplate（含 LoopConfig 全字段），SOUL.md 表达不了，故测试
+    侧保留此桩；真实目录版实现见 ctx_weft.providers.agent_template_local。
+    """
+
+    name = "agent"
 
     def __init__(self) -> None:
         self._templates: dict[str, AgentTemplate] = {}
@@ -35,41 +43,30 @@ class InMemoryTemplateResolver(TemplateResolver):
     def register(self, template: AgentTemplate) -> None:
         self._templates[template.id] = template
 
-    async def get(
-        self,
-        template_id: str,
-        version: str | None,
-        ctx: ProviderContext,
-    ) -> AgentTemplate:
-        t = self._templates.get(template_id)
-        if t is None:
-            raise KeyError(f"Template {template_id} not found")
-        return t
-
-    async def list_summaries(
-        self,
-        ctx: ProviderContext,
-    ) -> list[AgentTemplateSummary]:
+    async def list(self, ctx: ProviderContext) -> list:
         return [
-            AgentTemplateSummary(
-                id=t.id, name=t.name, version=t.version,
-                description=t.metadata.get("description", ""),
+            AgentCapability(
+                id=f"{self.name}:{t.id}", name=t.id, template_name=t.id,
+                description=t.metadata.get("description", ""), version=t.version,
             )
             for t in self._templates.values()
         ]
 
+    async def get_template(self, template_id, version, ctx) -> AgentTemplate | None:
+        return self._templates.get(template_id)
+
+    async def describe(self, ctx) -> CapabilityProviderInfo:
+        return CapabilityProviderInfo(
+            name=self.name, capability_count=len(self._templates),
+            supports_streaming=False, supports_cancel=False,
+        )
+
 
 def make_runtime(**kwargs) -> CtxWeftRuntime:
-    """测试构造入口：把 template_resolver 参数包装成 TemplateAgentCapabilityProvider 注册。
-
-    协议改造（spec 2026-07-22）后 CtxWeftRuntime 不再收 template_resolver——
-    存量测试经本助手做最小迁移：实参形状与旧构造完全一致。
-    """
-    from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
-    from ctx_weft.core.runtime import ProviderRegistry
-    resolver = kwargs.pop("template_resolver")
+    """测试构造入口：把 agent_provider 注册进 registry 后构造 runtime（方案 B：无适配器）。"""
+    provider = kwargs.pop("agent_provider")
     providers = kwargs.pop("providers", None) or ProviderRegistry()
-    providers.register_capability(TemplateAgentCapabilityProvider(resolver))
+    providers.register_capability(provider)
     return CtxWeftRuntime(providers=providers, **kwargs)
 
 
@@ -98,7 +95,7 @@ def make_echo_template() -> AgentTemplate:
 async def test_minimal_echo_loop() -> None:
     """完整跑一个 reason → act → observe → finalize 流程。"""
     # ── Setup ────────────────────────────────────────────────────────────────
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
 
     llm = MockLLMAdapter(
@@ -107,7 +104,7 @@ async def test_minimal_echo_loop() -> None:
         ],
     )
 
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     # ── Run ──────────────────────────────────────────────────────────────────
@@ -159,11 +156,11 @@ async def test_prompt_structure_matches_miniagents() -> None:
     - Actor messages 只有 1 条 user message
     - 文本包含 '## Current Message' 段（miniAgents 风格）
     """
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
 
     llm = MockLLMAdapter(responses=[MockResponse(text="ack")])
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     _handle, _state = await runtime.run_single_task(

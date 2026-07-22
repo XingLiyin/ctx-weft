@@ -24,7 +24,7 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -56,10 +56,10 @@ class _RecordingTool(ToolCapabilityProvider):
 
 
 async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="done"), MockResponse(text="done")])
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
     tool = _RecordingTool()

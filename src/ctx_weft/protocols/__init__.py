@@ -4,7 +4,7 @@
 - KnowledgeProvider（§4.2）
 - MemoryProvider（§4.3，统一协议：ingest + recall_* + subscribe + apply_compact）
 - CapabilityProvider（§4.4）
-- AgentTemplate / IdentityFacet / TemplateResolver（§4.6）
+- AgentTemplate / IdentityFacet（§4.6）
 - LLMClient / LLMClientResolver（§11，LLM 接入契约）
 - ProviderContext
 
@@ -65,12 +65,10 @@ from ctx_weft.protocols.memory import (
 )
 from ctx_weft.protocols.template import (
     AgentTemplate,
-    AgentTemplateSummary,
     CapabilityRef,
     IdentityFacet,
     LoopConfig,
     MemoryConfig,
-    TemplateResolver,
 )
 
 __all__ = [
@@ -131,10 +129,8 @@ __all__ = [
     "layer_for_types",
     # Template
     "AgentTemplate",
-    "AgentTemplateSummary",
     "CapabilityRef",
     "IdentityFacet",
     "LoopConfig",
     "MemoryConfig",
-    "TemplateResolver",
 ]

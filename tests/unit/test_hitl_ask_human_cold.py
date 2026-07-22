@@ -15,13 +15,13 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
 
 def _runtime_with_memory() -> tuple[CtxWeftRuntime, InMemoryMemoryProvider]:
-    rt = make_runtime(template_resolver=InMemoryTemplateResolver())
+    rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
     return rt, mem

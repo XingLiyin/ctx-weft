@@ -1,19 +1,20 @@
-"""AgentTemplate / IdentityFacet / TemplateResolver。
+"""AgentTemplate / IdentityFacet。
 
 Identity 是 AgentTemplate 的内禀字段（一等公民），不嵌套在 Capability 里。
 Capability 通过 capability_refs 引用外部能力。
+
+模板进入 core 的唯一通道是 AgentCapabilityProvider（spec 2026-07-22 方案 B）；
+目录格式 loader 见 providers/agent_template_local。
 
 详见设计文档 §4.6。
 """
 
 from __future__ import annotations
 
-from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable, Literal
+from typing import Any, Literal
 
 from ctx_weft.protocols.capability import Purpose
-from ctx_weft.protocols.context import ProviderContext
 
 CapabilityMode = Literal["optional", "required", "forbidden"]
 
@@ -102,9 +103,7 @@ class LoopConfig:
 
 @dataclass
 class AgentTemplate:
-    """Agent 实例化的蓝图。由 host 在 template registration 阶段构建并管理。
-    core 通过 TemplateResolver 协议读取。
-    """
+    """Agent 实例化的蓝图。core 通过 AgentCapabilityProvider 读取。"""
 
     id: str
     name: str
@@ -120,44 +119,3 @@ class AgentTemplate:
     loop_config: LoopConfig
     description: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class AgentTemplateSummary:
-    """用于发现/列表场景（如 sub-agent 选择）。"""
-
-    id: str
-    name: str
-    version: str
-    description: str
-
-
-# ── TemplateResolver ──────────────────────────────────────────────────────────
-
-
-@runtime_checkable
-class TemplateResolver(Protocol):
-    """目录/注册表型模板源的 SPI——经 TemplateAgentCapabilityProvider 适配接入 core。
-
-    不再是 core↔host 的模板接口（spec 2026-07-22）：模板进入 core 的唯一通道是
-    AgentCapabilityProvider；host 可实现本协议后用适配器注册，也可直接实现
-    AgentCapabilityProvider。
-    """
-
-    @abstractmethod
-    async def get(
-        self,
-        template_id: str,
-        version: str | None,
-        ctx: ProviderContext,
-    ) -> AgentTemplate:
-        """获取 template 定义。version=None 取最新；指定 version 用于实例化时 pin。"""
-        ...
-
-    @abstractmethod
-    async def list_summaries(
-        self,
-        ctx: ProviderContext,
-    ) -> list[AgentTemplateSummary]:
-        """列出可用 template 摘要——用于 sub-agent 发现、admin 界面等。"""
-        ...

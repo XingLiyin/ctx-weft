@@ -17,7 +17,6 @@ from ctx_weft.protocols import (
 import dataclasses as _dc
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
-from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
@@ -26,7 +25,7 @@ from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvi
 from ctx_weft.core.state.models import LoopGuard, Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
 pytestmark = pytest.mark.asyncio
 _BASE = datetime(2026, 7, 1, tzinfo=UTC)
@@ -43,7 +42,7 @@ def _act_only_template() -> AgentTemplate:
 
 
 async def test_context_limit_retry_folds_segment_e2e():
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     # 本测试钉「retry 段折」路径本体：关短段免折门（mock 段仅几 token，
     # 默认阈值 400 下会免折保 raw——那是另一条已单测的路径）。
     tpl = _dc.replace(_act_only_template(),
@@ -53,7 +52,7 @@ async def test_context_limit_retry_folds_segment_e2e():
     # output_reserve=0：effective_limit 不为 reserved_output_tokens 吞光（Task 4 引入）
     llm = MockLLMAdapter(responses=[MockResponse(text="partial work, not done yet")],
                          context_limit=20, output_reserve=0)
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     handle, state = await runtime.run_single_task(
@@ -76,10 +75,10 @@ async def test_context_limit_retry_folds_segment_e2e():
 
 async def test_normal_finish_still_works_e2e():
     """正常收尾回归：整条 loop 仍跑通到 FINISHED（Task 3 去 process_report 渲染不破主流程）。"""
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(_act_only_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="Here is the final answer.")])  # 正常 context_limit
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     handle, state = await runtime.run_single_task(
@@ -98,7 +97,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
         return "坍缩执行摘要"
     monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
 
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     tpl = _act_only_template()
     tpl = _dc.replace(tpl, id="tpl_mr", loop_config=LoopConfig(
         collapse_keep_last=2, compact_target_ratio=0.01,
@@ -106,7 +105,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     resolver.register(tpl)
     llm = MockLLMAdapter(responses=[MockResponse(text="partial work, not done yet")] * 30,
                          context_limit=20, output_reserve=0)
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 
@@ -114,7 +113,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     sid = "ses_mr"
     pctx = ProviderContext(session_id=sid, tenant_id="default")
     _reg = ProviderRegistry()
-    _reg.register_capability(TemplateAgentCapabilityProvider(resolver))
+    _reg.register_capability(resolver)
     lm = LifecycleManager(template_lookup=TemplateLookup(_reg))
     agent, template = await lm.instantiate_agent(
         template_id="agent:tpl_mr", session_id=sid, tenant_id="default", ctx=pctx)

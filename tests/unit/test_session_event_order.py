@@ -10,29 +10,34 @@ from __future__ import annotations
 
 from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.events.types import EventType
-from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.runtime import ProviderRegistry
 from ctx_weft.protocols import (
+    AgentCapabilityProvider,
     AgentTemplate,
+    CapabilityProviderInfo,
     IdentityFacet,
     LoopConfig,
     MemoryConfig,
-    TemplateResolver,
 )
 
 
-class _Resolver(TemplateResolver):
+class _Resolver(AgentCapabilityProvider):
+    name = "agent"
+
     def __init__(self, t: AgentTemplate) -> None:
         self._t = t
 
-    async def get(self, template_id, version, ctx):
+    async def list(self, ctx):
+        return []
+
+    async def get_template(self, template_id, version, ctx):
         return self._t
 
-    async def list_summaries(self, ctx):
-        return []
+    async def describe(self, ctx):
+        return CapabilityProviderInfo(name=self.name)
 
 
 def _template() -> AgentTemplate:
@@ -53,7 +58,7 @@ async def test_session_created_emitted_before_task_created() -> None:
     bus.subscribe(None, rec)
     resolver = _Resolver(_template())
     _reg = ProviderRegistry()
-    _reg.register_capability(TemplateAgentCapabilityProvider(resolver))
+    _reg.register_capability(resolver)
     sm = SessionManager(
         lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(_reg)),
         event_bus=bus,

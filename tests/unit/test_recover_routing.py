@@ -12,7 +12,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.events.types import Event, EventType
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -34,7 +34,7 @@ def _capture_interrupts(runtime) -> list[str]:
 
 
 async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
-    runtime = make_runtime(template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
     store = runtime.event_store
 
     # A: 有未解决 pending HITL → 只重建 HitlManager
@@ -66,7 +66,7 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
 
 async def test_recover_multi_hitl_partial_resolve_still_pending() -> None:
     """两个 pending、只解决一个 → 仍 pending → 重建剩余、不发 INTERRUPTED。"""
-    runtime = make_runtime(template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
     store = runtime.event_store
     await store.append(_ev(1, "M", EventType.SESSION_CREATED, template_id="t"))
     await store.append(_ev(2, "M", EventType.HITL_REQUIRED, hitl_id="h1", form="question"))

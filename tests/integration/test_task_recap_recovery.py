@@ -30,7 +30,7 @@ from ctx_weft.protocols import (
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,12 +43,12 @@ def _make_runtime() -> tuple[CtxWeftRuntime, InMemoryMemoryProvider, list]:
     The mock LLM returns a fixed recap for the relaunched background observe so the
     re-run completes deterministically (plain-text fallback across react rounds).
     """
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     # Enough plain-text responses to outlast the observe ReAct loop
     # (max_turns_per_observe defaults to 5) without exhausting the mock.
     llm = MockLLMAdapter(responses=[MockResponse(text="recovered recap") for _ in range(8)])
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 

@@ -14,13 +14,14 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.events import EventType
 from ctx_weft.protocols import (
+    AgentCapability,
+    AgentCapabilityProvider,
     AgentTemplate,
-    AgentTemplateSummary,
+    CapabilityProviderInfo,
     IdentityFacet,
     LoopConfig,
     MemoryConfig,
     ProviderContext,
-    TemplateResolver,
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.provider import LLMAccount, LLMProvider, ModelConfig, _FixedModelClient
@@ -31,18 +32,23 @@ from tests.integration.test_minimal_loop import make_runtime
 # ── minimal fakes（自包含，避免跨测试文件 import）─────────────────────────────
 
 
-class _InMemoryTemplateResolver(TemplateResolver):
+class _InlineAgentTemplateProvider(AgentCapabilityProvider):
+    name = "agent"
+
     def __init__(self) -> None:
         self._templates: dict[str, AgentTemplate] = {}
 
     def register(self, template: AgentTemplate) -> None:
         self._templates[template.id] = template
 
-    async def get(self, template_id: str, version, ctx: ProviderContext) -> AgentTemplate:
-        return self._templates[template_id]
-
-    async def list_summaries(self, ctx: ProviderContext) -> list[AgentTemplateSummary]:
+    async def list(self, ctx: ProviderContext) -> list[AgentCapability]:
         return []
+
+    async def get_template(self, template_id: str, version, ctx: ProviderContext) -> AgentTemplate | None:
+        return self._templates.get(template_id)
+
+    async def describe(self, ctx: ProviderContext) -> CapabilityProviderInfo:
+        return CapabilityProviderInfo(name=self.name, capability_count=len(self._templates))
 
 
 def _echo_template() -> AgentTemplate:
@@ -83,9 +89,9 @@ class _OneAccountResolver:
 
 
 def _make_runtime(resolver_llm: _OneAccountResolver) -> CtxWeftRuntime:
-    templates = _InMemoryTemplateResolver()
+    templates = _InlineAgentTemplateProvider()
     templates.register(_echo_template())
-    runtime = make_runtime(template_resolver=templates)
+    runtime = make_runtime(agent_provider=templates)
     runtime.providers.register_memory(InMemoryMemoryProvider())
     runtime.providers.register_llm_provider(resolver_llm)
     return runtime
@@ -195,10 +201,10 @@ async def test_events_carry_bare_adapter_model():
         def model(self) -> str:
             return "env-model-a"
 
-    templates = _InMemoryTemplateResolver()
+    templates = _InlineAgentTemplateProvider()
     templates.register(_echo_template())
     runtime = make_runtime(
-        llm=_ModelMock(responses=[MockResponse(text="hi")]), template_resolver=templates,
+        llm=_ModelMock(responses=[MockResponse(text="hi")]), agent_provider=templates,
     )
     runtime.providers.register_memory(InMemoryMemoryProvider())
     events = _collect_llm_events(runtime)

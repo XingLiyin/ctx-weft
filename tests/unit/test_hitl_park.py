@@ -93,7 +93,7 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
         ProviderContext,
     )
     from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     # ── real objects ──────────────────────────────────────────────────────────
     session = Session(
@@ -138,7 +138,7 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
     registry.register_memory(InMemoryMemoryProvider())
 
     rt = make_runtime(
-        template_resolver=InMemoryTemplateResolver(),
+        agent_provider=InlineAgentTemplateProvider(),
         providers=registry,
         event_store=None,  # uses InMemoryEventStore default
     )

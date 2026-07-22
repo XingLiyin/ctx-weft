@@ -5,14 +5,14 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control import RunTokens
 from ctx_weft.providers.llm.mock import MockLLMAdapter
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
 
 def _rt():
     return make_runtime(llm=MockLLMAdapter(responses=[]),
-                          template_resolver=InMemoryTemplateResolver())
+                          agent_provider=InlineAgentTemplateProvider())
 
 
 async def test_register_and_deregister_run_tokens():

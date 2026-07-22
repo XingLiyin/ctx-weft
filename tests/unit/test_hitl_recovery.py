@@ -73,12 +73,12 @@ async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
     from ctx_weft.core.events.types import Event, EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="should not run")])
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     ts = datetime(2026, 6, 12, tzinfo=timezone.utc)
@@ -188,9 +188,9 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.core.events.types import Event, EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
-    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
     statuses: list = []
 
     async def _cap(ev):
@@ -224,9 +224,9 @@ def _recover_runtime_with_status_capture():
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.core.events.types import EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
-    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
     statuses: list = []
 
     async def _cap(ev):
@@ -299,12 +299,12 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     from ctx_weft.core.orchestrator.task_manager import TaskManager
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="should not run")])
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     # 老 TM：alive，正在跑 X
@@ -348,9 +348,9 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     from ctx_weft.core.orchestrator.task_manager import TaskManager
     from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
-    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), template_resolver=InMemoryTemplateResolver())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
 
     rebuild_calls: list = []
     import ctx_weft.core.control.reducers as _reducers

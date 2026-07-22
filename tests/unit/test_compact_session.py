@@ -20,7 +20,7 @@ from ctx_weft.protocols import (
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
-    InMemoryTemplateResolver,
+    InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
@@ -29,10 +29,10 @@ pytestmark = pytest.mark.asyncio
 
 
 def _runtime() -> CtxWeftRuntime:
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
-    rt = make_runtime(llm=llm, template_resolver=resolver)
+    rt = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
     return rt
 
@@ -56,7 +56,7 @@ async def test_compact_session_unknown_session_raises() -> None:
 
 
 async def test_compact_session_folds_agent_layer() -> None:
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     # small keep_last so a handful of dispatch pairs is over budget
     tmpl = dataclasses.replace(make_echo_template(),
                                loop_config=LoopConfig(compact_keep_last=2))
@@ -65,7 +65,7 @@ async def test_compact_session_folds_agent_layer() -> None:
     # summarize_for_compact；本例 task_id="" 的当前 task 层无材料可折，L3 guard 拦下、不再空调
     # 第二次 LLM，故只需 1 条 mock 响应。
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
-    rt = make_runtime(llm=llm, template_resolver=resolver)
+    rt = make_runtime(llm=llm, agent_provider=resolver)
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
 

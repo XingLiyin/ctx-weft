@@ -15,7 +15,6 @@ def test_imports():
         MemoryProvider,
         MemoryScope,
         ProviderContext,
-        TemplateResolver,
     )
 
     # 基础数据结构构造

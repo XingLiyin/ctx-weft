@@ -27,7 +27,7 @@ from ctx_weft.protocols import ToolCall
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
-    InMemoryTemplateResolver, make_echo_template,
+    InlineAgentTemplateProvider, make_echo_template,
     make_runtime,
 )
 
@@ -94,9 +94,9 @@ class _RouterLLM(MockLLMAdapter):
 
 
 def _make_runtime(llm: _RouterLLM) -> CtxWeftRuntime:
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
     return runtime
 

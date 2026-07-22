@@ -424,7 +424,7 @@ def test_runtime_wires_hitl_timeout() -> None:
     """CtxWeftRuntime injects hitl knobs from RuntimeConfig."""
     from ctx_weft.core.config import RuntimeConfig
     from ctx_weft.core import CtxWeftRuntime
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     cfg = RuntimeConfig(hitl_timeout_sec=45)
-    rt = make_runtime(template_resolver=InMemoryTemplateResolver(), config=cfg)
+    rt = make_runtime(agent_provider=InlineAgentTemplateProvider(), config=cfg)
     assert rt.hitl_manager._timeout_sec == 45

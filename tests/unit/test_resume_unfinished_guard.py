@@ -28,10 +28,10 @@ def _ev(seq: int, type_: EventType, **payload) -> Event:
 async def _runtime_and_sm():
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]),
-                             template_resolver=InMemoryTemplateResolver())
+                             agent_provider=InlineAgentTemplateProvider())
     sm = SessionManager(
         lifecycle_manager=LifecycleManager(template_lookup=runtime._template_lookup),
         event_bus=runtime.event_bus,

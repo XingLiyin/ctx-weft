@@ -475,7 +475,7 @@ class CtxWeftRuntime:
             raise ValueError(
                 "CtxWeftRuntime requires at least one AgentCapabilityProvider in the "
                 "ProviderRegistry — register one before constructing, e.g. "
-                "providers.register_capability(TemplateAgentCapabilityProvider(resolver))"
+                "providers.register_capability(LocalAgentTemplateProvider(templates_dir))"
             )
         from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
         self._template_lookup = TemplateLookup(self.providers)

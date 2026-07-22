@@ -17,7 +17,7 @@ ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力�
   - [MemoryProvider](#memoryprovider)
   - [CapabilityProvider](#capabilityprovider)
   - [KnowledgeProvider](#knowledgeprovider)
-- [AgentTemplate 与 TemplateResolver](#agenttemplate-与-templateresolver)
+- [AgentTemplate 与 AgentCapabilityProvider](#agenttemplate-与-agentcapabilityprovider)
 - [LLM 接入](#llm-接入)
 - [CtxWeftRuntime API](#ctxweftruntime-api)
 - [事件系统](#事件系统)
@@ -69,9 +69,9 @@ from ctx_weft.testing import MockLLMAdapter, MockResponse, ToolCall
 AgentTemplate        定义 Agent 的身份（SOUL/ROLE）和能力引用
        ↓
 CtxWeftRuntime        顶层 API，连接所有组件
-  ├── ProviderRegistry   注册 Memory / Capability / Knowledge / LLM
-  ├── TemplateResolver   读取 AgentTemplate（由上层实现）
-  └── LLMClient          LLM 调用接口（由上层实现）
+  ├── ProviderRegistry        注册 Memory / Capability / Knowledge / LLM
+  ├── AgentCapabilityProvider 读取 AgentTemplate（由上层实现或用内置 LocalAgentTemplateProvider）
+  └── LLMClient               LLM 调用接口（由上层实现）
        ↓
 Loop Engine          reason → act → observe → finalize
        ↓
@@ -103,18 +103,32 @@ import asyncio
 from ctx_weft import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.testing import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
-from ctx_weft.protocols import AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig
+from ctx_weft.protocols import (
+    AgentCapability, AgentCapabilityProvider, AgentTemplate,
+    CapabilityProviderInfo, IdentityFacet, LoopConfig, MemoryConfig,
+)
 
 
-# 1. 实现一个最简 TemplateResolver
-class DictTemplateResolver:
-    def __init__(self, templates: dict):
+# 1. 实现一个最简 AgentCapabilityProvider——模板进入 core 的唯一通道
+#    （发现与加载同源，spec 2026-07-22）。真实项目通常直接用内置
+#    ctx_weft.providers.agent_template_local.LocalAgentTemplateProvider 扫描模板目录。
+class DictAgentTemplateProvider(AgentCapabilityProvider):
+    name = "agent"
+
+    def __init__(self, templates: dict[str, AgentTemplate]):
         self._t = templates
-    async def get(self, template_id, version, ctx):
-        return self._t[template_id]
-    async def list_summaries(self, ctx):
-        return []
+
+    async def list(self, ctx) -> list[AgentCapability]:
+        return [
+            AgentCapability(id=f"{self.name}:{t.id}", name=t.id, template_name=t.id)
+            for t in self._t.values()
+        ]
+
+    async def get_template(self, template_id, version, ctx) -> AgentTemplate | None:
+        return self._t.get(template_id)
+
+    async def describe(self, ctx) -> CapabilityProviderInfo:
+        return CapabilityProviderInfo(name=self.name, capability_count=len(self._t))
 
 
 # 2. 定义 AgentTemplate（Agent 的身份蓝图）
@@ -129,21 +143,18 @@ template = AgentTemplate(
     loop_config=LoopConfig(),
 )
 
-# 3. 组装 Runtime：模板进入 core 的唯一通道是 AgentCapabilityProvider——
-#    先把 TemplateResolver 包成 provider 注册，再构造（发现与加载同源，spec 2026-07-22）。
+# 3. 组装 Runtime
 providers = ProviderRegistry()
 providers.register_memory(InMemoryMemoryProvider())
-providers.register_capability(
-    TemplateAgentCapabilityProvider(DictTemplateResolver({"my_agent": template}))
-)
+providers.register_capability(DictAgentTemplateProvider({"my_agent": template}))
 
 runtime = CtxWeftRuntime(
     llm=MockLLMAdapter(responses=[MockResponse(text="The answer is 42.")]),
     providers=providers,
 )
 
-# 4. 运行一个任务：template_id 须为规范形式 provider:name——本 provider 自动注册的
-#    前缀是 "agent"（TemplateAgentCapabilityProvider.name），故 "my_agent" → "agent:my_agent"。
+# 4. 运行一个任务：template_id 须为规范形式 provider:name——本 provider 注册的
+#    前缀是 "agent"（DictAgentTemplateProvider.name），故 "my_agent" → "agent:my_agent"。
 async def main():
     handle, state = await runtime.run_single_task(
         template_id="agent:my_agent",
@@ -288,7 +299,7 @@ providers.register_knowledge(WikiProvider(), priority=10)
 
 ---
 
-## AgentTemplate 与 TemplateResolver
+## AgentTemplate 与 AgentCapabilityProvider
 
 ### AgentTemplate
 
@@ -335,34 +346,49 @@ template = AgentTemplate(
 )
 ```
 
-### TemplateResolver
+### AgentCapabilityProvider
 
-core 通过 `TemplateResolver` 协议读取 template，由使用方实现：
+模板进入 core 的**唯一通道**是 `AgentCapabilityProvider`（spec 2026-07-22 方案 B）：
+发现（`list`）与加载（`get_template`）同源，`register_capability` 直接注册即可，无需
+额外适配器。
+
+推荐直接使用内置的目录扫描实现——根目录下每个含 `SOUL.md` 的子目录即一个模板：
 
 ```python
-from ctx_weft.protocols import (
-    TemplateResolver, AgentTemplate, AgentTemplateSummary, ProviderContext,
-)
+from pathlib import Path
+from ctx_weft.providers.agent_template_local import LocalAgentTemplateProvider
 
-class MyTemplateResolver(TemplateResolver):
+providers.register_capability(LocalAgentTemplateProvider(Path("resources/templates")))
+runtime = CtxWeftRuntime(providers=providers)
+```
+
+也可以自己实现协议（比如从数据库/远端注册表读取）：
+
+```python
+from ctx_weft.protocols import AgentCapability, AgentCapabilityProvider, AgentTemplate, CapabilityProviderInfo
+
+class MyAgentTemplateProvider(AgentCapabilityProvider):
+    name = "agent"
+
     def __init__(self, store: dict[str, AgentTemplate]):
         self._store = store
 
-    async def get(self, template_id, version, ctx) -> AgentTemplate:
-        t = self._store.get(template_id)
-        if t is None:
-            raise KeyError(f"Template not found: {template_id}")
-        return t
-
-    async def list_summaries(self, ctx) -> list[AgentTemplateSummary]:
+    async def list(self, ctx) -> list[AgentCapability]:
         return [
-            AgentTemplateSummary(id=t.id, name=t.name, version=t.version,
-                                 description=t.metadata.get("description", ""))
+            AgentCapability(id=f"{self.name}:{t.id}", name=t.id, template_name=t.id,
+                            description=t.metadata.get("description", ""), version=t.version)
             for t in self._store.values()
         ]
+
+    async def get_template(self, template_id, version, ctx) -> AgentTemplate | None:
+        return self._store.get(template_id)
+
+    async def describe(self, ctx) -> CapabilityProviderInfo:
+        return CapabilityProviderInfo(name=self.name, capability_count=len(self._store))
 ```
 
-> 上层 host 应用通常提供开箱即用的模板解析器（支持从 Markdown 文件解析 SOUL/ROLE）。
+> `AgentCapabilityProvider` 缺省 `retrieve()` 返回 `[]`：全目录只经 `list()` 暴露给
+> required-ref 精确查找，永不自动召回——sub-agent 只经模板声明的 `subagents` 绑定。
 
 ---
 
@@ -391,7 +417,7 @@ from ctx_weft.protocols import (
 
 ```python
 providers = ProviderRegistry()
-providers.register_capability(TemplateAgentCapabilityProvider(resolver))
+providers.register_capability(my_agent_capability_provider)
 runtime = CtxWeftRuntime(providers=providers, llm=my_adapter)
 ```
 
@@ -453,7 +479,7 @@ runtime.providers.register_llm_provider(provider)
 # 模板进入 core 的唯一通道是 AgentCapabilityProvider——构造前先注册（发现与加载同源）；
 # registry 里一个 AgentCapabilityProvider 都没有会在构造期抛 ValueError（fail-fast）。
 providers = providers or ProviderRegistry()
-providers.register_capability(TemplateAgentCapabilityProvider(my_resolver))
+providers.register_capability(LocalAgentTemplateProvider(Path("resources/templates")))
 
 runtime = CtxWeftRuntime(
     providers=providers,              # 必需含至少一个 AgentCapabilityProvider
@@ -938,8 +964,10 @@ import pytest
 from ctx_weft import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.testing import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from ctx_weft.core.orchestrator.agent_capability import TemplateAgentCapabilityProvider
-from ctx_weft.protocols import AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig
+from ctx_weft.protocols import (
+    AgentCapability, AgentCapabilityProvider, AgentTemplate,
+    CapabilityProviderInfo, IdentityFacet, LoopConfig, MemoryConfig,
+)
 
 @pytest.fixture
 def echo_template():
@@ -951,12 +979,14 @@ def echo_template():
 
 @pytest.fixture
 def runtime(echo_template):
-    class Resolver:
-        async def get(self, tid, version, ctx): return echo_template
-        async def list_summaries(self, ctx): return []
+    class Provider(AgentCapabilityProvider):
+        name = "agent"
+        async def list(self, ctx) -> list[AgentCapability]: return []
+        async def get_template(self, tid, version, ctx): return echo_template
+        async def describe(self, ctx): return CapabilityProviderInfo(name=self.name)
     providers = ProviderRegistry()
     providers.register_memory(InMemoryMemoryProvider())
-    providers.register_capability(TemplateAgentCapabilityProvider(Resolver()))
+    providers.register_capability(Provider())
     return CtxWeftRuntime(
         llm=MockLLMAdapter([MockResponse(text="pong")]),
         providers=providers,

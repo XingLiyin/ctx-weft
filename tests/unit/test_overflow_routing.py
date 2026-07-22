@@ -12,7 +12,7 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from ctx_weft.core.events.types import EventType
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,11 +32,11 @@ class _OverflowLLM(MockLLMAdapter):
 
 
 async def test_overflow_marks_task_suspended_not_failed():
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     runtime = make_runtime(
         llm=_OverflowLLM(responses=[]),
-        template_resolver=resolver,
+        agent_provider=resolver,
         config=RuntimeConfig(),
     )
     runtime.providers.register_memory(InMemoryMemoryProvider())

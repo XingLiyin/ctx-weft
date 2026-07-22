@@ -28,7 +28,7 @@ from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
@@ -310,9 +310,9 @@ async def test_unstarted_task_cancel_never_calls_finalizer() -> None:
 
 
 def _runtime() -> CtxWeftRuntime:
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    runtime = make_runtime(template_resolver=resolver)
+    runtime = make_runtime(agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
     return runtime
 

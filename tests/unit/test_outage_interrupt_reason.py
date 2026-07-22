@@ -8,7 +8,7 @@ from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from ctx_weft.protocols import LLMOutageError
 from ctx_weft.core.events.types import EventType
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -22,11 +22,11 @@ class _OutageLLM(MockLLMAdapter):
 
 
 async def test_outage_interrupt_carries_llm_outage_reason():
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     runtime = make_runtime(
         llm=_OutageLLM(responses=[]),
-        template_resolver=resolver,
+        agent_provider=resolver,
         config=RuntimeConfig(llm_self_heal_max_attempts=1),
     )
     runtime.providers.register_memory(InMemoryMemoryProvider())

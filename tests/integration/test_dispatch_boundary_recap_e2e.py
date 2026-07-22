@@ -18,7 +18,7 @@ from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext, To
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
-    InMemoryTemplateResolver, make_echo_template,
+    InlineAgentTemplateProvider, make_echo_template,
     make_runtime,
 )
 
@@ -94,12 +94,12 @@ async def _wait_all_finished(runtime, session_id, n, timeout=8.0):
 
 async def test_dispatch_boundary_recap_e2e():
     llm = _RouterLLM()
-    resolver = InMemoryTemplateResolver()
+    resolver = InlineAgentTemplateProvider()
     template = make_echo_template()
     # 关短段免折门：本测试的 raw 只有几十 token，默认阈值(400)下必免折、断言不到折叠
     template.loop_config.short_segment_token_threshold = 0
     resolver.register(template)
-    runtime = make_runtime(llm=llm, template_resolver=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 

@@ -20,7 +20,7 @@ from ctx_weft.core.events.types import Event, EventType
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
 from ctx_weft.providers.llm.mock import MockLLMAdapter
-from tests.integration.test_minimal_loop import InMemoryTemplateResolver, make_runtime
+from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
@@ -119,7 +119,7 @@ async def test_current_tm_still_fires_session_finished() -> None:
 
 async def test_register_and_drain_marks_older_tm_not_current() -> None:
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
-                        template_resolver=InMemoryTemplateResolver())
+                        agent_provider=InlineAgentTemplateProvider())
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
                    status="RUNNING", token_budget=0)
 
@@ -184,7 +184,7 @@ async def test_recover_session_serialized_per_session(monkeypatch) -> None:
     用一个在闸门处阻塞的 fake rebuild_view 观测并发度：有锁 → 峰值并发 1；无锁 → 2。
     """
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
-                        template_resolver=InMemoryTemplateResolver())
+                        agent_provider=InlineAgentTemplateProvider())
     active = {"n": 0, "max": 0}
     gate = asyncio.Event()
 
@@ -209,7 +209,7 @@ async def test_recover_session_serialized_per_session(monkeypatch) -> None:
 async def test_recover_session_different_sessions_not_serialized(monkeypatch) -> None:
     """不同 session 之间不应被 resume 锁串行化（各自独立锁，可并发）。"""
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
-                        template_resolver=InMemoryTemplateResolver())
+                        agent_provider=InlineAgentTemplateProvider())
     active = {"n": 0, "max": 0}
     gate = asyncio.Event()
 
@@ -234,7 +234,7 @@ async def test_slow_prior_turn_bg_observe_does_not_clobber_next_turn() -> None:
     """端到端复现：第 N 轮 finish_task 后其 background observe 拖久了，第 N+1 轮已开启并
     进入 HITL 挂起；旧 TM 迟到的收尾必须 no-op——不释放新 TM、不发 SessionFinished。"""
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
-                        template_resolver=InMemoryTemplateResolver())
+                        agent_provider=InlineAgentTemplateProvider())
     sid = "s1"
     finished: list = []
 
@@ -280,7 +280,7 @@ async def test_probe_prior_turn_finishing_after_supersession() -> None:
     也不再发出——这里断言其为空。
     """
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
-                        template_resolver=InMemoryTemplateResolver())
+                        agent_provider=InlineAgentTemplateProvider())
     sid = "s1"
     statuses: list = []
     finished: list = []
