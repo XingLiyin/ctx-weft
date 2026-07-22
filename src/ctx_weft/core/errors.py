@@ -45,6 +45,27 @@ class DuplicateCapabilityName(CtxWeftError):
     code = "DUPLICATE_CAPABILITY_NAME"
 
 
+class TemplateNotFoundError(CtxWeftError):
+    """模板查找失败：裸 id 无前缀 / 前缀路由不到 provider / provider 不认识局部名。
+
+    模板引用必须是规范形式 'provider:name'（如 'agent:planner'）——边界强制前缀
+    （spec 2026-07-22），core 不做扫描回落。"""
+
+    code = "TEMPLATE_NOT_FOUND"
+
+    def __init__(self, template_ref: str, *, providers: list[str] | None = None) -> None:
+        self.template_ref = template_ref
+        self.providers = list(providers or [])
+        hint = (
+            f"registered agent providers: {', '.join(self.providers)}"
+            if self.providers else "no AgentCapabilityProvider registered"
+        )
+        super().__init__(
+            f"Template {template_ref!r} not found ({hint}); template refs must be "
+            f"canonical 'provider:name', e.g. 'agent:planner'"
+        )
+
+
 # ── Guard 相关 ─────────────────────────────────────────────────────────────────
 
 
