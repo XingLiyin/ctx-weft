@@ -1,7 +1,7 @@
 """TemplateAgentCapabilityProvider：把可用 agent template 暴露为 AgentCapability。
 
 与 ControlCapabilityProvider / SkillExecutorCapabilityProvider 同级，runtime 初始化时
-自动注册。AgentCapabilityProvider 是 list 型 provider，可注册多个（本地模板 + 远端
+自动注册。AgentCapabilityProvider 是发现与加载同源 provider，可注册多个（本地模板 + 远端
 注册中心等）；本 provider 仅覆盖「TemplateResolver 可见的模板」这一来源。
 """
 
@@ -16,7 +16,7 @@ from ctx_weft.protocols.capability import (
     CapabilityProviderInfo,
 )
 from ctx_weft.protocols.context import ProviderContext
-from ctx_weft.protocols.template import TemplateResolver
+from ctx_weft.protocols.template import AgentTemplate, TemplateResolver
 
 logger = logging.getLogger(__name__)
 
@@ -41,16 +41,18 @@ class TemplateAgentCapabilityProvider(AgentCapabilityProvider):
                 name=s.id,
                 template_name=s.id,
                 description=s.description,
+                version=s.version,
             )
             for s in summaries
         ]
 
-    async def retrieve(self, ctx: ProviderContext) -> list[Capability]:
-        """Sub-agents are bound only via the template's declared `subagents` (required
-        refs), never auto-retrieved. Returning [] makes `subagents` a true allowlist —
-        an agent never sees the whole template catalog as delegatable.
-        """
-        return []
+    async def get_template(
+        self, template_id: str, version: str | None, ctx: ProviderContext,
+    ) -> AgentTemplate | None:
+        try:
+            return await self._resolver.get(template_id, version=version, ctx=ctx)
+        except KeyError:
+            return None
 
     async def describe(self, ctx: ProviderContext) -> CapabilityProviderInfo:
         try:

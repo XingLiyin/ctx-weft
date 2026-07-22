@@ -137,7 +137,12 @@ class AgentTemplateSummary:
 
 @runtime_checkable
 class TemplateResolver(Protocol):
-    """core 与 host 之间关于 template 的唯一接口。host 实现。"""
+    """目录/注册表型模板源的 SPI——经 TemplateAgentCapabilityProvider 适配接入 core。
+
+    不再是 core↔host 的模板接口（spec 2026-07-22）：模板进入 core 的唯一通道是
+    AgentCapabilityProvider；host 可实现本协议后用适配器注册，也可直接实现
+    AgentCapabilityProvider。
+    """
 
     @abstractmethod
     async def get(

@@ -16,9 +16,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ctx_weft.protocols.context import ProviderContext
+
+if TYPE_CHECKING:
+    from ctx_weft.protocols.template import AgentTemplate
 
 
 # ── Purpose ───────────────────────────────────────────────────────────────────
@@ -83,6 +86,7 @@ class AgentCapability(Capability):
     """Sub-agent 模板描述符，由 orchestrator 负责 spawn。"""
     kind: str = "agent"
     template_name: str = ""
+    version: str = ""  # 信息性（listing 展示）；加载一律 version=None 取最新
 
 
 # ── Level 2（按需加载，不进 cache）────────────────────────────────────────────
@@ -210,5 +214,23 @@ class SkillCapabilityProvider(CapabilityProvider, ABC):
 
 
 class AgentCapabilityProvider(CapabilityProvider, ABC):
-    """列出可用 sub-agent 模板。list() 返回 AgentCapability；无额外方法。"""
-    pass
+    """列出可用 sub-agent 模板，并负责加载自己列出的模板。
+
+    发现与加载同源（spec 2026-07-22）：list() 返回的每个 AgentCapability.template_name，
+    本 provider 的 get_template() 必须能加载。TemplateLookup 按 cap.id 前缀路由到本
+    provider 后，传入的是**局部模板名**（前缀已剥掉）。
+    """
+
+    @abstractmethod
+    async def get_template(
+        self, template_id: str, version: str | None, ctx: ProviderContext,
+    ) -> "AgentTemplate | None":
+        """加载模板定义。不认识该 id → 返回 None（由 TemplateLookup 转成
+        TemplateNotFoundError）；仅真实故障（IO/网络/解析错误）才抛异常。
+        version=None 取最新。"""
+        ...
+
+    async def retrieve(self, ctx: ProviderContext) -> list[Capability]:
+        """默认不自动召回：sub-agent 只经模板声明的 `subagents` required refs 绑定
+        （allowlist），永不把整个模板目录泄漏给 agent。确需语义召回的 provider 可覆盖。"""
+        return []
