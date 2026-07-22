@@ -53,7 +53,9 @@ class AgentCapabilityProvider(CapabilityProvider, ABC):
         return []
 ```
 
-1. **get_template**：不认识该 id → 返回 `None`（供跨 provider 扫描组合）；仅真实
+1. **get_template**：入参是本 provider 命名空间内的**局部模板名**（即它自己
+   `list()` 出的 `AgentCapability.template_name`，前缀已由 TemplateLookup 剥掉）；
+   不认识 → 返回 `None`（由 TemplateLookup 转成 `TemplateNotFoundError`）；仅真实
    故障（IO/网络/解析错误）才抛异常。`version=None` 取最新。
 2. **retrieve() 默认 `[]`**：allowlist 语义从 `TemplateAgentCapabilityProvider` 的
    实现注释上移为协议默认——sub-agent 只经模板声明的 `subagents` required refs 绑定，
@@ -65,20 +67,26 @@ class AgentCapabilityProvider(CapabilityProvider, ABC):
 ## 核心组件：TemplateLookup
 
 新增 `core/orchestrator/template_lookup.py`，内部组件（**不是协议**），持有
-`ProviderRegistry`，消灭隐式单例路径：
+`ProviderRegistry`，消灭隐式单例路径。**路由靠前缀，不做注册序扫描**——provider
+归属本来就编码在 `cap.id`（`<provider名>:<模板名>`）里，扫描等于扔掉已有路由信息
+再靠注册序猜，还引入撞名时的顺序依赖：
 
 ```python
 class TemplateLookup:
     async def resolve_qualified(self, qualified: str, ctx) -> str:
-        """agent__planner → template_name。遍历 AgentCapabilityProvider 的 list()
-        按 qualify(cap.id) 精确匹配（原 runtime._resolve_subagent_template 逻辑平移）；
-        未命中原样返回（字面 template_id 透传语义保留）。"""
+        """agent__planner → 完整 cap.id（'agent:planner'）——保留 provider 归属，
+        不降级成裸 template_name（原 runtime._resolve_subagent_template 的匹配逻辑
+        平移，返回值升级）；未命中原样返回。"""
 
-    async def get_template(self, template_id: str, version, ctx) -> AgentTemplate:
-        """按注册序扫描各 AgentCapabilityProvider.get_template()，首个非 None 胜出；
-        单 provider 异常 → logger.exception + 跳过（与 list() 现有吞异常口径一致）；
-        全 miss → raise TemplateNotFoundError（携带 template_id 与已尝试的 provider
-        名单，替代现在从 resolver 泄漏的裸 KeyError）。"""
+    async def get_template(self, ref: str, version, ctx) -> AgentTemplate:
+        """规范 id 精确路由：rsplit(':', 1) 前段命中某已注册 AgentCapabilityProvider
+        的 name → 只调该 provider 的 get_template(局部模板名)；该 provider 返回
+        None → TemplateNotFoundError，不问别人（确定性）。rsplit 口径与现有
+        _provider_meta 一致，兼容 'mcp:github:researcher' 类多段 provider 名。
+
+        裸 id（无可路由前缀）→ 直接 TemplateNotFoundError，错误信息提示规范形式
+        （边界强制前缀，见「边界语义」）。provider 抛异常 → 传播（路由已确定，
+        不存在跳过语义）。"""
 ```
 
 ## 改动点
@@ -118,12 +126,29 @@ class TemplateLookup:
     改为 host 自持 resolver 引用（`build_runtime` 内直接 set，或返回二元组，实施时
     看装配顺序取顺手的）。`TemplateDirResolver` / `TemplateStore` / `TemplateLoader` /
     `merge_default_facets`（default facet 合并）全部不动。
+11. **边界规范化 + 存量迁移**：
+    - host 调 `start_session` / resume 传参处（`api/sessions.py`、`cli.py` 的
+      default_template_id 使用点）把裸模板 id 规范化为 `agent:<id>`（前缀即 host
+      注册适配器时的 provider 名，单一常量）；host 自己的模板管理 API / 前端
+      继续用裸 id，转换只发生在 ctx-weft 边界；
+    - `persistence/postgres/migrations.py` 加一次性迁移：事件表中 SessionCreated
+      等载荷内的裸 `template_id` → `'agent:' + id`（仓库已有 payload 回填迁移
+      先例）。快照/投影若冗余存了 template_id 一并覆盖。
 
 ## 边界语义
 
-- **字面 id 透传**：`resolve_qualified` 未命中原样返回，随后 `get_template` 按注册序
-  扫描——与现状行为一致。`assemble()` 里 `or self._template_id` 的回落（subagent_template
-  为空时用会话根模板）不变。
+- **边界强制规范 id（`provider:模板名`），裸 id 报错**：
+  - host 边界：`start_session(params.template_id)` 传规范形式（`agent:default`）——
+    适配器 provider 是 host 自己注册的，前缀由 host 自己掌握；
+  - LLM 边界：`subagent_template` 正常是 qualified 名（prompt 列表所示），
+    `resolve_qualified` 命中后返回规范 cap.id；LLM 写了不在列表里的裸名 →
+    原样透传 → `get_template` 报 `TemplateNotFoundError`（信息提示需用列表中的
+    qualified 名），该任务失败——**字面裸名透传能加载的旧行为不再保留**；
+  - `assemble()` 里 `or self._template_id` 的回落（subagent_template 为空时用会话
+    根模板）不变——session 的 template_id 现已是规范形式，口径自洽。
+- **存量数据**：resume / 冷 HITL / 手动 compact 的 template_id 来自 event store 重放
+  （SessionCreated 载荷），升级前的存量会话存的是裸 id，严格模式下不可恢复。
+  处理：**host DB 一次性迁移重写事件载荷**（见改动点 11），runtime 不留兼容逻辑。
 - **派发失败口径**：`TemplateNotFoundError` 在派发路径传播、该任务失败，不影响其他
   任务——与今天 `KeyError` 的传播行为相同，只是错误可读。
 - **describe()**：不为 `get_template` 增加 describe 字段（YAGNI）。
@@ -134,9 +159,10 @@ ctx-weft：
 
 1. 协议契约（`test_agent_capability_provider.py`）：`get_template` 委托 resolver、
    `KeyError`→`None`、version 透传；基类 `retrieve()` 默认 `[]`；`list()` 填 version。
-2. `TemplateLookup` 新单测：qualified 反查命中/未命中透传；多 provider 注册序首中；
-   单 provider 抛异常被跳过且不影响后续；全 miss 抛 `TemplateNotFoundError`
-   （含 provider 名单）。
+2. `TemplateLookup` 新单测：qualified 反查命中返回完整 cap.id / 未命中透传；
+   前缀精确路由（含多段 provider 名 rsplit 口径）；路由命中但 provider 返回 None →
+   `TemplateNotFoundError` 且不问其他 provider；裸 id → `TemplateNotFoundError`
+   （信息含规范形式提示）；provider 异常传播。
 3. 构造期：registry 无 `AgentCapabilityProvider` 时构造 runtime 抛 `ValueError`。
 4. 回归：`test_subagent_scoping.py` 语义不变（allowlist 仍靠 retrieve=[]），只改
    测试装配方式（显式注册适配器）；runtime 级冒烟——start_session + use_subagent
@@ -144,5 +170,8 @@ ctx-weft：
 
 IpMasterCoworkPy：
 
-5. `build_runtime()` 接线测试：registry 含适配器 provider、deps 拿到 resolver。
-   `test_template_resolver_merge.py` 等 resolver 自身测试不动。
+5. `build_runtime()` 接线测试：registry 含适配器 provider、deps 拿到 resolver；
+   start_session 边界传出规范 id。`test_template_resolver_merge.py` 等 resolver
+   自身测试不动。
+6. 迁移测试（`test_migrations.py`）：存量事件载荷裸 template_id 被重写为
+   `agent:` 前缀形式；已规范化的载荷幂等不动。
