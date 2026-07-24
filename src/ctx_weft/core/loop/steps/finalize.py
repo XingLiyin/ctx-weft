@@ -536,11 +536,15 @@ class FinalizeStep(Step):
         task_summary = verdict.task_summary if verdict else ""    # → 汇报给 parent 的 process report
         events: list[Any] = []
 
-        # retry 超过上限 → 降级 fail（不再重试）
-        if outcome == "retry" and task.retry_count >= task.max_retries:
+        # retry 超过上限 → 降级 fail（不再重试）。专属 error_code 区分「程序按重试上限
+        # 熔断」与 observer 主动判死；死因 = 最后一轮 retry 判决暂存的受阻原因（task.error，
+        # report_task_outcome 判 retry 时写入），机械退出轮没有判决则为空。
+        retry_exhausted = outcome == "retry" and task.retry_count >= task.max_retries
+        if retry_exhausted:
             outcome = "fail"
             task.status = "FAILED"
             task.observer_outcome = "fail"
+            task.error_code = "TASK_FAILED_RETRY_EXHAUSTED"
 
         terminal = outcome in ("success", "fail")
         # 汇报给 parent（blackboard + cross_agent bubble）= 最终输出 + task_summary（process report 作用）；
@@ -571,11 +575,12 @@ class FinalizeStep(Step):
             events.append(make_event(
                 state, EventType.TASK_FAILED,
                 payload={
-                    "error_code": "TASK_FAILED_BY_OBSERVER",
-                    # 真死因：task.error = observer 的 task_failure_reason（report_task_outcome
-                    # 判 fail 时写入）。无死因（规则 observe 判死等）置空——act_recap 是过程
-                    # 复述，不冒充死因；host 拿 error_message 当 session_notice.reason_text
-                    # 展示，空串由 host 按 error_code 补固定提示文案。
+                    "error_code": ("TASK_FAILED_RETRY_EXHAUSTED" if retry_exhausted
+                                   else "TASK_FAILED_BY_OBSERVER"),
+                    # 真死因：task.error = observer 的 task_failure_reason（判 fail 的根因，
+                    # 或判 retry 暂存的本轮受阻原因——耗尽降级时用）。无死因（规则 observe
+                    # 判死等）置空——act_recap 是过程复述，不冒充死因；host 拿 error_message
+                    # 当 session_notice.reason_text 展示，空串由 host 按 error_code 补固定文案。
                     "error_message": task.error or "",
                     "retry_count": task.retry_count,
                 },

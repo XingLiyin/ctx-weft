@@ -377,7 +377,7 @@ def report_task_outcome(
         "Don't over-think — once the situation is clear, call this tool promptly. "
         "'success' if completed successfully (give a thorough act_recap of the outcome and key steps); "
         "'retry' if this attempt fell short but is worth another try (act_recap describes what is missing, "
-        "next_step_hint the concrete next step); "
+        "task_failure_reason the concrete blocker of this attempt, next_step_hint the concrete next step); "
         "'fail' if it cannot be completed and should NOT be retried (act_recap/task_failure_reason explain why).",
     ],
     act_recap: Annotated[
@@ -396,9 +396,11 @@ def report_task_outcome(
     ] = "",
     task_failure_reason: Annotated[
         str,
-        "Required when task_status is 'fail'. "
-        "Explain specifically what went wrong: which step failed, what error or unexpected result was encountered, "
-        "and what the root cause is. Leave empty for non-fail outcomes.",
+        "Required when task_status is 'fail' or 'retry'. "
+        "For 'fail': explain specifically what went wrong: which step failed, what error or unexpected result "
+        "was encountered, and what the root cause is. "
+        "For 'retry': state what concretely blocked or fell short in this attempt — if the retry limit is hit, "
+        "this is shown to the user as the failure reason. Leave empty only for 'success'.",
     ] = "",
     task_reviews: Annotated[
         list,
@@ -455,6 +457,7 @@ def report_task_outcome(
         task.observer_outcome = task_status
         if task_status == "success":
             task.status = "FINISHED"
+            task.error = None  # 清掉上一轮 retry 暂存的受阻原因，FINISHED 任务不携带 error
             task.actor_done = True
         elif task_status == "fail":
             task.status = "FAILED"
@@ -462,6 +465,9 @@ def report_task_outcome(
             task.actor_done = True
         else:  # retry
             task.status = "PENDING"
+            # 本轮受阻原因暂存 task.error：retry 耗尽降级 fail 时它就是真死因
+            # （finalize 发 TASK_FAILED_RETRY_EXHAUSTED 携带）；下一轮判决必然覆盖或清空。
+            task.error = task_failure_reason or None
             task.actor_done = True
 
     review_msg = ""

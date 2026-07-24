@@ -47,6 +47,26 @@ def test_assessment_fail() -> None:
     assert t.error == "root cause"
 
 
+def test_assessment_retry_records_blocker() -> None:
+    """retry 判决的 task_failure_reason（本轮受阻原因）落 task.error——耗尽降级时即真死因。"""
+    t = _task(outputs="partial")
+    report_task_outcome(
+        task_status="retry", act_recap="more needed",
+        task_failure_reason="登录页有人机校验，自动化被拦", ctx=_ctx(t),
+    )
+    assert t.error == "登录页有人机校验，自动化被拦"
+    assert t.status == "PENDING"
+
+
+def test_assessment_success_clears_stale_blocker() -> None:
+    """上一轮 retry 留下的受阻原因不得残留在 FINISHED 任务上。"""
+    t = _task(outputs="done")
+    t.error = "旧受阻原因"
+    report_task_outcome(task_status="success", act_recap="ok", ctx=_ctx(t))
+    assert t.error is None
+    assert t.status == "FINISHED"
+
+
 def test_assessment_retry() -> None:
     t = _task(outputs="partial")
     report_task_outcome(
