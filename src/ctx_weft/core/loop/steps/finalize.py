@@ -13,7 +13,7 @@ from typing import Any
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.events import EventType
 from ctx_weft.core.utils import as_utc, content_to_text, generate_id, now_utc
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryLayer, MemoryAddress
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress
 from ctx_weft.protocols.capability import qualify
 
 logger = logging.getLogger(__name__)
@@ -65,10 +65,10 @@ async def _find_dispatch_frame(memory, parent_scope, task, provider_ctx):
     供 `_ensure_dispatch_frame`（find+create）与 `synthesize_cancel_closure`（find-only，
     born-cancel 未铸框时整体跳过、不补铸）共用。
     """
-    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
     existing = await memory.load_view(
         MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
-        MemoryLayer.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
+        MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     frame = next(
         (r for r in existing
          if r.role == "assistant"
@@ -115,7 +115,7 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     ts = _as_utc(task.started_at or task.created_at or now_utc())
     await memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=parent_scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=parent_scope,
             content="", timestamp=ts, role="assistant",
             metadata={"origin_task_id": task.parent_task_id,
                       "parent_task_id": task.parent_task_id,
@@ -148,10 +148,10 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
       同一 tool_call_id 若有两条 active result，reorder_tool_results_after_calls 会把两条
       都排到框之后，于是「在跑」和「已完成」并列出现。
     """
-    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
     recs = await memory.load_view(
         MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
-        MemoryLayer.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
+        MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     stale = [r.id for r in recs
              if r.role == "tool" and r.metadata.get("tool_call_id") == task.origin_tool_call_id]
     if stale and not replace:
@@ -159,7 +159,7 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
     # v2 P3d：旧 ack 遗忘 + 终态写入一次原子 fold（stale 空 = 纯写入）
     await memory.fold(stale, [
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=parent_scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=parent_scope,
             content=content, timestamp=ts, role="tool",
             metadata={"origin_task_id": task.parent_task_id,
                       "tool_call_id": task.origin_tool_call_id},
@@ -252,11 +252,11 @@ async def _is_short_leaf(memory, scope, task, loop_config, ctx, has_descendants:
     """叶子(无后代) 且 对话 token ≤ threshold 且 LLM_RESPONSE 轮次 ≤ turn_cap → short。"""
     if has_descendants:
         return False  # 非叶（委派过子任务）永不 short
-    from ctx_weft.protocols import MemoryKind, MemoryLayer
+    from ctx_weft.protocols import MemoryKind, MemoryScope
     # v2 P3a：全 task 层视图（对话+摘要+audit = 旧 _OWN_CONV_TYPES 五类型）一次取回，
     # assistant 轮次与 token 估算共用。
     records = await memory.load_view(
-        scope, MemoryLayer.TASK, ctx.provider_ctx,
+        scope, MemoryScope.TASK, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT])
     n_assistant = sum(
         1 for r in records
@@ -308,10 +308,10 @@ async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
     补删（background_observe close 回调）。**不另产新 TASK_COMPACT_SUMMARY**（避免与 finish
     对重复）。幂等：raw 已删则 no-op。
     """
-    from ctx_weft.protocols import MemoryKind, MemoryLayer
+    from ctx_weft.protocols import MemoryKind, MemoryScope
     # v2 P3a：升序视图（对话 + audit，SUMMARY 锚点天然不在），段界 = 末条 role=user 回合。
     view = await memory.load_view(
-        scope, MemoryLayer.TASK, provider_ctx,
+        scope, MemoryScope.TASK, provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT])
     ids: list[str] = []
     for r in view:
@@ -491,7 +491,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
 
     await memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=scope,
             content=act_recap, timestamp=base, role="assistant",
             metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
                       "tool_calls": [{"id": tool_call_id,
@@ -502,7 +502,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     )
     await memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=scope,
             content=f"{report_prefix}{summary_text}", timestamp=base, role="tool",
             metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
                       "tool_call_id": tool_call_id},
@@ -598,7 +598,7 @@ class FinalizeStep(Step):
         if outcome == "success" and mem_content:
             await ctx.memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.PUBLICATION, layer=MemoryLayer.SESSION,
+                    kind=MemoryKind.PUBLICATION, layer=MemoryScope.SESSION,
                     scope=state.scope,
                     content=mem_content,
                     timestamp=now_utc(),

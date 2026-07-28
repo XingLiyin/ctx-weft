@@ -11,7 +11,7 @@ from typing import Any
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.events import EventType
 from ctx_weft.core.utils import now_utc
-from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryLayer
+from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class SuspendStep(Step):
         if task.user_prompt and not task.user_prompt_in_memory:
             await ctx.memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+                    kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
                     scope=state.scope,
                     content=task.user_prompt,
                     timestamp=now_utc(),

@@ -14,7 +14,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
     MemoryEventType,
-    MemoryLayer,
+    MemoryScope,
     ProviderContext,
 )
 from ctx_weft.protocols.memory_compat import MemoryKind
@@ -34,7 +34,7 @@ def _legacy(type_: MemoryEventType, content: str, minute: int, *,
     )
 
 
-def _v2(kind: MemoryKind, layer: MemoryLayer, content: str, minute: int, *,
+def _v2(kind: MemoryKind, layer: MemoryScope, content: str, minute: int, *,
         task_id: str | None = "t1", agent_id: str | None = "a1",
         role: str | None = None) -> MemoryEvent:
     return MemoryEvent(
@@ -50,13 +50,13 @@ async def test_load_view_ascending_and_default_kinds() -> None:
     await m.ingest(_legacy(MemoryEventType.LLM_RESPONSE, "resp", 2, role="assistant"), _ctx())
 
     view = await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
-                             MemoryLayer.TASK, _ctx())
+                             MemoryScope.TASK, _ctx())
     # 默认 kinds = CONVERSATION_TURN + SUMMARY：audit 不在；升序（旧→新）
     assert [r.content for r in view] == ["up", "resp"]
     assert all(r.kind is MemoryKind.CONVERSATION_TURN for r in view)
 
     audit = await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
-                              MemoryLayer.TASK, _ctx(), kinds=[MemoryKind.TOOL_AUDIT])
+                              MemoryScope.TASK, _ctx(), kinds=[MemoryKind.TOOL_AUDIT])
     assert [r.content for r in audit] == ["audit"]
 
 
@@ -66,7 +66,7 @@ async def test_load_view_cross_task_by_agent() -> None:
     await m.ingest(_legacy(MemoryEventType.USER_PROMPT, "two", 1, task_id="tB", role="user"), _ctx())
 
     view = await m.load_view(MemoryAddress(session_id="s1", agent_id="a1"),
-                             MemoryLayer.TASK, _ctx())
+                             MemoryScope.TASK, _ctx())
     assert [r.content for r in view] == ["one", "two"]
     assert [r.address.task_id for r in view] == ["tA", "tB"]  # 来源回显
 
@@ -74,23 +74,23 @@ async def test_load_view_cross_task_by_agent() -> None:
 async def test_load_view_half_address_validation() -> None:
     m = InMemoryMemoryProvider()
     with pytest.raises(ValueError):
-        await m.load_view(MemoryAddress(session_id="s1"), MemoryLayer.TASK, _ctx())
+        await m.load_view(MemoryAddress(session_id="s1"), MemoryScope.TASK, _ctx())
     with pytest.raises(ValueError):
         await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
-                          MemoryLayer.AGENT, _ctx())
+                          MemoryScope.AGENT, _ctx())
     with pytest.raises(ValueError):
         await m.load_view(MemoryAddress(session_id="s1", agent_id="a1"),
-                          MemoryLayer.SESSION, _ctx())
+                          MemoryScope.SESSION, _ctx())
 
 
 async def test_load_view_sees_both_vocabularies() -> None:
     m = InMemoryMemoryProvider()
     await m.ingest(_legacy(MemoryEventType.USER_PROMPT, "old-vocab", 0, role="user"), _ctx())
-    await m.ingest(_v2(MemoryKind.CONVERSATION_TURN, MemoryLayer.TASK, "new-vocab", 1,
+    await m.ingest(_v2(MemoryKind.CONVERSATION_TURN, MemoryScope.TASK, "new-vocab", 1,
                        role="assistant"), _ctx())
 
     view = await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
-                             MemoryLayer.TASK, _ctx())
+                             MemoryScope.TASK, _ctx())
     assert [r.content for r in view] == ["old-vocab", "new-vocab"]
     assert all(r.kind is MemoryKind.CONVERSATION_TURN for r in view)  # kind 统一重打
 
@@ -105,7 +105,7 @@ async def test_load_view_excludes_superseded_and_dead_types() -> None:
     await m.supersede([rid], _ctx())
 
     view = await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
-                             MemoryLayer.TASK, _ctx())
+                             MemoryScope.TASK, _ctx())
     assert view == []
 
 
@@ -113,8 +113,8 @@ async def test_recall_recent_wrapper_matches_v2_rows() -> None:
     """过渡期桥接：v2 行可被旧 type 请求读到；newest-first + limit 语义不变。"""
     m = InMemoryMemoryProvider()
     await m.ingest(_legacy(MemoryEventType.USER_PROMPT, "l-up", 0, role="user"), _ctx())
-    await m.ingest(_v2(MemoryKind.CONVERSATION_TURN, MemoryLayer.TASK, "v-up", 1, role="user"), _ctx())
-    await m.ingest(_v2(MemoryKind.CONVERSATION_TURN, MemoryLayer.TASK, "v-resp", 2,
+    await m.ingest(_v2(MemoryKind.CONVERSATION_TURN, MemoryScope.TASK, "v-up", 1, role="user"), _ctx())
+    await m.ingest(_v2(MemoryKind.CONVERSATION_TURN, MemoryScope.TASK, "v-resp", 2,
                        role="assistant"), _ctx())
 
     recs = await m.recall_recent(

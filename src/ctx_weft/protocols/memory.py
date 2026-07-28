@@ -37,7 +37,7 @@ class MemoryEventType(StrEnum):
     内容筛选）且两套回合编码并存（task 层 type 区分 / agent 层 role+metadata 区分），框架机制
     演进屡次穿透协议铸新类型、事后僵尸化。v2 沿「内容种类」慢轴重画，方法面 11 → 8：
       kind:  CONVERSATION_TURN | SUMMARY | TOOL_AUDIT | PUBLICATION（封死，永不为新机制扩）
-      scope: TASK | AGENT | SESSION —— 归属范围（原 MemoryLayer 更名；"层"误导纵向堆叠，实为
+      scope: TASK | AGENT | SESSION —— 归属范围（原 MemoryScope 更名；"层"误导纵向堆叠，实为
         横向归属分区），MemoryEvent 显式字段，EVENT_LAYER 退役为 legacy 兜底；可随执行模型
         缓慢生长（如将来的 USER/TENANT）
       address: MemoryAddress（原 MemoryAddress 数据类更名——它是坐标不是范围）：全址 = ingest
@@ -77,35 +77,40 @@ class MemoryEventType(StrEnum):
     COMPACT_SUMMARY = "compact_summary"    # 死类型：已无写点（apply_compact 按层写 TASK/AGENT_COMPACT_SUMMARY）；读侧仅 prepare 估算仍带到
 
 
-class MemoryLayer(StrEnum):
-    """Memory 分层（spec/06 §2）。scope key 与 seq 计数按层分区。
+class MemoryScope(StrEnum):
+    """归属范围（v2 §2 · P4c 终名，原 MemoryLayer）：这条记忆归谁。
 
-    【目标形态更名 MemoryAddress】"层"误导为纵向抽象堆叠，实为横向归属分区（这条记忆归谁：
-    task-scoped 私有转录 / agent-scoped 跨 task 经验 / session-scoped 共享黑板）；
-    见 v2 设计 §2 命名注记。"""
+    task-scoped 私有执行转录 / agent-scoped 跨 task 经验 / session-scoped 共享黑板。
+    横向归属分区（非纵向抽象堆叠）；成员可随执行模型缓慢生长（如将来的 USER/TENANT）。
+    scope key 与 seq 计数按分区隔离。"""
 
     TASK = "task"        # tenant|session|task|<task_id>
     AGENT = "agent"      # tenant|session|agent|<agent_id>
     SESSION = "session"  # tenant|session
 
 
+# host 兼容别名（P4c）：host postgres provider 仍 import MemoryLayer；host 迁移
+# 完成后独立 PR 删除。新代码一律 MemoryScope。
+MemoryLayer = MemoryScope
+
+
 # 事件类型 → 层（spec/06 §3）。唯一映射，ingest/recall 据此选 scope key。
 # 注：「type 唯一决定层」已在松动——apply_compact 显式传 layer、provider recall 宽容混层；
 # 目标形态下 layer 是 MemoryEvent 显式字段，本映射仅为 legacy 类型兜底（见 MemoryEventType docstring）。
-EVENT_LAYER: dict[MemoryEventType, MemoryLayer] = {
-    MemoryEventType.USER_PROMPT: MemoryLayer.TASK,
-    MemoryEventType.LLM_RESPONSE: MemoryLayer.TASK,
-    MemoryEventType.TOOL_INVOCATION: MemoryLayer.TASK,
-    MemoryEventType.TOOL_RESULT: MemoryLayer.TASK,
-    MemoryEventType.TASK_COMPACT_SUMMARY: MemoryLayer.TASK,
-    MemoryEventType.AGENT_COMPACT_SUMMARY: MemoryLayer.AGENT,
-    MemoryEventType.AGENT_CONVERSATION_TURN: MemoryLayer.AGENT,
-    MemoryEventType.BLACKBOARD_PUBLISH: MemoryLayer.SESSION,
+EVENT_LAYER: dict[MemoryEventType, MemoryScope] = {
+    MemoryEventType.USER_PROMPT: MemoryScope.TASK,
+    MemoryEventType.LLM_RESPONSE: MemoryScope.TASK,
+    MemoryEventType.TOOL_INVOCATION: MemoryScope.TASK,
+    MemoryEventType.TOOL_RESULT: MemoryScope.TASK,
+    MemoryEventType.TASK_COMPACT_SUMMARY: MemoryScope.TASK,
+    MemoryEventType.AGENT_COMPACT_SUMMARY: MemoryScope.AGENT,
+    MemoryEventType.AGENT_CONVERSATION_TURN: MemoryScope.AGENT,
+    MemoryEventType.BLACKBOARD_PUBLISH: MemoryScope.SESSION,
     # legacy 类型（写侧已死，读侧兼容存量）
-    MemoryEventType.TASK_DISPATCH: MemoryLayer.AGENT,
-    MemoryEventType.TASK_DISPATCH_RESULT: MemoryLayer.AGENT,
-    MemoryEventType.OBSERVER_SUMMARY: MemoryLayer.AGENT,
-    MemoryEventType.COMPACT_SUMMARY: MemoryLayer.AGENT,
+    MemoryEventType.TASK_DISPATCH: MemoryScope.AGENT,
+    MemoryEventType.TASK_DISPATCH_RESULT: MemoryScope.AGENT,
+    MemoryEventType.OBSERVER_SUMMARY: MemoryScope.AGENT,
+    MemoryEventType.COMPACT_SUMMARY: MemoryScope.AGENT,
 }
 
 
@@ -121,7 +126,7 @@ class MemoryAddress:
 
     【目标形态更名 MemoryAddress】它是坐标不是范围：全址 = ingest 归档地址，
     半址 = load_view 过滤模式（None 字段 = 通配）；"scope" 一名让位给归属范围枚举
-    （原 MemoryLayer）。见 v2 设计 §3。"""
+    （原 MemoryScope）。见 v2 设计 §3。"""
 
     session_id: str
     task_id: str | None = None
@@ -129,7 +134,7 @@ class MemoryAddress:
 
 
 # v2 正名（P4b-1 完成实体互换）：类本体即 MemoryAddress；旧名 MemoryScope 进入
-# 名字真空（P4c 由归属范围枚举 MemoryLayer 接名）——漏网引用是 loud NameError。
+# 名字真空（P4c 由归属范围枚举 MemoryScope 接名）——漏网引用是 loud NameError。
 
 
 @dataclass
@@ -153,7 +158,7 @@ class MemoryEvent:
     # v2 词汇（设计 §2）：kind = 内容种类（memory_compat.MemoryKind），layer = 归属范围。
     # 前向引用避免 memory ↔ memory_compat 循环 import。
     kind: "Any | None" = None
-    layer: MemoryLayer | None = None
+    layer: MemoryScope | None = None
     role: Literal["user", "assistant", "system", "tool"] | None = None
     topic: str | None = None  # 用于 topic-style 事件（含父子 task 通信）
     causation_id: str | None = None  # 关联上游 event
@@ -172,12 +177,12 @@ class MemoryEvent:
             # v2-native：layer 必须显式 + §4 全址不变量（legacy 构造不强制，迁移期宽松）
             if self.layer is None:
                 raise ValueError("v2 MemoryEvent (kind given) requires explicit layer")
-            if self.layer is MemoryLayer.TASK:
+            if self.layer is MemoryScope.TASK:
                 if not (self.scope.task_id and self.scope.agent_id):
                     raise ValueError(
                         "TASK-scoped v2 event requires full address (task_id AND agent_id); "
                         f"got {self.scope!r}")
-            elif self.layer is MemoryLayer.AGENT:
+            elif self.layer is MemoryScope.AGENT:
                 if not self.scope.agent_id:
                     raise ValueError(
                         f"AGENT-scoped v2 event requires agent_id; got {self.scope!r}")
@@ -200,7 +205,7 @@ class MemoryRecord:
     topic: str | None = None
     score: float | None = None  # 仅 recall_semantic 时填
     kind: "Any | None" = None            # v2：memory_compat.MemoryKind（避循环 import 不注真型）
-    layer: MemoryLayer | None = None     # v2：归属范围
+    layer: MemoryScope | None = None     # v2：归属范围
     address: "MemoryAddress | None" = None  # v2：来源回显（P4 类名换为 MemoryAddress 本体）
     metadata: dict = field(default_factory=dict)
 
@@ -288,7 +293,7 @@ class MemoryProvider(Protocol):
     async def load_view(
         self,
         address: "MemoryAddress",
-        scope: MemoryLayer,
+        scope: MemoryScope,
         ctx: ProviderContext,
         kinds: "list[Any] | None" = None,
     ) -> list[MemoryRecord]:

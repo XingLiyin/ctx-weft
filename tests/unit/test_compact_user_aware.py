@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, UTC
 from ctx_weft.core.loop.steps.segment_fold import segment_fold
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
-    MemoryAddress, MemoryEvent, MemoryEventType, MemoryLayer, MemoryAddress,
+    MemoryAddress, MemoryEvent, MemoryEventType, MemoryScope, MemoryAddress,
 )
 from ctx_weft.protocols.context import ProviderContext
 
@@ -39,7 +39,7 @@ async def test_segment_fold_protects_user_prompts_and_prior_segment():
     await _ingest(p, MemoryEventType.USER_PROMPT, "HITL回复", base + timedelta(seconds=3), "user")
     await _ingest(p, MemoryEventType.LLM_RESPONSE, "想法2", base + timedelta(seconds=4), "assistant")
 
-    await segment_fold(p, _scope(), MemoryLayer.TASK, "段摘要", _ctx())
+    await segment_fold(p, _scope(), MemoryScope.TASK, "段摘要", _ctx())
 
     recs = await p.recall_recent(
         _scope(),
@@ -68,7 +68,7 @@ async def test_task_segment_summary_role_is_assistant():
     await _ingest(p, MemoryEventType.USER_PROMPT, "原始诉求", base, "user")
     await _ingest(p, MemoryEventType.LLM_RESPONSE, "想法", base + timedelta(seconds=1), "assistant")
 
-    await segment_fold(p, _scope(), MemoryLayer.TASK, "段摘要", _ctx())
+    await segment_fold(p, _scope(), MemoryScope.TASK, "段摘要", _ctx())
 
     recs = await p.recall_recent(_scope(), [MemoryEventType.TASK_COMPACT_SUMMARY], 100, _ctx())
     assert len(recs) == 1
@@ -93,7 +93,7 @@ async def test_agent_layer_summary_role_stays_user():
     ), _ctx())
 
     await segment_fold(
-        p, MemoryAddress(session_id="s1", agent_id="a1"), MemoryLayer.AGENT, "派发摘要", _ctx())
+        p, MemoryAddress(session_id="s1", agent_id="a1"), MemoryScope.AGENT, "派发摘要", _ctx())
 
     recs = await p.recall_recent(_scope(), [MemoryEventType.AGENT_COMPACT_SUMMARY], 100, _ctx())
     assert len(recs) == 1

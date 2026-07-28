@@ -14,7 +14,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
     MemoryKind,
-    MemoryLayer,
+    MemoryScope,
     ProviderContext,
 )
 
@@ -27,19 +27,19 @@ def _ctx() -> ProviderContext:
 
 
 def _turn(content: str, minute: int, role: str) -> MemoryEvent:
-    return MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+    return MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
                        scope=_ADDR, content=content,
                        timestamp=_T0 + timedelta(minutes=minute), role=role)
 
 
 def _summary(content: str, minute: int) -> MemoryEvent:
-    return MemoryEvent(kind=MemoryKind.SUMMARY, layer=MemoryLayer.TASK,
+    return MemoryEvent(kind=MemoryKind.SUMMARY, layer=MemoryScope.TASK,
                        scope=_ADDR, content=content, role="assistant",
                        timestamp=_T0 + timedelta(minutes=minute))
 
 
 async def _view(m: InMemoryMemoryProvider) -> list[tuple[str, str]]:
-    view = await m.load_view(_ADDR, MemoryLayer.TASK, _ctx())
+    view = await m.load_view(_ADDR, MemoryScope.TASK, _ctx())
     return [(str(r.kind), r.content) for r in view]
 
 
@@ -51,7 +51,7 @@ async def test_folds_only_current_segment_after_last_user_turn() -> None:
     await m.ingest(_turn("A2", 3, "assistant"), _ctx())
     await m.ingest(_turn("T2", 4, "tool"), _ctx())
 
-    result = await segment_fold(m, _ADDR, MemoryLayer.TASK, "recap", _ctx())
+    result = await segment_fold(m, _ADDR, MemoryScope.TASK, "recap", _ctx())
 
     assert isinstance(result, SegmentFoldResult)
     assert result.summary_event_id
@@ -60,7 +60,7 @@ async def test_folds_only_current_segment_after_last_user_turn() -> None:
     assert "A2" not in contents and "T2" not in contents
     assert "recap" in contents
     # 段摘要 role=assistant（TASK 层自述体）
-    view = await m.load_view(_ADDR, MemoryLayer.TASK, _ctx())
+    view = await m.load_view(_ADDR, MemoryScope.TASK, _ctx())
     recap = next(r for r in view if r.content == "recap")
     assert recap.role == "assistant" and recap.kind is MemoryKind.SUMMARY
 
@@ -71,7 +71,7 @@ async def test_protects_user_turns_and_summaries() -> None:
     await m.ingest(_summary("S-old", 1), _ctx())   # 段内旧摘要（多段累积）不得被吞
     await m.ingest(_turn("A1", 2, "assistant"), _ctx())
 
-    await segment_fold(m, _ADDR, MemoryLayer.TASK, "S-new", _ctx())
+    await segment_fold(m, _ADDR, MemoryScope.TASK, "S-new", _ctx())
 
     contents = [c for _, c in await _view(m)]
     assert "UP1" in contents and "S-old" in contents
@@ -86,7 +86,7 @@ async def test_anchor_lands_before_following_survivor() -> None:
     await m.ingest(_summary("S-mid", 2), _ctx())   # 折区中幸存的摘要
     await m.ingest(_turn("A2", 3, "assistant"), _ctx())
 
-    await segment_fold(m, _ADDR, MemoryLayer.TASK, "recap", _ctx())
+    await segment_fold(m, _ADDR, MemoryScope.TASK, "recap", _ctx())
 
     contents = [c for _, c in await _view(m)]
     assert contents == ["UP1", "recap", "S-mid"], f"锚点应在幸存摘要之前: {contents}"
@@ -98,7 +98,7 @@ async def test_segment_tail_anchor_does_not_use_now() -> None:
     await m.ingest(_turn("UP1", 0, "user"), _ctx())
     await m.ingest(_turn("A1", 1, "assistant"), _ctx())
 
-    await segment_fold(m, _ADDR, MemoryLayer.TASK, "recap", _ctx())
+    await segment_fold(m, _ADDR, MemoryScope.TASK, "recap", _ctx())
     # 模拟迟到收尾后新一轮消息（更晚墙钟）
     await m.ingest(_turn("UP-new", 90, "user"), _ctx())
 
@@ -112,7 +112,7 @@ async def test_counts_reported() -> None:
     await m.ingest(_turn("A1", 1, "assistant"), _ctx())
     await m.ingest(_turn("T1", 2, "tool"), _ctx())
 
-    result = await segment_fold(m, _ADDR, MemoryLayer.TASK, "recap", _ctx())
+    result = await segment_fold(m, _ADDR, MemoryScope.TASK, "recap", _ctx())
     # before：UP+A+T = 3；after：UP + 摘要 = 2
     assert result.events_before == 3
     assert result.events_after == 2

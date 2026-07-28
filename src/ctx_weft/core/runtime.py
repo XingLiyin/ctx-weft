@@ -63,7 +63,7 @@ from ctx_weft.protocols import (
     KnowledgeProvider,
     LLMOutageError,
     MemoryKind,
-    MemoryLayer,
+    MemoryScope,
     MemoryProvider,
     MemoryAddress,
     ProviderContext,
@@ -128,16 +128,16 @@ async def _copy_memory_for_inherit(
     # (their start_task frame precedes them, so no naked leak) and cross-agent siblings arrive as
     # bubbles. AGENT_COMPACT_SUMMARY is still excluded — the parent's folded black-box dispatch log
     # is of little use to a child.
-    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
     # v2 P3a：body = TASK 视图默认 kinds（对话+段摘要，跨 task 半址）；frames = AGENT 视图
     # conversation turn（AGENT_COMPACT_SUMMARY = SUMMARY kind，天然排除）。
     body_records = await memory.load_view(
         MemoryAddress(session_id=session_id, agent_id=parent_agent_id),
-        MemoryLayer.TASK, ctx,
+        MemoryScope.TASK, ctx,
     )
     frame_records = await memory.load_view(
         MemoryAddress(session_id=session_id, agent_id=parent_agent_id),
-        MemoryLayer.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN],
+        MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN],
     )
     combined = sorted(
         [*body_records, *frame_records],
@@ -152,7 +152,7 @@ async def _copy_memory_for_inherit(
             md["tool_call_id"] = r.metadata["tool_call_id"]
         await memory.ingest(
             MemoryEvent(
-                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT,
+                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT,
                 scope=child_scope,
                 content=r.content,
                 timestamp=r.timestamp,
@@ -1179,11 +1179,11 @@ class CtxWeftRuntime:
         self, memory: MemoryProvider, scope: MemoryAddress, task_id: str, pctx: ProviderContext,
     ) -> str | None:
         """从 memory 找该 task close 时写的占位 finish 对 assistant turn，返回其 finish_task tool_call id。"""
-        from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+        from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
         fin = qualify("control:finish_task")
         view = await memory.load_view(
             MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
-            MemoryLayer.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN],
+            MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN],
         )
         for r in reversed(view):  # 新→旧：多副本时最新的 finish 对胜出（同旧 newest-first 语义）
             if r.role == "assistant" and r.metadata.get("origin_task_id") == task_id:
@@ -1440,7 +1440,7 @@ class CtxWeftRuntime:
                 content = interrupt_edit_note(prev, content)
         await self.providers.get_memory().ingest(
             MemoryEvent(
-                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
                 scope=scope,
                 content=content,
                 timestamp=now_utc(),
@@ -1458,10 +1458,10 @@ class CtxWeftRuntime:
 
     async def _last_user_prompt(self, scope: MemoryAddress, pctx: ProviderContext) -> str:
         """取 scope 内最近一条 USER_PROMPT 内容（供 ① 打断续接的「上一条取消」说明）。"""
-        from ctx_weft.protocols import MemoryKind, MemoryLayer
+        from ctx_weft.protocols import MemoryKind, MemoryScope
         try:
             view = await self.providers.get_memory().load_view(
-                scope, MemoryLayer.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN],
+                scope, MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN],
             )
         except Exception:
             return ""

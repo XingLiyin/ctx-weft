@@ -24,16 +24,16 @@ class _FakeMem:
 
     async def load_view(self, address, scope, ctx, kinds=None):
         from datetime import datetime, timezone
-        from ctx_weft.protocols import MemoryKind, MemoryLayer, MemoryRecord
-        if scope is not MemoryLayer.TASK or self._count <= 0:
+        from ctx_weft.protocols import MemoryKind, MemoryScope, MemoryRecord
+        if scope is not MemoryScope.TASK or self._count <= 0:
             return []
         t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
         return [
             MemoryRecord(id="up", type=None, content="u", timestamp=t0, role="user",
-                         kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK),
+                         kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK),
             MemoryRecord(id="a1", type=None, content="x",
                          timestamp=t0.replace(minute=1), role="assistant",
-                         kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK),
+                         kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK),
         ]
 
     async def fold(self, supersede_ids, replacements, ctx):

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.events import EventType
-from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryLayer
+from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryScope
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
     request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
@@ -473,7 +473,7 @@ class ObserveStep(Step):
         # 锚点/段尾语义）由框架侧 segment_fold 执行原子 fold（与 bg 段折同门）。
         from ctx_weft.core.loop.steps.segment_fold import segment_fold
         result = await segment_fold(
-            ctx.memory, state.scope, MemoryLayer.TASK, summary, ctx.provider_ctx,
+            ctx.memory, state.scope, MemoryScope.TASK, summary, ctx.provider_ctx,
         )
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "events_before": result.events_before,

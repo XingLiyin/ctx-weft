@@ -92,8 +92,8 @@ async def test_agent_recall_heading_only_for_current_task_summary():
 
     class _M:
         async def load_view(self, address, scope, ctx, kinds=None):
-            from ctx_weft.protocols import MemoryLayer
-            return [cur, other] if scope is MemoryLayer.TASK else []
+            from ctx_weft.protocols import MemoryScope
+            return [cur, other] if scope is MemoryScope.TASK else []
 
     deps = SimpleNamespace(memory=_M(),
                            provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
@@ -110,15 +110,15 @@ class _Mem:
     """v2 fake：load_view 按 provider 契约返回 kind 已重打的记录。"""
     def __init__(self, agent_recs): self._agent_recs = agent_recs
     async def load_view(self, address, scope, ctx, kinds=None):
-        from ctx_weft.protocols import MemoryLayer
-        return self._agent_recs if scope is MemoryLayer.AGENT else []
+        from ctx_weft.protocols import MemoryScope
+        return self._agent_recs if scope is MemoryScope.AGENT else []
 
 
 @pytest.mark.asyncio
 async def test_agent_compact_summary_rendered_wrapped():
-    from ctx_weft.protocols import MemoryKind, MemoryLayer
+    from ctx_weft.protocols import MemoryKind, MemoryScope
     rec = _rec(T.AGENT_COMPACT_SUMMARY, "### 既往派发摘要\nY")
-    rec.kind, rec.layer = MemoryKind.SUMMARY, MemoryLayer.AGENT  # provider 契约：kind 已重打
+    rec.kind, rec.layer = MemoryKind.SUMMARY, MemoryScope.AGENT  # provider 契约：kind 已重打
     deps = SimpleNamespace(memory=_Mem([rec]), provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
     req = SimpleNamespace(scope=MemoryAddress(session_id="s1", agent_id="a1"),
                           token_counter=estimate_tokens)
@@ -135,8 +135,8 @@ async def test_agent_layer_recall_uses_uncapped_load_view():
 
     class _SpyMem:
         async def load_view(self, address, scope, ctx, kinds=None):
-            from ctx_weft.protocols import MemoryLayer
-            if scope is MemoryLayer.AGENT:
+            from ctx_weft.protocols import MemoryScope
+            if scope is MemoryScope.AGENT:
                 calls.append({"address": address, "kinds": kinds})
             return []
 

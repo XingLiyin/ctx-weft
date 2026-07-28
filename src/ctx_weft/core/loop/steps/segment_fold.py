@@ -27,7 +27,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
     MemoryKind,
-    MemoryLayer,
+    MemoryScope,
     MemoryProvider,
     ProviderContext,
 )
@@ -55,7 +55,7 @@ def _protected(r) -> bool:
 async def segment_fold(
     memory: MemoryProvider,
     address: MemoryAddress,
-    layer: MemoryLayer,
+    layer: MemoryScope,
     summary: str,
     ctx: ProviderContext,
 ) -> SegmentFoldResult:
@@ -91,7 +91,7 @@ async def segment_fold(
         scope=address,
         content=summary,
         timestamp=summary_ts,
-        role="assistant" if layer is MemoryLayer.TASK else "user",
+        role="assistant" if layer is MemoryScope.TASK else "user",
         metadata={"keep_last": 0, "archived_count": len(to_archive)},
     )
     new_ids = await memory.fold([r.id for r in to_archive], [summary_event], ctx)

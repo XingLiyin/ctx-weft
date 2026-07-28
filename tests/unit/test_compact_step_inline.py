@@ -51,9 +51,9 @@ class _FakeMemory:
 
     async def load_view(self, address, scope, ctx, kinds=None):
         # v2：AGENT 视图（root residue 查询）→ 空；TASK 视图 → counts 推升序 user 回合
-        from ctx_weft.protocols import MemoryLayer
+        from ctx_weft.protocols import MemoryScope
         from ctx_weft.protocols.memory_compat import MemoryKind
-        if scope is MemoryLayer.AGENT:
+        if scope is MemoryScope.AGENT:
             return []
         max_n = max(
             (v for k, v in self._counts.items() if T.AGENT_CONVERSATION_TURN not in k),
@@ -62,7 +62,7 @@ class _FakeMemory:
         return [
             SimpleNamespace(
                 id=str(i), type=T.USER_PROMPT, content=f"msg {i}", role="user",
-                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
                 address=None, metadata={},
                 timestamp=_BASE_DT + timedelta(seconds=i),
             )

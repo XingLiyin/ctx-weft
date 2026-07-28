@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.assembler.sources._history import record_to_history_block, wrap_compact_summary
 from ctx_weft.core.utils import content_to_text, generate_id
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
 from ctx_weft.protocols.memory_compat import legacy_type_of as _legacy_type_of
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ class AgentRecallSource:
         task_records = await deps.memory.load_view(
             MemoryAddress(session_id=request.scope.session_id,
                           agent_id=request.scope.agent_id),
-            MemoryLayer.TASK,
+            MemoryScope.TASK,
             deps.provider_ctx,
         )
         # 当前 task 的段摘要冠 ## Progress So Far（record_to_history_block 按 task_id 匹配）；
@@ -75,7 +75,7 @@ class AgentRecallSource:
         agent_records = await deps.memory.load_view(
             MemoryAddress(session_id=request.scope.session_id,
                           agent_id=request.scope.agent_id),
-            MemoryLayer.AGENT,
+            MemoryScope.AGENT,
             deps.provider_ctx,
         )
 

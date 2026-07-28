@@ -15,7 +15,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from ctx_weft.protocols.memory import EVENT_LAYER, MemoryEventType, MemoryLayer
+from ctx_weft.protocols.memory import EVENT_LAYER, MemoryEventType, MemoryScope
 
 if TYPE_CHECKING:
     from ctx_weft.protocols.memory import MemoryRecord
@@ -31,18 +31,18 @@ class MemoryKind(StrEnum):
 
 
 # 旧 type → (kind, layer, role 约束)。role=None 表示该词汇不含 role 约束。
-LEGACY_TRIPLE: dict[MemoryEventType, tuple[MemoryKind, MemoryLayer, str | None]] = {
-    MemoryEventType.USER_PROMPT: (MemoryKind.CONVERSATION_TURN, MemoryLayer.TASK, "user"),
-    MemoryEventType.LLM_RESPONSE: (MemoryKind.CONVERSATION_TURN, MemoryLayer.TASK, "assistant"),
-    MemoryEventType.TOOL_RESULT: (MemoryKind.CONVERSATION_TURN, MemoryLayer.TASK, "tool"),
-    MemoryEventType.TOOL_INVOCATION: (MemoryKind.TOOL_AUDIT, MemoryLayer.TASK, None),
-    MemoryEventType.TASK_COMPACT_SUMMARY: (MemoryKind.SUMMARY, MemoryLayer.TASK, None),
-    MemoryEventType.AGENT_COMPACT_SUMMARY: (MemoryKind.SUMMARY, MemoryLayer.AGENT, None),
-    MemoryEventType.AGENT_CONVERSATION_TURN: (MemoryKind.CONVERSATION_TURN, MemoryLayer.AGENT, None),
-    MemoryEventType.BLACKBOARD_PUBLISH: (MemoryKind.PUBLICATION, MemoryLayer.SESSION, None),
-    MemoryEventType.TASK_DISPATCH: (MemoryKind.CONVERSATION_TURN, MemoryLayer.AGENT, "assistant"),
-    MemoryEventType.TASK_DISPATCH_RESULT: (MemoryKind.CONVERSATION_TURN, MemoryLayer.AGENT, "tool"),
-    MemoryEventType.COMPACT_SUMMARY: (MemoryKind.SUMMARY, MemoryLayer.AGENT, None),
+LEGACY_TRIPLE: dict[MemoryEventType, tuple[MemoryKind, MemoryScope, str | None]] = {
+    MemoryEventType.USER_PROMPT: (MemoryKind.CONVERSATION_TURN, MemoryScope.TASK, "user"),
+    MemoryEventType.LLM_RESPONSE: (MemoryKind.CONVERSATION_TURN, MemoryScope.TASK, "assistant"),
+    MemoryEventType.TOOL_RESULT: (MemoryKind.CONVERSATION_TURN, MemoryScope.TASK, "tool"),
+    MemoryEventType.TOOL_INVOCATION: (MemoryKind.TOOL_AUDIT, MemoryScope.TASK, None),
+    MemoryEventType.TASK_COMPACT_SUMMARY: (MemoryKind.SUMMARY, MemoryScope.TASK, None),
+    MemoryEventType.AGENT_COMPACT_SUMMARY: (MemoryKind.SUMMARY, MemoryScope.AGENT, None),
+    MemoryEventType.AGENT_CONVERSATION_TURN: (MemoryKind.CONVERSATION_TURN, MemoryScope.AGENT, None),
+    MemoryEventType.BLACKBOARD_PUBLISH: (MemoryKind.PUBLICATION, MemoryScope.SESSION, None),
+    MemoryEventType.TASK_DISPATCH: (MemoryKind.CONVERSATION_TURN, MemoryScope.AGENT, "assistant"),
+    MemoryEventType.TASK_DISPATCH_RESULT: (MemoryKind.CONVERSATION_TURN, MemoryScope.AGENT, "tool"),
+    MemoryEventType.COMPACT_SUMMARY: (MemoryKind.SUMMARY, MemoryScope.AGENT, None),
 }
 
 
@@ -58,7 +58,7 @@ def kind_of(type_: MemoryEventType | None, kind: MemoryKind | None) -> MemoryKin
     return triple[0]
 
 
-def layer_of(type_: MemoryEventType | None, layer: MemoryLayer | None) -> MemoryLayer:
+def layer_of(type_: MemoryEventType | None, layer: MemoryScope | None) -> MemoryScope:
     """事件 layer 归一：显式 layer 优先；旧 type 走 EVENT_LAYER 兜底；双空抛 ValueError。"""
     if layer is not None:
         return layer
@@ -80,7 +80,7 @@ _DEAD_WRITE_TYPES: frozenset[MemoryEventType] = frozenset({
 def matches_legacy_type(
     record_type: MemoryEventType | None,
     record_kind: MemoryKind | None,
-    record_layer: MemoryLayer | None,
+    record_layer: MemoryScope | None,
     record_role: str | None,
     wanted: MemoryEventType,
 ) -> bool:
@@ -104,12 +104,12 @@ def matches_legacy_type(
 
 
 # (kind, layer) → 无 role 歧义时的 legacy 等价词汇；CONVERSATION_TURN@TASK 按 role 细分。
-_TRIPLE_TO_LEGACY: dict[tuple[MemoryKind, MemoryLayer], MemoryEventType] = {
-    (MemoryKind.SUMMARY, MemoryLayer.TASK): MemoryEventType.TASK_COMPACT_SUMMARY,
-    (MemoryKind.SUMMARY, MemoryLayer.AGENT): MemoryEventType.AGENT_COMPACT_SUMMARY,
-    (MemoryKind.CONVERSATION_TURN, MemoryLayer.AGENT): MemoryEventType.AGENT_CONVERSATION_TURN,
-    (MemoryKind.TOOL_AUDIT, MemoryLayer.TASK): MemoryEventType.TOOL_INVOCATION,
-    (MemoryKind.PUBLICATION, MemoryLayer.SESSION): MemoryEventType.BLACKBOARD_PUBLISH,
+_TRIPLE_TO_LEGACY: dict[tuple[MemoryKind, MemoryScope], MemoryEventType] = {
+    (MemoryKind.SUMMARY, MemoryScope.TASK): MemoryEventType.TASK_COMPACT_SUMMARY,
+    (MemoryKind.SUMMARY, MemoryScope.AGENT): MemoryEventType.AGENT_COMPACT_SUMMARY,
+    (MemoryKind.CONVERSATION_TURN, MemoryScope.AGENT): MemoryEventType.AGENT_CONVERSATION_TURN,
+    (MemoryKind.TOOL_AUDIT, MemoryScope.TASK): MemoryEventType.TOOL_INVOCATION,
+    (MemoryKind.PUBLICATION, MemoryScope.SESSION): MemoryEventType.BLACKBOARD_PUBLISH,
 }
 _TASK_TURN_BY_ROLE: dict[str, MemoryEventType] = {
     "user": MemoryEventType.USER_PROMPT,
@@ -119,14 +119,14 @@ _TASK_TURN_BY_ROLE: dict[str, MemoryEventType] = {
 
 
 def legacy_type_of(
-    kind: MemoryKind | None, layer: MemoryLayer | None, role: str | None,
+    kind: MemoryKind | None, layer: MemoryScope | None, role: str | None,
 ) -> MemoryEventType | None:
     """v2 三元组 → legacy 等价词汇（recall wrapper 的 type 回填 / 渲染链 mtype 派生）。
 
     渲染与旧断言消费的是 legacy 字符串词汇（composer 的 mtype=="user_prompt" 框定位、
     slot_priority 的 mem_type 档位）；过渡期由此函数单点派生，P4 随消费点迁移一并日落。
     """
-    if kind is MemoryKind.CONVERSATION_TURN and layer is MemoryLayer.TASK:
+    if kind is MemoryKind.CONVERSATION_TURN and layer is MemoryScope.TASK:
         return _TASK_TURN_BY_ROLE.get(role or "")
     if kind is None or layer is None:
         return None

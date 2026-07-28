@@ -18,7 +18,7 @@ from ctx_weft.core.events.types import EVENT_TYPES
 from ctx_weft.core.state.models import Agent, Session, Task
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import (
-    LLMClient, MemoryEvent, MemoryKind, MemoryLayer, MemoryProvider, MemoryAddress, ProviderContext,
+    LLMClient, MemoryEvent, MemoryKind, MemoryScope, MemoryProvider, MemoryAddress, ProviderContext,
 )
 
 if TYPE_CHECKING:
@@ -174,7 +174,7 @@ async def _persist_user_prompt(state, ctx) -> None:
             else content_to_text(task.user_prompt))
     await ctx.memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
             scope=state.scope,
             content=text,
             timestamp=now_utc(),

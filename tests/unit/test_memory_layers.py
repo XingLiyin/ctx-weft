@@ -16,7 +16,7 @@ from ctx_weft.protocols import (
     EVENT_LAYER,
     MemoryEvent,
     MemoryEventType,
-    MemoryLayer,
+    MemoryScope,
     MemoryAddress,
     ProviderContext,
 )
@@ -75,10 +75,10 @@ async def test_task_fold_leaves_agent_layer_untouched() -> None:
     await m.ingest(_ev(T.LLM_RESPONSE, sc, "a2", t=2), _ctx())
     await m.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, "agent-exp", t=3), _ctx())  # agent 层
 
-    view = await m.load_view(sc, MemoryLayer.TASK, _ctx())
+    view = await m.load_view(sc, MemoryScope.TASK, _ctx())
     fold_ids = [r.id for r in view if r.content in ("u", "a1")]  # 保 a2（策展在框架侧）
     await m.fold(fold_ids, [MemoryEvent(
-        kind=MemoryKind.SUMMARY, layer=MemoryLayer.TASK, scope=sc, content="SUMMARY",
+        kind=MemoryKind.SUMMARY, layer=MemoryScope.TASK, scope=sc, content="SUMMARY",
         timestamp=_BASE + timedelta(seconds=1, milliseconds=500), role="assistant",
     )], _ctx())
 
@@ -104,7 +104,7 @@ async def test_agent_segment_fold_writes_agent_summary() -> None:
     await m.ingest(_ev(T.TASK_DISPATCH_RESULT, _sc("tB"), "r2", t=1), _ctx())
 
     await segment_fold(
-        m, MemoryAddress(session_id="s1", agent_id="ag1"), MemoryLayer.AGENT, "AGSUM", _ctx())
+        m, MemoryAddress(session_id="s1", agent_id="ag1"), MemoryScope.AGENT, "AGSUM", _ctx())
 
     recs = await m.recall_recent(
         _sc("tZ"), [T.TASK_DISPATCH_RESULT, T.AGENT_COMPACT_SUMMARY], 10, _ctx()
@@ -125,4 +125,4 @@ async def test_mixed_layer_recall_merges_by_timestamp() -> None:
 
 def test_agent_conversation_turn_is_agent_layer() -> None:
     assert MemoryEventType.AGENT_CONVERSATION_TURN in EVENT_LAYER
-    assert EVENT_LAYER[MemoryEventType.AGENT_CONVERSATION_TURN] is MemoryLayer.AGENT
+    assert EVENT_LAYER[MemoryEventType.AGENT_CONVERSATION_TURN] is MemoryScope.AGENT

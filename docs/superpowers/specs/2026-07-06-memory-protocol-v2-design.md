@@ -1,7 +1,13 @@
 # Memory 协议 v2 设计（目标形态完整稿）
 
 日期：2026-07-06
-状态：设计定稿，未实施
+状态：**已实施**（2026-07-27，分支 feat/memory-protocol-v2，实施计划见
+docs/superpowers/plans/2026-07-27-memory-protocol-v2.md）。与定稿的三处偏差：
+① `MemoryEvent.scope→address`、`layer→scope` **字段**改名推迟（涉及数百关键字实参，
+独立后续；类名互换已完成，load_view 参数名已按终名）；② `MemoryLayer = MemoryScope`
+兼容别名保留至 host postgres provider 迁移完成；③ in-memory provider 保留
+recall_recent/by_agent/count_recent/supersede 四个**非协议**测试兼容方法（协议面已 8 方法），
+随存量测试迁移日落。host 升级前置：postgres provider 须实现 load_view/fold + ingest 幂等。
 一句话：**记忆按 scope 归档、按 address 定位。**
 
 前置讨论：本文档综合 2026-07-06 对 `ctx_weft/protocols/memory.py` 的五轮审计——

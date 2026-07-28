@@ -242,13 +242,13 @@ class PrepareStep(Step):
 
         if guard.context_tokens > 0:
             try:
-                from ctx_weft.protocols import MemoryKind, MemoryLayer
+                from ctx_weft.protocols import MemoryKind, MemoryScope
 
                 # v2 P3a：TASK 视图 + user/assistant 回合谓词（= 旧 USER_PROMPT+LLM_RESPONSE
                 # 口径，与 act._account_tokens 的 context_message_count 对齐）。升序视图：
                 # 基线计数之后的即新增记录。
                 view = await ctx.memory.load_view(
-                    state.scope, MemoryLayer.TASK, ctx.provider_ctx)
+                    state.scope, MemoryScope.TASK, ctx.provider_ctx)
                 convo = [
                     r for r in view
                     if r.kind is MemoryKind.CONVERSATION_TURN and r.role in ("user", "assistant")

@@ -56,6 +56,7 @@ from ctx_weft.protocols.memory import (
     MemoryEvent,
     MemoryEventType,
     MemoryLayer,
+    MemoryScope,
     MemoryProvider,
     MemoryProviderInfo,
     MemoryRecord,
@@ -119,7 +120,8 @@ __all__ = [
     "EVENT_LAYER",
     "MemoryEvent",
     "MemoryEventType",
-    "MemoryLayer",
+    "MemoryLayer",  # host 兼容别名（P4c）——host 迁移后删
+    "MemoryScope",
     "MemoryProvider",
     "MemoryProviderInfo",
     "MemoryRecord",

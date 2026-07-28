@@ -28,7 +28,7 @@ from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
 from ctx_weft.core.utils import content_to_text
-from ctx_weft.protocols import MemoryEventType, MemoryLayer
+from ctx_weft.protocols import MemoryEventType, MemoryScope
 
 if TYPE_CHECKING:
     from ctx_weft.core.loop.driver import LoopContext, LoopState
@@ -74,12 +74,12 @@ async def is_short_segment(state: "LoopState", ctx: "LoopContext") -> bool:
     threshold = getattr(state.agent.loop_config, "short_segment_token_threshold", 0)
     if threshold <= 0:
         return False
-    from ctx_weft.protocols import MemoryKind, MemoryLayer
+    from ctx_weft.protocols import MemoryKind, MemoryScope
 
     # v2 P3a：TASK 视图（对话 + audit，无 SUMMARY——旧类型清单不含段摘要）升序；
     # 段界 = 末条 role=user 回合，其后即当前段 raw。
     view = await ctx.memory.load_view(
-        state.scope, MemoryLayer.TASK, ctx.provider_ctx,
+        state.scope, MemoryScope.TASK, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT],
     )
     seg_records: list = []
@@ -123,12 +123,12 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
     title：归属 task 的标题，用于重建 tool 槽的 `[task: …]` 前缀（与 finalize 合成占位时同源，
     见 finalize._finish_report_prefix）。本函数整条重写 tool 槽，不传就会把占位里的归属标记抹掉。"""
     from ctx_weft.core.loop.steps.finalize import _finish_report_prefix
-    from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryLayer
+    from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope
     from ctx_weft.protocols.capability import qualify
 
     turns = await memory.load_view(
         MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
-        MemoryLayer.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN],
+        MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN],
     )
     asst = [r for r in turns
             if r.role == "assistant" and r.metadata.get("origin_task_id") == task_id
@@ -154,13 +154,13 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
     # v2 P3d：占位对遗忘 + 新对写入一次原子 fold（关旧「占位已删而真报告未写」窗口）。
     await memory.fold([r.id for r in (*asst, *tool)], [
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=scope,
             content=act_recap, timestamp=ts, role="assistant",
             metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
                       "tool_calls": tool_calls},
         ),
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=scope,
             content=f"{report_prefix}{summary_text}", timestamp=ts, role="tool",
             metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
                       "tool_call_id": tool_call_id},
@@ -197,9 +197,9 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
             # 崩溃前已折叠（raw 被 supersede），再折会产冗余胶囊 → 跳过（finally 仍发 DONE）。
             # 正常运行时该段刚产生 raw、计数 > 0，护栏为 no-op。
             if boundary not in _CLOSE_BOUNDARIES:
-                from ctx_weft.protocols import MemoryKind, MemoryLayer
+                from ctx_weft.protocols import MemoryKind, MemoryScope
                 view = await ctx.memory.load_view(
-                    state.scope, MemoryLayer.TASK, ctx.provider_ctx,
+                    state.scope, MemoryScope.TASK, ctx.provider_ctx,
                     kinds=[MemoryKind.CONVERSATION_TURN],
                 )
                 # 旧口径 = LLM_RESPONSE 计数 = assistant 回合
@@ -295,7 +295,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                     # （segment_fold 是框架内函数，签名错配不再是运行时 provider 风险）。
                     from ctx_weft.core.loop.steps.segment_fold import segment_fold
                     await segment_fold(
-                        ctx.memory, state.scope, MemoryLayer.TASK, act_recap,
+                        ctx.memory, state.scope, MemoryScope.TASK, act_recap,
                         ctx.provider_ctx,
                     )
             except Exception:

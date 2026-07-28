@@ -20,7 +20,7 @@ from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
-    MemoryLayer,
+    MemoryScope,
     MemoryAddress,
     ProviderContext,
 )
@@ -174,7 +174,7 @@ async def test_escalating_compact_passes_protect_types_and_user_prompts_survive(
         await escalating_compact(_state("normal"), _ctx(mem), token_estimate=10000, trigger="test")
 
     # escalating_compact 的 L3 用 collapse_task_layer，不用 apply_compact，折 task 层
-    task_calls = [c for c in mem.compact_calls if c["layer"] is MemoryLayer.TASK]
+    task_calls = [c for c in mem.compact_calls if c["layer"] is MemoryScope.TASK]
     assert not task_calls, (
         "apply_compact should NOT be called for task layer (collapse_task_layer is used instead)"
     )

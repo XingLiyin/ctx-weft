@@ -29,7 +29,7 @@ from ctx_weft.core.orchestrator.control_capability import (
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
-    MemoryLayer,
+    MemoryScope,
     MemoryAddress,
     ProviderContext,
 )
@@ -79,7 +79,7 @@ async def test_apply_compact_since_last_folds_only_current_segment():
     mem = InMemoryMemoryProvider()
     await _seed_two_segments(mem)
 
-    await segment_fold(mem, _SCOPE, MemoryLayer.TASK, "S2", _PCTX)
+    await segment_fold(mem, _SCOPE, MemoryScope.TASK, "S2", _PCTX)
 
     chrono = await _chrono(mem)
     kinds = [(r.type, r.content) for r in chrono]
@@ -99,7 +99,7 @@ async def test_apply_compact_since_last_without_up_folds_whole_scope():
         await mem.ingest(MemoryEvent(type=typ, scope=_SCOPE, content=content,
                                      timestamp=_ts(10 + i), role=role), _PCTX)
 
-    await segment_fold(mem, _SCOPE, MemoryLayer.TASK, "S", _PCTX)
+    await segment_fold(mem, _SCOPE, MemoryScope.TASK, "S", _PCTX)
 
     chrono = await _chrono(mem)
     assert [r.content for r in chrono] == ["S"], "无 UP 时应整 scope 照折"
@@ -283,7 +283,7 @@ async def test_apply_compact_since_last_after_collapsed_up_still_folds():
     assert folded == 2
 
     # 段边界折叠：坍缩 UP 之后的 raw（A2/A3）是当前段，必须被折
-    await segment_fold(mem, _SCOPE, MemoryLayer.TASK, "S", _PCTX)
+    await segment_fold(mem, _SCOPE, MemoryScope.TASK, "S", _PCTX)
 
     chrono = await _chrono(mem)
     contents = [r.content for r in chrono]

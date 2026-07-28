@@ -55,12 +55,12 @@ class ReconcileStep(Step):
 
 async def _dangling_tool_calls(memory, scope, provider_ctx) -> list[dict]:
     """最近一个 assistant turn 里，无对应 tool result 的 tool_call（按原顺序）。"""
-    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
 
     view = await memory.load_view(
         MemoryAddress(session_id=scope.session_id, task_id=scope.task_id,
                       agent_id=scope.agent_id),
-        MemoryLayer.TASK, provider_ctx,
+        MemoryScope.TASK, provider_ctx,
     )
     # 升序视图："最近一个 assistant turn" = 末条 role=assistant 的 CONVERSATION_TURN。
     # 必须按 kind 排除 SUMMARY——task 层段摘要 role 同为 assistant（自述体），会被误认。

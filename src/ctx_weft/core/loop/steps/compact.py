@@ -26,7 +26,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome,
 from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
 from ctx_weft.core.utils import content_to_text, effective_limit, now_utc
 from ctx_weft.protocols import (
-    LLMRequest, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryLayer,
+    LLMRequest, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,7 +105,7 @@ async def collapse_task_layer(
     """
     memory = ctx.memory
     recs = await memory.load_view(
-        state.scope, MemoryLayer.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
+        state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
     if len(recs) <= keep_last:
         return 0
 
@@ -128,7 +128,7 @@ async def collapse_task_layer(
     # v2 P3d：遗忘+坍缩物一次原子 fold（旧徒手 supersede+ingest 有崩溃丢摘要窗口）
     await memory.fold(ids, [
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
             scope=state.scope,
             content=f"{original}{COLLAPSE_DELIM}{summary_text or '[Context compacted]'}",
             timestamp=anchor_ts,
@@ -191,9 +191,9 @@ async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
     逐条 content 求 ctx.llm.tokenizer.count 之和。用于升级 compact 级间的 before/after 增量粗估（非精确装配）。"""
     total = 0
     body = await ctx.memory.load_view(
-        _agent_half(state.scope), MemoryLayer.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
+        _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
     agent_recs = await ctx.memory.load_view(
-        _agent_half(state.scope), MemoryLayer.AGENT, ctx.provider_ctx)
+        _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
     for r in [*body, *agent_recs]:
         text = r.content if isinstance(r.content, str) else content_to_text(r.content)
         total += ctx.llm.tokenizer.count(text)
@@ -208,7 +208,7 @@ async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
     → has_result）**，都是「已完成顶层单元」，计入 keep_last。真·在途（active，不计）= 派出但结果
     未回：has_dispatch 且既无 has_finish 也无 has_result。当前正在跑的 task 永不当完成单元。"""
     recs = await ctx.memory.load_view(
-        _agent_half(state.scope), MemoryLayer.AGENT, ctx.provider_ctx,
+        _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN],
     )
     # parent prefer-non-None：dispatch result 回合不带 parent（None），不得覆盖权威 parent。
@@ -254,11 +254,11 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     memory = ctx.memory
     # AGENT 视图默认 kinds（对话+摘要）；legacy dispatch 配对已在 load_view 内归一，升序即时序。
     recs = await memory.load_view(
-        _agent_half(state.scope), MemoryLayer.AGENT, ctx.provider_ctx,
+        _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
     )
     # task 层胶囊（跨 task 半址聚合，每条 address.task_id 标来源单元）
     body_recs = await memory.load_view(
-        _agent_half(state.scope), MemoryLayer.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS,
+        _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS,
     )
 
     # 按 origin 分组 conversation turn（finish 对 + dispatch 对同 origin）+ 记 parent + 最早 ts。
@@ -346,7 +346,7 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     # v2 P3d：跨层遗忘 + 新摘要一次原子 fold（关旧「raw 已删而摘要未写」窗口）
     await memory.fold(ids, [
         MemoryEvent(
-            kind=MemoryKind.SUMMARY, layer=MemoryLayer.AGENT,
+            kind=MemoryKind.SUMMARY, layer=MemoryScope.AGENT,
             scope=state.scope,
             content=summary_text or "[Experience compacted]",
             timestamp=anchor_ts - timedelta(microseconds=1),
@@ -365,9 +365,9 @@ async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: s
     无 LLM。返回 supersede 条数。"""
     memory = ctx.memory
     body = await memory.load_view(
-        _agent_half(state.scope), MemoryLayer.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
+        _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
     turns = await memory.load_view(
-        _agent_half(state.scope), MemoryLayer.AGENT, ctx.provider_ctx,
+        _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN])
     has_dispatch, has_finish = _dispatch_finish_sets(turns)
 
@@ -391,7 +391,7 @@ async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: s
 async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -> set:
     """L1 折后仍保留的最近 keep_last 个顶层单元的 origin_task_id（L2 的降级对象）。"""
     recs = await ctx.memory.load_view(
-        _agent_half(state.scope), MemoryLayer.AGENT, ctx.provider_ctx,
+        _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN])
     parent_of, first_ts = {}, {}
     has_dispatch, has_finish = _dispatch_finish_sets(recs)
@@ -506,7 +506,7 @@ async def escalating_compact(
     # 计数用全量 TASK 视图（含 SUMMARY 段摘要）——与 collapse_task_layer 实际所折一致：
     # retry 累积的是段摘要，只数 raw 会漏计、L3 永不触发。
     task_n = len(await ctx.memory.load_view(
-        state.scope, MemoryLayer.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS))
+        state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS))
     if task_n > collapse_keep:
         summary_task = await summarize_for_compact(state, ctx, scope="task")
         n, freed = await _apply(collapse_task_layer(state, ctx, collapse_keep, summary_task))

@@ -30,7 +30,7 @@ from ctx_weft.core.state.models import HitlRequest, Session, Task
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
-    MemoryLayer,
+    MemoryScope,
     MemoryAddress,
     ProviderContext,
 )
@@ -63,7 +63,7 @@ async def _fold_trailing_segment(mem: InMemoryMemoryProvider) -> None:
     await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=scope, content="上一轮回复",
                                  timestamp=_ts(2), role="assistant"), pctx)
     from ctx_weft.core.loop.steps.segment_fold import segment_fold
-    await segment_fold(mem, scope, MemoryLayer.TASK, "段摘要", pctx)
+    await segment_fold(mem, scope, MemoryScope.TASK, "段摘要", pctx)
 
 
 # ── Fix 2: provider anchor ─────────────────────────────────────────────────────

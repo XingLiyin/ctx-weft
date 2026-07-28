@@ -15,7 +15,7 @@ from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
     MemoryKind,
-    MemoryLayer,
+    MemoryScope,
     MemoryProvider,
     MemoryProviderInfo,
     MemoryRecord,
@@ -42,7 +42,7 @@ class _StoredEvent:
     topic_seq_no: int  # per-topic 单调递增（None topic 不算）
     # ingest 时归一化的 v2 三元组（kind=None → 死类型，永不见于视图）
     kind: MemoryKind | None = None
-    layer: MemoryLayer | None = None
+    layer: MemoryScope | None = None
     is_superseded: bool = False
 
 
@@ -145,7 +145,7 @@ class InMemoryMemoryProvider(MemoryProvider):
     async def load_view(
         self,
         address: MemoryAddress,
-        scope: MemoryLayer,
+        scope: MemoryScope,
         ctx: ProviderContext,
         kinds: list[MemoryKind] | None = None,
     ) -> list[MemoryRecord]:
@@ -163,12 +163,12 @@ class InMemoryMemoryProvider(MemoryProvider):
         return normalize_view([self._to_record(s) for s in matching])
 
     @staticmethod
-    def _validate_half_address(address: MemoryAddress, scope: MemoryLayer) -> None:
+    def _validate_half_address(address: MemoryAddress, scope: MemoryScope) -> None:
         """半址矩阵（v2 §4）：非法非 None 字段 loud 失败，抓静默漏召回。"""
-        if scope is MemoryLayer.TASK:
+        if scope is MemoryScope.TASK:
             if address.task_id is None and address.agent_id is None:
                 raise ValueError("TASK view requires task_id (single-task) or agent_id (cross-task)")
-        elif scope is MemoryLayer.AGENT:
+        elif scope is MemoryScope.AGENT:
             if not address.agent_id:
                 raise ValueError("AGENT view requires agent_id")
             if address.task_id is not None:
@@ -178,17 +178,17 @@ class InMemoryMemoryProvider(MemoryProvider):
                 raise ValueError("SESSION view forbids task_id/agent_id")
 
     @staticmethod
-    def _address_match(stored: MemoryAddress, address: MemoryAddress, scope: MemoryLayer) -> bool:
+    def _address_match(stored: MemoryAddress, address: MemoryAddress, scope: MemoryScope) -> bool:
         if stored.session_id != address.session_id:
             return False
-        if scope is MemoryLayer.TASK:
+        if scope is MemoryScope.TASK:
             if address.task_id is not None:
                 if stored.task_id != address.task_id:
                     return False
                 # 全址时防御性校验 agent 归属
                 return address.agent_id is None or stored.agent_id == address.agent_id
             return stored.agent_id == address.agent_id  # 跨 task 聚合
-        if scope is MemoryLayer.AGENT:
+        if scope is MemoryScope.AGENT:
             return stored.agent_id == address.agent_id
         return True  # SESSION：session_id 已匹配
 
@@ -256,7 +256,7 @@ class InMemoryMemoryProvider(MemoryProvider):
             and self._matches_any_type(s, type_set)
             and s.event.scope.session_id == agent_scope.session_id
             and s.event.scope.agent_id == aid
-            and s.layer is MemoryLayer.TASK
+            and s.layer is MemoryScope.TASK
         ]
         matching.sort(key=lambda s: s.event.timestamp)
         recent = matching[-limit:] if limit and limit > 0 else matching
@@ -383,10 +383,10 @@ class InMemoryMemoryProvider(MemoryProvider):
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _scope_key(self, scope: MemoryAddress, tenant_id: str, layer: MemoryLayer) -> str:
-        if layer is MemoryLayer.TASK:
+    def _scope_key(self, scope: MemoryAddress, tenant_id: str, layer: MemoryScope) -> str:
+        if layer is MemoryScope.TASK:
             return f"{tenant_id}|{scope.session_id}|task|{scope.task_id or ''}"
-        if layer is MemoryLayer.AGENT:
+        if layer is MemoryScope.AGENT:
             return f"{tenant_id}|{scope.session_id}|agent|{scope.agent_id or ''}"
         return f"{tenant_id}|{scope.session_id}|session"
 

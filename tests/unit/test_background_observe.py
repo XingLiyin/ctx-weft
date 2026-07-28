@@ -66,13 +66,13 @@ def _neutralize_refold_guard(monkeypatch, ctx) -> None:
     """
     from datetime import datetime, timezone
     from ctx_weft.protocols import MemoryEventType as MT
-    from ctx_weft.protocols import MemoryKind, MemoryLayer, MemoryRecord
+    from ctx_weft.protocols import MemoryKind, MemoryScope, MemoryRecord
 
     async def fake_load_view(address, scope, pctx, kinds=None):
         return [MemoryRecord(
             id="guard", type=MT.LLM_RESPONSE, content="x",
             timestamp=datetime.now(timezone.utc), role="assistant",
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
         )]
 
     monkeypatch.setattr(ctx.memory, "load_view", fake_load_view)

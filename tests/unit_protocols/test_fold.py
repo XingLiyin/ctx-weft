@@ -15,7 +15,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
     MemoryEventType,
-    MemoryLayer,
+    MemoryScope,
     ProviderContext,
 )
 from ctx_weft.protocols.memory_compat import MemoryKind
@@ -30,21 +30,21 @@ def _ctx() -> ProviderContext:
 
 def _turn(content: str, minute: int, role: str = "assistant") -> MemoryEvent:
     return MemoryEvent(
-        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
         scope=_ADDR, content=content, timestamp=_T0 + timedelta(minutes=minute), role=role,
     )
 
 
 def _summary(content: str, minute: int, id: str | None = None) -> MemoryEvent:
     return MemoryEvent(
-        kind=MemoryKind.SUMMARY, layer=MemoryLayer.TASK,
+        kind=MemoryKind.SUMMARY, layer=MemoryScope.TASK,
         scope=_ADDR, content=content, timestamp=_T0 + timedelta(minutes=minute),
         role="assistant", id=id,
     )
 
 
 async def _view(m: InMemoryMemoryProvider) -> list[str]:
-    view = await m.load_view(_ADDR, MemoryLayer.TASK, _ctx())
+    view = await m.load_view(_ADDR, MemoryScope.TASK, _ctx())
     return [r.content for r in view]
 
 

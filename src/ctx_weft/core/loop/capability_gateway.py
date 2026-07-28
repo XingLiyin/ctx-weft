@@ -31,7 +31,7 @@ from ctx_weft.protocols.capability import CapabilityProvider, ToolCapabilityProv
 from ctx_weft.protocols.llm import RAW_ARGS_KEY
 from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL, _PLAN_DISPATCH_ACK
 from ctx_weft.protocols.filesystem import SpillSink
-from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType, MemoryLayer, MemoryProvider, MemoryAddress
+from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType, MemoryScope, MemoryProvider, MemoryAddress
 from ctx_weft.protocols.memory_compat import MemoryKind
 
 if TYPE_CHECKING:
@@ -257,7 +257,7 @@ class CapabilityGateway:
         if not is_dispatch and not is_silent:
             await self._memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+                    kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
                     scope=_tool_scope(state),
                     content=content,
                     timestamp=now_utc(),
@@ -291,7 +291,7 @@ class CapabilityGateway:
             if tool_name in _PLAN_DISPATCH_TOOLS:
                 await self._memory.ingest(
                     MemoryEvent(
-                        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT,
+                        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT,
                         scope=_tool_scope(state),
                         content="",
                         timestamp=now_utc(),
@@ -306,7 +306,7 @@ class CapabilityGateway:
                 # envelope: 给 plan 框写一条配对的 ack tool result，避免该框悬挂(被 legalize 剥掉)。
                 await self._memory.ingest(
                     MemoryEvent(
-                        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT,
+                        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT,
                         scope=_tool_scope(state),
                         content=_PLAN_DISPATCH_ACK,
                         timestamp=now_utc(),
@@ -320,7 +320,7 @@ class CapabilityGateway:
         elif not is_silent:
             await self._memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.TOOL_AUDIT, layer=MemoryLayer.TASK,
+                    kind=MemoryKind.TOOL_AUDIT, layer=MemoryScope.TASK,
                     scope=_tool_scope(state),
                     content=f"{tool_name}({sanitized})",
                     timestamp=now_utc(),
@@ -386,7 +386,7 @@ class CapabilityGateway:
         if not is_dispatch and not is_silent:
             await self._memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+                    kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
                     scope=_tool_scope(state),
                     content=content,
                     timestamp=now_utc(),

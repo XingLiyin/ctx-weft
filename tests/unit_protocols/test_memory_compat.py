@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.protocols import MemoryAddress, MemoryEventType, MemoryLayer, MemoryAddress
+from ctx_weft.protocols import MemoryAddress, MemoryEventType, MemoryScope, MemoryAddress
 from ctx_weft.protocols.memory_compat import (
     LEGACY_TRIPLE,
     MemoryKind,
@@ -44,20 +44,20 @@ def test_kind_of_rejects_empty_and_dead() -> None:
 
 
 def test_layer_of_falls_back_to_event_layer() -> None:
-    assert layer_of(MemoryEventType.AGENT_COMPACT_SUMMARY, None) is MemoryLayer.AGENT
-    assert layer_of(None, MemoryLayer.TASK) is MemoryLayer.TASK
+    assert layer_of(MemoryEventType.AGENT_COMPACT_SUMMARY, None) is MemoryScope.AGENT
+    assert layer_of(None, MemoryScope.TASK) is MemoryScope.TASK
     with pytest.raises(ValueError):
         layer_of(None, None)
 
 
 def test_matches_legacy_type_bridges_vocabularies() -> None:
     # v2 行（type=None, kind+layer+role）匹配旧类型请求
-    assert matches_legacy_type(None, MemoryKind.CONVERSATION_TURN, MemoryLayer.TASK, "user",
+    assert matches_legacy_type(None, MemoryKind.CONVERSATION_TURN, MemoryScope.TASK, "user",
                                MemoryEventType.USER_PROMPT)
-    assert not matches_legacy_type(None, MemoryKind.CONVERSATION_TURN, MemoryLayer.TASK, "assistant",
+    assert not matches_legacy_type(None, MemoryKind.CONVERSATION_TURN, MemoryScope.TASK, "assistant",
                                    MemoryEventType.USER_PROMPT)
     # role 无约束的旧类型（AGENT_CONVERSATION_TURN）任意 role 皆匹配
-    assert matches_legacy_type(None, MemoryKind.CONVERSATION_TURN, MemoryLayer.AGENT, "tool",
+    assert matches_legacy_type(None, MemoryKind.CONVERSATION_TURN, MemoryScope.AGENT, "tool",
                                MemoryEventType.AGENT_CONVERSATION_TURN)
     # 旧行按 type 精确匹配（不跨型误配）
     assert matches_legacy_type(MemoryEventType.LLM_RESPONSE, None, None, "assistant",
@@ -65,7 +65,7 @@ def test_matches_legacy_type_bridges_vocabularies() -> None:
     assert not matches_legacy_type(MemoryEventType.LLM_RESPONSE, None, None, "assistant",
                                    MemoryEventType.USER_PROMPT)
     # 死类型请求匹配不到 v2 行
-    assert not matches_legacy_type(None, MemoryKind.SUMMARY, MemoryLayer.AGENT, None,
+    assert not matches_legacy_type(None, MemoryKind.SUMMARY, MemoryScope.AGENT, None,
                                    MemoryEventType.OBSERVER_SUMMARY)
 
 

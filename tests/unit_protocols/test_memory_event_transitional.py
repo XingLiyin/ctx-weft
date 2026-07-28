@@ -16,7 +16,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
     MemoryEventType,
-    MemoryLayer,
+    MemoryScope,
     MemoryRecord,
 )
 from ctx_weft.protocols.memory_compat import MemoryKind
@@ -26,11 +26,11 @@ _TS = datetime.now(timezone.utc)
 
 
 def test_v2_native_event_needs_no_type() -> None:
-    ev = MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+    ev = MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
                      scope=_FULL, content="hi", timestamp=_TS, role="user")
     assert ev.type is None
     assert ev.kind is MemoryKind.CONVERSATION_TURN
-    assert ev.layer is MemoryLayer.TASK
+    assert ev.layer is MemoryScope.TASK
 
 
 def test_event_requires_type_or_kind() -> None:
@@ -58,19 +58,19 @@ def test_legacy_event_unchanged() -> None:
 def test_v2_native_full_address_invariant() -> None:
     # TASK 层缺 agent_id → ValueError
     with pytest.raises(ValueError):
-        MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+        MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
                     scope=MemoryAddress(session_id="s1", task_id="t1"),
                     content="x", timestamp=_TS, role="user")
     # AGENT 层缺 agent_id → ValueError
     with pytest.raises(ValueError):
-        MemoryEvent(kind=MemoryKind.SUMMARY, layer=MemoryLayer.AGENT,
+        MemoryEvent(kind=MemoryKind.SUMMARY, layer=MemoryScope.AGENT,
                     scope=MemoryAddress(session_id="s1"),
                     content="x", timestamp=_TS)
     # SESSION 层仅 session_id 合法
-    ev = MemoryEvent(kind=MemoryKind.PUBLICATION, layer=MemoryLayer.SESSION,
+    ev = MemoryEvent(kind=MemoryKind.PUBLICATION, layer=MemoryScope.SESSION,
                      scope=MemoryAddress(session_id="s1"),
                      content="x", timestamp=_TS, topic="tp")
-    assert ev.layer is MemoryLayer.SESSION
+    assert ev.layer is MemoryScope.SESSION
 
 
 def test_v2_native_requires_layer() -> None:
@@ -81,7 +81,7 @@ def test_v2_native_requires_layer() -> None:
 
 def test_memory_record_transitional_fields() -> None:
     rec = MemoryRecord(id="r1", type=None, content="c", timestamp=_TS,
-                       kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+                       kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
                        address=_FULL, role="user")
     assert rec.kind is MemoryKind.CONVERSATION_TURN
     assert rec.address is _FULL
