@@ -280,6 +280,29 @@ class MemoryProvider(Protocol):
     # ── 召回（read，三种模式）──
 
     @abstractmethod
+    async def load_view(
+        self,
+        address: "MemoryAddress",
+        scope: MemoryLayer,
+        ctx: ProviderContext,
+        kinds: "list[Any] | None" = None,
+    ) -> list[MemoryRecord]:
+        """工作记忆回放（v2 设计 §4）：返回该归属分区**全量幸存**记录，**时间正序**。
+
+        - 排序键 (timestamp, seq_no) 升序；"最近一条"取 ``[-1]``。无 limit / 无 count——
+          视图天然有界（≈一个 LLM context，超了 compact 触发）。
+        - kinds=None 默认 = [CONVERSATION_TURN, SUMMARY]（工作记忆视图的定义）；
+          需要 TOOL_AUDIT（如计算折叠 id 集）时显式传。
+        - 半址过滤（非 None 字段皆为条件，非法非 None 字段抛 ValueError）：
+          TASK → task_id 给定=单 task 视图 / 仅 agent_id=跨 task 聚合 / 二者皆 None=ValueError；
+          AGENT → agent_id 必给、task_id 非 None=ValueError；
+          SESSION → task_id/agent_id 非 None=ValueError。
+        - 返回前经 memory_compat.normalize_view（legacy dispatch 配对 + kind/layer 重打）；
+          record.address 回显来源归档地址。
+        """
+        ...
+
+    @abstractmethod
     async def recall_recent(
         self,
         scope: MemoryScope,

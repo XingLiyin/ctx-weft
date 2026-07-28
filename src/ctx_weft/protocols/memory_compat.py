@@ -91,9 +91,20 @@ def matches_legacy_type(
 
 
 def normalize_view(records: "list[MemoryRecord]") -> "list[MemoryRecord]":
-    """视图返回前的统一归一化。
+    """视图返回前的统一归一化（v2 设计 §6）。
 
-    Task 4（load_view 落地）实装：legacy dispatch 配对（委托 _legacy_dispatch）+
-    kind/layer/address 重打。本阶段直通。
+    1. legacy dispatch 配对：TASK_DISPATCH/RESULT → AGENT_CONVERSATION_TURN 回合，
+       孤立 dispatch 隐去（委托 _legacy_dispatch，全仓唯一配对实现）；
+    2. kind/layer 重打：legacy 行按 LEGACY_TRIPLE 补全（v2 行已带，原样）。
+    address 回显由 provider 在 record 构造时填（来源即存储行的归档地址）。
     """
-    return records
+    from ctx_weft.protocols._legacy_dispatch import normalize_legacy_dispatch
+
+    out: list[MemoryRecord] = []
+    for r in normalize_legacy_dispatch(records):
+        if r.kind is None and r.type is not None:
+            triple = LEGACY_TRIPLE.get(r.type)
+            if triple is not None:
+                r.kind, r.layer = triple[0], triple[1]
+        out.append(r)
+    return out

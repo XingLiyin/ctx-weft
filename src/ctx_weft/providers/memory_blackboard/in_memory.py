@@ -12,8 +12,10 @@ from datetime import UTC, datetime, timedelta
 from ctx_weft.protocols import (
     EVENT_LAYER,
     CompactResult,
+    MemoryAddress,
     MemoryEvent,
     MemoryEventType,
+    MemoryKind,
     MemoryLayer,
     MemoryProvider,
     MemoryProviderInfo,
@@ -21,6 +23,12 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     Subscription,
+)
+from ctx_weft.protocols.memory_compat import (
+    kind_of,
+    layer_of,
+    matches_legacy_type,
+    normalize_view,
 )
 
 
@@ -32,6 +40,9 @@ class _StoredEvent:
     event: MemoryEvent
     seq_no: int  # per-(agent_id, scope) 单调递增
     topic_seq_no: int  # per-topic 单调递增（None topic 不算）
+    # ingest 时归一化的 v2 三元组（kind=None → 死类型，永不见于视图）
+    kind: MemoryKind | None = None
+    layer: MemoryLayer | None = None
     is_superseded: bool = False
 
 
@@ -64,34 +75,107 @@ class InMemoryMemoryProvider(MemoryProvider):
             else:
                 self._next_id += 1
                 event_id = f"mev_{self._next_id:08d}"
+            return self._ingest_locked(event, ctx, event_id)
 
-            layer = EVENT_LAYER[event.type]
-            scope_key = self._scope_key(event.scope, ctx.tenant_id, layer)
-            self._seq_counters[scope_key] = self._seq_counters.get(scope_key, 0) + 1
-            seq_no = self._seq_counters[scope_key]
+    def _ingest_locked(self, event: MemoryEvent, ctx: ProviderContext, event_id: str) -> str:
+        """ingest 内核（须持 self._lock 调用）；fold 复用以保证原子性。"""
+        # v2 三元组归一：kind 解析失败 = 死类型（OBSERVER_SUMMARY 等）→ 存储保留、视图不见
+        try:
+            kind = kind_of(event.type, event.kind)
+        except ValueError:
+            kind = None
+        layer = layer_of(event.type, event.layer)
 
-            topic_seq = 0
-            if event.topic:
-                # 覆盖语义：同 topic 的旧 BLACKBOARD_PUBLISH 标记 superseded，只保留最新一条
-                if event.type == MemoryEventType.BLACKBOARD_PUBLISH:
-                    for s in self._events:
-                        if (not s.is_superseded
-                                and s.event.topic == event.topic
-                                and s.event.type == MemoryEventType.BLACKBOARD_PUBLISH):
-                            s.is_superseded = True
-                self._topic_seq[event.topic] = self._topic_seq.get(event.topic, 0) + 1
-                topic_seq = self._topic_seq[event.topic]
+        scope_key = self._scope_key(event.scope, ctx.tenant_id, layer)
+        self._seq_counters[scope_key] = self._seq_counters.get(scope_key, 0) + 1
+        seq_no = self._seq_counters[scope_key]
 
-            stored = _StoredEvent(
-                id=event_id,
-                event=event,
-                seq_no=seq_no,
-                topic_seq_no=topic_seq,
-            )
-            self._events.append(stored)
-            return event_id
+        topic_seq = 0
+        if event.topic:
+            # 覆盖语义（PUBLICATION 特例）：同 topic 旧发布标 superseded，只保留最新一条
+            if kind is MemoryKind.PUBLICATION:
+                for s in self._events:
+                    if (not s.is_superseded
+                            and s.event.topic == event.topic
+                            and s.kind is MemoryKind.PUBLICATION):
+                        s.is_superseded = True
+            self._topic_seq[event.topic] = self._topic_seq.get(event.topic, 0) + 1
+            topic_seq = self._topic_seq[event.topic]
+
+        stored = _StoredEvent(
+            id=event_id,
+            event=event,
+            seq_no=seq_no,
+            topic_seq_no=topic_seq,
+            kind=kind,
+            layer=layer,
+        )
+        self._events.append(stored)
+        return event_id
+
+    # ── load_view（v2 §4：工作记忆回放）─────────────────────────────────────────
+
+    _DEFAULT_KINDS = (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY)
+
+    async def load_view(
+        self,
+        address: MemoryAddress,
+        scope: MemoryLayer,
+        ctx: ProviderContext,
+        kinds: list[MemoryKind] | None = None,
+    ) -> list[MemoryRecord]:
+        self._validate_half_address(address, scope)
+        wanted = set(kinds) if kinds is not None else set(self._DEFAULT_KINDS)
+
+        matching = [
+            s for s in self._events
+            if not s.is_superseded
+            and s.layer is scope
+            and s.kind in wanted
+            and self._address_match(s.event.scope, address, scope)
+        ]
+        matching.sort(key=lambda s: (s.event.timestamp, s.seq_no))
+        return normalize_view([self._to_record(s) for s in matching])
+
+    @staticmethod
+    def _validate_half_address(address: MemoryAddress, scope: MemoryLayer) -> None:
+        """半址矩阵（v2 §4）：非法非 None 字段 loud 失败，抓静默漏召回。"""
+        if scope is MemoryLayer.TASK:
+            if address.task_id is None and address.agent_id is None:
+                raise ValueError("TASK view requires task_id (single-task) or agent_id (cross-task)")
+        elif scope is MemoryLayer.AGENT:
+            if not address.agent_id:
+                raise ValueError("AGENT view requires agent_id")
+            if address.task_id is not None:
+                raise ValueError("AGENT view forbids task_id (pass task_id=None)")
+        else:  # SESSION
+            if address.task_id is not None or address.agent_id is not None:
+                raise ValueError("SESSION view forbids task_id/agent_id")
+
+    @staticmethod
+    def _address_match(stored: MemoryScope, address: MemoryAddress, scope: MemoryLayer) -> bool:
+        if stored.session_id != address.session_id:
+            return False
+        if scope is MemoryLayer.TASK:
+            if address.task_id is not None:
+                if stored.task_id != address.task_id:
+                    return False
+                # 全址时防御性校验 agent 归属
+                return address.agent_id is None or stored.agent_id == address.agent_id
+            return stored.agent_id == address.agent_id  # 跨 task 聚合
+        if scope is MemoryLayer.AGENT:
+            return stored.agent_id == address.agent_id
+        return True  # SESSION：session_id 已匹配
 
     # ── Recall ────────────────────────────────────────────────────────────────
+
+    def _matches_any_type(self, stored: _StoredEvent, type_set: set[MemoryEventType]) -> bool:
+        """过渡期桥接：旧行按 type 精确匹配，v2 行按 LEGACY_TRIPLE 三元组匹配。"""
+        return any(
+            matches_legacy_type(stored.event.type, stored.kind, stored.layer,
+                                stored.event.role, t)
+            for t in type_set
+        )
 
     async def recall_recent(
         self,
@@ -110,9 +194,11 @@ class InMemoryMemoryProvider(MemoryProvider):
         for stored in self._events:
             if stored.is_superseded:
                 continue
-            if stored.event.type not in type_set:
+            if not self._matches_any_type(stored, type_set):
                 continue
-            lyr = EVENT_LAYER[stored.event.type]
+            lyr = stored.layer
+            if lyr not in target_keys:
+                continue
             if self._scope_key(stored.event.scope, ctx.tenant_id, lyr) != target_keys[lyr]:
                 continue
             matching.append(stored)
@@ -134,10 +220,10 @@ class InMemoryMemoryProvider(MemoryProvider):
         matching = [
             s for s in self._events
             if not s.is_superseded
-            and s.event.type in type_set
+            and self._matches_any_type(s, type_set)
             and s.event.scope.session_id == agent_scope.session_id
             and s.event.scope.agent_id == aid
-            and EVENT_LAYER[s.event.type] is MemoryLayer.TASK
+            and s.layer is MemoryLayer.TASK
         ]
         matching.sort(key=lambda s: s.event.timestamp)
         recent = matching[-limit:] if limit and limit > 0 else matching
@@ -223,7 +309,7 @@ class InMemoryMemoryProvider(MemoryProvider):
         def _in_scope(s: _StoredEvent) -> bool:
             return (
                 not s.is_superseded
-                and EVENT_LAYER[s.event.type] is layer
+                and s.layer is layer
                 and self._scope_key(s.event.scope, ctx.tenant_id, layer) == scope_key
             )
 
@@ -240,18 +326,24 @@ class InMemoryMemoryProvider(MemoryProvider):
         # 2026-07-21）。短段免折残留的更早 raw 落在该点之前 → 永不跨段折入本摘要；
         # 且被折区从该点之后起算 → 锚点走「段尾」分支，不会抢到前一条 UP 之前。
         # 该类型记录不存在 → 不限定（整 scope 照旧）。
+        # 过渡期三元组感知（Task 4 加固）：写侧切 v2 词汇后（type=None），since_last 段界
+        # 与 protect_types 判定必须仍命中 v2 行（如 role=user 回合），否则 Task 7→8 窗口内
+        # v2 的 USER_PROMPT 失去折叠保护。matches_legacy_type 对旧行 = type 精确匹配（不变）。
+        def _is_type(s: _StoredEvent, t: MemoryEventType) -> bool:
+            return matches_legacy_type(s.event.type, s.kind, s.layer, s.event.role, t)
+
         pool = active
         if since_last is not None:
             boundary_idx = next(
                 (i for i in range(len(active) - 1, -1, -1)
-                 if active[i].event.type is since_last),
+                 if _is_type(active[i], since_last)),
                 None,
             )
             if boundary_idx is not None:
                 pool = active[boundary_idx + 1:]
 
         # protect_types 永不进 archive；keep_last 只对可折类型计
-        archivable = [s for s in pool if s.event.type not in protect_types]
+        archivable = [s for s in pool if not any(_is_type(s, pt) for pt in protect_types)]
         to_archive = archivable[:-keep_last] if keep_last > 0 else archivable
         for s in to_archive:
             s.is_superseded = True
@@ -301,6 +393,7 @@ class InMemoryMemoryProvider(MemoryProvider):
             compact_id = f"mev_{self._next_id:08d}"
             self._events.append(_StoredEvent(
                 id=compact_id, event=compact_event, seq_no=summary_seq, topic_seq_no=0,
+                kind=MemoryKind.SUMMARY, layer=layer,
             ))
 
         events_after = sum(1 for s in self._events if _in_scope(s))
@@ -341,9 +434,11 @@ class InMemoryMemoryProvider(MemoryProvider):
         for stored in self._events:
             if stored.is_superseded:
                 continue
-            if stored.event.type not in type_set:
+            if not self._matches_any_type(stored, type_set):
                 continue
-            lyr = EVENT_LAYER[stored.event.type]
+            lyr = stored.layer
+            if lyr not in target_keys:
+                continue
             if self._scope_key(stored.event.scope, ctx.tenant_id, lyr) != target_keys[lyr]:
                 continue
             count += 1
@@ -374,6 +469,9 @@ class InMemoryMemoryProvider(MemoryProvider):
             timestamp=stored.event.timestamp,
             role=stored.event.role,
             topic=stored.event.topic,
+            kind=stored.kind,
+            layer=stored.layer,
+            address=stored.event.scope,  # 来源回显（v2 §3；metadata 打标过渡期保留）
             metadata={
                 **stored.event.metadata,
                 "seq_no": stored.seq_no,
