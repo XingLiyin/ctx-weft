@@ -48,7 +48,7 @@ def _sc(task_id: str = "t1", agent_id: str = "ag1") -> MemoryAddress:
 def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
     return MemoryEvent(
         type=type_,
-        scope=scope,
+        address=scope,
         content=content,
         timestamp=_BASE + timedelta(seconds=t),
         role=role,

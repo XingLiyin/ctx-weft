@@ -39,7 +39,7 @@ def _sc(task_id: str, agent_id: str = "ag1") -> MemoryAddress:
 def _ev(type_: MemoryEventType, scope: MemoryAddress, content: str, t: int = 0) -> MemoryEvent:
     return MemoryEvent(
         type=type_,
-        scope=scope,
+        address=scope,
         content=content,
         timestamp=_BASE + timedelta(seconds=t),
     )
@@ -78,7 +78,7 @@ async def test_task_fold_leaves_agent_layer_untouched() -> None:
     view = await m.load_view(sc, MemoryScope.TASK, _ctx())
     fold_ids = [r.id for r in view if r.content in ("u", "a1")]  # 保 a2（策展在框架侧）
     await m.fold(fold_ids, [MemoryEvent(
-        kind=MemoryKind.SUMMARY, layer=MemoryScope.TASK, scope=sc, content="SUMMARY",
+        kind=MemoryKind.SUMMARY, scope=MemoryScope.TASK, address=sc, content="SUMMARY",
         timestamp=_BASE + timedelta(seconds=1, milliseconds=500), role="assistant",
     )], _ctx())
 

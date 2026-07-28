@@ -87,8 +87,8 @@ async def segment_fold(
 
     summary_event = MemoryEvent(
         kind=MemoryKind.SUMMARY,
-        layer=layer,
-        scope=address,
+        scope=layer,
+        address=address,
         content=summary,
         timestamp=summary_ts,
         role="assistant" if layer is MemoryScope.TASK else "user",

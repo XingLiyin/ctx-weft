@@ -72,7 +72,7 @@ def _loop_ctx(mem):
 
 
 def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
-    return MemoryEvent(type=type_, scope=scope, content=content,
+    return MemoryEvent(type=type_, address=scope, content=content,
                        timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta)
 
 
@@ -212,13 +212,13 @@ class _FakeGateway:
 async def _preset_placeholder_pair(mem, scope, task_id: str, pctx) -> None:
     ts = datetime.now(UTC)
     await mem.ingest(MemoryEvent(
-        type=T.AGENT_CONVERSATION_TURN, scope=scope, content="占位 recap",
+        type=T.AGENT_CONVERSATION_TURN, address=scope, content="占位 recap",
         timestamp=ts, role="assistant",
         metadata={"origin_task_id": task_id,
                   "tool_calls": [{"id": "tc9", "name": "control__finish_task", "input": {}}]},
     ), pctx)
     await mem.ingest(MemoryEvent(
-        type=T.AGENT_CONVERSATION_TURN, scope=scope, content="占位 summary",
+        type=T.AGENT_CONVERSATION_TURN, address=scope, content="占位 summary",
         timestamp=ts, role="tool",
         metadata={"origin_task_id": task_id, "tool_call_id": "tc9"},
     ), pctx)

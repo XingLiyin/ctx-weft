@@ -27,14 +27,14 @@ def _ctx() -> ProviderContext:
 
 
 def _turn(content: str, minute: int, role: str) -> MemoryEvent:
-    return MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-                       scope=_ADDR, content=content,
+    return MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+                       address=_ADDR, content=content,
                        timestamp=_T0 + timedelta(minutes=minute), role=role)
 
 
 def _summary(content: str, minute: int) -> MemoryEvent:
-    return MemoryEvent(kind=MemoryKind.SUMMARY, layer=MemoryScope.TASK,
-                       scope=_ADDR, content=content, role="assistant",
+    return MemoryEvent(kind=MemoryKind.SUMMARY, scope=MemoryScope.TASK,
+                       address=_ADDR, content=content, role="assistant",
                        timestamp=_T0 + timedelta(minutes=minute))
 
 

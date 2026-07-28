@@ -46,7 +46,7 @@ def _pctx() -> ProviderContext:
 
 
 def _ev(type_, content, t, role=None) -> MemoryEvent:
-    return MemoryEvent(type=type_, scope=_scope(), content=content,
+    return MemoryEvent(type=type_, address=_scope(), content=content,
                        timestamp=_BASE + timedelta(seconds=t), role=role)
 
 
@@ -97,12 +97,12 @@ async def test_agent_compact_writes_agent_summary() -> None:
         oid = f"root{grp}"
         await mem.ingest(MemoryEvent(
             type=T.USER_PROMPT,
-            scope=MemoryAddress(session_id="s1", task_id=oid, agent_id=_scope().agent_id),
+            address=MemoryAddress(session_id="s1", task_id=oid, agent_id=_scope().agent_id),
             content=f"body {oid}", timestamp=base + timedelta(seconds=t0), role="user",
         ), _pctx())
         for role, dt in [("user", 0), ("assistant", 1)]:
             await mem.ingest(MemoryEvent(
-                type=T.AGENT_CONVERSATION_TURN, scope=_scope(),
+                type=T.AGENT_CONVERSATION_TURN, address=_scope(),
                 content=f"turn {oid} {role}",
                 timestamp=base + timedelta(seconds=t0 + dt), role=role,
                 metadata={"origin_task_id": oid, "parent_task_id": None},

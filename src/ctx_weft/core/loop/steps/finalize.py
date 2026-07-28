@@ -115,7 +115,7 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     ts = _as_utc(task.started_at or task.created_at or now_utc())
     await memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=parent_scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
             content="", timestamp=ts, role="assistant",
             metadata={"origin_task_id": task.parent_task_id,
                       "parent_task_id": task.parent_task_id,
@@ -159,7 +159,7 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
     # v2 P3d：旧 ack 遗忘 + 终态写入一次原子 fold（stale 空 = 纯写入）
     await memory.fold(stale, [
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=parent_scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
             content=content, timestamp=ts, role="tool",
             metadata={"origin_task_id": task.parent_task_id,
                       "tool_call_id": task.origin_tool_call_id},
@@ -491,7 +491,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
 
     await memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
             content=act_recap, timestamp=base, role="assistant",
             metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
                       "tool_calls": [{"id": tool_call_id,
@@ -502,7 +502,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     )
     await memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
             content=f"{report_prefix}{summary_text}", timestamp=base, role="tool",
             metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
                       "tool_call_id": tool_call_id},
@@ -598,8 +598,8 @@ class FinalizeStep(Step):
         if outcome == "success" and mem_content:
             await ctx.memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.PUBLICATION, layer=MemoryScope.SESSION,
-                    scope=state.scope,
+                    kind=MemoryKind.PUBLICATION, scope=MemoryScope.SESSION,
+                    address=state.scope,
                     content=mem_content,
                     timestamp=now_utc(),
                     role="assistant",

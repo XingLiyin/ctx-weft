@@ -49,11 +49,11 @@ async def _seed_events(mem: InMemoryMemoryProvider) -> None:
     pctx = _pctx()
     scope = _scope()
     events = [
-        MemoryEvent(type=MemoryEventType.USER_PROMPT,  scope=scope, content="原始",  timestamp=_ts(1), role="user"),
-        MemoryEvent(type=MemoryEventType.LLM_RESPONSE, scope=scope, content="想法1", timestamp=_ts(2), role="assistant"),
-        MemoryEvent(type=MemoryEventType.TOOL_RESULT,  scope=scope, content="结果1", timestamp=_ts(3), role="tool"),
-        MemoryEvent(type=MemoryEventType.USER_PROMPT,  scope=scope, content="HITL",  timestamp=_ts(4), role="user"),
-        MemoryEvent(type=MemoryEventType.LLM_RESPONSE, scope=scope, content="想法2", timestamp=_ts(5), role="assistant"),
+        MemoryEvent(type=MemoryEventType.USER_PROMPT,  address=scope, content="原始",  timestamp=_ts(1), role="user"),
+        MemoryEvent(type=MemoryEventType.LLM_RESPONSE, address=scope, content="想法1", timestamp=_ts(2), role="assistant"),
+        MemoryEvent(type=MemoryEventType.TOOL_RESULT,  address=scope, content="结果1", timestamp=_ts(3), role="tool"),
+        MemoryEvent(type=MemoryEventType.USER_PROMPT,  address=scope, content="HITL",  timestamp=_ts(4), role="user"),
+        MemoryEvent(type=MemoryEventType.LLM_RESPONSE, address=scope, content="想法2", timestamp=_ts(5), role="assistant"),
     ]
     for ev in events:
         await mem.ingest(ev, pctx)

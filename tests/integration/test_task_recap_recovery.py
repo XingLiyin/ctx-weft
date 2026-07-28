@@ -109,13 +109,13 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
     fin_tcid = "tc_finish"
     await mem.ingest(MemoryEvent(
-        type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+        type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
         content="Process Report: (placeholder)", timestamp=_TS, role="assistant",
         metadata={"origin_task_id": tid, "tool_calls": [
             {"id": fin_tcid, "name": qualify("control:finish_task"), "input": {}}]},
     ), pctx)
     await mem.ingest(MemoryEvent(
-        type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+        type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
         content="(placeholder finish result)", timestamp=_TS, role="tool",
         metadata={"origin_task_id": tid, "tool_call_id": fin_tcid},
     ), pctx)
@@ -197,13 +197,13 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
     fin_tcid = "tc_finish_fail"
     await mem.ingest(MemoryEvent(
-        type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+        type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
         content="Process Report: (placeholder)", timestamp=_TS, role="assistant",
         metadata={"origin_task_id": tid, "tool_calls": [
             {"id": fin_tcid, "name": qualify("control:finish_task"), "input": {}}]},
     ), pctx)
     await mem.ingest(MemoryEvent(
-        type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+        type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
         content="(placeholder finish result)", timestamp=_TS, role="tool",
         metadata={"origin_task_id": tid, "tool_call_id": fin_tcid},
     ), pctx)
@@ -330,7 +330,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     scope = MemoryAddress(session_id=sid, task_id=tid, agent_id=aid)
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
     await mem.ingest(MemoryEvent(
-        type=MemoryEventType.LLM_RESPONSE, scope=scope, content="(raw turn, unfolded)",
+        type=MemoryEventType.LLM_RESPONSE, address=scope, content="(raw turn, unfolded)",
         timestamp=_TS, role="assistant", metadata={"tool_calls": []},
     ), pctx)
 

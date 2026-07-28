@@ -26,7 +26,7 @@ def _ctx() -> ProviderContext:
 def _event(content: str, id: str | None = None) -> MemoryEvent:
     return MemoryEvent(
         type=MemoryEventType.USER_PROMPT,
-        scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
+        address=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         content=content,
         timestamp=datetime.now(timezone.utc),
         id=id,

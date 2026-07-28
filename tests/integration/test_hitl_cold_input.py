@@ -116,7 +116,7 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
     await mem.ingest(
         MemoryEvent(
             type=MemoryEventType.LLM_RESPONSE,
-            scope=scope,
+            address=scope,
             content="",
             timestamp=now_utc(),
             role="assistant",

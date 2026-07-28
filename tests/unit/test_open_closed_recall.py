@@ -49,7 +49,7 @@ def _agent_scope(agent_id: str = "ag1") -> MemoryAddress:
 def _ev(type_: MemoryEventType, scope: MemoryAddress, content: str, t: int,
         role: str | None = None, **meta) -> MemoryEvent:
     return MemoryEvent(
-        type=type_, scope=scope, content=content,
+        type=type_, address=scope, content=content,
         timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta,
     )
 

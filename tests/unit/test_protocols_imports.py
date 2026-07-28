@@ -23,7 +23,7 @@ def test_imports():
     facet = IdentityFacet(text="I am a helpful assistant.")
     event = MemoryEvent(
         type=MemoryEventType.USER_PROMPT,
-        scope=scope,
+        address=scope,
         content="hello",
         timestamp=datetime.now(UTC),
     )

@@ -86,16 +86,16 @@ async def test_compact_session_folds_agent_layer() -> None:
         # task 层 body（task_id=root{i}）使每组成为真实 L0 单元（Task-4 §4）
         await mem.ingest(MemoryEvent(
             type=MemoryEventType.USER_PROMPT,
-            scope=MemoryAddress(session_id=sid, task_id=f"root{i}", agent_id=aid),
+            address=MemoryAddress(session_id=sid, task_id=f"root{i}", agent_id=aid),
             content=f"body {i}", role="user",
             timestamp=ts + timedelta(seconds=i * 10)), pctx)
         await mem.ingest(MemoryEvent(
-            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
             content=f"user prompt {i}", role="user",
             timestamp=ts + timedelta(seconds=i * 10),
             metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
         await mem.ingest(MemoryEvent(
-            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
             content=f"assistant summary {i}", role="assistant",
             timestamp=ts + timedelta(seconds=i * 10 + 1),
             metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)

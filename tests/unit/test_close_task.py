@@ -61,7 +61,7 @@ def _loop_ctx(mem, tm: _FakeTM):
 
 
 def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
-    return MemoryEvent(type=type_, scope=scope, content=content,
+    return MemoryEvent(type=type_, address=scope, content=content,
                        timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta)
 
 

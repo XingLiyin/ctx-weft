@@ -66,7 +66,7 @@ async def test_inject_user_reply_phase1_adds_edit_note():
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
     await mem.ingest(MemoryEvent(
-        type=MemoryEventType.USER_PROMPT, scope=scope, content="原始请求X",
+        type=MemoryEventType.USER_PROMPT, address=scope, content="原始请求X",
         timestamp=now_utc(), role="user",
     ), pctx)
 

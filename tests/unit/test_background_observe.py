@@ -72,7 +72,7 @@ def _neutralize_refold_guard(monkeypatch, ctx) -> None:
         return [MemoryRecord(
             id="guard", type=MT.LLM_RESPONSE, content="x",
             timestamp=datetime.now(timezone.utc), role="assistant",
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
         )]
 
     monkeypatch.setattr(ctx.memory, "load_view", fake_load_view)
@@ -294,11 +294,11 @@ async def test_two_plain_text_observes_accumulate_both_summaries(monkeypatch, fa
     # ── 用户回复(UP2) + 第二轮纯文本(LLM reply2)；用真实 now 保证时序单调 ──
     await asyncio.sleep(0.005)
     await ctx.memory.ingest(MemoryEvent(
-        type=MT.USER_PROMPT, scope=state.scope, content="user2",
+        type=MT.USER_PROMPT, address=state.scope, content="user2",
         timestamp=datetime.now(UTC), role="user"), ctx.provider_ctx)
     await asyncio.sleep(0.005)
     await ctx.memory.ingest(MemoryEvent(
-        type=MT.LLM_RESPONSE, scope=state.scope, content="reply2",
+        type=MT.LLM_RESPONSE, address=state.scope, content="reply2",
         timestamp=datetime.now(UTC), role="assistant"), ctx.provider_ctx)
     await asyncio.sleep(0.005)
 
@@ -400,13 +400,13 @@ async def test_no_usable_report_close_preserves_existing_finish_pair(monkeypatch
     # 预置 finalize 合成的 finish 对（assistant + tool，tool_call_id=tc9）
     ts = datetime.now(UTC)
     await ctx.memory.ingest(MemoryEvent(
-        type=MT.AGENT_CONVERSATION_TURN, scope=state.scope, content="finalize recap",
+        type=MT.AGENT_CONVERSATION_TURN, address=state.scope, content="finalize recap",
         timestamp=ts, role="assistant",
         metadata={"origin_task_id": state.task.id,
                   "tool_calls": [{"id": "tc9", "name": "control__finish_task", "input": {}}]},
     ), ctx.provider_ctx)
     await ctx.memory.ingest(MemoryEvent(
-        type=MT.AGENT_CONVERSATION_TURN, scope=state.scope, content="finalize summary",
+        type=MT.AGENT_CONVERSATION_TURN, address=state.scope, content="finalize summary",
         timestamp=ts, role="tool",
         metadata={"origin_task_id": state.task.id, "tool_call_id": "tc9"},
     ), ctx.provider_ctx)
@@ -467,7 +467,7 @@ async def test_dispatch_boundary_folds_segment(monkeypatch, fake_state_ctx):
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
     # 模拟 SuspendStep 已写的挂起摘要（AGENT 层）
     await ctx.memory.ingest(MemoryEvent(
-        type=MT.OBSERVER_SUMMARY, scope=state.scope,
+        type=MT.OBSERVER_SUMMARY, address=state.scope,
         content="Delegated to sub-task(s): 'x'. Awaiting completion.",
         timestamp=datetime.now(UTC), role="assistant",
         metadata={"task_id": state.task.id, "outcome": "suspended"}), ctx.provider_ctx)

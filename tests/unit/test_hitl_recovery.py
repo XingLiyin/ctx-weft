@@ -399,11 +399,11 @@ async def test_crash_mid_batch_routes_to_reconcile() -> None:
     mem = InMemoryMemoryProvider()
     pctx = ProviderContext(session_id="s1", tenant_id="default")
     sc = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
-    await mem.ingest(MemoryEvent(type=MemoryEventType.LLM_RESPONSE, scope=sc, content="",
+    await mem.ingest(MemoryEvent(type=MemoryEventType.LLM_RESPONSE, address=sc, content="",
         timestamp=base + timedelta(seconds=1), role="assistant",
         metadata={"tool_calls": [{"id": "x1", "name": "web", "input": {}},
                                  {"id": "x2", "name": "web", "input": {}}]}), pctx)
-    await mem.ingest(MemoryEvent(type=MemoryEventType.TOOL_RESULT, scope=sc, content="r1",
+    await mem.ingest(MemoryEvent(type=MemoryEventType.TOOL_RESULT, address=sc, content="r1",
         timestamp=base + timedelta(seconds=2), role="tool", metadata={"tool_call_id": "x1"}), pctx)
     assert await _task_has_dangling_tool_call(mem, sc, pctx) is True   # x2 dangling → reconcile
 

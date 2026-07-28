@@ -148,6 +148,6 @@ def normalize_view(records: "list[MemoryRecord]") -> "list[MemoryRecord]":
         if r.kind is None and r.type is not None:
             triple = LEGACY_TRIPLE.get(r.type)
             if triple is not None:
-                r.kind, r.layer = triple[0], triple[1]
+                r.kind, r.scope = triple[0], triple[1]
         out.append(r)
     return out

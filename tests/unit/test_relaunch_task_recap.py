@@ -51,7 +51,7 @@ async def _seed_finish_pair(memory: InMemoryMemoryProvider, session: Session, ta
     await memory.ingest(
         MemoryEvent(
             type=MemoryEventType.AGENT_CONVERSATION_TURN,
-            scope=scope,
+            address=scope,
             content="",
             timestamp=datetime(2026, 6, 12, tzinfo=UTC),
             role="assistant",

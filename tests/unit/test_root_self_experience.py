@@ -40,7 +40,7 @@ def _agent_sc(agent="ag1") -> MemoryAddress:
 
 
 def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
-    return MemoryEvent(type=type_, scope=scope, content=content,
+    return MemoryEvent(type=type_, address=scope, content=content,
                        timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta)
 
 

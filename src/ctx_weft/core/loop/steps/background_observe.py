@@ -154,13 +154,13 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
     # v2 P3d：占位对遗忘 + 新对写入一次原子 fold（关旧「占位已删而真报告未写」窗口）。
     await memory.fold([r.id for r in (*asst, *tool)], [
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
             content=act_recap, timestamp=ts, role="assistant",
             metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
                       "tool_calls": tool_calls},
         ),
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
             content=f"{report_prefix}{summary_text}", timestamp=ts, role="tool",
             metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
                       "tool_call_id": tool_call_id},

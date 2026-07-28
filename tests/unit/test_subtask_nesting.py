@@ -61,7 +61,7 @@ def _loop_ctx(mem):
 
 
 def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
-    return MemoryEvent(type=type_, scope=scope, content=content,
+    return MemoryEvent(type=type_, address=scope, content=content,
                        timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta)
 
 
@@ -399,7 +399,7 @@ async def test_ensure_dispatch_frame_mixed_tz_no_crash() -> None:
     parent_scope = _sc("p1", "ag1")
     naive_dispatch = datetime(2026, 1, 1)          # naive（无 tzinfo）
     await mem.ingest(MemoryEvent(
-        type=T.AGENT_CONVERSATION_TURN, scope=parent_scope, content="",
+        type=T.AGENT_CONVERSATION_TURN, address=parent_scope, content="",
         timestamp=naive_dispatch, role="assistant",
         metadata={"origin_task_id": "p1", "parent_task_id": None,
                   "tool_calls": [{"id": "oc1", "name": "delegate_task", "input": {}}]},

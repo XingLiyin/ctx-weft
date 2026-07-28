@@ -80,7 +80,7 @@ async def test_reconcile_invokes_only_dangling_tool_calls() -> None:
     sc = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
 
     def ev(tp, content, sec, role, **md):
-        return MemoryEvent(type=tp, scope=sc, content=content,
+        return MemoryEvent(type=tp, address=sc, content=content,
                            timestamp=base + timedelta(seconds=sec), role=role, metadata=md)
 
     await mem.ingest(ev(MemoryEventType.LLM_RESPONSE, "", 1, "assistant",
@@ -120,10 +120,10 @@ async def test_reconcile_no_dangling_routes_to_prepare() -> None:
     mem = InMemoryMemoryProvider()
     pctx = ProviderContext(session_id="s1", tenant_id="default")
     sc = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
-    await mem.ingest(MemoryEvent(type=MemoryEventType.LLM_RESPONSE, scope=sc, content="",
+    await mem.ingest(MemoryEvent(type=MemoryEventType.LLM_RESPONSE, address=sc, content="",
                                  timestamp=base + timedelta(seconds=1), role="assistant",
                                  metadata={"tool_calls": [{"id": "tcA", "name": "web", "input": {}}]}), pctx)
-    await mem.ingest(MemoryEvent(type=MemoryEventType.TOOL_RESULT, scope=sc, content="out",
+    await mem.ingest(MemoryEvent(type=MemoryEventType.TOOL_RESULT, address=sc, content="out",
                                  timestamp=base + timedelta(seconds=2), role="tool",
                                  metadata={"tool_call_id": "tcA"}), pctx)
     invoked = []
@@ -151,7 +151,7 @@ async def test_resolve_reconcile_detection_helper() -> None:
     sc = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
 
     def ev(tp, sec, role, **md):
-        return MemoryEvent(type=tp, scope=sc, content="", timestamp=base + timedelta(seconds=sec),
+        return MemoryEvent(type=tp, address=sc, content="", timestamp=base + timedelta(seconds=sec),
                            role=role, metadata=md)
 
     await mem.ingest(ev(MemoryEventType.LLM_RESPONSE, 1, "assistant",

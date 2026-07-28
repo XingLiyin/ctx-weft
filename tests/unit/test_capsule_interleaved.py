@@ -45,7 +45,7 @@ def _agent_scope(agent="ag1") -> MemoryAddress:
 
 def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
     return MemoryEvent(
-        type=type_, scope=scope, content=content,
+        type=type_, address=scope, content=content,
         timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta,
     )
 
@@ -114,9 +114,9 @@ async def test_finish_pair_timestamp_anchors_close():
     asc = _agent_scope()
 
     t2 = _BASE + timedelta(seconds=20)
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=tsc, content="q",
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=tsc, content="q",
                                  timestamp=_BASE + timedelta(seconds=10), role="user"), _ctx())
-    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tsc, content="s",
+    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, address=tsc, content="s",
                                  timestamp=t2, role="assistant"), _ctx())
 
     task = _task(prompt="q")
@@ -352,14 +352,14 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
     origin_tcid = "oc_adj_1"
 
     # T=1-2: Parent body (task layer)
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=p_tsc, content="parent task",
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=p_tsc, content="parent task",
                                  timestamp=_ts(1), role="user"), pctx)
-    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=p_tsc, content="delegating to child",
+    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, address=p_tsc, content="delegating to child",
                                  timestamp=_ts(2), role="assistant"), pctx)
 
     # T=3: Delegate assistant turn (agent layer, as written by gateway)
     await mem.ingest(MemoryEvent(
-        type=T.AGENT_CONVERSATION_TURN, scope=asc,
+        type=T.AGENT_CONVERSATION_TURN, address=asc,
         content="", timestamp=_ts(3), role="assistant",
         metadata={
             "origin_task_id": "P", "parent_task_id": None,
@@ -369,14 +369,14 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
     ), pctx)
 
     # T=4-5: Child body (task layer - same agent, thus recalled by AgentRecallSource)
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=c_tsc, content="child task",
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=c_tsc, content="child task",
                                  timestamp=_ts(4), role="user"), pctx)
-    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=c_tsc, content="doing child work",
+    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, address=c_tsc, content="doing child work",
                                  timestamp=_ts(5), role="assistant"), pctx)
 
     # T=3 (back-dated): dispatch ack tool result, same timestamp as delegate → strictly adjacent
     await mem.ingest(MemoryEvent(
-        type=T.AGENT_CONVERSATION_TURN, scope=asc,
+        type=T.AGENT_CONVERSATION_TURN, address=asc,
         content=_dispatch_ack("child task", "success"), timestamp=_ts(3), role="tool",
         metadata={
             "origin_task_id": "P",
@@ -387,7 +387,7 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
     # T=6: Child finish pair (agent layer)
     finish_tcid = "ftcall_adj_1"
     await mem.ingest(MemoryEvent(
-        type=T.AGENT_CONVERSATION_TURN, scope=asc,
+        type=T.AGENT_CONVERSATION_TURN, address=asc,
         content="child act recap", timestamp=_ts(6), role="assistant",
         metadata={
             "origin_task_id": "C", "parent_task_id": "P",
@@ -396,7 +396,7 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
         },
     ), pctx)
     await mem.ingest(MemoryEvent(
-        type=T.AGENT_CONVERSATION_TURN, scope=asc,
+        type=T.AGENT_CONVERSATION_TURN, address=asc,
         content="child task summary", timestamp=_ts(6), role="tool",
         metadata={
             "origin_task_id": "C", "parent_task_id": "P",

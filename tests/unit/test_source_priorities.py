@@ -104,7 +104,7 @@ async def test_blackboard_source_tiers_long_term_background_at_priority_1() -> N
     await m.ingest(
         MemoryEvent(
             type=MemoryEventType.BLACKBOARD_PUBLISH,
-            scope=MemoryAddress(session_id="s1", task_id="G", agent_id="a"),
+            address=MemoryAddress(session_id="s1", task_id="G", agent_id="a"),
             content="project background info",
             timestamp=datetime.now(timezone.utc),
             topic="G",
@@ -117,7 +117,7 @@ async def test_blackboard_source_tiers_long_term_background_at_priority_1() -> N
     await m.ingest(
         MemoryEvent(
             type=MemoryEventType.BLACKBOARD_PUBLISH,
-            scope=MemoryAddress(session_id="s1", task_id="A", agent_id="a"),
+            address=MemoryAddress(session_id="s1", task_id="A", agent_id="a"),
             content="subtask result",
             timestamp=datetime.now(timezone.utc),
             topic="A",

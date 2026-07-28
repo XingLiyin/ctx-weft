@@ -168,11 +168,11 @@ async def test_escalating_compact_shrinks_real_memory(monkeypatch):
     # seed 5 个结束顶层单元（finish 对：assistant + tool），parent=None → 顶层
     for i in range(5):
         oid = f"c{i}"
-        await mem.ingest(MemoryEvent(type=T.AGENT_CONVERSATION_TURN, scope=scope,
+        await mem.ingest(MemoryEvent(type=T.AGENT_CONVERSATION_TURN, address=scope,
             content="act_recap " + "x" * 200, timestamp=_BASE + timedelta(seconds=2 * i),
             role="assistant", metadata={"origin_task_id": oid, "parent_task_id": None,
             "tool_calls": [{"id": f"tc{i}", "name": "control:finish_task"}]}), pctx)
-        await mem.ingest(MemoryEvent(type=T.AGENT_CONVERSATION_TURN, scope=scope,
+        await mem.ingest(MemoryEvent(type=T.AGENT_CONVERSATION_TURN, address=scope,
             content="summary " + "y" * 200, timestamp=_BASE + timedelta(seconds=2 * i + 1),
             role="tool", metadata={"origin_task_id": oid, "parent_task_id": None,
             "tool_call_id": f"tc{i}"}), pctx)

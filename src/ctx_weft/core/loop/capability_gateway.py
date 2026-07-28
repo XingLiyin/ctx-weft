@@ -257,8 +257,8 @@ class CapabilityGateway:
         if not is_dispatch and not is_silent:
             await self._memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-                    scope=_tool_scope(state),
+                    kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+                    address=_tool_scope(state),
                     content=content,
                     timestamp=now_utc(),
                     role="tool",
@@ -291,8 +291,8 @@ class CapabilityGateway:
             if tool_name in _PLAN_DISPATCH_TOOLS:
                 await self._memory.ingest(
                     MemoryEvent(
-                        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT,
-                        scope=_tool_scope(state),
+                        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
+                        address=_tool_scope(state),
                         content="",
                         timestamp=now_utc(),
                         role="assistant",
@@ -306,8 +306,8 @@ class CapabilityGateway:
                 # envelope: 给 plan 框写一条配对的 ack tool result，避免该框悬挂(被 legalize 剥掉)。
                 await self._memory.ingest(
                     MemoryEvent(
-                        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT,
-                        scope=_tool_scope(state),
+                        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
+                        address=_tool_scope(state),
                         content=_PLAN_DISPATCH_ACK,
                         timestamp=now_utc(),
                         role="tool",
@@ -320,8 +320,8 @@ class CapabilityGateway:
         elif not is_silent:
             await self._memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.TOOL_AUDIT, layer=MemoryScope.TASK,
-                    scope=_tool_scope(state),
+                    kind=MemoryKind.TOOL_AUDIT, scope=MemoryScope.TASK,
+                    address=_tool_scope(state),
                     content=f"{tool_name}({sanitized})",
                     timestamp=now_utc(),
                     role="assistant",
@@ -386,8 +386,8 @@ class CapabilityGateway:
         if not is_dispatch and not is_silent:
             await self._memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-                    scope=_tool_scope(state),
+                    kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+                    address=_tool_scope(state),
                     content=content,
                     timestamp=now_utc(),
                     role="tool",

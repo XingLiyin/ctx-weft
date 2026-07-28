@@ -51,11 +51,11 @@ def _ts(us: int) -> datetime:
 async def _seed_two_segments(mem: InMemoryMemoryProvider, a1_content: str = "A1 段一回答") -> None:
     """时间线：UP1 → A1（段一 raw，模拟短段免折后残留）→ UP2 → A2a/A2b（当前段 raw）。"""
     events = [
-        MemoryEvent(type=MT.USER_PROMPT,  scope=_SCOPE, content="UP1 第一问", timestamp=_ts(10), role="user"),
-        MemoryEvent(type=MT.LLM_RESPONSE, scope=_SCOPE, content=a1_content,   timestamp=_ts(20), role="assistant"),
-        MemoryEvent(type=MT.USER_PROMPT,  scope=_SCOPE, content="UP2 第二问", timestamp=_ts(30), role="user"),
-        MemoryEvent(type=MT.LLM_RESPONSE, scope=_SCOPE, content="A2a 当前段", timestamp=_ts(40), role="assistant"),
-        MemoryEvent(type=MT.TOOL_RESULT,  scope=_SCOPE, content="A2b 工具",   timestamp=_ts(50), role="tool"),
+        MemoryEvent(type=MT.USER_PROMPT,  address=_SCOPE, content="UP1 第一问", timestamp=_ts(10), role="user"),
+        MemoryEvent(type=MT.LLM_RESPONSE, address=_SCOPE, content=a1_content,   timestamp=_ts(20), role="assistant"),
+        MemoryEvent(type=MT.USER_PROMPT,  address=_SCOPE, content="UP2 第二问", timestamp=_ts(30), role="user"),
+        MemoryEvent(type=MT.LLM_RESPONSE, address=_SCOPE, content="A2a 当前段", timestamp=_ts(40), role="assistant"),
+        MemoryEvent(type=MT.TOOL_RESULT,  address=_SCOPE, content="A2b 工具",   timestamp=_ts(50), role="tool"),
     ]
     for ev in events:
         await mem.ingest(ev, _PCTX)
@@ -96,7 +96,7 @@ async def test_apply_compact_since_last_without_up_folds_whole_scope():
         (MT.LLM_RESPONSE, "a", "assistant"),
         (MT.TOOL_RESULT, "b", "tool"),
     ]):
-        await mem.ingest(MemoryEvent(type=typ, scope=_SCOPE, content=content,
+        await mem.ingest(MemoryEvent(type=typ, address=_SCOPE, content=content,
                                      timestamp=_ts(10 + i), role=role), _PCTX)
 
     await segment_fold(mem, _SCOPE, MemoryScope.TASK, "S", _PCTX)
@@ -138,7 +138,7 @@ async def test_is_short_segment_long_current_segment_not_short():
     mem = InMemoryMemoryProvider()
     await _seed_two_segments(mem)
     await mem.ingest(MemoryEvent(
-        type=MT.LLM_RESPONSE, scope=_SCOPE, content="长" * 4000,
+        type=MT.LLM_RESPONSE, address=_SCOPE, content="长" * 4000,
         timestamp=_ts(60), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
@@ -189,11 +189,11 @@ async def test_background_fold_after_short_skip_keeps_previous_segment_raw(
 
     # 第二条用户消息 + 当前段 raw（真实 now 保证时序在预置事件之后）
     await ctx.memory.ingest(MemoryEvent(
-        type=MT.USER_PROMPT, scope=state.scope, content="UP2 第二问",
+        type=MT.USER_PROMPT, address=state.scope, content="UP2 第二问",
         timestamp=datetime.now(UTC), role="user"), ctx.provider_ctx)
     await asyncio.sleep(0.002)
     await ctx.memory.ingest(MemoryEvent(
-        type=MT.LLM_RESPONSE, scope=state.scope, content="A2 当前段",
+        type=MT.LLM_RESPONSE, address=state.scope, content="A2 当前段",
         timestamp=datetime.now(UTC), role="assistant"), ctx.provider_ctx)
 
     await bo.launch_background_observe(state, ctx, boundary="plain_text")
@@ -273,7 +273,7 @@ async def test_apply_compact_since_last_after_collapsed_up_still_folds():
         (MT.LLM_RESPONSE, "A3 保留raw",  40, "assistant"),
     ]
     for typ, content, off, role in seed:
-        await mem.ingest(MemoryEvent(type=typ, scope=_SCOPE, content=content,
+        await mem.ingest(MemoryEvent(type=typ, address=_SCOPE, content=content,
                                      timestamp=_ts(off), role=role), _PCTX)
 
     # 真实 L3 坍缩：折 [UP1, A1]，坍缩 UP 锚在保留区之前（ts 回填）、seq 最高
@@ -300,7 +300,7 @@ async def test_supersede_final_raw_segment_without_up_supersedes_all():
 
     mem = InMemoryMemoryProvider()
     await mem.ingest(MemoryEvent(
-        type=MT.LLM_RESPONSE, scope=_SCOPE, content="a",
+        type=MT.LLM_RESPONSE, address=_SCOPE, content="a",
         timestamp=_ts(10), role="assistant"), _PCTX)
 
     await _supersede_final_raw_segment(mem, _SCOPE, _PCTX)

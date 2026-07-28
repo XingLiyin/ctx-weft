@@ -62,7 +62,7 @@ def _agent_scope(agent_id: str = "ag1") -> MemoryAddress:
 def _ev(type_: MemoryEventType, scope: MemoryAddress, content: str, t: int,
         role: str | None = None, **meta) -> MemoryEvent:
     return MemoryEvent(
-        type=type_, scope=scope, content=content,
+        type=type_, address=scope, content=content,
         timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta,
     )
 
@@ -205,7 +205,7 @@ async def test_A3_mid_stream_interrupt_annotation() -> None:
     ids_to_supersede = [r.id for r in all_task_recs]
     summary_event = MemoryEvent(
         type=T.TASK_COMPACT_SUMMARY,
-        scope=tsc,
+        address=tsc,
         content="〔段①·被用户打断〕正用 PyJWT 写 login() 签发，写到一半被打断。",
         timestamp=_BASE + timedelta(seconds=2),
         role="assistant",  # apply_compact 存 role=assistant
@@ -217,14 +217,14 @@ async def test_A3_mid_stream_interrupt_annotation() -> None:
 
     # 原始 UP（打断前）
     up1 = MemoryEvent(
-        type=T.USER_PROMPT, scope=tsc, content="把 auth 从 session 改成 JWT，并补测试",
+        type=T.USER_PROMPT, address=tsc, content="把 auth 从 session 改成 JWT，并补测试",
         timestamp=_BASE + timedelta(seconds=0), role="user", metadata={},
     )
     await mem.ingest(up1, _pctx())
 
     # 打断后新指令 UP
     up2 = MemoryEvent(
-        type=T.USER_PROMPT, scope=tsc, content="别用 PyJWT，用 authlib",
+        type=T.USER_PROMPT, address=tsc, content="别用 PyJWT，用 authlib",
         timestamp=_BASE + timedelta(seconds=3), role="user", metadata={},
     )
     await mem.ingest(up2, _pctx())

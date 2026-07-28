@@ -30,7 +30,7 @@ def _legacy(type_: MemoryEventType, content: str, minute: int, *,
             task_id: str = "t1", agent_id: str = "a1", role: str | None = None) -> MemoryEvent:
     return MemoryEvent(
         type=type_, content=content, timestamp=_T0 + timedelta(minutes=minute),
-        scope=MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent_id), role=role,
+        address=MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent_id), role=role,
     )
 
 
@@ -38,8 +38,8 @@ def _v2(kind: MemoryKind, layer: MemoryScope, content: str, minute: int, *,
         task_id: str | None = "t1", agent_id: str | None = "a1",
         role: str | None = None) -> MemoryEvent:
     return MemoryEvent(
-        kind=kind, layer=layer, content=content, timestamp=_T0 + timedelta(minutes=minute),
-        scope=MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent_id), role=role,
+        kind=kind, scope=layer, content=content, timestamp=_T0 + timedelta(minutes=minute),
+        address=MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent_id), role=role,
     )
 
 
@@ -100,7 +100,7 @@ async def test_load_view_excludes_superseded_and_dead_types() -> None:
     rid = await m.ingest(_legacy(MemoryEventType.USER_PROMPT, "gone", 0, role="user"), _ctx())
     await m.ingest(MemoryEvent(  # 死类型 OBSERVER_SUMMARY：永不见于视图
         type=MemoryEventType.OBSERVER_SUMMARY, content="dead", timestamp=_T0,
-        scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"), role="assistant",
+        address=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"), role="assistant",
     ), _ctx())
     await m.supersede([rid], _ctx())
 

@@ -40,7 +40,7 @@ def _mirrored(type_: MemoryEventType, scope: MemoryAddress, content: str, t_offs
     """旧式镜像记录：AGENT_CONVERSATION_TURN 写入 agent scope，带 origin_task_id。"""
     return MemoryEvent(
         type=type_,
-        scope=scope,
+        address=scope,
         content=content,
         timestamp=_BASE + timedelta(seconds=t_offset),
         role=role,

@@ -29,8 +29,8 @@ class SuspendStep(Step):
         if task.user_prompt and not task.user_prompt_in_memory:
             await ctx.memory.ingest(
                 MemoryEvent(
-                    kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-                    scope=state.scope,
+                    kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+                    address=state.scope,
                     content=task.user_prompt,
                     timestamp=now_utc(),
                     role="user",

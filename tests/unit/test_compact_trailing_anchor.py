@@ -58,9 +58,9 @@ async def _fold_trailing_segment(mem: InMemoryMemoryProvider) -> None:
     """Ingest a single plain_text segment [UP1, LLM] and fold it (plain_text boundary)."""
     pctx = _pctx()
     scope = _scope()
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=scope, content="原始诉求",
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=scope, content="原始诉求",
                                  timestamp=_ts(1), role="user"), pctx)
-    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=scope, content="上一轮回复",
+    await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, address=scope, content="上一轮回复",
                                  timestamp=_ts(2), role="assistant"), pctx)
     from ctx_weft.core.loop.steps.segment_fold import segment_fold
     await segment_fold(mem, scope, MemoryScope.TASK, "段摘要", pctx)
@@ -91,7 +91,7 @@ async def test_user_prompt_after_trailing_fold_sorts_newest():
     await _fold_trailing_segment(mem)
 
     # Next turn: the user's new message is injected (later than the folded segment).
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=_scope(), content="新问题",
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=_scope(), content="新问题",
                                  timestamp=_ts(1000), role="user"), _pctx())
 
     recent = await mem.recall_recent(

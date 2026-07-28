@@ -48,7 +48,7 @@ def _loop_ctx(mem):
 
 async def _failed_state(mem, *, task_error: str | None, act_recap: str):
     scope = MemoryAddress(session_id="s1", task_id="c1", agent_id="ag2")
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=scope, content="do it",
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=scope, content="do it",
                                  timestamp=datetime(2026, 1, 1, tzinfo=UTC),
                                  role="user"), _ctx())
     task = Task(id="c1", session_id="s1", status="FAILED", tenant_id="default",
@@ -71,7 +71,7 @@ def _task_failed_payload(outcome_events) -> dict:
 async def _retry_exhausted_state(mem, *, task_error: str | None):
     """observer 判 retry 但 retry_count 已到上限——finalize 应降级 fail（程序熔断）。"""
     scope = MemoryAddress(session_id="s1", task_id="c1", agent_id="ag2")
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=scope, content="do it",
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=scope, content="do it",
                                  timestamp=datetime(2026, 1, 1, tzinfo=UTC),
                                  role="user"), _ctx())
     task = Task(id="c1", session_id="s1", status="PENDING", tenant_id="default",

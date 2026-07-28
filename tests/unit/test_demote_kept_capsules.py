@@ -21,17 +21,17 @@ async def test_demote_drops_body_and_thins_finish_pair():
     # （_to_record 用 stored.event.scope.task_id 覆盖），故子任务 c1 的 body 须用 c1 自己的 scope 灌入。
     c1_scope = MemoryAddress(session_id="s", task_id="c1", agent_id="a")
     # 同 agent 子任务 c1 的 rich 胶囊：task 层 body（含 c1 的 USER_PROMPT + 段摘要）
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=c1_scope, content="c1 请求",
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=c1_scope, content="c1 请求",
                                  timestamp=_BASE, role="user", metadata={}), _pctx())
-    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=c1_scope, content="c1 段摘要",
+    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, address=c1_scope, content="c1 段摘要",
                                  timestamp=_BASE + timedelta(seconds=1), role="assistant",
                                  metadata={}), _pctx())
     # agent 层 finish 对：assistant{act_recap + finish 调用} / tool{task_summary}
-    await mem.ingest(MemoryEvent(type=T.AGENT_CONVERSATION_TURN, scope=scope, content="c1 act_recap",
+    await mem.ingest(MemoryEvent(type=T.AGENT_CONVERSATION_TURN, address=scope, content="c1 act_recap",
                                  timestamp=_BASE + timedelta(seconds=2), role="assistant",
                                  metadata={"origin_task_id": "c1", "parent_task_id": "root",
                                            "tool_calls": [{"id": "tc1", "name": "control:finish_task"}]}), _pctx())
-    await mem.ingest(MemoryEvent(type=T.AGENT_CONVERSATION_TURN, scope=scope, content="c1 综合总结",
+    await mem.ingest(MemoryEvent(type=T.AGENT_CONVERSATION_TURN, address=scope, content="c1 综合总结",
                                  timestamp=_BASE + timedelta(seconds=2), role="tool",
                                  metadata={"origin_task_id": "c1", "parent_task_id": "root",
                                            "tool_call_id": "tc1"}), _pctx())

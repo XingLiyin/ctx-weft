@@ -42,7 +42,7 @@ class _StoredEvent:
     topic_seq_no: int  # per-topic 单调递增（None topic 不算）
     # ingest 时归一化的 v2 三元组（kind=None → 死类型，永不见于视图）
     kind: MemoryKind | None = None
-    layer: MemoryScope | None = None
+    scope: MemoryScope | None = None
     is_superseded: bool = False
 
 
@@ -84,9 +84,9 @@ class InMemoryMemoryProvider(MemoryProvider):
             kind = kind_of(event.type, event.kind)
         except ValueError:
             kind = None
-        layer = layer_of(event.type, event.layer)
+        layer = layer_of(event.type, event.scope)
 
-        scope_key = self._scope_key(event.scope, ctx.tenant_id, layer)
+        scope_key = self._scope_key(event.address, ctx.tenant_id, layer)
         self._seq_counters[scope_key] = self._seq_counters.get(scope_key, 0) + 1
         seq_no = self._seq_counters[scope_key]
 
@@ -108,7 +108,7 @@ class InMemoryMemoryProvider(MemoryProvider):
             seq_no=seq_no,
             topic_seq_no=topic_seq,
             kind=kind,
-            layer=layer,
+            scope=layer,
         )
         self._events.append(stored)
         return event_id
@@ -155,9 +155,9 @@ class InMemoryMemoryProvider(MemoryProvider):
         matching = [
             s for s in self._events
             if not s.is_superseded
-            and s.layer is scope
+            and s.scope is scope
             and s.kind in wanted
-            and self._address_match(s.event.scope, address, scope)
+            and self._address_match(s.event.address, address, scope)
         ]
         matching.sort(key=lambda s: (s.event.timestamp, s.seq_no))
         return normalize_view([self._to_record(s) for s in matching])
@@ -197,7 +197,7 @@ class InMemoryMemoryProvider(MemoryProvider):
     def _matches_any_type(self, stored: _StoredEvent, type_set: set[MemoryEventType]) -> bool:
         """过渡期桥接：旧行按 type 精确匹配，v2 行按 LEGACY_TRIPLE 三元组匹配。"""
         return any(
-            matches_legacy_type(stored.event.type, stored.kind, stored.layer,
+            matches_legacy_type(stored.event.type, stored.kind, stored.scope,
                                 stored.event.role, t)
             for t in type_set
         )
@@ -207,7 +207,7 @@ class InMemoryMemoryProvider(MemoryProvider):
         （旧断言/旧渲染按 record.type 消费）；load_view 出口不回填（kind 优先词汇）。"""
         rec = self._to_record(stored)
         if rec.type is None:
-            rec.type = legacy_type_of(rec.kind, rec.layer, rec.role)
+            rec.type = legacy_type_of(rec.kind, rec.scope, rec.role)
         return rec
 
     async def recall_recent(
@@ -229,10 +229,10 @@ class InMemoryMemoryProvider(MemoryProvider):
                 continue
             if not self._matches_any_type(stored, type_set):
                 continue
-            lyr = stored.layer
+            lyr = stored.scope
             if lyr not in target_keys:
                 continue
-            if self._scope_key(stored.event.scope, ctx.tenant_id, lyr) != target_keys[lyr]:
+            if self._scope_key(stored.event.address, ctx.tenant_id, lyr) != target_keys[lyr]:
                 continue
             matching.append(stored)
 
@@ -254,9 +254,9 @@ class InMemoryMemoryProvider(MemoryProvider):
             s for s in self._events
             if not s.is_superseded
             and self._matches_any_type(s, type_set)
-            and s.event.scope.session_id == agent_scope.session_id
-            and s.event.scope.agent_id == aid
-            and s.layer is MemoryScope.TASK
+            and s.event.address.session_id == agent_scope.session_id
+            and s.event.address.agent_id == aid
+            and s.scope is MemoryScope.TASK
         ]
         matching.sort(key=lambda s: s.event.timestamp)
         recent = matching[-limit:] if limit and limit > 0 else matching
@@ -365,10 +365,10 @@ class InMemoryMemoryProvider(MemoryProvider):
                 continue
             if not self._matches_any_type(stored, type_set):
                 continue
-            lyr = stored.layer
+            lyr = stored.scope
             if lyr not in target_keys:
                 continue
-            if self._scope_key(stored.event.scope, ctx.tenant_id, lyr) != target_keys[lyr]:
+            if self._scope_key(stored.event.address, ctx.tenant_id, lyr) != target_keys[lyr]:
                 continue
             count += 1
         return count
@@ -399,12 +399,12 @@ class InMemoryMemoryProvider(MemoryProvider):
             role=stored.event.role,
             topic=stored.event.topic,
             kind=stored.kind,
-            layer=stored.layer,
-            address=stored.event.scope,  # 来源回显（v2 §3；metadata 打标过渡期保留）
+            scope=stored.scope,
+            address=stored.event.address,  # 来源回显（v2 §3；metadata 打标过渡期保留）
             metadata={
                 **stored.event.metadata,
                 "seq_no": stored.seq_no,
                 "topic_seq_no": stored.topic_seq_no,
-                "task_id": stored.event.scope.task_id or "",
+                "task_id": stored.event.address.task_id or "",
             },
         )

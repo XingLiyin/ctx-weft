@@ -102,7 +102,7 @@ class AgentRecallSource:
                 priority=slot_priority("history", "agent_compact_summary"),
                 token_estimate=request.token_counter(text),
                 metadata={"role": "user",
-                          "type": s.type or _legacy_type_of(s.kind, s.layer, s.role),
+                          "type": s.type or _legacy_type_of(s.kind, s.scope, s.role),
                           "timestamp": _ts(s),
                           "seq_no": s.metadata.get("seq_no", 0)},
             )

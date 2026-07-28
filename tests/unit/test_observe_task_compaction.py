@@ -30,15 +30,15 @@ class _FakeMem:
         t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
         return [
             MemoryRecord(id="up", type=None, content="u", timestamp=t0, role="user",
-                         kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK),
+                         kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK),
             MemoryRecord(id="a1", type=None, content="x",
                          timestamp=t0.replace(minute=1), role="assistant",
-                         kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK),
+                         kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK),
         ]
 
     async def fold(self, supersede_ids, replacements, ctx):
         for ev in replacements:
-            self.applied.append((ev.layer.value, ev.content, ev.metadata.get("keep_last", 0)))
+            self.applied.append((ev.scope.value, ev.content, ev.metadata.get("keep_last", 0)))
         return [f"s{i+1}" for i in range(len(replacements))]
 
 

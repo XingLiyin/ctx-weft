@@ -30,15 +30,15 @@ def _ctx() -> ProviderContext:
 
 def _turn(content: str, minute: int, role: str = "assistant") -> MemoryEvent:
     return MemoryEvent(
-        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-        scope=_ADDR, content=content, timestamp=_T0 + timedelta(minutes=minute), role=role,
+        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+        address=_ADDR, content=content, timestamp=_T0 + timedelta(minutes=minute), role=role,
     )
 
 
 def _summary(content: str, minute: int, id: str | None = None) -> MemoryEvent:
     return MemoryEvent(
-        kind=MemoryKind.SUMMARY, layer=MemoryScope.TASK,
-        scope=_ADDR, content=content, timestamp=_T0 + timedelta(minutes=minute),
+        kind=MemoryKind.SUMMARY, scope=MemoryScope.TASK,
+        address=_ADDR, content=content, timestamp=_T0 + timedelta(minutes=minute),
         role="assistant", id=id,
     )
 

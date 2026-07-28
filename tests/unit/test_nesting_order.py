@@ -72,7 +72,7 @@ def _ts(t: float) -> datetime:
 async def _ingest(mem, type_, scope, content, t, role=None, **meta):
     """Ingest one record with an explicit LOGICAL-anchor timestamp _ts(t)."""
     await mem.ingest(
-        MemoryEvent(type=type_, scope=scope, content=content,
+        MemoryEvent(type=type_, address=scope, content=content,
                     timestamp=_ts(t), role=role, metadata=meta),
         _pctx(),
     )
@@ -175,7 +175,7 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
     await _ingest_delegate_pair(mem, asc, tool_call_id="dc1", child_title="JWT 迁移", anchor_t=3)
     await _ingest(mem, T.USER_PROMPT, c_tsc, "子任务：迁移 JWT", 4, role="user")
     c_seg1_id = await mem.ingest(
-        MemoryEvent(type=T.LLM_RESPONSE, scope=c_tsc, content="段1：读现状",
+        MemoryEvent(type=T.LLM_RESPONSE, address=c_tsc, content="段1：读现状",
                     timestamp=_ts(5), role="assistant", metadata={}), _pctx())
     await _ingest(mem, T.LLM_RESPONSE, c_tsc, "段2：改完", 7, role="assistant")
     # P 续跑 + P finish（在 C 的异步回填之前就 ingest——让 C 回填拿到更高 seq_no）

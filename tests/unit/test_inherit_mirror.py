@@ -20,7 +20,7 @@ def _ctx():
 
 
 def _ev(typ, scope, content, *, role, ts, md=None):
-    return MemoryEvent(type=typ, scope=scope, content=content, timestamp=ts, role=role,
+    return MemoryEvent(type=typ, address=scope, content=content, timestamp=ts, role=role,
                        metadata=md or {})
 
 

@@ -20,7 +20,7 @@ async def test_active_tokens_sums_and_drops_after_supersede():
     scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     ids = []
     for i in range(3):
-        await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=scope, content="x" * 400,
+        await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, address=scope, content="x" * 400,
                                      timestamp=_BASE + timedelta(seconds=i), role="assistant",
                                      metadata={"task_id": "t1"}), _pctx())
     state = SimpleNamespace(scope=scope, agent=SimpleNamespace())

@@ -149,43 +149,53 @@ class MemoryEvent:
     """
 
     type: MemoryEventType | None = None
-    scope: MemoryAddress | None = None
+    address: MemoryAddress | None = None  # 归档坐标（v2 §3 终名，原 scope 字段）
     content: str | list[ContentPart] | None = None  # 必给；显式空串合法（占位回合）
     timestamp: datetime | None = None
     # 调用方预生成 record id（v2 设计 §4 · 2026-07-27 增补，投影化前置）。
     # 给定 → provider 必须采用并按 id 幂等（重复 ingest = no-op）；None → provider 生成。
     id: str | None = None
-    # v2 词汇（设计 §2）：kind = 内容种类（memory_compat.MemoryKind），layer = 归属范围。
-    # 前向引用避免 memory ↔ memory_compat 循环 import。
+    # v2 词汇（设计 §2）：kind = 内容种类（memory_compat.MemoryKind），scope = 归属范围
+    # （MemoryScope 枚举，原 layer 字段）。前向引用避免 memory ↔ memory_compat 循环 import。
     kind: "Any | None" = None
-    layer: MemoryScope | None = None
+    scope: MemoryScope | None = None
     role: Literal["user", "assistant", "system", "tool"] | None = None
     topic: str | None = None  # 用于 topic-style 事件（含父子 task 通信）
     causation_id: str | None = None  # 关联上游 event
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # 误型 loud（字段终名切换护栏）：旧习惯 scope=<坐标> / address=<枚举> 静默换义
+        # 是最危险的错，必须 TypeError 指路。
+        if isinstance(self.scope, MemoryAddress):
+            raise TypeError(
+                "MemoryEvent.scope now takes the MemoryScope enum (归属范围); "
+                "pass the coordinate via address= (原 scope 字段已改名 address)")
+        if isinstance(self.address, MemoryScope):
+            raise TypeError(
+                "MemoryEvent.address takes a MemoryAddress coordinate; "
+                "pass the MemoryScope enum via scope= (原 layer 字段已改名 scope)")
         if self.type is None and self.kind is None:
             raise ValueError("MemoryEvent requires type (legacy) or kind (v2)")
-        if self.scope is None:
-            raise ValueError("MemoryEvent.scope is required")
+        if self.address is None:
+            raise ValueError("MemoryEvent.address is required")
         if self.content is None:
             raise ValueError("MemoryEvent.content is required")  # 空串合法（占位回合）
         if self.timestamp is None:
             raise ValueError("MemoryEvent.timestamp is required")
         if self.kind is not None:
-            # v2-native：layer 必须显式 + §4 全址不变量（legacy 构造不强制，迁移期宽松）
-            if self.layer is None:
-                raise ValueError("v2 MemoryEvent (kind given) requires explicit layer")
-            if self.layer is MemoryScope.TASK:
-                if not (self.scope.task_id and self.scope.agent_id):
+            # v2-native：scope 必须显式 + §4 全址不变量（legacy 构造不强制，迁移期宽松）
+            if self.scope is None:
+                raise ValueError("v2 MemoryEvent (kind given) requires explicit scope")
+            if self.scope is MemoryScope.TASK:
+                if not (self.address.task_id and self.address.agent_id):
                     raise ValueError(
                         "TASK-scoped v2 event requires full address (task_id AND agent_id); "
-                        f"got {self.scope!r}")
-            elif self.layer is MemoryScope.AGENT:
-                if not self.scope.agent_id:
+                        f"got {self.address!r}")
+            elif self.scope is MemoryScope.AGENT:
+                if not self.address.agent_id:
                     raise ValueError(
-                        f"AGENT-scoped v2 event requires agent_id; got {self.scope!r}")
+                        f"AGENT-scoped v2 event requires agent_id; got {self.address!r}")
 
 
 @dataclass
@@ -205,8 +215,8 @@ class MemoryRecord:
     topic: str | None = None
     score: float | None = None  # 仅 recall_semantic 时填
     kind: "Any | None" = None            # v2：memory_compat.MemoryKind（避循环 import 不注真型）
-    layer: MemoryScope | None = None     # v2：归属范围
-    address: "MemoryAddress | None" = None  # v2：来源回显（P4 类名换为 MemoryAddress 本体）
+    scope: MemoryScope | None = None     # v2：归属范围（终名，原 layer 字段）
+    address: "MemoryAddress | None" = None  # v2：来源回显（归档坐标）
     metadata: dict = field(default_factory=dict)
 
 

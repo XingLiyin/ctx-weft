@@ -45,21 +45,21 @@ async def fake_state_ctx():
         events = [
             MemoryEvent(
                 type=MemoryEventType.USER_PROMPT,
-                scope=scope,
+                address=scope,
                 content="hello user",
                 timestamp=_ts(1),
                 role="user",
             ),
             MemoryEvent(
                 type=MemoryEventType.LLM_RESPONSE,
-                scope=scope,
+                address=scope,
                 content="hello llm",
                 timestamp=_ts(2),
                 role="assistant",
             ),
             MemoryEvent(
                 type=MemoryEventType.TOOL_RESULT,
-                scope=scope,
+                address=scope,
                 content="tool result",
                 timestamp=_ts(3),
                 role="tool",

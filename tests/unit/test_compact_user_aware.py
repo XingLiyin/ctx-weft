@@ -24,7 +24,7 @@ def _scope():
 
 async def _ingest(p, typ, content, ts, role):
     return await p.ingest(
-        MemoryEvent(type=typ, scope=_scope(), content=content, timestamp=ts, role=role),
+        MemoryEvent(type=typ, address=_scope(), content=content, timestamp=ts, role=role),
         _ctx(),
     )
 
@@ -82,12 +82,12 @@ async def test_agent_layer_summary_role_stays_user():
     base = datetime(2026, 6, 27, 10, 0, 0, tzinfo=UTC)
     # 新词汇 agent 层回合（带 tool_call 配对，保证 normalize 后可见）
     await p.ingest(MemoryEvent(
-        type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=_scope(), content="delegate",
+        type=MemoryEventType.AGENT_CONVERSATION_TURN, address=_scope(), content="delegate",
         timestamp=base, role="assistant",
         metadata={"origin_task_id": "c1", "tool_calls": [{"id": "tc1", "name": "control__delegate_task", "input": {}}]},
     ), _ctx())
     await p.ingest(MemoryEvent(
-        type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=_scope(), content="done",
+        type=MemoryEventType.AGENT_CONVERSATION_TURN, address=_scope(), content="done",
         timestamp=base + timedelta(seconds=1), role="tool",
         metadata={"origin_task_id": "c1", "tool_call_id": "tc1"},
     ), _ctx())

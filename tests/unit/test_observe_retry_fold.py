@@ -22,7 +22,7 @@ def _llm():
 
 
 async def _ingest(mem, scope, typ, content, i, role="user"):
-    await mem.ingest(MemoryEvent(type=typ, scope=scope, content=content,
+    await mem.ingest(MemoryEvent(type=typ, address=scope, content=content,
                                  timestamp=_BASE + timedelta(seconds=i), role=role,
                                  metadata={"task_id": scope.task_id}), _pctx())
 

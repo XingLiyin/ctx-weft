@@ -341,8 +341,8 @@ async def _ingest_assistant_turn(
     non_dispatch_tool_dicts = [d for d in asst_tool_dicts if d["name"] not in _excluded]
     await ctx.memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-            scope=state.scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+            address=state.scope,
             content=text,
             timestamp=now_utc(),
             role="assistant",
@@ -520,8 +520,8 @@ async def _ingest_synthetic_tool_result(
     """为被打断/未执行的工具补一条 TOOL_RESULT，使 tool_call↔result 一一对应（无 dangling）。"""
     await ctx.memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-            scope=state.scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+            address=state.scope,
             content=content,
             timestamp=now_utc(),
             role="tool",
@@ -592,8 +592,8 @@ async def _commit_interrupted_partial(
     content = f"{text}\n\n{INTERRUPTED_MARK}" if text.strip() else INTERRUPTED_MARK
     await ctx.memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-            scope=state.scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+            address=state.scope,
             content=content,
             timestamp=now_utc(),
             role="assistant",

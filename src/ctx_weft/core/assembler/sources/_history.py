@@ -52,7 +52,7 @@ def record_to_history_block(
     role = record.role or "user"
     # 过渡期渲染词汇（v2 P3b）：v2 行（type=None）派生 legacy 等价词汇——composer 的
     # mtype=="user_prompt" 框定位、slot_priority 档位、旧断言都消费该字符串。
-    etype = record.type or legacy_type_of(record.kind, record.layer, record.role)
+    etype = record.type or legacy_type_of(record.kind, record.scope, record.role)
     # 包装是给「以 user 身份呈现」的摘要消歧义；assistant 自述无需。新数据段摘要恒 assistant
     # → 不套；旧数据若残留 role=user 仍套（防御）。AGENT_COMPACT_SUMMARY 在 agent_experience/
     # agent_recall 自行包装，不走此分支。

@@ -46,7 +46,7 @@ def _ctx() -> ProviderContext:
 def _publish(topic: str, content: str, title: str = "Report", outcome: str = "success") -> MemoryEvent:
     return MemoryEvent(
         type=MemoryEventType.BLACKBOARD_PUBLISH,
-        scope=MemoryAddress(session_id="s1", task_id=topic, agent_id="a"),
+        address=MemoryAddress(session_id="s1", task_id=topic, agent_id="a"),
         content=content,
         timestamp=datetime.now(timezone.utc),
         topic=topic,
@@ -85,7 +85,7 @@ async def test_non_publish_topic_events_not_superseded() -> None:
     m = InMemoryMemoryProvider()
     log = lambda c: MemoryEvent(  # noqa: E731
         type=MemoryEventType.OBSERVER_SUMMARY,
-        scope=MemoryAddress(session_id="s1", agent_id="a"),
+        address=MemoryAddress(session_id="s1", agent_id="a"),
         content=c, timestamp=datetime.now(timezone.utc), topic="proj_log",
     )
     await m.ingest(log("entry1"), _ctx())

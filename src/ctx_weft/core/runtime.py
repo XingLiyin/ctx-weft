@@ -152,8 +152,8 @@ async def _copy_memory_for_inherit(
             md["tool_call_id"] = r.metadata["tool_call_id"]
         await memory.ingest(
             MemoryEvent(
-                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.AGENT,
-                scope=child_scope,
+                kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
+                address=child_scope,
                 content=r.content,
                 timestamp=r.timestamp,
                 role=r.role,
@@ -1440,8 +1440,8 @@ class CtxWeftRuntime:
                 content = interrupt_edit_note(prev, content)
         await self.providers.get_memory().ingest(
             MemoryEvent(
-                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-                scope=scope,
+                kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+                address=scope,
                 content=content,
                 timestamp=now_utc(),
                 role="user",

@@ -128,8 +128,8 @@ async def collapse_task_layer(
     # v2 P3d：遗忘+坍缩物一次原子 fold（旧徒手 supersede+ingest 有崩溃丢摘要窗口）
     await memory.fold(ids, [
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-            scope=state.scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+            address=state.scope,
             content=f"{original}{COLLAPSE_DELIM}{summary_text or '[Context compacted]'}",
             timestamp=anchor_ts,
             role="user",
@@ -346,8 +346,8 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     # v2 P3d：跨层遗忘 + 新摘要一次原子 fold（关旧「raw 已删而摘要未写」窗口）
     await memory.fold(ids, [
         MemoryEvent(
-            kind=MemoryKind.SUMMARY, layer=MemoryScope.AGENT,
-            scope=state.scope,
+            kind=MemoryKind.SUMMARY, scope=MemoryScope.AGENT,
+            address=state.scope,
             content=summary_text or "[Experience compacted]",
             timestamp=anchor_ts - timedelta(microseconds=1),
             role="user",

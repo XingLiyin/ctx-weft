@@ -50,10 +50,10 @@ async def test_capsule_renders_body_and_finish_pair():
     scope = _sc()
     # task 层：一条 UP + 一条 TASK_COMPACT_SUMMARY（留 task 层，供 AgentRecallSource 读）
     tscope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
-    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=tscope,
+    await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=tscope,
                                  content="把 ppt 转 pdf", timestamp=_BASE, role="user",
                                  metadata={}), _pctx())
-    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, scope=tscope,
+    await mem.ingest(MemoryEvent(type=T.TASK_COMPACT_SUMMARY, address=tscope,
                                  content="### 会话目标\n转 PDF", timestamp=_BASE, role="assistant",
                                  metadata={}), _pctx())
     # 在 agent scope 合成 finish 对（task-resident：不镜像 body）

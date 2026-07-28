@@ -88,9 +88,9 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
     # memory:崩在工具批次中途 —— assistant turn 含 dangling tool_call "web",无 TOOL_RESULT。
     scope = MemoryAddress(session_id=sid, task_id=tid, agent_id=aid)
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
-    await mem.ingest(MemoryEvent(type=MemoryEventType.USER_PROMPT, scope=scope, content="fetch it",
+    await mem.ingest(MemoryEvent(type=MemoryEventType.USER_PROMPT, address=scope, content="fetch it",
         timestamp=ts, role="user", metadata={"task_id": tid}), pctx)
-    await mem.ingest(MemoryEvent(type=MemoryEventType.LLM_RESPONSE, scope=scope, content="",
+    await mem.ingest(MemoryEvent(type=MemoryEventType.LLM_RESPONSE, address=scope, content="",
         timestamp=ts, role="assistant",
         metadata={"tool_calls": [{"id": tcid, "name": "test__web", "input": {"url": "x"}}]}), pctx)
 

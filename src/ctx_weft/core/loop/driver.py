@@ -174,8 +174,8 @@ async def _persist_user_prompt(state, ctx) -> None:
             else content_to_text(task.user_prompt))
     await ctx.memory.ingest(
         MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-            scope=state.scope,
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+            address=state.scope,
             content=text,
             timestamp=now_utc(),
             role="user",
