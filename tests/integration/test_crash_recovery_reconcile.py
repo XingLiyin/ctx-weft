@@ -17,7 +17,7 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.events.types import Event, EventType
 from ctx_weft.protocols import (
-    MemoryEvent, MemoryEventType, MemoryScope, ProviderContext,
+    MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext,
 )
 from ctx_weft.protocols.capability import (
     CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
@@ -86,7 +86,7 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
         await runtime.event_store.append(e)
 
     # memory:崩在工具批次中途 —— assistant turn 含 dangling tool_call "web",无 TOOL_RESULT。
-    scope = MemoryScope(session_id=sid, task_id=tid, agent_id=aid)
+    scope = MemoryAddress(session_id=sid, task_id=tid, agent_id=aid)
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
     await mem.ingest(MemoryEvent(type=MemoryEventType.USER_PROMPT, scope=scope, content="fetch it",
         timestamp=ts, role="user", metadata={"task_id": tid}), pctx)

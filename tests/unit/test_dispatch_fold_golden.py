@@ -18,7 +18,7 @@ import pytest
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
 from ctx_weft.protocols import (
-    MemoryEvent, MemoryEventType, MemoryScope, ProviderContext,
+    MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext,
 )
 from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -28,7 +28,7 @@ _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _pctx(): return ProviderContext(session_id="s1", tenant_id="default")
-def _sc(agent="ag1"): return MemoryScope(session_id="s1", task_id=None, agent_id=agent)
+def _sc(agent="ag1"): return MemoryAddress(session_id="s1", task_id=None, agent_id=agent)
 
 
 def _task():
@@ -49,7 +49,7 @@ async def test_capsule_renders_body_and_finish_pair():
     mem = InMemoryMemoryProvider()
     scope = _sc()
     # task 层：一条 UP + 一条 TASK_COMPACT_SUMMARY（留 task 层，供 AgentRecallSource 读）
-    tscope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    tscope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=tscope,
                                  content="把 ppt 转 pdf", timestamp=_BASE, role="user",
                                  metadata={}), _pctx())

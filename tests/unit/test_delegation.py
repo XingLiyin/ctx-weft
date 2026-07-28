@@ -24,7 +24,7 @@ from ctx_weft.core.orchestrator.control_capability import (
     delegate_task,
 )
 from ctx_weft.core.state.models import Session, Task
-from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
     CapabilityProviderInfo,
@@ -157,7 +157,7 @@ async def test_gateway_delegate_plan_still_eager_writes_envelope() -> None:
         capability_cache=cache, capability_providers=[_PlanDispatchProvider()],
         memory=mem, event_bus=InProcessEventBus(),
     )
-    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     state = LoopState(
         run_id="run_1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1", parent_task_id=None),
@@ -194,7 +194,7 @@ async def test_gateway_delegate_task_defers_frame_to_finalize() -> None:
         memory=mem,
         event_bus=InProcessEventBus(),
     )
-    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     state = LoopState(
         run_id="run_1",
         session=SimpleNamespace(id="s1", tenant_id="default"),
@@ -261,7 +261,7 @@ async def test_gateway_silent_tool_writes_nothing_to_task_layer() -> None:
         capability_cache=cache, capability_providers=[_AssessProvider()],
         memory=mem, event_bus=InProcessEventBus(),
     )
-    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     state = LoopState(
         run_id="r1",
         session=SimpleNamespace(id="s1", tenant_id="default"),

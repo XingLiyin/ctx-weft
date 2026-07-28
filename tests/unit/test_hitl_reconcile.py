@@ -70,14 +70,14 @@ async def test_reconcile_invokes_only_dangling_tool_calls() -> None:
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
     from ctx_weft.core.loop.steps.reconcile import ReconcileStep
-    from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+    from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
     from ctx_weft.protocols.memory import MemoryEvent
     from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     mem = InMemoryMemoryProvider()
     pctx = ProviderContext(session_id="s1", tenant_id="default")
-    sc = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    sc = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
 
     def ev(tp, content, sec, role, **md):
         return MemoryEvent(type=tp, scope=sc, content=content,
@@ -112,14 +112,14 @@ async def test_reconcile_no_dangling_routes_to_prepare() -> None:
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
     from ctx_weft.core.loop.steps.reconcile import ReconcileStep
-    from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+    from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
     from ctx_weft.protocols.memory import MemoryEvent
     from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     mem = InMemoryMemoryProvider()
     pctx = ProviderContext(session_id="s1", tenant_id="default")
-    sc = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    sc = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     await mem.ingest(MemoryEvent(type=MemoryEventType.LLM_RESPONSE, scope=sc, content="",
                                  timestamp=base + timedelta(seconds=1), role="assistant",
                                  metadata={"tool_calls": [{"id": "tcA", "name": "web", "input": {}}]}), pctx)
@@ -141,14 +141,14 @@ async def test_reconcile_no_dangling_routes_to_prepare() -> None:
 async def test_resolve_reconcile_detection_helper() -> None:
     from datetime import UTC, datetime, timedelta
     from ctx_weft.core.runtime import _task_has_dangling_tool_call
-    from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+    from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
     from ctx_weft.protocols.memory import MemoryEvent
     from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     mem = InMemoryMemoryProvider()
     pctx = ProviderContext(session_id="s1", tenant_id="default")
-    sc = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    sc = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
 
     def ev(tp, sec, role, **md):
         return MemoryEvent(type=tp, scope=sc, content="", timestamp=base + timedelta(seconds=sec),

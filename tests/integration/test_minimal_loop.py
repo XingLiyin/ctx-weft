@@ -21,7 +21,7 @@ from ctx_weft.protocols import (
     LoopConfig,
     MemoryConfig,
     MemoryEventType,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider

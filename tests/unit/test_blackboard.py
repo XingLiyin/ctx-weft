@@ -31,7 +31,7 @@ from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvide
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 
@@ -46,7 +46,7 @@ def _ctx() -> ProviderContext:
 def _publish(topic: str, content: str, title: str = "Report", outcome: str = "success") -> MemoryEvent:
     return MemoryEvent(
         type=MemoryEventType.BLACKBOARD_PUBLISH,
-        scope=MemoryScope(session_id="s1", task_id=topic, agent_id="a"),
+        scope=MemoryAddress(session_id="s1", task_id=topic, agent_id="a"),
         content=content,
         timestamp=datetime.now(timezone.utc),
         topic=topic,
@@ -85,7 +85,7 @@ async def test_non_publish_topic_events_not_superseded() -> None:
     m = InMemoryMemoryProvider()
     log = lambda c: MemoryEvent(  # noqa: E731
         type=MemoryEventType.OBSERVER_SUMMARY,
-        scope=MemoryScope(session_id="s1", agent_id="a"),
+        scope=MemoryAddress(session_id="s1", agent_id="a"),
         content=c, timestamp=datetime.now(timezone.utc), topic="proj_log",
     )
     await m.ingest(log("entry1"), _ctx())
@@ -149,7 +149,7 @@ def _request_for(task_id: str, m: InMemoryMemoryProvider) -> tuple[ContextReques
     agent = Agent(id="a", session_id="s1", template_id="t", template_version="1", status="IDLE")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
-        purpose="observe", scope=MemoryScope(session_id="s1", task_id=task_id, agent_id="a"),
+        purpose="observe", scope=MemoryAddress(session_id="s1", task_id=task_id, agent_id="a"),
         task=task, agent=agent, session=session, template=None, bound_capabilities=[],
     )
     deps = AssemblerDeps(memory=m, knowledge_providers=[], provider_ctx=_ctx())
@@ -241,7 +241,7 @@ async def test_composer_renders_subtask_results_with_title() -> None:
 
     # (a) Blackboard block alone — old section must be absent.
     req_no_extra = ContextRequest(
-        purpose="observe", scope=MemoryScope(session_id="s1", task_id="T", agent_id="a"),
+        purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     msgs = comp._build_observer_messages([block], req_no_extra)
     text = msgs[-1].content
@@ -251,7 +251,7 @@ async def test_composer_renders_subtask_results_with_title() -> None:
 
     # (b) New path: extra["subtask_reviews"] still renders the cue.
     req_with_extra = ContextRequest(
-        purpose="observe", scope=MemoryScope(session_id="s1", task_id="T", agent_id="a"),
+        purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],        extra={"subtask_reviews": [{"task_id": "K1", "title": "Build report", "outcome": "success"}]},
     )
     msgs2 = comp._build_observer_messages([block], req_with_extra)
@@ -270,7 +270,7 @@ async def test_composer_splits_subtask_and_predecessor_sections() -> None:
     task = Task(id="T", session_id="s1", status="ACTIVE", title="Parent")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
-        purpose="observe", scope=MemoryScope(session_id="s1", task_id="T", agent_id="a"),
+        purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     sub = ContextBlock(
         id="b1", source="blackboard:K1", kind="blackboard", target="messages",
@@ -301,7 +301,7 @@ async def test_composer_no_related_results_when_empty() -> None:
     task = Task(id="T", session_id="s1", status="ACTIVE", title="Parent")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
-        purpose="observe", scope=MemoryScope(session_id="s1", task_id="T", agent_id="a"),
+        purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     msgs = comp._build_observer_messages([], req)
     joined = " ".join(m.content for m in msgs if isinstance(m.content, str))

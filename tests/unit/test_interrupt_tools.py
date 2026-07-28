@@ -18,7 +18,7 @@ from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.assembler.assembler import AssembledPrompt
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import (
-    LLMMessage, MemoryEventType, MemoryScope, ProviderContext, ToolCall,
+    LLMMessage, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
 )
 from ctx_weft.protocols.capability import (
     CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
@@ -78,7 +78,7 @@ def _harness(llm, provider):
     task = Task(id="t1", session_id="s1", status="ACTIVE", title="T",
                 interaction_mode="interactive", settings=NormalTaskSettings())
     agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     prompt = AssembledPrompt(system="", messages=[LLMMessage(role="user", content="hi")],
                              tools=[], token_count=1)
     state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope,

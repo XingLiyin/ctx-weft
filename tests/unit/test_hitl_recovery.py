@@ -391,14 +391,14 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
 async def test_crash_mid_batch_routes_to_reconcile() -> None:
     from datetime import datetime, timezone, timedelta
     from ctx_weft.core.runtime import _task_has_dangling_tool_call
-    from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+    from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
     from ctx_weft.protocols.memory import MemoryEvent
     from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 
     base = datetime(2026, 6, 12, tzinfo=timezone.utc)
     mem = InMemoryMemoryProvider()
     pctx = ProviderContext(session_id="s1", tenant_id="default")
-    sc = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    sc = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     await mem.ingest(MemoryEvent(type=MemoryEventType.LLM_RESPONSE, scope=sc, content="",
         timestamp=base + timedelta(seconds=1), role="assistant",
         metadata={"tool_calls": [{"id": "x1", "name": "web", "input": {}},

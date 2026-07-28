@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, UTC
 from ctx_weft.core.loop.steps.segment_fold import segment_fold
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
-    MemoryAddress, MemoryEvent, MemoryEventType, MemoryLayer, MemoryScope,
+    MemoryAddress, MemoryEvent, MemoryEventType, MemoryLayer, MemoryAddress,
 )
 from ctx_weft.protocols.context import ProviderContext
 
@@ -19,7 +19,7 @@ def _ctx():
 
 
 def _scope():
-    return MemoryScope(session_id="s1", task_id="task1", agent_id="a1")
+    return MemoryAddress(session_id="s1", task_id="task1", agent_id="a1")
 
 
 async def _ingest(p, typ, content, ts, role):

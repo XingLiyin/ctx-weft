@@ -22,7 +22,7 @@ from ctx_weft.core.loop.steps.background_observe import (
 )
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
 from ctx_weft.core.state.models import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
@@ -38,15 +38,15 @@ def _pctx() -> ProviderContext:
     return ProviderContext(session_id=SESSION, tenant_id="default")
 
 
-def _task_scope(task_id: str = "t1", agent_id: str = "ag1") -> MemoryScope:
-    return MemoryScope(session_id=SESSION, task_id=task_id, agent_id=agent_id)
+def _task_scope(task_id: str = "t1", agent_id: str = "ag1") -> MemoryAddress:
+    return MemoryAddress(session_id=SESSION, task_id=task_id, agent_id=agent_id)
 
 
-def _agent_scope(agent_id: str = "ag1") -> MemoryScope:
-    return MemoryScope(session_id=SESSION, task_id=None, agent_id=agent_id)
+def _agent_scope(agent_id: str = "ag1") -> MemoryAddress:
+    return MemoryAddress(session_id=SESSION, task_id=None, agent_id=agent_id)
 
 
-def _ev(type_: MemoryEventType, scope: MemoryScope, content: str, t: int,
+def _ev(type_: MemoryEventType, scope: MemoryAddress, content: str, t: int,
         role: str | None = None, **meta) -> MemoryEvent:
     return MemoryEvent(
         type=type_, scope=scope, content=content,
@@ -64,14 +64,14 @@ def _make_task(task_id: str = "t1", agent_id: str = "ag1",
     )
 
 
-async def _get_finish_tool(mem: InMemoryMemoryProvider, scope: MemoryScope) -> MemoryEvent | None:
+async def _get_finish_tool(mem: InMemoryMemoryProvider, scope: MemoryAddress) -> MemoryEvent | None:
     """取 agent scope 内最新的 tool role AGENT_CONVERSATION_TURN（finish 记录）。"""
     recs = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
     tool_recs = [r for r in recs if r.role == "tool"]
     return tool_recs[0] if tool_recs else None  # recall_recent returns newest-first
 
 
-async def _get_finish_asst(mem: InMemoryMemoryProvider, scope: MemoryScope) -> MemoryEvent | None:
+async def _get_finish_asst(mem: InMemoryMemoryProvider, scope: MemoryAddress) -> MemoryEvent | None:
     """取 agent scope 内最新的 assistant role AGENT_CONVERSATION_TURN（finish 记录）。"""
     recs = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
     asst_recs = [r for r in recs if r.role == "assistant"]
@@ -254,7 +254,7 @@ async def test_a1_no_await_blocking(monkeypatch) -> None:
 
 # ─── TEST 4/5: 方案2 最终段 raw 折叠 ───────────────────────────────────────────
 
-async def _ingest_user_plus_raw(mem: InMemoryMemoryProvider, tsc: MemoryScope) -> None:
+async def _ingest_user_plus_raw(mem: InMemoryMemoryProvider, tsc: MemoryAddress) -> None:
     """task 层：user 锚点 + 最终段 raw（LLM_RESPONSE + TOOL_RESULT，close 边界未折）。"""
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "初始请求", 1, role="user"), _pctx())
     await mem.ingest(_ev(T.LLM_RESPONSE, tsc, "我在读目录…", 2, role="assistant"), _pctx())

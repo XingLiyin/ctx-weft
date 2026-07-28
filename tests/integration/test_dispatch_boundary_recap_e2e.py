@@ -14,7 +14,7 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext, ToolCall
+from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext, ToolCall
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
@@ -113,7 +113,7 @@ async def test_dispatch_boundary_recap_e2e():
     view = await _wait_all_finished(runtime, handle.session_id, 2)
 
     root = next(t for t in view.tasks.values() if not t.parent_task_id)
-    scope = MemoryScope(session_id=handle.session_id, task_id=root.id,
+    scope = MemoryAddress(session_id=handle.session_id, task_id=root.id,
                         agent_id=root.assigned_agent_id)
     pctx = ProviderContext(session_id=handle.session_id, tenant_id="default",
                            task_id=root.id, agent_id=root.assigned_agent_id)

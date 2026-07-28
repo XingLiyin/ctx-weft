@@ -16,7 +16,7 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.loop.steps.finalize import _dispatch_running_ack, _ensure_dispatch_frame, _put_dispatch_result
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.utils import now_utc
-from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
@@ -57,7 +57,7 @@ def _ack_child(tid: str, **kw) -> Task:
 
 async def _seed_running_ack(memory, session, child: Task) -> None:
     """先手工 ingest 一个派发框 + running ack（模拟子任务真正 start 后留下的痕迹）。"""
-    parent_scope = MemoryScope(session_id=session.id, task_id=child.parent_task_id,
+    parent_scope = MemoryAddress(session_id=session.id, task_id=child.parent_task_id,
                                 agent_id=child.creator_agent_id)
     provider_ctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id,
                                    task_id=child.parent_task_id, agent_id=child.creator_agent_id)
@@ -77,7 +77,7 @@ async def test_root_finish_pair_written_on_own_scope() -> None:
 
     await runtime._finalize_threshold_memory(session, root, [], failures)
 
-    scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     recs = await memory.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
 
@@ -101,7 +101,7 @@ async def test_ack_task_running_ack_replaced_with_cancelled_text() -> None:
     child = _ack_child("c1")
     await _seed_running_ack(memory, session, child)
 
-    parent_scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    parent_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     before = await memory.recall_recent(
         parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
@@ -131,7 +131,7 @@ async def test_root_none_only_replaces_ack() -> None:
 
     await runtime._finalize_threshold_memory(session, None, [child], [("x", "y")])
 
-    root_scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    root_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     # root scope 用的是 root task_id="root" 与 parent scope 相同 task_id（因为 parent_task_id="root"）
     # 但 root finish 对是 assistant + tool 的一对 finish_task 调用；没写 root finish 对时不应出现
@@ -165,7 +165,7 @@ async def test_one_bad_ack_task_does_not_block_others() -> None:
     # 应不抛出——bad 的写失败被 best-effort 吞掉，good 仍正常替换。
     await runtime._finalize_threshold_memory(session, None, [good, bad], [])
 
-    parent_scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    parent_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     recs = await memory.recall_recent(
         parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)

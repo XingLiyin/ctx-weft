@@ -29,7 +29,7 @@ import pytest
 from ctx_weft.core.control.reducers import fold_pending_hitl
 from ctx_weft.core.events.types import Event, EventType
 from ctx_weft.core.state.models import HitlRequest, Session, Task
-from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
@@ -65,7 +65,7 @@ async def test_inject_user_reply_reply_visible_to_agent_recall(monkeypatch):
     await runtime._inject_user_reply(req, session, task_manager)
 
     # The actor recalls task body by agent (recall_recent_by_agent filters on scope.agent_id).
-    agent_scope = MemoryScope(session_id="s1", task_id=None, agent_id="ag_root")
+    agent_scope = MemoryAddress(session_id="s1", task_id=None, agent_id="ag_root")
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     recs = await mem.recall_recent_by_agent(agent_scope, [MemoryEventType.USER_PROMPT], 10, ctx)
     assert [r.content for r in recs] == ["用户回复"], (

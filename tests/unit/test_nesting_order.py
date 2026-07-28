@@ -40,7 +40,7 @@ from ctx_weft.core.loop.steps.finalize import (
 )
 from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.core.utils import generate_id
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
@@ -57,12 +57,12 @@ def _pctx() -> ProviderContext:
     return ProviderContext(session_id=SESSION, tenant_id="default")
 
 
-def _task_scope(task_id: str, agent_id: str) -> MemoryScope:
-    return MemoryScope(session_id=SESSION, task_id=task_id, agent_id=agent_id)
+def _task_scope(task_id: str, agent_id: str) -> MemoryAddress:
+    return MemoryAddress(session_id=SESSION, task_id=task_id, agent_id=agent_id)
 
 
-def _agent_scope(agent_id: str) -> MemoryScope:
-    return MemoryScope(session_id=SESSION, task_id=None, agent_id=agent_id)
+def _agent_scope(agent_id: str) -> MemoryAddress:
+    return MemoryAddress(session_id=SESSION, task_id=None, agent_id=agent_id)
 
 
 def _ts(t: float) -> datetime:

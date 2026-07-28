@@ -15,7 +15,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, CompactStep
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.state.models import Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
@@ -37,8 +37,8 @@ class _FakeLLM:
         yield SimpleNamespace(kind="token", text="SUMMARY")
 
 
-def _scope() -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id="T_target", agent_id="ag1")
+def _scope() -> MemoryAddress:
+    return MemoryAddress(session_id="s1", task_id="T_target", agent_id="ag1")
 
 
 def _pctx() -> ProviderContext:
@@ -97,7 +97,7 @@ async def test_agent_compact_writes_agent_summary() -> None:
         oid = f"root{grp}"
         await mem.ingest(MemoryEvent(
             type=T.USER_PROMPT,
-            scope=MemoryScope(session_id="s1", task_id=oid, agent_id=_scope().agent_id),
+            scope=MemoryAddress(session_id="s1", task_id=oid, agent_id=_scope().agent_id),
             content=f"body {oid}", timestamp=base + timedelta(seconds=t0), role="user",
         ), _pctx())
         for role, dt in [("user", 0), ("assistant", 1)]:
@@ -127,7 +127,7 @@ async def test_finalize_retry_no_process_report_no_user_message() -> None:
         session=SimpleNamespace(id="s1", tenant_id="default"),
         task=task,
         agent=SimpleNamespace(id="ag1", loop_config=SimpleNamespace(compact_keep_last=6)),
-        scope=MemoryScope(session_id="s1", task_id="T1", agent_id="ag1"),
+        scope=MemoryAddress(session_id="s1", task_id="T1", agent_id="ag1"),
         verdict=SimpleNamespace(task_outcome="retry", act_recap="missing X; do Y next",
                                 task_summary=""),
     )
@@ -141,7 +141,7 @@ async def test_finalize_retry_no_process_report_no_user_message() -> None:
     assert task.process_report_at is None
     assert task.retry_count == 1
     recs = await mem.recall_recent(
-        MemoryScope(session_id="s1", task_id="T1", agent_id="ag1"), [T.USER_PROMPT], 10, _pctx()
+        MemoryAddress(session_id="s1", task_id="T1", agent_id="ag1"), [T.USER_PROMPT], 10, _pctx()
     )
     assert recs == []  # 不注入 user message
 

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import ctx_weft.core.loop.steps.act as _act_mod
 from ctx_weft.core.loop.llm_gateway import PROMPT_EST_SEG_KEY, _estimate_request_tokens
-from ctx_weft.protocols import LLMUsage, MemoryScope
+from ctx_weft.protocols import LLMUsage, MemoryAddress
 from ctx_weft.core.loop.steps.act import _run_llm_turn
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
@@ -72,7 +72,7 @@ def _make_state(*, context_tokens: int = 0):
         id="t1", parent_task_id="p1", status="RUNNING",
         observer_outcome=None, process_report=None,
     )
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="a1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
     from ctx_weft.core.loop.driver import LoopState
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,

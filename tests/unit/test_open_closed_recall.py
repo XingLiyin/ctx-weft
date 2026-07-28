@@ -20,7 +20,7 @@ import pytest
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, finalize_task_memory
 from ctx_weft.core.state.models import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -38,15 +38,15 @@ def _pctx() -> ProviderContext:
     return ProviderContext(session_id=SESSION, tenant_id="default")
 
 
-def _task_scope(task_id: str, agent_id: str = "ag1") -> MemoryScope:
-    return MemoryScope(session_id=SESSION, task_id=task_id, agent_id=agent_id)
+def _task_scope(task_id: str, agent_id: str = "ag1") -> MemoryAddress:
+    return MemoryAddress(session_id=SESSION, task_id=task_id, agent_id=agent_id)
 
 
-def _agent_scope(agent_id: str = "ag1") -> MemoryScope:
-    return MemoryScope(session_id=SESSION, task_id=None, agent_id=agent_id)
+def _agent_scope(agent_id: str = "ag1") -> MemoryAddress:
+    return MemoryAddress(session_id=SESSION, task_id=None, agent_id=agent_id)
 
 
-def _ev(type_: MemoryEventType, scope: MemoryScope, content: str, t: int,
+def _ev(type_: MemoryEventType, scope: MemoryAddress, content: str, t: int,
         role: str | None = None, **meta) -> MemoryEvent:
     return MemoryEvent(
         type=type_, scope=scope, content=content,
@@ -75,7 +75,7 @@ class _FakeTM:
         return set()
 
 
-def _state(task: Task, scope: MemoryScope):
+def _state(task: Task, scope: MemoryAddress):
     agent = SimpleNamespace(id=scope.agent_id, loop_config=LoopConfig())
     session = SimpleNamespace(id=SESSION, tenant_id="default")
     return SimpleNamespace(
@@ -92,7 +92,7 @@ def _loop_ctx(mem: InMemoryMemoryProvider):
     )
 
 
-async def _recall_blocks(mem: InMemoryMemoryProvider, agent_scope: MemoryScope) -> list:
+async def _recall_blocks(mem: InMemoryMemoryProvider, agent_scope: MemoryAddress) -> list:
     """Drive AgentRecallSource.fetch and return sorted blocks."""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)

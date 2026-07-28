@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.compact import CompactStep
-from ctx_weft.protocols import MemoryEventType as T, MemoryScope
+from ctx_weft.protocols import MemoryEventType as T, MemoryAddress
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 
@@ -118,7 +118,7 @@ def _state(context_tokens=1000):
         agent=agent,
         session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="t1"),
-        scope=MemoryScope(session_id="s1", task_id="t1", agent_id="agt1"),
+        scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="agt1"),
         transcript=[],
         sequence_counter=0,
         extra={"template": None, "bound_capabilities": []},

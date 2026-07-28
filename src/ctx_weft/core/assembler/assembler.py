@@ -41,7 +41,7 @@ from ctx_weft.protocols import (
     LLMTool,
     LoopConfig,
     MemoryProvider,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
     Purpose,
 )
@@ -66,7 +66,7 @@ class ContextRequest:
     """
 
     purpose: Purpose
-    scope: MemoryScope
+    scope: MemoryAddress
     task: "Task"
     agent: "Agent"
     session: "Session"

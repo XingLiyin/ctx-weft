@@ -3,7 +3,7 @@ independent of any blackboard subscription."""
 from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.assembler import ContextRequest, ContextBlock
 from ctx_weft.core.state.models import Task, NormalTaskSettings
-from ctx_weft.protocols import MemoryScope
+from ctx_weft.protocols import MemoryAddress
 
 
 def _req(extra):
@@ -12,7 +12,7 @@ def _req(extra):
     agent = type("A", (), {"id": "ag1"})()
     session = type("S", (), {"id": "s1"})()
     return ContextRequest(
-        purpose="observe", scope=MemoryScope(session_id="s1", task_id="p1", agent_id="ag1"),
+        purpose="observe", scope=MemoryAddress(session_id="s1", task_id="p1", agent_id="ag1"),
         task=task, agent=agent, session=session, template=None, bound_capabilities=[],
         extra=extra,
     )

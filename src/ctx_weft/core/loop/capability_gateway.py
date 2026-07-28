@@ -31,7 +31,7 @@ from ctx_weft.protocols.capability import CapabilityProvider, ToolCapabilityProv
 from ctx_weft.protocols.llm import RAW_ARGS_KEY
 from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL, _PLAN_DISPATCH_ACK
 from ctx_weft.protocols.filesystem import SpillSink
-from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType, MemoryLayer, MemoryProvider, MemoryScope
+from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType, MemoryLayer, MemoryProvider, MemoryAddress
 from ctx_weft.protocols.memory_compat import MemoryKind
 
 if TYPE_CHECKING:
@@ -467,9 +467,9 @@ class CapabilityGateway:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _tool_scope(state: "LoopState") -> MemoryScope:
+def _tool_scope(state: "LoopState") -> MemoryAddress:
     """工具调用的 memory scope（session/task/agent）。统一构造，避免重复。"""
-    return MemoryScope(session_id=state.session.id, task_id=state.task.id, agent_id=state.agent.id)
+    return MemoryAddress(session_id=state.session.id, task_id=state.task.id, agent_id=state.agent.id)
 
 
 def _coerce_scalar(value: str, json_type: Any) -> Any:

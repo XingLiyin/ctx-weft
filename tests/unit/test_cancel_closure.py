@@ -26,7 +26,7 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
 from ctx_weft.core.utils import now_utc
-from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 from tests.unit._stub_runner import StubRunner
@@ -51,7 +51,7 @@ def _child(tid: str, parent: str = "root", *, creator: str = "agt_root",
 
 async def _seed_running_ack(mem, child: Task) -> None:
     """先手工 ingest 一个派发框 + running ack（模拟子任务真正 start 后留下的痕迹）。"""
-    parent_scope = MemoryScope(
+    parent_scope = MemoryAddress(
         session_id="s1", task_id=child.parent_task_id, agent_id=child.creator_agent_id,
     )
     ctx = _ctx()
@@ -71,7 +71,7 @@ async def test_same_agent_started_task_ack_replaced_and_nested_finish_pair() -> 
 
     await synthesize_cancel_closure(mem, "s1", child, _ctx(), "user_cancel")
 
-    parent_scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    parent_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     recs = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
     tool_recs = [r for r in recs if r.role == "tool"]
 
@@ -107,7 +107,7 @@ async def test_cross_agent_started_task_ack_and_own_scope_finish_pair() -> None:
 
     await synthesize_cancel_closure(mem, "s1", child, _ctx(), "user_cancel")
 
-    parent_scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    parent_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     parent_recs = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
     ack = [r for r in parent_recs if r.role == "tool" and r.metadata.get("tool_call_id") == "call-1"]
     assert len(ack) == 1
@@ -118,7 +118,7 @@ async def test_cross_agent_started_task_ack_and_own_scope_finish_pair() -> None:
     ]
     assert parent_finish == []
 
-    own_scope = MemoryScope(session_id="s1", task_id="c1", agent_id="agt_child")
+    own_scope = MemoryAddress(session_id="s1", task_id="c1", agent_id="agt_child")
     own_recs = await mem.recall_recent(own_scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
     tool = [r for r in own_recs if r.role == "tool"]
     assert len(tool) == 1
@@ -136,7 +136,7 @@ async def test_root_own_scope_finish_pair() -> None:
 
     await synthesize_cancel_closure(mem, "s1", root, _ctx(), "user_cancel")
 
-    scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     recs = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
     assistant = [r for r in recs if r.role == "assistant"]
     tool = [r for r in recs if r.role == "tool"]
@@ -157,10 +157,10 @@ async def test_born_cancel_no_frame_skips_entirely() -> None:
 
     await synthesize_cancel_closure(mem, "s1", child, _ctx(), "user_cancel")
 
-    parent_scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    parent_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     parent_recs = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
     assert parent_recs == []
-    own_scope = MemoryScope(session_id="s1", task_id="c1", agent_id="agt_root")
+    own_scope = MemoryAddress(session_id="s1", task_id="c1", agent_id="agt_root")
     own_recs = await mem.recall_recent(own_scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
     assert own_recs == []
 
@@ -328,7 +328,7 @@ async def test_runtime_finalize_cancel_memory_root_own_scope_finish_pair() -> No
 
     await runtime._finalize_cancel_memory(session, [root], "user_cancel")
 
-    scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     recs = await memory.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
     tool = [r for r in recs if r.role == "tool"]
@@ -357,7 +357,7 @@ async def test_runtime_finalize_cancel_memory_one_bad_task_does_not_block_others
 
     await runtime._finalize_cancel_memory(session, [good, bad], "user_cancel")
 
-    parent_scope = MemoryScope(session_id="s1", task_id="root", agent_id="agt_root")
+    parent_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     recs = await memory.recall_recent(parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
     good_ack = [r for r in recs if r.role == "tool" and r.metadata.get("tool_call_id") == "call-good"]

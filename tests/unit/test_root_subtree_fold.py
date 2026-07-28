@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.compact import _count_root_residues, fold_root_experience
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
@@ -24,8 +24,8 @@ def _pctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
 
 
-def _sc(agent="ag1") -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id=None, agent_id=agent)
+def _sc(agent="ag1") -> MemoryAddress:
+    return MemoryAddress(session_id="s1", task_id=None, agent_id=agent)
 
 
 def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
@@ -55,7 +55,7 @@ async def _seed_root_capsule(mem, scope, task_id: str, t0: int, parent_task_id=N
     """
     tcid = f"tc_{task_id}"
     # task 层 body（按 origin task_id 的 task scope，同 agent_id 供 recall_recent_by_agent 召回）
-    body_scope = MemoryScope(session_id="s1", task_id=task_id, agent_id=scope.agent_id)
+    body_scope = MemoryAddress(session_id="s1", task_id=task_id, agent_id=scope.agent_id)
     await mem.ingest(_ev(T.USER_PROMPT, body_scope, f"body prompt {task_id}", t0,
                          role="user"), _pctx())
     await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, scope, f"user prompt {task_id}", t0,
@@ -284,7 +284,7 @@ async def test_legacy_dispatch_pair_folds_with_unit_via_adapter():
     # legacy 表示：gateway 旧写 TASK_DISPATCH（scope task_id=R0 → 适配取 origin=R0）+ finalize 旧写
     # TASK_DISPATCH_RESULT（parent_task_id=R0 → 适配取 origin=R0）
     tc = "tc_legacy"
-    legacy_scope = MemoryScope(session_id="s1", task_id="R0", agent_id=scope.agent_id)
+    legacy_scope = MemoryAddress(session_id="s1", task_id="R0", agent_id=scope.agent_id)
     await mem.ingest(_ev(T.TASK_DISPATCH, legacy_scope, "", 10, role="assistant",
                          tool_call_id=tc, tool_name="control:delegate_task", arguments={}), _pctx())
     await mem.ingest(_ev(T.TASK_DISPATCH_RESULT, legacy_scope, "legacy child result", 11, role="tool",
@@ -370,7 +370,7 @@ async def test_cross_agent_child_counts_as_top_level_in_own_scope():
     """
     mem = InMemoryMemoryProvider()
     # child agent 有自己的 scope（agent_id 不同或 task_id 不同均可）
-    child_scope = MemoryScope(session_id="s1", task_id=None, agent_id="child_agent")
+    child_scope = MemoryAddress(session_id="s1", task_id=None, agent_id="child_agent")
 
     # 仅植入 C2 的胶囊（parent=R，但 R 不在 child_scope 的任何胶囊 origin 中）
     await _seed_root_capsule(mem, child_scope, "C2", 0, parent_task_id="R")

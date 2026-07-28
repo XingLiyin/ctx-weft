@@ -18,7 +18,7 @@ from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.protocols.template import LoopConfig
@@ -36,13 +36,13 @@ def _pctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
 
 
-def _task_scope(task_id: str) -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id=task_id, agent_id=AGENT)
+def _task_scope(task_id: str) -> MemoryAddress:
+    return MemoryAddress(session_id="s1", task_id=task_id, agent_id=AGENT)
 
 
-def _agent_scope() -> MemoryScope:
+def _agent_scope() -> MemoryAddress:
     """fold 跑在 agent scope（task_id 为当前 task，但 agent 层召回只看 agent_id）。"""
-    return MemoryScope(session_id="s1", task_id="cur", agent_id=AGENT)
+    return MemoryAddress(session_id="s1", task_id="cur", agent_id=AGENT)
 
 
 class _FakeTM:
@@ -55,7 +55,7 @@ def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
                        timestamp=_BASE + timedelta(seconds=t), role=role, metadata=meta)
 
 
-def _finalize_state(task: Task, scope: MemoryScope, cfg: LoopConfig):
+def _finalize_state(task: Task, scope: MemoryAddress, cfg: LoopConfig):
     agent = SimpleNamespace(id=scope.agent_id, loop_config=cfg)
     session = SimpleNamespace(id="s1", tenant_id="default")
     return SimpleNamespace(run_id="run1", sequence_counter=0, session=session,

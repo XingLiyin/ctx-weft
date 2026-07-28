@@ -30,7 +30,7 @@ import pytest
 
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, finalize_task_memory
 from ctx_weft.core.state.models import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -49,17 +49,17 @@ def _pctx() -> ProviderContext:
     return ProviderContext(session_id=SESSION, tenant_id="default")
 
 
-def _task_scope(task_id: str, agent_id: str = "ag1") -> MemoryScope:
+def _task_scope(task_id: str, agent_id: str = "ag1") -> MemoryAddress:
     """task 层 scope（含 task_id）。"""
-    return MemoryScope(session_id=SESSION, task_id=task_id, agent_id=agent_id)
+    return MemoryAddress(session_id=SESSION, task_id=task_id, agent_id=agent_id)
 
 
-def _agent_scope(agent_id: str = "ag1") -> MemoryScope:
+def _agent_scope(agent_id: str = "ag1") -> MemoryAddress:
     """agent 层 scope（task_id=None）。"""
-    return MemoryScope(session_id=SESSION, task_id=None, agent_id=agent_id)
+    return MemoryAddress(session_id=SESSION, task_id=None, agent_id=agent_id)
 
 
-def _ev(type_: MemoryEventType, scope: MemoryScope, content: str, t: int,
+def _ev(type_: MemoryEventType, scope: MemoryAddress, content: str, t: int,
         role: str | None = None, **meta) -> MemoryEvent:
     return MemoryEvent(
         type=type_, scope=scope, content=content,
@@ -81,7 +81,7 @@ def _make_task(task_id: str = "t1", agent_id: str = "ag1", prompt: str = "初始
     )
 
 
-async def _caps(mem: InMemoryMemoryProvider, scope: MemoryScope) -> list:
+async def _caps(mem: InMemoryMemoryProvider, scope: MemoryAddress) -> list:
     """召回 agent 层 AGENT_CONVERSATION_TURN，按 timestamp 升序（oldest first）。"""
     recs = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
     return list(reversed(recs))
@@ -96,7 +96,7 @@ class _FakeTM:
         return self._children.get(task_id, set())
 
 
-def _state(task: Task, scope: MemoryScope, loop_config: LoopConfig | None = None):
+def _state(task: Task, scope: MemoryAddress, loop_config: LoopConfig | None = None):
     agent = SimpleNamespace(id=scope.agent_id, loop_config=loop_config or LoopConfig())
     session = SimpleNamespace(id=SESSION, tenant_id="default")
     return SimpleNamespace(

@@ -15,7 +15,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.state.models import Agent, LoopGuard, Session, Task
 from ctx_weft.core.utils import generate_id, now_utc
-from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
@@ -42,7 +42,7 @@ def _build_state_and_ctx(runtime: CtxWeftRuntime, task: Task):
     session = Session(id="s1", user_prompt="hi", status="RUNNING")
     agent = Agent(id="agt1", session_id="s1", template_id="tpl", template_version="1",
                   status="ACTIVE", loop_guard=LoopGuard())
-    scope = MemoryScope(session_id="s1", task_id=task.id, agent_id="agt1")
+    scope = MemoryAddress(session_id="s1", task_id=task.id, agent_id="agt1")
     state = LoopState(run_id=generate_id("run"), session=session, task=task, agent=agent, scope=scope)
     provider_ctx = ProviderContext(session_id="s1", tenant_id="default", task_id=task.id, agent_id="agt1")
     ctx = LoopContext(

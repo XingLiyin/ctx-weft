@@ -20,7 +20,7 @@ from ctx_weft.core.orchestrator.control_capability import (
     ControlResult,
 )
 from ctx_weft.core.state.models import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -50,8 +50,8 @@ def _pctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
 
 
-def _sc(task_id: str | None, agent_id: str = "ag1") -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id=task_id, agent_id=agent_id)
+def _sc(task_id: str | None, agent_id: str = "ag1") -> MemoryAddress:
+    return MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent_id)
 
 
 class _FakeTM:
@@ -59,7 +59,7 @@ class _FakeTM:
         return set()
 
 
-def _state(task: Task, scope: MemoryScope):
+def _state(task: Task, scope: MemoryAddress):
     agent = SimpleNamespace(id=scope.agent_id, loop_config=LoopConfig())
     session = SimpleNamespace(id="s1", tenant_id="default")
     return SimpleNamespace(run_id="run1", sequence_counter=0, session=session,

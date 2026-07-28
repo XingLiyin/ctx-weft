@@ -17,7 +17,7 @@ from ctx_weft.core.utils import estimate_tokens
 import pytest
 
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
@@ -31,11 +31,11 @@ def _pctx() -> ProviderContext:
     return ProviderContext(session_id=SESSION, tenant_id="default")
 
 
-def _agent_scope(agent_id: str = "ag_old") -> MemoryScope:
-    return MemoryScope(session_id=SESSION, task_id=None, agent_id=agent_id)
+def _agent_scope(agent_id: str = "ag_old") -> MemoryAddress:
+    return MemoryAddress(session_id=SESSION, task_id=None, agent_id=agent_id)
 
 
-def _mirrored(type_: MemoryEventType, scope: MemoryScope, content: str, t_offset: int,
+def _mirrored(type_: MemoryEventType, scope: MemoryAddress, content: str, t_offset: int,
                role: str, origin_task_id: str, **meta) -> MemoryEvent:
     """旧式镜像记录：AGENT_CONVERSATION_TURN 写入 agent scope，带 origin_task_id。"""
     return MemoryEvent(
@@ -48,7 +48,7 @@ def _mirrored(type_: MemoryEventType, scope: MemoryScope, content: str, t_offset
     )
 
 
-async def _recall_blocks(mem: InMemoryMemoryProvider, agent_scope: MemoryScope) -> list:
+async def _recall_blocks(mem: InMemoryMemoryProvider, agent_scope: MemoryAddress) -> list:
     """Drive AgentRecallSource.fetch and return blocks sorted by (timestamp, seq_no)."""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)

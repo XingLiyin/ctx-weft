@@ -13,7 +13,7 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.orchestrator.hitl_manager import HitlRequest
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Session, Task
-from ctx_weft.protocols import MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
@@ -36,7 +36,7 @@ def _tm_with_task(status: str = "SUSPENDED") -> tuple[TaskManager, Task]:
 
 async def _recall_user_prompts(mem: InMemoryMemoryProvider) -> list:
     return await mem.recall_recent(
-        scope=MemoryScope(session_id="s1", task_id="t1", agent_id="ag1"),
+        scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1"),
         types=[MemoryEventType.USER_PROMPT],
         limit=10,
         ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="t1"),

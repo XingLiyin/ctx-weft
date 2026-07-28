@@ -7,7 +7,7 @@ from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, collapse_task_layer
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider as InMemoryBlackboard
 from ctx_weft.protocols import (
-    MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext,
+    MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext,
 )
 from ctx_weft.core.events import EventType
 
@@ -34,7 +34,7 @@ async def _ingest(mem, scope, typ, content, i, role="user"):
 
 async def test_collapse_folds_early_keeps_recent():
     mem = InMemoryBlackboard()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     await _ingest(mem, scope, T.USER_PROMPT, "原始请求：做 X", 0)
     await _ingest(mem, scope, T.LLM_RESPONSE, "step1", 1, role="assistant")
     await _ingest(mem, scope, T.TOOL_RESULT, "r1", 2, role="tool")
@@ -59,7 +59,7 @@ async def test_collapse_folds_early_keeps_recent():
 
 async def test_collapse_noop_when_within_keep_last():
     mem = InMemoryBlackboard()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     await _ingest(mem, scope, T.USER_PROMPT, "orig", 0)
     await _ingest(mem, scope, T.LLM_RESPONSE, "step1", 1, role="assistant")
     ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx())
@@ -69,7 +69,7 @@ async def test_collapse_noop_when_within_keep_last():
 
 async def test_recollapse_keeps_original_bounded():
     mem = InMemoryBlackboard()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     # 已坍缩过一次的 USER_PROMPT
     await _ingest(mem, scope, T.USER_PROMPT, f"原始请求：做 X{COLLAPSE_DELIM}旧摘要", 0)
     await _ingest(mem, scope, T.LLM_RESPONSE, "step3", 1, role="assistant")
@@ -104,7 +104,7 @@ async def test_escalating_compact_l3_uses_collapse_keep_last(monkeypatch):
     monkeypatch.setattr(cm, "collapse_task_layer", _fake_collapse)
 
     mem = InMemoryBlackboard()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     for i in range(6):  # 6 条 TASK_COMPACT_TYPES > collapse_keep_last(2)
         await _ingest(mem, scope, T.LLM_RESPONSE, f"turn{i}", i, role="assistant")
 
@@ -139,7 +139,7 @@ async def test_escalating_l3_fires_on_segment_only_accumulation(monkeypatch):
     monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)  # 免真实 LLM；collapse 用真的
 
     mem = InMemoryBlackboard()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     await _ingest(mem, scope, T.USER_PROMPT, "原始请求：做 X", 0)
     for i in range(3):  # 3 条段摘要（无任何 raw），collapse_keep_last=2 → 3+1 > 2 触发
         await _ingest(mem, scope, T.TASK_COMPACT_SUMMARY, f"段摘要{i}", i + 1, role="assistant")

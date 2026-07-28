@@ -25,7 +25,7 @@ from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.events.types import Event, EventType
 from ctx_weft.core.orchestrator.control_capability import BACKGROUND_PROCESS_REPORT_NAME
 from ctx_weft.protocols import (
-    MemoryEvent, MemoryEventType, MemoryScope, ProviderContext, ToolCall,
+    MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
 )
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
@@ -105,7 +105,7 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
 
     # Seed the placeholder finish pair in memory so _relaunch's close-synth path can
     # locate the finish_task tool_call and supersede the placeholder Process Report.
-    scope = MemoryScope(session_id=sid, task_id=tid, agent_id=aid)
+    scope = MemoryAddress(session_id=sid, task_id=tid, agent_id=aid)
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
     fin_tcid = "tc_finish"
     await mem.ingest(MemoryEvent(
@@ -193,7 +193,7 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
     # Seed the placeholder finish pair in memory so _relaunch's close-synth path can
     # locate the finish_task tool_call (register_close_synth infers outcome="fail"
     # from task.status == "FAILED" — see runtime._relaunch_task_recap).
-    scope = MemoryScope(session_id=sid, task_id=tid, agent_id=aid)
+    scope = MemoryAddress(session_id=sid, task_id=tid, agent_id=aid)
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
     fin_tcid = "tc_finish_fail"
     await mem.ingest(MemoryEvent(
@@ -327,7 +327,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     # Seed one un-folded raw LLM_RESPONSE so the interrupt-boundary recap's re-fold
     # guard sees active raw and takes the real fold path (rather than the "already
     # folded, nothing to do" no-op skip — see background_observe._run_background_observe).
-    scope = MemoryScope(session_id=sid, task_id=tid, agent_id=aid)
+    scope = MemoryAddress(session_id=sid, task_id=tid, agent_id=aid)
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
     await mem.ingest(MemoryEvent(
         type=MemoryEventType.LLM_RESPONSE, scope=scope, content="(raw turn, unfolded)",

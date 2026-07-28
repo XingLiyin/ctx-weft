@@ -20,7 +20,7 @@ from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
     MemoryRecord,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 
@@ -36,7 +36,7 @@ def _request_for(task_id: str, m: InMemoryMemoryProvider) -> tuple[ContextReques
     agent = Agent(id="a", session_id="s1", template_id="t", template_version="1", status="IDLE")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
-        purpose="observe", scope=MemoryScope(session_id="s1", task_id=task_id, agent_id="a"),
+        purpose="observe", scope=MemoryAddress(session_id="s1", task_id=task_id, agent_id="a"),
         task=task, agent=agent, session=session, template=None, bound_capabilities=[],
     )
     deps = AssemblerDeps(memory=m, knowledge_providers=[], provider_ctx=_ctx())
@@ -48,7 +48,7 @@ def _bare_request() -> ContextRequest:
     agent = Agent(id="a", session_id="s1", template_id="t", template_version="1", status="IDLE")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     return ContextRequest(
-        purpose="observe", scope=MemoryScope(session_id="s1", task_id="t", agent_id="a"),
+        purpose="observe", scope=MemoryAddress(session_id="s1", task_id="t", agent_id="a"),
         task=task, agent=agent, session=session, template=None, bound_capabilities=[],
     )
 
@@ -104,7 +104,7 @@ async def test_blackboard_source_tiers_long_term_background_at_priority_1() -> N
     await m.ingest(
         MemoryEvent(
             type=MemoryEventType.BLACKBOARD_PUBLISH,
-            scope=MemoryScope(session_id="s1", task_id="G", agent_id="a"),
+            scope=MemoryAddress(session_id="s1", task_id="G", agent_id="a"),
             content="project background info",
             timestamp=datetime.now(timezone.utc),
             topic="G",
@@ -117,7 +117,7 @@ async def test_blackboard_source_tiers_long_term_background_at_priority_1() -> N
     await m.ingest(
         MemoryEvent(
             type=MemoryEventType.BLACKBOARD_PUBLISH,
-            scope=MemoryScope(session_id="s1", task_id="A", agent_id="a"),
+            scope=MemoryAddress(session_id="s1", task_id="A", agent_id="a"),
             content="subtask result",
             timestamp=datetime.now(timezone.utc),
             topic="A",

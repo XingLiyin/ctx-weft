@@ -9,7 +9,7 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.orchestrator.hitl_manager import HitlRequest
 from ctx_weft.core.state.models import Session
 from ctx_weft.core.utils import now_utc
-from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -63,7 +63,7 @@ async def test_inject_user_reply_phase1_adds_edit_note():
     session = Session(id="s1", tenant_id="default", user_prompt="X", status="PAUSED", token_budget=0)
     task = SimpleNamespace(id="t1", status="SUSPENDED", outputs=None, process_report=None)
     tm = SimpleNamespace(get_task=lambda tid: task)
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
     await mem.ingest(MemoryEvent(
         type=MemoryEventType.USER_PROMPT, scope=scope, content="原始请求X",
@@ -92,7 +92,7 @@ async def test_inject_user_reply_non_edit_has_no_note():
     session = Session(id="s1", tenant_id="default", user_prompt="X", status="PAUSED", token_budget=0)
     task = SimpleNamespace(id="t1", status="SUSPENDED", outputs=None, process_report=None)
     tm = SimpleNamespace(get_task=lambda tid: task)
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
     req = HitlRequest(

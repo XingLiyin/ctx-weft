@@ -73,7 +73,7 @@ def test_agent_conversation_turn_not_wrapped():
 
 
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
-from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, ProviderContext
 
 
 def _rec_task(type_, content, task_id, role="assistant"):
@@ -97,7 +97,7 @@ async def test_agent_recall_heading_only_for_current_task_summary():
 
     deps = SimpleNamespace(memory=_M(),
                            provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
-    req = SimpleNamespace(scope=MemoryScope(session_id="s1", task_id="t_cur", agent_id="a1"),
+    req = SimpleNamespace(scope=MemoryAddress(session_id="s1", task_id="t_cur", agent_id="a1"),
                           token_counter=estimate_tokens)
     contents = {b.content for b in [x async for x in AgentRecallSource().fetch(req, deps)]}
 
@@ -120,7 +120,7 @@ async def test_agent_compact_summary_rendered_wrapped():
     rec = _rec(T.AGENT_COMPACT_SUMMARY, "### 既往派发摘要\nY")
     rec.kind, rec.layer = MemoryKind.SUMMARY, MemoryLayer.AGENT  # provider 契约：kind 已重打
     deps = SimpleNamespace(memory=_Mem([rec]), provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
-    req = SimpleNamespace(scope=MemoryScope(session_id="s1", agent_id="a1"),
+    req = SimpleNamespace(scope=MemoryAddress(session_id="s1", agent_id="a1"),
                           token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     summ = [b for b in blocks if b.metadata.get("type") == T.AGENT_COMPACT_SUMMARY]
@@ -142,7 +142,7 @@ async def test_agent_layer_recall_uses_uncapped_load_view():
 
     deps = SimpleNamespace(memory=_SpyMem(),
                            provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
-    req = SimpleNamespace(scope=MemoryScope(session_id="s1", agent_id="a1"),
+    req = SimpleNamespace(scope=MemoryAddress(session_id="s1", agent_id="a1"),
                           token_counter=estimate_tokens)
     _ = [b async for b in AgentRecallSource().fetch(req, deps)]
     assert calls, "agent 层召回须经 load_view（全量幸存、无条数上限）"

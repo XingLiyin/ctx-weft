@@ -65,7 +65,7 @@ from ctx_weft.protocols import (
     MemoryKind,
     MemoryLayer,
     MemoryProvider,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.protocols.capability import (
@@ -114,10 +114,10 @@ async def _copy_memory_for_inherit(
     """
     # AGENT_COMPACT_SUMMARY（父的黑盒折叠派发日志）仍排除——对子无用（沿用 2026-06-23 的窄化意图，
     # 只是现在改为 mirror 而非「仅 OPEN-task body」）。
-    from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope
+    from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress
 
     parent_agent_id = parent_task.assigned_agent_id or parent_task.creator_agent_id
-    parent_scope = MemoryScope(session_id=session_id, task_id=parent_task.id, agent_id=parent_agent_id)
+    parent_scope = MemoryAddress(session_id=session_id, task_id=parent_task.id, agent_id=parent_agent_id)
     ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
 
     # Mirror the parent agent's current recall view (spec Phase 2, 2026-06-30):
@@ -143,7 +143,7 @@ async def _copy_memory_for_inherit(
         [*body_records, *frame_records],
         key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)),
     )
-    child_scope = MemoryScope(session_id=session_id, task_id=child_task.id, agent_id=sub_agent.id)
+    child_scope = MemoryAddress(session_id=session_id, task_id=child_task.id, agent_id=sub_agent.id)
     for r in combined:  # chronological → re-ingest preserves order via fresh per-scope seq_no
         md = {"inherited_from_task_id": parent_task.id}
         if r.role == "assistant" and r.metadata.get("tool_calls"):
@@ -907,7 +907,7 @@ class CtxWeftRuntime:
 
         for t in ack_tasks:
             try:
-                parent_scope = MemoryScope(
+                parent_scope = MemoryAddress(
                     session_id=session.id, task_id=t.parent_task_id, agent_id=t.creator_agent_id,
                 )
                 provider_ctx = ProviderContext(
@@ -928,7 +928,7 @@ class CtxWeftRuntime:
 
         if root_task is not None and root_task.started_at:
             try:
-                scope = MemoryScope(
+                scope = MemoryAddress(
                     session_id=session.id, task_id=root_task.id, agent_id=session.root_agent_id,
                 )
                 provider_ctx = ProviderContext(
@@ -1176,7 +1176,7 @@ class CtxWeftRuntime:
             await task_manager.finalize_idle_session(final_status)
 
     async def _find_finish_pair_tool_call_id(
-        self, memory: MemoryProvider, scope: MemoryScope, task_id: str, pctx: ProviderContext,
+        self, memory: MemoryProvider, scope: MemoryAddress, task_id: str, pctx: ProviderContext,
     ) -> str | None:
         """从 memory 找该 task close 时写的占位 finish 对 assistant turn，返回其 finish_task tool_call id。"""
         from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
@@ -1211,7 +1211,7 @@ class CtxWeftRuntime:
                 existing_agent_id=agent_id, ctx=pctx0,
             )
             memory = self.providers.get_memory()
-            scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=agent.id)
+            scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
             provider_ctx = self._build_provider_ctx(session, task, agent)
             skill_index = self._skill_provider_index()
             assembler = self._build_assembler(memory, provider_ctx, skill_index)
@@ -1299,7 +1299,7 @@ class CtxWeftRuntime:
         from ctx_weft.core.loop.steps.compact import CompactStep
         from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
         from ctx_weft.core.state.models import LoopGuard, NormalTaskSettings, Task
-        from ctx_weft.protocols import MemoryScope, ProviderContext
+        from ctx_weft.protocols import MemoryAddress, ProviderContext
 
         # ── idle-guard: claim the slot synchronously (no await before the claim) ──
         if session_id in self._busy_sessions or self._run_tokens.get(session_id):
@@ -1363,7 +1363,7 @@ class CtxWeftRuntime:
                 assembler, llm, memory, provider_ctx, gateway, skill_index, token, None,
             )
 
-            scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=agent.id)
+            scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
             state = LoopState(
                 run_id=generate_id("run"),
                 session=session,
@@ -1424,7 +1424,7 @@ class CtxWeftRuntime:
         # （重启后「第一句」丢失）。回退到 task 的真实 agent（assigned/creator），与首条 USER_PROMPT
         # 落库时同 scope。
         agent_id = req.agent_id or target.assigned_agent_id or target.creator_agent_id or ""
-        scope = MemoryScope(session_id=session.id, task_id=target.id, agent_id=agent_id)
+        scope = MemoryAddress(session_id=session.id, task_id=target.id, agent_id=agent_id)
         pctx = ProviderContext(
             session_id=session.id, tenant_id=session.tenant_id,
             task_id=target.id, agent_id=agent_id,
@@ -1456,7 +1456,7 @@ class CtxWeftRuntime:
         if target.status not in ("FINISHED", "FAILED", "CANCELED"):
             target.status = "PENDING"
 
-    async def _last_user_prompt(self, scope: MemoryScope, pctx: ProviderContext) -> str:
+    async def _last_user_prompt(self, scope: MemoryAddress, pctx: ProviderContext) -> str:
         """取 scope 内最近一条 USER_PROMPT 内容（供 ① 打断续接的「上一条取消」说明）。"""
         from ctx_weft.protocols import MemoryKind, MemoryLayer
         try:
@@ -1842,7 +1842,7 @@ class CtxWeftRuntime:
             session.llm_provider = llm_account or getattr(llm, "account", "") or ""
         loop_ctx = self._build_loop_ctx(assembler, llm, memory, provider_ctx, gateway, skill_index, cancel_token, task_manager, pause_token=pause_token)
 
-        scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=scope_agent_id or agent.id)
+        scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=scope_agent_id or agent.id)
         state = LoopState(
             run_id=run_id,
             session=session,
@@ -2023,7 +2023,7 @@ class _SessionTaskRunner:
     async def _reconcile_or(self, t: "Task", agent: "Agent", base: str) -> str:
         """base initial_step；若该 task 最近 assistant turn 有 dangling tool_call → reconcile。"""
         from ctx_weft.protocols.context import ProviderContext as _PCtx
-        from ctx_weft.protocols.memory import MemoryScope as _Scope
+        from ctx_weft.protocols.memory import MemoryAddress as _Scope
         sess_id = self._session.id
         scope = _Scope(session_id=sess_id, task_id=t.id, agent_id=agent.id)
         pctx = _PCtx(session_id=sess_id, tenant_id=self._session.tenant_id,

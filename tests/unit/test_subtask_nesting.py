@@ -22,7 +22,7 @@ from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.protocols.template import LoopConfig
@@ -39,8 +39,8 @@ def _ctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
 
 
-def _sc(task_id: str, agent_id: str = "ag1") -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id=task_id, agent_id=agent_id)
+def _sc(task_id: str, agent_id: str = "ag1") -> MemoryAddress:
+    return MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent_id)
 
 
 class _FakeTM:
@@ -48,7 +48,7 @@ class _FakeTM:
         return set()
 
 
-def _state(task: Task, scope: MemoryScope, loop_config: LoopConfig):
+def _state(task: Task, scope: MemoryAddress, loop_config: LoopConfig):
     agent = SimpleNamespace(id=scope.agent_id, loop_config=loop_config)
     session = SimpleNamespace(id="s1", tenant_id="default")
     return SimpleNamespace(run_id="run1", sequence_counter=0, session=session,

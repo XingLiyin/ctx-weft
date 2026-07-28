@@ -11,7 +11,7 @@ from ctx_weft.core.loop.steps.observe import (
     BACKGROUND_OBSERVE_REACT_EVENTS, run_observe_react,
 )
 from ctx_weft.core.orchestrator.control_capability import ControlResult
-from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryScope
+from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryAddress
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 _LLM_EVENT_TYPES = {
@@ -95,7 +95,7 @@ def _make_state():
         observer_outcome=None,
         process_report=None,
     )
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="a1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
 
     from ctx_weft.core.loop.driver import LoopState
     state = LoopState(

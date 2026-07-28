@@ -15,7 +15,7 @@ from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.llm_gateway import resolve_llm_identity
 from ctx_weft.core.loop.steps.act import _run_llm_turn
 from ctx_weft.core.loop.steps.observe import run_observe_react
-from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryScope
+from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryAddress
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 
@@ -70,7 +70,7 @@ def _make_state(*, session_llm: bool):
         id="t1", parent_task_id="p1", status="RUNNING",
         observer_outcome=None, process_report=None,
     )
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="a1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
     from ctx_weft.core.loop.driver import LoopState
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,

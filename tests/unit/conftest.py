@@ -14,7 +14,7 @@ from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -38,7 +38,7 @@ async def fake_state_ctx():
     内部 asyncio.Lock 绑定到错误的循环。
     """
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="a1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
 
     async def _seed():

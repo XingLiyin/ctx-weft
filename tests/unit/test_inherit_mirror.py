@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 
 from ctx_weft.core.runtime import _copy_memory_for_inherit
 from ctx_weft.core.state.models import Task, NormalTaskSettings
-from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryScope
+from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
@@ -29,7 +29,7 @@ async def test_inherit_mirrors_frames_and_bubbles():
     mem = InMemoryMemoryProvider()
     sess, parent_agent = "s1", "agR"
     parent_task_id = "p1"
-    parent_scope = MemoryScope(session_id=sess, task_id=parent_task_id, agent_id=parent_agent)
+    parent_scope = MemoryAddress(session_id=sess, task_id=parent_task_id, agent_id=parent_agent)
 
     # parent's own body (plan task) — task layer
     await mem.ingest(_ev(T.USER_PROMPT, parent_scope, "提交一个 plan", role="user", ts=_BASE), _ctx())
@@ -40,7 +40,7 @@ async def test_inherit_mirrors_frames_and_bubbles():
                          ts=_BASE + timedelta(seconds=2),
                          md={"origin_task_id": parent_task_id,
                              "tool_calls": [{"id": "tc_lily", "name": "control:start_task", "input": {}}]}), _ctx())
-    lily_scope = MemoryScope(session_id=sess, task_id="lily", agent_id=parent_agent)  # same agent
+    lily_scope = MemoryAddress(session_id=sess, task_id="lily", agent_id=parent_agent)  # same agent
     await mem.ingest(_ev(T.USER_PROMPT, lily_scope, "请向 Lily 问好", role="user",
                          ts=_BASE + timedelta(seconds=5)), _ctx())
 
@@ -65,7 +65,7 @@ async def test_inherit_mirrors_frames_and_bubbles():
         parent_task=parent_task, child_task=child_task, sub_agent=sub_agent,
         memory=mem, session_id=sess, tenant_id="default")
 
-    child_scope = MemoryScope(session_id=sess, task_id="andy", agent_id="agB")
+    child_scope = MemoryAddress(session_id=sess, task_id="andy", agent_id="agB")
     turns = await mem.recall_recent(child_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
     # recall_recent returns newest-first; flip to chronological for ordering assertions
     chrono = list(reversed(turns))

@@ -9,7 +9,7 @@ import pytest
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -25,8 +25,8 @@ def _ctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
 
 
-def _sc(task_id: str, agent_id: str = "ag1") -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id=task_id, agent_id=agent_id)
+def _sc(task_id: str, agent_id: str = "ag1") -> MemoryAddress:
+    return MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent_id)
 
 
 def _ev(type_, scope, content, t) -> MemoryEvent:

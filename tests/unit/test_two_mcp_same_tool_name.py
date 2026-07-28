@@ -11,7 +11,7 @@ from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import estimate_tokens
-from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
 )
@@ -55,7 +55,7 @@ async def test_two_servers_same_tool_name_coexist_and_route() -> None:
 
     # 3. Each qualified name routes to its own provider.
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     state = LoopState(
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),

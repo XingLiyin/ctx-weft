@@ -22,8 +22,8 @@ T = MemoryEventType
 
 
 def _scope():
-    from ctx_weft.protocols import MemoryScope
-    return MemoryScope(session_id="s1", task_id="t1", agent_id="a1")
+    from ctx_weft.protocols import MemoryAddress
+    return MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
 
 
 def _pctx():

@@ -6,7 +6,7 @@ import pytest
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext
 
 pytestmark = pytest.mark.asyncio
 
@@ -29,7 +29,7 @@ async def _ingest(mem, scope, typ, content, i, role="user"):
 
 async def test_retry_folds_current_attempt_and_deletes_raw():
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     await _ingest(mem, scope, T.USER_PROMPT, "原始请求", 0)
     await _ingest(mem, scope, T.LLM_RESPONSE, "本轮回复", 1, role="assistant")
     await _ingest(mem, scope, T.TOOL_RESULT, "本轮工具结果", 2, role="tool")
@@ -58,7 +58,7 @@ async def test_retry_accumulates_prior_segments():
     """多轮 retry：本轮折只删本轮 raw，之前的段摘要保留累积（protect TASK_COMPACT_SUMMARY）。
     N 轮后 task 层 = USER_PROMPT + N 条段摘要（L3 再据 collapse_keep_last 坍缩），不是替换成 1 条。"""
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     await _ingest(mem, scope, T.USER_PROMPT, "原始请求", 0)
     # 上一轮 retry 已折出的段摘要①（assistant role，与前台折产物同形）
     await _ingest(mem, scope, T.TASK_COMPACT_SUMMARY, "段摘要①", 1, role="assistant")
@@ -92,7 +92,7 @@ async def test_retry_short_segment_kept_raw():
     short_segment_token_threshold → 不折、不写段摘要，raw 原样留给下个 attempt
     （recap 常比短原文更长，原文信息反而更全）。"""
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     await _ingest(mem, scope, T.USER_PROMPT, "原始请求", 0)
     await _ingest(mem, scope, T.LLM_RESPONSE, "一句话回复", 1, role="assistant")
 
@@ -116,7 +116,7 @@ async def test_retry_short_segment_kept_raw():
 async def test_retry_long_segment_still_folds_when_threshold_set():
     """超过阈值的 attempt 照常折（门只放行短段）。"""
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     await _ingest(mem, scope, T.USER_PROMPT, "原始请求", 0)
     await _ingest(mem, scope, T.LLM_RESPONSE, "本轮回复", 1, role="assistant")
 
@@ -138,7 +138,7 @@ async def test_retry_long_segment_still_folds_when_threshold_set():
 
 async def test_non_retry_outcome_does_not_fold():
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     await _ingest(mem, scope, T.LLM_RESPONSE, "回复", 1, role="assistant")
     state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"),
                             agent=SimpleNamespace(loop_config=SimpleNamespace(compact_keep_last=6)),

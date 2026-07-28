@@ -12,7 +12,7 @@ from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
-    MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext,
+    MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext,
 )
 import dataclasses as _dc
 from ctx_weft.core.loop.steps import compact as cm
@@ -162,7 +162,7 @@ async def test_escalating_compact_shrinks_real_memory(monkeypatch):
     monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
 
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s", task_id="root", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="root", agent_id="a")
     pctx = ProviderContext(session_id="s", tenant_id="tn")
 
     # seed 5 个结束顶层单元（finish 对：assistant + tool），parent=None → 顶层

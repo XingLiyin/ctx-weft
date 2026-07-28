@@ -13,7 +13,7 @@ from typing import Any
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.events import EventType
 from ctx_weft.core.utils import as_utc, content_to_text, generate_id, now_utc
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryLayer, MemoryScope
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryLayer, MemoryAddress
 from ctx_weft.protocols.capability import qualify
 
 logger = logging.getLogger(__name__)
@@ -129,9 +129,9 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     return ts
 
 
-def _parent_scope_of(state, task) -> MemoryScope:
+def _parent_scope_of(state, task) -> MemoryAddress:
     """派发方（parent task + creator agent）的 scope——派发框/result 的落点。"""
-    return MemoryScope(
+    return MemoryAddress(
         session_id=state.scope.session_id,
         task_id=task.parent_task_id,
         agent_id=task.creator_agent_id,
@@ -414,7 +414,7 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
       ② 同 agent（`creator_agent_id == assigned_agent_id`）→ 嵌套合成子自己的 finish 对，写进
          ①的父 scope（同 agent 共享 scope）。
       ③ 跨 agent 子任务 / root（`parent_task_id is None`）→ 在自己的 agent scope 合成 finish 对：
-         `MemoryScope(session_id, task.id, task.assigned_agent_id or task.creator_agent_id)`。
+         `MemoryAddress(session_id, task.id, task.assigned_agent_id or task.creator_agent_id)`。
     finish 对 `register_bg=False`：这不是正常 close 流程产生的，没有对应的后台 observe 会来替换它，
     登记只会累积永不消费的状态（同熔断收尾路径的既有惯例）。
     """
@@ -429,7 +429,7 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
     )
 
     if task.parent_task_id and task.origin_tool_call_id:
-        parent_scope = MemoryScope(
+        parent_scope = MemoryAddress(
             session_id=session_id, task_id=task.parent_task_id, agent_id=task.creator_agent_id,
         )
         frame_ts = await _find_dispatch_frame(memory, parent_scope, task, provider_ctx)
@@ -452,7 +452,7 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
             return
 
     if is_own_root:
-        own_scope = MemoryScope(
+        own_scope = MemoryAddress(
             session_id=session_id, task_id=task.id,
             agent_id=task.assigned_agent_id or task.creator_agent_id,
         )

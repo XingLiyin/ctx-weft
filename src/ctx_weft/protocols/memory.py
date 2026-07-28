@@ -40,7 +40,7 @@ class MemoryEventType(StrEnum):
       scope: TASK | AGENT | SESSION —— 归属范围（原 MemoryLayer 更名；"层"误导纵向堆叠，实为
         横向归属分区），MemoryEvent 显式字段，EVENT_LAYER 退役为 legacy 兜底；可随执行模型
         缓慢生长（如将来的 USER/TENANT）
-      address: MemoryAddress（原 MemoryScope 数据类更名——它是坐标不是范围）：全址 = ingest
+      address: MemoryAddress（原 MemoryAddress 数据类更名——它是坐标不是范围）：全址 = ingest
         归档地址，半址 = 过滤模式（None 字段 = 通配，非法字段抛 ValueError）
       role:  user | assistant | tool —— 回合按 LLM message 模型编码，机制住 metadata（约定注册表）
       读 = 三种记忆动作：load_view(address, scope, kinds=None) 全量幸存视图、时间正序、无
@@ -80,7 +80,7 @@ class MemoryEventType(StrEnum):
 class MemoryLayer(StrEnum):
     """Memory 分层（spec/06 §2）。scope key 与 seq 计数按层分区。
 
-    【目标形态更名 MemoryScope】"层"误导为纵向抽象堆叠，实为横向归属分区（这条记忆归谁：
+    【目标形态更名 MemoryAddress】"层"误导为纵向抽象堆叠，实为横向归属分区（这条记忆归谁：
     task-scoped 私有转录 / agent-scoped 跨 task 经验 / session-scoped 共享黑板）；
     见 v2 设计 §2 命名注记。"""
 
@@ -121,7 +121,7 @@ def layer_for_types(types: list[MemoryEventType]) -> MemoryLayer:
 
 
 @dataclass
-class MemoryScope:
+class MemoryAddress:
     """记忆范围限定。
 
     【目标形态更名 MemoryAddress】它是坐标不是范围：全址 = ingest 归档地址，
@@ -133,10 +133,8 @@ class MemoryScope:
     agent_id: str | None = None
 
 
-# v2 正名（设计 §3 · P2a 起）：它是坐标不是范围——全址 = ingest 归档地址，
-# 半址 = load_view 过滤模式。P4 完成实体互换（类本体改名 MemoryAddress、
-# "MemoryScope" 让位给归属范围枚举）；过渡期两名同指此类。
-MemoryAddress = MemoryScope
+# v2 正名（P4b-1 完成实体互换）：类本体即 MemoryAddress；旧名 MemoryScope 进入
+# 名字真空（P4c 由归属范围枚举 MemoryLayer 接名）——漏网引用是 loud NameError。
 
 
 @dataclass
@@ -151,7 +149,7 @@ class MemoryEvent:
     """
 
     type: MemoryEventType | None = None
-    scope: MemoryScope | None = None
+    scope: MemoryAddress | None = None
     content: str | list[ContentPart] | None = None  # 必给；显式空串合法（占位回合）
     timestamp: datetime | None = None
     # 调用方预生成 record id（v2 设计 §4 · 2026-07-27 增补，投影化前置）。
@@ -208,7 +206,7 @@ class MemoryRecord:
     score: float | None = None  # 仅 recall_semantic 时填
     kind: "Any | None" = None            # v2：memory_compat.MemoryKind（避循环 import 不注真型）
     layer: MemoryLayer | None = None     # v2：归属范围
-    address: "MemoryScope | None" = None  # v2：来源回显（P4 类名换为 MemoryAddress 本体）
+    address: "MemoryAddress | None" = None  # v2：来源回显（P4 类名换为 MemoryAddress 本体）
     metadata: dict = field(default_factory=dict)
 
 
@@ -323,7 +321,7 @@ class MemoryProvider(Protocol):
     @abstractmethod
     async def recall_recent(
         self,
-        scope: MemoryScope,
+        scope: MemoryAddress,
         types: list[MemoryEventType],
         limit: int,
         ctx: ProviderContext,
@@ -337,7 +335,7 @@ class MemoryProvider(Protocol):
     @abstractmethod
     async def recall_recent_by_agent(
         self,
-        agent_scope: MemoryScope,
+        agent_scope: MemoryAddress,
         types: list[MemoryEventType],
         limit: int,
         ctx: ProviderContext,
@@ -371,7 +369,7 @@ class MemoryProvider(Protocol):
     async def recall_semantic(
         self,
         query: str,
-        scope: MemoryScope,
+        scope: MemoryAddress,
         top_k: int,
         ctx: ProviderContext,
     ) -> list[MemoryRecord]:
@@ -410,7 +408,7 @@ class MemoryProvider(Protocol):
     @abstractmethod
     async def apply_compact(
         self,
-        scope: MemoryScope,
+        scope: MemoryAddress,
         summary: str,
         keep_last: int,
         ctx: ProviderContext,
@@ -459,7 +457,7 @@ class MemoryProvider(Protocol):
     @abstractmethod
     async def count_recent(
         self,
-        scope: MemoryScope,
+        scope: MemoryAddress,
         types: list[MemoryEventType],
         ctx: ProviderContext,
     ) -> int:

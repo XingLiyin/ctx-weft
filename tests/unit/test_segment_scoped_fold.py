@@ -30,7 +30,7 @@ from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
     MemoryLayer,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -40,7 +40,7 @@ from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvide
 MT = MemoryEventType
 
 _PCTX = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
-_SCOPE = MemoryScope(session_id="s1", task_id="t1", agent_id="a1")
+_SCOPE = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
 _BASE = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 

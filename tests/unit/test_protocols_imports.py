@@ -13,12 +13,12 @@ def test_imports():
         MemoryEvent,
         MemoryEventType,
         MemoryProvider,
-        MemoryScope,
+        MemoryAddress,
         ProviderContext,
     )
 
     # 基础数据结构构造
-    scope = MemoryScope(session_id="ses_001", agent_id="agt_001")
+    scope = MemoryAddress(session_id="ses_001", agent_id="agt_001")
     ctx = ProviderContext(session_id="ses_001", tenant_id="default")
     facet = IdentityFacet(text="I am a helpful assistant.")
     event = MemoryEvent(

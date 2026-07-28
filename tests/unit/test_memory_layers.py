@@ -17,7 +17,7 @@ from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
     MemoryLayer,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -32,11 +32,11 @@ def _ctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
 
 
-def _sc(task_id: str, agent_id: str = "ag1") -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id=task_id, agent_id=agent_id)
+def _sc(task_id: str, agent_id: str = "ag1") -> MemoryAddress:
+    return MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent_id)
 
 
-def _ev(type_: MemoryEventType, scope: MemoryScope, content: str, t: int = 0) -> MemoryEvent:
+def _ev(type_: MemoryEventType, scope: MemoryAddress, content: str, t: int = 0) -> MemoryEvent:
     return MemoryEvent(
         type=type_,
         scope=scope,

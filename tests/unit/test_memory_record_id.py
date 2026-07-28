@@ -14,7 +14,7 @@ from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvide
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 
@@ -26,7 +26,7 @@ def _ctx() -> ProviderContext:
 def _event(content: str, id: str | None = None) -> MemoryEvent:
     return MemoryEvent(
         type=MemoryEventType.USER_PROMPT,
-        scope=MemoryScope(session_id="s1", task_id="t1", agent_id="a1"),
+        scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         content=content,
         timestamp=datetime.now(timezone.utc),
         id=id,
@@ -40,7 +40,7 @@ async def test_ingest_adopts_caller_supplied_id() -> None:
     assert returned == "mem_pre_001"
 
     records = await provider.recall_recent(
-        MemoryScope(session_id="s1", task_id="t1", agent_id="a1"),
+        MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         [MemoryEventType.USER_PROMPT], 10, _ctx(),
     )
     assert [r.id for r in records] == ["mem_pre_001"]
@@ -54,7 +54,7 @@ async def test_ingest_same_id_twice_is_noop() -> None:
     assert first == second == "mem_pre_001"
 
     records = await provider.recall_recent(
-        MemoryScope(session_id="s1", task_id="t1", agent_id="a1"),
+        MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         [MemoryEventType.USER_PROMPT], 10, _ctx(),
     )
     # 只有一条：重复 ingest 不写入、不比对内容（id 即身份，原内容保留）
@@ -64,7 +64,7 @@ async def test_ingest_same_id_twice_is_noop() -> None:
     third = await provider.ingest(_event("next"), ctx)
     assert third != "mem_pre_001"
     records = await provider.recall_recent(
-        MemoryScope(session_id="s1", task_id="t1", agent_id="a1"),
+        MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         [MemoryEventType.USER_PROMPT], 10, _ctx(),
     )
     seqs = sorted(r.metadata["seq_no"] for r in records)
@@ -81,7 +81,7 @@ async def test_ingest_superseded_id_stays_noop() -> None:
     returned = await provider.ingest(_event("hello", id="mem_pre_001"), ctx)
     assert returned == "mem_pre_001"
     records = await provider.recall_recent(
-        MemoryScope(session_id="s1", task_id="t1", agent_id="a1"),
+        MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         [MemoryEventType.USER_PROMPT], 10, _ctx(),
     )
     assert records == []  # 仍是 superseded，未复活

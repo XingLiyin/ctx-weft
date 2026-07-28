@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
-from ctx_weft.protocols import MemoryScope
+from ctx_weft.protocols import MemoryAddress
 
 
 class _FakeMem:
@@ -54,7 +54,7 @@ def _state(exit_reason, process_report):
         agent=agent,
         session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="t1", process_report=process_report),
-        scope=MemoryScope(session_id="s1", task_id="t1", agent_id="a1"),
+        scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         transcript=[],
         extra={"template": None, "bound_capabilities": []},
         act_exit_reason=exit_reason,

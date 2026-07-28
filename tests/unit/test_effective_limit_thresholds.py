@@ -13,7 +13,7 @@ import pytest
 from ctx_weft.core.loop.steps.act import _account_tokens
 from ctx_weft.core.state.models import LoopGuard
 from ctx_weft.core.utils import effective_limit
-from ctx_weft.protocols import LLMUsage, MemoryScope
+from ctx_weft.protocols import LLMUsage, MemoryAddress
 
 pytestmark = pytest.mark.asyncio
 
@@ -27,7 +27,7 @@ def _state(*, context_limit=100_000, reserved_output_tokens=8192):
     guard = LoopGuard(context_limit=context_limit, reserved_output_tokens=reserved_output_tokens)
     agent = SimpleNamespace(id="a1", loop_guard=guard)
     session = SimpleNamespace(token_used=0)
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="a1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
     return SimpleNamespace(agent=agent, session=session, scope=scope)
 
 

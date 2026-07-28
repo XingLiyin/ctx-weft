@@ -5,7 +5,7 @@ import pytest
 from ctx_weft.core.loop.steps.compact import _active_memory_tokens
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext
 
 pytestmark = pytest.mark.asyncio
 _BASE = datetime(2026, 7, 1, tzinfo=UTC)
@@ -17,7 +17,7 @@ def _pctx():
 
 async def test_active_tokens_sums_and_drops_after_supersede():
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s", task_id="t1", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     ids = []
     for i in range(3):
         await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=scope, content="x" * 400,

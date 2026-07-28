@@ -11,7 +11,7 @@ from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
     CapabilityProviderInfo,
@@ -41,7 +41,7 @@ class _Echo(ToolCapabilityProvider):
 
 def _state_ctx():
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     state = LoopState(
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),

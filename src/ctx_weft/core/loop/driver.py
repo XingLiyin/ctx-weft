@@ -18,7 +18,7 @@ from ctx_weft.core.events.types import EVENT_TYPES
 from ctx_weft.core.state.models import Agent, Session, Task
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import (
-    LLMClient, MemoryEvent, MemoryKind, MemoryLayer, MemoryProvider, MemoryScope, ProviderContext,
+    LLMClient, MemoryEvent, MemoryKind, MemoryLayer, MemoryProvider, MemoryAddress, ProviderContext,
 )
 
 if TYPE_CHECKING:
@@ -69,7 +69,7 @@ class LoopState:
     session: Session
     task: Task
     agent: Agent
-    scope: MemoryScope
+    scope: MemoryAddress
     sequence_counter: int = 0  # 每发一个事件 +1
 
     # 由 PrepareStep 写入

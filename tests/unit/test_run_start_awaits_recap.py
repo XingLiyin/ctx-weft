@@ -15,7 +15,7 @@ import ctx_weft.core.loop.steps.background_observe as bo
 from ctx_weft.core.loop.driver import LoopState
 from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
-from ctx_weft.protocols import MemoryScope
+from ctx_weft.protocols import MemoryAddress
 
 pytestmark = pytest.mark.asyncio
 
@@ -52,7 +52,7 @@ def _make_state_and_task():
     )
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     agent = SimpleNamespace(id="ag1")
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope)
     return state, task, agent
 

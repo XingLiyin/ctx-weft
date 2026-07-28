@@ -31,7 +31,7 @@ from ctx_weft.core.state.models import (
 from ctx_weft.protocols import (
     LLMChunk,
     MemoryEventType,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -79,7 +79,7 @@ def _make_child_task(**kwargs) -> Task:
 def _make_observe_state_ctx(task: Task, act_exit_reason: str):
     """Build minimal LoopState + LoopContext for ObserveStep.execute()."""
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s1", task_id=task.id, agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id=task.id, agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id=task.id, agent_id="ag1")
     session = Session(id="s1", tenant_id="default", user_prompt="hello", status="RUNNING")
 
@@ -249,7 +249,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = _make_root_task(status="ACTIVE")
     agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
     prompt = AssembledPrompt(
@@ -309,7 +309,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     child = _make_child_task(status="ACTIVE")
     agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
-    scope = MemoryScope(session_id="s1", task_id="t2", agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id="t2", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t2", agent_id="ag1")
 
     prompt = AssembledPrompt(
@@ -364,7 +364,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = dataclasses.replace(_make_root_task(status="ACTIVE"), interaction_mode="interactive")
     agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
     state = LoopState(
@@ -411,7 +411,7 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     child = dataclasses.replace(_make_child_task(status="ACTIVE"), interaction_mode="interactive")
     agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
-    scope = MemoryScope(session_id="s1", task_id="t2", agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id="t2", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t2", agent_id="ag1")
 
     state = LoopState(
@@ -434,7 +434,7 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
 def _make_suspend_state_ctx(task: Task):
     """Minimal LoopState + LoopContext for SuspendStep.execute()."""
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s1", task_id=task.id, agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id=task.id, agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id=task.id, agent_id="ag1")
     session = Session(id="s1", tenant_id="default", user_prompt="hello", status="RUNNING")
     agent = SimpleNamespace(id="ag1")

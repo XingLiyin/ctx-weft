@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.protocols import MemoryAddress, MemoryEventType, MemoryLayer, MemoryScope
+from ctx_weft.protocols import MemoryAddress, MemoryEventType, MemoryLayer, MemoryAddress
 from ctx_weft.protocols.memory_compat import (
     LEGACY_TRIPLE,
     MemoryKind,
@@ -19,8 +19,8 @@ from ctx_weft.protocols.memory_compat import (
 
 
 def test_memory_address_is_the_scope_dataclass() -> None:
-    """过渡别名：MemoryAddress 即原 MemoryScope 数据类（P4 完成实体互换）。"""
-    assert MemoryAddress is MemoryScope
+    """过渡别名：MemoryAddress 即原 MemoryAddress 数据类（P4 完成实体互换）。"""
+    assert MemoryAddress is MemoryAddress
     addr = MemoryAddress(session_id="s1", task_id="t1")
     assert addr.session_id == "s1" and addr.agent_id is None
 

@@ -18,7 +18,7 @@ from ctx_weft.core.loop.steps.compact import (
 )
 from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
@@ -32,8 +32,8 @@ def _ctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
 
 
-def _sc(task_id="t1", agent_id="ag1") -> MemoryScope:
-    return MemoryScope(session_id="s1", task_id=task_id, agent_id=agent_id)
+def _sc(task_id="t1", agent_id="ag1") -> MemoryAddress:
+    return MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent_id)
 
 
 def _ev(type_, scope, content, t, role=None, **meta):
@@ -126,7 +126,7 @@ async def _seed_root_residues(mem, sc, n: int, start_t: int = 0) -> None:
     for i in range(n):
         t0 = start_t + 4 * i
         tcid = f"rd{i}"
-        body_scope = MemoryScope(session_id="s1", task_id=f"rt{i}", agent_id=sc.agent_id)
+        body_scope = MemoryAddress(session_id="s1", task_id=f"rt{i}", agent_id=sc.agent_id)
         await mem.ingest(_ev(T.USER_PROMPT, body_scope, f"body rt{i}", t0, role="user"), _ctx())
         await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, f"user prompt rt{i}", t0,
                              role="user", origin_task_id=f"rt{i}", parent_task_id=None), _ctx())
@@ -259,7 +259,7 @@ async def test_fold_anchor_precedes_surviving_body_capsule() -> None:
     sc = _sc("t1")
     await _seed_root_residues(mem, sc, 3)  # rt0/rt1/rt2 → 老单元被折
     # 存活单元 rtS：task 层 user_prompt 很早（t=1），但唯一 live 的 agent 回合很晚（t=50）
-    body_scope = MemoryScope(session_id="s1", task_id="rtS", agent_id="ag1")
+    body_scope = MemoryAddress(session_id="s1", task_id="rtS", agent_id="ag1")
     early_up = _ev(T.USER_PROMPT, body_scope, "body rtS", 1, role="user")
     await mem.ingest(early_up, _ctx())
     await mem.ingest(_ev(T.AGENT_CONVERSATION_TURN, sc, "late turn rtS", 50, role="assistant",

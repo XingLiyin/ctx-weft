@@ -24,7 +24,7 @@ from ctx_weft.core.orchestrator.control_capability import (
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.utils import now_utc
-from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -89,7 +89,7 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
     # 据此把 ask_user 等控制工具绑入 cache,gateway.invoke 才找得到。
     from tests.integration.test_minimal_loop import make_echo_template
 
-    scope = MemoryScope(session_id=session_id, task_id=task_id, agent_id=agent_id)
+    scope = MemoryAddress(session_id=session_id, task_id=task_id, agent_id=agent_id)
     agent = SimpleNamespace(id=agent_id, template_id="tmpl_a", session_id=session_id)
     state = LoopState(run_id="run_1", session=session, task=task, agent=agent, scope=scope,
                       extra={"template": make_echo_template()})

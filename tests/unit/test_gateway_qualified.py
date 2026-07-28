@@ -13,7 +13,7 @@ from ctx_weft.core.loop.capability_gateway import (
 )
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-from ctx_weft.protocols import MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
     CapabilityProviderInfo,
@@ -47,7 +47,7 @@ class _Echo(ToolCapabilityProvider):
 
 def _state_ctx():
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     state = LoopState(
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
@@ -140,7 +140,7 @@ async def test_collect_process_report_silent_no_task_ingest() -> None:
     assert res.is_error is False
     assert res.content == "段总结Y"  # 返回值不受 SILENT 影响
 
-    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     tool_recs = await mem.recall_recent(
         scope, [MemoryEventType.TOOL_INVOCATION, MemoryEventType.TOOL_RESULT], 100, ctx.provider_ctx)
     assert tool_recs == [], (

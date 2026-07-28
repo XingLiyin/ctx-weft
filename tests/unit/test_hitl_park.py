@@ -33,7 +33,7 @@ async def test_gateway_defer_raises_park_and_skips_provider() -> None:
     from ctx_weft.core.loop.driver import LoopContext, LoopState
     from ctx_weft.core.loop.park import HitlPark
     from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-    from ctx_weft.protocols import MemoryScope, ProviderContext
+    from ctx_weft.protocols import MemoryAddress, ProviderContext
     from ctx_weft.protocols.capability import (
         CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider)
     from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -64,7 +64,7 @@ async def test_gateway_defer_raises_park_and_skips_provider() -> None:
     agent = SimpleNamespace(id="agt_1", template_id="tmpl_a", session_id="s1")
     session = SimpleNamespace(id="s1", tenant_id="default")
     task = SimpleNamespace(id="tsk_1")
-    scope = MemoryScope(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope)
     ctx = LoopContext(assembler=None, llm=None, memory=InMemoryMemoryProvider(),
                       event_bus=InProcessEventBus(),
@@ -89,7 +89,7 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
     from ctx_weft.protocols import (
         LoopConfig,
         MemoryConfig,
-        MemoryScope,
+        MemoryAddress,
         ProviderContext,
     )
     from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
@@ -121,7 +121,7 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
         memory_config=MemoryConfig(),
         loop_config=LoopConfig(),
     )
-    scope = MemoryScope(session_id="s_park_1", task_id="tsk_park_1", agent_id="agt_p1")
+    scope = MemoryAddress(session_id="s_park_1", task_id="tsk_park_1", agent_id="agt_p1")
     state = LoopState(run_id="run_p1", session=session, task=task, agent=agent, scope=scope)
 
     # ── stub driver that raises HitlPark immediately ──────────────────────────

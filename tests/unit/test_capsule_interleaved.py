@@ -20,7 +20,7 @@ from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, _dispatch_ack
 from ctx_weft.core.state.models import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
@@ -33,14 +33,14 @@ def _ctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
 
 
-def _task_scope(task_id="t1", agent="ag1") -> MemoryScope:
+def _task_scope(task_id="t1", agent="ag1") -> MemoryAddress:
     """task 层 scope（含 task_id）。"""
-    return MemoryScope(session_id="s1", task_id=task_id, agent_id=agent)
+    return MemoryAddress(session_id="s1", task_id=task_id, agent_id=agent)
 
 
-def _agent_scope(agent="ag1") -> MemoryScope:
+def _agent_scope(agent="ag1") -> MemoryAddress:
     """agent 层 scope（task_id=None）。"""
-    return MemoryScope(session_id="s1", task_id=None, agent_id=agent)
+    return MemoryAddress(session_id="s1", task_id=None, agent_id=agent)
 
 
 def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:

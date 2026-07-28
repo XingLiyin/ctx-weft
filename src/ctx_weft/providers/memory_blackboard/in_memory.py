@@ -20,7 +20,7 @@ from ctx_weft.protocols import (
     MemoryProvider,
     MemoryProviderInfo,
     MemoryRecord,
-    MemoryScope,
+    MemoryAddress,
     ProviderContext,
     Subscription,
 )
@@ -179,7 +179,7 @@ class InMemoryMemoryProvider(MemoryProvider):
                 raise ValueError("SESSION view forbids task_id/agent_id")
 
     @staticmethod
-    def _address_match(stored: MemoryScope, address: MemoryAddress, scope: MemoryLayer) -> bool:
+    def _address_match(stored: MemoryAddress, address: MemoryAddress, scope: MemoryLayer) -> bool:
         if stored.session_id != address.session_id:
             return False
         if scope is MemoryLayer.TASK:
@@ -213,7 +213,7 @@ class InMemoryMemoryProvider(MemoryProvider):
 
     async def recall_recent(
         self,
-        scope: MemoryScope,
+        scope: MemoryAddress,
         types: list[MemoryEventType],
         limit: int,
         ctx: ProviderContext,
@@ -244,7 +244,7 @@ class InMemoryMemoryProvider(MemoryProvider):
 
     async def recall_recent_by_agent(
         self,
-        agent_scope: MemoryScope,
+        agent_scope: MemoryAddress,
         types: list[MemoryEventType],
         limit: int,
         ctx: ProviderContext,
@@ -281,7 +281,7 @@ class InMemoryMemoryProvider(MemoryProvider):
     async def recall_semantic(
         self,
         query: str,
-        scope: MemoryScope,
+        scope: MemoryAddress,
         top_k: int,
         ctx: ProviderContext,
     ) -> list[MemoryRecord]:
@@ -330,7 +330,7 @@ class InMemoryMemoryProvider(MemoryProvider):
 
     async def apply_compact(
         self,
-        scope: MemoryScope,
+        scope: MemoryAddress,
         summary: str,
         keep_last: int,
         ctx: ProviderContext,
@@ -455,7 +455,7 @@ class InMemoryMemoryProvider(MemoryProvider):
 
     async def count_recent(
         self,
-        scope: MemoryScope,
+        scope: MemoryAddress,
         types: list[MemoryEventType],
         ctx: ProviderContext,
     ) -> int:
@@ -488,7 +488,7 @@ class InMemoryMemoryProvider(MemoryProvider):
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _scope_key(self, scope: MemoryScope, tenant_id: str, layer: MemoryLayer) -> str:
+    def _scope_key(self, scope: MemoryAddress, tenant_id: str, layer: MemoryLayer) -> str:
         if layer is MemoryLayer.TASK:
             return f"{tenant_id}|{scope.session_id}|task|{scope.task_id or ''}"
         if layer is MemoryLayer.AGENT:

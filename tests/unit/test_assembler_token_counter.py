@@ -5,14 +5,14 @@ from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextRequest
 from ctx_weft.core.utils import estimate_tokens
-from ctx_weft.protocols import MemoryScope
+from ctx_weft.protocols import MemoryAddress
 
 
 def _request(counter=None):
     kw = {} if counter is None else {"token_counter": counter}
     return ContextRequest(
         purpose="act",
-        scope=MemoryScope(session_id="s", task_id="t", agent_id="a"),
+        scope=MemoryAddress(session_id="s", task_id="t", agent_id="a"),
         task=SimpleNamespace(id="t"),
         agent=SimpleNamespace(id="a"),
         session=SimpleNamespace(id="s"),

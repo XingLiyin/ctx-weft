@@ -60,7 +60,6 @@ from ctx_weft.protocols.memory import (
     MemoryProvider,
     MemoryProviderInfo,
     MemoryRecord,
-    MemoryScope,
     Subscription,
     layer_for_types,
 )
@@ -118,7 +117,6 @@ __all__ = [
     "KnowledgeProviderInfo",
     "KnowledgeQuery",
     # Memory
-    "MemoryAddress",
     "MemoryKind",
     "EVENT_LAYER",
     "CompactResult",
@@ -128,7 +126,7 @@ __all__ = [
     "MemoryProvider",
     "MemoryProviderInfo",
     "MemoryRecord",
-    "MemoryScope",
+    "MemoryAddress",
     "Subscription",
     "layer_for_types",
     # Template

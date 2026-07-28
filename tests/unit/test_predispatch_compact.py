@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
-from ctx_weft.protocols import MemoryEventType as T, MemoryScope  # noqa: F401
+from ctx_weft.protocols import MemoryEventType as T, MemoryAddress  # noqa: F401
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 
@@ -114,7 +114,7 @@ def _state(*, ratio, context_limit=1000, context_tokens=0, keep_last=2, compact_
         agent=agent,
         session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="t1"),
-        scope=MemoryScope(session_id="s1", task_id="t1", agent_id="agt1"),
+        scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="agt1"),
         transcript=[],
         sequence_counter=0,
         extra={"template": None, "bound_capabilities": []},

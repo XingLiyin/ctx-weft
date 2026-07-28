@@ -4,7 +4,7 @@ import pytest
 
 from ctx_weft.core.loop.steps.compact import demote_kept_capsules
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext
 
 pytestmark = pytest.mark.asyncio
 _BASE = datetime(2026, 7, 1, tzinfo=UTC)
@@ -16,10 +16,10 @@ def _pctx():
 
 async def test_demote_drops_body_and_thins_finish_pair():
     mem = InMemoryMemoryProvider()
-    scope = MemoryScope(session_id="s", task_id="root", agent_id="a")
+    scope = MemoryAddress(session_id="s", task_id="root", agent_id="a")
     # task 层 body 的 metadata["task_id"] 由 provider 据 ingest 时的 scope.task_id 回填
     # （_to_record 用 stored.event.scope.task_id 覆盖），故子任务 c1 的 body 须用 c1 自己的 scope 灌入。
-    c1_scope = MemoryScope(session_id="s", task_id="c1", agent_id="a")
+    c1_scope = MemoryAddress(session_id="s", task_id="c1", agent_id="a")
     # 同 agent 子任务 c1 的 rich 胶囊：task 层 body（含 c1 的 USER_PROMPT + 段摘要）
     await mem.ingest(MemoryEvent(type=T.USER_PROMPT, scope=c1_scope, content="c1 请求",
                                  timestamp=_BASE, role="user", metadata={}), _pctx())

@@ -10,7 +10,7 @@ import ctx_weft.core.runtime as rt_mod
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 
@@ -46,7 +46,7 @@ async def _seed_finish_pair(memory: InMemoryMemoryProvider, session: Session, ta
     from datetime import UTC, datetime
 
     tcid = "tc_finish_1"
-    scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=agent_id)
+    scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent_id)
     pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id, task_id=task.id, agent_id=agent_id)
     await memory.ingest(
         MemoryEvent(
@@ -131,7 +131,7 @@ async def test_relaunch_is_best_effort_swallows_errors(minimal_runtime_with_sess
 
 async def test_find_finish_pair_tool_call_id_found_and_none():
     _, session, _, _, task, agent_id, memory = _make_runtime_and_session()
-    scope = MemoryScope(session_id=session.id, task_id=task.id, agent_id=agent_id)
+    scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent_id)
     pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id, task_id=task.id, agent_id=agent_id)
 
     from ctx_weft.core import CtxWeftRuntime

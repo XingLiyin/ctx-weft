@@ -22,7 +22,7 @@ from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import (
-    LLMMessage, MemoryEventType, MemoryScope, ProviderContext, ToolCall,
+    LLMMessage, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
@@ -42,7 +42,7 @@ def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
         interaction_mode=interaction_mode, settings=NormalTaskSettings(),
     )
     agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
-    scope = MemoryScope(session_id="s1", task_id="t1", agent_id="ag1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     # composer 形态：guidance 已拼在末条 user 尾部（ActStep 不再自行注入）。
     guidance = build_act_guidance(task, None)
     prompt = AssembledPrompt(
