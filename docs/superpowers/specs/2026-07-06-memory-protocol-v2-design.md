@@ -78,6 +78,7 @@ class MemoryEvent:
     address: MemoryAddress        # 归档地址（全址，per-scope 必填字段见 §4 ingest 不变量）
     content: str | list[ContentPart]
     timestamp: datetime           # 框架可回锚（如 dispatch 框锚 started_at）；provider 稳定排序
+    id: str | None = None         # 调用方预生成 record id（2026-07-27 增补，见 §4）；None=provider 生成
     role: Literal["user", "assistant", "tool"] | None = None   # 仅 CONVERSATION_TURN 有意义
     topic: str | None = None      # 仅 PUBLICATION 有意义
     causation_id: str | None = None
@@ -114,6 +115,14 @@ async def ingest(event: MemoryEvent, ctx) -> str
   AGENT-scoped 必须携 agent_id（task_id 可留作 provenance 回显，不参与过滤）；
   SESSION-scoped 仅 session_id。
 - PUBLICATION 特例：同 topic 旧发布标 superseded（覆盖语义，沿现状）。
+- **调用方预生成 record id（2026-07-27 增补）**：`MemoryEvent.id` 给定时 provider 必须采用
+  并原样回显；**按 id 幂等**——ingest 已存在的 id = no-op（返回该 id，不比对内容、不重复
+  写入、不推进任何计数器），id 即身份。None → provider 自行生成（v1 行为，迁移期调用点
+  零改动）。动机：为「memory = 事件投影」预留——事件日志携带 record id 后，崩溃恢复的
+  尾部重放天然幂等，全量重建时 fold 事件的 supersede_ids 引用保持稳定。选显式携带而非
+  「id 派生自 event id」：fold 的 replacements 可多条（finish 对替换为 2 条），派生方案
+  需要写侧/重建侧共享后缀编码规则，隐式约定违背本设计「结构化取代约定」的原则。
+  replacements 同为 MemoryEvent，自动获得同一能力。
 
 ```python
 async def fold(supersede_ids: list[str], replacements: list[MemoryEvent], ctx) -> list[str]
@@ -213,6 +222,7 @@ provider 查询侧：kinds → type 字符串集合的别名展开表
 | supersede + apply_compact | fold(ids, replacements) 原子原语 | 策展政策上移框架；修徒手 supersede+ingest 的崩溃丢摘要窗口 |
 | CompactResult | 删除 | 随 apply_compact 消亡 |
 | metadata["task_id"] 来源打标 | MemoryRecord.address 回显 | 结构化取代约定 |
+| ingest id 恒由 provider 生成 | MemoryEvent.id 可选预生成、按 id 幂等 | 投影化前置：重放去重 + fold 引用稳定（2026-07-27） |
 | legacy_dispatch.py 专用 shim | 并入统一归一化模块 | 全仓一处认识旧词汇 |
 
 方法数 11 → 8；provider 实现净变薄（postgres 删 `_scope_layer_filter` 分组与 count 查询，

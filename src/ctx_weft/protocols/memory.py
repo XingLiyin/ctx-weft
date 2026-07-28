@@ -142,6 +142,9 @@ class MemoryEvent:
     content: str | list[ContentPart]
     timestamp: datetime
     # 以下字段有默认值
+    # 调用方预生成 record id（v2 设计 §4 · 2026-07-27 增补，投影化前置）。
+    # 给定 → provider 必须采用并按 id 幂等（重复 ingest = no-op）；None → provider 生成。
+    id: str | None = None
     role: Literal["user", "assistant", "system", "tool"] | None = None
     topic: str | None = None  # 用于 topic-style 事件（含父子 task 通信）
     causation_id: str | None = None  # 关联上游 event
@@ -220,6 +223,10 @@ class MemoryProvider(Protocol):
 
         core 调用方必须为每个重要事件调用 ingest；provider 自由决定是否持久化、
         如何索引。
+
+        id 契约（v2 设计 §4 · 2026-07-27 增补）：event.id 给定时必须采用并原样回显，
+        且**按 id 幂等**——已存在的 id（含已 superseded）= no-op，返回该 id，不比对
+        内容、不重复写入、不推进任何计数器。None → provider 自行生成。
         """
         ...
 

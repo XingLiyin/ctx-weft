@@ -56,8 +56,14 @@ class InMemoryMemoryProvider(MemoryProvider):
         ctx: ProviderContext,
     ) -> str:
         async with self._lock:
-            self._next_id += 1
-            event_id = f"mev_{self._next_id:08d}"
+            if event.id is not None:
+                # id 契约：已存在（含 superseded）= no-op，不比对内容、不推进计数器
+                if any(s.id == event.id for s in self._events):
+                    return event.id
+                event_id = event.id
+            else:
+                self._next_id += 1
+                event_id = f"mev_{self._next_id:08d}"
 
             layer = EVENT_LAYER[event.type]
             scope_key = self._scope_key(event.scope, ctx.tenant_id, layer)
