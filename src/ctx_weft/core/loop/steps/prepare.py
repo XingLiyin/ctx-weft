@@ -244,11 +244,11 @@ class PrepareStep(Step):
             try:
                 recent = await ctx.memory.recall_recent(
                     scope=state.scope,
+                    # v2 P1（2026-07-27）：剔除死类型 OBSERVER_SUMMARY / COMPACT_SUMMARY
+                    # （写侧已死；且与 act._account_tokens 的 context_message_count 口径对齐）。
                     types=[
                         MemoryEventType.USER_PROMPT,
                         MemoryEventType.LLM_RESPONSE,
-                        MemoryEventType.OBSERVER_SUMMARY,
-                        MemoryEventType.COMPACT_SUMMARY,
                     ],
                     limit=10000,
                     ctx=ctx.provider_ctx,

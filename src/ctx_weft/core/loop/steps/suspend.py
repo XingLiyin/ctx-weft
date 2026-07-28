@@ -51,17 +51,8 @@ class SuspendStep(Step):
         else:
             summary = "Agent suspended, awaiting sub-task completion."
 
-        await ctx.memory.ingest(
-            MemoryEvent(
-                type=MemoryEventType.OBSERVER_SUMMARY,
-                scope=state.scope,
-                content=summary,
-                timestamp=now_utc(),
-                role="assistant",
-                metadata={"task_id": task.id, "outcome": "suspended"},
-            ),
-            ctx.provider_ctx,
-        )
+        # v2 P1（2026-07-27）：不再写 OBSERVER_SUMMARY（不进装配的死写点）；
+        # summary 仅进 TASK_SUSPENDED 事件 payload。
 
         # task.status is already "SUSPENDED" — set by the control tool function body
         events.append(make_event(

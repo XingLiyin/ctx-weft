@@ -175,47 +175,13 @@ async def _flush_tracking_memory(
     session_id: str,
     tenant_id: str,
 ) -> None:
-    """把 agent.tracking_task_ids 中的前序任务结果写入 memory，写完后标记已拉取。"""
-    pending = [tid for tid in agent.tracking_task_ids if tid not in agent.fetched_tracking_ids]
-    if not pending:
-        return
+    """标记 tracking 任务已拉取（记账保留）。
 
-    from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope
-    from ctx_weft.protocols.context import ProviderContext
-
-    scope = MemoryScope(session_id=session_id, task_id=task.id, agent_id=agent.id)
-    provider_ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
-
-    for tid in pending:
-        tracked = task_manager.get_task(tid)
-        if tracked is None:
-            agent.fetched_tracking_ids.add(tid)
-            continue
-        result = ""
-        if isinstance(tracked.outputs, list):
-            result = next(
-                (p.get("text", "") for p in tracked.outputs if isinstance(p, dict) and p.get("type") == "text"),
-                "",
-            )
-        elif isinstance(tracked.outputs, str):
-            result = tracked.outputs
-        report = tracked.task_summary or tracked.process_report or ""
-        if result or report:
-            content = f"sub-task '{tracked.title}' completed. \nresult:{result} \nprocess report:{report}"
-            try:
-                await memory.ingest(
-                    MemoryEvent(
-                        type=MemoryEventType.OBSERVER_SUMMARY,
-                        scope=scope,
-                        content=content,
-                        timestamp=now_utc(),
-                        role="assistant",
-                        metadata={"task_id": tid, "outcome": tracked.status.lower()},
-                    ),
-                    provider_ctx,
-                )
-            except Exception:
-                logger.exception("Failed to flush tracking task %s into agent %s memory", tid, agent.id)
+    v2 P1（2026-07-27）：OBSERVER_SUMMARY 写点已死——该类型不进装配，只污染计数/估算口径；
+    前序任务结果自 Phase 3 起经 memory recall（inherit/recall）与 observe cue 到达。
+    本函数仅保留 fetched_tracking_ids 记账，签名不变（memory/task_manager 参数暂留待日落）。
+    """
+    for tid in agent.tracking_task_ids:
         agent.fetched_tracking_ids.add(tid)
 
 

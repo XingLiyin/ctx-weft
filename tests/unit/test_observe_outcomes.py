@@ -244,17 +244,20 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_tracking_report_uses_task_summary():
-    """_flush_tracking_memory 应用 task_summary（若有）而非 process_report。"""
+async def test_tracking_flush_writes_no_memory():
+    """v2 P1：_flush_tracking_memory 只记账（fetched 标记），不再写任何 memory 记录。
+
+    旧行为（写 OBSERVER_SUMMARY，body 用 task_summary）已死——该类型不进装配；
+    前序结果经 memory recall / observe cue 到达。
+    """
     from types import SimpleNamespace
     from ctx_weft.core.runtime import _flush_tracking_memory
-    from ctx_weft.protocols import MemoryEventType, MemoryScope
+    from ctx_weft.protocols import MemoryScope
     from ctx_weft.protocols.context import ProviderContext
     from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
     mem = InMemoryMemoryProvider()
 
-    # 前序 tracked 任务：有 task_summary 和 process_report
     tracked_task = SimpleNamespace(
         id="tracked1",
         title="子任务标题",
@@ -263,11 +266,7 @@ async def test_tracking_report_uses_task_summary():
         process_report="本段 recap",
         status="FINISHED",
     )
-
-    # 执行中的主任务（依赖 tracking）
     main_task = SimpleNamespace(id="main_task", session_id="s1")
-
-    # agent 正在追踪 tracked1
     agent = SimpleNamespace(
         id="agent1",
         tracking_task_ids=["tracked1"],
@@ -278,9 +277,6 @@ async def test_tracking_report_uses_task_summary():
         def get_task(self, tid):
             return tracked_task if tid == "tracked1" else None
 
-    scope = MemoryScope(session_id="s1", task_id="main_task", agent_id="agent1")
-    pctx = ProviderContext(session_id="s1", tenant_id="default")
-
     await _flush_tracking_memory(
         agent=agent,
         task=main_task,
@@ -290,8 +286,5 @@ async def test_tracking_report_uses_task_summary():
         tenant_id="default",
     )
 
-    records = await mem.recall_recent(scope, [MemoryEventType.OBSERVER_SUMMARY], 10, pctx)
-    assert records, "OBSERVER_SUMMARY not ingested"
-    body = records[0].content
-    assert "综合 report" in body, f"task_summary missing from body: {body!r}"
-    assert "本段 recap" not in body, f"process_report leaked into body: {body!r}"
+    assert agent.fetched_tracking_ids == {"tracked1"}
+    assert mem._events == [], "flush 不应再写任何 memory 记录"

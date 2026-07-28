@@ -304,7 +304,6 @@ async def _account_tokens(state: LoopState, ctx: LoopContext, usage: LLMUsage) -
                 types=[
                     MemoryEventType.USER_PROMPT,
                     MemoryEventType.LLM_RESPONSE,
-                    MemoryEventType.OBSERVER_SUMMARY,
                 ],
                 ctx=ctx.provider_ctx,
             )
