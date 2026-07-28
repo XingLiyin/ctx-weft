@@ -16,17 +16,30 @@ from ctx_weft.protocols import MemoryScope
 
 
 class _FakeMem:
+    """v2：retry 段折经 segment_fold → load_view + fold；applied 记 (layer, summary, keep_last)。"""
+
     def __init__(self, count):
         self._count = count
         self.applied = []  # (layer, summary, keep_last)
 
-    async def count_recent(self, scope, types, ctx):
-        return self._count
+    async def load_view(self, address, scope, ctx, kinds=None):
+        from datetime import datetime, timezone
+        from ctx_weft.protocols import MemoryKind, MemoryLayer, MemoryRecord
+        if scope is not MemoryLayer.TASK or self._count <= 0:
+            return []
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return [
+            MemoryRecord(id="up", type=None, content="u", timestamp=t0, role="user",
+                         kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK),
+            MemoryRecord(id="a1", type=None, content="x",
+                         timestamp=t0.replace(minute=1), role="assistant",
+                         kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK),
+        ]
 
-    async def apply_compact(self, scope, summary, keep_last, ctx, layer, protect_types=(),
-                            since_last=None):
-        self.applied.append((layer.value, summary, keep_last))
-        return SimpleNamespace(events_before=10, events_after=keep_last, summary_event_id="s1")
+    async def fold(self, supersede_ids, replacements, ctx):
+        for ev in replacements:
+            self.applied.append((ev.layer.value, ev.content, ev.metadata.get("keep_last", 0)))
+        return [f"s{i+1}" for i in range(len(replacements))]
 
 
 def _state(exit_reason, process_report):

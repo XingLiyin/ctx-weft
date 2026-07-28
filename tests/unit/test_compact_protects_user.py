@@ -207,8 +207,12 @@ def _ctx(mem: InMemoryMemoryProvider) -> SimpleNamespace:
     )
 
 
-async def test_fold_retry_segment_passes_protect_types_and_user_prompts_survive():
-    """_fold_retry_segment must pass protect_types=(USER_PROMPT,) and USER_PROMPs must survive."""
+async def test_fold_retry_segment_protects_user_prompts():
+    """retry 段折经 segment_fold（v2 P3c 策展上移）：user 回合必须幸存、段摘要必须产出。
+
+    旧断言检查 apply_compact 的 protect_types 传参（实现耦合）；protect 政策现内置于
+    框架侧 segment_fold，改为纯行为断言。
+    """
     mem = _SpyProvider()
     await _seed_events(mem)
 
@@ -216,14 +220,6 @@ async def test_fold_retry_segment_passes_protect_types_and_user_prompts_survive(
     verdict = Verdict(task_outcome="retry", act_recap="段摘要", reported=True)
 
     await ObserveStep()._fold_retry_segment(_state("max_turns"), _ctx(mem), verdict, events)
-
-    # Verify protect_types was passed
-    task_calls = [c for c in mem.compact_calls if c["layer"] is MemoryLayer.TASK]
-    assert task_calls, "No apply_compact call for task layer"
-    call = task_calls[0]
-    assert MemoryEventType.USER_PROMPT in call["protect_types"], (
-        f"protect_types=(USER_PROMPT,) NOT passed to apply_compact: {call['protect_types']}"
-    )
 
     # Verify behavioral outcome: both USER_PROMPs survive
     up_contents = await _active_contents(mem, [MemoryEventType.USER_PROMPT])

@@ -469,17 +469,11 @@ class ObserveStep(Step):
                 state.task.id,
             )
             return
-        result = await ctx.memory.apply_compact(
-            scope=state.scope,
-            summary=summary,
-            keep_last=0,
-            ctx=ctx.provider_ctx,
-            layer=MemoryLayer.TASK,
-            protect_types=(MemoryEventType.USER_PROMPT,
-                           MemoryEventType.TASK_COMPACT_SUMMARY),
-            # 段作用域（2026-07-21，与 bg 段折同门）：只折当前段（末条 UP 之后），
-            # 短段免折残留的前段 raw 不跨段合折。
-            since_last=MemoryEventType.USER_PROMPT,
+        # v2 P3c：策展上移——段作用域折叠（只折当前段、护 user 回合与既有摘要、
+        # 锚点/段尾语义）由框架侧 segment_fold 执行原子 fold（与 bg 段折同门）。
+        from ctx_weft.core.loop.steps.segment_fold import segment_fold
+        result = await segment_fold(
+            ctx.memory, state.scope, MemoryLayer.TASK, summary, ctx.provider_ctx,
         )
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "events_before": result.events_before,

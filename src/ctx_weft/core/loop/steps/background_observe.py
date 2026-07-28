@@ -286,34 +286,15 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                         # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。
                         _close_report[state.task.id] = (act_recap, task_summary)  # 不写 memory（不变量 3）
                 else:
-                    await ctx.memory.apply_compact(
-                        scope=state.scope,
-                        summary=act_recap,
-                        keep_last=0,
-                        ctx=ctx.provider_ctx,
-                        layer=MemoryLayer.TASK,
-                        # 同时护 TASK_COMPACT_SUMMARY：多段交互（多轮 plain_text）各产一段胶囊须累积，
-                        # 否则后一段折会 supersede 前一段摘要（前段丢失）、且新摘要锚到 UP 前 1μs 抢占前段
-                        # 位置。与 observe._fold_retry_segment 的 protect_types 一致。
-                        protect_types=(MemoryEventType.USER_PROMPT,
-                                       MemoryEventType.TASK_COMPACT_SUMMARY),
-                        # 段作用域（2026-07-21）：只折当前段（末条 UP 之后）。短段免折残留的
-                        # 前段 raw 永久保 raw（「短 → 原文成胶囊」），不被跨段合折——否则合并
-                        # 摘要会锚到前一条 UP 之前，UP 失去回答位、时序倒置。
-                        since_last=MemoryEventType.USER_PROMPT,
+                    # v2 P3c：策展上移——段作用域折叠（护 user 回合与既有段摘要、锚点/
+                    # 段尾语义，与 observe._fold_retry_segment 同门）由框架侧 segment_fold
+                    # 执行原子 fold。旧 apply_compact 的 TypeError 协议错配特判随之消亡
+                    # （segment_fold 是框架内函数，签名错配不再是运行时 provider 风险）。
+                    from ctx_weft.core.loop.steps.segment_fold import segment_fold
+                    await segment_fold(
+                        ctx.memory, state.scope, MemoryLayer.TASK, act_recap,
+                        ctx.provider_ctx,
                     )
-            except TypeError:
-                # 契约错误（典型：provider 的 apply_compact 缺 since_last 参数/签名过旧）。
-                # 与运行时故障同降级（段保 raw、不抛），但 ERROR 显式指出协议不匹配——
-                # 静默吞掉曾让 provider 不兼容运行数日无人察觉（spec 2026-07-21）。
-                if boundary in _CLOSE_BOUNDARIES:
-                    pop_close_synth(state.task.id)
-                logger.error(
-                    "background observe contract error: apply_compact 协议不匹配"
-                    "（provider 缺 since_last 参数或签名过旧？见 spec 2026-07-21）; "
-                    "segment kept raw (task=%s boundary=%s)",
-                    state.task.id, boundary, exc_info=True,
-                )
             except Exception:
                 # close 边界防泄漏：finalize 可能已 register_close_synth，本次失败后永远无人
                 # 消费（task_id 唯一 + close 单入口），弹掉——与「无可用报告」分支对称。

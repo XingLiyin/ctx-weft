@@ -566,10 +566,13 @@ async def test_dispatch_recap_completes_benignly_after_cancel(monkeypatch, fake_
 
 
 @pytest.mark.asyncio
-async def test_apply_compact_typeerror_logs_error_and_keeps_raw(
+async def test_segment_fold_failure_keeps_raw_and_does_not_raise(
         monkeypatch, caplog, fake_state_ctx):
-    """契约错误（provider 缺 since_last → TypeError）：ERROR 日志显式指出协议不匹配，
-    段保 raw 降级、不抛——与运行时故障同降级，但第一次折叠即可从日志发现（spec 2026-07-21）。"""
+    """段折运行时故障（v2：segment_fold 抛异常）：段保 raw 降级、不抛（fire-and-forget）。
+
+    旧的 apply_compact TypeError 协议错配特判随策展上移消亡——segment_fold 是框架内函数，
+    签名错配不再是 provider 运行时风险；只保留通用故障降级契约。
+    """
     import logging
 
     state, ctx = fake_state_ctx  # task 层预置 [UP, LLM, TOOL]
@@ -578,23 +581,20 @@ async def test_apply_compact_typeerror_logs_error_and_keeps_raw(
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
 
-    async def legacy_apply_compact(*args, **kwargs):
-        raise TypeError("apply_compact() got an unexpected keyword argument 'since_last'")
+    async def boom(*args, **kwargs):
+        raise RuntimeError("fold backend down")
 
-    monkeypatch.setattr(ctx.memory, "apply_compact", legacy_apply_compact)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.segment_fold.segment_fold", boom)
 
     with caplog.at_level(logging.ERROR, logger="ctx_weft.core.loop.steps.background_observe"):
         t = bo.launch_background_observe(state, ctx, boundary="plain_text")
         await t
 
-    assert t.exception() is None, "契约错误不得抛出（fire-and-forget 降级）"
+    assert t.exception() is None, "运行时故障不得抛出（fire-and-forget 降级）"
     from ctx_weft.protocols import MemoryEventType as MT
     recs = await ctx.memory.recall_recent(
         state.scope, [MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
-    assert recs == [], "契约错误不得写摘要"
+    assert recs == [], "故障不得写摘要"
     raw = await ctx.memory.recall_recent(
         state.scope, [MT.LLM_RESPONSE], 100, ctx.provider_ctx)
     assert raw, "段必须保 raw"
-    err_msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
-    assert any("apply_compact" in m and "协议" in m for m in err_msgs), \
-        f"ERROR 日志须显式指出 apply_compact 协议不匹配，实得: {err_msgs}"
