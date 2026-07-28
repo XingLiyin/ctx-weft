@@ -133,6 +133,12 @@ class MemoryScope:
     agent_id: str | None = None
 
 
+# v2 正名（设计 §3 · P2a 起）：它是坐标不是范围——全址 = ingest 归档地址，
+# 半址 = load_view 过滤模式。P4 完成实体互换（类本体改名 MemoryAddress、
+# "MemoryScope" 让位给归属范围枚举）；过渡期两名同指此类。
+MemoryAddress = MemoryScope
+
+
 @dataclass
 class MemoryEvent:
     """ingest 的输入：一条要写入的 memory 事件。"""
