@@ -79,8 +79,10 @@ async def _find_dispatch_frame(memory, parent_scope, task, provider_ctx):
     供 `_ensure_dispatch_frame`（find+create）与 `synthesize_cancel_closure`（find-only，
     born-cancel 未铸框时整体跳过、不补铸）共用。
     """
-    existing = await memory.recall_recent(
-        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, provider_ctx)
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+    existing = await memory.load_view(
+        MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
+        MemoryLayer.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     frame = next(
         (r for r in existing
          if r.role == "assistant"
@@ -160,8 +162,10 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
       同一 tool_call_id 若有两条 active result，reorder_tool_results_after_calls 会把两条
       都排到框之后，于是「在跑」和「已完成」并列出现。
     """
-    recs = await memory.recall_recent(
-        parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, provider_ctx)
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+    recs = await memory.load_view(
+        MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
+        MemoryLayer.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     stale = [r.id for r in recs
              if r.role == "tool" and r.metadata.get("tool_call_id") == task.origin_tool_call_id]
     if stale:
@@ -264,12 +268,18 @@ async def _is_short_leaf(memory, scope, task, loop_config, ctx, has_descendants:
     """叶子(无后代) 且 对话 token ≤ threshold 且 LLM_RESPONSE 轮次 ≤ turn_cap → short。"""
     if has_descendants:
         return False  # 非叶（委派过子任务）永不 short
-    n_assistant = await memory.count_recent(
-        scope, [MemoryEventType.LLM_RESPONSE], ctx.provider_ctx,
+    from ctx_weft.protocols import MemoryKind, MemoryLayer
+    # v2 P3a：全 task 层视图（对话+摘要+audit = 旧 _OWN_CONV_TYPES 五类型）一次取回，
+    # assistant 轮次与 token 估算共用。
+    records = await memory.load_view(
+        scope, MemoryLayer.TASK, ctx.provider_ctx,
+        kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT])
+    n_assistant = sum(
+        1 for r in records
+        if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "assistant"
     )
     if n_assistant > loop_config.short_task_turn_cap:
         return False
-    records = await memory.recall_recent(scope, _OWN_CONV_TYPES, 2000, ctx.provider_ctx)
     text = " ".join(
         content_to_text(r.content) if not isinstance(r.content, str) else r.content
         for r in records
@@ -314,12 +324,16 @@ async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
     补删（background_observe close 回调）。**不另产新 TASK_COMPACT_SUMMARY**（避免与 finish
     对重复）。幂等：raw 已删则 no-op。
     """
-    records = await memory.recall_recent(
-        scope, [*_FINAL_RAW_TYPES, MemoryEventType.USER_PROMPT], 2000, provider_ctx)
-    ids = []  # newest-first 迭代，遇到第一条 UP 即达段界
-    for r in records:
-        if r.type is MemoryEventType.USER_PROMPT:
-            break
+    from ctx_weft.protocols import MemoryKind, MemoryLayer
+    # v2 P3a：升序视图（对话 + audit，SUMMARY 锚点天然不在），段界 = 末条 role=user 回合。
+    view = await memory.load_view(
+        scope, MemoryLayer.TASK, provider_ctx,
+        kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT])
+    ids: list[str] = []
+    for r in view:
+        if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user":
+            ids = []  # 新段界：只删末段
+            continue
         ids.append(r.id)
     if ids:
         await memory.supersede(ids, provider_ctx)

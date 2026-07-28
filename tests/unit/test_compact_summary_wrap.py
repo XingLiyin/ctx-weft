@@ -91,11 +91,9 @@ async def test_agent_recall_heading_only_for_current_task_summary():
     other = _rec_task(T.TASK_COMPACT_SUMMARY, "别的task进度Y", task_id="t_other")
 
     class _M:
-        async def recall_recent(self, scope, types, limit, ctx):
-            return []
-
-        async def recall_recent_by_agent(self, agent_scope, types, limit, ctx):
-            return [cur, other]
+        async def load_view(self, address, scope, ctx, kinds=None):
+            from ctx_weft.protocols import MemoryLayer
+            return [cur, other] if scope is MemoryLayer.TASK else []
 
     deps = SimpleNamespace(memory=_M(),
                            provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
@@ -109,40 +107,43 @@ async def test_agent_recall_heading_only_for_current_task_summary():
 
 
 class _Mem:
-    def __init__(self, recs): self._recs = recs
-    async def recall_recent(self, scope, types, limit, ctx): return self._recs
-    async def recall_recent_by_agent(self, agent_scope, types, limit, ctx): return []
+    """v2 fake：load_view 按 provider 契约返回 kind 已重打的记录。"""
+    def __init__(self, agent_recs): self._agent_recs = agent_recs
+    async def load_view(self, address, scope, ctx, kinds=None):
+        from ctx_weft.protocols import MemoryLayer
+        return self._agent_recs if scope is MemoryLayer.AGENT else []
 
 
 @pytest.mark.asyncio
 async def test_agent_compact_summary_rendered_wrapped():
+    from ctx_weft.protocols import MemoryKind, MemoryLayer
     rec = _rec(T.AGENT_COMPACT_SUMMARY, "### 既往派发摘要\nY")
+    rec.kind, rec.layer = MemoryKind.SUMMARY, MemoryLayer.AGENT  # provider 契约：kind 已重打
     deps = SimpleNamespace(memory=_Mem([rec]), provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
-    req = SimpleNamespace(scope=SimpleNamespace(), token_counter=estimate_tokens)
+    req = SimpleNamespace(scope=MemoryScope(session_id="s1", agent_id="a1"),
+                          token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     summ = [b for b in blocks if b.metadata.get("type") == T.AGENT_COMPACT_SUMMARY]
     assert summ and summ[0].content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
 
 
 @pytest.mark.asyncio
-async def test_agent_layer_recall_not_count_capped():
-    """agent 层召回不设小条数上限（体量交给 token 守卫）：否则滚动 AGENT_COMPACT_SUMMARY
-    锚在最早、被条数窗截出 → 再折时总结看不到旧摘要 → 丢经验。"""
-    from ctx_weft.core.assembler.sources.agent_recall import _AGENT_TYPES, _RECALL_ALL
-
-    seen = {}
+async def test_agent_layer_recall_uses_uncapped_load_view():
+    """agent 层召回走 load_view 全量幸存视图（协议无 limit 参数，v2 §4）：体量交给 token
+    守卫，不按条数截断——否则滚动 AGENT_COMPACT_SUMMARY（锚在最早）会被截出窗、丢经验。"""
+    calls = []
 
     class _SpyMem:
-        async def recall_recent(self, scope, types, limit, ctx):
-            if list(types) == list(_AGENT_TYPES):
-                seen["limit"] = limit
-            return []
-
-        async def recall_recent_by_agent(self, agent_scope, types, limit, ctx):
+        async def load_view(self, address, scope, ctx, kinds=None):
+            from ctx_weft.protocols import MemoryLayer
+            if scope is MemoryLayer.AGENT:
+                calls.append({"address": address, "kinds": kinds})
             return []
 
     deps = SimpleNamespace(memory=_SpyMem(),
                            provider_ctx=ProviderContext(session_id="s1", tenant_id="default"))
-    req = SimpleNamespace(scope=SimpleNamespace(), token_counter=estimate_tokens)
+    req = SimpleNamespace(scope=MemoryScope(session_id="s1", agent_id="a1"),
+                          token_counter=estimate_tokens)
     _ = [b async for b in AgentRecallSource().fetch(req, deps)]
-    assert seen.get("limit") == _RECALL_ALL, "agent 层召回须全召回，不按条数截断"
+    assert calls, "agent 层召回须经 load_view（全量幸存、无条数上限）"
+    assert calls[0]["kinds"] is None, "默认 kinds（CONVERSATION_TURN+SUMMARY）——不得窄化漏摘要"

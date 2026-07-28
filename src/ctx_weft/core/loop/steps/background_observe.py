@@ -74,14 +74,19 @@ async def is_short_segment(state: "LoopState", ctx: "LoopContext") -> bool:
     threshold = getattr(state.agent.loop_config, "short_segment_token_threshold", 0)
     if threshold <= 0:
         return False
-    records = await ctx.memory.recall_recent(
-        state.scope, [*_SEGMENT_RAW_TYPES, MemoryEventType.USER_PROMPT], 2000,
-        ctx.provider_ctx,
+    from ctx_weft.protocols import MemoryKind, MemoryLayer
+
+    # v2 P3a：TASK 视图（对话 + audit，无 SUMMARY——旧类型清单不含段摘要）升序；
+    # 段界 = 末条 role=user 回合，其后即当前段 raw。
+    view = await ctx.memory.load_view(
+        state.scope, MemoryLayer.TASK, ctx.provider_ctx,
+        kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT],
     )
-    seg_records = []  # newest-first 迭代，遇到第一条 UP 即达段界
-    for r in records:
-        if r.type is MemoryEventType.USER_PROMPT:
-            break
+    seg_records: list = []
+    for r in view:
+        if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user":
+            seg_records = []  # 新段界：清空重计
+            continue
         seg_records.append(r)
     seg_text = " ".join(
         r.content if isinstance(r.content, str) else content_to_text(r.content)
@@ -118,10 +123,13 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
     title：归属 task 的标题，用于重建 tool 槽的 `[task: …]` 前缀（与 finalize 合成占位时同源，
     见 finalize._finish_report_prefix）。本函数整条重写 tool 槽，不传就会把占位里的归属标记抹掉。"""
     from ctx_weft.core.loop.steps.finalize import _finish_report_prefix
-    from ctx_weft.protocols import MemoryEvent, MemoryEventType
+    from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryLayer
     from ctx_weft.protocols.capability import qualify
 
-    turns = await memory.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 500, provider_ctx)
+    turns = await memory.load_view(
+        MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
+        MemoryLayer.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN],
+    )
     asst = [r for r in turns
             if r.role == "assistant" and r.metadata.get("origin_task_id") == task_id
             and any(tc.get("id") == tool_call_id for tc in (r.metadata.get("tool_calls") or []))]
@@ -186,9 +194,13 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
             # 崩溃前已折叠（raw 被 supersede），再折会产冗余胶囊 → 跳过（finally 仍发 DONE）。
             # 正常运行时该段刚产生 raw、计数 > 0，护栏为 no-op。
             if boundary not in _CLOSE_BOUNDARIES:
-                n_raw = await ctx.memory.count_recent(
-                    state.scope, [MemoryEventType.LLM_RESPONSE], ctx.provider_ctx,
+                from ctx_weft.protocols import MemoryKind, MemoryLayer
+                view = await ctx.memory.load_view(
+                    state.scope, MemoryLayer.TASK, ctx.provider_ctx,
+                    kinds=[MemoryKind.CONVERSATION_TURN],
                 )
+                # 旧口径 = LLM_RESPONSE 计数 = assistant 回合
+                n_raw = sum(1 for r in view if r.role == "assistant")
                 if n_raw == 0:
                     logger.info(
                         "task recap re-fold guard: segment already folded (task=%s); skip",

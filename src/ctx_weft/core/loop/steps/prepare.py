@@ -242,18 +242,18 @@ class PrepareStep(Step):
 
         if guard.context_tokens > 0:
             try:
-                recent = await ctx.memory.recall_recent(
-                    scope=state.scope,
-                    # v2 P1（2026-07-27）：剔除死类型 OBSERVER_SUMMARY / COMPACT_SUMMARY
-                    # （写侧已死；且与 act._account_tokens 的 context_message_count 口径对齐）。
-                    types=[
-                        MemoryEventType.USER_PROMPT,
-                        MemoryEventType.LLM_RESPONSE,
-                    ],
-                    limit=10000,
-                    ctx=ctx.provider_ctx,
-                )
-                new_records = recent[:max(0, len(recent) - guard.context_message_count)]
+                from ctx_weft.protocols import MemoryKind, MemoryLayer
+
+                # v2 P3a：TASK 视图 + user/assistant 回合谓词（= 旧 USER_PROMPT+LLM_RESPONSE
+                # 口径，与 act._account_tokens 的 context_message_count 对齐）。升序视图：
+                # 基线计数之后的即新增记录。
+                view = await ctx.memory.load_view(
+                    state.scope, MemoryLayer.TASK, ctx.provider_ctx)
+                convo = [
+                    r for r in view
+                    if r.kind is MemoryKind.CONVERSATION_TURN and r.role in ("user", "assistant")
+                ]
+                new_records = convo[guard.context_message_count:]
                 count = ctx.llm.tokenizer.count
                 delta = sum(_estimate_record_tokens(r, count) for r in new_records)
                 return guard.context_tokens + delta, True

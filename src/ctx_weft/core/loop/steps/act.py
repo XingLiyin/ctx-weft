@@ -299,17 +299,18 @@ async def _account_tokens(state: LoopState, ctx: LoopContext, usage: LLMUsage) -
     if usage.prompt_tokens > 0:
         agent.loop_guard.context_tokens = usage.prompt_tokens
         try:
-            agent.loop_guard.context_message_count = await ctx.memory.count_recent(
-                scope=state.scope,
-                types=[
-                    MemoryEventType.USER_PROMPT,
-                    MemoryEventType.LLM_RESPONSE,
-                ],
-                ctx=ctx.provider_ctx,
+            from ctx_weft.protocols import MemoryKind, MemoryLayer
+
+            # v2 P3a：len(视图谓词) 取代 count_recent（= 旧 USER_PROMPT+LLM_RESPONSE 口径，
+            # 与 prepare._estimate_tokens 对齐）。
+            view = await ctx.memory.load_view(state.scope, MemoryLayer.TASK, ctx.provider_ctx)
+            agent.loop_guard.context_message_count = sum(
+                1 for r in view
+                if r.kind is MemoryKind.CONVERSATION_TURN and r.role in ("user", "assistant")
             )
         except Exception as exc:
             # best-effort 计数：失败不影响主流程，但记 debug 便于排查（不静默吞）。
-            logger.debug("count_recent for loop_guard failed: %s", exc)
+            logger.debug("load_view count for loop_guard failed: %s", exc)
 
     # 累加 session.token_used（供 token_budget 检查使用）
     state.session.token_used += usage.prompt_tokens + usage.completion_tokens

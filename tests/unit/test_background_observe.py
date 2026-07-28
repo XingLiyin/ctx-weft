@@ -58,6 +58,26 @@ def _make_usage_chunk():
     )
 
 
+def _neutralize_refold_guard(monkeypatch, ctx) -> None:
+    """让重折幂等护栏恒放行（等价旧 count_recent→1 mock）。
+
+    新护栏走 load_view 数 assistant 回合；此处 mock 恒返回一条 assistant conversation
+    turn。流式已 mock，prompt 内容无关紧要。
+    """
+    from datetime import datetime, timezone
+    from ctx_weft.protocols import MemoryEventType as MT
+    from ctx_weft.protocols import MemoryKind, MemoryLayer, MemoryRecord
+
+    async def fake_load_view(address, scope, pctx, kinds=None):
+        return [MemoryRecord(
+            id="guard", type=MT.LLM_RESPONSE, content="x",
+            timestamp=datetime.now(timezone.utc), role="assistant",
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+        )]
+
+    monkeypatch.setattr(ctx.memory, "load_view", fake_load_view)
+
+
 class _FakeGateway:
     """Gateway that returns ControlResult(content=report_text) for collect_process_report."""
 
@@ -125,12 +145,8 @@ async def test_serialized_per_task(monkeypatch, fake_state_ctx):
         yield _make_usage_chunk()
         order.append("end")
 
-    async def mock_count_recent(scope, types, pctx):
-        # Return > 0 to ensure guard doesn't skip (normal path: raw count > 0)
-        return 1 if MemoryEventType.LLM_RESPONSE in types else 0
-
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", slow_stream)
-    monkeypatch.setattr(ctx.memory, "count_recent", mock_count_recent)
+    _neutralize_refold_guard(monkeypatch, ctx)
     t1 = bo.launch_background_observe(state, ctx, boundary="interrupt")
     t2 = bo.launch_background_observe(state, ctx, boundary="interrupt")
     await asyncio.gather(t1, t2)
@@ -163,12 +179,8 @@ async def test_await_pending_waits_for_latest_when_two_launched(monkeypatch, fak
         yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
         yield _make_usage_chunk()
 
-    async def mock_count_recent(scope, types, pctx):
-        # Return > 0 to ensure guard doesn't skip (normal path: raw count > 0)
-        return 1 if MemoryEventType.LLM_RESPONSE in types else 0
-
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", vary_speed)
-    monkeypatch.setattr(ctx.memory, "count_recent", mock_count_recent)
+    _neutralize_refold_guard(monkeypatch, ctx)
 
     t1 = bo.launch_background_observe(state, ctx, boundary="interrupt")
     t2 = bo.launch_background_observe(state, ctx, boundary="interrupt")
@@ -509,10 +521,12 @@ async def test_dispatch_boundary_refold_guard_skips(monkeypatch, fake_state_ctx)
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
 
-    async def zero_count(scope, types, pctx):
-        return 0
-
-    monkeypatch.setattr(ctx.memory, "count_recent", zero_count)
+    # 真实"已折过"状态：supersede 段内 raw（新护栏走 load_view 数 assistant 回合，
+    # 不再可经 count_recent mock 控制）
+    from ctx_weft.protocols import MemoryEventType as _MT
+    _raws = await ctx.memory.recall_recent(
+        state.scope, [_MT.LLM_RESPONSE], 100, ctx.provider_ctx)
+    await ctx.memory.supersede([r.id for r in _raws], ctx.provider_ctx)
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
 
     await bo.launch_background_observe(state, ctx, boundary="dispatch")

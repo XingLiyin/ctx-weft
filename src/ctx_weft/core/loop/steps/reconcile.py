@@ -54,17 +54,28 @@ class ReconcileStep(Step):
 
 
 async def _dangling_tool_calls(memory, scope, provider_ctx) -> list[dict]:
-    """最近一个 assistant turn 里，无对应 TOOL_RESULT 的 tool_call（按原顺序）。"""
-    responses = await memory.recall_recent(
-        scope=scope, types=[MemoryEventType.LLM_RESPONSE], limit=1, ctx=provider_ctx,
+    """最近一个 assistant turn 里，无对应 tool result 的 tool_call（按原顺序）。"""
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+
+    view = await memory.load_view(
+        MemoryAddress(session_id=scope.session_id, task_id=scope.task_id,
+                      agent_id=scope.agent_id),
+        MemoryLayer.TASK, provider_ctx,
     )
-    if not responses:
+    # 升序视图："最近一个 assistant turn" = 末条 role=assistant 的 CONVERSATION_TURN。
+    # 必须按 kind 排除 SUMMARY——task 层段摘要 role 同为 assistant（自述体），会被误认。
+    last_asst = next(
+        (r for r in reversed(view)
+         if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "assistant"),
+        None,
+    )
+    if last_asst is None:
         return []
-    tool_calls = responses[0].metadata.get("tool_calls") or []
+    tool_calls = last_asst.metadata.get("tool_calls") or []
     if not tool_calls:
         return []
-    results = await memory.recall_recent(
-        scope=scope, types=[MemoryEventType.TOOL_RESULT], limit=200, ctx=provider_ctx,
-    )
-    done_ids = {r.metadata.get("tool_call_id") for r in results}
+    done_ids = {
+        r.metadata.get("tool_call_id") for r in view
+        if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "tool"
+    }
     return [tc for tc in tool_calls if tc.get("id") not in done_ids]

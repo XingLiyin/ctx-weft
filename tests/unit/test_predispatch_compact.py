@@ -45,6 +45,22 @@ class _FakeMemory:
     async def recall_recent_by_agent(self, scope, types, limit, ctx):
         return []
 
+    async def load_view(self, address, scope, ctx, kinds=None):
+        # v2：AGENT 视图（root residue 查询）→ 空；TASK 视图 → 升序 user 回合
+        from ctx_weft.protocols import MemoryLayer
+        from ctx_weft.protocols.memory_compat import MemoryKind
+        if scope is MemoryLayer.AGENT:
+            return []
+        return [
+            SimpleNamespace(
+                id=str(i), type=T.USER_PROMPT, content=f"msg {i}", role="user",
+                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
+                address=None, metadata={},
+                timestamp=_BASE_DT + timedelta(seconds=i),
+            )
+            for i in range(self._task_count)
+        ]
+
     async def apply_compact(self, scope, summary, keep_last, ctx, layer, protect_types=()):
         # No longer called by _compact_scope; kept for interface completeness
         self.applied.append((layer.value, summary))

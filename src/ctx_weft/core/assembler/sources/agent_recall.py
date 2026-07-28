@@ -26,31 +26,16 @@ from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.assembler.sources._history import record_to_history_block, wrap_compact_summary
-from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
 from ctx_weft.core.utils import content_to_text, generate_id
-from ctx_weft.protocols import MemoryEventType
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
 
-# task 层 body 类型（ALL 未折叠 task，含已结束的；按 agent_id 跨 task 召回）
-# task-resident：body 不因 close 而 supersede，OPEN/CLOSED 由 task.status / finish 对判，不靠 supersession。
-_TASK_TYPES = [
-    MemoryEventType.USER_PROMPT,
-    MemoryEventType.LLM_RESPONSE,
-    MemoryEventType.TOOL_RESULT,
-    MemoryEventType.TASK_COMPACT_SUMMARY,
-]
-# agent 层对话 / 经验类型；前两个为 legacy（写侧已死），召回后经 normalize_legacy_dispatch 归一
-_AGENT_TYPES = [
-    MemoryEventType.TASK_DISPATCH,
-    MemoryEventType.TASK_DISPATCH_RESULT,
-    MemoryEventType.AGENT_COMPACT_SUMMARY,
-    MemoryEventType.AGENT_CONVERSATION_TURN,
-]
-
-# 召回全部未 superseded（体量边界由 close/compact 的 supersede + BudgetStrategy 负责，不在召回处截断）
-_RECALL_ALL = 2000
+# v2（P3a）：召回改 load_view——task 层 body = TASK 视图默认 kinds（CONVERSATION_TURN+SUMMARY，
+# 与旧 _TASK_TYPES 四类型等价）；agent 层 = AGENT 视图默认 kinds（覆盖旧 _AGENT_TYPES，legacy
+# dispatch 配对已在 normalize_view 内完成）。全量幸存、升序——体量边界由 close/compact 的
+# fold + BudgetStrategy 负责，不在召回处截断。
 
 
 class AgentRecallSource:
@@ -69,39 +54,36 @@ class AgentRecallSource:
     ) -> AsyncIterator["ContextBlock"]:
         from ctx_weft.core.assembler.assembler import ContextBlock
 
-        # ── 1) task 层 body：按 agent_id 跨 task 召回（ALL 未折叠 task，含已结束的） ──
-        task_records = await deps.memory.recall_recent_by_agent(
-            agent_scope=request.scope,
-            types=_TASK_TYPES,
-            limit=_RECALL_ALL,
-            ctx=deps.provider_ctx,
+        # ── 1) task 层 body：按 agent_id 跨 task 聚合（半址，显式 task_id=None）──
+        task_records = await deps.memory.load_view(
+            MemoryAddress(session_id=request.scope.session_id,
+                          agent_id=request.scope.agent_id),
+            MemoryLayer.TASK,
+            deps.provider_ctx,
         )
         # 当前 task 的段摘要冠 ## Progress So Far（record_to_history_block 按 task_id 匹配）；
         # 跨 task 胶囊不冠。current_task_id 取正在装配的 scope.task_id。
         current_task_id = getattr(request.scope, "task_id", None)
-        for idx, record in enumerate(reversed(task_records)):
+        for idx, record in enumerate(task_records):  # load_view 已升序（旧→新）
             yield record_to_history_block(
                 record, source="agent_recall", idx=idx, request=request, current_task_id=current_task_id
             )
 
         # ── 2) agent 层残留 / 经验 ──
-        # 全召回未 superseded（同 task 层）：体量交给 supersede + BudgetStrategy 的 token 守卫，
-        # 不在召回处按条数截断——否则滚动 AGENT_COMPACT_SUMMARY（锚在最早）会被截出窗、丢经验。
-        agent_records = await deps.memory.recall_recent(
-            scope=request.scope,
-            types=_AGENT_TYPES,
-            limit=_RECALL_ALL,
-            ctx=deps.provider_ctx,
+        # legacy dispatch 配对已在 load_view→normalize_view 内完成，此处只面对单一表示。
+        agent_records = await deps.memory.load_view(
+            MemoryAddress(session_id=request.scope.session_id,
+                          agent_id=request.scope.agent_id),
+            MemoryLayer.AGENT,
+            deps.provider_ctx,
         )
-        # §5.5：存量 legacy dispatch 对在读侧归一化成 conversation turn，下面统一走 conversation 渲染。
-        agent_records = normalize_legacy_dispatch(agent_records)
 
         summaries: list = []
         conversation: list = []
         for r in agent_records:
-            if r.type == MemoryEventType.AGENT_COMPACT_SUMMARY:
+            if r.kind is MemoryKind.SUMMARY:
                 summaries.append(r)
-            elif r.type == MemoryEventType.AGENT_CONVERSATION_TURN:
+            elif r.kind is MemoryKind.CONVERSATION_TURN:
                 conversation.append(r)
 
         def _ts(rec) -> str:
@@ -118,12 +100,12 @@ class AgentRecallSource:
                 content=text,
                 priority=slot_priority("history", "agent_compact_summary"),
                 token_estimate=request.token_counter(text),
-                metadata={"role": "user", "type": s.type, "timestamp": _ts(s),
+                metadata={"role": "user", "type": s.type or s.kind, "timestamp": _ts(s),
                           "seq_no": s.metadata.get("seq_no", 0)},
             )
 
-        # finish 对 + dispatch 对（均为 AGENT_CONVERSATION_TURN）统一按时序渲染：assistant 携
+        # finish 对 + dispatch 对（均为 agent 层 conversation turn）统一按时序渲染：assistant 携
         # tool_calls、tool 携 tool_call_id（record_to_history_block 据 role 无损重建）。悬空 tool_call
         # （在途 dispatch 尚无 result）由 llm_gateway 的 drop_dangling_tool_calls 兜底。
-        for idx, c in enumerate(reversed(conversation)):
+        for idx, c in enumerate(conversation):  # load_view 已升序
             yield record_to_history_block(c, source="agent_recall", idx=idx, request=request)
