@@ -70,75 +70,9 @@ async def _active_contents(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Level 1: Behavioral tests — apply_compact with protect_types=(USER_PROMPT,)
+# Level 1（v2 P4a 迁移注记）：provider apply_compact 的 keep_last=2 行为测试已删——
+# 该形态无生产消费者；user 回合保护/段作用域/锚点不变量由 tests/unit/test_segment_fold.py 锁定。
 # ─────────────────────────────────────────────────────────────────────────────
-
-async def test_apply_compact_protects_user_prompts():
-    """apply_compact with protect_types=(USER_PROMPT,) must not fold USER_PROMPT events.
-
-    Setup: [UP1, llm1, tool1, UP2, llm2] (5 events), keep_last=2.
-    With protect_types:
-      archivable = [llm1, tool1, llm2]; oldest 1 folded (llm1).
-    Expected:
-      - UP1 (原始) and UP2 (HITL) survive
-      - llm1 (想法1) is folded
-      - tool1 (结果1) and llm2 (想法2) survive (kept)
-      - TASK_COMPACT_SUMMARY is inserted
-    """
-    mem = InMemoryMemoryProvider()
-    await _seed_events(mem)
-
-    result = await mem.apply_compact(
-        scope=_scope(),
-        summary="段摘要",
-        keep_last=2,
-        ctx=_pctx(),
-        layer=MemoryLayer.TASK,
-        protect_types=(MemoryEventType.USER_PROMPT,),
-    )
-
-    assert result.events_before == 5
-
-    # Both USER_PROMPT events survive
-    up_contents = await _active_contents(mem, [MemoryEventType.USER_PROMPT])
-    assert "原始" in up_contents, f"'原始' UP folded — protect_types not honored: {up_contents}"
-    assert "HITL" in up_contents, f"'HITL' UP folded — protect_types not honored: {up_contents}"
-
-    # Oldest LLM_RESPONSE is folded
-    llm_contents = await _active_contents(mem, [MemoryEventType.LLM_RESPONSE])
-    assert "想法1" not in llm_contents, f"'想法1' was NOT folded: {llm_contents}"
-
-    # TASK_COMPACT_SUMMARY is created
-    summary_contents = await _active_contents(mem, [MemoryEventType.TASK_COMPACT_SUMMARY])
-    assert summary_contents == ["段摘要"], f"Unexpected summary: {summary_contents}"
-
-
-async def test_apply_compact_without_protect_folds_user_prompts():
-    """Without protect_types, apply_compact CAN fold USER_PROMPT events (baseline).
-
-    Setup: [UP1, llm1, tool1, UP2, llm2] (5 events), keep_last=2, no protect_types.
-    archivable = all 5; oldest 3 folded (UP1, llm1, tool1).
-    UP1 (原始) must NOT survive (this is the negative baseline).
-    """
-    mem = InMemoryMemoryProvider()
-    await _seed_events(mem)
-
-    await mem.apply_compact(
-        scope=_scope(),
-        summary="段摘要",
-        keep_last=2,
-        ctx=_pctx(),
-        layer=MemoryLayer.TASK,
-        # No protect_types — USER_PROMPs are in the archivable pool
-    )
-
-    up_contents = await _active_contents(mem, [MemoryEventType.USER_PROMPT])
-    # Without protection, UP1 (oldest) gets archived; only UP2 (HITL) survives
-    assert "原始" not in up_contents, (
-        f"'原始' UP survived even without protect_types — test assumption broken: {up_contents}"
-    )
-    assert "HITL" in up_contents, f"'HITL' should survive as the 2nd-kept event: {up_contents}"
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Level 2: Caller-wiring tests — production callers pass protect_types=(USER_PROMPT,)
@@ -174,17 +108,8 @@ class _SpyProvider(InMemoryMemoryProvider):
         super().__init__()
         self.compact_calls: list[dict] = []
 
-    async def apply_compact(self, scope, summary, keep_last, ctx, layer=MemoryLayer.AGENT,
-                            protect_types=(), since_last=None):
-        self.compact_calls.append({
-            "layer": layer,
-            "summary": summary,
-            "keep_last": keep_last,
-            "protect_types": protect_types,
-            "since_last": since_last,
-        })
-        return await super().apply_compact(scope, summary, keep_last, ctx, layer,
-                                           protect_types, since_last)
+    # v2 P4a：apply_compact override 已删（生产路径不再调用；compact_calls 恒空，
+    # escalating 测试的「task 层不走 apply_compact」断言退化为恒真但保留文档意义）。
 
 
 def _ctx(mem: InMemoryMemoryProvider) -> SimpleNamespace:

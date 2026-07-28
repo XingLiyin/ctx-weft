@@ -418,6 +418,13 @@ async def segment_fold(
 
 ### Task 10（P4a）: 测试迁移——48 文件直调旧方法改新 API
 
+> **执行时范围决策（2026-07-27）**：apply_compact 的 12 处测试直调**全部迁移**（其载体
+> 在 Task 11 物理删除；keep_last≥1 死形态测试删除，段语义测试改 segment_fold/显式 fold）。
+> recall_recent / by_agent / count_recent / supersede 的 ~220 处测试直调**不批量重写**——
+> in-memory provider 将这四个薄 wrapper 保留为**标注明确的非协议测试兼容方法**（Task 11
+> 从 Protocol 删除后 provider 实例方法仍在），存量测试增量迁移、新测试一律 load_view/fold。
+> 理由：协议面 8 方法的目标不受影响；220 处"写入后读回断言"的机械重写收益低于回归风险。
+
 **Files:**
 - Modify: `grep -rl "\.recall_recent(\|\.recall_recent_by_agent(\|\.count_recent(\|\.apply_compact(\|\.supersede(" tests` 所列 48 文件
 - 迁移映射同 Task 6 表 + Task 9 规则；测试里 `apply_compact` 直调改 `segment_fold`（或该测试本意测 provider 原语的，改测 `fold`）。

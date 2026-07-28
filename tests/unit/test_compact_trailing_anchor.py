@@ -62,10 +62,8 @@ async def _fold_trailing_segment(mem: InMemoryMemoryProvider) -> None:
                                  timestamp=_ts(1), role="user"), pctx)
     await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, scope=scope, content="上一轮回复",
                                  timestamp=_ts(2), role="assistant"), pctx)
-    await mem.apply_compact(
-        scope=scope, summary="段摘要", keep_last=0, ctx=pctx, layer=MemoryLayer.TASK,
-        protect_types=(T.USER_PROMPT, T.TASK_COMPACT_SUMMARY),
-    )
+    from ctx_weft.core.loop.steps.segment_fold import segment_fold
+    await segment_fold(mem, scope, MemoryLayer.TASK, "段摘要", pctx)
 
 
 # ── Fix 2: provider anchor ─────────────────────────────────────────────────────

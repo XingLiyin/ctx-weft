@@ -64,7 +64,10 @@ async def test_agent_layer_accumulates_across_tasks() -> None:
     assert sorted(r.content for r in recs) == ["r1", "r2"]
 
 
-async def test_task_compact_folds_task_layer_only() -> None:
+async def test_task_fold_leaves_agent_layer_untouched() -> None:
+    """v2 P4a：keep_last 策展上移框架侧——测试改为显式 id 集 fold + 层隔离断言。"""
+    from ctx_weft.protocols.memory_compat import MemoryKind
+
     m = InMemoryMemoryProvider()
     sc = _sc("tA")
     await m.ingest(_ev(T.USER_PROMPT, sc, "u", t=0), _ctx())
@@ -72,28 +75,36 @@ async def test_task_compact_folds_task_layer_only() -> None:
     await m.ingest(_ev(T.LLM_RESPONSE, sc, "a2", t=2), _ctx())
     await m.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, "agent-exp", t=3), _ctx())  # agent 层
 
-    await m.apply_compact(sc, "SUMMARY", keep_last=1, ctx=_ctx(), layer=MemoryLayer.TASK)
+    view = await m.load_view(sc, MemoryLayer.TASK, _ctx())
+    fold_ids = [r.id for r in view if r.content in ("u", "a1")]  # 保 a2（策展在框架侧）
+    await m.fold(fold_ids, [MemoryEvent(
+        kind=MemoryKind.SUMMARY, layer=MemoryLayer.TASK, scope=sc, content="SUMMARY",
+        timestamp=_BASE + timedelta(seconds=1, milliseconds=500), role="assistant",
+    )], _ctx())
 
     task_recs = await m.recall_recent(
         sc, [T.USER_PROMPT, T.LLM_RESPONSE, T.TASK_COMPACT_SUMMARY], 10, _ctx()
     )
-    assert any(r.type == T.TASK_COMPACT_SUMMARY and r.content == "SUMMARY" for r in task_recs)
     assert "u" not in [r.content for r in task_recs]  # 旧转录被折叠
-    assert "a2" in [r.content for r in task_recs]      # keep_last=1 保留最近一条
-    # recall 倒序：保留的 a2(最新) 在前，摘要逻辑置前 → 在后
+    # recall 倒序：保留的 a2(最新) 在前，摘要锚置前 → 在后
     assert [r.content for r in task_recs] == ["a2", "SUMMARY"]
 
-    # agent 层不受 task compact 影响
+    # agent 层不受 task 层 fold 影响（层隔离）
     ag = await m.recall_recent(sc, [T.TASK_DISPATCH_RESULT], 10, _ctx())
     assert [r.content for r in ag] == ["agent-exp"]
 
 
-async def test_agent_compact_writes_agent_summary() -> None:
+async def test_agent_segment_fold_writes_agent_summary() -> None:
+    """v2 P4a：AGENT 层折叠经 segment_fold（半址）；摘要跨 task 可见。"""
+    from ctx_weft.core.loop.steps.segment_fold import segment_fold
+    from ctx_weft.protocols import MemoryAddress
+
     m = InMemoryMemoryProvider()
     await m.ingest(_ev(T.TASK_DISPATCH_RESULT, _sc("tA"), "r1", t=0), _ctx())
     await m.ingest(_ev(T.TASK_DISPATCH_RESULT, _sc("tB"), "r2", t=1), _ctx())
 
-    await m.apply_compact(_sc("tA"), "AGSUM", keep_last=0, ctx=_ctx(), layer=MemoryLayer.AGENT)
+    await segment_fold(
+        m, MemoryAddress(session_id="s1", agent_id="ag1"), MemoryLayer.AGENT, "AGSUM", _ctx())
 
     recs = await m.recall_recent(
         _sc("tZ"), [T.TASK_DISPATCH_RESULT, T.AGENT_COMPACT_SUMMARY], 10, _ctx()

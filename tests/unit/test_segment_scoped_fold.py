@@ -34,6 +34,7 @@ from ctx_weft.protocols import (
     ProviderContext,
 )
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from ctx_weft.core.loop.steps.segment_fold import segment_fold
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 
 MT = MemoryEventType
@@ -78,11 +79,7 @@ async def test_apply_compact_since_last_folds_only_current_segment():
     mem = InMemoryMemoryProvider()
     await _seed_two_segments(mem)
 
-    await mem.apply_compact(
-        scope=_SCOPE, summary="S2", keep_last=0, ctx=_PCTX, layer=MemoryLayer.TASK,
-        protect_types=(MT.USER_PROMPT, MT.TASK_COMPACT_SUMMARY),
-        since_last=MT.USER_PROMPT,
-    )
+    await segment_fold(mem, _SCOPE, MemoryLayer.TASK, "S2", _PCTX)
 
     chrono = await _chrono(mem)
     kinds = [(r.type, r.content) for r in chrono]
@@ -102,11 +99,7 @@ async def test_apply_compact_since_last_without_up_folds_whole_scope():
         await mem.ingest(MemoryEvent(type=typ, scope=_SCOPE, content=content,
                                      timestamp=_ts(10 + i), role=role), _PCTX)
 
-    await mem.apply_compact(
-        scope=_SCOPE, summary="S", keep_last=0, ctx=_PCTX, layer=MemoryLayer.TASK,
-        protect_types=(MT.USER_PROMPT, MT.TASK_COMPACT_SUMMARY),
-        since_last=MT.USER_PROMPT,
-    )
+    await segment_fold(mem, _SCOPE, MemoryLayer.TASK, "S", _PCTX)
 
     chrono = await _chrono(mem)
     assert [r.content for r in chrono] == ["S"], "无 UP 时应整 scope 照折"
@@ -290,11 +283,7 @@ async def test_apply_compact_since_last_after_collapsed_up_still_folds():
     assert folded == 2
 
     # 段边界折叠：坍缩 UP 之后的 raw（A2/A3）是当前段，必须被折
-    await mem.apply_compact(
-        scope=_SCOPE, summary="S", keep_last=0, ctx=_PCTX, layer=MemoryLayer.TASK,
-        protect_types=(MT.USER_PROMPT, MT.TASK_COMPACT_SUMMARY),
-        since_last=MT.USER_PROMPT,
-    )
+    await segment_fold(mem, _SCOPE, MemoryLayer.TASK, "S", _PCTX)
 
     chrono = await _chrono(mem)
     contents = [r.content for r in chrono]
