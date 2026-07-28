@@ -67,6 +67,16 @@ def layer_of(type_: MemoryEventType | None, layer: MemoryLayer | None) -> Memory
     return EVENT_LAYER[type_]
 
 
+# 写侧已死的 legacy 词汇：查询它们只该命中**存量旧行**，v2 新行永不匹配
+# （否则「不再写 legacy enum」的回归断言 / 计数口径全部失真）。
+_DEAD_WRITE_TYPES: frozenset[MemoryEventType] = frozenset({
+    MemoryEventType.TASK_DISPATCH,
+    MemoryEventType.TASK_DISPATCH_RESULT,
+    MemoryEventType.COMPACT_SUMMARY,
+    MemoryEventType.OBSERVER_SUMMARY,
+})
+
+
 def matches_legacy_type(
     record_type: MemoryEventType | None,
     record_kind: MemoryKind | None,
@@ -77,17 +87,50 @@ def matches_legacy_type(
     """过渡期桥接：一条记录（新旧词汇皆可）是否命中一个旧 type 请求。
 
     旧行（record_type 非 None）按 type 精确匹配——保持 v1 行为逐字节不变；
-    v2 行（record_type 为 None）按 LEGACY_TRIPLE 三元组匹配，role=None 视为无约束。
+    v2 行（record_type 为 None）按 LEGACY_TRIPLE 三元组匹配，role=None 视为无约束；
+    写侧已死的词汇（_DEAD_WRITE_TYPES）只命中存量旧行、永不命中 v2 行。
     """
     if record_type is not None:
         return record_type == wanted
+    if wanted in _DEAD_WRITE_TYPES:
+        return False
     triple = LEGACY_TRIPLE.get(wanted)
     if triple is None:
-        return False  # 死类型请求永不命中 v2 行
+        return False
     k, lyr, role = triple
     if record_kind != k or record_layer != lyr:
         return False
     return role is None or record_role == role
+
+
+# (kind, layer) → 无 role 歧义时的 legacy 等价词汇；CONVERSATION_TURN@TASK 按 role 细分。
+_TRIPLE_TO_LEGACY: dict[tuple[MemoryKind, MemoryLayer], MemoryEventType] = {
+    (MemoryKind.SUMMARY, MemoryLayer.TASK): MemoryEventType.TASK_COMPACT_SUMMARY,
+    (MemoryKind.SUMMARY, MemoryLayer.AGENT): MemoryEventType.AGENT_COMPACT_SUMMARY,
+    (MemoryKind.CONVERSATION_TURN, MemoryLayer.AGENT): MemoryEventType.AGENT_CONVERSATION_TURN,
+    (MemoryKind.TOOL_AUDIT, MemoryLayer.TASK): MemoryEventType.TOOL_INVOCATION,
+    (MemoryKind.PUBLICATION, MemoryLayer.SESSION): MemoryEventType.BLACKBOARD_PUBLISH,
+}
+_TASK_TURN_BY_ROLE: dict[str, MemoryEventType] = {
+    "user": MemoryEventType.USER_PROMPT,
+    "assistant": MemoryEventType.LLM_RESPONSE,
+    "tool": MemoryEventType.TOOL_RESULT,
+}
+
+
+def legacy_type_of(
+    kind: MemoryKind | None, layer: MemoryLayer | None, role: str | None,
+) -> MemoryEventType | None:
+    """v2 三元组 → legacy 等价词汇（recall wrapper 的 type 回填 / 渲染链 mtype 派生）。
+
+    渲染与旧断言消费的是 legacy 字符串词汇（composer 的 mtype=="user_prompt" 框定位、
+    slot_priority 的 mem_type 档位）；过渡期由此函数单点派生，P4 随消费点迁移一并日落。
+    """
+    if kind is MemoryKind.CONVERSATION_TURN and layer is MemoryLayer.TASK:
+        return _TASK_TURN_BY_ROLE.get(role or "")
+    if kind is None or layer is None:
+        return None
+    return _TRIPLE_TO_LEGACY.get((kind, layer))
 
 
 def normalize_view(records: "list[MemoryRecord]") -> "list[MemoryRecord]":

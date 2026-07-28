@@ -154,12 +154,12 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
     # finish 对 assistant 槽 = act_recap（过程复述，≠ 答复）：答复由内联 body / blackboard 承载，
     # 避免与之重复（spec 2026-07-01 反转契约）。
     await memory.ingest(MemoryEvent(
-        type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
         content=act_recap, timestamp=ts, role="assistant",
         metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id, "tool_calls": tool_calls},
     ), provider_ctx)
     await memory.ingest(MemoryEvent(
-        type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
         content=f"{report_prefix}{summary_text}", timestamp=ts, role="tool",
         metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id, "tool_call_id": tool_call_id},
     ), provider_ctx)

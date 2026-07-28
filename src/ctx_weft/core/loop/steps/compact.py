@@ -128,7 +128,7 @@ async def collapse_task_layer(
     await memory.supersede(ids, ctx.provider_ctx)
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.USER_PROMPT,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
             scope=state.scope,
             content=f"{original}{COLLAPSE_DELIM}{summary_text or '[Context compacted]'}",
             timestamp=anchor_ts,
@@ -346,7 +346,7 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     anchor_ts = (min(kept_ts) if kept_ts else now_utc())
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.AGENT_COMPACT_SUMMARY,
+            kind=MemoryKind.SUMMARY, layer=MemoryLayer.AGENT,
             scope=state.scope,
             content=summary_text or "[Experience compacted]",
             timestamp=anchor_ts - timedelta(microseconds=1),

@@ -13,26 +13,12 @@ from typing import Any
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.events import EventType
 from ctx_weft.core.utils import as_utc, content_to_text, generate_id, now_utc
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryScope
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryLayer, MemoryScope
 from ctx_weft.protocols.capability import qualify
 
 logger = logging.getLogger(__name__)
 
-# close 时软删/折叠的 task 层类型（OPEN task 对话的全部）
-_OWN_CONV_TYPES = [
-    MemoryEventType.USER_PROMPT,
-    MemoryEventType.LLM_RESPONSE,
-    MemoryEventType.TOOL_INVOCATION,
-    MemoryEventType.TOOL_RESULT,
-    MemoryEventType.TASK_COMPACT_SUMMARY,
-]
-
-# 长任务 close 时 supersede 的 task 层「末 raw 段」类型（保留 USER_PROMPT / TASK_COMPACT_SUMMARY 锚点）
-_FINAL_RAW_TYPES = [
-    MemoryEventType.LLM_RESPONSE,
-    MemoryEventType.TOOL_INVOCATION,
-    MemoryEventType.TOOL_RESULT,
-]
+# v2 P3：旧类型清单常量（_OWN_CONV_TYPES/_FINAL_RAW_TYPES）随读侧 kind+role 谓词化删除。
 
 def _dispatch_running_ack(title: str) -> str:
     """派发对 tool 槽的 **running 态**：子任务真正 start 时写，close 时被 `_dispatch_ack` 终态替换。
@@ -129,7 +115,7 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     ts = _as_utc(task.started_at or task.created_at or now_utc())
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=parent_scope,
             content="", timestamp=ts, role="assistant",
             metadata={"origin_task_id": task.parent_task_id,
                       "parent_task_id": task.parent_task_id,
@@ -174,7 +160,7 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
         await memory.supersede(stale, provider_ctx)
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=parent_scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=parent_scope,
             content=content, timestamp=ts, role="tool",
             metadata={"origin_task_id": task.parent_task_id,
                       "tool_call_id": task.origin_tool_call_id},
@@ -507,7 +493,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
 
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
             content=act_recap, timestamp=base, role="assistant",
             metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
                       "tool_calls": [{"id": tool_call_id,
@@ -518,7 +504,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     )
     await memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.AGENT_CONVERSATION_TURN, scope=scope,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
             content=f"{report_prefix}{summary_text}", timestamp=base, role="tool",
             metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
                       "tool_call_id": tool_call_id},
@@ -614,7 +600,7 @@ class FinalizeStep(Step):
         if outcome == "success" and mem_content:
             await ctx.memory.ingest(
                 MemoryEvent(
-                    type=MemoryEventType.BLACKBOARD_PUBLISH,
+                    kind=MemoryKind.PUBLICATION, layer=MemoryLayer.SESSION,
                     scope=state.scope,
                     content=mem_content,
                     timestamp=now_utc(),

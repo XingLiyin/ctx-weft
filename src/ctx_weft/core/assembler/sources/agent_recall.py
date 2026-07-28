@@ -28,6 +28,7 @@ from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.assembler.sources._history import record_to_history_block, wrap_compact_summary
 from ctx_weft.core.utils import content_to_text, generate_id
 from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryLayer
+from ctx_weft.protocols.memory_compat import legacy_type_of as _legacy_type_of
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
@@ -100,7 +101,9 @@ class AgentRecallSource:
                 content=text,
                 priority=slot_priority("history", "agent_compact_summary"),
                 token_estimate=request.token_counter(text),
-                metadata={"role": "user", "type": s.type or s.kind, "timestamp": _ts(s),
+                metadata={"role": "user",
+                          "type": s.type or _legacy_type_of(s.kind, s.layer, s.role),
+                          "timestamp": _ts(s),
                           "seq_no": s.metadata.get("seq_no", 0)},
             )
 

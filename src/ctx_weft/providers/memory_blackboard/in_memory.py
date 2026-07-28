@@ -27,6 +27,7 @@ from ctx_weft.protocols import (
 from ctx_weft.protocols.memory_compat import (
     kind_of,
     layer_of,
+    legacy_type_of,
     matches_legacy_type,
     normalize_view,
 )
@@ -202,6 +203,14 @@ class InMemoryMemoryProvider(MemoryProvider):
             for t in type_set
         )
 
+    def _to_legacy_record(self, stored: _StoredEvent) -> MemoryRecord:
+        """recall wrapper 出口：v2 行回填 legacy 等价 type——wrapper 的契约就是 legacy 视界
+        （旧断言/旧渲染按 record.type 消费）；load_view 出口不回填（kind 优先词汇）。"""
+        rec = self._to_record(stored)
+        if rec.type is None:
+            rec.type = legacy_type_of(rec.kind, rec.layer, rec.role)
+        return rec
+
     async def recall_recent(
         self,
         scope: MemoryScope,
@@ -231,7 +240,7 @@ class InMemoryMemoryProvider(MemoryProvider):
         # 跨层用 timestamp 归并（同层即 seq 序）；newest-first 返回，limit 截最近 N
         matching.sort(key=lambda s: s.event.timestamp)
         recent = matching[-limit:] if limit and limit > 0 else matching
-        return [self._to_record(s) for s in reversed(recent)]
+        return [self._to_legacy_record(s) for s in reversed(recent)]
 
     async def recall_recent_by_agent(
         self,
@@ -252,7 +261,7 @@ class InMemoryMemoryProvider(MemoryProvider):
         ]
         matching.sort(key=lambda s: s.event.timestamp)
         recent = matching[-limit:] if limit and limit > 0 else matching
-        return [self._to_record(s) for s in reversed(recent)]
+        return [self._to_legacy_record(s) for s in reversed(recent)]
 
     async def recall_topic(
         self,

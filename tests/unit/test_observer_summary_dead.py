@@ -12,10 +12,13 @@ import pathlib
 
 def test_no_observer_summary_code_references_in_src() -> None:
     root = pathlib.Path(__file__).resolve().parents[2] / "src" / "ctx_weft"
+    # 豁免：枚举定义 + EVENT_LAYER 兜底（memory.py）；归一化模块（memory_compat.py）是
+    # v2 设计钦定的「全仓唯一认识旧词汇的地方」，其 _DEAD_WRITE_TYPES 合法引用死类型。
+    exempt = {("protocols", "memory.py"), ("protocols", "memory_compat.py")}
     offenders = []
     for p in root.rglob("*.py"):
-        if p.name == "memory.py" and p.parent.name == "protocols":
-            continue  # 枚举定义 + EVENT_LAYER 兜底映射合法保留
+        if (p.parent.name, p.name) in exempt:
+            continue
         if "MemoryEventType.OBSERVER_SUMMARY" in p.read_text(encoding="utf-8"):
             offenders.append(str(p))
     assert offenders == []

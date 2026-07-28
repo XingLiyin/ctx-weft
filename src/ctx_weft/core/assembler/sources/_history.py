@@ -46,16 +46,20 @@ def record_to_history_block(
     跨 task 胶囊（别的 task_id）不冠，不改跨任务重建形态。None → 一律不冠（防御）。
     """
     from ctx_weft.core.assembler.assembler import ContextBlock
+    from ctx_weft.protocols.memory_compat import legacy_type_of
 
     text = content_to_text(record.content) if not isinstance(record.content, str) else record.content
     role = record.role or "user"
+    # 过渡期渲染词汇（v2 P3b）：v2 行（type=None）派生 legacy 等价词汇——composer 的
+    # mtype=="user_prompt" 框定位、slot_priority 档位、旧断言都消费该字符串。
+    etype = record.type or legacy_type_of(record.kind, record.layer, record.role)
     # 包装是给「以 user 身份呈现」的摘要消歧义；assistant 自述无需。新数据段摘要恒 assistant
     # → 不套；旧数据若残留 role=user 仍套（防御）。AGENT_COMPACT_SUMMARY 在 agent_experience/
     # agent_recall 自行包装，不走此分支。
-    if record.type == MemoryEventType.TASK_COMPACT_SUMMARY and role == "user":
+    if etype == MemoryEventType.TASK_COMPACT_SUMMARY and role == "user":
         text = wrap_compact_summary(text)
     elif (
-        record.type == MemoryEventType.TASK_COMPACT_SUMMARY
+        etype == MemoryEventType.TASK_COMPACT_SUMMARY
         and role == "assistant"
         and current_task_id is not None
         and record.metadata.get("task_id") == current_task_id
@@ -67,7 +71,7 @@ def record_to_history_block(
         text = f"{PROGRESS_SO_FAR_HEADING}\n{text}"
     md = {
         "role": role,
-        "type": record.type,
+        "type": etype,
         "timestamp": record.timestamp.isoformat() if record.timestamp else "",
         "seq_no": record.metadata.get("seq_no", idx),
         "memory_event_id": record.id,
@@ -89,7 +93,7 @@ def record_to_history_block(
         kind="history",
         target="messages",
         content=text,
-        priority=slot_priority("history", str(record.type)),
+        priority=slot_priority("history", str(etype)),
         token_estimate=record.metadata.get("token_count") or request.token_counter(text),
         metadata=md,
     )

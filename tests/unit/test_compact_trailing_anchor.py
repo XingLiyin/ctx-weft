@@ -122,7 +122,10 @@ async def test_inject_user_reply_awaits_pending_background_observe(monkeypatch):
 
     class _RecordingMem(InMemoryMemoryProvider):
         async def ingest(self, event, ctx):
-            if event.type is T.USER_PROMPT:
+            from ctx_weft.protocols import MemoryKind
+            # v2 词汇：user 回合 = kind CONVERSATION_TURN + role user（旧 type 兜底兼容）
+            if (event.type is T.USER_PROMPT
+                    or (event.kind is MemoryKind.CONVERSATION_TURN and event.role == "user")):
                 order.append("ingest")
             return await super().ingest(event, ctx)
 

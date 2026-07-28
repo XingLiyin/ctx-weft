@@ -62,6 +62,8 @@ from ctx_weft.protocols import (
     Capability,
     KnowledgeProvider,
     LLMOutageError,
+    MemoryKind,
+    MemoryLayer,
     MemoryProvider,
     MemoryScope,
     ProviderContext,
@@ -150,7 +152,7 @@ async def _copy_memory_for_inherit(
             md["tool_call_id"] = r.metadata["tool_call_id"]
         await memory.ingest(
             MemoryEvent(
-                type=MemoryEventType.AGENT_CONVERSATION_TURN,
+                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT,
                 scope=child_scope,
                 content=r.content,
                 timestamp=r.timestamp,
@@ -1438,7 +1440,7 @@ class CtxWeftRuntime:
                 content = interrupt_edit_note(prev, content)
         await self.providers.get_memory().ingest(
             MemoryEvent(
-                type=MemoryEventType.USER_PROMPT,
+                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
                 scope=scope,
                 content=content,
                 timestamp=now_utc(),

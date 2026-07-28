@@ -26,7 +26,7 @@ from ctx_weft.core.orchestrator.control_capability import (
 )
 from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.core.utils import effective_limit, now_utc
-from ctx_weft.protocols import MemoryEvent, MemoryEventType
+from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryLayer
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +341,7 @@ async def _ingest_assistant_turn(
     non_dispatch_tool_dicts = [d for d in asst_tool_dicts if d["name"] not in _excluded]
     await ctx.memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.LLM_RESPONSE,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
             scope=state.scope,
             content=text,
             timestamp=now_utc(),
@@ -520,7 +520,7 @@ async def _ingest_synthetic_tool_result(
     """为被打断/未执行的工具补一条 TOOL_RESULT，使 tool_call↔result 一一对应（无 dangling）。"""
     await ctx.memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.TOOL_RESULT,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
             scope=state.scope,
             content=content,
             timestamp=now_utc(),
@@ -592,7 +592,7 @@ async def _commit_interrupted_partial(
     content = f"{text}\n\n{INTERRUPTED_MARK}" if text.strip() else INTERRUPTED_MARK
     await ctx.memory.ingest(
         MemoryEvent(
-            type=MemoryEventType.LLM_RESPONSE,
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
             scope=state.scope,
             content=content,
             timestamp=now_utc(),
