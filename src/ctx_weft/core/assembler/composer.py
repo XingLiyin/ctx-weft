@@ -140,13 +140,17 @@ _COMPACTION_INSTRUCTION = (
     "earlier turns, so fold in whatever matters. Output only the digest text, no preamble."
 )
 
-# agent compact cue：概括本 agent 的派发历史（每个子任务做了什么、结果/关键产出/教训），
-# 忽略当前 task 自身的执行细节，只压派发记录。
+# agent compact cue：概括本 agent 已完成的任务单元——每个任务被要求做什么、结果/关键产出/
+# 教训（含其派发的子任务）。L1 折的是超龄完成单元整体（finish 对 + task 层胶囊），不只是派发
+# 记录，故不得只压派发；旧 digest 随折叠被 supersede，须显式要求延续其内容。当前 task 的执行
+# 细节由 task 域 cue（L3 坍缩）负责，此处忽略。
 _AGENT_COMPACTION_INSTRUCTION = (
-    "Now act as a memory compactor for this agent's delegation history. Summarize the dispatched "
-    "sub-tasks so far — for each: what it was asked to do and its outcome / key results / lessons "
-    "— into one concise digest the agent can rely on later. Ignore the current task's own "
-    "execution detail; focus on the delegation record. Output only the digest text, no preamble."
+    "Now act as a memory compactor for this agent's work history. Summarize the completed tasks "
+    "so far — for each: what it was asked to do and its outcome / key results / lessons, "
+    "including any sub-tasks it delegated — into one concise digest the agent can rely on later. "
+    "This digest replaces the older task records, so fold in whatever matters, and carry forward "
+    "everything an earlier compaction digest in the conversation already preserved. Ignore the "
+    "current still-running task's own execution detail. Output only the digest text, no preamble."
 )
 
 # Capabilities 指针：清单全文随「当前 task」user 回合（cache 前缀内稳定），末条 user 只留
