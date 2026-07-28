@@ -147,22 +147,25 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
     tool_calls = (asst[0].metadata.get("tool_calls") if asst
                   else [{"id": tool_call_id, "name": qualify("control:finish_task"), "input": {}}])
 
-    await memory.supersede([r.id for r in (*asst, *tool)], provider_ctx)
-
     report_prefix = _finish_report_prefix(title, outcome)
     summary_text = task_summary if (task_summary and task_summary.strip()) else act_recap
     # finish 对 assistant 槽 = act_recap（过程复述，≠ 答复）：答复由内联 body / blackboard 承载，
     # 避免与之重复（spec 2026-07-01 反转契约）。
-    await memory.ingest(MemoryEvent(
-        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
-        content=act_recap, timestamp=ts, role="assistant",
-        metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id, "tool_calls": tool_calls},
-    ), provider_ctx)
-    await memory.ingest(MemoryEvent(
-        kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
-        content=f"{report_prefix}{summary_text}", timestamp=ts, role="tool",
-        metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id, "tool_call_id": tool_call_id},
-    ), provider_ctx)
+    # v2 P3d：占位对遗忘 + 新对写入一次原子 fold（关旧「占位已删而真报告未写」窗口）。
+    await memory.fold([r.id for r in (*asst, *tool)], [
+        MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
+            content=act_recap, timestamp=ts, role="assistant",
+            metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
+                      "tool_calls": tool_calls},
+        ),
+        MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=scope,
+            content=f"{report_prefix}{summary_text}", timestamp=ts, role="tool",
+            metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
+                      "tool_call_id": tool_call_id},
+        ),
+    ], provider_ctx)
 
 
 def _clear_pending(t: asyncio.Task, tid: str) -> None:

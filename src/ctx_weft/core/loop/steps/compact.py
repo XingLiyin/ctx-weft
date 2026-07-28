@@ -125,8 +125,8 @@ async def collapse_task_layer(
     anchor_ts = anchor_src.timestamp - timedelta(microseconds=1)
 
     ids = [r.id for r in fold]
-    await memory.supersede(ids, ctx.provider_ctx)
-    await memory.ingest(
+    # v2 P3d：遗忘+坍缩物一次原子 fold（旧徒手 supersede+ingest 有崩溃丢摘要窗口）
+    await memory.fold(ids, [
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.TASK,
             scope=state.scope,
@@ -136,8 +136,7 @@ async def collapse_task_layer(
             metadata={"task_id": state.scope.task_id, "collapsed": True,
                       "keep_last": keep_last, "folded_count": len(fold)},
         ),
-        ctx.provider_ctx,
-    )
+    ], ctx.provider_ctx)
     return len(ids)
 
 
@@ -323,10 +322,10 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
 
     if not ids:
         return 0
-    await memory.supersede(ids, ctx.provider_ctx)
 
-    # 折出新摘要：仅当确有单元被折时写
+    # 折出新摘要：仅当确有单元被折时写（纯遗忘 = fold(ids, [])）
     if not fold_top:
+        await memory.fold(ids, [], ctx.provider_ctx)
         return len(ids)
 
     # anchor = 仍保留单元的最早足迹 ts − 1µs（新摘要须排在所有保留胶囊之前）。足迹 = agent 层
@@ -344,7 +343,8 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
         if (r.address.task_id if r.address else r.metadata.get("task_id")) in surviving:
             kept_ts.append(r.timestamp)
     anchor_ts = (min(kept_ts) if kept_ts else now_utc())
-    await memory.ingest(
+    # v2 P3d：跨层遗忘 + 新摘要一次原子 fold（关旧「raw 已删而摘要未写」窗口）
+    await memory.fold(ids, [
         MemoryEvent(
             kind=MemoryKind.SUMMARY, layer=MemoryLayer.AGENT,
             scope=state.scope,
@@ -353,8 +353,7 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
             role="user",
             metadata={"keep_last": keep_last, "folded_count": len(fold_top)},
         ),
-        ctx.provider_ctx,
-    )
+    ], ctx.provider_ctx)
     return len(ids)
 
 
@@ -385,7 +384,7 @@ async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: s
             ids.append(r.id)   # 折 finish 对 assistant 槽，仅留 tool 槽回填
     if not ids:
         return 0
-    await memory.supersede(ids, ctx.provider_ctx)
+    await memory.fold(ids, [], ctx.provider_ctx)  # 纯遗忘（v2 P3d）
     return len(ids)
 
 

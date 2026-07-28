@@ -74,6 +74,15 @@ class _FakeMemory:
         self.ingested.append(event)
         return event
 
+    async def fold(self, supersede_ids, replacements, ctx):
+        # v2 原子原语：遗忘 + 补偿（fake 拆记回 superseded/ingested 两账本）
+        self.superseded.extend(supersede_ids)
+        out = []
+        for ev in replacements:
+            self.ingested.append(ev)
+            out.append(f"mev_fold_{len(self.ingested)}")
+        return out
+
 
 class _FakeAssembler:
     async def assemble(self, request):

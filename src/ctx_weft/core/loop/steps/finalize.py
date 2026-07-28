@@ -154,19 +154,17 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
         MemoryLayer.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     stale = [r.id for r in recs
              if r.role == "tool" and r.metadata.get("tool_call_id") == task.origin_tool_call_id]
-    if stale:
-        if not replace:
-            return
-        await memory.supersede(stale, provider_ctx)
-    await memory.ingest(
+    if stale and not replace:
+        return
+    # v2 P3d：旧 ack 遗忘 + 终态写入一次原子 fold（stale 空 = 纯写入）
+    await memory.fold(stale, [
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, layer=MemoryLayer.AGENT, scope=parent_scope,
             content=content, timestamp=ts, role="tool",
             metadata={"origin_task_id": task.parent_task_id,
                       "tool_call_id": task.origin_tool_call_id},
         ),
-        provider_ctx,
-    )
+    ], provider_ctx)
 
 
 async def ensure_dispatch_frame_at_start(state, ctx) -> None:
@@ -322,7 +320,7 @@ async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
             continue
         ids.append(r.id)
     if ids:
-        await memory.supersede(ids, provider_ctx)
+        await memory.fold(ids, [], provider_ctx)  # 纯遗忘（v2 P3d）
 
 
 async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
