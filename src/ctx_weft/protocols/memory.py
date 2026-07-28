@@ -277,6 +277,24 @@ class MemoryProvider(Protocol):
         """
         ...
 
+    @abstractmethod
+    async def fold(
+        self,
+        supersede_ids: list[str],
+        replacements: list[MemoryEvent],
+        ctx: ProviderContext,
+    ) -> list[str]:
+        """原子"遗忘 + 补偿"（v2 设计 §4）：标 superseded 并写入 replacements，一个事务内完成。
+
+        - replacements 可空（纯遗忘）、可多条（finish 对替换这类成对写入）；返回新事件 id 列表。
+        - 已 superseded / 不存在的 id 跳过（幂等）。
+        - replacement 带 ``event.id`` 时按 record-id 契约采用且按 id 幂等（重放安全）。
+        - 取代 v1 的 supersede + apply_compact：策展政策（keep_last/protect/段界/锚点）
+          上移框架侧（segment_fold 等），provider 只按显式 id 集与显式 replacement 执行。
+          修徒手 supersede+ingest 的崩溃丢摘要窗口。
+        """
+        ...
+
     # ── 召回（read，三种模式）──
 
     @abstractmethod

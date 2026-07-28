@@ -113,6 +113,31 @@ class InMemoryMemoryProvider(MemoryProvider):
         self._events.append(stored)
         return event_id
 
+    async def fold(
+        self,
+        supersede_ids: list[str],
+        replacements: list[MemoryEvent],
+        ctx: ProviderContext,
+    ) -> list[str]:
+        """原子"遗忘 + 补偿"：单锁内标 superseded + 逐条走 ingest 内核（in-memory 用锁模拟事务）。"""
+        wanted = set(supersede_ids)
+        new_ids: list[str] = []
+        async with self._lock:
+            for s in self._events:
+                if s.id in wanted and not s.is_superseded:
+                    s.is_superseded = True
+            for ev in replacements:
+                if ev.id is not None and any(s.id == ev.id for s in self._events):
+                    new_ids.append(ev.id)  # record-id 契约：已存在 = no-op
+                    continue
+                if ev.id is not None:
+                    event_id = ev.id
+                else:
+                    self._next_id += 1
+                    event_id = f"mev_{self._next_id:08d}"
+                new_ids.append(self._ingest_locked(ev, ctx, event_id))
+        return new_ids
+
     # ── load_view（v2 §4：工作记忆回放）─────────────────────────────────────────
 
     _DEFAULT_KINDS = (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY)
