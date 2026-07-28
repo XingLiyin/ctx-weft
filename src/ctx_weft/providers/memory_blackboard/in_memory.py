@@ -29,6 +29,7 @@ from ctx_weft.protocols.memory_compat import (
     legacy_type_of,
     matches_legacy_type,
     normalize_view,
+    validate_half_address,
 )
 
 
@@ -149,7 +150,7 @@ class InMemoryMemoryProvider(MemoryProvider):
         ctx: ProviderContext,
         kinds: list[MemoryKind] | None = None,
     ) -> list[MemoryRecord]:
-        self._validate_half_address(address, scope)
+        validate_half_address(address, scope)
         wanted = set(kinds) if kinds is not None else set(self._DEFAULT_KINDS)
 
         matching = [
@@ -162,20 +163,6 @@ class InMemoryMemoryProvider(MemoryProvider):
         matching.sort(key=lambda s: (s.event.timestamp, s.seq_no))
         return normalize_view([self._to_record(s) for s in matching])
 
-    @staticmethod
-    def _validate_half_address(address: MemoryAddress, scope: MemoryScope) -> None:
-        """半址矩阵（v2 §4）：非法非 None 字段 loud 失败，抓静默漏召回。"""
-        if scope is MemoryScope.TASK:
-            if address.task_id is None and address.agent_id is None:
-                raise ValueError("TASK view requires task_id (single-task) or agent_id (cross-task)")
-        elif scope is MemoryScope.AGENT:
-            if not address.agent_id:
-                raise ValueError("AGENT view requires agent_id")
-            if address.task_id is not None:
-                raise ValueError("AGENT view forbids task_id (pass task_id=None)")
-        else:  # SESSION
-            if address.task_id is not None or address.agent_id is not None:
-                raise ValueError("SESSION view forbids task_id/agent_id")
 
     @staticmethod
     def _address_match(stored: MemoryAddress, address: MemoryAddress, scope: MemoryScope) -> bool:

@@ -13,7 +13,7 @@ OBSERVER_SUMMARY 刻意不映射：写侧已死（P1），存量行不进任何�
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ctx_weft.protocols.memory import EVENT_LAYER, MemoryEventType, MemoryScope
 
@@ -131,6 +131,39 @@ def legacy_type_of(
     if kind is None or layer is None:
         return None
     return _TRIPLE_TO_LEGACY.get((kind, layer))
+
+
+def kind_expansion(kind: MemoryKind, scope: MemoryScope) -> frozenset[str]:
+    """查询侧别名展开（v2 §6）：kind@scope → 命中的 type 列字符串集合。
+
+    = {kind 本身的字符串（v2 新行）} ∪ {该 (kind, scope) 的全部 legacy 类型（存量行，
+    role 维度不参与——role 过滤在行上做）。两个 provider 的 load_view SQL/内存过滤共用；
+    OBSERVER_SUMMARY 不在任何展开里（死类型永不进视图）。
+    """
+    legacy = {
+        str(t) for t, (k, s, _role) in LEGACY_TRIPLE.items()
+        if k is kind and s is scope
+    }
+    return frozenset(legacy | {kind.value})
+
+
+def validate_half_address(address: "Any", scope: MemoryScope) -> None:
+    """半址矩阵（v2 §4）：非法非 None 字段 loud 失败，抓静默漏召回。provider 共用。
+
+    TASK → task_id（单 task）或 agent_id（跨 task 聚合）至少其一；
+    AGENT → agent_id 必给、task_id 禁带；SESSION → task_id/agent_id 皆禁带。
+    """
+    if scope is MemoryScope.TASK:
+        if address.task_id is None and address.agent_id is None:
+            raise ValueError("TASK view requires task_id (single-task) or agent_id (cross-task)")
+    elif scope is MemoryScope.AGENT:
+        if not address.agent_id:
+            raise ValueError("AGENT view requires agent_id")
+        if address.task_id is not None:
+            raise ValueError("AGENT view forbids task_id (pass task_id=None)")
+    else:  # SESSION
+        if address.task_id is not None or address.agent_id is not None:
+            raise ValueError("SESSION view forbids task_id/agent_id")
 
 
 def normalize_view(records: "list[MemoryRecord]") -> "list[MemoryRecord]":
