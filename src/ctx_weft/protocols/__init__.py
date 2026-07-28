@@ -52,7 +52,6 @@ from ctx_weft.protocols.knowledge import (
 )
 from ctx_weft.protocols.memory import (
     EVENT_LAYER,
-    CompactResult,
     MemoryAddress,
     MemoryEvent,
     MemoryEventType,
@@ -61,7 +60,6 @@ from ctx_weft.protocols.memory import (
     MemoryProviderInfo,
     MemoryRecord,
     Subscription,
-    layer_for_types,
 )
 from ctx_weft.protocols.memory_compat import MemoryKind
 from ctx_weft.protocols.template import (
@@ -119,7 +117,6 @@ __all__ = [
     # Memory
     "MemoryKind",
     "EVENT_LAYER",
-    "CompactResult",
     "MemoryEvent",
     "MemoryEventType",
     "MemoryLayer",
@@ -128,7 +125,6 @@ __all__ = [
     "MemoryRecord",
     "MemoryAddress",
     "Subscription",
-    "layer_for_types",
     # Template
     "AgentTemplate",
     "CapabilityRef",

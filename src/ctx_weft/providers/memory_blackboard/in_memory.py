@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 
 from ctx_weft.protocols import (
     EVENT_LAYER,
-    CompactResult,
     MemoryAddress,
     MemoryEvent,
     MemoryEventType,
@@ -326,116 +325,12 @@ class InMemoryMemoryProvider(MemoryProvider):
             out.append(s)
         return out
 
-    # ── Compact ───────────────────────────────────────────────────────────────
+    # ── Legacy test-compat（v2 P4b-2）────────────────────────────────────────
+    # apply_compact 已删：策展政策（keep_last/protect/段界/锚点）上移框架侧 segment_fold，
+    # provider 只保留原子 fold。下方 recall_recent / recall_recent_by_agent / count_recent /
+    # supersede 为**非协议**实例方法，仅供存量测试兼容（P4a 范围决策）；新代码一律
+    # load_view / fold。日落路径：随存量测试逐文件迁移后删除。
 
-    async def apply_compact(
-        self,
-        scope: MemoryAddress,
-        summary: str,
-        keep_last: int,
-        ctx: ProviderContext,
-        layer: MemoryLayer = MemoryLayer.AGENT,
-        protect_types: tuple[MemoryEventType, ...] = (),
-        since_last: MemoryEventType | None = None,
-    ) -> CompactResult:
-        scope_key = self._scope_key(scope, ctx.tenant_id, layer)
-
-        def _in_scope(s: _StoredEvent) -> bool:
-            return (
-                not s.is_superseded
-                and s.layer is layer
-                and self._scope_key(s.event.scope, ctx.tenant_id, layer) == scope_key
-            )
-
-        active = [s for s in self._events if _in_scope(s)]
-        events_before = len(active)
-        # 全函数统一按**渲染序** (timestamp, seq_no) 排（与 recall/装配一致；2026-07-21）。
-        # 不能按 seq_no：L3 坍缩 UP 等「timestamp 回填、seq 最高」的记录会在 seq 序里
-        # 排到所有 raw 之后——段界被推到末尾 → 归档池空 → 摘要照写而 raw 一条不折；
-        # 锚点判定同理会把摘要错插到坍缩 UP 之前。
-        _key = lambda s: (s.event.timestamp, s.seq_no)  # noqa: E731
-        active.sort(key=_key)
-
-        # since_last：归档池限定在「最后一条 active 该类型记录之后」（段作用域折叠，
-        # 2026-07-21）。短段免折残留的更早 raw 落在该点之前 → 永不跨段折入本摘要；
-        # 且被折区从该点之后起算 → 锚点走「段尾」分支，不会抢到前一条 UP 之前。
-        # 该类型记录不存在 → 不限定（整 scope 照旧）。
-        # 过渡期三元组感知（Task 4 加固）：写侧切 v2 词汇后（type=None），since_last 段界
-        # 与 protect_types 判定必须仍命中 v2 行（如 role=user 回合），否则 Task 7→8 窗口内
-        # v2 的 USER_PROMPT 失去折叠保护。matches_legacy_type 对旧行 = type 精确匹配（不变）。
-        def _is_type(s: _StoredEvent, t: MemoryEventType) -> bool:
-            return matches_legacy_type(s.event.type, s.kind, s.layer, s.event.role, t)
-
-        pool = active
-        if since_last is not None:
-            boundary_idx = next(
-                (i for i in range(len(active) - 1, -1, -1)
-                 if _is_type(active[i], since_last)),
-                None,
-            )
-            if boundary_idx is not None:
-                pool = active[boundary_idx + 1:]
-
-        # protect_types 永不进 archive；keep_last 只对可折类型计
-        archivable = [s for s in pool if not any(_is_type(s, pt) for pt in protect_types)]
-        to_archive = archivable[:-keep_last] if keep_last > 0 else archivable
-        for s in to_archive:
-            s.is_superseded = True
-
-        summary_type = (
-            MemoryEventType.TASK_COMPACT_SUMMARY
-            if layer is MemoryLayer.TASK
-            else MemoryEventType.AGENT_COMPACT_SUMMARY
-        )
-        # 摘要落在「被折区块之后、其后第一条幸存事件之前」→ [UP1][summary][UP2][kept]
-        # 找「归档起点」：第一条被折事件的渲染位；摘要插在该起点之后第一条幸存事件之前
-        archived_min_key = min((_key(s) for s in to_archive), default=None)
-        # 第一条幸存且渲染位 >= 归档起点的事件即为 anchor
-        following = ([] if archived_min_key is None
-                     else [s for s in active if _key(s) >= archived_min_key and not s.is_superseded])
-        if following:
-            anchor = min(following, key=lambda s: (s.event.timestamp, s.seq_no))
-            summary_ts = anchor.event.timestamp - timedelta(microseconds=1)
-            summary_seq = anchor.seq_no - 1
-        elif to_archive:
-            # 段尾无后继幸存事件（典型：单段 plain_text 折叠 [UP, LLM]）→ 锚到被折段最后一条
-            # 事件的位置，**不用 now()**。否则脱管的后台 observe 迟到收尾时，now() 可能晚于同刻
-            # 注入的下一轮 USER_PROMPT，摘要越到新消息之后 → 下一轮装配误判为「续跑」（尾部非
-            # user）并拼 continue cue、埋掉新消息（多轮对话空白回复 bug）。锚在原段时间位置后，
-            # 后到的 USER_PROMPT（now_utc 更晚）天然排在其后。
-            last = max(to_archive, key=lambda s: (s.event.timestamp, s.seq_no))
-            summary_ts = last.event.timestamp
-            summary_seq = last.seq_no
-        else:
-            summary_ts = datetime.now(UTC)
-            self._seq_counters[scope_key] = self._seq_counters.get(scope_key, 0) + 1
-            summary_seq = self._seq_counters[scope_key]
-
-        # task 层段摘要 = LLM 对前段的自述（role=assistant）；agent 层折叠摘要是 prompt
-        # 首条、Anthropic 首条 assistant 会 400，故保持 role=user。
-        summary_role = "assistant" if layer is MemoryLayer.TASK else "user"
-        compact_event = MemoryEvent(
-            type=summary_type,
-            scope=scope,
-            content=summary,
-            timestamp=summary_ts,
-            role=summary_role,
-            metadata={"keep_last": keep_last, "archived_count": len(to_archive)},
-        )
-        async with self._lock:
-            self._next_id += 1
-            compact_id = f"mev_{self._next_id:08d}"
-            self._events.append(_StoredEvent(
-                id=compact_id, event=compact_event, seq_no=summary_seq, topic_seq_no=0,
-                kind=MemoryKind.SUMMARY, layer=layer,
-            ))
-
-        events_after = sum(1 for s in self._events if _in_scope(s))
-        return CompactResult(
-            events_before=events_before,
-            events_after=events_after,
-            summary_event_id=compact_id,
-        )
 
     async def supersede(
         self,
@@ -483,7 +378,7 @@ class InMemoryMemoryProvider(MemoryProvider):
             name=self.name,
             supports_semantic=False,
             supports_topic=True,
-            supports_compact_archival=True,
+            archives_superseded=True,
         )
 
     # ── Internal ──────────────────────────────────────────────────────────────

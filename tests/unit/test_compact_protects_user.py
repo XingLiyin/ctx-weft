@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock, patch
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, escalating_compact
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
 from ctx_weft.protocols import (
-    CompactResult,
     MemoryEvent,
     MemoryEventType,
     MemoryLayer,

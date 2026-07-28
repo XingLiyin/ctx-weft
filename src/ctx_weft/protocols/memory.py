@@ -109,12 +109,7 @@ EVENT_LAYER: dict[MemoryEventType, MemoryLayer] = {
 }
 
 
-def layer_for_types(types: list[MemoryEventType]) -> MemoryLayer:
-    """从一次召回请求的类型集合推导层；要求同层，混层抛错（spec/06 §8）。"""
-    layers = {EVENT_LAYER[t] for t in types}
-    if len(layers) != 1:
-        raise ValueError(f"recall types span multiple memory layers: {layers} for {types}")
-    return layers.pop()
+# v2 P4b-2：layer_for_types 随类型清单召回日落删除（读侧统一 kind 视图，无调用点）。
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -227,13 +222,7 @@ class Subscription:
     priority: int = 5
 
 
-@dataclass
-class CompactResult:
-    """apply_compact 返回。"""
-
-    events_before: int  # apply_compact 之前未 superseded 的事件数
-    events_after: int  # 之后未 superseded 的事件数（含新写入的 TASK/AGENT_COMPACT_SUMMARY）
-    summary_event_id: str  # 新写入的 TASK/AGENT_COMPACT_SUMMARY 事件 id（按 layer 定类型）
+# v2 P4b-2：CompactResult 随 apply_compact 消亡（框架侧对应物 SegmentFoldResult）。
 
 
 @dataclass
@@ -243,7 +232,7 @@ class MemoryProviderInfo:
     name: str
     supports_semantic: bool = False  # 是否支持 recall_semantic
     supports_topic: bool = True  # 是否支持 topic / subscription
-    supports_compact_archival: bool = True  # apply_compact 是否真的归档
+    archives_superseded: bool = True  # fold 标记的 superseded 行是否物理归档（原 supports_compact_archival）
     max_event_size_bytes: int | None = None
 
 
@@ -318,39 +307,9 @@ class MemoryProvider(Protocol):
         """
         ...
 
-    @abstractmethod
-    async def recall_recent(
-        self,
-        scope: MemoryAddress,
-        types: list[MemoryEventType],
-        limit: int,
-        ctx: ProviderContext,
-    ) -> list[MemoryRecord]:
-        """按时间倒序返回最近 N 条指定类型事件。必需实现。
-
-        PrepareStep 装配 messages 段的主路径。
-        """
-        ...
-
-    @abstractmethod
-    async def recall_recent_by_agent(
-        self,
-        agent_scope: MemoryAddress,
-        types: list[MemoryEventType],
-        limit: int,
-        ctx: ProviderContext,
-    ) -> list[MemoryRecord]:
-        """召回某 agent 名下**所有 task** 的 task 层记录（按 agent_id 跨 task，忽略 task_id）。
-
-        统一 AgentRecall 装配路径用：OPEN task 的对话据此还原（CLOSED task 的对话已被
-        close 时 supersede，不会返回）。按 timestamp 倒序，每条 metadata["task_id"] 标来源。
-
-        【目标形态下消解】本方法与 recall_recent 在两个 provider 里都是同一条查询、仅差
-        匹配 task_id 还是 agent_id；layer 显式化 + selector 语义后并入统一 recall（见
-        MemoryEventType docstring），过渡期留薄包装。迁移时注意：现有三个调用点传的是带
-        task_id 的全量 scope，须显式改为 task_id=None 的 selector。
-        """
-        ...
+    # v2 P4b-2：recall_recent / recall_recent_by_agent / count_recent 自协议删除——
+    # 读取面收敛为三种记忆动作（load_view / recall_topic / recall_semantic）。
+    # in-memory provider 保留同名实例方法仅为存量测试兼容（非协议，见 P4a 范围决策）。
 
     @abstractmethod
     async def recall_topic(
@@ -403,66 +362,11 @@ class MemoryProvider(Protocol):
         """列出订阅。task_id 给定时只返回该 task 的订阅 + session 级订阅（task_id=""）；None 返回全部。"""
         ...
 
-    # ── 压缩（compact 触发时使用）──
+    # v2 P4b-2：apply_compact / supersede 自协议删除——写面收敛为 ingest + fold。
+    # 策展政策（keep_last / protect / 段界 / 锚点）上移框架侧 segment_fold 等；
+    # 排序契约（渲染序 (timestamp, seq_no)）与锚点语义随之移交（见 segment_fold docstring）。
 
-    @abstractmethod
-    async def apply_compact(
-        self,
-        scope: MemoryAddress,
-        summary: str,
-        keep_last: int,
-        ctx: ProviderContext,
-        layer: MemoryLayer = MemoryLayer.AGENT,
-        protect_types: tuple[MemoryEventType, ...] = (),
-        since_last: MemoryEventType | None = None,
-    ) -> CompactResult:
-        """折叠指定 layer 的 scope（spec/06 §7）。
-
-        - layer=TASK：task compact，写 TASK_COMPACT_SUMMARY，折叠 task 层执行转录。
-        - layer=AGENT：agent compact，写 AGENT_COMPACT_SUMMARY，按「完整派发对」折叠 agent 层。
-
-        把该 layer scope 内、超出 keep_last 范围的事件标记 superseded
-        （core 默认实现物理 archive；外部实现可能仅更新索引）。
-
-        since_last（段作用域折叠，2026-07-21）：非 None 时归档池限定在「最后一条 active
-        该类型记录之后」——段边界折叠传 USER_PROMPT，短段免折残留的前段 raw 不被跨段
-        折入本摘要（防合并摘要抢锚到前一条 UP 之前）。该类型记录不存在 → 不限定。
-
-        排序契约（2026-07-21，实现方必须遵守）：段界搜索、归档池切分、锚点判定一律按
-        **渲染序 (timestamp, seq_no)**，与 recall 的 timestamp 序一致。不得用裸 seq_no——
-        存在 timestamp 回填、seq 更高的合法记录（L3 坍缩 UP，见 collapse_task_layer），
-        seq 序会把段界推到所有 raw 之后（摘要照写、raw 不折）。
-
-        锚点语义：摘要落「被折区起点之后第一条幸存事件之前」；段尾无幸存者则锚到被折段
-        末条事件位置（不用 now()，防迟到摘要越过新 USER_PROMPT）。
-        """
-        ...
-
-    @abstractmethod
-    async def supersede(
-        self,
-        event_ids: list[str],
-        ctx: ProviderContext,
-    ) -> int:
-        """把给定 event id 标记为 superseded（此后不再被 recall）。返回实际标记的条数。
-
-        语义判定留框架、provider 只按 id 执行。主要调用方：finalize 折 task 层末 raw 段、
-        fold_root_experience 折超 keep_last 顶层单元（agent 层 conversation turn + task 层
-        胶囊跨层一并折）、bg observe 替换 finish 对占位。已 superseded / 不存在的 id 跳过。
-        """
-        ...
-
-    # ── 工具 ──
-
-    @abstractmethod
-    async def count_recent(
-        self,
-        scope: MemoryAddress,
-        types: list[MemoryEventType],
-        ctx: ProviderContext,
-    ) -> int:
-        """计数（供 PrepareStep 估算消息数）。"""
-        ...
+    # ── 能力 ──
 
     @abstractmethod
     async def describe(self, ctx: ProviderContext) -> MemoryProviderInfo:
