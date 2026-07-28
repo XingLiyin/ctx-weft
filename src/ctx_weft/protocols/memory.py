@@ -17,7 +17,7 @@ from abc import abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from ctx_weft.protocols.context import ContentPart, ProviderContext
 
@@ -141,33 +141,74 @@ MemoryAddress = MemoryScope
 
 @dataclass
 class MemoryEvent:
-    """ingest 的输入：一条要写入的 memory 事件。"""
+    """ingest 的输入：一条要写入的 memory 事件。
 
-    type: MemoryEventType
-    scope: MemoryScope
-    content: str | list[ContentPart]
-    timestamp: datetime
-    # 以下字段有默认值
+    过渡形态（v2 P2b · 2026-07-27）：type（legacy 词汇）与 kind+layer（v2 词汇）二选一——
+    - legacy 构造：type 给定，行为逐字节不变（不做 kind 补全，归一化在读侧）；
+    - v2-native 构造：kind+layer 显式、type=None；须满足 §4 ingest 全址不变量
+      （TASK → scope 必携 task_id **且** agent_id；AGENT → agent_id；SESSION → 仅 session_id）。
+    全字段带默认值（既有调用点均为关键字构造）；scope/content/timestamp 缺失 → ValueError。
+    """
+
+    type: MemoryEventType | None = None
+    scope: MemoryScope | None = None
+    content: str | list[ContentPart] | None = None  # 必给；显式空串合法（占位回合）
+    timestamp: datetime | None = None
     # 调用方预生成 record id（v2 设计 §4 · 2026-07-27 增补，投影化前置）。
     # 给定 → provider 必须采用并按 id 幂等（重复 ingest = no-op）；None → provider 生成。
     id: str | None = None
+    # v2 词汇（设计 §2）：kind = 内容种类（memory_compat.MemoryKind），layer = 归属范围。
+    # 前向引用避免 memory ↔ memory_compat 循环 import。
+    kind: "Any | None" = None
+    layer: MemoryLayer | None = None
     role: Literal["user", "assistant", "system", "tool"] | None = None
     topic: str | None = None  # 用于 topic-style 事件（含父子 task 通信）
     causation_id: str | None = None  # 关联上游 event
     metadata: dict = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if self.type is None and self.kind is None:
+            raise ValueError("MemoryEvent requires type (legacy) or kind (v2)")
+        if self.scope is None:
+            raise ValueError("MemoryEvent.scope is required")
+        if self.content is None:
+            raise ValueError("MemoryEvent.content is required")  # 空串合法（占位回合）
+        if self.timestamp is None:
+            raise ValueError("MemoryEvent.timestamp is required")
+        if self.kind is not None:
+            # v2-native：layer 必须显式 + §4 全址不变量（legacy 构造不强制，迁移期宽松）
+            if self.layer is None:
+                raise ValueError("v2 MemoryEvent (kind given) requires explicit layer")
+            if self.layer is MemoryLayer.TASK:
+                if not (self.scope.task_id and self.scope.agent_id):
+                    raise ValueError(
+                        "TASK-scoped v2 event requires full address (task_id AND agent_id); "
+                        f"got {self.scope!r}")
+            elif self.layer is MemoryLayer.AGENT:
+                if not self.scope.agent_id:
+                    raise ValueError(
+                        f"AGENT-scoped v2 event requires agent_id; got {self.scope!r}")
+
 
 @dataclass
 class MemoryRecord:
-    """recall 返回的统一表示。"""
+    """recall 返回的统一表示。
+
+    过渡形态（v2 P2b）：legacy 行 type 非 None；v2 行 type=None、kind/layer 给定。
+    load_view 返回前经 normalize_view 统一重打 kind/layer/address（来源回显，
+    取代 metadata["task_id"] 打标——打标过渡期保留，读侧优先 address）。
+    """
 
     id: str
-    type: MemoryEventType
+    type: MemoryEventType | None
     content: str | list[ContentPart]
     timestamp: datetime
     role: Literal["user", "assistant", "system", "tool"] | None = None
     topic: str | None = None
     score: float | None = None  # 仅 recall_semantic 时填
+    kind: "Any | None" = None            # v2：memory_compat.MemoryKind（避循环 import 不注真型）
+    layer: MemoryLayer | None = None     # v2：归属范围
+    address: "MemoryScope | None" = None  # v2：来源回显（P4 类名换为 MemoryAddress 本体）
     metadata: dict = field(default_factory=dict)
 
 
