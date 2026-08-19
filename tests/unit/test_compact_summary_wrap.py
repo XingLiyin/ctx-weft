@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.assembler.sources._history import (
-    COMPACT_SUMMARY_WRAPPER_PREFIX, PROGRESS_SO_FAR_HEADING,
+    ASSISTANT_SUMMARY_NOTE, COMPACT_SUMMARY_WRAPPER_PREFIX, PROGRESS_SO_FAR_HEADING,
     record_to_history_block, wrap_compact_summary,
 )
 from ctx_weft.core.utils import estimate_tokens
@@ -45,7 +45,7 @@ def test_task_compact_summary_assistant_gets_progress_heading():
                        topic=None, metadata={"seq_no": 1, "task_id": "t_cur"})
     blk = record_to_history_block(rec, "agent_recall", 0, request=_req(), current_task_id="t_cur")
     assert not blk.content.startswith(COMPACT_SUMMARY_WRAPPER_PREFIX)
-    assert blk.content == f"{PROGRESS_SO_FAR_HEADING}\n### 会话目标\nX"
+    assert blk.content == f"{PROGRESS_SO_FAR_HEADING}\n### 会话目标\nX\n\n{ASSISTANT_SUMMARY_NOTE}"
     assert blk.metadata["role"] == "assistant"
 
 
@@ -56,8 +56,26 @@ def test_task_compact_summary_assistant_no_heading_for_cross_task_capsule():
                        timestamp=datetime(2026, 1, 1, tzinfo=UTC), role="assistant",
                        topic=None, metadata={"seq_no": 1, "task_id": "t_other"})
     blk = record_to_history_block(rec, "agent_recall", 0, request=_req(), current_task_id="t_cur")
-    assert blk.content == "### 会话目标\nX"
+    assert blk.content == f"### 会话目标\nX\n\n{ASSISTANT_SUMMARY_NOTE}"
     assert PROGRESS_SO_FAR_HEADING not in blk.content
+
+
+def test_assistant_summary_gets_trailing_note():
+    """assistant 身份的段摘要须带尾注：说明其为系统压缩产物、不应模仿该形式作答。
+    尾注在末尾（离下一条 user 消息最近），且不落库（只在渲染块上）。"""
+    rec = MemoryRecord(id="m1", type=T.TASK_COMPACT_SUMMARY, content="### 会话目标\nX",
+                       timestamp=datetime(2026, 1, 1, tzinfo=UTC), role="assistant",
+                       topic=None, metadata={"seq_no": 1, "task_id": "t_cur"})
+    blk = record_to_history_block(rec, "agent_recall", 0, request=_req(), current_task_id="t_cur")
+    assert blk.content.endswith(ASSISTANT_SUMMARY_NOTE)
+    assert rec.content == "### 会话目标\nX", "尾注只在渲染期，不得改记录本身"
+
+
+def test_user_role_summary_has_no_assistant_note():
+    """role=user 的旧摘要走前缀包装，不叠加 assistant 尾注（两套消歧义不重复）。"""
+    blk = record_to_history_block(_rec(T.TASK_COMPACT_SUMMARY, "### 会话目标\nX"),
+                                  "task_conversation", 0, request=_req())
+    assert ASSISTANT_SUMMARY_NOTE not in blk.content
 
 
 def test_plain_user_prompt_not_wrapped():
@@ -101,9 +119,10 @@ async def test_agent_recall_heading_only_for_current_task_summary():
                           token_counter=estimate_tokens)
     contents = {b.content for b in [x async for x in AgentRecallSource().fetch(req, deps)]}
 
-    assert f"{PROGRESS_SO_FAR_HEADING}\n本段进度X" in contents, "当前 task 段摘要须冠 Progress So Far"
-    assert "别的task进度Y" in contents, "跨 task 胶囊仍应渲染"
-    assert f"{PROGRESS_SO_FAR_HEADING}\n别的task进度Y" not in contents, "跨 task 胶囊不应冠标题"
+    # 两条都带 assistant 尾注（见 test_assistant_summary_gets_trailing_note），此处只看标题
+    assert f"{PROGRESS_SO_FAR_HEADING}\n本段进度X" in "\n".join(contents), "当前 task 段摘要须冠 Progress So Far"
+    assert any(c.startswith("别的task进度Y") for c in contents), "跨 task 胶囊仍应渲染"
+    assert f"{PROGRESS_SO_FAR_HEADING}\n别的task进度Y" not in "\n".join(contents), "跨 task 胶囊不应冠标题"
 
 
 class _Mem:

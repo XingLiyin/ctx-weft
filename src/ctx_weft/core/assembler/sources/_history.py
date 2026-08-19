@@ -26,6 +26,20 @@ COMPACT_SUMMARY_WRAPPER_PREFIX = (
 )
 
 
+# assistant 身份呈现的段摘要尾注：摘要形似一条正常回复，模型容易误认为「上一轮我就是这么
+# 答的」，于是沿用该形式继续输出摘要、不再调用工具。尾注置于文本末尾（离下一条 user 消息
+# 最近），说明其为系统压缩产物并要求继续执行。
+ASSISTANT_SUMMARY_NOTE = (
+    "［以上为系统对你此前工作过程的压缩摘要，用于延续上下文，并非你对用户的回复。"
+    "请据此继续执行当前任务、按需调用工具，不要模仿该摘要的形式作答］"
+)
+
+
+def annotate_assistant_summary(text: str) -> str:
+    """给 assistant 身份的段摘要追加尾注（渲染期，不落库）。"""
+    return f"{text}\n\n{ASSISTANT_SUMMARY_NOTE}"
+
+
 def wrap_compact_summary(text: str) -> str:
     """给 compaction summary 文本套显式包装前缀（渲染期，不落库）。"""
     return f"{COMPACT_SUMMARY_WRAPPER_PREFIX}{text}"
@@ -58,17 +72,15 @@ def record_to_history_block(
     # agent_recall 自行包装，不走此分支。
     if etype == MemoryEventType.TASK_COMPACT_SUMMARY and role == "user":
         text = wrap_compact_summary(text)
-    elif (
-        etype == MemoryEventType.TASK_COMPACT_SUMMARY
-        and role == "assistant"
-        and current_task_id is not None
-        and record.metadata.get("task_id") == current_task_id
-    ):
-        # 当前任务的「上一段执行复述」（max_turns / 边界 compact / plain_text 复用 act_recap）：
-        # 冠以统一标题，与 composer 非压缩 retry 进度对齐。判据按 task_id 匹配当前 task，而非
-        # source 名——AgentRecallSource（526859f 起统一召回）用同一 source="agent_recall" 承载
-        # 当前 task 段摘要与跨 task 胶囊，只有 task_id 能区分二者；跨 task 胶囊不冠此标题。
-        text = f"{PROGRESS_SO_FAR_HEADING}\n{text}"
+    elif etype == MemoryEventType.TASK_COMPACT_SUMMARY and role == "assistant":
+        if current_task_id is not None and record.metadata.get("task_id") == current_task_id:
+            # 当前任务的「上一段执行复述」（max_turns / 边界 compact / plain_text 复用 act_recap）：
+            # 冠以统一标题，与 composer 非压缩 retry 进度对齐。判据按 task_id 匹配当前 task，而非
+            # source 名——AgentRecallSource（526859f 起统一召回）用同一 source="agent_recall" 承载
+            # 当前 task 段摘要与跨 task 胶囊，只有 task_id 能区分二者；跨 task 胶囊不冠此标题。
+            text = f"{PROGRESS_SO_FAR_HEADING}\n{text}"
+        # 尾注对当前段摘要与跨 task 胶囊一视同仁：两者都以 assistant 身份出现，都会被模仿。
+        text = annotate_assistant_summary(text)
     md = {
         "role": role,
         "type": etype,
