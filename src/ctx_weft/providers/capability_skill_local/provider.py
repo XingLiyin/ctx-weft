@@ -25,6 +25,7 @@ from ctx_weft.protocols.capability import (
     SkillCapability,
     SkillCapabilityProvider,
     SkillDefinition,
+    qualify,
 )
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING
@@ -41,6 +42,28 @@ from ._parser import SkillFileMetadata, load_skill_md
 logger = logging.getLogger(__name__)
 
 PROVIDER_NAME = "local_skill"
+
+# skill_executor / control 的 LLM 可见名。此处不从 core.orchestrator import 那两组常量：
+# providers 层对 core 只依赖 core.utils 这一个叶子模块，不给它加上行依赖；名字由 qualify
+# 现拼，与那边同一口径（provider:tool → provider__tool）。
+_DELEGATE_TASK_NAME = qualify("control:delegate_task")
+_SKILL_READ_FILE_NAME = qualify("skill_executor:read_file")
+_SKILL_LIST_FILES_NAME = qualify("skill_executor:list_files")
+_SKILL_EXEC_SCRIPT_NAME = qualify("skill_executor:exec_script")
+
+# composer 把它渲染成 "#### local_skill skills" 标题下的引子段（见 composer._render_grouped_
+# _section）。受众是**还没绑 skill、正在挑 skill 派发**的 actor：它在这里第一次看到 skill 清单，
+# 需要知道 skill 不是工具、怎么触发、以及 skill 自带文件归 skill_executor 管。已绑定 skill 的
+# 任务另有 PrepareStep 的运行时说明（prepare._SKILL_SCRIPT_RUNTIME_NOTE），两处受众不同。
+SKILL_PROVIDER_DESCRIPTION = (
+    "Skills are instruction bundles, not callable tools — never invoke a skill name as a tool. "
+    f"To run one, delegate a task bound to it: {_DELEGATE_TASK_NAME}(..., "
+    f"skill_name='{PROVIDER_NAME}__<name>'). The skill's instructions are then loaded into that "
+    "task. Inside such a task, reach the skill's own files only through the skill_executor tools "
+    f"— {_SKILL_READ_FILE_NAME}, {_SKILL_LIST_FILES_NAME}, {_SKILL_EXEC_SCRIPT_NAME}. Never read, "
+    "search, or run skill files with the filesystem or shell tools: skill paths do not resolve "
+    "from the session workspace."
+)
 
 
 # ── 内部索引条目 ──────────────────────────────────────────────────────────────
@@ -79,6 +102,8 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
     """从本地目录实现 Level1（list）/ Level2（load_definition）/ Level3（files/resource/script）。"""
 
     name = PROVIDER_NAME
+    # 整组 skill 的用法说明，随 describe() 与 capability blocks 进 prompt。
+    description = SKILL_PROVIDER_DESCRIPTION
 
     def __init__(
         self,
