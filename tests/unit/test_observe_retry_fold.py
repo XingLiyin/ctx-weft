@@ -114,11 +114,14 @@ async def test_retry_short_segment_kept_raw():
 
 
 async def test_retry_long_segment_still_folds_when_threshold_set():
-    """超过阈值的 attempt 照常折（门只放行短段）。"""
+    """超过阈值的 attempt 照常折（门只放行短段）。
+
+    段内需 ≥2 条 LLM 回复：单回复段无条件免折（is_short_segment 的单回复门）。"""
     mem = InMemoryMemoryProvider()
     scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     await _ingest(mem, scope, T.USER_PROMPT, "原始请求", 0)
     await _ingest(mem, scope, T.LLM_RESPONSE, "本轮回复", 1, role="assistant")
+    await _ingest(mem, scope, T.LLM_RESPONSE, "本轮回复二", 2, role="assistant")
 
     state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"),
                             agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(

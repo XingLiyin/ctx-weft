@@ -59,8 +59,11 @@ _SEGMENT_RAW_TYPES = [
 
 
 async def is_short_segment(state: "LoopState", ctx: "LoopContext") -> bool:
-    """短段免折门：**当前段**（最后一条 active USER_PROMPT 之后）的 raw token ≤
-    short_segment_token_threshold？
+    """短段免折门：**当前段**（最后一条 active USER_PROMPT 之后）满足以下任一即为短段：
+
+    - 段内 LLM 回复（role=assistant 回合）≤ 1 条——**不看 token**：一条回复折成摘要
+      是净亏（recap 常比原文还长，且原文对下一轮信息更全），折它只是白花一次 LLM；
+    - 段内 raw token ≤ short_segment_token_threshold。
 
     「短 → 原文成胶囊」决策（finalize._is_short_leaf）在段级的判定，
     `_run_background_observe`（interactive/interrupt 边界）与
@@ -88,6 +91,11 @@ async def is_short_segment(state: "LoopState", ctx: "LoopContext") -> bool:
             seg_records = []  # 新段界：清空重计
             continue
         seg_records.append(r)
+    # 单回复段免折（2026-08-19）：token 再多也不折——见 docstring。
+    n_llm = sum(1 for r in seg_records
+                if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "assistant")
+    if n_llm <= 1:
+        return True
     seg_text = " ".join(
         r.content if isinstance(r.content, str) else content_to_text(r.content)
         for r in seg_records

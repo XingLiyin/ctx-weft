@@ -1,10 +1,11 @@
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from types import SimpleNamespace
 import ctx_weft.core.loop.steps.background_observe as bo
 from ctx_weft.core.events import EventType
-from ctx_weft.protocols import MemoryEventType
+from ctx_weft.protocols import MemoryEvent, MemoryEventType
 
 
 @pytest.mark.asyncio
@@ -99,12 +100,18 @@ async def test_short_segment_kept_raw_no_llm_call(fake_state_ctx, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_segment_over_threshold_folds_as_before(fake_state_ctx, monkeypatch):
-    """超过阈值的段照常折叠（门只放行短段）。"""
+    """超过阈值的段照常折叠（门只放行短段）。
+
+    段内需 ≥2 条 LLM 回复：单回复段无条件免折（is_short_segment 的单回复门）。"""
     state, ctx = fake_state_ctx
     state.agent.loop_config = SimpleNamespace(
         compact_keep_last=2, max_turns_per_observe=3,
         short_segment_token_threshold=1,  # 种子 raw 必然超过
     )
+    await ctx.memory.ingest(MemoryEvent(
+        type=MemoryEventType.LLM_RESPONSE, address=state.scope,
+        content="second llm", role="assistant",
+        timestamp=datetime(2024, 1, 1, 12, 0, 0, 4, tzinfo=UTC)), ctx.provider_ctx)
     from ctx_weft.core.orchestrator.control_capability import ControlResult
     called = {"react": False}
     async def _react(*a, **k):

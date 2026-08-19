@@ -127,6 +127,10 @@ async def test_is_short_segment_counts_only_current_segment():
     """段一 raw 超阈值、当前段 raw 极短 → 仍判 short（旧实现把段一也计入 → False）。"""
     mem = InMemoryMemoryProvider()
     await _seed_two_segments(mem, a1_content="长" * 4000)  # 段一 raw 远超阈值
+    # 当前段凑两条 LLM 回复：绕开单回复门，让 token 口径成为判别项
+    await mem.ingest(MemoryEvent(
+        type=MT.LLM_RESPONSE, address=_SCOPE, content="A2c 短",
+        timestamp=_ts(55), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
     assert await bo.is_short_segment(state, ctx) is True, \
@@ -143,6 +147,26 @@ async def test_is_short_segment_long_current_segment_not_short():
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
     assert await bo.is_short_segment(state, ctx) is False
+
+
+async def test_is_short_segment_single_llm_reply_is_short_regardless_of_tokens():
+    """当前段只有一条 LLM 回复 → 判 short，哪怕它远超 token 阈值。
+
+    一条回复折成摘要是净亏：recap 常比原文还长，原文对下一轮信息更全。"""
+    mem = InMemoryMemoryProvider()
+    await _seed_two_segments(mem)
+    await mem.ingest(MemoryEvent(
+        type=MT.USER_PROMPT, address=_SCOPE, content="UP3 第三问",
+        timestamp=_ts(60), role="user"), _PCTX)
+    await mem.ingest(MemoryEvent(
+        type=MT.LLM_RESPONSE, address=_SCOPE, content="长" * 4000,
+        timestamp=_ts(70), role="assistant"), _PCTX)
+    await mem.ingest(MemoryEvent(
+        type=MT.TOOL_RESULT, address=_SCOPE, content="工具" * 2000,
+        timestamp=_ts(80), role="tool"), _PCTX)
+    state, ctx = _short_seg_state_ctx(mem, threshold=400)
+
+    assert await bo.is_short_segment(state, ctx) is True,         "单条 LLM 回复的段不该折，无论多长"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
