@@ -45,6 +45,12 @@ def _tool_block(qname: str, desc: str, provider_name: str, provider_description:
     return _tool_block_kind(qname, desc, provider_name, provider_description, "tool")
 
 
+def _tool_block_schema(qname: str, schema: dict) -> ContextBlock:
+    blk = _tool_block_kind(qname, "描述不该进正文", "p", "", "tool")
+    blk.metadata["input_schema"] = schema
+    return blk
+
+
 def _identity_block(text: str) -> ContextBlock:
     return ContextBlock(id="id", source="identity", kind="identity", target="system",
                         content=text, priority=0, token_estimate=1, metadata={})
@@ -207,12 +213,71 @@ def test_tools_grouped_by_provider_with_description_and_prefix() -> None:
     # 每个 provider 段都带具体前缀提示（无论是否有 description）
     assert "prefix the tool name with `mcp__github__`" in section
     assert "prefix the tool name with `fs__`" in section
-    # 工具仍按 qualified 名列出
-    assert "- mcp__github__create_issue: Create an issue" in section
-    assert "- fs__bash_exec: Run a shell command" in section
-    # 描述出现在该 provider 标题之后、其工具之前
+    # 工具仍按 qualified 名列出，但只留名字 + 入参签名（描述随 tools 参数下发）
+    assert "- mcp__github__create_issue()" in section
+    assert "- fs__bash_exec()" in section
+    assert "Create an issue" not in section
+    # provider 描述出现在该 provider 标题之后、其工具之前
     assert section.index("#### mcp:github tools") < section.index("Manage GitHub issues") \
         < section.index("- mcp__github__create_issue")
+
+
+def test_tool_signature_marks_optional_params() -> None:
+    """入参签名：必填直出，可选带 ?，类型用短名。"""
+    blk = _tool_block_schema("p__create_issue", {
+        "type": "object",
+        "properties": {"repo": {"type": "string"}, "labels": {"type": "array"},
+                       "draft": {"type": "boolean"}},
+        "required": ["repo"],
+    })
+    section = DefaultComposer()._build_resources_section([blk])
+    assert "- p__create_issue(repo: str, labels?: list, draft?: bool)" in section
+    assert "描述不该进正文" not in section
+
+
+def test_tool_signature_empty_when_no_properties() -> None:
+    """无入参 / schema 缺失 → 空括号，不留噪声。"""
+    for schema in ({"type": "object"}, {}, None):
+        blk = _tool_block_schema("p__ping", schema)
+        assert "- p__ping()" in DefaultComposer()._build_resources_section([blk])
+
+
+def test_tool_signature_truncates_long_param_lists() -> None:
+    """入参过多时截断成省略号，避免一行撑爆索引。"""
+    props = {f"p{i}": {"type": "string"} for i in range(12)}
+    blk = _tool_block_schema("p__wide", {"properties": props, "required": list(props)})
+    section = DefaultComposer()._build_resources_section([blk])
+    assert "p7: str, …)" in section
+    assert "p8" not in section
+
+
+def test_tool_signature_union_and_unknown_types() -> None:
+    """联合类型取首个；未知/缺失 type 记 any。"""
+    blk = _tool_block_schema("p__odd", {
+        "properties": {"a": {"type": ["string", "null"]}, "b": {}, "c": {"type": "integer"}},
+        "required": ["a", "b", "c"],
+    })
+    section = DefaultComposer()._build_resources_section([blk])
+    assert "- p__odd(a: str, b: any, c: int)" in section
+
+
+def test_tools_section_carries_index_preamble() -> None:
+    """段首说明去哪找完整描述，免得模型以为索引就是全部。"""
+    section = DefaultComposer()._build_resources_section(
+        [_tool_block_schema("p__x", {})])
+    assert "optional params are marked `?`" in section
+    assert "tool definitions in this request" in section
+
+
+def test_skills_and_agents_keep_descriptions() -> None:
+    """skill / sub-agent 没有 tools 参数那条通路，描述仍须留在正文。"""
+    blocks = [
+        _tool_block_kind("local_skill__pdf", "Work with PDFs", "local_skill", "", "skill"),
+        _tool_block_kind("template_agent__planner", "Plans work", "template_agent", "", "agent"),
+    ]
+    section = DefaultComposer()._build_resources_section(blocks)
+    assert "- local_skill__pdf: Work with PDFs" in section
+    assert "- template_agent__planner: Plans work" in section
 
 
 def test_skills_grouped_by_provider_with_description_and_prefix() -> None:
@@ -310,7 +375,8 @@ def test_tools_without_provider_name_render_flat() -> None:
     blocks = [_cap_block("web_search", "tool", "search the web")]
     section = DefaultComposer()._build_resources_section(blocks)
     assert "### Available Tools" in section
-    assert "- web_search: search the web" in section
+    assert "- web_search()" in section
+    assert "search the web" not in section  # 描述不入正文
     assert "####" not in section  # 无 provider 分块标题
 
 
@@ -341,7 +407,9 @@ def test_observer_messages_inject_resources_and_keep_role() -> None:
     msgs = DefaultComposer()._build_observer_messages(blocks, request)
     user_msgs = [m for m in msgs if m.role == "user"]
     assert "### Available Tools" in user_msgs[0].content
-    assert "report the outcome" in user_msgs[0].content
+    # 条目只有名字 + 入参签名，描述随 tools 参数下发、不重复进正文
+    assert "- report_task_outcome()" in user_msgs[0].content
+    assert "report the outcome" not in user_msgs[0].content
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "OBSERVER ROLE" in joined
 

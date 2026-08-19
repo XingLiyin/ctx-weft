@@ -161,6 +161,13 @@ _CAPABILITIES_POINTER = (
     "Capabilities section of the current task message above.)"
 )
 
+# Available Tools 段的引子：正文只留「名字 + 入参形状」的索引，描述与完整 JSON Schema
+# 随请求的 tools 参数下发，两处都写就是同一份内容付两遍 token。
+_TOOLS_INDEX_PREAMBLE = (
+    "Listed as `name(param: type)` — optional params are marked `?`. "
+    "Full descriptions and parameter schemas come with the tool definitions in this request."
+)
+
 _RECOGNIZE_INTENT_INSTRUCTION = (
     "Now set this task's metadata: call `control__update_task_metadata` exactly once. Both `title` and "
     "`description` are REQUIRED and must be non-empty — always provide a best-effort value even if the "
@@ -225,6 +232,49 @@ def _finish_result_section(request) -> str:
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s")
+
+
+_JSON_TYPE_ABBR = {
+    "string": "str", "integer": "int", "number": "num", "boolean": "bool",
+    "array": "list", "object": "obj", "null": "null",
+}
+
+# 单个工具最多列几个参数：MCP 工具偶有几十个入参，全列会把索引撑爆，超出部分折成省略号。
+_MAX_SIGNATURE_PARAMS = 8
+
+
+def _abbr_type(spec: object) -> str:
+    """JSON Schema 的 type 字段 → 短名；联合类型取首个，缺失为 any。"""
+    if not isinstance(spec, dict):
+        return "any"
+    t = spec.get("type")
+    if isinstance(t, list):
+        t = t[0] if t else None
+    if not isinstance(t, str):
+        return "any"
+    return _JSON_TYPE_ABBR.get(t, t)
+
+
+def _compact_signature(input_schema: object) -> str:
+    """input_schema → ``a: str, b?: int`` 形式的紧凑入参签名（可选参数带 ?）。
+
+    工具的完整描述与 JSON Schema 随请求的 tools 参数一并下发，prompt 里这份清单只作索引：
+    留名字与参数形状，够模型判断「有没有这个能力、要准备什么」，细节去 tool 定义里看。
+    """
+    if not isinstance(input_schema, dict):
+        return ""
+    props = input_schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return ""
+    required = input_schema.get("required")
+    required = set(required) if isinstance(required, (list, set, tuple)) else set()
+    parts: list[str] = []
+    for pname, spec in list(props.items())[:_MAX_SIGNATURE_PARAMS]:
+        mark = "" if pname in required else "?"
+        parts.append(f"{pname}{mark}: {_abbr_type(spec)}")
+    if len(props) > _MAX_SIGNATURE_PARAMS:
+        parts.append("…")
+    return ", ".join(parts)
 
 
 def _is_named_skill(block: "ContextBlock", skill_name: str) -> bool:
@@ -643,6 +693,8 @@ class DefaultComposer(Composer):
             sections.append(self._render_grouped_section(
                 "### Available Tools (use them via tool calls)",
                 tools, action="calling", noun="tool", noun_plural="tools",
+                preamble=_TOOLS_INDEX_PREAMBLE,
+                signature=True,
             ))
         if agents:
             sections.append(self._render_grouped_section(
@@ -661,6 +713,7 @@ class DefaultComposer(Composer):
         noun: str,
         noun_plural: str,
         preamble: str | None = None,
+        signature: bool = False,
     ) -> str:
         """按 provider 分块渲染一个能力段（tools / skills / sub-agents 共用）。
 
@@ -668,9 +721,16 @@ class DefaultComposer(Composer):
         有 description 则写出，并附「引用时须带前缀 `<prefix>`」提示（prefix 由 provider 名
         qualify 得到，与下方条目名一致）。无 provider_name 的条目（旧路径/测试构造）平铺在
         标题下，保持向后兼容。
+
+        signature=True（tools）：条目渲染成 ``- name(a: str, b?: int)``，不带描述——
+        描述与完整 schema 随请求的 tools 参数下发，正文里再写一遍是纯重复。
+        signature=False（skills / sub-agents）：仍是 ``- name: 描述``，这两类没有
+        tools 参数那条通路，描述只能由正文承载。
         """
         def _line(b: "ContextBlock") -> str:
             name = b.metadata.get("capability_name", "?")
+            if signature:
+                return f"- {name}({_compact_signature(b.metadata.get('input_schema'))})"
             return f"- {name}: {content_to_text(b.content)}"
 
         ungrouped: list["ContextBlock"] = []
