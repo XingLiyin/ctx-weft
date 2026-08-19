@@ -119,10 +119,12 @@ async def test_close_writes_final_reply_anchor_with_note() -> None:
     found = await _anchors(mem, scope)
     assert len(found) == 1, f"末段 raw 折掉后应留一条最终回复锚点；实得 {len(found)}"
     anchor = found[0]
-    assert anchor.content == f"{FINAL_REPLY_NOTE.format(title='抽取配置解析')}\n\n{_REPLY}", \
-        f"锚点 = 提示词 + 空行 + outputs 正文；实得 {anchor.content!r}"
-    assert anchor.timestamp == _BASE + timedelta(seconds=5), \
-        "锚点须锚在被删末段最后一条 raw 的时刻（段内、早于 finish 对）"
+    from ctx_weft.core.loop.steps.finalize import FINAL_REPLY_CLOSING_NOTE
+    assert anchor.content == (
+        f"{FINAL_REPLY_NOTE.format(title='抽取配置解析')}\n\n{_REPLY}\n\n{FINAL_REPLY_CLOSING_NOTE}"
+    ), f"锚点 = 提示词 + outputs 正文 + 收束尾注；实得 {anchor.content!r}"
+    assert anchor.timestamp > _BASE + timedelta(seconds=5), \
+        "锚点须排在被删末段之后（落位见 test_anchor_sorts_after_the_segment_recap）"
     assert anchor.metadata.get("task_id") == "t1"
 
 
@@ -231,3 +233,104 @@ async def test_anchor_renders_as_plain_assistant_message() -> None:
     assert ASSISTANT_SUMMARY_NOTE not in block.content, "锚点不是摘要，不得贴摘要尾注"
     assert block.content == anchor.content, "锚点原样渲染，不加任何包装"
     assert block.priority == 6, "与 task 层胶囊同档"
+
+
+# ─── 6) 锚点排在本段 recap（finish 对）之后，且带收束尾注 ─────────────────────
+
+async def _agent_turns(mem, agent_id="ag1") -> list:
+    from ctx_weft.protocols import MemoryAddress
+    return await mem.load_view(
+        MemoryAddress(session_id="s1", task_id=None, agent_id=agent_id),
+        MemoryScope.AGENT, _pctx(), kinds=[MemoryKind.CONVERSATION_TURN])
+
+
+async def test_anchor_sorts_after_the_segment_recap() -> None:
+    """胶囊读起来须是「过程 recap → 最终回复」：锚点早于 finish 对时，模型先看到答复、
+    再看到复述，像是答完又重讲一遍。"""
+    mem = InMemoryMemoryProvider()
+    scope = _sc("t1")
+    await _seed_long_conv(mem, scope)
+
+    await _close(mem, _task(), scope)
+
+    anchor = (await _anchors(mem, scope))[0]
+    finish_ts = max(r.timestamp for r in await _agent_turns(mem))
+    assert anchor.timestamp > finish_ts, \
+        f"锚点须排在 finish 对之后；锚点 {anchor.timestamp} vs finish 对 {finish_ts}"
+
+
+async def test_anchor_carries_closing_note() -> None:
+    """尾注：告诉模型这条是该任务闭合时已交付的回复，别照抄、别当成此刻的答复。
+    段摘要有 ASSISTANT_SUMMARY_NOTE 收束，锚点是真回复，更需要。"""
+    mem = InMemoryMemoryProvider()
+    scope = _sc("t1")
+    await _seed_long_conv(mem, scope)
+
+    await _close(mem, _task(), scope)
+
+    from ctx_weft.core.loop.steps.finalize import FINAL_REPLY_CLOSING_NOTE
+    anchor = (await _anchors(mem, scope))[0]
+    assert anchor.content.endswith(FINAL_REPLY_CLOSING_NOTE), \
+        f"锚点须以收束尾注结尾；实得 …{anchor.content[-80:]!r}"
+    assert _REPLY in anchor.content
+
+
+async def test_anchor_does_not_jump_past_later_turns() -> None:
+    """延迟折叠：补删发生在 close 之后，其间父可能已有更晚回合。锚点须紧跟本 task 的
+    finish 对，不能用「补删那一刻」当时间戳漂到后续对话中间。"""
+    from ctx_weft.protocols import MemoryAddress
+    from ctx_weft.core.loop.steps.finalize import _supersede_final_raw_segment
+    mem = InMemoryMemoryProvider()
+    scope = _sc("t1")
+    await _seed_long_conv(mem, scope)
+    task = _task()
+
+    await _close(mem, task, scope, has_llm_summary=False)  # 占位 close：末段 raw 仍在
+    # 「更晚的父回合」须晚于 finish 对（close 用真实 now 铸），故按 finish 对的时刻推算
+    finish_ts = max(r.timestamp for r in await _agent_turns(mem))
+    later = finish_ts + timedelta(days=1)
+    await mem.ingest(MemoryEvent(
+        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
+        address=MemoryAddress(session_id="s1", task_id=None, agent_id="ag1"),
+        content="父在子任务之后又说了话", timestamp=later, role="assistant",
+        metadata={"origin_task_id": "other"},
+    ), _pctx())
+
+    await _supersede_final_raw_segment(mem, scope, _pctx(), task=task)  # bg 补删
+
+    anchor = (await _anchors(mem, scope))[0]
+    assert anchor.timestamp < later, \
+        f"锚点不得漂到本 task 之后的回合之后；锚点 {anchor.timestamp} vs 后续回合 {later}"
+
+
+async def test_late_bg_report_replacement_keeps_anchor_last() -> None:
+    """close 时已有真摘要（锚点当场写）后，bg 仍可能回来重写 finish 对。重写须复用占位
+    时间戳，否则 recap 会跳到锚点之后——胶囊又变成「先答复、后复述」。"""
+    from ctx_weft.core.loop.steps.background_observe import _replace_finish_report, pop_close_synth
+    mem = InMemoryMemoryProvider()
+    scope = _sc("t1")
+    await _seed_long_conv(mem, scope)
+    task = _task()
+
+    await _close(mem, task, scope, has_llm_summary=True)
+    anchor_ts = (await _anchors(mem, scope))[0].timestamp
+
+    synth = pop_close_synth("t1")
+    assert synth is not None, "前提：close 登记了 bg 替换槽"
+    tool_call_id, synth_scope, outcome, _raw_scope = synth
+    await _replace_finish_report(mem, _pctx(), synth_scope, "t1", tool_call_id,
+                                 "bg 真 recap", "bg 真 summary", outcome, task.title)
+
+    recap_ts = max(r.timestamp for r in await _agent_turns(mem))
+    assert recap_ts < anchor_ts, \
+        f"bg 重写后 recap 仍须早于锚点；recap {recap_ts} vs 锚点 {anchor_ts}"
+    turns = await _agent_turns(mem)
+    assert any("bg 真 recap" == r.content for r in turns), "前提：替换确实发生了"
+
+
+async def test_dispatch_ack_points_at_the_final_reply() -> None:
+    """同 agent 派发的 ack 是内联执行的导读。锚点现在排在 finish 对之后，导读若还说
+    「以 finish_task 收尾」，读者会以为 finish 对之后的锚点不属于这个子任务。"""
+    from ctx_weft.core.loop.steps.finalize import _dispatch_ack
+    ack = _dispatch_ack("抽取配置解析", "success")
+    assert "final reply" in ack.lower(), f"导读须提到末尾还有最终回复；实得 {ack!r}"

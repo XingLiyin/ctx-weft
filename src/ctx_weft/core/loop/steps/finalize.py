@@ -8,6 +8,7 @@ miniAgents 对齐版：
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
@@ -46,7 +47,8 @@ def _dispatch_ack(title: str, outcome: str) -> str:
     verdict = "FAILED" if outcome == "fail" else "completed"
     return (
         f"Sub-task '{title}' ran here — outcome: {verdict}. Its execution is inlined "
-        f"below, ending with its own {qualify('control:finish_task')}."
+        f"below, ending with its own {qualify('control:finish_task')} and the final reply "
+        "it delivered."
     )
 
 # 派发框的叙事工具名（仅出现在重建历史的 tool_calls 里，非可调用能力）。
@@ -286,6 +288,14 @@ FINAL_REPLY_NOTE = (
 FINAL_REPLY_NOTE_UNTITLED = (
     "[Final reply — the answer I delivered on finishing this task, verbatim; not a summary.]"
 )
+# 收束尾注：锚点是**真回复**，比段摘要更容易被读成「我刚刚就是这么答的」——紧随其后的往往是
+# 新的用户消息或另一个 task，没有收束就会照抄/续写它。作用与段摘要的 ASSISTANT_SUMMARY_NOTE
+# 对称，措辞同为方括号系统注解。
+FINAL_REPLY_CLOSING_NOTE = (
+    "[End of that final reply. It was delivered to the user when the task closed — do not repeat "
+    "it, do not imitate its form, and do not treat it as the answer to whatever is being asked "
+    "now.]"
+)
 
 
 def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
@@ -396,9 +406,32 @@ async def _supersede_final_raw_segment(memory, scope, provider_ctx, *, task=None
         last_ts = r.timestamp or last_ts
     if not ids:
         return
-    # 锚点锚在被删末段最后一条记录的时刻：留在段内、早于 close 时刻合成的 finish 对。
-    anchor = _final_reply_anchor(task, scope, last_ts)
+    anchor_ts = await _anchor_timestamp(memory, scope, task, last_ts, provider_ctx)
+    anchor = _final_reply_anchor(task, scope, anchor_ts)
     await memory.fold(ids, [anchor] if anchor else [], provider_ctx)  # 遗忘 + 锚点一次提交
+
+
+async def _anchor_timestamp(memory, scope, task, last_raw_ts, provider_ctx):
+    """锚点时刻 = max(末段最后一条 raw, **本 task** 在 agent 层的最晚记录) + 1µs。
+
+    排在 finish 对**之后**：胶囊要读成「过程 recap → 最终回复」。锚点若停在末段 raw 的时刻，
+    就排在 close 时刻铸的 finish 对之前，模型先看到答复、再看到对该答复过程的复述，像是答完
+    又重讲一遍。
+
+    取「本 task 在 agent 层的最晚记录」而不是 now：延迟折叠路径的补删发生在 close 之后，
+    其间父可能已有更晚的新回合，用 now 会让锚点漂进父的后续对话中间。按 origin_task_id 过滤
+    即只跟到自己的 finish/dispatch 对，紧随其后落位。
+    """
+    if task is None or last_raw_ts is None:
+        return last_raw_ts
+    view = await memory.load_view(
+        MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
+        MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    own_ts = [
+        as_utc(r.timestamp) for r in view
+        if (r.metadata or {}).get("origin_task_id") == task.id and r.timestamp
+    ]
+    return max([as_utc(last_raw_ts), *own_ts]) + timedelta(microseconds=1)
 
 
 def _final_reply_anchor(task, scope, timestamp):
@@ -414,7 +447,8 @@ def _final_reply_anchor(task, scope, timestamp):
     note = FINAL_REPLY_NOTE.format(title=title) if title else FINAL_REPLY_NOTE_UNTITLED
     return MemoryEvent(
         kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK, address=scope,
-        content=f"{note}\n\n{reply}", timestamp=timestamp, role="assistant",
+        content=f"{note}\n\n{reply}\n\n{FINAL_REPLY_CLOSING_NOTE}",
+        timestamp=timestamp, role="assistant",
         metadata={"task_id": task.id, "final_reply": True},
     )
 
