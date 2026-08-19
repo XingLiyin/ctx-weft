@@ -484,3 +484,15 @@ async def test_predispatch_gate_blocks_below_threshold() -> None:
         state, _loop_ctx(mem, _FakeTM({}), with_assembler=True), prompt_tokens=500)
     assert events == []
     assert await mem.recall_recent(sc, [T.TASK_COMPACT_SUMMARY, T.AGENT_COMPACT_SUMMARY], 100, _ctx()) == []
+
+
+def test_original_section_splits_on_legacy_and_current_delims() -> None:
+    """坍缩分隔标记改成英文后，存量库里带旧中文标记的 USER_PROMPT 仍须能切出「原始消息」节
+    ——切不出就会把「原文 + 旧摘要」整体当原文，再坍缩时无界增长。"""
+    from ctx_weft.core.loop.steps.compact import (
+        COLLAPSE_DELIM, LEGACY_COLLAPSE_DELIMS, _original_section,
+    )
+    for delim in (COLLAPSE_DELIM, *LEGACY_COLLAPSE_DELIMS):
+        assert _original_section(f"原始消息{delim}执行摘要正文") == "原始消息", \
+            f"未按分隔标记 {delim!r} 切出原文节"
+    assert _original_section("没有标记的整条消息") == "没有标记的整条消息"

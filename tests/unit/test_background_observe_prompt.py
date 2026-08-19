@@ -35,7 +35,7 @@ def test_background_cue_only_process_report_no_verdict():
     msgs = DefaultComposer()._build_background_observe_messages(_blocks(), _req("interrupt"))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "collect_process_report" in joined
-    assert "无需判断" in joined            # 抑制三态裁决
+    assert "do not judge success/retry/fail" in joined   # 抑制三态裁决
     assert _BACKGROUND_BOUNDARY_DESC["interrupt"] in joined
 
 
@@ -54,8 +54,8 @@ def test_dispatch_boundary_cue_is_not_normal_close_wording():
     assert "dispatch" in _BACKGROUND_BOUNDARY_DESC
     assert _BACKGROUND_BOUNDARY_DESC["dispatch"] in dispatch_cue
     # 语义：委派出去 + 挂起等待，而非"正常结束"
-    assert "委派" in _BACKGROUND_BOUNDARY_DESC["dispatch"]
-    assert "挂起" in _BACKGROUND_BOUNDARY_DESC["dispatch"]
+    assert "delegated" in _BACKGROUND_BOUNDARY_DESC["dispatch"]
+    assert "suspended" in _BACKGROUND_BOUNDARY_DESC["dispatch"]
 
 
 _FINISH_RESULT = "工作目录现状：仅一个 即兴演讲训练.pptx，无活跃项目。"
@@ -68,7 +68,7 @@ def test_close_boundary_injects_finish_result(boundary):
         _blocks(), _req(boundary, outputs=_FINISH_RESULT))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert _FINISH_RESULT in joined
-    assert "Actor 的最终产出" in joined
+    assert "Actor's Final Output" in joined
     # 注入段在 cue 之前（先看产出，再被要求总结）
     assert joined.index(_FINISH_RESULT) < joined.index("collect_process_report")
 
@@ -79,7 +79,7 @@ def test_non_close_boundary_does_not_inject_finish_result(boundary):
     msgs = DefaultComposer()._build_background_observe_messages(
         _blocks(), _req(boundary, outputs=_FINISH_RESULT))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
-    assert "Actor 的最终产出" not in joined
+    assert "Actor's Final Output" not in joined
 
 
 def test_close_boundary_no_outputs_no_injection():
@@ -87,7 +87,7 @@ def test_close_boundary_no_outputs_no_injection():
     msgs = DefaultComposer()._build_background_observe_messages(
         _blocks(), _req("finish", outputs=""))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
-    assert "Actor 的最终产出" not in joined
+    assert "Actor's Final Output" not in joined
 
 
 def test_observe_cue_mentions_both_fields():

@@ -509,8 +509,8 @@ async def _invoke_tool(tc: ToolCall, state: LoopState, ctx: LoopContext) -> Any:
     )
 
 
-INTERRUPTED_MARK = "[被用户打断]"
-CANCELLED_MARK = "[已取消]"
+INTERRUPTED_MARK = "[interrupted by the user]"
+CANCELLED_MARK = "[cancelled]"
 
 
 async def _ingest_synthetic_tool_result(

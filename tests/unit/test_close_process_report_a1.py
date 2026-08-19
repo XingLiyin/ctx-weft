@@ -360,5 +360,5 @@ def test_finish_tool_text_falls_back():
     # task_summary（process report）优先；空则退 act_recap；都空给占位（不掺 outputs——outputs 在 call 入参）
     assert _finish_tool_text("综合 process report", "recap", "success") == "综合 process report"
     assert _finish_tool_text("", "recap", "success") == "recap"
-    assert _finish_tool_text("", "", "success") == "(本段无更多总结)"
-    assert _finish_tool_text("", "", "fail") == "(无最终产出)"
+    assert _finish_tool_text("", "", "success") == "(nothing further to report for this segment)"
+    assert _finish_tool_text("", "", "fail") == "(no final output)"

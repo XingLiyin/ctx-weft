@@ -296,7 +296,8 @@ def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
     for cand in (task_summary, act_recap):
         if cand and cand.strip():
             return cand
-    return "(无最终产出)" if outcome == "fail" else "(本段无更多总结)"
+    return ("(no final output)" if outcome == "fail"
+            else "(nothing further to report for this segment)")
 
 
 def _descendant_task_ids(root_id: str, task_manager) -> set[str]:
