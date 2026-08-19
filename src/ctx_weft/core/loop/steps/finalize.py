@@ -310,7 +310,22 @@ def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
             else "(nothing further to report for this segment)")
 
 
+# recap 槽的收束尾注：它是 agent 层普通 assistant 回合，拿不到段摘要那条尾注
+# （_history.annotate_assistant_summary 只贴 TASK_COMPACT_SUMMARY），而形态上同样像
+# 「我上一轮就是这么答的」，同样会被模仿。与 FINAL_REPLY_CLOSING_NOTE 一并夹住胶囊：
+# 前者说「这段是过程」，后者说「那段答复已经交付过了」。
+PROCESS_RECAP_NOTE = (
+    "[The above is a system-written recap of how this task was carried out, kept for context — "
+    "it is not your reply to the user. Do not imitate its form when you answer.]"
+)
+
 _RECAP_PLACEHOLDER = "(no process recap for this segment)"
+
+
+def _recap_block(act_recap: str) -> str:
+    """recap 槽正文 = 过程复述 + 收束尾注（正文为空时用占位，注解照贴）。"""
+    body = (act_recap or "").strip() or _RECAP_PLACEHOLDER
+    return f"{body}\n\n{PROCESS_RECAP_NOTE}"
 
 
 def _final_reply_block(title: str, reply: str) -> str:
@@ -354,13 +369,13 @@ def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outco
 
     if reply:
         return [
-            turn(act_recap.strip() or _RECAP_PLACEHOLDER, base, "assistant", {}),
+            turn(_recap_block(act_recap), base, "assistant", {}),
             turn(_final_reply_block(title, reply), base + timedelta(microseconds=1),
                  "assistant", {"tool_calls": call, "final_reply": True}),
             turn(report, base + timedelta(microseconds=2), "tool", {"tool_call_id": tool_call_id}),
         ]
     return [
-        turn(act_recap, base, "assistant", {"tool_calls": call}),
+        turn(_recap_block(act_recap), base, "assistant", {"tool_calls": call}),
         turn(report, base, "tool", {"tool_call_id": tool_call_id}),
     ]
 

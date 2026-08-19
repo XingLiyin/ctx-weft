@@ -95,7 +95,7 @@ async def test_synthesize_writes_only_finish_pair():
     assert len(tool_calls) == 1
     assert tool_calls[0]["name"].endswith("finish_task")
     # finish 对 assistant 槽 = act_recap（此处 4th 参传入 "最终答复"）；finish_task 无参标记
-    assert caps[-2].content == "最终答复"
+    assert caps[-2].content.startswith("最终答复")  # + PROCESS_RECAP_NOTE
     assert tool_calls[0]["input"] == {}
     assert caps[-1].role == "tool"
     # tool 槽 = `[task: <title>] ` 归属前缀 + 过程报告

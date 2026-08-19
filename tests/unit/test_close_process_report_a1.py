@@ -120,7 +120,7 @@ async def test_a1_slot_hit_uses_background_report() -> None:
     )
     finish_asst = await _get_finish_asst(mem, asc)
     assert finish_asst is not None, "finish assistant record must exist"
-    assert finish_asst.content == "好报告_act", (
+    assert finish_asst.content.startswith("好报告_act"), (
         f"slot hit: finish assistant content must be act_recap '好报告_act'; got {finish_asst.content!r}"
     )
 
@@ -164,7 +164,7 @@ async def test_a1_placeholder_then_async_replace() -> None:
     finish_asst_placeholder = await _get_finish_asst(mem, asc)
     assert finish_asst_placeholder is not None, "placeholder finish assistant must exist"
     # 反转契约：finish 对 assistant 槽 = act_recap（过程复述，≠ 答复）
-    assert finish_asst_placeholder.content == "占位 act_recap", (
+    assert finish_asst_placeholder.content.startswith("占位 act_recap"), (
         f"placeholder assistant content must be '占位 act_recap'; got {finish_asst_placeholder.content!r}"
     )
 
@@ -211,7 +211,7 @@ async def test_a1_placeholder_then_async_replace() -> None:
         f"bg replace); got {new_finish_tool.content!r}"
     )
     # 反转契约：finish 对 assistant 槽 = act_recap（bg 刷新后的 "好报告_act"，≠ 答复）
-    assert new_finish_asst.content == "好报告_act", (
+    assert new_finish_asst.content.startswith("好报告_act"), (
         f"new finish assistant content must be act_recap '好报告_act'; got {new_finish_asst.content!r}"
     )
     assert new_finish_tool.metadata.get("tool_call_id") == placeholder_tool_call_id, (
@@ -289,7 +289,7 @@ async def test_slot_hit_replaces_report_no_raw_mirror() -> None:
     )
     finish_asst = await _get_finish_asst(mem, asc)
     # 反转契约：finish 对 assistant 槽 = act_recap（"真实段_act"，≠ 答复）
-    assert finish_asst.content == "真实段_act", (
+    assert finish_asst.content.startswith("真实段_act"), (
         f"slot hit: assistant content must be act_recap '真实段_act'; got {finish_asst.content!r}"
     )
     # user 锚点 + 最终段 raw 留 task 层
@@ -340,7 +340,7 @@ async def test_synthesize_dispatch_pair_two_segments() -> None:
     asst = [r for r in turns if r.role == "assistant"]
     tool = [r for r in turns if r.role == "tool"]
     # assistant 槽 = act_recap（过程复述）；答复由内联 body / blackboard 承载，不在此重复
-    assert asst and asst[0].content == "本段我做了 A、B"
+    assert asst and asst[0].content.startswith("本段我做了 A、B")
     call = asst[0].metadata["tool_calls"][0]
     assert call["name"].endswith("finish_task")
     # finish_task 退化为无参收尾标记（不再塞 input.result）
