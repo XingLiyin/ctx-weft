@@ -124,15 +124,21 @@ def pop_close_synth(task_id: str) -> tuple | None:
 
 async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
                                  tool_call_id: str, act_recap: str, task_summary: str,
-                                 outcome: str, title: str) -> None:
-    """supersede finish 对的 assistant + tool 两条占位，按新 act_recap / task_summary 重写。
+                                 outcome: str, title: str, *, final_reply: str = "") -> None:
+    """supersede 本 task 的 finish 对占位，按新 act_recap / task_summary 整体重写。
     按 (tool_call_id + origin_task_id) 定位，不再靠 'Process Report:' 文本（spec 2026-06-30 §2.4）。
 
     title：归属 task 的标题，用于重建 tool 槽的 `[task: …]` 前缀（与 finalize 合成占位时同源，
-    见 finalize._finish_report_prefix）。本函数整条重写 tool 槽，不传就会把占位里的归属标记抹掉。"""
-    from ctx_weft.core.loop.steps.finalize import _finish_report_prefix
-    from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope
-    from ctx_weft.protocols.capability import qualify
+    见 finalize._finish_report_prefix）。本函数整条重写 tool 槽，不传就会把占位里的归属标记抹掉。
+
+    final_reply：延迟折叠路径下末段 raw 此刻才被折，答复要随之补进锚点槽——占位是两槽，
+    重写后升成三槽（recap / 答复+finish_task / 报告，见 finalize.build_finish_slots）。空则
+    保持原形态；若占位已是三槽（close 即折路径），沿用已有锚点正文，**不得**被 act_recap 冲掉
+    ——按 tool_call_id 找 assistant 命中的正是锚点那条。"""
+    from datetime import timedelta
+
+    from ctx_weft.core.loop.steps.finalize import build_finish_slots
+    from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope
 
     turns = await memory.load_view(
         MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
@@ -144,36 +150,40 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
     tool = [r for r in turns
             if r.role == "tool" and r.metadata.get("origin_task_id") == task_id
             and r.metadata.get("tool_call_id") == tool_call_id]
+    # 三槽占位里 recap 是**不挂 tool_calls** 的那条 assistant（挂着的是锚点）。
+    recap_slot = [r for r in turns
+                  if r.role == "assistant" and r.metadata.get("origin_task_id") == task_id
+                  and not r.metadata.get("tool_calls")]
     if not asst and not tool:
         logger.warning("A1 _replace_finish_report: no finish 对 for task=%s tcid=%s; skip (best-effort)",
                        task_id, tool_call_id)
         return
 
-    anchor = (asst or tool)[0]
-    ts = anchor.timestamp
-    parent_task_id = anchor.metadata.get("parent_task_id")
-    tool_calls = (asst[0].metadata.get("tool_calls") if asst
-                  else [{"id": tool_call_id, "name": qualify("control:finish_task"), "input": {}}])
+    first = (recap_slot or asst or tool)[0]
+    ts = first.timestamp
+    parent_task_id = first.metadata.get("parent_task_id")
+    # 已是三槽 → 沿用已有锚点正文（它已含前后两条注解，直接透传会被再包一层）。
+    existing_anchor = next((r for r in asst if r.metadata.get("final_reply")), None)
 
-    report_prefix = _finish_report_prefix(title, outcome)
-    summary_text = task_summary if (task_summary and task_summary.strip()) else act_recap
-    # finish 对 assistant 槽 = act_recap（过程复述，≠ 答复）：答复由内联 body / blackboard 承载，
-    # 避免与之重复（spec 2026-07-01 反转契约）。
-    # v2 P3d：占位对遗忘 + 新对写入一次原子 fold（关旧「占位已删而真报告未写」窗口）。
-    await memory.fold([r.id for r in (*asst, *tool)], [
-        MemoryEvent(
+    # 槽位形态与 close 合成同源（finalize.build_finish_slots）：答复在则三槽、不在则两槽。
+    # v2 P3d：占位遗忘 + 新槽写入一次原子 fold（关旧「占位已删而真报告未写」窗口）。
+    events = build_finish_slots(
+        scope=scope, task_id=task_id, parent_task_id=parent_task_id, title=title,
+        outcome=outcome, act_recap=act_recap, task_summary=task_summary,
+        final_reply=final_reply, base=ts, tool_call_id=tool_call_id,
+    )
+    if existing_anchor is not None and not (final_reply or "").strip():
+        # 占位已是三槽而本次没带答复：锚点正文原样保留，只换 recap 与报告两槽。
+        events = [e for e in events if not e.metadata.get("final_reply")]
+        events.insert(1, MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
-            content=act_recap, timestamp=ts, role="assistant",
+            content=existing_anchor.content, timestamp=ts + timedelta(microseconds=1),
+            role="assistant",
             metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
-                      "tool_calls": tool_calls},
-        ),
-        MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
-            content=f"{report_prefix}{summary_text}", timestamp=ts, role="tool",
-            metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
-                      "tool_call_id": tool_call_id},
-        ),
-    ], provider_ctx)
+                      "tool_calls": existing_anchor.metadata.get("tool_calls"),
+                      "final_reply": True},
+        ))
+    await memory.fold([r.id for r in (*recap_slot, *asst, *tool)], events, provider_ctx)
 
 
 def _clear_pending(t: asyncio.Task, tid: str) -> None:
@@ -279,10 +289,16 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                     synth = pop_close_synth(state.task.id)  # sync check-and-clear（无 await）
                     if synth is not None:
                         tool_call_id, scope, outcome, raw_fold_scope = synth
+                        from ctx_weft.core.loop.steps.finalize import _output_text
                         await _replace_finish_report(
                             ctx.memory, ctx.provider_ctx, scope, state.task.id,
                             tool_call_id, act_recap, task_summary, outcome,
                             state.task.title or "",
+                            # raw 此刻才折 → 答复随之补进锚点槽（占位两槽升三槽）
+                            # getattr 兜底：本路径异常被整段吞掉并「保 raw」，缺字段的
+                            # task 替身若在此炸 AttributeError，真报告就永远替换不上去。
+                            final_reply=(_output_text(getattr(state.task, "outputs", None))
+                                         if raw_fold_scope is not None else ""),
                         )
                         if raw_fold_scope is not None:
                             # 真摘要已替换进 finish 对 → 补删末段 raw（延迟折叠收口，
@@ -291,8 +307,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                                 _supersede_final_raw_segment,
                             )
                             await _supersede_final_raw_segment(
-                                ctx.memory, raw_fold_scope, ctx.provider_ctx,
-                                task=state.task)
+                                ctx.memory, raw_fold_scope, ctx.provider_ctx)
                     else:
                         # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
                         # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。

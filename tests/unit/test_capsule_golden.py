@@ -29,6 +29,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, finalize_task_memory
+from ctx_weft.protocols.capability import qualify
 from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
@@ -41,6 +42,7 @@ T = MemoryEventType
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 SESSION = "s1"
+FINISH_TASK_NAME = qualify("control:finish_task")
 
 
 # ─── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -547,11 +549,19 @@ async def test_H3_recursive_nesting_grandchild() -> None:
                        and not (r.role == "assistant"
                                 and any(tc.get("name") == START_TASK_NAME
                                         for tc in (r.metadata.get("tool_calls") or [])))]
-        assert len(finish_pair) == 2, (
-            f"task-resident: each task must contribute exactly the finish pair (2 turns); "
+        # 有最终产出的 task → 三槽（recap / 答复+finish_task / 报告），见
+        # finalize.build_finish_slots；无产出才退回两槽。
+        assert len(finish_pair) == 3, (
+            f"task-resident: each task must contribute exactly the finish slots (3 turns); "
             f"origin={origin} got {[(c.role, (c.content or '')[:40]) for c in finish_pair]}"
         )
-        assert {c.role for c in finish_pair} == {"assistant", "tool"}
+        ordered = sorted(finish_pair, key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
+        assert [c.role for c in ordered] == ["assistant", "assistant", "tool"]
+        finish_pair = ordered
+        assert finish_pair[1].metadata.get("final_reply") is True, "答复槽在中间"
+        assert any(tc.get("name") == FINISH_TASK_NAME
+                   for tc in (finish_pair[1].metadata.get("tool_calls") or [])), (
+            "finish_task 挂在答复那条")
         tool_turn = [c for c in finish_pair if c.role == "tool"][0]
         assert "Process Report:" in tool_turn.content
 
@@ -657,13 +667,15 @@ async def test_H4_cross_agent_isolation() -> None:
         child_scope_agent, [T.AGENT_CONVERSATION_TURN], 200, _pctx(),
     )
     child_turns_by_origin = [r for r in child_agent_turns if r.metadata.get("origin_task_id") == child_id]
-    assert len(child_turns_by_origin) == 2, (
-        f"cross-agent child must have its own finish pair (2 turns) in child agent scope (ag2); "
+    assert len(child_turns_by_origin) == 3, (
+        f"cross-agent child must have its own finish slots (3 turns) in child agent scope (ag2); "
         f"found {[(r.role, r.content[:40]) for r in child_agent_turns]}"
     )
 
-    # finish 对（assistant finish_task + tool Process Report）
-    assert {r.role for r in child_turns_by_origin} == {"assistant", "tool"}
+    # finish 槽位（recap / 答复+finish_task / tool Process Report）
+    child_turns_by_origin = sorted(child_turns_by_origin,
+                                   key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
+    assert [r.role for r in child_turns_by_origin] == ["assistant", "assistant", "tool"]
     child_finish_tool = [r for r in child_turns_by_origin if r.role == "tool"]
     assert child_finish_tool and "Process Report:" in child_finish_tool[0].content
 

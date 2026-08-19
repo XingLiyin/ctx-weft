@@ -310,6 +310,61 @@ def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
             else "(nothing further to report for this segment)")
 
 
+_RECAP_PLACEHOLDER = "(no process recap for this segment)"
+
+
+def _final_reply_block(title: str, reply: str) -> str:
+    """锚点正文 = 前置提示 + 答复原文 + 收束尾注。"""
+    note = (FINAL_REPLY_NOTE.format(title=title.strip()) if (title or "").strip()
+            else FINAL_REPLY_NOTE_UNTITLED)
+    return f"{note}\n\n{reply.strip()}\n\n{FINAL_REPLY_CLOSING_NOTE}"
+
+
+def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outcome: str,
+                       act_recap: str, task_summary: str, final_reply: str,
+                       base, tool_call_id: str) -> list[MemoryEvent]:
+    """finish 对的槽位事件。close 合成与 bg 事后重写共用，保证两处形态永远一致。
+
+    `final_reply` 非空 → **三槽**：
+
+        assistant  act_recap                      过程复述，不挂 tool_calls
+        assistant  提示 + 答复 + 收束尾注           锚点，finish_task{} 挂这条（metadata.final_reply）
+        tool       process report                 与锚点配对
+
+    finish_task 挂在答复那条、而不是 recap 那条：重建出的历史因此示范了 finish_task 的真实
+    用法——答复正文与收尾调用同一轮（见 control_capability.finish_task 的说明）。挂在 recap
+    上等于反过来教模型「收尾时正文写过程复述」。
+
+    `final_reply` 空 → **两槽**（旧形态，finish_task 挂 recap）。用于末段 raw 没被折的场景：
+    short leaf 原文即胶囊、observer 护栏兜底导致 outputs 为空、以及占位 close（raw 还在，
+    等 bg 真报告落地时再由 _replace_finish_report 升三槽）。
+
+    时间戳按槽位递增 1µs：顺序由写入点定死，不依赖后续记录的时刻。
+    """
+    md = {"origin_task_id": task_id, "parent_task_id": parent_task_id}
+    call = [{"id": tool_call_id, "name": qualify("control:finish_task"), "input": {}}]
+    report = f"{_finish_report_prefix(title, outcome)}"              f"{_finish_tool_text(task_summary, act_recap, outcome)}"
+    reply = (final_reply or "").strip()
+
+    def turn(content, ts, role, extra):
+        return MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
+            content=content, timestamp=ts, role=role, metadata={**md, **extra},
+        )
+
+    if reply:
+        return [
+            turn(act_recap.strip() or _RECAP_PLACEHOLDER, base, "assistant", {}),
+            turn(_final_reply_block(title, reply), base + timedelta(microseconds=1),
+                 "assistant", {"tool_calls": call, "final_reply": True}),
+            turn(report, base + timedelta(microseconds=2), "tool", {"tool_call_id": tool_call_id}),
+        ]
+    return [
+        turn(act_recap, base, "assistant", {"tool_calls": call}),
+        turn(report, base, "tool", {"tool_call_id": tool_call_id}),
+    ]
+
+
 def _descendant_task_ids(root_id: str, task_manager) -> set[str]:
     """BFS over children_of → 该 task 名下所有后代 task_id（不含自身）。"""
     if task_manager is None:
@@ -371,7 +426,7 @@ async def finalize_task_memory(memory, state, task, mem_content: str, outcome: s
     )
 
 
-async def _supersede_final_raw_segment(memory, scope, provider_ctx, *, task=None) -> None:
+async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
     """长任务 close：supersede task 层**末段** raw（active LLM_RESPONSE/TOOL_INVOCATION/
     TOOL_RESULT），保留 USER_PROMPT + TASK_COMPACT_SUMMARY 锚点（spec 2026-06-28 §3.2）。
 
@@ -385,72 +440,20 @@ async def _supersede_final_raw_segment(memory, scope, provider_ctx, *, task=None
     补删（background_observe close 回调）。**不另产新 TASK_COMPACT_SUMMARY**（避免与 finish
     对重复）。幂等：raw 已删则 no-op。
 
-    最终回复锚点（task）：末段 raw 里含收尾回合正文 = task.outputs 的主体，删掉它胶囊里就
-    再无最终答复——finish 对的 assistant 槽是无参收尾标记、tool 槽按约定「不掺 outputs」，
-    跨 agent 子任务的产出只到父的 dispatch result，root task 的产出则完全不进任何 prompt。
-    故删 raw 的同一次 fold 里补写一条 assistant 锚点（提示词 + outputs 正文），二者原子提交。
-    outputs 为空（observer 护栏兜底 / 机械退出）→ 只删不写。short leaf 不走本函数，原文即胶囊。
-    """
+"""
     from ctx_weft.protocols import MemoryKind, MemoryScope
     # v2 P3a：升序视图（对话 + audit，SUMMARY 锚点天然不在），段界 = 末条 role=user 回合。
     view = await memory.load_view(
         scope, MemoryScope.TASK, provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT])
     ids: list[str] = []
-    last_ts = None
     for r in view:
         if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user":
             ids = []  # 新段界：只删末段
             continue
         ids.append(r.id)
-        last_ts = r.timestamp or last_ts
-    if not ids:
-        return
-    anchor_ts = await _anchor_timestamp(memory, scope, task, last_ts, provider_ctx)
-    anchor = _final_reply_anchor(task, scope, anchor_ts)
-    await memory.fold(ids, [anchor] if anchor else [], provider_ctx)  # 遗忘 + 锚点一次提交
-
-
-async def _anchor_timestamp(memory, scope, task, last_raw_ts, provider_ctx):
-    """锚点时刻 = max(末段最后一条 raw, **本 task** 在 agent 层的最晚记录) + 1µs。
-
-    排在 finish 对**之后**：胶囊要读成「过程 recap → 最终回复」。锚点若停在末段 raw 的时刻，
-    就排在 close 时刻铸的 finish 对之前，模型先看到答复、再看到对该答复过程的复述，像是答完
-    又重讲一遍。
-
-    取「本 task 在 agent 层的最晚记录」而不是 now：延迟折叠路径的补删发生在 close 之后，
-    其间父可能已有更晚的新回合，用 now 会让锚点漂进父的后续对话中间。按 origin_task_id 过滤
-    即只跟到自己的 finish/dispatch 对，紧随其后落位。
-    """
-    if task is None or last_raw_ts is None:
-        return last_raw_ts
-    view = await memory.load_view(
-        MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
-        MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
-    own_ts = [
-        as_utc(r.timestamp) for r in view
-        if (r.metadata or {}).get("origin_task_id") == task.id and r.timestamp
-    ]
-    return max([as_utc(last_raw_ts), *own_ts]) + timedelta(microseconds=1)
-
-
-def _final_reply_anchor(task, scope, timestamp):
-    """最终回复锚点事件；无 task / 无 outputs / 无时间戳 → None（只删不写）。"""
-    if task is None or timestamp is None:
-        return None
-    # getattr 兜底：bg 补删路径（background_observe）在异常里静默吞掉一切并「保 raw」，
-    # 缺字段的 task 替身若在此炸出 AttributeError，末段 raw 就永远折不掉。
-    reply = _output_text(getattr(task, "outputs", None)).strip()
-    if not reply:
-        return None
-    title = (getattr(task, "title", "") or "").strip()
-    note = FINAL_REPLY_NOTE.format(title=title) if title else FINAL_REPLY_NOTE_UNTITLED
-    return MemoryEvent(
-        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK, address=scope,
-        content=f"{note}\n\n{reply}\n\n{FINAL_REPLY_CLOSING_NOTE}",
-        timestamp=timestamp, role="assistant",
-        metadata={"task_id": task.id, "final_reply": True},
-    )
+    if ids:
+        await memory.fold(ids, [], provider_ctx)  # 纯遗忘（v2 P3d）；答复由 finish 对的锚点槽承载
 
 
 async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
@@ -474,6 +477,8 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     is_own_root = (task.parent_task_id is None) or cross_agent
     # raw 所在层恒为本 task 的 task scope（≠ 嵌套 finish 对的 parent scope）
     raw_fold_scope = state.scope if (not short and not has_llm_summary) else None
+    # 末段 raw 会被折 → 答复须由 finish 对的锚点槽承载；short leaf 不折（原文即胶囊）→ 不塞。
+    final_reply = "" if short else _output_text(task.outputs)
 
     # 1) bubble 到 parent scope（dispatch marker 所在 scope）
     # 判据只看 parent_task_id + mem_content：origin_tool_call_id 是瞬态字段，重启重建后为 None，
@@ -511,12 +516,13 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             # 嵌套合成子自己的 finish 对（写进共享 agent scope，@close 时刻）
             await _synthesize_dispatch_pair(
                 memory, parent_scope, task, act_recap, task_summary, outcome, ctx.provider_ctx,
-                raw_fold_scope=raw_fold_scope)
+                raw_fold_scope=raw_fold_scope, final_reply=final_reply)
 
     # 2) 自身 finish 对：own root（session 根或跨 agent 根）close 时无条件在 own scope 合成
     if is_own_root and mem_content:
-        await _synthesize_dispatch_pair(memory, state.scope, task, act_recap, task_summary, outcome, ctx.provider_ctx,
-                                        raw_fold_scope=raw_fold_scope)
+        await _synthesize_dispatch_pair(memory, state.scope, task, act_recap, task_summary, outcome,
+                                        ctx.provider_ctx, raw_fold_scope=raw_fold_scope,
+                                        final_reply=final_reply)
         events.append(make_event(
             state, EventType.MEMORY_INGESTED,
             payload={"memory_event_type": MemoryEventType.AGENT_CONVERSATION_TURN.value,
@@ -528,7 +534,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     # 仅当 finish 对已承载 LLM 真摘要时同步删；占位（has_llm_summary=False）由 raw_fold_scope
     # 走延迟折叠——slot 命中在 _synthesize_dispatch_pair 内已补删，登记路径等 bg 替换后补删。
     if not short and has_llm_summary:
-        await _supersede_final_raw_segment(memory, state.scope, ctx.provider_ctx, task=task)
+        await _supersede_final_raw_segment(memory, state.scope, ctx.provider_ctx)
     return events
 
 
@@ -601,7 +607,7 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
 
 async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_summary: str,
                                     outcome: str, provider_ctx, *, register_bg: bool = True,
-                                    raw_fold_scope=None) -> None:
+                                    raw_fold_scope=None, final_reply: str = "") -> None:
     """close 合成 agent 层 finish 对（spec 2026-06-30 两段化）：
     assistant{content=act_recap + finish_task 调用} / tool{content=task_summary 综合总结}。
     own-root：占位先写，bg close observe 产新两段后经 _replace_finish_report 替换（A1）。
@@ -620,43 +626,30 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     )
     base = now_utc()
     tool_call_id = generate_id("tcall")
-    # 反转契约（spec 2026-07-01）：答复正文由「内联的 task 层 body / blackboard mem_content」承载，
-    # 故 finish 对的 assistant 槽用 act_recap（过程复述，≠ 答复），避免与内联 body 的答复重复；
-    # finish_task 退化为无参收尾标记（不再把答复塞进 input.result）。tool 槽 = task_summary（process report）。
-    report_prefix = _finish_report_prefix(task.title, outcome)
-    summary_text = _finish_tool_text(task_summary, act_recap, outcome)
-
-    await memory.ingest(
-        MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
-            content=act_recap, timestamp=base, role="assistant",
-            metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
-                      "tool_calls": [{"id": tool_call_id,
-                                      "name": qualify("control:finish_task"),
-                                      "input": {}}]},
-        ),
-        provider_ctx,
-    )
-    await memory.ingest(
-        MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
-            content=f"{report_prefix}{summary_text}", timestamp=base, role="tool",
-            metadata={"origin_task_id": task.id, "parent_task_id": task.parent_task_id,
-                      "tool_call_id": tool_call_id},
-        ),
-        provider_ctx,
-    )
+    # 占位 close（raw_fold_scope 非 None = 末段 raw 还没折）先写两槽：答复此刻仍在 raw 里，
+    # 提前塞锚点会让它出现两遍；等 bg 真报告落地、raw 真被折时由 _replace_finish_report 升三槽。
+    embed_reply = "" if raw_fold_scope is not None else final_reply
+    # 反转契约（spec 2026-07-01）：finish_task 退化为无参收尾标记（答复不再塞进 input.result）。
+    # 槽位形态见 build_finish_slots：有答复 → recap / 答复+finish_task / 报告 三槽，
+    # 无答复 → recap+finish_task / 报告 两槽。
+    for event in build_finish_slots(
+        scope=scope, task_id=task.id, parent_task_id=task.parent_task_id,
+        title=task.title or "", outcome=outcome, act_recap=act_recap,
+        task_summary=task_summary, final_reply=embed_reply, base=base,
+        tool_call_id=tool_call_id,
+    ):
+        await memory.ingest(event, provider_ctx)
 
     if register_bg:
         bg = pop_close_report(task.id)
         if bg is not None:
             bg_recap, bg_summary = bg
             await _replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
-                                         bg_recap, bg_summary, outcome, task.title or "")
+                                         bg_recap, bg_summary, outcome, task.title or "",
+                                         final_reply=(final_reply if raw_fold_scope else ""))
             if raw_fold_scope is not None:
                 # 真摘要已落地（slot 命中替换完成）→ 立即补删末段 raw（延迟折叠的即时分支）
-                await _supersede_final_raw_segment(memory, raw_fold_scope, provider_ctx,
-                                                   task=task)
+                await _supersede_final_raw_segment(memory, raw_fold_scope, provider_ctx)
         else:
             register_close_synth(task.id, tool_call_id, scope, outcome, raw_fold_scope)
 

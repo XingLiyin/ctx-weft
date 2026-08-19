@@ -111,14 +111,10 @@ async def test_long_close_supersedes_final_raw_keeps_anchors() -> None:
         act_recap="成功收尾", task_summary="",
     )
 
-    # 末 raw 段被 supersede（active LLM/TOOL/INVOCATION 不再 recall）；补写的最终回复锚点
-    # 同为 assistant 回合（词汇 LLM_RESPONSE），是折叠产物而非残留 raw，故排除后再断言。
-    raw = [
-        r for r in await mem.recall_recent(
-            tsc, [T.LLM_RESPONSE, T.TOOL_RESULT, T.TOOL_INVOCATION], 500, _pctx(),
-        )
-        if not r.metadata.get("final_reply")
-    ]
+    # 末 raw 段被 supersede（active LLM/TOOL/INVOCATION 不再 recall）
+    raw = await mem.recall_recent(
+        tsc, [T.LLM_RESPONSE, T.TOOL_RESULT, T.TOOL_INVOCATION], 500, _pctx(),
+    )
     assert raw == [], f"long task: final raw segment must be superseded; got {raw!r}"
 
     # USER_PROMPT + TASK_COMPACT_SUMMARY 锚点保留
@@ -131,8 +127,9 @@ async def test_long_close_supersedes_final_raw_keeps_anchors() -> None:
     summaries = [a for a in anchors if a.type == T.TASK_COMPACT_SUMMARY]
     assert len(summaries) == 1 and "段①" in summaries[0].content
 
-    # agent 层 finish 对仍在（Task 1）
+    # agent 层 finish 槽位仍在（Task 1）：有产出 → recap / 答复+finish_task / 报告 三槽
     caps = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
-    assert len(caps) == 2
-    asst = [c for c in caps if c.role == "assistant"][0]
-    assert asst.metadata["tool_calls"][0]["name"].endswith("finish_task")
+    assert len(caps) == 3
+    reply_slot = [c for c in caps if c.metadata.get("final_reply")][0]
+    assert reply_slot.metadata["tool_calls"][0]["name"].endswith("finish_task")
+    assert "大功告成" in reply_slot.content
