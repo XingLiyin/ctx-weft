@@ -111,10 +111,14 @@ async def test_long_close_supersedes_final_raw_keeps_anchors() -> None:
         act_recap="成功收尾", task_summary="",
     )
 
-    # 末 raw 段被 supersede（active LLM/TOOL/INVOCATION 不再 recall）
-    raw = await mem.recall_recent(
-        tsc, [T.LLM_RESPONSE, T.TOOL_RESULT, T.TOOL_INVOCATION], 500, _pctx(),
-    )
+    # 末 raw 段被 supersede（active LLM/TOOL/INVOCATION 不再 recall）；补写的最终回复锚点
+    # 同为 assistant 回合（词汇 LLM_RESPONSE），是折叠产物而非残留 raw，故排除后再断言。
+    raw = [
+        r for r in await mem.recall_recent(
+            tsc, [T.LLM_RESPONSE, T.TOOL_RESULT, T.TOOL_INVOCATION], 500, _pctx(),
+        )
+        if not r.metadata.get("final_reply")
+    ]
     assert raw == [], f"long task: final raw segment must be superseded; got {raw!r}"
 
     # USER_PROMPT + TASK_COMPACT_SUMMARY 锚点保留
