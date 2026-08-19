@@ -124,8 +124,6 @@ async def test_dispatch_boundary_recap_e2e():
     assert "DISPATCH段摘要" in contents, \
         f"父 task 层必须有 dispatch 段摘要（派发前 raw 的折叠产物），实得 {contents}"
 
-    # 最终回复锚点（close 折末段 raw 时补写）同为 assistant 回合，是折叠产物不是残留 raw
-    raws = [r for r in await memory.recall_recent(
+    raws = await memory.recall_recent(
         scope, [MemoryEventType.LLM_RESPONSE], 100, pctx)
-        if not r.metadata.get("final_reply")]
     assert raws == [], f"派发前 raw 应已被折掉/胶囊化，实得 {[r.content for r in raws]}"
