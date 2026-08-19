@@ -276,9 +276,22 @@ def _finish_report_prefix(title: str, outcome: str) -> str:
     return "".join(f"{p} " for p in parts)
 
 
+# 最终回复锚点（close 折末段 raw 时补位）：反转契约下答复正文是收尾回合的普通消息，
+# 随末段 raw 一起被删；锚点把它留在 task 层胶囊里。提示词用 assistant 第一人称，与
+# 「以上为系统压缩摘要」的尾注互不交叉（各自只描述自己那条消息的正文）。
+FINAL_REPLY_NOTE = (
+    "[Final reply for task '{title}' — the answer I delivered on finishing it, "
+    "verbatim; not a summary.]"
+)
+FINAL_REPLY_NOTE_UNTITLED = (
+    "[Final reply — the answer I delivered on finishing this task, verbatim; not a summary.]"
+)
+
+
 def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
     """finish 对 tool 槽内容 = task_summary（process report）。R2 兜底：空则退 act_recap，
-    再空给占位。**不掺 outputs**——最终输出在 finish_task 的 result 入参，tool 槽不重复它。
+    再空给占位。**不掺 outputs**——最终输出由 task 层的最终回复锚点承载
+    （见 _supersede_final_raw_segment），tool 槽只讲过程、不重复它。
     绝不返回空串（避免空 tool 回合 / 400）。"""
     for cand in (task_summary, act_recap):
         if cand and cand.strip():
@@ -347,7 +360,7 @@ async def finalize_task_memory(memory, state, task, mem_content: str, outcome: s
     )
 
 
-async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
+async def _supersede_final_raw_segment(memory, scope, provider_ctx, *, task=None) -> None:
     """长任务 close：supersede task 层**末段** raw（active LLM_RESPONSE/TOOL_INVOCATION/
     TOOL_RESULT），保留 USER_PROMPT + TASK_COMPACT_SUMMARY 锚点（spec 2026-06-28 §3.2）。
 
@@ -360,6 +373,12 @@ async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
     finish 对已承载 LLM 真摘要 → close 时同步删；占位 finish 对 → 推迟到 bg 替换真摘要后
     补删（background_observe close 回调）。**不另产新 TASK_COMPACT_SUMMARY**（避免与 finish
     对重复）。幂等：raw 已删则 no-op。
+
+    最终回复锚点（task）：末段 raw 里含收尾回合正文 = task.outputs 的主体，删掉它胶囊里就
+    再无最终答复——finish 对的 assistant 槽是无参收尾标记、tool 槽按约定「不掺 outputs」，
+    跨 agent 子任务的产出只到父的 dispatch result，root task 的产出则完全不进任何 prompt。
+    故删 raw 的同一次 fold 里补写一条 assistant 锚点（提示词 + outputs 正文），二者原子提交。
+    outputs 为空（observer 护栏兜底 / 机械退出）→ 只删不写。short leaf 不走本函数，原文即胶囊。
     """
     from ctx_weft.protocols import MemoryKind, MemoryScope
     # v2 P3a：升序视图（对话 + audit，SUMMARY 锚点天然不在），段界 = 末条 role=user 回合。
@@ -367,13 +386,36 @@ async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
         scope, MemoryScope.TASK, provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT])
     ids: list[str] = []
+    last_ts = None
     for r in view:
         if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user":
             ids = []  # 新段界：只删末段
             continue
         ids.append(r.id)
-    if ids:
-        await memory.fold(ids, [], provider_ctx)  # 纯遗忘（v2 P3d）
+        last_ts = r.timestamp or last_ts
+    if not ids:
+        return
+    # 锚点锚在被删末段最后一条记录的时刻：留在段内、早于 close 时刻合成的 finish 对。
+    anchor = _final_reply_anchor(task, scope, last_ts)
+    await memory.fold(ids, [anchor] if anchor else [], provider_ctx)  # 遗忘 + 锚点一次提交
+
+
+def _final_reply_anchor(task, scope, timestamp):
+    """最终回复锚点事件；无 task / 无 outputs / 无时间戳 → None（只删不写）。"""
+    if task is None or timestamp is None:
+        return None
+    # getattr 兜底：bg 补删路径（background_observe）在异常里静默吞掉一切并「保 raw」，
+    # 缺字段的 task 替身若在此炸出 AttributeError，末段 raw 就永远折不掉。
+    reply = _output_text(getattr(task, "outputs", None)).strip()
+    if not reply:
+        return None
+    title = (getattr(task, "title", "") or "").strip()
+    note = FINAL_REPLY_NOTE.format(title=title) if title else FINAL_REPLY_NOTE_UNTITLED
+    return MemoryEvent(
+        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK, address=scope,
+        content=f"{note}\n\n{reply}", timestamp=timestamp, role="assistant",
+        metadata={"task_id": task.id, "final_reply": True},
+    )
 
 
 async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
@@ -451,7 +493,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     # 仅当 finish 对已承载 LLM 真摘要时同步删；占位（has_llm_summary=False）由 raw_fold_scope
     # 走延迟折叠——slot 命中在 _synthesize_dispatch_pair 内已补删，登记路径等 bg 替换后补删。
     if not short and has_llm_summary:
-        await _supersede_final_raw_segment(memory, state.scope, ctx.provider_ctx)
+        await _supersede_final_raw_segment(memory, state.scope, ctx.provider_ctx, task=task)
     return events
 
 
@@ -578,7 +620,8 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
                                          bg_recap, bg_summary, outcome, task.title or "")
             if raw_fold_scope is not None:
                 # 真摘要已落地（slot 命中替换完成）→ 立即补删末段 raw（延迟折叠的即时分支）
-                await _supersede_final_raw_segment(memory, raw_fold_scope, provider_ctx)
+                await _supersede_final_raw_segment(memory, raw_fold_scope, provider_ctx,
+                                                   task=task)
         else:
             register_close_synth(task.id, tool_call_id, scope, outcome, raw_fold_scope)
 
