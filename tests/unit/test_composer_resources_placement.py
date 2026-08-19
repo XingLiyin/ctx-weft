@@ -230,6 +230,68 @@ def test_skills_grouped_by_provider_with_description_and_prefix() -> None:
     assert "- local_skill__pdf: Work with PDFs" in section
 
 
+def test_bound_skill_dropped_from_list_others_kept() -> None:
+    """当前 task 绑了某个 skill：清单里去掉它（正文已在 ## Instructions for the current task），
+    其余 skill 保留——它们是派发给子任务的候选。"""
+    blocks = [
+        _tool_block_kind("local_skill__pdf", "Work with PDFs", "local_skill", "", "skill"),
+        _tool_block_kind("local_skill__csv", "Work with CSVs", "local_skill", "", "skill"),
+    ]
+    section = DefaultComposer()._build_resources_section(
+        blocks, current_skill_name="local_skill__pdf")
+    assert "local_skill__pdf" not in section
+    assert "- local_skill__csv: Work with CSVs" in section
+    assert "### Available Skills (assign to tasks where appropriate)" in section
+
+
+def test_bound_skill_is_only_skill_drops_whole_section() -> None:
+    """绑定的 skill 是唯一一个 → 整段 Available Skills 消失（不留空标题）。"""
+    blocks = [_tool_block_kind("local_skill__pdf", "Work with PDFs", "local_skill", "", "skill")]
+    section = DefaultComposer()._build_resources_section(
+        blocks, current_skill_name="local_skill__pdf")
+    assert "Available Skills" not in section
+
+
+def test_directive_presence_alone_no_longer_hides_skills() -> None:
+    """判据是 skill 名，不是「有没有 directive 块」：没传 skill 名时清单原样渲染。"""
+    blocks = [
+        _tool_block_kind("local_skill__pdf", "Work with PDFs", "local_skill", "", "skill"),
+        _directive_block("skill 正文"),
+    ]
+    section = DefaultComposer()._build_resources_section(blocks)
+    assert "- local_skill__pdf: Work with PDFs" in section
+
+
+def test_same_bare_name_across_providers_only_bound_one_dropped() -> None:
+    """同名不同 provider：只剔掉绑定的那个 qualified 名，另一个 provider 的同名 skill 保留。"""
+    blocks = [
+        _tool_block_kind("local_skill__pdf", "Local PDFs", "local_skill", "", "skill"),
+        _tool_block_kind("mcp__docs__pdf", "Remote PDFs", "mcp:docs", "", "skill"),
+    ]
+    section = DefaultComposer()._build_resources_section(
+        blocks, current_skill_name="local_skill__pdf")
+    assert "- mcp__docs__pdf: Remote PDFs" in section
+    assert "local_skill__pdf" not in section
+
+
+def test_bare_skill_name_matches_nothing() -> None:
+    """裸名不作判据：它在 get_by_qualified_name 下查不到 skill 定义、正文没进 prompt，
+    此时再把条目从清单里藏掉是双输（跨 provider 还会误伤同名 skill）。"""
+    blocks = [_tool_block_kind("local_skill__pdf", "Work with PDFs", "local_skill", "", "skill")]
+    section = DefaultComposer()._build_resources_section(blocks, current_skill_name="pdf")
+    assert "- local_skill__pdf: Work with PDFs" in section
+
+
+def test_skill_name_matched_via_capability_id_when_name_absent() -> None:
+    """block 没带 capability_name 时按 qualify(capability_id) 折算，provider 段不丢。"""
+    blk = _tool_block_kind("", "Work with PDFs", "local_skill", "", "skill")
+    blk.metadata.pop("capability_name")
+    blk.metadata["capability_id"] = "local_skill:pdf"
+    section = DefaultComposer()._build_resources_section(
+        [blk], current_skill_name="local_skill__pdf")
+    assert "Available Skills" not in section
+
+
 def test_subagents_grouped_by_provider_keep_delegate_preamble() -> None:
     blocks = [
         _tool_block_kind("template_agent__planner", "Plans work", "template_agent",

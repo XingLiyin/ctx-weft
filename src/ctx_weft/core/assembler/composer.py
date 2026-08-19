@@ -227,6 +227,22 @@ def _finish_result_section(request) -> str:
 _HEADING_RE = re.compile(r"^(#{1,6})\s")
 
 
+def _is_named_skill(block: "ContextBlock", skill_name: str) -> bool:
+    """capability block 是否就是名为 skill_name 的那个 skill。
+
+    只认 qualified 名（``provider__name``），与 PrepareStep 加载 skill 正文时用的
+    capability_cache.get_by_qualified_name 同一口径——两个决定（正文进不进 prompt、
+    条目从不从清单里剔除）由同一个键决定，不会一边命中一边落空。
+
+    不接受裸名兜底：裸名跨 provider 撞车（``local_skill:pdf`` 与 ``mcp:skills:pdf``
+    都叫 pdf），一剔就是一片；且裸名在 get_by_qualified_name 下本就查不到 skill 定义，
+    正文根本没进 prompt，此时再把条目藏掉是双输。
+    """
+    md = block.metadata
+    name = md.get("capability_name") or qualify(str(md.get("capability_id", "")))
+    return name == skill_name
+
+
 def _shift_markdown_headings(md: str, base_level: int) -> str:
     """把 md 内的标题层级整体下移，使最浅一级标题成为 base_level 的子级（base_level+1）。
 
@@ -441,7 +457,8 @@ class DefaultComposer(Composer):
         #     前缀内，不再每回合随动态末条重付整段 token；末条只留一行 _CAPABILITIES_POINTER
         #     保住生成点附近的 recency 提示（tools 的可调用性另有 API tools 参数兜底）。
         directive_text = self._build_directive_section(blocks)
-        capabilities_text = self._build_capabilities_section(blocks)
+        capabilities_text = self._build_capabilities_section(
+            blocks, current_skill_name=getattr(request, "extra", {}).get("skill_name", ""))
         if getattr(request, "purpose", None) == "act":
             # directive 落到「当前 task」的 user message（紧跟任务上下文之后），即 history 里末条
             # user_prompt——而不是整个 message 列表的第一条 user（可能是更早的、经 agent_recall
@@ -596,7 +613,9 @@ class DefaultComposer(Composer):
         # 回合承载（续跑兜底仅 purpose=act 注入，facet 的历史可以 assistant/tool 收尾）。
         return self._append_to_last_user(messages, "\n\n".join(sections))
 
-    def _build_resources_section(self, blocks: list["ContextBlock"]) -> str:
+    def _build_resources_section(
+        self, blocks: list["ContextBlock"], *, current_skill_name: str = "",
+    ) -> str:
         """从 capabilities blocks 按 kind 分组渲染（miniAgents 风格）。
 
         三类（skills / tools / sub-agents）统一按 provider 分块（分级标题 + provider
@@ -607,11 +626,15 @@ class DefaultComposer(Composer):
         tools = [b for b in cap_blocks if b.metadata.get("capability_kind") == "tool"]
         agents = [b for b in cap_blocks if b.metadata.get("capability_kind") == "agent"]
 
-        # 如果有 skill_instructions（directive），跳过 skill 列表渲染（避免重复）
-        has_directive = any(b.kind == "directive" for b in blocks)
+        # 当前 task 已绑定的 skill：正文整段进了 ## Instructions for the current task，
+        # 列表里再列一遍是重复，故从清单中剔除；其余 skill 保留——它们是派发给子任务的候选，
+        # 绑了一个 skill 不该让模型看不见别的。判据是 skill 名（task.settings.skill_name，
+        # 与 capability_name = qualify(cap.id) 同一口径），不是「有没有 directive 块」。
+        if current_skill_name:
+            skills = [b for b in skills if not _is_named_skill(b, current_skill_name)]
 
         sections: list[str] = []
-        if skills and not has_directive:
+        if skills:
             sections.append(self._render_grouped_section(
                 "### Available Skills (assign to tasks where appropriate)",
                 skills, action="assigning", noun="skill", noun_plural="skills",
@@ -687,9 +710,12 @@ class DefaultComposer(Composer):
                 lines.append(_line(b))
         return "\n".join(lines)
 
-    def _build_capabilities_section(self, blocks: list["ContextBlock"]) -> str:
+    def _build_capabilities_section(
+        self, blocks: list["ContextBlock"], *, current_skill_name: str = "",
+    ) -> str:
         """Capabilities（skills/tools/agents）段，带 ## Capabilities 引导标题。空时返回 ""。"""
-        resources_section = self._build_resources_section(blocks)
+        resources_section = self._build_resources_section(
+            blocks, current_skill_name=current_skill_name)
         if not resources_section:
             return ""
         return (
