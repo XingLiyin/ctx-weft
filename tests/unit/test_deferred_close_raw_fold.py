@@ -244,7 +244,7 @@ async def test_bg_replace_success_folds_raw(monkeypatch, fake_state_ctx) -> None
     turns = await ctx.memory.recall_recent(
         state.scope, [T.AGENT_CONVERSATION_TURN], 100, ctx.provider_ctx)
     asst = [r for r in turns if r.role == "assistant"]
-    assert asst and asst[0].content == "真报告act", "finish 对应已被 bg 真报告替换"
+    assert asst and asst[0].content.startswith("真报告act"), "finish 对应已被 bg 真报告替换"
     raw = await ctx.memory.recall_recent(
         state.scope, [T.LLM_RESPONSE, T.TOOL_RESULT], 100, ctx.provider_ctx)
     assert raw == [], "真摘要落地后应按 raw_fold_scope 补删末段 raw"

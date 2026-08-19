@@ -93,7 +93,7 @@ async def test_same_agent_started_task_ack_replaced_and_nested_finish_pair() -> 
         r for r in recs if r.role == "assistant" and r.metadata.get("origin_task_id") == "c1"
     ]
     assert len(finish_assistant) == 1
-    assert finish_assistant[0].content == "Task was cancelled before completion."
+    assert finish_assistant[0].content.startswith("Task was cancelled before completion.")
     tool_calls = finish_assistant[0].metadata.get("tool_calls") or []
     assert any(tc.get("name", "").endswith("finish_task") for tc in tool_calls)
 

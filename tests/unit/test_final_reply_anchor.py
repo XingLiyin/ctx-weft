@@ -128,8 +128,8 @@ async def test_close_writes_recap_then_reply_then_report() -> None:
     assert len(turns) == 3, f"长任务 close 应写三槽；实得 {[(r.role, r.content[:20]) for r in turns]}"
     recap, anchor, report = turns
     assert (recap.role, anchor.role, report.role) == ("assistant", "assistant", "tool")
-    assert recap.content == "recap" and not _has_finish_call(recap), \
-        "recap 槽只放过程复述、不挂 finish_task"
+    assert recap.content.startswith("recap") and not _has_finish_call(recap), \
+        "recap 槽只放过程复述（+ 收束尾注）、不挂 finish_task"
     assert _has_finish_call(anchor), "finish_task{} 必须挂在答复那条消息上"
     assert _REPLY in anchor.content and anchor.metadata.get("final_reply") is True
     assert report.metadata.get("tool_call_id") == \
@@ -217,7 +217,7 @@ async def test_deferred_close_upgrades_to_three_slots_on_bg_report() -> None:
     turns = await _agent_turns(mem)
     assert len(turns) == 3, f"bg 报告已到 → 升三槽；实得 {[(r.role, r.content[:24]) for r in turns]}"
     recap, anchor, report = turns
-    assert recap.content == "bg 真 recap", "recap 槽换成 bg 真报告"
+    assert recap.content.startswith("bg 真 recap"), "recap 槽换成 bg 真报告"
     assert "bg 真 summary" in report.content
     assert _REPLY in anchor.content and _has_finish_call(anchor)
 
@@ -242,7 +242,7 @@ async def test_bg_replacement_does_not_clobber_the_anchor() -> None:
     turns = await _agent_turns(mem)
     assert len(turns) == 3, f"替换后仍是三槽；实得 {[(r.role, r.content[:24]) for r in turns]}"
     recap, anchor, report = turns
-    assert recap.content == "bg 真 recap"
+    assert recap.content.startswith("bg 真 recap")
     assert _REPLY in anchor.content and _has_finish_call(anchor), "锚点不得被 recap 冲掉"
     assert "bg 真 summary" in report.content
 
@@ -302,3 +302,55 @@ async def test_closed_capsule_summary_has_no_progress_heading() -> None:
     assert own.content.startswith(PROGRESS_SO_FAR_HEADING), "当前 task 自己的段摘要仍要冠标题"
     assert PROGRESS_SO_FAR_HEADING not in other.content, \
         f"跨 task（闭合胶囊）不得冠 Progress So Far；实得 {other.content!r}"
+
+
+# ─── recap 槽的收束尾注 ──────────────────────────────────────────────────────
+
+async def test_recap_slot_carries_closing_note() -> None:
+    """recap 槽是 agent 层普通 assistant 回合，拿不到段摘要那条尾注
+    （annotate_assistant_summary 只贴 TASK_COMPACT_SUMMARY）。它形似「我上一轮就是这么答的」，
+    同样需要一句系统注解说明它是过程复述、不是答复。"""
+    from ctx_weft.core.loop.steps.finalize import PROCESS_RECAP_NOTE
+    mem = InMemoryMemoryProvider()
+    scope = _sc("t1")
+    await _seed_long_conv(mem, scope)
+
+    await _close(mem, _task(), scope)
+
+    recap = (await _agent_turns(mem))[0]
+    assert recap.content.startswith("recap"), "复述正文仍在最前"
+    assert recap.content.endswith(PROCESS_RECAP_NOTE), \
+        f"recap 槽须以系统注解收束；实得 {recap.content!r}"
+
+
+async def test_two_slot_recap_also_carries_the_note() -> None:
+    """两槽形态下 recap 槽同样会被模仿（它还挂着 finish_task），一视同仁。"""
+    from ctx_weft.core.loop.steps.finalize import PROCESS_RECAP_NOTE
+    mem = InMemoryMemoryProvider()
+    scope = _sc("t1")
+    await _seed_long_conv(mem, scope)
+
+    await _close(mem, _task(outputs=None), scope)
+
+    turns = await _agent_turns(mem)
+    assert len(turns) == 2
+    assert turns[0].content.endswith(PROCESS_RECAP_NOTE)
+
+
+async def test_bg_rewritten_recap_keeps_the_note() -> None:
+    """bg 事后用真报告重写 recap 槽时，注解不能丢（两处形态共用 build_finish_slots）。"""
+    from ctx_weft.core.loop.steps.background_observe import _replace_finish_report, pop_close_synth
+    from ctx_weft.core.loop.steps.finalize import PROCESS_RECAP_NOTE
+    mem = InMemoryMemoryProvider()
+    scope = _sc("t1")
+    await _seed_long_conv(mem, scope)
+    task = _task()
+
+    await _close(mem, task, scope, has_llm_summary=True)
+    tool_call_id, synth_scope, outcome, _raw = pop_close_synth("t1")
+    await _replace_finish_report(mem, _pctx(), synth_scope, "t1", tool_call_id,
+                                 "bg 真 recap", "bg 真 summary", outcome, task.title)
+
+    recap = (await _agent_turns(mem))[0]
+    assert recap.content.startswith("bg 真 recap")
+    assert recap.content.endswith(PROCESS_RECAP_NOTE)
