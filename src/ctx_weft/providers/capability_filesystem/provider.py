@@ -363,23 +363,13 @@ async def write_file(
     """Create a file, or overwrite it entirely if it already exists.
     Parent directories are auto-created; to change part of an existing file,
     use edit_file instead.
-    Read this before you write anything. You do NOT get to decide whether
-    to write a large file in one shot — you don't. This is a HARD, NON-NEGOTIABLE
-    rule that applies in EVERY scenario, for EVERY task, EVERY time you touch a
-    non-trivial file. If you cram a whole file body into a single write_file
-    call, you are DOING IT WRONG — full stop. Do not rationalize it. Do not tell
-    yourself "this file is short" or "I already know exactly what to write" or
-    "just this once" — that reasoning is WRONG and it is exactly how output gets
-    truncated and work gets destroyed. Your confidence is IRRELEVANT. The rule
-    still applies. Obey it: (1) FIRST call write_file with a minimal skeleton
-    ONLY — structure and nothing else (signatures, section headers, placeholder
-    comments), a few dozen lines MAX; (2) THEN call edit_file to fill in exactly
-    ONE logical block at a time; (3) after EACH edit, CONFIRM it landed before
-    you touch the next block. No skipping steps. No batching blocks. No "I'll
-    just do the whole thing." Break the file into pieces, or you will break the
-    file.
-    Why: each output stays short (less truncation/error risk), and when
-    something goes wrong you redo one small block, not the whole file.
+    Short files and small rewrites: write them in one call, that is what this
+    tool is for. For a long file — roughly over ~200 lines, or several
+    independent logical blocks — write it in stages instead: first a compact
+    skeleton (signatures, section headers, placeholder comments), then fill in
+    one block at a time with edit_file, checking each edit landed before the
+    next. One giant write is where output gets truncated or malformed, and
+    recovering means redoing the whole file rather than one block.
     """
     if not path:
         yield CapabilityEvent(kind="error", payload={"code": "MISSING_PATH", "message": "path is required"})
