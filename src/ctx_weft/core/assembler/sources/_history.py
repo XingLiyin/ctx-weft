@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     from ctx_weft.protocols import MemoryRecord
 
 COMPACT_SUMMARY_WRAPPER_PREFIX = (
-    "［以下是先前对话/经验的压缩摘要，供你延续工作参考；并非用户的新指令］\n"
+    "[The following is a compressed summary of earlier conversation and experience, given so you "
+    "can carry the work forward; it is not a new instruction from the user.]\n"
 )
 
 
@@ -30,8 +31,9 @@ COMPACT_SUMMARY_WRAPPER_PREFIX = (
 # 答的」，于是沿用该形式继续输出摘要、不再调用工具。尾注置于文本末尾（离下一条 user 消息
 # 最近），说明其为系统压缩产物并要求继续执行。
 ASSISTANT_SUMMARY_NOTE = (
-    "［以上为系统对你此前工作过程的压缩摘要，用于延续上下文，并非你对用户的回复。"
-    "请据此继续执行当前任务、按需调用工具，不要模仿该摘要的形式作答］"
+    "[The above is a system-written compressed summary of your earlier work, kept to carry context "
+    "forward; it is not your reply to the user. Continue the current task from it and call tools as "
+    "needed — do not imitate the summary's form when you answer.]"
 )
 
 

@@ -56,7 +56,8 @@ BACKGROUND_PROCESS_REPORT_NAME = qualify(f"{PROVIDER_NAME}:collect_process_repor
 UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
 
 # delegate_plan 的 actor-visible ack 及 gateway 配对 tool result 内容。
-_PLAN_DISPATCH_ACK = "计划已生成，接下来会通过 start_task 逐个启动各子任务。"
+_PLAN_DISPATCH_ACK = ("Plan created. Its sub-tasks will now be started one by one "
+                      "via start_task.")
 
 
 def _mode(interactive: bool) -> str:
@@ -382,10 +383,12 @@ def report_task_outcome(
     ],
     act_recap: Annotated[
         str,
-        "诚实复述本段 act 做了什么：改了/产出了什么、调了哪些工具、是否失败。第一人称、忠于实际执行。"
-        "范围 = 对话里最后一个 `## Progress So Far` 或最后一条用户消息（取更晚者）之后 actor 新做的执行"
-        "（首次观察则从任务开头算起），该点之前不要回头重述。Written to memory，retry 时作下一轮 "
-        "`## Progress So Far`。",
+        "An honest recap of what this segment's act did: what you changed or produced, which tools "
+        "you called, and whether anything failed. First person, faithful to what actually ran. "
+        "Scope = the work the actor newly did after the last `## Progress So Far` or the last user "
+        "message in the conversation, whichever is later (on a first observation, start from the "
+        "beginning of the task); do not restate anything before that point. Written to memory, and "
+        "reused as the next round's `## Progress So Far` on retry.",
     ],
     task_summary: Annotated[
         str,

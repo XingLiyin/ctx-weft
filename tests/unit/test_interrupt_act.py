@@ -6,7 +6,7 @@ import pytest
 
 from ctx_weft.core.control.tokens import CancelToken, PauseToken
 from ctx_weft.core.loop.park import HitlPark
-from ctx_weft.core.loop.steps.act import ActStep, interrupt_edit_note
+from ctx_weft.core.loop.steps.act import INTERRUPTED_MARK, ActStep, interrupt_edit_note
 from ctx_weft.protocols import LLMChunk, MemoryEventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -84,7 +84,7 @@ async def test_interrupt_midstream_commits_partial_marked():
     hit = [r for r in recs if "partial reply" in (r.content or "")]
     assert hit, "partial assistant text should be persisted"
     rec = hit[-1]
-    assert "[被用户打断]" in rec.content
+    assert INTERRUPTED_MARK in rec.content
     assert "MORE" not in rec.content          # token after interrupt not consumed
     assert rec.metadata.get("interrupted") is True
 

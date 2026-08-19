@@ -12,7 +12,7 @@ from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
-from ctx_weft.core.loop.steps.act import ActStep
+from ctx_weft.core.loop.steps.act import CANCELLED_MARK, INTERRUPTED_MARK, ActStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.assembler.assembler import AssembledPrompt
@@ -115,7 +115,7 @@ async def test_interrupt_between_tools_cancels_not_started():
     by_id = {r.metadata.get("tool_call_id"): r for r in res}
     assert by_id["c_a"].metadata.get("interrupted") is not True   # completed normally
     assert by_id["c_b"].metadata.get("cancelled") is True
-    assert "[已取消]" in by_id["c_b"].content
+    assert CANCELLED_MARK in by_id["c_b"].content
 
 
 async def test_interrupt_during_tool_marks_interrupted_and_cancels_rest():
@@ -139,5 +139,5 @@ async def test_interrupt_during_tool_marks_interrupted_and_cancels_rest():
     res = await _tool_results(mem, ctx, state.scope)
     by_id = {r.metadata.get("tool_call_id"): r for r in res}
     assert by_id["c_a"].metadata.get("interrupted") is True
-    assert "[被用户打断]" in by_id["c_a"].content
+    assert INTERRUPTED_MARK in by_id["c_a"].content
     assert by_id["c_b"].metadata.get("cancelled") is True

@@ -176,11 +176,11 @@ _RECOGNIZE_INTENT_INSTRUCTION = (
 )
 
 _BACKGROUND_BOUNDARY_DESC = {
-    "interrupt": "本段被用户打断（中途打断）",
-    "plain_text": "你以散文回复后让位用户、暂停等待用户输入",
-    "finish": "任务已通过 finish_task 收尾",
-    "normal": "任务以最终产出正常结束",
-    "dispatch": "你已将子任务委派出去，任务挂起等待子任务完成",
+    "interrupt": "this segment was interrupted by the user part-way through",
+    "plain_text": "you replied in prose and yielded the floor, pausing for the user's input",
+    "finish": "the task was closed out with finish_task",
+    "normal": "the task ended normally with its final output",
+    "dispatch": "you delegated a sub-task, and this task is suspended until it completes",
 }
 
 
@@ -193,17 +193,20 @@ def _background_observe_cue(boundary: str) -> str:
     desc = _BACKGROUND_BOUNDARY_DESC.get(boundary, _BACKGROUND_BOUNDARY_DESC["normal"])
     is_close = boundary in _CLOSE_BOUNDARIES
     summary_ask = (
-        " 并给出 `task_summary`：整个 task 执行历程的简洁 process report（点出重要步骤与经验，不琐碎；"
-        "不是最终输出），须综合已完成子任务（sub-task）的结果。"
+        " Also give `task_summary`: a concise process report of the WHOLE task's execution "
+        "(call out the important steps and lessons, skip the trivia; it is not the final output), "
+        "incorporating the results of any completed sub-tasks."
         if is_close else ""
     )
     return (
-        f"当前 task 的状态：{desc}。请基于以上执行过程，调用 `collect_process_report` 一次："
-        "给出 `act_recap`（只复述本段 act——对话里最后一个 `## Progress So Far` 或**最后一条用户"
-        "消息**（取更晚者）之后 actor 新做的执行；两者都没有则为首次观察，从 `## Current Task` "
-        "之后算起；该点之前不要回头重述）"
+        f"Status of the current task: {desc}. Based on the execution above, call "
+        "`collect_process_report` exactly once: give `act_recap` (recap ONLY this segment's act — "
+        "the work the actor newly did after the last `## Progress So Far` or the **last user "
+        "message** in the conversation, whichever is later; if there is neither, this is the first "
+        "observation, so start from after `## Current Task`; do not restate anything before that "
+        "point)"
         + summary_ask +
-        " 只需总结，无需判断 success/retry/fail，不要调用其他工具。"
+        " Just summarize — do not judge success/retry/fail, and do not call any other tool."
     )
 
 
@@ -224,10 +227,11 @@ def _finish_result_section(request) -> str:
     if not text:
         return ""
     return (
-        "## Actor 的最终产出（已通过 finish_task 收尾本段）\n\n"
+        "## Actor's Final Output (this segment was closed out with finish_task)\n\n"
         f"{text}\n\n"
-        "（上面是 actor 提交的最终结果，是本段唯一权威的产出依据。请据此如实总结本段进展，"
-        "不要臆测未实际发生的工具调用、步骤或产物。）"
+        "(The above is the final result the actor submitted — the only authoritative evidence of "
+        "what this segment produced. Summarize the segment faithfully from it; do not invent tool "
+        "calls, steps, or artifacts that did not actually happen.)"
     )
 
 

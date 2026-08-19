@@ -84,12 +84,19 @@ async def summarize_for_compact(
 
 
 # 坍缩 USER_PROMPT 的两节分隔标记；再坍缩时据此切出「原始消息」节，保持有界。
-COLLAPSE_DELIM = "\n\n---\n## 执行摘要（先前对话已压缩）\n"
+COLLAPSE_DELIM = "\n\n---\n## Execution Summary (earlier conversation compacted)\n"
+# 存量标记：分隔标记进 prompt，改英文后旧库里的已坍缩 USER_PROMPT 仍带中文标记。切不出
+# 原文节 = 把「原文 + 旧摘要」整体当原文，再坍缩一次就翻倍，故读侧一并认旧标记。
+LEGACY_COLLAPSE_DELIMS = ("\n\n---\n## 执行摘要（先前对话已压缩）\n",)
+
 
 def _original_section(content: str) -> str:
     """取（可能已坍缩过的）USER_PROMPT 的「原始消息」节：有分隔标记取其前段，否则整体即原文。"""
-    idx = content.find(COLLAPSE_DELIM)
-    return content[:idx] if idx != -1 else content
+    for delim in (COLLAPSE_DELIM, *LEGACY_COLLAPSE_DELIMS):
+        idx = content.find(delim)
+        if idx != -1:
+            return content[:idx]
+    return content
 
 
 async def collapse_task_layer(
