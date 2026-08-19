@@ -61,10 +61,10 @@ async def _seed_running_ack(memory, session, child: Task) -> None:
                                 agent_id=child.creator_agent_id)
     provider_ctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id,
                                    task_id=child.parent_task_id, agent_id=child.creator_agent_id)
-    ts = await _ensure_dispatch_frame(memory, parent_scope, child, provider_ctx)
+    ts, tcid = await _ensure_dispatch_frame(memory, parent_scope, child, provider_ctx)
     await _put_dispatch_result(
         memory, parent_scope, child, _dispatch_running_ack(child.title), ts, provider_ctx,
-        replace=False,
+        replace=False, tool_call_id=tcid,
     )
 
 

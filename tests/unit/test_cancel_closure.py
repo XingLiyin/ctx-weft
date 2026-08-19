@@ -55,9 +55,10 @@ async def _seed_running_ack(mem, child: Task) -> None:
         session_id="s1", task_id=child.parent_task_id, agent_id=child.creator_agent_id,
     )
     ctx = _ctx()
-    ts = await _ensure_dispatch_frame(mem, parent_scope, child, ctx)
+    ts, tcid = await _ensure_dispatch_frame(mem, parent_scope, child, ctx)
     await _put_dispatch_result(
         mem, parent_scope, child, _dispatch_running_ack(child.title), ts, ctx, replace=False,
+        tool_call_id=tcid,
     )
 
 

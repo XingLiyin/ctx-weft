@@ -411,7 +411,8 @@ async def test_ensure_dispatch_frame_mixed_tz_no_crash() -> None:
                  origin_tool_call_id="oc1", title="My Sub Task", user_prompt="do sub",
                  started_at=started, settings=NormalTaskSettings())
 
-    ts = await _ensure_dispatch_frame(mem, parent_scope, child, _ctx())
+    ts, tcid = await _ensure_dispatch_frame(mem, parent_scope, child, _ctx())
+    assert tcid == "oc1", f"须返回框自己携带的配对 id；got {tcid!r}"
     assert ts == naive_dispatch.replace(tzinfo=UTC), (
         f"须返回框自己的 ts（归一为 aware），而非 started_at；got {ts!r}"
     )

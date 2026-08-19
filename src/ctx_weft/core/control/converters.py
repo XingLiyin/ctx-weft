@@ -62,6 +62,8 @@ def task_from_projection(proj: TaskView) -> Task:
         timeout_ms=proj.timeout_ms,
         settings=deserialize_settings(proj.settings_raw),
         interaction_mode=proj.interaction_mode,  # type: ignore[arg-type]
+        origin_tool_call_id=proj.origin_tool_call_id or None,
+        origin_tool_name=proj.origin_tool_name or None,
         outputs=proj.outputs,
         error=proj.error,
         created_at=_as_utc_opt(proj.created_at),

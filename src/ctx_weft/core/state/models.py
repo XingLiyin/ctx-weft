@@ -226,7 +226,8 @@ class Task:
     # 发起本任务的派发工具的**限定名**，finalize 铸派发框时用作 tool_calls[].name（保真）。
     # delegate_task → 真名 control__delegate_task（actor 确实调过）；delegate_plan 子 → None
     # （actor 只调过一次 delegate_plan、无 per-child 调用）→ finalize 回退 start_task 叙事名。
-    # 纯瞬态字段（与 origin_tool_call_id 同：不入 payload/表，重放后为 None → 回退 start_task）。
+    # 与 origin_tool_call_id 同走 TASK_CREATED payload → TaskView → 恢复链（2026-08-19 补，
+    # 此前是纯瞬态、重放后为 None）；存量事件仍无此字段 → 重建后为 None → 回退 start_task。
     origin_tool_name: str | None = None
 
     created_at: datetime | None = None

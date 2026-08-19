@@ -914,12 +914,13 @@ class CtxWeftRuntime:
                     session_id=session.id, tenant_id=session.tenant_id,
                     task_id=t.parent_task_id, agent_id=t.creator_agent_id,
                 )
-                ts = await _ensure_dispatch_frame(memory, parent_scope, t, provider_ctx)
+                ts, tool_call_id = await _ensure_dispatch_frame(
+                    memory, parent_scope, t, provider_ctx)
                 await _put_dispatch_result(
                     memory, parent_scope, t,
                     f"Sub-task '{t.title}' was cancelled mid-run (session failure threshold hit); "
                     f"its partial execution below is incomplete.",
-                    ts, provider_ctx, replace=True,
+                    ts, provider_ctx, replace=True, tool_call_id=tool_call_id,
                 )
             except Exception:
                 logger.exception(

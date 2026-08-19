@@ -787,7 +787,10 @@ class TaskManager:
         cancel_now_tasks: list[Task] = []
 
         def _has_dispatch_frame(t: Task) -> bool:
-            return bool(t.started_at and t.origin_tool_call_id and t.parent_task_id)
+            # 「已启动的子任务必有框」：框由 ensure_dispatch_frame_at_start 在 start 时铸。
+            # 不再看 origin_tool_call_id——它是瞬态字段，重启重建后为 None，拿它当条件会把
+            # 跨重启的在途子任务误判成「无框」而漏掉 ack 替换（框其实在，靠 child_task_id 认）。
+            return bool(t.started_at and t.parent_task_id)
 
         # 4) 清队：非 root 条目 → CANCELED + TASK_CANCELED（已启动者收进 cancel_now_tasks，
         #    经 _cancel_finalizer 闭合）；root 条目直接丢弃（它的去向是第 6 步的 root 判死，
@@ -1167,6 +1170,8 @@ def _task_payload(task: Task) -> dict:
             "timeout_ms": task.timeout_ms,
             "dag_deps": task.dag_deps,
             "interaction_mode": task.interaction_mode,
+            "origin_tool_call_id": task.origin_tool_call_id or "",
+            "origin_tool_name": task.origin_tool_name or "",
             "settings": settings_d,
             "result": None,
             "outputs": {},

@@ -58,9 +58,43 @@ START_TASK_NAME = qualify("control:start_task")
 _as_utc = as_utc
 
 
+def _is_frame_of(record, task) -> bool:
+    """这条 agent 层回合是不是**本子任务**的派发框 / ack。
+
+    首选 `child_task_id`：铸框时写死的子任务 id（v2「新机制 = 新 metadata 约定」）。它让
+    「这次派发对应哪个子任务」成为 memory 里的一等事实，close 时不再依赖任何进程内状态。
+    回退按 `tool_calls[].id / tool_call_id == task.origin_tool_call_id` 匹配，仅为存量数据
+    ——那是纯瞬态字段（不入 TASK_CREATED payload / TaskView），重启重建后为 None，届时只有
+    child_task_id 认得出框（子任务 close 后父只剩「派发框 + 停在 running 的 ack」即由此来）。
+    """
+    md = record.metadata or {}
+    if md.get("child_task_id") == task.id:
+        return True
+    tcid = task.origin_tool_call_id
+    if not tcid:
+        return False
+    if md.get("tool_call_id") == tcid:
+        return True
+    return any(tc.get("id") == tcid for tc in (md.get("tool_calls") or []))
+
+
+def _frame_tool_call_id(frame, task) -> str | None:
+    """框自己携带的配对 id：优先取与 task.origin_tool_call_id 相符的那条，否则取首条。
+
+    取首条是安全的：框由 core 合成，`_ensure_dispatch_frame` 每个子任务铸一条、恒单调用；
+    存量 legacy 记录经 `_legacy_dispatch` 归一后同样单调用。actor 的真实回合（可能并行多调用）
+    落在 task 层，不进本视图。
+    """
+    tcs = frame.metadata.get("tool_calls") or []
+    tcid = task.origin_tool_call_id
+    if tcid and any(tc.get("id") == tcid for tc in tcs):
+        return tcid
+    return tcs[0].get("id") if tcs else None
+
+
 async def _find_dispatch_frame(memory, parent_scope, task, provider_ctx):
-    """在 parent scope 只查已存在的派发框（tool_call_id==task.origin_tool_call_id 的 assistant
-    回合），不铸新框。找到 → 返回框自己的时间戳（归一 aware UTC）；没有 → None。
+    """在 parent scope 只查已存在的派发框（属于本子任务的 assistant 回合），不铸新框。
+    找到 → 返回 `(框的时间戳（归一 aware UTC）, 配对 tool_call_id)`；没有 → None。
 
     供 `_ensure_dispatch_frame`（find+create）与 `synthesize_cancel_closure`（find-only，
     born-cancel 未铸框时整体跳过、不补铸）共用。
@@ -70,22 +104,20 @@ async def _find_dispatch_frame(memory, parent_scope, task, provider_ctx):
         MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     frame = next(
-        (r for r in existing
-         if r.role == "assistant"
-         and any(tc.get("id") == task.origin_tool_call_id
-                 for tc in (r.metadata.get("tool_calls") or []))),
+        (r for r in existing if r.role == "assistant" and _is_frame_of(r, task)),
         None,
     )
     if frame is None:
         return None
     # 归一：框可能来自事件重放 / DB 反序列化而丢 tz（naive），直接返回会让调用方拿它与
     # aware 时间比较时炸 TypeError。
-    return _as_utc(frame.timestamp)
+    return _as_utc(frame.timestamp), _frame_tool_call_id(frame, task)
 
 
 async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
-    """在 parent scope 铸一条 tool_call id==task.origin_tool_call_id 的 assistant 派发框，
-    返回它 == 配对 tool result 应锚定的时间戳 = task 真正开始执行的时刻（started_at）。
+    """在 parent scope 铸一条属于本子任务的 assistant 派发框，返回
+    `(时间戳, 配对 tool_call_id)`——时间戳 == 配对 tool result 应锚定的时刻 = task
+    真正开始执行的时刻（started_at）。
 
     **框与 result 同锚 started_at**：二者共用同一时间戳 → 按 (timestamp, seq_no) 排序时严格相邻
     （框先写 seq 小、result 后写 seq 大），且落在「任务开始执行」这条时间线上（而非派发时刻）。
@@ -97,8 +129,15 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     eager 框只能带派发时刻，无法落在 started_at 时间线上，见 capability_gateway._record_invocation）。
     框的 tool name 取 task.origin_tool_name（保真）：delegate_task 子 = 真名 control__delegate_task
     （actor 确实调过）；delegate_plan 子 = None → 回退 START_TASK_NAME 叙事名（无 per-child 真实调用）。
-    幂等：若同 id 的框已存在（终态 finalize 单入本不会重入，此为防御），直接返回 ts、不重复铸。
-    origin_task_id 留父（delegate_task 的父 = 派发 task；delegate_plan 子 = 留 plan task）。
+    幂等：若本子任务的框已存在（终态 finalize 单入本不会重入，此为防御），直接返回、不重复铸。
+    origin_task_id 留父（delegate_task 的父 = 派发 task；delegate_plan 子 = 留 plan task）；
+    **child_task_id 记子**——派发框与 ack 里唯一指向子任务的字段，close 时靠它认框。
+
+    配对 id 的取值序：框已存在 → 用框自己的；否则 task.origin_tool_call_id；再否则现生成一个。
+    生成是安全的：actor 真实的 delegate_task 调用**不入 memory**（gateway 对 DISPATCH 工具不写
+    对话，见 capability_gateway._record_invocation），这里的框和 ack 整对都是 core 合成的叙事，
+    id 只用于本对内部配对，从不与 actor 侧的 id 对账（delegate_plan 子任务本就是现生成的，
+    见 control_capability）。有了它，重启丢掉 origin_tool_call_id 的子任务也能正常闭合。
 
     find + create：find 部分委托 `_find_dispatch_frame`（与 cancel closure 的 find-only 用法共用）。
     """
@@ -113,20 +152,22 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     # 框与 result 的公共锚点：task 真正启动执行的时刻。归一为 aware(UTC)：started_at/created_at
     # 可能来自事件重放而为 naive（历史无 started_at 时回退 created_at 再回退 now）。
     ts = _as_utc(task.started_at or task.created_at or now_utc())
+    tool_call_id = task.origin_tool_call_id or generate_id("tcall")
     await memory.ingest(
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
             content="", timestamp=ts, role="assistant",
             metadata={"origin_task_id": task.parent_task_id,
                       "parent_task_id": task.parent_task_id,
-                      "tool_calls": [{"id": task.origin_tool_call_id,
+                      "child_task_id": task.id,
+                      "tool_calls": [{"id": tool_call_id,
                                       "name": task.origin_tool_name or START_TASK_NAME,
                                       "input": {"title": task.title,
                                                 "description": task.description or ""}}]},
         ),
         provider_ctx,
     )
-    return ts
+    return ts, tool_call_id
 
 
 def _parent_scope_of(state, task) -> MemoryAddress:
@@ -139,21 +180,28 @@ def _parent_scope_of(state, task) -> MemoryAddress:
 
 
 async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, provider_ctx,
-                               *, replace: bool) -> None:
-    """写派发对的 tool 槽（按 origin_tool_call_id 与框配对）。
+                               *, replace: bool, tool_call_id: str) -> None:
+    """写派发对的 tool 槽（tool_call_id 由 `_ensure_dispatch_frame` / `_find_dispatch_frame`
+    给出，与框配对）。
 
     replace=False（start）：已有配对 result 时 no-op —— retry/resume 会重跑 driver.run，
       不能每轮都 churn 一遍、更不能改写原锚点。
     replace=True（close）：先 supersede 旧的 running ack 再写终态。**必须替换而非新增**：
       同一 tool_call_id 若有两条 active result，reorder_tool_results_after_calls 会把两条
       都排到框之后，于是「在跑」和「已完成」并列出现。
+
+    旧 ack 的识别用 `_is_frame_of`（child_task_id 优先、存量回退 tool_call_id）而非只比
+    tool_call_id：重启后拿到的 id 可能是新生成的，只比 id 会漏掉 start 时那条 running ack，
+    于是两条 active result 并存。新写的 ack 同样带 child_task_id，start/close/取消三个时刻
+    共用本函数，字段一路带下去不会在替换时掉。
     """
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
     recs = await memory.load_view(
         MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     stale = [r.id for r in recs
-             if r.role == "tool" and r.metadata.get("tool_call_id") == task.origin_tool_call_id]
+             if r.role == "tool"
+             and (_is_frame_of(r, task) or r.metadata.get("tool_call_id") == tool_call_id)]
     if stale and not replace:
         return
     # v2 P3d：旧 ack 遗忘 + 终态写入一次原子 fold（stale 空 = 纯写入）
@@ -162,7 +210,8 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
             content=content, timestamp=ts, role="tool",
             metadata={"origin_task_id": task.parent_task_id,
-                      "tool_call_id": task.origin_tool_call_id},
+                      "child_task_id": task.id,
+                      "tool_call_id": tool_call_id},
         ),
     ], provider_ctx)
 
@@ -184,15 +233,19 @@ async def ensure_dispatch_frame_at_start(state, ctx) -> None:
     与其 lean 隔离形态一致。
 
     幂等：框由 `_ensure_dispatch_frame` 查重，result 由 `_put_dispatch_result(replace=False)` 查重。
+
+    准入判据只看 `parent_task_id`（持久化字段）：origin_tool_call_id 是瞬态的，重启重建后为
+    None，若拿它当条件，重启后续跑的子任务连框都不铸，父永远看不到这次派发。
     """
     task = state.task
-    if not (task.parent_task_id and task.origin_tool_call_id):
+    if not task.parent_task_id:
         return  # root task：无派发方，没有框可铸
     parent_scope = _parent_scope_of(state, task)
-    ts = await _ensure_dispatch_frame(ctx.memory, parent_scope, task, ctx.provider_ctx)
+    ts, tool_call_id = await _ensure_dispatch_frame(
+        ctx.memory, parent_scope, task, ctx.provider_ctx)
     await _put_dispatch_result(
         ctx.memory, parent_scope, task, _dispatch_running_ack(task.title), ts, ctx.provider_ctx,
-        replace=False,
+        replace=False, tool_call_id=tool_call_id,
     )
 
 
@@ -346,7 +399,10 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     raw_fold_scope = state.scope if (not short and not has_llm_summary) else None
 
     # 1) bubble 到 parent scope（dispatch marker 所在 scope）
-    if task.parent_task_id and task.origin_tool_call_id and mem_content:
+    # 判据只看 parent_task_id + mem_content：origin_tool_call_id 是瞬态字段，重启重建后为 None，
+    # 曾经把它写进条件 → 跨重启收尾的子任务整段 bubble 被跳过（父的 ack 停在 running、finish 对
+    # 不合成 = 胶囊丢失），而末段 raw 照删。配对 id 现由框自己给出，不再需要它当门槛。
+    if task.parent_task_id and mem_content:
         parent_scope = _parent_scope_of(state, task)
         # 框通常已由 ensure_dispatch_frame_at_start（子 start 时）铸好，_ensure_dispatch_frame 在此
         # 幂等命中；仅对没走过 start 钩子的路径（旧数据 / start 与 close 之间崩溃）才真正补铸。
@@ -355,10 +411,11 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             # 跨 agent（spec 2026-06-28 §2.3）：dispatch result 写成 agent 层普通 conversation turn
             # （tool 回合），与 start_task / delegate 框靠 tool_call_id 配对、时间戳对齐保证相邻。
             report_prefix = "[outcome=fail] " if outcome == "fail" else ""
-            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx.provider_ctx)
+            frame_ts, frame_tcid = await _ensure_dispatch_frame(
+                memory, parent_scope, task, ctx.provider_ctx)
             await _put_dispatch_result(
                 memory, parent_scope, task, f"{report_prefix}{mem_content}", frame_ts,
-                ctx.provider_ctx, replace=True,
+                ctx.provider_ctx, replace=True, tool_call_id=frame_tcid,
             )
             events.append(make_event(
                 state, EventType.MEMORY_INGESTED,
@@ -368,10 +425,11 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
         elif same_agent:
             # 同 agent（spec 2026-06-30 §2.5）：配对 tool result 换终态文案，时间戳对齐框 → 严格
             # 相邻、排在子 body 之前。子真实产出由内联胶囊 body + 嵌套 finish 对承载。
-            frame_ts = await _ensure_dispatch_frame(memory, parent_scope, task, ctx.provider_ctx)
+            frame_ts, frame_tcid = await _ensure_dispatch_frame(
+                memory, parent_scope, task, ctx.provider_ctx)
             await _put_dispatch_result(
                 memory, parent_scope, task, _dispatch_ack(task.title, outcome), frame_ts,
-                ctx.provider_ctx, replace=True,
+                ctx.provider_ctx, replace=True, tool_call_id=frame_tcid,
             )
             # 嵌套合成子自己的 finish 对（写进共享 agent scope，@close 时刻）
             await _synthesize_dispatch_pair(
@@ -408,7 +466,7 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
       - `on_task_finished(CANCELED)` funnel：在途协作取消终态坐实后（reason=task.error or 通用文案）。
 
     分支（同 `_close_one`）：
-      ① task 有 parent_task_id + origin_tool_call_id → 父 scope 的派发对 tool 槽终态化替换为
+      ① task 有 parent_task_id → 父 scope 的派发对 tool 槽终态化替换为
          取消文案。**find-only**：找不到框（born-cancel，子任务从未真正 start 过、从未铸框）→
          整体跳过、不补铸（`_find_dispatch_frame`，不用 `_ensure_dispatch_frame`）。
       ② 同 agent（`creator_agent_id == assigned_agent_id`）→ 嵌套合成子自己的 finish 对，写进
@@ -428,21 +486,23 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
         f"the partial execution above is all that ran."
     )
 
-    if task.parent_task_id and task.origin_tool_call_id:
+    if task.parent_task_id:
         parent_scope = MemoryAddress(
             session_id=session_id, task_id=task.parent_task_id, agent_id=task.creator_agent_id,
         )
-        frame_ts = await _find_dispatch_frame(memory, parent_scope, task, provider_ctx)
-        if frame_ts is None:
+        found = await _find_dispatch_frame(memory, parent_scope, task, provider_ctx)
+        if found is None:
             # born-cancel：子任务从未真正 start（未走 ensure_dispatch_frame_at_start）、无框可闭——
             # 整体跳过，不补铸空框（补铸出的框只会带取消时刻，与「派发框=started_at」的不变量矛盾）。
             return
+        frame_ts, frame_tcid = found
         ack_text = (
             f"Sub-task '{task.title}' was cancelled before completion ({reason_text}); "
             f"its partial execution below is incomplete."
         )
         await _put_dispatch_result(
             memory, parent_scope, task, ack_text, frame_ts, provider_ctx, replace=True,
+            tool_call_id=frame_tcid,
         )
         if same_agent:
             await _synthesize_dispatch_pair(
