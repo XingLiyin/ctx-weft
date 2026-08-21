@@ -223,8 +223,27 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 
 ### 6.5 token 估算（图片感知）
 
-五处改用 `utils.estimate_content_tokens`（`utils.py:168`，已存在，`_IMAGE_PART_TOKENS
-= 1600`，且已被 `prepare.py:74,95` / `llm_gateway.py:281` 正确使用）：
+**不能直接改用 `estimate_content_tokens`。** 它在 `utils.py:176` 无条件加
+`_MSG_FRAMING_TOKENS = 4`，对纯文本不是恒等变换：五个改造点会各自凭空多 4 token/条，
+其中 `is_short_segment` 与 `_is_short_leaf` 现在是「整段拼成一个字符串数一次」，
+换过去变成 4×N，短段阈值与 short task 判定会实质漂移；`_active_memory_tokens` 同理会
+移动 compact 的升级阈值。
+
+改为在 `utils.py` 新增一个只补图片、不碰文本与 framing 的函数：
+
+```python
+def image_tokens(content: "str | list[ContentPart] | None") -> int:
+    """content 中图片 part 的 token 补偿（不含文本、不含 framing）。"""
+    if not content or isinstance(content, str):
+        return 0
+    return _IMAGE_PART_TOKENS * sum(1 for p in content if not hasattr(p, "text"))
+```
+
+五处一律改成 `既有的文本计数 + image_tokens(content)`，**纯文本逐字节恒等**。
+`estimate_content_tokens` 重构成复用 `image_tokens`，使 `_IMAGE_PART_TOKENS` 保持
+单一真源（`prepare.py:74,95` / `llm_gateway.py:281` 的既有行为不变）。
+
+五处及其不改的后果：
 
 | 位置 | 不改的后果 |
 |---|---|
@@ -366,8 +385,9 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 
 - 所有 `content_with_*` 在 `str` 输入时走原字符串拼接路径，产物与改造前一致
 - `NullBlobStore` 未注册时，`normalize_content` 对纯文本是恒等变换
-- `estimate_content_tokens` 对纯文本与 `token_counter(text)` 同值（`utils.py:168`
-  的 `_MSG_FRAMING_TOKENS` 补偿项需确认不改变既有口径——**这是 Phase 0 的首要验证项**）
+- 五个估算点对纯文本与改造前**逐字节同值**（`image_tokens` 对 `str` 输入恒返 0，
+  见 §6.5；这是不能直接套用 `estimate_content_tokens` 的原因——它带 4 token 的
+  framing 补偿，会静默移动裁剪与 compact 阈值）
 - 未注册 `BlobStore` 时，L0.5 返回 0（不降级），adapter 侧无 ref 可 rehydrate，
   图保持 inline base64——即 Phase 2 的形态
 

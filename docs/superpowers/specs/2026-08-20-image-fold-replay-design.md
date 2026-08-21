@@ -33,8 +33,10 @@ compact 收走；但收走之后模型若需要重看，又必须有取回路径
 | `loop/steps/background_observe.py:99` `is_short_segment` | 图片密集段被误判「短段免折」→ 该段 raw 永久保留 |
 | `loop/steps/finalize.py:415` `_is_short_leaf` | 图片密集 task 被误判 short |
 
-全部改为 `utils.estimate_content_tokens`（`utils.py:168`，已存在且已被
-`prepare.py:74,95` / `llm_gateway.py:281` 正确使用）。
+改法见上级设计 §6.5：**不是**直接套 `estimate_content_tokens`（它带 4 token 的
+framing 补偿，对纯文本非恒等，会静默移动裁剪与 compact 阈值），而是在 `utils.py`
+新增只补图片的 `image_tokens(content)`，五处改成
+`既有的文本计数 + image_tokens(content)`。
 
 按评审决定，图片 token 口径留在 `utils`，不进 media 模块；将来若要按
 media_type / 尺寸细化，在 `utils` 内演进。
