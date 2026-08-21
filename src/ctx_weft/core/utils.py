@@ -165,6 +165,20 @@ def _dumps_for_estimate(obj: Any) -> str:
         return str(obj)
 
 
+def image_tokens(content: "str | list[ContentPart] | None") -> int:
+    """content 中图片（非文本 part）的 token 补偿。不含文本、不含 framing。
+
+    对 str / None / 空一律返回 0——这保证调用方在纯文本路径上是恒等变换，
+    可以安全地加在既有的文本计数之后而不改变既有口径。
+
+    刻意不接受 count 回调：图片按固定常数计（见 _IMAGE_PART_TOKENS 的说明），
+    不过 tokenizer。
+    """
+    if not content or isinstance(content, str):
+        return 0
+    return _IMAGE_PART_TOKENS * sum(1 for p in content if not hasattr(p, "text"))
+
+
 def estimate_content_tokens(content: "str | list[ContentPart] | None", *, count: Callable[[str], int] | None = None) -> int:
     """一条 content 的估算：文本 + 图片 part 固定常数 + 每条 framing 开销。往大了估。
 
@@ -173,12 +187,13 @@ def estimate_content_tokens(content: "str | list[ContentPart] | None", *, count:
 
     count：文本费率经 count 回调走 tokenizer；None 回退未校准启发式（纯单测/无 llm 场景）。
     framing 常数不过回调。
+
+    注意：本函数带 _MSG_FRAMING_TOKENS 补偿，**不是**纯文本恒等的。只在本就计入
+    framing 的路径（prepare / llm_gateway）使用；装配与 compact 的估算点请改用
+    「既有文本计数 + image_tokens(content)」，见 spec 2026-08-20-multimodal-design §6.5。
     """
     count = count or estimate_tokens
-    total = _MSG_FRAMING_TOKENS + count(content_to_text(content))
-    if content and not isinstance(content, str):
-        total += _IMAGE_PART_TOKENS * sum(1 for p in content if not hasattr(p, "text"))
-    return total
+    return _MSG_FRAMING_TOKENS + count(content_to_text(content)) + image_tokens(content)
 
 
 def estimate_tool_calls_tokens(tool_calls: "list[dict] | None", *, count: Callable[[str], int] | None = None) -> int:
