@@ -9,7 +9,7 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ctx_weft.core.errors import ContextOverflowError
-from ctx_weft.core.utils import image_tokens, _IMAGE_PART_TOKENS
+from ctx_weft.core.utils import _IMAGE_PART_TOKENS, image_tokens
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import ContextBlock, ContextRequest
