@@ -251,9 +251,27 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 - `llm_gateway.py` 不改：`_is_empty_content:125` / `_merge_message_content:172` /
   估算 `:281` 已 parts-aware
 
-**已知 provider 不对称**（影响子设计的取回方案，此处备案）：Anthropic 的
-`tool_result` 支持 image block；OpenAI chat completions 的 `role="tool"` 消息**只接受
-文本**。
+#### provider 不对称由 adapter 吸收
+
+Anthropic 的 `tool_result` 支持 image block；OpenAI chat completions 的
+`role="tool"` 消息**只接受文本**。
+
+core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`，差异全部
+关在 adapter 内：
+
+- **Anthropic**（`anthropic.py:356-375`）：`tool_result.content` 从字符串改为 block
+  列表，原生承载图片
+- **OpenAI**（`openai.py:376-402`）：tool 消息只发文本，**在该组连续 tool 消息之后
+  追加一条 `user` 消息**承载图片。需把现有的 `for m in messages` 改成与 anthropic
+  同构的 `while` 分组循环，才能定位组尾——同批多个 tool call 时，追加的消息必须在
+  整组之后，夹在中间会触发 `insufficient tool messages following tool_calls message`
+
+**这条 user 消息只存在于 wire payload，不落 memory。** 落库会制造出一个假的段边界
+（`segment_fold.py:47`、`finalize.py:466`、`background_observe.py:87` 三处都用
+「最后一条 role=user 回合」划段），打乱段折叠与胶囊范围。
+
+与 `reorder_tool_results_after_calls`（`llm_gateway.py:198`）无冲突：那一步在 core
+执行，adapter 在其之后，追加的消息不会再被搬动。
 
 ### 6.7 模型能力门控
 
@@ -276,11 +294,14 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 
 - compact 新增 **L0.5**（插在 L1 之前）：把 `ImagePart` 就地降级成文本占位，
   无 LLM、可逆、单位收益最高
-- 模型经 `media:get_image(ref)` 取回；工具不投递图片，只写 unfold 标记 + 返回位置
-  信息，装配期在**原位**还原
-- unfold 状态放 `MemoryKind.TOOL_AUDIT` + metadata 约定：跨重启持久、不进 prompt、
-  随 compact 自动回收、零协议改动
-- 新模块 `core/media/`，占位格式 / blob 交互 / unfold 存储 / 位置描述四样全在墙内
+- 模型经 `media:get_image(ref)` 取回，**图随 tool result 回到对话尾部**，附带
+  「原本属于第几条用户消息」的位置信息
+- 尾部追加是 append-only，**KV cache 前缀不动**。这是否决「装配期在历史原位还原」
+  的决定性理由——原位还原会使 cache 前缀从该记录起全部失效，而被折的图往往位置很靠前
+- 取回结果落在普通 `TOOL_RESULT` 记录里：跨重启天然成立、下一轮装配天然包含、
+  段边界到来时自动被折走。**不需要任何额外状态或回收机制**
+- `InvocationResult.content` 随之放宽为 `str | list[ContentPart]`（见 §9）
+- 新模块 `core/media/`，占位格式 / blob ref 交互 / 位置描述全在墙内
 
 ## 7. 模块归属总表
 
@@ -305,9 +326,11 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 
 ## 9. 不在本期范围
 
-- **工具返图**（浏览器截图、图表生成）：`InvocationResult.content` 是硬
-  `str`（`capability_gateway.py:86`），要连带改落库与 wire 转换，且受 §6.6 的
-  OpenAI `tool` role 限制。独立立项。
+- **通用的工具返图**（浏览器截图、图表生成）：Phase 4 为 `media:get_image` 打开了
+  接缝——`InvocationResult.content` 放宽为 `str | list[ContentPart]`，非文本部分经
+  `metadata["content_parts"]` 由 provider 贡献，§6.6 的 adapter 改造对任意工具通用。
+  **机制到位，但本期只有 `media:get_image` 使用**；让第三方 capability provider 用上
+  它，需要额外的协议文档、大小限流与授权审查，独立立项。
 - **音频 / 视频**：`ContentPart` 联合类型可扩，但 token 口径、折叠策略、provider
   支持面都是另一套问题。
 - **摘要内含图**：见 §8，本期明确排除。
@@ -345,7 +368,8 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 - `NullBlobStore` 未注册时，`normalize_content` 对纯文本是恒等变换
 - `estimate_content_tokens` 对纯文本与 `token_counter(text)` 同值（`utils.py:168`
   的 `_MSG_FRAMING_TOKENS` 补偿项需确认不改变既有口径——**这是 Phase 0 的首要验证项**）
-- 未注册 `BlobStore` 时，L0.5 返回 0、`rehydrate` 直通
+- 未注册 `BlobStore` 时，L0.5 返回 0（不降级），adapter 侧无 ref 可 rehydrate，
+  图保持 inline base64——即 Phase 2 的形态
 
 ## 12. 测试策略
 

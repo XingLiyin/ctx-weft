@@ -13,7 +13,7 @@ compact 收走；但收走之后模型若需要重看，又必须有取回路径
 本设计覆盖两件事：
 
 - **收起**：预算紧张时把 memory 记录里的 `ImagePart` 就地降级成文本占位；
-- **回放**：模型主动调工具后，装配期把占位在**原位**还原成真图。
+- **回放**：模型调 `media:get_image(ref)`，图**随工具结果回到对话尾部**。
 
 本设计**不**覆盖（各自独立推进，本设计依赖它们）：
 
@@ -56,8 +56,6 @@ pin 成 priority 0，`budget.py:77` 明确「priority-0 地板永不丢」，而
 
 ## 4. 核心机制
 
-三个动作，只有第一个写 memory：
-
 ### 4.1 降级（写 memory，持久）
 
 对一条 memory 记录，把 content 里的 `ImagePart` 换成 `TextPart` 占位：
@@ -73,70 +71,111 @@ pin 成 priority 0，`budget.py:77` 明确「priority-0 地板永不丢」，而
 
 不需要新增 `MemoryProvider` 方法。
 
-### 4.2 取回（写一条 unfold 记录）
+### 4.2 取回：图放在 tool result 里
 
-`media:get_image(ref)` 工具做两件事：
-
-1. 写一条 unfold 标记记录（见 §5）；
-2. 返回带**位置信息**的回执文本，例如：
-   `Restored image ab12cd (image/png), originally attached to your 2nd message
-   in this task. It now appears inline at its original position above.`
-
-位置信息由模块从 task 视图推出（该 ref 的占位所在记录是本 task 第几条 user 回合）。
-
-工具**不投递图片本身**。这是刻意的：OpenAI chat completions 的 `role="tool"`
-消息只接受文本，塞不进图；而注入一条额外的 `role="user"` 回合会凭空制造段边界
-（`segment_fold.py:47`、`finalize.py:466`、`background_observe.py:87` 三处都用
-「最后一条 role=user 回合」划段），破坏段折叠与胶囊范围。
-
-### 4.3 还原（渲染期，不写 memory）
-
-装配期在 records → ContextBlock 之前加一趟：读 unfold 集合，把命中的占位
-`TextPart` 从 `BlobStore` 取回、换回 `ImagePart`。
-
-这与仓库既有原则一致——`loop/driver.py:168` 明确「呈现态框架由 composer 渲染期
-生成，不落库」。unfold 属于同一类。
-
-**取不到必须降级，不得抛**：blob 过期 / 宿主换机 / GC 误删都会发生。取不到时
-保持占位并追加 `(unavailable)`，loop 继续。
-
-## 5. unfold 状态的归属
-
-放 `MemoryKind.TOOL_AUDIT` + metadata 约定：
+`media:get_image(ref)` 的返回值是一个 `ContentPart` 列表：
 
 ```python
-MemoryEvent(
-    kind=MemoryKind.TOOL_AUDIT, scope=MemoryScope.TASK,
-    address=scope, role="tool", content="",
-    metadata={"mech": "image_unfold", "ref": ref},
-)
+[
+    TextPart("Restored image ab12cd (image/png), originally attached to "
+             "your 2nd message in this task."),
+    ImagePart(data=<ref>, media_type="image/png", source_type="ref"),
+]
 ```
 
-依据仓库自己的 memory v2 演进规则（`protocols/memory.py:44,54`）：
+文本部分带**位置信息**（该 ref 的占位原本在本 task 第几条 user 回合），因为图现在
+出现在对话**尾部**而非原位，模型需要知道它对应的是哪一条消息。
 
-> kind: CONVERSATION_TURN | SUMMARY | TOOL_AUDIT | PUBLICATION（封死，永不为新机制扩）
->
-> 演进规则：**新框架机制 = 新 metadata 约定，永不铸新 kind**
+这条 tool result 经 `_record_result`（`capability_gateway.py:386`）作为普通
+`TOOL_RESULT` 记录落库，content 里带着 `ImagePart`。于是：
 
-这个槽位同时满足四件事：
+- **跨重启天然成立** —— 它就是一条普通对话记录，不需要任何额外状态；
+- **下一轮装配天然包含** —— 走既有 history 路径，不需要装配期的还原钩子；
+- **不需要 unfold 集合** —— 图已经在对话里了。
 
-1. **跨重启持久** —— 是 memory 记录，不依赖进程状态；
-2. **不污染 prompt** —— 装配侧取 TASK 视图默认 kinds（`CONVERSATION_TURN + SUMMARY`，
-   见 `agent_recall.py:59,75`），不含 `TOOL_AUDIT`；
-3. **自动回收** —— compact 的 `_TASK_VIEW_KINDS` **含** `TOOL_AUDIT`，所以这条记录
-   会随 L2/L3 一起被折走，unfold 随之失效、图折回去。不需要写反向回收逻辑；
-4. **零协议改动** —— 不铸新 kind，不动 reducers / control types / converters。
+#### `InvocationResult.content` 放宽
 
-评审时否决的三个替代方案及理由：
+`InvocationResult.content` 由 `str` 放宽为 `str | list[ContentPart]`
+（`capability_gateway.py:86`）。
 
-- **从 assistant 记录的 `tool_calls` 反推**（`act.py:352`）：能工作且零改动，但依赖
-  「tool_calls 持久化 + `non_dispatch_tool_dicts` 过滤规则」这个隐式约定，将来被改会
-  无声失效。
-- **`InvocationResult.metadata` 透传进 TOOL_RESULT 记录**：需要改 gateway，且把 media
-  的知识散进 `capability_gateway`。
-- **新增 `IMAGE_UNFOLDED` 事件 + 投影字段**：要动 EventType 白名单、`reducers.py`、
-  `control/types.py`、`converters.py` 四处，且**回收对不齐**——事件投影不知道 compact
-  折了什么，会出现「投影说该展开、记录早已不在」。
+现有 `_stream_tool` 的流式协议只产出文本块（`result_parts: list[str]`），不改。
+非文本部分由 provider 经 `metadata["content_parts"]` 贡献，gateway 组装：
+
+```python
+content = "\n".join(result_parts) or ...
+content = await self._maybe_spill(content, ...)      # 只作用于文本
+if decision.message:
+    content = f"[Human note: {decision.message}]\n{content}"
+if parts := metadata.get("content_parts"):
+    content = [TextPart(content), *parts]
+```
+
+落盘截断（`_maybe_spill`）、human note 拼接、事件 payload 的
+`content[:8000]`（`capability_gateway.py:382`）全部只作用于**文本部分**，
+不必为 parts 分支。
+
+这个 `metadata["content_parts"]` 通道同时是**将来「工具返图」的接缝**（浏览器截图、
+图表生成），本期只有 `media:get_image` 使用。
+
+### 4.3 provider 差异在 adapter 层吸收
+
+core 侧统一：`LLMMessage(role="tool", content=[TextPart, ImagePart])`。
+两家 provider 的差异全部关在各自 adapter 内。
+
+**Anthropic**（`anthropic.py:356-375`）—— 原生支持。该 adapter 已经把连续 tool
+消息聚成一条 `{"role":"user","content":[tool_result...]}`，只需让
+`tool_result.content` 从字符串变成 block 列表：
+
+```python
+{"type": "tool_result", "tool_use_id": …,
+ "content": [{"type": "text", "text": …},
+             {"type": "image", "source": {…}}]}
+```
+
+**OpenAI**（`openai.py:396-402`）—— `role="tool"` 消息只接受文本。adapter 把 tool
+消息里的文本照常发出，**在该组连续 tool 消息之后追加一条 `user` 消息**承载图片：
+
+```python
+{"role": "user", "content": [{"type": "image_url",
+                              "image_url": {"url": "data:image/png;base64,…"}}]}
+```
+
+需要把 `openai.py:376` 的 `for m in messages` 改成与 anthropic 同构的 `while` 分组
+循环，才能定位「该组 tool 消息的末尾」——多个 tool call 同批时，追加的 user 消息必须
+在**整组之后**，不能夹在两条 tool 消息中间（会触发
+`insufficient tool messages following tool_calls message`）。
+
+两个关键性质：
+
+1. **这条 user 消息只存在于 wire payload，不落 memory。** 因此不会制造段边界——
+   `segment_fold.py:47`、`finalize.py:466`、`background_observe.py:87` 三处都用
+   「最后一条 role=user 回合」划段，若把它落库会打乱段折叠与胶囊范围。
+2. **与 `reorder_tool_results_after_calls` 无冲突。** 那一步在 core
+   （`llm_gateway.py:198`）执行，adapter 的 `_serialize_messages` 在其之后，
+   追加的消息不会再被搬动。
+
+### 4.4 为什么是尾部追加而不是原位还原
+
+**KV cache。** 在历史原位还原图片等于修改 prompt 中部，cache 前缀从那条记录起
+全部失效；而被折叠的图往往位置很靠前，实际代价接近整份 prompt 重付。
+
+tool result 追加在尾部是 append-only，前缀不动。这是本设计选择「图随工具结果回来」
+而非「装配期就地还原」的决定性理由。
+
+代价是图不在它原本的上下文位置上——由 §4.2 的位置信息文本补偿。
+
+## 5. 取回结果的生命周期
+
+取回的图落在当前段的 `TOOL_RESULT` 记录里，因此：
+
+- 下一个段边界到来时，被 `segment_fold` 折走（段内 raw **不受保护**，
+  `segment_fold.py:50` 只保 user 回合与 SUMMARY）；
+- 预算紧张时，也会被 L0.5 降级成占位。
+
+也就是说**取回天然是短时的**：够模型看几轮，然后自动回收，不需要任何额外的回收
+机制。需要时再取一次即可——占位始终留在原位，ref 一直可见。
+
+这一性质替代了早先方案里的 unfold 状态与其回收逻辑。
 
 ## 6. 折叠层级与策略
 
@@ -154,15 +193,15 @@ MemoryEvent(
 
 **策略：新增 L0.5，插在 L1 之前。**
 
-理由：图片降级无 LLM、单位收益最高（1600 tok/图）、且**可逆**（§4.1 就地重写，
-记录仍在原位）。这三条正是「应该最先跑」的层级画像。L1/L2/L3 折的是记录本身，
-一旦执行，位置就没了、不可逆。
+理由：图片降级无 LLM、单位收益最高（1600 tok/图）、且**可逆**（占位仍在原位，
+`media:get_image` 随时可取）。这三条正是「应该最先跑」的层级画像。L1/L2/L3 折的是
+记录本身，一旦执行位置就没了。
 
-因此形成一个**两段衰减**，这是设计的自觉取舍而非缺陷：
+因此形成一个**两段衰减**，这是自觉取舍而非缺陷：
 
-- **可逆窗口**（记录仍在）：图为占位，`media:get_image` 可精确还原到原位；
-- **衰减之后**（记录被 L1/L3 折进摘要）：ref 只以文本形式活在摘要里，位置丢失，
-  不再可还原。
+- **可逆窗口**（记录仍在）：图为占位，ref 可见，随时可取回；
+- **衰减之后**（记录被 L1/L3 折进摘要）：ref 只以文本形式活在摘要里，
+  已无从判断它原属哪条消息，不再提供取回。
 
 L0.5 跑在最前，意味着绝大多数情况下预算在可逆窗口内就够了，很少走到衰减段。
 
@@ -181,17 +220,14 @@ L0.5 会保留最近 `keep_recent` 张图不降级，因此当编排继续升级
 await media.demote_all(memory, [r.id for r in fold], ctx)
 ```
 
-这样图统一变成文本占位，ref 随 `original` 节 / 摘要文本一起留存，衰减是"位置丢失"
-而非"痕迹全无"。
+这样图统一变成文本占位，ref 随 `original` 节 / 摘要文本一起留存，衰减是「位置丢失」
+而非「痕迹全无」。
 
 L2 `demote_kept_capsules` 是纯遗忘、不产摘要，无处承载 ref，因此**不加**这一步：
 其范围内的残留图片直接随记录消失（blob 本体仍在，只是不再可达）。这是可接受的——
 L2 折的是已结束的历史胶囊。
 
 除这一处前置调用外，L1/L2/L3 的折叠逻辑本身不改。
-
-**滚动窗口（与预算无关地按张数/轮次收图）：评审决定不做。** L0.5 已覆盖其场景，
-只是触发晚一点；两套规则同时作用会让「图是被哪条规则收走的」难以判断。
 
 ## 7. 模块结构
 
@@ -201,27 +237,27 @@ core/media/
   refs.py         — 占位文本编解码 + blob ref 格式（唯一知道占位长什么样的地方）
   policy.py       — 哪些该降、保留几张（纯函数，无 IO）
   fold.py         — 降级执行：读记录 → 重写 content → memory.fold()
-  unfold.py       — unfold 记录的读写
-  render.py       — 渲染期还原
   capability.py   — MediaCapabilityProvider（core 侧，提供 media:get_image）
 ```
 
 `capability.py` 做成 core 侧 provider 而非放进 `FilesystemToolsProvider`，
-是因为工具体要写 memory，而 capability provider 拿不到 `MemoryProvider`。
-仓库既有先例是 `ControlCapabilityProvider`（`control_capability.py:617`，
-core 侧、构造时注入依赖）。本 provider 同形。
+是因为工具体要读 task 视图（定位 ref 的占位在第几条 user 回合，生成位置信息），
+而 capability provider 拿不到 `MemoryProvider`。仓库既有先例是
+`ControlCapabilityProvider`（`control_capability.py:617`，core 侧、构造时注入依赖）。
 
-**边界**：占位格式、blob 交互、unfold 存储、位置描述——四样全在墙内。
-`_history.py` 不解析占位，`capability_gateway` 不做透传，`reducers` /
-`control/types` 一个字不改。
+**边界**：占位格式、blob ref 交互、位置描述——全在墙内。`_history.py` 不解析占位，
+`composer` 不感知取回，`reducers` / `control/types` 一个字不改。
 
 **明确不属于本模块**：
 
 - `BlobStore` 协议 —— 归 `protocols/filesystem.py`（与 `SpillSink` 同处，形状一致：
   「core 不直接碰存储，只知道有个 sink」）；本模块只是消费者；
+- ref → base64 的 rehydrate —— 归 `providers/llm/*`（出网前最后一步）；
 - 入口 base64 → ref 外部化 —— 归内容归一层；
-- adapter 出网 rehydrate —— 归 `providers/llm/*`；
-- 图片 token 口径 —— 归 `utils`（评审决定）。
+- 图片 token 口径 —— 归 `utils`。
+
+相比早先方案，`unfold.py` 与 `render.py` 两个文件消失——图随 tool result 回到对话
+里，不再需要 unfold 状态与装配期还原。
 
 ## 8. 对外 API
 
@@ -230,17 +266,13 @@ async def demote_for_budget(memory, scope, ctx, *, keep_recent: int) -> int:
     """L0.5 调用。降级 scope 内除最近 keep_recent 张之外的所有图片。
     返回降级的图片张数。"""
 
-async def mark_unfolded(memory, scope, ctx, ref: str) -> str:
-    """media:get_image 工具体。写 unfold 记录，返回带位置信息的回执文本。
-    ref 不存在于本 scope 的任何占位中时，返回说明性文本（不抛）。"""
-
-async def rehydrate(records, memory, blob, ctx) -> list[MemoryRecord]:
-    """装配期调用。读 unfold 集合，把命中的占位换回 ImagePart。
-    blob 取不到时保持占位并标 (unavailable)，不抛。"""
-
 async def demote_all(memory, record_ids: list[str], ctx) -> int:
     """L1/L3 折叠前调用（见 §6.1）。对指定记录无条件降级，不受 keep_recent 保护。
     返回降级的图片张数。"""
+
+async def get_image(memory, scope, ctx, ref: str) -> list[ContentPart]:
+    """media:get_image 工具体。返回 [TextPart(位置信息), ImagePart(ref)]。
+    ref 不存在于本 scope 的任何占位中时，返回单条说明性 TextPart（不抛）。"""
 ```
 
 ## 9. 调用点
@@ -249,16 +281,21 @@ async def demote_all(memory, record_ids: list[str], ctx) -> int:
 |---|---|
 | `compact.escalating_compact:466`（L1 之前） | 插一级 `_apply(media.demote_for_budget(...))` + 一条 `MEMORY_COMPACTED` 事件（`source="demote_images"`），与现有各级同构 |
 | `compact.fold_root_experience:242` / `collapse_task_layer:102` | 各自在 `fold()` / 取 `original` 节之前调一次 `media.demote_all(...)`（见 §6.1） |
-| `ProviderRegistry` / `CtxWeftRuntime.__init__` | 注册 `MediaCapabilityProvider`（同 `ControlCapabilityProvider` 的注册方式，`runtime.py:423`） |
-| `assembler/sources/agent_recall.py:59` | `task_records = await media.rehydrate(task_records, ...)` |
+| `ProviderRegistry` / `CtxWeftRuntime.__init__` | 注册 `MediaCapabilityProvider`（同 `ControlCapabilityProvider`，`runtime.py:423`） |
+| `capability_gateway.py:86,229-241` | `InvocationResult.content` 放宽；组装 `metadata["content_parts"]`（见 §4.2） |
+| `providers/llm/anthropic.py:356-375` | `tool_result.content` 支持 block 列表 |
+| `providers/llm/openai.py:376-402` | 改分组循环；组尾追加承载图片的 user 消息（见 §4.3） |
+
+装配侧（`agent_recall.py` / `_history.py` / `composer.py`）**无本设计专属改动**——
+它们只需完成上级设计 §6.4 的通用「保 parts」改造。
 
 ## 10. 错误处理
 
 | 情形 | 行为 |
 |---|---|
-| `BlobStore` 未注册 | `demote_for_budget` 返回 0（不降级）；`rehydrate` 直通。无 blob 时行为与改造前完全一致 |
-| `blob.get()` 返回 None | 占位保留 + 追加 `(unavailable)`，不抛 |
-| `get_image(ref)` 的 ref 不存在 | 返回说明性文本，不抛、不写 unfold 记录 |
+| `BlobStore` 未注册 | `demote_for_budget` / `demote_all` 返回 0（不降级）。行为与改造前完全一致 |
+| `get_image` 的 ref 不存在于本 scope | 返回单条说明性 `TextPart`，不抛、不返回 `ImagePart` |
+| adapter 出网时 `blob.get()` 返回 None | 降级成 `[image unavailable]` 文本 block，不抛（上级设计 §6.6） |
 | 降级过程中 `fold()` 失败 | 记 warning，跳过该条继续；本级 `freed_tokens` 相应减少，编排自然升级到 L1 |
 
 ## 11. 测试
@@ -266,13 +303,16 @@ async def demote_all(memory, record_ids: list[str], ctx) -> int:
 - `policy.py` 纯函数：给定记录列表 + `keep_recent`，断言选中集合（无 IO，快）
 - `refs.py` 编解码往返
 - 降级：`fold()` 后位置不变（`(timestamp, seq_no)` 与降级前一致）
-- 还原：unfold 后图回到原位；unfold 记录被折走后图自动折回
-- unfold 记录不进 prompt（装配结果里不含该记录）
-- 跨重启：重建 memory 后 unfold 仍生效
-- `blob.get()` 返 None 时不抛且占位标记正确
-- 回归：未注册 `BlobStore` 时全链路行为不变
+- 取回：tool result 含 `ImagePart`；落库后下一轮装配里该图出现在尾部
+- 取回文本含正确的「第几条 user 回合」
+- Anthropic adapter：`tool_result.content` 为 block 列表
+- OpenAI adapter：同批多个 tool call 时，追加的 user 消息在**整组之后**；
+  且该消息不出现在任何 memory 记录里
+- 生命周期：段边界之后取回的图被折走；再次取回可用
+- 回归：未注册 `BlobStore` 时全链路行为不变；纯文本工具结果的 wire 形态逐字节不变
 
 ## 12. 未决参数
 
 - `keep_recent` 默认值：暂定 **2**（最近两张图保原样）。需实测校准。
 - 占位文本的确切措辞：影响模型是否会主动调 `get_image`，需实测。
+- `get_image` 是否允许一次取多个 ref：暂定单个，避免一次调用把窗口打满。
