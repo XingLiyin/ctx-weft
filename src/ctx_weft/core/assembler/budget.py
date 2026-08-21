@@ -9,6 +9,7 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ctx_weft.core.errors import ContextOverflowError
+from ctx_weft.core.utils import image_tokens, _IMAGE_PART_TOKENS
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import ContextBlock, ContextRequest
@@ -80,13 +81,18 @@ class PriorityBudgetStrategy(BudgetStrategy):
                     total -= b.token_estimate
 
         if total > token_limit:
-            required = sum(b.token_estimate for b in blocks if eff_prio[b.id] == 0)
+            floor = [b for b in blocks if eff_prio[b.id] == 0]
+            required = sum(b.token_estimate for b in floor)
+            # 地板（pin 住的当前消息）里的图片数——它们不可裁，是溢出的直接成因时
+            # 用户该做的是删图而非删字，故单独报出（见 spec §3）。
+            n_images = sum(image_tokens(b.content) for b in floor) // _IMAGE_PART_TOKENS
             sess = getattr(request, "session", None)
             raise ContextOverflowError(
                 required=required,
                 effective_limit=token_limit,
                 context_limit=getattr(sess, "context_limit", 0),
                 reserved_output_tokens=getattr(sess, "reserved_output_tokens", 0),
+                image_count=n_images,
             )
 
         return [b for b in blocks if b.id in kept_ids]

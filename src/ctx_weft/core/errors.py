@@ -86,18 +86,28 @@ class ContextOverflowError(CtxWeftError):
         effective_limit: int = 0,
         context_limit: int = 0,
         reserved_output_tokens: int = 0,
+        image_count: int = 0,
     ) -> None:
         self.required = required
         self.effective_limit = effective_limit
         self.context_limit = context_limit
         self.reserved_output_tokens = reserved_output_tokens
+        self.image_count = image_count
         if not message and context_limit:
             message = (
                 f"上下文超出模型可用窗口：保护槽位（角色设定 + 当前任务/消息）约 {required} tokens，"
                 f"已超过为输出预留后的可用窗口 effective_limit={effective_limit}"
                 f"（= 模型窗口 {context_limit} − 输出预留 {reserved_output_tokens}）。"
-                "请改用更大上下文窗口的模型，或缩短当前消息 / 任务描述。"
             )
+            if image_count:
+                from ctx_weft.core.utils import _IMAGE_PART_TOKENS
+                message += (
+                    f"其中不可裁的当前消息含 {image_count} 张图片，"
+                    f"约占 {image_count * _IMAGE_PART_TOKENS} tokens。"
+                    "请先减少图片数量，或改用更大上下文窗口的模型。"
+                )
+            else:
+                message += "请改用更大上下文窗口的模型，或缩短当前消息 / 任务描述。"
         super().__init__(message, code=code)
 
 
