@@ -100,6 +100,9 @@ class ContextOverflowError(CtxWeftError):
                 f"（= 模型窗口 {context_limit} − 输出预留 {reserved_output_tokens}）。"
             )
             if image_count:
+                # 函数内 import：errors.py 是被广泛引入的底层模块，故意保持依赖轻量，
+                # 不在模块顶层拉 core.utils（已确认 core/utils.py 只导入 stdlib + ulid，
+                # 模块级 import 也不会成环——此处仍就地导入是刻意的，不是遗留待清理项）。
                 from ctx_weft.core.utils import _IMAGE_PART_TOKENS
                 message += (
                     f"其中不可裁的当前消息含 {image_count} 张图片，"

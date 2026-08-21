@@ -165,6 +165,18 @@ def _dumps_for_estimate(obj: Any) -> str:
         return str(obj)
 
 
+def image_part_count(content: "str | list[ContentPart] | None") -> int:
+    """content 中图片（非文本 part）的个数。
+
+    对 str / None / 空一律返回 0，与 image_tokens 同口径——两者共用同一判据，
+    确保「token 补偿」与「图片数」永不互相矛盾（budget.py 报错文案据此报数，
+    不得靠对 image_tokens 整除反推）。
+    """
+    if not content or isinstance(content, str):
+        return 0
+    return sum(1 for p in content if not hasattr(p, "text"))
+
+
 def image_tokens(content: "str | list[ContentPart] | None") -> int:
     """content 中图片（非文本 part）的 token 补偿。不含文本、不含 framing。
 
@@ -172,11 +184,10 @@ def image_tokens(content: "str | list[ContentPart] | None") -> int:
     可以安全地加在既有的文本计数之后而不改变既有口径。
 
     刻意不接受 count 回调：图片按固定常数计（见 _IMAGE_PART_TOKENS 的说明），
-    不过 tokenizer。
+    不过 tokenizer。定义为 _IMAGE_PART_TOKENS * image_part_count(content)，
+    与 image_part_count 共用同一判据，两者不会不一致。
     """
-    if not content or isinstance(content, str):
-        return 0
-    return _IMAGE_PART_TOKENS * sum(1 for p in content if not hasattr(p, "text"))
+    return _IMAGE_PART_TOKENS * image_part_count(content)
 
 
 def estimate_content_tokens(content: "str | list[ContentPart] | None", *, count: Callable[[str], int] | None = None) -> int:

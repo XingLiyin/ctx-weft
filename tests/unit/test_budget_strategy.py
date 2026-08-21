@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.assembler.budget import PriorityBudgetStrategy
 from ctx_weft.core.errors import ContextOverflowError
+from ctx_weft.protocols import ImagePart, TextPart
 
 
 def _req(task_id="cur"):
@@ -102,3 +103,19 @@ async def test_overflow_when_floor_exceeds_limit():
     assert ei.value.effective_limit == 100
     assert ei.value.context_limit == 180_000
     assert ei.value.reserved_output_tokens == 8192
+
+
+@pytest.mark.asyncio
+async def test_overflow_reports_image_count_from_pinned_content():
+    """priority-0（pin 住的当前消息）里含图片时，ContextOverflowError.image_count
+    须精确等于其中 ImagePart 的个数（不靠 image_tokens 整除反推）。"""
+    content = [TextPart(text="hi"), ImagePart(data="ZGF0YQ==", media_type="image/png"),
+               ImagePart(data="ZGF0YQ==", media_type="image/png")]
+    pinned = ContextBlock(
+        id="cur", source="agent_recall", kind="history", target="messages",
+        content=content, priority=6, token_estimate=200_000,
+        metadata={"timestamp": "", "role": "user", "type": "user_prompt", "task_id": "cur"},
+    )
+    with pytest.raises(ContextOverflowError) as ei:
+        await PriorityBudgetStrategy().apply([pinned], token_limit=100, request=_req("cur"))
+    assert ei.value.image_count == 2

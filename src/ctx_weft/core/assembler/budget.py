@@ -9,7 +9,7 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ctx_weft.core.errors import ContextOverflowError
-from ctx_weft.core.utils import _IMAGE_PART_TOKENS, image_tokens
+from ctx_weft.core.utils import image_part_count
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import ContextBlock, ContextRequest
@@ -84,8 +84,9 @@ class PriorityBudgetStrategy(BudgetStrategy):
             floor = [b for b in blocks if eff_prio[b.id] == 0]
             required = sum(b.token_estimate for b in floor)
             # 地板（pin 住的当前消息）里的图片数——它们不可裁，是溢出的直接成因时
-            # 用户该做的是删图而非删字，故单独报出（见 spec §3）。
-            n_images = sum(image_tokens(b.content) for b in floor) // _IMAGE_PART_TOKENS
+            # 用户该做的是删图而非删字，故单独报出（见
+            # docs/superpowers/specs/2026-08-20-multimodal-design.md §6.5）。
+            n_images = sum(image_part_count(b.content) for b in floor)
             sess = getattr(request, "session", None)
             raise ContextOverflowError(
                 required=required,
