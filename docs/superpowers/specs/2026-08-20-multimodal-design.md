@@ -253,7 +253,15 @@ def image_tokens(content: "str | list[ContentPart] | None") -> int:
 | `background_observe.py:99` `is_short_segment` | 图片密集段误判"短段免折" → 该段 raw 永久保留 |
 | `finalize.py:415` `_is_short_leaf` | 图片密集 task 误判 short |
 
-这五处是**既有的潜伏 bug**，不依赖本设计其余部分，可以独立先行（见 §10 Phase 0）。
+这五处不依赖本设计其余部分，可以独立先行（见 §10 Phase 0）。
+
+**准确地说它们是「潜伏的」而非「已在发作的」bug**：当前没有任何入口能让 `ImagePart`
+进入 memory，因此五处补充项在 Phase 0 内恒为 0。Phase 0 的意义是**先把地基修对**——
+它的测试以合成记录验证补充项算得准，等 Phase 1-2 打通输入后，五处同时转为生效，
+无需再回头改。
+
+其中 `composer.py:400` 一处还额外依赖 §6.4 令 composer 保 parts：**Phase 2 的计划须
+显式验证该项确实从恒 0 转为生效**，否则它会永久是死代码。
 
 `ContextOverflowError`（`errors.py:76`）默认文案补图片维度，让用户知道该删图而非删字。
 

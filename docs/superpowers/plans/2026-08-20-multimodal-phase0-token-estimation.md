@@ -144,7 +144,9 @@ git commit -m "feat(utils): image_tokens——只补图片、不碰文本与 fra
 
 **Interfaces:**
 - Consumes: `ctx_weft.core.utils.image_tokens`（Task 1）
-- Produces: 无新接口。副作用是 `ContextBlock.token_estimate` 与 `AssembledPrompt.token_count` 开始计入图片，`PriorityBudgetStrategy` 因而能对图片触发裁剪。
+- Produces: 无新接口。`ContextBlock.token_estimate`（驱动 `PriorityBudgetStrategy` 裁剪，`budget.py:52`）与 `AssembledPrompt.token_count`（仅用于上报：`CONTEXT_ASSEMBLED` 事件 + 投影 `assembled_prompt_tokens`）两处都补上图片项。
+
+  **两项在 Phase 0 内恒为 0，这是设计如此。** Phase 0 尚无入口能让 `ImagePart` 进入 memory（`Task.user_prompt` 仍是 `str`，`driver._persist_user_prompt` 仍拍扁），composer 也一律 `content_to_text`。它们分别在 Phase 1-2 打通输入、Phase 2 令 composer 保 parts（spec §6.4）之后转为生效。本任务的测试以**合成记录**直接验证补充项算得对——这是 Phase 0 唯一可能的验证方式。
 
 **为什么两处放在一起：** 它们服务同一个消费者（budget 裁剪 + 溢出判定），回归风险同源，一个 reviewer 会一并看。
 
