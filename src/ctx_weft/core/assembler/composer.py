@@ -101,7 +101,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ctx_weft.protocols import LLMMessage, LLMTool
 from ctx_weft.protocols.capability import qualify
-from ctx_weft.core.utils import SUBTASKS_REVIEW_HEADING, content_to_text
+from ctx_weft.core.utils import SUBTASKS_REVIEW_HEADING, content_to_text, image_tokens
 from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
@@ -397,7 +397,8 @@ class DefaultComposer(Composer):
             tools = []
 
         token_count = request.token_counter(system) + sum(
-            request.token_counter(content_to_text(m.content)) for m in messages
+            request.token_counter(content_to_text(m.content)) + image_tokens(m.content)
+            for m in messages
         )
         return AssembledPrompt(
             system=system,

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils import (
-    PROGRESS_SO_FAR_HEADING, content_to_text, generate_id,
+    PROGRESS_SO_FAR_HEADING, content_to_text, generate_id, image_tokens,
 )
 from ctx_weft.protocols import MemoryEventType
 
@@ -108,6 +108,11 @@ def record_to_history_block(
         target="messages",
         content=text,
         priority=slot_priority("history", str(etype)),
-        token_estimate=record.metadata.get("token_count") or request.token_counter(text),
+        # 文本计数沿用既有口径（含存量 metadata['token_count']），图片另行补齐——
+        # 存量 token_count 是改造前按纯文本写的，不含图片，故补充项恒须相加。
+        token_estimate=(
+            (record.metadata.get("token_count") or request.token_counter(text))
+            + image_tokens(record.content)
+        ),
         metadata=md,
     )
