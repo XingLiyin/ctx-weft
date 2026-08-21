@@ -263,6 +263,12 @@ def image_tokens(content: "str | list[ContentPart] | None") -> int:
 其中 `composer.py:400` 一处还额外依赖 §6.4 令 composer 保 parts：**Phase 2 的计划须
 显式验证该项确实从恒 0 转为生效**，否则它会永久是死代码。
 
+`_history.py:111` 一处还有一条独立的数据源错位：Task 2 的 `token_estimate` 用
+`record.content`（未拍扁）算图片项，而 `budget.py` 只能读 `ContextBlock.content`。
+`_history.py` 目前设 `content=text`（已拍扁），因此 `budget.py` 的图片计数**按构造恒为
+0**——不只是「暂时没有图片」，而是即使 Phase 1 把真实 `ImagePart` 写入 memory 也依然
+为 0，直到 `record_to_history_block` 本身停止拍扁。Phase 2 须一并对齐这两处的数据源。
+
 `ContextOverflowError`（`errors.py:76`）默认文案补图片维度，让用户知道该删图而非删字。
 
 ### 6.6 LLM 出网
@@ -415,3 +421,11 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 - 视觉能力信息从 `LLMClient` 的哪个字段读（§6.7）——现有 duck-type 约定里
   没有对应字段，可能需要在 `protocols/llm.py` 补一个可选属性
 - `_IMAGE_PART_TOKENS = 1600` 是否够保守（`utils.py:154`），需按真实计费校准
+- `image_tokens` / `image_part_count` 以 `not hasattr(p, "text")` 判定非文本 part。若某个
+  memory provider 把 content 作 JSON 往返后返回 `list[dict]`，则**每个** part（含文本）
+  都会被计为图片。`content_to_text` 有对称的盲点（会把这类列表渲染成空串），故该失效
+  模式是既有的；但方向变了——此前静默少算为 0，此后变为多算，会导致过度裁剪与虚假
+  `ContextOverflowError`。今日潜伏（`in_memory.py` 存对象引用，`src/` 内无 JSON 往返），
+  但 ctx-weft 是 SDK、memory 协议可插拔，第三方 provider 正是它出现的地方。**Phase 1
+  须保证召回内容 rehydrate 成 `ContentPart` 对象**，或在归一层令判据 dict-aware。本
+  Phase 不改判据。
