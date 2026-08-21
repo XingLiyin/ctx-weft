@@ -157,15 +157,19 @@ from datetime import datetime, UTC
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.sources._history import record_to_history_block
-from ctx_weft.protocols import ImagePart, MemoryAddress, TextPart
-from ctx_weft.protocols.memory import MemoryKind, MemoryRecord, MemoryScope
+from ctx_weft.protocols import (
+    ImagePart, MemoryAddress, MemoryKind, MemoryRecord, MemoryScope, TextPart,
+)
 
 _BASE = datetime(2026, 8, 1, tzinfo=UTC)
 
 
 def _record(content):
+    # type=None = v2 行形态；record_to_history_block 会经
+    # legacy_type_of(kind, scope, role) 派生 etype。该字段无默认值，必须显式给出。
     return MemoryRecord(
         id="mem_1",
+        type=None,
         kind=MemoryKind.CONVERSATION_TURN,
         scope=MemoryScope.TASK,
         address=MemoryAddress(session_id="s", task_id="t1", agent_id="a"),
