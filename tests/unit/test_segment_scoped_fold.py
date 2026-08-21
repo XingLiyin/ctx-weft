@@ -27,11 +27,13 @@ from ctx_weft.core.orchestrator.control_capability import (
     ControlResult,
 )
 from ctx_weft.protocols import (
+    ImagePart,
     MemoryEvent,
     MemoryEventType,
     MemoryScope,
     MemoryAddress,
     ProviderContext,
+    TextPart,
 )
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.core.loop.steps.segment_fold import segment_fold
@@ -167,6 +169,24 @@ async def test_is_short_segment_single_llm_reply_is_short_regardless_of_tokens()
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
     assert await bo.is_short_segment(state, ctx) is True,         "单条 LLM 回复的段不该折，无论多长"
+
+
+async def test_is_short_segment_counts_image_parts():
+    """当前段文本极短但带图 → 图片 token 使其超阈值，必须判非 short。
+
+    _seed_two_segments 的当前段是 A2a(assistant) + A2b(tool)，只有 1 条 assistant
+    回合会命中单回复门直接 True；故再补一条带图的 assistant 回合凑够 2 条。
+    """
+    mem = InMemoryMemoryProvider()
+    await _seed_two_segments(mem)
+    await mem.ingest(MemoryEvent(
+        type=MT.LLM_RESPONSE, address=_SCOPE,
+        content=[TextPart(text="ok"), ImagePart(data="ZGF0YQ==", media_type="image/png")],
+        timestamp=_ts(55), role="assistant"), _PCTX)
+    state, ctx = _short_seg_state_ctx(mem, threshold=400)
+
+    assert await bo.is_short_segment(state, ctx) is False, \
+        "一张图 1600 token 已超阈值 400，不得因图算 0 而误判短段免折"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

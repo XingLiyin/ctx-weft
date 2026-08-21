@@ -13,7 +13,7 @@ from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.events import EventType
-from ctx_weft.core.utils import as_utc, content_to_text, generate_id, now_utc
+from ctx_weft.core.utils import as_utc, content_to_text, generate_id, image_tokens, now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress
 from ctx_weft.protocols.capability import qualify
 
@@ -415,7 +415,9 @@ async def _is_short_leaf(memory, scope, task, loop_config, ctx, has_descendants:
         content_to_text(r.content) if not isinstance(r.content, str) else r.content
         for r in records
     )
-    return ctx.llm.tokenizer.count(text) <= loop_config.short_task_token_threshold
+    # 同 background_observe.is_short_segment：保留 join 后数一次的文本口径，图片另计。
+    images = sum(image_tokens(r.content) for r in records)
+    return (ctx.llm.tokenizer.count(text) + images) <= loop_config.short_task_token_threshold
 
 
 async def finalize_task_memory(memory, state, task, mem_content: str, outcome: str, ctx,
