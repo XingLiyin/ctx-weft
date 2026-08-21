@@ -24,7 +24,7 @@ from ctx_weft.core.assembler.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
-from ctx_weft.core.utils import content_to_text, effective_limit, now_utc
+from ctx_weft.core.utils import content_to_text, effective_limit, image_tokens, now_utc
 from ctx_weft.protocols import (
     LLMRequest, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
 )
@@ -203,7 +203,9 @@ async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
     for r in [*body, *agent_recs]:
         text = r.content if isinstance(r.content, str) else content_to_text(r.content)
-        total += ctx.llm.tokenizer.count(text)
+        # 图片另计：不计入则降级图片的 freed_tokens 恒为 0，escalating_compact 的
+        # est 不减、误判该级白跑而继续升级（见 spec 2026-08-20-multimodal-design §6.5）。
+        total += ctx.llm.tokenizer.count(text) + image_tokens(r.content)
     return total
 
 
