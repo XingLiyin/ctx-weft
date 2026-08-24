@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.assembler import ContextRequest
+from ctx_weft.core.content import redact_content_for_event
 from ctx_weft.core.events import EventType
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryScope
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
@@ -118,7 +119,7 @@ async def run_observe_react(
             "round": round_num,
             "system": system,
             "messages": [
-                {"role": m.role, "content": m.content if isinstance(m.content, str) else str(m.content)}
+                {"role": m.role, "content": redact_content_for_event(m.content)}
                 for m in current_messages
             ],
             "tool_names": [t.name for t in tools],

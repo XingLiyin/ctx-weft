@@ -13,6 +13,7 @@ import dataclasses
 import logging
 from typing import Any
 
+from ctx_weft.core.content import content_to_text
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
     stream_llm, apply_dynamic_max_tokens, request_prompt_estimate, resolve_llm_identity,
@@ -124,7 +125,7 @@ class RecognizeIntentStep(Step):
         await ctx.event_bus.emit(make_event(state, EventType.RECOGNIZE_INTENT_LLM_PROMPT, payload={
             "system": prompt.system,
             "messages": [
-                {"role": m.role, "content": m.content if isinstance(m.content, str) else ""}
+                {"role": m.role, "content": content_to_text(m.content)}
                 for m in prompt.messages
             ],
             "tool_names": [t.name for t in prompt.tools],

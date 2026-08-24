@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
+from ctx_weft.core.content import redact_content_for_event
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
     PROMPT_EST_BASE_KEY, PROMPT_EST_SEG_KEY, request_prompt_estimate, resolve_llm_identity,
@@ -218,7 +219,7 @@ async def _run_llm_turn(
     await ctx.event_bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
         "request_id": req_id, "turn": turn_num, "system": prompt.system,
         "messages": [
-            {"role": m.role, "content": m.content if isinstance(m.content, str) else str(m.content)}
+            {"role": m.role, "content": redact_content_for_event(m.content)}
             for m in current_messages
         ],
         "tool_names": [t.name for t in prompt.tools]}))
