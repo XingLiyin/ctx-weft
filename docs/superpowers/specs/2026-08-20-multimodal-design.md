@@ -263,11 +263,27 @@ def image_tokens(content: "str | list[ContentPart] | None") -> int:
 其中 `composer.py:400` 一处还额外依赖 §6.4 令 composer 保 parts：**Phase 2 的计划须
 显式验证该项确实从恒 0 转为生效**，否则它会永久是死代码。
 
+> **已兑现（Task 7，2026-08-23）**：`tests/integration/test_multimodal_end_to_end.py::
+> test_assembled_token_count_higher_with_image_than_text_only` 驱动完整
+> `start_session` → PrepareStep → `ContextAssembler.assemble` → `DefaultComposer.compose`
+> 全链路，从生产事件 `CONTEXT_ASSEMBLED.token_count` 取真实值，断言含图会话
+> 严格大于同等文本会话（差值 = `_IMAGE_PART_TOKENS`）。变异验证：把
+> `composer.py:420` 的 `image_tokens(m.content)` 项改成常数 0，该测试即失败，
+> 证明其确有拦截力。
+
 `_history.py:111` 一处还有一条独立的数据源错位：Task 2 的 `token_estimate` 用
 `record.content`（未拍扁）算图片项，而 `budget.py` 只能读 `ContextBlock.content`。
 `_history.py` 目前设 `content=text`（已拍扁），因此 `budget.py` 的图片计数**按构造恒为
 0**——不只是「暂时没有图片」，而是即使 Phase 1 把真实 `ImagePart` 写入 memory 也依然
 为 0，直到 `record_to_history_block` 本身停止拍扁。Phase 2 须一并对齐这两处的数据源。
+
+> **已兑现（Task 7，2026-08-23）**：`tests/unit/test_budget_strategy.py::
+> test_overflow_image_count_from_real_assembled_history_block` 不手工构造
+> `ContextBlock`——用 `record_to_history_block`（Task 2 之后的真实装配产物）
+> 产出含 3 个 `ImagePart` 的 block，喂给 `PriorityBudgetStrategy.apply` 驱动溢出路径，
+> 断言 `ContextOverflowError.image_count == 3`，证明装配链真的把 parts 送到了
+> `budget.py:89` 的 `image_part_count(b.content)`。变异验证：把
+> `utils.py` 的 `image_part_count` 改成恒返回 0，该测试即失败。
 
 `ContextOverflowError`（`errors.py:76`）默认文案补图片维度，让用户知道该删图而非删字。
 
@@ -305,6 +321,17 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 
 与 `reorder_tool_results_after_calls`（`llm_gateway.py:198`）无冲突：那一步在 core
 执行，adapter 在其之后，追加的消息不会再被搬动。
+
+> **Phase 2 端到端出网验证（Task 7，2026-08-23）**：
+> `tests/integration/test_multimodal_end_to_end.py::
+> test_multimodal_prompt_reaches_wire_payload_as_image_block` 驱动
+> `start_session(user_prompt=[TextPart, ImagePart])` 走完一个 actor 回合，用一个
+> 子类化 `AnthropicAdapter`（复用真实 `_build_payload`/`_serialize_messages`，只是
+> 不做真实网络请求）捕获实际 wire payload，断言其中含 `{"type": "image", ...}`
+> block——证明图片真的从 memory 一路打到出网 payload，而不只是停在
+> `AssembledPrompt.messages` 里。变异验证：把 `anthropic.py` 里 `_parts_to_blocks`
+> 的图片分支改成退化成文本，该测试与 `test_adapter_multimodal_wire.py` 的两条
+> 既有测试同时失败。
 
 ### 6.7 模型能力门控
 

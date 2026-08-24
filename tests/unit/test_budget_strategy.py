@@ -1,9 +1,12 @@
+from datetime import UTC, datetime
+
 import pytest
 from types import SimpleNamespace
 from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.assembler.budget import PriorityBudgetStrategy
+from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.core.errors import ContextOverflowError
-from ctx_weft.protocols import ImagePart, TextPart
+from ctx_weft.protocols import ImagePart, MemoryEventType, MemoryRecord, TextPart
 
 
 def _req(task_id="cur"):
@@ -119,3 +122,35 @@ async def test_overflow_reports_image_count_from_pinned_content():
     with pytest.raises(ContextOverflowError) as ei:
         await PriorityBudgetStrategy().apply([pinned], token_limit=100, request=_req("cur"))
     assert ei.value.image_count == 2
+
+
+@pytest.mark.asyncio
+async def test_overflow_image_count_from_real_assembled_history_block():
+    """Phase 0 遗留义务 2（spec §6.5）：budget.py:89 的 image_part_count(b.content) 曾因
+    ContextBlock.content 恒为 _history.py 拍扁后的字符串而按构造恒 0。这里不手工构造
+    ContextBlock——而是用 record_to_history_block（Task 2 之后的真实装配产物）喂给
+    PriorityBudgetStrategy.apply，证明装配链真的把 parts 送到了 budget，而不只是
+    budget 自己会数。"""
+    record = MemoryRecord(
+        id="mem_pin",
+        type=MemoryEventType.USER_PROMPT,
+        content=[
+            TextPart(text="hi"),
+            ImagePart(data="ZGF0YQ==", media_type="image/png"),
+            ImagePart(data="ZGF0YQ==", media_type="image/png"),
+            ImagePart(data="ZGF0YQ==", media_type="image/png"),
+        ],
+        timestamp=datetime(2026, 8, 1, tzinfo=UTC),
+        role="user",
+        metadata={"task_id": "cur"},
+    )
+    req_for_block = SimpleNamespace(task=SimpleNamespace(id="cur"), token_counter=len)
+    blk = record_to_history_block(
+        record, "agent_recall", 0, request=req_for_block, current_task_id="cur",
+    )
+    # 未手工构造：content 直接来自 record_to_history_block 的真实产出。
+    assert isinstance(blk.content, list), "本条断言的前提是装配产出的是 part 列表，而非拍扁字符串"
+
+    with pytest.raises(ContextOverflowError) as ei:
+        await PriorityBudgetStrategy().apply([blk], token_limit=1, request=_req("cur"))
+    assert ei.value.image_count == 3
