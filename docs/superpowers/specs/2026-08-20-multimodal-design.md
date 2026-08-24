@@ -470,6 +470,21 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 
 ## 13. 未决项
 
+**Phase 3 的强制前置（Phase 2 终审后裁定，2026-08-24）：**
+
+- **纯空白文本块仍会出网。** Phase 2 的 I1 修复只跳过了 falsy 文本（`if text:`），
+  而 `TextPart("   ")` 是 truthy——它挨着 `ImagePart` 时仍产出
+  `{"type":"text","text":"   "}`。Anthropic 对空/**纯空白**文本块同样返回 400。
+  gateway 的 `_is_empty_content` 拦不住（图片确是内容，消息被正确保留）。
+  实测确认。修法：两家 adapter 的跳过条件改为 `if text.strip():`。
+  安全性：只含空白 `TextPart` 而无图的消息在上游已被 `_is_empty_content`（它 strip）
+  丢弃，故不会产出空 block 列表。**Phase 3 的第一件事。**
+- **`anthropic.py` assistant 分支的注释已失效。** 其陈述的「`_parts_to_blocks` 对每个
+  part 恰好产出一个 block」在 I1 修复后不再成立（falsy 文本 part 会被跳过）。
+  代码本身仍正确（`content_blocks or ""` 的兜底行为不变，因为 content_blocks 为空
+  仍蕴含消息为空），但注释会误导后来者——它正是 Task 5 删除死代码时所依据的不变式。
+  Phase 3 顺带更正。
+
 - 单图字节上限与 `media_type` 白名单的具体取值（§6.1）
 - 视觉能力信息从 `LLMClient` 的哪个字段读（§6.7）——现有 duck-type 约定里
   没有对应字段，可能需要在 `protocols/llm.py` 补一个可选属性
