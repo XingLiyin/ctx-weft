@@ -19,6 +19,14 @@
 - **摘要恒为纯文本**（spec §8）。`MemoryKind.SUMMARY` 记录的 content 永远是 `str`，因此 `_history.py` 里 `wrap_compact_summary` / `PROGRESS_SO_FAR_HEADING` / `annotate_assistant_summary` 三个包装器**保持字符串拼接、不必改**。只有非摘要记录需要保 parts。
 - **只允许两类地方拍扁**（spec §3②）：语义检索 query（`knowledge.py` / `long_memory.py` / `task_spec.py`）与摘要输入（`compact.py` / `finalize.py` / `background_observe.py`）。这些**保持现状、不要改**。
 - 非文本 part 判据保持 `not hasattr(p, "text")`（Phase 2 仍冻结，见 spec §13）。
+- **⚠️ 测试写法陷阱**：`assert any(not hasattr(p, "text") for p in content)` 在 `content` 是 `str` 时**恒为 True**——字符串的每个字符都没有 `.text` 属性。也就是说这条断言在「图片被拍扁成字符串」的失败场景下**照样通过**，是重言式。
+  **凡断言「图片存活」，必须先钉住类型或用完整相等**：
+  ```python
+  assert isinstance(out.content, list), "必须仍是 part 列表，不能被拍扁成 str"
+  assert any(not hasattr(p, "text") for p in out.content)
+  # 或者直接：assert out.content == expected_parts
+  ```
+  Task 1 已因此产生过一条无效守卫（详见 ledger 裁定 Q2）。
 - 测试运行器 `uv run pytest`。**已知**本环境下 `pytest -q` 配合大量 warning 时终结汇总行不输出——用不带 `-q` 的调用或 `-v`。
 - **不得新增 PytestWarning。** 需要 asyncio 时用 `@pytest.mark.asyncio` 装饰**具体的 async 测试**，**不得**用模块级 `pytestmark`。
 - 仓库有约 12000 条既有 ruff 违规，**不得**跨仓库跑 `ruff --fix`；如需使用，限定单文件单规则。
