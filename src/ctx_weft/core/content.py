@@ -21,6 +21,9 @@ __all__ = [
     "content_to_text",
     "content_with_prefix",
     "content_with_suffix",
+    "content_to_jsonable",
+    "content_from_jsonable",
+    "redact_content_for_event",
 ]
 
 
@@ -70,3 +73,85 @@ def content_with_suffix(
         tail = dataclasses.replace(content[-1], text=f"{content[-1].text}{text}")
         return [*content[:-1], tail]
     return [*content, TextPart(text=text)]
+
+
+# ── JSON 往返（事件 payload / 投影快照）─────────────────────────────────────
+
+
+def content_to_jsonable(
+    content: "str | list[ContentPart] | None",
+) -> "str | list[dict] | None":
+    """把内容转成可 json.dumps 的形态。
+
+    ContentPart 是普通 dataclass，直接进 json.dumps 会 TypeError——事件与投影
+    落库前必须过这一层（spec §6.2）。str / None 原样返回，纯文本路径零成本。
+    """
+    if content is None or isinstance(content, str):
+        return content
+    out: list[dict] = []
+    for part in content:
+        if _is_text_part(part):
+            out.append({"type": "text", "text": part.text})
+        else:
+            out.append({
+                "type": "image",
+                "data": part.data,
+                "media_type": part.media_type,
+                "source_type": getattr(part, "source_type", "base64"),
+            })
+    return out
+
+
+def content_from_jsonable(
+    raw: "str | list[dict] | None",
+) -> "str | list[ContentPart] | None":
+    """content_to_jsonable 的逆变换。
+
+    未知 type 的元素**跳过而不抛**：将来新增 part 类型时，旧版本读到新数据应当
+    降级而非崩溃（事件流是只增的，回放会遇到比自己新的数据）。
+    """
+    if raw is None or isinstance(raw, str):
+        return raw
+    from ctx_weft.protocols import ImagePart, TextPart
+    out: list[ContentPart] = []
+    for item in raw:
+        kind = item.get("type")
+        if kind == "text":
+            out.append(TextPart(text=item.get("text", "")))
+        elif kind == "image":
+            out.append(ImagePart(
+                data=item.get("data", ""),
+                media_type=item.get("media_type", ""),
+                source_type=item.get("source_type", "base64"),
+            ))
+        # 未知类型：跳过
+    return out
+
+
+# ── 事件脱敏 ───────────────────────────────────────────────────────────────
+
+_REDACT_DATA_PREVIEW = 12
+
+
+def redact_content_for_event(content: "str | list[ContentPart] | None") -> str:
+    """把内容渲染成适合进事件 payload 的字符串。
+
+    图片渲染成短标记而非原始 base64——一张图几万字符，直接进 LLM_PROMPT_SENT
+    会把事件库撑爆（spec §6.8）。
+    """
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for part in content:
+        if _is_text_part(part):
+            parts.append(part.text)
+        else:
+            data = getattr(part, "data", "") or ""
+            src = getattr(part, "source_type", "base64")
+            parts.append(
+                f"[image {getattr(part, 'media_type', '?')} "
+                f"{src}:{data[:_REDACT_DATA_PREVIEW]}…]"
+            )
+    return "".join(parts)
