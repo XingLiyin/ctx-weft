@@ -44,3 +44,50 @@ class SpillSink(ABC):
     @abstractmethod
     async def spill(self, content: str, ctx: ProviderContext, *, name_hint: str = "") -> str:
         ...
+
+
+BLOB_REF_PREFIX = "blob:"
+
+
+class BlobStore(ABC):
+    """core 的「二进制 sink」契约：存取图片等二进制内容，core 只见 ref。
+
+    与同处的 SpillSink 同形——core 不直接碰存储，只知道「有个 sink 能存能取」。
+    宿主侧实现落点也相同（FilesystemToolsProvider 已持有 per-session workspace）。
+
+    put 必须**内容寻址且幂等**：同样的 data 返回同样的 ref，重复调用不重复存。
+    这同时给到三件事：写入端去重、重放安全、以及 rehydrate 字节稳定——同一 ref
+    每次还原出的 base64 完全一致，Anthropic 的 prompt cache 前缀不会被打碎。
+
+    get 对不存在 / 已回收的 ref 返回 None，**不得 raise**：blob 过期、宿主换机、
+    GC 误删都会发生，调用方据此降级为文本占位，绝不因取图失败中断 loop。
+    """
+
+    @abstractmethod
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        ...
+
+    @abstractmethod
+    async def get(
+        self, ref: str, ctx: ProviderContext
+    ) -> "tuple[bytes, str] | None":
+        ...
+
+
+class NullBlobStore(BlobStore):
+    """未注册 BlobStore 时的默认实现——保证不接 blob 的宿主行为完全不变。
+
+    put 刻意抛错：Phase 1 内没有任何调用方（外部化在 Phase 3），抛错可在
+    Phase 3 接线错误时立刻暴露，而不是静默产出一个假 ref。
+    """
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        raise NotImplementedError(
+            "No BlobStore registered; register one via "
+            "ProviderRegistry.register_blob_store() before externalizing content."
+        )
+
+    async def get(
+        self, ref: str, ctx: ProviderContext
+    ) -> "tuple[bytes, str] | None":
+        return None

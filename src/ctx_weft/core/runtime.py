@@ -200,6 +200,7 @@ class ProviderRegistry:
         self._capabilities: list[CapabilityProvider] = []
         self._capability_authorizers: dict[str, Authorizer] = {}  # provider_name or capability_id → Authorizer
         self._llm_provider: LLMClientResolver | None = None
+        self._blob_store: "BlobStore | None" = None
 
     # ── Memory ────────────────────────────────────────────────────────────────
 
@@ -280,6 +281,19 @@ class ProviderRegistry:
 
     def has_llm_provider(self) -> bool:
         return self._llm_provider is not None
+
+    # ── BlobStore ────────────────────────────────────────────────────────────
+
+    def register_blob_store(self, store: "BlobStore") -> None:
+        """注册二进制内容存储。未注册时 get_blob_store() 返回 NullBlobStore。"""
+        self._blob_store = store
+
+    def get_blob_store(self) -> "BlobStore":
+        """取 blob store；未注册时返回 NullBlobStore（行为与不接 blob 完全一致）。"""
+        if self._blob_store is None:
+            from ctx_weft.protocols import NullBlobStore
+            self._blob_store = NullBlobStore()
+        return self._blob_store
 
 
 # ── SessionStartParams ────────────────────────────────────────────────────────

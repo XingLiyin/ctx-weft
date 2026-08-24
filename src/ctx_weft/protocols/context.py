@@ -28,7 +28,7 @@ class ImagePart:
 
     data: str  # base64 编码或 URL
     media_type: str  # 'image/png' / 'image/jpeg' / ...
-    source_type: Literal["base64", "url"] = "base64"
+    source_type: Literal["base64", "url", "ref"] = "base64"
     type: Literal["image"] = "image"
 
 
