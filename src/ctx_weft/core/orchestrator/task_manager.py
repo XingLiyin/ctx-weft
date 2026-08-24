@@ -542,7 +542,12 @@ class TaskManager:
         # 有 base 时从 base 起逐段 content_with_suffix；无 base 时退回纯文本 join。
         # 两条路径对 str base 的产物与改造前**逐字节相同**（已逐例核对，见 brief §5）。
         if base_prompt:
-            new_prompt = base_prompt
+            # 无 section 时 new_prompt 必须与 base_prompt 是不同对象：list base 若直接
+            # 复用同一引用，task.user_prompt 与 task.original_user_prompt 会别名同一份
+            # parts，日后任一方被就地修改都会污染另一方（str 不可变故无此风险）。
+            new_prompt = (
+                list(base_prompt) if isinstance(base_prompt, list) else base_prompt
+            )
             for sec in sections:
                 new_prompt = content_with_suffix(new_prompt, f"\n\n{sec}")
         else:

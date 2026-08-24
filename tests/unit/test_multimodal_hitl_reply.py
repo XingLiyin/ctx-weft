@@ -39,8 +39,6 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Task
 from ctx_weft.core.utils import now_utc
 
-pytestmark = pytest.mark.asyncio
-
 
 async def _finished_task_manager(prompt):
     tm = TaskManager(session_id="s1", event_bus=InProcessEventBus())
@@ -55,6 +53,7 @@ async def _finished_task_manager(prompt):
     return tm, task
 
 
+@pytest.mark.asyncio
 async def test_reopen_keeps_multimodal_original_prompt():
     """original_user_prompt 是 reopen 的 base；被丢空会让重开后图片永久消失。"""
     tm, task = await _finished_task_manager(_content())
@@ -65,6 +64,7 @@ async def test_reopen_keeps_multimodal_original_prompt():
     assert "## Revision required" in task.user_prompt[-1].text
 
 
+@pytest.mark.asyncio
 async def test_reopen_plain_text_prompt_byte_identical():
     """纯文本路径必须与改造前逐字节相同。"""
     tm, task = await _finished_task_manager("原始要求")
@@ -73,3 +73,17 @@ async def test_reopen_plain_text_prompt_byte_identical():
     assert task.user_prompt == (
         "原始要求\n\n## Previous attempt (rejected)\n旧产出\n\n## Revision required\n重做"
     )
+
+
+@pytest.mark.asyncio
+async def test_reopen_multimodal_zero_sections_does_not_alias_original():
+    """多模态 base + 零 section（无 reason/upstream/outputs）时，new_prompt 不得与
+    original_user_prompt 共享同一个列表对象——否则日后就地修改一方会污染另一方。"""
+    tm, task = await _finished_task_manager(_content())
+    task.outputs = None
+    task.process_report = None
+    assert await tm.reopen_task("tsk_1") is True
+    assert task.original_user_prompt == _content()
+    assert task.user_prompt == _content()
+    assert task.user_prompt is not task.original_user_prompt, \
+        "new_prompt 必须是 base 的独立拷贝，不能与 original_user_prompt 别名同一对象"
