@@ -188,10 +188,10 @@ class Task:
 
     title: str = ""
     description: str = ""
-    user_prompt: str | None = None
+    user_prompt: "str | list[ContentPart] | None" = None
     # 首次执行时的原始 user_prompt 快照；reopen 重写 user_prompt 时以此为 base，
     # 避免多轮 reopen 把"上轮产出/修订提示"反复累加进 prompt。None = 尚未快照。
-    original_user_prompt: str | None = None
+    original_user_prompt: "str | list[ContentPart] | None" = None
     user_prompt_in_memory: bool = False
     settings: TaskSettings = field(default_factory=NormalTaskSettings)
     # 纯文本(无 tool call)turn 的处理方式：interactive=暂停等用户 / auto=自治需调 finish_task。

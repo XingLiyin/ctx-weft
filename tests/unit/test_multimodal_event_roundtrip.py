@@ -69,6 +69,30 @@ def test_task_user_prompt_survives_event_replay():
     assert task.user_prompt == _content(), "多模态 prompt 必须经事件回放完整还原"
 
 
+def test_task_requeued_replay_restores_multimodal_prompt():
+    """TASK_REQUEUED 回放分支（reducers.py ~159-164 行）须把两个 prompt 字段完整还原为 part 列表。
+
+    reopen 携带改写后的 user_prompt / original_user_prompt 快照，replay 必须无损，
+    这是 Task 5 大改过的高风险路径，此前无测试驱动过多模态内容。
+    """
+    events = [
+        _ev(1, EventType.SESSION_CREATED, user_prompt="看这张图",
+            template_id="tmpl_a", root_agent_id="agt_root"),
+        _ev(2, EventType.TASK_CREATED, task={
+            "id": "tsk_1", "status": "ACTIVE", "title": "T1",
+            "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root",
+            "user_prompt": "纯文本",
+        }),
+        _ev(3, EventType.TASK_REQUEUED, task_id="tsk_1",
+            user_prompt=content_to_jsonable(_content()),
+            original_user_prompt=content_to_jsonable(_content())),
+    ]
+    view = reduce_events(events, run_id="s1")
+    task = task_from_projection(view.tasks["tsk_1"])
+    assert task.user_prompt == _content(), "requeue 后的 user_prompt 必须还原为 part 列表"
+    assert task.original_user_prompt == _content(), "original_user_prompt 快照同样必须无损还原"
+
+
 def test_snapshot_roundtrip_preserves_parts():
     """快照路径（serialize_view）与事件回放路径必须同样无损。"""
     events = [
