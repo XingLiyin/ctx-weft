@@ -724,10 +724,12 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
             _, session = self._sessions.get(ctx.session_id, (None, None))
             if session is not None:
                 session.status = "RUNNING"
+            from ctx_weft.core.content import content_to_text
+            msg = content_to_text(approval.message)
             if approval.status == "rejected":
-                content = f"Human declined: {approval.message}" if approval.message else "Human rejected the request."
+                content = f"Human declined: {msg}" if msg else "Human rejected the request."
             else:
-                content = approval.message or result.content
+                content = msg or result.content
             yield CapabilityEvent(kind="result", payload={"content": content, "metadata": {}})
             return
 

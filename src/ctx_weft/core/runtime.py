@@ -15,10 +15,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
-from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
-from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
-from ctx_weft.core.orchestrator.hitl_manager import HitlManager, HitlRequest  # noqa: F401 — re-exported for shell use
-from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.assembler import (
     ContextAssembler,
     PriorityBudgetStrategy,
@@ -35,12 +31,20 @@ from ctx_weft.core.assembler.sources import (
     SemanticRecallSource,
     TaskSpecSource,
 )
+from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
+from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
 from ctx_weft.core.events import Event, EventType, InProcessEventBus
 from ctx_weft.core.events.bus import EventBus
-from ctx_weft.protocols import LLMClient, LLMClientResolver
+from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.park import HitlPark
-from ctx_weft.core.loop.steps import ActStep, FinalizeStep, RecognizeIntentStep, ObserveStep, PrepareStep
+from ctx_weft.core.loop.steps import (
+    ActStep,
+    FinalizeStep,
+    ObserveStep,
+    PrepareStep,
+    RecognizeIntentStep,
+)
 from ctx_weft.core.loop.steps.background_observe import (
     await_pending_background_observe,
     launch_background_observe,
@@ -51,29 +55,34 @@ from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
-from ctx_weft.protocols.capability import SessionScopedCapabilityProvider
-from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.core.orchestrator.hitl_manager import (  # noqa: F401 — re-exported for shell use
+    HitlManager,
+    HitlRequest,
+)
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
-from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
-from ctx_weft.core.state.models import Agent, LoopGuard, Session, Task
+from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
+from ctx_weft.core.state.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import (
     AgentTemplate,
     Capability,
     KnowledgeProvider,
+    LLMClient,
+    LLMClientResolver,
     LLMOutageError,
-    MemoryKind,
-    MemoryScope,
-    MemoryProvider,
     MemoryAddress,
+    MemoryKind,
+    MemoryProvider,
+    MemoryScope,
     ProviderContext,
 )
 from ctx_weft.protocols.capability import (
     AgentCapabilityProvider,
     CapabilityProvider,
+    SessionScopedCapabilityProvider,
     SkillCapabilityProvider,
     qualify,
 )
@@ -117,7 +126,7 @@ async def _copy_memory_for_inherit(
     """
     # AGENT_COMPACT_SUMMARY（父的黑盒折叠派发日志）仍排除——对子无用（沿用 2026-06-23 的窄化意图，
     # 只是现在改为 mirror 而非「仅 OPEN-task body」）。
-    from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress
+    from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType
 
     parent_agent_id = parent_task.assigned_agent_id or parent_task.creator_agent_id
     parent_scope = MemoryAddress(session_id=session_id, task_id=parent_task.id, agent_id=parent_agent_id)
@@ -266,7 +275,9 @@ class ProviderRegistry:
 
     def _notify_skill_executor_dirty(self) -> None:
         """SkillCapabilityProvider 增减时通知 SkillExecutorCapabilityProvider 重建索引。"""
-        from ctx_weft.core.orchestrator.skill_executor_capability import SkillExecutorCapabilityProvider
+        from ctx_weft.core.orchestrator.skill_executor_capability import (
+            SkillExecutorCapabilityProvider,
+        )
         for p in self._capabilities:
             if isinstance(p, SkillExecutorCapabilityProvider):
                 p.mark_dirty()
@@ -440,7 +451,9 @@ class CtxWeftRuntime:
         control_provider = ControlCapabilityProvider(hitl_manager=self.hitl_manager)
         self.providers.register_capability(control_provider)
 
-        from ctx_weft.core.orchestrator.skill_executor_capability import SkillExecutorCapabilityProvider
+        from ctx_weft.core.orchestrator.skill_executor_capability import (
+            SkillExecutorCapabilityProvider,
+        )
         skill_executor = SkillExecutorCapabilityProvider(self.providers)
         self.providers.register_capability(skill_executor)
 
@@ -644,6 +657,7 @@ class CtxWeftRuntime:
     ) -> tuple[RunHandle, LoopState]:
         """Phase 1 compat: run a single task end-to-end and await completion."""
         import dataclasses as _dc
+
         from ctx_weft.core.content import content_to_text
 
         sid = session_id or generate_id("ses")
@@ -1421,8 +1435,8 @@ class CtxWeftRuntime:
         self, req: "HitlRequest", session: Session, task_manager: TaskManager,
     ) -> None:
         """把 act 纯文本暂停（wait_for_user）的用户回复作为 USER_PROMPT 注入 task 层 + 重排。"""
-        from ctx_weft.protocols import MemoryEvent, MemoryEventType
         from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
+        from ctx_weft.protocols import MemoryEvent, MemoryEventType
 
         target = task_manager.get_task(req.task_id)
         if target is None:

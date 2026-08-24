@@ -10,12 +10,15 @@ N 处替换」的关键（spec 2026-08-20-multimodal-design §3①）。
 from __future__ import annotations
 
 import dataclasses
+import logging
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.utils import content_to_text
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "content_to_text",
@@ -95,8 +98,8 @@ def content_to_jsonable(
         else:
             out.append({
                 "type": "image",
-                "data": part.data,
-                "media_type": part.media_type,
+                "data": getattr(part, "data", ""),
+                "media_type": getattr(part, "media_type", ""),
                 "source_type": getattr(part, "source_type", "base64"),
             })
     return out
@@ -124,7 +127,9 @@ def content_from_jsonable(
                 media_type=item.get("media_type", ""),
                 source_type=item.get("source_type", "base64"),
             ))
-        # 未知类型：跳过
+        else:
+            # 未知类型：跳过而不抛（见 docstring），但留个信号——静默丢弃数据不该完全无声。
+            logger.warning("content_from_jsonable: dropping unknown content part type %r", kind)
     return out
 
 
@@ -138,6 +143,9 @@ def redact_content_for_event(content: "str | list[ContentPart] | None") -> str:
 
     图片渲染成短标记而非原始 base64——一张图几万字符，直接进 LLM_PROMPT_SENT
     会把事件库撑爆（spec §6.8）。
+
+    Phase 1 尚无调用方——留给 Phase 2 的 LLM_PROMPT_SENT 脱敏用。不是死代码，
+    删除前请先确认 Phase 2 的脱敏需求已挪到别处。
     """
     if not content:
         return ""

@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ctx_weft.core.content import content_to_text
 from ctx_weft.core.state.models import Agent, Task
 from ctx_weft.protocols.capability import Capability
 from ctx_weft.protocols.context import ProviderContext
@@ -127,8 +128,8 @@ class HumanConfirmationAuthorizer(Authorizer):
         if approval.accepted:
             return AuthorizationDecision(
                 allowed=True,
-                message=approval.message,
+                message=content_to_text(approval.message),
                 modified_arguments=approval.modified_arguments,
             )
         logger.info("HITL blocked '%s' (status=%s)", capability.id, approval.status)
-        return AuthorizationDecision(allowed=False, message=approval.message)
+        return AuthorizationDecision(allowed=False, message=content_to_text(approval.message))

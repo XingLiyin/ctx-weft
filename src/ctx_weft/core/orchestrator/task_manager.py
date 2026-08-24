@@ -1179,6 +1179,9 @@ def _task_payload(task: Task) -> dict:
             "creator_agent_id": task.creator_agent_id or "",
             "assigned_agent_id": task.assigned_agent_id or "",
             "parent_task_id": task.parent_task_id or "",
+            # 空 part 列表被 `or ""` 降级成 ""：今日安全，因为本仓处处把 [] 与 "" 当等价的
+            # "无内容"（没有生成合法的空/短 part 列表的路径）。Phase 3 若出现这样的合法列表
+            # （例如一张裁掉了文字的纯图片 prompt 被上游误判为"空"），这里就会把它错误吞掉。
             "user_prompt": content_to_jsonable(task.user_prompt) or "",
             "priority": task.priority,
             "max_retries": task.max_retries,

@@ -50,7 +50,7 @@ def _task_label(t) -> str:
     title = (t.title or "").strip()
     if title:
         return title
-    prompt = (getattr(t, "user_prompt", None) or "").strip()
+    prompt = content_to_text(getattr(t, "user_prompt", None) or "").strip()
     if prompt:
         first = prompt.splitlines()[0].strip()
         return first[:_TASK_LABEL_MAX] + "…" if len(first) > _TASK_LABEL_MAX else first
