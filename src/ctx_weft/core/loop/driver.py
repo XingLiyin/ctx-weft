@@ -169,14 +169,14 @@ async def _persist_user_prompt(state, ctx) -> None:
     task = state.task
     if not task.user_prompt or task.user_prompt_in_memory:
         return
-    from ctx_weft.core.utils import content_to_text, now_utc
-    text = (task.user_prompt if isinstance(task.user_prompt, str)
-            else content_to_text(task.user_prompt))
+    from ctx_weft.core.utils import now_utc
     await ctx.memory.ingest(
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
             address=state.scope,
-            content=text,
+            # 原样落库（含多模态）：这是图片在改造前第一次消失的地方。
+            # 装配期是否拍扁由框架决定（Phase 2），落库必须无损。
+            content=task.user_prompt,
             timestamp=now_utc(),
             role="user",
             metadata={"task_id": task.id},
