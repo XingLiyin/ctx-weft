@@ -474,14 +474,14 @@ def _ctx():
     return ProviderContext(session_id="s", tenant_id="tn")
 
 
-def test_null_store_get_returns_none_and_does_not_raise():
-    assert NullBlobStore().get("blob:whatever", _ctx()) is not None or True
-    # get 是 async——见下一条；此条只保证类可实例化
+def test_null_store_satisfies_protocol():
+    """NullBlobStore 必须是 BlobStore 的具体实现（抽象方法全部实现，可实例化）。"""
     assert isinstance(NullBlobStore(), BlobStore)
 
 
 @pytest.mark.asyncio
 async def test_null_store_get_is_none():
+    """get 对不存在的 ref 返回 None 且不抛——这是 spec §5.1 的硬性要求。"""
     assert await NullBlobStore().get("blob:whatever", _ctx()) is None
 
 
