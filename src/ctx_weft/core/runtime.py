@@ -1448,15 +1448,18 @@ class CtxWeftRuntime:
             session_id=session.id, tenant_id=session.tenant_id,
             task_id=target.id, agent_id=agent_id,
         )
+        from ctx_weft.core.content import content_with_prefix
         if req.status == "rejected":
-            content = f"Human declined: {req.message}" if req.message else "Human rejected the request."
+            content = (content_with_prefix(req.message, "Human declined: ")
+                       if req.message else "Human rejected the request.")
         else:
             content = req.message or "(no response)"
             # ① 中途打断（未吐 token）续接：补「上一条请求已取消」说明（context=interrupt:edit）。
             if req.context == "interrupt:edit":
-                from ctx_weft.core.loop.steps.act import interrupt_edit_note
+                from ctx_weft.core.loop.steps.act import _interrupt_edit_prefix
                 prev = await self._last_user_prompt(scope, pctx)
-                content = interrupt_edit_note(prev, content)
+                prefix = _interrupt_edit_prefix(prev)
+                content = content_with_prefix(content, prefix)
         await self.providers.get_memory().ingest(
             MemoryEvent(
                 kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
@@ -1484,8 +1487,9 @@ class CtxWeftRuntime:
             )
         except Exception:
             return ""
+        from ctx_weft.core.content import content_to_text
         ups = [r for r in view if r.role == "user"]
-        return (ups[-1].content or "") if ups else ""
+        return content_to_text(ups[-1].content) if ups else ""
 
     async def recover(self) -> int:
         """Recover every still-active session (SessionCreated, no SessionFinished) after a restart.

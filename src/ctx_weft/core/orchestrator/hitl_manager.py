@@ -33,6 +33,7 @@ from ctx_weft.core.utils import generate_id, now_utc
 
 if TYPE_CHECKING:
     from ctx_weft.core.events.bus import EventBus
+    from ctx_weft.protocols import ContentPart
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,7 @@ class HitlManager:
         self,
         hitl_id: str,
         *,
-        message: str = "",
+        message: "str | list[ContentPart]" = "",
         modified_arguments: dict[str, Any] | None = None,
         llm_account: str | None = None,
         llm_model: str | None = None,
@@ -180,7 +181,7 @@ class HitlManager:
     async def answer(
         self,
         hitl_id: str,
-        text: str,
+        text: "str | list[ContentPart]",
         *,
         llm_account: str | None = None,
         llm_model: str | None = None,
@@ -194,7 +195,7 @@ class HitlManager:
         self,
         hitl_id: str,
         *,
-        message: str = "",
+        message: "str | list[ContentPart]" = "",
         llm_account: str | None = None,
         llm_model: str | None = None,
     ) -> HitlRequest:
@@ -220,7 +221,7 @@ class HitlManager:
         if llm_model is not None:
             req.resume_llm_model = llm_model
 
-    async def cancel(self, hitl_id: str, *, message: str = "") -> HitlRequest:
+    async def cancel(self, hitl_id: str, *, message: "str | list[ContentPart]" = "") -> HitlRequest:
         """收口一个悬挂 pending（session 关闭 / interrupt / GC）。cancelled + HitlCancelled。
 
         终态、不 requeue（§3）；已解决则幂等 no-op。
@@ -289,14 +290,14 @@ class HitlManager:
         """
         self._requests.update(pending)
 
-    async def resolve_answer(self, hitl_id: str, text: str) -> tuple[HitlRequest, bool]:
+    async def resolve_answer(self, hitl_id: str, text: "str | list[ContentPart]") -> tuple[HitlRequest, bool]:
         """question/wait form 应答，返回 (req, was_hot)。was_hot=False 时调用方须触发冷 resume。"""
         req = self._require(hitl_id)
         req.message = text
         return await self._resolve(req, "accepted", EventType.HITL_ANSWERED, resume_on_cold=True)
 
     async def resolve_approve(
-        self, hitl_id: str, *, message: str = "",
+        self, hitl_id: str, *, message: "str | list[ContentPart]" = "",
         modified_arguments: dict[str, Any] | None = None,
     ) -> tuple[HitlRequest, bool]:
         """approval form 放行，返回 (req, was_hot)。was_hot=False 时调用方须触发冷 resume。"""
@@ -306,7 +307,7 @@ class HitlManager:
         evt = EventType.HITL_MODIFIED if modified_arguments is not None else EventType.HITL_APPROVED
         return await self._resolve(req, "accepted", evt, resume_on_cold=True)
 
-    async def resolve_reject(self, hitl_id: str, *, message: str = "") -> tuple[HitlRequest, bool]:
+    async def resolve_reject(self, hitl_id: str, *, message: "str | list[ContentPart]" = "") -> tuple[HitlRequest, bool]:
         """拒绝（approval 与 question/wait form 通用），返回 (req, was_hot)。was_hot=False 时调用方须触发冷 resume。"""
         req = self._require(hitl_id)
         req.message = message

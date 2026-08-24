@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
+from ctx_weft.core.content import content_with_suffix
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
@@ -519,24 +520,33 @@ class TaskManager:
 
         # base = 首次执行的原始 prompt（首次 reopen 时快照下来）
         if task.original_user_prompt is None:
-            task.original_user_prompt = task.user_prompt if isinstance(task.user_prompt, str) else ""
+            # 原样保留（含多模态）：这是 reopen 的 base，拍扁会让重开后图片永久消失。
+            task.original_user_prompt = task.user_prompt or ""
         base_prompt = task.original_user_prompt
 
         prev_output = _outputs_to_text(task.outputs) or (task.process_report or "")
-        parts = [p for p in [base_prompt] if p]
+        sections: list[str] = []
         if prev_output:
-            parts.append(f"## Previous attempt (rejected)\n{prev_output}")
+            sections.append(f"## Previous attempt (rejected)\n{prev_output}")
         if upstream is not None:
             head_title, head_reason = upstream
-            parts.append(
+            sections.append(
                 f"## Upstream task revised\n"
                 f"Predecessor '{head_title}' was reopened (reason: {head_reason}). "
                 f"Its updated result appears in the conversation above. "
                 f"Redo this task based on the updated result."
             )
         elif reason:
-            parts.append(f"## Revision required\n{reason}")
-        new_prompt = "\n\n".join(parts) if parts else base_prompt
+            sections.append(f"## Revision required\n{reason}")
+        # base 可能是多模态（list[ContentPart]），不能进 "\n\n".join()。
+        # 有 base 时从 base 起逐段 content_with_suffix；无 base 时退回纯文本 join。
+        # 两条路径对 str base 的产物与改造前**逐字节相同**（已逐例核对，见 brief §5）。
+        if base_prompt:
+            new_prompt = base_prompt
+            for sec in sections:
+                new_prompt = content_with_suffix(new_prompt, f"\n\n{sec}")
+        else:
+            new_prompt = "\n\n".join(sections) if sections else base_prompt
 
         async with self._lock:
             self._queue.unmark_completed(task_id)

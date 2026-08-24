@@ -607,15 +607,22 @@ async def _commit_interrupted_partial(
     )
 
 
-def interrupt_edit_note(prev_request: str, new_input: str) -> str:
-    """① 打断（未吐 token）续接时的说明：上一条请求被取消、改为新请求。空 prev 时原样返回。"""
+def _interrupt_edit_prefix(prev_request: str) -> str:
+    """产出①打断续接的前缀说明；prev 为空则返回空串。
+
+    抽出成纯文本→纯文本的小函数，供多模态调用点用 content_with_prefix 组装
+    （new_input 可能是 list[ContentPart]，f-string 直接拼会把图片拍扁）。
+    """
     prev = (prev_request or "").strip()
     if not prev:
-        return new_input
-    return (
-        f'(I cancelled my previous request: "{prev}" — replacing it with the request below.)'
-        f"\n\n{new_input}"
-    )
+        return ""
+    return f'(I cancelled my previous request: "{prev}" — replacing it with the request below.)\n\n'
+
+
+def interrupt_edit_note(prev_request: str, new_input: str) -> str:
+    """① 打断（未吐 token）续接时的说明：上一条请求被取消、改为新请求。空 prev 时原样返回。"""
+    prefix = _interrupt_edit_prefix(prev_request)
+    return f"{prefix}{new_input}" if prefix else new_input
 
 
 async def _park_wait_for_user(

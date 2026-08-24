@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ctx_weft.protocols import LoopConfig, MemoryConfig
 
 from ctx_weft.core.utils import now_utc
+
+if TYPE_CHECKING:
+    from ctx_weft.protocols import ContentPart
 
 
 # ── TaskSettings ──────────────────────────────────────────────────────────────
@@ -303,7 +306,8 @@ class HitlRequest:
     questions: list[dict[str, Any]] = field(default_factory=list)  # ask_user 的结构化批量问题（含 options/multi_select）
     status: HitlStatus = "pending"
     # 解析载荷
-    message: str = ""                             # 人类附带的自由文本：答复 / 拒绝理由 / 备注
+    # 人类附带的内容：答复 / 拒绝理由 / 备注。多模态回复（含图片）走同一字段。
+    message: "str | list[ContentPart]" = ""
     modified_arguments: dict[str, Any] | None = None  # approval form：改写后的工具参数（暂仅记录，不生效）
     created_at: datetime = field(default_factory=now_utc)
     resolved_at: datetime | None = None

@@ -1,0 +1,75 @@
+import pytest
+
+from ctx_weft.core.state.models import HitlRequest
+from ctx_weft.protocols import ImagePart, TextPart
+
+
+def _content():
+    return [TextPart(text="这是我的答复"), ImagePart(data="ZGF0YQ==", media_type="image/png")]
+
+
+def test_hitl_request_message_accepts_parts():
+    req = HitlRequest(id="h1", form="wait", session_id="s", task_id="t")
+    req.message = _content()
+    assert req.message == _content()
+
+
+def test_rejected_reply_keeps_image_via_prefix():
+    """拒绝路径把「Human declined:」拼到回复前——必须保 parts。"""
+    from ctx_weft.core.content import content_with_prefix
+    out = content_with_prefix(_content(), "Human declined: ")
+    assert any(not hasattr(p, "text") for p in out), "图片不得在拼接中丢失"
+    assert out[0].text.startswith("Human declined: ")
+
+
+def test_interrupt_edit_prefix_keeps_image_via_content_with_prefix():
+    """① 打断续接说明拼到多模态回复前——必须保 parts，走 content_with_prefix 而非 f-string。"""
+    from ctx_weft.core.content import content_with_prefix
+    from ctx_weft.core.loop.steps.act import _interrupt_edit_prefix
+
+    prefix = _interrupt_edit_prefix("do X")
+    assert prefix
+    out = content_with_prefix(_content(), prefix)
+    assert any(not hasattr(p, "text") for p in out), "图片不得在拼接中丢失"
+    assert out[0].text.startswith(prefix)
+
+
+from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.state.models import Task
+from ctx_weft.core.utils import now_utc
+
+pytestmark = pytest.mark.asyncio
+
+
+async def _finished_task_manager(prompt):
+    tm = TaskManager(session_id="s1", event_bus=InProcessEventBus())
+    task = Task(
+        id="tsk_1", session_id="s1", status="FINISHED", tenant_id="default",
+        assigned_agent_id="a1", creator_agent_id="a1",
+        title="T", description="d", user_prompt=prompt,
+        outputs="旧产出", created_at=now_utc(),
+    )
+    await tm.push_task(task)
+    task.status = "FINISHED"          # push 会置 PENDING，reopen 要求 FINISHED
+    return tm, task
+
+
+async def test_reopen_keeps_multimodal_original_prompt():
+    """original_user_prompt 是 reopen 的 base；被丢空会让重开后图片永久消失。"""
+    tm, task = await _finished_task_manager(_content())
+    assert await tm.reopen_task("tsk_1", reason="重做") is True
+    assert task.original_user_prompt == _content(), "多模态 base 必须原样快照"
+    assert any(not hasattr(p, "text") for p in task.user_prompt), \
+        "重写后的 prompt 必须仍带图片"
+    assert "## Revision required" in task.user_prompt[-1].text
+
+
+async def test_reopen_plain_text_prompt_byte_identical():
+    """纯文本路径必须与改造前逐字节相同。"""
+    tm, task = await _finished_task_manager("原始要求")
+    assert await tm.reopen_task("tsk_1", reason="重做") is True
+    assert task.original_user_prompt == "原始要求"
+    assert task.user_prompt == (
+        "原始要求\n\n## Previous attempt (rejected)\n旧产出\n\n## Revision required\n重做"
+    )
