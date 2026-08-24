@@ -102,6 +102,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ctx_weft.protocols import LLMMessage, LLMTool
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.core.utils import SUBTASKS_REVIEW_HEADING, content_to_text, image_tokens
+from ctx_weft.core.content import content_with_prefix, content_with_suffix
 from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
@@ -814,8 +815,9 @@ class DefaultComposer(Composer):
         out = list(messages)
         for i, m in enumerate(out):
             if m.role == "user":
-                base = m.content if isinstance(m.content, str) else content_to_text(m.content)
-                out[i] = dataclasses.replace(m, content=f"{text}\n\n---\n\n{base}")
+                # 保 parts：拍扁会丢图。content_with_prefix 对 str 走朴素拼接、逐字节等价。
+                out[i] = dataclasses.replace(
+                    m, content=content_with_prefix(m.content, f"{text}\n\n---\n\n"))
                 return out
         return out
 
@@ -827,8 +829,7 @@ class DefaultComposer(Composer):
             return messages
         out = list(messages)
         m = out[idx]
-        base = m.content if isinstance(m.content, str) else content_to_text(m.content)
-        out[idx] = dataclasses.replace(m, content=f"{base}\n\n{text}")
+        out[idx] = dataclasses.replace(m, content=content_with_suffix(m.content, f"\n\n{text}"))
         return out
 
     def _last_user_index(self, messages: list[LLMMessage]) -> int | None:
@@ -852,8 +853,8 @@ class DefaultComposer(Composer):
         out = list(messages)
         if out and out[-1].role == "user":
             last = out[-1]
-            base = last.content if isinstance(last.content, str) else content_to_text(last.content)
-            out[-1] = dataclasses.replace(last, content=f"{base}\n\n{text}")
+            out[-1] = dataclasses.replace(
+                last, content=content_with_suffix(last.content, f"\n\n{text}"))
             return out
         out.append(LLMMessage(role="user", content=text))
         return out
