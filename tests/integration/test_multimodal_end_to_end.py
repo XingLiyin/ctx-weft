@@ -16,6 +16,7 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.events import EventType
 from ctx_weft.core.runtime import SessionStartParams
+from ctx_weft.core.utils import _IMAGE_PART_TOKENS
 from ctx_weft.protocols import (
     ImagePart, LLMChunk, LLMUsage, MemoryEventType, ProviderContext, TextPart, ToolCall,
 )
@@ -185,9 +186,10 @@ async def test_assembled_token_count_higher_with_image_than_text_only() -> None:
     （二者共享同一段文本 "describe this image"，唯一变量是多出的 ImagePart）。"""
     text_tokens = await _run_and_collect_context_assembled_tokens(_TEXT_ONLY_PROMPT)
     mm_tokens = await _run_and_collect_context_assembled_tokens(_MULTIMODAL_PROMPT)
-    assert mm_tokens > text_tokens, (
-        f"含图会话 token_count({mm_tokens}) 应大于同等文本会话({text_tokens})——"
-        "否则 composer.py 的 image_tokens(m.content) 仍是死代码"
+    assert mm_tokens == text_tokens + _IMAGE_PART_TOKENS, (
+        f"含图会话 token_count({mm_tokens}) 应恰好比同等文本会话({text_tokens}) 多"
+        f" _IMAGE_PART_TOKENS({_IMAGE_PART_TOKENS})——否则 image_tokens(m.content) 只是"
+        "贡献了非零但错误的常数（此前的 `>` 断言对此不敏感）"
     )
 
 

@@ -422,7 +422,9 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
                     },
                 })
             else:
-                blocks.append({"type": "text", "text": p.get("text", "")})
+                text = p.get("text", "")
+                if text:  # 空文本 part 会让 Anthropic 因空/纯空白文本块整条 400，直接跳过
+                    blocks.append({"type": "text", "text": text})
         elif getattr(p, "type", None) == "image":
             blocks.append({
                 "type": "image",
@@ -433,7 +435,9 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
                 },
             })
         else:
-            blocks.append({"type": "text", "text": getattr(p, "text", str(p))})
+            text = getattr(p, "text", str(p))
+            if text:  # 同上：空文本 part 跳过，不出网
+                blocks.append({"type": "text", "text": text})
     return blocks
 
 

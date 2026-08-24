@@ -4,8 +4,11 @@
 多模态输入（parts 含 ImagePart）必须转成各家 provider 的 wire block 形态。
 """
 
-from ctx_weft.protocols import ImagePart, LLMMessage, TextPart
+import asyncio
+
+from ctx_weft.protocols import ImagePart, LLMMessage, LLMRequest, TextPart
 from ctx_weft.providers.llm.anthropic import _serialize_messages as anth
+from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.openai import _serialize_messages as oai
 
 
@@ -99,17 +102,45 @@ def test_openai_assistant_tool_calls_image_becomes_image_url():
     assert out[0]["tool_calls"][0]["id"] == "tc1"
 
 
+# ── I1: 空文本 part 挨着 ImagePart 时不得出网（Anthropic 会因空文本块整条 400）──────
+
+def test_anthropic_empty_text_part_next_to_image_dropped():
+    out = anth([LLMMessage(role="user", content=[TextPart(text=""), _img()])])
+    blocks = out[0]["content"]
+    assert {"type": "text", "text": ""} not in blocks, (
+        "空 TextPart 不得产出空文本 block——Anthropic 对空/纯空白文本块整条 400"
+    )
+    assert any(b.get("type") == "image" for b in blocks)
+
+
+def test_openai_empty_text_part_next_to_image_dropped():
+    out = oai("", [LLMMessage(role="user", content=[TextPart(text=""), _img()])])
+    parts = out[0]["content"]
+    assert {"type": "text", "text": ""} not in parts, (
+        "空 TextPart 不得产出空文本 block"
+    )
+    assert any(p.get("type") == "image_url" for p in parts)
+
+
+# ── anthropic.py:360 的 `content_blocks or ""` 兜底路径 ─────────────────────
+# assistant 带 tool_calls 且 content 为空字符串：content_blocks 因 tool_use block 非空，
+# 不得落进 `or ""` 分支被兜底成空字符串（会把 tool_use 一并丢掉）。此前无测试覆盖。
+
+def test_anthropic_assistant_empty_content_with_tool_calls_keeps_tool_use_block():
+    out = anth([LLMMessage(
+        role="assistant", content="", tool_calls=[{"id": "tc1", "name": "noop", "arguments": {}}],
+    )])
+    content = out[0]["content"]
+    assert isinstance(content, list), "带 tool_calls 时不得被兜底成空字符串"
+    assert any(b.get("type") == "tool_use" and b.get("id") == "tc1" for b in content)
+
+
 # ── Mock 多模态 ──────────────────────────────────────────────────────────
 # mock.py:101 用 (m.content if isinstance(m.content, str) else "") 拍扁 usage 估算用的
 # prompt_text；多模态消息会变空串。改为 content_to_text(m.content) 后仍能取到文本部分。
 # MockLLMAdapter._stream 不是可脱离 request/response 直接调用的纯函数，这里走一次完整
 # complete() 驱动，断言 usage 的 prompt_tokens 因为含图片文本部分而 > 0（不因图片拍扁成空串
 # 而归零），且过程不抛。
-
-import asyncio
-
-from ctx_weft.protocols import LLMRequest
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 
 
 def test_mock_multimodal_prompt_text_not_dropped():

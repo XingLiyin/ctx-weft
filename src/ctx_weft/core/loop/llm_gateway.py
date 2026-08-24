@@ -123,7 +123,14 @@ def drop_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
 
 
 def _is_empty_content(content: "str | list[ContentPart]") -> bool:
-    """内容是否为「空」：空串/纯空白，或空列表/仅含空白 TextPart。非文本块（图片等）视为有内容。"""
+    """内容是否为「空」：空串/纯空白，或空列表/仅含空白 TextPart。非文本块（图片等）视为有内容。
+
+    与 composer._is_blank_content 语义相近但**不同**——本函数对字符串/TextPart 文本都
+    做 ``.strip()``（纯空白 "   " 判空），composer 那份不 strip（纯空白判非空）。两者共存
+    今日安全仅因为 legalize_messages 链路最终经本函数把纯空白消息滤掉；composer 侧的
+    "   " 不是本函数意义上的「空」不会传导成 bug，纯属两处判据本就不追求一致——但这是个
+    没写下来的非局部不变式，改动任一处前请先看 tests/unit/test_composer_vs_gateway_blank_content.py
+    钉住的那对语义。"""
     if isinstance(content, str):
         return not content.strip()
     if not content:

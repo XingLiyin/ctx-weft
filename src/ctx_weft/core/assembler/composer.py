@@ -304,6 +304,12 @@ def _is_blank_content(content: object) -> bool:
     与 llm_gateway._is_empty_content 同义但更严格地只判「有无内容」：
     str 看是否空；列表看是否为空、或是否只含空 TextPart。
     非文本 part（图片）一律视为有内容——纯图片消息不是空消息。
+
+    注意：本函数**不** strip——纯空白文本（如 "   "）在此判为非空，与
+    llm_gateway._is_empty_content（会 strip，纯空白判空）不同义。今日安全仅因为
+    legalize_messages 链路最终会再经 _is_empty_content 把纯空白消息滤掉一道；
+    这对不同判据不是巧合但也没人写下来过，改动前请先看
+    tests/unit/test_composer_vs_gateway_blank_content.py。
     """
     if content is None:
         return True
@@ -478,7 +484,14 @@ class DefaultComposer(Composer):
         parts: list[str] = []
 
         if not task.user_prompt_in_memory:
-            # daemon 或尚未持久化的路径：实时构建完整的用户消息（spec 取自 task_spec block）
+            # daemon 或尚未持久化的路径：实时构建完整的用户消息（spec 取自 task_spec block）。
+            # 注意：spec_prompt 来自 _task_spec_fields，读的是 task_spec block 的拍扁文本
+            # （见 spec §3② 允许的拍扁点），图片 part 在此路径上不会被携带。标准 loop 走不到
+            # 这个分支——driver.run 先调 _persist_user_prompt 把 user_prompt 落盘成 memory
+            # 记录，随后 user_prompt_in_memory 恒为真，落到下面的 else 分支（_frame_current_message，
+            # 保 parts）。这里安全仅因为「不可达」，不是因为这条路径本身处理了图片——如果将来
+            # daemon 或手工装配路径开始命中这个分支，图片会在此静默丢失，需要照 else 分支的
+            # 做法改成保 parts，而不是在这里加一行注释就当没看见。
             if spec_title and spec_desc:
                 parts.append(f"## Current Task\n{spec_title}\n{spec_desc}")
             elif spec_title:
