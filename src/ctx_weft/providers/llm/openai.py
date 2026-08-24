@@ -417,10 +417,16 @@ def _parts_to_text(parts: Any) -> str:
     if isinstance(parts, str):
         return parts
     if isinstance(parts, list):
-        return " ".join(
-            p.get("text", "") if isinstance(p, dict) else getattr(p, "text", str(p))
-            for p in parts
-        )
+        texts: list[str] = []
+        for p in parts:
+            if isinstance(p, dict):
+                if p.get("type") == "image":
+                    continue  # 非文本 part（图片）——跳过，不把 base64/repr 泄漏进发给模型的文本
+                texts.append(p.get("text", ""))
+            elif hasattr(p, "text"):
+                texts.append(p.text)
+            # else: 非文本 dataclass part（ImagePart 等）——跳过，语义对齐 core/utils.content_to_text
+        return " ".join(texts)
     return str(parts)
 
 

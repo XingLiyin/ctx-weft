@@ -72,11 +72,31 @@ def test_openai_user_image_becomes_image_url():
 
 
 def test_openai_tool_message_flattens_to_text():
-    """OpenAI 的 role="tool" 只接受文本——本 Phase 刻意拍扁，不得抛。"""
+    """OpenAI 的 role="tool" 只接受文本——本 Phase 刻意拍扁，不得抛，且不得泄漏图片的
+    base64/repr（fix round 1 finding 1/2：拍扁兜底若误用 str(p)，ImagePart 的完整 base64 +
+    元数据会原样拼进发给模型的文本）。"""
     out = oai("", [LLMMessage(role="tool", content=[TextPart(text="r"), _img()],
                               tool_call_id="tc1")])
-    assert isinstance(out[0]["content"], str)
-    assert "r" in out[0]["content"]
+    content = out[0]["content"]
+    assert isinstance(content, str)
+    assert "r" in content
+    assert "ZGF0YQ==" not in content, "不得把图片 base64 拍进拍扁后的文本"
+    assert "ImagePart" not in content, "不得把 dataclass repr 拍进拍扁后的文本"
+
+
+def test_openai_assistant_tool_calls_image_becomes_image_url():
+    """assistant-with-tool_calls 分支（openai.py:380 附近）与 user 分支走同一
+    _parts_to_blocks，此前没有多模态测试覆盖（fix round 1 finding 4）。"""
+    out = oai("", [LLMMessage(
+        role="assistant", content=[TextPart(text="看图"), _img()],
+        tool_calls=[{"id": "tc1", "name": "noop", "arguments": {}}],
+    )])
+    parts = out[0]["content"]
+    assert isinstance(parts, list)
+    assert {"type": "text", "text": "看图"} in parts
+    url = next(p["image_url"]["url"] for p in parts if p["type"] == "image_url")
+    assert url == "data:image/png;base64,ZGF0YQ=="
+    assert out[0]["tool_calls"][0]["id"] == "tc1"
 
 
 # ── Mock 多模态 ──────────────────────────────────────────────────────────
