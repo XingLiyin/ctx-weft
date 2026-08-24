@@ -80,7 +80,7 @@ Phase 1 的最终评审发现一个系统性缺口：计划枚举了被放宽字
 新建 `tests/unit/test_composer_splicers_parts.py`：
 
 ```python
-from ctx_weft.core.assembler.composer import PromptComposer
+from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.protocols import ImagePart, LLMMessage, TextPart
 
 
@@ -89,7 +89,7 @@ def _img():
 
 
 def _c():
-    return PromptComposer()
+    return DefaultComposer()
 
 
 # ── 纯文本：与改造前逐字节相同 ────────────────────────────────────────────
@@ -143,7 +143,7 @@ def test_append_last_creates_user_when_tail_not_user():
     assert out[-1].role == "user" and out[-1].content == "tail"
 ```
 
-**若 `PromptComposer` 的类名或构造签名与上面不符**，以 `composer.py` 实际为准调整测试，不要改源码迁就测试。三个方法都是实例私有方法，直接调用即可。
+**若 `DefaultComposer` 的类名或构造签名与上面不符**，以 `composer.py` 实际为准调整测试，不要改源码迁就测试。三个方法都是实例私有方法，直接调用即可。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -395,7 +395,7 @@ git commit -m "feat(assembler): 非摘要记录建块保 parts，摘要仍走纯
 
 ```python
 from ctx_weft.core.assembler.assembler import ContextBlock
-from ctx_weft.core.assembler.composer import PromptComposer
+from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.protocols import ImagePart, TextPart
 
 
@@ -409,30 +409,30 @@ def _blk(content, role="user", **md):
 
 
 def test_plain_text_message_unchanged():
-    out = PromptComposer()._history_to_messages([_blk("hello")])
+    out = DefaultComposer()._history_to_messages([_blk("hello")])
     assert len(out) == 1 and out[0].content == "hello"
 
 
 def test_parts_preserved_into_message():
     content = [TextPart(text="看图"), ImagePart(data="ZGF0YQ==", media_type="image/png")]
-    out = PromptComposer()._history_to_messages([_blk(content)])
+    out = DefaultComposer()._history_to_messages([_blk(content)])
     assert out[0].content == content
 
 
 def test_image_only_message_is_not_dropped():
     """纯图片消息的 content_to_text 是空串——旧的判空会把它静默丢掉。"""
-    out = PromptComposer()._history_to_messages(
+    out = DefaultComposer()._history_to_messages(
         [_blk([ImagePart(data="ZGF0YQ==", media_type="image/png")])])
     assert len(out) == 1, "纯图片消息不得被当成空消息丢弃"
 
 
 def test_truly_empty_message_still_dropped():
     """空串仍应被丢弃——既有行为不得改变。"""
-    assert PromptComposer()._history_to_messages([_blk("")]) == []
+    assert DefaultComposer()._history_to_messages([_blk("")]) == []
 
 
 def test_empty_parts_list_dropped():
-    assert PromptComposer()._history_to_messages([_blk([])]) == []
+    assert DefaultComposer()._history_to_messages([_blk([])]) == []
 ```
 
 **若 `ContextBlock` 的构造签名与上面不符**，以 `assembler.py` 实际为准调整测试。
