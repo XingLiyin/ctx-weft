@@ -1001,7 +1001,7 @@ git commit -m "feat(entry): HITL 回复与 reopen 保留多模态内容"
 
 **Files:**
 - Modify: `src/ctx_weft/core/orchestrator/session_manager.py`（`SESSION_CREATED` / `SESSION_RESUMED` payload）
-- Modify: `src/ctx_weft/core/orchestrator/task_manager.py`（`TASK_CREATED` / `TASK_REOPENED` payload）
+- Modify: `src/ctx_weft/core/orchestrator/task_manager.py`（`TASK_CREATED` / `TASK_REQUEUED` payload）
 - Modify: `src/ctx_weft/core/orchestrator/hitl_manager.py`（`payload["message"]`）
 - Modify: `src/ctx_weft/core/control/types.py:47,48`（`TaskView`）
 - Modify: `src/ctx_weft/core/control/reducers.py:185,186,257,258,485,508-513` + `110-117`
@@ -1121,7 +1121,7 @@ Expected: 第一条 FAIL（还原后是拍扁的字符串或空），第二条 P
 `session_manager.py` 的 `SESSION_CREATED` payload 里 `"user_prompt": user_prompt` —— Session 只存摘要，改为 `content_to_text(user_prompt)`。`SESSION_RESUMED` 同理。
 
 `task_manager.py` 的 `TASK_CREATED` payload 里 `"user_prompt": task.user_prompt or ""` 改为 `content_to_jsonable(task.user_prompt) or ""`。
-`TASK_REOPENED` payload 里的 `"user_prompt"` / `"original_user_prompt"` 同样改走 `content_to_jsonable`。
+`TASK_REQUEUED` payload 里的 `"user_prompt"` / `"original_user_prompt"` 同样改走 `content_to_jsonable`。
 
 `hitl_manager.py` 的 `payload["message"] = req.message` 改为 `payload["message"] = content_to_jsonable(req.message)`。
 
@@ -1150,7 +1150,7 @@ Expected: 第一条 FAIL（还原后是拍扁的字符串或空），第二条 P
 - 第 185-186 行（快照写出，`view_to_dict` 内）：`"user_prompt": t.user_prompt` → `content_to_jsonable(t.user_prompt)`；`original_user_prompt` 同理。
 - 第 257-258 行（快照读回）：`user_prompt=t.get("user_prompt", "")` → `content_from_jsonable(t.get("user_prompt", ""))`；`original_user_prompt` 同理。
 - 第 485 行（`TASK_CREATED` 回放）：`user_prompt=task_data.get("user_prompt", "")` → 包一层 `content_from_jsonable`。
-- 第 508-513 行（`TASK_REOPENED` 回放）：两处 `p.get(...)` 包 `content_from_jsonable`。
+- 第 508-513 行（`TASK_REQUEUED` 回放）：两处 `p.get(...)` 包 `content_from_jsonable`。
 - 第 110-117 行（HITL 回放）：`req.message = p["message"]` / `p.get("message", "")` 三处包 `content_from_jsonable`。
 - 第 159 / 231 行（Session）：**不改**，Session 保持 `str`。
 

@@ -186,7 +186,7 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 | 位置 | |
 |---|---|
 | `SESSION_CREATED` / `SESSION_RESUMED` payload | `session_manager.py:74,142` |
-| `TASK_CREATED` / `TASK_REOPENED` payload | `task_manager.py:1167,563` |
+| `TASK_CREATED` / `TASK_REQUEUED` payload | `task_manager.py:1167,563` |
 | HITL `payload["message"]` | `hitl_manager.py:343` |
 | 投影字段类型 | `control/types.py:20,47,48` |
 | 反序列化 | `reducers.py:231,257,409,427,485,508-513` + `110-117`（HITL） |
