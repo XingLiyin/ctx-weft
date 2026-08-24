@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from ctx_weft.core.content import content_from_jsonable, content_to_jsonable
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.events import TASK_STATUS_BY_EVENT, Event, EventType
 from ctx_weft.core.state.models import HitlRequest
@@ -107,14 +108,14 @@ def fold_cold_hitl_decision(events: list[Event], tool_call_id: str) -> HitlReque
         if req is None:
             continue
         if ev.type == EventType.HITL_ANSWERED and p.get("message"):
-            req.status, req.message = "accepted", p["message"]
+            req.status, req.message = "accepted", content_from_jsonable(p["message"])
         elif ev.type == EventType.HITL_APPROVED:
-            req.status, req.message = "accepted", p.get("message", "")
+            req.status, req.message = "accepted", content_from_jsonable(p.get("message", ""))
         elif ev.type == EventType.HITL_MODIFIED and p.get("modified_arguments") is not None:
-            req.status, req.message = "accepted", p.get("message", "")
+            req.status, req.message = "accepted", content_from_jsonable(p.get("message", ""))
             req.modified_arguments = p["modified_arguments"]
         elif ev.type == EventType.HITL_REJECTED:
-            req.status, req.message = "rejected", p.get("message", "")
+            req.status, req.message = "rejected", content_from_jsonable(p.get("message", ""))
         else:
             continue  # Cancelled / 缺 message 的 Answered / 缺改参的 Modified → 不可用
         req.resolved_at = ev.timestamp
@@ -182,8 +183,8 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "assigned_agent_id": t.assigned_agent_id,
                 "creator_agent_id": t.creator_agent_id,
                 "parent_task_id": t.parent_task_id,
-                "user_prompt": t.user_prompt,
-                "original_user_prompt": t.original_user_prompt,
+                "user_prompt": content_to_jsonable(t.user_prompt),
+                "original_user_prompt": content_to_jsonable(t.original_user_prompt),
                 "interaction_mode": t.interaction_mode,
                 "origin_tool_call_id": t.origin_tool_call_id,
                 "origin_tool_name": t.origin_tool_name,
@@ -254,8 +255,8 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             assigned_agent_id=t.get("assigned_agent_id", ""),
             creator_agent_id=t.get("creator_agent_id", ""),
             parent_task_id=t.get("parent_task_id", ""),
-            user_prompt=t.get("user_prompt", ""),
-            original_user_prompt=t.get("original_user_prompt", ""),
+            user_prompt=content_from_jsonable(t.get("user_prompt", "")),
+            original_user_prompt=content_from_jsonable(t.get("original_user_prompt", "")),
             interaction_mode=t.get("interaction_mode", "auto"),
             origin_tool_call_id=t.get("origin_tool_call_id", ""),
             origin_tool_name=t.get("origin_tool_name", ""),
@@ -482,7 +483,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
                 assigned_agent_id=task_data.get("assigned_agent_id", ""),
                 creator_agent_id=task_data.get("creator_agent_id", ""),
                 parent_task_id=task_data.get("parent_task_id", ""),
-                user_prompt=task_data.get("user_prompt", ""),
+                user_prompt=content_from_jsonable(task_data.get("user_prompt", "")),
                 interaction_mode=task_data.get("interaction_mode", "auto"),
                 origin_tool_call_id=task_data.get("origin_tool_call_id", ""),
                 origin_tool_name=task_data.get("origin_tool_name", ""),
@@ -507,10 +508,10 @@ def _apply(view: RunStateView, ev: Event) -> None:
             task.outputs = None
             up = p.get("user_prompt")
             if up is not None:
-                task.user_prompt = up
+                task.user_prompt = content_from_jsonable(up)
             oup = p.get("original_user_prompt")
             if oup is not None:
-                task.original_user_prompt = oup
+                task.original_user_prompt = content_from_jsonable(oup)
         view.task_status = "PENDING"
 
     elif t in TASK_STATUS_BY_EVENT and ev.task_id:

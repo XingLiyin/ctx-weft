@@ -75,7 +75,7 @@ class SessionManager:
         ts = now_utc()
         await self._emit(EventType.SESSION_CREATED, sid, tenant_id, timestamp=ts, payload={
             "template_id": template_id,
-            "user_prompt": user_prompt,
+            "user_prompt": content_to_text(user_prompt),
             "root_agent_id": agent.id,
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
@@ -143,7 +143,7 @@ class SessionManager:
         logger.info("Session %s resumed (agent=%s)", session_id, sess_proj.root_agent_id)
 
         await self._emit(EventType.SESSION_RESUMED, session_id, tenant_id, payload={
-            "user_prompt": user_prompt,
+            "user_prompt": content_to_text(user_prompt),
             "root_agent_id": sess_proj.root_agent_id,
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",

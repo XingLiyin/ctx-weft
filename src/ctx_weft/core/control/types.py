@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.state.models import HitlRequest
+
+if TYPE_CHECKING:
+    from ctx_weft.protocols import ContentPart
 
 
 @dataclass
@@ -44,8 +47,9 @@ class TaskView:
     assigned_agent_id: str = ""
     creator_agent_id: str = ""
     parent_task_id: str = ""
-    user_prompt: str = ""
-    original_user_prompt: str = ""  # reopen 重写前的原始 prompt 快照（防多轮累加，跨重启保留）
+    user_prompt: "str | list[ContentPart]" = ""
+    # reopen 重写前的原始 prompt 快照（防多轮累加，跨重启保留）
+    original_user_prompt: "str | list[ContentPart]" = ""
     interaction_mode: str = "auto"  # interactive=纯文本暂停等用户 / auto=自治（跨重启保留，否则 resume 后丢失暂停语义）
     # 派发来源（跨重启保留）：子任务是被父的哪一次 delegate 调用派出来的。丢了则 finalize
     # 认不出自己的派发框，子任务 close 时既不闭合父的 ack、也不合成 finish 对（胶囊丢失）。

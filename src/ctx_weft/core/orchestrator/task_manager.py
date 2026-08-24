@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
-from ctx_weft.core.content import content_with_suffix
+from ctx_weft.core.content import content_to_jsonable, content_with_suffix
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
@@ -575,8 +575,8 @@ class TaskManager:
             task_id=task_id,
             payload={
                 "reason": "observer_review_reopen",
-                "user_prompt": new_prompt,
-                "original_user_prompt": task.original_user_prompt,
+                "user_prompt": content_to_jsonable(new_prompt),
+                "original_user_prompt": content_to_jsonable(task.original_user_prompt),
             },
         )
         logger.info("TaskManager.reopen_task: re-queued %s", task_id)
@@ -1179,7 +1179,7 @@ def _task_payload(task: Task) -> dict:
             "creator_agent_id": task.creator_agent_id or "",
             "assigned_agent_id": task.assigned_agent_id or "",
             "parent_task_id": task.parent_task_id or "",
-            "user_prompt": task.user_prompt or "",
+            "user_prompt": content_to_jsonable(task.user_prompt) or "",
             "priority": task.priority,
             "max_retries": task.max_retries,
             "timeout_ms": task.timeout_ms,

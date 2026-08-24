@@ -27,6 +27,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from ctx_weft.core.content import content_to_jsonable
 from ctx_weft.core.events import EventType
 from ctx_weft.core.state.models import HitlForm, HitlRequest, HitlStatus  # noqa: F401  (HitlStatus re-export 供既有 import)
 from ctx_weft.core.utils import generate_id, now_utc
@@ -342,7 +343,7 @@ class HitlManager:
         # 短路）还原不出答案 → 只能重问、丢掉用户已给的回复。
         payload: dict = {"hitl_id": req.id}
         if req.message:
-            payload["message"] = req.message
+            payload["message"] = content_to_jsonable(req.message)
         if req.modified_arguments is not None:
             payload["modified_arguments"] = req.modified_arguments
         await self._emit(event_type, req, payload=payload)
