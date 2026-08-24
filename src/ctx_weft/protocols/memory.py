@@ -150,7 +150,7 @@ class MemoryEvent:
 
     type: MemoryEventType | None = None
     address: MemoryAddress | None = None  # 归档坐标（v2 §3 终名，原 scope 字段）
-    content: str | list[ContentPart] | None = None  # 必给；显式空串合法（占位回合）
+    content: str | list[ContentPart] | None = None  # 必给；显式空串合法（占位回合）。可能是 list[ContentPart]（多模态）；宿主 provider 必须能持久化并原样返回，见 MemoryProvider 多模态契约
     timestamp: datetime | None = None
     # 调用方预生成 record id（v2 设计 §4 · 2026-07-27 增补，投影化前置）。
     # 给定 → provider 必须采用并按 id 幂等（重复 ingest = no-op）；None → provider 生成。
@@ -256,7 +256,18 @@ class MemoryProviderInfo:
 
 @runtime_checkable
 class MemoryProvider(Protocol):
-    """统一 memory：摄取所有事件 + 多模召回。单实例，必需。"""
+    """统一 memory：摄取所有事件 + 多模召回。单实例，必需。
+
+    【多模态无损存取契约】
+    MemoryEvent.content 可能是 str 或 list[ContentPart]（后者为多模态，含文本与图片）。宿主 provider 必须：
+    1. 持久化时保持原样——若 ingest 接收 list[ContentPart]，则无损保存整体结构；
+    2. 召回时原样返回——load_view / recall_topic / recall_semantic 返回的 MemoryRecord.content
+       形态必与入库时相同（str 返 str，list 返 list，无转换）；
+    3. 落库推荐形态：``ctx_weft.core.content.content_to_jsonable`` 用于持久化前的 JSON 序列化
+      （ContentPart 是普通 dataclass，需过此转换才能 json.dumps；取回时用 ``content_from_jsonable`` 还原）；
+    4. 禁止在持久化层拍扁成纯文本——装配期是否拍扁为 str 由框架决定（见 composer.py），
+       provider 的职责仅是无损存取。
+    """
 
     name: str
 
