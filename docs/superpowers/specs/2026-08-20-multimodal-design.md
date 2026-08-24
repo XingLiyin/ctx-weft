@@ -70,6 +70,14 @@ providers/llm/anthropic.py:343,361,377 · openai.py:381,398,405   ★★ 出网�
 - **摘要输入** —— `compact.py:126,205`、`finalize.py:415`、`background_observe.py:100`、
   `recognize_intent.py:127`
 
+  > **勘误（评审 2026-08-23 fix wave，I3）**：这四处读的是 **memory 记录**（用于生成
+  > 摘要文本 / token 估算），**不在 LLM prompt 路径上**。Phase 2 实测（探针驱动
+  > `act` / `compact` / `observe` / `recognize_intent` / `background_observe` 五个
+  > compose purpose）确认：**真正发给 LLM 的 prompt 由 composer 构建，五个 purpose
+  > 现在全部携带 inline base64 parts**，包括本条意在覆盖的 compact/recognize_intent/
+  > background_observe 三个 facet purpose 自身的 prompt——这条拍扁点没有覆盖到它本想
+  > 覆盖的路径。后果与准入条件见 §13。
+
 **③ ref 最晚 rehydrate。** core 全程只见 blob ref，只有 LLM adapter 拼 wire payload
 时才换回 base64。memory / 事件 / 装配链搬的都是几十字节字符串。
 
@@ -322,6 +330,24 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 与 `reorder_tool_results_after_calls`（`llm_gateway.py:198`）无冲突：那一步在 core
 执行，adapter 在其之后，追加的消息不会再被搬动。
 
+> **未兑现（评审 2026-08-23 fix wave，I2）**：上面这条 OpenAI 重定位**Phase 2 没有实现**。
+> `openai.py:372-413` 的 `_serialize_messages` 保留了原有的 `for m in messages` 循环，
+> 没有改成与 Anthropic 同构的 `while` 分组循环去定位 tool 消息组的组尾。实际行为是：
+> `role="tool"` 的消息经 `_parts_to_text` 拍扁成纯文本发送（见本文件同段），其中的
+> **非文本 part（图片）被静默丢弃，不产出任何占位符**——既不报错也不提示，图片就是
+> 消失了。
+>
+> Phase 2 里 tool result 恒为文本（没有 capability provider 会通过 tool result 返图），
+> 所以今日无实际损失。但 Phase 4 实现 `media:get_image` 后，`InvocationResult.content`
+> 会真的携带 `ImagePart`（见 §9），届时 tool 消息就会带图——**在着手 Phase 4 之前必须
+> 补上这条重定位**，否则 `media:get_image` 取回的图片会在 OpenAI 侧原样丢失。
+>
+> 顺带记录 `_parts_to_text`（`openai.py:416` 与 `anthropic.py:390` 各一份、逻辑同构）
+> 现在的不变式，Phase 4 补重定位时会依赖它：**非文本 part 一律跳过，不产出占位符**——
+> 调用方（当前是 `role="tool"` 的拍扁路径）若需要占位符（如「[image unavailable]」
+> 或「[见下条工具结果]」之类的用户可见提示），需在调用方自己加，`_parts_to_text`
+> 本身不做。
+
 > **Phase 2 端到端出网验证（Task 7，2026-08-23）**：
 > `tests/integration/test_multimodal_end_to_end.py::
 > test_multimodal_prompt_reaches_wire_payload_as_image_block` 驱动
@@ -456,3 +482,31 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
   但 ctx-weft 是 SDK、memory 协议可插拔，第三方 provider 正是它出现的地方。**Phase 1
   须保证召回内容 rehydrate 成 `ContentPart` 对象**，或在归一层令判据 dict-aware。本
   Phase 不改判据。
+- **dict-aware 分歧在 Phase 2 变宽了（评审 2026-08-23 fix wave，M2）**：两家 adapter 的
+  `_parts_to_blocks` 现在是 dict-aware 的（`p.get("type") == "image"` 分支），而
+  `core/utils.py` 的 `content_to_text` / `image_part_count` 仍是 dict-blind（只认
+  `hasattr(p, "text")`，dict 形态的图片 part 会被误判成文本 part）。上面那条已经点出
+  这个盲点是「既有的」，但 Phase 2 之前只有 adapter 与 utils 两边都 dict-blind，行为
+  至少对称；现在 adapter 侧已经会正确处理 dict-shaped part、utils 侧仍不会，
+  同一个 `ImagePart` 在 wire 转换与 token 估算两条路径上可能被区别对待。Phase 3/4
+  触碰 `core/utils.py` 或引入会返回 dict 形态 part 的 memory provider 前，应一并
+  收敛这个分歧（而不是照抄 adapter 的 dict-aware 写法只加一半）。
+- **facet purpose 现已携带 inline base64（评审 2026-08-23 fix wave，I3）**：见 §3②
+  勘误。三条后果，作为 Phase 3/4 的准入条件：
+  - **(a) compaction 会重发所有图片。** compaction 恰在上下文超预算时触发，而它
+    现在的摘要 prompt（由 composer 构建）会带着触发它的那些图片一起发出去——这与
+    「compaction 是为了省 token」的目标相悖，且在图片本身就是超预算主因时可能
+    无法收敛。Phase 3/4 落地前须决定：compaction 输入是否该在拍扁前先过 L0.5
+    降级（§6.9），还是走独立的、真正拍扁图片的摘要输入路径。
+  - **(b) 视觉能力门控未生效。** §6.7 的门控是 Phase 3 交付物，**当前没有任何东西
+    阻止 image block 进入纯文本模型**的请求——纯文本模型收到 image block 大概率
+    直接 400（或更差，静默忽略图片内容）。Phase 3 门控上线前，这是一个已知但
+    未修复的失败模式，不是「设计遗漏」而是「按阶段划分排到了 Phase 3」，写在此处
+    防止被当成新发现重复报告。
+  - **(c) 字节上限无约束。** 现有 token 估算按 `_IMAGE_PART_TOKENS = 1600`/图算，
+    20 张 5MB 图只算约 32k tokens、在多数 context budget 下能通过，但原始字节
+    早已超过 provider 的单请求体积上限（Anthropic 约 32MB/请求）——请求会在
+    provider 侧因体积被拒，而不是被 budget 提前拦下。Phase 3/4（尤其是引入真
+    `BlobStore` 外部化、或允许更大 `media_type` 白名单）落地前，需要在 token
+    估算之外补一条独立的字节预算，或在 §6.1 的单图字节上限之上再加一条
+    「单请求总字节上限」。
