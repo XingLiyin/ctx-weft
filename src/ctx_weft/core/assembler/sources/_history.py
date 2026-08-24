@@ -86,6 +86,10 @@ def record_to_history_block(
             text = f"{PROGRESS_SO_FAR_HEADING}\n{text}"
         # 尾注对当前段摘要与跨 task 胶囊一视同仁：两者都以 assistant 身份出现，都会被模仿。
         text = annotate_assistant_summary(text)
+    # 摘要恒为纯文本（spec §8），三个包装器只作用于它，故走原字符串路径；
+    # 非摘要记录原样保留 record.content —— 拍扁会丢图（spec §6.4）。
+    _is_summary = etype == MemoryEventType.TASK_COMPACT_SUMMARY
+    block_content = text if _is_summary else record.content
     md = {
         "role": role,
         "type": etype,
@@ -109,7 +113,7 @@ def record_to_history_block(
         source=source,
         kind="history",
         target="messages",
-        content=text,
+        content=block_content,
         priority=slot_priority("history", str(etype)),
         # 文本计数沿用既有口径（含存量 metadata['token_count']），图片另行补齐——
         # 不变量：任何写 metadata['token_count'] 的路径都必须只数文本（当前 src/ 内无写入方，
