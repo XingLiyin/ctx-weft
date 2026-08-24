@@ -10,7 +10,10 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ctx_weft.protocols import ContentPart
 
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
@@ -312,7 +315,7 @@ class SessionStartParams:
     """
 
     template_id: str
-    user_prompt: str
+    user_prompt: "str | list[ContentPart]"
     initial_task_settings: NormalTaskSettings
     context_limit: int
     session_id: str | None = None
@@ -327,7 +330,7 @@ class SessionStartParams:
     def create(
         cls,
         template_id: str,
-        user_prompt: str,
+        user_prompt: "str | list[ContentPart]",
         *,
         context_limit: int,
         session_id: str | None = None,
@@ -634,13 +637,14 @@ class CtxWeftRuntime:
         *,
         session_id: str | None = None,
         template_id: str,
-        user_prompt: str,
+        user_prompt: "str | list[ContentPart]",
         tenant_id: str = "default",
         llm_account: str | None = None,
         llm_model: str | None = None,
     ) -> tuple[RunHandle, LoopState]:
         """Phase 1 compat: run a single task end-to-end and await completion."""
         import dataclasses as _dc
+        from ctx_weft.core.content import content_to_text
 
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
@@ -653,7 +657,7 @@ class CtxWeftRuntime:
 
         session = Session(
             id=sid,
-            user_prompt=user_prompt,
+            user_prompt=content_to_text(user_prompt),
             status="RUNNING",
             tenant_id=tenant_id,
             root_agent_id=agent.id,
@@ -678,7 +682,7 @@ class CtxWeftRuntime:
             assigned_agent_id=agent.id,
             creator_agent_id=agent.id,
             title="User Request",
-            description=user_prompt[:200],
+            description=content_to_text(user_prompt)[:200],
             user_prompt=user_prompt,
             created_at=now_utc(),
         )

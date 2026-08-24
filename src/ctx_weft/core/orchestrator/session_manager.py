@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from ctx_weft.core.content import content_to_text
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
@@ -15,6 +16,9 @@ from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.context import ProviderContext
+
+if TYPE_CHECKING:
+    from ctx_weft.protocols import ContentPart
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,7 @@ class SessionManager:
     async def create_session(
         self,
         template_id: str,
-        user_prompt: str,
+        user_prompt: "str | list[ContentPart]",
         context_limit: int,
         tenant_id: str = "default",
         llm_model: str | None = None,
@@ -52,7 +56,7 @@ class SessionManager:
 
         session = Session(
             id=sid,
-            user_prompt=user_prompt,
+            user_prompt=content_to_text(user_prompt),
             status="RUNNING",
             tenant_id=tenant_id,
             root_agent_id=agent.id,
@@ -93,7 +97,7 @@ class SessionManager:
         self,
         session_id: str,
         event_store: Any,
-        user_prompt: str,
+        user_prompt: "str | list[ContentPart]",
         tenant_id: str = "default",
         llm_model: str | None = None,
         llm_account: str | None = None,
@@ -124,7 +128,7 @@ class SessionManager:
 
         session = Session(
             id=session_id,
-            user_prompt=user_prompt,
+            user_prompt=content_to_text(user_prompt),
             status="RUNNING",
             tenant_id=tenant_id,
             root_agent_id=sess_proj.root_agent_id,
@@ -152,7 +156,7 @@ class SessionManager:
     async def _make_root_task_manager(
         self,
         session: Session,
-        user_prompt: str,
+        user_prompt: "str | list[ContentPart]",
         settings: NormalTaskSettings | None,
     ) -> tuple[Task, TaskManager]:
         task = Task(
