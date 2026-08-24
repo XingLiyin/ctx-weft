@@ -54,6 +54,8 @@ def test_append_at_keeps_image():
 
 def test_append_last_keeps_image():
     out = _c()._append_to_last_user([_parts_msg()], "tail")
+    # 先守住类型：拍扁成 str 会让下面的逐 part 断言对字符做假阳性判定。
+    assert isinstance(out[-1].content, list), "必须仍是 part 列表，不能被拍扁成 str"
     assert any(not hasattr(p, "text") for p in out[-1].content)
 
 
