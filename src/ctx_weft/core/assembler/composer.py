@@ -298,6 +298,25 @@ def _is_named_skill(block: "ContextBlock", skill_name: str) -> bool:
     return name == skill_name
 
 
+def _is_blank_content(content: object) -> bool:
+    """内容是否真的为空。
+
+    与 llm_gateway._is_empty_content 同义但更严格地只判「有无内容」：
+    str 看是否空；列表看是否为空、或是否只含空 TextPart。
+    非文本 part（图片）一律视为有内容——纯图片消息不是空消息。
+    """
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return not content
+    for p in content:
+        if not hasattr(p, "text"):
+            return False        # 图片 = 有内容
+        if p.text:
+            return False
+    return True
+
+
 def _shift_markdown_headings(md: str, base_level: int) -> str:
     """把 md 内的标题层级整体下移，使最浅一级标题成为 base_level 的子级（base_level+1）。
 
@@ -888,10 +907,12 @@ class DefaultComposer(Composer):
         out: list[tuple[LLMMessage, str, str, str]] = []
         for b in sorted_blocks:
             role = b.metadata.get("role", "user")
-            content = content_to_text(b.content)
+            content = b.content
             tool_calls = b.metadata.get("tool_calls") or [] if role == "assistant" else []
-            if not content and not tool_calls:
-                continue  # 空文本且无 tool_call 才跳过（保留仅含 tool_call 的 assistant 回合）
+            # 判空必须 parts-aware：纯图片消息的 content_to_text 是空串，
+            # 旧写法会把它当空消息静默丢弃（spec §6.4）。
+            if _is_blank_content(content) and not tool_calls:
+                continue  # 真空且无 tool_call 才跳过（保留仅含 tool_call 的 assistant 回合）
             if role == "assistant":
                 msg = LLMMessage(
                     role="assistant",
