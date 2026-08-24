@@ -378,7 +378,8 @@ def _serialize_messages(
 
     for m in messages:
         if m.role == "assistant" and m.tool_calls:
-            content: Any = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
+            content: Any = (m.content if isinstance(m.content, str)
+                            else _parts_to_blocks(m.content))
             tc_list = [
                 {
                     "id": tc.get("id", ""),
@@ -402,7 +403,8 @@ def _serialize_messages(
                 "content": content,
             })
         else:
-            content = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
+            content = (m.content if isinstance(m.content, str)
+                       else _parts_to_blocks(m.content))
             entry: dict[str, Any] = {"role": m.role, "content": content}
             if m.role == "assistant" and m.reasoning_content:
                 entry["reasoning_content"] = m.reasoning_content
@@ -416,9 +418,37 @@ def _parts_to_text(parts: Any) -> str:
         return parts
     if isinstance(parts, list):
         return " ".join(
-            p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
+            p.get("text", "") if isinstance(p, dict) else getattr(p, "text", str(p))
+            for p in parts
         )
     return str(parts)
+
+
+def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
+    """把 ContentPart 列表转成 OpenAI wire blocks（文本 → text block，图片 → image_url block）。
+
+    Phase 2 不做外部化：source_type 恒为 "base64"，直接把 base64 拼成 data URL。"""
+    blocks: list[dict[str, Any]] = []
+    for p in parts:
+        if isinstance(p, dict):
+            p_type = p.get("type")
+            if p_type == "image":
+                media_type = p.get("media_type", "")
+                data = p.get("data", "")
+                blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{data}"},
+                })
+            else:
+                blocks.append({"type": "text", "text": p.get("text", "")})
+        elif getattr(p, "type", None) == "image":
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{p.media_type};base64,{p.data}"},
+            })
+        else:
+            blocks.append({"type": "text", "text": getattr(p, "text", str(p))})
+    return blocks
 
 
 def _map_tools(tools: list[LLMTool]) -> list[dict[str, Any]]:

@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
+from ctx_weft.core.utils import content_to_text
 from ctx_weft.protocols import LLMChunk, LLMClient, LLMRequest, LLMUsage, ToolCall
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
@@ -98,8 +99,7 @@ class MockLLMAdapter(LLMClient):
 
         # usage
         prompt_text = request.system + "\n".join(
-            (m.content if isinstance(m.content, str) else "")
-            for m in request.messages
+            content_to_text(m.content) for m in request.messages
         )
         tok = self.tokenizer_for(request.model or "mock")
         prompt_tokens = tok.count(prompt_text)

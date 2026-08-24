@@ -340,9 +340,13 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
             continue
         if m.role == "assistant":
             content_blocks: list[dict] = []
-            text = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
-            if text:
-                content_blocks.append({"type": "text", "text": text})
+            if isinstance(m.content, str):
+                text = m.content
+                if text:
+                    content_blocks.append({"type": "text", "text": text})
+            else:
+                content_blocks.extend(_parts_to_blocks(m.content))
+                text = _parts_to_text(m.content)  # 空 content_blocks 兜底判据用
             for tc in (m.tool_calls or []):
                 content_blocks.append({
                     "type": "tool_use",
@@ -358,7 +362,8 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
             tool_results: list[dict] = []
             while i < len(messages) and messages[i].role == "tool":
                 tm = messages[i]
-                content = tm.content if isinstance(tm.content, str) else _parts_to_text(tm.content)
+                content = (tm.content if isinstance(tm.content, str)
+                           else _parts_to_blocks(tm.content))
                 if tm.tool_call_id:
                     tool_results.append({
                         "type": "tool_result",
@@ -374,7 +379,8 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                 i += 1
             result.append({"role": "user", "content": tool_results})
         else:
-            content = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
+            content = (m.content if isinstance(m.content, str)
+                       else _parts_to_blocks(m.content))
             result.append({"role": m.role, "content": content})
             i += 1
     return result
@@ -385,9 +391,43 @@ def _parts_to_text(parts: Any) -> str:
         return parts
     if isinstance(parts, list):
         return " ".join(
-            p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
+            p.get("text", "") if isinstance(p, dict) else getattr(p, "text", str(p))
+            for p in parts
         )
     return str(parts)
+
+
+def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
+    """把 ContentPart 列表转成 Anthropic wire blocks（文本 → text block，图片 → image block）。
+
+    Phase 2 不做外部化：source_type 恒为 "base64"，直接把 base64 写进 payload。"""
+    blocks: list[dict[str, Any]] = []
+    for p in parts:
+        if isinstance(p, dict):
+            p_type = p.get("type")
+            if p_type == "image":
+                blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": p.get("media_type", ""),
+                        "data": p.get("data", ""),
+                    },
+                })
+            else:
+                blocks.append({"type": "text", "text": p.get("text", "")})
+        elif getattr(p, "type", None) == "image":
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": p.media_type,
+                    "data": p.data,
+                },
+            })
+        else:
+            blocks.append({"type": "text", "text": getattr(p, "text", str(p))})
+    return blocks
 
 
 def _map_tools(tools: list[LLMTool]) -> list[dict[str, Any]]:
