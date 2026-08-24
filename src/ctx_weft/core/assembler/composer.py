@@ -624,14 +624,18 @@ class DefaultComposer(Composer):
         if anchor != latest:
             # 首条原文冠 ## Opening Message（开启此 task 的消息）：与最新一条的
             # ## Current Message 区分，也把原文和随后追加的 directive/capabilities 分隔开。
-            raw = content_to_text(messages[anchor].content)
             messages[anchor] = LLMMessage(
-                role="user", content=f"{prefix}## Opening Message\n{raw}"
+                role="user",
+                content=content_with_prefix(
+                    messages[anchor].content, f"{prefix}## Opening Message\n"
+                ),
             )
-        raw_latest = content_to_text(messages[latest].content)
-        framed = (
-            f"{prefix if anchor == latest else ''}## Current Message\n{raw_latest}\n\n"
-            "（Reply in the same language as the Current Message above.）"
+        framed = content_with_prefix(
+            messages[latest].content,
+            f"{prefix if anchor == latest else ''}## Current Message\n",
+        )
+        framed = content_with_suffix(
+            framed, "\n\n（Reply in the same language as the Current Message above.）"
         )
         messages[latest] = LLMMessage(role="user", content=framed)
 
