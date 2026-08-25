@@ -635,3 +635,70 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
   既有的惰性解析时机。测试：
   `tests/unit/test_content_validation.py::
   test_start_session_plain_text_does_not_eagerly_resolve_llm`。
+
+**Phase 3a 防 400 护栏复审 fix wave（2026-08-25）新增缺口/裁定：**
+
+- **工具产出的图片绕过全部三道护栏（I4，仅记录，不实现）。** §6.6 明文设计
+  `LLMMessage(role="tool", content=[TextPart, ImagePart])`（Phase 4 的
+  `media:get_image` 会产出这种形态）。但当前没有任何入口对工具结果调用
+  `validate_content`——`start_session` / `run_single_task` 只校验的是**发起**请求的
+  `user_prompt`，工具执行产出的 `LLMMessage(role="tool", ...)` 从工具 handler 直接
+  进入消息序列，不经过这两个入口。也就是说：即便本 Phase 把 `user_prompt` 的图片
+  护栏做得再严格，一个 text-only 模型仍可能在工具循环中间被喂 image block → 400，
+  这正是本 Phase 要防的失效模式，只是从"用户输入"这扇门换到了"工具输出"这扇门。
+  已记的缺口清单（本节上方，Task 4）目前只列了 HITL 与 `reopen_task`，未覆盖这条，
+  在此补记。
+  **门控该放在哪里，两个候选：**
+  - 工具结果路径（工具 handler 产出 `LLMMessage(role="tool", ...)` 之后、拼入历史
+    之前）——离"数据源头"最近，能在落库前就拒绝，但工具产出点分散（凡是能返回
+    `ImagePart` 的 capability 都要接一遍），覆盖面随 capability 数量线性增长。
+  - `stream_llm`（`core/loop/llm_gateway.py`，出网前最后一道关口）——是本模块
+    docstring 定义的"发送前合法化"唯一关口，天然覆盖所有来源（用户输入、工具输出、
+    历史回放）的图片，一处生效、不随 capability 数量增长；代价是校验发生得晚
+    （消息已落库/已进入历史后才拒绝，不是"入口即拒、不落库"）。
+  **倾向**：放在 `stream_llm`。理由：它已经是"发送前合法化"的唯一关口
+  （`legalize_messages` 六条不变式全在这里做），新增"逐条 tool-result 图片过
+  `validate_content` 视觉门控"是同一关口职责的自然延伸，且不需要在 Phase 4 每新增
+  一个可能产图的 capability 时都记得补校验——这正是本 Phase 反复强调的"防 400 是
+  唯一关口"架构原则（模块 docstring 开篇）在工具结果场景下的对应延伸。代价（校验晚、
+  已落库）需要 Phase 4 落地时与"入口即拒不落库"的既有语义做取舍，留给到时决定。
+  本条只记录判断倾向，不在本 fix wave 实现（超出 Phase 3a 范围，需要 Phase 4 的
+  `media:get_image` 落地后才有真实调用点可测）。
+
+- **dict 形态 part 被入口全数拒绝，且把纯文本拖进提前解析分支（I3，评审 2026-08-24
+  fix wave，裁定 B）。** `content.py` 的 `_is_text_part`（`hasattr(part, "text")`）
+  对 dict 形态 part 恒为 `False`——纯文本 dict `{"type":"text","text":"hello"}`
+  会被 `content_has_image` 误判为"含图"，进而在 `start_session` 触发提前
+  `_resolve_llm`（§13 上一条裁定要防的行为，从另一扇门回来了）；被 `validate_content`
+  当成"无 `media_type` 的图片"直接 `InvalidContentError` 拒绝。两家 adapter
+  （`anthropic.py` / `openai.py`）的 `_parts_to_blocks` 原生支持 dict 形态 part，
+  但入口把它们全拒了——入口比 adapter 更严格，形成一个不对称的硬限制。
+  评审给出两个选项：(A) 让归一层认识 dict（`_is_text_part` / `validate_content`
+  都支持 Mapping 取值）；(B) 保持现状，钉住这个限制并更新 spec，要求宿主在
+  ingest 前把 dict 形态 rehydrate 成 `ContentPart` 对象。**裁定：选 (B)。**
+  理由：`_is_text_part` 的判据字面量（`hasattr(part, "text")`）与
+  `core/utils.py` 的 `content_to_text` / `image_part_count` 共享——本节上方
+  （评审 2026-08-23 fix wave，M2）已经点出两边一度存在 dict-aware 分歧、需要
+  "一并收敛"而非"照抄一半"；`content_to_text` 还被
+  `tests/unit/test_content_module.py::test_content_to_text_reexported` 钉死为
+  `utils.content_to_text` 的同一个对象引用。若只在 `content.py` 本地给
+  `_is_text_part` / `validate_content` 加 Mapping 支持，会立刻制造一个新的、
+  比现状更难追踪的分歧：`content_has_image` / `validate_content` 认得
+  dict-text，`content_to_text` / `image_part_count` 仍不认得，同一份 dict 内容
+  在"是否含图判断"与"拍扁成文本"两条路径上给出不同答案。这比现状"两处对称地
+  都不认识 dict"更危险，不满足"不改判据本身"的约束（哪怕只改
+  `content.py` 一处，也会在两处判据之间制造语义分叉，等价于事实上改了判据的
+  可观察行为）。故选 (B)：`_is_text_part` 判据字面量不变，只把这个已知限制
+  钉成回归测试
+  （`tests/unit/test_content_validation.py::
+  test_dict_text_part_is_misclassified_as_image_known_limitation` /
+  `test_dict_text_part_rejected_by_validate_content_known_limitation`），并在此
+  记录：**入口目前只接受 dataclass 形态的 `ContentPart`（`TextPart`/
+  `ImagePart`）**——dict-shaped part（含纯文本 dict）会被入口硬拒绝或误判，宿主
+  必须在把内容喂给 `start_session`/`run_single_task` 之前，把从 JSON 往返/
+  memory provider 召回的 dict 形态内容 rehydrate 成 `ContentPart` 对象
+  （`content_from_jsonable` 即为此设计）。这把上面 M2 记录的"token 误计"级别的
+  隐患，在入口这一层升级成了"硬拒绝"——两者同源（同一判据、同一盲点），只是
+  暴露的层不同。真正收敛（选项 A，含 `core/utils.py` 一并改成 Mapping-aware）
+  留给 Phase 3b/4，届时若要做，须同步改 `_is_text_part` / `content_to_text` /
+  `image_part_count` 三处，不能只改一处。

@@ -1001,6 +1001,18 @@ async def test_single_task(runtime):
 
 ---
 
+## 升级须知（多模态 Phase 3a）
+
+- **破坏性变更：多模态会话默认失败，除非显式声明视觉能力。** 升级到本版本后，
+  任何携带图片（`ImagePart`）的会话会以 `VisionNotSupportedError`
+  （`error_code=VISION_NOT_SUPPORTED`）失败，**除非**在传给
+  `register_llm_provider` / `llm=` 的 `ModelConfig`（或等价的 LLM client 对象）上
+  显式设置 `supports_vision=True`。这是刻意的严格默认：未声明视觉能力的模型一律
+  视为不支持图片，防止图片 block 被静默发给 text-only 模型导致 provider 400。
+  纯文本会话不受影响，行为逐字节不变。
+  若你的宿主此前把图片喂给了任意模型（不管它是否真的支持视觉），升级后需要
+  逐个 model 显式标注 `supports_vision=True` 才能继续工作。
+
 ## 限制与约束
 
 - **单进程**：EventBus 是进程内实现，不跨进程。多进程需替换为 Redis Streams 等外部总线。
