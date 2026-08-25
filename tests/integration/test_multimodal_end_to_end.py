@@ -11,15 +11,20 @@ title 分支短路，永远走不到 user_prompt 分支。必须走 ``start_sess
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
+from ctx_weft.core.assembler.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.core.utils import _IMAGE_PART_TOKENS
+from ctx_weft.core.utils import _IMAGE_PART_TOKENS, content_to_text
 from ctx_weft.protocols import (
     ImagePart, LLMChunk, LLMUsage, MemoryEventType, ProviderContext, TextPart, ToolCall,
 )
+from ctx_weft.protocols.filesystem import BLOB_REF_PREFIX
+from ctx_weft.providers.capability_filesystem import FilesystemToolsProvider
 from ctx_weft.providers.llm.anthropic import AnthropicAdapter
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
@@ -289,4 +294,219 @@ async def test_multimodal_prompt_reaches_wire_payload_as_image_block() -> None:
     assert any(_has_image_block(p) for p in llm.captured_payloads), (
         "图片没有出现在任何一次 wire payload 的 image block 里——"
         "AssembledPrompt.messages 里可能有 ImagePart，但没有真的出网"
+    )
+
+
+# ── Task 5：Phase 3b 端到端收口 ────────────────────────────────────────────────
+#
+# 前四个任务各自都有单元测试，但都是在打过桩的边界上验证的。下面三条从**真实全链路**
+# （start_session → 归一层外部化 → memory → 装配 → gateway rehydrate → adapter wire
+# payload）证明它们确实拼得起来。
+
+_RAW_IMAGE_BYTES = base64.b64decode(_MULTIMODAL_PROMPT[1].data)
+
+
+def _image_sources(payload: dict) -> list[dict]:
+    """payload 里所有 image block 的 source 字典（真实 AnthropicAdapter 产出的 wire 形态）。"""
+    out: list[dict] = []
+    for m in payload.get("messages", []):
+        content = m.get("content")
+        if isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "image":
+                    out.append(b.get("source") or {})
+    return out
+
+
+def _image_parts(content: object) -> list:
+    """content 里的 ImagePart（dataclass 形态）。
+
+    调用方必须先 ``assert isinstance(content, list)``——``content`` 是 ``str`` 时本函数
+    返回空列表，用它做「没有图」的断言会得到一条永真的重言式（已知陷阱 1）。
+    """
+    if not isinstance(content, list):
+        return []
+    return [p for p in content if getattr(p, "type", None) == "image"]
+
+
+async def _recall_user_prompt_parts(memory, state) -> object:
+    ctxp = ProviderContext(session_id=state.session.id, agent_id=state.agent.id)
+    recs = await memory.recall_recent(
+        state.scope, [MemoryEventType.USER_PROMPT], 10, ctxp,
+    )
+    assert len(recs) == 1, f"expected exactly one USER_PROMPT record, got {len(recs)}"
+    return recs[0].content
+
+
+async def _run_multimodal_session(*, blob_store=None, session_id: str | None = None):
+    """跑一整个 start_session 会话（多模态 user_prompt），返回 (runtime, memory, state, llm)。
+
+    ``blob_store`` 为 None 时**完全不注册**——runtime 拿到 NullBlobStore，即 Phase 3a 的
+    既有行为面。
+    """
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+
+    llm = _WireCapturingAnthropicAdapter()
+    llm.supports_vision = True  # instance-only（见上文同名注释的理由）
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
+    memory = InMemoryMemoryProvider()
+    runtime.providers.register_memory(memory)
+    if blob_store is not None:
+        runtime.providers.register_blob_store(blob_store)
+
+    handle = await runtime.start_session(
+        SessionStartParams.create(
+            template_id="agent:tpl_echo",
+            user_prompt=_MULTIMODAL_PROMPT,
+            session_id=session_id,
+            context_limit=100_000,
+        )
+    )
+    state = await handle.wait_for_finish(timeout=5.0)
+    assert state is not None
+    assert state.task.status == "FINISHED", f"expected FINISHED, got {state.task.status}"
+    return runtime, memory, state, llm
+
+
+@pytest.mark.asyncio
+async def test_ref_externalized_in_memory_but_full_base64_on_the_wire(tmp_path) -> None:
+    """覆盖 1（ref 全链路）：注册**真** BlobStore（FilesystemToolsProvider，Task 1）后——
+
+    a) core 侧（memory 记录）里的图是 ``source_type="ref"`` 的 ``blob:<sha>``，
+       **不再是 base64**（证明 Task 2 的入口外部化在真实 start_session 上生效）；
+    b) 送到 adapter 的 wire payload 里是**完整 base64**，且 base64 解码回来
+       **逐字节等于原始图片字节**（证明 Task 3 的 gateway rehydrate 在真实出网路径上生效）。
+
+    (b) 刻意校验解码结果而不是「不以 blob: 开头」——后者对任何非空字符串几乎恒真，
+    杀不掉「rehydrate 还原出了别的字节」这类损坏。
+    """
+    session_id = "ses_blob_e2e"
+    fs = FilesystemToolsProvider()
+    fs.register_session(session_id, str(tmp_path / "ws"))
+
+    _rt, memory, state, llm = await _run_multimodal_session(
+        blob_store=fs, session_id=session_id,
+    )
+
+    # (a) memory 侧只见 ref
+    content = await _recall_user_prompt_parts(memory, state)
+    assert isinstance(content, list), (  # 陷阱 1 的守卫：str 上所有 part 断言都退化成重言式
+        f"USER_PROMPT 记录应仍是 part 列表，实为 {type(content).__name__}"
+    )
+    images = _image_parts(content)
+    assert len(images) == 1, f"expected exactly one ImagePart in memory, got {len(images)}"
+    assert images[0].source_type == "ref", (
+        f"接了真 BlobStore 时 memory 里应是 ref，实为 source_type={images[0].source_type!r}"
+    )
+    assert images[0].data.startswith(BLOB_REF_PREFIX), (
+        f"ref 的 data 应是 blob:<sha>，实为 {images[0].data!r}"
+    )
+    assert images[0].data != _MULTIMODAL_PROMPT[1].data, "memory 里仍是原始 base64——没有外部化"
+    # 同一条也钉住 task 侧（start_session 把外部化后的 params 透传给 create_session）
+    assert _image_parts(state.task.user_prompt)[0].source_type == "ref"
+
+    # blob 真的落盘了，且内容就是原始字节（外部化不是「把 data 改成个假 ref」）
+    ctxp = ProviderContext(session_id=session_id)
+    got = await fs.get(images[0].data, ctxp)
+    assert got is not None, f"blob {images[0].data!r} 没有真的落进 store"
+    assert got[0] == _RAW_IMAGE_BYTES
+    assert got[1] == "image/png"
+
+    # (b) wire 上是完整 base64，解码回原始字节
+    sources = [s for p in llm.captured_payloads for s in _image_sources(p)]
+    assert sources, (
+        "没有任何一次 wire payload 含 image block——ref 没有在出网前被还原成图片"
+    )
+    for src in sources:
+        assert src.get("type") == "base64"
+        assert src.get("media_type") == "image/png"
+        wire_data = src.get("data") or ""
+        assert base64.b64decode(wire_data) == _RAW_IMAGE_BYTES, (
+            "wire 上的 base64 解码后不等于原始图片字节——rehydrate 没有真的还原内容"
+        )
+        assert wire_data == _MULTIMODAL_PROMPT[1].data
+
+
+@pytest.mark.asyncio
+async def test_without_blob_store_memory_and_wire_stay_inline_base64() -> None:
+    """覆盖 2（不接 BlobStore 时行为不变）：不注册 BlobStore（runtime 用 NullBlobStore）时，
+    memory 记录与 wire payload 都仍是 **inline base64**，与 Phase 3a 既有 e2e
+    （``test_multimodal_prompt_reaches_wire_payload_as_image_block``）结果一致。
+
+    这条最容易写成永真（「某件事没有发生」型断言，已知陷阱 3），所以主断言取
+    **正向的逐字节相等**：``content == _MULTIMODAL_PROMPT``——它同时排除了「变成了 ref」
+    「data 被改写」「part 被降级成文本」「列表被拍扁成 str」全部走样，
+    而不只是「没有出现 blob: 前缀」。
+    """
+    _rt, memory, state, llm = await _run_multimodal_session(blob_store=None)
+
+    content = await _recall_user_prompt_parts(memory, state)
+    assert content == _MULTIMODAL_PROMPT, (
+        f"不接 BlobStore 时 memory 记录必须与 Phase 3a 逐字节一致，实为 {content!r}"
+    )
+    assert state.task.user_prompt == _MULTIMODAL_PROMPT
+
+    images = _image_parts(content)
+    assert len(images) == 1
+    assert images[0].source_type == "base64"
+
+    sources = [s for p in llm.captured_payloads for s in _image_sources(p)]
+    assert sources, "不接 BlobStore 时图片仍应照常出网（Phase 3a 的既有行为）"
+    for src in sources:
+        assert src.get("data") == _MULTIMODAL_PROMPT[1].data
+        assert base64.b64decode(src["data"]) == _RAW_IMAGE_BYTES
+
+
+@pytest.mark.asyncio
+async def test_compact_assembly_carries_no_image_while_act_still_does() -> None:
+    """覆盖 3（compaction 不再带图）：拿一次真实会话跑完后**真实 memory 里的记录**，
+    经**真实装配链**（runtime._build_assembler → PriorityBudgetStrategy → DefaultComposer）
+    各装配一次 ``purpose="compact"`` 与 ``purpose="act"``：
+
+    - compact 的 messages 里**一个 ImagePart 都没有**（Task 4 的 per-purpose 降级）；
+    - act 的 messages 里**仍有** ImagePart —— 对照组，否则「compact 没有图」可能只是
+      因为这条会话的 memory 里根本就没有图（假绿）。
+
+    另断言 compact 的 token_count 严格小于 act 的：降级发生在 token_count 计算**之前**
+    （裁定 T1），否则 budget/compact 会基于含图的错误数字判断。
+    """
+    runtime, memory, state, _llm = await _run_multimodal_session(blob_store=None)
+
+    ctxp = ProviderContext(session_id=state.session.id, agent_id=state.agent.id)
+    assembler = runtime._build_assembler(memory, ctxp, {})
+
+    def _request(purpose: str, extra: dict) -> ContextRequest:
+        return ContextRequest(
+            purpose=purpose,
+            scope=state.scope,
+            task=state.task,
+            agent=state.agent,
+            session=state.session,
+            template=state.extra.get("template"),
+            bound_capabilities=[],
+            extra=extra,
+        )
+
+    act_prompt = await assembler.assemble(_request("act", {}))
+    compact_prompt = await assembler.assemble(_request("compact", {"compact_scope": "task"}))
+
+    act_images = [im for m in act_prompt.messages for im in _image_parts(m.content)]
+    assert act_images, (
+        "对照组失败：act 装配里就没有 ImagePart——本测试的 compact 断言会是假绿"
+    )
+
+    compact_images = [im for m in compact_prompt.messages for im in _image_parts(m.content)]
+    assert not compact_images, (
+        f"compact 装配仍携带 {len(compact_images)} 个 ImagePart——compaction 又在重发图片"
+    )
+    # 图确实变成了确定性文本占位（裁定 D2），而不是整条消息被丢掉
+    compact_text = "\n".join(content_to_text(m.content) for m in compact_prompt.messages)
+    assert "[image image/png]" in compact_text, (
+        "compact 里既没有图、也没有占位文本——图被整个丢掉了，而不是降级"
+    )
+
+    assert compact_prompt.token_count < act_prompt.token_count, (
+        f"compact token_count({compact_prompt.token_count}) 应低于 act"
+        f"({act_prompt.token_count})——降级必须发生在 token_count 计算之前（裁定 T1）"
     )
