@@ -658,7 +658,7 @@ class CtxWeftRuntime:
         """Phase 1 compat: run a single task end-to-end and await completion."""
         import dataclasses as _dc
 
-        from ctx_weft.core.content import content_to_text, validate_content
+        from ctx_weft.core.content import content_to_text, normalize_content, validate_content
 
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
@@ -666,6 +666,13 @@ class CtxWeftRuntime:
         # 入口即拒、不落库：格式/视觉门控须在任何持久化（Session/Task/事件）之前完成
         # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全。
         validate_content(user_prompt, llm=llm)
+        # 顺序关键：validate 必须在 normalize 之前——先拒掉畸形/超限/无视觉能力的内容，
+        # 再花代价写 blob；反过来会让被拒的内容也在 blob store 里留下垃圾。
+        # 未注册 BlobStore 时 normalize_content 原样返回（NullBlobStore.can_externalize
+        # 为 False），纯文本与不接 blob 的宿主行为逐字节不变。
+        user_prompt = await normalize_content(
+            user_prompt, blob_store=self.providers.get_blob_store(), ctx=ctx,
+        )
         lm = LifecycleManager(template_lookup=self._template_lookup)
 
         agent, template = await lm.instantiate_agent(
@@ -744,7 +751,9 @@ class CtxWeftRuntime:
                                   session_id=<id> → new session with that host-provided ID).
         params.resume is True  → resume existing session (root_agent_id recovered from events).
         """
-        from ctx_weft.core.content import validate_content
+        import dataclasses as _dc
+
+        from ctx_weft.core.content import normalize_content, validate_content
 
         memory = self.providers.get_memory()
         # 入口即拒、不落库：sm.create_session / sm.resume_session 会立即持久化
@@ -765,6 +774,24 @@ class CtxWeftRuntime:
                 params.llm_account, params.llm_model
             ),
         )
+        # 顺序关键：validate 先于 normalize——被拒的内容不该在 blob store 留垃圾。
+        # 不能外部化时（NullBlobStore）下面整段是纯 no-op：params 不被替换、
+        # session_id 也不提前生成，行为与 Phase 3a 逐字节一致。
+        blob_store = self.providers.get_blob_store()
+        if blob_store.can_externalize:
+            # blob 落盘要一个 session 锚点（宿主按 session_id 登记 workspace），所以
+            # 这里必须把 session_id 定下来并透传给 create_session，否则外部化用的
+            # session 与真正创建的 session 会是两个 id。
+            sid = params.session_id or generate_id("ses")
+            params = _dc.replace(
+                params,
+                session_id=sid,
+                user_prompt=await normalize_content(
+                    params.user_prompt,
+                    blob_store=blob_store,
+                    ctx=ProviderContext(session_id=sid, tenant_id=params.tenant_id),
+                ),
+            )
         lm = LifecycleManager(template_lookup=self._template_lookup)
         sm = SessionManager(
             lifecycle_manager=lm,

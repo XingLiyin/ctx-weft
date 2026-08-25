@@ -32,6 +32,7 @@ __all__ = [
     "redact_content_for_event",
     "validate_content",
     "content_has_image",
+    "normalize_content",
 ]
 
 
@@ -251,15 +252,24 @@ def validate_content(
                 f"允许：{sorted(ALLOWED_IMAGE_MEDIA_TYPES)}"
             )
         source_type = getattr(img, "source_type", "base64")
+        if source_type == "ref":
+            # Phase 3b：ref 是本仓 normalize_content 写进 blob store 后产出的形态。
+            # 字节合法性与尺寸上限在 put 之前（即上一次 validate_content）已经把过关，
+            # data 此时是 "blob:<sha>" 而非 base64——再解码一次必然失败。故跳过解码与
+            # 尺寸校验，但 media_type 白名单仍逐条校验（它可能来自记录回放/宿主构造，
+            # 不能假定必然合法）。
+            continue
         if source_type != "base64":
             # M5：当下（Phase 3a）constraint 2 恒成立——source_type 恒为 "base64"，
             # 本分支今日不可达。原 `continue`（静默放行未经解码/尺寸校验的输入）在
             # Phase 3b 引入 ref/url 形态后就是一个真实的洞：非 base64 的图片会跳过
             # 全部尺寸/内容校验直接放行。改成 raise，强制 Phase 3b 到时必须显式
             # 处理该分支（新增校验逻辑），而不是继续沉默跳过。
+            # Phase 3b 已显式处理 "ref"（见上一分支）；剩下的 "url" 本 Phase 不支持，
+            # 维持 raise。
             raise InvalidContentError(
                 f"不支持的图片来源类型 {source_type!r}；"
-                "当前仅支持 base64（url/ref 形态未实现校验）"
+                "当前支持 base64 与 ref（url 形态未实现校验）"
             )
         try:
             raw = base64.b64decode(getattr(img, "data", "") or "", validate=True)
@@ -278,3 +288,43 @@ def validate_content(
             "当前模型未声明视觉能力（supports_vision），拒绝图片输入。"
             "若该模型确实支持图片，请在 ModelConfig 上显式设置 supports_vision=True。"
         )
+
+
+# ── 入口外部化（Phase 3b）─────────────────────────────────────────────────
+
+
+async def normalize_content(
+    content: "str | list[ContentPart] | None",
+    *,
+    blob_store: "Any",
+    ctx: "Any",
+) -> "str | list[ContentPart] | None":
+    """把 base64 图片外部化成 blob ref。返回新内容；**不改原对象**。
+
+    blob_store 不能外部化（``NullBlobStore``）时**原样返回同一对象**——不接
+    blob 的宿主行为与 Phase 3a 逐字节一致（本 Phase 最重要的兼容性约束）。
+    判定走 ``blob_store.can_externalize`` 探询，**不**调用 put 再捕获
+    NotImplementedError：后者会把「响亮失败」降级成控制流（Phase 1 终审契约）。
+
+    只处理 ``source_type == "base64"`` 的图片 part；文本 / ``url`` / 已是
+    ``ref`` 的 part 原样保留（不重复外部化）。
+
+    **调用契约：必须在 ``validate_content`` 通过之后调用。** ``b64decode`` 这里
+    刻意不再 try/except——两个入口都是「先 validate 后 normalize」，畸形 base64
+    在 validate 阶段就已报 InvalidContentError，到不了这里；此处再包一层
+    try/except 只会制造一条永不被执行、也永不被测试的分支。顺序若被后来者接反，
+    这里抛出的 binascii.Error 正好是响亮的信号。
+    """
+    if not content or isinstance(content, str):
+        return content
+    if not blob_store.can_externalize:
+        return content                      # 原样返回，零改动
+    out: list["ContentPart"] = []
+    for part in content:
+        if _is_text_part(part) or getattr(part, "source_type", "base64") != "base64":
+            out.append(part)                # 文本 / url / 已是 ref → 原样
+            continue
+        raw = base64.b64decode(getattr(part, "data", "") or "", validate=True)
+        ref = await blob_store.put(raw, getattr(part, "media_type", ""), ctx)
+        out.append(dataclasses.replace(part, data=ref, source_type="ref"))
+    return out

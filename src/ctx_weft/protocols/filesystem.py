@@ -63,6 +63,16 @@ class BlobStore(ABC):
     GC 误删都会发生，调用方据此降级为文本占位，绝不因取图失败中断 loop。
     """
 
+    @property
+    def can_externalize(self) -> bool:
+        """本 store 是否真的能存——``NullBlobStore`` 返回 False。
+
+        调用方据此**先探询、再决定**，而不是调用 put 并捕获 NotImplementedError：
+        后者会把「响亮失败」降级成控制流，让真正的接线错误也被静默吞掉
+        （Phase 1 终审契约）。基类默认 True，既有实现无需改动。
+        """
+        return True
+
     @abstractmethod
     async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
         ...
@@ -78,8 +88,14 @@ class NullBlobStore(BlobStore):
     """未注册 BlobStore 时的默认实现——保证不接 blob 的宿主行为完全不变。
 
     put 刻意抛错：Phase 1 内没有任何调用方（外部化在 Phase 3），抛错可在
-    Phase 3 接线错误时立刻暴露，而不是静默产出一个假 ref。
+    Phase 3 接线错误时立刻暴露，而不是静默产出一个假 ref。调用方（
+    ``core.content.normalize_content``）先探询 can_externalize 决定是否外部化，
+    **不**捕获这里的 NotImplementedError——它仍是接线错误的响亮信号。
     """
+
+    @property
+    def can_externalize(self) -> bool:
+        return False
 
     async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
         raise NotImplementedError(
