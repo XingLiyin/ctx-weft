@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 
+from ctx_weft.core.orchestrator._text_window import window_text
 from ctx_weft.core.utils import extract_schema
 from ctx_weft.protocols.capability import (
     Capability,
@@ -102,15 +103,28 @@ async def list_files(
 @skill_executor_tool(spillable=False)
 async def read_file(
     path: Annotated[str, "Relative path to a file within the skill directory"],
+    offset: Annotated[int | None, "1-based line number to start from (default 1)"] = None,
+    limit: Annotated[int | None, "Maximum number of lines to return (default 2000)"] = None,
+    char_offset: Annotated[int | None, "Character offset, for reading the remainder of an over-long line; mutually exclusive with offset/limit"] = None,
+    char_limit: Annotated[int | None, "Maximum number of characters to return in char mode"] = None,
     *,
     skill_provider: SkillCapabilityProvider,
     skill_name: str,
     ctx: ProviderContext,
 ) -> SkillResult:
-    """Read a file from the current skill's directory."""
+    """Read a file from the current skill's directory (paginated, one window per call).
+
+    Returns a numbered line window, not the whole file — a long reference doc would
+    otherwise blow up the context. When more remains, the tail of the content carries the
+    continuation hint (the next offset / char_offset); call again with it to page on.
+    """
     try:
+        # 协议上 load_resource 整份返回；开窗在这里做，模型只看到一页。
         content = await skill_provider.load_resource(skill_name, path, ctx)
-        return SkillResult(content=content)
+        return SkillResult(content=window_text(
+            content, offset=offset, limit=limit,
+            char_offset=char_offset, char_limit=char_limit,
+        ))
     except (ValueError, FileNotFoundError) as exc:
         return SkillResult(content=str(exc), is_error=True)
 
