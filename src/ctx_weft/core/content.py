@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.errors import InvalidContentError, VisionNotSupportedError
 from ctx_weft.core.utils import content_to_text
+from ctx_weft.protocols.filesystem import BLOB_REF_PREFIX
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
@@ -33,6 +34,7 @@ __all__ = [
     "validate_content",
     "content_has_image",
     "normalize_content",
+    "rehydrate_content",
 ]
 
 
@@ -327,4 +329,115 @@ async def normalize_content(
         raw = base64.b64decode(getattr(part, "data", "") or "", validate=True)
         ref = await blob_store.put(raw, getattr(part, "media_type", ""), ctx)
         out.append(dataclasses.replace(part, data=ref, source_type="ref"))
+    return out
+
+
+# ── 出网 rehydrate（Phase 3b）───────────────────────────────────────────────
+
+_IMAGE_UNAVAILABLE_TMPL = "[image unavailable: {media_type}]"
+
+
+def _part_field(part: Any, name: str, default: Any = None) -> Any:
+    """读 part 的字段，dataclass（属性）与 dict（键）两种形态都支持。
+
+    刻意只服务于 rehydrate 路径，**不动**被 spec §13 冻结的非文本判据
+    ``not hasattr(p, "text")``——那个判据同时被 core/utils 的 content_to_text /
+    image_part_count 共用，改它必须三处同改。
+    """
+    if isinstance(part, dict):
+        return part.get(name, default)
+    return getattr(part, name, default)
+
+
+def _is_ref_part(part: Any) -> bool:
+    """该 part 是否是一个「需要还原」的 blob ref。
+
+    dict 形态必须显式处理：``getattr(dict, "source_type", "base64")`` 在 dict 上
+    取不到属性、落回默认值 ``"base64"``，于是 dict 形态的 ref 会被静默当 base64
+    塞进 wire payload——图片废掉且全程无任何报错。这是三种结局里最差的一种
+    （不可观测的损坏 vs 可观测的降级），故此处走 dict-aware 取值。
+
+    第二条判据（``data`` 以 ``blob:`` 开头）是零误判的兜底：base64 字母表不含
+    ``:``，任何以 ``blob:`` 开头的 data 都不可能是合法 base64。有了它，
+    「把 blob:<sha> 当 base64 发出网」对任何 part 形态都不可达，即使某个
+    非一致性 provider 把 source_type 记错了也一样。
+    """
+    if _is_text_part(part):
+        return False
+    if isinstance(part, dict) and part.get("type") != "image":
+        return False                     # dict 形态的文本/未知 part
+    if _part_field(part, "source_type", "base64") == "ref":
+        return True
+    return str(_part_field(part, "data", "") or "").startswith(BLOB_REF_PREFIX)
+
+
+def _replace_part(part: Any, **changes: Any) -> Any:
+    """产出改过字段的**新** part，保持原形态（dict 进 dict 出，dataclass 同理）。"""
+    if isinstance(part, dict):
+        return {**part, **changes}
+    return dataclasses.replace(part, **changes)
+
+
+def _unavailable_part(part: Any, media_type: str) -> Any:
+    """取不到图时的文本占位。形态跟随入参，内容对同一张图**恒定**。
+
+    占位文本不得含随机 id / 时间戳 / 计数器 / blob sha（用户裁定 D2 的硬约束）：
+    降级发生在 compact 这类最需要命中 prompt cache 的时刻，占位每次不同会把该
+    purpose 自己的缓存前缀砸掉。
+    """
+    text = _IMAGE_UNAVAILABLE_TMPL.format(media_type=media_type or "image")
+    if isinstance(part, dict):
+        return {"type": "text", "text": text}
+    from ctx_weft.protocols import TextPart
+    return TextPart(text=text)
+
+
+async def rehydrate_content(
+    content: "str | list[ContentPart] | None",
+    *,
+    blob_store: "Any",
+    ctx: "Any",
+) -> "str | list[ContentPart] | None":
+    """把 blob ref 还原成 base64，供 adapter 拼 wire payload。返回新内容；**不改原对象**。
+
+    落在 gateway 而非 adapter（架构裁定 T0）：``_parts_to_blocks`` /
+    ``_serialize_messages`` / ``_build_payload`` 全是同步函数，而 ``BlobStore.get``
+    是 async——同步函数里没法 await。``stream_llm`` 是出网前最后一个 async 关口，
+    且一处覆盖三家 adapter。
+
+    三条零开销短路：纯文本（str / None / 空）、不能外部化的 store
+    （``NullBlobStore``）、内容里根本没有 ref——都**原样返回同一对象**，
+    不接 BlobStore 的宿主行为与 Phase 3a 逐字节一致。
+
+    ``get`` 返回 ``None`` 时**降级、不抛**（spec §5.1）：换成
+    ``[image unavailable: <media_type>]`` 文本 part。blob 过期 / 宿主换机 /
+    GC 误删都会发生，绝不能因取图失败中断整个 loop——rehydrate 在出网主路径上，
+    这里抛异常会掀掉整个 LLM 请求。
+    """
+    if not content or isinstance(content, str):
+        return content
+    if not blob_store.can_externalize:
+        # 存不进去的 store 也取不出来（NullBlobStore.get 恒 None）。此处短路而不是
+        # 让它走 get→None→降级，是为了保住「不接 BlobStore 时逐字节不变」的约束。
+        return content
+    if not any(_is_ref_part(p) for p in content):
+        return content                   # 没有 ref → 零开销
+    out: list["ContentPart"] = []
+    for part in content:
+        if not _is_ref_part(part):
+            out.append(part)
+            continue
+        ref = str(_part_field(part, "data", "") or "")
+        media_type = str(_part_field(part, "media_type", "") or "")
+        got = await blob_store.get(ref, ctx)
+        if got is None:
+            out.append(_unavailable_part(part, media_type))
+            continue
+        raw, stored_media_type = got
+        out.append(_replace_part(
+            part,
+            data=base64.b64encode(raw).decode("ascii"),
+            media_type=media_type or stored_media_type,
+            source_type="base64",
+        ))
     return out

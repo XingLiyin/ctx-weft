@@ -131,6 +131,9 @@ class LoopContext:
     task_manager: TaskManager|None = None
     # HitlManager 引用；ActStep interactive 任务纯文本 park 等用户用；None 时降级为旧的自动完成
     hitl_manager: "HitlManager|None" = None
+    # blob store：出网前把 ref 还原成 base64 用（Phase 3b）。默认 None → 不 rehydrate，
+    # 既有构造点与既有测试行为逐字节不变。
+    blob_store: "Any" = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

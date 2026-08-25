@@ -424,7 +424,13 @@ def _parts_to_text(parts: Any) -> str:
 def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
     """把 ContentPart 列表转成 Anthropic wire blocks（文本 → text block，图片 → image block）。
 
-    Phase 2 不做外部化：source_type 恒为 "base64"，直接把 base64 写进 payload。"""
+    到达本函数时 source_type 已恒为 "base64"——**这不是数据模型的性质，而是上游的
+    保证**：Phase 3b 起图片在入口被外部化成 ``blob:<sha>`` ref，由
+    ``core.loop.llm_gateway.stream_llm`` 在出网前（本函数之前的最后一个 async 关口）
+    调 ``rehydrate_content`` 还原回 base64（架构裁定 T0：本函数是同步的，
+    ``BlobStore.get`` 是 async，没法在这里 await）。取不到图时上游已把该 part 降级成
+    文本占位，故本函数无需处理 ref。**绕过 gateway 直调 adapter 的路径上此保证不成立**，
+    那条路上的 ref 会被当 base64 写进 payload。"""
     blocks: list[dict[str, Any]] = []
     for p in parts:
         if isinstance(p, dict):

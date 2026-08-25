@@ -139,7 +139,11 @@ class RecognizeIntentStep(Step):
             llm_request.prompt_token_estimate = request_prompt_estimate(
                 ctx.llm.tokenizer, llm_request, _guard, None)
             apply_dynamic_max_tokens(ctx, llm_request, _guard)
-            async for chunk in stream_llm(ctx.llm, llm_request):
+            async for chunk in stream_llm(
+                ctx.llm, llm_request,
+                blob_store=getattr(ctx, "blob_store", None),
+                provider_ctx=getattr(ctx, "provider_ctx", None),
+            ):
                 if chunk.kind == "tool_call" and chunk.tool_call:
                     tool_name = chunk.tool_call.name
                     tool_args = chunk.tool_call.arguments

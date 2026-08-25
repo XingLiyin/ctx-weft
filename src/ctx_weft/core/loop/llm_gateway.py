@@ -40,14 +40,16 @@ adapter 不应重复实现以上不变式——已在 core 层集中保证。
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import random
 from collections.abc import AsyncIterator
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
+from ctx_weft.core.content import rehydrate_content
 from ctx_weft.core.events.types import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.utils import (
@@ -375,10 +377,27 @@ def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
 
 
 async def stream_llm(
-    llm: "LLMClient", request: "LLMRequest", *, stream: bool = True
+    llm: "LLMClient", request: "LLMRequest", *, stream: bool = True,
+    blob_store: "Any" = None, provider_ctx: "Any" = None,
 ) -> AsyncIterator["LLMChunk"]:
-    """发送前合法化 ``request.messages``，再流式转发 ``llm.complete`` 的 chunk。"""
+    """发送前合法化 ``request.messages``、把 blob ref 还原成 base64，再流式转发 chunk。
+
+    rehydrate 落在这里而非 adapter（架构裁定 T0）：adapter 的序列化链
+    （``_build_payload`` / ``_serialize_messages`` / ``_parts_to_blocks``）全是同步
+    函数，而 ``BlobStore.get`` 是 async。本函数是出网前最后一个 async 关口，一处
+    覆盖三家 adapter。
+
+    ``blob_store`` / ``provider_ctx`` 均**带默认值 None**：不传时整段 rehydrate 不
+    执行，既有调用方与既有测试行为逐字节不变。刻意用显式参数而不是模块级单例——
+    blob store 是 per-runtime 依赖，藏进全局状态会让测试互相污染。
+    """
     request.messages = legalize_messages(request.messages)
+    if blob_store is not None:
+        request.messages = [
+            dataclasses.replace(m, content=await rehydrate_content(
+                m.content, blob_store=blob_store, ctx=provider_ctx))
+            for m in request.messages
+        ]
     async for chunk in llm.complete(request, stream=stream):
         yield chunk
 
@@ -473,7 +492,11 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
     while True:
         yielded_anything = False
         try:
-            async for chunk in stream_llm(ctx.llm, request):
+            async for chunk in stream_llm(
+                ctx.llm, request,
+                blob_store=getattr(ctx, "blob_store", None),
+                provider_ctx=getattr(ctx, "provider_ctx", None),
+            ):
                 yielded_anything = True
                 yield chunk
             return  # success

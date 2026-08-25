@@ -1771,6 +1771,9 @@ class CtxWeftRuntime:
             hitl_manager=self.hitl_manager,
             pause_token=pause_token,
             config=self._config,
+            # 出网前 rehydrate ref→base64 用（Phase 3b）；未注册时是 NullBlobStore，
+            # rehydrate_content 据其 can_externalize=False 原样返回、零开销。
+            blob_store=self.providers.get_blob_store(),
         )
 
     @staticmethod
