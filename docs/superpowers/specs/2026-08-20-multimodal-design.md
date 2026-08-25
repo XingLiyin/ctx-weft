@@ -106,7 +106,7 @@ providers/llm/anthropic.py:343,361,377 · openai.py:381,398,405   ★★ 出网�
 > **不抛异常**——默认 `validate=False` 会静默跳过非字母表字符，解出一串垃圾字节：
 >
 > ```
-> base64.b64decode('blob:d4735e3a265e16ee')                -> b'nZw÷åí...'  # 垃圾，不报错
+> base64.b64decode('blob:d4735e3a265e16ee')                -> b'nZ\x1bw\x8e\xf7\xe5\xed\xda\xdb\xae^\xd7\xa7\x9e'   # 垃圾字节，不报错
 > base64.b64decode('blob:d4735e3a265e16ee', validate=True) -> binascii.Error
 > ```
 >
