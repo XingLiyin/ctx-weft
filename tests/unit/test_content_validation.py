@@ -130,3 +130,43 @@ async def test_run_single_task_rejects_image_before_persisting_anything():
     assert memory._events == [], (
         "校验必须在任何持久化动作之前拒绝——memory 中不应有任何记录"
     )
+
+
+# ── 纯文本行为逐字节不变：start_session 不得因新增校验而提前解析 LLM ────────────
+#
+# 改动前 start_session 从不调用 _resolve_llm——LLM 解析完全推迟到任务真正执行时
+# （_make_task_runner → _SessionTaskRunner）才异步发生。若纯文本路径也提前解析，
+# "解析不出 LLM" 这件事会从"任务执行时才失败"变成"start_session 里同步失败"，
+# 这是本 Phase 明令禁止的行为变化（纯文本逐字节不变）。这条测试锁死：没有注册
+# 任何 LLM provider、也没有 llm= fallback 时，纯文本 start_session 仍应正常返回
+# RunHandle，而不是同步抛 RuntimeError("No LLM available...")。
+
+
+@pytest.mark.asyncio
+async def test_start_session_plain_text_does_not_eagerly_resolve_llm():
+    from ctx_weft.core.runtime import SessionStartParams
+    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider,
+        make_echo_template,
+        make_runtime,
+    )
+
+    templates = InlineAgentTemplateProvider()
+    templates.register(make_echo_template())
+    # 故意不传 llm=、不 register_llm_provider——_resolve_llm 此刻必然抛
+    # RuntimeError("No LLM available...")。纯文本 start_session 不该触发它。
+    runtime = make_runtime(agent_provider=templates)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+
+    handle = await runtime.start_session(
+        SessionStartParams.create(
+            template_id="agent:tpl_echo",
+            user_prompt="纯文本，没有图片",
+            context_limit=100_000,
+        )
+    )
+    assert handle is not None, (
+        "纯文本 start_session 应像改动前一样正常返回 RunHandle——"
+        "LLM 解析失败应推迟到任务执行时才发生，不应被新增校验提前触发"
+    )

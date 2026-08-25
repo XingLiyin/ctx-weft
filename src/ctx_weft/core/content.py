@@ -31,6 +31,7 @@ __all__ = [
     "content_from_jsonable",
     "redact_content_for_event",
     "validate_content",
+    "content_has_image",
 ]
 
 
@@ -41,6 +42,19 @@ def _is_text_part(part: Any) -> bool:
     鸭子类型对象。（已知局限见 spec §13 的 dict-shaped part 隐患。）
     """
     return hasattr(part, "text")
+
+
+def content_has_image(content: "str | list[ContentPart] | None") -> bool:
+    """内容里是否含至少一个非文本（图片）part。
+
+    归一层里判断「是否含图」的唯一入口——调用方（如 runtime.py 决定是否需要提前
+    解析 LLM 客户端）不该自己写 isinstance/hasattr 分支散布内容形态知识
+    （spec §3①）。判据与 validate_content / _is_text_part 一致：str / None / 空
+    list / 全 TextPart 均返回 False。
+    """
+    if not content or isinstance(content, str):
+        return False
+    return any(not _is_text_part(p) for p in content)
 
 
 def content_with_prefix(

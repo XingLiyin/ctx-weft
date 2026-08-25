@@ -744,15 +744,22 @@ class CtxWeftRuntime:
                                   session_id=<id> → new session with that host-provided ID).
         params.resume is True  → resume existing session (root_agent_id recovered from events).
         """
-        from ctx_weft.core.content import validate_content
+        from ctx_weft.core.content import content_has_image, validate_content
 
         memory = self.providers.get_memory()
         # 入口即拒、不落库：sm.create_session / sm.resume_session 会立即持久化
         # （instantiate_agent + SESSION_CREATED/RESUMED 事件），所以校验必须在它们
-        # 之前。_resolve_llm 是纯查表（provider.get_client 只查注册表拼 client 对象，
-        # 无副作用，已读代码确认），提前调用一次、稍后正常派发路径再次调用是安全的。
-        validate_content(params.user_prompt, llm=self._resolve_llm(
-            params.llm_account, params.llm_model))
+        # 之前。但纯文本路径改动前从不调用 _resolve_llm（原本推迟到
+        # _make_task_runner → _SessionTaskRunner 才异步解析）——纯文本行为逐字节
+        # 不变是硬约束，哪怕 _resolve_llm 本身是无副作用的纯查表，也不能让「解析不出
+        # LLM」这件事从原本推迟到任务执行时失败，变成同步抢在 start_session 里失败。
+        # 所以只在内容真的含图时才提前解析并把 llm 传给 validate_content；纯文本走
+        # 原分支，只做格式校验（对纯文本恒早返回、不触碰 llm）。
+        if content_has_image(params.user_prompt):
+            validate_content(params.user_prompt, llm=self._resolve_llm(
+                params.llm_account, params.llm_model))
+        else:
+            validate_content(params.user_prompt)
         lm = LifecycleManager(template_lookup=self._template_lookup)
         sm = SessionManager(
             lifecycle_manager=lm,
