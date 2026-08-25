@@ -118,6 +118,28 @@ class MaxTurnsExceeded(CtxWeftError):
     code = "MAX_TURNS_EXCEEDED"
 
 
+# ── 入口内容校验 ───────────────────────────────────────────────────────────────
+
+
+class InvalidContentError(CtxWeftError):
+    """入口内容格式非法：未知 media_type / base64 畸形 / 单图超限。
+
+    入口即拒，不落库——比让畸形内容流到 provider 侧再 400 更早、更可诊断。
+    """
+
+    code = "INVALID_CONTENT"
+
+
+class VisionNotSupportedError(CtxWeftError):
+    """当前模型未声明视觉能力，拒绝图片输入（spec §6.7 严格默认）。
+
+    未在 ModelConfig 上显式 supports_vision=True 的模型一律视为无视觉能力。
+    宿主若确认该模型支持图片，请显式配置。
+    """
+
+    code = "VISION_NOT_SUPPORTED"
+
+
 # ── Loop 控制流 ────────────────────────────────────────────────────────────────
 
 

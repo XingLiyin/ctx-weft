@@ -9,10 +9,13 @@ N 处替换」的关键（spec 2026-08-20-multimodal-design §3①）。
 
 from __future__ import annotations
 
+import base64
+import binascii
 import dataclasses
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ctx_weft.core.errors import InvalidContentError, VisionNotSupportedError
 from ctx_weft.core.utils import content_to_text
 
 if TYPE_CHECKING:
@@ -27,6 +30,7 @@ __all__ = [
     "content_to_jsonable",
     "content_from_jsonable",
     "redact_content_for_event",
+    "validate_content",
 ]
 
 
@@ -163,3 +167,59 @@ def redact_content_for_event(content: "str | list[ContentPart] | None") -> str:
                 f"{src}:{data[:_REDACT_DATA_PREVIEW]}…]"
             )
     return "".join(parts)
+
+
+# ── 入口校验 ───────────────────────────────────────────────────────────────
+
+# Anthropic 与 OpenAI 都接受的交集。扩这个集合前请先确认两家都支持。
+ALLOWED_IMAGE_MEDIA_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+})
+
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024      # Anthropic 单图约 5MB 上限
+
+
+def validate_content(
+    content: "str | list[ContentPart] | None", *, llm: object | None = None
+) -> None:
+    """入口内容校验。通过返回 None，否则抛。
+
+    只作用于 ImagePart——纯文本（str / 全 TextPart / None / 空）零影响、恒通过。
+
+    llm 非 None 且内容含图时，额外执行视觉能力门控：
+    ``getattr(llm, "supports_vision", False)`` 必须为真。**未声明即视为无视觉能力**
+    （严格默认，spec §6.7）。拿不到 client 的调用点可不传 llm，只做格式校验。
+
+    刻意**不**校验 token 总量——单条消息塞太多图由装配期 ContextOverflowError
+    兜底（spec §6.1 / 子设计 §3）。
+    """
+    if not content or isinstance(content, str):
+        return
+    images = [p for p in content if not _is_text_part(p)]
+    if not images:
+        return
+
+    if llm is not None and not getattr(llm, "supports_vision", False):
+        raise VisionNotSupportedError(
+            "当前模型未声明视觉能力（supports_vision），拒绝图片输入。"
+            "若该模型确实支持图片，请在 ModelConfig 上显式设置 supports_vision=True。"
+        )
+
+    for img in images:
+        media_type = getattr(img, "media_type", "") or ""
+        if media_type not in ALLOWED_IMAGE_MEDIA_TYPES:
+            raise InvalidContentError(
+                f"不支持的图片类型 {media_type!r}；"
+                f"允许：{sorted(ALLOWED_IMAGE_MEDIA_TYPES)}"
+            )
+        if getattr(img, "source_type", "base64") != "base64":
+            continue        # url / ref 形态不在本 Phase 校验范围
+        try:
+            raw = base64.b64decode(getattr(img, "data", "") or "", validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise InvalidContentError(f"图片 base64 解码失败：{exc}") from exc
+        if len(raw) > _MAX_IMAGE_BYTES:
+            raise InvalidContentError(
+                f"单张图片 {len(raw)} 字节超过上限 "
+                f"{_MAX_IMAGE_BYTES}（5 MiB）"
+            )

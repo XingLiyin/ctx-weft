@@ -658,11 +658,14 @@ class CtxWeftRuntime:
         """Phase 1 compat: run a single task end-to-end and await completion."""
         import dataclasses as _dc
 
-        from ctx_weft.core.content import content_to_text
+        from ctx_weft.core.content import content_to_text, validate_content
 
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
         llm = self._resolve_llm(llm_account, llm_model)
+        # 入口即拒、不落库：格式/视觉门控须在任何持久化（Session/Task/事件）之前完成
+        # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全。
+        validate_content(user_prompt, llm=llm)
         lm = LifecycleManager(template_lookup=self._template_lookup)
 
         agent, template = await lm.instantiate_agent(
@@ -741,7 +744,15 @@ class CtxWeftRuntime:
                                   session_id=<id> → new session with that host-provided ID).
         params.resume is True  → resume existing session (root_agent_id recovered from events).
         """
+        from ctx_weft.core.content import validate_content
+
         memory = self.providers.get_memory()
+        # 入口即拒、不落库：sm.create_session / sm.resume_session 会立即持久化
+        # （instantiate_agent + SESSION_CREATED/RESUMED 事件），所以校验必须在它们
+        # 之前。_resolve_llm 是纯查表（provider.get_client 只查注册表拼 client 对象，
+        # 无副作用，已读代码确认），提前调用一次、稍后正常派发路径再次调用是安全的。
+        validate_content(params.user_prompt, llm=self._resolve_llm(
+            params.llm_account, params.llm_model))
         lm = LifecycleManager(template_lookup=self._template_lookup)
         sm = SessionManager(
             lifecycle_manager=lm,

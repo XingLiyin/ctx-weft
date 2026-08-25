@@ -73,7 +73,7 @@ async def test_run_single_task_root_task_description_is_text_not_truncated_parts
         SimpleNamespace(
             get_client=lambda account=None, model=None: _FixedModelClient(
                 MockLLMAdapter(responses=[]), model or "mock-model", 128_000, 8_192,
-                account=account or "acct-main",
+                account=account or "acct-main", supports_vision=True,
             ),
         )
     )
