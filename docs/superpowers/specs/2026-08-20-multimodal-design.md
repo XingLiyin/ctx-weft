@@ -535,7 +535,20 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 
 ## 13. 未决项
 
-**Phase 3a 终审复审遗留（2026-08-25 裁定，移交 Phase 3b）：**
+**Phase 3a 终审复审遗留（2026-08-25 裁定）：**
+
+> **已兑现（2026-08-25，commit `06a2795`）**：下述第一条「dict 形态纯文本会翻转
+> `start_session` 的失败类型」已修复，**且刻意未改被冻结的判据**。修法是调整顺序 +
+> 惰性解析：`validate_content` 改为「格式校验先行 → 才轮到视觉门控」，并新增
+> `llm_resolver` 惰性参数；`start_session` 改传 resolver、不再用 `content_has_image`
+> 做闸。三条路径现均正确：纯文本早返回（resolver 不被调用）／dict 内容报
+> `InvalidContentError`（resolver 不被调用）／合法图片才解析并门控。
+> 顺带修掉一个同源缺陷：原实现**先门控后校验格式**，导致畸形内容被报成
+> `VisionNotSupportedError`、掩盖真正的问题。
+> 守卫：`tests/unit/test_content_validation.py`（32 passed，含两条 resolver 计数断言）。
+> **判据本身（`not hasattr(p, "text")`）仍冻结**——若 Phase 3b 要让归一层认识 dict，
+> 仍须同时修 `core/utils.py` 的 `content_to_text` / `image_part_count`。
+
 
 - **dict 形态纯文本会翻转 `start_session` 的失败类型。** I3 选定方案 (B)（入口只接受
   dataclass 形态 part）后，`content_has_image([{"type":"text","text":"hello"}])` 仍返回
