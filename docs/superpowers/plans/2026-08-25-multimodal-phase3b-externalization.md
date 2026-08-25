@@ -182,8 +182,18 @@ async def normalize_content(content, *, blob_store, ctx):
         return content
     if not blob_store.can_externalize:
         return content                     # 原样返回，零改动
-    ...
+    out: list[ContentPart] = []
+    for part in content:
+        if _is_text_part(part) or getattr(part, "source_type", "base64") != "base64":
+            out.append(part)               # 文本 / url / 已是 ref → 原样，不重复外部化
+            continue
+        raw = base64.b64decode(getattr(part, "data", "") or "", validate=True)
+        ref = await blob_store.put(raw, getattr(part, "media_type", ""), ctx)
+        out.append(dataclasses.replace(part, data=ref, source_type="ref"))
+    return out
 ```
+
+**注意 `b64decode` 这里不再需要 try/except**——`validate_content` 已在本函数之前跑过（入口顺序见下），畸形 base64 到不了这里。若你认为仍需防御，**先说明什么路径能绕过 `validate_content` 到达此处**，再加。
 
 **逐条要求：**
 - 只处理 `source_type == "base64"` 的 `ImagePart`；`url` / `ref` 原样保留
