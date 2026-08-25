@@ -62,6 +62,34 @@ def test_oversized_image_rejected():
     assert "5" in str(ei.value), "错误文案应报出上限，便于宿主自查"
 
 
+# ── M8：media_type 归一（大小写/参数/image-jpg 别名）──────────────────────────
+
+def test_media_type_uppercase_accepted():
+    validate_content([ImagePart(data=_PNG, media_type="IMAGE/PNG")])
+
+
+def test_media_type_with_params_accepted():
+    validate_content([ImagePart(data=_PNG, media_type="image/jpeg; charset=binary")])
+
+
+def test_media_type_jpg_alias_accepted():
+    validate_content([ImagePart(data=_PNG, media_type="image/jpg")])
+
+
+def test_media_type_still_rejects_unsupported_after_normalization():
+    with pytest.raises(InvalidContentError):
+        validate_content([ImagePart(data=_PNG, media_type="IMAGE/TIFF")])
+
+
+# ── M5：非 base64 source_type 应 raise，不再静默 continue 跳过校验 ─────────────
+
+def test_non_base64_source_type_raises_not_silently_skipped():
+    """Phase 3a 恒 base64（constraint 2），本分支今日不可达；但原 `continue` 会让
+    Phase 3b 引入 ref/url 形态后静默跳过尺寸/内容校验。改成 raise，强制显式处理。"""
+    with pytest.raises(InvalidContentError):
+        validate_content([ImagePart(data=_PNG, media_type="image/png", source_type="url")])
+
+
 # ── 视觉门控 ─────────────────────────────────────────────────────────────
 
 def test_image_rejected_when_model_lacks_vision():
@@ -197,3 +225,39 @@ async def test_start_session_plain_text_does_not_eagerly_resolve_llm():
         "纯文本 start_session 应像改动前一样正常返回 RunHandle——"
         "LLM 解析失败应推迟到任务执行时才发生，不应被新增校验提前触发"
     )
+
+
+# ── I3（评审 2026-08-24 fix wave，选项 B）：dict 形态 part 入口硬拒绝 ──────────
+#
+# _is_text_part 用 `hasattr(part, "text")` 判据（spec §13 冻结，Phase 3a 不得更改）。
+# dict 永远不满足 hasattr，故 dict 形态的 part——即便是纯文本 dict
+# {"type":"text","text":...}——也会被误判成"非文本"（图片）。评审给出两个修法选项：
+# (A) 让归一层认识 Mapping；(B) 保持现状但钉住这个限制、更新 spec。这里选 (B)：
+# _is_text_part 与 utils.content_to_text / image_part_count 共享同一判据字面量
+# （content.py 顶部 docstring 明确要求两者一致），content_to_text 还被
+# test_content_module.py::test_content_to_text_reexported 钉死为 utils 的同一个
+# 对象——只在 content.py 本地扩展 Mapping 支持会让这条"一致性"断言出现分叉：
+# validate_content/content_has_image 认得 dict-text，utils.content_to_text /
+# image_part_count 仍不认得，两条路径对同一份 dict 内容产出不同判断。这个新分叉
+# 比现状的"两处对称地不认识 dict"更难追踪，故选 (B)：不改判据本身，只把限制钉死
+# 成测试 + 文档（spec §13），要求宿主在 ingest 前把 dict 形态 rehydrate 成
+# ContentPart 对象。
+#
+# 下面两条测试锁死这个已知限制的具体表现——若将来实现选项 (A)（连带把 utils.py
+# 一并改成 Mapping-aware），这两条测试需要同步更新为新的、正确的行为。
+
+
+def test_dict_text_part_is_misclassified_as_image_known_limitation():
+    """纯文本 dict part 被 content_has_image 误判为「含图」——已知限制（选项 B），
+    非本 Phase 修复范围。真正后果见下一条：这会让 start_session 提前解析 LLM
+    （S2 修复要防的行为），以及被 validate_content 硬拒绝。"""
+    assert content_has_image([{"type": "text", "text": "hello"}]) is True
+
+
+def test_dict_text_part_rejected_by_validate_content_known_limitation():
+    """纯文本 dict part 被 validate_content 当成「无媒体类型的图片」硬拒绝——
+    已知限制（选项 B）。宿主必须在 ingest 前把 dict 形态 rehydrate 成
+    ContentPart 对象（TextPart/ImagePart），不能直接喂 dict-shaped part 进入口。"""
+    with pytest.raises(InvalidContentError) as ei:
+        validate_content([{"type": "text", "text": "hello"}])
+    assert "''" in str(ei.value)  # media_type 取不到值（dict 无 .media_type 属性），报出空字符串类型

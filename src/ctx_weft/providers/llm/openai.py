@@ -446,7 +446,11 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
                     "image_url": {"url": f"data:{media_type};base64,{data}"},
                 })
             else:
-                text = p.get("text", "")
+                # I1: p.get("text") 可能显式为 None（如 JSON 往返的畸形/容忍输入）——
+                # 原 `if text:` 对 None 是容忍的（跳过该 part），`.strip()` 收紧后若不
+                # 兜底会对 None 直接 AttributeError。`or ""` 把 None/缺失都归一成空串，
+                # 再走同一条「纯空白同属 400」判断，恢复原容忍语义。
+                text = p.get("text") or ""
                 if text.strip():  # 纯空白块与空块同属 provider 400 的一类（spec §13）
                     blocks.append({"type": "text", "text": text})
         elif getattr(p, "type", None) == "image":
@@ -455,7 +459,9 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
                 "image_url": {"url": f"data:{p.media_type};base64,{p.data}"},
             })
         else:
-            text = getattr(p, "text", str(p))
+            # I1: 同上对 None 兜底；注意不能改成 `or str(p)`——那会把无 .text 属性的
+            # 对象整个 repr 当文本泄漏进发给模型的文本（Phase 2 修过的同类泄漏）。
+            text = getattr(p, "text", None) or ""
             if text.strip():  # 同上：纯空白块与空块同属 provider 400 的一类（spec §13）
                 blocks.append({"type": "text", "text": text})
     return blocks

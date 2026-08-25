@@ -191,3 +191,67 @@ def test_anthropic_meaningful_text_with_leading_space_preserved():
     out = anth([LLMMessage(role="user", content=[TextPart(text="  hi  "), _img()])])
     texts = [b["text"] for b in out[0]["content"] if b.get("type") == "text"]
     assert texts == ["  hi  "], "有实义的文本必须原样保留，含首尾空白"
+
+
+# ── I1（评审 2026-08-24 fix wave）：`.strip()` 收紧对 text=None 不再容忍 ────────
+#
+# 原 `if text:` 对 text=None 是容忍的（跳过该 part）；I1 之前的 `.strip()` 收紧对
+# None 直接 AttributeError——两家 adapter 都显式支持 dict 形态 part（这个分支就是
+# 为它存在的），spec §13 已点名 JSON 往返的 memory provider 是这类输入的现实来源。
+
+
+def test_anthropic_dict_part_with_none_text_does_not_raise():
+    """dict part 的 text=None（如 JSON 往返产出的畸形/容忍输入）不得让 adapter 内部
+    抛未捕获的 AttributeError——应像原 `if text:` 语义一样跳过该 part。"""
+    out = anth([LLMMessage(role="user", content=[{"type": "text", "text": None}])])
+    assert out[0]["content"] == [], "text=None 的 part 应被跳过，不产出任何 block"
+
+
+def test_openai_dict_part_with_none_text_does_not_raise():
+    out = oai("", [LLMMessage(role="user", content=[{"type": "text", "text": None}])])
+    assert out[0]["content"] == [], "text=None 的 part 应被跳过，不产出任何 block"
+
+
+def test_anthropic_dataclass_part_without_text_attr_does_not_leak_repr():
+    """dataclass 分支的兜底不能改成 `or str(p)`——那会把无 .text 属性的对象整个 repr
+    当文本泄漏进发给模型的文本（Phase 2 修过的同类泄漏）。用一个没有 .text 属性、
+    也不是 ImagePart 的裸对象验证：不抛，且不产出带 repr 内容的 text block。"""
+    class _Weird:
+        type = "something_else"
+
+    out = anth([LLMMessage(role="user", content=[_Weird()])])
+    for block in out[0]["content"]:
+        if block.get("type") == "text":
+            assert "_Weird" not in block["text"] and "object at 0x" not in block["text"]
+
+
+# ── I2（评审 2026-08-24 fix wave）：纯空白 tool result 的 str/parts 形态需一致 ──
+#
+# 修复前：tool + parts [TextPart("   ")] → content: []（Anthropic 大概率因空数组
+# 400）；tool + str "   " → content: "   "（同一份"空白工具输出"两种形态产出不一致
+# 的 wire）。查证：Anthropic 对 tool_result.content 为空字符串/空数组同样拒绝
+# （与其对纯空/纯空白 text block 的拒绝同源，"text content blocks must be
+# non-empty" 系列报告一致），故不能兜底成 "" 或 []，必须是非空占位 block。
+
+
+def test_anthropic_tool_result_whitespace_parts_not_empty_list():
+    out = anth([LLMMessage(role="tool", content=[TextPart(text="   ")], tool_call_id="t1")])
+    tr = out[0]["content"][0]
+    assert tr == {
+        "type": "tool_result", "tool_use_id": "t1",
+        "content": [{"type": "text", "text": "(empty)"}],
+    }, "纯空白 parts 形态的 tool result 不得产出空 content 列表"
+
+
+def test_anthropic_tool_result_whitespace_str_matches_parts_form():
+    """str 形态与 parts 形态的纯空白工具输出必须产出一致的占位内容——不是各自兜底
+    出不同的 wire 形态。"""
+    out_str = anth([LLMMessage(role="tool", content="   ", tool_call_id="t1")])
+    out_parts = anth([LLMMessage(role="tool", content=[TextPart(text="   ")], tool_call_id="t1")])
+    assert out_str[0]["content"][0]["content"] == out_parts[0]["content"][0]["content"]
+
+
+def test_anthropic_tool_result_nonblank_str_unchanged():
+    """非空白 str 工具结果的 wire 形态必须逐字节不变（纯文本行为不受 I2 影响）。"""
+    out = anth([LLMMessage(role="tool", content="result", tool_call_id="tc1")])
+    assert out[0]["content"][0]["content"] == "result"

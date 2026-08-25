@@ -32,6 +32,11 @@ _ANTHROPIC_VERSION = "2023-06-01"
 _NON_RETRIABLE_CODES = frozenset({400, 401, 403, 404})
 _RETRIABLE_CODES     = frozenset({429, 500, 502, 503, 504})
 
+# I2: 空白/空 tool_result 的占位内容——查证 Anthropic 对 tool_result.content 为空字符串
+# / 空数组同样 400（与其对纯空/纯空白 text block 的拒绝同源），故不能像 assistant 分支
+# 那样兜底成 "" 或 []，必须是非空的合法 block。
+_EMPTY_TOOL_RESULT_CONTENT: list[dict[str, str]] = [{"type": "text", "text": "(empty)"}]
+
 
 class AnthropicAdapter(LLMClient):
     """Async Anthropic Messages API adapter."""
@@ -365,8 +370,18 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
             tool_results: list[dict] = []
             while i < len(messages) and messages[i].role == "tool":
                 tm = messages[i]
-                content = (tm.content if isinstance(tm.content, str)
-                           else _parts_to_blocks(tm.content))
+                # I2: parts 形态经 _parts_to_blocks 会把纯空白/空 TextPart 滤掉（同 I1），
+                # 若唯一的 part 就是空白文本，结果是 `content: []`——Anthropic 大概率因此
+                # 400（已查证：tool_result.content 为空字符串同样被拒，"text content blocks
+                # must be non-empty" 系列报告一致；见报告 I2 小节）。str 形态则原样透传
+                # "   "，同一份"空白工具输出"两种形态因此产出不一致的 wire。这里让两条路径
+                # 收敛到同一个占位文本块，而不是空字符串/空列表——占位块保证非空、可被
+                # provider 接受，且不改变非空白文本的既有行为（正常文本 str/parts 均不受影响）。
+                if isinstance(tm.content, str):
+                    content: Any = tm.content if tm.content.strip() else _EMPTY_TOOL_RESULT_CONTENT
+                else:
+                    blocks = _parts_to_blocks(tm.content)
+                    content = blocks if blocks else _EMPTY_TOOL_RESULT_CONTENT
                 if tm.tool_call_id:
                     tool_results.append({
                         "type": "tool_result",
@@ -424,7 +439,11 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
                     },
                 })
             else:
-                text = p.get("text", "")
+                # I1: p.get("text") 可能显式为 None（如 JSON 往返的畸形/容忍输入）——
+                # 原 `if text:` 对 None 是容忍的（跳过该 part），`.strip()` 收紧后若不
+                # 兜底会对 None 直接 AttributeError。`or ""` 把 None/缺失都归一成空串，
+                # 再走同一条「纯空白同属 400」判断，恢复原容忍语义。
+                text = p.get("text") or ""
                 if text.strip():  # 纯空白块与空块同属 provider 400 的一类（spec §13）
                     blocks.append({"type": "text", "text": text})
         elif getattr(p, "type", None) == "image":
@@ -437,7 +456,9 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
                 },
             })
         else:
-            text = getattr(p, "text", str(p))
+            # I1: 同上对 None 兜底；注意不能改成 `or str(p)`——那会把无 .text 属性的
+            # 对象整个 repr 当文本泄漏进发给模型的文本（Phase 2 修过的同类泄漏）。
+            text = getattr(p, "text", None) or ""
             if text.strip():  # 同上：纯空白块与空块同属 provider 400 的一类（spec §13）
                 blocks.append({"type": "text", "text": text})
     return blocks

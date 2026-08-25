@@ -193,6 +193,19 @@ ALLOWED_IMAGE_MEDIA_TYPES = frozenset({
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024      # Anthropic 单图约 5MB 上限
 
 
+def _normalize_media_type(media_type: str) -> str:
+    """M8：ALLOWED_IMAGE_MEDIA_TYPES 精确匹配过严——"IMAGE/PNG"（大小写）、
+    "image/jpeg; charset=..."（带参数）、"image/jpg"（常见但非标准别名）都会被误拒。
+    lookup 前统一归一：小写 + 丢弃 ``;`` 之后的参数部分 + 把 image/jpg 映射到
+    image/jpeg。只影响 validate_content 的匹配判定，不改写传给 provider 的原始
+    media_type（wire 序列化不在本函数职责内）。
+    """
+    mt = (media_type or "").strip().lower().split(";", 1)[0].strip()
+    if mt == "image/jpg":
+        mt = "image/jpeg"
+    return mt
+
+
 def validate_content(
     content: "str | list[ContentPart] | None", *, llm: object | None = None
 ) -> None:
@@ -220,14 +233,24 @@ def validate_content(
         )
 
     for img in images:
-        media_type = getattr(img, "media_type", "") or ""
+        raw_media_type = getattr(img, "media_type", "") or ""
+        media_type = _normalize_media_type(raw_media_type)
         if media_type not in ALLOWED_IMAGE_MEDIA_TYPES:
             raise InvalidContentError(
-                f"不支持的图片类型 {media_type!r}；"
+                f"不支持的图片类型 {raw_media_type!r}；"
                 f"允许：{sorted(ALLOWED_IMAGE_MEDIA_TYPES)}"
             )
-        if getattr(img, "source_type", "base64") != "base64":
-            continue        # url / ref 形态不在本 Phase 校验范围
+        source_type = getattr(img, "source_type", "base64")
+        if source_type != "base64":
+            # M5：当下（Phase 3a）constraint 2 恒成立——source_type 恒为 "base64"，
+            # 本分支今日不可达。原 `continue`（静默放行未经解码/尺寸校验的输入）在
+            # Phase 3b 引入 ref/url 形态后就是一个真实的洞：非 base64 的图片会跳过
+            # 全部尺寸/内容校验直接放行。改成 raise，强制 Phase 3b 到时必须显式
+            # 处理该分支（新增校验逻辑），而不是继续沉默跳过。
+            raise InvalidContentError(
+                f"不支持的图片来源类型 {source_type!r}；"
+                "当前仅支持 base64（url/ref 形态未实现校验）"
+            )
         try:
             raw = base64.b64decode(getattr(img, "data", "") or "", validate=True)
         except (binascii.Error, ValueError) as exc:
