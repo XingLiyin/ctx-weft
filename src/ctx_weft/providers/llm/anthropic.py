@@ -354,9 +354,9 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                     # OpenAI 那样回吐原始文本）；真畸形无法解包时保持原样，交 gateway 报错。
                     "input": unwrap_raw_arguments(tc.get("input", tc.get("arguments", {}))),
                 })
-            # content_blocks 为空 ⇔ m.content 无文本部分且无 tool_calls ⇔ 拍扁文本也是空串
-            # （str 分支：为空才不进 if；parts 分支：_parts_to_blocks 对每个 part 恰好产出一个
-            # block，为空即 parts 为空）——两种情况兜底值都是 ""，故直接用 "" 而非重算文本。
+            # content_blocks 为空 ⟺ m.content 既无实义文本（含纯空白）也无图片也无
+            # tool_calls ⟹ 此时兜底的 "" 与拍扁结果一致（_parts_to_blocks 会跳过空/纯空白
+            # 文本 part，不是「每个 part 恰好产出一个 block」——该不变式已不成立）。
             result.append({"role": "assistant", "content": content_blocks or ""})
             i += 1
         elif m.role == "tool":
@@ -423,7 +423,7 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
                 })
             else:
                 text = p.get("text", "")
-                if text:  # 空文本 part 会让 Anthropic 因空/纯空白文本块整条 400，直接跳过
+                if text.strip():  # 纯空白块与空块同属 provider 400 的一类（spec §13）
                     blocks.append({"type": "text", "text": text})
         elif getattr(p, "type", None) == "image":
             blocks.append({
@@ -436,7 +436,7 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
             })
         else:
             text = getattr(p, "text", str(p))
-            if text:  # 同上：空文本 part 跳过，不出网
+            if text.strip():  # 同上：纯空白块与空块同属 provider 400 的一类（spec §13）
                 blocks.append({"type": "text", "text": text})
     return blocks
 

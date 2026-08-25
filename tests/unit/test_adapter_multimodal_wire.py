@@ -165,3 +165,29 @@ def test_mock_multimodal_prompt_text_not_dropped():
         "多模态消息拍扁成空串会导致 prompt_tokens 归零——"
         "content_to_text 必须能取到文本 part"
     )
+
+
+# ── Q7: 纯空白文本块与空文本块同属一类——Anthropic 对两者都返回 400 ────────
+
+def test_anthropic_whitespace_text_part_next_to_image_dropped():
+    """纯空白文本块与空文本块同属一类：Anthropic 对两者都返回 400。"""
+    out = anth([LLMMessage(role="user", content=[TextPart(text="   "), _img()])])
+    blocks = out[0]["content"]
+    assert not any(b.get("type") == "text" and not b.get("text", "").strip()
+                   for b in blocks), "空白文本块不得出网"
+    assert any(b.get("type") == "image" for b in blocks), "图片必须保留"
+
+
+def test_openai_whitespace_text_part_next_to_image_dropped():
+    out = oai("", [LLMMessage(role="user", content=[TextPart(text="   "), _img()])])
+    parts = out[0]["content"]
+    assert not any(p.get("type") == "text" and not p.get("text", "").strip()
+                   for p in parts), "空白文本块不得出网"
+    assert any(p.get("type") == "image_url" for p in parts), "图片必须保留"
+
+
+def test_anthropic_meaningful_text_with_leading_space_preserved():
+    """收紧的是「纯空白」，不是「带空白」——有实义的文本一字不改。"""
+    out = anth([LLMMessage(role="user", content=[TextPart(text="  hi  "), _img()])])
+    texts = [b["text"] for b in out[0]["content"] if b.get("type") == "text"]
+    assert texts == ["  hi  "], "有实义的文本必须原样保留，含首尾空白"
