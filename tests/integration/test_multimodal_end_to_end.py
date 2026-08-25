@@ -76,6 +76,8 @@ async def test_multimodal_prompt_completes_one_actor_round_without_crashing() ->
     resolver.register(make_echo_template())
 
     llm = _RouterLLM()
+    llm.supports_vision = True  # instance-only：declares this mock's own capability,
+    # not a hardcoded class default — keeps the strict-default semantics intact.
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
@@ -157,6 +159,7 @@ async def _run_and_collect_context_assembled_tokens(user_prompt) -> int:
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = _FinishRouterLLM()
+    llm.supports_vision = True  # instance-only（见上一处同名注释的理由）
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
@@ -256,6 +259,7 @@ async def test_multimodal_prompt_reaches_wire_payload_as_image_block() -> None:
     resolver.register(make_echo_template())
 
     llm = _WireCapturingAnthropicAdapter()
+    llm.supports_vision = True  # instance-only（见上文同名注释的理由）
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
