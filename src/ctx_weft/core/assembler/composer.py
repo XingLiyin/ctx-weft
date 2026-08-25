@@ -102,7 +102,11 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ctx_weft.protocols import LLMMessage, LLMTool
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.core.utils import SUBTASKS_REVIEW_HEADING, content_to_text, image_tokens
-from ctx_weft.core.content import content_with_prefix, content_with_suffix
+from ctx_weft.core.content import (
+    content_with_prefix,
+    content_with_suffix,
+    downgrade_images_to_text,
+)
 from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
@@ -237,6 +241,12 @@ def _finish_result_section(request) -> str:
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s")
+
+# 携带真实图片的 compose purpose（用户裁定 D2）。只有 act 需要模型真看图：
+# compact 恰在上下文超预算时触发且产出按 spec §8 恒为纯文本；recognize_intent 是填元数据；
+# observe / background_observe 判任务成败靠 actor 产出与工具结果。其余 purpose 的图在
+# compose 出口降级成文本占位（见 compose 末尾）。
+_IMAGE_BEARING_PURPOSES = frozenset({"act"})
 
 
 _JSON_TYPE_ABBR = {
@@ -421,6 +431,17 @@ class DefaultComposer(Composer):
                    else _COMPACTION_INSTRUCTION)
             messages = self._build_facet_trailing_messages(blocks, request, cue)
             tools = []
+
+        # per-purpose 图片策略（用户裁定 D2）：只有 act 需要模型真看图，其余四个 purpose
+        # 一律把图降级成确定性文本占位。**必须在 token_count 之前**（架构裁定 T1）——
+        # 否则报出的 token 数含图、实际发出的 prompt 已无图，budget 与 compact 会基于
+        # 错误的数字判断。五条 purpose 分支都汇到这里，故只需这一处。
+        if request.purpose not in _IMAGE_BEARING_PURPOSES:
+            messages = [
+                m if (c := downgrade_images_to_text(m.content)) is m.content
+                else dataclasses.replace(m, content=c)
+                for m in messages
+            ]
 
         token_count = request.token_counter(system) + sum(
             request.token_counter(content_to_text(m.content)) + image_tokens(m.content)

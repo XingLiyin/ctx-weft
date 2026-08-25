@@ -35,6 +35,7 @@ __all__ = [
     "content_has_image",
     "normalize_content",
     "rehydrate_content",
+    "downgrade_images_to_text",
 ]
 
 
@@ -440,4 +441,66 @@ async def rehydrate_content(
             media_type=media_type or stored_media_type,
             source_type="base64",
         ))
+    return out
+
+
+# ── per-purpose 降级（Phase 3b Task 4）──────────────────────────────────────
+
+_IMAGE_PLACEHOLDER_TMPL = "[image {media_type}]"
+
+
+def _is_image_part(part: Any) -> bool:
+    """该 part 是不是图片。
+
+    dataclass 形态沿用被 spec §13 冻结的判据（``not hasattr(p,"text")``），dict 形态
+    **必须显式判 ``type``**：dict 上永远取不到 ``.text`` 属性，直接套冻结判据会把
+    ``{"type":"text","text":"hi"}`` 也当成图片、把纯文本换成 ``[image image]``——
+    那是实打实的内容损坏。判法与两家 adapter 的 ``_parts_to_blocks`` 一致。
+    """
+    if isinstance(part, dict):
+        return part.get("type") == "image"
+    return not _is_text_part(part)
+
+
+def downgrade_images_to_text(
+    content: "str | list[ContentPart] | None",
+) -> "str | list[ContentPart] | None":
+    """把图片 part 换成确定性文本占位 ``[image {media_type}]``；不改原对象。
+
+    用于 composer 的 per-purpose 策略（用户裁定 D2）：只有 ``act`` 需要模型真看图，
+    ``compact`` / ``observe`` / ``background_observe`` / ``recognize_intent`` 一律降级。
+    其中 compaction 恰在上下文超预算时触发，不降级就等于「在最贵的时刻多打一发最大的
+    请求」。
+
+    **换占位而不是直接删**：保留「这里曾有一张图」的信息，摘要器才写得出「用户提供了
+    一张图」而不是完全无感。
+
+    **占位文本必须逐字节确定性**（裁定 D2 的硬约束）：不得含 blob sha / 随机 id /
+    时间戳 / 跨调用计数器。各 purpose 发送不同的 tools 集合、tools 排在缓存前缀最前，
+    故各 purpose 之间本就不共享缓存条目；但占位每次不同会砸掉**该 purpose 自己**的
+    自动前缀缓存——而 compact 正是最需要命中缓存的那一刻。同一条消息内的多张图共用
+    相同占位，不加序号（无需区分它们）。
+
+    纯文本（``str`` / ``None`` / 空 / 全文本 part）**原样返回同一对象**，零开销、
+    对无图会话逐字节无影响。
+
+    占位一律产出 **dataclass ``TextPart``**，即便入参是 dict 形态的图片——刻意不
+    「dict 进 dict 出」：``core/utils`` 的 ``content_to_text`` / ``image_part_count``
+    是 dict-blind 的（spec §13 冻结判据），dict 形态的文本 part 会被渲染成空串、
+    且仍被计成一张图的 token。若这里回吐 dict 文本，占位文本对摘要器不可见（信息白留）、
+    token 也不会降下来（本任务的两个目的双双落空）。两家 adapter 的 ``_parts_to_blocks``
+    逐 part 判形态，混合列表照常工作。
+    """
+    if not content or isinstance(content, str):
+        return content
+    if not any(_is_image_part(p) for p in content):
+        return content
+    out: list["ContentPart"] = []
+    for part in content:
+        if not _is_image_part(part):
+            out.append(part)
+            continue
+        media_type = str(_part_field(part, "media_type", "") or "") or "image"
+        from ctx_weft.protocols import TextPart
+        out.append(TextPart(text=_IMAGE_PLACEHOLDER_TMPL.format(media_type=media_type)))
     return out
