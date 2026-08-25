@@ -81,6 +81,44 @@ providers/llm/anthropic.py:343,361,377 · openai.py:381,398,405   ★★ 出网�
 **③ ref 最晚 rehydrate。** core 全程只见 blob ref，只有 LLM adapter 拼 wire payload
 时才换回 base64。memory / 事件 / 装配链搬的都是几十字节字符串。
 
+> **订正 + 已兑现（Phase 3b Task 3，2026-08-25，架构裁定 T0）**：上面这句
+> 「**只有 LLM adapter 拼 wire payload 时才换回 base64**」**字面上做不到**，实现落点
+> 与之偏离一层，特此订正（原文保留以存上下文）。
+>
+> 核实结论：adapter 的整条序列化链——`_build_payload` / `_serialize_messages` /
+> `_parts_to_blocks`——**全是同步函数**，而 `BlobStore.get` 是 **async**，同步函数里
+> 没法 await。
+>
+> **裁定：rehydrate 落在 `core/loop/llm_gateway.py` 的 `stream_llm`**——出网前最后一个
+> async 关口、已在跑 `legalize_messages`，且**一处覆盖三家 adapter**（放 adapter 里要
+> 写三遍）。落点在 `legalize_messages` 之后、`llm.complete` 之前。
+>
+> 这偏离 §3③ 的字面（gateway 属 core），但**保住了它的实质**：core 的 memory / 事件 /
+> 装配链全程只见 ref，只有出网前那一瞬间内存里才存在 base64。
+>
+> **代价（已实测在生产路径上不成立）**：若将来出现绕过 gateway 直调 adapter 的路径，
+> 那条路上的 ref 不会被还原。Task 5 的端到端测试从**真实 wire payload** 断言
+> （`tests/integration/test_multimodal_end_to_end.py::`
+> `test_ref_externalized_in_memory_but_full_base64_on_the_wire`），已确认本仓真实
+> `start_session` 的两次 LLM 调用（`recognize_intent` + `act`）都经 `stream_llm`。
+>
+> **⚠️ 附带的静默损坏风险（Task 5 实测）**：`base64.b64decode("blob:<sha>")`
+> **不抛异常**——默认 `validate=False` 会静默跳过非字母表字符，解出一串垃圾字节：
+>
+> ```
+> base64.b64decode('blob:d4735e3a265e16ee')                -> b'nZw÷åí...'  # 垃圾，不报错
+> base64.b64decode('blob:d4735e3a265e16ee', validate=True) -> binascii.Error
+> ```
+>
+> 即：**ref 检测一旦失败，后果是「发出一堆垃圾图片字节」而不是报错**——静默损坏而非
+> 响亮失败。两个直接推论，务必保留：
+> 1. `_is_ref_part`（`core/content.py`）里那条「`data` 以 `blob:` 开头即判为 ref、
+>    **无视**声明的 `source_type`」的兜底，是**防静默损坏的安全护栏**，不是整洁性
+>    代码。该判据零假阳性：base64 字母表不含 `:`。
+> 2. 任何端到端断言都**必须校验「解码回原始字节」**，不能用「不以 `blob:` 开头」这种
+>    弱判据——后者杀不掉「还原出别的字节」这类损坏（Task 5 的 M2 变异体正是靠解码
+>    断言才被抓住的）。
+
 ## 4. 内容模型与归一层
 
 ### 4.1 `ImagePart` 扩一个 source_type
@@ -165,6 +203,57 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 未注册时的默认实现：`put` 原样退回 base64（`source_type` 保持 `"base64"`），`get`
 返回 `None`。**保证不接 blob store 的宿主行为完全不变**，也让 §10 的分阶段推进成立。
 
+> **订正（Phase 3b Task 2）**：`NullBlobStore.put` 实际是 `raise NotImplementedError`，
+> **不是**「原样退回 base64」——Phase 1 终审刻意如此，让接线错误立刻暴露，而不是静默
+> 产出一个假 ref。「行为完全不变」这个结论仍然成立，但成立的机制是
+> **调用方先探询 `can_externalize` 属性再决定是否 put**（见 §6.1 已兑现说明），
+> 而不是靠 put 返回原值。
+
+### 5.4 已兑现（Phase 3b Task 1，commit `490af28` + `2951d7c`）
+
+`FilesystemToolsProvider`（`providers/capability_filesystem/provider.py`）新增第四个
+契约实现 `BlobStore`（此前已实现 `ToolCapabilityProvider` / `SpillSink` /
+`SessionScopedCapabilityProvider`）。
+
+- **内容寻址**：`sha256(data).hexdigest()`，ref 形态 `blob:<sha>`。
+- **幂等**：`_write_blob_if_absent` —— `content_path.exists()` 即直接返回，不重写。
+- **落盘布局**：`<workspace>/blobs/<sha[:2]>/<sha[2:4]>/<sha>`，`media_type` 存在伴生
+  文件 `<sha>.meta`（两级目录分片，避免单目录文件数爆炸）。
+- **IO 走 `asyncio.to_thread`**，不阻塞事件循环。
+- **`media_type` 冲突取「先写入者胜」**：`put` 本就是「已存在则跳过」的幂等写，
+  `media_type` 沿用同一条规则最省心——不必新增分支决定「谁能覆盖谁」，也避免
+  「同一份数据的 media_type 取决于调用顺序」这种难复现的行为。
+- **`get` 恒不抛**（这条契约是 gateway rehydrate 的前提——rehydrate 在出网主路径上，
+  抛异常会掀掉整个 LLM 请求）。三条返回 `None` 的分支：workspace 未登记 /
+  ref 前缀不是 `blob:` / 内容文件不存在。`.meta` 缺失时 `media_type` 兜底为
+  `application/octet-stream`。
+- **安全发现（变异验证暴露）**：去掉「ref 前缀必须是 `blob:`」的检查后，
+  `http://example.com/x.png` 会被当作 sha 去拼路径，**Windows 的 `pathlib` 把它解释成
+  UNC 路径并真的发起了网络访问**（`WinError 64`）。这条前缀检查是**安全护栏**而非
+  整洁性代码，已记入测试 docstring。
+- 测试：`tests/unit/test_filesystem_blob_store.py`。
+
+**GC / 生命周期：本 Phase 只做「不删」（用户裁定 D3）。** blob 追加写、永不回收，
+清理责任留给宿主。§5.2 提到的 side index 与 `deregister_session` 挂钩**未实现**，
+本 Phase 不做任何 GC / 引用计数 / TTL。
+
+### 5.5 ⚠️ 宿主接线的隐式契约（Phase 3b Task 5 实测，最容易踩的一条）
+
+**接了真 BlobStore 的宿主，必须显式传 `SessionStartParams.session_id`，并在调用
+`start_session` 之前用 `register_session(session_id, workspace)` 预先登记 workspace。**
+
+原因链：`FilesystemToolsProvider.put` 通过 `workspace_for(ctx)` 定位落盘根目录，
+该映射由 `register_session` 建立；而 `session_id` 默认是在 `start_session` **内部**
+生成的——宿主不显式传，就没有机会提前登记。
+
+不这么做的后果：`put` 抛 `RuntimeError: no workspace registered for session ...`。
+它是在**入口归一层**抛的，会让 `start_session` 整个失败。
+
+这条契约此前**只在 `SessionStartParams` 的 docstring 里被暗示过**（「so the host can
+pre-register session-scoped resources, e.g. the filesystem provider's workspace」），
+没有任何文档把它和 BlobStore 串起来。Task 5 的端到端测试按简报字面写会直接
+`RuntimeError`，正是踩到了这一条。**这是「距离真正接线还差什么」的直接答案之一。**
+
 ## 6. 分层改动
 
 ### 6.1 入口签名放宽（`str` → `str | list[ContentPart]`）
@@ -205,6 +294,49 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 > "`start_session` 里同步失败"，这是本 Phase 明令禁止的行为变化（见 §13 新增条目）。
 > `validate_content` 因此只在**内容含图**时才需要 `llm` 参数（`content_has_image`
 > 判定，`content.py:47`），纯文本路径完全不触碰 LLM 解析。
+
+> **已兑现（Task 2，Phase 3b，2026-08-25，commit `5573272`）**：入口外部化落地为
+> `core/content.py` 的 `normalize_content(content, *, blob_store, ctx)`——把
+> `source_type == "base64"` 的 `ImagePart` 写进 BlobStore、换成
+> `ImagePart(data="blob:<sha>", source_type="ref")`；文本 / `url` / 已是 `ref` 的 part
+> 原样保留（不重复外部化）。**不改原对象**，返回新列表。
+>
+> **先探询 `can_externalize`，再决定——不 try/except（Phase 1 终审契约）。**
+> `BlobStore.can_externalize` 是新增的只读属性，基类默认 `True`，只有 `NullBlobStore`
+> 覆写为 `False`；`NullBlobStore.put` 的 `raise NotImplementedError` **保持不动**。
+> 若改成「调用 put 再捕获 NotImplementedError」，会把「响亮失败」降级成控制流——真正的
+> 接线错误（宿主注册了一个尚未实现 put 的 store）也会被静默吞掉。不能外部化时
+> `normalize_content` **原样返回同一对象**（`is` 相同），这是「不接 BlobStore 逐字节
+> 不变」这条硬约束的直接实现手段。
+>
+> **顺序：`validate_content` 严格先于 `normalize_content`。** 两个理由：
+> (a) 被拒的内容不该在 blob store 里留下垃圾——校验失败必须发生在任何 `put` 之前；
+> (b) `normalize_content` 里的 `base64.b64decode(..., validate=True)` **刻意不加
+> try/except**——validate 先行已把畸形 base64 拦成 `InvalidContentError`，此处再包一层
+> 只会造出一条永不执行、也永不被测试的分支；顺序若被后来者接反，这里抛出的
+> `binascii.Error` 正好是响亮的信号（变异验证实证：反转顺序后
+> `test_rejected_content_never_reaches_blob_store` 因 `binascii.Error` 转红）。
+>
+> 接线在两个入口：`start_session` 与 `run_single_task`，均为 **validate → normalize**。
+> `start_session` 在**能外部化时**把 `session_id` 提前定下并透传给 `create_session`
+> ——否则外部化所锚定的 session 与真正创建出来的 session 会是两个不同 id；不能外部化时
+> 整段是 no-op（不提前生成 id、不替换 params），行为逐字节不变。
+>
+> **M5 遗留已兑现**：`validate_content` 对 `source_type == "ref"` 的处理从 Phase 3a 的
+> 无差别 `raise` 改为——**跳过 base64 解码与单图尺寸校验**（那两项在 `put` 之前的那次
+> validate 里已经把过关，且此时 `data` 是 `blob:<sha>` 而非 base64，再解码必然失败），
+> 但**仍逐条校验 `media_type` 白名单与视觉门控**（ref 可能来自记录回放或宿主构造，
+> 不能假定必然合法）。`url` 形态维持 `raise`（本 Phase 不支持）。
+> 测试：`tests/unit/test_normalize_content.py`。
+>
+> **⚠️ 两层互相遮蔽的冗余守卫（已知，刻意保留）**：`start_session`
+> （`runtime.py:781` 附近）外层有一个 `if blob_store.can_externalize:`，
+> `normalize_content` 内部还有一个同样的守卫。`NullBlobStore` 时外层已经短路、
+> 内层根本不被调用，因此**任一单独删除都不可观测**——Task 2 的变异 C（删外层）与
+> Task 5 的变异 M3（删内层）双双存活，互为镜像实证，且已查明**不是测试薄弱**：
+> 真正承重的语义由「改判据源头」的变异（`NullBlobStore.can_externalize → True`）覆盖，
+> 那类变异会让端到端测试立刻转红。**裁定保留两层**（防御性、零成本）。
+> 写在这里是为了防止后来者发现「删掉其中一个没有任何测试转红」而误以为它是死代码。
 
 ### 6.2 持久化：事件与投影
 
@@ -326,6 +458,48 @@ def image_tokens(content: "str | list[ContentPart] | None") -> int:
   `{"type":"text","text":"[image unavailable]"}`，**不抛**
 - `llm_gateway.py` 不改：`_is_empty_content:125` / `_merge_message_content:172` /
   估算 `:281` 已 parts-aware
+
+> **订正（Phase 3b Task 3，2026-08-25）**：上面这组条目里有两条已被实现推翻，
+> 原文保留以存上下文：
+>
+> 1. 「`source_type=="ref"` **在此处**（adapter）rehydrate」——**订正为：rehydrate 落在
+>    `llm_gateway.stream_llm`**，理由见 §3③ 的架构裁定 T0（adapter 序列化链全是同步
+>    函数，`BlobStore.get` 是 async）。降级语义不变且已兑现：`get()` 返回 `None` 时换成
+>    文本 part `[image unavailable: <media_type>]`，**不抛**。
+> 2. 「`llm_gateway.py` 不改」——**订正为：改了**。`stream_llm` 新增两个**带默认值**的
+>    kwarg（`blob_store=None`、`provider_ctx=None`），在 `legalize_messages` 之后、
+>    `llm.complete` 之前对每条消息 `dataclasses.replace(m, content=await
+>    rehydrate_content(...))`。不传时整段不执行——既有调用方零影响。接线：
+>    `LoopContext.blob_store`（默认 `None`）由 `runtime._build_loop_ctx` 从
+>    `providers.get_blob_store()` 注入，两个调用方（`stream_llm_resilient` /
+>    `recognize_intent`）用 `getattr(ctx, "blob_store", None)` 取值——既有测试里大量
+>    ctx 桩不是真正的 `LoopContext`，没有这些字段。
+>
+> **两家 adapter 里「`source_type` 恒为 `base64`」的陈述同样已订正**（Task 3 已在
+> `anthropic.py` / `openai.py` 的 `_parts_to_blocks` docstring 里改掉，此处同步）：
+> 到达 `_parts_to_blocks` 时 `source_type` 确实恒为 `"base64"`，但这
+> **不再是数据模型的固有属性，而是来自上游 gateway 的保证**——Phase 3b 起图片在入口
+> 就被外部化成 ref，是 `stream_llm` 在出网前还原回 base64 的。
+> **绕过 gateway 直调 adapter 的路径会丢掉这个保证**，那条路上的 ref 会被当 base64
+> 写进 payload（且不会报错，见 §3③ 的 `b64decode` 静默损坏）。
+>
+> **`rehydrate_content` 的三条零开销短路**（都**原样返回同一对象**）：纯文本
+> （`str` / `None` / 空）、`can_externalize` 为假的 store、内容里根本没有 ref。
+> dict 形态的 part 也被正确处理（**dict 进 dict 出**）——`getattr(dict, "source_type",
+> "base64")` 在 dict 上取不到属性、会落回默认值 `"base64"`，于是 dict 形态的 ref 会被
+> 静默当 base64 塞进 wire payload。这是三种结局里最差的一种（不可观测的损坏 vs
+> 可观测的降级），故 rehydrate 路径专用的字段读取器 `_part_field` 是 dict-aware 的。
+> **被冻结的判据 `not hasattr(p, "text")` 未被改动**（`core/utils.py` 两处原封不动）。
+>
+> **⚠️ 已知的语义借用：`rehydrate_content` 用 `can_externalize`（一个「**写**」能力）
+> 来决定是否「**读**」。** 对当前仅有的两个实现是正确的（`NullBlobStore` 是唯一返回
+> `False` 的，而它的 `get` 恒返回 `None`），并且这正是保住「不接 BlobStore 时逐字节
+> 不变」的手段——若走 `get → None → 降级` 的路，不接 blob 的宿主会把 inline base64 图
+> 降级成 `[image unavailable]`，那就是行为变化。**但一个假想中的「只读 store」
+> （能 get、不能 put）会被这条短路误伤：它的图永远取不回来。** 已在代码里内联注明；
+> 若将来真的出现只读 store，须把判据换成一个独立的「可读」能力位，而不是删掉短路。
+>
+> 测试：`tests/unit/test_gateway_rehydrate.py`（14 测），变异验证 6 个变异体全部被杀死。
 
 #### provider 不对称由 adapter 吸收
 
@@ -506,6 +680,15 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 真 `BlobStore` 实现 + 入口 base64 → ref + adapter rehydrate + 能力门控。
 此阶段把内存与事件体积降下来，是 Phase 4 的前提。
 
+> **已兑现（2026-08-25）**：Phase 3 实际分两批落地。
+> **Phase 3a**（`c9fa1c6`）：防 400 护栏——`validate_content` 格式校验 + §6.7 视觉能力
+> 门控 + 两家 adapter 的空白文本块修复。
+> **Phase 3b**（`490af28` → `02fdfc6`）：真 `BlobStore` 实现（§5.4）+ 入口
+> `normalize_content` 外部化（§6.1）+ **gateway**（不是 adapter，见 §3③ 裁定 T0）
+> rehydrate + per-purpose 图片降级（§13 附表）。
+> 与原文的两处偏差：rehydrate 落点是 gateway 而非 adapter；§5.2 的 side index / GC
+> **未实现**（用户裁定 D3：本 Phase 只做「不删」）。
+
 **Phase 4 — 折叠与回放**（子设计全文）
 `core/media/` + L0.5 + `media:get_image`。
 
@@ -620,6 +803,17 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
     「compaction 是为了省 token」的目标相悖，且在图片本身就是超预算主因时可能
     无法收敛。Phase 3/4 落地前须决定：compaction 输入是否该在拍扁前先过 L0.5
     降级（§6.9），还是走独立的、真正拍扁图片的摘要输入路径。
+
+    > **已兑现（Task 4，Phase 3b，2026-08-25，commit `c00283d`）**：选了第三条路——
+    > **不改摘要输入路径，改 composer 的出口**。`compose` 在
+    > `return AssembledPrompt(...)` 之前、**`token_count` 计算之前**，对
+    > `purpose not in _IMAGE_BEARING_PURPOSES`（= `frozenset({"act"})`）的请求统一调
+    > `downgrade_images_to_text`，把 `ImagePart` 换成确定性文本占位
+    > `[image {media_type}]`。五条 purpose 分支都汇到这一个出口，故只需一处。
+    > 详见下方「§13 附：per-purpose 图片策略（Phase 3b 落地）」。
+    > 测试：`tests/unit/test_purpose_image_policy.py`（35 测）与
+    > `tests/integration/test_multimodal_end_to_end.py::
+    > test_compact_assembly_carries_no_image_while_act_still_does`。
   - **(b) 视觉能力门控未生效。** §6.7 的门控是 Phase 3 交付物，**当前没有任何东西
     阻止 image block 进入纯文本模型**的请求——纯文本模型收到 image block 大概率
     直接 400（或更差，静默忽略图片内容）。Phase 3 门控上线前，这是一个已知但
@@ -734,3 +928,113 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
   暴露的层不同。真正收敛（选项 A，含 `core/utils.py` 一并改成 Mapping-aware）
   留给 Phase 3b/4，届时若要做，须同步改 `_is_text_part` / `content_to_text` /
   `image_part_count` 三处，不能只改一处。
+
+
+---
+
+## §13 附：per-purpose 图片策略（Phase 3b Task 4 落地，用户裁定 D2）
+
+用户裁定原话：「observe 也不是很需要看图。除了 act 以外的步骤对图片没有需求」。
+
+**当前取值表**（`core/assembler/composer.py`，`_IMAGE_BEARING_PURPOSES = frozenset({"act"})`）：
+
+| compose purpose | 携带真实图片 | 理由 |
+|---|---|---|
+| `act` | ✅ 是 | 唯一需要模型真看图的步骤 |
+| `compact` | ❌ 降级 | 恰在超预算时触发；产出按 §8 恒为纯文本 |
+| `observe` | ❌ 降级 | 判任务成败靠 actor 产出与工具结果（**见下方功能回退风险**） |
+| `background_observe` | ❌ 降级 | 同上 |
+| `recognize_intent` | ❌ 降级 | 只是填元数据 |
+
+**若将来要让某个 purpose 重新看图，改这一处**：`composer.py` 的
+`_IMAGE_BEARING_PURPOSES` 集合加上该 purpose 名即可，别处无需改动——五条 purpose 分支
+都汇到 `compose` 末尾同一个出口。（例如要让 observe 看图：
+`frozenset({"act", "observe"})`。）
+
+**降级实现**：`core/content.py` 的 `downgrade_images_to_text` 把图片 part 换成
+`[image {media_type}]`。放在归一层而非 composer 内联，遵 §3① 单一归一层；纯文本
+（`str` / `None` / 空 / 全文本 part）**原样返回同一对象**。
+
+### 落点必须在 `token_count` 之前（架构裁定 T1）
+
+降级插在 `compose` 的 `token_count` 计算**之前**。若挪到之后，报出的 token 数含图、
+实际发出的 prompt 已无图，**budget 与 compact 会基于错误的数字判断**。
+两层测试各钉一次：
+`tests/unit/test_purpose_image_policy.py::test_token_count_excludes_image_tokens_for_downgraded_purposes`
+与端到端的
+`tests/integration/test_multimodal_end_to_end.py::test_compact_assembly_carries_no_image_while_act_still_does`
+（两处变异体「把降级挪到 token_count 之后」均被杀死）。
+
+**策略为什么不能放 gateway**：`LLMRequest` **没有 `purpose` 字段**（已核实），
+gateway 无从区分；composer 知道 purpose。这与 rehydrate 落 gateway 并不矛盾——
+rehydrate 是 purpose-无关的形态还原，降级是 purpose-相关的策略。
+
+### 降级占位必须逐字节确定性（用户裁定 D2 的附带硬约束）
+
+占位文本对同一张图**必须恒定**：`[image {media_type}]`，
+**不得含 blob sha / 随机 id / 时间戳 / 计数器**；同一条消息里多张图共用同一占位、
+**不加序号**。`rehydrate_content` 取不到图时的
+`[image unavailable: {media_type}]` 受同一条约束。
+
+理由（controller 核实、用户认可）：五种 purpose 各自发送**不同的 tools 集合**，而
+tools 排在缓存前缀最前面，所以各 purpose 之间本就从不共享缓存条目——降级伤不到别的
+purpose。但若占位文本每次不同，**该 purpose 自己的前缀每次都变**，会砸掉它自己的
+自动前缀缓存；而 compact 恰在上下文超预算时触发，正是最需要命中缓存的时刻。
+
+（核实附注：本仓当前**未启用** Anthropic 显式缓存——全仓无 `cache_control` /
+`anthropic-beta` 头，只有 DeepSeek 方言读 `prompt_cache_hit_tokens` 做统计。
+故此约束今日不影响行为，是为将来启用时的正确性兜底。变异「占位掺 sha」杀死 9 条测试。）
+
+### ⚠️ compact 的两套口径（设计意图，不是 bug）
+
+`_active_memory_tokens`（`core/loop/steps/compact.py:205`）读的是 **memory 记录**、
+**不经 composer**，因此 compact 的**折叠层级判断仍按「含图」口径**（memory 里图还在，
+每张按 `_IMAGE_PART_TOKENS = 1600` 计）；而 compact **自身发出去的 prompt 已不含图**
+（经上表降级）。
+
+**两套数字并存是设计意图**：折叠判断要反映「memory 里实际压着多少东西」（图还在那儿，
+Phase 4 的 L0.5 才会真正折走它），而 prompt 只需要文字。**明写在此以免后来者把它当
+bug「修」成一套口径**——统一到「不含图」会让折叠层级低估 memory 的真实体积，
+统一到「含图」会让 compact 自己的 prompt 白白带上图（正是本 Phase 刚消除的问题）。
+
+### ⚠️ 冻结判据对 dict 形态**文本** part 的误判（Task 4 实测）
+
+§13 上方已记「dict 形态 part 会被 `image_part_count` 全数计成图片」。Task 4 实测把它
+钉成逐字确凿的一对数字：
+
+```
+image_part_count([{"type": "text", "text": "hello world"}])  ->  1    # 被计成 1600 token
+content_to_text([{"type": "text", "text": "hello world"}])   ->  ''   # 摘要器完全看不见
+```
+
+即：**同一个 dict 形态的纯文本 part，在 token 估算里被当成图片多算 1600，在拍扁成
+文本时又被当成图片跳过、渲染成空串。** 两个盲点同源（同一判据
+`not hasattr(p, "text")`），方向相反，叠加起来是「既多算 token 又丢内容」。
+
+**判据仍冻结**（改它必须同时改 `core/content.py::_is_text_part` /
+`core/utils.py::content_to_text` / `core/utils.py::image_part_count` 三处，
+`test_content_module.py::test_content_to_text_reexported` 还把 `content_to_text` 钉死为
+同一对象引用）。此处只是把盲点写明。
+
+**这个盲点正是 Task 3 与 Task 4 在 dict 形态上刻意分歧的原因**，两者都是对的：
+
+- `rehydrate_content`（Task 3）：**dict 进 dict 出**——它只是把 ref 换回 base64，形态
+  不变，adapter 的 dict 分支照常工作。若改成「判不出形态就降级成占位」，会把**今天
+  工作正常的 dict 形态 base64 图片**也一并降级，对已接 BlobStore 的宿主构成新的能力回退。
+- `downgrade_images_to_text`（Task 4）：**dict 进、dataclass `TextPart` 出**——因为它
+  把图**转成文本**，若回吐 dict 文本，占位会被摘要器渲染成空串（信息白留）**且**仍被
+  计成 1600 token，本任务的两个目的双双落空。
+- 两者判 dict 形态是不是图片都走显式的 `part.get("type") == "image"`（与两家 adapter
+  的 `_parts_to_blocks` 一致），**不套冻结判据**——dict 上永远取不到 `.text`，套冻结
+  判据会把 `{"type":"text","text":"hi"}` 换成 `[image image]`，属实打实的内容损坏。
+
+### ⚠️ observe 看不到图：本次降级面里唯一的真实功能回退风险
+
+裁定 D2 原话是「observe 也不是很需要看图」，实现照做无误。但若某个 task 的成败判据
+**就是**「图里有没有那个东西」（例如 actor 的产出本身是一张渲染图），observer 只会
+看到 `[image image/png]`，只能靠 actor 的文字自述来判定。
+
+四个被降级的 purpose 里，只有 `observe` / `background_observe` 存在这个风险
+（`compact` 产出恒为纯文本、`recognize_intent` 只填元数据）。缓解手段已就位：改
+`_IMAGE_BEARING_PURPOSES` 一处即可放开（见上表）。Phase 4 的 `media:get_image` 落地后
+还有第二条路——让 observer 主动取回它需要看的那张图。
