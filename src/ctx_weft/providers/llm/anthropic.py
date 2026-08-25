@@ -354,9 +354,11 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                     # OpenAI 那样回吐原始文本）；真畸形无法解包时保持原样，交 gateway 报错。
                     "input": unwrap_raw_arguments(tc.get("input", tc.get("arguments", {}))),
                 })
-            # content_blocks 为空 ⟺ m.content 既无实义文本（含纯空白）也无图片也无
-            # tool_calls ⟹ 此时兜底的 "" 与拍扁结果一致（_parts_to_blocks 会跳过空/纯空白
-            # 文本 part，不是「每个 part 恰好产出一个 block」——该不变式已不成立）。
+            # content_blocks 为空 ⟹ 兜底的 "" 与拍扁结果一致；两条分支达成"为空"的条件不同，
+            # 且不对称——str 分支：m.content 为空串才不进 if（纯空白 str 仍会产出 text block，
+            # 不受此收紧影响）；parts 分支：_parts_to_blocks 会跳过空/纯空白文本 part（不是
+            # 「每个 part 恰好产出一个 block」，该不变式已不成立），故纯空白 TextPart 若不伴随
+            # 图片/tool_calls 时 content_blocks 才会为空。
             result.append({"role": "assistant", "content": content_blocks or ""})
             i += 1
         elif m.role == "tool":
