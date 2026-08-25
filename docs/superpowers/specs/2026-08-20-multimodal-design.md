@@ -187,6 +187,25 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 单图字节上限（防畸形/恶意输入）。**不**校验 token 总量——单条消息塞太多图的情形由
 装配期 `ContextOverflowError` 兜底，理由见子设计 §3。
 
+> **已兑现（Task 3，Phase 3a，2026-08-24）**：`validate_content`（`content.py:196`）
+> 落地上述三项格式校验——`media_type` 白名单（`ALLOWED_IMAGE_MEDIA_TYPES`，Anthropic
+> 与 OpenAI 都接受的交集）、base64 合法性（`base64.b64decode(..., validate=True)`）、
+> 单图字节上限 `_MAX_IMAGE_BYTES = 5 * 1024 * 1024`（Anthropic 单图约 5MB 上限）；
+> 并在含图时接上 §6.7 的视觉能力门控。接在 `start_session`
+> （`runtime.py:302` 附近）与 `run_single_task`（`runtime.py:665` 附近）两个入口，
+> **入口即拒、不落库**——校验失败不产生任何 Session/Task/事件记录，测试见
+> `tests/unit/test_content_validation.py::
+> test_run_single_task_rejects_image_before_persisting_anything`。
+>
+> **刻意不做 token 总量准入**，理由有二：其一如上文所述，超预算由装配期
+> `ContextOverflowError` 兜底，入口层重复判定只会引入两套阈值互相打架的风险；
+> 其二是纯文本路径的不变量——`start_session` 在改造前从不同步解析 LLM
+> （解析推迟到任务真正执行时才异步发生），若为了做 token 准入而提前调用
+> `_resolve_llm`，会把"LLM 解析失败"从"任务执行时才失败"变成
+> "`start_session` 里同步失败"，这是本 Phase 明令禁止的行为变化（见 §13 新增条目）。
+> `validate_content` 因此只在**内容含图**时才需要 `llm` 参数（`content_has_image`
+> 判定，`content.py:47`），纯文本路径完全不触碰 LLM 解析。
+
 ### 6.2 持久化：事件与投影
 
 全部走 `content_to_jsonable` / `content_from_jsonable`。
@@ -364,6 +383,34 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 `session.llm_model` 不支持视觉时，入口拒绝或降级成文本占位，不能让请求打到 provider
 才 400。能力信息取自 `LLMClientResolver` 解析出的 client（`runtime.py:471 _resolve_llm`）。
 
+> **已兑现（Task 2/3，Phase 3a，2026-08-24）**：能力字段落在
+> `ModelConfig.supports_vision: bool = False`（`providers/llm/provider.py`）——
+> **per-model 而非 per-provider**：同一账号下 `gpt-4o` 支持视觉而 `gpt-3.5-turbo`
+> 不支持，声明必须挂在单个模型配置上，挂在 adapter/provider 级会让该账号下所有
+> 模型被一并放行。**严格默认 `False` 是破坏性变更**——未显式配置
+> `supports_vision=True` 的模型一律被视为无视觉能力，宁可入口报错也不让
+> image block 打到纯文本模型后被 provider 400（`errors.py:136`）。
+>
+> `LLMProvider.get_client`（`provider.py:254-257`）把 `model_cfg.supports_vision`
+> 透传给 `_FixedModelClient`，后者以 `supports_vision` property 暴露
+> （`provider.py:104-105`）。core 侧统一约定 `getattr(llm, "supports_vision", False)`
+> 读取（`content.py:216`、`protocols/llm.py:263-266`）——duck-typed、非协议必需字段，
+> 缺省地对旧 client（没有该属性）也拿到严格默认 `False`。
+>
+> 门控接在 `validate_content`（`content.py:196`）里，`start_session` 与
+> `run_single_task` 两个入口调用（见 §6.1 已兑现说明）。
+>
+> **本仓两家 adapter（`AnthropicAdapter` / `OpenAIAdapter`）不声明 `supports_vision`**——
+> 判断依据见 Task 4 报告：真实解析路径（`LLMProvider.get_client` → `_FixedModelClient`）
+> 已从 `ModelConfig` 透传该字段，adapter 本身从不被 core 直接持有。唯一绕过
+> `_FixedModelClient` 的路径是 `CtxWeftRuntime.__init__` 的 `llm=` 兜底参数
+> （`runtime.py:433`，注释明写"fallback for backward compat / tests"）——这条路径本就
+> 没有 per-model 配置（`context_limit` 等窗口参数同样是整个 runtime 级固定，不是
+> per-model），走这条路径的宿主如需开放视觉，应在自己持有的 client 上按需声明该
+> duck-typed 属性，而不是让本仓 adapter 类硬编码 `supports_vision = True`——那会让
+> 该 provider 的所有模型（含纯文本模型）被一并放行，绕过 per-model 的严格默认，
+> 与本节开头的破坏性默认精神相悖。
+
 ### 6.8 可观测性脱敏
 
 - `act.py:221` 与 `observe.py:121` 的 `str(m.content)` 会把整块 base64 dump 进
@@ -485,6 +532,16 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
   仍蕴含消息为空），但注释会误导后来者——它正是 Task 5 删除死代码时所依据的不变式。
   Phase 3 顺带更正。
 
+> **已兑现（Task 1，Phase 3a，2026-08-24）**：上述两条均已修复。
+> 跳过条件改为 `if text.strip():`（两家 adapter，共四处：`anthropic.py` 的
+> user/assistant/tool_result 三处 + `openai.py` 的对应处），纯空白 `TextPart`
+> 挨着 `ImagePart` 时不再产出空白文本 block。测试：
+> `tests/unit/test_adapter_multimodal_wire.py::
+> test_anthropic_whitespace_text_part_next_to_image_dropped` 与
+> `test_openai_whitespace_text_part_next_to_image_dropped`（两家 adapter 各一条同构
+> 用例）。`anthropic.py` assistant 分支的失效注释已同步更正为准确描述
+> `_parts_to_blocks` 会跳过纯空白文本 part 的行为。
+
 - 单图字节上限与 `media_type` 白名单的具体取值（§6.1）
 - 视觉能力信息从 `LLMClient` 的哪个字段读（§6.7）——现有 duck-type 约定里
   没有对应字段，可能需要在 `protocols/llm.py` 补一个可选属性
@@ -525,3 +582,38 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
     `BlobStore` 外部化、或允许更大 `media_type` 白名单）落地前，需要在 token
     估算之外补一条独立的字节预算，或在 §6.1 的单图字节上限之上再加一条
     「单请求总字节上限」。
+
+**已知缺口（Task 4，Phase 3a，2026-08-24，刻意范围划定）：**
+
+- **HITL 应答与 `reopen_task` 两个入口未接校验与门控。** §6.1 列出的四个入口
+  （`SessionStartParams.user_prompt` / `run_single_task` / `HitlManager.answer/reject`
+  / `TaskManager.reopen_task`）里，本 Phase 只在前两个（`start_session` /
+  `run_single_task`）接了 `validate_content` 与视觉门控。`HitlManager.answer(text)` /
+  `reject(message)` 与 `TaskManager.reopen_task(new_prompt)` 仍未调用
+  `validate_content`——若这两个入口将来放宽为接受 `list[ContentPart]`
+  （见 §6.1 表格，本 Phase 尚未实现该放宽，签名仍是 `str`），畸形/超限图片或
+  纯文本模型收图会绕过入口校验直接进入 memory。这是刻意的范围划定，不是遗漏：
+  Phase 3a 的目标是防 400 护栏，优先覆盖两个主入口；HITL/reopen 的校验接入
+  留给后续 Phase。
+
+- **`start_session` 的纯文本路径刻意不提前解析 LLM。** Task 3 fix round 2 的裁定：
+  `validate_content` 需要 `llm` 参数才能做视觉门控，而获取 `llm` 需要调用
+  `_resolve_llm`——但改造前 `start_session` 从不同步解析 LLM（解析完全推迟到任务
+  真正执行时，由 `_make_task_runner` → `_SessionTaskRunner` 异步触发）。若为了给
+  `validate_content` 传 `llm` 而在 `start_session` 里无条件调用 `_resolve_llm`，
+  会把"没有可用 LLM"这件事从"任务执行时才失败"变成"`start_session` 里同步失败"，
+  违反本 Phase 的硬约束「纯文本行为逐字节不变」——哪怕 `_resolve_llm` 本身是无副作用
+  的纯查表也不行，因为可观察的失败时机变了。
+  裁定：`start_session` 先用 `content_has_image`（`content.py:47`）判断内容是否
+  含图，**只有含图时才调用 `_resolve_llm`** 传给 `validate_content` 做视觉门控；
+  纯文本内容走 `validate_content(content)`（不传 `llm`，只做格式校验，天然
+  no-op）。`run_single_task`（`runtime.py:648`）不受此约束——它改造前就已经
+  无条件同步调用 `_resolve_llm`（`runtime.py:665`），所以本 Phase 直接在该处
+  先行调用 `_resolve_llm` 并把 `llm` 传给 `validate_content`（`runtime.py:667-668`
+  注释：「`_resolve_llm` 是纯查表，此处先行调用安全」），不需要 `content_has_image`
+  分支——纯文本路径在这里本就已经解析 LLM，不存在"提前解析"的问题。
+  这条裁定记在此处供 Phase 3b/4 参考：任何新入口
+  校验若需要 `llm`，都必须先判断"是否真的需要它"，不能为了校验方便而破坏
+  既有的惰性解析时机。测试：
+  `tests/unit/test_content_validation.py::
+  test_start_session_plain_text_does_not_eagerly_resolve_llm`。

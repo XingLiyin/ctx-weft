@@ -2,7 +2,7 @@ import base64
 
 import pytest
 
-from ctx_weft.core.content import validate_content
+from ctx_weft.core.content import content_has_image, validate_content
 from ctx_weft.core.errors import InvalidContentError, VisionNotSupportedError
 from ctx_weft.protocols import ImagePart, TextPart
 
@@ -84,6 +84,33 @@ def test_image_passes_with_vision_client():
 def test_no_llm_means_no_gating():
     """不传 llm 时只做格式校验——供拿不到 client 的调用点使用。"""
     validate_content([ImagePart(data=_PNG, media_type="image/png")])
+
+
+# ── content_has_image：门控开关本身的直测 ───────────────────────────────────
+#
+# Task 3 复审指出该函数没有任何直测，全靠 validate_content / start_session 的
+# 测试间接覆盖。它是门控是否触发的开关——判据错了，视觉门控会静默失效（图片
+# 直接放行、不报错）。这里逐类型直接断言其返回值。
+
+
+def test_content_has_image_str_is_false():
+    assert content_has_image("hello") is False
+
+
+def test_content_has_image_none_is_false():
+    assert content_has_image(None) is False
+
+
+def test_content_has_image_empty_list_is_false():
+    assert content_has_image([]) is False
+
+
+def test_content_has_image_all_text_parts_is_false():
+    assert content_has_image([TextPart(text="a"), TextPart(text="b")]) is False
+
+
+def test_content_has_image_with_image_part_is_true():
+    assert content_has_image([TextPart(text="看"), ImagePart(data=_PNG, media_type="image/png")]) is True
 
 
 # ── 真实入口：入口即拒、不落库 ───────────────────────────────────────────────
