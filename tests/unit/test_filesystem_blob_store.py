@@ -77,3 +77,29 @@ def test_put_conflicting_media_type_first_writer_wins(tmp_path):
 
     result = asyncio.run(p.get(ref1, _ctx()))
     assert result == (b"ambiguous type", "image/png")
+
+
+def test_get_without_registered_workspace_returns_none_not_raise():
+    """get 与 put 的失败语义刻意不对称：put 抛，get 返回 None。
+
+    这条契约是 Task 3 的 rehydrate 依赖的——rehydrate 跑在 gateway 的出网路径上，
+    若 get 在此抛异常，一个未登记的 workspace 会掀掉整个 LLM 请求，而不是退化成
+    「这张图取不回来」。故此处必须钉死。
+    """
+    p = FilesystemToolsProvider()
+    result = asyncio.run(p.get(f"{BLOB_REF_PREFIX}whatever", ProviderContext(session_id="unregistered")))
+    assert result is None
+
+
+def test_get_ref_without_blob_prefix_returns_none_not_raise(tmp_path):
+    """非 blob: 前缀的字符串不是本 store 的 ref——返回 None，不抛、不当成 sha 去拼路径。
+
+    前缀检查不只是整洁性代码，它挡的是一条真实的 Windows 攻击面。变异验证时把这条
+    检查去掉后，"http://example.com/x.png" 被当成 sha 拼进路径，pathlib 将
+    //example.com/x.png 解释为 UNC 网络路径并**真的发起了网络访问**
+    （OSError WinError 64）。即：缺了前缀检查，一个受污染的 ref 字符串能让
+    blob 读取变成任意 SMB 外连。故此测试是安全护栏，删改需谨慎。
+    """
+    p = _provider(tmp_path)
+    assert asyncio.run(p.get("http://example.com/x.png", _ctx())) is None
+    assert asyncio.run(p.get("", _ctx())) is None

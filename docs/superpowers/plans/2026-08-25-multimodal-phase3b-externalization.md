@@ -61,7 +61,23 @@ spec §3③ 原文是「只有 LLM adapter 拼 wire payload 时才换回 base64�
 | `utils.image_tokens` / `image_part_count` | 只数个数、不读 `data`。不改 |
 | `content_to_jsonable` / `from_jsonable` | 已带 `source_type` 往返（Phase 1）。不改 |
 
-**字符串操作扫描**：全仓 grep `\.data\.` / `\.data\[` —— 实现者须自行跑一遍确认无遗漏，结果写进 Task 1 报告。
+**读取方扫描已由 controller 跑完**，结果如下：
+
+`ImagePart.data` 的 dataclass 形态读取点只有两处，都在上表内：
+- `anthropic.py:455`（`"data": p.data`）
+- `openai.py:459`（`f"data:{p.media_type};base64,{p.data}"`）
+
+**但扫描抓到一个上表未覆盖的盲点（Task 3 必须显式处理）：**
+
+adapter 还有 **dict 形态**的读取点（`anthropic.py:438`、`openai.py:443` 的 `p.get("data", "")`）。而 `rehydrate_content` 若用 `getattr(part, "source_type", "base64")` 判断形态，**dict 上取不到属性、会被当成 base64 放过**——实测确认：
+
+```
+getattr({'source_type': 'ref', ...}, 'source_type', 'base64')  →  'base64'
+```
+
+后果：dict 形态的 ref part 不会被 rehydrate，adapter 直接把 `blob:abc123` 当 base64 塞进 wire payload，图片废掉且无任何报错。
+
+**今日不可达**（dict 形态已被 Phase 3a 的入口校验硬拒，spec §13 记为不支持），但**非一致性 memory provider** 仍可能产出它。Task 3 的 `rehydrate_content` 须对此**显式表态**：要么同时支持 dict 取值，要么遇到无法判形态的 part 时**降级成文本占位而非静默放行**。静默放行是最差的选项——它把"取不到图"变成"发出一个坏 payload"。
 
 ---
 
