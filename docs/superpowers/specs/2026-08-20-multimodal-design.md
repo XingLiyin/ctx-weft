@@ -535,6 +535,25 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 
 ## 13. 未决项
 
+**Phase 3a 终审复审遗留（2026-08-25 裁定，移交 Phase 3b）：**
+
+- **dict 形态纯文本会翻转 `start_session` 的失败类型。** I3 选定方案 (B)（入口只接受
+  dataclass 形态 part）后，`content_has_image([{"type":"text","text":"hello"}])` 仍返回
+  `True`——因为 `_is_text_part` 用 `hasattr(part,"text")`，dict 永不满足。后果：**dict 形态
+  的纯文本内容会触发 `start_session` 的提前 `_resolve_llm`**，而 S2 的修复本意正是让纯文本
+  不走这条路。已实测：无 LLM 注册时，`start_session(user_prompt=[{"type":"text","text":"hello"}])`
+  抛 `RuntimeError: No LLM available` 而非 `InvalidContentError`。
+  内容最终都会被拒（两种错误都是拒绝），但**错误类型对宿主不可预期**。
+  Phase 3b 若让归一层认识 dict（方案 A），须同时修正 `core/utils.py` 的
+  `content_to_text` / `image_part_count`——三者共用同一判据字面量，只改一处会制造新分歧
+  （这正是 Phase 3a 选 (B) 而非 (A) 的理由）。
+
+- **中文注释持续增加 `RUF002/003` 噪音。** 本仓的 ruff 完整口径（含 RUF00x）在本 Phase
+  触及的三个文件上从 271 → 334（+63），全部来自新增中文注释里的全角括号。
+  各 Phase 的核验口径一直是窄 select（`I001,F401,F811`），在该口径下始终零新增——
+  两个数字都对，只是量的不是一回事。若将来要把 RUF00x 纳入 CI 门禁，需先做一次全仓清理，
+  否则新代码会被既有的 ~1855 条同类噪音淹没。
+
 **Phase 3 的强制前置（Phase 2 终审后裁定，2026-08-24）：**
 
 - **纯空白文本块仍会出网。** Phase 2 的 I1 修复只跳过了 falsy 文本（`if text:`），
