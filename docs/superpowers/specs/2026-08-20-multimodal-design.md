@@ -401,15 +401,33 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 > `run_single_task` 两个入口调用（见 §6.1 已兑现说明）。
 >
 > **本仓两家 adapter（`AnthropicAdapter` / `OpenAIAdapter`）不声明 `supports_vision`**——
-> 判断依据见 Task 4 报告：真实解析路径（`LLMProvider.get_client` → `_FixedModelClient`）
-> 已从 `ModelConfig` 透传该字段，adapter 本身从不被 core 直接持有。唯一绕过
-> `_FixedModelClient` 的路径是 `CtxWeftRuntime.__init__` 的 `llm=` 兜底参数
-> （`runtime.py:433`，注释明写"fallback for backward compat / tests"）——这条路径本就
-> 没有 per-model 配置（`context_limit` 等窗口参数同样是整个 runtime 级固定，不是
-> per-model），走这条路径的宿主如需开放视觉，应在自己持有的 client 上按需声明该
-> duck-typed 属性，而不是让本仓 adapter 类硬编码 `supports_vision = True`——那会让
-> 该 provider 的所有模型（含纯文本模型）被一并放行，绕过 per-model 的严格默认，
-> 与本节开头的破坏性默认精神相悖。
+> 判断依据见 Task 4 报告：本仓的真实解析路径（`LLMProvider.get_client` →
+> `_FixedModelClient`）已从 `ModelConfig` 透传该字段，adapter 本身从不被 core 直接
+> 持有。但 `_resolve_llm`（`runtime.py:501-514`）绕过 `_FixedModelClient` 拿到裸
+> `LLMClient` 的路径**截至本 Phase 审计到两条**（措辞留白：不排除今后出现第三条），
+> 均不是本仓 adapter 需要为此改动的理由：
+>
+> 1. `CtxWeftRuntime.__init__` 的 `llm=` 兜底参数（`runtime.py:433`，注释明写
+>    "fallback for backward compat / tests"）——`_resolve_llm` 在未注册 `LLMProvider`
+>    时原样返回它。
+> 2. **自定义 `LLMClientResolver`**（`protocols/llm.py:298-310`，一个 `Protocol`）经
+>    `register_llm_provider`（`runtime.py:288`）注册——这是本 SDK 的**主要多账号扩展
+>    点**，接受任何实现了 `get_client(account, model) -> LLMClient` 的对象，*不*要求
+>    经过 `_FixedModelClient`。本仓 `LLMProvider.get_client` 只是这个 Protocol 的一种
+>    实现；第三方宿主注册自己的 resolver、其 `get_client()` 直接返回裸 adapter，是
+>    预期用法而非边缘情况，比 llm= 兜底更容易在实际集成中出现。
+>
+> **两条路径都 fail-closed**：裸 adapter 没有 `supports_vision` 属性，
+> `getattr(llm, "supports_vision", False)`（`content.py:216`）取到严格默认 `False`，
+> 图片照样被拒——这正是「未显式配置视觉能力就整体拒绝」的预期行为，不是漏洞。
+>
+> 两条路径都没有 per-model 配置（`context_limit` 等窗口参数同样由调用方在自己的
+> `get_client()` 实现里决定，不是本仓 `ModelConfig` 管），所以走这两条路径、且需要
+> 开放视觉能力的宿主，应在自己返回的 client 对象上按需声明该 duck-typed
+> `supports_vision` 属性（自定义 resolver 里包一层最直接），而不是让本仓 adapter 类
+> 硬编码 `supports_vision = True`——那会让该 provider 的所有模型（含纯文本模型）在
+> **本仓的主路径**上也被一并放行，绕过 per-model 的严格默认，与本节开头的破坏性
+> 默认精神相悖。
 
 ### 6.8 可观测性脱敏
 
