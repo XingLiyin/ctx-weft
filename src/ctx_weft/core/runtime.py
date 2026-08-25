@@ -744,7 +744,7 @@ class CtxWeftRuntime:
                                   session_id=<id> → new session with that host-provided ID).
         params.resume is True  → resume existing session (root_agent_id recovered from events).
         """
-        from ctx_weft.core.content import content_has_image, validate_content
+        from ctx_weft.core.content import validate_content
 
         memory = self.providers.get_memory()
         # 入口即拒、不落库：sm.create_session / sm.resume_session 会立即持久化
@@ -753,13 +753,18 @@ class CtxWeftRuntime:
         # _make_task_runner → _SessionTaskRunner 才异步解析）——纯文本行为逐字节
         # 不变是硬约束，哪怕 _resolve_llm 本身是无副作用的纯查表，也不能让「解析不出
         # LLM」这件事从原本推迟到任务执行时失败，变成同步抢在 start_session 里失败。
-        # 所以只在内容真的含图时才提前解析并把 llm 传给 validate_content；纯文本走
-        # 原分支，只做格式校验（对纯文本恒早返回、不触碰 llm）。
-        if content_has_image(params.user_prompt):
-            validate_content(params.user_prompt, llm=self._resolve_llm(
-                params.llm_account, params.llm_model))
-        else:
-            validate_content(params.user_prompt)
+        # 终审 2026-08-25（缺陷 A/B）：不再用 content_has_image 预判「是否含图」来
+        # 决定要不要提前解析 LLM——那个判据对 dict 形态纯文本会误判成「含图」，
+        # 结果 dict 纯文本反而触发了本该只属于「真图片」路径的提前解析。改用
+        # llm_resolver 惰性解析：validate_content 内部先做格式校验，只有格式合法
+        # 的图片才会真的调用 resolver 走到门控。纯文本（含 dict 形态）与畸形内容
+        # 都在格式校验阶段提前返回/抛出，resolver 从不被调用。
+        validate_content(
+            params.user_prompt,
+            llm_resolver=lambda: self._resolve_llm(
+                params.llm_account, params.llm_model
+            ),
+        )
         lm = LifecycleManager(template_lookup=self._template_lookup)
         sm = SessionManager(
             lifecycle_manager=lm,

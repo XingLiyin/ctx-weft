@@ -47,10 +47,16 @@ def _is_text_part(part: Any) -> bool:
 def content_has_image(content: "str | list[ContentPart] | None") -> bool:
     """内容里是否含至少一个非文本（图片）part。
 
-    归一层里判断「是否含图」的唯一入口——调用方（如 runtime.py 决定是否需要提前
-    解析 LLM 客户端）不该自己写 isinstance/hasattr 分支散布内容形态知识
-    （spec §3①）。判据与 validate_content / _is_text_part 一致：str / None / 空
-    list / 全 TextPart 均返回 False。
+    归一层里判断「是否含图」的唯一入口——调用方不该自己写 isinstance/hasattr 分支
+    散布内容形态知识（spec §3①）。判据与 validate_content / _is_text_part 一致：
+    str / None / 空 list / 全 TextPart 均返回 False。
+
+    终审 2026-08-25（缺陷 A）后**当前无生产调用方**：runtime.start_session 原先
+    用它决定要不要提前解析 LLM 客户端，但该判据对 dict 形态纯文本会误判成
+    「含图」，于是 dict 纯文本反而触发了本该只属于「真图片」路径的提前解析
+    （§ validate_content 的 llm_resolver 惰性解析已替代这个用法）。保留本函数：
+    (1) 已有直测覆盖判据本身；(2) Phase 3b/4 的 per-purpose 策略（例如"仅在需要
+    展示缩略图时才判断是否含图"）大概率会用到它。删除前请先确认这两点仍成立。
     """
     if not content or isinstance(content, str):
         return False
@@ -207,15 +213,25 @@ def _normalize_media_type(media_type: str) -> str:
 
 
 def validate_content(
-    content: "str | list[ContentPart] | None", *, llm: object | None = None
+    content: "str | list[ContentPart] | None",
+    *,
+    llm: object | None = None,
+    llm_resolver: "Any" = None,
 ) -> None:
     """入口内容校验。通过返回 None，否则抛。
 
     只作用于 ImagePart——纯文本（str / 全 TextPart / None / 空）零影响、恒通过。
 
-    llm 非 None 且内容含图时，额外执行视觉能力门控：
-    ``getattr(llm, "supports_vision", False)`` 必须为真。**未声明即视为无视觉能力**
-    （严格默认，spec §6.7）。拿不到 client 的调用点可不传 llm，只做格式校验。
+    顺序刻意是「格式校验 → 视觉门控」，不是相反：格式畸形的内容必须报
+    ``InvalidContentError``，不能被门控抢先拦成 ``VisionNotSupportedError``——
+    后者会掩盖真正的问题（终审 2026-08-25 缺陷 B）。
+
+    llm 非 None，或 llm_resolver 非 None 且格式校验全部通过时，才执行视觉能力
+    门控：``getattr(client, "supports_vision", False)`` 必须为真。**未声明即视为
+    无视觉能力**（严格默认，spec §6.7）。llm_resolver 是惰性解析——只有确实需要
+    门控（即真的有格式合法的图片）时才调用，纯文本 / 畸形内容都不会触发它
+    （终审 2026-08-25 缺陷 A：调用方不该为了门控而提前解析 LLM 客户端）。
+    两者都不传的调用点只做格式校验，不做门控。
 
     刻意**不**校验 token 总量——单条消息塞太多图由装配期 ContextOverflowError
     兜底（spec §6.1 / 子设计 §3）。
@@ -225,12 +241,6 @@ def validate_content(
     images = [p for p in content if not _is_text_part(p)]
     if not images:
         return
-
-    if llm is not None and not getattr(llm, "supports_vision", False):
-        raise VisionNotSupportedError(
-            "当前模型未声明视觉能力（supports_vision），拒绝图片输入。"
-            "若该模型确实支持图片，请在 ModelConfig 上显式设置 supports_vision=True。"
-        )
 
     for img in images:
         raw_media_type = getattr(img, "media_type", "") or ""
@@ -260,3 +270,11 @@ def validate_content(
                 f"单张图片 {len(raw)} 字节超过上限 "
                 f"{_MAX_IMAGE_BYTES}（5 MiB）"
             )
+
+    # 门控放最后：只有格式合法的图片才值得问「模型支不支持」。
+    client = llm if llm is not None else (llm_resolver() if llm_resolver is not None else None)
+    if client is not None and not getattr(client, "supports_vision", False):
+        raise VisionNotSupportedError(
+            "当前模型未声明视觉能力（supports_vision），拒绝图片输入。"
+            "若该模型确实支持图片，请在 ModelConfig 上显式设置 supports_vision=True。"
+        )

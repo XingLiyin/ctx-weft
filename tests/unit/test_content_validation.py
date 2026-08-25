@@ -227,6 +227,90 @@ async def test_start_session_plain_text_does_not_eagerly_resolve_llm():
     )
 
 
+@pytest.mark.asyncio
+async def test_start_session_plain_text_resolver_never_called():
+    """上一条测试断言"整体不抛"；这条用计数器 stub 直接锁死 resolver 调用次数
+    为 0——比"不抛异常"更强的证据，直接证明惰性解析确实惰性。"""
+    from ctx_weft.core.runtime import SessionStartParams
+    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider,
+        make_echo_template,
+        make_runtime,
+    )
+
+    templates = InlineAgentTemplateProvider()
+    templates.register(make_echo_template())
+    runtime = make_runtime(agent_provider=templates)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+
+    calls = []
+    original_resolve = runtime._resolve_llm
+
+    def _counting_resolve(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original_resolve(*args, **kwargs)
+
+    runtime._resolve_llm = _counting_resolve
+
+    await runtime.start_session(
+        SessionStartParams.create(
+            template_id="agent:tpl_echo",
+            user_prompt="纯文本，没有图片",
+            context_limit=100_000,
+        )
+    )
+    assert calls == [], (
+        "纯文本 start_session 不应触发 _resolve_llm——validate_content 的 "
+        "llm_resolver 必须惰性，格式校验早返回时 resolver 从不被调用"
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_session_dict_text_does_not_eagerly_resolve_llm():
+    """缺陷 A 的端到端回归：dict 形态纯文本（{"type":"text","text":...}）经
+    content_has_image 误判为「含图」，但改用 llm_resolver 惰性解析后，
+    格式校验会先于门控/resolver 调用抛出 InvalidContentError——不再是
+    RuntimeError("No LLM available...")，resolver 也从未被调用。"""
+    from ctx_weft.core.errors import InvalidContentError
+    from ctx_weft.core.runtime import SessionStartParams
+    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider,
+        make_echo_template,
+        make_runtime,
+    )
+
+    templates = InlineAgentTemplateProvider()
+    templates.register(make_echo_template())
+    # 故意不注册任何 LLM provider——_resolve_llm 若被调用必然抛
+    # RuntimeError("No LLM available...")。这条测试要证明它压根没被调用到。
+    runtime = make_runtime(agent_provider=templates)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+
+    calls = []
+    original_resolve = runtime._resolve_llm
+
+    def _counting_resolve(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original_resolve(*args, **kwargs)
+
+    runtime._resolve_llm = _counting_resolve
+
+    with pytest.raises(InvalidContentError):
+        await runtime.start_session(
+            SessionStartParams.create(
+                template_id="agent:tpl_echo",
+                user_prompt=[{"type": "text", "text": "hello"}],
+                context_limit=100_000,
+            )
+        )
+    assert calls == [], (
+        "dict 形态纯文本应在格式校验阶段就被拒——resolver 不该被调用，"
+        "更不该抛出掩盖了真正问题的 RuntimeError"
+    )
+
+
 # ── I3（评审 2026-08-24 fix wave，选项 B）：dict 形态 part 入口硬拒绝 ──────────
 #
 # _is_text_part 用 `hasattr(part, "text")` 判据（spec §13 冻结，Phase 3a 不得更改）。
@@ -249,8 +333,10 @@ async def test_start_session_plain_text_does_not_eagerly_resolve_llm():
 
 def test_dict_text_part_is_misclassified_as_image_known_limitation():
     """纯文本 dict part 被 content_has_image 误判为「含图」——已知限制（选项 B），
-    非本 Phase 修复范围。真正后果见下一条：这会让 start_session 提前解析 LLM
-    （S2 修复要防的行为），以及被 validate_content 硬拒绝。"""
+    非本 Phase 修复范围。终审 2026-08-25（缺陷 A）之后 content_has_image 已不再
+    是 start_session 决定是否提前解析 LLM 的判据（改用 validate_content 的
+    llm_resolver 惰性解析），所以这个误判不再连带让 start_session 提前解析 LLM——
+    见 test_start_session_dict_text_does_not_eagerly_resolve_llm。"""
     assert content_has_image([{"type": "text", "text": "hello"}]) is True
 
 
@@ -261,3 +347,73 @@ def test_dict_text_part_rejected_by_validate_content_known_limitation():
     with pytest.raises(InvalidContentError) as ei:
         validate_content([{"type": "text", "text": "hello"}])
     assert "''" in str(ei.value)  # media_type 取不到值（dict 无 .media_type 属性），报出空字符串类型
+
+
+# ── 终审 2026-08-25：缺陷 A（dict 纯文本误触发提前解析 LLM）与
+#    缺陷 B（validate_content 先门控后格式校验，掩盖真正问题）的回归测试 ──────
+
+
+def test_dict_text_part_raises_invalid_content_not_runtime_error_via_resolver():
+    """缺陷 A 的核心断言：即便 llm_resolver 会抛（模拟"无 LLM 可用"），
+    dict 形态纯文本也必须先在格式校验阶段被拒（InvalidContentError），
+    resolver 根本不该被调用到——不是 RuntimeError、也不是 VisionNotSupportedError。"""
+    def _resolver_must_not_be_called():
+        raise RuntimeError("No LLM available (should never be reached)")
+
+    with pytest.raises(InvalidContentError):
+        validate_content(
+            [{"type": "text", "text": "hello"}],
+            llm_resolver=_resolver_must_not_be_called,
+        )
+
+
+def test_malformed_image_rejected_before_vision_gating():
+    """缺陷 B 的核心断言：格式畸形的图片 + 不支持视觉的模型 → 报的必须是
+    InvalidContentError（格式问题），不能被门控抢先拦成 VisionNotSupportedError
+    （那会掩盖真正的问题：内容本身就是畸形的）。"""
+    with pytest.raises(InvalidContentError):
+        validate_content(
+            [ImagePart(data=_PNG, media_type="image/tiff")],
+            llm=_TextOnlyClient(),
+        )
+
+
+def test_valid_image_still_gated_by_vision_capability():
+    """门控没有被削弱：格式合法的图片遇上纯文本模型，仍然报
+    VisionNotSupportedError（而不是被格式校验的重排意外放行）。"""
+    with pytest.raises(VisionNotSupportedError):
+        validate_content(
+            [ImagePart(data=_PNG, media_type="image/png")],
+            llm=_TextOnlyClient(),
+        )
+
+
+def test_llm_resolver_not_called_for_plain_text():
+    """llm_resolver 是惰性的：纯文本（无图）路径下，即便传了 resolver，
+    也绝不该被调用——resolver 抛异常时纯文本校验仍必须正常通过。"""
+    calls = []
+
+    def _resolver():
+        calls.append(1)
+        raise AssertionError("resolver 不该被调用")
+
+    validate_content("纯文本", llm_resolver=_resolver)
+    validate_content([TextPart(text="纯文本")], llm_resolver=_resolver)
+    assert calls == []
+
+
+def test_llm_resolver_called_lazily_only_for_valid_images():
+    """惰性解析的正面用例：只有格式合法的图片才会真的触发 resolver 调用，
+    并且门控结果反映 resolver 返回的 client。"""
+    calls = []
+
+    def _resolver():
+        calls.append(1)
+        return _TextOnlyClient()
+
+    with pytest.raises(VisionNotSupportedError):
+        validate_content(
+            [ImagePart(data=_PNG, media_type="image/png")],
+            llm_resolver=_resolver,
+        )
+    assert calls == [1], "格式合法的图片应当触发恰好一次 resolver 调用"
