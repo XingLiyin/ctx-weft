@@ -23,11 +23,13 @@ from typing import TYPE_CHECKING, Any
 import jsonschema
 
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer  # noqa: F401
+from ctx_weft.core.content import normalize_content_parts, redact_content_for_event
 from ctx_weft.core.events import EventType
 from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.capability import CapabilityProvider, ToolCapabilityProvider, qualify
+from ctx_weft.protocols.context import ContentPart, TextPart
 from ctx_weft.protocols.llm import RAW_ARGS_KEY
 from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL, _PLAN_DISPATCH_ACK
 from ctx_weft.protocols.filesystem import SpillSink
@@ -74,6 +76,21 @@ SILENT_TOOLS = frozenset({
 })
 
 
+# 「工具返回非文本内容」的通用接缝（子设计 §4.2）。
+#
+# provider 在 `CapabilityEvent(kind="result")` 的 `payload["metadata"]` 里挂一个
+# `list[ContentPart]`（或等价的 dict 形态，gateway 侧过归一层），gateway 把它拼在
+# 文本部分之后，使 `InvocationResult.content` 变成 `list[ContentPart]`。
+#
+# **通道是通用的，不认发布者**：本期只有 `media:get_image` 用（Phase 4 Task 4），
+# 但浏览器截图、图表生成等能力将来走同一条路，gateway 不做来源白名单。
+#
+# 流式协议本身不改：`_stream_tool` 依旧只聚合文本块（`result_parts: list[str]`）。
+# 于是落盘截断（`_maybe_spill`）、human note 拼接、事件 payload 截断这些既有加工
+# 全部只作用于**文本部分**——因为 parts 是在它们之后才拼上去的。
+CONTENT_PARTS_KEY = "content_parts"
+
+
 # ── InvocationResult ──────────────────────────────────────────────────────────
 
 
@@ -83,7 +100,13 @@ class InvocationResult:
 
     invocation_id: str
     tool_name: str
-    content: str                              # 拼好的 result 文本，追加进 LLM messages
+    # 拼好的 result，追加进 LLM messages。默认是**文本**（与改造前逐字节相同）；
+    # 仅当 provider 经 metadata[CONTENT_PARTS_KEY] 贡献了非文本部分时才是
+    # `list[ContentPart]`（形如 `[TextPart(文本), *parts]`）。
+    # 读取方注意：对 list 做 `.strip()` / `join` / `content[:N]` 都是错的
+    # （切片一个 list 不报错，但切出来的是前 N 个 part）——文本化请走
+    # `core.content` 的 `content_to_text` / `redact_content_for_event`。
+    content: str | list[ContentPart]
     metadata: dict[str, Any] = field(default_factory=dict)  # control signals
     is_error: bool = False
 
@@ -226,11 +249,19 @@ class CapabilityGateway:
             provider, cap.id, sanitized, provider_ctx, state, invocation_id,
         )
 
-        content = "\n".join(result_parts) or ("(no output)" if not is_error else "")
+        text = "\n".join(result_parts) or ("(no output)" if not is_error else "")
         # 工具输出过长 → 委托 fs provider 落盘；在 human note / 审计 / memory ingest 之前，使下游拿到截断版。
-        content = await self._maybe_spill(content, ctx, invocation_id, tool_name, cap.spillable)
+        text = await self._maybe_spill(text, ctx, invocation_id, tool_name, cap.spillable)
         if decision.message:  # 放行时人类备注并入结果回灌 LLM
-            content = f"[Human note: {decision.message}]\n{content}"
+            text = f"[Human note: {decision.message}]\n{text}"
+        # 非文本部分最后拼上（见 CONTENT_PARTS_KEY）：上面 spill / human note 两步只处理文本，
+        # 无 content_parts 时 content 仍是同一个 str，纯文本路径逐字节不变。
+        content: str | list[ContentPart] = text
+        parts = metadata.get(CONTENT_PARTS_KEY)
+        if isinstance(parts, (list, tuple)) and parts:
+            # 过归一层：宿主 provider 可能给 dict 形态的 part（JSON 往返），
+            # 与 MemoryEvent / LLMMessage 的 __post_init__ 共用同一份归一。
+            content = normalize_content_parts([TextPart(text=text), *parts])
 
         # 7. 记录 result（事件 + TOOL_RESULT 入 memory）
         await self._record_result(state, ctx, tool_name, invocation_id, sanitized, content, is_error, is_dispatch, is_silent, tool_call_id)
@@ -374,13 +405,18 @@ class CapabilityGateway:
     ) -> None:
         """发 CapabilityFinished + ingest TOOL_RESULT（派发暂挂 / SILENT 不入 / 普通写 task 层）。"""
         from ctx_weft.core.loop.driver import make_event
+        # 事件 payload 必须先脱敏再截断：content 可能是 list[ContentPart]（见 CONTENT_PARTS_KEY），
+        # 直接 `content[:8000]` 切的是**前 8000 个 part**——不报错、语义完全错，且图片 part 的
+        # base64 会随 repr 泄漏进事件库。`redact_content_for_event` 对 str 输入返回同一对象，
+        # 纯文本路径逐字节不变。
+        redacted = redact_content_for_event(content)
         await self._event_bus.emit(make_event(state, EventType.CAPABILITY_FINISHED, payload={
             "invocation_id": invocation_id,
             "capability_name": tool_name,
             "arguments": sanitized,
             "outcome": "error" if is_error else "success",
-            "result": content[:8000],
-            "result_length": len(content),
+            "result": redacted[:8000],
+            "result_length": len(redacted),
             "tool_call_id": tool_call_id,
         }))
         if not is_dispatch and not is_silent:

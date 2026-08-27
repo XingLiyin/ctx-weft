@@ -277,7 +277,10 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                     event_types=BACKGROUND_OBSERVE_REACT_EVENTS,  # 后台 LLM 交互发独立类型，host 决定不进前端
                 )
                 # 报告取值：terminal 工具产出 → 纯文本复述兜底（observer 把复述写成正文而没调工具）。
-                act_recap = ((result.content if result else "") or last_text or "").strip()
+                # content_to_text：InvocationResult.content 可能是 list[ContentPart]
+                # （gateway 的 CONTENT_PARTS_KEY 通道，任何 provider 都可能用）——对 list
+                # 直接 `.strip()` 会 AttributeError 掀掉后台 observe。str 输入原样返回。
+                act_recap = (content_to_text(result.content if result else "") or last_text or "").strip()
                 task_summary = (result.metadata or {}).get("task_summary", "") if result else ""
                 if not act_recap:
                     # 无任何可用报告：与异常路径同语义——段保 raw，不写占位摘要、不动 finish 对。
