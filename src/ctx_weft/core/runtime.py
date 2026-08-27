@@ -482,6 +482,13 @@ class CtxWeftRuntime:
         skill_executor = SkillExecutorCapabilityProvider(self.providers)
         self.providers.register_capability(skill_executor)
 
+        # media:get_image —— 取回被 L0.5 降级掉的图（子设计 §9）。core 侧 provider：
+        # 工具体要读 task 视图算「原本挂在第几条 user 回合」，普通 capability provider
+        # 拿不到 MemoryProvider。memory / blob store 由它在调用时经 registry 解析，
+        # 故此处不要求它们已注册。
+        from ctx_weft.core.media.capability import MediaCapabilityProvider
+        self.providers.register_capability(MediaCapabilityProvider(self.providers))
+
         # 模板通道硬校验（spec 2026-07-22）：模板进入 core 的唯一通道是
         # AgentCapabilityProvider；缺失则 root agent 都无法实例化，构造即失败。
         agent_provider_names = [

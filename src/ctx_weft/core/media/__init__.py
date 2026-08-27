@@ -12,6 +12,7 @@ ref→base64 的 rehydrate 归 `providers/llm/*`、入口外部化归内容归�
 
 from __future__ import annotations
 
+from ctx_weft.core.media.capability import get_image
 from ctx_weft.core.media.fold import demote_all, demote_for_budget
 
-__all__ = ["demote_all", "demote_for_budget"]
+__all__ = ["demote_all", "demote_for_budget", "get_image"]
