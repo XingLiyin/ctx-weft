@@ -1,0 +1,466 @@
+"""Phase 4 Task 5：L0.5 接入 `escalating_compact` + §6.1 L1/L3 折叠前置降级。
+
+前四个任务造的零件（占位编解码 / 降级 / content_parts 通道 / get_image）在此之前
+**谁都没被真正调用**。本文件钉住「接上电」的四件事：
+
+1. L0.5 跑在 L1 **之前**（子设计 §6：无 LLM、单位收益最高、且可逆——L1/L2/L3 折的是
+   记录本身，一旦执行位置就没了，所以先花可逆的额度）；
+2. L0.5 产出 `MemoryCompacted(source="demote_images")` 且 `freed_tokens` **真的 > 0**
+   （Phase 0 之前 `_active_memory_tokens` 不计图片，这里恒为 0，L0.5 等于白跑）；
+3. §6.1：`collapse_task_layer` 折叠前无条件降级折区内的残留真图，且**降级之后重新
+   `load_view`**——降级换掉了 record id，拿旧 id 去 fold 会让同一段对话出现两次，
+   而摘要输入里仍是真图、照旧被 `content_to_text` 静默拍扁；
+4. 未接 `BlobStore` 时行为与改造前一致（一次 `fold()` 都不发、没有 L0.5 事件）。
+
+⚠️ 断言口径：本文件里「某件事没有发生」型断言（不升级到 L1 / 不降级 / 不重复）
+一律配一个「确实发生了」的对照，写在同一个用例内；Step 6 另做变异验证。
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from ctx_weft.core.loop.steps import compact as cm
+from ctx_weft.core.media import demote_for_budget, get_image
+from ctx_weft.core.media.refs import decode_image_placeholder, find_image_placeholders
+from ctx_weft.protocols import (
+    ImagePart,
+    MemoryAddress,
+    MemoryEvent,
+    MemoryKind,
+    MemoryScope,
+    ProviderContext,
+    TextPart,
+)
+from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+
+_BASE = datetime(2026, 8, 27, tzinfo=UTC)
+_SCOPE = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
+
+# ── 脚手架 ────────────────────────────────────────────────────────────────────
+
+
+def _ref(n: int) -> str:
+    return f"blob:{n:064x}"
+
+
+def _img(n: int) -> ImagePart:
+    """ref 形态的图：byte_size=4096 → image_tokens 落在下界 1600（Phase 0/3c 口径）。"""
+    return ImagePart(data=_ref(n), media_type="image/png", source_type="ref",
+                     byte_size=4096)
+
+
+def _pctx() -> ProviderContext:
+    return ProviderContext(session_id="s1", tenant_id="tn")
+
+
+class _CountingMemory(InMemoryMemoryProvider):
+    """数 fold 次数——「未接 BlobStore 一次都不写」需要能观测到写。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fold_calls = 0
+
+    async def fold(self, supersede_ids, replacements, ctx):
+        self.fold_calls += 1
+        return await super().fold(supersede_ids, replacements, ctx)
+
+
+class _Blobs:
+    """能外部化的 blob store 桩（`can_externalize=True` 是 L0.5 的总闸）。"""
+
+    can_externalize = True
+
+    def __init__(self, data: dict[str, bytes] | None = None) -> None:
+        self._data = data or {}
+
+    async def put(self, data, media_type, ctx):  # pragma: no cover - 本文件不写入
+        raise NotImplementedError
+
+    async def get(self, ref, ctx):
+        raw = self._data.get(ref)
+        return (raw, "image/png") if raw is not None else None
+
+
+def _state(*, target_ratio=0.5, limit=10000, collapse_keep=99, keep_recent_images=2):
+    agent = SimpleNamespace(
+        id="a1",
+        loop_config=SimpleNamespace(
+            compact_keep_last=6, collapse_keep_last=collapse_keep,
+            compact_token_ratio=0.8, compact_target_ratio=target_ratio,
+            compact_keep_recent_images=keep_recent_images),
+        loop_guard=SimpleNamespace(context_limit=limit))
+    return SimpleNamespace(scope=_SCOPE, task=SimpleNamespace(id="t1"), agent=agent,
+                           session=SimpleNamespace(id="s1", tenant_id="tn"),
+                           extra={}, run_id="r1", sequence_counter=0)
+
+
+def _ctx(memory, *, blobs: _Blobs | None = None):
+    tokenizer = SimpleNamespace(count=lambda text: max(1, len(text) // 4))
+    return SimpleNamespace(memory=memory, provider_ctx=_pctx(),
+                           llm=SimpleNamespace(tokenizer=tokenizer),
+                           blob_store=blobs)
+
+
+async def _seed(mem, contents, *, role="user", address=_SCOPE):
+    ids = []
+    for i, content in enumerate(contents):
+        ids.append(await mem.ingest(MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK, address=address,
+            content=content, timestamp=_BASE + timedelta(seconds=i), role=role,
+            metadata={"i": i}), _pctx()))
+    return ids
+
+
+async def _view(mem, address=_SCOPE):
+    return await mem.load_view(address, MemoryScope.TASK, _pctx(),
+                               kinds=cm._TASK_VIEW_KINDS)
+
+
+def _all_text(records) -> str:
+    out = []
+    for r in records:
+        c = r.content
+        out.append(c if isinstance(c, str) else "".join(
+            getattr(p, "text", "") for p in c))
+    return "\n".join(out)
+
+
+async def _const(v):
+    return v
+
+
+# ── 1. L0.5 跑在 L1 之前 ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_l05_runs_before_l1(monkeypatch):
+    """顺序钉死：把 L0.5 挪到 L1 之后，本条必红。
+
+    L1 的 guard 被强行放行（`_count_root_residues` → 99），且预算门保持敞开
+    （est 远高于 target），故两级都**确实跑到**——记录到的是真顺序，不是「L1 没跑」。
+    """
+    mem = _CountingMemory()
+    await _seed(mem, [[TextPart(text="look"), _img(1)], [_img(2)], [_img(3)],
+                      [TextPart(text="ok")]])
+
+    order: list[str] = []
+    real = cm.demote_for_budget
+
+    async def spy_demote(*a, **k):
+        order.append("L0.5")
+        return await real(*a, **k)
+
+    async def spy_fold_root(state, ctx, keep_last, summary):
+        order.append("L1")
+        return 1
+
+    monkeypatch.setattr(cm, "demote_for_budget", spy_demote)
+    monkeypatch.setattr(cm, "fold_root_experience", spy_fold_root)
+    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(99))
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(set()))
+    monkeypatch.setattr(cm, "summarize_for_compact",
+                        lambda s, c, *, scope="task": _const("S"))
+
+    events = await cm.escalating_compact(
+        _state(target_ratio=0.01), _ctx(mem, blobs=_Blobs()),
+        token_estimate=9000, trigger="compact")
+
+    assert order == ["L0.5", "L1"], order
+    # 对照：两级都真的产出了事件（否则「顺序对」可能只是因为某级没跑）
+    assert [e.payload.get("source") for e in events
+            if e.type == "MemoryCompacted"] == ["demote_images", "root_experience"]
+
+
+# ── 2./3. 事件形状 + freed_tokens 真的 > 0 ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_l05_emits_memory_compacted_with_real_freed_tokens():
+    """L0.5 事件 `source="demote_images"`，且 `freed_tokens` **不是 0**。
+
+    Phase 0 之前 `_active_memory_tokens` 把图片一律算 0，这里恒为 0 → est 不减 →
+    编排误判本级白跑而继续升级。故这条断的是「> 0」而不是「>= 0」，并进一步要求
+    它落在「两张图（各 1600）减去两条占位文本」的量级上。
+    """
+    mem = _CountingMemory()
+    await _seed(mem, [[TextPart(text="a"), _img(1)], [_img(2)],
+                      [TextPart(text="b"), _img(3)], [_img(4)]])
+
+    events = await cm.escalating_compact(
+        _state(), _ctx(mem, blobs=_Blobs()), token_estimate=9000, trigger="compact")
+
+    l05 = [e for e in events if e.type == "MemoryCompacted"
+           and e.payload.get("source") == "demote_images"]
+    assert len(l05) == 1
+    p = l05[0].payload
+    assert p["demoted_images"] == 2 and p["superseded_count"] == 2   # keep_recent=2
+    assert p["layer"] == "task" and p["trigger"] == "compact"
+    assert p["freed_tokens"] > 3000, p            # 2 × 1600 − 两条占位的文本 token
+    # 视图侧对照：确实是「最早两张」变成了可解码的占位，最近两张仍是真图
+    view = await _view(mem)
+    found = find_image_placeholders(_all_text(view))
+    assert [r for r, _ in found] == [_ref(1), _ref(2)]
+    assert sum(1 for r in view for p_ in (r.content or [])
+               if not hasattr(p_, "text")) == 2
+
+
+# ── 4. L0.5 顶用时不再升级到 L1 ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_l05_alone_can_stop_escalation(monkeypatch):
+    """est 被 L0.5 压到 target 以下 → 不进 L1。
+
+    L1 的 guard 被强行放行，所以「没进 L1」的唯一可能原因就是预算已达标；
+    对照断言：同一批种子在 `keep_recent` 大到一张都不降时，L1 **确实会跑**。
+    """
+    calls: list[str] = []
+
+    async def spy_fold_root(state, ctx, keep_last, summary):
+        calls.append("L1")
+        return 1
+
+    monkeypatch.setattr(cm, "fold_root_experience", spy_fold_root)
+    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(99))
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(set()))
+    monkeypatch.setattr(cm, "summarize_for_compact",
+                        lambda s, c, *, scope="task": _const("S"))
+
+    seed = [[TextPart(text="a"), _img(1)], [_img(2)], [_img(3)], [_img(4)]]
+
+    mem = _CountingMemory()
+    await _seed(mem, seed)
+    # eff=10000, target_ratio=0.5 → target=5000；est 6000 − freed(≈3100) < 5000
+    events = await cm.escalating_compact(
+        _state(), _ctx(mem, blobs=_Blobs()), token_estimate=6000, trigger="compact")
+    assert calls == []
+    assert events[-1].payload["levels"] == ["demote_images"]
+    assert events[-1].payload["est_after"] < 5000
+
+    # 对照：keep_recent 大到一张都不降 → est 不动 → 照旧升级到 L1
+    mem2 = _CountingMemory()
+    await _seed(mem2, seed)
+    await cm.escalating_compact(
+        _state(keep_recent_images=99), _ctx(mem2, blobs=_Blobs()),
+        token_estimate=6000, trigger="compact")
+    assert calls == ["L1"]
+
+
+@pytest.mark.asyncio
+async def test_keep_recent_images_is_read_from_loop_config():
+    """`keep_recent` 从 `loop_config` 读，不是硬编码的 2。"""
+    for keep, expect_demoted in ((0, 3), (1, 2), (3, 0)):
+        mem = _CountingMemory()
+        await _seed(mem, [[_img(1)], [_img(2)], [_img(3)]])
+        events = await cm.escalating_compact(
+            _state(keep_recent_images=keep), _ctx(mem, blobs=_Blobs()),
+            token_estimate=9000, trigger="compact")
+        got = [e.payload["demoted_images"] for e in events
+               if e.type == "MemoryCompacted" and e.payload.get("source") == "demote_images"]
+        assert got == ([expect_demoted] if expect_demoted else []), keep
+
+
+# ── 5./6. §6.1：L3 折叠前置降级 + 降级后重新 load_view ────────────────────────
+
+
+async def _seed_for_collapse(mem):
+    """折区（最早 3 条）里放一张真图——它正是 L0.5 的 `keep_recent` 保下来的那种。"""
+    await _seed(mem, [[TextPart(text="ORIGINAL-MSG"), _img(7)]])
+    await _seed(mem, [[TextPart(text=f"turn-{i}")] for i in range(1, 5)],
+                role="assistant")
+
+
+@pytest.mark.asyncio
+async def test_collapse_demotes_images_in_fold_range_before_folding():
+    """§6.1（第 5 条）：折区里的真图先降级，ref 随「原始消息」节活下来。
+
+    不降级的话取 `original` 节走 `content_to_text`，这张图会被**静默拍扁**——而它恰
+    是最新的那几张之一，结果是老图留下可取回的占位、最新的图彻底消失。
+    """
+    mem = _CountingMemory()
+    await _seed_for_collapse(mem)
+
+    n = await cm.collapse_task_layer(
+        _state(), _ctx(mem, blobs=_Blobs()), 2, "SUMMARY-TEXT")
+    assert n > 0
+
+    view = await _view(mem)
+    collapsed = [r for r in view if r.metadata.get("collapsed")]
+    assert len(collapsed) == 1
+    original = cm._original_section(collapsed[0].content)
+    assert "ORIGINAL-MSG" in original
+    # ref 确实活在「原始消息」节里，且解得回来（不是被拍扁成空）
+    assert decode_image_placeholder(original) == (_ref(7), "image/png")
+
+
+@pytest.mark.asyncio
+async def test_collapse_reloads_view_after_demote_so_history_is_not_duplicated():
+    """🔴 第 6 条（防静默失效）：`demote_all` 换掉了 record id，之后**必须重新
+    `load_view`**。
+
+    不重新加载的话，下面那次 `fold()` 拿的是降级**前**的 id：被降过的那条一条都
+    supersede 不掉，于是同一段对话在视图里出现两次（旧记录的降级版还活着，坍缩物里
+    又抄了一份原文）；且手里那份旧 records 里仍是真图，取 `original` 节照旧被拍扁。
+
+    两条断言分别钉这两个后果，且都**非永真**：
+    - `ORIGINAL-MSG` 恰好出现一次——「什么都不做」（不坍缩）时它也只出现一次，故补
+      `collapsed` 记录必须存在、且折区记录必须真的消失了；
+    - `original` 节里解得出 ref——旧 records 走 `content_to_text` 解不出。
+    """
+    mem = _CountingMemory()
+    await _seed_for_collapse(mem)
+    before = await _view(mem)
+    assert len(before) == 5
+
+    await cm.collapse_task_layer(_state(), _ctx(mem, blobs=_Blobs()), 2, "SUMMARY-TEXT")
+
+    view = await _view(mem)
+    # 坍缩确实发生了（对照，防「什么都没做」）
+    collapsed = [r for r in view if r.metadata.get("collapsed")]
+    assert len(collapsed) == 1
+    # 同一段对话没有出现两次（不重新 load_view 时这里恰好是 2：被降级的那条 supersede
+    # 不掉、活了下来，坍缩物里又抄了一份原文）
+    assert _all_text(view).count("ORIGINAL-MSG") == 1, _all_text(view)
+    # 折区 3 条 + 保留 2 条 → 坍缩物 1 条 + 保留 2 条
+    assert len(view) == 3, [str(r.content)[:60] for r in view]
+    # 且用的是**降级后**的内容：ref 在，真图不在
+    assert decode_image_placeholder(cm._original_section(collapsed[0].content)) \
+        == (_ref(7), "image/png")
+    assert not any(not hasattr(p, "text")
+                   for r in view if not isinstance(r.content, str)
+                   for p in (r.content or []))
+
+
+@pytest.mark.asyncio
+async def test_fold_root_experience_demotes_its_range_before_folding(monkeypatch):
+    """§6.1 的另一半：`fold_root_experience` 也在动手前降一次自己的折区。"""
+    mem = _CountingMemory()
+    ranges: list[list[str]] = []
+    real = cm.demote_all
+
+    async def spy(memory, ids, ctx, **k):
+        ranges.append(list(ids))
+        return await real(memory, ids, ctx, **k)
+
+    monkeypatch.setattr(cm, "demote_all", spy)
+
+    # 两个已完成顶层单元（各一条 finish 对 assistant 回合）+ 各自的 task 层胶囊
+    for i, tid in enumerate(("old", "new")):
+        addr = MemoryAddress(session_id="s1", task_id=tid, agent_id="a1")
+        await mem.ingest(MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK, address=addr,
+            content=[TextPart(text=f"body-{tid}"), _img(20 + i)],
+            timestamp=_BASE + timedelta(seconds=i), role="user",
+            metadata={"task_id": tid}), _pctx())
+        await mem.ingest(MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
+            address=MemoryAddress(session_id="s1", agent_id="a1"),
+            content=f"done-{tid}", timestamp=_BASE + timedelta(seconds=i),
+            role="assistant",
+            metadata={"origin_task_id": tid, "parent_task_id": None,
+                      "tool_calls": [{"name": "finish_task"}]}), _pctx())
+
+    state = _state()
+    state.scope = MemoryAddress(session_id="s1", task_id="cur", agent_id="a1")
+    n = await cm.fold_root_experience(state, _ctx(mem, blobs=_Blobs()), 1, "EXP")
+
+    assert n > 0
+    assert ranges and ranges[0], "折区为空 → 前置降级没被真的调用"
+    # 折走的是最老那个单元（old）；它的图在被折之前先变成了占位
+    half = MemoryAddress(session_id="s1", agent_id="a1")
+    remaining = await mem.load_view(half, MemoryScope.TASK, _pctx(),
+                                    kinds=cm._TASK_VIEW_KINDS)
+    assert [r.address.task_id for r in remaining] == ["new"]
+
+
+# ── 7. 未注册 BlobStore：行为与改造前一致 ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_without_blob_store_l05_is_a_noop(monkeypatch):
+    """未接 `BlobStore` → 一次 `fold()` 都不发、没有 L0.5 事件、内容逐字节不变。
+
+    对照写在同一用例内：同样的种子接上 blob store 后**确实**降级并写了 memory——
+    否则「什么都没做」的实现也能让上半段通过。
+    """
+    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(0))
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(set()))
+    seed = [[TextPart(text="a"), _img(1)], [_img(2)], [_img(3)]]
+
+    mem = _CountingMemory()
+    await _seed(mem, seed)
+    events = await cm.escalating_compact(
+        _state(), _ctx(mem, blobs=None), token_estimate=9000, trigger="compact")
+
+    assert mem.fold_calls == 0
+    assert not [e for e in events if e.type == "MemoryCompacted"
+                and e.payload.get("source") == "demote_images"]
+    view = await _view(mem)
+    assert [p.data for r in view for p in r.content if not hasattr(p, "text")] \
+        == [_ref(1), _ref(2), _ref(3)]
+
+    # 对照：接上 blob store 的同一批种子确实被降级、确实写了 memory
+    mem2 = _CountingMemory()
+    await _seed(mem2, seed)
+    events2 = await cm.escalating_compact(
+        _state(), _ctx(mem2, blobs=_Blobs()), token_estimate=9000, trigger="compact")
+    assert mem2.fold_calls > 0
+    assert [e.payload["source"] for e in events2 if e.type == "MemoryCompacted"] \
+        == ["demote_images"]
+
+
+@pytest.mark.asyncio
+async def test_null_blob_store_is_treated_as_unregistered():
+    """`NullBlobStore`（`can_externalize=False`）与未注册同路——生产里 registry 给的
+    正是它，不是 `None`。"""
+    mem = _CountingMemory()
+    await _seed(mem, [[_img(1)], [_img(2)], [_img(3)]])
+    null = _Blobs()
+    null.can_externalize = False
+
+    events = await cm.escalating_compact(
+        _state(), _ctx(mem, blobs=null), token_estimate=9000, trigger="compact")
+
+    assert mem.fold_calls == 0
+    assert not [e for e in events if e.type == "MemoryCompacted"
+                and e.payload.get("source") == "demote_images"]
+
+
+# ── 8. 裁定 R2：衰减之后 get_image 给出诚实的「不在这里」 ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_image_is_honest_after_the_placeholder_is_folded_away():
+    """裁定 R2（子设计 §6 优先于 §5）：图被 L1/L3 折进摘要后不再提供取回。
+
+    这条验的是**那条路径是诚实的**——模型得到清楚的「本 task 里没有这个 ref」，
+    而不是崩溃、也不是错图。对照：占位还在时同一次调用**确实**返回 ImagePart，
+    且 blob store 里的字节自始至终都在（判据是「本视图占位里有没有它」，
+    不是「blob 存不存在」）。
+    """
+    mem = _CountingMemory()
+    ids = await _seed(mem, [[TextPart(text="x"), _img(9)]])
+    blobs = _Blobs({_ref(9): b"PNGBYTES"})
+
+    # 先降级，占位落库 → 取得回来
+    assert await demote_for_budget(mem, _SCOPE, _pctx(), keep_recent=0,
+                                   kinds=cm._TASK_VIEW_KINDS) == 1
+    parts = await get_image(mem, _SCOPE, _pctx(), _ref(9), blob_store=blobs,
+                            kinds=cm._TASK_VIEW_KINDS)
+    assert any(not hasattr(p, "text") for p in parts), parts
+
+    # 衰减：承载占位的记录被折进摘要（纯遗忘，模拟 L1）
+    view = await _view(mem)
+    await mem.fold([r.id for r in view], [], _pctx())
+    assert ids  # 原 id 早已被降级换掉，这里只是记明「折的是新 id」
+
+    parts = await get_image(mem, _SCOPE, _pctx(), _ref(9), blob_store=blobs,
+                            kinds=cm._TASK_VIEW_KINDS)
+    assert all(hasattr(p, "text") for p in parts), parts        # 没有错图
+    text = "".join(p.text for p in parts)
+    assert _ref(9) in text and "present in this task" in text   # 说得清楚
+    assert await blobs.get(_ref(9), _pctx()) is not None        # 字节其实还在

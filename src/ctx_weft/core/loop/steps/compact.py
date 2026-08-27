@@ -1,7 +1,8 @@
 """CompactStep：长对话压缩，由 PrepareStep 内联直调（不再以 task 形式调度）。
 
   - 作用域 = 当前 state.scope（当前 task + agent）。
-  - escalating_compact：预算驱动的 L1→L2→L3 升级编排（替旧的双阈值并行折 _compact_scope）。
+  - escalating_compact：预算驱动的 L0.5→L1→L2→L3 升级编排（替旧的双阈值并行折 _compact_scope）。
+    L0.5 = 图片降级（media.demote_for_budget，无 LLM、可逆），排在所有折叠之前（子设计 §6）。
     传入 token_estimate，未达 compact_target_ratio（回退 compact_token_ratio）× context_limit
     时空跑；否则按序试 L1 fold_root_experience（agent 层折叠成 AGENT_COMPACT_SUMMARY）→
     L2 demote_kept_capsules（L1 保留胶囊里 rich→lean 降级，无 LLM）→ L3 collapse_task_layer
@@ -24,6 +25,11 @@ from ctx_weft.core.assembler.assembler import ContextRequest
 from ctx_weft.core.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
+# 模块级 import（**实测不成环**）：`core.media` 的模块级依赖只到 `core.content` /
+# `protocols`，不回指 `core.loop`——`capability.py` 对 `CONTENT_PARTS_KEY` 用的正是
+# 惰性 import，就是为了让这一条能写在模块级（Task 4 台账）。若日后 media 模块级引入了
+# `core.loop` 的东西，这里要退回函数级 import。
+from ctx_weft.core.media import demote_all, demote_for_budget
 from ctx_weft.core.utils import content_to_text, effective_limit, image_tokens, now_utc
 from ctx_weft.protocols import (
     LLMRequest, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
@@ -34,6 +40,24 @@ logger = logging.getLogger(__name__)
 # v2 P3a：类型清单改 kind 视图。task 层全量视图（对话 + 段摘要 + audit）= 旧
 # _TASK_LAYER_TYPES/_TASK_BODY_TYPES 五类型；跨 task 聚合用半址（task_id=None）。
 _TASK_VIEW_KINDS = [MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT]
+
+
+def _media_enabled(ctx) -> bool:
+    """L0.5 与 §6.1 前置降级的总闸：只有真接了**可外部化**的 `BlobStore` 时才跑。
+
+    未注册（`LoopContext.blob_store is None`）或注册的是 `NullBlobStore`
+    （`can_externalize=False`）时，视图里根本不可能存在 `source_type == "ref"` 的图，
+    降级必然返回 0；提前短路省掉整级的读操作，坐实子设计 §10「不接 BlobStore 时行为
+    与改造前完全一致」——包括**一次多余的 memory 读都不发**。
+
+    ⚠️ 这**不是** Task 2 判断题 2 拒绝的「第二处 registry 探询」。那条拒的是拿 registry
+    当「哪些 part 该降」的判据（已注册但存量记录仍是 inline base64 时会放行并把图弄丢）。
+    选谁降级仍然只由 `policy.demotable_ref` 的 ref 判据决定；本闸只能让降级**少做**，
+    不能让它多做。代价是一个边角：曾接过 blob store、现已摘掉的宿主，存量 ref 图不再
+    被降级——那些图本来也 rehydrate 不回来了。
+    """
+    store = getattr(ctx, "blob_store", None)
+    return store is not None and bool(getattr(store, "can_externalize", False))
 
 
 def _agent_half(scope) -> MemoryAddress:
@@ -117,6 +141,24 @@ async def collapse_task_layer(
         return 0
 
     fold = recs if keep_last <= 0 else recs[:-keep_last]
+
+    # §6.1：折叠范围内的残留真图**先无条件降级**（不受 keep_recent 保护）。L0.5 保住了
+    # 最近 keep_recent 张，升级到这一级时它们恰好可能落进折区；不降的话下面取 `original`
+    # 节走 content_to_text 会把它们静默拍扁——最老的图留下了可取回的占位，最新的反而
+    # 痕迹全无，优先级完全颠倒。降级后 ref 随 `original` 节一起活下来。
+    if _media_enabled(ctx) and await demote_all(
+        memory, [r.id for r in fold], ctx.provider_ctx,
+        address=state.scope, scope=MemoryScope.TASK, kinds=_TASK_VIEW_KINDS,
+    ):
+        # 🔴 必须重新 load_view：降级是 fold(旧 id, 新事件)，**record id 全换了**。
+        # 拿降级前采集的 id 去下面那次 fold，被降过的一条都 supersede 不掉 → 同一段
+        # 对话在视图里出现两次；且手里这份 recs 已过期，用它取 `original` 节拿到的仍是
+        # 真图，照旧被拍扁，本段的目的完全落空。
+        recs = await memory.load_view(
+            state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
+        if len(recs) <= keep_last:
+            return 0
+        fold = recs if keep_last <= 0 else recs[:-keep_last]
     kept = [] if keep_last <= 0 else recs[-keep_last:]
 
     # 「原始消息」节 = 折区最早一条 user 回合的原文（已坍缩过则取其原始节，保持有界）
@@ -316,21 +358,47 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     fold_top = top if keep_last <= 0 else top[:-keep_last]
     fold_set = _expand(fold_top)        # 整体折成摘要的单元（含其子树）
 
-    ids: list = []
-    # 折掉 fold_set 单元的 task 层胶囊（user 回合 + 段摘要等；address.task_id 标来源）
-    for r in body_recs:
-        if (r.address.task_id if r.address else r.metadata.get("task_id")) in fold_set:
-            ids.append(r.id)
-    # + 其 agent 层 conversation turn（finish 对 + dispatch 对，同 origin 同命运）+ 旧摘要
-    for r in recs:
-        if (r.kind is MemoryKind.CONVERSATION_TURN
-                and r.metadata.get("origin_task_id") in fold_set):
-            ids.append(r.id)
-        elif r.kind is MemoryKind.SUMMARY:
-            ids.append(r.id)  # 旧摘要并入新摘要
+    def _collect(agent_recs: list, task_recs: list) -> list:
+        """本次要 supersede 的 id 全集。降级会换掉 record id，故这一步必须能重跑。"""
+        out: list = []
+        # 折掉 fold_set 单元的 task 层胶囊（user 回合 + 段摘要等；address.task_id 标来源）
+        for r in task_recs:
+            if (r.address.task_id if r.address else r.metadata.get("task_id")) in fold_set:
+                out.append(r.id)
+        # + 其 agent 层 conversation turn（finish 对 + dispatch 对，同 origin 同命运）+ 旧摘要
+        for r in agent_recs:
+            if (r.kind is MemoryKind.CONVERSATION_TURN
+                    and r.metadata.get("origin_task_id") in fold_set):
+                out.append(r.id)
+            elif r.kind is MemoryKind.SUMMARY:
+                out.append(r.id)  # 旧摘要并入新摘要
+        return out
 
+    ids = _collect(recs, body_recs)
     if not ids:
         return 0
+
+    # §6.1：折叠范围内的残留真图先无条件降级（不受 keep_recent 保护），理由同
+    # collapse_task_layer 处。折区横跨两个视图，故两次 demote_all（各自 load_view）。
+    if _media_enabled(ctx):
+        demoted = await demote_all(
+            memory, ids, ctx.provider_ctx, address=_agent_half(state.scope),
+            scope=MemoryScope.TASK, kinds=_TASK_VIEW_KINDS)
+        demoted += await demote_all(
+            memory, ids, ctx.provider_ctx, address=_agent_half(state.scope),
+            scope=MemoryScope.AGENT)
+        if demoted:
+            # 🔴 必须重新 load_view + 重算 ids：降级换掉了 record id，拿旧 id 去下面那次
+            # fold，被降过的一条都 supersede 不掉 → 同一段对话在视图里出现两次
+            # （旧的没被 supersede、新的补偿记录也活着），而摘要已按旧内容生成。
+            recs = await memory.load_view(
+                _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
+            body_recs = await memory.load_view(
+                _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx,
+                kinds=_TASK_VIEW_KINDS)
+            ids = _collect(recs, body_recs)
+            if not ids:
+                return 0
 
     # 折出新摘要：仅当确有单元被折时写（纯遗忘 = fold(ids, [])）
     if not fold_top:
@@ -430,7 +498,7 @@ async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -
 async def escalating_compact(
     state: LoopState, ctx: LoopContext, *, token_estimate: int, trigger: str = "compact"
 ) -> list[Any]:
-    """预算驱动升级式 compact（替 _compact_scope）：L1 agent 折 → L2 rich→lean → L3 坍当前 task，
+    """预算驱动升级式 compact（替 _compact_scope）：L0.5 图片降级 → L1 agent 折 → L2 rich→lean → L3 坍当前 task，
     每级后用 _active_memory_tokens 的增量从 token_estimate 累减，降到 target 以下即停。
     级间不完整重装配（Q4=c，调用方进 act 前重装配一次校正）。无 context_limit 或已达标 → []。"""
     agent = state.agent
@@ -445,6 +513,8 @@ async def escalating_compact(
     target_tokens = int(eff * target_ratio)
     keep_last = lc.compact_keep_last
     collapse_keep = getattr(lc, "collapse_keep_last", keep_last)
+    # §12 未决参数，暂定 2 —— 从 loop_config 读（与 compact_keep_last 等同构），不硬编码。
+    keep_recent_images = getattr(lc, "compact_keep_recent_images", 2)
 
     est = token_estimate
     if est < target_tokens:
@@ -488,6 +558,26 @@ async def escalating_compact(
         est -= freed
         last_tokens = after
         return n, freed
+
+    # L0.5 · 图片降级（子设计 §6：排在所有折叠之前）
+    # 三条理由：无 LLM（不花一次调用）、单位收益最高（一张图按当前口径最低 1600 token，
+    # 满额 5MB 图 40960）、**可逆**（占位仍在原位，模型随时 media:get_image 取回）。
+    # L1/L2/L3 折的是记录本身，一旦执行位置就没了；所以先花可逆的额度。
+    # 未接 BlobStore 时 _media_enabled 直接短路，本级连一次 memory 读都不发（§10）。
+    if _media_enabled(ctx):
+        n, freed = await _apply(demote_for_budget(
+            ctx.memory, _agent_half(state.scope), ctx.provider_ctx,
+            keep_recent=keep_recent_images, scope=MemoryScope.TASK,
+            kinds=_TASK_VIEW_KINDS))
+        if n:
+            # 注：本级的 n 是**图片张数**，不是记录条数（记录并没有被折走，只是被重写）。
+            # 仍填进 superseded_count 以与各级同构、让 MemoryCompactFinished 的聚合口径
+            # 不必分叉；真正无歧义的计数在 demoted_images。
+            events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
+                "superseded_count": n, "demoted_images": n, "layer": "task",
+                "source": "demote_images", "trigger": trigger, "freed_tokens": freed}))
+    if est < target_tokens:
+        return _finish(events)
 
     # L1 · agent 折（仅当有可折顶层单元）
     if await _count_root_residues(state, ctx) > keep_last:

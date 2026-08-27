@@ -83,6 +83,11 @@ class LoopConfig:
     compact_message_delta: int = 20      # DEPRECATED（2026-07-01）：compact 改纯预算驱动，本字段不再被读
     compact_keep_last: int = 6           # 保留底线（非触发门）：agent 层折叠保留的胶囊数；更老的折成摘要
     collapse_keep_last: int = 3          # 保留底线（非触发门）：task 坍缩保留的最近段摘要条数
+    # L0.5 图片降级（image fold/replay 子设计 §6/§12）：escalating_compact 在 L1 之前把
+    # memory 里的真图换成含 ref 的文本占位，保留**最近这么多张**不降（按图片张数数，一条
+    # 记录可以只降一部分）。模型对最近几张图的依赖最强，且降级可逆（media:get_image 取回）。
+    # §12 记为未决参数，暂定 2，待实测校准——故做成配置项而非常量。
+    compact_keep_recent_images: int = 2
     # 派发前压缩阈值：派发工具调用执行前，若本轮 prompt token / context_limit >= 此值，
     # 先对父自身 task 层对话压缩一次（fold_task），使父 resume 更精简、inherit 快照为
     # 压缩后版本。0 = 关闭（默认）。通常设得比 compact_token_ratio 更早触发。
