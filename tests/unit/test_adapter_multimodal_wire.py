@@ -75,9 +75,13 @@ def test_openai_user_image_becomes_image_url():
 
 
 def test_openai_tool_message_flattens_to_text():
-    """OpenAI 的 role="tool" 只接受文本——本 Phase 刻意拍扁，不得抛，且不得泄漏图片的
-    base64/repr（fix round 1 finding 1/2：拍扁兜底若误用 str(p)，ImagePart 的完整 base64 +
-    元数据会原样拼进发给模型的文本）。"""
+    """OpenAI 的 role="tool" 只接受文本——tool 消息本身恒被拍扁成 str，不得抛，且不得
+    泄漏图片的 base64/repr（fix round 1 finding 1/2：拍扁兜底若误用 str(p)，ImagePart 的
+    完整 base64 + 元数据会原样拼进发给模型的文本）。
+
+    Phase 3c Task B 起图片不再被**静默丢弃**，而是重定位到随后追加的一条 user 消息
+    （见 test_openai_tool_image_relocation.py）；本用例只看 ``out[0]``，钉的是「tool
+    消息这一条仍是安全的纯文本」，该性质未变。"""
     out = oai("", [LLMMessage(role="tool", content=[TextPart(text="r"), _img()],
                               tool_call_id="tc1")])
     content = out[0]["content"]

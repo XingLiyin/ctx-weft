@@ -49,7 +49,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
-from ctx_weft.core.content import rehydrate_content
+from ctx_weft.core.content import downgrade_images_to_text, rehydrate_content
 from ctx_weft.core.events.types import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.utils import (
@@ -376,11 +376,47 @@ def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
     )
 
 
+def _gate_tool_images(llm: "LLMClient", messages: list[LLMMessage]) -> list[LLMMessage]:
+    """无视觉模型：把 ``role == "tool"`` 消息里的图片收成确定性文本占位（Phase 3c Task B）。
+
+    **为什么落在 gateway 而不是 adapter**：``supports_vision`` 是 duck-typed、**不在
+    ``LLMClient`` 协议上**（``protocols/llm.py`` 明写「可选（duck-typed，非协议必需）」）。
+    adapter 自己不声明它，声明它的是包在外面的 ``_FixedModelClient``——在 adapter 内
+    ``getattr(self, "supports_vision", False)`` **恒为 False**，门控写在那儿会把**所有**
+    工具图降级掉，视觉模型也一起误伤。本函数与 Phase 3b 的 rehydrate 同处一个关口
+    （唯一的 async 边界、拿得到真正的 llm 对象），且**一处覆盖两家 adapter**——
+    Anthropic 虽原生支持 tool_result 图片块，在无视觉模型上同样不该发。
+
+    **为什么只降 tool 角色**：用户递的图在入口已被 ``validate_content`` 按同一
+    ``supports_vision`` 门控拒掉；工具产出的图**从未经过入口**，是唯一的漏网路径。
+    降别的角色属越权（而且会把入口已放行的图再降一次）。
+
+    **放在 rehydrate 之前**：注定要被降级的图不必先去 BlobStore 取一趟回来。
+    ``downgrade_images_to_text`` 对 ref 形态同样只读 ``media_type``，占位文本不变。
+
+    未声明 ``supports_vision`` 一律按无视觉处理（严格默认，同 ``validate_content``）。
+    纯文本消息返回**同一对象**，无图会话逐字节无影响。
+    """
+    if getattr(llm, "supports_vision", False):
+        return messages
+    out: list[LLMMessage] = []
+    changed = False
+    for m in messages:
+        if m.role == "tool":
+            downgraded = downgrade_images_to_text(m.content)
+            if downgraded is not m.content:
+                m = dataclasses.replace(m, content=downgraded)
+                changed = True
+        out.append(m)
+    return out if changed else messages
+
+
 async def stream_llm(
     llm: "LLMClient", request: "LLMRequest", *, stream: bool = True,
     blob_store: "Any" = None, provider_ctx: "Any" = None,
 ) -> AsyncIterator["LLMChunk"]:
-    """发送前合法化 ``request.messages``、把 blob ref 还原成 base64，再流式转发 chunk。
+    """发送前合法化 ``request.messages``、按视觉能力门控工具图、把 blob ref 还原成
+    base64，再流式转发 chunk。
 
     rehydrate 落在这里而非 adapter（架构裁定 T0）：adapter 的序列化链
     （``_build_payload`` / ``_serialize_messages`` / ``_parts_to_blocks``）全是同步
@@ -392,6 +428,7 @@ async def stream_llm(
     blob store 是 per-runtime 依赖，藏进全局状态会让测试互相污染。
     """
     request.messages = legalize_messages(request.messages)
+    request.messages = _gate_tool_images(llm, request.messages)
     if blob_store is not None:
         request.messages = [
             dataclasses.replace(m, content=await rehydrate_content(

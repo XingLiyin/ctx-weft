@@ -30,6 +30,15 @@ _OPENAI_API_URL = "https://api.openai.com"
 _NON_RETRIABLE_CODES = frozenset({400, 401, 403, 404})
 _RETRIABLE_CODES     = frozenset({429, 500, 502, 503, 504})
 
+# OpenAI 的 role="tool" 只接受纯文本，图片必须重定位到随后的 user 消息（Phase 3c Task B）。
+# 这条标记把「图去哪了」告诉模型，替代改前的**静默丢弃**。
+#
+# **必须逐字节确定**（同用户裁定 D2 的缓存理由）：不得含 blob sha / 随机 id / 时间戳 /
+# 跨调用计数器——tool 结果处在缓存前缀的中段，标记每次不同会把其后的整段前缀缓存砸掉。
+# 同一段内的多张图共用同一条标记，不加序号（图按 tool 消息顺序合并进同一条 user 消息，
+# 模型不需要靠序号对齐）。
+_TOOL_IMAGE_NOTICE = "\n\n[图片见后一条消息]"
+
 
 class OpenAIAdapter(LLMClient):
     """Async OpenAI chat completions adapter."""
@@ -376,7 +385,9 @@ def _serialize_messages(
     if system:
         result.append({"role": "system", "content": system})
 
-    for m in messages:
+    i = 0
+    while i < len(messages):
+        m = messages[i]
         if m.role == "assistant" and m.tool_calls:
             content: Any = (m.content if isinstance(m.content, str)
                             else _parts_to_blocks(m.content))
@@ -395,13 +406,37 @@ def _serialize_messages(
             if m.reasoning_content:
                 msg["reasoning_content"] = m.reasoning_content
             result.append(msg)
+            i += 1
         elif m.role == "tool":
-            content = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
-            result.append({
-                "role": "tool",
-                "tool_call_id": m.tool_call_id or "",
-                "content": content,
-            })
+            # 批处理**整段连续 tool 消息**（与 anthropic.py 的 tool 分支同构）：每条仍只发
+            # 文本，图片攒起来，整段结束后合并成一条 user 消息追加（见 _TOOL_IMAGE_NOTICE）。
+            relocated: list[Any] = []
+            while i < len(messages) and messages[i].role == "tool":
+                tm = messages[i]
+                if isinstance(tm.content, str):
+                    # 纯文本 str 形态：原样透传，wire 逐字节不变。
+                    content = tm.content
+                else:
+                    images = [p for p in (tm.content or [])
+                              if getattr(p, "type", None) == "image"]
+                    text = _parts_to_text(tm.content)
+                    if images:
+                        relocated.extend(images)
+                        # 纯图片结果（text 为空）时不拼前导空行——OpenAI 的 tool content
+                        # 为空会被拒（同 anthropic.py 的 _EMPTY_TOOL_RESULT_CONTENT 理由），
+                        # 标记本身就是那条非空占位。
+                        content = (f"{text}{_TOOL_IMAGE_NOTICE}" if text
+                                   else _TOOL_IMAGE_NOTICE.lstrip("\n"))
+                    else:
+                        content = text
+                result.append({
+                    "role": "tool",
+                    "tool_call_id": tm.tool_call_id or "",
+                    "content": content,
+                })
+                i += 1
+            if relocated:
+                result.append({"role": "user", "content": _parts_to_blocks(relocated)})
         else:
             content = (m.content if isinstance(m.content, str)
                        else _parts_to_blocks(m.content))
@@ -409,6 +444,7 @@ def _serialize_messages(
             if m.role == "assistant" and m.reasoning_content:
                 entry["reasoning_content"] = m.reasoning_content
             result.append(entry)
+            i += 1
 
     return result
 
