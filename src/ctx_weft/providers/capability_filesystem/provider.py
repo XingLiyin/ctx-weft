@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import glob as _glob
-import hashlib
 import logging
 import os
 import platform
@@ -35,7 +34,7 @@ from ctx_weft.protocols.capability import (
     ToolCapabilityProvider,
 )
 from ctx_weft.protocols.context import ProviderContext
-from ctx_weft.protocols.filesystem import BLOB_REF_PREFIX, FS_PROVIDER_NAME, BlobStore, SpillSink
+from ctx_weft.protocols.filesystem import FS_PROVIDER_NAME, SpillSink
 from ctx_weft.providers._encoding import decode_console
 from ctx_weft.providers._script_runner import run_with_liveness
 from ctx_weft.providers._tooldecl import make_tool_registry
@@ -583,7 +582,7 @@ class FilesystemConfig:
 # ── Provider ──────────────────────────────────────────────────────────────────
 
 
-class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, BlobStore,
+class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink,
                               SessionScopedCapabilityProvider):
     """文件系统工具 provider：shell, read_file, write_file, edit_file, glob, grep + per-session workspace。
 
@@ -651,59 +650,6 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, BlobStore,
     def _write_text(file_path: Path, content: str) -> None:
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding="utf-8")
-
-    # ── BlobStore ─────────────────────────────────────────────────────────────
-
-    def _blob_paths(self, ws: str, sha: str) -> tuple[Path, Path]:
-        """内容文件与其 media_type 伴生文件的路径：<workspace>/blobs/<sha[:2]>/<sha[2:4]>/<sha>[.meta]。"""
-        blob_dir = Path(ws) / "blobs" / sha[:2] / sha[2:4]
-        content_path = blob_dir / sha
-        meta_path = blob_dir / f"{sha}.meta"
-        return content_path, meta_path
-
-    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
-        """BlobStore：内容寻址存入 workspace/blobs/，同 sha 幂等——已存在则不重写。
-
-        media_type 冲突语义：先写入者胜。put 本就是「已存在则跳过」的幂等写，media_type
-        沿用同一条规则最省心——不必新增判断分支去决定「谁能覆盖谁」；也避免了「同一份
-        数据被哪次 put 认领的 media_type，取决于调用顺序」这种难以复现的行为。
-        """
-        ws = self.workspace_for(ctx)
-        if ws is None:
-            raise RuntimeError(f"no workspace registered for session {ctx.session_id!r}")
-        sha = hashlib.sha256(data).hexdigest()
-        content_path, meta_path = self._blob_paths(ws, sha)
-        await asyncio.to_thread(self._write_blob_if_absent, content_path, meta_path, data, media_type)
-        return f"{BLOB_REF_PREFIX}{sha}"
-
-    @staticmethod
-    def _write_blob_if_absent(content_path: Path, meta_path: Path, data: bytes, media_type: str) -> None:
-        if content_path.exists():
-            return  # 先写入者胜：内容与 media_type 都不再被后来的 put 覆盖。
-        content_path.parent.mkdir(parents=True, exist_ok=True)
-        content_path.write_bytes(data)
-        meta_path.write_text(media_type, encoding="utf-8")
-
-    async def get(
-        self, ref: str, ctx: ProviderContext
-    ) -> "tuple[bytes, str] | None":
-        """BlobStore：按 ref 还原 (data, media_type)；ref 不存在 / workspace 未登记一律返回 None，不抛。"""
-        ws = self.workspace_for(ctx)
-        if ws is None:
-            return None
-        if not ref.startswith(BLOB_REF_PREFIX):
-            return None
-        sha = ref[len(BLOB_REF_PREFIX):]
-        content_path, meta_path = self._blob_paths(ws, sha)
-        return await asyncio.to_thread(self._read_blob, content_path, meta_path)
-
-    @staticmethod
-    def _read_blob(content_path: Path, meta_path: Path) -> "tuple[bytes, str] | None":
-        if not content_path.is_file():
-            return None
-        data = content_path.read_bytes()
-        media_type = meta_path.read_text(encoding="utf-8") if meta_path.is_file() else "application/octet-stream"
-        return data, media_type
 
     # ── CapabilityProvider 接口 ───────────────────────────────────────────────
 

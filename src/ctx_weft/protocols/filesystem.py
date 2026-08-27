@@ -53,7 +53,13 @@ class BlobStore(ABC):
     """core 的「二进制 sink」契约：存取图片等二进制内容，core 只见 ref。
 
     与同处的 SpillSink 同形——core 不直接碰存储，只知道「有个 sink 能存能取」。
-    宿主侧实现落点也相同（FilesystemToolsProvider 已持有 per-session workspace）。
+
+    **实现落点在 memory**（裁定 D4）：事件里存的永远是短标记、从不存字节，
+    故 memory 是图片字节的唯一持有者，存取与回收都应与它同事务。
+    仓内实现见 ``ctx_weft.providers.memory_sql.SqlMemoryProvider``；
+    ``ProviderRegistry.get_blob_store()`` 在未显式注册时会自动解析到 memory provider。
+    （Phase 3b 曾有一个挂在 FilesystemToolsProvider 上的实现，裁定 D5 已移除——
+    字节与引用分居两处时，回收无法与 ingest/fold 事务性地一致。）
 
     put 必须**内容寻址且幂等**：同样的 data 返回同样的 ref，重复调用不重复存。
     这同时给到三件事：写入端去重、重放安全、以及 rehydrate 字节稳定——同一 ref

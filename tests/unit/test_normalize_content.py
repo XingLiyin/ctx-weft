@@ -41,7 +41,7 @@ class _CountingNullStore(NullBlobStore):
 
 
 class _CountingStore(BlobStore):
-    """能真正外部化的 stub store（内容寻址，与 FilesystemBlobStore 的 ref 形态一致）。"""
+    """能真正外部化的 stub store（内容寻址，与 SqlMemoryProvider 的 ref 形态一致）。"""
 
     def __init__(self) -> None:
         self.put_calls = 0

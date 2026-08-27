@@ -104,6 +104,10 @@ def _supports_blobs(m: MemoryProvider) -> bool:
 
     `can_externalize` 为 False 的 store（如 NullBlobStore）算不支持——探询而非
     调 put 捕异常，理由见 `BlobStore.can_externalize` 的 docstring。
+
+    自 Task C3 起本探测在两个 provider 上分开：``sqlite`` 真跑（裁定 D4），
+    ``in_memory`` 仍 skip（裁定 D6）——**这正是用户要的双模式对照**：
+    一个实现支持多模态 blob、一个不支持，同一套契约对两者都成立。
     """
     return isinstance(m, BlobStore) and m.can_externalize
 

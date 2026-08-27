@@ -37,6 +37,7 @@ __all__ = [
     "normalize_content",
     "rehydrate_content",
     "downgrade_images_to_text",
+    "extract_blob_refs",
 ]
 
 
@@ -440,6 +441,32 @@ def _is_ref_part(part: Any) -> bool:
     if _part_field(part, "source_type", "base64") == "ref":
         return True
     return str(_part_field(part, "data", "") or "").startswith(BLOB_REF_PREFIX)
+
+
+def extract_blob_refs(content: "str | list[ContentPart] | None") -> list[str]:
+    """内容里引用到的全部 blob ref（``blob:<sha>``），去重、保持首次出现顺序。
+
+    **归一层是 ref 判据的唯一真源**（spec §3①）：持久化侧（`providers/memory_sql`
+    的引用表）必须调本函数，不得各写一遍 isinstance——判据一旦分叉，
+    「哪些 blob 还活着」就会和「出网时哪些 part 会被 rehydrate」对不上，
+    而那正好是「回收删掉了还在用的图」的成因。
+
+    判据复用 ``_is_ref_part``（dataclass / dict 两种形态都认，
+    ``source_type == "ref"`` 或 ``data`` 以 ``blob:`` 开头），故与
+    ``rehydrate_content`` 会去 ``BlobStore.get`` 的那批 part **逐一对应**。
+
+    ``str`` / ``None`` / 无 ref 一律返回空列表（不接 BlobStore 的宿主永远走这条）。
+    """
+    if not content or isinstance(content, str):
+        return []
+    seen: dict[str, None] = {}
+    for part in content:
+        if not _is_ref_part(part):
+            continue
+        ref = str(_part_field(part, "data", "") or "")
+        if ref.startswith(BLOB_REF_PREFIX):
+            seen.setdefault(ref, None)
+    return list(seen)
 
 
 def _replace_part(part: Any, **changes: Any) -> Any:

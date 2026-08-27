@@ -1,4 +1,4 @@
-"""SQLAlchemy 表模型：``memory_events`` / ``memory_subscriptions``。
+"""SQLAlchemy 表模型：``memory_events`` / ``memory_subscriptions`` / ``memory_blobs`` / ``memory_blob_refs``。
 
 **平滑切换约束（裁定 D4）**：表名与既有列**逐字保持**与宿主
 （`IpMasterCoworkPy/src/ipmastercowork/persistence/postgres/models.py` 的
@@ -24,6 +24,10 @@
 `ix_subscriptions_tenant_session_task_topic`（4 列）。宿主切换时须
 **先 DROP 旧唯一索引**，否则两个租户的同 (session, task, topic) 订阅会撞 IntegrityError。
 这是「让两个租户能各有一条订阅」的必要条件，无法靠只加列绕开。
+
+**两张全新的表**（Task C3，宿主无存量，直接建即可）：``memory_blobs``（字节本体）
+与 ``memory_blob_refs``（事件 → blob 的引用边）。它们不受「只加 nullable 列」约束的限制
+（那条约束针对的是宿主已有行的两张表）。
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     TypeDecorator,
@@ -111,6 +116,47 @@ class MemoryEventModel(Base):
         Index("ix_memory_tenant_agent", "tenant", "session_id", "layer", "agent_id"),
         Index("ix_memory_tenant_topic", "tenant", "topic", "topic_seq_no"),
     )
+
+
+class MemoryBlobModel(Base):
+    """图片等二进制内容的**字节本体**（裁定 D4：blob 并入 memory，字节也一并）。
+
+    `memory_events` 里存的永远是 ``[image image/png ref:blob:deadbe…]`` 这类短标记
+    （`redact_content_for_event`），**从不存字节**——故本表是整个系统里图片字节的
+    唯一持有者，事件库任何情况下都重建不出一张图。
+
+    **主键是 sha，没有 tenant 列**：内容寻址本就是跨租户去重的
+    （同一份字节 → 同一个 sha → 同一行）。三处租户取向见
+    `provider.SqlMemoryProvider` 的【blob 与租户】docstring。
+
+    ``created_at`` 是**回收宽限期的锚点**，每次 ``put``（含命中已有行的幂等 put）
+    都会刷新：它记的不是「这份字节第一次出现的时间」，而是「最后一次有人声称
+    要用它的时间」。理由见 provider 的 `collect_blobs`。
+    """
+
+    __tablename__ = "memory_blobs"
+
+    sha: Mapped[str] = mapped_column(String(64), primary_key=True)
+    media_type: Mapped[str] = mapped_column(String(64), default="")
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, server_default=func.now())
+
+
+class MemoryBlobRefModel(Base):
+    """事件 → blob 的引用边（spec §5.2 设想的 side index，但长在 memory 内部）。
+
+    正因为它在 memory 内部，写入才能与 ``ingest`` **同一个事务**——这是原方案
+    （blob 在 filesystem provider、引用索引在别处）做不到的：那边无论如何都会存在
+    「事件已落库、引用还没记上」的窗口。
+
+    没有外键约束：宿主的 `memory_events` 是存量表，加 FK 需要 DDL 且会在
+    「先写 blob 后写 event」的顺序上反过来添乱。活性判定靠 JOIN，见 `collect_blobs`。
+    """
+
+    __tablename__ = "memory_blob_refs"
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    sha: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
 
 
 class MemorySubscriptionModel(Base):

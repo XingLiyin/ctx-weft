@@ -24,10 +24,10 @@ from ctx_weft.protocols import (
     ImagePart, LLMChunk, LLMUsage, MemoryEventType, ProviderContext, TextPart, ToolCall,
 )
 from ctx_weft.protocols.filesystem import BLOB_REF_PREFIX
-from ctx_weft.providers.capability_filesystem import FilesystemToolsProvider
 from ctx_weft.providers.llm.anthropic import AnthropicAdapter
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory_sql import open_sqlite_memory
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -371,7 +371,11 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
 
 @pytest.mark.asyncio
 async def test_ref_externalized_in_memory_but_full_base64_on_the_wire(tmp_path) -> None:
-    """覆盖 1（ref 全链路）：注册**真** BlobStore（FilesystemToolsProvider，Task 1）后——
+    """覆盖 1（ref 全链路）：注册**真** BlobStore（``SqlMemoryProvider``，Task C3）后——
+
+    Phase 3b 时这里挂的是 ``FilesystemToolsProvider``；裁定 D5 移除了那个实现，
+    改挂 SQL provider。**三条断言一字未改**——它们钉的是「ref 全链路」本身，
+    与 blob 存哪里无关，换实现后仍全绿就是契约面未漂移的证据。
 
     a) core 侧（memory 记录）里的图是 ``source_type="ref"`` 的 ``blob:<sha>``，
        **不再是 base64**（证明 Task 2 的入口外部化在真实 start_session 上生效）；
@@ -382,11 +386,13 @@ async def test_ref_externalized_in_memory_but_full_base64_on_the_wire(tmp_path) 
     杀不掉「rehydrate 还原出了别的字节」这类损坏。
     """
     session_id = "ses_blob_e2e"
-    fs = FilesystemToolsProvider()
-    fs.register_session(session_id, str(tmp_path / "ws"))
+    async with open_sqlite_memory(tmp_path / "blobs.db") as blob_store:
+        await _assert_ref_roundtrip(blob_store, session_id)
 
+
+async def _assert_ref_roundtrip(blob_store, session_id: str) -> None:
     _rt, memory, state, llm = await _run_multimodal_session(
-        blob_store=fs, session_id=session_id,
+        blob_store=blob_store, session_id=session_id,
     )
 
     # (a) memory 侧只见 ref
@@ -408,7 +414,7 @@ async def test_ref_externalized_in_memory_but_full_base64_on_the_wire(tmp_path) 
 
     # blob 真的落盘了，且内容就是原始字节（外部化不是「把 data 改成个假 ref」）
     ctxp = ProviderContext(session_id=session_id)
-    got = await fs.get(images[0].data, ctxp)
+    got = await blob_store.get(images[0].data, ctxp)
     assert got is not None, f"blob {images[0].data!r} 没有真的落进 store"
     assert got[0] == _RAW_IMAGE_BYTES
     assert got[1] == "image/png"

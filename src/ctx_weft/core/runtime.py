@@ -213,6 +213,7 @@ class ProviderRegistry:
         self._capability_authorizers: dict[str, Authorizer] = {}  # provider_name or capability_id → Authorizer
         self._llm_provider: LLMClientResolver | None = None
         self._blob_store: "BlobStore | None" = None
+        self._null_blob_store: "BlobStore | None" = None
 
     # ── Memory ────────────────────────────────────────────────────────────────
 
@@ -303,11 +304,29 @@ class ProviderRegistry:
         self._blob_store = store
 
     def get_blob_store(self) -> "BlobStore":
-        """取 blob store；未注册时返回 NullBlobStore（行为与不接 blob 完全一致）。"""
-        if self._blob_store is None:
+        """取 blob store。优先级：**显式注册 > memory provider > NullBlobStore**。
+
+        中间那一级是裁定 D4（blob 并入 memory）的接线点：memory provider
+        若同时实现了 ``BlobStore`` 且 ``can_externalize``（如
+        ``providers.memory_sql.SqlMemoryProvider``），它就是字节的持有者，
+        宿主不必再单独注册一遍。纯内存 provider 据裁定 D6 不实现
+        ``BlobStore``，回落 ``NullBlobStore`` ——不接 blob 的宿主行为逐字节不变。
+
+        探询走 ``can_externalize`` 而不是“调 put 捕异常”（Phase 1 终审契约）。
+        回落结果**不缓存到** ``self._blob_store``：缓存会让
+        “先 get_blob_store()、后 register_memory()” 的接线顺序静默地拿不到 memory。
+        ``NullBlobStore`` 实例仍只建一次，重复调用返回同一对象。
+        """
+        if self._blob_store is not None:
+            return self._blob_store
+        from ctx_weft.protocols import BlobStore as _BlobStore
+        mem = self._memory
+        if isinstance(mem, _BlobStore) and mem.can_externalize:
+            return mem
+        if self._null_blob_store is None:
             from ctx_weft.protocols import NullBlobStore
-            self._blob_store = NullBlobStore()
-        return self._blob_store
+            self._null_blob_store = NullBlobStore()
+        return self._null_blob_store
 
 
 # ── SessionStartParams ────────────────────────────────────────────────────────
