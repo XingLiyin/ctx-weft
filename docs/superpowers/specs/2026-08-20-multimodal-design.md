@@ -237,6 +237,16 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 清理责任留给宿主。§5.2 提到的 side index 与 `deregister_session` 挂钩**未实现**，
 本 Phase 不做任何 GC / 引用计数 / TTL。
 
+> **订正（Phase 3c Task C3，2026-08-27，commit `65dd606`）**：本节整段描述的
+> `FilesystemBlobStore` **已按用户裁定 D5 移除**（全仓 `src/` 零引用），原文保留以存
+> 上下文——它仍是理解「内容寻址 / 幂等 / `get` 恒不抛 / 前缀检查是安全护栏」这几条
+> `BlobStore` 契约的完整样本，那些契约**一条未变**，只是换了实现。
+>
+> 现在的落点是 `SqlMemoryProvider` 的 `memory_blobs` / `memory_blob_refs` 两张表
+> （裁定 D4：blob 并入 memory），引用边在 `ingest` 的**同一个事务**里写；GC 由
+> `collect_blobs()` 做（延迟、幂等、**不在协议里、宿主须自己定时调**）。
+> 「本 Phase 只做不删」这条**已不再成立**。**详见 §14.4。**
+
 ### 5.5 ⚠️ 宿主接线的隐式契约（Phase 3b Task 5 实测，最容易踩的一条）
 
 **接了真 BlobStore 的宿主，必须显式传 `SessionStartParams.session_id`，并在调用
@@ -253,6 +263,13 @@ GC 挂现有 session 生命周期钩子（`SessionScopedCapabilityProvider.dereg
 pre-register session-scoped resources, e.g. the filesystem provider's workspace」），
 没有任何文档把它和 BlobStore 串起来。Task 5 的端到端测试按简报字面写会直接
 `RuntimeError`，正是踩到了这一条。**这是「距离真正接线还差什么」的直接答案之一。**
+
+> **订正（Phase 3c Task C3）**：这条隐式契约来自 `FilesystemBlobStore` 的
+> `workspace_for(ctx)`，**随该实现移除而不再适用**于 blob-in-memory 形态——
+> `SqlMemoryProvider` 不需要 workspace。原文保留：它对仍在用
+> `FilesystemToolsProvider` 的 `SpillSink` 路径依然成立，也是「实现专有的接线契约
+> 会怎样咬人」的样本。**Phase 3c 之后的接线契约见 §14.4 与
+> [宿主迁移清单](../../host-migration-to-sql-memory.md)。**
 
 ## 6. 分层改动
 
@@ -398,6 +415,13 @@ def image_tokens(content: "str | list[ContentPart] | None") -> int:
     return _IMAGE_PART_TOKENS * sum(1 for p in content if not hasattr(p, "text"))
 ```
 
+> **订正（Phase 3c Task D，2026-08-27，commit `1be2296`，用户裁定 D2）**：上面这个
+> 「每张图恒 `_IMAGE_PART_TOKENS`」的函数体**已被推翻**，现行实现是逐 part
+> `max(_IMAGE_PART_TOKENS, image_byte_size(part) // 128)`，体积未知时回落旧常数。
+> 原文保留以存上下文（「不能直接改用 `estimate_content_tokens`」那条理由仍然成立、
+> 仍是现行设计的一部分）。**系数 128 的完整推导、以及「它建模的是字节压力而不是
+> 计费 token」这条要紧的界定，见 §14.3。**
+
 五处一律改成 `既有的文本计数 + image_tokens(content)`，**纯文本逐字节恒等**。
 `estimate_content_tokens` 重构成复用 `image_tokens`，使 `_IMAGE_PART_TOKENS` 保持
 单一真源（`prepare.py:74,95` / `llm_gateway.py:281` 的既有行为不变）。
@@ -540,6 +564,15 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 > 调用方（当前是 `role="tool"` 的拍扁路径）若需要占位符（如「[image unavailable]」
 > 或「[见下条工具结果]」之类的用户可见提示），需在调用方自己加，`_parts_to_text`
 > 本身不做。
+>
+> > **已兑现（Phase 3c Task B，2026-08-27，commit `76c86cd`）**：这条重定位**已实现**，
+> > 「Phase 4 之前必须补上」的前置条件因此解除。`_serialize_messages` 已改成
+> > `while` 索引循环、批处理整段连续 tool 消息、**段末 flush 一条合并的 user 消息**
+> > （段末是 OpenAI `tool_calls` 配对要求带来的**硬约束**）。视觉门控另落在
+> > **gateway**（`_gate_tool_images`，在 `legalize_messages` 之后、rehydrate 之前）
+> > 而非 adapter，因为 `supports_vision` 是 duck-typed、不在 `LLMClient` 协议上。
+> > **详见 §14.6。** `_parts_to_text` 的「非文本 part 一律跳过、不产出占位符」这条
+> > 不变式**未变**，占位仍由调用方（现在是 tool 分支自己）加。
 
 > **Phase 2 端到端出网验证（Task 7，2026-08-23）**：
 > `tests/integration/test_multimodal_end_to_end.py::
@@ -640,6 +673,13 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 | wire 格式转换与 rehydrate | `providers/llm/*` |
 | blob 本体存储与 GC | 宿主（`FilesystemToolsProvider` 或对象存储） |
 
+> **订正（Phase 3c，裁定 D4/D5）**：末行已变——blob 本体与引用表归
+> **memory provider**（`providers/memory_sql/`，`memory_blobs` + `memory_blob_refs`），
+> GC 是它的 `collect_blobs()`（**不在协议里，宿主定时调**）。
+> 「内容形态转换」一行新增一条：**边界归一** `core/content.normalize_content_parts`，
+> 由 `MemoryRecord` / `MemoryEvent` / `LLMMessage` 三处 `__post_init__` 共用
+> （§14.5）。其余各行不变。
+
 ## 8. 摘要恒为纯文本
 
 明确约定：`MemoryKind.SUMMARY` 的 content **恒为 `str`**。
@@ -689,6 +729,12 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 > 与原文的两处偏差：rehydrate 落点是 gateway 而非 adapter；§5.2 的 side index / GC
 > **未实现**（用户裁定 D3：本 Phase 只做「不删」）。
 
+> **新增：Phase 3c — 遗留收口（2026-08-27，`8cc336d..65dd606`）**。不在原阶段划分里，
+> 是 Phase 3b 终审后从遗留清单里长出来的一段：HITL 入口接校验/外部化（§14.7）、
+> 内容边界归一（§14.5）、OpenAI tool-result 重定位（§14.6，**解除 Phase 4 的前置**）、
+> 图片 token 体积化（§14.3）、memory 一致性测试套 + 🔴 跨租户泄漏修复（§14.2）、
+> SQLite 多模态 provider + blob 并入 memory（§14.4）。**详见 §14。**
+
 **Phase 4 — 折叠与回放**（子设计全文）
 `core/media/` + L0.5 + `media:get_image`。
 
@@ -715,6 +761,15 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 - **出网**：两家 adapter 的 blocks 形态；`blob.get()` 返 `None` 时降级不抛
 - **估算**：图片计入 token；budget 能因图片触发裁剪；`ContextOverflowError` 文案含图片数
 - **回归**：全量既有测试在每个 Phase 后保持绿
+
+> **补充（Phase 3c）**：多模态的持久化保证已不能只靠「某个 provider 的测试」——
+> memory 协议是可插拔的，而**多模态无损存取**与**多租户隔离**都是 provider 必须
+> 满足的契约。新增 `tests/unit/test_memory_conformance.py`：**面向协议、不面向实现**
+> 的一致性套（80 条 × 每个 provider），只经协议声明的 8 个方法操作 provider，
+> 不碰任何实现内部字段，能力差异一律用**探测**表达（`describe()` /
+> `isinstance(m, BlobStore) and m.can_externalize`）而**绝不写
+> `if provider_name == "sqlite"`**——那种写法在第三方 provider 接进来时立刻失效。
+> 新 provider 接入只需在 `_PROVIDER_FACTORIES` 加一行。
 
 ## 13. 未决项
 
@@ -779,6 +834,10 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 - 视觉能力信息从 `LLMClient` 的哪个字段读（§6.7）——现有 duck-type 约定里
   没有对应字段，可能需要在 `protocols/llm.py` 补一个可选属性
 - `_IMAGE_PART_TOKENS = 1600` 是否够保守（`utils.py:154`），需按真实计费校准
+  > **已裁定（Phase 3c Task D，裁定 D2）**：**不按计费校准**——`1600` 降级为
+  > **地板值**（同时是体积未知时的回落值），主口径改成按字节体积算
+  > （`// 128`）。这条口径**刻意不建模计费**，它建模的是 provider 请求体的字节压力。
+  > 见 §14.3。
 - `image_tokens` / `image_part_count` 以 `not hasattr(p, "text")` 判定非文本 part。若某个
   memory provider 把 content 作 JSON 往返后返回 `list[dict]`，则**每个** part（含文本）
   都会被计为图片。`content_to_text` 有对称的盲点（会把这类列表渲染成空串），故该失效
@@ -827,6 +886,12 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
     估算之外补一条独立的字节预算，或在 §6.1 的单图字节上限之上再加一条
     「单请求总字节上限」。
 
+    > **已兑现（Phase 3c Task D，用户裁定 D2）**：选的是**第三条路**——既不外挂
+    > 独立的字节预算，也不加「单请求总字节上限」，而是**把字节压力折进 token 口径
+    > 本身**，让超限在 prepare 的 `ContextOverflowError` 报出来，只留一套机制。
+    > 实测新口径下 4 张满额图 = 95% 预算、5 张即超限（旧口径 5 张才 8_000 tok，
+    > 不到预算 5%）。见 §14.3。
+
 **已知缺口（Task 4，Phase 3a，2026-08-24，刻意范围划定）：**
 
 - **HITL 应答与 `reopen_task` 两个入口未接校验与门控。** §6.1 列出的四个入口
@@ -839,6 +904,14 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
   纯文本模型收图会绕过入口校验直接进入 memory。这是刻意的范围划定，不是遗漏：
   Phase 3a 的目标是防 400 护栏，优先覆盖两个主入口；HITL/reopen 的校验接入
   留给后续 Phase。
+
+  > **已兑现（Phase 3c Task A/A2，2026-08-27，`ea6a87c` + `82d8081`）**：HITL 已接，
+  > 接线点是**三条下层**（`resolve_answer` / `resolve_reject` / **`resolve_approve`**，
+  > 第三条最容易漏）。`reopen_task` 经核实**不受影响**——它复用已校验过的
+  > `original_user_prompt` 快照、只追加文本，不引入新的外部内容。
+  > 回调传**整个 `HitlRequest`** 而非 `session_id`（否则视觉门控判的是默认 client
+  > 而非本次应答真正要用的模型，且 tenant 固定 `"default"`）。
+  > **详见 §14.7，含仍未闭合的半个洞（L1）。**
 
 - **`start_session` 的纯文本路径刻意不提前解析 LLM。** Task 3 fix round 2 的裁定：
   `validate_content` 需要 `llm` 参数才能做视觉门控，而获取 `llm` 需要调用
@@ -891,6 +964,13 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
   本条只记录判断倾向，不在本 fix wave 实现（超出 Phase 3a 范围，需要 Phase 4 的
   `media:get_image` 落地后才有真实调用点可测）。
 
+  > **半兑现（Phase 3c Task B）**：上面这个「放在 `stream_llm`」的倾向**已被采纳并
+  > 兑现了一半**——`_gate_tool_images` 就在 `stream_llm` 里（`legalize_messages`
+  > 之后、rehydrate 之前），对 `role == "tool"` 的消息做**视觉门控**。
+  > 另一半（对 tool result 做完整 `validate_content` 格式校验：畸形 base64 /
+  > 超限尺寸 / media_type 白名单）**仍未做**，留给 Phase 4 的 `media:get_image`
+  > 落地时一并接。见 §14.6。
+
 - **dict 形态 part 被入口全数拒绝，且把纯文本拖进提前解析分支（I3，评审 2026-08-24
   fix wave，裁定 B）。** `content.py` 的 `_is_text_part`（`hasattr(part, "text")`）
   对 dict 形态 part 恒为 `False`——纯文本 dict `{"type":"text","text":"hello"}`
@@ -928,6 +1008,15 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
   暴露的层不同。真正收敛（选项 A，含 `core/utils.py` 一并改成 Mapping-aware）
   留给 Phase 3b/4，届时若要做，须同步改 `_is_text_part` / `content_to_text` /
   `image_part_count` 三处，不能只改一处。
+
+  > **已裁定并兑现（Phase 3c Task E/E2，用户裁定 D1）**：**选项 A 已废弃，判据不解冻。**
+  > 裁定理由：dict 形态是**协议违规**（三个字段的类型声明都是
+  > `str | list[ContentPart]`，`MemoryProvider` 契约第 2 条要求原样返回），
+  > 修法不该是「给违规形态兜底」而是**在边界把它归一回 dataclass**。
+  > `core/content.normalize_content_parts` 是唯一实现，三处 `__post_init__`
+  > （`MemoryRecord` / `MemoryEvent` / `LLMMessage`）共用；两家 adapter 的 dict
+  > 死分支已删。上面说的「三处判据须同步改」因此**不再是待办**——三处判据保持
+  > 逐字节冻结（Phase 3c 已用 AST 比对复核）。**详见 §14.5。**
 
 
 ---
@@ -1038,3 +1127,472 @@ content_to_text([{"type": "text", "text": "hello world"}])   ->  ''   # 摘要�
 （`compact` 产出恒为纯文本、`recognize_intent` 只填元数据）。缓解手段已就位：改
 `_IMAGE_BEARING_PURPOSES` 一处即可放开（见上表）。Phase 4 的 `media:get_image` 落地后
 还有第二条路——让 observer 主动取回它需要看的那张图。
+
+> **用户裁定 D3（2026-08-26）：维持现状，observe 不看图。** 原话：
+> 「observe 的作用是看 actor 有没有干活，不是替代 actor 决策。」
+> 即职责边界是**执行性检查**而非**内容性仲裁**。上面记的功能回退风险仍然如实，
+> 但它是**已知且被接受的**代价，不是待修缺陷——**不要再当新发现重提**。
+> 裁定理由的完整表述见 §14.1 的 D3。
+
+---
+
+## 14. Phase 3c 收口（2026-08-27）
+
+Phase 3c 是「多模态遗留问题收口」，十个提交（`8cc336d..65dd606`）：
+
+| 任务 | commit | 内容 |
+|---|---|---|
+| A / A2 | `ea6a87c` / `82d8081` | HITL 三条下层接上校验与外部化 |
+| E / E2 | `72c6a3c` / `5f2278c` | 内容边界归一，三处共用一份实现 |
+| B | `76c86cd` | OpenAI tool-result 图片重定位 + gateway 视觉门控 |
+| D | `1be2296` | 图片 token 改为体积相关 |
+| C1 | `b645781` | 面向协议的 memory 一致性测试套（57 条） |
+| C1b | `ad403da` | 🔴 `load_view` 跨租户泄漏（安全修复） |
+| C2 | `f1bb035` | SQLite/SQLAlchemy 多模态 memory provider |
+| C3 | `65dd606` | blob 并入 memory + 延迟回收 + 移除 `FilesystemBlobStore` |
+
+全量回归 `1978 total / 1970 passed / 3 failed / 5 skipped`
+（3 failed 为既有环境性失败：缺 ROLE.md / 缺 golden 目录 / `test_compact_flow_e2e`）。
+
+**宿主怎么切**：见独立一篇 [宿主迁移清单](../../host-migration-to-sql-memory.md)。
+
+---
+
+### 14.1 用户裁定（2026-08-26）
+
+**D1 —— 判据不解冻。** `not hasattr(p, "text")` 三处（`core/content.py::_is_text_part`
+/ `core/utils.py::image_part_count` / `core/utils.py::content_to_text`）保持 §13
+的冻结状态。理由不是「懒得改」而是**dict 形态本身就是协议违规**：`MemoryEvent.content`
+/ `MemoryRecord.content` / `LLMMessage.content` 的类型声明都是 `str | list[ContentPart]`，
+`MemoryProvider` 的多模态契约第 2 条要求原样返回。修法在**边界归一**（§14.5），
+不是给违规形态兜底。§13 原文里「Phase 3b/4 若要收敛须同步改三处」的方案**已废弃**。
+
+**D2 —— 修图片 token 统计本身**（体积相关），让超限在 prepare 的
+`ContextOverflowError` 报出。**不**外挂「composer 按张数设限」那套第二机制。详见 §14.3。
+
+**D3 —— observe 不看图，维持现状。** `_IMAGE_BEARING_PURPOSES = frozenset({"act"})` 不变。
+
+> **裁定理由（用户原话，写在此处以免被反复重提）**：
+> 「observe 的作用是看 actor 有没有干活，不是替代 actor 决策。」
+>
+> 即：observe 的职责边界是**执行性检查**（干没干活），不是**内容性仲裁**（干得对不对）。
+> 后者是 actor 自己和用户的事。§13 附末尾记的「observe 看不到图是唯一的真实功能回退
+> 风险」仍然成立、仍然如实——但那是**已知且被接受的**代价，不是待修缺陷。真需要放开时
+> 改 `_IMAGE_BEARING_PURPOSES` 一处即可；Phase 4 的 `media:get_image` 落地后还有第二条
+> 路（让 observer 主动取回它要看的那张图）。
+
+**D4 —— blob 并入 memory（C-merge）。** core 仓新写 SQLite 多模态 provider
+（`providers/memory_sql/`），宿主后续平滑切换。**故表名列名必须兼容宿主存量行，
+新增列一律 nullable**。
+
+**D5 —— 移除 `FilesystemBlobStore`。** 其 9 条测试改挂 SQL provider——验的是
+`BlobStore` 契约而非某个实现。
+
+**D6 —— 纯内存 provider 不支持多模态**，走 `can_externalize=False` 既有路径。
+这不是遗漏，而是**双模式兼容性对照**：同一套 conformance 断言对「支持 blob 的
+provider」与「不支持的 provider」都成立，后者的 blob 用例按能力探测 skip。
+
+---
+
+### 14.2 🔴 多租户隔离契约（Phase 3c 最重要的安全条目）
+
+**已实证的泄漏**（Task C1b 之前）：
+
+```
+tenantB load_view 读到: ['TENANT-A-SECRET']
+```
+
+成因：`_address_match` 只比 session/task/agent，`load_view` 拿了 `ctx` 却从不读
+`ctx.tenant_id`。触发条件是两租户 `session_id` 相同——而 `start_session`
+**支持宿主自带 session_id**，故非理论问题。
+
+**同型的另外三处，其中第一处比原洞更严重**：
+
+1. **写侧的隐式扫描**：`ingest` 的 PUBLICATION 覆盖按 topic 扫全表标 superseded、
+   不看 tenant。**只修读侧会造成比修前更差的状态**——B 一发布就把 A 同 topic 的行标
+   superseded，而 B 自己也读不到那行。即「**能销毁自己读不到的数据**」，
+   一种比泄漏更差的不对称。
+2. **订阅身份串号**：`subscribe_topic` 的幂等键 `(session, task, topic)` 不含 tenant，
+   B 的订阅**撞进 A 的幂等分支**、拿到 A 的订阅对象与游标。不只是列表泄漏。
+3. **`recall_recent` 家族的 tenant 比较本就是空转**——目标键与被比键都用**读侧**的
+   `ctx.tenant_id`，tenant 在等式两边约掉了。这类「看起来有隔离」的代码比明摆着没有
+   更危险。
+
+**取向：归一到 `"default"`，写读两侧同一个函数**（`normalize_tenant(t) = t or "default"`；
+SQL 侧对应 `COALESCE(tenant,'default')`）。三条理由：
+
+- 既有数据与既有调用点全部落在 `"default"`，归一后单租户路径逐字节不变；
+- 严格比较只在两侧都给出明确非默认值时才生效，避开了「一处 `""`、一处 `None`、
+  一处 `"default"` → `load_view` 静默返空 → **会话失忆**」这个比泄漏更难诊断的失败模式；
+- 与仓内既有惯例同形（`reducers.py:495` 的 `ev.tenant_id or "default"`）。
+
+**⚠️ 划线原则（哪些刻意没修）**——已作为隔离契约第 5 条写进 `MemoryProvider` docstring：
+
+> **可见性相关的隐式跨行扫描**随读侧一起按租户分区（`load_view` / `recall_topic` /
+> `recall_semantic` / PUBLICATION 覆盖 / 订阅表）；
+> **调用方显式给 id 的操作**保持**全局 id 命名空间**不动（`ingest` 按 id 幂等、
+> `fold` 按 id 遗忘、`BlobStore.get(ref)`）。
+
+它们不是「扫出别人的行」，而是「调用方指名了一个 id」。要改得先定「record id 是全局
+唯一还是租户内唯一」——那是协议级决定。**这条划线是记录在案的取舍，不是默认安全**：
+in_memory 自生成的 id 是 `mev_%08d` 顺序号、**可猜**（遗留 L17）。
+
+**对任何新 provider 的硬约束**：tenant 必须是**列 + 索引/唯一键的一部分**
+（`events(tenant, session_id, …)`、`subscriptions` 唯一键
+`(tenant, session_id, task_id, topic)`），不能只在应用层过滤。存量表没有 tenant 列时
+「新增 nullable 列 + 读侧 `COALESCE`」正好与归一规则一致，**存量数据不迁移即落默认分区**。
+
+**守卫**：`tests/unit/test_memory_conformance.py` 的 23 条隔离用例对**所有** provider
+生效。其中一条变异值得记——把分区键退化成「按 `ProviderContext` 对象身份」
+（`load_view` 恒返空，「修过头」的典型形态）会让 **44 条转红**，即「返空」在这套里
+不可能悄悄通过。
+
+---
+
+### 14.3 图片 token 统计：体积相关（裁定 D2）
+
+**订正 §6.5**：`image_tokens` 不再是 `_IMAGE_PART_TOKENS × 张数`，改为逐 part
+
+```python
+max(_IMAGE_PART_TOKENS, image_byte_size(part) // _IMAGE_BYTES_PER_TOKEN)
+```
+
+`_IMAGE_BYTES_PER_TOKEN = 128`；体积未知（`byte_size` 为 None 的 ref/url）时回落旧常数
+`_IMAGE_PART_TOKENS = 1600`。§6.5 原文的函数体保留以存上下文，但那不再是现行实现。
+
+**新增 `ImagePart.byte_size: int | None = None`**（可选、有默认，既有构造点零改动）。
+存在理由：外部化后 `data` 是 `blob:<sha>`（长度恒约 69），体积信息就此丢失，而
+`image_tokens` 是同步函数、不能回 BlobStore 做 IO 取回来。`image_byte_size(part)` 两条
+来源：`byte_size` 字段 → inline base64 的 `len(data)*3//4 − padding`；**刻意不解码**
+（为估算 b64decode 一张 5 MiB 图在装配热路径上不可接受）。
+
+**系数 128 B/tok 的完整推导**：
+
+1. 约束的真实上限是 **provider 请求体**（Anthropic 约 32 MB）。base64 膨胀 4/3 →
+   可容纳原始字节 ≈ 24 MiB = 25_165_824 B。
+2. 仓内典型预算实测取值：`context_limit = 180_000`（`core/state/models.py:132` /
+   `core/control/types.py:32` / `core/control/reducers.py:241,417` 四处默认值一致）、
+   `reserved_output_tokens = 8_192` → `effective_limit = 171_808`。
+3. 令「预算耗尽」与「请求体触顶」对齐：`25_165_824 / 171_808 ≈ 146.5 B/tok`。
+4. 向下取到 2 的幂 **128**：取整方向使估算**偏高**（与 `estimate_tokens` 的「保证单边
+   高估」同向——低估触发 provider 400，高估只浪费窗口），且 128 是移位、纯整数。
+
+校验：单张满额图（`_MAX_IMAGE_BYTES = 5 MiB`）= 40_960 tok；4 张 = 163_840 = 95% 预算
+（早过 `compact_token_ratio = 0.8` 的触发比）；5 张 = 204_800 > 171_808 → 地板仍超限时
+`budget.py:91` 抛 `ContextOverflowError`。旧口径下 5 张满额图账面才 8_000 tok
+（不到预算 5%）——这正是 §13 (c)「字节上限无约束」那条缺陷的成因。
+
+> **⚠️ 这个数建模的是「字节压力」，不是「计费 token」。** 后来者极可能拿它去算成本——
+> **不能**。模型侧对一张图的真实 token 成本是**封顶**的（provider 会先降采样到自己的
+> 最大边长，Anthropic 与 OpenAI 都如此），一张 5 MiB 图不会真的计 40_960 个计费 token。
+> 本口径存在的唯一目的，是让「请求体积会打爆 provider」这件事在 **prepare 阶段**就以
+> `ContextOverflowError` 的形式报出来，而不是等到 provider 侧 400。要做成本核算，
+> 请另立一套按 provider 计费规则的口径，不要复用 `image_tokens`。
+
+**地板保留 `_IMAGE_PART_TOKENS = 1600`**（< 200 KiB 的图仍按它计）：① 模型侧对任意一张
+图的固定开销本就在这个量级，往下折算会低估；② 它同时是体积未知时的回落值，保证存量
+数据与不接 BlobStore 的宿主不劣化。副作用：既有测试（小图 == 1600）全部原样通过。
+
+**一个新引入的可踩点**：`image_tokens` **不再是 1600 的整数倍**，任何「对 image_tokens
+整除反推张数」的写法都会错（当前无此类调用点，`budget.py` 走 `image_part_count`）。
+
+**一条测试方法论**（Task D 的 M9 首轮存活）：padding 修正的 1~2 字节误差经
+`image_tokens` **不可观测**——地板吞掉小图、`// 128` 的整除吞掉大图。即
+**「只经聚合函数断言」对精度型缺陷天然不敏感**，必须直接断言底层函数才杀得掉。
+（同型的还有 Task C1 的 M18：`len(got) <= 5` 这种「不超过上界」型断言对「什么都没做」
+返空不敏感。）
+
+---
+
+### 14.4 blob 生命周期（裁定 D4/D5）
+
+**订正 §5.2 / §5.4 / §7 的模块归属**：blob 字节的持有者不再是
+`FilesystemToolsProvider`（该实现已按 D5 移除，全仓 `src/` 零引用），而是
+`SqlMemoryProvider` 的两张表：
+
+- `memory_blobs(sha PK, media_type, data, created_at)` —— **没有 tenant 列**；
+- `memory_blob_refs(event_id PK, sha PK+index)` —— §5.2 设想的 side index，
+  但**长在 memory 内部**。
+
+**引用边在 `ingest` 的同一个事务里写。** 这正是「blob 并入 memory」才做得到的事：
+原方案里字节与引用索引分居两处，无论如何都存在「事件已落库、引用还没记上」的窗口。
+ref 的提取复用归一层（`core/content.extract_blob_refs()`，判据直接调既有的
+`_is_ref_part`），与 `rehydrate_content` 会去 `BlobStore.get` 的那批 part 逐一对应。
+
+**回收查询**（`SqlMemoryProvider.collect_blobs(now=None) -> int`，延迟、幂等、
+不在写路径上）：
+
+```sql
+DELETE FROM memory_blobs
+WHERE created_at < :cutoff                       -- 宽限期（正确性要求，见下）
+  AND sha NOT IN (SELECT r.sha FROM memory_blob_refs r
+                  JOIN memory_events e ON e.id = r.event_id
+                  WHERE e.is_superseded = 0)     -- 活引用，**不按 tenant 过滤**
+```
+
+**三道判断题的裁定与理由**（也写在 `SqlMemoryProvider` 类 docstring 的【blob 与租户】段）：
+
+1. **回收侧不按 tenant 过滤活引用（看全表）——这是安全要求，不是选择。**
+   内容寻址跨租户去重（同字节 → 同 sha → 同一行），只看本租户的活引用，
+   A 的一次 fold 就会删掉 B 仍在引用的那一行。
+2. **`get` 不校验 tenant。** (a) 与 §14.2 契约第 5 条**同一条划线**——`get(ref)` 正是
+   「调用方显式给 id」的操作。(b) 必须与第 1 条**自洽**：既然一份字节跨租户共享同一行，
+   行上就没有「属于谁」可校验；硬记 owner 再校验会让第二个租户取不回自己合法引用的图
+   → `get` 返 None → rehydrate 降级成 `[image unavailable]` → **图永久丢失**
+   （变异 M10 实证：加上校验后跨租户用例立刻红）。(c) sha 是 SHA-256 内容哈希，
+   能说出 sha 意味着已持有该内容。**残余风险**是一条 sha 可探测的存在性侧信道（L26）。
+3. **`put` 跨租户同 sha 共享一行。** 内容寻址去重的全部价值在此，且是第 2 条自洽的前提。
+   `media_type` 冲突沿用 filesystem 实现的既有语义：**先写入者胜**。
+
+> **⚠️ 宽限期是正确性要求，不是优化。** 原方案把回收分两类、只对「从未被引用」的 blob
+> 加宽限期，「在引用表里但无活引用」的立即删——**照做会留一个悬空 ref 的洞**：
+> `put` 命中一份**旧**字节时（其引用者已全部 fold），新的 put→ingest 窗口照样打开，
+> 按第 1 类判定会在新 ingest 落地前把它删掉。
+>
+> 修法两条：① **`put` 刷新 `created_at`**（含命中已有行的幂等 put），语义从
+> 「首次出现时间」改成「**最后一次有人声称要用它**」；② **宽限期对两类一视同仁**。
+> 结果严格更保守，代价只是「fold 之后字节多留一个宽限期」——泄漏磁盘，是安全方向。
+
+**宽限期默认 24 小时**（`SqlMemoryProvider(..., blob_grace_period=...)` 可覆盖）。
+下界由真实窗口定：put→ingest 在进程内是毫秒级，但中间隔着 **HITL park（可等人数小时）**、
+重试、宿主重放；上界由泄漏成本定（孤儿最多堆积一天的上传量）。`created_at` 与 `now`
+可能来自不同机器的时钟，小时级窗口对分钟级漂移免疫。且这一侧**错误不对称**：
+删早了图永久丢失，删晚了只是多占一天磁盘。
+
+**永不在 `fold` 里同步删**（`test_fold_does_not_delete_bytes_synchronously` 钉住）。
+
+> **⚠️ `collect_blobs` 不在 `MemoryProvider` 协议里**，是 `SqlMemoryProvider` 的自有方法，
+> **宿主必须自己定时调**。core 里没有任何调用点——刻意的：回收时机是运维决策，且 core
+> 不该在任何写路径上触发删字节。宿主永不调用的后果是「blob 只涨不删」（泄漏磁盘），
+> **不会**产生悬空 ref。见迁移清单第 5 步。
+
+**⚠️ 行为变更：`ProviderRegistry.get_blob_store()` 改为三级自动解析**——
+**显式注册 > memory provider（若 `isinstance(BlobStore)` 且 `can_externalize`）>
+`NullBlobStore`**。即宿主一旦注册 `SqlMemoryProvider` 作 memory，**图片外部化自动开启**
+（此前须显式 `register_blob_store`）。这是 D4 的本意，但对存量宿主是「换 provider 顺带
+打开了新行为」，已在迁移清单第 4 步点名。回落结果**不缓存**进 `_blob_store`——缓存会让
+「先 `get_blob_store()`、后 `register_memory()`」的接线顺序静默拿不到 memory。
+
+**订正 §5.5**：那条「接了真 BlobStore 的宿主必须显式传 `session_id` 并预先
+`register_session(session_id, workspace)`」的隐式契约，是 `FilesystemBlobStore` 的
+`workspace_for(ctx)` 带来的，**随该实现移除而不再适用**于 SQL 形态。原文保留——
+它对仍在用 `FilesystemToolsProvider` 的 `SpillSink` 路径依然是对的，也是理解
+「实现专有的接线契约会怎样咬人」的样本。
+
+**那条 Windows UNC 安全护栏测试没有删**，改挂 SQL provider 后**保留为纯契约条**：
+SQL 侧不构造任何路径、sha 只作绑定参数进 WHERE，该攻击面确实不存在；但
+「ref 前缀不对必须返 `None` 而不是抛」仍是 `BlobStore` 契约，删掉会让这条契约在本
+provider 上失去覆盖。
+
+---
+
+### 14.5 内容边界归一（裁定 D1，订正 §13 的 dict 方案）
+
+**dict 形态的 part 是协议违规，不是需要兼容的形态。** 三个字段的类型声明都是
+`str | list[ContentPart]`。但违规输入现实存在（JSON 往返的第三方 memory provider、
+宿主直构 `LLMMessage`），且后果**全是静默的**：
+
+```
+image_part_count([{"type":"text","text":"hello"}])  ->  1     # 多算 1600 token
+content_to_text([{"type":"text","text":"hello"}])   ->  ''    # 摘要器完全看不见
+_parts_to_blocks([{"type":"image",...}])            ->  []    # Task E 实测：整个丢掉
+```
+
+**修法落在类型自己的边界、且只此一份**：`core/content.py::normalize_content_parts`
+是**唯一实现**，三处 `__post_init__` 共用——`MemoryRecord`（读侧）/ `MemoryEvent`
+（写侧）/ `LLMMessage`（出网侧）。在三处各写一遍 `isinstance` 分支，正是 §3① 单一
+归一层要防的散点；`test_three_boundaries_call_the_one_shared_implementation`
+专门钉住「共用而非三份复制」（变异「让 `MemoryEvent` 自己抄一份行为等价的实现」
+只有这一条会红，行为测试全绿）。
+
+**两家 adapter 的 dict 分支已删**（`_parts_to_text` / `_parts_to_blocks` 各两处）。
+入参来源已核实：只有 `LLMMessage.content`，而它现在在构造时就被归一。
+
+**为什么不在 adapter 里 raise**：adapter 在同步出网主路径上，抛异常会掀掉整个 LLM
+请求（同 Phase 3b 对 `BlobStore.get` 恒不抛的取向）。归一是正解。
+
+**顺序硬约束**：`MemoryEvent.__post_init__` 的归一放在**全部既有校验之后**——
+`content=None` 等报错路径不得被归一抢先（变异「把归一提到校验之前」会杀死
+`test_memory_event_validation_still_runs`）。
+
+**快路径与对象同一性**（都返回**同一对象**，不重建）：`str` / `None` / 空立即返回；
+已合规的 dataclass 列表只多一次 `isinstance` 扫描。扫描刻意用 `for/else` 而非
+`any(genexpr)`——实测生成器创建开销比扫描本身还大（691.7 ns vs 512.1 ns）。
+
+**热路径开销与 import 形态**（本 Phase 最大的一处实现分歧，记以备后来者）：三处
+`__post_init__` 无条件调归一。若按「沿用函数级 import」写 `from ctx_weft.core.content
+import ...` 进 `__post_init__`，**每次构造**都要跑一遍 `__import__` +
+`_handle_fromlist`——实测该语句本身 **361 ns**，把 `LLMMessage` 构造从 189 ns 抬到
+**682 ns**（3.6 倍）。Task E 之所以没吃到这个成本，是因为它的 import 在**快路径之后**。
+改用 `protocols/context.py` 的**惰性绑定**（缓存**模块对象**而非函数，属性查找留在调用
+时 → monkeypatch 仍生效、不留陈旧绑定的坑）后降到 **302 ns**。层序理由：protocols 是比
+core 低的层，模块级导入 core 会把依赖反向；现状是「运行时反向、导入期不反向」。
+**若将来要彻底摆脱，正解是把 `normalize_content_parts` 下沉进 protocols 层**
+（它只依赖 TextPart/ImagePart），而不是继续加绑定。
+
+**`rehydrate_content` 本身仍是「dict 进 dict 出」**，Phase 3b Task 3 的裁定未被推翻
+（旁边两条直调它的用例仍钉着）。变的是**上游**：`LLMMessage(content=[dict])` 在构造时
+就被归一成 dataclass，dict 到不了 rehydrate。
+
+---
+
+### 14.6 OpenAI tool-result 图片重定位（兑现 §6.6 的「未兑现」条目）
+
+§6.6 里那条「Phase 2 没有实现、着手 Phase 4 之前必须补上」的重定位，**Phase 3c Task B
+已兑现**（commit `76c86cd`）。`_serialize_messages` 的 `for m in messages` 改成
+`while i < len(messages)` 索引循环，`role == "tool"` 分支**批处理整段连续 tool 消息**
+（与 `anthropic.py` 的 tool 分支同构）。
+
+> **段末 flush 是硬约束，不是整洁性选择。** 每条 tool 消息仍只发文本，含图时把图
+> `extend` 进段级 `relocated` 并给文本尾部追加标记，**整段 while 退出后**才
+> `result.append({"role": "user", "content": _parts_to_blocks(relocated)})`。
+> 挪到「每条 tool 之后」会触发 OpenAI 的
+> `insufficient tool messages following tool_calls message`——同批多个 tool call 时，
+> 追加的 user 消息夹在中间会打断 `tool_calls` 的配对要求。
+> 守卫：`test_consecutive_tool_messages_flush_once_after_whole_segment`。
+
+标记 `_TOOL_IMAGE_NOTICE = "\n\n[图片见后一条消息]"` 是**模块常量、逐字节确定**
+（无 sha / 随机 id / 时间戳 / 计数器）——同 §13 附「降级占位必须逐字节确定性」的缓存
+约束。纯图结果（文本为空）用 `_TOOL_IMAGE_NOTICE.lstrip("\n")` 当非空占位：**OpenAI 拒
+空 content**（同 Anthropic 侧 `_EMPTY_TOOL_RESULT_CONTENT` 的理由）。
+`str` 形态 content 原样透传（纯文本 wire 逐字节不变）；**无图的 parts 形态不追加标记**。
+
+**视觉门控落在 gateway 而不是 adapter**（新增 `_gate_tool_images(llm, messages)`，
+在 `legalize_messages` 之后、**rehydrate 之前**调用）。两个理由：
+
+1. **`supports_vision` 是 duck-typed、不在 `LLMClient` 协议上**——core 侧统一约定
+   `getattr(llm, "supports_vision", False)`（§6.7）。adapter 是被解析出来的那个对象本身，
+   在 adapter 内部读自己的能力位没有意义；gateway 持有的 `llm` 才是**真正会被发到的
+   那个 client**（经 `stream_llm_resilient` 时是 `_FixedModelClient`，带 per-model 声明）。
+2. 门控放 **rehydrate 之前**：注定被降级的图不必先去 BlobStore 取一趟回来。
+   `downgrade_images_to_text` 对 ref 形态同样只读 `media_type`，占位文本不变。
+   守卫：`test_no_vision_skips_blob_fetch_for_tool_images`。
+
+这补上了 §13「工具产出的图片绕过全部三道护栏（I4）」那条的**一半**——门控确实落在了
+`stream_llm`（§13 当时的倾向判断被兑现且被证明是对的）。另一半（对 tool result 做完整
+`validate_content` 格式校验）仍未做，留给 Phase 4 的 `media:get_image`。
+
+**残余**：宿主若把裸 `OpenAIAdapter` 直塞 `ctx.llm`，`supports_vision` 恒 `False` →
+工具图一律降级。这与 §6.7 的 `validate_content` 严格默认同源、fail-closed，非新增；
+但「门控落 gateway 就拿得到真正的 llm 对象」在裸 adapter 形态下不成立（L5）。
+
+**gateway 层测 tool 消息的坑**（值得所有后续任务知道）：`stream_llm` 第一步
+`legalize_messages` 里，`drop_orphan_tool_results` 会把「前面没有配对 assistant
+tool_calls」的 tool 消息**整条丢掉**，`ensure_leading_user` 又会砍掉首条非 user 消息。
+所以单条 `LLMMessage(role="tool", ...)` 进 `stream_llm` 会因空消息列表 `IndexError`——
+**红是红了，但红的原因不是被测逻辑缺失**。必须构造完整回合
+`user → assistant(tool_calls) → tool…`，断言按 role 选取而非下标。
+
+---
+
+### 14.7 HITL 入口（兑现 §13「已知缺口」的 HITL 一半）
+
+§13「已知缺口（Task 4，Phase 3a）」里那条「HITL 应答与 `reopen_task` 两个入口未接
+校验与门控」，**HITL 部分已兑现**（`ea6a87c` + `82d8081`）。`reopen_task` 经核实
+**不受影响**：它复用已校验过的 `original_user_prompt` 快照，经 `content_with_suffix`
+追加文本，不引入新的外部内容。
+
+**接线点是三条下层，不是一条**：`resolve_answer` / `resolve_reject` /
+**`resolve_approve`**。第三条容易漏——approval 备注同样是 `str | list[ContentPart]`。
+
+**回调签名传整个 `HitlRequest`**（`async (content, req) -> content`），不是
+`(content, session_id)`。理由是把签名钉死在 session_id 上会挡住两件必需的事：
+
+- **视觉门控必须判本次应答真正要用的模型**（`req.resume_llm_account/model`），
+  而不是默认 client `_resolve_llm(None, None)`——否则 Phase 3a 建的 per-model 门控在
+  这条路径上判的是另一个模型的能力。
+- **`tenant_id`** 否则固定 `"default"`，多租户 blob 落错锚点。
+
+沿用该类**已有的注入惯例**（第三个 setter `set_content_normalizer`），`HitlManager`
+不 import `BlobStore` / LLM 任何类型；**未注入时是恒等变换**（`return content`，
+同一对象）。
+
+**由 session_id 解 tenant 走三级回落**：活 `TaskManager` 持有的 `Session.tenant_id`
+（热应答主路径，纯内存查表）→ 事件日志第一条（**每条 `Event` 都带 `tenant_id`**）→
+`"default"`。**不用 `rebuild_view`**——它要折叠整个投影才拿一个字符串。
+整段 **best-effort 不抛**（HITL 应答路径抛错会卡住人类应答），并加**纯文本 / blob store
+不能外部化时根本不解 tenant** 的短路（冷路径要读事件日志，代价不小）。
+
+> **⚠️ L1 洞只堵了一半。** `_stash_resume_llm` 只在 `answer` / `approve` / `reject`
+> 三个公开方法里调，而 `resolve_answer` / `resolve_reject` / `resolve_approve`
+> **同为公开方法却不调它**。宿主直接调 `resolve_*` 时 `resume_llm_*` 为 `None` →
+> 门控退回默认 client。**非回归**（本来如此），但上面那条「按本次应答的模型门控」
+> 在该调用形态上未真正关闭。根治应在 `HitlRequest` 补 `tenant_id` / 让
+> `HITL_REQUIRED` 投影在 `request()` 时就带上这些（那时已知），需动事件 payload 与
+> reducer、并处理存量事件回放，Phase 3c 判为越界。
+
+---
+
+### 14.8 遗留清单 L1–L30 的处置
+
+Phase 3c 的十个任务共记录 30 条遗留。逐条判定如下（**不是「待办列表」，是分类**）：
+
+#### 已闭合（4 条：L8 / L15 / L16 / L21）
+
+| # | 内容 | 闭合方式 |
+|---|---|---|
+| L8 | `image_tokens` 不再是 1600 的整数倍 | 已核实无「整除反推张数」调用点；写进 docstring 与 §14.3 的「可踩点」 |
+| L15 | `load_view` 无租户隔离 | C1b 修复（§14.2），并升级为 conformance 断言 |
+| L16 | 黑板覆盖语义不在协议 docstring 里 | 已补进 `recall_topic` docstring + conformance 用例 |
+| L21 | core 侧 tenant 串接是否有不一致 | 15 个 `ProviderContext` 构造点逐点核实：喂给 memory 的全部取自 `session.tenant_id` / `params.tenant_id`；**不存在「写 A 读 default」的仓内路径** |
+
+#### 移交 Phase 4（12 条：L1 / L2 / L3 / L4 / L10 / L12 / L13 / L14+L24 / L17 / L25 / L29）
+
+| # | 内容 | 建议做法 |
+|---|---|---|
+| L1 | `resolve_*` 三个公开方法不调 `_stash_resume_llm`（§14.7 的半个洞） | 与 L2 一起做 |
+| L2 | `HitlRequest` 无 `tenant_id`，根治要动 `HITL_REQUIRED` payload/reducer + 存量回放 | 与 L1 一起做，一次动事件 payload |
+| L3 | 冷路径解 tenant 要全量拉一次事件，`EventStore` 缺窄查询 | 给 `EventStore` 加一个窄查询，**不要**在 runtime 侧堆缓存 |
+| L4 | `test_dispatch_boundary_recap_e2e` 曾在一次全量跑中失败，其后 15+ 次未复现 | 观察项。留在台账，别当新发现重报 |
+| L10 | `_IMAGE_BYTES_PER_TOKEN` 硬编码（32 MB 是 Anthropic 的数） | 要按 provider 调，正解是挂到 LLM 客户端上（同 `context_limit`），不在 utils 堆分支 |
+| L12 | 「重复订阅保留游标」在纯协议面**不可观测**（8 个方法里没有推进游标的），SQL provider 上该断言 skip | 补 `advance_subscription(...)`，或让 `recall_topic` 接受订阅身份并落库游标 |
+| L13 | `archives_superseded` 声明面未被验证（协议未定义「已归档」的可观测行为） | 先定义可观测行为，再补 conformance |
+| L14 / L24 | `fold` 的崩溃原子性未验（单进程内只能验「两个效果同时可见」） | 需进程级用例；当前实现把 supersede 与 replacements 放在同一个 `db.begin()` 内 |
+| L17 | 记录 id 命名空间仍全局，且 in_memory 的 `mev_%08d` **可猜** | 先定「record id 全局唯一还是租户内唯一」（协议级），再改 `ingest`/`fold` 的按 id 分支 |
+| L25 | `recall_topic` 不比 `session_id`（两实现一致、协议未定），即同租户内跨 session 的同名 topic 共享 | 属**待定语义**，先裁定再改；改动会打到宿主自定的 `long_term_*` topic |
+| L29 | 并发 `put` 的 `IntegrityError` 补偿路径未被覆盖（SQLite 串行化，单进程造不出竞态） | postgres 上是真实路径，需集成环境测 |
+
+#### 移交宿主（7 条：L5 / L9 / L18 / L22 / L23 / L27 / L30）
+
+| # | 内容 | 落点 |
+|---|---|---|
+| L5 | 裸 `OpenAIAdapter` 塞 `ctx.llm` 时 `supports_vision` 恒 False | §6.7 已写明：应在自己返回的 client 上声明该 duck-typed 属性 |
+| L9 | `byte_size` 只有经 `normalize_content` 才被填；宿主**直接构造 ref 形态**时恒 None → 回落 1600，预算对该路径失明 | 协议上无强制手段，只能靠文档 |
+| L18 | legacy 非协议方法（`recall_recent` 家族 / `supersede`）仍无隔离 | 迁移清单第 7 步：切换前清零调用点。日落时随文件删除 |
+| L22 | 切换需先 DROP 旧的 3 列唯一索引 `ix_subscriptions_session_task_topic` | 迁移清单 **2.1**（唯一一条破坏性 DDL） |
+| L23 | 存量行 `content_format=NULL` 仍走启发式（正文恰为 JSON 数组的存量纯文本会被误读成 parts） | 迁移清单 **2.4**：建议回填 |
+| L27 | `collect_blobs` 不在协议里，宿主必须自己定时调 | 迁移清单 **第 5 步**。不调 = 只涨不删，不产生悬空 ref |
+| L30 | blob 表无大小上限/配额（单条 `LargeBinary` 无长度约束） | 要限体积需在入口（`validate_content` 的 `_MAX_IMAGE_BYTES`）或 DB 侧另加 |
+
+#### 明确不做（7 条：L6 / L7 / L11 / L19 / L20 / L26 / L28，附理由）
+
+| # | 内容 | 为什么不做 |
+|---|---|---|
+| L6 | 占位文案无统一真源：`[图片见后一条消息]`（中）vs `[image {media_type}]`（英） | 两者**各自逐字节确定**即满足缓存约束，正确性无损。Phase 4 若还要加第三条占位，**先收口再加** |
+| L7 | token 估算不知道重定位——多出那条 user 消息的 framing 开销未计 | 偏小几十 token，落在 margin 内；重定位不改张数/字节，总量一致 |
+| L11 | 存量 `metadata["token_count"]` 是旧口径写的，对大图整体偏小 | 随 fold/compact 自然淘汰；做数据迁移的收益不抵风险 |
+| L19 | `subscribe_topic` 返回的 id 不含 tenant，两租户的两条独立订阅拿到同一个 id 字符串 | 协议没说该 id 全局唯一，仓内无人拿它做键（返回值全被丢弃）。改格式可能打到宿主 |
+| L20 | `_topic_seq` 计数器跨租户共享 → A 的 cursor 会因 B 的发布跳号 | **不影响正确性**（过滤在后，A 不会漏读自己的行）。是一条弱侧信道（可推断别的租户在同名 topic 上的活动频次）。要治须把 topic seq 按租户分区，**会改变已有 cursor 的语义** |
+| L26 | `BlobStore.get` 不校验 tenant → sha 可探测的存在性侧信道 | 要治只能放弃跨租户去重（blob 表加 tenant 列并进主键），代价是去重失效 + `get` 侧重新出现「第二个租户取不回图」（**图永久丢失**，见 §14.4 第 2 题） |
+| L28 | `memory_blob_refs` 里指向已 superseded 事件的边不清理 | 事件永不删除，这些边一直留着（小、且是幂等重跑的正确前提）。宿主若真删事件行，它们会变成悬空边——JOIN 判定下不算活引用，**方向是安全的** |
+
+---
+
+### 14.9 本 Phase 的四条不变量（已逐条动手验证）
+
+1. **纯文本行为逐字节不变**（对比 Phase 3c 起点 `8cc336d`）：把 `8cc336d` 的 `src/`
+   导出成第二棵树，同一份 69 项探针（拍扁/token 口径/归一层/三处边界构造/NullBlobStore/
+   两家 adapter 的 wire payload（含多 tool_call 段）/in_memory 的 ingest·load_view·
+   fold·recall_topic·subscribe·describe）在两棵树上各跑一次 → **输出 md5 相同**。
+   探针的敏感性用两个反向变异证伪（去掉「已合规不重建」守卫 → 3 项翻转；
+   让无图的 parts 形态 tool 结果也追加标记 → wire payload 翻转）。
+2. **不接 SQL memory / 不接 blob 的宿主行为不变**：同一份探针覆盖
+   `get_blob_store()` 在「什么都没注册」与「只注册 in_memory」两种接线下的解析结果
+   （均为 `NullBlobStore` / `can_externalize=False`），以及 `normalize_content` /
+   `rehydrate_content` 在 `NullBlobStore` 下的三条零开销短路。
+3. **判据三处仍一致且未被改动**：`_is_text_part` / `image_part_count` /
+   `content_to_text` 三个函数体与 `8cc336d` **逐字节相同**（AST 取函数体后比对）。
+4. **`FilesystemBlobStore` 已彻底移除**：`src/` 内零命中；`_blob_paths` /
+   `_write_blob_if_absent` / `_read_blob` 零命中；`FilesystemToolsProvider` 的基类回到
+   三个（`ToolCapabilityProvider` / `SpillSink` / `SessionScopedCapabilityProvider`），
+   `hashlib` import 已去。
