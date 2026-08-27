@@ -28,7 +28,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from ctx_weft.protocols.context import ContentPart
+from ctx_weft.protocols.context import ContentPart, normalize_content_parts
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -108,6 +108,32 @@ class LLMMessage:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_call_id: str | None = None
     reasoning_content: str | None = None  # 部分模型支持的"内部推理"内容
+
+    def __post_init__(self) -> None:
+        """把 dict 形态的 content 归一回 ContentPart dataclass（多模态 Phase 3c Task E2）。
+
+        Task E 只在 ``MemoryRecord`` 归一，断言「dict 在 core 内部结构性消失」——该断言
+        **只对经 memory 的路径成立**：本类是普通 dataclass，宿主/自定义流程可直接构造；
+        ``rehydrate_content`` 又刻意是「dict 进 dict 出」。于是 Task E 删掉两家 adapter 的
+        dict 分支后，dict 图片在出网路径上被**静默丢弃**（实测
+        ``_parts_to_blocks([{...image...}]) → []``，无 raise 无 log）——以前是错误地兜底，
+        现在是无声地丢，诊断上更糟。
+
+        **不改成「adapter 里 raise」**：adapter 在同步出网主路径上，抛异常会掀掉整个 LLM
+        请求（同 Phase 3b 对 ``BlobStore.get`` 恒不抛的取向）。归一是正解，且落在类型
+        自己的边界——``dataclasses.replace``（gateway rehydrate 后即用）会重跑本方法，
+        故经 gateway 的路径也一并覆盖。
+
+        归一实现是三处边界共用的 ``core.content.normalize_content_parts``——spec §3① 要求
+        形态转换收在归一层。经 ``protocols.context.normalize_content_parts`` 这个**惰性绑定**
+        转调：protocols 是比 core 低的层，模块级导入 core 会把依赖反向；而把
+        ``from ... import`` 写进 ``__post_init__`` 则要为每次构造付 361 ns 的 import 开销
+        （见该绑定的 docstring 实测）。
+
+        性能：本方法在出网热路径上无条件被调。``str``（绝大多数消息）与已合规的 dataclass
+        列表都返回**同一对象**、不重建——纯文本路径逐字节不变。
+        """
+        self.content = normalize_content_parts(self.content)
 
 
 # ── Tool ──────────────────────────────────────────────────────────────────────

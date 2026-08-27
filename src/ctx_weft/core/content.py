@@ -30,6 +30,7 @@ __all__ = [
     "content_with_suffix",
     "content_to_jsonable",
     "content_from_jsonable",
+    "normalize_content_parts",
     "redact_content_for_event",
     "validate_content",
     "content_has_image",
@@ -159,6 +160,53 @@ def content_from_jsonable(
             # 未知类型：跳过而不抛（见 docstring），但留个信号——静默丢弃数据不该完全无声。
             logger.warning("content_from_jsonable: dropping unknown content part type %r", kind)
     return out
+
+
+# ── 边界归一（Phase 3c Task E / E2）─────────────────────────────────────────
+
+
+def normalize_content_parts(
+    content: "str | list[ContentPart] | None",
+) -> "str | list[ContentPart] | None":
+    """把 list 里 dict 形态的 part 归一回 ContentPart dataclass；不改原对象。
+
+    **三处边界共用这一份**（``MemoryRecord`` / ``MemoryEvent`` / ``LLMMessage`` 的
+    ``__post_init__``）。dict 形态是**协议违规**——这三个字段的类型声明都是
+    ``str | list[ContentPart]``；但违规输入现实存在（JSON 往返的 memory provider、
+    宿主直构 ``LLMMessage``），且后果全是**静默**的：``image_part_count`` 把 dict 文本
+    计成图（多算 1600 token）、``content_to_text`` 返回空串（摘要器看不见）、
+    adapter 的 ``_parts_to_blocks`` 把 dict 图片整个丢掉（Phase 3c Task E 后实测 → ``[]``）。
+
+    修法落在**类型自己的边界**、且**只此一份**（spec §3①：形态转换收在归一层）：
+    三处各写一遍 isinstance 分支正是该条要防的散点。判据
+    ``not hasattr(p, "text")`` 因此保持冻结（用户裁定 D1），不为违规形态解冻。
+
+    **不在 adapter 里 raise**：adapter 在同步出网主路径上，抛异常会掀掉整个 LLM 请求
+    （同 Phase 3b 对 ``BlobStore.get`` 恒不抛的取向）。归一是正解。
+
+    性能（本函数在热路径上，三处 ``__post_init__`` 都无条件调）：``str`` / ``None`` /
+    空立即返回**同一对象**；已合规的 dataclass 列表只多一次 ``isinstance`` 扫描并返回
+    **同一对象**，不重建。扫描刻意用 ``for/else`` 而非 ``any(genexpr)``——实测生成器
+    创建开销比扫描本身还大（691.7ns vs 512.1ns）。
+
+    未知 type 的 dict 交 ``content_from_jsonable`` 处理：跳过而不抛（事件流只增，
+    旧版本会读到比自己新的数据），语义与事件重放侧一致。
+    """
+    if isinstance(content, str) or not content:
+        return content                               # 快路径：str / None / 空
+    for part in content:
+        if isinstance(part, dict):
+            break
+    else:
+        return content                               # 已合规：同一对象，不重建
+    normalized: "list[ContentPart]" = []
+    for part in content:
+        if isinstance(part, dict):
+            # 复用归一层唯一真源；未知 type 在那里被跳过（见 docstring）。
+            normalized.extend(content_from_jsonable([part]) or [])
+        else:
+            normalized.append(part)
+    return normalized                                # 新列表：不就地改写调用方的 list
 
 
 # ── 事件脱敏 ───────────────────────────────────────────────────────────────

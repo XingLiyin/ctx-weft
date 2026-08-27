@@ -410,9 +410,9 @@ def _parts_to_text(parts: Any) -> str:
     if isinstance(parts, list):
         texts: list[str] = []
         for p in parts:
-            # dict 形态 part 的分支已删（Phase 3c Task E）：dict 是**协议违规**，已在
-            # ``MemoryRecord.__post_init__`` 边界归一成 dataclass；留着分支会让后来者
-            # 以为 dict 是受支持的形态。
+            # dict 形态 part 的分支已删（Phase 3c Task E/E2）：dict 是**协议违规**，已在
+            # ``LLMMessage`` / ``MemoryRecord`` / ``MemoryEvent`` 三处 ``__post_init__``
+            # 边界归一成 dataclass；留着分支会让后来者以为 dict 是受支持的形态。
             if hasattr(p, "text"):
                 texts.append(p.text)
             # else: 非文本 dataclass part（ImagePart 等）——跳过，语义对齐 core/utils.content_to_text
@@ -432,10 +432,11 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
     那条路上的 ref 会被当 base64 写进 payload。"""
     blocks: list[dict[str, Any]] = []
     for p in parts:
-        # dict 形态 part 的分支已删（Phase 3c Task E）：dict 是**协议违规**，已在
-        # ``MemoryRecord.__post_init__`` 边界归一成 dataclass，core 内部结构性不再
-        # 产生 dict part。dict 落到最后一支（``getattr`` 在 dict 上取不到属性）→
-        # 当作空文本跳过，不会 raise。
+        # dict 形态 part 的分支已删（Phase 3c Task E/E2）：dict 是**协议违规**，已在
+        # ``LLMMessage.__post_init__``（本函数入参恒为 ``LLMMessage.content``）与
+        # ``MemoryRecord`` / ``MemoryEvent`` 三处边界归一成 dataclass，到这里不再有 dict。
+        # 万一有（绕过构造器直调本函数），落到最后一支 → ``getattr`` 取不到 → 当作空文本
+        # 跳过，不会 raise：adapter 在同步出网主路径上，任何 raise 都会掀掉整个 LLM 请求。
         if getattr(p, "type", None) == "image":
             blocks.append({
                 "type": "image",

@@ -198,10 +198,10 @@ def test_anthropic_meaningful_text_with_leading_space_preserved():
 # 原 `if text:` 对 text=None 是容忍的（跳过该 part）；I1 之前的 `.strip()` 收紧对
 # None 直接 AttributeError。
 #
-# Phase 3c Task E 后两家 adapter 的 dict 分支已删（dict 是协议违规，已在
-# ``MemoryRecord.__post_init__`` 边界归一），dict part 因此落到「无 .text 属性」
-# 的最后一支被跳过——**外部可见行为不变**，这两条仍钉住「adapter 不得因 dict
-# 形态输入抛未捕获异常」这一契约。
+# Phase 3c Task E 后两家 adapter 的 dict 分支已删（dict 是协议违规，在边界归一）；
+# Task E2 起 ``LLMMessage.__post_init__`` 把这里的 dict 归一成 ``TextPart(text=None)``，
+# 于是又落回 adapter 的 `or ""` 兜底（即 I1 当初要守的那条）——**外部可见行为始终不变**，
+# 这两条仍钉住「adapter 不得因 dict 形态输入抛未捕获异常」这一契约。
 
 
 def test_anthropic_dict_part_with_none_text_does_not_raise():

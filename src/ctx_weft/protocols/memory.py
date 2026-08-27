@@ -19,7 +19,11 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from ctx_weft.protocols.context import ContentPart, ProviderContext
+from ctx_weft.protocols.context import (
+    ContentPart,
+    ProviderContext,
+    normalize_content_parts,
+)
 
 
 # ── Event types ───────────────────────────────────────────────────────────────
@@ -197,6 +201,15 @@ class MemoryEvent:
                     raise ValueError(
                         f"AGENT-scoped v2 event requires agent_id; got {self.address!r}")
 
+        # 写侧归一（Phase 3c Task E2），与读侧 MemoryRecord 对称：dict 形态 part 是
+        # 协议违规（本字段类型声明即 str | list[ContentPart]）。今日写侧 content 全由
+        # core 构造（都是 dataclass），但宿主直接 ingest(MemoryEvent(content=[dict]))
+        # 时 dict 会原样落库、读侧再归一回来——结果正确，只是往返多绕一圈，且写读两侧
+        # 语义不对称。放在全部校验**之后**：content=None 等既有报错路径不得被归一抢先。
+        # 共用实现见 core.content.normalize_content_parts（经 protocols.context 的惰性
+        # 绑定转调，层序 + 热路径理由同 MemoryRecord.__post_init__）。
+        self.content = normalize_content_parts(self.content)
+
 
 @dataclass
 class MemoryRecord:
@@ -234,29 +247,13 @@ class MemoryRecord:
         腐化；而任何 provider——含未来的第三方——都必须构造 MemoryRecord。判据
         ``not hasattr(p,"text")`` 因此保持冻结（用户裁定 D1），不为违规形态解冻。
 
-        性能：本方法在热路径上。``str``（绝大多数记录）立即返回；已合规的 dataclass
-        列表只多一次 ``isinstance`` 扫描（刻意用 for/else 而非 ``any(genexpr)``——
-        实测生成器开销让 2-part 列表从 +153ns 变成 +333ns）且**返回同一对象**，不重建。
-        ``content_from_jsonable`` 用函数级 import——protocols 是比 core 低的层，
-        模块级导入 ``core.content`` 会把依赖反向（该文件已在用同一手法，见 ``kind`` 字段）。
+        归一实现是三处边界共用的 ``core.content.normalize_content_parts``
+        （Phase 3c Task E2 抽取；另两处是 ``MemoryEvent`` 与 ``LLMMessage``）——spec §3①
+        要求形态转换收在归一层，三处各抄一份正是它要防的散点。快路径与「已合规不重建」
+        的性能性质由该函数保证。经 ``protocols.context.normalize_content_parts`` 这个
+        **惰性绑定**转调（层序 + 热路径理由见该绑定的 docstring）。
         """
-        content = self.content
-        if isinstance(content, str) or not content:
-            return                                   # 快路径：纯文本 / 空，零开销
-        for part in content:
-            if isinstance(part, dict):
-                break
-        else:
-            return                                   # 已合规：同一对象，不重建
-        from ctx_weft.core.content import content_from_jsonable
-        normalized: list[ContentPart] = []
-        for part in content:
-            if isinstance(part, dict):
-                # 复用归一层的唯一真源（未知 type 跳过而不抛，语义与事件重放侧一致）。
-                normalized.extend(content_from_jsonable([part]) or [])
-            else:
-                normalized.append(part)
-        self.content = normalized
+        self.content = normalize_content_parts(self.content)
 
 
 @dataclass

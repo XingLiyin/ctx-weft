@@ -236,12 +236,16 @@ async def test_rehydrate_is_byte_stable_across_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_dict_shaped_ref_is_not_emitted_as_base64() -> None:
-    """裁定 (A)：rehydrate_content 同时支持 dict 取值。
+    """裁定 (A)：dict 形态的 ref 绝不能带着 "blob:" 前缀出网。
 
     ``getattr(dict, "source_type", "base64")`` 在 dict 上落回默认值 "base64"，
-    于是 dict 形态的 ref 被静默当 base64 塞进 wire——图片废掉且全程无报错。
-    这里钉住：dict ref 必须要么被还原成 base64、要么降级成占位，**绝不能**
-    带着 "blob:" 前缀出网。
+    于是 dict 形态的 ref 会被静默当 base64 塞进 wire——图片废掉且全程无报错。
+    这里钉住：dict ref 必须要么被还原成 base64、要么降级成占位。
+
+    Phase 3c Task E2 后**这条路上 dict 已到不了 rehydrate**：``LLMMessage.__post_init__``
+    在构造时就把 dict 归一成 ``ImagePart``（``dataclasses.replace`` 在 rehydrate 之后
+    也会重跑它）。故此处断言的是归一后的 dataclass 形态。``rehydrate_content`` 本身
+    仍是「dict 进 dict 出」——那条性质由下面两条直调 ``rehydrate_content`` 的用例钉住。
     """
     store = _CountingStore()
     llm = _CapturingLLM()
@@ -253,11 +257,11 @@ async def test_dict_shaped_ref_is_not_emitted_as_base64() -> None:
     content = llm.seen[0].content
     assert isinstance(content, list)
     part = content[0]
-    assert isinstance(part, dict)                       # rehydrate 不改形态（dict 进 dict 出）
-    assert part["data"] == _PNG_B64
-    assert part["source_type"] == "base64"
-    assert not part["data"].startswith(BLOB_REF_PREFIX)
-    assert store.get_calls == [_PNG_REF]
+    assert isinstance(part, ImagePart)                  # E2：边界归一后 dict 已消失
+    assert part.data == _PNG_B64
+    assert part.source_type == "base64"
+    assert not part.data.startswith(BLOB_REF_PREFIX)
+    assert store.get_calls == [_PNG_REF], "归一不得丢掉 source_type='ref'（否则不会去取 blob）"
 
 
 @pytest.mark.asyncio
