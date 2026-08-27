@@ -844,3 +844,257 @@ async def test_blob_capable_provider_roundtrips_bytes(memory: MemoryProvider) ->
 
     assert await store.get("blob:definitely_missing", _ctx()) is None, (
         "get 对不存在的 ref 必须返回 None，不得 raise")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 跨租户隔离契约（Phase 3c Task C1b）
+# ══════════════════════════════════════════════════════════════════════════════
+# 已实证的泄漏：同 session_id、不同 tenant 时 tenantB 的 load_view 读到了
+# ['TENANT-A-SECRET']。`start_session` 支持宿主自带 session_id，故 session_id
+# 撞车不是理论问题。
+#
+# 本节每条**可见性**断言都正向断言「本租户读到了什么」——只断言「没读到别人的」
+# 对「修过头 → 返空」完全不敏感（台账 Task D M9 / C1 M18 两次实录）。
+
+_TENANT_A = "tenant-a"
+_TENANT_B = "tenant-b"
+_SECRET = "TENANT-A-SECRET"
+# 归一等价类：显式 "default" / 空串 / None 必须落同一分区（既有数据与既有调用点
+# 全都走 `ProviderContext.tenant_id` 的默认值 "default"，归一取向由此确定）。
+_DEFAULT_EQUIVALENTS: list[Any] = ["default", "", None]
+
+
+def _tctx(
+    tenant: Any,
+    task_id: str | None = None,
+    agent_id: str | None = None,
+) -> ProviderContext:
+    """同 session_id、不同 tenant 的调用上下文。
+
+    tenant 允许传 None：`ProviderContext.tenant_id` 声明是 `str`，但宿主实际会
+    塞 None / 空串——归一规则正是为这种串接不一致存在的。
+    """
+    return ProviderContext(
+        session_id=_SESSION, tenant_id=tenant, task_id=task_id, agent_id=agent_id
+    )
+
+
+async def test_load_view_isolates_tenants(memory: MemoryProvider) -> None:
+    """同 session_id、不同 tenant → 互相看不见。直接钉住实证的那条泄漏。"""
+    await memory.ingest(_turn(_SECRET, t=0), _tctx(_TENANT_A))
+    await memory.ingest(_turn("b-own", t=1), _tctx(_TENANT_B))
+
+    view_a = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(_TENANT_A))
+    view_b = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(_TENANT_B))
+    assert [r.content for r in view_a] == [_SECRET]
+    assert [r.content for r in view_b] == ["b-own"], (
+        "B 必须读到**自己的**那条——只断言 B 读不到 A 的话，返空也能通过"
+    )
+
+
+async def test_load_view_isolates_tenants_in_agent_scope(memory: MemoryProvider) -> None:
+    await memory.ingest(
+        _turn(_SECRET, t=0, task_id=None, scope=MemoryScope.AGENT, role="assistant"),
+        _tctx(_TENANT_A),
+    )
+    await memory.ingest(
+        _turn("b-own", t=1, task_id=None, scope=MemoryScope.AGENT, role="assistant"),
+        _tctx(_TENANT_B),
+    )
+    agent_addr = MemoryAddress(session_id=_SESSION, agent_id=_AGENT)
+
+    view_a = await memory.load_view(agent_addr, MemoryScope.AGENT, _tctx(_TENANT_A))
+    view_b = await memory.load_view(agent_addr, MemoryScope.AGENT, _tctx(_TENANT_B))
+    assert [r.content for r in view_a] == [_SECRET]
+    assert [r.content for r in view_b] == ["b-own"]
+
+
+async def test_load_view_isolates_tenants_in_session_scope(memory: MemoryProvider) -> None:
+    """SESSION 分区是泄漏面最大的一层：半址只有 session_id，撞车即全见。"""
+    for tenant, text, t in ((_TENANT_A, _SECRET, 0), (_TENANT_B, "b-own", 1)):
+        await memory.ingest(
+            MemoryEvent(
+                kind=MemoryKind.SUMMARY,
+                scope=MemoryScope.SESSION,
+                address=MemoryAddress(session_id=_SESSION),
+                content=text,
+                timestamp=_BASE + timedelta(seconds=t),
+            ),
+            _tctx(tenant),
+        )
+    session_addr = MemoryAddress(session_id=_SESSION)
+
+    view_a = await memory.load_view(session_addr, MemoryScope.SESSION, _tctx(_TENANT_A))
+    view_b = await memory.load_view(session_addr, MemoryScope.SESSION, _tctx(_TENANT_B))
+    assert [r.content for r in view_a] == [_SECRET]
+    assert [r.content for r in view_b] == ["b-own"]
+
+
+async def test_load_view_same_tenant_still_sees_all_its_own_rows(
+    memory: MemoryProvider,
+) -> None:
+    """防「修过头」：同一 tenant 字符串、不同 ProviderContext 对象 → 全量可见。
+
+    隔离必须按 tenant **值**分区，不能退化成按调用上下文对象分区。
+    """
+    await memory.ingest(_turn("first", t=0), _tctx(_TENANT_A))
+    await memory.ingest(_turn("second", t=1), _tctx(_TENANT_A, task_id="t1"))
+
+    view = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(_TENANT_A))
+    assert [r.content for r in view] == ["first", "second"]
+
+
+@pytest.mark.parametrize("read_tenant", _DEFAULT_EQUIVALENTS)
+@pytest.mark.parametrize("write_tenant", _DEFAULT_EQUIVALENTS)
+async def test_default_tenant_equivalents_are_one_partition(
+    memory: MemoryProvider, write_tenant: Any, read_tenant: Any
+) -> None:
+    """归一规则：`"default"` / `""` / `None` 是同一个租户分区。
+
+    这条比隔离本身更要紧——租户串接在写读两侧不一致时，严格比较会让 load_view
+    **静默返空**（表现是「会话突然失忆」），比泄漏更难诊断。
+    """
+    await memory.ingest(_turn("row", t=0), _tctx(write_tenant))
+    view = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(read_tenant))
+    assert [r.content for r in view] == ["row"]
+
+
+async def test_omitted_tenant_field_matches_explicit_default(
+    memory: MemoryProvider,
+) -> None:
+    """「缺失」= 根本不传 tenant_id（用 ProviderContext 的字段默认值）。
+
+    仓内绝大多数构造点就是这个形态，存量数据同理——它必须与显式 "default" 等价。
+    """
+    await memory.ingest(_turn("legacy-row", t=0), ProviderContext(session_id=_SESSION))
+    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    assert [r.content for r in view] == ["legacy-row"]
+
+
+async def test_named_tenant_and_default_tenant_are_isolated(
+    memory: MemoryProvider,
+) -> None:
+    """归一不得把具名租户也吞进默认分区。"""
+    await memory.ingest(_turn("default-row", t=0), _ctx())
+    await memory.ingest(_turn("named-row", t=1), _tctx(_TENANT_A))
+
+    default_view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    named_view = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(_TENANT_A))
+    assert [r.content for r in default_view] == ["default-row"]
+    assert [r.content for r in named_view] == ["named-row"]
+
+
+async def test_single_tenant_path_behaviour_is_unchanged(memory: MemoryProvider) -> None:
+    """既有路径（写读全程默认 tenant）行为不变：id、内容、顺序逐条对上。"""
+    ids = [
+        await memory.ingest(_turn(text, t=i), _ctx())
+        for i, text in enumerate(("one", "two", "three"))
+    ]
+    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    assert [r.id for r in view] == ids
+    assert [r.content for r in view] == ["one", "two", "three"]
+
+
+async def test_recall_topic_isolates_tenants(memory: MemoryProvider) -> None:
+    """topic 名同样可能跨租户撞车（宿主自定的 long_term_* topic 是常态）。"""
+    await _skip_unless_topic(memory)
+    await memory.ingest(_publication(_SECRET, "A", t=0), _tctx(_TENANT_A))
+    await memory.ingest(_publication("b-own", "A", t=1), _tctx(_TENANT_B))
+
+    recs_a, _ = await memory.recall_topic("A", since=0, ctx=_tctx(_TENANT_A))
+    recs_b, _ = await memory.recall_topic("A", since=0, ctx=_tctx(_TENANT_B))
+    assert [r.content for r in recs_a] == [_SECRET]
+    assert [r.content for r in recs_b] == ["b-own"]
+
+
+async def test_publication_overwrite_does_not_reach_other_tenants(
+    memory: MemoryProvider,
+) -> None:
+    """覆盖语义按租户分区：B 的发布不得把 A 的黑板条目标成 superseded。
+
+    读侧隔离若只加在读上，B 一发布就把 A 的行覆盖掉——A 从此读到空，而它连
+    B 的行都看不见。B 连发两条保证覆盖分支**真的执行过一次**。
+    """
+    await _skip_unless_topic(memory)
+    await memory.ingest(_publication("a-v1", "A", t=0), _tctx(_TENANT_A))
+    await memory.ingest(_publication("b-v1", "A", t=1), _tctx(_TENANT_B))
+    await memory.ingest(_publication("b-v2", "A", t=2), _tctx(_TENANT_B))
+
+    recs_a, _ = await memory.recall_topic("A", since=0, ctx=_tctx(_TENANT_A))
+    recs_b, _ = await memory.recall_topic("A", since=0, ctx=_tctx(_TENANT_B))
+    assert [r.content for r in recs_a] == ["a-v1"]
+    assert [r.content for r in recs_b] == ["b-v2"]
+
+
+async def test_recall_topic_default_tenant_equivalents_share_one_partition(
+    memory: MemoryProvider,
+) -> None:
+    await _skip_unless_topic(memory)
+    await memory.ingest(_publication("published", "A", t=0), _tctx(""))
+    recs, _ = await memory.recall_topic("A", since=0, ctx=_ctx())
+    assert [r.content for r in recs] == ["published"]
+
+
+async def test_recall_semantic_does_not_leak_across_tenants(
+    memory: MemoryProvider,
+) -> None:
+    await memory.ingest(_turn(_SECRET, t=0), _tctx(_TENANT_A))
+    info = await _declared(memory)
+
+    got = await memory.recall_semantic(_SECRET, _addr(), 5, _tctx(_TENANT_B))
+    assert isinstance(got, list)
+    assert [r for r in got if _SECRET in str(r.content)] == [], (
+        "另一个 tenant 不得经语义召回读到本租户内容"
+    )
+    if not info.supports_semantic:
+        assert got == [], "supports_semantic=False 的 provider 必须返空（core 默认行为）"
+    else:
+        own = await memory.recall_semantic(_SECRET, _addr(), 5, _tctx(_TENANT_A))
+        assert [r for r in own if _SECRET in str(r.content)], (
+            "本租户必须仍能召回自己的记录——否则是修过头把视图清空了"
+        )
+
+
+async def test_subscriptions_are_isolated_per_tenant(memory: MemoryProvider) -> None:
+    """订阅表同样按 (tenant, session, task) 分区——topic 名与 intent 也是租户数据。"""
+    await _skip_unless_topic(memory)
+    await memory.subscribe_topic(
+        _SESSION, topic="a-topic", intent="subtask", ctx=_tctx(_TENANT_A), task_id="B")
+    await memory.subscribe_topic(
+        _SESSION, topic="b-topic", intent="subtask", ctx=_tctx(_TENANT_B), task_id="B")
+
+    subs_a = await memory.list_subscriptions(_SESSION, ctx=_tctx(_TENANT_A), task_id="B")
+    subs_b = await memory.list_subscriptions(_SESSION, ctx=_tctx(_TENANT_B), task_id="B")
+    assert {s.topic for s in subs_a} == {"a-topic"}
+    assert {s.topic for s in subs_b} == {"b-topic"}
+
+
+async def test_same_topic_subscribed_by_two_tenants_stays_separate(
+    memory: MemoryProvider,
+) -> None:
+    """同 (session, task, topic) 在两个 tenant 下必须是两条独立订阅。
+
+    否则后订阅方撞上幂等分支，拿到的是**别人的**订阅（含别人的游标）。
+    用 intent 当判别器：共用一条时 B 会读到 A 的 "subtask"。
+    """
+    await _skip_unless_topic(memory)
+    await memory.subscribe_topic(
+        _SESSION, topic="shared", intent="subtask", ctx=_tctx(_TENANT_A), task_id="B")
+    await memory.subscribe_topic(
+        _SESSION, topic="shared", intent="long_term_background",
+        ctx=_tctx(_TENANT_B), task_id="B")
+
+    subs_a = await memory.list_subscriptions(_SESSION, ctx=_tctx(_TENANT_A), task_id="B")
+    subs_b = await memory.list_subscriptions(_SESSION, ctx=_tctx(_TENANT_B), task_id="B")
+    assert [(s.topic, s.intent) for s in subs_a] == [("shared", "subtask")]
+    assert [(s.topic, s.intent) for s in subs_b] == [("shared", "long_term_background")]
+
+
+async def test_subscriptions_default_tenant_equivalents_share_one_partition(
+    memory: MemoryProvider,
+) -> None:
+    await _skip_unless_topic(memory)
+    await memory.subscribe_topic(
+        _SESSION, topic="A", intent="subtask", ctx=_tctx(None), task_id="B")
+    subs = await memory.list_subscriptions(_SESSION, ctx=_ctx(), task_id="B")
+    assert [s.topic for s in subs] == ["A"]

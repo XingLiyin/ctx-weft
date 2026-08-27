@@ -294,6 +294,25 @@ class MemoryProviderInfo:
 class MemoryProvider(Protocol):
     """统一 memory：摄取所有事件 + 多模召回。单实例，必需。
 
+    【多租户隔离契约】
+    ``ProviderContext.tenant_id`` 是**硬隔离边界**，不是标签。宿主可自带 session_id
+    （见 ``start_session``），故「同 session_id、不同 tenant」是可达状态——provider
+    **必须**按租户分区，否则就是跨租户数据泄漏（实测发生过）。要求：
+    1. ingest 时记录 ``ctx.tenant_id``（归一后）随行落库；
+    2. 所有读接口（``load_view`` / ``recall_topic`` / ``recall_semantic`` /
+       ``list_subscriptions``）只返回**本租户**的行——即便 session_id / task_id /
+       agent_id / topic 全部撞车；
+    3. 归一：``None`` 与空串一律视为 ``"default"``（与 ``ProviderContext.tenant_id``
+       的字段默认值一致），**写读两侧必须用同一个归一**。这条不是洁癖：串接不一致
+       时若各自比原值，读侧会静默返空（「会话突然失忆」），比泄漏更难诊断；
+    4. 隐式的**跨行扫描**同样按租户分区——典型是 topic 发布的覆盖语义（下方
+       ``recall_topic``）：一个租户的发布绝不能把另一个租户同 topic 的行标为
+       superseded（它甚至读不到那些行）；订阅表同理，唯一键须含 tenant。
+    5. 尚未收口的一处（记录在案，不属本契约要求）：**记录 id 的命名空间仍是全局的**
+       ——``ingest`` 的按 id 幂等与 ``fold`` 的按 id 遗忘都不看 tenant。它们是调用方
+       显式给出 id 的操作，与「隐式扫描」不同类；要改需先定 id 是全局唯一还是租户内
+       唯一。宿主若跨租户复用记录 id，须自行保证。
+
     【多模态无损存取契约】
     MemoryEvent.content 可能是 str 或 list[ContentPart]（后者为多模态，含文本与图片）。宿主 provider 必须：
     1. 持久化时保持原样——若 ingest 接收 list[ContentPart]，则无损保存整体结构；
@@ -366,6 +385,9 @@ class MemoryProvider(Protocol):
           SESSION → task_id/agent_id 非 None=ValueError。
         - 返回前经 memory_compat.normalize_view（legacy dispatch 配对 + kind/layer 重打）；
           record.address 回显来源归档地址。
+        - **租户隔离**（见类 docstring）：只返回 ``ctx.tenant_id``（归一后）分区内的行。
+          同 session_id 的另一个租户的记录必须不可见；反之本租户的行一条都不能少
+          （修过头 → 返空 = 会话失忆）。
         """
         ...
 
@@ -383,6 +405,12 @@ class MemoryProvider(Protocol):
         """按 topic 拉取（自 since seq_no 之后），返回 (events, new_cursor)。
 
         必需实现。父子 task 通信 + 跨 session 订阅式上下文用。
+
+        - 覆盖语义（黑板）：同 topic 的 PUBLICATION 只保留最新一条，旧的标 superseded；
+          其它 kind 的带 topic 记录累积保留。``BlackboardSource`` 依赖这条。
+        - **租户隔离**（见类 docstring）：topic 名跨租户撞车同样可达（宿主自定的
+          long_term_* topic 是常态），故按 ``ctx.tenant_id``（归一后）过滤；上面的
+          覆盖扫描也**只在本租户分区内**进行。
         """
         ...
 
@@ -397,6 +425,8 @@ class MemoryProvider(Protocol):
         """语义相似度召回。可选——core 默认实现返空；外部实现核心能力。
 
         Provider 通过 describe() 声明是否支持。
+        **租户隔离**（见类 docstring）同样适用：向量检索也必须按 ``ctx.tenant_id``
+        预过滤，否则相似度会直接把别的租户的内容捞出来。
         """
         ...
 
@@ -411,7 +441,11 @@ class MemoryProvider(Protocol):
         ctx: ProviderContext,
         task_id: str = "",
     ) -> str:
-        """task 订阅 topic；返回 subscription id。幂等：同 (session, task, topic) 重复订阅保留游标。"""
+        """task 订阅 topic；返回 subscription id。幂等：同 (session, task, topic) 重复订阅保留游标。
+
+        幂等的唯一键**须含 tenant**（见类 docstring 第 4 条）：否则同 session_id 的
+        另一个租户会撞上幂等分支、拿到别人的订阅与游标。
+        """
         ...
 
     @abstractmethod
@@ -421,7 +455,11 @@ class MemoryProvider(Protocol):
         ctx: ProviderContext,
         task_id: str | None = None,
     ) -> list[Subscription]:
-        """列出订阅。task_id 给定时只返回该 task 的订阅 + session 级订阅（task_id=""）；None 返回全部。"""
+        """列出订阅。task_id 给定时只返回该 task 的订阅 + session 级订阅（task_id=""）；None 返回全部。
+
+        "全部" 仍以租户为界——只返回 ``ctx.tenant_id``（归一后）分区内的订阅
+        （topic 名与 intent 同样是租户数据）。
+        """
         ...
 
     # v2 P4b-2：apply_compact / supersede 自协议删除——写面收敛为 ingest + fold。

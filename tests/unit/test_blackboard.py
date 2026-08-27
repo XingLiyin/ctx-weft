@@ -124,8 +124,10 @@ async def test_session_level_subscription_visible_to_all() -> None:
 async def test_subscribe_is_idempotent_and_preserves_cursor() -> None:
     m = InMemoryMemoryProvider()
     await m.subscribe_topic("s1", topic="A", intent="subtask", ctx=_ctx(), task_id="B")
-    # 模拟游标推进
-    m._subscriptions[("s1", "B", "A")].cursor = 7
+    # 模拟游标推进。键含 tenant（Phase 3c Task C1b 起为 (tenant, session, task, topic)——
+    # 否则同 session_id 的另一个租户会撞上幂等分支、拿到别人的订阅与游标）；
+    # _ctx() 不传 tenant_id，走 ProviderContext 的默认值 "default"。
+    m._subscriptions[("default", "s1", "B", "A")].cursor = 7
     await m.subscribe_topic("s1", topic="A", intent="subtask", ctx=_ctx(), task_id="B")
 
     subs = await m.list_subscriptions("s1", ctx=_ctx(), task_id="B")

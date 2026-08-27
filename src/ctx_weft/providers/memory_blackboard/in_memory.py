@@ -33,6 +33,21 @@ from ctx_weft.protocols.memory_compat import (
 )
 
 
+_DEFAULT_TENANT = "default"
+
+
+def normalize_tenant(tenant_id: str | None) -> str:
+    """租户归一（协议「多租户隔离契约」第 3 条）：None / 空串 → ``"default"``。
+
+    写读两侧走同一个函数是这条隔离的**安全前提**：串接不一致（一处 ``"default"``、
+    一处 ``""``、一处 None）时若两侧各自比较原值，load_view 会静默返空——表现是
+    「会话突然失忆」，比泄漏本身更难诊断。归一到同一规范值后，严格比较只在两侧
+    都给出明确非默认值时才生效，既有数据与既有调用点（`ProviderContext.tenant_id`
+    默认值就是 ``"default"``）因此逐字节不受影响。
+    """
+    return tenant_id or _DEFAULT_TENANT
+
+
 @dataclass
 class _StoredEvent:
     """内存中存的一条事件。"""
@@ -44,6 +59,9 @@ class _StoredEvent:
     # ingest 时归一化的 v2 三元组（kind=None → 死类型，永不见于视图）
     kind: MemoryKind | None = None
     scope: MemoryScope | None = None
+    # 归一后的租户（隔离分区键）。此前只有 _scope_key 的 seq 计数器带 tenant，行记录
+    # 本身不带 → 任何读接口都无从按租户过滤（跨租户泄漏成因）。
+    tenant: str = _DEFAULT_TENANT
     is_superseded: bool = False
 
 
@@ -56,7 +74,9 @@ class InMemoryMemoryProvider(MemoryProvider):
         self._events: list[_StoredEvent] = []
         self._seq_counters: dict[str, int] = {}  # (tenant, session, agent) → seq
         self._topic_seq: dict[str, int] = {}  # topic → max seq
-        self._subscriptions: dict[tuple[str, str, str], Subscription] = {}  # (session_id, task_id, topic) → sub
+        # (tenant, session_id, task_id, topic) → sub；tenant 入键，否则同 session_id
+        # 的另一个租户会撞上 subscribe_topic 的幂等分支、拿到别人的订阅与游标。
+        self._subscriptions: dict[tuple[str, str, str, str], Subscription] = {}
         self._next_id = 0
         self._lock = asyncio.Lock()
 
@@ -86,8 +106,9 @@ class InMemoryMemoryProvider(MemoryProvider):
         except ValueError:
             kind = None
         layer = layer_of(event.type, event.scope)
+        tenant = normalize_tenant(ctx.tenant_id)
 
-        scope_key = self._scope_key(event.address, ctx.tenant_id, layer)
+        scope_key = self._scope_key(event.address, tenant, layer)
         self._seq_counters[scope_key] = self._seq_counters.get(scope_key, 0) + 1
         seq_no = self._seq_counters[scope_key]
 
@@ -97,6 +118,7 @@ class InMemoryMemoryProvider(MemoryProvider):
             if kind is MemoryKind.PUBLICATION:
                 for s in self._events:
                     if (not s.is_superseded
+                            and s.tenant == tenant  # 覆盖不得越过租户分区
                             and s.event.topic == event.topic
                             and s.kind is MemoryKind.PUBLICATION):
                         s.is_superseded = True
@@ -110,6 +132,7 @@ class InMemoryMemoryProvider(MemoryProvider):
             topic_seq_no=topic_seq,
             kind=kind,
             scope=layer,
+            tenant=tenant,
         )
         self._events.append(stored)
         return event_id
@@ -152,10 +175,12 @@ class InMemoryMemoryProvider(MemoryProvider):
     ) -> list[MemoryRecord]:
         validate_half_address(address, scope)
         wanted = set(kinds) if kinds is not None else set(self._DEFAULT_KINDS)
+        tenant = normalize_tenant(ctx.tenant_id)
 
         matching = [
             s for s in self._events
             if not s.is_superseded
+            and s.tenant == tenant  # 租户隔离：同 session_id 不同 tenant 互不可见
             and s.scope is scope
             and s.kind in wanted
             and self._address_match(s.event.address, address, scope)
@@ -255,9 +280,11 @@ class InMemoryMemoryProvider(MemoryProvider):
         since: int,
         ctx: ProviderContext,
     ) -> tuple[list[MemoryRecord], int]:
+        tenant = normalize_tenant(ctx.tenant_id)
         matching = [
             s for s in self._events
-            if s.event.topic == topic and s.topic_seq_no > since and not s.is_superseded
+            if s.tenant == tenant  # 租户隔离：topic 名跨租户撞车同样可达
+            and s.event.topic == topic and s.topic_seq_no > since and not s.is_superseded
         ]
         matching.sort(key=lambda s: s.topic_seq_no)
         records = [self._to_record(s) for s in matching]
@@ -284,7 +311,7 @@ class InMemoryMemoryProvider(MemoryProvider):
         ctx: ProviderContext,
         task_id: str = "",
     ) -> str:
-        key = (session_id, task_id, topic)
+        key = (normalize_tenant(ctx.tenant_id), session_id, task_id, topic)
         # 幂等：已存在则保留原订阅（含 cursor），不重置
         if key not in self._subscriptions:
             self._subscriptions[key] = Subscription(
@@ -303,8 +330,9 @@ class InMemoryMemoryProvider(MemoryProvider):
         task_id: str | None = None,
     ) -> list[Subscription]:
         out: list[Subscription] = []
-        for (sid, tid, _t), s in self._subscriptions.items():
-            if sid != session_id:
+        tenant = normalize_tenant(ctx.tenant_id)
+        for (ten, sid, tid, _t), s in self._subscriptions.items():
+            if ten != tenant or sid != session_id:
                 continue
             # task_id 给定时：只返回该 task 的订阅 + session 级订阅（tid == ""）
             if task_id is not None and tid != task_id and tid != "":
