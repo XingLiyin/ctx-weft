@@ -66,6 +66,13 @@ class HitlManager:
         self._cold_decision_lookup: (
             "Callable[[str, str], Awaitable[HitlRequest | None]] | None"
         ) = None
+        # 应答内容的校验 + 外部化回调（Runtime 绑定 _validate_and_normalize_content,
+        # 见 set_content_normalizer）。签名 async (content, session_id) -> content，
+        # 刻意只收这两个参数——HitlManager 因此不必 import BlobStore / LLM 任何类型。
+        # None（纯单测直接构造 HitlManager() 时）→ 恒等变换、行为逐字节不变。
+        self._content_normalizer: (
+            "Callable[[str | list[ContentPart], str], Awaitable[str | list[ContentPart]]] | None"
+        ) = None
         self._requests: dict[str, HitlRequest] = {}
         self._futures: dict[str, asyncio.Future[HitlRequest]] = {}
         self._lock = asyncio.Lock()
@@ -251,6 +258,36 @@ class HitlManager:
             return None
         return max(matches, key=lambda r: r.created_at)
 
+    def set_content_normalizer(
+        self,
+        handler: (
+            "Callable[[str | list[ContentPart], str], Awaitable[str | list[ContentPart]]] | None"
+        ),
+    ) -> None:
+        """注入应答内容的校验 + 外部化回调（Runtime 绑定 _validate_and_normalize_content）。
+
+        HITL 是人类往会话里注入内容的第二个入口——`run_single_task` / `start_session`
+        两个入口早已接上 validate → normalize，此路径此前全程不校验、不外部化：图片
+        既不过格式校验（`b64decode` 默认 `validate=False` **不抛**，静默解出垃圾字节
+        ⟹ 静默损坏）、也不过视觉门控，还以 inline base64 永久留在 memory 里。
+
+        供构造后晚绑定（与 set_cold_resolve_handler / set_cold_decision_lookup 同形态）。
+        **未注入时是恒等变换**——直接构造 `HitlManager()` 的既有调用方行为逐字节不变。
+        """
+        self._content_normalizer = handler
+
+    async def _normalize_message(
+        self, req: HitlRequest, content: "str | list[ContentPart]",
+    ) -> "str | list[ContentPart]":
+        """应答内容过一遍校验 + 外部化。未注入 normalizer → 原样返回同一对象。
+
+        刻意**不** try/except：校验失败必须原样抛给应答方（host 的 /messages），
+        req 保持 pending、不发事件、不写 blob——与两个入口「入口即拒、不落库」一致。
+        """
+        if self._content_normalizer is None:
+            return content
+        return await self._content_normalizer(content, req.session_id)
+
     def set_cold_decision_lookup(
         self, handler: "Callable[[str, str], Awaitable[HitlRequest | None]]",
     ) -> None:
@@ -294,7 +331,8 @@ class HitlManager:
     async def resolve_answer(self, hitl_id: str, text: "str | list[ContentPart]") -> tuple[HitlRequest, bool]:
         """question/wait form 应答，返回 (req, was_hot)。was_hot=False 时调用方须触发冷 resume。"""
         req = self._require(hitl_id)
-        req.message = text
+        # 校验/外部化先于任何状态改动：被拒的内容不得写进 req.message、不得推进状态。
+        req.message = await self._normalize_message(req, text)
         return await self._resolve(req, "accepted", EventType.HITL_ANSWERED, resume_on_cold=True)
 
     async def resolve_approve(
@@ -311,7 +349,7 @@ class HitlManager:
     async def resolve_reject(self, hitl_id: str, *, message: "str | list[ContentPart]" = "") -> tuple[HitlRequest, bool]:
         """拒绝（approval 与 question/wait form 通用），返回 (req, was_hot)。was_hot=False 时调用方须触发冷 resume。"""
         req = self._require(hitl_id)
-        req.message = message
+        req.message = await self._normalize_message(req, message)
         return await self._resolve(req, "rejected", EventType.HITL_REJECTED, resume_on_cold=True)
 
     # ── internals ──────────────────────────────────────────────────────────────

@@ -443,6 +443,10 @@ class CtxWeftRuntime:
         self.hitl_manager.set_cold_resolve_handler(self._resume_after_cold_hitl)
         # 冷决定查询：reconcile 短路的跨重启回落（内存缓存重启后不含已解决,不查日志会重问）。
         self.hitl_manager.set_cold_decision_lookup(self._cold_hitl_decision)
+        # HITL 应答内容的校验 + 外部化：人类经 HITL 递进来的图此前全程不校验、不外部化
+        # （无格式校验 / 无视觉门控 / inline base64 永久留在 memory）。与 start_session /
+        # run_single_task 共用同一个方法，顺序不会各自漂移（Phase 3c Task A）。
+        self.hitl_manager.set_content_normalizer(self._validate_and_normalize_content)
         # 默认使用内存版 EventStore，自动订阅 EventBus；传入自定义实现时由调用方自行 wire
         from ctx_weft.core.state.event_store import InMemoryEventStore
         self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)
@@ -511,6 +515,47 @@ class CtxWeftRuntime:
         raise RuntimeError(
             "No LLM available. Register an LLMProvider via providers.register_llm_provider() "
             "or pass llm= to CtxWeftRuntime."
+        )
+
+    async def _validate_and_normalize_content(
+        self,
+        content: "str | list[ContentPart]",
+        session_id: str,
+        *,
+        tenant_id: str = "default",
+        llm: "LLMClient | None" = None,
+        llm_account: str | None = None,
+        llm_model: str | None = None,
+    ) -> "str | list[ContentPart]":
+        """入口内容校验 + 外部化的**单一真源**（三个入口共用）。
+
+        顺序恒为 `validate_content` → `normalize_content`，理由两条（spec §6.1）：
+        (a) 被拒的内容不该在 blob store 里留下垃圾——校验失败必须发生在任何 `put`
+        之前；(b) `normalize_content` 里的 `b64decode(..., validate=True)` 刻意不加
+        try/except，靠 validate 先行把畸形 base64 拦成 `InvalidContentError`。抽成
+        这一个方法之后，三处调用点的顺序不会再各自漂移。
+
+        `llm` 已解析时直接传（`run_single_task`）；否则走 `llm_resolver` 惰性解析
+        ——纯文本与畸形内容都在格式校验阶段返回/抛出，resolver 从不被调用，
+        `start_session` 的「纯文本不提前解析 LLM」不变量因此得以保持。
+
+        不能外部化（`NullBlobStore`）时原样返回同一对象，整段是 no-op。
+        """
+        from ctx_weft.core.content import normalize_content, validate_content
+
+        if llm is not None:
+            validate_content(content, llm=llm)
+        else:
+            validate_content(
+                content, llm_resolver=lambda: self._resolve_llm(llm_account, llm_model),
+            )
+        blob_store = self.providers.get_blob_store()
+        if not blob_store.can_externalize:
+            return content
+        return await normalize_content(
+            content,
+            blob_store=blob_store,
+            ctx=ProviderContext(session_id=session_id, tenant_id=tenant_id),
         )
 
     def _sync_session_llm_window(self, session: Session) -> None:
@@ -658,20 +703,16 @@ class CtxWeftRuntime:
         """Phase 1 compat: run a single task end-to-end and await completion."""
         import dataclasses as _dc
 
-        from ctx_weft.core.content import content_to_text, normalize_content, validate_content
+        from ctx_weft.core.content import content_to_text
 
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
         llm = self._resolve_llm(llm_account, llm_model)
         # 入口即拒、不落库：格式/视觉门控须在任何持久化（Session/Task/事件）之前完成
         # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全。
-        validate_content(user_prompt, llm=llm)
-        # 顺序关键：validate 必须在 normalize 之前——先拒掉畸形/超限/无视觉能力的内容，
-        # 再花代价写 blob；反过来会让被拒的内容也在 blob store 里留下垃圾。
-        # 未注册 BlobStore 时 normalize_content 原样返回（NullBlobStore.can_externalize
-        # 为 False），纯文本与不接 blob 的宿主行为逐字节不变。
-        user_prompt = await normalize_content(
-            user_prompt, blob_store=self.providers.get_blob_store(), ctx=ctx,
+        # validate → normalize 的顺序与另外两个入口共用同一个方法，不再各写一遍。
+        user_prompt = await self._validate_and_normalize_content(
+            user_prompt, sid, tenant_id=tenant_id, llm=llm,
         )
         lm = LifecycleManager(template_lookup=self._template_lookup)
 
@@ -753,8 +794,6 @@ class CtxWeftRuntime:
         """
         import dataclasses as _dc
 
-        from ctx_weft.core.content import normalize_content, validate_content
-
         memory = self.providers.get_memory()
         # 入口即拒、不落库：sm.create_session / sm.resume_session 会立即持久化
         # （instantiate_agent + SESSION_CREATED/RESUMED 事件），所以校验必须在它们
@@ -768,30 +807,24 @@ class CtxWeftRuntime:
         # llm_resolver 惰性解析：validate_content 内部先做格式校验，只有格式合法
         # 的图片才会真的调用 resolver 走到门控。纯文本（含 dict 形态）与畸形内容
         # 都在格式校验阶段提前返回/抛出，resolver 从不被调用。
-        validate_content(
-            params.user_prompt,
-            llm_resolver=lambda: self._resolve_llm(
-                params.llm_account, params.llm_model
-            ),
-        )
         # 顺序关键：validate 先于 normalize——被拒的内容不该在 blob store 留垃圾。
-        # 不能外部化时（NullBlobStore）下面整段是纯 no-op：params 不被替换、
+        # 两步都在 _validate_and_normalize_content 里（三个入口共用的单一真源）。
+        # 不能外部化时（NullBlobStore）normalize 段是纯 no-op：params 不被替换、
         # session_id 也不提前生成，行为与 Phase 3a 逐字节一致。
         blob_store = self.providers.get_blob_store()
+        # blob 落盘要一个 session 锚点（宿主按 session_id 登记 workspace），所以
+        # 能外部化时必须把 session_id 定下来并透传给 create_session，否则外部化用的
+        # session 与真正创建的 session 会是两个 id。
+        sid = params.session_id or (generate_id("ses") if blob_store.can_externalize else None)
+        normalized = await self._validate_and_normalize_content(
+            params.user_prompt,
+            sid or "",
+            tenant_id=params.tenant_id,
+            llm_account=params.llm_account,
+            llm_model=params.llm_model,
+        )
         if blob_store.can_externalize:
-            # blob 落盘要一个 session 锚点（宿主按 session_id 登记 workspace），所以
-            # 这里必须把 session_id 定下来并透传给 create_session，否则外部化用的
-            # session 与真正创建的 session 会是两个 id。
-            sid = params.session_id or generate_id("ses")
-            params = _dc.replace(
-                params,
-                session_id=sid,
-                user_prompt=await normalize_content(
-                    params.user_prompt,
-                    blob_store=blob_store,
-                    ctx=ProviderContext(session_id=sid, tenant_id=params.tenant_id),
-                ),
-            )
+            params = _dc.replace(params, session_id=sid, user_prompt=normalized)
         lm = LifecycleManager(template_lookup=self._template_lookup)
         sm = SessionManager(
             lifecycle_manager=lm,
