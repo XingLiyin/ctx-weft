@@ -738,6 +738,18 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 **Phase 4 — 折叠与回放**（子设计全文）
 `core/media/` + L0.5 + `media:get_image`。
 
+> **已兑现（Phase 4，2026-08-27，`5a6f5e3..4867795` 九个提交）**：
+> `core/media/`（`refs` / `policy` / `fold` / `capability`）+ L0.5 接进
+> `escalating_compact`（L1 之前）+ §6.1 的 L1/L3 前置降级 + `InvocationResult.content`
+> 放宽与 `CONTENT_PARTS_KEY` 通用通道 + `MediaCapabilityProvider` 无条件注册。
+> 端到端已验证：L0.5 真降级落库 → 模型**从 wire payload 的文本里扫出占位**、
+> 把 ref 抄进工具参数 → gateway → `media:get_image` → 图随 tool result 回到对话尾部
+> → 下一轮装配 → adapter wire 上 `b64decode(...) == 原始字节`。
+> **子设计有四处表述被实现推翻，已就地加注「订正（Phase 4）」**：
+> §2（「图片一律算 0」是 Phase 0 之前的现状）、§4.1（位置靠 `timestamp` 保住，
+> **不是** `seq_no`）、§5（与 §6 矛盾，裁定 R2 以 §6 为准）、
+> §6.1（对 L1 的顺序错，Task 5b 修）。**落地全貌与遗留处置见子设计 §13。**
+
 ## 11. 回归保证
 
 每个阶段都必须满足：**纯文本会话的行为逐字节不变。**
@@ -751,6 +763,14 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
   framing 补偿，会静默移动裁剪与 compact 阈值）
 - 未注册 `BlobStore` 时，L0.5 返回 0（不降级），adapter 侧无 ref 可 rehydrate，
   图保持 inline base64——即 Phase 2 的形态
+
+> **补记（Phase 4）**：上面最后一条落地时收紧了一层——L0.5 与 §6.1 的三处调用点全部
+> 由 `compact._media_enabled(ctx)`（`blob_store is not None and can_externalize`）
+> **短路**，未接 BlobStore 时**连一次多余的 memory 读都不发**，而不只是「返回 0」。
+> 即便闸被绕开，`policy.demotable_ref` 的 `source_type == "ref"` 判据也会让选中集为空。
+> **两条已知例外，都不由 BlobStore 门控**：`media:get_image` 无条件出现在工具面
+> （子设计 §9 即如此）；`openai.py::_TOOL_IMAGE_NOTICE` 的文案由中文改英文
+> （L6 收口，wire-only，且不接 BlobStore 时工具结果不会带图，实际不可达）。
 
 ## 12. 测试策略
 
@@ -1543,7 +1563,7 @@ Phase 3c 的十个任务共记录 30 条遗留。逐条判定如下（**不是�
 | L1 | `resolve_*` 三个公开方法不调 `_stash_resume_llm`（§14.7 的半个洞） | 与 L2 一起做 |
 | L2 | `HitlRequest` 无 `tenant_id`，根治要动 `HITL_REQUIRED` payload/reducer + 存量回放 | 与 L1 一起做，一次动事件 payload |
 | L3 | 冷路径解 tenant 要全量拉一次事件，`EventStore` 缺窄查询 | 给 `EventStore` 加一个窄查询，**不要**在 runtime 侧堆缓存 |
-| L4 | `test_dispatch_boundary_recap_e2e` 曾在一次全量跑中失败，其后 15+ 次未复现 | 观察项。留在台账，别当新发现重报 |
+| L4 | `test_dispatch_boundary_recap_e2e` 曾在一次全量跑中失败，其后 15+ 次未复现 | 观察项。留在台账，别当新发现重报。**→ Phase 4 再次出现并查明机制（P4-L12）：不是超时，是 `_RouterLLM` 把 `tools=[]` 的摘要调用误路由进 act 分支；底下可能盖着一个真的折叠缺口。完整诊断与处置建议见子设计 §13.3，仍未闭合** |
 | L10 | `_IMAGE_BYTES_PER_TOKEN` 硬编码（32 MB 是 Anthropic 的数） | 要按 provider 调，正解是挂到 LLM 客户端上（同 `context_limit`），不在 utils 堆分支 |
 | L12 | 「重复订阅保留游标」在纯协议面**不可观测**（8 个方法里没有推进游标的），SQL provider 上该断言 skip | 补 `advance_subscription(...)`，或让 `recall_topic` 接受订阅身份并落库游标 |
 | L13 | `archives_superseded` 声明面未被验证（协议未定义「已归档」的可观测行为） | 先定义可观测行为，再补 conformance |
@@ -1568,7 +1588,7 @@ Phase 3c 的十个任务共记录 30 条遗留。逐条判定如下（**不是�
 
 | # | 内容 | 为什么不做 |
 |---|---|---|
-| L6 | 占位文案无统一真源：`[图片见后一条消息]`（中）vs `[image {media_type}]`（英） | 两者**各自逐字节确定**即满足缓存约束，正确性无损。Phase 4 若还要加第三条占位，**先收口再加** |
+| L6 | 占位文案无统一真源：`[图片见后一条消息]`（中）vs `[image {media_type}]`（英） | 两者**各自逐字节确定**即满足缓存约束，正确性无损。Phase 4 若还要加第三条占位，**先收口再加**。**→ 已在 Phase 4 收口（裁定 R1）**：`core/media/refs.py` 的模块 docstring 是全仓占位清单，且是**唯一有解析语义**的那种（L0.5）；另外三种保持在原处（归一层 / wire 层各归其位）并统一成英文，各加一行注释指向清单 |
 | L7 | token 估算不知道重定位——多出那条 user 消息的 framing 开销未计 | 偏小几十 token，落在 margin 内；重定位不改张数/字节，总量一致 |
 | L11 | 存量 `metadata["token_count"]` 是旧口径写的，对大图整体偏小 | 随 fold/compact 自然淘汰；做数据迁移的收益不抵风险 |
 | L19 | `subscribe_topic` 返回的 id 不含 tenant，两租户的两条独立订阅拿到同一个 id 字符串 | 协议没说该 id 全局唯一，仓内无人拿它做键（返回值全被丢弃）。改格式可能打到宿主 |
