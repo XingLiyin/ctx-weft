@@ -125,12 +125,18 @@ def content_to_jsonable(
         if _is_text_part(part):
             out.append({"type": "text", "text": part.text})
         else:
-            out.append({
+            item = {
                 "type": "image",
                 "data": getattr(part, "data", ""),
                 "media_type": getattr(part, "media_type", ""),
                 "source_type": getattr(part, "source_type", "base64"),
-            })
+            }
+            # byte_size 只在**有值时**才写键（Phase 3c Task D）：不写 None，存量事件
+            # 载荷与不接 BlobStore 的宿主逐字节不变。读侧缺键 → None → image_tokens 回落。
+            byte_size = getattr(part, "byte_size", None)
+            if byte_size is not None:
+                item["byte_size"] = byte_size
+            out.append(item)
     return out
 
 
@@ -155,6 +161,8 @@ def content_from_jsonable(
                 data=item.get("data", ""),
                 media_type=item.get("media_type", ""),
                 source_type=item.get("source_type", "base64"),
+                # 存量行没有该键 → None → image_tokens 回落到 _IMAGE_PART_TOKENS。
+                byte_size=item.get("byte_size"),
             ))
         else:
             # 未知类型：跳过而不抛（见 docstring），但留个信号——静默丢弃数据不该完全无声。
@@ -331,6 +339,16 @@ def validate_content(
                 f"单张图片 {len(raw)} 字节超过上限 "
                 f"{_MAX_IMAGE_BYTES}（5 MiB）"
             )
+        # Phase 3c Task D 简报要求「在 validate 解码 inline base64 时顺手填 byte_size」，
+        # **本实现刻意不做**——理由两条，见 task-D 报告：
+        # ① 零收益：inline 形态的体积由 image_tokens 的 len(data)*3//4（含 padding
+        #    修正）反解，与 len(raw) 逐字节相等，填不填算出的 token 数完全一样；真正
+        #    需要 byte_size 的只有 ref 形态，而那由 normalize_content 填。
+        # ② 有代价：本函数是**校验器**，签名返回 None、契约上不碰入参。填字段就是就地
+        #    改写调用方的对象，实测会让 tests/unit/test_multimodal_entry.py 的
+        #    「Task 承载全量内容」（task.user_prompt == 原 content）转红——因为
+        #    dataclass 相等比较把 byte_size 也算进去。为一个派生字段破坏「入口校验不改
+        #    内容」的不变量不划算。
 
     # 门控放最后：只有格式合法的图片才值得问「模型支不支持」。
     client = llm if llm is not None else (llm_resolver() if llm_resolver is not None else None)
@@ -377,7 +395,11 @@ async def normalize_content(
             continue
         raw = base64.b64decode(getattr(part, "data", "") or "", validate=True)
         ref = await blob_store.put(raw, getattr(part, "media_type", ""), ctx)
-        out.append(dataclasses.replace(part, data=ref, source_type="ref"))
+        # byte_size 必须在这里记下来（Phase 3c Task D）：外部化之后 data 是
+        # "blob:<sha>"（长度恒约 69），体积信息就此丢失，而 image_tokens 是同步的、
+        # 不能回 BlobStore 做 IO 取回来。这是最后一个还握着 raw bytes 的地方。
+        out.append(dataclasses.replace(
+            part, data=ref, source_type="ref", byte_size=len(raw)))
     return out
 
 

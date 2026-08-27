@@ -151,8 +151,32 @@ def content_to_text(content: "str | list[ContentPart] | None") -> str:
 # 一条消息/记录里文本 content 之外的计费补偿项（都往大了取，堵低估致 400 的洞）。
 # 供 gateway（LLMMessage）与 prepare/composer（memory 记录 / 装配消息）共用，单一真源。
 _MSG_FRAMING_TOKENS = 4       # 每条消息的角色/分隔 framing 开销（provider 计费、文本之外）
-_IMAGE_PART_TOKENS = 1600     # 每个非文本 part（图片）的保守 token 数（不按 base64 长度算，
-                              # 否则一张图几万字符会反向严重高估）
+# 每张图的**地板**。历史上 image_tokens 就等于「张数 × 本常数」，Phase 3c Task D 起
+# 它退化成下限：小于 _IMAGE_PART_TOKENS * _IMAGE_BYTES_PER_TOKEN（= 200 KiB）的图仍按
+# 它计，更大的图按字节折算。保留地板的两个理由：① 模型侧对任意一张图的固定开销本就在
+# 这个量级，往下折算会低估；② 体积未知（存量记录 / ref 且无 byte_size）时的回落值，
+# 保证存量数据与不接 BlobStore 的宿主行为不劣化。
+_IMAGE_PART_TOKENS = 1600
+
+# ⚠️ 本系数建模的是**字节压力，不是计费 token**。provider 侧会把图降采样，单图真实计费
+# 大约就封顶在 1600 附近——拿本口径去算成本是误用。但预算机制的职责是「判断这个请求能不能
+# 发出去」，而那由**字节**决定（请求体超上限会被 provider 直接拒），所以估算必须建模字节。
+#
+# 标定（Phase 3c Task D，依据全部取自仓内实际取值）：
+#   · Anthropic 单次请求体上限约 32 MB；base64 膨胀 4/3 → 可容纳原始字节约 24 MiB。
+#   · 仓内典型窗口 context_limit = 180_000（core/state/models.py、core/control/types.py、
+#     core/control/reducers.py 三处默认值），reserved_output_tokens = 8_192
+#     → effective_limit = 171_808。
+#   · 令「预算耗尽」与「请求体触顶」对齐：25_165_824 B / 171_808 tok ≈ 146.5 B/tok。
+#   · 向下取到 2 的幂 128：取整方向使估算**偏高**（与 estimate_tokens 的「保证单边高估」
+#     同向——低估会触发 provider 400，高估只浪费窗口），且 128 = 移位，纯整数运算。
+# 校验（compact_token_ratio 默认 0.8，protocols/template.py:79）：
+#   · 单张满额图（core/content.py 的 _MAX_IMAGE_BYTES = 5 MiB）= 40_960 tok。
+#   · 4 张 = 163_840 tok = 95% of 171_808 → 早已越过 0.8 触发比，compact 必然先行介入。
+#   · 5 张 = 204_800 tok > 171_808 → 地板仍超限时 budget.py 抛 ContextOverflowError。
+#   · 满预算 171_808 tok = 21 MiB 原始字节 ≈ 28 MB base64，对 32 MB 硬顶留约 13% 余量。
+# 即「若干张满额图即超出典型预算」，而旧口径下 5 张满额图账面才 8_000 tok（不到 5%）。
+_IMAGE_BYTES_PER_TOKEN = 128
 
 
 def _dumps_for_estimate(obj: Any) -> str:
@@ -177,17 +201,71 @@ def image_part_count(content: "str | list[ContentPart] | None") -> int:
     return sum(1 for p in content if not hasattr(p, "text"))
 
 
+def image_byte_size(part: Any) -> int | None:
+    """一个图片 part 的原始（解码后）字节数；无从得知时返回 None。
+
+    两条来源，按可靠度排序：
+    1. ``byte_size`` 字段——由 ``core.content`` 在**还有字节**的时候填上
+       （validate 解码 inline base64 / normalize 外部化拿到 raw bytes），
+       并经 ``content_to_jsonable`` 往返持久化。ref 形态只有这一条路。
+    2. inline base64 的载荷长度反解：``len(data) * 3 // 4`` 减去 padding。
+       刻意**不解码**——``image_tokens`` 在装配/压缩热路径上被逐条调用，
+       为估算去 b64decode 一张 5 MiB 的图是不可接受的开销。
+
+    两条都够不着（ref / url 且无 ``byte_size``，即存量记录与不接 BlobStore 的
+    宿主）→ None，由调用方回落到 ``_IMAGE_PART_TOKENS``。
+    """
+    size = getattr(part, "byte_size", None)
+    if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+        return size
+    if getattr(part, "source_type", "base64") != "base64":
+        return None                        # ref / url：data 不是载荷，长度无意义
+    data = getattr(part, "data", "") or ""
+    if not isinstance(data, str) or not data:
+        return None
+    pad = 2 if data.endswith("==") else (1 if data.endswith("=") else 0)
+    return max(0, (len(data) * 3) // 4 - pad)
+
+
 def image_tokens(content: "str | list[ContentPart] | None") -> int:
     """content 中图片（非文本 part）的 token 补偿。不含文本、不含 framing。
 
     对 str / None / 空一律返回 0——这保证调用方在纯文本路径上是恒等变换，
-    可以安全地加在既有的文本计数之后而不改变既有口径。
+    可以安全地加在既有的文本计数之后而不改变既有口径。**这条不变量不可破**：
+    所有文本口径都建立在它之上。
 
-    刻意不接受 count 回调：图片按固定常数计（见 _IMAGE_PART_TOKENS 的说明），
-    不过 tokenizer。定义为 _IMAGE_PART_TOKENS * image_part_count(content)，
-    与 image_part_count 共用同一判据，两者不会不一致。
+    单张图 = ``max(_IMAGE_PART_TOKENS, 字节数 // _IMAGE_BYTES_PER_TOKEN)``，
+    字节数未知时取 ``_IMAGE_PART_TOKENS``（等价于旧口径，故存量数据与不接
+    BlobStore 的宿主行为不劣化）。
+
+    **为什么按字节**（Phase 3c Task D，用户裁定 D2）：原口径是 ``1600 × 张数``，
+    对唯一真正变化的维度——体积——毫无反应。5 MiB 截图与 50 KiB 缩略图同价，于是
+    唯一能阻止请求体无限膨胀的机制（token 预算）对真实失败模式完全失明：几张大截图
+    账面才几千 token（远不触发 compact），实际请求体已 30 MB+ 被 provider 拒，
+    而每次 act 都重发全部历史图 → 会话永久卡死且无法自愈。按字节估算之后，
+    「预算 → compact → fold → 图片离开视图 → 请求缩小」这条既有链自己就闭合了。
+
+    ⚠️ **本函数建模的是字节压力，不是计费 token**——provider 会降采样，单图真实计费
+    大约封顶在 1600。别拿它算成本，见 ``_IMAGE_BYTES_PER_TOKEN`` 的标定说明。
+
+    判据与 ``image_part_count`` 同为 ``not hasattr(p, "text")``（spec §13 冻结），
+    两者对「哪些 part 是图」永不互相矛盾；但**数值上不再是 1600 的整数倍**，
+    ``budget.py`` 报图片数须继续走 ``image_part_count``，不得对本函数整除反推。
+
+    刻意不接受 count 回调：图片不过 tokenizer。
     """
-    return _IMAGE_PART_TOKENS * image_part_count(content)
+    if not content or isinstance(content, str):
+        return 0
+    total = 0
+    for part in content:
+        if hasattr(part, "text"):
+            continue
+        size = image_byte_size(part)
+        if size is None:
+            total += _IMAGE_PART_TOKENS
+        else:
+            total += max(_IMAGE_PART_TOKENS, size // _IMAGE_BYTES_PER_TOKEN)
+    return total
 
 
 def estimate_content_tokens(content: "str | list[ContentPart] | None", *, count: Callable[[str], int] | None = None) -> int:
