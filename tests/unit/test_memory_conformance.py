@@ -61,6 +61,7 @@ from ctx_weft.protocols.context import ImagePart, TextPart
 from ctx_weft.protocols.filesystem import BlobStore
 from ctx_weft.protocols.memory_compat import MemoryKind
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory_sql import open_sqlite_memory
 
 # ── Provider 注册表（C2 接入点）────────────────────────────────────────────────
 
@@ -70,9 +71,16 @@ async def _make_in_memory(tmp_path: Any) -> AsyncIterator[MemoryProvider]:
     yield InMemoryMemoryProvider()
 
 
+@asynccontextmanager
+async def _make_sqlite(tmp_path: Any) -> AsyncIterator[MemoryProvider]:
+    """SQLite 落盘的 SqlMemoryProvider（Task C2）。每条用例一个新库。"""
+    async with open_sqlite_memory(tmp_path / "memory.db") as provider:
+        yield provider
+
+
 _PROVIDER_FACTORIES = {
     "in_memory": _make_in_memory,
-    # "sqlite": _make_sqlite,   # ← Task C2 在此加一行
+    "sqlite": _make_sqlite,
 }
 
 
