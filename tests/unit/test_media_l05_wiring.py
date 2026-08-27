@@ -26,6 +26,7 @@ import pytest
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.media import demote_for_budget, get_image
 from ctx_weft.core.media.refs import decode_image_placeholder, find_image_placeholders
+from ctx_weft.core.utils import content_to_text
 from ctx_weft.protocols import (
     ImagePart,
     MemoryAddress,
@@ -464,3 +465,165 @@ async def test_get_image_is_honest_after_the_placeholder_is_folded_away():
     text = "".join(p.text for p in parts)
     assert _ref(9) in text and "present in this task" in text   # 说得清楚
     assert await blobs.get(_ref(9), _pctx()) is not None        # 字节其实还在
+
+
+# ── 9. Task 5b：§6.1 对 L1 真的生效——降级必须早于摘要（修 P4-L10） ───────────
+#
+# Task 5 按简报原文把 `demote_all` 放进了 `fold_root_experience` 内部，而调用方是
+# **先** `summarize_for_compact` 算好摘要、**再**把它传进来。于是被 `keep_recent`
+# 保住的那几张最新的图先被 `content_to_text` 无痕拍扁进摘要输入（连占位都没有、
+# ref 彻底没了），紧接着记录被 supersede——正是 §6.1 开头要防的「优先级完全颠倒」。
+#
+# 下面三条断的分别是：摘要输入里逐字有 ref（不是「摘要非空」这种永真）／降级确实排在
+# 摘要之前／降级省下的 token 归属正确（不重复计入、也不丢）。
+
+
+_AGENT_HALF = MemoryAddress(session_id="s1", agent_id="a1")
+
+
+async def _seed_two_top_units(mem):
+    """两个已完成顶层单元 old/new：各一条**含真图**的 task 层胶囊 + 一条 agent 层 finish 对。
+
+    两张图合计 2 张 = `keep_recent_images=2` 的名额，故 L0.5 一张都不降——正是简报要求的
+    「被 keep_recent 保住的最新的图落进 L1 折叠范围」。
+    """
+    for i, tid in enumerate(("old", "new")):
+        await mem.ingest(MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+            address=MemoryAddress(session_id="s1", task_id=tid, agent_id="a1"),
+            content=[TextPart(text=f"body-{tid}"), _img(20 + i)],
+            timestamp=_BASE + timedelta(seconds=i), role="user",
+            metadata={"task_id": tid}), _pctx())
+        await mem.ingest(MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
+            address=_AGENT_HALF, content=f"done-{tid}",
+            timestamp=_BASE + timedelta(seconds=i), role="assistant",
+            metadata={"origin_task_id": tid, "parent_task_id": None,
+                      "tool_calls": [{"name": "finish_task"}]}), _pctx())
+
+
+def _l1_state(**kw):
+    """当前 task 是 `cur`（不可折），keep_last=1 → 只折最老那个单元 `old`。"""
+    st = _state(**kw)
+    st.scope = MemoryAddress(session_id="s1", task_id="cur", agent_id="a1")
+    st.agent.loop_config.compact_keep_last = 1
+    return st
+
+
+async def _summary_input_text(mem) -> str:
+    """摘要输入的等价物：装配器读的就是这两个视图，每条 content 过 `content_to_text`
+    （真图在这一步被静默拍扁，占位则是文本、原样留下）。"""
+    recs = await mem.load_view(_AGENT_HALF, MemoryScope.AGENT, _pctx())
+    recs += await mem.load_view(_AGENT_HALF, MemoryScope.TASK, _pctx(),
+                                kinds=cm._TASK_VIEW_KINDS)
+    return "\n".join(r.content if isinstance(r.content, str) else content_to_text(r.content)
+                     for r in recs)
+
+
+@pytest.mark.asyncio
+async def test_l1_summary_input_holds_the_placeholder_not_a_vanished_image(monkeypatch):
+    """🔴 本任务存在的理由：L1 的**摘要输入**里，折区那张最新的图是**含 ref 的占位**。
+
+    逐字断言 ref 本身出现在摘要输入里——「摘要输入非空」之类是永真的。
+    修复前（摘要先算、降级后跑）这里逐字得到的是 `body-old` 而 ref 无影无踪。
+    """
+    mem = _CountingMemory()
+    await _seed_two_top_units(mem)
+
+    captured: dict[str, str] = {}
+
+    async def _fake_summ(state, ctx, *, scope="task"):
+        captured[scope] = await _summary_input_text(mem)
+        return f"SUM-{scope}"
+
+    monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(set()))
+
+    events = await cm.escalating_compact(
+        _l1_state(target_ratio=0.01), _ctx(mem, blobs=_Blobs()),
+        token_estimate=9000, trigger="compact")
+
+    sources = [e.payload["source"] for e in events if e.type == "MemoryCompacted"]
+    # 前提：L0.5 一张都没降（两张图正好被 keep_recent=2 保住）→ 图是「最新的」那种
+    assert "demote_images" not in sources, sources
+    # 对照：L1 **确实**跑了并折了东西（否则下面的断言可能只是因为什么都没发生）
+    assert sources == ["root_experience"], sources
+
+    text = captured["agent"]
+    assert "body-old" in text                                  # 折区那条确实进了摘要输入
+    assert _ref(20) in text, text                              # ← 逐字：ref 还在
+    assert find_image_placeholders(text) == [(_ref(20), "image/png")], text
+    # 折区那条随后就被 supersede 了，摘要文本是它唯一的痕迹——`ref` 在里面就是全部证据
+    body = await mem.load_view(_AGENT_HALF, MemoryScope.TASK, _pctx(),
+                               kinds=cm._TASK_VIEW_KINDS)
+    assert [r.address.task_id for r in body] == ["new"]
+    # 折区外那张（`new`，记录并不消失）仍是真图 —— §6.1 只降自己的折区，
+    # 也说明上面 `text` 里那个 ref 不可能来自它（真图过 content_to_text 一点不剩）
+    assert any(not hasattr(p, "text") for p in body[0].content)
+    assert _ref(21) not in text
+
+
+@pytest.mark.asyncio
+async def test_l1_demotion_runs_before_the_summary_is_generated(monkeypatch):
+    """顺序钉死在 `fold_root_experience` 内部：两次 `demote_all` 都在摘要求值之前。
+
+    调用形态因此改成「传取摘要的函数」而不是摘要文本——折区 ids 只有函数内部算得出，
+    所以是把摘要推迟进去，而不是把降级提到外面。
+    """
+    mem = _CountingMemory()
+    await _seed_two_top_units(mem)
+
+    order: list[str] = []
+    real = cm.demote_all
+
+    async def spy_demote(memory, ids, ctx, **k):
+        order.append("demote")
+        return await real(memory, ids, ctx, **k)
+
+    monkeypatch.setattr(cm, "demote_all", spy_demote)
+
+    seen: list[str] = []
+
+    async def _summary() -> str:
+        order.append("summarize")
+        seen.append(await _summary_input_text(mem))
+        return "EXP"
+
+    n = await cm.fold_root_experience(
+        _l1_state(), _ctx(mem, blobs=_Blobs()), 1, _summary)
+
+    assert n > 0                                   # 对照：确实折了
+    assert order == ["demote", "demote", "summarize"], order   # TASK + AGENT 两次降级
+    assert seen and _ref(20) in seen[0], seen      # 摘要看到的是占位不是空白
+    # 摘要真的落进了新的 AGENT_COMPACT_SUMMARY（证明 `_summary()` 的返回值被用上）
+    agent_recs = await mem.load_view(_AGENT_HALF, MemoryScope.AGENT, _pctx())
+    assert [r.content for r in agent_recs if r.kind is MemoryKind.SUMMARY] == ["EXP"]
+
+
+@pytest.mark.asyncio
+async def test_l1_freed_tokens_account_for_the_demotion_exactly_once(monkeypatch):
+    """freed 归属：降级发生在 L1 的 `_apply` **内部**，故它省下的 token 恰好计一次。
+
+    整级（降级 + 摘要 + fold）是交给 `_apply` 的一步，`before` 仍是 L0.5 的 `after`
+    ——把降级挪到 `_apply` 之外再显式重新测量，这一段就会从账上消失（est_after 偏高）；
+    不重新测量而在别处又减一次，则会被重复计入。这条断的是**逐字的守恒**。
+    """
+    mem = _CountingMemory()
+    await _seed_two_top_units(mem)
+    monkeypatch.setattr(cm, "summarize_for_compact",
+                        lambda s, c, *, scope="task": _const(f"SUM-{scope}"))
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(set()))
+
+    state = _l1_state(target_ratio=0.01)
+    ctx = _ctx(mem, blobs=_Blobs())
+    before = await cm._active_memory_tokens(state, ctx)
+    events = await cm.escalating_compact(state, ctx, token_estimate=9000,
+                                         trigger="compact")
+    after = await cm._active_memory_tokens(state, ctx)
+
+    folded = [e for e in events if e.type == "MemoryCompacted"]
+    assert [e.payload["source"] for e in folded] == ["root_experience"]
+    fin = events[-1].payload
+    assert before - after > 1600                       # 至少含那张图（对照，非永真）
+    assert fin["freed_tokens"] == before - after       # 不重复、不遗漏
+    assert fin["est_after"] == 9000 - (before - after)

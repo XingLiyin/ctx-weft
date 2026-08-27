@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
@@ -284,7 +285,7 @@ async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
 
 
 async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: int,
-                               summary_text: str) -> int:
+                               summary_text: str | Callable[[], Awaitable[str]]) -> int:
     """跨层折叠 fold：task 的详细度只 3 级（spec 2026-06-29 重订，删 L1 黑盒中间态）。
 
     - **执行中**：RUNNING/SUSPENDED → task 层 raw（每条工具调用展开），不在本函数管辖。
@@ -301,6 +302,12 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
 
     跨层 supersede 一次原子提交（ids 跨 task 层胶囊 + agent 层对话,provider 按 id 生效、不按
     scope 过滤）。返回 supersede 的总条数。
+
+    `summary_text` 可以是**已算好的摘要文本**，也可以是一个**取摘要的零参 async 函数**
+    （Task 5b / P4-L10）：§6.1 的前置降级必须发生在摘要生成**之前**，否则折区里的真图
+    会被 `content_to_text` 静默拍扁进摘要输入（连占位都没有），随后记录被 supersede——
+    正是 §6.1 要防的「最新的图反而痕迹全无」。摘要由本函数在降级 + 重新 `load_view`
+    之后才求值，调用方因此不必把降级逻辑（依赖折区 ids）搬到自己那边去。
     """
     memory = ctx.memory
     # AGENT 视图默认 kinds（对话+摘要）；legacy dispatch 配对已在 load_view 内归一，升序即时序。
@@ -400,6 +407,13 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
             if not ids:
                 return 0
 
+    # 🔴 摘要在这里才求值——**必须在上面那次前置降级之后**（Task 5b，修 P4-L10）。
+    # 反过来（旧序：调用方先算好摘要再传进来）的话，折区里那些被 L0.5 的 keep_recent
+    # 保下来的**最新的**图会先被 `content_to_text` 拍扁进摘要输入（连占位都没有、
+    # ref 彻底没了），紧接着记录就被下面的 `fold()` supersede → 老图留下可取回的占位、
+    # 最新的图反而痕迹全无，正是 §6.1 开头写的「优先级完全颠倒」。
+    summary = summary_text if isinstance(summary_text, str) else await summary_text()
+
     # 折出新摘要：仅当确有单元被折时写（纯遗忘 = fold(ids, [])）
     if not fold_top:
         await memory.fold(ids, [], ctx.provider_ctx)
@@ -425,7 +439,7 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
         MemoryEvent(
             kind=MemoryKind.SUMMARY, scope=MemoryScope.AGENT,
             address=state.scope,
-            content=summary_text or "[Experience compacted]",
+            content=summary or "[Experience compacted]",
             timestamp=anchor_ts - timedelta(microseconds=1),
             role="user",
             metadata={"keep_last": keep_last, "folded_count": len(fold_top)},
@@ -551,6 +565,8 @@ async def escalating_compact(
         nonlocal est, last_tokens
         # 不变量：前一级的 after 直接当这一级的 before 复用，只在 _active_memory_tokens 是纯快照读、
         # 且两次 _apply 之间没有其他改动内存的操作时才成立。未来若在级间插入其他写操作，须重新测量。
+        # 故 L1 的「前置降级 + 摘要 + fold」整体作为**一个** level_coro 交给本函数（Task 5b）：
+        # 把降级提到 _apply 之外会破坏这个前提，且降级省下的 token 要么被重复计入、要么彻底丢掉。
         before = last_tokens if last_tokens is not None else await _active_memory_tokens(state, ctx)
         n = await level_coro if inspect.isawaitable(level_coro) else level_coro
         after = await _active_memory_tokens(state, ctx)
@@ -581,8 +597,16 @@ async def escalating_compact(
 
     # L1 · agent 折（仅当有可折顶层单元）
     if await _count_root_residues(state, ctx) > keep_last:
-        summary_agent = await summarize_for_compact(state, ctx, scope="agent")
-        n, freed = await _apply(fold_root_experience(state, ctx, keep_last, summary_agent))
+        # 🔴 传的是「取摘要的函数」而不是摘要文本（Task 5b，修 P4-L10）：摘要必须在
+        # `fold_root_experience` 内部的 §6.1 前置降级**之后**才生成，否则折区里的真图
+        # 先被拍扁进摘要输入（连 ref 都不剩）再被 supersede。折区 ids 只有函数内部
+        # 算得出，故把摘要推迟进去，而不是把降级提到外面来。
+        # 这样整级（降级 + 摘要 + fold）仍是交给 `_apply` 的**一步**，`_apply` 的
+        # 「前一级 after 复用为本级 before」不变量不受影响，降级省下的 token 也自然
+        # 计进本级的 freed（既不重复计入 L0.5，也不丢）。
+        n, freed = await _apply(fold_root_experience(
+            state, ctx, keep_last,
+            lambda: summarize_for_compact(state, ctx, scope="agent")))
         if n:
             events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
                 "superseded_count": n, "layer": "agent", "source": "root_experience",
