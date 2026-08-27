@@ -219,6 +219,45 @@ class MemoryRecord:
     address: "MemoryAddress | None" = None  # v2：来源回显（归档坐标）
     metadata: dict = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """把 dict 形态的 content 归一回 ContentPart dataclass（多模态 Phase 3c）。
+
+        ``content`` 的类型声明就是 ``str | list[ContentPart]``，多模态契约第 2 条要求
+        「召回时原样返回——形态必与入库时相同」。JSON 往返的 provider 若回吐
+        ``[{"type":"text","text":"hi"}]`` 就是**协议违规**，后果实测过两条且互相掩护：
+        ``image_part_count`` 把文本计成图（多算 1600 token），``content_to_text``
+        返回空串（摘要器完全看不见内容）——token 涨了看着"内容很多"，实际内容全丢。
+
+        修法落在**类型自己的边界**而不是每个读取方：core 读 memory 有 11 个调用点
+        （act/compact/finalize/prepare/reconcile/segment_fold/background_observe/
+        runtime/agent_recall/blackboard/long_memory），逐个兜底既漏又会随新调用点
+        腐化；而任何 provider——含未来的第三方——都必须构造 MemoryRecord。判据
+        ``not hasattr(p,"text")`` 因此保持冻结（用户裁定 D1），不为违规形态解冻。
+
+        性能：本方法在热路径上。``str``（绝大多数记录）立即返回；已合规的 dataclass
+        列表只多一次 ``isinstance`` 扫描（刻意用 for/else 而非 ``any(genexpr)``——
+        实测生成器开销让 2-part 列表从 +153ns 变成 +333ns）且**返回同一对象**，不重建。
+        ``content_from_jsonable`` 用函数级 import——protocols 是比 core 低的层，
+        模块级导入 ``core.content`` 会把依赖反向（该文件已在用同一手法，见 ``kind`` 字段）。
+        """
+        content = self.content
+        if isinstance(content, str) or not content:
+            return                                   # 快路径：纯文本 / 空，零开销
+        for part in content:
+            if isinstance(part, dict):
+                break
+        else:
+            return                                   # 已合规：同一对象，不重建
+        from ctx_weft.core.content import content_from_jsonable
+        normalized: list[ContentPart] = []
+        for part in content:
+            if isinstance(part, dict):
+                # 复用归一层的唯一真源（未知 type 跳过而不抛，语义与事件重放侧一致）。
+                normalized.extend(content_from_jsonable([part]) or [])
+            else:
+                normalized.append(part)
+        self.content = normalized
+
 
 @dataclass
 class Subscription:

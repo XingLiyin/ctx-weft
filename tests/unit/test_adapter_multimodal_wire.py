@@ -196,13 +196,17 @@ def test_anthropic_meaningful_text_with_leading_space_preserved():
 # ── I1（评审 2026-08-24 fix wave）：`.strip()` 收紧对 text=None 不再容忍 ────────
 #
 # 原 `if text:` 对 text=None 是容忍的（跳过该 part）；I1 之前的 `.strip()` 收紧对
-# None 直接 AttributeError——两家 adapter 都显式支持 dict 形态 part（这个分支就是
-# 为它存在的），spec §13 已点名 JSON 往返的 memory provider 是这类输入的现实来源。
+# None 直接 AttributeError。
+#
+# Phase 3c Task E 后两家 adapter 的 dict 分支已删（dict 是协议违规，已在
+# ``MemoryRecord.__post_init__`` 边界归一），dict part 因此落到「无 .text 属性」
+# 的最后一支被跳过——**外部可见行为不变**，这两条仍钉住「adapter 不得因 dict
+# 形态输入抛未捕获异常」这一契约。
 
 
 def test_anthropic_dict_part_with_none_text_does_not_raise():
-    """dict part 的 text=None（如 JSON 往返产出的畸形/容忍输入）不得让 adapter 内部
-    抛未捕获的 AttributeError——应像原 `if text:` 语义一样跳过该 part。"""
+    """dict part（如 JSON 往返产出的畸形/容忍输入）不得让 adapter 内部抛未捕获的
+    AttributeError——应像原 `if text:` 语义一样跳过该 part。"""
     out = anth([LLMMessage(role="user", content=[{"type": "text", "text": None}])])
     assert out[0]["content"] == [], "text=None 的 part 应被跳过，不产出任何 block"
 

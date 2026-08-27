@@ -419,11 +419,10 @@ def _parts_to_text(parts: Any) -> str:
     if isinstance(parts, list):
         texts: list[str] = []
         for p in parts:
-            if isinstance(p, dict):
-                if p.get("type") == "image":
-                    continue  # 非文本 part（图片）——跳过，不把 base64/repr 泄漏进发给模型的文本
-                texts.append(p.get("text", ""))
-            elif hasattr(p, "text"):
+            # dict 形态 part 的分支已删（Phase 3c Task E）：dict 是**协议违规**，已在
+            # ``MemoryRecord.__post_init__`` 边界归一成 dataclass；留着分支会让后来者
+            # 以为 dict 是受支持的形态。
+            if hasattr(p, "text"):
                 texts.append(p.text)
             # else: 非文本 dataclass part（ImagePart 等）——跳过，语义对齐 core/utils.content_to_text
         return " ".join(texts)
@@ -442,24 +441,11 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
     那条路上的 ref 会被拼进 data URL。"""
     blocks: list[dict[str, Any]] = []
     for p in parts:
-        if isinstance(p, dict):
-            p_type = p.get("type")
-            if p_type == "image":
-                media_type = p.get("media_type", "")
-                data = p.get("data", "")
-                blocks.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{media_type};base64,{data}"},
-                })
-            else:
-                # I1: p.get("text") 可能显式为 None（如 JSON 往返的畸形/容忍输入）——
-                # 原 `if text:` 对 None 是容忍的（跳过该 part），`.strip()` 收紧后若不
-                # 兜底会对 None 直接 AttributeError。`or ""` 把 None/缺失都归一成空串，
-                # 再走同一条「纯空白同属 400」判断，恢复原容忍语义。
-                text = p.get("text") or ""
-                if text.strip():  # 纯空白块与空块同属 provider 400 的一类（spec §13）
-                    blocks.append({"type": "text", "text": text})
-        elif getattr(p, "type", None) == "image":
+        # dict 形态 part 的分支已删（Phase 3c Task E）：dict 是**协议违规**，已在
+        # ``MemoryRecord.__post_init__`` 边界归一成 dataclass，core 内部结构性不再
+        # 产生 dict part。dict 落到最后一支（``getattr`` 在 dict 上取不到属性）→
+        # 当作空文本跳过，不会 raise。
+        if getattr(p, "type", None) == "image":
             blocks.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:{p.media_type};base64,{p.data}"},

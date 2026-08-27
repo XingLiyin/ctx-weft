@@ -253,7 +253,7 @@ async def test_dict_shaped_ref_is_not_emitted_as_base64() -> None:
     content = llm.seen[0].content
     assert isinstance(content, list)
     part = content[0]
-    assert isinstance(part, dict)                       # 形态保持，adapter 的 dict 分支照走
+    assert isinstance(part, dict)                       # rehydrate 不改形态（dict 进 dict 出）
     assert part["data"] == _PNG_B64
     assert part["source_type"] == "base64"
     assert not part["data"].startswith(BLOB_REF_PREFIX)
