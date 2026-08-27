@@ -372,11 +372,28 @@ async def _age_blob(store: SqlMemoryProvider, sha: str, *, days: int) -> None:
 
 
 async def test_grace_period_is_configurable(tmp_path: Any) -> None:
-    """宽限期是构造参数：宿主可按自己的 put→ingest 时延调，默认 24h。"""
+    """宽限期是构造参数：宿主可按自己的 put→ingest 时延调，默认 24h。
+
+    ``now`` 必须显式传，不能靠 ``collect_blobs()`` 自己读钟——本机实测
+    ``datetime.now()`` 的粒度约 **0.5 ms**（相邻两次调用 100% 返回同值），
+    而 ``put`` 与 ``collect`` 是背靠背两个 await，极易落在同一个 tick 内。
+    那时 ``created_at == cutoff``，回收判据的**严格** ``<`` 不成立 → 一个都删不掉。
+    实测该 flake 在全量跑里 4 次错 2 次。
+
+    严格 ``<`` 是实现刻意的取舍（「宁可漏删，不可误删」），**不该为迁就测试放宽**；
+    racy 的是「同一 tick 内既 put 又判过期」这个测法。故用 ``now`` 把时间轴钉死。
+    """
     async with open_sqlite_memory(
             tmp_path / "m.db", blob_grace_period=timedelta(0)) as s:
         await s.put(b"zero grace", "image/png", _ctx())
-        assert await s.collect_blobs() == 1
+        # grace=0 → cutoff = now；给一个明确晚于 created_at 的 now，判定不再依赖时钟粒度。
+        assert await s.collect_blobs(now=datetime.now(UTC) + timedelta(seconds=1)) == 1
+        # 反向对照：同一份数据、grace 足够长时**不该**被回收——
+        # 否则「删了 1 个」可能只是因为回收无条件删，而非宽限期真的可配。
+    async with open_sqlite_memory(
+            tmp_path / "m.db", blob_grace_period=timedelta(days=1)) as s2:
+        await s2.put(b"long grace", "image/png", _ctx())
+        assert await s2.collect_blobs(now=datetime.now(UTC) + timedelta(seconds=1)) == 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
