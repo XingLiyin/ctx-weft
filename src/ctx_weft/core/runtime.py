@@ -445,8 +445,10 @@ class CtxWeftRuntime:
         self.hitl_manager.set_cold_decision_lookup(self._cold_hitl_decision)
         # HITL 应答内容的校验 + 外部化：人类经 HITL 递进来的图此前全程不校验、不外部化
         # （无格式校验 / 无视觉门控 / inline base64 永久留在 memory）。与 start_session /
-        # run_single_task 共用同一个方法，顺序不会各自漂移（Phase 3c Task A）。
-        self.hitl_manager.set_content_normalizer(self._validate_and_normalize_content)
+        # run_single_task 共用同一个方法，顺序不会各自漂移（Phase 3c Task A）。薄包装
+        # _normalize_hitl_content 只负责从 req 上取出本次应答真正要用的 llm 与 tenant，
+        # 校验/外部化本身仍是那个共用方法（Phase 3c Task A2）。
+        self.hitl_manager.set_content_normalizer(self._normalize_hitl_content)
         # 默认使用内存版 EventStore，自动订阅 EventBus；传入自定义实现时由调用方自行 wire
         from ctx_weft.core.state.event_store import InMemoryEventStore
         self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)
@@ -556,6 +558,66 @@ class CtxWeftRuntime:
             content,
             blob_store=blob_store,
             ctx=ProviderContext(session_id=session_id, tenant_id=tenant_id),
+        )
+
+    async def _tenant_for_session(self, session_id: str) -> str:
+        """由 session_id 解出 tenant_id；解不出一律回落 ``"default"``，**绝不抛**。
+
+        `HitlRequest` 不带 tenant_id，而 blob 的 ProviderContext 需要它——多租户宿主下
+        写死 `"default"` 会让 HITL 递进来的图落到错误的 tenant 锚点。
+
+        两条途径，先热后冷：
+        1. 活 owner TaskManager 的 `session`（`_task_managers`）——热应答的主路径，纯内存查表；
+        2. 事件日志：**每条 `Event` 都带 `tenant_id`**（`core/events/types.py`），取该 session
+           第一条即可，不必 `rebuild_view` 折叠整个投影（冷应答/重启后走这条）。
+
+        本方法在 HITL 应答路径上——**抛错会卡住人类应答**，故整段 best-effort：
+        存储不可用 / session 无事件 / 事件不带 tenant，一律回落 `"default"`（= 现状）。
+        """
+        tm = self._task_managers.get(session_id)
+        sess = tm.session if tm is not None else None
+        if sess is not None and sess.tenant_id:
+            return sess.tenant_id
+        try:
+            events = await self.event_store.read_by_session(session_id)
+        except Exception:
+            logger.warning(
+                "HITL tenant resolve: cannot read events for session %s; using 'default'",
+                session_id, exc_info=True,
+            )
+            return "default"
+        for ev in events:
+            tenant = getattr(ev, "tenant_id", "")
+            if tenant:
+                return tenant
+        return "default"
+
+    async def _normalize_hitl_content(
+        self, content: "str | list[ContentPart]", req: "HitlRequest",
+    ) -> "str | list[ContentPart]":
+        """HITL 应答内容的校验 + 外部化（`HitlManager.set_content_normalizer` 的回调）。
+
+        只做「从 req 上取出本次应答真正要用的 llm 与 tenant」这一件事，校验/外部化本身
+        仍由三入口共用的 `_validate_and_normalize_content` 完成（顺序恒为
+        validate → normalize，不在此重写一遍）。
+
+        - **llm**：用 `req.resume_llm_account / req.resume_llm_model`（host 应答时传入，
+          `_stash_resume_llm` 已在 resolve 之前写好）。多模型宿主下视觉门控必须判
+          「真正会收到这张图的那个模型」——判默认 client 等于门控失效。两者均为 `None`
+          时 `_resolve_llm(None, None)` 回落默认 client，既有行为不变。
+        - **tenant**：由 `req.session_id` 解出（见 `_tenant_for_session`）。解 tenant 冷路径
+          要读事件日志，故只在**真会写 blob** 时才付这个代价：纯文本、或 blob store 不能
+          外部化时 tenant 根本用不上（`_validate_and_normalize_content` 会原样返回）。
+        """
+        tenant_id = "default"
+        if not isinstance(content, str) and self.providers.get_blob_store().can_externalize:
+            tenant_id = await self._tenant_for_session(req.session_id)
+        return await self._validate_and_normalize_content(
+            content,
+            req.session_id,
+            tenant_id=tenant_id,
+            llm_account=req.resume_llm_account,
+            llm_model=req.resume_llm_model,
         )
 
     def _sync_session_llm_window(self, session: Session) -> None:

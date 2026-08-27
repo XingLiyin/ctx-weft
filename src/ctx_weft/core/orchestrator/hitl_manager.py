@@ -66,12 +66,15 @@ class HitlManager:
         self._cold_decision_lookup: (
             "Callable[[str, str], Awaitable[HitlRequest | None]] | None"
         ) = None
-        # 应答内容的校验 + 外部化回调（Runtime 绑定 _validate_and_normalize_content,
-        # 见 set_content_normalizer）。签名 async (content, session_id) -> content，
-        # 刻意只收这两个参数——HitlManager 因此不必 import BlobStore / LLM 任何类型。
+        # 应答内容的校验 + 外部化回调（Runtime 绑定 _normalize_hitl_content,
+        # 见 set_content_normalizer）。签名 async (content, req) -> content——整个
+        # HitlRequest 传过去（而非零散字段）：视觉门控要判的是 req.resume_llm_* 指定的
+        # 那个模型，blob 的 tenant 锚点也要由 req.session_id 解出。HitlRequest 本就是
+        # 本模块自己的类型，故仍不必 import BlobStore / LLM 任何类型。
         # None（纯单测直接构造 HitlManager() 时）→ 恒等变换、行为逐字节不变。
         self._content_normalizer: (
-            "Callable[[str | list[ContentPart], str], Awaitable[str | list[ContentPart]]] | None"
+            "Callable[[str | list[ContentPart], HitlRequest], "
+            "Awaitable[str | list[ContentPart]]] | None"
         ) = None
         self._requests: dict[str, HitlRequest] = {}
         self._futures: dict[str, asyncio.Future[HitlRequest]] = {}
@@ -261,15 +264,20 @@ class HitlManager:
     def set_content_normalizer(
         self,
         handler: (
-            "Callable[[str | list[ContentPart], str], Awaitable[str | list[ContentPart]]] | None"
+            "Callable[[str | list[ContentPart], HitlRequest], "
+            "Awaitable[str | list[ContentPart]]] | None"
         ),
     ) -> None:
-        """注入应答内容的校验 + 外部化回调（Runtime 绑定 _validate_and_normalize_content）。
+        """注入应答内容的校验 + 外部化回调（Runtime 绑定 _normalize_hitl_content）。
 
         HITL 是人类往会话里注入内容的第二个入口——`run_single_task` / `start_session`
         两个入口早已接上 validate → normalize，此路径此前全程不校验、不外部化：图片
         既不过格式校验（`b64decode` 默认 `validate=False` **不抛**，静默解出垃圾字节
         ⟹ 静默损坏）、也不过视觉门控，还以 inline base64 永久留在 memory 里。
+
+        回调收**整个 `HitlRequest`**：门控要判的是 `resume_llm_account/model` 指定的
+        那个模型（多模型宿主下判默认模型等于门控失效），blob 的 tenant 锚点也要由
+        `session_id` 解出——都在 req 上，将来再要别的字段也不必改签名。
 
         供构造后晚绑定（与 set_cold_resolve_handler / set_cold_decision_lookup 同形态）。
         **未注入时是恒等变换**——直接构造 `HitlManager()` 的既有调用方行为逐字节不变。
@@ -286,7 +294,7 @@ class HitlManager:
         """
         if self._content_normalizer is None:
             return content
-        return await self._content_normalizer(content, req.session_id)
+        return await self._content_normalizer(content, req)
 
     def set_cold_decision_lookup(
         self, handler: "Callable[[str, str], Awaitable[HitlRequest | None]]",
@@ -341,7 +349,9 @@ class HitlManager:
     ) -> tuple[HitlRequest, bool]:
         """approval form 放行，返回 (req, was_hot)。was_hot=False 时调用方须触发冷 resume。"""
         req = self._require(hitl_id)
-        req.message = message
+        # approve 的备注同样是 `str | list[ContentPart]`（见 approve 的签名）——
+        # 与 answer/reject 走同一道校验 + 外部化，否则同一个洞在这条路径上仍开着。
+        req.message = await self._normalize_message(req, message)
         req.modified_arguments = modified_arguments
         evt = EventType.HITL_MODIFIED if modified_arguments is not None else EventType.HITL_APPROVED
         return await self._resolve(req, "accepted", evt, resume_on_cold=True)
