@@ -109,6 +109,10 @@ def test_tool_text_carries_deterministic_marker() -> None:
     assert first != "截图如下", "含图的 tool 文本必须带标记，指向后一条消息"
     assert not any(ch.isdigit() for ch in first.replace("截图如下", "")), \
         f"标记不得含数字（sha / 计数器 / 时间戳的征兆）：{first!r}"
+    # Phase 4 Task 1（L6 收口）：文案统一成英文。逐字钉住 wire 输出——这条标记进的是
+    # 缓存前缀的中段，改一个字都要在这里显式过一遍。清单见 core/media/refs.py。
+    assert first == "截图如下\n\n[image see the following message]", \
+        f"标记文案变了（会改变 wire 输出、砸掉既有前缀缓存）：{first!r}"
 
 
 def test_tool_message_with_only_image_has_non_empty_content() -> None:

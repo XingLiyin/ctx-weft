@@ -37,7 +37,10 @@ _RETRIABLE_CODES     = frozenset({429, 500, 502, 503, 504})
 # 跨调用计数器——tool 结果处在缓存前缀的中段，标记每次不同会把其后的整段前缀缓存砸掉。
 # 同一段内的多张图共用同一条标记，不加序号（图按 tool 消息顺序合并进同一条 user 消息，
 # 模型不需要靠序号对齐）。
-_TOOL_IMAGE_NOTICE = "\n\n[图片见后一条消息]"
+# 本仓所有图片占位的清单见 `core/media/refs.py` 模块 docstring（L6 收口，裁定 R1）。
+# 这一条是**单向渲染、永不回读**，故留在 wire 层不搬进 `core/media/`；
+# 只有 L0.5 的占位需要被解析回来。文案为英文，与清单里其余四条一致。
+_TOOL_IMAGE_NOTICE = "\n\n[image see the following message]"
 
 
 class OpenAIAdapter(LLMClient):

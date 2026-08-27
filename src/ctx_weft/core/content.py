@@ -406,6 +406,8 @@ async def normalize_content(
 
 # ── 出网 rehydrate（Phase 3b）───────────────────────────────────────────────
 
+# 本仓所有图片占位的清单见 `core/media/refs.py` 模块 docstring（L6 收口，裁定 R1）。
+# 这一条单向渲染、永不回读，故留在归一层。
 _IMAGE_UNAVAILABLE_TMPL = "[image unavailable: {media_type}]"
 
 
@@ -543,6 +545,10 @@ async def rehydrate_content(
 
 # ── per-purpose 降级（Phase 3b Task 4）──────────────────────────────────────
 
+# 本仓所有图片占位的清单见 `core/media/refs.py` 模块 docstring（L6 收口，裁定 R1）。
+# ⚠️ 这是 **per-purpose 降级**（不落库、只影响本次 prompt），与 L0.5 降级
+# （`core/media` 重写 memory 记录、占位含 ref 可被 `get_image` 取回）**并存、
+# 互不替代**，不要合并。单向渲染、永不回读。
 _IMAGE_PLACEHOLDER_TMPL = "[image {media_type}]"
 
 
