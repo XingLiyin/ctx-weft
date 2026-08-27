@@ -121,9 +121,14 @@ class MemoryEventModel(Base):
 class MemoryBlobModel(Base):
     """图片等二进制内容的**字节本体**（裁定 D4：blob 并入 memory，字节也一并）。
 
-    `memory_events` 里存的永远是 ``[image image/png ref:blob:deadbe…]`` 这类短标记
-    （`redact_content_for_event`），**从不存字节**——故本表是整个系统里图片字节的
-    唯一持有者，事件库任何情况下都重建不出一张图。
+    本表是整个系统里图片字节的**唯一持有者**：`memory_events.content` 存的是
+    `content_to_jsonable` 的结果（含完整 ``blob:<sha>`` ref，`content_format="parts"`），
+    **不含字节**；而**事件库**（`LLM_PROMPT_SENT` 等）经 `redact_content_for_event`
+    只留 ``[image image/png ref:blob:deadbe…]`` 这类短标记，同样不含字节。
+    两者都重建不出一张图。
+
+    注意别把这两处搞混——它们存的东西不同：memory_events 存完整 ref（可解析、可 rehydrate），
+    事件库存的是不可回读的展示用短标记。
 
     **主键是 sha，没有 tenant 列**：内容寻址本就是跨租户去重的
     （同一份字节 → 同一个 sha → 同一行）。三处租户取向见
