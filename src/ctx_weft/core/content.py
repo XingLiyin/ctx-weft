@@ -39,6 +39,7 @@ __all__ = [
     "rehydrate_content",
     "downgrade_images_to_text",
     "extract_blob_refs",
+    "collect_blob_refs",
 ]
 
 
@@ -519,6 +520,33 @@ def extract_blob_refs(content: "str | list[ContentPart] | None") -> list[str]:
         ref = str(_part_field(part, "data", "") or "")
         if ref.startswith(BLOB_REF_PREFIX):
             seen.setdefault(ref, None)
+    return list(seen)
+
+
+def collect_blob_refs(event: Any) -> list[str]:
+    """GC 的 **mark 判据**：一个 MemoryEvent 引用了哪些 blob。provider 建引用边只走这里。
+
+    两个来源的并集，都**只看结构化字段**：
+
+    1. ``content`` 里的 ref part（``extract_blob_refs``，与 ``rehydrate_content``
+       会去 get 的那批逐一对应）；
+    2. ``event.blob_refs`` 的显式声明——L0.5 降级把 ``ImagePart(ref)`` 换成文本占位后，
+       ref 只能靠这条传递（缺陷 2026-08-27）。
+
+    **绝不解析占位文案。** 占位格式的唯一真源是 ``core/media/refs.py``；让 mark 判据
+    去解析它，等于把文案格式变成 GC 正确性的一部分——文案一改，图就开始被误删，而且
+    要到一个宽限期之后才看得出来。声明式采集把这个耦合彻底切断。
+
+    去重保序：content 里的在前（视图顺序），声明的在后。顺序不影响正确性，只为让
+    引用表的写入顺序稳定、便于比对。
+    """
+    seen: dict[str, None] = {}
+    for ref in extract_blob_refs(getattr(event, "content", None)):
+        seen.setdefault(ref, None)
+    for ref in getattr(event, "blob_refs", None) or ():
+        text = str(ref or "")
+        if text.startswith(BLOB_REF_PREFIX):
+            seen.setdefault(text, None)
     return list(seen)
 
 
