@@ -81,6 +81,28 @@ def _prompt() -> list:
     ]
 
 
+class _StubEventBlobStore:
+    """Task 4 的第三道门控（event blob 门控）要求携图会话注册 EventBlobStore。
+
+    本文件测的是 L0.5 折叠/回放/两家 adapter wire 形状等链路，与 event blob 存储
+    本身无关，故用一个最小可外部化桩满足门控——不断言其调用细节。
+    """
+
+    can_externalize = True
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        import hashlib
+        ref = f"blob:{hashlib.sha256(data).hexdigest()}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
+
+
 # ── 宿主侧的纯文本工具（覆盖 5 的对照组）─────────────────────────────────────
 
 
@@ -284,6 +306,7 @@ async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
     runtime.providers.register_capability(_EchoToolProvider())
+    runtime.providers.register_event_blob_store(_StubEventBlobStore())
     if blob_store is not None:
         runtime.providers.register_memory_blob_store(blob_store)
 

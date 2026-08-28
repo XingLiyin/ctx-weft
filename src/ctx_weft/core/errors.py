@@ -140,6 +140,16 @@ class VisionNotSupportedError(CtxWeftError):
     code = "VISION_NOT_SUPPORTED"
 
 
+class BlobStoreRequiredError(CtxWeftError):
+    """携图内容要求宿主注册 EventBlobStore（spec 2026-08-27 双 blob store §7）。
+
+    事件库的口径是**恒不含字节、恒可回读**，没有例外分支——没有 event blob store 就
+    无处放字节，只能在入口拒绝。纯文本会话不受影响。
+    """
+
+    code = "BLOB_STORE_REQUIRED"
+
+
 # ── Loop 控制流 ────────────────────────────────────────────────────────────────
 
 

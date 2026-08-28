@@ -601,11 +601,14 @@ class CtxWeftRuntime:
         """
         from ctx_weft.core.content import normalize_content, validate_content
 
+        event_blob_store = self.providers.get_event_blob_store()
         if llm is not None:
-            validate_content(content, llm=llm)
+            validate_content(content, llm=llm, event_blob_store=event_blob_store)
         else:
             validate_content(
-                content, llm_resolver=lambda: self._resolve_llm(llm_account, llm_model),
+                content,
+                llm_resolver=lambda: self._resolve_llm(llm_account, llm_model),
+                event_blob_store=event_blob_store,
             )
         blob_store = self.providers.get_memory_blob_store()
         if not blob_store.can_externalize:
@@ -613,7 +616,7 @@ class CtxWeftRuntime:
         return await normalize_content(
             content,
             blob_store=blob_store,
-            event_blob_store=self.providers.get_event_blob_store(),
+            event_blob_store=event_blob_store,
             ctx=ProviderContext(session_id=session_id, tenant_id=tenant_id),
         )
 

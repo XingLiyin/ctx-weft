@@ -1013,6 +1013,19 @@ async def test_single_task(runtime):
   若你的宿主此前把图片喂给了任意模型（不管它是否真的支持视觉），升级后需要
   逐个 model 显式标注 `supports_vision=True` 才能继续工作。
 
+## 升级须知（双 blob store）
+
+- **破坏性变更：携图会话默认失败，除非显式注册 `EventBlobStore`。** 事件库的口径是
+  **恒不含字节、恒可回读**，没有例外分支——升级到本版本后，任何携带图片
+  （`ImagePart`）的会话会在入口即以 `BlobStoreRequiredError`
+  （`error_code=BLOB_STORE_REQUIRED`）失败，**除非**在 `ProviderRegistry` 上调用
+  `register_event_blob_store()` 注册一个能外部化的 `EventBlobStore` 实现。这是刻意
+  的严格默认：没有 event blob store 就无处安放字节，只能在入口拒绝，而不是让图片
+  的原始字节悄悄进事件库、之后再无处收拾。纯文本会话不受影响，行为逐字节不变。
+  若你的宿主此前携图跑过（不管是否接了 `MemoryBlobStore`），升级后需要额外注册
+  `EventBlobStore` 才能继续工作；宿主若共用同一份存储服务两侧，同一个实现类可以
+  同时满足 `MemoryBlobStore` 与 `EventBlobStore` 两个协议。
+
 ## 限制与约束
 
 - **单进程**：EventBus 是进程内实现，不跨进程。多进程需替换为 Redis Streams 等外部总线。

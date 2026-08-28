@@ -232,27 +232,19 @@ async def test_transitional_helper_is_gone() -> None:
     assert not hasattr(c, "content_to_jsonable_refs_only")
 
 
-async def test_falls_back_to_plain_jsonable_when_event_store_cannot_externalize() -> None:
-    """无 EventBlobStore 时短路——**这是有意的过渡缺口**，Task 4 的入口门控关上它。
+async def test_raises_loudly_when_event_store_cannot_externalize() -> None:
+    """Task 4 收口：不再有「无 EventBlobStore 时退回 content_to_jsonable」的过渡短路。
 
-    钉住两件事：inline base64 原样保留（不被外部化），且返回的是
-    `content_to_jsonable` 的产物（dict 列表）而非裸 content——后者会让下游
-    json.dumps 在很远的地方才炸（Task 3 review Finding 1）。
+    携图内容能不能到这里，由 `validate_content` 入口的第三道门控把关——真的绕过
+    入口跑到这里（本用例就是这么干的：直接调本函数，不经入口），event blob 又不可用，
+    必须撞上 `NullEventBlobStore.put` 的 `NotImplementedError`，响亮且可诊断，而不是
+    静默把 inline base64 原样塞回 payload。
     """
-    out = await content_to_event_jsonable(
-        [TextPart(text="看图"), ImagePart(data=_B64, media_type="image/png")],
-        event_blob_store=NullEventBlobStore(), ctx=_ctx(),
-    )
-    assert isinstance(out, list)
-    assert all(isinstance(item, dict) for item in out), \
-        "必须是 content_to_jsonable 的产物（dict 列表），不能是裸 ContentPart"
-    assert out == [
-        {"type": "text", "text": "看图"},
-        {"type": "image", "data": _B64, "media_type": "image/png",
-         "source_type": "base64"},
-    ]
-    assert out[1]["data"] == _B64, "短路时 base64 原样保留，不被外部化"
-    assert out[1]["source_type"] == "base64"
+    with pytest.raises(NotImplementedError):
+        await content_to_event_jsonable(
+            [TextPart(text="看图"), ImagePart(data=_B64, media_type="image/png")],
+            event_blob_store=NullEventBlobStore(), ctx=_ctx(),
+        )
 
 
 async def test_url_part_is_downgraded_not_silently_passed_through() -> None:

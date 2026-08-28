@@ -7,7 +7,8 @@ from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.core.state.models import Session
 from ctx_weft.core.utils import content_to_text, now_utc
-from ctx_weft.protocols import ImagePart, TextPart
+from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
+from ctx_weft.protocols.events import EventBlobStore
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.llm.provider import _FixedModelClient
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
@@ -18,6 +19,26 @@ from tests.integration.test_minimal_loop import (
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+class _StubEventBlobStore(EventBlobStore):
+    """携图路径的第三道门控（Task 4）要求宿主注册 EventBlobStore——最小可外部化桩。
+
+    不 import 其他测试模块的等价实现（约定：测试模块之间不互相 import），故各文件
+    各放一份最小拷贝。
+    """
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        import hashlib
+        ref = f"blob:{hashlib.sha256(data).hexdigest()}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
 
 
 def _content():
@@ -42,6 +63,7 @@ async def test_root_task_carries_full_content_session_carries_summary():
     sm = SessionManager(
         lifecycle_manager=SimpleNamespace(),
         event_bus=SimpleNamespace(emit=AsyncMock()),
+        event_blob_store=_StubEventBlobStore(),
     )
     session = Session(
         id="s1", user_prompt=content_to_text(_content()), status="RUNNING",
@@ -69,6 +91,7 @@ async def test_run_single_task_root_task_description_is_text_not_truncated_parts
     templates.register(make_echo_template())
     runtime = make_runtime(agent_provider=templates)
     runtime.providers.register_memory(InMemoryMemoryProvider())
+    runtime.providers.register_event_blob_store(_StubEventBlobStore())
     runtime.providers.register_llm_provider(
         SimpleNamespace(
             get_client=lambda account=None, model=None: _FixedModelClient(

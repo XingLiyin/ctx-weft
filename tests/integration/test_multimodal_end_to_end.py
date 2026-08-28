@@ -40,6 +40,28 @@ _MULTIMODAL_PROMPT = [
 ]
 
 
+class _StubEventBlobStore:
+    """Task 4 的第三道门控（event blob 门控）要求携图会话注册 EventBlobStore。
+
+    本文件测的是 memory 侧外部化 / 出网 rehydrate / compact 降级等与 event blob
+    存储本身无关的链路，故用一个最小可外部化桩满足门控——不断言其调用细节。
+    """
+
+    can_externalize = True
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        import hashlib
+        ref = f"{BLOB_REF_PREFIX}{hashlib.sha256(data).hexdigest()}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
+
+
 class _RouterLLM(MockLLMAdapter):
     """按 request.tools 路由：recognize_intent → 空；act → finish_task 收尾。
 
@@ -86,6 +108,7 @@ async def test_multimodal_prompt_completes_one_actor_round_without_crashing() ->
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
+    runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
     handle = await runtime.start_session(
         SessionStartParams.create(
@@ -168,6 +191,7 @@ async def _run_and_collect_context_assembled_tokens(user_prompt) -> int:
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
+    runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
     handle = await runtime.start_session(
         SessionStartParams.create(
@@ -268,6 +292,7 @@ async def test_multimodal_prompt_reaches_wire_payload_as_image_block() -> None:
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
+    runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
     handle = await runtime.start_session(
         SessionStartParams.create(
@@ -352,6 +377,7 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
+    runtime.providers.register_event_blob_store(_StubEventBlobStore())
     if blob_store is not None:
         runtime.providers.register_memory_blob_store(blob_store)
 

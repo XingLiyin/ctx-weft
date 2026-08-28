@@ -40,6 +40,27 @@ class _CountingNullStore(NullMemoryBlobStore):
         return await super().put(data, media_type, ctx)
 
 
+class _CountingEventStore:
+    """携图路径的 event blob 门控（Task 4）要求宿主注册 EventBlobStore——最小可外部化桩。
+
+    本文件测的是 memory 侧 normalize_content，event 侧只需「存在且可外部化」，
+    不断言其调用次数，故不继承 EventBlobStore 也不需要计数器。
+    """
+
+    can_externalize = True
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        ref = f"{BLOB_REF_PREFIX}{hashlib.sha256(data).hexdigest()}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
+
+
 class _CountingStore(MemoryBlobStore):
     """能真正外部化的 stub store（内容寻址，与 SqlMemoryProvider 的 ref 形态一致）。"""
 
@@ -229,6 +250,7 @@ def _make_runtime_with_store(store, *, supports_vision: bool):
     runtime = make_runtime(agent_provider=templates)
     runtime.providers.register_memory(InMemoryMemoryProvider())
     runtime.providers.register_memory_blob_store(store)
+    runtime.providers.register_event_blob_store(_CountingEventStore())
 
     def _client(account=None, model=None):
         return _FixedModelClient(

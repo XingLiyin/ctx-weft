@@ -15,7 +15,11 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.core.errors import InvalidContentError, VisionNotSupportedError
+from ctx_weft.core.errors import (
+    BlobStoreRequiredError,
+    InvalidContentError,
+    VisionNotSupportedError,
+)
 from ctx_weft.core.utils import content_to_text
 from ctx_weft.protocols.context import BLOB_REF_PREFIX
 
@@ -170,14 +174,16 @@ async def content_to_event_jsonable(
       核心不变量（事件库恒不含字节）；同 `content_to_jsonable_refs_only` 对非 ref
       图的处理口径一致（本函数取代了它）。
 
-    ⚠️ **``event_blob_store.can_externalize`` 为 False 时整段短路**，退回同步的
-    ``content_to_jsonable``（inline base64 原样落进 payload，与 Task 3 之前的行为一致）
-    ——不去调 ``NullEventBlobStore.put`` 触发 ``NotImplementedError``。「携图但无
-    EventBlobStore 必须响亮拒绝」是 Task 4 的活，钉在 `validate_content` 的入口
-    （spec §7）：那一步会让不满足条件的内容**根本走不到这里**。本函数因此不必（也不该）
-    自己 raise——它的契约只是"能外部化就外部化"，判先于它的入口负责把关；短路还顺带让
-    未注入 event blob 的裸单测（如 `HitlManager()` 直接构造、不经 validate_content）
-    保持逐字节不变，不会因为内容恰好是畸形 base64 而在 decode 处炸掉。
+    ⚠️ **不再有「``can_externalize`` 为 False 时整段短路」这回事**（Task 4 收口）：
+    携图内容能不能走到这里，由 `validate_content` 入口（spec §7）的第三道门控把关——
+    没有可外部化的 EventBlobStore 时，携图内容在入口就被 `BlobStoreRequiredError`
+    拒了，根本到不了本函数。本函数因此不必自己判 `can_externalize`：真有内容绕过
+    入口跑到这里、而 event blob 又不可用，`NullEventBlobStore.put` 会响亮抛出
+    `NotImplementedError`——那正是想要的信号（某处绕开了入口门控，需要被看见，
+    而不是被这里的一条静默降级悄悄吞掉）。Task 4 落地前这里曾有一条「退回同步
+    `content_to_jsonable`」的短路，专门服务未接线的裸单测（如 `HitlManager()` 直接
+    构造、不经 `validate_content`）；那类调用如今若真的递入携图内容，会在此处撞见
+    `NotImplementedError`——同样正确：它们绕过的正是本设计要求必经的入口。
 
     ⚠️ 与 ``redact_content_for_event`` 的分工：那个产出**一整个 str**（含截断预览），
     用于纯观测事件（`LLM_PROMPT_SENT` / `CAPABILITY_FINISHED`）的调试展示，**不可
@@ -192,8 +198,6 @@ async def content_to_event_jsonable(
     """
     if content is None or isinstance(content, str):
         return content
-    if not event_blob_store.can_externalize:
-        return content_to_jsonable(content)
     prepared: list[Any] = []
     for part in content:
         if not _is_image_part(part):
@@ -354,14 +358,16 @@ def validate_content(
     *,
     llm: object | None = None,
     llm_resolver: "Any" = None,
+    event_blob_store: "Any" = None,
 ) -> None:
     """入口内容校验。通过返回 None，否则抛。
 
     只作用于 ImagePart——纯文本（str / 全 TextPart / None / 空）零影响、恒通过。
 
-    顺序刻意是「格式校验 → 视觉门控」，不是相反：格式畸形的内容必须报
-    ``InvalidContentError``，不能被门控抢先拦成 ``VisionNotSupportedError``——
-    后者会掩盖真正的问题（终审 2026-08-25 缺陷 B）。
+    三道门控顺序刻意是「格式校验 → 视觉门控 → event blob 门控」，不是任意排列：
+    格式畸形的内容必须报 ``InvalidContentError``，不能被后两道门控抢先拦成
+    ``VisionNotSupportedError`` / ``BlobStoreRequiredError``——那会掩盖真正的问题
+    （终审 2026-08-25 缺陷 B；event blob 门控放最后同理）。
 
     llm 非 None，或 llm_resolver 非 None 且格式校验全部通过时，才执行视觉能力
     门控：``getattr(client, "supports_vision", False)`` 必须为真。**未声明即视为
@@ -433,6 +439,16 @@ def validate_content(
         raise VisionNotSupportedError(
             "当前模型未声明视觉能力（supports_vision），拒绝图片输入。"
             "若该模型确实支持图片，请在 ModelConfig 上显式设置 supports_vision=True。"
+        )
+
+    # 第三道：event blob 门控（spec §7）。放在最后，与前两道同理——畸形/不被支持的
+    # 内容不该因为「没有 blob store」而报一个误导性的错。
+    # 严格默认：拿不到可外部化的 store 就拒绝。event_blob_store=None 的调用点
+    # （未接线的旧调用方）不做此门控，与 llm=None 时不做视觉门控同构。
+    if event_blob_store is not None and not event_blob_store.can_externalize:
+        raise BlobStoreRequiredError(
+            "携带图片的内容需要宿主注册 EventBlobStore（事件库恒不落字节）。"
+            "请调用 ProviderRegistry.register_event_blob_store()。"
         )
 
 

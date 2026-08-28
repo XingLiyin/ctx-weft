@@ -402,6 +402,47 @@ def test_llm_resolver_not_called_for_plain_text():
     assert calls == []
 
 
+# ── event blob 门控（Task 4）：第三道门控，放在视觉门控之后 ────────────────────
+
+async def test_image_requires_event_blob_store() -> None:
+    """携图会话未注册 EventBlobStore → 入口即拒（spec §7）。
+
+    口径统一：事件库恒不含字节、恒可回读，没有例外分支。
+    """
+    from ctx_weft.core.errors import BlobStoreRequiredError
+    from ctx_weft.protocols.events import NullEventBlobStore
+
+    with pytest.raises(BlobStoreRequiredError):
+        validate_content(
+            [ImagePart(data=_PNG, media_type="image/png")],
+            llm=_VisionClient(),
+            event_blob_store=NullEventBlobStore(),
+        )
+
+
+def test_plain_text_unaffected_by_event_blob_gate() -> None:
+    """纯文本在门控之前就已返回——这条不变量不可破。"""
+    from ctx_weft.protocols.events import NullEventBlobStore
+
+    validate_content("纯文本", event_blob_store=NullEventBlobStore())
+    validate_content(None, event_blob_store=NullEventBlobStore())
+
+
+def test_gate_order_format_before_vision_before_blob() -> None:
+    """三道门控的顺序：格式 → 视觉 → blob。
+
+    畸形内容必须报 InvalidContentError，不能被后两道抢先——那会掩盖真正的问题。
+    """
+    from ctx_weft.core.errors import InvalidContentError
+    from ctx_weft.protocols.events import NullEventBlobStore
+
+    with pytest.raises(InvalidContentError):
+        validate_content(
+            [ImagePart(data="!!!not-base64!!!", media_type="image/png")],
+            llm=_VisionClient(), event_blob_store=NullEventBlobStore(),
+        )
+
+
 def test_llm_resolver_called_lazily_only_for_valid_images():
     """惰性解析的正面用例：只有格式合法的图片才会真的触发 resolver 调用，
     并且门控结果反映 resolver 返回的 client。"""

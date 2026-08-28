@@ -100,7 +100,14 @@ class _TextOnlyClient:
 
 
 def _make_runtime(llm, store: "MemoryBlobStore | None" = None) -> CtxWeftRuntime:
-    """构造一个最小 runtime（CtxWeftRuntime 硬要求至少一个 AgentCapabilityProvider）。"""
+    """构造一个最小 runtime（CtxWeftRuntime 硬要求至少一个 AgentCapabilityProvider）。
+
+    Task 4：event blob 门控严格默认拒绝携图内容，本文件绝大多数用例测的是校验/
+    视觉门控/tenant 锚定等与 event blob store 本身无关的行为，故默认注册一个可
+    外部化的 event blob store 桩，避免这些用例被无关的第三道门控挡在门口。
+    唯一需要精确控制 event 侧行为的用例（Finding 2 那条）自己另外
+    `rt.providers.register_event_blob_store(...)` 覆盖它。
+    """
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
         make_echo_template,
@@ -112,6 +119,7 @@ def _make_runtime(llm, store: "MemoryBlobStore | None" = None) -> CtxWeftRuntime
     rt = make_runtime(agent_provider=templates, llm=llm)
     if store is not None:
         rt.providers.register_memory_blob_store(store)
+    rt.providers.register_event_blob_store(_CountingEventStore())
     return rt
 
 
@@ -220,36 +228,57 @@ async def test_hitl_answer_externalizes_valid_image_to_ref():
     )
 
 
-# ── 4. 未注入 normalizer 时行为逐字节不变 ─────────────────────────────────────
+# ── 4. 未注入 normalizer 时：纯文本恒等变换；携图不再静默放行（Task 4 收口）──────
+#
+# Task 3 时 `content_to_event_jsonable` 对不可外部化的 event store 整段短路，
+# 于是裸 `HitlManager()`（未接线，`_content_normalizer` / `_event_blob_store_resolver`
+# 均为 None）对**任何**内容——包括畸形 base64 图片——都是恒等变换。Task 4 删除了
+# 那条短路（brief「额外要求」）：`_resolve` 序列化 HITL_* 事件 payload 时仍会调
+# `content_to_event_jsonable`，不再对不可外部化的 store 悄悄放行，而是让「内容未经
+# `validate_content` 校验就直接到达这里」这件事本身响亮暴露出来——裸 HitlManager()
+# 从来就不是生产路径（生产路径恒为 CtxWeftRuntime 构造并接线，见 runtime.py:481+500），
+# 纯单测直接构造它、喂它畸形图片内容，理应撞见异常而不是被悄悄放行。
+# 纯文本这条不变量不受影响——见下方 test_bare_hitl_manager_plain_text_is_identity。
 
 
 @pytest.mark.asyncio
-async def test_bare_hitl_manager_is_identity_without_normalizer():
-    """裸 `HitlManager()`（大量既有单测的构造方式）必须是恒等变换。
+async def test_bare_hitl_manager_plain_text_is_identity_without_normalizer():
+    """裸 `HitlManager()` 对纯文本仍是恒等变换——这条不受 Task 4 影响。
 
-    刻意递畸形 base64 + 白名单外 media_type：未注入时**一律放行、原样保留**，
-    连对象身份都不变。若接线漏了 None 守卫，这条会以 TypeError 转红。
-    """
+    纯文本 content 从不触发 `content_to_event_jsonable` 的图片外部化分支，
+    `_resolve` 序列化事件 payload 时对它是零开销直通。"""
     hm = HitlManager()
     hid = await hm.request(form="wait", session_id="s", task_id="t")
-    payload = [TextPart(text="hi"), ImagePart(data=_MALFORMED, media_type="image/bmp")]
+    payload = "纯文本，没有图片"
 
     req = await hm.answer(hid, payload)
 
     assert req.status == "accepted"
-    assert req.message is payload, "未注入 normalizer 时必须是恒等变换（同一对象）"
+    assert req.message is payload, "纯文本必须仍是恒等变换（同一对象）"
 
 
 @pytest.mark.asyncio
-async def test_bare_hitl_manager_reject_is_identity_without_normalizer():
+async def test_bare_hitl_manager_with_image_raises_instead_of_silently_passing_through():
+    """裸 `HitlManager()`（未接线，`_content_normalizer` 为 None）递入图片内容——
+    Task 4 之前会被 Task 3 的过渡短路悄悄放行（畸形 base64 原样进事件 payload）；
+    短路删除后，`_resolve` 序列化 HITL_* 事件时直接对未经校验的畸形 base64 解码，
+    响亮地炸出来，而不是把垃圾字节悄悄写进事件。"""
+    hm = HitlManager()
+    hid = await hm.request(form="wait", session_id="s", task_id="t")
+    payload = [TextPart(text="hi"), ImagePart(data=_MALFORMED, media_type="image/bmp")]
+
+    with pytest.raises(ValueError):
+        await hm.answer(hid, payload)
+
+
+@pytest.mark.asyncio
+async def test_bare_hitl_manager_reject_with_image_raises_instead_of_silently_passing_through():
     hm = HitlManager()
     hid = await hm.request(form="approval", session_id="s", task_id="t")
     payload = [ImagePart(data=_MALFORMED, media_type="image/bmp")]
 
-    req = await hm.reject(hid, message=payload)
-
-    assert req.status == "rejected"
-    assert req.message is payload
+    with pytest.raises(ValueError):
+        await hm.reject(hid, message=payload)
 
 
 # ── 5. 纯文本应答逐字节不变（即使已注入 normalizer）─────────────────────────

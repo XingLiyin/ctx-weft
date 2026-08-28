@@ -38,10 +38,33 @@ from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Task
 from ctx_weft.core.utils import now_utc
+from ctx_weft.protocols import ProviderContext
+
+
+class _StubEventBlobStore:
+    """Task 4 收口后 `content_to_event_jsonable` 不再对不可外部化的 event store 短路——
+    本文件直接白盒构造 `TaskManager`（不经 `CtxWeftRuntime` 的入口门控），push_task /
+    reopen_task 携图内容因此需要一个真的可外部化 event blob store 才能走通。
+    """
+
+    can_externalize = True
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        import hashlib
+        ref = f"blob:{hashlib.sha256(data).hexdigest()}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
 
 
 async def _finished_task_manager(prompt):
     tm = TaskManager(session_id="s1", event_bus=InProcessEventBus())
+    tm.set_event_blob_store(_StubEventBlobStore())
     task = Task(
         id="tsk_1", session_id="s1", status="FINISHED", tenant_id="default",
         assigned_agent_id="a1", creator_agent_id="a1",
