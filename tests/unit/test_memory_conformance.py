@@ -821,6 +821,31 @@ async def test_ref_shaped_image_is_not_rewritten(memory: MemoryProvider) -> None
         "blob:deadbeef", "image/jpeg", "ref", 4096)
 
 
+async def test_blob_refs_roundtrip_losslessly(memory: MemoryProvider) -> None:
+    """`MemoryEvent.blob_refs`（声明式 ref，L0.5 降级补偿记录用）必须无损往返。
+
+    content 故意用纯文本占位、不含结构化 ref part——SQL provider 的 `_declared_refs`
+    只回显「声明的、content 里看不见的」那部分（相减语义），若 content 里也有同一个
+    结构化 ref，SQL 侧会回显空列表而 in_memory 侧回显非空，两个 provider 就没有
+    一致的期望值了。这里避开那个歧义区，纯测「声明未被结构化 part 覆盖」这条主路径。
+    """
+    await memory.ingest(
+        MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN,
+            scope=MemoryScope.TASK,
+            address=_addr(),
+            content="[image demoted]",
+            timestamp=_BASE,
+            role="user",
+            id="mem_demoted_001",
+            blob_refs=["blob:aaaa", "blob:bbbb"],
+        ),
+        _ctx(),
+    )
+    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    assert sorted(rec.blob_refs) == ["blob:aaaa", "blob:bbbb"]
+
+
 async def test_dict_shaped_parts_come_back_as_dataclasses(memory: MemoryProvider) -> None:
     """dict 形态在 `MemoryEvent.__post_init__` 即被归一（Task E2）；provider 不得
     把它「还原」成 dict——读侧拿到的必须仍是 dataclass。"""

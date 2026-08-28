@@ -210,6 +210,15 @@ async def _declared_refs(
     「声明的、content 里看不见的那些」——两者相减才对得上写侧。不相减的话，
     `collect_blob_refs` 会把结构化 ref 数两遍（去重后无害，但语义漂移，且
     `_rebuild` 的累积会把它们写进补偿记录的 blob_refs，越滚越多）。
+
+    为什么不能按 `content_format == "text"` 短路、省掉纯文本批次的这次查询：
+    `MemoryEvent.blob_refs` 在协议层是独立字段，理论上可与纯文本 content（
+    `content_format == "text"`）共存——当前唯一生产者 `fold._rebuild` 总是产出
+    `list[ContentPart]`，故这条路径实际不触发，但按格式过滤会让这种边界情况静默
+    丢失已声明的 ref（等于本缺陷的另一种复发形态）。加一列数据库标记区分「这批
+    确实没有声明式 ref」又会违反「无存量迁移」约束（不写迁移脚本、不加数据库列）。
+    两轮 review 都评估过这个问题，结论一致：多一次查询换来的正确性没有更便宜的
+    替代，故按 event_id 无差别查询，不做基于 content_format 的短路。
     """
     ids = [r.id for r in rows]
     if not ids:

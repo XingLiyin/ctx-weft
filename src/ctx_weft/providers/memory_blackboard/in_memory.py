@@ -422,4 +422,10 @@ class InMemoryMemoryProvider(MemoryProvider):
                 "topic_seq_no": stored.topic_seq_no,
                 "task_id": stored.event.address.task_id or "",
             },
+            # 与 SQL provider 对称的读侧回显（缺陷 2026-08-27）：不补这个字段，
+            # 连降两次时第一次降级声明的 ref 在第二次重建补偿事件时就没人认领
+            # （core/media/fold.py::_rebuild 靠它累积）。复制而非共享列表——
+            # 理由同 MemoryRecord.blob_refs 用 default_factory=list：共享可变
+            # 列表会让一条记录的 ref 污染另一条。
+            blob_refs=list(stored.event.blob_refs),
         )

@@ -537,8 +537,11 @@ def collect_blob_refs(event: Any) -> list[str]:
     去解析它，等于把文案格式变成 GC 正确性的一部分——文案一改，图就开始被误删，而且
     要到一个宽限期之后才看得出来。声明式采集把这个耦合彻底切断。
 
-    去重保序：content 里的在前（视图顺序），声明的在后。顺序不影响正确性，只为让
-    引用表的写入顺序稳定、便于比对。
+    本函数内部去重，返回时 content 里的在前、声明的在后。但**这不是可依赖的顺序
+    承诺**：下游只按集合语义使用返回值（建引用边、并集判重），SQL provider 读侧
+    的 `_declared_refs` 相减查询没有 `ORDER BY`，往返顺序由 SQL 行序决定——双重
+    降级后可能读回 `[B, A]` 而非写入时的 `[A, B]`。若未来需要顺序稳定，应在
+    `_declared_refs` 补 `ORDER BY`，而不是假设这里的返回顺序会被保留下去。
     """
     seen: dict[str, None] = {}
     for ref in extract_blob_refs(getattr(event, "content", None)):
