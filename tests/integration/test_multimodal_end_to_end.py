@@ -24,7 +24,8 @@ from ctx_weft.core.utils import _IMAGE_PART_TOKENS, content_to_text
 from ctx_weft.protocols import (
     ImagePart, LLMChunk, LLMUsage, MemoryEventType, ProviderContext, TextPart, ToolCall,
 )
-from ctx_weft.protocols.memory import BLOB_REF_PREFIX
+from ctx_weft.protocols.events import EventBlobStore
+from ctx_weft.protocols.memory import BLOB_REF_PREFIX, MemoryBlobStore
 from ctx_weft.providers.llm.anthropic import AnthropicAdapter, AnthropicMultimodalAdapter
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
@@ -645,3 +646,125 @@ async def test_text_only_adapter_persists_image_and_keeps_bytes_retrievable(tmp_
         f"占位 {placeholder!r} 没有出现在任何一次 wire payload 的文本 block 里——"
         "纯文本 adapter 必须把图降级成占位，而不是静默丢弃"
     )
+
+
+# ── 两个 blob store 的 ref 命名空间互不相通（blob-store 解耦 Task 3）─────────────
+#
+# 入口从前把同一份字节双写进两个 store 并断言两边返回同一个 ref，于是任何「拿 memory
+# ref 去 event 侧解」的隐藏跨命名空间引用都被「恰好相同」掩盖了。下面这组桩把两侧的
+# ref 方案**刻意做得不同**，掩盖不住：事件 payload 里的 ref 必须归 event store，
+# 且必须在 memory store 里解不开。
+
+
+class _Sha256MemoryBlobStore(MemoryBlobStore):
+    """memory 侧：内容寻址的 ``blob:<sha256>``（与仓内真实实现同口径）。"""
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        import hashlib
+        ref = f"{BLOB_REF_PREFIX}{hashlib.sha256(data).hexdigest()}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
+
+
+class _PrefixedEventBlobStore(EventBlobStore):
+    """event 侧：``blob:evt-<sha256>``——仍内容寻址（协议要求幂等），但命名空间独立。
+
+    多出的 ``evt-`` 段就是本组用例的全部机关：它让「这个 ref 是谁家的」变成可断言的
+    事实，而不是靠两边碰巧算出同一个 sha。
+    """
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        import hashlib
+        ref = f"{BLOB_REF_PREFIX}evt-{hashlib.sha256(data).hexdigest()}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
+
+
+@pytest.fixture
+def runtime_with_two_blob_stores():
+    """runtime + 两个**不同实例、不同 ref 方案**的 blob store。"""
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    runtime = make_runtime(llm=_RouterLLM(), agent_provider=resolver)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+    mem_store = _Sha256MemoryBlobStore()
+    evt_store = _PrefixedEventBlobStore()
+    runtime.providers.register_memory_blob_store(mem_store)
+    runtime.providers.register_event_blob_store(evt_store)
+    return runtime, mem_store, evt_store
+
+
+def _sole_image_part(parts: object) -> dict:
+    """事件 payload 里唯一的 image part（jsonable dict 形态）。
+
+    先断言 ``parts`` 是列表：payload 被拍扁成 str 时，下面的推导式会得到空列表，
+    「没有图」的断言就成了重言式（同 ``_image_parts`` 的已知陷阱）。
+    """
+    assert isinstance(parts, list), f"user_prompt 不得被拍扁，实为 {type(parts).__name__}"
+    images = [p for p in parts if isinstance(p, dict) and p.get("type") == "image"]
+    assert len(images) == 1, f"expected exactly one image part, got {len(images)}"
+    return images[0]
+
+
+@pytest.mark.asyncio
+async def test_event_refs_and_memory_refs_are_independent(runtime_with_two_blob_stores) -> None:
+    """两个 store 用互不相同的 ref 方案：memory 记录与事件 payload 各自可解。
+
+    这是解耦的验收条件——今天双写让两边 ref 恰好相同，任何隐藏的跨命名空间引用
+    都被掩盖；ref 方案一分开，掩盖不住。
+    """
+    import json
+
+    runtime, mem_store, evt_store = runtime_with_two_blob_stores
+    handle = await runtime.start_session(SessionStartParams.create(
+        template_id="agent:tpl_echo",
+        user_prompt=_MULTIMODAL_PROMPT,
+        context_limit=100_000,
+    ))
+    state = await handle.wait_for_finish(timeout=5.0)
+    assert state is not None
+
+    ctxp = ProviderContext(session_id=state.session.id)
+    events = await runtime.event_store.read_by_session(state.session.id)
+    b64 = _MULTIMODAL_PROMPT[1].data
+
+    for event_type, extract in (
+        (EventType.SESSION_CREATED, lambda p: p["user_prompt"]),
+        (EventType.TASK_CREATED, lambda p: p["task"]["user_prompt"]),
+    ):
+        evt = next(e for e in events if e.type == event_type.value)
+        img = _sole_image_part(extract(evt.payload))
+        assert img["source_type"] == "ref", f"{event_type.value} 的图必须是 ref"
+        # 事件里的 ref 归 event store，且必须真能取回字节
+        assert await evt_store.get(img["data"], ctxp) is not None, (
+            f"{event_type.value} 的 ref 必须能由 event store 解开"
+        )
+        # 且它**不是** memory 侧的 ref
+        assert await mem_store.get(img["data"], ctxp) is None, (
+            "事件 payload 里出现了 memory 侧的 ref——两个命名空间不相通，event store 永远打不开它"
+        )
+        # 事件 payload 恒不含字节
+        assert b64 not in json.dumps(evt.payload)
+
+    # 对照：memory 侧拿到的是自己的 ref，同样能解，且 event store 打不开
+    mem_img = _image_parts(await _recall_user_prompt_parts(
+        runtime.providers.get_memory(), state))[0]
+    assert mem_img.source_type == "ref"
+    assert await mem_store.get(mem_img.data, ctxp) is not None
+    assert await evt_store.get(mem_img.data, ctxp) is None
+    assert mem_img.data != _sole_image_part(
+        next(e for e in events if e.type == EventType.SESSION_CREATED.value)
+        .payload["user_prompt"],
+    )["data"], "两侧 ref 方案不同，本用例的前提就是它们不相等"

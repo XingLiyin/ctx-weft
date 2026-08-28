@@ -317,13 +317,6 @@ class HitlRequest:
     # 仅供本次 cold-resolve 转发给 recover_session，不入事件、不持久化。
     resume_llm_account: str | None = None
     resume_llm_model: str | None = None
-    # 已解析的真实 tenant（Task 3 review fix：`_normalize_hitl_content` 在校验/外部化
-    # memory 侧内容时顺手解出，`HitlManager._resolve` 用它给 event 侧
-    # `content_to_event_jsonable` 传正确的 `ProviderContext.tenant_id`，避免在
-    # `_resolve` 里重新查一遍事件日志）。同 resume_llm_*：不入事件、不持久化，只活在
-    # 本次 resolve 调用里。None → `_resolve` 退回 "default"（未接 normalizer 的裸
-    # HitlManager，或压根没算过 tenant 的场景）。
-    resume_tenant_id: str | None = None
 
     @property
     def accepted(self) -> bool:

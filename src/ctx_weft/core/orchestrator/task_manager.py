@@ -109,8 +109,9 @@ class TaskManager:
         self._cancel_finalizer: (
             Callable[[list[Task], str], Coroutine[Any, Any, None]] | None
         ) = None
-        # 事件侧 blob store（Task 3：TASK_CREATED / TASK_REQUEUED 的 user_prompt 外部化
-        # 用），Runtime._register_and_drain 里晚绑定。TaskManager 每次 start_session /
+        # 事件侧 blob store（TASK_REQUEUED 的 user_prompt 外部化用；TASK_CREATED 自
+        # blob-store 解耦 Task 3 起改由入口传现成载荷，不再经这里），
+        # Runtime._register_and_drain 里晚绑定。TaskManager 每次 start_session /
         # recover_session 都新建一份，接线晚于 providers 注册完毕（不同于 HitlManager
         # 那种跨 session 长寿命单例），故直接存已解析的 store 引用即可，不必像
         # HitlManager 那样存解析器。None（纯单测直接构造 TaskManager() 时）→ 视为
@@ -126,11 +127,11 @@ class TaskManager:
         self._runner = runner
 
     def set_event_blob_store(self, store: "EventBlobStore | None") -> None:
-        """注入事件侧 blob store（`push_task` / `reopen_task` 的事件外部化用，Task 3）。"""
+        """注入事件侧 blob store（`reopen_task` 的事件外部化用）。"""
         self._event_blob_store = store
 
     def _event_ctx(self) -> "ProviderContext":
-        """构造 push_task / reopen_task 事件外部化用的 ctx，tenant 口径同 `_emit`。"""
+        """构造 reopen_task 事件外部化用的 ctx，tenant 口径同 `_emit`。"""
         tenant_id = self._session.tenant_id if self._session else "default"
         return ProviderContext(session_id=self._session_id, tenant_id=tenant_id)
 
@@ -265,7 +266,23 @@ class TaskManager:
         task: Task,
         blocked_by: list[str] | None = None,
         parent_task_id: str | None = None,
+        *,
+        user_prompt_event_jsonable: "str | list[dict] | None" = None,
     ) -> None:
+        """入队一个新任务并发 TASK_CREATED。
+
+        ``user_prompt_event_jsonable``：TASK_CREATED 里 user_prompt 的 event 侧载荷，
+        由**入口**（`SessionManager.create_session` ← `CtxWeftRuntime.start_session`）
+        从**归一化之前的原始** content 算好传进来。本方法不自己算：`task.user_prompt`
+        到这里已是 memory 侧归一化过的内容，图片 part 是 memory ref，再算一次只会把
+        一个 event store 打不开的引用写进事件（blob-store 解耦 Task 3）。
+
+        不传（agent 派发的子任务经 `stage_task` → `_flush_staged` 走这条）时退回
+        ``task.user_prompt`` 本身：那条路径的 prompt 恒是工具参数里的纯文本
+        （见 `control_capability` 的 delegate_task / plan_tasks），jsonable 形态就是
+        它自己，没有字节、也无处取原始字节。真出现 part 列表则**响亮拒绝**——静默
+        塞进 payload 会直接击穿「事件库恒不含字节」。
+        """
         # 统一用 TaskManager 级别的 max_retries，覆盖 Task 模型的硬编码默认值
         task.max_retries = self._task_max_retries
         self._tasks[task.id] = task
@@ -287,14 +304,15 @@ class TaskManager:
         # 崩溃恢复时 restore() 可由 dag_deps 重建依赖链，无需父任务重新 spawn。
         # push_task 是唯一的「新建」路径（retry / resume / active 重排都走 _queue.push），
         # 故此处恰好 emit 一次。
-        # user_prompt 的外部化须在 await self._emit(...) 之前算好（Task 3）：_task_payload
-        # 是同步函数、还负责十余个与内容无关的字段，不能整体 async 化（所有调用方都得
-        # 等一次 IO）；提前把 event-jsonable 结果算出来再传进去，_task_payload 本身不变。
-        user_prompt_jsonable = await content_to_event_jsonable(
-            task.user_prompt,
-            event_blob_store=self._event_blob_store or NullEventBlobStore(),
-            ctx=self._event_ctx(),
-        )
+        user_prompt_jsonable = user_prompt_event_jsonable
+        if user_prompt_jsonable is None:
+            if isinstance(task.user_prompt, list):
+                raise ValueError(
+                    f"push_task({task.id}): 非纯文本 user_prompt 必须由调用方传 "
+                    "user_prompt_event_jsonable（由归一化之前的原始 content 算出）——"
+                    "事件库恒不含字节，这里没有原始字节可用"
+                )
+            user_prompt_jsonable = task.user_prompt   # str | None，本身即 jsonable
         await self._emit(
             EventType.TASK_CREATED, task_id=task.id,
             payload=_task_payload(task, user_prompt_jsonable=user_prompt_jsonable),
@@ -1203,10 +1221,10 @@ def _outputs_to_text(outputs: Any) -> str:
 def _task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None") -> dict:
     """TaskCreated 事件的 payload，供 sessions.py translate_event 构建前端 task 对象。
 
-    ``user_prompt_jsonable``：调用方（`push_task`）在 `await self._emit(...)` 之前算好
-    的 event-jsonable 结果（`content_to_event_jsonable`，保 ref、绝不落字节）——**不**
-    在本函数内部算，因为本函数是同步的、还负责十余个与内容无关的字段，async 化会让
-    所有调用方等一次 IO（spec §6）。
+    ``user_prompt_jsonable``：`push_task` 在 `await self._emit(...)` 之前备好的
+    event-jsonable 载荷（保 ref、绝不落字节；源头是入口从原始 content 算出的那一份，
+    见 `push_task` 的 docstring）——**不**在本函数内部算，因为本函数是同步的、还负责
+    十余个与内容无关的字段，async 化会让所有调用方等一次 IO（spec §6）。
 
     刻意做成**必传的 keyword-only 参数**（无默认值）：曾经有一条「默认 None 时退回
     同步 `content_to_jsonable`」的分支，效果是把 inline base64 直接塞回 TaskCreated

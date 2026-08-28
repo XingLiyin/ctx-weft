@@ -493,11 +493,6 @@ class CtxWeftRuntime:
         # _normalize_hitl_content 只负责从 req 上取出本次应答真正要用的 tenant，
         # 校验/外部化本身仍是那个共用方法（Phase 3c Task A2）。
         self.hitl_manager.set_content_normalizer(self._normalize_hitl_content)
-        # HITL_* 事件外部化（Task 3）：req.message 里的 inline base64 换成 event ref。
-        # 传解析器（绑定方法）而非解析出的 store——HitlManager 在此刻构造，host 完全
-        # 可能晚于 Runtime.__init__ 才 register_event_blob_store（同 get_memory_blob_store
-        # docstring 记的坑），存回调可保证每次取用都重新查 registry。
-        self.hitl_manager.set_event_blob_store_resolver(self.providers.get_event_blob_store)
         # 默认使用内存版 EventStore，自动订阅 EventBus；传入自定义实现时由调用方自行 wire
         from ctx_weft.providers.events import InMemoryEventStore
         self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)
@@ -581,11 +576,21 @@ class CtxWeftRuntime:
         session_id: str,
         *,
         tenant_id: str = "default",
-    ) -> "str | list[ContentPart]":
-        """入口内容校验 + 外部化的**单一真源**（三个入口共用）。
+    ) -> "tuple[str | list[ContentPart], str | list[dict] | None]":
+        """入口内容校验 + **双侧外部化**的单一真源（三个入口共用）。
 
-        顺序恒为 `validate_content` → `normalize_content`，理由两条（spec §6.1）：
-        (a) 被拒的内容不该在 blob store 里留下垃圾——校验失败必须发生在任何 `put`
+        返回 `(memory 侧归一化内容, event 侧 jsonable)`。两个产物都从**同一份原始
+        content** 派生，各自只碰一个 store：memory 侧走 `normalize_content`，event
+        侧走 `content_to_event_jsonable`。两个 ref 不必相同，core 也不比较它们——
+        两个契约独立、ref 命名空间互不相通（2026-08-28 解耦方案）。
+
+        **event 侧必须先做**：它要的是归一化**之前**的原始字节。等 `normalize_content`
+        把图片 part 改写成 memory ref 之后再喂给 event 侧，拿到的只会是一个 event
+        store 永远打不开的引用（`content_to_event_jsonable` 会把它降级成文本占位并
+        告警——图片就在事件流里丢了）。
+
+        顺序恒为 `validate_content` → 两侧外部化，理由两条（spec §6.1）：
+        (a) 被拒的内容不该在任何 blob store 里留下垃圾——校验失败必须发生在任何 `put`
         之前；(b) `normalize_content` 里的 `b64decode(..., validate=True)` 刻意不加
         try/except，靠 validate 先行把畸形 base64 拦成 `InvalidContentError`。抽成
         这一个方法之后，三处调用点的顺序不会再各自漂移。
@@ -594,20 +599,26 @@ class CtxWeftRuntime:
         实现方，core 全程透传。这也让「纯文本不提前解析 LLM」这条不变量自动成立
         ——本方法根本不碰 LLM。
 
-        不能外部化（`NullMemoryBlobStore`）时原样返回同一对象，整段是 no-op。
+        memory 侧不能外部化（`NullMemoryBlobStore`）时第一个产物是原样的同一对象；
+        纯文本 content 两侧都是零 IO 直通（两个函数对 `str` 都原样返回）。
         """
-        from ctx_weft.core.content import normalize_content, validate_content
+        from ctx_weft.core.content import (
+            content_to_event_jsonable,
+            normalize_content,
+            validate_content,
+        )
 
         event_blob_store = self.providers.get_event_blob_store()
         validate_content(content, event_blob_store=event_blob_store)
+        ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
+        event_jsonable = await content_to_event_jsonable(
+            content, event_blob_store=event_blob_store, ctx=ctx,
+        )
         blob_store = self.providers.get_memory_blob_store()
         if not blob_store.can_externalize:
-            return content
-        return await normalize_content(
-            content,
-            blob_store=blob_store,
-            ctx=ProviderContext(session_id=session_id, tenant_id=tenant_id),
-        )
+            return content, event_jsonable
+        normalized = await normalize_content(content, blob_store=blob_store, ctx=ctx)
+        return normalized, event_jsonable
 
     async def _tenant_for_session(self, session_id: str) -> str:
         """由 session_id 解出 tenant_id；解不出一律回落 ``"default"``，**绝不抛**。
@@ -643,24 +654,22 @@ class CtxWeftRuntime:
 
     async def _normalize_hitl_content(
         self, content: "str | list[ContentPart]", req: "HitlRequest",
-    ) -> "str | list[ContentPart]":
-        """HITL 应答内容的校验 + 外部化（`HitlManager.set_content_normalizer` 的回调）。
+    ) -> "tuple[str | list[ContentPart], str | list[dict] | None]":
+        """HITL 应答内容的校验 + 双侧外部化（`HitlManager.set_content_normalizer` 的回调）。
 
         只做「从 req 上取出本次应答真正要用的 tenant」这一件事，校验/外部化本身
         仍由三入口共用的 `_validate_and_normalize_content` 完成（顺序恒为
-        validate → normalize，不在此重写一遍）。
+        validate → 两侧外部化，不在此重写一遍），返回值也原样透传它的二元组
+        `(memory 侧内容, event 侧载荷)`——`HitlManager` 拿后者直接发 HITL_* 事件。
 
         - **tenant**：由 `req.session_id` 解出（见 `_tenant_for_session`）。解 tenant 冷路径
           要读事件日志，故只在**真会写 blob** 时才付这个代价：纯文本、或两个 blob store
           都不能外部化时 tenant 根本用不上。判据是 memory **或** event 任一可外部化就要
-          解——`content_to_event_jsonable` 在 memory 不可外部化时仍可能独立把内容写进
-          event blob（Task 3 spec §6：两条路径互补覆盖四种组合），只看 memory 侧会漏掉
-          「memory 不可外部化、event 可外部化」这一组合的 tenant。
+          解——event 侧的外部化独立于 memory 侧（两个 store 各写各的），只看 memory 侧
+          会漏掉「memory 不可外部化、event 可外部化」这一组合的 tenant。
 
-        解出的 tenant **顺手存回 `req.resume_tenant_id`**（Task 3 review fix）：
-        `HitlManager._resolve` 用它给 event 侧 `content_to_event_jsonable` 传正确的
-        `ProviderContext.tenant_id`，不必在 `_resolve` 的热路径上再查一遍事件日志——
-        本方法已经算出来了，值不会变。
+        解出的 tenant 只喂给本次外部化：event 侧与 memory 侧同用这一个
+        `ProviderContext`，两边的 blob 落在同一个 tenant 锚点上。
         """
         tenant_id = "default"
         if not isinstance(content, str) and (
@@ -668,7 +677,6 @@ class CtxWeftRuntime:
             or self.providers.get_event_blob_store().can_externalize
         ):
             tenant_id = await self._tenant_for_session(req.session_id)
-        req.resume_tenant_id = tenant_id
         return await self._validate_and_normalize_content(
             content, req.session_id, tenant_id=tenant_id,
         )
@@ -826,7 +834,12 @@ class CtxWeftRuntime:
         # 入口即拒、不落库：格式/blob 门控须在任何持久化（Session/Task/事件）之前完成
         # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全。
         # validate → normalize 的顺序与另外两个入口共用同一个方法，不再各写一遍。
-        user_prompt = await self._validate_and_normalize_content(
+        # event 侧产物在这条路径上无人消费，显式丢弃：run_single_task 自己
+        # register_task、不经 push_task，也不发 SESSION_CREATED，没有任何事件载得下它。
+        # 代价是携图时会在 event blob store 里留一份无人引用的字节；不为此加分支，是
+        # 因为「三入口共用同一个真源」这条不变量比省掉一次 compat 路径上的 put 更值钱
+        # （宿主的 event blob 回收本就按自己的保留策略走，见 EventBlobStore 协议）。
+        user_prompt, _ = await self._validate_and_normalize_content(
             user_prompt, sid, tenant_id=tenant_id,
         )
         lm = LifecycleManager(template_lookup=self._template_lookup)
@@ -922,7 +935,7 @@ class CtxWeftRuntime:
         # 能外部化时必须把 session_id 定下来并透传给 create_session，否则外部化用的
         # session 与真正创建的 session 会是两个 id。
         sid = params.session_id or (generate_id("ses") if blob_store.can_externalize else None)
-        normalized = await self._validate_and_normalize_content(
+        normalized, user_prompt_event_jsonable = await self._validate_and_normalize_content(
             params.user_prompt, sid or "", tenant_id=params.tenant_id,
         )
         if blob_store.can_externalize:
@@ -950,6 +963,7 @@ class CtxWeftRuntime:
                 context_limit=params.context_limit,
                 token_budget=params.token_budget,
                 reserved_output_tokens=params.reserved_output_tokens,
+                user_prompt_event_jsonable=user_prompt_event_jsonable,
             )
         else:
             session, root_task, task_manager = await sm.resume_session(
@@ -960,6 +974,7 @@ class CtxWeftRuntime:
                 llm_model=params.llm_model,
                 llm_account=params.llm_account,
                 initial_task_settings=params.initial_task_settings,
+                user_prompt_event_jsonable=user_prompt_event_jsonable,
             )
 
         run_id = generate_id("run")

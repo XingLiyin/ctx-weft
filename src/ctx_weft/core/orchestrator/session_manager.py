@@ -6,7 +6,6 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.core.content import content_to_event_jsonable
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
@@ -16,7 +15,6 @@ from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.context import ProviderContext
-from ctx_weft.protocols.events import NullEventBlobStore
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
@@ -34,13 +32,14 @@ class SessionManager:
     task_max_concurrent: int = 4
     task_max_retries: int = 3
     default_task_timeout_ms: int = 60_000
-    # 事件侧 blob store（Task 3：`content_to_event_jsonable` 用它把 SESSION_CREATED /
-    # SESSION_RESUMED 的 user_prompt 里的 inline base64 换成 ref）。CtxWeftRuntime 在
-    # start_session 里构造 SessionManager 时按 `self.providers.get_event_blob_store()`
-    # 注入——SessionManager 本身不持有 ProviderRegistry（也不该持有，见
-    # HitlManager.set_content_normalizer 的既有做法：把「需要什么」注入进来，而不是
-    # 把整个 registry 塞进构造签名）。None（测试直接构造 SessionManager() 不传）→
-    # 视为 NullEventBlobStore，与未接线时行为一致。
+    # 事件侧 blob store。SESSION_CREATED / SESSION_RESUMED / TASK_CREATED 的
+    # user_prompt 外部化**已不再经过它**（blob-store 解耦 Task 3：调用方从原始
+    # content 算好 event 侧载荷传进来），本字段今天只剩一处用途——原样透传给 root
+    # TaskManager，供其 `reopen_task` 的事件外部化（那条路径的内容来自 loop 内部，
+    # 不经入口）。CtxWeftRuntime 在 start_session 里按
+    # `self.providers.get_event_blob_store()` 注入——SessionManager 本身不持有
+    # ProviderRegistry（也不该持有，见 HitlManager.set_content_normalizer 的既有
+    # 做法：把「需要什么」注入进来，而不是把整个 registry 塞进构造签名）。
     event_blob_store: "EventBlobStore | None" = None
 
     async def create_session(
@@ -55,8 +54,16 @@ class SessionManager:
         reserved_output_tokens: int = 8192,
         session_id: str | None = None,
         initial_task_settings: NormalTaskSettings | None = None,
+        user_prompt_event_jsonable: "str | list[dict] | None" = None,
     ) -> tuple[Session, Task, TaskManager]:
-        """Create a new session, instantiate root agent, push initial task."""
+        """Create a new session, instantiate root agent, push initial task.
+
+        ``user_prompt_event_jsonable``：调用方（`CtxWeftRuntime.start_session`）由
+        **归一化之前的原始** user_prompt 算好的 event 侧载荷（见
+        `_validate_and_normalize_content`）。本类不自己算——它手上的 ``user_prompt``
+        已经是 memory 侧归一化过的内容，图片 part 是 memory ref，再算一次只会把一个
+        event store 打不开的引用写进事件（blob-store 解耦 Task 3）。
+        """
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
 
@@ -84,16 +91,10 @@ class SessionManager:
         # so the session row must be projected first.
         ts = now_utc()
         # 保 ref、不落字节、不拍扁（裁定 2026-08-27）——本事件参与状态重建（reducers
-        # 的 SESSION_CREATED 分支），拍扁会让重放后「曾有一张图」无痕。放在
-        # payload dict 构造之前 await——dict 字面量里不能直接 await（Task 3）。
-        user_prompt_jsonable = await content_to_event_jsonable(
-            user_prompt,
-            event_blob_store=self.event_blob_store or NullEventBlobStore(),
-            ctx=ctx,
-        )
+        # 的 SESSION_CREATED 分支），拍扁会让重放后「曾有一张图」无痕。
         await self._emit(EventType.SESSION_CREATED, sid, tenant_id, timestamp=ts, payload={
             "template_id": template_id,
-            "user_prompt": user_prompt_jsonable,
+            "user_prompt": user_prompt_event_jsonable,
             "root_agent_id": agent.id,
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
@@ -107,7 +108,9 @@ class SessionManager:
             "template_version": template.version,
         })
 
-        root_task, task_manager = await self._make_root_task_manager(session, user_prompt, initial_task_settings)
+        root_task, task_manager = await self._make_root_task_manager(
+            session, user_prompt, initial_task_settings, user_prompt_event_jsonable,
+        )
 
         return session, root_task, task_manager
 
@@ -120,8 +123,11 @@ class SessionManager:
         llm_model: str | None = None,
         llm_account: str | None = None,
         initial_task_settings: NormalTaskSettings | None = None,
+        user_prompt_event_jsonable: "str | list[dict] | None" = None,
     ) -> tuple[Session, Task, TaskManager]:
-        """Resume an existing session: recover root_agent_id from event store, push a new root task."""
+        """Resume an existing session: recover root_agent_id from event store, push a new root task.
+
+        ``user_prompt_event_jsonable`` 同 `create_session`：由调用方从原始 content 算好。"""
         from ctx_weft.core.control.reducers import rebuild_view
         view = await rebuild_view(event_store, session_id)
         sess_proj = view.sessions.get(session_id)
@@ -156,18 +162,15 @@ class SessionManager:
             reserved_output_tokens=getattr(sess_proj, "reserved_output_tokens", 8192),
             created_at=now_utc(),
         )
-        root_task, task_manager = await self._make_root_task_manager(session, user_prompt, initial_task_settings)
+        root_task, task_manager = await self._make_root_task_manager(
+            session, user_prompt, initial_task_settings, user_prompt_event_jsonable,
+        )
 
         logger.info("Session %s resumed (agent=%s)", session_id, sess_proj.root_agent_id)
 
         # 同 SESSION_CREATED：保 ref、不落字节、不拍扁。
-        user_prompt_jsonable = await content_to_event_jsonable(
-            user_prompt,
-            event_blob_store=self.event_blob_store or NullEventBlobStore(),
-            ctx=ProviderContext(session_id=session_id, tenant_id=tenant_id),
-        )
         await self._emit(EventType.SESSION_RESUMED, session_id, tenant_id, payload={
-            "user_prompt": user_prompt_jsonable,
+            "user_prompt": user_prompt_event_jsonable,
             "root_agent_id": sess_proj.root_agent_id,
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
@@ -182,6 +185,7 @@ class SessionManager:
         session: Session,
         user_prompt: "str | list[ContentPart]",
         settings: NormalTaskSettings | None,
+        user_prompt_event_jsonable: "str | list[dict] | None" = None,
     ) -> tuple[Task, TaskManager]:
         task = Task(
             id=generate_id("tsk"),
@@ -209,7 +213,11 @@ class SessionManager:
         # 绑定），故本 TaskManager 的 event_blob_store 必须现在就接上，直接透传
         # SessionManager 自己持有的那份（同一个 registry 解出的同一个 store）。
         task_manager.set_event_blob_store(self.event_blob_store)
-        await task_manager.push_task(task)
+        # root task 的 user_prompt 与 SESSION_CREATED 是同一份内容，故 event 侧载荷
+        # 也是同一份——同样由调用方从原始 content 算好，不在这里重算（Task 3）。
+        await task_manager.push_task(
+            task, user_prompt_event_jsonable=user_prompt_event_jsonable,
+        )
         return task, task_manager
 
     async def _emit(

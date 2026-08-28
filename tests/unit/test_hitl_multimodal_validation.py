@@ -325,15 +325,19 @@ async def test_runtime_injects_helper_that_delegates_to_the_shared_source():
 
     async def _spy(content, session_id, **kw):
         seen.append((content, session_id, kw))
-        return content
+        # 共用真源返回**二元组** `(memory 侧内容, event 侧载荷)`（blob-store 解耦
+        # Task 3），桩必须同形——只回 content 的话 HitlManager 会把它当二元组解包
+        # （短字符串正好解成两个字符，静默把 req.message 变成 "h"）。
+        return content, content
 
     rt._validate_and_normalize_content = _spy  # type: ignore[method-assign]
     hid = await _pending(rt, session_id="ses-delegate")
-    await rt.hitl_manager.answer(hid, "hi")
+    req = await rt.hitl_manager.answer(hid, "hi")
 
     assert len(seen) == 1, "薄包装必须转调共用真源（_validate_and_normalize_content）"
     assert seen[0][0] == "hi"
     assert seen[0][1] == "ses-delegate"
+    assert req.message == "hi", "回调返回的二元组第一项才是内容，不得被当成序列拆开"
 
 
 @pytest.mark.asyncio
@@ -625,3 +629,65 @@ async def test_hitl_event_put_receives_the_real_session_tenant_not_default():
         "event 侧 put 收到的 tenant 必须是该 session 的真实 tenant，而非硬编码 default"
     )
     assert event_store.ctx_session_ids == ["ses-tenant-event"]
+
+
+# ── blob-store 解耦 Task 3：HITL_* 事件里的 ref 归 event store ──────────────────
+
+
+class _PrefixedEventStore(_CountingEventStore):
+    """ref 方案刻意不同于 memory 侧（多一段 ``evt-``），仍内容寻址、仍幂等。
+
+    两侧同用 sha256 时「这个 ref 是谁家的」不可观测，跨命名空间引用就被
+    「恰好相同」掩盖了——这就是本组用例要拆掉的那层掩盖。
+    """
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        await super().put(data, media_type, ctx)
+        return f"{BLOB_REF_PREFIX}evt-{hashlib.sha256(data).hexdigest()}"
+
+    async def get(self, ref: str, ctx: ProviderContext) -> "tuple[bytes, str] | None":
+        for data, media_type in self.seen:
+            if ref == f"{BLOB_REF_PREFIX}evt-{hashlib.sha256(data).hexdigest()}":
+                return data, media_type
+        return None
+
+
+@pytest.mark.asyncio
+async def test_hitl_event_payload_carries_an_event_ref_not_the_memory_ref():
+    """HITL_ANSWERED 的 message 里必须是 **event store** 的 ref，且字节取得回。
+
+    这是 HITL 入口版的解耦验收：事件侧载荷必须由**归一化之前的原始**应答内容算出。
+    若改由 `req.message`（已是 memory ref）重算，`content_to_event_jsonable` 会把它
+    降级成文本占位——图片就在事件流里丢了，而 memory 侧看起来一切正常。
+    """
+    mem_store = _CountingStore()
+    evt_store = _PrefixedEventStore()
+    rt = _make_runtime(_VisionClient(), mem_store)
+    rt.providers.register_event_blob_store(evt_store)
+    hid = await _pending(rt, session_id="ses-two-stores")
+
+    await rt.hitl_manager.answer(
+        hid, [TextPart(text="看这张"), ImagePart(data=_PNG, media_type="image/png")],
+    )
+
+    events = await rt.event_store.read_by_session("ses-two-stores")
+    answered = next(e for e in events if e.type == "HitlAnswered")
+    parts = answered.payload["message"]
+    assert isinstance(parts, list), f"message 不得被拍扁，实为 {type(parts).__name__}"
+    images = [p for p in parts if isinstance(p, dict) and p.get("type") == "image"]
+    assert len(images) == 1, (
+        f"事件里应恰有一张图（被降级成文本占位就会是 0 张），实为 {len(images)}"
+    )
+    ref = images[0]["data"]
+
+    ctxp = ProviderContext(session_id="ses-two-stores")
+    assert await evt_store.get(ref, ctxp) == (_PNG_BYTES, "image/png"), (
+        "事件里的 ref 必须能由 event store 解回原始字节"
+    )
+    assert await mem_store.get(ref, ctxp) is None, (
+        "事件 payload 里出现了 memory 侧的 ref——两个命名空间不相通"
+    )
+    assert _PNG not in str(answered.payload), "事件 payload 恒不含字节"
+    # 两侧各写各的，各一次
+    assert mem_store.put_calls == 1
+    assert evt_store.put_calls == 1

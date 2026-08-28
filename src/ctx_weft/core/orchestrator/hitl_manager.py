@@ -37,7 +37,6 @@ from ctx_weft.protocols.events import NullEventBlobStore
 if TYPE_CHECKING:
     from ctx_weft.core.events.bus import EventBus
     from ctx_weft.protocols import ContentPart
-    from ctx_weft.protocols.events import EventBlobStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,24 +68,17 @@ class HitlManager:
         self._cold_decision_lookup: (
             "Callable[[str, str], Awaitable[HitlRequest | None]] | None"
         ) = None
-        # 应答内容的校验 + 外部化回调（Runtime 绑定 _normalize_hitl_content,
-        # 见 set_content_normalizer）。签名 async (content, req) -> content——整个
-        # HitlRequest 传过去（而非零散字段）：blob 的 tenant 锚点要由 req.session_id
-        # 解出，将来再要别的字段（如 resume_llm_*）也不必改签名。HitlRequest 本就是
-        # 本模块自己的类型，故仍不必 import MemoryBlobStore / LLM 任何类型。
+        # 应答内容的校验 + 双侧外部化回调（Runtime 绑定 _normalize_hitl_content,
+        # 见 set_content_normalizer）。签名 async (content, req) ->
+        # (content, event_jsonable)——整个 HitlRequest 传过去（而非零散字段）：blob 的
+        # tenant 锚点要由 req.session_id 解出，将来再要别的字段（如 resume_llm_*）也不
+        # 必改签名。HitlRequest 本就是本模块自己的类型，故仍不必 import
+        # MemoryBlobStore / LLM 任何类型。
         # None（纯单测直接构造 HitlManager() 时）→ 恒等变换、行为逐字节不变。
         self._content_normalizer: (
             "Callable[[str | list[ContentPart], HitlRequest], "
-            "Awaitable[str | list[ContentPart]]] | None"
+            "Awaitable[tuple[str | list[ContentPart], str | list[dict] | None]]] | None"
         ) = None
-        # 事件侧 blob store 的**解析器**（Task 3：HITL_* 事件把 req.message 外部化用），
-        # Runtime 构造后经 set_event_blob_store_resolver 晚绑定。刻意存回调而非直接存
-        # 解析出的 store 引用：HitlManager 是 Runtime.__init__ 里建的长寿命单例，此时
-        # host 可能还没 register_event_blob_store（同 get_memory_blob_store() docstring
-        # 记的坑——先 get 后 register 会静默拿不到）。存回调则每次 _resolve 都重新问一遍
-        # registry，接线顺序不再敏感。None（纯单测直接构造 HitlManager() 时）→ 视为
-        # NullEventBlobStore。
-        self._event_blob_store_resolver: "Callable[[], EventBlobStore] | None" = None
         self._requests: dict[str, HitlRequest] = {}
         self._futures: dict[str, asyncio.Future[HitlRequest]] = {}
         self._lock = asyncio.Lock()
@@ -276,10 +268,17 @@ class HitlManager:
         self,
         handler: (
             "Callable[[str | list[ContentPart], HitlRequest], "
-            "Awaitable[str | list[ContentPart]]] | None"
+            "Awaitable[tuple[str | list[ContentPart], str | list[dict] | None]]] | None"
         ),
     ) -> None:
-        """注入应答内容的校验 + 外部化回调（Runtime 绑定 _normalize_hitl_content）。
+        """注入应答内容的校验 + 双侧外部化回调（Runtime 绑定 _normalize_hitl_content）。
+
+        回调返回**二元组** ``(content, event_jsonable)``：前者是 memory 侧归一化后的
+        内容（写进 `req.message`），后者是同一份**原始** content 算出的 event 侧载荷
+        （写进 HITL_* 事件 payload）。两者各自只碰自己那个 blob store，两个 ref 不必
+        相同（blob-store 解耦 Task 3）。本类因此不再自己做事件侧外部化——它手上的
+        `req.message` 已是 memory 侧的 ref，再算一次只会把一个 event store 永远打不开
+        的引用写进事件。
 
         HITL 是人类往会话里注入内容的第二个入口——`run_single_task` / `start_session`
         两个入口早已接上 validate → normalize，此路径此前全程不校验、不外部化：图片
@@ -294,38 +293,27 @@ class HitlManager:
         """
         self._content_normalizer = handler
 
-    def set_event_blob_store_resolver(
-        self, resolver: "Callable[[], EventBlobStore] | None",
-    ) -> None:
-        """注入事件侧 blob store 的解析器（Runtime 构造时绑定，镜像 set_content_normalizer）。
-
-        供 `_resolve` 把 HITL_* 事件里的 ``message`` 换成 event-jsonable 形态：ref 原样、
-        inline base64 put 进 event blob 换成 ref（`content_to_event_jsonable`，见其
-        docstring）。传**解析器**（如 ``registry.get_event_blob_store``）而非直接传
-        store 引用——理由见 ``_event_blob_store_resolver`` 字段注释。**未注入时视为
-        NullEventBlobStore**：纯文本内容不受影响（`content_to_event_jsonable` 对
-        ``str``/``None`` 原样返回，与从前逐字节一致）；**携图**内容会抛错
-        （`ValueError` / `NullEventBlobStore.put` 的 `NotImplementedError`）——这是刻意
-        的，Task 4 随入口门控落地删除了 `content_to_event_jsonable` 里「不可外部化时
-        退回 `content_to_jsonable`」的过渡短路，不再有静默把字节塞进事件的通道。
-        生产路径不会撞上这个：`CtxWeftRuntime` 构造 `HitlManager` 时必定接线本
-        resolver（`runtime.py` `__init__`），且携图内容在 `validate_content` 入口就已被
-        `BlobStoreRequiredError` 拦下——只有纯单测直接构造 ``HitlManager()``（不经
-        `CtxWeftRuntime`）且递入图片内容时才会走到这里并抛错。
-        """
-        self._event_blob_store_resolver = resolver
-
     async def _normalize_message(
         self, req: HitlRequest, content: "str | list[ContentPart]",
-    ) -> "str | list[ContentPart]":
-        """应答内容过一遍校验 + 外部化。未注入 normalizer → 原样返回同一对象。
+    ) -> "tuple[str | list[ContentPart], str | list[dict] | None]":
+        """应答内容过一遍校验 + 双侧外部化，返回 ``(memory 侧内容, event 侧载荷)``。
 
         刻意**不** try/except：校验失败必须原样抛给应答方（host 的 /messages），
         req 保持 pending、不发事件、不写 blob——与两个入口「入口即拒、不落库」一致。
+
+        未注入 normalizer（纯单测直接构造 `HitlManager()`）→ 内容原样返回同一对象，
+        event 侧载荷就地按 `NullEventBlobStore` 算：纯文本是零开销直通（逐字节不变），
+        携图内容则**响亮抛错**——裸 HitlManager 从来不是生产路径（生产路径恒由
+        `CtxWeftRuntime` 构造并接线 normalizer），携图内容绕过入口校验直接到这里本就
+        该被看见，不该被一条静默降级吞掉。
         """
-        if self._content_normalizer is None:
-            return content
-        return await self._content_normalizer(content, req)
+        if self._content_normalizer is not None:
+            return await self._content_normalizer(content, req)
+        return content, await content_to_event_jsonable(
+            content,
+            event_blob_store=NullEventBlobStore(),
+            ctx=ProviderContext(session_id=req.session_id, tenant_id="default"),
+        )
 
     def set_cold_decision_lookup(
         self, handler: "Callable[[str, str], Awaitable[HitlRequest | None]]",
@@ -371,8 +359,11 @@ class HitlManager:
         """question/wait form 应答，返回 (req, was_hot)。was_hot=False 时调用方须触发冷 resume。"""
         req = self._require(hitl_id)
         # 校验/外部化先于任何状态改动：被拒的内容不得写进 req.message、不得推进状态。
-        req.message = await self._normalize_message(req, text)
-        return await self._resolve(req, "accepted", EventType.HITL_ANSWERED, resume_on_cold=True)
+        req.message, event_jsonable = await self._normalize_message(req, text)
+        return await self._resolve(
+            req, "accepted", EventType.HITL_ANSWERED,
+            resume_on_cold=True, message_event_jsonable=event_jsonable,
+        )
 
     async def resolve_approve(
         self, hitl_id: str, *, message: "str | list[ContentPart]" = "",
@@ -382,16 +373,22 @@ class HitlManager:
         req = self._require(hitl_id)
         # approve 的备注同样是 `str | list[ContentPart]`（见 approve 的签名）——
         # 与 answer/reject 走同一道校验 + 外部化，否则同一个洞在这条路径上仍开着。
-        req.message = await self._normalize_message(req, message)
+        req.message, event_jsonable = await self._normalize_message(req, message)
         req.modified_arguments = modified_arguments
         evt = EventType.HITL_MODIFIED if modified_arguments is not None else EventType.HITL_APPROVED
-        return await self._resolve(req, "accepted", evt, resume_on_cold=True)
+        return await self._resolve(
+            req, "accepted", evt,
+            resume_on_cold=True, message_event_jsonable=event_jsonable,
+        )
 
     async def resolve_reject(self, hitl_id: str, *, message: "str | list[ContentPart]" = "") -> tuple[HitlRequest, bool]:
         """拒绝（approval 与 question/wait form 通用），返回 (req, was_hot)。was_hot=False 时调用方须触发冷 resume。"""
         req = self._require(hitl_id)
-        req.message = await self._normalize_message(req, message)
-        return await self._resolve(req, "rejected", EventType.HITL_REJECTED, resume_on_cold=True)
+        req.message, event_jsonable = await self._normalize_message(req, message)
+        return await self._resolve(
+            req, "rejected", EventType.HITL_REJECTED,
+            resume_on_cold=True, message_event_jsonable=event_jsonable,
+        )
 
     # ── internals ──────────────────────────────────────────────────────────────
 
@@ -408,6 +405,7 @@ class HitlManager:
         event_type: EventType,
         *,
         resume_on_cold: bool = False,
+        message_event_jsonable: "str | list[dict] | None" = None,
     ) -> tuple[HitlRequest, bool]:
         async with self._lock:
             if req.status != "pending":
@@ -423,26 +421,11 @@ class HitlManager:
         payload: dict = {"hitl_id": req.id}
         if req.message:
             # HITL_* 参与状态重建（reducers 折叠 pending_hitl/决定缓存），事件库恒不含
-            # 字节——用 content_to_event_jsonable 而非 content_to_jsonable（Task 3）。
-            event_blob_store = (
-                self._event_blob_store_resolver()
-                if self._event_blob_store_resolver is not None
-                else NullEventBlobStore()
-            )
-            # tenant 用 `req.resume_tenant_id`——`_normalize_message` 一步之前刚由
-            # runtime 的 `_normalize_hitl_content` 解析并存回 req（同一批内容，同一个
-            # 真实 tenant，见该方法 docstring）。**不**在这里重新查事件日志：那是
-            # best-effort 的冷路径扫描，值已经算出来过，没必要在热路径上重付一次。
-            # 未注入 normalizer 的裸 HitlManager（纯单测）→ resume_tenant_id 恒 None →
-            # 退回 "default"，与之前的行为一致。
-            payload["message"] = await content_to_event_jsonable(
-                req.message,
-                event_blob_store=event_blob_store,
-                ctx=ProviderContext(
-                    session_id=req.session_id,
-                    tenant_id=req.resume_tenant_id or "default",
-                ),
-            )
+            # 字节。载荷由 `_normalize_message` 一步之前从**原始**应答内容算好、顺着
+            # 参数递进来——**不**在这里拿 `req.message` 重算：那份内容已是 memory 侧
+            # 归一化过的 ref，event store 既无权解读也解不开（两个契约独立、ref 命名
+            # 空间互不相通，blob-store 解耦 Task 3）。
+            payload["message"] = message_event_jsonable
         if req.modified_arguments is not None:
             payload["modified_arguments"] = req.modified_arguments
         await self._emit(event_type, req, payload=payload)

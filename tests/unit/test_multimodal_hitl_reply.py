@@ -63,15 +63,23 @@ class _StubEventBlobStore:
 
 
 async def _finished_task_manager(prompt):
+    from ctx_weft.core.content import content_to_event_jsonable
+
     tm = TaskManager(session_id="s1", event_bus=InProcessEventBus())
-    tm.set_event_blob_store(_StubEventBlobStore())
+    store = _StubEventBlobStore()
+    tm.set_event_blob_store(store)
     task = Task(
         id="tsk_1", session_id="s1", status="FINISHED", tenant_id="default",
         assigned_agent_id="a1", creator_agent_id="a1",
         title="T", description="d", user_prompt=prompt,
         outputs="旧产出", created_at=now_utc(),
     )
-    await tm.push_task(task)
+    # 事件侧载荷由调用方备好（blob-store 解耦 Task 3：push_task 不再自己算——它手上的
+    # user_prompt 可能已是 memory ref）。本文件白盒构造 TaskManager、prompt 就是原始
+    # 内容，故这里现算一份，与入口的算法完全一致。
+    await tm.push_task(task, user_prompt_event_jsonable=await content_to_event_jsonable(
+        prompt, event_blob_store=store, ctx=ProviderContext(session_id="s1"),
+    ))
     task.status = "FINISHED"          # push 会置 PENDING，reopen 要求 FINISHED
     return tm, task
 

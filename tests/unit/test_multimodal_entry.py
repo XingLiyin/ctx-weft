@@ -69,7 +69,11 @@ async def test_root_task_carries_full_content_session_carries_summary():
         id="s1", user_prompt=content_to_text(_content()), status="RUNNING",
         tenant_id="default", root_agent_id="a1", created_at=now_utc(),
     )
-    task, _tm = await sm._make_root_task_manager(session, _content(), None)
+    # event 侧载荷由调用方（入口）从原始 content 算好后传入（blob-store 解耦 Task 3）：
+    # 本用例只关心 Task/Session 各自承载什么，故给一份形态正确的最小载荷即可。
+    task, _tm = await sm._make_root_task_manager(
+        session, _content(), None, [{"type": "text", "text": "看这张图"}],
+    )
     assert task.user_prompt == _content(), "Task 承载全量内容"
     assert isinstance(session.user_prompt, str), "Session 只承载文本摘要"
     # _make_root_task_manager 从不从 user_prompt 派生 description（源码恒为 ""）——
