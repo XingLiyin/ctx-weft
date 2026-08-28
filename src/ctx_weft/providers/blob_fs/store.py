@@ -35,6 +35,13 @@ class FsBlobStore(MemoryBlobStore, EventBlobStore):
     各自演进（最明显的是回收锚点：memory 侧是记录 is_superseded，event 侧是事件保留
     策略）。本类只是**碰巧**两边都能用。
 
+    ⚠️ **两侧 ref 在共用一个实例时恰好相同（同一套 sha256 内容寻址），这是本实现的
+    选择，不是两个协议的约定。** `MemoryBlobStore.put` 与 `EventBlobStore.put` 各自
+    独立定义返回值，谁都没承诺过跨协议的 ref 兼容；分开部署两个 `FsBlobStore` 实例
+    （或换成不同实现）时这份「巧合」立刻不成立（见 `test_separate_instances_are_
+    truly_independent`）。core 不得依赖「两侧 ref 相通」这件事，哪怕在本实现下观察
+    到的现象一直是相通的。
+
     ⚠️ **共用一个实例时，`collect` 的 live_refs 必须同时含两侧的活引用**（spec §9）。
     只喂 memory 侧的活引用会删掉事件流仍需要的字节。这是共用实现自身的责任，core
     不代管——想省心就分开部署两个实例，各按各的策略回收。
@@ -121,7 +128,9 @@ class FsBlobStore(MemoryBlobStore, EventBlobStore):
             return None
         try:
             media_type = meta_path.read_text(encoding="utf-8").strip()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # sidecar 缺失、磁盘损坏、或被写到一半／被篡改成非 UTF-8 字节，
+            # 都算「形态不对」，一律回落，不让 get() 抛出（契约：绝不 raise）。
             media_type = ""
         return data, media_type or "application/octet-stream"
 
@@ -143,8 +152,16 @@ class FsBlobStore(MemoryBlobStore, EventBlobStore):
            「无引用」判会在窗口内把还没用上的字节删掉。`put` 对已存在的 sha 会
            刷新 mtime（「最后一次有人声称要用它」），所以重新 put 一份被引用者
            已全部失效的旧字节，也会重新打开这个窗口——宽限期对这种情况同样保护。
+
+        `now` 若传入 naive datetime（无 tzinfo），按 UTC 归一——本类内部一律用
+        tz-aware UTC 计时（文件 mtime 经 `datetime.fromtimestamp(..., tz=UTC)` 转换），
+        naive/aware 混比较会被 Python 直接 raise TypeError；调用方多半是把 `now`
+        当一个测试钩子传，不该因为忘记带时区而在这里炸掉。
         """
-        cutoff = (now or datetime.now(UTC)) - self._grace_period
+        now = now or datetime.now(UTC)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        cutoff = now - self._grace_period
         live_shas = {
             sha for ref in live_refs
             if ref.startswith(BLOB_REF_PREFIX)
