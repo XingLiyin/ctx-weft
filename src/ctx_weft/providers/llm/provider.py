@@ -18,7 +18,13 @@ from ctx_weft.providers.llm.store import LLMAccountStoreProtocol
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_STYLES = {"anthropic", "openai"}
+# 纯文本与多模态是**两个 style**，不是一个 style 加一个开关——能力由「注册了哪个
+# adapter 类」表达（spec 2026-08-28-multimodal-adapter-dispatch §2「类型即声明」）。
+# 存量 account 的 "anthropic" / "openai" 行为不变，仍拿到纯文本 adapter，零迁移。
+SUPPORTED_STYLES = {
+    "anthropic", "anthropic-multimodal",
+    "openai", "openai-multimodal",
+}
 
 # 模型可用性探测的补全预算。不用 1：个别推理模型对极小 max_tokens 会直接拒绝，
 # 取一个小而安全的值——只需请求被接受、流能跑完，不关心实际产出多少 token。
@@ -337,17 +343,26 @@ class LLMProvider:
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _build_adapter(self, account: LLMAccount) -> LLMClient:
-        if account.style == "anthropic":
-            from ctx_weft.providers.llm.anthropic import AnthropicAdapter
-            return AnthropicAdapter(
+        multimodal = account.style.endswith("-multimodal")
+        if account.style.startswith("anthropic"):
+            from ctx_weft.providers.llm.anthropic import (
+                AnthropicAdapter,
+                AnthropicMultimodalAdapter,
+            )
+            cls = AnthropicMultimodalAdapter if multimodal else AnthropicAdapter
+            return cls(
                 api_key=account.api_key,
                 base_url=account.base_url or "https://api.anthropic.com",
                 timeout_sec=account.timeout_sec,
                 max_http_retries=self._max_http_retries,
             )
-        if account.style == "openai":
-            from ctx_weft.providers.llm.openai import OpenAIAdapter
-            return OpenAIAdapter(
+        if account.style.startswith("openai"):
+            from ctx_weft.providers.llm.openai import (
+                OpenAIAdapter,
+                OpenAIMultimodalAdapter,
+            )
+            cls = OpenAIMultimodalAdapter if multimodal else OpenAIAdapter
+            return cls(
                 api_key=account.api_key,
                 base_url=account.base_url or "https://api.openai.com",
                 timeout_sec=account.timeout_sec,

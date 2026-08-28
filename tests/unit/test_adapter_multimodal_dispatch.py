@@ -198,3 +198,48 @@ def test_openai_plain_text_payload_unchanged_between_classes():
     req = _req(LLMMessage(role="user", content="纯文本"))
     assert _oai(multimodal=False)._build_payload(req) == \
         _oai(multimodal=True)._build_payload(req)
+
+
+# ── Task 4：LLMProvider 接线 ─────────────────────────────────────────────
+
+
+class _StoreStub:
+    def save(self, a): ...
+    def delete(self, n): return True
+    def list_all(self): return []
+
+
+def _provider_with(style: str):
+    from ctx_weft.providers.llm import LLMAccount, LLMProvider, ModelConfig
+    p = LLMProvider(_StoreStub())
+    p.register_account(LLMAccount(
+        name="a", style=style, api_key="k", base_url="https://x",
+        models=[ModelConfig(name="m", context_limit=200_000)],
+        default_model="m",
+    ), persist=False)
+    return p
+
+
+@pytest.mark.parametrize(("style", "cls_name"), [
+    ("anthropic", "AnthropicAdapter"),
+    ("anthropic-multimodal", "AnthropicMultimodalAdapter"),
+    ("openai", "OpenAIAdapter"),
+    ("openai-multimodal", "OpenAIMultimodalAdapter"),
+])
+def test_build_adapter_dispatches_on_style(style, cls_name):
+    p = _provider_with(style)
+    assert type(p._adapters["a"]).__name__ == cls_name
+
+
+def test_unknown_style_still_rejected():
+    from ctx_weft.providers.llm import LLMAccount, LLMProvider
+    p = LLMProvider(_StoreStub())
+    with pytest.raises(ValueError):
+        p.register_account(LLMAccount(
+            name="a", style="gemini", api_key="k", base_url=""), persist=False)
+
+
+def test_multimodal_classes_exported_from_package():
+    import ctx_weft.providers.llm as pkg
+    assert pkg.AnthropicMultimodalAdapter.__name__ == "AnthropicMultimodalAdapter"
+    assert pkg.OpenAIMultimodalAdapter.__name__ == "OpenAIMultimodalAdapter"
