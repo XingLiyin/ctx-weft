@@ -26,6 +26,15 @@
 - **历史文档不改**：`docs/` 下既往 spec / plan 对当时决定的记述一律保留原样——它们记录的
   是彼时的事实，改写会让可追溯性失效。只改活代码与协议自身的 docstring。
 - **`.superpowers/` 目录不动**（那是流程工作区，不是产品代码）。
+- **不统一两个同名的 `InMemoryEventStore`。** 仓里有两个：
+  `core/state/event_store.py:92`（完整实现，含快照三方法与 `TRANSIENT_EVENT_TYPES`
+  过滤，`dict` 存储，顶层 `ctx_weft.InMemoryEventStore` 导出的就是它）与
+  `core/control/replay.py:54`（简化版，只有 `append` + `read_by_session`，`list` 存储，
+  模块内自用未导出）。这是**既有的**重复，与本次划界正交（spec §8）。看到它不要顺手
+  合并——那是另一件事，需要先确认两处调用方各自依赖哪些方法。
+- **`core/control/replay.py` 一行都不改。** 它 `from ctx_weft.core.state.event_store
+  import EventStore`，搬迁后靠 re-export 继续工作。按「既有 import 一个都不改」的约束，
+  它不在本次范围内。
 - 注释与 docstring 用中文，解释「为什么」而非「是什么」。
 
 ## 已核实的实施前提（写计划时实测，实施前若发现不符请报告）
@@ -54,6 +63,7 @@
 | `src/ctx_weft/protocols/context.py` | 接收 `BLOB_REF_PREFIX` | Task 3 |
 | `src/ctx_weft/protocols/memory.py` | 交出 `BLOB_REF_PREFIX`；`BlobStore` 改名 | Task 3、4 |
 | 约 20 个 src 文件 + 16 个 tests 文件 | 机械改名 | Task 4 |
+| `src/ctx_weft/core/control/replay.py` | 含第二个同名 `InMemoryEventStore` | **不改**（见 Global Constraints） |
 
 ---
 
@@ -256,6 +266,9 @@ git commit -m "refactor(protocols): Event 数据类型入 protocols/events.py，
 - Modify: `src/ctx_weft/core/events/bus.py`（收缩为 re-export + `InProcessEventBus`）
 - Modify: `src/ctx_weft/core/state/event_store.py`（收缩为 re-export + `InMemoryEventStore`）
 - Modify: `src/ctx_weft/__init__.py`（补导出 `EventStore`）
+- **不改**: `src/ctx_weft/core/control/replay.py`——它 import 的 `EventStore` 由
+  `event_store.py` 的 re-export 兜住；它自带的第二个同名 `InMemoryEventStore` 是既有
+  重复，本次不动（见 Global Constraints）
 - Test: `tests/unit/test_protocols_events_relocation.py`（追加）
 
 **Interfaces:**
@@ -284,14 +297,22 @@ def test_bus_and_store_protocols_are_the_same_objects() -> None:
 
 
 def test_implementations_stay_in_core() -> None:
-    """实现不进 protocols——协议与实现分居是本次划界的全部意义。"""
+    """实现不进 protocols——协议与实现分居是本次划界的全部意义。
+
+    留在 core 的实现共**三个**类：`InProcessEventBus`，以及两个同名的
+    `InMemoryEventStore`（`core/state/event_store.py` 的完整实现与
+    `core/control/replay.py` 的简化版）。后两者的重复是既有的，本次不统一（spec §8）。
+    """
     import ctx_weft.protocols.events as pe
+    from ctx_weft.core.control.replay import InMemoryEventStore as ReplayStore
     from ctx_weft.core.events.bus import InProcessEventBus
     from ctx_weft.core.state.event_store import InMemoryEventStore
 
     assert InProcessEventBus is not None and InMemoryEventStore is not None
     assert not hasattr(pe, "InProcessEventBus")
     assert not hasattr(pe, "InMemoryEventStore")
+    # 两个同名实现仍是各自独立的类，本次不合并
+    assert ReplayStore is not InMemoryEventStore
 
 
 def test_implementations_still_satisfy_the_relocated_protocols() -> None:
