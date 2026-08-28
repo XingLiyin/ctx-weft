@@ -10,7 +10,7 @@
 **不装**：`InProcessEventBus` / `InMemoryEventStore`（实现，留 `core/`）、
 `TASK_STATUS_BY_EVENT`（core 的投影逻辑，且依赖 core 的 `TaskStatus`）。
 
-⚠️ **本模块不得 import core 层的任何东西。** protocols 是比 core 低的层；
+⚠️ **本模块不得 import `ctx_weft.core` 的任何东西。** protocols 是比 core 低的层；
 反向依赖会让 `protocols/context.py` 那个刻意的惰性绑定失去意义，并在某些 import
 顺序下变成真实的循环导入。`tests/unit/test_protocols_events_relocation.py` 钉住这条。
 """

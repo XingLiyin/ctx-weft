@@ -53,10 +53,36 @@ def test_protocols_events_does_not_import_core() -> None:
 
     这条不变量一旦破掉，`protocols/context.py` 那个刻意的惰性绑定就白做了，
     且会在某些 import 顺序下变成真实的循环导入。
+
+    用 `ast` 解析实际的 import 语句，而不是对源码整体做子串扫描：字符串扫描
+    误报（docstring/注释里提到字面路径 `ctx_weft.core` 也会被判违规）也漏报
+    （`from ctx_weft import core`、`importlib.import_module(...)`、拼接/折行
+    的字符串都扫不出来）。别为了"简化"把这条改回字符串匹配。
     """
+    import ast
     import inspect
 
     import ctx_weft.protocols.events as pe
 
     source = inspect.getsource(pe)
-    assert "ctx_weft.core" not in source, "protocols/events.py 不得 import core"
+    tree = ast.parse(source)
+
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "ctx_weft.core" or module.startswith("ctx_weft.core."):
+                violations.append(f"line {node.lineno}: from {module} import ...")
+            elif module == "ctx_weft":
+                for alias in node.names:
+                    if alias.name == "core":
+                        violations.append(f"line {node.lineno}: from ctx_weft import core")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.name
+                if name == "ctx_weft.core" or name.startswith("ctx_weft.core."):
+                    violations.append(f"line {node.lineno}: import {name}")
+
+    assert not violations, (
+        "protocols/events.py 不得 import core，违规语句：" + "; ".join(violations)
+    )
