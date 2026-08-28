@@ -216,18 +216,32 @@ memory。这正是现有注释刻意规避的东西：
 
 对模型的可观测效果与「不注册」完全相同；代价是注册表里多一个返回空工具集的 provider。
 
-## 9. 悬空 ref：本设计不解决，显式记录
+## 9. 事件侧 blob 的生命周期归 host
 
-blob 的引用边只锚在 `memory_events` 的活记录上，event store 不构成引用。故记录被
-fold 之后，事件流里的 ref 过宽限期仍会被回收，重放拿到悬空 ref → `rehydrate_content`
-降级成 `[image unavailable: …]`。
+两个 store 分开之后，**存储、引用、清理三件事各自独立**：
 
-本设计**不改变**这一点：它保证的是「事件库不含字节、结构与 ref 不丢」，不保证字节
-永远取得回来。host 若要求事件流可完整重建图片，需让 event blob 的回收策略与事件保留
-策略对齐（例如永不回收，或按事件 TTL 回收）——这是 host 侧实现 `EventBlobStore` 时的
-自由度，core 不规定。
+| | memory 侧 | event 侧 |
+|---|---|---|
+| 字节 | `memory_blobs`（或 host 实现） | host 实现的 `EventBlobStore` |
+| 引用边 | `memory_blob_refs`，`ingest` 时按内容里的 ref 建 | host 定义（按事件保留策略） |
+| 清理 | `collect_blobs`：无活引用 + 过宽限期 | host 定义 |
 
-`EventBlobStore` 的 docstring 应写明这条，避免 host 想当然地复用 memory 侧的回收逻辑。
+core 不在两者之间建立任何关联。`SqlMemoryProvider.collect_blobs` 的 JOIN 只扫
+`memory_events`——这**不是缺陷**，它本就不该管事件流的 ref；反过来 host 的
+`EventBlobStore` 也不必关心 memory 记录是否 supersede。
+
+由此，「事件流重放能否重建出图片」完全取决于 host 让 event blob 活多久：
+
+- **分开实现**：两套互不可见，各按各的策略回收。想让事件流永远可重建，就让 event
+  blob 的回收与事件保留策略对齐（例如永不回收，或按事件 TTL）。
+- **共用一个实例**：该实现要**同时**看两侧的引用才能安全回收。仅套用 memory 侧的
+  `collect_blobs` 判据会删掉事件流仍需要的字节——这是共用实现自身的责任。
+
+`EventBlobStore` 的 docstring 必须写明这条，尤其是共用实现的那条陷阱：host 很容易
+想当然地复用 memory 侧的回收逻辑。
+
+core 的保证到此为止：**事件库恒不含字节、结构与 ref 不丢**。字节能否取回是 host 的
+存储策略问题，core 不规定、也不应规定。
 
 ## 10. 测试
 
