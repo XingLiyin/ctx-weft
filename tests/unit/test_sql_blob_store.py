@@ -34,6 +34,7 @@ from typing import Any
 import pytest
 from sqlalchemy import func, select
 
+from ctx_weft.core.content import collect_blob_refs
 from ctx_weft.core.runtime import ProviderRegistry
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
@@ -212,6 +213,66 @@ async def test_ingest_without_refs_writes_no_ref_rows(store: SqlMemoryProvider) 
             content="just text", timestamp=_BASE, role="user"),
         _ctx())
     assert await _ref_rows(store) == set()
+
+
+async def test_ingest_registers_declared_blob_refs(store: SqlMemoryProvider) -> None:
+    """blob_refs 声明的 ref 也要建引用边——只扫 content 会漏掉 L0.5 的占位。
+
+    这是「声明式 ref」形态：content 里只有降级后的文本占位（结构化字段看不出
+    这里曾经有张图），ref 靠 ``MemoryEvent.blob_refs`` 显式声明传递
+    （见 `_rebuild` 的补偿事件构造，Task 3）。``_turn_with_refs`` 造不出这种
+    形态（它总生成结构化 ImagePart），故这里手写 MemoryEvent。
+    """
+    ref = await store.put(b"declared-only", "image/png", _ctx())
+    eid = await store.ingest(
+        MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN,
+            scope=MemoryScope.TASK,
+            address=MemoryAddress(session_id=_SESSION, task_id="t1", agent_id=_AGENT),
+            role="user",
+            timestamp=_BASE,
+            content=[TextPart(text=f"[image {ref} media_type=image/png]")],
+            blob_refs=[ref],
+        ),
+        _ctx(),
+    )
+    assert await _ref_rows(store) == {(eid, _sha(b"declared-only"))}
+    assert await store.collect_blobs(now=_LATER) == 0, "有声明的引用，不该回收"
+    assert await store.get(ref, _ctx()) is not None
+
+
+async def test_load_view_restores_blob_refs(store: SqlMemoryProvider) -> None:
+    """读侧回显——否则第二次降级时第一次的 ref 无人认领（`_rebuild` 的累积逻辑）。"""
+    ref = await store.put(b"declared-only", "image/png", _ctx())
+    await store.ingest(
+        MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN,
+            scope=MemoryScope.TASK,
+            address=MemoryAddress(session_id=_SESSION, task_id="t1", agent_id=_AGENT),
+            role="user",
+            timestamp=_BASE,
+            content=[TextPart(text=f"[image {ref} media_type=image/png]")],
+            blob_refs=[ref],
+        ),
+        _ctx(),
+    )
+    recs = await store.load_view(
+        MemoryAddress(session_id=_SESSION, task_id="t1", agent_id=_AGENT),
+        MemoryScope.TASK, _ctx(), kinds=[MemoryKind.CONVERSATION_TURN])
+    assert recs[0].blob_refs == [ref]
+
+
+async def test_structural_refs_are_not_duplicated_in_blob_refs(
+        store: SqlMemoryProvider) -> None:
+    """结构化 ref 已在 content 里，回显时不再重复塞进 blob_refs（否则 `_rebuild`
+    的累积逻辑会把结构化 ref 也滚进补偿记录，一轮轮越滚越多）。"""
+    ref = await store.put(b"structural-only", "image/png", _ctx())
+    await store.ingest(_turn_with_refs(ref), _ctx())
+    recs = await store.load_view(
+        MemoryAddress(session_id=_SESSION, task_id="t1", agent_id=_AGENT),
+        MemoryScope.TASK, _ctx(), kinds=[MemoryKind.CONVERSATION_TURN])
+    assert recs[0].blob_refs == []
+    assert collect_blob_refs(recs[0]) == [ref], "仍能从 content 采到"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

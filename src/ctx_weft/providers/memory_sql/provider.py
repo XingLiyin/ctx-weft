@@ -32,7 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from ctx_weft.core.content import (
+    collect_blob_refs,
     content_from_jsonable,
     content_to_jsonable,
     extract_blob_refs,
@@ -167,7 +168,9 @@ def _parse_row_vocab(row: MemoryEventModel) -> tuple[MemoryEventType | None, Mem
         return None, None  # 未知词汇（前向兼容）：存储保留、视图不见
 
 
-def _row_to_record(row: MemoryEventModel) -> MemoryRecord:
+def _row_to_record(
+    row: MemoryEventModel, blob_refs: list[str] | None = None
+) -> MemoryRecord:
     type_, kind = _parse_row_vocab(row)
     try:
         scope = MemoryScope(row.layer)
@@ -194,7 +197,40 @@ def _row_to_record(row: MemoryEventModel) -> MemoryRecord:
             "topic_seq_no": row.topic_seq_no,
             "task_id": row.task_id or "",
         },
+        blob_refs=list(blob_refs or []),
     )
+
+
+async def _declared_refs(
+    db: Any, rows: Sequence[MemoryEventModel]
+) -> dict[str, list[str]]:
+    """按 event_id 取「**没有**出现在 content 结构化字段里」的那部分引用。
+
+    引用表是 mark 结果的物化，它不区分来源；而 `MemoryRecord.blob_refs` 的语义是
+    「声明的、content 里看不见的那些」——两者相减才对得上写侧。不相减的话，
+    `collect_blob_refs` 会把结构化 ref 数两遍（去重后无害，但语义漂移，且
+    `_rebuild` 的累积会把它们写进补偿记录的 blob_refs，越滚越多）。
+    """
+    ids = [r.id for r in rows]
+    if not ids:
+        return {}
+    result = await db.execute(
+        select(MemoryBlobRefModel.event_id, MemoryBlobRefModel.sha)
+        .where(MemoryBlobRefModel.event_id.in_(ids))
+    )
+    all_refs: dict[str, list[str]] = {}
+    for event_id, sha in result.all():
+        all_refs.setdefault(event_id, []).append(f"{BLOB_REF_PREFIX}{sha}")
+    out: dict[str, list[str]] = {}
+    for row in rows:
+        refs = all_refs.get(row.id)
+        if not refs:
+            continue
+        structural = set(extract_blob_refs(_row_content(row.content, row.content_format)))
+        declared = [r for r in refs if r not in structural]
+        if declared:
+            out[row.id] = declared
+    return out
 
 
 def _partition_where(address: MemoryAddress, scope: MemoryScope, tenant: str) -> Any:
@@ -368,10 +404,11 @@ class SqlMemoryProvider(MemoryProvider, BlobStore):
             timestamp=event.timestamp,
             tenant=tenant,
         ))
-        # blob 引用边：**与事件行同一个事务**。判据复用归一层，不在这里另写 isinstance——
-        # 判据一旦分叉，「哪些 blob 还活着」就会和「出网时哪些 part 会被 rehydrate」
-        # 对不上，而那正好是「回收删掉了还在用的图」的成因。
-        for ref in extract_blob_refs(event.content):
+        # blob 引用边：**与事件行同一个事务**。判据走 collect_blob_refs——它是 GC 的
+        # mark 单一真源（结构化 ref part ∪ event.blob_refs）。不在这里另写 isinstance，
+        # 也不解析占位文案：判据一旦分叉，「哪些 blob 还活着」就会和「出网时哪些 part
+        # 会被 rehydrate」对不上，而那正好是「回收删掉了还在用的图」的成因。
+        for ref in collect_blob_refs(event):
             db.add(MemoryBlobRefModel(
                 event_id=event_id, sha=ref[len(BLOB_REF_PREFIX):]))
         await db.flush()
@@ -418,7 +455,9 @@ class SqlMemoryProvider(MemoryProvider, BlobStore):
                 .order_by(MemoryEventModel.timestamp.asc(), MemoryEventModel.seq_no.asc())
             )
             rows = list(result.scalars().all())
-        return normalize_view([_row_to_record(r) for r in rows])
+            declared = await _declared_refs(db, rows)
+            return normalize_view(
+                [_row_to_record(r, declared.get(r.id)) for r in rows])
 
     async def recall_topic(
         self,
@@ -439,7 +478,8 @@ class SqlMemoryProvider(MemoryProvider, BlobStore):
                 .order_by(MemoryEventModel.topic_seq_no.asc())
             )
             rows = list(result.scalars().all())
-        records = [_row_to_record(r) for r in rows]
+            declared = await _declared_refs(db, rows)
+            records = [_row_to_record(r, declared.get(r.id)) for r in rows]
         new_cursor = rows[-1].topic_seq_no if rows else since
         return records, new_cursor
 
