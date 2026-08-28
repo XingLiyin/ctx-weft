@@ -4,7 +4,7 @@
 
 **Goal:** 把 host 必须实现的 event 契约（`Event` / `EventBus` / `EventStore`）从 `core/` 搬进 `protocols/`，并把 `BlobStore` 更名为 `MemoryBlobStore`、`BLOB_REF_PREFIX` 移到 `protocols/context.py`。
 
-**Architecture:** 纯搬迁 + re-export 兼容层。定义移到 `protocols/events.py`，原模块收缩成 re-export，130+ 个既有 import 一个都不改。实现（`InProcessEventBus` / `InMemoryEventStore`）与 core 自用逻辑（`TASK_STATUS_BY_EVENT`）留在 core。改名是纯机械的词边界替换。
+**Architecture:** 三层划界——契约进 `protocols/events.py`，实现进 `providers/events/`，`core/` 只留编排（`TASK_STATUS_BY_EVENT` + runtime 接线）。原模块退化成 re-export 兼容层，130+ 个既有 import 一个都不改。改名是纯机械的词边界替换。
 
 **Tech Stack:** Python 3.11 / pytest（asyncio auto 模式，异步测试直接 `async def`，**不加** `@pytest.mark.asyncio`）/ uv
 
@@ -26,15 +26,17 @@
 - **历史文档不改**：`docs/` 下既往 spec / plan 对当时决定的记述一律保留原样——它们记录的
   是彼时的事实，改写会让可追溯性失效。只改活代码与协议自身的 docstring。
 - **`.superpowers/` 目录不动**（那是流程工作区，不是产品代码）。
-- **不统一两个同名的 `InMemoryEventStore`。** 仓里有两个：
-  `core/state/event_store.py:92`（完整实现，含快照三方法与 `TRANSIENT_EVENT_TYPES`
-  过滤，`dict` 存储，顶层 `ctx_weft.InMemoryEventStore` 导出的就是它）与
-  `core/control/replay.py:54`（简化版，只有 `append` + `read_by_session`，`list` 存储，
-  模块内自用未导出）。这是**既有的**重复，与本次划界正交（spec §8）。看到它不要顺手
-  合并——那是另一件事，需要先确认两处调用方各自依赖哪些方法。
-- **`core/control/replay.py` 一行都不改。** 它 `from ctx_weft.core.state.event_store
-  import EventStore`，搬迁后靠 re-export 继续工作。按「既有 import 一个都不改」的约束，
-  它不在本次范围内。
+- **划界是三层**（spec §2，用户裁定 2026-08-28）：**契约进 `protocols/`，实现进
+  `providers/`，`core/` 只留编排。** 两个内置实现（`InProcessEventBus` /
+  `InMemoryEventStore`）搬进 `providers/events/`，`core/events/bus.py` 与
+  `core/state/event_store.py` 因此退化成纯兼容层。
+- **搬实现时代码逐行不动**——只换文件位置与 import 来源，不改任何行为、不重构、
+  不"顺手优化"。
+- ⚠️ **禁止 `git stash` / `git checkout <path>` / `git reset` / `git clean`。**
+  工作区里有**调用者的未提交改动**（`tests/unit/conftest.py`），这些命令会波及它。
+  上一个计划执行时，一个 subagent 用 `git stash` 验证环境问题后未恢复，把它弄丢了
+  （事后从悬空 stash 对象里找回）。要对照基线就用 `git show HEAD:<path>` 或另建副本，
+  不要动工作区。
 - 注释与 docstring 用中文，解释「为什么」而非「是什么」。
 
 ## 已核实的实施前提（写计划时实测，实施前若发现不符请报告）
@@ -60,10 +62,12 @@
 | `src/ctx_weft/core/events/bus.py` | 收缩为 re-export + `InProcessEventBus` 实现 | Task 2 |
 | `src/ctx_weft/core/state/event_store.py` | 收缩为 re-export + `InMemoryEventStore` 实现 | Task 2 |
 | `src/ctx_weft/__init__.py` | 补导出 `EventStore` | Task 2 |
-| `src/ctx_weft/protocols/context.py` | 接收 `BLOB_REF_PREFIX` | Task 3 |
-| `src/ctx_weft/protocols/memory.py` | 交出 `BLOB_REF_PREFIX`；`BlobStore` 改名 | Task 3、4 |
-| 约 20 个 src 文件 + 16 个 tests 文件 | 机械改名 | Task 4 |
-| `src/ctx_weft/core/control/replay.py` | 含第二个同名 `InMemoryEventStore` | **不改**（见 Global Constraints） |
+| `src/ctx_weft/protocols/context.py` | 接收 `BLOB_REF_PREFIX` | Task 4 |
+| `src/ctx_weft/protocols/memory.py` | 交出 `BLOB_REF_PREFIX`；`BlobStore` 改名 | Task 4、5 |
+| 约 20 个 src 文件 + 16 个 tests 文件 | 机械改名 | Task 5 |
+| `src/ctx_weft/providers/events/` | **新建**。event 体系的内置实现 | Task 3 |
+| `src/ctx_weft/core/control/replay.py` | 删掉死代码 `InMemoryEventStore` | Task 3 |
+| `src/ctx_weft/core/control/__init__.py` | 撤掉对上者的导出 | Task 3 |
 
 ---
 
@@ -266,9 +270,7 @@ git commit -m "refactor(protocols): Event 数据类型入 protocols/events.py，
 - Modify: `src/ctx_weft/core/events/bus.py`（收缩为 re-export + `InProcessEventBus`）
 - Modify: `src/ctx_weft/core/state/event_store.py`（收缩为 re-export + `InMemoryEventStore`）
 - Modify: `src/ctx_weft/__init__.py`（补导出 `EventStore`）
-- **不改**: `src/ctx_weft/core/control/replay.py`——它 import 的 `EventStore` 由
-  `event_store.py` 的 re-export 兜住；它自带的第二个同名 `InMemoryEventStore` 是既有
-  重复，本次不动（见 Global Constraints）
+- **本任务不动** `src/ctx_weft/core/control/replay.py`（它由 Task 3 处理）
 - Test: `tests/unit/test_protocols_events_relocation.py`（追加）
 
 **Interfaces:**
@@ -296,23 +298,18 @@ def test_bus_and_store_protocols_are_the_same_objects() -> None:
     assert CoreSnapshot is RunSnapshot
 
 
-def test_implementations_stay_in_core() -> None:
+def test_implementations_do_not_enter_protocols() -> None:
     """实现不进 protocols——协议与实现分居是本次划界的全部意义。
 
-    留在 core 的实现共**三个**类：`InProcessEventBus`，以及两个同名的
-    `InMemoryEventStore`（`core/state/event_store.py` 的完整实现与
-    `core/control/replay.py` 的简化版）。后两者的重复是既有的，本次不统一（spec §8）。
+    本任务只保证「不在 protocols」；Task 3 会把它们从 core 搬进 providers。
     """
     import ctx_weft.protocols.events as pe
-    from ctx_weft.core.control.replay import InMemoryEventStore as ReplayStore
     from ctx_weft.core.events.bus import InProcessEventBus
     from ctx_weft.core.state.event_store import InMemoryEventStore
 
     assert InProcessEventBus is not None and InMemoryEventStore is not None
     assert not hasattr(pe, "InProcessEventBus")
     assert not hasattr(pe, "InMemoryEventStore")
-    # 两个同名实现仍是各自独立的类，本次不合并
-    assert ReplayStore is not InMemoryEventStore
 
 
 def test_implementations_still_satisfy_the_relocated_protocols() -> None:
@@ -406,7 +403,229 @@ git commit -m "refactor(protocols): EventBus/EventStore 协议入 protocols，�
 
 ---
 
-### Task 3: `BLOB_REF_PREFIX` 移到 `protocols/context.py`
+### Task 3: 两个内置实现搬进 `providers/events/`，删掉死代码
+
+**Files:**
+- Create: `src/ctx_weft/providers/events/__init__.py`
+- Create: `src/ctx_weft/providers/events/bus.py`（收 `InProcessEventBus` + `_Subscriber` + `_matches`）
+- Create: `src/ctx_weft/providers/events/store.py`（收 `InMemoryEventStore` + `_TERMINAL_STATUSES`）
+- Modify: `src/ctx_weft/core/events/bus.py`（退化为纯兼容层）
+- Modify: `src/ctx_weft/core/state/event_store.py`（退化为纯兼容层）
+- Modify: `src/ctx_weft/core/runtime.py`（两处 import 改为从 providers 取）
+- Modify: `src/ctx_weft/__init__.py`（`InMemoryEventStore` 来源改）
+- Modify: `src/ctx_weft/core/control/replay.py`（**删掉**死代码 `InMemoryEventStore`）
+- Modify: `src/ctx_weft/core/control/__init__.py`（撤掉对它的导出）
+- Test: `tests/unit/test_protocols_events_relocation.py`（追加）
+
+**Interfaces:**
+- Consumes: Task 2 的 `protocols/events.py`（两个实现要 import 协议）
+- Produces: `ctx_weft.providers.events` 导出 `InProcessEventBus` / `InMemoryEventStore`
+
+**判据**（spec §2，三层）：契约进 `protocols/`，**实现进 `providers/`**，`core/` 只留编排。
+`providers/` 本就是协议实现所在（`memory_blackboard` / `memory_sql` / `llm` /
+`capability_*`），唯独 event 体系的两个实现住在 `core/` 下，是历史惯性。
+
+⚠️ **代码逐行不动**——只换文件位置与 import 来源。不改行为、不重构、不"顺手优化"。
+
+- [ ] **Step 1: 写失败测试**
+
+追加到 `tests/unit/test_protocols_events_relocation.py`：
+
+```python
+def test_builtin_implementations_live_in_providers() -> None:
+    """实现归 providers（spec §2 三层划界）。core 侧保留 re-export，对象必须同一。"""
+    from ctx_weft.core.events.bus import InProcessEventBus as CoreBus
+    from ctx_weft.core.state.event_store import InMemoryEventStore as CoreStore
+    from ctx_weft.providers.events import InMemoryEventStore, InProcessEventBus
+
+    assert CoreBus is InProcessEventBus
+    assert CoreStore is InMemoryEventStore
+
+
+def test_package_root_store_comes_from_providers() -> None:
+    """host 的 `from ctx_weft import InMemoryEventStore` 拿到的仍是同一个类。"""
+    import ctx_weft
+    from ctx_weft.providers.events import InMemoryEventStore
+
+    assert ctx_weft.InMemoryEventStore is InMemoryEventStore
+
+
+def test_dead_simplified_store_is_gone() -> None:
+    """`core/control/replay.py` 的同名简化版是死代码（零使用者），已删。
+
+    留着的危害是「同名不同实现、都对外可见」：
+    `from ctx_weft.core.control import InMemoryEventStore` 会拿到一个缺快照方法的对象。
+    """
+    import ctx_weft.core.control as cc
+    import ctx_weft.core.control.replay as replay
+
+    assert not hasattr(replay, "InMemoryEventStore")
+    assert not hasattr(cc, "InMemoryEventStore")
+    assert "InMemoryEventStore" not in getattr(cc, "__all__", [])
+
+
+async def test_runtime_still_gets_a_working_default_store() -> None:
+    """接线换了来源，默认 event_store 仍要能用（自动订阅 bus 后收得到事件）。"""
+    from datetime import datetime, timezone
+
+    from ctx_weft.core.runtime import CtxWeftRuntime
+    from ctx_weft.protocols.events import Event, EventStore
+
+    rt = CtxWeftRuntime()
+    assert isinstance(rt.event_store, EventStore)
+    await rt._event_bus.emit(Event(
+        id="evt_0001", run_id="run_1", sequence=1, session_id="ses_1",
+        type="SessionCreated", timestamp=datetime(2026, 8, 28, tzinfo=timezone.utc),
+    ))
+    # 订阅是异步投递的，给它一次调度机会
+    import asyncio
+    await asyncio.sleep(0.05)
+    assert await rt.event_store.read_by_session("ses_1")
+```
+
+⚠️ `CtxWeftRuntime()` 的构造签名请先读 `core/runtime.py` 确认——若它需要必填参数，
+按实际签名调整（或改用一个更轻的等价断言：直接构造
+`InMemoryEventStore(event_bus=InProcessEventBus())` 验证订阅链路）。同理
+`rt._event_bus` 若不是这个名字，按实际的来。
+
+- [ ] **Step 2: 运行，确认失败**
+
+Run: `uv run pytest -q tests/unit/test_protocols_events_relocation.py -k providers`
+Expected: FAIL — `ModuleNotFoundError: No module named 'ctx_weft.providers.events'`
+
+- [ ] **Step 3: 搬迁**
+
+**(a)** 新建 `src/ctx_weft/providers/events/bus.py`，把 `core/events/bus.py` 里的
+`_Subscriber`、`InProcessEventBus`、`_matches` **整段剪切**过来（逐行不动），头部：
+
+```python
+"""事件总线的进程内实现。
+
+协议在 `ctx_weft.protocols.events`；本模块只是它的一个实现——按 spec 2026-08-27
+的三层划界（契约 protocols / 实现 providers / 编排 core），实现归这里。
+
+⚠️ 进程内实现：不跨进程。host 要多进程部署须换 Redis Streams 等外部总线，
+实现同一个 `EventBus` 协议即可。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+
+from ctx_weft.protocols.events import Event, EventBus, EventFilter, SubscriptionHandle
+
+logger = logging.getLogger(__name__)
+```
+
+**(b)** 新建 `src/ctx_weft/providers/events/store.py`，把 `core/state/event_store.py`
+里的 `_TERMINAL_STATUSES` 与 `InMemoryEventStore` **整段剪切**过来，头部：
+
+```python
+"""EventStore 的单进程内存实现。
+
+协议在 `ctx_weft.protocols.events`；本模块只是它的一个实现（spec 2026-08-27 三层划界）。
+线程不安全，仅供开发 / 测试 / 单进程 demo；host 上生产要换 Postgres 等持久实现。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+from ctx_weft.protocols.events import (
+    TRANSIENT_EVENT_TYPES, Event, EventStore, RunSnapshot,
+)
+
+if TYPE_CHECKING:
+    from ctx_weft.protocols.events import EventBus
+```
+
+**(c)** 新建 `src/ctx_weft/providers/events/__init__.py`：
+
+```python
+"""event 体系的内置实现（bus + store）。
+
+与 `providers/llm/` 同构：领域一个目录，内部按变体分文件。将来要加 Redis Streams
+的 bus 或 Postgres 的 store，加文件即可，不必再动 core。
+"""
+
+from ctx_weft.providers.events.bus import InProcessEventBus
+from ctx_weft.providers.events.store import InMemoryEventStore
+
+__all__ = ["InProcessEventBus", "InMemoryEventStore"]
+```
+
+**(d)** `core/events/bus.py` 退化为纯兼容层——整个文件替换成：
+
+```python
+"""EventBus 的 re-export 兼容层。
+
+协议已搬到 `ctx_weft.protocols.events`、实现已搬到 `ctx_weft.providers.events`
+（spec 2026-08-27 三层划界）。本模块保留只为让既有 import 不断裂；新代码请直接从
+protocols / providers 导入。
+"""
+
+from __future__ import annotations
+
+from ctx_weft.protocols.events import Event, EventBus, EventFilter, SubscriptionHandle
+from ctx_weft.providers.events.bus import InProcessEventBus
+
+__all__ = ["Event", "EventBus", "EventFilter", "SubscriptionHandle", "InProcessEventBus"]
+```
+
+**(e)** `core/state/event_store.py` 同法：
+
+```python
+"""EventStore 的 re-export 兼容层。
+
+协议已搬到 `ctx_weft.protocols.events`、实现已搬到 `ctx_weft.providers.events`
+（spec 2026-08-27 三层划界）。本模块保留只为让既有 import 不断裂。
+"""
+
+from __future__ import annotations
+
+from ctx_weft.protocols.events import Event, EventStore, RunSnapshot
+from ctx_weft.providers.events.store import InMemoryEventStore
+
+__all__ = ["Event", "EventStore", "RunSnapshot", "InMemoryEventStore"]
+```
+
+**(f)** `core/runtime.py`：第 36 行的 `from ctx_weft.core.events import Event, EventType,
+InProcessEventBus` 拆开——`InProcessEventBus` 改从 `ctx_weft.providers.events` 导入；
+约 472 行函数内的 `from ctx_weft.core.state.event_store import InMemoryEventStore`
+改为 `from ctx_weft.providers.events import InMemoryEventStore`。
+
+**(g)** `src/ctx_weft/__init__.py`：`InMemoryEventStore` 的来源改为
+`from ctx_weft.providers.events import InMemoryEventStore`。
+
+**(h)** `core/control/replay.py`：**删掉** `class InMemoryEventStore(EventStore)` 整个类。
+若删后 `EventStore` 在该文件已无其它用途，一并删掉它的 import（先 grep 确认）。
+
+**(i)** `core/control/__init__.py`：从 import 行与 `__all__` 里撤掉 `InMemoryEventStore`。
+
+- [ ] **Step 4: 运行，确认通过**
+
+Run: `uv run pytest -q tests/unit/test_protocols_events_relocation.py`
+Expected: 13 passed
+
+Run: `uv run pytest -q`
+Expected: `3 failed / 5 skipped`，无新增失败
+
+Run: `uv run ruff check --select I,F,E9 --output-format=concise src/ tests/`
+Expected: 无新增问题
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add src/ctx_weft/providers/events/ src/ctx_weft/core/ src/ctx_weft/__init__.py tests/unit/test_protocols_events_relocation.py
+git commit -m "refactor(providers): 两个内置 event 实现搬进 providers/events，删 replay 的死代码"
+```
+
+---
+
+### Task 4: `BLOB_REF_PREFIX` 移到 `protocols/context.py`
 
 **Files:**
 - Modify: `src/ctx_weft/protocols/context.py`（接收常量）
@@ -505,7 +724,7 @@ git commit -m "refactor(protocols): BLOB_REF_PREFIX 归 context——两个 blob
 
 ---
 
-### Task 4: `BlobStore` → `MemoryBlobStore` 全套改名
+### Task 5: `BlobStore` → `MemoryBlobStore` 全套改名
 
 **Files:**
 - Modify: 约 20 个 `src/` 文件、16 个 `tests/` 文件（下面给精确清单与命令）
@@ -619,22 +838,21 @@ git commit -m "refactor(protocols): BlobStore 更名 MemoryBlobStore，与将来
 
 ## Self-Review
 
-**Spec 覆盖：** §2 划界表 → Task 1（数据类型）+ Task 2（两个协议）；留 core 的三项由
-Task 1 的 `test_task_status_map_stays_in_core` 与 Task 2 的 `test_implementations_stay_in_core`
-钉住 ✓ · §2.1 无反向依赖 → Task 1 的 `test_protocols_events_does_not_import_core` ✓ ·
-§2.2 单文件落点 → Task 1 建、Task 2 扩充 ✓ · §3 `BLOB_REF_PREFIX` → Task 3 ✓ ·
+**Spec 覆盖：** §2 三层划界表 → Task 1（数据类型）+ Task 2（两个协议）+ Task 3（实现进 providers、删死代码）；
+留 core 的 `TASK_STATUS_BY_EVENT` 由 Task 1 的 `test_task_status_map_stays_in_core` 钉住 ✓ · §2.1 无反向依赖 → Task 1 的 `test_protocols_events_does_not_import_core` ✓ ·
+§2.2 单文件落点 → Task 1 建、Task 2 扩充 ✓ · §3 `BLOB_REF_PREFIX` → Task 4 ✓ ·
 §4 依赖方向 → Task 1 的层序守卫 ✓ · §5 re-export 兼容 → 每个任务的 `is` 断言 +
-全量基线 ✓ · §5.1 验收标准 → Global Constraints + 每任务 Step 4 ✓ · §6 改名 → Task 4 ✓ ·
-§6.1 历史文档不改 → Global Constraints + Task 4 Step 3 的核对项 3 ✓ ·
+全量基线 ✓ · §5.1 验收标准 → Global Constraints + 每任务 Step 4 ✓ · §6 改名 → Task 5 ✓ ·
+§6.1 历史文档不改 → Global Constraints + Task 5 Step 3 的核对项 3 ✓ ·
 §7 实施顺序 → 本计划是前置，双 blob store 另出计划 ✓ · §8 不做什么 → Global Constraints
 （`EventBlobStore` 不在范围）+ 未安排任何触及 `TASK_STATUS_BY_EVENT` 归属、
 两个同名 `InMemoryEventStore`、既有 import 语句的步骤 ✓
 
 **类型一致性：** `protocols/events.py` 在 Task 1 建、Task 2 追加，两任务的测试都用
-`from ctx_weft.protocols.events import ...`，模块路径一致；Task 4 的新名
+`from ctx_weft.protocols.events import ...`，模块路径一致；Task 5 的新名
 `MemoryBlobStore` / `NullMemoryBlobStore` / `register_memory_blob_store` /
 `get_memory_blob_store` 在测试与 sed 命令中拼写一致。
 
 **留给执行者的两处判断**（已在正文标注，不是占位）：
-1. Task 3(d) —— `provider.py` 走包级 import 则无需改，需先 grep 确认。
-2. Task 4 Step 1 —— `ProviderRegistry()` 的构造签名需先读代码确认。
+1. Task 4(d) —— `provider.py` 走包级 import 则无需改，需先 grep 确认。
+2. Task 5 Step 1 —— `ProviderRegistry()` 的构造签名需先读代码确认。
