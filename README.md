@@ -467,6 +467,13 @@ runtime.providers.register_llm_provider(provider)
 > 内置 `AnthropicAdapter` / `OpenAIAdapter` 由 `LLMProvider` 按 `style` 自动构造。
 > `run_single_task` / `SessionStartParams` 里的 `llm_account` / `llm_model` 会透传给 `get_client()`。
 
+`style` 取值：`"anthropic"` / `"openai"`（纯文本）与 `"anthropic-multimodal"` /
+`"openai-multimodal"`（收图片）。**能力由类型表达**——注册哪个 style，就是在声明
+该账号下的模型收不收图。纯文本 adapter 收到图片时会降级成 `[image ...]` 文本占位
+并记一条 warning，**不中断会话**；core 对模态零判断，全程透传到 `LLMClient` 面前。
+自写 adapter 时，`complete()` 收到的 `LLMMessage.content` 可能是
+`list[ContentPart]`，如何处置完全由你决定。
+
 ---
 
 ## CtxWeftRuntime API

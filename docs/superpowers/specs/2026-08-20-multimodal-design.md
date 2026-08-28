@@ -587,6 +587,9 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
 
 ### 6.7 模型能力门控
 
+> ⚠️ **本节已作废（2026-08-28）**：入口视觉门控与 `supports_vision` 严格默认已删除，
+> 模态能力回归 adapter。见 `2026-08-28-multimodal-adapter-dispatch-design.md`。
+
 `session.llm_model` 不支持视觉时，入口拒绝或降级成文本占位，不能让请求打到 provider
 才 400。能力信息取自 `LLMClientResolver` 解析出的 client（`runtime.py:471 _resolve_llm`）。
 

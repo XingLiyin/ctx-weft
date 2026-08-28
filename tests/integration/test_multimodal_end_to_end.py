@@ -24,7 +24,7 @@ from ctx_weft.protocols import (
     ImagePart, LLMChunk, LLMUsage, MemoryEventType, ProviderContext, TextPart, ToolCall,
 )
 from ctx_weft.protocols.memory import BLOB_REF_PREFIX
-from ctx_weft.providers.llm.anthropic import AnthropicMultimodalAdapter
+from ctx_weft.providers.llm.anthropic import AnthropicAdapter, AnthropicMultimodalAdapter
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from ctx_weft.providers.memory_sql import open_sqlite_memory
@@ -390,6 +390,20 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
     return runtime, memory, state, llm
 
 
+async def _make_sql_blob_store(tmp_path):
+    """真 MemoryBlobStore 装配（``SqlMemoryProvider``，Task C3），已 open 好可直接用。
+
+    复用 ``open_sqlite_memory`` 本身的建库逻辑（进它的 ``__aenter__``），只是不要求
+    调用方再包一层 ``async with``——两处调用方（``test_ref_externalized_...`` 与
+    ``test_text_only_adapter_persists_image_and_keeps_bytes_retrievable``）用法不同：
+    前者原本就在函数体内全程持有一个会话，后者只需要一个能直接 ``.get()`` 的对象，
+    统一成「返回已打开的 provider」两边都能用，不必分别装配一次。engine 的显式
+    dispose 略去——测试用 sqlite 文件随 ``tmp_path`` 由 pytest 清理，不影响正确性。
+    """
+    cm = open_sqlite_memory(tmp_path / "blobs.db")
+    return await cm.__aenter__()
+
+
 @pytest.mark.asyncio
 async def test_ref_externalized_in_memory_but_full_base64_on_the_wire(tmp_path) -> None:
     """覆盖 1（ref 全链路）：注册**真** MemoryBlobStore（``SqlMemoryProvider``，Task C3）后——
@@ -407,8 +421,8 @@ async def test_ref_externalized_in_memory_but_full_base64_on_the_wire(tmp_path) 
     杀不掉「rehydrate 还原出了别的字节」这类损坏。
     """
     session_id = "ses_blob_e2e"
-    async with open_sqlite_memory(tmp_path / "blobs.db") as blob_store:
-        await _assert_ref_roundtrip(blob_store, session_id)
+    blob_store = await _make_sql_blob_store(tmp_path)
+    await _assert_ref_roundtrip(blob_store, session_id)
 
 
 async def _assert_ref_roundtrip(blob_store, session_id: str) -> None:
@@ -537,3 +551,80 @@ async def test_compact_assembly_carries_no_image_while_act_still_does() -> None:
         f"compact token_count({compact_prompt.token_count}) 应低于 act"
         f"({act_prompt.token_count})——降级必须发生在 token_count 计算之前（裁定 T1）"
     )
+
+
+# ── Task 8：端到端回归——「是传递不是丢弃」（spec 2026-08-28 §7）────────────────
+
+
+class _TextOnlyWireCapturingAdapter(_WireCapturingAnthropicAdapter):
+    """与 `_WireCapturingAnthropicAdapter` 同样捕获 wire，但走**纯文本** adapter 的
+    `_prepare_messages`（spec 2026-08-28：能力由类型表达）。
+
+    MRO 说明：`_WireCapturingAnthropicAdapter` 已继承 `AnthropicMultimodalAdapter`，
+    这里显式把 `AnthropicAdapter` 排在后面不足以覆盖——故直接覆盖那个方法本身。
+    """
+
+    def _prepare_messages(self, request):
+        return AnthropicAdapter._prepare_messages(self, request)
+
+
+async def _run_text_only_session(*, blob_store):
+    """跑一整个多模态 user_prompt 的会话，但 LLM 侧是纯文本 adapter。
+
+    装配与 `_run_multimodal_session` 逐行相同，只换 adapter 类——不另起一套。
+    """
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+
+    llm = _TextOnlyWireCapturingAdapter()
+    runtime = make_runtime(llm=llm, agent_provider=resolver)
+    memory = InMemoryMemoryProvider()
+    runtime.providers.register_memory(memory)
+    runtime.providers.register_event_blob_store(_StubEventBlobStore())
+    runtime.providers.register_memory_blob_store(blob_store)
+
+    handle = await runtime.start_session(
+        SessionStartParams.create(
+            template_id="agent:tpl_echo",
+            user_prompt=_MULTIMODAL_PROMPT,
+            context_limit=100_000,
+        )
+    )
+    state = await handle.wait_for_finish(timeout=5.0)
+    assert state is not None
+    assert state.task.status == "FINISHED", f"expected FINISHED, got {state.task.status}"
+    return runtime, memory, state, llm
+
+
+@pytest.mark.asyncio
+async def test_text_only_adapter_persists_image_and_keeps_bytes_retrievable(tmp_path) -> None:
+    """纯文本 adapter 的会话：图片照样落库、字节照样取得回，只是没上 wire。
+
+    这是 spec 2026-08-28 §7 的核心承诺——旧行为在入口抛 VisionNotSupportedError、
+    一个字都不落库；新行为是「传递而非丢弃」，换成多模态 adapter 后同一份历史立刻可看图。
+    """
+    blob_store = await _make_sql_blob_store(tmp_path)   # 同 test_ref_externalized_... 的既有装配
+    _rt, memory, state, llm = await _run_text_only_session(blob_store=blob_store)
+
+    # (a) memory 侧：图片仍在，且已外部化成 ref
+    content = await _recall_user_prompt_parts(memory, state)
+    assert isinstance(content, list), (
+        f"USER_PROMPT 记录应仍是 part 列表，实为 {type(content).__name__}"
+    )
+    images = _image_parts(content)
+    assert len(images) == 1, "纯文本 adapter 不得影响落库——图片必须还在 memory 里"
+    assert images[0].source_type == "ref"
+
+    # (b) blob 侧：字节真的取得回（换个 adapter 就能看图，不是空头承诺）
+    got = await blob_store.get(images[0].data, ProviderContext(session_id=state.session.id))
+    assert got is not None and got[0], "blob 里必须有真实字节"
+
+    # (c) wire 侧：这一次确实没发图，而是文本占位
+    #
+    # 偏离 brief 的 `captured_payloads[0]`：payload[0] 是 recognize_intent 回合，
+    # 无论 adapter 是否多模态都不带图（已用调试脚本核实，禁用本类的 `_prepare_messages`
+    # 覆盖后 payload[0] 依旧无图，只有 payload[1]——act 回合——才会冒出 image block）。
+    # 只看 payload[0] 是条永真断言，杀不掉覆盖被删掉的回归；改成扫全部 payload。
+    all_sources = [s for p in llm.captured_payloads for s in _image_sources(p)]
+    assert all_sources == [], "纯文本 adapter 不得把图发上 wire"
+    assert llm.captured_payloads, "expected at least one captured wire payload"
