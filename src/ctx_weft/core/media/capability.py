@@ -371,12 +371,31 @@ class MediaCapabilityProvider(ToolCapabilityProvider):
             spillable=False,
         )
 
+    def _blob_available(self) -> bool:
+        """memory blob store 是否可用——决定 `media:get_image` 是否对模型可见。
+
+        用 **memory** 侧判据而非 event 侧：本工具取的是 L0.5 占位里的 ref，而 L0.5 是
+        memory 侧的机制（`compact._media_enabled` 用的是同一个判据，保持一致——本计划
+        另有 event blob store，但那是 event 流侧的机制，与本工具无关，不能顺手换用）。
+
+        在**调用时**解析而不是构造时：注册发生在 `Runtime.__init__`，而 host 完全可能
+        先构造 Runtime 再 `register_memory()` / `register_memory_blob_store()`——构造期
+        判定会让工具永远缺席，即使后来接上了 memory（同 `ProviderRegistry.
+        get_memory_blob_store` docstring 记的那个「先取后注册」坑）。
+        """
+        try:
+            return bool(self._providers.get_memory_blob_store().can_externalize)
+        except Exception:      # registry 尚未接线完毕（如 memory 都没注册）不该让 list() 炸
+            return False
+
     async def list(self, ctx: ProviderContext) -> list[ToolCapability]:
-        return [self.capability()]
+        # 条件可见（spec §8）：没有可用 blob 时不把工具暴露给模型——此刻它取不回任何东西
+        # （视图里也不会有 L0.5 占位可读），暴露出来只会占 prompt 位置、诱导无效调用。
+        return [self.capability()] if self._blob_available() else []
 
     async def describe(self, ctx: ProviderContext) -> CapabilityProviderInfo:
         return CapabilityProviderInfo(
-            name=self.name, capability_count=1,
+            name=self.name, capability_count=1 if self._blob_available() else 0,
             supports_streaming=False, supports_cancel=False,
             description=self.description,
         )

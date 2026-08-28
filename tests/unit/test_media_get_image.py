@@ -321,9 +321,15 @@ class _StubAgents(AgentCapabilityProvider):
 
 
 async def test_runtime_registers_media_provider_and_exposes_get_image() -> None:
-    """runtime 一构造，`media:get_image` 就在工具面里，且 LLM 侧名字合法。"""
+    """runtime 一构造，`media:get_image` 就在工具面里，且 LLM 侧名字合法。
+
+    Task 5 起 `list()` 条件可见（§8）：这里显式接上 memory blob store 才谈得上「可见」，
+    与 `test_tool_hidden_when_no_memory_blob_store` 互为对照——runtime 自动注册 provider
+    这件事本身，与 provider 是否可见（取决于宿主有没有接 blob store）是两回事。
+    """
     registry = ProviderRegistry()
     registry.register_capability(_StubAgents())
+    registry.register_memory_blob_store(_MemoryBlobStub())
     CtxWeftRuntime(providers=registry)
 
     media = [p for p in registry.get_capability_providers()
@@ -455,7 +461,46 @@ async def test_unknown_media_capability_is_an_error_not_a_crash() -> None:
 
 async def test_provider_describe_and_cancel_are_inert() -> None:
     """无在途句柄、无 per-session 状态：describe 报 1 个 capability，cancel 是空操作。"""
-    provider = MediaCapabilityProvider(ProviderRegistry())
+    registry = ProviderRegistry()
+    registry.register_memory_blob_store(_MemoryBlobStub())
+    provider = MediaCapabilityProvider(registry)
     info = await provider.describe(_pctx())
     assert info.capability_count == 1
     assert await provider.cancel("inv_1", _pctx()) is None
+
+
+# ── 7. 条件可见（§8）：没有可用 memory blob store 时，工具不出现在工具集里 ──────────
+
+
+class _MemoryBlobStub(MemoryBlobStore):
+    """`can_externalize=True` 的最小 blob store 桩——只用来让判据判「可用」。"""
+
+    can_externalize = True
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        raise NotImplementedError
+
+    async def get(self, ref: str, ctx: ProviderContext) -> "tuple[bytes, str] | None":
+        raise NotImplementedError
+
+
+async def test_tool_hidden_when_no_memory_blob_store() -> None:
+    """没有可用的 memory blob store 时，media:get_image 不出现在工具集里。
+
+    判据用 **memory** 侧而非 event 侧：get_image 取的是 L0.5 占位里的 ref，
+    而 L0.5 是 memory 侧的机制（`compact._media_enabled` 用的也是这个判据）。
+    """
+    reg = ProviderRegistry()          # 未注册任何 blob store
+    provider = MediaCapabilityProvider(reg)
+    assert await provider.list(_pctx()) == []
+    info = await provider.describe(_pctx())
+    assert info.capability_count == 0
+
+
+async def test_tool_visible_when_memory_blob_store_present() -> None:
+    reg = ProviderRegistry()
+    reg.register_memory_blob_store(_MemoryBlobStub())
+    provider = MediaCapabilityProvider(reg)
+    caps = await provider.list(_pctx())
+    assert [c.id for c in caps] == [GET_IMAGE_ID]
+    assert (await provider.describe(_pctx())).capability_count == 1
