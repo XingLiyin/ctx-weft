@@ -44,11 +44,11 @@ _TASK_VIEW_KINDS = [MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind
 
 
 def _media_enabled(ctx) -> bool:
-    """L0.5 与 §6.1 前置降级的总闸：只有真接了**可外部化**的 `BlobStore` 时才跑。
+    """L0.5 与 §6.1 前置降级的总闸：只有真接了**可外部化**的 `MemoryBlobStore` 时才跑。
 
-    未注册（`LoopContext.blob_store is None`）或注册的是 `NullBlobStore`
+    未注册（`LoopContext.blob_store is None`）或注册的是 `NullMemoryBlobStore`
     （`can_externalize=False`）时，视图里根本不可能存在 `source_type == "ref"` 的图，
-    降级必然返回 0；提前短路省掉整级的读操作，坐实子设计 §10「不接 BlobStore 时行为
+    降级必然返回 0；提前短路省掉整级的读操作，坐实子设计 §10「不接 MemoryBlobStore 时行为
     与改造前完全一致」——包括**一次多余的 memory 读都不发**。
 
     ⚠️ 这**不是** Task 2 判断题 2 拒绝的「第二处 registry 探询」。那条拒的是拿 registry
@@ -579,7 +579,7 @@ async def escalating_compact(
     # 三条理由：无 LLM（不花一次调用）、单位收益最高（一张图按当前口径最低 1600 token，
     # 满额 5MB 图 40960）、**可逆**（占位仍在原位，模型随时 media:get_image 取回）。
     # L1/L2/L3 折的是记录本身，一旦执行位置就没了；所以先花可逆的额度。
-    # 未接 BlobStore 时 _media_enabled 直接短路，本级连一次 memory 读都不发（§10）。
+    # 未接 MemoryBlobStore 时 _media_enabled 直接短路，本级连一次 memory 读都不发（§10）。
     if _media_enabled(ctx):
         n, freed = await _apply(demote_for_budget(
             ctx.memory, _agent_half(state.scope), ctx.provider_ctx,

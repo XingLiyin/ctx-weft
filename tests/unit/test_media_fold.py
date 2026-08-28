@@ -8,7 +8,7 @@ L0.5 把 memory 记录里的真图换成**含 ref 的文本占位并落库**，�
 
 1. `keep_recent` 按**图片张数**数，一条记录可以只有一部分图被降；
 2. 只降 `source_type == "ref"` 的图——inline base64 换成占位就永久丢失，
-   这条同时兜住「`BlobStore` 未注册 → 返回 0、不写 memory」；
+   这条同时兜住「`MemoryBlobStore` 未注册 → 返回 0、不写 memory」；
 3. 同刻 tie 组**整段同批重写**，否则被降的那条会掉到组尾（`seq_no` 由 provider
    在 ingest 时分配，带不过去；真正保住位置的是 timestamp）。
 
@@ -57,7 +57,7 @@ def _img(n: int) -> ImagePart:
 
 
 def _b64img() -> ImagePart:
-    """未接 BlobStore 时的图：inline base64，没有任何 ref 可写进占位。"""
+    """未接 MemoryBlobStore 时的图：inline base64，没有任何 ref 可写进占位。"""
     return ImagePart(data="ZGF0YQ==", media_type="image/png")
 
 
@@ -272,11 +272,11 @@ async def test_keep_recent_partially_demotes_a_single_record():
     assert content[1].text == "mid"                          # 原文本没被挪位
 
 
-# ── 5. 未注册 BlobStore：返回 0 且 memory 一个字节都没被写 ────────────────────
+# ── 5. 未注册 MemoryBlobStore：返回 0 且 memory 一个字节都没被写 ────────────────────
 
 
 async def test_no_blob_store_means_no_demotion_and_no_write():
-    """不接 BlobStore 时图是 inline base64，没有 ref 可写进占位 → 不降级、不写 memory。"""
+    """不接 MemoryBlobStore 时图是 inline base64，没有 ref 可写进占位 → 不降级、不写 memory。"""
     mem = _CountingMemory()
     await _seed(mem, [[TextPart(text="m0"), _b64img()], [_b64img()]])
     writes_before = mem.ingest_calls

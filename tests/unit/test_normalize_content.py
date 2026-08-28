@@ -1,6 +1,6 @@
 """normalize_content：入口外部化（多模态 Phase 3b Task 2）。
 
-要点：不接 BlobStore（NullBlobStore）时行为与 Phase 3a 逐字节一致——本 Phase
+要点：不接 MemoryBlobStore（NullMemoryBlobStore）时行为与 Phase 3a 逐字节一致——本 Phase
 最重要的兼容性约束。因此「没有调用 blob store」这件事必须被真的断言，而不是
 靠"没报错"推断：下面用计数器 stub 把每一次 put 记下来。
 """
@@ -14,9 +14,9 @@ from ctx_weft.core.content import normalize_content, validate_content
 from ctx_weft.core.errors import InvalidContentError
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
-    BlobStore,
+    MemoryBlobStore,
     ImagePart,
-    NullBlobStore,
+    NullMemoryBlobStore,
     ProviderContext,
     TextPart,
 )
@@ -29,8 +29,8 @@ def _ctx() -> ProviderContext:
     return ProviderContext(session_id="ses-1", tenant_id="default")
 
 
-class _CountingNullStore(NullBlobStore):
-    """NullBlobStore + put 计数器。put 仍抛 NotImplementedError（契约不变）。"""
+class _CountingNullStore(NullMemoryBlobStore):
+    """NullMemoryBlobStore + put 计数器。put 仍抛 NotImplementedError（契约不变）。"""
 
     def __init__(self) -> None:
         self.put_calls = 0
@@ -40,7 +40,7 @@ class _CountingNullStore(NullBlobStore):
         return await super().put(data, media_type, ctx)
 
 
-class _CountingStore(BlobStore):
+class _CountingStore(MemoryBlobStore):
     """能真正外部化的 stub store（内容寻址，与 SqlMemoryProvider 的 ref 形态一致）。"""
 
     def __init__(self) -> None:
@@ -62,15 +62,15 @@ class _CountingStore(BlobStore):
 
 
 def test_null_blob_store_cannot_externalize():
-    assert NullBlobStore().can_externalize is False
+    assert NullMemoryBlobStore().can_externalize is False
 
 
 def test_real_blob_store_can_externalize_by_default():
-    """基类默认 True——新增该属性不破坏任何既有 BlobStore 实现。"""
+    """基类默认 True——新增该属性不破坏任何既有 MemoryBlobStore 实现。"""
     assert _CountingStore().can_externalize is True
 
 
-# ── 1. NullBlobStore → 原样返回且从未调用 store ────────────────────────────
+# ── 1. NullMemoryBlobStore → 原样返回且从未调用 store ────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -228,7 +228,7 @@ def _make_runtime_with_store(store, *, supports_vision: bool):
     templates.register(make_echo_template())
     runtime = make_runtime(agent_provider=templates)
     runtime.providers.register_memory(InMemoryMemoryProvider())
-    runtime.providers.register_blob_store(store)
+    runtime.providers.register_memory_blob_store(store)
 
     def _client(account=None, model=None):
         return _FixedModelClient(

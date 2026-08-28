@@ -2,7 +2,7 @@
 
 裁定（2026-08-27）：`Session.user_prompt` 与两条 session 事件的 payload
 **不能拍扁**（图片结构必须留下）、也**不能内联 base64 字节**（事件库体积）——
-一律走 ref 形态。宿主没接 BlobStore 时手里没有 ref，那些 inline 图降级成不含
+一律走 ref 形态。宿主没接 MemoryBlobStore 时手里没有 ref，那些 inline 图降级成不含
 字节的占位 part（复用 per-purpose 的 `[image {media_type}]` 文案，不新增第六种占位）。
 
 对照组：`TASK_CREATED` 早已是 `content_to_jsonable`（无损），本文件钉的是 session 侧。

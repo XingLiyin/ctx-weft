@@ -58,8 +58,8 @@ from ctx_weft.protocols.knowledge import (
     KnowledgeQuery,
 )
 from ctx_weft.protocols.memory import (
-    BlobStore,
-    NullBlobStore,
+    MemoryBlobStore,
+    NullMemoryBlobStore,
     EVENT_LAYER,
     MemoryAddress,
     MemoryEvent,
@@ -138,8 +138,8 @@ __all__ = [
     "MemoryAddress",
     "Subscription",
     # Blob store（多模态字节侧，与 MemoryProvider 同模块）
-    "BlobStore",
-    "NullBlobStore",
+    "MemoryBlobStore",
+    "NullMemoryBlobStore",
     # Template
     "AgentTemplate",
     "CapabilityRef",

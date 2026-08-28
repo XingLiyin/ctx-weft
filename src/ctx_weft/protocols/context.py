@@ -34,7 +34,7 @@ class ImagePart:
     #
     # 存在的理由（Phase 3c Task D）：``image_tokens`` 要按体积估算预算压力，而
     # 外部化之后 ``data`` 是 ``blob:<sha>``（长度恒约 69），与真实体积毫无关系；
-    # ``image_tokens`` 是同步函数，不能去 BlobStore 做 IO 把字节取回来。故让体积
+    # ``image_tokens`` 是同步函数，不能去 MemoryBlobStore 做 IO 把字节取回来。故让体积
     # 在**还知道的时候**（validate 解码 inline base64 / normalize 外部化拿到 raw
     # bytes 时）被记下来带走，并经 ``content_to_jsonable`` 往返持久化。
     #

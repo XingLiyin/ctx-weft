@@ -36,11 +36,11 @@ ref 无从取回 = 图**永久丢失**——那不是降级，是删除。故判
 `media:get_image` 取回来」，即 `core.content.extract_blob_refs` 认得的 `blob:<sha>`
 （复用归一层这个**唯一真源**，不在本模块另写一遍 isinstance，见该函数 docstring）。
 
-这与 §10「`BlobStore` 未注册 → 返回 0、不降级」**不冲突，且严格更细**：未注册时
+这与 §10「`MemoryBlobStore` 未注册 → 返回 0、不降级」**不冲突，且严格更细**：未注册时
 `normalize_content` 原样返回、没有任何 part 会变成 ref 形态，于是本判据自然选中空集、
 `fold.py` 一次 `fold()` 都不发——「行为与改造前逐字节一致」由同一条判据兜住，不需要
 第二处 registry 探询（多一处判据就多一处会分叉的真源）。更细则体现在：宿主**已**注册
-BlobStore 但记录里仍有存量 inline base64（宿主直接 ingest 的、Phase 3b 之前落的）时，
+MemoryBlobStore 但记录里仍有存量 inline base64（宿主直接 ingest 的、Phase 3b 之前落的）时，
 registry 探询会放行并把它们弄丢，本判据不会。
 
 ref 形态但 ref 本身不是可解析 token（空 / 含空白 / 含 ``]``）的，同样**不选**：

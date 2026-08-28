@@ -213,8 +213,8 @@ class ProviderRegistry:
         self._capabilities: list[CapabilityProvider] = []
         self._capability_authorizers: dict[str, Authorizer] = {}  # provider_name or capability_id → Authorizer
         self._llm_provider: LLMClientResolver | None = None
-        self._blob_store: "BlobStore | None" = None
-        self._null_blob_store: "BlobStore | None" = None
+        self._blob_store: "MemoryBlobStore | None" = None
+        self._null_blob_store: "MemoryBlobStore | None" = None
 
     # ── Memory ────────────────────────────────────────────────────────────────
 
@@ -298,35 +298,35 @@ class ProviderRegistry:
     def has_llm_provider(self) -> bool:
         return self._llm_provider is not None
 
-    # ── BlobStore ────────────────────────────────────────────────────────────
+    # ── MemoryBlobStore ──────────────────────────────────────────────────────
 
-    def register_blob_store(self, store: "BlobStore") -> None:
-        """注册二进制内容存储。未注册时 get_blob_store() 返回 NullBlobStore。"""
+    def register_memory_blob_store(self, store: "MemoryBlobStore") -> None:
+        """注册二进制内容存储。未注册时 get_memory_blob_store() 返回 NullMemoryBlobStore。"""
         self._blob_store = store
 
-    def get_blob_store(self) -> "BlobStore":
-        """取 blob store。优先级：**显式注册 > memory provider > NullBlobStore**。
+    def get_memory_blob_store(self) -> "MemoryBlobStore":
+        """取 blob store。优先级：**显式注册 > memory provider > NullMemoryBlobStore**。
 
         中间那一级是裁定 D4（blob 并入 memory）的接线点：memory provider
-        若同时实现了 ``BlobStore`` 且 ``can_externalize``（如
+        若同时实现了 ``MemoryBlobStore`` 且 ``can_externalize``（如
         ``providers.memory_sql.SqlMemoryProvider``），它就是字节的持有者，
         宿主不必再单独注册一遍。纯内存 provider 据裁定 D6 不实现
-        ``BlobStore``，回落 ``NullBlobStore`` ——不接 blob 的宿主行为逐字节不变。
+        ``MemoryBlobStore``，回落 ``NullMemoryBlobStore`` ——不接 blob 的宿主行为逐字节不变。
 
         探询走 ``can_externalize`` 而不是“调 put 捕异常”（Phase 1 终审契约）。
         回落结果**不缓存到** ``self._blob_store``：缓存会让
-        “先 get_blob_store()、后 register_memory()” 的接线顺序静默地拿不到 memory。
-        ``NullBlobStore`` 实例仍只建一次，重复调用返回同一对象。
+        “先 get_memory_blob_store()、后 register_memory()” 的接线顺序静默地拿不到 memory。
+        ``NullMemoryBlobStore`` 实例仍只建一次，重复调用返回同一对象。
         """
         if self._blob_store is not None:
             return self._blob_store
-        from ctx_weft.protocols import BlobStore as _BlobStore
+        from ctx_weft.protocols import MemoryBlobStore as _MemoryBlobStore
         mem = self._memory
-        if isinstance(mem, _BlobStore) and mem.can_externalize:
+        if isinstance(mem, _MemoryBlobStore) and mem.can_externalize:
             return mem
         if self._null_blob_store is None:
-            from ctx_weft.protocols import NullBlobStore
-            self._null_blob_store = NullBlobStore()
+            from ctx_weft.protocols import NullMemoryBlobStore
+            self._null_blob_store = NullMemoryBlobStore()
         return self._null_blob_store
 
 
@@ -568,7 +568,7 @@ class CtxWeftRuntime:
         ——纯文本与畸形内容都在格式校验阶段返回/抛出，resolver 从不被调用，
         `start_session` 的「纯文本不提前解析 LLM」不变量因此得以保持。
 
-        不能外部化（`NullBlobStore`）时原样返回同一对象，整段是 no-op。
+        不能外部化（`NullMemoryBlobStore`）时原样返回同一对象，整段是 no-op。
         """
         from ctx_weft.core.content import normalize_content, validate_content
 
@@ -578,7 +578,7 @@ class CtxWeftRuntime:
             validate_content(
                 content, llm_resolver=lambda: self._resolve_llm(llm_account, llm_model),
             )
-        blob_store = self.providers.get_blob_store()
+        blob_store = self.providers.get_memory_blob_store()
         if not blob_store.can_externalize:
             return content
         return await normalize_content(
@@ -637,7 +637,7 @@ class CtxWeftRuntime:
           外部化时 tenant 根本用不上（`_validate_and_normalize_content` 会原样返回）。
         """
         tenant_id = "default"
-        if not isinstance(content, str) and self.providers.get_blob_store().can_externalize:
+        if not isinstance(content, str) and self.providers.get_memory_blob_store().can_externalize:
             tenant_id = await self._tenant_for_session(req.session_id)
         return await self._validate_and_normalize_content(
             content,
@@ -898,9 +898,9 @@ class CtxWeftRuntime:
         # 都在格式校验阶段提前返回/抛出，resolver 从不被调用。
         # 顺序关键：validate 先于 normalize——被拒的内容不该在 blob store 留垃圾。
         # 两步都在 _validate_and_normalize_content 里（三个入口共用的单一真源）。
-        # 不能外部化时（NullBlobStore）normalize 段是纯 no-op：params 不被替换、
+        # 不能外部化时（NullMemoryBlobStore）normalize 段是纯 no-op：params 不被替换、
         # session_id 也不提前生成，行为与 Phase 3a 逐字节一致。
-        blob_store = self.providers.get_blob_store()
+        blob_store = self.providers.get_memory_blob_store()
         # blob 落盘要一个 session 锚点（宿主按 session_id 登记 workspace），所以
         # 能外部化时必须把 session_id 定下来并透传给 create_session，否则外部化用的
         # session 与真正创建的 session 会是两个 id。
@@ -1893,9 +1893,9 @@ class CtxWeftRuntime:
             hitl_manager=self.hitl_manager,
             pause_token=pause_token,
             config=self._config,
-            # 出网前 rehydrate ref→base64 用（Phase 3b）；未注册时是 NullBlobStore，
+            # 出网前 rehydrate ref→base64 用（Phase 3b）；未注册时是 NullMemoryBlobStore，
             # rehydrate_content 据其 can_externalize=False 原样返回、零开销。
-            blob_store=self.providers.get_blob_store(),
+            blob_store=self.providers.get_memory_blob_store(),
         )
 
     @staticmethod

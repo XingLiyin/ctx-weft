@@ -492,7 +492,7 @@ class MemoryProvider(Protocol):
 # ── Blob 存储（多模态字节侧）─────────────────────────────────────────────────
 
 
-class BlobStore(ABC):
+class MemoryBlobStore(ABC):
     """core 的「二进制 sink」契约：存取图片等二进制内容，core 只见 ref。
 
     与 ``protocols.filesystem.SpillSink`` 同形——core 不直接碰存储，只知道
@@ -504,8 +504,8 @@ class BlobStore(ABC):
     ``MemoryProvider`` 的【多模态无损存取契约】（part 结构侧）是同一件事的两面，
     宿主实现多模态 memory 时应在本模块一次读全。
     保持独立 ABC 而不并入 ``MemoryProvider``，是因为 blob 能力**可选**：
-    ``InMemoryProvider`` 不实现它仍然完全合规，而 ``ProviderRegistry.get_blob_store()``
-    的自动解析判据正是 ``isinstance(mem, BlobStore) and mem.can_externalize``——
+    ``InMemoryProvider`` 不实现它仍然完全合规，而 ``ProviderRegistry.get_memory_blob_store()``
+    的自动解析判据正是 ``isinstance(mem, MemoryBlobStore) and mem.can_externalize``——
     并入协议会让该判据恒真、失去分辨力。
     仓内实现见 ``ctx_weft.providers.memory_sql.SqlMemoryProvider``。
     （Phase 3b 曾有一个挂在 FilesystemToolsProvider 上的实现，裁定 D5 已移除——
@@ -522,7 +522,7 @@ class BlobStore(ABC):
 
     @property
     def can_externalize(self) -> bool:
-        """本 store 是否真的能存——``NullBlobStore`` 返回 False。
+        """本 store 是否真的能存——``NullMemoryBlobStore`` 返回 False。
 
         调用方据此**先探询、再决定**，而不是调用 put 并捕获 NotImplementedError：
         后者会把「响亮失败」降级成控制流，让真正的接线错误也被静默吞掉
@@ -541,8 +541,8 @@ class BlobStore(ABC):
         ...
 
 
-class NullBlobStore(BlobStore):
-    """未注册 BlobStore 时的默认实现——保证不接 blob 的宿主行为完全不变。
+class NullMemoryBlobStore(MemoryBlobStore):
+    """未注册 MemoryBlobStore 时的默认实现——保证不接 blob 的宿主行为完全不变。
 
     put 刻意抛错：Phase 1 内没有任何调用方（外部化在 Phase 3），抛错可在
     Phase 3 接线错误时立刻暴露，而不是静默产出一个假 ref。调用方（
@@ -556,8 +556,8 @@ class NullBlobStore(BlobStore):
 
     async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
         raise NotImplementedError(
-            "No BlobStore registered; register one via "
-            "ProviderRegistry.register_blob_store() before externalizing content."
+            "No MemoryBlobStore registered; register one via "
+            "ProviderRegistry.register_memory_blob_store() before externalizing content."
         )
 
     async def get(

@@ -27,7 +27,7 @@ import pytest
 from ctx_weft.core.loop.llm_gateway import stream_llm
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
-    BlobStore,
+    MemoryBlobStore,
     ImagePart,
     LLMChunk,
     LLMMessage,
@@ -248,7 +248,7 @@ class _CapturingLLM:
         yield LLMChunk(kind="done")
 
 
-class _CountingStore(BlobStore):
+class _CountingStore(MemoryBlobStore):
     def __init__(self) -> None:
         self.get_calls: list[str] = []
 
@@ -349,7 +349,7 @@ async def test_gate_only_touches_tool_role() -> None:
 
 @pytest.mark.asyncio
 async def test_plain_text_messages_untouched_by_gate() -> None:
-    """纯文本消息经门控后**原样是同一对象**（不接 BlobStore 时行为逐字节不变）。"""
+    """纯文本消息经门控后**原样是同一对象**（不接 MemoryBlobStore 时行为逐字节不变）。"""
     llm = _CapturingLLM(supports_vision=False)
     msgs = _legal(LLMMessage(role="tool", content="result", tool_call_id="tc1"))
     await _drain(llm, _request(*msgs))
@@ -360,7 +360,7 @@ async def test_plain_text_messages_untouched_by_gate() -> None:
 
 @pytest.mark.asyncio
 async def test_no_vision_skips_blob_fetch_for_tool_images() -> None:
-    """无视觉时不该为一张注定被降级的图去 BlobStore 取一趟——门控在 rehydrate 之前。"""
+    """无视觉时不该为一张注定被降级的图去 MemoryBlobStore 取一趟——门控在 rehydrate 之前。"""
     llm = _CapturingLLM(supports_vision=False)
     store = _CountingStore()
     await _drain(llm, _request(*_legal(LLMMessage(

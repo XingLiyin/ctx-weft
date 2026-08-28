@@ -143,7 +143,7 @@ async def demote_for_budget(
     `policy` 模块 docstring 判断题 1。
 
     只降 `source_type == "ref"` 的图（判断题 2）：inline base64 换成占位就再也取不回来。
-    **`BlobStore` 未注册时视图里根本不存在 ref 形态的图**，于是选中空集、一次 `fold()`
+    **`MemoryBlobStore` 未注册时视图里根本不存在 ref 形态的图**，于是选中空集、一次 `fold()`
     都不发、返回 0——「行为与改造前逐字节一致」（子设计 §10）由这同一条判据兜住。
 
     参数名注：子设计 §8 写的是 `demote_for_budget(memory, scope, ctx, ...)`，那个

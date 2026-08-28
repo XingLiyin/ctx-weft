@@ -22,7 +22,7 @@
   零数据迁移（v2 设计 §6）。
 - **fold 原子**：遗忘 + 补偿在单个事务内（SQLite / postgres 天然满足）。
 
-- **blob 并入 memory**（裁定 D4，Task C3）：本 provider 同时实现 ``BlobStore``，
+- **blob 并入 memory**（裁定 D4，Task C3）：本 provider 同时实现 ``MemoryBlobStore``，
   字节落 ``memory_blobs``、引用边落 ``memory_blob_refs``（与 ingest 同事务），
   回收走延迟幂等的 ``collect_blobs``。**永不在 fold 里同步删字节**。
 """
@@ -55,7 +55,7 @@ from ctx_weft.core.content import (
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
-    BlobStore,
+    MemoryBlobStore,
     MemoryAddress,
     MemoryEvent,
     MemoryEventType,
@@ -260,8 +260,8 @@ def _partition_where(address: MemoryAddress, scope: MemoryScope, tenant: str) ->
     return and_(*conds)
 
 
-class SqlMemoryProvider(MemoryProvider, BlobStore):
-    """SQLAlchemy async MemoryProvider **兼 BlobStore**。SQLite 是默认后端，postgres 同一份代码。
+class SqlMemoryProvider(MemoryProvider, MemoryBlobStore):
+    """SQLAlchemy async MemoryProvider **兼 MemoryBlobStore**。SQLite 是默认后端，postgres 同一份代码。
 
     ── 【blob 与租户】三处取向（Task C3，简报要求逐处表态）────────────────────
 
@@ -572,7 +572,7 @@ class SqlMemoryProvider(MemoryProvider, BlobStore):
             for r in rows
         ]
 
-    # ── BlobStore（裁定 D4：字节也归 memory）──────────────────────────────────
+    # ── MemoryBlobStore（裁定 D4：字节也归 memory）──────────────────────────────────
 
     async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
         """内容寻址存字节，返回 ``blob:<sha256>``；同字节幂等（已存在则不重写内容）。

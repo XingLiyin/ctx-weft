@@ -25,7 +25,7 @@ provider 全跑一遍。工厂签名 `(tmp_path) -> AsyncIterator[MemoryProvider
 
 - `_declared(m)`      → `describe()` 返回的 `MemoryProviderInfo`（supports_semantic /
                         supports_topic 据此分流）
-- `_supports_blobs(m)` → provider 是否同时是可用的 `BlobStore`（用户裁定 D4 的
+- `_supports_blobs(m)` → provider 是否同时是可用的 `MemoryBlobStore`（用户裁定 D4 的
                         「blob 并入 memory」形态；纯内存 provider 据 D6 为 False）
 
 **覆盖不下降说明**：本套是**新增**的协议层覆盖，既有测试一条未删。
@@ -58,7 +58,7 @@ from ctx_weft.protocols import (
     Subscription,
 )
 from ctx_weft.protocols.context import ImagePart, TextPart
-from ctx_weft.protocols.memory import BlobStore
+from ctx_weft.protocols.memory import MemoryBlobStore
 from ctx_weft.protocols.memory_compat import MemoryKind
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.memory_sql import open_sqlite_memory
@@ -100,16 +100,16 @@ async def _declared(m: MemoryProvider) -> MemoryProviderInfo:
 
 
 def _supports_blobs(m: MemoryProvider) -> bool:
-    """provider 是否同时是一个**可用的** BlobStore（裁定 D4 的 blob-in-memory 形态）。
+    """provider 是否同时是一个**可用的** MemoryBlobStore（裁定 D4 的 blob-in-memory 形态）。
 
-    `can_externalize` 为 False 的 store（如 NullBlobStore）算不支持——探询而非
-    调 put 捕异常，理由见 `BlobStore.can_externalize` 的 docstring。
+    `can_externalize` 为 False 的 store（如 NullMemoryBlobStore）算不支持——探询而非
+    调 put 捕异常，理由见 `MemoryBlobStore.can_externalize` 的 docstring。
 
     自 Task C3 起本探测在两个 provider 上分开：``sqlite`` 真跑（裁定 D4），
     ``in_memory`` 仍 skip（裁定 D6）——**这正是用户要的双模式对照**：
     一个实现支持多模态 blob、一个不支持，同一套契约对两者都成立。
     """
-    return isinstance(m, BlobStore) and m.can_externalize
+    return isinstance(m, MemoryBlobStore) and m.can_externalize
 
 
 # ── 固定装置 ──────────────────────────────────────────────────────────────────
@@ -860,12 +860,12 @@ async def test_dict_shaped_parts_come_back_as_dataclasses(memory: MemoryProvider
 
 
 async def test_blob_capable_provider_roundtrips_bytes(memory: MemoryProvider) -> None:
-    """裁定 D4「blob 并入 memory」：provider 若同时是 BlobStore，则内容寻址 + 幂等。
+    """裁定 D4「blob 并入 memory」：provider 若同时是 MemoryBlobStore，则内容寻址 + 幂等。
 
     纯内存 provider 据裁定 D6 不支持——用**探测**跳过，不是按名字分支。
     """
     if not _supports_blobs(memory):
-        pytest.skip("provider is not a usable BlobStore (no multimodal blob storage)")
+        pytest.skip("provider is not a usable MemoryBlobStore (no multimodal blob storage)")
 
     store: Any = memory
     raw = bytes(range(64))

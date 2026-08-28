@@ -1,6 +1,6 @@
 """图片折叠与回放（子设计 §7）。
 
-墙内：占位格式、blob ref 交互、位置描述。墙外：`BlobStore` 协议归 `protocols/memory`（字节归 memory，裁定 D4）、
+墙内：占位格式、blob ref 交互、位置描述。墙外：`MemoryBlobStore` 协议归 `protocols/memory`（字节归 memory，裁定 D4）、
 ref→base64 的 rehydrate 归 `providers/llm/*`、入口外部化归内容归一层、图片 token 口径归
 `core/utils`。
 

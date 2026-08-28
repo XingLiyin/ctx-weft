@@ -7,7 +7,7 @@ Task E 删掉 adapter 的 dict 分支后，dict 图片在出网路径上被**静
 ``_parts_to_blocks([{...image...}]) → []``，无 raise 无 log）——比以前的错误兜底更糟。
 
 修法仍是归一（不是在 adapter 里 raise——adapter 在同步出网主路径上，抛异常会掀掉整个
-LLM 请求，同 Phase 3b 对 ``BlobStore.get`` 恒不抛的取向）。三处边界
+LLM 请求，同 Phase 3b 对 ``MemoryBlobStore.get`` 恒不抛的取向）。三处边界
 （``MemoryRecord`` / ``MemoryEvent`` / ``LLMMessage``）共用 ``core.content`` 里的
 **同一个** ``normalize_content_parts``——spec §3① 明令形态转换收在归一层，不得散成三份。
 """

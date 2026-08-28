@@ -391,7 +391,7 @@ def _gate_tool_images(llm: "LLMClient", messages: list[LLMMessage]) -> list[LLMM
     ``supports_vision`` 门控拒掉；工具产出的图**从未经过入口**，是唯一的漏网路径。
     降别的角色属越权（而且会把入口已放行的图再降一次）。
 
-    **放在 rehydrate 之前**：注定要被降级的图不必先去 BlobStore 取一趟回来。
+    **放在 rehydrate 之前**：注定要被降级的图不必先去 MemoryBlobStore 取一趟回来。
     ``downgrade_images_to_text`` 对 ref 形态同样只读 ``media_type``，占位文本不变。
 
     未声明 ``supports_vision`` 一律按无视觉处理（严格默认，同 ``validate_content``）。
@@ -420,7 +420,7 @@ async def stream_llm(
 
     rehydrate 落在这里而非 adapter（架构裁定 T0）：adapter 的序列化链
     （``_build_payload`` / ``_serialize_messages`` / ``_parts_to_blocks``）全是同步
-    函数，而 ``BlobStore.get`` 是 async。本函数是出网前最后一个 async 关口，一处
+    函数，而 ``MemoryBlobStore.get`` 是 async。本函数是出网前最后一个 async 关口，一处
     覆盖三家 adapter。
 
     ``blob_store`` / ``provider_ctx`` 均**带默认值 None**：不传时整段 rehydrate 不

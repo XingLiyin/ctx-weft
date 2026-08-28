@@ -266,3 +266,25 @@ def test_blob_ref_prefix_lives_in_context() -> None:
     assert BLOB_REF_PREFIX == "blob:"
     assert MemPrefix is BLOB_REF_PREFIX, "memory 侧仍要能拿到（re-export），且是同一对象"
     assert PkgPrefix is BLOB_REF_PREFIX
+
+
+def test_memory_blob_store_is_renamed() -> None:
+    """两个 blob 协议并存后，`BlobStore` 这个名字不再自明——见 spec §6。"""
+    import ctx_weft.protocols as p
+    from ctx_weft.protocols import MemoryBlobStore, NullMemoryBlobStore
+
+    assert issubclass(NullMemoryBlobStore, MemoryBlobStore)
+    assert NullMemoryBlobStore().can_externalize is False
+    assert not hasattr(p, "BlobStore"), "旧名不得残留，否则两个名字并存更糊涂"
+    assert not hasattr(p, "NullBlobStore")
+
+
+def test_registry_methods_are_renamed() -> None:
+    from ctx_weft.core.runtime import ProviderRegistry
+
+    reg = ProviderRegistry()
+    assert hasattr(reg, "register_memory_blob_store")
+    assert hasattr(reg, "get_memory_blob_store")
+    assert not hasattr(reg, "register_blob_store")
+    assert not hasattr(reg, "get_blob_store")
+    assert reg.get_memory_blob_store().can_externalize is False

@@ -341,7 +341,7 @@ async def _recall_user_prompt_parts(memory, state) -> object:
 async def _run_multimodal_session(*, blob_store=None, session_id: str | None = None):
     """跑一整个 start_session 会话（多模态 user_prompt），返回 (runtime, memory, state, llm)。
 
-    ``blob_store`` 为 None 时**完全不注册**——runtime 拿到 NullBlobStore，即 Phase 3a 的
+    ``blob_store`` 为 None 时**完全不注册**——runtime 拿到 NullMemoryBlobStore，即 Phase 3a 的
     既有行为面。
     """
     resolver = InlineAgentTemplateProvider()
@@ -353,7 +353,7 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
     if blob_store is not None:
-        runtime.providers.register_blob_store(blob_store)
+        runtime.providers.register_memory_blob_store(blob_store)
 
     handle = await runtime.start_session(
         SessionStartParams.create(
@@ -371,7 +371,7 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
 
 @pytest.mark.asyncio
 async def test_ref_externalized_in_memory_but_full_base64_on_the_wire(tmp_path) -> None:
-    """覆盖 1（ref 全链路）：注册**真** BlobStore（``SqlMemoryProvider``，Task C3）后——
+    """覆盖 1（ref 全链路）：注册**真** MemoryBlobStore（``SqlMemoryProvider``，Task C3）后——
 
     Phase 3b 时这里挂的是 ``FilesystemToolsProvider``；裁定 D5 移除了那个实现，
     改挂 SQL provider。**三条断言一字未改**——它们钉的是「ref 全链路」本身，
@@ -403,7 +403,7 @@ async def _assert_ref_roundtrip(blob_store, session_id: str) -> None:
     images = _image_parts(content)
     assert len(images) == 1, f"expected exactly one ImagePart in memory, got {len(images)}"
     assert images[0].source_type == "ref", (
-        f"接了真 BlobStore 时 memory 里应是 ref，实为 source_type={images[0].source_type!r}"
+        f"接了真 MemoryBlobStore 时 memory 里应是 ref，实为 source_type={images[0].source_type!r}"
     )
     assert images[0].data.startswith(BLOB_REF_PREFIX), (
         f"ref 的 data 应是 blob:<sha>，实为 {images[0].data!r}"
@@ -436,7 +436,7 @@ async def _assert_ref_roundtrip(blob_store, session_id: str) -> None:
 
 @pytest.mark.asyncio
 async def test_without_blob_store_memory_and_wire_stay_inline_base64() -> None:
-    """覆盖 2（不接 BlobStore 时行为不变）：不注册 BlobStore（runtime 用 NullBlobStore）时，
+    """覆盖 2（不接 MemoryBlobStore 时行为不变）：不注册 MemoryBlobStore（runtime 用 NullMemoryBlobStore）时，
     memory 记录与 wire payload 都仍是 **inline base64**，与 Phase 3a 既有 e2e
     （``test_multimodal_prompt_reaches_wire_payload_as_image_block``）结果一致。
 
@@ -449,7 +449,7 @@ async def test_without_blob_store_memory_and_wire_stay_inline_base64() -> None:
 
     content = await _recall_user_prompt_parts(memory, state)
     assert content == _MULTIMODAL_PROMPT, (
-        f"不接 BlobStore 时 memory 记录必须与 Phase 3a 逐字节一致，实为 {content!r}"
+        f"不接 MemoryBlobStore 时 memory 记录必须与 Phase 3a 逐字节一致，实为 {content!r}"
     )
     assert state.task.user_prompt == _MULTIMODAL_PROMPT
 
@@ -458,7 +458,7 @@ async def test_without_blob_store_memory_and_wire_stay_inline_base64() -> None:
     assert images[0].source_type == "base64"
 
     sources = [s for p in llm.captured_payloads for s in _image_sources(p)]
-    assert sources, "不接 BlobStore 时图片仍应照常出网（Phase 3a 的既有行为）"
+    assert sources, "不接 MemoryBlobStore 时图片仍应照常出网（Phase 3a 的既有行为）"
     for src in sources:
         assert src.get("data") == _MULTIMODAL_PROMPT[1].data
         assert base64.b64decode(src["data"]) == _RAW_IMAGE_BYTES

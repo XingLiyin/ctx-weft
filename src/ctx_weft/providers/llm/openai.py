@@ -475,7 +475,7 @@ def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
     保证**：Phase 3b 起图片在入口被外部化成 ``blob:<sha>`` ref，由
     ``core.loop.llm_gateway.stream_llm`` 在出网前（本函数之前的最后一个 async 关口）
     调 ``rehydrate_content`` 还原回 base64（架构裁定 T0：本函数是同步的，
-    ``BlobStore.get`` 是 async，没法在这里 await）。取不到图时上游已把该 part 降级成
+    ``MemoryBlobStore.get`` 是 async，没法在这里 await）。取不到图时上游已把该 part 降级成
     文本占位，故本函数无需处理 ref。**绕过 gateway 直调 adapter 的路径上此保证不成立**，
     那条路上的 ref 会被拼进 data URL。"""
     blocks: list[dict[str, Any]] = []

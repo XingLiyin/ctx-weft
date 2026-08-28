@@ -42,7 +42,7 @@ provider 落在 core 侧（构造时注入 `ProviderRegistry`）而不是塞进 
 | 情形 | 行为 |
 |---|---|
 | ref 不在本视图的任何占位中 | 单条说明性 `TextPart`，**不含 `ImagePart`** |
-| `BlobStore` 未注册（`blob_store=None` / `NullBlobStore.get` 返回 None） | 同上，且说明是「字节取不到」而非「没这张图」 |
+| `MemoryBlobStore` 未注册（`blob_store=None` / `NullMemoryBlobStore.get` 返回 None） | 同上，且说明是「字节取不到」而非「没这张图」 |
 | `blob.get` 抛 / `load_view` 抛 | 同上，记 warning |
 
 **取回阶段就发现取不到**与 gateway 出网时的 `[image unavailable]` 降级是两件事：后者
@@ -277,7 +277,7 @@ async def get_image(
     故 `load_view` / `blob.get` 的失败一律吸收成说明性文本。
 
     ``blob_store=None`` 表示宿主没有可用的 blob store（未注册时 `ProviderRegistry`
-    给的是 `NullBlobStore`，其 `get` 恒返回 None，两者行为一致）。字节确实取回来了才
+    给的是 `NullMemoryBlobStore`，其 `get` 恒返回 None，两者行为一致）。字节确实取回来了才
     返回 `ImagePart`：出网时再发现取不到只能降级成 `[image unavailable]`，那时模型已经
     白等一轮。顺带把 `byte_size` 填上——`utils.image_tokens` 按体积估预算，而 ref 形态的
     `data` 长度与真实体积无关。
@@ -343,8 +343,8 @@ class MediaCapabilityProvider(ToolCapabilityProvider):
 
     构造时注入 `ProviderRegistry`（同 `SkillExecutorCapabilityProvider`），memory 与
     blob store **每次调用时**才解析：宿主可能先建 runtime 再 `register_memory` /
-    `register_blob_store`，构造期取一次会把接线顺序变成隐性约束
-    （`ProviderRegistry.get_blob_store` 的 docstring 记着同款坑）。
+    `register_memory_blob_store`，构造期取一次会把接线顺序变成隐性约束
+    （`ProviderRegistry.get_memory_blob_store` 的 docstring 记着同款坑）。
 
     无 per-session 状态，故不实现 `SessionScopedCapabilityProvider`。
     """
@@ -410,7 +410,7 @@ class MediaCapabilityProvider(ToolCapabilityProvider):
                 "code": "MEDIA_NO_MEMORY", "message": str(exc)})
             return
         try:
-            blob_store = self._providers.get_blob_store()
+            blob_store = self._providers.get_memory_blob_store()
         except Exception:
             logger.warning("media:get_image 取 blob store 失败，按未注册处理", exc_info=True)
             blob_store = None

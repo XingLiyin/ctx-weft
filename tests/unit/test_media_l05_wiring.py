@@ -10,7 +10,7 @@
 3. §6.1：`collapse_task_layer` 折叠前无条件降级折区内的残留真图，且**降级之后重新
    `load_view`**——降级换掉了 record id，拿旧 id 去 fold 会让同一段对话出现两次，
    而摘要输入里仍是真图、照旧被 `content_to_text` 静默拍扁；
-4. 未接 `BlobStore` 时行为与改造前一致（一次 `fold()` 都不发、没有 L0.5 事件）。
+4. 未接 `MemoryBlobStore` 时行为与改造前一致（一次 `fold()` 都不发、没有 L0.5 事件）。
 
 ⚠️ 断言口径：本文件里「某件事没有发生」型断言（不升级到 L1 / 不降级 / 不重复）
 一律配一个「确实发生了」的对照，写在同一个用例内；Step 6 另做变异验证。
@@ -59,7 +59,7 @@ def _pctx() -> ProviderContext:
 
 
 class _CountingMemory(InMemoryMemoryProvider):
-    """数 fold 次数——「未接 BlobStore 一次都不写」需要能观测到写。"""
+    """数 fold 次数——「未接 MemoryBlobStore 一次都不写」需要能观测到写。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -378,12 +378,12 @@ async def test_fold_root_experience_demotes_its_range_before_folding(monkeypatch
     assert [r.address.task_id for r in remaining] == ["new"]
 
 
-# ── 7. 未注册 BlobStore：行为与改造前一致 ────────────────────────────────────
+# ── 7. 未注册 MemoryBlobStore：行为与改造前一致 ────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_without_blob_store_l05_is_a_noop(monkeypatch):
-    """未接 `BlobStore` → 一次 `fold()` 都不发、没有 L0.5 事件、内容逐字节不变。
+    """未接 `MemoryBlobStore` → 一次 `fold()` 都不发、没有 L0.5 事件、内容逐字节不变。
 
     对照写在同一用例内：同样的种子接上 blob store 后**确实**降级并写了 memory——
     否则「什么都没做」的实现也能让上半段通过。
@@ -416,7 +416,7 @@ async def test_without_blob_store_l05_is_a_noop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_null_blob_store_is_treated_as_unregistered():
-    """`NullBlobStore`（`can_externalize=False`）与未注册同路——生产里 registry 给的
+    """`NullMemoryBlobStore`（`can_externalize=False`）与未注册同路——生产里 registry 给的
     正是它，不是 `None`。"""
     mem = _CountingMemory()
     await _seed(mem, [[_img(1)], [_img(2)], [_img(3)]])

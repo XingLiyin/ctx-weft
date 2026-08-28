@@ -135,7 +135,7 @@ def content_to_jsonable(
                 "source_type": getattr(part, "source_type", "base64"),
             }
             # byte_size 只在**有值时**才写键（Phase 3c Task D）：不写 None，存量事件
-            # 载荷与不接 BlobStore 的宿主逐字节不变。读侧缺键 → None → image_tokens 回落。
+            # 载荷与不接 MemoryBlobStore 的宿主逐字节不变。读侧缺键 → None → image_tokens 回落。
             byte_size = getattr(part, "byte_size", None)
             if byte_size is not None:
                 item["byte_size"] = byte_size
@@ -151,14 +151,14 @@ def content_to_jsonable_refs_only(
     用在 `SESSION_CREATED` / `SESSION_RESUMED` 的 ``user_prompt``。这两条事件此前走
     ``content_to_text``——图片 part 被静默跳过，事件流重放出来的 session prompt 里
     「曾经有一张图」这件事完全无痕。而直接改用 ``content_to_jsonable`` 又会在宿主
-    **没接 BlobStore** 时把 inline base64 原样写进事件行（一张 5 MiB 图 ≈ 6.7 MB
+    **没接 MemoryBlobStore** 时把 inline base64 原样写进事件行（一张 5 MiB 图 ≈ 6.7 MB
     的事件载荷），故两者都不可用，需要这第三种。
 
     规则逐 part 判定：
 
     - 文本 part → 原样；
     - ``source_type == "ref"`` 的图 → **原样**。``data`` 是 ``blob:<sha>`` 短标记，
-      重放后可解析、可 `rehydrate_content` 还原（接了 BlobStore 的宿主走这条）；
+      重放后可解析、可 `rehydrate_content` 还原（接了 MemoryBlobStore 的宿主走这条）；
     - 其余图（``base64`` / ``url``）→ 降级成 ``[image {media_type}]`` 文本 part。
 
     降级复用 per-purpose 的 ``_IMAGE_PLACEHOLDER_TMPL``，**刻意不新增第六种占位**
@@ -243,7 +243,7 @@ def normalize_content_parts(
     ``not hasattr(p, "text")`` 因此保持冻结（用户裁定 D1），不为违规形态解冻。
 
     **不在 adapter 里 raise**：adapter 在同步出网主路径上，抛异常会掀掉整个 LLM 请求
-    （同 Phase 3b 对 ``BlobStore.get`` 恒不抛的取向）。归一是正解。
+    （同 Phase 3b 对 ``MemoryBlobStore.get`` 恒不抛的取向）。归一是正解。
 
     性能（本函数在热路径上，三处 ``__post_init__`` 都无条件调）：``str`` / ``None`` /
     空立即返回**同一对象**；已合规的 dataclass 列表只多一次 ``isinstance`` 扫描并返回
@@ -423,7 +423,7 @@ async def normalize_content(
 ) -> "str | list[ContentPart] | None":
     """把 base64 图片外部化成 blob ref。返回新内容；**不改原对象**。
 
-    blob_store 不能外部化（``NullBlobStore``）时**原样返回同一对象**——不接
+    blob_store 不能外部化（``NullMemoryBlobStore``）时**原样返回同一对象**——不接
     blob 的宿主行为与 Phase 3a 逐字节一致（本 Phase 最重要的兼容性约束）。
     判定走 ``blob_store.can_externalize`` 探询，**不**调用 put 再捕获
     NotImplementedError：后者会把「响亮失败」降级成控制流（Phase 1 终审契约）。
@@ -450,7 +450,7 @@ async def normalize_content(
         ref = await blob_store.put(raw, getattr(part, "media_type", ""), ctx)
         # byte_size 必须在这里记下来（Phase 3c Task D）：外部化之后 data 是
         # "blob:<sha>"（长度恒约 69），体积信息就此丢失，而 image_tokens 是同步的、
-        # 不能回 BlobStore 做 IO 取回来。这是最后一个还握着 raw bytes 的地方。
+        # 不能回 MemoryBlobStore 做 IO 取回来。这是最后一个还握着 raw bytes 的地方。
         out.append(dataclasses.replace(
             part, data=ref, source_type="ref", byte_size=len(raw)))
     return out
@@ -507,9 +507,9 @@ def extract_blob_refs(content: "str | list[ContentPart] | None") -> list[str]:
 
     判据复用 ``_is_ref_part``（dataclass / dict 两种形态都认，
     ``source_type == "ref"`` 或 ``data`` 以 ``blob:`` 开头），故与
-    ``rehydrate_content`` 会去 ``BlobStore.get`` 的那批 part **逐一对应**。
+    ``rehydrate_content`` 会去 ``MemoryBlobStore.get`` 的那批 part **逐一对应**。
 
-    ``str`` / ``None`` / 无 ref 一律返回空列表（不接 BlobStore 的宿主永远走这条）。
+    ``str`` / ``None`` / 无 ref 一律返回空列表（不接 MemoryBlobStore 的宿主永远走这条）。
     """
     if not content or isinstance(content, str):
         return []
@@ -583,13 +583,13 @@ async def rehydrate_content(
     """把 blob ref 还原成 base64，供 adapter 拼 wire payload。返回新内容；**不改原对象**。
 
     落在 gateway 而非 adapter（架构裁定 T0）：``_parts_to_blocks`` /
-    ``_serialize_messages`` / ``_build_payload`` 全是同步函数，而 ``BlobStore.get``
+    ``_serialize_messages`` / ``_build_payload`` 全是同步函数，而 ``MemoryBlobStore.get``
     是 async——同步函数里没法 await。``stream_llm`` 是出网前最后一个 async 关口，
     且一处覆盖三家 adapter。
 
     三条零开销短路：纯文本（str / None / 空）、不能外部化的 store
-    （``NullBlobStore``）、内容里根本没有 ref——都**原样返回同一对象**，
-    不接 BlobStore 的宿主行为与 Phase 3a 逐字节一致。
+    （``NullMemoryBlobStore``）、内容里根本没有 ref——都**原样返回同一对象**，
+    不接 MemoryBlobStore 的宿主行为与 Phase 3a 逐字节一致。
 
     ``get`` 返回 ``None`` 时**降级、不抛**（spec §5.1）：换成
     ``[image unavailable: <media_type>]`` 文本 part。blob 过期 / 宿主换机 /
@@ -599,8 +599,8 @@ async def rehydrate_content(
     if not content or isinstance(content, str):
         return content
     if not blob_store.can_externalize:
-        # 存不进去的 store 也取不出来（NullBlobStore.get 恒 None）。此处短路而不是
-        # 让它走 get→None→降级，是为了保住「不接 BlobStore 时逐字节不变」的约束。
+        # 存不进去的 store 也取不出来（NullMemoryBlobStore.get 恒 None）。此处短路而不是
+        # 让它走 get→None→降级，是为了保住「不接 MemoryBlobStore 时逐字节不变」的约束。
         return content
     if not any(_is_ref_part(p) for p in content):
         return content                   # 没有 ref → 零开销

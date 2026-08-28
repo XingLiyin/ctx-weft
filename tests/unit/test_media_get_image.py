@@ -32,7 +32,7 @@ from ctx_weft.core.media.refs import encode_image_placeholder
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.runtime import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.protocols import (
-    BlobStore,
+    MemoryBlobStore,
     ImagePart,
     MemoryAddress,
     MemoryEvent,
@@ -71,8 +71,8 @@ def _img(ref: str = REF) -> ImagePart:
     return ImagePart(data=ref, media_type=MT, source_type="ref", byte_size=4096)
 
 
-class _Blobs(BlobStore):
-    """假 blob store：只认预置的 ref。未预置 → get 返回 None（与 NullBlobStore 同）。"""
+class _Blobs(MemoryBlobStore):
+    """假 blob store：只认预置的 ref。未预置 → get 返回 None（与 NullMemoryBlobStore 同）。"""
 
     def __init__(self, **blobs: bytes) -> None:
         self._d = {REF: b"PNGBYTES" * 4} if not blobs else dict(blobs)
@@ -264,11 +264,11 @@ async def test_load_view_failure_is_absorbed_into_text() -> None:
     assert len(parts) == 1 and _images(parts) == []
 
 
-# ── 4. BlobStore 未注册 / 取不到字节 ──────────────────────────────────────────
+# ── 4. MemoryBlobStore 未注册 / 取不到字节 ──────────────────────────────────────────
 
 
 async def test_no_blob_store_yields_text_but_with_blob_store_yields_image() -> None:
-    """未注册 BlobStore → 说明性文本、无图、不抛。**配对照**：同一份视图接上 store
+    """未注册 MemoryBlobStore → 说明性文本、无图、不抛。**配对照**：同一份视图接上 store
     就确实取回了图，故这条不是「什么都不做」也能通过的永真。"""
     mem = InMemoryMemoryProvider()
     await _seed(mem, [("user", [_ph()])])
@@ -285,17 +285,17 @@ async def test_no_blob_store_yields_text_but_with_blob_store_yields_image() -> N
 
 
 async def test_null_blob_store_behaves_like_no_blob_store() -> None:
-    """`ProviderRegistry` 未注册时给的是 `NullBlobStore`（get 恒 None），行为须一致。"""
-    from ctx_weft.protocols import NullBlobStore
+    """`ProviderRegistry` 未注册时给的是 `NullMemoryBlobStore`（get 恒 None），行为须一致。"""
+    from ctx_weft.protocols import NullMemoryBlobStore
 
     mem = InMemoryMemoryProvider()
     await _seed(mem, [("user", [_ph()])])
-    parts = await get_image(mem, _ADDR, _pctx(), REF, blob_store=NullBlobStore())
+    parts = await get_image(mem, _ADDR, _pctx(), REF, blob_store=NullMemoryBlobStore())
     assert len(parts) == 1 and _images(parts) == []
 
 
 async def test_blob_get_raising_is_absorbed() -> None:
-    """`BlobStore.get` 契约上不该抛，但真抛了也不能打断 loop。"""
+    """`MemoryBlobStore.get` 契约上不该抛，但真抛了也不能打断 loop。"""
 
     class _Angry(_Blobs):
         async def get(self, ref, ctx):
@@ -378,7 +378,7 @@ async def _invoke_via_gateway(mem, blobs, ref: str):
     registry = ProviderRegistry()
     registry.register_memory(mem)
     if blobs is not None:
-        registry.register_blob_store(blobs)
+        registry.register_memory_blob_store(blobs)
     provider = MediaCapabilityProvider(registry)
 
     cache = CapabilityCache()
@@ -434,7 +434,7 @@ async def test_gateway_unknown_ref_content_stays_a_plain_string() -> None:
 
 
 async def test_gateway_without_blob_store_returns_text_only() -> None:
-    """未注册 BlobStore（registry 回落 NullBlobStore）→ 文本，不抛、不返图。"""
+    """未注册 MemoryBlobStore（registry 回落 NullMemoryBlobStore）→ 文本，不抛、不返图。"""
     mem = InMemoryMemoryProvider()
     await _seed(mem, [("user", [_ph()])])
 

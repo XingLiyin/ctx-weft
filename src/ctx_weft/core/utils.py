@@ -155,7 +155,7 @@ _MSG_FRAMING_TOKENS = 4       # 每条消息的角色/分隔 framing 开销（pr
 # 它退化成下限：小于 _IMAGE_PART_TOKENS * _IMAGE_BYTES_PER_TOKEN（= 200 KiB）的图仍按
 # 它计，更大的图按字节折算。保留地板的两个理由：① 模型侧对任意一张图的固定开销本就在
 # 这个量级，往下折算会低估；② 体积未知（存量记录 / ref 且无 byte_size）时的回落值，
-# 保证存量数据与不接 BlobStore 的宿主行为不劣化。
+# 保证存量数据与不接 MemoryBlobStore 的宿主行为不劣化。
 _IMAGE_PART_TOKENS = 1600
 
 # ⚠️ 本系数建模的是**字节压力，不是计费 token**。provider 侧会把图降采样，单图真实计费
@@ -212,7 +212,7 @@ def image_byte_size(part: Any) -> int | None:
        刻意**不解码**——``image_tokens`` 在装配/压缩热路径上被逐条调用，
        为估算去 b64decode 一张 5 MiB 的图是不可接受的开销。
 
-    两条都够不着（ref / url 且无 ``byte_size``，即存量记录与不接 BlobStore 的
+    两条都够不着（ref / url 且无 ``byte_size``，即存量记录与不接 MemoryBlobStore 的
     宿主）→ None，由调用方回落到 ``_IMAGE_PART_TOKENS``。
     """
     size = getattr(part, "byte_size", None)
@@ -236,7 +236,7 @@ def image_tokens(content: "str | list[ContentPart] | None") -> int:
 
     单张图 = ``max(_IMAGE_PART_TOKENS, 字节数 // _IMAGE_BYTES_PER_TOKEN)``，
     字节数未知时取 ``_IMAGE_PART_TOKENS``（等价于旧口径，故存量数据与不接
-    BlobStore 的宿主行为不劣化）。
+    MemoryBlobStore 的宿主行为不劣化）。
 
     **为什么按字节**（Phase 3c Task D，用户裁定 D2）：原口径是 ``1600 × 张数``，
     对唯一真正变化的维度——体积——毫无反应。5 MiB 截图与 50 KiB 缩略图同价，于是

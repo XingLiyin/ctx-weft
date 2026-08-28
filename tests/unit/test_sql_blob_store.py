@@ -1,7 +1,7 @@
-"""SqlMemoryProvider 的 BlobStore 面：契约（内容寻址 / 幂等 / get 不抛）+ 引用表 + 回收。
+"""SqlMemoryProvider 的 MemoryBlobStore 面：契约（内容寻址 / 幂等 / get 不抛）+ 引用表 + 回收。
 
 本文件由 `tests/unit/test_filesystem_blob_store.py` **改挂**而来（裁定 D5：移除
-`FilesystemBlobStore`，其契约用例改挂 SQL provider——验的是 `BlobStore` 契约本身，
+`FilesystemBlobStore`，其契约用例改挂 SQL provider——验的是 `MemoryBlobStore` 契约本身，
 与实现无关）。九条原用例的去向：
 
 - 七条**是契约**，逐条搬过来（前缀 / 内容寻址 / 幂等 / 往返 / 缺失返 None /
@@ -42,7 +42,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
     MemoryScope,
-    NullBlobStore,
+    NullMemoryBlobStore,
     ProviderContext,
     TextPart,
 )
@@ -58,7 +58,7 @@ _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 @pytest.fixture
 async def store(tmp_path: Any):
-    """一个 SQLite backed 的 SqlMemoryProvider（同时是 MemoryProvider 与 BlobStore）。"""
+    """一个 SQLite backed 的 SqlMemoryProvider（同时是 MemoryProvider 与 MemoryBlobStore）。"""
     async with open_sqlite_memory(tmp_path / "memory.db") as provider:
         yield provider
 
@@ -114,7 +114,7 @@ _LATER = datetime.now(UTC) + timedelta(days=365)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BlobStore 契约（自 test_filesystem_blob_store.py 改挂）
+# MemoryBlobStore 契约（自 test_filesystem_blob_store.py 改挂）
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -204,7 +204,7 @@ async def test_ingest_records_blob_refs_in_same_transaction(
 
 
 async def test_ingest_without_refs_writes_no_ref_rows(store: SqlMemoryProvider) -> None:
-    """纯文本 / inline base64 的记录不产生引用边——不接 BlobStore 的宿主路径零副作用。"""
+    """纯文本 / inline base64 的记录不产生引用边——不接 MemoryBlobStore 的宿主路径零副作用。"""
     await store.ingest(_turn_with_refs(), _ctx())
     await store.ingest(
         MemoryEvent(
@@ -458,49 +458,49 @@ async def test_grace_period_is_configurable(tmp_path: Any) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# runtime 解析：显式注册 > memory provider > NullBlobStore
+# runtime 解析：显式注册 > memory provider > NullMemoryBlobStore
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 async def test_registry_resolves_blob_store_to_sql_memory(
         store: SqlMemoryProvider) -> None:
-    """简报覆盖 7（上半）：接了 SQL memory 时 ``get_blob_store()`` 解析到它本身。"""
+    """简报覆盖 7（上半）：接了 SQL memory 时 ``get_memory_blob_store()`` 解析到它本身。"""
     reg = ProviderRegistry()
     reg.register_memory(store)
-    assert reg.get_blob_store() is store
+    assert reg.get_memory_blob_store() is store
 
 
 def test_registry_falls_back_to_null_store_for_plain_memory() -> None:
-    """简报覆盖 7（下半）+ 覆盖 8：纯内存 provider 据裁定 D6 不支持 blob → NullBlobStore。"""
+    """简报覆盖 7（下半）+ 覆盖 8：纯内存 provider 据裁定 D6 不支持 blob → NullMemoryBlobStore。"""
     reg = ProviderRegistry()
     reg.register_memory(InMemoryMemoryProvider())
-    got = reg.get_blob_store()
-    assert isinstance(got, NullBlobStore)
+    got = reg.get_memory_blob_store()
+    assert isinstance(got, NullMemoryBlobStore)
     assert not got.can_externalize
-    assert got is reg.get_blob_store(), "重复调用应返回同一个 NullBlobStore 实例"
+    assert got is reg.get_memory_blob_store(), "重复调用应返回同一个 NullMemoryBlobStore 实例"
 
 
 def test_registry_without_any_memory_still_returns_null_store() -> None:
     """覆盖 8：没有 memory provider 时的宿主行为与本任务前逐字节一致。"""
     reg = ProviderRegistry()
-    assert isinstance(reg.get_blob_store(), NullBlobStore)
+    assert isinstance(reg.get_memory_blob_store(), NullMemoryBlobStore)
 
 
 async def test_explicit_registration_wins_over_memory_provider(
         store: SqlMemoryProvider) -> None:
-    """显式 ``register_blob_store()`` 优先级最高——宿主想接别的存储时不被 memory 抢走。"""
+    """显式 ``register_memory_blob_store()`` 优先级最高——宿主想接别的存储时不被 memory 抢走。"""
     reg = ProviderRegistry()
     reg.register_memory(store)
-    null = NullBlobStore()
-    reg.register_blob_store(null)
-    assert reg.get_blob_store() is null
+    null = NullMemoryBlobStore()
+    reg.register_memory_blob_store(null)
+    assert reg.get_memory_blob_store() is null
 
 
 async def test_memory_registered_after_first_lookup_is_still_resolved(
         store: SqlMemoryProvider) -> None:
-    """接线顺序无关：先 ``get_blob_store()``（拿到 Null）、后 ``register_memory()``，
+    """接线顺序无关：先 ``get_memory_blob_store()``（拿到 Null）、后 ``register_memory()``，
     再取仍须解析到 memory——回落结果**不得**被缓存进 ``_blob_store``。"""
     reg = ProviderRegistry()
-    assert isinstance(reg.get_blob_store(), NullBlobStore)
+    assert isinstance(reg.get_memory_blob_store(), NullMemoryBlobStore)
     reg.register_memory(store)
-    assert reg.get_blob_store() is store
+    assert reg.get_memory_blob_store() is store

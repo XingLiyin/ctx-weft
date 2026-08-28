@@ -3,9 +3,9 @@
 闭合 Task 2 留下的破损：入口把图片外部化成 ``blob:<sha>``，而两家 adapter 的
 ``_parts_to_blocks`` 忽略 source_type、无条件把 ``p.data`` 当 base64 写进 wire。
 rehydrate 落在 ``stream_llm``（架构裁定 T0：adapter 的序列化链是同步的，
-``BlobStore.get`` 是 async）。
+``MemoryBlobStore.get`` 是 async）。
 
-「没有发生某件事」的断言全部用计数器 stub 钉住——不接 BlobStore 时行为与
+「没有发生某件事」的断言全部用计数器 stub 钉住——不接 MemoryBlobStore 时行为与
 Task 2 之前逐字节一致是本 Phase 最重要的兼容性约束，不能靠"没报错"推断。
 """
 
@@ -20,12 +20,12 @@ from ctx_weft.core.content import rehydrate_content
 from ctx_weft.core.loop.llm_gateway import stream_llm
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
-    BlobStore,
+    MemoryBlobStore,
     ImagePart,
     LLMChunk,
     LLMMessage,
     LLMRequest,
-    NullBlobStore,
+    NullMemoryBlobStore,
     ProviderContext,
     TextPart,
 )
@@ -39,7 +39,7 @@ def _ctx() -> ProviderContext:
     return ProviderContext(session_id="ses-1", tenant_id="default")
 
 
-class _CountingStore(BlobStore):
+class _CountingStore(MemoryBlobStore):
     """能外部化的 stub：内容寻址，get 计数并可配置为「取不到」。"""
 
     def __init__(self, *, found: bool = True) -> None:
@@ -57,8 +57,8 @@ class _CountingStore(BlobStore):
         return self.blobs.get(ref)
 
 
-class _CountingNullStore(NullBlobStore):
-    """NullBlobStore + get 计数器（get 契约不变：恒返回 None）。"""
+class _CountingNullStore(NullMemoryBlobStore):
+    """NullMemoryBlobStore + get 计数器（get 契约不变：恒返回 None）。"""
 
     def __init__(self) -> None:
         self.get_calls: list[str] = []
@@ -157,7 +157,7 @@ async def test_missing_blob_placeholder_is_deterministic() -> None:
     assert _PNG_REF not in a[0].text and hashlib.sha256(_PNG_BYTES).hexdigest() not in a[0].text
 
 
-# ── 3. NullBlobStore → 消息原样、get 未被调用 ─────────────────────────────────
+# ── 3. NullMemoryBlobStore → 消息原样、get 未被调用 ─────────────────────────────────
 
 
 @pytest.mark.asyncio

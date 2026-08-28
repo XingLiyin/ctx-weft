@@ -210,7 +210,7 @@ def test_jsonable_omits_byte_size_when_absent():
 async def test_externalize_records_byte_size_so_ref_keeps_its_size():
     """normalize_content 是最后一个还握着 raw bytes 的地方——必须在那里记下体积，
     否则外部化之后 data 变成 ``blob:<sha>``，体积信息永久丢失（image_tokens 是同步的，
-    不能回 BlobStore 取回来）。"""
+    不能回 MemoryBlobStore 取回来）。"""
     from ctx_weft.core.content import normalize_content
 
     raw_len = 1024 * 1024

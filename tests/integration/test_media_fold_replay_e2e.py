@@ -6,7 +6,7 @@ Task 1-5b 各自都有单元测试，但都是在打过桩的边界上验的：r
 
 本文件从真实全链路上跑通它：
 
-    start_session（真 runtime / 真 memory / 真 sqlite BlobStore）
+    start_session（真 runtime / 真 memory / 真 sqlite MemoryBlobStore）
       → 归一层把 base64 外部化成 blob:<sha>
       → PrepareStep 预算触发 escalating_compact → L0.5 `demote_for_budget` 落库
       → 模型（stub LLM）**从 prompt 里读出占位里的 ref**，调 media__get_image
@@ -20,7 +20,7 @@ stub LLM 只做一件真模型也会做的事：**扫 prompt 文本找占位、�
 是被链路本身证明的，不是被测试喂出来的。
 
 ⚠️ 断言口径（台账陷阱 4/5）：
-- 「某件事没有发生」型断言（重定位的 user 消息不落 memory / 未注册 BlobStore 不降级）
+- 「某件事没有发生」型断言（重定位的 user 消息不落 memory / 未注册 MemoryBlobStore 不降级）
   一律配一个「确实发生了」的正向对照，写在**同一个用例内**；
 - base64 一律断言 **`b64decode(...) == 原始字节`**——`b64decode` 默认不抛、会静默解出
   垃圾字节，「不以 blob: 开头」是弱判据（Phase 3b 实测）。
@@ -285,7 +285,7 @@ async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
     runtime.providers.register_memory(memory)
     runtime.providers.register_capability(_EchoToolProvider())
     if blob_store is not None:
-        runtime.providers.register_blob_store(blob_store)
+        runtime.providers.register_memory_blob_store(blob_store)
 
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
@@ -611,7 +611,7 @@ async def test_regression_no_blob_store_keeps_everything_inline_and_text_tool_wi
 ) -> None:
     """回归两条：
 
-    (a) **未注册 BlobStore 时全链路行为不变**——一次 L0.5 事件都没有、memory 里的图仍是
+    (a) **未注册 MemoryBlobStore 时全链路行为不变**——一次 L0.5 事件都没有、memory 里的图仍是
         **逐字节相同**的 inline base64、模型看不到任何占位（自然一次 `get_image` 都不调）、
         wire 上照常出网。主断言取**正向逐字节相等**而不是「没有出现 blob:」：后者对
         「图被整个丢掉」同样成立。
@@ -622,7 +622,7 @@ async def test_regression_no_blob_store_keeps_everything_inline_and_text_tool_wi
     """
     llm = _WireCapturingAnthropicLLM()
     llm.batch_with_echo = True
-    # 没有 BlobStore → 没有占位可读 → stub 模型第一轮就 finish，probe__echo 调不到；
+    # 没有 MemoryBlobStore → 没有占位可读 → stub 模型第一轮就 finish，probe__echo 调不到；
     # 故这一路单独用一个「先 echo 再 finish」的模型（见下）验 (b)。
     runtime, memory, state = await _run_session(llm=llm, blob_store=None)
 
@@ -631,14 +631,14 @@ async def test_regression_no_blob_store_keeps_everything_inline_and_text_tool_wi
     user_recs = [r for r in view if r.role == "user"]
     assert len(user_recs) == 1
     assert user_recs[0].content == _prompt(), (
-        f"未注册 BlobStore 时 memory 记录必须与改造前逐字节一致，实为 {user_recs[0].content!r}")
-    assert not await _l05_events(runtime, state), "未注册 BlobStore 却跑了 L0.5"
-    assert llm.asked == set(), "未注册 BlobStore 时不该有占位可取"
+        f"未注册 MemoryBlobStore 时 memory 记录必须与改造前逐字节一致，实为 {user_recs[0].content!r}")
+    assert not await _l05_events(runtime, state), "未注册 MemoryBlobStore 却跑了 L0.5"
+    assert llm.asked == set(), "未注册 MemoryBlobStore 时不该有占位可取"
     # 正向对照：图确实照常出网了（不是「什么都没发生」）
     wire_images = [b for p in llm.captured_payloads for m in p["messages"]
                    if isinstance(m.get("content"), list)
                    for b in m["content"] if isinstance(b, dict) and b.get("type") == "image"]
-    assert wire_images, "未注册 BlobStore 时图片根本没出网——那不叫「行为不变」"
+    assert wire_images, "未注册 MemoryBlobStore 时图片根本没出网——那不叫「行为不变」"
     decoded = {base64.b64decode(b["source"]["data"]) for b in wire_images}
     assert decoded == {_RAW_A, _RAW_B}, "inline base64 出网时内容变了"
 

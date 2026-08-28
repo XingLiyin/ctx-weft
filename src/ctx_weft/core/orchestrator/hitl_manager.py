@@ -70,7 +70,7 @@ class HitlManager:
         # 见 set_content_normalizer）。签名 async (content, req) -> content——整个
         # HitlRequest 传过去（而非零散字段）：视觉门控要判的是 req.resume_llm_* 指定的
         # 那个模型，blob 的 tenant 锚点也要由 req.session_id 解出。HitlRequest 本就是
-        # 本模块自己的类型，故仍不必 import BlobStore / LLM 任何类型。
+        # 本模块自己的类型，故仍不必 import MemoryBlobStore / LLM 任何类型。
         # None（纯单测直接构造 HitlManager() 时）→ 恒等变换、行为逐字节不变。
         self._content_normalizer: (
             "Callable[[str | list[ContentPart], HitlRequest], "

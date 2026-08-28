@@ -120,7 +120,7 @@ class LLMMessage:
         现在是无声地丢，诊断上更糟。
 
         **不改成「adapter 里 raise」**：adapter 在同步出网主路径上，抛异常会掀掉整个 LLM
-        请求（同 Phase 3b 对 ``BlobStore.get`` 恒不抛的取向）。归一是正解，且落在类型
+        请求（同 Phase 3b 对 ``MemoryBlobStore.get`` 恒不抛的取向）。归一是正解，且落在类型
         自己的边界——``dataclasses.replace``（gateway rehydrate 后即用）会重跑本方法，
         故经 gateway 的路径也一并覆盖。
 

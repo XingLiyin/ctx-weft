@@ -27,7 +27,7 @@ from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
-    BlobStore,
+    MemoryBlobStore,
     ImagePart,
     ProviderContext,
     TextPart,
@@ -40,7 +40,7 @@ _PNG = base64.b64encode(_PNG_BYTES).decode()
 _MALFORMED = "!!!这不是合法的 base64!!!"
 
 
-class _CountingStore(BlobStore):
+class _CountingStore(MemoryBlobStore):
     """能真正外部化的 stub store + put 计数器（内容寻址，ref 形态与真实实现一致）。"""
 
     def __init__(self) -> None:
@@ -75,7 +75,7 @@ class _TextOnlyClient:
     output_reserve = 8_192
 
 
-def _make_runtime(llm, store: "BlobStore | None" = None) -> CtxWeftRuntime:
+def _make_runtime(llm, store: "MemoryBlobStore | None" = None) -> CtxWeftRuntime:
     """构造一个最小 runtime（CtxWeftRuntime 硬要求至少一个 AgentCapabilityProvider）。"""
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
@@ -87,7 +87,7 @@ def _make_runtime(llm, store: "BlobStore | None" = None) -> CtxWeftRuntime:
     templates.register(make_echo_template())
     rt = make_runtime(agent_provider=templates, llm=llm)
     if store is not None:
-        rt.providers.register_blob_store(store)
+        rt.providers.register_memory_blob_store(store)
     return rt
 
 
@@ -315,7 +315,7 @@ async def test_all_three_entry_points_reject_malformed_base64_before_any_put():
     templates.register(make_echo_template())
     store = _CountingStore()
     rt = make_runtime(agent_provider=templates, llm=_VisionClient())
-    rt.providers.register_blob_store(store)
+    rt.providers.register_memory_blob_store(store)
     memory = InMemoryMemoryProvider()
     rt.providers.register_memory(memory)
 
@@ -364,7 +364,7 @@ class _RoutingLLMProvider:
         return self.by_key.get((account, model), self.default)
 
 
-def _make_routing_runtime(provider: _RoutingLLMProvider, store: "BlobStore | None" = None):
+def _make_routing_runtime(provider: _RoutingLLMProvider, store: "MemoryBlobStore | None" = None):
     """注册按账号/模型分派的 provider——_resolve_llm 优先走 registry。"""
     rt = _make_runtime(_VisionClient(), store)
     rt.providers.register_llm_provider(provider)
