@@ -366,6 +366,7 @@ Expected: FAIL —— 当前事件里的 ref 来自 memory store（入口双写�
 - `SessionManager` 新增 `user_prompt_event_jsonable` 参数（`create_session` / `resume_session`），把 `session_manager.py:87-92` 与 `:163-168` 那两段 `await content_to_event_jsonable(...)` **整段删掉**，payload 直接用传进来的值。
 - `TaskManager.push_task` 同理新增参数，删掉 `task_manager.py:295` 的调用。
 - `HitlManager`：`_normalize_hitl_content` 回调（`runtime.py:645-676`）改为返回二元组，`hitl_manager.py:425-445` 用返回的 `event_jsonable` 直接发事件，删掉自己那次 `content_to_event_jsonable`。`set_event_blob_store_resolver` 与 `_event_blob_store_resolver` 随之删除（不再有调用方）。
+  **`HitlManager.set_content_normalizer` 的契约随之改变**——回调的返回值从「content」变成 `(content, event_jsonable)` 二元组。它的类型标注与 docstring 必须同步更新，`_resolve` 里的解包点也要跟上；漏改会让 content 变成一个二元组往下游流，且 mypy 抓得到。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -552,23 +553,19 @@ import pytest
 from ctx_weft.protocols import BLOB_REF_PREFIX
 
 
-class _ExplodingEventStore:
-    """reopen 期间任何 put 都是缺陷——reopen 不可能引入新图片。"""
+@pytest.mark.asyncio
+async def test_task_manager_holds_no_event_blob_store():
+    """「reopen 零 blob IO」是**结构性**保证，不是运行时哨兵：本任务把 TaskManager
+    的 event blob store 整体删掉之后，它根本没有能力发起一次 blob 调用。"""
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
 
-    can_externalize = True
-
-    async def put(self, data, media_type, ctx):
-        raise AssertionError("reopen_task 不该调用 event blob put")
-
-    async def get(self, ref, ctx):
-        raise AssertionError("reopen_task 不该调用 event blob get")
+    assert not hasattr(TaskManager, "set_event_blob_store")
 
 
 @pytest.mark.asyncio
 async def test_reopen_reuses_carried_event_jsonable(task_manager_with_image_task):
     """TASK_REQUEUED 的 payload 由 task 上挂的 event jsonable + 追加文本拼出，零 blob IO。"""
     tm, task_id, emitted = task_manager_with_image_task
-    tm.set_event_blob_store(_ExplodingEventStore())
 
     assert await tm.reopen_task(task_id, reason="重做") is True
 
