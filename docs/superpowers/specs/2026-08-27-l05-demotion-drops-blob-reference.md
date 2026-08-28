@@ -1,6 +1,6 @@
 # 缺陷：L0.5 降级让 blob 引用归零，图在一个宽限期后永久丢失
 
-> 状态：**已复现，解法待定**（2026-08-27 立项）
+> 状态：**已复现，解法已定稿**（2026-08-27），待实施
 > 影响：`feat/multimodal` 分支，Phase 4 引入
 > 复现测试：`tests/unit/test_l05_demotion_blob_lifecycle.py`（`xfail(strict=True)`）
 > 与双 blob store 设计**无关**——这是 memory 侧内部的问题，两个 store 分开之后依然存在。
@@ -76,30 +76,81 @@ L0.5 被排在 L1/L2/L3 之前的三条理由（子设计 §6）中，第三条�
 然后拿到一句「字节取不到」。而占位文本仍在、ref 仍在、`_locate` 仍能命中——**失败发生
 在最后一步，且之前的每一步都表现正常**，诊断上很不友好。
 
-## 5. 解法方向（待裁定）
+## 5. 解法：让 ref 永远以结构化形式可采集（已裁定 2026-08-27）
 
-| | 做法 | 问题 |
+**根本判断：这不是机制选型问题，是 ref 逃出了结构化表示。** 换成引用计数或 owner set
+也救不了——`retain` 的时候同样得先知道补偿记录引用了哪个 sha，而那个 ref 当时只存在于
+一段自由文本里。真正要修的是「让 ref 不逃」；修完之后，现有的 mark-and-sweep 就是最省
+的机制，一行 SQL 都不用改。
+
+### 5.1 blob store 保持纯 CAS
+
+```python
+class MemoryBlobStore(ABC):      # EventBlobStore 同形
+    can_externalize -> bool
+    put(data, media_type, ctx) -> ref
+    get(ref, ctx) -> tuple[bytes, str] | None
+```
+
+**不加 `retain` / `release`，不记任何引用。** 它只回答「这个 sha 的字节是什么」。
+
+选 mark-and-sweep 而非 owner set / 引用计数的理由：retain/release 的**配对正确性**是
+分布式系统里最易出 bug 的地方——漏 release 永久泄漏、多 release 数据丢失，两者都难以
+事后发现。mark-and-sweep 没有配对，活引用集合随时可从当前状态重新推导，错了下一轮自愈。
+Git（`git gc` 从 refs 遍历）、IPFS（pinning）、Docker registry 都是这个取向。
+
+### 5.2 `MemoryEvent` / `MemoryRecord` 加 `blob_refs` 字段 ← 关键
+
+```python
+blob_refs: list[str] = field(default_factory=list)
+```
+
+**L0.5 补偿记录填上它降级掉的那些 ref。** 于是记录里同时有两样东西，各服务一条路径：
+
+| 载体 | 给谁看 | 谁解析 |
 |---|---|---|
-| A | `extract_blob_refs` 也扫占位文本里的 `blob:` | 归一层要知道占位格式，撞 `refs.py`「本仓唯一知道占位长什么样的地方」 |
-| B | 补偿记录保留 `ImagePart(source_type="ref")`，加 `demoted=True` 标记 | 引用边自然保住，但 `rehydrate_content` / adapter 会把它当真图取回出网，等于降级白做 |
-| C | provider 侧额外正则扫 content 文本 | 判据分叉，正是 §2 那段注释警告的事 |
-| **D**（倾向） | `MemoryEvent` 加显式 `blob_refs: list[str]` 字段，写侧填 | 引用不再靠内容形态推断；`fold.py` 降级时把 ref 显式带上。协议多一个字段 |
+| `content` 里的文本占位 | **模型**（照着它调 `media:get_image`） | `refs.py`（仍是唯一知道占位格式的地方） |
+| `blob_refs` 里的结构化 ref | **GC** | mark 函数 |
 
-D 的额外好处：`MemoryProvider` 协议可以把「引用边怎么建」从「provider 去猜内容」变成
-「调用方显式声明」，第三方 provider 不必复刻 `_is_ref_part` 的判据。
+两条路径互不解析对方的格式。其它写侧一行不用改——普通 `ImagePart(source_type="ref")`
+仍被自动采集。
 
-需要一并想清楚的：
+### 5.3 mark 判据收成一个函数
 
-- **存量数据**：已降级过的记录引用边已经丢了，其 blob 可能已被回收。迁移时能否从占位
-  文本反解 ref 补建引用边？（一次性脚本，不是常态判据——可以接受 A 的做法。）
-- **协议兼容**：`blob_refs` 缺省为空时，provider 是否回落到扫内容？回落会让两条路径并存；
-  不回落则所有写侧调用点都必须填。
-- **`extract_blob_refs` 的去留**：若走 D，它在 provider 侧还有没有调用方。
+```python
+def collect_blob_refs(event) -> list[str]:
+    """结构化 ref part ∪ event.blob_refs。不解析任何文案。"""
+```
 
-## 6. 本次只做
+取代 provider 里直接调 `extract_blob_refs`。判据从此**只看结构化字段**，不随占位文案
+演进而失效——这正是 §2 那段注释担心的「判据分叉」，只是修在了正确的层次。
 
-1. 复现测试 `tests/unit/test_l05_demotion_blob_lifecycle.py`，`xfail(strict=True)` 钉住。
-   修好后测试自动 XPASS，`strict=True` 会让它转红，提醒删掉标记——防止悄悄修好又悄悄退化。
-2. 本文档。
+### 5.4 sweep 与宽限期原样保留
 
-**不改实现**——解法要先裁定（§5）。
+`SqlMemoryProvider.collect_blobs` 的 SQL **一个字都不改**。`memory_blob_refs` 仍是 mark
+结果的物化（ingest 时写，避免 sweep 去解析 JSON 全表扫），改的只是**写入它的判据**
+变完整了。
+
+宽限期的论证不受影响：它解决的是 `put` 与首次 ingest 之间的窗口，与 mark 判据正交
+（同 Git 的 `gc.pruneExpire`）。
+
+### 5.5 event 侧同构
+
+`EventBlobStore` 同样是纯 CAS。事件侧 payload 里的 ref 已经是结构化 dict
+（`{"type":"image","source_type":"ref","data":"blob:…"}`），host 直接扫即可。清理策略
+由 host 按事件保留策略定，与 memory 侧独立（见 `2026-08-27-dual-blob-store-design.md` §9）。
+
+### 5.6 无存量迁移
+
+`feat/multimodal` 尚未上线，不存在已降级的生产数据。**不写迁移脚本。**
+
+## 6. 已完成
+
+复现测试 `tests/unit/test_l05_demotion_blob_lifecycle.py`，`xfail(strict=True)` 钉住。
+两个对照组把失败精确定位在引用边，而非降级逻辑或占位格式。修复后缺陷用例转 XPASS，
+`strict=True` 会让它转红，提醒删掉标记。
+
+## 7. 待实施
+
+见实施计划。改动量：`MemoryEvent` / `MemoryRecord` 各加一个默认空字段、`fold._rebuild`
+填一行、provider 换一个 mark 函数。SQL、宽限期、blob 协议均不动。
