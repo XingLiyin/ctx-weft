@@ -19,6 +19,7 @@ from ctx_weft.protocols import (
     LLMClient,
 )
 from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
+from ctx_weft.providers.llm._modality import downgrade_for_text_only
 from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
 from ctx_weft.providers.llm.text_calls import ContentGate, merge_content as _merge_content
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -299,9 +300,24 @@ class OpenAIAdapter(LLMClient):
             "Content-Type": "application/json",
         }
 
+    def _prepare_messages(self, request: LLMRequest) -> list[LLMMessage]:
+        """出网前的模态处置——**本类是纯文本 adapter**，图片降级成文本占位并告警。
+
+        能力由「注册了哪个 adapter 类」表达（spec 2026-08-28 §2「类型即声明」）：
+        要发图请用 ``OpenAIMultimodalAdapter``，它覆盖本方法为原样透传。
+
+        降级之后 ``_serialize_messages`` 里的 tool 图重定位（``_TOOL_IMAGE_NOTICE``）
+        天然空转：已无 image part，``relocated`` 恒为空，一条 user 消息都不追加。
+        故那段逻辑不需要任何改动。
+
+        纯文本请求返回同一对象、不记日志（无图会话逐字节不受影响）。
+        """
+        return downgrade_for_text_only(
+            request, adapter_hint="OpenAIMultimodalAdapter")
+
     def _build_payload(self, request: LLMRequest) -> dict[str, Any]:
         model = request.model if request.model and request.model != "mock" else self._model
-        messages = _serialize_messages(request.system, request.messages)
+        messages = _serialize_messages(request.system, self._prepare_messages(request))
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -317,6 +333,21 @@ class OpenAIAdapter(LLMClient):
             if self._tool_choice is not None:
                 payload["tool_choice"] = self._tool_choice
         return payload
+
+
+class OpenAIMultimodalAdapter(OpenAIAdapter):
+    """支持图片输入的 OpenAI adapter。
+
+    与基类的唯一区别：``_prepare_messages`` 原样透传，图片得以走到
+    ``_serialize_messages`` 面前——被拼成 ``image_url`` data URL，且 ``role="tool"``
+    里的图按既有逻辑重定位到随后的 user 消息（OpenAI 的 tool 只收纯文本）。
+
+    能力由类型表达（spec 2026-08-28 §2）——host 注册哪个类，就是在声明该账号下的
+    模型收不收图。core 对此零判断。
+    """
+
+    def _prepare_messages(self, request: LLMRequest) -> list[LLMMessage]:
+        return request.messages
 
 
 def _resolve_tc_index(

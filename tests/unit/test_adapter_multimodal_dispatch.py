@@ -138,3 +138,63 @@ def test_anthropic_plain_text_payload_unchanged_between_classes():
     req = _req(LLMMessage(role="user", content="纯文本"))
     assert _anth(multimodal=False)._build_payload(req) == \
         _anth(multimodal=True)._build_payload(req)
+
+
+# ── Task 3：OpenAI 分流 ───────────────────────────────────────────────────
+
+
+def _oai(multimodal: bool):
+    from ctx_weft.providers.llm.openai import OpenAIAdapter, OpenAIMultimodalAdapter
+    cls = OpenAIMultimodalAdapter if multimodal else OpenAIAdapter
+    return cls(api_key="k")
+
+
+def _roles(payload) -> list[str]:
+    return [m["role"] for m in payload["messages"]]
+
+
+def test_openai_text_only_downgrades_user_image():
+    payload = _oai(multimodal=False)._build_payload(
+        _req(LLMMessage(role="user", content=[TextPart(text="看图"), _img()])))
+    blocks = payload["messages"][0]["content"]
+    assert [b["type"] for b in blocks] == ["text", "text"]
+    assert blocks[1]["text"] == "[image image/png]"
+
+
+def test_openai_multimodal_keeps_user_image_as_data_url():
+    payload = _oai(multimodal=True)._build_payload(
+        _req(LLMMessage(role="user", content=[TextPart(text="看图"), _img()])))
+    blocks = payload["messages"][0]["content"]
+    assert [b["type"] for b in blocks] == ["text", "image_url"]
+    assert blocks[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_openai_text_only_emits_no_relocated_user_message():
+    """纯文本 adapter：tool 图已降级 → 不产生重定位的 user 消息。"""
+    payload = _oai(multimodal=False)._build_payload(_req(
+        LLMMessage(role="user", content="q"),
+        LLMMessage(role="tool", content=[_img()], tool_call_id="tc1"),
+    ))
+    assert _roles(payload) == ["user", "tool"]
+    assert "[image see the following message]" not in payload["messages"][-1]["content"]
+
+
+def test_openai_multimodal_relocates_tool_image_to_following_user_message():
+    payload = _oai(multimodal=True)._build_payload(_req(
+        LLMMessage(role="user", content="q"),
+        LLMMessage(role="tool", content=[_img()], tool_call_id="tc1"),
+    ))
+    assert _roles(payload) == ["user", "tool", "user"]
+    assert [b["type"] for b in payload["messages"][-1]["content"]] == ["image_url"]
+
+
+def test_openai_text_only_downgrades_assistant_image():
+    payload = _oai(multimodal=False)._build_payload(
+        _req(LLMMessage(role="assistant", content=[_img()])))
+    assert [b["type"] for b in payload["messages"][0]["content"]] == ["text"]
+
+
+def test_openai_plain_text_payload_unchanged_between_classes():
+    req = _req(LLMMessage(role="user", content="纯文本"))
+    assert _oai(multimodal=False)._build_payload(req) == \
+        _oai(multimodal=True)._build_payload(req)
