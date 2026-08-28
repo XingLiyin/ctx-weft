@@ -311,7 +311,9 @@ class EventBlobStore(ABC):
         class MyBlobStore(MemoryBlobStore, EventBlobStore): ...
 
     **ref 前缀取自 `protocols.context.BLOB_REF_PREFIX`**，与 memory 侧同一个常量——
-    内容寻址的 sha 口径两边必须逐字节一致，入口双写才能得到同一个 ref。
+    但**仅此而已**：两侧的 ref 是**两个独立的命名空间**，core 从不比较、也从不拿
+    一侧的 ref 去另一侧解。host 用同一实例时两个 ref 恰好相同，那是实现层的巧合，
+    不是任何代码可以依赖的前提。
 
     ⚠️ **回收策略由 host 定，core 不规定。** 事件流里的 ref 能否取回字节，完全取决于
     host 让 event blob 活多久：想让事件流永远可重建，就让回收与事件保留策略对齐

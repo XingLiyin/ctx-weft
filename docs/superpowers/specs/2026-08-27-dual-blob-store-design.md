@@ -5,6 +5,12 @@
 > （`protocols/events.py` 现已存在，commit `8788f02..84a9308`）
 > 上级：`2026-08-20-multimodal-design.md`
 
+> ⚠️ **§3 的「两边 sha 口径必须逐字节一致」与 §5「入口双写」已于 2026-08-28 被推翻**，
+> 见 `docs/superpowers/plans/2026-08-28-blob-store-decoupling.md`。§5.1 当初以成本为由
+> 否决的「各自 put + 跨界搬运」正是现行方案：跨界只发生在恢复路径这一个交界处，由
+> event 侧发起（`hydrate_event_content`），memory 的写路径不再替 event 代劳。
+> 其余各节（§4 注册面、§7 严格门控、§8 条件可见、§9 生命周期归 host）仍然有效。
+
 ## 0. 本设计写于 8-27，这些前提在实施前已经变了
 
 写完之后仓里发生了两件事，本节逐条订正，正文已按此更新：

@@ -518,6 +518,15 @@ async def hydrate_event_content(
                 setattr(task, field_name, hydrated)
 ```
 
+> ⚠️ **执行中被证伪**：上面 `_restore_task_prompts` 的 docstring 宣称「逐 task 独立
+> 降级，不整体失败」，但给出的代码里**没有任何 try/except**——且该方法是
+> `normalize_content` 的第四个调用点，绕过了 `_validate_and_normalize_content` 固化的
+> validate→normalize 顺序不变量（`normalize_content` 里的 `base64.b64decode(...,
+> validate=True)` 是刻意不加保护的，前提正是「已被 validate 筛过」）。实际实现已在
+> `runtime.py::_restore_task_prompts` 里补上逐 task、逐字段的 try/except，失败时
+> `logger.error(exc_info=True)` 并用 `downgrade_images_to_text` 降级，坏 task 不拖垮
+> 整场恢复。
+
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `pytest tests/integration/test_media_fold_replay_e2e.py -v`
@@ -631,6 +640,13 @@ def _append_text_sections(
         return (jsonable or "") + suffix
     return [*jsonable, {"type": "text", "text": suffix}]
 ```
+
+> ⚠️ **执行中被证伪**：上面这版 `_append_text_sections` 声称「与 `content_with_suffix`
+> 对 content 的处理同构」，实际不是——`content_with_suffix`（`core/content.py`）在内容以
+> 文本 part 结尾时会把后缀**并入已有的尾部 TextPart**，而这版无条件另起一个。实际实现
+> 已改为合并同一逻辑，并额外统一了空 base（`None` / `""` / `[]`）一律产出 str，以与
+> memory 侧保持一致。见 `src/ctx_weft/core/orchestrator/task_manager.py` 里的
+> `_append_text_sections` 实现。
 
 `set_event_blob_store` / `self._event_blob_store` 在 `reopen_task` 里不再被用到；`push_task` 若已按 Task 3 改为接收现成 jsonable，则整个 `TaskManager` 都不再需要 event blob store——一并删除 `set_event_blob_store`、`_event_blob_store`、`_event_ctx` 以及 `session_manager.py:211` / `runtime.py:1016` 的两处调用点。
 

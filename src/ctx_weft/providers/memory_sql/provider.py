@@ -277,6 +277,11 @@ class SqlMemoryProvider(MemoryProvider, MemoryBlobStore, EventBlobStore):
     （``register_memory_blob_store`` + ``register_event_blob_store``），
     通常传同一个 `SqlMemoryProvider` 实例。
 
+    ⚠️ 它同时满足两个契约，**不代表 core 可以假设两边 ref 相同**。解耦后（2026-08-28）
+    memory 与 event 的 ref 是两个独立命名空间；本类共用一张 memory_blobs 表使它们碰巧
+    一致，那是本实现的选择。共用时 `collect_blobs` 只看 memory 侧活引用，会删掉事件流
+    仍需要的字节——分开部署（如两个 `FsBlobStore` 实例）可回避该陷阱。
+
     ── 【blob 与租户】三处取向（Task C3，简报要求逐处表态）────────────────────
 
     1. **回收侧：不按 tenant 过滤活引用（看全表）。** 这是安全要求而非选择：
