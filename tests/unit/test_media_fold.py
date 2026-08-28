@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ctx_weft.core.media import demote_all, demote_for_budget
+from ctx_weft.core.media.fold import _rebuild
 from ctx_weft.core.media.policy import demotable_ref, plan_demotions
 from ctx_weft.core.media.refs import decode_image_placeholder
 from ctx_weft.core.utils import content_to_text, image_part_count, image_tokens
@@ -31,6 +32,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
     MemoryKind,
+    MemoryRecord,
     MemoryScope,
     ProviderContext,
     TextPart,
@@ -99,6 +101,15 @@ async def _seed(mem, contents, *, same_ts=False, role="user"):
 
 async def _view(mem):
     return await mem.load_view(_ADDR, MemoryScope.TASK, _pctx())
+
+
+def _make_record(*, content, blob_refs=None):
+    """`_rebuild` 的直接测试用——不经 provider 造一条 `MemoryRecord`（Ruling 3）。"""
+    return MemoryRecord(
+        id="rec_1", type="conversation_turn", content=content,
+        timestamp=_BASE, kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+        address=_ADDR, blob_refs=list(blob_refs or []),
+    )
 
 
 # ── 1. policy 纯函数：选中集合 ────────────────────────────────────────────────
@@ -323,3 +334,40 @@ async def test_demote_all_empty_id_list_is_a_no_op():
     await _seed(mem, [[_img(0)]])
     assert await demote_all(mem, [], _pctx(), address=_ADDR) == 0
     assert mem.fold_calls == 0
+
+
+# ── 8. `_rebuild` 显式声明降级掉的 ref（缺陷 2026-08-27） ──────────────────────
+
+
+def test_rebuild_declares_demoted_refs() -> None:
+    """降级掉的 ref 必须进 blob_refs——否则 GC 采不到，图过宽限期被删。"""
+    rec = _make_record(content=[
+        TextPart(text="看图"),
+        ImagePart(data="blob:aaaa", media_type="image/png", source_type="ref"),
+    ])
+    ev = _rebuild(rec, (1,), MemoryScope.TASK)
+    assert ev is not None
+    assert ev.blob_refs == ["blob:aaaa"]
+    assert not hasattr(ev.content[1], "data"), "降级后该 part 应是 TextPart 占位"
+
+
+def test_rebuild_accumulates_previously_declared_refs() -> None:
+    """两次降级：第一次降的 ref 不能在第二次重建时丢掉。"""
+    rec = _make_record(
+        content=[
+            TextPart(text="[image blob:aaaa media_type=image/png]"),
+            ImagePart(data="blob:bbbb", media_type="image/png", source_type="ref"),
+        ],
+        blob_refs=["blob:aaaa"],
+    )
+    ev = _rebuild(rec, (1,), MemoryScope.TASK)
+    assert ev is not None
+    assert ev.blob_refs == ["blob:aaaa", "blob:bbbb"]
+
+
+def test_rebuild_without_demotion_keeps_existing_refs() -> None:
+    """同刻组里被原样重写的记录：不降级，但已有的声明要照抄。"""
+    rec = _make_record(content=[TextPart(text="纯文本")], blob_refs=["blob:aaaa"])
+    ev = _rebuild(rec, (), MemoryScope.TASK)
+    assert ev is not None
+    assert ev.blob_refs == ["blob:aaaa"]

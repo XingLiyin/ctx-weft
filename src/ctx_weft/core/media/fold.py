@@ -51,6 +51,7 @@ def _rebuild(rec: Any, indices: Sequence[int], scope: MemoryScope) -> MemoryEven
     字段逐一照抄（timestamp 保住位置、role/topic/metadata 保住语义），只有 ``id`` 留空
     （见模块 docstring）。``causation_id`` 不在 `MemoryRecord` 上，无从照抄——L0.5 降级
     会丢这一个字段，记在此处以免日后当成 provider 的 bug 去查。
+    ``blob_refs`` 是**累积**的（旧的 + 本次降级的），不是照抄——见字段本身的注释。
 
     重建失败（`MemoryEvent.__post_init__` 的 v2 全址不变量不满足、address 缺失等）返回
     ``None`` 而不是抛：这条记录不降级，图还在、还能被取回，比让整级 compact 崩掉好。
@@ -61,6 +62,7 @@ def _rebuild(rec: Any, indices: Sequence[int], scope: MemoryScope) -> MemoryEven
     content = getattr(rec, "content", None)
     if content is None:                # content=None 造不出 MemoryEvent（__post_init__ 拒）
         return None
+    demoted: list[str] = []
     if indices:
         new = list(content)
         for i in indices:
@@ -68,7 +70,14 @@ def _rebuild(rec: Any, indices: Sequence[int], scope: MemoryScope) -> MemoryEven
             if ref is None:            # 计划与内容对不上（不该发生）→ 整条放弃，别写坏占位
                 return None
             new[i] = TextPart(text=encode_image_placeholder(ref, _media_type(content[i])))
+            demoted.append(ref)
         content = new
+    # 降级掉的 ref 必须显式声明（缺陷 2026-08-27）：占位是 TextPart，provider 的
+    # mark 判据只看结构化字段，扫不出文本里的 ref。不声明 → 引用归零 → 字节过宽限期
+    # 被回收 → media:get_image 取不回，L0.5 的「可逆」失效。
+    # 累积而非覆盖：本记录可能已被降级过一轮，那一轮的 ref 只在它的 blob_refs 里。
+    prior = list(getattr(rec, "blob_refs", None) or ())
+    blob_refs = list(dict.fromkeys([*prior, *demoted]))
     try:
         return MemoryEvent(
             type=getattr(rec, "type", None),
@@ -80,6 +89,7 @@ def _rebuild(rec: Any, indices: Sequence[int], scope: MemoryScope) -> MemoryEven
             role=getattr(rec, "role", None),
             topic=getattr(rec, "topic", None),
             metadata=dict(getattr(rec, "metadata", None) or {}),
+            blob_refs=blob_refs,
         )
     except (ValueError, TypeError):
         logger.warning("L0.5 降级跳过一条记录：无法由 MemoryRecord 重建 MemoryEvent "
