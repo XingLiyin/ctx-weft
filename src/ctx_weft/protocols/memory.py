@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -472,3 +472,83 @@ class MemoryProvider(Protocol):
     async def describe(self, ctx: ProviderContext) -> MemoryProviderInfo:
         """返回 provider 能力声明。"""
         ...
+
+
+# ── Blob 存储（多模态字节侧）─────────────────────────────────────────────────
+
+
+BLOB_REF_PREFIX = "blob:"
+
+
+class BlobStore(ABC):
+    """core 的「二进制 sink」契约：存取图片等二进制内容，core 只见 ref。
+
+    与 ``protocols.filesystem.SpillSink`` 同形——core 不直接碰存储，只知道
+    「有个 sink 能存能取」。
+
+    **本协议与 MemoryProvider 同处一个模块，但刻意不是它的方法**（裁定 D4）：
+    事件里存的永远是短标记、从不存字节，故 memory 是图片字节的唯一持有者，存取与
+    回收都应与它同事务——语义上这就是 memory 多模态支持的字节侧，与上面
+    ``MemoryProvider`` 的【多模态无损存取契约】（part 结构侧）是同一件事的两面，
+    宿主实现多模态 memory 时应在本模块一次读全。
+    保持独立 ABC 而不并入 ``MemoryProvider``，是因为 blob 能力**可选**：
+    ``InMemoryProvider`` 不实现它仍然完全合规，而 ``ProviderRegistry.get_blob_store()``
+    的自动解析判据正是 ``isinstance(mem, BlobStore) and mem.can_externalize``——
+    并入协议会让该判据恒真、失去分辨力。
+    仓内实现见 ``ctx_weft.providers.memory_sql.SqlMemoryProvider``。
+    （Phase 3b 曾有一个挂在 FilesystemToolsProvider 上的实现，裁定 D5 已移除——
+    字节与引用分居两处时，回收无法与 ingest/fold 事务性地一致；本协议也因此
+    从 ``protocols/filesystem.py`` 迁至此处。）
+
+    put 必须**内容寻址且幂等**：同样的 data 返回同样的 ref，重复调用不重复存。
+    这同时给到三件事：写入端去重、重放安全、以及 rehydrate 字节稳定——同一 ref
+    每次还原出的 base64 完全一致，Anthropic 的 prompt cache 前缀不会被打碎。
+
+    get 对不存在 / 已回收的 ref 返回 None，**不得 raise**：blob 过期、宿主换机、
+    GC 误删都会发生，调用方据此降级为文本占位，绝不因取图失败中断 loop。
+    """
+
+    @property
+    def can_externalize(self) -> bool:
+        """本 store 是否真的能存——``NullBlobStore`` 返回 False。
+
+        调用方据此**先探询、再决定**，而不是调用 put 并捕获 NotImplementedError：
+        后者会把「响亮失败」降级成控制流，让真正的接线错误也被静默吞掉
+        （Phase 1 终审契约）。基类默认 True，既有实现无需改动。
+        """
+        return True
+
+    @abstractmethod
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        ...
+
+    @abstractmethod
+    async def get(
+        self, ref: str, ctx: ProviderContext
+    ) -> "tuple[bytes, str] | None":
+        ...
+
+
+class NullBlobStore(BlobStore):
+    """未注册 BlobStore 时的默认实现——保证不接 blob 的宿主行为完全不变。
+
+    put 刻意抛错：Phase 1 内没有任何调用方（外部化在 Phase 3），抛错可在
+    Phase 3 接线错误时立刻暴露，而不是静默产出一个假 ref。调用方（
+    ``core.content.normalize_content``）先探询 can_externalize 决定是否外部化，
+    **不**捕获这里的 NotImplementedError——它仍是接线错误的响亮信号。
+    """
+
+    @property
+    def can_externalize(self) -> bool:
+        return False
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        raise NotImplementedError(
+            "No BlobStore registered; register one via "
+            "ProviderRegistry.register_blob_store() before externalizing content."
+        )
+
+    async def get(
+        self, ref: str, ctx: ProviderContext
+    ) -> "tuple[bytes, str] | None":
+        return None

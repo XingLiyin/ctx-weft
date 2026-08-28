@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.errors import InvalidContentError, VisionNotSupportedError
 from ctx_weft.core.utils import content_to_text
-from ctx_weft.protocols.filesystem import BLOB_REF_PREFIX
+from ctx_weft.protocols.memory import BLOB_REF_PREFIX
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
@@ -29,6 +29,7 @@ __all__ = [
     "content_with_prefix",
     "content_with_suffix",
     "content_to_jsonable",
+    "content_to_jsonable_refs_only",
     "content_from_jsonable",
     "normalize_content_parts",
     "redact_content_for_event",
@@ -139,6 +140,56 @@ def content_to_jsonable(
                 item["byte_size"] = byte_size
             out.append(item)
     return out
+
+
+def content_to_jsonable_refs_only(
+    content: "str | list[ContentPart] | None",
+) -> "str | list[dict] | None":
+    """事件库专用的 `content_to_jsonable`：**保 ref、绝不落字节、不拍扁**（裁定 2026-08-27）。
+
+    用在 `SESSION_CREATED` / `SESSION_RESUMED` 的 ``user_prompt``。这两条事件此前走
+    ``content_to_text``——图片 part 被静默跳过，事件流重放出来的 session prompt 里
+    「曾经有一张图」这件事完全无痕。而直接改用 ``content_to_jsonable`` 又会在宿主
+    **没接 BlobStore** 时把 inline base64 原样写进事件行（一张 5 MiB 图 ≈ 6.7 MB
+    的事件载荷），故两者都不可用，需要这第三种。
+
+    规则逐 part 判定：
+
+    - 文本 part → 原样；
+    - ``source_type == "ref"`` 的图 → **原样**。``data`` 是 ``blob:<sha>`` 短标记，
+      重放后可解析、可 `rehydrate_content` 还原（接了 BlobStore 的宿主走这条）；
+    - 其余图（``base64`` / ``url``）→ 降级成 ``[image {media_type}]`` 文本 part。
+
+    降级复用 per-purpose 的 ``_IMAGE_PLACEHOLDER_TMPL``，**刻意不新增第六种占位**
+    （占位清单见 `core/media/refs.py` 模块 docstring）。语义也对得上：两者都是
+    「不落库/不留字节的单向渲染」，永不回读。
+
+    ⚠️ 与 ``redact_content_for_event`` 的分工：那个产出**一整个 str**（含
+    ``ref:blob:dead…`` 的截断预览），用于纯观测事件（`LLM_PROMPT_SENT` /
+    `CAPABILITY_FINISHED`）的调试展示，不可回读；本函数产出 **jsonable 结构**，
+    ref 完整、可经 ``content_from_jsonable`` 还原，用于参与状态重建的事件。
+    别把两者互换。
+
+    ⚠️ ref 可能悬空：blob 的引用边只锚在 ``memory_events`` 的活记录上
+    （`memory_sql` 的 ``collect_blobs``），event store 不构成引用。故记录被 fold
+    之后，事件流里的 ref 过宽限期就取不回字节——`rehydrate_content` 会降级成
+    ``[image unavailable: …]``。这是外部化的固有代价，本函数只保证**结构与 ref
+    不丢**，不保证字节永远取得回来。
+
+    ``str`` / ``None`` 原样返回同一对象，纯文本路径零成本。
+    """
+    if content is None or isinstance(content, str):
+        return content
+    from ctx_weft.protocols import TextPart
+    prepared: list[Any] = []
+    for part in content:
+        if _is_image_part(part) and _part_field(part, "source_type", "base64") != "ref":
+            media_type = str(_part_field(part, "media_type", "") or "") or "image"
+            prepared.append(TextPart(text=_IMAGE_PLACEHOLDER_TMPL.format(
+                media_type=media_type)))
+        else:
+            prepared.append(part)
+    return content_to_jsonable(prepared)
 
 
 def content_from_jsonable(

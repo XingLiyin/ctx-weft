@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.core.content import content_to_text
+from ctx_weft.core.content import content_to_jsonable_refs_only
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
@@ -56,7 +56,7 @@ class SessionManager:
 
         session = Session(
             id=sid,
-            user_prompt=content_to_text(user_prompt),
+            user_prompt=user_prompt,
             status="RUNNING",
             tenant_id=tenant_id,
             root_agent_id=agent.id,
@@ -75,7 +75,9 @@ class SessionManager:
         ts = now_utc()
         await self._emit(EventType.SESSION_CREATED, sid, tenant_id, timestamp=ts, payload={
             "template_id": template_id,
-            "user_prompt": content_to_text(user_prompt),
+            # 保 ref、不落字节、不拍扁（裁定 2026-08-27）——本事件参与状态重建
+            # （reducers 的 SESSION_CREATED 分支），拍扁会让重放后「曾有一张图」无痕。
+            "user_prompt": content_to_jsonable_refs_only(user_prompt),
             "root_agent_id": agent.id,
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
@@ -128,7 +130,7 @@ class SessionManager:
 
         session = Session(
             id=session_id,
-            user_prompt=content_to_text(user_prompt),
+            user_prompt=user_prompt,
             status="RUNNING",
             tenant_id=tenant_id,
             root_agent_id=sess_proj.root_agent_id,
@@ -143,7 +145,8 @@ class SessionManager:
         logger.info("Session %s resumed (agent=%s)", session_id, sess_proj.root_agent_id)
 
         await self._emit(EventType.SESSION_RESUMED, session_id, tenant_id, payload={
-            "user_prompt": content_to_text(user_prompt),
+            # 同 SESSION_CREATED：保 ref、不落字节、不拍扁。
+            "user_prompt": content_to_jsonable_refs_only(user_prompt),
             "root_agent_id": sess_proj.root_agent_id,
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",

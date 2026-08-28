@@ -23,7 +23,7 @@ from ctx_weft.core.utils import _IMAGE_PART_TOKENS, content_to_text
 from ctx_weft.protocols import (
     ImagePart, LLMChunk, LLMUsage, MemoryEventType, ProviderContext, TextPart, ToolCall,
 )
-from ctx_weft.protocols.filesystem import BLOB_REF_PREFIX
+from ctx_weft.protocols.memory import BLOB_REF_PREFIX
 from ctx_weft.providers.llm.anthropic import AnthropicAdapter
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider

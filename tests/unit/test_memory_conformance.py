@@ -58,7 +58,7 @@ from ctx_weft.protocols import (
     Subscription,
 )
 from ctx_weft.protocols.context import ImagePart, TextPart
-from ctx_weft.protocols.filesystem import BlobStore
+from ctx_weft.protocols.memory import BlobStore
 from ctx_weft.protocols.memory_compat import MemoryKind
 from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.memory_sql import open_sqlite_memory

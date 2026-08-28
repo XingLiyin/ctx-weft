@@ -141,7 +141,9 @@ class Session:
     """会话容器。"""
 
     id: str
-    user_prompt: str
+    # 多模态：保 ref 形态（裁定 2026-08-27）。不拍扁——否则事件流重放不出
+    # 「曾有一张图」；也不内联字节——见 content_to_jsonable_refs_only。
+    user_prompt: "str | list[ContentPart]"
     status: SessionStatus
     goal: str = ""
     tenant_id: str = "default"

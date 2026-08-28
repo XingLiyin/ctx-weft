@@ -9,7 +9,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from ctx_weft.core.content import content_from_jsonable, content_to_jsonable
+from ctx_weft.core.content import (
+    content_from_jsonable,
+    content_to_jsonable,
+    content_to_jsonable_refs_only,
+)
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.events import TASK_STATUS_BY_EVENT, Event, EventType
 from ctx_weft.core.state.models import HitlRequest
@@ -157,7 +161,10 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
         "sessions": {
             sid: {
                 "id": s.id,
-                "user_prompt": s.user_prompt,
+                # 保 ref 形态（裁定 2026-08-27）：session prompt 与 task 侧同为
+                # 状态源，拍扁会让重放后「曾有一张图」无痕。refs_only 而非
+                # content_to_jsonable —— 快照里同样不落字节。
+                "user_prompt": content_to_jsonable_refs_only(s.user_prompt),
                 "template_id": s.template_id,
                 "status": s.status,
                 "goal": s.goal,
@@ -229,7 +236,7 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
     for sid, s in data.get("sessions", {}).items():
         sessions[sid] = SessionView(
             id=s["id"],
-            user_prompt=s.get("user_prompt", ""),
+            user_prompt=content_from_jsonable(s.get("user_prompt", "")),
             template_id=s.get("template_id", ""),
             status=s.get("status", "UNKNOWN"),
             goal=s.get("goal", ""),
@@ -407,7 +414,8 @@ def _apply(view: RunStateView, ev: Event) -> None:
     elif t == EventType.SESSION_CREATED:
         sess = SessionView(
             id=ev.session_id,
-            user_prompt=p.get("user_prompt", ""),
+            # 存量事件是裸 str → content_from_jsonable 原样返回，零数据迁移。
+            user_prompt=content_from_jsonable(p.get("user_prompt", "")),
             template_id=p.get("template_id", ""),
             root_agent_id=p.get("root_agent_id", ""),
             llm_model=p.get("llm_model", ""),
@@ -425,7 +433,9 @@ def _apply(view: RunStateView, ev: Event) -> None:
     elif t == EventType.SESSION_RESUMED:
         sess = view.sessions.get(ev.session_id)
         if sess is not None:
-            sess.user_prompt = p.get("user_prompt", sess.user_prompt)
+            _up = p.get("user_prompt")
+            if _up is not None:
+                sess.user_prompt = content_from_jsonable(_up)
             sess.status = "RUNNING"
         view.session_status = "RUNNING"
 

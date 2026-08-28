@@ -20,7 +20,7 @@ class SessionView:
     """Session 的轻量投影，从事件流 reduce 而来。"""
 
     id: str
-    user_prompt: str = ""
+    user_prompt: "str | list[ContentPart]" = ""
     template_id: str = ""
     status: str = "RUNNING"
     goal: str = ""
