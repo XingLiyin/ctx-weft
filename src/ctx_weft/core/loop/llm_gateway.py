@@ -388,6 +388,12 @@ async def stream_llm(
     图在入口已被视觉门控拒掉」，入口门控删除后该前提不成立，覆盖面必须扩到所有角色，
     而那正是 adapter 的 ``_prepare_messages`` 在做的事。留在这里就是第二处会分叉的判据。
 
+    已知代价：本函数对纯文本 adapter 一样会 rehydrate 每一个 blob ref（blob get +
+    base64 编码，单图最大 5 MiB），rehydrate 完之后 adapter 的 ``_prepare_messages``
+    才把它们降级成占位丢弃——这一趟读取白费了。这是「core 不判模态」换来的已知浪费；
+    要消除它就得让本函数重新知道 adapter 的能力，那正是本设计明确拒绝重新引入的
+    第二判据。不要在这里加判断。
+
     rehydrate 落在这里而非 adapter（架构裁定 T0）：adapter 的序列化链
     （``_build_payload`` / ``_serialize_messages`` / ``_parts_to_blocks``）全是同步
     函数，而 ``MemoryBlobStore.get`` 是 async。本函数是出网前最后一个 async 关口，一处

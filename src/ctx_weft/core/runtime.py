@@ -490,7 +490,7 @@ class CtxWeftRuntime:
         # HITL 应答内容的校验 + 外部化：人类经 HITL 递进来的图此前全程不校验、不外部化
         # （无格式校验 / 无视觉门控 / inline base64 永久留在 memory）。与 start_session /
         # run_single_task 共用同一个方法，顺序不会各自漂移（Phase 3c Task A）。薄包装
-        # _normalize_hitl_content 只负责从 req 上取出本次应答真正要用的 llm 与 tenant，
+        # _normalize_hitl_content 只负责从 req 上取出本次应答真正要用的 tenant，
         # 校验/外部化本身仍是那个共用方法（Phase 3c Task A2）。
         self.hitl_manager.set_content_normalizer(self._normalize_hitl_content)
         # HITL_* 事件外部化（Task 3）：req.message 里的 inline base64 换成 event ref。

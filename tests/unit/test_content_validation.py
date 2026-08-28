@@ -85,11 +85,11 @@ def test_no_vision_gating_any_more():
     validate_content([ImagePart(data=_PNG, media_type="image/png")])
 
 
-# ── content_has_image：门控开关本身的直测 ───────────────────────────────────
+# ── content_has_image：判据本身的直测 ───────────────────────────────────────
 #
 # Task 3 复审指出该函数没有任何直测，全靠 validate_content / start_session 的
-# 测试间接覆盖。它是门控是否触发的开关——判据错了，视觉门控会静默失效（图片
-# 直接放行、不报错）。这里逐类型直接断言其返回值。
+# 测试间接覆盖。这里逐类型直接断言其返回值，钉住判据本身的正确性（str / None /
+# 空 list / 全 TextPart 均为 False，含至少一个非文本 part 为 True）。
 
 
 def test_content_has_image_str_is_false():
@@ -237,17 +237,17 @@ async def test_start_session_plain_text_resolver_never_called():
         )
     )
     assert calls == [], (
-        "纯文本 start_session 不应触发 _resolve_llm——validate_content 的 "
-        "llm_resolver 必须惰性，格式校验早返回时 resolver 从不被调用"
+        "纯文本 start_session 不应触发 _resolve_llm——validate_content 对纯文本 "
+        "零影响、恒通过，压根用不上 LLM 客户端"
     )
 
 
 @pytest.mark.asyncio
 async def test_start_session_dict_text_does_not_eagerly_resolve_llm():
     """缺陷 A 的端到端回归：dict 形态纯文本（{"type":"text","text":...}）经
-    content_has_image 误判为「含图」，但改用 llm_resolver 惰性解析后，
-    格式校验会先于门控/resolver 调用抛出 InvalidContentError——不再是
-    RuntimeError("No LLM available...")，resolver 也从未被调用。"""
+    content_has_image 误判为「含图」，但 validate_content 对纯文本零影响、恒
+    通过——不再是 RuntimeError("No LLM available...")，_resolve_llm 也从未被
+    调用。"""
     from ctx_weft.core.errors import InvalidContentError
     from ctx_weft.core.runtime import SessionStartParams
     from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
@@ -310,8 +310,8 @@ async def test_start_session_dict_text_does_not_eagerly_resolve_llm():
 def test_dict_text_part_is_misclassified_as_image_known_limitation():
     """纯文本 dict part 被 content_has_image 误判为「含图」——已知限制（选项 B），
     非本 Phase 修复范围。终审 2026-08-25（缺陷 A）之后 content_has_image 已不再
-    是 start_session 决定是否提前解析 LLM 的判据（改用 validate_content 的
-    llm_resolver 惰性解析），所以这个误判不再连带让 start_session 提前解析 LLM——
+    是 start_session 决定是否提前解析 LLM 的判据（该调用方已删除），所以这个
+    误判不再连带让 start_session 提前解析 LLM——
     见 test_start_session_dict_text_does_not_eagerly_resolve_llm。"""
     assert content_has_image([{"type": "text", "text": "hello"}]) is True
 

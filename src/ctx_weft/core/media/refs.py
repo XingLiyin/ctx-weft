@@ -15,7 +15,7 @@ Task 2 的降级（写占位）与 Task 4 的 `media:get_image`（读占位取 r
 | # | 文案 | 落点 | 语义 | 需解析？ |
 |---|---|---|---|---|
 | 1 | ``[image {ref} media_type={mt} — dropped to save context; call media:get_image("{ref}") to bring it back]`` | 本模块 | **L0.5 降级**：重写 memory 记录、**落库**、可被取回 | **是** |
-| 2 | ``[image {media_type}]`` | `core/content.py::_IMAGE_PLACEHOLDER_TMPL` | **per-purpose 降级**（Phase 3c）：**不落库**，只影响本次 prompt | 否 |
+| 2 | ``[image {media_type}]`` | `core/content.py::_IMAGE_PLACEHOLDER_TMPL`，产出方二：`providers/llm/_modality.py::downgrade_for_text_only`（经 `AnthropicAdapter` / `OpenAIAdapter` 的 `_prepare_messages`），两者共用同一常量与同一底层函数（`downgrade_images_to_text`） | **per-purpose 降级**（Phase 3c）：**不落库**，只影响本次 prompt | 否 |
 | 3 | ``[image unavailable: {media_type}]`` | `core/content.py::_IMAGE_UNAVAILABLE_TMPL` | 出网 rehydrate 取不回 blob 时的降级 | 否 |
 | 4 | ``[image see the following message]`` | `providers/llm/openai.py::_TOOL_IMAGE_NOTICE` | OpenAI `role="tool"` 只收文本，图重定位到随后的 user 消息 | 否 |
 | 5 | ``[image unavailable]`` | `providers/memory_sql/*.py` docstring | 仅文档举例，**不是活代码** | 否 |

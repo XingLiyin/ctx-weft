@@ -288,7 +288,7 @@ async def test_plain_text_hitl_answer_is_byte_identical():
 
     assert req.message is text, "纯文本必须原样返回同一对象"
     assert store.put_calls == 0, "纯文本不得触碰 blob store"
-    assert calls == [], "纯文本不得触发 LLM 解析（视觉门控只对格式合法的图片才需要）"
+    assert calls == [], "纯文本不得触发 LLM 解析（格式校验先行，纯文本走不到图片分支，自然用不上）"
 
 
 @pytest.mark.asyncio

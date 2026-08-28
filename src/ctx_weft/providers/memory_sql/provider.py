@@ -270,7 +270,7 @@ class SqlMemoryProvider(MemoryProvider, MemoryBlobStore, EventBlobStore):
     `EventBlobStore` 是 ABC（名义类型），不是 Protocol——「同一个实现类可以同时
     满足 MemoryBlobStore 与 EventBlobStore」这句话对本仓自带的唯一实现要成立，
     必须显式加这个基类，否则升级后本仓开箱即用的配置下携图会话会被
-    ``validate_content`` 的第三道门控一律拒绝（找不到可外部化的 EventBlobStore）。
+    ``validate_content`` 的 EventBlobStore 门控一律拒绝（找不到可外部化的 EventBlobStore）。
 
     ``put``/``get`` 两个 ABC 同形（签名完全一致），下面复用同一份实现即可满足
     两边的抽象方法；不引入自动回落——host 仍需显式调用两次注册

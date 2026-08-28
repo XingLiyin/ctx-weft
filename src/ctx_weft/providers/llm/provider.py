@@ -46,7 +46,7 @@ class LLMAccount:
     """One API endpoint + credentials + list of available models."""
 
     name: str
-    style: str          # "anthropic" | "openai"
+    style: str          # 见 24 行上方 SUPPORTED_STYLES（"anthropic" | "anthropic-multimodal" | "openai" | "openai-multimodal"）
     api_key: str
     base_url: str = ""
     models: list[ModelConfig] = field(default_factory=list)

@@ -17,6 +17,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.assembler.assembler import ContextRequest
+from ctx_weft.core.content import _IMAGE_PLACEHOLDER_TMPL
 from ctx_weft.core.events import EventType
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.core.utils import _IMAGE_PART_TOKENS, content_to_text
@@ -628,3 +629,19 @@ async def test_text_only_adapter_persists_image_and_keeps_bytes_retrievable(tmp_
     all_sources = [s for p in llm.captured_payloads for s in _image_sources(p)]
     assert all_sources == [], "纯文本 adapter 不得把图发上 wire"
     assert llm.captured_payloads, "expected at least one captured wire payload"
+
+    # (d) wire 侧：占位确实到了——只钉「没发图」钉不住「传递而非丢弃」，还得钉住
+    # 占位文本真的出现在某次 payload 里（否则图片有可能被整段吞掉而不是降级）。
+    placeholder = _IMAGE_PLACEHOLDER_TMPL.format(media_type="image/png")
+    all_texts = [
+        b.get("text", "")
+        for p in llm.captured_payloads
+        for m in p.get("messages", [])
+        if isinstance(m.get("content"), list)
+        for b in m["content"]
+        if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    assert any(placeholder in t for t in all_texts), (
+        f"占位 {placeholder!r} 没有出现在任何一次 wire payload 的文本 block 里——"
+        "纯文本 adapter 必须把图降级成占位，而不是静默丢弃"
+    )

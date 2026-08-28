@@ -146,8 +146,10 @@ warning 措辞要点明三件事，**把修复路径直接写进日志**：哪�
 | 会话 | 中断 | 继续 |
 
 **代价要说清楚**：图片会占 memory / blob 存储与 token 预算，即使这个 adapter 永远
-不会把它发出去。换来的是三件事——core 对模态零判断、host 自写的 `LLMClient` 完全
-自治、以及换成多模态 adapter 后**同一份历史立刻可看图**（旧行为下那张图从未进过系统）。
+不会把它发出去；此外纯文本 adapter 下每一轮仍会为每张图付一次 blob 读 + base64
+编码（`stream_llm` 的 rehydrate 在 adapter 降级之前跑），编码完就被丢弃。换来的是
+三件事——core 对模态零判断、host 自写的 `LLMClient` 完全自治、以及换成多模态
+adapter 后**同一份历史立刻可看图**（旧行为下那张图从未进过系统）。
 
 `ModelConfig.supports_vision` 消失，`spec 2026-08-20-multimodal-design §6.7` 的
 「严格默认拒绝」随之作废。

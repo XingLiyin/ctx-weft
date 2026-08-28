@@ -1,4 +1,4 @@
-"""Phase 3c Task B：OpenAI tool-result 图片重定位 + gateway 视觉门控。
+"""Phase 3c Task B：OpenAI tool-result 图片重定位 + gateway 模态零判断。
 
 改前 `openai.py` 的 ``role == "tool"`` 分支走 ``_parts_to_text``，图片被 ``continue``
 **静默丢弃且无占位符**（Anthropic 侧 tool_result 原生支持图片块，是 OpenAI 单边缺口）。
@@ -231,7 +231,7 @@ def test_anthropic_tool_result_image_behaviour_unchanged() -> None:
     assert results[1]["content"][0]["source"]["media_type"] == "image/jpeg"
 
 
-# ── 5. gateway 视觉门控 ──────────────────────────────────────────────────────
+# ── 5. gateway 模态零判断 / 图片原样透传 ─────────────────────────────────────
 
 
 class _CapturingLLM:

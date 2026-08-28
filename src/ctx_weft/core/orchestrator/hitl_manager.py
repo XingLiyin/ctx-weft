@@ -71,8 +71,8 @@ class HitlManager:
         ) = None
         # 应答内容的校验 + 外部化回调（Runtime 绑定 _normalize_hitl_content,
         # 见 set_content_normalizer）。签名 async (content, req) -> content——整个
-        # HitlRequest 传过去（而非零散字段）：视觉门控要判的是 req.resume_llm_* 指定的
-        # 那个模型，blob 的 tenant 锚点也要由 req.session_id 解出。HitlRequest 本就是
+        # HitlRequest 传过去（而非零散字段）：blob 的 tenant 锚点要由 req.session_id
+        # 解出，将来再要别的字段（如 resume_llm_*）也不必改签名。HitlRequest 本就是
         # 本模块自己的类型，故仍不必 import MemoryBlobStore / LLM 任何类型。
         # None（纯单测直接构造 HitlManager() 时）→ 恒等变换、行为逐字节不变。
         self._content_normalizer: (
@@ -284,11 +284,10 @@ class HitlManager:
         HITL 是人类往会话里注入内容的第二个入口——`run_single_task` / `start_session`
         两个入口早已接上 validate → normalize，此路径此前全程不校验、不外部化：图片
         既不过格式校验（`b64decode` 默认 `validate=False` **不抛**，静默解出垃圾字节
-        ⟹ 静默损坏）、也不过视觉门控，还以 inline base64 永久留在 memory 里。
+        ⟹ 静默损坏），还以 inline base64 永久留在 memory 里。
 
-        回调收**整个 `HitlRequest`**：门控要判的是 `resume_llm_account/model` 指定的
-        那个模型（多模型宿主下判默认模型等于门控失效），blob 的 tenant 锚点也要由
-        `session_id` 解出——都在 req 上，将来再要别的字段也不必改签名。
+        回调收**整个 `HitlRequest`**：blob 的 tenant 锚点要由 `session_id` 解出——在
+        req 上，将来再要别的字段（如 `resume_llm_account/model`）也不必改签名。
 
         供构造后晚绑定（与 set_cold_resolve_handler / set_cold_decision_lookup 同形态）。
         **未注入时是恒等变换**——直接构造 `HitlManager()` 的既有调用方行为逐字节不变。

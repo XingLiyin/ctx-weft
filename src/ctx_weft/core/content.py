@@ -64,10 +64,10 @@ def content_has_image(content: "str | list[ContentPart] | None") -> bool:
 
     终审 2026-08-25（缺陷 A）后**当前无生产调用方**：runtime.start_session 原先
     用它决定要不要提前解析 LLM 客户端，但该判据对 dict 形态纯文本会误判成
-    「含图」，于是 dict 纯文本反而触发了本该只属于「真图片」路径的提前解析
-    （§ validate_content 的 llm_resolver 惰性解析已替代这个用法）。保留本函数：
-    (1) 已有直测覆盖判据本身；(2) Phase 3b/4 的 per-purpose 策略（例如"仅在需要
-    展示缩略图时才判断是否含图"）大概率会用到它。删除前请先确认这两点仍成立。
+    「含图」，于是 dict 纯文本反而触发了本该只属于「真图片」路径的提前解析。
+    该调用方已删除，保留本函数是因为：(1) 已有直测覆盖判据本身；(2) Phase 3b/4
+    的 per-purpose 策略（例如"仅在需要展示缩略图时才判断是否含图"）大概率会用
+    到它。删除前请先确认这两点仍成立。
     """
     if not content or isinstance(content, str):
         return False
