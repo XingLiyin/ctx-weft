@@ -17,10 +17,12 @@
 
 from __future__ import annotations
 
+from abc import abstractmethod
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -180,3 +182,108 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = frozenset({
     EventType.LLM_RETRY_TRIGGERED,
     EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED,
 })
+
+
+# ── Subscription handle ───────────────────────────────────────────────────────
+
+
+@dataclass
+class SubscriptionHandle:
+    """订阅句柄，用于 unsubscribe。"""
+
+    subscriber_id: str
+    _bus: "EventBus"
+
+    async def unsubscribe(self) -> None:
+        await self._bus._unsubscribe(self.subscriber_id)
+
+
+# ── Protocol ──────────────────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class EventBus(Protocol):
+    """事件总线。"""
+
+    @abstractmethod
+    async def emit(self, event: Event) -> None: ...
+
+    @abstractmethod
+    def subscribe(
+        self,
+        event_type: str | None,
+        handler: Callable[[Event], Awaitable[None]],
+    ) -> SubscriptionHandle: ...
+
+    @abstractmethod
+    def stream(
+        self,
+        filter: EventFilter,
+    ) -> AsyncIterator[Event]: ...
+
+    @abstractmethod
+    async def _unsubscribe(self, subscriber_id: str) -> None: ...
+
+
+# ── RunSnapshot ───────────────────────────────────────────────────────────────
+
+
+@dataclass
+class RunSnapshot:
+    """事件流的某一时刻快照（供 host 实现 snapshot/restore 优化用）。"""
+
+    id: str
+    run_id: str
+    session_id: str
+    last_event_id: str
+    last_event_sequence: int
+    state_blob: dict[str, Any]
+    snapshot_reason: str = ""
+    snapshot_at: datetime | None = None
+
+
+# ── EventStore Protocol ───────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class EventStore(Protocol):
+    """事件流持久化抽象。host 提供具体实现（Postgres / SQLite / in-memory）。"""
+
+    @abstractmethod
+    async def append(self, event: Event) -> None:
+        """持久化单条事件。"""
+        ...
+
+    @abstractmethod
+    async def read_by_session(self, session_id: str) -> list[Event]:
+        """按 session_id 加载全部事件，按 sequence 排序。"""
+        ...
+
+    # ── 可选快照扩展 ──────────────────────────────────────────────────────────
+    # 未实现时抛 NotImplementedError；core 捕获后降级为全量 replay。
+
+    async def list_active_session_ids(self) -> list[str]:
+        """返回有 SessionCreated 但无终态事件的 session ID 列表（用于启动时 crash recovery）。"""
+        raise NotImplementedError
+
+    async def read_after(self, session_id: str, after_event_id: str) -> list[Event]:
+        """加载 session 中 id > after_event_id 的增量事件（ULID 字典序）。"""
+        raise NotImplementedError
+
+    async def read_session_events_of_types(
+        self, session_id: str, types: "tuple[str, ...]",
+    ) -> list[Event]:
+        """只加载 session 中指定类型的事件（按 sequence 排序）。
+
+        轻查询——供恢复决策按事件折叠（如 HITL 待解决判定）而**不必全量回放**。
+        未实现时抛 NotImplementedError；调用方降级为 read_by_session + 内存过滤。
+        """
+        raise NotImplementedError
+
+    async def save_snapshot(self, snapshot: RunSnapshot) -> None:
+        """持久化一个状态快照。"""
+        raise NotImplementedError
+
+    async def load_latest_snapshot(self, session_id: str) -> RunSnapshot | None:
+        """加载 session 最新快照，无快照时返回 None。"""
+        raise NotImplementedError

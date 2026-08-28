@@ -86,3 +86,51 @@ def test_protocols_events_does_not_import_core() -> None:
     assert not violations, (
         "protocols/events.py 不得 import core，违规语句：" + "; ".join(violations)
     )
+
+
+def test_bus_and_store_protocols_are_the_same_objects() -> None:
+    from ctx_weft.core.events.bus import EventBus as CoreBus
+    from ctx_weft.core.events.bus import SubscriptionHandle as CoreHandle
+    from ctx_weft.core.state.event_store import EventStore as CoreStore
+    from ctx_weft.core.state.event_store import RunSnapshot as CoreSnapshot
+    from ctx_weft.protocols.events import (
+        EventBus, EventStore, RunSnapshot, SubscriptionHandle,
+    )
+
+    assert CoreBus is EventBus
+    assert CoreHandle is SubscriptionHandle
+    assert CoreStore is EventStore
+    assert CoreSnapshot is RunSnapshot
+
+
+def test_implementations_do_not_enter_protocols() -> None:
+    """实现不进 protocols——协议与实现分居是本次划界的全部意义。
+
+    本任务只保证「不在 protocols」；Task 3 会把它们从 core 搬进 providers。
+    """
+    import ctx_weft.protocols.events as pe
+    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.core.state.event_store import InMemoryEventStore
+
+    assert InProcessEventBus is not None and InMemoryEventStore is not None
+    assert not hasattr(pe, "InProcessEventBus")
+    assert not hasattr(pe, "InMemoryEventStore")
+
+
+def test_implementations_still_satisfy_the_relocated_protocols() -> None:
+    """re-export 若产生了同名副本，这条会红——runtime_checkable 认的是具体类对象。"""
+    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.core.state.event_store import InMemoryEventStore
+    from ctx_weft.protocols.events import EventBus, EventStore
+
+    assert isinstance(InProcessEventBus(), EventBus)
+    assert isinstance(InMemoryEventStore(), EventStore)
+
+
+def test_event_store_contract_is_exported_from_package_root() -> None:
+    """host 必须实现 EventStore，却一直只能从 core 里 import 它（spec §1）。"""
+    import ctx_weft
+    from ctx_weft.protocols.events import EventStore
+
+    assert ctx_weft.EventStore is EventStore
+    assert "EventStore" in ctx_weft.__all__

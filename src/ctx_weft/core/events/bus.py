@@ -5,61 +5,24 @@
 V1：单进程，基于 asyncio.Queue；每订阅者独立 queue，size=1000；
 慢消费者超容时**丢弃旧事件**而非阻塞 loop（保证 loop 不被订阅者拖死），
 丢弃时 emit 一个 EventsDropped 元事件。
+
+协议（`EventBus` / `SubscriptionHandle`）已搬到 `ctx_weft.protocols.events`
+（spec 2026-08-27 协议层划界）；本模块保留 re-export 以免既有 import 断裂，
+自身只留 `InProcessEventBus` 这个进程内实现。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from abc import abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
 
-from ctx_weft.core.events.types import Event, EventFilter
+from ctx_weft.protocols.events import (
+    Event, EventBus, EventFilter, SubscriptionHandle,
+)
 
 logger = logging.getLogger(__name__)
-
-
-# ── Subscription handle ───────────────────────────────────────────────────────
-
-
-@dataclass
-class SubscriptionHandle:
-    """订阅句柄，用于 unsubscribe。"""
-
-    subscriber_id: str
-    _bus: "EventBus"
-
-    async def unsubscribe(self) -> None:
-        await self._bus._unsubscribe(self.subscriber_id)
-
-
-# ── Protocol ──────────────────────────────────────────────────────────────────
-
-
-@runtime_checkable
-class EventBus(Protocol):
-    """事件总线。"""
-
-    @abstractmethod
-    async def emit(self, event: Event) -> None: ...
-
-    @abstractmethod
-    def subscribe(
-        self,
-        event_type: str | None,
-        handler: Callable[[Event], Awaitable[None]],
-    ) -> SubscriptionHandle: ...
-
-    @abstractmethod
-    def stream(
-        self,
-        filter: EventFilter,
-    ) -> AsyncIterator[Event]: ...
-
-    @abstractmethod
-    async def _unsubscribe(self, subscriber_id: str) -> None: ...
 
 
 # ── In-process implementation ─────────────────────────────────────────────────
