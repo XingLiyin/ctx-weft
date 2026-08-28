@@ -606,7 +606,6 @@ class CtxWeftRuntime:
         return await normalize_content(
             content,
             blob_store=blob_store,
-            event_blob_store=event_blob_store,
             ctx=ProviderContext(session_id=session_id, tenant_id=tenant_id),
         )
 

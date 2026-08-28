@@ -344,3 +344,51 @@ async def test_start_session_plain_text_never_touches_store():
         assert store.put_calls == 0
     finally:
         await runtime.cancel_session(handle.session_id)
+
+
+# ── 8. normalize_content 退回纯 memory 侧（blob-store 解耦 Task 1）───────────
+
+
+class _RecordingStore:
+    """记录 put 次数的 memory blob 桩。"""
+
+    can_externalize = True
+
+    def __init__(self) -> None:
+        self.puts: list[bytes] = []
+
+    async def put(self, data, media_type, ctx):
+        self.puts.append(data)
+        return f"{BLOB_REF_PREFIX}mem-{len(self.puts)}"
+
+    async def get(self, ref, ctx):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_normalize_content_takes_no_event_blob_store():
+    """normalize_content 只认 memory 侧——多传 event_blob_store 必须 TypeError。"""
+    store = _RecordingStore()
+    content = [ImagePart(data=_PNG, media_type="image/png")]
+    with pytest.raises(TypeError):
+        await normalize_content(
+            content,
+            blob_store=store,
+            event_blob_store=store,        # 已删除的参数
+            ctx=ProviderContext(session_id="s1"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_normalize_content_puts_once_into_memory_only():
+    """一张图只 put 一次，产出的 ref 就是 memory store 给的那个。"""
+    store = _RecordingStore()
+    out = await normalize_content(
+        [ImagePart(data=_PNG, media_type="image/png")],
+        blob_store=store,
+        ctx=ProviderContext(session_id="s1"),
+    )
+    assert len(store.puts) == 1
+    assert out[0].data == f"{BLOB_REF_PREFIX}mem-1"
+    assert out[0].source_type == "ref"
+    assert out[0].byte_size == len(base64.b64decode(_PNG))

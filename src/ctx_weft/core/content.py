@@ -449,7 +449,6 @@ async def normalize_content(
     content: "str | list[ContentPart] | None",
     *,
     blob_store: "Any",
-    event_blob_store: "Any" = None,
     ctx: "Any",
 ) -> "str | list[ContentPart] | None":
     """把 base64 图片外部化成 blob ref。返回新内容；**不改原对象**。
@@ -468,21 +467,10 @@ async def normalize_content(
     try/except 只会制造一条永不被执行、也永不被测试的分支。顺序若被后来者接反，
     这里抛出的 binascii.Error 正好是响亮的信号。
 
-    双写（spec §5）：``event_blob_store`` 非 None 且可外部化时，**同一个循环里**
-    把同一份原始字节也 put 进事件侧。内容寻址保证两边算出同一个 sha，故只产出
-    **一个 ref**——memory 装配路径（rehydrate / L0.5 / get_image）与事件流路径
-    （TASK_CREATED / HITL / 重放）各取各的 store，都取得到，读侧因此一行都不用
-    改。**必须同循环**：``put`` 之后 raw bytes 就不再持有，分两趟要么重新
-    ``b64decode``（热路径上不可接受，同 byte_size 拒绝解码的理由见上），要么从
-    store 取回（一次无谓 IO）。host 共用同一实例注册两侧时，第二次 ``put``
-    内容寻址命中已有行，零额外成本。
-
-    ⚠️ 函数开头的短路对 event 侧同样生效：``blob_store``（memory 侧）不可外部化
-    时整段直接原样返回，**不会**去碰 ``event_blob_store``——否则短路本身就失去
-    意义（还会因为 memory 侧其实拿不到而制造「event 有、memory 没有」的诡异
-    半外部化状态）。因此「memory 不可外部化、event 可外部化」这一组合下，事件的
-    ref 化**不由本函数负责**，由 Task 3 的事件发射点函数独立完成——两条路径互补，
-    合起来覆盖 memory×event 可/不可外部化的全部四种组合。
+    **只写 memory 侧。** event 侧的外部化由 `content_to_event_jsonable` 在事件发射点
+    独立完成，两者从同一份原始 content 各自取字节、各自 put、各自拿 ref，**core 不假设
+    两个 ref 相同**（两个契约独立，ref 相同只在 host 偷懒用同一实例时才成立，那是实现
+    层的巧合，不是协议层的前提）。
     """
     if not content or isinstance(content, str):
         return content
@@ -495,31 +483,6 @@ async def normalize_content(
             continue
         raw = base64.b64decode(getattr(part, "data", "") or "", validate=True)
         ref = await blob_store.put(raw, getattr(part, "media_type", ""), ctx)
-        # 双写（spec §5）：同一份字节也存进 event 侧，见函数 docstring「为什么必须
-        # 同循环」。can_externalize 探询与 memory 侧同理，不靠捕异常判定。
-        #
-        # 「只有一个 ref → 读侧一行未改」的论证压在「两个 host 实现的内容寻址口径
-        # 逐字节一致」这个前提上——core 自己不算 sha，两个 store 各自决定摘要算法。
-        # 若口径分叉，事件里写进去的会是 memory 的 ref，event store 永远解不开，
-        # 且没有异常、没有测试能发现（两个 store 都成功返回，只是返回值不同）。
-        # 这里必须接住 event 侧的返回值并与 memory 侧比对，把这个假设变成断言。
-        #
-        # 处置选 logger.error + 继续（不 raise）：raise 会让此时已经写成功的
-        # memory 侧内容也不可用（一次 put 不一致炸掉整个入口，代价过大——内容其实
-        # 是可用的，只是将来从事件流侧取不回）；单纯 logger.error 又怕淹没在日志
-        # 里，所以错误信息里把后果写清楚，方便运维定位到「两个 blob store 的内容
-        # 寻址口径不一致」这个根因，而不是等到某天 event 侧回读失败才排查到这里。
-        if event_blob_store is not None and event_blob_store.can_externalize:
-            event_ref = await event_blob_store.put(raw, getattr(part, "media_type", ""), ctx)
-            if event_ref != ref:
-                logger.error(
-                    "双写 ref 不一致：memory 侧 put 返回 %r，event 侧 put 返回 %r"
-                    "（同一份字节）。这意味着两个 blob store 的内容寻址口径不一致"
-                    "（例如摘要算法不同，或干脆用了非内容寻址的 key）。事件流里"
-                    "写进去的将是 memory 的 ref，event store 无法用它取回图片——"
-                    "请检查两个 blob store 的实现是否真的逐字节一致地内容寻址。",
-                    ref, event_ref,
-                )
         # byte_size 必须在这里记下来（Phase 3c Task D）：外部化之后 data 是
         # "blob:<sha>"（长度恒约 69），体积信息就此丢失，而 image_tokens 是同步的、
         # 不能回 MemoryBlobStore 做 IO 取回来。这是最后一个还握着 raw bytes 的地方。
