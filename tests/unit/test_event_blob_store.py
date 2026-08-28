@@ -8,14 +8,16 @@ memory 侧是记录 is_superseded，event 侧是事件保留策略）。host 要
 
 from __future__ import annotations
 
+import base64
 import hashlib
 
 import pytest
 
+from ctx_weft.core.content import normalize_content
 from ctx_weft.core.runtime import ProviderRegistry
-from ctx_weft.protocols import ProviderContext
+from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore, NullEventBlobStore
-from ctx_weft.protocols.memory import MemoryBlobStore
+from ctx_weft.protocols.memory import MemoryBlobStore, NullMemoryBlobStore
 
 
 def _ctx() -> ProviderContext:
@@ -108,3 +110,71 @@ def test_registry_does_not_fall_back_to_memory_provider() -> None:
     # memory 侧拿得到，event 侧仍是 Null——不串门
     assert reg.get_memory_blob_store().can_externalize is True
     assert reg.get_event_blob_store().can_externalize is False
+
+
+# ── 入口双写（Task 2）─────────────────────────────────────────────────────
+
+_RAW = b"\x89PNG\r\n\x1a\n" + b"payload" * 20
+_B64 = base64.b64encode(_RAW).decode("ascii")
+
+
+class _MemStub(_Stub):
+    """与 _Stub 同实现，只为在测试里区分两个 store 实例。"""
+
+
+async def test_dual_write_yields_one_ref_both_stores_have_it() -> None:
+    """内容寻址保证两边 sha 相同，故**只有一个 ref**，两边都取得到。"""
+    mem, evt = _MemStub(), _Stub()
+    out = await normalize_content(
+        [TextPart(text="看图"), ImagePart(data=_B64, media_type="image/png")],
+        blob_store=mem, event_blob_store=evt, ctx=_ctx(),
+    )
+    ref = out[1].data
+    assert ref.startswith("blob:")
+    assert out[1].source_type == "ref"
+    assert out[1].byte_size == len(_RAW)
+    assert await mem.get(ref, _ctx()) is not None
+    assert await evt.get(ref, _ctx()) is not None, "event 侧也必须有，否则事件流取不回"
+
+
+async def test_shared_instance_is_idempotent() -> None:
+    """host 共用同一实例时第二次 put 幂等命中，零额外成本。"""
+    both = _Stub()
+    out = await normalize_content(
+        [ImagePart(data=_B64, media_type="image/png")],
+        blob_store=both, event_blob_store=both, ctx=_ctx(),
+    )
+    assert len(both.blobs) == 1, "同一份字节只应存一行"
+    assert await both.get(out[0].data, _ctx()) is not None
+
+
+async def test_no_dual_write_when_memory_cannot_externalize() -> None:
+    """memory 侧不可外部化时整个函数短路——否则会去调 NullMemoryBlobStore.put 抛错。
+
+    这一组合下事件的 ref 化**不由入口负责**，由 Task 3 的发射点函数独立完成。
+    """
+    evt = _Stub()
+    content = [ImagePart(data=_B64, media_type="image/png")]
+    out = await normalize_content(
+        content, blob_store=NullMemoryBlobStore(), event_blob_store=evt, ctx=_ctx(),
+    )
+    assert out is content, "应原样返回同一对象"
+    assert evt.blobs == {}, "短路时 event 侧也不该被写"
+
+
+async def test_plain_text_is_untouched() -> None:
+    mem, evt = _MemStub(), _Stub()
+    s = "纯文本"
+    assert await normalize_content(
+        s, blob_store=mem, event_blob_store=evt, ctx=_ctx()) is s
+    assert mem.blobs == {} and evt.blobs == {}
+
+
+async def test_ref_parts_are_not_re_externalized() -> None:
+    """已是 ref 的 part 原样保留，不重复 put。"""
+    mem, evt = _MemStub(), _Stub()
+    part = ImagePart(data="blob:already", media_type="image/png", source_type="ref")
+    out = await normalize_content(
+        [part], blob_store=mem, event_blob_store=evt, ctx=_ctx())
+    assert out[0] is part
+    assert mem.blobs == {} and evt.blobs == {}

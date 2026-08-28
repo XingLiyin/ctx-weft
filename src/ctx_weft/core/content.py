@@ -419,6 +419,7 @@ async def normalize_content(
     content: "str | list[ContentPart] | None",
     *,
     blob_store: "Any",
+    event_blob_store: "Any" = None,
     ctx: "Any",
 ) -> "str | list[ContentPart] | None":
     """把 base64 图片外部化成 blob ref。返回新内容；**不改原对象**。
@@ -436,11 +437,27 @@ async def normalize_content(
     在 validate 阶段就已报 InvalidContentError，到不了这里；此处再包一层
     try/except 只会制造一条永不被执行、也永不被测试的分支。顺序若被后来者接反，
     这里抛出的 binascii.Error 正好是响亮的信号。
+
+    双写（spec §5）：``event_blob_store`` 非 None 且可外部化时，**同一个循环里**
+    把同一份原始字节也 put 进事件侧。内容寻址保证两边算出同一个 sha，故只产出
+    **一个 ref**——memory 装配路径（rehydrate / L0.5 / get_image）与事件流路径
+    （TASK_CREATED / HITL / 重放）各取各的 store，都取得到，读侧因此一行都不用
+    改。**必须同循环**：``put`` 之后 raw bytes 就不再持有，分两趟要么重新
+    ``b64decode``（热路径上不可接受，同 byte_size 拒绝解码的理由见上），要么从
+    store 取回（一次无谓 IO）。host 共用同一实例注册两侧时，第二次 ``put``
+    内容寻址命中已有行，零额外成本。
+
+    ⚠️ 函数开头的短路对 event 侧同样生效：``blob_store``（memory 侧）不可外部化
+    时整段直接原样返回，**不会**去碰 ``event_blob_store``——否则短路本身就失去
+    意义（还会因为 memory 侧其实拿不到而制造「event 有、memory 没有」的诡异
+    半外部化状态）。因此「memory 不可外部化、event 可外部化」这一组合下，事件的
+    ref 化**不由本函数负责**，由 Task 3 的事件发射点函数独立完成——两条路径互补，
+    合起来覆盖 memory×event 可/不可外部化的全部四种组合。
     """
     if not content or isinstance(content, str):
         return content
     if not blob_store.can_externalize:
-        return content                      # 原样返回，零改动
+        return content                      # 原样返回，零改动；event 侧也不碰（见 docstring）
     out: list["ContentPart"] = []
     for part in content:
         if _is_text_part(part) or getattr(part, "source_type", "base64") != "base64":
@@ -448,6 +465,10 @@ async def normalize_content(
             continue
         raw = base64.b64decode(getattr(part, "data", "") or "", validate=True)
         ref = await blob_store.put(raw, getattr(part, "media_type", ""), ctx)
+        # 双写（spec §5）：同一份字节也存进 event 侧，见函数 docstring「为什么必须
+        # 同循环」。can_externalize 探询与 memory 侧同理，不靠捕异常判定。
+        if event_blob_store is not None and event_blob_store.can_externalize:
+            await event_blob_store.put(raw, getattr(part, "media_type", ""), ctx)
         # byte_size 必须在这里记下来（Phase 3c Task D）：外部化之后 data 是
         # "blob:<sha>"（长度恒约 69），体积信息就此丢失，而 image_tokens 是同步的、
         # 不能回 MemoryBlobStore 做 IO 取回来。这是最后一个还握着 raw bytes 的地方。
