@@ -169,28 +169,86 @@ def test_dead_simplified_store_is_gone() -> None:
 
 
 async def test_runtime_still_gets_a_working_default_store() -> None:
-    """接线换了来源，默认 event_store 仍要能用（自动订阅 bus 后收得到事件）。
+    """接线换了来源，`CtxWeftRuntime` 的默认 event_store 仍要能用。
 
-    ⚠️ 适配自 brief：`CtxWeftRuntime()` 无参构造会因「未注册
-    AgentCapabilityProvider」抛 ValueError（core/runtime.py 里的硬校验，与本次
-    搬迁无关）。改用 brief 建议的等价写法：直接构造
-    `InMemoryEventStore(event_bus=InProcessEventBus())`，验证的正是 runtime.py
-    里同一行接线（`self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)`）
-    背后的订阅链路是否仍然工作。
+    ⚠️ 修订记录：本测试原先按 brief 的 fallback 直接构造
+    `InMemoryEventStore(event_bus=InProcessEventBus())`，绕开了
+    `CtxWeftRuntime()` 无参构造会因「未注册 AgentCapabilityProvider」抛
+    ValueError 这一既有硬校验（core/runtime.py:498-503，与本次搬迁无关）。
+    但那样一来测试从未真正碰到 `core/runtime.py` 里本任务实际改动的两处接线
+    （模块级 `InProcessEventBus` 改从 providers 取、函数内 `InMemoryEventStore`
+    改从 providers 取），且与同文件的
+    `test_implementations_still_satisfy_the_relocated_protocols` 重复。code
+    review 后改为：照抄 `tests/unit/test_media_get_image.py` 里
+    `_StubAgents` 的最小构造方式，真正实例化 `CtxWeftRuntime`；换源本身则用
+    AST 读 runtime.py 的 import 语句直接钉住（对象身份比较会被 re-export
+    链路掩盖，验证过，见下方注释与 task-3-report.md）。
     """
     from datetime import datetime, timezone
 
-    from ctx_weft.protocols.events import Event, EventStore
-    from ctx_weft.providers.events import InMemoryEventStore, InProcessEventBus
+    from ctx_weft.core.runtime import CtxWeftRuntime, ProviderRegistry
+    from ctx_weft.protocols.capability import (
+        AgentCapability,
+        AgentCapabilityProvider,
+        CapabilityProviderInfo,
+    )
+    from ctx_weft.protocols.events import Event
+    from ctx_weft.providers.events import InMemoryEventStore
 
-    bus = InProcessEventBus()
-    store = InMemoryEventStore(event_bus=bus)
-    assert isinstance(store, EventStore)
-    await bus.emit(Event(
+    class _StubAgents(AgentCapabilityProvider):
+        """`CtxWeftRuntime` 构造期硬校验要求至少一个 AgentCapabilityProvider——
+        照抄 `tests/unit/test_media_get_image.py::_StubAgents`，只为满足这个
+        构造期前置条件，与 event 体系无关。
+        """
+
+        name = "stub_agents"
+
+        async def list(self, ctx): return [AgentCapability(id="stub_agents:a", name="a", kind="agent")]
+        async def get_template(self, template_id, version, ctx): return None
+        async def describe(self, ctx): return CapabilityProviderInfo(name=self.name)
+
+    registry = ProviderRegistry()
+    registry.register_capability(_StubAgents())
+    rt = CtxWeftRuntime(providers=registry)
+
+    # 行为面的最低限：默认 event_store 得是能用的 providers 版实现。
+    assert isinstance(rt.event_store, InMemoryEventStore)
+
+    # 「来源」的真正钉子：core/runtime.py 现在两处都被 re-export 链路环绕
+    # （core.events.bus → providers.events.bus、core.state.event_store →
+    # providers.events.store 都转发同一个类对象），所以 `is` 身份比较钉不住
+    # 「从哪条路径 import」——不管 runtime.py 写 `from ctx_weft.core.events import
+    # InProcessEventBus` 还是 `from ctx_weft.providers.events import
+    # InProcessEventBus`，运行时拿到的都是同一个类对象，`is` 恒真（已用注入
+    # 验证过，见 task-3-report.md 的「注入验证」小节）。故改用 AST 直接读
+    # runtime.py 里两条 import 语句的 `module` 字段，钉的是源码里写的路径本身，
+    # 不是运行时对象——这不是 Task 1 否决的"扫源码字符串"，是结构化解析。
+    import ast
+    import inspect
+
+    import ctx_weft.core.runtime as runtime_module
+
+    tree = ast.parse(inspect.getsource(runtime_module))
+    import_sources: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                if alias.name in ("InProcessEventBus", "InMemoryEventStore"):
+                    import_sources[alias.name] = node.module
+
+    assert import_sources.get("InProcessEventBus") == "ctx_weft.providers.events", (
+        "core/runtime.py 模块级 InProcessEventBus 必须从 ctx_weft.providers.events 导入"
+    )
+    assert import_sources.get("InMemoryEventStore") == "ctx_weft.providers.events", (
+        "core/runtime.py 函数内 InMemoryEventStore 必须从 ctx_weft.providers.events 导入"
+    )
+
+    # 订阅链路仍要能用：emit 之后 event_store 收得到（自动订阅 bus 后异步投递）。
+    await rt._event_bus.emit(Event(
         id="evt_0001", run_id="run_1", sequence=1, session_id="ses_1",
         type="SessionCreated", timestamp=datetime(2026, 8, 28, tzinfo=timezone.utc),
     ))
     # 订阅是异步投递的，给它一次调度机会
     import asyncio
     await asyncio.sleep(0.05)
-    assert await store.read_by_session("ses_1")
+    assert await rt.event_store.read_by_session("ses_1")
