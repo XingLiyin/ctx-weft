@@ -34,7 +34,6 @@ from ctx_weft.core.assembler.sources import (
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
 from ctx_weft.core.events import Event, EventType
-from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.park import HitlPark
@@ -86,6 +85,7 @@ from ctx_weft.protocols.capability import (
     SkillCapabilityProvider,
     qualify,
 )
+from ctx_weft.protocols.events import EventBus
 from ctx_weft.providers.events import InProcessEventBus
 
 logger = logging.getLogger(__name__)

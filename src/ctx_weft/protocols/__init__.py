@@ -7,6 +7,7 @@
 - AgentTemplate / IdentityFacet（§4.6）
 - LLMClient / LLMClientResolver（§11，LLM 接入契约）
 - ProviderContext
+- Event / EventFilter / EventType / EventBus / EventStore（事件体系，host-facing 契约）
 
 零运行时依赖；所有方法 `async def`；所有返回值是 dataclass。
 """
@@ -33,6 +34,17 @@ from ctx_weft.protocols.context import (
     ImagePart,
     ProviderContext,
     TextPart,
+)
+from ctx_weft.protocols.events import (
+    EVENT_TYPES,
+    TRANSIENT_EVENT_TYPES,
+    Event,
+    EventBus,
+    EventFilter,
+    EventStore,
+    EventType,
+    RunSnapshot,
+    SubscriptionHandle,
 )
 from ctx_weft.protocols.filesystem import FS_PROVIDER_NAME, FsTool, SpillSink
 from ctx_weft.protocols.llm import (
@@ -95,6 +107,16 @@ __all__ = [
     "SkillDefinition",
     "ToolCapability",
     "ToolCapabilityProvider",
+    # Events
+    "EVENT_TYPES",
+    "TRANSIENT_EVENT_TYPES",
+    "Event",
+    "EventBus",
+    "EventFilter",
+    "EventStore",
+    "EventType",
+    "RunSnapshot",
+    "SubscriptionHandle",
     # Filesystem capability
     "FS_PROVIDER_NAME",
     "FsTool",

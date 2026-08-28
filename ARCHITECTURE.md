@@ -73,8 +73,8 @@
 | `CapabilityGateway` | `src/ctx_weft/core/loop/capability_gateway.py:52` | capability 解析、鉴权、`invoke` `:75`、把调用/结果写 memory + 发事件 |
 | `CapabilityCache` | `src/ctx_weft/core/orchestrator/capability_cache.py:21` | per-agent 能力缓存，loop 结束 `evict(agent.id)` |
 | `StepDriver` | `src/ctx_weft/core/loop/driver.py:155` | 按 `initial_step` 起步，`run()` `:162` 循环执行 Step，发 StepStarted/Completed/Failed |
-| `EventBus` / `InProcessEventBus` | `src/ctx_weft/core/events/bus.py:42` / `:79` | 进程内事件总线，`emit()` `:88` / `stream()` `:142` |
-| `EventStore` / `InMemoryEventStore` | `src/ctx_weft/core/state/event_store.py:43` / `:82` | 事件持久化 + `list_active_session_ids` `:113` + 回放支撑 |
+| `EventBus` / `InProcessEventBus` | `src/ctx_weft/protocols/events.py:205` / `src/ctx_weft/providers/events/bus.py:36` | 协议 + 进程内实现，`emit()` `src/ctx_weft/providers/events/bus.py:45` / `stream()` `:99` |
+| `EventStore` / `InMemoryEventStore` | `src/ctx_weft/protocols/events.py:249` / `src/ctx_weft/providers/events/store.py:29` | 协议 + 内存实现，`list_active_session_ids` `src/ctx_weft/providers/events/store.py:79` + 回放支撑 |
 | `HitlManager` | `src/ctx_weft/core/orchestrator/hitl_manager.py:40` | 人工介入请求/应答（`approve` `:96` / `reject` `:120`） |
 
 **自动注册的内置 Capability**（在 `CtxWeftRuntime.__init__`，`src/ctx_weft/core/runtime.py:369`）：
@@ -454,7 +454,7 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 两步，通常在应用 lifespan 启动、provider 注册完成、接收新请求之前调用：
 
 1. **`recover(on_session_interrupted)`**（`src/ctx_weft/core/runtime.py:794`）：调
-   `event_store.list_active_session_ids()`（`src/ctx_weft/core/state/event_store.py:113`，查无终态
+   `event_store.list_active_session_ids()`（`src/ctx_weft/protocols/events.py:265`，查无终态
    事件的 session，不依赖 host 投影表），逐个回调把它标记/拉起，返回数量。`list_active_session_ids`
    未实现时跳过并告警。
 2. **`recover_session(session_id)`**（`src/ctx_weft/core/runtime.py:723`）：
@@ -479,14 +479,15 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 
 ## 10. 事件系统内部
 
-- **总线**：`InProcessEventBus`（`src/ctx_weft/core/events/bus.py:79`），`emit(event)` `:88`
-  广播给所有匹配 `EventFilter(session_id / run_id / task_id / types)` 的 `stream()` `:142` 订阅者。进程内、不跨进程。
+- **总线**：协议 `EventBus`（`src/ctx_weft/protocols/events.py:205`）、内置实现
+  `InProcessEventBus`（`src/ctx_weft/providers/events/bus.py:36`），`emit(event)` `:45`
+  广播给所有匹配 `EventFilter(session_id / run_id / task_id / types)` 的 `stream()` `:99` 订阅者。进程内、不跨进程。
 - **顺序**：`sequence` 来自 `LoopState.sequence_counter`，在同一 `run_id` 内单调递增；
   `id` 是 `evt_ULID`（时间有序、全局唯一）。
-- **白名单冻结**：`EVENT_TYPES`（`src/ctx_weft/core/events/types.py:47`）是 V1 冻结集合，`make_event`
+- **白名单冻结**：`EVENT_TYPES`（`src/ctx_weft/protocols/events.py:172`）是 V1 冻结集合，`make_event`
   对未登记类型直接 `ValueError`——保证下游 reducer 的分支封闭。
-- **持久化**：`CtxWeftRuntime` 默认用 `InMemoryEventStore(event_bus=...)`
-  （`src/ctx_weft/core/state/event_store.py:82`），构造时即订阅总线、落盘所有事件，并支撑
+- **持久化**：`CtxWeftRuntime` 默认用协议 `EventStore`（`src/ctx_weft/protocols/events.py:249`）的内置实现
+  `InMemoryEventStore(event_bus=...)`（`src/ctx_weft/providers/events/store.py:29`），构造时即订阅总线、落盘所有事件，并支撑
   `list_active_session_ids` 与回放。传入自定义 `event_store` 时由调用方自行 wire。
 - **因果链**：`causation_id` 串起「哪个事件导致了这个事件」，用于调试与回放重建。
 

@@ -48,11 +48,8 @@ def test_task_status_map_stays_in_core() -> None:
     assert not hasattr(pe, "TASK_STATUS_BY_EVENT")
 
 
-def test_protocols_events_does_not_import_core() -> None:
-    """层序守卫：protocols 不得依赖 core。
-
-    这条不变量一旦破掉，`protocols/context.py` 那个刻意的惰性绑定就白做了，
-    且会在某些 import 顺序下变成真实的循环导入。
+def _assert_module_does_not_import_core(module: object, label: str) -> None:
+    """层序守卫的公共实现：解析 `module` 的源码，确认它不 import `ctx_weft.core`。
 
     用 `ast` 解析实际的 import 语句，而不是对源码整体做子串扫描：字符串扫描
     误报（docstring/注释里提到字面路径 `ctx_weft.core` 也会被判违规）也漏报
@@ -62,18 +59,16 @@ def test_protocols_events_does_not_import_core() -> None:
     import ast
     import inspect
 
-    import ctx_weft.protocols.events as pe
-
-    source = inspect.getsource(pe)
+    source = inspect.getsource(module)
     tree = ast.parse(source)
 
     violations: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if module == "ctx_weft.core" or module.startswith("ctx_weft.core."):
-                violations.append(f"line {node.lineno}: from {module} import ...")
-            elif module == "ctx_weft":
+            mod = node.module or ""
+            if mod == "ctx_weft.core" or mod.startswith("ctx_weft.core."):
+                violations.append(f"line {node.lineno}: from {mod} import ...")
+            elif mod == "ctx_weft":
                 for alias in node.names:
                     if alias.name == "core":
                         violations.append(f"line {node.lineno}: from ctx_weft import core")
@@ -83,9 +78,34 @@ def test_protocols_events_does_not_import_core() -> None:
                 if name == "ctx_weft.core" or name.startswith("ctx_weft.core."):
                     violations.append(f"line {node.lineno}: import {name}")
 
-    assert not violations, (
-        "protocols/events.py 不得 import core，违规语句：" + "; ".join(violations)
-    )
+    assert not violations, f"{label} 不得 import core，违规语句：" + "; ".join(violations)
+
+
+def test_protocols_events_does_not_import_core() -> None:
+    """层序守卫：protocols 不得依赖 core。
+
+    这条不变量一旦破掉，`protocols/context.py` 那个刻意的惰性绑定就白做了，
+    且会在某些 import 顺序下变成真实的循环导入。
+    """
+    import ctx_weft.protocols.events as pe
+
+    _assert_module_does_not_import_core(pe, "protocols/events.py")
+
+
+def test_providers_events_does_not_import_core() -> None:
+    """同一条层序守卫，扩展到 `providers/events/`。
+
+    `providers/*` 整体是允许 import core 的（`providers/llm/*` 等 7 个模块确实
+    这么做），但 `providers/events/bus.py` / `store.py` 被 `core/events/bus.py`
+    等兼容层反向 import——若它们也 import core，加上 `providers/__init__.py`
+    未来若不再是平凡的 3 行，就会拼出一条包内真实的循环 import
+    （见 2026-08-28 final-fix 计划 I3）。这条钉住前一半：这两个模块本身 core-free。
+    """
+    import ctx_weft.providers.events.bus as bus_module
+    import ctx_weft.providers.events.store as store_module
+
+    _assert_module_does_not_import_core(bus_module, "providers/events/bus.py")
+    _assert_module_does_not_import_core(store_module, "providers/events/store.py")
 
 
 def test_bus_and_store_protocols_are_the_same_objects() -> None:
@@ -229,18 +249,24 @@ async def test_runtime_still_gets_a_working_default_store() -> None:
     import ctx_weft.core.runtime as runtime_module
 
     tree = ast.parse(inspect.getsource(runtime_module))
-    import_sources: dict[str, str] = {}
+    # 按名字收集*全部*来源（而非 last-wins 的单值 dict）：若日后 runtime.py 里
+    # 又冒出一条从 core 路径 import 同名符号的语句，last-wins 会被后写的正确
+    # 语句悄悄盖掉、测试仍然全绿；collect-all 后断言集合，任何一条杂质来源都会
+    # 让集合里多出一个不该有的元素，测试转红。
+    import_sources: dict[str, list[str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             for alias in node.names:
                 if alias.name in ("InProcessEventBus", "InMemoryEventStore"):
-                    import_sources[alias.name] = node.module
+                    import_sources.setdefault(alias.name, []).append(node.module)
 
-    assert import_sources.get("InProcessEventBus") == "ctx_weft.providers.events", (
-        "core/runtime.py 模块级 InProcessEventBus 必须从 ctx_weft.providers.events 导入"
+    assert import_sources.get("InProcessEventBus") == ["ctx_weft.providers.events"], (
+        "core/runtime.py 模块级 InProcessEventBus 必须从 ctx_weft.providers.events 导入，"
+        f"且只能有这一条来源，实际：{import_sources.get('InProcessEventBus')}"
     )
-    assert import_sources.get("InMemoryEventStore") == "ctx_weft.providers.events", (
-        "core/runtime.py 函数内 InMemoryEventStore 必须从 ctx_weft.providers.events 导入"
+    assert import_sources.get("InMemoryEventStore") == ["ctx_weft.providers.events"], (
+        "core/runtime.py 函数内 InMemoryEventStore 必须从 ctx_weft.providers.events 导入，"
+        f"且只能有这一条来源，实际：{import_sources.get('InMemoryEventStore')}"
     )
 
     # 订阅链路仍要能用：emit 之后 event_store 收得到（自动订阅 bus 后异步投递）。
@@ -259,12 +285,31 @@ def test_blob_ref_prefix_lives_in_context() -> None:
 
     移动的动机是让两个 blob 协议共用它而不互相 import——见 spec §3。
     """
+    import ast
+    import inspect
+
+    import ctx_weft.protocols.memory as memory_module
     from ctx_weft.protocols import BLOB_REF_PREFIX as PkgPrefix
     from ctx_weft.protocols.context import BLOB_REF_PREFIX
     from ctx_weft.protocols.memory import BLOB_REF_PREFIX as MemPrefix
 
     assert BLOB_REF_PREFIX == "blob:"
-    assert MemPrefix is BLOB_REF_PREFIX, "memory 侧仍要能拿到（re-export），且是同一对象"
+    assert MemPrefix == BLOB_REF_PREFIX
+
+    # `"blob:" is "blob:"` 恒真——短字符串字面量会被 CPython interned，`is` 在这里
+    # 分不清「re-export 同一个对象」和「memory.py 自己又写了一份同样的字面量」，
+    # 承重的是上面的 `==`。真正有区分力的检查是：memory.py 里不该有一条给
+    # `BLOB_REF_PREFIX` 赋值的语句——它必须只是从 context.py import 进来。
+    tree = ast.parse(inspect.getsource(memory_module))
+    own_definitions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "BLOB_REF_PREFIX" for t in node.targets)
+    ]
+    assert not own_definitions, (
+        "protocols/memory.py 不该自己定义 BLOB_REF_PREFIX，应只从 context.py re-export"
+    )
     assert PkgPrefix is BLOB_REF_PREFIX
 
 

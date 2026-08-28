@@ -1,13 +1,15 @@
 """Event 领域的 host-facing 契约：事件数据类型 + EventBus + EventStore。
 
-划界判据（spec 2026-08-27-protocols-layer-event-contracts-design §2）：
-**host 要实现它或按它编程的进 protocols；core 自用的实现与逻辑留 core。**
+划界判据（spec 2026-08-27-protocols-layer-event-contracts-design §2，
+用户 2026-08-28 裁定改为三层）：
+**契约进 `protocols/`，实现进 `providers/`，`core/` 只留编排。**
 
 故本模块装：`Event` / `EventFilter` / `EventType` 与两个常量集（host 要构造事件、
 要持久化、要按类型分派）、`EventBus` 协议（README 明说 host 可换 Redis Streams）、
 `EventStore` 协议与 `RunSnapshot`（host 必须实现 append + read_by_session）。
 
-**不装**：`InProcessEventBus` / `InMemoryEventStore`（实现，留 `core/`）、
+**不装**：`InProcessEventBus` / `InMemoryEventStore`（内置实现，在
+`providers/events/bus.py` / `providers/events/store.py`）、
 `TASK_STATUS_BY_EVENT`（core 的投影逻辑，且依赖 core 的 `TaskStatus`）。
 
 ⚠️ **本模块不得 import `ctx_weft.core` 的任何东西。** protocols 是比 core 低的层；
