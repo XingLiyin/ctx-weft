@@ -1,6 +1,6 @@
 # 缺陷：L0.5 降级让 blob 引用归零，图在一个宽限期后永久丢失
 
-> 状态：**已复现，解法已定稿**（2026-08-27），待实施
+> 状态：**已修复**（2026-08-27）
 > 影响：`feat/multimodal` 分支，Phase 4 引入
 > 复现测试：`tests/unit/test_l05_demotion_blob_lifecycle.py`（`xfail(strict=True)`）
 > 与双 blob store 设计**无关**——这是 memory 侧内部的问题，两个 store 分开之后依然存在。
@@ -146,11 +146,17 @@ def collect_blob_refs(event) -> list[str]:
 
 ## 6. 已完成
 
-复现测试 `tests/unit/test_l05_demotion_blob_lifecycle.py`，`xfail(strict=True)` 钉住。
-两个对照组把失败精确定位在引用边，而非降级逻辑或占位格式。修复后缺陷用例转 XPASS，
-`strict=True` 会让它转红，提醒删掉标记。
+复现测试 `tests/unit/test_l05_demotion_blob_lifecycle.py`，缺陷用例已转 XPASS，
+`strict=True` 触发后删掉了标记。两个对照组把失败精确定位在引用边，而非降级逻辑或占位格式。
 
-## 7. 待实施
+## 7. 已实施
 
-见实施计划。改动量：`MemoryEvent` / `MemoryRecord` 各加一个默认空字段、`fold._rebuild`
-填一行、provider 换一个 mark 函数。SQL、宽限期、blob 协议均不动。
+实施落点：
+- `protocols/memory.py`：`MemoryEvent` / `MemoryRecord` 各加 `blob_refs: list[str]` 字段（Task 1）
+- `core/content.py`：`collect_blob_refs(event)` 为 mark 的单一真源（Task 2）
+- `media/fold.py::_rebuild`：补偿记录的 `blob_refs` 填上降级掉的 ref（Task 3）
+- `providers/memory_sql.py`：
+  - mark 函数改用 `collect_blob_refs`（Task 4）
+  - `_declared_refs` 反查补偿记录的 `blob_refs`，`load_view` 回显（Task 4）
+
+SQL、宽限期、blob 协议均不动。

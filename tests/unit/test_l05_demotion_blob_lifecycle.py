@@ -9,8 +9,9 @@ ref part（`extract_blob_refs` 判据 `_is_ref_part`）。于是补偿记录写�
 
 L0.5 排在 L1/L2/L3 之前的第三条理由就是「可逆」，这条测试钉的正是那个可逆性。
 
-现有测试没覆盖这条链：`test_sql_blob_store.py` 只测 blob 契约、`test_media_fold.py`
-只测降级逻辑、`test_media_get_image.py` 用的是未经回收的 store。
+本文件钉住的缺陷已于 2026-08-27 修复（补偿记录经 MemoryEvent.blob_refs 显式声明
+降级掉的 ref，provider 的 mark 判据 collect_blob_refs 据此建引用边）。用例保留为
+回归防线：任何让 ref 重新只存在于占位文本里的改动，都会让它转红。
 """
 
 from __future__ import annotations
@@ -18,8 +19,6 @@ from __future__ import annotations
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 from ctx_weft.core.media import demote_for_budget
 from ctx_weft.protocols import (
@@ -97,12 +96,6 @@ async def test_demotion_leaves_placeholder_that_still_carries_the_ref() -> None:
             assert any(ref in t for t in texts), "占位里必须留着 ref，否则 get_image 无从定位"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="缺陷 2026-08-27：L0.5 的文本占位不产生引用边，blob 过宽限期被回收。"
-           "见 docs/superpowers/specs/2026-08-27-l05-demotion-drops-blob-reference.md。"
-           "修复后本用例转 XPASS，strict=True 会让它转红——届时删掉本标记。",
-)
 async def test_demoted_image_survives_blob_collection() -> None:
     """L0.5 的可逆性：降级过的图，回收之后仍取得回来。
 
