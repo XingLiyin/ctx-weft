@@ -1197,13 +1197,32 @@ class TaskManager:
 def _append_text_sections(
     jsonable: "str | list[dict] | None", sections: "list[str]",
 ) -> "str | list[dict] | None":
-    """把 reopen 的文本 section 追加到事件侧 jsonable 尾部，与 `content_with_suffix`
-    对 content 的处理同构（str 直接接、list 追加 TextPart dict）。"""
+    """把 reopen 的文本 section 追加到事件侧 jsonable 尾部，与 `reopen_task` 对
+    `new_prompt`（memory 侧）的构造逐分支同构（review round 2 finding 1 + 2 修正）：
+
+    - base 为空（``None`` / ``""`` / ``[]``）→ 与 memory 侧 ``else`` 分支
+      （``"\\n\\n".join(sections)``）一致：产出**不带前导空行**的 str，类型也收敛
+      为 str（哪怕 base 原本是空 list）——`if base_prompt:` 对三者一视同仁地判假，
+      event 侧必须跟着一视同仁。
+    - base 非空 → 与 memory 侧逐 section 调 `content_with_suffix` 的**等效**结果
+      一致：suffix 逐 section 以 ``"\\n\\n"`` 为前缀拼接（迭代调用 `content_with_suffix`
+      与一次性拼接完整 suffix 对同一批纯文本 section 等价——合并只发生在字符串层面，
+      不受分几次调用影响）；str base 直接接在尾部；list base 若尾部已是 text part
+      则原地合并进那个 part（同 `content_with_suffix` 对连续 text part 的合并语义，
+      否则事件侧会比 memory 侧多出一个独立 text part、两边形状分歧），否则新增一个
+      text part。
+    """
     if not sections:
         return jsonable
+    if not jsonable:  # None / "" / [] —— 与 memory 侧 `if base_prompt:` 判据一致
+        return "\n\n".join(sections)
     suffix = "".join(f"\n\n{sec}" for sec in sections)
-    if jsonable is None or isinstance(jsonable, str):
-        return (jsonable or "") + suffix
+    if isinstance(jsonable, str):
+        return jsonable + suffix
+    if isinstance(jsonable[-1], dict) and jsonable[-1].get("type") == "text":
+        tail = jsonable[-1]
+        merged = {**tail, "text": tail.get("text", "") + suffix}
+        return [*jsonable[:-1], merged]
     return [*jsonable, {"type": "text", "text": suffix}]
 
 
