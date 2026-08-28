@@ -449,7 +449,7 @@ from ctx_weft.providers.llm import LLMProvider, LLMAccount, ModelConfig
 
 provider = LLMProvider(store)          # store 实现 LLMAccountStoreProtocol(save/delete/list_all)
 provider.register_account(LLMAccount(
-    name="claude", style="anthropic",  # 仅支持 "anthropic" / "openai"
+    name="claude", style="anthropic",  # 取值见下方「style 取值」段落
     api_key="sk-...", base_url="",      # base_url 留空走各家默认
     models=[ModelConfig(name="claude-sonnet-4-6", context_limit=200_000)],  # output_reserve 缺省=按窗口尺寸
     default_model="claude-sonnet-4-6", timeout_sec=120,
@@ -464,7 +464,8 @@ runtime.providers.register_llm_provider(provider)
 > SDK core 不读环境变量。从环境变量自举一个默认账号（`bootstrap_from_env`）由上层应用
 > 在子类中实现（host 的 `LLMProvider` 子类读自己约定前缀的环境变量）。
 
-> 内置 `AnthropicAdapter` / `OpenAIAdapter` 由 `LLMProvider` 按 `style` 自动构造。
+> 内置 `AnthropicAdapter` / `OpenAIAdapter`（纯文本）与 `AnthropicMultimodalAdapter` /
+> `OpenAIMultimodalAdapter`（收图片）均由 `LLMProvider` 按 `style` 自动构造。
 > `run_single_task` / `SessionStartParams` 里的 `llm_account` / `llm_model` 会透传给 `get_client()`。
 
 `style` 取值：`"anthropic"` / `"openai"`（纯文本）与 `"anthropic-multimodal"` /
@@ -1008,17 +1009,27 @@ async def test_single_task(runtime):
 
 ---
 
-## 升级须知（多模态 Phase 3a）
+## 升级须知（多模态 adapter dispatch）
 
-- **破坏性变更：多模态会话默认失败，除非显式声明视觉能力。** 升级到本版本后，
-  任何携带图片（`ImagePart`）的会话会以 `VisionNotSupportedError`
-  （`error_code=VISION_NOT_SUPPORTED`）失败，**除非**在传给
-  `register_llm_provider` / `llm=` 的 `ModelConfig`（或等价的 LLM client 对象）上
-  显式设置 `supports_vision=True`。这是刻意的严格默认：未声明视觉能力的模型一律
-  视为不支持图片，防止图片 block 被静默发给 text-only 模型导致 provider 400。
-  纯文本会话不受影响，行为逐字节不变。
-  若你的宿主此前把图片喂给了任意模型（不管它是否真的支持视觉），升级后需要
-  逐个 model 显式标注 `supports_vision=True` 才能继续工作。
+- **破坏性变更：`ModelConfig.supports_vision` 已删除。** 若你的账号配置里还带着
+  `ModelConfig(..., supports_vision=True)`，升级后构造会直接失败——把这个参数
+  从你的配置里删掉。视觉能力不再是挂在 `ModelConfig` 上的一个字段，入口也不再
+  做任何视觉门控（旧的 `VisionNotSupportedError` / `error_code=VISION_NOT_SUPPORTED`
+  一并删除）。
+- **能力现在由「注册了哪个 adapter 类」表达。** 用 `LLMProvider` 的宿主改用
+  `style` 字符串声明：纯文本传 `"anthropic"` / `"openai"`，收图片传
+  `"anthropic-multimodal"` / `"openai-multimodal"`；直接 `llm=` 一个 `LLMClient`
+  的宿主，则由你传的是 `AnthropicAdapter`/`OpenAIAdapter` 还是
+  `AnthropicMultimodalAdapter`/`OpenAIMultimodalAdapter`（或自定义等价类）决定。
+- **行为变化：图片不再在入口被拒绝。** 携带图片（`ImagePart`）的会话现在会被
+  正常接受、落库，并按既有规则外部化到 `MemoryBlobStore`——不论当前挂的是哪种
+  adapter。纯文本 adapter 会在**出网前**把图片降级成 `[image {media_type}]`
+  文本占位并记一条 warning（每次请求最多一条），**不中断会话**。
+  实际影响：即使当前账号绑定的是纯文本 adapter，图片依然会占用 memory / blob
+  storage 与 token 预算——换来的是，日后把该账号切到对应的多模态 adapter，
+  同一份既有历史立刻可以看图，不需要重新携带一次。
+- 若你的宿主此前依赖入口拒绝携图请求（例如用 `VisionNotSupportedError` 做业务
+  分支），升级后需要自己在应用层做等价判断——core 不再替你拒绝。
 
 ## 升级须知（双 blob store）
 
