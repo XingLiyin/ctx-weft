@@ -42,9 +42,10 @@ from ctx_weft.protocols import ProviderContext
 
 
 class _StubEventBlobStore:
-    """Task 4 收口后 `content_to_event_jsonable` 不再对不可外部化的 event store 短路——
-    本文件直接白盒构造 `TaskManager`（不经 `CtxWeftRuntime` 的入口门控），push_task /
-    reopen_task 携图内容因此需要一个真的可外部化 event blob store 才能走通。
+    """`content_to_event_jsonable` 不对不可外部化的 event store 短路——本文件直接白盒
+    构造 `TaskManager`（不经 `CtxWeftRuntime` 的入口门控），push_task 携图内容因此需要
+    一个真的可外部化 event blob store 才能算出 event jsonable（blob-store 解耦 Task 5
+    起 reopen_task 本身不再需要它——它只是复用 push_task 时挂在 task 上的那一份）。
     """
 
     can_externalize = True
@@ -67,7 +68,6 @@ async def _finished_task_manager(prompt):
 
     tm = TaskManager(session_id="s1", event_bus=InProcessEventBus())
     store = _StubEventBlobStore()
-    tm.set_event_blob_store(store)
     task = Task(
         id="tsk_1", session_id="s1", status="FINISHED", tenant_id="default",
         assigned_agent_id="a1", creator_agent_id="a1",

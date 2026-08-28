@@ -957,8 +957,6 @@ class CtxWeftRuntime:
             task_max_concurrent=self._config.task_max_concurrent,
             task_max_retries=self._config.task_max_retries,
             default_task_timeout_ms=self._config.default_task_timeout_ms,
-            # SESSION_CREATED / SESSION_RESUMED 的 user_prompt 事件外部化用（Task 3）。
-            event_blob_store=self.providers.get_event_blob_store(),
         )
 
         if not params.resume:
@@ -1033,11 +1031,6 @@ class CtxWeftRuntime:
                 break
 
         self._task_managers[session.id] = task_manager
-
-        # TASK_CREATED / TASK_REQUEUED 的 user_prompt 事件外部化用（Task 3）。两个
-        # TaskManager 构造点（start_session / recover_session）都汇合到本方法，故只
-        # 需在此接一次线——镜像 set_is_current 等既有晚绑定做法。
-        task_manager.set_event_blob_store(self.providers.get_event_blob_store())
 
         # 归属权谓词：多轮对话里每次 resume 都新建 TM 并覆盖此映射。旧 TM 的收尾若迟到
         # （被其慢的 background observe 拖住），必须认出自己已被顶替、变 no-op，否则会

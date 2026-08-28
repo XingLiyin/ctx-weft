@@ -18,7 +18,6 @@ from ctx_weft.protocols.context import ProviderContext
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
-    from ctx_weft.protocols.events import EventBlobStore
 
 logger = logging.getLogger(__name__)
 
@@ -56,15 +55,6 @@ class SessionManager:
     task_max_concurrent: int = 4
     task_max_retries: int = 3
     default_task_timeout_ms: int = 60_000
-    # 事件侧 blob store。SESSION_CREATED / SESSION_RESUMED / TASK_CREATED 的
-    # user_prompt 外部化**已不再经过它**（blob-store 解耦 Task 3：调用方从原始
-    # content 算好 event 侧载荷传进来），本字段今天只剩一处用途——原样透传给 root
-    # TaskManager，供其 `reopen_task` 的事件外部化（那条路径的内容来自 loop 内部，
-    # 不经入口）。CtxWeftRuntime 在 start_session 里按
-    # `self.providers.get_event_blob_store()` 注入——SessionManager 本身不持有
-    # ProviderRegistry（也不该持有，见 HitlManager.set_content_normalizer 的既有
-    # 做法：把「需要什么」注入进来，而不是把整个 registry 塞进构造签名）。
-    event_blob_store: "EventBlobStore | None" = None
 
     async def create_session(
         self,
@@ -241,10 +231,6 @@ class SessionManager:
             max_concurrent=self.task_max_concurrent,
             task_max_retries=self.task_max_retries,
         )
-        # push_task 在这里立即发 TASK_CREATED（先于 runtime._register_and_drain 的晚
-        # 绑定），故本 TaskManager 的 event_blob_store 必须现在就接上，直接透传
-        # SessionManager 自己持有的那份（同一个 registry 解出的同一个 store）。
-        task_manager.set_event_blob_store(self.event_blob_store)
         # root task 的 user_prompt 与 SESSION_CREATED 是同一份内容，故 event 侧载荷
         # 也是同一份——同样由调用方从原始 content 算好，不在这里重算（Task 3）。
         await task_manager.push_task(

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
-from ctx_weft.core.content import content_to_event_jsonable, content_with_suffix
+from ctx_weft.core.content import content_with_suffix
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
@@ -26,12 +26,9 @@ from ctx_weft.core.state.models import (
     TaskStatus,
 )
 from ctx_weft.core.utils import generate_id, now_utc
-from ctx_weft.protocols.context import ProviderContext
-from ctx_weft.protocols.events import NullEventBlobStore
 
 if TYPE_CHECKING:
     from ctx_weft.core.events.bus import EventBus
-    from ctx_weft.protocols.events import EventBlobStore
 
 logger = logging.getLogger(__name__)
 
@@ -109,14 +106,11 @@ class TaskManager:
         self._cancel_finalizer: (
             Callable[[list[Task], str], Coroutine[Any, Any, None]] | None
         ) = None
-        # 事件侧 blob store（TASK_REQUEUED 的 user_prompt 外部化用；TASK_CREATED 自
-        # blob-store 解耦 Task 3 起改由入口传现成载荷，不再经这里），
-        # Runtime._register_and_drain 里晚绑定。TaskManager 每次 start_session /
-        # recover_session 都新建一份，接线晚于 providers 注册完毕（不同于 HitlManager
-        # 那种跨 session 长寿命单例），故直接存已解析的 store 引用即可，不必像
-        # HitlManager 那样存解析器。None（纯单测直接构造 TaskManager() 时）→ 视为
-        # NullEventBlobStore。
-        self._event_blob_store: "EventBlobStore | None" = None
+        # 事件侧 blob store 的注入点（set_event_blob_store / _event_blob_store /
+        # _event_ctx）已删除：TASK_CREATED 自 Task 3 起、TASK_REQUEUED 自本任务
+        # （blob-store 解耦 Task 5）起都改由调用方/task 上携带的现成 event jsonable
+        # 供给，TaskManager 不再需要持有 event blob store——reopen_task 零 blob IO
+        # 是**结构性**保证：这个类根本没有能力发起一次 blob 调用。
 
     def track_background(self, t: "asyncio.Task") -> None:
         """Track a fire-and-forget background coroutine so the session awaits it before close."""
@@ -125,15 +119,6 @@ class TaskManager:
 
     def set_runner(self, runner: TaskRunner) -> None:
         self._runner = runner
-
-    def set_event_blob_store(self, store: "EventBlobStore | None") -> None:
-        """注入事件侧 blob store（`reopen_task` 的事件外部化用）。"""
-        self._event_blob_store = store
-
-    def _event_ctx(self) -> "ProviderContext":
-        """构造 reopen_task 事件外部化用的 ctx，tenant 口径同 `_emit`。"""
-        tenant_id = self._session.tenant_id if self._session else "default"
-        return ProviderContext(session_id=self._session_id, tenant_id=tenant_id)
 
     def set_is_current(self, predicate: "Callable[[], bool]") -> None:
         """注入归属权谓词：本 TM 是否仍是该 session 的当前 owner（见 `_is_current`）。"""
@@ -313,6 +298,9 @@ class TaskManager:
                     "事件库恒不含字节，这里没有原始字节可用"
                 )
             user_prompt_jsonable = task.user_prompt   # str | None，本身即 jsonable
+        # 挂在 task 上供 reopen_task 直接复用（零 blob IO——reopen 不引入新图，见
+        # Task.user_prompt_event_jsonable 的字段注释）。
+        task.user_prompt_event_jsonable = user_prompt_jsonable
         await self._emit(
             EventType.TASK_CREATED, task_id=task.id,
             payload=_task_payload(task, user_prompt_jsonable=user_prompt_jsonable),
@@ -570,6 +558,7 @@ class TaskManager:
         if task.original_user_prompt is None:
             # 原样保留（含多模态）：这是 reopen 的 base，拍扁会让重开后图片永久消失。
             task.original_user_prompt = task.user_prompt or ""
+            task.original_user_prompt_event_jsonable = task.user_prompt_event_jsonable
         base_prompt = task.original_user_prompt
 
         prev_output = _outputs_to_text(task.outputs) or (task.process_report or "")
@@ -618,13 +607,13 @@ class TaskManager:
                 blocked_by=set(blocked_by or []),
             ))
         # 把改写后的 prompt 一并落进事件，使崩溃恢复（event replay）能重建修订后的 user_prompt。
-        # 事件库恒不含字节（Task 3）：两个 prompt 字段都要经 content_to_event_jsonable。
-        event_blob_store = self._event_blob_store or NullEventBlobStore()
-        ctx = self._event_ctx()
-        user_prompt_jsonable = await content_to_event_jsonable(
-            new_prompt, event_blob_store=event_blob_store, ctx=ctx)
-        original_user_prompt_jsonable = await content_to_event_jsonable(
-            task.original_user_prompt, event_blob_store=event_blob_store, ctx=ctx)
+        # reopen 只在 prompt 尾部追加**文本** section（见上方 new_prompt 构造），
+        # 不可能引入事件流没见过的图。故事件形态直接由首次发射那份 + 文本拼出，
+        # 零 blob IO，且同一张图的 event ref 跨 reopen 逐字节相同（重放确定性）。
+        original_user_prompt_jsonable = task.original_user_prompt_event_jsonable
+        user_prompt_jsonable = _append_text_sections(
+            original_user_prompt_jsonable, sections)
+        task.user_prompt_event_jsonable = user_prompt_jsonable
         await self._emit(
             EventType.TASK_REQUEUED,
             task_id=task_id,
@@ -1203,6 +1192,19 @@ class TaskManager:
         for tid in cancelled:
             await self._try_resume_parent(tid)
         return cancelled
+
+
+def _append_text_sections(
+    jsonable: "str | list[dict] | None", sections: "list[str]",
+) -> "str | list[dict] | None":
+    """把 reopen 的文本 section 追加到事件侧 jsonable 尾部，与 `content_with_suffix`
+    对 content 的处理同构（str 直接接、list 追加 TextPart dict）。"""
+    if not sections:
+        return jsonable
+    suffix = "".join(f"\n\n{sec}" for sec in sections)
+    if jsonable is None or isinstance(jsonable, str):
+        return (jsonable or "") + suffix
+    return [*jsonable, {"type": "text", "text": suffix}]
 
 
 def _outputs_to_text(outputs: Any) -> str:

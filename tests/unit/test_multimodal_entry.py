@@ -63,7 +63,6 @@ async def test_root_task_carries_full_content_session_carries_summary():
     sm = SessionManager(
         lifecycle_manager=SimpleNamespace(),
         event_bus=SimpleNamespace(emit=AsyncMock()),
-        event_blob_store=_StubEventBlobStore(),
     )
     session = Session(
         id="s1", user_prompt=content_to_text(_content()), status="RUNNING",
