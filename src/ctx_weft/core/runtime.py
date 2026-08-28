@@ -1325,6 +1325,10 @@ class CtxWeftRuntime:
             # 换模型恢复：窗口参数须随新模型，否则 CONTEXT_OVERFLOW 挂起换大模型也照旧溢出
             self._sync_session_llm_window(session)
         all_tasks = [task_from_projection(tp) for tp in view.tasks.values()]
+        # 重放出来的 prompt 带的是 **event ref**（事件 payload 的口径），而它下游要被
+        # driver ingest 进 memory。两个 ref 命名空间互不相通，故必须在此过桥：
+        # event_blob 取字节 → memory 侧重新归一化。每一步只碰一个 store。
+        await self._restore_task_prompts(all_tasks, session_id, sess_proj.tenant_id)
 
         # 重建内存 HitlManager（_futures 空 → 后续应答自动走冷 resume；spec/07 §9）
         if view.pending_hitl:
@@ -1417,6 +1421,35 @@ class CtxWeftRuntime:
         if not resumable:
             final_status = "FAILED" if session.failure_counter > 0 else "SUCCEEDED"
             await task_manager.finalize_idle_session(final_status)
+
+    async def _restore_task_prompts(
+        self, tasks: "list[Task]", session_id: str, tenant_id: str,
+    ) -> None:
+        """恢复态的 prompt 从 event ref 转回 memory ref。**逐 task 独立降级，不整体失败。**
+
+        转换前先把事件侧的原样形态快照到 `user_prompt_event_jsonable`（见 Task 5）：
+        `reopen_task` 要用它发 TASK_REQUEUED，此时它就是从事件里读来的那一份，
+        零成本、且与首次发射逐字节相同。
+        """
+        from ctx_weft.core.content import (
+            content_to_jsonable, hydrate_event_content, normalize_content,
+        )
+
+        event_blob_store = self.providers.get_event_blob_store()
+        blob_store = self.providers.get_memory_blob_store()
+        ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
+        for task in tasks:
+            for field_name in ("user_prompt", "original_user_prompt"):
+                content = getattr(task, field_name)
+                if not content or isinstance(content, str):
+                    continue
+                setattr(task, f"{field_name}_event_jsonable", content_to_jsonable(content))
+                hydrated = await hydrate_event_content(
+                    content, event_blob_store=event_blob_store, ctx=ctx)
+                if blob_store.can_externalize:
+                    hydrated = await normalize_content(
+                        hydrated, blob_store=blob_store, ctx=ctx)
+                setattr(task, field_name, hydrated)
 
     async def _find_finish_pair_tool_call_id(
         self, memory: MemoryProvider, scope: MemoryAddress, task_id: str, pctx: ProviderContext,

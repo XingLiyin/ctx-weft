@@ -40,6 +40,7 @@ __all__ = [
     "content_has_image",
     "normalize_content",
     "rehydrate_content",
+    "hydrate_event_content",
     "downgrade_images_to_text",
     "extract_blob_refs",
     "collect_blob_refs",
@@ -671,6 +672,52 @@ async def rehydrate_content(
             data=base64.b64encode(raw).decode("ascii"),
             media_type=media_type or stored_media_type,
             source_type="base64",
+        ))
+    return out
+
+
+async def hydrate_event_content(
+    content: "str | list[ContentPart] | None",
+    *,
+    event_blob_store: "Any",
+    ctx: "Any",
+) -> "str | list[ContentPart] | None":
+    """把事件里的 event ref 还原成 base64 part，供恢复路径重新走 memory 侧归一化。
+
+    这是两个 blob 世界之间**唯一**的桥，且方向单一：event → 字节 → 调用方自己决定
+    要不要再 put 进 memory。桥架在恢复路径这个交界处、由 event 侧发起，而不是藏在
+    memory 的写路径里替 event 代劳（那正是本次解耦拆掉的入口双写）。
+
+    与 `rehydrate_content` 的分工：那个取 `MemoryBlobStore`、产出给 adapter 拼 wire
+    payload；本函数取 `EventBlobStore`、产出给 `normalize_content` 重新落 memory。
+    两者取的 store 不同、ref 命名空间不同，**不可互换**。
+
+    取不回字节 → `[image unavailable: {media_type}]` 文本占位，**不抛**：event blob
+    的保留策略归 host（spec §9），取不到是预期内的正常降级，不该让恢复整个失败。
+    """
+    if not content or isinstance(content, str):
+        return content
+    if not event_blob_store.can_externalize:
+        return content
+    from ctx_weft.protocols import ImagePart
+    out: list[Any] = []
+    for part in content:
+        if not _is_ref_part(part):
+            out.append(part)
+            continue
+        ref = str(_part_field(part, "data", "") or "")
+        media_type = str(_part_field(part, "media_type", "") or "")
+        got = await event_blob_store.get(ref, ctx)
+        if got is None:
+            logger.warning("hydrate_event_content: event blob 取不回 %r，降级为占位", ref)
+            out.append(_unavailable_part(part, media_type))
+            continue
+        raw, got_media_type = got
+        out.append(ImagePart(
+            data=base64.b64encode(raw).decode(),
+            media_type=media_type or got_media_type,
+            source_type="base64",
+            byte_size=len(raw),
         ))
     return out
 

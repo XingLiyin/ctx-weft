@@ -31,15 +31,18 @@ from __future__ import annotations
 import base64
 import dataclasses as _dc
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
-from ctx_weft.core.events import EventType
+from ctx_weft.core.content import content_to_jsonable
+from ctx_weft.core.events import Event, EventType
 from ctx_weft.core.loop.steps.segment_fold import segment_fold
 from ctx_weft.core.media.refs import find_image_placeholders
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import (
+    BLOB_REF_PREFIX,
     ImagePart,
     LLMChunk,
     LLMUsage,
@@ -55,6 +58,8 @@ from ctx_weft.protocols.capability import (
     ToolCapability,
     ToolCapabilityProvider,
 )
+from ctx_weft.protocols.events import EventBlobStore
+from ctx_weft.protocols.memory import MemoryBlobStore
 from ctx_weft.providers.llm.anthropic import AnthropicMultimodalAdapter
 from ctx_weft.providers.llm.openai import _TOOL_IMAGE_NOTICE, OpenAIMultimodalAdapter
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
@@ -733,3 +738,185 @@ async def _assert_text_tool_wire_shape_unchanged() -> None:
     assert not any(m.get("role") == "user" and isinstance(m.get("content"), list)
                    for m in following), (
         "纯文本工具结果之后 adapter 仍追加了一条重定位 user 消息")
+
+
+# ── Task 4：恢复路径把 event ref 转回 memory ref ─────────────────────────────
+#
+# 事件 payload 里恒为 event ref；重放出来的 task.user_prompt 要被 driver ingest 进
+# memory，必须先过 `Runtime._restore_task_prompts` 这座桥。本组用例直接构造事件流
+# （同 `test_crash_recovery_reconcile.py` 的手法），绕开真实 LLM 跑一整轮的不确定性，
+# 只钉住 `_recover_session_locked` 这一段的行为。
+#
+# 两个 blob store 用**互不相同的 ref 方案**（同 `test_multimodal_end_to_end.py` 的
+# 机关）：入口从前把同一份字节双写进两个 store 并断言两边 ref 相同，任何「拿 event
+# ref 去 memory 侧解」的隐藏跨命名空间引用都被「恰好相同」掩盖了；下面这组桩把 ref
+# 方案刻意做得不同，掩盖不住。
+
+
+class _Sha256MemoryBlobStore(MemoryBlobStore):
+    """memory 侧：内容寻址的 ``blob:<sha256>``（与仓内真实实现同口径）。"""
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        import hashlib
+        ref = f"{BLOB_REF_PREFIX}{hashlib.sha256(data).hexdigest()}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
+
+
+class _PrefixedEventBlobStore(EventBlobStore):
+    """event 侧：``blob:evt-<sha256>``——仍内容寻址（协议要求幂等），但命名空间独立。
+
+    多出的 ``evt-`` 段是本组用例的全部机关：它让「这个 ref 是谁家的」变成可断言的
+    事实，而不是靠两边碰巧算出同一个 sha。
+    """
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        import hashlib
+        ref = f"{BLOB_REF_PREFIX}evt-{hashlib.sha256(data).hexdigest()}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
+
+
+def _ctx() -> ProviderContext:
+    return ProviderContext(session_id="unused", tenant_id="default")
+
+
+@pytest.fixture
+def runtime_with_images():
+    """runtime + 两个**不同实例、不同 ref 方案**的 blob store（Task 4 回归专用）。"""
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    runtime = make_runtime(llm=None, agent_provider=resolver)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+    mem_store = _Sha256MemoryBlobStore()
+    evt_store = _PrefixedEventBlobStore()
+    runtime.providers.register_memory_blob_store(mem_store)
+    runtime.providers.register_event_blob_store(evt_store)
+    return runtime, mem_store, evt_store
+
+
+def _seed_event(seq: int, sid: str, type_: EventType, *, task_id=None, ts=None, **payload) -> Event:
+    return Event(
+        id=f"evt_{seq:04d}", run_id="run_task4", sequence=seq, session_id=sid,
+        type=type_, timestamp=ts or datetime(2026, 8, 28, tzinfo=timezone.utc),
+        task_id=task_id, payload=payload,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_converts_event_refs_into_memory_refs(runtime_with_images) -> None:
+    """崩溃恢复后 task.user_prompt 必须是 **memory** ref——它会被 driver ingest 进 memory。
+
+    重放直接拿到的是 event ref；不转换就等于把一个 memory 解不开的 ref 落进记忆。
+    """
+    runtime, mem_store, evt_store = runtime_with_images
+    sid, tid, aid = "ses_t4a", "tsk_t4a", "agt_root"
+    ref_a = await evt_store.put(_RAW_A, "image/png", _ctx())
+    user_prompt_jsonable = content_to_jsonable([
+        TextPart(text="look at this"),
+        ImagePart(data=ref_a, media_type="image/png", source_type="ref"),
+    ])
+
+    events = [
+        _seed_event(1, sid, EventType.SESSION_CREATED, user_prompt="look at this",
+                    template_id="agent:tpl_echo", root_agent_id=aid),
+        _seed_event(2, sid, EventType.RUN_STARTED),
+        # status 刻意用非终态（ACTIVE）：终态 task 会让 recover_session 判定「无可恢复
+        # task」，同步走 finalize_idle_session 收尾并把 TaskManager 从
+        # `runtime._task_managers` 里摘掉——本用例要在恢复**之后**立刻查 Task 对象，
+        # 必须让它留在可恢复集合里、TM 保持挂着（`_register_and_drain` 用
+        # `asyncio.create_task` 派发真正的执行，不 await 就不会被后台协程抢跑）。
+        _seed_event(3, sid, EventType.TASK_CREATED, task={
+            "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            "assigned_agent_id": aid, "creator_agent_id": aid,
+            "user_prompt": user_prompt_jsonable}),
+    ]
+    for e in events:
+        await runtime.event_store.append(e)
+
+    await runtime.recover_session(sid)
+
+    tm = runtime._task_managers[sid]
+    task = tm.get_task(tid)
+    assert task is not None
+    img = next(p for p in task.user_prompt if getattr(p, "source_type", "") == "ref")
+    assert await mem_store.get(img.data, _ctx()) is not None      # memory 解得开
+    assert await evt_store.get(img.data, _ctx()) is None          # 不是 event 的 ref
+
+
+@pytest.mark.asyncio
+async def test_recovery_populates_both_event_jsonable_fields_for_reopen(runtime_with_images) -> None:
+    """恢复之后、任何 reopen 发生之前，两个 event jsonable 字段都必须已经被填好。
+
+    `reopen_task` 首次 reopen 时会把 ``user_prompt_event_jsonable`` 快照进
+    ``original_user_prompt_event_jsonable``；若恢复路径只填了其中一个、或一个都
+    没填，被重开的携图任务其事件载荷会静默降级成纯文本，而不会有任何报错——这条
+    用例直接钉住恢复后 `user_prompt_event_jsonable` **与**
+    `original_user_prompt_event_jsonable` 都非 None，且内容是 **event 侧**形态
+    （ref 归 evt_store 解，归 mem_store 解不开）。
+
+    构造一个「崩在 reopen 之后」的持久态：TASK_CREATED（FINISHED）之后紧跟一条真实的
+    TASK_REQUEUED（`user_prompt` / `original_user_prompt` 均携带 event ref 图片）——
+    reducer 把 TASK_REQUEUED 的状态折成 PENDING（非终态），故不需要再补一条终态事件；
+    留在可恢复集合里，TaskManager 才不会被 `finalize_idle_session` 同步收尾摘掉
+    （摘掉后 `runtime._task_managers` 查不到、Task 对象也就无从断言）。本用例只验证
+    `_restore_task_prompts` 这一段的落地结果，不依赖真实 LLM 跑完一轮
+    （`recover_session` 用 `asyncio.create_task` 派发真正的执行，不 await 就不会被
+    后台协程抢跑）。
+    """
+    runtime, mem_store, evt_store = runtime_with_images
+    sid, tid, aid = "ses_t4b", "tsk_t4b", "agt_root"
+    ref_a = await evt_store.put(_RAW_A, "image/png", _ctx())
+    original_jsonable = content_to_jsonable([
+        TextPart(text="look at this"),
+        ImagePart(data=ref_a, media_type="image/png", source_type="ref"),
+    ])
+    revised_jsonable = content_to_jsonable([
+        TextPart(text="look at this"),
+        ImagePart(data=ref_a, media_type="image/png", source_type="ref"),
+        TextPart(text="\n\n## Revision required\nplease redo it"),
+    ])
+
+    events = [
+        _seed_event(1, sid, EventType.SESSION_CREATED, user_prompt="look at this",
+                    template_id="agent:tpl_echo", root_agent_id=aid),
+        _seed_event(2, sid, EventType.RUN_STARTED),
+        _seed_event(3, sid, EventType.TASK_CREATED, task={
+            "id": tid, "status": "FINISHED", "title": "T", "kind": "reasoning",
+            "assigned_agent_id": aid, "creator_agent_id": aid,
+            "user_prompt": original_jsonable}),
+        _seed_event(4, sid, EventType.TASK_REQUEUED, task_id=tid,
+                    reason="observer_review_reopen",
+                    user_prompt=revised_jsonable, original_user_prompt=original_jsonable),
+    ]
+    for e in events:
+        await runtime.event_store.append(e)
+
+    await runtime.recover_session(sid)
+
+    tm = runtime._task_managers[sid]
+    task = tm.get_task(tid)
+    assert task is not None
+
+    for field_name in ("user_prompt_event_jsonable", "original_user_prompt_event_jsonable"):
+        jsonable = getattr(task, field_name)
+        assert jsonable is not None, f"{field_name} 恢复后必须非 None"
+        images = [p for p in jsonable if isinstance(p, dict) and p.get("type") == "image"]
+        assert images, f"{field_name} 里没有 image part：{jsonable}"
+        ref = images[0]["data"]
+        assert await evt_store.get(ref, _ctx()) is not None, (
+            f"{field_name} 里的 ref 必须是 event 侧的、能被 evt_store 解开")
+        assert await mem_store.get(ref, _ctx()) is None, (
+            f"{field_name} 混进了 memory 侧 ref——它是事件侧载荷，命名空间不该相通")
