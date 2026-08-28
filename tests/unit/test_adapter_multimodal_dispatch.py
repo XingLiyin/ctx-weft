@@ -243,3 +243,13 @@ def test_multimodal_classes_exported_from_package():
     import ctx_weft.providers.llm as pkg
     assert pkg.AnthropicMultimodalAdapter.__name__ == "AnthropicMultimodalAdapter"
     assert pkg.OpenAIMultimodalAdapter.__name__ == "OpenAIMultimodalAdapter"
+
+
+@pytest.mark.asyncio
+async def test_near_miss_style_rejected_on_ungated_path():
+    """fetch_models / verify_model 不经 SUPPORTED_STYLES 门控，靠 _build_adapter 自己拒——
+    故分派必须精确匹配：前缀相同但不在清单里的 style 也要抛。"""
+    p = _provider_with("anthropic")  # Create a provider instance
+    # Now test ungated path with a near-miss style
+    with pytest.raises(ValueError, match="Unsupported style"):
+        await p.fetch_models("anthropicX", "k", "https://x")

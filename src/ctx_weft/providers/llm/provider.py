@@ -343,25 +343,28 @@ class LLMProvider:
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _build_adapter(self, account: LLMAccount) -> LLMClient:
-        multimodal = account.style.endswith("-multimodal")
-        if account.style.startswith("anthropic"):
+        # 分派必须精确匹配：fetch_models / verify_model 两个 ungated call site 靠 _build_adapter
+        # 自己拒绝未知 style。前缀匹配会让 "anthropicX" 这样的近似值也被接受（降级成纯文本），
+        # 破坏了入口防御（只有 register_account 经过 SUPPORTED_STYLES 门控）。故必须精确匹配。
+        style = account.style
+        if style in ("anthropic", "anthropic-multimodal"):
             from ctx_weft.providers.llm.anthropic import (
                 AnthropicAdapter,
                 AnthropicMultimodalAdapter,
             )
-            cls = AnthropicMultimodalAdapter if multimodal else AnthropicAdapter
+            cls = AnthropicMultimodalAdapter if style == "anthropic-multimodal" else AnthropicAdapter
             return cls(
                 api_key=account.api_key,
                 base_url=account.base_url or "https://api.anthropic.com",
                 timeout_sec=account.timeout_sec,
                 max_http_retries=self._max_http_retries,
             )
-        if account.style.startswith("openai"):
+        if style in ("openai", "openai-multimodal"):
             from ctx_weft.providers.llm.openai import (
                 OpenAIAdapter,
                 OpenAIMultimodalAdapter,
             )
-            cls = OpenAIMultimodalAdapter if multimodal else OpenAIAdapter
+            cls = OpenAIMultimodalAdapter if style == "openai-multimodal" else OpenAIAdapter
             return cls(
                 api_key=account.api_key,
                 base_url=account.base_url or "https://api.openai.com",
