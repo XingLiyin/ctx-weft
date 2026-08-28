@@ -167,6 +167,16 @@ class MemoryEvent:
     topic: str | None = None  # 用于 topic-style 事件（含父子 task 通信）
     causation_id: str | None = None  # 关联上游 event
     metadata: dict = field(default_factory=dict)
+    # GC 的 mark 输入（缺陷 2026-08-27）：本事件引用了哪些 blob，但**没有**以结构化
+    # ImagePart(source_type="ref") 形式出现在 content 里。
+    #
+    # 唯一的填写方——L0.5 降级（core/media/fold.py）：它把 ImagePart(ref) 换成文本
+    # 占位，ref 就此掉进自由文本，provider 再也扫不出来 → 引用归零 → 字节被回收 →
+    # media:get_image 取不回，L0.5 承诺的「可逆」失效。
+    #
+    # 普通写侧**不必填**：content 里结构化的 ref part 由 collect_blob_refs 自动采集。
+    # provider 建引用边时一律走 core.content.collect_blob_refs，不得自行判断。
+    blob_refs: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # 误型 loud（字段终名切换护栏）：旧习惯 scope=<坐标> / address=<枚举> 静默换义
@@ -231,6 +241,10 @@ class MemoryRecord:
     scope: MemoryScope | None = None     # v2：归属范围（终名，原 layer 字段）
     address: "MemoryAddress | None" = None  # v2：来源回显（归档坐标）
     metadata: dict = field(default_factory=dict)
+    # 与 MemoryEvent.blob_refs 对称的读侧回显（缺陷 2026-08-27）。
+    # provider 必须还原它——否则一条被降级过两次的记录，第一次降的 ref 在第二次
+    # 重建补偿事件时就没人认领了（core/media/fold.py::_rebuild 要累积它）。
+    blob_refs: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """把 dict 形态的 content 归一回 ContentPart dataclass（多模态 Phase 3c）。
