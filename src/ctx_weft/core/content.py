@@ -157,11 +157,18 @@ async def content_to_event_jsonable(
     - 文本 part → 原样；
     - ``source_type == "ref"`` 的图 → **原样**，不重复 put（入口 `normalize_content`
       的双写已保证 event store 持有这份字节，见该函数 docstring「为什么必须同循环」）；
-    - 其余图（``base64`` / ``url``）→ put 进 event blob → 换成 ref。
+    - ``source_type == "base64"`` 的图 → put 进 event blob → 换成 ref。
       memory 侧无 blob 时入口不外部化、content 里仍是 inline base64，**只要 event blob
       可用，事件侧仍能独立完成 ref 化**——这是「所有 base64 变引用」在 memory 无 blob
       时也成立的关键（两条路径互补，合起来覆盖 memory×event 可/不可外部化的全部四种
       组合）。
+    - 其余图（当下即 ``url``，本仓尚不支持、格式校验层理应拦下——但本函数不能假设
+      调用方一定先过了校验）→ **降级成 ``[image {media_type}]`` 文本占位**
+      （`_IMAGE_PLACEHOLDER_TMPL`，占位清单见 `core/media/refs.py` 模块 docstring
+      第 2 行），**不静默透传**。理由：``url`` 形态可以携带 ``data:`` URI，静默
+      `content_to_jsonable` 序列化会把字节原样写进事件 payload，直接击穿本函数的
+      核心不变量（事件库恒不含字节）；同 `content_to_jsonable_refs_only` 对非 ref
+      图的处理口径一致（本函数取代了它）。
 
     ⚠️ **``event_blob_store.can_externalize`` 为 False 时整段短路**，退回同步的
     ``content_to_jsonable``（inline base64 原样落进 payload，与 Task 3 之前的行为一致）
@@ -189,14 +196,24 @@ async def content_to_event_jsonable(
         return content_to_jsonable(content)
     prepared: list[Any] = []
     for part in content:
-        if _is_image_part(part) and _part_field(part, "source_type", "base64") == "base64":
+        if not _is_image_part(part):
+            prepared.append(part)                                    # 文本 → 原样
+            continue
+        source_type = _part_field(part, "source_type", "base64")
+        if source_type == "ref":
+            prepared.append(part)                                    # ref → 原样，不重复 put
+        elif source_type == "base64":
             raw = base64.b64decode(str(_part_field(part, "data", "") or ""), validate=True)
             media_type = str(_part_field(part, "media_type", "") or "")
             ref = await event_blob_store.put(raw, media_type, ctx)
             prepared.append(dataclasses.replace(
                 part, data=ref, source_type="ref", byte_size=len(raw)))
         else:
-            prepared.append(part)
+            # url（或未来的未知形态）：不静默透传——见函数 docstring「为什么不能透传」。
+            from ctx_weft.protocols import TextPart
+            media_type = str(_part_field(part, "media_type", "") or "") or "image"
+            prepared.append(TextPart(text=_IMAGE_PLACEHOLDER_TMPL.format(
+                media_type=media_type)))
     return content_to_jsonable(prepared)
 
 

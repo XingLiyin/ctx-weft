@@ -32,6 +32,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     TextPart,
 )
+from ctx_weft.protocols.events import EventBlobStore
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"x" * 100
 _PNG = base64.b64encode(_PNG_BYTES).decode()
@@ -42,6 +43,29 @@ _MALFORMED = "!!!这不是合法的 base64!!!"
 
 class _CountingStore(MemoryBlobStore):
     """能真正外部化的 stub store + put 计数器（内容寻址，ref 形态与真实实现一致）。"""
+
+    def __init__(self) -> None:
+        self.put_calls = 0
+        self.seen: list[tuple[bytes, str]] = []
+        self.ctx_session_ids: list[str] = []
+        self.ctx_tenant_ids: list[str] = []
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        self.put_calls += 1
+        self.seen.append((data, media_type))
+        self.ctx_session_ids.append(ctx.session_id)
+        self.ctx_tenant_ids.append(ctx.tenant_id)
+        return f"{BLOB_REF_PREFIX}{hashlib.sha256(data).hexdigest()}"
+
+    async def get(self, ref: str, ctx: ProviderContext) -> "tuple[bytes, str] | None":
+        for data, media_type in self.seen:
+            if ref == f"{BLOB_REF_PREFIX}{hashlib.sha256(data).hexdigest()}":
+                return data, media_type
+        return None
+
+
+class _CountingEventStore(EventBlobStore):
+    """event 侧的 `_CountingStore` 同形版——只记 put 时收到的 ctx（Task 3 review Finding 2）。"""
 
     def __init__(self) -> None:
         self.put_calls = 0
@@ -631,3 +655,34 @@ async def test_plain_text_reply_never_touches_the_event_store():
 
     assert req.message == "纯文本"
     assert reads == [], "纯文本应答不得为了解 tenant 去读事件日志"
+
+
+# ── Task 3 review Finding 2：event 侧的 tenant 必须是真实解析值，不是硬编码 default ──
+
+
+@pytest.mark.asyncio
+async def test_hitl_event_put_receives_the_real_session_tenant_not_default():
+    """`HitlManager._resolve` 给 event 侧 `content_to_event_jsonable` 传的 ctx.tenant_id
+    必须是 `_normalize_hitl_content` 解出的真实 tenant，而不是写死的 "default"。
+
+    刻意只注册 EventBlobStore、**不注册 MemoryBlobStore**：这是「memory 不可外部化、
+    event 可外部化」组合（spec §6：`normalize_content` 短路不碰 event 侧，ref 化改由
+    `content_to_event_jsonable` 独立完成）——message 到 `_resolve` 时仍是 inline
+    base64，必然真的调用 event_blob_store.put，断言才立得住（若 memory 也可外部化，
+    入口的双写会先把内容变成 ref，`_resolve` 走 ref 直通分支，根本不会再 put，
+    这条用例就验不到本次要修的 bug）。
+    """
+    event_store = _CountingEventStore()
+    rt = _make_runtime(_VisionClient())
+    rt.providers.register_event_blob_store(event_store)
+    _install_live_owner(rt, "ses-tenant-event", "tenant-gamma")
+    hid = await _pending(rt, session_id="ses-tenant-event")
+
+    req = await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
+
+    assert req.status == "accepted"
+    assert event_store.put_calls == 1, "message 应仍是 inline base64，必须真的外部化一次"
+    assert event_store.ctx_tenant_ids == ["tenant-gamma"], (
+        "event 侧 put 收到的 tenant 必须是该 session 的真实 tenant，而非硬编码 default"
+    )
+    assert event_store.ctx_session_ids == ["ses-tenant-event"]

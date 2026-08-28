@@ -426,10 +426,19 @@ class HitlManager:
                 if self._event_blob_store_resolver is not None
                 else NullEventBlobStore()
             )
+            # tenant 用 `req.resume_tenant_id`——`_normalize_message` 一步之前刚由
+            # runtime 的 `_normalize_hitl_content` 解析并存回 req（同一批内容，同一个
+            # 真实 tenant，见该方法 docstring）。**不**在这里重新查事件日志：那是
+            # best-effort 的冷路径扫描，值已经算出来过，没必要在热路径上重付一次。
+            # 未注入 normalizer 的裸 HitlManager（纯单测）→ resume_tenant_id 恒 None →
+            # 退回 "default"，与之前的行为一致。
             payload["message"] = await content_to_event_jsonable(
                 req.message,
                 event_blob_store=event_blob_store,
-                ctx=ProviderContext(session_id=req.session_id, tenant_id="default"),
+                ctx=ProviderContext(
+                    session_id=req.session_id,
+                    tenant_id=req.resume_tenant_id or "default",
+                ),
             )
         if req.modified_arguments is not None:
             payload["modified_arguments"] = req.modified_arguments

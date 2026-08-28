@@ -230,3 +230,43 @@ async def test_transitional_helper_is_gone() -> None:
     """`content_to_jsonable_refs_only` 是本设计落地前的过渡实现，应已删除。"""
     import ctx_weft.core.content as c
     assert not hasattr(c, "content_to_jsonable_refs_only")
+
+
+async def test_falls_back_to_plain_jsonable_when_event_store_cannot_externalize() -> None:
+    """无 EventBlobStore 时短路——**这是有意的过渡缺口**，Task 4 的入口门控关上它。
+
+    钉住两件事：inline base64 原样保留（不被外部化），且返回的是
+    `content_to_jsonable` 的产物（dict 列表）而非裸 content——后者会让下游
+    json.dumps 在很远的地方才炸（Task 3 review Finding 1）。
+    """
+    out = await content_to_event_jsonable(
+        [TextPart(text="看图"), ImagePart(data=_B64, media_type="image/png")],
+        event_blob_store=NullEventBlobStore(), ctx=_ctx(),
+    )
+    assert isinstance(out, list)
+    assert all(isinstance(item, dict) for item in out), \
+        "必须是 content_to_jsonable 的产物（dict 列表），不能是裸 ContentPart"
+    assert out == [
+        {"type": "text", "text": "看图"},
+        {"type": "image", "data": _B64, "media_type": "image/png",
+         "source_type": "base64"},
+    ]
+    assert out[1]["data"] == _B64, "短路时 base64 原样保留，不被外部化"
+    assert out[1]["source_type"] == "base64"
+
+
+async def test_url_part_is_downgraded_not_silently_passed_through() -> None:
+    """既非 ref 也非 base64 的图（如 url）不得静默透传（Task 3 review Finding 3）。
+
+    `url` 形态可以携带 ``data:`` URI——静默 `content_to_jsonable` 序列化会把字节
+    原样写进事件 payload，直接击穿「事件库恒不含字节」。同
+    `content_to_jsonable_refs_only`（本函数取代的过渡实现）对非 ref 图的处理口径
+    一致：降级成 `[image {media_type}]` 占位。
+    """
+    evt = _Stub()
+    part = ImagePart(data="https://example.com/a.png", media_type="image/png",
+                     source_type="url")
+    out = await content_to_event_jsonable([part], event_blob_store=evt, ctx=_ctx())
+    assert out == [{"type": "text", "text": "[image image/png]"}]
+    assert "https://example.com" not in str(out)
+    assert evt.blobs == {}, "url 形态不 put，直接降级"

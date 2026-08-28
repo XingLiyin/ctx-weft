@@ -663,12 +663,24 @@ class CtxWeftRuntime:
           「真正会收到这张图的那个模型」——判默认 client 等于门控失效。两者均为 `None`
           时 `_resolve_llm(None, None)` 回落默认 client，既有行为不变。
         - **tenant**：由 `req.session_id` 解出（见 `_tenant_for_session`）。解 tenant 冷路径
-          要读事件日志，故只在**真会写 blob** 时才付这个代价：纯文本、或 blob store 不能
-          外部化时 tenant 根本用不上（`_validate_and_normalize_content` 会原样返回）。
+          要读事件日志，故只在**真会写 blob** 时才付这个代价：纯文本、或两个 blob store
+          都不能外部化时 tenant 根本用不上。判据是 memory **或** event 任一可外部化就要
+          解——`content_to_event_jsonable` 在 memory 不可外部化时仍可能独立把内容写进
+          event blob（Task 3 spec §6：两条路径互补覆盖四种组合），只看 memory 侧会漏掉
+          「memory 不可外部化、event 可外部化」这一组合的 tenant。
+
+        解出的 tenant **顺手存回 `req.resume_tenant_id`**（Task 3 review fix）：
+        `HitlManager._resolve` 用它给 event 侧 `content_to_event_jsonable` 传正确的
+        `ProviderContext.tenant_id`，不必在 `_resolve` 的热路径上再查一遍事件日志——
+        本方法已经算出来了，值不会变。
         """
         tenant_id = "default"
-        if not isinstance(content, str) and self.providers.get_memory_blob_store().can_externalize:
+        if not isinstance(content, str) and (
+            self.providers.get_memory_blob_store().can_externalize
+            or self.providers.get_event_blob_store().can_externalize
+        ):
             tenant_id = await self._tenant_for_session(req.session_id)
+        req.resume_tenant_id = tenant_id
         return await self._validate_and_normalize_content(
             content,
             req.session_id,
