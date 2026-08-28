@@ -4,11 +4,10 @@
 **静默丢弃且无占位符**（Anthropic 侧 tool_result 原生支持图片块，是 OpenAI 单边缺口）。
 本任务拆两处：
 
-- **策略在 gateway**：``supports_vision`` 是 duck-typed、不在 ``LLMClient`` 协议上，
-  ``OpenAIAdapter`` 自己不声明它（声明的是包在外面的 ``_FixedModelClient``），故
-  adapter 内 ``getattr(self, "supports_vision", False)`` 恒为 False——门控写在 adapter
-  会把**所有**工具图降级掉，包括视觉模型。门控落 ``stream_llm``，与 Phase 3b 的
-  rehydrate 同一处、同一理由，且一处覆盖两家 adapter。
+- **策略在 adapter**：模态能力由「注册了哪个 adapter 类」表达（spec 2026-08-28）。
+  纯文本 adapter 在 ``_prepare_messages`` 里把图降级；gateway 不再做任何模态判断。
+  本文件只覆盖 wire 序列化（``_serialize_messages`` 的 tool 图重定位），
+  分流行为见 tests/unit/test_adapter_multimodal_dispatch.py。
 - **格式在 adapter**：批处理连续 tool 消息，图片攒到**整段之后**合并成一条 user 消息。
   「段末 flush」是硬约束而非风格选择：OpenAI 要求 assistant 的每个 ``tool_calls`` 由
   紧随其后的 ``tool`` 消息应答，中间插 user 消息会打断配对 → 400。
@@ -238,10 +237,8 @@ def test_anthropic_tool_result_image_behaviour_unchanged() -> None:
 class _CapturingLLM:
     """记录 complete() 实际收到的 messages——即 adapter 将要序列化的东西。"""
 
-    def __init__(self, *, supports_vision: bool | None = None) -> None:
+    def __init__(self) -> None:
         self.seen: list[LLMMessage] = []
-        if supports_vision is not None:
-            self.supports_vision = supports_vision
 
     async def complete(self, request: LLMRequest, stream: bool = True):
         self.seen = list(request.messages)
@@ -290,94 +287,22 @@ async def _drain(llm, request, **kw) -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_vision_downgrades_tool_images_and_adapter_adds_no_user_message() -> None:
-    """无视觉模型：gateway 把 tool 图收成文本占位 → adapter 不再产生额外 user 消息。"""
-    llm = _CapturingLLM(supports_vision=False)
-    await _drain(llm, _request(*_legal(
-        LLMMessage(role="tool", content=[TextPart(text="截图"), _img()], tool_call_id="tc1"))))
+async def test_gateway_passes_images_through_untouched() -> None:
+    """gateway 对模态零判断（spec 2026-08-28）：图片原样到达 LLMClient，
+    降不降级由 adapter 自己决定。"""
+    llm = _CapturingLLM()
+    msg = LLMMessage(role="tool", content=[TextPart(text="截图"), _img()],
+                     tool_call_id="tc1")
+    await _drain(llm, _request(*_legal(msg)))
 
     tool_msg = _by_role(llm.seen, "tool")[0]
-    assert _images(tool_msg.content) == [], "无视觉模型的 tool 消息不得留下图片 part"
-    out = oai("", llm.seen)
-    assert [m["role"] for m in out] == ["user", "assistant", "tool"], \
-        f"不得产生额外 user 消息：{out}"
-    assert "[image image/png]" in out[-1]["content"], \
-        f"降级后 tool 文本必须留占位：{out[-1]['content']!r}"
-
-
-@pytest.mark.asyncio
-async def test_undeclared_vision_is_treated_as_no_vision() -> None:
-    """严格默认：未声明 ``supports_vision`` 的 client 一律按无视觉处理。"""
-    llm = _CapturingLLM()  # 不设属性
-    await _drain(llm, _request(*_legal(
-        LLMMessage(role="tool", content=[_img()], tool_call_id="tc1"))))
-    assert _images(_by_role(llm.seen, "tool")[0].content) == []
-
-
-@pytest.mark.asyncio
-async def test_vision_model_keeps_tool_images() -> None:
-    """视觉模型不得被门控误伤——否则门控就成了「一律降级」。"""
-    llm = _CapturingLLM(supports_vision=True)
-    await _drain(llm, _request(*_legal(
-        LLMMessage(role="tool", content=[TextPart(text="截图"), _img()], tool_call_id="tc1"))))
-
-    imgs = _images(_by_role(llm.seen, "tool")[0].content)
-    assert len(imgs) == 1 and imgs[0].data == _PNG_B64
-    out = oai("", llm.seen)
-    assert [m["role"] for m in out] == ["user", "assistant", "tool", "user"]
-    assert _data_url_payload(out[-1]["content"][0]) == _PNG_BYTES
-
-
-@pytest.mark.asyncio
-async def test_gate_only_touches_tool_role() -> None:
-    """门控**只降 ``role == "tool"``**：用户递的图在入口已被 ``validate_content`` 门控，
-    工具产出的图从未经过入口，是唯一的漏网路径。降别的角色属越权。"""
-    llm = _CapturingLLM(supports_vision=False)
-    await _drain(llm, _request(
-        LLMMessage(role="user", content=[TextPart(text="看图"), _img()]),
-        LLMMessage(role="assistant", content=[TextPart(text="收到"), _img()],
-                   tool_calls=[{"id": "tc1", "name": "shot", "arguments": {}}]),
-        LLMMessage(role="tool", content=[TextPart(text="截图"), _img()], tool_call_id="tc1"),
-    ))
-    user_msg = _by_role(llm.seen, "user")[0]
-    assistant_msg = _by_role(llm.seen, "assistant")[0]
-    tool_msg = _by_role(llm.seen, "tool")[0]
-    assert len(_images(user_msg.content)) == 1, "user 消息的图不得被门控波及"
-    assert len(_images(assistant_msg.content)) == 1, "assistant 消息的图不得被门控波及"
-    assert _images(tool_msg.content) == []
-
-
-@pytest.mark.asyncio
-async def test_plain_text_messages_untouched_by_gate() -> None:
-    """纯文本消息经门控后**原样是同一对象**（不接 MemoryBlobStore 时行为逐字节不变）。"""
-    llm = _CapturingLLM(supports_vision=False)
-    msgs = _legal(LLMMessage(role="tool", content="result", tool_call_id="tc1"))
-    await _drain(llm, _request(*msgs))
-    assert llm.seen == msgs
-    assert all(seen is orig for seen, orig in zip(llm.seen, msgs, strict=True)), \
-        "纯文本路径不得重建消息对象"
-
-
-@pytest.mark.asyncio
-async def test_no_vision_skips_blob_fetch_for_tool_images() -> None:
-    """无视觉时不该为一张注定被降级的图去 MemoryBlobStore 取一趟——门控在 rehydrate 之前。"""
-    llm = _CapturingLLM(supports_vision=False)
-    store = _CountingStore()
-    await _drain(llm, _request(*_legal(LLMMessage(
-        role="tool",
-        content=[ImagePart(data=_PNG_REF, media_type="image/png", source_type="ref")],
-        tool_call_id="tc1",
-    ))), blob_store=store, provider_ctx=_ctx())
-
-    assert store.get_calls == [], "被门控降级掉的图不该再触发 blob 取回"
-    assert _images(_by_role(llm.seen, "tool")[0].content) == []
-    assert "[image image/png]" in oai("", llm.seen)[-1]["content"]
+    assert len(_images(tool_msg.content)) == 1, "gateway 不得降级任何图片"
 
 
 @pytest.mark.asyncio
 async def test_vision_model_tool_ref_rehydrated_then_relocated() -> None:
     """视觉模型 + blob ref 的全链路：rehydrate → 重定位，wire 上的 base64 解回原始字节。"""
-    llm = _CapturingLLM(supports_vision=True)
+    llm = _CapturingLLM()
     store = _CountingStore()
     await _drain(llm, _request(*_legal(LLMMessage(
         role="tool",
