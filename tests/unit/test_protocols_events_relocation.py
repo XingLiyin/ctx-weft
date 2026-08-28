@@ -134,3 +134,63 @@ def test_event_store_contract_is_exported_from_package_root() -> None:
 
     assert ctx_weft.EventStore is EventStore
     assert "EventStore" in ctx_weft.__all__
+
+
+def test_builtin_implementations_live_in_providers() -> None:
+    """实现归 providers（spec §2 三层划界）。core 侧保留 re-export，对象必须同一。"""
+    from ctx_weft.core.events.bus import InProcessEventBus as CoreBus
+    from ctx_weft.core.state.event_store import InMemoryEventStore as CoreStore
+    from ctx_weft.providers.events import InMemoryEventStore, InProcessEventBus
+
+    assert CoreBus is InProcessEventBus
+    assert CoreStore is InMemoryEventStore
+
+
+def test_package_root_store_comes_from_providers() -> None:
+    """host 的 `from ctx_weft import InMemoryEventStore` 拿到的仍是同一个类。"""
+    import ctx_weft
+    from ctx_weft.providers.events import InMemoryEventStore
+
+    assert ctx_weft.InMemoryEventStore is InMemoryEventStore
+
+
+def test_dead_simplified_store_is_gone() -> None:
+    """`core/control/replay.py` 的同名简化版是死代码（零使用者），已删。
+
+    留着的危害是「同名不同实现、都对外可见」：
+    `from ctx_weft.core.control import InMemoryEventStore` 会拿到一个缺快照方法的对象。
+    """
+    import ctx_weft.core.control as cc
+    import ctx_weft.core.control.replay as replay
+
+    assert not hasattr(replay, "InMemoryEventStore")
+    assert not hasattr(cc, "InMemoryEventStore")
+    assert "InMemoryEventStore" not in getattr(cc, "__all__", [])
+
+
+async def test_runtime_still_gets_a_working_default_store() -> None:
+    """接线换了来源，默认 event_store 仍要能用（自动订阅 bus 后收得到事件）。
+
+    ⚠️ 适配自 brief：`CtxWeftRuntime()` 无参构造会因「未注册
+    AgentCapabilityProvider」抛 ValueError（core/runtime.py 里的硬校验，与本次
+    搬迁无关）。改用 brief 建议的等价写法：直接构造
+    `InMemoryEventStore(event_bus=InProcessEventBus())`，验证的正是 runtime.py
+    里同一行接线（`self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)`）
+    背后的订阅链路是否仍然工作。
+    """
+    from datetime import datetime, timezone
+
+    from ctx_weft.protocols.events import Event, EventStore
+    from ctx_weft.providers.events import InMemoryEventStore, InProcessEventBus
+
+    bus = InProcessEventBus()
+    store = InMemoryEventStore(event_bus=bus)
+    assert isinstance(store, EventStore)
+    await bus.emit(Event(
+        id="evt_0001", run_id="run_1", sequence=1, session_id="ses_1",
+        type="SessionCreated", timestamp=datetime(2026, 8, 28, tzinfo=timezone.utc),
+    ))
+    # 订阅是异步投递的，给它一次调度机会
+    import asyncio
+    await asyncio.sleep(0.05)
+    assert await store.read_by_session("ses_1")

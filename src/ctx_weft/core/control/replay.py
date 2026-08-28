@@ -49,16 +49,3 @@ class ReplayEngine:
         view.target_event_id = until_event_id
         view.events_replayed = len(events)
         return view
-
-
-class InMemoryEventStore(EventStore):
-    """Simple in-process event store (for tests / no-DB mode)."""
-
-    def __init__(self) -> None:
-        self._events: list[Event] = []
-
-    async def append(self, event: Event) -> None:
-        self._events.append(event)
-
-    async def read_by_session(self, session_id: str) -> list[Event]:
-        return [e for e in self._events if e.session_id == session_id]

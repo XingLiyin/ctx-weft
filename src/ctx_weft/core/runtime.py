@@ -33,7 +33,7 @@ from ctx_weft.core.assembler.sources import (
 )
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
-from ctx_weft.core.events import Event, EventType, InProcessEventBus
+from ctx_weft.core.events import Event, EventType
 from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
@@ -86,6 +86,7 @@ from ctx_weft.protocols.capability import (
     SkillCapabilityProvider,
     qualify,
 )
+from ctx_weft.providers.events import InProcessEventBus
 
 logger = logging.getLogger(__name__)
 
@@ -469,7 +470,7 @@ class CtxWeftRuntime:
         # 校验/外部化本身仍是那个共用方法（Phase 3c Task A2）。
         self.hitl_manager.set_content_normalizer(self._normalize_hitl_content)
         # 默认使用内存版 EventStore，自动订阅 EventBus；传入自定义实现时由调用方自行 wire
-        from ctx_weft.core.state.event_store import InMemoryEventStore
+        from ctx_weft.providers.events import InMemoryEventStore
         self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)
 
         # Auto-register 内置 providers（与用户注册的 providers 无关）
