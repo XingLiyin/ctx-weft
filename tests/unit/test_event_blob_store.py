@@ -17,7 +17,7 @@ from ctx_weft.core.content import normalize_content
 from ctx_weft.core.runtime import ProviderRegistry
 from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore, NullEventBlobStore
-from ctx_weft.protocols.memory import MemoryBlobStore, NullMemoryBlobStore
+from ctx_weft.protocols.memory import MemoryBlobStore
 
 
 def _ctx() -> ProviderContext:
@@ -144,7 +144,10 @@ def test_registry_does_not_fall_back_from_memory_provider_to_event_blob_store() 
     assert reg.get_event_blob_store().can_externalize is False
 
 
-# ── 入口双写（Task 2）─────────────────────────────────────────────────────
+# ── normalize_content 只写 memory 侧（blob-store 解耦 Task 1）────────────────
+# 入口双写已删除（原 Task 2 的双写逻辑）：normalize_content 不再接受
+# event_blob_store 参数。event 侧的外部化改由 content_to_event_jsonable
+# 在事件发射点独立完成，见下一节。
 
 _RAW = b"\x89PNG\r\n\x1a\n" + b"payload" * 20
 _B64 = base64.b64encode(_RAW).decode("ascii")
@@ -154,110 +157,20 @@ class _MemStub(_Stub):
     """与 _Stub 同实现，只为在测试里区分两个 store 实例。"""
 
 
-async def test_dual_write_yields_one_ref_both_stores_have_it() -> None:
-    """内容寻址保证两边 sha 相同，故**只有一个 ref**，两边都取得到。"""
-    mem, evt = _MemStub(), _Stub()
-    out = await normalize_content(
-        [TextPart(text="看图"), ImagePart(data=_B64, media_type="image/png")],
-        blob_store=mem, event_blob_store=evt, ctx=_ctx(),
-    )
-    ref = out[1].data
-    assert ref.startswith("blob:")
-    assert out[1].source_type == "ref"
-    assert out[1].byte_size == len(_RAW)
-    assert await mem.get(ref, _ctx()) is not None
-    assert await evt.get(ref, _ctx()) is not None, "event 侧也必须有，否则事件流取不回"
-
-
-class _DifferentDigestStore(EventBlobStore):
-    """摘要口径与 _Stub（sha256）不同的桩：模拟两个 host 实现分叉的场景。
-
-    用递增计数器代替内容寻址（等价于「干脆用 uuid key」的那类实现）——
-    同一份字节两次 put 也会拿到不同 ref，这正是 I1 要检出的情形。
-    """
-
-    def __init__(self) -> None:
-        self.blobs: dict[str, tuple[bytes, str]] = {}
-        self._n = 0
-
-    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
-        self._n += 1
-        ref = f"blob:counter-{self._n}"
-        self.blobs[ref] = (data, media_type)
-        return ref
-
-    async def get(self, ref: str, ctx: ProviderContext):
-        return self.blobs.get(ref)
-
-
-async def test_dual_write_mismatch_is_detected_and_logged(caplog) -> None:
-    """两个 store 的内容寻址口径分叉时，双写必须检出并记日志——不能静默通过。
-
-    这是把「只有一个 ref → 读侧一行未改」这条论证从假设变成断言的测试：
-    memory 侧用 sha256（_MemStub），event 侧用一个不同的摘要口径
-    （_DifferentDigestStore），对同一份字节两个 put 返回不同的 ref。
-    """
-    mem, evt = _MemStub(), _DifferentDigestStore()
-    with caplog.at_level("ERROR"):
-        out = await normalize_content(
-            [ImagePart(data=_B64, media_type="image/png")],
-            blob_store=mem, event_blob_store=evt, ctx=_ctx(),
-        )
-    mem_ref = out[0].data
-    assert mem_ref.startswith("blob:")
-    event_ref = next(iter(evt.blobs))
-    assert event_ref != mem_ref, "桩就是刻意制造出不同 ref"
-    # 写进 content（进而写进事件 payload）的是 memory 的 ref
-    assert out[0].data == mem_ref
-    # 不一致必须被检出并记入日志——而不是静默通过
-    assert len(caplog.records) == 1
-    msg = caplog.records[0].getMessage()
-    assert "不一致" in msg
-    assert mem_ref in msg
-    assert event_ref in msg
-
-
-async def test_shared_instance_is_idempotent() -> None:
-    """host 共用同一实例时第二次 put 幂等命中，零额外成本。"""
-    both = _Stub()
-    out = await normalize_content(
-        [ImagePart(data=_B64, media_type="image/png")],
-        blob_store=both, event_blob_store=both, ctx=_ctx(),
-    )
-    assert len(both.blobs) == 1, "同一份字节只应存一行"
-    assert await both.get(out[0].data, _ctx()) is not None
-
-
-async def test_no_dual_write_when_memory_cannot_externalize() -> None:
-    """memory 侧不可外部化时整个函数短路——否则会去调 NullMemoryBlobStore.put 抛错。
-
-    这一组合下事件的 ref 化**不由入口负责**，由 Task 3 的发射点函数独立完成。
-    """
-    evt = _Stub()
-    content = [ImagePart(data=_B64, media_type="image/png")]
-    out = await normalize_content(
-        content, blob_store=NullMemoryBlobStore(), event_blob_store=evt, ctx=_ctx(),
-    )
-    assert out is content, "应原样返回同一对象"
-    assert evt.blobs == {}, "短路时 event 侧也不该被写"
-
-
 async def test_plain_text_is_untouched() -> None:
-    mem, evt = _MemStub(), _Stub()
+    mem = _MemStub()
     s = "纯文本"
-    assert await normalize_content(
-        s, blob_store=mem, event_blob_store=evt, ctx=_ctx()) is s
-    assert mem.blobs == {} and evt.blobs == {}
+    assert await normalize_content(s, blob_store=mem, ctx=_ctx()) is s
+    assert mem.blobs == {}
 
 
 async def test_ref_parts_are_not_re_externalized() -> None:
     """已是 ref 的 part 原样保留，不重复 put。"""
-    mem, evt = _MemStub(), _Stub()
+    mem = _MemStub()
     part = ImagePart(data="blob:already", media_type="image/png", source_type="ref")
-    out = await normalize_content(
-        [part], blob_store=mem, event_blob_store=evt, ctx=_ctx())
+    out = await normalize_content([part], blob_store=mem, ctx=_ctx())
     assert out[0] is part
-    assert mem.blobs == {} and evt.blobs == {}
+    assert mem.blobs == {}
 
 
 # ── content_to_event_jsonable（Task 3）─────────────────────────────────────
