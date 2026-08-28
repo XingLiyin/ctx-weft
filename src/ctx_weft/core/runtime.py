@@ -581,9 +581,6 @@ class CtxWeftRuntime:
         session_id: str,
         *,
         tenant_id: str = "default",
-        llm: "LLMClient | None" = None,
-        llm_account: str | None = None,
-        llm_model: str | None = None,
     ) -> "str | list[ContentPart]":
         """入口内容校验 + 外部化的**单一真源**（三个入口共用）。
 
@@ -593,23 +590,16 @@ class CtxWeftRuntime:
         try/except，靠 validate 先行把畸形 base64 拦成 `InvalidContentError`。抽成
         这一个方法之后，三处调用点的顺序不会再各自漂移。
 
-        `llm` 已解析时直接传（`run_single_task`）；否则走 `llm_resolver` 惰性解析
-        ——纯文本与畸形内容都在格式校验阶段返回/抛出，resolver 从不被调用，
-        `start_session` 的「纯文本不提前解析 LLM」不变量因此得以保持。
+        **不解析 LLM、不判模型能力**（spec 2026-08-28）：模态处置归 `LLMClient`
+        实现方，core 全程透传。这也让「纯文本不提前解析 LLM」这条不变量自动成立
+        ——本方法根本不碰 LLM。
 
         不能外部化（`NullMemoryBlobStore`）时原样返回同一对象，整段是 no-op。
         """
         from ctx_weft.core.content import normalize_content, validate_content
 
         event_blob_store = self.providers.get_event_blob_store()
-        if llm is not None:
-            validate_content(content, llm=llm, event_blob_store=event_blob_store)
-        else:
-            validate_content(
-                content,
-                llm_resolver=lambda: self._resolve_llm(llm_account, llm_model),
-                event_blob_store=event_blob_store,
-            )
+        validate_content(content, event_blob_store=event_blob_store)
         blob_store = self.providers.get_memory_blob_store()
         if not blob_store.can_externalize:
             return content
@@ -657,14 +647,10 @@ class CtxWeftRuntime:
     ) -> "str | list[ContentPart]":
         """HITL 应答内容的校验 + 外部化（`HitlManager.set_content_normalizer` 的回调）。
 
-        只做「从 req 上取出本次应答真正要用的 llm 与 tenant」这一件事，校验/外部化本身
+        只做「从 req 上取出本次应答真正要用的 tenant」这一件事，校验/外部化本身
         仍由三入口共用的 `_validate_and_normalize_content` 完成（顺序恒为
         validate → normalize，不在此重写一遍）。
 
-        - **llm**：用 `req.resume_llm_account / req.resume_llm_model`（host 应答时传入，
-          `_stash_resume_llm` 已在 resolve 之前写好）。多模型宿主下视觉门控必须判
-          「真正会收到这张图的那个模型」——判默认 client 等于门控失效。两者均为 `None`
-          时 `_resolve_llm(None, None)` 回落默认 client，既有行为不变。
         - **tenant**：由 `req.session_id` 解出（见 `_tenant_for_session`）。解 tenant 冷路径
           要读事件日志，故只在**真会写 blob** 时才付这个代价：纯文本、或两个 blob store
           都不能外部化时 tenant 根本用不上。判据是 memory **或** event 任一可外部化就要
@@ -685,11 +671,7 @@ class CtxWeftRuntime:
             tenant_id = await self._tenant_for_session(req.session_id)
         req.resume_tenant_id = tenant_id
         return await self._validate_and_normalize_content(
-            content,
-            req.session_id,
-            tenant_id=tenant_id,
-            llm_account=req.resume_llm_account,
-            llm_model=req.resume_llm_model,
+            content, req.session_id, tenant_id=tenant_id,
         )
 
     def _sync_session_llm_window(self, session: Session) -> None:
@@ -842,11 +824,11 @@ class CtxWeftRuntime:
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
         llm = self._resolve_llm(llm_account, llm_model)
-        # 入口即拒、不落库：格式/视觉门控须在任何持久化（Session/Task/事件）之前完成
+        # 入口即拒、不落库：格式/blob 门控须在任何持久化（Session/Task/事件）之前完成
         # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全。
         # validate → normalize 的顺序与另外两个入口共用同一个方法，不再各写一遍。
         user_prompt = await self._validate_and_normalize_content(
-            user_prompt, sid, tenant_id=tenant_id, llm=llm,
+            user_prompt, sid, tenant_id=tenant_id,
         )
         lm = LifecycleManager(template_lookup=self._template_lookup)
 
@@ -930,32 +912,19 @@ class CtxWeftRuntime:
 
         memory = self.providers.get_memory()
         # 入口即拒、不落库：sm.create_session / sm.resume_session 会立即持久化
-        # （instantiate_agent + SESSION_CREATED/RESUMED 事件），所以校验必须在它们
-        # 之前。但纯文本路径改动前从不调用 _resolve_llm（原本推迟到
-        # _make_task_runner → _SessionTaskRunner 才异步解析）——纯文本行为逐字节
-        # 不变是硬约束，哪怕 _resolve_llm 本身是无副作用的纯查表，也不能让「解析不出
-        # LLM」这件事从原本推迟到任务执行时失败，变成同步抢在 start_session 里失败。
-        # 终审 2026-08-25（缺陷 A/B）：不再用 content_has_image 预判「是否含图」来
-        # 决定要不要提前解析 LLM——那个判据对 dict 形态纯文本会误判成「含图」，
-        # 结果 dict 纯文本反而触发了本该只属于「真图片」路径的提前解析。改用
-        # llm_resolver 惰性解析：validate_content 内部先做格式校验，只有格式合法
-        # 的图片才会真的调用 resolver 走到门控。纯文本（含 dict 形态）与畸形内容
-        # 都在格式校验阶段提前返回/抛出，resolver 从不被调用。
+        # （instantiate_agent + SESSION_CREATED/RESUMED 事件），所以格式校验与
+        # EventBlobStore 门控必须在它们之前。
+        # **不做模型能力判断**（spec 2026-08-28-multimodal-adapter-dispatch）：
+        # 模态处置归 LLMClient 实现方，core 全程透传。原先为了视觉门控要在这里
+        # 惰性解析 LLM，现在整段不碰 LLM，「纯文本不提前解析 LLM」自动成立。
         # 顺序关键：validate 先于 normalize——被拒的内容不该在 blob store 留垃圾。
-        # 两步都在 _validate_and_normalize_content 里（三个入口共用的单一真源）。
-        # 不能外部化时（NullMemoryBlobStore）normalize 段是纯 no-op：params 不被替换、
-        # session_id 也不提前生成，行为与 Phase 3a 逐字节一致。
         blob_store = self.providers.get_memory_blob_store()
         # blob 落盘要一个 session 锚点（宿主按 session_id 登记 workspace），所以
         # 能外部化时必须把 session_id 定下来并透传给 create_session，否则外部化用的
         # session 与真正创建的 session 会是两个 id。
         sid = params.session_id or (generate_id("ses") if blob_store.can_externalize else None)
         normalized = await self._validate_and_normalize_content(
-            params.user_prompt,
-            sid or "",
-            tenant_id=params.tenant_id,
-            llm_account=params.llm_account,
-            llm_model=params.llm_model,
+            params.user_prompt, sid or "", tenant_id=params.tenant_id,
         )
         if blob_store.can_externalize:
             params = _dc.replace(params, session_id=sid, user_prompt=normalized)

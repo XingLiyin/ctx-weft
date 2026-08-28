@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.errors import InvalidContentError, VisionNotSupportedError
+from ctx_weft.core.errors import InvalidContentError
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.protocols import (
@@ -88,13 +88,11 @@ class _CountingEventStore(EventBlobStore):
 
 
 class _VisionClient:
-    supports_vision = True
     context_limit = 128_000
     output_reserve = 8_192
 
 
 class _TextOnlyClient:
-    supports_vision = False
     context_limit = 128_000
     output_reserve = 8_192
 
@@ -168,20 +166,7 @@ async def test_hitl_reject_rejects_malformed_base64_without_touching_blob_store(
     assert rt.hitl_manager.get(hid).status == "pending"
 
 
-# ── 2. 视觉门控在 HITL 路径同样生效 ──────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_hitl_answer_rejects_image_for_non_vision_model():
-    store = _CountingStore()
-    rt = _make_runtime(_TextOnlyClient(), store)
-    hid = await _pending(rt)
-
-    with pytest.raises(VisionNotSupportedError):
-        await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
-
-    assert store.put_calls == 0
-    assert rt.hitl_manager.get(hid).status == "pending"
+# ── 2. 格式校验在 HITL 路径同样生效 ──────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -474,42 +459,13 @@ async def test_hitl_approve_externalizes_valid_image_to_ref():
     assert store.ctx_session_ids == ["ses-appr"]
 
 
-# ── A2-3：门控判的是 req.resume_llm_* 指定的模型，不是默认 client（缺口 2）────
+# ── 模态能力已回归 adapter：HITL 路径携图不再受任何模型能力判断（spec 2026-08-28）──
 
 
 @pytest.mark.asyncio
-async def test_vision_gate_uses_the_model_named_by_the_reply_not_the_default_client():
-    """默认 client 支持视觉、本次应答指定的模型不支持 → 必须拒。
-
-    这条是本任务的实质：修好前 runtime 只能 `_resolve_llm(None, None)`，会拿到
-    **支持视觉的默认 client** 而放行——门控判的不是真正会收到这张图的那个模型。
-    """
-    store = _CountingStore()
-    provider = _RoutingLLMProvider(
-        default=_VisionClient(), by_key={("acct-text", "text-only"): _TextOnlyClient()},
-    )
-    rt = _make_routing_runtime(provider, store)
-    hid = await _pending(rt)
-
-    with pytest.raises(VisionNotSupportedError):
-        await rt.hitl_manager.answer(
-            hid, [ImagePart(data=_PNG, media_type="image/png")],
-            llm_account="acct-text", llm_model="text-only",
-        )
-
-    assert ("acct-text", "text-only") in provider.calls, (
-        "视觉门控必须按 req.resume_llm_account / resume_llm_model 解析 client"
-    )
-    assert store.put_calls == 0
-    assert rt.hitl_manager.get(hid).status == "pending"
-
-
-@pytest.mark.asyncio
-async def test_vision_gate_allows_image_when_the_named_model_supports_vision():
-    """反向：默认 client **不**支持视觉、本次应答指定的模型支持 → 必须放行。
-
-    与上一条构成拒/放两侧的双向锁：只判默认 client 的实现会在这一条上错误拒绝。
-    """
+async def test_hitl_image_reaches_memory():
+    """HITL 应答携带图片时，内容被外部化落库成功——模态能力判断已不在 core，
+    resume_llm_account / resume_llm_model 不再影响本次应答是否被放行。"""
     store = _CountingStore()
     provider = _RoutingLLMProvider(
         default=_TextOnlyClient(), by_key={("acct-v", "vision-model"): _VisionClient()},
@@ -523,56 +479,10 @@ async def test_vision_gate_allows_image_when_the_named_model_supports_vision():
     )
 
     assert req.status == "accepted"
-    assert ("acct-v", "vision-model") in provider.calls
     assert store.put_calls == 1
     content = req.message
     assert isinstance(content, list), f"应答内容必须仍是 parts 列表，实为 {type(content)!r}"
     assert content[0].source_type == "ref"
-
-
-@pytest.mark.asyncio
-async def test_approve_vision_gate_also_uses_the_named_model():
-    """approve 路径同样按 req.resume_llm_* 解析（缺口 1 与缺口 2 的交叉点）。"""
-    store = _CountingStore()
-    provider = _RoutingLLMProvider(
-        default=_VisionClient(), by_key={("acct-text", "text-only"): _TextOnlyClient()},
-    )
-    rt = _make_routing_runtime(provider, store)
-    hid = await rt.hitl_manager.request(
-        form="approval", session_id="ses-hitl", task_id="tsk-1", question="放行？",
-    )
-
-    with pytest.raises(VisionNotSupportedError):
-        await rt.hitl_manager.approve(
-            hid, message=[ImagePart(data=_PNG, media_type="image/png")],
-            llm_account="acct-text", llm_model="text-only",
-        )
-
-    assert store.put_calls == 0
-    assert rt.hitl_manager.get(hid).status == "pending"
-
-
-# ── A2-4：resume_llm_* 均为 None → 回落默认 client（既有行为不变）─────────────
-
-
-@pytest.mark.asyncio
-async def test_falls_back_to_default_client_when_reply_names_no_model():
-    """未指定模型（host 没传 llm_account/llm_model）时必须仍解默认 client。"""
-    store = _CountingStore()
-    provider = _RoutingLLMProvider(
-        default=_TextOnlyClient(), by_key={("acct-v", "vision-model"): _VisionClient()},
-    )
-    rt = _make_routing_runtime(provider, store)
-    hid = await _pending(rt)
-
-    # 默认 client 不支持视觉 → 递图被拒，正说明解的是默认 client。
-    with pytest.raises(VisionNotSupportedError):
-        await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
-
-    assert provider.calls == [(None, None)], (
-        "未指定模型时必须以 (None, None) 解析——即 _resolve_llm 的既有默认回落"
-    )
-    assert store.put_calls == 0
 
 
 # ── A2-5：blob 落在正确的 tenant 锚点（缺口 3）────────────────────────────────

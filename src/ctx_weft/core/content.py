@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any
 from ctx_weft.core.errors import (
     BlobStoreRequiredError,
     InvalidContentError,
-    VisionNotSupportedError,
 )
 from ctx_weft.core.utils import content_to_text
 from ctx_weft.protocols.context import BLOB_REF_PREFIX
@@ -359,25 +358,21 @@ def _normalize_media_type(media_type: str) -> str:
 def validate_content(
     content: "str | list[ContentPart] | None",
     *,
-    llm: object | None = None,
-    llm_resolver: "Any" = None,
     event_blob_store: "Any" = None,
 ) -> None:
     """入口内容校验。通过返回 None，否则抛。
 
     只作用于 ImagePart——纯文本（str / 全 TextPart / None / 空）零影响、恒通过。
 
-    三道门控顺序刻意是「格式校验 → 视觉门控 → event blob 门控」，不是任意排列：
-    格式畸形的内容必须报 ``InvalidContentError``，不能被后两道门控抢先拦成
-    ``VisionNotSupportedError`` / ``BlobStoreRequiredError``——那会掩盖真正的问题
-    （终审 2026-08-25 缺陷 B；event blob 门控放最后同理）。
+    两道门控，顺序刻意是「格式校验 → event blob 门控」：格式畸形的内容必须报
+    ``InvalidContentError``，不能被 blob 门控抢先拦成 ``BlobStoreRequiredError``
+    ——那会掩盖真正的问题（终审 2026-08-25 缺陷 B）。
 
-    llm 非 None，或 llm_resolver 非 None 且格式校验全部通过时，才执行视觉能力
-    门控：``getattr(client, "supports_vision", False)`` 必须为真。**未声明即视为
-    无视觉能力**（严格默认，spec §6.7）。llm_resolver 是惰性解析——只有确实需要
-    门控（即真的有格式合法的图片）时才调用，纯文本 / 畸形内容都不会触发它
-    （终审 2026-08-25 缺陷 A：调用方不该为了门控而提前解析 LLM 客户端）。
-    两者都不传的调用点只做格式校验，不做门控。
+    ⚠️ **这里没有、也不该有「模型支不支持图片」这道门控**（spec
+    2026-08-28-multimodal-adapter-dispatch）。模态能力是 ``LLMClient`` 实现方的
+    性质，由「host 注册了哪个 adapter 类」表达；core 全程透传多模态内容，纯文本
+    adapter 在出网时自行降级成占位并告警。原先那道门控读的是 duck-typed 的
+    ``supports_vision``，host 自写的 adapter 几乎必然读不到 → 一律被误判为无视觉。
 
     刻意**不**校验 token 总量——单条消息塞太多图由装配期 ContextOverflowError
     兜底（spec §6.1 / 子设计 §3）。
@@ -436,18 +431,10 @@ def validate_content(
         #    dataclass 相等比较把 byte_size 也算进去。为一个派生字段破坏「入口校验不改
         #    内容」的不变量不划算。
 
-    # 门控放最后：只有格式合法的图片才值得问「模型支不支持」。
-    client = llm if llm is not None else (llm_resolver() if llm_resolver is not None else None)
-    if client is not None and not getattr(client, "supports_vision", False):
-        raise VisionNotSupportedError(
-            "当前模型未声明视觉能力（supports_vision），拒绝图片输入。"
-            "若该模型确实支持图片，请在 ModelConfig 上显式设置 supports_vision=True。"
-        )
-
-    # 第三道：event blob 门控（spec §7）。放在最后，与前两道同理——畸形/不被支持的
-    # 内容不该因为「没有 blob store」而报一个误导性的错。
+    # 第二道：event blob 门控（spec §7）。放在最后，与格式校验同理——畸形内容
+    # 不该因为「没有 blob store」而报一个误导性的错。
     # 严格默认：拿不到可外部化的 store 就拒绝。event_blob_store=None 的调用点
-    # （未接线的旧调用方）不做此门控，与 llm=None 时不做视觉门控同构。
+    # （未接线的旧调用方）不做此门控。
     if event_blob_store is not None and not event_blob_store.can_externalize:
         raise BlobStoreRequiredError(
             "携带图片的内容需要宿主注册 EventBlobStore（事件库恒不落字节）。"

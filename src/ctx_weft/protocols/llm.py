@@ -286,10 +286,12 @@ class LLMClient(Protocol):
     #   单次输出的收紧上限（per-request max_tokens 的硬天花板）。网关经 getattr 读取，
     #   缺省/None → 回退 context_limit。实现方（_FixedModelClient）可提供；未提供者网关自动回退。
 
-    # 可选（duck-typed，非协议必需）：supports_vision -> bool
-    #   是否支持图片输入。core 一律用 getattr(llm, "supports_vision", False) 读取——
-    #   **未声明即视为无视觉能力**（严格默认，spec §6.7）。这样第三方 adapter 不必被迫
-    #   实现新属性，但也因此拿不到视觉能力：宿主须显式配置 ModelConfig.supports_vision=True。
+    # ⚠️ **core 对模态能力零判断**（spec 2026-08-28-multimodal-adapter-dispatch）。
+    #   core 会把 `list[ContentPart]`（含 ImagePart）原样透传到 complete()，实现方
+    #   自行决定发多模态、降级成纯文本、还是报错。曾经有一个 duck-typed 的
+    #   `supports_vision` 被 core 在入口读取并据以拒绝内容——它不在本协议上，host
+    #   自写的 adapter 几乎必然读不到，于是一律被误判为无视觉能力。已删除。
+    #   内置实现的做法见 providers/llm/{anthropic,openai}.py 的 _prepare_messages。
 
     @property
     @abstractmethod

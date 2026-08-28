@@ -219,21 +219,10 @@ def test_validate_content_still_rejects_url_source():
                                     source_type="url")])
 
 
-def test_validate_content_ref_still_gated_by_vision():
-    from ctx_weft.core.errors import VisionNotSupportedError
-
-    class _TextOnly:
-        supports_vision = False
-
-    with pytest.raises(VisionNotSupportedError):
-        validate_content([ImagePart(data=f"{BLOB_REF_PREFIX}deadbeef", media_type="image/png",
-                                    source_type="ref")], llm=_TextOnly())
-
-
 # ── 7. 入口接线：validate_content 先于 normalize_content ────────────────────
 
 
-def _make_runtime_with_store(store, *, supports_vision: bool):
+def _make_runtime_with_store(store):
     from types import SimpleNamespace
 
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
@@ -256,7 +245,7 @@ def _make_runtime_with_store(store, *, supports_vision: bool):
         return _FixedModelClient(
             MockLLMAdapter(responses=[MockResponse(text="Hello!")]),
             model or "mock-model", 128_000, 8_192,
-            account=account or "acct-main", supports_vision=supports_vision,
+            account=account or "acct-main",
         )
 
     runtime.providers.register_llm_provider(SimpleNamespace(get_client=_client))
@@ -270,7 +259,7 @@ async def test_rejected_content_never_reaches_blob_store():
     顺序反了（先 normalize 后 validate）会让被拒的内容也被写进 blob store。
     """
     store = _CountingStore()
-    runtime = _make_runtime_with_store(store, supports_vision=True)
+    runtime = _make_runtime_with_store(store)
 
     with pytest.raises(InvalidContentError):
         await runtime.run_single_task(
@@ -283,26 +272,10 @@ async def test_rejected_content_never_reaches_blob_store():
 
 
 @pytest.mark.asyncio
-async def test_vision_rejected_content_never_reaches_blob_store():
-    from ctx_weft.core.errors import VisionNotSupportedError
-
-    store = _CountingStore()
-    runtime = _make_runtime_with_store(store, supports_vision=False)
-
-    with pytest.raises(VisionNotSupportedError):
-        await runtime.run_single_task(
-            template_id="agent:tpl_echo",
-            user_prompt=[ImagePart(data=_PNG, media_type="image/png")],
-        )
-
-    assert store.put_calls == 0, "被视觉门控拒掉的内容同样不得写入 blob store"
-
-
-@pytest.mark.asyncio
 async def test_run_single_task_externalizes_valid_image():
     """入口确实接了 normalize_content——合法图片会被写入 blob store。"""
     store = _CountingStore()
-    runtime = _make_runtime_with_store(store, supports_vision=True)
+    runtime = _make_runtime_with_store(store)
 
     _handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo",
@@ -324,7 +297,7 @@ async def test_run_single_task_externalizes_valid_image():
 async def test_run_single_task_plain_text_never_touches_store():
     """纯文本路径逐字节不变：即便注册了真 store 也一次都不该调用。"""
     store = _CountingStore()
-    runtime = _make_runtime_with_store(store, supports_vision=True)
+    runtime = _make_runtime_with_store(store)
 
     await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hello")
 
@@ -341,7 +314,7 @@ async def test_start_session_externalizes_under_the_real_session_id():
     from ctx_weft.core.runtime import SessionStartParams
 
     store = _CountingStore()
-    runtime = _make_runtime_with_store(store, supports_vision=True)
+    runtime = _make_runtime_with_store(store)
 
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
@@ -360,7 +333,7 @@ async def test_start_session_plain_text_never_touches_store():
     from ctx_weft.core.runtime import SessionStartParams
 
     store = _CountingStore()
-    runtime = _make_runtime_with_store(store, supports_vision=True)
+    runtime = _make_runtime_with_store(store)
 
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",

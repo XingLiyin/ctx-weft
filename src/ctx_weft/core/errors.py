@@ -130,16 +130,6 @@ class InvalidContentError(CtxWeftError):
     code = "INVALID_CONTENT"
 
 
-class VisionNotSupportedError(CtxWeftError):
-    """当前模型未声明视觉能力，拒绝图片输入（spec §6.7 严格默认）。
-
-    未在 ModelConfig 上显式 supports_vision=True 的模型一律视为无视觉能力。
-    宿主若确认该模型支持图片，请显式配置。
-    """
-
-    code = "VISION_NOT_SUPPORTED"
-
-
 class BlobStoreRequiredError(CtxWeftError):
     """携图内容要求宿主注册 EventBlobStore（spec 2026-08-27 双 blob store §7）。
 

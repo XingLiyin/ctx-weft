@@ -3,29 +3,16 @@ import base64
 import pytest
 
 from ctx_weft.core.content import content_has_image, validate_content
-from ctx_weft.core.errors import InvalidContentError, VisionNotSupportedError
+from ctx_weft.core.errors import InvalidContentError
 from ctx_weft.protocols import ImagePart, TextPart
 
 _PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 100).decode()
-
-
-class _VisionClient:
-    supports_vision = True
-
-
-class _TextOnlyClient:
-    supports_vision = False
-
-
-class _LegacyClient:
-    """未声明该属性——严格默认下应视为无视觉能力。"""
 
 
 # ── 纯文本：零影响 ────────────────────────────────────────────────────────
 
 def test_plain_str_always_passes():
     validate_content("hello")                      # 不抛
-    validate_content("hello", llm=_TextOnlyClient())  # 纯文本不受门控约束
 
 
 def test_none_and_empty_pass():
@@ -34,8 +21,8 @@ def test_none_and_empty_pass():
     validate_content([])
 
 
-def test_text_parts_only_pass_without_vision():
-    validate_content([TextPart(text="a"), TextPart(text="b")], llm=_TextOnlyClient())
+def test_text_parts_only_pass():
+    validate_content([TextPart(text="a"), TextPart(text="b")])
 
 
 # ── 格式校验 ─────────────────────────────────────────────────────────────
@@ -90,27 +77,11 @@ def test_non_base64_source_type_raises_not_silently_skipped():
         validate_content([ImagePart(data=_PNG, media_type="image/png", source_type="url")])
 
 
-# ── 视觉门控 ─────────────────────────────────────────────────────────────
+# ── 模态能力已回归 adapter ──────────────────────────────────────────────────
 
-def test_image_rejected_when_model_lacks_vision():
-    with pytest.raises(VisionNotSupportedError):
-        validate_content([ImagePart(data=_PNG, media_type="image/png")],
-                         llm=_TextOnlyClient())
-
-
-def test_image_rejected_when_client_does_not_declare():
-    """严格默认：未声明 supports_vision 的 client 一律拒绝图片。"""
-    with pytest.raises(VisionNotSupportedError):
-        validate_content([ImagePart(data=_PNG, media_type="image/png")],
-                         llm=_LegacyClient())
-
-
-def test_image_passes_with_vision_client():
-    validate_content([ImagePart(data=_PNG, media_type="image/png")], llm=_VisionClient())
-
-
-def test_no_llm_means_no_gating():
-    """不传 llm 时只做格式校验——供拿不到 client 的调用点使用。"""
+def test_no_vision_gating_any_more():
+    """模态能力已回归 adapter（spec 2026-08-28）：入口对图片一律放行，
+    只做格式校验。任何模型能力判断都不在这里。"""
     validate_content([ImagePart(data=_PNG, media_type="image/png")])
 
 
@@ -144,14 +115,20 @@ def test_content_has_image_with_image_part_is_true():
 # ── 真实入口：入口即拒、不落库 ───────────────────────────────────────────────
 #
 # 只测 validate_content 本身证明不了它接对了位置——下面这条测试驱动真实的
-# runtime.run_single_task() 入口，断言：(1) 抛 VisionNotSupportedError，
+# runtime.run_single_task() 入口。视觉门控删除后，携图内容仍会在任何持久化之前
+# 被拒——这次触发的是仍然保留的第二道门控：本用例故意不注册 EventBlobStore，
+# `_validate_and_normalize_content` 取到的是不可外部化的 NullEventBlobStore，
+# `validate_content` 因此报 `BlobStoreRequiredError`。这条测试的价值不在于具体
+# 是哪道门控触发，而在于证明 `validate_content` 确实接在 run_single_task 的
+# 任何持久化（Session/Task/事件）之前——(1) 抛 BlobStoreRequiredError，
 # (2) memory 中无任何记录（instantiate_agent / Session / Task 均未落库）。
 
 
 @pytest.mark.asyncio
-async def test_run_single_task_rejects_image_before_persisting_anything():
+async def test_run_single_task_rejects_image_before_persisting_anything_without_event_blob_store():
     from types import SimpleNamespace
 
+    from ctx_weft.core.errors import BlobStoreRequiredError
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from ctx_weft.providers.llm.provider import _FixedModelClient
     from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
@@ -166,7 +143,6 @@ async def test_run_single_task_rejects_image_before_persisting_anything():
     runtime = make_runtime(agent_provider=templates)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
-    # supports_vision 未传 → _FixedModelClient 默认 False（严格默认）。
     runtime.providers.register_llm_provider(
         SimpleNamespace(
             get_client=lambda account=None, model=None: _FixedModelClient(
@@ -176,7 +152,7 @@ async def test_run_single_task_rejects_image_before_persisting_anything():
         )
     )
 
-    with pytest.raises(VisionNotSupportedError):
+    with pytest.raises(BlobStoreRequiredError):
         await runtime.run_single_task(
             template_id="agent:tpl_echo",
             user_prompt=[TextPart(text="看这张图"), ImagePart(data=_PNG, media_type="image/png")],
@@ -349,60 +325,7 @@ def test_dict_text_part_rejected_by_validate_content_known_limitation():
     assert "''" in str(ei.value)  # media_type 取不到值（dict 无 .media_type 属性），报出空字符串类型
 
 
-# ── 终审 2026-08-25：缺陷 A（dict 纯文本误触发提前解析 LLM）与
-#    缺陷 B（validate_content 先门控后格式校验，掩盖真正问题）的回归测试 ──────
-
-
-def test_dict_text_part_raises_invalid_content_not_runtime_error_via_resolver():
-    """缺陷 A 的核心断言：即便 llm_resolver 会抛（模拟"无 LLM 可用"），
-    dict 形态纯文本也必须先在格式校验阶段被拒（InvalidContentError），
-    resolver 根本不该被调用到——不是 RuntimeError、也不是 VisionNotSupportedError。"""
-    def _resolver_must_not_be_called():
-        raise RuntimeError("No LLM available (should never be reached)")
-
-    with pytest.raises(InvalidContentError):
-        validate_content(
-            [{"type": "text", "text": "hello"}],
-            llm_resolver=_resolver_must_not_be_called,
-        )
-
-
-def test_malformed_image_rejected_before_vision_gating():
-    """缺陷 B 的核心断言：格式畸形的图片 + 不支持视觉的模型 → 报的必须是
-    InvalidContentError（格式问题），不能被门控抢先拦成 VisionNotSupportedError
-    （那会掩盖真正的问题：内容本身就是畸形的）。"""
-    with pytest.raises(InvalidContentError):
-        validate_content(
-            [ImagePart(data=_PNG, media_type="image/tiff")],
-            llm=_TextOnlyClient(),
-        )
-
-
-def test_valid_image_still_gated_by_vision_capability():
-    """门控没有被削弱：格式合法的图片遇上纯文本模型，仍然报
-    VisionNotSupportedError（而不是被格式校验的重排意外放行）。"""
-    with pytest.raises(VisionNotSupportedError):
-        validate_content(
-            [ImagePart(data=_PNG, media_type="image/png")],
-            llm=_TextOnlyClient(),
-        )
-
-
-def test_llm_resolver_not_called_for_plain_text():
-    """llm_resolver 是惰性的：纯文本（无图）路径下，即便传了 resolver，
-    也绝不该被调用——resolver 抛异常时纯文本校验仍必须正常通过。"""
-    calls = []
-
-    def _resolver():
-        calls.append(1)
-        raise AssertionError("resolver 不该被调用")
-
-    validate_content("纯文本", llm_resolver=_resolver)
-    validate_content([TextPart(text="纯文本")], llm_resolver=_resolver)
-    assert calls == []
-
-
-# ── event blob 门控（Task 4）：第三道门控，放在视觉门控之后 ────────────────────
+# ── event blob 门控（Task 4）：第二道门控 ─────────────────────────────────────
 
 async def test_image_requires_event_blob_store() -> None:
     """携图会话未注册 EventBlobStore → 入口即拒（spec §7）。
@@ -415,7 +338,6 @@ async def test_image_requires_event_blob_store() -> None:
     with pytest.raises(BlobStoreRequiredError):
         validate_content(
             [ImagePart(data=_PNG, media_type="image/png")],
-            llm=_VisionClient(),
             event_blob_store=NullEventBlobStore(),
         )
 
@@ -428,10 +350,10 @@ def test_plain_text_unaffected_by_event_blob_gate() -> None:
     validate_content(None, event_blob_store=NullEventBlobStore())
 
 
-def test_gate_order_format_before_vision_before_blob() -> None:
-    """三道门控的顺序：格式 → 视觉 → blob。
+def test_gate_order_format_before_blob() -> None:
+    """两道门控的顺序：格式 → blob。
 
-    畸形内容必须报 InvalidContentError，不能被后两道抢先——那会掩盖真正的问题。
+    畸形内容必须报 InvalidContentError，不能被 blob 门控抢先——那会掩盖真正的问题。
     """
     from ctx_weft.core.errors import InvalidContentError
     from ctx_weft.protocols.events import NullEventBlobStore
@@ -439,22 +361,5 @@ def test_gate_order_format_before_vision_before_blob() -> None:
     with pytest.raises(InvalidContentError):
         validate_content(
             [ImagePart(data="!!!not-base64!!!", media_type="image/png")],
-            llm=_VisionClient(), event_blob_store=NullEventBlobStore(),
+            event_blob_store=NullEventBlobStore(),
         )
-
-
-def test_llm_resolver_called_lazily_only_for_valid_images():
-    """惰性解析的正面用例：只有格式合法的图片才会真的触发 resolver 调用，
-    并且门控结果反映 resolver 返回的 client。"""
-    calls = []
-
-    def _resolver():
-        calls.append(1)
-        return _TextOnlyClient()
-
-    with pytest.raises(VisionNotSupportedError):
-        validate_content(
-            [ImagePart(data=_PNG, media_type="image/png")],
-            llm_resolver=_resolver,
-        )
-    assert calls == [1], "格式合法的图片应当触发恰好一次 resolver 调用"
