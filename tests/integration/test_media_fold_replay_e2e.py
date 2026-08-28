@@ -55,8 +55,8 @@ from ctx_weft.protocols.capability import (
     ToolCapability,
     ToolCapabilityProvider,
 )
-from ctx_weft.providers.llm.anthropic import AnthropicAdapter
-from ctx_weft.providers.llm.openai import _TOOL_IMAGE_NOTICE, OpenAIAdapter
+from ctx_weft.providers.llm.anthropic import AnthropicMultimodalAdapter
+from ctx_weft.providers.llm.openai import _TOOL_IMAGE_NOTICE, OpenAIMultimodalAdapter
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from ctx_weft.providers.memory_sql import open_sqlite_memory
 from tests.integration.test_minimal_loop import (
@@ -256,13 +256,12 @@ class _PlaceholderReadingLLM:
                        finish_reason="tool_use" if tool_calls else "stop")
 
 
-class _WireCapturingAnthropicLLM(_PlaceholderReadingLLM, AnthropicAdapter):
+class _WireCapturingAnthropicLLM(_PlaceholderReadingLLM, AnthropicMultimodalAdapter):
     """真 `AnthropicAdapter._build_payload` / `_serialize_messages`，不走网络。"""
 
     def __init__(self, **kw: Any) -> None:
-        AnthropicAdapter.__init__(self, api_key="test-key", **kw)
+        AnthropicMultimodalAdapter.__init__(self, api_key="test-key", **kw)
         self._init_stub()
-        self.supports_vision = True   # instance-only（同 Phase 3b 既有 e2e 的理由）
 
     def complete(self, request, stream=True):
         payload = self._build_payload(request)
@@ -270,13 +269,12 @@ class _WireCapturingAnthropicLLM(_PlaceholderReadingLLM, AnthropicAdapter):
         return self._emit(*self._decide(payload))
 
 
-class _WireCapturingOpenAILLM(_PlaceholderReadingLLM, OpenAIAdapter):
+class _WireCapturingOpenAILLM(_PlaceholderReadingLLM, OpenAIMultimodalAdapter):
     """真 `OpenAIAdapter._build_payload` / `_serialize_messages`，不走网络。"""
 
     def __init__(self, **kw: Any) -> None:
-        OpenAIAdapter.__init__(self, api_key="test-key", **kw)
+        OpenAIMultimodalAdapter.__init__(self, api_key="test-key", **kw)
         self._init_stub()
-        self.supports_vision = True
 
     def complete(self, request, stream=True):
         payload = self._build_payload(request)
@@ -685,11 +683,10 @@ class _EchoThenFinishLLM(_PlaceholderReadingLLM):
                                  arguments={"deliverables_summary": "d"})]
 
 
-class _TextAnthropicLLM(_EchoThenFinishLLM, AnthropicAdapter):
+class _TextAnthropicLLM(_EchoThenFinishLLM, AnthropicMultimodalAdapter):
     def __init__(self) -> None:
-        AnthropicAdapter.__init__(self, api_key="test-key")
+        AnthropicMultimodalAdapter.__init__(self, api_key="test-key")
         self._init_stub()
-        self.supports_vision = True
 
     def complete(self, request, stream=True):
         payload = self._build_payload(request)
@@ -697,11 +694,10 @@ class _TextAnthropicLLM(_EchoThenFinishLLM, AnthropicAdapter):
         return self._emit(*self._decide(payload))
 
 
-class _TextOpenAILLM(_EchoThenFinishLLM, OpenAIAdapter):
+class _TextOpenAILLM(_EchoThenFinishLLM, OpenAIMultimodalAdapter):
     def __init__(self) -> None:
-        OpenAIAdapter.__init__(self, api_key="test-key")
+        OpenAIMultimodalAdapter.__init__(self, api_key="test-key")
         self._init_stub()
-        self.supports_vision = True
 
     def complete(self, request, stream=True):
         payload = self._build_payload(request)

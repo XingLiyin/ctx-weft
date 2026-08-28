@@ -24,7 +24,7 @@ from ctx_weft.protocols import (
     ImagePart, LLMChunk, LLMUsage, MemoryEventType, ProviderContext, TextPart, ToolCall,
 )
 from ctx_weft.protocols.memory import BLOB_REF_PREFIX
-from ctx_weft.providers.llm.anthropic import AnthropicAdapter
+from ctx_weft.providers.llm.anthropic import AnthropicMultimodalAdapter
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
 from ctx_weft.providers.memory_sql import open_sqlite_memory
@@ -103,8 +103,6 @@ async def test_multimodal_prompt_completes_one_actor_round_without_crashing() ->
     resolver.register(make_echo_template())
 
     llm = _RouterLLM()
-    llm.supports_vision = True  # instance-only：declares this mock's own capability,
-    # not a hardcoded class default — keeps the strict-default semantics intact.
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
@@ -187,7 +185,6 @@ async def _run_and_collect_context_assembled_tokens(user_prompt) -> int:
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = _FinishRouterLLM()
-    llm.supports_vision = True  # instance-only（见上一处同名注释的理由）
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
@@ -225,7 +222,7 @@ async def test_assembled_token_count_higher_with_image_than_text_only() -> None:
     )
 
 
-class _WireCapturingAnthropicAdapter(AnthropicAdapter):
+class _WireCapturingAnthropicAdapter(AnthropicMultimodalAdapter):
     """驱动 Task 5 的真实 wire 转换代码（AnthropicAdapter._build_payload → _serialize_messages）
     捕获实际会发给 Anthropic Messages API 的 payload，但不做真实网络调用——complete() 直接
     从 payload 合成一段 chunk 流，不经 httpx。captured_payloads 是本 Phase 的验收证据：
@@ -288,7 +285,6 @@ async def test_multimodal_prompt_reaches_wire_payload_as_image_block() -> None:
     resolver.register(make_echo_template())
 
     llm = _WireCapturingAnthropicAdapter()
-    llm.supports_vision = True  # instance-only（见上文同名注释的理由）
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
@@ -373,7 +369,6 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
     resolver.register(make_echo_template())
 
     llm = _WireCapturingAnthropicAdapter()
-    llm.supports_vision = True  # instance-only（见上文同名注释的理由）
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)

@@ -39,10 +39,6 @@ class ModelConfig:
     # reserved_output_tokens，不参与 per-request 输出上限（那是 output_ceiling）。
     output_reserve: int | None = None
     output_ceiling: int | None = None  # 单次输出收紧上限；None → 网关回退 context_limit
-    # 是否支持图片输入（多模态）。**默认 False = 严格**：未显式声明的模型一律拒绝图片，
-    # 宁可在入口报错，也不让 image block 打到纯文本模型后被 provider 400。
-    # 这是破坏性默认——宿主须为支持视觉的模型显式开启。
-    supports_vision: bool = False
 
 
 @dataclass
@@ -72,7 +68,6 @@ class _FixedModelClient:
         output_reserve: int,
         output_ceiling: int | None = None,
         account: str = "",
-        supports_vision: bool = False,      # 严格默认，见 ModelConfig
     ) -> None:
         self._adapter = adapter
         self._model = model
@@ -80,7 +75,6 @@ class _FixedModelClient:
         self._output_reserve = output_reserve
         self._output_ceiling = output_ceiling
         self._account = account
-        self._supports_vision = supports_vision
 
     @property
     def model(self) -> str:
@@ -105,10 +99,6 @@ class _FixedModelClient:
     @property
     def output_ceiling(self) -> int | None:
         return self._output_ceiling
-
-    @property
-    def supports_vision(self) -> bool:
-        return self._supports_vision
 
     @property
     def supports_tool_calling(self) -> bool:
@@ -257,10 +247,8 @@ class LLMProvider:
         cfg_reserve = model_cfg.output_reserve if model_cfg else None
         reserve = cfg_reserve if cfg_reserve is not None else default_output_reserve(ctx_limit)
         ceiling = model_cfg.output_ceiling if model_cfg else None
-        vision = model_cfg.supports_vision if model_cfg else False
 
-        return _FixedModelClient(adapter, resolved_model, ctx_limit, reserve, ceiling,
-                                 account=name, supports_vision=vision)
+        return _FixedModelClient(adapter, resolved_model, ctx_limit, reserve, ceiling, account=name)
 
     # ── Model discovery / connectivity (host-facing; not on the protocol) ──────
 

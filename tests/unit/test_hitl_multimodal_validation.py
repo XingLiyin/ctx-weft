@@ -273,7 +273,7 @@ async def test_bare_hitl_manager_reject_with_image_raises_instead_of_silently_pa
 async def test_plain_text_hitl_answer_is_byte_identical():
     store = _CountingStore()
     calls: list[int] = []
-    rt = _make_runtime(SimpleNamespace(supports_vision=True), store)
+    rt = _make_runtime(SimpleNamespace(), store)
     _orig = rt._resolve_llm
 
     def _counting_resolve(*a, **k):
