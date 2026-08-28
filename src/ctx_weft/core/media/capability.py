@@ -382,11 +382,13 @@ class MediaCapabilityProvider(ToolCapabilityProvider):
         先构造 Runtime 再 `register_memory()` / `register_memory_blob_store()`——构造期
         判定会让工具永远缺席，即使后来接上了 memory（同 `ProviderRegistry.
         get_memory_blob_store` docstring 记的那个「先取后注册」坑）。
+
+        不吞异常：`get_memory_blob_store()` 未注册时回落到缓存的 `NullMemoryBlobStore()`
+        （`.can_externalize` 恒 `False`），文档化为从不抛（`runtime.py` 同函数 docstring）。
+        真抛了大概率是别处的接线坏了或契约被改，应该响亮报出来，而不是被这里悄悄吞成
+        「工具消失」——那种失败没有异常、没有日志，只会表现成模型突然拿不到这个工具。
         """
-        try:
-            return bool(self._providers.get_memory_blob_store().can_externalize)
-        except Exception:      # registry 尚未接线完毕（如 memory 都没注册）不该让 list() 炸
-            return False
+        return bool(self._providers.get_memory_blob_store().can_externalize)
 
     async def list(self, ctx: ProviderContext) -> list[ToolCapability]:
         # 条件可见（spec §8）：没有可用 blob 时不把工具暴露给模型——此刻它取不回任何东西
