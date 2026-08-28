@@ -1,6 +1,6 @@
 # 协议层划界——event 体系入 protocols
 
-> 状态：设计已批准（2026-08-27），待实施
+> 状态：设计已批准（2026-08-27），§2 划界经用户裁定改为三层（2026-08-28），待实施
 > 性质：**纯重构**，与多模态特性正交。配套特性设计见
 > `2026-08-27-dual-blob-store-design.md`，该特性依赖本次搬迁先落地。
 
@@ -22,10 +22,17 @@
 - 新增 `EventBlobStore`（见配套特性设计）时无处可放：跟 `EventStore` 同处则继续
   留在 core，放 `protocols/` 则与它服务的契约分居。
 
-判据一旦写清楚，归属就不再含糊：**host 要实现它或按它编程的，进 protocols；
-core 自用的实现与逻辑，留 core。**
+判据一旦写清楚，归属就不再含糊——见 §2 的三层划界。
 
 ## 2. 划界
+
+判据是**三层**（用户裁定 2026-08-28）：
+
+> **契约进 `protocols/`，实现进 `providers/`，`core/` 只留编排。**
+
+原先只分「host-facing 契约 vs core 自用」两层，把内置实现也归给 core。那不对称：
+`providers/` 本就是「协议的具体实现」所在（`memory_blackboard` / `memory_sql` /
+`llm` / `capability_*` 都是），唯独 event 体系的两个实现住在 `core/` 下，是历史惯性。
 
 | 符号 | 现居 | 判据 | 去向 |
 |---|---|---|---|
@@ -35,8 +42,19 @@ core 自用的实现与逻辑，留 core。**
 | `EventBus` / `SubscriptionHandle` | `core/events/bus.py` | host 可替换（README 明说要换 Redis Streams） | **protocols** |
 | `EventStore` / `RunSnapshot` | `core/state/event_store.py` | host 必须实现 | **protocols** |
 | `TASK_STATUS_BY_EVENT` | `core/events/types.py` | 只被 `core/control/reducers.py` 用，依赖 core 的 `TaskStatus` | **留 core** |
-| `InProcessEventBus` | `core/events/bus.py` | 实现 | **留 core** |
-| `InMemoryEventStore` | `core/state/event_store.py` | 实现 | **留 core** |
+| `InProcessEventBus` | `core/events/bus.py` | 实现 | **providers/events/** |
+| `InMemoryEventStore` | `core/state/event_store.py` | 实现 | **providers/events/** |
+| `InMemoryEventStore`（简化版） | `core/control/replay.py` | 死代码 | **删除** |
+
+两个实现一并搬（不只搬 store）：它们是同一类东西，且**配套**——
+`InMemoryEventStore(event_bus=...)` 会自动订阅 bus。只搬一个会让布局自相矛盾。
+
+`core/control/replay.py:54` 那个同名简化版（只有 `append` + `read_by_session`，`list`
+存储）**除 `core/control/__init__.py` 的一行 re-export 外零使用者**（实测 src 与 tests
+均无 import）。它不是「需要合并的重复」，是死代码——留着只会制造「同名不同实现、都对外
+可见」的陷阱：`from ctx_weft.core.control import InMemoryEventStore` 拿到的是个缺快照
+方法的对象。删掉类与那行导出（用户裁定 2026-08-28；分支未上线，`core.control` 也不在
+顶层导出面）。
 
 ### 2.1 可行性：无反向依赖
 
@@ -47,7 +65,23 @@ core 自用的实现与逻辑，留 core。**
 
 `EventStore` 的方法签名只用到 `Event` / `RunSnapshot`，两者同批搬迁，自洽。
 
-### 2.2 落点：`protocols/events.py` 单文件
+### 2.2 实现的落点：`providers/events/`
+
+与既有的 `providers/llm/` 同构（领域目录 + 内部按变体分文件）：
+
+```
+providers/events/
+  __init__.py   导出 InProcessEventBus / InMemoryEventStore
+  bus.py        InProcessEventBus + _Subscriber + _matches
+  store.py      InMemoryEventStore + _TERMINAL_STATUSES
+```
+
+将来 host 要 Redis Streams 的 bus 或 Postgres 的 store，加文件即可，不必再动 core。
+
+`CtxWeftRuntime` 改为 `from ctx_weft.providers.events import ...` 取默认实现；顶层
+`ctx_weft.InMemoryEventStore` 的导出**保留**（host 在用），只换来源。
+
+### 2.3 落点：`protocols/events.py` 单文件
 
 约 400 行，与 `protocols/memory.py`（554 行）同量级，符合仓里「一个领域一个文件、
 协议与其数据类型同处」的既有风格（`memory.py` 同时装 `MemoryProvider` 与
@@ -104,8 +138,12 @@ from ctx_weft.protocols.events import (
 # TASK_STATUS_BY_EVENT 仍在本模块定义（core 侧投影逻辑，见 §2）
 ```
 
-`core/events/__init__.py` 与 `core/state/event_store.py` 同法——后者继续定义
-`InMemoryEventStore`，只把 `EventStore` / `RunSnapshot` 改成 re-export。
+`core/events/__init__.py`、`core/events/bus.py`、`core/state/event_store.py` 同法：
+协议改为从 `protocols.events` re-export，**实现改为从 `providers.events` re-export**
+（§2.2 把它们搬走了）。两个原模块因此都退化成纯兼容层，自身不再定义任何东西。
+
+顶层 `ctx_weft.InMemoryEventStore` 同样只换来源、不换对象——host 的
+`from ctx_weft import InMemoryEventStore` 拿到的仍是同一个类。
 
 顶层 `ctx_weft/__init__.py` 补充导出 `EventStore`（契约此前根本没导出，是 §1 列的
 问题之一）。
@@ -151,8 +189,7 @@ from ctx_weft.protocols.events import (
 
 ## 8. 不做什么
 
-- **不**动 `TASK_STATUS_BY_EVENT`、`InProcessEventBus`、`InMemoryEventStore` 的归属。
-- **不**统一 `core/state/event_store.py` 与 `core/control/replay.py` 的两个同名
-  `InMemoryEventStore`。这是本次审视中发现的既有重复，但与划界正交，另行处理。
+- **不**动 `TASK_STATUS_BY_EVENT` 的归属（它是 core 的投影逻辑，依赖 core 的 `TaskStatus`）。
+- **不**改两个内置实现的任何行为——搬家 + 换 import 来源，代码逐行不动。
 - **不**改任何既有 import 语句（re-export 兜住）。
 - **不**改 `context.py` 对 `core.content` 的惰性绑定。
