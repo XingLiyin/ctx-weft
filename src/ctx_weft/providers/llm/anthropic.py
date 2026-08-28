@@ -18,6 +18,7 @@ from ctx_weft.protocols import (
     LLMCallError, LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall,
 )
 from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
+from ctx_weft.providers.llm._modality import downgrade_for_text_only
 from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
 from ctx_weft.providers.llm.text_calls import (
     ContentGate, merge_content as _merge_content, unwrap_raw_arguments,
@@ -304,9 +305,24 @@ class AnthropicAdapter(LLMClient):
             "Content-Type": "application/json",
         }
 
+    def _prepare_messages(self, request: LLMRequest) -> list[LLMMessage]:
+        """出网前的模态处置——**本类是纯文本 adapter**，图片降级成文本占位并告警。
+
+        能力由「注册了哪个 adapter 类」表达（spec 2026-08-28 §2「类型即声明」）：
+        要发图请用 ``AnthropicMultimodalAdapter``，它覆盖本方法为原样透传。
+
+        接缝开在这里而不是改 ``_serialize_messages``：后者已经能正确处理图片 part
+        （``_parts_to_blocks`` 都在），两种 adapter 的唯一区别是**图片能不能活着走到
+        它面前**。故 ``_serialize_messages`` 一字不改。
+
+        纯文本请求返回同一对象、不记日志（无图会话逐字节不受影响）。
+        """
+        return downgrade_for_text_only(
+            request, adapter_hint="AnthropicMultimodalAdapter")
+
     def _build_payload(self, request: LLMRequest) -> dict[str, Any]:
         model = request.model if request.model and request.model != "mock" else self._model
-        messages = _serialize_messages(request.messages)
+        messages = _serialize_messages(self._prepare_messages(request))
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -321,6 +337,20 @@ class AnthropicAdapter(LLMClient):
         if request.tools:
             payload["tools"] = _map_tools(request.tools)
         return payload
+
+
+class AnthropicMultimodalAdapter(AnthropicAdapter):
+    """支持图片输入的 Anthropic adapter。
+
+    与基类的唯一区别：``_prepare_messages`` 原样透传，图片得以走到
+    ``_serialize_messages`` 面前被拼成 Anthropic image block。
+
+    能力由类型表达（spec 2026-08-28 §2）——host 注册哪个类，就是在声明该账号下的
+    模型收不收图。core 对此零判断。
+    """
+
+    def _prepare_messages(self, request: LLMRequest) -> list[LLMMessage]:
+        return request.messages
 
 
 def _parse_tool_blocks(blocks: dict[int, dict[str, Any]]) -> list[ToolCall]:

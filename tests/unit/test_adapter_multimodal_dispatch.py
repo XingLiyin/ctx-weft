@@ -78,3 +78,63 @@ def test_downgrade_does_not_mutate_input_messages():
     req = _req(original)
     downgrade_for_text_only(req, adapter_hint="X")
     assert isinstance(original.content[0], ImagePart), "入参消息不得被就地改写"
+
+
+# ── Task 2：Anthropic 分流 ────────────────────────────────────────────────
+
+
+def _anth(multimodal: bool):
+    from ctx_weft.providers.llm.anthropic import (
+        AnthropicAdapter,
+        AnthropicMultimodalAdapter,
+    )
+    cls = AnthropicMultimodalAdapter if multimodal else AnthropicAdapter
+    return cls(api_key="k")
+
+
+def test_anthropic_text_only_downgrades_user_image():
+    payload = _anth(multimodal=False)._build_payload(
+        _req(LLMMessage(role="user", content=[TextPart(text="看图"), _img()])))
+    blocks = payload["messages"][0]["content"]
+    assert [b["type"] for b in blocks] == ["text", "text"]
+    assert blocks[1]["text"] == "[image image/png]"
+
+
+def test_anthropic_multimodal_keeps_user_image():
+    payload = _anth(multimodal=True)._build_payload(
+        _req(LLMMessage(role="user", content=[TextPart(text="看图"), _img()])))
+    blocks = payload["messages"][0]["content"]
+    assert [b["type"] for b in blocks] == ["text", "image"]
+    assert blocks[1]["source"]["data"] == _PNG_B64
+
+
+def test_anthropic_text_only_downgrades_assistant_image():
+    payload = _anth(multimodal=False)._build_payload(
+        _req(LLMMessage(role="assistant", content=[_img()])))
+    blocks = payload["messages"][0]["content"]
+    assert [b["type"] for b in blocks] == ["text"]
+
+
+def test_anthropic_text_only_downgrades_tool_result_image():
+    payload = _anth(multimodal=False)._build_payload(_req(
+        LLMMessage(role="user", content="q"),
+        LLMMessage(role="tool", content=[_img()], tool_call_id="tc1"),
+    ))
+    tool_msg = payload["messages"][-1]["content"][0]
+    assert [b["type"] for b in tool_msg["content"]] == ["text"]
+
+
+def test_anthropic_multimodal_keeps_tool_result_image():
+    payload = _anth(multimodal=True)._build_payload(_req(
+        LLMMessage(role="user", content="q"),
+        LLMMessage(role="tool", content=[_img()], tool_call_id="tc1"),
+    ))
+    tool_msg = payload["messages"][-1]["content"][0]
+    assert [b["type"] for b in tool_msg["content"]] == ["image"]
+
+
+def test_anthropic_plain_text_payload_unchanged_between_classes():
+    """纯文本会话在两个类上产出完全相同的 wire。"""
+    req = _req(LLMMessage(role="user", content="纯文本"))
+    assert _anth(multimodal=False)._build_payload(req) == \
+        _anth(multimodal=True)._build_payload(req)
