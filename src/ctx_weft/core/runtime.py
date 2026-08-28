@@ -1425,14 +1425,29 @@ class CtxWeftRuntime:
     async def _restore_task_prompts(
         self, tasks: "list[Task]", session_id: str, tenant_id: str,
     ) -> None:
-        """恢复态的 prompt 从 event ref 转回 memory ref。**逐 task 独立降级，不整体失败。**
+        """恢复态的 prompt 从 event ref 转回 memory ref。**逐 task、逐字段独立降级：任一
+        字段转换失败只降级它自己，不牵连同一 task 的另一字段、不牵连其他 task、更不
+        中断整场恢复。**
 
         转换前先把事件侧的原样形态快照到 `user_prompt_event_jsonable`（见 Task 5）：
         `reopen_task` 要用它发 TASK_REQUEUED，此时它就是从事件里读来的那一份，
         零成本、且与首次发射逐字节相同。
+
+        本函数刻意不走 `validate_content`——它的输入直接来自事件重放，不是入口，
+        套不上「先 validate 后 normalize」那条不变量（`_validate_and_normalize_content`，
+        `runtime.py:573` 附近）。事件日志可能损坏、`EventBlobStore` 实现也可能有 bug，
+        `hydrate_event_content` / `normalize_content` 因此可能抛出——`normalize_content`
+        对 base64 解码刻意不做 try/except（`content.py` 该函数 docstring 原话），
+        正是假定调用方已经过 `validate_content` 筛过一轮，而这里明确没有这层保证。
+        抛出时把该字段整体降级成 `downgrade_images_to_text` 产出的确定性文本占位：
+        **不允许任何解不开的 ref（event 侧或 memory 侧）流进 task 字段**，并用
+        `logger.error` 记下 task id / field name，让问题看得见，而不是被这层降级
+        悄悄吞掉。崩溃恢复是最不能再崩一次的地方——一个 task 的坏数据不该拖垮
+        整场会话恢复。
         """
         from ctx_weft.core.content import (
-            content_to_jsonable, hydrate_event_content, normalize_content,
+            content_to_jsonable, downgrade_images_to_text, hydrate_event_content,
+            normalize_content,
         )
 
         event_blob_store = self.providers.get_event_blob_store()
@@ -1444,11 +1459,19 @@ class CtxWeftRuntime:
                 if not content or isinstance(content, str):
                     continue
                 setattr(task, f"{field_name}_event_jsonable", content_to_jsonable(content))
-                hydrated = await hydrate_event_content(
-                    content, event_blob_store=event_blob_store, ctx=ctx)
-                if blob_store.can_externalize:
-                    hydrated = await normalize_content(
-                        hydrated, blob_store=blob_store, ctx=ctx)
+                try:
+                    hydrated = await hydrate_event_content(
+                        content, event_blob_store=event_blob_store, ctx=ctx)
+                    if blob_store.can_externalize:
+                        hydrated = await normalize_content(
+                            hydrated, blob_store=blob_store, ctx=ctx)
+                except Exception:
+                    logger.error(
+                        "_restore_task_prompts: task_id=%s field=%s 转换失败，"
+                        "降级为纯文本占位（不让解不开的 ref 混进 memory）",
+                        task.id, field_name, exc_info=True,
+                    )
+                    hydrated = downgrade_images_to_text(content)
                 setattr(task, field_name, hydrated)
 
     async def _find_finish_pair_tool_call_id(

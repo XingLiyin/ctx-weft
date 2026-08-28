@@ -920,3 +920,129 @@ async def test_recovery_populates_both_event_jsonable_fields_for_reopen(runtime_
             f"{field_name} 里的 ref 必须是 event 侧的、能被 evt_store 解开")
         assert await mem_store.get(ref, _ctx()) is None, (
             f"{field_name} 混进了 memory 侧 ref——它是事件侧载荷，命名空间不该相通")
+
+
+# ── review 追加轮 1：hydrate_event_content 的「取不回字节」降级分支 ──────────────
+#
+# 这是 Task 4 新增的真实行为（恢复时取不回 event blob → 图变成确定性文本占位），
+# 且是任务说明里点名要覆盖的边角。之前的两条用例都走「取得到字节」的主路径，
+# 这条分支此前零覆盖。
+
+
+@pytest.mark.asyncio
+async def test_hydrate_event_content_degrades_to_placeholder_when_blob_missing() -> None:
+    """event blob 取不回字节（过期 / 宿主换机 / GC 误删）→ 降级成确定性文本占位，不抛。"""
+    from ctx_weft.core.content import hydrate_event_content
+
+    evt_store = _PrefixedEventBlobStore()
+    # 刻意不 put：这个 ref 在 evt_store 里查无此物，get() 恒返回 None。
+    missing_ref = f"{BLOB_REF_PREFIX}evt-does-not-exist"
+    content = [
+        TextPart(text="look at this"),
+        ImagePart(data=missing_ref, media_type="image/png", source_type="ref"),
+    ]
+
+    out = await hydrate_event_content(content, event_blob_store=evt_store, ctx=_ctx())
+
+    assert isinstance(out, list)
+    images = [p for p in out if getattr(p, "source_type", "") == "ref"
+              or getattr(p, "source_type", "") == "base64"]
+    assert images == [], f"取不回字节时不该还留着图片 part：{out}"
+    texts = [p.text for p in out if hasattr(p, "text")]
+    assert "[image unavailable: image/png]" in texts, (
+        f"应降级成确定性占位文本，实为：{texts}")
+
+
+@pytest.mark.asyncio
+async def test_hydrate_event_content_missing_blob_placeholder_is_deterministic() -> None:
+    """占位文本对同一张图必须逐字节确定（用户裁定 D2 的硬约束），不得含 ref/sha。"""
+    from ctx_weft.core.content import hydrate_event_content
+
+    evt_store = _PrefixedEventBlobStore()
+    missing_ref = f"{BLOB_REF_PREFIX}evt-does-not-exist"
+    part = ImagePart(data=missing_ref, media_type="image/png", source_type="ref")
+
+    a = await hydrate_event_content([part], event_blob_store=evt_store, ctx=_ctx())
+    b = await hydrate_event_content([part], event_blob_store=evt_store, ctx=_ctx())
+
+    assert [p.text for p in a] == [p.text for p in b] == ["[image unavailable: image/png]"]
+    assert missing_ref not in a[0].text
+
+
+# ── review 追加轮 1：_restore_task_prompts 的 per-field 韧性 ────────────────────
+#
+# 裁定：per-task/per-field 转换失败必须只降级那一个字段，绝不中断整场恢复
+# ——崩溃恢复恰是最不能再崩一次的地方。构造一个会让 `normalize_content` 抛出的
+# task（畸形 base64，绕开 hydrate_event_content 只碰 ref part 的判据，直接从
+# 「损坏的事件日志」这个角度进入 normalize_content 未被 try/except 保护的
+# b64decode），验证：① 整场恢复仍然成功、② 该 task 的字段被降级成不含任何图片
+# part 的纯文本（不让解不开的 ref 流进 memory）、③ 同一 session 里的另一个正常
+# task 完好无损、④ 记了一条 error 日志点名 task id 与 field name。
+
+
+@pytest.mark.asyncio
+async def test_restore_task_prompts_isolates_one_bad_task_and_logs_error(
+    runtime_with_images, caplog,
+) -> None:
+    runtime, mem_store, evt_store = runtime_with_images
+    sid = "ses_t4c"
+    good_tid, bad_tid, aid = "tsk_t4c_good", "tsk_t4c_bad", "agt_root"
+    ref_a = await evt_store.put(_RAW_A, "image/png", _ctx())
+    good_jsonable = content_to_jsonable([
+        TextPart(text="good task"),
+        ImagePart(data=ref_a, media_type="image/png", source_type="ref"),
+    ])
+    # 畸形事件载荷：source_type="base64" 却带着解不了的 data——正常入口（validate_content
+    # 先行）不可能产出这种东西，这里刻意模拟「事件日志损坏 / EventBlobStore 有 bug」，
+    # 绕开 hydrate_event_content（只处理 ref part），直接命中 normalize_content 那句
+    # 刻意不做 try/except 的 b64decode(..., validate=True)。
+    bad_jsonable = [
+        {"type": "text", "text": "bad task"},
+        {"type": "image", "data": "not-valid-base64!!", "media_type": "image/png",
+         "source_type": "base64"},
+    ]
+
+    events = [
+        _seed_event(1, sid, EventType.SESSION_CREATED, user_prompt="two tasks",
+                    template_id="agent:tpl_echo", root_agent_id=aid),
+        _seed_event(2, sid, EventType.RUN_STARTED),
+        _seed_event(3, sid, EventType.TASK_CREATED, task={
+            "id": good_tid, "status": "ACTIVE", "title": "Good", "kind": "reasoning",
+            "assigned_agent_id": aid, "creator_agent_id": aid,
+            "user_prompt": good_jsonable}),
+        _seed_event(4, sid, EventType.TASK_CREATED, task={
+            "id": bad_tid, "status": "ACTIVE", "title": "Bad", "kind": "reasoning",
+            "assigned_agent_id": aid, "creator_agent_id": aid,
+            "user_prompt": bad_jsonable}),
+    ]
+    for e in events:
+        await runtime.event_store.append(e)
+
+    import logging
+    with caplog.at_level(logging.ERROR, logger="ctx_weft.core.runtime"):
+        await runtime.recover_session(sid)  # 必须不抛——整场恢复不能因一个 task 坏数据而死
+
+    tm = runtime._task_managers[sid]
+
+    good_task = tm.get_task(good_tid)
+    assert good_task is not None
+    good_img = next(p for p in good_task.user_prompt if getattr(p, "source_type", "") == "ref")
+    assert await mem_store.get(good_img.data, _ctx()) is not None, (
+        "正常 task 不该被同 session 里另一个坏 task 拖累")
+
+    bad_task = tm.get_task(bad_tid)
+    assert bad_task is not None
+    assert isinstance(bad_task.user_prompt, list)
+    bad_images = [p for p in bad_task.user_prompt
+                  if getattr(p, "source_type", "") in ("ref", "base64")]
+    assert bad_images == [], (
+        f"降级后不该再留着任何图片 part（无论 ref 还是 base64）：{bad_task.user_prompt}")
+    bad_texts = [p.text for p in bad_task.user_prompt if hasattr(p, "text")]
+    assert any("[image image/png]" in t for t in bad_texts), (
+        f"应降级成 downgrade_images_to_text 的确定性占位，实为：{bad_texts}")
+
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(bad_tid in r.getMessage() and "user_prompt" in r.getMessage()
+               for r in error_records), (
+        f"必须有一条 error 日志点名坏 task 的 id 与字段名，实际记录：" +
+        repr([r.getMessage() for r in error_records]))
