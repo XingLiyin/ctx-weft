@@ -611,6 +611,16 @@ class TaskManager:
         # 不可能引入事件流没见过的图。故事件形态直接由首次发射那份 + 文本拼出，
         # 零 blob IO，且同一张图的 event ref 跨 reopen 逐字节相同（重放确定性）。
         original_user_prompt_jsonable = task.original_user_prompt_event_jsonable
+        if original_user_prompt_jsonable is None and isinstance(base_prompt, str) and base_prompt:
+            # 兜底：event jsonable 没被填上（历史上 `_restore_task_prompts` 跳过纯文本、
+            # `run_single_task` 丢弃它，都出过这个洞——终审 C1），而 base 又是非空 str。
+            # 纯文本的事件形态就是它自己，直接补上；决不能让「字段没填」被
+            # `_append_text_sections` 读成「base 为空」，那会把用户的原始指令从
+            # TASK_REQUEUED 里抹掉、并在下一次重放时永久生效。
+            # 只兜 str：list base 的事件形态含 event ref，core 无从凭空重建（重建
+            # 就意味着拿 memory ref 冒充 event ref，正是两个命名空间不得相通的红线）。
+            original_user_prompt_jsonable = base_prompt
+            task.original_user_prompt_event_jsonable = base_prompt
         user_prompt_jsonable = _append_text_sections(
             original_user_prompt_jsonable, sections)
         task.user_prompt_event_jsonable = user_prompt_jsonable

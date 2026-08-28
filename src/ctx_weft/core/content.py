@@ -694,11 +694,18 @@ async def hydrate_event_content(
 
     取不回字节 → `[image unavailable: {media_type}]` 文本占位，**不抛**：event blob
     的保留策略归 host（spec §9），取不到是预期内的正常降级，不该让恢复整个失败。
+
+    **未注册可外部化的 `EventBlobStore`（`can_externalize` 为假）与「取不回字节」是
+    同一种情形**，走同一条降级：宿主上次跑时注册了、这次重启没注册，重放出来的
+    `source_type == "ref"` part 就再也解不开。此时**绝不能原样返回**——调用方
+    （`Runtime._restore_task_prompts`）会把返回值当 memory 侧内容落进 task 字段，
+    而 `normalize_content` 按设计不碰 ref part、也不会抛，于是一个 event 命名空间的
+    ref 悄悄流进 memory 侧，之后被 `rehydrate_content` 拿去问 `MemoryBlobStore`。
+    那是本次解耦要消灭的最后一条跨命名空间通路（终审 I1）。
     """
     if not content or isinstance(content, str):
         return content
-    if not event_blob_store.can_externalize:
-        return content
+    can_get = event_blob_store.can_externalize
     from ctx_weft.protocols import ImagePart
     out: list[Any] = []
     for part in content:
@@ -707,9 +714,11 @@ async def hydrate_event_content(
             continue
         ref = str(_part_field(part, "data", "") or "")
         media_type = str(_part_field(part, "media_type", "") or "")
-        got = await event_blob_store.get(ref, ctx)
+        got = await event_blob_store.get(ref, ctx) if can_get else None
         if got is None:
-            logger.warning("hydrate_event_content: event blob 取不回 %r，降级为占位", ref)
+            logger.warning(
+                "hydrate_event_content: event blob 取不回 %r（%s），降级为占位",
+                ref, "无此条目" if can_get else "未注册可外部化的 EventBlobStore")
             out.append(_unavailable_part(part, media_type))
             continue
         raw, got_media_type = got

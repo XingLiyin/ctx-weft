@@ -1044,6 +1044,13 @@ async def test_single_task(runtime):
   `EventBlobStore` 才能继续工作；宿主若共用同一份存储服务两侧，同一个实现类可以
   同时满足 `MemoryBlobStore` 与 `EventBlobStore` 两个协议（本仓自带的
   `SqlMemoryProvider` 已经同时实现两者，注册两次即可）。
+- **行为变化：入口内容里已经是 `source_type == "ref"` 的图片 part，不再进事件流。**
+  典型场景是宿主把从 memory 读回来的内容（其中的图已被外部化成 memory ref）原样再
+  提交一次。这类 part 的 ref 属于 **memory 命名空间**，event blob store 永远解不开，
+  故事件侧会把它降级成 `[image {media_type}]` 文本占位并记一条 warning；**memory 侧
+  照旧保留该图**。也就是说：进程内与后续 memory 读取都看得见图，但**崩溃恢复后从事件
+  流重建出来的那份只剩文本占位**。宿主若有「回读—再提交」的用法，请改为提交原始
+  base64（或自己先把字节取回来再提交），不要依赖 ref 原样透传。
 - **回读有且仅有一条 core 内置路径：会话恢复。** `Runtime._restore_task_prompts`
   （`core/content.py::hydrate_event_content`）在 `_recover_session_locked` 里把
   重放出来的 event ref 过桥转回 memory ref，逐 task 逐字段包 try/except，失败时
@@ -1051,7 +1058,9 @@ async def test_single_task(runtime):
   世界之间**唯一**的桥，方向单一，由 event 侧发起。除此之外 core 不会主动从
   事件流回读图片字节，读侧走的仍是 memory 侧的 `MemoryBlobStore`。其他场景
   （例如导入到一个新的 memory 实例、或做纯事件重放）想把图片字节取回来，
-  仍需宿主自己调用 `EventBlobStore.get(ref, ctx)`。
+  仍需宿主自己调用 `EventBlobStore.get(ref, ctx)`。若重启后**没再注册**
+  `EventBlobStore`，重放出来的 event ref 无从解开，走与「取不回字节」完全相同的降级
+  （占位 + warning）——绝不会原样流进 memory 侧的 task 字段。
 - **两侧的 ref 是两个独立的命名空间。** memory 侧与 event 侧各自 put、各自拿
   自己的 ref，core 从不比较两者、也从不拿一侧的 ref 去另一侧解。宿主自
   2026-08-28 起可以分开注册两个实现——`providers/blob_fs/FsBlobStore` 是可

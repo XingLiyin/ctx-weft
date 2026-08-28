@@ -595,6 +595,15 @@ class CtxWeftRuntime:
         try/except，靠 validate 先行把畸形 base64 拦成 `InvalidContentError`。抽成
         这一个方法之后，三处调用点的顺序不会再各自漂移。
 
+        **(a) 有一个诚实的例外**：event 侧先 put、memory 侧后 put，故 memory 侧
+        `normalize_content` 失败（blob store 报错等）时，本方法带着异常返回，而字节
+        **已经**落进了 event blob store——留下一份无人引用的孤儿。这个顺序是被「event
+        侧要的是归一化之前的原始字节」硬性决定的（见上），不为此改序、也不加补偿删除
+        （删除本身会失败、且 `EventBlobStore` 协议里没有 delete）。孤儿的回收归宿主的
+        event blob 保留策略，与「被拒的内容不在 blob store 里留垃圾」相比，这里的口径
+        准确说法是：**校验（validate）失败恒不留垃圾；外部化中途失败可能留下 event 侧
+        孤儿字节**。
+
         **不解析 LLM、不判模型能力**（spec 2026-08-28）：模态处置归 `LLMClient`
         实现方，core 全程透传。这也让「纯文本不提前解析 LLM」这条不变量自动成立
         ——本方法根本不碰 LLM。
@@ -834,12 +843,14 @@ class CtxWeftRuntime:
         # 入口即拒、不落库：格式/blob 门控须在任何持久化（Session/Task/事件）之前完成
         # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全。
         # validate → normalize 的顺序与另外两个入口共用同一个方法，不再各写一遍。
-        # event 侧产物在这条路径上无人消费，显式丢弃：run_single_task 自己
-        # register_task、不经 push_task，也不发 SESSION_CREATED，没有任何事件载得下它。
-        # 代价是携图时会在 event blob store 里留一份无人引用的字节；不为此加分支，是
-        # 因为「三入口共用同一个真源」这条不变量比省掉一次 compat 路径上的 put 更值钱
+        # event 侧产物在这条路径上没有**入口事件**载得下它（run_single_task 自己
+        # register_task、不经 push_task，也不发 SESSION_CREATED），但它必须挂到 Task 上：
+        # 这条路径产出的 task 一样会被 observer reopen，`reopen_task` 要用它发
+        # TASK_REQUEUED；丢掉它等于让 reopen 把原始 prompt 从事件流里抹掉（终审 C1）。
+        # 代价是携图时会在 event blob store 里留一份暂时无人引用的字节；不为此加分支，
+        # 是因为「三入口共用同一个真源」这条不变量比省掉一次 compat 路径上的 put 更值钱
         # （宿主的 event blob 回收本就按自己的保留策略走，见 EventBlobStore 协议）。
-        user_prompt, _ = await self._validate_and_normalize_content(
+        user_prompt, user_prompt_event_jsonable = await self._validate_and_normalize_content(
             user_prompt, sid, tenant_id=tenant_id,
         )
         lm = LifecycleManager(template_lookup=self._template_lookup)
@@ -877,6 +888,7 @@ class CtxWeftRuntime:
             title="User Request",
             description=content_to_text(user_prompt)[:200],
             user_prompt=user_prompt,
+            user_prompt_event_jsonable=user_prompt_event_jsonable,
             created_at=now_utc(),
         )
 
@@ -1431,7 +1443,8 @@ class CtxWeftRuntime:
 
         转换前先把事件侧的原样形态快照到 `user_prompt_event_jsonable`（见 Task 5）：
         `reopen_task` 要用它发 TASK_REQUEUED，此时它就是从事件里读来的那一份，
-        零成本、且与首次发射逐字节相同。
+        零成本、且与首次发射逐字节相同。**纯文本字段同样要快照**（str 往返即自身），
+        否则 reopen 会把「字段没填」误读成「原始 prompt 是空的」（终审 C1）。
 
         本函数刻意不走 `validate_content`——它的输入直接来自事件重放，不是入口，
         套不上「先 validate 后 normalize」那条不变量（`_validate_and_normalize_content`，
@@ -1456,9 +1469,16 @@ class CtxWeftRuntime:
         for task in tasks:
             for field_name in ("user_prompt", "original_user_prompt"):
                 content = getattr(task, field_name)
-                if not content or isinstance(content, str):
+                if not content:
                     continue
+                # 快照恒先于「要不要转换」的判断：纯文本 prompt 也必须落这一份。
+                # str 经 content_to_jsonable 往返即自身、零成本，而少落它的代价是
+                # `reopen_task` 拿到 None、被 `_append_text_sections` 当成「base 为空」，
+                # 发出的 TASK_REQUEUED 只剩一句修订说明——用户的原始指令在下一次重放
+                # 时蒸发（终审 C1）。纯文本恰恰是绝大多数情形。
                 setattr(task, f"{field_name}_event_jsonable", content_to_jsonable(content))
+                if isinstance(content, str):
+                    continue  # 纯文本无 ref 可转，零 blob IO 直通
                 try:
                     hydrated = await hydrate_event_content(
                         content, event_blob_store=event_blob_store, ctx=ctx)

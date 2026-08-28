@@ -1046,3 +1046,141 @@ async def test_restore_task_prompts_isolates_one_bad_task_and_logs_error(
                for r in error_records), (
         f"必须有一条 error 日志点名坏 task 的 id 与字段名，实际记录：" +
         repr([r.getMessage() for r in error_records]))
+
+
+# ── 全分支终审：C1 / I1 的跨任务接缝回归 ───────────────────────────────────────
+
+
+class _CapturingBus:
+    """只收事件、不落库的 event bus 桩：用来读 reopen 发出的 TASK_REQUEUED 载荷。"""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def emit(self, event) -> None:  # noqa: ANN001
+        self.events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_recovery_then_reopen_preserves_text_only_prompt(runtime_with_images) -> None:
+    """**纯文本** prompt 的 task：恢复之后被 reopen，原始指令不得从事件流里消失（C1）。
+
+    `_restore_task_prompts` 曾对 ``isinstance(content, str)`` 直接 continue，导致
+    ``user_prompt_event_jsonable`` 恢复后恒为 None；`reopen_task` 拿到 None 之后
+    `_append_text_sections` 把它当「base 为空」，发出的 TASK_REQUEUED 只剩一句
+    「## Revision required」——下一次重放据此重建 task，用户的原始指令就此蒸发。
+    内存里当场看不出任何异常（`task.user_prompt` 仍是对的），所以断言必须落在
+    **事件载荷**上，而不是 task 的 memory 侧字段。
+    """
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import Task
+
+    runtime, _mem_store, _evt_store = runtime_with_images
+    sid, tid = "ses_c1", "tsk_c1"
+    original = "写一份 Q3 周报，重点写风险项"
+    task = Task(id=tid, session_id=sid, status="FINISHED", user_prompt=original)
+
+    await runtime._restore_task_prompts([task], sid, "default")
+
+    assert task.user_prompt_event_jsonable == original, (
+        "纯文本 prompt 恢复后也必须有事件侧快照（str 往返即自身，零成本）")
+
+    bus = _CapturingBus()
+    tm = TaskManager(session_id=sid, event_bus=bus)
+    tm.register_task(task)
+    assert await tm.reopen_task(tid, reason="补上数据来源") is True
+
+    requeued = next(e for e in bus.events if e.type == EventType.TASK_REQUEUED)
+    assert requeued.payload["user_prompt"].startswith(original), (
+        f"TASK_REQUEUED 丢了原始指令：{requeued.payload['user_prompt']!r}")
+    assert "补上数据来源" in requeued.payload["user_prompt"]
+    assert requeued.payload["original_user_prompt"] == original
+    # 事件侧与 memory 侧对纯文本必须逐字节一致（重放重建出的 task 与在途 task 同形）。
+    assert requeued.payload["user_prompt"] == task.user_prompt
+
+
+@pytest.mark.asyncio
+async def test_reopen_falls_back_to_original_prompt_when_jsonable_missing() -> None:
+    """兜底：event jsonable 为 None 而 base 是非空 str 时，不得被当成「base 为空」（C1）。
+
+    这是与上一条正交的第二道闸——即便日后又出现一条没填 `user_prompt_event_jsonable`
+    的路径，「字段没填」也不该再伪装成「原始 prompt 是空的」。
+    """
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import Task
+
+    bus = _CapturingBus()
+    tm = TaskManager(session_id="s_fb", event_bus=bus)
+    task = Task(id="t_fb", session_id="s_fb", status="FINISHED",
+                user_prompt="原始指令")
+    assert task.user_prompt_event_jsonable is None  # 刻意不填
+    tm.register_task(task)
+
+    assert await tm.reopen_task("t_fb", reason="重做") is True
+
+    requeued = next(e for e in bus.events if e.type == EventType.TASK_REQUEUED)
+    assert requeued.payload["user_prompt"].startswith("原始指令")
+    assert requeued.payload["original_user_prompt"] == "原始指令"
+
+
+@pytest.mark.asyncio
+async def test_recovery_degrades_event_refs_when_event_store_unregistered() -> None:
+    """宿主重启后没再注册 EventBlobStore：event ref 必须降级，**不得**原样流进 memory 侧（I1）。
+
+    这是解耦分支要消灭的最后一条跨命名空间通路：`hydrate_event_content` 早退、
+    `normalize_content` 按设计不碰 ``source_type == "ref"``、也没有异常触发
+    `_restore_task_prompts` 的降级分支，于是一个 event 命名空间的 ref 悄悄落进
+    `task.user_prompt`，之后被 `rehydrate_content` 拿去问 `MemoryBlobStore`。
+    """
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    runtime = make_runtime(llm=None, agent_provider=resolver)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+    mem_store = _Sha256MemoryBlobStore()
+    runtime.providers.register_memory_blob_store(mem_store)
+    # 刻意不注册 EventBlobStore（NullEventBlobStore.can_externalize is False）
+
+    from ctx_weft.core.state.models import Task
+
+    evt_ref = f"{BLOB_REF_PREFIX}evt-orphan"
+    task = Task(
+        id="tsk_i1", session_id="ses_i1", status="ACTIVE",
+        user_prompt=[
+            TextPart(text="look at this"),
+            ImagePart(data=evt_ref, media_type="image/png", source_type="ref"),
+        ],
+    )
+
+    await runtime._restore_task_prompts([task], "ses_i1", "default")
+
+    assert isinstance(task.user_prompt, list)
+    leftovers = [p for p in task.user_prompt
+                 if getattr(p, "source_type", "") in ("ref", "base64")]
+    assert leftovers == [], (
+        f"event ref 不得原样流进 memory 侧的 task 字段：{task.user_prompt}")
+    texts = [p.text for p in task.user_prompt if hasattr(p, "text")]
+    assert any("image/png" in t and t.startswith("[image") for t in texts), (
+        f"应降级成确定性图片占位，实为：{texts}")
+
+
+@pytest.mark.asyncio
+async def test_hydrate_event_content_degrades_when_store_cannot_externalize(caplog) -> None:
+    """`hydrate_event_content` 自身的口径：拿不到 store 与拿不回字节是同一种情形（I1）。"""
+    import logging
+
+    from ctx_weft.core.content import hydrate_event_content
+    from ctx_weft.protocols.events import NullEventBlobStore
+
+    content = [
+        TextPart(text="look at this"),
+        ImagePart(data=f"{BLOB_REF_PREFIX}evt-x", media_type="image/png", source_type="ref"),
+    ]
+    with caplog.at_level(logging.WARNING, logger="ctx_weft.core.content"):
+        out = await hydrate_event_content(
+            content, event_blob_store=NullEventBlobStore(), ctx=_ctx())
+
+    assert isinstance(out, list)
+    assert [p for p in out if getattr(p, "source_type", "") in ("ref", "base64")] == []
+    assert any("[image unavailable: image/png]" == getattr(p, "text", None) for p in out)
+    assert any(r.levelno >= logging.WARNING for r in caplog.records), (
+        "降级必须是可见的、有日志的，而不是静默交接")
