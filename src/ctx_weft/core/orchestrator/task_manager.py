@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
-from ctx_weft.core.content import content_to_event_jsonable, content_to_jsonable, content_with_suffix
+from ctx_weft.core.content import content_to_event_jsonable, content_with_suffix
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
@@ -297,7 +297,7 @@ class TaskManager:
         )
         await self._emit(
             EventType.TASK_CREATED, task_id=task.id,
-            payload=_task_payload(task, user_prompt_jsonable),
+            payload=_task_payload(task, user_prompt_jsonable=user_prompt_jsonable),
         )
 
     def stage_task(
@@ -1200,23 +1200,26 @@ def _outputs_to_text(outputs: Any) -> str:
     return ""
 
 
-def _task_payload(task: Task, user_prompt_jsonable: "str | list[dict] | None" = None) -> dict:
+def _task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None") -> dict:
     """TaskCreated 事件的 payload，供 sessions.py translate_event 构建前端 task 对象。
 
     ``user_prompt_jsonable``：调用方（`push_task`）在 `await self._emit(...)` 之前算好
     的 event-jsonable 结果（`content_to_event_jsonable`，保 ref、绝不落字节）——**不**
     在本函数内部算，因为本函数是同步的、还负责十余个与内容无关的字段，async 化会让
-    所有调用方等一次 IO（spec §6）。默认 None 时退回同步的 `content_to_jsonable`，
-    供无需外部化场景（如未来的纯本地快照）复用本函数而不必先 await。
+    所有调用方等一次 IO（spec §6）。
+
+    刻意做成**必传的 keyword-only 参数**（无默认值）：曾经有一条「默认 None 时退回
+    同步 `content_to_jsonable`」的分支，效果是把 inline base64 直接塞回 TaskCreated
+    payload——今天零调用方用它（`push_task` 是唯一调用点，且必传），留着只是把「事件
+    库恒不含字节」这条不变量的破口焊死在函数签名的默认参数上，静静等下一个复用本函数
+    的人在没有 await 的地方顺手调用。去掉默认值后，下一个复用者会在签名处就被挡住，
+    而不是无声地把字节写回事件。
     """
     import dataclasses
     settings_d = dataclasses.asdict(task.settings)
     settings_d["_type"] = type(task.settings).__name__
     ts = task.created_at.isoformat() if task.created_at else ""
-    prompt = (
-        user_prompt_jsonable if user_prompt_jsonable is not None
-        else content_to_jsonable(task.user_prompt)
-    )
+    prompt = user_prompt_jsonable
     return {
         "task": {
             "id": task.id,

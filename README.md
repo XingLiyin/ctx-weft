@@ -1024,7 +1024,14 @@ async def test_single_task(runtime):
   的原始字节悄悄进事件库、之后再无处收拾。纯文本会话不受影响，行为逐字节不变。
   若你的宿主此前携图跑过（不管是否接了 `MemoryBlobStore`），升级后需要额外注册
   `EventBlobStore` 才能继续工作；宿主若共用同一份存储服务两侧，同一个实现类可以
-  同时满足 `MemoryBlobStore` 与 `EventBlobStore` 两个协议。
+  同时满足 `MemoryBlobStore` 与 `EventBlobStore` 两个协议（本仓自带的
+  `SqlMemoryProvider` 已经同时实现两者，注册两次即可）。
+- **回读需要宿主自己接。** core 只保证「写进事件的是 ref」——`EventBlobStore.get()`
+  在本仓没有任何调用方（core 从不主动从事件流回读图片字节，读侧走的一直是
+  memory 侧的 `MemoryBlobStore`）。设计目标写的是「所有图片以 ref 形式可回读」，
+  实际交付的是「可回读由 host 自己接」：想从事件流（例如导入到一个新的 memory
+  实例、或做纯事件重放）里把图片字节取回来，需要宿主自己调用
+  `EventBlobStore.get(ref, ctx)`。
 
 ## 限制与约束
 

@@ -164,6 +164,12 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 # 状态源，拍扁会让重放后「曾有一张图」无痕。同步的 content_to_jsonable
                 # 即可——view 从事件还原，本就是 ref 形态，无 base64 可外部化，不需要
                 # content_to_event_jsonable 的 put（那个是 async，且只用在发射点）。
+                # ⚠️ 这条推理链继承自「事件里恒无字节」这个不变量本身，本处不是独立的
+                # 第二道防线（final review M1）：**存量**（双写机制上线之前发出的）
+                # 含 base64 的 SESSION_CREATED / TASK_CREATED 事件被重放到这里时，
+                # content_to_jsonable 会原样保留 base64，字节就此写进
+                # RunSnapshot.state_blob——即写回事件库外的另一处持久层。窄（只影响
+                # 存量事件的重放快照），但真实，此处不修，仅记录在案。
                 "user_prompt": content_to_jsonable(s.user_prompt),
                 "template_id": s.template_id,
                 "status": s.status,

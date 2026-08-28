@@ -26,7 +26,7 @@ def _interactive_task() -> Task:
 
 
 def test_task_payload_carries_interaction_mode() -> None:
-    payload = _task_payload(_interactive_task())
+    payload = _task_payload(_interactive_task(), user_prompt_jsonable=None)
     assert payload["task"]["interaction_mode"] == "interactive"
 
 
@@ -45,7 +45,7 @@ def test_interaction_mode_survives_reduce_and_snapshot() -> None:
     ev = Event(
         id=generate_id("evt"), run_id=None, sequence=1, session_id="s1",
         type=EventType.TASK_CREATED, timestamp=now_utc(), tenant_id="default",
-        task_id="t1", payload=_task_payload(_interactive_task()),
+        task_id="t1", payload=_task_payload(_interactive_task(), user_prompt_jsonable=None),
     )
     view = reduce_events([ev], run_id="run1")
     assert view.tasks["t1"].interaction_mode == "interactive"

@@ -23,7 +23,8 @@ def _ev(seq: int, type_: str, task_id: str | None = None, payload: dict | None =
 
 def _root_task_created(seq: int) -> Event:
     task = Task(id="t1", session_id="s1", status="ACTIVE", title="")
-    return _ev(seq, EventType.TASK_CREATED, task_id="t1", payload=_task_payload(task))
+    return _ev(seq, EventType.TASK_CREATED, task_id="t1",
+               payload=_task_payload(task, user_prompt_jsonable=None))
 
 
 def test_recognize_intent_tool_call_fills_task_title_and_description() -> None:

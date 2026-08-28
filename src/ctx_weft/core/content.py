@@ -198,6 +198,10 @@ async def content_to_event_jsonable(
     """
     if content is None or isinstance(content, str):
         return content
+    # 挪到循环外（final review M6）：url 分支每命中一次就 import 一次没有必要——
+    # 只挪到函数顶而不挪到模块顶，是跟随本文件既有惯例（多处函数体内 import，
+    # 避免与 TYPE_CHECKING 下的类型专用导入混在一起）。
+    from ctx_weft.protocols import TextPart
     prepared: list[Any] = []
     for part in content:
         if not _is_image_part(part):
@@ -214,7 +218,6 @@ async def content_to_event_jsonable(
                 part, data=ref, source_type="ref", byte_size=len(raw)))
         else:
             # url（或未来的未知形态）：不静默透传——见函数 docstring「为什么不能透传」。
-            from ctx_weft.protocols import TextPart
             media_type = str(_part_field(part, "media_type", "") or "") or "image"
             prepared.append(TextPart(text=_IMAGE_PLACEHOLDER_TMPL.format(
                 media_type=media_type)))
@@ -507,8 +510,29 @@ async def normalize_content(
         ref = await blob_store.put(raw, getattr(part, "media_type", ""), ctx)
         # 双写（spec §5）：同一份字节也存进 event 侧，见函数 docstring「为什么必须
         # 同循环」。can_externalize 探询与 memory 侧同理，不靠捕异常判定。
+        #
+        # 「只有一个 ref → 读侧一行未改」的论证压在「两个 host 实现的内容寻址口径
+        # 逐字节一致」这个前提上——core 自己不算 sha，两个 store 各自决定摘要算法。
+        # 若口径分叉，事件里写进去的会是 memory 的 ref，event store 永远解不开，
+        # 且没有异常、没有测试能发现（两个 store 都成功返回，只是返回值不同）。
+        # 这里必须接住 event 侧的返回值并与 memory 侧比对，把这个假设变成断言。
+        #
+        # 处置选 logger.error + 继续（不 raise）：raise 会让此时已经写成功的
+        # memory 侧内容也不可用（一次 put 不一致炸掉整个入口，代价过大——内容其实
+        # 是可用的，只是将来从事件流侧取不回）；单纯 logger.error 又怕淹没在日志
+        # 里，所以错误信息里把后果写清楚，方便运维定位到「两个 blob store 的内容
+        # 寻址口径不一致」这个根因，而不是等到某天 event 侧回读失败才排查到这里。
         if event_blob_store is not None and event_blob_store.can_externalize:
-            await event_blob_store.put(raw, getattr(part, "media_type", ""), ctx)
+            event_ref = await event_blob_store.put(raw, getattr(part, "media_type", ""), ctx)
+            if event_ref != ref:
+                logger.error(
+                    "双写 ref 不一致：memory 侧 put 返回 %r，event 侧 put 返回 %r"
+                    "（同一份字节）。这意味着两个 blob store 的内容寻址口径不一致"
+                    "（例如摘要算法不同，或干脆用了非内容寻址的 key）。事件流里"
+                    "写进去的将是 memory 的 ref，event store 无法用它取回图片——"
+                    "请检查两个 blob store 的实现是否真的逐字节一致地内容寻址。",
+                    ref, event_ref,
+                )
         # byte_size 必须在这里记下来（Phase 3c Task D）：外部化之后 data 是
         # "blob:<sha>"（长度恒约 69），体积信息就此丢失，而 image_tokens 是同步的、
         # 不能回 MemoryBlobStore 做 IO 取回来。这是最后一个还握着 raw bytes 的地方。

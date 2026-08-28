@@ -112,6 +112,38 @@ def test_registry_does_not_fall_back_to_memory_provider() -> None:
     assert reg.get_event_blob_store().can_externalize is False
 
 
+def test_registry_does_not_fall_back_from_memory_provider_to_event_blob_store() -> None:
+    """真正要防的回落是 `get_event_blob_store()` 从 **memory provider** 解析
+    （对称于 `get_memory_blob_store()` 中间那一级：
+    ``isinstance(self._memory, MemoryBlobStore) and mem.can_externalize`` 回落）。
+
+    上一条用例（`test_registry_does_not_fall_back_to_memory_provider`）走的是
+    `register_memory_blob_store`，从不调 `register_memory`，故 `self._memory`
+    恒为 None——即便后人给 `get_event_blob_store()` 加上完全对称的
+    `isinstance(self._memory, EventBlobStore)` 回落，那条用例也测不出来。
+
+    这里改用 `register_memory()`：provider 本身同时实现 `MemoryProvider`
+    （借用仓内现成的 `InMemoryMemoryProvider` 满足完整协议，避免手搓一遍全部
+    抽象方法）、`MemoryBlobStore`、`EventBlobStore` 三个协议，注册为 memory
+    provider 后断言 `get_event_blob_store()` 仍是 Null。
+    """
+    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+
+    class BothProvider(InMemoryMemoryProvider, MemoryBlobStore, EventBlobStore):
+        async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+            return "blob:x"
+
+        async def get(self, ref: str, ctx: ProviderContext):
+            return None
+
+    reg = ProviderRegistry()
+    reg.register_memory(BothProvider())
+    # memory provider 自身可外部化（对称于 get_memory_blob_store 的中间一级）……
+    assert reg.get_memory_blob_store().can_externalize is True
+    # ……但 event 侧绝不能从 memory provider 回落解析，必须仍是 Null。
+    assert reg.get_event_blob_store().can_externalize is False
+
+
 # ── 入口双写（Task 2）─────────────────────────────────────────────────────
 
 _RAW = b"\x89PNG\r\n\x1a\n" + b"payload" * 20
@@ -135,6 +167,54 @@ async def test_dual_write_yields_one_ref_both_stores_have_it() -> None:
     assert out[1].byte_size == len(_RAW)
     assert await mem.get(ref, _ctx()) is not None
     assert await evt.get(ref, _ctx()) is not None, "event 侧也必须有，否则事件流取不回"
+
+
+class _DifferentDigestStore(EventBlobStore):
+    """摘要口径与 _Stub（sha256）不同的桩：模拟两个 host 实现分叉的场景。
+
+    用递增计数器代替内容寻址（等价于「干脆用 uuid key」的那类实现）——
+    同一份字节两次 put 也会拿到不同 ref，这正是 I1 要检出的情形。
+    """
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, tuple[bytes, str]] = {}
+        self._n = 0
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        self._n += 1
+        ref = f"blob:counter-{self._n}"
+        self.blobs[ref] = (data, media_type)
+        return ref
+
+    async def get(self, ref: str, ctx: ProviderContext):
+        return self.blobs.get(ref)
+
+
+async def test_dual_write_mismatch_is_detected_and_logged(caplog) -> None:
+    """两个 store 的内容寻址口径分叉时，双写必须检出并记日志——不能静默通过。
+
+    这是把「只有一个 ref → 读侧一行未改」这条论证从假设变成断言的测试：
+    memory 侧用 sha256（_MemStub），event 侧用一个不同的摘要口径
+    （_DifferentDigestStore），对同一份字节两个 put 返回不同的 ref。
+    """
+    mem, evt = _MemStub(), _DifferentDigestStore()
+    with caplog.at_level("ERROR"):
+        out = await normalize_content(
+            [ImagePart(data=_B64, media_type="image/png")],
+            blob_store=mem, event_blob_store=evt, ctx=_ctx(),
+        )
+    mem_ref = out[0].data
+    assert mem_ref.startswith("blob:")
+    event_ref = next(iter(evt.blobs))
+    assert event_ref != mem_ref, "桩就是刻意制造出不同 ref"
+    # 写进 content（进而写进事件 payload）的是 memory 的 ref
+    assert out[0].data == mem_ref
+    # 不一致必须被检出并记入日志——而不是静默通过
+    assert len(caplog.records) == 1
+    msg = caplog.records[0].getMessage()
+    assert "不一致" in msg
+    assert mem_ref in msg
+    assert event_ref in msg
 
 
 async def test_shared_instance_is_idempotent() -> None:

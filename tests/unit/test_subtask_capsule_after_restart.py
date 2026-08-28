@@ -117,7 +117,7 @@ def _restart_roundtrip(task: Task) -> Task:
     ev = Event(
         id=generate_id("evt"), run_id=None, sequence=1, session_id=SESSION,
         type=EventType.TASK_CREATED, timestamp=_ts(3), tenant_id="default",
-        task_id=task.id, payload=_task_payload(task),
+        task_id=task.id, payload=_task_payload(task, user_prompt_jsonable=task.user_prompt),
     )
     view = reduce_events([ev], run_id="run1")
     return task_from_projection(view.tasks[task.id])
