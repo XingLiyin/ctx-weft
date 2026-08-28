@@ -304,11 +304,15 @@ class HitlManager:
         inline base64 put 进 event blob 换成 ref（`content_to_event_jsonable`，见其
         docstring）。传**解析器**（如 ``registry.get_event_blob_store``）而非直接传
         store 引用——理由见 ``_event_blob_store_resolver`` 字段注释。**未注入时视为
-        NullEventBlobStore**——纯单测直接构造 ``HitlManager()`` 的既有调用方行为不变
-        （`content_to_event_jsonable` 对不可外部化的 store 整段短路、退回原有的
-        `content_to_jsonable`，见其 docstring；「携图但无 EventBlobStore 必须响亮拒绝」
-        是 Task 4 在 `validate_content` 入口做的事，本函数只保证「能外部化时事件不含
-        字节」）。
+        NullEventBlobStore**：纯文本内容不受影响（`content_to_event_jsonable` 对
+        ``str``/``None`` 原样返回，与从前逐字节一致）；**携图**内容会抛错
+        （`ValueError` / `NullEventBlobStore.put` 的 `NotImplementedError`）——这是刻意
+        的，Task 4 随入口门控落地删除了 `content_to_event_jsonable` 里「不可外部化时
+        退回 `content_to_jsonable`」的过渡短路，不再有静默把字节塞进事件的通道。
+        生产路径不会撞上这个：`CtxWeftRuntime` 构造 `HitlManager` 时必定接线本
+        resolver（`runtime.py` `__init__`），且携图内容在 `validate_content` 入口就已被
+        `BlobStoreRequiredError` 拦下——只有纯单测直接构造 ``HitlManager()``（不经
+        `CtxWeftRuntime`）且递入图片内容时才会走到这里并抛错。
         """
         self._event_blob_store_resolver = resolver
 
