@@ -178,22 +178,6 @@ async def test_ref_parts_are_not_re_externalized() -> None:
 from ctx_weft.core.content import content_to_event_jsonable
 
 
-async def test_ref_parts_pass_through_without_put() -> None:
-    """入口双写已保证 event store 持有这份字节，不必重复 put。"""
-    evt = _Stub()
-    out = await content_to_event_jsonable(
-        [TextPart(text="看图"),
-         ImagePart(data="blob:aaa", media_type="image/png", source_type="ref")],
-        event_blob_store=evt, ctx=_ctx(),
-    )
-    assert out == [
-        {"type": "text", "text": "看图"},
-        {"type": "image", "data": "blob:aaa", "media_type": "image/png",
-         "source_type": "ref"},
-    ]
-    assert evt.blobs == {}, "ref 已在 store 里，不该重复 put"
-
-
 async def test_inline_base64_is_externalized_here() -> None:
     """memory 侧无 blob 时入口不外部化，content 里仍是 inline base64——
     只要 event blob 可用，事件侧仍能独立完成 ref 化。这是「所有 base64 变引用」

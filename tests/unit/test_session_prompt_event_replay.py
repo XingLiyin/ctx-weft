@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from datetime import datetime, timezone
 
 from ctx_weft.core.content import content_to_event_jsonable
@@ -24,12 +26,16 @@ from ctx_weft.core.state.event_store import InMemoryEventStore
 from ctx_weft.protocols import ImagePart, TextPart
 from tests.unit.test_event_blob_store import _ctx, _Stub
 
-_PNG_REF = "blob:deadbeef"
+# blob-store 解耦 Task 2 后 content_to_event_jsonable 拒收外来 ref part（降级为占位）；
+# 这里改用 base64 图片喂入，走真实的「event 侧独立 put」路径产出 ref，而不是像旧版那样
+# 预先伪造一个 ref part 假装「双写已经把字节存进 event store」。
+_PNG_BYTES = b"\x89PNG_fake_bytes"
+_PNG_REF = f"blob:{hashlib.sha256(_PNG_BYTES).hexdigest()}"
 
 
-def _ref_part() -> ImagePart:
-    return ImagePart(data=_PNG_REF, media_type="image/png",
-                     source_type="ref", byte_size=4096)
+def _b64_image_part() -> ImagePart:
+    return ImagePart(data=base64.b64encode(_PNG_BYTES).decode(), media_type="image/png",
+                     source_type="base64")
 
 
 async def _store_with(payload_prompt: object) -> InMemoryEventStore:
@@ -47,7 +53,7 @@ async def _store_with(payload_prompt: object) -> InMemoryEventStore:
 async def test_rebuild_view_restores_parts_from_session_created() -> None:
     """重放 SESSION_CREATED 还原出 parts 结构与 ref，而不是一个 str。"""
     payload = await content_to_event_jsonable(
-        [TextPart(text="看图"), _ref_part()], event_blob_store=_Stub(), ctx=_ctx())
+        [TextPart(text="看图"), _b64_image_part()], event_blob_store=_Stub(), ctx=_ctx())
     view = await rebuild_view(await _store_with(payload), "ses_1")
     prompt = view.sessions["ses_1"].user_prompt
     assert isinstance(prompt, list)
@@ -65,7 +71,7 @@ async def test_legacy_str_payload_still_replays() -> None:
 async def test_view_snapshot_roundtrip_keeps_parts() -> None:
     """serialize_view / deserialize_view 往返不丢 parts。"""
     payload = await content_to_event_jsonable(
-        [TextPart(text="看图"), _ref_part()], event_blob_store=_Stub(), ctx=_ctx())
+        [TextPart(text="看图"), _b64_image_part()], event_blob_store=_Stub(), ctx=_ctx())
     view = await rebuild_view(await _store_with(payload), "ses_1")
     back = deserialize_view(serialize_view(view))
     prompt = back.sessions["ses_1"].user_prompt

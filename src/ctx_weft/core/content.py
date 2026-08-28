@@ -158,8 +158,12 @@ async def content_to_event_jsonable(
     `TASK_CREATED` / `TASK_REQUEUED` / `HITL_*`）。规则逐 part 判定：
 
     - 文本 part → 原样；
-    - ``source_type == "ref"`` 的图 → **原样**，不重复 put（入口 `normalize_content`
-      的双写已保证 event store 持有这份字节，见该函数 docstring「为什么必须同循环」）；
+    - ``source_type == "ref"`` 的图 → **降级成 ``[image {media_type}]`` 文本占位**
+      并 ``logger.warning``（blob-store 解耦 Task 2）：已是 ref 意味着调用方喂进来
+      的是**归一化之后**的内容，那份字节属于 memory 侧，event 侧既无权解读、也解不开
+      （两个契约独立，ref 命名空间互不相通）——透传会在事件 payload 里留下一个
+      event store 永远打不开的 ref。正确的喂法是把**归一化之前**的原始 content
+      递进来（Task 3）；
     - ``source_type == "base64"`` 的图 → put 进 event blob → 换成 ref。
       memory 侧无 blob 时入口不外部化、content 里仍是 inline base64，**只要 event blob
       可用，事件侧仍能独立完成 ref 化**——这是「所有 base64 变引用」在 memory 无 blob
@@ -208,7 +212,18 @@ async def content_to_event_jsonable(
             continue
         source_type = _part_field(part, "source_type", "base64")
         if source_type == "ref":
-            prepared.append(part)                                    # ref → 原样，不重复 put
+            # 已是 ref = 调用方喂的是**归一化之后**的内容，那份字节属于 memory 侧，
+            # event 侧既无权解读、也解不开（两个契约独立，ref 命名空间互不相通）。
+            # 透传会在事件 payload 里留下一个 event store 永远打不开的 ref，故降级。
+            # 正确的喂法是把**归一化之前**的原始 content 递进来（见 Task 3）。
+            media_type = str(_part_field(part, "media_type", "") or "") or "image"
+            logger.warning(
+                "content_to_event_jsonable 收到 source_type='ref' 的图片 part（ref=%r）："
+                "调用方应递入归一化之前的原始 content。本 part 已降级为文本占位。",
+                _part_field(part, "data", ""),
+            )
+            prepared.append(TextPart(text=_IMAGE_PLACEHOLDER_TMPL.format(
+                media_type=media_type)))
         elif source_type == "base64":
             raw = base64.b64decode(str(_part_field(part, "data", "") or ""), validate=True)
             media_type = str(_part_field(part, "media_type", "") or "")
