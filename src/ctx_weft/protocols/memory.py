@@ -20,6 +20,7 @@ from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from ctx_weft.protocols.context import (
+    BLOB_REF_PREFIX,  # noqa: F401  # 刻意的 re-export：既有调用点仍从这里取
     ContentPart,
     ProviderContext,
     normalize_content_parts,
@@ -489,9 +490,6 @@ class MemoryProvider(Protocol):
 
 
 # ── Blob 存储（多模态字节侧）─────────────────────────────────────────────────
-
-
-BLOB_REF_PREFIX = "blob:"
 
 
 class BlobStore(ABC):

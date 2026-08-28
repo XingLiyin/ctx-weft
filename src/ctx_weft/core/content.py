@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.errors import InvalidContentError, VisionNotSupportedError
 from ctx_weft.core.utils import content_to_text
-from ctx_weft.protocols.memory import BLOB_REF_PREFIX
+from ctx_weft.protocols.context import BLOB_REF_PREFIX
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart

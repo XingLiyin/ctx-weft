@@ -252,3 +252,17 @@ async def test_runtime_still_gets_a_working_default_store() -> None:
     import asyncio
     await asyncio.sleep(0.05)
     assert await rt.event_store.read_by_session("ses_1")
+
+
+def test_blob_ref_prefix_lives_in_context() -> None:
+    """前缀属于内容形态（ImagePart.data 的前缀），不属于 memory，也不属于 events。
+
+    移动的动机是让两个 blob 协议共用它而不互相 import——见 spec §3。
+    """
+    from ctx_weft.protocols import BLOB_REF_PREFIX as PkgPrefix
+    from ctx_weft.protocols.context import BLOB_REF_PREFIX
+    from ctx_weft.protocols.memory import BLOB_REF_PREFIX as MemPrefix
+
+    assert BLOB_REF_PREFIX == "blob:"
+    assert MemPrefix is BLOB_REF_PREFIX, "memory 侧仍要能拿到（re-export），且是同一对象"
+    assert PkgPrefix is BLOB_REF_PREFIX

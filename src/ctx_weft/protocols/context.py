@@ -43,6 +43,14 @@ class ImagePart:
     byte_size: int | None = None
 
 
+# blob ref 的前缀。放在这里而不是某个 blob 协议里：它是**内容形态**的一部分——
+# `ImagePart.source_type == "ref"` 时 `data` 字段就长这样——而 `ImagePart` 定义在本模块。
+# 两个 blob 协议（memory 侧与 event 侧）共用它，且必须逐字节一致：内容寻址的 sha 口径
+# 一旦分叉，同一份字节在两边会得到不同的 ref。放在中立的 context 层，两边各自取，
+# 谁也不必 import 对方。
+BLOB_REF_PREFIX = "blob:"
+
+
 ContentPart = Union[TextPart, ImagePart]
 
 

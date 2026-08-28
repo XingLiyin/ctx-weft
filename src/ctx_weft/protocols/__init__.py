@@ -26,7 +26,14 @@ from ctx_weft.protocols.capability import (
     ToolCapability,
     ToolCapabilityProvider,
 )
-from ctx_weft.protocols.context import ContentPart, Citation, ImagePart, ProviderContext, TextPart
+from ctx_weft.protocols.context import (
+    BLOB_REF_PREFIX,
+    ContentPart,
+    Citation,
+    ImagePart,
+    ProviderContext,
+    TextPart,
+)
 from ctx_weft.protocols.filesystem import FS_PROVIDER_NAME, FsTool, SpillSink
 from ctx_weft.protocols.llm import (
     # adapter 契约：实现一个 LLM adapter 所需的全部类型
@@ -51,7 +58,6 @@ from ctx_weft.protocols.knowledge import (
     KnowledgeQuery,
 )
 from ctx_weft.protocols.memory import (
-    BLOB_REF_PREFIX,
     BlobStore,
     NullBlobStore,
     EVENT_LAYER,
@@ -94,6 +100,7 @@ __all__ = [
     "FsTool",
     "SpillSink",
     # Context
+    "BLOB_REF_PREFIX",
     "ContentPart",
     "Citation",
     "ImagePart",
@@ -131,7 +138,6 @@ __all__ = [
     "MemoryAddress",
     "Subscription",
     # Blob store（多模态字节侧，与 MemoryProvider 同模块）
-    "BLOB_REF_PREFIX",
     "BlobStore",
     "NullBlobStore",
     # Template
