@@ -215,6 +215,8 @@ class ProviderRegistry:
         self._llm_provider: LLMClientResolver | None = None
         self._blob_store: "MemoryBlobStore | None" = None
         self._null_blob_store: "MemoryBlobStore | None" = None
+        self._event_blob_store: "EventBlobStore | None" = None
+        self._null_event_blob_store: "EventBlobStore | None" = None
 
     # ── Memory ────────────────────────────────────────────────────────────────
 
@@ -328,6 +330,28 @@ class ProviderRegistry:
             from ctx_weft.protocols import NullMemoryBlobStore
             self._null_blob_store = NullMemoryBlobStore()
         return self._null_blob_store
+
+    # ── EventBlobStore ───────────────────────────────────────────────────────
+
+    def register_event_blob_store(self, store: "EventBlobStore") -> None:
+        """注册事件流侧的二进制存储。未注册时 get_event_blob_store() 返回 NullEventBlobStore。"""
+        self._event_blob_store = store
+
+    def get_event_blob_store(self) -> "EventBlobStore":
+        """取 event blob store。**只有两级：显式注册 > NullEventBlobStore。**
+
+        刻意不像 `get_memory_blob_store()` 那样自动回落到 memory provider（spec §4）：
+        自动解析会让「共用」成为隐式默认，而双 store 的出发点正是让两者**可分**。
+        host 要共用就把同一个实例注册两次——意图写在接线代码里，而不是藏在解析规则里。
+
+        `NullEventBlobStore` 实例只建一次，重复调用返回同一对象。
+        """
+        if self._event_blob_store is not None:
+            return self._event_blob_store
+        if self._null_event_blob_store is None:
+            from ctx_weft.protocols.events import NullEventBlobStore
+            self._null_event_blob_store = NullEventBlobStore()
+        return self._null_event_blob_store
 
 
 # ── SessionStartParams ────────────────────────────────────────────────────────

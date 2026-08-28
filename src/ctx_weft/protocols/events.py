@@ -19,12 +19,17 @@
 
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    # 仅类型注解用；`protocols/events.py` 运行时只依赖 stdlib 的现状不变
+    # （同层 import 不违反层序 ast 守卫，但保持现状更稳，见文件顶部说明）。
+    from ctx_weft.protocols.context import ProviderContext
 
 
 @dataclass
@@ -289,3 +294,76 @@ class EventStore(Protocol):
     async def load_latest_snapshot(self, session_id: str) -> RunSnapshot | None:
         """加载 session 最新快照，无快照时返回 None。"""
         raise NotImplementedError
+
+
+# ── Blob 存储（事件流的字节侧）─────────────────────────────────────────────────
+
+
+class EventBlobStore(ABC):
+    """事件流侧的「二进制 sink」：存取图片等二进制内容，事件库里只留 ref。
+
+    与 `protocols.memory.MemoryBlobStore` **同形但类型无关**（spec §3）。不做成子类型、
+    也不共用一个 ABC，理由是两侧语义会各自演进——最明显的是**回收锚点不同**：memory 侧
+    是记录 `is_superseded`，event 侧是事件保留策略。今天同形不代表明天同形。
+
+    host 要共用就一个类同时实现两者，注册两次：
+
+        class MyBlobStore(MemoryBlobStore, EventBlobStore): ...
+
+    **ref 前缀取自 `protocols.context.BLOB_REF_PREFIX`**，与 memory 侧同一个常量——
+    内容寻址的 sha 口径两边必须逐字节一致，入口双写才能得到同一个 ref。
+
+    ⚠️ **回收策略由 host 定，core 不规定。** 事件流里的 ref 能否取回字节，完全取决于
+    host 让 event blob 活多久：想让事件流永远可重建，就让回收与事件保留策略对齐
+    （例如永不回收，或按事件 TTL）。**共用一个实例时尤其当心**——该实现要同时看两侧的
+    引用才能安全回收，仅套用 memory 侧 `collect_blobs` 的判据会删掉事件流仍需要的字节
+    （spec §9）。
+    """
+
+    @property
+    def can_externalize(self) -> bool:
+        """本 store 是否真的能存——`NullEventBlobStore` 返回 False。
+
+        调用方据此**先探询、再决定**，而不是调用 put 并捕获 NotImplementedError：
+        后者会把「响亮失败」降级成控制流，让真正的接线错误也被静默吞掉。
+        基类默认 True，既有实现无需改动。
+        """
+        return True
+
+    @abstractmethod
+    async def put(self, data: bytes, media_type: str, ctx: "ProviderContext") -> str:
+        """存字节，返回 ref。必须**内容寻址且幂等**：同样的 data 返回同样的 ref。
+
+        这同时给到三件事：写入端去重、重放安全、以及 rehydrate 字节稳定——同一 ref
+        每次还原出的 base64 完全一致，prompt cache 前缀不会被打碎。
+        """
+
+    @abstractmethod
+    async def get(self, ref: str, ctx: "ProviderContext") -> "tuple[bytes, str] | None":
+        """取字节。对不存在 / 已回收的 ref 返回 `None`，**不得 raise**。
+
+        blob 过期、宿主换机、GC 误删都会发生，调用方据此降级为文本占位，
+        绝不因取图失败中断 loop。
+        """
+
+
+class NullEventBlobStore(EventBlobStore):
+    """未注册 `EventBlobStore` 时的默认实现。
+
+    `put` 刻意抛错而不是静默产出假 ref：调用方（`core.content`）先探询
+    `can_externalize` 决定是否外部化，**不**捕获这里的 NotImplementedError——
+    它仍是接线错误的响亮信号。
+    """
+
+    @property
+    def can_externalize(self) -> bool:
+        return False
+
+    async def put(self, data: bytes, media_type: str, ctx: "ProviderContext") -> str:
+        raise NotImplementedError(
+            "No EventBlobStore registered; register one via "
+            "ProviderRegistry.register_event_blob_store() before externalizing content."
+        )
+
+    async def get(self, ref: str, ctx: "ProviderContext") -> "tuple[bytes, str] | None":
+        return None
