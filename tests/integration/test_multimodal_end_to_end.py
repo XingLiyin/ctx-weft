@@ -681,9 +681,11 @@ class _PrefixedEventBlobStore(EventBlobStore):
 
     def __init__(self) -> None:
         self.blobs: dict[str, tuple[bytes, str]] = {}
+        self.ctx_session_ids: list[str] = []
 
     async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
         import hashlib
+        self.ctx_session_ids.append(ctx.session_id)
         ref = f"{BLOB_REF_PREFIX}evt-{hashlib.sha256(data).hexdigest()}"
         self.blobs[ref] = (data, media_type)
         return ref
@@ -768,3 +770,35 @@ async def test_event_refs_and_memory_refs_are_independent(runtime_with_two_blob_
         next(e for e in events if e.type == EventType.SESSION_CREATED.value)
         .payload["user_prompt"],
     )["data"], "两侧 ref 方案不同，本用例的前提就是它们不相等"
+
+
+@pytest.mark.asyncio
+async def test_event_blob_anchors_to_the_real_session_when_only_event_store_exists() -> None:
+    """「memory Null + event 真」组合下，event blob 的 session 锚点必须是真正被创建的 session。
+
+    `start_session` 只在 **memory** store 可外部化时才提前把 session_id 定下来。事件侧
+    外部化提到入口之后，这条判据就漏了一种受支持的组合（见 `core/content.py` 对
+    `content_to_event_jsonable` 的说明：memory 无 blob 时事件侧仍独立完成 ref 化，且
+    `validate_content` 的门控只看 event store）——此时 `put` 会收到 ``session_id=""``，
+    而随后 `create_session` 又生成另一个真 id，blob 就锚在了一个不存在的 session 上。
+    """
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    runtime = make_runtime(llm=_RouterLLM(), agent_provider=resolver)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+    evt_store = _PrefixedEventBlobStore()
+    runtime.providers.register_event_blob_store(evt_store)   # 刻意不注册 memory blob store
+
+    handle = await runtime.start_session(SessionStartParams.create(
+        template_id="agent:tpl_echo",
+        user_prompt=_MULTIMODAL_PROMPT,
+        context_limit=100_000,
+    ))
+    state = await handle.wait_for_finish(timeout=5.0)
+    assert state is not None
+
+    assert evt_store.ctx_session_ids, "event blob 必须真的被写过一次，否则下面是重言式"
+    assert set(evt_store.ctx_session_ids) == {state.session.id}, (
+        f"event blob 的 session 锚点应恒为真正创建的 session {state.session.id!r}，"
+        f"实为 {evt_store.ctx_session_ids!r}"
+    )

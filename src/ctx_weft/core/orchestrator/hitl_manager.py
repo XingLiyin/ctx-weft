@@ -239,10 +239,18 @@ class HitlManager:
         """收口一个悬挂 pending（session 关闭 / interrupt / GC）。cancelled + HitlCancelled。
 
         终态、不 requeue（§3）；已解决则幂等 no-op。
+
+        message 与 answer/reject/approve 同走 `_normalize_message`：`_resolve` 写事件
+        载荷的判据是 `if req.message`，载荷本身却由参数链递进去——不走同一条路就会发出
+        「message 为真、载荷为 None」的 `HitlCancelled`，把「为什么被取消」从重放流里
+        抹掉（生产调用方是熔断取消，`message="failure_threshold"`）。
         """
         req = self._require(hitl_id)
-        req.message = message
-        result, _ = await self._resolve(req, "cancelled", EventType.HITL_CANCELLED)
+        req.message, event_jsonable = await self._normalize_message(req, message)
+        result, _ = await self._resolve(
+            req, "cancelled", EventType.HITL_CANCELLED,
+            message_event_jsonable=event_jsonable,
+        )
         return result
 
     def set_cold_resolve_handler(self, handler: "Callable[[HitlRequest], Awaitable[None]] | None") -> None:

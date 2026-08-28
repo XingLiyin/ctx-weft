@@ -23,6 +23,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _event_jsonable_or_fallback(
+    user_prompt: "str | list[ContentPart]",
+    user_prompt_event_jsonable: "str | list[dict] | None",
+    where: str,
+) -> "str | list[dict] | None":
+    """事件侧载荷缺席时的判据，与 `TaskManager.push_task` 完全同形。
+
+    新参数默认 None 是为了不打断既有的纯文本调用方；但「默认 None」若直接写进
+    payload，任何忘记传参的调用方都会静默发出 ``user_prompt: None`` 的
+    SESSION_CREATED / SESSION_RESUMED——prompt 就此从重放流里消失，正是本次解耦要
+    消灭的那类静默降级。故：纯文本回退用它自己（`str`/`None` 本身即 jsonable，与
+    `content_to_event_jsonable` 的快路逐字节一致），part 列表则**响亮拒绝**——这里
+    没有原始字节可用（`user_prompt` 到这里可能已是 memory ref），拒绝是唯一诚实的选择。
+    """
+    if user_prompt_event_jsonable is not None:
+        return user_prompt_event_jsonable
+    if isinstance(user_prompt, list):
+        raise ValueError(
+            f"{where}: 非纯文本 user_prompt 必须由调用方传 user_prompt_event_jsonable"
+            "（由归一化之前的原始 content 算出）——事件库恒不含字节，这里没有原始字节可用"
+        )
+    return user_prompt
+
+
 @dataclass
 class SessionManager:
     """Coordinates session creation and root task scheduling."""
@@ -66,6 +90,11 @@ class SessionManager:
         """
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
+        # 先于 instantiate_agent / 任何 emit：被拒的入参不该留下半个 session
+        # （同「入口即拒、不落库」）。
+        user_prompt_event_jsonable = _event_jsonable_or_fallback(
+            user_prompt, user_prompt_event_jsonable, "create_session",
+        )
 
         agent, template = await self.lifecycle_manager.instantiate_agent(
             template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
@@ -129,6 +158,9 @@ class SessionManager:
 
         ``user_prompt_event_jsonable`` 同 `create_session`：由调用方从原始 content 算好。"""
         from ctx_weft.core.control.reducers import rebuild_view
+        user_prompt_event_jsonable = _event_jsonable_or_fallback(
+            user_prompt, user_prompt_event_jsonable, "resume_session",
+        )
         view = await rebuild_view(event_store, session_id)
         sess_proj = view.sessions.get(session_id)
         if not sess_proj or not sess_proj.root_agent_id:

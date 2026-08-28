@@ -121,3 +121,99 @@ async def test_run_single_task_root_task_description_is_text_not_truncated_parts
     assert task.description == content_to_text(_content())[:200]
     assert isinstance(task.description, str)
     assert task.user_prompt == _content(), "Task 承载全量内容"
+
+
+# ── 漏传 event 侧载荷时不得静默降级（blob-store 解耦 Task 3 review Important 3）──
+#
+# 参数化穿线的通病：新参数默认 None，忘了传的调用方就静默把 `user_prompt: None` 发进
+# SESSION_CREATED / SESSION_RESUMED，把 prompt 从重放流里抹掉。判据与 `push_task`
+# 完全同形——纯文本回退用它自己，part 列表则响亮 raise。
+
+
+class _CapturingBus:
+    """记下每条 emit 的事件（SessionManager._emit 只用 bus.emit）。"""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def emit(self, event) -> None:
+        self.events.append(event)
+
+
+def _session_manager(bus) -> SessionManager:
+    from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+
+    templates = InlineAgentTemplateProvider()
+    templates.register(make_echo_template())
+    reg = ProviderRegistry()
+    reg.register_capability(templates)
+    return SessionManager(
+        lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(reg)),
+        event_bus=bus,
+    )
+
+
+async def test_create_session_without_jsonable_falls_back_to_the_text_prompt():
+    """纯文本 prompt 漏传载荷 → 事件里仍是那段文本，不得变成 None。"""
+    bus = _CapturingBus()
+    sm = _session_manager(bus)
+
+    await sm.create_session(
+        template_id="agent:tpl_echo", user_prompt="你好", context_limit=1000,
+    )
+
+    created = next(e for e in bus.events if e.type == "SessionCreated")
+    assert created.payload["user_prompt"] == "你好"
+    task_created = next(e for e in bus.events if e.type == "TaskCreated")
+    assert task_created.payload["task"]["user_prompt"] == "你好"
+
+
+async def test_create_session_without_jsonable_raises_on_multimodal_prompt():
+    """携图 prompt 漏传载荷 → 响亮 raise，绝不静默把 prompt 抹成 None。
+
+    这里没有原始字节可用（`user_prompt` 可能已是 memory ref），唯一诚实的选择是拒绝。
+    """
+    bus = _CapturingBus()
+    sm = _session_manager(bus)
+
+    with pytest.raises(ValueError):
+        await sm.create_session(
+            template_id="agent:tpl_echo", user_prompt=_content(), context_limit=1000,
+        )
+
+    # 关键：拒绝必须发生在**发事件之前**。`push_task` 的守卫也会 raise，但那时
+    # SESSION_CREATED 已经带着 `user_prompt: None` 落进事件流了——只断言 raise
+    # 会把这个顺序缺陷放过去。
+    assert not [e for e in bus.events if e.type == "SessionCreated"], (
+        "校验失败不得先发出一条 user_prompt 被抹成 None 的 SessionCreated"
+    )
+
+
+async def test_resume_session_without_jsonable_falls_back_to_the_text_prompt():
+    """resume 分支与 create 同一判据——两处都写事件，不能只加固一处。"""
+    from unittest.mock import MagicMock
+
+    from ctx_weft.core.events.types import Event
+    from ctx_weft.core.utils import generate_id
+    from ctx_weft.providers.events import InMemoryEventStore
+
+    bus = _CapturingBus()
+    store = InMemoryEventStore()
+    await store.append(Event(
+        id=generate_id("evt"), run_id=None, sequence=1, session_id="ses-resume",
+        type="SessionCreated", timestamp=now_utc(), tenant_id="default",
+        payload={"template_id": "tpl", "user_prompt": "第一轮",
+                 "root_agent_id": "agt_root", "context_limit": 1000},
+    ))
+    # resume_session 不调 instantiate_agent，故 lifecycle_manager 用桩即可（同
+    # tests/unit/test_resume_context_limit.py 的既有做法）。
+    sm = SessionManager(lifecycle_manager=MagicMock(), event_bus=bus)
+
+    await sm.resume_session(
+        session_id="ses-resume", event_store=store, user_prompt="第二轮",
+    )
+
+    resumed = next(e for e in bus.events if e.type == "SessionResumed")
+    assert resumed.payload["user_prompt"] == "第二轮"

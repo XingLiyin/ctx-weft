@@ -428,3 +428,31 @@ def test_runtime_wires_hitl_timeout() -> None:
     cfg = RuntimeConfig(hitl_timeout_sec=45)
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider(), config=cfg)
     assert rt.hitl_manager._timeout_sec == 45
+
+
+async def test_cancel_event_payload_carries_the_real_message() -> None:
+    """`HitlCancelled` 的 payload 必须带真实 message，不得是 None。
+
+    HITL_* 参与状态重建（reducers 折叠决定缓存），载荷丢成 None 就等于把「为什么被
+    取消」从重放流里抹掉。生产调用方是熔断取消（`runtime.py` 传
+    ``message="failure_threshold"``），所以这条不是理论缺口。
+
+    形状上的坑：`_resolve` 的判据是 `if req.message:`（真值），载荷却是另一条参数链
+    递进来的——两者一旦脱节，就会写出「message 为真、载荷为 None」这种自相矛盾的
+    payload，而只断言事件类型的既有用例照样绿。
+    """
+    bus = InProcessEventBus()
+    events: list = []
+
+    async def handler(ev):
+        events.append(ev)
+
+    bus.subscribe(None, handler)
+    mgr = HitlManager(event_bus=bus)
+    rid = await _request(mgr, form="question")
+
+    await mgr.cancel(rid, message="failure_threshold")
+
+    cancelled = [e for e in events if e.type == "HitlCancelled"]
+    assert len(cancelled) == 1
+    assert cancelled[0].payload["message"] == "failure_threshold"

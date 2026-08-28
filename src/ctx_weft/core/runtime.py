@@ -934,11 +934,21 @@ class CtxWeftRuntime:
         # blob 落盘要一个 session 锚点（宿主按 session_id 登记 workspace），所以
         # 能外部化时必须把 session_id 定下来并透传给 create_session，否则外部化用的
         # session 与真正创建的 session 会是两个 id。
-        sid = params.session_id or (generate_id("ses") if blob_store.can_externalize else None)
+        # 判据必须**两个 store 取或**：memory 侧不可外部化时 event 侧仍会独立把内容
+        # ref 化（`content_to_event_jsonable`，且 `validate_content` 的门控只看 event
+        # store），只看 memory 侧会让「memory Null + event 真」这一受支持的组合把
+        # `session_id=""` 喂给 event blob 的 put，而 create_session 随后又另生成一个真 id。
+        can_externalize_either = (
+            blob_store.can_externalize or self.providers.get_event_blob_store().can_externalize
+        )
+        sid = params.session_id or (generate_id("ses") if can_externalize_either else None)
         normalized, user_prompt_event_jsonable = await self._validate_and_normalize_content(
             params.user_prompt, sid or "", tenant_id=params.tenant_id,
         )
-        if blob_store.can_externalize:
+        if sid is not None:
+            # 两侧都不能外部化时 sid 恒为 params.session_id（可能是 None），此处不改写，
+            # 与从前逐字节一致；memory 不可外部化时 `normalized` 就是 params.user_prompt
+            # 同一对象，故这一支对纯 event 组合也是无害的。
             params = _dc.replace(params, session_id=sid, user_prompt=normalized)
         lm = LifecycleManager(template_lookup=self._template_lookup)
         sm = SessionManager(
