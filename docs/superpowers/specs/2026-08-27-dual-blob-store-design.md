@@ -1,9 +1,22 @@
 # 双 blob store——事件流全 ref 化
 
-> 状态：设计已批准（2026-08-27），待实施
-> 前置：`2026-08-27-protocols-layer-event-contracts-design.md`（`EventBlobStore`
-> 需要 `protocols/events.py` 先存在）
+> 状态：设计已批准（2026-08-27），**前提刷新于 2026-08-28**，待实施
+> 前置：`2026-08-27-protocols-layer-event-contracts-design.md` —— **已实施**
+> （`protocols/events.py` 现已存在，commit `8788f02..84a9308`）
 > 上级：`2026-08-20-multimodal-design.md`
+
+## 0. 本设计写于 8-27，这些前提在实施前已经变了
+
+写完之后仓里发生了两件事，本节逐条订正，正文已按此更新：
+
+| 当时 | 现在 | 影响 |
+|---|---|---|
+| `BlobStore` / `NullBlobStore` | `MemoryBlobStore` / `NullMemoryBlobStore` | 正文已用新名 |
+| `ProviderRegistry.register_blob_store` / `get_blob_store` | `register_memory_blob_store` / `get_memory_blob_store` | §4 已更新 |
+| `BLOB_REF_PREFIX` 在 `protocols/memory.py` | 在 **`protocols/context.py`** | §3 的「共用前缀」来源随之改 |
+| `protocols/events.py` 不存在 | 已存在（含 `Event` / `EventBus` / `EventStore`），import 块已有 `abstractmethod` | `EventBlobStore` 直接追加即可，需补 `from abc import ABC` |
+| `MemoryEvent` 无 `blob_refs` 字段 | **有**（L0.5 引用缺陷修复引入，见 `2026-08-27-l05-demotion-drops-blob-reference.md`） | 见 §6.1 |
+| §8 说 `describe()` 返回空工具集 | **事实错误**——`describe()` 返回 `CapabilityProviderInfo`（provider 元信息），暴露工具的是 **`list(ctx)`** | §8 已订正 |
 
 ---
 
@@ -59,6 +72,13 @@ class MyBlobStore(MemoryBlobStore, EventBlobStore):
 `put` 的内容寻址与幂等要求、`get` 对不存在的 ref 恒返回 `None` 不抛——两条约束与
 `MemoryBlobStore` 逐字相同，在 docstring 各写一份（协议独立，不靠 import 共享措辞）。
 
+**共用的 ref 前缀取自 `protocols/context.py::BLOB_REF_PREFIX`**（协议层划界已把它移到
+那里，正是为了让两个 blob 协议各自取用而不互相 import）。两边的 sha 口径必须逐字节
+一致，双写才能得到同一个 ref。
+
+`protocols/events.py` 现有的 import 块已含 `from abc import abstractmethod`，
+新增 `EventBlobStore` 需补 `ABC`。
+
 ## 4. 注册面：显式，不自动解析
 
 ```python
@@ -70,7 +90,7 @@ ProviderRegistry.get_event_blob_store()   # 显式注册 > NullEventBlobStore
 「共用」成为隐式默认，而本设计的出发点正是让两者可分。host 要共用就把同一个实例
 注册两次——意图写在接线代码里，而不是藏在解析规则里。
 
-`get_memory_blob_store()` 的三级回落（显式 > memory provider > Null）保持不变。
+`get_memory_blob_store()` 的三级回落（显式 > memory provider > `NullMemoryBlobStore`）保持不变。
 
 ## 5. 入口双写
 
@@ -147,6 +167,18 @@ async def content_to_event_jsonable(content, *, event_blob_store, ctx):
 `serialize_view` / `deserialize_view` 保持同步、继续用 `content_to_jsonable`：投影
 快照读的 view 本就是从事件还原来的 ref，无 base64 可外部化，不需要 `put`。
 
+### 6.1 与 `MemoryEvent.blob_refs` 无交集
+
+L0.5 引用缺陷修复（`2026-08-27-l05-demotion-drops-blob-reference.md`）给 `MemoryEvent` /
+`MemoryRecord` 加了 `blob_refs` 字段，作为 GC 的 mark 输入。**它与本设计不相干**：
+
+- `blob_refs` 是 **memory 侧**记录的字段，服务于 `SqlMemoryProvider` 建引用边；
+- 本设计动的是**事件 payload** 里的 `content`（`TASK_CREATED` 等），那是
+  `content_to_jsonable` 的产物，不含 `blob_refs`。
+
+两者都叫「blob ref」但落在完全不同的载体上，实施时不要混淆——**事件外部化不读也不写
+`MemoryEvent.blob_refs`**。
+
 ## 7. 严格默认：携图必须有 EventBlobStore
 
 新错误：
@@ -198,8 +230,15 @@ class BlobStoreRequiredError(CtxWeftError):
 
 目标：没有可用 blob 时，`media:get_image` 不出现在模型的工具集里。
 
-**做法是 `describe()` 在 blob 不可用时返回空工具集，而不是在 `Runtime.__init__` 里
+**做法是 `list(ctx)` 在 blob 不可用时返回空列表，而不是在 `Runtime.__init__` 里
 条件注册**（用户裁定 2026-08-27 选 B）。
+
+⚠️ **本设计初稿写的是「`describe()` 返回空工具集」，那是事实错误**：
+`MediaCapabilityProvider.describe()`（`core/media/capability.py:377`）返回的是
+`CapabilityProviderInfo`（name / capability_count / supports_streaming…），是 **provider
+元信息**；真正把工具暴露给模型的是 `list(ctx) -> list[ToolCapability]`
+（同文件 `:374`）。要改的是后者。`describe()` 的 `capability_count` 宜一并跟着变
+（可用时 1、不可用时 0），保持自洽。
 
 理由：注册发生在 `Runtime.__init__`，而 host 完全可能先构造 `Runtime` 再
 `register_memory()`。`__init__` 时刻判定 blob 不可用 → 工具永远缺席，即使后来接上了
