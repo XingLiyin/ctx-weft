@@ -493,6 +493,11 @@ class CtxWeftRuntime:
         # _normalize_hitl_content 只负责从 req 上取出本次应答真正要用的 llm 与 tenant，
         # 校验/外部化本身仍是那个共用方法（Phase 3c Task A2）。
         self.hitl_manager.set_content_normalizer(self._normalize_hitl_content)
+        # HITL_* 事件外部化（Task 3）：req.message 里的 inline base64 换成 event ref。
+        # 传解析器（绑定方法）而非解析出的 store——HitlManager 在此刻构造，host 完全
+        # 可能晚于 Runtime.__init__ 才 register_event_blob_store（同 get_memory_blob_store
+        # docstring 记的坑），存回调可保证每次取用都重新查 registry。
+        self.hitl_manager.set_event_blob_store_resolver(self.providers.get_event_blob_store)
         # 默认使用内存版 EventStore，自动订阅 EventBus；传入自定义实现时由调用方自行 wire
         from ctx_weft.providers.events import InMemoryEventStore
         self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)
@@ -946,6 +951,8 @@ class CtxWeftRuntime:
             task_max_concurrent=self._config.task_max_concurrent,
             task_max_retries=self._config.task_max_retries,
             default_task_timeout_ms=self._config.default_task_timeout_ms,
+            # SESSION_CREATED / SESSION_RESUMED 的 user_prompt 事件外部化用（Task 3）。
+            event_blob_store=self.providers.get_event_blob_store(),
         )
 
         if not params.resume:
@@ -1018,6 +1025,11 @@ class CtxWeftRuntime:
                 break
 
         self._task_managers[session.id] = task_manager
+
+        # TASK_CREATED / TASK_REQUEUED 的 user_prompt 事件外部化用（Task 3）。两个
+        # TaskManager 构造点（start_session / recover_session）都汇合到本方法，故只
+        # 需在此接一次线——镜像 set_is_current 等既有晚绑定做法。
+        task_manager.set_event_blob_store(self.providers.get_event_blob_store())
 
         # 归属权谓词：多轮对话里每次 resume 都新建 TM 并覆盖此映射。旧 TM 的收尾若迟到
         # （被其慢的 background observe 拖住），必须认出自己已被顶替、变 no-op，否则会

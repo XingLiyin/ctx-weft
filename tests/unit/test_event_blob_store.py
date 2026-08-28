@@ -178,3 +178,55 @@ async def test_ref_parts_are_not_re_externalized() -> None:
         [part], blob_store=mem, event_blob_store=evt, ctx=_ctx())
     assert out[0] is part
     assert mem.blobs == {} and evt.blobs == {}
+
+
+# ── content_to_event_jsonable（Task 3）─────────────────────────────────────
+
+from ctx_weft.core.content import content_to_event_jsonable
+
+
+async def test_ref_parts_pass_through_without_put() -> None:
+    """入口双写已保证 event store 持有这份字节，不必重复 put。"""
+    evt = _Stub()
+    out = await content_to_event_jsonable(
+        [TextPart(text="看图"),
+         ImagePart(data="blob:aaa", media_type="image/png", source_type="ref")],
+        event_blob_store=evt, ctx=_ctx(),
+    )
+    assert out == [
+        {"type": "text", "text": "看图"},
+        {"type": "image", "data": "blob:aaa", "media_type": "image/png",
+         "source_type": "ref"},
+    ]
+    assert evt.blobs == {}, "ref 已在 store 里，不该重复 put"
+
+
+async def test_inline_base64_is_externalized_here() -> None:
+    """memory 侧无 blob 时入口不外部化，content 里仍是 inline base64——
+    只要 event blob 可用，事件侧仍能独立完成 ref 化。这是「所有 base64 变引用」
+    在 memory 无 blob 时也成立的关键（spec §6）。
+    """
+    evt = _Stub()
+    out = await content_to_event_jsonable(
+        [ImagePart(data=_B64, media_type="image/png")],
+        event_blob_store=evt, ctx=_ctx(),
+    )
+    assert out[0]["source_type"] == "ref"
+    assert out[0]["data"].startswith("blob:")
+    assert _B64 not in str(out), "事件载荷里绝不能出现字节"
+    assert len(evt.blobs) == 1
+
+
+async def test_plain_text_returns_same_object() -> None:
+    evt = _Stub()
+    s = "纯文本"
+    assert await content_to_event_jsonable(
+        s, event_blob_store=evt, ctx=_ctx()) is s
+    assert await content_to_event_jsonable(
+        None, event_blob_store=evt, ctx=_ctx()) is None
+
+
+async def test_transitional_helper_is_gone() -> None:
+    """`content_to_jsonable_refs_only` 是本设计落地前的过渡实现，应已删除。"""
+    import ctx_weft.core.content as c
+    assert not hasattr(c, "content_to_jsonable_refs_only")

@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.core.content import content_to_jsonable_refs_only
+from ctx_weft.core.content import content_to_event_jsonable
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.core.events.bus import EventBus
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
@@ -16,9 +16,11 @@ from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.protocols.events import NullEventBlobStore
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
+    from ctx_weft.protocols.events import EventBlobStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,14 @@ class SessionManager:
     task_max_concurrent: int = 4
     task_max_retries: int = 3
     default_task_timeout_ms: int = 60_000
+    # 事件侧 blob store（Task 3：`content_to_event_jsonable` 用它把 SESSION_CREATED /
+    # SESSION_RESUMED 的 user_prompt 里的 inline base64 换成 ref）。CtxWeftRuntime 在
+    # start_session 里构造 SessionManager 时按 `self.providers.get_event_blob_store()`
+    # 注入——SessionManager 本身不持有 ProviderRegistry（也不该持有，见
+    # HitlManager.set_content_normalizer 的既有做法：把「需要什么」注入进来，而不是
+    # 把整个 registry 塞进构造签名）。None（测试直接构造 SessionManager() 不传）→
+    # 视为 NullEventBlobStore，与未接线时行为一致。
+    event_blob_store: "EventBlobStore | None" = None
 
     async def create_session(
         self,
@@ -73,11 +83,17 @@ class SessionManager:
         # projection inserts the task row with a FK on tasks.session_id → sessions.id,
         # so the session row must be projected first.
         ts = now_utc()
+        # 保 ref、不落字节、不拍扁（裁定 2026-08-27）——本事件参与状态重建（reducers
+        # 的 SESSION_CREATED 分支），拍扁会让重放后「曾有一张图」无痕。放在
+        # payload dict 构造之前 await——dict 字面量里不能直接 await（Task 3）。
+        user_prompt_jsonable = await content_to_event_jsonable(
+            user_prompt,
+            event_blob_store=self.event_blob_store or NullEventBlobStore(),
+            ctx=ctx,
+        )
         await self._emit(EventType.SESSION_CREATED, sid, tenant_id, timestamp=ts, payload={
             "template_id": template_id,
-            # 保 ref、不落字节、不拍扁（裁定 2026-08-27）——本事件参与状态重建
-            # （reducers 的 SESSION_CREATED 分支），拍扁会让重放后「曾有一张图」无痕。
-            "user_prompt": content_to_jsonable_refs_only(user_prompt),
+            "user_prompt": user_prompt_jsonable,
             "root_agent_id": agent.id,
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
@@ -144,9 +160,14 @@ class SessionManager:
 
         logger.info("Session %s resumed (agent=%s)", session_id, sess_proj.root_agent_id)
 
+        # 同 SESSION_CREATED：保 ref、不落字节、不拍扁。
+        user_prompt_jsonable = await content_to_event_jsonable(
+            user_prompt,
+            event_blob_store=self.event_blob_store or NullEventBlobStore(),
+            ctx=ProviderContext(session_id=session_id, tenant_id=tenant_id),
+        )
         await self._emit(EventType.SESSION_RESUMED, session_id, tenant_id, payload={
-            # 同 SESSION_CREATED：保 ref、不落字节、不拍扁。
-            "user_prompt": content_to_jsonable_refs_only(user_prompt),
+            "user_prompt": user_prompt_jsonable,
             "root_agent_id": sess_proj.root_agent_id,
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
@@ -184,6 +205,10 @@ class SessionManager:
             max_concurrent=self.task_max_concurrent,
             task_max_retries=self.task_max_retries,
         )
+        # push_task 在这里立即发 TASK_CREATED（先于 runtime._register_and_drain 的晚
+        # 绑定），故本 TaskManager 的 event_blob_store 必须现在就接上，直接透传
+        # SessionManager 自己持有的那份（同一个 registry 解出的同一个 store）。
+        task_manager.set_event_blob_store(self.event_blob_store)
         await task_manager.push_task(task)
         return task, task_manager
 

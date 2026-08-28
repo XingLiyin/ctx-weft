@@ -12,7 +12,6 @@ from typing import Any
 from ctx_weft.core.content import (
     content_from_jsonable,
     content_to_jsonable,
-    content_to_jsonable_refs_only,
 )
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.events import TASK_STATUS_BY_EVENT, Event, EventType
@@ -162,9 +161,10 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
             sid: {
                 "id": s.id,
                 # 保 ref 形态（裁定 2026-08-27）：session prompt 与 task 侧同为
-                # 状态源，拍扁会让重放后「曾有一张图」无痕。refs_only 而非
-                # content_to_jsonable —— 快照里同样不落字节。
-                "user_prompt": content_to_jsonable_refs_only(s.user_prompt),
+                # 状态源，拍扁会让重放后「曾有一张图」无痕。同步的 content_to_jsonable
+                # 即可——view 从事件还原，本就是 ref 形态，无 base64 可外部化，不需要
+                # content_to_event_jsonable 的 put（那个是 async，且只用在发射点）。
+                "user_prompt": content_to_jsonable(s.user_prompt),
                 "template_id": s.template_id,
                 "status": s.status,
                 "goal": s.goal,

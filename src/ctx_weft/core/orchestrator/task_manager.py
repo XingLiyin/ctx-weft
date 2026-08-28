@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
-from ctx_weft.core.content import content_to_jsonable, content_with_suffix
+from ctx_weft.core.content import content_to_event_jsonable, content_to_jsonable, content_with_suffix
 from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
@@ -26,9 +26,12 @@ from ctx_weft.core.state.models import (
     TaskStatus,
 )
 from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.protocols.events import NullEventBlobStore
 
 if TYPE_CHECKING:
     from ctx_weft.core.events.bus import EventBus
+    from ctx_weft.protocols.events import EventBlobStore
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +109,13 @@ class TaskManager:
         self._cancel_finalizer: (
             Callable[[list[Task], str], Coroutine[Any, Any, None]] | None
         ) = None
+        # 事件侧 blob store（Task 3：TASK_CREATED / TASK_REQUEUED 的 user_prompt 外部化
+        # 用），Runtime._register_and_drain 里晚绑定。TaskManager 每次 start_session /
+        # recover_session 都新建一份，接线晚于 providers 注册完毕（不同于 HitlManager
+        # 那种跨 session 长寿命单例），故直接存已解析的 store 引用即可，不必像
+        # HitlManager 那样存解析器。None（纯单测直接构造 TaskManager() 时）→ 视为
+        # NullEventBlobStore。
+        self._event_blob_store: "EventBlobStore | None" = None
 
     def track_background(self, t: "asyncio.Task") -> None:
         """Track a fire-and-forget background coroutine so the session awaits it before close."""
@@ -114,6 +124,15 @@ class TaskManager:
 
     def set_runner(self, runner: TaskRunner) -> None:
         self._runner = runner
+
+    def set_event_blob_store(self, store: "EventBlobStore | None") -> None:
+        """注入事件侧 blob store（`push_task` / `reopen_task` 的事件外部化用，Task 3）。"""
+        self._event_blob_store = store
+
+    def _event_ctx(self) -> "ProviderContext":
+        """构造 push_task / reopen_task 事件外部化用的 ctx，tenant 口径同 `_emit`。"""
+        tenant_id = self._session.tenant_id if self._session else "default"
+        return ProviderContext(session_id=self._session_id, tenant_id=tenant_id)
 
     def set_is_current(self, predicate: "Callable[[], bool]") -> None:
         """注入归属权谓词：本 TM 是否仍是该 session 的当前 owner（见 `_is_current`）。"""
@@ -268,7 +287,18 @@ class TaskManager:
         # 崩溃恢复时 restore() 可由 dag_deps 重建依赖链，无需父任务重新 spawn。
         # push_task 是唯一的「新建」路径（retry / resume / active 重排都走 _queue.push），
         # 故此处恰好 emit 一次。
-        await self._emit(EventType.TASK_CREATED, task_id=task.id, payload=_task_payload(task))
+        # user_prompt 的外部化须在 await self._emit(...) 之前算好（Task 3）：_task_payload
+        # 是同步函数、还负责十余个与内容无关的字段，不能整体 async 化（所有调用方都得
+        # 等一次 IO）；提前把 event-jsonable 结果算出来再传进去，_task_payload 本身不变。
+        user_prompt_jsonable = await content_to_event_jsonable(
+            task.user_prompt,
+            event_blob_store=self._event_blob_store or NullEventBlobStore(),
+            ctx=self._event_ctx(),
+        )
+        await self._emit(
+            EventType.TASK_CREATED, task_id=task.id,
+            payload=_task_payload(task, user_prompt_jsonable),
+        )
 
     def stage_task(
         self,
@@ -570,13 +600,20 @@ class TaskManager:
                 blocked_by=set(blocked_by or []),
             ))
         # 把改写后的 prompt 一并落进事件，使崩溃恢复（event replay）能重建修订后的 user_prompt。
+        # 事件库恒不含字节（Task 3）：两个 prompt 字段都要经 content_to_event_jsonable。
+        event_blob_store = self._event_blob_store or NullEventBlobStore()
+        ctx = self._event_ctx()
+        user_prompt_jsonable = await content_to_event_jsonable(
+            new_prompt, event_blob_store=event_blob_store, ctx=ctx)
+        original_user_prompt_jsonable = await content_to_event_jsonable(
+            task.original_user_prompt, event_blob_store=event_blob_store, ctx=ctx)
         await self._emit(
             EventType.TASK_REQUEUED,
             task_id=task_id,
             payload={
                 "reason": "observer_review_reopen",
-                "user_prompt": content_to_jsonable(new_prompt),
-                "original_user_prompt": content_to_jsonable(task.original_user_prompt),
+                "user_prompt": user_prompt_jsonable,
+                "original_user_prompt": original_user_prompt_jsonable,
             },
         )
         logger.info("TaskManager.reopen_task: re-queued %s", task_id)
@@ -1163,12 +1200,23 @@ def _outputs_to_text(outputs: Any) -> str:
     return ""
 
 
-def _task_payload(task: Task) -> dict:
-    """TaskCreated 事件的 payload，供 sessions.py translate_event 构建前端 task 对象。"""
+def _task_payload(task: Task, user_prompt_jsonable: "str | list[dict] | None" = None) -> dict:
+    """TaskCreated 事件的 payload，供 sessions.py translate_event 构建前端 task 对象。
+
+    ``user_prompt_jsonable``：调用方（`push_task`）在 `await self._emit(...)` 之前算好
+    的 event-jsonable 结果（`content_to_event_jsonable`，保 ref、绝不落字节）——**不**
+    在本函数内部算，因为本函数是同步的、还负责十余个与内容无关的字段，async 化会让
+    所有调用方等一次 IO（spec §6）。默认 None 时退回同步的 `content_to_jsonable`，
+    供无需外部化场景（如未来的纯本地快照）复用本函数而不必先 await。
+    """
     import dataclasses
     settings_d = dataclasses.asdict(task.settings)
     settings_d["_type"] = type(task.settings).__name__
     ts = task.created_at.isoformat() if task.created_at else ""
+    prompt = (
+        user_prompt_jsonable if user_prompt_jsonable is not None
+        else content_to_jsonable(task.user_prompt)
+    )
     return {
         "task": {
             "id": task.id,
@@ -1182,7 +1230,7 @@ def _task_payload(task: Task) -> dict:
             # 空 part 列表被 `or ""` 降级成 ""：今日安全，因为本仓处处把 [] 与 "" 当等价的
             # "无内容"（没有生成合法的空/短 part 列表的路径）。Phase 3 若出现这样的合法列表
             # （例如一张裁掉了文字的纯图片 prompt 被上游误判为"空"），这里就会把它错误吞掉。
-            "user_prompt": content_to_jsonable(task.user_prompt) or "",
+            "user_prompt": prompt or "",
             "priority": task.priority,
             "max_retries": task.max_retries,
             "timeout_ms": task.timeout_ms,
