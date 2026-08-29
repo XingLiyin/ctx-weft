@@ -22,14 +22,20 @@ from ctx_weft.core.events import EventType
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.core.utils import _IMAGE_PART_TOKENS, content_to_text
 from ctx_weft.protocols import (
-    ImagePart, LLMChunk, LLMUsage, MemoryEventType, ProviderContext, TextPart, ToolCall,
+    ImagePart,
+    LLMChunk,
+    LLMUsage,
+    MemoryEventType,
+    ProviderContext,
+    TextPart,
+    ToolCall,
 )
 from ctx_weft.protocols.events import EventBlobStore
 from ctx_weft.protocols.memory import BLOB_REF_PREFIX, MemoryBlobStore
+from ctx_weft.providers.blob.fs import FsBlobStore
 from ctx_weft.providers.llm.anthropic import AnthropicAdapter, AnthropicMultimodalAdapter
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft.providers.memory.sql import open_sqlite_memory
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -393,25 +399,26 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
 
 
 async def _make_sql_blob_store(tmp_path):
-    """真 MemoryBlobStore 装配（``SqlMemoryProvider``，Task C3），已 open 好可直接用。
+    """真 MemoryBlobStore 装配（``FsBlobStore``），可直接用。
 
-    复用 ``open_sqlite_memory`` 本身的建库逻辑（进它的 ``__aenter__``），只是不要求
-    调用方再包一层 ``async with``——两处调用方（``test_ref_externalized_...`` 与
-    ``test_text_only_adapter_persists_image_and_keeps_bytes_retrievable``）用法不同：
-    前者原本就在函数体内全程持有一个会话，后者只需要一个能直接 ``.get()`` 的对象，
-    统一成「返回已打开的 provider」两边都能用，不必分别装配一次。engine 的显式
-    dispose 略去——测试用 sqlite 文件随 ``tmp_path`` 由 pytest 清理，不影响正确性。
+    2026-08-29 之后 ``SqlMemoryProvider`` 不再兼当 blob store——引用边
+    （``memory_blob_refs``）留在 SQL、与 ingest 同事务，字节挪去了文件系统。
+    这里返回的 ``FsBlobStore`` 是宿主真正会接的字节侧实现，函数名保留是因为
+    两处调用方（``test_ref_externalized_...`` 与
+    ``test_text_only_adapter_persists_image_and_keeps_bytes_retrievable``）只
+    要一个能直接 ``.get()`` 的 ``MemoryBlobStore``，不关心具体实现。
     """
-    cm = open_sqlite_memory(tmp_path / "blobs.db")
-    return await cm.__aenter__()
+    return FsBlobStore(tmp_path / "blobs")
 
 
 @pytest.mark.asyncio
 async def test_ref_externalized_in_memory_but_full_base64_on_the_wire(tmp_path) -> None:
-    """覆盖 1（ref 全链路）：注册**真** MemoryBlobStore（``SqlMemoryProvider``，Task C3）后——
+    """覆盖 1（ref 全链路）：注册**真** MemoryBlobStore（``FsBlobStore``）后——
 
-    Phase 3b 时这里挂的是 ``FilesystemToolsProvider``；裁定 D5 移除了那个实现，
-    改挂 SQL provider。**三条断言一字未改**——它们钉的是「ref 全链路」本身，
+    Phase 3b 时这里挂的是 ``FilesystemToolsProvider``（裁定 D5 移除），随后一度改挂
+    兼当 blob store 的 ``SqlMemoryProvider``（spec 2026-08-29 §5 移除——引用边该与
+    ingest 同事务，不等于字节该进 RDBMS），现在挂的是字节侧的真实生产实现
+    ``FsBlobStore``。**三条断言一字未改**——它们钉的是「ref 全链路」本身，
     与 blob 存哪里无关，换实现后仍全绿就是契约面未漂移的证据。
 
     a) core 侧（memory 记录）里的图是 ``source_type="ref"`` 的 ``blob:<sha>``，

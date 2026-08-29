@@ -6,7 +6,7 @@ Task 1-5b 各自都有单元测试，但都是在打过桩的边界上验的：r
 
 本文件从真实全链路上跑通它：
 
-    start_session（真 runtime / 真 memory / 真 sqlite MemoryBlobStore）
+    start_session（真 runtime / 真 memory / 真 FsBlobStore MemoryBlobStore）
       → 归一层把 base64 外部化成 blob:<sha>
       → PrepareStep 预算触发 escalating_compact → L0.5 `demote_for_budget` 落库
       → 模型（stub LLM）**从 prompt 里读出占位里的 ref**，调 media__get_image
@@ -18,6 +18,13 @@ Task 1-5b 各自都有单元测试，但都是在打过桩的边界上验的：r
 stub LLM 只做一件真模型也会做的事：**扫 prompt 文本找占位、把 ref 原样抄进工具参数**。
 它不认识 memory、不认识 blob store，也拿不到测试的局部变量——所以「模型能取回图」这件事
 是被链路本身证明的，不是被测试喂出来的。
+
+**跨组件组合（2026-08-29）**：本文件里承载图片字节的 `blob_store` 现在是独立的
+`FsBlobStore`（文件系统内容寻址），memory 侧仍是 `InMemoryMemoryProvider`——引用边
+与字节从一开始就分居两处，靠 ref 串起来，这正是宿主真正会跑的形态（SqlMemoryProvider
+维护引用边的场景另见 `test_l05_demotion_blob_lifecycle.py` / `test_blob_gc_integration.py`）。
+`blob_store=None` 的用例（未注册 MemoryBlobStore）不受影响，继续验「不接 blob store
+时一切保持 inline」那条支路。
 
 ⚠️ 断言口径（台账陷阱 4/5）：
 - 「某件事没有发生」型断言（重定位的 user 消息不落 memory / 未注册 MemoryBlobStore 不降级）
@@ -60,10 +67,10 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.events import EventBlobStore
 from ctx_weft.protocols.memory import MemoryBlobStore
+from ctx_weft.providers.blob.fs import FsBlobStore
 from ctx_weft.providers.llm.anthropic import AnthropicMultimodalAdapter
 from ctx_weft.providers.llm.openai import _TOOL_IMAGE_NOTICE, OpenAIMultimodalAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft.providers.memory.sql import open_sqlite_memory
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -407,64 +414,64 @@ async def test_full_round_trip_demoted_image_comes_back_decodable_on_the_wire(tm
     `content_parts` 通道没接、工具结果没落库、装配把 parts 拍扁、rehydrate 取错 blob
     ——都会在下面某一条断言上炸，而不是静默降级成「没有图」。
     """
-    async with open_sqlite_memory(tmp_path / "blobs.db") as blobs:
-        llm = _WireCapturingAnthropicLLM()
-        runtime, memory, state = await _run_session(llm=llm, blob_store=blobs)
+    blobs = FsBlobStore(tmp_path / "blobs")
+    llm = _WireCapturingAnthropicLLM()
+    runtime, memory, state = await _run_session(llm=llm, blob_store=blobs)
 
-        # ① L0.5 真的跑了，且真的降了图（不是「一张都没降也算通过」）
-        l05 = await _l05_events(runtime, state)
-        assert l05, "没有 source='demote_images' 的 MemoryCompacted 事件——L0.5 根本没跑"
-        assert sum(e.payload["demoted_images"] for e in l05) == 1, (
-            f"应恰好降 1 张（keep_recent=1 保住最新那张），实为 {[e.payload for e in l05]}")
-        assert all(e.payload["freed_tokens"] > 0 for e in l05), (
-            "freed_tokens 为 0 —— token 口径不认图片，L0.5 等于白跑")
+    # ① L0.5 真的跑了，且真的降了图（不是「一张都没降也算通过」）
+    l05 = await _l05_events(runtime, state)
+    assert l05, "没有 source='demote_images' 的 MemoryCompacted 事件——L0.5 根本没跑"
+    assert sum(e.payload["demoted_images"] for e in l05) == 1, (
+        f"应恰好降 1 张（keep_recent=1 保住最新那张），实为 {[e.payload for e in l05]}")
+    assert all(e.payload["freed_tokens"] > 0 for e in l05), (
+        "freed_tokens 为 0 —— token 口径不认图片，L0.5 等于白跑")
 
-        # ② memory 里：最老那张变成占位（含 ref），最新那张仍是真图（正向对照）
-        view = await _view(memory, state)
-        user_recs = [r for r in view if r.role == "user"]
-        assert len(user_recs) == 1
-        assert isinstance(user_recs[0].content, list), (
-            f"USER_PROMPT 记录被拍扁成了 {type(user_recs[0].content).__name__}")
-        placeholders = find_image_placeholders(_record_text(user_recs[0]))
-        assert len(placeholders) == 1, f"user 记录里应恰好一个 L0.5 占位，实为 {placeholders}"
-        ref_a, media_type = placeholders[0]
-        assert media_type == "image/png"
-        surviving = _image_parts(user_recs[0].content)
-        assert len(surviving) == 1 and surviving[0].data != ref_a, (
-            "对照组失败：另一张图也被降了 / 或一张都没剩，那本条的「降了一张」就没有意义")
+    # ② memory 里：最老那张变成占位（含 ref），最新那张仍是真图（正向对照）
+    view = await _view(memory, state)
+    user_recs = [r for r in view if r.role == "user"]
+    assert len(user_recs) == 1
+    assert isinstance(user_recs[0].content, list), (
+        f"USER_PROMPT 记录被拍扁成了 {type(user_recs[0].content).__name__}")
+    placeholders = find_image_placeholders(_record_text(user_recs[0]))
+    assert len(placeholders) == 1, f"user 记录里应恰好一个 L0.5 占位，实为 {placeholders}"
+    ref_a, media_type = placeholders[0]
+    assert media_type == "image/png"
+    surviving = _image_parts(user_recs[0].content)
+    assert len(surviving) == 1 and surviving[0].data != ref_a, (
+        "对照组失败：另一张图也被降了 / 或一张都没剩，那本条的「降了一张」就没有意义")
 
-        # 占位里的 ref 指向的确实是 A 的字节（不是随手编的 sha）
-        blob = await blobs.get(ref_a, _pctx(state))
-        assert blob is not None and blob[0] == _RAW_A, "占位里的 ref 取不回原始字节"
+    # 占位里的 ref 指向的确实是 A 的字节（不是随手编的 sha）
+    blob = await blobs.get(ref_a, _pctx(state))
+    assert blob is not None and blob[0] == _RAW_A, "占位里的 ref 取不回原始字节"
 
-        # ③ 模型确实读着占位调了工具（stub 只从 prompt 文本里拿 ref）
-        assert llm.asked == {ref_a}, f"模型没有照占位调 get_image：asked={llm.asked}"
+    # ③ 模型确实读着占位调了工具（stub 只从 prompt 文本里拿 ref）
+    assert llm.asked == {ref_a}, f"模型没有照占位调 get_image：asked={llm.asked}"
 
-        # ④ 图回到了**对话尾部**：最后一条带图的记录是 tool 角色的工具结果
-        img_recs = [r for r in view if _image_parts(r.content)]
-        restored = [r for r in img_recs if any(p.data == ref_a for p in _image_parts(r.content))]
-        assert len(restored) == 1, "取回的图没有作为一条普通记录落库"
-        assert restored[0].role == "tool"
-        assert view.index(restored[0]) > view.index(user_recs[0]), (
-            "取回的图没有排在原 user 回合之后——它应该在对话尾部")
-        restored_text = _record_text(restored[0])
-        assert ref_a in restored_text and "1st message in this task" in restored_text, (
-            f"取回结果缺少位置信息文本，实为 {restored_text!r}")
+    # ④ 图回到了**对话尾部**：最后一条带图的记录是 tool 角色的工具结果
+    img_recs = [r for r in view if _image_parts(r.content)]
+    restored = [r for r in img_recs if any(p.data == ref_a for p in _image_parts(r.content))]
+    assert len(restored) == 1, "取回的图没有作为一条普通记录落库"
+    assert restored[0].role == "tool"
+    assert view.index(restored[0]) > view.index(user_recs[0]), (
+        "取回的图没有排在原 user 回合之后——它应该在对话尾部")
+    restored_text = _record_text(restored[0])
+    assert ref_a in restored_text and "1st message in this task" in restored_text, (
+        f"取回结果缺少位置信息文本，实为 {restored_text!r}")
 
-        # ⑤ 下一轮装配把它带上，且 wire 上是**可解码回原始字节**的 base64
-        idx = llm.calls.index("finish")
-        finish_payload = llm.captured_payloads[idx]
-        tool_results = _anthropic_tool_results(finish_payload)
-        assert tool_results, "收尾那轮的 wire 里没有 tool_result —— 工具结果没进下一轮装配"
-        images = [b for tr in tool_results if isinstance(tr.get("content"), list)
-                  for b in tr["content"] if b.get("type") == "image"]
-        assert len(images) == 1, (
-            f"取回的图没有出现在下一轮的 wire tool_result 里（找到 {len(images)} 个）")
-        src = images[0]["source"]
-        assert src["type"] == "base64" and src["media_type"] == "image/png"
-        assert base64.b64decode(src["data"]) == _RAW_A, (
-            "wire 上的 base64 解码后不等于原始图片字节——rehydrate 还原出了别的内容")
-        assert base64.b64decode(src["data"]) != _RAW_B, "取回的是另一张图"
+    # ⑤ 下一轮装配把它带上，且 wire 上是**可解码回原始字节**的 base64
+    idx = llm.calls.index("finish")
+    finish_payload = llm.captured_payloads[idx]
+    tool_results = _anthropic_tool_results(finish_payload)
+    assert tool_results, "收尾那轮的 wire 里没有 tool_result —— 工具结果没进下一轮装配"
+    images = [b for tr in tool_results if isinstance(tr.get("content"), list)
+              for b in tr["content"] if b.get("type") == "image"]
+    assert len(images) == 1, (
+        f"取回的图没有出现在下一轮的 wire tool_result 里（找到 {len(images)} 个）")
+    src = images[0]["source"]
+    assert src["type"] == "base64" and src["media_type"] == "image/png"
+    assert base64.b64decode(src["data"]) == _RAW_A, (
+        "wire 上的 base64 解码后不等于原始图片字节——rehydrate 还原出了别的内容")
+    assert base64.b64decode(src["data"]) != _RAW_B, "取回的是另一张图"
 
 
 # ── 覆盖 2：OpenAI 重定位的 user 消息不得落 memory（§4.3 关键性质 1）────────────
@@ -483,39 +490,39 @@ async def test_openai_relocated_user_message_is_wire_only_and_never_lands_in_mem
     故本用例把正向对照写在同一处：**wire 上必须真的有那条 user 消息**（且它带的
     base64 解码回原始字节），memory 里 user 角色的记录才**仍然只有一条**。
     """
-    async with open_sqlite_memory(tmp_path / "blobs.db") as blobs:
-        llm = _WireCapturingOpenAILLM()
-        runtime, memory, state = await _run_session(llm=llm, blob_store=blobs)
+    blobs = FsBlobStore(tmp_path / "blobs")
+    llm = _WireCapturingOpenAILLM()
+    runtime, memory, state = await _run_session(llm=llm, blob_store=blobs)
 
-        assert await _l05_events(runtime, state), "L0.5 没跑，本用例的前提不成立"
-        assert llm.asked, "模型没调 get_image —— 后面的断言会全部落空"
+    assert await _l05_events(runtime, state), "L0.5 没跑，本用例的前提不成立"
+    assert llm.asked, "模型没调 get_image —— 后面的断言会全部落空"
 
-        # ── 正向：wire 上确实有那条重定位的 user 消息，且载着真图 ──
-        finish_payload = llm.captured_payloads[llm.calls.index("finish")]
-        msgs = finish_payload["messages"]
-        rel_idx, rel_msg = _relocated_user_message(msgs)
-        assert _TOOL_IMAGE_NOTICE.strip() in msgs[rel_idx - 1]["content"], (
-            "被搬空的那条 tool 消息里没有指向后一条消息的标记")
-        urls = [b["image_url"]["url"] for b in rel_msg["content"]
-                if b.get("type") == "image_url"]
-        assert len(urls) == 1
-        assert _decode_data_url(urls[0]) == _RAW_A, (
-            "重定位的 user 消息里的 base64 解码后不是原始图片字节")
+    # ── 正向：wire 上确实有那条重定位的 user 消息，且载着真图 ──
+    finish_payload = llm.captured_payloads[llm.calls.index("finish")]
+    msgs = finish_payload["messages"]
+    rel_idx, rel_msg = _relocated_user_message(msgs)
+    assert _TOOL_IMAGE_NOTICE.strip() in msgs[rel_idx - 1]["content"], (
+        "被搬空的那条 tool 消息里没有指向后一条消息的标记")
+    urls = [b["image_url"]["url"] for b in rel_msg["content"]
+            if b.get("type") == "image_url"]
+    assert len(urls) == 1
+    assert _decode_data_url(urls[0]) == _RAW_A, (
+        "重定位的 user 消息里的 base64 解码后不是原始图片字节")
 
-        # ── 反向：memory 里没有它 ──
-        view = await _view(memory, state)
-        user_recs = [r for r in view if r.role == "user"]
-        assert len(user_recs) == 1, (
-            f"task 视图里的 user 回合应仍只有那条 USER_PROMPT，实为 "
-            f"{[(r.role, _record_text(r)[:40]) for r in user_recs]}——"
-            "adapter 重定位的 user 消息落库了，段边界会被打乱")
-        # 图在 memory 里活在 role="tool" 的工具结果记录上，不是 user 记录上
-        img_recs = [r for r in view if _image_parts(r.content)]
-        assert [r.role for r in img_recs if any(
-            p.data in llm.asked for p in _image_parts(r.content))] == ["tool"]
-        # 那条 wire 专属消息的标记文本一个字都没进 memory
-        assert not any(_TOOL_IMAGE_NOTICE.strip() in _record_text(r) for r in view), (
-            "wire 专属的图片重定位标记出现在了 memory 记录里")
+    # ── 反向：memory 里没有它 ──
+    view = await _view(memory, state)
+    user_recs = [r for r in view if r.role == "user"]
+    assert len(user_recs) == 1, (
+        f"task 视图里的 user 回合应仍只有那条 USER_PROMPT，实为 "
+        f"{[(r.role, _record_text(r)[:40]) for r in user_recs]}——"
+        "adapter 重定位的 user 消息落库了，段边界会被打乱")
+    # 图在 memory 里活在 role="tool" 的工具结果记录上，不是 user 记录上
+    img_recs = [r for r in view if _image_parts(r.content)]
+    assert [r.role for r in img_recs if any(
+        p.data in llm.asked for p in _image_parts(r.content))] == ["tool"]
+    # 那条 wire 专属消息的标记文本一个字都没进 memory
+    assert not any(_TOOL_IMAGE_NOTICE.strip() in _record_text(r) for r in view), (
+        "wire 专属的图片重定位标记出现在了 memory 记录里")
 
 
 # ── 覆盖 3：生命周期（§5）────────────────────────────────────────────────────
@@ -531,44 +538,44 @@ async def test_restored_image_is_folded_at_segment_boundary_and_can_be_restored_
     用真 `segment_fold`（生产函数，非桩）制造段边界，再经**真的 `MediaCapabilityProvider`
     实例**（runtime 构造期注册的那一个，走 registry 现解析 memory / blob store）取第二次。
     """
-    async with open_sqlite_memory(tmp_path / "blobs.db") as blobs:
-        llm = _WireCapturingAnthropicLLM()
-        runtime, memory, state = await _run_session(llm=llm, blob_store=blobs)
-        ctxp = _pctx(state)
-        (ref_a,) = tuple(llm.asked)
+    blobs = FsBlobStore(tmp_path / "blobs")
+    llm = _WireCapturingAnthropicLLM()
+    runtime, memory, state = await _run_session(llm=llm, blob_store=blobs)
+    ctxp = _pctx(state)
+    (ref_a,) = tuple(llm.asked)
 
-        before = await _view(memory, state)
-        assert any(p.data == ref_a for r in before for p in _image_parts(r.content)), (
-            "前提不成立：取回的图不在视图里")
+    before = await _view(memory, state)
+    assert any(p.data == ref_a for r in before for p in _image_parts(r.content)), (
+        "前提不成立：取回的图不在视图里")
 
-        # 段边界：真 segment_fold 把末条 user 回合之后的 raw 折成一条段摘要
-        result = await segment_fold(memory, state.scope, MemoryScope.TASK,
-                                    "the agent looked at the screenshot", ctxp)
-        assert result.events_before > result.events_after, (
-            f"段折叠什么都没折（{result.events_before} → {result.events_after}）")
+    # 段边界：真 segment_fold 把末条 user 回合之后的 raw 折成一条段摘要
+    result = await segment_fold(memory, state.scope, MemoryScope.TASK,
+                                "the agent looked at the screenshot", ctxp)
+    assert result.events_before > result.events_after, (
+        f"段折叠什么都没折（{result.events_before} → {result.events_after}）")
 
-        after = await _view(memory, state)
-        assert not any(p.data == ref_a for r in after for p in _image_parts(r.content)), (
-            "取回的图没有被段折叠收走——§5 的「取回是短时的」不成立")
+    after = await _view(memory, state)
+    assert not any(p.data == ref_a for r in after for p in _image_parts(r.content)), (
+        "取回的图没有被段折叠收走——§5 的「取回是短时的」不成立")
 
-        # 占位还在原位、ref 一直可见（user 回合受 `_protected` 保护）
-        user_recs = [r for r in after if r.role == "user"]
-        assert len(user_recs) == 1
-        assert [ref for ref, _ in find_image_placeholders(_record_text(user_recs[0]))] == [ref_a]
-        assert after.index(user_recs[0]) == before.index(
-            next(r for r in before if r.role == "user")), "占位记录的位置变了"
+    # 占位还在原位、ref 一直可见（user 回合受 `_protected` 保护）
+    user_recs = [r for r in after if r.role == "user"]
+    assert len(user_recs) == 1
+    assert [ref for ref, _ in find_image_placeholders(_record_text(user_recs[0]))] == [ref_a]
+    assert after.index(user_recs[0]) == before.index(
+        next(r for r in before if r.role == "user")), "占位记录的位置变了"
 
-        # 再取一次仍可用——走真的 provider 实例
-        provider = next(p for p in runtime.providers.get_capability_providers()
-                        if p.name == "media")
-        events = [ev async for ev in provider.invoke("media:get_image", {"ref": ref_a}, ctxp)]
-        assert [e.kind for e in events] == ["result"], f"provider 报错：{events}"
-        payload = events[0].payload
-        parts = payload["metadata"].get("content_parts") or []
-        imgs = [p for p in parts if getattr(p, "type", None) == "image"]
-        assert len(imgs) == 1 and imgs[0].data == ref_a, (
-            f"第二次取回没拿到图：content={payload['content']!r}")
-        assert (await blobs.get(imgs[0].data, ctxp))[0] == _RAW_A
+    # 再取一次仍可用——走真的 provider 实例
+    provider = next(p for p in runtime.providers.get_capability_providers()
+                    if p.name == "media")
+    events = [ev async for ev in provider.invoke("media:get_image", {"ref": ref_a}, ctxp)]
+    assert [e.kind for e in events] == ["result"], f"provider 报错：{events}"
+    payload = events[0].payload
+    parts = payload["metadata"].get("content_parts") or []
+    imgs = [p for p in parts if getattr(p, "type", None) == "image"]
+    assert len(imgs) == 1 and imgs[0].data == ref_a, (
+        f"第二次取回没拿到图：content={payload['content']!r}")
+    assert (await blobs.get(imgs[0].data, ctxp))[0] == _RAW_A
 
 
 # ── 覆盖 4：两家 adapter 各自的形状 ──────────────────────────────────────────
@@ -587,12 +594,12 @@ async def test_both_adapters_carry_the_restored_image_in_their_own_wire_shape(
     「整段之后」用**同批两个 tool call** 才验得出：追加的 user 消息若夹在两条 tool
     消息中间，真实 OpenAI 会回 `insufficient tool messages following tool_calls message`。
     """
-    async with open_sqlite_memory(tmp_path / "a.db") as blobs_a:
-        anthropic = _WireCapturingAnthropicLLM()
-        await _run_session(llm=anthropic, blob_store=blobs_a, batch_with_echo=True)
-    async with open_sqlite_memory(tmp_path / "o.db") as blobs_o:
-        openai = _WireCapturingOpenAILLM()
-        await _run_session(llm=openai, blob_store=blobs_o, batch_with_echo=True)
+    blobs_a = FsBlobStore(tmp_path / "blobs_a")
+    anthropic = _WireCapturingAnthropicLLM()
+    await _run_session(llm=anthropic, blob_store=blobs_a, batch_with_echo=True)
+    blobs_o = FsBlobStore(tmp_path / "blobs_o")
+    openai = _WireCapturingOpenAILLM()
+    await _run_session(llm=openai, blob_store=blobs_o, batch_with_echo=True)
 
     # ── Anthropic：tool_result.content 是 block 列表 ──
     a_payload = anthropic.captured_payloads[anthropic.calls.index("finish")]
