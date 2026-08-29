@@ -28,8 +28,9 @@ import pytest
 
 from ctx_weft.core.control.reducers import fold_pending_hitl
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.state.models import HitlRequest, Session, Task
+from ctx_weft.core.state.models import Session, Task
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
+from ctx_weft.protocols.hitl import HitlRequest
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio

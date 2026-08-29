@@ -4,6 +4,7 @@
 - KnowledgeProvider（§4.2）
 - MemoryProvider（§4.3，统一协议：ingest + recall_* + subscribe + apply_compact）
 - CapabilityProvider（§4.4）
+- HitlForm / HitlStatus / HitlRequest（HITL 请求契约，host-facing）
 - AgentTemplate / IdentityFacet（§4.6）
 - LLMClient / LLMClientResolver（§11，LLM 接入契约）
 - ProviderContext
@@ -49,6 +50,14 @@ from ctx_weft.protocols.events import (
     SubscriptionHandle,
 )
 from ctx_weft.protocols.filesystem import FS_PROVIDER_NAME, FsTool, SpillSink
+from ctx_weft.protocols.hitl import (
+    HITL_FORM_APPROVAL,
+    HITL_FORM_QUESTION,
+    HITL_FORM_WAIT,
+    HitlForm,
+    HitlRequest,
+    HitlStatus,
+)
 from ctx_weft.protocols.llm import (
     # adapter 契约：实现一个 LLM adapter 所需的全部类型
     LLMCallError,
@@ -125,6 +134,13 @@ __all__ = [
     "FS_PROVIDER_NAME",
     "FsTool",
     "SpillSink",
+    # HITL
+    "HITL_FORM_APPROVAL",
+    "HITL_FORM_QUESTION",
+    "HITL_FORM_WAIT",
+    "HitlForm",
+    "HitlRequest",
+    "HitlStatus",
     # Context
     "BLOB_REF_PREFIX",
     "ContentPart",

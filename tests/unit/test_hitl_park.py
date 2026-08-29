@@ -240,8 +240,8 @@ async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:
 async def test_authorize_cold_no_future_does_not_keyerror() -> None:
     """restart 后：rebuild_pending(无 future) + 冷 resolve → authorize 必须短路（否则 wait() KeyError）。"""
     from ctx_weft.core.auth import HumanConfirmationAuthorizer
-    from ctx_weft.core.state.models import HitlRequest
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.protocols.hitl import HitlRequest
     from ctx_weft.protocols import ProviderContext
     from ctx_weft.protocols.capability import ToolCapability
 

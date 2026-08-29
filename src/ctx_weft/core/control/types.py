@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.core.state.models import HitlRequest
+from ctx_weft.protocols.hitl import HitlRequest
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart

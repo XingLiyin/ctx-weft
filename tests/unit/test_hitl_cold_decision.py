@@ -24,8 +24,9 @@ from ctx_weft.core.orchestrator.control_capability import (
     ControlCapabilityProvider,
 )
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-from ctx_weft.core.state.models import HitlRequest, Session, Task
+from ctx_weft.core.state.models import Session, Task
 from ctx_weft.protocols import ProviderContext
+from ctx_weft.protocols.hitl import HitlRequest
 
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 

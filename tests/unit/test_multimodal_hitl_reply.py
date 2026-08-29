@@ -1,7 +1,7 @@
 import pytest
 
-from ctx_weft.core.state.models import HitlRequest
 from ctx_weft.protocols import ImagePart, TextPart
+from ctx_weft.protocols.hitl import HitlRequest
 
 
 def _content():

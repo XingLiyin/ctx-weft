@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.state.models import HitlRequest
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+from ctx_weft.protocols.hitl import HitlRequest
 from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
@@ -411,7 +411,7 @@ async def test_crash_mid_batch_routes_to_reconcile() -> None:
 def test_rebuild_pending_stores_hitl_request_directly():
     """合并实体后 rebuild_pending 直存 HitlRequest,不再做字段搬运。"""
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-    from ctx_weft.core.state.models import HitlRequest
+    from ctx_weft.protocols.hitl import HitlRequest
 
     mgr = HitlManager()
     req = HitlRequest(id="hit_1", form="question", session_id="s1", task_id="t1",

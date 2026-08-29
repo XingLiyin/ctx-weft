@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.state.models import HitlRequest, Session, Task
+from ctx_weft.core.state.models import Session, Task
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
@@ -34,6 +34,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     ProviderContext,
 )
+from ctx_weft.protocols.hitl import HitlRequest
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio

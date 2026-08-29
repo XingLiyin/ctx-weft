@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.content import content_to_event_jsonable
 from ctx_weft.protocols.events import EventType
-from ctx_weft.core.state.models import HitlForm, HitlRequest, HitlStatus  # noqa: F401  (HitlStatus re-export 供既有 import)
+from ctx_weft.protocols.hitl import HitlForm, HitlRequest, HitlStatus  # noqa: F401  (HitlStatus re-export 供既有 import)
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.protocols.events import NullEventBlobStore

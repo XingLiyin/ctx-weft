@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
-from ctx_weft.core.state.models import HitlRequest
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+from ctx_weft.protocols.hitl import HitlRequest
 
 
 class _Recorder:

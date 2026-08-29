@@ -14,8 +14,9 @@ from ctx_weft.core.content import (
     content_to_jsonable,
 )
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
-from ctx_weft.core.state.models import HitlRequest, TaskStatus
+from ctx_weft.core.state.models import TaskStatus
 from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.protocols.hitl import HitlRequest
 
 # 事件类型 → 任务状态的投影映射。
 #

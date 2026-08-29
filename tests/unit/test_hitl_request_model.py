@@ -1,5 +1,5 @@
 """HitlRequest 统一实体（spec 2026-07-05）：form 三形态 + 默认值。"""
-from ctx_weft.core.state.models import HitlForm, HitlRequest, HitlStatus  # noqa: F401
+from ctx_weft.protocols.hitl import HitlForm, HitlRequest, HitlStatus  # noqa: F401
 
 
 def test_hitl_request_defaults():
