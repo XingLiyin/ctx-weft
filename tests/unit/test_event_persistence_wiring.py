@@ -127,7 +127,15 @@ async def test_snapshot_not_written_before_threshold():
 
 
 async def test_snapshot_sees_the_triggering_event():
-    """顺序契约：persister 必须先落库，snapshot 才折得到这条事件（spec §6.5）。"""
+    """顺序契约：persister 必须先落库，snapshot 才折得到这条事件（spec §6.5）。
+
+    `last_event_id` / `last_event_sequence` 是 `_write` 直接从触发事件对象上取的，
+    跟 `store.read_by_session("s1")[-1]` 同源、恒等——单独断言这两个字段验不出订阅
+    顺序对不对（顺序反了它们照样相等）。真正对顺序敏感的是 `state_blob`：它是
+    `rebuild_view` 的产物，若 SnapshotWriter 抢在 EventPersister 之前跑，store 里
+    还只有 1 条事件，`events_total` 就会是 1 而非 2。所以顺序契约靠 `events_total`
+    断言钉住，`last_event_id` / `last_event_sequence` 两条另验「快照记的是哪条事件」。
+    """
     bus, store = InProcessEventBus(), InMemoryEventStore()
     attach_persistence(bus, store, snapshot_every_n=1)
     await bus.emit(_ev("SessionCreated", 1))
@@ -136,6 +144,7 @@ async def test_snapshot_sees_the_triggering_event():
     stored = await store.read_by_session("s1")
     assert snap.last_event_id == stored[-1].id
     assert snap.last_event_sequence == stored[-1].sequence
+    assert snap.state_blob["events_total"] == 2
 
 
 async def test_snapshot_writer_not_attached_by_default():
