@@ -277,3 +277,22 @@ async def test_gateway_passes_provider_context_not_loop_context() -> None:
     assert isinstance(got, ProviderContext)
     assert got.session_id == "s1"
     assert got.agent_template_id == "tmpl_a"
+
+
+def test_authorizer_contract_lives_in_protocols() -> None:
+    from ctx_weft.protocols import AuthorizationDecision as PD
+    from ctx_weft.protocols import Authorizer as PA
+    from ctx_weft.protocols.capability import AuthorizationDecision as CD
+    from ctx_weft.protocols.capability import Authorizer as CA
+
+    assert PA is CA and PD is CD
+
+
+def test_protocols_capability_has_no_core_dependency() -> None:
+    """契约层不得反向依赖 core（含 TYPE_CHECKING）。"""
+    import pathlib
+
+    import ctx_weft.protocols.capability as m
+
+    src = pathlib.Path(m.__file__).read_text(encoding="utf-8")
+    assert "ctx_weft.core" not in src

@@ -1,66 +1,18 @@
-"""Authorizer：capability 授权协议 + 内置实现。
-
-核心方法 `authorize(capability, ...) -> AuthorizationDecision`：对**一次工具调用**作放行/拦截
-决定，并可携带回灌给 LLM 的 `message`（反馈/拒绝指导）与 allow 时的 `modified_arguments`（改写参数）。
-`filter` 是基于 `authorize` 的批量便捷默认（可见性过滤），保留给装配期/外部用。
-"""
+"""Authorizer 的三个内置实现。契约本体在 ``protocols/capability.py``。"""
 
 from __future__ import annotations
 
 import logging
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ctx_weft.core.content import content_to_text
-from ctx_weft.protocols.capability import Capability
-from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
 
 if TYPE_CHECKING:
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class AuthorizationDecision:
-    """一次授权的结构化结果。"""
-
-    allowed: bool
-    message: str = ""                              # 反馈 / 拒绝指导，回灌给 LLM（allow / deny 都可带）
-    modified_arguments: dict[str, Any] | None = None  # allow 时的有效参数（None = 用原参）
-    defer: bool = False                            # spec/07 §7：挂起本次调用（不放行也不拒绝；gateway 绝不 invoke）
-
-
-class Authorizer(ABC):
-    """对一次 capability 调用作授权决定。
-
-    只收 ``ProviderContext``（session/task/agent/模板 标识齐备），不收 core 的 Agent/Task
-    状态对象——契约层不依赖 core 状态，host 自实现时也只需面对 protocols。
-    """
-
-    @abstractmethod
-    async def authorize(
-        self,
-        capability: Capability,
-        ctx: ProviderContext,
-        arguments: dict[str, Any] | None = None,
-        *,
-        tool_call_id: str = "",
-    ) -> AuthorizationDecision: ...
-
-    async def filter(
-        self,
-        capabilities: list[Capability],
-        ctx: ProviderContext,
-        arguments: dict[str, Any] | None = None,
-    ) -> list[Capability]:
-        """批量可见性过滤（基于 authorize 的默认实现）。"""
-        result = []
-        for cap in capabilities:
-            if (await self.authorize(cap, ctx, arguments)).allowed:
-                result.append(cap)
-        return result
 
 
 @dataclass

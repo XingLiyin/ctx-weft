@@ -234,3 +234,52 @@ class AgentCapabilityProvider(CapabilityProvider, ABC):
         """默认不自动召回：sub-agent 只经模板声明的 `subagents` required refs 绑定
         （allowlist），永不把整个模板目录泄漏给 agent。确需语义召回的 provider 可覆盖。"""
         return []
+
+
+# ── 授权契约 ───────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class AuthorizationDecision:
+    """一次授权的结构化结果。"""
+
+    allowed: bool
+    message: str = ""                              # 反馈 / 拒绝指导，回灌给 LLM（allow / deny 都可带）
+    modified_arguments: dict[str, Any] | None = None  # allow 时的有效参数（None = 用原参）
+    defer: bool = False                            # spec/07 §7：挂起本次调用（不放行也不拒绝；gateway 绝不 invoke）
+
+
+class Authorizer(ABC):
+    """对一次 capability 调用作授权决定。
+
+    核心方法 ``authorize`` 对**一次工具调用**作放行/拦截决定，并可携带回灌给 LLM 的
+    ``message``（反馈/拒绝指导）与 allow 时的 ``modified_arguments``（改写参数）。
+    ``filter`` 是基于 ``authorize`` 的批量便捷默认（可见性过滤），保留给装配期/外部用。
+
+    只收 ``ProviderContext``（session/task/agent/模板 标识齐备），不收 core 的 Agent/Task
+    状态对象——契约层不依赖 core 状态，host 自实现时也只需面对 protocols。
+    内置实现见 ``ctx_weft.providers.authorizer``。
+    """
+
+    @abstractmethod
+    async def authorize(
+        self,
+        capability: Capability,
+        ctx: ProviderContext,
+        arguments: dict[str, Any] | None = None,
+        *,
+        tool_call_id: str = "",
+    ) -> AuthorizationDecision: ...
+
+    async def filter(
+        self,
+        capabilities: list[Capability],
+        ctx: ProviderContext,
+        arguments: dict[str, Any] | None = None,
+    ) -> list[Capability]:
+        """批量可见性过滤（基于 authorize 的默认实现）。"""
+        result = []
+        for cap in capabilities:
+            if (await self.authorize(cap, ctx, arguments)).allowed:
+                result.append(cap)
+        return result

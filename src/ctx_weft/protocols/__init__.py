@@ -1,6 +1,7 @@
 """ctx-weft 协议层。
 
 定义 V1 的硬契约：
+- Authorizer / AuthorizationDecision（capability 授权契约）
 - KnowledgeProvider（§4.2）
 - MemoryProvider（§4.3，统一协议：ingest + recall_* + subscribe + apply_compact）
 - CapabilityProvider（§4.4）
@@ -16,6 +17,8 @@
 from ctx_weft.protocols.capability import (
     AgentCapability,
     AgentCapabilityProvider,
+    AuthorizationDecision,
+    Authorizer,
     Capability,
     CapabilityEvent,
     CapabilityProvider,
@@ -107,6 +110,8 @@ __all__ = [
     # Capability
     "AgentCapability",
     "AgentCapabilityProvider",
+    "AuthorizationDecision",
+    "Authorizer",
     "Capability",
     "CapabilityEvent",
     "CapabilityProvider",
