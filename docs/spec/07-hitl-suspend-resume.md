@@ -19,7 +19,7 @@
 > approval-kind 冷路径：`resolve_approve` 写决定缓存，`HumanConfirmationAuthorizer.authorize`
 > 按 `tool_call_id` 键命中已解决 HITL 后直接返回（短路 `wait()`，重启后无 future 时不 KeyError）。
 >
-> 真相源：`core/orchestrator/hitl_manager.py`、`core/auth/authorizer.py`、
+> 真相源：`core/orchestrator/hitl_manager.py`、`protocols/capability.py`（契约）+ `providers/authorizer/`（实现）、
 > `core/loop/capability_gateway.py`、`core/loop/steps/reconcile.py`、
 > `core/orchestrator/task_manager.py`、`core/runtime.py`（`_task_has_dangling_tool_call`）
 > 关联：[06-memory-layers-and-compaction.md](./06-memory-layers-and-compaction.md)（上下文两 source 重建）

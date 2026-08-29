@@ -25,9 +25,9 @@
 | [02-step-state-machine.md](./02-step-state-machine.md) | initial_step 选择 + Step 跳转 | `core/loop/driver.py`、`runtime._resolve` |
 | [03-reducer-rules.md](./03-reducer-rules.md) | 事件 → 投影的变更规则、状态映射 | `core/control/reducers.py` |
 | [04-blackboard.md](./04-blackboard.md) | topic / intent / 发布覆盖 / 订阅 / review-reopen | `ARCHITECTURE.md §Blackboard` |
-| [05-authz-and-hitl.md](./05-authz-and-hitl.md) | 工具鉴权（Authorizer/Gateway）+ HITL 生命周期 | `core/auth/`、`core/orchestrator/hitl_manager.py` |
+| [05-authz-and-hitl.md](./05-authz-and-hitl.md) | 工具鉴权（Authorizer/Gateway）+ HITL 生命周期 | `protocols/capability.py`（契约）+ `providers/authorizer/`（实现）、`core/orchestrator/hitl_manager.py` |
 | [06-memory-layers-and-compaction.md](./06-memory-layers-and-compaction.md) | **（设计目标，未实现）** 分层 memory（session/task/agent）+ 上下文两 source 重建 + 委派黑盒 + 两类 compact + observe 五态 | `protocols/memory.py`、`assembler/sources/`、`core/loop/steps/` |
-| [07-hitl-suspend-resume.md](./07-hitl-suspend-resume.md) | **（设计提案，未实现）** HITL 热/冷两层：请求即持久化 + 协程热阻塞 + 超时驱逐降级为冷持久挂起 + 应答后热续跑/冷 resume + 跨重启可恢复 | `core/orchestrator/hitl_manager.py`、`core/auth/authorizer.py`、`task_manager.py` |
+| [07-hitl-suspend-resume.md](./07-hitl-suspend-resume.md) | **（设计提案，未实现）** HITL 热/冷两层：请求即持久化 + 协程热阻塞 + 超时驱逐降级为冷持久挂起 + 应答后热续跑/冷 resume + 跨重启可恢复 | `core/orchestrator/hitl_manager.py`、`protocols/capability.py`（契约）+ `providers/authorizer/`（实现）、`task_manager.py` |
 | [golden/](./golden/) | 黄金用例（JSON：事件序列 → 期望投影） | `tests/unit/test_snapshot_recovery.py` 等 |
 
 ## 一致性契约
