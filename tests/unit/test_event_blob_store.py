@@ -112,20 +112,24 @@ def test_registry_does_not_fall_back_to_memory_provider() -> None:
     assert reg.get_event_blob_store().can_externalize is False
 
 
-def test_registry_does_not_fall_back_from_memory_provider_to_event_blob_store() -> None:
-    """真正要防的回落是 `get_event_blob_store()` 从 **memory provider** 解析
-    （对称于 `get_memory_blob_store()` 中间那一级：
-    ``isinstance(self._memory, MemoryBlobStore) and mem.can_externalize`` 回落）。
+def test_neither_resolver_falls_back_from_memory_provider() -> None:
+    """两个 resolver 现在都只有两级（显式注册 > Null），**都不得**从 `self._memory` 解析。
+
+    `get_memory_blob_store()` 曾经有一条中间级——memory provider 若自身实现了
+    `MemoryBlobStore` 且 `can_externalize` 就直接用它——已随 spec 2026-08-29 §5.3
+    删除（那一级唯一服务对象 `SqlMemoryProvider` 的字节存储，字节移出 RDBMS 后
+    无对象可服务）。`get_event_blob_store()` 从设计起就刻意没有对称的那一级（spec §4）。
+    本用例钉住两者现在的对称性：只注册 memory provider、不显式注册任何 blob store，
+    两个 resolver 都必须回落 Null。
 
     上一条用例（`test_registry_does_not_fall_back_to_memory_provider`）走的是
     `register_memory_blob_store`，从不调 `register_memory`，故 `self._memory`
-    恒为 None——即便后人给 `get_event_blob_store()` 加上完全对称的
-    `isinstance(self._memory, EventBlobStore)` 回落，那条用例也测不出来。
-
-    这里改用 `register_memory()`：provider 本身同时实现 `MemoryProvider`
-    （借用仓内现成的 `InMemoryMemoryProvider` 满足完整协议，避免手搓一遍全部
-    抽象方法）、`MemoryBlobStore`、`EventBlobStore` 三个协议，注册为 memory
-    provider 后断言 `get_event_blob_store()` 仍是 Null。
+    恒为 None——即便后人给某个 resolver 加上 `isinstance(self._memory, XxxBlobStore)`
+    回落，那条用例也测不出来。这里改用 `register_memory()`：provider 本身同时实现
+    `MemoryProvider`（借用仓内现成的 `InMemoryMemoryProvider` 满足完整协议，避免
+    手搓一遍全部抽象方法）、`MemoryBlobStore`、`EventBlobStore` 三个协议，注册为
+    memory provider 后断言两个 resolver 都仍是 Null——这正是本用例改用
+    `register_memory()` 的理由，也是它比上一条更能抓回归的地方。
     """
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
@@ -138,9 +142,8 @@ def test_registry_does_not_fall_back_from_memory_provider_to_event_blob_store() 
 
     reg = ProviderRegistry()
     reg.register_memory(BothProvider())
-    # memory provider 自身可外部化（对称于 get_memory_blob_store 的中间一级）……
-    assert reg.get_memory_blob_store().can_externalize is True
-    # ……但 event 侧绝不能从 memory provider 回落解析，必须仍是 Null。
+    # 两侧都绝不能从 memory provider 回落解析，必须仍是 Null。
+    assert reg.get_memory_blob_store().can_externalize is False
     assert reg.get_event_blob_store().can_externalize is False
 
 
