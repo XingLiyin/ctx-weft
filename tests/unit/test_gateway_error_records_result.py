@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.auth.authorizer import AuthorizationDecision, Authorizer
+from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState

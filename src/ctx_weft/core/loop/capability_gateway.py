@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 import jsonschema
 
-from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer  # noqa: F401
+from ctx_weft.protocols.capability import Authorizer  # noqa: F401
 from ctx_weft.core.content import normalize_content_parts, redact_content_for_event
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.events import EventBus
@@ -137,7 +137,10 @@ class CapabilityGateway:
         self._memory = memory
         self._event_bus = event_bus
         self._provider_authorizers: dict[str, Authorizer] = provider_authorizers or {}
-        self._default_authorizer: Authorizer = default_authorizer or AllowAllAuthorizer()
+        if default_authorizer is None:
+            from ctx_weft.providers.authorizer import AllowAllAuthorizer
+            default_authorizer = AllowAllAuthorizer()
+        self._default_authorizer: Authorizer = default_authorizer
         # 工具输出截断阈值（字符）：超出则委托 SpillSink.spill() 落盘，
         # result 改为「提示 + 路径 + 预览」。<=0 关闭。
         self._spill_threshold = spill_threshold

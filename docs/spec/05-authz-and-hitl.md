@@ -1,6 +1,6 @@
 # 05 · 工具鉴权与 HITL
 
-> 真相源：`core/auth/authorizer.py`、`core/orchestrator/hitl_manager.py`、`core/loop/capability_gateway.py`
+> 真相源：`protocols/capability.py`（契约）+ `providers/authorizer/`（实现）、`core/orchestrator/hitl_manager.py`、`core/loop/capability_gateway.py`
 > 行为黄金：`tests/unit/test_authorizer.py`、`test_hitl.py`（三份实现须复现同一断言）
 
 这是行为契约（非 reducer 投影），但同样要求三份实现语义一致。下面的"必须"项即跨语言一致性点。

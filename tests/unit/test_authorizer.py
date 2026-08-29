@@ -13,12 +13,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.auth import (
-    AllowAllAuthorizer,
-    AllowListAuthorizer,
-    AuthorizationDecision,
-    Authorizer,
-)
+from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
+from ctx_weft.providers.authorizer import AllowAllAuthorizer, AllowListAuthorizer
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway, _sanitize
 from ctx_weft.core.loop.driver import LoopContext, LoopState
@@ -296,3 +292,25 @@ def test_protocols_capability_has_no_core_dependency() -> None:
 
     src = pathlib.Path(m.__file__).read_text(encoding="utf-8")
     assert "ctx_weft.core" not in src
+
+
+def test_builtin_authorizers_live_in_providers() -> None:
+    from ctx_weft.providers.authorizer import (
+        AllowAllAuthorizer,
+        AllowListAuthorizer,
+        HumanConfirmationAuthorizer,
+    )
+
+    assert issubclass(AllowAllAuthorizer, Authorizer)
+    assert issubclass(AllowListAuthorizer, Authorizer)
+    assert issubclass(HumanConfirmationAuthorizer, Authorizer)
+
+
+def test_core_auth_package_is_gone() -> None:
+    """不留 re-export shim：旧路径必须彻底消失。"""
+    import importlib
+
+    import pytest
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("ctx_weft.core.auth")

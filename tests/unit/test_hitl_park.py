@@ -20,14 +20,14 @@ def test_hitl_park_carries_ids() -> None:
 
 
 def test_authorization_decision_has_defer_default_false() -> None:
-    from ctx_weft.core.auth.authorizer import AuthorizationDecision
+    from ctx_weft.protocols.capability import AuthorizationDecision
     assert AuthorizationDecision(allowed=True).defer is False
 
 
 async def test_gateway_defer_raises_park_and_skips_provider() -> None:
     from types import SimpleNamespace
     from collections.abc import AsyncIterator
-    from ctx_weft.core.auth import AuthorizationDecision, Authorizer
+    from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
     from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.loop.driver import LoopContext, LoopState
@@ -220,10 +220,10 @@ async def test_answer_before_timeout_is_hot_and_wins() -> None:
 
 
 async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:
-    from ctx_weft.core.auth import HumanConfirmationAuthorizer
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
     from ctx_weft.protocols import ProviderContext
     from ctx_weft.protocols.capability import ToolCapability
+    from ctx_weft.providers.authorizer import HumanConfirmationAuthorizer
 
     mgr = HitlManager()
     rid = await mgr.request(form="approval", session_id="s1", task_id="t1", tool_call_id="tcZ")
@@ -239,7 +239,7 @@ async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:
 
 async def test_authorize_cold_no_future_does_not_keyerror() -> None:
     """restart 后：rebuild_pending(无 future) + 冷 resolve → authorize 必须短路（否则 wait() KeyError）。"""
-    from ctx_weft.core.auth import HumanConfirmationAuthorizer
+    from ctx_weft.providers.authorizer import HumanConfirmationAuthorizer
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
     from ctx_weft.protocols.hitl import HitlRequest
     from ctx_weft.protocols import ProviderContext

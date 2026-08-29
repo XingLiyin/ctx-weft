@@ -31,7 +31,7 @@ from ctx_weft.core.assembler.sources import (
     SemanticRecallSource,
     TaskSpecSource,
 )
-from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
+from ctx_weft.protocols.capability import Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway

@@ -1,51 +1,18 @@
-"""Authorizer 的三个内置实现。契约本体在 ``protocols/capability.py``。"""
+"""HITL 审批授权：每次工具调用前暂停，等人工确认后再放行。"""
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.content import content_to_text
+from ctx_weft.core.utils import content_to_text
 from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
 
 if TYPE_CHECKING:
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class AllowAllAuthorizer(Authorizer):
-    """默认：放行全部。"""
-
-    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
-        return AuthorizationDecision(allowed=True)
-
-
-@dataclass
-class AllowListAuthorizer(Authorizer):
-    """按 agent 模板白/黑名单放行 capability id。
-
-    allow_map: {template_id: set[capability_id]} —— 空集 = 全拦；模板不在表中 = 不限制。
-    deny_map:  {template_id: set[capability_id]} —— deny 优先。
-    deny_message: 被拦截时回灌给 LLM 的统一说明（可空）。
-    模板维度取自 ``ctx.agent_template_id``。
-    """
-
-    allow_map: dict[str, set[str]] = field(default_factory=dict)
-    deny_map: dict[str, set[str]] = field(default_factory=dict)
-    deny_message: str = ""
-
-    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
-        tmpl = ctx.agent_template_id
-        allowed = self.allow_map.get(tmpl)
-        denied = self.deny_map.get(tmpl, set())
-        if capability.id in denied:
-            return AuthorizationDecision(allowed=False, message=self.deny_message)
-        if allowed is not None and capability.id not in allowed:
-            return AuthorizationDecision(allowed=False, message=self.deny_message)
-        return AuthorizationDecision(allowed=True)
 
 
 @dataclass

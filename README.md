@@ -804,8 +804,9 @@ runtime.hitl_manager.reject(request_id, reason="不允许该操作")
 给敏感 capability 挂鉴权器，在 invoke 前拦截：
 
 ```python
-from ctx_weft.core.auth import (
-    Authorizer, AllowAllAuthorizer, AllowListAuthorizer, HumanConfirmationAuthorizer,
+from ctx_weft.protocols.capability import Authorizer
+from ctx_weft.providers.authorizer import (
+    AllowAllAuthorizer, AllowListAuthorizer, HumanConfirmationAuthorizer,
 )
 
 # 方式 ①：注册 capability 时传入

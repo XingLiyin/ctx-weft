@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.auth import HumanConfirmationAuthorizer
+from ctx_weft.providers.authorizer import HumanConfirmationAuthorizer
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.orchestrator.control_capability import (
     PROVIDER_NAME,

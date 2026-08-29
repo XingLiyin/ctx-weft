@@ -10,7 +10,7 @@
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.auth.authorizer import AuthorizationDecision, Authorizer
+from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CONTENT_PARTS_KEY, CapabilityGateway
