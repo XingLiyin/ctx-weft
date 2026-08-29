@@ -282,7 +282,13 @@ class EventStore(Protocol):
         raise NotImplementedError
 
     async def read_after(self, session_id: str, after_event_id: str) -> list[Event]:
-        """加载 session 中 id > after_event_id 的增量事件（ULID 字典序）。"""
+        """加载 session 中 id > after_event_id 的增量事件（ULID 字典序）。
+
+        `after_event_id` 不存在于本 session 时，字面语义已蕴含：返回 id 大于它的
+        **全部**事件，不是空列表——这是纯过滤，不是"从标记处扫描、找不到就返回空"。
+        调用方（如 `rebuild_view` 用快照的 `last_event_id` 调本方法）据此在标记失配
+        时仍能拿到完整增量，而不是静默丢失整段 delta。
+        """
         raise NotImplementedError
 
     async def read_session_events_of_types(
