@@ -454,7 +454,7 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 两步，通常在应用 lifespan 启动、provider 注册完成、接收新请求之前调用：
 
 1. **`recover(on_session_interrupted)`**（`src/ctx_weft/core/runtime.py:794`）：调
-   `event_store.list_active_session_ids()`（`src/ctx_weft/protocols/events.py:265`，查无终态
+   `event_store.list_active_session_ids()`（`src/ctx_weft/protocols/events.py:280`，查无终态
    事件的 session，不依赖 host 投影表），逐个回调把它标记/拉起，返回数量。`list_active_session_ids`
    未实现时跳过并告警。
 2. **`recover_session(session_id)`**（`src/ctx_weft/core/runtime.py:723`）：
@@ -479,14 +479,14 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 
 ## 10. 事件系统内部
 
-- **总线**：协议 `EventBus`（`src/ctx_weft/protocols/events.py:205`）、内置实现
+- **总线**：协议 `EventBus`（`src/ctx_weft/protocols/events.py:212`）、内置实现
   `InProcessEventBus`（`src/ctx_weft/providers/events/bus/in_process/bus.py:36`），`emit(event)` `:45`
   广播给所有匹配 `EventFilter(session_id / run_id / task_id / types)` 的 `stream()` `:99` 订阅者。进程内、不跨进程。
 - **顺序**：`sequence` 来自 `LoopState.sequence_counter`，在同一 `run_id` 内单调递增；
   `id` 是 `evt_ULID`（时间有序、全局唯一）。
-- **白名单冻结**：`EVENT_TYPES`（`src/ctx_weft/protocols/events.py:172`）是 V1 冻结集合，`make_event`
+- **白名单冻结**：`EVENT_TYPES`（`src/ctx_weft/protocols/events.py:179`）是 V1 冻结集合，`make_event`
   对未登记类型直接 `ValueError`——保证下游 reducer 的分支封闭。
-- **持久化**：`CtxWeftRuntime` 默认用协议 `EventStore`（`src/ctx_weft/protocols/events.py:249`）的内置实现
+- **持久化**：`CtxWeftRuntime` 默认用协议 `EventStore`（`src/ctx_weft/protocols/events.py:256`）的内置实现
   `InMemoryEventStore()`（`src/ctx_weft/providers/events/store/in_memory/store.py`），落盘非瞬态事件并支撑
   `list_active_session_ids` 与回放；订阅总线是独立的 `EventPersister`
   （`src/ctx_weft/providers/events/persister.py`）的职责，`CtxWeftRuntime` 用

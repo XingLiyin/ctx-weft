@@ -255,19 +255,27 @@ deleted = await blobs.collect(live)
 deleted = await blobs.collect(await memory.live_blob_refs())
 ```
 
-**`memory.live_blob_refs()` 是 `SqlMemoryProvider` 的自有方法，`EventStore` 协议
-没有对应物**——ctx-weft 目前不提供「事件侧当前活引用」的现成计算（事件本就不像
-memory 记录那样有 `is_superseded` 语义，「哪些事件仍然有效」是宿主的保留策略，
-不是 core 能替你判断的）。也就是说，**共用一个实例时，正确的并集算不出来，除非
-宿主自己扫一遍保留窗口内的事件、从 `Event.content` 与 `Event.blob_refs`
-（见 `protocols/memory.py` 里对称的读侧回显字段）里把用到的 `blob:<sha>` 收集
-出来，再与 `memory.live_blob_refs()` 取并集**。这件事没有便利函数可用。
+**`memory.live_blob_refs()` 是 `SqlMemoryProvider` 的自有方法，`EventStore`
+协议没有对应物**——ctx-weft **不提供**「枚举一个 event store 当前活引用」的
+现成接口（事件本就不像 memory 记录那样有 `is_superseded` 语义，「哪些事件仍然
+有效」是宿主的保留策略，不是 core 能替你判断的）。
 
-正因为「共用一个实例」时回收的正确性要靠宿主自己维护一套事件侧活引用扫描逻辑，
-**强烈建议改为分开部署两个独立的 blob store 实例**（各指向不同目录/桶）：
-memory 侧回收只看 `memory.live_blob_refs()`，event 侧按宿主自己的事件保留策略
-（例如「保留最近 N 天」，过期即整体归档/删除，根本不需要按 sha 级别回收）单独
-处理，两侧从此互不干扰，也不需要写那段并集扫描代码。
+真要自己算，ref 藏在**事件的 `payload`** 里——由 `content_to_event_jsonable`
+（`core/content.py`）在五个参与状态重建的事件发射点（`SESSION_CREATED` /
+`SESSION_RESUMED` / `TASK_CREATED` / `TASK_REQUEUED` / `HITL_*`）写入，**键名随
+事件类型而异**（例如 `SESSION_CREATED`/`SESSION_RESUMED` 是 `payload["user_prompt"]`，
+`HITL_ANSWERED` 等 HITL 事件是 `payload["message"]`）。要从中提取 `blob:<sha>`，
+得先用 `core.content.content_from_jsonable` 把该键的值还原成 `list[ContentPart]`，
+再喂给 `core.content.extract_blob_refs`——但**该取哪个键，得宿主自己按事件类型
+判断**，ctx-weft 没有替你把这层封装成一个函数。也就是说，**共用一个实例时，
+正确的并集要靠宿主自己维护这套「按事件类型取键 → 还原 → 提取 ref」的逻辑**，
+没有便利函数可用。
+
+正因为「共用一个实例」时回收的正确性要靠宿主自己维护上面这套事件侧活引用枚举
+逻辑，**除非你愿意维护它，否则强烈建议改为分开部署两个独立的 blob store 实例**
+（各指向不同目录/桶）：memory 侧回收只看 `memory.live_blob_refs()`，event 侧按
+宿主自己的事件保留策略（例如「保留最近 N 天」，过期即整体归档/删除，根本不需要
+按 sha 级别回收）单独处理，两侧从此互不干扰，也不需要写那套枚举逻辑。
 
 **验收**：定时任务上线后观察 blob store 的存储用量不再单调上涨；若共用一个实例，
 额外确认回收前后携图会话仍能在崩溃恢复后正确显示图片。
