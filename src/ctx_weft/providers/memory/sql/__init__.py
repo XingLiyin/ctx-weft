@@ -9,7 +9,6 @@
 
 from ctx_weft.providers.memory.sql.models import (
     Base,
-    MemoryBlobModel,
     MemoryBlobRefModel,
     MemoryEventModel,
     MemorySubscriptionModel,
@@ -23,7 +22,6 @@ from ctx_weft.providers.memory.sql.provider import (
 
 __all__ = [
     "Base",
-    "MemoryBlobModel",
     "MemoryBlobRefModel",
     "MemoryEventModel",
     "MemorySubscriptionModel",
