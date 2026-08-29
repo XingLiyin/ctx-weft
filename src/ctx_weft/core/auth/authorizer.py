@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.content import content_to_text
-from ctx_weft.core.state.models import Agent, Task
 from ctx_weft.protocols.capability import Capability
 from ctx_weft.protocols.context import ProviderContext
 
@@ -34,14 +33,16 @@ class AuthorizationDecision:
 
 
 class Authorizer(ABC):
-    """对一次 capability 调用作授权决定。"""
+    """对一次 capability 调用作授权决定。
+
+    只收 ``ProviderContext``（session/task/agent/模板 标识齐备），不收 core 的 Agent/Task
+    状态对象——契约层不依赖 core 状态，host 自实现时也只需面对 protocols。
+    """
 
     @abstractmethod
     async def authorize(
         self,
         capability: Capability,
-        agent: Agent,
-        task: Task | None,
         ctx: ProviderContext,
         arguments: dict[str, Any] | None = None,
         *,
@@ -51,15 +52,13 @@ class Authorizer(ABC):
     async def filter(
         self,
         capabilities: list[Capability],
-        agent: Agent,
-        task: Task | None,
         ctx: ProviderContext,
         arguments: dict[str, Any] | None = None,
     ) -> list[Capability]:
         """批量可见性过滤（基于 authorize 的默认实现）。"""
         result = []
         for cap in capabilities:
-            if (await self.authorize(cap, agent, task, ctx, arguments)).allowed:
+            if (await self.authorize(cap, ctx, arguments)).allowed:
                 result.append(cap)
         return result
 
@@ -68,7 +67,7 @@ class Authorizer(ABC):
 class AllowAllAuthorizer(Authorizer):
     """默认：放行全部。"""
 
-    async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
+    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
         return AuthorizationDecision(allowed=True)
 
 
@@ -79,14 +78,15 @@ class AllowListAuthorizer(Authorizer):
     allow_map: {template_id: set[capability_id]} —— 空集 = 全拦；模板不在表中 = 不限制。
     deny_map:  {template_id: set[capability_id]} —— deny 优先。
     deny_message: 被拦截时回灌给 LLM 的统一说明（可空）。
+    模板维度取自 ``ctx.agent_template_id``。
     """
 
     allow_map: dict[str, set[str]] = field(default_factory=dict)
     deny_map: dict[str, set[str]] = field(default_factory=dict)
     deny_message: str = ""
 
-    async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
-        tmpl = agent.template_id
+    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
+        tmpl = ctx.agent_template_id
         allowed = self.allow_map.get(tmpl)
         denied = self.deny_map.get(tmpl, set())
         if capability.id in denied:
@@ -107,17 +107,17 @@ class HumanConfirmationAuthorizer(Authorizer):
 
     hitl_manager: "HitlManager"
 
-    async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
+    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
         # 决定缓存命中直接用（cold reconcile，spec/07 §6）——内存优先,未命中回落事件日志
         # （否则跨重启再入会重新求批一遍）;内存 pending 由 request() 幂等复用。
         approval = await self.hitl_manager.find_resolved_for_tool_call(
-            agent.session_id, tool_call_id)
+            ctx.session_id, tool_call_id)
         if approval is None:
             hitl_id = await self.hitl_manager.request(
                 form="approval",
-                session_id=agent.session_id,
-                task_id=task.id if task else "",
-                agent_id=agent.id,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id or "",
+                agent_id=ctx.agent_id or "",
                 capability_id=capability.id,
                 arguments=arguments or {},
                 question=f"Allow tool '{capability.name}'?",

@@ -53,7 +53,7 @@ async def test_gateway_defer_raises_park_and_skips_provider() -> None:
         async def cancel(self, iid, ctx): return None
 
     class _DeferAuth(Authorizer):
-        async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id=""):
+        async def authorize(self, capability, ctx, arguments=None, *, tool_call_id=""):
             return AuthorizationDecision(allowed=False, defer=True)
 
     prov = _Prov()
@@ -220,7 +220,6 @@ async def test_answer_before_timeout_is_hot_and_wins() -> None:
 
 
 async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:
-    from types import SimpleNamespace
     from ctx_weft.core.auth import HumanConfirmationAuthorizer
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
     from ctx_weft.protocols import ProviderContext
@@ -232,17 +231,14 @@ async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:
 
     authz = HumanConfirmationAuthorizer(hitl_manager=mgr)
     cap = ToolCapability(id="fs:bash_exec", name="bash_exec", description="run")
-    agent = SimpleNamespace(id="a1", template_id="t", session_id="s1")
-    d = await authz.authorize(cap, agent, SimpleNamespace(id="t1"),
-                              ProviderContext(session_id="s1", tenant_id="default"),
-                              {"command": "ls"}, tool_call_id="tcZ")
+    ctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
+    d = await authz.authorize(cap, ctx, {"command": "ls"}, tool_call_id="tcZ")
     assert d.allowed and d.modified_arguments == {"command": "ls -la"}
     assert len(mgr.list_pending()) == 0     # 未新建
 
 
 async def test_authorize_cold_no_future_does_not_keyerror() -> None:
     """restart 后：rebuild_pending(无 future) + 冷 resolve → authorize 必须短路（否则 wait() KeyError）。"""
-    from types import SimpleNamespace
     from ctx_weft.core.auth import HumanConfirmationAuthorizer
     from ctx_weft.core.state.models import HitlRequest
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
@@ -261,9 +257,7 @@ async def test_authorize_cold_no_future_does_not_keyerror() -> None:
 
     authz = HumanConfirmationAuthorizer(hitl_manager=mgr)
     cap = ToolCapability(id="fs:bash_exec", name="bash_exec", description="run")
-    agent = SimpleNamespace(id="a1", template_id="t", session_id="s1")
+    ctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
     # reconcile 再入：必须用缓存决定、不调 wait()（否则 KeyError：无 future）
-    d = await authz.authorize(cap, agent, SimpleNamespace(id="t1"),
-                              ProviderContext(session_id="s1", tenant_id="default"),
-                              {"command": "ls"}, tool_call_id="tcR")
+    d = await authz.authorize(cap, ctx, {"command": "ls"}, tool_call_id="tcR")
     assert d.allowed and d.modified_arguments == {"command": "ls -la"}

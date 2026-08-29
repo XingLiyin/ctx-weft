@@ -12,12 +12,15 @@
 主方法对**一次调用**作授权决定：
 
 ```
-authorize(capability, agent, task, ctx, arguments?) -> AuthorizationDecision
-AuthorizationDecision { allowed: bool, message: str = "", modified_arguments: dict | None = None }
+authorize(capability, ctx, arguments?, *, tool_call_id="") -> AuthorizationDecision
+AuthorizationDecision { allowed: bool, message: str = "", modified_arguments: dict | None = None, defer: bool = False }
 ```
 
 - `message`：反馈 / 拒绝指导，回灌给 LLM（allow / deny 都可带）。
 - `modified_arguments`：allow 时的有效参数（`None` = 用原参）。
+- `defer`：挂起本次调用（不放行也不拒绝；gateway 绝不 invoke，上抛 HitlPark）。见 spec/07 §7。
+- `ctx` 是 `ProviderContext`，携带 session/task/agent 标识与 `agent_template_id`；
+  授权契约不依赖 core 的 Agent/Task 状态对象。
 
 `filter(capabilities, ...) -> capabilities` 是基于 `authorize` 的**批量便捷默认**（可见性过滤），
 保留给装配期/外部用；当前内部唯一消费点是 gateway 的单 cap `authorize`。
@@ -27,12 +30,12 @@ AuthorizationDecision { allowed: bool, message: str = "", modified_arguments: di
 | Authorizer | `authorize` 返回 |
 |------------|------|
 | `AllowAll` | `allowed=True`（默认） |
-| `AllowList` | 按 `agent.template_id` 查 `allow_map`/`deny_map`；拦截时带 `deny_message` |
+| `AllowList` | 按 `ctx.agent_template_id` 查 `allow_map`/`deny_map`；拦截时带 `deny_message` |
 | `HumanConfirmation` | 发 approval HITL，等应答，把 `message`/`modified_arguments` 透传进决定 |
 
 **AllowList 规则（必须按此顺序）**：
-- `cap.id ∈ deny_map[template_id]` → `allowed=False, message=deny_message`。
-- `allowed_set = allow_map.get(template_id)`：
+- `cap.id ∈ deny_map[ctx.agent_template_id]` → `allowed=False, message=deny_message`。
+- `allowed_set = allow_map.get(ctx.agent_template_id)`：
   - `None`（模板未登记）→ 放行。
   - 集合（含空集）→ 仅 `cap.id ∈ allowed_set` 放行；空集 = 全拦（拦截带 `deny_message`）。
 - deny 优先于 allow。
@@ -53,7 +56,8 @@ AuthorizationDecision { allowed: bool, message: str = "", modified_arguments: di
 `invoke(tool_name, arguments, state, ctx)` 的鉴权相关步骤（必须）：
 
 1. 按名查 cap；未找到或 `kind != "tool"` → 返回 `is_error` 结果，文案含 `unknown tool`。
-2. **鉴权**：`authorizer = _get_authorizer(cap.id)`；`decision = authorizer.authorize(cap, agent, task, ctx, arguments)`。
+2. **鉴权**：`authorizer = _get_authorizer(cap.id)`；`decision = authorizer.authorize(cap, ctx.provider_ctx, arguments, tool_call_id=…)`。
+   传入的必须是 `ProviderContext`，不是 loop 的 `LoopContext`。
    - `decision.allowed == False` → 返回 `is_error` 结果，**且绝不调用 provider.invoke**（关键安全不变式）。
      文案：有 `message` → `[Blocked by human: {message}]`（指导回灌）；否则 `[Error: capability 'X' not authorized]`。
 3. 放行 → 有效参数 = `decision.modified_arguments ?? arguments` → `_sanitize(有效参数)` → 找 provider
@@ -186,7 +190,7 @@ host 据 `request.kind` 决定动作与 UI：
 
 TS / Java 实现必须复现：
 
-- [ ] `authorize(cap, …) -> AuthorizationDecision{allowed, message, modified_arguments}`；`filter` 为基于它的默认。
+- [ ] `authorize(cap, ctx: ProviderContext, arguments?, *, tool_call_id) -> AuthorizationDecision{allowed, message, modified_arguments, defer}`；`filter` 为基于它的默认。
 - [ ] AllowList 的 deny 优先、未登记模板放行、空集全拦三条规则（拦截带 `deny_message`）。
 - [ ] `_get_authorizer` 三级解析顺序。
 - [ ] **拦截时 provider.invoke 绝不被调用**（安全不变式）；deny 的 `message` 作 `[Blocked by human: …]` 回灌。

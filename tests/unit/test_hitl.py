@@ -142,19 +142,15 @@ async def test_resolution_events_per_kind() -> None:
 # ── 3. 触发点 A：HumanConfirmationAuthorizer（approval 门控）端到端 ───────────────────
 
 
-def _agent():
-    return SimpleNamespace(id="agt_1", template_id="tmpl_a", session_id="s1")
-
-
 def _cap():
     return ToolCapability(id="fs:bash_exec", name="bash_exec", description="run shell")
 
 
 async def _filter_with_response(mgr: HitlManager, respond) -> list:
     authorizer = HumanConfirmationAuthorizer(hitl_manager=mgr)
-    ctx = ProviderContext(session_id="s1", tenant_id="default")
+    ctx = ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1")
     ftask = asyncio.create_task(
-        authorizer.filter([_cap()], _agent(), SimpleNamespace(id="tsk_1"), ctx, {"command": "ls"})
+        authorizer.filter([_cap()], ctx, {"command": "ls"})
     )
     req = await _await_pending(mgr)
     assert req.form == "approval"
@@ -185,9 +181,9 @@ async def test_authorizer_reject_blocks() -> None:
 
 async def _authorize_with_response(mgr: HitlManager, respond):
     authorizer = HumanConfirmationAuthorizer(hitl_manager=mgr)
-    ctx = ProviderContext(session_id="s1", tenant_id="default")
+    ctx = ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1")
     dtask = asyncio.create_task(
-        authorizer.authorize(_cap(), _agent(), SimpleNamespace(id="tsk_1"), ctx, {"command": "ls"})
+        authorizer.authorize(_cap(), ctx, {"command": "ls"})
     )
     req = await _await_pending(mgr)
     await respond(req.id)

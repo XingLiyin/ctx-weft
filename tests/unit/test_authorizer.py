@@ -47,8 +47,10 @@ def _cap(cid: str = "test:echo", name: str = "echo") -> ToolCapability:
     return ToolCapability(id=cid, name=name, description="Echo back the input.")
 
 
-def _ctx() -> ProviderContext:
-    return ProviderContext(session_id="s1", tenant_id="default")
+def _ctx(template_id: str = "tmpl_a") -> ProviderContext:
+    return ProviderContext(
+        session_id="s1", tenant_id="default", agent_id="agt_1", agent_template_id=template_id,
+    )
 
 
 # ── 1. AllowAll / 2. AllowList ────────────────────────────────────────────────────
@@ -56,42 +58,42 @@ def _ctx() -> ProviderContext:
 
 async def test_allow_all_passes_everything() -> None:
     caps = [_cap("a:x", "x"), _cap("b:y", "y")]
-    out = await AllowAllAuthorizer().filter(caps, _agent(), _task(), _ctx())
+    out = await AllowAllAuthorizer().filter(caps, _ctx())
     assert {c.id for c in out} == {"a:x", "b:y"}
 
 
 async def test_allow_list_whitelist() -> None:
     auth = AllowListAuthorizer(allow_map={"tmpl_a": {"a:x"}})
-    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _agent(), _task(), _ctx())
+    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _ctx())
     assert {c.id for c in out} == {"a:x"}
 
 
 async def test_allow_list_denylist_wins() -> None:
     auth = AllowListAuthorizer(deny_map={"tmpl_a": {"b:y"}})
-    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _agent(), _task(), _ctx())
+    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _ctx())
     assert {c.id for c in out} == {"a:x"}
 
 
 async def test_allow_list_unknown_template_falls_back_to_allow() -> None:
     auth = AllowListAuthorizer(allow_map={"other": {"a:x"}})
-    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _agent("tmpl_a"), _task(), _ctx())
+    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _ctx("tmpl_a"))
     assert {c.id for c in out} == {"a:x", "b:y"}  # tmpl_a 不在 allow_map → 不限制
 
 
 async def test_allow_list_empty_set_blocks_all() -> None:
     auth = AllowListAuthorizer(allow_map={"tmpl_a": set()})
-    out = await auth.filter([_cap("a:x", "x")], _agent(), _task(), _ctx())
+    out = await auth.filter([_cap("a:x", "x")], _ctx())
     assert out == []
 
 
 async def test_authorize_returns_decision() -> None:
-    d = await AllowAllAuthorizer().authorize(_cap(), _agent(), _task(), _ctx())
+    d = await AllowAllAuthorizer().authorize(_cap(), _ctx())
     assert isinstance(d, AuthorizationDecision) and d.allowed is True
 
 
 async def test_allow_list_deny_carries_message() -> None:
     auth = AllowListAuthorizer(allow_map={"tmpl_a": set()}, deny_message="blocked by policy")
-    d = await auth.authorize(_cap("a:x", "x"), _agent(), _task(), _ctx())
+    d = await auth.authorize(_cap("a:x", "x"), _ctx())
     assert d.allowed is False and d.message == "blocked by policy"
 
 
@@ -133,7 +135,10 @@ def _state_ctx():
     ctx = LoopContext(
         assembler=None, llm=None, memory=InMemoryMemoryProvider(),
         event_bus=InProcessEventBus(),
-        provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1"),
+        provider_ctx=ProviderContext(
+            session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1",
+            agent_template_id="tmpl_a",
+        ),
     )
     return state, ctx
 
@@ -182,12 +187,12 @@ async def test_gateway_unknown_tool_errors() -> None:
 
 
 class _ModifyAuthorizer(Authorizer):
-    async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
+    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
         return AuthorizationDecision(allowed=True, message="be careful", modified_arguments={"text": "override"})
 
 
 class _DenyMsgAuthorizer(Authorizer):
-    async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
+    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
         return AuthorizationDecision(allowed=False, message="not in this context")
 
 
@@ -245,3 +250,30 @@ def test_sanitize_redacts_sensitive_headers() -> None:
 def test_sanitize_passes_through_without_headers() -> None:
     args = {"command": "ls"}
     assert _sanitize(args) == {"command": "ls"}
+
+
+# ── 6. gateway 必须传 ProviderContext（不是 LoopContext）给 authorizer ──────────────
+
+
+async def test_gateway_passes_provider_context_not_loop_context() -> None:
+    """gateway 必须把 ProviderContext（而非 LoopContext）交给 authorizer。
+
+    回归 latent bug：capability_gateway 曾把 LoopContext 传给形参 ctx: ProviderContext。
+    三个内置实现都不读 ctx 所以没爆，但 host 自写 authorizer 读 ctx.session_id 会 AttributeError。
+    """
+    seen: dict = {}
+
+    class _CtxSpy(Authorizer):
+        async def authorize(self, capability, ctx, arguments=None, *, tool_call_id=""):
+            seen["ctx"] = ctx
+            return AuthorizationDecision(allowed=True)
+
+    provider = _EchoProvider()
+    gw, _ = _gateway(provider, authorizers={"test:echo": _CtxSpy()})
+    state, ctx = _state_ctx()
+    await gw.invoke("test__echo", {"text": "hi"}, state, ctx)
+
+    got = seen["ctx"]
+    assert isinstance(got, ProviderContext)
+    assert got.session_id == "s1"
+    assert got.agent_template_id == "tmpl_a"

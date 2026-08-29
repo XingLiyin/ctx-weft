@@ -67,7 +67,7 @@ class _Prov(ToolCapabilityProvider):
 class _NoteAuthorizer(Authorizer):
     """放行但带 human note（走 `[Human note: ...]` 拼接分支）。"""
 
-    async def authorize(self, capability, agent, task, ctx, arguments, tool_call_id=""):
+    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id=""):
         return AuthorizationDecision(allowed=True, message="be careful")
 
 

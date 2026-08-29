@@ -58,7 +58,7 @@ class _Echo(ToolCapabilityProvider):
 class _BlockAll(Authorizer):
     """镜像生产里工作目录守卫的拒绝（path 在 workspace 之外，已拒绝写入）。"""
 
-    async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
+    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
         return AuthorizationDecision(allowed=False, message="路径在工作目录之外，已拒绝写入")
 
 

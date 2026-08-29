@@ -1936,6 +1936,7 @@ class CtxWeftRuntime:
             tenant_id=session.tenant_id,
             task_id=task.id,
             agent_id=agent.id,
+            agent_template_id=agent.template_id,
             timestamp=now_utc(),
             skill_name=task.settings.skill_name if isinstance(task.settings, NormalTaskSettings) else "",
         )

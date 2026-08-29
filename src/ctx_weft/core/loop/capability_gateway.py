@@ -176,8 +176,9 @@ class CapabilityGateway:
 
         # 2. Authorization：按 cap.id 前缀取 per-provider authorizer，无则用 default
         authorizer = self._get_authorizer(cap.id)
+        # 交出 ProviderContext（不是 loop 的 LoopContext）——授权契约只认 protocols 类型。
         decision = await authorizer.authorize(
-            cap, state.agent, state.task, ctx, arguments, tool_call_id=tool_call_id,
+            cap, ctx.provider_ctx, arguments, tool_call_id=tool_call_id,
         )
         if decision.defer:
             # 守住安全不变式：绝不调 provider.invoke；上抛 park 信号 → loop 落 SUSPENDED（spec/07 §7）。

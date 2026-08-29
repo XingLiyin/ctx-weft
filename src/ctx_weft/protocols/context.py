@@ -106,7 +106,7 @@ class ProviderContext:
     """Provider 调用上下文。core 在每次 provider 操作时构造并注入。
 
     携带：
-    - 当前 session/task/agent 标识（限定操作范围）
+    - 当前 session/task/agent 标识 + agent 模板 id（限定操作范围 / 授权维度）
     - tenant_id（多租户预留）
     - trace_id（全链路追踪）
     - invocation_id（capability invoke 时分配，用于 cancel）
@@ -117,6 +117,7 @@ class ProviderContext:
     tenant_id: str = "default"
     task_id: str | None = None
     agent_id: str | None = None
+    agent_template_id: str = ""  # 该 agent 的模板 id；授权按模板维度做策略（AllowListAuthorizer）
     trace_id: str | None = None
     invocation_id: str | None = None
     request_id: str | None = None
