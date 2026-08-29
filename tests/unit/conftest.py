@@ -73,7 +73,15 @@ async def fake_state_ctx():
     # Minimal agent with required attributes
     agent = SimpleNamespace(
         id="a1",
-        loop_config=SimpleNamespace(compact_keep_last=2),
+        # 字段须与 protocols/template.py::LoopConfig 的默认值一致。
+        # 缺字段的后果不是「测试报错」而是「测试假绿」：被测代码读到不存在的属性抛
+        # AttributeError，而 _run_background_observe 之类会整段吞掉它，于是用例走的是
+        # 异常路径却自称验了成功路径。实测探针确认曾有 1 条如此（详见下）。
+        loop_config=SimpleNamespace(
+            compact_keep_last=2,
+            max_turns_per_observe=5,          # LoopConfig 默认
+            short_segment_token_threshold=400,  # LoopConfig 默认
+        ),
         runtime={"llm_model": "mock"},
         loop_guard=SimpleNamespace(context_limit=100000, context_tokens=1000),
     )
