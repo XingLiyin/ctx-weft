@@ -28,7 +28,7 @@ def _now_utc() -> datetime:
     return datetime.now(UTC)
 
 
-# 三种内建等待形态（spec 2026-07-05）：
+# 三种内建等待形态（spec 2026-07-05，替代旧 kind + capability_id sentinel 拼判）：
 #   approval — 审批门控：放行/拒绝一次工具调用（HumanConfirmationAuthorizer 触发）
 #   question — ask_user 结构化提问，答复回灌 LLM
 #   wait     — act 纯文本暂停 / 软打断（wait_for_user 冷 park）

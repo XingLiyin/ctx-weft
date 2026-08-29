@@ -466,6 +466,7 @@ class CtxWeftRuntime:
 
     def __init__(
         self,
+        *,
         providers: ProviderRegistry | None = None,
         llm: LLMClient | None = None,
         hitl_manager: HitlManager | None = None,

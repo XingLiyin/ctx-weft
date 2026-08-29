@@ -29,13 +29,37 @@ def test_event_bus_defaults_when_absent(runtime_registry) -> None:
 
 def test_runtime_module_has_no_toplevel_provider_import() -> None:
     """兜底实现只在需要时才 import——不得在模块级把 providers 拖进来。"""
+    import ast
+    import importlib.util
     import pathlib
 
     import ctx_weft.core.runtime as m
 
-    lines = pathlib.Path(m.__file__).read_text(encoding="utf-8").splitlines()
-    toplevel = [
-        ln for ln in lines
-        if ln.startswith("from ctx_weft.providers") or ln.startswith("import ctx_weft.providers")
-    ]
-    assert toplevel == [], f"模块级 providers import 残留: {toplevel}"
+    def _is_provider(name: str) -> bool:
+        return name == "ctx_weft.providers" or name.startswith("ctx_weft.providers.")
+
+    src = pathlib.Path(m.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=m.__file__)
+
+    offenders: list[str] = []
+    # 只看模块顶层的直接子节点——惰性 import 全部缩进在函数/方法体内，
+    # 不是 ast.Module.body 的直接元素，天然被排除。
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_provider(alias.name):
+                    offenders.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                base = node.module or ""
+            else:
+                dotted = "." * node.level + (node.module or "")
+                base = importlib.util.resolve_name(dotted, m.__package__)
+            if _is_provider(base):
+                offenders.append(base)
+            for alias in node.names:
+                target = f"{base}.{alias.name}" if base else alias.name
+                if _is_provider(target):
+                    offenders.append(target)
+
+    assert offenders == [], f"模块级 providers import 残留: {offenders}"

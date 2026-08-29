@@ -22,13 +22,12 @@ from typing import TYPE_CHECKING, Any
 
 import jsonschema
 
-from ctx_weft.protocols.capability import Authorizer  # noqa: F401
 from ctx_weft.core.content import normalize_content_parts, redact_content_for_event
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
-from ctx_weft.protocols.capability import CapabilityProvider, ToolCapabilityProvider, qualify
+from ctx_weft.protocols.capability import Authorizer, CapabilityProvider, ToolCapabilityProvider, qualify
 from ctx_weft.protocols.context import ContentPart, TextPart
 from ctx_weft.protocols.llm import RAW_ARGS_KEY
 from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL, _PLAN_DISPATCH_ACK

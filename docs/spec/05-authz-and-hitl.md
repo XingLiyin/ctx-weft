@@ -141,6 +141,12 @@ question / context / questions / status / message / modified_arguments / created
 > 以 `protocols.hitl.HITL_FORM_*` 常量给出；host 可自定义其它值，core 原样透传、
 > 不做白名单校验。`status` 相反是闭集——状态机是 core 不变式。
 > 契约位置：`ctx_weft.protocols.hitl`（host-facing，非 core 内部状态）。
+> 但 core 确实对内建值 `"wait"` 做了两处字面量分支：`core/control/reducers.py:477`
+> 折叠 `SESSION_PAUSED_HITL` 事件时，`form == "wait"` 记为软待命 `PAUSED`，其余记为
+> `PAUSED_HITL`；`core/runtime.py:1725` 冷 HITL 应答恢复时，只有 `form == "wait"` 才把
+> 应答作为 `USER_PROMPT` 注入 task 层（`_resume_after_cold_hitl`），其它 form 走 reconcile
+> 覆盖。这两个行为都只认字面量 `"wait"`——host 自定义的 form（即便语义上也是「纯文本等待」）
+> 会落进这两处的「其它」分支，拿不到内建 `wait` 的这两个行为。
 
 ### 接口与规则（必须）
 

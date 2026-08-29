@@ -4,7 +4,7 @@
 >
 > **Phase B 落地内容**：HitlCancelled 事件、`pending_hitl` reducer fold、
 > `request()` 按 tool_call_id 幂等去重、`ReconcileStep` + `_dangling_tool_calls` 检测、
-> `request_human_input` input-kind 冷路径短路（已解决 HITL 直接复用答复、不再 park）。
+> `request_human_input` question-form 冷路径短路（已解决 HITL 直接复用答复、不再 park）。
 >
 > **Phase C-1 落地内容**：`recover_session()` 从 `pending_hitl` 投影重建 `HitlManager`；
 > `TaskManager.restore()` 区分"HITL 挂起"与"等子任务挂起"（前者不重入队，后者视子任务状态决定）；
@@ -16,7 +16,7 @@
 > `AuthorizationDecision.defer` 字段（gateway 见 defer → 不调 provider.invoke + 抛 HitlPark）；
 > `tool_call_id` 透传进 `authorize()` 签名；`_run_loop` 捕获 `HitlPark` → task `SUSPENDED`（非 `FAILED`）；
 > 超时 = hot→cold 驱逐（Future 移出 `_futures`，request 仍 `pending`，单一权威锁保证驱逐 vs. 应答互斥）；
-> approval-kind 冷路径：`resolve_approve` 写决定缓存，`HumanConfirmationAuthorizer.authorize`
+> approval-form 冷路径：`resolve_approve` 写决定缓存，`HumanConfirmationAuthorizer.authorize`
 > 按 `tool_call_id` 键命中已解决 HITL 后直接返回（短路 `wait()`，重启后无 future 时不 KeyError）。
 >
 > 真相源：`core/orchestrator/hitl_manager.py`、`protocols/capability.py`（契约）+ `providers/authorizer/`（实现）、
@@ -81,9 +81,9 @@ pending ──answer(text)────▶ answered    （HitlAnswered；写 tool
 
 ---
 
-## 4. input-kind 流程（`request_human_input` / `needs_user_input`）
+## 4. question-form 流程（`request_human_input` / `needs_user_input`）
 
-**请求**：ingest 控制工具 `TOOL_INVOCATION`（已发生）→ `request(kind="input")` 持久登记 + 建 Future +
+**请求**：ingest 控制工具 `TOOL_INVOCATION`（已发生）→ `request(form="question")` 持久登记 + 建 Future +
 启动超时 → `session.status=PAUSED_HITL`（**热窗口内也是 PAUSED_HITL**，投影全程一致）→ 协程
 `await` 该 Future（受超时约束）。
 
@@ -99,7 +99,7 @@ pending ──answer(text)────▶ answered    （HitlAnswered；写 tool
 
 ---
 
-## 5. approval-kind 流程（gateway bash 门控）
+## 5. approval-form 流程（gateway bash 门控）
 
 **热路径绕过最难的部分。** 人类在热窗口内 `approve`：Future set → `HumanConfirmationAuthorizer.authorize`
 拿到决定返回 gateway → gateway 原地用 `modified_arguments` 执行 `provider.invoke()`。**不进任何重入机制。**
@@ -205,7 +205,7 @@ _resolve(task) 选出基础 initial_step（normal → "reason"）后：
 
 approval 的 authorizer 需 `tool_call_id` 才能按它键 HITL。该 id 已经 `ctx.extra["tool_call_id"]`
 透传给 provider（`capability_gateway.py:191`），但**当前未传进 `authorize()`**——需补一处签名/透传。
-input-kind 的 control provider 已能从 `ctx.extra` 取到，无需改。
+question-form 的 control provider 已能从 `ctx.extra` 取到，无需改。
 
 ---
 
@@ -216,7 +216,7 @@ input-kind 的 control provider 已能从 `ctx.extra` 取到，无需改。
 - 超时不抛"普通 cancel/异常"，而抛一个**专用 park 信号**，从 authorizer / control-provider 一路上抛，
   **必须穿过 `CapabilityGateway` 的 `except Exception`**（否则被当成 `[Exception: …]` 错误结果），
   最终落到 loop 设 task `SUSPENDED`（**不是 FAILED**）。
-- 这条 park 管线与 approval-kind 冷路径的「authorizer 返回 `defer`」是**同一套基础设施**——
+- 这条 park 管线与 approval-form 冷路径的「authorizer 返回 `defer`」是**同一套基础设施**——
   `AuthorizationDecision` 加 `defer: bool`，gateway 见 `defer`/park 信号即「不调 `provider.invoke`
   （守住安全不变式）+ task 挂起 + unwind」。合并实现。
 - `_run_task` 现已在 `BaseException` 分支丢弃未 flush 的 staged 子任务（`task_manager.py:224`），
@@ -251,7 +251,7 @@ README「事件 + reducer 是唯一真相」一致。
 
 ```
 pending_hitl: { request_id → HitlRequest }   # 仅未解决的
-  HitlRequired              → 新增一条 pending（kind/cap/tool_call_id/question/context）
+  HitlRequired              → 新增一条 pending（form/cap/tool_call_id/question/context）
   HitlAnswered/Approved/Modified/Rejected/Cancelled(同 request_id) → 从 pending_hitl 移除
 ```
 
@@ -324,7 +324,7 @@ session 级暂停状态分两个 host read-model，现状割裂、须补齐持�
 - `/answer`、`/approve`、`/reject` 端点签名不变；内部据 `_futures` 命中与否分流热（set Future）/冷
   （写结果 + 触发该 session 恢复）。
 - `HumanConfirmationAuthorizer(hitl_manager=runtime.hitl_manager)` 等装配点不变（仍单实例共享，
-  cli.py:95 / main.py:28）。前端不变：据 `request.kind` 渲染审批/答题，`HitlRequired`/`HitlAnswered` 驱动 UI。
+  cli.py:95 / main.py:28）。前端不变：据 `request.form` 渲染审批/答题，`HitlRequired`/`HitlAnswered` 驱动 UI。
 - **持久投影补 session 状态维护（§9.1，非新表）**：`projection_updater` 加 `SessionPausedHitl` → `PAUSED_HITL`、
   resolve → `RUNNING` 的 `sessions.status` 维护，使跨重启暂停态不丢、`recover` 不误标 `INTERRUPTED`。
 
@@ -337,8 +337,8 @@ session 级暂停状态分两个 host read-model，现状割裂、须补齐持�
 | 快速回复 | 就地续跑 | 就地续跑（热路径，等价） |
 | 慢回复 / 久挂 | 误判失败 或 协程永驻 | 驱逐内存、保留 pending、晚到照常 resume |
 | 跨重启 | 丢失 → INTERRUPTED | 可恢复（请求即持久化 + 全走冷） |
-| input-kind 实现量 | 现成 | 中（热=现成；冷=复用委派挂起） |
-| approval-kind 实现量 | 现成 | 热=现成；冷=高（`defer` + act-step 重入） |
+| question-form 实现量 | 现成 | 中（热=现成；冷=复用委派挂起） |
+| approval-form 实现量 | 现成 | 热=现成；冷=高（`defer` + act-step 重入） |
 | 与架构一致性 | 唯一阻塞等待路径 | 冷路径与委派/事件溯源一致 |
 
 ---
@@ -400,6 +400,6 @@ session 级暂停状态分两个 host read-model，现状割裂、须补齐持�
 已部分落地——**其实际成熟度直接决定 reconcile 检测可不可靠**，不能假设已齐。
 
 **建议落地顺序**（按风险递增、可独立验证）：
-1. B：HITL 持久化（§9）+ `reconcile` step（§6），先只接 input-kind 冷路径——孤立、可单测。
+1. B：HITL 持久化（§9）+ `reconcile` step（§6），先只接 question-form 冷路径——孤立、可单测。
 2. C-①：改 `restore` 的 SUSPENDED 区分 + 崩溃恢复接驳（§9）——单独一批，重跑全部恢复回归。
 3. C-②/D：park/驱逐 + 超时降级 + approval `defer` 冷路径——最后上，受 D 语义取舍约束。

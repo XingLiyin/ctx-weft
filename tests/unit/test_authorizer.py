@@ -285,13 +285,40 @@ def test_authorizer_contract_lives_in_protocols() -> None:
 
 
 def test_protocols_capability_has_no_core_dependency() -> None:
-    """契约层不得反向依赖 core（含 TYPE_CHECKING）。"""
+    """契约层不得反向依赖 core（含 TYPE_CHECKING、含相对导入）。"""
+    import ast
+    import importlib.util
     import pathlib
 
     import ctx_weft.protocols.capability as m
 
+    def _is_core(name: str) -> bool:
+        return name == "ctx_weft.core" or name.startswith("ctx_weft.core.")
+
     src = pathlib.Path(m.__file__).read_text(encoding="utf-8")
-    assert "ctx_weft.core" not in src
+    tree = ast.parse(src, filename=m.__file__)
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_core(alias.name):
+                    offenders.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                base = node.module or ""
+            else:
+                # 相对导入（如 `from ..core import x`）按 __package__ 解析成绝对路径再判定。
+                dotted = "." * node.level + (node.module or "")
+                base = importlib.util.resolve_name(dotted, m.__package__)
+            if _is_core(base):
+                offenders.append(base)
+            for alias in node.names:
+                target = f"{base}.{alias.name}" if base else alias.name
+                if _is_core(target):
+                    offenders.append(target)
+
+    assert offenders == [], f"protocols 反向依赖 core: {offenders}"
 
 
 def test_builtin_authorizers_live_in_providers() -> None:

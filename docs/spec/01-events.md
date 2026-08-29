@@ -1,6 +1,6 @@
 # 01 · 事件类型与结构
 
-> 真相源：`src/ctx_weft/core/events/types.py`
+> 真相源：`src/ctx_weft/protocols/events.py`
 
 ---
 
