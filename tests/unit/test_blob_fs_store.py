@@ -4,7 +4,7 @@ import pytest
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX, EventBlobStore, MemoryBlobStore, ProviderContext,
 )
-from ctx_weft.providers.blob_fs import FsBlobStore
+from ctx_weft.providers.blob.fs import FsBlobStore
 
 
 def _ctx():

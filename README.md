@@ -1063,7 +1063,7 @@ async def test_single_task(runtime):
   （占位 + warning）——绝不会原样流进 memory 侧的 task 字段。
 - **两侧的 ref 是两个独立的命名空间。** memory 侧与 event 侧各自 put、各自拿
   自己的 ref，core 从不比较两者、也从不拿一侧的 ref 去另一侧解。宿主自
-  2026-08-28 起可以分开注册两个实现——`providers/blob_fs/FsBlobStore` 是可
+  2026-08-28 起可以分开注册两个实现——`providers/blob/fs/FsBlobStore` 是可
   直接用的内容寻址示例，可以各建一个实例分别注册为 `MemoryBlobStore` 与
   `EventBlobStore`。共用同一个实例（如 `SqlMemoryProvider`）仍受
   `collect_blobs` 陷阱影响：它只看 memory 侧活引用，会删掉事件流仍需要的
