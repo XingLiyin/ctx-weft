@@ -47,3 +47,39 @@ def test_registry_returns_registered_store():
 
 def test_blob_ref_prefix_value():
     assert BLOB_REF_PREFIX == "blob:"
+
+
+async def test_memory_blob_store_does_not_auto_resolve_from_memory_provider():
+    """两个 blob store 的解析规则对称：都只有「显式注册 > Null」两级（spec §5.3）。
+
+    曾经 memory 侧有第三级——memory provider 若自己实现了 MemoryBlobStore 就直接用它。
+    那一级的唯一服务对象是 SqlMemoryProvider 的字节存储，字节移出 RDBMS 后无对象可服务。
+    """
+    from ctx_weft.protocols import MemoryBlobStore, NullMemoryBlobStore
+    from ctx_weft.core.runtime import ProviderRegistry
+
+    class _MemoryThatIsAlsoBlobStore(MemoryBlobStore):
+        name = "fake"
+
+        async def put(self, data, media_type, ctx):
+            return "blob:" + "0" * 64
+
+        async def get(self, ref, ctx):
+            return None
+
+    reg = ProviderRegistry()
+    reg.register_memory(_MemoryThatIsAlsoBlobStore())
+    assert isinstance(reg.get_memory_blob_store(), NullMemoryBlobStore)
+
+
+async def test_memory_blob_store_returns_explicit_registration():
+    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.providers.blob.fs import FsBlobStore
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as d:
+        store = FsBlobStore(Path(d))
+        reg = ProviderRegistry()
+        reg.register_memory_blob_store(store)
+        assert reg.get_memory_blob_store() is store

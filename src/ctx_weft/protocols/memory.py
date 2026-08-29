@@ -515,14 +515,15 @@ class MemoryBlobStore(ABC):
     回收都应与它同事务——语义上这就是 memory 多模态支持的字节侧，与上面
     ``MemoryProvider`` 的【多模态无损存取契约】（part 结构侧）是同一件事的两面，
     宿主实现多模态 memory 时应在本模块一次读全。
-    保持独立 ABC 而不并入 ``MemoryProvider``，是因为 blob 能力**可选**：
-    ``InMemoryProvider`` 不实现它仍然完全合规，而 ``ProviderRegistry.get_memory_blob_store()``
-    的自动解析判据正是 ``isinstance(mem, MemoryBlobStore) and mem.can_externalize``——
-    并入协议会让该判据恒真、失去分辨力。
-    仓内实现见 ``ctx_weft.providers.memory.sql.SqlMemoryProvider``。
-    （Phase 3b 曾有一个挂在 FilesystemToolsProvider 上的实现，裁定 D5 已移除——
-    字节与引用分居两处时，回收无法与 ingest/fold 事务性地一致；本协议也因此
-    从 ``protocols/filesystem.py`` 迁至此处。）
+    保持独立 ABC 而不并入 ``MemoryProvider``，是因为两者的能力**正交**：字节放在哪
+    （文件系统 / 对象存储 / 数据库）与记忆怎么存是两个独立的部署决策，宿主换其中一个
+    不应被迫换另一个。仓内实现见 ``ctx_weft.providers.blob.fs.FsBlobStore``
+    （它同时也满足 ``EventBlobStore``，那是实现层的方便，不是协议层的关系）。
+
+    ⚠️ 历史：Phase 3b 曾把本协议挂在 ``FilesystemToolsProvider`` 上（裁定 D5 移除），
+    随后 ``SqlMemoryProvider`` 曾同时实现它、由 ``ProviderRegistry`` 自动解析
+    （spec 2026-08-29 §5 移除——D4 论证的是引用边该与 ingest 同事务，不是字节该进 RDBMS）。
+    现在字节侧只由显式注册决定。
 
     put 必须**内容寻址且幂等**：同样的 data 返回同样的 ref，重复调用不重复存。
     这同时给到三件事：写入端去重、重放安全、以及 rehydrate 字节稳定——同一 ref

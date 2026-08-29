@@ -307,25 +307,21 @@ class ProviderRegistry:
         self._blob_store = store
 
     def get_memory_blob_store(self) -> "MemoryBlobStore":
-        """取 blob store。优先级：**显式注册 > memory provider > NullMemoryBlobStore**。
+        """取 memory 侧 blob store。**只有两级：显式注册 > NullMemoryBlobStore。**
 
-        中间那一级是裁定 D4（blob 并入 memory）的接线点：memory provider
-        若同时实现了 ``MemoryBlobStore`` 且 ``can_externalize``（如
-        ``providers.memory.sql.SqlMemoryProvider``），它就是字节的持有者，
-        宿主不必再单独注册一遍。纯内存 provider 据裁定 D6 不实现
-        ``MemoryBlobStore``，回落 ``NullMemoryBlobStore`` ——不接 blob 的宿主行为逐字节不变。
+        与 `get_event_blob_store()` 完全对称。曾经这里有第三级——「memory provider 自己
+        实现了 MemoryBlobStore 且 can_externalize 就用它」——那一级的唯一服务对象是
+        `SqlMemoryProvider` 的字节存储；字节已移出 RDBMS（spec 2026-08-29 §5），
+        该级无对象可服务，一并删除。
 
-        探询走 ``can_externalize`` 而不是“调 put 捕异常”（Phase 1 终审契约）。
-        回落结果**不缓存到** ``self._blob_store``：缓存会让
-        “先 get_memory_blob_store()、后 register_memory()” 的接线顺序静默地拿不到 memory。
-        ``NullMemoryBlobStore`` 实例仍只建一次，重复调用返回同一对象。
+        自动解析删掉之后，「字节放哪」这件事只由接线代码表达，不再藏在解析规则里：
+        宿主要 blob 能力就显式 `register_memory_blob_store(FsBlobStore(...))`。
+        不注册就是 `NullMemoryBlobStore`，行为与不接 blob 的宿主逐字节一致。
+
+        `NullMemoryBlobStore` 实例只建一次，重复调用返回同一对象。
         """
         if self._blob_store is not None:
             return self._blob_store
-        from ctx_weft.protocols import MemoryBlobStore as _MemoryBlobStore
-        mem = self._memory
-        if isinstance(mem, _MemoryBlobStore) and mem.can_externalize:
-            return mem
         if self._null_blob_store is None:
             from ctx_weft.protocols import NullMemoryBlobStore
             self._null_blob_store = NullMemoryBlobStore()

@@ -66,9 +66,9 @@ class FsBlobStore(MemoryBlobStore, EventBlobStore):
     async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
         """内容寻址存字节，返回 ``blob:<sha256>``；同字节幂等（已存在则只刷新 mtime）。
 
-        已存在时**不重写内容与 media_type**（先写入者胜），但仍刷新 mtime——语义同
-        ``SqlMemoryProvider.put``：「最后一次有人声称要用它」，是 `collect` 宽限期
-        赖以成立的前提（见该类同名 docstring）。
+        已存在时**不重写内容与 media_type**（先写入者胜），但仍刷新 mtime——「最后一次
+        有人声称要用它」，是 `collect` 宽限期赖以成立的前提（见 spec 2026-08-29 §5，
+        以及本类 `collect` 的 docstring）。
 
         首次写入走临时文件 + ``os.replace`` 的原子落盘，避免半截文件被并发的
         `get` 读到；本仓 store 协议全是 async，阻塞 IO 经 `asyncio.to_thread` 执行。
@@ -146,12 +146,14 @@ class FsBlobStore(MemoryBlobStore, EventBlobStore):
            EventBlobStore）时，调用方必须把两侧的活引用合并后一起传进来**：只喂
            memory 侧会把事件流仍需要的字节当孤儿删掉，反之亦然（本类 docstring
            已警示，这里是它在代码里的落点）。
-        2. **mtime 早于 ``now - grace_period``**。这是正确性要求，不是优化——理由
-           与 ``SqlMemoryProvider.collect_blobs`` 相同：`put` 与真正建立引用之间
-           必然存在一个窗口（中间隔着 HITL park、重试、崩溃后重放），只按
-           「无引用」判会在窗口内把还没用上的字节删掉。`put` 对已存在的 sha 会
-           刷新 mtime（「最后一次有人声称要用它」），所以重新 put 一份被引用者
-           已全部失效的旧字节，也会重新打开这个窗口——宽限期对这种情况同样保护。
+        2. **mtime 早于 ``now - grace_period``**。这是正确性要求，不是优化——理由见
+           spec 2026-08-29 §5：`put` 与真正建立引用之间必然存在一个窗口
+           （中间隔着 HITL park、重试、崩溃后重放），只按活引用判会在窗口内把还没
+           用上的图删掉。宿主用 `SqlMemoryProvider.live_blob_refs()` 取活引用集合，
+           **宽限期由本方法自己把关**——那个方法返回的是「此刻的活引用」，不含窗口语义。
+           `put` 对已存在的 sha 会刷新 mtime（「最后一次有人声称要用它」），所以重新
+           put 一份被引用者已全部失效的旧字节，也会重新打开这个窗口——宽限期对这种
+           情况同样保护。
 
         `now` 若传入 naive datetime（无 tzinfo），按 UTC 归一——本类内部一律用
         tz-aware UTC 计时（文件 mtime 经 `datetime.fromtimestamp(..., tz=UTC)` 转换），
