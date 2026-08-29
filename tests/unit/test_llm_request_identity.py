@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import ctx_weft.core.loop.steps.act as _act_mod
 import ctx_weft.core.loop.steps.observe as _obs_mod
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.llm_gateway import resolve_llm_identity
 from ctx_weft.core.loop.steps.act import _run_llm_turn
 from ctx_weft.core.loop.steps.observe import run_observe_react

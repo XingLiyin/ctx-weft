@@ -12,7 +12,7 @@ from datetime import timedelta
 from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.utils import as_utc, content_to_text, generate_id, image_tokens, now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress
 from ctx_weft.protocols.capability import qualify

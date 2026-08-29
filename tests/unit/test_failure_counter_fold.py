@@ -12,7 +12,7 @@ from ctx_weft.core.control.reducers import (
     reduce_events, serialize_view, deserialize_view, apply_events
 )
 from ctx_weft.core.control.types import RunStateView
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 
 
 def _ts() -> datetime:

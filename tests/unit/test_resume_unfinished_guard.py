@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import pytest
 
 from ctx_weft.core.errors import UnfinishedTasksError
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 

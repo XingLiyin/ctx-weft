@@ -525,7 +525,7 @@ async def test_blob_anchors_to_the_session_tenant_via_live_owner():
 @pytest.mark.asyncio
 async def test_blob_anchors_to_the_session_tenant_via_event_log_on_cold_reply():
     """冷路径：进程重启后无活 TM，tenant 由事件日志解出（每条 Event 都带 tenant_id）。"""
-    from ctx_weft.core.events.types import Event
+    from ctx_weft.protocols.events import Event
     from ctx_weft.core.utils import generate_id, now_utc
 
     store = _CountingStore()

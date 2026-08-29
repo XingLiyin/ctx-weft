@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 from types import SimpleNamespace
 import ctx_weft.core.loop.steps.background_observe as bo
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols import MemoryEvent, MemoryEventType
 
 

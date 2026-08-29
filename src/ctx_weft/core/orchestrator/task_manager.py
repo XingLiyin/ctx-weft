@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
 from ctx_weft.core.content import content_with_suffix
-from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
+from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.state.models import (
@@ -28,7 +28,7 @@ from ctx_weft.core.state.models import (
 from ctx_weft.core.utils import generate_id, now_utc
 
 if TYPE_CHECKING:
-    from ctx_weft.core.events.bus import EventBus
+    from ctx_weft.protocols.events import EventBus
 
 logger = logging.getLogger(__name__)
 

@@ -8,7 +8,7 @@ from ctx_weft.protocols import LLMCallError, LLMChunk, LLMOutageError, LLMReques
 from ctx_weft.core.loop import llm_gateway
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient, _sleep_cancellable as _real_sleep
 from ctx_weft.core.control.tokens import CancelToken
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 
 pytestmark = pytest.mark.asyncio
 

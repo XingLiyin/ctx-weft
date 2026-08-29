@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ctx_weft.core.control.reducers import reduce_events, serialize_view, deserialize_view
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 
 pytestmark = pytest.mark.asyncio
 

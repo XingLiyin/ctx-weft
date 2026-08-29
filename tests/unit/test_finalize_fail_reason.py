@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.loop.steps.observe import Verdict
 from ctx_weft.core.state.models import NormalTaskSettings, Task

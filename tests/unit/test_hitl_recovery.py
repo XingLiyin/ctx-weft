@@ -70,7 +70,7 @@ async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
     import asyncio
     from datetime import datetime, timezone
     from ctx_weft.core import CtxWeftRuntime
-    from ctx_weft.core.events.types import Event, EventType
+    from ctx_weft.protocols.events import Event, EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
@@ -126,8 +126,8 @@ def test_restore_keeps_active_parked_task_out_of_queue() -> None:
 
 async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
     """多任务：一个任务完成、另一个仍 parked 等审批 → 会话不得结束（is_done 感知 pending-HITL）。"""
-    from ctx_weft.core.events.bus import InProcessEventBus
-    from ctx_weft.core.events.types import EventType
+    from ctx_weft.providers.events import InProcessEventBus
+    from ctx_weft.protocols.events import EventType
     from ctx_weft.core.orchestrator.task_manager import TaskManager
     from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
 
@@ -155,8 +155,8 @@ async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
 
 async def test_session_finishes_when_no_pending_hitl() -> None:
     """对照：无 pending HITL 时，任务完成正常结束会话。"""
-    from ctx_weft.core.events.bus import InProcessEventBus
-    from ctx_weft.core.events.types import EventType
+    from ctx_weft.providers.events import InProcessEventBus
+    from ctx_weft.protocols.events import EventType
     from ctx_weft.core.orchestrator.task_manager import TaskManager
     from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
 
@@ -186,7 +186,7 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     让投影如实反映"等待人工"，而非停在崩溃前的 RUNNING。"""
     from datetime import datetime, timezone
     from ctx_weft.core import CtxWeftRuntime
-    from ctx_weft.core.events.types import Event, EventType
+    from ctx_weft.protocols.events import Event, EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
@@ -222,7 +222,7 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
 def _recover_runtime_with_status_capture():
     """构造带 SESSION_STATUS_CHANGED 捕获的 runtime（recover 状态语义测试共用）。"""
     from ctx_weft.core import CtxWeftRuntime
-    from ctx_weft.core.events.types import EventType
+    from ctx_weft.protocols.events import EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
@@ -238,7 +238,7 @@ def _recover_runtime_with_status_capture():
 
 def _mk_ev(seq, type_, **payload):
     from datetime import datetime, timezone
-    from ctx_weft.core.events.types import Event
+    from ctx_weft.protocols.events import Event
     task_id = payload.pop("task_id", None)
     return Event(id=f"e{seq}", run_id="r1", sequence=seq, session_id="ses_1", type=type_,
                  timestamp=datetime(2026, 6, 12, tzinfo=timezone.utc), task_id=task_id, payload=payload)
@@ -247,7 +247,7 @@ def _mk_ev(seq, type_, **payload):
 async def test_recover_emits_paused_for_wait_only_pending() -> None:
     """wait-only pending（纯文本软待命）恢复应 PAUSED 而非 PAUSED_HITL——与
     SESSION_PAUSED_HITL 的 reducer/投影语义一致（form=wait → PAUSED，无 HITL 面板）。"""
-    from ctx_weft.core.events.types import EventType
+    from ctx_weft.protocols.events import EventType
 
     runtime, statuses = _recover_runtime_with_status_capture()
     seed = [
@@ -267,7 +267,7 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
 
 async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None:
     """混合 pending（wait + question/approval）恢复仍应 PAUSED_HITL——有面板可答。"""
-    from ctx_weft.core.events.types import EventType
+    from ctx_weft.protocols.events import EventType
 
     runtime, statuses = _recover_runtime_with_status_capture()
     seed = [
@@ -295,7 +295,7 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     import asyncio
     from datetime import datetime, timezone
     from ctx_weft.core import CtxWeftRuntime
-    from ctx_weft.core.events.types import Event, EventType
+    from ctx_weft.protocols.events import Event, EventType
     from ctx_weft.core.orchestrator.task_manager import TaskManager
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

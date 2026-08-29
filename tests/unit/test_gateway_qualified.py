@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import (
     DISPATCH_TOOLS,
     SILENT_TOOLS,

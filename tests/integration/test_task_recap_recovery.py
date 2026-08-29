@@ -22,7 +22,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.control_capability import BACKGROUND_PROCESS_REPORT_NAME
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,

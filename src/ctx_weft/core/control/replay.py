@@ -10,8 +10,8 @@ from typing import Any
 
 from ctx_weft.core.control.reducers import reduce_events
 from ctx_weft.core.control.types import RunStateView
-from ctx_weft.core.events import Event
-from ctx_weft.core.state.event_store import EventStore
+from ctx_weft.protocols.events import Event
+from ctx_weft.protocols.events import EventStore
 
 logger = logging.getLogger(__name__)
 

@@ -194,7 +194,7 @@ async def test_resume_session_without_jsonable_falls_back_to_the_text_prompt():
     """resume 分支与 create 同一判据——两处都写事件，不能只加固一处。"""
     from unittest.mock import MagicMock
 
-    from ctx_weft.core.events.types import Event
+    from ctx_weft.protocols.events import Event
     from ctx_weft.core.utils import generate_id
     from ctx_weft.providers.events import InMemoryEventStore
 

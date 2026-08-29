@@ -9,7 +9,7 @@ from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider as InMemo
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext,
 )
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 
 pytestmark = pytest.mark.asyncio
 

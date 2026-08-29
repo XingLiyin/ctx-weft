@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
 from ctx_weft.protocols import MemoryAddress
 

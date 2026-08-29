@@ -1,6 +1,7 @@
 """Core state layer."""
 
-from ctx_weft.core.state.event_store import EventStore, InMemoryEventStore, RunSnapshot
+from ctx_weft.protocols.events import EventStore, RunSnapshot
+from ctx_weft.providers.events import InMemoryEventStore
 from ctx_weft.core.state.models import (
     Agent,
     AgentStatus,

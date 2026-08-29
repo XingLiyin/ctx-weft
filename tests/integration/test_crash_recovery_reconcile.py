@@ -15,7 +15,7 @@ from unittest import mock
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext,
 )

@@ -30,7 +30,7 @@ from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.control.converters import task_from_projection
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.loop.steps.finalize import (
     ensure_dispatch_frame_at_start,
     finalize_task_memory,

@@ -18,7 +18,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome,
 from ctx_weft.core.loop.llm_gateway import (
     stream_llm, apply_dynamic_max_tokens, request_prompt_estimate, resolve_llm_identity,
 )
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols.capability import ToolCapability
 

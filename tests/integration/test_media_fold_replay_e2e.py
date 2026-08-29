@@ -44,7 +44,7 @@ from typing import Any
 import pytest
 
 from ctx_weft.core.content import content_to_jsonable
-from ctx_weft.core.events import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.loop.steps.segment_fold import segment_fold
 from ctx_weft.core.media.refs import find_image_placeholders
 from ctx_weft.core.runtime import SessionStartParams

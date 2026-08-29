@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import ctx_weft.core.loop.steps.observe as _obs_mod
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.steps.observe import (
     BACKGROUND_OBSERVE_REACT_EVENTS, run_observe_react,
 )

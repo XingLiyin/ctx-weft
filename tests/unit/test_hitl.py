@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.auth import HumanConfirmationAuthorizer
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.orchestrator.control_capability import (
     PROVIDER_NAME,
     ControlCapabilityProvider,
@@ -295,7 +295,7 @@ async def test_ask_user_reject_feeds_message_back() -> None:
 
 
 def test_hitl_cancelled_is_registered_event() -> None:
-    from ctx_weft.core.events.types import EVENT_TYPES, EventType
+    from ctx_weft.protocols.events import EVENT_TYPES, EventType
     assert EventType.HITL_CANCELLED == "HitlCancelled"
     assert "HitlCancelled" in EVENT_TYPES
 

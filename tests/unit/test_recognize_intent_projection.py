@@ -7,7 +7,7 @@ title/description，导入/重启后重建的投影里 root task 就永远无名
 from __future__ import annotations
 
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.task_manager import _task_payload
 from ctx_weft.core.state.models import Task
 from ctx_weft.core.utils import generate_id, now_utc

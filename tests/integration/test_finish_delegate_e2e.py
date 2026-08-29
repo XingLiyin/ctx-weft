@@ -21,7 +21,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import ToolCall
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse

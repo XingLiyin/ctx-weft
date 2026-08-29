@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from ctx_weft.core.control.tokens import CancelToken, PauseToken
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark

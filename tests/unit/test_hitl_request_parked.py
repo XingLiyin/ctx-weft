@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 
 pytestmark = pytest.mark.asyncio

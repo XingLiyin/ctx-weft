@@ -8,8 +8,8 @@ The causal order must be Session → Agent → Task.
 
 from __future__ import annotations
 
-from ctx_weft.core.events.bus import InProcessEventBus
-from ctx_weft.core.events.types import EventType
+from ctx_weft.providers.events import InProcessEventBus
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup

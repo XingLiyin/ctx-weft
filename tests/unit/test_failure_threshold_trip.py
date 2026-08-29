@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.state.models import Session, Task

@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols import (
     AgentCapability,
     AgentCapabilityProvider,

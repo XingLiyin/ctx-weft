@@ -24,8 +24,8 @@ import jsonschema
 
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer  # noqa: F401
 from ctx_weft.core.content import normalize_content_parts, redact_content_for_event
-from ctx_weft.core.events import EventType
-from ctx_weft.core.events.bus import EventBus
+from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.capability import CapabilityProvider, ToolCapabilityProvider, qualify

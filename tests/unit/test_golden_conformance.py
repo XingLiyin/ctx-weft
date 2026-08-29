@@ -24,7 +24,7 @@ from ctx_weft.core.control.reducers import (
     reduce_events,
     serialize_view,
 )
-from ctx_weft.core.events.types import Event
+from ctx_weft.protocols.events import Event
 
 _GOLDEN_DIR = Path(__file__).parents[3] / "docs" / "spec" / "golden"
 

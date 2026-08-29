@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
 from ctx_weft.core.content import rehydrate_content
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.utils import (
     dynamic_max_tokens,

@@ -19,7 +19,7 @@ from ctx_weft.core.loop.llm_gateway import (
     PROMPT_EST_BASE_KEY, PROMPT_EST_SEG_KEY, request_prompt_estimate, resolve_llm_identity,
     stream_llm_resilient,
 )
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import (
     FINISH_TASK_NAME,

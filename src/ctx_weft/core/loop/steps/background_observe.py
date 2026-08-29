@@ -24,7 +24,7 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
 from ctx_weft.core.utils import content_to_text, image_tokens

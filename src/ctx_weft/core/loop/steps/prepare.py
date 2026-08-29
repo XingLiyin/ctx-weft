@@ -16,7 +16,7 @@ import logging
 from typing import Callable
 
 from ctx_weft.core.assembler import ContextRequest
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
 from ctx_weft.core.loop.steps.act_guidance import build_act_guidance, build_resume_cue

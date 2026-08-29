@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from ctx_weft.core.events.types import Event
-from ctx_weft.core.state.event_store import InMemoryEventStore
+from ctx_weft.protocols.events import Event
+from ctx_weft.providers.events import InMemoryEventStore
 
 
 def _ev(seq: int, type_: str) -> Event:

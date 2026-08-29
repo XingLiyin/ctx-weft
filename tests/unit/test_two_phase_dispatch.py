@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_runner import AgentBinding
 from ctx_weft.core.state.models import Session, Task

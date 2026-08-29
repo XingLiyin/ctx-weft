@@ -12,8 +12,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ctx_weft.core.assembler import AssembledPrompt, ContextAssembler
-from ctx_weft.core.events import Event, EventBus, EventType
-from ctx_weft.core.events.types import EVENT_TYPES
+from ctx_weft.protocols.events import Event, EventBus, EventType
+from ctx_weft.protocols.events import EVENT_TYPES
 
 from ctx_weft.core.state.models import Agent, Session, Task
 from ctx_weft.core.utils import generate_id, now_utc

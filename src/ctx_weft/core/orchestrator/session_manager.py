@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.errors import UnfinishedTasksError
-from ctx_weft.core.events.bus import EventBus
-from ctx_weft.core.events.types import EVENT_TYPES, Event, EventType
+from ctx_weft.protocols.events import EventBus
+from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Session, Task

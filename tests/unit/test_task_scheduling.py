@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from ctx_weft.core.events.types import EVENT_TYPES, EventType
+from ctx_weft.protocols.events import EVENT_TYPES, EventType
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Task
 from tests.unit._stub_runner import StubRunner

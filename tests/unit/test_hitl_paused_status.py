@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.events.bus import InProcessEventBus
-from ctx_weft.core.events import EventType
+from ctx_weft.providers.events import InProcessEventBus
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.orchestrator.control_capability import WAIT_FOR_USER_CAPABILITY_ID
 
@@ -44,7 +44,7 @@ async def test_session_paused_hitl_event_carries_capability_id() -> None:
 
 
 def _paused_event(session_id: str, form: str):
-    from ctx_weft.core.events.types import Event
+    from ctx_weft.protocols.events import Event
     from ctx_weft.core.utils import generate_id, now_utc
     return Event(
         id=generate_id("evt"), run_id=None, sequence=0, session_id=session_id,

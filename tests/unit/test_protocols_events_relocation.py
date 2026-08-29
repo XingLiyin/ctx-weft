@@ -1,48 +1,35 @@
-"""event 契约搬进 protocols 之后，两条 import 路径必须指向同一批对象。
+    # 「来源」的真正钉子：用 AST 读 runtime.py 里 import 语句的 `module` 字段，
+    # 钉的是**源码里写的路径**而不是运行时对象。
+    #
+    # 历史理由（2026-08-27）：当时 core.events.bus / core.state.event_store 两个 shim
+    # 转发的是同一个类对象，`is` 身份比较因此钉不住「从哪条路径 import」，恒真。
+    # 那两个 shim 已于 2026-08-29 删除，`is` 比较今天确实能区分了——但本用例仍用
+    # AST，因为它钉的是**不许再冒出第二条来源**：任何人日后新加一个转发层，`is`
+    # 会重新失效，而 AST 断言的集合会立刻多出一个元素、转红。
+"""event 契约的分层守卫：契约在 protocols、实现在 providers、投影逻辑留 core。
 
 spec: docs/superpowers/specs/2026-08-27-protocols-layer-event-contracts-design.md
 
-本文件钉的是「搬迁不改行为」——re-export 必须是同一个对象（`is`），不是同名副本。
-同名副本会让 `isinstance` 与 `EventType.X is EventType.X` 在跨路径比较时静默失败。
+原先本文件还钉「两条 import 路径指向同一批对象」——`core/events/` 与
+`core/state/event_store.py` 两个 re-export shim 在 2026-08-29 删除后，那批用例
+全部退化成同义反复（同一个模块 import 两次再断言 `is`），已一并删除；只剩下真正
+还钉得住东西的：层序（protocols 不 import core）、归属（实现不进 protocols、
+TASK_STATUS_BY_EVENT 不进 protocols）、包根导出、以及 shim 不得复活。
 """
 
 from __future__ import annotations
 
 
-def test_event_types_are_the_same_objects() -> None:
-    """两条路径拿到的必须是同一个类对象，不是各自定义的同名类。"""
-    from ctx_weft.core.events.types import Event as CoreEvent
-    from ctx_weft.core.events.types import EventFilter as CoreFilter
-    from ctx_weft.core.events.types import EventType as CoreType
-    from ctx_weft.protocols.events import Event, EventFilter, EventType
 
-    assert CoreEvent is Event
-    assert CoreFilter is EventFilter
-    assert CoreType is EventType
-
-
-def test_event_constant_sets_are_the_same_objects() -> None:
-    from ctx_weft.core.events.types import EVENT_TYPES as CORE_TYPES
-    from ctx_weft.core.events.types import TRANSIENT_EVENT_TYPES as CORE_TRANSIENT
-    from ctx_weft.protocols.events import EVENT_TYPES, TRANSIENT_EVENT_TYPES
-
-    assert CORE_TYPES is EVENT_TYPES
-    assert CORE_TRANSIENT is TRANSIENT_EVENT_TYPES
-
-
-def test_package_level_reexport_still_works() -> None:
-    """`from ctx_weft.core.events import X` 是 99 个测试文件在用的路径，不能断。"""
-    from ctx_weft.core.events import Event, EventFilter, EventType
-    from ctx_weft.protocols.events import Event as PEvent
-
-    assert Event is PEvent
-    assert EventFilter is not None and EventType is not None
 
 
 def test_task_status_map_stays_in_core() -> None:
-    """TASK_STATUS_BY_EVENT 是 core 的投影逻辑（依赖 core 的 TaskStatus），不进 protocols。"""
+    """TASK_STATUS_BY_EVENT 是 core 的投影逻辑（依赖 core 的 TaskStatus），不进 protocols。
+
+    shim 删除后它落在 `core/control/reducers.py`（唯一的生产消费者就在那个文件里）。
+    """
     import ctx_weft.protocols.events as pe
-    from ctx_weft.core.events.types import TASK_STATUS_BY_EVENT
+    from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
 
     assert TASK_STATUS_BY_EVENT
     assert not hasattr(pe, "TASK_STATUS_BY_EVENT")
@@ -111,20 +98,6 @@ def test_providers_events_does_not_import_core() -> None:
         store_module, "providers/events/store/in_memory/store.py")
 
 
-def test_bus_and_store_protocols_are_the_same_objects() -> None:
-    from ctx_weft.core.events.bus import EventBus as CoreBus
-    from ctx_weft.core.events.bus import SubscriptionHandle as CoreHandle
-    from ctx_weft.core.state.event_store import EventStore as CoreStore
-    from ctx_weft.core.state.event_store import RunSnapshot as CoreSnapshot
-    from ctx_weft.protocols.events import (
-        EventBus, EventStore, RunSnapshot, SubscriptionHandle,
-    )
-
-    assert CoreBus is EventBus
-    assert CoreHandle is SubscriptionHandle
-    assert CoreStore is EventStore
-    assert CoreSnapshot is RunSnapshot
-
 
 def test_implementations_do_not_enter_protocols() -> None:
     """实现不进 protocols——协议与实现分居是本次划界的全部意义。
@@ -132,8 +105,8 @@ def test_implementations_do_not_enter_protocols() -> None:
     本任务只保证「不在 protocols」；Task 3 会把它们从 core 搬进 providers。
     """
     import ctx_weft.protocols.events as pe
-    from ctx_weft.core.events.bus import InProcessEventBus
-    from ctx_weft.core.state.event_store import InMemoryEventStore
+    from ctx_weft.providers.events import InProcessEventBus
+    from ctx_weft.providers.events import InMemoryEventStore
 
     assert InProcessEventBus is not None and InMemoryEventStore is not None
     assert not hasattr(pe, "InProcessEventBus")
@@ -142,8 +115,8 @@ def test_implementations_do_not_enter_protocols() -> None:
 
 def test_implementations_still_satisfy_the_relocated_protocols() -> None:
     """re-export 若产生了同名副本，这条会红——runtime_checkable 认的是具体类对象。"""
-    from ctx_weft.core.events.bus import InProcessEventBus
-    from ctx_weft.core.state.event_store import InMemoryEventStore
+    from ctx_weft.providers.events import InProcessEventBus
+    from ctx_weft.providers.events import InMemoryEventStore
     from ctx_weft.protocols.events import EventBus, EventStore
 
     assert isinstance(InProcessEventBus(), EventBus)
@@ -158,15 +131,6 @@ def test_event_store_contract_is_exported_from_package_root() -> None:
     assert ctx_weft.EventStore is EventStore
     assert "EventStore" in ctx_weft.__all__
 
-
-def test_builtin_implementations_live_in_providers() -> None:
-    """实现归 providers（spec §2 三层划界）。core 侧保留 re-export，对象必须同一。"""
-    from ctx_weft.core.events.bus import InProcessEventBus as CoreBus
-    from ctx_weft.core.state.event_store import InMemoryEventStore as CoreStore
-    from ctx_weft.providers.events import InMemoryEventStore, InProcessEventBus
-
-    assert CoreBus is InProcessEventBus
-    assert CoreStore is InMemoryEventStore
 
 
 def test_package_root_store_comes_from_providers() -> None:
@@ -336,3 +300,24 @@ def test_registry_methods_are_renamed() -> None:
     assert not hasattr(reg, "register_blob_store")
     assert not hasattr(reg, "get_blob_store")
     assert reg.get_memory_blob_store().can_externalize is False
+
+
+def test_deleted_shims_do_not_come_back() -> None:
+    """`core/events/` 与 `core/state/event_store.py` 两个 re-export shim 已删（2026-08-29）。
+
+    它们在 2026-08-27 的三层划界里是刻意留下的过渡层，让 130+ 处既有 import 不必
+    同时改。过渡期结束后删除，本用例防的是「有人为了少改一行又把转发层加回来」——
+    那会让「一个符号只有一条 import 路径」这条刚建立的性质悄悄失效，且不会有任何
+    别的测试变红。
+    """
+    import importlib
+
+    for mod in ("ctx_weft.core.events", "ctx_weft.core.events.types",
+                "ctx_weft.core.events.bus", "ctx_weft.core.state.event_store"):
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            continue
+        raise AssertionError(
+            f"{mod} 应当已删除——契约请从 ctx_weft.protocols.events 引入，"
+            "内置实现请从 ctx_weft.providers.events 引入")

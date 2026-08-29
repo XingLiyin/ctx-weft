@@ -28,7 +28,7 @@ async def test_gateway_defer_raises_park_and_skips_provider() -> None:
     from types import SimpleNamespace
     from collections.abc import AsyncIterator
     from ctx_weft.core.auth import AuthorizationDecision, Authorizer
-    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.loop.driver import LoopContext, LoopState
     from ctx_weft.core.loop.park import HitlPark
@@ -80,8 +80,8 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import CtxWeftRuntime, ProviderRegistry
-    from ctx_weft.core.events import EventType
-    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.protocols.events import EventType
+    from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.loop.park import HitlPark
     from ctx_weft.core.orchestrator.capability_cache import CapabilityCache

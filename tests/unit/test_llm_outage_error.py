@@ -1,5 +1,5 @@
 from ctx_weft.protocols import LLMCallError, LLMOutageError
-from ctx_weft.core.events.types import EVENT_TYPES, TRANSIENT_EVENT_TYPES, EventType
+from ctx_weft.protocols.events import EVENT_TYPES, EventType, TRANSIENT_EVENT_TYPES
 
 
 def test_llmcallerror_defaults_no_outage():

@@ -28,14 +28,14 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.content import content_to_event_jsonable
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.state.models import HitlForm, HitlRequest, HitlStatus  # noqa: F401  (HitlStatus re-export 供既有 import)
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.protocols.events import NullEventBlobStore
 
 if TYPE_CHECKING:
-    from ctx_weft.core.events.bus import EventBus
+    from ctx_weft.protocols.events import EventBus
     from ctx_weft.protocols import ContentPart
 
 logger = logging.getLogger(__name__)
@@ -461,7 +461,7 @@ class HitlManager:
     async def _emit(self, event_type: EventType, req: HitlRequest, payload: dict) -> None:
         if self._event_bus is None:
             return
-        from ctx_weft.core.events.types import EVENT_TYPES, Event
+        from ctx_weft.protocols.events import EVENT_TYPES, Event
         if event_type not in EVENT_TYPES:
             raise ValueError(f"Unknown event type: {event_type}; not in EVENT_TYPES")
         await self._event_bus.emit(Event(

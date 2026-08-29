@@ -241,7 +241,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
         raising=False,
     )
 
-    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.providers.events import InProcessEventBus
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
     hitl = HitlManager(event_bus=bus)
@@ -301,7 +301,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
         raising=False,
     )
 
-    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.providers.events import InProcessEventBus
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
     hitl = HitlManager(event_bus=bus)
@@ -341,7 +341,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
     """act plain-text pause (source='plain_text', root task, interactive) → launch_background_observe called once."""
     from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.providers.events import InProcessEventBus
 
     launched = []
 
@@ -388,7 +388,7 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
     """act plain-text pause with child task → launch_background_observe NOT called."""
     from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.providers.events import InProcessEventBus
 
     launched = []
 

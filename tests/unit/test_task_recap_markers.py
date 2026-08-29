@@ -1,5 +1,5 @@
 import pytest
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 import ctx_weft.core.loop.steps.background_observe as bo
 
 

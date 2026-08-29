@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, CompactStep
 from ctx_weft.core.loop.steps.finalize import FinalizeStep

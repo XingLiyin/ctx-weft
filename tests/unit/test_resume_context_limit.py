@@ -16,10 +16,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ctx_weft.core.events.bus import InProcessEventBus
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.providers.events import InProcessEventBus
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.session_manager import SessionManager
-from ctx_weft.core.state.event_store import InMemoryEventStore
+from ctx_weft.providers.events import InMemoryEventStore
 from ctx_weft.providers.events import EventPersister
 
 pytestmark = pytest.mark.asyncio

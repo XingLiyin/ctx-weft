@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
 

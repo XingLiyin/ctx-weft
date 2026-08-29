@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from ctx_weft.core.content import content_to_event_jsonable, content_to_jsonable
 from ctx_weft.core.control.converters import task_from_projection
 from ctx_weft.core.control.reducers import reduce_events, serialize_view
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.task_manager import _task_payload
 from ctx_weft.core.state.models import Task
 from ctx_weft.core.utils import now_utc

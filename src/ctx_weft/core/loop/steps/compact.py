@@ -23,7 +23,7 @@ from datetime import timedelta
 from typing import Any
 
 from ctx_weft.core.assembler.assembler import ContextRequest
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
 # 模块级 import（**实测不成环**）：`core.media` 的模块级依赖只到 `core.content` /

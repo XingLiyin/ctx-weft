@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.control.reducers import fold_cold_hitl_decision
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.control_capability import (
     PROVIDER_NAME,
     ControlCapabilityProvider,

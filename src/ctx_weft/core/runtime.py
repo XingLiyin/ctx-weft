@@ -33,7 +33,7 @@ from ctx_weft.core.assembler.sources import (
 )
 from ctx_weft.core.auth.authorizer import AllowAllAuthorizer, Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
-from ctx_weft.core.events import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.park import HitlPark
@@ -430,7 +430,7 @@ class RunHandle:
     _state: LoopState | None = None
 
     async def events(self) -> AsyncIterator[Event]:
-        from ctx_weft.core.events.types import EventFilter
+        from ctx_weft.protocols.events import EventFilter
         async for ev in self.event_bus.stream(EventFilter(run_id=self.run_id)):
             yield ev
 
@@ -438,7 +438,7 @@ class RunHandle:
         """Block until RunFinished event or timeout."""
         try:
             async with asyncio.timeout(timeout):
-                from ctx_weft.core.events.types import EventFilter
+                from ctx_weft.protocols.events import EventFilter
                 async for ev in self.event_bus.stream(EventFilter(run_id=self.run_id)):
                     if ev.type == "RunFinished":
                         return self._state
@@ -647,7 +647,7 @@ class CtxWeftRuntime:
 
         两条途径，先热后冷：
         1. 活 owner TaskManager 的 `session`（`_task_managers`）——热应答的主路径，纯内存查表；
-        2. 事件日志：**每条 `Event` 都带 `tenant_id`**（`core/events/types.py`），取该 session
+        2. 事件日志：**每条 `Event` 都带 `tenant_id`**（`protocols/events.py`），取该 session
            第一条即可，不必 `rebuild_view` 折叠整个投影（冷应答/重启后走这条）。
 
         本方法在 HITL 应答路径上——**抛错会卡住人类应答**，故整段 best-effort：

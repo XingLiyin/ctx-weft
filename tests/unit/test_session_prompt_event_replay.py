@@ -21,8 +21,8 @@ from datetime import datetime, timezone
 
 from ctx_weft.core.content import content_to_event_jsonable
 from ctx_weft.core.control.reducers import deserialize_view, rebuild_view, serialize_view
-from ctx_weft.core.events.types import Event, EventType
-from ctx_weft.core.state.event_store import InMemoryEventStore
+from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.providers.events import InMemoryEventStore
 from ctx_weft.protocols import ImagePart, TextPart
 from tests.unit.test_event_blob_store import _ctx, _Stub
 

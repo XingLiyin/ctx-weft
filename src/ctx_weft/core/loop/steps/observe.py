@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.content import redact_content_for_event
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryScope
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (

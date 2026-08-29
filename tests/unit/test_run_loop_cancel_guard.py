@@ -10,7 +10,7 @@ import asyncio
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.state.models import Agent, LoopGuard, Session, Task

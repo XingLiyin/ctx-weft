@@ -14,8 +14,25 @@ from ctx_weft.core.content import (
     content_to_jsonable,
 )
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
-from ctx_weft.core.events import TASK_STATUS_BY_EVENT, Event, EventType
-from ctx_weft.core.state.models import HitlRequest
+from ctx_weft.core.state.models import HitlRequest, TaskStatus
+from ctx_weft.protocols.events import Event, EventType
+
+# 事件类型 → 任务状态的投影映射。
+#
+# 留在 core 而不进 `protocols/events.py` 的理由（spec 2026-08-27 三层划界）：这是 core
+# 的**投影逻辑**，不是 host 要按之编程的契约；且值类型 `TaskStatus` 来自
+# `core/state/models.py`，放进 protocols 会让协议层反向依赖 core。
+#
+# 落在本文件而不是单独模块：`reduce_events` 是它唯一的消费者，就在下方几十行处用到。
+TASK_STATUS_BY_EVENT: dict[EventType, TaskStatus] = {
+    EventType.TASK_STARTED: "ACTIVE",
+    EventType.TASK_SUSPENDED: "SUSPENDED",
+    EventType.TASK_FINISHED: "FINISHED",
+    EventType.TASK_FAILED: "FAILED",
+    EventType.TASK_CANCELED: "CANCELED",
+    EventType.TASK_RESUMED: "ACTIVE",
+    EventType.TASK_REQUEUED: "PENDING",
+}
 
 # HITL 状态相关事件（请求 + 各终态）。供"取该 session 待解决 HITL"的轻查询折叠用，
 # 与下面 _apply 的 pending_hitl 折叠语义一致（单一真相）。

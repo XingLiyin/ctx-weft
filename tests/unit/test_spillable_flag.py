@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache

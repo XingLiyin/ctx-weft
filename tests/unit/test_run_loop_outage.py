@@ -6,7 +6,7 @@ from ctx_weft.core.config import RuntimeConfig
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import LLMOutageError
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
