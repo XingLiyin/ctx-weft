@@ -32,55 +32,24 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
-    DateTime,
     Index,
     Integer,
     LargeBinary,
     String,
     Text,
-    TypeDecorator,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from ctx_weft.providers._sqlalchemy import UtcDateTime
+
 
 class Base(DeclarativeBase):
     """本 provider 自带的 declarative base（宿主可把这两张表映射进自己的 Base）。"""
-
-
-class UtcDateTime(TypeDecorator):
-    """时区保真的 DateTime：入库转 UTC，出库补回 ``tzinfo=UTC``。
-
-    为什么必须自己包一层：**SQLite 没有时区类型**。SQLAlchemy 的 SQLite 方言把
-    aware datetime 的 tzinfo 直接丢掉、回读得到 naive datetime——于是
-    ``rec.timestamp == 写入时的 aware datetime`` 恒为 False（naive 与 aware 不相等），
-    而排序又照常工作，所以这个丢失**不会**在任何排序类断言上暴露，只会在等值比较上
-    炸一条。postgres 侧 `TIMESTAMP WITH TIME ZONE` 本就保真，本装饰器在那边是恒等
-    变换（bind 时值已是 UTC aware，result 时已带 tzinfo 不再补）。
-
-    naive 输入按 UTC 解释（仓内 memory 事件的时间戳统一来自 ``datetime.now(UTC)``）。
-    """
-
-    impl = DateTime(timezone=True)
-    cache_ok = True
-
-    def process_bind_param(self, value: datetime | None, dialect: object) -> datetime | None:
-        if value is None:
-            return None
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
-
-    def process_result_value(self, value: datetime | None, dialect: object) -> datetime | None:
-        if value is None:
-            return None
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
 
 
 class MemoryEventModel(Base):

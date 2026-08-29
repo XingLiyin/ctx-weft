@@ -40,11 +40,7 @@ from typing import Any, Literal
 
 from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ctx_weft.core.content import (
     collect_blob_refs,
@@ -75,6 +71,7 @@ from ctx_weft.protocols.memory_compat import (
     normalize_view,
     validate_half_address,
 )
+from ctx_weft.providers._sqlalchemy import make_session_factory
 from ctx_weft.providers.memory.sql.models import (
     Base,
     MemoryBlobModel,
@@ -722,12 +719,6 @@ class SqlMemoryProvider(MemoryProvider, MemoryBlobStore, EventBlobStore):
 
 
 # ── 建库/开库便利函数 ─────────────────────────────────────────────────────────
-
-
-def make_session_factory(url: str, **engine_kwargs: Any) -> Any:
-    """``(engine, session_factory)``。url 例：``sqlite+aiosqlite:///path/mem.db``。"""
-    engine = create_async_engine(url, **engine_kwargs)
-    return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
 @asynccontextmanager
