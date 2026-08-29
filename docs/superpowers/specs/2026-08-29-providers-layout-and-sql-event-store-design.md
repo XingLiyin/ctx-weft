@@ -126,8 +126,12 @@ for ref in collect_blob_refs(event):
 
 **删（`providers/memory/sql/`）：**
 - `models.py` 的 `MemoryBlobModel`（`memory_blobs` 表）
-- `provider.py` 的 `put` / `get` / `collect_blobs`、对 `MemoryBlobStore` 的基类继承、
-  `_DEFAULT_BLOB_GRACE` 常量与 `blob_grace_period` 构造参数
+- `provider.py` 的 `put` / `get` / `collect_blobs`、`_DEFAULT_BLOB_GRACE` 常量与
+  `blob_grace_period` 构造参数
+- 基类里的 **`MemoryBlobStore` 与 `EventBlobStore` 两个**——现声明是
+  `class SqlMemoryProvider(MemoryProvider, MemoryBlobStore, EventBlobStore)`，一份
+  `put`/`get` 同时满足两个 ABC。字节整体离开 RDBMS，故两个都摘掉，类退回
+  `class SqlMemoryProvider(MemoryProvider)`
 - `open_sqlite_memory` 的 `blob_grace_period` 形参
 
 **留：**
