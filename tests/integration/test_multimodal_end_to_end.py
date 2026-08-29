@@ -398,13 +398,14 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
     return runtime, memory, state, llm
 
 
-async def _make_sql_blob_store(tmp_path):
+async def _make_blob_store(tmp_path):
     """真 MemoryBlobStore 装配（``FsBlobStore``），可直接用。
 
     2026-08-29 之后 ``SqlMemoryProvider`` 不再兼当 blob store——引用边
     （``memory_blob_refs``）留在 SQL、与 ingest 同事务，字节挪去了文件系统。
-    这里返回的 ``FsBlobStore`` 是宿主真正会接的字节侧实现，函数名保留是因为
-    两处调用方（``test_ref_externalized_...`` 与
+    这里返回的 ``FsBlobStore`` 是宿主真正会接的字节侧实现（函数曾叫
+    ``_make_sql_blob_store``，名不副实，已改名）。两处调用方
+    （``test_ref_externalized_...`` 与
     ``test_text_only_adapter_persists_image_and_keeps_bytes_retrievable``）只
     要一个能直接 ``.get()`` 的 ``MemoryBlobStore``，不关心具体实现。
     """
@@ -430,7 +431,7 @@ async def test_ref_externalized_in_memory_but_full_base64_on_the_wire(tmp_path) 
     杀不掉「rehydrate 还原出了别的字节」这类损坏。
     """
     session_id = "ses_blob_e2e"
-    blob_store = await _make_sql_blob_store(tmp_path)
+    blob_store = await _make_blob_store(tmp_path)
     await _assert_ref_roundtrip(blob_store, session_id)
 
 
@@ -612,7 +613,7 @@ async def test_text_only_adapter_persists_image_and_keeps_bytes_retrievable(tmp_
     这是 spec 2026-08-28 §7 的核心承诺——旧行为在入口抛 VisionNotSupportedError、
     一个字都不落库；新行为是「传递而非丢弃」，换成多模态 adapter 后同一份历史立刻可看图。
     """
-    blob_store = await _make_sql_blob_store(tmp_path)   # 同 test_ref_externalized_... 的既有装配
+    blob_store = await _make_blob_store(tmp_path)   # 同 test_ref_externalized_... 的既有装配
     _rt, memory, state, llm = await _run_text_only_session(blob_store=blob_store)
 
     # (a) memory 侧：图片仍在，且已外部化成 ref

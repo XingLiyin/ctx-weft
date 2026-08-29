@@ -73,8 +73,8 @@
 | `CapabilityGateway` | `src/ctx_weft/core/loop/capability_gateway.py:52` | capability 解析、鉴权、`invoke` `:75`、把调用/结果写 memory + 发事件 |
 | `CapabilityCache` | `src/ctx_weft/core/orchestrator/capability_cache.py:21` | per-agent 能力缓存，loop 结束 `evict(agent.id)` |
 | `StepDriver` | `src/ctx_weft/core/loop/driver.py:155` | 按 `initial_step` 起步，`run()` `:162` 循环执行 Step，发 StepStarted/Completed/Failed |
-| `EventBus` / `InProcessEventBus` | `src/ctx_weft/protocols/events.py:205` / `src/ctx_weft/providers/events/bus.py:36` | 协议 + 进程内实现，`emit()` `src/ctx_weft/providers/events/bus.py:45` / `stream()` `:99` |
-| `EventStore` / `InMemoryEventStore` | `src/ctx_weft/protocols/events.py:249` / `src/ctx_weft/providers/events/store.py:29` | 协议 + 内存实现，`list_active_session_ids` `src/ctx_weft/providers/events/store.py:79` + 回放支撑 |
+| `EventBus` / `InProcessEventBus` | `src/ctx_weft/protocols/events.py:212` / `src/ctx_weft/providers/events/bus/in_process/bus.py:36` | 协议 + 进程内实现，`emit()` `src/ctx_weft/providers/events/bus/in_process/bus.py:45` / `stream()` `:99` |
+| `EventStore` / `InMemoryEventStore` | `src/ctx_weft/protocols/events.py:256` / `src/ctx_weft/providers/events/store/in_memory/store.py:22` | 协议 + 内存实现，`list_active_session_ids` `src/ctx_weft/providers/events/store/in_memory/store.py:51` + 回放支撑 |
 | `HitlManager` | `src/ctx_weft/core/orchestrator/hitl_manager.py:40` | 人工介入请求/应答（`approve` `:96` / `reject` `:120`） |
 
 **自动注册的内置 Capability**（在 `CtxWeftRuntime.__init__`，`src/ctx_weft/core/runtime.py:369`）：
@@ -480,7 +480,7 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 ## 10. 事件系统内部
 
 - **总线**：协议 `EventBus`（`src/ctx_weft/protocols/events.py:205`）、内置实现
-  `InProcessEventBus`（`src/ctx_weft/providers/events/bus.py:36`），`emit(event)` `:45`
+  `InProcessEventBus`（`src/ctx_weft/providers/events/bus/in_process/bus.py:36`），`emit(event)` `:45`
   广播给所有匹配 `EventFilter(session_id / run_id / task_id / types)` 的 `stream()` `:99` 订阅者。进程内、不跨进程。
 - **顺序**：`sequence` 来自 `LoopState.sequence_counter`，在同一 `run_id` 内单调递增；
   `id` 是 `evt_ULID`（时间有序、全局唯一）。

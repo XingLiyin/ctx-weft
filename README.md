@@ -1043,7 +1043,9 @@ async def test_single_task(runtime):
   若你的宿主此前携图跑过（不管是否接了 `MemoryBlobStore`），升级后需要额外注册
   `EventBlobStore` 才能继续工作；宿主若共用同一份存储服务两侧，同一个实现类可以
   同时满足 `MemoryBlobStore` 与 `EventBlobStore` 两个协议（本仓自带的
-  `SqlMemoryProvider` 已经同时实现两者，注册两次即可）。
+  `providers/blob/fs/FsBlobStore` 已经同时实现两者，注册两次即可；`SqlMemoryProvider`
+  自 2026-08-29 起**不再**实现这两个协议，只维护引用边，见下面「blob 字节移出
+  memory」一节）。
 - **行为变化：入口内容里已经是 `source_type == "ref"` 的图片 part，不再进事件流。**
   典型场景是宿主把从 memory 读回来的内容（其中的图已被外部化成 memory ref）原样再
   提交一次。这类 part 的 ref 属于 **memory 命名空间**，event blob store 永远解不开，
@@ -1065,9 +1067,82 @@ async def test_single_task(runtime):
   自己的 ref，core 从不比较两者、也从不拿一侧的 ref 去另一侧解。宿主自
   2026-08-28 起可以分开注册两个实现——`providers/blob/fs/FsBlobStore` 是可
   直接用的内容寻址示例，可以各建一个实例分别注册为 `MemoryBlobStore` 与
-  `EventBlobStore`。共用同一个实例（如 `SqlMemoryProvider`）仍受
-  `collect_blobs` 陷阱影响：它只看 memory 侧活引用，会删掉事件流仍需要的
-  字节，分开部署可回避该陷阱。
+  `EventBlobStore`。共用同一个实例（如 `providers/blob/fs/FsBlobStore`）时，回收
+  必须同时喂两侧的活引用——只喂 memory 侧的 `live_blob_refs()` 会把事件流仍需要
+  的字节当孤儿删掉，而 `EventStore` 协议目前没有对应的活引用计算可用，分开部署
+  两个实例可回避该陷阱（详见「blob 字节移出 memory」一节与
+  `docs/host-migration-to-sql-memory.md`）。
+
+## 升级须知（providers 目录重组）
+
+**破坏性变更：provider 的 import 路径全部变了。** 按「领域 → 协议 → 变体」重组，
+不留兼容 shim：
+
+| 旧 | 新 |
+|---|---|
+| `ctx_weft.providers.memory_blackboard` | `ctx_weft.providers.memory.in_memory` |
+| `ctx_weft.providers.memory_sql` | `ctx_weft.providers.memory.sql` |
+| `ctx_weft.providers.blob_fs` | `ctx_weft.providers.blob.fs` |
+| `ctx_weft.providers.events.bus` | `ctx_weft.providers.events.bus.in_process` |
+| `ctx_weft.providers.events.store` | `ctx_weft.providers.events.store.in_memory` |
+
+`ctx_weft.providers.events` 顶层的 `InProcessEventBus` / `InMemoryEventStore`
+两个名字不变。
+
+## 升级须知（blob 字节移出 memory）
+
+- **破坏性变更：`SqlMemoryProvider` 不再实现 `MemoryBlobStore` / `EventBlobStore`。**
+  它只维护 `memory_blob_refs` 引用边（那部分需要与 ingest 同事务），字节归 blob store。
+  接线改成显式注册：
+
+  ```python
+  blobs = FsBlobStore(Path("/var/lib/app/blobs"))
+  registry.register_memory_blob_store(blobs)
+  registry.register_event_blob_store(blobs)   # 共用一个实例是允许的
+  ```
+
+- **`ProviderRegistry.get_memory_blob_store()` 不再自动回落到 memory provider。**
+  现在与 `get_event_blob_store()` 一样只有两级：显式注册 > `NullMemoryBlobStore`。
+  没注册就是「不接 blob」，携图会话会在入口被拒（`BlobStoreRequiredError`）。
+
+- **回收方式变了。** 原先 `await memory.collect_blobs()` 一步搞定，现在是标准的
+  mark-sweep 两步——mark 在 memory（它持有引用边），sweep 在 blob store（它持有字节）：
+
+  ```python
+  await blobs.collect(await memory.live_blob_refs())
+  ```
+
+  ⚠️ **共用一个 blob store 实例时，`live_refs` 必须同时含两侧的活引用**，只喂 memory
+  侧会删掉事件流仍需要的字节。想省心就分开部署两个实例，各按各的策略回收。
+
+## 升级须知（事件持久化）
+
+- **`InMemoryEventStore` 不再接受 `event_bus=` 参数，`append()` 也不再过滤瞬态事件。**
+  订阅与过滤都归新的 `EventPersister`。若你此前直接调 `event_store.append()`，注意
+  每 token 一个的流式 delta 现在会真的落库——改用 `EventPersister` 或自己加过滤。
+
+- **接线改用 `attach_persistence`：**
+
+  ```python
+  from ctx_weft.providers.events import attach_persistence
+
+  handle = attach_persistence(runtime.event_bus, my_store, snapshot_every_n=50)
+  # ...
+  await handle.detach()
+  ```
+
+  `snapshot_every_n > 0` 时会一并接上 `SnapshotWriter`（**默认不接**，现有行为零变化）。
+  接上之后崩溃恢复从 O(全部事件) 全量回放退化成「最新快照 + 增量」。
+  顺序（persister 必须先于 snapshot writer）由这个函数保证，别手动分别 subscribe。
+
+- **新增 SQL 事件持久化**（需 `ctx-weft[sql]`）：
+
+  ```python
+  from ctx_weft.providers.events.store.sql import open_sqlite_event_store
+
+  async with open_sqlite_event_store("app-events.db") as store:
+      attach_persistence(runtime.event_bus, store, snapshot_every_n=50)
+  ```
 
 ## 限制与约束
 

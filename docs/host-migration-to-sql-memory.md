@@ -1,12 +1,20 @@
 # 宿主迁移清单：切到 ctx-weft 自带的 `SqlMemoryProvider`
 
-日期：2026-08-27
-适用版本：ctx-weft `feat/multimodal` @ Phase 3c（commit `65dd606` 之后）
-相关设计：[多模态整体设计 §14](superpowers/specs/2026-08-20-multimodal-design.md)
+日期：2026-08-29
+适用版本：ctx-weft `feat/multimodal`（`providers/` 目录重组 + blob 归属 + 事件持久化落地之后）
+相关设计：
+[多模态整体设计 §14](superpowers/specs/2026-08-20-multimodal-design.md)、
+[providers 目录 / SQL 事件存储设计](superpowers/specs/2026-08-29-providers-layout-and-sql-event-store-design.md)
 
 > **这份文档是给人执行的**，不是给 agent 读的。按顺序做，每一步都有验收判据。
 > 用户裁定 D4 是「宿主后续用这个 memory，平滑切换」——**平滑指存量行零迁移**，
 > 但**不指零 DDL**：第 2 步里有一条**破坏性 DDL 必须先做**，只加列绕不开。
+>
+> 本次重写相对旧版最大的变化：**blob 字节已经离开 SQL memory provider**。
+> 旧版教你「注册 `SqlMemoryProvider` 即自动获得 blob 能力」，那条自动解析路径
+> 已经不存在——`SqlMemoryProvider` 现在只维护引用边，字节必须单独接一个
+> `BlobStore` 实现（本仓自带 `FsBlobStore` 可直接用）。第 4、5 步已按新接线整体
+> 重写；其余步骤与旧版一致。
 
 ---
 
@@ -22,17 +30,21 @@
 - **多模态能真的存住**。参考实现的 `_ingest_in_tx` 里是 `json.dumps(event.content)`，
   而 `ContentPart` 是普通 dataclass —— **一旦 content 带图就 `TypeError`**（今日不炸
   只因 content 全是 `str`）。新 provider 有判别列 + jsonable 往返。
-- **blob 字节与引用表**，以及延迟回收（`collect_blobs`）。
+- **blob 引用边与延迟回收**——字节本身由宿主单独接的 `BlobStore` 实现持有
+  （见第 4、5 步），`SqlMemoryProvider` 只管 `memory_blob_refs` 那张引用边表。
 
 **失去 / 需要留意**：
 
 - `FilesystemBlobStore` 已被移除（裁定 D5）。若宿主此前显式
   `register_blob_store(FilesystemToolsProvider(...))`，那行代码会失效。
-- `ProviderRegistry.get_blob_store()` 现在会**自动解析到 memory provider**——
-  注册 `SqlMemoryProvider` 即等于打开了图片外部化（详见第 4 步，这是行为变更）。
+- **`SqlMemoryProvider` 不再实现 `MemoryBlobStore` / `EventBlobStore`。** 旧版文档
+  说的「`ProviderRegistry.get_blob_store()` 会自动解析到 memory provider」这条路径
+  已经删除——注册 `SqlMemoryProvider` **不会**顺带打开图片外部化，必须显式注册
+  blob store（见第 4 步）。没注册就是「不接 blob」：携图会话会在入口被
+  `BlobStoreRequiredError` 拒绝。
 - 文末 legacy 方法（`recall_recent` / `recall_recent_by_agent` / `count_recent` /
   `supersede`）**新 provider 不实现**——它们已被 P4b-2 移出协议。宿主若有直调点，
-  必须先改成协议面的 `load_view` / `fold`（见第 6 步）。
+  必须先改成协议面的 `load_view` / `fold`（见第 7 步）。
 
 ---
 
@@ -45,8 +57,8 @@ pip install "ctx-weft[sql]"        # sqlalchemy>=2.0 + aiosqlite>=0.19
 `aiosqlite` 只有 SQLite 后端需要；接 postgres 的宿主自带 `asyncpg`/`psycopg` 即可。
 
 **这是可选依赖，且没有任何上层包 eager import 它**——缺 sqlalchemy 时
-`import ctx_weft` / `import ctx_weft.providers` 照常工作（已实测，见台账 Task C2），
-只有显式 `import ctx_weft.providers.memory_sql` 才会如实报 `ImportError`。
+`import ctx_weft` / `import ctx_weft.providers` 照常工作，只有显式
+`import ctx_weft.providers.memory.sql` 才会如实报 `ImportError`。
 
 ---
 
@@ -102,15 +114,7 @@ CREATE INDEX ix_memory_tenant_task  ON memory_events (tenant, session_id, layer,
 CREATE INDEX ix_memory_tenant_agent ON memory_events (tenant, session_id, layer, agent_id);
 CREATE INDEX ix_memory_tenant_topic ON memory_events (tenant, topic, topic_seq_no);
 
--- 图片等二进制字节的唯一持有者。没有 tenant 列——内容寻址本就跨租户去重。
-CREATE TABLE memory_blobs (
-    sha         VARCHAR(64)  PRIMARY KEY,
-    media_type  VARCHAR(64)  NOT NULL DEFAULT '',
-    data        BYTEA        NOT NULL,          -- SQLite: BLOB
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
-);
-
--- 事件 → blob 的引用边。刻意无外键（见设计 §14.4）。
+-- 事件 → blob 的引用边。只存 sha 引用，不存字节；刻意无外键（见设计 §14.4）。
 CREATE TABLE memory_blob_refs (
     event_id VARCHAR(64) NOT NULL,
     sha      VARCHAR(64) NOT NULL,
@@ -118,6 +122,11 @@ CREATE TABLE memory_blob_refs (
 );
 CREATE INDEX ix_memory_blob_refs_sha ON memory_blob_refs (sha);
 ```
+
+**没有 `memory_blobs` 表了。** 旧版本这里还建了一张持有字节的 `memory_blobs`
+（`sha` / `media_type` / `data BYTEA`），那是 blob 字节还留在 RDBMS 时代的产物。
+现在 `SqlMemoryProvider` 只维护上面这张纯引用边表，字节由第 4 步单独接的
+`BlobStore` 实现（如 `FsBlobStore`）持有，不进这个库。
 
 `ix_memory_task` / `ix_memory_agent` 两个既有索引**保持原样，名字与列都不要动**——
 新 provider 的模型定义与宿主逐字一致。
@@ -147,18 +156,22 @@ UPDATE memory_events SET content_format = 'text' WHERE content_format IS NULL;
 
 ---
 
-## 3. 接线：换 provider
+## 3. 接线：换 memory provider
 
 ```python
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from ctx_weft.providers.memory_sql import SqlMemoryProvider
+from ctx_weft.providers.memory.sql import SqlMemoryProvider
 
 engine  = create_async_engine(dsn)                      # 宿主自己的 engine
 factory = async_sessionmaker(engine, expire_on_commit=False)
-memory  = SqlMemoryProvider(factory)                    # blob_grace_period 可选
+memory  = SqlMemoryProvider(factory)
 
 runtime.providers.register_memory(memory)
 ```
+
+注意包路径是 `ctx_weft.providers.memory.sql`（不是旧版的 `providers.memory_sql`——
+`providers/` 已按「领域 → 协议 → 变体」重组，全部 provider 的 import 路径都变了，
+不留兼容 shim）。
 
 宿主接 postgres 时**自带 engine 与 migration**，直接构造 `SqlMemoryProvider(factory)`
 即可，不必走 `open_sqlite_memory`（那是测试与单机部署用的便利函数，会 `create_all`）。
@@ -168,57 +181,153 @@ runtime.providers.register_memory(memory)
 
 ---
 
-## 4. ⚠️ 行为变更：`get_blob_store()` 现在会自动解析到 memory
+## 4. ⚠️ 接线：blob 字节必须单独注册
 
-`ProviderRegistry.get_blob_store()` 的优先级是
-**显式注册 > memory provider（若 `isinstance(BlobStore)` 且 `can_externalize`）> `NullBlobStore`**。
+**`SqlMemoryProvider` 不实现 `MemoryBlobStore` / `EventBlobStore`。** 它只维护
+`memory_blob_refs` 这张引用边表（这部分必须与 ingest 同事务，所以留在 SQL 侧），
+字节的存取归 blob store 单独负责。`ProviderRegistry` 上 blob 相关的两个 getter
+**都不会**自动解析到 memory provider——`get_memory_blob_store()` 与
+`get_event_blob_store()` 完全对称，各自只有两级：显式注册 > `Null*BlobStore`。
+没注册就是「不接 blob」，携图会话会在入口被 `BlobStoreRequiredError` 拒绝。
 
-所以**注册 `SqlMemoryProvider` 这一个动作，同时打开了图片外部化**：入口收到的
-inline base64 图片会被 `normalize_content` 换成 `blob:<sha>` ref 存进 memory，
-出网前由 gateway 还原。这是裁定 D4 的本意，但对存量宿主是「换 provider 顺带
-打开了新行为」，需要知情：
+接线用本仓自带的 `FsBlobStore`（文件系统内容寻址实现，可直接用于生产，也可以
+换成宿主自己的对象存储实现）：
 
-- 事件 payload / memory 行里从此**不再有 base64**，只有短 ref 标记；
-- 图片字节全部落在 `memory_blobs` 表——**事件库任何情况下都重建不出一张图**，
-  备份策略要把这张表算进去；
-- 不想要这个行为，可以显式 `register_blob_store(NullBlobStore())` 覆盖
-  （显式注册优先级最高）；纯内存 provider 按裁定 D6 不实现 `BlobStore`，回落
-  `NullBlobStore`，行为逐字节不变。
+```python
+from pathlib import Path
+from ctx_weft.providers.blob.fs import FsBlobStore
 
-**验收**：接线后 `runtime.providers.get_blob_store()` 返回的是那个
-`SqlMemoryProvider` 实例本身（不是 `NullBlobStore`）。
+blobs = FsBlobStore(Path("/var/lib/app/blobs"))
+runtime.providers.register_memory_blob_store(blobs)
+runtime.providers.register_event_blob_store(blobs)   # 共用一个实例是允许的
+```
+
+`FsBlobStore` 同时实现 `MemoryBlobStore` 与 `EventBlobStore` 两个协议，是「一个类
+满足两个契约」的示例——但**两个协议各自独立定义、语义会各自演进**，共用一个实例
+只是这份实现恰好两边都能用，不代表两个协议本身合并了。
+
+⚠️ **两个协议的 ref 命名空间彼此独立**，core 从不比较、也从不拿一侧的 ref 去
+另一侧解析。宿主也可以分开部署两个 `FsBlobStore` 实例（各指向不同目录）分别注册
+为 memory 侧与 event 侧——这样第 5 步的回收陷阱自动不存在。
+
+**验收**：接线后 `runtime.providers.get_memory_blob_store()` /
+`get_event_blob_store()` 返回的是你注册的 `blobs` 实例（不是 `NullMemoryBlobStore`
+/ `NullEventBlobStore`）；携图会话不再在入口报 `BlobStoreRequiredError`。
 
 ---
 
-## 5. ⚠️ `collect_blobs` 必须由宿主自己定时调
+## 5. ⚠️ 回收变成标准 mark-sweep 两步，必须由宿主自己定时调
 
-`collect_blobs(now=None) -> int` **不在 `MemoryProvider` 协议里**，是
-`SqlMemoryProvider` 的自有方法，**ctx-weft 里没有任何调用点**——这是刻意的：
-回收时机是运维决策，core 不该在任何写路径上触发删字节。
+旧版本这里是一步 `await memory.collect_blobs()`——那是 blob 字节还存在
+`SqlMemoryProvider` 自己那张 `memory_blobs` 表里的时代。现在字节已经搬到独立的
+blob store，回收自然拆成标准的 mark-sweep 两步：**mark 在 memory**（它持有引用
+边，知道哪些 sha 还被活记录引用），**sweep 在 blob store**（它持有字节，知道怎么
+删）。
 
 ```python
 # 例：每小时一次的后台任务
-deleted = await memory.collect_blobs()
+live = await memory.live_blob_refs()
+deleted = await blobs.collect(live)
 ```
 
-- **幂等**，可随时重跑，可并发重入（多删一次也只是删不到）。
-- **两条判据同时成立才删**：① 没有任何 `is_superseded = 0` 的引用者；
-  ② `created_at` 已过宽限期（默认 **24 小时**，`SqlMemoryProvider(...,
-  blob_grace_period=timedelta(hours=N))` 可调）。
-- **宽限期是正确性要求，不是优化**：`put` 与 `ingest` 之间存在时序窗口
+- `live_blob_refs() -> set[str]`（`SqlMemoryProvider` 的自有方法，不在
+  `MemoryProvider` 协议里）返回当前仍被 `is_superseded = 0` 的记录引用的全部
+  `blob:<sha>`。
+- `collect(live_refs, *, now=None) -> int`（`BlobStore` 双协议都声明）把不在
+  `live_refs` 里、且已过宽限期（`FsBlobStore` 默认 **24 小时**，构造时
+  `FsBlobStore(root, grace_period=timedelta(hours=N))` 可调）的字节删掉，返回删除数。
+- **两条都是幂等的**，可随时重跑，可并发重入（多删一次也只是删不到）。
+- **宽限期是正确性要求，不是优化**：`put` 与 `ingest`/事件落库之间存在时序窗口
   （进程内是毫秒级，但中间可能隔着 HITL park——那能等人数小时）。窗口里的 blob
-  没有任何引用边，没有宽限期就会被清扫误删，图**永久丢失**。
-- **不调用的后果是「blob 只涨不删」**（泄漏磁盘），**不会**产生悬空 ref。
+  在 `live_blob_refs()` 里查不到（还没有引用边），没有宽限期就会被清扫误删，
+  图**永久丢失**。
+- **不调用回收的后果是「blob 只涨不删」**（泄漏磁盘），**不会**产生悬空 ref。
   即：忘了配定时任务不会坏数据，只会费磁盘。
 
-**验收**：定时任务上线后观察 `SELECT count(*) FROM memory_blobs` 不再单调上涨。
+### ⚠️ 共用一个 blob store 实例时的陷阱
+
+如果第 4 步里 memory 侧与 event 侧注册的是**同一个** `blobs` 实例（如上面的
+写法），回收时喂给 `collect()` 的 `live_refs` **必须同时包含两侧的活引用**——
+只喂 memory 侧会把事件流仍需要的字节当孤儿删掉：
+
+```python
+# 错——只喂了 memory 侧，会把事件流仍需要的字节当孤儿删掉
+deleted = await blobs.collect(await memory.live_blob_refs())
+```
+
+**`memory.live_blob_refs()` 是 `SqlMemoryProvider` 的自有方法，`EventStore` 协议
+没有对应物**——ctx-weft 目前不提供「事件侧当前活引用」的现成计算（事件本就不像
+memory 记录那样有 `is_superseded` 语义，「哪些事件仍然有效」是宿主的保留策略，
+不是 core 能替你判断的）。也就是说，**共用一个实例时，正确的并集算不出来，除非
+宿主自己扫一遍保留窗口内的事件、从 `Event.content` 与 `Event.blob_refs`
+（见 `protocols/memory.py` 里对称的读侧回显字段）里把用到的 `blob:<sha>` 收集
+出来，再与 `memory.live_blob_refs()` 取并集**。这件事没有便利函数可用。
+
+正因为「共用一个实例」时回收的正确性要靠宿主自己维护一套事件侧活引用扫描逻辑，
+**强烈建议改为分开部署两个独立的 blob store 实例**（各指向不同目录/桶）：
+memory 侧回收只看 `memory.live_blob_refs()`，event 侧按宿主自己的事件保留策略
+（例如「保留最近 N 天」，过期即整体归档/删除，根本不需要按 sha 级别回收）单独
+处理，两侧从此互不干扰，也不需要写那段并集扫描代码。
+
+**验收**：定时任务上线后观察 blob store 的存储用量不再单调上涨；若共用一个实例，
+额外确认回收前后携图会话仍能在崩溃恢复后正确显示图片。
 
 ---
 
-## 6. 宿主自己的 event model 做多模态改造时的五个坑
+## 6. 事件持久化也可以换成 `SqlEventStore`
+
+memory 换 SQL 之后，事件流也可以从默认的 `InMemoryEventStore` 换成
+`SqlEventStore`（需同一个 `ctx-weft[sql]` 依赖），得到跨进程重启不丢事件、
+支持崩溃恢复快照的持久化。
+
+单文件 SQLite 部署可以与 memory 共享同一个 `engine`/`factory`，各自 `create_all`
+一次（两个包的 `Base` 是独立的——`memory.sql` 一个、`events.store.sql` 一个，
+共用会强迫只想建 events 表的宿主连 memory 表一起建）：
+
+```python
+from ctx_weft.providers.events import attach_persistence
+from ctx_weft.providers.events.store import sql as events_sql
+from ctx_weft.providers.events.store.sql import SqlEventStore
+from ctx_weft.providers.memory import sql as memory_sql
+from ctx_weft.providers.memory.sql import SqlMemoryProvider, make_session_factory
+
+engine, factory = make_session_factory("sqlite+aiosqlite:///app.db")
+async with engine.begin() as conn:
+    await conn.run_sync(memory_sql.Base.metadata.create_all)
+    await conn.run_sync(events_sql.Base.metadata.create_all)
+
+memory = SqlMemoryProvider(factory)
+store = SqlEventStore(factory)
+
+runtime.providers.register_memory(memory)
+attach_persistence(runtime.event_bus, store, snapshot_every_n=50)
+```
+
+宿主接 postgres、自带 engine/migration 时同理：直接 `SqlEventStore(factory)`，
+不必走 `open_sqlite_event_store`（那是单机部署用的便利函数）。
+
+要点：
+
+- **`attach_persistence` 是唯一推荐的接线方式**，它保证 `EventPersister` 先于
+  `SnapshotWriter` 订阅（顺序反了会让快照的 `last_event_id` 与它实际看到的
+  view 对不上）。不要自己分别 `bus.subscribe(...)`。
+- `snapshot_every_n=0`（默认不传）等价于「不接快照」，现有行为零变化；传正数
+  才会额外接上 `SnapshotWriter`，把崩溃恢复从 O(全部事件) 全量回放降级成
+  「最新快照 + 增量」。
+- `SqlEventStore` 与 `InMemoryEventStore` 在 `append()` 上同口径：**都不过滤瞬态
+  事件**，过滤是 `EventPersister` 的订阅策略，不是存储策略。若宿主此前直接调
+  `event_store.append()`，注意每 token 一个的流式 delta 现在会真的落库。
+
+**验收**：跑一遍宿主自己的事件冒烟用例；ctx-weft 侧的一致性套
+`tests/unit/test_event_store_conformance.py` 用同一套用例跑
+`InMemoryEventStore` 与 `SqlEventStore`，可作为参考基线。
+
+---
+
+## 7. 宿主自己的 event model 做多模态改造时的五个坑
 
 宿主的参考实现 `providers/memory/postgres.py`（462 行）落后于当前协议七处，
-下面五条是真会咬人的（另两处是 legacy 方法与 `recall_topic` 语义，见第 7 步）：
+下面五条是真会咬人的（另两处是 legacy 方法与 `recall_topic` 语义，见第 8 步）：
 
 1. **`json.dumps(event.content)` 对 dataclass 直接 `TypeError`。** 必须走
    `ctx_weft.core.content.content_to_jsonable` / `content_from_jsonable`。
@@ -227,8 +336,9 @@ deleted = await memory.collect_blobs()
    `NULL` 因此唯一表示存量行——**两态改三态**是这次的关键设计。
 3. **SQLite 会静默丢 tzinfo。** 裸 `DateTime(timezone=True)` 在 SQLite 上回读得到
    naive datetime，排序照常工作，但**等值比较恒 False**。新 provider 包了一层
-   `UtcDateTime` TypeDecorator（在 postgres 上是恒等变换）。宿主若共用模型文件，
-   直接用它。
+   `UtcDateTime` TypeDecorator（在 postgres 上是恒等变换，`memory.sql` 与
+   `events.store.sql` 各自从共享的 `providers/_sqlalchemy.py` 引用同一实现）。
+   宿主若共用模型文件，直接用它。
 4. **tenant 必须进列 + 索引/唯一键**，不能只在应用层过滤。写读两侧用**同一条**
    归一规则（`COALESCE(tenant,'default')`）。
 5. **`MemoryEventModel` 与宿主的 `SessionModel` / `TaskModel` / `EventModel`
@@ -240,7 +350,7 @@ deleted = await memory.collect_blobs()
 
 ---
 
-## 7. 迁移前必须先改掉的宿主调用点
+## 8. 迁移前必须先改掉的宿主调用点
 
 - **legacy 方法**：`recall_recent` / `recall_recent_by_agent` / `count_recent` /
   `supersede` **新 provider 不实现**（P4b-2 已移出协议）。宿主有直调点的话，
@@ -255,7 +365,7 @@ deleted = await memory.collect_blobs()
 
 ---
 
-## 8. 验收清单（照着勾）
+## 9. 验收清单（照着勾）
 
 - [ ] `pip install "ctx-weft[sql]"` 完成
 - [ ] `ix_subscriptions_session_task_topic`（3 列）**已 DROP**
@@ -263,25 +373,35 @@ deleted = await memory.collect_blobs()
       `memory_subscriptions.tenant` 三列已加，且**均为 nullable、无 DEFAULT**
 - [ ] `ix_subscriptions_tenant_session_task_topic`（4 列 unique）已建
 - [ ] `ix_memory_tenant_task` / `_agent` / `_topic` 已建
-- [ ] `memory_blobs` / `memory_blob_refs` 两表已建（含 `ix_memory_blob_refs_sha`）
+- [ ] `memory_blob_refs` 表已建（含 `ix_memory_blob_refs_sha`）——**没有**
+      `memory_blobs` 表，字节不进这个库
 - [ ] 存量行 `content_format` 已回填（或已确认不回填的风险）
 - [ ] `register_memory(SqlMemoryProvider(factory))` 已接
-- [ ] 已知晓 `get_blob_store()` 自动解析 = 外部化自动开启，且备份包含 `memory_blobs`
-- [ ] `collect_blobs()` 的定时任务已配
+- [ ] `register_memory_blob_store(...)` / `register_event_blob_store(...)`
+      **均已显式注册**（不注册就是没有 blob 能力，不是自动获得）
+- [ ] 若两侧共用同一个 blob store 实例，回收脚本的 `live_refs` 已确认取的是
+      两侧并集；若分开部署两个实例，两个回收任务已分别配置
+- [ ] 回收（mark-sweep 两步）的定时任务已配
 - [ ] 宿主对 legacy 四方法的调用点已清零
 - [ ] 两个租户用**同一个 `session_id`** 跑一遍冒烟：A 读不到 B 的行，
       B 发布不会把 A 的行标 superseded，两边订阅各自独立
+- [ ] （若同时切换事件持久化）`SqlEventStore` + `attach_persistence` 已接，
+      与 `InMemoryEventStore` 的冒烟结果一致
 
 ---
 
-## 9. 回滚
+## 10. 回滚
 
 DDL 全是加列/加索引/加表（除 2.1 那条 DROP），回滚方向：
 
-1. 代码切回旧 provider；
+1. 代码切回旧 provider，并把 `register_memory_blob_store` / 
+   `register_event_blob_store` 的接线也一并撤掉（或换回旧的
+   `register_blob_store(FilesystemToolsProvider(...))`，如果宿主当时是这样接的）；
 2. 重建旧的 3 列唯一索引——**但先确认此时库里没有「同 (session,task,topic)
    不同 tenant」的订阅行**，有的话重建会失败，需要先决定保留哪一条；
-3. 新增的三列与两张表可以留着不管（旧 provider 不读它们），也可以 DROP。
+3. 新增的三列、`memory_blob_refs` 表可以留着不管（旧 provider 不读它们），
+   也可以 DROP。
 
-**不可回滚的一件事**：切换期间新写入的图片，字节只在 `memory_blobs` 表里，
-事件行里只有 ref。回滚到旧 provider 后那些图取不回来（旧 provider 不认识 ref）。
+**不可回滚的一件事**：切换期间新写入的图片，字节只在 blob store（如
+`FsBlobStore` 指向的文件系统目录）里，事件行/memory 行里只有 ref。回滚到旧
+provider 后那些图取不回来（旧 provider 不认识 ref，也不知道去哪个目录找字节）。
