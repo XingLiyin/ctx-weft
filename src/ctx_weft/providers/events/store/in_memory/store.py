@@ -74,8 +74,16 @@ class InMemoryEventStore(EventStore):
 
     async def save_snapshot(self, snapshot: RunSnapshot) -> None:
         # 仅保留每个 session 的最新快照——恢复只需最新一条（snapshot + delta replay）。
+        # 「最新」按协议口径（protocols/events.py::load_latest_snapshot）取
+        # (snapshot_at, id) 的最大值，**不是**「最后一次调用 save_snapshot」——
+        # 写入顺序不保证与时间顺序一致，与 SqlEventStore 的 `ORDER BY created_at
+        # DESC, id DESC` 对齐，避免乱序写入时两个实现返回不同快照。
         async with self._lock:
-            self._snapshots[snapshot.session_id] = snapshot
+            existing = self._snapshots.get(snapshot.session_id)
+            if existing is None or (snapshot.snapshot_at, snapshot.id) >= (
+                existing.snapshot_at, existing.id
+            ):
+                self._snapshots[snapshot.session_id] = snapshot
 
     async def load_latest_snapshot(self, session_id: str) -> RunSnapshot | None:
         return self._snapshots.get(session_id)

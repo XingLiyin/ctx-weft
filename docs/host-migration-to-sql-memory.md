@@ -307,8 +307,17 @@ async with engine.begin() as conn:
 memory = SqlMemoryProvider(factory)
 store = SqlEventStore(factory)
 
+# ⚠️ store 必须在 CtxWeftRuntime 构造之前建好，并作为 event_store= 传入——
+# 不是建完 runtime 之后再对 runtime.event_bus 调 attach_persistence()。
+# CtxWeftRuntime.__init__ 内部自己调用 attach_persistence(bus, event_store,
+# snapshot_every_n=...)；recover() / rebuild_view / read_session_events_of_types
+# 等**所有读路径**读的都是 self.event_store。如果晚建 runtime、早建 store 再补接，
+# runtime 内部默认的 InMemoryEventStore 早已经是被 attach 好的那份，你自己接的
+# store 只会被写、从不会被读——重启后 recover() 从空的内存 store 恢复，"崩溃后
+# 存活"这个工作流的目的根本不工作，还会让每条事件存两遍。
+runtime = CtxWeftRuntime(
+    providers=registry, event_store=store, snapshot_every_n=50)
 runtime.providers.register_memory(memory)
-attach_persistence(runtime.event_bus, store, snapshot_every_n=50)
 ```
 
 宿主接 postgres、自带 engine/migration 时同理：直接 `SqlEventStore(factory)`，
@@ -316,19 +325,32 @@ attach_persistence(runtime.event_bus, store, snapshot_every_n=50)
 
 要点：
 
-- **`attach_persistence` 是唯一推荐的接线方式**，它保证 `EventPersister` 先于
+- **`CtxWeftRuntime(event_store=..., snapshot_every_n=...)` 是唯一推荐的接线方式**。
+  `attach_persistence` 在 `__init__` 内部被调用，它保证 `EventPersister` 先于
   `SnapshotWriter` 订阅（顺序反了会让快照的 `last_event_id` 与它实际看到的
-  view 对不上）。不要自己分别 `bus.subscribe(...)`。
-- `snapshot_every_n=0`（默认不传）等价于「不接快照」，现有行为零变化；传正数
+  view 对不上）。不要在 runtime 构造之后再自己额外调一次 `attach_persistence`
+  ——那样等于对同一条 bus 挂了两个 persister，`SqlEventStore` 那份会因为
+  `events.id` 主键冲突每条事件抛一次 `IntegrityError`（被吞成
+  `logger.exception`，日志刷屏但不掀 loop）。只有在完全不经过 `CtxWeftRuntime`
+  独立使用事件总线时（例如单测 store 往返），才直接调 `attach_persistence`。
+- `runtime.persistence` 是 `attach_persistence` 返回的 `PersistenceHandle`（公开
+  属性），需要换 store 或停止持久化时调 `await runtime.persistence.detach()`。
+- `snapshot_every_n=0`（默认）等价于「不接快照」，现有行为零变化；传正数
   才会额外接上 `SnapshotWriter`，把崩溃恢复从 O(全部事件) 全量回放降级成
   「最新快照 + 增量」。
 - `SqlEventStore` 与 `InMemoryEventStore` 在 `append()` 上同口径：**都不过滤瞬态
   事件**，过滤是 `EventPersister` 的订阅策略，不是存储策略。若宿主此前直接调
   `event_store.append()`，注意每 token 一个的流式 delta 现在会真的落库。
 
-**验收**：跑一遍宿主自己的事件冒烟用例；ctx-weft 侧的一致性套
-`tests/unit/test_event_store_conformance.py` 用同一套用例跑
-`InMemoryEventStore` 与 `SqlEventStore`，可作为参考基线。
+**验收**：重启进程（或在测试里模拟"新建一个 `CtxWeftRuntime` 但传入同一个
+`factory` 建出的 `SqlEventStore`"）后，`await runtime.recover()` 能从这个
+`SqlEventStore` 里读回此前落盘的事件、恢复出正确的 session 状态——而不是仅仅
+观察到事件被写了进去。只验"写"不验"重启后能读回"查不出接反的问题（读永远
+走的是 runtime 内部默认的 `InMemoryEventStore`，重启后就是空的，但『冒烟结果
+与 InMemoryEventStore 一致』这个说法在这种接反状态下照样为真）。ctx-weft 侧的
+一致性套 `tests/unit/test_event_store_conformance.py` 用同一套用例跑
+`InMemoryEventStore` 与 `SqlEventStore` 的 store 级往返，可作为参考基线，但
+它不覆盖"接入 `CtxWeftRuntime` 后重启恢复"这条——那条需要宿主自己验。
 
 ---
 
@@ -393,8 +415,13 @@ attach_persistence(runtime.event_bus, store, snapshot_every_n=50)
 - [ ] 宿主对 legacy 四方法的调用点已清零
 - [ ] 两个租户用**同一个 `session_id`** 跑一遍冒烟：A 读不到 B 的行，
       B 发布不会把 A 的行标 superseded，两边订阅各自独立
-- [ ] （若同时切换事件持久化）`SqlEventStore` + `attach_persistence` 已接，
-      与 `InMemoryEventStore` 的冒烟结果一致
+- [ ] （若同时切换事件持久化）`store = SqlEventStore(factory)` 已在
+      `CtxWeftRuntime(event_store=store, ...)` 构造**之前**建好并传入——**不是**
+      建完 runtime 后再对 `runtime.event_bus` 补调一次 `attach_persistence`；
+      重启进程（或用同一个 `factory` 重新构造一个 `CtxWeftRuntime`）后
+      `await runtime.recover()` 确认能从这个 `SqlEventStore` 里读回事件、恢复出
+      正确的 session 状态（只验证事件被写入不够——接反时写入也会成功，只是
+      读路径读的是另一个从未被读过的 `InMemoryEventStore`，重启后就是空的）
 
 ---
 

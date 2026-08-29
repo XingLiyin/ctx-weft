@@ -96,7 +96,8 @@ def test_providers_events_does_not_import_core() -> None:
     """同一条层序守卫，扩展到 `providers/events/`。
 
     `providers/*` 整体是允许 import core 的（`providers/llm/*` 等 7 个模块确实
-    这么做），但 `providers/events/bus.py` / `store.py` 被 `core/events/bus.py`
+    这么做），但 `providers/events/bus/in_process/bus.py` /
+    `providers/events/store/in_memory/store.py` 被 `core/events/bus.py`
     等兼容层反向 import——若它们也 import core，加上 `providers/__init__.py`
     未来若不再是平凡的 3 行，就会拼出一条包内真实的循环 import
     （见 2026-08-28 final-fix 计划 I3）。这条钉住前一半：这两个模块本身 core-free。
@@ -104,8 +105,10 @@ def test_providers_events_does_not_import_core() -> None:
     import ctx_weft.providers.events.bus as bus_module
     import ctx_weft.providers.events.store as store_module
 
-    _assert_module_does_not_import_core(bus_module, "providers/events/bus.py")
-    _assert_module_does_not_import_core(store_module, "providers/events/store.py")
+    _assert_module_does_not_import_core(
+        bus_module, "providers/events/bus/in_process/bus.py")
+    _assert_module_does_not_import_core(
+        store_module, "providers/events/store/in_memory/store.py")
 
 
 def test_bus_and_store_protocols_are_the_same_objects() -> None:

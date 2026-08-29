@@ -511,8 +511,10 @@ class MemoryBlobStore(ABC):
     「有个 sink 能存能取」。
 
     **本协议与 MemoryProvider 同处一个模块，但刻意不是它的方法**（裁定 D4）：
-    事件里存的永远是短标记、从不存字节，故 memory 是图片字节的唯一持有者，存取与
-    回收都应与它同事务——语义上这就是 memory 多模态支持的字节侧，与上面
+    D4 论证的是**引用边**（哪个 part 指向哪个 blob ref）该与 ingest 同事务，
+    不是**字节**该进 RDBMS——字节侧可以是文件系统 / 对象存储等任意独立部署，
+    memory 只需持有、维护引用边（见 ``MemoryProvider.live_blob_refs()``），
+    不必是字节的持有者。语义上这仍是 memory 多模态支持的字节侧，与上面
     ``MemoryProvider`` 的【多模态无损存取契约】（part 结构侧）是同一件事的两面，
     宿主实现多模态 memory 时应在本模块一次读全。
     保持独立 ABC 而不并入 ``MemoryProvider``，是因为两者的能力**正交**：字节放在哪

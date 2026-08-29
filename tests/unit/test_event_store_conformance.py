@@ -218,6 +218,31 @@ async def test_load_latest_snapshot_none_when_absent(store):
     assert await store.load_latest_snapshot("s1") is None
 
 
+async def test_load_latest_snapshot_by_created_at_not_write_order(store):
+    """乱序写入时「最新」按 snapshot_at 取最大，不是「最后一次 save_snapshot」。
+
+    协议口径（protocols/events.py::load_latest_snapshot）：按 snapshot_at 取
+    最大、同值按 id 取最大。这里先写一条时间更晚的快照，再写一条时间更早的
+    （模拟并发/重试补写导致的乱序），"最新"必须仍然是时间更晚的那条——
+    两个实现（in_memory 的 last-write-wins、sql 的 ORDER BY created_at DESC）
+    在写入顺序与时间顺序一致时看不出分歧，只有乱序写入才会暴露。
+    """
+    import dataclasses
+
+    later = dataclasses.replace(
+        _snap(last_id="evt_0009", seq=9), snapshot_at=_T0 + timedelta(seconds=10)
+    )
+    earlier = _snap(last_id="evt_0001", seq=1)  # snapshot_at=_T0，比 later 早
+
+    await store.save_snapshot(later)
+    await store.save_snapshot(earlier)  # 写入顺序在后，但时间更早
+
+    got = await store.load_latest_snapshot("s1")
+    assert got.last_event_sequence == 9, (
+        "载入应仍是时间更晚（snapshot_at 更大）的快照，而不是写入顺序最后的那条"
+    )
+
+
 # ── list_active_session_ids：会话生命周期状态机 ──────────────────────────────
 
 

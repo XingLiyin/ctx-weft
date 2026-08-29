@@ -453,7 +453,7 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 
 两步，通常在应用 lifespan 启动、provider 注册完成、接收新请求之前调用：
 
-1. **`recover(on_session_interrupted)`**（`src/ctx_weft/core/runtime.py:794`）：调
+1. **`recover()`**（`src/ctx_weft/core/runtime.py:794`）：调
    `event_store.list_active_session_ids()`（`src/ctx_weft/protocols/events.py:280`，查无终态
    事件的 session，不依赖 host 投影表），逐个回调把它标记/拉起，返回数量。`list_active_session_ids`
    未实现时跳过并告警。

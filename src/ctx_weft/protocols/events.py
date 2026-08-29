@@ -9,7 +9,7 @@
 `EventStore` 协议与 `RunSnapshot`（host 必须实现 append + read_by_session）。
 
 **不装**：`InProcessEventBus` / `InMemoryEventStore`（内置实现，在
-`providers/events/bus.py` / `providers/events/store.py`）、
+`providers/events/bus/in_process/bus.py` / `providers/events/store/in_memory/store.py`）、
 `TASK_STATUS_BY_EVENT`（core 的投影逻辑，且依赖 core 的 `TaskStatus`）。
 
 ⚠️ **本模块不得 import `ctx_weft.core` 的任何东西。** protocols 是比 core 低的层；
@@ -309,7 +309,16 @@ class EventStore(Protocol):
         raise NotImplementedError
 
     async def load_latest_snapshot(self, session_id: str) -> RunSnapshot | None:
-        """加载 session 最新快照，无快照时返回 None。"""
+        """加载 session 最新快照，无快照时返回 None。
+
+        **「最新」的定义（跨实现必须一致）：按 `snapshot.snapshot_at` 取最大；
+        `snapshot_at` 相同时按 `snapshot.id` 取最大。** 这条口径选 `snapshot_at`
+        而不是「最后一次 `save_snapshot` 调用」，是因为写入顺序不保证与时间顺序
+        一致（并发写、重试补写都可能乱序），而 `created_at` / `id` 是可以跨实现
+        定义的稳定排序键，「哪次调用最后执行」不是。`SnapshotWriter` 目前只按
+        `snapshot_at` 升序写，所以这条口径暂不影响现有行为，但实现方不得依赖
+        「最后写入即最新」这个更强、不受协议保证的假设。
+        """
         raise NotImplementedError
 
 
@@ -335,7 +344,8 @@ class EventBlobStore(ABC):
     ⚠️ **回收策略由 host 定，core 不规定。** 事件流里的 ref 能否取回字节，完全取决于
     host 让 event blob 活多久：想让事件流永远可重建，就让回收与事件保留策略对齐
     （例如永不回收，或按事件 TTL）。**共用一个实例时尤其当心**——该实现要同时看两侧的
-    引用才能安全回收，仅套用 memory 侧 `collect_blobs` 的判据会删掉事件流仍需要的字节
+    引用才能安全回收，仅把 `MemoryProvider.live_blob_refs()`（memory 侧的活引用集合）
+    喂给 `FsBlobStore.collect` 之类的 sweep，会把事件流仍需要的字节当孤儿删掉
     （spec §9）。
     """
 

@@ -472,6 +472,7 @@ class CtxWeftRuntime:
         hitl_manager: HitlManager | None = None,
         event_store: "Any | None" = None,
         config: "RuntimeConfig | None" = None,
+        snapshot_every_n: int = 0,
     ) -> None:
         from ctx_weft.core.config import RuntimeConfig
         self._config = config or RuntimeConfig()
@@ -494,11 +495,17 @@ class CtxWeftRuntime:
         # _normalize_hitl_content 只负责从 req 上取出本次应答真正要用的 tenant，
         # 校验/外部化本身仍是那个共用方法（Phase 3c Task A2）。
         self.hitl_manager.set_content_normalizer(self._normalize_hitl_content)
-        from ctx_weft.providers.events import EventPersister, InMemoryEventStore
+        from ctx_weft.providers.events import InMemoryEventStore, attach_persistence
         self.event_store = event_store or InMemoryEventStore()
-        # 订阅从 store 里抽了出来（spec 2026-08-29 §6.4）。SnapshotWriter **默认不接**：
-        # 宿主要快照 + 增量回放就自己 attach_persistence(bus, store, snapshot_every_n=50)。
-        self._event_persister = EventPersister(self.event_store, self._event_bus)
+        # 单一入口交给 attach_persistence（spec 2026-08-29 §6.4 + final review R15）：
+        # ① EventPersister 与 SnapshotWriter 的订阅顺序契约（persister 必须先于 snapshot
+        #   writer 订阅，否则 rebuild_view 看不到当前事件）统一由它保证，宿主不必懂顺序；
+        # ② snapshot_every_n=0（默认）时不接 SnapshotWriter —— 与改造前行为零变化；
+        # ③ 返回的 handle 存成**公开**属性 `self.persistence`（而不是私有的
+        #   `_event_persister`），因为 `EventPersister.detach` 的 docstring 明确要求宿主
+        #   换持久 store 时调用 detach，私有且无调用点会让那个用例本就是坏的。
+        self.persistence = attach_persistence(
+            self._event_bus, self.event_store, snapshot_every_n=snapshot_every_n)
 
         # Auto-register 内置 providers（与用户注册的 providers 无关）
         control_provider = ControlCapabilityProvider(hitl_manager=self.hitl_manager)

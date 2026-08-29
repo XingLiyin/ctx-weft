@@ -1083,37 +1083,51 @@ async def test_single_task(runtime):
 | `ctx_weft.providers.memory_blackboard` | `ctx_weft.providers.memory.in_memory` |
 | `ctx_weft.providers.memory_sql` | `ctx_weft.providers.memory.sql` |
 | `ctx_weft.providers.blob_fs` | `ctx_weft.providers.blob.fs` |
-| `ctx_weft.providers.events.bus` | `ctx_weft.providers.events.bus.in_process` |
-| `ctx_weft.providers.events.store` | `ctx_weft.providers.events.store.in_memory` |
 
-`ctx_weft.providers.events` 顶层的 `InProcessEventBus` / `InMemoryEventStore`
-两个名字不变。
+`ctx_weft.providers.events.bus` / `ctx_weft.providers.events.store` **不在上表里**——
+它们现在是子包而不是模块，但各自的 `__init__.py` 仍 re-export `InProcessEventBus` /
+`InMemoryEventStore`，所以 `from ctx_weft.providers.events.bus import InProcessEventBus`
+与 `from ctx_weft.providers.events.store import InMemoryEventStore` 照样能 import，
+和改造前一样，`ctx_weft.providers.events` 顶层也一样。真正挪动的只是私有实现模块名
+（`bus.py` → `bus/in_process/bus.py`、`store.py` → `store/in_memory/store.py`），
+没人应该直接 import 那两个私有模块，因此不构成破坏性变更。
 
 ## 升级须知（blob 字节移出 memory）
 
 - **破坏性变更：`SqlMemoryProvider` 不再实现 `MemoryBlobStore` / `EventBlobStore`。**
   它只维护 `memory_blob_refs` 引用边（那部分需要与 ingest 同事务），字节归 blob store。
-  接线改成显式注册：
+
+  **强烈建议分开部署两个 blob store 实例**——一个只挂 `MemoryBlobStore`、一个只挂
+  `EventBlobStore`，各自按各自的策略回收，不必互相当心：
 
   ```python
-  blobs = FsBlobStore(Path("/var/lib/app/blobs"))
-  registry.register_memory_blob_store(blobs)
-  registry.register_event_blob_store(blobs)   # 共用一个实例是允许的
+  memory_blobs = FsBlobStore(Path("/var/lib/app/memory-blobs"))
+  event_blobs = FsBlobStore(Path("/var/lib/app/event-blobs"))
+  registry.register_memory_blob_store(memory_blobs)
+  registry.register_event_blob_store(event_blobs)
   ```
+
+  共用同一个实例给两侧在类型上是允许的（`FsBlobStore` 恰好同时满足两个协议），但这是
+  实现层的巧合，不是推荐做法——见下面「回收方式变了」。
 
 - **`ProviderRegistry.get_memory_blob_store()` 不再自动回落到 memory provider。**
   现在与 `get_event_blob_store()` 一样只有两级：显式注册 > `NullMemoryBlobStore`。
   没注册就是「不接 blob」，携图会话会在入口被拒（`BlobStoreRequiredError`）。
 
 - **回收方式变了。** 原先 `await memory.collect_blobs()` 一步搞定，现在是标准的
-  mark-sweep 两步——mark 在 memory（它持有引用边），sweep 在 blob store（它持有字节）：
+  mark-sweep 两步——mark 在 memory（它持有引用边），sweep 在 blob store（它持有字节）。
+  **分开部署时**（推荐），mark 只需 memory 侧的活引用：
 
   ```python
-  await blobs.collect(await memory.live_blob_refs())
+  await memory_blobs.collect(await memory.live_blob_refs())
   ```
 
-  ⚠️ **共用一个 blob store 实例时，`live_refs` 必须同时含两侧的活引用**，只喂 memory
-  侧会删掉事件流仍需要的字节。想省心就分开部署两个实例，各按各的策略回收。
+  ⚠️ **若你选择共用同一个 blob store 实例给两侧**，上面这行是**错的**——
+  `live_blob_refs()` 只枚举 memory 侧的活引用，会把事件流仍需要的字节当孤儿删掉。
+  `EventStore` 协议目前**没有**对应的活引用枚举接口可用于补全另一半，core 不提供
+  现成方案；共用实例时必须自己另想办法算出两侧活引用的并集再喂给 `collect`，
+  否则就只回收 memory 侧不再需要、且确定不在事件流里被引用的那部分。这正是
+  上面建议分开部署的原因——分开之后这个陷阱不存在。
 
 ## 升级须知（事件持久化）
 
@@ -1121,19 +1135,27 @@ async def test_single_task(runtime):
   订阅与过滤都归新的 `EventPersister`。若你此前直接调 `event_store.append()`，注意
   每 token 一个的流式 delta 现在会真的落库——改用 `EventPersister` 或自己加过滤。
 
-- **接线改用 `attach_persistence`：**
+- **接线改用 `CtxWeftRuntime(event_store=..., snapshot_every_n=...)`。**
+  `attach_persistence` 现在由 `CtxWeftRuntime.__init__` 内部调用，接线的正确顺序是
+  **先建 store，再把它传进 runtime 构造器**——不要先建 runtime、再自己额外调一次
+  `attach_persistence(runtime.event_bus, my_store)`：那样默认的 `InMemoryEventStore`
+  仍然是 runtime 内部已经接好的那份，`recover()` / `rebuild_view` 等所有读路径读的
+  还是它，你自己接的 store 只会被写、永远不会被读，等于白写一份、事件还多存一遍。
 
   ```python
-  from ctx_weft.providers.events import attach_persistence
-
-  handle = attach_persistence(runtime.event_bus, my_store, snapshot_every_n=50)
+  my_store = InMemoryEventStore()  # 或任意自定义 EventStore
+  runtime = CtxWeftRuntime(event_store=my_store, snapshot_every_n=50)
+  # runtime.persistence 是 attach_persistence() 返回的 PersistenceHandle
   # ...
-  await handle.detach()
+  await runtime.persistence.detach()
   ```
 
-  `snapshot_every_n > 0` 时会一并接上 `SnapshotWriter`（**默认不接**，现有行为零变化）。
-  接上之后崩溃恢复从 O(全部事件) 全量回放退化成「最新快照 + 增量」。
-  顺序（persister 必须先于 snapshot writer）由这个函数保证，别手动分别 subscribe。
+  `snapshot_every_n > 0` 时会一并接上 `SnapshotWriter`（**默认 0 = 不接**，现有行为
+  零变化）。接上之后崩溃恢复从 O(全部事件) 全量回放退化成「最新快照 + 增量」。
+  顺序（persister 必须先于 snapshot writer）由 `attach_persistence` 保证，宿主不需要
+  也不应该自己分别 subscribe。想在 `CtxWeftRuntime` 之外单独使用事件总线（例如测试里
+  只测 store 往返），仍可以直接调 `attach_persistence(bus, store, snapshot_every_n=N)`
+  ——但那是脱离 runtime 的独立用法，不要在已经传了 `event_store=` 的 runtime 上重复调。
 
 - **新增 SQL 事件持久化**（需 `ctx-weft[sql]`）：
 
@@ -1141,7 +1163,9 @@ async def test_single_task(runtime):
   from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 
   async with open_sqlite_event_store("app-events.db") as store:
-      attach_persistence(runtime.event_bus, store, snapshot_every_n=50)
+      runtime = CtxWeftRuntime(event_store=store, snapshot_every_n=50)
+      # runtime 的 recover() / rebuild_view 等读路径现在读的就是这个 SQL store，
+      # 重启后可以从它恢复。
   ```
 
 ## 限制与约束
