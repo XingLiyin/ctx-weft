@@ -311,7 +311,7 @@ class ProviderRegistry:
 
         中间那一级是裁定 D4（blob 并入 memory）的接线点：memory provider
         若同时实现了 ``MemoryBlobStore`` 且 ``can_externalize``（如
-        ``providers.memory_sql.SqlMemoryProvider``），它就是字节的持有者，
+        ``providers.memory.sql.SqlMemoryProvider``），它就是字节的持有者，
         宿主不必再单独注册一遍。纯内存 provider 据裁定 D6 不实现
         ``MemoryBlobStore``，回落 ``NullMemoryBlobStore`` ——不接 blob 的宿主行为逐字节不变。
 

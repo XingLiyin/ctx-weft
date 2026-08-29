@@ -254,7 +254,7 @@ async def test_tracking_flush_writes_no_memory():
     from ctx_weft.core.runtime import _flush_tracking_memory
     from ctx_weft.protocols import MemoryAddress
     from ctx_weft.protocols.context import ProviderContext
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     mem = InMemoryMemoryProvider()
 

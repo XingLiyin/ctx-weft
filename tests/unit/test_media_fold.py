@@ -37,7 +37,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     TextPart,
 )
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 _BASE = datetime(2026, 8, 27, tzinfo=UTC)
 _ADDR = MemoryAddress(session_id="s", task_id="t1", agent_id="a1")

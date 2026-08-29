@@ -16,7 +16,7 @@ from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, CompactStep
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.state.models import Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio

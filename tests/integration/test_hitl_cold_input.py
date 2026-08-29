@@ -27,7 +27,7 @@ from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
 @pytest.mark.asyncio

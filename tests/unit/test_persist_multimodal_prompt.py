@@ -10,7 +10,7 @@ from ctx_weft.core.loop.driver import _persist_user_prompt
 from ctx_weft.protocols import (
     ImagePart, MemoryAddress, MemoryEventType, ProviderContext, TextPart,
 )
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
 def _content():

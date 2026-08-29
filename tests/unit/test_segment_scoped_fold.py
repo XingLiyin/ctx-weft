@@ -37,7 +37,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.core.loop.steps.segment_fold import segment_fold
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 MT = MemoryEventType
 

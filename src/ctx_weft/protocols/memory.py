@@ -507,7 +507,7 @@ class MemoryBlobStore(ABC):
     ``InMemoryProvider`` 不实现它仍然完全合规，而 ``ProviderRegistry.get_memory_blob_store()``
     的自动解析判据正是 ``isinstance(mem, MemoryBlobStore) and mem.can_externalize``——
     并入协议会让该判据恒真、失去分辨力。
-    仓内实现见 ``ctx_weft.providers.memory_sql.SqlMemoryProvider``。
+    仓内实现见 ``ctx_weft.providers.memory.sql.SqlMemoryProvider``。
     （Phase 3b 曾有一个挂在 FilesystemToolsProvider 上的实现，裁定 D5 已移除——
     字节与引用分居两处时，回收无法与 ingest/fold 事务性地一致；本协议也因此
     从 ``protocols/filesystem.py`` 迁至此处。）

@@ -28,8 +28,8 @@ from ctx_weft.protocols.events import EventBlobStore
 from ctx_weft.protocols.memory import BLOB_REF_PREFIX, MemoryBlobStore
 from ctx_weft.providers.llm.anthropic import AnthropicAdapter, AnthropicMultimodalAdapter
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from ctx_weft.providers.memory_sql import open_sqlite_memory
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.sql import open_sqlite_memory
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,

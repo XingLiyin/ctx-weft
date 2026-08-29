@@ -11,7 +11,7 @@ from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.llm.provider import _FixedModelClient
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,

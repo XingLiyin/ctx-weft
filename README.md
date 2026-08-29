@@ -102,7 +102,7 @@ EventBus             事件总线，所有状态变更的唯一出口
 import asyncio
 from ctx_weft import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.testing import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     AgentCapability, AgentCapabilityProvider, AgentTemplate,
     CapabilityProviderInfo, IdentityFacet, LoopConfig, MemoryConfig,
@@ -673,7 +673,7 @@ async for ev in runtime.event_bus.stream(EventFilter(session_id="ses_xxx")):
 零依赖，用于开发/测试：
 
 ```python
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 providers.register_memory(InMemoryMemoryProvider())
 # recall_recent ✓ / recall_topic ✓ / recall_semantic ✗（返空）；线程不安全，仅单进程/测试
 ```
@@ -971,7 +971,7 @@ assert llm.last_request.system.startswith("You are")
 import pytest
 from ctx_weft import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.testing import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     AgentCapability, AgentCapabilityProvider, AgentTemplate,
     CapabilityProviderInfo, IdentityFacet, LoopConfig, MemoryConfig,

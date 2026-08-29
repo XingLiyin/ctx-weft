@@ -24,7 +24,7 @@ from ctx_weft.protocols.capability import (
     ToolCapabilityProvider,
 )
 from ctx_weft.protocols.filesystem import SpillSink
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 # 一段够长、能在 repr 里被一眼认出的假 base64。
 FAKE_B64 = "QUJDREVG" * 200

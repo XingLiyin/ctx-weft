@@ -27,7 +27,7 @@ from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 from tests.unit._stub_runner import StubRunner
 

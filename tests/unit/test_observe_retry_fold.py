@@ -5,7 +5,7 @@ import pytest
 
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext
 
 pytestmark = pytest.mark.asyncio

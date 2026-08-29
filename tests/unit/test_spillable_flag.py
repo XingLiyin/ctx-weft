@@ -14,7 +14,7 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.filesystem import SpillSink
 from ctx_weft.providers._tooldecl import make_tool_registry
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
 def test_toolcapability_spillable_defaults_true():

@@ -49,7 +49,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     TextPart,
 )
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 # 仓内典型预算（见 core/state/models.py:132、core/control/types.py:32-33，
 # 以及 protocols/template.py:79 的 compact_token_ratio）。

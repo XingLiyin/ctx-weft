@@ -27,7 +27,7 @@ from ctx_weft.protocols import (
     ProviderContext,
 )
 from ctx_weft.protocols.capability import qualify
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 

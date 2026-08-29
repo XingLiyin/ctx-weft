@@ -9,7 +9,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
     MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext,

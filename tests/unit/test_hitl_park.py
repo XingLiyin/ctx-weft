@@ -36,7 +36,7 @@ async def test_gateway_defer_raises_park_and_skips_provider() -> None:
     from ctx_weft.protocols import MemoryAddress, ProviderContext
     from ctx_weft.protocols.capability import (
         CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider)
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     cap = ToolCapability(id="test:echo", name="echo", description="e")
 
@@ -92,7 +92,7 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
         MemoryAddress,
         ProviderContext,
     )
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     # ── real objects ──────────────────────────────────────────────────────────

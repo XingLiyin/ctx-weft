@@ -24,7 +24,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     ProviderContext,
 )
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
 class InlineAgentTemplateProvider(AgentCapabilityProvider):

@@ -110,7 +110,7 @@ def _make_state():
 
 
 def _make_ctx(tool_content: str, event_bus=None):
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import ProviderContext
     mem = InMemoryMemoryProvider()
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
@@ -386,7 +386,7 @@ async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
             return ControlResult(content="recap", metadata={"task_summary": "sum"})
 
     state = _make_state()
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
 

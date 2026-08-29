@@ -53,7 +53,7 @@ from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
 from ctx_weft.protocols import LLMUsage, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
 class _RecordingBus:

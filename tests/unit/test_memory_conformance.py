@@ -60,8 +60,8 @@ from ctx_weft.protocols import (
 from ctx_weft.protocols.context import ImagePart, TextPart
 from ctx_weft.protocols.memory import MemoryBlobStore
 from ctx_weft.protocols.memory_compat import MemoryKind
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-from ctx_weft.providers.memory_sql import open_sqlite_memory
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.sql import open_sqlite_memory
 
 # ── Provider 注册表（C2 接入点）────────────────────────────────────────────────
 

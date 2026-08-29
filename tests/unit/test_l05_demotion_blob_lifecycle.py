@@ -30,7 +30,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     TextPart,
 )
-from ctx_weft.providers.memory_sql import open_sqlite_memory
+from ctx_weft.providers.memory.sql import open_sqlite_memory
 
 _RAW = b"\x89PNG\r\n\x1a\n" + b"payload" * 100
 _KINDS = [MemoryKind.CONVERSATION_TURN]

@@ -8,7 +8,7 @@ from ctx_weft.protocols import (
     ImagePart, MemoryAddress, MemoryEvent, MemoryEventType as MT, ProviderContext, TextPart,
 )
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 

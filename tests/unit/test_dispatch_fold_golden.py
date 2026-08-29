@@ -21,7 +21,7 @@ from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext,
 )
 from ctx_weft.core.state.models import NormalTaskSettings, Task
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 T = MemoryEventType
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)

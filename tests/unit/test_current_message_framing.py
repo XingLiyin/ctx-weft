@@ -170,7 +170,7 @@ def test_frame_noop_when_no_task_conversation_user():
 
 @pytest.mark.asyncio
 async def test_driver_persists_raw_user_prompt():
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
     mem = InMemoryMemoryProvider()
     pctx = ProviderContext(session_id="s1", tenant_id="default")

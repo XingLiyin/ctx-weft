@@ -81,7 +81,7 @@ def _make_state(*, context_tokens: int = 0):
 
 
 def _make_ctx(event_bus, tokenizer: HeuristicTokenizer):
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
 

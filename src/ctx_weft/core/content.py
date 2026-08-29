@@ -551,7 +551,7 @@ def _is_ref_part(part: Any) -> bool:
 def extract_blob_refs(content: "str | list[ContentPart] | None") -> list[str]:
     """内容里引用到的全部 blob ref（``blob:<sha>``），去重、保持首次出现顺序。
 
-    **归一层是 ref 判据的唯一真源**（spec §3①）：持久化侧（`providers/memory_sql`
+    **归一层是 ref 判据的唯一真源**（spec §3①）：持久化侧（`providers/memory/sql`
     的引用表）必须调本函数，不得各写一遍 isinstance——判据一旦分叉，
     「哪些 blob 还活着」就会和「出网时哪些 part 会被 rehydrate」对不上，
     而那正好是「回收删掉了还在用的图」的成因。

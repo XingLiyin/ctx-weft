@@ -10,7 +10,7 @@ from ctx_weft.core.runtime import _copy_memory_for_inherit
 from ctx_weft.core.state.models import Task, NormalTaskSettings
 from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress
 from ctx_weft.protocols.context import ProviderContext
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 _BASE = datetime(2026, 6, 30, 12, 0, 0, tzinfo=timezone.utc)
 

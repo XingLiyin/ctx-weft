@@ -4,17 +4,17 @@
 装法 ``pip install ctx-weft[sql]``。它不在 ctx-weft 的基础依赖里，
 也**没有**任何上层包 eager import 它——``import ctx_weft`` /
 ``import ctx_weft.providers`` 在缺 sqlalchemy 时照常工作，只有显式
-``import ctx_weft.providers.memory_sql`` 才会（如实地）报 ImportError。
+``import ctx_weft.providers.memory.sql`` 才会（如实地）报 ImportError。
 """
 
-from ctx_weft.providers.memory_sql.models import (
+from ctx_weft.providers.memory.sql.models import (
     Base,
     MemoryBlobModel,
     MemoryBlobRefModel,
     MemoryEventModel,
     MemorySubscriptionModel,
 )
-from ctx_weft.providers.memory_sql.provider import (
+from ctx_weft.providers.memory.sql.provider import (
     SqlMemoryProvider,
     make_session_factory,
     normalize_tenant,

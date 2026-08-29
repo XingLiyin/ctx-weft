@@ -127,7 +127,7 @@ def test_registry_does_not_fall_back_from_memory_provider_to_event_blob_store() 
     抽象方法）、`MemoryBlobStore`、`EventBlobStore` 三个协议，注册为 memory
     provider 后断言 `get_event_blob_store()` 仍是 Null。
     """
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class BothProvider(InMemoryMemoryProvider, MemoryBlobStore, EventBlobStore):
         async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:

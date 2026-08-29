@@ -18,7 +18,7 @@ Task 2 的降级（写占位）与 Task 4 的 `media:get_image`（读占位取 r
 | 2 | ``[image {media_type}]`` | `core/content.py::_IMAGE_PLACEHOLDER_TMPL`，产出方二：`providers/llm/_modality.py::downgrade_for_text_only`（经 `AnthropicAdapter` / `OpenAIAdapter` 的 `_prepare_messages`），两者共用同一常量与同一底层函数（`downgrade_images_to_text`） | **per-purpose 降级**（Phase 3c）：**不落库**，只影响本次 prompt | 否 |
 | 3 | ``[image unavailable: {media_type}]`` | `core/content.py::_IMAGE_UNAVAILABLE_TMPL` | 出网 rehydrate 取不回 blob 时的降级 | 否 |
 | 4 | ``[image see the following message]`` | `providers/llm/openai.py::_TOOL_IMAGE_NOTICE` | OpenAI `role="tool"` 只收文本，图重定位到随后的 user 消息 | 否 |
-| 5 | ``[image unavailable]`` | `providers/memory_sql/*.py` docstring | 仅文档举例，**不是活代码** | 否 |
+| 5 | ``[image unavailable]`` | `providers/memory/sql/*.py` docstring | 仅文档举例，**不是活代码** | 否 |
 
 ⚠️ 2 与 1 **并存、互不替代**：per-purpose 是「这次不发」，L0.5 是「从记忆里收起来」。
 改 1 不要顺手动 2。

@@ -12,7 +12,7 @@ from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
 pytestmark = pytest.mark.asyncio

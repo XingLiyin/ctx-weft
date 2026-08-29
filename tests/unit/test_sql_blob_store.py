@@ -47,9 +47,9 @@ from ctx_weft.protocols import (
     TextPart,
 )
 from ctx_weft.protocols.memory_compat import MemoryKind
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
-from ctx_weft.providers.memory_sql import MemoryBlobModel, MemoryBlobRefModel
-from ctx_weft.providers.memory_sql.provider import SqlMemoryProvider, open_sqlite_memory
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.sql import MemoryBlobModel, MemoryBlobRefModel
+from ctx_weft.providers.memory.sql.provider import SqlMemoryProvider, open_sqlite_memory
 
 _SESSION = "s1"
 _AGENT = "ag1"

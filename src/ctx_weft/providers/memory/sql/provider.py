@@ -3,7 +3,7 @@
 协议面 8 方法齐备：写 ingest / fold、读 load_view / recall_topic / recall_semantic、
 订阅 subscribe_topic / list_subscriptions、能力 describe。
 
-与 `providers/memory_blackboard/in_memory.py` 是同一套契约的两个实现，
+与 `providers/memory/in_memory/provider.py` 是同一套契约的两个实现，
 `tests/unit/test_memory_conformance.py` 对两者跑同一套用例。
 
 设计要点：
@@ -75,7 +75,7 @@ from ctx_weft.protocols.memory_compat import (
     normalize_view,
     validate_half_address,
 )
-from ctx_weft.providers.memory_sql.models import (
+from ctx_weft.providers.memory.sql.models import (
     Base,
     MemoryBlobModel,
     MemoryBlobRefModel,

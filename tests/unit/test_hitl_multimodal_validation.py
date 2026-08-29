@@ -344,7 +344,7 @@ async def test_runtime_injects_helper_that_delegates_to_the_shared_source():
 async def test_all_three_entry_points_reject_malformed_base64_before_any_put():
     """run_single_task / start_session / HITL 应答——三处顺序与判据必须一致。"""
     from ctx_weft.core.runtime import SessionStartParams
-    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
         make_echo_template,

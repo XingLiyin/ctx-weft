@@ -27,7 +27,7 @@ from ctx_weft.core.assembler.sources.blackboard import BlackboardSource
 from ctx_weft.core.loop.driver import StepDriver
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Agent, Session, Task
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,

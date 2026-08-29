@@ -131,7 +131,7 @@ async def test_run_single_task_rejects_image_before_persisting_anything_without_
     from ctx_weft.core.errors import BlobStoreRequiredError
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from ctx_weft.providers.llm.provider import _FixedModelClient
-    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
         make_echo_template,
@@ -176,7 +176,7 @@ async def test_run_single_task_rejects_image_before_persisting_anything_without_
 @pytest.mark.asyncio
 async def test_start_session_plain_text_does_not_eagerly_resolve_llm():
     from ctx_weft.core.runtime import SessionStartParams
-    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
         make_echo_template,
@@ -208,7 +208,7 @@ async def test_start_session_plain_text_resolver_never_called():
     """上一条测试断言"整体不抛"；这条用计数器 stub 直接锁死 resolver 调用次数
     为 0——比"不抛异常"更强的证据，直接证明惰性解析确实惰性。"""
     from ctx_weft.core.runtime import SessionStartParams
-    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
         make_echo_template,
@@ -250,7 +250,7 @@ async def test_start_session_dict_text_does_not_eagerly_resolve_llm():
     调用。"""
     from ctx_weft.core.errors import InvalidContentError
     from ctx_weft.core.runtime import SessionStartParams
-    from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
         make_echo_template,

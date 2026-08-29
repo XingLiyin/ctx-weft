@@ -72,7 +72,7 @@ async def test_reconcile_invokes_only_dangling_tool_calls() -> None:
     from ctx_weft.core.loop.steps.reconcile import ReconcileStep
     from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
     from ctx_weft.protocols.memory import MemoryEvent
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     mem = InMemoryMemoryProvider()
@@ -114,7 +114,7 @@ async def test_reconcile_no_dangling_routes_to_prepare() -> None:
     from ctx_weft.core.loop.steps.reconcile import ReconcileStep
     from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
     from ctx_weft.protocols.memory import MemoryEvent
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     mem = InMemoryMemoryProvider()
@@ -143,7 +143,7 @@ async def test_resolve_reconcile_detection_helper() -> None:
     from ctx_weft.core.runtime import _task_has_dangling_tool_call
     from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
     from ctx_weft.protocols.memory import MemoryEvent
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     mem = InMemoryMemoryProvider()
