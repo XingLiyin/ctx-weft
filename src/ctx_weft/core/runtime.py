@@ -336,9 +336,14 @@ class ProviderRegistry:
     def get_event_blob_store(self) -> "EventBlobStore":
         """取 event blob store。**只有两级：显式注册 > NullEventBlobStore。**
 
-        刻意不像 `get_memory_blob_store()` 那样自动回落到 memory provider（spec §4）：
+        与 `get_memory_blob_store()` 完全对称——两侧都**刻意不**自动解析到 memory
+        provider（spec §4；memory 侧那条已删除的中间级见 spec 2026-08-29 §5.3）：
         自动解析会让「共用」成为隐式默认，而双 store 的出发点正是让两者**可分**。
         host 要共用就把同一个实例注册两次——意图写在接线代码里，而不是藏在解析规则里。
+
+        「可分」的实质不在解析规则，而在 ref 命名空间：两个 store 的 ref 是两个
+        独立的命名空间，即便 host 把同一个实例注册两次也不改变这一点——core 从不
+        比较两侧的 ref，也从不拿一侧的 ref 去另一侧解析。
 
         `NullEventBlobStore` 实例只建一次，重复调用返回同一对象。
         """
