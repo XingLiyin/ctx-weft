@@ -20,6 +20,7 @@ from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.events.types import Event, EventType
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.state.event_store import InMemoryEventStore
+from ctx_weft.providers.events import EventPersister
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,7 +44,8 @@ def _ev(seq: int, sid: str, type_: EventType, **payload) -> Event:
 async def test_resume_session_preserves_context_limit() -> None:
     """Session built by resume_session carries context_limit from persisted event."""
     bus = InProcessEventBus()
-    store = InMemoryEventStore(bus)
+    store = InMemoryEventStore()
+    EventPersister(store, bus)
 
     sid = "ses_resume_ctx"
 

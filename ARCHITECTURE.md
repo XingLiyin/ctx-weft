@@ -487,8 +487,11 @@ postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
 - **白名单冻结**：`EVENT_TYPES`（`src/ctx_weft/protocols/events.py:172`）是 V1 冻结集合，`make_event`
   对未登记类型直接 `ValueError`——保证下游 reducer 的分支封闭。
 - **持久化**：`CtxWeftRuntime` 默认用协议 `EventStore`（`src/ctx_weft/protocols/events.py:249`）的内置实现
-  `InMemoryEventStore(event_bus=...)`（`src/ctx_weft/providers/events/store.py:29`），构造时即订阅总线、落盘所有事件，并支撑
-  `list_active_session_ids` 与回放。传入自定义 `event_store` 时由调用方自行 wire。
+  `InMemoryEventStore()`（`src/ctx_weft/providers/events/store/in_memory/store.py`），落盘非瞬态事件并支撑
+  `list_active_session_ids` 与回放；订阅总线是独立的 `EventPersister`
+  （`src/ctx_weft/providers/events/persister.py`）的职责，`CtxWeftRuntime` 用
+  `EventPersister(self.event_store, self._event_bus)` 把两者接起来。传入自定义
+  `event_store` 时同样走这条 persister。
 - **因果链**：`causation_id` 串起「哪个事件导致了这个事件」，用于调试与回放重建。
 
 > 因为所有状态变更都先变成事件再流出，事件流即「单一事实源」：UI 实时渲染、审计、崩溃恢复、回放

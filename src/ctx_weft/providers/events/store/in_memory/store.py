@@ -7,71 +7,40 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
 
 from ctx_weft.protocols.events import (
-    TRANSIENT_EVENT_TYPES,
     Event,
     EventStore,
     RunSnapshot,
 )
-
-if TYPE_CHECKING:
-    from ctx_weft.protocols.events import EventBus
+from ctx_weft.providers.events._lifecycle import apply_lifecycle
 
 
 # ── InMemoryEventStore ────────────────────────────────────────────────────────
 
 
-_TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "CANCELED", "INTERRUPTED"})
-
-
 class InMemoryEventStore(EventStore):
     """单进程内存版。线程不安全，仅供开发/测试/单进程 demo 使用。
 
-    传入 event_bus= 时自动订阅所有事件，无需手动调用 append。
+    订阅由 `EventPersister` 负责，见 `providers/events/persister.py`。
     """
 
-    def __init__(self, event_bus: "EventBus | None" = None) -> None:
+    def __init__(self) -> None:
         self._events: dict[str, list[Event]] = {}
         self._active: set[str] = set()
         self._snapshots: dict[str, RunSnapshot] = {}
         self._lock = asyncio.Lock()
-        # 保存订阅句柄，便于 host 切换到外部 event_store 时注销（见 detach）。
-        self._subscription = event_bus.subscribe(None, self.append) if event_bus else None
-
-    async def detach(self) -> None:
-        """停止订阅 event_bus。
-
-        host 在构造 runtime 后才异步初始化 DB，会把 runtime.event_store 替换为
-        Postgres 实现；若不注销本实例，它会作为孤儿订阅者继续在内存里堆积事件。
-        """
-        if self._subscription is not None:
-            await self._subscription.unsubscribe()
-            self._subscription = None
 
     async def append(self, event: Event) -> None:
-        # 瞬态 delta（每 token 一个）只为实时流而发，不落存储——否则内存无界堆积、
-        # 且会被 read_by_session / reduce_events 全量回放。真相由 LLMResponseFinished 承载。
-        if event.type in TRANSIENT_EVENT_TYPES:
-            return
+        # **不过滤瞬态事件**（spec 2026-08-29 §6.4）：那是订阅策略，归 EventPersister。
+        # 本方法「让存什么就存什么」——一致性测试因此能直接测 append/read 往返。
         async with self._lock:
             sid = event.session_id
             if sid not in self._events:
                 self._events[sid] = []
-                self._active.add(sid)
+                self._active.add(sid)      # 种子：该 session 出现过即 active
             self._events[sid].append(event)
-            t = event.type
-            if t == "SessionFinished":
-                self._active.discard(sid)
-            elif t == "SessionResumed":
-                # 多轮会话每轮结束发 SessionFinished、下一条消息发 SessionResumed 重新激活；
-                # 故 resume 后须重新计入 active，否则崩溃恢复会漏掉已对话过的会话。
-                self._active.add(sid)
-            elif t == "SessionStatusChanged":
-                new_status = (event.payload or {}).get("new_status", "")
-                if new_status in _TERMINAL_STATUSES:
-                    self._active.discard(sid)
+            apply_lifecycle(self._active, event)
 
     async def read_by_session(self, session_id: str) -> list[Event]:
         return list(self._events.get(session_id, []))

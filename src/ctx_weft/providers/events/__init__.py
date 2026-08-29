@@ -13,6 +13,17 @@
 """
 
 from ctx_weft.providers.events.bus import InProcessEventBus
+from ctx_weft.providers.events.persister import (
+    EventPersister,
+    PersistenceHandle,
+    attach_persistence,
+)
 from ctx_weft.providers.events.store import InMemoryEventStore
 
-__all__ = ["InProcessEventBus", "InMemoryEventStore"]
+__all__ = [
+    "EventPersister",
+    "InMemoryEventStore",
+    "InProcessEventBus",
+    "PersistenceHandle",
+    "attach_persistence",
+]

@@ -15,6 +15,7 @@ from ctx_weft.core.control.reducers import rebuild_view, reduce_events, serializ
 from ctx_weft.core.events.bus import InProcessEventBus
 from ctx_weft.core.events.types import Event, EventType
 from ctx_weft.core.state.event_store import InMemoryEventStore, RunSnapshot
+from ctx_weft.providers.events import EventPersister
 
 
 def _ts() -> datetime:
@@ -110,12 +111,17 @@ async def test_rebuild_view_snapshot_plus_delta_matches_full_replay() -> None:
 
 
 async def test_inmemory_store_drops_transient_token_events() -> None:
-    """每 token 一个的流式 delta 不入存储——只为实时流而发，真相在 LLMResponseFinished。"""
+    """每 token 一个的流式 delta 不入存储——只为实时流而发，真相在 LLMResponseFinished。
+
+    过滤已搬到 EventPersister（spec 2026-08-29 §6.4）：store.append 本身「让存什么就
+    存什么」，这里改经 persister 走一遍，验证的仍是端到端「瞬态事件不落库」的效果。
+    """
     store = InMemoryEventStore()
-    await store.append(_ev(1, EventType.SESSION_CREATED, template_id="t", root_agent_id="a"))
-    await store.append(_ev(2, EventType.LLM_TOKEN_STREAMED, delta="he"))
-    await store.append(_ev(3, EventType.LLM_REASONING_STREAMED, delta="..."))
-    await store.append(_ev(4, EventType.LLM_RESPONSE_FINISHED, content="hello"))
+    persister = EventPersister(store)
+    await persister.on_event(_ev(1, EventType.SESSION_CREATED, template_id="t", root_agent_id="a"))
+    await persister.on_event(_ev(2, EventType.LLM_TOKEN_STREAMED, delta="he"))
+    await persister.on_event(_ev(3, EventType.LLM_REASONING_STREAMED, delta="..."))
+    await persister.on_event(_ev(4, EventType.LLM_RESPONSE_FINISHED, content="hello"))
 
     types = [e.type for e in await store.read_by_session("s1")]
     assert types == [EventType.SESSION_CREATED, EventType.LLM_RESPONSE_FINISHED]
@@ -124,20 +130,24 @@ async def test_inmemory_store_drops_transient_token_events() -> None:
 
 
 async def test_detach_stops_receiving_events() -> None:
-    """detach 后内存 store 不再从总线收事件（host 切到 Postgres 后避免孤儿堆积）。"""
+    """detach 后不再从总线收事件（host 切到 Postgres 后避免孤儿堆积）。
+
+    该能力已搬去 EventPersister（spec 2026-08-29 §6.4）——store 自身不再自订阅。
+    """
     bus = InProcessEventBus()
-    store = InMemoryEventStore(event_bus=bus)
+    store = InMemoryEventStore()
+    persister = EventPersister(store, bus)
 
     await bus.emit(_ev(1, EventType.SESSION_CREATED, template_id="t", root_agent_id="a"))
     assert len(await store.read_by_session("s1")) == 1
 
-    await store.detach()
+    await persister.detach()
     await bus.emit(_ev(2, EventType.RUN_FINISHED, final_status="FINISHED"))
 
     # detach 之后的事件不应再落入本 store
     assert len(await store.read_by_session("s1")) == 1
     # 幂等：重复 detach 不报错
-    await store.detach()
+    await persister.detach()
 
 
 async def test_rebuild_view_without_snapshot_falls_back_to_full_replay() -> None:

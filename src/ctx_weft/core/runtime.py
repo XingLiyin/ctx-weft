@@ -494,9 +494,11 @@ class CtxWeftRuntime:
         # _normalize_hitl_content 只负责从 req 上取出本次应答真正要用的 tenant，
         # 校验/外部化本身仍是那个共用方法（Phase 3c Task A2）。
         self.hitl_manager.set_content_normalizer(self._normalize_hitl_content)
-        # 默认使用内存版 EventStore，自动订阅 EventBus；传入自定义实现时由调用方自行 wire
-        from ctx_weft.providers.events import InMemoryEventStore
-        self.event_store = event_store or InMemoryEventStore(event_bus=self._event_bus)
+        from ctx_weft.providers.events import EventPersister, InMemoryEventStore
+        self.event_store = event_store or InMemoryEventStore()
+        # 订阅从 store 里抽了出来（spec 2026-08-29 §6.4）。SnapshotWriter **默认不接**：
+        # 宿主要快照 + 增量回放就自己 attach_persistence(bus, store, snapshot_every_n=50)。
+        self._event_persister = EventPersister(self.event_store, self._event_bus)
 
         # Auto-register 内置 providers（与用户注册的 providers 无关）
         control_provider = ControlCapabilityProvider(hitl_manager=self.hitl_manager)
