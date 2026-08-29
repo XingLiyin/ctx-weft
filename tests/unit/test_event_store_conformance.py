@@ -35,8 +35,17 @@ async def _make_in_memory(tmp_path) -> AsyncIterator[EventStore]:
     yield InMemoryEventStore()
 
 
+@asynccontextmanager
+async def _make_sql(tmp_path) -> AsyncIterator[EventStore]:
+    from ctx_weft.providers.events.store.sql import open_sqlite_event_store
+
+    async with open_sqlite_event_store(tmp_path / "events.db") as s:
+        yield s
+
+
 _STORE_FACTORIES = {
     "in_memory": _make_in_memory,
+    "sql": _make_sql,
 }
 
 
