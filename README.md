@@ -493,6 +493,7 @@ runtime = CtxWeftRuntime(
     providers=providers,              # 必需含至少一个 AgentCapabilityProvider
     llm=my_llm_adapter,               # 可选，LLM 兜底（未注册 llm provider 时用）
     hitl_manager=None,                # 可选，默认自动创建
+    event_bus=None,                   # 可选，默认 InProcessEventBus；注入以接 Redis / NATS / 跨进程
     event_store=None,                 # 可选，默认 InMemoryEventStore（自动订阅 event_bus）
 )
 ```

@@ -86,7 +86,6 @@ from ctx_weft.protocols.capability import (
     qualify,
 )
 from ctx_weft.protocols.events import EventBus
-from ctx_weft.providers.events import InProcessEventBus
 
 logger = logging.getLogger(__name__)
 
@@ -470,6 +469,7 @@ class CtxWeftRuntime:
         providers: ProviderRegistry | None = None,
         llm: LLMClient | None = None,
         hitl_manager: HitlManager | None = None,
+        event_bus: EventBus | None = None,
         event_store: "Any | None" = None,
         config: "RuntimeConfig | None" = None,
         snapshot_every_n: int = 0,
@@ -478,7 +478,11 @@ class CtxWeftRuntime:
         self._config = config or RuntimeConfig()
         self._llm = llm  # fallback for backward compat / tests
         self.providers = providers or ProviderRegistry()
-        self._event_bus = InProcessEventBus()
+        # 默认实现只在 host 没给时才解析——避免「默认」从运行期选择退化成 import 期耦合。
+        if event_bus is None:
+            from ctx_weft.providers.events import InProcessEventBus
+            event_bus = InProcessEventBus()
+        self._event_bus: EventBus = event_bus
         # shell 侧持有此实例，用于 approve() / reject() 响应 HITL 请求
         self.hitl_manager: HitlManager = hitl_manager or HitlManager(
             timeout_sec=self._config.hitl_timeout_sec,
@@ -495,8 +499,11 @@ class CtxWeftRuntime:
         # _normalize_hitl_content 只负责从 req 上取出本次应答真正要用的 tenant，
         # 校验/外部化本身仍是那个共用方法（Phase 3c Task A2）。
         self.hitl_manager.set_content_normalizer(self._normalize_hitl_content)
-        from ctx_weft.providers.events import InMemoryEventStore, attach_persistence
-        self.event_store = event_store or InMemoryEventStore()
+        from ctx_weft.providers.events import attach_persistence
+        if event_store is None:
+            from ctx_weft.providers.events import InMemoryEventStore
+            event_store = InMemoryEventStore()
+        self.event_store = event_store
         # 单一入口交给 attach_persistence（spec 2026-08-29 §6.4 + final review R15）：
         # ① EventPersister 与 SnapshotWriter 的订阅顺序契约（persister 必须先于 snapshot
         #   writer 订阅，否则 rebuild_view 看不到当前事件）统一由它保证，宿主不必懂顺序；
