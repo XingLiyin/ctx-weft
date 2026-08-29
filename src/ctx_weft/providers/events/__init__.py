@@ -18,6 +18,7 @@ from ctx_weft.providers.events.persister import (
     PersistenceHandle,
     attach_persistence,
 )
+from ctx_weft.providers.events.snapshot import SnapshotWriter
 from ctx_weft.providers.events.store import InMemoryEventStore
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "InMemoryEventStore",
     "InProcessEventBus",
     "PersistenceHandle",
+    "SnapshotWriter",
     "attach_persistence",
 ]

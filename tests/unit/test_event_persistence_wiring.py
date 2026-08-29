@@ -90,3 +90,71 @@ async def test_attach_persistence_wires_persister():
     await handle.detach()
     await bus.emit(_ev("SessionFinished", 2))
     assert len(await store.read_by_session("s1")) == 1
+
+
+# ── SnapshotWriter ──────────────────────────────────────────────────────────
+
+
+async def test_snapshot_written_on_session_finished():
+    from ctx_weft.providers.events import SnapshotWriter
+
+    bus, store = InProcessEventBus(), InMemoryEventStore()
+    attach_persistence(bus, store, snapshot_every_n=1)
+    await bus.emit(_ev("SessionCreated", 1))
+    await bus.emit(_ev("SessionFinished", 2))
+    snap = await store.load_latest_snapshot("s1")
+    assert snap is not None
+    assert snap.snapshot_reason == "session_finished"
+    assert snap.last_event_id == "evt_0002"
+
+
+async def test_snapshot_periodic_on_run_finished():
+    bus, store = InProcessEventBus(), InMemoryEventStore()
+    attach_persistence(bus, store, snapshot_every_n=2)
+    await bus.emit(_ev("SessionCreated", 1))
+    await bus.emit(_ev("RunFinished", 2))       # n=2 达阈值
+    snap = await store.load_latest_snapshot("s1")
+    assert snap is not None
+    assert snap.snapshot_reason == "periodic"
+
+
+async def test_snapshot_not_written_before_threshold():
+    bus, store = InProcessEventBus(), InMemoryEventStore()
+    attach_persistence(bus, store, snapshot_every_n=50)
+    await bus.emit(_ev("SessionCreated", 1))
+    await bus.emit(_ev("RunFinished", 2))
+    assert await store.load_latest_snapshot("s1") is None
+
+
+async def test_snapshot_sees_the_triggering_event():
+    """顺序契约：persister 必须先落库，snapshot 才折得到这条事件（spec §6.5）。"""
+    bus, store = InProcessEventBus(), InMemoryEventStore()
+    attach_persistence(bus, store, snapshot_every_n=1)
+    await bus.emit(_ev("SessionCreated", 1))
+    await bus.emit(_ev("SessionFinished", 2))
+    snap = await store.load_latest_snapshot("s1")
+    stored = await store.read_by_session("s1")
+    assert snap.last_event_id == stored[-1].id
+    assert snap.last_event_sequence == stored[-1].sequence
+
+
+async def test_snapshot_writer_not_attached_by_default():
+    bus, store = InProcessEventBus(), InMemoryEventStore()
+    handle = attach_persistence(bus, store)          # snapshot_every_n 默认 0
+    assert handle.snapshot_writer is None
+    await bus.emit(_ev("SessionCreated", 1))
+    await bus.emit(_ev("SessionFinished", 2))
+    assert await store.load_latest_snapshot("s1") is None
+
+
+async def test_snapshot_writer_swallows_errors():
+    from ctx_weft.providers.events import SnapshotWriter
+
+    class _Boom(InMemoryEventStore):
+        async def save_snapshot(self, snapshot):
+            raise RuntimeError("db down")
+
+    bus, store = InProcessEventBus(), _Boom()
+    attach_persistence(bus, store, snapshot_every_n=1)
+    await bus.emit(_ev("SessionCreated", 1))
+    await bus.emit(_ev("SessionFinished", 2))   # 不抛即通过
