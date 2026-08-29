@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from ctx_weft.protocols.context import (
     BLOB_REF_PREFIX,  # noqa: F401  # 刻意的 re-export：既有调用点仍从这里取
@@ -99,6 +99,19 @@ class MemoryScope(StrEnum):
 MemoryLayer = MemoryScope
 
 
+class MemoryKind(StrEnum):
+    """v2 内容种类（设计 §2）。判据：不同 kind = provider 可施加不同存储/索引/保留策略。
+
+    与 MemoryScope 正交：kind 答「这是什么内容」，scope 答「这条记忆归谁」。
+    封死——永不为新机制扩，新机制 = 新 metadata 约定（见 MemoryEventType docstring）。
+    """
+
+    CONVERSATION_TURN = "conversation_turn"  # 对话回合（user/assistant/tool），各 scope 通用
+    SUMMARY = "summary"                      # 遗忘补偿：段摘要 / 经验摘要（fold 的 replacement）
+    TOOL_AUDIT = "tool_audit"                # 真实能力调用审计；默认不进视图装配
+    PUBLICATION = "publication"              # topic 发布；按流读取（recall_topic）
+
+
 # 事件类型 → 层（spec/06 §3）。唯一映射，ingest/recall 据此选 scope key。
 # 注：「type 唯一决定层」已在松动——apply_compact 显式传 layer、provider recall 宽容混层；
 # 目标形态下 layer 是 MemoryEvent 显式字段，本映射仅为 legacy 类型兜底（见 MemoryEventType docstring）。
@@ -160,9 +173,8 @@ class MemoryEvent:
     # 调用方预生成 record id（v2 设计 §4 · 2026-07-27 增补，投影化前置）。
     # 给定 → provider 必须采用并按 id 幂等（重复 ingest = no-op）；None → provider 生成。
     id: str | None = None
-    # v2 词汇（设计 §2）：kind = 内容种类（memory_compat.MemoryKind），scope = 归属范围
-    # （MemoryScope 枚举，原 layer 字段）。前向引用避免 memory ↔ memory_compat 循环 import。
-    kind: "Any | None" = None
+    # v2 词汇（设计 §2）：kind = 内容种类，scope = 归属范围（原 layer 字段）。
+    kind: MemoryKind | None = None
     scope: MemoryScope | None = None
     role: Literal["user", "assistant", "system", "tool"] | None = None
     topic: str | None = None  # 用于 topic-style 事件（含父子 task 通信）
@@ -238,7 +250,7 @@ class MemoryRecord:
     role: Literal["user", "assistant", "system", "tool"] | None = None
     topic: str | None = None
     score: float | None = None  # 仅 recall_semantic 时填
-    kind: "Any | None" = None            # v2：memory_compat.MemoryKind（避循环 import 不注真型）
+    kind: MemoryKind | None = None       # v2：内容种类
     scope: MemoryScope | None = None     # v2：归属范围（终名，原 layer 字段）
     address: "MemoryAddress | None" = None  # v2：来源回显（归档坐标）
     metadata: dict = field(default_factory=dict)
@@ -386,7 +398,7 @@ class MemoryProvider(Protocol):
         address: "MemoryAddress",
         scope: MemoryScope,
         ctx: ProviderContext,
-        kinds: "list[Any] | None" = None,
+        kinds: list[MemoryKind] | None = None,
     ) -> list[MemoryRecord]:
         """工作记忆回放（v2 设计 §4）：返回该归属分区**全量幸存**记录，**时间正序**。
 

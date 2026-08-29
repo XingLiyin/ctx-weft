@@ -78,6 +78,7 @@ from ctx_weft.protocols.memory import (
     MemoryAddress,
     MemoryEvent,
     MemoryEventType,
+    MemoryKind,
     MemoryLayer,
     MemoryScope,
     MemoryProvider,
@@ -85,7 +86,6 @@ from ctx_weft.protocols.memory import (
     MemoryRecord,
     Subscription,
 )
-from ctx_weft.protocols.memory_compat import MemoryKind
 from ctx_weft.protocols.template import (
     AgentTemplate,
     CapabilityRef,
