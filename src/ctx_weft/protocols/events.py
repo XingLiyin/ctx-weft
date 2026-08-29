@@ -263,7 +263,15 @@ class EventStore(Protocol):
 
     @abstractmethod
     async def read_by_session(self, session_id: str) -> list[Event]:
-        """按 session_id 加载全部事件，按 sequence 排序。"""
+        """按 session_id 加载全部事件，按 id（ULID 字典序）升序排序。
+
+        **排序键是 id，不是 sequence。** `sequence` 只在同一 `run_id` 内单调递增
+        （见 `Event.sequence`）；一个 session 可以跨多个 run，按 sequence 排会把
+        不同 run 的事件交错在一起（run A 的 1,2,3 与 run B 的 1,2,3 排成
+        A1,B1,A2,B2,A3,B3）。`id` 是 ULID，全局单调，与 `read_after` 的排序口径
+        一致，也是 `SqlEventStore` 的排序键（`ORDER BY id`）。生产里三者（append 顺序 /
+        sequence 顺序 / id 顺序）通常一致，只有乱序 append 或跨 run 会话才会分叉。
+        """
         ...
 
     # ── 可选快照扩展 ──────────────────────────────────────────────────────────
@@ -280,7 +288,10 @@ class EventStore(Protocol):
     async def read_session_events_of_types(
         self, session_id: str, types: "tuple[str, ...]",
     ) -> list[Event]:
-        """只加载 session 中指定类型的事件（按 sequence 排序）。
+        """只加载 session 中指定类型的事件（按 id / ULID 字典序升序排序）。
+
+        排序键与 `read_by_session` 同理是 id 而非 sequence——sequence 只在同一
+        `run_id` 内单调，跨 run 的 session 按它排会交错两个 run 的事件。
 
         轻查询——供恢复决策按事件折叠（如 HITL 待解决判定）而**不必全量回放**。
         未实现时抛 NotImplementedError；调用方降级为 read_by_session + 内存过滤。

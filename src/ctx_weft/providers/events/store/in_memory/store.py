@@ -43,27 +43,26 @@ class InMemoryEventStore(EventStore):
             apply_lifecycle(self._active, event)
 
     async def read_by_session(self, session_id: str) -> list[Event]:
-        return list(self._events.get(session_id, []))
+        # 排序键是 id（ULID，全局单调），不是 sequence——sequence 只在同一 run_id 内
+        # 单调，跨多个 run 的 session 按它排会把两个 run 的事件交错（见协议 docstring）。
+        # 生产里这是 no-op：append 顺序即 id 顺序；只对乱序 append 生效。
+        return sorted(self._events.get(session_id, []), key=lambda e: e.id)
 
     async def list_active_session_ids(self) -> list[str]:
         return list(self._active)
 
     async def read_after(self, session_id: str, after_event_id: str) -> list[Event]:
-        events = self._events.get(session_id, [])
-        result = []
-        found = False
-        for ev in events:
-            if found:
-                result.append(ev)
-            elif ev.id == after_event_id:
-                found = True
-        return result
+        # 按 id 排序后取字典序严格大于 after_event_id 的部分，与 read_by_session
+        # 同一排序键，且不依赖 append 顺序恰好等于 id 顺序。
+        events = sorted(self._events.get(session_id, []), key=lambda e: e.id)
+        return [ev for ev in events if ev.id > after_event_id]
 
     async def read_session_events_of_types(
         self, session_id: str, types: tuple[str, ...],
     ) -> list[Event]:
         type_set = set(types)
-        return [ev for ev in self._events.get(session_id, []) if ev.type in type_set]
+        events = sorted(self._events.get(session_id, []), key=lambda e: e.id)
+        return [ev for ev in events if ev.type in type_set]
 
     async def save_snapshot(self, snapshot: RunSnapshot) -> None:
         # 仅保留每个 session 的最新快照——恢复只需最新一条（snapshot + delta replay）。
