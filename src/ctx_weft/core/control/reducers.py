@@ -237,6 +237,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "id": a.id,
                 "spawn_depth": a.spawn_depth,
                 "parent_agent_id": a.parent_agent_id,
+                "template_id": a.template_id,
             }
             for aid, a in view.agents.items()
         },
@@ -309,6 +310,8 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             id=a["id"],
             spawn_depth=a.get("spawn_depth", 0),
             parent_agent_id=a.get("parent_agent_id"),
+            # 旧快照无该键 → 留空，调用方回落 session 模板（零数据迁移）。
+            template_id=a.get("template_id", ""),
         )
 
     pending_hitl: dict[str, HitlRequest] = {}
@@ -383,22 +386,41 @@ def reduce_events(events: list[Event], run_id: str) -> RunStateView:
     return view
 
 
+def _agent_slot(view: RunStateView, aid: str) -> AgentView:
+    """取（或建）某 agent 的投影槽位。
+
+    槽位可能已被 `_apply` 的 AGENT_INSTANTIATED 分支建出来（只带 template_id）——
+    树形字段与 template_id 来自两个不同的来源（推算 vs 事件），谁先到都不能踩掉对方。
+    """
+    av = view.agents.get(aid)
+    if av is None:
+        av = AgentView(id=aid)
+        view.agents[aid] = av
+    return av
+
+
 def _rebuild_agents(view: RunStateView) -> None:
-    """从 session/task 层级推算所有 AgentView（含 spawn_depth）。"""
+    """从 session/task 层级推算所有 AgentView 的树形字段（spawn_depth / parent）。
+
+    只写树形字段，不碰 `template_id`——后者只有 AGENT_INSTANTIATED 事件知道。
+    「首个来源胜出」的原有语义由 `_inferred` 保持（此前靠 `aid in view.agents` 判定，
+    在 _apply 会预建槽位之后那个判据已失效）。
+    """
+    _inferred: set[str] = set()
+
     # Root agents from sessions
     for sess in view.sessions.values():
-        if sess.root_agent_id and sess.root_agent_id not in view.agents:
-            view.agents[sess.root_agent_id] = AgentView(
-                id=sess.root_agent_id,
-                spawn_depth=0,
-                parent_agent_id=None,
-            )
+        if sess.root_agent_id:
+            av = _agent_slot(view, sess.root_agent_id)
+            av.spawn_depth = 0
+            av.parent_agent_id = None
+            _inferred.add(sess.root_agent_id)
 
     # Subagent tasks sorted by creation time (parent tasks precede children in event stream)
     ordered = sorted(view.tasks.values(), key=lambda t: t.created_at or datetime.min)
     for task in ordered:
         aid = task.assigned_agent_id
-        if not aid or aid in view.agents:
+        if not aid or aid in _inferred:
             continue
         use_subagent = task.settings_raw.get("use_subagent", False)
         creator = task.creator_agent_id
@@ -406,11 +428,10 @@ def _rebuild_agents(view: RunStateView) -> None:
             depth = view.agents[creator].spawn_depth + 1
         else:
             depth = 0
-        view.agents[aid] = AgentView(
-            id=aid,
-            spawn_depth=depth,
-            parent_agent_id=creator or None,
-        )
+        av = _agent_slot(view, aid)
+        av.spawn_depth = depth
+        av.parent_agent_id = creator or None
+        _inferred.add(aid)
 
 
 def _apply(view: RunStateView, ev: Event) -> None:
@@ -504,6 +525,15 @@ def _apply(view: RunStateView, ev: Event) -> None:
                     task.description = p["description"]
 
     # ── Task projection ───────────────────────────────────────────────────────
+    # ── Agent projection ──────────────────────────────────────────────────────
+    elif t == EventType.AGENT_INSTANTIATED and ev.agent_id:
+        # 事件流里唯一记录「该 agent 用的哪个模板」的地方：树形推算得不出模板。
+        # 授权按模板做策略（AllowListAuthorizer 读 ctx.agent_template_id），冷 resume
+        # 若拿不到就只能回落 session 模板，子 agent 会顶着 root 的模板身份。
+        tmpl = p.get("template_id", "")
+        if tmpl:
+            _agent_slot(view, ev.agent_id).template_id = tmpl
+
     elif t == EventType.TASK_CREATED:
         task_data: dict = p.get("task", {})
         task_id = task_data.get("id") or ev.task_id

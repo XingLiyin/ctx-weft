@@ -75,6 +75,10 @@ class AgentView:
     id: str
     spawn_depth: int = 0
     parent_agent_id: str | None = None
+    # 该 agent 实例化时用的模板 id，来自 AgentInstantiated 事件（唯一记录它的地方——
+    # 树形推算得不出模板）。存量事件流里子 agent 没发过该事件 → 留空，调用方回落
+    # session 模板，与改动前行为一致。
+    template_id: str = ""
 
 
 @dataclass

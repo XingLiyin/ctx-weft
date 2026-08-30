@@ -1343,7 +1343,11 @@ class CtxWeftRuntime:
         if not template_id:
             raise RuntimeError(f"Session {session_id!r} has no template_id — cannot recover")
 
-        from ctx_weft.core.control.converters import session_from_projection, task_from_projection
+        from ctx_weft.core.control.converters import (
+            agents_from_projection,
+            session_from_projection,
+            task_from_projection,
+        )
         session = session_from_projection(sess_proj)
         # 调用方（host /resume）传入当前所选 LLM 时覆盖投影里的原始 model：用户改了 model 后
         # 续跑须用新 model，而非 SessionCreated 记录的旧 model（投影不随重配更新）。
@@ -1401,19 +1405,15 @@ class CtxWeftRuntime:
                         session.id, sorted(inflight))
         task_manager.restore(all_tasks, terminal_ids, parked_task_ids=parked_task_ids | inflight)
 
-        pre_resolved = {
-            av.id: Agent(
-                id=av.id,
-                session_id=session.id,
-                template_id=template_id,
-                template_version=template.version,
-                status="IDLE",
-                tenant_id=session.tenant_id,
-                spawn_depth=av.spawn_depth,
-                parent_agent_id=av.parent_agent_id,
-            )
-            for av in view.agents.values()
-        }
+        # 各 agent 取自己的 template_id（AgentInstantiated 事件投影而来）；投影里没有的
+        # （存量事件流）回落 session 模板——见 agents_from_projection 的说明。
+        pre_resolved = agents_from_projection(
+            view.agents,
+            session_id=session.id,
+            tenant_id=session.tenant_id,
+            fallback_template_id=template_id,
+            fallback_template_version=template.version,
+        )
 
         task_manager.set_runner(self._make_task_runner(
             session=session,
@@ -2267,6 +2267,9 @@ class _SessionTaskRunner:
                     if s.subagent_template else ""
                 ) or self._template_id
                 parent_agent = self._resolved_agents.get(t.creator_agent_id) if t.creator_agent_id else None
+                # 本次是否**真的**新建一个 agent：assigned 已有值时下面只是按同一 id 重新
+                # 水合对象（重派发 / 恢复），那不是一次实例化，不该再发出身事件。
+                is_new_agent = not t.assigned_agent_id
                 agent, tmpl = await self._lm.instantiate_agent(
                     template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
                     parent_agent=parent_agent, ctx=ctx,
@@ -2277,6 +2280,23 @@ class _SessionTaskRunner:
                     reserved_output_tokens=self._session.reserved_output_tokens,
                 ))
                 t.assigned_agent_id = agent.id
+                if is_new_agent:
+                    # 事件流里唯一记录「该 agent 用的哪个模板」的地方——`_rebuild_agents`
+                    # 从 session/task 树推算 AgentView，推得出 parent/depth，推不出模板。
+                    # root 的对应发射在 SessionManager.create_session；此处补上子 agent 那条，
+                    # 否则冷 resume 的 pre_resolved 只能把每个 agent 都填成 session root 的模板。
+                    await self._runtime._event_bus.emit(Event(
+                        id=generate_id("evt"),
+                        run_id=None,
+                        sequence=0,
+                        session_id=sess_id,
+                        type=EventType.AGENT_INSTANTIATED,
+                        timestamp=now_utc(),
+                        tenant_id=tenant_id,
+                        task_id=t.id,
+                        agent_id=agent.id,
+                        payload={"template_id": tmpl.id, "template_version": tmpl.version},
+                    ))
                 await _flush_tracking_memory(agent, t, self._task_manager, self._memory, sess_id, tenant_id)
                 if s.inherit_memory and not t.user_prompt_in_memory:
                     # Parented sub-tasks copy from their parent; a root turn dispatched
