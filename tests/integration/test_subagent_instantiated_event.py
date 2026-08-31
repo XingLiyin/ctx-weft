@@ -161,3 +161,69 @@ async def test_replayed_view_gives_subagent_its_own_template():
 
     assert sub_av.template_id == SUB_TEMPLATE_ID
     assert root_av.template_id != SUB_TEMPLATE_ID
+
+
+# ── spawn 动作本身的事件：AgentSpawned / SpawnRejected ────────────────────────
+#
+# 与 AgentInstantiated 的分工：后者的主语是「这个 agent 自己」（出身配置），
+# 前者的主语是「父 agent 的一次 spawn 动作」，且与 SpawnRejected 配对，构成对
+# **每一次 spawn 尝试**的完整审计——被拒的那些根本不会有 agent 诞生，
+# AgentInstantiated 覆盖不到。
+#
+# 两者都发在 assemble() 的同一个决定点上：唯一的权限门（深度检查）在
+# instantiate_agent 里，派发时才跑。若在 delegate_task 处发 AgentSpawned，
+# 会出现「先 Spawned、后 Rejected」的自相矛盾事件对。
+
+
+async def test_agent_spawned_emitted_with_parent_and_subtask():
+    llm = _SpawnLLM()
+    runtime = _make_runtime(llm)
+
+    handle = await runtime.start_session(
+        SessionStartParams.create(
+            template_id=f"agent:{make_echo_template().id}",
+            user_prompt="delegate to a researcher",
+            context_limit=100_000,
+        )
+    )
+    view, sub_task = await _wait_for_subagent_task(runtime, handle.session_id)
+    root_agent_id = view.sessions[handle.session_id].root_agent_id
+
+    events = await runtime.event_store.read_by_session(handle.session_id)
+    spawned = [e for e in events if e.type == EventType.AGENT_SPAWNED]
+
+    assert spawned, (
+        "no AgentSpawned emitted; agent-domain events = "
+        f"{[e.type for e in events if e.type.startswith('Agent') or e.type == 'SpawnRejected']}"
+    )
+    ev = spawned[-1]
+    assert ev.payload.get("parent_agent_id") == root_agent_id
+    assert ev.payload.get("subtask_id") == sub_task.id
+    # envelope：子 agent 是这次 spawn 的产物，task 是它要跑的子任务
+    assert ev.agent_id == sub_task.assigned_agent_id
+    assert ev.task_id == sub_task.id
+
+
+async def test_agent_spawned_precedes_agent_instantiated():
+    """因果顺序：先「这次 spawn 被准了」，再「诞生的 agent 长这样」。"""
+    llm = _SpawnLLM()
+    runtime = _make_runtime(llm)
+
+    handle = await runtime.start_session(
+        SessionStartParams.create(
+            template_id=f"agent:{make_echo_template().id}",
+            user_prompt="delegate to a researcher",
+            context_limit=100_000,
+        )
+    )
+    _view, sub_task = await _wait_for_subagent_task(runtime, handle.session_id)
+    sub_agent_id = sub_task.assigned_agent_id
+
+    events = await runtime.event_store.read_by_session(handle.session_id)
+    order = [
+        e.type for e in events
+        if e.agent_id == sub_agent_id
+        and e.type in (EventType.AGENT_SPAWNED, EventType.AGENT_INSTANTIATED)
+    ]
+
+    assert order[:2] == [EventType.AGENT_SPAWNED, EventType.AGENT_INSTANTIATED]

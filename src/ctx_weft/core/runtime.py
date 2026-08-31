@@ -58,7 +58,7 @@ from ctx_weft.core.orchestrator.hitl_manager import (  # noqa: F401 — re-expor
     HitlManager,
     HitlRequest,
 )
-from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager, SpawnDepthExceeded
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
@@ -2270,17 +2270,65 @@ class _SessionTaskRunner:
                 # 本次是否**真的**新建一个 agent：assigned 已有值时下面只是按同一 id 重新
                 # 水合对象（重派发 / 恢复），那不是一次实例化，不该再发出身事件。
                 is_new_agent = not t.assigned_agent_id
-                agent, tmpl = await self._lm.instantiate_agent(
-                    template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
-                    parent_agent=parent_agent, ctx=ctx,
-                    existing_agent_id=t.assigned_agent_id or None,
-                )
+                try:
+                    agent, tmpl = await self._lm.instantiate_agent(
+                        template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
+                        parent_agent=parent_agent, ctx=ctx,
+                        existing_agent_id=t.assigned_agent_id or None,
+                    )
+                except SpawnDepthExceeded:
+                    # SpawnRejected 是 AgentSpawned 的另一半：被拒的 spawn 根本不会有
+                    # agent 诞生，AgentInstantiated 覆盖不到，不发这条则事件流里看不出
+                    # 「有人想 spawn 但被挡了」。envelope 的 agent_id 填**父**——子 agent
+                    # 没诞生，没有 id 可填，而这条事件的主语正是发起 spawn 的那个 agent。
+                    await self._runtime._event_bus.emit(Event(
+                        id=generate_id("evt"),
+                        run_id=None,
+                        sequence=0,
+                        session_id=sess_id,
+                        type=EventType.SPAWN_REJECTED,
+                        timestamp=now_utc(),
+                        tenant_id=tenant_id,
+                        task_id=t.id,
+                        agent_id=t.creator_agent_id or None,
+                        payload={
+                            "reason": "depth_limit",
+                            # 恒 False：spawn 被拒后降级为 inline 执行的能力今天不存在，
+                            # 如实反映现状而不是留一个骗人的 True。
+                            "fallback_to_inline": False,
+                            "attempted_subtask_id": t.id,
+                        },
+                    ))
+                    raise
                 agent = _dc.replace(agent, loop_guard=LoopGuard(
                     context_limit=self._session.context_limit,
                     reserved_output_tokens=self._session.reserved_output_tokens,
                 ))
                 t.assigned_agent_id = agent.id
                 if is_new_agent:
+                    # 先记「这次 spawn 被准了」，再记「诞生的 agent 长这样」——读事件流的
+                    # 因果顺序。AgentSpawned 的主语是**父 agent 的一次 spawn 动作**（与
+                    # SpawnRejected 配对，构成对每次 spawn 尝试的完整审计）；下面那条的
+                    # 主语是这个 agent 自己的出身配置。两者都发在同一决定点上：唯一的
+                    # 权限门（深度检查）在 instantiate_agent 里、派发时才跑，若改在
+                    # delegate_task 处发，会出现「先 Spawned、后 Rejected」的矛盾事件对。
+                    await self._runtime._event_bus.emit(Event(
+                        id=generate_id("evt"),
+                        run_id=None,
+                        sequence=0,
+                        session_id=sess_id,
+                        type=EventType.AGENT_SPAWNED,
+                        timestamp=now_utc(),
+                        tenant_id=tenant_id,
+                        task_id=t.id,
+                        agent_id=agent.id,
+                        payload={
+                            # creator_agent_id 而非 parent_agent.id：后者依赖
+                            # _resolved_agents 的内存命中，跨重启不稳。
+                            "parent_agent_id": t.creator_agent_id,
+                            "subtask_id": t.id,
+                        },
+                    ))
                     # 事件流里唯一记录「该 agent 用的哪个模板」的地方——`_rebuild_agents`
                     # 从 session/task 树推算 AgentView，推得出 parent/depth，推不出模板。
                     # root 的对应发射在 SessionManager.create_session；此处补上子 agent 那条，
