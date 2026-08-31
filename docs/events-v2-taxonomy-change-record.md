@@ -32,7 +32,7 @@
 
 ### 1.3 扁平枚举丢掉了一个关键区分
 
-83 个里只有 32 个被状态消费者折叠（承载状态），其余 51 个是纯观测/展示。
+83 个里只有 30 个被状态消费者折叠（承载状态），其余 53 个是纯观测/展示。
 两者的契约强度完全不同——前者改了会破坏重放或 host 投影，后者随便加。
 但代码里它们混在一个扁平枚举中，**看不出哪个动不得**。
 
@@ -60,18 +60,20 @@
 | **O** | 已发射、无状态消费者 → 纯观测/展示 | 自由重命名 / 合并 / 删除（但须与 host SSE 同步） |
 | **X** | 从未发射 | 完全自由 |
 
-> ⚠️ **状态消费者有两个，不是一个**（2026-08-31 核查 host 后更正）：
+> ⚠️ **「状态消费者」由 core 定义，不由下游的实际行为反推**（2026-08-31 核查 host 后厘清）。
 >
-> 1. ctx-weft 的 `core/control/reducers.py`
-> 2. **host 的 `netlivecowork/persistence/postgres/projection_updater.py`** —— 它有自己独立的
->    一套 `elif t == ...` 分支，维护 Postgres 投影，**不共享** ctx-weft 的 reducer
+> host 的 `netlivecowork/persistence/postgres/projection_updater.py` 有自己独立的一套
+> `elif t == ...` 分支维护 Postgres 投影，**不共享** ctx-weft 的 reducer，消费集合也更大。
+> 但那是**下游的实现选择**，不构成对 core 契约的约束——host 是消费者，跟着 core 的契约变。
 >
-> 两者消费的集合**不一样**。最典型的是 `RunCanceled`：ctx-weft reducer 不碰它，host 投影却据它
-> 把 session 落成 CANCELED。`projection_updater.py:86-89` 的注释明写「core reducer / SSE 层均不
-> 据此改状态，**仅本投影需守卫**」——原作者清楚这个不对称。
+> 实际核查两处越界，结论都是 host 该改：
 >
-> 初版本文只按 ctx-weft 的 reducer 分档，导致 `RunCanceled` 一度被判为「可删」——那会删掉一个
-> 会改 host 数据库状态的事件。
+> | 事件 | host 投影里做什么 | 判定 |
+> |---|---|---|
+> | `RunCanceled` | 置 session 为 `CANCELED` | **冗余**：与它已消费的 `SessionStatusChanged(CANCELED)`（`task_manager.py:988`，`cancel_all` 直接发）殊途同归。`projection_updater.py:86-89` 那个「不得覆盖已落终态」的守卫，正是这条冗余路径招来的 |
+> | `FailureThresholdHit` | **`pass`** | 空分支；注释说明计数已改由 `TASK_FAILED` / `TASK_FINISHED` 承担 |
+>
+> 故 S 档仍是 30 个，两者留在 O 档。**host 待办见 §8。**
 
 依据：`ReplayEngine.replay()`（`core/control/replay.py:47`）内部只有一句
 `reduce_events(events, ...)`——**在 ctx-weft 内部**replay 就等于 reducer。
@@ -115,16 +117,15 @@
 
 ---
 
-## 3. 最终清单 · 54 个
+## 3. 最终清单 · 53 个
 
-### S 档 · 32 个
+### S 档 · 30 个
 
 | 域 | 事件 |
 |---|---|
 | Session | `SessionCreated` `SessionResumed` `SessionStatusChanged` `SessionFinished` **`SessionPaused`** |
-| Run | `RunStarted` `RunFinished` `RunCanceled` |
+| Run | `RunStarted` `RunFinished` |
 | Step | `StepStarted` `StepCompleted` |
-| Guard | `FailureThresholdHit` |
 | Task | `TaskCreated` `TaskStarted` `TaskSuspended` `TaskResumed` `TaskFinished` `TaskFailed` `TaskCanceled` **`TaskOutcomeRecorded`** `TaskRequeued` |
 | Agent | `AgentInstantiated` |
 | Context | **`PromptAssembled`** |
@@ -135,7 +136,7 @@
 
 **粗体 = 改名**（见 §4.5）。
 
-### O 档 · 22 个
+### O 档 · 23 个
 
 | 域 | 事件 |
 |---|---|
@@ -148,6 +149,7 @@
 | Act | `ActTurnStarted` `MaxTurnsReached` |
 | Observe | `ObserveCompleted` |
 | Memory | `MemoryIngested` `MemoryCompactStarted` `MemoryCompacted` `MemoryCompactFinished` |
+| Guard | `FailureThresholdHit` |
 
 ### TRANSIENT · 3 个（⊂ O）
 
@@ -243,15 +245,15 @@ LEGACY_EVENT_ALIASES: dict[str, str] = {
 三字段完全一样，后者只多一个 `usage`。把 `usage` 并入 `IntentRecognized` 的 payload
 （给 S 档事件**加**字段是安全的，旧事件只是没有这个键），删掉 `RecognizeIntentCompleted`。
 
-### 4.7 删除 1 个信息冗余的**已发射**事件 【与 4.1 性质不同】
+### 4.7 删除 2 个信息冗余的**已发射**事件 【与 4.1 性质不同】
 
 | 删除 | 理由 |
 |---|---|
-| `ContextAssembled` | payload 唯一字段 `{token_count}` 在同一时刻被另两条事件各带一份（`ContextTokensEstimated.assembled_tokens`、`PrepareCompleted.assembled_token_count`）。三份相同数据，它是唯一「O 档 + 零独有字段」的那个。host 侧零引用（已核查） |
+| `RunCanceled` | 不承载任何 core 状态。取消的状态由 `TaskCanceled` + `RunFinished(final_status="CANCELED")` + `SessionStatusChanged(CANCELED)` 三条承载。`runtime.py:2127-2136` 的注释自己说明了分工：`RUN_CANCELED` 有守卫，`RUN_FINISHED` 无论如何都要发。host 侧确有一个分支用它置 session 状态，但那条路径与 host 已消费的 `SessionStatusChanged` 重复，且是其守卫逻辑的来源——**host 该删该分支**，不是 core 该留该事件 |
+| `ContextAssembled` | payload 唯一字段 `{token_count}` 在同一时刻被另两条事件各带一份（`ContextTokensEstimated.assembled_tokens`、`PrepareCompleted.assembled_token_count`）。三份相同数据，它是唯一「O 档 + 零独有字段」的那个。host 侧零引用 |
 
-> **它和 4.1 的 21 个性质不同**：它**发射过**。不过 host 全仓零引用，实际风险与 4.1 同级。
->
-> 初版这里还有一条 `RunCanceled`，核查 host 后**撤销**——见 §6。
+> **这两个和 4.1 的 21 个性质不同**：它们**发射过**。`ContextAssembled` host 零引用，风险同 4.1；
+> `RunCanceled` 需 host 配合删分支（§8）。
 
 ### 4.8 新增字段
 
@@ -318,7 +320,6 @@ LEGACY_EVENT_ALIASES: dict[str, str] = {
 | `MemoryCompactFinished` 删除 | 多数字段是各条 `MemoryCompacted` 的加总，但 `est_after`（压缩后估算）独有 |
 | Task 状态族改名 | `TaskCreated/Started/Suspended/Resumed/Finished/Failed/Canceled/Requeued` 是 `TASK_STATUS_BY_EVENT` 的一致家族，动任一个都破坏一致性 |
 | HITL 六件套改名 | `HitlModified`（= 带改参的放行）单看不够直白，但 `spec/05` 有明确定义，六个一起看语义自洽 |
-| 删 `RunCanceled` | **初版判它可删，核查 host 后撤销**。它在 host 的 `projection_updater.py:85-94` 里把 session 落成 `CANCELED`——是状态消费者，只是 ctx-weft 的 reducer 不碰它。该文件注释明写「core reducer / SSE 层均不据此改状态，仅本投影需守卫」 |
 | 拆成两个独立枚举 | 事件总线 / EventStore / SSE 都只认字符串，不该分裂。用单枚举 + 分组常量 + 测试约束 |
 
 ---
@@ -351,45 +352,64 @@ host 读存量事件会全部落空。三个待改名类型（`RecognizeIntentTo
 
 ---
 
-## 8. host 侧影响面（2026-08-31 已核查）
+## 8. host 侧待办（2026-08-31 已核查）
+
+**定位**：host 是 core 事件契约的**消费者**，跟着 core 变。下表是 core 定案后 host 要做的工，
+不是对 core 设计的约束。
 
 host 仓：`C:/Users/Xing/Documents/codes/IpMasterCoworkPy/src`（162 个 py 文件）。
 
-**三类消费者，影响严重度不同：**
+### 8.1 三类消费者
 
-| 消费者 | 文件 | 影响 |
+| 消费者 | 文件 | 改错的后果 |
 |---|---|---|
-| **状态投影** | `netlivecowork/persistence/postgres/projection_updater.py` | 改错 = **数据错**（Postgres 投影） |
-| **SSE 展示** | `netlivecowork/api/models/session.py` | 改错 = 前端断，数据不损 |
+| **状态投影** | `netlivecowork/persistence/postgres/projection_updater.py` | Postgres 投影数据错 |
+| **SSE 展示** | `netlivecowork/api/models/session.py` | 前端断，数据不损 |
 | **历史回填** | `netlivecowork/persistence/postgres/migrations.py` | 读历史事件，**必须保留旧名字**，不随改名走 |
 
-**逐项核查结果：**
+### 8.2 host 该主动收敛的两处（与本次改动无关，但被它暴露）
 
-| 改动 | host 影响 |
+| 位置 | 现状 | 该改成 |
+|---|---|---|
+| `projection_updater.py:85-94` | 用 `RUN_CANCELED` 置 session `CANCELED`，并加守卫防止覆盖已落终态 | **删掉该分支**。它与同文件已消费的 `SESSION_STATUS_CHANGED(CANCELED)` 殊途同归（`cancel_all` 在 `task_manager.py:988` 直接发），守卫正是这条冗余路径招来的 |
+| `projection_updater.py:111-115` | `FAILURE_THRESHOLD_HIT` 分支体是 `pass` | 删掉，或保留注释但不占分支 |
+
+### 8.3 随 core 改动的工
+
+| core 改动 | host 要做 |
 |---|---|
-| 4.1 删 21 个未发射 | ✓ 零引用 |
-| 4.7 删 `ContextAssembled` | ✓ 零引用 |
-| 4.2 合并 4 个 `BackgroundObserve*` | ✓ 零引用 |
-| 4.2 合并 `RecognizeIntentLLMPrompt` | ⚠ SSE |
-| 4.3 归一 `RecognizeIntentStarted` / `Skipped` | ⚠ SSE |
-| 4.6 合并 `RecognizeIntentCompleted` | ⚠ SSE |
-| 4.5 改名 `PrepareCompleted` / `TaskRecapDone` | ✓ 零引用 |
-| 4.5 改名 `RecognizeIntentToolCall` | ⚠⚠ 投影 + SSE + 迁移 |
-| 4.5 改名 `SessionPausedHitl` | ⚠⚠ 投影 + SSE + 迁移 |
-| 4.5 改名 `TaskFinalized` | ⚠⚠ 投影 + `providers/capability/skills/runtime/usage.py`（技能用量上报） |
+| 4.1 删 21 个未发射 | 无（零引用） |
+| 4.7 删 `ContextAssembled` | 无（零引用） |
+| 4.7 删 `RunCanceled` | 见 8.2 |
+| 4.2 合并 4 个 `BackgroundObserve*` | 无（零引用）；改用 `origin` 前缀过滤是**新增能力**，非补救 |
+| 4.2 / 4.3 / 4.6 归一 `RecognizeIntent*` 4 个 | SSE 层（`session.py`）改按 `origin` + 新类型分支 |
+| 4.5 改名 `PrepareCompleted` / `TaskRecapDone` | 无（零引用） |
+| 4.5 改名 `RecognizeIntentToolCall` / `SessionPausedHitl` | 投影 + SSE 改新名；**投影侧需自己的一份别名表**（见下） |
+| 4.5 改名 `TaskFinalized` | 投影 + `providers/capability/skills/runtime/usage.py`（技能用量上报） |
+| 4.8 新增 `origin` | Postgres 事件表加列；SSE 帧可透出 |
 
-**迁移脚本的特殊性**：`migrations.py:157` 的 `_FORM_BACKFILL_TYPES` 和 `:531` 的
-`RecognizeIntentToolCall` 回填读的是**历史事件**，它们的字符串**不能**跟着改名走——
-改了反而读不到旧数据。但改名后新事件用新名，若迁移将来重跑，需同时匹配新旧两个名字。
-`migrations.py:157` 还引用了 `HitlTimeout`（本次要删的 21 个之一），同理保留。
+### 8.4 别名表要两份
 
-### 核查方法上的一个教训
+host 的 `projection_updater.py` **不共享** ctx-weft 的 reducer，只在 ctx-weft 加
+`LEGACY_EVENT_ALIASES` 不够——改名后 host 读存量事件会全部落空。三个待改名类型
+（`RecognizeIntentToolCall` / `SessionPausedHitl` / `TaskFinalized`）都被 host 投影消费。
 
-初次扫描只 grep 了**字符串值**（`"RecognizeIntentStarted"`），报告「host 零引用」——
-**错的**。host 用的是 `EventType.RECOGNIZE_INTENT_STARTED` 这种**常量名**。
-两种形式都扫之后，受影响项从 2 个变成 9 个。
+**迁移脚本例外**：`migrations.py:157` 的 `_FORM_BACKFILL_TYPES` 与 `:531` 的
+`RecognizeIntentToolCall` 读的是**历史事件**，字符串**不能**跟着改名走——改了反而读不到旧数据。
+若迁移将来重跑且库里已有新事件，需同时匹配新旧两个名字。该文件还引用了 `HitlTimeout`
+（本次要删的 21 个之一），同理保留。
 
-后续任何跨仓影响面核查，都必须同时匹配 `"EventValue"` 与 `EVENT_CONSTANT_NAME` 两种形式。
+### 8.5 核查方法上的两个教训
+
+两次判断反复，成因相同：**看名字没看语义**。
+
+1. 初次扫描只 grep **字符串值**（`"RecognizeIntentStarted"`），报「host 零引用」——错的，
+   host 用的是 `EventType.RECOGNIZE_INTENT_STARTED` 这种**常量名**。两种都扫后，受影响项 2 → 9。
+2. 补扫后只看 host 消费**哪些类型**，据此把 `RunCanceled` / `FailureThresholdHit` 升为 S 档——
+   仍是错的。读分支体才发现一个冗余、一个是 `pass`。
+
+后续任何跨仓影响面核查：同时匹配 `"EventValue"` 与 `EVENT_CONSTANT_NAME`，且**必须读分支体**，
+不能停在类型清单。
 
 ---
 
@@ -397,5 +417,5 @@ host 仓：`C:/Users/Xing/Documents/codes/IpMasterCoworkPy/src`（162 个 py 文
 
 - **TS / Java 移植**：本次按「事件清单 = Python 实现清单」定案，移植按新设计重新实现。
   `spec/01` 里「三份实现须复现同一断言」的措辞届时需一并处理。
-- **host 与 ctx-weft 的改动必须同批次上线**：涉及投影的三个改名没有灰度空间——
-  ctx-weft 先改则 host 投影漏事件，host 先改则读不到新名字。
+- **上线批次**：涉及投影的三个改名没有灰度空间——ctx-weft 先改则 host 投影漏事件，
+  host 先改则读不到新名字。两仓需同批次，或先在 host 侧把别名表加好（兼容新旧）再改 core。
