@@ -42,6 +42,7 @@ __all__ = [
     "rehydrate_content",
     "hydrate_event_content",
     "downgrade_images_to_text",
+    "split_for_tool_result",
     "extract_blob_refs",
     "collect_blob_refs",
 ]
@@ -795,3 +796,27 @@ def downgrade_images_to_text(
         from ctx_weft.protocols import TextPart
         out.append(TextPart(text=_IMAGE_PLACEHOLDER_TMPL.format(media_type=media_type)))
     return out
+
+
+def split_for_tool_result(
+    content: "str | list[ContentPart] | None",
+) -> "tuple[str, list[ContentPart]]":
+    """拆成 ``(文本, 非文本 part)``，供 provider 经 ``CONTENT_PARTS_KEY`` 回传给 gateway。
+
+    gateway 收到 ``metadata[CONTENT_PARTS_KEY]`` 后会自己拼成 ``[TextPart(text), *parts]``
+    （``capability_gateway.py`` 的 ``CONTENT_PARTS_KEY`` 一节），所以 provider 必须把两者
+    分开交出去，不能自己拼好。
+
+    ``str`` 进 → 返回**同一个对象**与空列表；``None`` / 空列表 → ``("", [])``。
+    纯文本路径因此零开销、逐字节不变。
+
+    非文本判据 ``not hasattr(p, "text")`` 与 ``utils.content_to_text`` /
+    ``utils.image_part_count`` 同源（spec 2026-08-20 §13 冻结），不在此另写一份。
+    """
+    if content is None:
+        return "", []
+    if isinstance(content, str):
+        return content, []
+    text = "".join(p.text for p in content if hasattr(p, "text"))
+    parts = [p for p in content if not hasattr(p, "text")]
+    return text, parts
