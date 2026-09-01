@@ -330,7 +330,7 @@ HitlResolved(claimed=false) → 按 delivery 分流
 代价：总线是异步、至少一次投递，因此**冷续跑必须幂等**——重复投递同一个 `HitlResolved` 不得产生重复副作用。这条是硬不变式（§10）。幂等由目标动作承担，不由协调器记账（记账要跨重启，就又需要一份持久状态，绕回 §3.1 要消除的东西）：
 
 - `ToolResult`：reconcile 本就按「该 tool_call 是否已有 TOOL_RESULT」判定，天然幂等。
-- `UserTurn`：注入需要一个幂等键（`hitl_id`）。**这是本设计对外部组件的唯一新增要求**——memory 层需支持按幂等键去重写入。若不支持，须先补这一处能力（§12.2）。
+- `UserTurn`：注入时把 `MemoryEvent.id` 设为**由 `hitl_id` 确定性派生**的值（如 `hitlreply:{hitl_id}`），重复投递即 no-op。**这一能力已经具备，无需新增**——见 §12.2 的核实记录。
 
 ### 7.4 内容
 
@@ -489,14 +489,22 @@ core 对这两个新值的处理是**完全不处理**：`form` 只用于透传�
 | 代价 | 说明 |
 |---|---|
 | **重入式 provider** | 需要拿决定后继续做事的工具 provider，要把逻辑拆成「让出前 / 重入后」两段并自带 `resume_state`，比线性 `await` 难写。`reply_as_result` 覆盖多数场景，这是少数派路径。这是本设计唯一的人体工学退步 |
-| **冷续跑改为异步订阅** | 需至少一次投递 + 幂等。`ToolResult` 天然幂等；`UserTurn` 依赖 memory 幂等键（见 12.2） |
+| **冷续跑改为异步订阅** | 需至少一次投递 + 幂等。`ToolResult` 靠 reconcile 天然幂等；`UserTurn` 靠 `MemoryEvent.id` 派生键，该能力已具备（§12.2） |
 | **装填完备性成为恢复路径的责任** | core 不再兜底扫日志，恢复时漏装 = 重问一遍已答过的问题。需要针对性回归测试 |
 | **delivery 封闭是明确取舍** | 若将来出现真正的第三种回灌方式（如「决定只改配置、不回灌给任何对话」），要改 core。现在封闭是对的，但这是一个会回来找我们的决定 |
 | **host 不能凭空发起 HITL** | 见 §9.6。若确有需求，应走 interrupt 入口而非扩展 HITL |
 
-### 12.2 待确认
+### 12.2 已核实：memory 幂等键无需新增（2026-09-01）
 
-- **memory 层是否已支持写入幂等键？** `UserTurn` 冷续跑的幂等依赖它。若不支持，需先补这一处能力——这是本设计对外部组件的唯一新增要求。
+`UserTurn` 冷续跑的幂等依赖「按调用方给定的 id 去重写入」。**该能力已存在，本设计对外部组件零新增要求。**
+
+- 契约：`MemoryEvent.id`（`protocols/memory.py:175`）——「给定 → provider 必须采用并按 id 幂等（重复 ingest = no-op）；None → provider 生成」。
+- 实现：SQL provider `providers/memory/sql/provider.py:272`（已存在即 no-op，且明确「不比对内容、不推进计数器」）；in-memory provider `providers/memory/in_memory/provider.py:91-94` 同语义。
+
+两条使用约束：
+
+1. **id 命名空间是全局的**，不按 tenant 隔离（`_id_exists` 的注释：「契约第 5 条：id 命名空间仍是全局的」）。派生 id 因此必须全局唯一——`hitl_id` 本身即全局唯一，加前缀后仍然唯一，满足。
+2. **排序不依赖 id**：读取按 `timestamp, seq_no` 排序（`provider.py:427`），所以派生 id 不必保持 ULID 的可排序形状，可以用可读前缀。
 
 ### 12.3 迁移：双读适配（已定）
 
