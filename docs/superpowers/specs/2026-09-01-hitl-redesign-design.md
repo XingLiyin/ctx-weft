@@ -149,7 +149,7 @@ core/loop                               唯一碰 park 的地方
   HitlWaiter          热等待：创建等待句柄、超时驱逐
   CapabilityGateway   消费 NeedsHuman；把「被驱逐」翻译成 HitlPark
         ▲
-runtime                                 组装 · 恢复时装填 registry · 订阅 HitlResolved 做续跑
+runtime                                 组装 · 恢复时装填 registry · 据 resolve 返回值做续跑
   ResumeCoordinator
 
 providers/*         ──▶ 只依赖 protocols。恢复「providers 只面对契约层」的不变式
@@ -363,18 +363,43 @@ reducer（纯函数）折叠 HitlOpened / HitlResolved
 
 **决定必须与 `resume_state` 成对装填**：冷路径重入调的是 `resume(ask_id, decision, resume_state, ctx)`，只带决定而丢掉 `resume_state`，provider 就得重做让出前的工作——正是 §2.2 要消除的重复副作用。`resume_state` 来自同一 `hitl_id` 的 `HitlOpened`，折叠时一并取出。
 
-### 7.3 冷续跑：订阅而非回调
+### 7.3 冷续跑：返回值驱动，**不挂总线订阅**
 
-`HitlService` 不认识 Runtime。冷续跑由 `ResumeCoordinator` 订阅 `HitlResolved` 完成：
+> **订正（2026-09-01，出段 2 计划时核对实现发现）**：本节原设计为「`ResumeCoordinator` 订阅
+> `HitlResolved`」。核对 `providers/events/bus/in_process/bus.py` 后**推翻**：该总线的 handler
+> 订阅者是**在 `emit()` 内部同步 drain** 的，且队列满时**丢弃最旧事件**（`QueueFull` 分支）。
+> 于是订阅式冷续跑有两个致命性质：①「人答了但事件被丢」⟹ 会话永不续跑，正是本设计要消灭的
+> 故障类；② `recover_session` 会在 host 应答的调用栈里内联跑完。事件总线适合**广播事实**，
+> 不适合承载**控制流关键信号**。
+
+`HitlService` 仍然不认识 Runtime——但这个目标由**返回值**达成，而不是靠订阅：
 
 ```
-HitlResolved(claimed=false) → 按 delivery 分流
+HitlService.resolve(reply) -> PendingHitl | None      # 已终局 → None
+```
+
+冷续跑由**组合根**（runtime 的应答入口）驱动：它调 `resolve`，拿到已终局的请求，按 delivery
+决定续跑方式。`HitlService` 依然只发事实、不认识任何人；依赖方向依然单向。区别只在于「谁来
+接这个结果」——是调用者自己接，而不是注入一个回调、也不是挂一个可能丢事件的订阅。
+
+这与旧实现的 `set_cold_resolve_handler` 有本质区别：那是**构造期注入的回调**（双向依赖 +
+半成品窗口），这是**调用点的返回值**（单向，且 `HitlService` 可以脱离 runtime 单测）。
+
+`claimed` 字段仍然进事实——它是重放时判断「这次应答当时是热是冷」的依据，只是不再由订阅者消费。
+
+续跑分流：
+
+```
+resolve() 返回已终局请求 且 claimed=false → 按 delivery 分流
     ToolResult → recover_session(resumed_task_id) → reconcile 精确重入
     UserTurn   → 注入 user 消息 + 置 PENDING + 重排
     NoResume   → 无动作
 ```
 
-代价：总线是异步、至少一次投递，因此**冷续跑必须幂等**——重复投递同一个 `HitlResolved` 不得产生重复副作用。这条是硬不变式（§10）。幂等由目标动作承担，不由协调器记账（记账要跨重启，就又需要一份持久状态，绕回 §3.1 要消除的东西）：
+**冷续跑仍必须幂等**，尽管不再有至少一次投递的问题——因为应答入口本身可能被重试（host 超时重发、
+用户连点两次），而 `resolve` 的幂等只保证「不二次转移」、不保证调用方不会拿着同一个已终局请求
+再续跑一次。幂等由目标动作承担，不由协调器记账（记账要跨重启，就又需要一份持久状态，绕回 §3.1
+要消除的东西）：
 
 - `ToolResult`：reconcile 本就按「该 tool_call 是否已有 TOOL_RESULT」判定，天然幂等。
 - `UserTurn`：注入时把 `MemoryEvent.id` 设为**由 `hitl_id` 确定性派生**的值（如 `hitlreply:{hitl_id}`），重复投递即 no-op。**这一能力已经具备，无需新增**——见 §12.2 的核实记录。
@@ -528,7 +553,7 @@ core 对这两个新值的处理是**完全不处理**：`form` 只用于透传�
 |---|---|
 | provider → `core.orchestrator.hitl_manager` 的 import | 0 |
 | `core/hitl` → `core.loop.park` 的函数体内延迟 import | 0（park 只在 gateway 抛） |
-| 三个 setter 注入（cold_resolve / cold_lookup / content_normalizer） | 0，全部构造参数或订阅 |
+| 三个 setter 注入（cold_resolve / cold_lookup / content_normalizer） | 0，全部构造参数或返回值 |
 | `find_resolved_for_tool_call` 两级回落（内存 → scan 事件日志） | 一次内存查询 |
 | `request` / `request_parked` 双入口 | 一个 `open`，是否热等由是否注册等待槽决定 |
 | `wait` / `wait_for_decision` 双出口（一抛一返 None） | 一个 `await`，park 只在 gateway 抛 |
@@ -550,7 +575,7 @@ core 对这两个新值的处理是**完全不处理**：`form` 只用于透传�
 | 代价 | 说明 |
 |---|---|
 | **重入式 provider** | 需要拿决定后继续做事的工具 provider，要把逻辑拆成 `invoke` / `resume` 两段并自带 `resume_state`，比线性 `await` 难写。代价**只落在会问人的实现身上**——基础契约不变，`reply_as_result` 又覆盖了多数场景，所以这是少数派路径的少数派 |
-| **冷续跑改为异步订阅** | 需至少一次投递 + 幂等。`ToolResult` 靠 reconcile 天然幂等；`UserTurn` 靠 `MemoryEvent.id` 派生键，该能力已具备（§12.2） |
+| **冷续跑由应答入口驱动** | 组合根拿 `resolve` 的返回值分流（§7.3 订正：不挂总线订阅——该总线内联投递且背压下丢事件）。仍须幂等以防应答重试：`ToolResult` 靠 reconcile 天然幂等；`UserTurn` 靠 `MemoryEvent.id` 派生键，该能力已具备（§12.2） |
 | **装填完备性成为恢复路径的责任** | core 不再兜底扫日志，恢复时漏装 = 重问一遍已答过的问题。需要针对性回归测试 |
 | **delivery 封闭是明确取舍** | 若将来出现真正的第三种回灌方式（如「决定只改配置、不回灌给任何对话」），要改 core。现在封闭是对的，但这是一个会回来找我们的决定 |
 | **host 不能凭空发起 HITL** | 见 §9.6。若确有需求，应走 interrupt 入口而非扩展 HITL |
