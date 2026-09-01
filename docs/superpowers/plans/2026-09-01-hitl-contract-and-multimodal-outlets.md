@@ -772,6 +772,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Modify: `src/ctx_weft/protocols/capability.py:274-285`（删 `filter`）
 - Modify: `docs/spec/05-authz-and-hitl.md:26, 206`
 - Test: `tests/unit/test_hitl_park.py`（增补）
+- Test: `tests/unit/test_authorizer.py:55-81`（5 条 filter 测试改走 `authorize`）
+- Test: `tests/unit/test_hitl.py`（删 `_filter_with_response`，两个调用方改用 `_authorize_with_response`）
 
 **Interfaces:**
 - Produces: `HitlManager.wait_for_decision(hitl_id: str) -> HitlRequest | None`（驱逐返回 `None`，不抛）。`HitlManager.wait(hitl_id) -> HitlRequest` 语义不变（`None` → `raise HitlPark`）。
@@ -891,6 +893,9 @@ Expected: FAIL —— `AttributeError: 'HitlManager' object has no attribute 'wa
 
 - [ ] **Step 5: 删 `protocols/capability.py:274-285` 的 `filter`**
 
+⚠️ `filter` 在 **src 里**零调用点，但**测试里有 6 处**，其中 5 处承载 spec/05 §1 明文规定的
+AllowList 规则。**删 API 不等于删覆盖**——测试的迁移办法见 Step 5b，不要连测试一起删。
+
 整个 `async def filter(...)` 方法删除，并把 `Authorizer` 类 docstring 里
 「``filter`` 是基于 ``authorize`` 的批量便捷默认（可见性过滤），保留给装配期/外部用。」
 换成：
@@ -901,6 +906,66 @@ Expected: FAIL —— `AttributeError: 'HitlManager' object has no attribute 'wa
     工具可见」变成「向人类逐个求批」。真需要装配期可见性过滤时应另行设计，届时必须显式
     排除会挂起的 authorizer。
 ```
+
+- [ ] **Step 5b: 迁移 `filter` 的 6 处测试调用（删 API 不等于删覆盖）**
+
+其中 5 处测的是 **spec/05 §1 明文规定的 AllowList 规则**（deny 优先 / 未登记模板放行 /
+空集全拦）——那些规则必须继续被测，只是改成经 `authorize()` 测，因为它才是真正的契约。
+
+`tests/unit/test_authorizer.py:55-81` 五条改写（`_cap` / `_ctx` 用该文件已有的）：
+
+```python
+async def _allowed_ids(auth, caps, ctx) -> set[str]:
+    """filter 删除后的等价物：逐个 authorize，收集放行的 id。"""
+    return {c.id for c in caps if (await auth.authorize(c, ctx)).allowed}
+
+
+async def test_allow_all_passes_everything() -> None:
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    assert await _allowed_ids(AllowAllAuthorizer(), caps, _ctx()) == {"a:x", "b:y"}
+
+
+async def test_allow_list_whitelist() -> None:
+    auth = AllowListAuthorizer(allow_map={"tmpl_a": {"a:x"}})
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    assert await _allowed_ids(auth, caps, _ctx()) == {"a:x"}
+
+
+async def test_allow_list_denylist_wins() -> None:
+    auth = AllowListAuthorizer(deny_map={"tmpl_a": {"b:y"}})
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    assert await _allowed_ids(auth, caps, _ctx()) == {"a:x"}
+
+
+async def test_allow_list_unknown_template_falls_back_to_allow() -> None:
+    auth = AllowListAuthorizer(allow_map={"other": {"a:x"}})
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    # tmpl_a 不在 allow_map → 不限制
+    assert await _allowed_ids(auth, caps, _ctx("tmpl_a")) == {"a:x", "b:y"}
+
+
+async def test_allow_list_empty_set_blocks_all() -> None:
+    auth = AllowListAuthorizer(allow_map={"tmpl_a": set()})
+    assert await _allowed_ids(auth, [_cap("a:x", "x")], _ctx()) == set()
+```
+
+`tests/unit/test_hitl.py`：删掉 `_filter_with_response`（约 `:147-157`），把它仅有的两个
+调用方改用**同文件已存在的** `_authorize_with_response`（约 `:182`）：
+
+```python
+async def test_authorizer_approve_passes() -> None:
+    mgr = HitlManager()
+    decision = await _authorize_with_response(mgr, lambda rid: mgr.approve(rid))
+    assert decision.allowed is True
+
+
+async def test_authorizer_reject_blocks() -> None:
+    mgr = HitlManager()
+    decision = await _authorize_with_response(mgr, lambda rid: mgr.reject(rid))
+    assert decision.allowed is False
+```
+
+⚠️ 删 `_filter_with_response` 后**不要**顺手删 `_cap()`——`_authorize_with_response` 用的就是它。
 
 - [ ] **Step 6: 同步 `docs/spec/05-authz-and-hitl.md`**
 
