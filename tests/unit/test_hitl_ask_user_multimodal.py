@@ -113,3 +113,14 @@ async def test_rejected_without_message_uses_default_sentence():
     payload = await _ask_and_respond(mgr, provider, lambda hid: mgr.reject(hid))
     assert payload["content"] == "Human rejected the request."
     assert CONTENT_PARTS_KEY not in payload["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_accepted_empty_answer_falls_back_to_tool_confirmation_text():
+    """空答复（msg 为假值）落到 ``content = msg or result.content`` 分支：
+    用工具自己的确认文案兜底，而不是把空字符串当答案送回模型。"""
+    mgr = HitlManager()
+    provider = _control_provider(mgr)
+    payload = await _ask_and_respond(mgr, provider, lambda hid: mgr.answer(hid, ""))
+    assert payload["content"] == "Human input requested (1 question(s))"
+    assert CONTENT_PARTS_KEY not in payload["metadata"]
