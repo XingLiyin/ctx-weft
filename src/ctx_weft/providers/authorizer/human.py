@@ -22,6 +22,7 @@ class HumanConfirmationAuthorizer(Authorizer):
     shell 侧持有同一个 HitlManager 实例，通过 approve() / reject() 响应；可在 approve 时
     携带 modified_arguments（改写参数），或在 reject 时携带 message（指导反馈）——二者经
     AuthorizationDecision 流出，由 CapabilityGateway 应用 / 回灌。
+    热窗口被驱逐（超时）时返回 ``defer=True`` 的决定，由 gateway 挂起本次调用。
     """
 
     hitl_manager: "HitlManager"
@@ -43,7 +44,13 @@ class HumanConfirmationAuthorizer(Authorizer):
                 context=capability.description,
                 tool_call_id=tool_call_id,
             )
-            approval = await self.hitl_manager.wait(hitl_id)   # may raise HitlPark on eviction
+            approval = await self.hitl_manager.wait_for_decision(hitl_id)
+            if approval is None:
+                # 热→冷驱逐：不放行也不拒绝。gateway 见 defer 即「绝不调 provider.invoke
+                # + 挂起」（capability_gateway.py 的 defer 分支）。走协议的挂起语义而不是
+                # 让 core 的 HitlPark 穿过 authorize()——Authorizer 是 host 扩展点，
+                # 内置实现该做契约的范例。
+                return AuthorizationDecision(allowed=False, defer=True)
         if approval.accepted:
             return AuthorizationDecision(
                 allowed=True,

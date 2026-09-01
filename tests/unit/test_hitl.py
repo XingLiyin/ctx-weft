@@ -146,18 +146,6 @@ def _cap():
     return ToolCapability(id="fs:bash_exec", name="bash_exec", description="run shell")
 
 
-async def _filter_with_response(mgr: HitlManager, respond) -> list:
-    authorizer = HumanConfirmationAuthorizer(hitl_manager=mgr)
-    ctx = ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1")
-    ftask = asyncio.create_task(
-        authorizer.filter([_cap()], ctx, {"command": "ls"})
-    )
-    req = await _await_pending(mgr)
-    assert req.form == "approval"
-    await respond(req.id)
-    return await ftask
-
-
 async def _await_pending(mgr: HitlManager):
     for _ in range(200):
         pend = mgr.list_pending()
@@ -169,14 +157,14 @@ async def _await_pending(mgr: HitlManager):
 
 async def test_authorizer_approve_passes() -> None:
     mgr = HitlManager()
-    out = await _filter_with_response(mgr, lambda rid: mgr.approve(rid))
-    assert [c.id for c in out] == ["fs:bash_exec"]
+    decision = await _authorize_with_response(mgr, lambda rid: mgr.approve(rid))
+    assert decision.allowed is True
 
 
 async def test_authorizer_reject_blocks() -> None:
     mgr = HitlManager()
-    out = await _filter_with_response(mgr, lambda rid: mgr.reject(rid))
-    assert out == []
+    decision = await _authorize_with_response(mgr, lambda rid: mgr.reject(rid))
+    assert decision.allowed is False
 
 
 async def _authorize_with_response(mgr: HitlManager, respond):

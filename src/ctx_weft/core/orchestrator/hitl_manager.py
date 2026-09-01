@@ -164,11 +164,16 @@ class HitlManager:
         self._futures.pop(rid, None)  # 驱逐 future → 应答走冷路径
         return rid
 
-    async def wait(self, hitl_id: str) -> HitlRequest:
-        """阻塞至应答。timeout_sec=None（默认）则永不超时。
+    async def wait_for_decision(self, hitl_id: str) -> HitlRequest | None:
+        """阻塞至应答；**热→冷驱逐返回 ``None``，不抛**。timeout_sec=None（默认）永不超时。
 
-        显式正整数 timeout_sec 超时 → 热→冷驱逐：移除 future、保留 pending、抛 HitlPark
-        （spec/07 §3/§7）。answer 先到（race）则正常返回已解决请求。未知 id 抛 KeyError。
+        给 `Authorizer` 实现方用：授权是 protocols 层的 host 扩展点，不该要求实现方去
+        catch 一个 core 内部的 `BaseException`——它们该返回
+        `AuthorizationDecision(defer=True)`，由 gateway 决定怎么挂起（spec/07 §7
+        「同一套基础设施……合并实现」）。
+
+        `ask_user` 那类 `ToolCapabilityProvider` 够不着 `defer` 那个接缝，走 `wait()`。
+        未知 id 抛 KeyError。
         """
         future = self._futures.get(hitl_id)
         if future is None:
@@ -181,9 +186,18 @@ class HitlManager:
                 req = self._requests[hitl_id]
                 if req.resolved:
                     return req                       # answer 先到：走热已解决
-                self._futures.pop(hitl_id, None)  # 驱逐 future，保留 pending
-            from ctx_weft.core.loop.park import HitlPark
-            raise HitlPark(hitl_id=hitl_id, tool_call_id=req.tool_call_id)
+                self._futures.pop(hitl_id, None)     # 驱逐 future，保留 pending
+            return None
+
+    async def wait(self, hitl_id: str) -> HitlRequest:
+        """`wait_for_decision` 之上的薄层：驱逐 → `raise HitlPark`（协程栈 unwind 到
+        SUSPENDED）。控制工具（ask_user / wait_for_user）走这条。"""
+        decision = await self.wait_for_decision(hitl_id)
+        if decision is not None:
+            return decision
+        from ctx_weft.core.loop.park import HitlPark
+        raise HitlPark(hitl_id=hitl_id,
+                       tool_call_id=self._requests[hitl_id].tool_call_id)
 
     async def approve(
         self,

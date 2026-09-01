@@ -52,34 +52,38 @@ def _ctx(template_id: str = "tmpl_a") -> ProviderContext:
 # ── 1. AllowAll / 2. AllowList ────────────────────────────────────────────────────
 
 
+async def _allowed_ids(auth, caps, ctx) -> set[str]:
+    """filter 删除后的等价物：逐个 authorize，收集放行的 id。"""
+    return {c.id for c in caps if (await auth.authorize(c, ctx)).allowed}
+
+
 async def test_allow_all_passes_everything() -> None:
     caps = [_cap("a:x", "x"), _cap("b:y", "y")]
-    out = await AllowAllAuthorizer().filter(caps, _ctx())
-    assert {c.id for c in out} == {"a:x", "b:y"}
+    assert await _allowed_ids(AllowAllAuthorizer(), caps, _ctx()) == {"a:x", "b:y"}
 
 
 async def test_allow_list_whitelist() -> None:
     auth = AllowListAuthorizer(allow_map={"tmpl_a": {"a:x"}})
-    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _ctx())
-    assert {c.id for c in out} == {"a:x"}
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    assert await _allowed_ids(auth, caps, _ctx()) == {"a:x"}
 
 
 async def test_allow_list_denylist_wins() -> None:
     auth = AllowListAuthorizer(deny_map={"tmpl_a": {"b:y"}})
-    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _ctx())
-    assert {c.id for c in out} == {"a:x"}
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    assert await _allowed_ids(auth, caps, _ctx()) == {"a:x"}
 
 
 async def test_allow_list_unknown_template_falls_back_to_allow() -> None:
     auth = AllowListAuthorizer(allow_map={"other": {"a:x"}})
-    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _ctx("tmpl_a"))
-    assert {c.id for c in out} == {"a:x", "b:y"}  # tmpl_a 不在 allow_map → 不限制
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    # tmpl_a 不在 allow_map → 不限制
+    assert await _allowed_ids(auth, caps, _ctx("tmpl_a")) == {"a:x", "b:y"}
 
 
 async def test_allow_list_empty_set_blocks_all() -> None:
     auth = AllowListAuthorizer(allow_map={"tmpl_a": set()})
-    out = await auth.filter([_cap("a:x", "x")], _ctx())
-    assert out == []
+    assert await _allowed_ids(auth, [_cap("a:x", "x")], _ctx()) == set()
 
 
 async def test_authorize_returns_decision() -> None:

@@ -261,3 +261,50 @@ async def test_authorize_cold_no_future_does_not_keyerror() -> None:
     # reconcile 再入：必须用缓存决定、不调 wait()（否则 KeyError：无 future）
     d = await authz.authorize(cap, ctx, {"command": "ls"}, tool_call_id="tcR")
     assert d.allowed and d.modified_arguments == {"command": "ls -la"}
+
+
+# ── defer：内置 authorizer 走协议的挂起语义，不再让 BaseException 穿过 gateway ──────
+
+
+@pytest.mark.asyncio
+async def test_wait_for_decision_returns_none_on_eviction():
+    """热→冷驱逐时返回 None 而不是抛——authorizer 由此不必 import core 的 HitlPark。"""
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+
+    hm = HitlManager(timeout_sec=0)
+    hid = await hm.request(form="approval", session_id="s", task_id="t")
+    assert await hm.wait_for_decision(hid) is None
+
+
+@pytest.mark.asyncio
+async def test_wait_still_raises_park_for_ask_user():
+    """wait() 语义不变：ask_user 在 provider 里，够不着 defer，必须靠异常 unwind。"""
+    from ctx_weft.core.loop.park import HitlPark
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+
+    hm = HitlManager(timeout_sec=0)
+    hid = await hm.request(form="question", session_id="s", task_id="t")
+    with pytest.raises(HitlPark):
+        await hm.wait(hid)
+
+
+@pytest.mark.asyncio
+async def test_human_authorizer_defers_instead_of_raising():
+    """🔴 本任务存在的理由：驱逐后 authorize() 返回 defer 决定，不抛异常。"""
+    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.protocols import ProviderContext, ToolCapability
+    from ctx_weft.providers.authorizer.human import HumanConfirmationAuthorizer
+
+    hm = HitlManager(timeout_sec=0)
+    az = HumanConfirmationAuthorizer(hitl_manager=hm)
+    cap = ToolCapability(id="bash:run", name="run", kind="tool")
+    decision = await az.authorize(cap, ProviderContext(session_id="s", tenant_id="tn"),
+                                 {}, tool_call_id="tc1")
+    assert decision.defer is True
+    assert decision.allowed is False
+
+
+def test_authorizer_filter_is_gone():
+    """filter 零调用点，且对 HumanConfirmation 会真的发一个 HITL 请求并等人——是陷阱。"""
+    from ctx_weft.protocols.capability import Authorizer
+    assert not hasattr(Authorizer, "filter")

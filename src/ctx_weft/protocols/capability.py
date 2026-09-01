@@ -254,7 +254,10 @@ class Authorizer(ABC):
 
     核心方法 ``authorize`` 对**一次工具调用**作放行/拦截决定，并可携带回灌给 LLM 的
     ``message``（反馈/拒绝指导）与 allow 时的 ``modified_arguments``（改写参数）。
-    ``filter`` 是基于 ``authorize`` 的批量便捷默认（可见性过滤），保留给装配期/外部用。
+    曾有一个基于 ``authorize`` 的批量 ``filter`` 默认实现，**已删除**：它零调用点，且对
+    ``HumanConfirmationAuthorizer`` 会**真的发出一个 HITL 请求并等人**——把「列一下有哪些
+    工具可见」变成「向人类逐个求批」。真需要装配期可见性过滤时应另行设计，届时必须显式
+    排除会挂起的 authorizer。
 
     只收 ``ProviderContext``（session/task/agent/模板 标识齐备），不收 core 的 Agent/Task
     状态对象——契约层不依赖 core 状态，host 自实现时也只需面对 protocols。
@@ -270,16 +273,3 @@ class Authorizer(ABC):
         *,
         tool_call_id: str = "",
     ) -> AuthorizationDecision: ...
-
-    async def filter(
-        self,
-        capabilities: list[Capability],
-        ctx: ProviderContext,
-        arguments: dict[str, Any] | None = None,
-    ) -> list[Capability]:
-        """批量可见性过滤（基于 authorize 的默认实现）。"""
-        result = []
-        for cap in capabilities:
-            if (await self.authorize(cap, ctx, arguments)).allowed:
-                result.append(cap)
-        return result

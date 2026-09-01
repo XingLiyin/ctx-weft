@@ -22,9 +22,6 @@ AuthorizationDecision { allowed: bool, message: str = "", modified_arguments: di
 - `ctx` 是 `ProviderContext`，携带 session/task/agent 标识与 `agent_template_id`；
   授权契约不依赖 core 的 Agent/Task 状态对象。
 
-`filter(capabilities, ...) -> capabilities` 是基于 `authorize` 的**批量便捷默认**（可见性过滤），
-保留给装配期/外部用；当前内部唯一消费点是 gateway 的单 cap `authorize`。
-
 ### 内置实现
 
 | Authorizer | `authorize` 返回 |
@@ -43,7 +40,7 @@ AuthorizationDecision { allowed: bool, message: str = "", modified_arguments: di
 **HumanConfirmation 规则（热路径）**：`hitl.request(form="approval")` → `wait`；
 `accepted` → `allowed=True` 且透传 `approval.message`/`approval.modified_arguments`；
 `rejected` → `allowed=False` 且透传 `approval.message`（拒绝指导）。
-热窗口超时 → 协程经 HitlPark 信号 unwind 至 `SUSPENDED`（不是失败，见下方热/冷模型）。
+热窗口超时 → authorizer 返回 defer=True 决定，gateway 挂起本次调用（不是失败，见下方热/冷模型）。
 
 **HumanConfirmation 规则（冷路径短路）**：`authorize()` 先按 `tool_call_id` 查已解决的 HITL 缓存；
 命中（restart 后 `rebuild_pending` + `resolve_approve` 路径）→ 直接用缓存决定返回，**不调 `wait()`**。
@@ -203,7 +200,7 @@ host 据 `request.form` 决定动作与 UI：
 
 TS / Java 实现必须复现：
 
-- [ ] `authorize(cap, ctx: ProviderContext, arguments?, *, tool_call_id) -> AuthorizationDecision{allowed, message, modified_arguments, defer}`；`filter` 为基于它的默认。
+- [ ] `authorize(cap, ctx: ProviderContext, arguments?, *, tool_call_id) -> AuthorizationDecision{allowed, message, modified_arguments, defer}`。
 - [ ] AllowList 的 deny 优先、未登记模板放行、空集全拦三条规则（拦截带 `deny_message`）。
 - [ ] `_get_authorizer` 三级解析顺序。
 - [ ] **拦截时 provider.invoke 绝不被调用**（安全不变式）；deny 的 `message` 作 `[Blocked by human: …]` 回灌。
