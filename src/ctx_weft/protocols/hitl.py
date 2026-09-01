@@ -6,6 +6,11 @@
 ``form`` 是**开放扩展点**（``str`` 而非闭 ``Literal``）：host 可定义自己的等待形态，
 core 只负责原样透传、不做白名单校验。``outcome`` 与之对称，同样开放——core 只认
 ``accepted``/``rejected``/``cancelled`` 三个内建值，其余原样透传、不校验。
+
+``outcome`` 与 ``form`` 一样是开放 ``str``。真正封闭的是**事件类型**——`HitlManager._emit`
+对 ``EVENT_TYPES`` 做运行期校验并抛 `ValueError`，而 5 个 resolve 事件
+（Approved/Modified/Answered/Rejected/Cancelled）映到 3 个内建 outcome，
+``outcome`` 是它的**有损投影**。reducer 不消费 outcome，reducer **生产**它。
 """
 
 from __future__ import annotations
@@ -72,7 +77,11 @@ class HitlRequest:
     # 解析载荷
     # 人类附带的内容：答复 / 拒绝理由 / 备注。多模态回复（含图片）走同一字段。
     message: "str | list[ContentPart]" = ""
-    modified_arguments: dict[str, Any] | None = None  # approval form：改写后的工具参数（暂仅记录，不生效）
+    # approval form：人类改写后的工具参数。**生效**——经 `human.py` 透进
+    # `AuthorizationDecision.modified_arguments`，`capability_gateway` 的
+    # `effective_args` 用它替换原参，再过 `_coerce_args` 交给 provider。
+    # （旧注释写的「暂仅记录，不生效」是错的，会让人以为人工改参是安全的空操作。）
+    modified_arguments: dict[str, Any] | None = None
     created_at: datetime = field(default_factory=_now_utc)
     resolved_at: datetime | None = None
     # resume-time LLM 覆盖：冷应答触发 session resume 时用的当前所选模型（host 据 entry 传入），

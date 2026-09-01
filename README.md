@@ -1131,6 +1131,40 @@ async def test_single_task(runtime):
   否则就只回收 memory 侧不再需要、且确定不在事件流里被引用的那部分。这正是
   上面建议分开部署的原因——分开之后这个陷阱不存在。
 
+## 升级须知（HITL 契约两维化 + 多模态出口）
+
+- **破坏性变更：`HitlRequest.status` 已删除，换成 `outcome`。**
+  `status` 的四值 `Literal["pending","accepted","rejected","cancelled"]` 是按「批准一次
+  工具调用」造的，却要同时服务 `question`（accepted = 人答了）与 `wait`（accepted = 人
+  发了条消息）。现在是：
+
+  ```python
+  req.outcome     # str，开放值域。"" = 未决；"accepted"/"rejected"/"cancelled" 是内建值
+  req.resolved    # 推导属性：bool(outcome)
+  req.accepted    # 推导属性：outcome == "accepted"
+  req.resolve(o)  # 终局的唯一写入点
+  ```
+
+  host 定义了自己的 `form`，现在也能定义自己的 `outcome`。空串是未决哨兵，不要占用。
+  `HitlStatus` 已从 `ctx_weft.protocols` 移出，改用 `HitlOutcome` 与
+  `HITL_OUTCOME_ACCEPTED` / `HITL_OUTCOME_REJECTED` / `HITL_OUTCOME_CANCELLED`。
+
+- **破坏性变更：`AuthorizationDecision.message` 放宽为 `str | list[ContentPart]`。**
+  自实现 Authorizer 只**写** str 的不受影响；**读** `decision.message` 的要处理 parts
+  （用 `core.content.split_for_tool_result` 或 `core.utils.content_to_text`）。
+
+- **破坏性变更：`Authorizer.filter()` 已删除。** 它零调用点，且对
+  `HumanConfirmationAuthorizer` 会真的发出一个 HITL 请求并等人——把「列出可见工具」
+  变成「逐个求批」。需要装配期可见性过滤请自行实现，并显式排除会挂起的 authorizer。
+
+- **行为变更：`ask_user` 与 approval 备注现在会把人贴的图带给模型。** 此前这两条出口
+  用 `content_to_text` 展平，非文本 part 被静默丢弃（连占位都不留）。工具结果因此可能
+  是 `list[ContentPart]` 而非 `str`——`InvocationResult.content` 早已声明为该联合类型，
+  host 通常无感。
+
+- **不变**：事件类型、事件 payload 形状、`RunSnapshot` 序列化、golden 数据。
+  旧事件日志与旧快照原样可读，无需迁移。
+
 ## 升级须知（事件持久化）
 
 - **`InMemoryEventStore` 不再接受 `event_bus=` 参数，`append()` 也不再过滤瞬态事件。**

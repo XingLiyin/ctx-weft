@@ -7,7 +7,8 @@
   - ``question``：向人提问——取回人类文字 ``answer`` 回灌给 LLM。由 ask_user 工具触发。
   - ``wait``    ：act 纯文本暂停 / 软打断（wait_for_user 冷 park），回复经注入续跑。
 
-状态：``pending → accepted | rejected | cancelled``
+状态：未决（``outcome == ""``）→ ``accepted | rejected | cancelled``（内建三值，
+host 可自定义其它 outcome；``resolved``/``accepted`` 是由 outcome 推导的只读属性）
 
   - approval accepted（无改参）→ HitlApproved；（带改参）→ HitlModified
   - question/wait accepted     → HitlAnswered
@@ -331,10 +332,17 @@ class HitlManager:
         req 保持 pending、不发事件、不写 blob——与两个入口「入口即拒、不落库」一致。
 
         未注入 normalizer（纯单测直接构造 `HitlManager()`）→ 内容原样返回同一对象，
-        event 侧载荷就地按 `NullEventBlobStore` 算：纯文本是零开销直通（逐字节不变），
-        携图内容则**响亮抛错**——裸 HitlManager 从来不是生产路径（生产路径恒由
-        `CtxWeftRuntime` 构造并接线 normalizer），携图内容绕过入口校验直接到这里本就
-        该被看见，不该被一条静默降级吞掉。
+        event 侧载荷就地按 `NullEventBlobStore` 算。纯文本是零开销直通。
+
+        携图内容的实际行为（实测，**不是**统一的「响亮抛错」）：
+        - 合法 base64 / 白名单外 media_type / 超 5 MiB → 抛 `NotImplementedError`，
+          来自 `NullEventBlobStore.put`。注意这**不是**格式校验——白名单与尺寸上限在这条
+          路上一次都没跑（`validate_content` 只在注入了 normalizer 时才经过），
+          当前的「响亮」是巧合而非设计。
+        - ``source_type="ref"`` → **不抛**，静默降级成 `[image {media_type}]` 占位 + warning
+          （与生产路径同口径）。
+
+        裸 `HitlManager` 从来不是生产路径（生产恒由 `CtxWeftRuntime` 构造并接线 normalizer）。
         """
         if self._content_normalizer is not None:
             return await self._content_normalizer(content, req)

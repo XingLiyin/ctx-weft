@@ -93,7 +93,7 @@ AuthorizationDecision { allowed: bool, message: str = "", modified_arguments: di
 
 | # | 触发点 | purpose | form | park 在 | task 状态 |
 |---|--------|---------|------|---------|-----------|
-| A | HumanConfirmationAuthorizer（gateway 鉴权步） | — | approval | authorizer.filter 内 | 不改 |
+| A | HumanConfirmationAuthorizer（gateway 鉴权步） | — | approval | authorize 返回 defer → gateway 挂起 | 不改 |
 | B | `request_human_input` 控制工具 | act + observe | question | ControlProvider._handle 内 | 不改 |
 | C | `submit_task_assessment(task_status="needs_user_input")` | observe | question | 同 _handle（复用 `HITL_REQUESTED` metadata） | **不改**（观察循环据答复继续，非终态裁决） |
 
@@ -112,31 +112,36 @@ AuthorizationDecision { allowed: bool, message: str = "", modified_arguments: di
 ### 状态机
 
 ```
-pending ──approve──────────▶ accepted   （HitlApproved；带 modified_arguments → HitlModified）
-        ──answer(text)─────▶ accepted   （HitlAnswered）
-        ──reject───────────▶ rejected   （HitlRejected）
-        ──cancel───────────▶ cancelled  （HitlCancelled；session 关闭 / interrupt / GC）
+未决（outcome == ""） ──approve──────────▶ accepted   （HitlApproved；带 modified_arguments → HitlModified）
+                       ──answer(text)─────▶ accepted   （HitlAnswered）
+                       ──reject───────────▶ rejected   （HitlRejected）
+                       ──cancel───────────▶ cancelled  （HitlCancelled；session 关闭 / interrupt / GC）
 
-        ──(热窗口超时)──▶ 仍是 pending  （内部 hot→cold 降级：驱逐 _futures entry + task SUSPENDED；不发终态事件）
+                       ──(热窗口超时)──▶ 仍未决  （内部 hot→cold 降级：驱逐 _futures entry + task SUSPENDED；不发终态事件）
 ```
+
+> outcome 值域开放，host 可为自定义 form 定义自己的结局；core 只认上面三个内建值。
 
 > 旧的 `approved`/`modified` 合并为 `accepted`；区别落在 form + 载荷 + 发出的事件。
 > **超时不再是终态**（已删除 `timeout` 状态与 `HitlTimeout` 事件）：超时 = hot→cold 驱逐，
-> request 持久保持 `pending`，协程经 `HitlPark` 信号 unwind 到 `SUSPENDED`；
+> request 持久保持未决（`outcome == ""`），协程经 `HitlPark` 信号 unwind 到 `SUSPENDED`；
 > 晚到的应答走冷路径（写结果 + 重新入队 task → reconcile → LLM 续跑）。
 > 竞态由单一权威锁保证：驱逐 vs. 应答互斥（要么 Future 先被 set 走热路径、要么 Future 先被驱逐走冷路径）。
 
 ### HitlRequest 字段
 
 `id / form / session_id / task_id / agent_id / capability_id / tool_call_id / arguments /
-question / context / questions / status / message / modified_arguments / created_at / resolved_at`
+question / context / questions / outcome / message / modified_arguments / created_at / resolved_at`
 （另有不入事件、不持久化的 `resume_llm_account` / `resume_llm_model`）。
 `message` 承载人类自由文本（答复 / 拒绝指导 / 备注），任何 decision 下都可有。
-`accepted` 便捷属性 = `status == "accepted"`。
+`accepted` 便捷属性 = `outcome == "accepted"`；`resolved` 便捷属性 = `outcome != ""`。
 
 > **`form` 是开放扩展点**：类型为 `str`，内建值 `approval` / `question` / `wait`
 > 以 `protocols.hitl.HITL_FORM_*` 常量给出；host 可自定义其它值，core 原样透传、
-> 不做白名单校验。`status` 相反是闭集——状态机是 core 不变式。
+> 不做白名单校验。`outcome` 与 `form` 一样是开放 `str`。真正封闭的是**事件类型**——
+> `HitlManager._emit` 对 `EVENT_TYPES` 做运行期校验并抛 `ValueError`，而 5 个 resolve
+> 事件（Approved/Modified/Answered/Rejected/Cancelled）映到 3 个内建 outcome，
+> `outcome` 是它的**有损投影**。reducer 不消费 outcome，reducer **生产**它。
 > 契约位置：`ctx_weft.protocols.hitl`（host-facing，非 core 内部状态）。
 > 但 core 确实对内建值 `"wait"` 做了两处字面量分支：`core/control/reducers.py:477`
 > 折叠 `SESSION_PAUSED_HITL` 事件时，`form == "wait"` 记为软待命 `PAUSED`，其余记为
@@ -149,15 +154,15 @@ question / context / questions / status / message / modified_arguments / created
 
 | 方法 | 规则 |
 |------|------|
-| `request(form, session_id, task_id, *, capability_id, arguments, question, context, agent_id)` | 登记 pending，返回 id；发 `HitlRequired`(payload 含 `form`) + `SessionPausedHitl` |
-| `wait(id)` | 阻塞至应答（热路径）；热窗口超时 → 抛 `HitlPark`（hot→cold 降级，request 仍 `pending`）；未知 id 抛错 |
-| `approve(id, *, message="", modified_arguments=None)` | approval：`status="accepted"`、存 `message`；发 `HitlModified`(有改参)/`HitlApproved` |
-| `answer(id, text)` | question/wait：`status="accepted"`、`message=text`；发 `HitlAnswered` |
-| `reject(id, *, message="")` | `status="rejected"`、存 `message`（指导反馈）；发 `HitlRejected` |
-| `get(id)` / `list_pending(session_id=None)` | 查询；仅 `pending` 出现在 list |
+| `request(form, session_id, task_id, *, capability_id, arguments, question, context, agent_id)` | 登记未决请求（`outcome=""`），返回 id；发 `HitlRequired`(payload 含 `form`) + `SessionPausedHitl` |
+| `wait(id)` | 阻塞至应答（热路径）；热窗口超时 → 抛 `HitlPark`（hot→cold 降级，request 仍未决）；未知 id 抛错 |
+| `approve(id, *, message="", modified_arguments=None)` | approval：`outcome="accepted"`、存 `message`；发 `HitlModified`(有改参)/`HitlApproved` |
+| `answer(id, text)` | question/wait：`outcome="accepted"`、`message=text`；发 `HitlAnswered` |
+| `reject(id, *, message="")` | `outcome="rejected"`、存 `message`（指导反馈）；发 `HitlRejected` |
+| `get(id)` / `list_pending(session_id=None)` | 查询；仅未决（`outcome==""`）请求出现在 list |
 
 > **resolve 幂等**：已解决（accepted/rejected/cancelled）的请求再调 approve/answer/reject 是 no-op，不二次转移。
-> 消费方按 `status` 判定：`accepted` → 放行 / 取 `answer`；`rejected` → 拦截 / 给提示文案。
+> 消费方按 `outcome` 判定：`accepted` → 放行 / 取 `answer`；`rejected` → 拦截 / 给提示文案。
 
 ### host 应答路由（必须）
 
@@ -170,7 +175,7 @@ host 据 `request.form` 决定动作与 UI：
 
 ## 4. 端到端语义
 
-**B/C. question/wait（控制工具）—— message 回灌已落地**：`request(form="question")`（或 `"wait"`）后 `wait`（热路径），按 status 生成工具结果回灌 LLM：
+**B/C. question/wait（控制工具）—— message 回灌已落地**：`request(form="question")`（或 `"wait"`）后 `wait`（热路径），按 outcome 生成工具结果回灌 LLM：
 - `accepted` → `message or 默认文案`；
 - `rejected` → `Human declined: {message}`（有 message）/ `Human rejected the request.`（无）——**拒绝时的指导反馈也回灌**，agent 可据此改方向。
 - 热窗口超时 → `HitlPark` unwind 至 `SUSPENDED`；冷路径应答到达后 reconcile 恢复续跑（工具结果在 reconcile 中写入）。
@@ -206,7 +211,9 @@ TS / Java 实现必须复现：
 - [ ] **拦截时 provider.invoke 绝不被调用**（安全不变式）；deny 的 `message` 作 `[Blocked by human: …]` 回灌。
 - [ ] allow 时 `modified_arguments` 生效（过 `_sanitize`，审计/memory 用有效参数）；`message` 作 `[Human note: …]` 并入结果。
 - [ ] `_sanitize` 的敏感 header 集合 + 不改原对象。
-- [ ] HITL **form 判别**（approval / question / wait；form 为开放 str，core 不校验）+ 状态机 `pending→accepted/rejected/cancelled`；**超时 = hot→cold 降级，不改持久状态**。
+- [ ] HITL **form 判别**（approval / question / wait；form 为开放 str，core 不校验）+ 状态机
+  未决(`outcome=""`)→内建三值或 host 自定义 outcome；`resolved`/`accepted` 为推导属性；
+  **超时 = hot→cold 降级，不改持久状态**。
 - [ ] 各 resolution 事件：`HitlApproved`/`HitlModified`/`HitlAnswered`/`HitlRejected`/`HitlCancelled`；request 发 `HitlRequired`(含 form)+`SessionPausedHitl`。
 - [ ] 三触发点：authorizer（approval）、request_human_input（question）、submit_task_assessment needs_user_input（question，不改 task 状态）。
 - [ ] park 期间 PAUSED_HITL ↔ RUNNING；答复回灌为工具结果。
