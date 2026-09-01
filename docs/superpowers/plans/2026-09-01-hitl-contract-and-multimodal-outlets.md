@@ -1201,6 +1201,8 @@ Expected: all passed
 - [ ] **Step 7: 提交**
 
 ```bash
+# ⚠️ 下面这行是**清单不是穷举** —— 本计划已三次出现「git add 漏文件」。
+# 提交前必须先跑 `git status --porcelain` 核对：凡本任务改过的文件一个都不能落下。
 git add src/ctx_weft/core/orchestrator/control_capability.py tests/unit/test_hitl_ask_user_multimodal.py
 git commit -m "fix(hitl): ask_user 的答复带图时不再静默丢图
 
@@ -1486,6 +1488,8 @@ Expected: 只剩三条既有失败。
 - [ ] **Step 9: 提交**
 
 ```bash
+# ⚠️ 下面这行是**清单不是穷举** —— 本计划已三次出现「git add 漏文件」。
+# 提交前必须先跑 `git status --porcelain` 核对：凡本任务改过的文件一个都不能落下。
 git add src/ctx_weft/protocols/capability.py src/ctx_weft/providers/authorizer/human.py src/ctx_weft/core/loop/capability_gateway.py tests/unit/test_approval_note_multimodal.py
 git commit -m "fix(authz): approval 的人工备注带图时不再静默丢图
 
@@ -1565,6 +1569,25 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - 第 212 行清单项：`状态机 pending→accepted/rejected/cancelled` 改为
   `状态机 未决(outcome="")→内建三值或 host 自定义 outcome；resolved/accepted 为推导属性`。
 
+- [ ] **Step 4b: 修掉 `docs/spec/05` 里指向已删 `Authorizer.filter` 的过期引用（R8）**
+
+Task 4 删掉了 `Authorizer.filter`，但「三个触发点」表里还写着 park 发生在它内部。
+**按内容定位**（行号会因 Task 4 的编辑而漂移），找这一行：
+
+```
+| A | HumanConfirmationAuthorizer（gateway 鉴权步） | — | approval | authorizer.filter 内 | 不改 |
+```
+
+「park 在」那格改成：
+
+```
+| A | HumanConfirmationAuthorizer（gateway 鉴权步） | — | approval | authorize 返回 defer → gateway 挂起 | 不改 |
+```
+
+这条是**双重过期**：`filter` 已不存在；而且 park 本来也不在 `filter` 里——它一直在
+`authorize` 里（经 `wait()`），Task 4 之后是 `authorize` 返回 `defer=True` 由 gateway 挂起。
+改完 `grep -n "filter" docs/spec/05-authz-and-hitl.md` 应无命中。
+
 - [ ] **Step 5: 在 `README.md` 新增升级须知一节**
 
 插在第 1097 行「## 升级须知（blob 字节移出 memory）」那一节之后：
@@ -1618,6 +1641,8 @@ Expected: 只剩三条既有失败；ruff 无新增告警。
 - [ ] **Step 7: 提交**
 
 ```bash
+# ⚠️ 下面这行是**清单不是穷举** —— 本计划已三次出现「git add 漏文件」。
+# 提交前必须先跑 `git status --porcelain` 核对：凡本任务改过的文件一个都不能落下。
 git add src/ctx_weft/protocols/hitl.py src/ctx_weft/core/orchestrator/hitl_manager.py docs/spec/05-authz-and-hitl.md README.md
 git commit -m "docs: 订正三处与代码不符的说明，补 HITL 契约的升级须知
 
