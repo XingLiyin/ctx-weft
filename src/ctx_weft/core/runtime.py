@@ -1935,7 +1935,32 @@ class CtxWeftRuntime:
         except NotImplementedError:
             events = [e for e in await self.event_store.read_by_session(session_id)
                       if e.type in HITL_STATUS_EVENT_TYPES]
-        return fold_cold_hitl_decision(events, tool_call_id)
+        req = fold_cold_hitl_decision(events, tool_call_id)
+        # event 侧 ref → memory 侧 ref。事件 payload 里存的是 EventBlobStore 命名空间的
+        # ref，而这个 req 的 message 会被 ask_user / approval 消费、最终随 TOOL_RESULT 进
+        # memory——直接透传就是往 memory 里写一个永远打不开的引用（两个 ref 命名空间独立，
+        # spec 2026-08-27 dual-blob-store）。纯文本 message 零成本直通。
+        if req is None or not req.message or isinstance(req.message, str):
+            return req
+        from ctx_weft.core.content import (
+            downgrade_images_to_text, hydrate_event_content, normalize_content,
+        )
+        ctx = ProviderContext(
+            session_id=session_id, tenant_id=await self._tenant_for_session(session_id))
+        try:
+            hydrated = await hydrate_event_content(
+                req.message, event_blob_store=self.providers.get_event_blob_store(), ctx=ctx)
+            blob_store = self.providers.get_memory_blob_store()
+            req.message = (await normalize_content(hydrated, blob_store=blob_store, ctx=ctx)
+                           if blob_store.can_externalize else hydrated)
+        except Exception:
+            # 与 _restore_task_prompts 同一姿态：绝不让解不开的 ref 流下去，降级成确定性
+            # 占位并响亮记账。冷恢复是最不能再崩一次的地方，也是最不能静默的地方。
+            logger.error(
+                "_cold_hitl_decision: event ref 转换失败，降级为文本占位 (tool_call=%s)",
+                tool_call_id, exc_info=True)
+            req.message = downgrade_images_to_text(req.message)
+        return req
 
     # ── Internal execution ───────────────────────────────────────────────────
 
