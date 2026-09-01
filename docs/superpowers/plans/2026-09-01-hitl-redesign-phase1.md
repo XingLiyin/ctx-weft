@@ -1619,7 +1619,10 @@ def _legacy_delivery(form: str, tool_call_id: str, context: str, task_id: str) -
                                 preface=_LEGACY_PREFACE.get(context, PREFACE_NORMAL))
     if tool_call_id:
         return ToolResultDelivery(tool_call_id=tool_call_id)
-    # 既非 wait、又无 tool_call 可补：续跑无从谈起。显式「只可取消」，不静默丢。
+    # 既非 wait、又无 tool_call 可补：续跑无从谈起。显式「只可取消」**并告警**——
+    # spec §12.3.2 的原文是「NoResume + 告警」，告警本身就是要求的一部分：走到这条
+    # 分支意味着有个真人正卡在一个只能取消的请求上，没有信号就没人知道。
+    logger.warning("HITL fold: 旧请求无法续跑，降级为 NoResume (hitl=%s form=%s)", hitl_id, form)
     return NoResumeDelivery()
 
 
@@ -1691,19 +1694,30 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 delivery=_legacy_delivery(form, tool_call_id, p.get("context", ""),
                                           ev.task_id or ""),
                 created_at=ev.timestamp, subject_id=p.get("capability_id", ""),
-                prompt=p.get("question", ""), detail=p.get("context", ""),
+                prompt=p.get("question", ""),
+                # wait 形态的旧 context 是模式标记（plain_text/interrupt/interrupt:edit），
+                # 不是描述文本——它的语义已由 UserTurnDelivery.preface 承载。塞进 detail
+                # 会把它当描述渲染给人看，正是 spec §4 批评的「私有语义混进通用槽位」。
+                detail=("" if form == "wait" else p.get("context", "")),
                 fields=list(p.get("questions") or []), proposal=p.get("arguments") or None,
                 tool_call_id=tool_call_id,
+                # 旧模型没有这个字段，必须**推导**：form == "question" 全仓只有一个生产者
+                # （control_capability.py 的 ask_user），而它的契约正是「答复即工具结果」。
+                # 恒取 False 会让在途 ask_user 在段 2 去要一个它永不实现的 HumanResumable
+                # → 按 spec §12.3.5 当场报错。这不是同构。
+                reply_as_result=(form == "question"),
             )
             opened[rid] = req
             snap.pending[rid] = req
 
         elif ev.type == EventType.HITL_RESOLVED:
-            snap.pending.pop(rid, None)
             req = opened.get(rid)
             outcome = p.get("outcome", "")
+            # 守卫**先于** pop：畸形事件（outcome 为空）若先把请求移出 pending，它就既不
+            # 未决、也无决定——凭空消失。留在 pending 是安全的方向（大不了重问一次）。
             if req is None or not outcome:
                 continue
+            snap.pending.pop(rid, None)
             decision = HitlDecision(
                 # 同 `_legacy_decision`：事件载荷是 jsonable 形态，必须转回 ContentPart。
                 outcome=outcome, message=content_from_jsonable(p.get("message") or ""),
