@@ -49,36 +49,64 @@
 
 这一条决定其余全部结构。它的价值不在「少写几行」，而在**让解耦成为结构性事实**：provider 层拿不到等待句柄，所以不可能耦合——不需要靠纪律维持。
 
-provider 侧契约变成纯数据进、纯数据出：
+provider 侧契约变成纯数据进、纯数据出。**基础契约的签名一个字不改**——不问人的实现完全不受 HITL 影响：
 
 ```
-Authorizer.authorize(cap, ctx, args, tool_call_id, human?) -> AuthzDecision
+Authorizer.authorize(cap, ctx, args, tool_call_id) -> AuthzDecision
 
 AuthzDecision =
   | Allow      { message?, modified_arguments? }
   | Deny       { message? }
   | NeedsHuman { ask: HitlAsk }
 
-ToolProvider.invoke(name, args, ctx, human?, resume_state?) -> ToolOutcome
+ToolProvider.invoke(name, args, ctx) -> ToolOutcome
 
 ToolOutcome =
   | Value      { content, is_error }
   | NeedsHuman { ask: HitlAsk }
 ```
 
-### 2.1 同一个方法可重入，不是两阶段方法
+只有**会问人**的实现，额外实现一个可选能力接口：
 
-`human` 参数缺省（`None`）= 第一次进入；非空 = **带着人的决定被重入**。不设独立的 `resume()`。
+```
+HumanGatedAuthorizer {                                    # 授权侧
+  on_decision(cap, ctx, args, tool_call_id, decision: HitlDecision) -> AuthzDecision
+}
 
-这样做的收益是**热路径与冷路径形状完全一致**：热路径由 gateway 直接重入，冷路径由 reconcile 带着装填好的决定重入，被调用方分辨不出、也不需要分辨。
+HumanResumable {                                          # 工具侧
+  resume(ask_id, decision: HitlDecision, resume_state, ctx) -> ToolOutcome
+}
+```
+
+### 2.1 重入走可选接口，不污染基础签名
+
+**加法式，不是分叉式。** 不问人的 provider / authorizer 看不到任何 HITL 相关的参数；会问人的多实现一个接口。
+
+由此，「谁能问人」在契约上是**可见且可判定**的：
+
+| 返回 | 要求 |
+|---|---|
+| `NeedsHuman(reply_as_result = true)` | 不必实现接口——答复直接作工具结果（`ask_user` 走这条） |
+| `NeedsHuman(reply_as_result = false)` | **必须**实现对应接口；未实现 = 契约违例，gateway 当场报错，不静默降级 |
+
+**为什么不分叉基类。** 一个直觉方案是拆成「需要 HITL 的基类 / 不需要的基类」。它的问题是：基类分叉会连带要求把**返回类型联合也分叉**——否则「不需要 HITL 的基类」在类型上仍然允许返回 `NeedsHuman`，非法组合只是换了个地方藏。要做干净就得维护两套返回联合，契约面积翻倍，gateway 还要按类型分派。加法式接口只加一个方法，基础契约零改动。
+
+**热路径与冷路径依然同形**——统一的是 gateway 的调用形状，不是被调用方的方法数：
+
+```
+热：gateway 拿到 decision            → 调 on_decision / resume
+冷：reconcile 走 gateway.invoke      → gateway 见 registry 已有该 tool_call 的决定 → 调同一个方法
+```
+
+被调用方知道自己正在被恢复，这是无害的；把它藏起来不是本设计的目标。
 
 `NeedsHuman` 取代 `AuthorizationDecision.defer`——`defer` 只能说「挂起」，说不出「挂起并问这个问题」，所以今天的实现必须自己先去登记请求。合并成一个结局后，authorizer **退化为无状态判断**：`HumanConfirmationAuthorizer` 连 `hitl_manager` 字段都没有。
 
 ### 2.2 `resume_state`：让出前的工作不必重做
 
-`HitlAsk` 带一个**不透明**的 `resume_state`。core 原样保存（随 `HitlOpened` 落盘）、重入时原样回传，**永不解读**。
+`HitlAsk` 带一个**不透明**的 `resume_state`。core 原样保存（随 `HitlOpened` 落盘、随 `HitlSnapshot` 装填回内存），重入时作为 `resume()` 的参数原样回传，**永不解读**。它不出现在 `invoke` 的签名里。
 
-没有它，「单方法可重入」就等于要求 provider 重做让出前的全部工作——对纯判断的 authorizer 无所谓，对已经做过实际工作的工具就是重复副作用。
+没有它，重入就等于要求 provider 重做让出前的全部工作——对纯判断的 authorizer 无所谓，对已经做过实际工作的工具就是重复副作用。
 
 两条约束写死：`resume_state` 必须**可序列化**（要跨重启存活）；core 对其内容**零假设**。
 
@@ -267,13 +295,13 @@ resolve_human(ask) -> HitlDecision | Evicted:
 ```
 授权步:      authorize(...) -> NeedsHuman(ask)
              → d = resolve_human(ask)
-             → Evicted ? raise HitlPark : authorize(..., human=d) 重入
+             → Evicted ? raise HitlPark : authorizer.on_decision(..., decision=d)
 
 工具调用:    invoke(...) -> NeedsHuman(ask)
              → d = resolve_human(ask)
              → Evicted ? raise HitlPark
              : ask.reply_as_result ? 直接构造工具结果
-                                   : invoke(..., human=d, resume_state=…) 重入
+                                   : provider.resume(ask_id, d, resume_state, ctx)
 
 act 暂停:    hitl.open(ask with UserTurn) 后不等待，直接抛 HitlPark（冷 park）
 ```
@@ -310,11 +338,16 @@ HitlResolved { hitl_id, outcome, message_ref, modified_arguments, claimed }
 
 ```
 reducer（纯函数）折叠 HitlOpened / HitlResolved
-   → HitlSnapshot { pending: [...], decisions_for: { tool_call_id → HitlDecision } }
+   → HitlSnapshot {
+       pending:       [...],
+       decisions_for: { tool_call_id → (HitlDecision, resume_state) }
+     }
    → runtime 装填 HitlRegistry
 ```
 
 `decisions_for` 只需覆盖**最后一个 assistant turn 里 dangling 的 tool_call**——有界，且是 reconcile 唯一会问的集合。
+
+**决定必须与 `resume_state` 成对装填**：冷路径重入调的是 `resume(ask_id, decision, resume_state, ctx)`，只带决定而丢掉 `resume_state`，provider 就得重做让出前的工作——正是 §2.2 要消除的重复副作用。`resume_state` 来自同一 `hitl_id` 的 `HitlOpened`，折叠时一并取出。
 
 ### 7.3 冷续跑：订阅而非回调
 
@@ -370,49 +403,53 @@ registry.set_authorizer("shell:*", HumanConfirmationAuthorizer())
 ### 9.2 自定义 Authorizer
 
 ```
-class SpendLimitAuthorizer(Authorizer):
-    async def authorize(self, cap, ctx, args=None, *, tool_call_id="", human=None):
+class SpendLimitAuthorizer(Authorizer, HumanGatedAuthorizer):
+    async def authorize(self, cap, ctx, args=None, *, tool_call_id=""):
         amount = (args or {}).get("amount", 0)
         if amount <= self.limit:
             return Allow()
+        return NeedsHuman(HitlAsk(                  # 让出
+            form="spend_approval",                  # host 自定义 form
+            delivery=ToolResult(tool_call_id),
+            prompt=f"批准 ${amount} 的支出？",
+            proposal=args,
+        ))
 
-        if human is None:                       # 第一次进入：让出
-            return NeedsHuman(HitlAsk(
-                form="spend_approval",          # host 自定义 form
-                delivery=ToolResult(tool_call_id),
-                prompt=f"批准 ${amount} 的支出？",
-                proposal=args,
-            ))
-
-        # 被重入：由**我**来解释这个决定
-        if human.outcome == "accepted":
-            return Allow(message=human.message,
-                         modified_arguments=human.modified_arguments)
-        return Deny(message=human.message)      # 未知 outcome 落此分支 = 不放行
+    async def on_decision(self, cap, ctx, args, tool_call_id, decision):
+        # 由**我**来解释这个决定
+        if decision.outcome == "accepted":
+            return Allow(message=decision.message,
+                         modified_arguments=decision.modified_arguments)
+        return Deny(message=decision.message)       # 未知 outcome 落此分支 = 不放行
 ```
+
+不需要问人的 authorizer（`AllowAll` / `AllowList`）只实现 `Authorizer`，签名里看不到任何 HITL 概念。
 
 三处性质：
 
 1. **authorizer 不再自己查决定缓存。** 今天 `human.py:32` 第一件事是 `find_resolved_for_tool_call(...)`——provider 在替 core 做记账查询。新设计里决定是喂进来的，authorizer 完全无状态、无查询、无 I/O，可纯函数式单测。
-2. **热/冷同形。** 热路径由 gateway 重入，冷路径由 reconcile 带装填好的决定重入，authorizer 分辨不出。
-3. **安全不变式不依赖 outcome。** gateway 是否调 `provider.invoke`，只取决于第二次 `authorize` 返回的 `Allow/Deny`。
+2. **热/冷同形。** 热路径由 gateway 调 `on_decision`，冷路径由 reconcile 经 gateway 调同一个方法。
+3. **安全不变式不依赖 outcome。** gateway 是否调 `provider.invoke`，只取决于 `on_decision` 返回的 `Allow/Deny`。
 
 ### 9.3 自定义工具 provider 要问人
 
 ```
-class DeployTool(ToolCapabilityProvider):
-    async def invoke(self, cap, args, ctx, *, human=None, resume_state=None):
-        if human is None:
-            plan = await self.compute_plan(args)          # 有代价的工作
-            return NeedsHuman(HitlAsk(
-                form="question",
-                delivery=ToolResult(ctx.tool_call_id),
-                prompt=f"确认部署 {plan.summary}？",
-                resume_state=plan.to_dict(),              # 不必重算
-            ))
-        plan = Plan.from_dict(resume_state)
-        return Value(await self.apply(plan, human))
+class DeployTool(ToolCapabilityProvider, HumanResumable):
+    async def invoke(self, cap, args, ctx):
+        plan = await self.compute_plan(args)              # 有代价的工作
+        return NeedsHuman(HitlAsk(
+            form="question",
+            delivery=ToolResult(ctx.tool_call_id),
+            prompt=f"确认部署 {plan.summary}？",
+            resume_state=plan.to_dict(),                  # 让出前的工作存这里
+        ))
+
+    async def resume(self, ask_id, decision, resume_state, ctx):
+        plan = Plan.from_dict(resume_state)               # 不必重算
+        return Value(await self.apply(plan, decision))
 ```
+
+若某 provider 返回了 `NeedsHuman(reply_as_result=false)` 却没实现 `HumanResumable`，gateway **当场报错**——这是契约违例，不静默降级成「把答复当结果」，否则一次未完成的部署会被伪装成已完成。
 
 ### 9.4 自定义 form 与自定义 outcome
 
@@ -455,7 +492,8 @@ core 对这两个新值的处理是**完全不处理**：`form` 只用于透传�
 - [ ] **安全不变式**：`Deny` 时 `provider.invoke` 绝不被调用；`Allow` 时 `modified_arguments` 生效且过脱敏，审计与 memory 记录用实际执行的有效参数。
 - [ ] **控制流不看 outcome**：core 仅判「非空 = 终局」；outcome 的语义解释归发起方；core 对 outcome 的分支只出现在呈现层。
 - [ ] **delivery 封闭、form 开放**：host 不能定义新的 delivery；form / outcome 原样透传不校验。
-- [ ] **`resume_state` 不透明**：core 永不解读，且可序列化、跨重启存活。
+- [ ] **`resume_state` 不透明**：core 永不解读，且可序列化、跨重启存活；冷路径装填时必须与决定成对取回。
+- [ ] **基础契约不含 HITL 参数**：`authorize` / `invoke` 的签名不因 HITL 而变；重入只经可选接口。返回 `NeedsHuman(reply_as_result=false)` 却未实现对应接口 = 契约违例，**当场报错**，不静默降级。
 - [ ] **内容**：事件载荷恒不含字节；memory 侧与 event 侧各自外部化；校验失败则不改状态、不发事实、不写 blob。
 - [ ] **事件**：仅 `HitlOpened` / `HitlResolved`；会话暂停态由 pending 集合推导而非独立事件。
 
@@ -488,7 +526,7 @@ core 对这两个新值的处理是**完全不处理**：`form` 只用于透传�
 
 | 代价 | 说明 |
 |---|---|
-| **重入式 provider** | 需要拿决定后继续做事的工具 provider，要把逻辑拆成「让出前 / 重入后」两段并自带 `resume_state`，比线性 `await` 难写。`reply_as_result` 覆盖多数场景，这是少数派路径。这是本设计唯一的人体工学退步 |
+| **重入式 provider** | 需要拿决定后继续做事的工具 provider，要把逻辑拆成 `invoke` / `resume` 两段并自带 `resume_state`，比线性 `await` 难写。代价**只落在会问人的实现身上**——基础契约不变，`reply_as_result` 又覆盖了多数场景，所以这是少数派路径的少数派 |
 | **冷续跑改为异步订阅** | 需至少一次投递 + 幂等。`ToolResult` 靠 reconcile 天然幂等；`UserTurn` 靠 `MemoryEvent.id` 派生键，该能力已具备（§12.2） |
 | **装填完备性成为恢复路径的责任** | core 不再兜底扫日志，恢复时漏装 = 重问一遍已答过的问题。需要针对性回归测试 |
 | **delivery 封闭是明确取舍** | 若将来出现真正的第三种回灌方式（如「决定只改配置、不回灌给任何对话」），要改 core。现在封闭是对的，但这是一个会回来找我们的决定 |
