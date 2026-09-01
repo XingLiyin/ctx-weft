@@ -138,7 +138,19 @@ class HitlService:
         if transferred is None:
             return None                              # 已终局：幂等 no-op
         resolved, slot = transferred
-        claimed = bool(slot.deliver(decision)) if slot is not None else False
+        claimed = False
+        if slot is not None:
+            # deliver 声明为不抛（-> bool），但对一个已完成的 future 再次 set 会抛
+            # InvalidStateError。resolve() 已不可逆——这里若真抛出且不接住，请求就停在
+            # 「已终局」却没有 HitlResolved 事实，跨重启无法恢复。发事实的义务优先于
+            # 让这个异常继续传播。
+            try:
+                claimed = bool(slot.deliver(decision))
+            except Exception:
+                logger.exception(
+                    "HitlService._commit: slot.deliver raised for hitl_id=%s; "
+                    "treating as unclaimed and still emitting HitlResolved", resolved.id)
+                claimed = False
         payload: dict[str, Any] = {
             "hitl_id": resolved.id,
             "outcome": decision.outcome,

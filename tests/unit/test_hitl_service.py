@@ -61,6 +61,13 @@ class FakeSlot:
         return self.accepts
 
 
+class RaisingSlot:
+    """模拟一个已经完成的 future 再被 deliver：InvalidStateError 之类。"""
+
+    def deliver(self, decision: HitlDecision) -> bool:
+        raise RuntimeError("future already done")
+
+
 def _service(bus: RecordingBus, normalizer=None) -> HitlService:
     ids = iter(f"hit_{i}" for i in range(1, 100))
     return HitlService(
@@ -153,6 +160,20 @@ async def test_resolve_marks_claimed_false_when_slot_refuses():
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1")
     svc.registry.attach_slot("hit_1", FakeSlot(accepts=False))
     await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted"))
+    assert bus.payload_of(EventType.HITL_RESOLVED)["claimed"] is False
+
+
+async def test_resolve_still_emits_hitl_resolved_when_slot_deliver_raises():
+    """deliver 声明 -> bool 不该抛，但一旦真抛（如对已完成 future 再 set），resolve() 已
+    不可逆——发事实的义务优先于让异常传播：必须仍然发出 HitlResolved(claimed=False)，
+    否则请求停在「已终局」却没有可跨重启恢复的事实（Minor B）。"""
+    bus = RecordingBus()
+    svc = _service(bus)
+    await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1")
+    svc.registry.attach_slot("hit_1", RaisingSlot())
+    req = await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted"))
+    assert req is not None
+    assert bus.types() == [EventType.HITL_OPENED, EventType.HITL_RESOLVED]
     assert bus.payload_of(EventType.HITL_RESOLVED)["claimed"] is False
 
 

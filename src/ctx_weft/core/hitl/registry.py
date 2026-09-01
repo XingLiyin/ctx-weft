@@ -166,6 +166,11 @@ class HitlRegistry:
         - 装填出来的 pending **不带等待槽**——重启后一切皆冷（spec §10）。
         - 已有的**活 pending 优先**：日志里的旧决定不得盖掉一个正在等人的请求，
           否则会把活请求判成「已答过」而跳过。
+
+        **调用方在传入 `snapshot` 之前须先处理 event 侧 blob ref**：
+        `snapshot.decisions_for[*][0].message` 仍是事件 blob store 命名空间下的引用，
+        见 `HitlSnapshot` docstring 与 `fold_hitl_snapshot` docstring（spec §12.3.3，
+        参照 `runtime.py:1943` 的 hydrate + normalize 实现）——本方法不做这一步。
         """
         for hitl_id, req in snapshot.pending.items():
             req.slot = None

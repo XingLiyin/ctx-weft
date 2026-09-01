@@ -246,3 +246,37 @@ def test_legacy_answered_with_empty_message_is_not_a_usable_decision():
         _legacy_required(form="question"),
         _ev(EventType.HITL_ANSWERED, {"hitl_id": "hit_1", "message": ""}, seq=1)])
     assert "call_1" not in snap.decisions_for
+
+
+# ── 回归修复（final review：reply_as_result / detail / pop 顺序）───────────────────
+
+def test_legacy_question_form_folds_to_reply_as_result_true():
+    """form == "question" 的唯一生产者是 ask_user（control_capability.py:714），其契约
+    就是 reply_as_result=True——答案直接当工具结果，不再入 provider。"""
+    snap = fold_hitl_snapshot([_legacy_required(form="question")])
+    assert snap.pending["hit_1"].reply_as_result is True
+
+
+def test_legacy_approval_form_folds_to_reply_as_result_false():
+    snap = fold_hitl_snapshot([_legacy_required(form="approval")])
+    assert snap.pending["hit_1"].reply_as_result is False
+
+
+def test_legacy_wait_form_context_mode_marker_is_not_leaked_into_detail():
+    """wait 表单的旧 context 是模式标记（preface 已承接其语义），不是人类可读文案——
+    塞进 detail 会把私有语义泄给人看（spec §4）。"""
+    snap = fold_hitl_snapshot([
+        _legacy_required(form="wait", tool_call_id="", context="interrupt:edit")])
+    req = snap.pending["hit_1"]
+    assert req.detail == ""
+    assert req.delivery == UserTurnDelivery(task_id="t1", preface="interrupt_edit")
+
+
+def test_malformed_hitl_resolved_with_empty_outcome_leaves_request_pending():
+    """popped-before-validated 会让畸形事件把请求既不留在 pending、也不留下决定——凭空
+    消失。正确方向是留在 pending：大不了被重新问一遍（Minor C）。"""
+    snap = fold_hitl_snapshot([
+        _opened(),
+        _ev(EventType.HITL_RESOLVED, {"hitl_id": "hit_9", "outcome": ""}, seq=1)])
+    assert "hit_9" in snap.pending
+    assert "call_9" not in snap.decisions_for

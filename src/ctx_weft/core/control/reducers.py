@@ -6,6 +6,7 @@ RunStateView.sessions / .tasks 包含完整的 Session/Task 投影。
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,8 @@ from ctx_weft.core.hitl.snapshot import HitlSnapshot
 from ctx_weft.core.state.models import TaskStatus
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import (
+    HITL_FORM_QUESTION,
+    HITL_FORM_WAIT,
     HITL_OUTCOME_ACCEPTED,
     HITL_OUTCOME_CANCELLED,
     HITL_OUTCOME_REJECTED,
@@ -32,6 +35,8 @@ from ctx_weft.protocols.hitl import (
     ToolResultDelivery,
     UserTurnDelivery,
 )
+
+logger = logging.getLogger(__name__)
 
 # 事件类型 → 任务状态的投影映射。
 #
@@ -685,7 +690,7 @@ _LEGACY_PREFACE: dict[str, str] = {
 }
 
 
-def _delivery_from_payload(payload: dict) -> Delivery:
+def _delivery_from_payload(payload: dict, hitl_id: str = "") -> Delivery:
     """新事件的 delivery 载荷 → Delivery。封闭值域，穷举即完备。"""
     kind = payload.get("kind", "")
     if kind == "tool_result":
@@ -693,10 +698,16 @@ def _delivery_from_payload(payload: dict) -> Delivery:
     if kind == "user_turn":
         return UserTurnDelivery(task_id=payload.get("task_id", ""),
                                 preface=payload.get("preface", PREFACE_NORMAL))
+    # 未知 kind（更新版本写下的、本版本不认识的取值）：只能降级为「不可续跑」。
+    # 有真人正等着这条请求被 claim——spec §12.3.2「NoResume + 告警」，不静默丢。
+    logger.warning(
+        "fold_hitl_snapshot: unknown delivery kind %r for hitl_id=%s, degrading to NoResume",
+        kind, hitl_id)
     return NoResumeDelivery()
 
 
-def _legacy_delivery(form: str, tool_call_id: str, context: str, task_id: str) -> Delivery:
+def _legacy_delivery(form: str, tool_call_id: str, context: str, task_id: str,
+                     hitl_id: str = "") -> Delivery:
     """旧请求 → Delivery 的反推。
 
     **复刻旧的「判据」，而不是旧的「意图」**：今天 runtime 的实际分流判据是
@@ -710,7 +721,11 @@ def _legacy_delivery(form: str, tool_call_id: str, context: str, task_id: str) -
                                 preface=_LEGACY_PREFACE.get(context, PREFACE_NORMAL))
     if tool_call_id:
         return ToolResultDelivery(tool_call_id=tool_call_id)
-    # 既非 wait、又无 tool_call 可补：续跑无从谈起。显式「只可取消」，不静默丢。
+    # 既非 wait、又无 tool_call 可补：续跑无从谈起。显式「只可取消」，不静默丢——有真人正
+    # 等着这条请求的答复（spec §12.3.2「NoResume + 告警」）。
+    logger.warning(
+        "fold_hitl_snapshot: legacy hitl_id=%s form=%r has no tool_call_id, "
+        "degrading to NoResume", hitl_id, form)
     return NoResumeDelivery()
 
 
@@ -747,6 +762,13 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
     """双读折叠：新旧两套 HITL 事件 → `HitlSnapshot`。
 
     同 tool_call 有多条请求（重问副本）时，**最后一条可用决定胜出**。
+
+    **event 侧 ref 尚未 hydrate**：`decisions_for[*]` 里的 `HitlDecision.message` 就是
+    事件载荷里存的、经 `content_from_jsonable` 转回的 `ContentPart`——但那仍是**事件**
+    blob store 命名空间下的引用。装填进 registry、被工具结果/记忆消费之前，调用方须比照
+    `runtime.py:1943-1961` 的 `_cold_hitl_decision`：先 `hydrate_event_content`，再
+    `normalize_content` 写入**记忆** blob store，并对失败做 `downgrade_images_to_text`
+    兜底（该兜底绝不可再抛）。本函数本身保持同步、不做这一步（spec §12.3.3）。
     """
     snap = HitlSnapshot()
     opened: dict[str, PendingHitl] = {}
@@ -760,7 +782,7 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
             req = PendingHitl(
                 id=rid, form=p.get("form", ""), session_id=ev.session_id,
                 task_id=ev.task_id or "", agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
-                delivery=_delivery_from_payload(p.get("delivery") or {}),
+                delivery=_delivery_from_payload(p.get("delivery") or {}, hitl_id=rid),
                 created_at=ev.timestamp, subject_id=p.get("subject_id", ""),
                 prompt=p.get("prompt", ""), detail=p.get("detail", ""),
                 fields=list(p.get("fields") or []), proposal=p.get("proposal"),
@@ -777,21 +799,34 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 id=rid, form=form, session_id=ev.session_id, task_id=ev.task_id or "",
                 agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
                 delivery=_legacy_delivery(form, tool_call_id, p.get("context", ""),
-                                          ev.task_id or ""),
+                                          ev.task_id or "", hitl_id=rid),
                 created_at=ev.timestamp, subject_id=p.get("capability_id", ""),
-                prompt=p.get("question", ""), detail=p.get("context", ""),
+                prompt=p.get("question", ""),
+                # wait 表单的旧 context 存的是模式标记（"plain_text"/"interrupt"/
+                # "interrupt:edit"），不是人类可读文案——那份语义已经由上面的 delivery.preface
+                # 承接。塞进 detail 会把私有的续跑模式当成展示文案泄给人看（spec §4）。
+                detail=("" if form == HITL_FORM_WAIT else p.get("context", "")),
                 fields=list(p.get("questions") or []), proposal=p.get("arguments") or None,
                 tool_call_id=tool_call_id,
+                # 唯一生产 form="question" 的路径是 ask_user
+                # （control_capability.py:714），其契约就是「人类答案直接当工具结果」——
+                # reply_as_result=True。旧 payload 没有这个字段，默认值会让在途 ask_user
+                # 请求跨升级边界后被判成需要 HumanResumable provider（ask_user 从不实现），
+                # gateway 按 spec §12.3.5 直接拒绝（Finding: reply_as_result 丢失）。
+                reply_as_result=(form == HITL_FORM_QUESTION),
             )
             opened[rid] = req
             snap.pending[rid] = req
 
         elif ev.type == EventType.HITL_RESOLVED:
-            snap.pending.pop(rid, None)
             req = opened.get(rid)
             outcome = p.get("outcome", "")
             if req is None or not outcome:
+                # 畸形事件（outcome 为空）：不 pop——留在 pending 比消失安全，大不了被
+                # 重新问一遍；pop 在校验之前会让这条请求既不在 pending、也没留下决定，
+                # 凭空消失（Minor C）。
                 continue
+            snap.pending.pop(rid, None)
             decision = HitlDecision(
                 outcome=outcome, message=content_from_jsonable(p.get("message") or ""),
                 modified_arguments=p.get("modified_arguments"),
