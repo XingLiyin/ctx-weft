@@ -5,5 +5,15 @@
 """
 
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl, WaitSlot
+from ctx_weft.core.hitl.reply_intake import ContentNormalizer, ReplyIntake
+from ctx_weft.core.hitl.service import HitlService, delivery_to_payload
 
-__all__ = ["HitlRegistry", "PendingHitl", "WaitSlot"]
+__all__ = [
+    "ContentNormalizer",
+    "HitlRegistry",
+    "HitlService",
+    "PendingHitl",
+    "ReplyIntake",
+    "WaitSlot",
+    "delivery_to_payload",
+]
