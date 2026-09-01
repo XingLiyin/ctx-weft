@@ -200,6 +200,15 @@ async def test_no_content_parts_byte_for_byte_no_output_sentinel():
     assert res.content == "(no output)"
 
 
+async def test_image_only_result_does_not_claim_no_output():
+    """provider 只回了图（result_parts 为空，metadata 里挂着 content_parts）时，
+    不该说「(no output)」——模型会以为真的什么都没拿到，图却已经在 content 里了。"""
+    res, _, _ = await _run(_Prov("", {CONTENT_PARTS_KEY: [_img()]}))
+    assert isinstance(res.content, list)
+    assert res.content[0].text == "", f"文本槽不该被塞进 (no output)：{res.content[0].text!r}"
+    assert res.content[1].data == FAKE_B64
+
+
 async def test_empty_content_parts_list_does_not_switch_to_parts_mode():
     """空列表/None 不该把 content 变成 [TextPart(...)]——那会让纯文本路径悄悄换形态。"""
     for value in ([], None):

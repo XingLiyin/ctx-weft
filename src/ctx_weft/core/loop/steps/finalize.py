@@ -13,6 +13,7 @@ from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.protocols.events import EventType
+from ctx_weft.core.media import placeholder_refs
 from ctx_weft.core.utils import as_utc, content_to_text, generate_id, image_tokens, now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress
 from ctx_weft.protocols.capability import qualify
@@ -362,9 +363,15 @@ def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outco
     reply = (final_reply or "").strip()
 
     def turn(content, ts, role, extra):
+        # act_recap / task_summary / final_reply 都可能是折叠产物，逐字带着 L0.5 占位向前走
+        # （见 `placeholder_refs` docstring）。这三槽既经 `_replace_finish_report` 的 fold
+        # 写入（旧记录被 supersede），也经 `_synthesize_dispatch_pair` 的裸 ingest 写入
+        # （无 supersede，但 mark 判据一视同仁、同样只看结构化字段）——两条路都要声明，
+        # 故放在两个调用方共用的这一层，而不是分别在各自的调用点补。
         return MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
             content=content, timestamp=ts, role=role, metadata={**md, **extra},
+            blob_refs=placeholder_refs(content),
         )
 
     if reply:

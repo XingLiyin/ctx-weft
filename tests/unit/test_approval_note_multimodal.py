@@ -14,10 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from ctx_weft.core.content import collect_blob_refs
 from ctx_weft.core.loop.capability_gateway import CONTENT_PARTS_KEY, CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-from ctx_weft.protocols import ImagePart, MemoryAddress, ProviderContext, TextPart
+from ctx_weft.protocols import ImagePart, MemoryAddress, MemoryScope, ProviderContext, TextPart
 from ctx_weft.protocols.capability import (
     AuthorizationDecision,
     Authorizer,
@@ -95,11 +96,19 @@ async def _run(provider, authorizer):
 @pytest.mark.asyncio
 async def test_human_note_with_image_reaches_the_model():
     """🔴 本任务存在的理由：审批备注里的图必须随工具结果送到模型面前。"""
-    res, _ = await _run(_Prov("tool output"),
+    res, mem = await _run(_Prov("tool output"),
                         _Az([TextPart(text="看这个"), _img(NOTE_REF)]))
     assert isinstance(res.content, list)
     assert res.content[0].text == "[Human note: 看这个]\ntool output"
     assert [p.data for p in res.content if not hasattr(p, "text")] == [NOTE_REF]
+
+    # GC 的 mark 判据（collect_blob_refs）必须能在已入库的那条 tool 记录上看到这个 ref——
+    # 否则宽限期一过，字节被回收，模型读到的 get_image 会取不回刚刚贴进来的图。
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    view = await mem.load_view(scope, MemoryScope.TASK, ProviderContext(
+        session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1"))
+    tool_record = next(r for r in view if r.role == "tool")
+    assert NOTE_REF in collect_blob_refs(tool_record)
 
 
 @pytest.mark.asyncio

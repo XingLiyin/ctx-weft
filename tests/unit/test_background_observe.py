@@ -598,3 +598,59 @@ async def test_segment_fold_failure_keeps_raw_and_does_not_raise(
     raw = await ctx.memory.recall_recent(
         state.scope, [MT.LLM_RESPONSE], 100, ctx.provider_ctx)
     assert raw, "段必须保 raw"
+
+
+# ── build_finish_slots：折叠产出必须声明幸存占位的 ref（GC mark 判据）───────────
+
+
+@pytest.mark.asyncio
+async def test_replace_finish_report_declares_surviving_placeholder_refs():
+    """`_replace_finish_report` 用 `memory.fold` 把旧 finish 对 supersede 掉、换上新槽。
+    若新槽正文（act_recap / task_summary）逐字带着 L0.5 占位向前走，旧的供体记录正被
+    这次 fold 干掉——占位的活引用只剩新槽记录能扛，`build_finish_slots` 必须替两个调用方
+    （这里的 fold 路径、以及 finalize._synthesize_dispatch_pair 的裸 ingest 路径）都声明。
+    """
+    from datetime import datetime, timezone
+
+    from ctx_weft.core.content import collect_blob_refs
+    from ctx_weft.core.media.refs import encode_image_placeholder
+    from ctx_weft.protocols import (
+        MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext,
+    )
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+    ref = "blob:" + "e" * 64
+    placeholder = encode_image_placeholder(ref, "image/png")
+
+    mem = InMemoryMemoryProvider()
+    pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
+    ts = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
+    tool_call_id = "tc1"
+
+    # 占位 finish 对（两槽）：assistant 挂 tool_calls，tool 是 process report——都带着
+    # 供体占位，即将被本次 fold 全部 supersede。
+    await mem.ingest(MemoryEvent(
+        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
+        content=f"placeholder recap {placeholder}", timestamp=ts, role="assistant",
+        metadata={"origin_task_id": "t1", "parent_task_id": None,
+                  "tool_calls": [{"id": tool_call_id, "name": "control:finish_task", "input": {}}]},
+    ), pctx)
+    await mem.ingest(MemoryEvent(
+        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
+        content="placeholder report", timestamp=ts, role="tool",
+        metadata={"origin_task_id": "t1", "tool_call_id": tool_call_id},
+    ), pctx)
+
+    await bo._replace_finish_report(
+        mem, pctx, scope, "t1", tool_call_id,
+        act_recap=f"did the thing {placeholder}", task_summary="summary body",
+        outcome="done", title="task title",
+    )
+
+    agent_addr = MemoryAddress(session_id="s1", agent_id="a1")
+    view = await mem.load_view(agent_addr, MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    recap_rec = next(r for r in view if r.role == "assistant" and "did the thing" in r.content)
+    assert ref in collect_blob_refs(recap_rec), (
+        "折叠重写的 finish 对没有声明幸存占位的 ref，GC 会在宽限期后误删"
+    )

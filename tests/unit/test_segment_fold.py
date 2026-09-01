@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from ctx_weft.core.content import collect_blob_refs
 from ctx_weft.core.loop.steps.segment_fold import SegmentFoldResult, segment_fold
+from ctx_weft.core.media.refs import encode_image_placeholder
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     MemoryAddress,
@@ -104,6 +106,26 @@ async def test_segment_tail_anchor_does_not_use_now() -> None:
 
     contents = [c for _, c in await _view(m)]
     assert contents == ["UP1", "recap", "UP-new"], f"摘要不得越过新消息: {contents}"
+
+
+async def test_summary_declares_surviving_placeholder_refs() -> None:
+    """`_protected` 只护住 user 回合与 SUMMARY，role=tool 记录会被折进 to_archive。
+    若 LLM 摘要逐字带着其中一条的 L0.5 占位向前走，供体记录被本次 fold supersede，
+    占位的活引用只剩新摘要记录能扛——GC 的 mark 判据必须能在它身上看见这条 ref。"""
+    ref = "blob:" + "d" * 64
+    placeholder = encode_image_placeholder(ref, "image/png")
+    m = InMemoryMemoryProvider()
+    await m.ingest(_turn("UP1", 0, "user"), _ctx())
+    await m.ingest(_turn(placeholder, 1, "tool"), _ctx())   # 供体：折区内、role=tool
+
+    summary_text = f"did the thing; {placeholder}"
+    await segment_fold(m, _ADDR, MemoryScope.TASK, summary_text, _ctx())
+
+    view = await m.load_view(_ADDR, MemoryScope.TASK, _ctx())
+    summary_rec = next(r for r in view if r.kind is MemoryKind.SUMMARY)
+    assert ref in collect_blob_refs(summary_rec), (
+        "折叠产出的摘要没有声明幸存占位的 ref，GC 会在宽限期后误删"
+    )
 
 
 async def test_counts_reported() -> None:

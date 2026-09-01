@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 
+from ctx_weft.core.media import placeholder_refs
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import (
     MemoryAddress,
@@ -93,6 +94,10 @@ async def segment_fold(
         timestamp=summary_ts,
         role="assistant" if layer is MemoryScope.TASK else "user",
         metadata={"keep_last": 0, "archived_count": len(to_archive)},
+        # `_protected` 只护住 user 回合与 SUMMARY，role="tool" 记录会被折进 `to_archive`——
+        # 若其正文（本次 LLM 摘要）逐字带着 L0.5 占位向前走，供体记录正被本次 fold
+        # supersede，占位的活引用只剩这一条新记录能扛，必须显式声明（同 compact.py 两处）。
+        blob_refs=placeholder_refs(summary),
     )
     new_ids = await memory.fold([r.id for r in to_archive], [summary_event], ctx)
 

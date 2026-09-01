@@ -269,7 +269,12 @@ class CapabilityGateway:
             provider, cap.id, sanitized, provider_ctx, state, invocation_id,
         )
 
-        text = "\n".join(result_parts) or ("(no output)" if not is_error else "")
+        text = "\n".join(result_parts)
+        if not text:
+            # 空文本但 metadata 里挂着非文本 part（例如 ask_user 只回了一张图）时，
+            # 别说「(no output)」——那会让模型以为真的什么都没拿到，图却已经在 content 里了。
+            # 其余分支（真的什么都没有 / is_error）逐字节保留原行为。
+            text = "" if is_error or metadata.get(CONTENT_PARTS_KEY) else "(no output)"
         # 工具输出过长 → 委托 fs provider 落盘；在 human note / 审计 / memory ingest 之前，使下游拿到截断版。
         text = await self._maybe_spill(text, ctx, invocation_id, tool_name, cap.spillable)
         # 人类备注：文本前置进 text，备注里的图片 part 与工具结果的 part 一起进最终 content。
@@ -294,7 +299,7 @@ class CapabilityGateway:
         )
 
     @staticmethod
-    def _error_result(invocation_id: str, tool_name: str, content: str) -> InvocationResult:
+    def _error_result(invocation_id: str, tool_name: str, content: str | list[ContentPart]) -> InvocationResult:
         return InvocationResult(invocation_id=invocation_id, tool_name=tool_name, content=content, is_error=True)
 
     async def _error_and_record(
