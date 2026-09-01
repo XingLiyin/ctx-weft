@@ -61,7 +61,9 @@
 `MemoryCompacted` `MemoryCompactFailedFallback` `BlackboardSubscribed`
 
 ### HITL
-`HitlRequired` `HitlApproved` `HitlAnswered` `HitlRejected` `HitlModified` `HitlTimeout` `HitlCancelled`
+`HitlRequired` `HitlApproved` `HitlAnswered` `HitlRejected` `HitlModified` `HitlTimeout` `HitlCancelled` `HitlOpened` `HitlResolved`
+
+> `HitlOpened` 取代 `HitlRequired` + `SessionPausedHitl`；`HitlResolved` 取代 5 个 resolve 事件（`HitlApproved` / `HitlModified` / `HitlAnswered` / `HitlRejected` / `HitlTimeout`）。
 
 ### Guard
 `TokenBudgetWarning` `TokenBudgetExceeded` `FailureThresholdHit` `MaxConcurrentAgentsExceeded`

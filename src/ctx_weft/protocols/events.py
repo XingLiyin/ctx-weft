@@ -145,6 +145,12 @@ class EventType(StrEnum):
     HITL_MODIFIED = "HitlModified"       # approval kind 放行（带改参）
     HITL_TIMEOUT = "HitlTimeout"
     HITL_CANCELLED = "HitlCancelled"   # session 关闭 / interrupt / GC：收口悬挂 pending，不 requeue
+    # ── HITL v2（2026-09-01 重设计）──
+    # outcome 是事实本身，不再由事件类型编码结局：approved vs modified 由
+    # payload 有无 modified_arguments 推出，其余由 outcome 推出。host 自定义
+    # outcome 因此无需新增事件类型。上方 6 个 legacy HITL 事件在段 3 才退役。
+    HITL_OPENED = "HitlOpened"
+    HITL_RESOLVED = "HitlResolved"
     # ── Guard 域 ──
     TOKEN_BUDGET_WARNING = "TokenBudgetWarning"
     TOKEN_BUDGET_EXCEEDED = "TokenBudgetExceeded"

@@ -78,3 +78,21 @@ def test_view_has_no_tool_call_id_field():
                         created_at=datetime.now(UTC)),
         "tool_call_id",
     )
+
+
+def test_new_hitl_event_types_are_registered():
+    from ctx_weft.protocols.events import EVENT_TYPES, EventType
+
+    assert EventType.HITL_OPENED == "HitlOpened"
+    assert EventType.HITL_RESOLVED == "HitlResolved"
+    # EVENT_TYPES 由 frozenset(EventType) 派生，登记即自动生效
+    assert "HitlOpened" in EVENT_TYPES and "HitlResolved" in EVENT_TYPES
+
+
+def test_legacy_hitl_event_types_still_registered():
+    """段 1 不删旧事件——双读折叠仍要认它们（spec §12.3）。"""
+    from ctx_weft.protocols.events import EventType
+
+    for name in ("HitlRequired", "HitlApproved", "HitlModified",
+                 "HitlAnswered", "HitlRejected", "HitlCancelled"):
+        assert name in {e.value for e in EventType}
