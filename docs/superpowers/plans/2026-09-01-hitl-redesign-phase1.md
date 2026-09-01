@@ -1628,22 +1628,30 @@ def _legacy_decision(event_type: str, payload: dict) -> HitlDecision | None:
 
     可用性规则原样继承自 `fold_cold_hitl_decision`：Answered 须带 message、
     Modified 须带 modified_arguments、Cancelled 不是决定（spec §12.3.3）。
+
+    **message 必须过 `content_from_jsonable`**：事件里存的是 jsonable 形态
+    （`str | list[dict]`），而 `HitlDecision.message` 是 `str | list[ContentPart]`。
+    不转换的话，带图答复恢复出来是一堆裸 dict，下游 `split_for_tool_result` 按
+    `hasattr(p, "text")` 分区 → 人打的字变成空串（重演 6284929 修过的静默丢图）。
     """
-    message = payload.get("message")
+    message = content_from_jsonable(payload.get("message") or "")
     if event_type == EventType.HITL_APPROVED:
-        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message or "")
+        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message)
     if event_type == EventType.HITL_MODIFIED:
         args = payload.get("modified_arguments")
         if args is None:
             return None
-        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message or "",
+        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message,
                             modified_arguments=args)
     if event_type == EventType.HITL_ANSWERED:
-        if message is None:
+        # **按真值判定，不是 `is None`**：`fold_cold_hitl_decision` 的门是
+        # `p.get("message")`，故 `""` / `[]` 今天就不是可用决定、会重问。放宽成
+        # `is None` 等于从空载荷里造出一个「已接受、答案为空」的决定。
+        if not payload.get("message"):
             return None
         return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message)
     if event_type == EventType.HITL_REJECTED:
-        return HitlDecision(outcome=HITL_OUTCOME_REJECTED, message=message or "")
+        return HitlDecision(outcome=HITL_OUTCOME_REJECTED, message=message)
     return None                                   # HITL_CANCELLED：不是决定
 
 
@@ -1697,7 +1705,8 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
             if req is None or not outcome:
                 continue
             decision = HitlDecision(
-                outcome=outcome, message=p.get("message") or "",
+                # 同 `_legacy_decision`：事件载荷是 jsonable 形态，必须转回 ContentPart。
+                outcome=outcome, message=content_from_jsonable(p.get("message") or ""),
                 modified_arguments=p.get("modified_arguments"),
             )
             if outcome != HITL_OUTCOME_CANCELLED and req.tool_call_id:
