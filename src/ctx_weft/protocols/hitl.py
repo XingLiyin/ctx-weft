@@ -105,3 +105,116 @@ class HitlRequest:
         """终局的唯一写入点。`HitlManager._resolve` 与 `reducers.fold_cold_hitl_decision`
         都经由它，不各写各的赋值。"""
         self.outcome = outcome
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 新契约（2026-09-01 重设计 · 段 1）。与上方 legacy 类型并存，段 2 删除 legacy。
+# 设计：docs/superpowers/specs/2026-09-01-hitl-redesign-design.md §4 / §5
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: `UserTurnDelivery.preface`：注入用户回合时的续接修饰。取代 legacy 的
+#: `context` 字符串 sniffing（"plain_text" / "interrupt" / "interrupt:edit"）。
+PREFACE_NORMAL = "normal"
+PREFACE_AFTER_INTERRUPT = "interrupt"
+PREFACE_AFTER_INTERRUPT_EDIT = "interrupt_edit"
+
+
+@dataclass(frozen=True)
+class ToolResultDelivery:
+    """决定作为该 tool_call 的结果送达 → 热路径就地重入 / 冷路径 reconcile 精确重入。"""
+
+    tool_call_id: str
+
+
+@dataclass(frozen=True)
+class UserTurnDelivery:
+    """决定作为一条 user 消息注入任务对话 → 置 PENDING 重排。"""
+
+    task_id: str
+    preface: str = PREFACE_NORMAL
+
+
+@dataclass(frozen=True)
+class NoResumeDelivery:
+    """纯通知 / 取消，不续跑。"""
+
+
+#: **封闭值域**——与开放的 `form` 正交（spec §5）。host 可以定义新的等待形态，
+#: 但不能定义新的回灌方式；因此续跑路由的每个取值 core 都认识、都有确定行为。
+Delivery = ToolResultDelivery | UserTurnDelivery | NoResumeDelivery
+
+
+@dataclass
+class HitlAsk:
+    """「我需要一个人的决定」——provider 产出的纯意图。provider 唯一需要构造的类型。
+
+    展示槽位（prompt / detail / fields / proposal）是**通用**的：因为 form 是开放值域，
+    不可能做穷举的 tagged union，host 自定义 form 复用同一组槽位。私有语义不得混进来。
+    """
+
+    form: str
+    delivery: Delivery
+    prompt: str = ""                                  # 给人看的主问题
+    detail: str = ""                                  # 展示用补充说明
+    fields: list[dict[str, Any]] = field(default_factory=list)   # 结构化提问
+    proposal: dict[str, Any] | None = None            # 被门控的参数（approval 用）
+    subject_id: str = ""                              # 被门控的能力 id（展示与审计）
+    #: 不透明续跑载荷：core 原样保存、重入时原样回传，**永不解读**。必须可序列化。
+    resume_state: dict[str, Any] | None = None
+    #: True = 人的答复直接作工具结果，重入不发生（`ask_user` 走这条）。
+    reply_as_result: bool = False
+
+
+@dataclass
+class HitlDecision:
+    """「人给了什么」——core 喂给发起方的结果。无 id、无时间、无 session。"""
+
+    outcome: HitlOutcome
+    message: "str | list[ContentPart]" = ""
+    modified_arguments: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ResumeHint:
+    """应答时携带的当前所选模型。属于**这一次应答**，不属于这个请求——故不入事件、不入状态。"""
+
+    llm_account: str | None = None
+    llm_model: str | None = None
+
+
+@dataclass
+class HitlReply:
+    """host → core 的一次应答命令。"""
+
+    hitl_id: str
+    outcome: HitlOutcome
+    message: "str | list[ContentPart]" = ""
+    modified_arguments: dict[str, Any] | None = None
+    resume_hint: ResumeHint = field(default_factory=ResumeHint)
+
+
+@dataclass
+class HitlRequestView:
+    """core → host 的只读视图：渲染 UI 与 pending 列表用。
+
+    刻意**不含** `tool_call_id`——那是 core 的幂等键，host 不需要（spec §4）。
+    """
+
+    id: str
+    form: HitlForm
+    session_id: str
+    task_id: str
+    created_at: datetime
+    agent_id: str = ""
+    subject_id: str = ""
+    prompt: str = ""
+    detail: str = ""
+    fields: list[dict[str, Any]] = field(default_factory=list)
+    proposal: dict[str, Any] | None = None
+    outcome: HitlOutcome = ""
+    resolved_at: datetime | None = None
+
+    @property
+    def resolved(self) -> bool:
+        """推导而非存储——存两份就有一条要维护的不变量，而漏维护是静默的。"""
+        return bool(self.outcome)
