@@ -724,14 +724,23 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
             _, session = self._sessions.get(ctx.session_id, (None, None))
             if session is not None:
                 session.status = "RUNNING"
-            from ctx_weft.core.content import content_to_text
+            # 出口：文本走工具文本，图片 part 走 CONTENT_PARTS_KEY 交给 gateway
+            # （Phase 4 Task 3 建的通用接缝，media:get_image 走的也是它）。
+            # 此前这里是 content_to_text + metadata={}，人贴的图被静默丢弃。
+            from ctx_weft.core.content import content_with_prefix, split_for_tool_result
+            from ctx_weft.core.loop.capability_gateway import CONTENT_PARTS_KEY
             from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
-            msg = content_to_text(approval.message)
+            msg = approval.message
             if approval.outcome == HITL_OUTCOME_REJECTED:
-                content = f"Human declined: {msg}" if msg else "Human rejected the request."
+                content = (content_with_prefix(msg, "Human declined: ") if msg
+                           else "Human rejected the request.")
             else:
                 content = msg or result.content
-            yield CapabilityEvent(kind="result", payload={"content": content, "metadata": {}})
+            text, parts = split_for_tool_result(content)
+            payload: dict[str, Any] = {"content": text, "metadata": {}}
+            if parts:
+                payload["metadata"] = {CONTENT_PARTS_KEY: parts}
+            yield CapabilityEvent(kind="result", payload=payload)
             return
 
         yield CapabilityEvent(
