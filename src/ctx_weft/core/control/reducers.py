@@ -14,12 +14,23 @@ from ctx_weft.core.content import (
     content_to_jsonable,
 )
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
+from ctx_weft.core.hitl.registry import PendingHitl
+from ctx_weft.core.hitl.snapshot import HitlSnapshot
 from ctx_weft.core.state.models import TaskStatus
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import (
     HITL_OUTCOME_ACCEPTED,
+    HITL_OUTCOME_CANCELLED,
     HITL_OUTCOME_REJECTED,
+    PREFACE_AFTER_INTERRUPT,
+    PREFACE_AFTER_INTERRUPT_EDIT,
+    PREFACE_NORMAL,
+    Delivery,
+    HitlDecision,
     HitlRequest,
+    NoResumeDelivery,
+    ToolResultDelivery,
+    UserTurnDelivery,
 )
 
 # 事件类型 → 任务状态的投影映射。
@@ -650,3 +661,145 @@ def _apply(view: RunStateView, ev: Event) -> None:
         sess = view.sessions.get(ev.session_id)
         if sess is not None and sess.status in ("PAUSED", "PAUSED_HITL"):
             sess.status = "RUNNING"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HITL v2 双读折叠（2026-09-01 重设计 · 段 1）
+# 设计：docs/superpowers/specs/2026-09-01-hitl-redesign-design.md §12.3
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: 折叠所需的事件类型全集（新 2 类 + 旧 6 类）。供事件库按类型过滤读取，
+#: 无需全量回放。`SessionPausedHitl` 不在其中——新模型由 pending 集合推导。
+HITL_FOLD_EVENT_TYPES: tuple[EventType, ...] = (
+    EventType.HITL_OPENED,
+    EventType.HITL_RESOLVED,
+    EventType.HITL_REQUIRED,
+    *_HITL_RESOLVE_TYPES,
+)
+
+#: 旧 `context` 字符串 → 新 `UserTurnDelivery.preface` 枚举。
+_LEGACY_PREFACE: dict[str, str] = {
+    "plain_text": PREFACE_NORMAL,
+    "interrupt": PREFACE_AFTER_INTERRUPT,
+    "interrupt:edit": PREFACE_AFTER_INTERRUPT_EDIT,
+}
+
+
+def _delivery_from_payload(payload: dict) -> Delivery:
+    """新事件的 delivery 载荷 → Delivery。封闭值域，穷举即完备。"""
+    kind = payload.get("kind", "")
+    if kind == "tool_result":
+        return ToolResultDelivery(tool_call_id=payload.get("tool_call_id", ""))
+    if kind == "user_turn":
+        return UserTurnDelivery(task_id=payload.get("task_id", ""),
+                                preface=payload.get("preface", PREFACE_NORMAL))
+    return NoResumeDelivery()
+
+
+def _legacy_delivery(form: str, tool_call_id: str, context: str, task_id: str) -> Delivery:
+    """旧请求 → Delivery 的反推。
+
+    **复刻旧的「判据」，而不是旧的「意图」**：今天 runtime 的实际分流判据是
+    `req.form == "wait"`（runtime.py:1725），不是 sentinel capability_id。用
+    sentinel 反推会让「form 是 wait 但 capability_id 不是 sentinel」的在途请求
+    从「注入」变成「补 tool_call」——迁移本身改变了行为。迁移的正确性判据是
+    与升级前逐条同构（spec §12.3.2）。
+    """
+    if form == "wait":
+        return UserTurnDelivery(task_id=task_id,
+                                preface=_LEGACY_PREFACE.get(context, PREFACE_NORMAL))
+    if tool_call_id:
+        return ToolResultDelivery(tool_call_id=tool_call_id)
+    # 既非 wait、又无 tool_call 可补：续跑无从谈起。显式「只可取消」，不静默丢。
+    return NoResumeDelivery()
+
+
+def _legacy_decision(event_type: str, payload: dict) -> HitlDecision | None:
+    """旧 resolve 事件 → 决定；**不可用**则返回 None（按未决重问，绝不臆造）。
+
+    可用性规则原样继承自 `fold_cold_hitl_decision`：Answered 须带 message、
+    Modified 须带 modified_arguments、Cancelled 不是决定（spec §12.3.3）。
+    """
+    message = payload.get("message")
+    if event_type == EventType.HITL_APPROVED:
+        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message or "")
+    if event_type == EventType.HITL_MODIFIED:
+        args = payload.get("modified_arguments")
+        if args is None:
+            return None
+        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message or "",
+                            modified_arguments=args)
+    if event_type == EventType.HITL_ANSWERED:
+        if message is None:
+            return None
+        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message)
+    if event_type == EventType.HITL_REJECTED:
+        return HitlDecision(outcome=HITL_OUTCOME_REJECTED, message=message or "")
+    return None                                   # HITL_CANCELLED：不是决定
+
+
+def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
+    """双读折叠：新旧两套 HITL 事件 → `HitlSnapshot`。
+
+    同 tool_call 有多条请求（重问副本）时，**最后一条可用决定胜出**。
+    """
+    snap = HitlSnapshot()
+    opened: dict[str, PendingHitl] = {}
+    for ev in events:
+        p = ev.payload or {}
+        rid = p.get("hitl_id", "")
+        if not rid:
+            continue
+
+        if ev.type == EventType.HITL_OPENED:
+            req = PendingHitl(
+                id=rid, form=p.get("form", ""), session_id=ev.session_id,
+                task_id=ev.task_id or "", agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
+                delivery=_delivery_from_payload(p.get("delivery") or {}),
+                created_at=ev.timestamp, subject_id=p.get("subject_id", ""),
+                prompt=p.get("prompt", ""), detail=p.get("detail", ""),
+                fields=list(p.get("fields") or []), proposal=p.get("proposal"),
+                tool_call_id=p.get("tool_call_id", ""), resume_state=p.get("resume_state"),
+                reply_as_result=bool(p.get("reply_as_result", False)),
+            )
+            opened[rid] = req
+            snap.pending[rid] = req
+
+        elif ev.type == EventType.HITL_REQUIRED:
+            form = p.get("form", "approval")
+            tool_call_id = p.get("tool_call_id", "")
+            req = PendingHitl(
+                id=rid, form=form, session_id=ev.session_id, task_id=ev.task_id or "",
+                agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
+                delivery=_legacy_delivery(form, tool_call_id, p.get("context", ""),
+                                          ev.task_id or ""),
+                created_at=ev.timestamp, subject_id=p.get("capability_id", ""),
+                prompt=p.get("question", ""), detail=p.get("context", ""),
+                fields=list(p.get("questions") or []), proposal=p.get("arguments") or None,
+                tool_call_id=tool_call_id,
+            )
+            opened[rid] = req
+            snap.pending[rid] = req
+
+        elif ev.type == EventType.HITL_RESOLVED:
+            snap.pending.pop(rid, None)
+            req = opened.get(rid)
+            outcome = p.get("outcome", "")
+            if req is None or not outcome:
+                continue
+            decision = HitlDecision(
+                outcome=outcome, message=p.get("message") or "",
+                modified_arguments=p.get("modified_arguments"),
+            )
+            if outcome != HITL_OUTCOME_CANCELLED and req.tool_call_id:
+                snap.decisions_for[req.tool_call_id] = (decision, req.resume_state)
+
+        elif ev.type in _HITL_RESOLVE_TYPES:
+            snap.pending.pop(rid, None)
+            req = opened.get(rid)
+            decision = _legacy_decision(ev.type, p)
+            if req is None or decision is None or not req.tool_call_id:
+                continue
+            snap.decisions_for[req.tool_call_id] = (decision, req.resume_state)
+
+    return snap
