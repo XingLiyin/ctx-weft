@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from ctx_weft.core.control.reducers import fold_hitl_snapshot
+from ctx_weft.protocols import ImagePart, TextPart
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import (
     NoResumeDelivery,
@@ -205,3 +206,43 @@ def test_last_usable_decision_wins_for_the_same_tool_call():
 def test_empty_event_list_yields_an_empty_snapshot():
     snap = fold_hitl_snapshot([])
     assert snap.pending == {} and snap.decisions_for == {}
+
+
+# ── 回归修复（review Finding 1/2）────────────────────────────────────────────────
+
+def test_legacy_answered_multimodal_message_round_trips_to_content_parts():
+    """事件载荷存 jsonable 形态；decision.message 须经 content_from_jsonable 转回
+    ContentPart，否则图片答复在 split_for_tool_result 里因无 .text 被拆成空文本。"""
+    snap = fold_hitl_snapshot([
+        _legacy_required(form="question"),
+        _ev(EventType.HITL_ANSWERED, {
+            "hitl_id": "hit_1",
+            "message": [
+                {"type": "text", "text": "here"},
+                {"type": "image", "data": "abc", "media_type": "image/png"},
+            ],
+        }, seq=1)])
+    decision, _ = snap.decisions_for["call_1"]
+    assert decision.message == [
+        TextPart(text="here"),
+        ImagePart(data="abc", media_type="image/png", source_type="base64"),
+    ]
+
+
+def test_new_resolved_multimodal_message_round_trips_to_content_parts():
+    snap = fold_hitl_snapshot([
+        _opened(),
+        _ev(EventType.HITL_RESOLVED, {
+            "hitl_id": "hit_9", "outcome": "accepted", "claimed": False,
+            "message": [{"type": "text", "text": "go"}],
+        }, seq=1)])
+    decision, _ = snap.decisions_for["call_9"]
+    assert decision.message == [TextPart(text="go")]
+
+
+def test_legacy_answered_with_empty_message_is_not_a_usable_decision():
+    """判据是真值而非 is None——空串同样还原不出答案，须与 fold_cold_hitl_decision 同构。"""
+    snap = fold_hitl_snapshot([
+        _legacy_required(form="question"),
+        _ev(EventType.HITL_ANSWERED, {"hitl_id": "hit_1", "message": ""}, seq=1)])
+    assert "call_1" not in snap.decisions_for

@@ -720,21 +720,26 @@ def _legacy_decision(event_type: str, payload: dict) -> HitlDecision | None:
     可用性规则原样继承自 `fold_cold_hitl_decision`：Answered 须带 message、
     Modified 须带 modified_arguments、Cancelled 不是决定（spec §12.3.3）。
     """
-    message = payload.get("message")
+    # 事件载荷存的是 jsonable 形态（str | list[dict]）——须经 content_from_jsonable 转回
+    # ContentPart，否则多模态答复（图片）在 split_for_tool_result 里因无 .text 被拆成空文本
+    # 静默丢损（Finding 1）。
+    message = content_from_jsonable(payload.get("message") or "")
     if event_type == EventType.HITL_APPROVED:
-        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message or "")
+        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message)
     if event_type == EventType.HITL_MODIFIED:
         args = payload.get("modified_arguments")
         if args is None:
             return None
-        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message or "",
+        return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message,
                             modified_arguments=args)
     if event_type == EventType.HITL_ANSWERED:
-        if message is None:
+        # 判据是真值而非 is None：与 fold_cold_hitl_decision 的 `p.get("message")` 同构——
+        # 空串/空表同样视为「还原不出答案」，按未决重问，不臆造（Finding 2）。
+        if not payload.get("message"):
             return None
         return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message)
     if event_type == EventType.HITL_REJECTED:
-        return HitlDecision(outcome=HITL_OUTCOME_REJECTED, message=message or "")
+        return HitlDecision(outcome=HITL_OUTCOME_REJECTED, message=message)
     return None                                   # HITL_CANCELLED：不是决定
 
 
@@ -788,7 +793,7 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
             if req is None or not outcome:
                 continue
             decision = HitlDecision(
-                outcome=outcome, message=p.get("message") or "",
+                outcome=outcome, message=content_from_jsonable(p.get("message") or ""),
                 modified_arguments=p.get("modified_arguments"),
             )
             if outcome != HITL_OUTCOME_CANCELLED and req.tool_call_id:
