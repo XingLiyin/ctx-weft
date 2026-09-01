@@ -286,9 +286,22 @@ yield CapabilityEvent(kind="result", payload=payload)
 
 gateway 两处拼接改走既有的 `content_with_prefix` / `content_with_suffix`：
 
-- `:192` 拒绝 →
-  `content_with_suffix(content_with_prefix(decision.message, "[Blocked by human: "), "]")`，
-  结果交给 `_error_and_record`（它已经能收 `str | list[ContentPart]` 并原样 ingest）。
+- `:192` 拒绝 → **先拆再套前后缀**，结果交给 `_error_and_record`（它已经能收
+  `str | list[ContentPart]` 并原样 ingest）：
+
+```python
+note_text, note_parts = split_for_tool_result(decision.message)
+blocked_text = content_with_suffix(
+    content_with_prefix(note_text, "[Blocked by human: "), "]")
+content = (normalize_content_parts([TextPart(text=blocked_text), *note_parts])
+           if note_parts else blocked_text)
+```
+
+  ⚠️ **不能**直接对整个 message 套 `content_with_suffix`：当备注以图片收尾时，
+  `content_with_suffix` 走的是 `return [*content, TextPart(text="]")]` 分支
+  （`content.py` 里它只在末元素是文本 part 时才并入），于是右括号会落在图片**之后**
+  而不是文本之后，产出 `[TextPart("[Blocked by human: …"), ImagePart, TextPart("]")]`。
+  两个前后缀必须落在同一个 `TextPart` 里。
 - `:258-267` 放行备注 → 文本部分照旧前置进 `text`，备注里的图片 part 与工具结果的 part 一起
   进最终 content：
 
