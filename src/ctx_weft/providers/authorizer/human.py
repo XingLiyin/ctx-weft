@@ -6,7 +6,6 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.utils import content_to_text
 from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
 
 if TYPE_CHECKING:
@@ -54,8 +53,8 @@ class HumanConfirmationAuthorizer(Authorizer):
         if approval.accepted:
             return AuthorizationDecision(
                 allowed=True,
-                message=content_to_text(approval.message),
+                message=approval.message,          # 透传，不再 content_to_text 展平
                 modified_arguments=approval.modified_arguments,
             )
         logger.info("HITL blocked '%s' (outcome=%s)", capability.id, approval.outcome)
-        return AuthorizationDecision(allowed=False, message=content_to_text(approval.message))
+        return AuthorizationDecision(allowed=False, message=approval.message)

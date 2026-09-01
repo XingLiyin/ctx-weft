@@ -22,7 +22,13 @@ from typing import TYPE_CHECKING, Any
 
 import jsonschema
 
-from ctx_weft.core.content import normalize_content_parts, redact_content_for_event
+from ctx_weft.core.content import (
+    content_with_prefix,
+    content_with_suffix,
+    normalize_content_parts,
+    redact_content_for_event,
+    split_for_tool_result,
+)
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
@@ -188,10 +194,21 @@ class CapabilityGateway:
             raise HitlPark(tool_call_id=tool_call_id)
         if not decision.allowed:
             logger.warning("Capability '%s' blocked by authorizer for agent %s", cap.id, state.agent.id)
-            content = (
-                f"[Blocked by human: {decision.message}]" if decision.message
-                else f"[Error: capability '{tool_name}' not authorized]"
-            )
+            # 走 content_with_prefix/suffix 而非 f-string：备注可能是 list[ContentPart]
+            # （人类审批时贴的图），f-string 会把它拍成 repr。对 str 逐字节原样。
+            # 先拆出非文本 part（split_for_tool_result）再对纯文本部分套前后缀，
+            # 否则当 message 以图片收尾时，content_with_suffix 会把 "]" 拍到图片
+            # 后面而非文本后面——两个前后缀必须都落在同一个 TextPart 里。
+            if decision.message:
+                note_text, note_parts = split_for_tool_result(decision.message)
+                blocked_text = content_with_suffix(
+                    content_with_prefix(note_text, "[Blocked by human: "), "]")
+                content = (
+                    normalize_content_parts([TextPart(text=blocked_text), *note_parts])
+                    if note_parts else blocked_text
+                )
+            else:
+                content = f"[Error: capability '{tool_name}' not authorized]"
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id, content, is_dispatch, is_silent, tool_call_id,
             )
@@ -255,16 +272,18 @@ class CapabilityGateway:
         text = "\n".join(result_parts) or ("(no output)" if not is_error else "")
         # 工具输出过长 → 委托 fs provider 落盘；在 human note / 审计 / memory ingest 之前，使下游拿到截断版。
         text = await self._maybe_spill(text, ctx, invocation_id, tool_name, cap.spillable)
-        if decision.message:  # 放行时人类备注并入结果回灌 LLM
-            text = f"[Human note: {decision.message}]\n{text}"
-        # 非文本部分最后拼上（见 CONTENT_PARTS_KEY）：上面 spill / human note 两步只处理文本，
-        # 无 content_parts 时 content 仍是同一个 str，纯文本路径逐字节不变。
+        # 人类备注：文本前置进 text，备注里的图片 part 与工具结果的 part 一起进最终 content。
+        # 顺序为「备注图 → 工具图」，与文本顺序一致（[Human note: …] 也在工具输出之前）。
+        note_text, note_parts = split_for_tool_result(decision.message)
+        if note_text or note_parts:
+            text = f"[Human note: {note_text}]\n{text}"
         content: str | list[ContentPart] = text
         parts = metadata.get(CONTENT_PARTS_KEY)
-        if isinstance(parts, (list, tuple)) and parts:
+        parts = list(parts) if isinstance(parts, (list, tuple)) else []
+        if note_parts or parts:
             # 过归一层：宿主 provider 可能给 dict 形态的 part（JSON 往返），
             # 与 MemoryEvent / LLMMessage 的 __post_init__ 共用同一份归一。
-            content = normalize_content_parts([TextPart(text=text), *parts])
+            content = normalize_content_parts([TextPart(text=text), *note_parts, *parts])
 
         # 7. 记录 result（事件 + TOOL_RESULT 入 memory）
         await self._record_result(state, ctx, tool_name, invocation_id, sanitized, content, is_error, is_dispatch, is_silent, tool_call_id)

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from ctx_weft.protocols.context import ProviderContext
 
 if TYPE_CHECKING:
+    from ctx_weft.protocols.context import ContentPart
     from ctx_weft.protocols.template import AgentTemplate
 
 
@@ -244,7 +245,11 @@ class AuthorizationDecision:
     """一次授权的结构化结果。"""
 
     allowed: bool
-    message: str = ""                              # 反馈 / 拒绝指导，回灌给 LLM（allow / deny 都可带）
+    # 反馈 / 拒绝指导，回灌给 LLM（allow / deny 都可带）。
+    # **可以是 `list[ContentPart]`**：人类经 HITL 递进来的备注可能带图
+    # （`HumanConfirmationAuthorizer` 直接透传 `HitlRequest.message`）。gateway 的两处
+    # 拼接走 `content_with_prefix` / `content_with_suffix`，对 str 逐字节原样。
+    message: "str | list[ContentPart]" = ""
     modified_arguments: dict[str, Any] | None = None  # allow 时的有效参数（None = 用原参）
     defer: bool = False                            # spec/07 §7：挂起本次调用（不放行也不拒绝；gateway 绝不 invoke）
 
