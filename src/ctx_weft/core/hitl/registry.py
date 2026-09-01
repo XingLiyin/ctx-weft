@@ -11,15 +11,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Protocol
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ctx_weft.protocols.hitl import (
     Delivery,
     HitlAsk,
     HitlDecision,
     HitlRequestView,
+    NoResumeDelivery,
 )
+
+if TYPE_CHECKING:
+    from ctx_weft.core.hitl.snapshot import HitlSnapshot
+
+#: 装填决定时的占位创建时间——占位项只为回答 `decision_for`，永不出现在 pending 列表里，
+#: 故取最小值即可（GC 排序用 resolved_at，装填项无 resolved_at 时回落到它）。
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 class WaitSlot(Protocol):
@@ -147,6 +155,33 @@ class HitlRegistry:
         resolved.sort(key=lambda r: r.resolved_at or r.created_at)
         for r in resolved[: len(resolved) - self._max_resolved]:
             self._requests.pop(r.id, None)
+
+    def load_snapshot(self, snapshot: HitlSnapshot) -> int:
+        """把折叠结果装填进内存，返回 pending 条数。
+
+        **完备即构造**：装填之后 core 的一切查询只读内存，绝不回落去 scan 事件日志。
+        装填的完备性因此是恢复路径的责任（spec §3.1）。
+
+        两条规则：
+        - 装填出来的 pending **不带等待槽**——重启后一切皆冷（spec §10）。
+        - 已有的**活 pending 优先**：日志里的旧决定不得盖掉一个正在等人的请求，
+          否则会把活请求判成「已答过」而跳过。
+        """
+        for hitl_id, req in snapshot.pending.items():
+            req.slot = None
+            self._requests.setdefault(hitl_id, req)
+        for tool_call_id, (decision, resume_state) in snapshot.decisions_for.items():
+            live = self.find_for_tool_call(tool_call_id)
+            if live is not None:
+                continue                       # 活 pending 或已装填的决定，均不覆盖
+            placeholder = PendingHitl(
+                id=f"loaded:{tool_call_id}", form="", session_id="", task_id="",
+                agent_id="", delivery=NoResumeDelivery(), created_at=_EPOCH,
+                tool_call_id=tool_call_id, resume_state=resume_state,
+                decision=decision,
+            )
+            self._requests[placeholder.id] = placeholder
+        return len(snapshot.pending)
 
     # ── 读 ────────────────────────────────────────────────────────────────────
 
