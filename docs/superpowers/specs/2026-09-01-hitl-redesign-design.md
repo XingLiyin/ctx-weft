@@ -59,12 +59,26 @@ AuthzDecision =
   | Deny       { message? }
   | NeedsHuman { ask: HitlAsk }
 
-ToolProvider.invoke(name, args, ctx) -> ToolOutcome
+ToolProvider.invoke(name, args, ctx) -> AsyncIterator<CapabilityEvent>
 
-ToolOutcome =
-  | Value      { content, is_error }
-  | NeedsHuman { ask: HitlAsk }
+CapabilityEvent.kind ∈ { progress, stdout, stderr, result, error, needs_human }
+                                                                 ^^^^^^^^^^^^ 新增
 ```
+
+**工具侧是流式的，所以「返回一个结局」落成「产出一个事件」。** 现有契约
+（`protocols/capability.py`）里 `invoke` 是 `AsyncIterator[CapabilityEvent]`，`kind` 是封闭
+`Literal`。因此 provider 表达「我需要一个人」的方式是 **yield 一个 `kind="needs_human"` 的
+事件**，payload 携带 `HitlAsk`；gateway 见到它即**停止消费该流**并接管等待。
+
+两条随之而来的性质：
+
+- 该事件**必须是流的最后一个**——gateway 收到即停止消费。provider 在它之后 yield 的任何东西
+  都不会被看到，这一点要写进契约。
+- 重入是**重新调用**，不是恢复一个挂起的生成器：原生成器已被关闭。`resume` 因此同样是
+  `AsyncIterator[CapabilityEvent]`，而 `resume_state`（§2.2）在流式契约下不是优化而是**必需**
+  ——生成器里的局部状态在关闭时就没了。
+
+授权侧不是流式的，`NeedsHuman` 就是普通的返回值联合成员。
 
 只有**会问人**的实现，额外实现一个可选能力接口：
 
@@ -73,8 +87,8 @@ HumanGatedAuthorizer {                                    # 授权侧
   on_decision(cap, ctx, args, tool_call_id, decision: HitlDecision) -> AuthzDecision
 }
 
-HumanResumable {                                          # 工具侧
-  resume(ask_id, decision: HitlDecision, resume_state, ctx) -> ToolOutcome
+HumanResumable {                                          # 工具侧（同样是流式）
+  resume(ask_id, decision: HitlDecision, resume_state, ctx) -> AsyncIterator<CapabilityEvent>
 }
 ```
 
@@ -433,21 +447,29 @@ class SpendLimitAuthorizer(Authorizer, HumanGatedAuthorizer):
 
 ### 9.3 自定义工具 provider 要问人
 
+工具侧是**流式**的（`invoke` 是 `AsyncIterator[CapabilityEvent]`），所以让出是 yield 一个事件，
+而不是 return 一个值：
+
 ```
 class DeployTool(ToolCapabilityProvider, HumanResumable):
     async def invoke(self, cap, args, ctx):
         plan = await self.compute_plan(args)              # 有代价的工作
-        return NeedsHuman(HitlAsk(
+        yield CapabilityEvent("progress", {"text": "plan computed"})
+        yield CapabilityEvent("needs_human", {"ask": HitlAsk(
             form="question",
             delivery=ToolResult(ctx.tool_call_id),
             prompt=f"确认部署 {plan.summary}？",
             resume_state=plan.to_dict(),                  # 让出前的工作存这里
-        ))
+        )})
+        # 到此为止：gateway 见 needs_human 即停止消费，其后 yield 的东西不会被看到。
 
     async def resume(self, ask_id, decision, resume_state, ctx):
         plan = Plan.from_dict(resume_state)               # 不必重算
-        return Value(await self.apply(plan, decision))
+        yield CapabilityEvent("result", {"text": await self.apply(plan, decision)})
 ```
+
+注意 `resume_state` 在流式契约下**不是优化而是必需**：让出时生成器被关闭，它的局部变量
+（这里的 `plan`）随之消失，重入是重新调用而非恢复挂起的生成器。
 
 若某 provider 返回了 `NeedsHuman(reply_as_result=false)` 却没实现 `HumanResumable`，gateway **当场报错**——这是契约违例，不静默降级成「把答复当结果」，否则一次未完成的部署会被伪装成已完成。
 
@@ -493,7 +515,8 @@ core 对这两个新值的处理是**完全不处理**：`form` 只用于透传�
 - [ ] **控制流不看 outcome**：core 仅判「非空 = 终局」；outcome 的语义解释归发起方；core 对 outcome 的分支只出现在呈现层。
 - [ ] **delivery 封闭、form 开放**：host 不能定义新的 delivery；form / outcome 原样透传不校验。
 - [ ] **`resume_state` 不透明**：core 永不解读，且可序列化、跨重启存活；冷路径装填时必须与决定成对取回。
-- [ ] **基础契约不含 HITL 参数**：`authorize` / `invoke` 的签名不因 HITL 而变；重入只经可选接口。返回 `NeedsHuman(reply_as_result=false)` 却未实现对应接口 = 契约违例，**当场报错**，不静默降级。
+- [ ] **基础契约不含 HITL 参数**：`authorize` / `invoke` 的签名不因 HITL 而变；重入只经可选接口。声明 `NeedsHuman(reply_as_result=false)` 却未实现对应接口 = 契约违例，**当场报错**，不静默降级。
+- [ ] **`needs_human` 事件是流的终点**：gateway 收到即停止消费该流，其后的 yield 一律不可见；`resume` 是重新调用而非恢复生成器，故 `resume_state` 承载让出前的全部状态。
 - [ ] **内容**：事件载荷恒不含字节；memory 侧与 event 侧各自外部化；校验失败则不改状态、不发事实、不写 blob。
 - [ ] **事件**：仅 `HitlOpened` / `HitlResolved`；会话暂停态由 pending 集合推导而非独立事件。
 
