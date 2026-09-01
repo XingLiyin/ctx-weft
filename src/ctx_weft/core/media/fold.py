@@ -31,12 +31,38 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 from ctx_weft.core.media.policy import DemotionPlan, demotable_ref, plan_demotions
-from ctx_weft.core.media.refs import encode_image_placeholder
+from ctx_weft.core.media.refs import encode_image_placeholder, find_image_placeholders
 from ctx_weft.protocols import MemoryEvent, MemoryScope, TextPart
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["demote_all", "demote_for_budget"]
+__all__ = ["demote_all", "demote_for_budget", "placeholder_refs"]
+
+
+def placeholder_refs(text: str) -> list[str]:
+    """文本里 L0.5 占位携带的全部 blob ref，去重、保持首次出现顺序。
+
+    **给折叠的产出方用**：把「幸存下来的占位」转成 `MemoryEvent.blob_refs` 的显式声明。
+
+    为什么必须由产出方声明——`content.collect_blob_refs`（GC 的 mark 判据）**只看结构化
+    字段**，刻意绝不解析占位文案（文案一改图就开始被误删，且要到一个宽限期之后才看得
+    出来）。于是「占位随文本活下来、承载它的原记录被 supersede」这条路上，ref 会静默
+    掉出活引用集：占位仍在视图里、`get_image` 仍定位得到它，字节却已被回收——模型读到
+    一句「call media:get_image(...) to bring it back」，换回来的是 `[image unavailable]`。
+    这正是 `_rebuild` 为缺陷 2026-08-27 引入 `blob_refs` 累积的同一个失败面，只是发生在
+    折叠而非降级。
+
+    **只数占位里的 ref，不数折区里的全部 ref**：折走的记录里那些占位没能进入新内容的图，
+    模型再也定位不到（`get_image` 的判据是「本视图占位里有没有它」），把它们一并声明只会
+    让字节永远回收不掉。声明的边界必须与「还能被取回的边界」严格重合。
+
+    解析占位在这里是允许的——本包是占位格式的唯一真源，产出方知道自己写下了什么；
+    被禁止的是让**mark 判据**去解析（那会把文案格式变成 GC 正确性的一部分）。
+    """
+    seen: dict[str, None] = {}
+    for ref, _ in find_image_placeholders(text):
+        seen.setdefault(ref, None)
+    return list(seen)
 
 
 def _media_type(part: Any) -> str:

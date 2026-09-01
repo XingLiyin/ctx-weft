@@ -30,7 +30,7 @@ from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_r
 # `protocols`，不回指 `core.loop`——`capability.py` 对 `CONTENT_PARTS_KEY` 用的正是
 # 惰性 import，就是为了让这一条能写在模块级（Task 4 台账）。若日后 media 模块级引入了
 # `core.loop` 的东西，这里要退回函数级 import。
-from ctx_weft.core.media import demote_all, demote_for_budget
+from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
 from ctx_weft.core.utils import content_to_text, effective_limit, image_tokens, now_utc
 from ctx_weft.protocols import (
     LLMRequest, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
@@ -175,16 +175,26 @@ async def collapse_task_layer(
     anchor_ts = anchor_src.timestamp - timedelta(microseconds=1)
 
     ids = [r.id for r in fold]
+    collapsed = f"{original}{COLLAPSE_DELIM}{summary_text or '[Context compacted]'}"
     # v2 P3d：遗忘+坍缩物一次原子 fold（旧徒手 supersede+ingest 有崩溃丢摘要窗口）
     await memory.fold(ids, [
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
             address=state.scope,
-            content=f"{original}{COLLAPSE_DELIM}{summary_text or '[Context compacted]'}",
+            content=collapsed,
             timestamp=anchor_ts,
             role="user",
             metadata={"task_id": state.scope.task_id, "collapsed": True,
                       "keep_last": keep_last, "folded_count": len(fold)},
+            # 上面 §6.1 的前置降级把折区的真图换成了 L0.5 占位，`original` 节又把其中
+            # 一部分逐字带进了坍缩物——那些 ref 于是**仍在视图里、仍被 get_image 定位得到**，
+            # 而承载它们的原记录正要被这一次 fold 全部 supersede。占位是文本，GC 的 mark
+            # 判据（`collect_blob_refs`）只看结构化字段，不声明就等于让引用归零：宽限期一过
+            # 字节被回收，模型读到「call media:get_image(...) to bring it back」，换回来的却是
+            # `[image unavailable]`——L0.5 承诺的「可逆」在这一步失效。
+            # 只声明**幸存在坍缩物里**的那些（`placeholder_refs` 的口径），没进来的那些
+            # 本就再也定位不到，一并声明只会让字节永远回收不掉。
+            blob_refs=placeholder_refs(collapsed),
         ),
     ], ctx.provider_ctx)
     return len(ids)
@@ -434,15 +444,20 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
         if (r.address.task_id if r.address else r.metadata.get("task_id")) in surviving:
             kept_ts.append(r.timestamp)
     anchor_ts = (min(kept_ts) if kept_ts else now_utc())
+    folded_summary = summary or "[Experience compacted]"
     # v2 P3d：跨层遗忘 + 新摘要一次原子 fold（关旧「raw 已删而摘要未写」窗口）
     await memory.fold(ids, [
         MemoryEvent(
             kind=MemoryKind.SUMMARY, scope=MemoryScope.AGENT,
             address=state.scope,
-            content=summary or "[Experience compacted]",
+            content=folded_summary,
             timestamp=anchor_ts - timedelta(microseconds=1),
             role="user",
             metadata={"keep_last": keep_last, "folded_count": len(fold_top)},
+            # 同 collapse_task_layer 处：摘要输入里含 L0.5 占位（§6.1 的前置降级刚写下），
+            # 模型**可能**把某个 ref 逐字抄进摘要。抄进来了就仍能被 get_image 定位到，
+            # 故必须声明；没抄进来则 `placeholder_refs` 返回空表，这里恒为 no-op。
+            blob_refs=placeholder_refs(folded_summary),
         ),
     ], ctx.provider_ctx)
     return len(ids)

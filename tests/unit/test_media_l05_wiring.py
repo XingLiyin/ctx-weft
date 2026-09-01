@@ -23,9 +23,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from ctx_weft.core.content import collect_blob_refs
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.media import demote_for_budget, get_image
-from ctx_weft.core.media.refs import decode_image_placeholder, find_image_placeholders
+from ctx_weft.core.media.refs import (
+    decode_image_placeholder,
+    encode_image_placeholder,
+    find_image_placeholders,
+)
 from ctx_weft.core.utils import content_to_text
 from ctx_weft.protocols import (
     ImagePart,
@@ -296,6 +301,116 @@ async def test_collapse_demotes_images_in_fold_range_before_folding():
     assert "ORIGINAL-MSG" in original
     # ref 确实活在「原始消息」节里，且解得回来（不是被拍扁成空）
     assert decode_image_placeholder(original) == (_ref(7), "image/png")
+
+
+async def _seed_two_images_for_collapse(mem):
+    """折区（最早 3 条）里两条 user 回合各一张真图。
+
+    坍缩物的「原始消息」节只取**折区最早那条 user 回合**，故 `_ref(7)` 的占位会随它
+    活下来、`_ref(8)` 的不会——这正是「声明边界必须与可取回边界重合」的检验样本。
+    """
+    await _seed(mem, [[TextPart(text="ORIGINAL-MSG"), _img(7)]])
+    await _seed(mem, [[TextPart(text="SECOND-MSG"), _img(8)]])
+    await _seed(mem, [[TextPart(text=f"turn-{i}")] for i in range(1, 4)],
+                role="assistant")
+
+
+async def _live_refs(mem) -> set[str]:
+    """活引用集的等价物：`SqlMemoryProvider.live_blob_refs` 就是对未 supersede 的记录
+    逐条取 `collect_blob_refs` 的并集（provider 建引用边只走这个真源）。"""
+    refs: set[str] = set()
+    for r in await _view(mem):
+        refs |= set(collect_blob_refs(r))
+    return refs
+
+
+@pytest.mark.asyncio
+async def test_collapse_declares_the_placeholder_ref_it_carried_over():
+    """🔴 坍缩物必须**声明**它带过来的那个 ref，否则字节会被 GC 收走而占位还在。
+
+    上一条钉的是「ref 随 `original` 节活下来」——那只保住了**文本**。字节的死活由另一
+    条判据决定：`collect_blob_refs` 只看结构化字段，刻意绝不解析占位文案。坍缩把原记录
+    全部 supersede，占位却是文本，不显式声明 → 该 ref 掉出活引用集 → 宽限期一过字节被
+    回收，而占位仍在视图里、`get_image` 仍定位得到它，换回来的是 `[image unavailable]`。
+    这是缺陷 2026-08-27（`fold._rebuild` 的 `blob_refs` 累积）在折叠侧的同一个失败面。
+
+    对照（防永真）：`_ref(8)` 的占位**没有**进坍缩物，故它不该被声明——声明边界必须与
+    「还能被 get_image 取回的边界」严格重合，宽一格就是字节永远回收不掉。
+    """
+    mem = _CountingMemory()
+    await _seed_two_images_for_collapse(mem)
+    assert await _live_refs(mem) == {_ref(7), _ref(8)}      # 折叠前两张都活着
+
+    await cm.collapse_task_layer(
+        _state(), _ctx(mem, blobs=_Blobs()), 2, "SUMMARY-TEXT")
+
+    view = await _view(mem)
+    collapsed = [r for r in view if r.metadata.get("collapsed")]
+    assert len(collapsed) == 1
+    # 占位确实幸存在坍缩物里（前提，非永真）
+    assert find_image_placeholders(collapsed[0].content) == [(_ref(7), "image/png")]
+    # 且它被显式声明了 —— 修复前这里是 set()
+    assert await _live_refs(mem) == {_ref(7)}
+
+
+@pytest.mark.asyncio
+async def test_get_image_still_works_after_collapse_and_a_real_sweep():
+    """端到端：坍缩 → 按活引用集真扫一遍字节 → 幸存占位仍取得回图。
+
+    上一条断的是 mark 输入，这一条断它**换来的结果**：sweep 之后 `get_image` 对
+    `_ref(7)` 仍返回 `ImagePart`（而不是 `[image unavailable]`），对没能幸存的
+    `_ref(8)` 则诚实地说「本 task 里没有这个 ref」——两种失败模式分得开。
+    """
+    mem = _CountingMemory()
+    await _seed_two_images_for_collapse(mem)
+    blobs = _Blobs({_ref(7): b"SEVEN", _ref(8): b"EIGHT"})
+
+    await cm.collapse_task_layer(_state(), _ctx(mem, blobs=blobs), 2, "SUMMARY-TEXT")
+
+    # mark-sweep：活引用集之外的字节被回收（`FsBlobStore.collect` 的判据一，宽限期已过）
+    live = await _live_refs(mem)
+    for ref in list(blobs._data):
+        if ref not in live:
+            del blobs._data[ref]
+
+    parts = await get_image(mem, _SCOPE, _pctx(), _ref(7), blob_store=blobs,
+                            kinds=cm._TASK_VIEW_KINDS)
+    assert any(not hasattr(p, "text") for p in parts), parts      # 图真的回来了
+
+    parts8 = await get_image(mem, _SCOPE, _pctx(), _ref(8), blob_store=blobs,
+                             kinds=cm._TASK_VIEW_KINDS)
+    assert all(hasattr(p, "text") for p in parts8), parts8
+    assert "present in this task" in "".join(p.text for p in parts8)
+
+
+@pytest.mark.asyncio
+async def test_l1_summary_declares_a_ref_only_when_it_actually_echoed_one(monkeypatch):
+    """L1 的摘要是 LLM 写的：抄了 ref 就得声明，没抄就不该凭空声明。
+
+    两半都断，因为这一处的 `placeholder_refs` 在健康数据上恒返回空表——只断「没抄不
+    声明」会是一条永真断言。
+    """
+    mem = _CountingMemory()
+    await _seed_two_top_units(mem)
+    ctx = _ctx(mem, blobs=_Blobs())
+    state = _l1_state()
+
+    # ① 摘要里逐字抄了折区那个占位 → 必须声明
+    ph = encode_image_placeholder(_ref(20), "image/png")
+    await cm.fold_root_experience(state, ctx, 1, lambda: _const(f"SUMMARY {ph}"))
+    agent_view = await mem.load_view(_AGENT_HALF, MemoryScope.AGENT, _pctx())
+    summaries = [r for r in agent_view if r.kind is MemoryKind.SUMMARY]
+    assert len(summaries) == 1
+    assert set(collect_blob_refs(summaries[0])) == {_ref(20)}
+
+    # ② 对照：纯文本摘要不声明任何 ref
+    mem2 = _CountingMemory()
+    await _seed_two_top_units(mem2)
+    await cm.fold_root_experience(
+        _l1_state(), _ctx(mem2, blobs=_Blobs()), 1, lambda: _const("PLAIN SUMMARY"))
+    agent_view2 = await mem2.load_view(_AGENT_HALF, MemoryScope.AGENT, _pctx())
+    s2 = [r for r in agent_view2 if r.kind is MemoryKind.SUMMARY]
+    assert len(s2) == 1 and collect_blob_refs(s2[0]) == []
 
 
 @pytest.mark.asyncio
