@@ -380,9 +380,14 @@ ref 流下去**，降级成确定性占位并 `logger.error` —— 崩溃恢复
 
 ### 迁移
 
-7 个文件、42 处 status/accepted 断言：`test_hitl.py`、`test_hitl_cold_decision.py`、
-`test_hitl_cold_resume.py`、`test_hitl_form_extensible.py`、`test_hitl_multimodal_validation.py`、
-`test_hitl_request_model.py`、`test_hitl_request_parked.py`。
+**10 个文件、约 33 处**（读取 + **构造参数**两类，后者易漏——`HitlRequest(..., status="accepted")`
+是测试里的既有写法）：`test_hitl.py`(5)、`test_hitl_multimodal_validation.py`(10)、
+`test_hitl_cold_decision.py`(3)、`test_hitl_recovery.py`(2)、`test_hitl_request_model.py`(4)、
+`test_hitl_ask_human_cold.py`(4，全是构造参数)、`test_hitl_form_extensible.py`(2)、
+`test_hitl_park.py`(1)、`test_hitl_cold_resume.py`(1)、`test_hitl_request_parked.py`(1)。
+
+> 计数口径：只算 `HitlRequest` 的 status/accepted，**不含** `task.status` / `session.status`
+> ——那两个是同名不同物，机械替换会误伤。
 
 ### 新增（每条配一个「纯文本逐字节不变」的对照）
 
