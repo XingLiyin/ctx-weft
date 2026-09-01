@@ -22,7 +22,7 @@ async def test_request_parked_registers_pending_without_live_future() -> None:
     )
     # pending 已登记（供 /hitl/pending 与崩溃恢复重建）
     assert mgr.get(rid) is not None
-    assert mgr.get(rid).status == "pending"
+    assert mgr.get(rid).resolved is False
     # future 已驱逐 → 应答必走冷路径
     assert mgr._futures.get(rid) is None
 
@@ -41,6 +41,6 @@ async def test_parked_answer_triggers_cold_resolve() -> None:
 
     req = await mgr.answer(rid, "the user's reply")
 
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     assert req.message == "the user's reply"
     assert len(cold) == 1 and cold[0].id == rid  # 冷 resume 被触发

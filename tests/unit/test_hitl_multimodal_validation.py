@@ -146,7 +146,7 @@ async def test_hitl_answer_rejects_malformed_base64_without_touching_blob_store(
     )
     req = rt.hitl_manager.get(hid)
     assert req is not None
-    assert req.status == "pending", "校验失败不得把请求推进到终态"
+    assert req.resolved is False, "校验失败不得把请求推进到终态"
     assert req.message == "", "校验失败不得把畸形内容写进 req.message"
 
 
@@ -163,7 +163,7 @@ async def test_hitl_reject_rejects_malformed_base64_without_touching_blob_store(
         )
 
     assert store.put_calls == 0
-    assert rt.hitl_manager.get(hid).status == "pending"
+    assert rt.hitl_manager.get(hid).resolved is False
 
 
 # ── 2. 格式校验在 HITL 路径同样生效 ──────────────────────────────────────────
@@ -194,7 +194,7 @@ async def test_hitl_answer_externalizes_valid_image_to_ref():
         hid, [TextPart(text="看这张"), ImagePart(data=_PNG, media_type="image/png")],
     )
 
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     content = req.message
     # 陷阱守卫：`not hasattr(p, "text")` 在 str 上恒为 True，下面的断言才不是重言式。
     assert isinstance(content, list), f"应答内容必须仍是 parts 列表，实为 {type(content)!r}"
@@ -238,7 +238,7 @@ async def test_bare_hitl_manager_plain_text_is_identity_without_normalizer():
 
     req = await hm.answer(hid, payload)
 
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     assert req.message is payload, "纯文本必须仍是恒等变换（同一对象）"
 
 
@@ -300,7 +300,7 @@ async def test_empty_message_reject_is_byte_identical():
 
     req = await rt.hitl_manager.reject(hid)
 
-    assert req.status == "rejected"
+    assert req.outcome == "rejected"
     assert req.message == ""
     assert store.put_calls == 0
 
@@ -433,7 +433,7 @@ async def test_hitl_approve_rejects_malformed_base64_without_touching_blob_store
     assert store.put_calls == 0, "被拒的内容不得在 blob store 留垃圾"
     req = rt.hitl_manager.get(hid)
     assert req is not None
-    assert req.status == "pending", "校验失败不得把请求推进到终态"
+    assert req.resolved is False, "校验失败不得把请求推进到终态"
     assert req.message == "", "校验失败不得把畸形内容写进 req.message"
     assert req.modified_arguments is None, "校验失败不得写 modified_arguments"
 
@@ -450,7 +450,7 @@ async def test_hitl_approve_externalizes_valid_image_to_ref():
         hid, message=[TextPart(text="放行，见图"), ImagePart(data=_PNG, media_type="image/png")],
     )
 
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     content = req.message
     # 陷阱守卫：`not hasattr(p, "text")` 在 str 上恒为 True。
     assert isinstance(content, list), f"应答内容必须仍是 parts 列表，实为 {type(content)!r}"
@@ -482,7 +482,7 @@ async def test_hitl_image_reaches_memory():
         llm_account="acct-v", llm_model="vision-model",
     )
 
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     assert store.put_calls == 1
     content = req.message
     assert isinstance(content, list), f"应答内容必须仍是 parts 列表，实为 {type(content)!r}"
@@ -557,7 +557,7 @@ async def test_unknown_session_falls_back_to_default_tenant_without_raising():
 
     req = await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
 
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     assert store.ctx_tenant_ids == ["default"]
 
 
@@ -575,7 +575,7 @@ async def test_event_store_failure_falls_back_to_default_tenant_without_raising(
 
     req = await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
 
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     assert store.ctx_tenant_ids == ["default"]
 
 
@@ -623,7 +623,7 @@ async def test_hitl_event_put_receives_the_real_session_tenant_not_default():
 
     req = await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
 
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     assert event_store.put_calls == 1, "message 应仍是 inline base64，必须真的外部化一次"
     assert event_store.ctx_tenant_ids == ["tenant-gamma"], (
         "event 侧 put 收到的 tenant 必须是该 session 的真实 tenant，而非硬编码 default"

@@ -61,7 +61,7 @@ async def test_inject_user_reply_reply_visible_to_agent_recall(monkeypatch):
 
     # Rebuilt-from-projection HITL: agent_id was NOT persisted → empty.
     req = HitlRequest(id="h1", form="wait", session_id="s1", task_id="t1", agent_id="",
-                      status="accepted", message="用户回复", context="plain_text")
+                      outcome="accepted", message="用户回复", context="plain_text")
 
     await runtime._inject_user_reply(req, session, task_manager)
 

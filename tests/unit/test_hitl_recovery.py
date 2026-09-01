@@ -21,7 +21,7 @@ def test_rebuild_pending_restores_requests_without_futures() -> None:
     })
     pend = mgr.list_pending(session_id="s1")
     assert len(pend) == 1 and pend[0].id == "hit_1"
-    assert pend[0].tool_call_id == "tc1" and pend[0].status == "pending"
+    assert pend[0].tool_call_id == "tc1" and pend[0].resolved is False
     assert mgr.find_for_tool_call("tc1") is not None
     assert "hit_1" not in mgr._futures
 
@@ -33,7 +33,7 @@ async def test_answer_rebuilt_request_is_cold() -> None:
                              task_id="t1", tool_call_id="tc1"),
     })
     resolved, was_hot = await mgr.resolve_answer("hit_1", "use postgres")
-    assert resolved.status == "accepted" and resolved.message == "use postgres"
+    assert resolved.outcome == "accepted" and resolved.message == "use postgres"
     assert was_hot is False
 
 
@@ -419,6 +419,6 @@ def test_rebuild_pending_stores_hitl_request_directly():
     mgr.rebuild_pending({"hit_1": req})
     got = mgr.get("hit_1")
     assert got is req                      # 直存同一对象
-    assert got.status == "pending"
+    assert got.resolved is False
     assert got.questions == [{"question": "q?"}] and got.arguments == {"a": 1}  # 不再丢字段
     assert mgr.list_pending(session_id="s1") == [req]

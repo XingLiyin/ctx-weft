@@ -55,7 +55,7 @@ def test_cold_decision_answered_with_message() -> None:
     ]
     req = fold_cold_hitl_decision(events, "tc1")
     assert req is not None
-    assert req.status == "accepted" and req.message == "use postgres"
+    assert req.outcome == "accepted" and req.message == "use postgres"
     assert req.tool_call_id == "tc1" and req.id == "h1"
 
 
@@ -77,9 +77,9 @@ def test_cold_decision_approved_and_rejected_usable_without_message() -> None:
         _ev(EventType.HITL_REJECTED, {"hitl_id": "r1", "message": "no prod"}, 4),
     ]
     ok = fold_cold_hitl_decision(events, "tcA")
-    assert ok is not None and ok.status == "accepted"
+    assert ok is not None and ok.outcome == "accepted"
     no = fold_cold_hitl_decision(events, "tcR")
-    assert no is not None and no.status == "rejected" and no.message == "no prod"
+    assert no is not None and no.outcome == "rejected" and no.message == "no prod"
 
 
 def test_cold_decision_modified_requires_args() -> None:
@@ -97,7 +97,7 @@ def test_cold_decision_modified_requires_args() -> None:
             {"hitl_id": "m2", "modified_arguments": {"cmd": "ls"}}, 2),
     ]
     req = fold_cold_hitl_decision(events2, "tcM2")
-    assert req is not None and req.status == "accepted"
+    assert req is not None and req.outcome == "accepted"
     assert req.modified_arguments == {"cmd": "ls"}
 
 
@@ -162,7 +162,7 @@ async def test_resolve_events_carry_message_and_modified_arguments() -> None:
 def _resolved_req(tcid: str) -> HitlRequest:
     return HitlRequest(
         id="h_cold", form="question", session_id="s1", task_id="t1",
-        tool_call_id=tcid, question="Which DB?", status="accepted", message="use postgres",
+        tool_call_id=tcid, question="Which DB?", outcome="accepted", message="use postgres",
     )
 
 
@@ -259,3 +259,21 @@ async def test_ask_user_short_circuits_via_cold_lookup_after_restart() -> None:
     assert parts and "use postgres" in parts[0]
     assert mgr.list_pending() == []                                     # 未重新登记
     assert not any(e.type == EventType.HITL_REQUIRED for e in bus.events)  # 未重发重问
+
+
+def test_old_shape_payload_still_folds_into_an_outcome():
+    """旧事件日志（payload 里从来只有 hitl_id / message / modified_arguments）必须原样可折。
+
+    status → outcome 的重整只动 Python API，不动事件。这条用**手写的**旧形状 payload
+    喂 fold_cold_hitl_decision，绕开任何「用新代码生成事件再读回来」的自证。
+    """
+    events = [
+        _required("h1", "tc9", 1),
+        _ev(EventType.HITL_ANSWERED, {"hitl_id": "h1", "message": "use postgres"}, 2),
+    ]
+    req = fold_cold_hitl_decision(events, "tc9")
+
+    assert req is not None
+    assert req.outcome == "accepted"
+    assert req.resolved is True
+    assert req.message == "use postgres"

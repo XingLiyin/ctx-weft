@@ -16,7 +16,11 @@ from ctx_weft.core.content import (
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.state.models import TaskStatus
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.protocols.hitl import HitlRequest
+from ctx_weft.protocols.hitl import (
+    HITL_OUTCOME_ACCEPTED,
+    HITL_OUTCOME_REJECTED,
+    HitlRequest,
+)
 
 # 事件类型 → 任务状态的投影映射。
 #
@@ -129,14 +133,18 @@ def fold_cold_hitl_decision(events: list[Event], tool_call_id: str) -> HitlReque
         if req is None:
             continue
         if ev.type == EventType.HITL_ANSWERED and p.get("message"):
-            req.status, req.message = "accepted", content_from_jsonable(p["message"])
+            req.resolve(HITL_OUTCOME_ACCEPTED)
+            req.message = content_from_jsonable(p["message"])
         elif ev.type == EventType.HITL_APPROVED:
-            req.status, req.message = "accepted", content_from_jsonable(p.get("message", ""))
+            req.resolve(HITL_OUTCOME_ACCEPTED)
+            req.message = content_from_jsonable(p.get("message", ""))
         elif ev.type == EventType.HITL_MODIFIED and p.get("modified_arguments") is not None:
-            req.status, req.message = "accepted", content_from_jsonable(p.get("message", ""))
+            req.resolve(HITL_OUTCOME_ACCEPTED)
+            req.message = content_from_jsonable(p.get("message", ""))
             req.modified_arguments = p["modified_arguments"]
         elif ev.type == EventType.HITL_REJECTED:
-            req.status, req.message = "rejected", content_from_jsonable(p.get("message", ""))
+            req.resolve(HITL_OUTCOME_REJECTED)
+            req.message = content_from_jsonable(p.get("message", ""))
         else:
             continue  # Cancelled / 缺 message 的 Answered / 缺改参的 Modified → 不可用
         req.resolved_at = ev.timestamp

@@ -145,7 +145,7 @@ async def test_inject_user_reply_awaits_pending_background_observe(monkeypatch):
                 assigned_agent_id="a1", creator_agent_id="a1")
     task_manager = SimpleNamespace(get_task=lambda tid: task if tid == "t1" else None)
     req = HitlRequest(id="h1", form="wait", session_id="s1", task_id="t1", agent_id="a1",
-                      status="accepted", message="新问题", context="plain_text")
+                      outcome="accepted", message="新问题", context="plain_text")
 
     await runtime._inject_user_reply(req, session, task_manager)
 

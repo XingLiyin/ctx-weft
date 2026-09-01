@@ -725,8 +725,9 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
             if session is not None:
                 session.status = "RUNNING"
             from ctx_weft.core.content import content_to_text
+            from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
             msg = content_to_text(approval.message)
-            if approval.status == "rejected":
+            if approval.outcome == HITL_OUTCOME_REJECTED:
                 content = f"Human declined: {msg}" if msg else "Human rejected the request."
             else:
                 content = msg or result.content

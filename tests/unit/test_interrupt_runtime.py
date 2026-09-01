@@ -73,7 +73,7 @@ async def test_inject_user_reply_phase1_adds_edit_note():
     req = HitlRequest(
         id="h1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
         capability_id="control:wait_for_user", context="interrupt:edit",
-        status="accepted", message="新请求Y",
+        outcome="accepted", message="新请求Y",
     )
     await rt._inject_user_reply(req, session, tm)
 
@@ -98,7 +98,7 @@ async def test_inject_user_reply_non_edit_has_no_note():
     req = HitlRequest(
         id="h1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
         capability_id="control:wait_for_user", context="interrupt",  # ② not edit
-        status="accepted", message="just continue",
+        outcome="accepted", message="just continue",
     )
     await rt._inject_user_reply(req, session, tm)
     recs = await mem.recall_recent(scope, [MemoryEventType.USER_PROMPT], 10, pctx)

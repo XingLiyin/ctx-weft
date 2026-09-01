@@ -50,5 +50,5 @@ class HumanConfirmationAuthorizer(Authorizer):
                 message=content_to_text(approval.message),
                 modified_arguments=approval.modified_arguments,
             )
-        logger.info("HITL blocked '%s' (status=%s)", capability.id, approval.status)
+        logger.info("HITL blocked '%s' (outcome=%s)", capability.id, approval.outcome)
         return AuthorizationDecision(allowed=False, message=content_to_text(approval.message))

@@ -29,7 +29,14 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.content import content_to_event_jsonable
 from ctx_weft.protocols.events import EventType
-from ctx_weft.protocols.hitl import HitlForm, HitlRequest, HitlStatus  # noqa: F401  (HitlStatus re-export 供既有 import)
+from ctx_weft.protocols.hitl import (
+    HITL_OUTCOME_ACCEPTED,
+    HITL_OUTCOME_CANCELLED,
+    HITL_OUTCOME_REJECTED,
+    HitlForm,
+    HitlOutcome,
+    HitlRequest,
+)
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.protocols.events import NullEventBlobStore
@@ -101,7 +108,7 @@ class HitlManager:
         # idempotent by tool_call_id（§6）：cold reconcile / resume 再入同一调用时不新建。
         existing = self.find_for_tool_call(tool_call_id)
         if existing is not None:
-            if existing.status == "pending":
+            if not existing.resolved:
                 # 仍未解决（resume 后 re-park）：补一个存活 future 供本次 await。
                 fut = self._futures.get(existing.id)
                 if fut is None or fut.done():
@@ -172,7 +179,7 @@ class HitlManager:
         except TimeoutError:
             async with self._lock:
                 req = self._requests[hitl_id]
-                if req.status != "pending":
+                if req.resolved:
                     return req                       # answer 先到：走热已解决
                 self._futures.pop(hitl_id, None)  # 驱逐 future，保留 pending
             from ctx_weft.core.loop.park import HitlPark
@@ -248,7 +255,7 @@ class HitlManager:
         req = self._require(hitl_id)
         req.message, event_jsonable = await self._normalize_message(req, message)
         result, _ = await self._resolve(
-            req, "cancelled", EventType.HITL_CANCELLED,
+            req, HITL_OUTCOME_CANCELLED, EventType.HITL_CANCELLED,
             message_event_jsonable=event_jsonable,
         )
         return result
@@ -343,7 +350,7 @@ class HitlManager:
             return None
         mem = self.find_for_tool_call(tool_call_id)
         if mem is not None:
-            return mem if mem.status != "pending" else None
+            return mem if mem.resolved else None
         if self._cold_decision_lookup is None:
             return None
         return await self._cold_decision_lookup(session_id, tool_call_id)
@@ -351,7 +358,7 @@ class HitlManager:
     def list_pending(self, session_id: str | None = None) -> list[HitlRequest]:
         return [
             r for r in self._requests.values()
-            if r.status == "pending" and (session_id is None or r.session_id == session_id)
+            if not r.resolved and (session_id is None or r.session_id == session_id)
         ]
 
     def rebuild_pending(self, pending: dict[str, HitlRequest]) -> None:
@@ -369,7 +376,7 @@ class HitlManager:
         # 校验/外部化先于任何状态改动：被拒的内容不得写进 req.message、不得推进状态。
         req.message, event_jsonable = await self._normalize_message(req, text)
         return await self._resolve(
-            req, "accepted", EventType.HITL_ANSWERED,
+            req, HITL_OUTCOME_ACCEPTED, EventType.HITL_ANSWERED,
             resume_on_cold=True, message_event_jsonable=event_jsonable,
         )
 
@@ -385,7 +392,7 @@ class HitlManager:
         req.modified_arguments = modified_arguments
         evt = EventType.HITL_MODIFIED if modified_arguments is not None else EventType.HITL_APPROVED
         return await self._resolve(
-            req, "accepted", evt,
+            req, HITL_OUTCOME_ACCEPTED, evt,
             resume_on_cold=True, message_event_jsonable=event_jsonable,
         )
 
@@ -394,7 +401,7 @@ class HitlManager:
         req = self._require(hitl_id)
         req.message, event_jsonable = await self._normalize_message(req, message)
         return await self._resolve(
-            req, "rejected", EventType.HITL_REJECTED,
+            req, HITL_OUTCOME_REJECTED, EventType.HITL_REJECTED,
             resume_on_cold=True, message_event_jsonable=event_jsonable,
         )
 
@@ -409,16 +416,16 @@ class HitlManager:
     async def _resolve(
         self,
         req: HitlRequest,
-        status: HitlStatus,
+        outcome: HitlOutcome,
         event_type: EventType,
         *,
         resume_on_cold: bool = False,
         message_event_jsonable: "str | list[dict] | None" = None,
     ) -> tuple[HitlRequest, bool]:
         async with self._lock:
-            if req.status != "pending":
+            if req.resolved:
                 return req, False                    # 已解决（含驱逐后）→ 幂等
-            req.status = status
+            req.resolve(outcome)
             req.resolved_at = now_utc()
             future = self._futures.get(req.id)
             was_hot = future is not None and not future.done()
@@ -450,7 +457,7 @@ class HitlManager:
 
         同步、无 await：在 asyncio 单线程下原子执行，无需持锁。
         """
-        resolved = [r for r in self._requests.values() if r.status != "pending"]
+        resolved = [r for r in self._requests.values() if r.resolved]
         if len(resolved) <= self._max_resolved:
             return
         resolved.sort(key=lambda r: r.resolved_at or r.created_at)

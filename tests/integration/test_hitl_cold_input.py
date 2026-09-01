@@ -66,7 +66,7 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
     )
     await mgr.answer(rid, "use postgres")
     # Confirm it's resolved already
-    assert mgr.get(rid).status == "accepted"
+    assert mgr.get(rid).outcome == "accepted"
     assert mgr.get(rid).message == "use postgres"
 
     # ── ControlCapabilityProvider: register the session ─────────────────────────

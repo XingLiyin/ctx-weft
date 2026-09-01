@@ -201,10 +201,10 @@ async def test_timeout_evicts_to_cold_keeps_pending() -> None:
     rid = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tc1")
     with pytest.raises(HitlPark):
         await mgr.wait(rid)
-    assert mgr.get(rid).status == "pending"        # 仍 pending（hot→cold，不是 timeout 终态）
+    assert mgr.get(rid).resolved is False        # 仍 pending（hot→cold，不是 timeout 终态）
     assert mgr.list_pending()
     resolved, was_hot = await mgr.resolve_answer(rid, "late answer")
-    assert resolved.status == "accepted" and was_hot is False
+    assert resolved.outcome == "accepted" and was_hot is False
 
 
 async def test_answer_before_timeout_is_hot_and_wins() -> None:
@@ -216,7 +216,7 @@ async def test_answer_before_timeout_is_hot_and_wins() -> None:
     await asyncio.sleep(0)
     resolved, was_hot = await mgr.resolve_answer(rid, "answered")
     assert was_hot is True
-    assert (await waiter).status == "accepted"
+    assert (await waiter).outcome == "accepted"
 
 
 async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:

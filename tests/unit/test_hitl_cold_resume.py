@@ -34,7 +34,7 @@ async def test_cold_answer_resumes() -> None:
     rec = _Recorder()
     mgr = _cold_mgr(rec, form="question")
     req = await mgr.answer("hit1", "use postgres")
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     assert rec.calls == ["s1"]
 
 
@@ -64,7 +64,7 @@ async def test_cancel_never_resumes() -> None:
     rec = _Recorder()
     mgr = _cold_mgr(rec, form="question")
     await mgr.cancel("hit1")
-    assert mgr.get("hit1").status == "cancelled"
+    assert mgr.get("hit1").outcome == "cancelled"
     assert rec.calls == []                       # 终态,不 requeue,不 resume
 
 

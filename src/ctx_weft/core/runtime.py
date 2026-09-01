@@ -1767,7 +1767,8 @@ class CtxWeftRuntime:
             task_id=target.id, agent_id=agent_id,
         )
         from ctx_weft.core.content import content_with_prefix
-        if req.status == "rejected":
+        from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
+        if req.outcome == HITL_OUTCOME_REJECTED:
             content = (content_with_prefix(req.message, "Human declined: ")
                        if req.message else "Human rejected the request.")
         else:

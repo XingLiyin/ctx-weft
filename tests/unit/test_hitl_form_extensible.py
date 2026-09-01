@@ -20,7 +20,7 @@ def test_wellknown_form_constants() -> None:
 def test_hitl_request_accepts_custom_form() -> None:
     req = HitlRequest(id="h1", form="diff_review", session_id="s1", task_id="t1")
     assert req.form == "diff_review"
-    assert req.status == "pending"
+    assert req.resolved is False
     assert req.accepted is False
 
 

@@ -4,15 +4,15 @@
 ``HitlManager.approve/answer/reject`` 回话。故它属于 protocols 而非 core 内部状态。
 
 ``form`` 是**开放扩展点**（``str`` 而非闭 ``Literal``）：host 可定义自己的等待形态，
-core 只负责原样透传、不做白名单校验。``status`` 相反是**闭集**——状态机是 core 的
-不变式，新增状态会破坏 reducer 投影。
+core 只负责原样透传、不做白名单校验。``outcome`` 与之对称，同样开放——core 只认
+``accepted``/``rejected``/``cancelled`` 三个内建值，其余原样透传、不校验。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ctx_weft.protocols.context import ContentPart
@@ -38,7 +38,15 @@ HITL_FORM_QUESTION = "question"
 HITL_FORM_WAIT = "wait"
 
 HitlForm = str
-HitlStatus = Literal["pending", "accepted", "rejected", "cancelled"]
+
+#: 终局结果。**开放值域**，与 `HitlForm` 对称——host 定义了自己的 form，就该能定义自己的
+#: 结局。core 只认下面三个内建值，其余原样透传、不校验。
+#: 空串 `""` 是「未决」哨兵，host 自定义 outcome 不得使用它。
+HitlOutcome = str
+
+HITL_OUTCOME_ACCEPTED = "accepted"
+HITL_OUTCOME_REJECTED = "rejected"
+HITL_OUTCOME_CANCELLED = "cancelled"
 
 
 @dataclass
@@ -60,7 +68,7 @@ class HitlRequest:
     question: str = ""                            # 展示给人类的问题（approval / wait 用）
     context: str = ""                             # wait 形态的来源（plain_text / interrupt / interrupt:edit）
     questions: list[dict[str, Any]] = field(default_factory=list)  # ask_user 的结构化批量问题（含 options/multi_select）
-    status: HitlStatus = "pending"
+    outcome: HitlOutcome = ""     # "" = 未决；非空 = 终局（开放值域，见 HitlOutcome）
     # 解析载荷
     # 人类附带的内容：答复 / 拒绝理由 / 备注。多模态回复（含图片）走同一字段。
     message: "str | list[ContentPart]" = ""
@@ -73,5 +81,20 @@ class HitlRequest:
     resume_llm_model: str | None = None
 
     @property
+    def resolved(self) -> bool:
+        """是否已有终局。**推导而非存储**——存两份就有一条要维护的不变量
+        （`resolved is False` ⟺ `outcome == ""`），而漏维护是静默的：
+        `HitlManager.find_resolved_for_tool_call` 会误判成「还没答」，把已答过的问题
+        重新问一遍、丢掉用户已给的回复。推导掉之后这种失败不可能发生。
+        """
+        return bool(self.outcome)
+
+    @property
     def accepted(self) -> bool:
-        return self.status == "accepted"
+        """approval 语义的便利属性。唯一消费者是 `providers/authorizer/human.py`。"""
+        return self.outcome == HITL_OUTCOME_ACCEPTED
+
+    def resolve(self, outcome: HitlOutcome) -> None:
+        """终局的唯一写入点。`HitlManager._resolve` 与 `reducers.fold_cold_hitl_decision`
+        都经由它，不各写各的赋值。"""
+        self.outcome = outcome

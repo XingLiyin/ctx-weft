@@ -53,11 +53,11 @@ async def test_request_then_approve() -> None:
     mgr = HitlManager()
     rid = await _request(mgr)
     assert mgr.list_pending() and mgr.list_pending()[0].id == rid
-    assert mgr.get(rid).form == "approval" and mgr.get(rid).status == "pending"
+    assert mgr.get(rid).form == "approval" and mgr.get(rid).resolved is False
 
     await mgr.approve(rid)
     req = await mgr.wait(rid)
-    assert req.status == "accepted" and req.accepted is True
+    assert req.outcome == "accepted" and req.accepted is True
     assert mgr.list_pending() == []
 
 
@@ -66,7 +66,7 @@ async def test_reject_carries_message() -> None:
     rid = await _request(mgr)
     await mgr.reject(rid, message="run ls first instead")
     req = await mgr.wait(rid)
-    assert req.status == "rejected" and req.message == "run ls first instead"
+    assert req.outcome == "rejected" and req.message == "run ls first instead"
 
 
 async def test_approve_with_modified_arguments() -> None:
@@ -74,7 +74,7 @@ async def test_approve_with_modified_arguments() -> None:
     rid = await _request(mgr)
     await mgr.approve(rid, modified_arguments={"command": "ls -la"})
     req = await mgr.wait(rid)
-    assert req.status == "accepted"
+    assert req.outcome == "accepted"
     assert req.modified_arguments == {"command": "ls -la"}
 
 
@@ -83,7 +83,7 @@ async def test_answer_input_kind() -> None:
     rid = await _request(mgr, form="question")
     await mgr.answer(rid, "use postgres")
     req = await mgr.wait(rid)
-    assert req.status == "accepted" and req.message == "use postgres"
+    assert req.outcome == "accepted" and req.message == "use postgres"
 
 
 async def test_wait_timeout_raises_park_and_keeps_pending() -> None:
@@ -92,7 +92,7 @@ async def test_wait_timeout_raises_park_and_keeps_pending() -> None:
     rid = await _request(mgr)
     with pytest.raises(HitlPark):
         await mgr.wait(rid)
-    assert mgr.get(rid).status == "pending"
+    assert mgr.get(rid).resolved is False
 
 
 async def test_answer_after_timeout_resolves_cold() -> None:
@@ -102,7 +102,7 @@ async def test_answer_after_timeout_resolves_cold() -> None:
     with pytest.raises(HitlPark):
         await mgr.wait(rid)
     resolved, was_hot = await mgr.resolve_answer(rid, "late")
-    assert resolved.status == "accepted" and was_hot is False
+    assert resolved.outcome == "accepted" and was_hot is False
 
 
 async def test_wait_unknown_id_raises() -> None:
@@ -311,7 +311,7 @@ async def test_cancel_moves_to_cancelled_and_emits() -> None:
     mgr = HitlManager(event_bus=bus)
     rid = await _request(mgr, form="question")
     await mgr.cancel(rid)
-    assert mgr.get(rid).status == "cancelled"
+    assert mgr.get(rid).outcome == "cancelled"
     assert mgr.list_pending() == []
     assert "HitlCancelled" in seen
 
@@ -321,7 +321,7 @@ async def test_cancel_is_idempotent_after_resolve() -> None:
     rid = await _request(mgr, form="question")
     await mgr.answer(rid, "done")
     await mgr.cancel(rid)                 # 已解决 → no-op
-    assert mgr.get(rid).status == "accepted"
+    assert mgr.get(rid).outcome == "accepted"
 
 
 async def test_request_idempotent_by_tool_call_id_pending() -> None:
@@ -339,7 +339,7 @@ async def test_request_idempotent_by_tool_call_id_resolved_no_future() -> None:
     # 重新请求同一 tool_call_id（cold reconcile 再入）：返回已解决记录、不重置状态
     rid2 = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tcY")
     assert rid2 == rid
-    assert mgr.get(rid2).status == "accepted" and mgr.get(rid2).message == "answered"
+    assert mgr.get(rid2).outcome == "accepted" and mgr.get(rid2).message == "answered"
 
 
 def test_find_for_tool_call_returns_latest() -> None:
