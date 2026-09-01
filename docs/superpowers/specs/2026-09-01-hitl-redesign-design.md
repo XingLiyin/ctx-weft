@@ -1,12 +1,13 @@
 # HITL 机制重新设计（权威设计 · 语言中立）
 
-> 状态：设计稿，待评审。**这是一份从零设计**——不背现有事件日志、旧测试、host 端点的兼容包袱。
-> 迁移方案另议（§12.3）。
+> 状态：设计稿，待评审。**设计本身是从零写的**——不让现有事件日志、旧测试、host 端点的形状反过来约束目标结构。
+> 兼容性不进设计、只进迁移：§12.3 已定为**双读适配**，在途未决请求跨版本存活。
 >
 > 取代：`docs/spec/05-authz-and-hitl.md` 的 HITL 部分、`docs/spec/07-hitl-suspend-resume.md` 的结构部分。
 > **保留** 07 的核心洞见：热/冷两层、超时=降级而非失败、请求即持久化、精确重入。本设计不推翻机制，只重划边界。
 >
-> 语言中立：下文用伪类型描述契约，`asyncio` 只作实现举例。三份实现（Python / TS / Java）须复现 §10 的不变式清单。
+> 语言中立：下文用伪类型描述契约，`asyncio` 只作实现举例，§10 的不变式清单不依赖任何语言特性。
+> 注：`docs/loomej` 那份 Java 实现已不再维护，本设计不为它承担同步义务。
 
 ---
 
@@ -441,7 +442,7 @@ core 对这两个新值的处理是**完全不处理**：`form` 只用于透传�
 
 ---
 
-## 10. 不变式清单（三份实现须复现）
+## 10. 不变式清单（任何实现须复现）
 
 - [ ] **provider 层零 core 依赖**：`providers/` 不 import 任何 core 编排类；provider 不感知热/冷、不认识 park。
 - [ ] **park 只有一个抛出点**：`CapabilityGateway`（含 act 的显式冷 park）。`core/hitl` 不认识 park。
@@ -497,6 +498,113 @@ core 对这两个新值的处理是**完全不处理**：`form` 只用于透传�
 
 - **memory 层是否已支持写入幂等键？** `UserTurn` 冷续跑的幂等依赖它。若不支持，需先补这一处能力——这是本设计对外部组件的唯一新增要求。
 
-### 12.3 迁移（未定，另议）
+### 12.3 迁移：双读适配（已定）
 
-事件模型 8 → 2 与 host 端点 3 → 1 都是破坏性变更，旧事件日志无法直接回放。本设计按「从零设计」写就，迁移方案单独决定，至少须回答三个问题：旧日志「双读适配」还是「断代」；host 端点是否留兼容层；灰度期两套 HITL 能否共存。
+两条已确认的前提决定了迁移形态：
+
+- **在途未决请求必须跨版本存活**——不能靠「升级前 drain 干净」回避。因此旧事件的双读**是硬要求**，不是可选的保险。
+- **loomej（Java 实现）已不维护**——迁移只覆盖 ctx-weft，不承担跨语言同步。
+
+#### 12.3.1 形态：三段，中间态不允许两套 HITL 共存
+
+| 段 | 内容 | 性质 |
+|---|---|---|
+| **1 · 纯新增** | 新契约类型 + reducer 双读（旧 8 类事件 → `HitlSnapshot`） | 不碰任何执行路径，可独立发布、可单测 |
+| **2 · 原子替换** | `core/hitl` + gateway 接管；provider 契约切换；旧 `HitlManager` 删除 | **不留开关**，一次切完 |
+| **3 · 收口** | host 端点合一；双读退役（见 12.3.6） | 依赖闸门条件 |
+
+段 2 不留开关是刻意的：两套 HITL 并存会引入一批**只在过渡期存在**的不变式（pending 归属哪一套、host 该问谁、事件写哪种格式），测了也是白测，而它们出错的方式是**静默丢掉用户已给的回复**。宁可要一次短的原子替换。
+
+#### 12.3.2 旧事件 → 新模型的折叠规则
+
+`HitlRequired` → `HitlOpened`：
+
+| 新字段 | 来源 |
+|---|---|
+| `form` | `form`（缺省 `"approval"`，与现 reducer 一致） |
+| `subject_id` | `capability_id` |
+| `prompt` / `detail` | `question` / `context` |
+| `proposal` / `fields` | `arguments` / `questions` |
+| `tool_call_id`、`task_id`、`agent_id` | 同名字段（`agent_id` 在现 reducer 中确实保留，见 `reducers.py:67`） |
+| `resume_state` | `null`（旧模型无此概念） |
+| `delivery` | **反推，见下** |
+
+**`Delivery` 的反推必须复刻旧的「判据」，而不是旧的「意图」**：
+
+```
+form == "wait"             → UserTurn { task_id, preface: plain_text     → normal
+                                                        interrupt      → after_interrupt
+                                                        interrupt:edit → after_interrupt_edit }
+else if tool_call_id 非空  → ToolResult { tool_call_id }
+else                       → NoResume + 告警；host 侧只允许取消
+```
+
+直觉上更该用 `capability_id == "control:wait_for_user"` 这个 sentinel 来反推——它是 `act.py:639` 的唯一写入点，语义上更精确。**但那是错的**：今天 runtime 的实际分流判据是 `req.form == "wait"`（`runtime.py:1725`）。若某条旧请求 `form == "wait"` 而 `capability_id` 不是 sentinel，它今天会被注入；改用 sentinel 反推就会把它变成 `ToolResult`——**迁移本身改变了在途请求的行为**。迁移的正确性判据是「与升级前逐条同构」，不是「更符合新设计的意图」。
+
+第三条分支是兜底：既非 `wait`、又无 `tool_call` 可补，续跑无从谈起。让它显式地「只可取消」并告警，好过静默丢掉一条用户正在等的请求。
+
+resolve 类事件 → `HitlResolved`（无损）：
+
+| 旧事件 | `outcome` | 附加 |
+|---|---|---|
+| `HitlApproved` | `accepted` | — |
+| `HitlModified` | `accepted` | `modified_arguments` |
+| `HitlAnswered` | `accepted` | `message_ref` |
+| `HitlRejected` | `rejected` | `message_ref` |
+| `HitlCancelled` | `cancelled` | `message_ref` |
+
+`claimed` 一律折为 `false`：旧事件不记录热/冷，而恢复语境下本就一切皆冷（§6），`false` 是唯一安全值。
+
+`SessionPausedHitl` 折叠时**丢弃**——新模型里会话暂停态由 pending 集合推导（§7.1），旧事件不再是真相。
+
+#### 12.3.3 必须原样继承的保守规则
+
+现 `fold_cold_hitl_decision` 有一条「**可用决定**」规则：`Answered` 必须带 `message`、`Modified` 必须带 `modified_arguments`，否则视为**没有可用决定**，请求按仍未决处理、重新问，**绝不臆造答案**。旧日志里确实存在这类残缺事件。
+
+双读折叠必须逐字继承这条规则。这是整个迁移里最容易被「顺手简化」掉的一处，而代价是丢掉用户已经给过的回复。
+
+同样要继承的还有 event-side ref 的还原路径：旧决定里的 `message` 可能是指向 **event blob store** 的 ref，回放时需转换才能作 memory 侧内容使用；转换失败时降级为文本占位（现 `runtime.py:1960` 的行为），不得抛错卡住恢复。
+
+#### 12.3.4 host 端点兼容层
+
+三个旧端点在 **host 侧**转译成统一的 `HitlReply`，core 不需知情：
+
+```
+POST /hitl/{id}/approve {message, modified_arguments}  → Reply{outcome: "accepted", ...}
+POST /hitl/{id}/answer  {text}                          → Reply{outcome: "accepted", message: text}
+POST /hitl/{id}/reject  {message}                       → Reply{outcome: "rejected", message}
+```
+
+成本近似为零，可长期保留，不必与双读同期退役。
+
+#### 12.3.5 provider 契约：没有兼容路径
+
+老式 provider 的形态是 `await hitl_manager.wait(...)`——它要的是一个**等待句柄**，而新契约里这个东西根本不存在，没有适配器能凭空造出来。因此：
+
+- 仓内只有一处（`providers/authorizer/human.py`），随段 2 一起改写。
+- host 自写的 authorizer / 工具 provider **必须改**，改不了就不能升级。这一条要在升级须知里写在最前面，不能藏在附录里。
+
+#### 12.3.6 双读的退役闸门
+
+写成明确条件，不是「以后再说」：
+
+> 当且仅当**升级前产生的全部未决 HITL 请求均已终局**，且不再有会话需要回放到升级点之前的日志段时，双读折叠可以删除。
+
+实践上给两个可核对的信号：升级点之前的 `HitlRequired` 全部有对应终态事件；且这些 session 均已归档 / 超出最长存活期。段 3 前先核对，核对不过就继续留着——留着的成本只是一份纯函数。
+
+#### 12.3.7 明确不做：重写事件日志
+
+另一条路是跑一次迁移作业，把旧 8 类事件改写成新 2 类，迁移完零负担。**不采用**，理由：
+
+- 它**改写 append-only 日志**，即变更真相源，失败不可回滚；
+- 既有快照（`providers/events/snapshot.py` 的 `serialize_view`）会随之失效，须一并重建，工作量与风险都翻倍。
+
+为省一份纯函数去承担真相源被改坏的风险，不划算。
+
+#### 12.3.8 迁移的验收
+
+双读折叠是纯函数，因此可以被逐条锁死：
+
+- 用**真实旧日志的 golden 夹具**覆盖：approval 已批 / 已改参 / 已拒 / 残缺 Answered / 残缺 Modified / wait 的三种 `context` / 无 `tool_call_id` 的非 wait 请求（兜底分支）。
+- 断言口径是**与升级前逐条同构**：同一份旧日志，旧路径与新路径解出的「该不该重问、该怎么续跑、放不放行」必须一致。
+- 段 2 上线前，跑一遍全量恢复回归——`restore` 是所有会话恢复都走的路径，HITL 只是它的一个原因（07 §14 已把这里标为最高风险面）。
