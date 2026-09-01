@@ -87,7 +87,7 @@ AuthorizationDecision { allowed: bool, message: str = "", modified_arguments: di
 | `wait` | act 纯文本暂停 / 软打断 | `answer` / `reject` | wait_for_user |
 
 **决定与消息正交**：任何应答都可附带自由文本 `message`（答复 / 拒绝指导 / 备注）。
-`decision`（accept/reject）控制流程，`message` 旨在回灌给 agent。`modified_arguments` 仅 approval、暂仅记录。
+`decision`（accept/reject）控制流程，`message` 旨在回灌给 agent。`modified_arguments` 仅 approval，允许时生效——gateway 用它替换原参交给 provider。
 
 **三个触发点**：
 

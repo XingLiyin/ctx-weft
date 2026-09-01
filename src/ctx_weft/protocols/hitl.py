@@ -5,12 +5,10 @@
 
 ``form`` 是**开放扩展点**（``str`` 而非闭 ``Literal``）：host 可定义自己的等待形态，
 core 只负责原样透传、不做白名单校验。``outcome`` 与之对称，同样开放——core 只认
-``accepted``/``rejected``/``cancelled`` 三个内建值，其余原样透传、不校验。
-
-``outcome`` 与 ``form`` 一样是开放 ``str``。真正封闭的是**事件类型**——`HitlManager._emit`
-对 ``EVENT_TYPES`` 做运行期校验并抛 `ValueError`，而 5 个 resolve 事件
-（Approved/Modified/Answered/Rejected/Cancelled）映到 3 个内建 outcome，
-``outcome`` 是它的**有损投影**。reducer 不消费 outcome，reducer **生产**它。
+``accepted``/``rejected``/``cancelled`` 三个内建值，其余原样透传、不校验。真正封闭的
+是**事件类型**——`HitlManager._emit` 对 ``EVENT_TYPES`` 做运行期校验并抛 `ValueError`，
+而 5 个 resolve 事件（Approved/Modified/Answered/Rejected/Cancelled）映到 3 个内建
+outcome，``outcome`` 是它的**有损投影**。reducer 不消费 outcome，reducer **生产**它。
 """
 
 from __future__ import annotations
