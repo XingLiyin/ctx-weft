@@ -49,13 +49,13 @@ def test_run_started_no_longer_writes_the_session_status():
 
 
 def test_legacy_session_paused_hitl_still_folds_for_old_logs():
-    # brief 字面值是 "WAITING"，但那与遗留分支的实际行为矛盾：SESSION_PAUSED_HITL 对
-    # form!="wait" 恒产出 "PAUSED_HITL"（旧值域），且本任务明令 legacy 分支不可改动。
-    # 这里按实际遗留行为断言，见 task-7-report.md 的偏离说明。
+    # 旧模型按 form 分 PAUSED / PAUSED_HITL 两档；新值域只有 WAITING（Task 9 收敛掉
+    # PAUSED/PAUSED_HITL）。L 档的职责是把旧事实翻译进当前词表，故这里恒折进 WAITING，
+    # 不再区分 form。见 task-7-report.md「C1 复议」。
     view = reduce_events([_created(),
                           _ev(EventType.SESSION_PAUSED_HITL, {"form": "approval"}, 1)],
                          "run_1")
-    assert view.session_status == "PAUSED_HITL"
+    assert view.session_status == "WAITING"
 
 
 def test_legacy_session_status_changed_still_folds_for_old_logs():

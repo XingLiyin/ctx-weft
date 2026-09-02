@@ -17,7 +17,7 @@ from ctx_weft.core.content import (
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
-from ctx_weft.core.orchestrator.session_state import TERMINAL_SESSION_STATUSES
+from ctx_weft.core.orchestrator.session_state import TERMINAL_SESSION_STATUSES, WAITING
 from ctx_weft.core.state.models import TaskStatus
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import (
@@ -63,10 +63,6 @@ _HITL_RESOLVE_TYPES = (
     EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
     EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
 )
-
-#: 存量日志里的会话暂停态。新模型只有一个 `WAITING`；这一对是 L 档，
-#: 只用于读升级点之前的事件（`SessionPausedHitl` 与 5 个旧 HITL 终态）。
-_LEGACY_PAUSED_STATUSES: tuple[str, str] = ("PAUSED", "PAUSED_HITL")
 
 
 def fold_pending_task_recap(events: list[Event]) -> dict[str, dict]:
@@ -423,13 +419,11 @@ def _apply(view: RunStateView, ev: Event) -> None:
             _set_session_status(view, ev.session_id, "RUNNING")
 
     elif t == EventType.SESSION_PAUSED_HITL:
-        # 纯文本暂停(form=wait)= 软待命 PAUSED；ask_user/审批 = PAUSED_HITL。
-        # 与 ProjectionUpdater 同语义（单一真相）。
-        status = "PAUSED" if p.get("form") == "wait" else "PAUSED_HITL"
-        view.session_status = status
-        sess = view.sessions.get(ev.session_id)
-        if sess is not None:
-            sess.status = status
+        # L 档：只读存量日志。旧模型按 form 分 PAUSED / PAUSED_HITL 两档，
+        # 新模型合并成一个 WAITING——「等的是审批面板还是一句话」是 delivery 的性质，
+        # 由 HitlOpened 承载，不进会话状态（docs/events-v2.md §2.1.3）。
+        # 故这里**刻意**把两档都折进 WAITING，不再读 form。
+        _set_session_status(view, ev.session_id, WAITING)
 
     elif t == EventType.SESSION_FINISHED:
         final_status = p.get("final_status", "SUCCEEDED")
@@ -553,7 +547,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
         EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
         EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
     ):
-        if view.session_status in _LEGACY_PAUSED_STATUSES:
+        if view.session_status == WAITING:
             _set_session_status(view, ev.session_id, "RUNNING")
 
 

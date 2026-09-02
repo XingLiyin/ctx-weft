@@ -1,4 +1,5 @@
-"""Plain-text pause uses session status PAUSED (distinct from ask_user's PAUSED_HITL)."""
+"""SessionStatus 字面量仍保留 PAUSED/PAUSED_HITL（Task 9 才收敛掉）；但 reducer 的
+SESSION_PAUSED_HITL legacy 折叠分支自 Task 7 起把两档统一折进当前词表的 WAITING。"""
 
 from __future__ import annotations
 
@@ -30,16 +31,13 @@ def _paused_event(session_id: str, form: str):
     )
 
 
-@pytest.mark.parametrize("form,expected", [
-    ("wait", "PAUSED"),
-    ("question", "PAUSED_HITL"),
-    ("approval", "PAUSED_HITL"),
-])
-async def test_session_paused_hitl_routes_by_form(form, expected) -> None:
-    """SESSION_PAUSED_HITL 按显式 form 分流,不再看 capability sentinel。"""
+@pytest.mark.parametrize("form", ["wait", "question", "approval"])
+async def test_session_paused_hitl_folds_to_waiting_regardless_of_form(form) -> None:
+    """L 档折叠目标是当前词表：PAUSED/PAUSED_HITL 两档合并进单一 WAITING
+    （Task 9 从 SessionStatus 值域里收敛掉 PAUSED/PAUSED_HITL），故不再按 form 分流。"""
     from ctx_weft.core.control.reducers import reduce_events
     view = reduce_events([_paused_event("s1", form)], run_id="r1")
-    assert view.session_status == expected
+    assert view.session_status == "WAITING"
 
 
 # ── Task 7（会话状态所有权重构）之后：HITL_OPENED / HITL_RESOLVED 不再驱动投影 ──
