@@ -48,6 +48,9 @@ async def test_outage_interrupt_carries_llm_outage_reason():
     assert interrupts, "expected RunInterrupted"
     assert all((e.payload or {}).get("reason") == "llm_outage" for e in interrupts)
     # 成因也随 task.error 抵达 TM 的聚合信号（host 据此区分 LLM 故障 vs 重启中断）。
+    # 精确断言：reason 必须是**码** "llm_outage"，不是 str(exc) 那种自由文本。
+    # host 按码分流（三份契约：升级须知 / docs/events-v2.md §2.1.2 / spec/golden/07）。
     queue_sig = [e for e in seen if getattr(e, "type", None) == EventType.TASK_QUEUE_INTERRUPTED]
-    assert queue_sig and "outage" in (queue_sig[0].payload or {}).get("reason", "")
+    assert queue_sig, "expected TaskQueueInterrupted"
+    assert (queue_sig[0].payload or {}).get("reason") == "llm_outage"
     assert EventType.SESSION_STATUS_CHANGED not in [getattr(e, "type", None) for e in seen]

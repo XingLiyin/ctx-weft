@@ -2470,6 +2470,11 @@ class CtxWeftRuntime:
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
                 task.status = "INTERRUPTED"
                 # 成因随 task 走：TM 聚合 TaskQueueInterrupted 时读的就是它。
+                # error_code 是**码**，error 只是自由文本兜底：TM 的聚合优先读码
+                # （task_manager.py `_emit_queue_signal`），host 按码分流。不写码的话
+                # outage 会降级成 str(exc) 这种自由文本，三份契约（升级须知 /
+                # docs/events-v2.md §2.1.2 / spec/golden/07）要的都是 "llm_outage"。
+                task.error_code = "llm_outage"
                 task.error = str(exc)
             logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
             # run 级事实。会话状态由 TM 聚合后交给 SM 判定——这里不宣布会话怎么了。
