@@ -58,10 +58,6 @@ from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
-from ctx_weft.core.orchestrator.hitl_manager import (  # noqa: F401 — re-exported for shell use
-    HitlManager,
-    HitlRequest,
-)
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager, SpawnDepthExceeded
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
@@ -481,7 +477,6 @@ class CtxWeftRuntime:
         *,
         providers: ProviderRegistry | None = None,
         llm: LLMClient | None = None,
-        hitl_manager: HitlManager | None = None,
         event_bus: EventBus | None = None,
         event_store: "Any | None" = None,
         config: "RuntimeConfig | None" = None,
@@ -496,14 +491,6 @@ class CtxWeftRuntime:
             from ctx_weft.providers.events import InProcessEventBus
             event_bus = InProcessEventBus()
         self._event_bus: EventBus = event_bus
-        # shell 侧持有此实例，用于 approve() / reject() 响应 HITL 请求
-        # legacy —— 段 2 保留但不再接线（三个 setter 全删），后续任务整体删除
-        # （spec 2026-09-01 重设计 §0）。新路径见下方 self.hitl_registry / self.hitl。
-        self.hitl_manager: HitlManager = hitl_manager or HitlManager(
-            timeout_sec=self._config.hitl_timeout_sec,
-            event_bus=self._event_bus,
-            max_resolved=self._config.hitl_max_resolved,
-        )
         # HITL：构造期一次性接线，**没有 setter、没有半成品窗口**。裸构造即生产形态
         # （spec 2026-09-01 重设计 §3）。`_normalize_hitl_content` 是与 start_session /
         # run_single_task 共用的内容校验 + 外部化方法（Phase 3c Task A），此处原样接进
@@ -665,7 +652,7 @@ class CtxWeftRuntime:
     async def _tenant_for_session(self, session_id: str) -> str:
         """由 session_id 解出 tenant_id；解不出一律回落 ``"default"``，**绝不抛**。
 
-        `HitlRequest` 不带 tenant_id，而 blob 的 ProviderContext 需要它——多租户宿主下
+        HITL 请求不带 tenant_id，而 blob 的 ProviderContext 需要它——多租户宿主下
         写死 `"default"` 会让 HITL 递进来的图落到错误的 tenant 锚点。
 
         两条途径，先热后冷：
@@ -1297,7 +1284,7 @@ class CtxWeftRuntime:
         self,
         session_id: str,
         *,
-        user_reply: "HitlRequest | PendingHitl | None" = None,
+        user_reply: "PendingHitl | None" = None,
         llm_account: str | None = None,
         llm_model: str | None = None,
         resumed_task_id: str | None = None,
@@ -1321,7 +1308,7 @@ class CtxWeftRuntime:
         self,
         session_id: str,
         *,
-        user_reply: "HitlRequest | PendingHitl | None" = None,
+        user_reply: "PendingHitl | None" = None,
         llm_account: str | None = None,
         llm_model: str | None = None,
         resumed_task_id: str | None = None,
@@ -1381,9 +1368,6 @@ class CtxWeftRuntime:
         # event_blob 取字节 → memory 侧重新归一化。每一步只碰一个 store。
         await self._restore_task_prompts(all_tasks, session_id, sess_proj.tenant_id)
 
-        # 重建内存 HitlManager（_futures 空 → 后续应答自动走冷 resume；spec/07 §9）
-        if view.pending_hitl:
-            self.hitl_manager.rebuild_pending(view.pending_hitl)
         # 装填 HitlRegistry：**park / 重排的判据从此只读内存**（spec §3.1）。必须在算下面
         # 两个集合之前——registry 空着算出来的 parked 是空集，等于「人还没答，任务却自己
         # 跑起来了」。装填幂等：活 pending 不会被日志里的旧决定盖掉。
@@ -1617,7 +1601,7 @@ class CtxWeftRuntime:
         self,
         tm: "TaskManager",
         *,
-        user_reply: "HitlRequest | PendingHitl | None",
+        user_reply: "PendingHitl | None",
         llm_account: str | None,
         llm_model: str | None,
         resumed_task_id: str,
@@ -1811,30 +1795,8 @@ class CtxWeftRuntime:
             )
             raise
 
-    async def _resume_after_cold_hitl(self, req: "HitlRequest") -> None:
-        """冷 HITL 应答后恢复 session（legacy `HitlManager.on_cold_resolve` 回调）。
-
-        **段 2 起不再被接线**——构造期三个 setter 已删，`hitl_manager` 无人调它；新路径是
-        `reply_to_hitl` → `_resume_after_hitl`。方法与 legacy `HitlManager`/`self.hitl_manager`
-        一起保留，留给后续任务整体删除（spec 2026-09-01 重设计 §0）。
-
-        act 的纯文本暂停（form=wait）须把回复注入 task 层（reconcile 覆盖不到——它不在
-        task 层留 dangling tool_call）；act 的 ``ask_user`` / approval 走 reconcile,不在此注入。
-        """
-        is_inject = req.form == "wait"
-        # 应答携带的当前所选模型（host 据 entry 传入）覆盖投影里的旧 model：用户改 model 后
-        # 冷续跑须用新 model。未携带（None）时 recover_session 回退投影。
-        # resumed_task_id：被应答的 task——若存活 owner 拥有它，recover_session 就地重驱不重建。
-        await self.recover_session(
-            req.session_id,
-            user_reply=req if is_inject else None,
-            llm_account=req.resume_llm_account,
-            llm_model=req.resume_llm_model,
-            resumed_task_id=req.task_id,
-        )
-
     async def _inject_user_reply(
-        self, req: "HitlRequest | PendingHitl", session: Session, task_manager: TaskManager,
+        self, req: "PendingHitl", session: Session, task_manager: TaskManager,
     ) -> None:
         """把 act 纯文本暂停（wait_for_user）的用户回复注入对话 **并把 task 掰回可跑状态**。
 
@@ -1856,7 +1818,7 @@ class CtxWeftRuntime:
             target.status = "PENDING"
 
     async def _write_hitl_reply_turn(
-        self, req: "HitlRequest | PendingHitl", session: Session, target: "Task",
+        self, req: "PendingHitl", session: Session, target: "Task",
     ) -> None:
         """**只把人的答复写进对话，绝不碰 task 状态。**
 
@@ -1870,11 +1832,8 @@ class CtxWeftRuntime:
 
         原 `_inject_user_reply` 的注释与行为在这里逐字保留，仅去掉尾部的状态重置。
 
-        接受两种 `req` 形态并存（段 2 · Task 8）：legacy `HitlRequest`（旧冷路径，
-        `_resume_after_cold_hitl` 与既有单测仍在用它，字段直读 `message`/`outcome`/`context`）
-        与新契约 `PendingHitl`（`_resume_after_hitl` 新应答入口用它，字段经 `req.decision` 取、
-        打断续接判据经 `req.delivery.preface`）。旧分支原样保留——不因为新增分支牵动一个已经
-        在跑的路径。
+        `req` 是新契约的 `PendingHitl`：内容经 `req.decision` 取，打断续接判据经
+        `req.delivery.preface`（不再 sniff legacy 的 `context` 字符串）。
         """
         from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
         from ctx_weft.protocols import MemoryEvent, MemoryEventType
@@ -1901,25 +1860,20 @@ class CtxWeftRuntime:
         from ctx_weft.core.content import content_with_prefix
         from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
 
-        is_new_contract = isinstance(req, PendingHitl)
-        if is_new_contract:
-            message = req.decision.message if req.decision else ""
-            outcome = req.decision.outcome if req.decision else ""
-            is_edit_interrupt = (
-                isinstance(req.delivery, UserTurnDelivery)
-                and req.delivery.preface == PREFACE_AFTER_INTERRUPT_EDIT
-            )
-        else:
-            message = req.message
-            outcome = req.outcome
-            is_edit_interrupt = req.context == "interrupt:edit"
+        message = req.decision.message if req.decision else ""
+        outcome = req.decision.outcome if req.decision else ""
+        is_edit_interrupt = (
+            isinstance(req.delivery, UserTurnDelivery)
+            and req.delivery.preface == PREFACE_AFTER_INTERRUPT_EDIT
+        )
 
         if outcome == HITL_OUTCOME_REJECTED:
             content = (content_with_prefix(message, "Human declined: ")
                        if message else "Human rejected the request.")
         else:
             content = message or "(no response)"
-            # ① 中途打断（未吐 token）续接：补「上一条请求已取消」说明（context=interrupt:edit）。
+            # ① 中途打断（未吐 token）续接：补「上一条请求已取消」说明
+            # （preface = PREFACE_AFTER_INTERRUPT_EDIT）。
             if is_edit_interrupt:
                 from ctx_weft.core.loop.steps.act import _interrupt_edit_prefix
                 prev = await self._last_user_prompt(scope, pctx)
@@ -1927,10 +1881,10 @@ class CtxWeftRuntime:
                 content = content_with_prefix(content, prefix)
         await self.providers.get_memory().ingest(
             MemoryEvent(
-                # 新契约的应答可能被重试（host 超时重发 / 用户连点）：`resolve()` 对已终局
-                # 请求已幂等 no-op（不会二次调用本方法），但这里再加一道幂等键——`id` 是
+                # 应答可能被重试（host 超时重发 / 用户连点）：`resolve()` 对已终局请求
+                # 已幂等 no-op（不会二次调用本方法），但这里再加一道幂等键——`id` 是
                 # memory 层的幂等键（provider 已实现），确定性地由 hitl_id 派生（spec §7.3/§12.2）。
-                id=f"hitlreply:{req.id}" if is_new_contract else None,
+                id=f"hitlreply:{req.id}",
                 kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
                 address=scope,
                 content=content,
@@ -1966,8 +1920,7 @@ class CtxWeftRuntime:
         唤醒它，那时它进 act 就看得见这里写下的那一轮。三种形状都落对。
 
         跳过的几类：
-        - `skip_hitl_id`：本次调用已由 `user_reply` 显式注入过的那条（legacy
-          `HitlRequest` 形态不带幂等 id，重复注入会真的写两条）。
+        - `skip_hitl_id`：本次调用已由 `user_reply` 显式注入过的那条。
         - `legacy_origin`：本方法关的是**新模型**的崩溃窗口。升级前由 legacy 路径注入过的
           答复，其记忆记录是随机 id、去重不了，补写会凭空多一轮用户发言。
         - `parked_or_inflight_task_ids`：该 task 还挂着别的未决 HITL，或仍在被上一个活
@@ -2013,7 +1966,7 @@ class CtxWeftRuntime:
 
         Decision is made **in core, from events** (no host projection, no full replay):
         a session with an unresolved pending HITL was waiting for a human answer → **only the
-        in-memory HitlManager is rebuilt** (so ``/hitl/pending`` and the reply endpoints work);
+        in-memory ``HitlRegistry`` is refilled** (so ``/hitl/pending`` and the reply endpoints work);
         status stays PAUSED_HITL or PAUSED and **nothing runs** — the task rebuild + drain defers to the
         reply's ``recover_session``. Otherwise it was actively running at crash → **emit
         ``SessionStatusChanged(INTERRUPTED)``**.
@@ -2059,26 +2012,13 @@ class CtxWeftRuntime:
         幂等，可重复调用（`load_snapshot` 对已在内存的活 pending 不覆盖）。启动 `recover`
         用它把 PAUSED 会话的内存态填回来；应答入口也可在内存为空时按需自愈（重启后
         registry 还没被 recover 填上时，据事件即时装填，避免应答 KeyError；spec/07 §9）。
-
-        legacy `HitlManager` 同步填一份（`rebuild_pending`）——它由后续任务删除，在此之前
-        仍有既有路径读它，装填两份比让其中一份陈旧安全。
         """
         from ctx_weft.core.control.reducers import HITL_FOLD_EVENT_TYPES, fold_hitl_snapshot
 
         events = await self._read_session_events_of_types(session_id, HITL_FOLD_EVENT_TYPES)
         snapshot = fold_hitl_snapshot(events)
         await self._hydrate_snapshot_messages(snapshot, session_id)
-        n = self.hitl_registry.load_snapshot(snapshot)
-
-        # legacy 双写（下个任务随 HitlManager 一并删除）。它自己的折叠口径更窄
-        # （只认旧事件类型），failure 不得影响新路径。
-        try:
-            legacy = await self._pending_hitl(session_id)
-            if legacy:
-                self.hitl_manager.rebuild_pending(legacy)
-        except Exception:
-            logger.exception("rebuild_hitl: legacy HitlManager rebuild failed for %s", session_id)
-        return n
+        return self.hitl_registry.load_snapshot(snapshot)
 
     async def _read_session_events_of_types(
         self, session_id: str, types: "tuple[EventType, ...]",
@@ -2170,7 +2110,7 @@ class CtxWeftRuntime:
     async def rebuild_all_pending_hitl(self) -> int:
         """据事件重建**所有 active session** 的内存 pending HITL（不发中断、不 drain）,返回总条数。
 
-        供只带 hitl_id 的应答入口（`/hitl/{id}/*`）自愈:重启后内存 HitlManager 为空、又无 session_id
+        供只带 hitl_id 的应答入口（`/hitl/{id}/*`）自愈:重启后内存 registry 为空、又无 session_id
         可定位时,重建全部 active pending 后即可按 id 命中。仅在 miss 时调用,成本有界（spec/07 §9）。
         """
         try:
@@ -2217,56 +2157,6 @@ class CtxWeftRuntime:
             timestamp=now_utc(),
             payload={"new_status": new_status},
         ))
-
-    async def _pending_hitl(self, session_id: str) -> dict:
-        """该 session 仍未解决的 pending HITL（{id: HitlRequest}）—— 仅折叠 HITL 类事件,不全量回放。"""
-        from ctx_weft.core.control.reducers import HITL_STATUS_EVENT_TYPES, fold_pending_hitl
-        try:
-            events = await self.event_store.read_session_events_of_types(session_id, HITL_STATUS_EVENT_TYPES)
-        except NotImplementedError:
-            # 退化（极简 EventStore 未实现轻查询）：全量读后内存过滤,仍正确、只是不省。
-            events = [e for e in await self.event_store.read_by_session(session_id)
-                      if e.type in HITL_STATUS_EVENT_TYPES]
-        return fold_pending_hitl(events)
-
-    async def _cold_hitl_decision(self, session_id: str, tool_call_id: str):
-        """冷决定查询（HitlManager 绑定）：从事件日志折出该 tool_call 的可用人工决定。
-
-        reconcile 短路门控的跨重启回落——内存决定缓存重启后只重建 pending、不含已解决,
-        不查日志就会把已答过的问题重新问一遍、丢掉答案（spec/07 §6）。仅折 HITL 类事件。
-        """
-        from ctx_weft.core.control.reducers import HITL_STATUS_EVENT_TYPES, fold_cold_hitl_decision
-        try:
-            events = await self.event_store.read_session_events_of_types(session_id, HITL_STATUS_EVENT_TYPES)
-        except NotImplementedError:
-            events = [e for e in await self.event_store.read_by_session(session_id)
-                      if e.type in HITL_STATUS_EVENT_TYPES]
-        req = fold_cold_hitl_decision(events, tool_call_id)
-        # event 侧 ref → memory 侧 ref。事件 payload 里存的是 EventBlobStore 命名空间的
-        # ref，而这个 req 的 message 会被 ask_user / approval 消费、最终随 TOOL_RESULT 进
-        # memory——直接透传就是往 memory 里写一个永远打不开的引用（两个 ref 命名空间独立，
-        # spec 2026-08-27 dual-blob-store）。纯文本 message 零成本直通。
-        if req is None or not req.message or isinstance(req.message, str):
-            return req
-        from ctx_weft.core.content import (
-            downgrade_images_to_text, hydrate_event_content, normalize_content,
-        )
-        ctx = ProviderContext(
-            session_id=session_id, tenant_id=await self._tenant_for_session(session_id))
-        try:
-            hydrated = await hydrate_event_content(
-                req.message, event_blob_store=self.providers.get_event_blob_store(), ctx=ctx)
-            blob_store = self.providers.get_memory_blob_store()
-            req.message = (await normalize_content(hydrated, blob_store=blob_store, ctx=ctx)
-                           if blob_store.can_externalize else hydrated)
-        except Exception:
-            # 与 _restore_task_prompts 同一姿态：绝不让解不开的 ref 流下去，降级成确定性
-            # 占位并响亮记账。冷恢复是最不能再崩一次的地方，也是最不能静默的地方。
-            logger.error(
-                "_cold_hitl_decision: event ref 转换失败，降级为文本占位 (tool_call=%s)",
-                tool_call_id, exc_info=True)
-            req.message = downgrade_images_to_text(req.message)
-        return req
 
     # ── Internal execution ───────────────────────────────────────────────────
 
@@ -2355,7 +2245,6 @@ class CtxWeftRuntime:
             skill_provider_index=skill_index,
             cancel_token=cancel_token,
             task_manager=task_manager,
-            hitl_manager=self.hitl_manager,
             hitl=self.hitl,
             waiter=HitlWaiter(self.hitl_registry, timeout_sec=self._hitl_timeout_sec),
             pause_token=pause_token,

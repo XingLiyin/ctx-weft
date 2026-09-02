@@ -252,15 +252,14 @@ class AuthorizationDecision:
     allowed: bool
     # 反馈 / 拒绝指导，回灌给 LLM（allow / deny 都可带）。
     # **可以是 `list[ContentPart]`**：人类经 HITL 递进来的备注可能带图
-    # （`HumanConfirmationAuthorizer` 直接透传 `HitlRequest.message`）。gateway 的两处
+    # （`HumanConfirmationAuthorizer` 直接透传 `HitlDecision.message`）。gateway 的两处
     # 拼接走 `content_with_prefix` / `content_with_suffix`，对 str 逐字节原样。
     message: "str | list[ContentPart]" = ""
     modified_arguments: dict[str, Any] | None = None  # allow 时的有效参数（None = 用原参）
-    #: 「挂起并问这个问题」。取代只能说「挂起」的 `defer`——后者说不出问什么，
+    #: 「挂起并问这个问题」。取代只能说「挂起」的 `defer`（已删除）——后者说不出问什么，
     #: 所以旧实现必须让 authorizer 自己先去登记请求（那正是耦合的源头）。
     #: 非 None 时 `allowed` 必须为 False；gateway 先判 allowed，安全不变式不依赖本字段。
     needs_human: "HitlAsk | None" = None
-    defer: bool = False                            # spec/07 §7：挂起本次调用（不放行也不拒绝；gateway 绝不 invoke）
 
 
 class Authorizer(ABC):

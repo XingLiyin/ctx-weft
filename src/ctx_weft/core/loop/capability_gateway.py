@@ -32,6 +32,7 @@ from ctx_weft.core.content import (
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL
+from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.capability import (
@@ -188,7 +189,8 @@ class CapabilityGateway:
 
         # 2. Authorization：按 cap.id 前缀取 per-provider authorizer，无则用 default
         authorizer = self._get_authorizer(cap.id)
-        # 决定缓存短路（冷路径重入）：registry 已有该 tool_call 的人工决定 → 不重问。
+        # 决定缓存短路（冷路径重入 · 授权步）：registry 已有该 tool_call 的人工决定 →
+        # 连 authorize() 都不调。工具步的同一短路在 `_resolve_human` 里（那时才知道要问人）。
         # 内存 pending（活的等待）不算「已答过」，registry.decision_for 已保证这点。
         cached = (
             ctx.hitl.registry.decision_for(
@@ -300,7 +302,8 @@ class CapabilityGateway:
                 needs_human_ask, state, ctx, tool_call_id, stage=HITL_STAGE_TOOL)
             if needs_human_ask.reply_as_result:
                 # 答复即结果：重入根本不发生（`ask_user` 走这条）。
-                result_parts, metadata, is_error = _human_reply_as_result(human)
+                result_parts, metadata, is_error = _human_reply_as_result(
+                    human, needs_human_ask)
             else:
                 from ctx_weft.protocols.capability import HumanResumable
                 if not isinstance(provider, HumanResumable):
@@ -568,6 +571,18 @@ class CapabilityGateway:
         """
         if ctx.hitl is None or ctx.waiter is None:
             raise RuntimeError("HITL requested but no HitlService/HitlWaiter wired")
+        # 冷路径重入的决定缓存短路。授权步在 `invoke` 顶上已查过一次（为的是连
+        # `authorizer.authorize()` 都不调）；**工具步只能在这里查**——provider 必须先跑
+        # 到 yield needs_human，才知道这次调用要问人。少了这一查，reconcile 重跑一个
+        # 已答过的 `ask_user` 会走 `open()`（幂等命中那条已终局的请求）→ `waiter.wait()`
+        # 见 `resolved` 判为驱逐 → `HitlPark`：人给过的答案永远送不回模型，任务原地重挂。
+        cached = ctx.hitl.registry.decision_for(
+            ctx.provider_ctx.session_id, tool_call_id, stage)
+        if cached is not None:
+            cached_decision, _resume_state = cached
+            existing = ctx.hitl.registry.find_for_tool_call(
+                ctx.provider_ctx.session_id, tool_call_id, stage)
+            return (existing.id if existing else ""), cached_decision
         req = await ctx.hitl.open(
             ask,
             session_id=ctx.provider_ctx.session_id,
@@ -654,14 +669,29 @@ class CapabilityGateway:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _human_reply_as_result(human: "HitlDecision") -> tuple[list[str], dict, bool]:
+def _human_reply_as_result(
+    human: "HitlDecision", ask: "HitlAsk",
+) -> tuple[list[str], dict, bool]:
     """把人的答复直接变成工具结果（`HitlAsk.reply_as_result=True` 的出口，如 `ask_user`）。
 
     多模态部分经 metadata 的 `CONTENT_PARTS_KEY` 透出，与 provider 自己产出的非文本 part
     走同一条路（`invoke` 里 `metadata.get(CONTENT_PARTS_KEY)` 拼进最终 content）——否则带图
     答复会被 `split_for_tool_result` 拆开后只剩文本部分被使用，图片就此丢失。
+
+    两条**非空的**语义，从旧 `control_capability` 的出口原样移过来（Task 10）：
+
+    - **拒绝**：`outcome == rejected` 时给答复加「Human declined: 」前缀（无正文则用固定句）。
+      不加的话模型只看到一段孤零零的备注，读不出「这是一次拒绝」——把「人不同意」降级成
+      了「人说了句话」。前缀只套在**文本 part** 上（`split_for_tool_result` 已拆开），
+      以图收尾时才不会把前缀拍到图片对象上。
+    - **空答复**：既无文本又无 part 时回落 `ask.prompt`（工具自己的确认文案），而不是把
+      空串当答案送回去——那会在上游变成 `(no output)`，读起来像工具坏了。
     """
     text, parts = split_for_tool_result(human.message)
+    if human.outcome == HITL_OUTCOME_REJECTED:
+        text = f"Human declined: {text}" if text else "Human rejected the request."
+    elif not text and not parts:
+        text = ask.prompt
     metadata: dict = {CONTENT_PARTS_KEY: parts} if parts else {}
     return ([text] if text else []), metadata, False
 

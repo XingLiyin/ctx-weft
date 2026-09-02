@@ -39,11 +39,6 @@ PROVIDER_NAME = "control"
 # runtime-injected context parameter — excluded from LLM schema and from arguments filtering
 _SKIP: frozenset[str] = frozenset({"ctx"})
 
-# Sentinel capability_id for an act plain-text "wait for user" park (no real tool).
-# Used as the HITL request's capability_id so cold-resume routes the reply to
-# USER_PROMPT injection (act plain-text pause resume), not reconcile.
-WAIT_FOR_USER_CAPABILITY_ID = f"{PROVIDER_NAME}:wait_for_user"
-
 # Qualified (LLM-facing) names for the built-in control tools. Use these anywhere
 # a control tool is named to the LLM (prompts, docstrings shown as descriptions).
 FINISH_TASK_NAME = qualify(f"{PROVIDER_NAME}:finish_task")
@@ -698,7 +693,7 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
             for tid, reason in reopen_map.items():
                 await tm.reopen_chain(tid, reason)
 
-        # ask_user：声明「我需要一个人的决定」并立即停——不在此 park、不碰 hitl_manager。
+        # ask_user：声明「我需要一个人的决定」并立即停——不在此 park、不自己等人。
         # 「答复即结果」：gateway 收到 needs_human 后开等待、拿到答复直接回灌为本次工具结果，
         # 因此本 provider **不需要**实现 HumanResumable（spec §2.3）。
         if result.metadata.get(K.HITL_REQUESTED):

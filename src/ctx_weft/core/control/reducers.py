@@ -30,7 +30,6 @@ from ctx_weft.protocols.hitl import (
     PREFACE_NORMAL,
     Delivery,
     HitlDecision,
-    HitlRequest,
     NoResumeDelivery,
     ToolResultDelivery,
     UserTurnDelivery,
@@ -55,51 +54,19 @@ TASK_STATUS_BY_EVENT: dict[EventType, TaskStatus] = {
     EventType.TASK_REQUEUED: "PENDING",
 }
 
-# HITL 状态相关事件（请求 + 各终态）。供"取该 session 待解决 HITL"的轻查询折叠用，
-# 与下面 _apply 的 pending_hitl 折叠语义一致（单一真相）。
+# HITL 各终态事件。`HITL_FOLD_EVENT_TYPES`（见下方 v2 折叠段）与 `RECOVERY_EVENT_TYPES`
+# 共用它，语义与 `fold_hitl_snapshot` 一致（单一真相）。
 _HITL_RESOLVE_TYPES = (
     EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
     EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
 )
-HITL_STATUS_EVENT_TYPES: tuple[EventType, ...] = (EventType.HITL_REQUIRED, *_HITL_RESOLVE_TYPES)
-
-
-def fold_pending_hitl(events: list[Event]) -> dict[str, HitlRequest]:
-    """折叠 HITL 事件 → 仍未解决的 {hitl_id: HitlRequest}（HitlRequired 减去各终态）。
-
-    只需 HITL_STATUS_EVENT_TYPES 这几类事件即可,无需全量回放——崩溃恢复据此既判某 session 是
-    "等人答复 / 崩溃中断",又(等人答复时)直接重建内存 HitlManager（spec/07 §9）。
-    """
-    pending: dict[str, HitlRequest] = {}
-    for ev in events:
-        p = ev.payload or {}
-        rid = p.get("hitl_id", "")
-        if not rid:
-            continue
-        if ev.type == EventType.HITL_REQUIRED:
-            pending[rid] = HitlRequest(
-                id=rid, form=p.get("form", "approval"),
-                session_id=ev.session_id, task_id=ev.task_id or "",
-                agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
-                capability_id=p.get("capability_id", ""), tool_call_id=p.get("tool_call_id", ""),
-                question=p.get("question", ""), context=p.get("context", ""),
-                arguments=p.get("arguments") or {}, questions=p.get("questions") or [],
-            )
-        elif ev.type in _HITL_RESOLVE_TYPES:
-            pending.pop(rid, None)
-    return pending
-
-
-def unresolved_hitl_ids(events: list[Event]) -> set[str]:
-    """仍未解决的 hitl_id 集合（fold_pending_hitl 的键）。"""
-    return set(fold_pending_hitl(events))
 
 
 def fold_pending_task_recap(events: list[Event]) -> dict[str, dict]:
     """折叠 TaskRecap 事件 → 仍未完成的 {task_id: {"boundary", "agent_id"}}（started 减去 done）。
 
     某 task 有 TASK_RECAP_STARTED 而无其后的 TASK_RECAP_DONE，说明该段 background observe 的
-    memory 写未持久完成（崩溃在中途）——恢复据此重跑。同 task_id last-write-wins（仿 fold_pending_hitl）。
+    memory 写未持久完成（崩溃在中途）——恢复据此重跑。同 task_id last-write-wins。
     """
     pending: dict[str, dict] = {}
     for ev in events:
@@ -112,60 +79,6 @@ def fold_pending_task_recap(events: list[Event]) -> dict[str, dict]:
         elif ev.type == EventType.TASK_RECAP_DONE:
             pending.pop(tid, None)
     return pending
-
-
-def fold_cold_hitl_decision(events: list[Event], tool_call_id: str) -> HitlRequest | None:
-    """折出某 tool_call 的**可用**人工决定（冷决定查询,reconcile 短路的跨重启版,spec/07 §6）。
-
-    热路径决定缓存（HitlManager.find_for_tool_call）是纯内存：重启后只重建 pending、不重建
-    已解决,"回答 → 续跑到 reconcile"之间夹一次重启,再入就会把同一问题重新问一遍、丢掉已给
-    的答案。本折叠让短路以事件日志为准。
-
-    "可用"= 事件里记全了执行所需内容：Approved/Rejected 本身即决定;Answered 须带 message
-    （旧事件只有 hitl_id,还原不出答案 → 不可用,调用方重新问、绝不臆造）;Modified 须带
-    modified_arguments（缺了会拿原参执行,违背改参意图）;Cancelled 不是决定。同 tool_call_id
-    多条 Required（重问副本）时,最后一条可用决定胜出。无可用决定 → None。
-    """
-    if not tool_call_id:
-        return None
-    reqs: dict[str, HitlRequest] = {}
-    decided: HitlRequest | None = None
-    for ev in events:
-        p = ev.payload or {}
-        rid = p.get("hitl_id", "")
-        if not rid:
-            continue
-        if ev.type == EventType.HITL_REQUIRED:
-            if p.get("tool_call_id", "") == tool_call_id:
-                reqs[rid] = HitlRequest(
-                    id=rid, form=p.get("form", "approval"),
-                    session_id=ev.session_id, task_id=ev.task_id or "",
-                    capability_id=p.get("capability_id", ""), tool_call_id=tool_call_id,
-                    question=p.get("question", ""), context=p.get("context", ""),
-                    arguments=p.get("arguments") or {}, questions=p.get("questions") or [],
-                )
-            continue
-        req = reqs.get(rid)
-        if req is None:
-            continue
-        if ev.type == EventType.HITL_ANSWERED and p.get("message"):
-            req.resolve(HITL_OUTCOME_ACCEPTED)
-            req.message = content_from_jsonable(p["message"])
-        elif ev.type == EventType.HITL_APPROVED:
-            req.resolve(HITL_OUTCOME_ACCEPTED)
-            req.message = content_from_jsonable(p.get("message", ""))
-        elif ev.type == EventType.HITL_MODIFIED and p.get("modified_arguments") is not None:
-            req.resolve(HITL_OUTCOME_ACCEPTED)
-            req.message = content_from_jsonable(p.get("message", ""))
-            req.modified_arguments = p["modified_arguments"]
-        elif ev.type == EventType.HITL_REJECTED:
-            req.resolve(HITL_OUTCOME_REJECTED)
-            req.message = content_from_jsonable(p.get("message", ""))
-        else:
-            continue  # Cancelled / 缺 message 的 Answered / 缺改参的 Modified → 不可用
-        req.resolved_at = ev.timestamp
-        decided = req
-    return decided
 
 
 def apply_events(events: list[Event], view: RunStateView) -> RunStateView:
@@ -265,14 +178,6 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
             }
             for aid, a in view.agents.items()
         },
-        "pending_hitl": {
-            rid: {
-                "id": h.id, "form": h.form, "session_id": h.session_id,
-                "task_id": h.task_id, "agent_id": h.agent_id, "capability_id": h.capability_id,
-                "tool_call_id": h.tool_call_id, "question": h.question, "context": h.context,
-            }
-            for rid, h in view.pending_hitl.items()
-        },
     }
 
 
@@ -338,17 +243,6 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             template_id=a.get("template_id", ""),
         )
 
-    pending_hitl: dict[str, HitlRequest] = {}
-    for rid, h in data.get("pending_hitl", {}).items():
-        pending_hitl[rid] = HitlRequest(
-            # 旧快照无 form（inspect/replay 工具数据,非恢复真相源）→ 缺省按 approval 降级读。
-            id=h["id"], form=h.get("form", "approval"), session_id=h.get("session_id", ""),
-            task_id=h.get("task_id", ""), agent_id=h.get("agent_id", ""),
-            capability_id=h.get("capability_id", ""),
-            tool_call_id=h.get("tool_call_id", ""), question=h.get("question", ""),
-            context=h.get("context", ""),
-        )
-
     return RunStateView(
         run_id=data.get("run_id", ""),
         session_id=data.get("session_id", ""),
@@ -363,7 +257,6 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
         sessions=sessions,
         tasks=tasks,
         agents=agents,
-        pending_hitl=pending_hitl,
     )
 
 
@@ -637,28 +530,14 @@ def _apply(view: RunStateView, ev: Event) -> None:
     elif t == EventType.ACT_TURN_COMPLETED:
         view.transcript_turns = p.get("turn", view.transcript_turns)
 
-    # ── HITL projection (spec/07 §9) ───────────────────────────────────────────
-    elif t == EventType.HITL_REQUIRED:
-        rid = p.get("hitl_id", "")
-        if rid:
-            view.pending_hitl[rid] = HitlRequest(
-                id=rid,
-                form=p.get("form", "approval"),
-                session_id=ev.session_id,
-                task_id=ev.task_id or "",
-                agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
-                capability_id=p.get("capability_id", ""),
-                tool_call_id=p.get("tool_call_id", ""),
-                question=p.get("question", ""),
-                context=p.get("context", ""),
-                arguments=p.get("arguments") or {},
-                questions=p.get("questions") or [],
-            )
+    # ── HITL projection ───────────────────────────────────────────────────────
+    # **只投影会话状态**：pending HITL 的真相源是 `HitlRegistry`（由 `fold_hitl_snapshot`
+    # 装填），不再在 RunStateView 里另存一份——两份口径不同的 HITL 折叠正是旧实现里
+    # 「重建了 pending 却没重建已解决」那类漂移的来源。
     elif t in (
         EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
         EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
     ):
-        view.pending_hitl.pop(p.get("hitl_id", ""), None)
         # HITL 解决 → 会话回 RUNNING（仅当仍处暂停态，避免覆盖已到的终态）。与 ProjectionUpdater
         # _update_session_if_status 同语义。
         if view.session_status in ("PAUSED", "PAUSED_HITL"):
@@ -732,7 +611,7 @@ def _legacy_delivery(form: str, tool_call_id: str, context: str, task_id: str,
 def _legacy_decision(event_type: str, payload: dict) -> HitlDecision | None:
     """旧 resolve 事件 → 决定；**不可用**则返回 None（按未决重问，绝不臆造）。
 
-    可用性规则原样继承自 `fold_cold_hitl_decision`：Answered 须带 message、
+    可用性规则（旧事件）：Answered 须带 message、
     Modified 须带 modified_arguments、Cancelled 不是决定（spec §12.3.3）。
     """
     # 事件载荷存的是 jsonable 形态（str | list[dict]）——须经 content_from_jsonable 转回
@@ -748,7 +627,7 @@ def _legacy_decision(event_type: str, payload: dict) -> HitlDecision | None:
         return HitlDecision(outcome=HITL_OUTCOME_ACCEPTED, message=message,
                             modified_arguments=args)
     if event_type == EventType.HITL_ANSWERED:
-        # 判据是真值而非 is None：与 fold_cold_hitl_decision 的 `p.get("message")` 同构——
+        # 判据是真值而非 is None：空串同样还原不出答案——
         # 空串/空表同样视为「还原不出答案」，按未决重问，不臆造（Finding 2）。
         if not payload.get("message"):
             return None

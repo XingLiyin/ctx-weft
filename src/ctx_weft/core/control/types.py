@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.protocols.hitl import HitlRequest
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
@@ -109,6 +108,3 @@ class RunStateView:
     sessions: dict[str, SessionView] = field(default_factory=dict)
     tasks: dict[str, TaskView] = field(default_factory=dict)
     agents: dict[str, AgentView] = field(default_factory=dict)
-
-    # Pending HITL requests folded from events (only unresolved; spec/07 §9)
-    pending_hitl: dict[str, "HitlRequest"] = field(default_factory=dict)
