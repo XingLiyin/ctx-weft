@@ -833,6 +833,188 @@ git commit -m "feat(hitl): gateway 接管授权侧等待——登记/热等/park
 
 ---
 
+## Task 4.5: 决定缓存的键补全 session 与 stage（安全修复）
+
+> **本任务是 Task 4 审查发现后插入的。** 根因在计划自身：Task 4 的 `decision_for(tool_call_id)`
+> 只按一个 id 查，扫的是整个 registry。两个后果，一个是安全洞、一个在 Task 5 就会活过来。
+
+**Files:**
+- Modify: `src/ctx_weft/core/hitl/registry.py`
+- Modify: `src/ctx_weft/core/hitl/service.py`
+- Modify: `src/ctx_weft/core/control/reducers.py`（折叠出 stage）
+- Modify: `src/ctx_weft/core/loop/capability_gateway.py`（传 session_id 与 stage）
+- Test: `tests/unit/test_hitl_decision_cache_key.py`
+
+**Interfaces:**
+- Produces：`PendingHitl.stage: str`（core 内部，不进对外视图）；
+  `HitlRegistry.find_for_tool_call(session_id, tool_call_id, stage)`；
+  `HitlRegistry.decision_for(session_id, tool_call_id, stage)`；
+  `HitlService.open(ask, *, session_id, task_id, agent_id="", tool_call_id="", stage)`；
+  `HitlOpened` 载荷新增 `stage`
+
+**两个必须堵住的洞：**
+
+1. **跨会话**：`find_for_tool_call` 不按 session 过滤。LLM 给的 tool_call id 常是 `call_1`
+   这类短值，而 Task 8 会让 runtime 持有一个进程级 registry —— A 会话的批准就能替 B 会话里
+   同名 id 的调用开门。这是授权绕过，不是理论风险。
+2. **跨阶段**：Task 5 加上工具侧 `needs_human` 后，同一 `tool_call_id` 下会同时存在「审批决定」
+   与「工具自己问人的决定」。`max(created_at)` 会让**授权步吃掉工具阶段的答复**，并把它的
+   `modified_arguments` 当成工具参数送进 provider。
+
+- [ ] **Step 1: 写失败的测试**
+
+```python
+"""决定缓存的键必须是 (session_id, tool_call_id, stage)（段 2 · Task 4.5）。"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from ctx_weft.core.hitl.registry import HitlRegistry
+from ctx_weft.protocols.hitl import HitlAsk, HitlDecision, ToolResultDelivery
+
+T0 = datetime(2026, 9, 1, tzinfo=UTC)
+STAGE_AUTHZ = "authz"
+STAGE_TOOL = "tool"
+
+
+def _open(reg, hitl_id, session_id, tool_call_id, stage):
+    return reg.open(
+        HitlAsk(form="approval", delivery=ToolResultDelivery(tool_call_id=tool_call_id)),
+        hitl_id=hitl_id, session_id=session_id, task_id="t1",
+        tool_call_id=tool_call_id, stage=stage, created_at=T0)
+
+
+def test_a_decision_in_one_session_is_invisible_to_another():
+    """跨会话授权绕过：LLM 的 tool_call id 常是 call_1 这类短值，会碰撞。"""
+    reg = HitlRegistry()
+    _open(reg, "hit_1", "s1", "call_1", STAGE_AUTHZ)
+    reg.resolve("hit_1", HitlDecision(outcome="accepted"), T0)
+    assert reg.decision_for("s1", "call_1", STAGE_AUTHZ) is not None
+    assert reg.decision_for("s2", "call_1", STAGE_AUTHZ) is None      # ← 洞在这里
+
+
+def test_an_authz_decision_is_not_consumed_by_the_tool_stage():
+    reg = HitlRegistry()
+    _open(reg, "hit_1", "s1", "call_1", STAGE_AUTHZ)
+    reg.resolve("hit_1", HitlDecision(outcome="accepted"), T0)
+    assert reg.decision_for("s1", "call_1", STAGE_TOOL) is None
+
+
+def test_a_tool_stage_decision_is_not_consumed_by_the_authz_stage():
+    """最危险的一条：工具阶段答复的 modified_arguments 会被当成工具参数送进 provider。"""
+    reg = HitlRegistry()
+    _open(reg, "hit_2", "s1", "call_1", STAGE_TOOL)
+    reg.resolve("hit_2", HitlDecision(outcome="accepted",
+                                      modified_arguments={"command": "rm -rf /"}), T0)
+    assert reg.decision_for("s1", "call_1", STAGE_AUTHZ) is None
+
+
+def test_both_stages_can_coexist_under_one_tool_call_id():
+    reg = HitlRegistry()
+    _open(reg, "hit_1", "s1", "call_1", STAGE_AUTHZ)
+    _open(reg, "hit_2", "s1", "call_1", STAGE_TOOL)
+    reg.resolve("hit_1", HitlDecision(outcome="accepted", message="authz"), T0)
+    reg.resolve("hit_2", HitlDecision(outcome="accepted", message="tool"), T0)
+    assert reg.decision_for("s1", "call_1", STAGE_AUTHZ)[0].message == "authz"
+    assert reg.decision_for("s1", "call_1", STAGE_TOOL)[0].message == "tool"
+
+
+def test_open_is_still_idempotent_within_one_session_and_stage():
+    reg = HitlRegistry()
+    a = _open(reg, "hit_1", "s1", "call_1", STAGE_AUTHZ)
+    b = _open(reg, "hit_2", "s1", "call_1", STAGE_AUTHZ)
+    assert a is b
+
+
+def test_open_is_not_idempotent_across_stages():
+    reg = HitlRegistry()
+    a = _open(reg, "hit_1", "s1", "call_1", STAGE_AUTHZ)
+    b = _open(reg, "hit_2", "s1", "call_1", STAGE_TOOL)
+    assert a is not b
+
+
+async def test_stage_survives_a_restart_via_the_event_payload():
+    """stage 不进事件就等于重启后丢失，两个洞立刻复活。"""
+    from ctx_weft.core.control.reducers import fold_hitl_snapshot
+
+    svc, bus = _service()
+    await svc.open(HitlAsk(form="approval",
+                           delivery=ToolResultDelivery(tool_call_id="call_1")),
+                   session_id="s1", task_id="t1", tool_call_id="call_1",
+                   stage=STAGE_TOOL)
+    snap = fold_hitl_snapshot(bus.events)
+    assert next(iter(snap.pending.values())).stage == STAGE_TOOL
+
+
+def test_legacy_events_infer_their_stage_from_form():
+    """旧数据没有 stage：approval 出自授权步，其余出自工具步。"""
+    from ctx_weft.core.control.reducers import fold_hitl_snapshot
+
+    approval = fold_hitl_snapshot([_legacy_required(form="approval")])
+    question = fold_hitl_snapshot([_legacy_required(form="question")])
+    assert next(iter(approval.pending.values())).stage == STAGE_AUTHZ
+    assert next(iter(question.pending.values())).stage == STAGE_TOOL
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `uv run pytest tests/unit/test_hitl_decision_cache_key.py -v`
+Expected: FAIL —— `open()` 尚无 `stage` 参数
+
+- [ ] **Step 3: 实现**
+
+① `registry.py`：`PendingHitl` 加 `stage: str = ""`；`open()` 加 keyword-only 参数 `stage: str`；
+`find_for_tool_call` / `decision_for` 的签名改为 `(session_id, tool_call_id, stage)`，过滤条件加上
+这两维：
+
+```python
+    def find_for_tool_call(
+        self, session_id: str, tool_call_id: str, stage: str,
+    ) -> PendingHitl | None:
+        """按 (session, tool_call, stage) 取最近一条；空 tool_call_id → None。
+
+        **三维缺一不可**：只按 tool_call_id 查会让 A 会话的批准替 B 会话里同名 id 的调用
+        开门（LLM 的 tool_call id 常是 `call_1` 这类短值），也会让授权步吃掉工具阶段的
+        答复、把它的 modified_arguments 当成工具参数送进 provider。
+        """
+        if not tool_call_id:
+            return None
+        matches = [r for r in self._requests.values()
+                   if r.tool_call_id == tool_call_id
+                   and r.session_id == session_id
+                   and r.stage == stage]
+        return max(matches, key=lambda r: r.created_at) if matches else None
+```
+
+`load_snapshot` 里那个占位项的 id 也要带上三维（`f"loaded:{session_id}:{stage}:{tool_call_id}"`），
+并把 `session_id` / `stage` 填进占位对象，否则装填出来的决定查不到。
+
+② `service.py`：`open()` 透传 `stage`；`HitlOpened` 载荷加 `"stage": req.stage`。
+
+③ `reducers.py`：`HITL_OPENED` 分支读 `p.get("stage", "")`；`HITL_REQUIRED`（legacy）按 form 反推
+——`approval` → `authz`，其余 → `tool`（旧模型里 approval 出自授权步，question/wait 出自工具步）。
+
+④ `capability_gateway.py`：`decision_for` 与 `open` 的调用点补上 `ctx.provider_ctx.session_id`
+与 `stage="authz"`。
+
+模块级常量 `HITL_STAGE_AUTHZ = "authz"` / `HITL_STAGE_TOOL = "tool"` 放在 `core/hitl/registry.py`，
+**不进 protocols**——它是 core 的内部键，不是对外契约。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `uv run pytest tests/unit/test_hitl_decision_cache_key.py tests/unit/test_hitl_registry.py tests/unit/test_hitl_registry_load.py tests/unit/test_hitl_service.py tests/unit/test_hitl_fold_snapshot.py tests/unit/test_gateway_authz_hitl.py -v`
+Expected: 全通过。段 1 的既有测试会因签名变化需要同步更新——**这是本任务的一部分**，不是连带。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add -A src tests
+git commit -m "fix(hitl)!: 决定缓存的键补全 session 与 stage，堵住跨会话与跨阶段两个洞"
+```
+
+---
+
 ## Task 5: gateway 的工具流路径
 
 **Files:**
