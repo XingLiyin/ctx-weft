@@ -2258,10 +2258,11 @@ class CtxWeftRuntime:
                     logger.exception("HITL 恢复：降级占位也失败 (key=%s)", key)
 
     def _derive_paused_status(self, session_id: str) -> str:
-        """由**未决 HITL 的 delivery** 推导会话暂停态；无未决 → `""`。
+        """由**未决 HITL 的 delivery** 推导**面板提示**；无未决 → `""`。
 
-        判据在 `core.hitl.status.paused_status_for`——`reducers._apply` 的 `HITL_OPENED`
-        分支与本处共用**同一份**，不各写一遍（复审 I4）。
+        判据在 `core.hitl.status.paused_status_for`。返回的 `"PAUSED"` / `"PAUSED_HITL"`
+        **不是 `SessionStatus`**——那个值域已把两者合并成 `WAITING`。这里回答的是
+        「等的是面板还是一句话」，是 delivery 的性质。唯一去处是下面那个 host 只读入口。
         """
         return paused_status_for(
             r.delivery for r in self.hitl_registry.list_pending(session_id=session_id))

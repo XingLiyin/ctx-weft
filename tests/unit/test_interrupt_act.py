@@ -56,7 +56,6 @@ async def test_interrupt_parks_instead_of_cancel():
     with pytest.raises(HitlPark):
         await ActStep().execute(state, ctx)
 
-    assert state.session.status == "PAUSED"
     assert task.status == "SUSPENDED"
     pend = hitl.list_pending("s1")
     # 旧断言看的是 capability_id sentinel；新契约用 delivery 表达同一件事（spec §5）。
@@ -84,7 +83,6 @@ async def test_interrupt_midstream_commits_partial_marked():
     with pytest.raises(HitlPark):
         await ActStep().execute(state, ctx)
 
-    assert state.session.status == "PAUSED"
     assert task.status == "SUSPENDED"
     recs = await mem.recall_recent(state.scope, [MemoryEventType.LLM_RESPONSE], 10, ctx.provider_ctx)
     hit = [r for r in recs if "partial reply" in (r.content or "")]

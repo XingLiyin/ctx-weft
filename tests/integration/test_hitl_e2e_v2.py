@@ -405,7 +405,6 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
     state = await handle.wait_for_finish(timeout=5.0)
     assert state is not None
     assert state.task.status == "AWAITING_HUMAN"
-    assert state.session.status == "PAUSED"
 
     pending = runtime.hitl_registry.list_pending(session_id=sid)
     assert len(pending) == 1

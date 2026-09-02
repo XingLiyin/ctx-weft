@@ -1,5 +1,7 @@
-"""SessionStatus 字面量仍保留 PAUSED/PAUSED_HITL（Task 9 才收敛掉）；但 reducer 的
-SESSION_PAUSED_HITL legacy 折叠分支自 Task 7 起把两档统一折进当前词表的 WAITING。"""
+"""存量日志里的 `SessionPausedHitl` 折进当前词表的 `WAITING`（Task 7 起，两种 form 都是）。
+
+`SessionStatus` 值域自 Task 9 起不再含 `PAUSED` / `PAUSED_HITL`——值域本身由
+`tests/unit/test_session_status_domain.py` 钉住。"""
 
 from __future__ import annotations
 
@@ -8,12 +10,6 @@ import pytest
 from ctx_weft.protocols.events import EventType
 
 pytestmark = pytest.mark.asyncio
-
-
-async def test_session_status_literal_includes_paused() -> None:
-    from typing import get_args
-    from ctx_weft.core.state.models import SessionStatus
-    assert "PAUSED" in get_args(SessionStatus)
 
 
 # `SessionPausedHitl` 不再由 core 发出——会话暂停态改由 pending 集合的 delivery 推导
@@ -34,7 +30,7 @@ def _paused_event(session_id: str, form: str):
 @pytest.mark.parametrize("form", ["wait", "question", "approval"])
 async def test_session_paused_hitl_folds_to_waiting_regardless_of_form(form) -> None:
     """L 档折叠目标是当前词表：PAUSED/PAUSED_HITL 两档合并进单一 WAITING
-    （Task 9 从 SessionStatus 值域里收敛掉 PAUSED/PAUSED_HITL），故不再按 form 分流。"""
+    （Task 9 已把两者从 SessionStatus 值域里删掉），故不再按 form 分流。"""
     from ctx_weft.core.control.reducers import reduce_events
     view = reduce_events([_paused_event("s1", form)], run_id="r1")
     assert view.session_status == "WAITING"

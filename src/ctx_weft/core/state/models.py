@@ -82,16 +82,18 @@ def deserialize_settings(d: dict | None) -> TaskSettings:
 
 
 SessionStatus = Literal[
-    "QUEUED",
-    "RUNNING",
-    "INTERRUPTED",
+    "RUNNING",          # 有 task 在跑
+    "WAITING",          # 停着，但正常——都在等人 / 等外部输入
+    "INTERRUPTED",      # 停着，异常——系统故障，等 /resume（非终态）
     "SUCCEEDED",
     "FAILED",
-    "TIMEOUT",
     "CANCELED",
-    "PAUSED_HITL",
-    "PAUSED",
 ]
+# 值域 == `core.orchestrator.session_state` 状态机的可达状态。
+# 已删除：`QUEUED` / `TIMEOUT`（core 从未赋值）；`PAUSED` / `PAUSED_HITL`
+# （两者的差别是「前端要不要出面板」，那是 `HitlOpened.delivery` 的性质，不是会话状态，
+# 已合并成 `WAITING`）。存量日志里的旧值由 `core.control.reducers` 折叠，见
+# `docs/upgrade/2026-09-02-session-status-ownership.md`。
 
 TaskStatus = Literal[
     "PENDING",

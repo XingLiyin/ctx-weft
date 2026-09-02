@@ -635,7 +635,10 @@ def interrupt_edit_note(prev_request: str, new_input: str) -> str:
 async def _park_wait_for_user(
     state: LoopState, ctx: LoopContext, *, source: str, edit: bool = False,
 ) -> None:
-    """起 wait_for_user 冷 park：会话 PAUSED、任务 SUSPENDED，抛 HitlPark。
+    """起 wait_for_user 冷 park：任务 SUSPENDED、抛 HitlPark。
+
+    **不写会话状态**：会话状态的唯一写者是 `SessionManager`，它由 TM 的
+    `TaskQueueBlocked` 信号推出 `SessionWaiting`（2026-09-02 会话状态所有权重构）。
 
     续跑方式由 **delivery 显式声明**，不再靠 `form == "wait"` + sentinel capability_id
     这组跨三个模块的魔法字符串（spec §5）。``source``/``edit`` 只决定 preface：
@@ -656,7 +659,6 @@ async def _park_wait_for_user(
         stage=HITL_STAGE_TOOL,
     )
     # 不建等待槽 —— 本调用方随即 park 释放协程而非 await，应答必然走冷续跑。
-    state.session.status = "PAUSED"
     state.task.status = "SUSPENDED"
     raise HitlPark(hitl_id=req.id)
 
