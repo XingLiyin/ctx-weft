@@ -70,14 +70,16 @@ class HitlService:
         task_id: str,
         agent_id: str = "",
         tool_call_id: str = "",
+        stage: str,
     ) -> PendingHitl:
-        """登记一个请求并发 `HitlOpened`。同 tool_call_id 复用既有请求且**不重发事实**。"""
-        existing = self.registry.find_for_tool_call(tool_call_id)
+        """登记一个请求并发 `HitlOpened`。同 `(session_id, tool_call_id, stage)` 复用既有
+        请求且**不重发事实**。"""
+        existing = self.registry.find_for_tool_call(session_id, tool_call_id, stage)
         if existing is not None:
             return existing
         req = self.registry.open(
             ask, hitl_id=self._new_id(), session_id=session_id, task_id=task_id,
-            agent_id=agent_id, tool_call_id=tool_call_id, created_at=self._now(),
+            agent_id=agent_id, tool_call_id=tool_call_id, stage=stage, created_at=self._now(),
         )
         logger.info("HITL opened [%s]: %s (%s)", req.form, req.id, req.prompt[:80])
         await self._emit(EventType.HITL_OPENED, req, {
@@ -90,6 +92,7 @@ class HitlService:
             "fields": list(req.fields),
             "proposal": req.proposal,
             "tool_call_id": req.tool_call_id,
+            "stage": req.stage,
             "agent_id": req.agent_id,
             "resume_state": req.resume_state,
             "reply_as_result": req.reply_as_result,

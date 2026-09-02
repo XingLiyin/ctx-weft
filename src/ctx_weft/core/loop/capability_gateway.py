@@ -31,6 +31,7 @@ from ctx_weft.core.content import (
 )
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.events import EventBus
+from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.capability import (
@@ -189,7 +190,11 @@ class CapabilityGateway:
         authorizer = self._get_authorizer(cap.id)
         # 决定缓存短路（冷路径重入）：registry 已有该 tool_call 的人工决定 → 不重问。
         # 内存 pending（活的等待）不算「已答过」，registry.decision_for 已保证这点。
-        cached = ctx.hitl.registry.decision_for(tool_call_id) if ctx.hitl else None
+        cached = (
+            ctx.hitl.registry.decision_for(
+                ctx.provider_ctx.session_id, tool_call_id, HITL_STAGE_AUTHZ)
+            if ctx.hitl else None
+        )
         try:
             if cached is not None:
                 cached_decision, _resume_state = cached
@@ -511,6 +516,7 @@ class CapabilityGateway:
             task_id=state.task.id,
             agent_id=state.agent.id,
             tool_call_id=tool_call_id,
+            stage=HITL_STAGE_AUTHZ,
         )
         human = await ctx.waiter.wait(req.id)
         if human is None:

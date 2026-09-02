@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
+from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HitlRegistry, PendingHitl
 from ctx_weft.protocols.hitl import (
     HitlAsk,
     HitlDecision,
@@ -37,9 +37,10 @@ def _ask(tool_call_id: str = "call_1") -> HitlAsk:
 
 
 def _open(reg: HitlRegistry, hitl_id: str = "hit_1", tool_call_id: str = "call_1",
-          at: datetime = T0) -> PendingHitl:
-    return reg.open(_ask(tool_call_id), hitl_id=hitl_id, session_id="s1", task_id="t1",
-                    agent_id="a1", tool_call_id=tool_call_id, created_at=at)
+          at: datetime = T0, session_id: str = "s1",
+          stage: str = HITL_STAGE_AUTHZ) -> PendingHitl:
+    return reg.open(_ask(tool_call_id), hitl_id=hitl_id, session_id=session_id, task_id="t1",
+                    agent_id="a1", tool_call_id=tool_call_id, stage=stage, created_at=at)
 
 
 def test_open_registers_a_pending_request():
@@ -64,10 +65,10 @@ def test_open_with_empty_tool_call_id_always_creates_a_new_request():
     reg = HitlRegistry()
     a = reg.open(HitlAsk(form="wait", delivery=UserTurnDelivery(task_id="t1")),
                  hitl_id="hit_1", session_id="s1", task_id="t1", agent_id="a1",
-                 tool_call_id="", created_at=T0)
+                 tool_call_id="", stage=HITL_STAGE_AUTHZ, created_at=T0)
     b = reg.open(HitlAsk(form="wait", delivery=UserTurnDelivery(task_id="t1")),
                  hitl_id="hit_2", session_id="s1", task_id="t1", agent_id="a1",
-                 tool_call_id="", created_at=T0)
+                 tool_call_id="", stage=HITL_STAGE_AUTHZ, created_at=T0)
     assert a is not b
 
 
@@ -108,7 +109,7 @@ def test_list_pending_filters_by_session():
     reg = HitlRegistry()
     _open(reg, hitl_id="hit_1", tool_call_id="call_1")
     reg.open(_ask("call_2"), hitl_id="hit_2", session_id="s2", task_id="t2",
-             agent_id="a1", tool_call_id="call_2", created_at=T0)
+             agent_id="a1", tool_call_id="call_2", stage=HITL_STAGE_AUTHZ, created_at=T0)
     assert [r.id for r in reg.list_pending(session_id="s2")] == ["hit_2"]
 
 
@@ -118,9 +119,9 @@ def test_decision_for_returns_decision_and_resume_state_as_a_pair():
     ask = HitlAsk(form="question", delivery=ToolResultDelivery(tool_call_id="call_1"),
                   resume_state={"plan": "deploy-7"})
     reg.open(ask, hitl_id="hit_1", session_id="s1", task_id="t1", agent_id="a1",
-             tool_call_id="call_1", created_at=T0)
+             tool_call_id="call_1", stage=HITL_STAGE_AUTHZ, created_at=T0)
     reg.resolve("hit_1", HitlDecision(outcome="accepted", message="go"), T0)
-    got = reg.decision_for("call_1")
+    got = reg.decision_for("s1", "call_1", HITL_STAGE_AUTHZ)
     assert got is not None
     decision, resume_state = got
     assert decision.message == "go" and resume_state == {"plan": "deploy-7"}
@@ -130,25 +131,26 @@ def test_decision_for_returns_none_while_still_pending():
     """内存 pending = 活的等待，不得被当成「已答过」。"""
     reg = HitlRegistry()
     _open(reg)
-    assert reg.decision_for("call_1") is None
+    assert reg.decision_for("s1", "call_1", HITL_STAGE_AUTHZ) is None
 
 
 def test_decision_for_empty_or_unknown_tool_call_id_is_none():
     reg = HitlRegistry()
     _open(reg)
-    assert reg.decision_for("") is None
-    assert reg.decision_for("other") is None
+    assert reg.decision_for("s1", "", HITL_STAGE_AUTHZ) is None
+    assert reg.decision_for("s1", "other", HITL_STAGE_AUTHZ) is None
 
 
 def test_gc_trims_oldest_resolved_and_never_touches_pending():
     reg = HitlRegistry(max_resolved=1)
     for i in (1, 2):
         reg.open(_ask(f"call_{i}"), hitl_id=f"hit_{i}", session_id="s1", task_id="t1",
-                 agent_id="a1", tool_call_id=f"call_{i}", created_at=T0)
+                 agent_id="a1", tool_call_id=f"call_{i}", stage=HITL_STAGE_AUTHZ,
+                 created_at=T0)
         reg.resolve(f"hit_{i}", HitlDecision(outcome="accepted"),
                     T0 + timedelta(seconds=i))
     reg.open(_ask("call_3"), hitl_id="hit_3", session_id="s1", task_id="t1",
-             agent_id="a1", tool_call_id="call_3", created_at=T0)
+             agent_id="a1", tool_call_id="call_3", stage=HITL_STAGE_AUTHZ, created_at=T0)
     reg.gc()
     assert reg.get("hit_1") is None               # 最旧的已终局项被裁剪
     assert reg.get("hit_2") is not None

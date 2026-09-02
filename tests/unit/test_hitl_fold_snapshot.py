@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from ctx_weft.core.control.reducers import fold_hitl_snapshot
+from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL
 from ctx_weft.protocols import ImagePart, TextPart
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import (
@@ -25,6 +26,11 @@ def _ev(event_type: str, payload: dict, *, seq: int = 0, task_id: str = "t1",
     return Event(id=f"evt_{seq}", run_id=None, sequence=seq, session_id="s1",
                  type=event_type, timestamp=T0 + timedelta(seconds=seq),
                  task_id=task_id, agent_id=agent_id, payload=payload)
+
+
+def _key(tool_call_id: str, stage: str) -> tuple[str, str, str]:
+    """`decisions_for` 的键——所有测试事件都落在 session "s1"（第 2 段 · Task 4.5）。"""
+    return "s1", tool_call_id, stage
 
 
 # ── 旧事件（legacy）─────────────────────────────────────────────────────────────
@@ -46,6 +52,7 @@ def test_legacy_required_becomes_pending_with_tool_result_delivery():
     assert req.prompt == "Allow bash?" and req.proposal == {"command": "ls"}
     assert req.delivery == ToolResultDelivery(tool_call_id="call_1")
     assert req.agent_id == "a1"
+    assert req.stage == HITL_STAGE_AUTHZ
 
 
 def test_legacy_wait_form_becomes_user_turn_delivery():
@@ -84,7 +91,7 @@ def test_legacy_approved_resolves_to_accepted():
         _legacy_required(),
         _ev(EventType.HITL_APPROVED, {"hitl_id": "hit_1"}, seq=1)])
     assert snap.pending == {}
-    decision, resume_state = snap.decisions_for["call_1"]
+    decision, resume_state = snap.decisions_for[_key("call_1", HITL_STAGE_AUTHZ)]
     assert decision.outcome == "accepted" and decision.modified_arguments is None
     assert resume_state is None
 
@@ -94,7 +101,7 @@ def test_legacy_modified_resolves_to_accepted_with_arguments():
         _legacy_required(),
         _ev(EventType.HITL_MODIFIED,
             {"hitl_id": "hit_1", "modified_arguments": {"command": "ls -l"}}, seq=1)])
-    decision, _ = snap.decisions_for["call_1"]
+    decision, _ = snap.decisions_for[_key("call_1", HITL_STAGE_AUTHZ)]
     assert decision.outcome == "accepted"
     assert decision.modified_arguments == {"command": "ls -l"}
 
@@ -103,7 +110,7 @@ def test_legacy_answered_carries_its_message():
     snap = fold_hitl_snapshot([
         _legacy_required(form="question"),
         _ev(EventType.HITL_ANSWERED, {"hitl_id": "hit_1", "message": "yes"}, seq=1)])
-    decision, _ = snap.decisions_for["call_1"]
+    decision, _ = snap.decisions_for[_key("call_1", HITL_STAGE_TOOL)]
     assert decision.outcome == "accepted" and decision.message == "yes"
 
 
@@ -111,13 +118,14 @@ def test_legacy_rejected_and_cancelled_map_to_their_outcomes():
     rejected = fold_hitl_snapshot([
         _legacy_required(),
         _ev(EventType.HITL_REJECTED, {"hitl_id": "hit_1", "message": "no"}, seq=1)])
-    assert rejected.decisions_for["call_1"][0].outcome == "rejected"
+    assert rejected.decisions_for[_key("call_1", HITL_STAGE_AUTHZ)][0].outcome == "rejected"
 
     cancelled = fold_hitl_snapshot([
         _legacy_required(),
         _ev(EventType.HITL_CANCELLED, {"hitl_id": "hit_1"}, seq=1)])
     assert cancelled.pending == {}
-    assert "call_1" not in cancelled.decisions_for   # cancelled 不是可用决定
+    # cancelled 不是可用决定
+    assert _key("call_1", HITL_STAGE_AUTHZ) not in cancelled.decisions_for
 
 
 def test_answered_without_message_is_not_a_usable_decision():
@@ -125,7 +133,7 @@ def test_answered_without_message_is_not_a_usable_decision():
     snap = fold_hitl_snapshot([
         _legacy_required(form="question"),
         _ev(EventType.HITL_ANSWERED, {"hitl_id": "hit_1"}, seq=1)])
-    assert "call_1" not in snap.decisions_for
+    assert _key("call_1", HITL_STAGE_TOOL) not in snap.decisions_for
     assert snap.pending == {}          # 已终局，故不在 pending；但也不可用作决定
 
 
@@ -134,7 +142,7 @@ def test_modified_without_arguments_is_not_a_usable_decision():
     snap = fold_hitl_snapshot([
         _legacy_required(),
         _ev(EventType.HITL_MODIFIED, {"hitl_id": "hit_1"}, seq=1)])
-    assert "call_1" not in snap.decisions_for
+    assert _key("call_1", HITL_STAGE_AUTHZ) not in snap.decisions_for
 
 
 def test_session_paused_hitl_is_ignored():
@@ -147,13 +155,14 @@ def test_session_paused_hitl_is_ignored():
 
 # ── 新事件 ──────────────────────────────────────────────────────────────────────
 
-def _opened(hitl_id="hit_9", delivery=None, resume_state=None, seq=0) -> Event:
+def _opened(hitl_id="hit_9", delivery=None, resume_state=None, seq=0,
+           stage=HITL_STAGE_TOOL) -> Event:
     return _ev(EventType.HITL_OPENED, {
         "hitl_id": hitl_id, "form": "question",
         "delivery": delivery or {"kind": "tool_result", "tool_call_id": "call_9"},
         "subject_id": "deploy:apply", "prompt": "确认部署？", "detail": "",
         "fields": [], "proposal": None, "tool_call_id": "call_9", "agent_id": "a1",
-        "resume_state": resume_state, "reply_as_result": False,
+        "resume_state": resume_state, "reply_as_result": False, "stage": stage,
     }, seq=seq)
 
 
@@ -162,6 +171,7 @@ def test_new_opened_folds_into_pending():
     req = snap.pending["hit_9"]
     assert req.delivery == ToolResultDelivery(tool_call_id="call_9")
     assert req.subject_id == "deploy:apply" and req.prompt == "确认部署？"
+    assert req.stage == HITL_STAGE_TOOL
 
 
 def test_new_user_turn_delivery_round_trips():
@@ -179,7 +189,7 @@ def test_new_resolved_pairs_the_decision_with_its_resume_state():
             {"hitl_id": "hit_9", "outcome": "accepted", "message": "go",
              "claimed": False}, seq=1)])
     assert snap.pending == {}
-    decision, resume_state = snap.decisions_for["call_9"]
+    decision, resume_state = snap.decisions_for[_key("call_9", HITL_STAGE_TOOL)]
     assert decision.outcome == "accepted" and decision.message == "go"
     assert resume_state == {"plan": "deploy-7"}
 
@@ -190,7 +200,7 @@ def test_new_resolved_with_host_custom_outcome_is_passed_through():
         _opened(),
         _ev(EventType.HITL_RESOLVED,
             {"hitl_id": "hit_9", "outcome": "escalated", "claimed": False}, seq=1)])
-    assert snap.decisions_for["call_9"][0].outcome == "escalated"
+    assert snap.decisions_for[_key("call_9", HITL_STAGE_TOOL)][0].outcome == "escalated"
 
 
 def test_last_usable_decision_wins_for_the_same_tool_call():
@@ -200,7 +210,7 @@ def test_last_usable_decision_wins_for_the_same_tool_call():
         _ev(EventType.HITL_REJECTED, {"hitl_id": "hit_1", "message": "no"}, seq=1),
         _legacy_required(hitl_id="hit_2", seq=2),
         _ev(EventType.HITL_APPROVED, {"hitl_id": "hit_2"}, seq=3)])
-    assert snap.decisions_for["call_1"][0].outcome == "accepted"
+    assert snap.decisions_for[_key("call_1", HITL_STAGE_AUTHZ)][0].outcome == "accepted"
 
 
 def test_empty_event_list_yields_an_empty_snapshot():
@@ -222,7 +232,7 @@ def test_legacy_answered_multimodal_message_round_trips_to_content_parts():
                 {"type": "image", "data": "abc", "media_type": "image/png"},
             ],
         }, seq=1)])
-    decision, _ = snap.decisions_for["call_1"]
+    decision, _ = snap.decisions_for[_key("call_1", HITL_STAGE_TOOL)]
     assert decision.message == [
         TextPart(text="here"),
         ImagePart(data="abc", media_type="image/png", source_type="base64"),
@@ -236,7 +246,7 @@ def test_new_resolved_multimodal_message_round_trips_to_content_parts():
             "hitl_id": "hit_9", "outcome": "accepted", "claimed": False,
             "message": [{"type": "text", "text": "go"}],
         }, seq=1)])
-    decision, _ = snap.decisions_for["call_9"]
+    decision, _ = snap.decisions_for[_key("call_9", HITL_STAGE_TOOL)]
     assert decision.message == [TextPart(text="go")]
 
 
@@ -245,7 +255,7 @@ def test_legacy_answered_with_empty_message_is_not_a_usable_decision():
     snap = fold_hitl_snapshot([
         _legacy_required(form="question"),
         _ev(EventType.HITL_ANSWERED, {"hitl_id": "hit_1", "message": ""}, seq=1)])
-    assert "call_1" not in snap.decisions_for
+    assert _key("call_1", HITL_STAGE_TOOL) not in snap.decisions_for
 
 
 # ── 回归修复（final review：reply_as_result / detail / pop 顺序）───────────────────
@@ -279,4 +289,4 @@ def test_malformed_hitl_resolved_with_empty_outcome_leaves_request_pending():
         _opened(),
         _ev(EventType.HITL_RESOLVED, {"hitl_id": "hit_9", "outcome": ""}, seq=1)])
     assert "hit_9" in snap.pending
-    assert "call_9" not in snap.decisions_for
+    assert _key("call_9", HITL_STAGE_TOOL) not in snap.decisions_for

@@ -29,6 +29,11 @@ if TYPE_CHECKING:
 #: 故取最小值即可（GC 排序用 resolved_at，装填项无 resolved_at 时回落到它）。
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
+#: 决定缓存键的第三维——**core 内部键，不进 protocols**：host 不需要知道「谁问的」，
+#: 只有 gateway（授权步）与工具 provider（工具步）自己需要区分（Task 4.5）。
+HITL_STAGE_AUTHZ = "authz"
+HITL_STAGE_TOOL = "tool"
+
 
 class WaitSlot(Protocol):
     """热等待的会合槽——**只有一个操作**的不透明句柄。
@@ -59,6 +64,10 @@ class PendingHitl:
     fields: list[dict[str, Any]] = field(default_factory=list)
     proposal: dict[str, Any] | None = None
     tool_call_id: str = ""                       # 幂等键 + 决定缓存键
+    #: 决定缓存键的第三维（连同 session_id、tool_call_id）：`HITL_STAGE_AUTHZ` /
+    #: `HITL_STAGE_TOOL`。**只按 tool_call_id 查会让授权步吃掉工具阶段的答复**，见
+    #: `find_for_tool_call` docstring。core 内部键，不出 `to_view()`。
+    stage: str = ""
     resume_state: dict[str, Any] | None = None   # 不透明，core 永不解读
     reply_as_result: bool = False
     #: 终局决定。**唯一的结局存储**——`resolved` 由它推导，不存第二份。
@@ -101,13 +110,15 @@ class HitlRegistry:
         task_id: str,
         agent_id: str = "",
         tool_call_id: str = "",
+        stage: str,
         created_at: datetime,
     ) -> PendingHitl:
-        """登记一个请求。同 `tool_call_id` 已有记录 → **复用**，不新建（幂等，spec §10）。
+        """登记一个请求。同 `(session_id, tool_call_id, stage)` 已有记录 → **复用**，不新建
+        （幂等，spec §10）。
 
         空 `tool_call_id` 不作幂等键——`UserTurn` 的冷 park 本就没有 tool_call。
         """
-        existing = self.find_for_tool_call(tool_call_id)
+        existing = self.find_for_tool_call(session_id, tool_call_id, stage)
         if existing is not None:
             return existing
         req = PendingHitl(
@@ -115,7 +126,7 @@ class HitlRegistry:
             agent_id=agent_id, delivery=ask.delivery, created_at=created_at,
             subject_id=ask.subject_id, prompt=ask.prompt, detail=ask.detail,
             fields=list(ask.fields), proposal=ask.proposal, tool_call_id=tool_call_id,
-            resume_state=ask.resume_state, reply_as_result=ask.reply_as_result,
+            stage=stage, resume_state=ask.resume_state, reply_as_result=ask.reply_as_result,
         )
         self._requests[hitl_id] = req
         return req
@@ -175,14 +186,17 @@ class HitlRegistry:
         for hitl_id, req in snapshot.pending.items():
             req.slot = None
             self._requests.setdefault(hitl_id, req)
-        for tool_call_id, (decision, resume_state) in snapshot.decisions_for.items():
-            live = self.find_for_tool_call(tool_call_id)
+        for (session_id, tool_call_id, stage), (decision, resume_state) in (
+            snapshot.decisions_for.items()
+        ):
+            live = self.find_for_tool_call(session_id, tool_call_id, stage)
             if live is not None:
                 continue                       # 活 pending 或已装填的决定，均不覆盖
             placeholder = PendingHitl(
-                id=f"loaded:{tool_call_id}", form="", session_id="", task_id="",
+                id=f"loaded:{session_id}:{stage}:{tool_call_id}", form="",
+                session_id=session_id, task_id="",
                 agent_id="", delivery=NoResumeDelivery(), created_at=_EPOCH,
-                tool_call_id=tool_call_id, resume_state=resume_state,
+                tool_call_id=tool_call_id, stage=stage, resume_state=resume_state,
                 decision=decision,
             )
             self._requests[placeholder.id] = placeholder
@@ -193,16 +207,27 @@ class HitlRegistry:
     def get(self, hitl_id: str) -> PendingHitl | None:
         return self._requests.get(hitl_id)
 
-    def find_for_tool_call(self, tool_call_id: str) -> PendingHitl | None:
-        """按 tool_call_id 取最近一条记录；空 id → None。"""
+    def find_for_tool_call(
+        self, session_id: str, tool_call_id: str, stage: str,
+    ) -> PendingHitl | None:
+        """按 (session, tool_call, stage) 取最近一条；空 tool_call_id → None。
+
+        **三维缺一不可**：只按 tool_call_id 查会让 A 会话的批准替 B 会话里同名 id 的调用
+        开门（LLM 的 tool_call id 常是 `call_1` 这类短值——跨会话授权绕过），也会让授权步
+        吃掉工具阶段的答复、把它的 modified_arguments 当成工具参数送进 provider（跨阶段
+        混淆，Task 4.5）。
+        """
         if not tool_call_id:
             return None
-        matches = [r for r in self._requests.values() if r.tool_call_id == tool_call_id]
-        if not matches:
-            return None
-        return max(matches, key=lambda r: r.created_at)
+        matches = [r for r in self._requests.values()
+                   if r.tool_call_id == tool_call_id
+                   and r.session_id == session_id
+                   and r.stage == stage]
+        return max(matches, key=lambda r: r.created_at) if matches else None
 
-    def decision_for(self, tool_call_id: str) -> tuple[HitlDecision, dict[str, Any] | None] | None:
+    def decision_for(
+        self, session_id: str, tool_call_id: str, stage: str,
+    ) -> tuple[HitlDecision, dict[str, Any] | None] | None:
         """决定缓存查询：`(decision, resume_state)` 成对返回。
 
         成对是硬要求——冷路径重入调的是 `resume(ask_id, decision, resume_state, ctx)`，
@@ -210,7 +235,7 @@ class HitlRegistry:
 
         仍 pending（活的等待）→ None：不得把它当成「已答过」。
         """
-        req = self.find_for_tool_call(tool_call_id)
+        req = self.find_for_tool_call(session_id, tool_call_id, stage)
         if req is None or req.decision is None:
             return None
         return req.decision, req.resume_state

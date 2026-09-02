@@ -15,7 +15,7 @@ from ctx_weft.core.content import (
     content_to_jsonable,
 )
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
-from ctx_weft.core.hitl.registry import PendingHitl
+from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
 from ctx_weft.core.state.models import TaskStatus
 from ctx_weft.protocols.events import Event, EventType
@@ -786,7 +786,8 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 created_at=ev.timestamp, subject_id=p.get("subject_id", ""),
                 prompt=p.get("prompt", ""), detail=p.get("detail", ""),
                 fields=list(p.get("fields") or []), proposal=p.get("proposal"),
-                tool_call_id=p.get("tool_call_id", ""), resume_state=p.get("resume_state"),
+                tool_call_id=p.get("tool_call_id", ""), stage=p.get("stage", ""),
+                resume_state=p.get("resume_state"),
                 reply_as_result=bool(p.get("reply_as_result", False)),
             )
             opened[rid] = req
@@ -795,12 +796,16 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
         elif ev.type == EventType.HITL_REQUIRED:
             form = p.get("form", "approval")
             tool_call_id = p.get("tool_call_id", "")
+            # 旧模型没有 stage 字段：approval 出自授权步（HumanGatedAuthorizer 的
+            # needs_human），question/wait 等其余 form 出自工具步（ask_user 等 provider 自问）。
+            stage = HITL_STAGE_AUTHZ if form == "approval" else HITL_STAGE_TOOL
             req = PendingHitl(
                 id=rid, form=form, session_id=ev.session_id, task_id=ev.task_id or "",
                 agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
                 delivery=_legacy_delivery(form, tool_call_id, p.get("context", ""),
                                           ev.task_id or "", hitl_id=rid),
                 created_at=ev.timestamp, subject_id=p.get("capability_id", ""),
+                stage=stage,
                 prompt=p.get("question", ""),
                 # wait 表单的旧 context 存的是模式标记（"plain_text"/"interrupt"/
                 # "interrupt:edit"），不是人类可读文案——那份语义已经由上面的 delivery.preface
@@ -832,7 +837,8 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 modified_arguments=p.get("modified_arguments"),
             )
             if outcome != HITL_OUTCOME_CANCELLED and req.tool_call_id:
-                snap.decisions_for[req.tool_call_id] = (decision, req.resume_state)
+                key = (req.session_id, req.tool_call_id, req.stage)
+                snap.decisions_for[key] = (decision, req.resume_state)
 
         elif ev.type in _HITL_RESOLVE_TYPES:
             snap.pending.pop(rid, None)
@@ -840,6 +846,7 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
             decision = _legacy_decision(ev.type, p)
             if req is None or decision is None or not req.tool_call_id:
                 continue
-            snap.decisions_for[req.tool_call_id] = (decision, req.resume_state)
+            key = (req.session_id, req.tool_call_id, req.stage)
+            snap.decisions_for[key] = (decision, req.resume_state)
 
     return snap

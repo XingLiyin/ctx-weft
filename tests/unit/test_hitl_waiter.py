@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ctx_weft.core.hitl.registry import HitlRegistry
+from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HitlRegistry
 from ctx_weft.core.loop.hitl_waiter import FutureWaitSlot, HitlWaiter
 from ctx_weft.protocols.hitl import HitlAsk, HitlDecision, ToolResultDelivery
 
@@ -24,6 +24,7 @@ def _open(reg: HitlRegistry, hitl_id: str = "hit_1") -> None:
         session_id="s1",
         task_id="t1",
         tool_call_id="call_1",
+        stage=HITL_STAGE_AUTHZ,
         created_at=T0,
     )
 

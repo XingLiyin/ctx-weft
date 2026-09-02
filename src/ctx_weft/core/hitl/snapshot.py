@@ -17,9 +17,11 @@ from ctx_weft.protocols.hitl import HitlDecision
 class HitlSnapshot:
     """`pending`：仍未终局的请求。
 
-    `decisions_for`：`tool_call_id → (决定, resume_state)`。**成对**是硬要求——
-    冷路径重入调 `resume(ask_id, decision, resume_state, ctx)`，丢掉 resume_state
-    就要求 provider 重做让出前的工作（spec §7.2）。只收录**可用**的决定。
+    `decisions_for`：`(session_id, tool_call_id, stage) → (决定, resume_state)`。键必须
+    是这三维——只按 tool_call_id 会让 A 会话的批准替 B 会话同名 id 的调用开门，也会让
+    同一 tool_call_id 下的授权决定与工具阶段决定相互覆盖（Task 4.5：跨会话 / 跨阶段两个
+    洞）。**成对**是硬要求——冷路径重入调 `resume(ask_id, decision, resume_state, ctx)`，
+    丢掉 resume_state 就要求 provider 重做让出前的工作（spec §7.2）。只收录**可用**的决定。
 
     **`decisions_for[*][0].message` 仍是 event 侧引用**：折叠只做到
     `content_from_jsonable`，得到的 `ContentPart` 里若含 blob 引用，那引用落在
@@ -32,5 +34,5 @@ class HitlSnapshot:
     """
 
     pending: dict[str, PendingHitl] = field(default_factory=dict)
-    decisions_for: dict[str, tuple[HitlDecision, dict[str, Any] | None]] = field(
+    decisions_for: dict[tuple[str, str, str], tuple[HitlDecision, dict[str, Any] | None]] = field(
         default_factory=dict)

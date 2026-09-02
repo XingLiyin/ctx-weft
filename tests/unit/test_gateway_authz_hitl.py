@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.hitl.registry import HitlRegistry
+from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HitlRegistry
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
 from ctx_weft.core.hitl.service import HitlService
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
@@ -174,7 +174,9 @@ def _last_invoked_args() -> dict | None:
 
 
 def _snapshot_with_decision(tool_call_id: str, decision: HitlDecision) -> HitlSnapshot:
-    return HitlSnapshot(decisions_for={tool_call_id: (decision, None)})
+    # session_id="s1"：与 _state()/_ctx() 里搭的 session 一致——decision_for 现在按
+    # (session_id, tool_call_id, stage) 三维查（Task 4.5），键错一维就查不到。
+    return HitlSnapshot(decisions_for={("s1", tool_call_id, HITL_STAGE_AUTHZ): (decision, None)})
 
 
 # ── 测试 ────────────────────────────────────────────────────────────────────
