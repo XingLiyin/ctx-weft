@@ -197,6 +197,19 @@ class HitlRegistry:
             live = self.find_for_tool_call(session_id, tool_call_id, stage)
             if live is not None:
                 continue                       # 活 pending 或已装填的决定，均不覆盖
+            # 折叠若同时给出了那条**已终局请求本身**（`snapshot.resolved`），就装它——
+            # 它带着 `task_id` / `delivery` / `form` / `created_at`，`resolved_for_session`
+            # 的重排兜底靠的正是 `task_id`（Task 9）。没给（手工构造的快照）则退回只带
+            # 决定的占位项，与本分支引入之前逐字节一致。
+            meta = snapshot.resolved.get((session_id, tool_call_id, stage))
+            if meta is not None:
+                meta.slot = None
+                meta.decision = decision
+                meta.resume_state = resume_state
+                if meta.resolved_at is None:
+                    meta.resolved_at = _EPOCH
+                self._requests.setdefault(meta.id, meta)
+                continue
             placeholder = PendingHitl(
                 id=f"loaded:{session_id}:{stage}:{tool_call_id}", form="",
                 session_id=session_id, task_id="",
@@ -249,4 +262,20 @@ class HitlRegistry:
         return [
             r for r in self._requests.values()
             if not r.resolved and (session_id is None or r.session_id == session_id)
+        ]
+
+    def resolved_for_session(self, session_id: str) -> list[PendingHitl]:
+        """该 session **已终局**的请求。`list_pending` 的镜像：纯内存、同步、不查存储。
+
+        用途只有一个——恢复期的崩溃窗口兜底（Task 9）：决定已落盘、但进程在续跑之前
+        就死了，此时 HITL 已终局而 task 仍 SUSPENDED。不把这些 task 重排，人已经答过
+        的会话就永远停在挂起态，症状与「事件被丢」一模一样。
+
+        **口径**：返回的集合与 `load_snapshot` 装填的已终局集合完全一致——装填漏掉的
+        请求这里就看不见，兜底也随之失效。这就是「装填的完备性是恢复路径的责任」
+        （spec §3.1）在这里第二次成为承重点。
+        """
+        return [
+            r for r in self._requests.values()
+            if r.resolved and r.session_id == session_id
         ]

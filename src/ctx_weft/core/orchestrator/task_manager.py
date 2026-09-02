@@ -196,6 +196,7 @@ class TaskManager:
         all_tasks: list[Task],
         terminal_ids: set[str],
         parked_task_ids: set[str] | None = None,
+        resumable_task_ids: set[str] | None = None,
     ) -> None:
         """Rebuild task registry and re-queue resumable tasks after a crash.
 
@@ -203,12 +204,23 @@ class TaskManager:
         SUSPENDED but must STAY parked (not re-queued) until ``/answer`` resumes them.
         Empty/None → legacy behavior.
 
+        ``resumable_task_ids``: 反过来的一组——挂在**已终局** HITL 上的 task（决定已
+        落盘、但进程在续跑之前就崩了）。它们必须重排，否则人已经答过的会话永远停在
+        SUSPENDED，症状与「事件被丢」一模一样（Task 9）。具体作用是**豁免
+        「children 全终态」那道闸门**：那道闸门是给「挂在子任务上」的 SUSPENDED 准备
+        的，而这里的 task 挂的是一个已经有答案的 HITL，不该被子任务的进度连坐。
+
+        两者冲突时 **parked 优先**：一个 task 既有未决 HITL、又有已终局 HITL 时，
+        「人还没答」永远压过「有一次答过」。
+
         compact / recognize_intent are no longer scheduled as Tasks; any such obsolete
         task found in a replayed event stream is skipped (never re-queued). Recovery is
         condition-based.
         """
         _TERMINAL = {"FINISHED", "FAILED", "CANCELED"}
         parked = parked_task_ids or set()
+        # parked 优先：未决 HITL 压过已终局 HITL（调用方通常已相减，这里再兜一道）。
+        resumable = (resumable_task_ids or set()) - parked
 
         for t in all_tasks:
             self._tasks[t.id] = t
@@ -231,7 +243,8 @@ class TaskManager:
                 continue
             if t.status == "SUSPENDED":
                 children = self._children_of.get(t.id, set())
-                if all(cid in terminal_ids for cid in children):
+                # `t.id in resumable` = 挂在已终局 HITL 上（人答过了）→ 豁免 children 闸门。
+                if t.id in resumable or all(cid in terminal_ids for cid in children):
                     t.status = "PENDING"
                     t.retry_count = 0  # 崩溃挂起带着耗尽的计数；恢复重跑从零重计
                     self._queue.push(QueueEntry(

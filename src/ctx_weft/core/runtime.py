@@ -1083,10 +1083,12 @@ class CtxWeftRuntime:
         task_manager.set_is_current(
             lambda tm=task_manager: self._task_managers.get(session.id) is tm
         )
-        # 完成判定的"未决 HITL"真相：查内存 HitlManager。有 parked（未决 HITL）任务时，
-        # 会话算"空闲等应答"而非"完成"，避免另一任务收尾时把 parked 任务孤立（spec/07 §9.1）。
+        # 完成判定的"未决 HITL"真相：查 `HitlRegistry`（单一真相，spec §3.1——恢复期由
+        # `rebuild_hitl` 装填，此后只读内存、不回落 scan 日志）。有 parked（未决 HITL）任务
+        # 时，会话算"空闲等应答"而非"完成"，避免另一任务收尾时把 parked 任务孤立
+        # （spec/07 §9.1）。
         task_manager.set_has_pending_hitl(
-            lambda sid=session.id: bool(self.hitl_manager.list_pending(session_id=sid))
+            lambda sid=session.id: bool(self.hitl_registry.list_pending(session_id=sid))
         )
         # 熔断真终结（Task 10）三处注入：cancel 挂起 HITL / 协作取消在途 run / memory 闭合。
         # 均 best-effort——trip 序列本身不因这三者缺失或异常而崩溃（TaskManager 侧已兜底）。
@@ -1146,9 +1148,9 @@ class CtxWeftRuntime:
 
         单条取消失败不阻断其余——HitlCancelled 需尽量全部先于会话终态发出，但这不是硬要求。
         """
-        for req in list(self.hitl_manager.list_pending(session_id=session_id)):
+        for req in list(self.hitl_registry.list_pending(session_id=session_id)):
             try:
-                await self.hitl_manager.cancel(req.id, message="failure_threshold")
+                await self.hitl.cancel(req.id, message="failure_threshold")
             except Exception:
                 logger.exception(
                     "_cancel_session_hitl: cancel failed for session=%s hitl=%s", session_id, req.id,
@@ -1382,8 +1384,25 @@ class CtxWeftRuntime:
         # 重建内存 HitlManager（_futures 空 → 后续应答自动走冷 resume；spec/07 §9）
         if view.pending_hitl:
             self.hitl_manager.rebuild_pending(view.pending_hitl)
-        # 有未解决 pending HITL 的 task：restore 时保持 parked、不重排（spec/07 §9.1）
-        parked_task_ids = {h.task_id for h in view.pending_hitl.values() if h.task_id}
+        # 装填 HitlRegistry：**park / 重排的判据从此只读内存**（spec §3.1）。必须在算下面
+        # 两个集合之前——registry 空着算出来的 parked 是空集，等于「人还没答，任务却自己
+        # 跑起来了」。装填幂等：活 pending 不会被日志里的旧决定盖掉。
+        await self.rebuild_hitl(session_id)
+        # 有未决 pending HITL 的 task：保持 parked、不重排（人还没答，绝不能自己跑起来）。
+        parked_task_ids = {
+            r.task_id for r in self.hitl_registry.list_pending(session_id=session_id)
+            if r.task_id
+        }
+        # 反过来：挂在**已终局** HITL 上的 task 要重排——决定已落盘、但续跑没跑成
+        # （进程在应答入口返回之后、recover 之前崩了）。不重排它就永远停在 SUSPENDED，
+        # 症状与「事件被丢」一模一样。重排是安全的：两条续跑动作本身都幂等
+        # （ToolResult 走 reconcile，只补没有 TOOL_RESULT 的 dangling 调用；UserTurn 的
+        # 注入带 hitl_id 派生的幂等键），所以这里**不需要**记「这次续跑跑没跑过」
+        # ——那笔账要跨重启，又得多一份持久状态（绕回 §3.1 要消除的东西）。
+        resumable_task_ids = {
+            r.task_id for r in self.hitl_registry.resolved_for_session(session_id)
+            if r.task_id and r.task_id not in parked_task_ids
+        }
 
         _TERMINAL = {"FINISHED", "FAILED", "CANCELED"}
         terminal_ids = {t.id for t in all_tasks if t.status in _TERMINAL}
@@ -1418,7 +1437,9 @@ class CtxWeftRuntime:
         if inflight:
             logger.info("Recovery: session %s has a live TM running %s; new TM will not re-dispatch them",
                         session.id, sorted(inflight))
-        task_manager.restore(all_tasks, terminal_ids, parked_task_ids=parked_task_ids | inflight)
+        task_manager.restore(all_tasks, terminal_ids,
+                             parked_task_ids=parked_task_ids | inflight,
+                             resumable_task_ids=resumable_task_ids)
 
         # 各 agent 取自己的 template_id（AgentInstantiated 事件投影而来）；投影里没有的
         # （存量事件流）回落 session 模板——见 agents_from_projection 的说明。
@@ -1933,10 +1954,10 @@ class CtxWeftRuntime:
                 n = await self.rebuild_hitl(session_id)
                 if n:
                     # 有未决 HITL → 如实反映"等待人工"（否则投影停在崩溃前的 RUNNING，看着在跑却卡住）。
-                    # wait-only（纯文本软待命）= PAUSED、其余 = PAUSED_HITL——与 SESSION_PAUSED_HITL
-                    # 的 reducer/投影语义一致（form=wait 无 HITL 面板，误标会让前端等一个不存在的面板）。
-                    pend = self.hitl_manager.list_pending(session_id=session_id)
-                    status = "PAUSED" if pend and all(r.form == "wait" for r in pend) else "PAUSED_HITL"
+                    # 暂停态由 delivery 推导（见 `_derive_paused_status`）：UserTurn-only（软待命，
+                    # 无面板）= PAUSED、其余 = PAUSED_HITL。`or "PAUSED_HITL"` 只是防御——
+                    # 进到这个分支时 n > 0，推导恒非空。
+                    status = self._derive_paused_status(session_id) or "PAUSED_HITL"
                     await self._emit_session_status(session_id, status)
                     logger.info("Recovery: session %s → %s (%d pending, drain deferred to reply)", session_id, status, n)
                 else:
@@ -1948,15 +1969,111 @@ class CtxWeftRuntime:
         return len(session_ids)
 
     async def rebuild_hitl(self, session_id: str) -> int:
-        """从事件重建该 session 的内存 pending HITL（仅折叠 HITL 类事件,不 drain）,返回 pending 条数。
+        """从事件**装填**该 session 的 HITL 内存态，返回 pending 条数。
 
-        幂等,可重复调用。启动 `recover` 用它重建 PAUSED 会话;应答入口也可在内存为空时按需自愈
-        （重启后内存 HitlManager 还没被 recover 填上时,据事件即时重建,避免应答 404；spec/07 §9）。
+        **恢复是「喂进来」，不是「查回去」**（spec §3.1）：装填之后 registry 的一切查询
+        只读内存，绝不回落去 scan 日志。装填的完备性因此是本路径的责任——漏装的请求
+        之后谁也看不见（`list_pending` 看不见 → 任务被误重排；`resolved_for_session`
+        看不见 → 人答过的会话永远醒不过来）。
+
+        幂等，可重复调用（`load_snapshot` 对已在内存的活 pending 不覆盖）。启动 `recover`
+        用它把 PAUSED 会话的内存态填回来；应答入口也可在内存为空时按需自愈（重启后
+        registry 还没被 recover 填上时，据事件即时装填，避免应答 KeyError；spec/07 §9）。
+
+        legacy `HitlManager` 同步填一份（`rebuild_pending`）——它由后续任务删除，在此之前
+        仍有既有路径读它，装填两份比让其中一份陈旧安全。
         """
-        pending = await self._pending_hitl(session_id)
-        if pending:
-            self.hitl_manager.rebuild_pending(pending)
-        return len(pending)
+        from ctx_weft.core.control.reducers import HITL_FOLD_EVENT_TYPES, fold_hitl_snapshot
+
+        events = await self._read_session_events_of_types(session_id, HITL_FOLD_EVENT_TYPES)
+        snapshot = fold_hitl_snapshot(events)
+        await self._hydrate_snapshot_messages(snapshot, session_id)
+        n = self.hitl_registry.load_snapshot(snapshot)
+
+        # legacy 双写（下个任务随 HitlManager 一并删除）。它自己的折叠口径更窄
+        # （只认旧事件类型），failure 不得影响新路径。
+        try:
+            legacy = await self._pending_hitl(session_id)
+            if legacy:
+                self.hitl_manager.rebuild_pending(legacy)
+        except Exception:
+            logger.exception("rebuild_hitl: legacy HitlManager rebuild failed for %s", session_id)
+        return n
+
+    async def _read_session_events_of_types(
+        self, session_id: str, types: "tuple[EventType, ...]",
+    ) -> "list[Event]":
+        """轻查询取该 session 的指定类型事件；EventStore 未实现轻查询时退化为全量读 + 内存过滤。"""
+        try:
+            return await self.event_store.read_session_events_of_types(session_id, types)
+        except NotImplementedError:
+            return [e for e in await self.event_store.read_by_session(session_id)
+                    if e.type in types]
+
+    async def _hydrate_snapshot_messages(self, snapshot, session_id: str) -> None:
+        """把 `decisions_for` 里的 **event 侧** 内容还原成 memory 侧可用的形态。
+
+        spec §12.3.3：折叠出来的 message 仍是事件形态（可能是 event blob store 的 ref）。
+        直接喂进 memory 会写一个那个 store 永远打不开的引用——图就此静默消失。本方法是
+        `fold_hitl_snapshot`（同步、纯函数，结构上做不了 I/O）之后的必经一步，口径与
+        现行 `_cold_hitl_decision` 完全一致：hydrate（event → 字节）→ normalize（字节 →
+        memory ref），纯文本零成本直通。
+
+        **best-effort，绝不抛**：抛错会卡住整条恢复路径（`recover` 的每个 session、
+        `recover_session` 的每次续跑都过这里）。失败一律降级为文本占位——降级本身
+        （`downgrade_images_to_text`，纯函数）也在 try 里兜一道，宁可留着原内容也不让
+        恢复崩掉。
+        """
+        if not snapshot.decisions_for:
+            return
+        from ctx_weft.core.content import (
+            downgrade_images_to_text, hydrate_event_content, normalize_content,
+        )
+        ctx: ProviderContext | None = None
+        for key, (decision, _resume_state) in list(snapshot.decisions_for.items()):
+            message = decision.message
+            if not message or isinstance(message, str):
+                continue                       # 纯文本无 ref 可转，零 blob IO
+            try:
+                if ctx is None:
+                    ctx = ProviderContext(
+                        session_id=session_id,
+                        tenant_id=await self._tenant_for_session(session_id))
+                hydrated = await hydrate_event_content(
+                    message, event_blob_store=self.providers.get_event_blob_store(), ctx=ctx)
+                blob_store = self.providers.get_memory_blob_store()
+                decision.message = (
+                    await normalize_content(hydrated, blob_store=blob_store, ctx=ctx)
+                    if blob_store.can_externalize else hydrated)
+            except Exception:
+                logger.warning(
+                    "HITL 恢复：event ref 还原失败，降级为文本占位 (key=%s)", key, exc_info=True)
+                try:
+                    decision.message = downgrade_images_to_text(message)
+                except Exception:                       # pragma: no cover — 纯函数，防御性
+                    logger.exception("HITL 恢复：降级占位也失败 (key=%s)", key)
+
+    def _derive_paused_status(self, session_id: str) -> str:
+        """由**未决 HITL 的 delivery** 推导会话暂停态；无未决 → `""`。
+
+        判据是 `delivery`，**不是 form**：`UserTurnDelivery` = 会话在等用户说话（软待命，
+        没有面板要答）→ `PAUSED`；其余（`ToolResultDelivery` / `NoResumeDelivery`）
+        = 有一个面板决定悬着 → `PAUSED_HITL`。旧实现按 `form == "wait"` 字面量判定，
+        host 自定义 form 因此拿不到正确行为——误标会让前端等一个不存在的面板。
+        """
+        pend = self.hitl_registry.list_pending(session_id=session_id)
+        if not pend:
+            return ""
+        return ("PAUSED" if all(isinstance(r.delivery, UserTurnDelivery) for r in pend)
+                else "PAUSED_HITL")
+
+    async def session_status_after_recover(self, session_id: str) -> str:
+        """装填该 session 的 HITL 内存态并返回它应处的暂停态（`""` = 无未决，不该暂停）。
+
+        `recover()` 与 host 的只读查询共用同一份推导，不各写一遍。
+        """
+        await self.rebuild_hitl(session_id)
+        return self._derive_paused_status(session_id)
 
     async def rebuild_all_pending_hitl(self) -> int:
         """据事件重建**所有 active session** 的内存 pending HITL（不发中断、不 drain）,返回总条数。

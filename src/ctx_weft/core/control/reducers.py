@@ -758,6 +758,20 @@ def _legacy_decision(event_type: str, payload: dict) -> HitlDecision | None:
     return None                                   # HITL_CANCELLED：不是决定
 
 
+def _as_resolved(req: PendingHitl, decision: HitlDecision, resolved_at: datetime) -> PendingHitl:
+    """把折出的请求标成已终局，供 `HitlSnapshot.resolved` 收录。
+
+    就地改**同一个对象**：它此刻已被 `snap.pending.pop` 摘掉，不再是 pending 的一员，
+    没有第二个持有者。复制一份反而会让「同一 hitl_id 两个对象」这种更难查的状态出现。
+
+    `slot` 恒为 None（折叠出来的东西没有等待槽——重启后一切皆冷）。
+    """
+    req.decision = decision
+    req.resolved_at = resolved_at
+    req.slot = None
+    return req
+
+
 def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
     """双读折叠：新旧两套 HITL 事件 → `HitlSnapshot`。
 
@@ -839,6 +853,7 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
             if outcome != HITL_OUTCOME_CANCELLED and req.tool_call_id:
                 key = (req.session_id, req.tool_call_id, req.stage)
                 snap.decisions_for[key] = (decision, req.resume_state)
+                snap.resolved[key] = _as_resolved(req, decision, ev.timestamp)
 
         elif ev.type in _HITL_RESOLVE_TYPES:
             snap.pending.pop(rid, None)
@@ -848,5 +863,6 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 continue
             key = (req.session_id, req.tool_call_id, req.stage)
             snap.decisions_for[key] = (decision, req.resume_state)
+            snap.resolved[key] = _as_resolved(req, decision, ev.timestamp)
 
     return snap

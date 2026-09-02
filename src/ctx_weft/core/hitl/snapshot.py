@@ -36,3 +36,15 @@ class HitlSnapshot:
     pending: dict[str, PendingHitl] = field(default_factory=dict)
     decisions_for: dict[tuple[str, str, str], tuple[HitlDecision, dict[str, Any] | None]] = field(
         default_factory=dict)
+    #: `decisions_for` 同键 → 那条**已终局请求本身**（`task_id` / `delivery` / `form` /
+    #: `created_at` 都在）。
+    #:
+    #: 为什么单开一份而不只留 `(decision, resume_state)`：崩溃窗口的兜底
+    #: （`restore` 要重排「挂在已终局 HITL 上」的 task，Task 9）判据是 **task_id**，
+    #: 而 `decisions_for` 的值里没有它。少了这一份，`resolved_for_session()` 返回的
+    #: 全是 `task_id=""` 的占位，重排集合恒为空——「人答过了、会话永远醒不过来」这条
+    #: 故障就悄悄留在原地。
+    #:
+    #: 可选：手工构造的快照（既有单测、host 直接喂）不填它，`load_snapshot` 退回
+    #: 只带决定的占位项，行为与本字段引入之前逐字节一致。
+    resolved: dict[tuple[str, str, str], PendingHitl] = field(default_factory=dict)
