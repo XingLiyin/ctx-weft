@@ -19,7 +19,7 @@ from ctx_weft.protocols.hitl import (
     UserTurnDelivery,
 )
 from ctx_weft.core.utils import now_utc
-from ctx_weft.protocols import MemoryAddress, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -88,7 +88,9 @@ async def test_inject_user_reply_phase1_adds_edit_note():
     rt.providers.register_memory(mem)
     session = Session(id="s1", tenant_id="default", user_prompt="X", status="PAUSED", token_budget=0)
     task = SimpleNamespace(id="t1", status="SUSPENDED", outputs=None, process_report=None)
-    tm = SimpleNamespace(get_task=lambda tid: task)
+    # children_of：`_inject_user_reply` 现在据它跳过「SUSPENDED 在活子任务上」的父任务
+    # （复审 I7）。这里的 fake 无子任务。
+    tm = SimpleNamespace(get_task=lambda tid: task, children_of=lambda tid: set())
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
     await mem.ingest(MemoryEvent(
@@ -114,7 +116,9 @@ async def test_inject_user_reply_non_edit_has_no_note():
     rt.providers.register_memory(mem)
     session = Session(id="s1", tenant_id="default", user_prompt="X", status="PAUSED", token_budget=0)
     task = SimpleNamespace(id="t1", status="SUSPENDED", outputs=None, process_report=None)
-    tm = SimpleNamespace(get_task=lambda tid: task)
+    # children_of：`_inject_user_reply` 现在据它跳过「SUSPENDED 在活子任务上」的父任务
+    # （复审 I7）。这里的 fake 无子任务。
+    tm = SimpleNamespace(get_task=lambda tid: task, children_of=lambda tid: set())
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
@@ -124,3 +128,106 @@ async def test_inject_user_reply_non_edit_has_no_note():
     recs = await mem.recall_recent(scope, [MemoryEventType.USER_PROMPT], 10, pctx)
     assert any(r.content == "just continue" for r in recs)
     assert all("cancelled" not in (r.content or "") for r in recs)
+
+
+# ── I7：reply 路径上的 task 状态重置必须是有条件的 ────────────────────────────
+
+
+def _tm_with_children(parent, children):
+    """真实 `TaskManager` 的两个被用到的读接口：`get_task` / `children_of`。"""
+    by_id = {t.id: t for t in [parent, *children]}
+    return SimpleNamespace(
+        get_task=lambda tid: by_id.get(tid),
+        children_of=lambda tid: {c.id for c in children} if tid == parent.id else set(),
+    )
+
+
+async def test_inject_user_reply_leaves_a_parent_suspended_on_live_children_alone():
+    """SUSPENDED + 尚有活子任务 = `restore` 刻意不重排的那一种形状。
+
+    在这里无条件翻成 PENDING 却没有人入队，`_try_resume_parent` 的
+    `status == "SUSPENDED"` 门随之失效 → 子任务收尾时那次合法唤醒被静默吞掉，
+    父任务永久停摆（复审 I7）。答复照写，状态不碰。
+    """
+    rt = _runtime()
+    mem = InMemoryMemoryProvider()
+    rt.providers.register_memory(mem)
+    session = Session(id="s1", tenant_id="default", user_prompt="X",
+                      status="PAUSED", token_budget=0)
+    parent = SimpleNamespace(id="t1", status="SUSPENDED", outputs="old",
+                             process_report="rep", process_report_at="then")
+    child = SimpleNamespace(id="t2", status="ACTIVE")
+    tm = _tm_with_children(parent, [child])
+
+    await rt._inject_user_reply(_user_turn_req(), session, tm)
+
+    assert parent.status == "SUSPENDED"         # 门还在，唤醒不会丢
+    assert parent.outputs == "old"              # 与本窗口无关的进度不被清掉
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
+    pctx = ProviderContext(session_id="s1", tenant_id="default",
+                           task_id="t1", agent_id="ag1")
+    view = await mem.load_view(scope, MemoryScope.TASK, pctx)
+    assert any(r.role == "user" and "ship it" in str(r.content) for r in view), (
+        "答复仍然必须被写进对话——跳过的只是状态重置"
+    )
+
+
+async def test_inject_user_reply_still_resets_a_parent_whose_children_are_done():
+    """子任务全终态 ⟹ 不是那种形状 ⟹ 照旧掰回 PENDING（`restore` 也会重排它）。"""
+    rt = _runtime()
+    rt.providers.register_memory(InMemoryMemoryProvider())
+    session = Session(id="s1", tenant_id="default", user_prompt="X",
+                      status="PAUSED", token_budget=0)
+    parent = SimpleNamespace(id="t1", status="SUSPENDED", outputs="old",
+                             process_report="rep", process_report_at="then")
+    child = SimpleNamespace(id="t2", status="FINISHED")
+    await rt._inject_user_reply(_user_turn_req(), session, _tm_with_children(parent, [child]))
+    assert parent.status == "PENDING"
+    assert parent.outputs is None
+
+
+# ── I6：恢复期补写的界 ────────────────────────────────────────────────────────
+
+
+async def test_inject_resolved_user_turns_skips_replies_already_in_the_conversation():
+    """已经注入过的答复不再重走一次写入（复审 I6 的界）。
+
+    判据不是启发式：`hitlreply:{hitl_id}` 这条记忆记录只可能由
+    `_write_hitl_reply_turn` 自己写下，「在对话里」**就是**「已经注入过」。
+    """
+    rt = _runtime()
+    mem = InMemoryMemoryProvider()
+    rt.providers.register_memory(mem)
+    session = Session(id="s1", tenant_id="default", user_prompt="X",
+                      status="PAUSED", token_budget=0)
+    task = SimpleNamespace(id="t1", status="ACTIVE", outputs=None,
+                           process_report=None, process_report_at=None)
+    tm = _tm_with_children(task, [])
+
+    done = _user_turn_req(hitl_id="h_done", message="already said")
+    fresh = _user_turn_req(hitl_id="h_fresh", message="not yet said")
+    rt.hitl_registry._requests[done.id] = done
+    rt.hitl_registry._requests[fresh.id] = fresh
+
+    # h_done 的答复已经在对话里（上一次恢复写下的）
+    await rt._write_hitl_reply_turn(done, session, task)
+
+    writes: list[str] = []
+    original = rt._write_hitl_reply_turn
+
+    async def _spy(req, sess, target):
+        writes.append(req.id)
+        return await original(req, sess, target)
+
+    rt._write_hitl_reply_turn = _spy  # type: ignore[method-assign]
+    await rt._inject_resolved_user_turns(
+        session, tm, parked_or_inflight_task_ids=set())
+
+    assert writes == ["h_fresh"], "已注入过的那条不该再写一次；没注入过的那条必须补上"
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
+    pctx = ProviderContext(session_id="s1", tenant_id="default",
+                           task_id="t1", agent_id="ag1")
+    view = await mem.load_view(scope, MemoryScope.TASK, pctx)
+    texts = [str(r.content) for r in view if r.role == "user"]
+    assert any("already said" in t for t in texts)
+    assert any("not yet said" in t for t in texts)

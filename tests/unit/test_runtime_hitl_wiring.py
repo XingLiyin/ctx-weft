@@ -201,3 +201,30 @@ async def test_a_failed_cold_resume_after_commit_is_logged_loudly_and_still_rais
     assert req.id in caplog.text
     # 应答本身已经不可逆地提交——即便续跑失败，请求也真的终局了。
     assert rt.hitl_registry.get(req.id).resolved is True
+
+
+# ── host 面向 HITL 的读入口（复审 I5a）───────────────────────────────────────
+
+
+async def test_list_pending_hitl_returns_views_not_core_records():
+    """host 不该被迫走 `runtime.hitl_registry.list_pending()`——那返回的 `PendingHitl`
+    自己的 docstring 就写着「不出 core」。"""
+    from ctx_weft.protocols.hitl import HitlRequestView
+
+    rt = _runtime()
+    req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
+                             tool_call_id="call_1", stage="tool")
+    await rt.hitl.open(_ask_tool_result("call_2"), session_id="s2", task_id="t9",
+                       tool_call_id="call_2", stage="tool")
+
+    all_pending = rt.list_pending_hitl()
+    assert len(all_pending) == 2
+    assert all(isinstance(v, HitlRequestView) for v in all_pending)
+    assert not any(hasattr(v, "tool_call_id") or hasattr(v, "slot") for v in all_pending)
+
+    only_s1 = rt.list_pending_hitl(session_id="s1")
+    assert [v.id for v in only_s1] == [req.id]
+
+    # 经 service 终局（不走 reply_to_hitl，那会去事件库找一个本测试没建的会话）
+    await rt.hitl.resolve(HitlReply(hitl_id=req.id, outcome="accepted"))
+    assert rt.list_pending_hitl(session_id="s1") == []

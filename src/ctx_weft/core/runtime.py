@@ -37,6 +37,7 @@ from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
 from ctx_weft.core.hitl.service import HitlService
+from ctx_weft.core.hitl.status import paused_status_for
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.hitl_waiter import HitlWaiter
@@ -462,6 +463,39 @@ async def _task_has_dangling_tool_call(memory, scope, provider_ctx) -> bool:
 
 
 # ── CtxWeftRuntime ─────────────────────────────────────────────────────────────
+
+
+def _reply_turn_agent_id(req: "PendingHitl", target: "Task") -> str:
+    """人的答复该写进**哪个 agent scope**。写入（`_write_hitl_reply_turn`）与「查它写没写过」
+    （`_injected_reply_ids`）共用这一份，两边不得各推一次。
+
+    必须是本 task 对话真正所在的 agent scope——`AgentRecallSource` 用
+    `recall_recent_by_agent` 按 `scope.agent_id` 过滤召回 task body。冷重启从旧事件日志
+    重建的 HITL 丢了 agent_id（legacy `HITL_REQUIRED` 投影未持久化它），`req.agent_id=""`
+    会把回复写进空 agent scope → 对 actor 装配不可见 → 重启后「第一句」丢失。故回退到
+    task 的真实 agent（assigned/creator），与首条 USER_PROMPT 落库时同 scope。
+    """
+    return (req.agent_id
+            or getattr(target, "assigned_agent_id", "")
+            or getattr(target, "creator_agent_id", "")
+            or "")
+
+
+def _suspended_on_live_children(task_manager: "TaskManager", task: "Task") -> bool:
+    """该 task 是否「SUSPENDED 且尚有未终态的子任务」——即等着 `_try_resume_parent` 唤醒。
+
+    这是 `restore` 唯一**刻意不重排**的形状（见 `TaskManager.restore` 的注释）：它必须
+    保持 SUSPENDED，否则 `_try_resume_parent` 的 `status == "SUSPENDED"` 门失效，子任务
+    收尾时那次唤醒静默消失，父任务永久停摆。
+    """
+    if task.status != "SUSPENDED":
+        return False
+    _TERMINAL = ("FINISHED", "FAILED", "CANCELED")
+    for cid in task_manager.children_of(task.id):
+        child = task_manager.get_task(cid)
+        if child is None or child.status not in _TERMINAL:
+            return True
+    return False
 
 
 class CtxWeftRuntime:
@@ -1742,6 +1776,18 @@ class CtxWeftRuntime:
         finally:
             self._busy_sessions.discard(session_id)
 
+    def list_pending_hitl(self, session_id: str | None = None) -> "list[HitlRequestView]":
+        """未决 HITL 的**只读视图**列表（`session_id=None` = 全部会话）。
+
+        host 面向 HITL 的读入口。刻意不暴露 `HitlRegistry`：`PendingHitl` 是 core 的活
+        记录（带等待槽、stage、invocation_key 这些内部键），它自己的 docstring 就写着
+        「不出 core」。经由本方法拿到的 `HitlRequestView` 才是契约层类型。
+
+        **只读内存**：注意重启之后 registry 要先被装填（`recover()` / `rebuild_hitl()`）
+        才有内容——「恢复是喂进来、不是查回去」（spec §3.1）。
+        """
+        return [r.to_view() for r in self.hitl_registry.list_pending(session_id=session_id)]
+
     async def reply_to_hitl(self, reply: "HitlReply") -> "HitlRequestView | None":
         """host 应答的唯一入口。返回已终局请求的视图；已终局再答 → `None`。
 
@@ -1803,6 +1849,12 @@ class CtxWeftRuntime:
         = `_write_hitl_reply_turn`（只写记忆，幂等）+ 尾部的 task 状态重置（**不幂等**）。
         只有「正在驱动一次续跑」的调用方才该走这个组合——恢复期的补写用
         `_write_hitl_reply_turn`，见 `_inject_resolved_user_turns`（复审 Critical）。
+
+        **状态重置是有条件的**（复审 I7）：一个「SUSPENDED 且尚有活子任务」的父任务，
+        `restore` 刻意不把它重排（它要等子任务收尾时由 `_try_resume_parent` 唤醒，那道门
+        正是 `status == "SUSPENDED"`）。在这里无条件翻成 PENDING **却没有人入队**，那次
+        合法唤醒就被静默吞掉，父任务永久停摆——与恢复路径上早已拆掉的正是同一个形状。
+        `_resume_in_existing_tm` 那条分支不受影响：它随后调 `resume_task()`，会真的入队。
         """
         target = task_manager.get_task(req.task_id)
         if target is None:
@@ -1810,6 +1862,12 @@ class CtxWeftRuntime:
                            req.task_id, req.id)
             return
         await self._write_hitl_reply_turn(req, session, target)
+        if _suspended_on_live_children(task_manager, target):
+            logger.info(
+                "_inject_user_reply: task %s is SUSPENDED on live children — reply written, "
+                "state left alone so _try_resume_parent still wakes it (hitl=%s)",
+                target.id, req.id)
+            return
         # 清旧进展、置 PENDING（restore 已重排,这里保证状态正确）。
         target.outputs = None
         target.process_report = None
@@ -1851,7 +1909,7 @@ class CtxWeftRuntime:
         # req.agent_id="" 会把回复写进空 agent scope → 对 actor 装配不可见 → 续跑 cue → 空白回复
         # （重启后「第一句」丢失）。回退到 task 的真实 agent（assigned/creator），与首条 USER_PROMPT
         # 落库时同 scope。
-        agent_id = req.agent_id or target.assigned_agent_id or target.creator_agent_id or ""
+        agent_id = _reply_turn_agent_id(req, target)
         scope = MemoryAddress(session_id=session.id, task_id=target.id, agent_id=agent_id)
         pctx = ProviderContext(
             session_id=session.id, tenant_id=session.tenant_id,
@@ -1929,7 +1987,22 @@ class CtxWeftRuntime:
           它不再需要、也不该收到新输入。
 
         **best-effort**：与 hydration 同一姿态，单条失败只记账、不中断整场恢复。
+
+        ── 代价与它的界（复审 I6）────────────────────────────────────────────
+        交互式会话里每一条用户消息都是一次 `UserTurn` HITL，所以「已终局的 UserTurn」
+        随会话轮数线性增长，而本方法在**每次冷应答**都会跑一遍。原实现对其中每一条都
+        走一次 `_write_hitl_reply_turn`（= 一次 memory ingest，多数是 `hitlreply:` 幂等
+        键下的 no-op，外加可能的一次 `_last_user_prompt` 视图读）——O(N) 次写 I/O。
+
+        **界**：先按 task 各读**一次**对话视图，凡是 `hitlreply:{hitl_id}` 已在其中的
+        请求直接跳过。这不是启发式：那条记录只可能由 `_write_hitl_reply_turn` 自己写下，
+        「在视图里」**就是**「已经注入过」，不存在漏掉一条真正没被续跑的答复的可能。
+        视图读不到（provider 不回显 ingest id、记录已被压缩折走）时集合为空 → 退回逐条
+        写、行为与加界之前逐字节一致——失败方向朝「多做一次幂等写」，不朝「少救一条答复」。
+        于是每次冷应答的代价从 O(N) 次写降到 O(该 session 里有已终局 UserTurn 的 task 数)
+        次读。**仍未被界住**的是 `rebuild_hitl` 的整流折叠，见那里的说明。
         """
+        candidates: list[tuple[PendingHitl, Any]] = []
         for req in self.hitl_registry.resolved_for_session(session.id):
             if (req.id == skip_hitl_id
                     or req.legacy_origin
@@ -1941,12 +2014,50 @@ class CtxWeftRuntime:
             target = task_manager.get_task(req.task_id)
             if target is None or target.status in ("FINISHED", "FAILED", "CANCELED"):
                 continue                      # 已终态的 task 不再需要（也不该收到）新输入
+            candidates.append((req, target))
+        if not candidates:
+            return
+
+        already: set[str] = set()
+        for scope_key in {(t.id, _reply_turn_agent_id(r, t)) for r, t in candidates}:
+            already |= await self._injected_reply_ids(session, *scope_key)
+
+        for req, target in candidates:
+            if f"hitlreply:{req.id}" in already:
+                continue                      # 已经注入过（见上「界」）
             try:
                 await self._write_hitl_reply_turn(req, session, target)
             except Exception:
                 logger.exception(
                     "_inject_resolved_user_turns: 注入失败 session=%s hitl=%s",
                     session.id, req.id)
+
+    async def _injected_reply_ids(
+        self, session: Session, task_id: str, agent_id: str,
+    ) -> "set[str]":
+        """该 task 对话里已经存在的 `hitlreply:*` 记忆记录 id。读不出来 → 空集（退回逐条写）。
+
+        scope 必须与 `_write_hitl_reply_turn` 写入时**完全一致**（同一个 agent_id，见
+        `_reply_turn_agent_id`）——查错 scope 只会查空，退回逐条幂等写，不会误判成
+        「已注入」。
+
+        **best-effort，绝不抛**：这是一层纯优化，失败只能让恢复多做几次幂等写，不能
+        让整场恢复停下来。
+        """
+        try:
+            view = await self.providers.get_memory().load_view(
+                MemoryAddress(session_id=session.id, task_id=task_id, agent_id=agent_id),
+                MemoryScope.TASK,
+                ProviderContext(session_id=session.id, tenant_id=session.tenant_id,
+                                task_id=task_id, agent_id=agent_id),
+                kinds=[MemoryKind.CONVERSATION_TURN],
+            )
+        except Exception:
+            logger.debug("_injected_reply_ids: 视图读失败 task=%s，退回逐条幂等写",
+                         task_id, exc_info=True)
+            return set()
+        return {r.id for r in view if isinstance(getattr(r, "id", None), str)
+                and r.id.startswith("hitlreply:")}
 
     async def _last_user_prompt(self, scope: MemoryAddress, pctx: ProviderContext) -> str:
         """取 scope 内最近一条 USER_PROMPT 内容（供 ① 打断续接的「上一条取消」说明）。"""
@@ -2012,6 +2123,19 @@ class CtxWeftRuntime:
         幂等，可重复调用（`load_snapshot` 对已在内存的活 pending 不覆盖）。启动 `recover`
         用它把 PAUSED 会话的内存态填回来；应答入口也可在内存为空时按需自愈（重启后
         registry 还没被 recover 填上时，据事件即时装填，避免应答 KeyError；spec/07 §9）。
+
+        ── 已知代价：**O(该会话 HITL 事件数)，且这条路每次冷应答都走一遍**（复审 I6）──
+        交互式会话里每条用户消息都是一次 `UserTurn` HITL，所以 N 轮对话 ≈ 2N 条 HITL
+        事件；每次冷应答重跑一次全量折叠 + 一次装填。读取已经收窄到 `HITL_FOLD_EVENT_TYPES`
+        （事件库支持轻查询时不全量回放），blob 还原也只碰**非纯文本**的决定
+        （`_hydrate_snapshot_messages` 对 `str` 内容零 blob IO），所以常数很小；但阶数是
+        线性的，长会话的每次应答都要付。
+
+        **为什么不截尾**：自然的界是「只折最近一段」，但那会漏掉一条很久以前开出、至今
+        未决的请求——`list_pending` 看不见它 ⟹ `parked_task_ids` 少一个 ⟹ 那个任务在人还
+        没回答时就被重排跑起来。未决请求的年龄没有上界，任何按条数/时间截尾的界都可能
+        踩中它，所以这里**不猜**。真要去掉这个阶数，需要的是事件库侧「只取未终局 HITL」
+        的查询能力（或一份 HITL 检查点），那是 provider 契约的改动，不属于本次修复。
         """
         from ctx_weft.core.control.reducers import HITL_FOLD_EVENT_TYPES, fold_hitl_snapshot
 
@@ -2088,16 +2212,11 @@ class CtxWeftRuntime:
     def _derive_paused_status(self, session_id: str) -> str:
         """由**未决 HITL 的 delivery** 推导会话暂停态；无未决 → `""`。
 
-        判据是 `delivery`，**不是 form**：`UserTurnDelivery` = 会话在等用户说话（软待命，
-        没有面板要答）→ `PAUSED`；其余（`ToolResultDelivery` / `NoResumeDelivery`）
-        = 有一个面板决定悬着 → `PAUSED_HITL`。旧实现按 `form == "wait"` 字面量判定，
-        host 自定义 form 因此拿不到正确行为——误标会让前端等一个不存在的面板。
+        判据在 `core.hitl.status.paused_status_for`——`reducers._apply` 的 `HITL_OPENED`
+        分支与本处共用**同一份**，不各写一遍（复审 I4）。
         """
-        pend = self.hitl_registry.list_pending(session_id=session_id)
-        if not pend:
-            return ""
-        return ("PAUSED" if all(isinstance(r.delivery, UserTurnDelivery) for r in pend)
-                else "PAUSED_HITL")
+        return paused_status_for(
+            r.delivery for r in self.hitl_registry.list_pending(session_id=session_id))
 
     async def session_status_after_recover(self, session_id: str) -> str:
         """装填该 session 的 HITL 内存态并返回它应处的暂停态（`""` = 无未决，不该暂停）。

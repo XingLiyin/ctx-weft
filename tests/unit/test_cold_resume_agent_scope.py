@@ -79,7 +79,8 @@ async def test_inject_user_reply_reply_visible_to_agent_recall(monkeypatch):
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = Task(id="t1", session_id="s1", status="SUSPENDED",
                 assigned_agent_id="ag_root", creator_agent_id="ag_root")
-    task_manager = SimpleNamespace(get_task=lambda tid: task if tid == "t1" else None)
+    task_manager = SimpleNamespace(get_task=lambda tid: task if tid == "t1" else None,
+                                   children_of=lambda tid: set())
 
     # Rebuilt-from-projection HITL: agent_id was NOT persisted → empty.
     req = _user_turn_req(hitl_id="h1", agent_id="", message="用户回复")
