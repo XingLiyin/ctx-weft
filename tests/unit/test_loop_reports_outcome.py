@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -241,3 +242,166 @@ async def test_llm_outage_produces_interrupted_not_retriable() -> None:
     assert state.run_outcome.kind is RunOutcomeKind.INTERRUPTED
     assert state.run_outcome.reason == "llm_outage"
     assert state.run_outcome.retriable is False     # outage 从不原地重试
+
+
+# ── cancellation（runtime._run_loop 的 except asyncio.CancelledError） ────────
+
+
+async def run_until_cancel():
+    """同 run_until_park 的搭台，只是驱动改抛 asyncio.CancelledError（BaseException，
+    今天 `except asyncio.CancelledError` 分支不重抛，正常 return state）。"""
+    from collections.abc import AsyncIterator
+
+    from ctx_weft.core import ProviderRegistry
+    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
+    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.core.state.models import Agent, LoopGuard, Session
+    from ctx_weft.protocols import LoopConfig as RTLoopConfig
+    from ctx_weft.protocols import MemoryConfig
+    from ctx_weft.providers.events import InProcessEventBus
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider as MemProv
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+
+    session = Session(id="s_cancel_2", user_prompt="cancel test", status="RUNNING",
+                      tenant_id="default", root_agent_id="agt_c2")
+    task = Task(id="tsk_cancel_2", session_id="s_cancel_2", status="ACTIVE",
+               tenant_id="default", assigned_agent_id="agt_c2")
+    agent = Agent(id="agt_c2", session_id="s_cancel_2", template_id="tpl_test",
+                 template_version="0.1", status="RUNNING", tenant_id="default",
+                 loop_guard=LoopGuard(), memory_config=MemoryConfig(),
+                 loop_config=RTLoopConfig())
+    scope = MemoryAddress(session_id="s_cancel_2", task_id="tsk_cancel_2", agent_id="agt_c2")
+    state = LoopState(run_id="run_c2", session=session, task=task, agent=agent, scope=scope)
+
+    class _CancellingDriver:
+        async def run(
+            self, initial_state: LoopState, ctx: LoopContext,
+        ) -> AsyncIterator[StepOutcome]:
+            raise asyncio.CancelledError
+            yield
+
+    bus = InProcessEventBus()
+    registry = ProviderRegistry()
+    registry.register_memory(MemProv())
+    rt = make_runtime(agent_provider=InlineAgentTemplateProvider(), providers=registry,
+                      event_store=None)
+    rt._event_bus = bus
+
+    loop_ctx = LoopContext(
+        assembler=None, llm=None, memory=MemProv(), event_bus=bus,
+        provider_ctx=ProviderContext(session_id="s_cancel_2", tenant_id="default",
+                                     task_id="tsk_cancel_2", agent_id="agt_c2"),
+        capability_cache=CapabilityCache(),
+    )
+
+    result_state = await rt._run_loop(state=state, loop_ctx=loop_ctx, driver=_CancellingDriver(),
+                                      run_id="run_c2", initial_step="act", task=task, agent=agent)
+    return result_state, task
+
+
+async def test_cancellation_produces_canceled_outcome_with_no_reason() -> None:
+    """取消支不编造 reason（R5：payload 该是 `{}` 而不是 `{"reason": ""}`）。"""
+    state, task = await run_until_cancel()
+    assert state.run_outcome.kind is RunOutcomeKind.CANCELED
+    assert state.run_outcome.reason == ""
+    # 旧路径仍在：task.status 仍然照今天的行为置 CANCELED。
+    assert task.status == "CANCELED"
+
+
+# ── crash（runtime._run_loop 的泛 except Exception） ──────────────────────────
+
+
+async def run_until_crash(exc: BaseException):
+    """同 run_until_park 的搭台，驱动改抛 `exc`（retriable 的任意异常）。
+    `_run_loop` 的泛 `except Exception` 分支 `raise run_error`——调用方拿不到
+    返回值，这里返回的是抛出的那个异常本身供 `pytest.raises` 断言。"""
+    from collections.abc import AsyncIterator
+
+    from ctx_weft.core import ProviderRegistry
+    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
+    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.core.state.models import Agent, LoopGuard, Session
+    from ctx_weft.protocols import LoopConfig as RTLoopConfig
+    from ctx_weft.protocols import MemoryConfig
+    from ctx_weft.providers.events import InProcessEventBus
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider as MemProv
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+
+    session = Session(id="s_crash_2", user_prompt="crash test", status="RUNNING",
+                      tenant_id="default", root_agent_id="agt_x2")
+    task = Task(id="tsk_crash_2", session_id="s_crash_2", status="ACTIVE",
+               tenant_id="default", assigned_agent_id="agt_x2")
+    agent = Agent(id="agt_x2", session_id="s_crash_2", template_id="tpl_test",
+                 template_version="0.1", status="RUNNING", tenant_id="default",
+                 loop_guard=LoopGuard(), memory_config=MemoryConfig(),
+                 loop_config=RTLoopConfig())
+    scope = MemoryAddress(session_id="s_crash_2", task_id="tsk_crash_2", agent_id="agt_x2")
+    state = LoopState(run_id="run_x2", session=session, task=task, agent=agent, scope=scope)
+
+    class _CrashingDriver:
+        async def run(
+            self, initial_state: LoopState, ctx: LoopContext,
+        ) -> AsyncIterator[StepOutcome]:
+            raise exc
+            yield
+
+    bus = InProcessEventBus()
+    registry = ProviderRegistry()
+    registry.register_memory(MemProv())
+    rt = make_runtime(agent_provider=InlineAgentTemplateProvider(), providers=registry,
+                      event_store=None)
+    rt._event_bus = bus
+
+    loop_ctx = LoopContext(
+        assembler=None, llm=None, memory=MemProv(), event_bus=bus,
+        provider_ctx=ProviderContext(session_id="s_crash_2", tenant_id="default",
+                                     task_id="tsk_crash_2", agent_id="agt_x2"),
+        capability_cache=CapabilityCache(),
+    )
+
+    return await rt._run_loop(state=state, loop_ctx=loop_ctx, driver=_CrashingDriver(),
+                              run_id="run_x2", initial_step="act", task=task, agent=agent)
+
+
+async def test_run_crash_reraises_and_outcome_is_unreachable_to_caller() -> None:
+    """崩溃支 `raise run_error`——`state`（连同它上面挂的 `run_outcome`）根本不
+    返回给调用方。这里断言的正是这件事本身：调用方只拿到重抛的异常，拿不到
+    任何返回值。**不为了好测而改生产代码的控制流**（R6）。"""
+    with pytest.raises(ValueError, match="boom"):
+        await run_until_crash(ValueError("boom"))
+
+
+# ── 崩溃支 outcome 构造的契约（退一步：不改控制流断不到那个 RunOutcome 本体，
+#    改测 `disposition_for` 吃到「按 runtime.py 崩溃支同样方式构造」的 RunOutcome
+#    后，是否按 retriable 分流）───────────────────────────────────────────────
+
+
+async def test_crash_outcome_contract_non_retriable_exception_never_requeues() -> None:
+    """`ContextOverflowError.retriable = False`——按崩溃支 `getattr(exc, "retriable",
+    True)` 的同一构造方式喂给 disposition_for，即使预算充足也不该原地重试。"""
+    from ctx_weft.core.errors import ContextOverflowError, crash_error_code
+    from ctx_weft.core.orchestrator.task_disposition import RunOutcome, disposition_for
+
+    exc = ContextOverflowError("溢出了")
+    outcome = RunOutcome(
+        kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
+        error_code=crash_error_code(exc), retriable=getattr(exc, "retriable", True),
+    )
+    d = disposition_for(outcome, retry_count=0, max_retries=3)
+    assert d.status == "INTERRUPTED"
+    assert d.event_type == "TaskInterrupted"
+
+
+async def test_crash_outcome_contract_default_exception_retries_with_budget() -> None:
+    """没有 `retriable` 属性的普通异常按契约缺省为 `True`——预算充足时该原地重试。"""
+    from ctx_weft.core.errors import crash_error_code
+    from ctx_weft.core.orchestrator.task_disposition import RunOutcome, disposition_for
+
+    exc = ValueError("随便什么崩溃")
+    outcome = RunOutcome(
+        kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
+        error_code=crash_error_code(exc), retriable=getattr(exc, "retriable", True),
+    )
+    d = disposition_for(outcome, retry_count=0, max_retries=3)
+    assert d.status == "PENDING"
+    assert d.event_type == "TaskRequeued"

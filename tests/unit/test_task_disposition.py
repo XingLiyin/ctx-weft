@@ -106,6 +106,22 @@ def test_canceled():
     assert d.payload == {"reason": "user_cancel"}
 
 
+def test_canceled_with_empty_reason_yields_no_reason_key():
+    """R5：今天 runtime.py 发 TASK_CANCELED 的 payload 是字面 `{}`——reason 为空时
+    不许平白多出一个 `{"reason": ""}` 破行为等价。"""
+    d = disposition_for(RunOutcome(kind=RunOutcomeKind.CANCELED), retry_count=0, max_retries=3)
+    assert d.status == "CANCELED"
+    assert d.event_type == "TaskCanceled"
+    assert d.payload == {}
+
+
+def test_canceled_with_nonempty_reason_includes_it():
+    """非空 reason 照放——给未来真有取消原因的调用方留口。"""
+    d = disposition_for(RunOutcome(kind=RunOutcomeKind.CANCELED, reason="user_cancel"),
+                        retry_count=0, max_retries=3)
+    assert d.payload == {"reason": "user_cancel"}
+
+
 @pytest.mark.parametrize("kind", list(RunOutcomeKind))
 def test_every_kind_yields_a_disposition(kind):
     """值域穷举：加一种结局就必须在表里给它一行，否则这条会红。"""

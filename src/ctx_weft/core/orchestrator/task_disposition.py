@@ -95,7 +95,13 @@ def disposition_for(
         })
 
     if outcome.kind is RunOutcomeKind.CANCELED:
-        return Disposition("CANCELED", "TaskCanceled", {"reason": outcome.reason})
+        # 今天 `runtime.py` 的 `TASK_CANCELED` payload 是字面 `{}`（取消从不编造
+        # `reason`）。`reason` 为空时不放这个键，避免平白多出一个 `{"reason": ""}`
+        # 破坏行为等价；非空时照放，给未来真有取消原因的调用方留口。
+        payload: dict = {}
+        if outcome.reason:
+            payload["reason"] = outcome.reason
+        return Disposition("CANCELED", "TaskCanceled", payload)
 
     if outcome.kind is RunOutcomeKind.INTERRUPTED:
         # 调用方契约：outage 必须显式传 retriable=False，**不得**转发 exc.retriable

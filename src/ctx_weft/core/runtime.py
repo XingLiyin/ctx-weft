@@ -2518,6 +2518,10 @@ class CtxWeftRuntime:
             # Task 2（loop 产出 RunOutcome，尚无消费者）：崩溃支必须显式传
             # `getattr(exc, "retriable", True)`——与上面 outage 支的硬编码 False 不同源，
             # 不许合并成一份（task_disposition.py 顶部契约）。
+            # **这份值对消费者不可达**：本分支下面 `raise run_error`，`state` 根本不
+            # 返回给调用方。真正的崩溃 outcome 由 `_run_task` 的 `except Exception`
+            # 就地构造并消费——Task 4 会连同这条旧路径一并删除本行。保留它只是为了
+            # 五个产出点对称、零成本，不要误当作数据来源。
             state = state.apply_patch({"run_outcome": RunOutcome(
                 kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
                 error_code=crash_error_code(exc), retriable=getattr(exc, "retriable", True),
