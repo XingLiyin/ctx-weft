@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+from ctx_weft.core.orchestrator.session_state import (
+    SessionInput, TERMINAL_SESSION_STATUSES, Transition, next_transition,
+)
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.state.models import NormalTaskSettings
@@ -47,14 +50,80 @@ def _event_jsonable_or_fallback(
 
 
 @dataclass
+class _SessionState:
+    """SM 为每个 session 持有的全部东西——**只有状态本身**。
+
+    没有未决 HITL 集合、没有任务表：那些是 HitlRegistry 和 TaskManager 的，
+    SM 需要的结论由 TM 的信号带过来（docs/events-v2.md §2.1.1）。
+    """
+
+    status: str = "RUNNING"
+    tenant_id: str = "default"
+
+
+@dataclass
 class SessionManager:
-    """Coordinates session creation and root task scheduling."""
+    """Coordinates session creation and root task scheduling; owns session status.
+
+    从前是每次调用 new 一个、用完就扔的临时对象（无状态、不订阅事件）——会话状态因此
+    无处可放，被 TaskManager / runtime / reducer 各写一份。现在是 runtime 级长生命周期
+    组件，`_states` 是会话状态的**唯一住所**（docs/events-v2.md §2.1.1）。
+    """
 
     lifecycle_manager: LifecycleManager
     event_bus: EventBus
     task_max_concurrent: int = 4
     task_max_retries: int = 3
     default_task_timeout_ms: int = 60_000
+
+    #: session_id → 状态。**会话状态的唯一住所。**
+    _states: dict[str, _SessionState] = field(default_factory=dict, init=False, repr=False)
+
+    # ── 查询：TaskManager / host 都从这里读，不再各自维护判断 ────────────
+
+    def status_of(self, session_id: str) -> str:
+        """当前会话状态；未知 session 返回 `""` 而不是抛——host 会拿任意 id 来问。"""
+        st = self._states.get(session_id)
+        return st.status if st is not None else ""
+
+    def is_terminal(self, session_id: str) -> bool:
+        return self.status_of(session_id) in TERMINAL_SESSION_STATUSES
+
+    # ── 登记 ─────────────────────────────────────────────────────────────
+
+    def register_session(self, session_id: str, *, tenant_id: str = "default") -> None:
+        """纳入管理。已存在则保留原状态（重入安全）。"""
+        self._states.setdefault(session_id, _SessionState(tenant_id=tenant_id))
+
+    def forget_session(self, session_id: str) -> None:
+        """会话彻底收口后释放内存。此后查询返回 `""`，调用方须先读后忘。"""
+        self._states.pop(session_id, None)
+
+    # ── 转移：改状态与发事件**只在这里** ──────────────────────────────────
+
+    async def _apply(self, session_id: str, inp: SessionInput, **kw: Any) -> None:
+        st = self._states.get(session_id)
+        if st is None:
+            return
+        transition = next_transition(st.status, inp, **kw)
+        if transition is None:
+            return                      # 不转移就不发事件（否则每条信号都刷前端）
+        st.status = transition.status
+        await self._emit_session_event(session_id, st, transition)
+
+    async def _emit_session_event(
+        self, session_id: str, st: _SessionState, transition: Transition,
+    ) -> None:
+        await self.event_bus.emit(Event(
+            id=generate_id("evt"),
+            run_id=None,                 # 会话级事件不属于任何一次 run
+            sequence=0,
+            session_id=session_id,
+            type=transition.event_type,
+            timestamp=now_utc(),
+            tenant_id=st.tenant_id,
+            payload=dict(transition.payload),
+        ))
 
     async def create_session(
         self,
@@ -126,6 +195,7 @@ class SessionManager:
             "template_id": template.id,
             "template_version": template.version,
         })
+        self.register_session(sid, tenant_id=tenant_id)
 
         root_task, task_manager = await self._make_root_task_manager(
             session, user_prompt, initial_task_settings, user_prompt_event_jsonable,
@@ -197,6 +267,8 @@ class SessionManager:
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
         })
+        self.register_session(session_id, tenant_id=tenant_id)
+        self._states[session_id].status = "RUNNING"   # 新一轮：显式回到 RUNNING
 
         return session, root_task, task_manager
 

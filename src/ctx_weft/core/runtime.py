@@ -600,6 +600,16 @@ class CtxWeftRuntime:
         # compact 等一次性操作的忙位（原先借 _cancel_tokens dict 占位）。
         self._busy_sessions: set[str] = set()
         self._task_managers: dict[str, TaskManager] = {}
+        # 会话状态的唯一住所。从前 SessionManager 是每次调用 new 一个的临时对象
+        # （无状态、用完即弃），状态因此无处可放，被 TaskManager / runtime / reducer
+        # 各写一份。见 docs/events-v2.md §2.1.1。
+        self._session_manager = SessionManager(
+            lifecycle_manager=LifecycleManager(template_lookup=self._template_lookup),
+            event_bus=self._event_bus,
+            task_max_concurrent=self._config.task_max_concurrent,
+            task_max_retries=self._config.task_max_retries,
+            default_task_timeout_ms=self._config.default_task_timeout_ms,
+        )
         # Per-session resume 锁：串行化同一 session 的 recover_session，避免重叠的冷 HITL 应答 /
         # /resume 并发建出两个 TaskManager、两套 drain 竞争派发（spec/07 §9）。惰性建、不回收
         # （体量微小、按 session 数有界）。
@@ -1016,14 +1026,8 @@ class CtxWeftRuntime:
             # 与从前逐字节一致；memory 不可外部化时 `normalized` 就是 params.user_prompt
             # 同一对象，故这一支对纯 event 组合也是无害的。
             params = _dc.replace(params, session_id=sid, user_prompt=normalized)
-        lm = LifecycleManager(template_lookup=self._template_lookup)
-        sm = SessionManager(
-            lifecycle_manager=lm,
-            event_bus=self._event_bus,
-            task_max_concurrent=self._config.task_max_concurrent,
-            task_max_retries=self._config.task_max_retries,
-            default_task_timeout_ms=self._config.default_task_timeout_ms,
-        )
+        sm = self._session_manager
+        lm = sm.lifecycle_manager
 
         if not params.resume:
             session, root_task, task_manager = await sm.create_session(
