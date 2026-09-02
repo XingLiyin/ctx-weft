@@ -1471,7 +1471,8 @@ git commit -m "feat(hitl): Runtime 构造期接线（零 setter）+ 应答入口
 
 **Interfaces:**
 - Consumes: 段 1 `fold_hitl_snapshot` / `load_snapshot`
-- Produces: `CtxWeftRuntime.rebuild_hitl(session_id) -> int` 改为装填 registry
+- Produces: `CtxWeftRuntime.rebuild_hitl(session_id) -> int` 改为装填 registry；
+  `HitlRegistry.resolved_for_session(session_id) -> list[PendingHitl]`（新增只读查询，纯内存、同步）
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1533,6 +1534,33 @@ async def test_a_task_with_an_unresolved_hitl_stays_parked_and_is_not_requeued()
     await rt.recover_session("s1")
     assert _task_status(rt, "t1") == "SUSPENDED"
     assert _drained_tasks(rt) == []
+
+
+async def test_a_task_parked_on_an_already_resolved_hitl_is_requeued():
+    """崩溃窗口的兜底：决定已落盘、但进程在续跑之前死了。
+
+    应答入口的返回值驱动（§7.3）挡住的是「丢事件」，挡不住「丢进程」。若恢复时
+    不管这种任务，人已经答过的会话就永远停在 SUSPENDED——症状与被丢事件时一模一样。
+    """
+    rt = _runtime_with_events(_resolved_but_never_resumed_tool_result())
+    await rt.recover_session("s1")
+    assert "t1" in _drained_tasks(rt)
+
+
+async def test_requeue_of_a_resolved_hitl_does_not_re_execute_the_tool():
+    """重排是安全的，因为续跑动作本身幂等：reconcile 只补没有 TOOL_RESULT 的 dangling
+    调用。所以恢复期**不需要**记「这次续跑到底跑没跑过」——那笔账要跨重启，又得多一份
+    持久状态（绕回 §3.1 要消除的东西）。"""
+    rt = _runtime_with_events(_resolved_and_already_resumed_tool_result())
+    await rt.recover_session("s1")
+    assert _tool_executions(rt, tool_call_id="call_1") == 1
+
+
+async def test_requeue_of_a_resolved_user_turn_does_not_duplicate_the_injection():
+    """UserTurn 侧的幂等靠 MemoryEvent.id = f"hitlreply:{hitl_id}"（§7.3/§12.2）。"""
+    rt = _runtime_with_events(_resolved_and_already_injected_user_turn())
+    await rt.recover_session("s1")
+    assert _user_prompt_count(rt, task_id="t1") == 1
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1593,6 +1621,41 @@ Expected: FAIL
 
 ③ `task_manager.set_has_pending_hitl` / `set_cancel_pending_hitl` 的 lambda 改指
 `self.hitl_registry.list_pending(...)` 与 `self.hitl.cancel(...)`。
+
+④ **崩溃窗口的兜底：挂在「已终局」HITL 上的任务要重排。**
+
+`restore` 今天区分「SUSPENDED-on-children」与「SUSPENDED-on-HITL」，后者一律保持挂起、不重排
+（spec/07 §9.1）。这条规则漏了一种情形：**决定已落盘、但进程在续跑之前就死了**。此时 HITL 已
+终局，任务却仍是 SUSPENDED，按现规则会被永远晾着——症状与「事件被丢」一模一样，而这正是本次
+重设计要消灭的故障类。
+
+判据从「这个任务有没有 HITL」改成「它挂着的 HITL **终局了没有**」：
+
+```python
+        # 有未决 pending HITL 的 task：保持 parked、不重排（人还没答，绝不能自己跑起来）。
+        parked_task_ids = {
+            r.task_id for r in self.hitl_registry.list_pending(session_id=session_id)
+            if r.task_id
+        }
+        # 反过来：挂在**已终局** HITL 上的 task 要重排——决定已落盘、但续跑没跑成
+        # （进程在应答入口返回之后、recover 之前崩了）。不重排它就永远停在 SUSPENDED。
+        resumable_task_ids = {
+            r.task_id for r in self.hitl_registry.resolved_for_session(session_id)
+            if r.task_id and r.task_id not in parked_task_ids
+        }
+```
+
+`HitlRegistry.resolved_for_session(session_id)` 是本任务给 registry 加的一个只读查询（纯内存、
+同步，与 `list_pending` 同形），返回该 session 已终局的请求。
+
+**为什么不需要记「这次续跑到底跑没跑过」**：因为两条续跑路径本身都幂等——`ToolResult` 走
+reconcile，它只补没有 `TOOL_RESULT` 的 dangling 调用；`UserTurn` 的注入带 `hitl_id` 派生的
+幂等键。所以「宁可重排一次」是安全的，而记这笔账要跨重启，就又需要一份持久状态，绕回 §3.1
+想消除的东西。
+
+> 装填的完备性在这里第二次成为承重点：`load_snapshot` 只装填 reconcile 需要的那些已终局决定
+> （按 dangling tool_call 有界）。若某个已终局请求没被装进来，`resolved_for_session` 就看不见
+> 它，兜底也就失效。Task 9 的实现者要确认这两处的集合口径一致，并在报告里说明。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -1704,3 +1767,4 @@ git commit -m "test(hitl): 段 2 端到端——热/冷审批、ask_user 带图�
 - [ ] `grep -rn "HitlManager\|hitl_manager" src tests` 无输出
 - [ ] `grep -rn "form == \"wait\"" src/` 无输出
 - [ ] 全部恢复相关测试通过（Task 9 Step 5 的口径）
+- [ ] 恢复期两个方向都对：挂在**未决** HITL 上的任务保持 parked，挂在**已终局** HITL 上的任务被重排（spec §7.3.1）
