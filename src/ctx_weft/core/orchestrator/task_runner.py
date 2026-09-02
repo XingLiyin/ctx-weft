@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from ctx_weft.core.state.models import NormalTaskSettings
 
 if TYPE_CHECKING:
+    from ctx_weft.core.orchestrator.task_disposition import RunOutcome
     from ctx_weft.core.state.models import Task
 
 
@@ -36,7 +37,19 @@ class TaskRunner(Protocol):
 
     async def assemble(self, task_id: str) -> "AgentBinding | None": ...
 
-    async def execute(self, binding: "AgentBinding", task_id: str) -> None: ...
+    async def execute(
+        self, binding: "AgentBinding", task_id: str,
+    ) -> "RunOutcome | None":
+        """驱动一次 run，交回它的**结局**（不是 task 状态）。
+
+        返回值是 TaskManager 消费处置的**唯一数据通道**（Task 4）：不订阅 run 事件，
+        因为 in-process bus 在 `emit()` 内同步 drain——TM 拿到处置后还要动队列、
+        `drain()` 会派下一个 task、开新 run、发更多事件，全嵌套在最初那次 `emit()`
+        里层层重入。数据走返回值，TM 在 run 返回**之后**动手。
+        None = 这次执行没留下结局，由 TM 按 COMPLETED/success 兜底；崩溃则是重抛，
+        由 TM 的 `except Exception` 就地构造 RunOutcome。
+        """
+        ...
 
 
 def effective_agent_id(task: "Task | None", root_agent_id: str) -> str:

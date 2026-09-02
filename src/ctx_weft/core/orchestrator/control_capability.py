@@ -204,7 +204,7 @@ def delegate_task(
     if isinstance(ctx.task.settings, NormalTaskSettings):
         ctx.task.settings.spawn_titles.append(title)
 
-    ctx.task.status = "SUSPENDED"
+    ctx.task.suspend_requested = True     # 路由意图；task 落 SUSPENDED 归 TaskManager
     ctx.task.actor_done = True
     return ControlResult(content=f"Sub-task '{title}' scheduled.")
 
@@ -277,7 +277,7 @@ def delegate_plan(
 
     if isinstance(ctx.task.settings, NormalTaskSettings):
         ctx.task.settings.spawn_titles = titles
-    ctx.task.status = "SUSPENDED"
+    ctx.task.suspend_requested = True     # 路由意图；task 落 SUSPENDED 归 TaskManager
     ctx.task.actor_done = True
     return ControlResult(content=_PLAN_DISPATCH_ACK)
 
@@ -451,21 +451,18 @@ def report_task_outcome(
         task.next_step_hint = hint or None
         task.task_summary = task_summary
         task.process_report_at = now_utc()
+        # **只写判决，不写状态**（Task 4）：三态 verdict 经 FinalizeStep 的 RunOutcome
+        # 交给 TaskManager，由处置表决定 task 落 FINISHED / FAILED / PENDING。
         task.observer_outcome = task_status
+        task.actor_done = True
         if task_status == "success":
-            task.status = "FINISHED"
             task.error = None  # 清掉上一轮 retry 暂存的受阻原因，FINISHED 任务不携带 error
-            task.actor_done = True
         elif task_status == "fail":
-            task.status = "FAILED"
             task.error = task_failure_reason
-            task.actor_done = True
         else:  # retry
-            task.status = "PENDING"
             # 本轮受阻原因暂存 task.error：retry 耗尽降级 fail 时它就是真死因
-            # （finalize 发 TASK_FAILED_RETRY_EXHAUSTED 携带）；下一轮判决必然覆盖或清空。
+            # （TaskFailed 的 TASK_FAILED_RETRY_EXHAUSTED 携带）；下一轮判决必然覆盖或清空。
             task.error = task_failure_reason or None
-            task.actor_done = True
 
     review_msg = ""
     if task_reviews and ctx:

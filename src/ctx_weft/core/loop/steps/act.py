@@ -141,8 +141,9 @@ class ActStep(Step):
             await ctx.event_bus.emit(make_event(state, EventType.MAX_TURNS_REACHED, payload={
                 "max_turns": max_turns}))
 
-        # task.status == "SUSPENDED" 表示本 task 在等子任务，路由到 SuspendStep
-        next_step = "suspend" if state.task.status == "SUSPENDED" else "observe"
+        # suspend_requested 表示 actor 本轮派了活、本 run 要停在等子任务 → SuspendStep。
+        # （判据从 `task.status == "SUSPENDED"` 换成意图位：状态归 TaskManager，Task 4）
+        next_step = "suspend" if state.task.suspend_requested else "observe"
 
         # ── task.outputs：收尾时合成最终交付物（spec 2026-07-01 反转契约）──
         # 收尾路径 = 纯文本收尾(normal) 或 finish_task 收尾(actor_done 且未挂起)；答复即消息正文，
@@ -150,7 +151,7 @@ class ActStep(Step):
         # delegate-suspend 不在此列（不产最终输出，维持现状）。
         if (
             exit_reason in ("normal", "actor_done")
-            and state.task.status != "SUSPENDED"
+            and not state.task.suspend_requested
             and transcript
         ):
             outputs = _compose_final_outputs(transcript)
@@ -423,8 +424,9 @@ async def _execute_tool_calls(
         try:
             result = invoke_task.result()
         except HitlPark:
-            # 被 park 的工具未执行；task 落 SUSPENDED 并 unwind（spec/07 §7）。
-            state.task.status = "SUSPENDED"
+            # 被 park 的工具未执行，直接 unwind（spec/07 §7）；task 落 AWAITING_HUMAN
+            # 由 TaskManager 据 RunOutcome 定（Task 4：这里原先那句 `task.status =
+            # "SUSPENDED"` 是写给自己看的死值，_run_loop 的 HitlPark 支随即覆盖）。
             raise
 
         tool_results.append({
@@ -448,7 +450,7 @@ def _reconcile_finish_vs_dispatch(
     阻塞子任务」改投为「当前 task 的 parent 名下的独立后继」(当前是 root 则为顶层)，自行调度。
 
     - detach_staged：把本轮 staged 子任务改挂到 parent，切断与收尾 task 的阻塞链。
-    - status 复位为 ACTIVE：撤销 delegate 置的 SUSPENDED，使路由走 observe(task.outputs
+    - 清 suspend_requested：撤销 delegate 置的挂起意图，使路由走 observe(task.outputs
       已由 finish_task 写好)。
     - 清 spawn_titles：避免 SuspendStep 误报(虽已不路由到 suspend，仍清掉防脏状态)。
 
@@ -461,7 +463,7 @@ def _reconcile_finish_vs_dispatch(
     if FINISH_TASK_NAME not in names or not any(n in DISPATCH_TOOLS for n in names):
         return
     ctx.task_manager.detach_staged(state.task.id, state.task.parent_task_id)
-    state.task.status = "ACTIVE"
+    state.task.suspend_requested = False
     if isinstance(state.task.settings, NormalTaskSettings):
         state.task.settings.spawn_titles = []
     logger.info(
@@ -635,7 +637,7 @@ def interrupt_edit_note(prev_request: str, new_input: str) -> str:
 async def _park_wait_for_user(
     state: LoopState, ctx: LoopContext, *, source: str, edit: bool = False,
 ) -> None:
-    """起 wait_for_user 冷 park：任务 SUSPENDED、抛 HitlPark。
+    """起 wait_for_user 冷 park：抛 HitlPark（task 落 AWAITING_HUMAN 由 TaskManager 定）。
 
     **不写会话状态**：会话状态的唯一写者是 `SessionManager`，它由 TM 的
     `TaskQueueBlocked` 信号推出 `SessionWaiting`（2026-09-02 会话状态所有权重构）。
@@ -659,7 +661,6 @@ async def _park_wait_for_user(
         stage=HITL_STAGE_TOOL,
     )
     # 不建等待槽 —— 本调用方随即 park 释放协程而非 await，应答必然走冷续跑。
-    state.task.status = "SUSPENDED"
     raise HitlPark(hitl_id=req.id)
 
 

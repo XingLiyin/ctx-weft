@@ -980,16 +980,34 @@ class CtxWeftRuntime:
                 p.register_session(sid, task_manager, session)
                 break
         try:
-            state, handle = await self._execute_task(
-                session=session,
-                task=task,
-                agent=agent,
-                template=template,
-                run_id=generate_id("run"),
-                memory=self.providers.get_memory(),
-                llm_account=llm_account,
-                llm_model=llm_model,
-                task_manager=task_manager,
+            try:
+                state, handle = await self._execute_task(
+                    session=session,
+                    task=task,
+                    agent=agent,
+                    template=template,
+                    run_id=generate_id("run"),
+                    memory=self.providers.get_memory(),
+                    llm_account=llm_account,
+                    llm_model=llm_model,
+                    task_manager=task_manager,
+                )
+            except Exception as e:
+                # 崩溃入口（与 TaskManager._run_task 的那条同形）：_run_loop 重抛，
+                # 这里就地构造 RunOutcome 让 TM 落状态发事件，再原样抛给调用方。
+                await task_manager.apply_run_outcome(task.id, RunOutcome(
+                    kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
+                    error=str(e), error_code=crash_error_code(e),
+                    retriable=getattr(e, "retriable", True),
+                ))
+                raise
+            # compat 路径没有队列、不经 _run_task，但一样要有人消费 run 的结局——
+            # 否则 outage / park / 取消在这条路径上没人写 task 状态、没人发 task 事件
+            # （Task 4 之前是 _run_loop 自己写自己发）。兜底同 _run_task。
+            await task_manager.apply_run_outcome(
+                task.id,
+                state.run_outcome or RunOutcome(
+                    kind=RunOutcomeKind.COMPLETED, verdict="success"),
             )
         finally:
             await task_manager.announce_queue_state()
@@ -2441,34 +2459,30 @@ class CtxWeftRuntime:
 
         run_error: BaseException | None = None
         was_cancelled = False
+        cancel_takes_effect = False
         try:
             async for outcome in driver.run(state, loop_ctx):
                 if outcome.state_patch:
                     state = state.apply_patch(outcome.state_patch)
         except HitlPark as park:
-            # Task 2（loop 产出 RunOutcome，尚无消费者）：旧路径原样保留，本行只新增产出。
+            # run 的结局：这次执行停在「等人答一句」。**task 变成什么不在这里决定**
+            # （Task 4）：TaskManager 据本 outcome 走处置表落 AWAITING_HUMAN 并发
+            # TaskAwaitingHuman——挡住这个 task 的那一个请求就是 park.hitl_id（act 的
+            # tool call 循环是串行的，第一个 park 就 unwind 整个 run，唯一确定）。
+            # run_error 保持 None → finally 发 RUN_FINISHED(awaiting_human,
+            # will_retry=False)，与委派挂起同形。
             state = state.apply_patch({"run_outcome": RunOutcome(
                 kind=RunOutcomeKind.AWAITING_HUMAN, hitl_id=park.hitl_id,
             )})
-            # 热→冷降级 / 显式挂起：干净挂起，不算失败。run_error 保持 None →
-            # finally 发 RUN_FINISHED(AWAITING_HUMAN, will_retry=False)，与委派挂起同形；
-            # _run_task 据非终态挂起走挂起分支（不 requeue）。
-            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
-                task.status = "AWAITING_HUMAN"
-                # task 级事实：这个 task 卡住了，卡它的是一个 HITL 请求。这条描述的是
-                # **挡住这个 task 的那一个请求**——act 的 tool call 循环是串行的，第一个
-                # park 就 unwind 整个 run，所以「挡住它的」唯一确定。会话怎么了不在这里
-                # 宣布（由 TM 聚合后交 SM 判定，docs/events-v2.md §2.1.1）。
-                await self._event_bus.emit(make_event(
-                    state, EventType.TASK_AWAITING_HUMAN,
-                    payload={"hitl_id": park.hitl_id},
-                ))
             logger.info("_run_loop: task %s parked on HITL", task.id)
         except asyncio.CancelledError:
             was_cancelled = True
-            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
-                task.status = "CANCELED"
-            # Task 2（loop 产出 RunOutcome，尚无消费者）：旧路径原样保留，本行只新增产出。
+            # A1 守卫的 run 侧半边：熔断 trip 会**先**把 root 判 FAILED、**再**对在跑的
+            # root 发协作取消（内部清场手段），此时这次取消不该把已坐实的终态盖回
+            # CANCELED。本 run 不再写 task.status（Task 4：状态归 TM），故把「本来会不会
+            # 翻成 CANCELED」记成局部量给下面 RUN_CANCELED 的守卫用；task 侧的同一守卫
+            # 长在 TaskManager 的处置入口（终态已坐实 → 不应用 run 的结局）。
+            cancel_takes_effect = task.status not in ("FINISHED", "FAILED", "CANCELED")
             state = state.apply_patch({"run_outcome": RunOutcome(kind=RunOutcomeKind.CANCELED)})
         except LLMOutageError as exc:
             # Task 2（loop 产出 RunOutcome，尚无消费者）：outage 硬编码 retriable=False——
@@ -2477,7 +2491,7 @@ class CtxWeftRuntime:
             # 转发会让 outage 在预算充足时被错误地原地重试。见 task_disposition.py 顶部契约。
             state = state.apply_patch({"run_outcome": RunOutcome(
                 kind=RunOutcomeKind.INTERRUPTED, reason="llm_outage",
-                error_code="llm_outage", retriable=False,
+                error_code="llm_outage", error=str(exc), retriable=False,
             )})
             # 瞬时 LLM 故障自愈耗尽 / 中途断流 → 可恢复中断，**不是** task 失败。
             # task 置 INTERRUPTED（非终态，与 HitlPark 同形）→ _run_task 走挂起分支不判 FINISHED，
@@ -2487,7 +2501,6 @@ class CtxWeftRuntime:
             # TASK_INTERRUPTED）必须同源，否则终态三元组日后加值时两处会漂移（M3）。
             was_interrupted = task.status not in ("FINISHED", "FAILED", "CANCELED")
             if was_interrupted:
-                task.status = "INTERRUPTED"
                 # 成因随 task 走：TM 聚合 TaskQueueInterrupted 时读的就是它。
                 # error_code 是**码**，error 只是自由文本兜底：TM 的聚合优先读码
                 # （task_manager.py `_emit_queue_signal`），host 按码分流。不写码的话
@@ -2500,31 +2513,21 @@ class CtxWeftRuntime:
             # 会话状态由 TM 聚合后交给 SM 判定——这里不宣布会话怎么了。
             await self._event_bus.emit(make_event(state, EventType.RUN_INTERRUPTED, payload={
                 "reason": "llm_outage", "error_message": str(exc)}))
-            # task 级事实：这个 task 停在 INTERRUPTED，等 /resume。
-            # **outage 支没有重试判定**——本分支不重抛（run_error 保持 None），
-            # _handle_task_failure 根本不会被调用，所以这里就是「挂起等 /resume」
-            # 那一支本身，紧随 run 级事实发出即可（崩溃支相反：判定在 TM，故那条
-            # TaskInterrupted 由 TaskManager._suspend_task_interrupted 发）。
-            if was_interrupted:
-                await self._event_bus.emit(make_event(
-                    state, EventType.TASK_INTERRUPTED, payload={
-                        "reason": "llm_outage",
-                        "error_code": "llm_outage",
-                        "error_message": str(exc),
-                        "retry_count": task.retry_count,
-                    }))
+            # task 级事实（TaskInterrupted）不在这里发：outage 的 RunOutcome 带着
+            # retriable=False 交给 TaskManager，由处置表判成 INTERRUPTED 并发出——
+            # 「outage 从不原地重试」的判据从路径隔离变成了这个显式标志位（Task 4）。
         except Exception as exc:
             run_error = exc
-            # Task 2（loop 产出 RunOutcome，尚无消费者）：崩溃支必须显式传
-            # `getattr(exc, "retriable", True)`——与上面 outage 支的硬编码 False 不同源，
-            # 不许合并成一份（task_disposition.py 顶部契约）。
-            # **这份值对消费者不可达**：本分支下面 `raise run_error`，`state` 根本不
-            # 返回给调用方。真正的崩溃 outcome 由 `_run_task` 的 `except Exception`
-            # 就地构造并消费——Task 4 会连同这条旧路径一并删除本行。保留它只是为了
-            # 五个产出点对称、零成本，不要误当作数据来源。
+            # 这份 outcome **不是**给 TaskManager 的（本分支下面 `raise run_error`，
+            # `state` 根本不返回给调用方；处置用的那份由 `TaskManager._run_task` 的
+            # `except Exception` 就地构造）。它是给下面 finally 里 `RUN_FINISHED.outcome`
+            # 用的——run 得说出自己是怎么结束的，否则崩溃支会兜底报成 "completed"。
+            # retriable 取 `getattr(exc, "retriable", True)`，与 outage 支硬编码的 False
+            # **不同源**，不许合并成一份（见 task_disposition.py 顶部契约）。
             state = state.apply_patch({"run_outcome": RunOutcome(
                 kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
-                error_code=crash_error_code(exc), retriable=getattr(exc, "retriable", True),
+                error=str(exc), error_code=crash_error_code(exc),
+                retriable=getattr(exc, "retriable", True),
             )})
             # 运行层崩溃 = 可恢复中断的临时标记（非终态）：re-raise 交 _handle_task_failure
             # 定夺——原地重试（翻回 PENDING）或挂起等 /resume（保持 SUSPENDED + 发事件）。
@@ -2540,7 +2543,6 @@ class CtxWeftRuntime:
             # was_interrupted 同一个判据（M3 的教训：别让两处判断各写一份）。
             was_interrupted = task.status not in ("FINISHED", "FAILED", "CANCELED")
             if was_interrupted:
-                task.status = "SUSPENDED"
                 task.error = str(exc)
             if getattr(exc, "retriable", False):
                 logger.warning("_run_loop: task %s failed (retriable): %s", task.id, exc)
@@ -2559,15 +2561,14 @@ class CtxWeftRuntime:
                 }))
         finally:
             self._capability_cache.evict(agent.id)
-            # A1 守卫：was_cancelled 只在 task 真的落在 CANCELED（本 run 自己置的取消态）时才发
-            # RUN_CANCELED + TASK_CANCELED。熔断 trip 序列会先把 root 判 FAILED 再对在跑 root 发
-            # 协作取消（_cancel_inflight）——那是内部清场手段，task.status 已是 FAILED（except
-            # asyncio.CancelledError 分支的 `if task.status not in (...)` 挡住了覆写），若仍照发
-            # 这两条事件，host/postgres 投影会把已经写定的 FAILED 盖回 CANCELED。RUN_FINISHED
-            # 不受此守卫约束，无论如何都要发（关 SSE）。
-            if was_cancelled and task.status == "CANCELED":
+            # A1 守卫：只有这次取消真的会让 task 翻成 CANCELED 时才发 RUN_CANCELED。熔断
+            # trip 序列会先把 root 判 FAILED 再对在跑 root 发协作取消（_cancel_inflight）——
+            # 那是内部清场手段，task 已是 FAILED，照发会让 host/postgres 投影把写定的 FAILED
+            # 盖回 CANCELED。判据 cancel_takes_effect 在 except 分支里取，与 task 侧的同一
+            # 守卫（TaskManager 的处置入口）同源。TASK_CANCELED 不在这里发了（Task 4：task
+            # 状态事件只从 TaskManager 出）。RUN_FINISHED 不受此守卫约束，无论如何都发（关 SSE）。
+            if was_cancelled and cancel_takes_effect:
                 await self._event_bus.emit(make_event(state, EventType.RUN_CANCELED, payload={"run_id": run_id}))
-                await self._event_bus.emit(make_event(state, EventType.TASK_CANCELED, payload={}))
             # will_retry=True suppresses SSE close on the host side.
             # cancelled → False; retriable=False → TaskManager won't retry anyway.
             will_retry = (
@@ -2586,8 +2587,10 @@ class CtxWeftRuntime:
             )
             await self._event_bus.emit(make_event(state, EventType.RUN_FINISHED, payload={
                 "outcome": outcome_kind.value,
-                # `final_status` 已废弃，保留一个发布周期供旧断言过渡——host 应改读
-                # 上面的 `outcome`（run 词表）。下个周期随旧路径一起删（Task 4）。
+                # `final_status` 已废弃，下个周期删除——host 应改读上面的 `outcome`
+                # （run 词表）。Task 4 起 run 不再写 task 状态，故这里只是**发 RUN_FINISHED
+                # 那一刻** task 的状态（多半仍是 ACTIVE）：真正的终态由随后 TaskManager 的
+                # 处置写定，靠它推 task 状态的 host 一定要改。
                 "final_status": task.status,
                 "will_retry": will_retry,
                 "total_events": state.sequence_counter,
@@ -2825,10 +2828,17 @@ class _SessionTaskRunner:
 
     # ── 阶段 2：执行 ─────────────────────────────────────────────────────────
 
-    async def execute(self, binding: "AgentBinding", task_id: str) -> None:
+    async def execute(self, binding: "AgentBinding", task_id: str) -> "RunOutcome | None":
+        """驱动 step loop，把 run 的结局交回 TaskManager（Task 4）。
+
+        返回值取自 `_run_loop` **最终返回的那个 state**（`apply_patch` 会换对象，
+        入口那个 state 上没有 run_outcome）。返回 None = 这次执行没留下结局（task 已
+        不存在），由 TM 按 COMPLETED/success 兜底。崩溃不从这里回：`_run_loop` 重抛，
+        TM 的 `except Exception` 就地构造 outcome。
+        """
         t = self._task_manager.get_task(task_id)
         if t is None:
-            return
+            return None
         # 单 owner 架构 seam：model 在派发时从可变 session 读取；控制令牌 per-run 发放——
         # 随本次派发登记进 runtime registry、run 结束注销，pause/cancel 经 registry 必达在途 run。
         # 出生信号在登记点按执行 agent 分流：pause 弃子窗口内 root run born-pause、
@@ -2857,8 +2867,11 @@ class _SessionTaskRunner:
             )
         finally:
             self._runtime._deregister_run_tokens(self._session.id, task_id)
-        if self._handle is not None and s is not None:
+        if s is None:
+            return None
+        if self._handle is not None:
             self._handle._state = s
+        return s.run_outcome
 
     # ── helpers（原闭包内嵌函数）───────────────────────────────────────────────
 

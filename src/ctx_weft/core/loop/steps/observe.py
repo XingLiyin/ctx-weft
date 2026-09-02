@@ -404,15 +404,13 @@ class ObserveStep(Step):
 
     @staticmethod
     def _apply_assessment(task: Task, verdict: Verdict) -> None:
-        """将 verdict 三态结果写入 task，对齐 report_task_outcome。"""
-        outcome = verdict.task_outcome
-        task.observer_outcome = outcome
-        if outcome == "success":
-            task.status = "FINISHED"
-        elif outcome == "fail":
-            task.status = "FAILED"
-        else:  # retry
-            task.status = "PENDING"
+        """把规则 observe 的判决写进 task，对齐 report_task_outcome。
+
+        **只写判决，不写状态**（Task 4）：三态 verdict 经 FinalizeStep 的 RunOutcome
+        交给 TaskManager，由处置表决定 task 落 FINISHED / FAILED / PENDING。这里原本
+        的 `task.status = ...` 是判决越界写状态，已删。
+        """
+        task.observer_outcome = verdict.task_outcome
         task.task_summary = verdict.task_summary
         task.actor_done = True
 

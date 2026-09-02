@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from typing import Any, Callable, Coroutine
 
+from ctx_weft.core.orchestrator.task_disposition import RunOutcome
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, effective_agent_id
 
-ExecuteFn = Callable[[str, str], Coroutine[Any, Any, None]]
+ExecuteFn = Callable[[str, str], Coroutine[Any, Any, Any]]
 
 
 class StubRunner:
@@ -28,6 +29,14 @@ class StubRunner:
         root = self._tm.session.root_agent_id if self._tm.session else ""
         return AgentBinding(agent_id=effective_agent_id(t, root))
 
-    async def execute(self, binding: AgentBinding, task_id: str) -> None:
+    async def execute(self, binding: AgentBinding, task_id: str) -> "RunOutcome | None":
+        """execute_fn 返回的 RunOutcome 原样交回 TaskManager（Task 4 的处置通道）。
+
+        返回 None（含没有 execute_fn 的空转 stub）= 这次 run 没留下结局，TM 按
+        COMPLETED/success 兜底——与旧 stub「跑完什么都不改」的效果一致。
+        """
         if self._fn is not None:
-            await self._fn(self._session_id, task_id)
+            res = await self._fn(self._session_id, task_id)
+            if isinstance(res, RunOutcome):
+                return res
+        return None

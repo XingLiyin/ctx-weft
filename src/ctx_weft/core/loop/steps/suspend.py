@@ -8,8 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.protocols.events import EventType
+from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class SuspendStep(Step):
-    """Writes suspension summary to memory and marks task as SUSPENDED."""
+    """写挂起摘要，并把「这次 run 停在等子任务」报成 RunOutcome（状态归 TaskManager）。"""
 
     name = "suspend"
 
@@ -55,23 +54,14 @@ class SuspendStep(Step):
         # v2 P1（2026-07-27）：不再写 OBSERVER_SUMMARY（不进装配的死写点）；
         # summary 仅进 TASK_SUSPENDED 事件 payload。
 
-        # task.status is already "SUSPENDED" — set by the control tool function body
-        events.append(make_event(
-            state, EventType.TASK_SUSPENDED,
-            payload={
-                "task_id": task.id,
-                "summary": summary,
-                "spawn_titles": titles,
-            },
-        ))
-
+        # TASK_SUSPENDED 不在这里发（Task 4）：本 step 只报「这次 run 停在等子任务」，
+        # summary / spawn_titles 随 RunOutcome 交给 TaskManager，由它落状态并发事件。
         # dispatch 段边界（spec 2026-07-16）：父坐实 SUSPENDED 后 fire-and-forget 后台
         # recap，折派发前 raw——挂起空窗跑 LLM。所有委派父生效（不加 _is_own_root 门控）；
         # resume 竞态由 _run_loop 入口 await_pending_background_observe 封死。
         from ctx_weft.core.loop.steps.background_observe import launch_background_observe
         launch_background_observe(state, ctx, boundary="dispatch")
 
-        # Task 2（loop 产出 RunOutcome，尚无消费者）：旧的写状态/发事件原样保留，本行只新增产出。
         run_outcome = RunOutcome(
             kind=RunOutcomeKind.SUSPENDED_ON_CHILDREN,
             summary=summary,

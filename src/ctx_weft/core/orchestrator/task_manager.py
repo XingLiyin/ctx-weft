@@ -16,6 +16,11 @@ from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
 from ctx_weft.core.content import content_with_suffix
 from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
+from ctx_weft.core.orchestrator.task_disposition import (
+    RunOutcome,
+    RunOutcomeKind,
+    disposition_for,
+)
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.state.models import (
@@ -37,6 +42,11 @@ logger = logging.getLogger(__name__)
 #: 非终态的「停下来了」：run 已经退出、任务还没做完。三者的区别在于**解开它需要谁**——
 #: 等子任务（自愈）/ 等人答一句 / 等运维 /resume。判据是 task.status，不是任何字面量。
 _PARKED_STATUSES: frozenset[str] = frozenset({"SUSPENDED", "AWAITING_HUMAN", "INTERRUPTED"})
+
+#: 已经坐实的终态。TM 自己写过其中之一（熔断 trip 的 root 判死）之后，run 的结局
+#: 不得再把它盖掉——这条守卫此前长在 `_run_loop` 的三个 except 支里
+#: （`if task.status not in ("FINISHED", "FAILED", "CANCELED")`），随发射一起搬来。
+_TERMINAL_STATUSES: frozenset[str] = frozenset({"FINISHED", "FAILED", "CANCELED"})
 
 # 默认值；实际值由 host 经 RuntimeConfig → TaskManager 构造参数注入。
 _DEFAULT_MAX_RETRIES    = 3
@@ -424,6 +434,9 @@ class TaskManager:
         if task is not None:
             task.status = "ACTIVE"
             task.actor_done = False
+            # 上一轮的挂起意图不得带进这一轮：父任务被子任务唤醒后重跑，若 delegate 置的
+            # suspend_requested 还留着，ActStep 会再路由去 SuspendStep、父永远醒不过来。
+            task.suspend_requested = False
 
         # ── 阶段 1：装配（assemble）────────────────────────────────────────
         # 失败发生在 TASK_STARTED 之前 → 投影不会出现幽灵 ACTIVE；与执行失败
@@ -451,53 +464,113 @@ class TaskManager:
                          payload={"assigned_agent_id": binding.agent_id})
 
         # ── 阶段 2：执行（execute）────────────────────────────────────────
+        # 消费 RunOutcome 有**两条**入口：正常返回（completed / awaiting_human /
+        # suspended_on_children / canceled 四种，run 自己 return 回来）与崩溃
+        # （`_run_loop` 重抛 → 下面的 `except Exception` 就地构造）。两条喂**同一张**
+        # 处置表，「还能不能原地重试」的判断因此只剩 disposition_for 一处。
         try:
             try:
-                await self._runner.execute(binding, task_id)
+                outcome = await self._runner.execute(binding, task_id)
             except BaseException:
                 # cancel(CancelledError) / 异常退出：丢弃未 flush 的缓冲，
                 # 防止泄漏或日后 resume 时被误入队。再交回外层原有处理。
                 self._staged.pop(task_id, None)
                 raise
+            if outcome is None:
+                # 这次执行没留下结局（task 已不存在等）→ 按「没炸、没挂起、没取消」兜底，
+                # 与旧路径的 `final_status = "FINISHED"` 同形。
+                outcome = RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="success")
+            # 处置**先于** _flush_staged：子任务一入队就可能跑完、回头唤醒父亲，而
+            # `_try_resume_parent` 的门是 `parent.status == "SUSPENDED"`——父亲必须在
+            # 子任务入队前落到 SUSPENDED（旧路径由 control tool 在 run 内写，同一时序）。
+            status = await self.apply_run_outcome(task_id, outcome)
             # runner 正常跑完才把本轮 spawn 的子任务入队（“一轮跑完之后 push”）
             await self._flush_staged(task_id)
-            task = self._tasks.get(task_id)
-            if task and task.status in _PARKED_STATUSES:
-                # 子任务已由 control tool 推入队列；parent 等待所有子任务完成后
-                # 由 _try_resume_parent 重新入队，此处只需移出 running set 并 drain。
-                # 三种非终态停顿共用这一条出口：SUSPENDED（等子任务）、AWAITING_HUMAN
-                # （HitlPark，等人应答）、INTERRUPTED（LLM 故障，待 /resume 由 restore 重排）。
-                async with self._lock:
-                    self._running_tasks.discard(task_id)
-                    self._running_agents.pop(task_id, None)
-                    self._queue.unmark_running(task_id)
-                await self.drain()
-                # 整个会话因 park/suspend 进入空闲（无在跑任务、无待派子任务）→ 通知 runtime 回收
-                # 按 run 计的控制信号。注意是 is_done（而非"本 task 挂起"）：父等子时子仍在跑，
-                # is_done 为 False、不触发，待子完成 resume 父；只有全会话静止才算空闲挂起。
-                if self.is_done():
-                    await self._fire_session_idle()
-                return
-            if task and task.status == "PENDING":
-                # Observer 判 retry（本轮未完成，含机械退出）：重新入队（retry_count 已在 finalize +1）。
-                async with self._lock:
-                    self._running_tasks.discard(task_id)
-                    self._running_agents.pop(task_id, None)
-                    self._queue.unmark_running(task_id)
-                    self._queue.push(QueueEntry(task_id=task_id, session_id=self._session_id))
-                await self.drain()
-                return
-            # 使用 task 的实际终态，避免将 FAILED/CANCELED 覆盖为 FINISHED
-            final_status: TaskStatus = "FINISHED"
-            if task and task.status in ("FAILED", "CANCELED"):
-                final_status = task.status
-            await self.on_task_finished(task_id, status=final_status)
+            await self._settle(task_id, status)
         except Exception as e:
             if getattr(e, "retriable", False):
                 logger.warning("Task %s failed (retriable): %s", task_id, e)
             else:
                 logger.exception("Task %s failed: %s", task_id, e)
-            await self._handle_task_failure(task_id, error=str(e), exc=e)
+            # 崩溃入口：`retriable` 取 `getattr(exc, "retriable", True)`——与 outage 支
+            # 硬编码的 False **不同源**，不许合并成一份（LLMOutageError.retriable 恒为
+            # True，转发会让 outage 在预算充足时被错误地原地重试；见 task_disposition.py）。
+            status = await self.apply_run_outcome(task_id, RunOutcome(
+                kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
+                error=str(e), error_code=crash_error_code(e),
+                retriable=getattr(e, "retriable", True),
+            ))
+            await self._settle(task_id, status)
+
+    async def apply_run_outcome(self, task_id: str, outcome: RunOutcome) -> str:
+        """run 的结局 → task 的处置：写状态 + 发那一条 task 状态事件。**唯一入口**。
+
+        loop 只报「发生了什么」（RunOutcome），这里回答「那么 task 变成什么」——判据
+        全在 `disposition_for` 那张纯函数表里，本方法只负责执行：写 status、写回
+        retry_count、发事件。返回落定的状态，供调用方选出口。公开是因为`run_single_task`
+        那条 compat 路径（没有队列、不经 `_run_task`）也要消费同一份结局。
+        """
+        task = self._tasks.get(task_id)
+        if (task is not None and outcome.kind is not RunOutcomeKind.COMPLETED
+                and task.status in _TERMINAL_STATUSES):
+            # 终态守卫（见 _TERMINAL_STATUSES）：熔断 trip 先把 root 判 FAILED、再对在跑
+            # 的 root 发协作取消，那次取消的 CANCELED 不得盖回已写定的 FAILED。run 侧的
+            # 同一守卫是 `_run_loop` 的 cancel_takes_effect（它据此决定发不发 RUN_CANCELED）。
+            return task.status
+        disp = disposition_for(
+            outcome,
+            retry_count=task.retry_count if task is not None else 0,
+            max_retries=task.max_retries if task is not None else self._task_max_retries,
+        )
+        if task is not None:
+            task.status = disp.status
+            if disp.event_type == "TaskRequeued":
+                # **处置表不 mutate**：新的 retry_count 只在 payload 里，必须在这里写回，
+                # 否则重试预算永不消耗、同一个 task 无限重排（旧路径是先 `+= 1` 再写 payload）。
+                task.retry_count = disp.payload["retry_count"]
+            if outcome.kind is RunOutcomeKind.INTERRUPTED:
+                # 成因随 task 走：`announce_queue_state` 聚合 TaskQueueInterrupted 时
+                # 优先读 error_code（host 按码分流），自由文本只是兜底。
+                task.error = outcome.error or task.error
+                if outcome.error_code:
+                    task.error_code = outcome.error_code
+        await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload)
+        return disp.status
+
+    async def _settle(self, task_id: str, status: str) -> None:
+        """处置落定之后的队列收尾：挂起出口 / 重排出口 / 终态收尾，三选一。
+
+        出口逻辑与旧路径逐字相同，只是判据从「loop 写进 task.status 的值」换成了
+        「处置表算出来的状态」。
+        """
+        if status in _PARKED_STATUSES:
+            # 子任务已由 control tool 推入队列；parent 等待所有子任务完成后
+            # 由 _try_resume_parent 重新入队，此处只需移出 running set 并 drain。
+            # 三种非终态停顿共用这一条出口：SUSPENDED（等子任务）、AWAITING_HUMAN
+            # （HitlPark，等人应答）、INTERRUPTED（LLM 故障 / run 崩溃，待 /resume 由 restore 重排）。
+            async with self._lock:
+                self._running_tasks.discard(task_id)
+                self._running_agents.pop(task_id, None)
+                self._queue.unmark_running(task_id)
+            await self.drain()
+            # 整个会话因 park/suspend 进入空闲（无在跑任务、无待派子任务）→ 通知 runtime 回收
+            # 按 run 计的控制信号。注意是 is_done（而非"本 task 挂起"）：父等子时子仍在跑，
+            # is_done 为 False、不触发，待子完成 resume 父；只有全会话静止才算空闲挂起。
+            if self.is_done():
+                await self._fire_session_idle()
+            return
+        if status == "PENDING":
+            # observer 判 retry（本轮未完成，含机械退出）或崩溃后可重试：重新入队。
+            async with self._lock:
+                self._running_tasks.discard(task_id)
+                self._running_agents.pop(task_id, None)
+                self._queue.unmark_running(task_id)
+                self._queue.push(QueueEntry(task_id=task_id, session_id=self._session_id))
+            await self.drain()
+            return
+        # 终态：用处置算出的那个，避免把 FAILED/CANCELED 覆盖成 FINISHED
+        final_status: TaskStatus = status if status in _TERMINAL_STATUSES else "FINISHED"  # type: ignore[assignment]
+        await self.on_task_finished(task_id, status=final_status)
 
     async def reopen_chain(self, head_id: str, reason: str = "") -> bool:
         """Reopen a FINISHED sub-task **and force-reopen its plan successors**.
@@ -656,7 +729,14 @@ class TaskManager:
         self, task_id: str, error: str = "", exc: BaseException | None = None,
         reason: str = "run_failure_retry",
     ) -> None:
-        """运行层失败：先尝试自动 retry，耗尽或不可重试 → 挂起等恢复（绝不落终态 FAILED）。
+        """**装配失败**专用：先尝试自动 retry，耗尽或不可重试 → 挂起等恢复（绝不落终态 FAILED）。
+
+        Task 4 起，**执行**（execute）崩溃不再走这里：它由 `_run_task` 的 `except
+        Exception` 就地构造 `RunOutcome(INTERRUPTED, reason="run_crash")`，喂
+        `disposition_for` 那张表（重试判断因此只剩一处）。本方法保留是因为装配阶段
+        （assemble）没有 run、也就没有 RunOutcome，且它的 TASK_REQUEUED
+        `reason="assembly_failure"` 是对外可区分的契约。
+
 
         运行层崩溃（异常退出，未经 observer/FinalizeStep）是**可恢复中断**，不是任务失败：
         真失败只有 observer 判 fail 一条路（FinalizeStep 闭合胶囊、发 TaskFailed、回传父亲）。

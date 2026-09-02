@@ -229,6 +229,12 @@ class Task:
     error: str | None = None
     error_code: str | None = None
     actor_done: bool = False
+    # 本轮 act 里 actor 调了 delegate_task / delegate_plan：**这一次 run 该停在
+    # 「等子任务」**。纯瞬态、纯 loop 内路由用（ActStep 据它路由到 SuspendStep 并
+    # 跳过最终产出合成），每次 _run_task 派发时归零。
+    # 它**不是** task 状态：task 落不落 SUSPENDED 由 TaskManager 据 RunOutcome 定
+    # （Task 4）。此前这个意图借 `task.status = "SUSPENDED"` 表达，是判决越界写状态。
+    suspend_requested: bool = False
     # observe 裁决（三态）：success|retry|fail。retry 置 status=PENDING 重排（机械退出也归 retry）。
     observer_outcome: str | None = None
     # observer 产出的整段综合总结（执行历程+结果）→ finish 对 tool 槽（spec 2026-06-30）。

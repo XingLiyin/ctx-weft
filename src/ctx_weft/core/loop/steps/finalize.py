@@ -690,9 +690,9 @@ class FinalizeStep(Step):
         task_summary = verdict.task_summary if verdict else ""    # → 汇报给 parent 的 process report
         events: list[Any] = []
 
-        # Task 2（loop 产出 RunOutcome，尚无消费者）：用 observer 的原值 outcome，**不经**
-        # 下面 retry_exhausted 的重试耗尽降级——那是 TM 的活（task_disposition.disposition_for），
-        # loop 只报「observer 说了什么」。旧的写状态/发事件（下面全部）原样保留，本行只新增产出。
+        # 交给 TaskManager 的结局：用 observer 的**原值** outcome，不经下面 retry_exhausted
+        # 的重试耗尽降级——那是 TM 的活（task_disposition.disposition_for），loop 只报
+        # 「observer 说了什么」。task 状态与状态事件都不在本 step 落地了（Task 4）。
         run_outcome = RunOutcome(
             kind=RunOutcomeKind.COMPLETED,
             verdict=outcome,
@@ -704,10 +704,12 @@ class FinalizeStep(Step):
         # retry 超过上限 → 降级 fail（不再重试）。专属 error_code 区分「程序按重试上限
         # 熔断」与 observer 主动判死；死因 = 最后一轮 retry 判决暂存的受阻原因（task.error，
         # report_task_outcome 判 retry 时写入），机械退出轮没有判决则为空。
+        # **本地降级只为收尾副作用服务**（下面的 close/bubble/blackboard 与 TASK_FINALIZED
+        # 的 outcome），不再决定 task 状态：状态与 TaskFailed 事件由 TM 据同一条判据算出
+        # （disposition_for 的 exhausted 分支）。两处判据逐字同形，改一处必须改另一处。
         retry_exhausted = outcome == "retry" and task.retry_count >= task.max_retries
         if retry_exhausted:
             outcome = "fail"
-            task.status = "FAILED"
             task.observer_outcome = "fail"
             task.error_code = "TASK_FAILED_RETRY_EXHAUSTED"
 
@@ -726,40 +728,18 @@ class FinalizeStep(Step):
                 has_llm_summary=bool(verdict and verdict.reported),
             ))
 
-        # 2) 按 outcome 分派（task.status 已由 ObserveStep 设置）
-        if outcome == "success":
+        # 2) 按 outcome 收尾（只写「判决的产物」，不写状态、不发状态事件——Task 4：
+        #    TaskFinished / TaskFailed / TaskRequeued 三条统一由 TaskManager 据 RunOutcome 发）
+        if outcome in ("success", "fail"):
             task.finished_at = now_utc()
             task.process_report = summary
-            events.append(make_event(
-                state, EventType.TASK_FINISHED,
-                payload={"outcome": "success", "summary": summary, "outputs": task.outputs},
-            ))
-        elif outcome == "fail":
-            task.finished_at = now_utc()
-            task.process_report = summary
-            events.append(make_event(
-                state, EventType.TASK_FAILED,
-                payload={
-                    "error_code": ("TASK_FAILED_RETRY_EXHAUSTED" if retry_exhausted
-                                   else "TASK_FAILED_BY_OBSERVER"),
-                    # 真死因：task.error = observer 的 task_failure_reason（判 fail 的根因，
-                    # 或判 retry 暂存的本轮受阻原因——耗尽降级时用）。无死因（规则 observe
-                    # 判死等）置空——act_recap 是过程复述，不冒充死因；host 拿 error_message
-                    # 当 session_notice.reason_text 展示，空串由 host 按 error_code 补固定文案。
-                    "error_message": task.error or "",
-                    "retry_count": task.retry_count,
-                },
-            ))
         elif outcome == "retry":
             # retry 反馈由 observe 前台段折写的 TASK_COMPACT_SUMMARY 承载（spec 2026-07-01 §3.1）；
             # 不再写 process_report/process_report_at（旧 Progress So Far 字段路径已废）。
             # 机械退出（max_turns/context_limit）也归到这里：重排再跑，受 max_retries 兜底。
+            # retry_count 的 +1 也搬走了：处置表算出新值，TaskManager 写回 task
+            # （在这里先加会让 TM 二次自增，重试预算一轮烧两格）。
             task.outputs = None
-            task.retry_count += 1
-            events.append(make_event(
-                state, EventType.TASK_REQUEUED,
-                payload={"outcome": "retry", "summary": summary, "retry_count": task.retry_count},
-            ))
 
         # 3) success 时发布 BLACKBOARD，供任何 agent 按 task_id 精确召回
         if outcome == "success" and mem_content:
