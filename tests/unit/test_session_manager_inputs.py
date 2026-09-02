@@ -74,6 +74,7 @@ async def test_lower_layer_events_are_not_subscribed():
                  (EventType.HITL_RESOLVED, {"hitl_id": "hit_1", "outcome": "accepted"}),
                  (EventType.TASK_AWAITING_HUMAN, {"hitl_id": "hit_1"}),
                  (EventType.RUN_INTERRUPTED, {"reason": "llm_outage"}),
+                 (EventType.TASK_INTERRUPTED, {"reason": "run_crash"}),
                  (EventType.TASK_SUSPENDED, {"summary": "waiting"})):
         await sm.handle_event(_ev(t, p))
     assert sm.status_of("sess_1") == "RUNNING"
