@@ -2477,9 +2477,23 @@ class CtxWeftRuntime:
                 task.error_code = "llm_outage"
                 task.error = str(exc)
             logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
-            # run 级事实。会话状态由 TM 聚合后交给 SM 判定——这里不宣布会话怎么了。
+            # run 级事实：这次执行死了。**无条件发**，与 task 后续怎么处置无关。
+            # 会话状态由 TM 聚合后交给 SM 判定——这里不宣布会话怎么了。
             await self._event_bus.emit(make_event(state, EventType.RUN_INTERRUPTED, payload={
                 "reason": "llm_outage", "error_message": str(exc)}))
+            # task 级事实：这个 task 停在 INTERRUPTED，等 /resume。
+            # **outage 支没有重试判定**——本分支不重抛（run_error 保持 None），
+            # _handle_task_failure 根本不会被调用，所以这里就是「挂起等 /resume」
+            # 那一支本身，紧随 run 级事实发出即可（崩溃支相反：判定在 TM，故那条
+            # TaskInterrupted 由 TaskManager._suspend_task_interrupted 发）。
+            if task.status == "INTERRUPTED":
+                await self._event_bus.emit(make_event(
+                    state, EventType.TASK_INTERRUPTED, payload={
+                        "reason": "llm_outage",
+                        "error_code": "llm_outage",
+                        "error_message": str(exc),
+                        "retry_count": task.retry_count,
+                    }))
         except Exception as exc:
             run_error = exc
             # 运行层崩溃 = 可恢复中断的临时标记（非终态）：re-raise 交 _handle_task_failure
@@ -2495,6 +2509,15 @@ class CtxWeftRuntime:
                 logger.warning("_run_loop: task %s failed (retriable): %s", task.id, exc)
             else:
                 logger.exception("_run_loop: run failed for task %s", task.id)
+            # run 级事实，**无条件发**：这次执行确实死了，与 task 接下来是原地重试
+            # （TaskRequeued）还是挂起等 /resume（TaskInterrupted）无关。那个决定归
+            # TaskManager._handle_task_failure，在 run 外面、判完才知道；run 域的四条
+            # 事实（Started/Canceled/Finished/Interrupted）一律从这里发，别处不发。
+            await self._event_bus.emit(make_event(state, EventType.RUN_INTERRUPTED, payload={
+                "reason": "run_crash",
+                "error_code": (getattr(exc, "code", None) or type(exc).__name__),
+                "error_message": str(exc),
+            }))
         finally:
             self._capability_cache.evict(agent.id)
             # A1 守卫：was_cancelled 只在 task 真的落在 CANCELED（本 run 自己置的取消态）时才发

@@ -155,9 +155,10 @@ def test_restore_rebuilds_blocked_chain() -> None:
 async def test_run_layer_failure_suspends_not_fails() -> None:
     """运行层失败（非 observer 判定，如 model 名写错）挂起等恢复，不落终态。
 
-    仍须发事件对齐投影（TASK_STATUS_BY_EVENT 按事件类型定 task 状态）——Task 6 起
-    是 RunInterrupted：任务在投影为 INTERRUPTED，restore 会把它当可恢复任务重排，
-    这正是期望语义（真失败只有 observer 判 fail 一条路）。
+    仍须发事件对齐投影（TASK_STATUS_BY_EVENT 按事件类型定 task 状态）——挂起分支
+    发的是 task 域的 TaskInterrupted（run 域的 RunInterrupted 归 _run_loop）：任务在
+    投影为 INTERRUPTED，restore 会把它当可恢复任务重排，这正是期望语义
+    （真失败只有 observer 判 fail 一条路）。
     """
     bus = _CapturingBus()
     tm = TaskManager(session_id="s1", event_bus=bus)
@@ -176,8 +177,8 @@ async def test_run_layer_failure_suspends_not_fails() -> None:
     await tm._handle_task_failure("A", error="unknown model", exc=_NonRetriable("boom"))
 
     assert not [e for e in bus.events if e.type == EventType.TASK_FAILED]
-    interrupted = [e for e in bus.events if e.type == EventType.RUN_INTERRUPTED]
-    assert interrupted, "run-layer failure must emit RunInterrupted (projection alignment)"
+    interrupted = [e for e in bus.events if e.type == EventType.TASK_INTERRUPTED]
+    assert interrupted, "run-layer failure must emit TaskInterrupted (projection alignment)"
     assert interrupted[0].task_id == "A"
     assert t.status == "INTERRUPTED"
 

@@ -38,9 +38,14 @@ def test_task_awaiting_human_projects_to_awaiting_human():
     assert view.tasks["task_1"].status == "AWAITING_HUMAN"
 
 
-def test_run_interrupted_projects_the_task_to_interrupted():
+def test_task_interrupted_projects_the_task_to_interrupted():
+    """「被打断」的 task 状态由 task 域的 TaskInterrupted 写。
+
+    run 域的 RunInterrupted 只说「这次执行死了」，不写 task 状态——那次 run 死了
+    不等于 task 停在 INTERRUPTED（还能重试的走 TaskRequeued → PENDING）。
+    """
     view = reduce_events(_seed() + [
-        _ev(EventType.RUN_INTERRUPTED, {"reason": "llm_outage"}, 2),
+        _ev(EventType.TASK_INTERRUPTED, {"reason": "llm_outage"}, 2),
     ], "run_1")
     assert view.tasks["task_1"].status == "INTERRUPTED"
 
@@ -48,7 +53,7 @@ def test_run_interrupted_projects_the_task_to_interrupted():
 def test_both_new_types_are_in_the_status_map():
     """漏进这张表 = 事件发了但投影不动，冷重建看不见。"""
     assert TASK_STATUS_BY_EVENT[EventType.TASK_AWAITING_HUMAN] == "AWAITING_HUMAN"
-    assert TASK_STATUS_BY_EVENT[EventType.RUN_INTERRUPTED] == "INTERRUPTED"
+    assert TASK_STATUS_BY_EVENT[EventType.TASK_INTERRUPTED] == "INTERRUPTED"
 
 
 def test_legacy_task_suspended_still_projects_to_suspended():
@@ -62,3 +67,4 @@ def test_legacy_task_suspended_still_projects_to_suspended():
 def test_new_types_do_not_reuse_any_legacy_string():
     assert EventType.TASK_AWAITING_HUMAN == "TaskAwaitingHuman"
     assert EventType.RUN_INTERRUPTED == "RunInterrupted"
+    assert EventType.TASK_INTERRUPTED == "TaskInterrupted"

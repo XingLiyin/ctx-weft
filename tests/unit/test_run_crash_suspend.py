@@ -1,11 +1,12 @@
 """运行层崩溃 = 可恢复中断（挂起等 /resume），不是失败。
 
-Task 6 起判据是**事件类型**：run 级事实是 `RunInterrupted`，TM 聚合成
+判据是**事件类型**：TM 的挂起收尾发 task 域的 `TaskInterrupted`（run 域的
+`RunInterrupted` 由 runtime._run_loop 发，TM 在 run 外面、拿不到 run_id），TM 聚合成
 `TaskQueueInterrupted`，会话状态由 SessionManager 判定（TM 不再自己写 session.status，
 也不再发 `SessionStatusChanged`）。
 
 覆盖：
-1. 不可重试异常 → RUN_INTERRUPTED + TASK_QUEUE_INTERRUPTED，绝不发 TASK_FAILED。
+1. 不可重试异常 → TASK_INTERRUPTED + TASK_QUEUE_INTERRUPTED，绝不发 TASK_FAILED。
 2. 可重试异常耗尽 max_retries → 同上（不再降级终态 FAILED）。
 3. 崩溃挂起不触碰 session.failure_counter（真失败只有 observer 判 fail 一条路）。
 4. ContextOverflowError：retriable=False → 不重试直接挂起，error_code=CONTEXT_OVERFLOW
@@ -63,7 +64,7 @@ async def test_non_retriable_crash_suspends_not_fails() -> None:
     assert EventType.TASK_FAILED not in _types(bus)
     assert EventType.TASK_SUSPENDED not in _types(bus)   # 旧的 reason 分流已退场
     assert EventType.SESSION_STATUS_CHANGED not in _types(bus)
-    interrupted = [e for e in bus.events if e.type == EventType.RUN_INTERRUPTED]
+    interrupted = [e for e in bus.events if e.type == EventType.TASK_INTERRUPTED]
     assert interrupted and interrupted[0].task_id == "A"
     assert interrupted[0].payload["error_code"] == "LLM_AUTH_FAILED"
     assert interrupted[0].payload["error_message"] == "401 unauthorized"
@@ -86,7 +87,7 @@ async def test_retry_exhausted_suspends_not_fails() -> None:
 
     assert EventType.TASK_FAILED not in _types(bus)
     assert EventType.TASK_REQUEUED not in _types(bus)  # 耗尽后不再重排
-    assert EventType.RUN_INTERRUPTED in _types(bus)
+    assert EventType.TASK_INTERRUPTED in _types(bus)
     assert t.status == "INTERRUPTED"
 
 
@@ -110,7 +111,7 @@ async def test_context_overflow_suspends_without_retry() -> None:
 
     assert EventType.TASK_REQUEUED not in _types(bus)  # retriable=False：不重试
     assert EventType.TASK_FAILED not in _types(bus)
-    interrupted = [e for e in bus.events if e.type == EventType.RUN_INTERRUPTED]
+    interrupted = [e for e in bus.events if e.type == EventType.TASK_INTERRUPTED]
     assert interrupted and interrupted[0].payload["error_code"] == "CONTEXT_OVERFLOW"
     # 溢出码必须上浮到会话级中断的 reason —— host 据此提示换更大窗口的模型恢复。
     queue_sig = [e for e in bus.events if e.type == EventType.TASK_QUEUE_INTERRUPTED]

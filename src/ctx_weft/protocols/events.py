@@ -99,8 +99,14 @@ class EventType(StrEnum):
     # ── task/run 层「为什么停」（2026-09-02 所有权重构）──
     # 从前三件事都压在 TASK_SUSPENDED 的 reason 字面量里，消费方只能匹配字符串。
     # 现在各有类型：TASK_SUSPENDED（等子任务）/ TASK_AWAITING_HUMAN（等人）/
-    # RUN_INTERRUPTED（被外部打断）。判据是类型，不是 payload。
+    # TASK_INTERRUPTED（被外部打断）。判据是类型，不是 payload。
     TASK_AWAITING_HUMAN = "TaskAwaitingHuman"   # payload: {hitl_id}
+    # task 域：这个 task 停在 INTERRUPTED，等 /resume。**发在重试判定之后**——崩溃后
+    # 还能原地重试的那一支发的是 TASK_REQUEUED，不是这条（docs/events-v2.md §2.3）。
+    # payload: {reason, error_code?, error_message?, retry_count}
+    TASK_INTERRUPTED = "TaskInterrupted"
+    # run 域：这次执行被外部原因打断了。**只由 _run_loop 发**（run 域的四条事实同源），
+    # 且不写 task 状态——task 停在哪由 TASK_INTERRUPTED 说（docs/events-v2.md §2.4）。
     RUN_INTERRUPTED = "RunInterrupted"          # payload: {reason, error_code?, error_message?}
     TASK_RESUMED = "TaskResumed"
     TASK_FINISHED = "TaskFinished"

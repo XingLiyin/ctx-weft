@@ -701,10 +701,13 @@ class TaskManager:
     ) -> None:
         """运行层崩溃的终局：挂起等 /resume，**不是失败**。
 
-        置 INTERRUPTED（非终态）+ 发 RUN_INTERRUPTED——投影只认事件类型
+        置 INTERRUPTED（非终态）+ 发 TASK_INTERRUPTED——投影只认事件类型
         （TASK_STATUS_BY_EVENT），不发则任务停留 ACTIVE、restore 语义错位。这是一条
-        **run 级事实**：会话怎么了不在这里宣布，由 `announce_queue_state` 聚合后交 SM
-        判定（判据是事件类型，不是 payload 里的 reason 字面量）。
+        **task 级事实**：TM 在 run 外面、不拥有 run（连 run_id 都拿不到），run 域的
+        `RunInterrupted` 由 `runtime._run_loop` 自己发。会话怎么了也不在这里宣布，
+        由 `announce_queue_state` 聚合后交 SM 判定（判据是事件类型，不是 reason 字面量）。
+        **发射时机是重试判定之后**：`_handle_task_failure` 决定原地重试的那一支发的是
+        TASK_REQUEUED（→ PENDING），只有落到本方法才是「停在 INTERRUPTED 等 /resume」。
         不发 TASK_FAILED、不增 failure_counter、不闭合胶囊：真失败只有 observer 判 fail
         一条路。恢复由 /resume → restore() 据非终态重排（重排时 retry_count 归零）。
         """
@@ -719,11 +722,11 @@ class TaskManager:
             self._running_tasks.discard(task_id)
             self._running_agents.pop(task_id, None)
             self._queue.unmark_running(task_id)
-        # reason 只作**溯源**，不作路由——判据是 RUN_INTERRUPTED 这个类型本身。
+        # reason 只作**溯源**，不作路由——判据是 TASK_INTERRUPTED 这个类型本身。
         # 值本身是对外契约的一部分（host 升级须知的映射表写的就是 reason="run_crash"），
         # 故照旧；被删掉的是**拿它做条件判断**那件事，不是这个字面量的存在
         # （tests/unit/test_layered_signals.py 检测的正是「分流」而非「出现」）。
-        await self._emit(EventType.RUN_INTERRUPTED, task_id=task_id, payload={
+        await self._emit(EventType.TASK_INTERRUPTED, task_id=task_id, payload={
             "reason": "run_crash",
             "error_code": error_code,
             "error_message": error,

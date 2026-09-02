@@ -49,7 +49,10 @@ TASK_STATUS_BY_EVENT: dict[EventType, TaskStatus] = {
     EventType.TASK_STARTED: "ACTIVE",
     EventType.TASK_SUSPENDED: "SUSPENDED",
     EventType.TASK_AWAITING_HUMAN: "AWAITING_HUMAN",
-    EventType.RUN_INTERRUPTED: "INTERRUPTED",
+    # 被打断由 task 域的 TASK_INTERRUPTED 写；run 域的 RUN_INTERRUPTED 只说
+    # 「这次执行死了」，不写 task 状态——那次 run 死了不等于 task 停在 INTERRUPTED
+    # （还能重试的走 TASK_REQUEUED → PENDING）。见 docs/events-v2.md §2.3 / §2.4。
+    EventType.TASK_INTERRUPTED: "INTERRUPTED",
     EventType.TASK_FINISHED: "FINISHED",
     EventType.TASK_FAILED: "FAILED",
     EventType.TASK_CANCELED: "CANCELED",
