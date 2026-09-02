@@ -8,6 +8,12 @@
    （→ `PENDING`），中间不得先被打成 `INTERRUPTED` 再翻回 `PENDING`。
 
 判据一律是事件类型；`reason` 只作溯源。
+
+崩溃那几条走的是**真崩溃路径**（`runner.execute` 抛 → `_run_task` 的 `except Exception`
+→ `crash_run_outcome` → `disposition_for` → `apply_run_outcome`）。Task 4 之前它们经
+`_handle_task_failure`；补 `reason=` 必传参数时被整体挪去了装配失败路径，文件里说的
+"crash" 就此与实际测的东西对不上——现改回真崩溃路径（装配失败另有覆盖，见
+`test_task_scheduling.py` / `test_superseded_task_manager.py`）。
 """
 
 from __future__ import annotations
@@ -56,6 +62,15 @@ def _types(bus: _CapturingBus) -> list:
     return [e.type for e in bus.events]
 
 
+async def _crash(tm: TaskManager, exc: BaseException) -> None:
+    """让 execute 抛出 exc，驱动一次真崩溃。`error` 即 `str(exc)`（crash_run_outcome）。"""
+    async def _boom(_s: str, _t: str) -> None:
+        raise exc
+
+    tm.set_runner(StubRunner(tm, _boom))
+    await tm._run_task("A")
+
+
 async def test_retriable_crash_requeues_without_task_interrupted() -> None:
     """崩溃 + 还有重试额度 → `TaskRequeued`，**没有** `TaskInterrupted`，终态 `PENDING`。
 
@@ -64,11 +79,11 @@ async def test_retriable_crash_requeues_without_task_interrupted() -> None:
     bus = _CapturingBus()
     tm, _session, t = _tm(bus)
 
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error="transient", exc=_Retriable("boom"),
-    )
+    await _crash(tm, _Retriable("transient"))
 
-    assert EventType.TASK_REQUEUED in _types(bus)
+    requeued = [e for e in bus.events if e.type == EventType.TASK_REQUEUED]
+    # 崩溃重排的 reason 与崩溃挂起支、run 域 RunInterrupted 同源（见升级须知）。
+    assert requeued and requeued[0].payload == {"reason": "run_crash", "retry_count": 1}
     assert TASK_INTERRUPTED not in _types(bus)
     assert t.status == "PENDING"
 
@@ -78,9 +93,7 @@ async def test_task_manager_emits_task_interrupted_not_run_interrupted() -> None
     bus = _CapturingBus()
     tm, _session, t = _tm(bus)
 
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error="401 unauthorized", exc=_NonRetriable("boom"),
-    )
+    await _crash(tm, _NonRetriable("401 unauthorized"))
 
     assert EventType.RUN_INTERRUPTED not in _types(bus)
     interrupted = [e for e in bus.events if e.type == TASK_INTERRUPTED]
@@ -98,9 +111,7 @@ async def test_retry_exhausted_falls_through_to_task_interrupted() -> None:
     tm, _session, t = _tm(bus)
     t.retry_count = t.max_retries
 
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error="transient", exc=_Retriable("boom"),
-    )
+    await _crash(tm, _Retriable("transient"))
 
     assert EventType.TASK_REQUEUED not in _types(bus)
     assert TASK_INTERRUPTED in _types(bus)
@@ -116,9 +127,7 @@ async def test_context_overflow_still_reaches_task_interrupted() -> None:
     exc = ContextOverflowError(context_limit=100_000, required=171_808,
                                effective_limit=92_000, reserved_output_tokens=8_000)
 
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error=str(exc), exc=exc,
-    )
+    await _crash(tm, exc)
 
     interrupted = [e for e in bus.events if e.type == TASK_INTERRUPTED]
     assert interrupted and interrupted[0].payload["error_code"] == "CONTEXT_OVERFLOW"

@@ -1,4 +1,14 @@
-"""运行层崩溃 = 可恢复中断（挂起等 /resume），不是失败。
+"""运行层崩溃（**执行期**）= 可恢复中断（挂起等 /resume），不是失败。
+
+**走的是真崩溃路径**：`runner.execute` 抛 → `TaskManager._run_task` 的 `except
+Exception` → `crash_run_outcome(exc)` → `disposition_for` → `apply_run_outcome` →
+`_settle`。Task 4 之前这条路径经 `_handle_task_failure`，本文件当时就是那么写的；
+补 `reason=` 必传参数时它被整体挪去了**装配失败**路径（`_handle_task_failure` 如今
+只服务 assemble 阶段），于是文件名与 docstring 说的 "run crash" 与实际测的东西对不上，
+下面这四条断言在真崩溃路径上无人接管——`TaskInterrupted.error_code=="CONTEXT_OVERFLOW"`、
+`TaskQueueInterrupted.reason=="CONTEXT_OVERFLOW"`、崩溃不动 `failure_counter`、崩溃挂起
+阻塞会话收尾。现改回真崩溃路径。装配失败那条另有覆盖（`test_task_scheduling.py` 的
+`TaskInterrupted` / `TaskRequeued` 两支、`test_superseded_task_manager.py` 的归属权守卫）。
 
 判据是**事件类型**：TM 的挂起收尾发 task 域的 `TaskInterrupted`（run 域的
 `RunInterrupted` 由 runtime._run_loop 发，TM 在 run 外面、拿不到 run_id），TM 聚合成
@@ -51,6 +61,18 @@ def _tm(bus: _CapturingBus) -> tuple[TaskManager, Session, Task]:
     return tm, session, t
 
 
+async def _crash(tm: TaskManager, exc: BaseException) -> None:
+    """让 execute 抛出 exc，驱动一次真崩溃：`_run_task` 的 except → crash_run_outcome。
+
+    `error` 不再是独立入参——真路径上它就是 `str(exc)`（见 `errors.crash_run_outcome`）。
+    """
+    async def _boom(_s: str, _t: str) -> None:
+        raise exc
+
+    tm.set_runner(StubRunner(tm, _boom))
+    await tm._run_task("A")
+
+
 def _types(bus: _CapturingBus) -> list:
     return [e.type for e in bus.events]
 
@@ -59,9 +81,7 @@ async def test_non_retriable_crash_suspends_not_fails() -> None:
     bus = _CapturingBus()
     tm, session, t = _tm(bus)
 
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error="401 unauthorized", exc=_NonRetriable("boom"),
-    )
+    await _crash(tm, _NonRetriable("401 unauthorized"))
 
     assert EventType.TASK_FAILED not in _types(bus)
     assert EventType.TASK_SUSPENDED not in _types(bus)   # 旧的 reason 分流已退场
@@ -85,9 +105,7 @@ async def test_retry_exhausted_suspends_not_fails() -> None:
     tm, _session, t = _tm(bus)
     t.retry_count = t.max_retries  # 自动重试已耗尽
 
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error="transient", exc=_Retriable("boom"),
-    )
+    await _crash(tm, _Retriable("transient"))
 
     assert EventType.TASK_FAILED not in _types(bus)
     assert EventType.TASK_REQUEUED not in _types(bus)  # 耗尽后不再重排
@@ -99,9 +117,7 @@ async def test_run_crash_does_not_touch_failure_counter() -> None:
     bus = _CapturingBus()
     tm, session, _t = _tm(bus)
 
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error="boom", exc=_NonRetriable("boom"),
-    )
+    await _crash(tm, _NonRetriable("boom"))
 
     assert session.failure_counter == 0
     assert EventType.SESSION_FINISHED not in _types(bus)
@@ -113,9 +129,7 @@ async def test_context_overflow_suspends_without_retry() -> None:
     exc = ContextOverflowError(context_limit=100_000, required=171_808,
                                effective_limit=92_000, reserved_output_tokens=8_000)
 
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error=str(exc), exc=exc,
-    )
+    await _crash(tm, exc)
 
     assert EventType.TASK_REQUEUED not in _types(bus)  # retriable=False：不重试
     assert EventType.TASK_FAILED not in _types(bus)
@@ -139,9 +153,7 @@ async def test_crash_suspended_task_blocks_session_finish() -> None:
     b = Task(id="B", session_id="s1", status="ACTIVE")
     tm.register_task(b)
 
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error="boom", exc=_NonRetriable("boom"),
-    )
+    await _crash(tm, _NonRetriable("boom"))
     await tm.on_task_finished("B", status="FINISHED")
 
     assert EventType.SESSION_FINISHED not in _types(bus)
