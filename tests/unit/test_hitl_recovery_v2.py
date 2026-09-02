@@ -181,6 +181,49 @@ def _resolved_user_turn_never_injected() -> list[Event]:
     ]
 
 
+def _resolved_user_turn_on_a_parent_with_a_live_child() -> list[Event]:
+    """父任务挂在活子任务上，且有一条已终局的 `UserTurn`。
+
+    子任务带一个永不终态的 dag_dep，因此 restore 会入队但永不派发——父任务的
+    「children 全终态」闸门确定性地关着，不受 drain 时序影响。
+    """
+    return [
+        _ev(1, EventType.SESSION_CREATED, user_prompt="do it",
+            template_id="agent:tpl_echo", root_agent_id="agt_root"),
+        _ev(2, EventType.RUN_STARTED),
+        _ev(3, EventType.TASK_CREATED, task={
+            "id": TID, "status": "PENDING", "title": "T1",
+            "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"}),
+        _ev(4, EventType.TASK_STARTED, task_id=TID, assigned_agent_id="agt_root"),
+        # 播一份「已攒下的产出」进投影（TASK_CREATED 的 payload 不带 outputs，
+        # TASK_FINALIZED 是唯一把 outputs 折进 TaskView 的事件；它不改 status）。
+        _ev(41, EventType.TASK_FINALIZED, task_id=TID, outputs={"note": "已攒下的进展"}),
+        _ev(5, EventType.TASK_CREATED, task={
+            "id": "tsk_child", "status": "PENDING", "title": "C1",
+            "parent_task_id": TID, "dag_deps": ["tsk_never_done"],
+            "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"}),
+        _ev(6, EventType.TASK_STARTED, task_id="tsk_child", assigned_agent_id="agt_root"),
+        _ev(7, EventType.HITL_OPENED, task_id=TID, hitl_id="hit_1", form="wait",
+            delivery={"kind": "user_turn", "task_id": TID, "preface": "normal"},
+            stage="tool", agent_id="agt_root", prompt=""),
+        _ev(8, EventType.TASK_SUSPENDED, task_id=TID),
+        _ev(9, EventType.HITL_RESOLVED, task_id=TID, hitl_id="hit_1",
+            outcome="accepted", message="use postgres"),
+    ]
+
+
+def _legacy_answered_user_turn() -> list[Event]:
+    """**旧模型**的 wait 应答：旧路径注入的记忆记录不带幂等键，补写会重复。"""
+    return [
+        *_session_prelude(),
+        _ev(5, EventType.HITL_REQUIRED, task_id=TID, hitl_id="hit_1", form="wait",
+            capability_id="control:wait_for_user", context="plain_text", question="?"),
+        _ev(6, EventType.TASK_SUSPENDED, task_id=TID),
+        _ev(7, EventType.HITL_ANSWERED, task_id=TID, hitl_id="hit_1",
+            message="use postgres"),
+    ]
+
+
 # ── runtime 装配 ────────────────────────────────────────────────────────────
 
 
@@ -449,3 +492,64 @@ async def test_restore_leaves_a_parent_with_live_children_suspended():
     tm.restore([parent, child], terminal_ids=set(), parked_task_ids=set())
     assert tm.get_task("p").status == "SUSPENDED"   # 等 children，靠 _try_resume_parent 唤醒
     assert tm.get_task("c").status == "PENDING"     # 子任务本身被这一趟 restore 重排了
+
+
+async def test_recovery_does_not_touch_a_parent_suspended_on_a_live_child():
+    """复审 Critical：补写必须是**只写**的。
+
+    父任务 SUSPENDED 在活子任务上、且有一条已终局 UserTurn。若补写沿用
+    `_inject_user_reply`（尾部会 `status = "PENDING"` + 清 outputs），父任务会被翻成
+    PENDING **却没人入队**，`_try_resume_parent` 的 SUSPENDED 门随之失效 → 永久停摆；
+    同时它攒下的 outputs 被清空。两者都必须不发生，而人的答复仍要落进对话。
+    """
+    rt = await _runtime_with_events(_resolved_user_turn_on_a_parent_with_a_live_child())
+    await rt.recover_session(SID)
+    parent = _tm(rt).get_task(TID)
+    assert parent.status == "SUSPENDED"                  # 留给 _try_resume_parent
+    assert parent.outputs == {"note": "已攒下的进展"}   # 进展没被清掉
+    assert parent.process_report is None                 # （同一行代码路径）
+    assert len(await _hitl_reply_prompts(rt)) == 1       # 答复照样补上了
+
+
+async def test_recovery_backfill_survives_repeated_recovery_without_state_drift():
+    """反复恢复：状态不漂移、进展不丢、注入不重复。"""
+    rt = await _runtime_with_events(_resolved_user_turn_on_a_parent_with_a_live_child())
+    await rt.recover_session(SID)
+    await rt.recover_session(SID)
+    parent = _tm(rt).get_task(TID)
+    assert parent.status == "SUSPENDED"
+    assert parent.outputs == {"note": "已攒下的进展"}
+    assert len(await _hitl_reply_prompts(rt)) == 1
+
+
+async def test_legacy_origin_user_turns_are_not_backfilled():
+    """旧模型的应答不补写：旧路径的记忆记录没有 `hitlreply:` 幂等键，补一次就多一轮。"""
+    rt = await _runtime_with_events(_legacy_answered_user_turn())
+    await rt.rebuild_hitl(SID)
+    resolved = rt.hitl_registry.resolved_for_session(SID)
+    assert len(resolved) == 1 and resolved[0].legacy_origin is True
+    await rt.recover_session(SID)
+    assert await _hitl_reply_prompts(rt) == []
+
+
+async def test_new_model_user_turns_are_not_flagged_legacy():
+    rt = await _runtime_with_events(_resolved_user_turn_never_injected())
+    await rt.rebuild_hitl(SID)
+    assert rt.hitl_registry.resolved_for_session(SID)[0].legacy_origin is False
+
+
+async def test_inflight_tasks_are_excluded_from_the_backfill():
+    """补写的跳过集合必须与 `restore` 用同一个：只传 parked 会让一个仍被上一个活
+    TaskManager 跑着的 task 也被补写、状态在两个 TM 之间打架（复审 Important）。"""
+
+    class _LiveTM:
+        def is_alive(self) -> bool:
+            return True
+
+        def running_task_ids(self) -> set[str]:
+            return {TID}
+
+    rt = await _runtime_with_events(_resolved_user_turn_never_injected())
+    rt._task_managers[SID] = _LiveTM()          # 上一个 TM 还在跑 TID
+    await rt.recover_session(SID)               # 不带 resumed_task_id → 走重建路径
+    assert await _hitl_reply_prompts(rt) == []

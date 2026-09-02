@@ -79,6 +79,13 @@ class PendingHitl:
     #: 这正是我们要的默认值，不需要装填路径另外清它。调用方（`reply_to_hitl`）据此
     #: 决定要不要触发冷续跑：已被热消费的不得再触发一次，否则同一次应答驱动两跑。
     claimed: bool = False
+    #: 这条记录是从**旧模型事件**（`HITL_REQUIRED` + 各旧终态）折出来的。
+    #:
+    #: 恢复期的 `UserTurn` 补写（`Runtime._inject_resolved_user_turns`）据此跳过它：
+    #: 补写关的是**新模型**的崩溃窗口，而旧路径注入的记忆记录不带
+    #: `hitlreply:{hitl_id}` 幂等键、去重不了，补一次就凭空多一轮用户发言。
+    #: 活路径开出来的请求恒为 False。**core 内部字段，不出 `to_view()`。**
+    legacy_origin: bool = False
 
     @property
     def resolved(self) -> bool:

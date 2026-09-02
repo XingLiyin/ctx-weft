@@ -1466,7 +1466,9 @@ class CtxWeftRuntime:
         # 崩溃窗口兜底：已终局的 UserTurn 请求，其答复若还没进过对话，在这里补上。
         await self._inject_resolved_user_turns(
             session, task_manager,
-            parked_task_ids=parked_task_ids,
+            # 与 `restore` 用**同一个**集合：只传 parked 会让一个仍被上一个活 TM 跑着的
+            # task 也被补写（复审 Important）。
+            parked_or_inflight_task_ids=parked_task_ids | inflight,
             skip_hitl_id=getattr(user_reply, "id", "") if user_reply is not None else "",
         )
 
@@ -1834,7 +1836,39 @@ class CtxWeftRuntime:
     async def _inject_user_reply(
         self, req: "HitlRequest | PendingHitl", session: Session, task_manager: TaskManager,
     ) -> None:
-        """把 act 纯文本暂停（wait_for_user）的用户回复作为 USER_PROMPT 注入 task 层 + 重排。
+        """把 act 纯文本暂停（wait_for_user）的用户回复注入对话 **并把 task 掰回可跑状态**。
+
+        = `_write_hitl_reply_turn`（只写记忆，幂等）+ 尾部的 task 状态重置（**不幂等**）。
+        只有「正在驱动一次续跑」的调用方才该走这个组合——恢复期的补写用
+        `_write_hitl_reply_turn`，见 `_inject_resolved_user_turns`（复审 Critical）。
+        """
+        target = task_manager.get_task(req.task_id)
+        if target is None:
+            logger.warning("wait_for_user cold resume: task %s not found for HITL %s",
+                           req.task_id, req.id)
+            return
+        await self._write_hitl_reply_turn(req, session, target)
+        # 清旧进展、置 PENDING（restore 已重排,这里保证状态正确）。
+        target.outputs = None
+        target.process_report = None
+        target.process_report_at = None
+        if target.status not in ("FINISHED", "FAILED", "CANCELED"):
+            target.status = "PENDING"
+
+    async def _write_hitl_reply_turn(
+        self, req: "HitlRequest | PendingHitl", session: Session, target: "Task",
+    ) -> None:
+        """**只把人的答复写进对话，绝不碰 task 状态。**
+
+        拆出来的理由（复审 Critical）：记忆写入靠 `MemoryEvent.id = f"hitlreply:{hitl_id}"`
+        幂等，可以在恢复期反复重放；而原先跟在它后面的 task 状态重置
+        （`outputs = None` / `status = "PENDING"`）**不幂等**，重放会造成两种实打实的损坏：
+        ① 一个 SUSPENDED 在活子任务上的父任务被翻成 PENDING **却没人入队**，
+        `_try_resume_parent` 的 `status == "SUSPENDED"` 门随之失效 → 永久停摆；
+        ② 早已消费过该答复的 task，其 `outputs` / `process_report` 在此后每次会话恢复时
+        被清空 —— 与要关的那个窗口毫无关系的进度损失。
+
+        原 `_inject_user_reply` 的注释与行为在这里逐字保留，仅去掉尾部的状态重置。
 
         接受两种 `req` 形态并存（段 2 · Task 8）：legacy `HitlRequest`（旧冷路径，
         `_resume_after_cold_hitl` 与既有单测仍在用它，字段直读 `message`/`outcome`/`context`）
@@ -1844,11 +1878,6 @@ class CtxWeftRuntime:
         """
         from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
         from ctx_weft.protocols import MemoryEvent, MemoryEventType
-
-        target = task_manager.get_task(req.task_id)
-        if target is None:
-            logger.warning("wait_for_user cold resume: task %s not found for HITL %s", req.task_id, req.id)
-            return
 
         # 强一致屏障：上一轮 plain_text/interrupt park 甩出的后台 observe（fire-and-forget 段折叠）
         # 可能仍在跑。先等它落库，再注入本轮 USER_PROMPT——保证折叠摘要的时间戳早于新消息，
@@ -1911,16 +1940,10 @@ class CtxWeftRuntime:
             ),
             pctx,
         )
-        # 清旧进展、置 PENDING（restore 已重排,这里保证状态正确）。
-        target.outputs = None
-        target.process_report = None
-        target.process_report_at = None
-        if target.status not in ("FINISHED", "FAILED", "CANCELED"):
-            target.status = "PENDING"
 
     async def _inject_resolved_user_turns(
         self, session: Session, task_manager: TaskManager, *,
-        parked_task_ids: "set[str]", skip_hitl_id: str = "",
+        parked_or_inflight_task_ids: "set[str]", skip_hitl_id: str = "",
     ) -> None:
         """恢复期补注入：把该 session 里**已终局的 `UserTurn` 请求**的答复写进对话。
 
@@ -1930,17 +1953,25 @@ class CtxWeftRuntime:
         于是「人答了 → 决定落盘 → 进程在续跑之前崩了」这个窗口里，任务恢复后会重新进
         act，而**人的那句话彻底不见了**。这正是本次重设计要消灭的故障类。
 
-        **可以无条件跑，因为注入本身幂等**：`MemoryEvent.id = f"hitlreply:{hitl_id}"`
-        （spec §7.3/§12.2）——那个键的存在就是为了让这一步可重放。已经注入过 → memory
-        层 no-op；没注入过 → 这是唯一一次把答复救回来的机会。故这里**不需要**记「注入
-        跑没跑过」，那笔账要跨重启，又得多一份持久状态（绕回 §3.1）。
+        **只写记忆，绝不碰 task 状态**（`_write_hitl_reply_turn`，复审 Critical）。写入靠
+        `MemoryEvent.id = f"hitlreply:{hitl_id}"` 幂等（spec §7.3/§12.2），那个键的存在
+        就是为了让这一步可重放：已经注入过 → memory 层 no-op；没注入过 → 这是唯一一次
+        把答复救回来的机会。故这里**不需要**记「注入跑没跑过」，那笔账要跨重启，又得多
+        一份持久状态（绕回 §3.1）。
 
-        三条跳过：
+        **为什么不碰状态是正确的、而不只是更安全**：parked 真相源改成 registry 之后，
+        HITL 已终局的 task 本来就会被 `restore` 重排（ACTIVE → else 分支；SUSPENDED +
+        子任务全终态 → children 闸门）。唯一没被重排的形状是「SUSPENDED 在活子任务上」，
+        而它恰恰**必须**保持 SUSPENDED——`_try_resume_parent` 以此为门，在子任务收尾时
+        唤醒它，那时它进 act 就看得见这里写下的那一轮。三种形状都落对。
+
+        跳过的几类：
         - `skip_hitl_id`：本次调用已由 `user_reply` 显式注入过的那条（legacy
           `HitlRequest` 形态不带幂等 id，重复注入会真的写两条）。
-        - `parked_task_ids`：该 task 还挂着**别的未决** HITL。它此刻是 parked、没入队，
-          而 `_inject_user_reply` 会把 status 改成 PENDING——改了也没人派发，只会留下
-          一个对不上的状态。等那条未决的被应答时自然会走到这里。
+        - `legacy_origin`：本方法关的是**新模型**的崩溃窗口。升级前由 legacy 路径注入过的
+          答复，其记忆记录是随机 id、去重不了，补写会凭空多一轮用户发言。
+        - `parked_or_inflight_task_ids`：该 task 还挂着别的未决 HITL，或仍在被上一个活
+          TaskManager 跑着（与 `restore` 用**同一个**集合——`:1439` 与本处必须一致）。
         - 无 `task_id` / 无 decision 的记录（装填占位项等），以及已终态的 task——
           它不再需要、也不该收到新输入。
 
@@ -1948,16 +1979,17 @@ class CtxWeftRuntime:
         """
         for req in self.hitl_registry.resolved_for_session(session.id):
             if (req.id == skip_hitl_id
+                    or req.legacy_origin
                     or not isinstance(req.delivery, UserTurnDelivery)
                     or req.decision is None
                     or not req.task_id
-                    or req.task_id in parked_task_ids):
+                    or req.task_id in parked_or_inflight_task_ids):
                 continue
             target = task_manager.get_task(req.task_id)
             if target is None or target.status in ("FINISHED", "FAILED", "CANCELED"):
                 continue                      # 已终态的 task 不再需要（也不该收到）新输入
             try:
-                await self._inject_user_reply(req, session, task_manager)
+                await self._write_hitl_reply_turn(req, session, target)
             except Exception:
                 logger.exception(
                     "_inject_resolved_user_turns: 注入失败 session=%s hitl=%s",
