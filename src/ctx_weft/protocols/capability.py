@@ -313,6 +313,16 @@ class HumanResumable(Protocol):
 
     同样是流式（spec §2）。重入是**重新调用**而非恢复挂起的生成器，故 `resume_state`
     承载让出前的全部状态。`reply_as_result=True` 的 ask（如 `ask_user`）不需要它。
+
+    **`resume_state` 只省掉热重入**（spec §2.2 / §9.3）。热路径上进程还活着，gateway
+    拿到人的决定直接调 `resume()`，`invoke` 不跑第二遍。**冷路径不然**：热窗口被驱逐
+    或进程崩了之后，续跑由 `ReconcileStep` 重新 `invoke`，
+    **`invoke` 从头再跑一遍**——gateway 在 provider yield `needs_human` 之前无从知道
+    这次调用要问人，只能等它跑到那一刻才查到缓存的决定。而 `resume()` 收到的
+    `resume_state` 是**这一次刚 yield 的那一份**，不是崩溃前落盘的那一份。
+
+    因此契约是：**`needs_human` 之前做的工作必须幂等，或者便宜到重做无所谓。**
+    不可重复的副作用只能放进 `resume()`。
     """
 
     def resume(

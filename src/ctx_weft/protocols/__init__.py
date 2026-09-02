@@ -5,7 +5,9 @@
 - KnowledgeProvider（§4.2）
 - MemoryProvider（§4.3，统一协议：ingest + recall_* + subscribe + apply_compact）
 - CapabilityProvider（§4.4）
-- HitlForm / HitlOutcome（HITL 值域；请求/应答类型见 ctx_weft.protocols.hitl）
+- HITL：值域（HitlForm / HitlOutcome / PREFACE_*）+ 交换类型（HitlAsk、HitlDecision、
+  HitlReply、HitlRequestView、ResumeHint）+ 封闭的 Delivery 联合及其三个成员。
+  host 与自定义 authorizer/provider 需要构造或读取的全部 HITL 类型都在这里
 - AgentTemplate / IdentityFacet（§4.6）
 - LLMClient / LLMClientResolver（§11，LLM 接入契约）
 - ProviderContext
@@ -60,8 +62,20 @@ from ctx_weft.protocols.hitl import (
     HITL_OUTCOME_ACCEPTED,
     HITL_OUTCOME_CANCELLED,
     HITL_OUTCOME_REJECTED,
+    PREFACE_AFTER_INTERRUPT,
+    PREFACE_AFTER_INTERRUPT_EDIT,
+    PREFACE_NORMAL,
+    Delivery,
+    HitlAsk,
+    HitlDecision,
     HitlForm,
     HitlOutcome,
+    HitlReply,
+    HitlRequestView,
+    NoResumeDelivery,
+    ResumeHint,
+    ToolResultDelivery,
+    UserTurnDelivery,
 )
 from ctx_weft.protocols.llm import (
     # adapter 契约：实现一个 LLM adapter 所需的全部类型
@@ -148,8 +162,20 @@ __all__ = [
     "HITL_OUTCOME_ACCEPTED",
     "HITL_OUTCOME_CANCELLED",
     "HITL_OUTCOME_REJECTED",
+    "PREFACE_AFTER_INTERRUPT",
+    "PREFACE_AFTER_INTERRUPT_EDIT",
+    "PREFACE_NORMAL",
+    "Delivery",
+    "HitlAsk",
+    "HitlDecision",
     "HitlForm",
     "HitlOutcome",
+    "HitlReply",
+    "HitlRequestView",
+    "NoResumeDelivery",
+    "ResumeHint",
+    "ToolResultDelivery",
+    "UserTurnDelivery",
     # Context
     "BLOB_REF_PREFIX",
     "ContentPart",

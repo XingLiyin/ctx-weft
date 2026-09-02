@@ -116,11 +116,18 @@ HumanResumable {                                          # 工具侧（同样�
 
 `NeedsHuman` 取代 `AuthorizationDecision.defer`——`defer` 只能说「挂起」，说不出「挂起并问这个问题」，所以今天的实现必须自己先去登记请求。合并成一个结局后，authorizer **退化为无状态判断**：`HumanConfirmationAuthorizer` 连 `hitl_manager` 字段都没有。
 
-### 2.2 `resume_state`：让出前的工作不必重做
+### 2.2 `resume_state`：**热**重入不必重做让出前的工作
 
 `HitlAsk` 带一个**不透明**的 `resume_state`。core 原样保存（随 `HitlOpened` 落盘、随 `HitlSnapshot` 装填回内存），重入时作为 `resume()` 的参数原样回传，**永不解读**。它不出现在 `invoke` 的签名里。
 
-没有它，重入就等于要求 provider 重做让出前的全部工作——对纯判断的 authorizer 无所谓，对已经做过实际工作的工具就是重复副作用。
+它省掉的是**热路径**的重做：进程还活着、`invoke` 的调用栈还在 gateway 手里时，gateway 拿到人的决定就直接调 `resume(ask_id, decision, resume_state, ctx)`，`invoke` 不再跑第二遍。
+
+**冷路径不然，`invoke` 会从头重跑一遍。** park 之后由 `ReconcileStep` 重新 `gateway.invoke` → `provider.invoke`，而 gateway 在 provider yield `needs_human` **之前**无从知道这次调用要问人（工具步的决定缓存只能在那一刻才查得到，见 §6）。所以：
+
+> **让出之前做的工作，在冷路径上会被再做一次。它必须是幂等的，或者便宜到重做无所谓。**
+> 真正昂贵且不可重复的副作用不能放在 yield 之前。
+
+传进来的 `resume_state` 在冷路径上因此并不省事：`resume()` 收到的是 provider **刚刚重新 yield 的那一份**，落盘装填回来的那一份被丢弃（`capability_gateway.py` 的短路点、`runtime.py` 的装填点都只解构不读）。持久化它的价值在于**故障可诊断与后向兼容**，不是省掉冷重入的工作量。
 
 两条约束写死：`resume_state` 必须**可序列化**（要跨重启存活）；core 对其内容**零假设**。
 
@@ -536,6 +543,16 @@ class DeployTool(ToolCapabilityProvider, HumanResumable):
 
 注意 `resume_state` 在流式契约下**不是优化而是必需**：让出时生成器被关闭，它的局部变量
 （这里的 `plan`）随之消失，重入是重新调用而非恢复挂起的生成器。
+
+**但它只救得了热重入。** 若热窗口被驱逐（park）或进程崩了，续跑走冷路径：`ReconcileStep`
+重新调 `invoke`，上面的 `compute_plan(args)` **会再跑一遍**，直到 provider 再次 yield
+`needs_human`，gateway 才在那一刻查到缓存的决定并转入 `resume()`——而它收到的
+`resume_state` 是**这一次刚 yield 的那一份**，不是崩溃前落盘的那一份。因此：
+
+> `needs_human` 之前的工作必须**幂等或便宜**。不可重复的副作用（扣款、发工单、真正的
+> 部署动作）只能放在 `resume()` 里，绝不能放在 yield 之前。
+
+（gateway 做不到别的：在 provider 让出之前，没有任何人知道这次调用要问人。）
 
 若某 provider 返回了 `NeedsHuman(reply_as_result=false)` 却没实现 `HumanResumable`，gateway **当场报错**——这是契约违例，不静默降级成「把答复当结果」，否则一次未完成的部署会被伪装成已完成。
 
