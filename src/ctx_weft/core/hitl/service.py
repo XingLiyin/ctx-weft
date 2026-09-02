@@ -154,6 +154,7 @@ class HitlService:
                     "HitlService._commit: slot.deliver raised for hitl_id=%s; "
                     "treating as unclaimed and still emitting HitlResolved", resolved.id)
                 claimed = False
+        resolved.claimed = claimed
         payload: dict[str, Any] = {
             "hitl_id": resolved.id,
             "outcome": decision.outcome,

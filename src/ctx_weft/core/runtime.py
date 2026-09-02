@@ -34,8 +34,12 @@ from ctx_weft.core.assembler.sources import (
 from ctx_weft.protocols.capability import Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
 from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
+from ctx_weft.core.hitl.reply_intake import ReplyIntake
+from ctx_weft.core.hitl.service import HitlService
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
+from ctx_weft.core.loop.hitl_waiter import HitlWaiter
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps import (
     ActStep,
@@ -86,6 +90,14 @@ from ctx_weft.protocols.capability import (
     qualify,
 )
 from ctx_weft.protocols.events import EventBus
+from ctx_weft.protocols.hitl import (
+    PREFACE_AFTER_INTERRUPT_EDIT,
+    HitlReply,
+    HitlRequestView,
+    ResumeHint,
+    ToolResultDelivery,
+    UserTurnDelivery,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -485,21 +497,24 @@ class CtxWeftRuntime:
             event_bus = InProcessEventBus()
         self._event_bus: EventBus = event_bus
         # shell 侧持有此实例，用于 approve() / reject() 响应 HITL 请求
+        # legacy —— 段 2 保留但不再接线（三个 setter 全删），后续任务整体删除
+        # （spec 2026-09-01 重设计 §0）。新路径见下方 self.hitl_registry / self.hitl。
         self.hitl_manager: HitlManager = hitl_manager or HitlManager(
             timeout_sec=self._config.hitl_timeout_sec,
             event_bus=self._event_bus,
             max_resolved=self._config.hitl_max_resolved,
         )
-        # 冷应答自触发 session resume —— 热/冷分流在 core 内闭环,host 只转发回复（spec/07 §6/§9）。
-        self.hitl_manager.set_cold_resolve_handler(self._resume_after_cold_hitl)
-        # 冷决定查询：reconcile 短路的跨重启回落（内存缓存重启后不含已解决,不查日志会重问）。
-        self.hitl_manager.set_cold_decision_lookup(self._cold_hitl_decision)
-        # HITL 应答内容的校验 + 外部化：人类经 HITL 递进来的图此前全程不校验、不外部化
-        # （无格式校验 / 无视觉门控 / inline base64 永久留在 memory）。与 start_session /
-        # run_single_task 共用同一个方法，顺序不会各自漂移（Phase 3c Task A）。薄包装
-        # _normalize_hitl_content 只负责从 req 上取出本次应答真正要用的 tenant，
-        # 校验/外部化本身仍是那个共用方法（Phase 3c Task A2）。
-        self.hitl_manager.set_content_normalizer(self._normalize_hitl_content)
+        # HITL：构造期一次性接线，**没有 setter、没有半成品窗口**。裸构造即生产形态
+        # （spec 2026-09-01 重设计 §3）。`_normalize_hitl_content` 是与 start_session /
+        # run_single_task 共用的内容校验 + 外部化方法（Phase 3c Task A），此处原样接进
+        # `ReplyIntake` 作为其 `ContentNormalizer`。
+        self.hitl_registry = HitlRegistry(max_resolved=self._config.hitl_max_resolved)
+        self.hitl = HitlService(
+            registry=self.hitl_registry,
+            event_bus=self._event_bus,
+            reply_intake=ReplyIntake(self._normalize_hitl_content),
+        )
+        self._hitl_timeout_sec = self._config.hitl_timeout_sec
         from ctx_weft.providers.events import attach_persistence
         if event_store is None:
             from ctx_weft.providers.events import InMemoryEventStore
@@ -680,16 +695,16 @@ class CtxWeftRuntime:
         return "default"
 
     async def _normalize_hitl_content(
-        self, content: "str | list[ContentPart]", req: "HitlRequest",
+        self, content: "str | list[ContentPart]", session_id: str,
     ) -> "tuple[str | list[ContentPart], str | list[dict] | None]":
-        """HITL 应答内容的校验 + 双侧外部化（`HitlManager.set_content_normalizer` 的回调）。
+        """HITL 应答内容的校验 + 双侧外部化（`ReplyIntake` 的 `ContentNormalizer` 回调）。
 
-        只做「从 req 上取出本次应答真正要用的 tenant」这一件事，校验/外部化本身
+        只做「从 session_id 解出本次应答真正要用的 tenant」这一件事，校验/外部化本身
         仍由三入口共用的 `_validate_and_normalize_content` 完成（顺序恒为
         validate → 两侧外部化，不在此重写一遍），返回值也原样透传它的二元组
-        `(memory 侧内容, event 侧载荷)`——`HitlManager` 拿后者直接发 HITL_* 事件。
+        `(memory 侧内容, event 侧载荷)`——`HitlService` 拿后者直接发 HITL_* 事件。
 
-        - **tenant**：由 `req.session_id` 解出（见 `_tenant_for_session`）。解 tenant 冷路径
+        - **tenant**：由 `session_id` 解出（见 `_tenant_for_session`）。解 tenant 冷路径
           要读事件日志，故只在**真会写 blob** 时才付这个代价：纯文本、或两个 blob store
           都不能外部化时 tenant 根本用不上。判据是 memory **或** event 任一可外部化就要
           解——event 侧的外部化独立于 memory 侧（两个 store 各写各的），只看 memory 侧
@@ -703,9 +718,9 @@ class CtxWeftRuntime:
             self.providers.get_memory_blob_store().can_externalize
             or self.providers.get_event_blob_store().can_externalize
         ):
-            tenant_id = await self._tenant_for_session(req.session_id)
+            tenant_id = await self._tenant_for_session(session_id)
         return await self._validate_and_normalize_content(
-            content, req.session_id, tenant_id=tenant_id,
+            content, session_id, tenant_id=tenant_id,
         )
 
     def _sync_session_llm_window(self, session: Session) -> None:
@@ -1280,7 +1295,7 @@ class CtxWeftRuntime:
         self,
         session_id: str,
         *,
-        user_reply: "HitlRequest | None" = None,
+        user_reply: "HitlRequest | PendingHitl | None" = None,
         llm_account: str | None = None,
         llm_model: str | None = None,
         resumed_task_id: str | None = None,
@@ -1304,7 +1319,7 @@ class CtxWeftRuntime:
         self,
         session_id: str,
         *,
-        user_reply: "HitlRequest | None" = None,
+        user_reply: "HitlRequest | PendingHitl | None" = None,
         llm_account: str | None = None,
         llm_model: str | None = None,
         resumed_task_id: str | None = None,
@@ -1576,7 +1591,7 @@ class CtxWeftRuntime:
         self,
         tm: "TaskManager",
         *,
-        user_reply: "HitlRequest | None",
+        user_reply: "HitlRequest | PendingHitl | None",
         llm_account: str | None,
         llm_model: str | None,
         resumed_task_id: str,
@@ -1717,8 +1732,45 @@ class CtxWeftRuntime:
         finally:
             self._busy_sessions.discard(session_id)
 
+    async def reply_to_hitl(self, reply: "HitlReply") -> "HitlRequestView | None":
+        """host 应答的唯一入口。返回已终局请求的视图；已终局再答 → `None`。
+
+        **冷续跑由本返回值驱动，不挂总线订阅**（spec §7.3 订正）：该总线的 handler
+        订阅者在 `emit()` 内部同步 drain，且背压下丢事件——把控制流关键信号挂上去，
+        「人答了但会话永不续跑」就成了可能。
+
+        **claimed 分流**：`resolved.claimed` 由 `HitlService._commit` 在取走等待槽的
+        同一原子段里判定——True 说明一个活协程正在等这个 hitl_id，投递已把它就地叫醒，
+        再触发一次冷续跑就是同一个 task 被驱动两次。
+        """
+        resolved = await self.hitl.resolve(reply)
+        if resolved is None:
+            return None                       # 幂等：已终局，不重复续跑
+        if resolved.claimed:
+            return resolved.to_view()         # 热投递已就地续跑，不得双投
+        await self._resume_after_hitl(resolved, reply.resume_hint)
+        return resolved.to_view()
+
+    async def _resume_after_hitl(self, req: "PendingHitl", hint: "ResumeHint") -> None:
+        """按 **delivery** 分流续跑——不看 form，不看 capability_id（spec §5）。"""
+        if isinstance(req.delivery, ToolResultDelivery):
+            await self.recover_session(
+                req.session_id, resumed_task_id=req.task_id,
+                llm_account=hint.llm_account, llm_model=hint.llm_model,
+            )
+        elif isinstance(req.delivery, UserTurnDelivery):
+            await self.recover_session(
+                req.session_id, user_reply=req, resumed_task_id=req.delivery.task_id,
+                llm_account=hint.llm_account, llm_model=hint.llm_model,
+            )
+        # NoResumeDelivery：纯通知 / 取消，无动作。
+
     async def _resume_after_cold_hitl(self, req: "HitlRequest") -> None:
-        """冷 HITL 应答后恢复 session（HitlManager.on_cold_resolve 回调）。
+        """冷 HITL 应答后恢复 session（legacy `HitlManager.on_cold_resolve` 回调）。
+
+        **段 2 起不再被接线**——构造期三个 setter 已删，`hitl_manager` 无人调它；新路径是
+        `reply_to_hitl` → `_resume_after_hitl`。方法与 legacy `HitlManager`/`self.hitl_manager`
+        一起保留，留给后续任务整体删除（spec 2026-09-01 重设计 §0）。
 
         act 的纯文本暂停（form=wait）须把回复注入 task 层（reconcile 覆盖不到——它不在
         task 层留 dangling tool_call）；act 的 ``ask_user`` / approval 走 reconcile,不在此注入。
@@ -1736,9 +1788,16 @@ class CtxWeftRuntime:
         )
 
     async def _inject_user_reply(
-        self, req: "HitlRequest", session: Session, task_manager: TaskManager,
+        self, req: "HitlRequest | PendingHitl", session: Session, task_manager: TaskManager,
     ) -> None:
-        """把 act 纯文本暂停（wait_for_user）的用户回复作为 USER_PROMPT 注入 task 层 + 重排。"""
+        """把 act 纯文本暂停（wait_for_user）的用户回复作为 USER_PROMPT 注入 task 层 + 重排。
+
+        接受两种 `req` 形态并存（段 2 · Task 8）：legacy `HitlRequest`（旧冷路径，
+        `_resume_after_cold_hitl` 与既有单测仍在用它，字段直读 `message`/`outcome`/`context`）
+        与新契约 `PendingHitl`（`_resume_after_hitl` 新应答入口用它，字段经 `req.decision` 取、
+        打断续接判据经 `req.delivery.preface`）。旧分支原样保留——不因为新增分支牵动一个已经
+        在跑的路径。
+        """
         from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
         from ctx_weft.protocols import MemoryEvent, MemoryEventType
 
@@ -1768,19 +1827,37 @@ class CtxWeftRuntime:
         )
         from ctx_weft.core.content import content_with_prefix
         from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
-        if req.outcome == HITL_OUTCOME_REJECTED:
-            content = (content_with_prefix(req.message, "Human declined: ")
-                       if req.message else "Human rejected the request.")
+
+        is_new_contract = isinstance(req, PendingHitl)
+        if is_new_contract:
+            message = req.decision.message if req.decision else ""
+            outcome = req.decision.outcome if req.decision else ""
+            is_edit_interrupt = (
+                isinstance(req.delivery, UserTurnDelivery)
+                and req.delivery.preface == PREFACE_AFTER_INTERRUPT_EDIT
+            )
         else:
-            content = req.message or "(no response)"
+            message = req.message
+            outcome = req.outcome
+            is_edit_interrupt = req.context == "interrupt:edit"
+
+        if outcome == HITL_OUTCOME_REJECTED:
+            content = (content_with_prefix(message, "Human declined: ")
+                       if message else "Human rejected the request.")
+        else:
+            content = message or "(no response)"
             # ① 中途打断（未吐 token）续接：补「上一条请求已取消」说明（context=interrupt:edit）。
-            if req.context == "interrupt:edit":
+            if is_edit_interrupt:
                 from ctx_weft.core.loop.steps.act import _interrupt_edit_prefix
                 prev = await self._last_user_prompt(scope, pctx)
                 prefix = _interrupt_edit_prefix(prev)
                 content = content_with_prefix(content, prefix)
         await self.providers.get_memory().ingest(
             MemoryEvent(
+                # 新契约的应答可能被重试（host 超时重发 / 用户连点）：`resolve()` 对已终局
+                # 请求已幂等 no-op（不会二次调用本方法），但这里再加一道幂等键——`id` 是
+                # memory 层的幂等键（provider 已实现），确定性地由 hitl_id 派生（spec §7.3/§12.2）。
+                id=f"hitlreply:{req.id}" if is_new_contract else None,
                 kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
                 address=scope,
                 content=content,
@@ -2050,6 +2127,8 @@ class CtxWeftRuntime:
             cancel_token=cancel_token,
             task_manager=task_manager,
             hitl_manager=self.hitl_manager,
+            hitl=self.hitl,
+            waiter=HitlWaiter(self.hitl_registry, timeout_sec=self._hitl_timeout_sec),
             pause_token=pause_token,
             config=self._config,
             # 出网前 rehydrate ref→base64 用（Phase 3b）；未注册时是 NullMemoryBlobStore，

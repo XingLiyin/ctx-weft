@@ -74,6 +74,11 @@ class PendingHitl:
     decision: HitlDecision | None = None
     resolved_at: datetime | None = None
     slot: WaitSlot | None = None
+    #: 本次终局是否被一个活等待槽热消费（`HitlService._commit` 在取槽的同一原子段里
+    #: 判定并写入）。默认 `False`——快照装填出来的项永远是冷的（重启后一切皆冷），
+    #: 这正是我们要的默认值，不需要装填路径另外清它。调用方（`reply_to_hitl`）据此
+    #: 决定要不要触发冷续跑：已被热消费的不得再触发一次，否则同一次应答驱动两跑。
+    claimed: bool = False
 
     @property
     def resolved(self) -> bool:
