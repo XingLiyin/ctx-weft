@@ -1,6 +1,6 @@
 {
   "name": "session-status-transitions",
-  "description": "会话状态的分层链路（2026-09-02 所有权重构）：SessionCreated→RUNNING；TM 报 TaskQueueBlocked（reducer 中 no-op，它是 SessionManager 的输入而非投影输入）→ SessionManager 发 SessionWaiting→WAITING；有 task 重新开跑 → SessionRunning→RUNNING；SessionFinished→SUCCEEDED。通用 setter SessionStatusChanged 已停发（L 档，只读存量），本用例锁定它的四个替代者。",
+  "description": "会话状态的分层链路（2026-09-02 所有权重构）：SessionCreated→RUNNING；TM 报 TaskQueueBlocked{count}（reducer 中 no-op，它是 SessionManager 的输入而非投影输入；**计数停在这一层**）→ SessionManager 发 SessionWaiting（**payload 恒为空**，裁定 R3）→WAITING；有 task 重新开跑 → SessionRunning→RUNNING；SessionFinished→SUCCEEDED。通用 setter SessionStatusChanged 已停发（L 档，只读存量），本用例锁定它的四个替代者。",
   "runId": "s1",
   "events": [
     { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
@@ -9,7 +9,7 @@
     { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
       "type": "TaskQueueBlocked", "timestamp": "2026-06-05T00:00:02Z", "payload": { "count": 1 } },
     { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1",
-      "type": "SessionWaiting", "timestamp": "2026-06-05T00:00:03Z", "payload": { "count": 1 } },
+      "type": "SessionWaiting", "timestamp": "2026-06-05T00:00:03Z", "payload": {} },
     { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1",
       "type": "SessionRunning", "timestamp": "2026-06-05T00:00:04Z",
       "payload": { "reason": "human_replied" } },

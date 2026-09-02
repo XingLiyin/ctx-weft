@@ -41,11 +41,11 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 ### Session
 | type | 变更 |
 |------|------|
-| `SessionCreated` | 建 `SessionView`（user_prompt/template_id/root_agent_id/llm_*/token_budget/tenant_id/created_at=ts，status=RUNNING）；`sessionStatus="RUNNING"` |
+| `SessionCreated` | 建 `SessionView`（`user_prompt`（jsonable）/`template_id`/`root_agent_id`/`llm_model`/`llm_account`/`tenant_id`（缺省回落 `event.tenantId`）/`token_budget`/`context_limit`/`reserved_output_tokens`，`created_at=ts`，`status="RUNNING"`）；`sessionStatus="RUNNING"` |
 | `SessionResumed` | 该 session 的 `userPrompt`、`status="RUNNING"`；`sessionStatus="RUNNING"` |
 | `SessionInterrupted` | payload `reason`（仅展示，**不做路由**）；`sessionStatus` 与该 session.status 置 `"INTERRUPTED"` |
-| `SessionWaiting` | payload `count`（仅展示）；`sessionStatus` 与该 session.status 置 `"WAITING"` |
-| `SessionRunning` | payload `reason`（仅展示）；**守卫**：`sessionStatus ∈ {SUCCEEDED, FAILED, CANCELED}` 时**整条跳过**（迟到的续跑事件不得复活已终结的会话）；否则置 `"RUNNING"` |
+| `SessionWaiting` | **payload 恒为空** `{}`；`sessionStatus` 与该 session.status 置 `"WAITING"` |
+| `SessionRunning` | payload `reason`（`"human_replied"` / `"resumed"`，**溯源用，仅展示**）；**守卫**：`sessionStatus ∈ {SUCCEEDED, FAILED, CANCELED}` 时**整条跳过**（迟到的续跑事件不得复活已终结的会话）；否则置 `"RUNNING"` |
 | `SessionFinished` | `final_status ?? "SUCCEEDED"` 置 `sessionStatus` 与 session.status |
 | `SessionStatusChanged` **L 档** | 只读存量。若有 `new_status`：`sessionStatus` 与该 session.status 置之。**新流量里不再发出**，但分支必须保留——存量日志靠它才能重建 |
 | `SessionPausedHitl` **L 档** | 只读存量。置 `"WAITING"`，**不读 `form`**：旧模型按 form 分 `PAUSED` / `PAUSED_HITL` 两档，新值域里两档合并成单一 `WAITING` |
@@ -65,6 +65,14 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 > `SessionStatus` 值域共 6 个：`RUNNING` / `WAITING` / `INTERRUPTED` /
 > `SUCCEEDED` / `FAILED` / `CANCELED`。回放存量日志时旧值 `PAUSED` / `PAUSED_HITL`
 > 一律折进 `WAITING`（`QUEUED` / `TIMEOUT` 从未被写出过）。
+>
+> **`SessionWaiting` 刻意不带「有几个在等」的计数**（裁定 R3）。那个数字停在
+> `TaskQueueBlocked{count}` 那一层，**不进会话事件**——展示数据不该穿过状态判据，
+> 同本次重构删掉 `needs_panel` 用的是同一条理由。想显示计数的 host 订
+> `TaskQueueBlocked`，或直接数未决 HITL / `AWAITING_HUMAN` 的 task。
+> 状态机里这条转移的 payload 是硬编码的空字典
+> （`session_state.py::next_transition` 的 `QUEUE_BLOCKED` 分支），
+> `SessionManager.handle_event` 也只从源事件转发 `reason` / `final_status` 两个字段。
 
 ### Task
 | type | 变更 |

@@ -47,8 +47,11 @@
 > `WAITING`。**reducer 的读分支保留**——存量日志还要回放。详见 `docs/events-v2.md` §5
 > 与 `docs/upgrade/2026-09-02-session-status-ownership.md`。
 >
-> `RunInterrupted{reason, error_code?, error_message?}`：run 被外部打断（LLM outage /
-> run 崩溃），task → `INTERRUPTED`。它取代了 `TaskSuspended{reason:"run_crash"}`。
+> `RunInterrupted{reason, error_code?, error_message?, retry_count?}`：run 被外部打断，
+> task → `INTERRUPTED`。它取代了 `TaskSuspended{reason:"run_crash"}`。
+> 两个发射点的 payload 不同形：run 崩溃（`task_manager.py`）带全部四个字段
+> （`reason="run_crash"`）；LLM outage（`runtime.py`）只带
+> `{reason:"llm_outage", error_message}`。**`reason` 只作溯源，判据是事件类型本身。**
 
 ### Task
 `TaskCreated` `TaskStarted` `TaskSuspended` `TaskAwaitingHuman` `TaskResumed` `TaskFinished`
