@@ -719,11 +719,12 @@ class TaskManager:
             self._running_tasks.discard(task_id)
             self._running_agents.pop(task_id, None)
             self._queue.unmark_running(task_id)
-        # reason 是给人看的成因标签，**不是判据**——判据是 RUN_INTERRUPTED 这个类型本身。
-        # 刻意换掉了旧的 TaskSuspended.reason 字面量：那串字符曾是路由判据的遗物，
-        # 全仓不该再出现（tests/unit/test_layered_signals.py 钉着这条）。
+        # reason 只作**溯源**，不作路由——判据是 RUN_INTERRUPTED 这个类型本身。
+        # 值本身是对外契约的一部分（host 升级须知的映射表写的就是 reason="run_crash"），
+        # 故照旧；被删掉的是**拿它做条件判断**那件事，不是这个字面量的存在
+        # （tests/unit/test_layered_signals.py 检测的正是「分流」而非「出现」）。
         await self._emit(EventType.RUN_INTERRUPTED, task_id=task_id, payload={
-            "reason": "crash",
+            "reason": "run_crash",
             "error_code": error_code,
             "error_message": error,
             "retry_count": task.retry_count if task else 0,

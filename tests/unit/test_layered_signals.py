@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 
 def test_no_component_emits_session_status_changed_any_more():
@@ -19,14 +20,21 @@ def test_no_component_emits_session_status_changed_any_more():
 
 def test_no_component_dispatches_on_a_task_suspended_reason():
     """判据只能是类型，不能是 payload 里的字符串（Global Constraints）。
-    reducers 读存量事件时可以认这两个字符串；别处不许拿它们做路由。"""
+
+    **测的是「分流」，不是「出现」**：约束的原话是「不许拿这两个字面量做路由」，
+    而同一份 Global Constraints 另一条明说 `reason` 字段只作溯源、不作路由——
+    发射端把它写进 payload 是显式允许的（`RunInterrupted{reason:"run_crash"}`
+    还是对外契约的一部分）。故只在字面量与比较/成员运算符**同现的那一行**上告警。
+    reducers 读存量事件时可以认这两个字符串；别处不许拿它们做路由。
+    """
     src = pathlib.Path("src/ctx_weft")
+    routing = re.compile(r"==|!=|\bnot in\b|\bin\b|\bmatch\b|\bcase\b")
     offenders = []
     for p in src.rglob("*.py"):
-        if p.name == "reducers.py":
+        if p.name == "reducers.py":       # 读存量日志，允许认这两个旧值
             continue
-        text = p.read_text(encoding="utf-8")
-        for needle in ('"hitl_park"', '"run_crash"'):
-            if needle in text:
-                offenders.append(f"{p}:{needle}")
+        for lineno, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            for needle in ('"hitl_park"', '"run_crash"'):
+                if needle in line and routing.search(line):
+                    offenders.append(f"{p}:{lineno}:{needle}")
     assert offenders == []
