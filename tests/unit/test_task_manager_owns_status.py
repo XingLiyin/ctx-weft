@@ -6,6 +6,10 @@
   emit 调用经常跨行（`await bus.emit(make_event(\n state, EventType.TASK_CANCELED, ...))`），
   按行匹配会漏掉，守卫就成了摆设。注释里的字面量不进 AST，天然不误报。
 - 守卫 B：判决归 loop、状态归 TM——loop 侧不许出现 `task.status` 的赋值。
+  **同样扫全树 + 白名单**（不是「列举几个要看的文件」）：开集判据在这道守卫上已经
+  出事两次——第一次它认不出裸变量形态（`task.status=`），第二次它只看硬编码的 6 个
+  文件，往 `steps/prepare.py` 注入裸赋值照样绿。新文件天然被守到，是这道守卫唯一
+  能长久成立的形态。
 - 行为：五种 run 结局（含崩溃就地构造那一条）经同一张处置表落到状态 + 事件。
 """
 
@@ -28,7 +32,13 @@ TASK_STATUS_EVENTS = (
 )
 
 #: 允许出现 `EventType.TASK_*` 的文件：唯一发射者 + 事件表 + 投影映射表。
-_ALLOWED = {"task_manager.py", "events.py", "reducers.py"}
+#: **按仓根相对路径认，不按 basename**——按 basename 放行会连带豁免 `src/` 下任何
+#: 同名新文件（再出现一个 `reducers.py` / `events.py` 就白白开了个口子）。
+_ALLOWED = {
+    "src/ctx_weft/core/orchestrator/task_manager.py",
+    "src/ctx_weft/protocols/events.py",
+    "src/ctx_weft/core/control/reducers.py",
+}
 
 
 def test_only_task_manager_emits_task_status_events() -> None:
@@ -44,7 +54,7 @@ def _task_status_event_sites(root: pathlib.Path) -> list[str]:
     """
     offenders: list[str] = []
     for p in sorted(root.rglob("*.py")):
-        if p.name in _ALLOWED:
+        if p.as_posix() in _ALLOWED:
             continue
         tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
         for node in ast.walk(tree):
@@ -52,32 +62,50 @@ def _task_status_event_sites(root: pathlib.Path) -> list[str]:
                     and node.attr in TASK_STATUS_EVENTS
                     and isinstance(node.value, ast.Name)
                     and node.value.id == "EventType"):
-                offenders.append(f"{p}:{node.lineno}:{node.attr}")
+                offenders.append(f"{p.as_posix()}:{node.lineno}:{node.attr}")
     return offenders
 
 
 def test_loop_side_does_not_write_task_status() -> None:
-    """判决归 loop，状态归 TM——loop 侧不许出现 task.status 的赋值。"""
-    targets = [
-        "src/ctx_weft/core/loop/steps/observe.py",
-        "src/ctx_weft/core/loop/steps/finalize.py",
-        "src/ctx_weft/core/loop/steps/act.py",
-        "src/ctx_weft/core/loop/steps/suspend.py",
-        "src/ctx_weft/core/orchestrator/control_capability.py",
-        "src/ctx_weft/core/runtime.py",
-    ]
-    offenders = [f"{t}:{lineno}" for t in targets
-                 for lineno in _task_status_writes(pathlib.Path(t))]
-    assert offenders == []
+    """判决归 loop，状态归 TM——loop 侧不许出现 task.status 的赋值。
+
+    与守卫 A 同构：**扫全树 + 白名单**。上一版列举 6 个「要看的文件」是开集——往
+    任何不在列表里的文件（评审实测：`core/loop/steps/prepare.py`）注入裸
+    `task.status = "FINISHED"`，守卫照样绿。
+    """
+    assert _task_status_write_sites(pathlib.Path("src/ctx_weft")) == []
 
 
-#: 判据里精确放过的写入点，按 (文件, 所在函数) 认——行号会漂，函数名不会。
+#: 整份文件放行的写入者，按**仓根相对路径**认（不按 basename——同名新文件不该白拿豁免）：
+#: - `task_manager.py`：task 状态的唯一所有者，本守卫存在的目的就是把写入收进它。
+#: - `reducers.py`：投影层，按事件重放 task 状态，不产生判决。
+#: - `session_manager.py`：只写 `sess.status`，被判据的**裸变量**形态误伤（`<name>.status`
+#:   一律算命中是刻意的——被删掉的那批 loop 侧写入绝大多数长成 `task.status=` / `t.status=`，
+#:   收窄判据比列几个白名单文件危险得多）。
+_ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
+    "src/ctx_weft/core/orchestrator/task_manager.py",
+    "src/ctx_weft/core/control/reducers.py",
+    "src/ctx_weft/core/orchestrator/session_manager.py",
+})
+
+#: 判据里精确放过的写入点，按 (仓根相对路径, 所在函数) 认——行号会漂，函数名不会。
 #: `runtime._inject_user_reply`：冷 HITL 应答落地后把 task 置回 PENDING。它在 **run 之外**
 #: （run 早已结束、TaskManager 已写定 AWAITING_HUMAN），属编排层重排的一部分，不是
 #: 「判决越界写状态」——本守卫要钉死的是 loop 内部拿 task.status 当自己的工作变量那件事。
 _ALLOWED_STATUS_WRITES: frozenset[tuple[str, str]] = frozenset({
-    ("runtime.py", "_inject_user_reply"),
+    ("src/ctx_weft/core/runtime.py", "_inject_user_reply"),
 })
+
+
+def _task_status_write_sites(root: pathlib.Path) -> list[str]:
+    """全树扫描：非白名单文件里所有对 task 状态的赋值。"""
+    offenders: list[str] = []
+    for p in sorted(root.rglob("*.py")):
+        rel = p.as_posix()
+        if rel in _ALLOWED_STATUS_WRITE_FILES:
+            continue
+        offenders += [f"{rel}:{lineno}" for lineno in _task_status_writes(p)]
+    return offenders
 
 
 def _task_status_writes(path: pathlib.Path) -> list[int]:
@@ -113,7 +141,7 @@ def _task_status_writes(path: pathlib.Path) -> list[int]:
             elif isinstance(child, (ast.AugAssign, ast.AnnAssign)):
                 targets = [child.target]
             if (any(_is_task_status(t) for t in targets)
-                    and (path.name, func) not in _ALLOWED_STATUS_WRITES):
+                    and (path.as_posix(), func) not in _ALLOWED_STATUS_WRITES):
                 hits.append(child.lineno)
             _walk(child, func)
 
