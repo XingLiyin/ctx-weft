@@ -51,7 +51,9 @@
 - 取消（CancelledError）→ task 置 `CANCELED`，发 `RunCanceled` + `TaskCanceled`。
 - 其它异常 → task 置 `FAILED` + `task.error`；按 `retriable` 决定是否重试。
 - finally：清能力缓存；计算 `willRetry`（有错 + `retryCount < maxRetries` + retriable）；
-  发 `RunFinished`（含 `finalStatus` / `willRetry` / `totalEvents` / `totalTurns` / `error` / `errorType`）。
+  发 `RunFinished`（含 `outcome`（run 词表五值，权威字段）/ `finalStatus`（已废弃，
+  保留一个发布周期供旧断言过渡）/ `willRetry` / `totalEvents` / `totalTurns` / `error` /
+  `errorType`）。
 
 ---
 
