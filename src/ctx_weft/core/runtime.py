@@ -516,7 +516,7 @@ class CtxWeftRuntime:
             self._event_bus, self.event_store, snapshot_every_n=snapshot_every_n)
 
         # Auto-register 内置 providers（与用户注册的 providers 无关）
-        control_provider = ControlCapabilityProvider(hitl_manager=self.hitl_manager)
+        control_provider = ControlCapabilityProvider()
         self.providers.register_capability(control_provider)
 
         from ctx_weft.core.orchestrator.skill_executor_capability import (

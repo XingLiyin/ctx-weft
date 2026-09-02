@@ -29,7 +29,6 @@ from ctx_weft.protocols.capability import (
 from ctx_weft.protocols.context import ProviderContext
 
 if TYPE_CHECKING:
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
     from ctx_weft.core.orchestrator.task_manager import TaskManager
     from ctx_weft.core.state.models import Session, Task
 
@@ -589,9 +588,8 @@ def ask_user(
     ctx: ControlContext = None,
 ) -> ControlResult:
     """Ask the user one or more questions and wait for their reply — call this whenever you need information, a decision, a clarification, or a choice that only the user can provide; prefer asking over guessing or assuming. Execution pauses until they answer, then resumes from their reply."""
-    if ctx is not None and ctx.session is not None:
-        ctx.session.status = "PAUSED_HITL"
-    # Async parking until human responds is handled in ControlCapabilityProvider._handle()
+    # 暂停态由 pending HITL 集合推导（spec §7.1），不再由这里直接写 session.status。
+    # needs_human 的产出与 park 均在 ControlCapabilityProvider._handle() 完成。
     n = len(questions) if questions else 0
     return ControlResult(
         content=f"Human input requested ({n} question(s))",
@@ -614,8 +612,7 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
 
     name = PROVIDER_NAME
 
-    def __init__(self, hitl_manager: "HitlManager | None" = None) -> None:
-        self._hitl_manager = hitl_manager
+    def __init__(self) -> None:
         self._sessions: dict[str, tuple["TaskManager", "Session"]] = {}
 
     def register_session(
@@ -701,47 +698,21 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
             for tid, reason in reopen_map.items():
                 await tm.reopen_chain(tid, reason)
 
-        # ask_user：park 直到人类响应，把答复作为工具结果返回给 LLM。
-        # cold reconcile 再入（tool_call_id 已有「已解决」HITL）时短路、不再 park（spec/07 §6）。
-        if result.metadata.get(K.HITL_REQUESTED) and self._hitl_manager is not None:
+        # ask_user：声明「我需要一个人的决定」并立即停——不在此 park、不碰 hitl_manager。
+        # 「答复即结果」：gateway 收到 needs_human 后开等待、拿到答复直接回灌为本次工具结果，
+        # 因此本 provider **不需要**实现 HumanResumable（spec §2.3）。
+        if result.metadata.get(K.HITL_REQUESTED):
+            from ctx_weft.protocols.hitl import HITL_FORM_QUESTION, HitlAsk, ToolResultDelivery
             tool_call_id = (ctx.extra or {}).get("tool_call_id", "")
-            # 决定缓存命中直接用——内存优先,未命中回落事件日志（否则跨重启再入会把同一
-            # 问题重新问一遍,丢掉用户已给的答案）;内存 pending 由 request() 幂等复用。
-            approval = await self._hitl_manager.find_resolved_for_tool_call(
-                ctx.session_id, tool_call_id)
-            if approval is None:
-                hitl_id = await self._hitl_manager.request(
-                    form="question",
-                    session_id=ctx.session_id,
-                    task_id=ctx.task_id or "",
-                    agent_id=ctx.agent_id or "",
-                    capability_id=capability_id,
-                    arguments=arguments,
-                    questions=result.metadata.get("questions", []),
-                    tool_call_id=tool_call_id,
-                )
-                approval = await self._hitl_manager.wait(hitl_id)
-            _, session = self._sessions.get(ctx.session_id, (None, None))
-            if session is not None:
-                session.status = "RUNNING"
-            # 出口：文本走工具文本，图片 part 走 CONTENT_PARTS_KEY 交给 gateway
-            # （Phase 4 Task 3 建的通用接缝，media:get_image 走的也是它）。
-            # 此前这里是 content_to_text + metadata={}，人贴的图被静默丢弃。
-            from ctx_weft.core.content import content_with_prefix, split_for_tool_result
-            from ctx_weft.core.loop.capability_gateway import CONTENT_PARTS_KEY
-            from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
-            msg = approval.message
-            if approval.outcome == HITL_OUTCOME_REJECTED:
-                content = (content_with_prefix(msg, "Human declined: ") if msg
-                           else "Human rejected the request.")
-            else:
-                content = msg or result.content
-            text, parts = split_for_tool_result(content)
-            payload: dict[str, Any] = {"content": text, "metadata": {}}
-            if parts:
-                payload["metadata"] = {CONTENT_PARTS_KEY: parts}
-            yield CapabilityEvent(kind="result", payload=payload)
-            return
+            yield CapabilityEvent(kind="needs_human", payload={"ask": HitlAsk(
+                form=HITL_FORM_QUESTION,
+                delivery=ToolResultDelivery(tool_call_id=tool_call_id),
+                prompt=result.content,
+                fields=list(result.metadata.get("questions") or []),
+                subject_id=capability_id,
+                reply_as_result=True,
+            )})
+            return                                     # needs_human 是流的终点
 
         yield CapabilityEvent(
             kind="result",
