@@ -16,8 +16,9 @@ from ctx_weft.core.content import (
 )
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
-from ctx_weft.core.hitl.status import PAUSED_STATUSES, paused_status_for
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
+from ctx_weft.core.hitl.status import PAUSED_STATUSES, paused_status_for
+from ctx_weft.core.orchestrator.session_state import TERMINAL_SESSION_STATUSES
 from ctx_weft.core.state.models import TaskStatus
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import (
@@ -428,6 +429,26 @@ def _apply(view: RunStateView, ev: Event) -> None:
         if sess is not None:
             sess.status = final_status
 
+    elif t == EventType.SESSION_INTERRUPTED:
+        _set_session_status(view, ev.session_id, "INTERRUPTED")
+
+    elif t == EventType.SESSION_WAITING:
+        _set_session_status(view, ev.session_id, "WAITING")
+
+    elif t == EventType.SESSION_RUNNING:
+        # 迟到的续跑事件不得复活已终结的会话。判据与 session_state 同源。
+        if view.session_status not in TERMINAL_SESSION_STATUSES:
+            _set_session_status(view, ev.session_id, "RUNNING")
+
+    elif t == EventType.SESSION_PAUSED_HITL:
+        # 纯文本暂停(form=wait)= 软待命 PAUSED；ask_user/审批 = PAUSED_HITL。
+        # 与 ProjectionUpdater 同语义（单一真相）。
+        status = "PAUSED" if p.get("form") == "wait" else "PAUSED_HITL"
+        view.session_status = status
+        sess = view.sessions.get(ev.session_id)
+        if sess is not None:
+            sess.status = status
+
     elif t == EventType.RECOGNIZE_INTENT_TOOL_CALL:
         goal = p.get("session_goal", "")
         if goal:
@@ -565,6 +586,15 @@ def _apply(view: RunStateView, ev: Event) -> None:
         sess = view.sessions.get(ev.session_id)
         if sess is not None and sess.status in PAUSED_STATUSES:
             sess.status = "RUNNING"
+
+
+def _set_session_status(view: RunStateView, session_id: str, status: str) -> None:
+    """把状态同时写进 run 级标量与 SessionView。两处必须同写——只写一处是
+    「投影和视图对不上」那类 bug 的来源。"""
+    view.session_status = status
+    sess = view.sessions.get(session_id)
+    if sess is not None:
+        sess.status = status
 
 
 # ══════════════════════════════════════════════════════════════════════════════

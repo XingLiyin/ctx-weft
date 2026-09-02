@@ -78,6 +78,12 @@ class EventType(StrEnum):
     SESSION_STATUS_CHANGED = "SessionStatusChanged"
     SESSION_FINISHED = "SessionFinished"   # TaskManager 确定 session 真正结束时发（含 final_status）
     SESSION_PAUSED_HITL = "SessionPausedHitl"
+    # ── 会话状态 v2（2026-09-02 所有权重构）──
+    # 只有 SessionManager 发这三条 + SESSION_FINISHED。通用 setter
+    # SESSION_STATUS_CHANGED 就此退役（L 档，只读存量）。
+    SESSION_INTERRUPTED = "SessionInterrupted"        # 断了，等 /resume，非终态
+    SESSION_WAITING = "SessionWaiting"                # 停着但正常：都在等人 / 等外部输入（payload 空）
+    SESSION_RUNNING = "SessionRunning"                # 重新开跑：human_replied / resumed
     RUN_STARTED = "RunStarted"
     RUN_PAUSED = "RunPaused"
     RUN_RESUMED = "RunResumed"
@@ -102,6 +108,12 @@ class EventType(StrEnum):
     TASK_CANCELED = "TaskCanceled"
     TASK_FINALIZED = "TaskFinalized"
     TASK_REQUEUED = "TaskRequeued"
+    # ── TaskManager 的聚合信号（SM 的唯一输入）──
+    # 三个独立类型而不是一个带 discriminator 的类型：SM 收到哪条就转到哪个状态，
+    # 不读任何字面量。O 档——reducer 不折叠，会话状态由 SM 发的事件承载。
+    TASK_QUEUE_BLOCKED = "TaskQueueBlocked"                  # payload: {count}
+    TASK_QUEUE_INTERRUPTED = "TaskQueueInterrupted"          # payload: {reason}
+    TASK_QUEUE_DRAINED = "TaskQueueDrained"                  # payload: {final_status}
     BLACKBOARD_PUBLISHED = "BlackboardPublished"
     # ── Agent 域 ──
     AGENT_INSTANTIATED = "AgentInstantiated"
