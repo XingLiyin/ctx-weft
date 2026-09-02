@@ -1,7 +1,7 @@
 """End-to-end: transient LLM outage interrupts a session; /resume re-drives to completion.
 
 Two invariants:
-1. After outage: task is SUSPENDED (non-terminal), NOT FAILED; SessionStatusChanged(INTERRUPTED) emitted.
+1. After outage: task is SUSPENDED (non-terminal), NOT FAILED; SessionInterrupted emitted.
 2. After resume with healthy LLM: task reaches FINISHED; session not left INTERRUPTED/FAILED.
 3. Idempotent: a second outage+resume cycle behaves identically; final resume completes.
 
@@ -163,7 +163,7 @@ async def _wait_for_interrupted_event(
     seen: list,
     timeout: float = 5.0,
 ) -> None:
-    """Wait until a new SessionStatusChanged(INTERRUPTED) event appears in the spy list.
+    """Wait until a new SessionInterrupted event appears in the spy list.
 
     recover_session() launches drain as asyncio.create_task, so we need to yield
     to the event loop and poll until the event is captured by the spy.
@@ -171,14 +171,13 @@ async def _wait_for_interrupted_event(
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         has_interrupted = any(
-            getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-            and (e.payload or {}).get("new_status") == "INTERRUPTED"
+            getattr(e, "type", None) == EventType.SESSION_INTERRUPTED
             for e in seen
         )
         if has_interrupted:
             return
         await asyncio.sleep(0.02)
-    raise TimeoutError("Did not receive SessionStatusChanged(INTERRUPTED) within timeout")
+    raise TimeoutError("Did not receive SessionInterrupted within timeout")
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -236,13 +235,12 @@ async def test_outage_then_resume_completes():
         f"Task must not be terminal after transient outage, got {[t.status for t in tasks_after_outage]}"
     )
 
-    # A SessionStatusChanged(INTERRUPTED) must have been emitted.
+    # A SessionInterrupted must have been emitted.
     interrupted_events = [
         e for e in seen
-        if getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-        and (e.payload or {}).get("new_status") == "INTERRUPTED"
+        if getattr(e, "type", None) == EventType.SESSION_INTERRUPTED
     ]
-    assert interrupted_events, "Expected SessionStatusChanged(INTERRUPTED) after outage"
+    assert interrupted_events, "Expected SessionInterrupted after outage"
 
     # Session status in the event store must reflect INTERRUPTED.
     sess_after_outage = view_after_outage.sessions.get(session_id)
@@ -335,8 +333,7 @@ async def test_idempotent_outage_resume_completes():
     )
     interrupted_1 = [
         e for e in seen
-        if getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-        and (e.payload or {}).get("new_status") == "INTERRUPTED"
+        if getattr(e, "type", None) == EventType.SESSION_INTERRUPTED
     ]
     assert interrupted_1, "Expected INTERRUPTED after first outage"
 
@@ -350,7 +347,7 @@ async def test_idempotent_outage_resume_completes():
     await runtime.recover_session(session_id)
 
     # Wait until the second outage fires: poll the spy list for the new
-    # SessionStatusChanged(INTERRUPTED) event from the background drain.
+    # SessionInterrupted event from the background drain.
     await _wait_for_interrupted_event(seen)
 
     view_mid = await rebuild_view(runtime.event_store, session_id)
@@ -369,8 +366,7 @@ async def test_idempotent_outage_resume_completes():
 
     # _wait_for_interrupted_event already confirmed INTERRUPTED is in seen.
     assert any(
-        getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-        and (e.payload or {}).get("new_status") == "INTERRUPTED"
+        getattr(e, "type", None) == EventType.SESSION_INTERRUPTED
         for e in seen
     ), "Expected INTERRUPTED again after second outage"
 

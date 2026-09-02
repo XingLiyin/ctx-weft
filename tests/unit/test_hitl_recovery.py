@@ -101,20 +101,19 @@ def test_restore_keeps_active_parked_task_out_of_queue() -> None:
     assert tm.get_task("t1").status == "ACTIVE", "parked 任务状态不应被改成 PENDING"
 
 
-async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
-    """多任务：一个任务完成、另一个仍 parked 等审批 → 会话不得结束（is_done 感知 pending-HITL）。"""
+def _tm_with_bus():
+    """一个挂着真实 bus、能观察聚合信号的 TaskManager（本文件两条会话收尾用例共用）。"""
     from ctx_weft.providers.events import InProcessEventBus
-    from ctx_weft.protocols.events import EventType
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+    from ctx_weft.core.state.models import Session
 
     bus = InProcessEventBus()
-    finished: list = []
+    seen: list = []
 
     async def _cap(ev):
-        finished.append(ev)
+        seen.append(ev)
 
-    bus.subscribe(EventType.SESSION_FINISHED, _cap)
+    bus.subscribe(None, _cap)
     tm = TaskManager(session_id="s1", event_bus=bus, max_concurrent=1)
     tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING", token_budget=0))
 
@@ -122,95 +121,85 @@ async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
         return None
 
     tm.set_runner(StubRunner(tm, _noop_runner))
-    tm.set_has_pending_hitl(lambda: True)   # 仍有未决 HITL（B parked）
+    return tm, seen
+
+
+async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
+    """多任务：一个完成、另一个仍在等人 → TM 报 TaskQueueBlocked 而不是 TaskQueueDrained。
+
+    Task 6：「还有人在等」不再靠注入的 pending-HITL 谓词，而是由 AWAITING_HUMAN 的
+    任务自己表达；会话终不终结是 SM 看到哪条聚合信号决定的。
+    """
+    from ctx_weft.protocols.events import EventType
+    from ctx_weft.core.state.models import NormalTaskSettings, Task
+
+    tm, seen = _tm_with_bus()
     tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
-    tm.register_task(Task(id="B", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
+    tm.register_task(Task(id="B", session_id="s1", status="AWAITING_HUMAN",
+                          settings=NormalTaskSettings()))
     tm._running_tasks.add("A")
     await tm.on_task_finished("A", status="FINISHED")
-    assert finished == [], "仍有 parked HITL 任务时会话不应 SESSION_FINISHED"
+
+    types = [e.type for e in seen]
+    assert EventType.TASK_QUEUE_DRAINED not in types, "仍有等人的任务时不得报「跑完了」"
+    assert EventType.SESSION_FINISHED not in types
+    blocked = [e for e in seen if e.type == EventType.TASK_QUEUE_BLOCKED]
+    assert blocked and blocked[0].payload["count"] == 1
 
 
 async def test_session_finishes_when_no_pending_hitl() -> None:
-    """对照：无 pending HITL 时，任务完成正常结束会话。"""
-    from ctx_weft.providers.events import InProcessEventBus
+    """对照：没有任何等人/中断的任务时，TM 报 TaskQueueDrained（SM 据此终结会话）。"""
     from ctx_weft.protocols.events import EventType
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+    from ctx_weft.core.state.models import NormalTaskSettings, Task
 
-    bus = InProcessEventBus()
-    finished: list = []
-
-    async def _cap(ev):
-        finished.append(ev)
-
-    bus.subscribe(EventType.SESSION_FINISHED, _cap)
-    tm = TaskManager(session_id="s1", event_bus=bus, max_concurrent=1)
-    tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING", token_budget=0))
-
-    async def _noop_runner(_sid, _tid):
-        return None
-
-    tm.set_runner(StubRunner(tm, _noop_runner))
-    tm.set_has_pending_hitl(lambda: False)
+    tm, seen = _tm_with_bus()
     tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
     tm._running_tasks.add("A")
     await tm.on_task_finished("A", status="FINISHED")
-    assert len(finished) == 1, "无 pending HITL 时会话应正常结束"
+
+    drained = [e for e in seen if e.type == EventType.TASK_QUEUE_DRAINED]
+    assert len(drained) == 1 and drained[0].payload["final_status"] == "SUCCEEDED"
 
 
 async def test_recover_emits_paused_hitl_for_pending_session() -> None:
-    """缺陷 C：启动恢复时，有 pending HITL 的会话应 emit SESSION_STATUS_CHANGED(PAUSED_HITL)，
-    让投影如实反映"等待人工"，而非停在崩溃前的 RUNNING。"""
-    from datetime import datetime, timezone
-    from ctx_weft.core import CtxWeftRuntime
-    from ctx_weft.protocols.events import Event, EventType
-    from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+    """启动恢复装填 registry，但**不宣布**会话状态；「等的是面板还是一句话」由
+    host 的只读查询 `session_status_after_recover` 按 delivery 推导（Task 6：
+    「复活不是一种状态」，会话状态只由 TM 的聚合信号驱动 SM）。"""
+    from ctx_weft.protocols.events import EventType
 
-    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
-    statuses: list = []
-
-    async def _cap(ev):
-        statuses.append(ev.payload.get("new_status"))
-
-    runtime.event_bus.subscribe(EventType.SESSION_STATUS_CHANGED, _cap)
-
-    ts = datetime(2026, 6, 12, tzinfo=timezone.utc)
-
-    def ev(seq, type_, **payload):
-        task_id = payload.pop("task_id", None)
-        return Event(id=f"e{seq}", run_id="r1", sequence=seq, session_id="ses_1", type=type_,
-                     timestamp=ts, task_id=task_id, payload=payload)
-
+    runtime, verdicts = _recover_runtime_with_status_capture()
     seed = [
-        ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
-        ev(2, EventType.RUN_STARTED),
-        ev(3, EventType.TASK_STARTED, task_id="t1", assigned_agent_id="agt"),
-        ev(4, EventType.HITL_REQUIRED, task_id="t1", hitl_id="h1", form="approval",
-           capability_id="fs:bash_exec", tool_call_id="tc1", question="ok?"),
+        _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
+        _mk_ev(2, EventType.RUN_STARTED),
+        _mk_ev(3, EventType.TASK_STARTED, task_id="t1", assigned_agent_id="agt"),
+        _mk_ev(4, EventType.HITL_REQUIRED, task_id="t1", hitl_id="h1", form="approval",
+               capability_id="fs:bash_exec", tool_call_id="tc1", question="ok?"),
     ]
     for e in seed:
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert "PAUSED_HITL" in statuses, "有 pending HITL 的会话恢复应反映 PAUSED_HITL"
+    assert verdicts == [], "启动恢复不再宣布会话状态"
+    assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
 
 
 def _recover_runtime_with_status_capture():
-    """构造带 SESSION_STATUS_CHANGED 捕获的 runtime（recover 状态语义测试共用）。"""
-    from ctx_weft.core import CtxWeftRuntime
+    """构造会捕获**任何会话级宣告**的 runtime（recover 状态语义测试共用）。"""
     from ctx_weft.protocols.events import EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
-    statuses: list = []
+    verdicts: list = []
+    watched = (EventType.SESSION_STATUS_CHANGED, EventType.SESSION_INTERRUPTED,
+               EventType.SESSION_WAITING, EventType.SESSION_FINISHED)
 
     async def _cap(ev):
-        statuses.append(ev.payload.get("new_status"))
+        if ev.type in watched:
+            verdicts.append(ev.type)
 
-    runtime.event_bus.subscribe(EventType.SESSION_STATUS_CHANGED, _cap)
-    return runtime, statuses
+    runtime.event_bus.subscribe(None, _cap)
+    return runtime, verdicts
 
 
 def _mk_ev(seq, type_, **payload):
@@ -222,11 +211,11 @@ def _mk_ev(seq, type_, **payload):
 
 
 async def test_recover_emits_paused_for_wait_only_pending() -> None:
-    """wait-only pending（纯文本软待命）恢复应 PAUSED 而非 PAUSED_HITL——与
+    """wait-only pending（纯文本软待命）推导出 PAUSED 而非 PAUSED_HITL——与
     SESSION_PAUSED_HITL 的 reducer/投影语义一致（form=wait → PAUSED，无 HITL 面板）。"""
     from ctx_weft.protocols.events import EventType
 
-    runtime, statuses = _recover_runtime_with_status_capture()
+    runtime, verdicts = _recover_runtime_with_status_capture()
     seed = [
         _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
         _mk_ev(2, EventType.RUN_STARTED),
@@ -238,15 +227,16 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert "PAUSED" in statuses, "wait-only pending 恢复应反映 PAUSED（软待命）"
-    assert "PAUSED_HITL" not in statuses, "wait-only 不应误标 PAUSED_HITL（前端会等一个不存在的面板）"
+    assert verdicts == [], "启动恢复不再宣布会话状态"
+    # wait-only 不应误标 PAUSED_HITL——前端会等一个不存在的面板。
+    assert await runtime.session_status_after_recover("ses_1") == "PAUSED"
 
 
 async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None:
-    """混合 pending（wait + question/approval）恢复仍应 PAUSED_HITL——有面板可答。"""
+    """混合 pending（wait + question/approval）仍推导成 PAUSED_HITL——有面板可答。"""
     from ctx_weft.protocols.events import EventType
 
-    runtime, statuses = _recover_runtime_with_status_capture()
+    runtime, verdicts = _recover_runtime_with_status_capture()
     seed = [
         _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
         _mk_ev(2, EventType.RUN_STARTED),
@@ -260,7 +250,8 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert "PAUSED_HITL" in statuses, "混合 pending 恢复应反映 PAUSED_HITL"
+    assert verdicts == [], "启动恢复不再宣布会话状态"
+    assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
 
 
 async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:

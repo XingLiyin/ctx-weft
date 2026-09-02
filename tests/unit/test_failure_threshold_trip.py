@@ -2,7 +2,8 @@
 
 覆盖 task-9-brief.md 「机制设计（全量）」的 _trip_failure_threshold 步骤 1-8：
 - 事件序：FAILURE_THRESHOLD_HIT → TASK_CANCELED*（非 root）→ TASK_FAILED(root) →
-  SESSION_STATUS_CHANGED(FAILED, reason="failure_threshold")。
+  TASK_QUEUE_DRAINED(final_status=FAILED)。Task 6 起会话终态由 SessionManager 据这条
+  聚合信号发 SessionFinished，TM 不再自己发 SESSION_STATUS_CHANGED/SESSION_FINISHED。
 - 队列/挂起任务全 CANCELED，root FAILED（error_code=TASK_FAILED_BY_THRESHOLD）。
 - 幂等闩：第 4 败不重进 trip、不重发事件。
 - 封闸后 _flush_staged 丢弃本轮 staged 子任务。
@@ -65,7 +66,7 @@ async def _fail_n_times(tm: TaskManager, task_ids: list[str]) -> None:
 
 
 async def test_trip_event_sequence_on_third_failure() -> None:
-    """3 连败：THRESHOLD_HIT → TASK_CANCELED*（非 root）→ TASK_FAILED(root) → SESSION_STATUS_CHANGED(FAILED)。"""
+    """3 连败：THRESHOLD_HIT → TASK_CANCELED*（非 root）→ TASK_FAILED(root) → TASK_QUEUE_DRAINED(FAILED)。"""
     bus = _CapturingBus()
     tm, session = _tm(bus)
     root = _root()
@@ -79,13 +80,11 @@ async def test_trip_event_sequence_on_third_failure() -> None:
     assert EventType.FAILURE_THRESHOLD_HIT in types
     hit_idx = types.index(EventType.FAILURE_THRESHOLD_HIT)
     failed_idx = types.index(EventType.TASK_FAILED)
-    status_idx = max(i for i, t in enumerate(types) if t == EventType.SESSION_STATUS_CHANGED
-                      and bus.events[i].payload.get("new_status") == "FAILED")
+    status_idx = max(i for i, t in enumerate(types) if t == EventType.TASK_QUEUE_DRAINED
+                      and bus.events[i].payload.get("final_status") == "FAILED")
     assert hit_idx < failed_idx < status_idx
-    session_status_event = bus.events[status_idx]
-    assert session_status_event.payload.get("reason") == "failure_threshold"
+    assert EventType.SESSION_STATUS_CHANGED not in types
     assert session.status == "FAILED"
-    assert EventType.SESSION_FINISHED in types
 
 
 async def test_queue_and_suspended_tasks_canceled_root_failed() -> None:
@@ -316,7 +315,7 @@ async def test_root_already_terminal_skips_finalization() -> None:
 
 
 async def test_cancel_pending_hitl_invoked_before_terminal_status() -> None:
-    """cancel_pending_hitl 在 SESSION_STATUS_CHANGED(FAILED) 之前被 await 调用。"""
+    """cancel_pending_hitl 在 TASK_QUEUE_DRAINED(FAILED)（→ SessionFinished）之前被 await 调用。"""
     bus = _CapturingBus()
     tm, session = _tm(bus)
     root = _root()
@@ -333,7 +332,7 @@ async def test_cancel_pending_hitl_invoked_before_terminal_status() -> None:
     orig_emit = tm._emit
 
     async def _tracking_emit(event_type, task_id=None, payload=None):
-        if event_type == EventType.SESSION_STATUS_CHANGED and (payload or {}).get("new_status") == "FAILED":
+        if event_type == EventType.TASK_QUEUE_DRAINED and (payload or {}).get("final_status") == "FAILED":
             call_order.append("session_failed")
         await orig_emit(event_type, task_id=task_id, payload=payload)
 

@@ -1,10 +1,14 @@
 """运行层崩溃 = 可恢复中断（挂起等 /resume），不是失败。
 
+Task 6 起判据是**事件类型**：run 级事实是 `RunInterrupted`，TM 聚合成
+`TaskQueueInterrupted`，会话状态由 SessionManager 判定（TM 不再自己写 session.status，
+也不再发 `SessionStatusChanged`）。
+
 覆盖：
-1. 不可重试异常 → TASK_SUSPENDED + SESSION_STATUS_CHANGED(INTERRUPTED)，绝不发 TASK_FAILED。
+1. 不可重试异常 → RUN_INTERRUPTED + TASK_QUEUE_INTERRUPTED，绝不发 TASK_FAILED。
 2. 可重试异常耗尽 max_retries → 同上（不再降级终态 FAILED）。
 3. 崩溃挂起不触碰 session.failure_counter（真失败只有 observer 判 fail 一条路）。
-4. ContextOverflowError：retriable=False → 不重试直接挂起，error_code/reason=CONTEXT_OVERFLOW
+4. ContextOverflowError：retriable=False → 不重试直接挂起，error_code=CONTEXT_OVERFLOW
    区分性地抵达事件流（host 据此提示换更大窗口的模型恢复）。
 """
 
@@ -56,19 +60,18 @@ async def test_non_retriable_crash_suspends_not_fails() -> None:
     await tm._handle_task_failure("A", error="401 unauthorized", exc=_NonRetriable("boom"))
 
     assert EventType.TASK_FAILED not in _types(bus)
-    suspended = [e for e in bus.events if e.type == EventType.TASK_SUSPENDED]
-    assert suspended and suspended[0].task_id == "A"
-    assert suspended[0].payload["error_code"] == "LLM_AUTH_FAILED"
-    assert suspended[0].payload["error_message"] == "401 unauthorized"
-    interrupted = [
-        e for e in bus.events
-        if e.type == EventType.SESSION_STATUS_CHANGED
-        and e.payload.get("new_status") == "INTERRUPTED"
-    ]
-    assert interrupted and interrupted[0].payload.get("reason") == "LLM_AUTH_FAILED"
-    assert t.status == "SUSPENDED"
+    assert EventType.TASK_SUSPENDED not in _types(bus)   # 旧的 reason 分流已退场
+    assert EventType.SESSION_STATUS_CHANGED not in _types(bus)
+    interrupted = [e for e in bus.events if e.type == EventType.RUN_INTERRUPTED]
+    assert interrupted and interrupted[0].task_id == "A"
+    assert interrupted[0].payload["error_code"] == "LLM_AUTH_FAILED"
+    assert interrupted[0].payload["error_message"] == "401 unauthorized"
+    # TM 的聚合信号：队列里没有能跑的了，因为有任务断了。会话状态由 SM 据此判定。
+    queue_sig = [e for e in bus.events if e.type == EventType.TASK_QUEUE_INTERRUPTED]
+    assert queue_sig and queue_sig[0].payload["reason"] == "401 unauthorized"
+    assert t.status == "INTERRUPTED"
     assert t.error == "401 unauthorized"
-    assert session.status == "INTERRUPTED"
+    assert session.status == "RUNNING"   # 会话状态不再由 TM 改写（归 SessionManager）
 
 
 async def test_retry_exhausted_suspends_not_fails() -> None:
@@ -80,8 +83,8 @@ async def test_retry_exhausted_suspends_not_fails() -> None:
 
     assert EventType.TASK_FAILED not in _types(bus)
     assert EventType.TASK_REQUEUED not in _types(bus)  # 耗尽后不再重排
-    assert EventType.TASK_SUSPENDED in _types(bus)
-    assert t.status == "SUSPENDED"
+    assert EventType.RUN_INTERRUPTED in _types(bus)
+    assert t.status == "INTERRUPTED"
 
 
 async def test_run_crash_does_not_touch_failure_counter() -> None:
@@ -104,15 +107,10 @@ async def test_context_overflow_suspends_without_retry() -> None:
 
     assert EventType.TASK_REQUEUED not in _types(bus)  # retriable=False：不重试
     assert EventType.TASK_FAILED not in _types(bus)
-    suspended = [e for e in bus.events if e.type == EventType.TASK_SUSPENDED]
-    assert suspended and suspended[0].payload["error_code"] == "CONTEXT_OVERFLOW"
-    interrupted = [
-        e for e in bus.events
-        if e.type == EventType.SESSION_STATUS_CHANGED
-        and e.payload.get("new_status") == "INTERRUPTED"
-    ]
-    assert interrupted and interrupted[0].payload.get("reason") == "CONTEXT_OVERFLOW"
-    assert t.status == "SUSPENDED"
+    interrupted = [e for e in bus.events if e.type == EventType.RUN_INTERRUPTED]
+    assert interrupted and interrupted[0].payload["error_code"] == "CONTEXT_OVERFLOW"
+    assert EventType.TASK_QUEUE_INTERRUPTED in _types(bus)
+    assert t.status == "INTERRUPTED"
 
 
 async def test_crash_suspended_task_blocks_session_finish() -> None:
@@ -131,7 +129,10 @@ async def test_crash_suspended_task_blocks_session_finish() -> None:
     await tm.on_task_finished("B", status="FINISHED")
 
     assert EventType.SESSION_FINISHED not in _types(bus)
-    assert session.status == "INTERRUPTED"  # 不被 SUCCEEDED/FAILED 覆盖
+    # TM 报的是「断了」而不是「跑完了」——SM 据此不会终结会话（TaskQueueDrained 才会）。
+    assert EventType.TASK_QUEUE_DRAINED not in _types(bus)
+    assert _types(bus).count(EventType.TASK_QUEUE_INTERRUPTED) >= 1
+    assert session.status == "RUNNING"  # 会话状态归 SessionManager，TM 不写
 
 
 def test_restore_requeues_crash_suspended_with_fresh_retries() -> None:

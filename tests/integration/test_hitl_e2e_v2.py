@@ -5,7 +5,7 @@
 （LLM 与工具 provider——brief 明确允许），不打桩 core 的任何一层：
 
 1. 热审批：改参放行，工具真执行、结果真回灌 LLM。
-2. 冷审批：零热窗强制驱逐 → SUSPENDED → 应答 → reconcile 精确重入，工具**恰好一次**。
+2. 冷审批：零热窗强制驱逐 → AWAITING_HUMAN → 应答 → reconcile 精确重入，工具**恰好一次**。
 3. `ask_user` 冷路径：应答带图，图片以真实 part 落进 TOOL_RESULT、送回模型。
 4. 纯文本暂停：PAUSED → 应答注入一条 user 回合、任务续跑；重复应答不产生第二条注入。
 
@@ -240,7 +240,7 @@ async def test_hot_approval_rewrites_arguments_and_result_reaches_the_model() ->
 
 async def test_cold_approval_reconciles_and_invokes_the_tool_exactly_once() -> None:
     """驱动：`hitl_timeout_sec=0` 强制热窗即刻驱逐 → `ActStep` 抛 `HitlPark` → task
-    落 `SUSPENDED`、工具**尚未**执行 → `reply_to_hitl` 驱动 `recover_session` →
+    落 `AWAITING_HUMAN`、工具**尚未**执行 → `reply_to_hitl` 驱动 `recover_session` →
     `ReconcileStep` 命中 authz 阶段的决定缓存短路，重跑该 dangling tool_call。
 
     会因下列任一项回归而失败：
@@ -258,8 +258,8 @@ async def test_cold_approval_reconciles_and_invokes_the_tool_exactly_once() -> N
     sid = handle.session_id
 
     state = await handle.wait_for_finish(timeout=5.0)  # RUN_FINISHED 也在冷 park 时发出
-    assert state is not None and state.task.status == "SUSPENDED", (
-        f"expected SUSPENDED (cold park), got {state.task.status if state else None}"
+    assert state is not None and state.task.status == "AWAITING_HUMAN", (
+        f"expected AWAITING_HUMAN (cold park), got {state.task.status if state else None}"
     )
     assert tool.invocations == 0, "tool must not have run before the human answered"
 
@@ -303,7 +303,7 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
     - 冷路径下 `ask_user` 的图片被丢弃或降级成文字描述（`CONTENT_PARTS_KEY` 没有被
       正确拼进最终 content）——断言的是 memory 里 TOOL_RESULT 含**真实 `ImagePart`**、
       逐字节等于原始 base64，而不是「文本里提到了图片」；
-    - 冷路径没有真正续跑（任务卡在 SUSPENDED，断言 FINISHED 会失败）。
+    - 冷路径没有真正续跑（任务卡在 AWAITING_HUMAN，断言 FINISHED 会失败）。
     """
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
@@ -326,7 +326,7 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
     sid = handle.session_id
 
     state = await handle.wait_for_finish(timeout=5.0)
-    assert state is not None and state.task.status == "SUSPENDED"
+    assert state is not None and state.task.status == "AWAITING_HUMAN"
 
     pending = runtime.hitl_registry.list_pending(session_id=sid)
     assert len(pending) == 1
@@ -382,7 +382,7 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
     兜底——两层任一失守，重复应答都会在对话里多出一轮。
 
     会因下列任一项回归而失败：
-    - 纯文本没有触发冷 park（task 未落 SUSPENDED / session 未落 PAUSED）；
+    - 纯文本没有触发冷 park（task 未落 AWAITING_HUMAN / session 未落 PAUSED）；
     - 应答后用户回复没有以 `user` 回合的形式真正进入 memory；
     - 重复应答被误当作新事实处理，写出第二条注入（无论是因为 `resolve()` 对已终局请求
       不再幂等，还是因为幂等键失效）。
@@ -404,7 +404,7 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
 
     state = await handle.wait_for_finish(timeout=5.0)
     assert state is not None
-    assert state.task.status == "SUSPENDED"
+    assert state.task.status == "AWAITING_HUMAN"
     assert state.session.status == "PAUSED"
 
     pending = runtime.hitl_registry.list_pending(session_id=sid)

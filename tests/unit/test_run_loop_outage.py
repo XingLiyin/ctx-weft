@@ -44,13 +44,16 @@ async def test_outage_marks_session_interrupted_not_failed():
     handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
 
     # task must NOT be terminal-failed
-    assert state.task.status == "SUSPENDED"
-    # a SessionStatusChanged(INTERRUPTED) must have been emitted
-    status_events = [
-        e for e in seen
-        if getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-        and (e.payload or {}).get("new_status") == "INTERRUPTED"
-    ]
-    assert status_events, "expected SessionStatusChanged(INTERRUPTED)"
+    assert state.task.status == "INTERRUPTED"
+
+    types = [getattr(e, "type", None) for e in seen]
+    # 三层各发各的（Task 6）：loop 报 run 级事实，TM 聚合队列状态，SM 判会话状态。
+    run_interrupted = [e for e in seen if e.type == EventType.RUN_INTERRUPTED]
+    assert run_interrupted, "expected RunInterrupted (run-level fact)"
+    assert run_interrupted[0].payload["reason"] == "llm_outage"
+    assert EventType.TASK_QUEUE_INTERRUPTED in types, "expected TaskQueueInterrupted (TM aggregate)"
+    assert EventType.SESSION_INTERRUPTED in types, "expected SessionInterrupted (SM verdict)"
+    # 通用 setter 退役：谁都不许再发它。
+    assert EventType.SESSION_STATUS_CHANGED not in types
     # no TASK_FAILED emitted
     assert not [e for e in seen if getattr(e, "type", None) == EventType.TASK_FAILED]

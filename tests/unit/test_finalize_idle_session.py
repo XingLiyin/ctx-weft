@@ -20,10 +20,10 @@ async def test_finalize_idle_session_emits_status_and_finished():
 
     await tm.finalize_idle_session("SUCCEEDED")
 
-    kinds = [(e.type, (e.payload or {}).get("new_status") or (e.payload or {}).get("final_status"))
-             for e in bus.emitted]
-    assert (EventType.SESSION_STATUS_CHANGED, "SUCCEEDED") in kinds
-    assert (EventType.SESSION_FINISHED, "SUCCEEDED") in kinds
+    # Task 6：TM 只报「我这边空了、结论是 SUCCEEDED」，SessionFinished 由 SM 发。
+    kinds = [(e.type, (e.payload or {}).get("final_status")) for e in bus.emitted]
+    assert (EventType.TASK_QUEUE_DRAINED, "SUCCEEDED") in kinds
+    assert EventType.SESSION_STATUS_CHANGED not in [e.type for e in bus.emitted]
     assert tm.session.status == "SUCCEEDED"
 
 
@@ -42,4 +42,4 @@ async def test_finalize_idle_session_gathers_background_recap():
 
     await tm.finalize_idle_session("SUCCEEDED")
 
-    assert done["bg"] is True  # SESSION_FINISHED 前 gather 了后台 recap
+    assert done["bg"] is True  # 报队列状态（→ SessionFinished）前 gather 了后台 recap

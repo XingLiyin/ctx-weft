@@ -57,7 +57,7 @@ async def test_superseded_tm_skips_finish_when_replaced_during_gather() -> None:
     async def _capture(ev):
         finished.append(ev)
 
-    bus.subscribe(EventType.SESSION_FINISHED, _capture)
+    bus.subscribe(EventType.TASK_QUEUE_DRAINED, _capture)
 
     tm = _tm(bus)
     done_called: list = []
@@ -88,18 +88,19 @@ async def test_superseded_tm_skips_finish_when_replaced_during_gather() -> None:
     release.set()
     await fire
 
-    assert finished == [], "被顶替的旧 TM 不应发 SessionFinished"
+    assert finished == [], "被顶替的旧 TM 不应报队列状态（→ 不会有 SessionFinished）"
     assert done_called == [], "被顶替的旧 TM 不应触发终结回调（_release_session）"
 
 
 async def test_current_tm_still_fires_session_finished() -> None:
+    """Task 6：TM 报 TaskQueueDrained（SessionFinished 由 SM 据它发），回调照常触发。"""
     bus = InProcessEventBus()
-    finished: list = []
+    drained: list = []
 
     async def _capture(ev):
-        finished.append(ev)
+        drained.append(ev)
 
-    bus.subscribe(EventType.SESSION_FINISHED, _capture)
+    bus.subscribe(EventType.TASK_QUEUE_DRAINED, _capture)
 
     tm = _tm(bus)
     done_called: list = []
@@ -112,8 +113,8 @@ async def test_current_tm_still_fires_session_finished() -> None:
 
     await tm._fire_session_done()
 
-    assert len(finished) == 1
-    assert finished[0].payload["final_status"] == "SUCCEEDED"
+    assert len(drained) == 1
+    assert drained[0].payload["final_status"] == "SUCCEEDED"
     assert done_called == [True]
 
 
@@ -253,7 +254,7 @@ async def test_slow_prior_turn_bg_observe_does_not_clobber_next_turn() -> None:
 
     tm6.track_background(asyncio.create_task(_slow_bg()))
 
-    # 任务完成 → is_done → SESSION_STATUS_CHANGED SUCCEEDED → _fire_session_done → gather 阻塞
+    # 任务完成 → is_done → _fire_session_done → gather 阻塞
     done6 = asyncio.create_task(tm6.on_task_finished("t6", status="FINISHED"))
     await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -276,8 +277,8 @@ async def test_probe_prior_turn_finishing_after_supersession() -> None:
     """探针：强制让旧轮的 on_task_finished 在被顶替**之后**才跑（forced ordering）。
 
     验证关键不变量仍成立：不释放新 TM、不发 SessionFinished。
-    is_done 分支已加归属权守卫，被顶替旧 TM 收尾时连 stale 的 SESSION_STATUS_CHANGED
-    也不再发出——这里断言其为空。
+    is_done 分支已加归属权守卫，被顶替旧 TM 收尾时连 stale 的会话级聚合信号
+    （TaskQueueDrained）也不再发出——这里断言其为空。
     """
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                         agent_provider=InlineAgentTemplateProvider())
@@ -286,8 +287,8 @@ async def test_probe_prior_turn_finishing_after_supersession() -> None:
     finished: list = []
 
     async def _cap(ev):
-        if ev.type == EventType.SESSION_STATUS_CHANGED:
-            statuses.append(ev.payload.get("new_status"))
+        if ev.type == EventType.TASK_QUEUE_DRAINED:
+            statuses.append(ev.payload.get("final_status"))
         elif ev.type == EventType.SESSION_FINISHED:
             finished.append(ev)
 
@@ -308,6 +309,6 @@ async def test_probe_prior_turn_finishing_after_supersession() -> None:
     assert sid in rt._pausing, "新一轮的 pause 闩锁不得被旧 TM 迟到收尾清除"
     assert finished == [], "被顶替的旧 TM 不得发 SessionFinished"
 
-    # is_done 分支已加归属权守卫：被顶替旧 TM 的迟到收尾连 stale 的 SESSION_STATUS_CHANGED
+    # is_done 分支已加归属权守卫：被顶替旧 TM 的迟到收尾连 stale 的 TaskQueueDrained
     # 也不发出（新 owner 的状态才是真相），故这里 statuses 为空。
     assert statuses == []

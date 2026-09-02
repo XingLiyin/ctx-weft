@@ -32,8 +32,8 @@ def test_hitl_park_carries_ids() -> None:
     assert p.hitl_id == "hit_1" and p.tool_call_id == "tc1"
 
 
-async def test_run_loop_catches_park_returns_suspended() -> None:
-    """_run_loop must catch HitlPark, set task SUSPENDED, and NOT raise (no FAILED)."""
+async def test_run_loop_catches_park_returns_awaiting_human() -> None:
+    """_run_loop must catch HitlPark, set task AWAITING_HUMAN, and NOT raise (no FAILED)."""
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import CtxWeftRuntime, ProviderRegistry
@@ -134,21 +134,24 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
     )
 
     # ── assertions ───────────────────────────────────────────────────────────
-    assert task.status == "SUSPENDED", f"expected SUSPENDED, got {task.status!r}"
+    assert task.status == "AWAITING_HUMAN", f"expected AWAITING_HUMAN, got {task.status!r}"
 
     run_finished = next((e for e in collected if e.type == EventType.RUN_FINISHED), None)
     assert run_finished is not None, "RUN_FINISHED not emitted"
-    assert run_finished.payload["final_status"] == "SUSPENDED"
+    assert run_finished.payload["final_status"] == "AWAITING_HUMAN"
     assert run_finished.payload.get("error") is None
 
     task_failed_events = [e for e in collected if e.type == "TaskFailed"]
     assert task_failed_events == [], f"unexpected TaskFailed events: {task_failed_events}"
 
-    # Phase 3：冷 park 也补发 TASK_SUSPENDED，使 task 投影状态 = 内存状态(SUSPENDED)，
-    # 消除"投影停在 ACTIVE、与在等人脱节"的漂移。
-    task_suspended = [e for e in collected if e.type == EventType.TASK_SUSPENDED]
-    assert len(task_suspended) == 1, f"expected one TASK_SUSPENDED, got {len(task_suspended)}"
-    assert task_suspended[0].task_id == "tsk_park_1"
+    # park 是 **task 级事实**：这个 task 卡住了、卡它的是哪个 HITL 请求。会话怎么了
+    # 不在这里宣布（Task 6：三层各发各的）。旧的 TaskSuspended(reason="hitl_park")
+    # 已退场——判据是事件类型，不是 payload 里的字符串。
+    awaiting = [e for e in collected if e.type == EventType.TASK_AWAITING_HUMAN]
+    assert len(awaiting) == 1, f"expected one TaskAwaitingHuman, got {len(awaiting)}"
+    assert awaiting[0].task_id == "tsk_park_1"
+    assert awaiting[0].payload["hitl_id"] == "req_park"
+    assert [e for e in collected if e.type == EventType.TASK_SUSPENDED] == []
 
 
 def test_authorizer_filter_is_gone():

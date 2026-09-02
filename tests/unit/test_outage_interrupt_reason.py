@@ -1,5 +1,9 @@
-"""LLM-outage interrupt is tagged with reason='llm_outage' on the status event,
-so the host/frontend can tell it apart from a generic interrupt (e.g. restart)."""
+"""LLM-outage interrupt is tagged with reason='llm_outage' on the **run-level** event,
+so the host/frontend can tell it apart from a generic interrupt (e.g. restart).
+
+Task 6 起会话状态不在这里宣布：loop 发 RunInterrupted（带 reason），TM 聚合成
+TaskQueueInterrupted，SessionManager 才把会话判成 INTERRUPTED。
+"""
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
@@ -40,10 +44,10 @@ async def test_outage_interrupt_carries_llm_outage_reason():
 
     await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
 
-    interrupts = [
-        e for e in seen
-        if getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-        and (e.payload or {}).get("new_status") == "INTERRUPTED"
-    ]
-    assert interrupts, "expected SessionStatusChanged(INTERRUPTED)"
+    interrupts = [e for e in seen if getattr(e, "type", None) == EventType.RUN_INTERRUPTED]
+    assert interrupts, "expected RunInterrupted"
     assert all((e.payload or {}).get("reason") == "llm_outage" for e in interrupts)
+    # 成因也随 task.error 抵达 TM 的聚合信号（host 据此区分 LLM 故障 vs 重启中断）。
+    queue_sig = [e for e in seen if getattr(e, "type", None) == EventType.TASK_QUEUE_INTERRUPTED]
+    assert queue_sig and "outage" in (queue_sig[0].payload or {}).get("reason", "")
+    assert EventType.SESSION_STATUS_CHANGED not in [getattr(e, "type", None) for e in seen]
