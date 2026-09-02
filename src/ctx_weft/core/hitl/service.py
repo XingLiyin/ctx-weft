@@ -1,8 +1,13 @@
 """HitlService：HITL 的唯一漏斗。
 
 只做三件事：登记（open）、终局（resolve / cancel）、**发事实**。它不认识 Runtime、
-不认识协程栈、不持久化任何东西——耐久性是 event store provider 的事，冷续跑是
-`ResumeCoordinator` 订阅 `HitlResolved` 的事（spec §3.1 / §7.3）。
+不认识协程栈、不持久化任何东西——耐久性是 event store provider 的事。
+
+**冷续跑不是订阅出来的**（spec §7.3 订正）：早期草案让一个 `ResumeCoordinator` 订阅
+`HitlResolved` 去驱动冷续跑，那个设计已被推翻——总线 handler 在 `emit()` 内同步 drain
+且背压下丢事件，把控制流的关键信号挂上去，「人答了但会话永不续跑」就成了可能。现行
+唯一驱动方是 `CtxWeftRuntime.reply_to_hitl` 的**返回值**：它按 `resolved.claimed` 分流，
+未被热投递消费的才触发冷续跑。本模块只发事实，不认识续跑。
 """
 
 from __future__ import annotations
@@ -71,15 +76,22 @@ class HitlService:
         agent_id: str = "",
         tool_call_id: str = "",
         stage: str,
+        invocation_key: str = "",
     ) -> PendingHitl:
-        """登记一个请求并发 `HitlOpened`。同 `(session_id, tool_call_id, stage)` 复用既有
-        请求且**不重发事实**。"""
-        existing = self.registry.find_for_tool_call(session_id, tool_call_id, stage)
+        """登记一个请求并发 `HitlOpened`。同 `(session_id, tool_call_id, stage,
+        invocation_key)` 复用既有请求且**不重发事实**。
+
+        `invocation_key` 见 `PendingHitl.invocation_key`：同一 tool_call id 下的**另一次**
+        调用不得复用上一次的记录/决定（复审 I3）。
+        """
+        existing = self.registry.find_for_tool_call(
+            session_id, tool_call_id, stage, invocation_key=invocation_key or None)
         if existing is not None:
             return existing
         req = self.registry.open(
             ask, hitl_id=self._new_id(), session_id=session_id, task_id=task_id,
             agent_id=agent_id, tool_call_id=tool_call_id, stage=stage, created_at=self._now(),
+            invocation_key=invocation_key,
         )
         logger.info("HITL opened [%s]: %s (%s)", req.form, req.id, req.prompt[:80])
         await self._emit(EventType.HITL_OPENED, req, {
@@ -93,6 +105,7 @@ class HitlService:
             "proposal": req.proposal,
             "tool_call_id": req.tool_call_id,
             "stage": req.stage,
+            "invocation_key": req.invocation_key,
             "agent_id": req.agent_id,
             "resume_state": req.resume_state,
             "reply_as_result": req.reply_as_result,

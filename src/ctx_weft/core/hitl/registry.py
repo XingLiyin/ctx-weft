@@ -68,6 +68,14 @@ class PendingHitl:
     #: `HITL_STAGE_TOOL`。**只按 tool_call_id 查会让授权步吃掉工具阶段的答复**，见
     #: `find_for_tool_call` docstring。core 内部键，不出 `to_view()`。
     stage: str = ""
+    #: 决定缓存键的**第四维**：这条决定授权/回答的是**哪一次调用**（工具名 + 原始参数的
+    #: 摘要，见 `capability_gateway.invocation_key`）。模型复用 tool_call id 是常态
+    #: （`call_1` 这类短值），只按前三维查会让第 3 轮的批准替第 9 轮的**另一次**调用开门，
+    #: 并把第 3 轮的 `modified_arguments` 一并带进去（复审 I3）。
+    #:
+    #: `""` = 未键控，**通配**：旧模型事件折出来的记录、以及 host 直接喂的快照没有这一维，
+    #: 让它们照旧命中（迁移期逐条同构）。活路径开出来的记录恒有非空 key。
+    invocation_key: str = ""
     resume_state: dict[str, Any] | None = None   # 不透明，core 永不解读
     reply_as_result: bool = False
     #: 终局决定。**唯一的结局存储**——`resolved` 由它推导，不存第二份。
@@ -124,13 +132,15 @@ class HitlRegistry:
         tool_call_id: str = "",
         stage: str,
         created_at: datetime,
+        invocation_key: str = "",
     ) -> PendingHitl:
         """登记一个请求。同 `(session_id, tool_call_id, stage)` 已有记录 → **复用**，不新建
         （幂等，spec §10）。
 
         空 `tool_call_id` 不作幂等键——`UserTurn` 的冷 park 本就没有 tool_call。
         """
-        existing = self.find_for_tool_call(session_id, tool_call_id, stage)
+        existing = self.find_for_tool_call(
+            session_id, tool_call_id, stage, invocation_key=invocation_key or None)
         if existing is not None:
             return existing
         req = PendingHitl(
@@ -138,7 +148,8 @@ class HitlRegistry:
             agent_id=agent_id, delivery=ask.delivery, created_at=created_at,
             subject_id=ask.subject_id, prompt=ask.prompt, detail=ask.detail,
             fields=list(ask.fields), proposal=ask.proposal, tool_call_id=tool_call_id,
-            stage=stage, resume_state=ask.resume_state, reply_as_result=ask.reply_as_result,
+            stage=stage, invocation_key=invocation_key,
+            resume_state=ask.resume_state, reply_as_result=ask.reply_as_result,
         )
         self._requests[hitl_id] = req
         return req
@@ -205,7 +216,9 @@ class HitlRegistry:
         #    park**：它进不了 `decisions_for`（那是按 tool_call 建的决定缓存），但恢复
         #    期必须看得见它，否则人答过的那句话在崩溃窗口里静默消失（复审 Finding 2）。
         for hitl_id, req in snapshot.resolved.items():
-            live = self.find_for_tool_call(req.session_id, req.tool_call_id, req.stage)
+            live = self.find_for_tool_call(
+                req.session_id, req.tool_call_id, req.stage,
+                invocation_key=req.invocation_key or None)
             if live is not None and not live.resolved:
                 continue                       # 活 pending 优先，旧决定不得盖掉活等待
             req.slot = None
@@ -238,24 +251,34 @@ class HitlRegistry:
 
     def find_for_tool_call(
         self, session_id: str, tool_call_id: str, stage: str,
+        invocation_key: str | None = None,
     ) -> PendingHitl | None:
-        """按 (session, tool_call, stage) 取最近一条；空 tool_call_id → None。
+        """按 (session, tool_call, stage[, invocation_key]) 取最近一条；空 tool_call_id → None。
 
         **三维缺一不可**：只按 tool_call_id 查会让 A 会话的批准替 B 会话里同名 id 的调用
         开门（LLM 的 tool_call id 常是 `call_1` 这类短值——跨会话授权绕过），也会让授权步
         吃掉工具阶段的答复、把它的 modified_arguments 当成工具参数送进 provider（跨阶段
         混淆，Task 4.5）。
+
+        **第四维 `invocation_key`**（复审 I3）：`None` = 不按调用区分（登记本体的查询、
+        host 的只读查询）；非 `None` = 只认同一次调用的记录——同 session 同 id 的**另一次**
+        调用不得复用它的决定。记录侧的 `""` 通配（旧事件折出来的没有这一维，见
+        `PendingHitl.invocation_key`）。
         """
         if not tool_call_id:
             return None
         matches = [r for r in self._requests.values()
                    if r.tool_call_id == tool_call_id
                    and r.session_id == session_id
-                   and r.stage == stage]
+                   and r.stage == stage
+                   and (invocation_key is None
+                        or not r.invocation_key
+                        or r.invocation_key == invocation_key)]
         return max(matches, key=lambda r: r.created_at) if matches else None
 
     def decision_for(
         self, session_id: str, tool_call_id: str, stage: str,
+        invocation_key: str | None = None,
     ) -> tuple[HitlDecision, dict[str, Any] | None] | None:
         """决定缓存查询：`(decision, resume_state)` 成对返回。
 
@@ -263,8 +286,11 @@ class HitlRegistry:
         丢掉 `resume_state` 就等于要求 provider 重做让出前的工作（spec §7.2）。
 
         仍 pending（活的等待）→ None：不得把它当成「已答过」。
+
+        `invocation_key` 见 `find_for_tool_call`：授权步的短路**必须**传它，否则模型复用
+        tool_call id 时旧决定会替新调用开门（复审 I3）。
         """
-        req = self.find_for_tool_call(session_id, tool_call_id, stage)
+        req = self.find_for_tool_call(session_id, tool_call_id, stage, invocation_key)
         if req is None or req.decision is None:
             return None
         return req.decision, req.resume_state

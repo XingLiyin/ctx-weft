@@ -119,8 +119,10 @@ async def test_user_turn_delivery_serialises_its_preface():
 async def test_reopen_same_tool_call_reuses_request_and_emits_nothing_new():
     bus = RecordingBus()
     svc = _service(bus)
-    a = await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
-    b = await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
+    a = await svc.open(_ask(), session_id="s1", task_id="t1",
+                       tool_call_id="call_1", stage=STAGE_AUTHZ)
+    b = await svc.open(_ask(), session_id="s1", task_id="t1",
+                       tool_call_id="call_1", stage=STAGE_AUTHZ)
     assert a is b
     assert bus.types() == [EventType.HITL_OPENED]
 

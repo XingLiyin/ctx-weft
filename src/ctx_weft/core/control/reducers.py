@@ -16,6 +16,7 @@ from ctx_weft.core.content import (
 )
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
+from ctx_weft.core.hitl.status import PAUSED_STATUSES, paused_status_for
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
 from ctx_weft.core.state.models import TaskStatus
 from ctx_weft.protocols.events import Event, EventType
@@ -534,16 +535,33 @@ def _apply(view: RunStateView, ev: Event) -> None:
     # **只投影会话状态**：pending HITL 的真相源是 `HitlRegistry`（由 `fold_hitl_snapshot`
     # 装填），不再在 RunStateView 里另存一份——两份口径不同的 HITL 折叠正是旧实现里
     # 「重建了 pending 却没重建已解决」那类漂移的来源。
+    elif t == EventType.HITL_OPENED:
+        # 新模型不再发 `SessionPausedHitl`——「等人」这件事**就是** `HitlOpened`
+        # （spec §12.3）。少了本分支，一个停在普通纯文本暂停上的会话会在投影与 SSE 里
+        # 一直显示 RUNNING，直到进程重启才被 `recover()` 纠正（复审 I4）。
+        #
+        # PAUSED / PAUSED_HITL 的判据是 **delivery，不是 form**，与
+        # `CtxWeftRuntime._derive_paused_status` 共用同一份 `paused_status_for`。
+        status = paused_status_for([_delivery_from_payload(p.get("delivery") or {},
+                                                           p.get("hitl_id", ""))])
+        if status:
+            view.session_status = status
+            sess = view.sessions.get(ev.session_id)
+            if sess is not None:
+                sess.status = status
+
     elif t in (
+        EventType.HITL_RESOLVED,
         EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
         EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
     ):
-        # HITL 解决 → 会话回 RUNNING（仅当仍处暂停态，避免覆盖已到的终态）。与 ProjectionUpdater
-        # _update_session_if_status 同语义。
-        if view.session_status in ("PAUSED", "PAUSED_HITL"):
+        # HITL 解决 → 会话回 RUNNING（仅当仍处暂停态，避免覆盖已到的终态）。
+        # `HITL_RESOLVED` 是新模型的终态事件；漏了它，被崩溃恢复标成 PAUSED_HITL 的会话
+        # 永远回不到 RUNNING（复审 I4）。
+        if view.session_status in PAUSED_STATUSES:
             view.session_status = "RUNNING"
         sess = view.sessions.get(ev.session_id)
-        if sess is not None and sess.status in ("PAUSED", "PAUSED_HITL"):
+        if sess is not None and sess.status in PAUSED_STATUSES:
             sess.status = "RUNNING"
 
 
@@ -687,6 +705,9 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 prompt=p.get("prompt", ""), detail=p.get("detail", ""),
                 fields=list(p.get("fields") or []), proposal=p.get("proposal"),
                 tool_call_id=p.get("tool_call_id", ""), stage=p.get("stage", ""),
+                # 决定缓存的第四维（复审 I3）。旧事件没有这一维 → "" → 通配，
+                # 迁移期行为逐条同构。
+                invocation_key=p.get("invocation_key", ""),
                 resume_state=p.get("resume_state"),
                 reply_as_result=bool(p.get("reply_as_result", False)),
             )

@@ -126,3 +126,65 @@ def test_legacy_events_infer_their_stage_from_form():
     question = fold_hitl_snapshot([_legacy_required(form="question")])
     assert next(iter(approval.pending.values())).stage == STAGE_AUTHZ
     assert next(iter(question.pending.values())).stage == STAGE_TOOL
+
+
+# ── 第四维：invocation_key（复审 I3）──────────────────────────────────────────
+
+
+def _open_keyed(reg, hitl_id, tool_call_id, key):
+    return reg.open(
+        HitlAsk(form="approval", delivery=ToolResultDelivery(tool_call_id=tool_call_id)),
+        hitl_id=hitl_id, session_id="s1", task_id="t1",
+        tool_call_id=tool_call_id, stage=STAGE_AUTHZ, created_at=T0,
+        invocation_key=key)
+
+
+def test_same_invocation_key_still_hits_the_cache():
+    """合法重放：同一次调用重入（reconcile）用的是同一份参数 → 同 key → 照旧短路。"""
+    reg = HitlRegistry()
+    _open_keyed(reg, "hit_1", "call_1", "bash:AAA")
+    reg.resolve("hit_1", HitlDecision(outcome="accepted"), T0)
+    assert reg.decision_for("s1", "call_1", STAGE_AUTHZ, "bash:AAA") is not None
+
+
+def test_a_different_invocation_key_under_the_same_tool_call_id_misses():
+    """模型复用 `call_1`：第 3 轮的批准不得替第 9 轮的**另一次**调用开门。"""
+    reg = HitlRegistry()
+    _open_keyed(reg, "hit_1", "call_1", "bash:AAA")
+    reg.resolve("hit_1", HitlDecision(outcome="accepted",
+                                      modified_arguments={"command": "ls -l"}), T0)
+    assert reg.decision_for("s1", "call_1", STAGE_AUTHZ, "bash:BBB") is None
+    # 且 `open()` 的幂等复用也不得把新调用挂到那条已终局的旧记录上（否则 waiter 见
+    # resolved 判为驱逐 → 永久 park）。
+    fresh = _open_keyed(reg, "hit_2", "call_1", "bash:BBB")
+    assert fresh.id == "hit_2" and fresh.resolved is False
+
+
+def test_an_unkeyed_record_is_a_wildcard():
+    """旧模型事件 / host 直接喂的快照没有这一维（key=""）→ 通配，迁移期行为逐条同构。"""
+    reg = HitlRegistry()
+    _open_keyed(reg, "hit_1", "call_1", "")
+    reg.resolve("hit_1", HitlDecision(outcome="accepted"), T0)
+    assert reg.decision_for("s1", "call_1", STAGE_AUTHZ, "bash:ANY") is not None
+
+
+def test_open_emits_and_folds_the_invocation_key():
+    """key 必须跨重启存活——不落事件就等于重启后这一维消失、洞重新打开。"""
+    import asyncio
+
+    from ctx_weft.core.control.reducers import fold_hitl_snapshot
+
+    svc, bus = _service()
+
+    async def _go():
+        return await svc.open(
+            HitlAsk(form="approval",
+                    delivery=ToolResultDelivery(tool_call_id="call_1")),
+            session_id="s1", task_id="t1", tool_call_id="call_1",
+            stage=STAGE_AUTHZ, invocation_key="bash:AAA")
+
+    req = asyncio.run(_go())
+    opened = [e for e in bus.events if e.type is EventType.HITL_OPENED][0]
+    assert opened.payload["invocation_key"] == "bash:AAA"
+    snap = fold_hitl_snapshot([opened])
+    assert snap.pending[req.id].invocation_key == "bash:AAA"

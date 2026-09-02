@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -99,6 +101,26 @@ SILENT_TOOLS = frozenset({
 # 于是落盘截断（`_maybe_spill`）、human note 拼接、事件 payload 截断这些既有加工
 # 全部只作用于**文本部分**——因为 parts 是在它们之后才拼上去的。
 CONTENT_PARTS_KEY = "content_parts"
+
+
+def invocation_key(tool_name: str, arguments: dict[str, Any] | None) -> str:
+    """一次**具体调用**的稳定指纹：工具名 + 原始参数。
+
+    模型复用 tool_call id 是常态（`call_1` 这类短值），所以 `(session, tool_call_id,
+    stage)` 三维并不能唯一标定「哪一次调用」——第 3 轮批准的 `call_1` 会替第 9 轮
+    **另一次** `call_1` 开门，还把第 3 轮的 `modified_arguments` 一并带进去（复审 I3）。
+    本键是决定缓存的第四维，把「同一次调用的合法重入」与「同 id 的另一次调用」分开。
+
+    **必须用 `invoke()` 收到的原始 `arguments`**，不是改写之后的：冷路径由
+    `ReconcileStep` 用对话里记着的那份 tool_call 参数原样重入，两侧只有原始参数才
+    逐字节相同。dict 序不稳定 → `sort_keys`；非 JSON 值 → `default=str`（指纹不需要
+    可逆，只需要确定）。
+    """
+    try:
+        blob = json.dumps(arguments or {}, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:                                   # pragma: no cover — 防御性
+        blob = repr(arguments)
+    return f"{tool_name}:{hashlib.sha256(blob.encode('utf-8', 'replace')).hexdigest()[:32]}"
 
 
 # ── InvocationResult ──────────────────────────────────────────────────────────
@@ -192,31 +214,39 @@ class CapabilityGateway:
         # 决定缓存短路（冷路径重入 · 授权步）：registry 已有该 tool_call 的人工决定 →
         # 连 authorize() 都不调。工具步的同一短路在 `_resolve_human` 里（那时才知道要问人）。
         # 内存 pending（活的等待）不算「已答过」，registry.decision_for 已保证这点。
+        # 第四维 `invocation_key`：**同一次调用**才算合法重入（复审 I3）。用原始参数，
+        # 不是改写后的——冷路径 reconcile 拿的就是对话里记着的原始参数。
+        inv_key = invocation_key(tool_name, arguments)
         cached = (
             ctx.hitl.registry.decision_for(
-                ctx.provider_ctx.session_id, tool_call_id, HITL_STAGE_AUTHZ)
+                ctx.provider_ctx.session_id, tool_call_id, HITL_STAGE_AUTHZ,
+                invocation_key=inv_key)
             if ctx.hitl else None
         )
-        try:
-            if cached is not None:
-                cached_decision, _resume_state = cached
+        if cached is not None:
+            cached_decision, _resume_state = cached
+            decision = await self._authz_after_human(
+                authorizer, cap, ctx, arguments, tool_call_id, cached_decision)
+        else:
+            # 交出 ProviderContext（不是 loop 的 LoopContext）——授权契约只认 protocols 类型。
+            decision = await authorizer.authorize(
+                cap, ctx.provider_ctx, arguments, tool_call_id=tool_call_id,
+            )
+            if decision.needs_human is not None:
+                # 等待权归 gateway：authorizer 只是**声明**需要人，不自己等。
+                _hitl_id, human = await self._resolve_human(
+                    decision.needs_human, state, ctx, tool_call_id,
+                    stage=HITL_STAGE_AUTHZ, invocation_key=inv_key)
                 decision = await self._authz_after_human(
-                    authorizer, cap, ctx, arguments, tool_call_id, cached_decision)
-            else:
-                # 交出 ProviderContext（不是 loop 的 LoopContext）——授权契约只认 protocols 类型。
-                decision = await authorizer.authorize(
-                    cap, ctx.provider_ctx, arguments, tool_call_id=tool_call_id,
-                )
-                if decision.needs_human is not None:
-                    # 等待权归 gateway：authorizer 只是**声明**需要人，不自己等。
-                    _hitl_id, human = await self._resolve_human(
-                        decision.needs_human, state, ctx, tool_call_id, stage=HITL_STAGE_AUTHZ)
-                    decision = await self._authz_after_human(
-                        authorizer, cap, ctx, arguments, tool_call_id, human)
-        except TypeError as exc:
+                    authorizer, cap, ctx, arguments, tool_call_id, human)
+        if decision is None:
+            # 契约违例：authorizer 声明了 NeedsHuman 却没实现 HumanGatedAuthorizer。
+            # 收敛成一条工具结果错误，安全不变式仍然成立（绝不放行）。
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,
-                f"[Error: {exc}]", is_dispatch, is_silent, tool_call_id,
+                f"[Error: {type(authorizer).__name__} returned NeedsHuman but does not "
+                f"implement HumanGatedAuthorizer]",
+                is_dispatch, is_silent, tool_call_id,
             )
         if not decision.allowed:
             logger.warning("Capability '%s' blocked by authorizer for agent %s", cap.id, state.agent.id)
@@ -299,7 +329,8 @@ class CapabilityGateway:
         # `_stream_events`）。等待权归 gateway——provider 只**声明**需要人。
         if needs_human_ask is not None:
             needs_human_ask_id, human = await self._resolve_human(
-                needs_human_ask, state, ctx, tool_call_id, stage=HITL_STAGE_TOOL)
+                needs_human_ask, state, ctx, tool_call_id, stage=HITL_STAGE_TOOL,
+                invocation_key=inv_key)
             if needs_human_ask.reply_as_result:
                 # 答复即结果：重入根本不发生（`ask_user` 走这条）。
                 result_parts, metadata, is_error = _human_reply_as_result(
@@ -479,32 +510,46 @@ class CapabilityGateway:
         """消费一个 `CapabilityEvent` 流，聚合 result/metadata/error。
 
         **`needs_human` 是流的终点**（spec §2）：见到即 `break`，不再从 `events` 拉下一个
-        事件——其后 provider 让出的任何东西都不可见。生成器随之被 GC 关闭，provider 的局部
-        状态随之消失，这正是 `HitlAsk.resume_state` 存在的理由。
+        事件——其后 provider 让出的任何东西都不可见。provider 的局部状态随之消失，这正是
+        `HitlAsk.resume_state` 存在的理由。
+
+        **提前退出时显式 `aclose()`，不把关闭寄给 GC**：第三方 provider 的 `invoke` 是个
+        异步生成器，它的 `finally` 里可能要杀进程、关连接、释放锁。靠 GC 意味着那些清理在
+        一个不确定的时刻发生（`aclose()` 是协程，GC 只能凑合地安排它），而契约文本对实现者
+        承诺的是「让出即关闭」。正常跑完的流 `aclose()` 是 no-op。
         """
         from ctx_weft.core.loop.driver import make_event
         result_parts: list[str] = []
         metadata: dict[str, Any] = {}
         is_error = False
         needs_human_ask = None
-        async for ev in events:
-            if ev.kind == "needs_human":
-                needs_human_ask = ev.payload.get("ask")
-                break
-            if ev.kind in ("stdout", "progress"):
-                await self._event_bus.emit(make_event(state, EventType.CAPABILITY_PROGRESS, payload={
-                    "invocation_id": invocation_id,
-                    "kind": ev.kind,
-                    "data": ev.payload.get("data", "")[:500],
-                }))
-            elif ev.kind == "result":
-                result_parts.append(ev.payload.get("content", ""))
-                metadata.update(ev.payload.get("metadata", {}))
-            elif ev.kind == "error":
-                is_error = True
-                result_parts.append(
-                    f"[Error {ev.payload.get('code', 'ERR')}: {ev.payload.get('message', '')}]"
-                )
+        try:
+            async for ev in events:
+                if ev.kind == "needs_human":
+                    needs_human_ask = ev.payload.get("ask")
+                    break
+                if ev.kind in ("stdout", "progress"):
+                    await self._event_bus.emit(make_event(
+                        state, EventType.CAPABILITY_PROGRESS, payload={
+                            "invocation_id": invocation_id,
+                            "kind": ev.kind,
+                            "data": ev.payload.get("data", "")[:500],
+                        }))
+                elif ev.kind == "result":
+                    result_parts.append(ev.payload.get("content", ""))
+                    metadata.update(ev.payload.get("metadata", {}))
+                elif ev.kind == "error":
+                    is_error = True
+                    result_parts.append(
+                        f"[Error {ev.payload.get('code', 'ERR')}: "
+                        f"{ev.payload.get('message', '')}]"
+                    )
+        finally:
+            aclose = getattr(events, "aclose", None)
+            if aclose is not None:
+                # provider 的 finally 自身出错不该盖掉已聚合好的结果 / 正在传播的取消。
+                with contextlib.suppress(Exception):
+                    await aclose()
         return result_parts, metadata, is_error, needs_human_ask
 
     async def _record_result(
@@ -556,7 +601,7 @@ class CapabilityGateway:
 
     async def _resolve_human(
         self, ask: "HitlAsk", state: "LoopState", ctx: "LoopContext", tool_call_id: str,
-        *, stage: str,
+        *, stage: str, invocation_key: str = "",
     ) -> "tuple[str, HitlDecision]":
         """登记 → 热等 → 拿到决定；被驱逐则抛 `HitlPark`。
 
@@ -566,6 +611,9 @@ class CapabilityGateway:
         `stage`（`HITL_STAGE_AUTHZ` / `HITL_STAGE_TOOL`）是决定缓存键的第三维——同一
         `tool_call_id` 下授权步与工具步各自独立登记等待，互不偷答案（安全修复，见
         `HitlRegistry`）。调用方必须显式传入，无默认值。
+
+        `invocation_key` 是缓存键的第四维（复审 I3）：同一 tool_call id 下的**另一次**
+        调用不得复用上一次的记录与决定。见模块级 `invocation_key()`。
 
         返回 `(hitl_id, decision)`——id 供工具侧路径（`resume`）用；授权侧调用点只解构决定。
         """
@@ -580,7 +628,8 @@ class CapabilityGateway:
         # `resume` 要收 ask_id）。仍 pending（活的等待）时 `decision is None`，因此
         # 「活请求不算已答过」这条与 `decision_for` 同一判据。
         cached = ctx.hitl.registry.find_for_tool_call(
-            ctx.provider_ctx.session_id, tool_call_id, stage)
+            ctx.provider_ctx.session_id, tool_call_id, stage,
+            invocation_key=invocation_key or None)
         if cached is not None and cached.decision is not None:
             return cached.id, cached.decision
         req = await ctx.hitl.open(
@@ -590,6 +639,7 @@ class CapabilityGateway:
             agent_id=state.agent.id,
             tool_call_id=tool_call_id,
             stage=stage,
+            invocation_key=invocation_key,
         )
         human = await ctx.waiter.wait(req.id)
         if human is None:
@@ -602,14 +652,20 @@ class CapabilityGateway:
     async def _authz_after_human(
         authorizer, cap, ctx: "LoopContext", arguments, tool_call_id: str,
         human: "HitlDecision",
-    ) -> AuthorizationDecision:
-        """把决定喂回发起方去解释。未实现可选接口 = 契约违例，当场报错。"""
+    ) -> "AuthorizationDecision | None":
+        """把决定喂回发起方去解释。未实现可选接口 = 契约违例 → `None`（调用方出错误 result）。
+
+        **契约违例在这里判定并就地收敛，不再靠调用方 `except TypeError` 兜**（复审）：
+        那个 except 罩着整段授权，会把 host authorizer 内部一个货真价实的 `TypeError`
+        （它自己的 bug）也翻译成一条温和的 tool-result 错误——真故障被静默吞掉，看起来
+        只是「这次调用没被授权」。`on_decision` 自己抛的异常现在照旧向上传播。
+        """
         from ctx_weft.protocols.capability import HumanGatedAuthorizer
         if not isinstance(authorizer, HumanGatedAuthorizer):
-            raise TypeError(
-                f"{type(authorizer).__name__} returned NeedsHuman but does not implement "
-                f"HumanGatedAuthorizer"
-            )
+            logger.error(
+                "%s returned NeedsHuman but does not implement HumanGatedAuthorizer",
+                type(authorizer).__name__)
+            return None
         return await authorizer.on_decision(
             cap, ctx.provider_ctx, arguments, tool_call_id, human)
 
