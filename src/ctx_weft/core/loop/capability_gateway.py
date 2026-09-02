@@ -33,7 +33,9 @@ from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
-from ctx_weft.protocols.capability import Authorizer, CapabilityProvider, ToolCapabilityProvider, qualify
+from ctx_weft.protocols.capability import (
+    AuthorizationDecision, Authorizer, CapabilityProvider, ToolCapabilityProvider, qualify,
+)
 from ctx_weft.protocols.context import ContentPart, TextPart
 from ctx_weft.protocols.llm import RAW_ARGS_KEY
 from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as CONTROL, _PLAN_DISPATCH_ACK
@@ -43,6 +45,7 @@ from ctx_weft.protocols.memory_compat import MemoryKind
 
 if TYPE_CHECKING:
     from ctx_weft.core.loop.driver import LoopState, LoopContext
+    from ctx_weft.protocols.hitl import HitlAsk, HitlDecision
 
 logger = logging.getLogger(__name__)
 
@@ -184,14 +187,30 @@ class CapabilityGateway:
 
         # 2. Authorization：按 cap.id 前缀取 per-provider authorizer，无则用 default
         authorizer = self._get_authorizer(cap.id)
-        # 交出 ProviderContext（不是 loop 的 LoopContext）——授权契约只认 protocols 类型。
-        decision = await authorizer.authorize(
-            cap, ctx.provider_ctx, arguments, tool_call_id=tool_call_id,
-        )
-        if decision.defer:
-            # 守住安全不变式：绝不调 provider.invoke；上抛 park 信号 → loop 落 SUSPENDED（spec/07 §7）。
-            from ctx_weft.core.loop.park import HitlPark
-            raise HitlPark(tool_call_id=tool_call_id)
+        # 决定缓存短路（冷路径重入）：registry 已有该 tool_call 的人工决定 → 不重问。
+        # 内存 pending（活的等待）不算「已答过」，registry.decision_for 已保证这点。
+        cached = ctx.hitl.registry.decision_for(tool_call_id) if ctx.hitl else None
+        try:
+            if cached is not None:
+                cached_decision, _resume_state = cached
+                decision = await self._authz_after_human(
+                    authorizer, cap, ctx, arguments, tool_call_id, cached_decision)
+            else:
+                # 交出 ProviderContext（不是 loop 的 LoopContext）——授权契约只认 protocols 类型。
+                decision = await authorizer.authorize(
+                    cap, ctx.provider_ctx, arguments, tool_call_id=tool_call_id,
+                )
+                if decision.needs_human is not None:
+                    # 等待权归 gateway：authorizer 只是**声明**需要人，不自己等。
+                    _hitl_id, human = await self._resolve_human(
+                        decision.needs_human, state, ctx, tool_call_id)
+                    decision = await self._authz_after_human(
+                        authorizer, cap, ctx, arguments, tool_call_id, human)
+        except TypeError as exc:
+            return await self._error_and_record(
+                state, ctx, tool_name, invocation_id,
+                f"[Error: {exc}]", is_dispatch, is_silent, tool_call_id,
+            )
         if not decision.allowed:
             logger.warning("Capability '%s' blocked by authorizer for agent %s", cap.id, state.agent.id)
             # 走 content_with_prefix/suffix 而非 f-string：备注可能是 list[ContentPart]
@@ -473,6 +492,47 @@ class CapabilityGateway:
             return self._provider_authorizers[capability_id]
         prefix = capability_id.rsplit(":", 1)[0]
         return self._provider_authorizers.get(prefix, self._default_authorizer)
+
+    async def _resolve_human(
+        self, ask: "HitlAsk", state: "LoopState", ctx: "LoopContext", tool_call_id: str,
+    ) -> "tuple[str, HitlDecision]":
+        """登记 → 热等 → 拿到决定；被驱逐则抛 `HitlPark`。
+
+        **全仓唯一的登记+等待+抛 park 的地方。** 热路径与冷路径在此收敛：冷路径由
+        reconcile 经 `invoke` 再入，命中上面的决定缓存短路，根本走不到这里。
+
+        返回 `(hitl_id, decision)`——id 供未来工具侧路径使用；本调用点只解构决定。
+        """
+        if ctx.hitl is None or ctx.waiter is None:
+            raise RuntimeError("HITL requested but no HitlService/HitlWaiter wired")
+        req = await ctx.hitl.open(
+            ask,
+            session_id=ctx.provider_ctx.session_id,
+            task_id=state.task.id,
+            agent_id=state.agent.id,
+            tool_call_id=tool_call_id,
+        )
+        human = await ctx.waiter.wait(req.id)
+        if human is None:
+            # 热窗口被驱逐 → 不放行也不拒绝。守住安全不变式：绝不调 provider.invoke。
+            from ctx_weft.core.loop.park import HitlPark
+            raise HitlPark(hitl_id=req.id, tool_call_id=tool_call_id)
+        return req.id, human
+
+    @staticmethod
+    async def _authz_after_human(
+        authorizer, cap, ctx: "LoopContext", arguments, tool_call_id: str,
+        human: "HitlDecision",
+    ) -> AuthorizationDecision:
+        """把决定喂回发起方去解释。未实现可选接口 = 契约违例，当场报错。"""
+        from ctx_weft.protocols.capability import HumanGatedAuthorizer
+        if not isinstance(authorizer, HumanGatedAuthorizer):
+            raise TypeError(
+                f"{type(authorizer).__name__} returned NeedsHuman but does not implement "
+                f"HumanGatedAuthorizer"
+            )
+        return await authorizer.on_decision(
+            cap, ctx.provider_ctx, arguments, tool_call_id, human)
 
     async def _maybe_spill(
         self,

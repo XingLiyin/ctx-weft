@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.orchestrator import CapabilityCache, TaskManager
     from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from ctx_weft.core.hitl.service import HitlService
+    from ctx_weft.core.loop.hitl_waiter import HitlWaiter
     from ctx_weft.protocols.capability import CapabilityProvider
 
 logger = logging.getLogger(__name__)
@@ -131,6 +133,10 @@ class LoopContext:
     task_manager: TaskManager|None = None
     # HitlManager 引用；ActStep interactive 任务纯文本 park 等用户用；None 时降级为旧的自动完成
     hitl_manager: "HitlManager|None" = None
+    # HITL：管账的 service 与管栈的 waiter 分开持有——旧实现把两者塞进一个对象，
+    # 于是编排层被迫认识协程栈（spec §3）。
+    hitl: "HitlService | None" = None
+    waiter: "HitlWaiter | None" = None
     # blob store：出网前把 ref 还原成 base64 用（Phase 3b）。默认 None → 不 rehydrate，
     # 既有构造点与既有测试行为逐字节不变。
     blob_store: "Any" = None
