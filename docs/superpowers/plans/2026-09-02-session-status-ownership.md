@@ -20,8 +20,11 @@
 - **只删发射，不删枚举值。** `SessionStatusChanged` 与带 legacy `reason` 的 `TaskSuspended`
   都要继续被 reducer 认识——存量日志靠它们重建（L 档，`docs/events-v2.md` §5）。
 - **存量事件不重写、不迁移。**
-- 既有测试的验收口径是「不新增失败」。本仓已有 3 条既有失败（见 HITL 重设计段 1/段 2 计划），
-  跑全量时以这 3 条为基线。
+- 既有测试的验收口径是「不新增失败」。本仓已有 3 条既有失败，跑全量时以此为基线：
+  `test_compact_flow_e2e.py::test_multiround_retry_accumulates_then_l3_collapses_e2e`、
+  `test_golden_conformance.py::test_golden_dir_present`、
+  `test_observe_outcomes.py::test_default_role_prompt_uses_two_fields`。
+  Task 9 会修好第二条（裁定 R4），此后基线为 2 条。
 - **顺序不可调换。** Task 7 之前会话状态仍由旧路径写，Task 7 之后由 SM 写，中间不留真空。
 - ruff line-length 100；新文件一律 `from __future__ import annotations`。
 
@@ -203,6 +206,7 @@ __all__ = [
     "SessionInput",
     "TERMINAL_SESSION_STATUSES",
     "Transition",
+    "WAITING",
     "next_transition",
 ]
 
@@ -497,14 +501,7 @@ def test_session_interrupted_sets_interrupted():
 
 def test_awaiting_human_with_panel_is_paused_hitl():
     view = reduce_events([_created(),
-                          _ev(EventType.SESSION_WAITING, {"count": 1}, 1)],
-                         "run_1")
-    assert view.session_status == "WAITING"
-
-
-def test_awaiting_human_without_panel_is_paused():
-    view = reduce_events([_created(),
-                          _ev(EventType.SESSION_WAITING, {"count": 2}, 1)],
+                          _ev(EventType.SESSION_WAITING, {}, 1)],
                          "run_1")
     assert view.session_status == "WAITING"
 
@@ -512,7 +509,7 @@ def test_awaiting_human_without_panel_is_paused():
 def test_session_running_returns_to_running():
     view = reduce_events([
         _created(),
-        _ev(EventType.SESSION_WAITING, {"count": 1}, 1),
+        _ev(EventType.SESSION_WAITING, {}, 1),
         _ev(EventType.SESSION_RUNNING, {"reason": "human_replied"}, 2),
     ], "run_1")
     assert view.session_status == "RUNNING"
@@ -566,7 +563,7 @@ Expected: FAIL —— `AttributeError: TASK_QUEUE_BLOCKED`
     # 只有 SessionManager 发这三条 + SESSION_FINISHED。通用 setter
     # SESSION_STATUS_CHANGED 就此退役（L 档，只读存量）。
     SESSION_INTERRUPTED = "SessionInterrupted"        # 断了，等 /resume，非终态
-    SESSION_WAITING = "SessionWaiting"                # 停着但正常：都在等人 / 等外部输入
+    SESSION_WAITING = "SessionWaiting"                # 停着但正常：都在等人 / 等外部输入（payload 空）
     SESSION_RUNNING = "SessionRunning"                # 重新开跑：human_replied / resumed
 ```
 
@@ -734,7 +731,7 @@ async def test_blocked_on_human_emits_awaiting_and_moves_state():
     await sm._apply("sess_1", SessionInput.QUEUE_BLOCKED)
     assert sm.status_of("sess_1") == "WAITING"
     assert bus.types() == [EventType.SESSION_WAITING]
-    assert bus.events[0].payload == {}
+    assert bus.events[0].payload == {}          # 会话事件不带展示数据（裁定 R3）
     assert bus.events[0].session_id == "sess_1"
     assert bus.events[0].run_id is None          # 会话级事件不属于任何 run
     assert bus.events[0].tenant_id == "t1"
@@ -1004,7 +1001,7 @@ async def test_session_status_events_are_ignored_by_the_handler():
     handler 必须对它们 no-op，否则一次转移会引发无穷递归。"""
     bus = RecordingBus()
     sm = _sm(bus)
-    await sm.handle_event(_ev(EventType.SESSION_WAITING, {"count": 1}))
+    await sm.handle_event(_ev(EventType.SESSION_WAITING, {}))
     assert bus.types() == []
 
 
@@ -1314,7 +1311,7 @@ git commit -m "refactor(session)!: 三层各发各的事实，会话状态改写
 ## Task 7: reducer 停止让领域事实写会话状态
 
 **Files:**
-- Modify: `src/ctx_weft/core/control/reducers.py`
+- Modify: `src/ctx_weft/core/control/reducers.py`（删四处越界写入 + 本地化 legacy 常量）
 - Test: `tests/unit/test_domain_facts_do_not_write_session_status.py`
 
 - [ ] **Step 1: 写失败的测试**
@@ -1348,7 +1345,7 @@ def test_hitl_opened_no_longer_pauses_the_session():
 def test_hitl_resolved_no_longer_returns_the_session_to_running():
     view = reduce_events([
         _created(),
-        _ev(EventType.SESSION_WAITING, {"count": 1}, 1),
+        _ev(EventType.SESSION_WAITING, {}, 1),
         _ev(EventType.HITL_RESOLVED, {"hitl_id": "hit_1", "outcome": "accepted"}, 2),
     ], "run_1")
     assert view.session_status == "WAITING"
@@ -1364,7 +1361,7 @@ def test_run_finished_no_longer_writes_the_session_status():
 def test_run_started_no_longer_writes_the_session_status():
     view = reduce_events([
         _created(),
-        _ev(EventType.SESSION_WAITING, {"count": 1}, 1),
+        _ev(EventType.SESSION_WAITING, {}, 1),
         _ev(EventType.RUN_STARTED, {"run_id": "run_1", "initial_step": "prepare"}, 2),
     ], "run_1")
     assert view.session_status == "WAITING"
@@ -1410,9 +1407,24 @@ Expected: 前 4 条 FAIL，后 2 条 PASS
         EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
         EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
     ):
-        if view.session_status in PAUSED_STATUSES:   # 存量的 PAUSED / PAUSED_HITL
+        if view.session_status in _LEGACY_PAUSED_STATUSES:
             _set_session_status(view, ev.session_id, "RUNNING")
 ```
+
+**同时把那对旧值搬进本文件**（裁定 R2）。它今天来自
+`ctx_weft.core.hitl.status`，而 Task 9 要删掉整个模块；但这一对是**存量日志的历史常量**，
+与新值域 `WAITING` 无关，归宿就是这里——它旁边全是 L 档折叠逻辑：
+
+```python
+#: 存量日志里的会话暂停态。新模型只有一个 `WAITING`；这一对是 L 档，
+#: 只用于读升级点之前的事件（`SessionPausedHitl` 与 5 个旧 HITL 终态）。
+_LEGACY_PAUSED_STATUSES: tuple[str, str] = ("PAUSED", "PAUSED_HITL")
+```
+
+**并删掉 `reducers.py` 顶部整行**
+`from ctx_weft.core.hitl.status import PAUSED_STATUSES, paused_status_for`——
+`paused_status_for` 在本任务删掉 `HITL_OPENED` 分支后已无人使用，
+`PAUSED_STATUSES` 由上面的本地常量取代。`core.control` 从此不再 import `core.hitl`。
 
 - [ ] **Step 4: 跑测试确认通过 + 全量回归**
 
@@ -1464,7 +1476,7 @@ def test_session_interrupted_removes_the_session_from_active():
 def test_waiting_keeps_the_session_active():
     """停着但正常的会话必须留在活跃集——重启后要重新装填它的未决 HITL。"""
     active = {"sess_1"}
-    apply_lifecycle(active, _ev("SessionWaiting", {"count": 1}))
+    apply_lifecycle(active, _ev("SessionWaiting", {}))
     assert active == {"sess_1"}
 
 
@@ -1603,7 +1615,19 @@ SessionStatus = Literal[
 两个调用方各自处理：`runtime._derive_paused_status` 直接删；
 `runtime.session_status_after_recover` 改成 `self._session_manager.status_of(session_id)`。
 
-- [ ] **Step 4: 重生成三份 golden**
+- [ ] **Step 4a: 先修 `_GOLDEN_DIR` 的路径解析**（裁定 R4）
+
+`tests/unit/test_golden_conformance.py` 今天把 golden 目录解析到**比仓根高一层**的
+`…/Loome-02/docs/spec/golden`，而 fixture 实际在 `…/Loome-02/ctx-weft/docs/spec/golden`。
+于是 `_CASES` 为空：两个参数化测试被 skip、`test_golden_dir_present` 失败——
+它是全量基线 3 条失败之一。
+
+**加载不到 fixture 就没有「失败输出」可依**，Step 4b 无从谈起。先修这一行
+（`parents[N]` 少了一级），确认 `test_golden_dir_present` 转绿、两个参数化测试真的跑起来。
+
+修完之后**全量基线从 3 条失败降到 2 条**，后续「不新增失败」按 2 条算。
+
+- [ ] **Step 4b: 重生成三份 golden**
 
 ```bash
 uv run pytest tests/unit/test_golden_conformance.py -v
@@ -1743,6 +1767,8 @@ git commit -m "refactor(session): 清除 SessionStatus 死值、golden 与 spec 
 - [ ] `cancel_all` 发 `SessionFinished{final_status:"CANCELED"}`
 - [ ] 三份 golden 的最终 `session_status` 与重构前**逐字相同**
 - [ ] `SessionStatus` 值域 = 状态机可达状态
+- [ ] `reducers.py` 不再 import `ctx_weft.core.hitl` 任何东西（裁定 R2）
+- [ ] `test_golden_dir_present` 转绿，两个参数化 golden 测试真的跑起来（裁定 R4）
 - [ ] 全量测试无新增失败（基线 3 条既有失败）
 
 ---

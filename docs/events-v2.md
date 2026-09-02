@@ -114,7 +114,7 @@ SM     ──►  会话状态                      SessionWaiting / SessionInte
 |---|---|---|---|
 | `SessionCreated` | | `template_id` `user_prompt`（jsonable，保 ref 不落字节） `root_agent_id` `llm_model` `llm_account` `tenant_id` `token_budget` `context_limit` `reserved_output_tokens` | 会话诞生。建 `SessionView`，`status=RUNNING` |
 | `SessionResumed` | | `user_prompt` `root_agent_id` `llm_model` `llm_account` | 在已有会话上**开新一轮**：带新的 user_prompt 建新 root task。前置拒绝有未终结任务的会话。`status` 回 `RUNNING`，并把 `SessionView.user_prompt` 覆写成本轮的 |
-| `SessionWaiting` **新增** | | `count` | 会话停着，但是**正常地停**——所有任务都在等人 / 等外部输入。→ `WAITING` |
+| `SessionWaiting` **新增** | | （空） | 会话停着，但是**正常地停**——所有任务都在等人 / 等外部输入。→ `WAITING` |
 | `SessionInterrupted` **新增** | | `reason` | 会话停着，**异常**——系统故障，等 `/resume`。`reason` ∈ `llm_outage` / run 崩溃的 `error_code` / `process_restart`。→ `INTERRUPTED` |
 | `SessionRunning` **新增** | | `reason` | 会话（重新）开跑。`reason` ∈ `human_replied`（从 `WAITING` 回来）/ `resumed`（从 `INTERRUPTED` 回来）。→ `RUNNING` |
 | `SessionFinished` | | `final_status` | **唯一的会话终态事件**。全部任务终态，或 `cancel_all` 硬取消。→ `final_status` |
@@ -163,7 +163,7 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 | 当前状态 | 收到 | 新状态 | SM 发出 |
 |---|---|---|---|
 | （无） | `create_session` 命令 | `RUNNING` | `SessionCreated` |
-| 任一非终态 | `TaskQueueBlocked{count}` | `WAITING` | `SessionWaiting` |
+| 任一非终态 | `TaskQueueBlocked{count}` | `WAITING` | `SessionWaiting`（payload 空） |
 | 任一非终态 | `TaskQueueInterrupted{reason}` | `INTERRUPTED` | `SessionInterrupted(reason)` |
 | `RUNNING` | `TaskQueueDrained{final_status}` | `final_status` | `SessionFinished(final_status)` |
 | `WAITING` | `TaskStarted` | `RUNNING` | `SessionRunning("human_replied")` |
@@ -175,6 +175,11 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 
 > **「重新开跑」用已有的 `TaskStarted`，不新造类型。** 有 task 开始跑，会话就在跑——
 > 这是结构性的，不需要 TM 再发一条「我又有活了」。
+
+> **会话状态事件不带展示数据。** `TaskQueueBlocked` 的 `count` 停在 TM 那一层，
+> 不穿过状态机——让展示需求进入状态判据，正是本次删掉 `needs_panel` 的那条理由。
+> host 要在徽标上显示「几个任务在等你」，读 `TaskQueueBlocked{count}`：它比会话事件
+> 更早到达，且是那个数字的原产地。
 
 > **`SessionRunning.reason` 由「从哪个状态回来」定**（`WAITING` → `human_replied`，
 > `INTERRUPTED` → `resumed`）。这是溯源，不是判据——SM 转移到 `RUNNING` 这件事本身
