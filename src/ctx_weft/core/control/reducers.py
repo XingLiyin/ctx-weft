@@ -589,11 +589,13 @@ def _legacy_delivery(form: str, tool_call_id: str, context: str, task_id: str,
                      hitl_id: str = "") -> Delivery:
     """旧请求 → Delivery 的反推。
 
-    **复刻旧的「判据」，而不是旧的「意图」**：今天 runtime 的实际分流判据是
-    `req.form == "wait"`（runtime.py:1725），不是 sentinel capability_id。用
-    sentinel 反推会让「form 是 wait 但 capability_id 不是 sentinel」的在途请求
-    从「注入」变成「补 tool_call」——迁移本身改变了行为。迁移的正确性判据是
-    与升级前逐条同构（spec §12.3.2）。
+    **复刻旧的「判据」，而不是旧的「意图」**：已删除的 `_resume_after_cold_hitl` 分流
+    时看的是 `req.form == "wait"`，不是 sentinel capability_id。用 sentinel 反推会让
+    「form 是 wait 但 capability_id 不是 sentinel」的在途请求从「注入」变成「补
+    tool_call」——迁移本身改变了行为。迁移的正确性判据是与升级前逐条同构（spec §12.3.2）。
+
+    这里的字面量 `"wait"` 是**存量事件的数据值**，不是活路由判据：活路由只认
+    `Delivery`（spec §5），旧模型的这一维已在此处一次性翻译掉。
     """
     if form == "wait":
         return UserTurnDelivery(task_id=task_id,
