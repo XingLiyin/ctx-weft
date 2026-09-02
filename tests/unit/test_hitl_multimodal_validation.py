@@ -1,4 +1,4 @@
-"""HITL 入口的内容校验与外部化（多模态 Phase 3c Task A）。
+"""HITL 应答入口的内容校验与外部化（多模态 Phase 3c Task A；Task 10 迁到新契约）。
 
 背景：`validate_content` / `normalize_content` 此前只接了 `run_single_task` 与
 `start_session` 两个入口，而 HITL 应答接口在 Phase 1/2 就已放宽成多模态。人类经
@@ -6,14 +6,17 @@ HITL 递进来的图**全程不校验、不外部化**——无格式校验（�
 `validate=False` 不抛、静默解出垃圾字节，后果是**静默损坏**）、无视觉门控、图以
 inline base64 永久留在 memory 里。
 
-接线点是 `resolve_answer` / `resolve_reject`（`answer` / `reject` 的共同下层，
-也覆盖冷应答路径），经 `set_content_normalizer` 注入 runtime 的
-`_validate_and_normalize_content`。
+**接线点现在是唯一的生产入口 `CtxWeftRuntime.reply_to_hitl`**：它经
+`HitlService.resolve` → `ReplyIntake` → runtime 的 `_normalize_hitl_content`
+（三入口共用的 `_validate_and_normalize_content` 的薄包装）。旧的
+`set_content_normalizer` 那道后期接线已随 `HitlManager` 删除——本文件保留的价值正是
+**盯住没人把这条管线悄悄拆掉**。
 
 两条硬约束在下面被显式锁死：
-1. **未注入 normalizer 时行为逐字节不变**（大量既有单测直接构造 `HitlManager()`）。
-2. **顺序恒为 validate → normalize**——被拒内容不得在 blob store 留垃圾，因此
-   「没有写过 blob」这件事必须用计数器 stub 真的断言，而不是靠「没报错」推断。
+1. **顺序恒为 validate → normalize**——被拒内容不得在 blob store 留垃圾，因此
+   「没有写过 blob」这件事必须用计数器 stub 真的断言，而不是靠「没报错」推断；
+   且校验失败**不得推进请求状态**（仍 pending、不发事实）。
+2. 纯文本逐字节不变（同一对象），且不为解 tenant 去读事件日志。
 """
 
 import base64
@@ -23,7 +26,6 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.errors import InvalidContentError
-from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
@@ -33,6 +35,12 @@ from ctx_weft.protocols import (
     TextPart,
 )
 from ctx_weft.protocols.events import EventBlobStore
+from ctx_weft.protocols.hitl import (
+    HitlAsk,
+    HitlReply,
+    NoResumeDelivery,
+    ResumeHint,
+)
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"x" * 100
 _PNG = base64.b64encode(_PNG_BYTES).decode()
@@ -121,10 +129,32 @@ def _make_runtime(llm, store: "MemoryBlobStore | None" = None) -> CtxWeftRuntime
     return rt
 
 
-async def _pending(rt: CtxWeftRuntime, session_id: str = "ses-hitl") -> str:
-    return await rt.hitl_manager.request(
-        form="wait", session_id=session_id, task_id="tsk-1", question="?",
+async def _pending(rt: CtxWeftRuntime, session_id: str = "ses-hitl",
+                   form: str = "wait") -> str:
+    """开一个未决请求。`NoResumeDelivery` 是刻意的——本文件测的是应答**内容管线**，
+    不该顺带触发一次 session 续跑。"""
+    req = await rt.hitl.open(
+        HitlAsk(form=form, delivery=NoResumeDelivery()),
+        session_id=session_id, task_id="tsk-1", stage="tool",
     )
+    return req.id
+
+
+async def _reply(rt: CtxWeftRuntime, hid: str, message, *, outcome: str = "accepted",
+                 modified_arguments=None, resume_hint: ResumeHint | None = None):
+    """经**唯一的生产应答入口**回话。"""
+    return await rt.reply_to_hitl(HitlReply(
+        hitl_id=hid, outcome=outcome, message=message,
+        modified_arguments=modified_arguments,
+        resume_hint=resume_hint or ResumeHint(),
+    ))
+
+
+def _decision(rt: CtxWeftRuntime, hid: str):
+    """终局决定（`HitlRequestView` 刻意不带 message——那是 core 内部的活记录才有的）。"""
+    req = rt.hitl_registry.get(hid)
+    assert req is not None
+    return req.decision
 
 
 # ── 1. 畸形 base64 → 被拒，且 blob store 未被写入 ──────────────────────────────
@@ -137,17 +167,16 @@ async def test_hitl_answer_rejects_malformed_base64_without_touching_blob_store(
     hid = await _pending(rt)
 
     with pytest.raises(InvalidContentError):
-        await rt.hitl_manager.answer(
-            hid, [TextPart(text="看这张"), ImagePart(data=_MALFORMED, media_type="image/png")],
-        )
+        await _reply(rt, hid,
+                     [TextPart(text="看这张"), ImagePart(data=_MALFORMED, media_type="image/png")])
 
     assert store.put_calls == 0, (
         "顺序必须是 validate → normalize：被拒的内容不得在 blob store 留下垃圾"
     )
-    req = rt.hitl_manager.get(hid)
+    req = rt.hitl_registry.get(hid)
     assert req is not None
     assert req.resolved is False, "校验失败不得把请求推进到终态"
-    assert req.message == "", "校验失败不得把畸形内容写进 req.message"
+    assert req.decision is None, "校验失败不得把畸形内容写进决定"
 
 
 @pytest.mark.asyncio
@@ -158,12 +187,11 @@ async def test_hitl_reject_rejects_malformed_base64_without_touching_blob_store(
     hid = await _pending(rt)
 
     with pytest.raises(InvalidContentError):
-        await rt.hitl_manager.reject(
-            hid, message=[ImagePart(data=_MALFORMED, media_type="image/png")],
-        )
+        await _reply(rt, hid, [ImagePart(data=_MALFORMED, media_type="image/png")],
+                     outcome="rejected")
 
     assert store.put_calls == 0
-    assert rt.hitl_manager.get(hid).resolved is False
+    assert rt.hitl_registry.get(hid).resolved is False
 
 
 # ── 2. 格式校验在 HITL 路径同样生效 ──────────────────────────────────────────
@@ -176,7 +204,7 @@ async def test_hitl_answer_rejects_disallowed_media_type():
     hid = await _pending(rt)
 
     with pytest.raises(InvalidContentError):
-        await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/bmp")])
+        await _reply(rt, hid, [ImagePart(data=_PNG, media_type="image/bmp")])
 
     assert store.put_calls == 0
 
@@ -190,12 +218,11 @@ async def test_hitl_answer_externalizes_valid_image_to_ref():
     rt = _make_runtime(_VisionClient(), store)
     hid = await _pending(rt, session_id="ses-blob")
 
-    req = await rt.hitl_manager.answer(
-        hid, [TextPart(text="看这张"), ImagePart(data=_PNG, media_type="image/png")],
-    )
+    view = await _reply(rt, hid,
+                        [TextPart(text="看这张"), ImagePart(data=_PNG, media_type="image/png")])
 
-    assert req.outcome == "accepted"
-    content = req.message
+    assert view is not None and view.outcome == "accepted"
+    content = _decision(rt, hid).message
     # 陷阱守卫：`not hasattr(p, "text")` 在 str 上恒为 True，下面的断言才不是重言式。
     assert isinstance(content, list), f"应答内容必须仍是 parts 列表，实为 {type(content)!r}"
     images = [p for p in content if not hasattr(p, "text")]
@@ -213,58 +240,13 @@ async def test_hitl_answer_externalizes_valid_image_to_ref():
     )
 
 
-# ── 4. 未注入 normalizer 时：纯文本恒等变换；携图不再静默放行（Task 4 收口）──────
+# ── 4.（已删）「未注入 normalizer 时」的三条：裸 `HitlManager()` 不复存在。
 #
-# Task 3 时 `content_to_event_jsonable` 对不可外部化的 event store 整段短路，
-# 于是裸 `HitlManager()`（未接线，`_content_normalizer` / `_event_blob_store_resolver`
-# 均为 None）对**任何**内容——包括畸形 base64 图片——都是恒等变换。Task 4 删除了
-# 那条短路（brief「额外要求」）：`_resolve` 序列化 HITL_* 事件 payload 时仍会调
-# `content_to_event_jsonable`，不再对不可外部化的 store 悄悄放行，而是让「内容未经
-# `validate_content` 校验就直接到达这里」这件事本身响亮暴露出来——裸 HitlManager()
-# 从来就不是生产路径（生产路径恒为 CtxWeftRuntime 构造并接线，见 runtime.py:481+500），
-# 纯单测直接构造它、喂它畸形图片内容，理应撞见异常而不是被悄悄放行。
-# 纯文本这条不变量不受影响——见下方 test_bare_hitl_manager_plain_text_is_identity。
-
-
-@pytest.mark.asyncio
-async def test_bare_hitl_manager_plain_text_is_identity_without_normalizer():
-    """裸 `HitlManager()` 对纯文本仍是恒等变换——这条不受 Task 4 影响。
-
-    纯文本 content 从不触发 `content_to_event_jsonable` 的图片外部化分支，
-    `_resolve` 序列化事件 payload 时对它是零开销直通。"""
-    hm = HitlManager()
-    hid = await hm.request(form="wait", session_id="s", task_id="t")
-    payload = "纯文本，没有图片"
-
-    req = await hm.answer(hid, payload)
-
-    assert req.outcome == "accepted"
-    assert req.message is payload, "纯文本必须仍是恒等变换（同一对象）"
-
-
-@pytest.mark.asyncio
-async def test_bare_hitl_manager_with_image_raises_instead_of_silently_passing_through():
-    """裸 `HitlManager()`（未接线，`_content_normalizer` 为 None）递入图片内容——
-    Task 4 之前会被 Task 3 的过渡短路悄悄放行（畸形 base64 原样进事件 payload）；
-    短路删除后，`_resolve` 序列化 HITL_* 事件时直接对未经校验的畸形 base64 解码，
-    响亮地炸出来，而不是把垃圾字节悄悄写进事件。"""
-    hm = HitlManager()
-    hid = await hm.request(form="wait", session_id="s", task_id="t")
-    payload = [TextPart(text="hi"), ImagePart(data=_MALFORMED, media_type="image/bmp")]
-
-    with pytest.raises(ValueError):
-        await hm.answer(hid, payload)
-
-
-@pytest.mark.asyncio
-async def test_bare_hitl_manager_reject_with_image_raises_instead_of_silently_passing_through():
-    hm = HitlManager()
-    hid = await hm.request(form="approval", session_id="s", task_id="t")
-    payload = [ImagePart(data=_MALFORMED, media_type="image/bmp")]
-
-    with pytest.raises(ValueError):
-        await hm.reject(hid, message=payload)
-
+# 那三条锁的是「旧实现未接线时退化成恒等变换 / 携图直接炸」这组过渡行为。新契约里
+# `ReplyIntake.__init__` **要求**显式传入 normalizer（无默认值），生产路径恒由
+# `CtxWeftRuntime` 构造期一次性接好（没有 setter、没有半成品窗口）——「未注入」这个
+# 状态在类型与构造上都不可达，因此不再有可测的行为。管线**确实**挂在共用真源上这一点，
+# 由下面第 6 组的 `test_runtime_injects_helper_that_delegates_to_the_shared_source` 钉住。
 
 # ── 5. 纯文本应答逐字节不变（即使已注入 normalizer）─────────────────────────
 
@@ -284,9 +266,9 @@ async def test_plain_text_hitl_answer_is_byte_identical():
     hid = await _pending(rt)
 
     text = "就是一句纯文本"
-    req = await rt.hitl_manager.answer(hid, text)
+    await _reply(rt, hid, text)
 
-    assert req.message is text, "纯文本必须原样返回同一对象"
+    assert _decision(rt, hid).message is text, "纯文本必须原样返回同一对象"
     assert store.put_calls == 0, "纯文本不得触碰 blob store"
     assert calls == [], "纯文本不得触发 LLM 解析（格式校验先行，纯文本走不到图片分支，自然用不上）"
 
@@ -298,10 +280,10 @@ async def test_empty_message_reject_is_byte_identical():
     rt = _make_runtime(_VisionClient(), store)
     hid = await _pending(rt)
 
-    req = await rt.hitl_manager.reject(hid)
+    view = await _reply(rt, hid, "", outcome="rejected")
 
-    assert req.outcome == "rejected"
-    assert req.message == ""
+    assert view is not None and view.outcome == "rejected"
+    assert _decision(rt, hid).message == ""
     assert store.put_calls == 0
 
 
@@ -312,12 +294,13 @@ async def test_empty_message_reject_is_byte_identical():
 async def test_runtime_injects_helper_that_delegates_to_the_shared_source():
     """HITL 用的薄包装底下必须仍是那三处共用的同一个方法，不是各写一遍的副本。
 
-    Task A2 起回调收整个 `HitlRequest`（要拿 resume_llm_* 与 session_id），故注入的是
-    `_normalize_hitl_content`；这条断言它**确实转调**共用真源，而不是自己重写一遍
-    validate → normalize。
+    `ReplyIntake` 收的是 `_normalize_hitl_content`（它由 session_id 解 tenant）；这条
+    断言它**确实转调**共用真源 `_validate_and_normalize_content`，而不是自己重写一遍
+    validate → normalize。旧版断言的是 `set_content_normalizer` 注入了什么——那道
+    setter 已随 `HitlManager` 删除，钉子改钉在构造期接好的 `ReplyIntake` 上。
     """
     rt = _make_runtime(_VisionClient())
-    injected = rt.hitl_manager._content_normalizer
+    injected = rt.hitl._intake._normalizer
     assert injected is not None
     assert injected.__func__ is CtxWeftRuntime._normalize_hitl_content
 
@@ -326,18 +309,19 @@ async def test_runtime_injects_helper_that_delegates_to_the_shared_source():
     async def _spy(content, session_id, **kw):
         seen.append((content, session_id, kw))
         # 共用真源返回**二元组** `(memory 侧内容, event 侧载荷)`（blob-store 解耦
-        # Task 3），桩必须同形——只回 content 的话 HitlManager 会把它当二元组解包
-        # （短字符串正好解成两个字符，静默把 req.message 变成 "h"）。
+        # Task 3），桩必须同形——只回 content 的话调用方会把它当二元组解包
+        # （短字符串正好解成两个字符，静默把 message 变成 "h"）。
         return content, content
 
     rt._validate_and_normalize_content = _spy  # type: ignore[method-assign]
     hid = await _pending(rt, session_id="ses-delegate")
-    req = await rt.hitl_manager.answer(hid, "hi")
+    await _reply(rt, hid, "hi")
 
     assert len(seen) == 1, "薄包装必须转调共用真源（_validate_and_normalize_content）"
     assert seen[0][0] == "hi"
     assert seen[0][1] == "ses-delegate"
-    assert req.message == "hi", "回调返回的二元组第一项才是内容，不得被当成序列拆开"
+    assert _decision(rt, hid).message == "hi", (
+        "回调返回的二元组第一项才是内容，不得被当成序列拆开")
 
 
 @pytest.mark.asyncio
@@ -375,7 +359,7 @@ async def test_all_three_entry_points_reject_malformed_base64_before_any_put():
 
     hid = await _pending(rt)
     with pytest.raises(InvalidContentError):
-        await rt.hitl_manager.answer(hid, bad)
+        await _reply(rt, hid, bad)
     assert store.put_calls == 0
 
 
@@ -421,37 +405,32 @@ async def test_hitl_approve_rejects_malformed_base64_without_touching_blob_store
     """`approve(message=...)` 与 answer/reject 同为多模态入口，不得漏校验。"""
     store = _CountingStore()
     rt = _make_runtime(_VisionClient(), store)
-    hid = await rt.hitl_manager.request(
-        form="approval", session_id="ses-hitl", task_id="tsk-1", question="放行？",
-    )
+    hid = await _pending(rt, session_id="ses-hitl", form="approval")
 
     with pytest.raises(InvalidContentError):
-        await rt.hitl_manager.approve(
-            hid, message=[TextPart(text="备注"), ImagePart(data=_MALFORMED, media_type="image/png")],
-        )
+        await _reply(rt, hid,
+                     [TextPart(text="备注"), ImagePart(data=_MALFORMED, media_type="image/png")],
+                     modified_arguments={"command": "ls -la"})
 
     assert store.put_calls == 0, "被拒的内容不得在 blob store 留垃圾"
-    req = rt.hitl_manager.get(hid)
+    req = rt.hitl_registry.get(hid)
     assert req is not None
     assert req.resolved is False, "校验失败不得把请求推进到终态"
-    assert req.message == "", "校验失败不得把畸形内容写进 req.message"
-    assert req.modified_arguments is None, "校验失败不得写 modified_arguments"
+    assert req.decision is None, (
+        "校验失败不得写决定——message 与 modified_arguments 都不得落下")
 
 
 @pytest.mark.asyncio
 async def test_hitl_approve_externalizes_valid_image_to_ref():
     store = _CountingStore()
     rt = _make_runtime(_VisionClient(), store)
-    hid = await rt.hitl_manager.request(
-        form="approval", session_id="ses-appr", task_id="tsk-1", question="放行？",
-    )
+    hid = await _pending(rt, session_id="ses-appr", form="approval")
 
-    req = await rt.hitl_manager.approve(
-        hid, message=[TextPart(text="放行，见图"), ImagePart(data=_PNG, media_type="image/png")],
-    )
+    view = await _reply(rt, hid,
+                        [TextPart(text="放行，见图"), ImagePart(data=_PNG, media_type="image/png")])
 
-    assert req.outcome == "accepted"
-    content = req.message
+    assert view is not None and view.outcome == "accepted"
+    content = _decision(rt, hid).message
     # 陷阱守卫：`not hasattr(p, "text")` 在 str 上恒为 True。
     assert isinstance(content, list), f"应答内容必须仍是 parts 列表，实为 {type(content)!r}"
     images = [p for p in content if not hasattr(p, "text")]
@@ -469,7 +448,7 @@ async def test_hitl_approve_externalizes_valid_image_to_ref():
 @pytest.mark.asyncio
 async def test_hitl_image_reaches_memory():
     """HITL 应答携带图片时，内容被外部化落库成功——模态能力判断已不在 core，
-    resume_llm_account / resume_llm_model 不再影响本次应答是否被放行。"""
+    应答携带的 `ResumeHint`（本轮所选模型）不再影响本次应答是否被放行。"""
     store = _CountingStore()
     provider = _RoutingLLMProvider(
         default=_TextOnlyClient(), by_key={("acct-v", "vision-model"): _VisionClient()},
@@ -477,14 +456,12 @@ async def test_hitl_image_reaches_memory():
     rt = _make_routing_runtime(provider, store)
     hid = await _pending(rt, session_id="ses-named-vision")
 
-    req = await rt.hitl_manager.answer(
-        hid, [ImagePart(data=_PNG, media_type="image/png")],
-        llm_account="acct-v", llm_model="vision-model",
-    )
+    view = await _reply(rt, hid, [ImagePart(data=_PNG, media_type="image/png")],
+                        resume_hint=ResumeHint(llm_account="acct-v", llm_model="vision-model"))
 
-    assert req.outcome == "accepted"
+    assert view is not None and view.outcome == "accepted"
     assert store.put_calls == 1
-    content = req.message
+    content = _decision(rt, hid).message
     assert isinstance(content, list), f"应答内容必须仍是 parts 列表，实为 {type(content)!r}"
     assert content[0].source_type == "ref"
 
@@ -513,7 +490,7 @@ async def test_blob_anchors_to_the_session_tenant_via_live_owner():
     _install_live_owner(rt, "ses-tenant-hot", "tenant-alpha")
     hid = await _pending(rt, session_id="ses-tenant-hot")
 
-    await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
+    await _reply(rt, hid, [ImagePart(data=_PNG, media_type="image/png")])
 
     assert store.put_calls == 1
     assert store.ctx_tenant_ids == ["tenant-alpha"], (
@@ -536,7 +513,7 @@ async def test_blob_anchors_to_the_session_tenant_via_event_log_on_cold_reply():
     ))
     hid = await _pending(rt, session_id="ses-tenant-cold")
 
-    await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
+    await _reply(rt, hid, [ImagePart(data=_PNG, media_type="image/png")])
 
     assert store.put_calls == 1
     assert store.ctx_tenant_ids == ["tenant-beta"]
@@ -555,9 +532,9 @@ async def test_unknown_session_falls_back_to_default_tenant_without_raising():
     rt = _make_runtime(_VisionClient(), store)
     hid = await _pending(rt, session_id="ses-nowhere")
 
-    req = await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
+    view = await _reply(rt, hid, [ImagePart(data=_PNG, media_type="image/png")])
 
-    assert req.outcome == "accepted"
+    assert view is not None and view.outcome == "accepted"
     assert store.ctx_tenant_ids == ["default"]
 
 
@@ -573,9 +550,9 @@ async def test_event_store_failure_falls_back_to_default_tenant_without_raising(
     rt.event_store.read_by_session = _boom  # type: ignore[method-assign]
     hid = await _pending(rt, session_id="ses-broken-store")
 
-    req = await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
+    view = await _reply(rt, hid, [ImagePart(data=_PNG, media_type="image/png")])
 
-    assert req.outcome == "accepted"
+    assert view is not None and view.outcome == "accepted"
     assert store.ctx_tenant_ids == ["default"]
 
 
@@ -594,9 +571,9 @@ async def test_plain_text_reply_never_touches_the_event_store():
     rt.event_store.read_by_session = _counting  # type: ignore[method-assign]
     hid = await _pending(rt)
 
-    req = await rt.hitl_manager.answer(hid, "纯文本")
+    await _reply(rt, hid, "纯文本")
 
-    assert req.message == "纯文本"
+    assert _decision(rt, hid).message == "纯文本"
     assert reads == [], "纯文本应答不得为了解 tenant 去读事件日志"
 
 
@@ -605,14 +582,14 @@ async def test_plain_text_reply_never_touches_the_event_store():
 
 @pytest.mark.asyncio
 async def test_hitl_event_put_receives_the_real_session_tenant_not_default():
-    """`HitlManager._resolve` 给 event 侧 `content_to_event_jsonable` 传的 ctx.tenant_id
+    """应答提交路径给 event 侧 `content_to_event_jsonable` 传的 ctx.tenant_id
     必须是 `_normalize_hitl_content` 解出的真实 tenant，而不是写死的 "default"。
 
     刻意只注册 EventBlobStore、**不注册 MemoryBlobStore**：这是「memory 不可外部化、
     event 可外部化」组合（spec §6：`normalize_content` 短路不碰 event 侧，ref 化改由
     `content_to_event_jsonable` 独立完成）——message 到 `_resolve` 时仍是 inline
     base64，必然真的调用 event_blob_store.put，断言才立得住（若 memory 也可外部化，
-    入口的双写会先把内容变成 ref，`_resolve` 走 ref 直通分支，根本不会再 put，
+    入口的双写会先把内容变成 ref，提交时走 ref 直通分支，根本不会再 put，
     这条用例就验不到本次要修的 bug）。
     """
     event_store = _CountingEventStore()
@@ -621,9 +598,9 @@ async def test_hitl_event_put_receives_the_real_session_tenant_not_default():
     _install_live_owner(rt, "ses-tenant-event", "tenant-gamma")
     hid = await _pending(rt, session_id="ses-tenant-event")
 
-    req = await rt.hitl_manager.answer(hid, [ImagePart(data=_PNG, media_type="image/png")])
+    view = await _reply(rt, hid, [ImagePart(data=_PNG, media_type="image/png")])
 
-    assert req.outcome == "accepted"
+    assert view is not None and view.outcome == "accepted"
     assert event_store.put_calls == 1, "message 应仍是 inline base64，必须真的外部化一次"
     assert event_store.ctx_tenant_ids == ["tenant-gamma"], (
         "event 侧 put 收到的 tenant 必须是该 session 的真实 tenant，而非硬编码 default"
@@ -654,10 +631,10 @@ class _PrefixedEventStore(_CountingEventStore):
 
 @pytest.mark.asyncio
 async def test_hitl_event_payload_carries_an_event_ref_not_the_memory_ref():
-    """HITL_ANSWERED 的 message 里必须是 **event store** 的 ref，且字节取得回。
+    """`HitlResolved` 的 message 里必须是 **event store** 的 ref，且字节取得回。
 
     这是 HITL 入口版的解耦验收：事件侧载荷必须由**归一化之前的原始**应答内容算出。
-    若改由 `req.message`（已是 memory ref）重算，`content_to_event_jsonable` 会把它
+    若改由已归一化的 memory ref 重算，`content_to_event_jsonable` 会把它
     降级成文本占位——图片就在事件流里丢了，而 memory 侧看起来一切正常。
     """
     mem_store = _CountingStore()
@@ -666,12 +643,11 @@ async def test_hitl_event_payload_carries_an_event_ref_not_the_memory_ref():
     rt.providers.register_event_blob_store(evt_store)
     hid = await _pending(rt, session_id="ses-two-stores")
 
-    await rt.hitl_manager.answer(
-        hid, [TextPart(text="看这张"), ImagePart(data=_PNG, media_type="image/png")],
-    )
+    await _reply(rt, hid,
+                 [TextPart(text="看这张"), ImagePart(data=_PNG, media_type="image/png")])
 
     events = await rt.event_store.read_by_session("ses-two-stores")
-    answered = next(e for e in events if e.type == "HitlAnswered")
+    answered = next(e for e in events if e.type == "HitlResolved")
     parts = answered.payload["message"]
     assert isinstance(parts, list), f"message 不得被拍扁，实为 {type(parts).__name__}"
     images = [p for p in parts if isinstance(p, dict) and p.get("type") == "image"]
