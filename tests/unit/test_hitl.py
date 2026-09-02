@@ -33,10 +33,19 @@ def test_runtime_wires_hitl_timeout() -> None:
 
     旋钮的落点随重设计换了对象——超时归管栈的 `HitlWaiter`（runtime 在装配
     `LoopContext` 时用 `self._hitl_timeout_sec` 现造），保留上限归管账的
-    `HitlRegistry`。断言的是「配置真的到达了它们」，与旧版同一件事。
+    `HitlRegistry`。旧版断言 `hitl_manager._timeout_sec`，钉的是「值到达了真正在等的
+    那个对象」；这里必须走完同样的最后一跳——只断言 `rt._hitl_timeout_sec` 等于只测了
+    一次属性赋值，`HitlWaiter(...)` 那行掉了实参照样绿。
     """
     from ctx_weft.core.config import RuntimeConfig
+    from ctx_weft.protocols import ProviderContext
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     cfg = RuntimeConfig(hitl_timeout_sec=45)
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider(), config=cfg)
     assert rt._hitl_timeout_sec == 45
+    loop_ctx = rt._build_loop_ctx(
+        assembler=None, llm=None, memory=None,
+        provider_ctx=ProviderContext(session_id="s1", tenant_id="default"),
+        gateway=None, skill_index={}, cancel_token=None, task_manager=None,
+    )
+    assert loop_ctx.waiter is not None and loop_ctx.waiter._timeout_sec == 45

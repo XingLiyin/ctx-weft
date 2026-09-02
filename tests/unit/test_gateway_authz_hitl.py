@@ -230,6 +230,47 @@ async def test_a_cached_decision_short_circuits_without_asking_again():
     assert _provider_invocations() == 1
 
 
+async def test_a_cached_decision_carries_modified_arguments_into_the_provider():
+    """人在批准前**改写的参数**必须跨重启仍然生效——不只是「短路发生了」。
+
+    这是安全相关的一条：人把 `rm -rf /` 改成 `ls -la` 再放行，冷路径若只取 outcome、
+    丢掉 `modified_arguments`，provider 收到的就是原参——一次人工把关变成空操作，
+    而且只在崩溃之后才出错（最难被发现的时机）。
+
+    旧 `test_hitl_park.py::test_authorize_cold_uses_resolved_decision_no_new_hitl` 断言过
+    这一条，随 `HitlManager` 一并删除；在这里补回，且比旧版更进一步——旧版只看
+    `authorize()` 的返回值，这里看 **provider 真正收到了什么**。
+    """
+    gw, reg, _svc = _make_gateway(HumanConfirmationAuthorizer())
+    reg.load_snapshot(_snapshot_with_decision("call_1", HitlDecision(
+        outcome="accepted", modified_arguments={"command": "ls -la"})))
+    result = await gw.invoke(_TOOL_NAME, {"command": "rm -rf /"}, _state(), _ctx(),
+                             tool_call_id="call_1")
+    assert result.is_error is False
+    assert reg.list_pending() == []                    # 没有重新问人
+    assert _provider_invocations() == 1
+    assert _last_invoked_args() == {"command": "ls -la"}, (
+        "人工改写的参数没有跨冷路径生效——provider 拿到的仍是原参"
+    )
+
+
+async def test_a_cached_rejection_still_blocks_the_provider():
+    """冷路径的另一半：缓存里是一次**拒绝**时，provider 同样绝不被调用。
+
+    短路是「重用人给过的决定」，不是「放行」——`accepted` 那条用例单独绿着的话，
+    一个把 `decision_for` 命中当成放行的实现照样能通过。
+    """
+    gw, reg, _svc = _make_gateway(HumanConfirmationAuthorizer())
+    reg.load_snapshot(_snapshot_with_decision("call_1", HitlDecision(
+        outcome="rejected", message="别删")))
+    result = await gw.invoke(_TOOL_NAME, {"command": "rm -rf /"}, _state(), _ctx(),
+                             tool_call_id="call_1")
+    assert result.is_error is True
+    assert "别删" in _text_of(result.content)
+    assert _provider_invocations() == 0
+    assert reg.list_pending() == []
+
+
 async def test_a_plain_authorizer_never_touches_the_hitl_path():
     """不问人的 authorizer 走的路径与 HITL 无关，一行 HITL 代码都不执行。"""
     gw, reg, _svc = _make_gateway(_AllowAll())
