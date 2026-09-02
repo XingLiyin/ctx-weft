@@ -442,6 +442,15 @@ Task 4 删除。
 run 真正的用处是**事件流的分段与 SSE 的开关**：`run_id` 把一次执行的事件聚成一组，
 `sequence` 在组内单调递增。
 
+> **例外（Task 4 起）**：七条 task 状态事件由 `TaskManager` 在 run **之外**发出
+> （`TaskFinished` / `TaskFailed` / `TaskRequeued` / `TaskSuspended` /
+> `TaskAwaitingHuman` / `TaskInterrupted` / `TaskCanceled`，另加 `TaskStarted` /
+> `TaskResumed` 这两条本来就由 TM 发的）。TM 不属于任何一次 run，拿不到 run_id、
+> 也不持有 run 的 `sequence_counter`，故它发的事件 `run_id=None`、`sequence=0`
+> （`TaskManager._emit`）。**这些事件既不进任何 run 组，也不参与组内单调递增**——
+> 按 `sequence` 排序或去重的 host 必须改按到达顺序 / `timestamp`，否则这一整批会被
+> 排到最前面或被当成重复项丢掉。详见 docs/upgrade/2026-09-02-task-status-ownership.md。
+
 | 事件 | payload | 含义 |
 |---|---|---|
 | `RunStarted` | `run_id` `initial_step` | 一次 step 链执行开始。一个 task 可以有多个 run（重试 / 重排 / 挂起后恢复各一个新 run），一个 session 可以同时有多个 run 在跑 |

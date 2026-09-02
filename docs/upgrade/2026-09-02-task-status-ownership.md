@@ -17,10 +17,17 @@
    `TaskFinished`、`TaskFailed`、`TaskCanceled`、`TaskRequeued`（observer 判重试
    那一种形状；reopen 那一种一直是 TM 发，不受影响）、`TaskResumed`（本来就是 TM
    发，不变）。
-3. **这些事件的 `run_id` 从有变为 `None`。** `TaskManager` 不属于任何一次 run——
-   它在 run 返回之后才动手，连 `run_id` 都拿不到。host 若按 `run_id` 归组 task 事件
-   （例如「这次 run 产生了哪些 task 事件」），要改成按 `session_id` + 到达顺序，或者
-   干脆不再依赖 `run_id` 做 task 事件的归组。
+3. **这些事件的 `run_id` 从有变为 `None`，`sequence` 一律为 `0`。** `TaskManager`
+   不属于任何一次 run——它在 run 返回之后才动手，连 `run_id` 都拿不到，也不持有 run 的
+   `sequence_counter`（`TaskManager._emit` 一直是把两者写成 `None` 和 `0` 的，只是
+   Task 4 之前这七条不从它出；`docs/spec/golden/*.json` 里如实反映）。两类 host 是
+   同一类受害者：
+   - 按 `run_id` **归组**的（「这次 run 产生了哪些 task 事件」）——改成按 `session_id`
+     + 到达顺序，或干脆不再用 `run_id` 归组 task 事件；
+   - 按 `sequence` **排序或去重**的——七条 task 状态事件现在全是 `sequence=0`，
+     排序会把它们整批顶到最前面，「同 `sequence` 视为重复」的去重会只留下一条。
+     改成按到达顺序 / `timestamp`。`docs/events-v2.md` §3.2 那句「`sequence` 在组内
+     单调递增」只对 run 内的事件成立，已在那里补了例外说明。
    **顺带一条事件顺序提醒（brief 没提，这里补上）：** 这些 task 状态事件现在**在
    `RunFinished` 之后**到达（`RunFinished` 在 `_run_loop` 的 `finally` 里无条件发，
    `TaskManager` 要等 `execute()` 把 `RunOutcome` 交回来才处置）。而 `RunFinished`
@@ -29,12 +36,16 @@
    里）。正确做法：关流前先等这次 run 对应的 task 状态事件到达，或者干脆不再靠
    `RunFinished` 单独判断「可以关流了」。
 
-事件**语义**与 task 的**最终状态**一个都没变——这是一次纯所有权重构，不改行为。
+事件**语义**没变。task 的**最终状态**在 golden 覆盖的那些路径上逐字未变，但 golden
+覆盖不到的路径上**有三处终态变化**，各有小节：`run_single_task` 的上下文溢出、
+熔断竞态下的终态守卫、「observer 判 fail 之后被取消」。另有一处 payload 字面量变化
+（崩溃后重排的 `TaskRequeued.reason`）与一条既有缺陷提醒（`will_retry`），也在下面。
 
 判断你是否受影响：搜这些字符串，命中即需要检查。
 
 ```
 final_status              run_id                RunFinished
+sequence                   will_retry            failure_counter
 TaskSuspended              TaskFinished          TaskFailed
 TaskCanceled                TaskInterrupted      TaskRequeued
 run_failure_retry
@@ -119,10 +130,63 @@ task 判成 `FAILED`（`TaskManager` 第 6 步「root 判 FAILED」），随后�
 
 ---
 
-## 事件语义与 task 最终状态：一个都没变
+## observer 判 fail 之后被取消：终态从 `FAILED` 变成 `CANCELED`
+
+窗口很窄但确实存在：observer 已经判了 `fail`，`FinalizeStep` 还没跑，就在这两个 step
+之间的边界上命中了协作取消（`driver.run` 循环顶部的 `raise_if_cancelled`）。
+
+- **旧行为**：`report_task_outcome` 判 `fail` 时**就地写** `task.status="FAILED"`；
+  随后 `_run_loop` 的 `except asyncio.CancelledError` 里那道
+  `if task.status not in ("FINISHED", "FAILED", "CANCELED")` 守卫挡住了覆写，于是
+  终态是 **`FAILED`** → `on_task_finished(FAILED)` → **`failure_counter += 1`**
+  （可能因此触达 `failure_threshold`、触发熔断）→ 会话按 `_final_status()` 落 `FAILED`。
+  这条路径上 `RunCanceled` **不发**（run 侧的 `cancel_takes_effect` 守卫同样被那个
+  `FAILED` 挡住了）。
+- **新行为**：observe 只写判决（`task.observer_outcome`），不写状态。取消发生时
+  `task.status` 仍是 `ACTIVE` → `cancel_takes_effect=True` → `RunCanceled` 照发 →
+  `RunOutcome(CANCELED)` 交给 `TaskManager` → 终态 **`CANCELED`**、发 `TaskCanceled`、
+  **`failure_counter` 不增**（因此也不会由这一次触发熔断）、会话落 `CANCELED`。
+
+**这次接受新行为，不回退**，与上面「`run_single_task` 的溢出行为」同一条理由：
+`FinalizeStep` 没跑，`TaskFailed` **从未进过事件流**，host 的投影一直停在 `ACTIVE`；
+旧行为是拿一个事件流从未见过的内存状态，压掉了一次**真实发生**的取消。取消是用户
+（或熔断清场）明确发起的动作，把它记成一次「任务失败」还顺带推高熔断计数，是错的。
+
+受影响的 host：① 统计「本轮失败了几个任务」或依赖熔断阈值触发时机的；② 把
+`CANCELED` 与 `FAILED` 做不同展示/告警的。若你的 host 观察到过「取消之后任务显示
+失败、会话也判失败」，这次修的就是它。
+
+（两侧均有实测：`tests/unit/test_cancel_end_to_end.py::
+test_observer_fail_then_boundary_cancel_lands_on_canceled` 钉住新行为。）
+
+---
+
+## `RunFinished.will_retry` 在熔断竞态下会说谎
+
+`will_retry`（`runtime.py` 的 `_run_loop` finally 里）的判据是
+`run_error is not None and task.retry_count < task.max_retries and
+getattr(run_error, "retriable", True)`——它**没有终态守卫**。于是在「熔断已把 root
+判 `FAILED` → 该 run 随后崩溃」那条竞态里，`RunFinished` 会带着 `will_retry=True`
+发出，而 `TaskManager.apply_run_outcome` 的终态守卫命中、**一步不动**（不改状态、
+不发事件、更不会重排）。
+
+`will_retry=True` 的既定含义是「host 先别关流，还有下一个 run」。在这条竞态里它是
+假的：不会再有下一个 run，等下去只会永远等不到。**这不是本次重构引入的**（判据与
+BASE 逐字相同，只是 TM 侧新加的终态守卫让「说了不算」这件事第一次成为可能），
+已记账为后续待办。当前建议：不要把 `will_retry` 当成唯一的关流判据——收到
+`RunFinished` 之后若一段时间内没有新的 `RunStarted`，就关流。
+
+---
+
+## golden 覆盖的 task 最终状态：一个都没变（例外见上）
 
 这是纯所有权重构：同一份判据（原来散在 `FinalizeStep` / `ObserveStep` /
 `TaskManager._handle_task_failure` / `_run_loop` 的 except 链四处）收进了
-`task_disposition.py` 的 `disposition_for` 一张纯函数表，**不改变任何一条今天的
-转移结果**。`docs/spec/golden/*.json` 的 task 最终状态逐字未变，只是发射者、
-`run_id`、（部分事件）相对 `RunFinished` 的顺序换了——见上面三条。
+`task_disposition.py` 的 `disposition_for` 一张纯函数表。`docs/spec/golden/*.json`
+的 task 最终状态逐字未变，只是发射者、`run_id`、`sequence`、（部分事件）相对
+`RunFinished` 的顺序换了——见开头三条。
+
+**限定语很重要**：「没变」说的是 golden 覆盖到的那些路径。golden 覆盖不到的三条
+竞态/兼容路径上终态确实变了，各有小节：`run_single_task` 的溢出、熔断竞态的终态
+守卫、observer 判 fail 后被取消。三条都是「旧行为拿一个事件流没见过的内存状态说话」，
+不是 `disposition_for` 那张表把哪条判据改写了。
