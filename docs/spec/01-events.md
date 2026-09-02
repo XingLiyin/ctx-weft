@@ -32,13 +32,40 @@
 未登记类型不得发出（`makeEvent` 对未登记类型直接报错）。按域分组：
 
 ### Session / Run / Step
-`SessionCreated` `SessionResumed` `SessionStatusChanged` `SessionFinished` `SessionPausedHitl`
-`RunStarted` `RunPaused` `RunResumed` `RunCanceled` `RunFinished`
+`SessionCreated` `SessionResumed` `SessionFinished`
+`SessionInterrupted` `SessionWaiting` `SessionRunning`
+`RunStarted` `RunPaused` `RunResumed` `RunCanceled` `RunFinished` `RunInterrupted`
 `StepStarted` `StepCompleted` `StepFailed`
 
+> **会话状态只由 `SessionManager` 写，且只经这四条**：`SessionInterrupted`（停着且异常，
+> 等 `/resume`）/ `SessionWaiting`（停着但正常，都在等人）/ `SessionRunning`（重新开跑）/
+> `SessionFinished`（终态）。它们说「会话到了什么状态」，不带命令语气。
+>
+> **L 档（只读存量，不得再发射）**：`SessionStatusChanged` `SessionPausedHitl`。
+> 前者是事实流里唯一的命令式事件（「把状态写成 X」），6 个发射点混着三类不同的东西，
+> 已按上面四条拆解；后者的两档（`PAUSED` / `PAUSED_HITL`）在新值域里合并成单一
+> `WAITING`。**reducer 的读分支保留**——存量日志还要回放。详见 `docs/events-v2.md` §5
+> 与 `docs/upgrade/2026-09-02-session-status-ownership.md`。
+>
+> `RunInterrupted{reason, error_code?, error_message?}`：run 被外部打断（LLM outage /
+> run 崩溃），task → `INTERRUPTED`。它取代了 `TaskSuspended{reason:"run_crash"}`。
+
 ### Task
-`TaskCreated` `TaskStarted` `TaskSuspended` `TaskResumed` `TaskFinished` `TaskFailed`
-`TaskCanceled` `TaskFinalized` `TaskRequeued` `BlackboardPublished`
+`TaskCreated` `TaskStarted` `TaskSuspended` `TaskAwaitingHuman` `TaskResumed` `TaskFinished`
+`TaskFailed` `TaskCanceled` `TaskFinalized` `TaskRequeued` `BlackboardPublished`
+
+> `TaskSuspended` 从三义收窄到**一义**：只表示「等子任务完成」（payload 带
+> `summary` / `spawn_titles`）。另两义各自成型：等人 → `TaskAwaitingHuman{hitl_id}`
+> （task → `AWAITING_HUMAN`），被打断 → `RunInterrupted`（task → `INTERRUPTED`）。
+> **判据是类型，不是 payload 里的 `reason` 字面量。**
+
+### TaskManager 信号（会话状态机的输入）
+`TaskQueueBlocked` `TaskQueueInterrupted` `TaskQueueDrained`
+
+> TM 报「队列此刻是什么形状」，`SessionManager` 据此推会话状态。三条都是 O 档：
+> reducer 不折叠它们（会话状态由 `Session*` 承载），host **不必**订阅；但它们比会话
+> 状态事件更早到达，想做「这一轮跑完了」的提前提示，订 `TaskQueueDrained` 最准。
+> payload：`{count}` / `{reason}` / `{final_status}`。
 
 ### Agent
 `AgentInstantiated` `AgentSpawned` `AgentStatusChanged` `AgentWaiting` `AgentFinalized` `SpawnRejected`

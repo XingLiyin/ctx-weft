@@ -1,7 +1,11 @@
 # 事件体系 V2 · 事件清单
 
 > 这是 V2 定案后的**事件全集**：留哪些、每个长什么样、代表什么。
-> 状态：**已定案，未实施**——除 HITL 两条外，其余按本文改名/合并的动作尚未接线。
+> 状态：**会话状态所有权那一段（§2.1 / §2.3 / §2.4 / §3.3 / §5.2）已于 2026-09-02
+> 落地**——`SessionStatusChanged` 停发进 L 档，`Session*` 四条、`TaskAwaitingHuman`、
+> `RunInterrupted`、三条 `TaskQueue*` 均已接线；`SessionStatus` 值域已收敛为 6 个。
+> host 侧的破坏性变更见 `docs/upgrade/2026-09-02-session-status-ownership.md`。
+> 本文其余各节仍是**已定案、未实施**的改名/合并。
 > 表中「存量名」列非空者，代码里现在还叫旧名字。
 >
 > 真相源：`src/ctx_weft/protocols/events.py`（类型）、各发射点（payload）、
@@ -91,22 +95,21 @@ SM     ──►  会话状态                      SessionWaiting / SessionInte
 （`create` / `resume` / `cancel` / `recovered`）——那是 host 经 runtime 进来的请求，
 不是组件在驱动 SM。
 
-这条查询是今天那堆散落守卫的正确归宿，落地时一并收掉：
+这条查询是重构前那堆散落守卫的正确归宿，**已一并收掉**：
 
-| 今天在哪 | 手工做的判断 |
+| 重构前在哪 | 手工做的判断 |
 |---|---|
-| `task_manager.py:818` | `if self._session.status not in ("FAILED", "CANCELED")` |
-| `task_manager.py:799` | `if self._session_done_fired: return` |
-| `task_manager.py:804` | `if not self._is_current(): return`（被顶替的旧 TM 不得代表会话发言） |
-| `reducers.py:562` | `if view.session_status in PAUSED_STATUSES`（`HitlResolved` 的「不覆盖已到终态」） |
+| `task_manager.py` | `if self._session.status not in ("FAILED", "CANCELED")` |
+| `task_manager.py` | `if self._session_done_fired: return` |
+| `task_manager.py` | `if not self._is_current(): return`（被顶替的旧 TM 不得代表会话发言） |
+| `reducers.py` | `if view.session_status in PAUSED_STATUSES`（`HitlResolved` 的「不覆盖已到终态」） |
 | host 投影 | 「不得覆盖已落终态」的守卫 |
 
 它们各自维护一份对会话状态的判断，口径不同、位置分散——这正是通用 setter
 `SessionStatusChanged` 存在的土壤。收进 SM 之后，「已终态就不再转移」写在状态机里一次。
 
-> **前置改造**：`SessionManager` 今天是 `runtime.py:1020` 里 `new` 出来用完即弃的
-> dataclass（docstring：「session 创建 + root agent 启动」），无状态、不订阅事件。
-> 它必须先变成 runtime 级的长生命周期组件，本节其余部分才谈得上。
+> **前置改造已完成**：`SessionManager` 从前是 `runtime.py` 里 `new` 出来用完即弃的
+> dataclass，无状态、不订阅事件；现在是 runtime 级的长生命周期组件，订阅 TM 的四类信号。
 
 #### 2.1.2 会话状态事件 · 6
 
@@ -114,9 +117,9 @@ SM     ──►  会话状态                      SessionWaiting / SessionInte
 |---|---|---|---|
 | `SessionCreated` | | `template_id` `user_prompt`（jsonable，保 ref 不落字节） `root_agent_id` `llm_model` `llm_account` `tenant_id` `token_budget` `context_limit` `reserved_output_tokens` | 会话诞生。建 `SessionView`，`status=RUNNING` |
 | `SessionResumed` | | `user_prompt` `root_agent_id` `llm_model` `llm_account` | 在已有会话上**开新一轮**：带新的 user_prompt 建新 root task。前置拒绝有未终结任务的会话。`status` 回 `RUNNING`，并把 `SessionView.user_prompt` 覆写成本轮的 |
-| `SessionWaiting` **新增** | | （空） | 会话停着，但是**正常地停**——所有任务都在等人 / 等外部输入。→ `WAITING` |
-| `SessionInterrupted` **新增** | | `reason` | 会话停着，**异常**——系统故障，等 `/resume`。`reason` ∈ `llm_outage` / run 崩溃的 `error_code` / `process_restart`。→ `INTERRUPTED` |
-| `SessionRunning` **新增** | | `reason` | 会话（重新）开跑。`reason` ∈ `human_replied`（从 `WAITING` 回来）/ `resumed`（从 `INTERRUPTED` 回来）。→ `RUNNING` |
+| `SessionWaiting` | | （空） | 会话停着，但是**正常地停**——所有任务都在等人 / 等外部输入。→ `WAITING` |
+| `SessionInterrupted` | | `reason` | 会话停着，**异常**——系统故障，等 `/resume`。`reason` ∈ `llm_outage` / run 崩溃的 `error_code` / `process_restart`。→ `INTERRUPTED` |
+| `SessionRunning` | | `reason` | 会话（重新）开跑。`reason` ∈ `human_replied`（从 `WAITING` 回来）/ `resumed`（从 `INTERRUPTED` 回来）。→ `RUNNING` |
 | `SessionFinished` | | `final_status` | **唯一的会话终态事件**。全部任务终态，或 `cancel_all` 硬取消。→ `final_status` |
 
 > **`SessionStatusChanged` 已删除**（进 L 档，§5）。它是事实流里唯一的命令式事件——别的都说「发生了什么」，只有它说「把状态写成 X」，于是 6 个发射点混着三类完全不同的东西。拆解如下：
@@ -191,14 +194,15 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 > `task.awaiting_needs_panel` 是单个 bool，同一 task 若 park 两次会**后写覆盖前面的**，
 > 等于把「降级污染」从会话层搬到了 task 层。字段没了，缺陷无从谈起。
 
-> **`SessionStatus` 里有两个死值**：`QUEUED` 和 `TIMEOUT` 定义在 `models.py:84`，
-> 但全仓从未被赋值过（`grep` 只命中 capability provider 的错误码 `"TIMEOUT"`，
-> 是另一回事）。状态机是它们的判据——状态机表里没有的状态就不该在值域里，
-> 同 §6 不变式 1 对事件的要求。落地时连同 `PAUSED` / `PAUSED_HITL` 一并删，
-> 值域收敛为 6 个。
+> **`SessionStatus` 已收敛为 6 个**（2026-09-02）：`RUNNING` / `WAITING` /
+> `INTERRUPTED` / `SUCCEEDED` / `FAILED` / `CANCELED`。删掉的四个：`QUEUED` 和
+> `TIMEOUT` 是死值——定义在 `models.py`、全仓从未被赋值过（`grep` 只命中 capability
+> provider 的错误码 `"TIMEOUT"`，是另一回事）；`PAUSED` / `PAUSED_HITL` 合并成
+> `WAITING`。状态机是判据——状态机表里没有的状态就不该在值域里，同 §6 不变式 1 对
+> 事件的要求。值域由 `tests/unit/test_session_status_domain.py` 钉住。
 >
 > **`TaskStatus` 相反，是不够用**：一个 `SUSPENDED` 盖住「等子任务」/「等人」/「被打断」
-> 三件事，逼得消费方去匹配 `TaskSuspended.reason`。拆成
+> 三件事，逼得消费方去匹配 `TaskSuspended.reason`。已拆成
 > `SUSPENDED` / `AWAITING_HUMAN` / `INTERRUPTED` 三个值（§2.3）。
 
 > **并行 task 状态不同时怎么办**（TaskManager 侧的两层判断）：
@@ -225,7 +229,7 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 | `TaskCreated` | | `task: {id, session_id, status, title, description, creator_agent_id, assigned_agent_id, parent_task_id, user_prompt, priority, max_retries, timeout_ms, dag_deps, interaction_mode, origin_tool_call_id, origin_tool_name, settings}` | 任务入队。建 `TaskView` |
 | `TaskStarted` | | `assigned_agent_id` | → `ACTIVE`，并回填 `assigned_agent_id` |
 | `TaskSuspended` | | `summary` `spawn_titles` | **只剩「等子任务完成」这一个语义**。→ `SUSPENDED`（非终态） |
-| `TaskAwaitingHuman` **新增** | | `hitl_id` | 这个 task 被 HITL 挂起、需要人来解决。→ `AWAITING_HUMAN` |
+| `TaskAwaitingHuman` | | `hitl_id` | 这个 task 被 HITL 挂起、需要人来解决。→ `AWAITING_HUMAN` |
 | `TaskResumed` | | `{}` | 阻塞的子任务全部终态，父任务解除挂起 → `ACTIVE` |
 | `TaskFinished` | | `outcome="success"` `summary` `outputs` | → `FINISHED`，并把会话的 `failure_counter` 清零 |
 | `TaskFailed` | | `error_code` `error_message` `retry_count` | → `FAILED`，`failure_counter += 1`。`error_code=TASK_FAILED_BY_THRESHOLD` 是熔断的聚合结果，**不计数** |
@@ -263,7 +267,7 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 
 | 事件 | payload | 含义 · 状态效果 |
 |---|---|---|
-| `RunInterrupted` **新增** | `reason` `error_code?` `error_message?` | 这次执行被**外部原因**打断（`llm_outage` / `run_crash`），不是任务逻辑决定的停。→ task `INTERRUPTED` |
+| `RunInterrupted` | `reason` `error_code?` `error_message?` | 这次执行被**外部原因**打断（`llm_outage` / `run_crash`），不是任务逻辑决定的停。→ task `INTERRUPTED` |
 
 > **这是 run 唯一真正拥有的事实。** §3.2 说 run 没有自己的状态——那是对的，
 > `RunStarted` / `RunFinished` 一直在替 task 和 session 说话。但「这次执行非正常终止」
@@ -339,8 +343,15 @@ host 自定义结局因此不必新增事件类型。
 那是同一份信息的三个副本，每一跳都可能失步（§2.1.3）。
 
 > 旧实现按 `form == "wait"` 字面量判定暂停态，host 自定义的 form 一律落错。
-> 新模型里这个判定整个不存在了——`core/hitl/status.py::paused_status_for` 连同
-> `PAUSED` / `PAUSED_HITL` 两个状态值一起删除。
+> 新模型里**会话状态**这一侧的判定整个不存在了：`PAUSED` / `PAUSED_HITL` 已从
+> `SessionStatus` 值域删除，合并成单一 `WAITING`。
+>
+> `core/hitl/status.py::paused_status_for` **保留**，但它答的是另一个问题——它服务
+> `CtxWeftRuntime.session_status_after_recover` 这个 host 只读入口，返回的
+> `"PAUSED"` / `"PAUSED_HITL"` 是**面板提示**（panel hint），按 `delivery` 判、
+> 不按 form，**不是 `SessionStatus` 值**。
+> （遗留项：`session_status_after_recover` 这个名字现在名不副实——它返回的不是会话
+> 状态。改名要动 host 契约，已记为延后项。）
 
 > **热等待窗口期间会话仍是 `RUNNING`**（2026-09-02 定案的行为变更）。热等待时 task
 > 真的还在跑——阻塞在一个 `await` 里，和阻塞在一次 LLM 调用上没有区别，没有 park、
@@ -404,9 +415,9 @@ O 档：reducer 不折叠它们（会话状态由 SM 发的事件承载），但
 
 | 事件 | payload | 含义 |
 |---|---|---|
-| `TaskQueueBlocked` **新增** | `count` | 没有能跑的任务了，剩下的都**正常地**停着（`AWAITING_HUMAN` / `SUSPENDED`）。`count` 供展示，SM 不读 |
-| `TaskQueueInterrupted` **新增** | `reason` | 没有能跑的了，且**有任务被打断**（等 `/resume`）。优先于 `Blocked`——解开它需要运维 |
-| `TaskQueueDrained` **新增** | `final_status` | 全部任务终态，可以收工 |
+| `TaskQueueBlocked` | `count` | 没有能跑的任务了，剩下的都**正常地**停着（`AWAITING_HUMAN` / `SUSPENDED`）。`count` 供展示，SM 不读 |
+| `TaskQueueInterrupted` | `reason` | 没有能跑的了，且**有任务被打断**（等 `/resume`）。优先于 `Blocked`——解开它需要运维 |
+| `TaskQueueDrained` | `final_status` | 全部任务终态，可以收工 |
 
 ### 3.4 Task / Agent · 3
 
@@ -533,7 +544,8 @@ persistence.snapshot_writer
 
 ### 5.2 `SessionStatusChanged` · 1 个
 
-拆成 `SessionInterrupted` / `SessionRecovered` / `SessionFinished` 三条具体事实（§2.1）。
+拆成 `SessionInterrupted` / `SessionWaiting` / `SessionRunning` / `SessionFinished`
+四条具体事实（§2.1.2）。
 `_apply` 保留原分支——它读 `payload["new_status"]` 直接写会话状态，存量日志靠它才能重建。
 
 **退役闸门比 HITL 那批简单**：它没有双读折叠，只有 `_apply` 的一个分支；条件只有一条——

@@ -51,9 +51,14 @@
 | `UserTurnDelivery(task_id, preface)` | 把答复作一条 user 消息注入 task 对话并重排 |
 | `NoResumeDelivery` | 纯通知 / 取消，不续跑 |
 
-会话暂停态由**未决请求的 delivery** 推导，同样不看 form：全是 `UserTurnDelivery`（软待命，
-无面板）→ `PAUSED`，其余 → `PAUSED_HITL`。判据只有一份：`core/hitl/status.py::paused_status_for`，
-`CtxWeftRuntime._derive_paused_status` 与 `reducers._apply` 的 `HITL_OPENED` 分支共用。
+**面板提示**（前端要不要出一块要人拍板的面板）由**未决请求的 delivery** 推导，同样不看
+form：全是 `UserTurnDelivery`（软待命，无面板）→ `"PAUSED"`，其余 → `"PAUSED_HITL"`。
+判据只有一份：`core/hitl/status.py::paused_status_for`，唯一消费方是 host 只读入口
+`CtxWeftRuntime.session_status_after_recover`。
+
+> **这两个字面量不是会话状态。** 会话状态的值域自 2026-09-02 起不含 `PAUSED` /
+> `PAUSED_HITL`——「等的是面板还是一句话」是 delivery 的性质，`HitlOpened` 已经载着它到了
+> 前端，会话状态再复制一份只会失步。会话级只回答「停着且正常」= `WAITING`。
 
 ## 4. 精确重入：dangling tool_call 对账
 
@@ -108,8 +113,10 @@ key 随 `HitlOpened` 落盘、随折叠装填回来；旧事件折出来的记�
 → `_hydrate_snapshot_messages`（event blob ref → memory 侧内容，纯文本零 IO）
 → `HitlRegistry.load_snapshot`。此后 registry 的一切查询只读内存。
 
-- `CtxWeftRuntime.recover()`：有未决 → 只装填 registry，会话状态如实标成 `PAUSED` / `PAUSED_HITL`，
-  **什么都不跑**（重排推迟到应答）；无未决 → 发 `SessionStatusChanged(INTERRUPTED)`，等 `/resume`。
+- `CtxWeftRuntime.recover()`：**不再按未决与否分流会话状态**，它代 TM 发一条队列信号，
+  由 `SessionManager` 推会话状态——有未决 → `TaskQueueBlocked{count}` → `SessionWaiting` →
+  `WAITING`；无未决 → `TaskQueueInterrupted{reason}` → `SessionInterrupted` → `INTERRUPTED`，
+  等 `/resume`。两条路都**什么都不跑**（重排推迟到应答）。
 - 装填出来的 pending **不带等待槽**：重启后一切皆冷。
 - 崩溃窗口兜底：已终局的 `UserTurn` 请求，其答复若还没进过对话，由
   `_inject_resolved_user_turns` 在恢复期补写（幂等键 `MemoryEvent.id = "hitlreply:{hitl_id}"`）。
@@ -120,17 +127,37 @@ key 随 `HitlOpened` 落盘、随折叠装填回来；旧事件折出来的记�
 不截尾是刻意的：未决请求的年龄没有上界，按条数/时间截尾可能漏掉一条久未终局的请求，
 从而让人还没回答的任务被重排跑起来。详见 `rebuild_hitl` 的 docstring。
 
-## 7. 投影
+## 7. 投影：分层链路，HITL 事件不写会话状态
 
-- `HitlOpened` → `PAUSED` / `PAUSED_HITL`（按 delivery，见 §3）。
-- `HitlResolved` → `RUNNING`（仅当会话仍处暂停态，不覆盖已到的终态）。
-- `SessionPausedHitl` **不再被发出**；reducer 保留该分支只为读存量日志。
+从前是一步到位：`HitlOpened` 直接把会话打成 `PAUSED` / `PAUSED_HITL`，`HitlResolved`
+再把它掰回 `RUNNING`。那让同一份信息有了第二个副本，而副本会失步——多个未决请求时，
+「后到的 user_turn 把 `PAUSED_HITL` 降成 `PAUSED`」和「解掉其中一个就回 `RUNNING`」
+两个 bug 就是失步的表现。现在改成**每层只说自己那层的事实**：
+
+| 层 | 事件 | 说了什么 |
+|----|------|----------|
+| HITL | `HitlOpened` / `HitlResolved` | 有一个请求开了 / 终局了。**不碰任何状态** |
+| task | `TaskAwaitingHuman{hitl_id}` | 这个 task 在等人 → task 状态 `AWAITING_HUMAN` |
+| TM | `TaskQueueBlocked{count}` | 队列里没有能跑的了，`count` 个在等人 |
+| session | `SessionWaiting{count}` | 会话停着，但正常 → 会话状态 `WAITING` |
+
+反向同理：人答复了 → task 重新入队 → `TaskStarted` → SM 发 `SessionRunning{reason}`。
+
+**行为变更：热等待窗口期间会话仍是 `RUNNING`。** 那时 task 真的还在跑（协程挂在等待槽上，
+没被 park），队列也没空。只有降级成冷 park、队列真的空了，会话才变 `WAITING`。
+**审批面板由 `HitlOpened` 驱动，不受影响**——变的只是会话徽标会晚一点。
+
+其余：
+
+- `SessionPausedHitl` **不再被发出**；reducer 保留该分支只为读存量日志，且把旧的两档
+  （`PAUSED` / `PAUSED_HITL`）一律折进 `WAITING`——新值域里没有那两个值。
 - pending 列表的真相源是 `HitlRegistry`，**不在 `RunStateView` 里另存一份**。
 
 ## 8. park 信号管线
 
 `HitlPark` 是 `BaseException` 子类，穿过 gateway 的 `except Exception`，由 loop 捕获后把 task
-置 `SUSPENDED`（不是 `FAILED`）。**只有 gateway 抛它**——`HitlWaiter` 连 park 都不认识，
+置「挂起」（不是 `FAILED`），并发 `TaskAwaitingHuman{hitl_id}`——投影里该 task 落
+`AWAITING_HUMAN`。**只有 gateway 抛它**——`HitlWaiter` 连 park 都不认识，
 它只返回 `None`；`core/hitl/` 不 import `core.loop` / `core.runtime`。
 
 ## 9. 不变式清单

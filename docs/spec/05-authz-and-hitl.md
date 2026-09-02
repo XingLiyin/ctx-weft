@@ -117,8 +117,12 @@ AuthorizationDecision { allowed: bool, message: str | list[ContentPart] = "",
 - `accepted` → 放行；gateway 用 `modified_arguments`（若有）执行 provider；
   `message` 作 `[Human note: …]` 并入结果（其中的图片 part 与工具结果的 part 一起进最终 content）。
 - `rejected` → 拦截，**provider 不执行**；`message` 作 `[Blocked by human: …]` 回灌。
-- 热窗口被驱逐 → `HitlPark` unwind → task `SUSPENDED`；冷应答到达后经 reconcile 重入
-  `gateway.invoke`，命中决定缓存执行（spec/07 §4）。
+- 热窗口被驱逐 → `HitlPark` unwind → 发 `TaskAwaitingHuman{hitl_id}`，task 落
+  `AWAITING_HUMAN`（不是 `SUSPENDED`——那个值现在只表示「等子任务」）；冷应答到达后经
+  reconcile 重入 `gateway.invoke`，命中决定缓存执行（spec/07 §4）。
+- **会话状态不在这条路上写**：task 落 `AWAITING_HUMAN` 后由 TM 报 `TaskQueueBlocked`、
+  `SessionManager` 发 `SessionWaiting` → 会话 `WAITING`（spec/07 §7）。
+  **热等待窗口期间会话仍是 `RUNNING`**——审批面板由 `HitlOpened` 驱动，不受影响。
 
 改写参数同样过 `_sanitize`，审计 / memory 记录用实际执行的有效参数。
 
