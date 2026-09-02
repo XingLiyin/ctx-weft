@@ -90,6 +90,12 @@ class EventType(StrEnum):
     TASK_CREATED = "TaskCreated"
     TASK_STARTED = "TaskStarted"
     TASK_SUSPENDED = "TaskSuspended"
+    # ── task/run 层「为什么停」（2026-09-02 所有权重构）──
+    # 从前三件事都压在 TASK_SUSPENDED 的 reason 字面量里，消费方只能匹配字符串。
+    # 现在各有类型：TASK_SUSPENDED（等子任务）/ TASK_AWAITING_HUMAN（等人）/
+    # RUN_INTERRUPTED（被外部打断）。判据是类型，不是 payload。
+    TASK_AWAITING_HUMAN = "TaskAwaitingHuman"   # payload: {hitl_id}
+    RUN_INTERRUPTED = "RunInterrupted"          # payload: {reason, error_code?, error_message?}
     TASK_RESUMED = "TaskResumed"
     TASK_FINISHED = "TaskFinished"
     TASK_FAILED = "TaskFailed"

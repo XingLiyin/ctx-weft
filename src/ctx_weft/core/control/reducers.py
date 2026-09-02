@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 TASK_STATUS_BY_EVENT: dict[EventType, TaskStatus] = {
     EventType.TASK_STARTED: "ACTIVE",
     EventType.TASK_SUSPENDED: "SUSPENDED",
+    EventType.TASK_AWAITING_HUMAN: "AWAITING_HUMAN",
+    EventType.RUN_INTERRUPTED: "INTERRUPTED",
     EventType.TASK_FINISHED: "FINISHED",
     EventType.TASK_FAILED: "FAILED",
     EventType.TASK_CANCELED: "CANCELED",
