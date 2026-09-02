@@ -71,26 +71,53 @@ def test_loop_side_does_not_write_task_status() -> None:
     assert offenders == []
 
 
+#: 判据里精确放过的写入点，按 (文件, 所在函数) 认——行号会漂，函数名不会。
+#: `runtime._inject_user_reply`：冷 HITL 应答落地后把 task 置回 PENDING。它在 **run 之外**
+#: （run 早已结束、TaskManager 已写定 AWAITING_HUMAN），属编排层重排的一部分，不是
+#: 「判决越界写状态」——本守卫要钉死的是 loop 内部拿 task.status 当自己的工作变量那件事。
+_ALLOWED_STATUS_WRITES: frozenset[tuple[str, str]] = frozenset({
+    ("runtime.py", "_inject_user_reply"),
+})
+
+
 def _task_status_writes(path: pathlib.Path) -> list[int]:
-    """AST 扫描：对任何 `<...>.task.status` 的赋值（含增量赋值）。
+    """AST 扫描：对 task 状态的赋值（含增量赋值）。
+
+    判据是 `<base>.status = ...`，其中 base 既认**裸名字**（`task.status`、
+    `t.status`——被删掉的那批写入绝大多数长这样）也认 `<...>.task`
+    （`state.task.status` / `ctx.task.status`）。只认后者是本守卫第一版的洞：
+    负向对照恰好只注入了被覆盖的那一种形态，于是「碰巧过」。
+    读（`if task.status != ...`）不算，只抓写。
 
     `runtime.py` 里 TM 之外的模块也在此列——`_run_loop` 的 except 链正是被搬走的
-    那批写入。读（`if task.status != ...`）不算，只抓写。
+    那批写入；确属编排层的写入走 `_ALLOWED_STATUS_WRITES` 精确放行。
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     hits: list[int] = []
 
     def _is_task_status(n: ast.expr) -> bool:
-        return (isinstance(n, ast.Attribute) and n.attr == "status"
-                and isinstance(n.value, ast.Attribute) and n.value.attr == "task")
+        if not (isinstance(n, ast.Attribute) and n.attr == "status"):
+            return False
+        base = n.value
+        return (isinstance(base, ast.Name)
+                or (isinstance(base, ast.Attribute) and base.attr == "task"))
 
-    for node in ast.walk(tree):
-        targets: list[ast.expr] = []
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-            targets = [node.target]
-        hits += [node.lineno for t in targets if _is_task_status(t)]
+    def _walk(node: ast.AST, func: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                _walk(child, child.name)
+                continue
+            targets: list[ast.expr] = []
+            if isinstance(child, ast.Assign):
+                targets = list(child.targets)
+            elif isinstance(child, (ast.AugAssign, ast.AnnAssign)):
+                targets = [child.target]
+            if (any(_is_task_status(t) for t in targets)
+                    and (path.name, func) not in _ALLOWED_STATUS_WRITES):
+                hits.append(child.lineno)
+            _walk(child, func)
+
+    _walk(tree, "<module>")
     return sorted(hits)
 
 
@@ -101,7 +128,7 @@ class _CapturingBus:
     def __init__(self) -> None:
         self.events: list = []
 
-    async def emit(self, event) -> None:  # noqa: ANN001
+    async def emit(self, event) -> None:
         self.events.append(event)
 
 
@@ -259,7 +286,7 @@ async def test_tm_terminal_status_wins_over_run_outcome() -> None:
     tm, t = _setup(bus)
 
     class _TripRunner(_OutcomeRunner):
-        async def execute(self, binding, task_id):  # noqa: ANN001, ANN201
+        async def execute(self, binding, task_id):
             self._tm.get_task(task_id).status = "FAILED"      # 熔断 trip 的先手
             return RunOutcome(kind=RunOutcomeKind.CANCELED)
 

@@ -4,7 +4,7 @@ RUN_CANCELED；已被熔断标 FAILED 的 run 被协作取消属内部清场，�
 
 Task 4 起 **TASK_CANCELED 不再由 _run_loop 发**（task 状态事件只从 TaskManager 出），
 run 侧也不再写 task.status；守卫的判据改成 except 分支里取的 cancel_takes_effect，
-task 侧的同一守卫在 `TaskManager._apply_run_outcome`（终态已坐实 → 不应用 run 的结局）。
+task 侧的同一守卫在 `TaskManager.apply_run_outcome`（终态已坐实 → 不应用 run 的结局）。
 """
 
 from __future__ import annotations

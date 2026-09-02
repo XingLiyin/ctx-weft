@@ -66,7 +66,7 @@ from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKi
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.state.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
-from ctx_weft.core.errors import crash_error_code
+from ctx_weft.core.errors import crash_error_code, crash_run_outcome
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import (
     AgentTemplate,
@@ -993,13 +993,9 @@ class CtxWeftRuntime:
                     task_manager=task_manager,
                 )
             except Exception as e:
-                # 崩溃入口（与 TaskManager._run_task 的那条同形）：_run_loop 重抛，
-                # 这里就地构造 RunOutcome 让 TM 落状态发事件，再原样抛给调用方。
-                await task_manager.apply_run_outcome(task.id, RunOutcome(
-                    kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
-                    error=str(e), error_code=crash_error_code(e),
-                    retriable=getattr(e, "retriable", True),
-                ))
+                # 崩溃入口（与 TaskManager._run_task 的那条同形、同一个工厂）：_run_loop
+                # 重抛，这里交给 TM 落状态发事件，再原样抛给调用方。
+                await task_manager.apply_run_outcome(task.id, crash_run_outcome(e))
                 raise
             # compat 路径没有队列、不经 _run_task，但一样要有人消费 run 的结局——
             # 否则 outage / park / 取消在这条路径上没人写 task 状态、没人发 task 事件
@@ -2524,11 +2520,7 @@ class CtxWeftRuntime:
             # 用的——run 得说出自己是怎么结束的，否则崩溃支会兜底报成 "completed"。
             # retriable 取 `getattr(exc, "retriable", True)`，与 outage 支硬编码的 False
             # **不同源**，不许合并成一份（见 task_disposition.py 顶部契约）。
-            state = state.apply_patch({"run_outcome": RunOutcome(
-                kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
-                error=str(exc), error_code=crash_error_code(exc),
-                retriable=getattr(exc, "retriable", True),
-            )})
+            state = state.apply_patch({"run_outcome": crash_run_outcome(exc)})
             # 运行层崩溃 = 可恢复中断的临时标记（非终态）：re-raise 交 _handle_task_failure
             # 定夺——原地重试（翻回 PENDING）或挂起等 /resume（保持 SUSPENDED + 发事件）。
             # 真失败只有 observer 判 fail 一条路（FinalizeStep 闭合胶囊、回传父亲）。

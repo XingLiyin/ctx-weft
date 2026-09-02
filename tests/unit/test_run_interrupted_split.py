@@ -64,7 +64,9 @@ async def test_retriable_crash_requeues_without_task_interrupted() -> None:
     bus = _CapturingBus()
     tm, _session, t = _tm(bus)
 
-    await tm._handle_task_failure("A", error="transient", exc=_Retriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="transient", exc=_Retriable("boom"),
+    )
 
     assert EventType.TASK_REQUEUED in _types(bus)
     assert TASK_INTERRUPTED not in _types(bus)
@@ -76,7 +78,9 @@ async def test_task_manager_emits_task_interrupted_not_run_interrupted() -> None
     bus = _CapturingBus()
     tm, _session, t = _tm(bus)
 
-    await tm._handle_task_failure("A", error="401 unauthorized", exc=_NonRetriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="401 unauthorized", exc=_NonRetriable("boom"),
+    )
 
     assert EventType.RUN_INTERRUPTED not in _types(bus)
     interrupted = [e for e in bus.events if e.type == TASK_INTERRUPTED]
@@ -94,7 +98,9 @@ async def test_retry_exhausted_falls_through_to_task_interrupted() -> None:
     tm, _session, t = _tm(bus)
     t.retry_count = t.max_retries
 
-    await tm._handle_task_failure("A", error="transient", exc=_Retriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="transient", exc=_Retriable("boom"),
+    )
 
     assert EventType.TASK_REQUEUED not in _types(bus)
     assert TASK_INTERRUPTED in _types(bus)
@@ -110,7 +116,9 @@ async def test_context_overflow_still_reaches_task_interrupted() -> None:
     exc = ContextOverflowError(context_limit=100_000, required=171_808,
                                effective_limit=92_000, reserved_output_tokens=8_000)
 
-    await tm._handle_task_failure("A", error=str(exc), exc=exc)
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error=str(exc), exc=exc,
+    )
 
     interrupted = [e for e in bus.events if e.type == TASK_INTERRUPTED]
     assert interrupted and interrupted[0].payload["error_code"] == "CONTEXT_OVERFLOW"

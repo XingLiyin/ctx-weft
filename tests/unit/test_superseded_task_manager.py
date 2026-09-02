@@ -178,7 +178,9 @@ async def test_superseded_tm_crash_suspend_does_not_announce_queue_state() -> No
     class _NonRetriable(Exception):
         retriable = False
 
-    await tm._handle_task_failure("A", error="boom", exc=_NonRetriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="boom", exc=_NonRetriable("boom"),
+    )
 
     assert signals == [], "被顶替的旧 TM 的崩溃收尾不得报队列状态"
 

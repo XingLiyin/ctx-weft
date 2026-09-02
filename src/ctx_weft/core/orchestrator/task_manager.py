@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
-from ctx_weft.core.errors import crash_error_code
+from ctx_weft.core.errors import crash_error_code, crash_run_outcome
 from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
 from ctx_weft.core.content import content_with_suffix
@@ -492,14 +492,9 @@ class TaskManager:
                 logger.warning("Task %s failed (retriable): %s", task_id, e)
             else:
                 logger.exception("Task %s failed: %s", task_id, e)
-            # 崩溃入口：`retriable` 取 `getattr(exc, "retriable", True)`——与 outage 支
-            # 硬编码的 False **不同源**，不许合并成一份（LLMOutageError.retriable 恒为
-            # True，转发会让 outage 在预算充足时被错误地原地重试；见 task_disposition.py）。
-            status = await self.apply_run_outcome(task_id, RunOutcome(
-                kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
-                error=str(e), error_code=crash_error_code(e),
-                retriable=getattr(e, "retriable", True),
-            ))
+            # 崩溃入口：结局的构造在 `crash_run_outcome` 一处（retriable 的取法是崩溃
+            # 专用的，与 outage 支硬编码的 False 不同源——契约见那个工厂的 docstring）。
+            status = await self.apply_run_outcome(task_id, crash_run_outcome(e))
             await self._settle(task_id, status)
 
     async def apply_run_outcome(self, task_id: str, outcome: RunOutcome) -> str:
@@ -726,8 +721,8 @@ class TaskManager:
         return True
 
     async def _handle_task_failure(
-        self, task_id: str, error: str = "", exc: BaseException | None = None,
-        reason: str = "run_failure_retry",
+        self, task_id: str, *, reason: str, error: str = "",
+        exc: BaseException | None = None,
     ) -> None:
         """**装配失败**专用：先尝试自动 retry，耗尽或不可重试 → 挂起等恢复（绝不落终态 FAILED）。
 
@@ -735,7 +730,8 @@ class TaskManager:
         Exception` 就地构造 `RunOutcome(INTERRUPTED, reason="run_crash")`，喂
         `disposition_for` 那张表（重试判断因此只剩一处）。本方法保留是因为装配阶段
         （assemble）没有 run、也就没有 RunOutcome，且它的 TASK_REQUEUED
-        `reason="assembly_failure"` 是对外可区分的契约。
+        `reason="assembly_failure"` 是对外可区分的契约。`reason` 因此改为必传：旧的默认值
+        `"run_failure_retry"` 随执行崩溃那条路径一起退场，留着只会是个再也不会出现的字面量。
 
 
         运行层崩溃（异常退出，未经 observer/FinalizeStep）是**可恢复中断**，不是任务失败：

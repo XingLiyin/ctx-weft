@@ -59,7 +59,9 @@ async def test_non_retriable_crash_suspends_not_fails() -> None:
     bus = _CapturingBus()
     tm, session, t = _tm(bus)
 
-    await tm._handle_task_failure("A", error="401 unauthorized", exc=_NonRetriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="401 unauthorized", exc=_NonRetriable("boom"),
+    )
 
     assert EventType.TASK_FAILED not in _types(bus)
     assert EventType.TASK_SUSPENDED not in _types(bus)   # 旧的 reason 分流已退场
@@ -83,7 +85,9 @@ async def test_retry_exhausted_suspends_not_fails() -> None:
     tm, _session, t = _tm(bus)
     t.retry_count = t.max_retries  # 自动重试已耗尽
 
-    await tm._handle_task_failure("A", error="transient", exc=_Retriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="transient", exc=_Retriable("boom"),
+    )
 
     assert EventType.TASK_FAILED not in _types(bus)
     assert EventType.TASK_REQUEUED not in _types(bus)  # 耗尽后不再重排
@@ -95,7 +99,9 @@ async def test_run_crash_does_not_touch_failure_counter() -> None:
     bus = _CapturingBus()
     tm, session, _t = _tm(bus)
 
-    await tm._handle_task_failure("A", error="boom", exc=_NonRetriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="boom", exc=_NonRetriable("boom"),
+    )
 
     assert session.failure_counter == 0
     assert EventType.SESSION_FINISHED not in _types(bus)
@@ -107,7 +113,9 @@ async def test_context_overflow_suspends_without_retry() -> None:
     exc = ContextOverflowError(context_limit=100_000, required=171_808,
                                effective_limit=92_000, reserved_output_tokens=8_000)
 
-    await tm._handle_task_failure("A", error=str(exc), exc=exc)
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error=str(exc), exc=exc,
+    )
 
     assert EventType.TASK_REQUEUED not in _types(bus)  # retriable=False：不重试
     assert EventType.TASK_FAILED not in _types(bus)
@@ -131,7 +139,9 @@ async def test_crash_suspended_task_blocks_session_finish() -> None:
     b = Task(id="B", session_id="s1", status="ACTIVE")
     tm.register_task(b)
 
-    await tm._handle_task_failure("A", error="boom", exc=_NonRetriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="boom", exc=_NonRetriable("boom"),
+    )
     await tm.on_task_finished("B", status="FINISHED")
 
     assert EventType.SESSION_FINISHED not in _types(bus)

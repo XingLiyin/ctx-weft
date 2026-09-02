@@ -174,7 +174,9 @@ async def test_run_layer_failure_suspends_not_fails() -> None:
     class _NonRetriable(Exception):
         retriable = False
 
-    await tm._handle_task_failure("A", error="unknown model", exc=_NonRetriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="unknown model", exc=_NonRetriable("boom"),
+    )
 
     assert not [e for e in bus.events if e.type == EventType.TASK_FAILED]
     interrupted = [e for e in bus.events if e.type == EventType.TASK_INTERRUPTED]
@@ -199,7 +201,9 @@ async def test_retry_emits_task_requeued() -> None:
     class _Retriable(Exception):
         retriable = True
 
-    await tm._handle_task_failure("A", error="transient", exc=_Retriable("boom"))
+    await tm._handle_task_failure(
+        "A", reason="assembly_failure", error="transient", exc=_Retriable("boom"),
+    )
 
     requeued = [e for e in bus.events if e.type == EventType.TASK_REQUEUED]
     assert requeued, "retry must emit TaskRequeued"

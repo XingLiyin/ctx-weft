@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ctx_weft.core.orchestrator.task_disposition import RunOutcome
+
 
 class CtxWeftError(Exception):
     """所有 ctx-weft 异常的基类。"""
@@ -129,6 +134,32 @@ def crash_error_code(exc: BaseException | None) -> str:
     if exc is None:
         return "RUN_CRASH"
     return getattr(exc, "code", None) or type(exc).__name__
+
+
+def crash_run_outcome(exc: BaseException) -> "RunOutcome":
+    """运行层崩溃 → `RunOutcome`。**崩溃这份结局只有这一个构造点。**
+
+    三处调用方（`TaskManager._run_task` 的 except、`runtime.run_single_task` 的
+    except、`_run_loop` 崩溃支给 `RunFinished.outcome` 用的那份）此前各内联一份同构
+    字面量——与 `crash_error_code` 当年被抽出来的理由一模一样（M3：别让同一条判据在
+    多处各写一份，改一处会静默分叉）。
+
+    `retriable=getattr(exc, "retriable", True)` 是**崩溃专用**的取法，与 outage 支
+    硬编码的 `retriable=False` **不同源、不许合并**：`LLMOutageError.retriable` 恒为
+    True（`protocols/llm.py`），转发它会让 outage 在预算充足时被错误地原地重试
+    （见 `task_disposition.py` 顶部契约）。故本工厂只服务崩溃，outage 不走这里。
+
+    放在 errors.py 而不是 task_disposition.py：与 `crash_error_code` 同处，且
+    `task_disposition` 是纯 stdlib、不引任何 ctx_weft 模块，此方向无环。
+    """
+    from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
+    return RunOutcome(
+        kind=RunOutcomeKind.INTERRUPTED,
+        reason="run_crash",
+        error=str(exc),
+        error_code=crash_error_code(exc),
+        retriable=getattr(exc, "retriable", True),
+    )
 
 
 # ── 入口内容校验 ───────────────────────────────────────────────────────────────
