@@ -20,14 +20,20 @@ from ctx_weft.core.loop.llm_gateway import (
     stream_llm_resilient,
 )
 from ctx_weft.protocols.events import EventType
+from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.core.loop.park import HitlPark
-from ctx_weft.core.orchestrator.control_capability import (
-    FINISH_TASK_NAME,
-    WAIT_FOR_USER_CAPABILITY_ID,
-)
+from ctx_weft.core.orchestrator.control_capability import FINISH_TASK_NAME
 from ctx_weft.core.state.models import NormalTaskSettings
 from ctx_weft.core.utils import effective_limit, now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
+from ctx_weft.protocols.hitl import (
+    HITL_FORM_WAIT,
+    PREFACE_AFTER_INTERRUPT,
+    PREFACE_AFTER_INTERRUPT_EDIT,
+    PREFACE_NORMAL,
+    HitlAsk,
+    UserTurnDelivery,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -469,13 +475,13 @@ async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: 
     """纯文本回合（无 tool call）收尾。
 
     interactive 普通任务：让位给用户 → HITL input 冷 park（raises HitlPark；用户回复经 runtime
-    冷 resume 作 USER_PROMPT 注入后重入 act）。auto / 非普通任务 / 无 hitl_manager：纯文本即任务
+    冷 resume 作 USER_PROMPT 注入后重入 act）。auto / 非普通任务 / 无 hitl：纯文本即任务
     产出，发 stop 事件路由 observe。
     """
     if (
         isinstance(state.task.settings, NormalTaskSettings)
         and state.task.interaction_mode == "interactive"
-        and ctx.hitl_manager is not None
+        and ctx.hitl is not None
     ):
         await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
             "turn": turn_num, "reason": "await_user"}))
@@ -564,12 +570,12 @@ async def _await_tool_or_stop(invoke_task: "asyncio.Future", ctx: LoopContext) -
 
 
 def _interrupt_pending(ctx: LoopContext) -> bool:
-    """软打断挂起中：pause_token 被 pause 且有 hitl_manager 可 park。"""
+    """软打断挂起中：pause_token 被 pause 且有 hitl 可 park。"""
     tok = ctx.pause_token
     return (
         tok is not None
         and tok.is_paused
-        and ctx.hitl_manager is not None
+        and ctx.hitl is not None
     )
 
 
@@ -631,23 +637,28 @@ async def _park_wait_for_user(
 ) -> None:
     """起 wait_for_user 冷 park：会话 PAUSED、任务 SUSPENDED，抛 HitlPark。
 
-    ``source`` 标记触发来源（``plain_text`` 纯文本暂停 / ``interrupt`` 中途打断），供前端区分。
-    ``edit=True``（仅 interrupt 的 ① 阶段，未吐 token/未进工具）→ context=``interrupt:edit``，
-    续接时 runtime 补「上一条取消」说明。
+    续跑方式由 **delivery 显式声明**，不再靠 `form == "wait"` + sentinel capability_id
+    这组跨三个模块的魔法字符串（spec §5）。``source``/``edit`` 只决定 preface：
+    ``plain_text`` → normal；``interrupt`` 已吐过 token/已进工具 → after_interrupt；
+    ``interrupt`` 且 ``edit=True``（未吐任何 token、未进工具）→ after_interrupt_edit。
     """
-    context = "interrupt:edit" if (source == "interrupt" and edit) else source
-    rid = await ctx.hitl_manager.request_parked(
-        form="wait",
+    preface = (PREFACE_AFTER_INTERRUPT_EDIT if (source == "interrupt" and edit)
+               else PREFACE_AFTER_INTERRUPT if source == "interrupt"
+               else PREFACE_NORMAL)
+    req = await ctx.hitl.open(
+        HitlAsk(
+            form=HITL_FORM_WAIT,
+            delivery=UserTurnDelivery(task_id=state.task.id, preface=preface),
+        ),
         session_id=state.session.id,
         task_id=state.task.id,
         agent_id=state.agent.id,
-        capability_id=WAIT_FOR_USER_CAPABILITY_ID,
-        question="",
-        context=context,
+        stage=HITL_STAGE_TOOL,
     )
+    # 不建等待槽 —— 本调用方随即 park 释放协程而非 await，应答必然走冷续跑。
     state.session.status = "PAUSED"
     state.task.status = "SUSPENDED"
-    raise HitlPark(hitl_id=rid)
+    raise HitlPark(hitl_id=req.id)
 
 
 async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
