@@ -33,10 +33,16 @@ def test_hitl_park_carries_ids() -> None:
 
 
 async def test_run_loop_catches_park_returns_awaiting_human() -> None:
-    """_run_loop must catch HitlPark, set task AWAITING_HUMAN, and NOT raise (no FAILED)."""
+    """_run_loop 必须接住 HitlPark、报出 awaiting_human 结局、且不抛（不落 FAILED）。
+
+    Task 4 起 task.status / TaskAwaitingHuman 都不在 run 里落地：run 只交回
+    `RunOutcome(kind=awaiting_human, hitl_id=...)`，TaskManager 据它写状态发事件
+    （TM 侧的对照断言见 tests/unit/test_task_manager_owns_status.py）。
+    """
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import CtxWeftRuntime, ProviderRegistry
+    from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
     from ctx_weft.protocols.events import EventType
     from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
@@ -134,23 +140,23 @@ async def test_run_loop_catches_park_returns_awaiting_human() -> None:
     )
 
     # ── assertions ───────────────────────────────────────────────────────────
-    assert task.status == "AWAITING_HUMAN", f"expected AWAITING_HUMAN, got {task.status!r}"
+    # run 侧不写 task 状态了；park 的全部信息落在 RunOutcome 上，交给 TaskManager。
+    assert task.status == "ACTIVE", f"run 不该改 task.status, got {task.status!r}"
+    outcome = final_state.run_outcome
+    assert outcome is not None and outcome.kind is RunOutcomeKind.AWAITING_HUMAN
+    assert outcome.hitl_id == "req_park"
 
     run_finished = next((e for e in collected if e.type == EventType.RUN_FINISHED), None)
     assert run_finished is not None, "RUN_FINISHED not emitted"
-    assert run_finished.payload["final_status"] == "AWAITING_HUMAN"
+    assert run_finished.payload["outcome"] == "awaiting_human"
     assert run_finished.payload.get("error") is None
 
     task_failed_events = [e for e in collected if e.type == "TaskFailed"]
     assert task_failed_events == [], f"unexpected TaskFailed events: {task_failed_events}"
 
-    # park 是 **task 级事实**：这个 task 卡住了、卡它的是哪个 HITL 请求。会话怎么了
-    # 不在这里宣布（Task 6：三层各发各的）。旧的 TaskSuspended(reason="hitl_park")
-    # 已退场——判据是事件类型，不是 payload 里的字符串。
-    awaiting = [e for e in collected if e.type == EventType.TASK_AWAITING_HUMAN]
-    assert len(awaiting) == 1, f"expected one TaskAwaitingHuman, got {len(awaiting)}"
-    assert awaiting[0].task_id == "tsk_park_1"
-    assert awaiting[0].payload["hitl_id"] == "req_park"
+    # park 是 **task 级事实**：这个 task 卡住了、卡它的是哪个 HITL 请求——但它由
+    # TaskManager 宣布（Task 4：task 状态事件只从 TM 出），run 里一条都不该有。
+    assert [e for e in collected if e.type == EventType.TASK_AWAITING_HUMAN] == []
     assert [e for e in collected if e.type == EventType.TASK_SUSPENDED] == []
 
 

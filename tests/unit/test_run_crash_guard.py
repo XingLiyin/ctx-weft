@@ -102,4 +102,6 @@ async def test_run_interrupted_still_emitted_when_task_not_terminal():
     assert EventType.RUN_INTERRUPTED in types
     run_interrupted = [e for e in seen if e.type == EventType.RUN_INTERRUPTED]
     assert run_interrupted[0].payload["reason"] == "run_crash"
-    assert task.status == "SUSPENDED"
+    # Task 4：崩溃支不再写 task.status（那句 `= "SUSPENDED"` 是过渡态，随即被 TM 的
+    # 处置覆盖）。task 落 PENDING/INTERRUPTED 由 TaskManager 据崩溃 RunOutcome 定。
+    assert task.status == "ACTIVE"

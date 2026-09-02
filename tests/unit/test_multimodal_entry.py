@@ -108,7 +108,8 @@ async def test_run_single_task_root_task_description_is_text_not_truncated_parts
 
     async def _fake_execute_task(**kwargs):
         captured["task"] = kwargs["task"]
-        return SimpleNamespace(), SimpleNamespace()
+        # run_outcome=None：run 的结局是 run_single_task 收尾时要消费的（Task 4）。
+        return SimpleNamespace(run_outcome=None), SimpleNamespace()
 
     runtime._execute_task = _fake_execute_task  # type: ignore[method-assign]
 

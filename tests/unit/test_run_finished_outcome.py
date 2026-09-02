@@ -320,7 +320,11 @@ async def test_will_retry_is_unchanged() -> None:
 
 
 async def test_final_status_key_still_present_but_deprecated() -> None:
-    """`final_status` 保留一个发布周期，值仍是 task.status，供既有断言过渡。"""
+    """`final_status` 保留一个发布周期，值是**发 RUN_FINISHED 那一刻**的 task.status。
+
+    Task 4 起 run 不写 task 状态，这个值因此多半是 ACTIVE——它已经不是 task 的终态
+    （终态由随后 TaskManager 的处置写定），正是 host 必须改读 `outcome` 的原因。
+    """
     events = await _events_from_park()
     ev = next(e for e in events if e.type == EventType.RUN_FINISHED)
-    assert ev.payload["final_status"] == "AWAITING_HUMAN"
+    assert ev.payload["final_status"] == "ACTIVE"

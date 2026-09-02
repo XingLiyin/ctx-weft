@@ -139,7 +139,9 @@ async def test_finalize_retry_no_process_report_no_user_message() -> None:
 
     assert task.process_report is None  # 不再写 process_report（旧 Progress So Far 字段路径已废）
     assert task.process_report_at is None
-    assert task.retry_count == 1
+    # retry_count 的 +1 归 TaskManager（Task 4：处置表算新值、TM 写回）——finalize 里
+    # 再加一次会让重试预算一轮烧两格。这里断言 finalize **没动**它。
+    assert task.retry_count == 0
     recs = await mem.recall_recent(
         MemoryAddress(session_id="s1", task_id="T1", agent_id="ag1"), [T.USER_PROMPT], 10, _pctx()
     )

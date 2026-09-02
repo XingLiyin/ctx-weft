@@ -147,6 +147,8 @@ async def test_outage_emits_both_run_and_task_interrupted() -> None:
     assert run_evs and run_evs[0].payload["reason"] == "llm_outage"
     assert run_evs[0].run_id
     assert task_evs, "outage 挂起也要有 task 域的事实，否则投影停在 ACTIVE"
-    assert task_evs[0].run_id, "outage 的 TaskInterrupted 从 run 里发，带 run_id"
+    # Task 4：TaskInterrupted 改由 TaskManager 发——TM 在 run 外面、拿不到 run_id，
+    # 故这条 task 域事实的 run_id 是 None（run 域那条照旧带，见上面 run_evs 的断言）。
+    assert task_evs[0].run_id is None
     assert task_evs[0].payload["reason"] == "llm_outage"
     assert EventType.TASK_QUEUE_INTERRUPTED in [e.type for e in seen]

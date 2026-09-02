@@ -304,8 +304,9 @@ async def test_cancellation_produces_canceled_outcome_with_no_reason() -> None:
     state, task = await run_until_cancel()
     assert state.run_outcome.kind is RunOutcomeKind.CANCELED
     assert state.run_outcome.reason == ""
-    # 旧路径仍在：task.status 仍然照今天的行为置 CANCELED。
-    assert task.status == "CANCELED"
+    # Task 4：run 不写 task 状态了——CANCELED 由 TaskManager 据本 outcome 落
+    # （对照断言见 tests/unit/test_task_manager_owns_status.py）。
+    assert task.status == "ACTIVE"
 
 
 # ── crash（runtime._run_loop 的泛 except Exception） ──────────────────────────

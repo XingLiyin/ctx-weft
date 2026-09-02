@@ -1,6 +1,10 @@
-"""_run_loop A1 守卫（Task 10）：was_cancelled 只在 task.status == "CANCELED" 时才发
-RUN_CANCELED + TASK_CANCELED；已被熔断标 FAILED 的 run 被协作取消属内部清场，两条都不发
-（否则 host/postgres 投影会把 FAILED 盖成 CANCELED）。RUN_FINISHED 无条件发出。
+"""_run_loop A1 守卫（Task 10）：只有这次取消真的会让 task 翻成 CANCELED 时才发
+RUN_CANCELED；已被熔断标 FAILED 的 run 被协作取消属内部清场，不发（否则 host/postgres
+投影会把 FAILED 盖成 CANCELED）。RUN_FINISHED 无条件发出。
+
+Task 4 起 **TASK_CANCELED 不再由 _run_loop 发**（task 状态事件只从 TaskManager 出），
+run 侧也不再写 task.status；守卫的判据改成 except 分支里取的 cancel_takes_effect，
+task 侧的同一守卫在 `TaskManager._apply_run_outcome`（终态已坐实 → 不应用 run 的结局）。
 """
 
 from __future__ import annotations
@@ -84,11 +88,15 @@ async def test_was_cancelled_and_task_failed_suppresses_cancel_events():
     assert EventType.RUN_CANCELED not in types
     assert EventType.TASK_CANCELED not in types
     assert EventType.RUN_FINISHED in types
-    assert task.status == "FAILED"  # 未被 except 分支覆写（FAILED 在排除元组里）
+    assert task.status == "FAILED"  # run 侧不写状态；FAILED 是熔断先手写的，原样保留
 
 
-async def test_was_cancelled_and_task_canceled_emits_both_events():
-    """回归：普通协作取消（task 未处于任何终态）本 run 自己置 CANCELED → 两条事件照发。"""
+async def test_was_cancelled_and_task_not_terminal_emits_run_canceled():
+    """回归：普通协作取消（task 未处于任何终态）→ RUN_CANCELED 照发。
+
+    TASK_CANCELED 不在这里发了（Task 4）：run 交回 `RunOutcome(kind=canceled)`，
+    由 TaskManager 落 CANCELED 并发事件。
+    """
     runtime = _runtime()
     task = Task(id="c1", session_id="s1", status="ACTIVE")
 
@@ -96,6 +104,6 @@ async def test_was_cancelled_and_task_canceled_emits_both_events():
     types = [e.type for e in seen]
 
     assert EventType.RUN_CANCELED in types
-    assert EventType.TASK_CANCELED in types
+    assert EventType.TASK_CANCELED not in types      # 只从 TaskManager 出
     assert EventType.RUN_FINISHED in types
-    assert task.status == "CANCELED"
+    assert task.status == "ACTIVE"                   # run 侧不写状态

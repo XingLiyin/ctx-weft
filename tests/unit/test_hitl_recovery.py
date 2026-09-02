@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
@@ -351,7 +352,10 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
 
     async def _runner(_sid, tid):
         ran.append(tid)
-        tm.get_task(tid).status = "SUSPENDED"   # 重新 park，避免 stub 无限重排；owner 保持存活
+        # 重新 park，避免 stub 无限重排；owner 保持存活。Task 4 起「这次 run 停在哪」
+        # 走返回值（RunOutcome），不再由 runner 直接写 task.status。
+        ran_outcome = RunOutcome(kind=RunOutcomeKind.SUSPENDED_ON_CHILDREN)
+        return ran_outcome
 
     tm.set_runner(StubRunner(tm, _runner))
     tm.register_task(Task(id="tsk_A", session_id="ses_1", status="SUSPENDED", settings=NormalTaskSettings()))

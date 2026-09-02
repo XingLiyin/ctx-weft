@@ -68,4 +68,5 @@ async def test_only_the_first_parking_tool_call_is_invoked() -> None:
     # 抛出的正是**第一个**的 park——「挡住这个 task 的那一个请求」唯一确定。
     assert caught.value.hitl_id == "hit_for_tc_1"
     assert caught.value.tool_call_id == "tc_1"
-    assert state.task.status == "SUSPENDED"
+    # park 不写状态：AWAITING_HUMAN 由 TaskManager 据 RunOutcome 落（Task 4）
+    assert state.task.status == "ACTIVE"

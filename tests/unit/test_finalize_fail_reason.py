@@ -4,6 +4,11 @@
 展示成「死因」，而 observer 专门写的 task_failure_reason（→ task.error）从未出核。
 error_message = task.error；无死因（如规则 observe 判死）置空——过程复述不冒充死因，
 固定提示文案由 host 合成 notice 时按 error_code 补。
+
+Task 4 起 **TaskFailed 由 TaskManager 发**：FinalizeStep 只产出 `RunOutcome`
+（带 observer 的原值 verdict + task.error），payload 由 `disposition_for` 算。
+本文件因此改成「跑完 FinalizeStep → 把它产出的 RunOutcome 喂处置表 → 断 payload」，
+**期望值一字未改**——变的只是这份 payload 从哪条代码路径出来。
 """
 
 from __future__ import annotations
@@ -13,8 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
+from ctx_weft.core.orchestrator.task_disposition import disposition_for
 from ctx_weft.core.loop.steps.observe import Verdict
 from ctx_weft.core.state.models import NormalTaskSettings, Task
 from ctx_weft.protocols import (
@@ -62,10 +67,13 @@ async def _failed_state(mem, *, task_error: str | None, act_recap: str):
                            scope=scope, task=task, agent=agent, verdict=verdict)
 
 
-def _task_failed_payload(outcome_events) -> dict:
-    failed = [e for e in outcome_events if e.type == EventType.TASK_FAILED]
-    assert len(failed) == 1
-    return failed[0].payload
+def _task_failed_payload(step_outcome, task) -> dict:
+    """FinalizeStep 的 RunOutcome → 处置表 → TaskManager 会发的那条 TaskFailed 的 payload。"""
+    run_outcome = step_outcome.state_patch["run_outcome"]
+    disp = disposition_for(run_outcome, retry_count=task.retry_count,
+                           max_retries=task.max_retries)
+    assert disp.event_type == "TaskFailed" and disp.status == "FAILED"
+    return disp.payload
 
 
 async def _retry_exhausted_state(mem, *, task_error: str | None):
@@ -92,7 +100,7 @@ async def test_retry_exhausted_downgrade_has_own_code_and_blocker() -> None:
     mem = InMemoryMemoryProvider()
     state = await _retry_exhausted_state(mem, task_error="登录页有人机校验，自动化被拦")
     outcome = await FinalizeStep().execute(state, _loop_ctx(mem))
-    payload = _task_failed_payload(outcome.events)
+    payload = _task_failed_payload(outcome, state.task)
     assert payload["error_code"] == "TASK_FAILED_RETRY_EXHAUSTED"
     assert payload["error_message"] == "登录页有人机校验，自动化被拦"
     assert payload["retry_count"] == state.task.max_retries
@@ -104,7 +112,7 @@ async def test_retry_exhausted_without_blocker_message_empty() -> None:
     mem = InMemoryMemoryProvider()
     state = await _retry_exhausted_state(mem, task_error=None)
     outcome = await FinalizeStep().execute(state, _loop_ctx(mem))
-    payload = _task_failed_payload(outcome.events)
+    payload = _task_failed_payload(outcome, state.task)
     assert payload["error_code"] == "TASK_FAILED_RETRY_EXHAUSTED"
     assert payload["error_message"] == ""
 
@@ -115,7 +123,7 @@ async def test_error_message_prefers_task_error() -> None:
     state = await _failed_state(
         mem, task_error="第 2 步 API 调用 403：凭据无权限", act_recap="我调了 A、B 两个工具")
     outcome = await FinalizeStep().execute(state, _loop_ctx(mem))
-    assert _task_failed_payload(outcome.events)["error_message"] == "第 2 步 API 调用 403：凭据无权限"
+    assert _task_failed_payload(outcome, state.task)["error_message"] == "第 2 步 API 调用 403：凭据无权限"
 
 
 async def test_error_message_empty_without_task_error() -> None:
@@ -123,4 +131,4 @@ async def test_error_message_empty_without_task_error() -> None:
     mem = InMemoryMemoryProvider()
     state = await _failed_state(mem, task_error=None, act_recap="[No actor execution recorded]")
     outcome = await FinalizeStep().execute(state, _loop_ctx(mem))
-    assert _task_failed_payload(outcome.events)["error_message"] == ""
+    assert _task_failed_payload(outcome, state.task)["error_message"] == ""

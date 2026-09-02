@@ -1,7 +1,13 @@
-"""_run_loop routes ContextOverflowError to recoverable SUSPENDED (interrupted), not terminal FAILED.
+"""溢出 = 可恢复中断（INTERRUPTED），不是终态 FAILED。
 
 溢出不再终态：retriable=False → 不重试、挂起等 /resume；用户换更大窗口的模型恢复
 （recover_session 的 llm_model 覆盖 + 窗口参数同步）。错误文案仍随 task.error 抵达 host。
+
+Task 4 起状态由 TaskManager 据 RunOutcome 落：崩溃 + retriable=False → INTERRUPTED
+（`disposition_for` 的 INTERRUPTED 支）。此前 `_run_loop` 在崩溃支就地写的那个
+SUSPENDED 只是 run 内的过渡值——真会话里它随即被 `_suspend_task_interrupted` 覆写成
+INTERRUPTED，compat 路径（run_single_task）因为没人接手才把它留在了 SUSPENDED。
+现在两条路径都走同一张处置表，落的都是 INTERRUPTED。
 """
 import pytest
 
@@ -65,13 +71,12 @@ async def test_overflow_marks_task_suspended_not_failed():
         TaskManager.register_task = orig_register
 
     task = registered["task"]
-    # 溢出 = 可恢复中断：挂起等 /resume，不是终态失败
-    assert task.status == "SUSPENDED"
+    # 溢出 = 可恢复中断：停在 INTERRUPTED 等 /resume，不是终态失败
+    assert task.status == "INTERRUPTED"
     assert "171808" in task.error or "171,808" in task.error
 
-    # 本 harness 直驱 _execute_task/_run_loop，不经 TaskManager._run_task；
-    # SessionStatusChanged(INTERRUPTED) 由 TaskManager._suspend_task_interrupted 挂起终局发，
-    # 不在本层——此处仍应为空（该事件由 test_run_crash_suspend.py 覆盖）。
+    # 会话状态不由 TM 改写（归 SessionManager，判据是 TM 的聚合信号）——
+    # 此处仍应为空（SessionStatusChanged 的覆盖见 test_run_crash_suspend.py）。
     status_events = [
         e for e in seen
         if getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
@@ -81,7 +86,8 @@ async def test_overflow_marks_task_suspended_not_failed():
     # 不发 TASK_FAILED；TaskSuspended + SessionStatusChanged(INTERRUPTED) 由
     # TaskManager._suspend_task_interrupted 发（tests/unit/test_run_crash_suspend.py 覆盖）
     assert not [e for e in seen if getattr(e, "type", None) == EventType.TASK_FAILED]
-    # RUN_FINISHED 反映挂起（可恢复中断），且不再自动重试
+    # RUN_FINISHED 说出 run 自己的结局（interrupted），且不再自动重试。
+    # `final_status` 已废弃：Task 4 起 run 不写 task 状态，它只是发事件那一刻的值。
     finished = [e for e in seen if getattr(e, "type", None) == EventType.RUN_FINISHED]
-    assert finished and finished[-1].payload.get("final_status") == "SUSPENDED"
+    assert finished and finished[-1].payload.get("outcome") == "interrupted"
     assert finished[-1].payload.get("will_retry") is False

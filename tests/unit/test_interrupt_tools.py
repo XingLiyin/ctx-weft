@@ -109,7 +109,8 @@ async def test_interrupt_between_tools_cancels_not_started():
     with pytest.raises(HitlPark):
         await ActStep().execute(state, ctx)
 
-    assert task.status == "SUSPENDED"
+    # park 不写状态：AWAITING_HUMAN 由 TaskManager 据 RunOutcome 落（Task 4）
+    assert task.status == "ACTIVE"
     assert provider.calls == ["mcp:t:a"]            # tc_b never invoked
     res = await _tool_results(mem, ctx, state.scope)
     by_id = {r.metadata.get("tool_call_id"): r for r in res}
@@ -135,7 +136,8 @@ async def test_interrupt_during_tool_marks_interrupted_and_cancels_rest():
     with pytest.raises(HitlPark):
         await run
 
-    assert task.status == "SUSPENDED"
+    # park 不写状态：AWAITING_HUMAN 由 TaskManager 据 RunOutcome 落（Task 4）
+    assert task.status == "ACTIVE"
     res = await _tool_results(mem, ctx, state.scope)
     by_id = {r.metadata.get("tool_call_id"): r for r in res}
     assert by_id["c_a"].metadata.get("interrupted") is True

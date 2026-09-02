@@ -1,7 +1,8 @@
 """observe 三态机 + report_task_outcome 枚举。
 
 锁定：
-- report_task_outcome 接受 success/retry/fail，写 task.observer_outcome + task.status
+- report_task_outcome 接受 success/retry/fail，写 task.observer_outcome（**不写
+  task.status**：判决归 loop、状态归 TaskManager，见 task_disposition.disposition_for）
 - 护栏：success 但无 outputs → 降级 retry
 - 非法值（含旧 active/ask_human）→ retry
 - ObserveStep 规则降级：机械退出(max_turns/context_limit) → retry；正常退出 → success
@@ -34,7 +35,7 @@ def test_assessment_success() -> None:
     t = _task(outputs="done")
     report_task_outcome(task_status="success", act_recap="ok", ctx=_ctx(t))
     assert t.observer_outcome == "success"
-    assert t.status == "FINISHED"
+    assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
 def test_assessment_fail() -> None:
@@ -43,7 +44,7 @@ def test_assessment_fail() -> None:
         task_status="fail", act_recap="bad", task_failure_reason="root cause", ctx=_ctx(t)
     )
     assert t.observer_outcome == "fail"
-    assert t.status == "FAILED"
+    assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
     assert t.error == "root cause"
 
 
@@ -55,7 +56,7 @@ def test_assessment_retry_records_blocker() -> None:
         task_failure_reason="登录页有人机校验，自动化被拦", ctx=_ctx(t),
     )
     assert t.error == "登录页有人机校验，自动化被拦"
-    assert t.status == "PENDING"
+    assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
 def test_assessment_success_clears_stale_blocker() -> None:
@@ -64,7 +65,7 @@ def test_assessment_success_clears_stale_blocker() -> None:
     t.error = "旧受阻原因"
     report_task_outcome(task_status="success", act_recap="ok", ctx=_ctx(t))
     assert t.error is None
-    assert t.status == "FINISHED"
+    assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
 def test_assessment_retry() -> None:
@@ -73,7 +74,7 @@ def test_assessment_retry() -> None:
         task_status="retry", act_recap="more needed", next_step_hint="do X", ctx=_ctx(t)
     )
     assert t.observer_outcome == "retry"
-    assert t.status == "PENDING"
+    assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
     # 生命周期分离：act_recap 是永久记录（→ 段摘要 / finish 对），恒为纯复述；
     # next_step_hint 是只对下一次 attempt 有效的一次性转向 → 单独字段 → guidance（不入 memory）。
     assert t.process_report == "more needed", (
@@ -87,7 +88,7 @@ def test_assessment_success_without_outputs_downgrades_to_retry() -> None:
     t = _task(outputs=None)
     report_task_outcome(task_status="success", act_recap="claims done", ctx=_ctx(t))
     assert t.observer_outcome == "retry"  # 护栏：无终稿 → 重试
-    assert t.status == "PENDING"
+    assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
 def test_guardrail_hint_goes_to_next_step_hint_not_process_report() -> None:
@@ -140,7 +141,7 @@ def test_rule_observe_mechanical_exit_is_retry() -> None:
         t = _task()
         v = ObserveStep()._rule_observe(_state(reason, t))
         assert v.task_outcome == "retry", reason
-        assert t.status == "PENDING"
+        assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
         assert t.observer_outcome == "retry"
 
 
@@ -148,7 +149,7 @@ def test_rule_observe_normal_exit_is_success() -> None:
     t = _task()
     v = ObserveStep()._rule_observe(_state("normal", t))
     assert v.task_outcome == "success"
-    assert t.status == "FINISHED"
+    assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
 def test_rule_observe_no_transcript_is_fail() -> None:
@@ -156,7 +157,7 @@ def test_rule_observe_no_transcript_is_fail() -> None:
     state = SimpleNamespace(transcript=[], act_exit_reason="normal", task=t)
     v = ObserveStep()._rule_observe(state)
     assert v.task_outcome == "fail"
-    assert t.status == "FAILED"
+    assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
 # ── _should_use_llm gate tests ────────────────────────────────────────────────

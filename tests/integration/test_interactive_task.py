@@ -71,7 +71,8 @@ async def test_interactive_plain_text_parks_for_user() -> None:
     with pytest.raises(HitlPark):
         await ActStep().execute(state, ctx)
 
-    assert task.status == "SUSPENDED"
+    # park 不写 task 状态（Task 4）：AWAITING_HUMAN 由 TaskManager 据 RunOutcome 落。
+    assert task.status == "ACTIVE"
     assert task.outputs is None                       # 纯文本不是产出
     pend = hitl.list_pending("s1")
     assert len(pend) == 1
