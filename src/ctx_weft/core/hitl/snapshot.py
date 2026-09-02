@@ -36,15 +36,20 @@ class HitlSnapshot:
     pending: dict[str, PendingHitl] = field(default_factory=dict)
     decisions_for: dict[tuple[str, str, str], tuple[HitlDecision, dict[str, Any] | None]] = field(
         default_factory=dict)
-    #: `decisions_for` 同键 → 那条**已终局请求本身**（`task_id` / `delivery` / `form` /
-    #: `created_at` 都在）。
+    #: `hitl_id` → 那条**已终局请求本身**（`task_id` / `delivery` / `form` /
+    #: `created_at` / `decision` 都在）。取消（cancelled）不收录——它不是可续跑的决定。
     #:
-    #: 为什么单开一份而不只留 `(decision, resume_state)`：崩溃窗口的兜底
-    #: （`restore` 要重排「挂在已终局 HITL 上」的 task，Task 9）判据是 **task_id**，
-    #: 而 `decisions_for` 的值里没有它。少了这一份，`resolved_for_session()` 返回的
-    #: 全是 `task_id=""` 的占位，重排集合恒为空——「人答过了、会话永远醒不过来」这条
-    #: 故障就悄悄留在原地。
+    #: **键是 `hitl_id`，不是 `decisions_for` 的三元组**：`decisions_for` 是决定缓存，
+    #: 它的三维键（session / tool_call / stage）是一条安全边界，不能动；而本表要回答的是
+    #: 「这个 session 里哪些请求已终局」，对**没有 tool_call_id 的请求同样成立**——
+    #: `_park_wait_for_user`（`act.py`）开的 `UserTurn` park 就没有 tool_call_id，用三元组
+    #: 做键会把整整一类请求排除在外（Task 9 复审 Finding 2）。
+    #:
+    #: 为什么单开一份而不只留 `decisions_for` 的 `(decision, resume_state)`：那个值里
+    #: 没有 `task_id`、没有 `delivery`。少了这一份，`load_snapshot` 装出来的全是
+    #: `task_id=""` 的占位，`resolved_for_session()` 既认不出该唤醒哪个 task、也认不出
+    #: 哪些是 `UserTurn`——「人答过了，那句话却静默消失」这条故障就留在原地。
     #:
     #: 可选：手工构造的快照（既有单测、host 直接喂）不填它，`load_snapshot` 退回
     #: 只带决定的占位项，行为与本字段引入之前逐字节一致。
-    resolved: dict[tuple[str, str, str], PendingHitl] = field(default_factory=dict)
+    resolved: dict[str, PendingHitl] = field(default_factory=dict)

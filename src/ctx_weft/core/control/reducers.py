@@ -850,19 +850,23 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 outcome=outcome, message=content_from_jsonable(p.get("message") or ""),
                 modified_arguments=p.get("modified_arguments"),
             )
-            if outcome != HITL_OUTCOME_CANCELLED and req.tool_call_id:
-                key = (req.session_id, req.tool_call_id, req.stage)
-                snap.decisions_for[key] = (decision, req.resume_state)
-                snap.resolved[key] = _as_resolved(req, decision, ev.timestamp)
+            if outcome != HITL_OUTCOME_CANCELLED:
+                # `resolved` **不看 tool_call_id**：`UserTurn` 的 park 本就没有 tool_call，
+                # 按它过滤会把整整一类已终局请求丢掉（复审 Finding 2）。
+                snap.resolved[rid] = _as_resolved(req, decision, ev.timestamp)
+                if req.tool_call_id:
+                    key = (req.session_id, req.tool_call_id, req.stage)
+                    snap.decisions_for[key] = (decision, req.resume_state)
 
         elif ev.type in _HITL_RESOLVE_TYPES:
             snap.pending.pop(rid, None)
             req = opened.get(rid)
             decision = _legacy_decision(ev.type, p)
-            if req is None or decision is None or not req.tool_call_id:
-                continue
-            key = (req.session_id, req.tool_call_id, req.stage)
-            snap.decisions_for[key] = (decision, req.resume_state)
-            snap.resolved[key] = _as_resolved(req, decision, ev.timestamp)
+            if req is None or decision is None:
+                continue                      # HITL_CANCELLED / 不可用决定：按未决重问
+            snap.resolved[rid] = _as_resolved(req, decision, ev.timestamp)
+            if req.tool_call_id:              # 决定缓存只对得上 tool_call 的请求有意义
+                key = (req.session_id, req.tool_call_id, req.stage)
+                snap.decisions_for[key] = (decision, req.resume_state)
 
     return snap

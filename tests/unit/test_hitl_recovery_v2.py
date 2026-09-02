@@ -138,6 +138,49 @@ def _resolved_but_never_resumed_tool_result() -> list[Event]:
     ]
 
 
+def _new_model_resolved_tool_result() -> list[Event]:
+    """**新两事件模型**的已终局 tool_result：HITL_OPENED + HITL_RESOLVED，task 仍 SUSPENDED。
+
+    旧投影 reducer 根本没有 HITL_OPENED 分支，这条流对它是透明的。
+    """
+    return [
+        *_session_prelude(),
+        _ev(5, EventType.HITL_OPENED, task_id=TID, hitl_id="hit_1", form="approval",
+            delivery={"kind": "tool_result", "tool_call_id": "call_1"},
+            tool_call_id="call_1", stage="authz", prompt="ok?"),
+        _ev(6, EventType.TASK_SUSPENDED, task_id=TID),
+        _ev(7, EventType.HITL_RESOLVED, task_id=TID, hitl_id="hit_1",
+            outcome="accepted", message="go"),
+    ]
+
+
+def _new_model_unresolved_tool_result() -> list[Event]:
+    """新两事件模型的**未决** HITL：旧投影看不见它 → 旧实现会把任务重排（Critical）。"""
+    return [
+        *_session_prelude(),
+        _ev(5, EventType.HITL_OPENED, task_id=TID, hitl_id="hit_1", form="approval",
+            delivery={"kind": "tool_result", "tool_call_id": "call_1"},
+            tool_call_id="call_1", stage="authz", prompt="ok?"),
+        _ev(6, EventType.TASK_SUSPENDED, task_id=TID),
+    ]
+
+
+def _resolved_user_turn_never_injected() -> list[Event]:
+    """`wait_for_user` 已被应答，但进程在注入之前就死了。
+
+    关键形状：`UserTurn` 的 park **没有 tool_call_id**（`act.py:_park_wait_for_user`）。
+    """
+    return [
+        *_session_prelude(),
+        _ev(5, EventType.HITL_OPENED, task_id=TID, hitl_id="hit_1", form="wait",
+            delivery={"kind": "user_turn", "task_id": TID, "preface": "normal"},
+            stage="tool", agent_id="agt_root", prompt=""),
+        _ev(6, EventType.TASK_SUSPENDED, task_id=TID),
+        _ev(7, EventType.HITL_RESOLVED, task_id=TID, hitl_id="hit_1",
+            outcome="accepted", message="use postgres"),
+    ]
+
+
 # ── runtime 装配 ────────────────────────────────────────────────────────────
 
 
@@ -174,13 +217,34 @@ def _task_status(rt, task_id: str) -> str:
     return task.status
 
 
+def _tm(rt):
+    tm = rt._task_managers.get(SID)
+    assert tm is not None, "recover_session should have registered a TaskManager"
+    return tm
+
+
 async def _drained_tasks(rt) -> list[str]:
-    """实际被派发跑起来的 task —— 以「LLM 被调用过」为证（与既有恢复测试同口径）。"""
+    """实际被派发跑起来的 task —— 以「LLM 被调用过」为证（与既有恢复测试同口径）。
+
+    **只用于肯定断言**：轮询等一个必然发生的事件是可靠的；等一个「不该发生」的事件
+    则是天然 flaky 的，那一侧改用 `restore` 之后的确定性状态（见
+    `test_a_task_with_an_unresolved_hitl_stays_parked_and_is_not_requeued`）。
+    """
     for _ in range(40):
         if rt._test_llm.last_request is not None:
             return [TID]
         await asyncio.sleep(0.02)
     return []
+
+
+async def _hitl_reply_prompts(rt, task_id: str = TID, agent_id: str = "agt_root") -> list:
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
+    scope = MemoryAddress(session_id=SID, task_id=task_id, agent_id=agent_id)
+    pctx = ProviderContext(session_id=SID, tenant_id="default", task_id=task_id,
+                           agent_id=agent_id)
+    view = await rt.providers.get_memory().load_view(
+        scope, MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    return [r for r in view if r.metadata.get("source") == "hitl_reply"]
 
 
 def _is_event_side_ref(message) -> bool:
@@ -272,47 +336,50 @@ async def test_session_status_is_empty_when_nothing_is_pending():
 
 
 async def test_a_task_with_an_unresolved_hitl_stays_parked_and_is_not_requeued():
-    """最高风险的一条：人还没答，任务绝不能自己跑起来。"""
+    """最高风险的一条：人还没答，任务绝不能自己跑起来。
+
+    断言是**确定性**的：`restore` 在 `recover_session` 返回之前同步跑完，被重排的 task
+    在那一刻就已经被改成 `PENDING` 并入队。所以「仍是 SUSPENDED 且队列里没有它」是一个
+    不依赖时序的判据——不必去轮询一个「不该发生」的事件。
+    """
     rt = await _runtime_with_events(_pending_with_tool_result_delivery())
     await rt.recover_session(SID)
-    assert _task_status(rt, TID) == "SUSPENDED"
-    assert await _drained_tasks(rt) == []
+    tm = _tm(rt)
+    assert tm.get_task(TID).status == "SUSPENDED"
+    assert not tm._queue.has_pending()
+    assert rt._test_llm.last_request is None
+
+
+async def test_a_new_model_unresolved_hitl_also_keeps_its_task_parked():
+    """基线的 Critical：旧投影 reducer 没有 HITL_OPENED 分支 → parked 集合为空 → 人还
+    没答，任务就被重排跑起来了。parked 真相源改成 registry 之后这条才成立。"""
+    rt = await _runtime_with_events(_new_model_unresolved_tool_result())
+    await rt.recover_session(SID)
+    tm = _tm(rt)
+    assert [r.tool_call_id for r in rt.hitl_registry.list_pending(SID)] == ["call_1"]
+    assert tm.get_task(TID).status == "SUSPENDED"
+    assert not tm._queue.has_pending()
+    assert rt._test_llm.last_request is None
 
 
 async def test_a_task_parked_on_an_already_resolved_hitl_is_requeued():
-    """崩溃窗口的兜底：决定已落盘、但进程在续跑之前死了。"""
+    """崩溃窗口：决定已落盘、但进程在续跑之前死了 —— 任务必须重新跑起来。"""
     rt = await _runtime_with_events(_resolved_but_never_resumed_tool_result())
     await rt.recover_session(SID)
     assert TID in await _drained_tasks(rt)
 
 
-async def test_resolved_hitl_task_is_requeued_even_when_a_child_is_still_running():
-    """`restore` 的「children 全终态」闸门不能把已答过的 task 永远晾着。"""
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Task
-
-    tm = TaskManager(session_id=SID)
-    parent = Task(id="p", session_id=SID, status="SUSPENDED")
-    child = Task(id="c", session_id=SID, status="ACTIVE", parent_task_id="p")
-    tm.restore([parent, child], terminal_ids=set(), parked_task_ids=set(),
-               resumable_task_ids={"p"})
-    assert tm.get_task("p").status == "PENDING"
-
-
-async def test_parked_wins_over_resumable():
-    """同时既有未决、又有已终局 HITL 的 task：未决优先，保持 parked。"""
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Task
-
-    tm = TaskManager(session_id=SID)
-    t = Task(id="p", session_id=SID, status="SUSPENDED")
-    tm.restore([t], terminal_ids=set(), parked_task_ids={"p"}, resumable_task_ids={"p"})
-    assert tm.get_task("p").status == "SUSPENDED"
-    assert not tm._queue.has_pending()
+async def test_a_task_on_a_resolved_new_model_hitl_is_requeued():
+    """新两事件模型（HITL_OPENED + HITL_RESOLVED）的同一条路。旧投影对这条流是瞎的。"""
+    rt = await _runtime_with_events(_new_model_resolved_tool_result())
+    await rt.recover_session(SID)
+    assert rt.hitl_registry.list_pending(SID) == []          # 已终局 → 不 park
+    assert rt.hitl_registry.decision_for(SID, "call_1", "authz")[0].outcome == "accepted"
+    assert TID in await _drained_tasks(rt)
 
 
 async def test_resolved_for_session_sees_the_task_id_of_a_filled_decision():
-    """兜底的承重点：装填出来的已终局记录必须带 task_id，否则重排集合恒为空。"""
+    """承重点：装填出来的已终局记录必须带 task_id，否则恢复期认不出该唤醒哪个 task。"""
     rt = await _runtime_with_events(_resolved_but_never_resumed_tool_result())
     await rt.rebuild_hitl(SID)
     resolved = rt.hitl_registry.resolved_for_session(SID)
@@ -320,30 +387,65 @@ async def test_resolved_for_session_sees_the_task_id_of_a_filled_decision():
     assert rt.hitl_registry.resolved_for_session("other") == []
 
 
+async def test_a_resolved_user_turn_without_a_tool_call_id_is_still_filled():
+    """`UserTurn` 的 park 没有 tool_call_id —— 按 tool_call 过滤会把整整一类请求丢掉。"""
+    rt = await _runtime_with_events(_resolved_user_turn_never_injected())
+    await rt.rebuild_hitl(SID)
+    resolved = rt.hitl_registry.resolved_for_session(SID)
+    assert len(resolved) == 1
+    assert resolved[0].tool_call_id == "" and resolved[0].task_id == TID
+    assert isinstance(resolved[0].delivery, UserTurnDelivery)
+
+
+async def test_recovery_injects_the_answer_of_a_resolved_user_turn():
+    """崩溃窗口里最容易静默丢的一条：人答了 `wait_for_user`，进程在注入之前就死了。
+
+    任务照样会被重排（children 闸门放行），但没人把人的答复写进对话——不补这一步，
+    那句话就彻底消失。
+    """
+    rt = await _runtime_with_events(_resolved_user_turn_never_injected())
+    await rt.recover_session(SID)
+    prompts = await _hitl_reply_prompts(rt)
+    assert len(prompts) == 1
+    from ctx_weft.core.content import content_to_text
+    assert "use postgres" in content_to_text(prompts[0].content)
+
+
 async def test_requeue_of_a_resolved_user_turn_does_not_duplicate_the_injection():
-    """UserTurn 侧的幂等靠 MemoryEvent.id = f"hitlreply:{hitl_id}"（§7.3/§12.2）。"""
-    from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL, PendingHitl
+    """UserTurn 侧的幂等靠 MemoryEvent.id = f"hitlreply:{hitl_id}"（§7.3/§12.2）。
+
+    恢复可以反复跑（重启、/resume、冷应答各来一遍），注入必须只留一条。
+    """
+    rt = await _runtime_with_events(_resolved_user_turn_never_injected())
+    await rt.recover_session(SID)
+    await rt.recover_session(SID)
+    assert len(await _hitl_reply_prompts(rt)) == 1
+
+
+async def test_a_task_still_parked_on_another_hitl_gets_no_injection():
+    """该 task 还挂着别的**未决** HITL：它此刻是 parked、没入队，不该被改状态。"""
+    events = [
+        *_resolved_user_turn_never_injected(),
+        _ev(8, EventType.HITL_OPENED, task_id=TID, hitl_id="hit_2", form="approval",
+            delivery={"kind": "tool_result", "tool_call_id": "call_9"},
+            tool_call_id="call_9", stage="authz", prompt="ok?"),
+    ]
+    rt = await _runtime_with_events(events)
+    await rt.recover_session(SID)
+    tm = _tm(rt)
+    assert tm.get_task(TID).status == "SUSPENDED"
+    assert await _hitl_reply_prompts(rt) == []
+
+
+async def test_restore_leaves_a_parent_with_live_children_suspended():
+    """删掉 `resumable_task_ids` 之后的守卫：父任务提前置 PENDING 会让
+    `_try_resume_parent`（以 status == "SUSPENDED" 为门）在子任务收尾时静默失效。"""
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Session, Task
-    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
-    from ctx_weft.protocols.hitl import HitlDecision
+    from ctx_weft.core.state.models import Task
 
-    rt = await _runtime_with_events(_pending_with_user_turn_delivery())
-    session = Session(id=SID, user_prompt="do it", status="RUNNING", tenant_id="default")
     tm = TaskManager(session_id=SID)
-    task = Task(id=TID, session_id=SID, status="SUSPENDED", assigned_agent_id="agt_root")
-    tm.restore([task], terminal_ids=set())
-    req = PendingHitl(
-        id="hit_1", form="wait", session_id=SID, task_id=TID, agent_id="agt_root",
-        delivery=UserTurnDelivery(task_id=TID), created_at=TS, stage=HITL_STAGE_TOOL,
-        decision=HitlDecision(outcome="accepted", message="carry on"),
-    )
-    await rt._inject_user_reply(req, session, tm)
-    await rt._inject_user_reply(req, session, tm)
-
-    scope = MemoryAddress(session_id=SID, task_id=TID, agent_id="agt_root")
-    pctx = ProviderContext(session_id=SID, tenant_id="default", task_id=TID,
-                           agent_id="agt_root")
-    view = await rt.providers.get_memory().load_view(
-        scope, MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
-    assert sum(1 for r in view if r.metadata.get("source") == "hitl_reply") == 1
+    parent = Task(id="p", session_id=SID, status="SUSPENDED")
+    child = Task(id="c", session_id=SID, status="ACTIVE", parent_task_id="p")
+    tm.restore([parent, child], terminal_ids=set(), parked_task_ids=set())
+    assert tm.get_task("p").status == "SUSPENDED"   # 等 children，靠 _try_resume_parent 唤醒
+    assert tm.get_task("c").status == "PENDING"     # 子任务本身被这一趟 restore 重排了

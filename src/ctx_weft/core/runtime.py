@@ -1393,16 +1393,15 @@ class CtxWeftRuntime:
             r.task_id for r in self.hitl_registry.list_pending(session_id=session_id)
             if r.task_id
         }
-        # 反过来：挂在**已终局** HITL 上的 task 要重排——决定已落盘、但续跑没跑成
-        # （进程在应答入口返回之后、recover 之前崩了）。不重排它就永远停在 SUSPENDED，
-        # 症状与「事件被丢」一模一样。重排是安全的：两条续跑动作本身都幂等
-        # （ToolResult 走 reconcile，只补没有 TOOL_RESULT 的 dangling 调用；UserTurn 的
-        # 注入带 hitl_id 派生的幂等键），所以这里**不需要**记「这次续跑跑没跑过」
-        # ——那笔账要跨重启，又得多一份持久状态（绕回 §3.1 要消除的东西）。
-        resumable_task_ids = {
-            r.task_id for r in self.hitl_registry.resolved_for_session(session_id)
-            if r.task_id and r.task_id not in parked_task_ids
-        }
+        # 挂在**已终局** HITL 上的 task **不在这里另开重排口子**：它们已被 restore 的既有
+        # 分支覆盖（ACTIVE → else 分支；SUSPENDED + 子任务全终态 → children 闸门；
+        # SUSPENDED + 尚有活子任务 → 子任务收尾时 `_try_resume_parent` 唤醒，而那些子任务
+        # 本身也被这一趟 restore 重排了）。硬提前重排反而会把那次合法唤醒静默吞掉
+        # （`_try_resume_parent` 以 status == "SUSPENDED" 为门；Task 9 复审 Finding 1）。
+        #
+        # 崩溃窗口真正会丢的是 **UserTurn 那一类**：它的续跑不是「重排」，而是把人的答复
+        # 注入进对话——任务重排了但答复没注入，人说的话就静默消失。见下面
+        # `_inject_resolved_user_turns`。
 
         _TERMINAL = {"FINISHED", "FAILED", "CANCELED"}
         terminal_ids = {t.id for t in all_tasks if t.status in _TERMINAL}
@@ -1437,9 +1436,7 @@ class CtxWeftRuntime:
         if inflight:
             logger.info("Recovery: session %s has a live TM running %s; new TM will not re-dispatch them",
                         session.id, sorted(inflight))
-        task_manager.restore(all_tasks, terminal_ids,
-                             parked_task_ids=parked_task_ids | inflight,
-                             resumable_task_ids=resumable_task_ids)
+        task_manager.restore(all_tasks, terminal_ids, parked_task_ids=parked_task_ids | inflight)
 
         # 各 agent 取自己的 template_id（AgentInstantiated 事件投影而来）；投影里没有的
         # （存量事件流）回落 session 模板——见 agents_from_projection 的说明。
@@ -1466,6 +1463,12 @@ class CtxWeftRuntime:
         # act 纯文本暂停（wait_for_user）冷应答：把用户回复注入 task 层并重排（reconcile 覆盖不到,见上）。
         if user_reply is not None:
             await self._inject_user_reply(user_reply, session, task_manager)
+        # 崩溃窗口兜底：已终局的 UserTurn 请求，其答复若还没进过对话，在这里补上。
+        await self._inject_resolved_user_turns(
+            session, task_manager,
+            parked_task_ids=parked_task_ids,
+            skip_hitl_id=getattr(user_reply, "id", "") if user_reply is not None else "",
+        )
 
         # 重跑被崩溃打断的段 recap（登记到新 TM；close 边界补 register_close_synth 替换占位 finish 对）。
         tasks_by_id = {t.id: t for t in all_tasks}
@@ -1915,6 +1918,51 @@ class CtxWeftRuntime:
         if target.status not in ("FINISHED", "FAILED", "CANCELED"):
             target.status = "PENDING"
 
+    async def _inject_resolved_user_turns(
+        self, session: Session, task_manager: TaskManager, *,
+        parked_task_ids: "set[str]", skip_hitl_id: str = "",
+    ) -> None:
+        """恢复期补注入：把该 session 里**已终局的 `UserTurn` 请求**的答复写进对话。
+
+        补的是一个 **`restore` 覆盖不到的洞**（复审 Finding 2）。`ToolResult` 那一类的
+        续跑是「补一条 TOOL_RESULT」，由 reconcile 在任务重跑时自己完成；`UserTurn` 的
+        续跑却是「把人说的话注入对话」——`restore` 只负责让任务重新入队，注入没人做。
+        于是「人答了 → 决定落盘 → 进程在续跑之前崩了」这个窗口里，任务恢复后会重新进
+        act，而**人的那句话彻底不见了**。这正是本次重设计要消灭的故障类。
+
+        **可以无条件跑，因为注入本身幂等**：`MemoryEvent.id = f"hitlreply:{hitl_id}"`
+        （spec §7.3/§12.2）——那个键的存在就是为了让这一步可重放。已经注入过 → memory
+        层 no-op；没注入过 → 这是唯一一次把答复救回来的机会。故这里**不需要**记「注入
+        跑没跑过」，那笔账要跨重启，又得多一份持久状态（绕回 §3.1）。
+
+        三条跳过：
+        - `skip_hitl_id`：本次调用已由 `user_reply` 显式注入过的那条（legacy
+          `HitlRequest` 形态不带幂等 id，重复注入会真的写两条）。
+        - `parked_task_ids`：该 task 还挂着**别的未决** HITL。它此刻是 parked、没入队，
+          而 `_inject_user_reply` 会把 status 改成 PENDING——改了也没人派发，只会留下
+          一个对不上的状态。等那条未决的被应答时自然会走到这里。
+        - 无 `task_id` / 无 decision 的记录（装填占位项等），以及已终态的 task——
+          它不再需要、也不该收到新输入。
+
+        **best-effort**：与 hydration 同一姿态，单条失败只记账、不中断整场恢复。
+        """
+        for req in self.hitl_registry.resolved_for_session(session.id):
+            if (req.id == skip_hitl_id
+                    or not isinstance(req.delivery, UserTurnDelivery)
+                    or req.decision is None
+                    or not req.task_id
+                    or req.task_id in parked_task_ids):
+                continue
+            target = task_manager.get_task(req.task_id)
+            if target is None or target.status in ("FINISHED", "FAILED", "CANCELED"):
+                continue                      # 已终态的 task 不再需要（也不该收到）新输入
+            try:
+                await self._inject_user_reply(req, session, task_manager)
+            except Exception:
+                logger.exception(
+                    "_inject_resolved_user_turns: 注入失败 session=%s hitl=%s",
+                    session.id, req.id)
+
     async def _last_user_prompt(self, scope: MemoryAddress, pctx: ProviderContext) -> str:
         """取 scope 内最近一条 USER_PROMPT 内容（供 ① 打断续接的「上一条取消」说明）。"""
         from ctx_weft.protocols import MemoryKind, MemoryScope
@@ -2013,6 +2061,9 @@ class CtxWeftRuntime:
     async def _hydrate_snapshot_messages(self, snapshot, session_id: str) -> None:
         """把 `decisions_for` 里的 **event 侧** 内容还原成 memory 侧可用的形态。
 
+        覆盖 `decisions_for` **与** `resolved` 两张表里的全部决定（后者含没有 tool_call_id
+        的 `UserTurn` park——它的答复同样要被注入 memory，同样不能带着 event 侧 ref 进去）。
+
         spec §12.3.3：折叠出来的 message 仍是事件形态（可能是 event blob store 的 ref）。
         直接喂进 memory 会写一个那个 store 永远打不开的引用——图就此静默消失。本方法是
         `fold_hitl_snapshot`（同步、纯函数，结构上做不了 I/O）之后的必经一步，口径与
@@ -2024,13 +2075,22 @@ class CtxWeftRuntime:
         （`downgrade_images_to_text`，纯函数）也在 try 里兜一道，宁可留着原内容也不让
         恢复崩掉。
         """
-        if not snapshot.decisions_for:
+        # `decisions_for` 与 `resolved` 常指向**同一个** HitlDecision 对象（折叠时同源），
+        # 按 id() 去重，避免同一条内容被 hydrate 两遍（第二遍拿到的已是 memory 侧内容，
+        # 再喂 hydrate_event_content 会解不开 → 白白降级成占位）。
+        targets: dict[int, tuple[str, Any]] = {}
+        for key, (decision, _resume_state) in snapshot.decisions_for.items():
+            targets.setdefault(id(decision), (str(key), decision))
+        for hitl_id, req in snapshot.resolved.items():
+            if req.decision is not None:
+                targets.setdefault(id(req.decision), (hitl_id, req.decision))
+        if not targets:
             return
         from ctx_weft.core.content import (
             downgrade_images_to_text, hydrate_event_content, normalize_content,
         )
         ctx: ProviderContext | None = None
-        for key, (decision, _resume_state) in list(snapshot.decisions_for.items()):
+        for key, decision in targets.values():
             message = decision.message
             if not message or isinstance(message, str):
                 continue                       # 纯文本无 ref 可转，零 blob IO
