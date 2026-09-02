@@ -1,17 +1,15 @@
 import pytest
 
 from ctx_weft.protocols import ImagePart, TextPart
-from ctx_weft.protocols.hitl import HitlRequest
 
 
 def _content():
     return [TextPart(text="这是我的答复"), ImagePart(data="ZGF0YQ==", media_type="image/png")]
 
 
-def test_hitl_request_message_accepts_parts():
-    req = HitlRequest(id="h1", form="wait", session_id="s", task_id="t")
-    req.message = _content()
-    assert req.message == _content()
+# 「HITL 应答内容可以是 parts 列表」这条契约现在钉在 `HitlDecision.message` /
+# `HitlReply.message` 的类型上，端到端由 test_hitl_multimodal_validation.py 覆盖；
+# 下面两条钉的是拼接助手本身——它们才是图片真正会丢的地方。
 
 
 def test_rejected_reply_keeps_image_via_prefix():

@@ -81,7 +81,7 @@ class TaskManager:
         # None = 不受管（永远视为 current，保持旧行为）。被同 session 上更新的 TM
         # 顶替后返回 False → 迟到的收尾变 no-op（不发 SessionFinished、不 _release_session）。
         self._is_current: Callable[[], bool] | None = None
-        # 该 session 是否仍有未决 pending HITL —— runtime 注入（查 HitlManager）。完成判定据此：
+        # 该 session 是否仍有未决 pending HITL —— runtime 注入（查 HitlRegistry）。完成判定据此：
         # 有未决 HITL 的 parked 任务时，会话是"空闲等应答"而非"完成"，绝不发 SESSION_FINISHED
         # 把 parked 任务孤立（真相以 pending-HITL 为准，spec/07 §9.1）。None = 退回旧行为。
         self._has_pending_hitl: Callable[[], bool] | None = None
@@ -125,11 +125,11 @@ class TaskManager:
         self._is_current = predicate
 
     def set_has_pending_hitl(self, predicate: "Callable[[], bool]") -> None:
-        """注入"该 session 是否仍有未决 pending HITL"谓词（runtime 查 HitlManager）。"""
+        """注入"该 session 是否仍有未决 pending HITL"谓词（runtime 查 HitlRegistry）。"""
         self._has_pending_hitl = predicate
 
     def set_cancel_pending_hitl(self, cb: Callable[[], Coroutine[Any, Any, None]]) -> None:
-        """注入"取消该 session 所有未决 pending HITL"回调（runtime 侧遍历 HitlManager.cancel）。
+        """注入"取消该 session 所有未决 pending HITL"回调（runtime 侧遍历 HitlService.cancel）。
 
         trip 序列第 3 步 best-effort 调用；HitlCancelled 需全部先于会话终态发出。
         """
@@ -233,7 +233,7 @@ class TaskManager:
                 continue  # obsolete ephemeral helpers — never re-scheduled (recovery is condition-based)
             # HITL-park：有未决 HITL → 保持挂起、不入队，**不论 ACTIVE 还是 SUSPENDED**。
             # 审批热等的任务恒为 ACTIVE（不会走 SUSPENDED 分支）；park 判据是"有无未决 HITL"
-            # （parked_task_ids，源自 fold_pending_hitl），而非 task.status（spec/07 §9.1，缺陷 A）。
+            # （parked_task_ids，源自 HitlRegistry.list_pending），而非 task.status（spec/07 §9.1，缺陷 A）。
             if t.id in parked:
                 continue
             if t.status == "SUSPENDED":

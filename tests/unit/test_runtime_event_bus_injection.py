@@ -1,4 +1,4 @@
-"""event_bus 必须可由 host 注入（与 event_store / hitl_manager / llm 一致）。"""
+"""event_bus 必须可由 host 注入（与 event_store / llm 一致）。"""
 
 from __future__ import annotations
 

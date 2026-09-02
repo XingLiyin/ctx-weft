@@ -1,6 +1,6 @@
 """recover() 据事件决策恢复策略（spec/07 §9）——core 内闭环,无回调,启动不 drain。
 
-有未解决 pending HITL 的 session → **只重建内存 HitlManager**（task 重建+续跑推迟到应答的
+有未解决 pending HITL 的 session → **只装填内存 HitlRegistry**（task 重建+续跑推迟到应答的
 recover_session）;否则 → **emit SessionStatusChanged(INTERRUPTED)**。决策只折叠 HITL 类事件,不全量回放。
 """
 
@@ -12,6 +12,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
 pytestmark = pytest.mark.asyncio
@@ -37,7 +38,7 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
     runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
     store = runtime.event_store
 
-    # A: 有未解决 pending HITL → 只重建 HitlManager
+    # A: 有未解决 pending HITL → 只装填 HitlRegistry
     await store.append(_ev(1, "A", EventType.SESSION_CREATED, template_id="t"))
     await store.append(_ev(2, "A", EventType.HITL_REQUIRED, hitl_id="hA", form="question", tool_call_id="tcA"))
     # B: HITL 已答复 → 无 pending → interrupt(event)
@@ -58,9 +59,12 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
 
     assert n == 3
     assert called == []                                          # 启动不 drain/不重建 task
-    assert [r.id for r in runtime.hitl_manager.list_pending(session_id="A")] == ["hA"]
-    assert runtime.hitl_manager.find_for_tool_call("tcA") is not None
-    assert runtime.hitl_manager.list_pending(session_id="B") == []
+    assert [r.id for r in runtime.hitl_registry.list_pending(session_id="A")] == ["hA"]
+    # 决定缓存键是三维的 (session, tool_call, stage)——只按 tool_call_id 查会让 A 会话的
+    # 批准替 B 会话里同名 id 的调用开门，那正是本次重设计关掉的跨会话授权洞。
+    assert runtime.hitl_registry.find_for_tool_call("A", "tcA", HITL_STAGE_TOOL) is not None
+    assert runtime.hitl_registry.find_for_tool_call("B", "tcA", HITL_STAGE_TOOL) is None
+    assert runtime.hitl_registry.list_pending(session_id="B") == []
     assert set(interrupted) == {"B", "C"}                        # 其余 emit INTERRUPTED
 
 
@@ -76,5 +80,5 @@ async def test_recover_multi_hitl_partial_resolve_still_pending() -> None:
     interrupted = _capture_interrupts(runtime)
     await runtime.recover()
 
-    assert {r.id for r in runtime.hitl_manager.list_pending(session_id="M")} == {"h2"}
+    assert {r.id for r in runtime.hitl_registry.list_pending(session_id="M")} == {"h2"}
     assert interrupted == []

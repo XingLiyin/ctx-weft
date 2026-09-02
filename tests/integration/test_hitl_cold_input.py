@@ -1,46 +1,66 @@
-"""Phase B integration test: input-kind COLD reconcile path end-to-end.
+"""Integration: the tool-stage COLD reconcile path, end to end.
 
-Proves that a pre-resolved (answered) HITL keyed by tool_call_id, when its
-dangling tool_call is re-invoked by ReconcileStep through a REAL CapabilityGateway
-+ real ControlCapabilityProvider, causes the human's answer text to be written
-as a TOOL_RESULT into memory.
+Proves that a human answer that was already recorded for a ``tool_call_id`` — the
+state you are in after "user answered, then the process restarted" — is written back
+as that call's TOOL_RESULT when ``ReconcileStep`` re-invokes the dangling tool call
+through a REAL ``CapabilityGateway`` + real ``ControlCapabilityProvider``, **without
+asking the human again**.
+
+This is the tool-stage twin of
+``test_gateway_authz_hitl.py::test_a_cached_decision_short_circuits_without_asking_again``.
+It is not redundant with it: the authorization stage short-circuits at the top of
+``invoke`` (before ``authorizer.authorize()``), while the tool stage can only
+short-circuit inside ``_resolve_human`` — a provider has to run far enough to yield
+``needs_human`` before anyone knows a human is involved. Without that second
+short-circuit, ``open()`` idempotently returns the already-resolved request,
+``HitlWaiter.wait()`` sees ``resolved`` and reports eviction, and the gateway parks:
+the answer the human already gave never reaches the model and the task re-hangs.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.providers.events import InProcessEventBus
+from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL, HitlRegistry
+from ctx_weft.core.hitl.reply_intake import ReplyIntake
+from ctx_weft.core.hitl.service import HitlService
+from ctx_weft.core.hitl.snapshot import HitlSnapshot
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
+from ctx_weft.core.loop.hitl_waiter import HitlWaiter
 from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.control_capability import (
     PROVIDER_NAME,
     ControlCapabilityProvider,
 )
-from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import ToolCapability
+from ctx_weft.protocols.hitl import HitlDecision
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+
+class _PassthroughNormalizer:
+    async def __call__(self, content, session_id):
+        return content, content
 
 
 @pytest.mark.asyncio
 async def test_cold_input_reconcile_writes_tool_result() -> None:
     """Cold reconcile: pre-answered HITL → ReconcileStep short-circuits → TOOL_RESULT in memory."""
 
-    # ── IDs ─────────────────────────────────────────────────────────────────────
     session_id = "s1"
     task_id = "tsk_1"
     agent_id = "agt_1"
     tool_call_id = "tcA"
 
-    # ── Shared memory + event bus ────────────────────────────────────────────────
     mem = InMemoryMemoryProvider()
     bus = InProcessEventBus()
 
@@ -55,22 +75,21 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
     cache = CapabilityCache()
     cache.put(agent_id, [cap])
 
-    # ── HitlManager + pre-answered HITL ─────────────────────────────────────────
-    mgr = HitlManager(event_bus=bus)
-    rid = await mgr.request(
-        form="question",
-        session_id=session_id,
-        task_id=task_id,
-        tool_call_id=tool_call_id,
-        question="Which DB?",
-    )
-    await mgr.answer(rid, "use postgres")
-    # Confirm it's resolved already
-    assert mgr.get(rid).outcome == "accepted"
-    assert mgr.get(rid).message == "use postgres"
+    # ── HITL subsystem refilled from a restart: the decision is already on record ──
+    # This is exactly what `rebuild_hitl` produces after a crash — a decision keyed by
+    # (session, tool_call, stage) with no wait slot. No live pending, no live coroutine.
+    registry = HitlRegistry()
+    registry.load_snapshot(HitlSnapshot(decisions_for={
+        (session_id, tool_call_id, HITL_STAGE_TOOL): (
+            HitlDecision(outcome="accepted", message="use postgres"), None,
+        ),
+    }))
+    service = HitlService(registry=registry, event_bus=bus,
+                          reply_intake=ReplyIntake(_PassthroughNormalizer()))
+    assert registry.decision_for(session_id, tool_call_id, HITL_STAGE_TOOL) is not None
 
     # ── ControlCapabilityProvider: register the session ─────────────────────────
-    provider = ControlCapabilityProvider(hitl_manager=mgr)
+    provider = ControlCapabilityProvider()
     session = Session(id=session_id, tenant_id="default", user_prompt="do it", status="RUNNING")
     task = Task(id=task_id, session_id=session_id, status="ACTIVE", title="T1")
     tm = SimpleNamespace(get_task=lambda tid: task, reopen_chain=None)
@@ -109,6 +128,10 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
         capability_gateway=gateway,
         capability_cache=cache,
         capability_providers=[provider],
+        hitl=service,
+        # timeout_sec=0：真要走到「开一个新请求然后等人」这条路，它会立刻驱逐 → HitlPark，
+        # 用例响亮地红，而不是挂住整场测试。短路生效时这个 waiter 根本不会被用到。
+        waiter=HitlWaiter(registry, timeout_sec=0),
     )
 
     # ── Pre-ingest the assistant LLM_RESPONSE with the dangling tool_call ───────
@@ -153,4 +176,36 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
     ), f"Expected TOOL_RESULT for {tool_call_id!r} with 'use postgres'; got: {results}"
 
     # ── Assert: no NEW pending HITL was created (cold short-circuit worked) ──────
-    assert mgr.list_pending() == [], f"Expected no pending HITL; got: {mgr.list_pending()}"
+    assert registry.list_pending() == [], f"Expected no pending HITL; got: {registry.list_pending()}"
+
+
+@pytest.mark.asyncio
+async def test_the_cold_decision_of_another_session_does_not_apply() -> None:
+    """同名 tool_call_id、不同 session → 短路**不得**命中。
+
+    LLM 的 tool_call id 常是 `call_1` 这类短值；旧 `HitlManager.find_for_tool_call`
+    不过滤 session，A 会话里人给的答案会被 B 会话的同名调用直接取用。三维键
+    (session_id, tool_call_id, stage) 从构造上关掉它——这条用例守住那扇门。
+    """
+    registry = HitlRegistry()
+    registry.load_snapshot(HitlSnapshot(decisions_for={
+        ("session_A", "call_1", HITL_STAGE_TOOL): (
+            HitlDecision(outcome="accepted", message="use postgres"), None,
+        ),
+    }))
+    assert registry.decision_for("session_A", "call_1", HITL_STAGE_TOOL) is not None
+    assert registry.decision_for("session_B", "call_1", HITL_STAGE_TOOL) is None
+    # 阶段也是键的一维：授权步不得吃掉工具步的答复（反之亦然）。
+    assert registry.decision_for("session_A", "call_1", "authz") is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_placeholder_keeps_its_epoch_created_at() -> None:
+    """装填出来的占位项不参与 pending 列表，`created_at` 取最小值即可（回归守卫）。"""
+    registry = HitlRegistry()
+    registry.load_snapshot(HitlSnapshot(decisions_for={
+        ("s", "c", HITL_STAGE_TOOL): (HitlDecision(outcome="accepted"), None),
+    }))
+    assert registry.list_pending() == []
+    found = registry.find_for_tool_call("s", "c", HITL_STAGE_TOOL)
+    assert found is not None and found.created_at == datetime(1970, 1, 1, tzinfo=UTC)

@@ -5,9 +5,19 @@ from types import SimpleNamespace
 
 import pytest
 
+from datetime import UTC, datetime
+
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.orchestrator.hitl_manager import HitlRequest
+from ctx_weft.core.hitl.registry import PendingHitl
 from ctx_weft.core.state.models import Session
+from ctx_weft.protocols.hitl import (
+    HITL_FORM_WAIT,
+    PREFACE_AFTER_INTERRUPT,
+    PREFACE_AFTER_INTERRUPT_EDIT,
+    PREFACE_NORMAL,
+    HitlDecision,
+    UserTurnDelivery,
+)
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
@@ -20,6 +30,22 @@ pytestmark = pytest.mark.asyncio
 
 def _runtime():
     return make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
+
+def _user_turn_req(
+    *, hitl_id="hit1", session_id="s1", task_id="t1", agent_id="ag1",
+    outcome="accepted", message="ship it", preface=PREFACE_NORMAL,
+):
+    """一条**已终局**的 `UserTurn` 请求——`_inject_user_reply` / `_write_hitl_reply_turn`
+    收的就是这个形态（core 内部的活记录，不是 host 视图）。"""
+    req = PendingHitl(
+        id=hitl_id, form=HITL_FORM_WAIT, session_id=session_id, task_id=task_id,
+        agent_id=agent_id,
+        delivery=UserTurnDelivery(task_id=task_id, preface=preface),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    req.decision = HitlDecision(outcome=outcome, message=message)
+    req.resolved_at = datetime(2026, 1, 1, tzinfo=UTC)
+    return req
 
 
 async def test_pause_session_without_tm_cancels_all_runs():
@@ -70,11 +96,8 @@ async def test_inject_user_reply_phase1_adds_edit_note():
         timestamp=now_utc(), role="user",
     ), pctx)
 
-    req = HitlRequest(
-        id="h1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
-        capability_id="control:wait_for_user", context="interrupt:edit",
-        outcome="accepted", message="新请求Y",
-    )
+    req = _user_turn_req(hitl_id="h1", message="新请求Y",
+                         preface=PREFACE_AFTER_INTERRUPT_EDIT)
     await rt._inject_user_reply(req, session, tm)
 
     recs = await mem.recall_recent(scope, [MemoryEventType.USER_PROMPT], 10, pctx)
@@ -95,11 +118,8 @@ async def test_inject_user_reply_non_edit_has_no_note():
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
-    req = HitlRequest(
-        id="h1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
-        capability_id="control:wait_for_user", context="interrupt",  # ② not edit
-        outcome="accepted", message="just continue",
-    )
+    req = _user_turn_req(hitl_id="h1", message="just continue",
+                         preface=PREFACE_AFTER_INTERRUPT)  # ② not edit
     await rt._inject_user_reply(req, session, tm)
     recs = await mem.recall_recent(scope, [MemoryEventType.USER_PROMPT], 10, pctx)
     assert any(r.content == "just continue" for r in recs)

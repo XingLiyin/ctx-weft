@@ -2,7 +2,7 @@
 scope — the "first prompt after restart is lost / blank reply" bug.
 
 On a cold app restart the pending wait_for_user HITL is rebuilt from the event store.
-The HITL_REQUIRED event never persisted agent_id, so the rebuilt HitlRequest has
+The HITL_REQUIRED event never persisted agent_id, so the rebuilt request has
 agent_id="". _inject_user_reply then ingested the reply into a memory scope with
 agent_id="".
 
@@ -16,7 +16,7 @@ live HITLs that still carry agent_id.
 Two layers:
 1. _inject_user_reply falls back to the resumed task's agent scope when req.agent_id is
    missing (robust even if the projection ever loses it).
-2. The HITL_REQUIRED projection round-trips agent_id (fix at source).
+2. The HITL fold round-trips agent_id off the event (fix at source).
 """
 
 from __future__ import annotations
@@ -26,23 +26,45 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.control.reducers import fold_pending_hitl
+from ctx_weft.core.control.reducers import fold_hitl_snapshot
+from ctx_weft.core.hitl.registry import PendingHitl
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
-from ctx_weft.protocols.hitl import HitlRequest
+from ctx_weft.protocols.hitl import (
+    HITL_FORM_WAIT,
+    PREFACE_NORMAL,
+    HitlDecision,
+    UserTurnDelivery,
+)
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 
 _TS = datetime(2026, 7, 13, tzinfo=UTC)
 
+def _user_turn_req(
+    *, hitl_id="hit1", session_id="s1", task_id="t1", agent_id="ag1",
+    outcome="accepted", message="ship it", preface=PREFACE_NORMAL,
+):
+    """一条**已终局**的 `UserTurn` 请求——`_inject_user_reply` / `_write_hitl_reply_turn`
+    收的就是这个形态（core 内部的活记录，不是 host 视图）。"""
+    req = PendingHitl(
+        id=hitl_id, form=HITL_FORM_WAIT, session_id=session_id, task_id=task_id,
+        agent_id=agent_id,
+        delivery=UserTurnDelivery(task_id=task_id, preface=preface),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    req.decision = HitlDecision(outcome=outcome, message=message)
+    req.resolved_at = datetime(2026, 1, 1, tzinfo=UTC)
+    return req
+
 
 # ── Layer 1: _inject_user_reply scope fallback ─────────────────────────────────
 
 
 async def test_inject_user_reply_reply_visible_to_agent_recall(monkeypatch):
-    """When the rebuilt HitlRequest lost agent_id, the reply must still be recallable via
+    """When the rebuilt request lost agent_id, the reply must still be recallable via
     recall_recent_by_agent (the actor's history path), which filters by scope.agent_id."""
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     from ctx_weft.core import CtxWeftRuntime
@@ -60,8 +82,7 @@ async def test_inject_user_reply_reply_visible_to_agent_recall(monkeypatch):
     task_manager = SimpleNamespace(get_task=lambda tid: task if tid == "t1" else None)
 
     # Rebuilt-from-projection HITL: agent_id was NOT persisted → empty.
-    req = HitlRequest(id="h1", form="wait", session_id="s1", task_id="t1", agent_id="",
-                      outcome="accepted", message="用户回复", context="plain_text")
+    req = _user_turn_req(hitl_id="h1", agent_id="", message="用户回复")
 
     await runtime._inject_user_reply(req, session, task_manager)
 
@@ -79,15 +100,15 @@ async def test_inject_user_reply_reply_visible_to_agent_recall(monkeypatch):
 
 
 async def test_hitl_required_projection_preserves_agent_id():
-    """fold_pending_hitl must round-trip agent_id from the HITL_REQUIRED event so cold
-    resume rebuilds a HitlRequest that still knows its agent scope."""
+    """fold_hitl_snapshot must round-trip agent_id from the HITL_REQUIRED event so cold
+    resume refills a request that still knows its agent scope."""
     ev = Event(
         id="evt_1", run_id="r1", sequence=1, session_id="s1", task_id="t1",
         agent_id="ag_root", type=EventType.HITL_REQUIRED, timestamp=_TS,
         payload={"hitl_id": "h1", "form": "wait", "agent_id": "ag_root",
                  "context": "plain_text"},
     )
-    pending = fold_pending_hitl([ev])
+    pending = fold_hitl_snapshot([ev]).pending
     assert "h1" in pending
     assert pending["h1"].agent_id == "ag_root", (
         f"agent_id lost through HITL projection: {pending['h1'].agent_id!r}"

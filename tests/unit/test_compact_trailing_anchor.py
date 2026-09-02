@@ -34,7 +34,13 @@ from ctx_weft.protocols import (
     MemoryAddress,
     ProviderContext,
 )
-from ctx_weft.protocols.hitl import HitlRequest
+from ctx_weft.core.hitl.registry import PendingHitl
+from ctx_weft.protocols.hitl import (
+    HITL_FORM_WAIT,
+    PREFACE_NORMAL,
+    HitlDecision,
+    UserTurnDelivery,
+)
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
@@ -144,8 +150,12 @@ async def test_inject_user_reply_awaits_pending_background_observe(monkeypatch):
     task = Task(id="t1", session_id="s1", status="SUSPENDED",
                 assigned_agent_id="a1", creator_agent_id="a1")
     task_manager = SimpleNamespace(get_task=lambda tid: task if tid == "t1" else None)
-    req = HitlRequest(id="h1", form="wait", session_id="s1", task_id="t1", agent_id="a1",
-                      outcome="accepted", message="新问题", context="plain_text")
+    req = PendingHitl(
+        id="h1", form=HITL_FORM_WAIT, session_id="s1", task_id="t1", agent_id="a1",
+        delivery=UserTurnDelivery(task_id="t1", preface=PREFACE_NORMAL),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    req.decision = HitlDecision(outcome="accepted", message="新问题")
 
     await runtime._inject_user_reply(req, session, task_manager)
 

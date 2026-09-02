@@ -251,7 +251,7 @@ def test_new_resolved_multimodal_message_round_trips_to_content_parts():
 
 
 def test_legacy_answered_with_empty_message_is_not_a_usable_decision():
-    """判据是真值而非 is None——空串同样还原不出答案，须与 fold_cold_hitl_decision 同构。"""
+    """判据是真值而非 is None——空串同样还原不出答案，与「缺 message」同样不可用。"""
     snap = fold_hitl_snapshot([
         _legacy_required(form="question"),
         _ev(EventType.HITL_ANSWERED, {"hitl_id": "hit_1", "message": ""}, seq=1)])

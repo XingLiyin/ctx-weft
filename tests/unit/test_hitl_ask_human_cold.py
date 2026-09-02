@@ -1,17 +1,30 @@
-"""act 纯文本暂停（wait_for_user）的冷路径。
+"""act 纯文本暂停（wait_for_user）的冷路径——**注入侧**。
 
 热路径：actor 纯文本 → HITL park → 用户回复经冷 resume 注入 task 层 → 重入 act。
 冷路径：超时驱逐 / 重启使 reconcile 覆盖不到（无 dangling tool_call）→ recover_session 收到
-user_reply 时在 drain 前注入回复。本测试钉死注入逻辑与「act ask_user/approval 仍走 reconcile」的分流。
+user_reply 时在 drain 前注入回复。本文件钉死 `_inject_user_reply` 的注入逻辑。
+
+「哪种请求走注入、哪种走 reconcile」的分流原先也在这里（按 `form` 判），现在由
+**delivery** 决定、且只在 `reply_to_hitl` 这一个入口分流：见
+`test_runtime_hitl_wiring.py` 的 `test_reply_returns_the_view_and_drives_resume_by_delivery`
+/ `test_user_turn_delivery_injects_instead_of_reconciling` / `test_no_resume_delivery_triggers_nothing`。
 """
 
 from __future__ import annotations
 
 import pytest
 
+from datetime import UTC, datetime
+
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.orchestrator.hitl_manager import HitlRequest
+from ctx_weft.core.hitl.registry import PendingHitl
 from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.protocols.hitl import (
+    HITL_FORM_WAIT,
+    PREFACE_NORMAL,
+    HitlDecision,
+    UserTurnDelivery,
+)
 from ctx_weft.core.state.models import Session, Task
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -43,11 +56,25 @@ async def _recall_user_prompts(mem: InMemoryMemoryProvider) -> list:
     )
 
 
-def _wait_for_user_req(outcome: str = "accepted", message: str = "ship it") -> HitlRequest:
-    return HitlRequest(
-        id="hit1", form="wait", session_id="s1", task_id="t1", agent_id="ag1",
-        capability_id="control:wait_for_user", outcome=outcome, message=message,
+def _wait_for_user_req(outcome: str = "accepted", message: str = "ship it") -> PendingHitl:
+    return _user_turn_req(outcome=outcome, message=message)
+
+
+def _user_turn_req(
+    *, hitl_id="hit1", session_id="s1", task_id="t1", agent_id="ag1",
+    outcome="accepted", message="ship it", preface=PREFACE_NORMAL,
+):
+    """一条**已终局**的 `UserTurn` 请求——`_inject_user_reply` / `_write_hitl_reply_turn`
+    收的就是这个形态（core 内部的活记录，不是 host 视图）。"""
+    req = PendingHitl(
+        id=hitl_id, form=HITL_FORM_WAIT, session_id=session_id, task_id=task_id,
+        agent_id=agent_id,
+        delivery=UserTurnDelivery(task_id=task_id, preface=preface),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
+    req.decision = HitlDecision(outcome=outcome, message=message)
+    req.resolved_at = datetime(2026, 1, 1, tzinfo=UTC)
+    return req
 
 
 async def test_inject_writes_user_prompt_and_requeues() -> None:
@@ -82,57 +109,3 @@ async def test_inject_missing_task_is_noop() -> None:
     await rt._inject_user_reply(_wait_for_user_req(), session, tm)   # 不抛
 
     assert await _recall_user_prompts(mem) == []
-
-
-async def test_resume_routes_wait_for_user_to_injection(monkeypatch) -> None:
-    rt, _ = _runtime_with_memory()
-    captured: dict = {}
-
-    async def fake_recover(session_id, *, user_reply=None, llm_account=None, llm_model=None, resumed_task_id=None):
-        captured["resumed_task_id"] = resumed_task_id
-        captured["session_id"] = session_id
-        captured["user_reply"] = user_reply
-
-    monkeypatch.setattr(rt, "recover_session", fake_recover)
-    req = _wait_for_user_req()
-    await rt._resume_after_cold_hitl(req)
-
-    assert captured["session_id"] == "s1"
-    assert captured["user_reply"] is req           # act 纯文本暂停 → 注入
-    assert captured["resumed_task_id"] == "t1"     # 被应答的 task 透传 → 复用活 owner 就地重驱
-
-
-async def test_resume_act_ask_user_uses_reconcile(monkeypatch) -> None:
-    rt, _ = _runtime_with_memory()
-    captured: dict = {}
-
-    async def fake_recover(session_id, *, user_reply=None, llm_account=None, llm_model=None, resumed_task_id=None):
-        captured["resumed_task_id"] = resumed_task_id
-        captured["user_reply"] = user_reply
-
-    monkeypatch.setattr(rt, "recover_session", fake_recover)
-    req = HitlRequest(
-        id="h2", form="question", session_id="s1", task_id="t1",
-        capability_id="control:ask_user", outcome="accepted", message="postgres",
-    )
-    await rt._resume_after_cold_hitl(req)
-
-    assert captured["user_reply"] is None          # act 的 ask_user → reconcile,不注入
-
-
-async def test_resume_approval_uses_reconcile(monkeypatch) -> None:
-    rt, _ = _runtime_with_memory()
-    captured: dict = {}
-
-    async def fake_recover(session_id, *, user_reply=None, llm_account=None, llm_model=None, resumed_task_id=None):
-        captured["resumed_task_id"] = resumed_task_id
-        captured["user_reply"] = user_reply
-
-    monkeypatch.setattr(rt, "recover_session", fake_recover)
-    req = HitlRequest(
-        id="h3", form="approval", session_id="s1", task_id="t1",
-        capability_id="bash:run", outcome="accepted",
-    )
-    await rt._resume_after_cold_hitl(req)
-
-    assert captured["user_reply"] is None          # approval 门控 → reconcile,不注入

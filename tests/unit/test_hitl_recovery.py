@@ -1,40 +1,17 @@
-"""HITL 跨重启恢复：从 pending_hitl 重建 HitlManager（spec/07 §9）。"""
+"""HITL 跨重启恢复：装填 registry 后 task 的 park / 重排判定（spec/07 §9）。
+
+`rebuild_pending` 那两条（重建不带 future / 重建后应答走冷）已删——装填与「装填出来
+的项恒无等待槽」由 `test_hitl_registry_load.py` 覆盖，冷应答由
+`test_runtime_hitl_wiring.py` 覆盖。
+"""
 
 from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-from ctx_weft.protocols.hitl import HitlRequest
 from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
-
-
-def test_rebuild_pending_restores_requests_without_futures() -> None:
-    mgr = HitlManager()
-    mgr.rebuild_pending({
-        "hit_1": HitlRequest(
-            id="hit_1", form="question", session_id="s1", task_id="t1",
-            capability_id="control:rhi", tool_call_id="tc1", question="Which DB?",
-        ),
-    })
-    pend = mgr.list_pending(session_id="s1")
-    assert len(pend) == 1 and pend[0].id == "hit_1"
-    assert pend[0].tool_call_id == "tc1" and pend[0].resolved is False
-    assert mgr.find_for_tool_call("tc1") is not None
-    assert "hit_1" not in mgr._futures
-
-
-async def test_answer_rebuilt_request_is_cold() -> None:
-    mgr = HitlManager()
-    mgr.rebuild_pending({
-        "hit_1": HitlRequest(id="hit_1", form="question", session_id="s1",
-                             task_id="t1", tool_call_id="tc1"),
-    })
-    resolved, was_hot = await mgr.resolve_answer("hit_1", "use postgres")
-    assert resolved.outcome == "accepted" and resolved.message == "use postgres"
-    assert was_hot is False
 
 
 def test_restore_keeps_hitl_parked_task_suspended() -> None:
@@ -105,7 +82,7 @@ async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
     await runtime.recover_session("ses_1")
     await asyncio.sleep(0)
 
-    pend = runtime.hitl_manager.list_pending(session_id="ses_1")
+    pend = runtime.hitl_registry.list_pending(session_id="ses_1")
     assert len(pend) == 1 and pend[0].tool_call_id == "tcA"
     assert llm.last_request is None             # parked task did not run
 
@@ -406,19 +383,3 @@ async def test_crash_mid_batch_routes_to_reconcile() -> None:
     await mem.ingest(MemoryEvent(type=MemoryEventType.TOOL_RESULT, address=sc, content="r1",
         timestamp=base + timedelta(seconds=2), role="tool", metadata={"tool_call_id": "x1"}), pctx)
     assert await _task_has_dangling_tool_call(mem, sc, pctx) is True   # x2 dangling → reconcile
-
-
-def test_rebuild_pending_stores_hitl_request_directly():
-    """合并实体后 rebuild_pending 直存 HitlRequest,不再做字段搬运。"""
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-    from ctx_weft.protocols.hitl import HitlRequest
-
-    mgr = HitlManager()
-    req = HitlRequest(id="hit_1", form="question", session_id="s1", task_id="t1",
-                      questions=[{"question": "q?"}], arguments={"a": 1})
-    mgr.rebuild_pending({"hit_1": req})
-    got = mgr.get("hit_1")
-    assert got is req                      # 直存同一对象
-    assert got.resolved is False
-    assert got.questions == [{"question": "q?"}] and got.arguments == {"a": 1}  # 不再丢字段
-    assert mgr.list_pending(session_id="s1") == [req]

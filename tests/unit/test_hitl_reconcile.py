@@ -1,65 +1,18 @@
-"""HITL 持久化（事件折叠 pending_hitl）+ reconcile step（spec/07 §6/§9）。"""
+"""reconcile step（spec/07 §6）。
+
+原先本文件开头还有三条 `RunStateView.pending_hitl` 的折叠用例。那份投影已删除——
+HITL 状态的真相源只剩 `fold_hitl_snapshot` → `HitlRegistry` 一条（口径见
+`test_hitl_fold_snapshot.py` / `test_hitl_registry_load.py`）。第二份口径不同的 HITL
+折叠留着就是等人再接一次的陈旧副本，正是旧实现「重建了 pending 却没重建已解决」
+那类漂移的来源。
+"""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
-from ctx_weft.core.control.reducers import reduce_events, serialize_view, deserialize_view
-from ctx_weft.protocols.events import Event, EventType
 
 pytestmark = pytest.mark.asyncio
-
-_BASE = datetime(2026, 1, 1, tzinfo=UTC)
-
-
-def _ev(t: EventType, payload: dict, sec: int, *, task_id="t1", session_id="s1") -> Event:
-    return Event(
-        id=f"evt_{sec}", run_id="r1", sequence=sec, session_id=session_id,
-        type=t, timestamp=_BASE + timedelta(seconds=sec), task_id=task_id, payload=payload,
-    )
-
-
-def test_reducer_folds_pending_then_removes_on_resolve() -> None:
-    events = [
-        _ev(EventType.SESSION_CREATED, {"template_id": "tpl"}, 0),
-        _ev(EventType.HITL_REQUIRED, {
-            "hitl_id": "hit_1", "form": "question", "capability_id": "control:rhi",
-            "tool_call_id": "tc1", "question": "Which DB?",
-        }, 1),
-    ]
-    view = reduce_events(events, run_id="s1")
-    assert "hit_1" in view.pending_hitl
-    hr = view.pending_hitl["hit_1"]
-    assert hr.form == "question" and hr.tool_call_id == "tc1" and hr.task_id == "t1"
-
-    events.append(_ev(EventType.HITL_ANSWERED, {"hitl_id": "hit_1"}, 2))
-    view2 = reduce_events(events, run_id="s1")
-    assert "hit_1" not in view2.pending_hitl
-
-
-def test_reducer_pending_survives_snapshot_roundtrip() -> None:
-    events = [
-        _ev(EventType.SESSION_CREATED, {"template_id": "tpl"}, 0),
-        _ev(EventType.HITL_REQUIRED, {
-            "hitl_id": "hit_2", "form": "approval", "capability_id": "fs:bash",
-            "tool_call_id": "tc2", "question": "ok?",
-        }, 1),
-    ]
-    view = reduce_events(events, run_id="s1")
-    restored = deserialize_view(serialize_view(view))
-    assert "hit_2" in restored.pending_hitl
-    assert restored.pending_hitl["hit_2"].tool_call_id == "tc2"
-
-
-def test_reducer_cancelled_removes_pending() -> None:
-    events = [
-        _ev(EventType.HITL_REQUIRED, {"hitl_id": "h3", "form": "question", "tool_call_id": "tc3"}, 0),
-        _ev(EventType.HITL_CANCELLED, {"hitl_id": "h3"}, 1),
-    ]
-    view = reduce_events(events, run_id="s1")
-    assert "h3" not in view.pending_hitl
 
 
 class _NullBus:

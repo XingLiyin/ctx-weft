@@ -186,8 +186,8 @@ async def content_to_event_jsonable(
     入口跑到这里、而 event blob 又不可用，`NullEventBlobStore.put` 会响亮抛出
     `NotImplementedError`——那正是想要的信号（某处绕开了入口门控，需要被看见，
     而不是被这里的一条静默降级悄悄吞掉）。Task 4 落地前这里曾有一条「退回同步
-    `content_to_jsonable`」的短路，专门服务未接线的裸单测（如 `HitlManager()` 直接
-    构造、不经 `validate_content`）；那类调用如今若真的递入携图内容，会在此处撞见
+    `content_to_jsonable`」的短路，专门服务绕过 `validate_content` 直接构造的裸单测；
+    那类调用如今若真的递入携图内容，会在此处撞见
     `NotImplementedError`——同样正确：它们绕过的正是本设计要求必经的入口。
 
     ⚠️ 与 ``redact_content_for_event`` 的分工：那个产出**一整个 str**（含截断预览），
