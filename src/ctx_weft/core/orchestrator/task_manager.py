@@ -153,8 +153,9 @@ class TaskManager:
     def set_cancel_inflight(self, cb: Callable[[str], bool]) -> None:
         """注入"对指定在途 task 发协作取消信号"回调（runtime 侧查 _run_tokens 发 cancel）。
 
-        只发信号不代表任务立即终结——该任务的 TASK_CANCELED（非 root）由 _run_loop
-        退出路径发；root 则由 trip 序列自己先标 FAILED（顺序见 _trip_failure_threshold）。
+        只发信号不代表任务立即终结——该任务的 TASK_CANCELED（非 root）由 run 结束后的
+        `apply_run_outcome` 发（Task 4 之前是 _run_loop 退出路径）；root 则由 trip 序列
+        自己先标 FAILED（顺序见 _trip_failure_threshold）。
         """
         self._cancel_inflight = cb
 
@@ -477,8 +478,13 @@ class TaskManager:
                 self._staged.pop(task_id, None)
                 raise
             if outcome is None:
-                # 这次执行没留下结局（task 已不存在等）→ 按「没炸、没挂起、没取消」兜底，
-                # 与旧路径的 `final_status = "FINISHED"` 同形。
+                # 这次执行没留下结局（task 已不存在等）→ 按「没炸、没挂起、没取消」兜底。
+                # **与旧路径并不完全同形**：旧路径走 `on_task_finished(FINISHED)`，一条 task
+                # 事件都不发；这里会经处置表发一条
+                # `TaskFinished{"outcome": "success", "summary": "", "outputs": None}`。
+                # 当前接线下本分支不可达（`_tasks` 从不删条目；`_SessionTaskRunner.execute`
+                # 只在 `get_task(task_id) is None` 时返回 None，而 `_execute_task` 恒返回
+                # 非 None 的 state），故不是行为差异；留着是给未来的 runner 实现兜底。
                 outcome = RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="success")
             # 处置**先于** _flush_staged：子任务一入队就可能跑完、回头唤醒父亲，而
             # `_try_resume_parent` 的门是 `parent.status == "SUSPENDED"`——父亲必须在
@@ -564,7 +570,9 @@ class TaskManager:
             await self.drain()
             return
         # 终态：用处置算出的那个，避免把 FAILED/CANCELED 覆盖成 FINISHED
-        final_status: TaskStatus = status if status in _TERMINAL_STATUSES else "FINISHED"  # type: ignore[assignment]
+        final_status: TaskStatus = (  # type: ignore[assignment]
+            status if status in _TERMINAL_STATUSES else "FINISHED"
+        )
         await self.on_task_finished(task_id, status=final_status)
 
     async def reopen_chain(self, head_id: str, reason: str = "") -> bool:
@@ -830,8 +838,9 @@ class TaskManager:
 
         # ── 取消胶囊闭合 funnel（Task 14）───────────────────────────────────────
         # 在途协作取消的任务：发信号时（cancel_all 的 CancelToken / 熔断的 cancel_inflight）
-        # 只做了 ack 替换（幂等自愈），finish 对要等这里——终态真正坐实（_run_loop 退出把
-        # task.status 置 CANCELED）——才补写。正常收尾的任务走 FinalizeStep，永不落到这个分支
+        # 只做了 ack 替换（幂等自愈），finish 对要等这里——终态真正坐实（`apply_run_outcome`
+        # 据处置表把 task.status 写成 CANCELED；Task 4 之前是 _run_loop 自己写）——才补写。
+        # 正常收尾的任务走 FinalizeStep，永不落到这个分支
         # （status 只会是 FINISHED/FAILED，与本 if 互斥）。未真正 start 过的任务（started_at 为
         # 空）不会有派发框/own scope 可闭，交由 synthesize_cancel_closure 的 find-only 兜底判定
         # 即可，这里额外用 started_at 提前短路只是省一次无意义调用。
@@ -957,8 +966,9 @@ class TaskManager:
         # 5) 取消挂起：SUSPENDED 且非 root → CANCELED + 事件（已启动者收进 cancel_now_tasks，
         #    立即整对闭合——不再走 ack_tasks/threshold_finalizer 的 ack-only 半闭合，因为它已经
         #    是终态，没有后续 on_task_finished 会来补 finish 对）；
-        #    在途非 root run → 只发协作取消信号，不发事件（其 TASK_CANCELED 由 _run_loop
-        #    退出路径发，finish 对交由 on_task_finished 的取消胶囊闭合 funnel；已启动带框者
+        #    在途非 root run → 只发协作取消信号，不发事件（其 TASK_CANCELED 由 run 结束后的
+        #    `apply_run_outcome` 发——Task 4 之前是 _run_loop 退出路径；finish 对交由
+        #    on_task_finished 的取消胶囊闭合 funnel；已启动带框者
         #    收进 ack_tasks，供 threshold_finalizer 做 eager ack 替换）。
         for t in list(self._tasks.values()):
             if t.parent_task_id is None:
@@ -991,7 +1001,9 @@ class TaskManager:
         # 6) root 判 FAILED：所有 parent_task_id is None 且非终态的任务判死；
         #    已终态的 root（自己就是第 N 败，FinalizeStep 已闭合；或时序尾巴已 FINISHED）
         #    不改状态、不发事件——闭合跳过。**先标 FAILED 再**对在跑的 root 调 cancel_inflight
-        #    （顺序保证 _run_loop 的终态守卫接得住，见 Task 10）。
+        #    （顺序保证两道守卫都接得住：task 侧是 `apply_run_outcome` 的终态守卫——不把 FAILED
+        #    盖回 CANCELED；run 侧是 `_run_loop` 的 cancel_takes_effect——不发 RUN_CANCELED。
+        #    Task 4 之前 task 侧那道也长在 _run_loop 里，见 Task 10）。
         root_we_failed_and_started: Task | None = None
         for t in list(self._tasks.values()):
             if t.parent_task_id is not None:
@@ -1034,7 +1046,8 @@ class TaskManager:
         """硬取消整条 session 链：清空 pending 队列并标 CANCELED，会话置 CANCELED。
 
         在途 task 不在此处理——由 CancelToken → act checkpoint → CancelledError →
-        _run_loop 置该 task CANCELED → on_task_finished（其 drain() 被 _cancelled 守卫挡住，
+        `_run_loop` 交回 `RunOutcome(CANCELED)` → `apply_run_outcome` 置该 task CANCELED
+        → on_task_finished（其 drain() 被 _cancelled 守卫挡住，
         finish 对经 on_task_finished 的取消胶囊闭合 funnel 补写，见 Task 14）。
 
         标态后立即对已启动的任务（`started_at` 非空——含 root：root 没有 origin_tool_call_id，
