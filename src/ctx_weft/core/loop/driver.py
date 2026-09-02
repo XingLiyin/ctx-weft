@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from ctx_weft.core.control.tokens import CancelToken, PauseToken
     from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.orchestrator import CapabilityCache, TaskManager
+    from ctx_weft.core.orchestrator.task_disposition import RunOutcome
     from ctx_weft.core.hitl.service import HitlService
     from ctx_weft.core.loop.hitl_waiter import HitlWaiter
     from ctx_weft.protocols.capability import CapabilityProvider
@@ -80,6 +81,11 @@ class LoopState:
     act_exit_reason: str = ""
     # 由 ObserveStep 写入
     verdict: Verdict | None = None
+
+    #: 本次 run 的结局，由 loop 在结束前填好、交给 TaskManager 决定 task 处置。
+    #: loop 报「发生了什么」，不报「task 该变成什么」——后者是 TM 的活
+    #: （docs/superpowers/plans/2026-09-02-task-status-ownership.md 的处置表）。
+    run_outcome: "RunOutcome | None" = None
 
     # 其他扩展字段
     extra: dict[str, Any] = field(default_factory=dict)

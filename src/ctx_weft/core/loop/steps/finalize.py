@@ -14,6 +14,7 @@ from typing import Any
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.media import placeholder_refs
+from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.utils import as_utc, content_to_text, generate_id, image_tokens, now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress
 from ctx_weft.protocols.capability import qualify
@@ -689,6 +690,17 @@ class FinalizeStep(Step):
         task_summary = verdict.task_summary if verdict else ""    # → 汇报给 parent 的 process report
         events: list[Any] = []
 
+        # Task 2（loop 产出 RunOutcome，尚无消费者）：用 observer 的原值 outcome，**不经**
+        # 下面 retry_exhausted 的重试耗尽降级——那是 TM 的活（task_disposition.disposition_for），
+        # loop 只报「observer 说了什么」。旧的写状态/发事件（下面全部）原样保留，本行只新增产出。
+        run_outcome = RunOutcome(
+            kind=RunOutcomeKind.COMPLETED,
+            verdict=outcome,
+            summary=summary,
+            outputs=task.outputs,
+            error=task.error or "",
+        )
+
         # retry 超过上限 → 降级 fail（不再重试）。专属 error_code 区分「程序按重试上限
         # 熔断」与 observer 主动判死；死因 = 最后一轮 retry 判决暂存的受阻原因（task.error，
         # report_task_outcome 判 retry 时写入），机械退出轮没有判决则为空。
@@ -774,7 +786,7 @@ class FinalizeStep(Step):
             payload={"task_id": task.id, "outcome": outcome},
         ))
 
-        return StepOutcome(next_step=None, state_patch={}, events=events)
+        return StepOutcome(next_step=None, state_patch={"run_outcome": run_outcome}, events=events)
 
 
 def _output_text(outputs: Any) -> str:

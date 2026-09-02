@@ -62,6 +62,7 @@ from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvi
 from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager, SpawnDepthExceeded
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
+from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.state.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
@@ -2445,6 +2446,10 @@ class CtxWeftRuntime:
                 if outcome.state_patch:
                     state = state.apply_patch(outcome.state_patch)
         except HitlPark as park:
+            # Task 2（loop 产出 RunOutcome，尚无消费者）：旧路径原样保留，本行只新增产出。
+            state = state.apply_patch({"run_outcome": RunOutcome(
+                kind=RunOutcomeKind.AWAITING_HUMAN, hitl_id=park.hitl_id,
+            )})
             # 热→冷降级 / 显式挂起：干净挂起，不算失败。run_error 保持 None →
             # finally 发 RUN_FINISHED(AWAITING_HUMAN, will_retry=False)，与委派挂起同形；
             # _run_task 据非终态挂起走挂起分支（不 requeue）。
@@ -2463,7 +2468,17 @@ class CtxWeftRuntime:
             was_cancelled = True
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
                 task.status = "CANCELED"
+            # Task 2（loop 产出 RunOutcome，尚无消费者）：旧路径原样保留，本行只新增产出。
+            state = state.apply_patch({"run_outcome": RunOutcome(kind=RunOutcomeKind.CANCELED)})
         except LLMOutageError as exc:
+            # Task 2（loop 产出 RunOutcome，尚无消费者）：outage 硬编码 retriable=False——
+            # **不得**转发 exc.retriable（LLMOutageError.retriable 恒为 True，见
+            # protocols/llm.py；今天"outage 从不原地重试"靠的是路径隔离，不是这个标志位，
+            # 转发会让 outage 在预算充足时被错误地原地重试。见 task_disposition.py 顶部契约。
+            state = state.apply_patch({"run_outcome": RunOutcome(
+                kind=RunOutcomeKind.INTERRUPTED, reason="llm_outage",
+                error_code="llm_outage", retriable=False,
+            )})
             # 瞬时 LLM 故障自愈耗尽 / 中途断流 → 可恢复中断，**不是** task 失败。
             # task 置 INTERRUPTED（非终态，与 HitlPark 同形）→ _run_task 走挂起分支不判 FINISHED，
             # restore() 在 /resume 时据非终态重排；不发 TASK_FAILED；不增 failure_counter；
@@ -2500,6 +2515,13 @@ class CtxWeftRuntime:
                     }))
         except Exception as exc:
             run_error = exc
+            # Task 2（loop 产出 RunOutcome，尚无消费者）：崩溃支必须显式传
+            # `getattr(exc, "retriable", True)`——与上面 outage 支的硬编码 False 不同源，
+            # 不许合并成一份（task_disposition.py 顶部契约）。
+            state = state.apply_patch({"run_outcome": RunOutcome(
+                kind=RunOutcomeKind.INTERRUPTED, reason="run_crash",
+                error_code=crash_error_code(exc), retriable=getattr(exc, "retriable", True),
+            )})
             # 运行层崩溃 = 可恢复中断的临时标记（非终态）：re-raise 交 _handle_task_failure
             # 定夺——原地重试（翻回 PENDING）或挂起等 /resume（保持 SUSPENDED + 发事件）。
             # 真失败只有 observer 判 fail 一条路（FinalizeStep 闭合胶囊、回传父亲）。

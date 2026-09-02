@@ -10,6 +10,7 @@ from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.protocols.events import EventType
+from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
 
@@ -70,8 +71,15 @@ class SuspendStep(Step):
         from ctx_weft.core.loop.steps.background_observe import launch_background_observe
         launch_background_observe(state, ctx, boundary="dispatch")
 
+        # Task 2（loop 产出 RunOutcome，尚无消费者）：旧的写状态/发事件原样保留，本行只新增产出。
+        run_outcome = RunOutcome(
+            kind=RunOutcomeKind.SUSPENDED_ON_CHILDREN,
+            summary=summary,
+            spawn_titles=tuple(titles),
+        )
+
         return StepOutcome(
             next_step=None,  # loop stops; TaskManager will re-queue when children done
-            state_patch={"act_exit_reason": "suspended"},
+            state_patch={"act_exit_reason": "suspended", "run_outcome": run_outcome},
             events=events,
         )
