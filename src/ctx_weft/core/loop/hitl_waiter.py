@@ -64,12 +64,29 @@ class HitlWaiter:
 
         不抛是刻意的：抛一个 core 内部的 `BaseException` 就是旧实现让 provider 层
         被迫 catch 它的那条路。翻译成 park 的权力留在 gateway。
+
+        **入口即已终局 → 当成驱逐，不把决定递回去（spec 复审修复）**：`gateway` 调用
+        顺序是 `ctx.hitl.open(...)` 先于 `ctx.waiter.wait(...)`，而 `open()` 内部
+        `await self._emit(...)` 会在 `emit()` 里同步 drain 订阅者——另一个协程可能
+        在这个窗口里把请求答了。此时请求从未挂过等待槽，`HitlService._commit` 看到
+        `slot is None` ⟹ `claimed=False` ⟹ `reply_to_hitl` 已经（或即将）触发冷续跑。
+        若这里把 `req.decision` 原样递回去，还在等的这个协程会热续跑——同一个 task
+        被两条路同时驱动，正是本任务要堵的洞。入口已终局的另一种情形是 `cancel()`，
+        此时保持「未建槽即返回」同样正确：不该假装收到了一个答案。
+        两种情形都按「驱逐」处理——返回 `None`，让 gateway 走已经踩熟的 park 路径；
+        真正「答复先到、槽已挂上」的热路径不受影响，走下面的 `slot.result()`。
         """
         req = self._registry.get(hitl_id)
         if req is None:
             raise KeyError(f"No HITL request found: {hitl_id}")
         if req.resolved:
-            return req.decision  # 已终局：不建槽，直接给
+            logger.info(
+                "HITL resolved before wait() attached a slot (open()/wait() race "
+                "window, or cancel) → treating as evicted so the cold path (which "
+                "already owns this resolution) is the only driver (hitl=%s)",
+                hitl_id,
+            )
+            return None
         slot = FutureWaitSlot()
         self._registry.attach_slot(hitl_id, slot)
         try:

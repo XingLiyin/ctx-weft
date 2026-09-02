@@ -7,6 +7,8 @@ import inspect
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
+from ctx_weft.core.errors import InvalidContentError
+from ctx_weft.protocols import ImagePart
 from ctx_weft.protocols.hitl import (
     HitlAsk,
     HitlReply,
@@ -114,7 +116,10 @@ async def test_a_claimed_hot_reply_does_not_trigger_cold_resume():
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
                              tool_call_id="call_1", stage="tool")
     rt.hitl_registry.attach_slot(req.id, _AcceptingSlot())
-    await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted"))
+    view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted"))
+    # 不能只看 calls == []——resolve() 失败（未知 id / 已终局）时同样不产生任何 call，
+    # 两种情况必须区分开：这里断言的是「已终局且真被消费」，不是「resolve 失败了」。
+    assert view is not None and view.outcome == "accepted"
     assert calls == []
 
 
@@ -135,3 +140,64 @@ async def test_resume_hint_overrides_the_model_for_this_resume_only():
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                      resume_hint=ResumeHint(llm_model="big")))
     assert calls[0][-1] == "big"
+
+
+async def test_hitl_reply_intake_is_wired_to_the_runtime_shared_normalizer():
+    """`ReplyIntake` 必须挂着 `_normalize_hitl_content`——不是某个桩、不是恒等变换。
+
+    这是与旧 `set_content_normalizer` 那道接线等价的钉子：以前 `test_hitl_multimodal_
+    validation.py` 直接断言 legacy manager 的 normalizer 就是这个方法；新路径下没有
+    setter 可断言了，改断言 `ReplyIntake` 构造时收到的就是它，防止有人以后悄悄拿掉。
+    """
+    rt = _runtime()
+    assert rt.hitl._intake._normalizer == rt._normalize_hitl_content
+
+
+async def test_reply_with_a_disallowed_image_media_type_is_rejected_and_stays_pending():
+    """校验能力在唯一的生产路径（`reply_to_hitl`）上是活的，不是被静默拆掉的接线。
+
+    白名单外的 media type 必须在 `validate_content` 就地拒绝——不落库、不发事实、
+    请求原样保持未决，供人类重新提交一个合法答复。
+    """
+    rt = _runtime()
+    req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
+                             tool_call_id="call_1", stage="tool")
+    events: list = []
+
+    async def _record(ev):
+        events.append(ev)
+
+    rt._event_bus.subscribe(None, _record)  # type: ignore[attr-defined]
+
+    with pytest.raises(InvalidContentError):
+        await rt.reply_to_hitl(HitlReply(
+            hitl_id=req.id, outcome="accepted",
+            message=[ImagePart(data="AAAA", media_type="image/bmp")],
+        ))
+
+    pending = rt.hitl_registry.get(req.id)
+    assert pending is not None and pending.resolved is False
+    assert events == []
+
+
+async def test_a_failed_cold_resume_after_commit_is_logged_loudly_and_still_raises(
+    caplog,
+):
+    """resolve() 已经不可逆地提交——续跑失败没有第二次机会,必须在日志里带上 hitl_id
+    响亮地留痕,而不是只悄悄传给 host（复审 cheap fix）。"""
+    rt = _runtime()
+    req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
+                             tool_call_id="call_1", stage="tool")
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("owner TM rebuild exploded")
+
+    rt.recover_session = _boom  # type: ignore[method-assign]
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(RuntimeError, match="owner TM rebuild exploded"):
+            await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted"))
+
+    assert req.id in caplog.text
+    # 应答本身已经不可逆地提交——即便续跑失败，请求也真的终局了。
+    assert rt.hitl_registry.get(req.id).resolved is True

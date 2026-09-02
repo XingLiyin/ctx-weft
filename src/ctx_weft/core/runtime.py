@@ -1752,18 +1752,38 @@ class CtxWeftRuntime:
         return resolved.to_view()
 
     async def _resume_after_hitl(self, req: "PendingHitl", hint: "ResumeHint") -> None:
-        """按 **delivery** 分流续跑——不看 form，不看 capability_id（spec §5）。"""
-        if isinstance(req.delivery, ToolResultDelivery):
-            await self.recover_session(
-                req.session_id, resumed_task_id=req.task_id,
-                llm_account=hint.llm_account, llm_model=hint.llm_model,
+        """按 **delivery** 分流续跑——不看 form，不看 capability_id（spec §5）。
+
+        由 `reply_to_hitl` 调用时，`req` 已经**不可逆地终局**（`registry.resolve()`
+        已提交、事实已发）——这是「唯一驱动方」路径本身，不是一个可以撤销重试的准备
+        阶段。若这里 `recover_session` 抛出，重试 `reply_to_hitl` 只会撞见
+        `hitl.resolve()` 对已终局请求的幂等 `None`（不重发事实、不重新触发续跑），
+        会话就此永久卡住、且没有第二次机会补上——这正是「既没热投递、也没冷续跑」的
+        那个「都没有」路径。异常仍然原样传给调用方（host 需要知道这次应答的续跑没
+        成），但**先**用 `hitl_id` 记一条响亮的 exception 日志，让运维不必去反查
+        「host 报的这次失败对应哪个已经提交但没跑起来的 HITL」。
+        """
+        try:
+            if isinstance(req.delivery, ToolResultDelivery):
+                await self.recover_session(
+                    req.session_id, resumed_task_id=req.task_id,
+                    llm_account=hint.llm_account, llm_model=hint.llm_model,
+                )
+            elif isinstance(req.delivery, UserTurnDelivery):
+                await self.recover_session(
+                    req.session_id, user_reply=req, resumed_task_id=req.delivery.task_id,
+                    llm_account=hint.llm_account, llm_model=hint.llm_model,
+                )
+            # NoResumeDelivery：纯通知 / 取消，无动作。
+        except Exception:
+            logger.exception(
+                "_resume_after_hitl: cold resume failed after the HITL was already "
+                "committed (hitl_id=%s, session_id=%s, task_id=%s, delivery=%s) — "
+                "the session will not wake up on its own; a retry of reply_to_hitl "
+                "won't help (resolve() is idempotent), this needs manual recovery",
+                req.id, req.session_id, req.task_id, type(req.delivery).__name__,
             )
-        elif isinstance(req.delivery, UserTurnDelivery):
-            await self.recover_session(
-                req.session_id, user_reply=req, resumed_task_id=req.delivery.task_id,
-                llm_account=hint.llm_account, llm_model=hint.llm_model,
-            )
-        # NoResumeDelivery：纯通知 / 取消，无动作。
+            raise
 
     async def _resume_after_cold_hitl(self, req: "HitlRequest") -> None:
         """冷 HITL 应答后恢复 session（legacy `HitlManager.on_cold_resolve` 回调）。

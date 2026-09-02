@@ -44,6 +44,20 @@ async def test_wait_returns_the_decision_when_it_is_delivered():
     assert (await task).message == "go"
 
 
+async def test_resolved_before_wait_attaches_a_slot_returns_none_not_the_decision():
+    """open()/wait() 之间的窄竞态窗口（段 2 复审修复）：`open()` 内部 `emit()` 同步 drain
+    订阅者时若被答了，请求从未挂过等待槽——`claimed=False`，`reply_to_hitl` 已经/即将
+    冷续跑。此时 `wait()` 若把决定原样递回去，还在等的这个协程会热续跑,同一个 task
+    被两条路同时驱动。必须当成驱逐处理：返回 `None`，交给 gateway 走 park。"""
+    reg = HitlRegistry()
+    _open(reg)
+    res = reg.resolve("hit_1", HitlDecision(outcome="accepted", message="go"), T0)
+    assert res is not None
+    _req, slot = res
+    assert slot is None  # 从未有协程调用过 wait()，故没有等待槽——正是竞态窗口的特征
+    assert await HitlWaiter(reg).wait("hit_1") is None
+
+
 async def test_wait_returns_none_when_the_slot_is_evicted_by_timeout():
     reg = HitlRegistry()
     _open(reg)
