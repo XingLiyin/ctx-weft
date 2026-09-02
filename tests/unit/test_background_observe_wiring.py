@@ -222,7 +222,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
     """act soft-interrupt park (source='interrupt', root task) → launch_background_observe called once."""
     from ctx_weft.core.control.tokens import PauseToken
     from ctx_weft.core.loop.steps.act import ActStep
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from tests.hitl_env import make_hitl
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.core.assembler.assembler import AssembledPrompt
     from ctx_weft.protocols import LLMMessage
@@ -244,7 +244,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
     from ctx_weft.providers.events import InProcessEventBus
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
-    hitl = HitlManager(event_bus=bus)
+    hitl, _hitl_reg = make_hitl(bus)
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = _make_root_task(status="ACTIVE")
@@ -261,7 +261,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
     llm = MockLLMAdapter(responses=[MockResponse(text="partial")])
     ctx = LoopContext(
         assembler=None, llm=llm, memory=mem, event_bus=bus,
-        provider_ctx=pctx, hitl_manager=hitl,
+        provider_ctx=pctx, hitl=hitl,
     )
 
     # Fire pause before act starts
@@ -282,7 +282,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
     """act soft-interrupt park with child task → launch_background_observe NOT called."""
     from ctx_weft.core.control.tokens import PauseToken
     from ctx_weft.core.loop.steps.act import ActStep
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from tests.hitl_env import make_hitl
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.core.assembler.assembler import AssembledPrompt
     from ctx_weft.protocols import LLMMessage
@@ -304,7 +304,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
     from ctx_weft.providers.events import InProcessEventBus
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
-    hitl = HitlManager(event_bus=bus)
+    hitl, _hitl_reg = make_hitl(bus)
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     child = _make_child_task(status="ACTIVE")
@@ -321,7 +321,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
     llm = MockLLMAdapter(responses=[MockResponse(text="partial")])
     ctx = LoopContext(
         assembler=None, llm=llm, memory=mem, event_bus=bus,
-        provider_ctx=pctx, hitl_manager=hitl,
+        provider_ctx=pctx, hitl=hitl,
     )
 
     pause = PauseToken()
@@ -340,7 +340,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
 async def test_act_plain_text_pause_fires_for_root(monkeypatch):
     """act plain-text pause (source='plain_text', root task, interactive) → launch_background_observe called once."""
     from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from tests.hitl_env import make_hitl
     from ctx_weft.providers.events import InProcessEventBus
 
     launched = []
@@ -359,7 +359,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
 
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
-    hitl = HitlManager(event_bus=bus)
+    hitl, _hitl_reg = make_hitl(bus)
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = dataclasses.replace(_make_root_task(status="ACTIVE"), interaction_mode="interactive")
@@ -372,7 +372,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=bus,
-        provider_ctx=pctx, hitl_manager=hitl,
+        provider_ctx=pctx, hitl=hitl,
     )
 
     with pytest.raises(HitlPark):
@@ -387,7 +387,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
 async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
     """act plain-text pause with child task → launch_background_observe NOT called."""
     from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+    from tests.hitl_env import make_hitl
     from ctx_weft.providers.events import InProcessEventBus
 
     launched = []
@@ -406,7 +406,7 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
 
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
-    hitl = HitlManager(event_bus=bus)
+    hitl, _hitl_reg = make_hitl(bus)
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     child = dataclasses.replace(_make_child_task(status="ACTIVE"), interaction_mode="interactive")
@@ -419,7 +419,7 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=bus,
-        provider_ctx=pctx, hitl_manager=hitl,
+        provider_ctx=pctx, hitl=hitl,
     )
 
     with pytest.raises(HitlPark):

@@ -14,7 +14,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.act import CANCELLED_MARK, INTERRUPTED_MARK, ActStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-from ctx_weft.core.orchestrator.hitl_manager import HitlManager
+from tests.hitl_env import make_hitl
 from ctx_weft.core.assembler.assembler import AssembledPrompt
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import (
@@ -68,7 +68,7 @@ class _ToolProvider(ToolCapabilityProvider):
 def _harness(llm, provider):
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
-    hitl = HitlManager(event_bus=bus)
+    hitl, _hitl_reg = make_hitl(bus)
     cache = CapabilityCache()
     cache.put("ag1", provider._caps())
     gw = CapabilityGateway(
@@ -87,7 +87,7 @@ def _harness(llm, provider):
     ctx = LoopContext(
         assembler=None, llm=llm, memory=mem, event_bus=bus,
         provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1"),
-        hitl_manager=hitl, capability_gateway=gw, pause_token=pause,
+        hitl=hitl, capability_gateway=gw, pause_token=pause,
     )
     return state, ctx, task, mem, pause, provider
 

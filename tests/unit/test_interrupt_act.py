@@ -8,6 +8,11 @@ from ctx_weft.core.control.tokens import CancelToken, PauseToken
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.act import INTERRUPTED_MARK, ActStep, interrupt_edit_note
 from ctx_weft.protocols import LLMChunk, MemoryEventType
+from ctx_weft.protocols.hitl import (
+    PREFACE_AFTER_INTERRUPT,
+    PREFACE_AFTER_INTERRUPT_EDIT,
+    UserTurnDelivery,
+)
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.integration.test_interactive_task import _act_state_ctx
@@ -54,7 +59,8 @@ async def test_interrupt_parks_instead_of_cancel():
     assert state.session.status == "PAUSED"
     assert task.status == "SUSPENDED"
     pend = hitl.list_pending("s1")
-    assert pend and pend[0].capability_id.endswith(":wait_for_user")
+    # 旧断言看的是 capability_id sentinel；新契约用 delivery 表达同一件事（spec §5）。
+    assert pend and isinstance(pend[0].delivery, UserTurnDelivery)
 
 
 async def test_hard_cancel_raises_cancellederror():
@@ -101,7 +107,7 @@ def test_interrupt_edit_note_empty_prev_returns_new():
 
 
 async def test_interrupt_before_token_marks_edit_phase():
-    # ① 未吐 token → park context = interrupt:edit（续接需补说明）。
+    # ① 未吐 token → preface = interrupt_edit（续接需补说明；旧字段名 context）。
     pause = PauseToken()
     pause.pause()
     llm = MockLLMAdapter(responses=[MockResponse(text="x")])
@@ -110,11 +116,11 @@ async def test_interrupt_before_token_marks_edit_phase():
 
     with pytest.raises(HitlPark):
         await ActStep().execute(state, ctx)
-    assert hitl.list_pending("s1")[0].context == "interrupt:edit"
+    assert hitl.list_pending("s1")[0].delivery.preface == PREFACE_AFTER_INTERRUPT_EDIT
 
 
 async def test_interrupt_after_token_is_not_edit_phase():
-    # ② 已吐 token → 非 edit（context = interrupt）。
+    # ② 已吐 token → 非 edit（preface = interrupt）。
     pause = PauseToken()
     llm = _PauseMidStream(pause, "partial")
     state, ctx, task, hitl, _mem = _act_state_ctx("interactive", llm)
@@ -122,7 +128,7 @@ async def test_interrupt_after_token_is_not_edit_phase():
 
     with pytest.raises(HitlPark):
         await ActStep().execute(state, ctx)
-    assert hitl.list_pending("s1")[0].context == "interrupt"
+    assert hitl.list_pending("s1")[0].delivery.preface == PREFACE_AFTER_INTERRUPT
 
 
 async def test_interrupt_before_any_token_does_not_persist_response():

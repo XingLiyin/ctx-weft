@@ -19,22 +19,26 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep
 from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
-from ctx_weft.core.orchestrator.hitl_manager import HitlManager
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import (
     LLMMessage, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
 )
+from ctx_weft.protocols.hitl import PREFACE_NORMAL, UserTurnDelivery
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.hitl_env import make_hitl
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
 
 def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
+    """返回 (state, ctx, task, registry, mem)。第 4 项是 `HitlRegistry`——`list_pending`
+    的持有者从 `HitlManager` 换成了它，断言口径不变（仍是「这个 session 上挂着哪些未决
+    请求」）。"""
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
-    hitl = HitlManager(event_bus=bus)
+    hitl_service, hitl = make_hitl(bus)
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING", token_budget=0)
     task = Task(
         id="t1", session_id="s1", status="ACTIVE",
@@ -55,7 +59,7 @@ def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
     ctx = LoopContext(
         assembler=None, llm=llm, memory=mem, event_bus=bus,
         provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1"),
-        hitl_manager=hitl,
+        hitl=hitl_service,
     )
     return state, ctx, task, hitl, mem
 
@@ -73,7 +77,8 @@ async def test_interactive_plain_text_parks_for_user() -> None:
     pend = hitl.list_pending("s1")
     assert len(pend) == 1
     assert pend[0].form == "wait"
-    assert pend[0].capability_id.endswith(":wait_for_user")
+    # 续跑方式由 delivery 显式声明——取代旧的 `capability_id` sentinel（spec §5）。
+    assert pend[0].delivery == UserTurnDelivery(task_id="t1", preface=PREFACE_NORMAL)
 
     # guidance 只在发送的 prompt（装配期已拼入），不入 memory
     sent = llm.last_request.messages[-1].content
