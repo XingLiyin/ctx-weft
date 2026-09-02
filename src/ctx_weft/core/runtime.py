@@ -967,6 +967,11 @@ class CtxWeftRuntime:
         )
         task_manager.set_session(session)
         task_manager.register_task(task)
+        # compat 路径也走同一条会话状态链：这里不经 _register_and_drain（没有队列、
+        # 没有 drain），但 run 结束后一样要把「我这边什么情况」报出去，否则 outage /
+        # park 的会话状态无人落定（判据只有一条：TM 的聚合信号）。
+        task_manager.set_session_manager(self._session_manager)
+        self._session_manager.register_session(sid, tenant_id=tenant_id)
 
         for p in self.providers.get_capability_providers():
             if isinstance(p, ControlCapabilityProvider):
@@ -985,6 +990,9 @@ class CtxWeftRuntime:
                 task_manager=task_manager,
             )
         finally:
+            await task_manager.announce_queue_state()
+            # 一次性路径：状态已随事件发出，内存里不必留着（host 之后读的是投影）。
+            self._session_manager.forget_session(sid)
             for p in self.providers.get_capability_providers():
                 if isinstance(p, SessionScopedCapabilityProvider):
                     p.deregister_session(sid)
@@ -1111,13 +1119,13 @@ class CtxWeftRuntime:
         task_manager.set_is_current(
             lambda tm=task_manager: self._task_managers.get(session.id) is tm
         )
-        # 完成判定的"未决 HITL"真相：查 `HitlRegistry`（单一真相，spec §3.1——恢复期由
-        # `rebuild_hitl` 装填，此后只读内存、不回落 scan 日志）。有 parked（未决 HITL）任务
-        # 时，会话算"空闲等应答"而非"完成"，避免另一任务收尾时把 parked 任务孤立
-        # （spec/07 §9.1）。
-        task_manager.set_has_pending_hitl(
-            lambda sid=session.id: bool(self.hitl_registry.list_pending(session_id=sid))
-        )
+        # 会话状态的持有者。TM 只往它发事实（announce_queue_state 的三条聚合信号）+
+        # 透传 cancel；「有人在等」不再靠注入的 pending-HITL 谓词，而是由 AWAITING_HUMAN
+        # 的任务表达（docs/events-v2.md §2.1.1）。
+        task_manager.set_session_manager(self._session_manager)
+        # 纳入 SM 管理。setdefault 语义，重入安全：多轮对话/恢复重建都会走到这里，
+        # 已有状态不被重置（新一轮的显式 RUNNING 由 resume_session 负责）。
+        self._session_manager.register_session(session.id, tenant_id=session.tenant_id)
         # 熔断真终结（Task 10）三处注入：cancel 挂起 HITL / 协作取消在途 run / memory 闭合。
         # 均 best-effort——trip 序列本身不因这三者缺失或异常而崩溃（TaskManager 侧已兜底）。
         task_manager.set_cancel_pending_hitl(
@@ -2083,16 +2091,15 @@ class CtxWeftRuntime:
         """Recover every still-active session (SessionCreated, no SessionFinished) after a restart.
 
         Decision is made **in core, from events** (no host projection, no full replay):
-        a session with an unresolved pending HITL was waiting for a human answer → **only the
-        in-memory ``HitlRegistry`` is refilled** (so ``/hitl/pending`` and the reply endpoints work);
-        status stays PAUSED_HITL or PAUSED and **nothing runs** — the task rebuild + drain defers to the
-        reply's ``recover_session``. Otherwise it was actively running at crash → **emit
-        ``SessionStatusChanged(INTERRUPTED)``**.
+        the in-memory ``HitlRegistry`` is refilled (so ``/hitl/pending`` and the reply endpoints
+        work), the session is registered with the ``SessionManager``, and the live TaskManager —
+        if there is one — announces its queue state. **恢复不是一种状态**：会话状态照常由
+        SM 据 TM 的聚合信号判定，恢复路径与正常路径走同一条链。
 
-        So at startup **nothing drains/runs**: PAUSED waits for a reply, INTERRUPTED waits for
-        ``/resume``. No host callback — the interrupt is just an event handled by the host's
-        existing subscribers (projection + SSE). Call in the app lifespan after providers are
-        registered, before serving. Returns the count handled.
+        So at startup **nothing drains/runs**: a waiting session waits for a reply, an interrupted
+        one waits for ``/resume``. No host callback — the session-level events are handled by the
+        host's existing subscribers (projection + SSE). Call in the app lifespan after providers
+        are registered, before serving. Returns the count handled.
         """
         try:
             session_ids = await self.event_store.list_active_session_ids()
@@ -2102,18 +2109,14 @@ class CtxWeftRuntime:
 
         for session_id in session_ids:
             try:
-                n = await self.rebuild_hitl(session_id)
-                if n:
-                    # 有未决 HITL → 如实反映"等待人工"（否则投影停在崩溃前的 RUNNING，看着在跑却卡住）。
-                    # 暂停态由 delivery 推导（见 `_derive_paused_status`）：UserTurn-only（软待命，
-                    # 无面板）= PAUSED、其余 = PAUSED_HITL。`or "PAUSED_HITL"` 只是防御——
-                    # 进到这个分支时 n > 0，推导恒非空。
-                    status = self._derive_paused_status(session_id) or "PAUSED_HITL"
-                    await self._emit_session_status(session_id, status)
-                    logger.info("Recovery: session %s → %s (%d pending, drain deferred to reply)", session_id, status, n)
-                else:
-                    await self._emit_session_interrupted(session_id)
-                    logger.info("Recovery: session %s → INTERRUPTED (event emitted)", session_id)
+                # 恢复期不再有专门的分支判断「有没有未决 HITL」——装填内存 HITL 之后，
+                # 由 TM 照常聚合队列状态、该报什么报什么，会话状态仍由 SM 判定。
+                # 「复活不是一种状态」的落地（docs/events-v2.md §2.1.1）。
+                await self.rebuild_hitl(session_id)
+                self._session_manager.register_session(session_id)
+                tm = self._task_managers.get(session_id)
+                if tm is not None:
+                    await tm.announce_queue_state()   # 恢复路径和正常路径走同一条链
             except Exception:
                 logger.exception("Recovery: failed to recover session %s", session_id)
 
@@ -2228,7 +2231,9 @@ class CtxWeftRuntime:
     async def session_status_after_recover(self, session_id: str) -> str:
         """装填该 session 的 HITL 内存态并返回它应处的暂停态（`""` = 无未决，不该暂停）。
 
-        `recover()` 与 host 的只读查询共用同一份推导，不各写一遍。
+        **host 面向的只读查询**：「等的是审批面板（PAUSED_HITL）还是一句话（PAUSED）」是
+        `delivery` 的性质、只有前端需要，不上升到会话状态——会话只有一个 WAITING
+        （docs/events-v2.md §2.8）。`recover()` 自 Task 6 起不再走这条推导（恢复不分流）。
         """
         await self.rebuild_hitl(session_id)
         return self._derive_paused_status(session_id)
@@ -2250,39 +2255,6 @@ class CtxWeftRuntime:
             except Exception:
                 logger.exception("rebuild_all_pending_hitl: failed for session %s", sid)
         return total
-
-    async def _emit_session_interrupted(self, session_id: str, reason: str | None = None) -> None:
-        """发 SessionStatusChanged(INTERRUPTED) —— host 读模型(投影/SSE)按事件自行反映,不走回调。
-
-        reason 标记中断成因（如 "llm_outage"）供前端区分 LLM 故障中断 vs 通用中断(重启等)。
-        """
-        payload: dict = {"new_status": "INTERRUPTED"}
-        if reason:
-            payload["reason"] = reason
-        await self._event_bus.emit(Event(
-            id=generate_id("evt"),
-            run_id=None,
-            sequence=0,
-            session_id=session_id,
-            type=EventType.SESSION_STATUS_CHANGED,
-            timestamp=now_utc(),
-            payload=payload,
-        ))
-
-    async def _emit_session_status(self, session_id: str, new_status: str) -> None:
-        """发 SessionStatusChanged(new_status) —— host 读模型据事件反映，不走回调。
-
-        供恢复时把有未决 HITL 的会话如实标为 PAUSED_HITL（否则投影停在崩溃前的 RUNNING）。
-        """
-        await self._event_bus.emit(Event(
-            id=generate_id("evt"),
-            run_id=None,
-            sequence=0,
-            session_id=session_id,
-            type=EventType.SESSION_STATUS_CHANGED,
-            timestamp=now_utc(),
-            payload={"new_status": new_status},
-        ))
 
     # ── Internal execution ───────────────────────────────────────────────────
 
@@ -2432,17 +2404,19 @@ class CtxWeftRuntime:
             async for outcome in driver.run(state, loop_ctx):
                 if outcome.state_patch:
                     state = state.apply_patch(outcome.state_patch)
-        except HitlPark:
+        except HitlPark as park:
             # 热→冷降级 / 显式挂起：干净挂起，不算失败。run_error 保持 None →
-            # finally 发 RUN_FINISHED(SUSPENDED, will_retry=False)，与委派挂起同形；
-            # _run_task 据 task.status==SUSPENDED 走挂起分支（不 requeue）。
+            # finally 发 RUN_FINISHED(AWAITING_HUMAN, will_retry=False)，与委派挂起同形；
+            # _run_task 据非终态挂起走挂起分支（不 requeue）。
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
-                task.status = "SUSPENDED"
-                # Phase 3：补发 TASK_SUSPENDED，使 task 投影状态 = 内存状态(SUSPENDED)。冷 park 此前
-                # 只改内存、不发此事件 → 投影停在 ACTIVE，与"在等人"脱节（restore/host UI 都被误导）。
-                # parked-set 保证 restore 不会据此错误重排（spec/07 §9.1）；与委派挂起(SuspendStep)同形。
+                task.status = "AWAITING_HUMAN"
+                # task 级事实：这个 task 卡住了，卡它的是一个 HITL 请求。这条描述的是
+                # **挡住这个 task 的那一个请求**——act 的 tool call 循环是串行的，第一个
+                # park 就 unwind 整个 run，所以「挡住它的」唯一确定。会话怎么了不在这里
+                # 宣布（由 TM 聚合后交 SM 判定，docs/events-v2.md §2.1.1）。
                 await self._event_bus.emit(make_event(
-                    state, EventType.TASK_SUSPENDED, payload={"reason": "hitl_park"},
+                    state, EventType.TASK_AWAITING_HUMAN,
+                    payload={"hitl_id": park.hitl_id},
                 ))
             logger.info("_run_loop: task %s parked on HITL", task.id)
         except asyncio.CancelledError:
@@ -2451,13 +2425,17 @@ class CtxWeftRuntime:
                 task.status = "CANCELED"
         except LLMOutageError as exc:
             # 瞬时 LLM 故障自愈耗尽 / 中途断流 → 可恢复中断，**不是** task 失败。
-            # task 置 SUSPENDED（非终态，与 HitlPark 同形）→ _run_task 走挂起分支不判 FINISHED，
+            # task 置 INTERRUPTED（非终态，与 HitlPark 同形）→ _run_task 走挂起分支不判 FINISHED，
             # restore() 在 /resume 时据非终态重排；不发 TASK_FAILED；不增 failure_counter；
             # run_error 保持 None → finally 不再抛出（不经 _handle_task_failure）。
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
-                task.status = "SUSPENDED"
+                task.status = "INTERRUPTED"
+                # 成因随 task 走：TM 聚合 TaskQueueInterrupted 时读的就是它。
+                task.error = str(exc)
             logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
-            await self._emit_session_interrupted(state.session.id, reason="llm_outage")
+            # run 级事实。会话状态由 TM 聚合后交给 SM 判定——这里不宣布会话怎么了。
+            await self._event_bus.emit(make_event(state, EventType.RUN_INTERRUPTED, payload={
+                "reason": "llm_outage", "error_message": str(exc)}))
         except Exception as exc:
             run_error = exc
             # 运行层崩溃 = 可恢复中断的临时标记（非终态）：re-raise 交 _handle_task_failure

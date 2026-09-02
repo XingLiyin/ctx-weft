@@ -368,12 +368,12 @@ def _apply(view: RunStateView, ev: Event) -> None:
         view.task_status = "ACTIVE"
         view.session_status = "RUNNING"
     elif t == EventType.RUN_FINISHED:
-        # final_status 是**任务级** run 终态（FINISHED/SUSPENDED/FAILED/CANCELED）。SUSPENDED
-        # 是 HITL park / LLM 中断的任务挂起态，不是会话状态——落到 session_status 会污染投影
-        # （会话级状态只由 SESSION_* 事件驱动；park 已先发 SESSION_PAUSED_HITL，outage 已先发
-        # SESSION_STATUS_CHANGED(INTERRUPTED)）。其余终态保留旧行为。
+        # final_status 是**任务级** run 终态。三个非终态停顿（SUSPENDED=等子任务、
+        # AWAITING_HUMAN=等人、INTERRUPTED=被打断）都不是会话状态——落到 session_status
+        # 会污染投影（会话级状态只由 SESSION_* 事件驱动）。其余终态保留旧行为。
+        # 注：这整条分支在会话状态所有权重构的下一步删除，届时 RunFinished 不再碰会话状态。
         final_status = p.get("final_status", "FINISHED")
-        if final_status != "SUSPENDED":
+        if final_status not in ("SUSPENDED", "AWAITING_HUMAN", "INTERRUPTED"):
             view.session_status = final_status
 
     # ── Session projection ────────────────────────────────────────────────────
