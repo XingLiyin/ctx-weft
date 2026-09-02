@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
+from ctx_weft.core.errors import crash_error_code
 from ctx_weft.core.utils import as_utc, generate_id, now_utc
 
 from ctx_weft.core.content import content_with_suffix
@@ -712,8 +713,7 @@ class TaskManager:
         一条路。恢复由 /resume → restore() 据非终态重排（重排时 retry_count 归零）。
         """
         task = self._tasks.get(task_id)
-        error_code = (getattr(exc, "code", None)
-                      or (type(exc).__name__ if exc is not None else "RUN_CRASH"))
+        error_code = crash_error_code(exc)
         if task is not None:
             task.status = "INTERRUPTED"
             task.error = error

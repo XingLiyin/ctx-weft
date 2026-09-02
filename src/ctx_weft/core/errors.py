@@ -118,6 +118,19 @@ class MaxTurnsExceeded(CtxWeftError):
     code = "MAX_TURNS_EXCEEDED"
 
 
+def crash_error_code(exc: BaseException | None) -> str:
+    """运行层崩溃的 error_code 推导，供 `RunInterrupted` 与 `TaskInterrupted` 共用。
+
+    同一次崩溃发出的两条事件（run 域 `RunInterrupted` / task 域 `TaskInterrupted`）
+    必须同码——此前各自内联一份同构表达式，日后改一处会静默分叉。`exc is None`
+    的兜底只在 `TaskManager._suspend_task_interrupted` 的重排/恢复等非崩溃调用路径上
+    触发（那里 `exc` 可以是 None）；runtime._run_loop 的 crash 分支里 `exc` 恒非 None。
+    """
+    if exc is None:
+        return "RUN_CRASH"
+    return getattr(exc, "code", None) or type(exc).__name__
+
+
 # ── 入口内容校验 ───────────────────────────────────────────────────────────────
 
 

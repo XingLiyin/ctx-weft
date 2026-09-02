@@ -65,6 +65,7 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.state.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
+from ctx_weft.core.errors import crash_error_code
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import (
     AgentTemplate,
@@ -2467,7 +2468,10 @@ class CtxWeftRuntime:
             # task 置 INTERRUPTED（非终态，与 HitlPark 同形）→ _run_task 走挂起分支不判 FINISHED，
             # restore() 在 /resume 时据非终态重排；不发 TASK_FAILED；不增 failure_counter；
             # run_error 保持 None → finally 不再抛出（不经 _handle_task_failure）。
-            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
+            # 是否非终态命中本分支——下面两处判断（是否置 INTERRUPTED / 是否发
+            # TASK_INTERRUPTED）必须同源，否则终态三元组日后加值时两处会漂移（M3）。
+            was_interrupted = task.status not in ("FINISHED", "FAILED", "CANCELED")
+            if was_interrupted:
                 task.status = "INTERRUPTED"
                 # 成因随 task 走：TM 聚合 TaskQueueInterrupted 时读的就是它。
                 # error_code 是**码**，error 只是自由文本兜底：TM 的聚合优先读码
@@ -2486,7 +2490,7 @@ class CtxWeftRuntime:
             # _handle_task_failure 根本不会被调用，所以这里就是「挂起等 /resume」
             # 那一支本身，紧随 run 级事实发出即可（崩溃支相反：判定在 TM，故那条
             # TaskInterrupted 由 TaskManager._suspend_task_interrupted 发）。
-            if task.status == "INTERRUPTED":
+            if was_interrupted:
                 await self._event_bus.emit(make_event(
                     state, EventType.TASK_INTERRUPTED, payload={
                         "reason": "llm_outage",
@@ -2502,22 +2506,31 @@ class CtxWeftRuntime:
             # ContextOverflowError 不再特判终态：retriable=False 使其跳过重试直接挂起，
             # 溢出文案随 task.error / RUN_INTERRUPTED.error_message 抵达 host，错误码
             # 再经 TaskQueueInterrupted.reason 上浮（提示换大窗口模型）。
-            if task.status not in ("FINISHED", "FAILED", "CANCELED"):
+            # 崩溃发生时 task 是否已是终态（如 observer 已判 FAILED、随后 FinalizeStep 又
+            # 抛异常那条窄路径）——是的话下面 RUN_INTERRUPTED 也不发：那次执行的终局
+            # 已经由 TaskFailed/RunFinished{FAILED} 宣布过，再发一条 RunInterrupted 会
+            # 让「靠类型存在与否判断这次执行是否非正常终止」的 host（docs/events-v2.md
+            # §2.4）误报一次「非正常终止」（M1）。与上面 A1 守卫、outage 支的
+            # was_interrupted 同一个判据（M3 的教训：别让两处判断各写一份）。
+            was_interrupted = task.status not in ("FINISHED", "FAILED", "CANCELED")
+            if was_interrupted:
                 task.status = "SUSPENDED"
                 task.error = str(exc)
             if getattr(exc, "retriable", False):
                 logger.warning("_run_loop: task %s failed (retriable): %s", task.id, exc)
             else:
                 logger.exception("_run_loop: run failed for task %s", task.id)
-            # run 级事实，**无条件发**：这次执行确实死了，与 task 接下来是原地重试
-            # （TaskRequeued）还是挂起等 /resume（TaskInterrupted）无关。那个决定归
+            # run 级事实：这次执行确实死了，与 task 接下来是原地重试（TaskRequeued）
+            # 还是挂起等 /resume（TaskInterrupted）无关——那个决定归
             # TaskManager._handle_task_failure，在 run 外面、判完才知道；run 域的四条
             # 事实（Started/Canceled/Finished/Interrupted）一律从这里发，别处不发。
-            await self._event_bus.emit(make_event(state, EventType.RUN_INTERRUPTED, payload={
-                "reason": "run_crash",
-                "error_code": (getattr(exc, "code", None) or type(exc).__name__),
-                "error_message": str(exc),
-            }))
+            # 但 task 已是终态时不发（见上面 was_interrupted 的注释）。
+            if was_interrupted:
+                await self._event_bus.emit(make_event(state, EventType.RUN_INTERRUPTED, payload={
+                    "reason": "run_crash",
+                    "error_code": crash_error_code(exc),
+                    "error_message": str(exc),
+                }))
         finally:
             self._capability_cache.evict(agent.id)
             # A1 守卫：was_cancelled 只在 task 真的落在 CANCELED（本 run 自己置的取消态）时才发
