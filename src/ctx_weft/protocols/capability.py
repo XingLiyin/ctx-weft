@@ -16,12 +16,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from ctx_weft.protocols.context import ProviderContext
 
 if TYPE_CHECKING:
     from ctx_weft.protocols.context import ContentPart
+    from ctx_weft.protocols.hitl import HitlAsk, HitlDecision
     from ctx_weft.protocols.template import AgentTemplate
 
 
@@ -103,7 +104,11 @@ class SkillDefinition:
 
 @dataclass
 class CapabilityEvent:
-    kind: Literal["progress", "stdout", "stderr", "result", "error"]
+    kind: Literal["progress", "stdout", "stderr", "result", "error", "needs_human"]
+    # needs_human：provider 声明「我需要一个人的决定」，payload["ask"] 是 HitlAsk。
+    # **必须是流的最后一个事件**——gateway 见之即停止消费本流，其后 yield 的一律不可见
+    # （spec §2）。让出时生成器被关闭，局部状态随之消失，故让出前的工作要放进
+    # ask.resume_state。
     payload: dict[str, Any] = field(default_factory=dict)
 
 
@@ -251,6 +256,10 @@ class AuthorizationDecision:
     # 拼接走 `content_with_prefix` / `content_with_suffix`，对 str 逐字节原样。
     message: "str | list[ContentPart]" = ""
     modified_arguments: dict[str, Any] | None = None  # allow 时的有效参数（None = 用原参）
+    #: 「挂起并问这个问题」。取代只能说「挂起」的 `defer`——后者说不出问什么，
+    #: 所以旧实现必须让 authorizer 自己先去登记请求（那正是耦合的源头）。
+    #: 非 None 时 `allowed` 必须为 False；gateway 先判 allowed，安全不变式不依赖本字段。
+    needs_human: "HitlAsk | None" = None
     defer: bool = False                            # spec/07 §7：挂起本次调用（不放行也不拒绝；gateway 绝不 invoke）
 
 
@@ -278,3 +287,39 @@ class Authorizer(ABC):
         *,
         tool_call_id: str = "",
     ) -> AuthorizationDecision: ...
+
+
+@runtime_checkable
+class HumanGatedAuthorizer(Protocol):
+    """**可选**能力接口：只有会问人的 authorizer 实现它。
+
+    加法式而非分叉式（spec §2.1）：基础 `Authorizer` 的签名一个字不变，不问人的实现
+    看不到任何 HITL 概念。分叉基类会连带要求分叉返回类型联合，否则「不需要 HITL 的
+    基类」在类型上仍允许返回 NeedsHuman——非法组合只是换了个地方藏。
+    """
+
+    async def on_decision(
+        self,
+        capability: Capability,
+        ctx: ProviderContext,
+        arguments: dict[str, Any] | None,
+        tool_call_id: str,
+        decision: "HitlDecision",
+    ) -> AuthorizationDecision: ...
+
+
+@runtime_checkable
+class HumanResumable(Protocol):
+    """**可选**能力接口：只有会问人、且答复不直接作结果的工具 provider 实现它。
+
+    同样是流式（spec §2）。重入是**重新调用**而非恢复挂起的生成器，故 `resume_state`
+    承载让出前的全部状态。`reply_as_result=True` 的 ask（如 `ask_user`）不需要它。
+    """
+
+    def resume(
+        self,
+        ask_id: str,
+        decision: "HitlDecision",
+        resume_state: dict[str, Any] | None,
+        ctx: ProviderContext,
+    ) -> AsyncIterator[CapabilityEvent]: ...
