@@ -57,6 +57,15 @@ TASK_STATUS_BY_EVENT: dict[EventType, TaskStatus] = {
     EventType.TASK_REQUEUED: "PENDING",
 }
 
+# L 档翻译表：存量日志里 `SessionStatusChanged.new_status` 可能带旧词表的值。
+# 旧模型按 form 分 PAUSED / PAUSED_HITL 两档，新模型合并成一个 WAITING
+# （docs/events-v2.md §2.1.3）——与 SESSION_PAUSED_HITL 分支同口径。
+# 未列出的值仍在当前值域内，原样通过。
+_LEGACY_SESSION_STATUS: dict[str, str] = {
+    "PAUSED": WAITING,
+    "PAUSED_HITL": WAITING,
+}
+
 # HITL 各终态事件。`HITL_FOLD_EVENT_TYPES`（见下方 v2 折叠段）与 `RECOVERY_EVENT_TYPES`
 # 共用它，语义与 `fold_hitl_snapshot` 一致（单一真相）。
 _HITL_RESOLVE_TYPES = (
@@ -400,7 +409,16 @@ def _apply(view: RunStateView, ev: Event) -> None:
         view.session_status = "RUNNING"
 
     elif t == EventType.SESSION_STATUS_CHANGED:
-        new_status = p.get("new_status", "")
+        # L 档：只读存量日志（新代码不再发这条通用 setter）。与兄弟分支
+        # SESSION_PAUSED_HITL 同口径——旧值域里的 PAUSED / PAUSED_HITL 在新词表
+        # 里不存在，必须**翻译进当前词表**再写，否则重放存量日志会往
+        # `session_status` 写一个类型里没有的值（models.py 的承诺）。
+        # 重构前 `recover()` 发的 `_emit_session_status(... or "PAUSED_HITL")`
+        # 走的正是这条，故存量日志里旧值的主要产地就在这儿。
+        # 其余值（RUNNING / INTERRUPTED / SUCCEEDED / FAILED / CANCELED）仍在
+        # 值域内，原样通过。
+        new_status = _LEGACY_SESSION_STATUS.get(
+            p.get("new_status", ""), p.get("new_status", ""))
         if new_status:
             view.session_status = new_status
             sess = view.sessions.get(ev.session_id)

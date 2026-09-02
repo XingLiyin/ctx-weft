@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ctx_weft.core.control.reducers import reduce_events
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.events import Event, EventType
@@ -59,7 +61,29 @@ def test_legacy_session_paused_hitl_still_folds_for_old_logs():
 
 
 def test_legacy_session_status_changed_still_folds_for_old_logs():
+    # INTERRUPTED 仍在当前值域内 → 原样通过。
     view = reduce_events([_created(),
                           _ev(EventType.SESSION_STATUS_CHANGED,
                               {"new_status": "INTERRUPTED"}, 1)], "run_1")
     assert view.session_status == "INTERRUPTED"
+
+
+@pytest.mark.parametrize("legacy", ["PAUSED", "PAUSED_HITL"])
+def test_legacy_session_status_changed_translates_old_vocabulary(legacy: str):
+    # 存量日志里 PAUSED / PAUSED_HITL 的**主要产地**就是这条通用 setter
+    # （重构前 recover() 发的 _emit_session_status(... or "PAUSED_HITL")）。
+    # 它们不在新值域里，L 档必须翻译进当前词表——与 SESSION_PAUSED_HITL 分支同口径。
+    view = reduce_events([_created(),
+                          _ev(EventType.SESSION_STATUS_CHANGED,
+                              {"new_status": legacy}, 1)], "run_1")
+    assert view.session_status == "WAITING"
+    assert view.sessions["sess_1"].status == "WAITING"
+
+
+@pytest.mark.parametrize("status", ["RUNNING", "INTERRUPTED", "SUCCEEDED", "FAILED", "CANCELED"])
+def test_legacy_session_status_changed_passes_through_current_vocabulary(status: str):
+    view = reduce_events([_created(),
+                          _ev(EventType.SESSION_STATUS_CHANGED,
+                              {"new_status": status}, 1)], "run_1")
+    assert view.session_status == status
+    assert view.sessions["sess_1"].status == status
