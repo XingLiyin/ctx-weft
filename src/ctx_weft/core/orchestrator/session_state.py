@@ -1,8 +1,8 @@
 """会话状态机：**唯一**一份「什么状态下、什么输入、转到哪」的判据。
 
 会话状态回答的是「这个会话健康吗、还能不能自己往前走」，不是「卡在哪」——
-后者是 task 的事。故只有 5 个值：RUNNING（有活在跑）/ WAITING（停着但正常）/
-INTERRUPTED（停着且异常）/ 三个终态。
+后者是 task 的事。故只有 6 个值：RUNNING（有活在跑）/ WAITING（停着但正常）/
+INTERRUPTED（停着且异常）/ 三个终态（SUCCEEDED / FAILED / CANCELED）。
 
 为什么单独成模块、且是纯函数：今天这份判据散在 5 个地方各写一遍——
 `task_manager.py:818` / `:799` / `:804`、`reducers.py:562`、host 投影里的
