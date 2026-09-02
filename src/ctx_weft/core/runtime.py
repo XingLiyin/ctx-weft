@@ -2575,7 +2575,19 @@ class CtxWeftRuntime:
                 and task.retry_count < task.max_retries
                 and getattr(run_error, "retriable", True)
             )
+            # Task 3：run 自己的结局，run 词表（RunOutcomeKind）五值之一。正常跑完那条路
+            # 不经任何 except 分支，`state.run_outcome` 已由 FinalizeStep/SuspendStep 的
+            # state_patch 挂好（driver.run 循环里 `state = state.apply_patch(...)`）；
+            # 仍为 None 是理论上不可达的兜底（例如驱动没有产出任何 StepOutcome 就正常退出）
+            # ——按“没炸、没挂起、没取消”兜底为 COMPLETED，而不是让 host 拿到空 outcome。
+            outcome_kind = (
+                state.run_outcome.kind if state.run_outcome is not None
+                else RunOutcomeKind.COMPLETED
+            )
             await self._event_bus.emit(make_event(state, EventType.RUN_FINISHED, payload={
+                "outcome": outcome_kind.value,
+                # `final_status` 已废弃，保留一个发布周期供旧断言过渡——host 应改读
+                # 上面的 `outcome`（run 词表）。下个周期随旧路径一起删（Task 4）。
                 "final_status": task.status,
                 "will_retry": will_retry,
                 "total_events": state.sequence_counter,

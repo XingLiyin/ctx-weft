@@ -53,6 +53,13 @@
 > 两支的 payload 不同形：run 崩溃带 `{reason:"run_crash", error_code, error_message}`；
 > LLM outage 只带 `{reason:"llm_outage", error_message}`。
 > **`reason` 只作溯源，判据是事件类型本身。**
+>
+> `RunFinished{outcome, final_status?, will_retry, total_events, total_turns, error?,
+> error_type?}`：一次 run 执行结束，**无论成败必发**——host 靠它关 SSE。`outcome`
+> 是权威字段（`RunOutcomeKind` 五值：`completed` / `awaiting_human` /
+> `suspended_on_children` / `interrupted` / `canceled`），说的是**这次执行自己**
+> 怎么收场，不是 task 状态。`final_status`（装 `task.status`）**已废弃**，保留一个
+> 发布周期供旧断言过渡，下个周期删除（2026-09-02 task-status-ownership 重构 Task 3/4）。
 
 ### Task
 `TaskCreated` `TaskStarted` `TaskSuspended` `TaskAwaitingHuman` `TaskInterrupted`

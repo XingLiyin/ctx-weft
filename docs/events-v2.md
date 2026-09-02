@@ -288,8 +288,14 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 > `RunStarted` / `RunFinished` 一直在替 task 和 session 说话。但「这次执行非正常终止」
 > 确实是 run 层的事：task 没有选择停下，是执行环境塌了。
 >
-> `RunFinished` 照发（关流，`final_status="SUSPENDED"`）；`RunInterrupted` 说**为什么**。
+> `RunFinished` 照发（关流，`outcome="interrupted"`）；`RunInterrupted` 说**为什么**。
 > 消费方靠**类型存在与否**判断，不读 `reason`——`reason` 只是溯源。
+>
+> **`RunFinished.outcome`（Task 3，2026-09-02）是权威字段**，值 ∈ run 词表五值
+> （`completed` / `awaiting_human` / `suspended_on_children` / `interrupted` / `canceled`，
+> `RunOutcomeKind`）——说的是**这次执行自己**怎么收场，不是 task 状态。旧键
+> `final_status`（装 `task.status`）**已废弃，保留一个发布周期**供旧断言过渡，
+> 下个周期随其余旧路径一并删除（Task 4）；host 应改读 `outcome`。
 >
 > **它只由 `runtime._run_loop` 发**，两支（LLM outage / run 崩溃）各发一次，**无条件**：
 > 那次 run 确实死了，与 task 后续是重试还是挂起无关。run 域另外三条
@@ -413,10 +419,12 @@ host 自定义结局因此不必新增事件类型。
 
 ### 3.2 Run · 2
 
-**run 没有自己的状态。** `RunFinished.final_status` 装的是 `task.status`（`runtime.py:2487`），
-`RunStarted` 旧模型里写的是 `task_status` 与 `session_status`——这两条事件从来没描述过 run
-自己，一直在替 task 和 session 说话。剥掉那些越界的写入之后，reducer 里什么都不剩，
-判据上就落在 O 档。
+`RunStarted` 旧模型里写的是 `task_status` 与 `session_status`——这两条事件从来没描述过
+task/session 自己，一直在替它们说话。剥掉那些越界的写入之后，reducer 里什么都不剩，
+判据上就落在 O 档。**`RunFinished` 现在确实说了 run 自己的事**——`outcome`
+（Task 3，见 §2.4）是 run 词表五值之一，不再是 `task.status` 的镜像；旧键
+`final_status`（仍装 `task.status`，`runtime.py:2578` 附近）保留一个发布周期后随
+Task 4 删除。
 
 run 真正的用处是**事件流的分段与 SSE 的开关**：`run_id` 把一次执行的事件聚成一组，
 `sequence` 在组内单调递增。
@@ -424,7 +432,7 @@ run 真正的用处是**事件流的分段与 SSE 的开关**：`run_id` 把一�
 | 事件 | payload | 含义 |
 |---|---|---|
 | `RunStarted` | `run_id` `initial_step` | 一次 step 链执行开始。一个 task 可以有多个 run（重试 / 重排 / 挂起后恢复各一个新 run），一个 session 可以同时有多个 run 在跑 |
-| `RunFinished` | `final_status` `will_retry` `total_events` `total_turns` `error` `error_type` | 一次执行结束，**无论成败必发**——host 靠它关 SSE。`final_status` 是**任务级**终态；`will_retry=true` 时 host 先别关流 |
+| `RunFinished` | `outcome` `final_status`（废弃） `will_retry` `total_events` `total_turns` `error` `error_type` | 一次执行结束，**无论成败必发**——host 靠它关 SSE。`outcome` 是**run 自己**的结局（run 词表五值，见 §2.4）；`final_status` 已废弃（仍装 `task.status`，保留一个发布周期供旧断言过渡）；`will_retry=true` 时 host 先别关流 |
 
 ### 3.3 TaskManager 信号 · 3
 
