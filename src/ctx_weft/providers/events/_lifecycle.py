@@ -32,7 +32,10 @@ LIFECYCLE_EVENT_TYPES = (
     "SessionCreated",
     "SessionResumed",
     "SessionFinished",
-    "SessionStatusChanged",
+    "SessionInterrupted",  # 取代 SessionStatusChanged(INTERRUPTED)
+    "SessionWaiting",  # 留在活跃集，但须列出（SQL 侧据此收窄查询）
+    "SessionRunning",  # 重新激活
+    "SessionStatusChanged",  # L 档：只为读存量日志
 )
 
 
@@ -45,11 +48,11 @@ def apply_lifecycle(active: set[str], event: Any) -> None:
     """
     sid = event.session_id
     t = event.type
-    if t == "SessionFinished":
+    if t in ("SessionFinished", "SessionInterrupted"):
+        # 终结与中断都不必在下次重启时再捞：前者已结束，后者等显式 /resume。
         active.discard(sid)
-    elif t == "SessionResumed":
-        # 多轮会话每轮结束发 SessionFinished、下一条消息发 SessionResumed 重新激活；
-        # 不重新计入的话崩溃恢复会漏掉所有已对话过的会话。
+    elif t in ("SessionResumed", "SessionRunning", "SessionWaiting"):
+        # 在等人 = 还活着，重启后要重新装填它的未决 HITL。
         active.add(sid)
     elif t == "SessionStatusChanged":
         if (event.payload or {}).get("new_status", "") in TERMINAL_STATUSES:
