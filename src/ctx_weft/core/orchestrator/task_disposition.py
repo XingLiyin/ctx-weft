@@ -39,7 +39,11 @@ class RunOutcome:
     error: str = ""              # 死因 / 受阻原因（自由文本，只作溯源）
     error_code: str = ""
     reason: str = ""             # INTERRUPTED：llm_outage / run_crash；CANCELED：取消原因
-    retriable: bool = False      # INTERRUPTED 专用：这次打断允不允许原地重试
+    # INTERRUPTED 专用：这次打断允不允许原地重试。默认 False（不重试）与真实判据
+    # `getattr(exc, "retriable", True)` 的缺省方向相反，是有意的：漏传导致"不重试"
+    # 只是让 task 停在 INTERRUPTED 等 /resume，可恢复；漏传导致"重试"会烧预算。
+    # crash 入口必须显式传 `getattr(exc, "retriable", True)`。
+    retriable: bool = False
     hitl_id: str = ""            # AWAITING_HUMAN
     spawn_titles: tuple[str, ...] = ()   # SUSPENDED_ON_CHILDREN
 
@@ -67,7 +71,12 @@ def disposition_for(
     - `runtime.py` 的 `will_retry`：`run_error is not None and task.retry_count <
       task.max_retries and getattr(run_error, "retriable", True)`——即"retriable
       且预算未尽"这一个合取条件，与上面 `_handle_task_failure` 的判断同构（只是
-      在不同调用点各查了一次）。outage 类异常固定 `retriable=False`，故恒不重试。
+      在不同调用点各查了一次）。
+    - **outage 不走上面任何一条。** 今天"outage 从不原地重试"靠的是**路径隔离**，
+      不是异常上的标志位：`LLMOutageError.retriable` 实际是 `True`
+      （`protocols/llm.py`），但 `_run_loop` 的 `except LLMOutageError` 分支从不置
+      `run_error`、从不重抛，于是既进不了 `_handle_task_failure`，也让 `will_retry`
+      的第一个合取项 `run_error is not None` 直接短路。
     - `FinalizeStep`（finalize.py:695 附近）：`retry_exhausted = outcome == "retry"
       and task.retry_count >= task.max_retries`；耗尽时降级为 "fail" 且
       `error_code="TASK_FAILED_RETRY_EXHAUSTED"`，否则 verdict=="fail" 时
@@ -89,7 +98,9 @@ def disposition_for(
         return Disposition("CANCELED", "TaskCanceled", {"reason": outcome.reason})
 
     if outcome.kind is RunOutcomeKind.INTERRUPTED:
-        # outage 恒 retriable=False：它等 /resume，从不原地重试（今天的行为）。
+        # 调用方契约：outage 必须显式传 retriable=False，**不得**转发 exc.retriable
+        # ——`LLMOutageError.retriable` 是 True，转发会让 outage 在预算充足时被错误地
+        # 原地重试。本字段是"这次打断允不允许重试"的判据，不是异常标志位的镜像。
         if outcome.retriable and retry_count < max_retries:
             return Disposition("PENDING", "TaskRequeued", {
                 "reason": outcome.reason, "retry_count": retry_count + 1,
