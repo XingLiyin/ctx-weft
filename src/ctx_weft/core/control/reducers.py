@@ -17,7 +17,6 @@ from ctx_weft.core.content import (
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
-from ctx_weft.core.hitl.status import PAUSED_STATUSES, paused_status_for
 from ctx_weft.core.orchestrator.session_state import TERMINAL_SESSION_STATUSES
 from ctx_weft.core.state.models import TaskStatus
 from ctx_weft.protocols.events import Event, EventType
@@ -64,6 +63,10 @@ _HITL_RESOLVE_TYPES = (
     EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
     EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
 )
+
+#: 存量日志里的会话暂停态。新模型只有一个 `WAITING`；这一对是 L 档，
+#: 只用于读升级点之前的事件（`SessionPausedHitl` 与 5 个旧 HITL 终态）。
+_LEGACY_PAUSED_STATUSES: tuple[str, str] = ("PAUSED", "PAUSED_HITL")
 
 
 def fold_pending_task_recap(events: list[Event]) -> dict[str, dict]:
@@ -366,15 +369,10 @@ def _apply(view: RunStateView, ev: Event) -> None:
         view.current_step = p.get("next_step")
     elif t == EventType.RUN_STARTED:
         view.task_status = "ACTIVE"
-        view.session_status = "RUNNING"
+        # 会话状态不在此写：run 是任务级的，会话状态归 SessionManager
+        # （docs/events-v2.md §2.1.1）。
     elif t == EventType.RUN_FINISHED:
-        # final_status 是**任务级** run 终态。三个非终态停顿（SUSPENDED=等子任务、
-        # AWAITING_HUMAN=等人、INTERRUPTED=被打断）都不是会话状态——落到 session_status
-        # 会污染投影（会话级状态只由 SESSION_* 事件驱动）。其余终态保留旧行为。
-        # 注：这整条分支在会话状态所有权重构的下一步删除，届时 RunFinished 不再碰会话状态。
-        final_status = p.get("final_status", "FINISHED")
-        if final_status not in ("SUSPENDED", "AWAITING_HUMAN", "INTERRUPTED"):
-            view.session_status = final_status
+        pass   # run 的记账，不承载状态——它在 §3.2 已是 O 档
 
     # ── Session projection ────────────────────────────────────────────────────
     elif t == EventType.SESSION_CREATED:
@@ -549,34 +547,14 @@ def _apply(view: RunStateView, ev: Event) -> None:
     # **只投影会话状态**：pending HITL 的真相源是 `HitlRegistry`（由 `fold_hitl_snapshot`
     # 装填），不再在 RunStateView 里另存一份——两份口径不同的 HITL 折叠正是旧实现里
     # 「重建了 pending 却没重建已解决」那类漂移的来源。
-    elif t == EventType.HITL_OPENED:
-        # 新模型不再发 `SessionPausedHitl`——「等人」这件事**就是** `HitlOpened`
-        # （spec §12.3）。少了本分支，一个停在普通纯文本暂停上的会话会在投影与 SSE 里
-        # 一直显示 RUNNING，直到进程重启才被 `recover()` 纠正（复审 I4）。
-        #
-        # PAUSED / PAUSED_HITL 的判据是 **delivery，不是 form**，与
-        # `CtxWeftRuntime._derive_paused_status` 共用同一份 `paused_status_for`。
-        status = paused_status_for([_delivery_from_payload(p.get("delivery") or {},
-                                                           p.get("hitl_id", ""))])
-        if status:
-            view.session_status = status
-            sess = view.sessions.get(ev.session_id)
-            if sess is not None:
-                sess.status = status
-
     elif t in (
-        EventType.HITL_RESOLVED,
+        # L 档：这五个不再发射，保留只为读存量日志。HITL_RESOLVED（新模型）**不在其中**
+        # ——新流量里会话状态由 SM 的 SessionRunning 承载。
         EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
         EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
     ):
-        # HITL 解决 → 会话回 RUNNING（仅当仍处暂停态，避免覆盖已到的终态）。
-        # `HITL_RESOLVED` 是新模型的终态事件；漏了它，被崩溃恢复标成 PAUSED_HITL 的会话
-        # 永远回不到 RUNNING（复审 I4）。
-        if view.session_status in PAUSED_STATUSES:
-            view.session_status = "RUNNING"
-        sess = view.sessions.get(ev.session_id)
-        if sess is not None and sess.status in PAUSED_STATUSES:
-            sess.status = "RUNNING"
+        if view.session_status in _LEGACY_PAUSED_STATUSES:
+            _set_session_status(view, ev.session_id, "RUNNING")
 
 
 def _set_session_status(view: RunStateView, session_id: str, status: str) -> None:

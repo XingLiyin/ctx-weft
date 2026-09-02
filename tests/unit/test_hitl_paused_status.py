@@ -42,12 +42,15 @@ async def test_session_paused_hitl_routes_by_form(form, expected) -> None:
     assert view.session_status == expected
 
 
-# ── 新模型：投影直接由 HITL_OPENED / HITL_RESOLVED 驱动（复审 I4）─────────────
+# ── Task 7（会话状态所有权重构）之后：HITL_OPENED / HITL_RESOLVED 不再驱动投影 ──
 #
-# `SessionPausedHitl` 不再被发出，而 reducer 里原本也没有 HITL_OPENED 分支——于是一个停在
-# 普通纯文本暂停上的会话在投影与 SSE 里一直显示 RUNNING，直到进程重启才被 `recover()`
-# 纠正；被崩溃恢复标成 PAUSED_HITL 的会话则永远回不到 RUNNING（旧的回 RUNNING 分支只列了
-# 五个 legacy 终态事件，没有 HITL_RESOLVED）。
+# 上面这段旧注释描述的是 Task 6 引入、Task 7 收回的行为：`HITL_OPENED` 分支已整个删除，
+# `HITL_RESOLVED`（新模型）也已从会话回 RUNNING 的 elif 元组里移出——「等人」这件事的
+# 会话状态改由 SessionManager 承载（docs/events-v2.md §2.1.1）。正面用例见
+# `tests/unit/test_domain_facts_do_not_write_session_status.py`
+# （`test_hitl_opened_no_longer_pauses_the_session` /
+# `test_hitl_resolved_no_longer_returns_the_session_to_running`）。
+# 下面只留一条：确认 HITL_RESOLVED 对已终结的会话仍是无操作（无论是不是因为它已被削掉写入）。
 
 
 def _hitl_event(session_id: str, etype, payload: dict):
@@ -62,29 +65,6 @@ def _hitl_event(session_id: str, etype, payload: dict):
 def _opened(session_id: str, delivery: dict):
     return _hitl_event(session_id, EventType.HITL_OPENED,
                        {"hitl_id": "h1", "form": "whatever", "delivery": delivery})
-
-
-@pytest.mark.parametrize("delivery,expected", [
-    ({"kind": "user_turn", "task_id": "t1"}, "PAUSED"),
-    ({"kind": "tool_result", "tool_call_id": "call_1"}, "PAUSED_HITL"),
-    ({"kind": "no_resume"}, "PAUSED_HITL"),
-])
-async def test_hitl_opened_pauses_the_session_by_delivery(delivery, expected) -> None:
-    """判据是 **delivery**，不是 form——与 `_derive_paused_status` 共用 `paused_status_for`。"""
-    from ctx_weft.core.control.reducers import reduce_events
-    view = reduce_events([_opened("s1", delivery)], run_id="r1")
-    assert view.session_status == expected
-
-
-async def test_hitl_resolved_returns_the_session_to_running() -> None:
-    from ctx_weft.core.control.reducers import reduce_events
-    events = [
-        _opened("s1", {"kind": "tool_result", "tool_call_id": "call_1"}),
-        _hitl_event("s1", EventType.HITL_RESOLVED,
-                    {"hitl_id": "h1", "outcome": "accepted"}),
-    ]
-    view = reduce_events(events, run_id="r1")
-    assert view.session_status == "RUNNING"
 
 
 async def test_hitl_resolved_does_not_overwrite_a_terminal_status() -> None:
