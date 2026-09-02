@@ -24,7 +24,7 @@ def test_session_interrupted_sets_interrupted():
     assert view.sessions["sess_1"].status == "INTERRUPTED"
 
 
-def test_awaiting_human_with_panel_is_paused_hitl():
+def test_session_waiting_sets_waiting():
     view = reduce_events([_created(),
                           _ev(EventType.SESSION_WAITING, {}, 1)],
                          "run_1")

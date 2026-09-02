@@ -413,22 +413,6 @@ def _apply(view: RunStateView, ev: Event) -> None:
             if sess is not None:
                 sess.status = new_status
 
-    elif t == EventType.SESSION_PAUSED_HITL:
-        # 纯文本暂停(form=wait)= 软待命 PAUSED；ask_user/审批 = PAUSED_HITL。
-        # 与 ProjectionUpdater 同语义（单一真相）。
-        status = "PAUSED" if p.get("form") == "wait" else "PAUSED_HITL"
-        view.session_status = status
-        sess = view.sessions.get(ev.session_id)
-        if sess is not None:
-            sess.status = status
-
-    elif t == EventType.SESSION_FINISHED:
-        final_status = p.get("final_status", "SUCCEEDED")
-        view.session_status = final_status
-        sess = view.sessions.get(ev.session_id)
-        if sess is not None:
-            sess.status = final_status
-
     elif t == EventType.SESSION_INTERRUPTED:
         _set_session_status(view, ev.session_id, "INTERRUPTED")
 
@@ -448,6 +432,13 @@ def _apply(view: RunStateView, ev: Event) -> None:
         sess = view.sessions.get(ev.session_id)
         if sess is not None:
             sess.status = status
+
+    elif t == EventType.SESSION_FINISHED:
+        final_status = p.get("final_status", "SUCCEEDED")
+        view.session_status = final_status
+        sess = view.sessions.get(ev.session_id)
+        if sess is not None:
+            sess.status = final_status
 
     elif t == EventType.RECOGNIZE_INTENT_TOOL_CALL:
         goal = p.get("session_goal", "")
