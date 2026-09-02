@@ -12,7 +12,7 @@
 > `src/ctx_weft/core/control/reducers.py`（S 档的状态含义）。
 > 决策依据与迁移工序见 `docs/events-v2-taxonomy-change-record.md`。
 
-**总量：55 个在用 + 9 个只读存量（L 档）。**
+**总量：56 个在用 + 9 个只读存量（L 档）。**
 
 ---
 
@@ -47,7 +47,7 @@
 
 | 档 | 判据 | 可改动程度 |
 |---|---|---|
-| **S** · 27 个 | 有状态消费者（reducer / host 投影）折叠它 | 语义冻结；改名须走别名表；payload 只可**加**字段 |
+| **S** · 28 个 | 有状态消费者（reducer / host 投影）折叠它 | 语义冻结；改名须走别名表；payload 只可**加**字段 |
 | **O** · 28 个 | 已发射、无状态消费者，纯观测/展示 | 可重命名 / 合并 / 删除，与 host SSE 同步即可 |
 | **L** · 9 个 | 曾发射、现已停发、重放仍须认识 | **只读**。不得再发射；删除须过退役闸门（§5） |
 | X · 0 个 | 从未发射 | V2 已清空——定义即必须发射 |
@@ -58,7 +58,7 @@
 
 ---
 
-## 2. S 档 · 27 个（承载状态）
+## 2. S 档 · 28 个（承载状态）
 
 ### 2.1 Session · 6
 
@@ -78,12 +78,19 @@
 
 ```
 HITL   ──►  task 挂起了、在等人           TaskAwaitingHuman{hitl_id}
-loop   ──►  这次执行被打断了              RunInterrupted{reason}
+loop   ──►  这次执行被打断了              RunInterrupted{reason}          ← run 域
+TM/loop──►  这个 task 停在 INTERRUPTED    TaskInterrupted{reason, …}      ← task 域
               │
 TM     ──►  我这边没有能跑的了，因为 X     TaskQueueBlocked / …Interrupted / …Drained
               │
 SM     ──►  会话状态                      SessionWaiting / SessionInterrupted / …
 ```
+
+> **`RunInterrupted` 与 `TaskInterrupted` 是两件事，故是两条事件**（2026-09-02 收尾修正）。
+> 「这次执行死了」是 run 域的事实，无条件发；「这个 task 停在 `INTERRUPTED` 等 `/resume`」
+> 是 task 域的结论，**发在重试判定之后**——崩溃后还能原地重试的那一支发的是
+> `TaskRequeued`（→ `PENDING`）。一条事件做两份工作，正是本次重构从 `RunFinished`
+> 身上拆掉的那个模式。
 
 **HITL 不决定会话状态，它决定 task 状态**——一个 task 被挂起、需要人来解决。
 **SM 只看 TaskManager 的信号**，不订阅 HITL 事件、不读 `HitlRegistry`。
@@ -222,7 +229,7 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 
 > `step_name` 与新增的 `origin` 语义重复，但 reducer 在读它，**保留不动**。
 
-### 2.3 Task · 10
+### 2.3 Task · 11
 
 | 事件 | 存量名 | payload | 含义 · 状态效果 |
 |---|---|---|---|
@@ -230,6 +237,7 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 | `TaskStarted` | | `assigned_agent_id` | → `ACTIVE`，并回填 `assigned_agent_id` |
 | `TaskSuspended` | | `summary` `spawn_titles` | **只剩「等子任务完成」这一个语义**。→ `SUSPENDED`（非终态） |
 | `TaskAwaitingHuman` | | `hitl_id` | 这个 task 被 HITL 挂起、需要人来解决。→ `AWAITING_HUMAN` |
+| `TaskInterrupted` | | `reason` `error_code?` `error_message?` `retry_count` | 这个 task 停在 `INTERRUPTED`，等 `/resume`。→ `INTERRUPTED` |
 | `TaskResumed` | | `{}` | 阻塞的子任务全部终态，父任务解除挂起 → `ACTIVE` |
 | `TaskFinished` | | `outcome="success"` `summary` `outputs` | → `FINISHED`，并把会话的 `failure_counter` 清零 |
 | `TaskFailed` | | `error_code` `error_message` `retry_count` | → `FAILED`，`failure_counter += 1`。`error_code=TASK_FAILED_BY_THRESHOLD` 是熔断的聚合结果，**不计数** |
@@ -240,7 +248,14 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 > **`TaskSuspended` 从三义收窄到一义。** 它从前靠 `reason` 字面量区分「等子任务」/
 > 「在等人」/「崩了」三件语义完全不同的事，消费方只能匹配字符串分流——那正是 HITL 旧实现
 > 按 `form == "wait"` 判暂停态的同一种病。现在三者各有类型：`TaskSuspended`（等子任务）、
-> `TaskAwaitingHuman`（等人）、`RunInterrupted`（被打断，见 §2.4）。
+> `TaskAwaitingHuman`（等人）、`TaskInterrupted`（被打断；run 域那一半是 `RunInterrupted`，见 §2.4）。
+>
+> **`TaskInterrupted` 的发射时机是「重试判定之后」**，两条异常路径不对称：
+> LLM outage 由 `runtime._run_loop` 自己捕获、不重抛，没有重试判定，故它紧随
+> `RunInterrupted` 在 `_run_loop` 里发；run 崩溃则重抛给
+> `TaskManager._handle_task_failure` 定夺——决定原地重试的那一支发 `TaskRequeued`，
+> 只有决定挂起等 `/resume` 的那一支（`_suspend_task_interrupted`）发本条。
+> 发早了，走重试的 task 会先被打成 `INTERRUPTED` 再翻回 `PENDING`，中间那一下是假的。
 >
 > 同理，`TaskStatus` 值域也从一个 `SUSPENDED` 拆成三个：
 > `SUSPENDED` / `AWAITING_HUMAN` / `INTERRUPTED`。**状态值域的过载是事件过载的根**——
@@ -267,7 +282,7 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 
 | 事件 | payload | 含义 · 状态效果 |
 |---|---|---|
-| `RunInterrupted` | `reason` `error_code?` `error_message?` | 这次执行被**外部原因**打断（`llm_outage` / `run_crash`），不是任务逻辑决定的停。→ task `INTERRUPTED` |
+| `RunInterrupted` | `reason` `error_code?` `error_message?` | 这次执行被**外部原因**打断（`llm_outage` / `run_crash`），不是任务逻辑决定的停。**不写 task 状态** |
 
 > **这是 run 唯一真正拥有的事实。** §3.2 说 run 没有自己的状态——那是对的，
 > `RunStarted` / `RunFinished` 一直在替 task 和 session 说话。但「这次执行非正常终止」
@@ -275,6 +290,16 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 >
 > `RunFinished` 照发（关流，`final_status="SUSPENDED"`）；`RunInterrupted` 说**为什么**。
 > 消费方靠**类型存在与否**判断，不读 `reason`——`reason` 只是溯源。
+>
+> **它只由 `runtime._run_loop` 发**，两支（LLM outage / run 崩溃）各发一次，**无条件**：
+> 那次 run 确实死了，与 task 后续是重试还是挂起无关。run 域另外三条
+> （`RunStarted` / `RunCanceled` / `RunFinished`）同源。从前它还有一个发射点在
+> `TaskManager._suspend_task_interrupted`——那在 run 外面，TaskManager 不拥有 run、
+> 连 `run_id` 都拿不到，发出来的是一条自称属于某次 run 却没有 `run_id` 的事件；
+> 已改发 task 域的 `TaskInterrupted`（§2.3）。
+>
+> **它也不再写 task 状态**：已从 `TASK_STATUS_BY_EVENT` 移出，那份工作归
+> `TaskInterrupted`。理由见 §2.3——run 死了不等于 task 停在 `INTERRUPTED`。
 
 ### 2.5 Agent · 1
 

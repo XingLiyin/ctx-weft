@@ -47,20 +47,27 @@
 > `WAITING`。**reducer 的读分支保留**——存量日志还要回放。详见 `docs/events-v2.md` §5
 > 与 `docs/upgrade/2026-09-02-session-status-ownership.md`。
 >
-> `RunInterrupted{reason, error_code?, error_message?, retry_count?}`：run 被外部打断，
-> task → `INTERRUPTED`。它取代了 `TaskSuspended{reason:"run_crash"}`。
-> 两个发射点的 payload 不同形：run 崩溃（`task_manager.py`）带全部四个字段
-> （`reason="run_crash"`）；LLM outage（`runtime.py`）只带
-> `{reason:"llm_outage", error_message}`。**`reason` 只作溯源，判据是事件类型本身。**
+> `RunInterrupted{reason, error_code?, error_message?}`：**这次执行**被外部打断。
+> **只由 `runtime._run_loop` 发**，两支各发一次、无条件（run 死了就是死了）；
+> 它**不写 task 状态**——task 停在哪由 task 域的 `TaskInterrupted` 说。
+> 两支的 payload 不同形：run 崩溃带 `{reason:"run_crash", error_code, error_message}`；
+> LLM outage 只带 `{reason:"llm_outage", error_message}`。
+> **`reason` 只作溯源，判据是事件类型本身。**
 
 ### Task
-`TaskCreated` `TaskStarted` `TaskSuspended` `TaskAwaitingHuman` `TaskResumed` `TaskFinished`
+`TaskCreated` `TaskStarted` `TaskSuspended` `TaskAwaitingHuman` `TaskInterrupted`
+`TaskResumed` `TaskFinished`
 `TaskFailed` `TaskCanceled` `TaskFinalized` `TaskRequeued` `BlackboardPublished`
 
 > `TaskSuspended` 从三义收窄到**一义**：只表示「等子任务完成」（payload 带
 > `summary` / `spawn_titles`）。另两义各自成型：等人 → `TaskAwaitingHuman{hitl_id}`
-> （task → `AWAITING_HUMAN`），被打断 → `RunInterrupted`（task → `INTERRUPTED`）。
+> （task → `AWAITING_HUMAN`），被打断 →
+> `TaskInterrupted{reason, error_code?, error_message?, retry_count}`（task → `INTERRUPTED`）。
 > **判据是类型，不是 payload 里的 `reason` 字面量。**
+>
+> `TaskInterrupted` 发在**重试判定之后**：崩溃后还能原地重试的那一支发的是
+> `TaskRequeued`（task → `PENDING`），不是这条。run 层同时发的 `RunInterrupted`
+> 说的是另一件事（那次执行死了），不写 task 状态。
 
 ### TaskManager 信号（会话状态机的输入）
 `TaskQueueBlocked` `TaskQueueInterrupted` `TaskQueueDrained`

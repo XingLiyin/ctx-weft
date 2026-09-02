@@ -38,7 +38,7 @@
 | `04-subagent-spawn-depth.json` | `_rebuild_agents` 子 agent 推算（spawnDepth=1、parent=root） |
 | `05-step-and-context-progress.json` | RunStarted / StepStarted / StepCompleted → currentStep；ReasonCompleted；ActTurnCompleted |
 | `06-session-status-transitions.json` | 会话状态的分层链路：TaskQueueBlocked(no-op) → SessionWaiting → SessionRunning → SessionFinished |
-| `07-session-resumed.json` | RunInterrupted → TaskQueueInterrupted(no-op) → SessionInterrupted；SessionResumed 更新 userPrompt + 回 RUNNING |
+| `07-session-resumed.json` | RunInterrupted(no-op) → TaskInterrupted(task→INTERRUPTED) → TaskQueueInterrupted(no-op) → SessionInterrupted；SessionResumed 更新 userPrompt + 回 RUNNING |
 | `08-metadata-filler-goal.json` | RecognizeIntentToolCall 回填 session.goal |
 | `09-failure-threshold.json` | failureCounter 折叠：TaskFailed +1、熔断失败不计、FailureThresholdHit 本身 no-op（跨快照边界） |
 | `10-reopen-chain-multi-step.json` | 三步 plan 级联 reopen（head vs 后续 prompt 改写） |

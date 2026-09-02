@@ -127,7 +127,7 @@ reducer、Postgres 投影、前端 SSE 翻译**三处共用**此映射：
 | `TaskStarted` | `ACTIVE` |
 | `TaskSuspended` | `SUSPENDED` |
 | `TaskAwaitingHuman` | `AWAITING_HUMAN` |
-| `RunInterrupted` | `INTERRUPTED` |
+| `TaskInterrupted` | `INTERRUPTED` |
 | `TaskFinished` | `FINISHED` |
 | `TaskFailed` | `FAILED` |
 | `TaskCanceled` | `CANCELED` |
@@ -140,9 +140,15 @@ reducer、Postgres 投影、前端 SSE 翻译**三处共用**此映射：
 
 > **`TaskSuspended` 从三义收窄到一义**（2026-09-02）：它现在**只**表示「等子任务完成」。
 > 从前用 `TaskSuspended{reason:"hitl_park"}` / `{reason:"run_crash"}` 表达的另两义，
-> 各自成了独立类型 `TaskAwaitingHuman{hitl_id}` / `RunInterrupted{reason, …}`。
+> 各自成了独立类型 `TaskAwaitingHuman{hitl_id}` / `TaskInterrupted{reason, …}`。
 > **判据是事件类型，不是 payload 里的 `reason` 字面量。** 三处共用此映射，
 > 漏这两行就是三处一起把「等人」和「被打断」的 task 认成 `UNKNOWN`。
+>
+> **`RunInterrupted` 不在这张表里**（2026-09-02 收尾修正）：它是 run 域的事实
+> （「这次执行死了」），reducer 对它**无副作用**。task 停在 `INTERRUPTED` 由
+> `TaskInterrupted` 写，且那条只在「挂起等 `/resume`」时发——崩溃后还能重试的
+> task 收到的是 `TaskRequeued`（→ `PENDING`）。**把 `RunInterrupted` 留在表里，
+> 走重试的 task 会先被打成 `INTERRUPTED` 再翻回 `PENDING`，中间那一下是假的。**
 
 ---
 

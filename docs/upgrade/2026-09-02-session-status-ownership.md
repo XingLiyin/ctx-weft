@@ -40,7 +40,8 @@ TaskSuspended            hitl_park         run_crash
 | 旧 | 新 | task 状态 |
 |----|----|----|
 | `TaskSuspended{reason:"hitl_park"}` | `TaskAwaitingHuman{hitl_id}` | `AWAITING_HUMAN` |
-| `TaskSuspended{reason:"run_crash", …}` | `RunInterrupted{reason, error_code?, error_message?}` | `INTERRUPTED` |
+| `TaskSuspended{reason:"run_crash", …}` | `TaskInterrupted{reason, error_code?, error_message?, retry_count}` | `INTERRUPTED` |
+| （同上，run 层另发一条） | `RunInterrupted{reason, error_code?, error_message?}` | **不写 task 状态** |
 | `TaskSuspended{summary, spawn_titles}` | **不变** | 仍是 `SUSPENDED`（等子任务） |
 
 **host 若按 `reason` 字面量分流，改为按类型分流。** `reason` 现在只是展示文本。
@@ -175,7 +176,19 @@ HitlOpened{delivery}             ← HITL 层：有一个请求开了。不碰�
 反向：人答复 → task 重新入队 → `TaskStarted` → `SessionRunning{reason:"human_replied"}`
 → 会话 `RUNNING`。
 
-崩溃打断同理：`RunInterrupted` → `TaskQueueInterrupted` → `SessionInterrupted`。
+崩溃打断同理，但 run 层与 task 层各说各的：
+
+```
+RunInterrupted{reason}           ← run 层：这次执行死了。**不写 task 状态**
+  → TaskInterrupted{reason, …}   ← task 层：这个 task 停在 INTERRUPTED，等 /resume
+  → TaskQueueInterrupted{reason} ← TM 层：没有能跑的了，且有任务被打断
+  → SessionInterrupted{reason}   ← session 层：异常地停            → 会话 INTERRUPTED
+```
+
+**`TaskInterrupted` 发在重试判定之后**：崩溃后还能原地重试的 task 收到的是
+`TaskRequeued`（→ `PENDING`），此时流里只有 `RunInterrupted`，没有 `TaskInterrupted`。
+host 若按 `RunInterrupted` 写 task 状态，请改按 `TaskInterrupted` 写——否则重试中的
+task 会被误标成 `INTERRUPTED`。
 
 ---
 
