@@ -1,18 +1,24 @@
 {
   "name": "failure-threshold",
-  "description": "FailureThresholdHit 累加 session.failureCounter（验证跨快照边界的累加）。",
+  "description": "session.failureCounter 的折叠：TaskFailed +1、TaskFinished 清零、熔断失败（error_code=TASK_FAILED_BY_THRESHOLD）不计、FailureThresholdHit 本身是 no-op（它是聚合播报，不是新失败）。验证跨快照边界的累加。",
   "runId": "s1",
-  "snapshotAt": 2,
+  "snapshotAt": 3,
   "events": [
     { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
       "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
       "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
-    { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
-      "type": "FailureThresholdHit", "timestamp": "2026-06-05T00:00:02Z", "payload": {} },
-    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1",
-      "type": "FailureThresholdHit", "timestamp": "2026-06-05T00:00:03Z", "payload": {} },
-    { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1",
-      "type": "FailureThresholdHit", "timestamp": "2026-06-05T00:00:04Z", "payload": {} }
+    { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1", "taskId": "tsk_1",
+      "type": "TaskFailed", "timestamp": "2026-06-05T00:00:02Z", "payload": { "error": "boom 1" } },
+    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1", "taskId": "tsk_2",
+      "type": "TaskFailed", "timestamp": "2026-06-05T00:00:03Z", "payload": { "error": "boom 2" } },
+    { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1", "taskId": "tsk_3",
+      "type": "TaskFailed", "timestamp": "2026-06-05T00:00:04Z", "payload": { "error": "boom 3" } },
+    { "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1",
+      "type": "FailureThresholdHit", "timestamp": "2026-06-05T00:00:05Z",
+      "payload": { "failure_counter": 3, "threshold": 3 } },
+    { "id": "evt_0006", "runId": "run_1", "sequence": 6, "sessionId": "s1", "taskId": "tsk_4",
+      "type": "TaskFailed", "timestamp": "2026-06-05T00:00:06Z",
+      "payload": { "error": "circuit open", "error_code": "TASK_FAILED_BY_THRESHOLD" } }
   ],
   "expected": {
     "sessions": { "s1": { "failureCounter": 3 } }

@@ -35,8 +35,8 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 |------|------|
 | `StepStarted` | `currentStep = payload.step_name` |
 | `StepCompleted` | `currentStep = payload.next_step` |
-| `RunStarted` | `taskStatus="ACTIVE"`；`sessionStatus="RUNNING"` |
-| `RunFinished` | `sessionStatus = payload.final_status ?? "FINISHED"` |
+| `RunStarted` | `taskStatus="ACTIVE"`——**不写 `sessionStatus`**：run 是任务级的，会话状态归 `Session*` 事件（2026-09-02 会话状态所有权重构） |
+| `RunFinished` | **无投影副作用**——run 级记账，同上不写 `sessionStatus` |
 
 ### Session
 | type | 变更 |
@@ -46,14 +46,14 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 | `SessionStatusChanged` | 若有 `new_status`：`sessionStatus` 与该 session.status 置之 |
 | `SessionFinished` | `final_status ?? "SUCCEEDED"` 置 `sessionStatus` 与 session.status |
 | `RecognizeIntentToolCall` | 若有 `session_goal`：置该 session.goal |
-| `FailureThresholdHit` | 该 session.failureCounter += 1 |
+| `FailureThresholdHit` | **无投影副作用**——它是聚合播报。计数由 `TaskFailed` / `TaskFinished` 折叠（见 Task 段） |
 
 ### Task
 | type | 变更 |
 |------|------|
 | `TaskCreated` | 建 `TaskView`（取 `payload.task`，id 缺省回落 `event.taskId`）；若 view.taskId 空则填入 |
 | `TaskRequeued` | 该 task：`status="PENDING"`、`outputs=null`；若带 `user_prompt`/`original_user_prompt` 则一并恢复；`taskStatus="PENDING"` |
-| `type ∈ TASK_STATUS_BY_EVENT`（且有 taskId） | 该 task.status = 映射值；`TaskStarted` 额外回填 `assigned_agent_id`；`taskStatus` 置之 |
+| `type ∈ TASK_STATUS_BY_EVENT`（且有 taskId） | 该 task.status = 映射值；`TaskStarted` 额外回填 `assigned_agent_id`；`taskStatus` 置之。另折叠 `session.failureCounter`：`TaskFailed` +1（`error_code="TASK_FAILED_BY_THRESHOLD"` 不计）、`TaskFinished` 清零 |
 | `TaskFinalized` | 该 task：`outputs=payload.outputs`、`error=payload.error`、`finishedAt=ts` |
 | `RecognizeIntentToolCall`（且有 taskId） | 该 task：`title`/`description` 非空则更新（root task 创建时为空、recognize_intent 并发补填；空值不覆盖） |
 

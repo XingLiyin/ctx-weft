@@ -26,7 +26,7 @@ from ctx_weft.core.control.reducers import (
 )
 from ctx_weft.protocols.events import Event
 
-_GOLDEN_DIR = Path(__file__).parents[3] / "docs" / "spec" / "golden"
+_GOLDEN_DIR = Path(__file__).parents[2] / "docs" / "spec" / "golden"
 
 # Event 信封：canonical camelCase（JSON）→ Python snake_case
 _ENVELOPE = {

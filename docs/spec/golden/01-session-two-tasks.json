@@ -1,6 +1,6 @@
 {
   "name": "session-two-tasks",
-  "description": "建会话 → 跑完 tsk_1 → tsk_2 仍在进行；验证 TASK_STATUS 映射、root agent 推算、快照(前6条)+增量 == 全量回放。",
+  "description": "建会话 → 跑完 tsk_1 → tsk_2 仍在进行；验证 TASK_STATUS 映射、root agent 推算、快照(前6条)+增量 == 全量回放。RunFinished 是 run 级记账，**不写会话状态**（会话状态所有权重构 2026-09-02）——会话仍是 RUNNING。",
   "runId": "s1",
   "snapshotAt": 6,
   "events": [
@@ -50,7 +50,7 @@
     }
   ],
   "expected": {
-    "sessionStatus": "FINISHED",
+    "sessionStatus": "RUNNING",
     "tasks": {
       "tsk_1": { "status": "FINISHED" },
       "tsk_2": { "status": "ACTIVE" }
