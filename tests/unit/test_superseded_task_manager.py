@@ -118,6 +118,71 @@ async def test_current_tm_still_fires_session_finished() -> None:
     assert done_called == [True]
 
 
+async def test_superseded_tm_park_does_not_announce_queue_state() -> None:
+    """**idle 路径**同样受归属权守卫：被顶替的旧 TM 迟到的 park 收尾不得报队列状态。
+
+    这条是 `_fire_session_done` 那条不变量的孪生兄弟，而且更隐蔽：`announce_queue_state`
+    发的是**会话级**信号，SM 按 session_id 无条件应用——旧 TM 报一句 TaskQueueBlocked，
+    新一轮正在跑的会话就被翻成 WAITING。`_fire_session_idle` 从前 docstring 明写「不发
+    事件」、因此无守卫；它现在会发了，守卫必须跟上。
+    """
+    tm = _tm(InProcessEventBus())
+    signals: list = []
+
+    async def _cap(ev):
+        if ev.type in (EventType.TASK_QUEUE_BLOCKED, EventType.TASK_QUEUE_INTERRUPTED,
+                       EventType.TASK_QUEUE_DRAINED):
+            signals.append(ev.type)
+
+    tm._event_bus.subscribe(None, _cap)
+    idle_called: list = []
+
+    async def _on_idle():
+        idle_called.append(True)
+
+    tm.set_session_idle_callback(_on_idle)
+    tm.register_task(Task(id="A", session_id="s1", status="AWAITING_HUMAN",
+                          assigned_agent_id="a", creator_agent_id="a",
+                          settings=NormalTaskSettings()))
+
+    tm.set_is_current(lambda: True)
+    await tm._fire_session_idle()
+    assert signals == [EventType.TASK_QUEUE_BLOCKED], "对照：current TM 照常报「有人在等」"
+
+    signals.clear()
+    tm.set_is_current(lambda: False)          # 被同 session 上更新的 TM 顶替
+    await tm._fire_session_idle()
+    assert signals == [], "被顶替的旧 TM 的 park 收尾不得报队列状态（会翻掉新一轮的会话）"
+
+
+async def test_superseded_tm_crash_suspend_does_not_announce_queue_state() -> None:
+    """同上，走 `_suspend_task_interrupted` 那条裸调用路径（崩溃收尾）。"""
+    tm = _tm(InProcessEventBus())
+    signals: list = []
+
+    async def _cap(ev):
+        if ev.type == EventType.TASK_QUEUE_INTERRUPTED:
+            signals.append(ev.type)
+
+    tm._event_bus.subscribe(None, _cap)
+
+    async def _noop_runner(_sid, _tid):
+        return None
+
+    tm.set_runner(StubRunner(tm, _noop_runner))
+    tm.register_task(Task(id="A", session_id="s1", status="ACTIVE",
+                          assigned_agent_id="a", creator_agent_id="a",
+                          settings=NormalTaskSettings()))
+    tm.set_is_current(lambda: False)          # 已被顶替
+
+    class _NonRetriable(Exception):
+        retriable = False
+
+    await tm._handle_task_failure("A", error="boom", exc=_NonRetriable("boom"))
+
+    assert signals == [], "被顶替的旧 TM 的崩溃收尾不得报队列状态"
+
+
 async def test_register_and_drain_marks_older_tm_not_current() -> None:
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                         agent_provider=InlineAgentTemplateProvider())

@@ -991,8 +991,11 @@ class CtxWeftRuntime:
             )
         finally:
             await task_manager.announce_queue_state()
-            # 一次性路径：状态已随事件发出，内存里不必留着（host 之后读的是投影）。
-            self._session_manager.forget_session(sid)
+            # **不 forget_session**：状态忘掉之后 SM 就不再「吸收」后续输入了——
+            # 冷 HITL 走这条 compat 路径时，park 已把会话推到 WAITING，忘掉之后
+            # 应答期的 register_session 拿回默认 RUNNING，之后的 TaskStarted 因
+            # 「current 已是 RUNNING」不转移、不发 SessionRunning，投影会整个续跑期
+            # 停在 WAITING。本 task 用来替换 _session_done_fired 闩的正是这份记忆。
             for p in self.providers.get_capability_providers():
                 if isinstance(p, SessionScopedCapabilityProvider):
                     p.deregister_session(sid)
@@ -2092,9 +2095,11 @@ class CtxWeftRuntime:
 
         Decision is made **in core, from events** (no host projection, no full replay):
         the in-memory ``HitlRegistry`` is refilled (so ``/hitl/pending`` and the reply endpoints
-        work), the session is registered with the ``SessionManager``, and the live TaskManager —
-        if there is one — announces its queue state. **恢复不是一种状态**：会话状态照常由
-        SM 据 TM 的聚合信号判定，恢复路径与正常路径走同一条链。
+        work), the session is registered with the ``SessionManager``, and **this method stands in
+        for the TaskManager**（进程刚起来，`_task_managers` 还是空的）：它拿 `rebuild_hitl`
+        刚从日志折出来的未决集合——那正是 TM 会用来聚合的同一份事实——发那一条 TM 信号。
+        **恢复不是一种状态**：会话状态照常由 SM 据 TM 的聚合信号判定，恢复路径与正常路径
+        走同一条链，SM 的输入类型一个都没变。
 
         So at startup **nothing drains/runs**: a waiting session waits for a reply, an interrupted
         one waits for ``/resume``. No host callback — the session-level events are handled by the
@@ -2109,18 +2114,51 @@ class CtxWeftRuntime:
 
         for session_id in session_ids:
             try:
-                # 恢复期不再有专门的分支判断「有没有未决 HITL」——装填内存 HITL 之后，
-                # 由 TM 照常聚合队列状态、该报什么报什么，会话状态仍由 SM 判定。
+                # 恢复期不再有专门的「PAUSED_HITL vs INTERRUPTED」分支：装填内存 HITL 之后
+                # 照常报一句队列状态，会话状态仍由 SM 判定。
                 # 「复活不是一种状态」的落地（docs/events-v2.md §2.1.1）。
-                await self.rebuild_hitl(session_id)
+                n = await self.rebuild_hitl(session_id)
                 self._session_manager.register_session(session_id)
-                tm = self._task_managers.get(session_id)
-                if tm is not None:
-                    await tm.announce_queue_state()   # 恢复路径和正常路径走同一条链
+                await self._announce_queue_state_as_tm_proxy(session_id, n)
             except Exception:
                 logger.exception("Recovery: failed to recover session %s", session_id)
 
         return len(session_ids)
+
+    async def _announce_queue_state_as_tm_proxy(self, session_id: str, pending_hitl: int) -> None:
+        """启动恢复期**代 TaskManager** 发那一条队列状态信号（SM 的唯一输入）。
+
+        为什么要代行：`recover()` 跑在进程刚起来的时候，`_task_managers` 恒为空——
+        没有代行者的话崩溃会话一条会话级事件都收不到，投影停在崩溃前的 RUNNING，
+        「看着在跑却卡住」。而**不能**在这里顺手建一个真 TM：本方法的契约是
+        「启动时 nothing drains/runs」，建 TM 有启动即跑活的风险。
+
+        判据与 `TaskManager.announce_queue_state` 同源——有人在等就是 blocked，
+        没人在等就是被进程重启打断：
+
+        - 有未决 HITL → ``TaskQueueBlocked{count}``  → SM 判 WAITING
+        - 没有        → ``TaskQueueInterrupted``     → SM 判 INTERRUPTED，等 /resume
+
+        「等的是审批面板还是一句话」不在这里区分：那是 delivery 的性质、只有前端需要
+        （host 的只读入口 `session_status_after_recover`），会话只有一个 WAITING。
+        """
+        if pending_hitl:
+            event_type = EventType.TASK_QUEUE_BLOCKED
+            payload: dict = {"count": pending_hitl}
+        else:
+            event_type = EventType.TASK_QUEUE_INTERRUPTED
+            payload = {"reason": "process_restart"}
+        await self._event_bus.emit(Event(
+            id=generate_id("evt"),
+            run_id=None,
+            sequence=0,
+            session_id=session_id,
+            type=event_type,
+            timestamp=now_utc(),
+            payload=payload,
+        ))
+        logger.info("Recovery: session %s → %s (%d pending HITL)",
+                    session_id, event_type, pending_hitl)
 
     async def rebuild_hitl(self, session_id: str) -> int:
         """从事件**装填**该 session 的 HITL 内存态，返回 pending 条数。
@@ -2442,7 +2480,8 @@ class CtxWeftRuntime:
             # 定夺——原地重试（翻回 PENDING）或挂起等 /resume（保持 SUSPENDED + 发事件）。
             # 真失败只有 observer 判 fail 一条路（FinalizeStep 闭合胶囊、回传父亲）。
             # ContextOverflowError 不再特判终态：retriable=False 使其跳过重试直接挂起，
-            # 溢出文案随 task.error / TASK_SUSPENDED.error_message 抵达 host（提示换大窗口模型）。
+            # 溢出文案随 task.error / RUN_INTERRUPTED.error_message 抵达 host，错误码
+            # 再经 TaskQueueInterrupted.reason 上浮（提示换大窗口模型）。
             if task.status not in ("FINISHED", "FAILED", "CANCELED"):
                 task.status = "SUSPENDED"
                 task.error = str(exc)

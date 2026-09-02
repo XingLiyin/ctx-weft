@@ -1019,10 +1019,18 @@ class TaskManager:
         三个独立事件而不是一个带 discriminator 的：消费方收到哪条就知道怎么办，
         不必读 payload 分流（本次重构的核心约束）。
 
-        调用点：每次可能改变「有没有能跑的任务」的地方——`drain()` 走完、
-        `on_task_finished` 收尾、恢复期重建完成之后。多调无害：状态没变时
+        调用点：每次可能改变「有没有能跑的任务」的地方——`_run_task` 的挂起出口、
+        `_suspend_task_interrupted` 尾部、`on_task_finished` 收尾（后两者经
+        `_fire_session_idle` / `_fire_session_done`）。多调无害：状态没变时
         SM 不会发事件（`next_transition` 返回 `None`）。
+
+        **归属权守卫长在这里**，而不是长在三个调用点上：本方法一发就是**会话级**
+        信号，SM 按 session_id 无条件应用。被同 session 上更新的 TM 顶替之后，
+        旧 TM 迟到的 park / 崩溃收尾若还报一句，就会把**新一轮正在跑的会话**
+        翻成 WAITING / INTERRUPTED。守卫贴着发射点，新增调用点不必各自记得加。
         """
+        if self._is_current is not None and not self._is_current():
+            return                                   # 已被顶替：新 owner 的状态才是真相
         if self._queue.has_pending() or self._running_tasks:
             return                                   # 还有活干，没什么好报的
         interrupted = [t for t in self._tasks.values() if t.status == "INTERRUPTED"]
@@ -1032,8 +1040,14 @@ class TaskManager:
             # 优先级判据是「解开它需要谁」：INTERRUPTED 要运维介入（/resume），
             # AWAITING_HUMAN 只要用户答一句。一个 task 断了、另一个在等人，先报
             # 「断了」——人答完了那个断的还是断的，而且它需要更重的介入。
-            await self._emit(EventType.TASK_QUEUE_INTERRUPTED,
-                             payload={"reason": interrupted[0].error or "interrupted"})
+            #
+            # reason 优先取 error_code：host 按码分流（CONTEXT_OVERFLOW → 提示换更大
+            # 窗口的模型恢复、LLM_AUTH_FAILED → 提示改配置）。自由文本只是没有码时的
+            # 兜底，绝不能反过来把码降级成文本——那会让 host 的分流静默失效。
+            await self._emit(EventType.TASK_QUEUE_INTERRUPTED, payload={
+                "reason": (interrupted[0].error_code
+                           or interrupted[0].error
+                           or "interrupted")})
         elif blocked:
             await self._emit(EventType.TASK_QUEUE_BLOCKED, payload={"count": len(blocked)})
         else:

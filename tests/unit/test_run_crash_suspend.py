@@ -9,7 +9,8 @@ Task 6 起判据是**事件类型**：run 级事实是 `RunInterrupted`，TM 聚
 2. 可重试异常耗尽 max_retries → 同上（不再降级终态 FAILED）。
 3. 崩溃挂起不触碰 session.failure_counter（真失败只有 observer 判 fail 一条路）。
 4. ContextOverflowError：retriable=False → 不重试直接挂起，error_code=CONTEXT_OVERFLOW
-   区分性地抵达事件流（host 据此提示换更大窗口的模型恢复）。
+   区分性地抵达事件流,并上浮成 TaskQueueInterrupted.reason（host 据此提示换更大窗口的
+   模型恢复）——会话级中断的 reason 是**码**,不是自由文本。
 """
 
 from __future__ import annotations
@@ -67,8 +68,10 @@ async def test_non_retriable_crash_suspends_not_fails() -> None:
     assert interrupted[0].payload["error_code"] == "LLM_AUTH_FAILED"
     assert interrupted[0].payload["error_message"] == "401 unauthorized"
     # TM 的聚合信号：队列里没有能跑的了，因为有任务断了。会话状态由 SM 据此判定。
+    # reason 带的必须是**错误码**——host 按码分流提示（换更大窗口的模型 / 改配置），
+    # 降级成自由文本会让分流静默失效。
     queue_sig = [e for e in bus.events if e.type == EventType.TASK_QUEUE_INTERRUPTED]
-    assert queue_sig and queue_sig[0].payload["reason"] == "401 unauthorized"
+    assert queue_sig and queue_sig[0].payload["reason"] == "LLM_AUTH_FAILED"
     assert t.status == "INTERRUPTED"
     assert t.error == "401 unauthorized"
     assert session.status == "RUNNING"   # 会话状态不再由 TM 改写（归 SessionManager）
@@ -109,7 +112,9 @@ async def test_context_overflow_suspends_without_retry() -> None:
     assert EventType.TASK_FAILED not in _types(bus)
     interrupted = [e for e in bus.events if e.type == EventType.RUN_INTERRUPTED]
     assert interrupted and interrupted[0].payload["error_code"] == "CONTEXT_OVERFLOW"
-    assert EventType.TASK_QUEUE_INTERRUPTED in _types(bus)
+    # 溢出码必须上浮到会话级中断的 reason —— host 据此提示换更大窗口的模型恢复。
+    queue_sig = [e for e in bus.events if e.type == EventType.TASK_QUEUE_INTERRUPTED]
+    assert queue_sig and queue_sig[0].payload["reason"] == "CONTEXT_OVERFLOW"
     assert t.status == "INTERRUPTED"
 
 

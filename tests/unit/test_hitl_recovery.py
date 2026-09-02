@@ -162,9 +162,13 @@ async def test_session_finishes_when_no_pending_hitl() -> None:
 
 
 async def test_recover_emits_paused_hitl_for_pending_session() -> None:
-    """启动恢复装填 registry，但**不宣布**会话状态；「等的是面板还是一句话」由
-    host 的只读查询 `session_status_after_recover` 按 delivery 推导（Task 6：
-    「复活不是一种状态」，会话状态只由 TM 的聚合信号驱动 SM）。"""
+    """缺陷 C：启动恢复时，有 pending HITL 的会话必须如实反映「在等人」，
+    而非停在崩溃前的 RUNNING。
+
+    Task 6 起走的是同一条链：recover() 代 TM 发 `TaskQueueBlocked` → SM 判 WAITING
+    → 发 `SessionWaiting`。「等的是审批面板（PAUSED_HITL）还是一句话（PAUSED）」是
+    delivery 的性质、只有前端需要，由 host 的只读入口推导，不上升到会话状态。
+    """
     from ctx_weft.protocols.events import EventType
 
     runtime, verdicts = _recover_runtime_with_status_capture()
@@ -179,12 +183,17 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert verdicts == [], "启动恢复不再宣布会话状态"
+    assert verdicts == [EventType.SESSION_WAITING], "有 pending HITL 的会话恢复应判 WAITING"
+    # 面板 vs 一句话的区分仍在，只是搬去了 host 的只读入口。
     assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
 
 
 def _recover_runtime_with_status_capture():
-    """构造会捕获**任何会话级宣告**的 runtime（recover 状态语义测试共用）。"""
+    """构造会捕获**全部会话级宣告**的 runtime（recover 状态语义测试共用）。
+
+    捕的是 SM 发的会话事件类型，不是 TM 的聚合信号——断言要钉的是「会话最终被判成
+    什么」，而退役的通用 setter `SessionStatusChanged` 一旦重新出现也会当场被抓到。
+    """
     from ctx_weft.protocols.events import EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
@@ -211,8 +220,8 @@ def _mk_ev(seq, type_, **payload):
 
 
 async def test_recover_emits_paused_for_wait_only_pending() -> None:
-    """wait-only pending（纯文本软待命）推导出 PAUSED 而非 PAUSED_HITL——与
-    SESSION_PAUSED_HITL 的 reducer/投影语义一致（form=wait → PAUSED，无 HITL 面板）。"""
+    """wait-only pending（纯文本软待命）：会话判 WAITING，host 侧推导出 PAUSED 而非
+    PAUSED_HITL——与 SESSION_PAUSED_HITL 的 reducer/投影语义一致（form=wait → 无面板）。"""
     from ctx_weft.protocols.events import EventType
 
     runtime, verdicts = _recover_runtime_with_status_capture()
@@ -227,13 +236,15 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert verdicts == [], "启动恢复不再宣布会话状态"
+    # 会话状态只有一个 WAITING：软待命和等面板都是「停着但正常」。
+    assert verdicts == [EventType.SESSION_WAITING]
     # wait-only 不应误标 PAUSED_HITL——前端会等一个不存在的面板。
     assert await runtime.session_status_after_recover("ses_1") == "PAUSED"
 
 
 async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None:
-    """混合 pending（wait + question/approval）仍推导成 PAUSED_HITL——有面板可答。"""
+    """混合 pending（wait + question/approval）：会话仍判 WAITING，host 侧推导成
+    PAUSED_HITL——有面板可答。"""
     from ctx_weft.protocols.events import EventType
 
     runtime, verdicts = _recover_runtime_with_status_capture()
@@ -250,7 +261,7 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert verdicts == [], "启动恢复不再宣布会话状态"
+    assert verdicts == [EventType.SESSION_WAITING]
     assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
 
 
