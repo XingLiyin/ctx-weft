@@ -1,6 +1,6 @@
 {
   "name": "suspend-resume",
-  "description": "tsk_1 ACTIVE → SUSPENDED（派生子任务挂起）→ RESUMED（子任务完成后重新入队）。验证 TASK_STATUS 映射的挂起/恢复分支。",
+  "description": "tsk_1 ACTIVE → SUSPENDED（派生子任务挂起）→ RESUMED（子任务完成后重新入队）。验证 TASK_STATUS 映射的挂起/恢复分支。task 状态所有权重构（2026-09-02）后 TaskSuspended 由 TaskManager 发、不带 run_id；payload 照抄 `disposition_for`（`summary` + `spawn_titles`），不再带 `task_id`（envelope 已有，旧 suspend.py 的 payload 曾重复一份）。",
   "runId": "s1",
   "events": [
     {
@@ -22,8 +22,9 @@
       "payload": { "assigned_agent_id": "agt_root" }
     },
     {
-      "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1", "taskId": "tsk_1",
-      "type": "TaskSuspended", "timestamp": "2026-06-05T00:00:04Z", "payload": {}
+      "id": "evt_0004", "runId": null, "sequence": 0, "sessionId": "s1", "taskId": "tsk_1",
+      "type": "TaskSuspended", "timestamp": "2026-06-05T00:00:04Z",
+      "payload": { "summary": "spawned 1 sub-task, waiting", "spawn_titles": ["Sub 1"] }
     },
     {
       "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1", "taskId": "tsk_1",

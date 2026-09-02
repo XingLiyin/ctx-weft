@@ -138,6 +138,16 @@ reducer、Postgres 投影、前端 SSE 翻译**三处共用**此映射：
 非终态的三种「停」各有各的类型：`SUSPENDED`（等子任务）/ `AWAITING_HUMAN`（等人）/
 `INTERRUPTED`（被外部打断，等 `/resume`）。
 
+> **这九条现在只从 `TaskManager` 发出**（task 状态所有权重构，2026-09-02）：loop
+> （`runtime.py` / `finalize.py` / `suspend.py` / `observe.py` / `control_capability.py`）
+> 交出 `RunOutcome`（发生了什么），`TaskManager.apply_run_outcome` 据 `disposition_for`
+> 那张纯函数表写状态并发这张表里唯一的那条事件——loop 侧不再直接写 `task.status`、
+> 不再直接发任何一条 task 状态事件（`tests/unit/test_task_manager_owns_status.py` 按
+> AST 扫两条守卫钉住）。这些事件因此不带 `run_id`（`TaskManager` 不属于任何一次
+> run，写 `None`）；发射相对 `RunFinished` 的顺序也从「run 内部先发」变成「run 返回
+> 之后 `TaskManager` 才发」——host 若靠收到 `RunFinished` 就关 SSE 流，会漏掉紧随其
+> 后的 task 事件（见 `docs/upgrade/2026-09-02-task-status-ownership.md`）。
+
 > **`TaskSuspended` 从三义收窄到一义**（2026-09-02）：它现在**只**表示「等子任务完成」。
 > 从前用 `TaskSuspended{reason:"hitl_park"}` / `{reason:"run_crash"}` 表达的另两义，
 > 各自成了独立类型 `TaskAwaitingHuman{hitl_id}` / `TaskInterrupted{reason, …}`。

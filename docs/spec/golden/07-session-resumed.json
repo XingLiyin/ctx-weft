@@ -1,6 +1,6 @@
 {
   "name": "session-resumed",
-  "description": "崩溃恢复续跑的分层链路（2026-09-02 所有权重构 + RunInterrupted/TaskInterrupted 分家）：run 层 RunInterrupted 只说「这次执行死了」，**不写 task 状态**；task 层 TaskInterrupted 把 task 打成 INTERRUPTED；TM 层 TaskQueueInterrupted（reducer no-op）；会话层 SessionInterrupted→INTERRUPTED。随后 SessionResumed 更新 userPrompt 并回 RUNNING。payload 照抄发射点：outage 支的 RunInterrupted 只有 {reason, error_message}（runtime._run_loop），TaskInterrupted 带四个溯源字段。",
+  "description": "崩溃恢复续跑的分层链路（2026-09-02 所有权重构 + RunInterrupted/TaskInterrupted 分家）：run 层 RunInterrupted 只说「这次执行死了」，**不写 task 状态**；task 层 TaskInterrupted 把 task 打成 INTERRUPTED；TM 层 TaskQueueInterrupted（reducer no-op）；会话层 SessionInterrupted→INTERRUPTED。随后 SessionResumed 更新 userPrompt 并回 RUNNING。payload 照抄发射点：outage 支的 RunInterrupted 只有 {reason, error_message}（runtime._run_loop），TaskInterrupted 带四个溯源字段。task 状态所有权重构（2026-09-02，task-status-ownership 计划）后 TaskInterrupted 改由 TaskManager 发，不带 run_id（TM 不属于任何一次 run）。",
   "runId": "s1",
   "events": [
     { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
@@ -16,7 +16,7 @@
     { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1", "taskId": "tsk_1",
       "type": "RunInterrupted", "timestamp": "2026-06-05T00:00:04Z",
       "payload": { "reason": "llm_outage", "error_message": "LLM self-heal exhausted" } },
-    { "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1", "taskId": "tsk_1",
+    { "id": "evt_0005", "runId": null, "sequence": 0, "sessionId": "s1", "taskId": "tsk_1",
       "type": "TaskInterrupted", "timestamp": "2026-06-05T00:00:05Z",
       "payload": { "reason": "llm_outage", "error_code": "llm_outage",
         "error_message": "LLM self-heal exhausted", "retry_count": 0 } },

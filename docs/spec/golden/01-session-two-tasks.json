@@ -1,6 +1,6 @@
 {
   "name": "session-two-tasks",
-  "description": "建会话 → 跑完 tsk_1 → tsk_2 仍在进行；验证 TASK_STATUS 映射、root agent 推算、快照(前6条)+增量 == 全量回放。RunFinished 是 run 级记账，**不写会话状态**（会话状态所有权重构 2026-09-02）——会话仍是 RUNNING。",
+  "description": "建会话 → 跑完 tsk_1 → tsk_2 仍在进行；验证 TASK_STATUS 映射、root agent 推算、快照(前6条)+增量 == 全量回放。RunFinished 是 run 级记账，**不写会话状态**（会话状态所有权重构 2026-09-02）——会话仍是 RUNNING。task 状态所有权重构（2026-09-02）后，TaskFinished 由 TaskManager 在 run 返回之后发，顺序落在 RunFinished **之后**、且不带 run_id（TM 不属于任何一次 run）；RunFinished 那一刻 task 尚未落定，`final_status` 仍是 `ACTIVE`（该键已废弃，权威字段是 `outcome`）。",
   "runId": "s1",
   "snapshotAt": 6,
   "events": [
@@ -27,13 +27,15 @@
       "payload": { "assigned_agent_id": "agt_root" }
     },
     {
-      "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1", "taskId": "tsk_1",
-      "type": "TaskFinished", "timestamp": "2026-06-05T00:00:00Z", "payload": {}
+      "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1",
+      "type": "RunFinished", "timestamp": "2026-06-05T00:00:00Z",
+      "payload": { "outcome": "completed", "final_status": "ACTIVE", "will_retry": false,
+        "total_events": 5, "total_turns": 0, "error": null, "error_type": null }
     },
     {
-      "id": "evt_0006", "runId": "run_1", "sequence": 6, "sessionId": "s1",
-      "type": "RunFinished", "timestamp": "2026-06-05T00:00:00Z",
-      "payload": { "final_status": "FINISHED" }
+      "id": "evt_0006", "runId": null, "sequence": 0, "sessionId": "s1", "taskId": "tsk_1",
+      "type": "TaskFinished", "timestamp": "2026-06-05T00:00:01Z",
+      "payload": { "outcome": "success", "summary": "", "outputs": null }
     },
     {
       "id": "evt_0007", "runId": "run_1", "sequence": 7, "sessionId": "s1",

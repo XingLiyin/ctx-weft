@@ -77,14 +77,22 @@
 #### 严格分层：每层只跟下一层说话
 
 ```
-HITL   ──►  task 挂起了、在等人           TaskAwaitingHuman{hitl_id}
 loop   ──►  这次执行被打断了              RunInterrupted{reason}          ← run 域
-TM/loop──►  这个 task 停在 INTERRUPTED    TaskInterrupted{reason, …}      ← task 域
+              │  RunOutcome（发生了什么，不含 task 该变成什么）
+              ▼
+TM     ──►  task 挂起了、在等人           TaskAwaitingHuman{hitl_id}      ← task 域
+TM     ──►  这个 task 停在 INTERRUPTED    TaskInterrupted{reason, …}      ← task 域
               │
 TM     ──►  我这边没有能跑的了，因为 X     TaskQueueBlocked / …Interrupted / …Drained
               │
 SM     ──►  会话状态                      SessionWaiting / SessionInterrupted / …
 ```
+
+> **task 状态事件（`TaskAwaitingHuman` / `TaskInterrupted` 及本节其余 9 条）现在只从
+> `TaskManager` 发**（task 状态所有权重构，2026-09-02）。loop 五个结局点只交出
+> `RunOutcome`，`TaskManager.apply_run_outcome` 据 `disposition_for` 判定后才写状态、
+> 发事件——发生在 run 返回之后，故这些事件不带 `run_id`，且相对 `RunFinished` 的顺序
+> 是「之后」不是「之前」。
 
 > **`RunInterrupted` 与 `TaskInterrupted` 是两件事，故是两条事件**（2026-09-02 收尾修正）。
 > 「这次执行死了」是 run 域的事实，无条件发；「这个 task 停在 `INTERRUPTED` 等 `/resume`」
@@ -250,12 +258,17 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 > 按 `form == "wait"` 判暂停态的同一种病。现在三者各有类型：`TaskSuspended`（等子任务）、
 > `TaskAwaitingHuman`（等人）、`TaskInterrupted`（被打断；run 域那一半是 `RunInterrupted`，见 §2.4）。
 >
-> **`TaskInterrupted` 的发射时机是「重试判定之后」**，两条异常路径不对称：
-> LLM outage 由 `runtime._run_loop` 自己捕获、不重抛，没有重试判定，故它紧随
-> `RunInterrupted` 在 `_run_loop` 里发；run 崩溃则重抛给
-> `TaskManager._handle_task_failure` 定夺——决定原地重试的那一支发 `TaskRequeued`，
-> 只有决定挂起等 `/resume` 的那一支（`_suspend_task_interrupted`）发本条。
-> 发早了，走重试的 task 会先被打成 `INTERRUPTED` 再翻回 `PENDING`，中间那一下是假的。
+> **`TaskInterrupted` 的发射时机是「重试判定之后」，且只从 `TaskManager` 发**（task 状态
+> 所有权重构，2026-09-02）。LLM outage 与 run 崩溃两条异常路径都不在 `runtime._run_loop`
+> 里发它：`_run_loop` 只无条件发 run 域的 `RunInterrupted`（§2.4），随后把
+> `RunOutcome(INTERRUPTED, retriable=...)` 交回（outage 硬编码 `retriable=False`，崩溃取
+> `getattr(exc, "retriable", True)`，两者不同源、不许合并）——`TaskManager.apply_run_outcome`
+> 用同一张 `disposition_for` 表判定：`retriable` 且预算未尽 → `TaskRequeued`（→ `PENDING`）；
+> 否则 → 本条（→ `INTERRUPTED`）。发早了，走重试的 task 会先被打成 `INTERRUPTED` 再翻回
+> `PENDING`，中间那一下是假的——这正是两支路径都要等 `disposition_for` 判完才发的原因。
+> `TaskManager._handle_task_failure` / `_suspend_task_interrupted` 仍存在，但只服务**装配
+> 失败**这一条路（装配阶段没有 run、没有 `RunOutcome` 可喂）；执行阶段的崩溃自 Task 4 起
+> 不再经过它们。
 >
 > 同理，`TaskStatus` 值域也从一个 `SUSPENDED` 拆成三个：
 > `SUSPENDED` / `AWAITING_HUMAN` / `INTERRUPTED`。**状态值域的过载是事件过载的根**——
