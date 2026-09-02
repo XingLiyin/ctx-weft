@@ -31,7 +31,7 @@ from ctx_weft.core.content import (
 )
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.events import EventBus
-from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ
+from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.capability import (
@@ -208,7 +208,7 @@ class CapabilityGateway:
                 if decision.needs_human is not None:
                     # 等待权归 gateway：authorizer 只是**声明**需要人，不自己等。
                     _hitl_id, human = await self._resolve_human(
-                        decision.needs_human, state, ctx, tool_call_id)
+                        decision.needs_human, state, ctx, tool_call_id, stage=HITL_STAGE_AUTHZ)
                     decision = await self._authz_after_human(
                         authorizer, cap, ctx, arguments, tool_call_id, human)
         except TypeError as exc:
@@ -289,9 +289,35 @@ class CapabilityGateway:
             invocation_id=invocation_id,
             extra={**ctx.provider_ctx.extra, "tool_call_id": tool_call_id},
         )
-        result_parts, metadata, is_error = await self._stream_tool(
+        result_parts, metadata, is_error, needs_human_ask = await self._stream_tool(
             provider, cap.id, sanitized, provider_ctx, state, invocation_id,
         )
+
+        # 6b. provider 让出了 needs_human：流已停在此处（其后 yield 的事件从未被消费，见
+        # `_stream_events`）。等待权归 gateway——provider 只**声明**需要人。
+        if needs_human_ask is not None:
+            needs_human_ask_id, human = await self._resolve_human(
+                needs_human_ask, state, ctx, tool_call_id, stage=HITL_STAGE_TOOL)
+            if needs_human_ask.reply_as_result:
+                # 答复即结果：重入根本不发生（`ask_user` 走这条）。
+                result_parts, metadata, is_error = _human_reply_as_result(human)
+            else:
+                from ctx_weft.protocols.capability import HumanResumable
+                if not isinstance(provider, HumanResumable):
+                    return await self._error_and_record(
+                        state, ctx, tool_name, invocation_id,
+                        f"[Error: {type(provider).__name__} yielded needs_human but does "
+                        f"not implement HumanResumable]",
+                        is_dispatch, is_silent, tool_call_id,
+                    )
+                # 重入是**新调用** resume（不是恢复挂起的生成器）——局部状态已随原生成器
+                # 关闭而消失，全靠 ask.resume_state 带回。
+                result_parts, metadata, is_error, _ = await self._stream_events_safe(
+                    provider.resume(
+                        needs_human_ask_id, human, needs_human_ask.resume_state, provider_ctx,
+                    ),
+                    provider, provider_ctx, state, invocation_id,
+                )
 
         text = "\n".join(result_parts)
         if not text:
@@ -415,41 +441,68 @@ class CapabilityGateway:
 
     async def _stream_tool(
         self, provider, cap_id, sanitized, provider_ctx, state, invocation_id,
-    ) -> tuple[list[str], dict[str, Any], bool]:
-        """流式执行 provider.invoke，聚合 result/metadata/error。
+    ) -> tuple[list[str], dict[str, Any], bool, "HitlAsk | None"]:
+        """流式执行 provider.invoke，聚合 result/metadata/error（含 needs_human 让出的 ask）。
+
+        事件消费循环与错误/取消处理分别由 `_stream_events` / `_stream_events_safe` 承担，
+        `resume` 复用同一对 helper——不重复写这段循环（spec §2 的编排约束）。
+        """
+        return await self._stream_events_safe(
+            provider.invoke(cap_id, sanitized, provider_ctx), provider, provider_ctx,
+            state, invocation_id,
+        )
+
+    async def _stream_events_safe(
+        self, events, provider, provider_ctx, state, invocation_id,
+    ) -> tuple[list[str], dict[str, Any], bool, "HitlAsk | None"]:
+        """`_stream_events` 外面套一层取消/异常安全网，`invoke` 与 `resume` 两处调用点共用。
 
         CancelledError（在途被打断）→ 调 provider.cancel 作安全网后重抛（provider 自身的 finally，
         如 bash terminate_tree，已先杀进程树）。其它异常 → 收敛为错误 result，不让 loop 崩。
         """
-        from ctx_weft.core.loop.driver import make_event
-        result_parts: list[str] = []
-        metadata: dict[str, Any] = {}
-        is_error = False
         try:
-            async for ev in provider.invoke(cap_id, sanitized, provider_ctx):
-                if ev.kind in ("stdout", "progress"):
-                    await self._event_bus.emit(make_event(state, EventType.CAPABILITY_PROGRESS, payload={
-                        "invocation_id": invocation_id,
-                        "kind": ev.kind,
-                        "data": ev.payload.get("data", "")[:500],
-                    }))
-                elif ev.kind == "result":
-                    result_parts.append(ev.payload.get("content", ""))
-                    metadata.update(ev.payload.get("metadata", {}))
-                elif ev.kind == "error":
-                    is_error = True
-                    result_parts.append(
-                        f"[Error {ev.payload.get('code', 'ERR')}: {ev.payload.get('message', '')}]"
-                    )
+            return await self._stream_events(events, state, invocation_id)
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 await provider.cancel(invocation_id, provider_ctx)
             raise
         except Exception as exc:
-            logger.exception("CapabilityGateway: invoke failed for %s", cap_id)
-            is_error = True
-            result_parts = [f"[Exception: {exc}]"]
-        return result_parts, metadata, is_error
+            logger.exception("CapabilityGateway: invoke failed for invocation %s", invocation_id)
+            return [f"[Exception: {exc}]"], {}, True, None
+
+    async def _stream_events(
+        self, events, state, invocation_id,
+    ) -> tuple[list[str], dict[str, Any], bool, "HitlAsk | None"]:
+        """消费一个 `CapabilityEvent` 流，聚合 result/metadata/error。
+
+        **`needs_human` 是流的终点**（spec §2）：见到即 `break`，不再从 `events` 拉下一个
+        事件——其后 provider 让出的任何东西都不可见。生成器随之被 GC 关闭，provider 的局部
+        状态随之消失，这正是 `HitlAsk.resume_state` 存在的理由。
+        """
+        from ctx_weft.core.loop.driver import make_event
+        result_parts: list[str] = []
+        metadata: dict[str, Any] = {}
+        is_error = False
+        needs_human_ask = None
+        async for ev in events:
+            if ev.kind == "needs_human":
+                needs_human_ask = ev.payload.get("ask")
+                break
+            if ev.kind in ("stdout", "progress"):
+                await self._event_bus.emit(make_event(state, EventType.CAPABILITY_PROGRESS, payload={
+                    "invocation_id": invocation_id,
+                    "kind": ev.kind,
+                    "data": ev.payload.get("data", "")[:500],
+                }))
+            elif ev.kind == "result":
+                result_parts.append(ev.payload.get("content", ""))
+                metadata.update(ev.payload.get("metadata", {}))
+            elif ev.kind == "error":
+                is_error = True
+                result_parts.append(
+                    f"[Error {ev.payload.get('code', 'ERR')}: {ev.payload.get('message', '')}]"
+                )
+        return result_parts, metadata, is_error, needs_human_ask
 
     async def _record_result(
         self, state, ctx, tool_name, invocation_id, sanitized, content, is_error, is_dispatch, is_silent, tool_call_id,
@@ -500,13 +553,18 @@ class CapabilityGateway:
 
     async def _resolve_human(
         self, ask: "HitlAsk", state: "LoopState", ctx: "LoopContext", tool_call_id: str,
+        *, stage: str,
     ) -> "tuple[str, HitlDecision]":
         """登记 → 热等 → 拿到决定；被驱逐则抛 `HitlPark`。
 
         **全仓唯一的登记+等待+抛 park 的地方。** 热路径与冷路径在此收敛：冷路径由
         reconcile 经 `invoke` 再入，命中上面的决定缓存短路，根本走不到这里。
 
-        返回 `(hitl_id, decision)`——id 供未来工具侧路径使用；本调用点只解构决定。
+        `stage`（`HITL_STAGE_AUTHZ` / `HITL_STAGE_TOOL`）是决定缓存键的第三维——同一
+        `tool_call_id` 下授权步与工具步各自独立登记等待，互不偷答案（安全修复，见
+        `HitlRegistry`）。调用方必须显式传入，无默认值。
+
+        返回 `(hitl_id, decision)`——id 供工具侧路径（`resume`）用；授权侧调用点只解构决定。
         """
         if ctx.hitl is None or ctx.waiter is None:
             raise RuntimeError("HITL requested but no HitlService/HitlWaiter wired")
@@ -516,7 +574,7 @@ class CapabilityGateway:
             task_id=state.task.id,
             agent_id=state.agent.id,
             tool_call_id=tool_call_id,
-            stage=HITL_STAGE_AUTHZ,
+            stage=stage,
         )
         human = await ctx.waiter.wait(req.id)
         if human is None:
@@ -594,6 +652,18 @@ class CapabilityGateway:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _human_reply_as_result(human: "HitlDecision") -> tuple[list[str], dict, bool]:
+    """把人的答复直接变成工具结果（`HitlAsk.reply_as_result=True` 的出口，如 `ask_user`）。
+
+    多模态部分经 metadata 的 `CONTENT_PARTS_KEY` 透出，与 provider 自己产出的非文本 part
+    走同一条路（`invoke` 里 `metadata.get(CONTENT_PARTS_KEY)` 拼进最终 content）——否则带图
+    答复会被 `split_for_tool_result` 拆开后只剩文本部分被使用，图片就此丢失。
+    """
+    text, parts = split_for_tool_result(human.message)
+    metadata: dict = {CONTENT_PARTS_KEY: parts} if parts else {}
+    return ([text] if text else []), metadata, False
 
 
 def _tool_scope(state: "LoopState") -> MemoryAddress:
