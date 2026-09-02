@@ -62,7 +62,7 @@
 > `TaskSuspended` 从三义收窄到**一义**：只表示「等子任务完成」（payload 带
 > `summary` / `spawn_titles`）。另两义各自成型：等人 → `TaskAwaitingHuman{hitl_id}`
 > （task → `AWAITING_HUMAN`），被打断 →
-> `TaskInterrupted{reason, error_code?, error_message?, retry_count}`（task → `INTERRUPTED`）。
+> `TaskInterrupted{reason, error_code, error_message, retry_count}`（task → `INTERRUPTED`）。
 > **判据是类型，不是 payload 里的 `reason` 字面量。**
 >
 > `TaskInterrupted` 发在**重试判定之后**：崩溃后还能原地重试的那一支发的是

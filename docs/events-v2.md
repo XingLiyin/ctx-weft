@@ -237,7 +237,7 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 | `TaskStarted` | | `assigned_agent_id` | → `ACTIVE`，并回填 `assigned_agent_id` |
 | `TaskSuspended` | | `summary` `spawn_titles` | **只剩「等子任务完成」这一个语义**。→ `SUSPENDED`（非终态） |
 | `TaskAwaitingHuman` | | `hitl_id` | 这个 task 被 HITL 挂起、需要人来解决。→ `AWAITING_HUMAN` |
-| `TaskInterrupted` | | `reason` `error_code?` `error_message?` `retry_count` | 这个 task 停在 `INTERRUPTED`，等 `/resume`。→ `INTERRUPTED` |
+| `TaskInterrupted` | | `reason` `error_code` `error_message` `retry_count` | 这个 task 停在 `INTERRUPTED`，等 `/resume`。→ `INTERRUPTED` |
 | `TaskResumed` | | `{}` | 阻塞的子任务全部终态，父任务解除挂起 → `ACTIVE` |
 | `TaskFinished` | | `outcome="success"` `summary` `outputs` | → `FINISHED`，并把会话的 `failure_counter` 清零 |
 | `TaskFailed` | | `error_code` `error_message` `retry_count` | → `FAILED`，`failure_counter += 1`。`error_code=TASK_FAILED_BY_THRESHOLD` 是熔断的聚合结果，**不计数** |
