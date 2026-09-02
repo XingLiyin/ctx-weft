@@ -576,13 +576,13 @@ class CapabilityGateway:
         # 到 yield needs_human，才知道这次调用要问人。少了这一查，reconcile 重跑一个
         # 已答过的 `ask_user` 会走 `open()`（幂等命中那条已终局的请求）→ `waiter.wait()`
         # 见 `resolved` 判为驱逐 → `HitlPark`：人给过的答案永远送不回模型，任务原地重挂。
-        cached = ctx.hitl.registry.decision_for(
+        # 走 `find_for_tool_call` 而非 `decision_for`：这里还要那条记录的 id（工具侧
+        # `resume` 要收 ask_id）。仍 pending（活的等待）时 `decision is None`，因此
+        # 「活请求不算已答过」这条与 `decision_for` 同一判据。
+        cached = ctx.hitl.registry.find_for_tool_call(
             ctx.provider_ctx.session_id, tool_call_id, stage)
-        if cached is not None:
-            cached_decision, _resume_state = cached
-            existing = ctx.hitl.registry.find_for_tool_call(
-                ctx.provider_ctx.session_id, tool_call_id, stage)
-            return (existing.id if existing else ""), cached_decision
+        if cached is not None and cached.decision is not None:
+            return cached.id, cached.decision
         req = await ctx.hitl.open(
             ask,
             session_id=ctx.provider_ctx.session_id,
