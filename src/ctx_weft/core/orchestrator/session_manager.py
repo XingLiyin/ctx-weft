@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import EventBus
@@ -98,6 +98,45 @@ class SessionManager:
     def forget_session(self, session_id: str) -> None:
         """会话彻底收口后释放内存。此后查询返回 `""`，调用方须先读后忘。"""
         self._states.pop(session_id, None)
+
+    # ── 输入：总线事件 + 外部命令 ────────────────────────────────────────
+
+    #: SM 的全部事件输入 → 状态机输入。**这张表就是分层的边界**：
+    #: HITL 事件、task 级停顿事件、run 级事件一个都不在里面——那些是下层的事，
+    #: 由 TaskManager 聚合成这四条（docs/events-v2.md §2.1.1）。
+    #:
+    #: 会话状态事件（SM 自己发的）也必须不在其中：in-process bus 在 `emit()` 内
+    #: 同步 drain，会把它回流给自己，一次转移变成递归。
+    _INPUT_BY_EVENT: ClassVar[dict[str, SessionInput]] = {
+        EventType.TASK_QUEUE_BLOCKED: SessionInput.QUEUE_BLOCKED,
+        EventType.TASK_QUEUE_INTERRUPTED: SessionInput.QUEUE_INTERRUPTED,
+        EventType.TASK_QUEUE_DRAINED: SessionInput.QUEUE_DRAINED,
+        EventType.TASK_STARTED: SessionInput.TASK_STARTED,
+    }
+
+    def attach_to_bus(self) -> None:
+        """订阅。runtime 构造期调一次。"""
+        self.event_bus.subscribe(None, self.handle_event)
+
+    async def handle_event(self, ev: Event) -> None:
+        """总线回调。**只读事件、只喂状态机**，不碰其他组件。"""
+        inp = self._INPUT_BY_EVENT.get(ev.type)
+        if inp is None:
+            return
+        p = ev.payload or {}
+        # 两个 kwargs 一律传下去，由状态机各分支自取——这样加一种输入时不必改
+        # 本方法，也不会出现「某分支忘了传参」的静默 bug。
+        await self._apply(
+            ev.session_id, inp,
+            reason=str(p.get("reason", "")),
+            final_status=str(p.get("final_status", "")),
+        )
+
+    # ── 外部命令：host 经 runtime 进来的请求，不是组件在驱动 SM ────────────
+
+    async def cancel(self, session_id: str) -> None:
+        """硬取消。终态，`SessionFinished(CANCELED)`。"""
+        await self._apply(session_id, SessionInput.CANCEL)
 
     # ── 转移：改状态与发事件**只在这里** ──────────────────────────────────
 

@@ -610,6 +610,9 @@ class CtxWeftRuntime:
             task_max_retries=self._config.task_max_retries,
             default_task_timeout_ms=self._config.default_task_timeout_ms,
         )
+        # SM 的输入端：只认 TaskManager 的四类事件（_INPUT_BY_EVENT），本 task
+        # 之后 TM 还没开始发这三条信号，运行时行为不变（docs/events-v2.md §2.1.1）。
+        self._session_manager.attach_to_bus()
         # Per-session resume 锁：串行化同一 session 的 recover_session，避免重叠的冷 HITL 应答 /
         # /resume 并发建出两个 TaskManager、两套 drain 竞争派发（spec/07 §9）。惰性建、不回收
         # （体量微小、按 session 数有界）。
