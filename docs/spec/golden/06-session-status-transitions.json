@@ -1,17 +1,21 @@
 {
   "name": "session-status-transitions",
-  "description": "SessionCreated→RUNNING；SessionStatusChanged 切 PAUSED_HITL 再回 RUNNING；SessionFinished→SUCCEEDED。覆盖 session 状态分支。",
+  "description": "会话状态的分层链路（2026-09-02 所有权重构）：SessionCreated→RUNNING；TM 报 TaskQueueBlocked（reducer 中 no-op，它是 SessionManager 的输入而非投影输入）→ SessionManager 发 SessionWaiting→WAITING；有 task 重新开跑 → SessionRunning→RUNNING；SessionFinished→SUCCEEDED。通用 setter SessionStatusChanged 已停发（L 档，只读存量），本用例锁定它的四个替代者。",
   "runId": "s1",
   "events": [
     { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
       "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
       "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
     { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
-      "type": "SessionStatusChanged", "timestamp": "2026-06-05T00:00:02Z", "payload": { "new_status": "PAUSED_HITL" } },
+      "type": "TaskQueueBlocked", "timestamp": "2026-06-05T00:00:02Z", "payload": { "count": 1 } },
     { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1",
-      "type": "SessionStatusChanged", "timestamp": "2026-06-05T00:00:03Z", "payload": { "new_status": "RUNNING" } },
+      "type": "SessionWaiting", "timestamp": "2026-06-05T00:00:03Z", "payload": { "count": 1 } },
     { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1",
-      "type": "SessionFinished", "timestamp": "2026-06-05T00:00:04Z", "payload": { "final_status": "SUCCEEDED" } }
+      "type": "SessionRunning", "timestamp": "2026-06-05T00:00:04Z",
+      "payload": { "reason": "human_replied" } },
+    { "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1",
+      "type": "SessionFinished", "timestamp": "2026-06-05T00:00:05Z",
+      "payload": { "final_status": "SUCCEEDED" } }
   ],
   "expected": {
     "sessionStatus": "SUCCEEDED",

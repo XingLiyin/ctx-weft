@@ -32,19 +32,19 @@
 
 | 文件 | 覆盖的 reducer 分支 |
 |------|------|
-| `01-session-two-tasks.json` | 基本生命周期 + TASK_STATUS 映射 + 快照/增量一致 |
+| `01-session-two-tasks.json` | 基本生命周期 + TASK_STATUS 映射 + 快照/增量一致；**RunStarted / RunFinished 不写 sessionStatus** |
 | `02-reopen-requeue.json` | TaskRequeued：回 PENDING、清 outputs、恢复改写后的 prompt |
 | `03-suspend-resume.json` | TaskSuspended → TaskResumed 状态分支 |
 | `04-subagent-spawn-depth.json` | `_rebuild_agents` 子 agent 推算（spawnDepth=1、parent=root） |
 | `05-step-and-context-progress.json` | RunStarted / StepStarted / StepCompleted → currentStep；ReasonCompleted；ActTurnCompleted |
-| `06-session-status-transitions.json` | SessionStatusChanged（PAUSED_HITL↔RUNNING）+ SessionFinished |
-| `07-session-resumed.json` | SessionResumed 更新 userPrompt + 回 RUNNING（崩溃恢复续跑） |
+| `06-session-status-transitions.json` | 会话状态的分层链路：TaskQueueBlocked(no-op) → SessionWaiting → SessionRunning → SessionFinished |
+| `07-session-resumed.json` | RunInterrupted → TaskQueueInterrupted(no-op) → SessionInterrupted；SessionResumed 更新 userPrompt + 回 RUNNING |
 | `08-metadata-filler-goal.json` | RecognizeIntentToolCall 回填 session.goal |
-| `09-failure-threshold.json` | FailureThresholdHit 累加 failureCounter（跨快照边界） |
+| `09-failure-threshold.json` | failureCounter 折叠：TaskFailed +1、熔断失败不计、FailureThresholdHit 本身 no-op（跨快照边界） |
 | `10-reopen-chain-multi-step.json` | 三步 plan 级联 reopen（head vs 后续 prompt 改写） |
 | `11-compact-task.json` | compact 子任务作为普通 task；compact 域事件 no-op |
 | `12-inert-events-noop.json` | token budget / capability / HITL / LLM 事件对投影无副作用 |
-| `13-task-canceled.json` | TaskCanceled → CANCELED；**RunCanceled 在 reducer 中 no-op** |
+| `13-task-canceled.json` | TaskCanceled → CANCELED；**RunCanceled 在 reducer 中 no-op**（会话取消看 SessionFinished{CANCELED}） |
 | `14-task-failed.json` | TaskFailed → FAILED；TaskFinalized 回填 error |
 | `15-recognize-intent-metadata.json` | RecognizeIntentToolCall 更新 task title/description + session.goal（空值不覆盖） |
 

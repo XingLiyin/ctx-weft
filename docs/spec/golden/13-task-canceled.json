@@ -1,6 +1,6 @@
 {
   "name": "task-canceled",
-  "description": "取消路径：task 状态由 TaskCanceled 驱动（→ CANCELED）。注意 RunCanceled 在 reducer 中是 no-op——session 取消须经 SessionStatusChanged。本用例锁定该真相。",
+  "description": "取消路径：task 状态由 TaskCanceled 驱动（→ CANCELED）。注意 RunCanceled 在 reducer 中是 no-op——**它不改会话状态**。会话被取消要看 SessionFinished{final_status:\"CANCELED\"}（`cancel_all` 自 2026-09-02 会话状态所有权重构起发这一条；从前发的通用 setter SessionStatusChanged 已停发）。本用例只到 task 层，故会话仍是 RUNNING——锁定该真相。",
   "runId": "s1",
   "events": [
     { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",

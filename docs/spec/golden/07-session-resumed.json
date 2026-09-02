@@ -1,18 +1,34 @@
 {
   "name": "session-resumed",
-  "description": "崩溃恢复续跑：SessionStatusChanged→INTERRUPTED 后 SessionResumed 更新 userPrompt 并回 RUNNING。",
+  "description": "崩溃恢复续跑的分层链路（2026-09-02 所有权重构）：run 层 RunInterrupted 把 task 打成 INTERRUPTED；TM 层 TaskQueueInterrupted（reducer no-op）；会话层 SessionInterrupted→INTERRUPTED。随后 SessionResumed 更新 userPrompt 并回 RUNNING。原用例用的通用 setter SessionStatusChanged(INTERRUPTED) 已停发。",
   "runId": "s1",
   "events": [
     { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
       "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
       "payload": { "user_prompt": "first prompt", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
     { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
-      "type": "SessionStatusChanged", "timestamp": "2026-06-05T00:00:02Z", "payload": { "new_status": "INTERRUPTED" } },
-    { "id": "evt_0003", "runId": "run_2", "sequence": 3, "sessionId": "s1",
-      "type": "SessionResumed", "timestamp": "2026-06-05T00:00:03Z", "payload": { "user_prompt": "continue please" } }
+      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:02Z",
+      "payload": { "task": { "id": "tsk_1", "status": "PENDING", "title": "T1",
+        "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root" } } },
+    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1", "taskId": "tsk_1",
+      "type": "TaskStarted", "timestamp": "2026-06-05T00:00:03Z",
+      "payload": { "assigned_agent_id": "agt_root" } },
+    { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1", "taskId": "tsk_1",
+      "type": "RunInterrupted", "timestamp": "2026-06-05T00:00:04Z",
+      "payload": { "reason": "llm_outage", "error_code": "LLM_UNAVAILABLE" } },
+    { "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1",
+      "type": "TaskQueueInterrupted", "timestamp": "2026-06-05T00:00:05Z",
+      "payload": { "reason": "llm_outage" } },
+    { "id": "evt_0006", "runId": "run_1", "sequence": 6, "sessionId": "s1",
+      "type": "SessionInterrupted", "timestamp": "2026-06-05T00:00:06Z",
+      "payload": { "reason": "llm_outage" } },
+    { "id": "evt_0007", "runId": "run_2", "sequence": 7, "sessionId": "s1",
+      "type": "SessionResumed", "timestamp": "2026-06-05T00:00:07Z",
+      "payload": { "user_prompt": "continue please" } }
   ],
   "expected": {
     "sessionStatus": "RUNNING",
-    "sessions": { "s1": { "status": "RUNNING", "userPrompt": "continue please" } }
+    "sessions": { "s1": { "status": "RUNNING", "userPrompt": "continue please" } },
+    "tasks": { "tsk_1": { "status": "INTERRUPTED" } }
   }
 }
