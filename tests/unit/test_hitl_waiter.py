@@ -126,3 +126,43 @@ async def test_external_cancellation_propagates_and_is_not_mistaken_for_eviction
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+class _ResolveOnSecondLookup(HitlRegistry):
+    """第 2 次 `get()`（= 超时分支的那次查询）时注入「应答刚刚落地、但没被热投递消费」。
+
+    忠实复刻真实交错：`asyncio.timeout` 先取消了等待的 future，应答协程随后 `resolve()`
+    → `slot.deliver()` 见 future 已 done → 返回 False → `claimed=False` → `reply_to_hitl`
+    开始**冷**续跑。waiter 此刻才被重新调度，进入超时分支。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def get(self, hitl_id):
+        req = super().get(hitl_id)
+        self.calls += 1
+        if self.calls == 2 and req is not None and not req.resolved:
+            transferred = super().resolve(
+                hitl_id, HitlDecision(outcome="accepted", message="go"), T0)
+            assert transferred is not None
+            _r, slot = transferred
+            assert slot is not None
+            # future 已被超时取消 ⟹ 热投递不被接受 ⟹ 这次终局归冷路径所有
+            assert slot.deliver(HitlDecision(outcome="accepted", message="go")) is False
+            req.claimed = False
+        return req
+
+
+async def test_timeout_branch_does_not_return_a_decision_the_cold_path_owns():
+    """驱逐与应答交错：已终局但 **claimed=False** ⟹ 冷路径已在续跑，不得再热续跑一次。
+
+    超时分支只看 `resolved` 是不够的（复审 I1）——它与入口守卫的判据必须同源：
+    `claimed` 才是「热投递赢了这次终局」的唯一权威。
+    """
+    reg = _ResolveOnSecondLookup()
+    _open(reg)
+    assert await HitlWaiter(reg, timeout_sec=0).wait("hit_1") is None
+    req = reg.get("hit_1")
+    assert req.resolved is True and req.claimed is False

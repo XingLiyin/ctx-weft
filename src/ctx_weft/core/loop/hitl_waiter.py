@@ -93,11 +93,16 @@ class HitlWaiter:
             async with asyncio.timeout(self._timeout_sec):
                 return await slot.result()
         except TimeoutError:
-            # 驱逐与「应答刚好到达」的竞态由 registry 的同步 resolve 裁决：它已原子地
-            # 取走槽，则本处 detach 是 no-op、future 已有结果、上面的 await 早已返回。
+            # 驱逐与「应答刚好到达」的竞态由 registry 的同步 resolve 裁决，但**「已终局」
+            # 不等于「这条等待赢了」**：超时会先取消 future，此后 `slot.deliver()` 看到
+            # `future.done()` 直接返回 False → `claimed=False` → `reply_to_hitl` 已经开始
+            # 冷续跑。此时本处若只看 `resolved` 就把决定递回去，被 park 的协程会同时热续跑
+            # ——一次应答驱动两条路（复审 I1）。判据必须与入口守卫同源：`claimed` 才是
+            # 「热投递赢了这次终局」的唯一权威，它由 `HitlService._commit` 在取槽的同一
+            # 原子段里写入。claimed=False 一律按驱逐处理，返回 None 让 gateway 走 park。
             current = self._registry.get(hitl_id)
-            if current is not None and current.resolved:
-                return current.decision  # 应答先到：走热已解决
+            if current is not None and current.resolved and current.claimed:
+                return current.decision  # 应答先到且被本槽热消费：走热已解决
             self._registry.detach_slot(hitl_id)
             slot.abandon()
             logger.info("HITL hot window evicted → cold (hitl=%s)", hitl_id)
