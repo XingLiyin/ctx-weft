@@ -249,6 +249,22 @@ class AgentRegistry:
                 # ModelChoice() 默认值（那是修复前 recover_session 静默降级的根因）。
                 llm=ModelChoice(account=av.llm_account, model=av.llm_model),
             )
+            if av.parent_agent_id is not None:
+                # 重建 _children——冷恢复必须让级联 cancel/pause（Task 19/20）在
+                # 重启后依旧可用，不能只在 instantiate() 这条热路径上维护索引。
+                # 与 instantiate() 同一条件（parent 非 None 就落边），不额外要求
+                # 父已经在本次 agent_views 批次里出现：`set.add` 天然幂等，
+                # `load()` 被多次调用或与既有索引共存时不会重复计数、也不会覆盖；
+                # 父若属于尚未 load 的另一个 session，边先落在这里，等那个 session
+                # 也 load() 完，_children[parent] 已经是齐的，不依赖跨 session 的
+                # 加载顺序。父若是彻底的幽灵（事件流损坏、永远不会被登记）——
+                # 边挂在一个未注册的 id 下，无害：没有已知调用路径会拿一个未
+                # `has()` 通过的 id 去发起级联遍历，`children_of`/`descendants_of`
+                # 该 id 之外的查询结果不受影响；`release_session` 释放这个子
+                # agent 所在的 session 时，会把它从这条边的值集合里摘掉（见
+                # release_session 对 `self._children.values()` 的全量清理），
+                # 不会留下指向「已被移除的 agent」的悬垂值。
+                self._children.setdefault(av.parent_agent_id, set()).add(av.id)
             n += 1
         return n
 

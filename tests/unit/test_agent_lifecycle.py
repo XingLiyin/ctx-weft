@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, _AgentRecord
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Task
@@ -169,3 +170,56 @@ def test_release_session_cleans_children_index():
     assert reg.children_of("other") == set()
     assert reg.agent_ids_of_session("s1") == []
     assert reg.agent_ids_of_session("s2") == ["other"]
+
+
+async def test_load_rebuilds_children_index_for_cold_recovery():
+    """冷恢复（load）必须在没有任何 instantiate() 调用的情况下重建 _children。
+
+    这钉住的性质：进程重启后，级联 cancel/pause（Task 19/20）依赖 _children
+    对父子树做遍历——如果恢复期不重建索引，父被 load() 灌回来之后 cascade
+    就是静默失效的（父存在、子存在，但父找不到子）。
+    """
+    reg = _reg()
+    views = {
+        "root": AgentView(id="root"),
+        "kid1": AgentView(id="kid1", parent_agent_id="root", spawn_depth=1),
+        "kid2": AgentView(id="kid2", parent_agent_id="root", spawn_depth=1),
+        "grandkid": AgentView(id="grandkid", parent_agent_id="kid1", spawn_depth=2),
+    }
+
+    n = await reg.load(views, session_id="s1", tenant_id="default", fallback_template_id="tpl")
+
+    assert n == 4
+    assert reg.children_of("root") == {"kid1", "kid2"}
+    assert set(reg.descendants_of("root")) == {"kid1", "kid2", "grandkid"}
+    assert reg.descendants_of("grandkid") == []
+
+
+async def test_load_tolerates_parent_outside_batch():
+    """view.parent_agent_id 指向本次 load() 批次之外的 id（幽灵父/另一 session
+    尚未加载）——不该崩，也不该让 descendants_of 在真实 agent 上查出脏结果。
+    """
+    reg = _reg()
+    views = {"orphan": AgentView(id="orphan", parent_agent_id="not-in-this-batch", spawn_depth=1)}
+
+    n = await reg.load(views, session_id="s1", tenant_id="default", fallback_template_id="tpl")
+
+    assert n == 1
+    assert reg.has("orphan")
+    assert reg.children_of("not-in-this-batch") == {"orphan"}
+    assert reg.descendants_of("orphan") == []
+
+
+async def test_load_is_idempotent_for_children_index():
+    """load() 对同一批 views 重复调用（比如 recover() 内部的重试路径），
+    _children 不应重复计数或产生副本——set 语义天然幂等。
+    """
+    reg = _reg()
+    views = {
+        "root": AgentView(id="root"),
+        "kid1": AgentView(id="kid1", parent_agent_id="root", spawn_depth=1),
+    }
+    await reg.load(views, session_id="s1", tenant_id="default", fallback_template_id="tpl")
+    await reg.load(views, session_id="s1", tenant_id="default", fallback_template_id="tpl")
+
+    assert reg.children_of("root") == {"kid1"}
