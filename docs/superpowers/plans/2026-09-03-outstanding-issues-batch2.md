@@ -654,7 +654,35 @@ def test_agent_instantiated_does_not_overwrite_with_empty():
 
 ---
 
-## Task 7: 文档漂移一次性收干净
+## Task 7: 文档漂移一次性收干净 —— **已取消（用户裁定，2026-09-03）**
+
+> **不做。** 用户在批次二执行期间继续演进设计（`docs/spec/` 下已落地
+> 「agent-centric 交互机制」与「LLM 事件收敛」两份新设计），
+> `SessionManager` 降格、`AgentRegistry` 升格为 `AgentLifecycleManager` 等改动会
+> 让本 task 要对齐的那批描述再次失效 —— **把文本同步到一个即将变化的状态没有意义**。
+>
+> **被取消的具体范围**（E1-E9 + 批次二自己的升级须知），留待设计稳定后重估：
+> - E1 `docs/spec/03-reducer-rules.md` 的四处漂移
+> - E2 golden 里 `TaskStarted`/`TaskResumed` 错带 `runId`/非零 `sequence`
+> - E3 `TaskHumanResolved` / `AgentLlmChanged` 的 golden fixture 缺失
+>   （注：`AgentLlmChanged` 的**单测**覆盖已由 Task 6 补上，缺的只是 golden）
+> - E4 `docs/upgrade/2026-09-02-agent-llm-ownership.md` 的不实描述
+> - E6 两处声称会发 `HitlCancelled` 的注释
+> - E8 `announce_queue_state` / `AgentRegistry.load` 的过期 docstring
+> - E9 `docs/events-v2.md` 的「已实施 vs 未实施」状态标注
+> - **批次二自己的升级须知**（原计划要覆盖：删 21 个 `EventType` 成员、
+>   后台 recap 换 `run_id`、新增三处 `RunStarted`/`RunFinished`、
+>   装配失败的 `TaskInterrupted.reason` 变更、三处 `tenant_id` 修复、终态守卫）
+>
+> **仍然有效的记录**：本批次的实际改动全部记在
+> `.superpowers/sdd/2026-09-03-outstanding-issues-batch2/progress.md`
+> 与各 commit message 里；新发现的 A10/A11 已写进
+> `docs/follow-ups/2026-09-03-outstanding-issues.md`。
+
+<details>
+<summary>原 Task 7 内容（保留备查）</summary>
+
+## Task 7（原文）: 文档漂移一次性收干净
 
 **Files:**
 - Modify: `docs/spec/03-reducer-rules.md`（E1，漂移 4 处）
@@ -864,3 +892,5 @@ Expected: 前两条 FAIL（一条 HITL_RESOLVED 都没有），第三条 PASS。
 ```bash
 git add -A && git commit -m "fix(hitl): 用户取消会话时一并终局未决的 ask_user"
 ```
+
+</details>

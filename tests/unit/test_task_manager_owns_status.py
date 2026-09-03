@@ -31,20 +31,46 @@ TASK_STATUS_EVENTS = (
     "TASK_AWAITING_HUMAN", "TASK_INTERRUPTED", "TASK_CANCELED",
     "TASK_HUMAN_RESOLVED", "TASK_RESUMED",
 )
+#: 比 `reducers.TASK_STATUS_BY_EVENT` 少一个 `TASK_STARTED`，是刻意的、不是漏记：
+#: 下面的判据匹配**任意** `EventType.X` 属性引用，不分「发射」还是「查表读」；
+#: 而 `session_manager.py` 里有 `EventType.TASK_STARTED: SessionInput.TASK_STARTED`
+#: 这样一条纯读的映射条目，加进这张清单会把它当误报抓出来。TASK_STARTED 自己的
+#: 唯一发射点在 `task_manager.py`，不需要这道守卫再管。
 
-#: 允许出现 `EventType.TASK_*` 的文件：唯一发射者 + 事件表 + 投影映射表。
+#: 锚定本文件位置，**不吃调用 cwd**：写成相对路径 `pathlib.Path("src/ctx_weft")`
+#: 时，从别的 cwd 下跑 rglob 会命中 0 个文件 → offenders 恒空 → 守卫报绿。
+#: 零扫描即通过，正是本批次在治的那类假绿灯（与 golden `_GOLDEN_DIR`、
+#: test_discriminators.py 那次同源）。
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_SRC = _REPO_ROOT / "src" / "ctx_weft"
+
+#: 允许出现 `EventType.TASK_*` 属性引用、或 task 状态事件 wire 字符串字面量的
+#: 文件：唯一发射者 + 事件表 + 投影映射表 + 处置表。
 #: **按仓根相对路径认，不按 basename**——按 basename 放行会连带豁免 `src/` 下任何
 #: 同名新文件（再出现一个 `reducers.py` / `events.py` 就白白开了个口子）。
 _ALLOWED = {
     "src/ctx_weft/core/orchestrator/task_manager.py",
     "src/ctx_weft/protocols/events.py",
     "src/ctx_weft/core/control/reducers.py",
+    "src/ctx_weft/core/orchestrator/task_disposition.py",
 }
+
+#: 上面 `TASK_STATUS_EVENTS` 里每个名字对应的 wire 字符串值（`EventType` 的值），
+#: 供字符串形态判据用。
+TASK_STATUS_EVENT_VALUES = tuple(EventType[name].value for name in TASK_STATUS_EVENTS)
 
 
 def test_only_task_manager_emits_task_status_events() -> None:
     """loop 侧（steps/ 与 runtime.py）一条 task 状态事件都不许发。"""
-    assert _task_status_event_sites(pathlib.Path("src/ctx_weft")) == []
+    assert _task_status_event_sites(_SRC) == []
+
+
+def test_guard_a_scans_a_real_tree_not_an_empty_one() -> None:
+    """守卫必须真的扫到文件——零扫描也会报绿，那是假绿灯。"""
+    scanned = list(_SRC.rglob("*.py"))
+    assert len(scanned) > 50, f"守卫只扫到 {len(scanned)} 个文件，疑似路径解析错误"
+    assert (_SRC / "core" / "orchestrator" / "task_manager.py").exists(), \
+        "_SRC 没指向真的源码树"
 
 
 def _task_status_event_sites(root: pathlib.Path) -> list[str]:
@@ -55,7 +81,8 @@ def _task_status_event_sites(root: pathlib.Path) -> list[str]:
     """
     offenders: list[str] = []
     for p in sorted(root.rglob("*.py")):
-        if p.as_posix() in _ALLOWED:
+        rel = p.relative_to(_REPO_ROOT).as_posix()
+        if rel in _ALLOWED:
             continue
         tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
         for node in ast.walk(tree):
@@ -63,8 +90,36 @@ def _task_status_event_sites(root: pathlib.Path) -> list[str]:
                     and node.attr in TASK_STATUS_EVENTS
                     and isinstance(node.value, ast.Name)
                     and node.value.id == "EventType"):
-                offenders.append(f"{p.as_posix()}:{node.lineno}:{node.attr}")
+                offenders.append(f"{rel}:{node.lineno}:{node.attr}")
     return offenders
+
+
+def _task_status_string_sites(root: pathlib.Path) -> list[str]:
+    """AST 扫描：非白名单文件里以字符串字面量形式出现的 task 状态事件值（总账 B2）。
+
+    上面 `_task_status_event_sites` 只认 `EventType.<NAME>` 属性访问；
+    `task_disposition.py` 自己就用这些事件的 wire 字符串（`"TaskFinished"` 等，
+    TM 发射前才 `EventType(...)` 转回来）表达处置结果——模仿这种写法的新模块能
+    绕过属性判据。`task_disposition.py` 是处置表本体，正当使用，随 `_ALLOWED`
+    放行。
+    """
+    offenders: list[str] = []
+    for p in sorted(root.rglob("*.py")):
+        rel = p.relative_to(_REPO_ROOT).as_posix()
+        if rel in _ALLOWED:
+            continue
+        tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value in TASK_STATUS_EVENT_VALUES):
+                offenders.append(f"{rel}:{node.lineno}:{node.value}")
+    return offenders
+
+
+def test_only_task_manager_emits_task_status_events_as_string_literals() -> None:
+    """守卫 A 的字符串形态补充判据：非白名单文件不许以字符串字面量表达 task 状态事件。"""
+    assert _task_status_string_sites(_SRC) == []
 
 
 def test_loop_side_does_not_write_task_status() -> None:
@@ -74,7 +129,15 @@ def test_loop_side_does_not_write_task_status() -> None:
     任何不在列表里的文件（评审实测：`core/loop/steps/prepare.py`）注入裸
     `task.status = "FINISHED"`，守卫照样绿。
     """
-    assert _task_status_write_sites(pathlib.Path("src/ctx_weft")) == []
+    assert _task_status_write_sites(_SRC) == []
+
+
+def test_guard_b_scans_a_real_tree_not_an_empty_one() -> None:
+    """守卫必须真的扫到文件——零扫描也会报绿，那是假绿灯。"""
+    scanned = list(_SRC.rglob("*.py"))
+    assert len(scanned) > 50, f"守卫只扫到 {len(scanned)} 个文件，疑似路径解析错误"
+    assert (_SRC / "core" / "orchestrator" / "task_manager.py").exists(), \
+        "_SRC 没指向真的源码树"
 
 
 #: 整份文件放行的写入者，按**仓根相对路径**认（不按 basename——同名新文件不该白拿豁免）：
@@ -103,7 +166,7 @@ def _task_status_write_sites(root: pathlib.Path) -> list[str]:
     """全树扫描：非白名单文件里所有对 task 状态的赋值。"""
     offenders: list[str] = []
     for p in sorted(root.rglob("*.py")):
-        rel = p.as_posix()
+        rel = p.relative_to(_REPO_ROOT).as_posix()
         if rel in _ALLOWED_STATUS_WRITE_FILES:
             continue
         offenders += [f"{rel}:{lineno}" for lineno in _task_status_writes(p)]
