@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from ctx_weft.core.control.types import AgentView
+from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
 from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, _AgentRecord
 from ctx_weft.core.orchestrator.agent_state import AgentInput
 from ctx_weft.core.orchestrator.task_manager import TaskManager
@@ -385,3 +386,52 @@ async def test_attach_to_bus_with_real_event_bus_drives_transition_without_recur
     assert len(running) == 1
     assert running[0].agent_id == "a1"
     assert running[0].session_id == "s1"
+
+
+def test_status_of_unknown_agent_raises_agent_not_found():
+    """R18 收口：`status_of` 对不存在的 agent 抛 `AgentNotFound`，而不是裸 KeyError。"""
+    reg = _reg()
+    with pytest.raises(AgentNotFound):
+        reg.status_of("ghost")
+
+
+def test_guard_allows_idle_and_waiting_human():
+    reg = _reg()
+    _plant(reg, "a1", None)
+    reg.assert_can_receive("a1")
+    reg._agents["a1"].status = "waiting_human"
+    reg.assert_can_receive("a1")
+
+
+def test_guard_rejects_running():
+    """spec 4.1：忙碌直接报错，不排队。"""
+    reg = _reg()
+    _plant(reg, "a1", None)
+    reg._agents["a1"].status = "running"
+    with pytest.raises(AgentBusyError):
+        reg.assert_can_receive("a1")
+
+
+def test_guard_rejects_terminated_and_unknown():
+    reg = _reg()
+    _plant(reg, "a1", None)
+    reg._agents["a1"].status = "terminated"
+    with pytest.raises(AgentTerminatedError):
+        reg.assert_can_receive("a1")
+    with pytest.raises(AgentNotFound):
+        reg.assert_can_receive("ghost")
+
+
+def test_guard_allows_interrupted():
+    """interrupted 是可恢复态，不拒收——resume 后继续处理。"""
+    reg = _reg()
+    _plant(reg, "a1", None)
+    reg._agents["a1"].status = "interrupted"
+    reg.assert_can_receive("a1")
+
+
+def test_new_exception_codes_follow_existing_naming_style():
+    """host 侧错误处理按 code 分流，新增异常必须带 code（跟随既有 SCREAMING_SNAKE 风格）。"""
+    assert AgentNotFound.code == "AGENT_NOT_FOUND"
+    assert AgentBusyError.code == "AGENT_BUSY"
+    assert AgentTerminatedError.code == "AGENT_TERMINATED"

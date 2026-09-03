@@ -29,6 +29,20 @@ class AgentNotFound(CtxWeftError):
     code = "AGENT_NOT_FOUND"
 
 
+class AgentBusyError(CtxWeftError):
+    """agent 正在执行（running），拒收新消息（spec §4.1：忙碌直接拒绝，不排队）。
+
+    调用方自行重试，或先 pause/cancel 该 agent。对位既有的 `SessionBusyError`。"""
+
+    code = "AGENT_BUSY"
+
+
+class AgentTerminatedError(CtxWeftError):
+    """agent 已被显式 cancel（终态 'terminated'），不再接受任何输入。"""
+
+    code = "AGENT_TERMINATED"
+
+
 class TaskNotFound(CtxWeftError):
     code = "TASK_NOT_FOUND"
 

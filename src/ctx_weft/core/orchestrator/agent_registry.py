@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
 
 from ctx_weft.core.control.types import AgentView
-from ctx_weft.core.errors import CtxWeftError
+from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError, CtxWeftError
 from ctx_weft.core.orchestrator.agent_state import AgentInput, next_agent_transition
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.state.models import Agent, LoopGuard
@@ -266,9 +266,11 @@ class AgentRegistry:
         return self._agents[agent_id].template_id
 
     def status_of(self, agent_id: str) -> str:
-        """当前五态机状态。未登记的 agent_id 直接 KeyError——与 `template_id_of`
-        同一口径（本文件里「按 id 查已知 record 的字段」历来是裸下标，让不存在
-        的 id 响亮地失败，而不是编个看似合理的值）。
+        """当前五态机状态。未登记的 agent_id 抛 `AgentNotFound`（R18 收口：此前是
+        裸 `KeyError`，与 `template_id_of` 同一口径的「按 id 查已知 record 的字段
+        历来是裸下标」——但 `assert_can_receive` 现在复用本方法做存在性校验，
+        runtime 级 API 需要一个有意义的领域异常类型往外传播，不能让实现细节的
+        `KeyError` 漏出去）。全仓核实过：本方法此前零调用点，收口不影响既有控制流。
 
         没有采用 brief 草案里「未登记 -> 回落 'terminated'」的写法：'terminated'
         是五态机里一个**真实、有意义**的终态（只由外部显式 cancel 触发，见
@@ -277,10 +279,33 @@ class AgentRegistry:
         压根没登记过」——前者是合法的终态查询，后者多半是调用方自己算错了 id
         或者查早了（agent 还没 instantiate）。两者背后要做的事不一样：前者可能
         要继续走「已终态，忽略」的分支，后者是编程错误，应该尽早炸出来，而不是
-        被误判成「已终止」悄悄放过。`assert_can_receive`（后续任务）会在调用
-        这里之前单独校验存在性，是两层不同的检查，不是本方法要顺手兼顾的事。
+        被误判成「已终止」悄悄放过。
         """
-        return self._agents[agent_id].status
+        rec = self._agents.get(agent_id)
+        if rec is None:
+            raise AgentNotFound(f"unknown agent: {agent_id}")
+        return rec.status
+
+    def assert_can_receive(self, agent_id: str) -> None:
+        """外部消息投递前的同步守卫（spec §3.5 / §4.1）。判断逻辑收敛在此一处，
+        不散落到 runtime.py 各个 API 方法里。
+
+        - 不存在 -> `AgentNotFound`（复用 `status_of` 的存在性校验）
+        - `terminated`（已被显式 cancel）-> `AgentTerminatedError`
+        - `running` -> `AgentBusyError`（忙碌直接拒绝，不排队；调用方自行重试，
+          或先 pause/cancel）
+        - `idle` / `waiting_human` / `interrupted`（`interrupted` 是可恢复态，
+          resume 后能继续处理）-> 放行
+
+        同步方法：投递前的守卫不该引入 await 点。
+        """
+        status = self.status_of(agent_id)
+        if status == "terminated":
+            raise AgentTerminatedError(f"agent {agent_id} already terminated")
+        if status == "running":
+            raise AgentBusyError(
+                f"agent {agent_id} is running; retry later or pause/cancel it first"
+            )
 
     def children_of(self, agent_id: str) -> set[str]:
         return set(self._children.get(agent_id, ()))
