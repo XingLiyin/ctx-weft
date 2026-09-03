@@ -141,6 +141,29 @@ FINISHED、又被 SUSPENDED）——和被修的那四处伪造 payload 是同�
 **若要修**：需要一条承载中途产出的事件（或让 `TaskSuspended` /
 `TaskAwaitingHuman` 携带当前 outputs 快照）。**属独立立项，不在批次一范围。**
 
+### A9. `error_code` 不进投影，跨重启后 host 失去分流依据
+
+`Task.error_code`（`state/models.py:222`）在 `TaskView` 上**没有对应字段**
+（`control/types.py` 里查无此项），`task_from_projection` 也不还原它
+（`control/converters.py` 里查无此项）。于是进程重启后，被还原的 INTERRUPTED
+任务 `error_code` 为 `None`——`announce_queue_state` 只能退到兜底码
+`"interrupted"`。
+
+**后果**：三份契约（升级须知 / `docs/events-v2.md` §2.1.2 / `spec/golden/07`）
+说 host 按码分流（如 `CONTEXT_OVERFLOW` → 提示换更大窗口的模型），但**重启
+之后这个码就没了**，分流静默退化成「通用中断」。
+
+**不是本批次引入的**：批次一 task 5 只是把兜底从「吐散文」改成「吐码」——
+修复前，跨重启还原路径上 `error_code` 为空时会退到 `interrupted[0].error`
+这项自由文本（Task 2 让 `TaskView.error` 可还原之后，这项确实会有值，
+真的吐出过散文）；修复后统一退到 `"interrupted"` 这个码。批次一只是使该
+退化变得**明确**（恒是某个码，要么真实要么兜底码）而非混入自由文本，
+`error_code` 本身跨重启丢失这件事，批次一没有引入也没有修。
+
+**若要修**：给 `TaskView` 加 `error_code` 字段（需走批次一 Task 2 建立的
+「加 View 字段」维护清单：types → 发射侧 payload → reducer →
+serialize/deserialize → converters → golden）。**属独立立项。**
+
 ---
 
 ## B. 不变量与守卫

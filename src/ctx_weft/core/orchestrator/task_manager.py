@@ -1140,9 +1140,10 @@ class TaskManager:
             # 「断了」——人答完了那个断的还是断的，而且它需要更重的介入。
             #
             # 契约：本字段是**码**，host 据此分流（三份契约：升级须知 /
-            # docs/events-v2.md §2.1.2 / spec/golden/07）。自由文本走
-            # TaskInterrupted.error_message，不进这里——error_code 为空时
-            # 兜底成 "interrupted" 这个码，而不是塞散文。
+            # docs/events-v2.md §2.1.2 / spec/golden/07）。
+            # 兜底吐码而非散文：跨重启还原的 task 没有 error_code
+            # （TaskView 不带该字段、converters 不还原，见总账 A9），此时退到
+            # "interrupted" 这个码，而不是把 task.error 的自由文本塞进来。
             await self._emit(EventType.TASK_QUEUE_INTERRUPTED, payload={
                 "reason": (interrupted[0].error_code or "interrupted")})
         elif blocked:
