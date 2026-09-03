@@ -1118,19 +1118,36 @@ class TaskManager:
         if self._session_manager is not None:
             await self._session_manager.cancel(self._session_id)
 
+    def _agent_id_of(self, task_id: str) -> str | None:
+        """先看正在跑的登记，再回落到 task 自己的 assigned_agent_id。"""
+        running = self._running_agents.get(task_id)
+        if running:
+            return running
+        task = self._tasks.get(task_id)
+        return task.assigned_agent_id if task is not None else None
+
     async def _emit(
         self,
         event_type: EventType,
         task_id: str | None = None,
         payload: dict | None = None,
+        *,
+        agent_id: str | None = None,
     ) -> None:
-        """构造并发出一个 session/task 级别的事件（无 LoopState）。"""
+        """构造并发出一个 session/task 级别的事件（无 LoopState）。
+
+        V2 §0：envelope 管身份。``agent_id`` 未显式传且有 ``task_id`` 时自动解析
+        （先查在跑登记 ``_running_agents``，查不到再回落到 ``Task.assigned_agent_id``）；
+        无 ``task_id``（如 TASK_QUEUE_* 队列级聚合信号）则 agent_id 保持 None，不乱填。
+        """
         if self._event_bus is None:
             return
         # 与 make_event 一致的白名单校验：直接构造 Event 的路径此前会绕过它。
         if event_type not in EVENT_TYPES:
             raise ValueError(f"Unknown event type: {event_type}; not in EVENT_TYPES")
         tenant_id = self._session.tenant_id if self._session else "default"
+        if agent_id is None and task_id is not None:
+            agent_id = self._agent_id_of(task_id)
         await self._event_bus.emit(Event(
             id=generate_id("evt"),
             run_id=None,
@@ -1140,6 +1157,7 @@ class TaskManager:
             timestamp=now_utc(),
             tenant_id=tenant_id,
             task_id=task_id,
+            agent_id=agent_id,
             origin=_ORIGIN,
             payload=payload or {},
         ))
