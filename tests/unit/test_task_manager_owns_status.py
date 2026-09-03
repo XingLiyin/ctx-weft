@@ -90,12 +90,12 @@ _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
 })
 
 #: 判据里精确放过的写入点，按 (仓根相对路径, 所在函数) 认——行号会漂，函数名不会。
-#: `runtime._inject_user_reply`：冷 HITL 应答落地后把 task 置回 PENDING。它在 **run 之外**
-#: （run 早已结束、TaskManager 已写定 AWAITING_HUMAN），属编排层重排的一部分，不是
-#: 「判决越界写状态」——本守卫要钉死的是 loop 内部拿 task.status 当自己的工作变量那件事。
-_ALLOWED_STATUS_WRITES: frozenset[tuple[str, str]] = frozenset({
-    ("src/ctx_weft/core/runtime.py", "_inject_user_reply"),
-})
+#: 目前为空：`runtime._inject_user_reply` 曾在这里就地写 `task.status = "PENDING"`
+#: 并自行发事件（Task 6 之前），豁免是为它开的。Task 6 把状态重置连同事件发射一并
+#: 收拢进 `TaskManager.mark_human_resolved`，该函数自此不再写 task 状态——豁免随之
+#: 撤销，并用负向对照（`test_removed_exemption_still_catches_a_reinstated_write`）
+#: 确认撤销后守卫仍能抓人，不是白留一个空集合摆设。
+_ALLOWED_STATUS_WRITES: frozenset[tuple[str, str]] = frozenset()
 
 
 def _task_status_write_sites(root: pathlib.Path) -> list[str]:
