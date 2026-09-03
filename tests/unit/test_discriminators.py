@@ -26,14 +26,20 @@ def test_enum_values_are_the_wire_strings():
 #: （与 golden `_GOLDEN_DIR` 那次同源）。
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src" / "ctx_weft"
-#: 守卫抓的是散落的**判别值**。下面这个文件里的同名字符串是**配置 schema 的
-#: 字段名**（模板作者面向的 YAML key），与判别值是两份独立演进的契约，恰好同名而已
-#: ——把 key 绑上枚举会让日后改判别值名字时静默读错 YAML key。这是假阳性，
-#: 正确处理是豁免，而不是制造一个虚假的语义绑定。
-_ALLOWED = {
-    "src/ctx_weft/core/discriminators.py",
-    "src/ctx_weft/providers/agent_template_local/_loader.py",
-}
+#: `discriminators.py` 本身整份豁免：那是判别值的定义处，枚举成员的值字面量
+#: 天然就长在这个文件里，不是「散落」。
+_DISCRIMINATORS_FILE = "src/ctx_weft/core/discriminators.py"
+
+#: 守卫抓的是散落的**判别值**。`_loader.py` 里的 `failure_threshold` 是**配置
+#: schema 的字段名**（模板作者面向的 YAML key），与判别值 `CancelReason.
+#: FAILURE_THRESHOLD` 是两份独立演进的契约，恰好同名而已——把 key 绑上枚举会让
+#: 日后改判别值名字时静默读错 YAML key。这是假阳性，正确处理是精确豁免这一个
+#: 字面量，而不是整份文件放行——**按 (仓根相对路径, 字面量) 精确放行**，
+#: 不是整份文件豁免：粒度粗了，该文件将来真出现别的散落判别值也抓不到
+#: （批次二终评 M2）。
+_ALLOWED: frozenset[tuple[str, str]] = frozenset({
+    ("src/ctx_weft/providers/agent_template_local/_loader.py", "failure_threshold"),
+})
 
 
 def _literal_sites(literal: str) -> list[str]:
@@ -43,7 +49,7 @@ def _literal_sites(literal: str) -> list[str]:
         # 相对仓根算，与 _ALLOWED 里存的口径一致——_SRC 现在是绝对路径（防 cwd 假绿灯），
         # 直接 as_posix() 会让白名单永远失配。
         rel = p.relative_to(_REPO_ROOT).as_posix()
-        if rel in _ALLOWED:
+        if rel == _DISCRIMINATORS_FILE or (rel, literal) in _ALLOWED:
             continue
         for lineno, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
             code = line.split("#", 1)[0]
