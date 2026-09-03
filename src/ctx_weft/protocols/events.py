@@ -242,6 +242,28 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = frozenset({
 })
 
 
+# L 档：已停止发射，但 reducer 仍读它们以重放存量日志。删除须过退役闸门。
+# 这是「EventType 全集 ≡ 实际发射 ∪ L 档」这条不变式的唯一真相源——
+# `tests/unit/test_no_dead_event_types.py` 从这里 import，不再自建平行注册表。
+L_TIER_EVENT_TYPES: frozenset[str] = frozenset({
+    "SessionStatusChanged", "SessionPausedHitl",
+    "HitlRequired", "HitlApproved", "HitlAnswered", "HitlRejected",
+    "HitlModified", "HitlCancelled",
+    # Task 5（2026-09-03-agent-centric-interaction）：observe.py 的 ReactEventTypes 间接层
+    # 删除后，run_observe_react 统一发 LLM_*（靠 state.origin 区分前台/后台），这 4 个
+    # BackgroundObserve* 类型停止发射。枚举成员本身按控制方裁定暂不删除（退役闸门是
+    # 后续任务的事）——就地登记 L 档，让「EventType 全集 ≡ 实际发射 ∪ L 档」这条不变式
+    # 在本 commit 就恢复成立，不把红灯留给下一个任务。
+    "BackgroundObserveRequestStarted", "BackgroundObservePromptSent",
+    "BackgroundObserveTokenStreamed", "BackgroundObserveResponseFinished",
+    # Task 6（2026-09-03-agent-centric-interaction）：recognize_intent.py 切到
+    # stream_llm_resilient 后，通用 LLM_PROMPT_SENT（由 gateway 发，origin=
+    # loop.recognize_intent）取代了这条 step 专属的镜像事件，停止发射。就地登记 L 档，
+    # 不新建常量、不搬到 events.py（那是下一个任务的事），不从 EventType 枚举里删除。
+    "RecognizeIntentLLMPrompt",
+})
+
+
 # ── Subscription handle ───────────────────────────────────────────────────────
 
 
