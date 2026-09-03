@@ -341,3 +341,47 @@ async def test_handle_event_does_not_recurse_on_its_own_agent_events():
     assert reg.status_of("a1") == "running"
     running = [e for e in reg.event_bus.events if e.type == EventType.AGENT_RUNNING]
     assert len(running) == 1
+
+
+async def test_attach_to_bus_registers_one_handler():
+    """对等 SessionManager 的同名先例（test_session_manager_inputs.py 的
+    test_attach_to_bus_registers_one_handler）：`_SpyBus.subscribe` 是空实现，
+    验证不了订阅是否真的发生——这里换成会记录 handler 的 `RecordingBus`，
+    直接断言 `attach_to_bus()` 确实调用了一次 `subscribe`（review Important #2）。
+    """
+    from tests.unit._session_helpers import RecordingBus
+
+    bus = RecordingBus()
+    reg = AgentRegistry(template_lookup=None, event_bus=bus, model_resolver=lambda a, m: None)
+    reg.attach_to_bus()
+    assert len(bus.handlers) == 1
+
+
+async def test_attach_to_bus_with_real_event_bus_drives_transition_without_recursion():
+    """走真实 `InProcessEventBus`（而不是简化 mock）的集成验证（review Important #2）：
+    `emit()` 内同步 drain——handler 在同一次 `emit()` 调用里被直接 await，不经调度器
+    让出。真实注册一次订阅、真实发一条 `TASK_STARTED` 进总线，断言 ALM 收到、
+    转移到 `running`、发出恰一条 `AGENT_RUNNING`（没有因为总线把 ALM 自己发的
+    `AGENT_RUNNING` 回流给它自己而递归/重复转移）。
+    """
+    from ctx_weft.providers.events import InProcessEventBus
+
+    bus = InProcessEventBus()
+    reg = AgentRegistry(template_lookup=None, event_bus=bus, model_resolver=lambda a, m: None)
+    _plant(reg, "a1", None)
+    reg.attach_to_bus()
+
+    received: list[Event] = []
+
+    async def _spy(ev: Event) -> None:
+        received.append(ev)
+
+    bus.subscribe(None, _spy)
+
+    await bus.emit(_task_ev(EventType.TASK_STARTED, "a1", {"assigned_agent_id": "a1"}))
+
+    assert reg.status_of("a1") == "running"
+    running = [e for e in received if e.type == EventType.AGENT_RUNNING]
+    assert len(running) == 1
+    assert running[0].agent_id == "a1"
+    assert running[0].session_id == "s1"

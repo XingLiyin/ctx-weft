@@ -157,20 +157,38 @@ _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
     "src/ctx_weft/core/orchestrator/task_manager.py",
     "src/ctx_weft/core/control/reducers.py",
     "src/ctx_weft/core/orchestrator/session_manager.py",
-    # Task 12：AgentRegistry.apply_input 写的是 `rec.status`——agent 五态机的状态
-    # （spec 3.1），不是 task 状态。与 session_manager.py 那条豁免同一原因：判据
-    # 认裸变量形态（`<name>.status =`）是刻意的，`rec` 撞上同一个属性名纯属误伤。
-    "src/ctx_weft/core/orchestrator/agent_registry.py",
+    # 不放 agent_registry.py：它 700+ 行、职责杂、随 Task 19/20 还会继续长——文件级
+    # 豁免会让守卫对它整体失明。它唯一一处 `.status` 赋值走下面 _ALLOWED_STATUS_WRITES
+    # 的函数级豁免（review 2026-09-03，Task 12 修复轮）。
 })
 
-#: 判据里精确放过的写入点，按 (仓根相对路径, 所在函数) 认——行号会漂，函数名不会。
-#: 目前为空：`runtime._inject_user_reply` 曾在这里就地写 `task.status = "PENDING"`
-#: 并自行发事件（Task 6 之前），豁免是为它开的。Task 6 把状态重置连同事件发射一并
-#: 收拢进 `TaskManager.mark_human_resolved`，该函数自此不再写 task 状态——豁免随之
-#: 撤销。撤销后守卫是否仍能抓人，由下面的
-#: `test_removed_exemption_still_catches_a_reinstated_write` 常驻钉住——
-#: 空集合不是摆设，它下面的全树扫描仍然覆盖 runtime.py。
-_ALLOWED_STATUS_WRITES: frozenset[tuple[str, str]] = frozenset()
+#: 判据里精确放过的写入点，按 (path, 所在函数) 认——行号会漂，函数名不会。
+#: ⚠️ path 是**绝对路径**（`_task_status_writes` 里比较的是 `path.as_posix()`，
+#: 而调用方 `_task_status_write_sites` 传进来的 `p` 来自 `root.rglob(...)`，
+#: `root` 是本文件顶部的 `_SRC`——已经是绝对路径，rglob 不会把它转回相对）。
+#: 上面 `_ALLOWED_STATUS_WRITE_FILES` 的「按仓根相对路径认」是那张表自己的判据，
+#: 两张表判据不同、**不要混用**——照着仓根相对路径的写法在这里写一条，会因为
+#: 永远比较不相等而静默豁免失效（测试照样绿，只是没起到豁免的作用）。
+#:
+#: `runtime._inject_user_reply` 曾在这里就地写 `task.status = "PENDING"` 并自行
+#: 发事件（Task 6 之前），豁免是为它开的。Task 6 把状态重置连同事件发射一并收拢进
+#: `TaskManager.mark_human_resolved`，该函数自此不再写 task 状态——豁免随之撤销。
+#: 撤销后守卫是否仍能抓人，由下面的 `test_removed_exemption_still_catches_a_reinstated_write`
+#: 常驻钉住——这张表不空不代表它是摆设，它下面的全树扫描仍然覆盖 runtime.py。
+#:
+#: Task 12（review 2026-09-03 修复轮）新增一条：`agent_registry.py` 的 `apply_input`
+#: 写 `rec.status = tr.status`——agent 五态机状态（spec 3.1），不是 task 状态，判据
+#: 认裸变量形态（`<name>.status=`）撞上同一属性名纯属误伤，与 `session_manager.py`
+#: 被 `_ALLOWED_STATUS_WRITE_FILES` 放行的原因相同；但 `agent_registry.py` 体量大、
+#: 还会随 Task 19/20 继续长，改用这里的函数级豁免——只放 `apply_input` 这一个函数，
+#: 该文件里任何其它函数新写一行 `xxx.status = ...` 仍然会被守卫抓到——已用一份
+#: 临时补丁手工验证过（review 2026-09-03 修复轮，见 task-12-report.md），未固化
+#: 成常驻测试：这条豁免只锁 (path, func) 两个值，`_task_status_writes` 本身逐函数
+#: 独立判断（见其内部 `_walk` 按 `func` 传参），新函数不命中这条豁免元组是判据的
+#: 结构性质，不依赖额外测试维持。
+_ALLOWED_STATUS_WRITES: frozenset[tuple[str, str]] = frozenset({
+    ((_SRC / "core" / "orchestrator" / "agent_registry.py").as_posix(), "apply_input"),
+})
 
 
 def _task_status_write_sites(root: pathlib.Path) -> list[str]:
@@ -428,5 +446,12 @@ def test_removed_exemption_still_catches_a_reinstated_write(tmp_path):
 
 
 def test_exemption_table_is_empty_by_design():
-    """空集合是 Task 6 的结论，不是忘了填——改动它需要一条明确理由。"""
-    assert _ALLOWED_STATUS_WRITES == frozenset()
+    """`_ALLOWED_STATUS_WRITES` 不是想加就能加的摆设——改动它需要一条明确理由，
+    这条测试把「当前理由」钉成断言：谁想再加一条，得同时改这里，等于逼着他把
+    理由写进 PR。Task 6 之后曾经是空集合；Task 12（review 2026-09-03 修复轮）
+    为 `agent_registry.py::apply_input` 开了唯一一条函数级豁免（见上方大段注释），
+    不再是空的，但依旧只精确放行这一个 (path, 函数) 组合。
+    """
+    assert _ALLOWED_STATUS_WRITES == frozenset({
+        ((_SRC / "core" / "orchestrator" / "agent_registry.py").as_posix(), "apply_input"),
+    })
