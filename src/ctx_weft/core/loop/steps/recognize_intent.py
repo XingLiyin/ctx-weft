@@ -19,7 +19,7 @@ from ctx_weft.core.loop.llm_gateway import (
     stream_llm, apply_dynamic_max_tokens, request_prompt_estimate, resolve_llm_identity,
 )
 from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols.capability import ToolCapability
 
@@ -49,6 +49,10 @@ def launch_recognize_intent(state: LoopState, ctx: LoopContext) -> asyncio.Task:
         scope=state.scope,
         extra=dict(state.extra),
         resolved_model=state.resolved_model,
+        # 孤儿 run：不走 StepDriver.run 的每步 origin 赋值机制（Task 2 的
+        # `_STEP_ORIGIN`），构造时就得显式钉住，否则这里发的全部事件
+        # （含下面 RUN_STARTED/RUN_FINISHED）origin 都会是空串。
+        origin=EventOrigin.LOOP_RECOGNIZE_INTENT,
     )
 
     async def _run() -> None:

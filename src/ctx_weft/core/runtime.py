@@ -1678,6 +1678,10 @@ class CtxWeftRuntime:
             state = LoopState(
                 run_id=generate_id("run"), session=session, task=task, agent=agent,
                 scope=scope, extra={"template": template}, resolved_model=rm,
+                # 孤儿 run：不走 StepDriver.run，构造时显式钉住 origin，否则
+                # launch_background_observe 内部经 make_event(state, ...) 发的
+                # 事件 origin 都会是空串。
+                origin=EventOrigin.LOOP_BACKGROUND_OBSERVE,
             )
             if boundary in _CLOSE_BOUNDARIES:
                 tcid = await self._find_finish_pair_tool_call_id(memory, scope, task.id, provider_ctx)
@@ -1837,6 +1841,11 @@ class CtxWeftRuntime:
                 scope=scope,
                 extra={"template": template},
                 resolved_model=rm,
+                # 孤儿 run：不走 StepDriver.run，构造时显式钉住 origin——下面两条
+                # RUN_STARTED/RUN_FINISHED 已各自显式覆盖为 RUNTIME，这里补的是
+                # CompactStep.execute 内部经 make_event(state, ...) 发的其余事件
+                # （如 MEMORY_COMPACT_* 一类），不补则它们的 origin 是空串。
+                origin=EventOrigin.LOOP_COMPACT,
             )
             # 总账 C5：这段独立跑了一个 run_id 却从不发起止——host 会看到凭空出现又
             # 凭空消失的 run。补齐起止事件（payload 结构照抄 `_run_loop` 的实际发射点，
@@ -2729,6 +2738,10 @@ class CtxWeftRuntime:
             scope=scope,
             extra={"template": template},
             resolved_model=resolved_model,
+            # 兜底：StepDriver.run 从 initial_step 开始的每一步都会用 Task 2 的
+            # `_STEP_ORIGIN` 表覆盖这个值，这里的 LOOP_DRIVER 只在「驱动器还没跑
+            # 第一步就已经有事件要发」这个理论缝隙里生效，不代表任何具体子步骤。
+            origin=EventOrigin.LOOP_DRIVER,
         )
         driver = self._build_step_driver(initial_step)
         state = await self._run_loop(state, loop_ctx, driver, run_id, initial_step, task, agent)

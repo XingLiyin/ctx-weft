@@ -84,6 +84,9 @@ def test_make_event_explicit_origin_overrides_state():
 
 # ── Task 3: 循环外发射者补 origin + 端到端不变式 ──
 
+import asyncio
+import time
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
@@ -95,21 +98,56 @@ from tests.integration.test_minimal_loop import (
 )
 
 
+class _RouterLLM(MockLLMAdapter):
+    """按 request.tools 路由（同 test_run_id_sequence_integrity.py::_RouterLLM）：
+
+    recognize_intent（工具集含 `control__update_task_metadata`）恒回空文本；
+    act 首轮回纯文本、无 tool_call——root task 恒 interactive，纯文本首轮触发
+    冷 park，同时并发一次 background observe + recognize_intent。三条并发路径
+    叠加主 run，一次跑遍循环外 5 个发射者 + 循环内多个孤儿 run 构造点，是本测试
+    想要的覆盖面（不能用单条 MockResponse 队列——并发调用抢同一个响应槽位，
+    顺序不确定会导致 RuntimeError: MockLLMAdapter exhausted）。
+    """
+
+    def __init__(self, **kw) -> None:
+        super().__init__(responses=[], **kw)
+
+    def complete(self, request, stream: bool = True):
+        self.last_request = request
+        names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
+        if "control__update_task_metadata" in names:  # recognize_intent
+            return self._stream(MockResponse(text=""), request)
+        return self._stream(MockResponse(text="Hi! Anything else?"), request)
+
+
+async def _poll(predicate, *, timeout: float = 5.0, interval: float = 0.02):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        await asyncio.sleep(interval)
+    raise AssertionError("timed out waiting for background run(s) to finish")
+
+
 @pytest.mark.asyncio
 async def test_every_emitted_event_has_nonempty_origin():
     """docs/events-v2.md §6 外加条：所有发射出的事件 origin 非空。
 
-    本任务（Task 3）只管循环外 5 个发射者（session_manager/task_manager/
-    hitl.service/agent_registry/runtime）；`start_session` 只同步跑到「登记 +
-    起 drain 后台任务」为止就返回（真正的 loop 执行经
-    `asyncio.create_task(task_manager.drain())` 甩到后台，本测试不等它），故这里
-    收到的是 SessionCreated / AgentInstantiated / TaskCreated 一类会话建立期的
-    事件——循环内 40+ 发射点（含尚未在本任务范围内收敛的 RecognizeIntent 等）由
-    Task 2 与后续 Phase B 覆盖，不在本测试断言范围。
+    严格版：真正 await 到主 run + background observe + recognize_intent 三条
+    并发路径都跑完（不再收窄到 `start_session` 同步返回那一刻），一次性覆盖
+    Task 3 触碰过的循环外 5 个发射者、循环内孤儿 run 的 4 个构造点
+    （recognize_intent / background_observe / compact / driver 兜底）、以及
+    正常经 StepDriver 每步覆盖 origin 的常规循环内事件。
+
+    **唯一显式豁免**：`SessionWaiting`（`session_manager._emit_session_event`）。
+    该方法按控制方裁定本任务不动——它将在 Task 15/16 随会话状态机整体拆掉，
+    现在给它补 origin 字段是白费工。除这一条外，若还暴露出别的 origin 为空的
+    事件类型，本测试直接失败（不再收窄断言范围）。
     """
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    llm = MockLLMAdapter(responses=[MockResponse(text="hi")])
+    llm = _RouterLLM()
     rt: CtxWeftRuntime = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
 
@@ -120,16 +158,189 @@ async def test_every_emitted_event_has_nonempty_origin():
 
     rt._event_bus.subscribe(None, _spy)
 
-    await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo",
-        user_prompt="hi",
-        initial_task=None,
-        context_limit=8000,
+    handle = await rt.start_session(SessionStartParams.create(
+        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
+    await handle.wait_for_finish(timeout=5.0)
+    # background observe / recognize_intent 是 fire-and-forget：主 run 的
+    # RunFinished 不代表它们也发完了，等三个 run（主 + recap + recognize_intent）
+    # 各自的 RunFinished 落地。
+    await _poll(lambda: sum(1 for t, _ in seen if t == EventType.RUN_FINISHED) >= 3)
 
     assert seen, "没有采集到任何事件"
-    blank = sorted({t for t, o in seen if not o})
+    _EXEMPT = {EventType.SESSION_WAITING}  # Task 15/16 随会话状态机整体删除，见上方 docstring
+    blank = sorted({t for t, o in seen if not o and t not in _EXEMPT})
     assert blank == [], f"这些事件类型的 origin 为空：{blank}"
+
+
+# ── Task 3 / 补充：三组只被端到端测试路径顺带覆盖、无针对性回归保护的发射点 ──
+#
+# 上面的 e2e 测试触达的是「act 首轮回纯文本→冷 park」这条路径；HITL_SERVICE
+# （只在真正的 approval/input 型 HITL 走到）、runtime.py 的 RUN_* 事件里
+# compact-only 支路、capability_gateway 的三条事件（只在 act 真调用一个工具时
+# 才发）都不在那条路径上，缺一个误删 `origin=` 也不会变红的回归保护。三个都是
+# 直接调用/构造对应代码路径的针对性单测，不驱动完整 loop。
+
+
+async def test_hitl_service_emits_with_hitl_service_origin():
+    """HitlService._emit 发的 HitlOpened/HitlResolved 恒是 EventOrigin.HITL_SERVICE。"""
+    from ctx_weft.core.hitl.registry import HitlRegistry
+    from ctx_weft.core.hitl.reply_intake import ReplyIntake
+    from ctx_weft.core.hitl.service import HitlService
+    from ctx_weft.protocols.hitl import HitlAsk, HitlReply, ToolResultDelivery
+
+    class _RecordingBus:
+        def __init__(self) -> None:
+            self.events: list[Event] = []
+
+        async def emit(self, event: Event) -> None:
+            self.events.append(event)
+
+    class _PassthroughNormalizer:
+        async def __call__(self, content, session_id):
+            return content, content
+
+    bus = _RecordingBus()
+    svc = HitlService(
+        registry=HitlRegistry(), event_bus=bus,
+        reply_intake=ReplyIntake(_PassthroughNormalizer()),
+    )
+    req = await svc.open(
+        HitlAsk(form="approval", delivery=ToolResultDelivery(tool_call_id="tc_1")),
+        session_id="s1", task_id="t1", stage="tool",
+    )
+    await svc.resolve(HitlReply(hitl_id=req.id, outcome="accepted"))
+
+    assert len(bus.events) == 2, "HitlOpened + HitlResolved"
+    origins = {ev.type: ev.origin for ev in bus.events}
+    assert origins == {
+        EventType.HITL_OPENED: EventOrigin.HITL_SERVICE,
+        EventType.HITL_RESOLVED: EventOrigin.HITL_SERVICE,
+    }
+
+
+async def test_capability_gateway_events_have_loop_capability_gateway_origin():
+    """CapabilityGateway.invoke 发的 Invoked/Progress/Finished 恒是 LOOP_CAPABILITY_GATEWAY。"""
+    from collections.abc import AsyncIterator
+    from types import SimpleNamespace
+
+    from ctx_weft.core.loop.capability_gateway import CapabilityGateway
+    from ctx_weft.core.loop.driver import LoopContext, LoopState
+    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.protocols import MemoryAddress, ProviderContext
+    from ctx_weft.protocols.capability import (
+        CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
+    )
+    from ctx_weft.providers.events import InProcessEventBus
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+    class _Echo(ToolCapabilityProvider):
+        name = "mcp:a"
+
+        def _cap(self) -> ToolCapability:
+            return ToolCapability(id="mcp:a:search", name="search", description="s")
+
+        async def list(self, ctx): return [self._cap()]
+        async def retrieve(self, ctx): return [self._cap()]
+        async def describe(self, ctx):
+            return CapabilityProviderInfo(name=self.name, capability_count=1)
+
+        def invoke(self, capability_id, arguments, ctx) -> AsyncIterator[CapabilityEvent]:
+            async def _run():
+                yield CapabilityEvent(kind="progress", payload={"data": "working"})
+                yield CapabilityEvent(kind="result", payload={"content": "ok"})
+            return _run()
+
+        async def cancel(self, invocation_id, ctx) -> None: return None
+
+    p = _Echo()
+    mem = InMemoryMemoryProvider()
+    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
+    state = LoopState(
+        run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
+        task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
+        scope=scope, resolved_model=SimpleNamespace(model="mock", account=""),
+    )
+    bus = InProcessEventBus()
+    ctx = LoopContext(
+        assembler=None, llm=None, memory=mem, event_bus=bus,
+        provider_ctx=ProviderContext(
+            session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1"),
+    )
+    captured: list[Event] = []
+
+    async def _collect(ev):
+        captured.append(ev)
+
+    bus.subscribe(None, _collect)
+
+    cache = CapabilityCache()
+    cache.put("agt_1", [p._cap()])
+    gw = CapabilityGateway(
+        capability_cache=cache, capability_providers=[p], memory=mem, event_bus=bus,
+    )
+    await gw.invoke("mcp__a__search", {"q": "x"}, state, ctx, tool_call_id="tc_abc")
+
+    gw_types = {EventType.CAPABILITY_INVOKED, EventType.CAPABILITY_PROGRESS,
+                EventType.CAPABILITY_FINISHED}
+    seen = [ev for ev in captured if ev.type in gw_types]
+    assert {ev.type for ev in seen} == gw_types, "三种事件都应发出"
+    assert all(ev.origin == EventOrigin.LOOP_CAPABILITY_GATEWAY for ev in seen), (
+        [(ev.type, ev.origin) for ev in seen]
+    )
+
+
+async def test_compact_session_run_events_have_runtime_origin():
+    """`CtxWeftRuntime.compact_session` 的 RunStarted/RunFinished 恒是 EventOrigin.RUNTIME。
+
+    覆盖 runtime.py 里独立于主 `_run_loop` 之外的第二条 RUN_* 发射路径
+    （compact-only，走 `origin=EventOrigin.RUNTIME` 显式覆盖，不继承 state.origin）
+    ——上面的 e2e 测试走的是「act 首轮冷 park」，不会触达这条 compact-only 支路。
+    """
+    from datetime import timedelta
+
+    from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
+
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
+    rt: CtxWeftRuntime = make_runtime(llm=llm, agent_provider=resolver)
+    mem = InMemoryMemoryProvider()
+    rt.providers.register_memory(mem)
+
+    sid, aid = "ses_origin", "agt_root"
+    ts = datetime(2026, 9, 3, tzinfo=UTC)
+    await rt.event_store.append(Event(
+        id="evt_0001", run_id="run_1", sequence=1, session_id=sid,
+        type=EventType.SESSION_CREATED, timestamp=ts,
+        payload={"template_id": "agent:tpl_echo", "user_prompt": "x", "root_agent_id": aid,
+                 "llm_model": "mock", "context_limit": 180000},
+    ))
+    scope = MemoryAddress(session_id=sid, task_id="t_seed", agent_id=aid)
+    pctx = ProviderContext(session_id=sid, tenant_id="default", task_id="t_seed", agent_id=aid)
+    for i in range(3):
+        await mem.ingest(MemoryEvent(
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
+            content=f"turn {i}", role="user", timestamp=ts + timedelta(seconds=i),
+            metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
+
+    rt._agent_registry.register_session(sid, tenant_id="default", fallback_template_id="agent:tpl_echo")
+    rt._agent_registry.materialize(aid)
+
+    seen: list[Event] = []
+
+    async def _spy(ev):
+        seen.append(ev)
+
+    rt._event_bus.subscribe(None, _spy)
+
+    await rt.compact_session(sid)
+
+    run_events = [ev for ev in seen if ev.type in (EventType.RUN_STARTED, EventType.RUN_FINISHED)]
+    assert len(run_events) == 2, "RunStarted + RunFinished"
+    assert all(ev.origin == EventOrigin.RUNTIME for ev in run_events), (
+        [(ev.type, ev.origin) for ev in run_events]
+    )
 
 
 # ── Task 3 / R7: SQL EventStore 往返持久化 origin ──
