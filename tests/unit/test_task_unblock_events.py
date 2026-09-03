@@ -71,10 +71,15 @@ def test_task_human_resolved_maps_to_pending_in_the_lookup_table():
 
 
 def test_human_resolved_clears_outputs():
-    """与 TaskRequeued 同一效果：解除阻塞回 PENDING 要清旧产出（判据是类型，不是 payload）。"""
+    """与 TaskRequeued 同一效果：解除阻塞回 PENDING 要清旧产出（判据是类型，不是 payload）。
+
+    outputs 由 TaskFinished 的 payload 折入（TaskFinalized 只发 {task_id, outcome}，
+    见 finalize.py:766 / reducers.py 的 TASK_STATUS_BY_EVENT 分支）。
+    """
     view = reduce_events([
         _created("tsk_1"),
-        _ev(EventType.TASK_FINALIZED, "tsk_1", {"outputs": "done"}),
+        _ev(EventType.TASK_FINISHED, "tsk_1",
+            {"outcome": "success", "summary": "", "outputs": "done"}),
         _ev(EventType.TASK_AWAITING_HUMAN, "tsk_1", {"hitl_id": "hit_1"}),
         _ev(EventType.TASK_HUMAN_RESOLVED, "tsk_1", {"hitl_id": "hit_1"}),
     ], run_id="run_1")

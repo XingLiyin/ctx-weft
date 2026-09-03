@@ -92,7 +92,9 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
         _ev(4, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         _ev(5, EventType.TASK_FINISHED, task_id=tid,
             outcome="success", summary="done", outputs={"result": "ok"}),
-        _ev(6, EventType.TASK_FINALIZED, task_id=tid, outputs={"result": "ok"}),
+        # TaskFinalized 的真实发射侧只带 {task_id, outcome}（finalize.py:766）——
+        # outputs 已由上面的 TASK_FINISHED 折进投影，这里不再伪造它。
+        _ev(6, EventType.TASK_FINALIZED, task_id=tid, outcome="success"),
         # Crash mid finish-boundary observe: STARTED persisted, DONE never was.
         _ev(7, EventType.TASK_RECAP_STARTED, task_id=tid, boundary="finish", agent_id=aid),
     ]
@@ -102,6 +104,7 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
     # Pre-crash state: session projection is still RUNNING (no SESSION_FINISHED).
     view_before = await rebuild_view(runtime.event_store, sid)
     assert view_before.sessions[sid].status == "RUNNING"
+    assert view_before.tasks[tid].outputs == {"result": "ok"}
 
     # Seed the placeholder finish pair in memory so _relaunch's close-synth path can
     # locate the finish_task tool_call and supersede the placeholder Process Report.
@@ -177,7 +180,9 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
         _ev(5, EventType.TASK_FAILED, task_id=tid,
             error_code="TASK_FAILED_AT_RUN", error_message="boom", retry_count=3),
         _ev(6, EventType.FAILURE_THRESHOLD_HIT, failure_counter=1, threshold=1),
-        _ev(7, EventType.TASK_FINALIZED, task_id=tid, error="boom"),
+        # TaskFinalized 的真实发射侧只带 {task_id, outcome}（finalize.py:766）——
+        # error 已由上面的 TASK_FAILED 折进投影，这里不再伪造它。
+        _ev(7, EventType.TASK_FINALIZED, task_id=tid, outcome="fail"),
         # Crash mid finish-boundary observe: STARTED persisted, DONE never was.
         _ev(8, EventType.TASK_RECAP_STARTED, task_id=tid, boundary="finish", agent_id=aid),
     ]
@@ -187,6 +192,7 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
     # Pre-crash state: task FAILED, session projection failure_counter > 0, still RUNNING.
     view_before = await rebuild_view(runtime.event_store, sid)
     assert view_before.tasks[tid].status == "FAILED"
+    assert view_before.tasks[tid].error == "boom"
     assert view_before.sessions[sid].failure_counter > 0
     assert view_before.sessions[sid].status == "RUNNING"
 

@@ -195,19 +195,23 @@ def _resolved_user_turn_on_a_parent_with_a_live_child() -> list[Event]:
             "id": TID, "status": "PENDING", "title": "T1",
             "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"}),
         _ev(4, EventType.TASK_STARTED, task_id=TID, assigned_agent_id="agt_root"),
-        # 播一份「已攒下的产出」进投影（TASK_CREATED 的 payload 不带 outputs，
-        # TASK_FINALIZED 是唯一把 outputs 折进 TaskView 的事件；它不改 status）。
-        _ev(41, EventType.TASK_FINALIZED, task_id=TID, outputs={"note": "已攒下的进展"}),
-        _ev(5, EventType.TASK_CREATED, task={
+        # 播一份「已攒下的产出」进投影：outputs 由 TASK_FINISHED 的 payload 折入
+        # （TaskFinalized 的真实发射侧只带 {task_id, outcome}，见 finalize.py:766 /
+        # reducers.py 的 TASK_STATUS_BY_EVENT 分支）。这里让它按真实的时间顺序发生
+        # 在 TASK_SUSPENDED 之前——后者只改 status、不碰 outputs，于是父任务停在
+        # SUSPENDED 时仍带着这份产出。
+        _ev(5, EventType.TASK_FINISHED, task_id=TID,
+            outcome="success", summary="", outputs={"note": "已攒下的进展"}),
+        _ev(6, EventType.TASK_CREATED, task={
             "id": "tsk_child", "status": "PENDING", "title": "C1",
             "parent_task_id": TID, "dag_deps": ["tsk_never_done"],
             "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"}),
-        _ev(6, EventType.TASK_STARTED, task_id="tsk_child", assigned_agent_id="agt_root"),
-        _ev(7, EventType.HITL_OPENED, task_id=TID, hitl_id="hit_1", form="wait",
+        _ev(7, EventType.TASK_STARTED, task_id="tsk_child", assigned_agent_id="agt_root"),
+        _ev(8, EventType.HITL_OPENED, task_id=TID, hitl_id="hit_1", form="wait",
             delivery={"kind": "user_turn", "task_id": TID, "preface": "normal"},
             stage="tool", agent_id="agt_root", prompt=""),
-        _ev(8, EventType.TASK_SUSPENDED, task_id=TID),
-        _ev(9, EventType.HITL_RESOLVED, task_id=TID, hitl_id="hit_1",
+        _ev(9, EventType.TASK_SUSPENDED, task_id=TID),
+        _ev(10, EventType.HITL_RESOLVED, task_id=TID, hitl_id="hit_1",
             outcome="accepted", message="use postgres"),
     ]
 
