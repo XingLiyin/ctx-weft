@@ -61,7 +61,7 @@ async def test_session_start_params_still_accepts_str():
 
 async def test_root_task_carries_full_content_session_carries_summary():
     sm = SessionManager(
-        lifecycle_manager=SimpleNamespace(),
+        agent_registry=SimpleNamespace(),
         event_bus=SimpleNamespace(emit=AsyncMock()),
     )
     session = Session(
@@ -141,7 +141,7 @@ class _CapturingBus:
 
 
 def _session_manager(bus) -> SessionManager:
-    from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+    from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
     from ctx_weft.core.runtime import ProviderRegistry
     from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 
@@ -150,7 +150,7 @@ def _session_manager(bus) -> SessionManager:
     reg = ProviderRegistry()
     reg.register_capability(templates)
     return SessionManager(
-        lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(reg), event_bus=bus),
+        agent_registry=AgentRegistry(template_lookup=TemplateLookup(reg), event_bus=bus),
         event_bus=bus,
     )
 
@@ -207,9 +207,9 @@ async def test_resume_session_without_jsonable_falls_back_to_the_text_prompt():
         payload={"template_id": "tpl", "user_prompt": "第一轮",
                  "root_agent_id": "agt_root", "context_limit": 1000},
     ))
-    # resume_session 不调 instantiate_agent，故 lifecycle_manager 用桩即可（同
+    # resume_session 不调 instantiate，故 agent_registry 用桩即可（同
     # tests/unit/test_resume_context_limit.py 的既有做法）。
-    sm = SessionManager(lifecycle_manager=MagicMock(), event_bus=bus)
+    sm = SessionManager(agent_registry=MagicMock(), event_bus=bus)
 
     await sm.resume_session(
         session_id="ses-resume", event_store=store, user_prompt="第二轮",

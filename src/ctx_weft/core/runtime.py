@@ -1,6 +1,6 @@
 """CtxWeftRuntime：顶层 API。
 
-Phase 4 版本：完整 SessionManager + TaskManager + LifecycleManager 支持；
+Phase 4 版本：完整 SessionManager + TaskManager + AgentRegistry 支持；
 同时保留 run_single_task() 兼容 Phase 1 测试。
 """
 
@@ -59,7 +59,7 @@ from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
-from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
@@ -567,9 +567,9 @@ class CtxWeftRuntime:
         from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
         self._template_lookup = TemplateLookup(self.providers)
         # Agent 注册表：runtime 级长生命周期组件，_agents 是 agent 身份与配置的唯一住所。
-        # 从前 LifecycleManager 是每次调用 new 一个的临时对象，见
+        # 从前 AgentRegistry 是每次调用 new 一个的临时对象，见
         # docs/events-v2.md §2.1.1（与 SessionManager 同形的那次晋升）。
-        self._agent_registry = LifecycleManager(
+        self._agent_registry = AgentRegistry(
             template_lookup=self._template_lookup, event_bus=self._event_bus)
 
         # Capability cache (per-session, shared across all agents in runtime)
@@ -593,7 +593,7 @@ class CtxWeftRuntime:
         # （无状态、用完即弃），状态因此无处可放，被 TaskManager / runtime / reducer
         # 各写一份。见 docs/events-v2.md §2.1.1。
         self._session_manager = SessionManager(
-            lifecycle_manager=self._agent_registry,
+            agent_registry=self._agent_registry,
             event_bus=self._event_bus,
             task_max_concurrent=self._config.task_max_concurrent,
             task_max_retries=self._config.task_max_retries,
@@ -1017,7 +1017,7 @@ class CtxWeftRuntime:
 
         memory = self.providers.get_memory()
         # 入口即拒、不落库：sm.create_session / sm.resume_session 会立即持久化
-        # （instantiate_agent + SESSION_CREATED/RESUMED 事件），所以格式校验与
+        # （instantiate + SESSION_CREATED/RESUMED 事件），所以格式校验与
         # EventBlobStore 门控必须在它们之前。
         # **不做模型能力判断**（spec 2026-08-28-multimodal-adapter-dispatch）：
         # 模态处置归 LLMClient 实现方，core 全程透传。原先为了视觉门控要在这里
@@ -1044,7 +1044,7 @@ class CtxWeftRuntime:
             # 同一对象，故这一支对纯 event 组合也是无害的。
             params = _dc.replace(params, session_id=sid, user_prompt=normalized)
         sm = self._session_manager
-        lm = sm.lifecycle_manager
+        lm = sm.agent_registry
 
         if not params.resume:
             session, root_task, task_manager = await sm.create_session(
@@ -1316,7 +1316,7 @@ class CtxWeftRuntime:
         session: Session,
         template: "AgentTemplate",
         template_id: str,
-        lm: LifecycleManager,
+        lm: AgentRegistry,
         memory: MemoryProvider,
         llm_account: str | None,
         llm_model: str | None,
@@ -2660,7 +2660,7 @@ class _SessionTaskRunner:
     """两阶段 TaskRunner（每个 owner-TM 一个实例）：assemble 装配执行 agent，execute 驱动 step loop。
 
     原 _make_task_runner 闭包的显式化：闭包捕获 → 实例字段。恢复播种不再靠
-    per-runner 缓存——agent 身份/配置的唯一住所是 runtime 级 `LifecycleManager`
+    per-runner 缓存——agent 身份/配置的唯一住所是 runtime 级 `AgentRegistry`
     registry（`lm`），恢复路径由 `recover_session` 显式调 `lm.load()` 装填。
     assigned_agent_id 回填 / started_at / TASK_STARTED 均归 TaskManager（两阶段契约）。
     """
@@ -2672,7 +2672,7 @@ class _SessionTaskRunner:
         session: Session,
         template: "AgentTemplate",
         template_id: str,
-        lm: LifecycleManager,
+        lm: AgentRegistry,
         memory: MemoryProvider,
         llm_account: str | None,
         llm_model: str | None,
@@ -2684,7 +2684,7 @@ class _SessionTaskRunner:
         self._session = session
         self._template = template
         self._template_id = template_id
-        self._lm = lm
+        self._registry = lm
         self._memory = memory
         self._llm_account = llm_account
         self._llm_model = llm_model
@@ -2717,12 +2717,12 @@ class _SessionTaskRunner:
                 # （零事件、只读 record，不会把 spawn_depth 重算成 0）。SpawnDepthExceeded
                 # 由 instantiate 内部发完 SpawnRejected 后原样上抛，此处不再捕获。
                 if not t.assigned_agent_id:
-                    agent, tmpl = await self._lm.instantiate(
+                    agent, tmpl = await self._registry.instantiate(
                         template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
                         parent_agent_id=t.creator_agent_id, task_id=t.id, ctx=ctx,
                     )
                 else:
-                    agent = self._lm.materialize(
+                    agent = self._registry.materialize(
                         t.assigned_agent_id,
                         context_limit=self._session.context_limit,
                         reserved_output_tokens=self._session.reserved_output_tokens,
@@ -2759,7 +2759,7 @@ class _SessionTaskRunner:
                 # 非 subagent 任务在**创建者**的 agent scope 上跑（延续创建者对话），
                 # 而非一律 root——否则 subagent 派生的非 subagent 子会跑进 root scope、丢失
                 # 创建者上下文并污染 root。scope 键与调度串行判定共用 effective_agent_id 单一真相。
-                agent = self._lm.materialize(
+                agent = self._registry.materialize(
                     effective_agent_id(t, self._session.root_agent_id or ""),
                     context_limit=self._session.context_limit,
                     reserved_output_tokens=self._session.reserved_output_tokens,

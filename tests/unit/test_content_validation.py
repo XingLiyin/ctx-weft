@@ -121,7 +121,7 @@ def test_content_has_image_with_image_part_is_true():
 # `validate_content` 因此报 `BlobStoreRequiredError`。这条测试的价值不在于具体
 # 是哪道门控触发，而在于证明 `validate_content` 确实接在 run_single_task 的
 # 任何持久化（Session/Task/事件）之前——(1) 抛 BlobStoreRequiredError，
-# (2) memory 中无任何记录（instantiate_agent / Session / Task 均未落库）。
+# (2) memory 中无任何记录（instantiate / Session / Task 均未落库）。
 
 
 @pytest.mark.asyncio

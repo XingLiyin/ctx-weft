@@ -57,11 +57,11 @@ async def test_resume_session_preserves_context_limit() -> None:
                            token_budget=200_000,
                            context_limit=NON_DEFAULT_CONTEXT_LIMIT))
 
-    # Build a minimal lifecycle_manager mock — resume_session does NOT call
-    # instantiate_agent, so any object with the right shape works.
+    # Build a minimal agent_registry mock — resume_session does NOT call
+    # instantiate, so any object with the right shape works.
     lm = MagicMock()
 
-    sm = SessionManager(lifecycle_manager=lm, event_bus=bus)
+    sm = SessionManager(agent_registry=lm, event_bus=bus)
 
     # resume_session emits events on the bus; we don't need to assert them here.
     session, root_task, task_manager = await sm.resume_session(

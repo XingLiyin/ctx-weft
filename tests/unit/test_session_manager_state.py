@@ -10,7 +10,7 @@ from tests.unit._session_helpers import RecordingBus
 
 
 def _sm(bus: RecordingBus) -> SessionManager:
-    sm = SessionManager(lifecycle_manager=None, event_bus=bus)
+    sm = SessionManager(agent_registry=None, event_bus=bus)
     sm.register_session("sess_1", tenant_id="t1")
     return sm
 
@@ -21,7 +21,7 @@ async def test_register_session_starts_running():
 
 async def test_unknown_session_has_empty_status_not_an_exception():
     """host 会拿任意 id 来问；抛异常会把一次查询变成一次 500。"""
-    sm = SessionManager(lifecycle_manager=None, event_bus=RecordingBus())
+    sm = SessionManager(agent_registry=None, event_bus=RecordingBus())
     assert sm.status_of("nope") == ""
 
 
@@ -60,7 +60,7 @@ async def test_terminal_state_absorbs_every_later_input():
 
 async def test_applying_to_an_unregistered_session_is_a_noop():
     bus = RecordingBus()
-    sm = SessionManager(lifecycle_manager=None, event_bus=bus)
+    sm = SessionManager(agent_registry=None, event_bus=bus)
     await sm._apply("nope", SessionInput.QUEUE_DRAINED, final_status="SUCCEEDED")
     assert bus.types() == []
 

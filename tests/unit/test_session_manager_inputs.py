@@ -10,7 +10,7 @@ from tests.unit._session_helpers import RecordingBus
 
 
 def _sm(bus: RecordingBus) -> SessionManager:
-    sm = SessionManager(lifecycle_manager=None, event_bus=bus)
+    sm = SessionManager(agent_registry=None, event_bus=bus)
     sm.register_session("sess_1", tenant_id="t1")
     return sm
 
@@ -100,5 +100,5 @@ async def test_cancel_command_finishes_the_session():
 
 async def test_attach_to_bus_registers_one_handler():
     bus = RecordingBus()
-    SessionManager(lifecycle_manager=None, event_bus=bus).attach_to_bus()
+    SessionManager(agent_registry=None, event_bus=bus).attach_to_bus()
     assert len(bus.handlers) == 1

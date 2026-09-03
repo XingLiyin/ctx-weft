@@ -28,7 +28,7 @@
                          ┌──────────────────────────────────────┐
                          │           CtxWeftRuntime              │
                          │                                        │
- TemplateResolver ──────▶│  LifecycleManager   instantiate_agent  │
+ TemplateResolver ──────▶│  AgentRegistry   instantiate           │
                          │  SessionManager     create/resume      │
  ProviderRegistry ──────▶│  TaskManager        队列 / drain        │
    memory/cap/know/llm   │                                        │
@@ -66,7 +66,7 @@
 |------|------------------|------|
 | `CtxWeftRuntime` | `src/ctx_weft/core/runtime.py:343` | 顶层编排：构造依赖、5 种运行入口、`_execute_task` |
 | `ProviderRegistry` | `src/ctx_weft/core/runtime.py:163` | 四类 provider 注册表（memory 唯一 / cap 列表 / knowledge 按 priority / llm 唯一） |
-| `LifecycleManager` | `src/ctx_weft/core/orchestrator/lifecycle_manager.py:30` | 从 template 实例化 `Agent`（`instantiate_agent` `:35`，含 spawn_depth / 父子关系） |
+| `AgentRegistry` | `src/ctx_weft/core/orchestrator/agent_registry.py:30` | 从 template 实例化 `Agent`（`instantiate` `:35`，含 spawn_depth / 父子关系） |
 | `SessionManager` | `src/ctx_weft/core/orchestrator/session_manager.py:22` | `create_session` `:28` / `resume_session` `:77`，建 Session + root Task + TaskManager |
 | `TaskManager` | `src/ctx_weft/core/orchestrator/task_manager.py:41` | 任务队列、`drain()` `:204` 调度、`track_background` `:76`（后台协程登记）、`restore` `:96` |
 | `ContextAssembler` | `src/ctx_weft/core/assembler/assembler.py:140` | 多 Source 取数 → budget 裁剪 → composer 拼 prompt |

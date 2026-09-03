@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
-from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
 from ctx_weft.core.orchestrator.session_state import (
     SessionInput, TERMINAL_SESSION_STATUSES, Transition, next_transition,
 )
@@ -70,7 +70,7 @@ class SessionManager:
     组件，`_states` 是会话状态的**唯一住所**（docs/events-v2.md §2.1.1）。
     """
 
-    lifecycle_manager: LifecycleManager
+    agent_registry: AgentRegistry
     event_bus: EventBus
     task_max_concurrent: int = 4
     task_max_retries: int = 3
@@ -188,7 +188,7 @@ class SessionManager:
         """
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
-        # 先于 instantiate_agent / 任何 emit：被拒的入参不该留下半个 session
+        # 先于 agent_registry.instantiate / 任何 emit：被拒的入参不该留下半个 session
         # （同「入口即拒、不落库」）。
         user_prompt_event_jsonable = _event_jsonable_or_fallback(
             user_prompt, user_prompt_event_jsonable, "create_session",
@@ -200,7 +200,7 @@ class SessionManager:
         # （热更新友好），解析两次会在 SESSION_CREATED 落库之后再开一个 TOCTOU
         # 窗口（模板可能已被热更新/删除），把「入口即拒、不落库」击穿。这里解析出的
         # template 对象直接传给下面的 instantiate(template=...)，它不会再自己解析。
-        template = await self.lifecycle_manager.template_lookup.get_template(
+        template = await self.agent_registry.template_lookup.get_template(
             template_id, None, ctx=ctx,
         )
 
@@ -226,7 +226,7 @@ class SessionManager:
         logger.info("Session %s created (template=%s, agent=%s)", sid, template_id, agent_id)
 
         # Emit in causal order Session → Agent → Task. AGENT_INSTANTIATED (from
-        # lifecycle_manager.instantiate, below) and TASK_CREATED (from
+        # agent_registry.instantiate, below) and TASK_CREATED (from
         # _make_root_task_manager → push_task) MUST follow SESSION_CREATED: the host
         # projection inserts the agent/task row with a FK on session_id → sessions.id,
         # so the session row must be projected first.
@@ -245,9 +245,9 @@ class SessionManager:
             "reserved_output_tokens": reserved_output_tokens,
         })
         # 登记 record + 发 AgentInstantiated（root 没有 parent_agent_id，
-        # LifecycleManager.instantiate 内部只发这一条，不发 AgentSpawned）。
+        # AgentRegistry.instantiate 内部只发这一条，不发 AgentSpawned）。
         # template=template：复用上面已经解析过的对象，全程只解析一次。
-        await self.lifecycle_manager.instantiate(
+        await self.agent_registry.instantiate(
             template_id=template_id, session_id=sid, tenant_id=tenant_id,
             agent_id=agent_id, template=template, ctx=ctx,
         )

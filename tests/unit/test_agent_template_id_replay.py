@@ -1,6 +1,6 @@
 """子 agent 的 template_id 必须能从事件流重建，而不是一律回落 session root 模板。
 
-背景：`Agent.template_id` 在 spawn 时是正确的（LifecycleManager.instantiate_agent 用
+背景：`Agent.template_id` 在 spawn 时是正确的（AgentRegistry.instantiate 用
 解析后的 sub_tmpl_id 构造），但它只活在内存的 `TaskRunner._resolved_agents` dict 里。
 事件流里只有 root agent 发过 `AgentInstantiated`（session_manager），子 agent 那条从来
 不发，且 reducer 根本不处理这个事件类型 —— 于是 `_rebuild_agents` 只能从 session/task

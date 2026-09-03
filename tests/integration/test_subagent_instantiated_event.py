@@ -171,7 +171,7 @@ async def test_replayed_view_gives_subagent_its_own_template():
 # AgentInstantiated 覆盖不到。
 #
 # 两者都发在 assemble() 的同一个决定点上：唯一的权限门（深度检查）在
-# instantiate_agent 里，派发时才跑。若在 delegate_task 处发 AgentSpawned，
+# instantiate 里，派发时才跑。若在 delegate_task 处发 AgentSpawned，
 # 会出现「先 Spawned、后 Rejected」的自相矛盾事件对。
 
 

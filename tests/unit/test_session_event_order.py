@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.protocols.events import EventType
-from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.runtime import ProviderRegistry
@@ -60,7 +60,7 @@ async def test_session_created_emitted_before_task_created() -> None:
     _reg = ProviderRegistry()
     _reg.register_capability(resolver)
     sm = SessionManager(
-        lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(_reg), event_bus=bus),
+        agent_registry=AgentRegistry(template_lookup=TemplateLookup(_reg), event_bus=bus),
         event_bus=bus,
     )
     await sm.create_session(template_id="agent:tpl", user_prompt="你好", context_limit=1000)

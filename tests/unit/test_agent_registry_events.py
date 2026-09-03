@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.lifecycle_manager import (
-    LifecycleManager,
+from ctx_weft.core.orchestrator.agent_registry import (
+    AgentRegistry,
     SpawnDepthExceeded,
 )
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
@@ -47,7 +47,7 @@ def _lm(bus, *, max_depth=3):
     provider.register(tmpl)
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    lm = LifecycleManager(
+    lm = AgentRegistry(
         template_lookup=TemplateLookup(providers=providers), event_bus=bus)
     lm.register_session("s1", tenant_id="default", fallback_template_id=TPL)
     return lm

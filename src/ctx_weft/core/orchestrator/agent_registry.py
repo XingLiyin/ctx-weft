@@ -1,4 +1,4 @@
-"""LifecycleManager：Agent 实例化 + spawn 深度检查。
+"""AgentRegistry：Agent 实例化 + spawn 深度检查。
 
 Capability 解析已移至 PrepareStep（CapabilityResolver），
 此处只负责从 template 创建 Agent 对象。
@@ -65,7 +65,7 @@ class _AgentRecord:
 
 
 @dataclass
-class LifecycleManager:
+class AgentRegistry:
     """Agent 实例化 + 注册表。
 
     从前是「runtime.py 里 new 五次、用完即弃的无状态 dataclass」，现在是
@@ -137,7 +137,7 @@ class LifecycleManager:
                 loop_config = template.loop_config
             except Exception:
                 logger.warning(
-                    "LifecycleManager.load: template %r unresolvable for agent %s; "
+                    "AgentRegistry.load: template %r unresolvable for agent %s; "
                     "using default configs (recovery-time gap, degrading not crashing)",
                     template_id, av.id,
                 )
@@ -256,7 +256,7 @@ class LifecycleManager:
         )
 
         logger.info(
-            "LifecycleManager: instantiated agent %s (template=%s, depth=%d)",
+            "AgentRegistry: instantiated agent %s (template=%s, depth=%d)",
             agent_id, template_id, spawn_depth,
         )
         agent = self.materialize(
@@ -353,7 +353,7 @@ class LifecycleManager:
         路径），不是本方法本身必须用猜的。
         """
         logger.warning(
-            "LifecycleManager: unregistered agent %s; "
+            "AgentRegistry: unregistered agent %s; "
             "falling back to a session default (recovery-time gap, degrading not crashing)",
             agent_id,
         )

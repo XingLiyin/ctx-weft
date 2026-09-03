@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
+from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
@@ -26,21 +26,21 @@ class _Bus:
         return None
 
 
-def _lm() -> LifecycleManager:
+def _lm() -> AgentRegistry:
     from ctx_weft.core.runtime import ProviderRegistry
 
     provider = InlineAgentTemplateProvider()
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    lm = LifecycleManager(template_lookup=TemplateLookup(providers=providers), event_bus=_Bus())
+    lm = AgentRegistry(template_lookup=TemplateLookup(providers=providers), event_bus=_Bus())
     lm.register_session("s1", tenant_id="default", fallback_template_id=TPL)
     return lm
 
 
 async def test_instantiate_has_no_existing_agent_id_param():
     import inspect
-    sig = inspect.signature(LifecycleManager.instantiate)
+    sig = inspect.signature(AgentRegistry.instantiate)
     assert "existing_agent_id" not in sig.parameters
 
 
