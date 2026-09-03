@@ -55,6 +55,81 @@ async def test_compact_session_unknown_session_raises() -> None:
         await rt.compact_session("ses_missing")
 
 
+async def test_compact_session_uses_agent_registrys_current_model_not_stale_session_field() -> None:
+    """`set_agent_llm` 换模型后手动 compact：送出的 LLMRequest.model 必须是新模型。
+
+    钉住评审 finding：compact_session 里 `agent.runtime["llm_model"]` 曾经取自
+    `session.llm_model`（批次 B 前的真相源，早已停止权威），而不是本次 `materialize()`
+    同一处返回的 `ResolvedModel.model`——client 派对了（`rm.client`），模型名却掰旧的。
+    """
+    resolver = InlineAgentTemplateProvider()
+    tmpl = dataclasses.replace(make_echo_template(),
+                               loop_config=LoopConfig(compact_keep_last=2))
+    resolver.register(tmpl)
+
+    old_llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY-OLD")])
+    new_llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY-NEW")])
+
+    class _TwoModelResolver:
+        def get_client(self, account=None, model=None):
+            return new_llm if model == "model-new" else old_llm
+
+    from ctx_weft.core import ProviderRegistry
+    providers = ProviderRegistry()
+    rt = make_runtime(llm=old_llm, agent_provider=resolver, providers=providers)
+    rt.providers.register_llm_provider(_TwoModelResolver())
+    mem = InMemoryMemoryProvider()
+    rt.providers.register_memory(mem)
+
+    sid, aid = "ses_m", "agt_root"
+    ts = datetime(2026, 6, 16, tzinfo=timezone.utc)
+    await rt.event_store.append(Event(
+        id="evt_0001", run_id="run_1", sequence=1, session_id=sid,
+        type=EventType.SESSION_CREATED, timestamp=ts,
+        payload={"template_id": f"agent:{tmpl.id}", "user_prompt": "x", "root_agent_id": aid,
+                 "llm_model": "mock", "context_limit": 180000},
+    ))
+
+    scope = MemoryAddress(session_id=sid, task_id="t_seed", agent_id=aid)
+    pctx = ProviderContext(session_id=sid, tenant_id="default", task_id="t_seed", agent_id=aid)
+    for i in range(5):
+        await mem.ingest(MemoryEvent(
+            type=MemoryEventType.USER_PROMPT,
+            address=MemoryAddress(session_id=sid, task_id=f"root{i}", agent_id=aid),
+            content=f"body {i}", role="user",
+            timestamp=ts + timedelta(seconds=i * 10)), pctx)
+        await mem.ingest(MemoryEvent(
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
+            content=f"user prompt {i}", role="user",
+            timestamp=ts + timedelta(seconds=i * 10),
+            metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
+        await mem.ingest(MemoryEvent(
+            type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
+            content=f"assistant summary {i}", role="assistant",
+            timestamp=ts + timedelta(seconds=i * 10 + 1),
+            metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
+
+    # 先水合 record（生产路径里这一步发生在 root agent 实例化时；此处手工建 session
+    # 只走了 event_store，registry 还没见过这个 agent_id）。
+    rt._agent_registry.register_session(
+        sid, tenant_id="default", fallback_template_id=f"agent:{tmpl.id}",
+    )
+    rt._agent_registry.materialize(aid)
+
+    # host 先经 registry 的真相源换模型……
+    changed = await rt.set_agent_llm(aid, llm_model="model-new")
+    assert changed is True
+
+    # ……再手动 compact：materialize() 拿到的 client 与 model 必须同源一致。
+    await rt.compact_session(sid)
+
+    assert old_llm.last_request is None, "旧模型不该被调用"
+    assert new_llm.last_request is not None, "新模型该被调用（client 派对了）"
+    assert new_llm.last_request.model == "model-new", (
+        "LLMRequest.model 必须跟 ResolvedModel.model 同源，不能掰回 session.llm_model"
+    )
+
+
 async def test_compact_session_folds_agent_layer() -> None:
     resolver = InlineAgentTemplateProvider()
     # small keep_last so a handful of dispatch pairs is over budget

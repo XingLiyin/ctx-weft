@@ -1789,7 +1789,7 @@ class CtxWeftRuntime:
                 # 与旧 instantiate_agent(existing_agent_id=...) 每次按 template 现算一致。
                 memory_config=template.memory_config,
                 loop_config=template.loop_config,
-                runtime={"llm_model": session.llm_model or ""},
+                runtime={"llm_model": rm.model},
             )
 
             task = Task(
