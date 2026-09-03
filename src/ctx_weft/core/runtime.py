@@ -566,6 +566,10 @@ class CtxWeftRuntime:
             )
         from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
         self._template_lookup = TemplateLookup(self.providers)
+        # Agent 注册表：runtime 级长生命周期组件，_agents 是 agent 身份与配置的唯一住所。
+        # 从前 LifecycleManager 是每次调用 new 一个的临时对象，见
+        # docs/events-v2.md §2.1.1（与 SessionManager 同形的那次晋升）。
+        self._agent_registry = LifecycleManager(template_lookup=self._template_lookup)
 
         # Capability cache (per-session, shared across all agents in runtime)
         self._capability_cache = CapabilityCache()
@@ -588,7 +592,7 @@ class CtxWeftRuntime:
         # （无状态、用完即弃），状态因此无处可放，被 TaskManager / runtime / reducer
         # 各写一份。见 docs/events-v2.md §2.1.1。
         self._session_manager = SessionManager(
-            lifecycle_manager=LifecycleManager(template_lookup=self._template_lookup),
+            lifecycle_manager=self._agent_registry,
             event_bus=self._event_bus,
             task_max_concurrent=self._config.task_max_concurrent,
             task_max_retries=self._config.task_max_retries,
@@ -904,7 +908,7 @@ class CtxWeftRuntime:
         user_prompt, user_prompt_event_jsonable = await self._validate_and_normalize_content(
             user_prompt, sid, tenant_id=tenant_id,
         )
-        lm = LifecycleManager(template_lookup=self._template_lookup)
+        lm = self._agent_registry
 
         agent, template = await lm.instantiate_agent(
             template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
@@ -1174,6 +1178,7 @@ class CtxWeftRuntime:
         self._pausing.discard(session_id)
         self._pause_claimed.discard(session_id)
         self._task_managers.pop(session_id, None)
+        self._agent_registry.release_session(session_id)
         for _p in self.providers.get_capability_providers():
             if isinstance(_p, SessionScopedCapabilityProvider):
                 _p.deregister_session(session_id)
@@ -1450,7 +1455,7 @@ class CtxWeftRuntime:
         if not resumable and not all_tasks:
             raise RuntimeError(f"Session {session_id!r} has no resumable tasks")
 
-        lm = LifecycleManager(template_lookup=self._template_lookup)
+        lm = self._agent_registry
         template = await self._template_lookup.get_template(
             template_id, None,
             ctx=ProviderContext(session_id=session.id, tenant_id=session.tenant_id),
@@ -1614,7 +1619,7 @@ class CtxWeftRuntime:
         """
         from ctx_weft.core.loop.steps.background_observe import _CLOSE_BOUNDARIES
         try:
-            lm = LifecycleManager(template_lookup=self._template_lookup)
+            lm = self._agent_registry
             pctx0 = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
             agent, _tmpl = await lm.instantiate_agent(
                 template_id=template_id,
@@ -1708,7 +1713,6 @@ class CtxWeftRuntime:
         from ctx_weft.core.control.reducers import rebuild_view
         from ctx_weft.core.errors import SessionBusyError
         from ctx_weft.core.loop.steps.compact import CompactStep
-        from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
         from ctx_weft.core.state.models import LoopGuard, NormalTaskSettings, Task
         from ctx_weft.protocols import MemoryAddress, ProviderContext
 
@@ -1730,7 +1734,7 @@ class CtxWeftRuntime:
             if not target_agent_id:
                 raise RuntimeError(f"Session {session_id!r} has no agent to compact")
 
-            lm = LifecycleManager(template_lookup=self._template_lookup)
+            lm = self._agent_registry
             pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
             agent, template = await lm.instantiate_agent(
                 template_id=proj.template_id,
