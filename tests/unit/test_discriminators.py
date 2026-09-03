@@ -22,7 +22,14 @@ def test_enum_values_are_the_wire_strings():
 
 
 _SRC = pathlib.Path("src/ctx_weft")
-_ALLOWED = {"src/ctx_weft/core/discriminators.py"}
+#: 守卫抓的是散落的**判别值**。下面这个文件里的同名字符串是**配置 schema 的
+#: 字段名**（模板作者面向的 YAML key），与判别值是两份独立演进的契约，恰好同名而已
+#: ——把 key 绑上枚举会让日后改判别值名字时静默读错 YAML key。这是假阳性，
+#: 正确处理是豁免，而不是制造一个虚假的语义绑定。
+_ALLOWED = {
+    "src/ctx_weft/core/discriminators.py",
+    "src/ctx_weft/providers/agent_template_local/_loader.py",
+}
 
 
 def _literal_sites(literal: str) -> list[str]:
