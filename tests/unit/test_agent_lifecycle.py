@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, _AgentRecord
+from ctx_weft.core.orchestrator.agent_state import AgentInput
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Task
 from ctx_weft.protocols.events import (
     EVENT_TYPES,
     L_TIER_EVENT_TYPES,
+    Event,
     EventType,
 )
 
@@ -223,3 +227,117 @@ async def test_load_is_idempotent_for_children_index():
     await reg.load(views, session_id="s1", tenant_id="default", fallback_template_id="tpl")
 
     assert reg.children_of("root") == {"kid1"}
+
+
+# ── Task 12: ALM 订阅 TASK_* 驱动转移并发 AGENT_* ──────────────────────────
+
+
+def _task_ev(t: str, agent_id: str, payload: dict | None = None) -> Event:
+    return Event(
+        id="evt_x", run_id=None, sequence=0, session_id="s1", type=t,
+        timestamp=datetime.now(UTC), task_id="t1", agent_id=agent_id,
+        payload=payload or {},
+    )
+
+
+async def test_task_started_drives_agent_to_running_and_emits():
+    reg = _reg()
+    _plant(reg, "a1", None)
+    await reg.handle_event(_task_ev(EventType.TASK_STARTED, "a1", {"assigned_agent_id": "a1"}))
+
+    assert reg.status_of("a1") == "running"
+    emitted = [e for e in reg.event_bus.events if e.type == EventType.AGENT_RUNNING]
+    assert len(emitted) == 1
+    assert emitted[0].agent_id == "a1"
+    assert emitted[0].session_id == "s1"
+    assert emitted[0].payload["trigger"] == "task_started"
+
+
+async def test_awaiting_human_then_resolved():
+    reg = _reg()
+    _plant(reg, "a1", None)
+    await reg.handle_event(_task_ev(EventType.TASK_STARTED, "a1"))
+    await reg.handle_event(_task_ev(EventType.TASK_AWAITING_HUMAN, "a1", {"hitl_id": "h1"}))
+    assert reg.status_of("a1") == "waiting_human"
+
+    await reg.handle_event(_task_ev(EventType.TASK_HUMAN_RESOLVED, "a1", {"hitl_id": "h1"}))
+    assert reg.status_of("a1") == "running"
+
+
+async def test_task_terminal_returns_to_idle_not_terminated():
+    """spec 3.1：task 终态不是 agent 终态。"""
+    for t in (
+        EventType.TASK_FINISHED,
+        EventType.TASK_FAILED,
+        EventType.TASK_CANCELED,
+        EventType.TASK_FINALIZED,
+        EventType.TASK_REQUEUED,
+        EventType.TASK_SUSPENDED,
+    ):
+        reg = _reg()
+        _plant(reg, "a1", None)
+        await reg.handle_event(_task_ev(EventType.TASK_STARTED, "a1"))
+        await reg.handle_event(_task_ev(t, "a1"))
+        assert reg.status_of("a1") == "idle", f"{t} 应回 idle"
+
+
+async def test_unknown_agent_id_is_ignored():
+    reg = _reg()
+    await reg.handle_event(_task_ev(EventType.TASK_STARTED, "ghost"))
+    assert reg.event_bus.events == []
+
+
+async def test_current_task_id_tracked():
+    reg = _reg()
+    _plant(reg, "a1", None)
+    await reg.handle_event(_task_ev(EventType.TASK_STARTED, "a1"))
+    assert reg._agents["a1"].current_task_id == "t1"
+
+
+async def test_no_duplicate_event_on_same_state_input():
+    reg = _reg()
+    _plant(reg, "a1", None)
+    await reg.handle_event(_task_ev(EventType.TASK_STARTED, "a1"))
+    await reg.handle_event(_task_ev(EventType.TASK_STARTED, "a1"))
+    running = [e for e in reg.event_bus.events if e.type == EventType.AGENT_RUNNING]
+    assert len(running) == 1
+
+
+async def test_apply_input_is_direct_entry_point_not_only_via_events():
+    """apply_input 是独立可调用的转移入口——Task 19/20 的 cancel/pause 要走它，
+    不经由 handle_event/事件总线也必须能驱动转移并发事件。"""
+    reg = _reg()
+    _plant(reg, "a1", None)
+    changed = await reg.apply_input("a1", AgentInput.TASK_STARTED, task_id="t1")
+    assert changed is True
+    assert reg.status_of("a1") == "running"
+    changed_again = await reg.apply_input("a1", AgentInput.TASK_STARTED, task_id="t1")
+    assert changed_again is False  # 同态输入，不转移
+
+
+async def test_handle_event_does_not_recurse_on_its_own_agent_events():
+    """同步 drain 下，ALM 在 handle_event 里发出的 AGENT_* 事件会在 emit() 返回前
+    回流给全部订阅者（包括 ALM 自己，因为 attach_to_bus 用 subscribe(None, ...)
+    订阅了全部类型）。_INPUT_BY_EVENT 只含 TASK_*，AGENT_* 类型查表落空直接
+    return，不会对自己发的事件再喂一次状态机——这里用会把自己也接进总线的
+    真实 handler 验证「不会递归/不会对 AGENT_* 二次转移」。
+    """
+    reg = _reg()
+    _plant(reg, "a1", None)
+
+    # 模拟总线同步 drain：emit 时把事件也喂回 reg.handle_event 自己，
+    # 与 InProcessEventBus 的真实行为同构（_SpyBus 本身不做 drain，这里补上）。
+    async def _emit_and_redrain(ev: Event) -> None:
+        reg.event_bus.events.append(ev)
+        await reg.handle_event(ev)
+
+    reg.event_bus.emit = _emit_and_redrain  # type: ignore[method-assign]
+
+    await reg.handle_event(_task_ev(EventType.TASK_STARTED, "a1"))
+
+    # 若发生递归/自触发，AGENT_RUNNING 之后 AgentInput.SETTLED 等输入不会凭空
+    # 出现——真正要钉住的是：没有抛出 RecursionError，且状态、事件数都符合
+    # 「只转移一次」的预期（AGENT_* 不在 _INPUT_BY_EVENT 里，二次投递必然是 no-op）。
+    assert reg.status_of("a1") == "running"
+    running = [e for e in reg.event_bus.events if e.type == EventType.AGENT_RUNNING]
+    assert len(running) == 1

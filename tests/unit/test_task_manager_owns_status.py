@@ -53,6 +53,13 @@ _ALLOWED = {
     "src/ctx_weft/protocols/events.py",
     "src/ctx_weft/core/control/reducers.py",
     "src/ctx_weft/core/orchestrator/task_disposition.py",
+    # Task 12：AgentRegistry（ALM）的 `_INPUT_BY_EVENT` / `_SETTLE_REASON` 把全部
+    # 11 种 TASK_* 当纯读的映射键——翻译成 AgentInput、驱动 agent 五态机，自己只
+    # 发 AGENT_*，不发一条 TASK_* 事件。与上面 TASK_STARTED 被逐出 TASK_STATUS_EVENTS
+    # 清单本身是同一类豁免（session_manager.py 那条），只是这里读的类型更多、判据
+    # 不区分「发射」与「查表读」，只能靠按文件放行，不能靠收窄清单（清单收窄到
+    # 只剩 TASK_STARTED 会连 task_manager.py 自己的发射点都放过）。
+    "src/ctx_weft/core/orchestrator/agent_registry.py",
 }
 
 #: 上面 `TASK_STATUS_EVENTS` 里每个名字对应的 wire 字符串值（`EventType` 的值），
@@ -150,6 +157,10 @@ _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
     "src/ctx_weft/core/orchestrator/task_manager.py",
     "src/ctx_weft/core/control/reducers.py",
     "src/ctx_weft/core/orchestrator/session_manager.py",
+    # Task 12：AgentRegistry.apply_input 写的是 `rec.status`——agent 五态机的状态
+    # （spec 3.1），不是 task 状态。与 session_manager.py 那条豁免同一原因：判据
+    # 认裸变量形态（`<name>.status =`）是刻意的，`rec` 撞上同一个属性名纯属误伤。
+    "src/ctx_weft/core/orchestrator/agent_registry.py",
 })
 
 #: 判据里精确放过的写入点，按 (仓根相对路径, 所在函数) 认——行号会漂，函数名不会。

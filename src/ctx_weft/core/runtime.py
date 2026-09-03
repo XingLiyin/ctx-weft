@@ -577,6 +577,10 @@ class CtxWeftRuntime:
         self._agent_registry = AgentRegistry(
             template_lookup=self._template_lookup, event_bus=self._event_bus,
             model_resolver=self._resolve_llm)
+        # ALM 的输入端：只认 TASK_*（_INPUT_BY_EVENT），发 AGENT_*。与
+        # SessionManager.attach_to_bus 之间无顺序依赖——两者各订各的事件类型，互不
+        # 消费对方发出的事件（docs/events-v2.md §2.1.1，Task 12）。
+        self._agent_registry.attach_to_bus()
 
         # Capability cache (per-session, shared across all agents in runtime)
         self._capability_cache = CapabilityCache()

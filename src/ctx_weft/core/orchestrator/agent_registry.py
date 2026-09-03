@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.errors import CtxWeftError
+from ctx_weft.core.orchestrator.agent_state import AgentInput, next_agent_transition
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.state.models import Agent, LoopGuard
 from ctx_weft.core.utils import generate_id, now_utc
@@ -23,6 +24,17 @@ from ctx_weft.protocols.template import AgentTemplate
 logger = logging.getLogger(__name__)
 
 _ORIGIN = EventOrigin.RUNTIME
+
+#: TASK_* 终态 -> SETTLED 转移的 reason 缺省值（payload 没带显式 reason 时用）。
+#: 只覆盖六种 task 终态事件——它们都回 idle（spec 3.1：task 终态不是 agent 终态）。
+_SETTLE_REASON: dict[str, str] = {
+    EventType.TASK_FINISHED: "task_finished",
+    EventType.TASK_FAILED: "task_failed",
+    EventType.TASK_CANCELED: "task_canceled",
+    EventType.TASK_FINALIZED: "task_finalized",
+    EventType.TASK_REQUEUED: "task_requeued",
+    EventType.TASK_SUSPENDED: "task_suspended",
+}
 
 
 @dataclass(frozen=True)
@@ -120,6 +132,108 @@ class AgentRegistry:
     # release_session 必须把摘除的 agent 从键和所有值集合里都清掉，否则 descendants_of
     # 会经由悬垂引用「复活」已释放的 agent（见 release_session 内注释）。
     _children: dict[str, set[str]] = field(default_factory=dict)
+
+    # ── ALM：TASK_* 驱动五态机，发 AGENT_* ─────────────────────────────────
+
+    #: ALM 的全部事件输入 → 状态机输入。**只含 TASK_***：`AgentRegistry.apply_input`
+    #: 发出的是 AGENT_*，若这张表也收 AGENT_*，内置 InProcessEventBus 的同步 drain
+    #: 会在 `emit()` 返回前把刚发的事件回流给 `handle_event` 自己，一次转移变成
+    #: 递归——与 `SessionManager._INPUT_BY_EVENT` 当初避开同一坑同一口径（该文件
+    #: docstring 原话）。
+    _INPUT_BY_EVENT: ClassVar[dict[str, AgentInput]] = {
+        EventType.TASK_STARTED: AgentInput.TASK_STARTED,
+        EventType.TASK_AWAITING_HUMAN: AgentInput.AWAITING_HUMAN,
+        EventType.TASK_HUMAN_RESOLVED: AgentInput.HUMAN_RESOLVED,
+        EventType.TASK_INTERRUPTED: AgentInput.INTERRUPTED,
+        EventType.TASK_RESUMED: AgentInput.RESUMED,
+        # 以下六种一律回 idle——task 终态不是 agent 终态（spec 3.1）。
+        EventType.TASK_FINISHED: AgentInput.SETTLED,
+        EventType.TASK_FAILED: AgentInput.SETTLED,
+        EventType.TASK_CANCELED: AgentInput.SETTLED,
+        EventType.TASK_FINALIZED: AgentInput.SETTLED,
+        EventType.TASK_REQUEUED: AgentInput.SETTLED,
+        EventType.TASK_SUSPENDED: AgentInput.SETTLED,
+    }
+
+    def attach_to_bus(self) -> None:
+        """订阅。runtime 构造期调一次。"""
+        self.event_bus.subscribe(None, self.handle_event)
+
+    async def handle_event(self, ev: Event) -> None:
+        """总线回调。**只读事件、只喂状态机**，不碰其他组件。
+
+        agent_id 取法：优先信封 `ev.agent_id`（Task 8 已把 `_running_agents` 优先于
+        `Task.assigned_agent_id` 填好），信封缺失（存量/边缘事件）才回落 payload 里的
+        `assigned_agent_id`。不在 `_agents` 里登记的 agent_id（幽灵/未知）直接忽略——
+        与 `template_id_of` 等既有查询方法「不存在就不该往下走」的口径一致，也是
+        brief 明确要求的过滤。
+
+        没有再加别的过滤：见 `apply_input` 与本方法上方关于「要不要防语义误用」的
+        分析（agent_registry 模块 docstring 之外，写在本任务的报告里）——结论是
+        TaskManager 的派发本身保证「同一 agent 同时只挂一个在跑 task」（busy_agents
+        校验，task_manager.py `abandon_pending` 等处可见同一不变量），ALM 没有独立
+        证据表明还有别的「语义上不该发生」的组合需要在这一层补挡；再加会变成
+        replicate TaskManager 的不变量、猜它可能错在哪，属于过度防御。
+        """
+        inp = self._INPUT_BY_EVENT.get(ev.type)
+        if inp is None:
+            return
+        agent_id = ev.agent_id or (ev.payload or {}).get("assigned_agent_id")
+        if not agent_id or agent_id not in self._agents:
+            return
+        if ev.task_id:
+            self._agents[agent_id].current_task_id = ev.task_id
+        p = ev.payload or {}
+        await self.apply_input(
+            agent_id,
+            inp,
+            task_id=ev.task_id,
+            hitl_id=str(p.get("hitl_id", "")),
+            reason=str(p.get("reason", "")) or _SETTLE_REASON.get(ev.type, ""),
+        )
+
+    async def apply_input(
+        self,
+        agent_id: str,
+        inp: AgentInput,
+        *,
+        task_id: str | None = None,
+        hitl_id: str = "",
+        reason: str = "",
+        cascaded_from: str | None = None,
+    ) -> bool:
+        """状态转移与事件发射的**唯一入口**。返回是否真的发生了转移。
+
+        `handle_event` 走它，Phase F 的 cancel/pause/resume（Task 19/20）也走它——
+        任何要驱动五态机的调用方都不得绕过本方法直接改 `rec.status` 或直接
+        `event_bus.emit`，否则「转移即发事件」这条不变量会被绕开一半。
+        """
+        rec = self._agents.get(agent_id)
+        if rec is None:
+            return False
+        tr = next_agent_transition(
+            rec.status, inp,
+            task_id=task_id, hitl_id=hitl_id, reason=reason, cascaded_from=cascaded_from,
+        )
+        if tr is None:
+            return False
+        rec.status = tr.status
+        await self.event_bus.emit(Event(
+            id=generate_id("evt"),
+            run_id=None,
+            sequence=0,
+            session_id=rec.session_id,
+            type=tr.event_type,
+            timestamp=now_utc(),
+            tenant_id=rec.tenant_id,
+            task_id=task_id,
+            agent_id=agent_id,
+            origin=_ORIGIN,
+            payload=dict(tr.payload),
+        ))
+        return True
+
+    # ── 登记 ─────────────────────────────────────────────────────────────
 
     def register_session(
         self, session_id: str, *, tenant_id: str, fallback_template_id: str,
