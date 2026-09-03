@@ -18,7 +18,7 @@
 - 不再运行状态机，`session_state.py` 的 `next_transition` 及相关状态转移逻辑整体删除。
 - 只处理两件事：① `SESSION_CREATED`/`SESSION_RESUMED` 容器生命周期；② 订阅既有的 `AGENT_INSTANTIATED`/`AGENT_SPAWNED` 事件，维护 `session_id → {agent_id}` 扁平成员集合（用于 tenant 归属和 `list_agents` 的 session 过滤）。**不建"父→子"索引**——级联操作（cancel/pause）需要的父子遍历放在 `AgentLifecycleManager` 里，避免两个组件各建一份可变的层级索引。
 - `_SessionState` 精简为：`tenant_id: str` + `agent_ids: set[str]`，去掉 `status` 字段。
-- 现有 `SESSION_RUNNING`/`SESSION_WAITING`/`SESSION_INTERRUPTED`/`SESSION_FINISHED` 四个事件类型整体废弃（从 `EventType` 枚举中移除）；`SESSION_CREATED`/`SESSION_RESUMED` 保留。会话本身不再有"运行态"这个维度——外部若想知道"这个 session 整体是不是都闲着"，自己聚合该 session 下所有 `AgentSummary.status` 即可，不由系统预先算好广播。
+- 现有 `SESSION_RUNNING`/`SESSION_WAITING`/`SESSION_INTERRUPTED`/`SESSION_FINISHED` 四个事件类型**停止发射并移入 L 档**（`docs/events-v2.md` §5）——按仓库不变式「只删发射，不删枚举」，枚举值保留、`_apply` 分支保留，存量日志重放仍须认识它们；删枚举值要另过退役闸门。`SESSION_CREATED`/`SESSION_RESUMED` 保留发射。会话本身不再有"运行态"这个维度——外部若想知道"这个 session 整体是不是都闲着"，自己聚合该 session 下所有 `AgentSummary.status` 即可，不由系统预先算好广播。
 
 ## 3. AgentRegistry → AgentLifecycleManager
 
@@ -159,7 +159,13 @@ resume_agent(agent_id: str) -> None
 
 **`ReactEventTypes` 整层删除**：连同 `OBSERVE_REACT_EVENTS` / `BACKGROUND_OBSERVE_REACT_EVENTS` 两个常量与 `run_observe_react` 的 `event_types` 形参一并移除，内部硬编码 LLM_*。该间接层存在的唯一目的就是区分这两组事件，目的消失则层消失。
 
-**caller 字段**：全部 6 种 LLM_* 的 payload 新增 `caller`，取值复用 `Purpose`（protocols/capability.py:31），并补第 5 个值 `"background_observe"`——现状 background_observe.py:271 已经在传这个 Literal 之外的值，补齐后类型才自洽。与装配层 `ContextRequest.purpose` 天然对齐，不引入第二套词汇。
+**调用方标识用 `origin` 信封字段，不新增 payload 字段。** 这是 `docs/events-v2.md` §0/§3.6/§4 已定案的机制：
+
+- §0 信封表已列 **`origin: str`**（标注「V2 新增」，存量事件读出空串），且明确「envelope 管身份，payload 管内容」——往 payload 加 caller 与该方向相反。
+- §3.6 原话：「`origin` 区分是哪个子循环在跑：`loop.act` / `loop.observe` / `loop.background_observe` / `loop.recognize_intent`。**V2 之前这是靠四套同形的独立类型做的（`BackgroundObserve*` 那一族），合并后由 `origin` 承担。**」——本节要做的合并，V2 已经定案，只是未实施。
+- §4 定义 17 个取值与**结构性填充**方式：`LoopState.origin` 由 driver 每步写入 → `make_event` 默认从 `state.origin` 取，40+ 个循环内发射点零改动；脱离主 driver 序列的（background observe）用 `make_event(..., origin=...)` 显式覆盖；循环外 5 个发射者各持模块常量在自己的 `_emit` 里填。
+
+因此 `Purpose`（protocols/capability.py:31）**保持原样不动**——它是装配层「上下文为何而装」的取值，与「哪个组件发出事件」是两件事，不再挪用。
 
 调用方全集（core 下共 5 处，均经 gateway）：`act`（act.py:240）、`observe`（observe.py:135）、`background_observe`（复用 `run_observe_react`，background_observe.py:282）、`compact`（compact.py:105）、`recognize_intent`（recognize_intent.py:167）。`finalize.py` / `prepare.py` / `segment_fold.py` / `reconcile.py` 不调 LLM。
 
@@ -171,7 +177,7 @@ resume_agent(agent_id: str) -> None
 
 ### 9.4 必须一并处理的字段冲突
 
-`turn` vs `round`：**同一个 `LLM_PROMPT_SENT` 事件类型，act.py 发的带 `turn`，`run_observe_react` 发的带 `round`**——这是现存的不一致，收敛到单一发射点后必须统一。取 `turn`。
+`turn` vs `round`：**同一个 `LLM_PROMPT_SENT` 事件类型，act.py 发的带 `turn`，`run_observe_react` 发的带 `round`**——这是现存的不一致。`docs/events-v2.md` §3.6 的 payload 列写作 `turn`/`round` 并存，说明 V2 尚未裁定。收敛到单一发射点后必须二选一：**取 `turn`**，`round` 作为别名在过渡期由 reducer 双读。
 
 ### 9.5 信息不丢失的保证
 
@@ -182,10 +188,12 @@ resume_agent(agent_id: str) -> None
 
 ## 10. 事件类型变更汇总
 
-**移除（共 11 种）**：
+**停发进 L 档（共 9 种）**——枚举值与 reducer 分支一律保留，见 `docs/events-v2.md` §5/§6：
 
-- session 运行态 6 种：`SESSION_RUNNING`、`SESSION_WAITING`、`SESSION_INTERRUPTED`、`SESSION_FINISHED`、legacy `SESSION_STATUS_CHANGED`、legacy `SESSION_PAUSED_HITL`（后两个原本就标注为 legacy/待退役）。
-- LLM 镜像 5 种（见 §9）：`RECOGNIZE_INTENT_LLM_PROMPT`、`BACKGROUND_OBSERVE_REQUEST_STARTED`、`BACKGROUND_OBSERVE_PROMPT_SENT`、`BACKGROUND_OBSERVE_TOKEN_STREAMED`、`BACKGROUND_OBSERVE_RESPONSE_FINISHED`。BackgroundObserve 这个域整体消失（4 个事件全是 LLM 镜像）。
+- session 运行态 4 种：`SESSION_RUNNING`、`SESSION_WAITING`、`SESSION_INTERRUPTED`、`SESSION_FINISHED`。
+- LLM 镜像 5 种（见 §9）：`RECOGNIZE_INTENT_LLM_PROMPT`、`BACKGROUND_OBSERVE_REQUEST_STARTED`、`BACKGROUND_OBSERVE_PROMPT_SENT`、`BACKGROUND_OBSERVE_TOKEN_STREAMED`、`BACKGROUND_OBSERVE_RESPONSE_FINISHED`。BackgroundObserve 这个域整体停发（4 个事件全是 LLM 镜像）。
+
+`SESSION_STATUS_CHANGED` 与 `SESSION_PAUSED_HITL` **已于 2026-09-02 进入 L 档**（`docs/events-v2.md` §5.1/§5.2），本次不涉及。L 档因此从 9 个增至 18 个——§5.3 明说「第 2 级闸门过了 L 档才清空，在那之前 L 档非空是正常状态，不是待办积压」。
 
 **新增**：`AGENT_RUNNING`、`AGENT_WAITING_HUMAN`、`AGENT_INTERRUPTED`、`AGENT_IDLE`、`AGENT_TERMINATED`。
 
@@ -207,9 +215,11 @@ resume_agent(agent_id: str) -> None
 
 - `SessionStartParams`/`start_session` 返回值形状变化（新增 `root_agent_id`）。
 - `HitlReply` 新增必填 `agent_id`。
-- `EventType` 枚举移除 11 个类型（6 个 session 运行态 + 5 个 LLM 镜像）、新增 5 个 agent 状态类型。
-- `stream_llm_resilient` 签名扩展为接收 caller；`Purpose` Literal 补 `"background_observe"`；`ReactEventTypes` 及其两个常量、`run_observe_react` 的 `event_types` 形参整体删除。
-- 依赖 `BACKGROUND_OBSERVE_*` 或 `RECOGNIZE_INTENT_LLM_PROMPT` 做前端渲染分流的 host 侧消费方，需改为按 `LLM_*` 的 `caller` 字段分流。
+- `EventType` 枚举**不删任何值**；9 个类型停发进 L 档，新增 5 个 `AGENT_*` 类型（须显式选边进 S 档，见 `docs/events-v2.md` §6 不变式 2）。
+- `Event` 信封新增 `origin: str` 字段（V2 §0），全部发射点按 §4 结构性填充。
+- `ReactEventTypes` 及其两个常量、`run_observe_react` 的 `event_types` 形参整体删除；`stream_llm_resilient` 接管 6 种 LLM_* 的发射。
+- 依赖 `BACKGROUND_OBSERVE_*` 或 `RECOGNIZE_INTENT_LLM_PROMPT` 做前端渲染分流的 host 侧消费方，需改为按 `origin` 前缀匹配分流（§4 明说两级点号就是为了 host 前缀匹配）。
+- host 侧的 `projection_updater.py` 不共享 core 的 reducer，新增的 5 个 S 档事件须由 host 侧对应测试补足（§6 不变式 3）。
 - 原本按 session 续跑打到 root agent 的隐式路径被 `send_message(agent_id, ...)` 显式替代。
 - 依赖 `SessionManager` 状态字段的既有测试/消费方需要同步改为读取 `AgentLifecycleManager`/`AgentSummary.status`。
 
