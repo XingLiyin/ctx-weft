@@ -16,7 +16,6 @@ _EXEMPT: dict[str, set[str]] = {
     "RunStateView": {
         "sessions", "tasks", "agents",   # 容器，各自单独序列化
         "target_event_id", "events_replayed",  # replay 专用，不属于快照状态
-        "extra", "snapshot_at",          # 死字段（总账 D3），待清理
     },
 }
 

@@ -104,10 +104,6 @@ class RunStateView:
     target_event_id: str | None = None
     events_replayed: int = 0
 
-    extra: dict[str, Any] = field(default_factory=dict)
-
-    snapshot_at: datetime | None = None
-
     # Full projections rebuilt from events
     sessions: dict[str, SessionView] = field(default_factory=dict)
     tasks: dict[str, TaskView] = field(default_factory=dict)
