@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.core.orchestrator.control_capability import ControlContext, report_task_outcome
 from ctx_weft.core.state.models import Task
@@ -125,7 +127,7 @@ def test_assessment_invalid_defaults_to_retry() -> None:
     assert t.observer_outcome == "retry"  # 'active' 不在工具允许集
 
 
-# ── ObserveStep 规则降级 ─────────────────────────────────────────────────────────
+# ── ObserveStep 机械判决（原 _rule_observe，Task 4 起不产摘要）─────────────────
 
 
 def _state(exit_reason: str, task: Task):
@@ -136,27 +138,33 @@ def _state(exit_reason: str, task: Task):
     )
 
 
-def test_rule_observe_mechanical_exit_is_retry() -> None:
+def test_mechanical_verdict_mechanical_exit_is_retry() -> None:
     for reason in ("max_turns", "context_limit"):
         t = _task()
-        v = ObserveStep()._rule_observe(_state(reason, t))
+        v = ObserveStep()._mechanical_verdict(_state(reason, t))
         assert v.task_outcome == "retry", reason
+        assert v.act_recap == ""  # 不产合成摘要（用户裁定）
         assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
-        assert t.observer_outcome == "retry"
+        # 机械判决只定结局、不写 task：原 _rule_observe 的 _apply_assessment 副作用已删。
+        assert t.observer_outcome is None
+        assert t.actor_done is False
 
 
-def test_rule_observe_normal_exit_is_success() -> None:
+def test_mechanical_verdict_normal_exit_is_success() -> None:
     t = _task()
-    v = ObserveStep()._rule_observe(_state("normal", t))
+    v = ObserveStep()._mechanical_verdict(_state("normal", t))
     assert v.task_outcome == "success"
+    assert v.act_recap == ""
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
+    assert t.observer_outcome is None
 
 
-def test_rule_observe_no_transcript_is_fail() -> None:
+def test_mechanical_verdict_no_transcript_is_fail() -> None:
     t = _task()
     state = SimpleNamespace(transcript=[], act_exit_reason="normal", task=t)
-    v = ObserveStep()._rule_observe(state)
+    v = ObserveStep()._mechanical_verdict(state)
     assert v.task_outcome == "fail"
+    assert v.act_recap == ""
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
@@ -236,3 +244,165 @@ def test_default_role_prompt_uses_two_fields():
         assert "act_recap" in text and "task_summary" in text, f"missing new fields in {rel}"
         assert "task_process_report" not in text, f"old field still present in {rel}"
 
+
+
+# ── 非 LLM 路径：机械判决 + 转 background observe（Task 4）────────────────────
+
+
+def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
+                    parent_task_id="t0", cancelled=False):
+    """ObserveStep.execute() 的最小搭台：默认「无 observe ROLE 的子任务」= 机械路径。"""
+    from ctx_weft.core.control.tokens import CancelToken
+    from ctx_weft.core.loop.driver import LoopContext, LoopState
+    from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session
+    from ctx_weft.protocols import MemoryAddress, ProviderContext
+    from ctx_weft.protocols.template import AgentTemplate, IdentityFacet
+    from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+    task = Task(
+        id="t1", session_id="s1", status="ACTIVE", assigned_agent_id="ag1",
+        creator_agent_id="ag1", parent_task_id=parent_task_id,
+        settings=NormalTaskSettings(),
+    )
+    template = None
+    if has_role:
+        template = AgentTemplate(
+            id="tpl1", name="t", version="1.0.0",
+            identity={"observe": IdentityFacet(text="ROLE")},
+            capability_refs=[], memory_config=None, loop_config=None,
+        )
+    agent = SimpleNamespace(
+        id="ag1",
+        loop_config=SimpleNamespace(max_turns_per_observe=1, compact_keep_last=2,
+                                    short_segment_token_threshold=0),
+        runtime={"llm_model": "mock"},
+        loop_guard=SimpleNamespace(context_limit=100_000, context_tokens=0),
+    )
+    state = LoopState(
+        run_id="r1",
+        session=Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING"),
+        task=task, agent=agent,
+        scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1"),
+        act_exit_reason=exit_reason,
+        transcript=[SimpleNamespace(tool_calls=[])] if transcript is None else transcript,
+        extra={"template": template},
+        resolved_model=SimpleNamespace(model="mock", account=""),
+    )
+
+    class _Bus:
+        async def emit(self, event):  # noqa: D102
+            pass
+
+    tok = CancelToken()
+    if cancelled:
+        tok.cancel()
+    ctx = LoopContext(
+        assembler=SimpleNamespace(),
+        llm=SimpleNamespace(tokenizer=HeuristicTokenizer()),
+        memory=InMemoryMemoryProvider(),
+        event_bus=_Bus(),
+        provider_ctx=ProviderContext(session_id="s1", tenant_id="default",
+                                     task_id="t1", agent_id="ag1"),
+        cancel_token=tok,
+    )
+    return state, ctx
+
+
+def _capture_launches(monkeypatch) -> list[str]:
+    launched: list[str] = []
+
+    def _fake(state, ctx, *, boundary):
+        launched.append(boundary)
+        return None
+
+    monkeypatch.setattr(
+        "ctx_weft.core.loop.steps.background_observe.launch_background_observe", _fake
+    )
+    return launched
+
+
+@pytest.mark.asyncio
+async def test_non_llm_path_emits_no_synthetic_summary(monkeypatch) -> None:
+    """机械判决路径不得产出任何合成摘要文本（用户裁定）。"""
+    _capture_launches(monkeypatch)
+    state, ctx = _mech_state_ctx()
+    outcome = await ObserveStep().execute(state, ctx)
+    assert outcome.state_patch["verdict"].act_recap == ""
+
+
+@pytest.mark.asyncio
+async def test_non_llm_path_launches_background_observe(monkeypatch) -> None:
+    """摘要改由 background observe 产。"""
+    launched = _capture_launches(monkeypatch)
+    state, ctx = _mech_state_ctx()
+    await ObserveStep().execute(state, ctx)
+    assert launched == ["mechanical"], "非 LLM 路径必须转 background observe"
+
+
+@pytest.mark.asyncio
+async def test_close_boundary_not_double_launched(monkeypatch) -> None:
+    """root + normal/actor_done 已在 close 边界 launch 过 → 机械路径不再重复 launch
+    （重复虽有 per-task 锁兜着，但会多发一对 TaskRecapStarted/Done）。"""
+    for reason, expected in [("normal", "normal"), ("actor_done", "finish")]:
+        launched = _capture_launches(monkeypatch)
+        state, ctx = _mech_state_ctx(exit_reason=reason, parent_task_id=None)
+        await ObserveStep().execute(state, ctx)
+        assert launched == [expected], reason
+
+
+@pytest.mark.asyncio
+async def test_mechanical_verdict_preserves_today_outcomes(monkeypatch) -> None:
+    """判决逐字不变：机械退出 → retry；正常/actor_done → success；空 transcript → fail。"""
+    _capture_launches(monkeypatch)
+    for exit_reason, expected in [
+        ("max_turns", "retry"), ("context_limit", "retry"),
+        ("normal", "success"), ("actor_done", "success"),
+    ]:
+        state, ctx = _mech_state_ctx(exit_reason=exit_reason)
+        outcome = await ObserveStep().execute(state, ctx)
+        assert outcome.state_patch["verdict"].task_outcome == expected, exit_reason
+
+    state, ctx = _mech_state_ctx(transcript=[])
+    outcome = await ObserveStep().execute(state, ctx)
+    assert outcome.state_patch["verdict"].task_outcome == "fail"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_skips_llm_observe(monkeypatch) -> None:
+    """取消时不跑 LLM ReAct，走机械判决 + background observe（observe 本身不中止）。"""
+    called = False
+
+    async def _never(*a, **kw):
+        nonlocal called
+        called = True
+        raise AssertionError("must not run LLM observe after cancel")
+
+    monkeypatch.setattr(ObserveStep, "_llm_observe", _never)
+    launched = _capture_launches(monkeypatch)
+    state, ctx = _mech_state_ctx(has_role=True, cancelled=True)
+    outcome = await ObserveStep().execute(state, ctx)
+    assert not called, "取消后不应再跑多轮 LLM observe"
+    assert outcome.next_step == "finalize", "observe 仍须走完，不得中止"
+    assert outcome.state_patch["verdict"].task_outcome == "success"
+    assert launched == ["mechanical"], "取消是降级，不是中止——摘要仍交 background observe"
+
+
+def test_no_mechanical_synthetic_summary_text_left_in_source() -> None:
+    """硬裁定守卫：仓内不得再出现任何机械合成的摘要文本。"""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[2] / "src"
+    banned = [
+        "[No actor execution recorded]",
+        "conversation round(s).",
+        "Tools used:",
+        "No tools were called.",
+        "Task completed.",
+    ]
+    hits = [
+        f"{p}: {phrase}"
+        for p in src.rglob("*.py")
+        for phrase in banned
+        if phrase in p.read_text(encoding="utf-8")
+    ]
+    assert not hits, hits

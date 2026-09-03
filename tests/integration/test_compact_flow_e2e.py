@@ -41,10 +41,29 @@ def _act_only_template() -> AgentTemplate:
     )
 
 
-async def test_context_limit_retry_folds_segment_e2e():
+async def test_context_limit_retry_without_recap_keeps_raw_and_defers_to_background_e2e(
+        monkeypatch):
+    """机械退出 retry 且**无可用 LLM observer** → 判决无摘要 → 段折降级保 raw，摘要交后台。
+
+    改前：`_rule_observe` 用机械合成文本（"Ran N conversation round(s)." 等）当 act_recap，
+    前台同步折出一条 TASK_COMPACT_SUMMARY。用户裁定禁止任何机械合成摘要后，机械判决的
+    act_recap 恒为空，`_fold_retry_segment` 按其既有口径「空则不折、段保 raw（不写占位摘要）」
+    降级——真摘要改由这里 launch 的 background observe（boundary="mechanical"）异步产，
+    下一轮 `_run_loop` 入口 `await_pending_background_observe` 保证它先落地。
+
+    `_fold_retry_segment` 真折叠那条路径由 tests/unit/test_observe_retry_fold.py 专测覆盖。
+    """
+    launched: list[str] = []
+
+    def _spy(state, ctx, *, boundary):
+        launched.append(boundary)
+        return None
+
+    monkeypatch.setattr(
+        "ctx_weft.core.loop.steps.background_observe.launch_background_observe", _spy)
+
     resolver = InlineAgentTemplateProvider()
-    # 本测试钉「retry 段折」路径本体：关短段免折门（mock 段仅几 token，
-    # 默认阈值 400 下会免折保 raw——那是另一条已单测的路径）。
+    # 关短段免折门，隔离出「空 recap 才是不折的原因」（短段免折是另一条已单测的路径）。
     tpl = _dc.replace(_act_only_template(),
                       loop_config=LoopConfig(short_segment_token_threshold=0))
     resolver.register(tpl)
@@ -58,19 +77,21 @@ async def test_context_limit_retry_folds_segment_e2e():
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_actonly", user_prompt="do a long task")
 
-    # 机械退出 → retry（非终态），本轮 attempt 折成段摘要、raw 删除、USER_PROMPT 保留
+    # 结局逐字不变：机械退出 → retry（非终态）
     assert state.verdict is not None and state.verdict.task_outcome == "retry"
     assert state.task.status == "PENDING"
     assert not getattr(state.task, "process_report", None)  # retry 不写 process_report
+    assert state.verdict.act_recap == "", "机械判决不得产出任何合成摘要"
+    assert launched == ["mechanical"], "摘要须交 background observe 产"
 
     mem = runtime.providers.get_memory()
     pctx = ProviderContext(session_id=state.session.id, agent_id=state.agent.id)
     n_summary = await mem.count_recent(state.scope, [T.TASK_COMPACT_SUMMARY], pctx)
     n_user = await mem.count_recent(state.scope, [T.USER_PROMPT], pctx)
     n_raw = await mem.count_recent(state.scope, [T.LLM_RESPONSE], pctx)
-    assert n_summary >= 1, "retry 应写至少一条 TASK_COMPACT_SUMMARY 段摘要"
+    assert n_summary == 0, "空 recap 不得写占位段摘要"
     assert n_user >= 1, "USER_PROMPT 锚必须保留"
-    assert n_raw == 0, "本轮 attempt 的 LLM_RESPONSE raw 应被折叠删除"
+    assert n_raw >= 1, "降级 = 段保 raw，信息不丢"
 
 
 async def test_normal_finish_still_works_e2e():

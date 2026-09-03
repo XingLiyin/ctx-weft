@@ -118,8 +118,9 @@ async def test_minimal_echo_loop() -> None:
     assert state.task.user_prompt == "say hello"
     assert state.verdict is not None
     assert state.verdict.task_outcome == "success"
-    # root agent 正常结束走规则降级 observer：act_recap 是机械总结，不回显文本
-    assert "conversation round" in state.verdict.act_recap
+    # root agent 正常结束走机械判决：只定结局、**不产任何摘要**（用户裁定：不允许机械
+    # 合成的摘要）。摘要由 close 边界的 background observe 异步产。
+    assert state.verdict.act_recap == ""
 
     # transcript 应有 1 个 turn；assistant 文本回显在 transcript（而非 verdict.act_recap）
     assert len(state.transcript) == 1

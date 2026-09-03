@@ -2,12 +2,15 @@
 
 miniAgents 对齐版：
 - 有 ROLE 配置 + 非 root-normal 场景 → LLM 多轮 ReAct（用 report_task_outcome 工具）
-- 其他情况 → 规则降级（从 transcript + exit_reason 推断）
+- 其他情况 → **机械判决**：只从 transcript + exit_reason 定三态结局，**不产任何摘要**；
+  摘要改由 background observe 异步产（用户裁定：不允许任何机械合成的摘要）。
 
-降级条件（按 task 排除）：
+走机械判决的场景：
   1. template 未配置 identity["observe"]（assigned agent 无 ROLE）
   2. root task（task.parent_task_id is None）——顶层任务无 parent 可上报，不需要 LLM observer
-  3. LLM 调用失败
+  3. LLM 调用失败，或耗尽轮次没调 report_task_outcome
+  4. 本 run 已被取消——不再烧多轮 LLM。注意这是**选路径**，不是检查点：observe 是
+     「整理现状」，取消到达时降级但仍走完并交出 verdict，绝不半途中止（用户裁定）。
 """
 
 from __future__ import annotations
@@ -246,15 +249,28 @@ class ObserveStep(Step):
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
         events: list[Any] = []
 
-        used_llm = self._should_use_llm(state)
-        if used_llm:
+        # 取消时不跑多轮 LLM observe：observe 是「整理现状」，**不中止**（用户裁定）——
+        # 这里读 token 只为**选路径**，绝不是检查点：不 raise_if_cancelled、不提前 return，
+        # observe 照常走完并交出 verdict（next_step="finalize"）。半途中止会留下既无判决、
+        # 也没整理干净记忆的 task，比多等几轮更糟。但也不该在用户已按下取消后再烧几轮
+        # LLM —— 降级走机械判决，摘要交后台 observe 产。
+        tok = getattr(ctx, "cancel_token", None)
+        cancelled = tok is not None and tok.is_cancelled
+
+        verdict: Verdict | None = None
+        if (not cancelled) and self._should_use_llm(state):
             try:
                 verdict = await self._llm_observe(state, ctx, events)
             except Exception as exc:
-                logger.warning("ObserveStep LLM call failed, falling back to rules: %s", exc)
-                verdict = self._rule_observe(state)
-        else:
-            verdict = self._rule_observe(state)
+                logger.warning(
+                    "ObserveStep LLM call failed, degrading to mechanical verdict: %s", exc)
+                verdict = None
+        # used_llm = 判决**真的**出自 LLM observer（不是「尝试过 LLM」）：LLM 抛异常或
+        # 耗尽轮次没调 report_task_outcome 时同样落机械判决，那份判决没有摘要，
+        # 一律要转 background observe 补。
+        used_llm = verdict is not None
+        if verdict is None:
+            verdict = self._mechanical_verdict(state)
 
         # 机械退出（max_turns/context_limit）：任务未完成、只是耗尽 turn/context，非终态——
         # 强制 retry 重排（覆盖 success/fail）；用 replace 保留 summary 与 reported 标记。
@@ -274,11 +290,20 @@ class ObserveStep(Step):
         # 单次终结点——task 只 close 一次，_close_report 槽写一次、弹一次，不存在乱序复用。
         # 注：纯文本暂停（plain_text 边界）由 act.py:_finish_plain_text_turn 单独触发，不经此处。
         # max_turns/context_limit 走同步 _fold_retry_segment；非 root 不触发（它们走 LLM observe）。
+        launched = False
         if (state.act_exit_reason in ("normal", "actor_done")
                 and verdict.task_outcome != "retry" and _is_own_root(state.task)):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
             boundary = "finish" if state.act_exit_reason == "actor_done" else "normal"
             launch_background_observe(state, ctx, boundary=boundary)
+            launched = True
+
+        # 机械判决没有摘要（用户裁定：不允许任何机械合成的摘要）→ 交后台产真 recap。
+        # 上面 close 边界那支已经 launch 过的不再重复：重复 launch 虽有 per-task 锁兜着，
+        # 但会多发一对 TaskRecapStarted/Done。
+        if not used_llm and not launched:
+            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+            launch_background_observe(state, ctx, boundary="mechanical")
 
         events.append(make_event(
             state, EventType.OBSERVE_COMPLETED,
@@ -303,7 +328,7 @@ class ObserveStep(Step):
         state: LoopState,
         ctx: LoopContext,
         events: list[Any],
-    ) -> Verdict:
+    ) -> Verdict | None:
         """LLM ReAct 循环：装配 observe prompt → 最多 max_turns_per_observe 轮 LLM 调用。
 
         每轮：若 LLM 调用 report_task_outcome → 立即返回 verdict；
@@ -363,44 +388,37 @@ class ObserveStep(Step):
                 reported=True,
             )
 
-        logger.warning("ObserveStep: LLM did not call report_task_outcome in %d rounds, falling back to rules", max_rounds)
-        return self._rule_observe(state)
+        # 没走成 report_task_outcome → 本次 LLM observe 视为未产出判决，交给调用方
+        # 落机械判决 + background observe（返回 None 而非在此合成，见 execute）。
+        logger.warning(
+            "ObserveStep: LLM did not call report_task_outcome in %d rounds, "
+            "degrading to mechanical verdict", max_rounds)
+        return None
 
-    # ── 规则降级 ───────────────────────────────────────────────────────────────
+    # ── 机械判决（无摘要）─────────────────────────────────────────────────────
 
-    def _rule_observe(self, state: LoopState) -> Verdict:
-        """不调 LLM，从 transcript + exit_reason 直接推断结果（miniAgents _rule_observe 对齐版）。
+    def _mechanical_verdict(self, state: LoopState) -> Verdict:
+        """无可用 LLM observer 时的判决：**只定结局，不产摘要**。
 
-        直接对 state.task 执行与 report_task_outcome 相同的 status 变更。
+        摘要由 background observe 异步产出（用户裁定：不允许任何机械合成的摘要）。
+        act_recap 留空——`_fold_retry_segment` 对空摘要的口径是「不折、段保 raw」
+        （见其 docstring），不会写占位。
+
+        三条映射逐字对齐删除前的 `_rule_observe` 结局，故 task 终态不变：
+          空 transcript                        → fail
+          max_turns / context_limit（机械退出）→ retry
+          normal / actor_done                  → success
+
+        不写 task 状态：判决三态经 FinalizeStep 的 RunOutcome 交 TaskManager 处置
+        （删掉的 `_rule_observe` 里那句 `_apply_assessment` 只写 observer_outcome /
+        task_summary / actor_done，均无下游依赖——observer_outcome 只被 LLM 路径回读，
+        actor_done 在下一轮 `TaskManager._run_task` 入口被重置为 False）。
         """
-        transcript = state.transcript
-        exit_reason = state.act_exit_reason
-
-        if not transcript:
-            verdict = Verdict(task_outcome="fail", act_recap="[No actor execution recorded]")
-            self._apply_assessment(state.task, verdict)
-            return verdict
-
-        tools_used = list({tc.name for turn in transcript for tc in turn.tool_calls})
-
-        lines: list[str] = [f"Ran {len(transcript)} conversation round(s)."]
-        if tools_used:
-            lines.append(f"Tools used: {', '.join(tools_used)}.")
-        else:
-            lines.append("No tools were called.")
-
-        if exit_reason in ("max_turns", "context_limit"):
-            # 机械退出 → retry（重排再跑，非终态，受 max_retries 兜底）；摘要即执行记录
-            lines.append("Actor reached its turn/context limit; will retry.")
-            outcome = "retry"
-        else:
-            # "normal"（LLM 自然停止）或 "actor_done"（控制工具退出）均视为成功
-            lines.append("Task completed.")
-            outcome = "success"
-
-        verdict = Verdict(task_outcome=outcome, act_recap=" ".join(lines))
-        self._apply_assessment(state.task, verdict)
-        return verdict
+        if not state.transcript:
+            return Verdict(task_outcome="fail", act_recap="")
+        if state.act_exit_reason in ("max_turns", "context_limit"):
+            return Verdict(task_outcome="retry", act_recap="")
+        return Verdict(task_outcome="success", act_recap="")
 
     @staticmethod
     def _apply_assessment(task: Task, verdict: Verdict) -> None:

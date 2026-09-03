@@ -192,12 +192,17 @@ async def test_observe_finish_fires_for_root(monkeypatch):
 # ── observe.py: child task does NOT fire ─────────────────────────────────────
 
 
-async def test_observe_child_task_does_not_fire(monkeypatch):
-    """child task (parent_task_id set, same agent) → launch_background_observe NOT called."""
+async def test_observe_child_task_does_not_fire_close_boundary(monkeypatch):
+    """child task（parent_task_id 非空、同 agent）→ 不触发 close 边界（finish/normal）。
+
+    Task 4 起它仍会 launch 一次，但边界是 "mechanical"：该子任务无 observe ROLE
+    （template=None）→ 走机械判决，判决无摘要，摘要交 background observe 补。
+    close 边界仍严格只属 root——mechanical 不在 _CLOSE_BOUNDARIES，不写 _close_report。
+    """
     launched = []
 
     def fake_launch(state, ctx, *, boundary=""):
-        launched.append((state.task.id,))
+        launched.append((state.task.id, boundary))
         return asyncio.ensure_future(asyncio.sleep(0))
 
     import ctx_weft.core.loop.steps.background_observe as bo_mod
@@ -213,7 +218,10 @@ async def test_observe_child_task_does_not_fire(monkeypatch):
 
     await ObserveStep().execute(state, ctx)
 
-    assert len(launched) == 0, f"Expected 0 launches for child task, got {len(launched)}"
+    from ctx_weft.core.loop.steps.background_observe import _CLOSE_BOUNDARIES
+    assert launched == [("t2", "mechanical")], launched
+    assert not [b for _, b in launched if b in _CLOSE_BOUNDARIES], (
+        f"child task must never take a close boundary, got {launched}")
 
 
 # ── act.py: soft-interrupt park fires for root ───────────────────────────────
