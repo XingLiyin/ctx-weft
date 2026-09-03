@@ -362,6 +362,12 @@ class SessionManager:
             max_concurrent=self.task_max_concurrent,
             task_max_retries=self.task_max_retries,
         )
+        # `push_task` 之前必须先注入 session：`TaskManager._emit` 取
+        # `self._session.tenant_id if self._session else "default"`，晚注入会让 root
+        # task 的 TaskCreated 落到 default 租户（总账 A5）。runtime 侧后续仍会再调一次
+        # `set_session`（`start_session`/`recover_session` 里另有用途——注入 llm 参数复用等），
+        # 幂等、原样保留。
+        task_manager.set_session(session)
         # root task 的 user_prompt 与 SESSION_CREATED 是同一份内容，故 event 侧载荷
         # 也是同一份——同样由调用方从原始 content 算好，不在这里重算（Task 3）。
         await task_manager.push_task(
