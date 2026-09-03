@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.errors import CtxWeftError
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.state.models import Agent, LoopGuard
@@ -98,6 +99,63 @@ class LifecycleManager:
     def template_id_of(self, agent_id: str) -> str:
         return self._agents[agent_id].template_id
 
+    async def load(
+        self,
+        agent_views: dict[str, AgentView],
+        *,
+        session_id: str,
+        tenant_id: str,
+        fallback_template_id: str,
+    ) -> int:
+        """恢复期喂入：把 reducer 折出的 `AgentView` 逐条装填进 registry。
+
+        「喂进来，不是查回去」——registry 不订阅 reducer、不订阅总线，装填之后
+        只读自己内存，绝不回落 scan 事件（与 `rebuild_hitl` 同一条纪律）。
+
+        `AgentView` 只有 id/spawn_depth/parent_agent_id/template_id 四个字段，
+        没有 memory_config/loop_config——这里用 `template_lookup` 重新解析出
+        真正的 template 配置（取代 `agents_from_projection` 留下的 dataclass
+        默认值，那是本 Task 有意修正的行为）。
+
+        `view.template_id` 为空（存量事件流子 agent 没发过 AgentInstantiated）
+        → 回落 `fallback_template_id`；模板解析失败 → `logger.warning` 后用
+        `MemoryConfig()`/`LoopConfig()` 默认值继续。**绝不抛**：这条路要在
+        `recover()` 的每个 session 上都跑通，抛一次就卡住整条恢复链——回落而非
+        报错的口径与 `_register_fallback` 一致。
+        """
+        self.register_session(
+            session_id, tenant_id=tenant_id, fallback_template_id=fallback_template_id,
+        )
+        ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
+        n = 0
+        for av in agent_views.values():
+            template_id = av.template_id or fallback_template_id
+            try:
+                template = await self.template_lookup.get_template(template_id, None, ctx=ctx)
+                resolved_template_id = template.id
+                memory_config = template.memory_config
+                loop_config = template.loop_config
+            except Exception:
+                logger.warning(
+                    "LifecycleManager.load: template %r unresolvable for agent %s; "
+                    "using default configs (recovery-time gap, degrading not crashing)",
+                    template_id, av.id,
+                )
+                resolved_template_id = template_id
+                memory_config = MemoryConfig()
+                loop_config = LoopConfig()
+            self._agents[av.id] = _AgentRecord(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                template_id=resolved_template_id,
+                parent_agent_id=av.parent_agent_id,
+                spawn_depth=av.spawn_depth,
+                memory_config=memory_config,
+                loop_config=loop_config,
+            )
+            n += 1
+        return n
+
     async def instantiate(
         self,
         *,
@@ -149,8 +207,14 @@ class LifecycleManager:
         if parent_agent_id is not None:
             # .get() + 回落而非裸下标：父 agent 若因跨重启未被本进程重新登记
             # （旧调用方直接递 Agent 对象、绕过了 registry），裸下标会把一次
-            # 「登记缺口」升级成一次崩溃——与 materialize 的既有口径一致。
-            parent_rec = self._agents.get(parent_agent_id) or self._register_fallback(parent_agent_id)
+            # 「登记缺口」升级成一次崩溃——与 materialize 的既有口径一致。这里手上
+            # 就有本次 instantiate 调用自己的 session_id/tenant_id——子 agent 的父
+            # 几乎必然在同一 session，传进去比 `_register_fallback` 内部「猜最近一次
+            # register_session 的会话」精确，消掉多 session 并发恢复时猜错 tenant
+            # 的那类风险（Task 3 评审 deferred minor，Task 5 顺手收紧这一个调用点）。
+            parent_rec = self._agents.get(parent_agent_id) or self._register_fallback(
+                parent_agent_id, session_id=session_id, tenant_id=tenant_id,
+            )
             spawn_depth = parent_rec.spawn_depth + 1
             if spawn_depth > template.loop_config.max_spawn_depth:
                 # SpawnRejected 是 AgentSpawned 的另一半：被拒的 spawn 根本不会有
@@ -246,7 +310,7 @@ class LifecycleManager:
 
         未登记的 id（恢复期缺口——比如跨重启后本进程的 registry 是空的）走「按
         session 的 fallback_template_id 就地补登记 + WARNING」而不是 KeyError：
-        回落而非报错是刻意的，见 `agents_from_projection` docstring 的同一口径——
+        回落而非报错是刻意的，与 `load()` 装填时模板解析失败的口径一致——
         授权按模板做策略，重启后把未知模板判成「无权限」会让老会话直接跑不动，
         把恢复期的一个缺口变成崩溃是净损失。
 
@@ -272,23 +336,35 @@ class LifecycleManager:
             created_at=now_utc(),
         )
 
-    def _register_fallback(self, agent_id: str) -> _AgentRecord:
+    def _register_fallback(
+        self, agent_id: str, *, session_id: str | None = None, tenant_id: str | None = None,
+    ) -> _AgentRecord:
         """未登记 id 的一次性补登记（materialize 的降级路径，instantiate 的父查找也借用它）。
 
         本方法**不**代表「除 instantiate 外还有人改已存在的 record」——它只在
         record 从未存在过时创建一条，且创建后立刻幂等（第二次直接命中 `_agents.get`，
         不再触发警告），不会覆盖任何已登记的真实状态。
 
-        session 语境（tenant/fallback 模板）取「最近一次 register_session 的会话」：
-        materialize() 签名里没有 session_id 参数，多会话并发登记时这是有意的近似——
-        恢复期的一次缺口容忍度本就高于严格授权路径。
+        `session_id`/`tenant_id`：调用方若手上已经有确凿的 session 语境（比如
+        instantiate 的父查找——子 agent 的父几乎必然在同一次 instantiate 调用
+        的 session 里），传进来直接用，不猜。省略时才回落「最近一次
+        register_session 的会话」这个近似——materialize() 签名里没有 session_id
+        参数，是那条路径专属的容忍度（恢复期的一次缺口容忍度本就高于严格授权
+        路径），不是本方法本身必须用猜的。
         """
         logger.warning(
-            "LifecycleManager: materialize() saw unregistered agent %s; "
+            "LifecycleManager: unregistered agent %s; "
             "falling back to a session default (recovery-time gap, degrading not crashing)",
             agent_id,
         )
-        if self._sessions:
+        if session_id is not None and session_id in self._sessions:
+            _sid, defaults = session_id, self._sessions[session_id]
+        elif session_id is not None:
+            _sid = session_id
+            defaults = _SessionDefaults(
+                tenant_id=tenant_id or "default", fallback_template_id="",
+            )
+        elif self._sessions:
             _sid, defaults = next(reversed(self._sessions.items()))
         else:
             defaults = _SessionDefaults(tenant_id="default", fallback_template_id="")

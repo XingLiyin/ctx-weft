@@ -1323,7 +1323,6 @@ class CtxWeftRuntime:
         task_manager: TaskManager,
         default_run_id: str,
         handle: "RunHandle | None" = None,
-        pre_resolved_agents: dict[str, "Agent"] | None = None,
     ) -> "_SessionTaskRunner":
         """构造本 session/run 的两阶段 runner（原闭包工厂的显式化）。"""
         return _SessionTaskRunner(
@@ -1331,7 +1330,6 @@ class CtxWeftRuntime:
             lm=lm, memory=memory, llm_account=llm_account, llm_model=llm_model,
             task_manager=task_manager,
             default_run_id=default_run_id, handle=handle,
-            pre_resolved_agents=pre_resolved_agents,
         )
 
     # ── Crash recovery ───────────────────────────────────────────────────────
@@ -1404,7 +1402,6 @@ class CtxWeftRuntime:
             raise RuntimeError(f"Session {session_id!r} has no template_id — cannot recover")
 
         from ctx_weft.core.control.converters import (
-            agents_from_projection,
             session_from_projection,
             task_from_projection,
         )
@@ -1484,8 +1481,8 @@ class CtxWeftRuntime:
         task_manager.restore(all_tasks, terminal_ids, parked_task_ids=parked_task_ids | inflight)
 
         # 各 agent 取自己的 template_id（AgentInstantiated 事件投影而来）；投影里没有的
-        # （存量事件流）回落 session 模板——见 agents_from_projection 的说明。
-        pre_resolved = agents_from_projection(
+        # （存量事件流）回落 session 模板——喂进 registry，registry 就是那份缓存。
+        await self._agent_registry.load(
             view.agents,
             session_id=session.id,
             tenant_id=session.tenant_id,
@@ -1502,7 +1499,6 @@ class CtxWeftRuntime:
             llm_model=session.llm_model,
             task_manager=task_manager,
             default_run_id=generate_id("run"),
-            pre_resolved_agents=pre_resolved,
         ))
         # act 纯文本暂停（wait_for_user）冷应答：把用户回复注入 task 层并重排（reconcile 覆盖不到,见上）。
         if user_reply is not None:
@@ -2663,8 +2659,9 @@ class CtxWeftRuntime:
 class _SessionTaskRunner:
     """两阶段 TaskRunner（每个 owner-TM 一个实例）：assemble 装配执行 agent，execute 驱动 step loop。
 
-    原 _make_task_runner 闭包的显式化：闭包捕获 → 实例字段；_resolved_agents
-    闭包缓存 → 实例属性（恢复播种 = 构造参数 pre_resolved_agents）。
+    原 _make_task_runner 闭包的显式化：闭包捕获 → 实例字段。恢复播种不再靠
+    per-runner 缓存——agent 身份/配置的唯一住所是 runtime 级 `LifecycleManager`
+    registry（`lm`），恢复路径由 `recover_session` 显式调 `lm.load()` 装填。
     assigned_agent_id 回填 / started_at / TASK_STARTED 均归 TaskManager（两阶段契约）。
     """
 
@@ -2682,7 +2679,6 @@ class _SessionTaskRunner:
         task_manager: TaskManager,
         default_run_id: str,
         handle: "RunHandle | None" = None,
-        pre_resolved_agents: dict[str, "Agent"] | None = None,
     ) -> None:
         self._runtime = runtime
         self._session = session
@@ -2695,7 +2691,6 @@ class _SessionTaskRunner:
         self._task_manager = task_manager
         self._default_run_id = default_run_id
         self._handle = handle
-        self._resolved_agents: dict[str, Agent] = dict(pre_resolved_agents or {})
 
     # ── 阶段 1：装配 ─────────────────────────────────────────────────────────
 
@@ -2757,7 +2752,6 @@ class _SessionTaskRunner:
                             memory=self._memory, session_id=sess_id, tenant_id=tenant_id,
                         )
                 initial = await self._reconcile_or(t, agent, "prepare")
-                self._resolved_agents[agent.id] = agent
                 return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
                                     initial_step=initial, run_id=generate_id("run"))
 
@@ -2771,7 +2765,6 @@ class _SessionTaskRunner:
                     reserved_output_tokens=self._session.reserved_output_tokens,
                 )
                 initial = await self._reconcile_or(t, agent, "prepare")
-                self._resolved_agents[agent.id] = agent
                 return AgentBinding(agent_id=agent.id, agent=agent, template=self._template,
                                     initial_step=initial, run_id=self._default_run_id)
 

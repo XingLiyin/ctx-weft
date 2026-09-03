@@ -5,9 +5,8 @@ Used by resume_session to rebuild Session/Task objects from event replay.
 
 from __future__ import annotations
 
-from ctx_weft.core.control.types import AgentView, SessionView, TaskView
-from ctx_weft.core.state.models import Agent, Session, Task
-from ctx_weft.core.state.models import deserialize_settings
+from ctx_weft.core.control.types import SessionView, TaskView
+from ctx_weft.core.state.models import Session, Task, deserialize_settings
 from ctx_weft.core.utils import as_utc
 
 
@@ -70,32 +69,3 @@ def task_from_projection(proj: TaskView) -> Task:
         finished_at=_as_utc_opt(proj.finished_at),
         user_prompt_in_memory=prompt_in_memory,
     )
-
-
-def agents_from_projection(
-    agent_views: dict[str, AgentView],
-    *,
-    session_id: str,
-    tenant_id: str,
-    fallback_template_id: str,
-) -> dict[str, Agent]:
-    """从投影重建 agent 实例（冷 resume 的 pre_resolved 种子）。
-
-    `template_id` 优先取 AgentView 自己的——它来自 `AgentInstantiated` 事件，是事件流里
-    唯一记录 agent 出身的地方（树形推算得不出模板）。存量事件流里子 agent 没发过该事件，
-    投影中该字段为空 → 回落 session 模板，与本函数抽出前的行为逐字一致，零数据迁移。
-
-    回落而非报错是刻意的：授权按模板做策略，重启后把未知模板判成"无权限"会让老会话
-    直接跑不动；沿用旧行为至少与重启前一致。
-    """
-    return {
-        av.id: Agent(
-            id=av.id,
-            session_id=session_id,
-            template_id=av.template_id or fallback_template_id,
-            tenant_id=tenant_id,
-            spawn_depth=av.spawn_depth,
-            parent_agent_id=av.parent_agent_id,
-        )
-        for av in agent_views.values()
-    }
