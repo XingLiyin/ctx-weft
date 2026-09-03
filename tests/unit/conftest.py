@@ -91,6 +91,11 @@ async def fake_state_ctx():
         id="t1",
         parent_task_id=None,
         title="",
+        # 总账 C5（批次二 Task 5）：background recap 现在自己的 run 也发
+        # RunStarted/RunFinished，`final_status` 取 `state.task.status`（照抄
+        # `_run_loop` 的实际发射点）——缺了这个字段就不是「测试假绿」而是
+        # AttributeError 直接炸穿，所以补上，不是行为放宽。
+        status="ACTIVE",
         user_prompt="hello user",
         user_prompt_in_memory=True,
         process_report="",
