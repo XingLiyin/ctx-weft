@@ -748,6 +748,36 @@ class TaskManager:
         exc.retriable=False（如 LLMCallError 401 认证失败、CONTEXT_OVERFLOW）时跳过重试直接挂起，
         避免对确定性错误做无效重试。
         """
+        task = self._tasks.get(task_id)
+        if task is not None and task.status in _TERMINAL_STATUSES:
+            # 终态不复活（见 apply_run_outcome 的同源守卫）：熔断 trip 可能已把这个
+            # task 判 FAILED，此后的装配失败属内部清场，不该把写定的终态盖回非终态、
+            # 也不再发任何事件。
+            #
+            # 但队列簿记的清场不能省：本方法只在 `_run_task` 的 assemble 异常分支被
+            # 调用，而 `_run_task` 是 `drain()` 把 task_id 加进 `_running_tasks`（并
+            # mark_running 进队列）之后才 `asyncio.create_task` 出来的，所以此刻
+            # task_id 必然还占着一个 running 槽位——不摘掉它会话就会永久少一个可派
+            # 发的并发槽位（tests/unit/test_terminal_guard_on_assembly_failure.py 的
+            # test_terminal_guard_still_clears_running_bookkeeping 测的正是这个）。
+            # drain() 之后让别的排队任务照常派发；trip 场景下 `_cancelled` 已置位，
+            # drain() 本就空转，调用是安全的。
+            #
+            # 到此为止——不再跟 `_suspend_task_interrupted` 尾段一样调 is_done() /
+            # `_fire_session_idle()`。这个 task 走到本分支时已经是终态：它的终态要么
+            # 是熔断 trip 判的（`_trip_failure_threshold` 第 8 步已经同步跑完
+            # `_fire_session_done()`，会话早已收尾），要么是 observer 判 fail 经
+            # `on_task_finished` 判的（那条路自己就会在同一次调用里做完 is_done() /
+            # 收尾判断）。两条路都已经把「会话是不是完了」回答过一次；此处再报一次
+            # "idle"（暗示"挂起等恢复"）对一个已经终态收场的会话是错的信号，且
+            # `_on_session_idle` 回调不是幂等收尾专用的 `_on_session_done`，不该在
+            # 这里替它多按一次。
+            async with self._lock:
+                self._running_tasks.discard(task_id)
+                self._running_agents.pop(task_id, None)
+                self._queue.unmark_running(task_id)
+            await self.drain()
+            return
         # 不可重试的错误（如认证失败 / 上下文溢出），不重试、直接挂起等恢复
         if exc is not None and not getattr(exc, "retriable", True):
             logger.warning(
@@ -757,7 +787,6 @@ class TaskManager:
             await self._suspend_task_interrupted(task_id, error, exc, reason=reason)
             return
 
-        task = self._tasks.get(task_id)
         if task is not None and task.retry_count < task.max_retries:
             task.retry_count += 1
             task.status = "PENDING"
