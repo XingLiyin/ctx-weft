@@ -230,10 +230,8 @@ class SessionManager:
             "context_limit": context_limit,
             "reserved_output_tokens": reserved_output_tokens,
         })
-        await self._emit(EventType.AGENT_INSTANTIATED, sid, tenant_id, timestamp=ts, agent_id=agent.id, payload={
-            "template_id": template.id,
-            "template_version": template.version,
-        })
+        # AgentInstantiated 已由 LifecycleManager.instantiate（上面那次调用）发出——
+        # root/子 agent 现在共用同一条发射路径，此处不再重复发。
         self.register_session(sid, tenant_id=tenant_id)
 
         root_task, task_manager = await self._make_root_task_manager(

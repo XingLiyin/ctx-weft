@@ -15,6 +15,7 @@ from ctx_weft.core.state.models import Agent, LoopGuard
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import LoopConfig, MemoryConfig
 from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.protocols.events import Event, EventBus, EventType
 from ctx_weft.protocols.template import AgentTemplate
 
 # LoopGuard() 的字段默认值——instantiate() 末尾水合时没有调用方给的真实窗口参数
@@ -32,6 +33,16 @@ class UnknownCapabilityError(CtxWeftError):
 
 class SpawnDepthExceeded(CtxWeftError):
     pass
+
+
+class _NullEventBus:
+    """event_bus 的零参数默认值：existing 直接 new LifecycleManager 的测试/工具代码
+    （不关心事件、构造时不给 event_bus）保持零事件的旧行为，而不是被迫全部改造。
+    生产路径（runtime.py）总是显式传入真正的 EventBus。
+    """
+
+    async def emit(self, ev) -> None:
+        return None
 
 
 @dataclass
@@ -63,6 +74,7 @@ class LifecycleManager:
     """
 
     template_lookup: "TemplateLookup"
+    event_bus: EventBus = field(default_factory=_NullEventBus)
     _agents: dict[str, _AgentRecord] = field(default_factory=dict)
     _sessions: dict[str, _SessionDefaults] = field(default_factory=dict)
 
@@ -92,14 +104,19 @@ class LifecycleManager:
         session_id: str,
         tenant_id: str,
         parent_agent_id: str | None = None,
+        task_id: str | None = None,
         ctx: ProviderContext | None = None,
     ) -> tuple[Agent, AgentTemplate]:
-        """真新建：解析 template，生成新 id，登记 record。
+        """真新建：解析 template，生成新 id，登记 record，发出身事件。
 
         template_id 须为规范形式 provider:name；裸 id 由 TemplateLookup 抛 TemplateNotFoundError。
-        深度超限抛 SpawnDepthExceeded。
+        深度超限发 SpawnRejected 并抛 SpawnDepthExceeded。
 
         ★ 无 existing_agent_id 参数——水合走 materialize()，两件事不再共用一个入口。
+
+        task_id：AgentSpawned / SpawnRejected 的 envelope 需要——两条事件的主语都是
+        「围绕这次 spawn 尝试」，task_id 标的是被 spawn 出来要跑的那个子任务。root
+        agent 实例化没有 task（session 尚未建 root task），传 None 即可。
         """
         resolve_ctx = ctx or ProviderContext(session_id=session_id, tenant_id=tenant_id)
         template: AgentTemplate = await self.template_lookup.get_template(
@@ -114,6 +131,28 @@ class LifecycleManager:
             parent_rec = self._agents.get(parent_agent_id) or self._register_fallback(parent_agent_id)
             spawn_depth = parent_rec.spawn_depth + 1
             if spawn_depth > template.loop_config.max_spawn_depth:
+                # SpawnRejected 是 AgentSpawned 的另一半：被拒的 spawn 根本不会有
+                # agent 诞生，AgentInstantiated 覆盖不到，不发这条则事件流里看不出
+                # 「有人想 spawn 但被挡了」。envelope 的 agent_id 填**父**——子 agent
+                # 没诞生，没有 id 可填，而这条事件的主语正是发起 spawn 的那个 agent。
+                await self.event_bus.emit(Event(
+                    id=generate_id("evt"),
+                    run_id=None,
+                    sequence=0,
+                    session_id=session_id,
+                    type=EventType.SPAWN_REJECTED,
+                    timestamp=now_utc(),
+                    tenant_id=tenant_id,
+                    task_id=task_id,
+                    agent_id=parent_agent_id,
+                    payload={
+                        "reason": "depth_limit",
+                        # 恒 False：spawn 被拒后降级为 inline 执行的能力今天不存在，
+                        # 如实反映现状而不是留一个骗人的 True。
+                        "fallback_to_inline": False,
+                        "attempted_subtask_id": task_id,
+                    },
+                ))
                 raise SpawnDepthExceeded(
                     f"Max spawn depth {template.loop_config.max_spawn_depth} exceeded "
                     f"(current: {spawn_depth})"
@@ -139,6 +178,43 @@ class LifecycleManager:
             context_limit=_DEFAULT_CONTEXT_LIMIT,
             reserved_output_tokens=_DEFAULT_RESERVED_OUTPUT_TOKENS,
         )
+
+        if parent_agent_id is not None:
+            # 先记「这次 spawn 被准了」，再记「诞生的 agent 长这样」——读事件流的
+            # 因果顺序。AgentSpawned 的主语是**父 agent 的一次 spawn 动作**（与
+            # SpawnRejected 配对，构成对每次 spawn 尝试的完整审计）；下面那条的
+            # 主语是这个 agent 自己的出身配置。
+            await self.event_bus.emit(Event(
+                id=generate_id("evt"),
+                run_id=None,
+                sequence=0,
+                session_id=session_id,
+                type=EventType.AGENT_SPAWNED,
+                timestamp=now_utc(),
+                tenant_id=tenant_id,
+                task_id=task_id,
+                agent_id=agent_id,
+                payload={
+                    "parent_agent_id": parent_agent_id,
+                    "subtask_id": task_id,
+                },
+            ))
+        # 事件流里唯一记录「该 agent 用的哪个模板」的地方——`_rebuild_agents` 从
+        # session/task 树推算 AgentView，推得出 parent/depth，推不出模板。root 与
+        # 子 agent 现在共用同一条发射路径，不再分落 session_manager 与 runtime 两处。
+        await self.event_bus.emit(Event(
+            id=generate_id("evt"),
+            run_id=None,
+            sequence=0,
+            session_id=session_id,
+            type=EventType.AGENT_INSTANTIATED,
+            timestamp=now_utc(),
+            tenant_id=tenant_id,
+            task_id=task_id,
+            agent_id=agent_id,
+            payload={"template_id": template.id, "template_version": template.version},
+        ))
+
         return agent, template
 
     def materialize(

@@ -59,7 +59,7 @@ from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
-from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager, SpawnDepthExceeded
+from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
@@ -569,7 +569,8 @@ class CtxWeftRuntime:
         # Agent 注册表：runtime 级长生命周期组件，_agents 是 agent 身份与配置的唯一住所。
         # 从前 LifecycleManager 是每次调用 new 一个的临时对象，见
         # docs/events-v2.md §2.1.1（与 SessionManager 同形的那次晋升）。
-        self._agent_registry = LifecycleManager(template_lookup=self._template_lookup)
+        self._agent_registry = LifecycleManager(
+            template_lookup=self._template_lookup, event_bus=self._event_bus)
 
         # Capability cache (per-session, shared across all agents in runtime)
         self._capability_cache = CapabilityCache()
@@ -2715,98 +2716,33 @@ class _SessionTaskRunner:
                     await self._runtime._template_lookup.resolve_qualified(s.subagent_template, ctx)
                     if s.subagent_template else ""
                 ) or self._template_id
-                # 本次是否**真的**新建一个 agent：assigned 已有值时下面只是按同一 id 重新
-                # 水合对象（重派发 / 恢复），那不是一次实例化，不该再发出身事件——分支由
-                # t.assigned_agent_id 是否为空决定：真新建走 instantiate，水合走
-                # materialize（后者零事件、只读 record，不会把 spawn_depth 重算成 0）。
-                is_new_agent = not t.assigned_agent_id
-                try:
-                    if is_new_agent:
-                        agent, tmpl = await self._lm.instantiate(
-                            template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
-                            parent_agent_id=t.creator_agent_id, ctx=ctx,
-                        )
-                    else:
-                        agent = self._lm.materialize(
-                            t.assigned_agent_id,
-                            context_limit=self._session.context_limit,
-                            reserved_output_tokens=self._session.reserved_output_tokens,
-                        )
-                        # materialize 不返回 template；沿用原行为按 sub_tmpl_id 重新解析
-                        # （与 create 分支同一个来源，agent 出身早已由 AgentInstantiated
-                        # 事件钉住，这里只是要一份可用的 AgentTemplate 对象）。
-                        tmpl = await self._runtime._template_lookup.get_template(
-                            sub_tmpl_id, None, ctx=ctx,
-                        )
-                except SpawnDepthExceeded:
-                    # SpawnRejected 是 AgentSpawned 的另一半：被拒的 spawn 根本不会有
-                    # agent 诞生，AgentInstantiated 覆盖不到，不发这条则事件流里看不出
-                    # 「有人想 spawn 但被挡了」。envelope 的 agent_id 填**父**——子 agent
-                    # 没诞生，没有 id 可填，而这条事件的主语正是发起 spawn 的那个 agent。
-                    await self._runtime._event_bus.emit(Event(
-                        id=generate_id("evt"),
-                        run_id=None,
-                        sequence=0,
-                        session_id=sess_id,
-                        type=EventType.SPAWN_REJECTED,
-                        timestamp=now_utc(),
-                        tenant_id=tenant_id,
-                        task_id=t.id,
-                        agent_id=t.creator_agent_id or None,
-                        payload={
-                            "reason": "depth_limit",
-                            # 恒 False：spawn 被拒后降级为 inline 执行的能力今天不存在，
-                            # 如实反映现状而不是留一个骗人的 True。
-                            "fallback_to_inline": False,
-                            "attempted_subtask_id": t.id,
-                        },
-                    ))
-                    raise
+                # 分支判据：t.assigned_agent_id 是否为空。真新建走 instantiate——
+                # Registry 内部会按因果顺序发 AgentSpawned/SpawnRejected/AgentInstantiated；
+                # 已有值时只是按同一 id 重新水合对象（重派发 / 恢复），走 materialize
+                # （零事件、只读 record，不会把 spawn_depth 重算成 0）。SpawnDepthExceeded
+                # 由 instantiate 内部发完 SpawnRejected 后原样上抛，此处不再捕获。
+                if not t.assigned_agent_id:
+                    agent, tmpl = await self._lm.instantiate(
+                        template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
+                        parent_agent_id=t.creator_agent_id, task_id=t.id, ctx=ctx,
+                    )
+                else:
+                    agent = self._lm.materialize(
+                        t.assigned_agent_id,
+                        context_limit=self._session.context_limit,
+                        reserved_output_tokens=self._session.reserved_output_tokens,
+                    )
+                    # materialize 不返回 template；沿用原行为按 sub_tmpl_id 重新解析
+                    # （与 create 分支同一个来源，agent 出身早已由 AgentInstantiated
+                    # 事件钉住，这里只是要一份可用的 AgentTemplate 对象）。
+                    tmpl = await self._runtime._template_lookup.get_template(
+                        sub_tmpl_id, None, ctx=ctx,
+                    )
                 agent = _dc.replace(agent, loop_guard=LoopGuard(
                     context_limit=self._session.context_limit,
                     reserved_output_tokens=self._session.reserved_output_tokens,
                 ))
                 t.assigned_agent_id = agent.id
-                if is_new_agent:
-                    # 先记「这次 spawn 被准了」，再记「诞生的 agent 长这样」——读事件流的
-                    # 因果顺序。AgentSpawned 的主语是**父 agent 的一次 spawn 动作**（与
-                    # SpawnRejected 配对，构成对每次 spawn 尝试的完整审计）；下面那条的
-                    # 主语是这个 agent 自己的出身配置。两者都发在同一决定点上：唯一的
-                    # 权限门（深度检查）在 LifecycleManager.instantiate 里、派发时才跑，若改在
-                    # delegate_task 处发，会出现「先 Spawned、后 Rejected」的矛盾事件对。
-                    await self._runtime._event_bus.emit(Event(
-                        id=generate_id("evt"),
-                        run_id=None,
-                        sequence=0,
-                        session_id=sess_id,
-                        type=EventType.AGENT_SPAWNED,
-                        timestamp=now_utc(),
-                        tenant_id=tenant_id,
-                        task_id=t.id,
-                        agent_id=agent.id,
-                        payload={
-                            # creator_agent_id 而非 parent_agent.id：后者依赖
-                            # _resolved_agents 的内存命中，跨重启不稳。
-                            "parent_agent_id": t.creator_agent_id,
-                            "subtask_id": t.id,
-                        },
-                    ))
-                    # 事件流里唯一记录「该 agent 用的哪个模板」的地方——`_rebuild_agents`
-                    # 从 session/task 树推算 AgentView，推得出 parent/depth，推不出模板。
-                    # root 的对应发射在 SessionManager.create_session；此处补上子 agent 那条，
-                    # 否则冷 resume 的 pre_resolved 只能把每个 agent 都填成 session root 的模板。
-                    await self._runtime._event_bus.emit(Event(
-                        id=generate_id("evt"),
-                        run_id=None,
-                        sequence=0,
-                        session_id=sess_id,
-                        type=EventType.AGENT_INSTANTIATED,
-                        timestamp=now_utc(),
-                        tenant_id=tenant_id,
-                        task_id=t.id,
-                        agent_id=agent.id,
-                        payload={"template_id": tmpl.id, "template_version": tmpl.version},
-                    ))
                 if s.inherit_memory and not t.user_prompt_in_memory:
                     # Parented sub-tasks copy from their parent; a root turn dispatched
                     # straight to a sub-agent has no parent_task_id, so fall back to the
