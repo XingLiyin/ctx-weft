@@ -4,7 +4,7 @@
 
 **Goal:** 清掉全部死代码与死值域，修四条小而真的行为缺陷，加固三道静态守卫，并把文档漂移一次性收干净。
 
-**Architecture:** 七个任务。前两个清死代码（枚举/字段/变量/冗余写），中间三个各修一类真缺陷（租户漏填、终态守卫缺失、payload 不对称 / sequence 重号 / 孤儿 run），第六个加固守卫（字符串形态 + cwd 依赖 + 补零覆盖的分支），第七个收文档漂移。**不引入任何新契约** —— 需要新事件或新 View 字段的四条（A8/A9/B4/C4）留给批次三。
+**Architecture:** 八个任务（T8 为执行中按用户要求插入）。前两个清死代码（枚举/字段/变量/冗余写），中间三个各修一类真缺陷（租户漏填、终态守卫缺失、payload 不对称 / sequence 重号 / 孤儿 run），第六个加固守卫（字符串形态 + cwd 依赖 + 补零覆盖的分支），第七个收文档漂移。**不引入任何新契约** —— 需要新事件或新 View 字段的四条（A8/A9/B4/C4）留给批次三。
 
 **Tech Stack:** Python **3.11.4**（实测；不要用 3.12 才有的特性），事件溯源（`EventType` / reducer / `*View` 投影 / 快照），pytest，ruff。
 
@@ -725,3 +725,142 @@ T1 产出的「定义即必须发射」守卫会约束 T5 —— **T5 若新增�
   brief 已要求两条路都不通就停。
 - T1 删枚举成员虽已核实安全，但**若 golden 或测试里出现被删的类型名会红** ——
   那是好事（说明有引用），停下来报告。
+
+---
+
+## Task 8: 用户取消会话时一并取消未决的 ask_user
+
+**Files:**
+- Modify: `src/ctx_weft/core/runtime.py`（`cancel_session`）
+- Modify: `src/ctx_weft/core/hitl/service.py`（`cancel` 的 docstring）
+- Test: `tests/unit/test_cancel_session_hitl.py`（新建）
+
+**Interfaces:**
+- Consumes: `CtxWeftRuntime._cancel_session_hitl(session_id)`（已存在，熔断 trip 在用）
+- Produces: 无新接口
+
+**背景（总账 A10，用户追问引出）**
+
+`HitlService.cancel()` 能用，发的是 `HitlResolved{outcome: "cancelled"}`
+（不是 `HitlCancelled`——那是 L 档旧名，本批次 Task 1 已确认保留）。
+但它在 `src/` 里**只有一个注入点**：`runtime.py:1159` 把 `_cancel_session_hitl`
+注入给**熔断 trip 序列的第 3 步**。
+
+而 `cancel_session`（用户主动取消）的三步 ——
+`task_manager.cancel_all(...)` → 取消 run token → `_release_session` ——
+**都不碰 HITL registry**。
+
+**后果**：用户在某个 task 正等 ask_user 时取消会话，
+task 被清掉、会话正确落 `SessionFinished{CANCELED}`，
+但**那条 HITL 请求仍留在 registry 里 pending，事件流里没有终局事件**。
+于是 `rebuild_hitl`（它按「有 `HitlOpened` 无终局事件」折 pending）
+会在**重启后把它当未决恢复出来** —— 一个已取消会话的提问又活了。
+
+**旁证**：`HitlService.cancel` 的 docstring 自称服务「会话关闭 / 熔断」两种场合，
+**「会话关闭」那半从未实现**。
+
+- [ ] **Step 1: 写失败的测试**
+
+新建 `tests/unit/test_cancel_session_hitl.py`：
+
+```python
+"""用户取消会话时，未决的 ask_user 必须一并终局（总账 A10）。
+
+不终局的代价不在当下——当下那个 task 已经被 cancel_all 清掉了——
+而在**重启之后**：`rebuild_hitl` 按「有 HitlOpened 无终局事件」折 pending，
+于是一个已取消会话的提问会被当成未决恢复出来。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from ctx_weft.core.hitl.constants import HITL_OUTCOME_CANCELLED
+from ctx_weft.protocols.events import EventType
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_resolves_pending_hitl(runtime_with_pending_hitl):
+    rt, bus, session_id, hitl_id = runtime_with_pending_hitl
+
+    await rt.cancel_session(session_id)
+
+    resolved = [e for e in bus.events if e.type == EventType.HITL_RESOLVED]
+    assert len(resolved) == 1, "未决的 ask_user 没有被终局"
+    assert resolved[0].payload["hitl_id"] == hitl_id
+    assert resolved[0].payload["outcome"] == HITL_OUTCOME_CANCELLED
+    assert rt.hitl_registry.list_pending(session_id=session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_hitl_cancelled_before_session_terminal(runtime_with_pending_hitl):
+    """HitlResolved 必须先于 SessionFinished——与熔断 trip 序列同一条纪律。"""
+    rt, bus, session_id, _ = runtime_with_pending_hitl
+
+    await rt.cancel_session(session_id)
+
+    types = [e.type for e in bus.events]
+    assert EventType.HITL_RESOLVED in types
+    assert EventType.SESSION_FINISHED in types
+    assert types.index(EventType.HITL_RESOLVED) < types.index(EventType.SESSION_FINISHED), (
+        "已取消会话的 HITL 终局事件晚于会话终态"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_without_pending_hitl_is_noop(runtime_without_hitl):
+    """没有未决 HITL 时不该多发任何 HITL 事件。"""
+    rt, bus, session_id = runtime_without_hitl
+    await rt.cancel_session(session_id)
+    assert [e for e in bus.events if e.type == EventType.HITL_RESOLVED] == []
+```
+
+`runtime_with_pending_hitl` / `runtime_without_hitl` 要你自己写 ——
+**先读 `tests/unit/test_runtime_hitl_wiring.py` 与 `tests/unit/test_hitl_recovery_v2.py`**，
+它们已有造真 runtime + 开 HITL 的搭台，照其风格。
+`HITL_OUTCOME_CANCELLED` 的实际 import 路径以仓内为准（brief 这行可能不对）。
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `./.venv/Scripts/python.exe -m pytest tests/unit/test_cancel_session_hitl.py -v`
+Expected: 前两条 FAIL（一条 HITL_RESOLVED 都没有），第三条 PASS。
+
+- [ ] **Step 3: 在 `cancel_session` 里补一句**
+
+⚠️ **位置是关键**：要在 `task_manager.cancel_all(...)` **之前**。
+
+理由：`cancel_all` 内部会透传给 `SessionManager.cancel` 发
+`SessionFinished{CANCELED}`，而会话状态机一进终态就不再转移。
+熔断那条路径的注释明写「须尽量全部**先于会话终态**发出」——
+同一条纪律照搬，否则 HITL 的终局事件会排在会话终态之后。
+
+```python
+        idle = task_manager is not None and task_manager.is_done()
+        # 未决的 ask_user 一并终局，且**先于**下面 cancel_all 触发的 SessionFinished——
+        # 与熔断 trip 序列同一条纪律（HITL 终局须先于会话终态）。不终局的代价在重启后：
+        # rebuild_hitl 按「有 HitlOpened 无终局事件」折 pending，会把已取消会话的
+        # 提问当未决恢复出来（总账 A10）。
+        await self._cancel_session_hitl(session_id)
+        if task_manager is not None:
+            await task_manager.cancel_all(reason=CancelReason.USER_CANCEL)
+```
+
+⚠️ **`_cancel_session_hitl` 目前硬编码 `message=CancelReason.FAILURE_THRESHOLD`** ——
+它原本只服务熔断。你要把 `message` 改成参数，两个调用点各传各的
+（熔断传 `FAILURE_THRESHOLD`，本处传 `USER_CANCEL`）。
+**用 `core/discriminators.py` 的枚举，不要写裸字面量**（批次一的守卫会抓）。
+
+- [ ] **Step 4: 订正两处 docstring**
+
+- `HitlService.cancel` 的 docstring 说服务「会话关闭 / 熔断」—— 现在两半都实现了，
+  措辞可保留，但**确认它描述的是现状**。
+- `_cancel_session_hitl` 的 docstring 自陈「trip 序列第 3 步注入」——
+  现在它有**两个**调用方，订正。
+
+- [ ] **Step 5: 跑测试确认通过 + 全量 + golden**
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add -A && git commit -m "fix(hitl): 用户取消会话时一并终局未决的 ask_user"
+```
