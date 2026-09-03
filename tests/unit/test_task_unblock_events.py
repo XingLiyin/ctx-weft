@@ -65,6 +65,11 @@ def test_active_still_comes_from_task_started():
     assert view2.tasks["tsk_1"].status == "ACTIVE"
 
 
+def test_task_human_resolved_maps_to_pending_in_the_lookup_table():
+    """该条目在 _apply 里因专属分支先命中而走不到，但它是给直接查表的消费方看的契约。"""
+    assert TASK_STATUS_BY_EVENT[EventType.TASK_HUMAN_RESOLVED] == "PENDING"
+
+
 def test_human_resolved_clears_outputs():
     """与 TaskRequeued 同一效果：解除阻塞回 PENDING 要清旧产出（判据是类型，不是 payload）。"""
     view = reduce_events([

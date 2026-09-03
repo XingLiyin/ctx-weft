@@ -1227,8 +1227,14 @@ class TaskManager:
 
         if resumed:
             logger.info("All children of %s done, resuming parent", parent_id)
-            await self.drain()
+            # 先发事件、再 drain（评审 Important）：drain() 派发走 asyncio.create_task，
+            # 不等子协程跑完就把控制权交还——旧顺序「drain 在前」曾经无害，是因为
+            # TaskResumed/TaskStarted 都折叠成 ACTIVE，谁先谁后结果一样。D5 把
+            # TaskResumed 改成 PENDING 后，若 TaskStarted（→ACTIVE）先落进事件流，
+            # 重放会把一个真正在跑的任务钉成 PENDING。「解除阻塞」先于「开始执行」
+            # ——这正是本次改动的核心语义，事件顺序也要跟着这条排。
             await self._emit(EventType.TASK_RESUMED, task_id=parent_id)
+            await self.drain()
 
     def get_task(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)

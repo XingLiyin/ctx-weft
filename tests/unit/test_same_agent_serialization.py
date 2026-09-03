@@ -12,10 +12,22 @@ from __future__ import annotations
 
 import asyncio
 
+from ctx_weft.core.control.reducers import reduce_events
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+from ctx_weft.protocols.events import EventType
 from tests.unit._stub_runner import StubRunner
+
+
+class _CapturingBus:
+    """记录真实 emit 顺序——真派发路径专用（evt.type 是 EventType，不是 Event 对象本身）。"""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def emit(self, event) -> None:  # noqa: ANN001
+        self.events.append(event)
 
 
 def _session(root_agent_id: str) -> Session:
@@ -242,3 +254,101 @@ async def test_resume_parent_not_double_resumed() -> None:
 
     await tm._try_resume_parent("B")  # 父已不是 SUSPENDED → 不再入队
     assert tm._queue.pending_count() == n_after_first
+
+
+# ── 5) _try_resume_parent 的 emit 顺序（评审 Important，真派发路径）────────────
+#
+# 上面三个 _try_resume_parent 测试全用 max_concurrent=0 让 drain() 空转，从未穿过
+# 真派发这条路。旧顺序「drain 在前、emit 在后」在旧映射下无害（TaskResumed/TaskStarted
+# 都折叠成 ACTIVE，谁先谁后结果一样）；D5 把 TaskResumed 改成 PENDING 后，若
+# TaskStarted（→ACTIVE）先落进事件流，重放会把一个真正在跑的任务钉成 PENDING。
+# 这条测试用 max_concurrent=1 让 drain() 真的把解挂的父任务派发出去，钉住新顺序。
+
+
+async def test_resume_parent_emits_before_dispatch_and_replay_lands_active() -> None:
+    """真派发：TaskResumed 必须先于 TaskStarted 落进事件流；重放最终投影是 ACTIVE
+    （因为 TaskStarted 最后落，覆盖掉 TaskResumed 的 PENDING）。
+
+    两段各钉一件事：
+    1. **调用顺序**（决定性、不依赖调度）：`asyncio.create_task` 排的 `_run_task`
+       从不会抢在当前协程的下一条语句之前跑——`drain()` 内部创建任务这一步本身
+       不会让出控制权。真正会不会「TaskStarted 抢在 TaskResumed 前面」，取决于
+       源码里 `_emit(TaskResumed)` 有没有在 `drain()` **被调用之前**就已经完整
+       跑完（包括它自己内部的落盘/广播）。用 spy 直接钉「emit 调用完成」发生在
+       「drain 被调用」之前，这是对源码顺序的直接断言，不依赖任何计时假设。
+    2. **端到端**：真派发（`max_concurrent=1`）+ 真实 bus 记录 + `reduce_events`
+       重放到 TaskStarted 落地那一刻，投影确实是 ACTIVE——证明顺序不只是「调用
+       顺序对了」，落到事件流里、喂给 reducer 也确实得到期望的最终状态。
+    """
+    from ctx_weft.core.utils import generate_id, now_utc
+    from ctx_weft.protocols.events import Event
+
+    bus = _CapturingBus()
+    tm = TaskManager(session_id="s1", event_bus=bus, max_concurrent=1)
+    session = Session(id="s1", user_prompt="", status="RUNNING", root_agent_id="agr")
+    tm.set_session(session)
+
+    parent = Task(id="P", session_id="s1", status="SUSPENDED", assigned_agent_id="agr")
+    a = Task(id="A", session_id="s1", status="FINISHED", parent_task_id="P")
+    for t in (parent, a):
+        tm.register_task(t)
+    tm._parent_map["A"] = "P"
+    tm._children_of["P"] = {"A"}
+
+    # ── 1) 调用顺序：spy 包一层，记「谁先完整跑完」───────────────────────────
+    call_order: list[str] = []
+    orig_emit = tm._emit
+    orig_drain = tm.drain
+
+    async def spy_emit(event_type, **kw):  # noqa: ANN001, ANN003
+        await orig_emit(event_type, **kw)
+        call_order.append(f"emit:{event_type}")
+
+    async def spy_drain():
+        call_order.append("drain:start")
+        await orig_drain()
+
+    tm._emit = spy_emit
+    tm.drain = spy_drain
+
+    done = asyncio.Event()
+
+    async def runner(_s: str, _t: str) -> None:
+        done.set()
+
+    tm.set_runner(StubRunner(tm, runner))
+    await tm._try_resume_parent("A")
+
+    resumed_idx = call_order.index(f"emit:{EventType.TASK_RESUMED}")
+    drain_idx = call_order.index("drain:start")
+    assert resumed_idx < drain_idx, (
+        f"TaskResumed 必须在 drain() 被调用之前就已经完整发出，实际调用顺序是 "
+        f"{call_order}——旧代码先 drain() 再 emit(TaskResumed) 正是评审 Important "
+        f"指出的那个抢跑"
+    )
+
+    # ── 2) 端到端：真派发 + 真实事件流 + reduce_events ───────────────────────
+    # drain() 用 asyncio.create_task 派发，不等子协程跑完就把控制权交还——等真正跑到
+    # runner（即 TaskStarted 已发）为止，再放一拍收尾（on_task_finished 等）。
+    await asyncio.wait_for(done.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    types = [e.type for e in bus.events]
+    assert EventType.TASK_RESUMED in types
+    assert EventType.TASK_STARTED in types
+    assert types.index(EventType.TASK_RESUMED) < types.index(EventType.TASK_STARTED), (
+        "TaskResumed 必须先于 TaskStarted 落进事件流——D5 之后顺序错了会让重放把一个"
+        "真正在跑的任务钉成 PENDING"
+    )
+
+    # 只重放到 TaskStarted 落地那一刻（含）——这是「解挂 → 派发」这段窗口本身要钉的
+    # 投影快照。再往后 runner 会立刻把这个 stub 任务收尾成 FINISHED，那是另一件事，
+    # 不是本测试要验证的顺序问题。
+    started_idx = types.index(EventType.TASK_STARTED)
+    created = Event(
+        id=generate_id("evt"), run_id=None, sequence=0, session_id="s1",
+        type=EventType.TASK_CREATED, timestamp=now_utc(), task_id="P",
+        payload={"task": {"id": "P", "session_id": "s1", "status": "SUSPENDED"}},
+    )
+    view = reduce_events([created, *bus.events[: started_idx + 1]], run_id="run_1")
+    assert view.tasks["P"].status == "ACTIVE"
