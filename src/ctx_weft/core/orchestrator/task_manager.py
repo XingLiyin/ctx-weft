@@ -1139,23 +1139,12 @@ class TaskManager:
             # AWAITING_HUMAN 只要用户答一句。一个 task 断了、另一个在等人，先报
             # 「断了」——人答完了那个断的还是断的，而且它需要更重的介入。
             #
-            # reason 优先取 error_code：host 按码分流（CONTEXT_OVERFLOW → 提示换更大
-            # 窗口的模型恢复、LLM_AUTH_FAILED → 提示改配置）。自由文本只是没有码时的
-            # 兜底，绝不能反过来把码降级成文本——那会让 host 的分流静默失效。
-            #
-            # C2（total 账）待修：这个 reason 键名义上叫「reason」实际装的是
-            # error_code，值域是「error_code ∪ 自由文本 ∪ 兜底串」的并集，语义混淆。
-            # brief（task-5-brief.md Step 5）建议拆成 error_code/reason 两个键，但
-            # `test_outage_interrupt_reason.py:51-55`、`test_run_crash_suspend.py:94-97/
-            # 138-140` 三处显式锁定「TaskQueueInterrupted.reason 必须是**码**，
-            # 不是 str(exc) 那种自由文本」——这是刻意定下的既有契约（注释原话）。
-            # 按任务纪律撞上既有测试锁定旧形状要停下报告、不改 fixture 迁就，
-            # 故本次收敛枚举暂不拆键，留待与既有契约的取舍单独决策
-            # （见 task-5-report.md「Step 5 payload 拆键」一节）。
+            # 契约：本字段是**码**，host 据此分流（三份契约：升级须知 /
+            # docs/events-v2.md §2.1.2 / spec/golden/07）。自由文本走
+            # TaskInterrupted.error_message，不进这里——error_code 为空时
+            # 兜底成 "interrupted" 这个码，而不是塞散文。
             await self._emit(EventType.TASK_QUEUE_INTERRUPTED, payload={
-                "reason": (interrupted[0].error_code
-                           or interrupted[0].error
-                           or "interrupted")})
+                "reason": (interrupted[0].error_code or "interrupted")})
         elif blocked:
             await self._emit(EventType.TASK_QUEUE_BLOCKED, payload={"count": len(blocked)})
         else:

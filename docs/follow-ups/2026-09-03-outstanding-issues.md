@@ -237,19 +237,33 @@ FINISHED、又被 SUSPENDED）——和被修的那四处伪造 payload 是同�
 **建议**：`reason` 与 `error_code` 各做一个 `StrEnum`，换掉 `RunOutcome` 的字段类型。
 这件事的收益比拆 event type 大——它同时修掉「同一字面量写 4 遍」和 C2。
 
-### C2. `reason` 键里装的是 `error_code`
+### C2. `TaskQueueInterrupted.reason` 的兜底会吐自由文本，违反自身契约
 
-`task_manager.py:1140`：
+**这条最初记的判断是错的，已撤销**：本条曾写「`reason` 键里装的是 `error_code`，
+是语义混淆最集中的一处」，建议拆成 `error_code`/`reason` 两个键。批次一 task 5
+按此建议实现后，撞上三条既有测试（`test_outage_interrupt_reason.py`、
+`test_run_crash_suspend.py` 两处），它们的注释明写「reason 必须是**码**，
+不是自由文本，host 按码分流」，并点名**三份契约**钉住这个口径：升级须知 /
+`docs/events-v2.md` §2.1.2 / `spec/golden/07`。也就是说 `TaskQueueInterrupted.reason`
+**按设计就是码，不是本条最初以为的「语义混淆」**——那是读代码没查契约得出的
+误判。拆键取消，不做。
+
+真实缺陷更窄：取值链
 
 ```python
 "reason": (interrupted[0].error_code or interrupted[0].error or "interrupted")
 ```
 
-于是 `TaskQueueInterrupted.reason` 的值域是
-「error_code ∪ 自由文本 ∪ `"interrupted"` ∪ `"process_restart"`」的并集。
-而注释明写 host 要按这个码分流（`CONTEXT_OVERFLOW` → 提示换更大窗口的模型）。
+中间那项 `interrupted[0].error` 是**自由文本**（散文），于是当 `error_code`
+为空时，本该恒为码的字段会吐出散文，与「reason 是码」的自身契约相悖——
+虽然实测所有能走到这条聚合的路径（outage / 崩溃 / assembly failure）
+`error_code` 恒非空（`crash_error_code` 兜底到 `type(exc).__name__`，从不返回
+空串），这个分支目前是死路径，但作为兜底逻辑仍不该承诺一个自己不遵守的契约。
 
-这是 reason / error_code 语义混淆最集中的一处。
+**已在批次一修复**：删掉中间的自由文本项，`error_code` 为空时兜底改为码
+`"interrupted"`（本就是原先三态兜底串里的那个词，只是现在被提升成唯一的
+非 error_code 兜底值）；自由文本仍走 `TaskInterrupted.error_message`，不进
+`TaskQueueInterrupted.reason`。
 
 ### C3. 17 个多发射点事件，4 处 payload 不一致
 
