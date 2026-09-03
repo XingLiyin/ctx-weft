@@ -201,6 +201,7 @@ resume_agent(agent_id: str) -> None
 | `AgentRegistry` | 被动登记表，无状态字段，session→agent/parent→child 查询靠全表扫 | `AgentLifecycleManager`：订阅 TM 事件维护 `status`/`current_task_id`，维护 `parent→children` 索引，暴露 `assert_can_receive` 守卫，发 `AGENT_*` 事件 |
 | `TaskManager` | 持有 `_running_agents`/`busy_agents`（"忙闲"这个概念错位地记在这里） | 不变，继续是 task/队列状态唯一住所；`AgentLifecycleManager` 只是新增的订阅者，不需要 TM 反过来感知它 |
 | `HitlRegistry`/`HitlService` | HITL 未决状态唯一住所，`PendingHitl` 已含三级 id | 不变，`cancel_agent` 复用其 `cancel()` |
+| `EventBus` / `EventStore` | **协议留给 host 实现**（`protocols/events.py`），内置实现在 `providers/` 下 | 不变。注意「同步 drain」是内置 `InProcessEventBus` 的特性而非契约保证，见 §13 |
 
 ## 12. 破坏性变更范围（明确接受，不做兼容 shim）
 
@@ -220,3 +221,4 @@ resume_agent(agent_id: str) -> None
 - `TASK_QUEUE_BLOCKED`/`TASK_QUEUE_INTERRUPTED`/`TASK_QUEUE_DRAINED` 原本是 `SessionManager` 唯一的输入。SM 不再消费后，建议保留发射作为外部可观测信号，但需确认没有其他消费者依赖它们。
 - `reducers._apply` 除了新增 5 个 `AGENT_*` 的折叠分支，还需处理被移除的 11 个类型：旧事件日志重放要保留读取兼容（与 legacy HITL 6 种事件同样的处理方式），不能直接删分支。
 - `RECOGNIZE_INTENT_COMPLETED` 的 `usage` 字段在 recognize_intent 开始发 `LLM_RESPONSE_FINISHED` 后成为冗余（后者已带 usage）。可选清理，本设计不强制。
+- **异步 bus 下 `AgentLifecycleManager` 的状态是最终一致的。** `EventBus` 由 host 实现，「同步 drain」只是内置 `InProcessEventBus`（bus.py:45-81）的特性，不是契约保证。若 host 换用异步/远程 bus（README 明说可换 Redis Streams），ALM 的 status 更新相对 `TaskManager` 的内存态转移存在延迟，`assert_can_receive` 可能读到陈旧状态而放行本该拒绝的消息。需确认该守卫是否需要额外的同步保证——`HitlService` 已有先例：它刻意不靠订阅驱动续跑，而用 `reply_to_hitl` 返回值里的 `claimed` 分流，正是为了避开这类背压问题。

@@ -1,0 +1,1545 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent 中心化交互机制</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@600;700&display=swap">
+
+<style>
+:root{
+  --ground:#EAEDF0; --surface:#FFFFFF; --surface-2:#F3F6F8;
+  --line:#D2DAE0; --line-soft:#E2E8EC;
+  --ink:#151B21; --ink-2:#3D4952; --ink-3:#6B7883;
+  --accent:#0B6E5F; --accent-soft:#DFEEE9;
+  --keep:#4C5A66; --keep-bg:#E5EAEE;
+  --new:#0B6E5F; --new-bg:#DCEDE7;
+  --gone:#A3392C; --gone-bg:#F6E2DF;
+  --warn:#8A6008; --warn-bg:#F5EAD4;
+  --tran:#4A5AA8; --tran-bg:#E1E5F5;
+  --shadow:0 1px 2px rgba(21,27,33,.05), 0 8px 24px -16px rgba(21,27,33,.28);
+  --sans:"IBM Plex Sans","PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,-apple-system,sans-serif;
+  --serif:"IBM Plex Serif","Songti SC","Noto Serif SC",Georgia,serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0F1317; --surface:#161C22; --surface-2:#1C232A;
+    --line:#2B343C; --line-soft:#222A31;
+    --ink:#E3E9ED; --ink-2:#B2BDC6; --ink-3:#7D8A94;
+    --accent:#4FC8AC; --accent-soft:#12312C;
+    --keep:#93A0AB; --keep-bg:#212A31;
+    --new:#4FC8AC; --new-bg:#12312C;
+    --gone:#E2887A; --gone-bg:#34201D;
+    --warn:#D9AC57; --warn-bg:#312715;
+    --tran:#9AA6E8; --tran-bg:#1C2140;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F1317; --surface:#161C22; --surface-2:#1C232A;
+  --line:#2B343C; --line-soft:#222A31;
+  --ink:#E3E9ED; --ink-2:#B2BDC6; --ink-3:#7D8A94;
+  --accent:#4FC8AC; --accent-soft:#12312C;
+  --keep:#93A0AB; --keep-bg:#212A31;
+  --new:#4FC8AC; --new-bg:#12312C;
+  --gone:#E2887A; --gone-bg:#34201D;
+  --warn:#D9AC57; --warn-bg:#312715;
+  --tran:#9AA6E8; --tran-bg:#1C2140;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--sans); font-size:15px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+code,kbd{font-family:var(--mono); font-variant-ligatures:none}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+
+.wrap{max-width:1220px; margin:0 auto; padding:0 24px 96px}
+
+/* ── header ─────────────────────────────── */
+.masthead{padding:56px 0 32px; border-bottom:1px solid var(--line)}
+.eyebrow{
+  font-family:var(--mono); font-size:11.5px; font-weight:500;
+  letter-spacing:.14em; text-transform:uppercase; color:var(--accent); margin:0 0 14px;
+}
+.masthead h1{
+  font-family:var(--serif); font-weight:700; font-size:clamp(30px,4.4vw,46px);
+  line-height:1.12; letter-spacing:-.015em; margin:0 0 14px; text-wrap:balance;
+}
+.lede{margin:0; max-width:64ch; font-size:16.5px; color:var(--ink-2)}
+.facts{
+  display:flex; flex-wrap:wrap; gap:8px 10px; margin-top:24px; padding:0; list-style:none;
+}
+.facts li{
+  font-family:var(--mono); font-size:11.5px; color:var(--ink-3);
+  border:1px solid var(--line); border-radius:999px; padding:4px 11px; background:var(--surface);
+}
+.facts b{color:var(--ink-2); font-weight:500}
+
+/* ── shell ──────────────────────────────── */
+.shell{display:grid; grid-template-columns:1fr; gap:40px; padding-top:40px}
+@media (min-width:1040px){ .shell{grid-template-columns:210px minmax(0,1fr); gap:56px} }
+
+.rail{align-self:start}
+@media (min-width:1040px){ .rail{position:sticky; top:24px; max-height:calc(100vh - 48px); overflow-y:auto} }
+.rail h2{
+  font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--ink-3); font-weight:500; margin:0 0 12px;
+}
+.rail ol{list-style:none; margin:0; padding:0; counter-reset:nav}
+.rail li{counter-increment:nav}
+.rail a{
+  display:flex; gap:10px; padding:6px 0; font-size:13.5px; color:var(--ink-2);
+  text-decoration:none; border-bottom:1px solid var(--line-soft);
+}
+.rail a::before{
+  content:counter(nav,decimal-leading-zero); font-family:var(--mono); font-size:11px;
+  color:var(--ink-3); padding-top:3px;
+}
+.rail a:hover{color:var(--accent)}
+@media (max-width:1039px){
+  .rail ol{display:flex; flex-wrap:wrap; gap:6px}
+  .rail li{flex:0 0 auto}
+  .rail a{border:1px solid var(--line); border-radius:999px; padding:5px 12px; background:var(--surface)}
+}
+
+main{min-width:0}
+section{scroll-margin-top:20px; margin-bottom:64px}
+section > h2{
+  font-family:var(--serif); font-weight:600; font-size:26px; letter-spacing:-.01em;
+  margin:0 0 6px; padding-bottom:10px; border-bottom:2px solid var(--ink); text-wrap:balance;
+}
+.sub{margin:0 0 26px; color:var(--ink-3); font-size:14px; max-width:70ch}
+h3{
+  font-family:var(--sans); font-weight:600; font-size:15.5px; margin:34px 0 12px;
+  display:flex; align-items:center; gap:10px;
+}
+h3::before{content:""; width:3px; height:15px; background:var(--accent); border-radius:2px}
+p{max-width:70ch}
+
+/* ── panels / cards ─────────────────────── */
+.panel{background:var(--surface); border:1px solid var(--line); border-radius:10px; box-shadow:var(--shadow)}
+.grid{display:grid; gap:14px}
+@media (min-width:680px){ .grid--2{grid-template-columns:1fr 1fr} }
+
+.shift{padding:18px 20px}
+.shift .from,.shift .to{font-size:13.5px}
+.shift .k{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--ink-3); display:block; margin-bottom:3px;
+}
+.shift .from{color:var(--ink-3); text-decoration:line-through; text-decoration-color:var(--gone); margin-bottom:12px}
+.shift .to{color:var(--ink); font-weight:500}
+.shift h4{margin:0 0 14px; font-size:14px; font-family:var(--mono); font-weight:600; color:var(--accent)}
+
+.comp{padding:20px}
+.comp header{display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; margin-bottom:4px}
+.comp h4{margin:0; font-family:var(--mono); font-size:14.5px; font-weight:600}
+.comp .role{font-size:12.5px; color:var(--ink-3)}
+.comp dl{margin:14px 0 0; display:grid; gap:9px; font-size:13px}
+.comp dl > div{display:grid; grid-template-columns:64px minmax(0,1fr); gap:12px; align-items:start}
+.comp dt{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--ink-3); padding-top:3px;
+}
+.comp dd{margin:0; color:var(--ink-2); min-width:0}
+.comp dd code{font-size:12px; color:var(--ink)}
+
+/* ── figure / svg ───────────────────────── */
+figure{margin:0}
+.fig{padding:20px; overflow-x:auto}
+.fig svg{display:block; width:100%; min-width:640px; height:auto}
+figcaption{margin-top:12px; font-size:12.5px; color:var(--ink-3); max-width:70ch}
+.n-box{fill:var(--surface-2); stroke:var(--line); stroke-width:1.5}
+.n-box--term{fill:var(--gone-bg); stroke:var(--gone)}
+.n-box--start{fill:var(--accent-soft); stroke:var(--accent)}
+.n-name{font-family:var(--mono); font-size:14px; font-weight:600; fill:var(--ink)}
+.n-desc{font-family:var(--sans); font-size:11px; fill:var(--ink-3)}
+.edge{fill:none; stroke:var(--ink-3); stroke-width:1.5}
+.edge--kill{stroke:var(--gone); stroke-dasharray:6 4}
+.lbl rect{fill:var(--ground); stroke:none}
+.lbl text{font-family:var(--mono); font-size:11.5px; fill:var(--ink-2)}
+.dot{fill:var(--accent)}
+
+/* ── wiring ─────────────────────────────── */
+.wire{display:grid; gap:0; padding:0; overflow:hidden}
+@media (min-width:760px){ .wire{grid-template-columns:1fr 128px 1fr} }
+.wire__col{padding:20px}
+.wire__col h4{
+  margin:0 0 12px; font-family:var(--mono); font-size:10.5px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-3); font-weight:500;
+}
+.wire__spine{
+  display:grid; place-items:center; background:var(--accent-soft);
+  border-left:1px solid var(--line); border-right:1px solid var(--line); padding:20px 8px;
+}
+.wire__spine span{
+  font-family:var(--mono); font-size:11.5px; font-weight:600; color:var(--accent); text-align:center;
+}
+@media (max-width:759px){
+  .wire__spine{border:none; border-top:1px solid var(--line); border-bottom:1px solid var(--line)}
+}
+.wire ul{margin:0; padding:0; list-style:none; display:grid; gap:8px}
+.wire li{font-size:13px; color:var(--ink-2)}
+.wire li code{font-size:12px; color:var(--ink); font-weight:500}
+.wire li em{display:block; font-style:normal; font-size:11.5px; color:var(--ink-3)}
+
+/* ── tables ─────────────────────────────── */
+.tw{overflow-x:auto; border:1px solid var(--line); border-radius:10px; background:var(--surface); box-shadow:var(--shadow)}
+table{border-collapse:collapse; width:100%; min-width:560px; font-size:13.5px}
+th,td{text-align:left; padding:11px 16px; border-bottom:1px solid var(--line-soft); vertical-align:top}
+thead th{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--ink-3); font-weight:500; background:var(--surface-2); border-bottom:1px solid var(--line);
+  position:sticky; top:0;
+}
+tbody tr:last-child td{border-bottom:none}
+td code{font-size:12.5px}
+.mono-col{font-family:var(--mono); font-size:12.5px; white-space:nowrap}
+
+/* ── chips ──────────────────────────────── */
+.chip{
+  display:inline-block; font-family:var(--mono); font-size:10.5px; font-weight:500;
+  letter-spacing:.04em; padding:2px 8px; border-radius:999px; white-space:nowrap;
+}
+.chip--keep{color:var(--keep); background:var(--keep-bg)}
+.chip--new{color:var(--new); background:var(--new-bg)}
+.chip--gone{color:var(--gone); background:var(--gone-bg)}
+.chip--replay{color:var(--warn); background:var(--warn-bg)}
+.chip--tran{color:var(--tran); background:var(--tran-bg)}
+
+/* ── filter bar ─────────────────────────── */
+.filters{
+  position:sticky; top:0; z-index:5; background:var(--ground);
+  padding:12px 0 14px; margin-bottom:18px; border-bottom:1px solid var(--line);
+}
+.frow{display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px}
+.frow:last-child{margin-bottom:0}
+.frow > span{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--ink-3); margin-right:4px; flex:0 0 auto;
+}
+.fbtn{
+  font-family:var(--sans); font-size:12.5px; color:var(--ink-2); cursor:pointer;
+  background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:4px 11px;
+}
+.fbtn:hover{border-color:var(--accent); color:var(--accent)}
+.fbtn[aria-pressed="true"]{background:var(--ink); border-color:var(--ink); color:var(--ground); font-weight:500}
+#q{
+  font-family:var(--mono); font-size:12.5px; color:var(--ink); background:var(--surface);
+  border:1px solid var(--line); border-radius:999px; padding:5px 13px; min-width:190px; flex:1 1 190px;
+}
+#q::placeholder{color:var(--ink-3)}
+#count{font-family:var(--mono); font-size:11.5px; color:var(--ink-3); margin-left:auto; flex:0 0 auto}
+
+/* ── event rows ─────────────────────────── */
+.dom{margin-bottom:26px}
+.dom > h3{margin-top:0}
+.dom[hidden]{display:none}
+.evs{display:grid; gap:1px; background:var(--line); border:1px solid var(--line); border-radius:10px; overflow:hidden}
+.ev{display:grid; grid-template-columns:1fr; gap:10px; padding:14px 16px; background:var(--surface)}
+@media (min-width:820px){ .ev{grid-template-columns:270px minmax(0,1fr); gap:20px} }
+.ev[hidden]{display:none}
+.ev__id{display:flex; flex-wrap:wrap; align-items:center; gap:7px; align-content:start}
+.ev__name{font-size:13px; font-weight:600; color:var(--ink); word-break:break-all}
+.ev__body{display:grid; gap:5px; min-width:0}
+.ev__r{display:grid; grid-template-columns:58px minmax(0,1fr); gap:10px; font-size:12.5px}
+.ev__k{
+  font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--ink-3); padding-top:2px;
+}
+.ev__v{min-width:0; overflow-wrap:anywhere; color:var(--ink-2)}
+code.ev__v{font-size:12px; color:var(--ink)}
+.ev__v--hit{color:var(--accent); font-weight:500}
+.empty{padding:28px; text-align:center; color:var(--ink-3); font-size:13.5px}
+.empty[hidden]{display:none}
+
+/* ── notes ──────────────────────────────── */
+.notes{display:grid; gap:12px; padding:0; margin:0; list-style:none; counter-reset:note}
+.notes li{
+  counter-increment:note; background:var(--surface); border:1px solid var(--line);
+  border-left:3px solid var(--warn); border-radius:8px; padding:14px 18px;
+  display:grid; grid-template-columns:26px minmax(0,1fr); gap:12px; font-size:13.5px; color:var(--ink-2);
+}
+.notes li::before{
+  content:counter(note,decimal-leading-zero); font-family:var(--mono); font-size:11px;
+  color:var(--warn); padding-top:3px;
+}
+.notes b{color:var(--ink); font-weight:600}
+.notes code{font-size:12.5px; color:var(--ink)}
+
+footer{margin-top:72px; padding-top:20px; border-top:1px solid var(--line); font-size:12.5px; color:var(--ink-3)}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">ctx-weft · 机制变更参考</p>
+  <h1>Agent 中心化交互机制</h1>
+  <p class="lede">
+    外部交互的对象从 session 改为 agent。session 退为容器，只登记成员与主从关系；
+    agent 自己持有状态并被生命周期管理器控制；TaskManager 维持 task 与队列的唯一权威地位不变。
+    并行收敛一项：各 step 自维护的 LLM 镜像事件全部删除，统一走 <code>LLM_*</code> 并由 gateway 标注调用方。
+    本页是变更后机制的完整参考：组件职责、状态机、外部 API、以及全部事件的发射点与 payload。
+  </p>
+  <ul class="facts">
+    <li><b>日期</b> 2026-09-03</li>
+    <li><b>状态</b> 设计待评审</li>
+    <li><b>分支</b> feat/multimodal</li>
+    <li><b>spec</b> docs/superpowers/specs/2026-09-03-agent-centric-interaction-design.md</li>
+  </ul>
+</header>
+
+<div class="shell">
+
+<nav class="rail" aria-label="目录">
+  <h2>目录</h2>
+  <ol>
+    <li><a href="#shift">变更摘要</a></li>
+    <li><a href="#comps">组件职责</a></li>
+    <li><a href="#wiring">事件流拓扑</a></li>
+    <li><a href="#fsm">Agent 状态机</a></li>
+    <li><a href="#api">外部 API</a></li>
+    <li><a href="#llmconv">LLM 事件收敛</a></li>
+    <li><a href="#envelope">事件信封</a></li>
+    <li><a href="#catalog">事件目录</a></li>
+    <li><a href="#open">待确认</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<!-- ═══ 1 变更摘要 ═══ -->
+<section id="shift">
+  <h2>变更摘要</h2>
+  <p class="sub">四处职责搬迁。数据层地基已部分具备 agent 粒度，改造集中在状态归属与外部入口。</p>
+
+  <div class="grid grid--2">
+    <div class="panel shift">
+      <h4>SessionManager</h4>
+      <span class="k">变更前</span>
+      <div class="from">会话运行状态机，持有 status，订阅 TaskManager 四条队列聚合信号</div>
+      <span class="k">变更后</span>
+      <div class="to">会话内 agent 登记表，持有 <code>agent_ids</code> 集合，订阅 AGENT_INSTANTIATED / AGENT_SPAWNED</div>
+    </div>
+    <div class="panel shift">
+      <h4>AgentRegistry → AgentLifecycleManager</h4>
+      <span class="k">变更前</span>
+      <div class="from">被动登记表，无状态字段，session/parent 查询靠全表扫</div>
+      <span class="k">变更后</span>
+      <div class="to">状态权威：持有 status 与 current_task_id，建 parent→children 索引，发 AGENT_* 事件，提供接收守卫</div>
+    </div>
+    <div class="panel shift">
+      <h4>忙闲状态的归属</h4>
+      <span class="k">变更前</span>
+      <div class="from">活在 TaskManager 的 <code>_running_agents</code> / <code>busy_agents</code> 里</div>
+      <span class="k">变更后</span>
+      <div class="to">TaskManager 保留这两个字段做并发调度；对外可见的忙闲改由 agent 自身的 status 表达</div>
+    </div>
+    <div class="panel shift">
+      <h4>外部输入主通道</h4>
+      <span class="k">变更前</span>
+      <div class="from"><code>start_session</code> 续跑分支，硬编码打到 root_agent_id</div>
+      <span class="k">变更后</span>
+      <div class="to"><code>send_message(agent_id, ...)</code> 显式指定收信 agent，配合 list_agents 发现</div>
+    </div>
+  </div>
+
+  <h3>已有地基（无需新建）</h3>
+  <p>
+    <code>Agent.parent_agent_id</code> 与 <code>spawn_depth</code>（models.py:263-264）、<code>Task.assigned_agent_id</code>、
+    <code>PendingHitl</code> 的三级 id（registry.py:51-95）、<code>HitlRequestView.agent_id</code>（hitl.py:141）、
+    <code>set_agent_llm</code> 都已是 agent 粒度。执行引擎的
+    <code>TaskManager.drain()</code>（task_manager.py:398-430）本就用 <code>asyncio.create_task</code>
+    并发调度不同 agent 的 task，上限 <code>_DEFAULT_MAX_CONCURRENT = 4</code>（task_manager.py:52），
+    唯一约束是「同一 agent 不并发」。<b>多 agent 真并发是既有能力，本次改造不新建执行机制。</b>
+  </p>
+</section>
+
+<!-- ═══ 2 组件职责 ═══ -->
+<section id="comps">
+  <h2>组件职责</h2>
+  <p class="sub">状态没有总控。各组件按事件驱动各自的状态，边界严格分层。</p>
+
+  <div class="grid grid--2">
+
+    <div class="panel comp">
+      <header><h4>SessionManager</h4><span class="role">会话内 agent 登记表</span></header>
+      <dl>
+        <div><dt>持有</dt><dd><code>_SessionState{tenant_id, agent_ids: set[str]}</code> — 去掉 status 字段</dd></div>
+        <div><dt>订阅</dt><dd><code>AGENT_INSTANTIATED</code> / <code>AGENT_SPAWNED</code>（建成员集合）</dd></div>
+        <div><dt>发送</dt><dd><code>SESSION_CREATED</code> / <code>SESSION_RESUMED</code>，仅此两种</dd></div>
+        <div><dt>删除</dt><dd><code>session_state.py</code> 的 <code>next_transition</code> 及全部状态转移逻辑</dd></div>
+        <div><dt>不做</dt><dd>不建 parent→children 索引 —— 交给 ALM，避免两处各持一份可变层级</dd></div>
+      </dl>
+    </div>
+
+    <div class="panel comp">
+      <header><h4>AgentLifecycleManager</h4><span class="role">agent 状态唯一住所 · 原 AgentRegistry</span></header>
+      <dl>
+        <div><dt>持有</dt><dd><code>status</code>、<code>current_task_id</code>、<code>parent → children</code> 索引</dd></div>
+        <div><dt>订阅</dt><dd>11 种 TASK_* 事件（见状态机表）+ <code>AGENT_SPAWNED</code></dd></div>
+        <div><dt>发送</dt><dd>新增 5 种 <code>AGENT_*</code> 状态事件 + 原有 4 种 agent 事件</dd></div>
+        <div><dt>控制</dt><dd><code>assert_can_receive(agent_id)</code> 守卫；cancel / pause / resume 的级联遍历</dd></div>
+      </dl>
+    </div>
+
+    <div class="panel comp">
+      <header><h4>TaskManager</h4><span class="role">task 与队列的唯一住所 · 不变</span></header>
+      <dl>
+        <div><dt>持有</dt><dd>Task / Session 内存态、队列、<code>_running_agents</code>、并发上限</dd></div>
+        <div><dt>模式</dt><dd>先改自己的内存态，再 <code>_emit</code> 事件 —— 事件是广播而非驱动源</dd></div>
+        <div><dt>变化</dt><dd>只是多了 ALM 一个订阅者，TaskManager 无需反向感知它</dd></div>
+      </dl>
+    </div>
+
+    <div class="panel comp">
+      <header><h4>HitlRegistry / HitlService</h4><span class="role">HITL 未决状态唯一住所 · 不变</span></header>
+      <dl>
+        <div><dt>持有</dt><dd><code>PendingHitl</code>，已含 session_id + task_id + agent_id 三级</dd></div>
+        <div><dt>路由</dt><dd>靠全局唯一 <code>hitl_id</code>，不经 session_id / agent_id</dd></div>
+        <div><dt>复用</dt><dd><code>cancel_agent</code> 对 waiting_human 的 agent 调 <code>HitlService.cancel()</code> 终局未决请求</dd></div>
+      </dl>
+    </div>
+
+    <div class="panel comp">
+      <header><h4>EventBus</h4><span class="role">host 侧实现 · 契约在 protocols</span></header>
+      <dl>
+        <div><dt>定位</dt><dd><b>协议留给 host 实现</b>（protocols/events.py），README 明说可换 Redis Streams。core 只依赖协议，不依赖任何具体实现</dd></div>
+        <div><dt>内置</dt><dd><code>InProcessEventBus</code>（providers/events/bus/in_process/bus.py:45-81）：<code>emit()</code> 同步 drain —— 内部直接推给所有订阅者并 await 完成</dd></div>
+        <div><dt>注意</dt><dd>「一次 emit 返回时全部副作用已完成」是<b>该实现的特性，不是契约保证</b>。换成异步 / 远程 bus 时不成立</dd></div>
+      </dl>
+    </div>
+
+    <div class="panel comp">
+      <header><h4>EventStore</h4><span class="role">host 侧实现 · 契约在 protocols</span></header>
+      <dl>
+        <div><dt>定位</dt><dd><b>协议留给 host 实现</b>（protocols/events.py），host 必须实现 <code>append</code> + <code>read_by_session</code>。内置 InMemory / SQL 两种实现在 providers/ 下</dd></div>
+        <div><dt>胶水</dt><dd><code>EventPersister</code>（providers/events/persister.py）订阅全部事件，过滤 <code>TRANSIENT_EVENT_TYPES</code> 后 <code>store.append()</code> —— 唯一落库入口</dd></div>
+        <div><dt>顺序</dt><dd><code>attach_persistence()</code> 保证它先于可选的 SnapshotWriter 订阅</dd></div>
+      </dl>
+    </div>
+
+    <div class="panel comp">
+      <header><h4>control/reducers.py</h4><span class="role">唯一冷路径投影器 · 需扩展</span></header>
+      <dl>
+        <div><dt>行为</dt><dd><code>rebuild_view</code> 重放事件日志折叠出 <code>RunStateView</code></dd></div>
+        <div><dt>改动</dt><dd><code>_apply</code> 需新增分支折叠 5 种 AGENT_* 事件，使冷重建与运行时内存态一致</dd></div>
+      </dl>
+    </div>
+
+  </div>
+</section>
+
+<!-- ═══ 3 事件流拓扑 ═══ -->
+<section id="wiring">
+  <h2>事件流拓扑</h2>
+  <p class="sub">谁发、谁收。ALM 同时是订阅者和发送者：消费 task 级事实，产出 agent 级事实。</p>
+
+  <div class="panel wire">
+    <div class="wire__col">
+      <h4>发送方</h4>
+      <ul>
+        <li><code>StepDriver</code><em>STEP_* · 各 Step 的 StepOutcome.events</em></li>
+        <li><code>llm_gateway / capability_gateway</code><em>LLM_* · CAPABILITY_*</em></li>
+        <li><code>TaskManager</code><em>全部 TASK_* · FAILURE_THRESHOLD_HIT</em></li>
+        <li><code>SessionManager</code><em>SESSION_CREATED / RESUMED</em></li>
+        <li><code>AgentLifecycleManager</code><em>AGENT_* 九种</em></li>
+        <li><code>HitlService</code><em>HITL_OPENED / HITL_RESOLVED</em></li>
+      </ul>
+    </div>
+    <div class="wire__spine"><span>EventBus<br><small style="font-weight:400; opacity:.75">host 侧实现</small></span></div>
+    <div class="wire__col">
+      <h4>订阅方</h4>
+      <ul>
+        <li><code>EventPersister</code><em>全部非瞬态 → EventStore（host 侧实现）</em></li>
+        <li><code>AgentLifecycleManager</code><em>TASK_* 11 种 + AGENT_SPAWNED → agent status</em></li>
+        <li><code>SessionManager</code><em>AGENT_INSTANTIATED / SPAWNED → 成员集合</em></li>
+        <li><code>SnapshotWriter</code><em>可选，落快照</em></li>
+        <li><code>host SSE 订阅</code><em>含瞬态事件，实时推送</em></li>
+      </ul>
+    </div>
+  </div>
+  <figcaption style="margin-top:14px">
+    改造后 SessionManager 不再消费 <code>TASK_QUEUE_BLOCKED / INTERRUPTED / DRAINED</code>——
+    这三条原本是它唯一的输入。事件本身继续发射，作为外部可观测信号保留。
+  </figcaption>
+</section>
+
+<!-- ═══ 4 状态机 ═══ -->
+<section id="fsm">
+  <h2>Agent 状态机</h2>
+  <p class="sub">五态。终态只由外部显式 cancel 触发，task 走完不会让 agent 终结。</p>
+
+  <figure class="panel fig">
+    <svg viewBox="0 0 940 560" role="img" aria-label="Agent 五态状态机：idle、running、waiting_human、interrupted、terminated 及其转移">
+      <defs>
+        <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--ink-3)"/>
+        </marker>
+        <marker id="arwk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--gone)"/>
+        </marker>
+      </defs>
+
+      <!-- entry -->
+      <circle class="dot" cx="36" cy="239" r="6"/>
+      <path class="edge" d="M46,239 H64" marker-end="url(#arw)"/>
+
+      <!-- nodes -->
+      <rect class="n-box n-box--start" x="70"  y="210" width="170" height="58" rx="6"/>
+      <text class="n-name" x="155" y="234" text-anchor="middle">idle</text>
+      <text class="n-desc" x="155" y="253" text-anchor="middle">可接收输入</text>
+
+      <rect class="n-box" x="430" y="210" width="170" height="58" rx="6"/>
+      <text class="n-name" x="515" y="234" text-anchor="middle">running</text>
+      <text class="n-desc" x="515" y="253" text-anchor="middle">拒绝新消息</text>
+
+      <rect class="n-box" x="700" y="70"  width="190" height="58" rx="6"/>
+      <text class="n-name" x="795" y="94"  text-anchor="middle">waiting_human</text>
+      <text class="n-desc" x="795" y="113" text-anchor="middle">可接收 HITL 回复</text>
+
+      <rect class="n-box" x="700" y="350" width="190" height="58" rx="6"/>
+      <text class="n-name" x="795" y="374" text-anchor="middle">interrupted</text>
+      <text class="n-desc" x="795" y="393" text-anchor="middle">可恢复</text>
+
+      <rect class="n-box n-box--term" x="430" y="480" width="170" height="58" rx="6"/>
+      <text class="n-name" x="515" y="504" text-anchor="middle">terminated</text>
+      <text class="n-desc" x="515" y="523" text-anchor="middle">终态 · 不再接受输入</text>
+
+      <!-- edges -->
+      <path class="edge" d="M240,226 H424" marker-end="url(#arw)"/>
+      <path class="edge" d="M430,252 H246" marker-end="url(#arw)"/>
+      <path class="edge" d="M560,210 L694,104" marker-end="url(#arw)"/>
+      <path class="edge" d="M760,128 L606,232" marker-end="url(#arw)"/>
+      <path class="edge" d="M560,268 L694,362" marker-end="url(#arw)"/>
+      <path class="edge" d="M760,350 L606,254" marker-end="url(#arw)"/>
+      <path class="edge edge--kill" d="M515,268 V474" marker-end="url(#arwk)"/>
+
+      <!-- labels -->
+      <g class="lbl"><rect x="302" y="217" width="66" height="18" rx="4"/><text x="335" y="226" text-anchor="middle" dominant-baseline="middle">接收输入</text></g>
+      <g class="lbl"><rect x="302" y="243" width="66" height="18" rx="4"/><text x="335" y="252" text-anchor="middle" dominant-baseline="middle">本轮完成</text></g>
+      <g class="lbl"><rect x="584" y="143" width="72" height="18" rx="4"/><text x="620" y="152" text-anchor="middle" dominant-baseline="middle">ask_user</text></g>
+      <g class="lbl"><rect x="659" y="179" width="66" height="18" rx="4"/><text x="692" y="188" text-anchor="middle" dominant-baseline="middle">人工回复</text></g>
+      <g class="lbl"><rect x="601" y="306" width="52" height="18" rx="4"/><text x="627" y="315" text-anchor="middle" dominant-baseline="middle">pause</text></g>
+      <g class="lbl"><rect x="654" y="293" width="58" height="18" rx="4"/><text x="683" y="302" text-anchor="middle" dominant-baseline="middle">resume</text></g>
+      <g class="lbl"><rect x="428" y="391" width="174" height="18" rx="4"/><text x="515" y="400" text-anchor="middle" dominant-baseline="middle">cancel_agent（任意状态）</text></g>
+    </svg>
+    <figcaption>
+      虚线表示 <code>cancel_agent</code> 可从任意状态发起，图中以 running 为例。
+      <code>idle</code> 是初始态，也是每次交互处理完后回到的态。
+    </figcaption>
+  </figure>
+
+  <h3>TaskManager 事件 → 状态转移</h3>
+  <p class="sub">全部复用既有事件，无需为状态机新增 TASK_* 类型。</p>
+  <div class="tw">
+    <table>
+      <thead><tr><th style="width:34%">消费的事件</th><th style="width:26%">转移</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td class="mono-col">TASK_STARTED</td><td class="mono-col">→ running</td><td>开始占用执行</td></tr>
+        <tr><td class="mono-col">TASK_AWAITING_HUMAN</td><td class="mono-col">running → waiting_human</td><td>触发 ask_user，可接收 HITL 回复</td></tr>
+        <tr><td class="mono-col">TASK_HUMAN_RESOLVED</td><td class="mono-col">waiting_human → running</td><td>人工已答复，恢复执行</td></tr>
+        <tr><td class="mono-col">TASK_INTERRUPTED</td><td class="mono-col">→ interrupted</td><td>pause_agent 的底层机制</td></tr>
+        <tr><td class="mono-col">TASK_RESUMED</td><td class="mono-col">interrupted → running</td><td>resume_agent 的底层机制</td></tr>
+        <tr><td class="mono-col">TASK_REQUEUED</td><td class="mono-col">→ idle</td><td>重新排队，暂不占用执行</td></tr>
+        <tr><td class="mono-col">TASK_SUSPENDED</td><td class="mono-col">→ idle</td><td>挂起等子任务（suspended_on_children），此时仍可接外部消息</td></tr>
+        <tr><td class="mono-col">TASK_FINISHED</td><td class="mono-col">→ idle</td><td rowspan="4">task 终态 <b>不是</b> agent 终态；agent 回到 idle 等下一条消息</td></tr>
+        <tr><td class="mono-col">TASK_FAILED</td><td class="mono-col">→ idle</td></tr>
+        <tr><td class="mono-col">TASK_CANCELED</td><td class="mono-col">→ idle</td></tr>
+        <tr><td class="mono-col">TASK_FINALIZED</td><td class="mono-col">→ idle</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>三条关键性质</h3>
+  <ul class="notes" style="counter-reset:note">
+    <li><span><b>idle ≠ 没有活着的 task。</b> agent 的 task 是跨多轮持续存在的容器；只要 task 未到终态，idle 就是「当前轮次做完了，等下一个输入」，不管输入是用户消息还是子任务完成结果。</span></li>
+    <li><span><b>agent 也是跨多轮的容器。</b> task 到终态后 agent 依然回到 idle，可接新消息并开启新 task。真正的终态 <code>terminated</code> 仅由外部显式 <code>cancel_agent</code> 触发。</span></li>
+    <li><span><b>两类输入不对称。</b> 用户消息在 running 时直接报错拒绝、不排队；子任务完成结果永远排队（它不是外部发起的，无法要求重试），等 agent 回到 idle 时自动注入。</span></li>
+  </ul>
+</section>
+
+<!-- ═══ 5 API ═══ -->
+<section id="api">
+  <h2>外部 API</h2>
+  <p class="sub">破坏性修改，不保留兼容 shim。所有交互必须显式指定 agent。</p>
+
+  <div class="tw">
+    <table>
+      <thead><tr><th style="width:30%">方法</th><th style="width:12%">状态</th><th>行为</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono-col">send_message(<br>&nbsp;&nbsp;agent_id, content,<br>&nbsp;&nbsp;session_id=None)</td>
+          <td><span class="chip chip--new">新增</span></td>
+          <td>
+            <b>守卫：</b>不存在 / terminated → 报错；running → 报错「agent 忙」；idle / waiting_human → 放行。<br>
+            <b>路由：</b><code>current_task_id</code> 已终态 → 新建 Task 走 <code>push_task</code>；未终态 → 复用按 task_id 注入对话轮次的既有通路。<br>
+            <b>session_id：</b>可选，仅用于校验归属，不参与路由。
+          </td>
+        </tr>
+        <tr>
+          <td class="mono-col">reply_to_hitl(reply)</td>
+          <td><span class="chip chip--gone">变更</span></td>
+          <td>路由逻辑不变（hitl_id 全局唯一）。<code>HitlReply</code> 新增<b>必填</b> <code>agent_id</code>，与 <code>PendingHitl.agent_id</code> 不符则拒绝 —— 防呆而非路由必需。</td>
+        </tr>
+        <tr>
+          <td class="mono-col">start_session(params)<br>→ SessionHandle</td>
+          <td><span class="chip chip--gone">变更</span></td>
+          <td>仍一次性建 session + root agent，返回 <code>{session_id, root_agent_id}</code>。带初始消息则内部复用 send_message 的注入逻辑，不另建路径。</td>
+        </tr>
+        <tr>
+          <td class="mono-col">list_agents(<br>&nbsp;&nbsp;session_id,<br>&nbsp;&nbsp;parent_agent_id=None,<br>&nbsp;&nbsp;include_terminated=False)</td>
+          <td><span class="chip chip--new">新增</span></td>
+          <td>不传 parent 返回该 session 全部 agent 的扁平列表（层级靠各条的 parent_agent_id 还原成树）；传了只返回其直接子 agent。默认排除已终止，避免列表随时间膨胀。</td>
+        </tr>
+        <tr>
+          <td class="mono-col">get_agent(agent_id)<br>→ AgentDetail</td>
+          <td><span class="chip chip--new">新增</span></td>
+          <td>AgentSummary 基础上加 template_id / 角色信息，以及 current_task 摘要（是否终态、是否 waiting_human），免去再查一次 TaskManager。</td>
+        </tr>
+        <tr>
+          <td class="mono-col">cancel_agent(<br>&nbsp;&nbsp;agent_id, reason=None)</td>
+          <td><span class="chip chip--new">新增</span></td>
+          <td><b>级联全部子孙。</b>running → 复用 TaskManager 单任务取消；waiting_human → 先 <code>HitlService.cancel()</code> 终局未决请求；idle → 直接终态化。每个转 terminated 并发 AGENT_TERMINATED。子孙之间可并发处理。</td>
+        </tr>
+        <tr>
+          <td class="mono-col">pause_agent(<br>&nbsp;&nbsp;agent_id, reason=None)</td>
+          <td><span class="chip chip--new">新增</span></td>
+          <td>仅对 running 生效，其余状态直接报错。复用 TaskManager interrupt 机制。<b>级联暂停所有当前 running 的子孙</b>，避免父冻住而子继续耗资源。</td>
+        </tr>
+        <tr>
+          <td class="mono-col">resume_agent(agent_id)</td>
+          <td><span class="chip chip--new">新增</span></td>
+          <td>复用既有 TASK_RESUMED。<b>级联恢复所有当前处于 interrupted 的子孙</b>，不区分是否由同一次 pause 带下去，与 pause 的级联对象对称。</td>
+        </tr>
+        <tr>
+          <td class="mono-col">pause_session / cancel_session<br>set_session_llm</td>
+          <td><span class="chip chip--keep">保留</span></td>
+          <td>降格为广播便捷入口：对该 session 成员集合里每个 agent 逐个调用对应的 agent 级接口，不含独立的 session 级执行逻辑。</td>
+        </tr>
+        <tr>
+          <td class="mono-col">set_agent_llm(agent_id, …)<br>pause_task(session_id, task_id)<br>run_single_task(…)</td>
+          <td><span class="chip chip--keep">不变</span></td>
+          <td>set_agent_llm 本就是 agent 粒度；pause_task 按 task 定位；run_single_task 是 Phase 1 兼容路径。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>AgentSummary 字段</h3>
+  <p><code>agent_id</code> · <code>parent_agent_id</code> · <code>status</code> · <code>current_task_id</code> · <code>spawn_depth</code> · <code>created_at</code></p>
+
+  <h3>发现新 agent 的两条通路</h3>
+  <p>
+    <b>拉取：</b><code>list_agents</code> 用于首次进入或断线重连后取现状。
+    <b>推送：</b>既有的 <code>AGENT_INSTANTIATED</code> / <code>AGENT_SPAWNED</code> 本身已带 session_id 与 parent_agent_id，
+    经既有事件流 / SSE 订阅即可实时感知，<b>无需新增「agent 加入 session」事件</b>；状态变化则由新的 5 种 AGENT_* 事件推送。
+  </p>
+</section>
+
+<!-- ═══ LLM 收敛 ═══ -->
+<section id="llmconv">
+  <h2>LLM 事件收敛</h2>
+  <p class="sub">与 agent 中心化并行的一项独立收敛，因同样改动事件类型清单而并入。各 step 自己维护的 LLM 镜像事件全部删除，统一走 <code>LLM_*</code> 并标注调用方。</p>
+
+  <h3>问题：可见性取决于调用方是否记得发事件</h3>
+  <div class="tw">
+    <table>
+      <thead><tr><th style="width:22%">调用方</th><th style="width:26%">调用位置</th><th style="width:18%">入口</th><th>改造前的事件覆盖</th></tr></thead>
+      <tbody>
+        <tr><td class="mono-col">act</td><td class="mono-col">act.py:240（_run_llm_turn@206）</td><td class="mono-col">stream_llm_resilient</td><td>完整 5 种，自己 emit</td></tr>
+        <tr><td class="mono-col">observe</td><td class="mono-col">observe.py:135（run_observe_react@70）</td><td class="mono-col">stream_llm_resilient</td><td>4 种，经 ReactEventTypes 默认值</td></tr>
+        <tr><td class="mono-col">background_observe</td><td class="mono-col">background_observe.py:282 → run_observe_react</td><td class="mono-col">stream_llm_resilient</td><td>4 种，但发的是 <code>BACKGROUND_OBSERVE_*</code> 镜像</td></tr>
+        <tr><td class="mono-col">compact</td><td class="mono-col">compact.py:105（summarize_for_compact@69）</td><td class="mono-col">stream_llm_resilient</td><td><b>一个都不发</b> —— 唯一完全静默的调用方</td></tr>
+        <tr><td class="mono-col">recognize_intent</td><td class="mono-col">recognize_intent.py:167</td><td class="mono-col"><b>stream_llm（裸调）</b></td><td>只发 <code>RECOGNIZE_INTENT_LLM_PROMPT</code>，无通用 LLM_*、无 retry</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="margin-top:14px">
+    <code>finalize.py</code> / <code>prepare.py</code> / <code>segment_fold.py</code> / <code>reconcile.py</code> 不调 LLM。
+    <code>observe</code> 是<b>条件性</b>调用：<code>used_llm = verdict is not None</code>（observe.py:279），机械路径不调 LLM。
+  </p>
+
+  <h3>方案</h3>
+  <div class="grid grid--2">
+    <div class="panel comp">
+      <header><h4>发射点收敛到 gateway</h4></header>
+      <dl>
+        <div><dt>改动</dt><dd><code>stream_llm_resilient</code>（llm_gateway.py:477）签名扩展为接收 caller，由 gateway 统一 emit 全部 6 种 LLM_*，调用方不再自行发射</dd></div>
+        <div><dt>动机</dt><dd>caller 字段天然正确且不可遗漏；否则需在 3 处分散的发射点各自记得填</dd></div>
+      </dl>
+    </div>
+    <div class="panel comp">
+      <header><h4>caller 取值复用 Purpose</h4></header>
+      <dl>
+        <div><dt>类型</dt><dd><code>Purpose</code>（protocols/capability.py:31），现有 4 值，<b>补第 5 个</b> <code>"background_observe"</code></dd></div>
+        <div><dt>动机</dt><dd>与装配层 <code>ContextRequest.purpose</code> 天然对齐，不引入第二套词汇。background_observe.py:271 现已在传这个 Literal 之外的值，补齐后类型才自洽</dd></div>
+      </dl>
+    </div>
+    <div class="panel comp">
+      <header><h4>ReactEventTypes 整层删除</h4></header>
+      <dl>
+        <div><dt>范围</dt><dd>observe.py:44-67 的 frozen dataclass，连同 <code>OBSERVE_REACT_EVENTS</code> / <code>BACKGROUND_OBSERVE_REACT_EVENTS</code> 两个常量与 <code>run_observe_react</code> 的 <code>event_types</code> 形参</dd></div>
+        <div><dt>理由</dt><dd>该间接层存在的唯一目的就是区分这两组事件类型，目的消失则层消失，内部硬编码 LLM_* 即可</dd></div>
+      </dl>
+    </div>
+    <div class="panel comp">
+      <header><h4>request_id 前缀降级为可读性</h4></header>
+      <dl>
+        <div><dt>现状</dt><dd><code>req_</code>（act）/ <code>obs_</code>（observe）/ <code>bgobs_</code>（background_observe）是识别调用方的<b>非正式</b>手段；compact 与 recognize_intent 无 request_id</dd></div>
+        <div><dt>改后</dt><dd>有显式 caller 后不再承担识别职责，可保留作可读性；缺失的两处由 gateway 统一生成</dd></div>
+      </dl>
+    </div>
+  </div>
+
+  <h3>顺带修复的三个问题</h3>
+  <ul class="notes" style="counter-reset:note">
+    <li><span><b>compact 不再静默。</b>走统一 gateway 后自动获得全部 6 种 LLM_* 事件，无需为它单独补发射逻辑。</span></li>
+    <li><span><b>recognize_intent 获得自愈退避。</b>从裸 <code>stream_llm</code> 切到 <code>stream_llm_resilient</code>，顺带修掉它缺退避重试的现状。</span></li>
+    <li><span><b>多模态脱敏统一。</b>recognize_intent 现用 <code>content_to_text</code>（:153），act / run_observe_react 用 <code>redact_content_for_event</code>（act.py:225、observe.py:124）。收敛后统一到后者。</span></li>
+  </ul>
+
+  <h3>信息不丢失的保证</h3>
+  <div class="grid grid--2">
+    <div class="panel shift">
+      <h4>background_observe · 无损</h4>
+      <span class="k">依据</span>
+      <div class="to" style="font-weight:400">run_observe_react 对两组事件走同一段代码、同一份 payload 构造，仅事件类型不同。改发 LLM_* 后 payload 逐字节等价，唯一丢失的「这是后台调用」一位信息由 <code>caller="background_observe"</code> 补回。</div>
+    </div>
+    <div class="panel shift">
+      <h4>recognize_intent · 净增</h4>
+      <span class="k">依据</span>
+      <div class="to" style="font-weight:400">删除镜像事件的同时它开始发通用 LLM_*，可见性从「只有 prompt 一个事件」提升到完整 6 种，并首次被 retry 事件覆盖。</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 6 信封 ═══ -->
+<section id="envelope">
+  <h2>事件信封</h2>
+  <p class="sub">所有事件共享同一结构，payload 按类型而异。<code>protocols/events.py:36-51</code></p>
+
+  <div class="tw">
+    <table>
+      <thead><tr><th style="width:22%">字段</th><th style="width:20%">类型</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td class="mono-col">id</td><td class="mono-col">str</td><td><code>evt_ULID</code></td></tr>
+        <tr><td class="mono-col">run_id</td><td class="mono-col">str | None</td><td>一次 loop run 的标识。session / task / agent 级事件为 <code>None</code></td></tr>
+        <tr><td class="mono-col">sequence</td><td class="mono-col">int</td><td>同一 run_id 内单调递增；非 run 事件恒为 0</td></tr>
+        <tr><td class="mono-col">session_id</td><td class="mono-col">str</td><td>必填</td></tr>
+        <tr><td class="mono-col">type</td><td class="mono-col">str</td><td>见 <code>EventType</code>。StrEnum，<b>线上值为 PascalCase</b>：<code>EventType.TASK_CREATED == "TaskCreated"</code></td></tr>
+        <tr><td class="mono-col">timestamp</td><td class="mono-col">datetime</td><td>—</td></tr>
+        <tr><td class="mono-col">tenant_id</td><td class="mono-col">str</td><td>默认 <code>"default"</code></td></tr>
+        <tr><td class="mono-col">task_id</td><td class="mono-col">str | None</td><td>—</td></tr>
+        <tr><td class="mono-col">agent_id</td><td class="mono-col">str | None</td><td>SPAWN_REJECTED 例外：填的是<b>父</b> agent</td></tr>
+        <tr><td class="mono-col">payload</td><td class="mono-col">dict[str, Any]</td><td>按类型而异，本页逐条列出</td></tr>
+        <tr><td class="mono-col">metadata</td><td class="mono-col">dict[str, Any]</td><td>—</td></tr>
+        <tr><td class="mono-col">causation_id</td><td class="mono-col">str | None</td><td>—</td></tr>
+        <tr><td class="mono-col">schema_version</td><td class="mono-col">int</td><td>默认 1，payload 版本，reducer 据此分支</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>信封怎么被填上</h3>
+  <p>
+    <code>make_event(state, type, payload)</code>（driver.py:157-182）从 <code>LoopState</code> 自动取
+    session / task / agent id 并分配 sequence，对白名单 <code>EVENT_TYPES</code> 校验。
+    <code>task_manager.py</code>、<code>session_manager.py</code>、<code>hitl/service.py</code>
+    各有自己的 <code>_emit</code> 直接构造 <code>Event</code>，同样自动填充这些字段。
+  </p>
+
+  <h3>瞬态事件</h3>
+  <p>
+    <code>TRANSIENT_EVENT_TYPES</code>（events.py:202-207）里的 4 种高频流式 delta
+    <b>不落库、不参与投影 / 快照 / 重放</b>，只供 SSE 实时订阅。目录中以
+    <span class="chip chip--tran">瞬态</span> 标出。
+  </p>
+</section>
+
+<!-- ═══ 7 事件目录 ═══ -->
+<section id="catalog">
+  <h2>事件目录</h2>
+  <p class="sub">全部事件类型、发射点与 payload 字段。除新增的 5 种 AGENT_* 外，payload 均取自实际发射点的构造代码。共移除 11 种（6 种 session 运行态 + 5 种 LLM 镜像），新增 5 种；筛「废弃」可只看被删的。</p>
+
+  <div class="filters">
+    <div class="frow">
+      <span>域</span>
+      <button class="fbtn" data-d="all" aria-pressed="true">全部</button>
+      <button class="fbtn" data-d="session" aria-pressed="false">Session/Run/Step</button>
+      <button class="fbtn" data-d="task" aria-pressed="false">Task</button>
+      <button class="fbtn" data-d="agent" aria-pressed="false">Agent</button>
+      <button class="fbtn" data-d="llm" aria-pressed="false">LLM</button>
+      <button class="fbtn" data-d="hitl" aria-pressed="false">HITL</button>
+      <button class="fbtn" data-d="other" aria-pressed="false">其余域</button>
+    </div>
+    <div class="frow">
+      <span>变更</span>
+      <button class="fbtn" data-s="all" aria-pressed="true">全部</button>
+      <button class="fbtn" data-s="new" aria-pressed="false">新增</button>
+      <button class="fbtn" data-s="gone" aria-pressed="false">废弃</button>
+      <button class="fbtn" data-s="keep" aria-pressed="false">保留</button>
+      <button class="fbtn" data-s="replay" aria-pressed="false">仅重放</button>
+      <input id="q" type="search" placeholder="搜索事件名 / 字段 / 文件…" aria-label="搜索事件">
+      <output id="count"></output>
+    </div>
+  </div>
+
+  <p class="empty" id="empty" hidden>没有匹配的事件。</p>
+
+  <!-- Session/Run/Step -->
+  <div class="dom" data-dom="session">
+    <h3>Session / Run / Step</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="session" data-s="keep">
+        <div class="ev__id"><code class="ev__name">SESSION_CREATED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">session_manager.py:236</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{template_id, user_prompt, root_agent_id, llm_model, llm_account, tenant_id, token_budget, context_limit, reserved_output_tokens}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="keep">
+        <div class="ev__id"><code class="ev__name">SESSION_RESUMED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">session_manager.py:323</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{user_prompt, root_agent_id, llm_model, llm_account}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="gone">
+        <div class="ev__id"><code class="ev__name">SESSION_RUNNING</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">session_state.py:76-101</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{reason: "human_replied" | "resumed"}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">session 不再有运行态维度，随状态机一并移除</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="gone">
+        <div class="ev__id"><code class="ev__name">SESSION_WAITING</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">session_state.py:76-101</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">由 AGENT_WAITING_HUMAN 取代</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="gone">
+        <div class="ev__id"><code class="ev__name">SESSION_INTERRUPTED</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">session_state.py:76-101</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{reason}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">由 AGENT_INTERRUPTED 取代</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="gone">
+        <div class="ev__id"><code class="ev__name">SESSION_FINISHED</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">session_state.py:76-101</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{final_status}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">外部若需「整体闲否」自行聚合 AgentSummary.status</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="gone">
+        <div class="ev__id"><code class="ev__name">SESSION_STATUS_CHANGED</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">状态</span><span class="ev__v">原本已标注 legacy / 待退役，本次一并移除</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="gone">
+        <div class="ev__id"><code class="ev__name">SESSION_PAUSED_HITL</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">状态</span><span class="ev__v">原本已标注 legacy / 待退役，本次一并移除</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="keep">
+        <div class="ev__id"><code class="ev__name">RUN_STARTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">runtime.py:2506</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{run_id, initial_step}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="keep">
+        <div class="ev__id"><code class="ev__name">RUN_INTERRUPTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">runtime.py:2571 / 2610</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{reason, error_code?, error_message}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="keep">
+        <div class="ev__id"><code class="ev__name">RUN_CANCELED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">runtime.py:2627</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{run_id, source: "token" | "external"}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="keep">
+        <div class="ev__id"><code class="ev__name">RUN_FINISHED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">runtime.py:2646</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{outcome, final_status（已废弃字段）, will_retry, total_events, total_turns, error, error_type}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="keep">
+        <div class="ev__id"><code class="ev__name">STEP_STARTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">driver.py:268</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{step_name}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="keep">
+        <div class="ev__id"><code class="ev__name">STEP_FAILED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">driver.py:276</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{step_name, error_code, error_message}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="session" data-s="keep">
+        <div class="ev__id"><code class="ev__name">STEP_COMPLETED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">driver.py:292</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{step_name, next_step}</code></div>
+        </div>
+      </article>
+    </div>
+  </div>
+
+  <!-- Task -->
+  <div class="dom" data-dom="task">
+    <h3>Task</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_CREATED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_manager.py:332（_task_payload@1468）</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task: {id, session_id, status, title, description, creator_agent_id, assigned_agent_id, parent_task_id, user_prompt, priority, max_retries, timeout_ms, dag_deps, interaction_mode, origin_tool_call_id, origin_tool_name, settings, result, outputs, error, created_at, updated_at}}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_STARTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_manager.py:464</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{assigned_agent_id}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">ALM 消费 → agent 转 running</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_AWAITING_HUMAN</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_disposition.py:92-94</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{hitl_id}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">ALM 消费 → agent 转 waiting_human</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_SUSPENDED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_disposition.py:96-100</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{summary, spawn_titles}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">挂起等子任务 → agent 转 idle，此时仍可接外部消息</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_INTERRUPTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_disposition.py:119-124</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{reason, error_code, error_message, retry_count}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">pause_agent 的底层机制 → agent 转 interrupted</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_RESUMED</code><span class="chip chip--keep">保留</span><span class="chip chip--replay">待核实</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><span class="ev__v">调查中未定位到显式 payload 构造点，实现阶段需核实</span></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">resume_agent 的底层机制 → agent 转 running</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_HUMAN_RESOLVED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_manager.py:1300 / 1320</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{hitl_id}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">ALM 消费 → waiting_human 转回 running</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_FINISHED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_disposition.py:127-130</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{outcome: "success", summary, outputs}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">agent 转 idle（非终态），可接新消息开新 task</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_FAILED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_disposition.py:136-141；熔断变体 task_manager.py:1055</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{error_code, error_message, retry_count}；熔断变体 {error_code: BY_THRESHOLD, error_message}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">agent 转 idle（非终态）</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_CANCELED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_disposition.py:102-109；task_manager.py:967 / 987 / 1078 / 1384</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{reason?}（为空则不放键）；变体 {reason: CancelReason.FAILURE_THRESHOLD}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">agent 转 idle（非终态）；cancel_agent 复用此机制取消 running 的 task</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_FINALIZED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">finalize.py:766</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task_id, outcome}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">agent 转 idle（非终态）</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_REQUEUED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_disposition.py:116-118 / 134；task_manager.py:719 / 777</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">三变体：{reason, retry_count+1}（崩溃重试）／{outcome: "retry", summary, retry_count+1}（观察者判 retry）／{reason: "observer_review_reopen", user_prompt, original_user_prompt}（reopen_task）</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">agent 转 idle</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_QUEUE_BLOCKED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_manager.py:1150-1155</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{count}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">SessionManager 不再消费（原为其唯一输入），保留作可观测信号</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_QUEUE_INTERRUPTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_manager.py:1150-1155</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{reason}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">同上，SessionManager 不再消费</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_QUEUE_DRAINED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_manager.py:1150-1155</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{final_status}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">同上，SessionManager 不再消费</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="task" data-s="keep">
+        <div class="ev__id"><code class="ev__name">BLACKBOARD_PUBLISHED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">finalize.py:761</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{topic, content_length, parent_task_id}</code></div>
+        </div>
+      </article>
+    </div>
+  </div>
+
+  <!-- Agent -->
+  <div class="dom" data-dom="agent">
+    <h3>Agent</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="agent" data-s="keep">
+        <div class="ev__id"><code class="ev__name">AGENT_INSTANTIATED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">agent_registry.py:361</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{template_id, template_version, llm_account, llm_model}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">新增消费者：SessionManager 建成员集合、ALM 建 agent 记录</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="agent" data-s="keep">
+        <div class="ev__id"><code class="ev__name">AGENT_SPAWNED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">agent_registry.py:343</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{parent_agent_id, subtask_id}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">ALM 据此建 parent→children 索引，级联 cancel / pause 依赖它；同时是外部实时发现新 agent 的推送通路</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="agent" data-s="keep">
+        <div class="ev__id"><code class="ev__name">AGENT_LLM_CHANGED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">agent_registry.py:395</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{llm_account, llm_model, reason}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="agent" data-s="keep">
+        <div class="ev__id"><code class="ev__name">SPAWN_REJECTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">agent_registry.py:275</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{reason: "depth_limit", fallback_to_inline: false, attempted_subtask_id}</code></div>
+          <div class="ev__r"><span class="ev__k">注意</span><span class="ev__v">信封的 <code>agent_id</code> 填的是<b>父</b> agent</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="agent" data-s="new">
+        <div class="ev__id"><code class="ev__name">AGENT_RUNNING</code><span class="chip chip--new">新增</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">AgentLifecycleManager</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{from_status, task_id, trigger}</code>　trigger ∈ task_started | human_replied | resumed</div>
+          <div class="ev__r"><span class="ev__k">来源</span><span class="ev__v">消费 TASK_STARTED / TASK_HUMAN_RESOLVED / TASK_RESUMED 后发出</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="agent" data-s="new">
+        <div class="ev__id"><code class="ev__name">AGENT_IDLE</code><span class="chip chip--new">新增</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">AgentLifecycleManager</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{from_status, reason}</code>　reason ∈ task_finished | task_failed | task_canceled | task_finalized | task_requeued | task_suspended</div>
+          <div class="ev__r"><span class="ev__k">来源</span><span class="ev__v">消费 6 类 task 收尾 / 挂起事件后发出；<b>不代表 agent 终结</b></span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="agent" data-s="new">
+        <div class="ev__id"><code class="ev__name">AGENT_WAITING_HUMAN</code><span class="chip chip--new">新增</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">AgentLifecycleManager</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{from_status, hitl_id, task_id}</code></div>
+          <div class="ev__r"><span class="ev__k">来源</span><span class="ev__v">消费 TASK_AWAITING_HUMAN 后发出</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="agent" data-s="new">
+        <div class="ev__id"><code class="ev__name">AGENT_INTERRUPTED</code><span class="chip chip--new">新增</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">AgentLifecycleManager</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{from_status, reason, task_id}</code></div>
+          <div class="ev__r"><span class="ev__k">来源</span><span class="ev__v">消费 TASK_INTERRUPTED 后发出，对应 pause_agent</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="agent" data-s="new">
+        <div class="ev__id"><code class="ev__name">AGENT_TERMINATED</code><span class="chip chip--new">新增</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">AgentLifecycleManager</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{from_status, reason, cascaded_from}</code>　cascaded_from 为 null 表示被直接指定取消</div>
+          <div class="ev__r"><span class="ev__k">来源</span><span class="ev__v"><b>唯一</b>由外部显式 cancel_agent 触发，不来自任何 task 生命周期事件</span></div>
+        </div>
+      </article>
+    </div>
+  </div>
+
+  <!-- LLM -->
+  <div class="dom" data-dom="llm">
+    <h3>LLM</h3>
+    <p class="sub">
+      改造后<b>全部 6 种由 <code>llm_gateway.stream_llm_resilient</code> 统一发射</b>，调用方不再自行 emit；
+      每条 payload 新增 <code>caller</code> 字段。变更前的发射点分散在 act.py（5 种）与 gateway（仅 retry），
+      故下表同时给出「变更前发射点」以便对照。
+    </p>
+    <div class="evs">
+      <article class="ev" data-ev data-d="llm" data-s="keep">
+        <div class="ev__id"><code class="ev__name">LLM_REQUEST_STARTED</code><span class="chip chip--keep">保留</span><span class="chip chip--new">+caller</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">llm_gateway.stream_llm_resilient（变更前：act.py:218）</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{request_id, model, llm_account, turn, <b>caller</b>}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="llm" data-s="keep">
+        <div class="ev__id"><code class="ev__name">LLM_PROMPT_SENT</code><span class="chip chip--keep">保留</span><span class="chip chip--new">+caller</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">llm_gateway.stream_llm_resilient（变更前：act.py:226、observe.py:124）</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{request_id, turn, system, messages: [{role, content}], tool_names, <b>caller</b>}</code></div>
+          <div class="ev__r"><span class="ev__k">冲突</span><span class="ev__v ev__v--hit">现存不一致：act.py 发的带 <code>turn</code>，run_observe_react 发的带 <code>round</code>。收敛到单一发射点后统一取 <code>turn</code></span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="llm" data-s="keep">
+        <div class="ev__id"><code class="ev__name">LLM_TOKEN_STREAMED</code><span class="chip chip--keep">保留</span><span class="chip chip--new">+caller</span><span class="chip chip--tran">瞬态</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">llm_gateway.stream_llm_resilient（变更前：act.py:250）</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{request_id, delta, <b>caller</b>}</code></div>
+          <div class="ev__r"><span class="ev__k">注意</span><span class="ev__v">不落库、不参与投影 / 快照 / 重放</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="llm" data-s="keep">
+        <div class="ev__id"><code class="ev__name">LLM_REASONING_STREAMED</code><span class="chip chip--keep">保留</span><span class="chip chip--new">+caller</span><span class="chip chip--tran">瞬态</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">llm_gateway.stream_llm_resilient（变更前：act.py:255，全仓唯一发射点）</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{request_id, delta, <b>caller</b>}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="llm" data-s="keep">
+        <div class="ev__id"><code class="ev__name">LLM_RESPONSE_FINISHED</code><span class="chip chip--keep">保留</span><span class="chip chip--new">+caller</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">llm_gateway.stream_llm_resilient（变更前：act.py:286、observe.py:160）</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{request_id, content, reasoning, tool_calls: [{id, name, arguments}], usage, llm_model, llm_account, finish_reason, turn, <b>caller</b>}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="llm" data-s="keep">
+        <div class="ev__id"><code class="ev__name">LLM_RETRY_TRIGGERED</code><span class="chip chip--keep">保留</span><span class="chip chip--new">+caller</span><span class="chip chip--tran">瞬态</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">llm_gateway.py:468（_emit_retry@457）—— 本就在 gateway，位置不变</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{attempt, max_attempts, next_delay_sec, error_code, error, <b>caller</b>}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">recognize_intent 从裸 stream_llm 切到 stream_llm_resilient 后，首次被此事件覆盖</span></div>
+        </div>
+      </article>
+    </div>
+  </div>
+
+  <!-- HITL -->
+  <div class="dom" data-dom="hitl">
+    <h3>HITL</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="hitl" data-s="keep">
+        <div class="ev__id"><code class="ev__name">HITL_OPENED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">hitl/service.py:103（open()）</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{hitl_id, form, delivery, subject_id, prompt, detail, fields, proposal, tool_call_id, stage, invocation_key, agent_id, resume_state, reply_as_result}</code></div>
+          <div class="ev__r"><span class="ev__k">时序</span><span class="ev__v">先 <code>registry.open()</code> 登记，再发事件</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="hitl" data-s="keep">
+        <div class="ev__id"><code class="ev__name">HITL_RESOLVED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">hitl/service.py:177-188（_commit()，resolve() 与 cancel() 都汇入）</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{hitl_id, outcome, claimed, message?, modified_arguments?}</code></div>
+          <div class="ev__r"><span class="ev__k">时序</span><span class="ev__v">先 registry 同步原子转移并取槽 → 投递唤醒挂起协程 → 最后才发事件</span></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">cancel_agent 对 waiting_human 的 agent 复用 <code>HitlService.cancel()</code> 走到这里</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="hitl" data-s="replay">
+        <div class="ev__id"><code class="ev__name">HITL_REQUIRED</code><span class="chip chip--replay">仅重放</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">状态</span><span class="ev__v">legacy。当前代码<b>已不再发射</b>，仅 <code>control/reducers.py</code> 读取，用于兼容旧事件日志重放</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="hitl" data-s="replay">
+        <div class="ev__id"><code class="ev__name">HITL_APPROVED</code><span class="chip chip--replay">仅重放</span></div>
+        <div class="ev__body"><div class="ev__r"><span class="ev__k">状态</span><span class="ev__v">legacy，同上</span></div></div>
+      </article>
+      <article class="ev" data-ev data-d="hitl" data-s="replay">
+        <div class="ev__id"><code class="ev__name">HITL_ANSWERED</code><span class="chip chip--replay">仅重放</span></div>
+        <div class="ev__body"><div class="ev__r"><span class="ev__k">状态</span><span class="ev__v">legacy，同上</span></div></div>
+      </article>
+      <article class="ev" data-ev data-d="hitl" data-s="replay">
+        <div class="ev__id"><code class="ev__name">HITL_REJECTED</code><span class="chip chip--replay">仅重放</span></div>
+        <div class="ev__body"><div class="ev__r"><span class="ev__k">状态</span><span class="ev__v">legacy，同上</span></div></div>
+      </article>
+      <article class="ev" data-ev data-d="hitl" data-s="replay">
+        <div class="ev__id"><code class="ev__name">HITL_MODIFIED</code><span class="chip chip--replay">仅重放</span></div>
+        <div class="ev__body"><div class="ev__r"><span class="ev__k">状态</span><span class="ev__v">legacy，同上</span></div></div>
+      </article>
+      <article class="ev" data-ev data-d="hitl" data-s="replay">
+        <div class="ev__id"><code class="ev__name">HITL_CANCELLED</code><span class="chip chip--replay">仅重放</span></div>
+        <div class="ev__body"><div class="ev__r"><span class="ev__k">状态</span><span class="ev__v">legacy，同上</span></div></div>
+      </article>
+    </div>
+  </div>
+
+  <!-- 其余域 -->
+  <div class="dom" data-dom="other">
+    <h3>Context</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">PREPARE_COMPLETED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">prepare.py:179-188</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{estimated_tokens, assembled_token_count}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">CONTEXT_TOKENS_ESTIMATED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">prepare.py:179-188</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{estimated_tokens, assembled_tokens, has_baseline}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">CONTEXT_ASSEMBLED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">prepare.py:179-188</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{token_count}</code></div>
+        </div>
+      </article>
+    </div>
+
+    <h3>Capability</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">CAPABILITY_INVOKED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">capability_gateway.py:420</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{invocation_id, capability_name, capability_id, arguments, tool_call_id}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">CAPABILITY_PROGRESS</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">capability_gateway.py:533</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{invocation_id, kind, data（截 500 字符）}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">CAPABILITY_FINISHED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">capability_gateway.py:565</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{invocation_id, capability_name, arguments, outcome: "success" | "error", result（截 8000 字符）, result_length, tool_call_id}</code></div>
+        </div>
+      </article>
+    </div>
+
+    <h3>Act / Observe</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">ACT_TURN_STARTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">act.py:78</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{turn}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">ACT_TURN_COMPLETED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">act.py:104 / 128 / 488 / 495</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{turn, reason}</code>　reason ∈ tool_calls_processed | context_limit | await_user | stop</div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">MAX_TURNS_REACHED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">act.py:141</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{max_turns}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">OBSERVE_STARTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">observe.py:257</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task_id}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">OBSERVE_COMPLETED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">observe.py:316-324</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task_id, outcome, summary_length, used_llm}</code></div>
+        </div>
+      </article>
+    </div>
+
+    <h3>Memory</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">MEMORY_INGESTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">finalize.py:530 / 554</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{memory_event_type, source, content_length}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">MEMORY_COMPACT_STARTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">compact.py:553</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task_id, agent_id, trigger, token_estimate, target_tokens}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">MEMORY_COMPACTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">compact.py:607 / 626 / 637 / 652</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{superseded_count, layer, source, trigger, freed_tokens}；图片降级级另有 demoted_images</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">MEMORY_COMPACT_FINISHED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">compact.py:566</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task_id, agent_id, trigger, total_superseded, freed_tokens, levels, est_before, est_after, target_tokens}</code></div>
+        </div>
+      </article>
+    </div>
+
+    <h3>Guard</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">FAILURE_THRESHOLD_HIT</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">task_manager.py:928 / 957</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{failure_counter, threshold, failures: [{title, reason}]}</code></div>
+        </div>
+      </article>
+    </div>
+
+    <h3>RecognizeIntent</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">RECOGNIZE_INTENT_STARTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">recognize_intent.py:79</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task_id, target_task_id}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">RECOGNIZE_INTENT_SKIPPED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">recognize_intent.py:125</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task_id, target_task_id, reason?}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="gone">
+        <div class="ev__id"><code class="ev__name">RECOGNIZE_INTENT_LLM_PROMPT</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">recognize_intent.py:151</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{system, messages: [{role, content}], tool_names}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">由通用 <code>LLM_PROMPT_SENT</code>（caller="recognize_intent"）取代。<b>净增</b>：该 step 原本只发这一个事件，收敛后获得完整 6 种 LLM_*，并从裸 stream_llm 切到 stream_llm_resilient 拿到自愈退避</span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">RECOGNIZE_INTENT_TOOL_CALL</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">recognize_intent.py:168</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{title, description, session_goal}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">RECOGNIZE_INTENT_COMPLETED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">recognize_intent.py:179</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{title, description, session_goal, usage}</code></div>
+        </div>
+      </article>
+    </div>
+
+    <h3>BackgroundObserve（整域移除）</h3>
+    <p class="sub">四个事件全是 LLM 镜像，由 <code>run_observe_react</code> 经 <code>ReactEventTypes</code> 参数化发出（observe.py:44-67 / 103-171）。与 observe 走的 LLM_* 组是<b>同一段代码、同一份 payload 构造</b>，仅事件类型不同 —— 故收敛为<b>无损</b>，唯一丢失的「这是后台调用」一位信息由 <code>caller="background_observe"</code> 补回。</p>
+    <div class="evs">
+      <article class="ev" data-ev data-d="other" data-s="gone">
+        <div class="ev__id"><code class="ev__name">BACKGROUND_OBSERVE_REQUEST_STARTED</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">observe.py:103-171</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{request_id, model, llm_account, round}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">→ <code>LLM_REQUEST_STARTED</code></span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="gone">
+        <div class="ev__id"><code class="ev__name">BACKGROUND_OBSERVE_PROMPT_SENT</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">observe.py:103-171</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{request_id, round, system, messages, tool_names}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">→ <code>LLM_PROMPT_SENT</code></span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="gone">
+        <div class="ev__id"><code class="ev__name">BACKGROUND_OBSERVE_TOKEN_STREAMED</code><span class="chip chip--gone">废弃</span><span class="chip chip--tran">瞬态</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">observe.py:103-171</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{request_id, delta}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">→ <code>LLM_TOKEN_STREAMED</code></span></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="gone">
+        <div class="ev__id"><code class="ev__name">BACKGROUND_OBSERVE_RESPONSE_FINISHED</code><span class="chip chip--gone">废弃</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">observe.py:103-171</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{request_id, content, tool_calls: [{name}], usage, llm_model, llm_account, round}</code></div>
+          <div class="ev__r"><span class="ev__k">改造</span><span class="ev__v ev__v--hit">→ <code>LLM_RESPONSE_FINISHED</code></span></div>
+        </div>
+      </article>
+    </div>
+
+    <h3>TaskRecap</h3>
+    <div class="evs">
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_RECAP_STARTED</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">background_observe.py:213</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task_id, boundary, agent_id}</code></div>
+        </div>
+      </article>
+      <article class="ev" data-ev data-d="other" data-s="keep">
+        <div class="ev__id"><code class="ev__name">TASK_RECAP_DONE</code><span class="chip chip--keep">保留</span></div>
+        <div class="ev__body">
+          <div class="ev__r"><span class="ev__k">发射点</span><code class="ev__v">background_observe.py:342</code></div>
+          <div class="ev__r"><span class="ev__k">payload</span><code class="ev__v">{task_id}</code></div>
+        </div>
+      </article>
+    </div>
+  </div>
+
+</section>
+
+<!-- ═══ 8 待确认 ═══ -->
+<section id="open">
+  <h2>待确认</h2>
+  <p class="sub">非架构性问题，不阻塞设计评审，留给实现阶段处理。</p>
+  <ul class="notes">
+    <li><span><b>异步 bus 下 ALM 的状态是最终一致的。</b><code>EventBus</code> 由 host 实现，同步 drain 只是内置 <code>InProcessEventBus</code> 的特性。若 host 换用异步 / 远程 bus（如 Redis Streams），ALM 的 status 更新相对 TaskManager 的内存态转移存在延迟，<code>assert_can_receive</code> 可能读到陈旧状态而放行本该拒绝的消息。需确认该守卫是否需要额外的同步保证 —— <code>HitlService</code> 已有先例：它刻意不靠订阅驱动续跑，而用 <code>reply_to_hitl</code> 返回值里的 <code>claimed</code> 分流，正是为了避开这类背压问题。</span></li>
+    <li><span><b><code>TASK_RESUMED</code> 的发射点与 payload。</b>调查中未定位到显式的 payload 构造点，消费方按类型判断。实现 <code>resume_agent</code> 前需核实其实际发射位置与字段。</span></li>
+    <li><span><b>三条队列事件的去向。</b><code>TASK_QUEUE_BLOCKED / INTERRUPTED / DRAINED</code> 原本是 SessionManager 唯一的输入。SM 不再消费后，建议保留发射作为外部可观测信号，但需确认没有其他消费者依赖它们。</span></li>
+    <li><span><b><code>reducers._apply</code> 需扩展。</b>加入 5 种 <code>AGENT_*</code> 的折叠分支，使 <code>rebuild_view</code> 冷重建出的视图与运行时内存态保持一致。被移除的 11 种类型<b>不能直接删分支</b>——旧事件日志重放要保留读取兼容，与 legacy HITL 6 种事件同样的处理方式。</span></li>
+    <li><span><b>host 侧的渲染分流要改。</b>依赖 <code>BACKGROUND_OBSERVE_*</code> 或 <code>RECOGNIZE_INTENT_LLM_PROMPT</code> 判断「这条要不要渲染 / 渲染到哪个面板」的消费方，需改为按 <code>LLM_*</code> 的 <code>caller</code> 字段分流。<code>ReactEventTypes</code> 的 docstring 原话就是「core 只发类型，由 host 决定前端是否渲染」，所以这类消费方大概率存在。</span></li>
+    <li><span><b><code>RECOGNIZE_INTENT_COMPLETED</code> 的 <code>usage</code> 字段成为冗余。</b>该 step 开始发 <code>LLM_RESPONSE_FINISHED</code> 后，后者已带 usage。可选清理，本设计不强制。</span></li>
+    <li><span><b>新 AGENT_* 的 payload 是本设计新定义。</b>目录中这 5 条的字段来自本设计而非现有代码，实现时可按需调整。</span></li>
+    <li><span><b>ALM 内部索引的分片策略。</b><code>parent → children</code> 与 <code>current_task_id</code> 在多 session 下用分 session 分片还是全局字典 + session 过滤，按现有 AgentRegistry 的既有模式决定即可。</span></li>
+    <li><span><b>测试改动范围。</b><code>test_runtime_hitl_wiring.py</code>、<code>test_runtime_pause_wiring.py</code>、<code>test_runtime_public_api.py</code> 等依赖 session 状态字段的用例需改读 <code>AgentSummary.status</code>，具体范围留给实现计划梳理。</span></li>
+  </ul>
+</section>
+
+<footer>
+  ctx-weft · Agent 中心化交互机制 + LLM 事件收敛 · 设计待评审 · 2026-09-03<br>
+  除新增的 5 种 AGENT_* 事件与 LLM_* 的 caller 字段外，全部 payload 字段与 file:line 取自实际发射点代码。
+</footer>
+
+</main>
+</div>
+</div>
+
+<script>
+(function(){
+  var evs   = Array.prototype.slice.call(document.querySelectorAll('[data-ev]'));
+  var doms  = Array.prototype.slice.call(document.querySelectorAll('.dom'));
+  var q     = document.getElementById('q');
+  var count = document.getElementById('count');
+  var empty = document.getElementById('empty');
+  var state = {d:'all', s:'all', q:''};
+
+  evs.forEach(function(e){ e.__t = e.textContent.toLowerCase(); });
+
+  function apply(){
+    var shown = 0;
+    evs.forEach(function(e){
+      var ok = (state.d === 'all' || e.dataset.d === state.d)
+            && (state.s === 'all' || e.dataset.s === state.s)
+            && (state.q === ''    || e.__t.indexOf(state.q) !== -1);
+      e.hidden = !ok;
+      if (ok) shown++;
+    });
+    doms.forEach(function(d){
+      var any = Array.prototype.some.call(d.querySelectorAll('[data-ev]'), function(e){ return !e.hidden; });
+      d.hidden = !any;
+      Array.prototype.forEach.call(d.querySelectorAll('.evs'), function(g){
+        g.hidden = !Array.prototype.some.call(g.querySelectorAll('[data-ev]'), function(e){ return !e.hidden; });
+      });
+      Array.prototype.forEach.call(d.querySelectorAll('h3'), function(h){
+        var g = h.nextElementSibling;
+        while (g && !g.classList.contains('evs')) g = g.nextElementSibling;
+        if (g) h.hidden = g.hidden;
+      });
+    });
+    empty.hidden = shown !== 0;
+    count.textContent = shown + ' / ' + evs.length + ' 事件';
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('.fbtn'), function(b){
+    b.addEventListener('click', function(){
+      var key = b.dataset.d !== undefined ? 'd' : 's';
+      var val = b.dataset[key];
+      state[key] = val;
+      Array.prototype.forEach.call(document.querySelectorAll('.fbtn'), function(o){
+        if ((o.dataset.d !== undefined ? 'd' : 's') === key){
+          o.setAttribute('aria-pressed', String(o.dataset[key] === val));
+        }
+      });
+      apply();
+    });
+  });
+
+  q.addEventListener('input', function(){ state.q = q.value.trim().toLowerCase(); apply(); });
+  apply();
+})();
+</script>
+
+</body>
+</html>
