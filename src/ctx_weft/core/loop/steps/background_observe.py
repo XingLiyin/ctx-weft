@@ -208,6 +208,16 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
     from ctx_weft.core.assembler import ContextRequest
     from ctx_weft.core.orchestrator.control_capability import BACKGROUND_PROCESS_REPORT_NAME
 
+    # Task 5 复审修复：origin 必须在本函数**任何**发射点之前钉住，不能拖到调
+    # run_observe_react 前才改——RUN_STARTED/TASK_RECAP_STARTED（下面紧接着）以及
+    # 两条早退路径（re-fold 幂等护栏、短段免折，均在拿到 origin 之前就 return）此前
+    # 都带着调用方快照进来的 origin（正常路径是 LOOP_OBSERVE，act.py interrupt 边界
+    # 路径是 LOOP_ACT）发出，host 按 origin 前缀过滤后台事件时会把它们误判成前台
+    # 事件渲染进对话流（docs/events-v2.md §4）。这份 state 是 launch_background_observe
+    # 给这段后台工作单独快照出的（独立 run_id/sequence_counter），改写 origin 不会
+    # 污染主 run 的 state。
+    state.origin = EventOrigin.LOOP_BACKGROUND_OBSERVE
+
     # 总账 C5（控制方裁定 R1）：`launch_background_observe` 给这段快照发了自己的
     # run_id（解 A4）——它在 host 眼里就是一段独立的 run，得有起有止，不能只补
     # recognize_intent / compact_session 两处而漏掉它自己。payload 结构照抄
@@ -279,11 +289,8 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 )
                 prompt = await ctx.assembler.assemble(request)
                 # Task 5：不再有 event_types 间接层——LLM_* 的「后台 vs 前台」区分改靠
-                # state.origin（EventOrigin.LOOP_BACKGROUND_OBSERVE），由 host 据此决定
-                # 后台 observe 的 LLM 交互不进前端对话流。这份 state 是 launch_background_observe
-                # 给这段后台工作单独快照出的（独立 run_id/sequence_counter，见其注释），改写
-                # origin 不会污染主 run 的 state。
-                state.origin = EventOrigin.LOOP_BACKGROUND_OBSERVE
+                # state.origin（EventOrigin.LOOP_BACKGROUND_OBSERVE，已在函数入口钉住），
+                # 由 host 据此决定后台 observe 的 LLM 交互不进前端对话流。
                 result, last_text = await run_observe_react(
                     state, ctx,
                     system=prompt.system,

@@ -18,6 +18,13 @@ _LEGACY_READ_ONLY = frozenset({
     "SessionStatusChanged", "SessionPausedHitl",
     "HitlRequired", "HitlApproved", "HitlAnswered", "HitlRejected",
     "HitlModified", "HitlCancelled",
+    # Task 5（2026-09-03-agent-centric-interaction）：observe.py 的 ReactEventTypes 间接层
+    # 删除后，run_observe_react 统一发 LLM_*（靠 state.origin 区分前台/后台），这 4 个
+    # BackgroundObserve* 类型停止发射。枚举成员本身按控制方裁定暂不删除（退役闸门是
+    # 后续任务的事）——就地登记 L 档，让「EventType 全集 ≡ 实际发射 ∪ L 档」这条不变式
+    # 在本 commit 就恢复成立，不把红灯留给下一个任务。
+    "BackgroundObserveRequestStarted", "BackgroundObservePromptSent",
+    "BackgroundObserveTokenStreamed", "BackgroundObserveResponseFinished",
 })
 
 

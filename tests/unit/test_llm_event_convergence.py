@@ -475,3 +475,96 @@ async def test_background_observe_path_events_share_origin_and_request_id():
         EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED, EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED,
     }
     assert [e for e in bus.events if e.type in _OBSOLETE] == []
+
+
+# ── Task 5 复审修复 R1：origin 必须在 _run_background_observe 入口钉住，覆盖 ──
+# RUN_STARTED/TASK_RECAP_STARTED 以及两条早退路径（re-fold 幂等护栏、短段免折）——
+# 这几处此前发射时用的还是调用方快照进来的 origin（LOOP_OBSERVE / LOOP_ACT），只有
+# 走到 run_observe_react 那句才被改写成 LOOP_BACKGROUND_OBSERVE，两条早退路径根本
+# 走不到那句。
+
+
+@pytest.mark.asyncio
+async def test_background_observe_origin_pinned_on_refold_guard_early_exit(
+    fake_state_ctx, monkeypatch,
+):
+    """re-fold 幂等护栏早退（非 close 边界、视图内无 active raw）：函数体内已经发出的
+    RUN_STARTED/TASK_RECAP_STARTED，以及 finally 里的 TASK_RECAP_DONE/RUN_FINISHED，
+    origin 必须全部是 loop.background_observe——即使调用方快照带进来的是别的 origin。"""
+    from ctx_weft.core.loop.steps import background_observe as bo
+
+    state, ctx = fake_state_ctx
+    state.origin = EventOrigin.LOOP_OBSERVE  # 模拟调用方快照带进来的「错误」origin
+
+    async def _empty_view(address, scope, pctx, kinds=None):
+        return []
+
+    monkeypatch.setattr(ctx.memory, "load_view", _empty_view)
+
+    await bo._run_background_observe(state, ctx, boundary="interrupt")
+
+    assert ctx.event_bus.emitted
+    origins = {e.origin for e in ctx.event_bus.emitted}
+    assert origins == {EventOrigin.LOOP_BACKGROUND_OBSERVE}, origins
+    types_seen = {e.type for e in ctx.event_bus.emitted}
+    assert {EventType.RUN_STARTED, EventType.TASK_RECAP_STARTED,
+            EventType.TASK_RECAP_DONE, EventType.RUN_FINISHED} <= types_seen
+
+
+@pytest.mark.asyncio
+async def test_background_observe_origin_pinned_on_short_segment_early_exit(fake_state_ctx):
+    """短段免折早退（is_short_segment 命中，同 test_task_recap_refold_guard.py 里
+    test_short_segment_kept_raw_no_llm_call 的 fixture 配置：默认 threshold=400、
+    种子 raw 远低于此）：同上，origin 必须全部是 loop.background_observe。"""
+    from ctx_weft.core.loop.steps import background_observe as bo
+
+    state, ctx = fake_state_ctx
+    state.origin = EventOrigin.LOOP_ACT  # 模拟 act.py interrupt 边界快照带进来的「错误」origin
+
+    await bo._run_background_observe(state, ctx, boundary="plain_text")
+
+    assert ctx.event_bus.emitted
+    origins = {e.origin for e in ctx.event_bus.emitted}
+    assert origins == {EventOrigin.LOOP_BACKGROUND_OBSERVE}, origins
+    types_seen = {e.type for e in ctx.event_bus.emitted}
+    assert {EventType.RUN_STARTED, EventType.TASK_RECAP_STARTED,
+            EventType.TASK_RECAP_DONE, EventType.RUN_FINISHED} <= types_seen
+
+
+# ── Task 5 复审修复 R3：≥2 轮回归，钉住 request_id/turn 跨轮的行为 ──
+
+
+@pytest.mark.asyncio
+async def test_observe_multi_round_request_id_and_turn_increment():
+    """审查者手工验证过多轮机制（round 内 5 个事件共用一个 request_id、跨轮各不相同，
+    turn 依次递增）成立，但此前没有回归测试钉住——补上。默认 `_FakeLLM` 每轮都只吐
+    纯文本 + usage、从不产 tool_call，配 max_rounds=3 保证跑满 3 轮不提前终止。"""
+    from ctx_weft.core.loop.steps.observe import run_observe_react
+
+    bus = _RecordingBus()
+    state = _make_state()
+    state.origin = EventOrigin.LOOP_OBSERVE
+    ctx = _make_ctx(bus)
+
+    await run_observe_react(
+        state, ctx, system="SYS", messages=[], tools=[],
+        max_rounds=3, terminal_tool_name="report_task_outcome",
+    )
+
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    assert len(finished) == 3, "3 轮都无 tool_call，应跑满 max_rounds"
+
+    per_round_ids = []
+    for turn in range(3):
+        turn_finished = [e for e in finished if e.payload["turn"] == turn]
+        assert len(turn_finished) == 1, (turn, [e.payload for e in finished])
+        rid = turn_finished[0].payload["request_id"]
+        # 该 turn 对应的 4 个 gateway 流式事件 + 1 个收尾事件应共用同一个 request_id。
+        round_events = [e for e in bus.events if e.payload.get("request_id") == rid]
+        debug = [(e.type, e.payload.get("request_id")) for e in bus.events]
+        assert len(round_events) == 5, (turn, rid, debug)
+        started = [e for e in round_events if e.type == EventType.LLM_REQUEST_STARTED]
+        assert len(started) == 1
+        per_round_ids.append(rid)
+
+    assert len(set(per_round_ids)) == 3, f"跨轮 request_id 应各不相同：{per_round_ids}"
