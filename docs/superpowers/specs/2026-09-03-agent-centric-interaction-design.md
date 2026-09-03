@@ -136,15 +136,64 @@ resume_agent(agent_id: str) -> None
 
 `pause_session`/`cancel_session`/`set_session_llm` 保留，作为广播便捷入口：对该 session 下（`SessionManager` 维护的成员集合里）每个 agent 逐个调用对应的 agent 级接口（`pause_agent`/`cancel_agent`/`set_agent_llm`）。不新增独立的 session 级执行逻辑。
 
-## 9. 事件类型变更汇总
+## 9. LLM 事件收敛
 
-**移除**：`SESSION_RUNNING`、`SESSION_WAITING`、`SESSION_INTERRUPTED`、`SESSION_FINISHED`、legacy `SESSION_STATUS_CHANGED`、legacy `SESSION_PAUSED_HITL`（这些原本就标注为 legacy/待退役）。
+这是与 agent 中心化并行的一项独立收敛，因同样改动事件类型清单而并入本 spec。
 
-**保留不变**：`SESSION_CREATED`、`SESSION_RESUMED`、全部 `TASK_*`、`AGENT_INSTANTIATED`/`AGENT_SPAWNED`/`AGENT_LLM_CHANGED`/`SPAWN_REJECTED`、全部 HITL 相关事件、其余域事件。
+### 9.1 问题
+
+各 step 自己维护了一套 LLM 事件的镜像，覆盖程度参差不齐：
+
+- `recognize_intent` 只发 `RECOGNIZE_INTENT_LLM_PROMPT`（recognize_intent.py:151），**完全不发通用 LLM_\***；且走裸 `stream_llm`（:167），连自愈退避带来的 `LLM_RETRY_TRIGGERED` 也没有。
+- `background_observe` 走 `run_observe_react`，靠 `ReactEventTypes`（observe.py:44-67）把事件类型参数化，发 `BACKGROUND_OBSERVE_*` 四种。与 observe 走的 LLM_* 组是**同一段代码、同一份 payload 构造**，仅事件类型不同。
+- `compact.py` 的 `summarize_for_compact`（:69-126）调 LLM 但**一个事件都不发**，是唯一完全静默的调用方。
+- `LLM_*` 由调用方自己 emit（act.py:218/226/251/256/287、observe.py 的 `run_observe_react`），`llm_gateway.py` 全文只发 `LLM_RETRY_TRIGGERED`（`_emit_retry`@457）。
+
+结果：LLM 调用的可见性取决于调用方是否记得发事件，5 个调用方有 5 种不同程度的覆盖。
+
+### 9.2 方案
+
+**发射点收敛到 gateway。** `stream_llm_resilient`（llm_gateway.py:477）签名扩展为接收 caller，由 gateway 统一 emit 全部 6 种 LLM_* 事件，调用方不再自行发射。这样「调用方」字段天然正确且不可遗漏。
+
+**删除 5 个镜像事件**：`RECOGNIZE_INTENT_LLM_PROMPT`、`BACKGROUND_OBSERVE_REQUEST_STARTED`、`BACKGROUND_OBSERVE_PROMPT_SENT`、`BACKGROUND_OBSERVE_TOKEN_STREAMED`、`BACKGROUND_OBSERVE_RESPONSE_FINISHED`。
+
+**`ReactEventTypes` 整层删除**：连同 `OBSERVE_REACT_EVENTS` / `BACKGROUND_OBSERVE_REACT_EVENTS` 两个常量与 `run_observe_react` 的 `event_types` 形参一并移除，内部硬编码 LLM_*。该间接层存在的唯一目的就是区分这两组事件，目的消失则层消失。
+
+**caller 字段**：全部 6 种 LLM_* 的 payload 新增 `caller`，取值复用 `Purpose`（protocols/capability.py:31），并补第 5 个值 `"background_observe"`——现状 background_observe.py:271 已经在传这个 Literal 之外的值，补齐后类型才自洽。与装配层 `ContextRequest.purpose` 天然对齐，不引入第二套词汇。
+
+调用方全集（core 下共 5 处，均经 gateway）：`act`（act.py:240）、`observe`（observe.py:135）、`background_observe`（复用 `run_observe_react`，background_observe.py:282）、`compact`（compact.py:105）、`recognize_intent`（recognize_intent.py:167）。`finalize.py` / `prepare.py` / `segment_fold.py` / `reconcile.py` 不调 LLM。
+
+### 9.3 顺带修复的三个问题
+
+1. **compact 不再静默**——走统一 gateway 后自动获得全部 LLM_* 事件。
+2. **recognize_intent 获得自愈退避**——从裸 `stream_llm` 切到 `stream_llm_resilient`，顺带修掉它缺退避重试的现状。
+3. **多模态脱敏统一**——recognize_intent 现用 `content_to_text`（:153），act / `run_observe_react` 用 `redact_content_for_event`（act.py:225、observe.py:124）。收敛后统一到 `redact_content_for_event`。
+
+### 9.4 必须一并处理的字段冲突
+
+`turn` vs `round`：**同一个 `LLM_PROMPT_SENT` 事件类型，act.py 发的带 `turn`，`run_observe_react` 发的带 `round`**——这是现存的不一致，收敛到单一发射点后必须统一。取 `turn`。
+
+### 9.5 信息不丢失的保证
+
+- **background_observe 的 4 个事件：无损。** payload 逐字节等价，唯一丢失的「这是后台调用」一位信息由 `caller="background_observe"` 补回。
+- **recognize_intent：净增。** 删除镜像事件的同时它开始发通用 LLM_*，可见性从「只有 prompt」提升到完整 6 种。
+
+`request_id` 的前缀约定（`req_` / `obs_` / `bgobs_`）原本是识别调用方的非正式手段，有了显式 `caller` 后不再承担该职责，可保留作可读性。compact 与 recognize_intent 现无 request_id，收敛后由 gateway 统一生成。
+
+## 10. 事件类型变更汇总
+
+**移除（共 11 种）**：
+
+- session 运行态 6 种：`SESSION_RUNNING`、`SESSION_WAITING`、`SESSION_INTERRUPTED`、`SESSION_FINISHED`、legacy `SESSION_STATUS_CHANGED`、legacy `SESSION_PAUSED_HITL`（后两个原本就标注为 legacy/待退役）。
+- LLM 镜像 5 种（见 §9）：`RECOGNIZE_INTENT_LLM_PROMPT`、`BACKGROUND_OBSERVE_REQUEST_STARTED`、`BACKGROUND_OBSERVE_PROMPT_SENT`、`BACKGROUND_OBSERVE_TOKEN_STREAMED`、`BACKGROUND_OBSERVE_RESPONSE_FINISHED`。BackgroundObserve 这个域整体消失（4 个事件全是 LLM 镜像）。
 
 **新增**：`AGENT_RUNNING`、`AGENT_WAITING_HUMAN`、`AGENT_INTERRUPTED`、`AGENT_IDLE`、`AGENT_TERMINATED`。
 
-## 10. 组件职责对照表（变更前后）
+**payload 变更**：全部 6 种 `LLM_*` 新增 `caller` 字段；`LLM_PROMPT_SENT` 等事件的 `round` 统一为 `turn`。
+
+**保留不变**：`SESSION_CREATED`、`SESSION_RESUMED`、全部 `TASK_*`、`AGENT_INSTANTIATED`/`AGENT_SPAWNED`/`AGENT_LLM_CHANGED`/`SPAWN_REJECTED`、全部 HITL 相关事件、`TASK_RECAP_*`、其余域事件。`RECOGNIZE_INTENT_*` 除被删的那一个外全部保留。
+
+## 11. 组件职责对照表（变更前后）
 
 | 组件 | 变更前 | 变更后 |
 |---|---|---|
@@ -153,16 +202,21 @@ resume_agent(agent_id: str) -> None
 | `TaskManager` | 持有 `_running_agents`/`busy_agents`（"忙闲"这个概念错位地记在这里） | 不变，继续是 task/队列状态唯一住所；`AgentLifecycleManager` 只是新增的订阅者，不需要 TM 反过来感知它 |
 | `HitlRegistry`/`HitlService` | HITL 未决状态唯一住所，`PendingHitl` 已含三级 id | 不变，`cancel_agent` 复用其 `cancel()` |
 
-## 11. 破坏性变更范围（明确接受，不做兼容 shim）
+## 12. 破坏性变更范围（明确接受，不做兼容 shim）
 
 - `SessionStartParams`/`start_session` 返回值形状变化（新增 `root_agent_id`）。
 - `HitlReply` 新增必填 `agent_id`。
-- `EventType` 枚举移除 4 个 session 运行态类型、新增 5 个 agent 状态类型。
+- `EventType` 枚举移除 11 个类型（6 个 session 运行态 + 5 个 LLM 镜像）、新增 5 个 agent 状态类型。
+- `stream_llm_resilient` 签名扩展为接收 caller；`Purpose` Literal 补 `"background_observe"`；`ReactEventTypes` 及其两个常量、`run_observe_react` 的 `event_types` 形参整体删除。
+- 依赖 `BACKGROUND_OBSERVE_*` 或 `RECOGNIZE_INTENT_LLM_PROMPT` 做前端渲染分流的 host 侧消费方，需改为按 `LLM_*` 的 `caller` 字段分流。
 - 原本按 session 续跑打到 root agent 的隐式路径被 `send_message(agent_id, ...)` 显式替代。
 - 依赖 `SessionManager` 状态字段的既有测试/消费方需要同步改为读取 `AgentLifecycleManager`/`AgentSummary.status`。
 
-## 12. 已知留待实现阶段处理的细节（非架构性，不阻塞本设计）
+## 13. 已知留待实现阶段处理的细节（非架构性，不阻塞本设计）
 
 - `RunStateView`/`control/reducers.py` 的 `_apply` 需要扩展以折叠新的 `AGENT_*` 事件，使冷启动重建（`rebuild_view`）后的视图与运行时内存态一致。
 - `AgentLifecycleManager` 的内部索引（`parent→children`、`current_task_id`）在多 session 场景下的具体数据结构（分 session 分片 vs 全局字典 + session 过滤）留给实现阶段按现有 `AgentRegistry` 已有模式决定。
 - 现有测试（`test_runtime_hitl_wiring.py`、`test_runtime_pause_wiring.py` 等）需要的改动范围，留给实现阶段的 writing-plans 环节梳理。
+- `TASK_QUEUE_BLOCKED`/`TASK_QUEUE_INTERRUPTED`/`TASK_QUEUE_DRAINED` 原本是 `SessionManager` 唯一的输入。SM 不再消费后，建议保留发射作为外部可观测信号，但需确认没有其他消费者依赖它们。
+- `reducers._apply` 除了新增 5 个 `AGENT_*` 的折叠分支，还需处理被移除的 11 个类型：旧事件日志重放要保留读取兼容（与 legacy HITL 6 种事件同样的处理方式），不能直接删分支。
+- `RECOGNIZE_INTENT_COMPLETED` 的 `usage` 字段在 recognize_intent 开始发 `LLM_RESPONSE_FINISHED` 后成为冗余（后者已带 usage）。可选清理，本设计不强制。
