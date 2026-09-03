@@ -98,3 +98,59 @@ def test_observe_cue_mentions_both_fields():
     assert "act_recap" in close_cue and "task_summary" in close_cue
     # 综合子任务结果的引导
     assert "sub-task" in close_cue.lower() or "子任务" in close_cue
+
+
+# ── 地基：background observe 不依赖 observe ROLE（Task 4 前提）────────────────
+
+
+def _identity_blocks_for(template, purpose="background_observe"):
+    """跑真 IdentitySource，拿它在给定 template 下实际产出的 blocks。"""
+    import asyncio
+
+    from ctx_weft.core.assembler.sources.identity import IdentitySource
+
+    req = SimpleNamespace(purpose=purpose, template=template, extra={},
+                          token_counter=len)
+
+    async def _run():
+        return [b async for b in IdentitySource().fetch(req, deps=None)]
+
+    return asyncio.run(_run())
+
+
+def _template(identity: dict):
+    from ctx_weft.protocols.template import AgentTemplate, IdentityFacet
+
+    return AgentTemplate(
+        id="tpl1", name="t", version="1.0.0",
+        identity={k: IdentityFacet(text=v) for k, v in identity.items()},
+        capability_refs=[], memory_config=None, loop_config=None,
+    )
+
+
+def test_background_observe_identity_falls_back_to_act_without_observe_role():
+    """无 observe facet → IdentitySource 回落 act facet（identity.py:33-36），不空转。"""
+    blocks = _identity_blocks_for(_template({"act": "ACT-SOUL-BODY"}))
+    assert len(blocks) == 1
+    assert blocks[0].content == "ACT-SOUL-BODY"
+    assert blocks[0].metadata["facet_purpose"] == "background_observe"
+
+
+def test_background_observe_prompt_usable_with_no_identity_block_at_all():
+    """连 act facet 都没有（template=None / 空 identity）→ composer 用 _OBSERVER_ROLE_FALLBACK，
+    cue 与 collect_process_report 指令仍完整产出，不抛错、不空转。"""
+    from ctx_weft.core.assembler.composer import _OBSERVER_ROLE_FALLBACK
+
+    assert _identity_blocks_for(_template({})) == []
+    assert _identity_blocks_for(None) == []
+
+    # 只留历史块，无 identity 块 —— 模拟无任何 ROLE 的装配结果
+    from ctx_weft.core.assembler.assembler import ContextBlock
+    hist = [ContextBlock(id="b1", source="task_conversation", kind="history",
+                         target="messages", content="原始诉求", priority=3, token_estimate=1,
+                         metadata={"role": "user", "timestamp": "2026-01-01T00:00:00+00:00"})]
+    msgs = DefaultComposer()._build_background_observe_messages(hist, _req("normal"))
+    joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
+    assert _OBSERVER_ROLE_FALLBACK in joined
+    assert "collect_process_report" in joined
+    assert _BACKGROUND_BOUNDARY_DESC["normal"] in joined
