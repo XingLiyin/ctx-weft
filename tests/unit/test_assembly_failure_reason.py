@@ -20,7 +20,7 @@ class _CapturingBus:
     def __init__(self) -> None:
         self.events: list = []
 
-    async def emit(self, event) -> None:  # noqa: ANN001
+    async def emit(self, event) -> None:
         self.events.append(event)
 
 
