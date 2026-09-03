@@ -29,6 +29,7 @@ from ctx_weft.protocols.events import EventType
 TASK_STATUS_EVENTS = (
     "TASK_FINISHED", "TASK_FAILED", "TASK_REQUEUED", "TASK_SUSPENDED",
     "TASK_AWAITING_HUMAN", "TASK_INTERRUPTED", "TASK_CANCELED",
+    "TASK_HUMAN_RESOLVED", "TASK_RESUMED",
 )
 
 #: 允许出现 `EventType.TASK_*` 的文件：唯一发射者 + 事件表 + 投影映射表。
