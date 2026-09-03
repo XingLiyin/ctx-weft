@@ -46,11 +46,16 @@ TaskSuspended            hitl_park         run_crash
 
 **host 若按 `reason` 字面量分流，改为按类型分流。** `reason` 现在只是展示文本。
 
-`TaskStatus` 相应多了两个值。完整值域：
+`TaskStatus` 相应多了两个值：`AWAITING_HUMAN` 与 `INTERRUPTED`。完整值域（本次变更后）：
 `PENDING` / `ACTIVE` / `SUSPENDED` / `AWAITING_HUMAN` / `INTERRUPTED` /
-`TO_BE_OBSERVED` / `FINISHED` / `FAILED` / `CANCELED`。
-host 若镜像了这份值域或用它做 switch，补上两个分支——**否则「等人」和「被打断」的
+`FINISHED` / `FAILED` / `CANCELED`。
+host 若镜像了这份值域或用它做 switch，补上这两个分支——**否则「等人」和「被打断」的
 task 会掉进 default**。
+
+> 订正：本节早先版本把 `TO_BE_OBSERVED` 也列进了「本次新增的值域」，是搭便车
+> 写错的——它并非本次改动引入，从 LoomeJ baseline 导入起就在值域里、却从未被
+> 赋过值。它已在后续批次（2026-09-03 outstanding-issues batch1 task 7）作为
+> 死值域删除，上面这份值域列表已不含它。
 
 > **「谁在等人」现在完全由 task 层回答。** 会话级只说「停着且正常」；
 > 具体是哪个 task 在等、等的是什么，看 task 状态与未决 HITL 列表。
