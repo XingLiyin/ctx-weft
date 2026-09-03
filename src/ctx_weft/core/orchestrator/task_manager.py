@@ -1297,6 +1297,26 @@ class TaskManager:
             await self._emit(EventType.TASK_HUMAN_RESOLVED, task_id=task_id,
                               payload={"hitl_id": hitl_id})
 
+    async def mark_human_resolved(self, task_id: str, *, hitl_id: str) -> None:
+        """HITL 应答落地后把 task 置回 PENDING 并发事实——**不看当前状态**。
+
+        与 `resume_task` 的区别：后者有 `was_blocked` 门（只对
+        AWAITING_HUMAN/SUSPENDED 生效），而 wait_for_user 冷应答的重建路径上
+        `restore()` 先跑、已把该 task 的状态从 AWAITING_HUMAN 翻成了 PENDING，
+        那道门必然落空——`_inject_user_reply` 走的就是这条入口。
+
+        不入队（与旧行为一致）：wait_for_user 场景下重排交给调用方后续的驱动，
+        本方法只落状态 + 发事实。
+
+        终态不复活：已 FINISHED/FAILED/CANCELED 的 task 原样返回、不发事件。
+        """
+        task = self._tasks.get(task_id)
+        if task is None or task.status in _TERMINAL_STATUSES:
+            return
+        task.status = "PENDING"
+        await self._emit(EventType.TASK_HUMAN_RESOLVED, task_id=task_id,
+                          payload={"hitl_id": hitl_id})
+
     def is_cancelled(self) -> bool:
         """本 TM 是否已被硬取消（cancel_all 置 _cancelled）——供派发点补投 born-cancel 判定。"""
         return self._cancelled

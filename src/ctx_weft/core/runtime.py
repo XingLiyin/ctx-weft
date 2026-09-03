@@ -1914,12 +1914,14 @@ class CtxWeftRuntime:
         合法唤醒就被静默吞掉，父任务永久停摆——与恢复路径上早已拆掉的正是同一个形状。
         `_resume_in_existing_tm` 那条分支不受影响：它随后调 `resume_task()`，会真的入队。
 
-        **本方法自己发 `TaskHumanResolved`（D4）**，不委托给 `resume_task`：重建路径上
-        `restore()` 早于本方法跑，且已把该 task 的状态从 `AWAITING_HUMAN` 翻成了
-        `PENDING`——等本方法执行到这里时状态已经"看不出"曾经被人挡住过，`resume_task`
-        那种"状态仍是 AWAITING_HUMAN/SUSPENDED 才发"的判据在这条路径上必然落空。
-        本方法反而不看当前状态，只要没走上面 SUSPENDED-on-children 的提前返回、且非
-        终态，就发一次——这是 `TaskAwaitingHuman{hitl_id}` 在这条路径上唯一的解除点。
+        状态重置与 `TaskHumanResolved` 发射都委托给 `TaskManager.mark_human_resolved`
+        （D4；Task 6 收拢），而不是 `resume_task`：重建路径上 `restore()` 早于本方法跑，
+        且已把该 task 的状态从 `AWAITING_HUMAN` 翻成了 `PENDING`——等本方法执行到这里时
+        状态已经"看不出"曾经被人挡住过，`resume_task` 那种"状态仍是
+        AWAITING_HUMAN/SUSPENDED 才发"的判据在这条路径上必然落空。
+        `mark_human_resolved` 不看当前状态，只要没走上面 SUSPENDED-on-children 的
+        提前返回、且非终态，就发一次——这是 `TaskAwaitingHuman{hitl_id}` 在这条路径上
+        唯一的解除点。
         """
         target = task_manager.get_task(req.task_id)
         if target is None:
@@ -1933,21 +1935,14 @@ class CtxWeftRuntime:
                 "state left alone so _try_resume_parent still wakes it (hitl=%s)",
                 target.id, req.id)
             return
-        # 清旧进展、置 PENDING（restore 已重排,这里保证状态正确）。
+        # 清旧进展（restore 已重排,这里保证进展字段正确）；状态置回与事件发射
+        # 交给 TaskManager.mark_human_resolved——它不看当前状态，正对得上
+        # restore() 早于本方法跑、已把状态从 AWAITING_HUMAN 翻成 PENDING 的场景
+        # （resume_task 的 was_blocked 判据在这里必然落空，见其 docstring）。
         target.outputs = None
         target.process_report = None
         target.process_report_at = None
-        if target.status not in ("FINISHED", "FAILED", "CANCELED"):
-            target.status = "PENDING"
-            # 不经 task_manager._emit：这里只有真实 Session（tenant_id 从它取），
-            # task_manager 在部分既有单测里是不带 _emit 的轻量 fake——直接走
-            # runtime 自己的 event_bus，与 TaskManager._emit 构造同形。
-            await self._event_bus.emit(Event(
-                id=generate_id("evt"), run_id=None, sequence=0,
-                session_id=session.id, type=EventType.TASK_HUMAN_RESOLVED,
-                timestamp=now_utc(), tenant_id=session.tenant_id,
-                task_id=target.id, payload={"hitl_id": req.id},
-            ))
+        await task_manager.mark_human_resolved(target.id, hitl_id=req.id)
 
     async def _write_hitl_reply_turn(
         self, req: "PendingHitl", session: Session, target: "Task",
