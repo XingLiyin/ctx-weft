@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
@@ -23,9 +24,11 @@ from datetime import timedelta
 from typing import Any
 
 from ctx_weft.core.assembler.assembler import ContextRequest
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
+from ctx_weft.core.loop.llm_gateway import (
+    request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
+)
 # 模块级 import（**实测不成环**）：`core.media` 的模块级依赖只到 `core.content` /
 # `protocols`，不回指 `core.loop`——`capability.py` 对 `CONTENT_PARTS_KEY` 用的正是
 # 惰性 import，就是为了让这一条能写在模块级（Task 4 台账）。若日后 media 模块级引入了
@@ -33,7 +36,7 @@ from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_r
 from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
 from ctx_weft.core.utils import content_to_text, effective_limit, image_tokens, now_utc
 from ctx_weft.protocols import (
-    LLMRequest, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
+    LLMRequest, LLMUsage, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +80,22 @@ async def summarize_for_compact(
     LLM 摘要是 compact 的硬依赖（compact + observe 回退档共用本函数）：瞬时故障由
     stream_llm_resilient 自愈，自愈耗尽抛 LLMOutageError → 走 INTERRUPTED。**不再**在
     LLM 失败时静默退化为纯截断（旧的 except Exception 兜底已移除）。
+
+    task-4 复审修复：compact 走的这次 LLM 调用现在也经 gateway 的门禁（origin==
+    LOOP_COMPACT）自动获得 LLM_REQUEST_STARTED/LLM_PROMPT_SENT/LLM_TOKEN_STREAMED/
+    LLM_REASONING_STREAMED；本函数补发收尾的 LLM_RESPONSE_FINISHED——两边必须成对，
+    否则 host SSE 看到的是一条永远等不到收尾的挂死请求。payload 字段名/取值方式照抄
+    act.py 那份（``_run_llm_turn``）。request_id 用同一个确定性公式独立算出（同
+    act.py 的手法，见 llm_gateway.stream_llm_resilient 文档字符串）：两边都在本次
+    调用任何事件发射前求值，天然一致，不需要新增参数或跨函数传值。
+
+    收尾事件的发射条件与 gateway 那 4 个流式事件**同一个门禁**（``bus is not None`` 且
+    ``state.origin == EventOrigin.LOOP_COMPACT``），而不是只看 ``bus``——否则本函数万一
+    在别的 origin 下被调用（目前实际不会，但别指望调用方永远守规矩），会发一条没有配对
+    REQUEST_STARTED 的孤儿 RESPONSE_FINISHED，比不发更糟。``bus is None``（多数单测的
+    ctx 不接总线）时整段事件收发都跳过——`agent.id` / `state.sequence_counter` 在这些
+    最小化 state 上不一定存在，故 request_id 的计算也放在同一个 guard 里，不会在 bus
+    缺失时因缺字段而崩。
     """
     agent = state.agent
     request = ContextRequest(
@@ -101,10 +120,33 @@ async def summarize_for_compact(
     # 一次性调用（无循环内基线）→ baseline=None，走 max(整份估算, context_tokens)。
     llm_request.prompt_token_estimate = request_prompt_estimate(
         ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), None)
+
+    bus = getattr(ctx, "event_bus", None)
+    # 同 gateway 那 4 个流式事件一个门禁：bus 存在 且 origin==LOOP_COMPACT（见上方 docstring）。
+    should_emit_finished = bus is not None and getattr(state, "origin", None) == EventOrigin.LOOP_COMPACT
+    req_id = f"req_{agent.id}_{state.sequence_counter}" if should_emit_finished else None
+
     summary_text = ""
+    reasoning_text = ""
+    usage = LLMUsage()
     async for chunk in stream_llm_resilient(ctx, state, llm_request):
         if chunk.kind == "token":
             summary_text += chunk.text
+        elif chunk.kind == "reasoning":
+            reasoning_text += chunk.text
+        elif chunk.kind == "usage" and chunk.usage is not None:
+            usage = chunk.usage
+
+    if should_emit_finished:
+        model, llm_account = resolve_llm_identity(state)
+        await bus.emit(make_event(
+            state, EventType.LLM_RESPONSE_FINISHED,
+            payload={
+                "request_id": req_id, "content": summary_text, "reasoning": reasoning_text,
+                "tool_calls": [],
+                "usage": dataclasses.asdict(usage),
+                "llm_model": model, "llm_account": llm_account,
+                "finish_reason": "stop", "turn": 0}))
     return summary_text
 
 

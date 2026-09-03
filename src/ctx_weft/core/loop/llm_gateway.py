@@ -74,6 +74,11 @@ PROMPT_EST_BASE_KEY = "prompt_est_base"
 # floor 只应影响 max_tokens 的保守性，不应污染校准。
 PROMPT_EST_SEG_KEY = "prompt_est_seg"
 
+# stream_llm_resilient 的「流式侧」4 种 LLM_* 事件只在 state.origin 落在这个集合里才发射
+# （见 stream_llm_resilient 文档字符串）。临时脚手架：Task 5 删掉 observe.py 自己的那套
+# 发射后，observe/background_observe 也改靠 origin 区分，届时这里要放开。
+_STREAM_EVENT_ORIGINS = frozenset({EventOrigin.LOOP_ACT, EventOrigin.LOOP_COMPACT})
+
 
 def resolve_llm_identity(state) -> tuple[str, str]:
     """本次 LLM 调用实际使用的 (model, account)。
@@ -485,15 +490,23 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
 
     「流式侧」4 种 LLM_* 事件（REQUEST_STARTED / PROMPT_SENT / TOKEN_STREAMED /
     REASONING_STREAMED）在此发射（task-4 收敛，spec 2026-09-03 §9.5）。仅当
-    ``state.origin == EventOrigin.LOOP_ACT`` 时发射——本函数也被 observe /
-    background_observe（run_observe_react）与 compact（summarize_for_compact）
-    复用，它们各自已有自己的一套 LLM 交互事件（observe 用同名 LLM_* 但自己的
-    request_id 方案；background_observe 用 BACKGROUND_OBSERVE_* 专门把后台交互
-    挡在前端可见的 LLM_* 频道之外；compact 干脆不发）。不按 origin 收窄的话，
-    这里会在它们的调用上重复发射/串错 request_id，还会把本该隐藏的后台 LLM 调用
-    泄漏进 LLM_* 频道——origin 门禁把本次改动精确限定在 act.py 原来发射的那次
-    调用上，不影响另外三条路径的既有行为。
-    ``LLM_RESPONSE_FINISHED`` 仍留在 act.py（依赖软打断决策，见 task-4 brief）。
+    ``state.origin in _STREAM_EVENT_ORIGINS``（``LOOP_ACT`` / ``LOOP_COMPACT``）
+    时发射：
+
+    - **放行 LOOP_ACT**：act.py 原来自己发的那次调用，逐字搬过来。
+    - **放行 LOOP_COMPACT**：compact（``summarize_for_compact``）此前一个 LLM_*
+      事件都不发，是纯增量、不存在重复发射或串号风险（spec §9.3：compact 走统一
+      gateway 后应自动获得全部 LLM_* 事件）。``summarize_for_compact`` 自己成对
+      发射 ``LLM_RESPONSE_FINISHED``（同 act.py 的收尾职责分工）。
+    - **不放行 observe / background_observe**（``run_observe_react`` 复用本函数）：
+      它们各自已有自己的一套 LLM 交互事件与 request_id 方案（observe 前台用同名
+      LLM_* 但自己的 ``request_id_prefix`` 方案；background_observe 用
+      ``BACKGROUND_OBSERVE_*`` 专门把后台交互挡在前端可见的 LLM_* 频道之外）。
+      放行会在它们的调用上重复发射/串错 request_id，还会把本该隐藏的后台 LLM
+      调用泄漏进 LLM_* 频道。**这是临时脚制手架**——Task 5 会删掉 observe.py
+      自己的那套发射，届时改靠 origin 区分（spec §9 原意），本处门禁需一并放开。
+    ``LLM_RESPONSE_FINISHED`` 在 act.py 与 compact.py 两处各自发射（依赖各自的收尾
+    逻辑：act 依赖软打断决策，见 task-4 brief；compact 是单次调用直出）。
 
     request_id：与 act.py 侧 ``_run_llm_turn`` 用同一个确定性公式
     ``f"req_{agent.id}_{state.sequence_counter}"`` 独立算出——两边都在「本次 LLM
@@ -509,7 +522,7 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
     bus = getattr(ctx, "event_bus", None)
     emit_stream_events = (
         bus is not None and state is not None
-        and getattr(state, "origin", None) == EventOrigin.LOOP_ACT
+        and getattr(state, "origin", None) in _STREAM_EVENT_ORIGINS
     )
     request_id: str | None = None
     if emit_stream_events:

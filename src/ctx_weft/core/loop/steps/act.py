@@ -18,7 +18,7 @@ from ctx_weft.core.loop.llm_gateway import (
     PROMPT_EST_BASE_KEY, PROMPT_EST_SEG_KEY, request_prompt_estimate, resolve_llm_identity,
     stream_llm_resilient,
 )
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.orchestrator.control_capability import FINISH_TASK_NAME
@@ -364,12 +364,27 @@ async def _maybe_predispatch_compact(
 
     在 gateway 写 delegate conversation turn / 子 spawn-inherit 之前完成，使子继承到压缩后的记忆；每轮至多一次。
     随后 dispatch 执行（父转 SUSPENDED）→ 本 Act 末尾路由到 SuspendStep。usage.prompt_tokens 是本轮真实计数。
+
+    task-4 复审修复：driver 只在**步骤边界**切换 state.origin，此刻仍是 Act 步骤执行期间、
+    origin 还是 LOOP_ACT——但接下来经 maybe_compact_before_dispatch → escalating_compact →
+    summarize_for_compact 发起的这次 LLM 调用实际是 compact 摘要，不是 act 的一次 LLM turn。
+    不临时切换的话，llm_gateway.stream_llm_resilient 的 origin 门禁会把它错当成 act 调用发出
+    LLM_REQUEST_STARTED/LLM_PROMPT_SENT（turn 还取不到值恒为 0），escalating_compact 内部
+    make_event(state, ...) 发的 MEMORY_COMPACT_* 也会被错标成 LOOP_ACT。这里临时切到
+    LOOP_COMPACT、调用结束（含异常路径）后用 finally 还原，使这次调用的所有事件来源标注
+    正确，也走上 summarize_for_compact 里新补的收尾事件。
     """
     from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS
     if not any(tc.name in DISPATCH_TOOLS for tc in tool_calls):
         return
     from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
-    for ev in await maybe_compact_before_dispatch(state, ctx, prompt_tokens=usage.prompt_tokens):
+    prev_origin = state.origin
+    state.origin = EventOrigin.LOOP_COMPACT
+    try:
+        events = await maybe_compact_before_dispatch(state, ctx, prompt_tokens=usage.prompt_tokens)
+    finally:
+        state.origin = prev_origin
+    for ev in events:
         await ctx.event_bus.emit(ev)
 
 

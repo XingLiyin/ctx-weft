@@ -144,3 +144,145 @@ async def test_request_started_prompt_sent_response_finished_share_request_id():
     tokens = [e for e in bus.events if e.type == EventType.LLM_TOKEN_STREAMED]
     assert len(tokens) == 2
     assert all(e.payload["request_id"] == rid for e in tokens)
+
+
+# ── 复审修复轮：compact 也要放行 + 补收尾事件；_maybe_predispatch_compact 的 origin ──
+#
+# 控制方复审发现：
+#   1. gateway 的 origin 门禁原来只放行 LOOP_ACT，但 compact（summarize_for_compact）此前
+#      一个 LLM_* 事件都不发，放行它是纯增量，不存在 observe/background_observe 那种重复
+#      发射/串号风险——理应一并放行。
+#   2. 放行 compact 后，summarize_for_compact 必须补发 LLM_RESPONSE_FINISHED，否则
+#      REQUEST_STARTED 有了收尾却永远不来，host SSE 看到一条挂死请求。
+#   3. act.py::_maybe_predispatch_compact 在 Act 步骤执行期间调用 compact，driver 只在步骤
+#      边界切 origin，此刻仍是 LOOP_ACT——必须临时切到 LOOP_COMPACT，调用结束（含异常）后
+#      还原，否则这次「实际是 compact 摘要」的调用会被门禁错当成 act 的一次 LLM turn。
+
+
+class _FakeCompactAssembler:
+    async def assemble(self, req):
+        return SimpleNamespace(system="SYS-COMPACT", messages=[], tools=[])
+
+
+def _make_compact_state(*, origin: str = EventOrigin.LOOP_COMPACT):
+    agent = SimpleNamespace(
+        id="a1", runtime={"llm_model": "mock-model"},
+        loop_guard=SimpleNamespace(context_limit=100_000, context_tokens=0),
+    )
+    session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+    task = SimpleNamespace(id="t1", parent_task_id="p1", status="RUNNING")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
+    from ctx_weft.core.loop.driver import LoopState
+    return LoopState(
+        run_id="run-test", session=session, task=task, agent=agent, scope=scope,
+        extra={"template": None, "bound_capabilities": []},
+        resolved_model=SimpleNamespace(model="mock-model", account="mock-acct"),
+        origin=origin,
+    )
+
+
+def _make_compact_ctx(event_bus):
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.core.loop.driver import LoopContext
+
+    return LoopContext(
+        assembler=_FakeCompactAssembler(),
+        llm=_FakeLLM(),
+        memory=InMemoryMemoryProvider(),
+        event_bus=event_bus,
+        provider_ctx=ProviderContext(
+            session_id="s1", tenant_id="default", task_id="t1", agent_id="a1"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_emits_stream_events_for_compact_origin_and_pairs_with_response_finished():
+    """origin==LOOP_COMPACT 放行 4 个流式事件；summarize_for_compact 补发的
+    LLM_RESPONSE_FINISHED 与它们共享同一个 request_id（同 act.py 那条回归的镜像用例）。"""
+    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+
+    bus = _RecordingBus()
+    state = _make_compact_state()
+    ctx = _make_compact_ctx(bus)
+
+    out = await summarize_for_compact(state, ctx, scope="task")
+
+    assert out == "hello"
+    started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
+    prompt_sent = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT]
+    tokens = [e for e in bus.events if e.type == EventType.LLM_TOKEN_STREAMED]
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    assert len(started) == 1 and len(prompt_sent) == 1 and len(finished) == 1
+    assert len(tokens) == 2
+
+    rid = started[0].payload["request_id"]
+    assert rid
+    assert prompt_sent[0].payload["request_id"] == rid
+    assert finished[0].payload["request_id"] == rid
+    assert all(e.payload["request_id"] == rid for e in tokens)
+    assert finished[0].payload["content"] == "hello"
+    assert finished[0].payload["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_gateway_still_gates_out_observe_origin_and_compact_stays_silent_too():
+    """门禁维持不放行 observe/background_observe（Task 5 前的临时脚手架，不在本轮改动范围）；
+    summarize_for_compact 万一在这种 origin 下被调用，也不该发孤儿 LLM_RESPONSE_FINISHED。"""
+    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+
+    bus = _RecordingBus()
+    state = _make_compact_state(origin=EventOrigin.LOOP_OBSERVE)
+    ctx = _make_compact_ctx(bus)
+
+    await summarize_for_compact(state, ctx, scope="task")
+
+    assert [e for e in bus.events if e.type in _GATEWAY_TYPES] == []
+
+
+@pytest.mark.asyncio
+async def test_predispatch_compact_swaps_origin_to_compact_and_restores_on_success(monkeypatch):
+    from ctx_weft.core.loop.steps.act import _maybe_predispatch_compact
+    from ctx_weft.core.loop import capability_gateway as _cap_mod
+    from ctx_weft.core.loop.steps import compact as _compact_mod
+
+    dispatch_tool_name = next(iter(_cap_mod.DISPATCH_TOOLS))
+    tool_calls = [SimpleNamespace(name=dispatch_tool_name, id="tc1", arguments={})]
+    seen_origin = {}
+
+    async def _fake_maybe_compact(state, ctx, *, prompt_tokens):
+        seen_origin["value"] = state.origin
+        return []
+
+    monkeypatch.setattr(_compact_mod, "maybe_compact_before_dispatch", _fake_maybe_compact)
+    bus = _RecordingBus()
+    state = _make_state()  # origin=LOOP_ACT，同 _run_llm_turn 测试用的那份夹具
+    ctx = _make_ctx(bus)
+
+    await _maybe_predispatch_compact(state, ctx, tool_calls, LLMUsage(prompt_tokens=1))
+
+    assert seen_origin["value"] == EventOrigin.LOOP_COMPACT
+    assert state.origin == EventOrigin.LOOP_ACT  # 调用结束后已还原
+
+
+@pytest.mark.asyncio
+async def test_predispatch_compact_restores_origin_even_on_exception(monkeypatch):
+    from ctx_weft.core.loop.steps.act import _maybe_predispatch_compact
+    from ctx_weft.core.loop import capability_gateway as _cap_mod
+    from ctx_weft.core.loop.steps import compact as _compact_mod
+
+    dispatch_tool_name = next(iter(_cap_mod.DISPATCH_TOOLS))
+    tool_calls = [SimpleNamespace(name=dispatch_tool_name, id="tc1", arguments={})]
+
+    async def _boom(state, ctx, *, prompt_tokens):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_compact_mod, "maybe_compact_before_dispatch", _boom)
+    bus = _RecordingBus()
+    state = _make_state()
+    ctx = _make_ctx(bus)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _maybe_predispatch_compact(state, ctx, tool_calls, LLMUsage(prompt_tokens=1))
+
+    assert state.origin == EventOrigin.LOOP_ACT  # finally 里还原，异常路径也不例外
