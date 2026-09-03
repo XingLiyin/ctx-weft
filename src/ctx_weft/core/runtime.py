@@ -1695,8 +1695,8 @@ class CtxWeftRuntime:
         - 不碰模型：换模型走 `set_agent_llm`/`set_session_llm`，registry 现读现解，
           续跑只管把已经存在的选择重新派发出去（批次 B）。
         - 控制令牌随 run 在派发时发放（per-run registry），无需在此重建。
-        - wait_for_user 冷应答注入用户回复到 task 层（`_inject_user_reply` 自己发
-          `TaskHumanResolved`）；approval 走 reconcile，由本方法直接调 `resume_task`
+        - wait_for_user 冷应答注入用户回复到 task 层（`_inject_user_reply` 委托
+          `TaskManager.mark_human_resolved` 发 `TaskHumanResolved`）；approval 走 reconcile，由本方法直接调 `resume_task`
           发那条事件——两条路径合起来正好各发一次，不重不漏（D4）。
         - 重排被应答的 task 并重新 drain（``_register_and_drain`` 对同一 TM 幂等：重挂回调 + 派发）。
 

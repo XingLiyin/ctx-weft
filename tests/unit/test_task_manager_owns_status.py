@@ -93,8 +93,9 @@ _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
 #: 目前为空：`runtime._inject_user_reply` 曾在这里就地写 `task.status = "PENDING"`
 #: 并自行发事件（Task 6 之前），豁免是为它开的。Task 6 把状态重置连同事件发射一并
 #: 收拢进 `TaskManager.mark_human_resolved`，该函数自此不再写 task 状态——豁免随之
-#: 撤销，并用负向对照（`test_removed_exemption_still_catches_a_reinstated_write`）
-#: 确认撤销后守卫仍能抓人，不是白留一个空集合摆设。
+#: 撤销。撤销后守卫是否仍能抓人，由下面的
+#: `test_removed_exemption_still_catches_a_reinstated_write` 常驻钉住——
+#: 空集合不是摆设，它下面的全树扫描仍然覆盖 runtime.py。
 _ALLOWED_STATUS_WRITES: frozenset[tuple[str, str]] = frozenset()
 
 
@@ -333,3 +334,25 @@ def test_every_run_outcome_kind_is_handled(kind: RunOutcomeKind) -> None:
 
     disp = disposition_for(RunOutcome(kind=kind), retry_count=0, max_retries=3)
     assert disp.status and disp.event_type
+
+
+def test_removed_exemption_still_catches_a_reinstated_write(tmp_path):
+    """撤销豁免不是空集合摆设：真有人把写入加回来，守卫必须报出来。
+
+    Task 6 撤掉了 `runtime._inject_user_reply` 的精确豁免。若判据其实扫不到
+    那个文件（或 `_ALLOWED_STATUS_WRITE_FILES` 把它整份放过了），空集合就成了
+    一块遮羞布——本测试用一份合成源码钉死「扫得到 + 报得出」。
+    """
+    pkg = tmp_path / "src" / "ctx_weft" / "core"
+    pkg.mkdir(parents=True)
+    (pkg / "reinstated.py").write_text(
+        'def _cold_reply(task):\n    task.status = "PENDING"\n',
+        encoding="utf-8",
+    )
+    offenders = _task_status_writes(pkg / "reinstated.py")
+    assert offenders == [2], f"守卫漏掉了重新加回来的写入: {offenders}"
+
+
+def test_exemption_table_is_empty_by_design():
+    """空集合是 Task 6 的结论，不是忘了填——改动它需要一条明确理由。"""
+    assert _ALLOWED_STATUS_WRITES == frozenset()

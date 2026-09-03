@@ -1277,7 +1277,7 @@ class TaskManager:
         配对（D4）。
 
         **只在真的解除了「被人挡住」时才发那条事件**（`was_blocked` 判据）：`_inject_user_reply`
-        走 wait_for_user 分支时已经把状态改成 PENDING 并自己发过一次；若这里不做这个判断，
+        走 wait_for_user 分支时已经委托 `mark_human_resolved` 把状态改成 PENDING 并发过一次；若这里不做这个判断，
         紧随其后的这次调用会对同一个 hitl_id 重复发 `TaskHumanResolved`——配对就不再是一对一。
         """
         t = self._tasks.get(task_id)
