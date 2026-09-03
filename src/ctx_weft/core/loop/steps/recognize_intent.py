@@ -13,10 +13,9 @@ import dataclasses
 import logging
 from typing import Any
 
-from ctx_weft.core.content import content_to_text
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
-    stream_llm, apply_dynamic_max_tokens, request_prompt_estimate, resolve_llm_identity,
+    stream_llm_resilient, apply_dynamic_max_tokens, request_prompt_estimate, resolve_llm_identity,
 )
 from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
 from ctx_weft.protocols.events import EventOrigin, EventType
@@ -151,29 +150,34 @@ class RecognizeIntentStep(Step):
             "task_id": target_task_id,
             "target_task_id": target_task_id,
         }))
-        await ctx.event_bus.emit(make_event(state, EventType.RECOGNIZE_INTENT_LLM_PROMPT, payload={
-            "system": prompt.system,
-            "messages": [
-                {"role": m.role, "content": content_to_text(m.content)}
-                for m in prompt.messages
-            ],
-            "tool_names": [t.name for t in prompt.tools],
-        }))
 
+        # req_id：与 gateway 内部用同一个确定性公式独立算出——两边都在「本次 LLM 调用的
+        # 任何事件被发射之前」求值（此处在调用 stream_llm_resilient 之前；gateway 侧在其
+        # while 重试循环、也就是第一次 emit 之前），故 state.sequence_counter 两处读到同一个
+        # 值，天然一致（同 act.py::_run_llm_turn / compact.py::summarize_for_compact 的手法）。
+        req_id = f"req_{state.agent.id}_{state.sequence_counter}"
+        model, llm_account = resolve_llm_identity(state)
+
+        from ctx_weft.protocols import ToolCall
+
+        tool_call_obj: ToolCall | None = None
         tool_name = ""
         tool_args: dict[str, Any] = {}
         usage = LLMUsage()
+        text = ""
+        reasoning = ""
         try:
             _guard = getattr(state.agent, "loop_guard", None)
             llm_request.prompt_token_estimate = request_prompt_estimate(
                 ctx.llm.tokenizer, llm_request, _guard, None)
             apply_dynamic_max_tokens(ctx, llm_request, _guard)
-            async for chunk in stream_llm(
-                ctx.llm, llm_request,
-                blob_store=getattr(ctx, "blob_store", None),
-                provider_ctx=getattr(ctx, "provider_ctx", None),
-            ):
-                if chunk.kind == "tool_call" and chunk.tool_call:
+            async for chunk in stream_llm_resilient(ctx, state, llm_request):
+                if chunk.kind == "token":
+                    text += chunk.text
+                elif chunk.kind == "reasoning":
+                    reasoning += chunk.text
+                elif chunk.kind == "tool_call" and chunk.tool_call:
+                    tool_call_obj = chunk.tool_call
                     tool_name = chunk.tool_call.name
                     tool_args = chunk.tool_call.arguments
                 elif chunk.kind == "usage" and chunk.usage is not None:
@@ -184,6 +188,22 @@ class RecognizeIntentStep(Step):
             else:
                 logger.exception("RecognizeIntentStep: LLM call failed for task %s", target_task_id)
             return StepOutcome(next_step=None)
+
+        # LLM_RESPONSE_FINISHED：gateway 只发流式侧 4 个事件，收尾事件由各调用方自己发
+        # （同 act.py / compact.py 的既定分工）——否则 LLM_REQUEST_STARTED 有始无终，host
+        # SSE 会看到一条永远等不到收尾的挂死请求。payload 结构照抄 act.py::_run_llm_turn。
+        await ctx.event_bus.emit(make_event(
+            state, EventType.LLM_RESPONSE_FINISHED,
+            payload={
+                "request_id": req_id, "content": text, "reasoning": reasoning,
+                "tool_calls": (
+                    [{"id": tool_call_obj.id, "name": tool_call_obj.name,
+                      "arguments": tool_call_obj.arguments}]
+                    if tool_call_obj is not None else []
+                ),
+                "usage": dataclasses.asdict(usage),
+                "llm_model": model, "llm_account": llm_account,
+                "finish_reason": "tool_use" if tool_name else "stop"}))
 
         if tool_name and ctx.capability_gateway is not None:
             await ctx.capability_gateway.invoke(

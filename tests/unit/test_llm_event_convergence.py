@@ -477,6 +477,143 @@ async def test_background_observe_path_events_share_origin_and_request_id():
     assert [e for e in bus.events if e.type in _OBSOLETE] == []
 
 
+# ── Task 6：recognize_intent 切 stream_llm_resilient + 补发 LLM_RESPONSE_FINISHED ──
+#
+# 裸 stream_llm 没有自愈退避——切到 resilient 顺带修掉这个缺陷，并白拿 gateway 那 4 个
+# 流式事件。RECOGNIZE_INTENT_LLM_PROMPT（该 step 专属的镜像事件）随之删除，角色由通用
+# LLM_PROMPT_SENT 承担；切网关后 LLM_REQUEST_STARTED 有始无终，故本 step 自己补发
+# LLM_RESPONSE_FINISHED（payload 结构照抄 act.py::_run_llm_turn），request_id 用同一个
+# 确定性公式独立算出，与 gateway 的 4 个天然一致。
+
+from ctx_weft.core.loop.steps import recognize_intent
+
+
+def test_recognize_intent_uses_resilient_gateway():
+    """裸 stream_llm 没有自愈退避——切到 resilient 顺带修掉这个缺陷。"""
+    src = inspect.getsource(recognize_intent)
+    assert "stream_llm_resilient" in src
+    assert "content_to_text" not in src, "脱敏应统一到 redact_content_for_event"
+
+
+def test_recognize_intent_no_longer_emits_its_mirror_event():
+    src = inspect.getsource(recognize_intent)
+    assert "RECOGNIZE_INTENT_LLM_PROMPT" not in src
+
+
+def _make_recognize_intent_state():
+    from ctx_weft.protocols.capability import ToolCapability
+    agent = SimpleNamespace(
+        id="a1", runtime={}, loop_guard=SimpleNamespace(context_limit=100_000, context_tokens=0),
+    )
+    session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+    task = SimpleNamespace(id="t1", parent_task_id=None, title="", settings=SimpleNamespace())
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
+    cap = ToolCapability(id="cap1", name="update_task_metadata", purposes=["recognize_intent"])
+    from ctx_weft.core.loop.driver import LoopState
+    return LoopState(
+        run_id="run-test", session=session, task=task, agent=agent, scope=scope,
+        extra={"template": None, "bound_capabilities": [cap]},
+        resolved_model=SimpleNamespace(model="mock-model", account="mock-acct"),
+        origin=EventOrigin.LOOP_RECOGNIZE_INTENT,
+    )
+
+
+def _make_recognize_intent_ctx(event_bus, *, llm=None, config=None):
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.core.loop.driver import LoopContext
+
+    class _FakeRIAssembler:
+        async def assemble(self, req):
+            return SimpleNamespace(system="SYS-RI", messages=[], tools=[])
+
+    class _FakeRIGateway:
+        async def invoke(self, *, tool_name, arguments, state, ctx):
+            pass
+
+    return LoopContext(
+        assembler=_FakeRIAssembler(),
+        llm=llm if llm is not None else _FakeLLM(),
+        memory=InMemoryMemoryProvider(),
+        event_bus=event_bus,
+        provider_ctx=ProviderContext(
+            session_id="s1", tenant_id="default", task_id="t1", agent_id="a1"),
+        capability_gateway=_FakeRIGateway(),
+        config=config,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recognize_intent_events_share_origin_and_request_id():
+    """gateway 的 4 个流式事件 + recognize_intent 自己补发的收尾事件，5 个共用一个
+    request_id，且 origin 全部是 loop.recognize_intent；镜像事件不再出现在事件流里。"""
+    from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+
+    bus = _RecordingBus()
+    state = _make_recognize_intent_state()
+    ctx = _make_recognize_intent_ctx(bus)
+
+    outcome = await RecognizeIntentStep().execute(state, ctx)
+    assert outcome.next_step is None
+
+    started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
+    prompt_sent = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT]
+    tokens = [e for e in bus.events if e.type == EventType.LLM_TOKEN_STREAMED]
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    assert len(started) == 1 and len(prompt_sent) == 1 and len(finished) == 1
+    assert len(tokens) == 2
+
+    five = started + prompt_sent + tokens + finished
+    assert len(five) == 5
+    rid = started[0].payload["request_id"]
+    assert rid
+    assert all(e.payload["request_id"] == rid for e in five)
+    assert all(e.origin == EventOrigin.LOOP_RECOGNIZE_INTENT for e in five)
+
+    assert [e for e in bus.events if e.type == "RecognizeIntentLLMPrompt"] == []
+
+
+@pytest.mark.asyncio
+async def test_recognize_intent_self_heals_via_resilient_gateway():
+    """切网关的直接收益：裸 stream_llm 没有退避重试，切到 stream_llm_resilient 后，
+    首次瞬时故障（outage）应被自愈层原地重试并最终成功，不冒泡成异常。"""
+    from ctx_weft.protocols import LLMCallError
+    from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+
+    class _FlakyLLM:
+        tokenizer = HeuristicTokenizer()
+        context_limit = 100_000
+
+        def __init__(self):
+            self.attempts = 0
+
+        async def complete(self, req, stream=True):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise LLMCallError("boom", retriable=True, outage=True)
+            yield SimpleNamespace(kind="token", text="ok", tool_call=None, usage=None)
+            yield SimpleNamespace(
+                kind="usage", text="", tool_call=None,
+                usage=LLMUsage(prompt_tokens=1, completion_tokens=1))
+
+    bus = _RecordingBus()
+    state = _make_recognize_intent_state()
+    llm = _FlakyLLM()
+    ctx = _make_recognize_intent_ctx(bus, llm=llm, config=SimpleNamespace(
+        llm_self_heal_base_delay_sec=0.01, llm_self_heal_max_interval_sec=0.01,
+        llm_self_heal_max_attempts=8, llm_self_heal_max_duration_sec=30.0,
+    ))
+
+    outcome = await RecognizeIntentStep().execute(state, ctx)
+
+    assert outcome.next_step is None
+    assert llm.attempts == 2, "应在瞬时故障后原地重试一次并成功"
+    retried = [e for e in bus.events if e.type == EventType.LLM_RETRY_TRIGGERED]
+    assert len(retried) == 1
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    assert len(finished) == 1
+
+
 # ── Task 5 复审修复 R1：origin 必须在 _run_background_observe 入口钉住，覆盖 ──
 # RUN_STARTED/TASK_RECAP_STARTED 以及两条早退路径（re-fold 幂等护栏、短段免折）——
 # 这几处此前发射时用的还是调用方快照进来的 origin（LOOP_OBSERVE / LOOP_ACT），只有

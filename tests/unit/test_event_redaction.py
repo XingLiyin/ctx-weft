@@ -33,12 +33,17 @@ def test_recognize_intent_gets_text_not_empty():
     assert content_to_text(m.content) == "看图"
 
 
-# ── 真实驱动：从实际的 LLM_PROMPT_SENT / RECOGNIZE_INTENT_LLM_PROMPT 事件里断言 ──
+# ── 真实驱动：从实际的 LLM_PROMPT_SENT 事件里断言 ──
 #
 # 复用 tests/unit/test_llm_request_identity.py（act/observe）与
 # tests/unit/test_recognize_intent_fill.py（recognize_intent）已有的最小 fake 夹具，
 # 直接驱动到 make_event(..., payload={"messages": [...]}) 那一行，而不是只测
 # redact_content_for_event 本身。
+#
+# Task 6：recognize_intent 切到 stream_llm_resilient 后，RECOGNIZE_INTENT_LLM_PROMPT
+# 这条 step 专属镜像事件已删除——三条 step（act/observe/recognize_intent）现在统一由
+# gateway 发 LLM_PROMPT_SENT，脱敏统一走 redact_content_for_event，故本测试与上面两条
+# 同构，改为断言 LLM_PROMPT_SENT。
 
 
 from types import SimpleNamespace
@@ -165,7 +170,8 @@ async def test_observe_prompt_sent_event_has_no_base64():
 
 
 async def test_recognize_intent_prompt_event_keeps_text_not_empty():
-    """真实驱动到 RECOGNIZE_INTENT_LLM_PROMPT：多模态消息的文本不该被丢空。"""
+    """recognize_intent 切到 stream_llm_resilient 后（Task 6），LLM_PROMPT_SENT 由 gateway
+    发射、脱敏走 redact_content_for_event：多模态消息的文本不该被丢空。"""
 
     class _FakeAssembler:
         async def assemble(self, request):
@@ -177,39 +183,41 @@ async def test_recognize_intent_prompt_event_keeps_text_not_empty():
 
     class _FakeLLM:
         tokenizer = HeuristicTokenizer()
+        context_limit = 100_000
 
         async def complete(self, request, stream=True):
             yield SimpleNamespace(kind="usage", usage=LLMUsage(prompt_tokens=1, completion_tokens=1),
                                    tool_call=None, text="")
 
-    emitted = []
-
-    async def _emit(ev):
-        emitted.append(ev)
+    bus = _RecordingBus()
 
     cap = ToolCapability(id="cap1", name="update_task_metadata", purposes=["recognize_intent"])
-    ctx = SimpleNamespace(
-        provider_ctx=SimpleNamespace(),
-        capability_cache=None,
+    ctx = LoopContext(
         assembler=_FakeAssembler(),
         llm=_FakeLLM(),
+        memory=InMemoryMemoryProvider(),
+        event_bus=bus,
+        provider_ctx=ProviderContext(
+            session_id="s1", tenant_id="te1", task_id="t1", agent_id="a1"),
         capability_gateway=_FakeGateway(),
-        event_bus=SimpleNamespace(emit=_emit),
     )
-    state = SimpleNamespace(
+    state = LoopState(
         run_id="r1",
-        sequence_counter=0,
-        agent=SimpleNamespace(id="a1", runtime={"llm_model": "mock"}),
         session=SimpleNamespace(id="s1", tenant_id="te1"),
         task=SimpleNamespace(id="t1", title="", settings=SimpleNamespace()),
-        scope=SimpleNamespace(session_id="s1", task_id="t1", agent_id="a1"),
+        agent=SimpleNamespace(id="a1", runtime={"llm_model": "mock"},
+                               loop_guard=SimpleNamespace(context_limit=100_000, context_tokens=0)),
+        scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         extra={"template": SimpleNamespace(), "bound_capabilities": [cap]},
         resolved_model=SimpleNamespace(model="mock", account=""),
+        origin=EventOrigin.LOOP_RECOGNIZE_INTENT,
     )
 
     await RecognizeIntentStep().execute(state, ctx)
 
-    prompt_ev = [e for e in emitted if e.type == EventType.RECOGNIZE_INTENT_LLM_PROMPT][0]
+    assert [e for e in bus.events if e.type == "RecognizeIntentLLMPrompt"] == []
+    prompt_ev = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT][0]
+    assert prompt_ev.origin == EventOrigin.LOOP_RECOGNIZE_INTENT
     content = prompt_ev.payload["messages"][0]["content"]
     assert content != ""
     assert "看图" in content
