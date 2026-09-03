@@ -33,8 +33,22 @@
    补发射侧只对新事件有效。
 2. **observe 的非 LLM 路径**：判决用规则出，**摘要一律不许机械合成**。
    `_rule_observe` 整个换成「机械判决 + 转 background observe」。
-   observe / finalize **不可中断是有意设计**（它们是「整理现状」与「闭合」），
-   **不得**给它们加取消检查点。background observe 不影响主进程，取消时照跑。
+
+3. **取消在 observe 里的语义**：observe / finalize **不可中断是有意设计**
+   （它们是「整理现状」与「闭合」，半途中止会留下既无判决、也没整理干净记忆的 task）。
+
+   这里有个**必须分清的区别**，两者只差一个词但结论相反：
+
+   | | 做不做 | 含义 |
+   |---|---|---|
+   | **检查点** | **禁止** | 执行途中 `raise_if_cancelled()`，把 step **打断在半路** |
+   | **入口读 token 选路径** | **正是要做的**（Task 4） | observe **照常走完**，只是不再烧多轮 LLM |
+
+   即：取消到达时，observe 降级走机械判决那条路、摘要交 background observe，
+   **但它仍然跑完并交出 verdict**。用户已按下取消却还要等几轮 LLM，体验上说不过去；
+   而中途甩手不管，比多等几轮更糟。
+
+   background observe 不影响主进程，取消时照跑。
 
 ---
 
@@ -427,6 +441,9 @@ git add -A && git commit -m "fix(snapshot): AgentView 的模型选择进快照 +
 
 - observe / finalize **不可中断是有意设计** —— 它们是「整理现状」与「闭合」，
   半途中止会留下既无判决、也没整理干净记忆的 task。**不得给它们加检查点。**
+  （**注意与 Task 4 区分**：Task 4 在 observe **入口**读一次 token 来选路径，
+  那不是检查点 —— observe 仍然跑完。见「用户已裁定」第 3 条的对照表。
+  本任务**完全不碰 observe**。）
 - 「取消被完全丢弃」是**判重了**：`cancel_session` 先调 `cancel_all`
   （清队 + 写 `session.status="CANCELED"` + 透传 SM 发 `SessionFinished{CANCELED}`），
   会话终态正确。真正的差异只是那个正在 finalize 的 task 报 FINISHED 而非 CANCELED，
