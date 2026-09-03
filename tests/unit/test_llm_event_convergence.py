@@ -506,7 +506,12 @@ def _make_recognize_intent_state():
         id="a1", runtime={}, loop_guard=SimpleNamespace(context_limit=100_000, context_tokens=0),
     )
     session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
-    task = SimpleNamespace(id="t1", parent_task_id=None, title="", settings=SimpleNamespace())
+    # status: launch_recognize_intent._run() 的 RUN_FINISHED payload 读
+    # snapshot.task.status（final_status）——即使本测试组大多只驱动
+    # RecognizeIntentStep.execute() 本身（用不到这个字段），也一并给上，供驱动
+    # launch_recognize_intent 的那条测试复用同一个 fixture。
+    task = SimpleNamespace(
+        id="t1", parent_task_id=None, title="", status="RUNNING", settings=SimpleNamespace())
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
     cap = ToolCapability(id="cap1", name="update_task_metadata", purposes=["recognize_intent"])
     from ctx_weft.core.loop.driver import LoopState
@@ -612,6 +617,130 @@ async def test_recognize_intent_self_heals_via_resilient_gateway():
     assert len(retried) == 1
     finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
     assert len(finished) == 1
+
+
+# ── Task 6 复审修复：异常路径不得留孤儿 LLM_REQUEST_STARTED（无配对 RESPONSE_FINISHED）──
+#
+# gateway 在进重试循环**之前**就无条件发了 LLM_REQUEST_STARTED/LLM_PROMPT_SENT——若本
+# step 的 except 分支既不补发 LLM_RESPONSE_FINISHED、异常也不冒泡，host SSE 会看到一条
+# 永远等不到收尾的挂死请求。下面两条覆盖「重试耗尽」与「不可重试的永久失败」，均须验证
+# REQUEST_STARTED 与 RESPONSE_FINISHED 成对。
+#
+# outcome 语义的复审结论（详见 task-6-report.md）：`launch_recognize_intent._run()` 把
+# 「内部已捕获、降级处理的失败」报成 RUN_FINISHED(outcome=completed) 是 commit 920bb05
+# （总账 C5）已经明确裁定的既有设计，本任务未变更——`test_recognize_intent_swallowed_llm_failure_still_reports_run_completed`
+# 把这条既有行为钉成回归测试，以便日后若要翻案能在这里看见。
+
+
+@pytest.mark.asyncio
+async def test_recognize_intent_pairs_events_on_permanent_llm_failure():
+    """不可重试的永久失败（retriable=False）：LLM_REQUEST_STARTED 已经发出（gateway
+    无条件发），except 分支必须补发 LLM_RESPONSE_FINISHED（finish_reason="error"），
+    异常本身被就地吞掉、不冒泡（既有设计，见上）。"""
+    from ctx_weft.protocols import LLMCallError
+    from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+
+    class _PermFailLLM:
+        tokenizer = HeuristicTokenizer()
+        context_limit = 100_000
+
+        async def complete(self, req, stream=True):
+            raise LLMCallError("bad request", retriable=False, outage=False)
+            yield  # pragma: no cover — 使函数成为 async generator，见 stream_llm_resilient 用法
+
+    bus = _RecordingBus()
+    state = _make_recognize_intent_state()
+    ctx = _make_recognize_intent_ctx(bus, llm=_PermFailLLM())
+
+    outcome = await RecognizeIntentStep().execute(state, ctx)
+
+    assert outcome.next_step is None, "异常被就地吞掉，不冒泡"
+    started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    assert len(started) == 1 and len(finished) == 1, "REQUEST_STARTED 必须配对 RESPONSE_FINISHED"
+    assert finished[0].payload["request_id"] == started[0].payload["request_id"]
+    assert finished[0].payload["finish_reason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_recognize_intent_pairs_events_on_retry_exhausted():
+    """瞬时故障但重试预算耗尽（LLMOutageError）：同上，REQUEST_STARTED 只发一次
+    （gateway 在整个重试循环外发一次，不随 attempt 重发），RESPONSE_FINISHED 必须补上。"""
+    from ctx_weft.protocols import LLMCallError
+    from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+
+    class _AlwaysOutageLLM:
+        tokenizer = HeuristicTokenizer()
+        context_limit = 100_000
+
+        def __init__(self):
+            self.attempts = 0
+
+        async def complete(self, req, stream=True):
+            self.attempts += 1
+            raise LLMCallError("outage", retriable=True, outage=True)
+            yield  # pragma: no cover
+
+    bus = _RecordingBus()
+    state = _make_recognize_intent_state()
+    llm = _AlwaysOutageLLM()
+    ctx = _make_recognize_intent_ctx(bus, llm=llm, config=SimpleNamespace(
+        llm_self_heal_base_delay_sec=0.01, llm_self_heal_max_interval_sec=0.01,
+        llm_self_heal_max_attempts=2, llm_self_heal_max_duration_sec=30.0,
+    ))
+
+    outcome = await RecognizeIntentStep().execute(state, ctx)
+
+    assert outcome.next_step is None
+    assert llm.attempts == 2, "应耗尽 max_attempts=2 后放弃"
+    started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    retried = [e for e in bus.events if e.type == EventType.LLM_RETRY_TRIGGERED]
+    assert len(started) == 1, "REQUEST_STARTED 只在重试循环外发一次"
+    assert len(finished) == 1
+    assert len(retried) == 1, "耗尽前应先原地重试一次"
+    assert finished[0].payload["request_id"] == started[0].payload["request_id"]
+    assert finished[0].payload["finish_reason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_recognize_intent_swallowed_llm_failure_still_reports_run_completed():
+    """回归钉住既有设计（commit 920bb05 / 总账 C5，本任务未变更）：recognize_intent 内部
+    已捕获、降级处理的 LLM 失败，`launch_recognize_intent._run()` 仍把 RUN_FINISHED 报成
+    outcome=completed——因为异常从未逃出 RecognizeIntentStep.execute()。这不是「谎报」的
+    新缺陷，是该 commit 明确选择的既有口径：只有真正逃出这段代码的未捕获异常才记
+    interrupted。若日后要翻案，改这条测试的断言。"""
+    from ctx_weft.protocols import LLMCallError
+    from ctx_weft.core.loop.driver import LoopState
+    from ctx_weft.core.loop.steps.recognize_intent import launch_recognize_intent
+    from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
+
+    class _PermFailLLM:
+        tokenizer = HeuristicTokenizer()
+        context_limit = 100_000
+
+        async def complete(self, req, stream=True):
+            raise LLMCallError("bad request", retriable=False, outage=False)
+            yield  # pragma: no cover
+
+    bus = _RecordingBus()
+    inner_state = _make_recognize_intent_state()
+    ctx = _make_recognize_intent_ctx(bus, llm=_PermFailLLM())
+    # launch_recognize_intent 自己会拷贝出一份快照 state，只需要一份带 task/agent/session/
+    # scope/extra/resolved_model 的 LoopState 供其读取（origin 由 launch 内部钉死，见源码）。
+    outer_state = LoopState(
+        run_id="orig-run", session=inner_state.session, task=inner_state.task,
+        agent=inner_state.agent, scope=inner_state.scope, extra=inner_state.extra,
+        resolved_model=inner_state.resolved_model,
+    )
+
+    task = launch_recognize_intent(outer_state, ctx)
+    await task
+
+    finished_runs = [e for e in bus.events if e.type == EventType.RUN_FINISHED]
+    assert len(finished_runs) == 1
+    assert finished_runs[0].payload["outcome"] == RunOutcomeKind.COMPLETED.value
+    assert finished_runs[0].payload["error"] is None
 
 
 # ── Task 5 复审修复 R1：origin 必须在 _run_background_observe 入口钉住，覆盖 ──

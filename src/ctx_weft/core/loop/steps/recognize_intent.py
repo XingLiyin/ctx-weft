@@ -187,6 +187,28 @@ class RecognizeIntentStep(Step):
                 logger.warning("RecognizeIntentStep: LLM call failed for task %s: %s", target_task_id, exc)
             else:
                 logger.exception("RecognizeIntentStep: LLM call failed for task %s", target_task_id)
+            # 复审修复（task-6）：gateway 在进入重试循环**之前**就无条件发了
+            # LLM_REQUEST_STARTED/LLM_PROMPT_SENT——任何退出路径都必须配对
+            # LLM_RESPONSE_FINISHED，否则 host SSE 看到一条永远等不到收尾的挂死请求
+            # （同成功路径下方那条收尾的理由）。finish_reason="error" 是本 step 自己的
+            # 错误收尾语义，不对应任何 provider 原生 finish_reason 取值；content/reasoning/
+            # usage 用异常发生前已累积到的部分值（可能全空）。
+            #
+            # 就地吞掉异常、不让它向上冒泡：这不是本次改动引入的行为，是 commit 920bb05
+            # （总账 C5）已经明确裁定的既有设计——「正常路径（含内部已捕获、降级处理的
+            # 失败）记 completed，只有真正逃出这段代码的未捕获异常才记 interrupted」。
+            # recognize_intent 是尽力而为的元数据补全（失败不影响 task 主流程），outer
+            # `launch_recognize_intent._run()` 因此仍会把这次失败报成
+            # RUN_FINISHED(outcome=COMPLETED)——按该文档化的既定口径延续，未在本次改动中
+            # 变更（复审记录见 task-6-report.md）。
+            await ctx.event_bus.emit(make_event(
+                state, EventType.LLM_RESPONSE_FINISHED,
+                payload={
+                    "request_id": req_id, "content": text, "reasoning": reasoning,
+                    "tool_calls": [],
+                    "usage": dataclasses.asdict(usage),
+                    "llm_model": model, "llm_account": llm_account,
+                    "finish_reason": "error"}))
             return StepOutcome(next_step=None)
 
         # LLM_RESPONSE_FINISHED：gateway 只发流式侧 4 个事件，收尾事件由各调用方自己发
