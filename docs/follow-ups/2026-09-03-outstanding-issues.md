@@ -164,6 +164,33 @@ FINISHED、又被 SUSPENDED）——和被修的那四处伪造 payload 是同�
 「加 View 字段」维护清单：types → 发射侧 payload → reducer →
 serialize/deserialize → converters → golden）。**属独立立项。**
 
+### A10. 用户取消会话时，未决的 ask_user 不会被取消（重启后会复活）
+
+`HitlService.cancel()` 能用，发的是 `HitlResolved{outcome: "cancelled"}`
+（不是 `HitlCancelled`——那是 L 档旧名）。但它在 `src/` 里**只有一个注入点**：
+`runtime.py:1159` 把 `_cancel_session_hitl` 注入给**熔断 trip 序列的第 3 步**。
+
+而 `cancel_session`（用户主动取消）走的是
+`task_manager.cancel_all(...)` → 取消 run token → `_release_session`，
+**三步都不碰 HITL registry**。
+
+**后果**：用户在某个 task 正等 ask_user 时取消会话 ——
+task 被清掉、会话正确落 `SessionFinished{CANCELED}`，
+但**那条 HITL 请求仍留在 registry 里 pending，且事件流里没有终局事件**。
+于是 `rebuild_hitl`（它按「有 `HitlOpened` 无终局事件」折 pending）
+会在**重启后把它当未决恢复出来** —— 一个已取消会话的提问又活了。
+
+**旁证**：`HitlService.cancel` 的 docstring 自称服务「会话关闭 / 熔断」两种场合，
+**「会话关闭」那半从未实现**；`_cancel_session_hitl` 的 docstring 也自陈是
+「trip 序列第 3 步注入」。
+
+**修法很轻**：`cancel_session` 在 `cancel_all` 之后、`_release_session` **之前**
+调一次 `_cancel_session_hitl(session_id)`，`message` 用 `CancelReason.USER_CANCEL`。
+时序是关键——释放会话状态之后再取消就晚了。
+
+**发现路径**：批次二 pre-flight 裁定「`HitlCancelled` 是 L 档不能删」之后，
+用户追问「那 ask_user 还能被取消吗」——顺着这条线查出来的。
+
 ---
 
 ## B. 不变量与守卫
