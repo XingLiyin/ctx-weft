@@ -6,7 +6,7 @@
 
 **Architecture:** 七个任务，前两个各修一条数据损失（投影里 task 成果恒空、agent 模型选择不进快照），第三个补取消来源的可辨识性，第四个按用户裁定重做 observe 的非 LLM 路径（机械判决 + 转 background observe，禁止任何机械合成摘要），第五个把 `reason` / `error_code` 收敛成 `StrEnum`，第六个把越界的事件发射搬回 TaskManager 并收紧守卫，第七个清死值域并补 observe 的起点事件。
 
-**Tech Stack:** Python 3.12+，事件溯源（`EventType` / reducer / `*View` 投影 / 快照），pytest，ruff。
+**Tech Stack:** Python **3.11.4**（实测；`StrEnum` 是 3.11 引入的，T5 可用 —— 但**不要用 3.12 才有的特性**），事件溯源（`EventType` / reducer / `*View` 投影 / 快照），pytest，ruff。
 
 **Spec:** `docs/follow-ups/2026-09-03-outstanding-issues.md`（本计划逐条实现其「建议的处理顺序」）
 
