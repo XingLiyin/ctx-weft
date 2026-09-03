@@ -195,23 +195,16 @@ def _resolved_user_turn_on_a_parent_with_a_live_child() -> list[Event]:
             "id": TID, "status": "PENDING", "title": "T1",
             "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"}),
         _ev(4, EventType.TASK_STARTED, task_id=TID, assigned_agent_id="agt_root"),
-        # 播一份「已攒下的产出」进投影：outputs 由 TASK_FINISHED 的 payload 折入
-        # （TaskFinalized 的真实发射侧只带 {task_id, outcome}，见 finalize.py:766 /
-        # reducers.py 的 TASK_STATUS_BY_EVENT 分支）。这里让它按真实的时间顺序发生
-        # 在 TASK_SUSPENDED 之前——后者只改 status、不碰 outputs，于是父任务停在
-        # SUSPENDED 时仍带着这份产出。
-        _ev(5, EventType.TASK_FINISHED, task_id=TID,
-            outcome="success", summary="", outputs={"note": "已攒下的进展"}),
-        _ev(6, EventType.TASK_CREATED, task={
+        _ev(5, EventType.TASK_CREATED, task={
             "id": "tsk_child", "status": "PENDING", "title": "C1",
             "parent_task_id": TID, "dag_deps": ["tsk_never_done"],
             "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root"}),
-        _ev(7, EventType.TASK_STARTED, task_id="tsk_child", assigned_agent_id="agt_root"),
-        _ev(8, EventType.HITL_OPENED, task_id=TID, hitl_id="hit_1", form="wait",
+        _ev(6, EventType.TASK_STARTED, task_id="tsk_child", assigned_agent_id="agt_root"),
+        _ev(7, EventType.HITL_OPENED, task_id=TID, hitl_id="hit_1", form="wait",
             delivery={"kind": "user_turn", "task_id": TID, "preface": "normal"},
             stage="tool", agent_id="agt_root", prompt=""),
-        _ev(9, EventType.TASK_SUSPENDED, task_id=TID),
-        _ev(10, EventType.HITL_RESOLVED, task_id=TID, hitl_id="hit_1",
+        _ev(8, EventType.TASK_SUSPENDED, task_id=TID),
+        _ev(9, EventType.HITL_RESOLVED, task_id=TID, hitl_id="hit_1",
             outcome="accepted", message="use postgres"),
     ]
 
@@ -502,27 +495,36 @@ async def test_recovery_does_not_touch_a_parent_suspended_on_a_live_child():
     """复审 Critical：补写必须是**只写**的。
 
     父任务 SUSPENDED 在活子任务上、且有一条已终局 UserTurn。若补写沿用
-    `_inject_user_reply`（尾部会 `status = "PENDING"` + 清 outputs），父任务会被翻成
-    PENDING **却没人入队**，`_try_resume_parent` 的 SUSPENDED 门随之失效 → 永久停摆；
-    同时它攒下的 outputs 被清空。两者都必须不发生，而人的答复仍要落进对话。
+    `_inject_user_reply`（尾部会 `status = "PENDING"`），父任务会被翻成
+    PENDING **却没人入队**，`_try_resume_parent` 的 SUSPENDED 门随之失效 → 永久停摆。
+    这件事必须不发生，而人的答复仍要落进对话。
+
+    注意：这里不断言 outputs——`TaskView.outputs` 唯一的非空写入点是
+    `TaskFinished`（reducers.py:581），一个从未 FINISHED 过、只是 SUSPENDED
+    在活子任务上的父任务，outputs 本就是 None（`TASK_CREATED` 的
+    `t.get("outputs")` 在 payload 不带这个键时也是 None）。断言它「非空」
+    曾经能过，是因为这份 fixture 用一条伪造的 `TaskFinalized{outputs:...}`
+    在任意时刻硬注入了 outputs——那正是本 batch Task 1 在修的洞。见
+    `docs/follow-ups/2026-09-03-outstanding-issues.md` A8：非终态任务的
+    中途产出目前确实无法从事件流恢复，这不是本测试要保护的东西。
     """
     rt = await _runtime_with_events(_resolved_user_turn_on_a_parent_with_a_live_child())
     await rt.recover_session(SID)
     parent = _tm(rt).get_task(TID)
     assert parent.status == "SUSPENDED"                  # 留给 _try_resume_parent
-    assert parent.outputs == {"note": "已攒下的进展"}   # 进展没被清掉
-    assert parent.process_report is None                 # （同一行代码路径）
+    assert parent.outputs is None                        # 从未 FINISHED 过，本就没有 outputs——实测确认，非猜测
+    assert parent.process_report is None                 # 没被 _inject_user_reply 尾部清过（同一行代码路径）
     assert len(await _hitl_reply_prompts(rt)) == 1       # 答复照样补上了
 
 
 async def test_recovery_backfill_survives_repeated_recovery_without_state_drift():
-    """反复恢复：状态不漂移、进展不丢、注入不重复。"""
+    """反复恢复：状态不漂移、注入不重复。"""
     rt = await _runtime_with_events(_resolved_user_turn_on_a_parent_with_a_live_child())
     await rt.recover_session(SID)
     await rt.recover_session(SID)
     parent = _tm(rt).get_task(TID)
     assert parent.status == "SUSPENDED"
-    assert parent.outputs == {"note": "已攒下的进展"}
+    assert parent.outputs is None                        # 见上一个测试的注释：本就没有，不因重复恢复而变
     assert len(await _hitl_reply_prompts(rt)) == 1
 
 

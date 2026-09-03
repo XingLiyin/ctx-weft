@@ -111,6 +111,36 @@ task 落 FINISHED/FAILED、token 随 run 注销，`RunCanceled` 与 `TaskCancele
 `task.status = "INTERRUPTED"`（`:800`）并发 `TaskInterrupted`——
 **把写定的终态盖回非终态**。
 
+### A8. 非终态任务的中途产出无法从事件流恢复
+
+`TaskView.outputs` 的唯一非空写入点是 `TaskFinished`（`reducers.py:581`）；
+`TASK_CREATED` 不设它（`t.get("outputs")` 在 payload 不带这个键时是 `None`），
+`TaskRequeued`/`TaskHumanResolved` 只会清它（`:536`/`:552`）。
+
+**后果**：任何还没跑到 `TaskFinished` 的 task
+（SUSPENDED / AWAITING_HUMAN / INTERRUPTED……）在崩溃恢复后，
+它在这次执行里已经攒下的中途产出**必然丢失**——事件流里根本没有携带
+这份数据的事件。
+
+**这不是本次（Task 1）引入的**：改动前 reducer 挂在 `TaskFinalized` 上读
+`outputs`，但那条事件的真实发射侧只带 `{task_id, outcome}`
+（`finalize.py:766`），同样恢复不出中途产出，只是连*终态*的产出也读不到而已。
+Task 1 只是把读取点从「一个从不携带这份数据的事件」换成
+「唯一真正携带它的事件」，缺口本身的范围没有缩小或扩大。
+
+**发现路径**：`tests/unit/test_hitl_recovery_v2.py` 里
+`_resolved_user_turn_on_a_parent_with_a_live_child` 这份 fixture 曾用一条
+伪造的 `TaskFinalized{outputs: {...}}`（真实发射侧不带这个键）在任意时刻
+给一个 SUSPENDED 的父任务硬注入 outputs，制造出「中途产出能扛过恢复」的假象；
+断言 `parent.outputs == {...}` 因此一直是绿的。Task 1 修复四处虚假绿灯时，
+一度试图用一条真实的 `TaskFinished` 事件（配合后续 `TaskSuspended`）去复现
+同一断言，能让测试通过，但代价是编排一段事件流里到不了的状态（父任务先
+FINISHED、又被 SUSPENDED）——和被修的那四处伪造 payload 是同一类错误，
+已撤销该改法，测试改为断言 `parent.outputs is None`（已实测确认，非猜测）。
+
+**若要修**：需要一条承载中途产出的事件（或让 `TaskSuspended` /
+`TaskAwaitingHuman` 携带当前 outputs 快照）。**属独立立项，不在批次一范围。**
+
 ---
 
 ## B. 不变量与守卫
