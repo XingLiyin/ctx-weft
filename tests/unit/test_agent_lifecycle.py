@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, _AgentRecord
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Task
 from ctx_weft.protocols.events import (
@@ -89,3 +90,82 @@ def test_agent_event_wire_values_are_pascal_case():
     assert EventType.AGENT_WAITING_HUMAN == "AgentWaitingHuman"
     assert EventType.AGENT_INTERRUPTED == "AgentInterrupted"
     assert EventType.AGENT_TERMINATED == "AgentTerminated"
+
+
+def _reg() -> AgentRegistry:
+    return AgentRegistry(
+        template_lookup=None, event_bus=_SpyBus(), model_resolver=lambda a, m: None
+    )
+
+
+def _plant(reg: AgentRegistry, agent_id: str, parent: str | None, session_id: str = "s1") -> None:
+    """直接种记录，绕开 instantiate 的模板依赖。"""
+    reg._agents[agent_id] = _AgentRecord(
+        session_id=session_id, tenant_id="default", template_id="tpl",
+        parent_agent_id=parent, spawn_depth=0 if parent is None else 1,
+        memory_config=None, loop_config=None,
+    )
+    if parent is not None:
+        reg._children.setdefault(parent, set()).add(agent_id)
+
+
+def test_record_defaults_to_idle_with_no_task():
+    reg = _reg()
+    _plant(reg, "root", None)
+    assert reg.status_of("root") == "idle"
+    assert reg._agents["root"].current_task_id is None
+
+
+def test_children_and_descendants():
+    reg = _reg()
+    _plant(reg, "root", None)
+    _plant(reg, "kid1", "root")
+    _plant(reg, "kid2", "root")
+    _plant(reg, "grandkid", "kid1")
+
+    assert reg.children_of("root") == {"kid1", "kid2"}
+    assert set(reg.descendants_of("root")) == {"kid1", "kid2", "grandkid"}
+    assert reg.descendants_of("grandkid") == []
+
+
+def test_descendants_tolerates_cycle():
+    """防御性：父子关系理论上无环，索引损坏时也不能死循环。"""
+    reg = _reg()
+    _plant(reg, "a", None)
+    _plant(reg, "b", "a")
+    reg._children.setdefault("b", set()).add("a")
+    assert set(reg.descendants_of("a")) == {"b"}
+
+
+def test_agent_ids_of_session():
+    reg = _reg()
+    _plant(reg, "a", None, session_id="s1")
+    _plant(reg, "b", None, session_id="s2")
+    assert reg.agent_ids_of_session("s1") == ["a"]
+
+
+def test_release_session_cleans_children_index():
+    """release_session 之后 _children 不能留悬垂键，也不能留悬垂值。
+
+    root/kid1/kid2/grandkid 都在 s1；额外种一个 s2 的 other，其 _children
+    指向 s1 的 kid1（模拟索引本不该出现、但要能被安全清理的悬垂引用来源）。
+    释放 s1 后：s1 的 agent 不能再作为键出现在 _children 里；也不能作为值
+    残留在任何还活着的 agent（other）的 children 集合里。
+    """
+    reg = _reg()
+    _plant(reg, "root", None, session_id="s1")
+    _plant(reg, "kid1", "root", session_id="s1")
+    _plant(reg, "kid2", "root", session_id="s1")
+    _plant(reg, "grandkid", "kid1", session_id="s1")
+    _plant(reg, "other", None, session_id="s2")
+    reg._children.setdefault("other", set()).add("kid1")
+
+    reg.release_session("s1")
+
+    removed = {"root", "kid1", "kid2", "grandkid"}
+    assert not (removed & set(reg._children.keys()))
+    for children in reg._children.values():
+        assert not (removed & children)
+    assert reg.children_of("other") == set()
+    assert reg.agent_ids_of_session("s1") == []
+    assert reg.agent_ids_of_session("s2") == ["other"]

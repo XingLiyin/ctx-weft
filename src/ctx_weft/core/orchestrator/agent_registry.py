@@ -96,6 +96,8 @@ class _AgentRecord:
     memory_config: MemoryConfig
     loop_config: LoopConfig
     llm: ModelChoice = field(default_factory=ModelChoice)
+    status: str = "idle"                     # spec 3.1 五态机的当前值
+    current_task_id: str | None = None       # 消息路由据此判断新建还是复用 task
 
 
 @dataclass
@@ -114,6 +116,10 @@ class AgentRegistry:
     model_resolver: ModelResolver
     _agents: dict[str, _AgentRecord] = field(default_factory=dict)
     _sessions: dict[str, _SessionDefaults] = field(default_factory=dict)
+    # parent_agent_id -> {child_agent_id, ...}。只在 instantiate 落 record 后维护；
+    # release_session 必须把摘除的 agent 从键和所有值集合里都清掉，否则 descendants_of
+    # 会经由悬垂引用「复活」已释放的 agent（见 release_session 内注释）。
+    _children: dict[str, set[str]] = field(default_factory=dict)
 
     def register_session(
         self, session_id: str, *, tenant_id: str, fallback_template_id: str,
@@ -124,8 +130,19 @@ class AgentRegistry:
         )
 
     def release_session(self, session_id: str) -> None:
-        for aid in [k for k, r in self._agents.items() if r.session_id == session_id]:
+        ids = self.agent_ids_of_session(session_id)
+        removed = set(ids)
+        for aid in ids:
             self._agents.pop(aid, None)
+        # 清 _children 索引：既要摘掉被移除 agent 自己的键（它的子列表跟着它一起
+        # 消失——子 agent 属于同一 session，已经在上面的 removed 里），也要把它们
+        # 从其它 agent（多半是它们自己的父）的值集合里摘掉，否则父的 children_of
+        # 会指向一个 self._agents 里已经不存在的 id，descendants_of 遍历到它时
+        # 仍会把它当成「活着」吐出来——这就是「悬垂引用」的具体后果。
+        for aid in ids:
+            self._children.pop(aid, None)
+        for children in self._children.values():
+            children -= removed
         self._sessions.pop(session_id, None)
 
     def has(self, agent_id: str) -> bool:
@@ -133,6 +150,47 @@ class AgentRegistry:
 
     def template_id_of(self, agent_id: str) -> str:
         return self._agents[agent_id].template_id
+
+    def status_of(self, agent_id: str) -> str:
+        """当前五态机状态。未登记的 agent_id 直接 KeyError——与 `template_id_of`
+        同一口径（本文件里「按 id 查已知 record 的字段」历来是裸下标，让不存在
+        的 id 响亮地失败，而不是编个看似合理的值）。
+
+        没有采用 brief 草案里「未登记 -> 回落 'terminated'」的写法：'terminated'
+        是五态机里一个**真实、有意义**的终态（只由外部显式 cancel 触发，见
+        agent_state.py 顶部 docstring），把它复用成「查无此 agent」的哨兵值，
+        会让调用方没法区分「这个 agent 曾经存在、现在已终止」和「这个 id
+        压根没登记过」——前者是合法的终态查询，后者多半是调用方自己算错了 id
+        或者查早了（agent 还没 instantiate）。两者背后要做的事不一样：前者可能
+        要继续走「已终态，忽略」的分支，后者是编程错误，应该尽早炸出来，而不是
+        被误判成「已终止」悄悄放过。`assert_can_receive`（后续任务）会在调用
+        这里之前单独校验存在性，是两层不同的检查，不是本方法要顺手兼顾的事。
+        """
+        return self._agents[agent_id].status
+
+    def children_of(self, agent_id: str) -> set[str]:
+        return set(self._children.get(agent_id, ()))
+
+    def descendants_of(self, agent_id: str) -> list[str]:
+        """深度优先展开全部子孙，不含自己。带 seen 集防御索引成环。
+
+        父子关系理论上无环（每个 agent 只在 instantiate 时认一次父），但索引
+        一旦因为 bug 损坏成环，宁可返回一份不完整的列表也不要死循环卡死调用方。
+        """
+        out: list[str] = []
+        seen: set[str] = {agent_id}
+        stack = list(self._children.get(agent_id, ()))
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            out.append(cur)
+            stack.extend(self._children.get(cur, ()))
+        return out
+
+    def agent_ids_of_session(self, session_id: str) -> list[str]:
+        return [k for k, r in self._agents.items() if r.session_id == session_id]
 
     async def load(
         self,
@@ -303,6 +361,8 @@ class AgentRegistry:
             loop_config=template.loop_config,
             llm=llm,
         )
+        if parent_agent_id is not None:
+            self._children.setdefault(parent_agent_id, set()).add(agent_id)
 
         logger.info(
             "AgentRegistry: instantiated agent %s (template=%s, depth=%d)",
@@ -418,7 +478,7 @@ class AgentRegistry:
         host 要展示「这是一次会话级切换」→ 按它聚合，不需要第三种事件类型。
         """
         cid = generate_id("cau")
-        ids = [k for k, r in self._agents.items() if r.session_id == session_id]
+        ids = self.agent_ids_of_session(session_id)
         n = 0
         for aid in ids:
             if await self.set_agent_llm(aid, choice, reason=reason, causation_id=cid):
