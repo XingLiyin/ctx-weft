@@ -127,6 +127,9 @@ class EventType(StrEnum):
     AGENT_STATUS_CHANGED = "AgentStatusChanged"
     AGENT_WAITING = "AgentWaiting"
     AGENT_FINALIZED = "AgentFinalized"
+    # agent 的模型选择变了（D1 修复：跨重启存活）。纯赋值，不碰 task / session 状态——
+    # 「换模型」和「让 task 跑起来」是两件事（docs/events-v2.md 三条命令，见 spec §06）。
+    AGENT_LLM_CHANGED = "AgentLlmChanged"   # payload: {llm_account, llm_model, reason}
     SPAWN_REJECTED = "SpawnRejected"
     # ── Context 域 ──
     PREPARE_COMPLETED = "PrepareCompleted"

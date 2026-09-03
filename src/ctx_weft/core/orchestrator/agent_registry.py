@@ -185,6 +185,9 @@ class AgentRegistry:
                 spawn_depth=av.spawn_depth,
                 memory_config=memory_config,
                 loop_config=loop_config,
+                # D1 修复：模型选择从 AgentView 读回，跨重启存活——不再是
+                # ModelChoice() 默认值（那是修复前 recover_session 静默降级的根因）。
+                llm=ModelChoice(account=av.llm_account, model=av.llm_model),
             )
             n += 1
         return n
@@ -355,7 +358,12 @@ class AgentRegistry:
             tenant_id=tenant_id,
             task_id=task_id,
             agent_id=agent_id,
-            payload={"template_id": template.id, "template_version": template.version},
+            payload={
+                "template_id": template.id,
+                "template_version": template.version,
+                "llm_account": llm.account,
+                "llm_model": llm.model,
+            },
         ))
 
         return agent, template

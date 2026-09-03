@@ -478,6 +478,20 @@ def _apply(view: RunStateView, ev: Event) -> None:
         tmpl = p.get("template_id", "")
         if tmpl:
             _agent_slot(view, ev.agent_id).template_id = tmpl
+        # 同一事件里的初始模型选择——空值不覆盖，与 template_id 同口径。
+        account = p.get("llm_account", "")
+        if account:
+            _agent_slot(view, ev.agent_id).llm_account = account
+        model = p.get("llm_model", "")
+        if model:
+            _agent_slot(view, ev.agent_id).llm_model = model
+
+    elif t == EventType.AGENT_LLM_CHANGED and ev.agent_id:
+        # 纯赋值：agent 的模型选择变了。不改任何 task / session 状态——
+        # 「换模型」和「让 task 跑起来」是两件事（见 spec §06 的三条命令）。
+        slot = _agent_slot(view, ev.agent_id)
+        slot.llm_account = p.get("llm_account", "")
+        slot.llm_model = p.get("llm_model", "")
 
     elif t == EventType.TASK_CREATED:
         task_data: dict = p.get("task", {})

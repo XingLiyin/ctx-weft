@@ -78,6 +78,10 @@ class AgentView:
     # 树形推算得不出模板）。存量事件流里子 agent 没发过该事件 → 留空，调用方回落
     # session 模板，与改动前行为一致。
     template_id: str = ""
+    # 该 agent 当前的模型选择，来自 AgentInstantiated（初值）/ AgentLlmChanged（切换）。
+    # D1 修复：跨重启存活——`load()` 据此重建 registry 里的 ModelChoice。
+    llm_account: str = ""
+    llm_model: str = ""
 
 
 @dataclass
