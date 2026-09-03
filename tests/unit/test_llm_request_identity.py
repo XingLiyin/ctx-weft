@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import ctx_weft.core.loop.steps.observe as _obs_mod
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.llm_gateway import resolve_llm_identity
 from ctx_weft.core.loop.steps.act import _run_llm_turn
@@ -83,15 +82,19 @@ class _FakeLLM:
     """最小 LLMClient：按脚本 yield chunk。context_limit 是
     llm_gateway.apply_dynamic_max_tokens（stream_llm_resilient 入口即调用）的硬需求——
     此前这些测试整个 monkeypatch 掉 stream_llm_resilient，从未真正跑到这段，现在
-    改走真实 gateway 后必须补上。
+    改走真实 gateway 后必须补上。last_request：记录实际发给 LLM client 的 request，
+    供测试断言 request.model（与事件 payload 里报的 model 是两回事，见
+    test_llm_event_convergence.py 的同名夹具注释）。
     """
     tokenizer = HeuristicTokenizer()
     context_limit = 100_000
 
     def __init__(self, chunks=()):
         self._chunks = list(chunks)
+        self.last_request = None
 
     async def complete(self, req, stream=True):
+        self.last_request = req
         for c in self._chunks:
             yield c
 
@@ -170,30 +173,26 @@ async def test_act_request_events_carry_mock_adapters_model():
 # ── observe：run_observe_react 的请求/响应事件（前台/后台共用路径）───────────────
 
 
-async def test_observe_request_events_carry_resolved_model_identity(monkeypatch):
-    captured = {}
-
-    async def _fake_stream(ctx, state, request):
-        captured["model"] = request.model
-        yield _make_tool_call_chunk("report_task_outcome")
-        yield _make_usage_chunk()
-
-    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+async def test_observe_request_events_carry_resolved_model_identity():
+    """observe 走真实 llm_gateway.stream_llm_resilient（Task 5 后 REQUEST_STARTED 由 gateway
+    无条件发射），因此这里不再 monkeypatch stream_llm_resilient——用 _FakeLLM 脚本化 chunk。"""
     bus = _RecordingBus()
-    state = _make_state(model="deepseek-v4-pro", account="deepseek-rj")
-    ctx = _make_ctx(bus)
+    state = _make_state(
+        model="deepseek-v4-pro", account="deepseek-rj", origin=EventOrigin.LOOP_OBSERVE)
+    llm = _FakeLLM(chunks=[_make_tool_call_chunk("report_task_outcome"), _make_usage_chunk()])
+    ctx = _make_ctx(bus, llm=llm)
 
     await run_observe_react(
         state, ctx, system="SYS",
         messages=[LLMMessage(role="user", content="observe")],
-        tools=[], request_id_prefix="t", max_rounds=1,
+        tools=[], max_rounds=1,
         terminal_tool_name="report_task_outcome",
     )
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED][0]
     assert started.payload["model"] == "deepseek-v4-pro"
     assert started.payload["llm_account"] == "deepseek-rj"
-    assert captured["model"] == "deepseek-v4-pro"
+    assert llm.last_request.model == "deepseek-v4-pro"
     finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED][0]
     assert finished.payload["llm_model"] == "deepseek-v4-pro"
     assert finished.payload["llm_account"] == "deepseek-rj"

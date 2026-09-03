@@ -43,7 +43,6 @@ def test_recognize_intent_gets_text_not_empty():
 
 from types import SimpleNamespace
 
-import ctx_weft.core.loop.steps.observe as _obs_mod
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.act import _run_llm_turn
@@ -145,19 +144,17 @@ async def test_act_prompt_sent_event_has_no_base64():
     assert "看图" in blob and "image/png" in blob
 
 
-async def test_observe_prompt_sent_event_has_no_base64(monkeypatch):
-    async def _fake_stream(ctx, state, request):
-        yield _make_usage_chunk()
-
-    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+async def test_observe_prompt_sent_event_has_no_base64():
+    """observe 走真实 llm_gateway.stream_llm_resilient（Task 5 后 LLM_PROMPT_SENT 由 gateway
+    无条件发射），因此这里不再 monkeypatch stream_llm_resilient——用 _FakeLLM 脚本化 chunk。"""
     bus = _RecordingBus()
-    state = _make_state()
-    ctx = _make_ctx(bus)
+    state = _make_state(origin=EventOrigin.LOOP_OBSERVE)
+    ctx = _make_ctx(bus, llm=_FakeLLM(chunks=[_make_usage_chunk()]))
 
     await run_observe_react(
         state, ctx, system="SYS",
         messages=[LLMMessage(role="user", content=[TextPart(text="看图"), _img()])],
-        tools=[], request_id_prefix="t", max_rounds=1,
+        tools=[], max_rounds=1,
         terminal_tool_name="report_task_outcome",
     )
 

@@ -6,22 +6,11 @@ from types import SimpleNamespace
 import pytest
 
 import ctx_weft.core.loop.steps.observe as _obs_mod
-from ctx_weft.protocols.events import EventType
-from ctx_weft.core.loop.steps.observe import (
-    BACKGROUND_OBSERVE_REACT_EVENTS, run_observe_react,
-)
+from ctx_weft.protocols.events import EventOrigin, EventType
+from ctx_weft.core.loop.steps.observe import run_observe_react
 from ctx_weft.core.orchestrator.control_capability import ControlResult
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryAddress
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-
-_LLM_EVENT_TYPES = {
-    EventType.LLM_REQUEST_STARTED, EventType.LLM_PROMPT_SENT,
-    EventType.LLM_TOKEN_STREAMED, EventType.LLM_RESPONSE_FINISHED,
-}
-_BACKGROUND_EVENT_TYPES = {
-    EventType.BACKGROUND_OBSERVE_REQUEST_STARTED, EventType.BACKGROUND_OBSERVE_PROMPT_SENT,
-    EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED, EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED,
-}
 
 pytestmark = pytest.mark.asyncio
 
@@ -35,12 +24,14 @@ class _FakeEventBus:
 
 
 class _RecordingEventBus:
-    """Records emitted event types so tests can assert which events fired."""
+    """Records emitted events (and their types) so tests can assert which fired."""
 
     def __init__(self):
+        self.events = []
         self.types = []
 
     async def emit(self, event) -> None:
+        self.events.append(event)
         self.types.append(event.type)
 
 
@@ -161,7 +152,6 @@ async def test_helper_returns_tool_content_when_control_tool_called(monkeypatch)
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name="report_task_outcome",
     )
@@ -198,7 +188,6 @@ async def test_plain_text_round_nudged_then_terminal(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name="collect_process_report",
     )
@@ -231,7 +220,6 @@ async def test_helper_returns_none_when_no_tool_called(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name="report_task_outcome",
     )
@@ -258,7 +246,6 @@ async def test_helper_last_text_from_final_round(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name="report_task_outcome",
     )
@@ -285,7 +272,6 @@ async def test_helper_token_accounting(monkeypatch):
         system="SYS",
         messages=[],
         tools=[],
-        request_id_prefix="test",
         max_rounds=1,
         terminal_tool_name="report_task_outcome",
     )
@@ -321,7 +307,6 @@ async def test_ask_user_does_not_terminate_loop(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=1,
         terminal_tool_name=TERMINAL_TOOL,
     )
@@ -334,12 +319,11 @@ async def test_ask_user_does_not_terminate_loop(monkeypatch):
     assert last_text == "thinking about user question"
 
 
-async def test_background_event_types_emit_background_not_llm(monkeypatch):
-    """background path (event_types=BACKGROUND_OBSERVE_REACT_EVENTS): emits BackgroundObserve*
-    events, NEVER the generic LLM_* events.
-
-    core 不感知前端可见性——只发独立类型；host 据此决定后台 observe 的 LLM 交互不进前端对话流。
-    """
+async def test_response_finished_type_and_origin_follow_state_origin(monkeypatch):
+    """Task 5：不再有 event_types 参数区分前台/后台——run_observe_react 自己只发一种类型
+    （LLM_RESPONSE_FINISHED，其它 4 个「流式侧」事件由 gateway 发，这里 stream_llm_resilient
+    整个被 monkeypatch 掉不会跑到那段）。前台/后台的区别只体现在事件的 origin 字段上，
+    origin 随 state.origin 走，run_observe_react 本身不感知也不分支。"""
 
     async def _fake_stream(ctx, state, request):
         yield _make_token_chunk("thinking")
@@ -348,26 +332,23 @@ async def test_background_event_types_emit_background_not_llm(monkeypatch):
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
 
-    bus = _RecordingEventBus()
-    state = _make_state()
-    ctx = _make_ctx(tool_content="REPORT", event_bus=bus)
+    for origin in (EventOrigin.LOOP_OBSERVE, EventOrigin.LOOP_BACKGROUND_OBSERVE):
+        bus = _RecordingEventBus()
+        state = _make_state()
+        state.origin = origin
+        ctx = _make_ctx(tool_content="REPORT", event_bus=bus)
 
-    await run_observe_react(
-        state, ctx,
-        system="SYS",
-        messages=[],
-        tools=[],
-        request_id_prefix="bgobs",
-        max_rounds=1,
-        terminal_tool_name="collect_process_report",
-        event_types=BACKGROUND_OBSERVE_REACT_EVENTS,
-    )
+        await run_observe_react(
+            state, ctx,
+            system="SYS",
+            messages=[],
+            tools=[],
+            max_rounds=1,
+            terminal_tool_name="collect_process_report",
+        )
 
-    emitted_llm = [t for t in bus.types if t in _LLM_EVENT_TYPES]
-    emitted_bg = [t for t in bus.types if t in _BACKGROUND_EVENT_TYPES]
-    assert emitted_llm == [], f"background path must emit NO LLM_* events, got {emitted_llm}"
-    assert EventType.BACKGROUND_OBSERVE_PROMPT_SENT in emitted_bg
-    assert EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED in emitted_bg
+        assert bus.types == [EventType.LLM_RESPONSE_FINISHED], (origin, bus.types)
+        assert bus.events[0].origin == origin
 
 
 async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
@@ -419,44 +400,12 @@ async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name=TERMINAL,
     )
     assert result is not None
     assert result.content == "recap"
     assert result.metadata.get("task_summary") == "sum"
-
-
-async def test_default_event_types_emit_llm(monkeypatch):
-    """observe path (default event_types): emits the generic LLM_* events (regression guard)."""
-
-    async def _fake_stream(ctx, state, request):
-        yield _make_token_chunk("thinking")
-        yield _make_tool_call_chunk("report_task_outcome")
-        yield _make_usage_chunk()
-
-    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
-
-    bus = _RecordingEventBus()
-    state = _make_state()
-    ctx = _make_ctx(tool_content="REPORT", event_bus=bus)
-
-    await run_observe_react(
-        state, ctx,
-        system="SYS",
-        messages=[],
-        tools=[],
-        request_id_prefix="obs",
-        max_rounds=1,
-        terminal_tool_name="report_task_outcome",
-    )  # event_types defaults to OBSERVE_REACT_EVENTS
-
-    emitted_llm = [t for t in bus.types if t in _LLM_EVENT_TYPES]
-    emitted_bg = [t for t in bus.types if t in _BACKGROUND_EVENT_TYPES]
-    assert EventType.LLM_PROMPT_SENT in emitted_llm
-    assert EventType.LLM_RESPONSE_FINISHED in emitted_llm
-    assert emitted_bg == [], f"observe path must emit NO BackgroundObserve* events, got {emitted_bg}"
 
 
 class _RecordingBusFull:
@@ -489,7 +438,7 @@ async def test_response_finished_payload_carries_usage_split(monkeypatch):
 
     await run_observe_react(
         state, ctx, system="SYS", messages=[], tools=[],
-        request_id_prefix="test", max_rounds=1,
+        max_rounds=1,
         terminal_tool_name="report_task_outcome",
     )
 

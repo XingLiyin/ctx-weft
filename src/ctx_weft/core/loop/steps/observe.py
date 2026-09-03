@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.assembler import ContextRequest
-from ctx_weft.core.content import redact_content_for_event
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryEventType, MemoryScope
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
@@ -40,33 +39,6 @@ logger = logging.getLogger(__name__)
 # ── Shared ReAct helper ───────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True)
-class ReactEventTypes:
-    """run_observe_react 每轮发的 LLM 交互事件类型组（请求/prompt/token/响应）。
-
-    observe 用 LLM_* 组；background observe 用 BACKGROUND_OBSERVE_* 组——同形不同类型，
-    供 host 区分前端是否渲染。core 只发类型，不感知前端可见性。
-    """
-    request_started: EventType
-    prompt_sent: EventType
-    token_streamed: EventType
-    response_finished: EventType
-
-
-OBSERVE_REACT_EVENTS = ReactEventTypes(
-    EventType.LLM_REQUEST_STARTED,
-    EventType.LLM_PROMPT_SENT,
-    EventType.LLM_TOKEN_STREAMED,
-    EventType.LLM_RESPONSE_FINISHED,
-)
-BACKGROUND_OBSERVE_REACT_EVENTS = ReactEventTypes(
-    EventType.BACKGROUND_OBSERVE_REQUEST_STARTED,
-    EventType.BACKGROUND_OBSERVE_PROMPT_SENT,
-    EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED,
-    EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED,
-)
-
-
 async def run_observe_react(
     state: "Any",
     ctx: "Any",
@@ -74,10 +46,8 @@ async def run_observe_react(
     system: str,
     messages: "list[LLMMessage]",
     tools: "Any",
-    request_id_prefix: str,
     max_rounds: int,
     terminal_tool_name: str,
-    event_types: ReactEventTypes = OBSERVE_REACT_EVENTS,
 ) -> "tuple[ControlResult | None, str]":
     """共用 observe/background ReAct：跑多轮 LLM，指定 terminal_tool 被调用时返回其完整 ControlResult 终止。
 
@@ -87,9 +57,14 @@ async def run_observe_react(
     非 terminal 控制工具（如 ask_user）只执行副作用，不终止循环。
     不解读 verdict、不写 task 状态（状态写是工具副作用，由调用方绑定的工具决定）。
 
-    event_types：每轮 LLM 交互事件的类型组。observe 默认 OBSERVE_REACT_EVENTS（LLM_*）；
-      background observe 传 BACKGROUND_OBSERVE_REACT_EVENTS——core 只发不同类型，由 host 决定
-      前端是否渲染（background 后台交互不应进前端对话流）。
+    Task 5：不再有 event_types 间接层——「流式侧」4 种事件（REQUEST_STARTED/PROMPT_SENT/
+    TOKEN_STREAMED/REASONING_STREAMED）统一由 llm_gateway.stream_llm_resilient 发射
+    LLM_*，observe 前台与 background observe 之间只靠 state.origin
+    （EventOrigin.LOOP_OBSERVE / LOOP_BACKGROUND_OBSERVE）区分——由调用方在调用本函数前
+    设好 state.origin（observe 前台由 driver 按 step 名设好；background_observe 在
+    launch 出的快照 state 上显式改写）。本函数自己只补发收尾的 LLM_RESPONSE_FINISHED
+    （payload 结构对齐 act.py._run_llm_turn），否则 gateway 发的 REQUEST_STARTED 会等不到
+    收尾（host SSE 侧的挂死请求，Task 4 在 compact 上踩过同样的坑）。
     """
     agent = state.agent
     model, llm_account = resolve_llm_identity(state)
@@ -99,13 +74,10 @@ async def run_observe_react(
     baseline_msg_count: int | None = None
 
     for round_num in range(max_rounds):
-        req_id = f"{request_id_prefix}_r{round_num}"
-        await ctx.event_bus.emit(make_event(state, event_types.request_started, payload={
-            "request_id": req_id,
-            "model": model,
-            "llm_account": llm_account,
-            "round": round_num,
-        }))
+        # req_id：与 llm_gateway.stream_llm_resilient 内部同一确定性公式独立算出（同
+        # act.py._run_llm_turn 的手法）——两边都在本次 LLM 调用任何事件发射前求值，故
+        # state.sequence_counter 两处读到同一个值，天然一致，不需要新增参数或跨函数传值。
+        req_id = f"req_{agent.id}_{state.sequence_counter}"
 
         sent_msg_count = len(current_messages)  # 本轮发送条数（append 前）→ 下轮增量基线
         llm_request = LLMRequest(
@@ -116,29 +88,20 @@ async def run_observe_react(
         )
         llm_request.prompt_token_estimate = request_prompt_estimate(
             ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
-
-        await ctx.event_bus.emit(make_event(state, event_types.prompt_sent, payload={
-            "request_id": req_id,
-            "round": round_num,
-            "system": system,
-            "messages": [
-                {"role": m.role, "content": redact_content_for_event(m.content)}
-                for m in current_messages
-            ],
-            "tool_names": [t.name for t in tools],
-        }))
+        # turn：gateway 从 metadata["turn"] 取（spec §9.4 统一口径：LLM_* 事件一律用 turn，
+        # 不用 round）；round_num 仍是本函数内部的轮次计数局部变量，只是不再直接进 payload。
+        llm_request.metadata["turn"] = round_num
 
         accumulated_text = ""
+        reasoning_text = ""
         tool_calls = []
         usage = LLMUsage()
 
         async for chunk in stream_llm_resilient(ctx, state, llm_request):
             if chunk.kind == "token":
                 accumulated_text += chunk.text
-                await ctx.event_bus.emit(make_event(
-                    state, event_types.token_streamed,
-                    payload={"request_id": req_id, "delta": chunk.text},
-                ))
+            elif chunk.kind == "reasoning":
+                reasoning_text += chunk.text
             elif chunk.kind == "tool_call" and chunk.tool_call is not None:
                 tool_calls.append(chunk.tool_call)
             elif chunk.kind == "usage" and chunk.usage is not None:
@@ -157,16 +120,20 @@ async def run_observe_react(
         state.session.token_used += usage.prompt_tokens + usage.completion_tokens
 
         await ctx.event_bus.emit(make_event(
-            state, event_types.response_finished,
+            state, EventType.LLM_RESPONSE_FINISHED,
             payload={
                 "request_id": req_id,
                 "content": accumulated_text,
-                "tool_calls": [{"name": tc.name} for tc in tool_calls],
+                "reasoning": reasoning_text,
+                "tool_calls": [
+                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls
+                ],
                 "usage": dataclasses.asdict(usage),
                 # 本次调用实际使用的模型/账号（host 云端上报按此计账，不受切换竞态影响）
                 "llm_model": model,
                 "llm_account": llm_account,
-                "round": round_num,
+                "finish_reason": "tool_use" if tool_calls else "stop",
+                "turn": round_num,
             },
         ))
 
@@ -382,7 +349,6 @@ class ObserveStep(Step):
             system=prompt.system,
             messages=list(prompt.messages),
             tools=prompt.tools,
-            request_id_prefix=f"obs_{agent.id}_{state.sequence_counter}",
             max_rounds=max_rounds,
             terminal_tool_name=REPORT_TASK_OUTCOME_NAME,
         )

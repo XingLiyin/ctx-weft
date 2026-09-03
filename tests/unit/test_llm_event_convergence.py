@@ -299,9 +299,12 @@ async def test_compact_sends_resolved_model_to_llm_client_not_mock_sentinel():
 
 
 @pytest.mark.asyncio
-async def test_gateway_still_gates_out_observe_origin_and_compact_stays_silent_too():
-    """门禁维持不放行 observe/background_observe（Task 5 前的临时脚手架，不在本轮改动范围）；
-    summarize_for_compact 万一在这种 origin 下被调用，也不该发孤儿 LLM_RESPONSE_FINISHED。"""
+async def test_compact_stays_silent_on_response_finished_under_wrong_origin():
+    """Task 5 更新：gateway 的临时门禁（曾只放行 LOOP_ACT/LOOP_COMPACT）已整个删除——
+    gateway 现在对所有 origin 无条件发射 4 个流式事件，下面第一条断言随之翻转。但
+    summarize_for_compact 自己的收尾门禁（origin==LOOP_COMPACT）是另一回事、独立保留：
+    万一在错误 origin 下被调用，不该补发一条没有配对 REQUEST_STARTED 语境的孤儿
+    LLM_RESPONSE_FINISHED（比不发更糟，见该函数文档字符串）。"""
     from ctx_weft.core.loop.steps.compact import summarize_for_compact
 
     bus = _RecordingBus()
@@ -310,7 +313,12 @@ async def test_gateway_still_gates_out_observe_origin_and_compact_stays_silent_t
 
     await summarize_for_compact(state, ctx, scope="task")
 
-    assert [e for e in bus.events if e.type in _GATEWAY_TYPES] == []
+    assert [e for e in bus.events if e.type in _MOVED_TYPES] != [], (
+        "gateway 现在应对所有 origin 无条件发射流式事件（Task 5 删除了临时门禁）"
+    )
+    assert [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED] == [], (
+        "compact 自己的收尾门禁仍应挡住错误 origin 下的孤儿 RESPONSE_FINISHED"
+    )
 
 
 @pytest.mark.asyncio
@@ -359,3 +367,111 @@ async def test_predispatch_compact_restores_origin_even_on_exception(monkeypatch
         await _maybe_predispatch_compact(state, ctx, tool_calls, LLMUsage(prompt_tokens=1))
 
     assert state.origin == EventOrigin.LOOP_ACT  # finally 里还原，异常路径也不例外
+
+
+# ── Task 5：删除 ReactEventTypes 间接层，observe/background_observe 靠 origin 收敛 ──
+#
+# run_observe_react 不再接收 event_types/request_id_prefix 形参；「观察是前台 observe
+# 还是后台 background_observe」不再靠传入不同的一组事件类型区分，改靠调用前已经设好的
+# state.origin（观察前台由 driver 按 step 名设好 LOOP_OBSERVE；background_observe 在
+# launch 出的独立快照 state 上显式改写 LOOP_BACKGROUND_OBSERVE）。gateway 的临时门禁
+# （Task 4 留下的 _STREAM_EVENT_ORIGINS）随之整个删除，对所有 origin 无条件发射。
+
+
+def test_react_event_types_indirection_is_gone():
+    """该间接层唯一的目的是区分两组事件类型，目的消失则层消失。"""
+    from ctx_weft.core.loop.steps import observe
+
+    for name in ("ReactEventTypes", "OBSERVE_REACT_EVENTS", "BACKGROUND_OBSERVE_REACT_EVENTS"):
+        assert not hasattr(observe, name), f"{name} 应已删除"
+
+
+def test_run_observe_react_has_no_event_types_param():
+    from ctx_weft.core.loop.steps import observe
+
+    sig = inspect.signature(observe.run_observe_react)
+    assert "event_types" not in sig.parameters
+    # request_id 方案改用与 gateway 相同的确定性公式独立算出，prefix 形参随之失去用途。
+    assert "request_id_prefix" not in sig.parameters
+
+
+def test_background_observe_types_never_emitted_under_core_src():
+    """BACKGROUND_OBSERVE_* 四个类型仍留在 EventType 枚举里（退役登记是 Task 7 的事），
+    但本任务起 src/ctx_weft/core/ 下不应再有任何发射点——统一走 LLM_* + origin。"""
+    import pathlib
+
+    core_dir = pathlib.Path(__file__).resolve().parents[2] / "src" / "ctx_weft" / "core"
+    assert core_dir.is_dir(), core_dir
+    hits = []
+    for py in core_dir.rglob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        if "EventType.BACKGROUND_OBSERVE_" in text:
+            hits.append(str(py))
+    assert hits == [], f"仍在发射 BACKGROUND_OBSERVE_*：{hits}"
+
+
+@pytest.mark.asyncio
+async def test_observe_path_events_share_origin_and_request_id():
+    """observe 前台：gateway 的 4 个流式事件 + run_observe_react 自己补发的收尾事件，
+    5 个事件共用一个 request_id，且 origin 全部是 loop.observe（state.origin 由调用方
+    设好，run_observe_react 不用管、也不该管——它只管跑 ReAct）。"""
+    from ctx_weft.core.loop.steps.observe import run_observe_react
+
+    bus = _RecordingBus()
+    state = _make_state()
+    state.origin = EventOrigin.LOOP_OBSERVE
+    ctx = _make_ctx(bus)
+
+    await run_observe_react(
+        state, ctx, system="SYS", messages=[], tools=[],
+        max_rounds=1, terminal_tool_name="report_task_outcome",
+    )
+
+    started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
+    prompt_sent = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT]
+    tokens = [e for e in bus.events if e.type == EventType.LLM_TOKEN_STREAMED]
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    assert len(started) == 1 and len(prompt_sent) == 1 and len(finished) == 1
+    assert len(tokens) == 2
+
+    five = started + prompt_sent + tokens + finished
+    assert len(five) == 5
+    rid = started[0].payload["request_id"]
+    assert rid
+    assert all(e.payload["request_id"] == rid for e in five)
+    assert all(e.origin == EventOrigin.LOOP_OBSERVE for e in five)
+
+
+@pytest.mark.asyncio
+async def test_background_observe_path_events_share_origin_and_request_id():
+    """background_observe：调用前把 state.origin 显式改写为 loop.background_observe
+    （同 background_observe.py:_run_background_observe 在调 run_observe_react 前做的事）
+    ——同样 5 个事件的 origin 全部随之变成 loop.background_observe，且从不出现已废弃的
+    BACKGROUND_OBSERVE_* 类型。"""
+    from ctx_weft.core.loop.steps.observe import run_observe_react
+
+    bus = _RecordingBus()
+    state = _make_state()
+    state.origin = EventOrigin.LOOP_BACKGROUND_OBSERVE
+    ctx = _make_ctx(bus)
+
+    await run_observe_react(
+        state, ctx, system="SYS", messages=[], tools=[],
+        max_rounds=1, terminal_tool_name="collect_process_report",
+    )
+
+    five = [e for e in bus.events if e.type in (
+        EventType.LLM_REQUEST_STARTED, EventType.LLM_PROMPT_SENT,
+        EventType.LLM_TOKEN_STREAMED, EventType.LLM_RESPONSE_FINISHED,
+    )]
+    assert len(five) == 5
+    rid = five[0].payload["request_id"]
+    assert rid
+    assert all(e.payload["request_id"] == rid for e in five)
+    assert all(e.origin == EventOrigin.LOOP_BACKGROUND_OBSERVE for e in five)
+
+    _OBSOLETE = {
+        EventType.BACKGROUND_OBSERVE_REQUEST_STARTED, EventType.BACKGROUND_OBSERVE_PROMPT_SENT,
+        EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED, EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED,
+    }
+    assert [e for e in bus.events if e.type in _OBSOLETE] == []

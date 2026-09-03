@@ -24,7 +24,7 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING
 
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
 from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
@@ -206,7 +206,6 @@ def _lock_for(task_id: str) -> asyncio.Lock:
 
 async def _run_background_observe(state: "LoopState", ctx: "LoopContext", boundary: str) -> None:
     from ctx_weft.core.assembler import ContextRequest
-    from ctx_weft.core.loop.steps.observe import BACKGROUND_OBSERVE_REACT_EVENTS
     from ctx_weft.core.orchestrator.control_capability import BACKGROUND_PROCESS_REPORT_NAME
 
     # 总账 C5（控制方裁定 R1）：`launch_background_observe` 给这段快照发了自己的
@@ -279,15 +278,19 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                     extra={"observe_boundary": boundary},
                 )
                 prompt = await ctx.assembler.assemble(request)
+                # Task 5：不再有 event_types 间接层——LLM_* 的「后台 vs 前台」区分改靠
+                # state.origin（EventOrigin.LOOP_BACKGROUND_OBSERVE），由 host 据此决定
+                # 后台 observe 的 LLM 交互不进前端对话流。这份 state 是 launch_background_observe
+                # 给这段后台工作单独快照出的（独立 run_id/sequence_counter，见其注释），改写
+                # origin 不会污染主 run 的 state。
+                state.origin = EventOrigin.LOOP_BACKGROUND_OBSERVE
                 result, last_text = await run_observe_react(
                     state, ctx,
                     system=prompt.system,
                     messages=list(prompt.messages),
                     tools=prompt.tools,
-                    request_id_prefix=f"bgobs_{state.task.id}",
                     max_rounds=agent.loop_config.max_turns_per_observe,
                     terminal_tool_name=BACKGROUND_PROCESS_REPORT_NAME,
-                    event_types=BACKGROUND_OBSERVE_REACT_EVENTS,  # 后台 LLM 交互发独立类型，host 决定不进前端
                 )
                 # 报告取值：terminal 工具产出 → 纯文本复述兜底（observer 把复述写成正文而没调工具）。
                 # content_to_text：InvocationResult.content 可能是 list[ContentPart]

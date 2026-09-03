@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
 from ctx_weft.core.content import rehydrate_content, redact_content_for_event
-from ctx_weft.protocols.events import EventOrigin, EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.utils import (
     dynamic_max_tokens,
@@ -74,10 +74,6 @@ PROMPT_EST_BASE_KEY = "prompt_est_base"
 # floor 只应影响 max_tokens 的保守性，不应污染校准。
 PROMPT_EST_SEG_KEY = "prompt_est_seg"
 
-# stream_llm_resilient 的「流式侧」4 种 LLM_* 事件只在 state.origin 落在这个集合里才发射
-# （见 stream_llm_resilient 文档字符串）。临时脚手架：Task 5 删掉 observe.py 自己的那套
-# 发射后，observe/background_observe 也改靠 origin 区分，届时这里要放开。
-_STREAM_EVENT_ORIGINS = frozenset({EventOrigin.LOOP_ACT, EventOrigin.LOOP_COMPACT})
 
 
 def resolve_llm_identity(state) -> tuple[str, str]:
@@ -489,24 +485,21 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
     - 退避期间尊重 cancel_token。
 
     「流式侧」4 种 LLM_* 事件（REQUEST_STARTED / PROMPT_SENT / TOKEN_STREAMED /
-    REASONING_STREAMED）在此发射（task-4 收敛，spec 2026-09-03 §9.5）。仅当
-    ``state.origin in _STREAM_EVENT_ORIGINS``（``LOOP_ACT`` / ``LOOP_COMPACT``）
-    时发射：
+    REASONING_STREAMED）在此发射（task-4 收敛，spec 2026-09-03 §9.5），对所有调用方
+    无条件发射——不看 ``state.origin``。
 
-    - **放行 LOOP_ACT**：act.py 原来自己发的那次调用，逐字搬过来。
-    - **放行 LOOP_COMPACT**：compact（``summarize_for_compact``）此前一个 LLM_*
-      事件都不发，是纯增量、不存在重复发射或串号风险（spec §9.3：compact 走统一
-      gateway 后应自动获得全部 LLM_* 事件）。``summarize_for_compact`` 自己成对
-      发射 ``LLM_RESPONSE_FINISHED``（同 act.py 的收尾职责分工）。
-    - **不放行 observe / background_observe**（``run_observe_react`` 复用本函数）：
-      它们各自已有自己的一套 LLM 交互事件与 request_id 方案（observe 前台用同名
-      LLM_* 但自己的 ``request_id_prefix`` 方案；background_observe 用
-      ``BACKGROUND_OBSERVE_*`` 专门把后台交互挡在前端可见的 LLM_* 频道之外）。
-      放行会在它们的调用上重复发射/串错 request_id，还会把本该隐藏的后台 LLM
-      调用泄漏进 LLM_* 频道。**这是临时脚制手架**——Task 5 会删掉 observe.py
-      自己的那套发射，届时改靠 origin 区分（spec §9 原意），本处门禁需一并放开。
-    ``LLM_RESPONSE_FINISHED`` 在 act.py 与 compact.py 两处各自发射（依赖各自的收尾
-    逻辑：act 依赖软打断决策，见 task-4 brief；compact 是单次调用直出）。
+    Task 4 曾在这里挂过一道临时门禁（``_STREAM_EVENT_ORIGINS``，只放行
+    ``LOOP_ACT``/``LOOP_COMPACT``），因为当时 observe.py 的 ``run_observe_react``
+    还在自己发一套同形事件（前台 LLM_*、后台 BACKGROUND_OBSERVE_*），放行会重复发射/
+    串号。Task 5 删掉了 observe.py 那套自发射，改成所有调用方（act / compact /
+    observe / background_observe）统一由本函数发 LLM_*，只靠 ``state.origin``
+    （``EventOrigin.LOOP_OBSERVE`` / ``LOOP_BACKGROUND_OBSERVE`` 等）区分前台/后台
+    （docs/events-v2.md §3.6：V2 之前这是靠 BackgroundObserve* 那族独立类型做的，
+    合并后由 origin 承担）——门禁因此整个删除。
+
+    ``LLM_RESPONSE_FINISHED`` 各调用方自己发射（依赖各自的收尾逻辑：act 依赖软打断
+    决策，见 task-4 brief；compact 是单次调用直出；observe/background_observe 共用
+    ``run_observe_react``，Task 5 起也在那里补发）。
 
     request_id：与 act.py 侧 ``_run_llm_turn`` 用同一个确定性公式
     ``f"req_{agent.id}_{state.sequence_counter}"`` 独立算出——两边都在「本次 LLM
@@ -520,10 +513,7 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
     apply_dynamic_max_tokens(ctx, request, loop_guard)
 
     bus = getattr(ctx, "event_bus", None)
-    emit_stream_events = (
-        bus is not None and state is not None
-        and getattr(state, "origin", None) in _STREAM_EVENT_ORIGINS
-    )
+    emit_stream_events = bus is not None and state is not None
     request_id: str | None = None
     if emit_stream_events:
         agent = state.agent
