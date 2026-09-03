@@ -186,6 +186,11 @@ _BACKGROUND_BOUNDARY_DESC = {
     "finish": "the task was closed out with finish_task",
     "normal": "the task ended normally with its final output",
     "dispatch": "you delegated a sub-task, and this task is suspended until it completes",
+    # 机械判决路径（observe 无可用 LLM observer / 已取消）：结局由规则定，摘要全靠这次
+    # 后台观察补 —— 段可能刚结束、也可能马上要重跑，故措辞不预设收尾。**非 close 边界**
+    # （不进 _CLOSE_BOUNDARIES）：不写 _close_report，走段折。
+    "mechanical": ("this segment just ended and was judged by rule (no LLM observer ran), "
+                   "so this recap is the only account of it"),
 }
 
 
