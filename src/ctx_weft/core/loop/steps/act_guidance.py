@@ -58,7 +58,7 @@ def _task_label(t) -> str:
 
 
 def _nonterminal_tasks(task_manager) -> list:
-    """session 内非终态 task（PENDING/ACTIVE/SUSPENDED/TO_BE_OBSERVED），无 task_manager 时空表。"""
+    """session 内非终态 task（`_TERMINAL_STATUSES` 的补集），无 task_manager 时空表。"""
     if task_manager is None:
         return []
     return [t for t in task_manager.all_tasks() if t.status not in _TERMINAL_STATUSES]
@@ -108,7 +108,7 @@ def _subtask_result_snippet(t) -> str:
 def _session_task_tree(task, task_manager) -> str:
     """把 session 内**非终态** task 渲染成缩进任务树，当前 task 以 ``▶`` 标注。
 
-    - 仅列非终态（PENDING/ACTIVE/SUSPENDED/TO_BE_OBSERVED）——终态不刷屏、只留「还没做完的活」。
+    - 仅列非终态（`_TERMINAL_STATUSES` 的补集）——终态不刷屏、只留「还没做完的活」。
     - 按 parent_task_id 建树；父节点被过滤掉（终态/缺失）的非终态 task 提升到 root 层，避免孤儿丢失。
       roots 及同层子节点按 created_at 升序。
     - 只要有 ≥1 个非终态 task 就出树（含 root 独自 act 时只列它自己一行）——root 派生子任务后即转
