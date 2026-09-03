@@ -1733,9 +1733,11 @@ class CtxWeftRuntime:
         root agent). Pass a real ``task_id`` to also make that task's task layer
         eligible. Raises ``SessionBusyError`` if the session is currently running.
 
-        Calls ``CompactStep.execute`` directly (no step driver / no Run lifecycle
-        events), so the session's projection status is untouched — only
-        MemoryCompactStarted / MemoryCompacted are emitted (both reducer no-ops).
+        Calls ``CompactStep.execute`` directly (no step driver) but does emit a
+        matching RunStarted/RunFinished pair around it (总账 C5: an orphan run_id
+        with no start/finish confused hosts) — the session's projection status is
+        still untouched, since RunStarted/RunFinished are reducer no-ops just like
+        MemoryCompactStarted / MemoryCompacted.
 
         Returns ``{"session_id", "agent_id", "task_id"}``. When ``task_id`` is not
         supplied, the returned ``task_id`` is a transient in-memory carrier id with no
@@ -1826,8 +1828,9 @@ class CtxWeftRuntime:
             )
 
             scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
+            run_id = generate_id("run")
             state = LoopState(
-                run_id=generate_id("run"),
+                run_id=run_id,
                 session=session,
                 task=task,
                 agent=agent,
@@ -1835,9 +1838,36 @@ class CtxWeftRuntime:
                 extra={"template": template},
                 resolved_model=rm,
             )
-            outcome = await CompactStep().execute(state, loop_ctx)
-            for ev in outcome.events:
-                await self._event_bus.emit(ev)
+            # 总账 C5：这段独立跑了一个 run_id 却从不发起止——host 会看到凭空出现又
+            # 凭空消失的 run。补齐起止事件（payload 结构照抄 `_run_loop` 的实际发射点，
+            # 见 task-5-report）；这条路径没有 StepDriver，也没有 RunOutcome，
+            # `initial_step` 用它实际跑的那个 step 名 "compact"，`outcome` 按「跑完即
+            # 完成 / 崩溃即 interrupted」的既有口径取值。
+            await self._event_bus.emit(make_event(state, EventType.RUN_STARTED, payload={
+                "run_id": run_id,
+                "initial_step": "compact",
+            }))
+            run_error: Exception | None = None
+            try:
+                outcome = await CompactStep().execute(state, loop_ctx)
+                for ev in outcome.events:
+                    await self._event_bus.emit(ev)
+            except Exception as exc:
+                run_error = exc
+                raise
+            finally:
+                await self._event_bus.emit(make_event(state, EventType.RUN_FINISHED, payload={
+                    "outcome": (
+                        RunOutcomeKind.COMPLETED.value if run_error is None
+                        else RunOutcomeKind.INTERRUPTED.value
+                    ),
+                    "final_status": task.status,
+                    "will_retry": False,
+                    "total_events": state.sequence_counter,
+                    "total_turns": len(state.transcript),
+                    "error": str(run_error) if run_error else None,
+                    "error_type": type(run_error).__name__ if run_error else None,
+                }))
 
             return {"session_id": session.id, "agent_id": agent.id, "task_id": task.id}
         finally:

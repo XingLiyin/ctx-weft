@@ -18,6 +18,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome,
 from ctx_weft.core.loop.llm_gateway import (
     stream_llm, apply_dynamic_max_tokens, request_prompt_estimate, resolve_llm_identity,
 )
+from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols.capability import ToolCapability
@@ -51,10 +52,33 @@ def launch_recognize_intent(state: LoopState, ctx: LoopContext) -> asyncio.Task:
     )
 
     async def _run() -> None:
+        # 总账 C5：这段快照造了自己的 run_id 却从没配起止事件——host 会看到凭空
+        # 出现又凭空消失的 run。补齐（payload 结构照抄 `_run_loop` 的实际发射点，
+        # 见 task-5-report）；这条路径没有 StepDriver 也没有 RunOutcome，
+        # `initial_step` 用它实际跑的那个 step 名 "recognize_intent"。
+        await ctx.event_bus.emit(make_event(snapshot, EventType.RUN_STARTED, payload={
+            "run_id": snapshot.run_id,
+            "initial_step": "recognize_intent",
+        }))
+        run_error: Exception | None = None
         try:
             await RecognizeIntentStep().execute(snapshot, ctx)
-        except Exception:
+        except Exception as exc:
+            run_error = exc
             logger.exception("recognize_intent concurrent run failed (ignored)")
+        finally:
+            await ctx.event_bus.emit(make_event(snapshot, EventType.RUN_FINISHED, payload={
+                "outcome": (
+                    RunOutcomeKind.COMPLETED.value if run_error is None
+                    else RunOutcomeKind.INTERRUPTED.value
+                ),
+                "final_status": snapshot.task.status,
+                "will_retry": False,
+                "total_events": snapshot.sequence_counter,
+                "total_turns": len(snapshot.transcript),
+                "error": str(run_error) if run_error else None,
+                "error_type": type(run_error).__name__ if run_error else None,
+            }))
 
     task = asyncio.create_task(_run())
     tm = getattr(ctx, "task_manager", None)

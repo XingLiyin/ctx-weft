@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
+from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
 from ctx_weft.core.utils import content_to_text, generate_id, image_tokens
 from ctx_weft.protocols import MemoryEventType, MemoryScope
 
@@ -208,10 +209,22 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
     from ctx_weft.core.loop.steps.observe import BACKGROUND_OBSERVE_REACT_EVENTS
     from ctx_weft.core.orchestrator.control_capability import BACKGROUND_PROCESS_REPORT_NAME
 
+    # 总账 C5（控制方裁定 R1）：`launch_background_observe` 给这段快照发了自己的
+    # run_id（解 A4）——它在 host 眼里就是一段独立的 run，得有起有止，不能只补
+    # recognize_intent / compact_session 两处而漏掉它自己。payload 结构照抄
+    # `_run_loop` 的实际发射点（`runtime.py`，见 task-5-report）；`initial_step`
+    # 用它实际做的事 "background_observe"（这条路径没有 StepDriver，取不到真实
+    # step 名）。TaskRecapStarted/Done 是任务级的 recap 记账，与这里的 run 级起止
+    # 是两层，不互相顶替。
+    await ctx.event_bus.emit(make_event(state, EventType.RUN_STARTED, payload={
+        "run_id": state.run_id,
+        "initial_step": "background_observe",
+    }))
     await ctx.event_bus.emit(make_event(
         state, EventType.TASK_RECAP_STARTED,
         payload={"task_id": state.task.id, "boundary": boundary, "agent_id": state.agent.id},
     ))
+    run_error: Exception | None = None
     try:
         async with _lock_for(state.task.id):
             # 重跑幂等护栏（恢复重跑时才生效）：非 close 边界若该段已无 active raw，说明上次
@@ -337,10 +350,29 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 if boundary in _CLOSE_BOUNDARIES:
                     pop_close_synth(state.task.id)
                 logger.exception("background observe failed (ignored); segment kept raw")
+    except Exception as exc:
+        # 上面那个 except 只吞真正跑出 fold/observe 的失败（业务已降级 = 段保
+        # raw，run 仍算跑完）；这里接的是护栏段（幂等检查 / is_short_segment）本身
+        # 炸的异常——那条既有行为是原样往外传，不吞。只是顺手记一笔，好让下面的
+        # RunFinished 如实报 outcome=interrupted，不撒谎报 completed。
+        run_error = exc
+        raise
     finally:
         await ctx.event_bus.emit(make_event(
             state, EventType.TASK_RECAP_DONE, payload={"task_id": state.task.id},
         ))
+        await ctx.event_bus.emit(make_event(state, EventType.RUN_FINISHED, payload={
+            "outcome": (
+                RunOutcomeKind.COMPLETED.value if run_error is None
+                else RunOutcomeKind.INTERRUPTED.value
+            ),
+            "final_status": state.task.status,
+            "will_retry": False,
+            "total_events": state.sequence_counter,
+            "total_turns": len(state.transcript),
+            "error": str(run_error) if run_error else None,
+            "error_type": type(run_error).__name__ if run_error else None,
+        }))
 
 
 def launch_background_observe(
