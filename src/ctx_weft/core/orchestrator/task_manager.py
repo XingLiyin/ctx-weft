@@ -754,7 +754,7 @@ class TaskManager:
                 "Task %s non-retriable error (%s), suspending for recovery: %s",
                 task_id, type(exc).__name__, error,
             )
-            await self._suspend_task_interrupted(task_id, error, exc)
+            await self._suspend_task_interrupted(task_id, error, exc, reason=reason)
             return
 
         task = self._tasks.get(task_id)
@@ -780,10 +780,10 @@ class TaskManager:
             })
             await self.drain()
         else:
-            await self._suspend_task_interrupted(task_id, error, exc)
+            await self._suspend_task_interrupted(task_id, error, exc, reason=reason)
 
     async def _suspend_task_interrupted(
-        self, task_id: str, error: str, exc: BaseException | None,
+        self, task_id: str, error: str, exc: BaseException | None, *, reason: str,
     ) -> None:
         """运行层崩溃的终局：挂起等 /resume，**不是失败**。
 
@@ -808,12 +808,15 @@ class TaskManager:
             self._running_agents.pop(task_id, None)
             self._queue.unmark_running(task_id)
         # reason 只作**溯源**，不作路由——判据是 TASK_INTERRUPTED 这个类型本身。
-        # 值本身是对外契约的一部分（host 升级须知的映射表写的就是
-        # reason=InterruptReason.RUN_CRASH），故照旧；被删掉的是**拿它做条件判断**
-        # 那件事，不是这个值的存在
-        # （tests/unit/test_layered_signals.py 检测的正是「分流」而非「出现」）。
+        # 值本身是对外契约的一部分（host 升级须知的映射表按 reason 分流展示文案），
+        # 故按调用方透传的 `reason` 原样发出，不再在这里硬编码单一来源——
+        # `_handle_task_failure` 现在服务装配失败（ASSEMBLY_FAILURE）一条路，
+        # 执行崩溃改走 `_run_task` 的 `except Exception`（RunOutcome 路径），两者的
+        # reason 必须同源透传，不得在挂起出口各写各的
+        # （tests/unit/test_assembly_failure_reason.py 检测的正是这一点；
+        # tests/unit/test_layered_signals.py 检测的是「分流」而非「出现」）。
         await self._emit(EventType.TASK_INTERRUPTED, task_id=task_id, payload={
-            "reason": InterruptReason.RUN_CRASH,
+            "reason": reason,
             "error_code": error_code,
             "error_message": error,
             "retry_count": task.retry_count if task else 0,
