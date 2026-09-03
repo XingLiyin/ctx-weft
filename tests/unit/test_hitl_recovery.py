@@ -321,7 +321,9 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     """单 owner 架构：冷 HITL 应答且存活 owner 拥有该 task → 就地重驱、**不重建 TM**。
 
     验证：(1) rebuild_view 未被调用(走复用而非重建)；(2) 被应答的 task 重新派发；
-    (3) 本轮 model 写回 owner 的 session（run_task seam 会据它 dispatch）；(4) owner TM 未被顶替。
+    (3) owner TM 未被顶替。**不再验证**「model 写回 session」——`recover_session`
+    批次 B 起不再接受 llm_account/llm_model，换模型走 `set_agent_llm`/
+    `set_session_llm` 两条独立命令（Task 9）。
     """
     import asyncio
     from ctx_weft.core import CtxWeftRuntime
@@ -361,13 +363,12 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     tm.register_task(Task(id="tsk_A", session_id="ses_1", status="SUSPENDED", settings=NormalTaskSettings()))
     runtime._task_managers["ses_1"] = tm
 
-    await runtime.recover_session("ses_1", resumed_task_id="tsk_A", llm_account="acct2", llm_model="m2")
+    await runtime.recover_session("ses_1", resumed_task_id="tsk_A")
     for _ in range(10):
         await asyncio.sleep(0)
 
     assert rebuild_calls == [], "复用路径不应调用 rebuild_view（未重建 TM）"
     assert ran == ["tsk_A"], "被应答的 task 应就地重新派发"
-    assert session.llm_model == "m2" and session.llm_provider == "acct2", "本轮 model/account 应写回 owner session"
     assert runtime._task_managers["ses_1"] is tm, "owner TM 不应被顶替/替换"
 
 

@@ -108,23 +108,19 @@ class HitlDecision:
     modified_arguments: dict[str, Any] | None = None
 
 
-@dataclass(frozen=True)
-class ResumeHint:
-    """应答时携带的当前所选模型。属于**这一次应答**，不属于这个请求——故不入事件、不入状态。"""
-
-    llm_account: str | None = None
-    llm_model: str | None = None
-
-
 @dataclass
 class HitlReply:
-    """host → core 的一次应答命令。"""
+    """host → core 的一次应答命令。
+
+    不再携带模型选择——换模型走 `CtxWeftRuntime.set_agent_llm`/`set_session_llm`
+    两条独立命令（批次 B）。原来一次 `reply_to_hitl(reply, resume_hint=...)`
+    同时做「换模型」+「应答」两件事；现在是两条调用。
+    """
 
     hitl_id: str
     outcome: HitlOutcome
     message: "str | list[ContentPart]" = ""
     modified_arguments: dict[str, Any] | None = None
-    resume_hint: ResumeHint = field(default_factory=ResumeHint)
 
 
 @dataclass

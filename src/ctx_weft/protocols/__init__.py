@@ -6,7 +6,7 @@
 - MemoryProvider（§4.3，统一协议：ingest + recall_* + subscribe + apply_compact）
 - CapabilityProvider（§4.4）
 - HITL：值域（HitlForm / HitlOutcome / PREFACE_*）+ 交换类型（HitlAsk、HitlDecision、
-  HitlReply、HitlRequestView、ResumeHint）+ 封闭的 Delivery 联合及其三个成员。
+  HitlReply、HitlRequestView）+ 封闭的 Delivery 联合及其三个成员。
   host 与自定义 authorizer/provider 需要构造或读取的全部 HITL 类型都在这里
 - AgentTemplate / IdentityFacet（§4.6）
 - LLMClient / LLMClientResolver（§11，LLM 接入契约）
@@ -73,7 +73,6 @@ from ctx_weft.protocols.hitl import (
     HitlReply,
     HitlRequestView,
     NoResumeDelivery,
-    ResumeHint,
     ToolResultDelivery,
     UserTurnDelivery,
 )
@@ -173,7 +172,6 @@ __all__ = [
     "HitlReply",
     "HitlRequestView",
     "NoResumeDelivery",
-    "ResumeHint",
     "ToolResultDelivery",
     "UserTurnDelivery",
     # Context

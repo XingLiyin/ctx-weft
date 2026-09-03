@@ -368,6 +368,57 @@ class AgentRegistry:
 
         return agent, template
 
+    async def set_agent_llm(
+        self, agent_id: str, choice: ModelChoice, *,
+        reason: str, causation_id: str | None = None,
+    ) -> bool:
+        """纯赋值：改这一个 agent 的模型选择，发一条 `AGENT_LLM_CHANGED`。
+
+        不入队、不改任何 task 状态、不触发调度——「换模型」和「让 task 跑起来」
+        是两件事（spec §06 的三条命令）。未登记的 agent_id、或选择与现值相同
+        → no-op，不发事件（host 重复点击不刷屏，也不会对幽灵 id 广播事实）。
+        """
+        rec = self._agents.get(agent_id)
+        if rec is None or rec.llm == choice:
+            return False
+        rec.llm = choice
+        await self.event_bus.emit(Event(
+            id=generate_id("evt"),
+            run_id=None,
+            sequence=0,
+            session_id=rec.session_id,
+            type=EventType.AGENT_LLM_CHANGED,
+            timestamp=now_utc(),
+            tenant_id=rec.tenant_id,
+            task_id=None,
+            agent_id=agent_id,
+            payload={
+                "llm_account": choice.account,
+                "llm_model": choice.model,
+                "reason": reason,
+            },
+            causation_id=causation_id,
+        ))
+        return True
+
+    async def set_session_llm(self, session_id: str, choice: ModelChoice, *, reason: str) -> int:
+        """作用于该 session 下 registry 持有的**全部** record。
+
+        不去问 TaskManager「哪些还会被派发」——零查询依赖是 Registry 的设计属性。
+        已跑完的 agent 改了也无害（不会再被派发），代价只是多几条事件。
+
+        发 N 条 `AGENT_LLM_CHANGED`，不是一条会话级事件：真相源因此仍然唯一，
+        reducer 不必处理「一条事件改 N 个实体」。N 条事件共享一个 causation_id，
+        host 要展示「这是一次会话级切换」→ 按它聚合，不需要第三种事件类型。
+        """
+        cid = generate_id("cau")
+        ids = [k for k, r in self._agents.items() if r.session_id == session_id]
+        n = 0
+        for aid in ids:
+            if await self.set_agent_llm(aid, choice, reason=reason, causation_id=cid):
+                n += 1
+        return n
+
     def resolve_model(self, agent_id: str) -> ResolvedModel:
         """现解，不缓存：client/身份/窗口是同一次解析的三面，一次算出、当次即弃。
 

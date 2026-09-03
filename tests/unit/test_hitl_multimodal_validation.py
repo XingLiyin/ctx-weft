@@ -39,7 +39,6 @@ from ctx_weft.protocols.hitl import (
     HitlAsk,
     HitlReply,
     NoResumeDelivery,
-    ResumeHint,
 )
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"x" * 100
@@ -141,12 +140,11 @@ async def _pending(rt: CtxWeftRuntime, session_id: str = "ses-hitl",
 
 
 async def _reply(rt: CtxWeftRuntime, hid: str, message, *, outcome: str = "accepted",
-                 modified_arguments=None, resume_hint: ResumeHint | None = None):
+                 modified_arguments=None):
     """经**唯一的生产应答入口**回话。"""
     return await rt.reply_to_hitl(HitlReply(
         hitl_id=hid, outcome=outcome, message=message,
         modified_arguments=modified_arguments,
-        resume_hint=resume_hint or ResumeHint(),
     ))
 
 
@@ -448,7 +446,7 @@ async def test_hitl_approve_externalizes_valid_image_to_ref():
 @pytest.mark.asyncio
 async def test_hitl_image_reaches_memory():
     """HITL 应答携带图片时，内容被外部化落库成功——模态能力判断已不在 core，
-    应答携带的 `ResumeHint`（本轮所选模型）不再影响本次应答是否被放行。"""
+    应答不再携带模型选择，换模型是独立的 `set_agent_llm`/`set_session_llm` 命令。"""
     store = _CountingStore()
     provider = _RoutingLLMProvider(
         default=_TextOnlyClient(), by_key={("acct-v", "vision-model"): _VisionClient()},
@@ -456,8 +454,7 @@ async def test_hitl_image_reaches_memory():
     rt = _make_routing_runtime(provider, store)
     hid = await _pending(rt, session_id="ses-named-vision")
 
-    view = await _reply(rt, hid, [ImagePart(data=_PNG, media_type="image/png")],
-                        resume_hint=ResumeHint(llm_account="acct-v", llm_model="vision-model"))
+    view = await _reply(rt, hid, [ImagePart(data=_PNG, media_type="image/png")])
 
     assert view is not None and view.outcome == "accepted"
     assert store.put_calls == 1

@@ -13,7 +13,6 @@ from ctx_weft.protocols.hitl import (
     HitlAsk,
     HitlReply,
     NoResumeDelivery,
-    ResumeHint,
     ToolResultDelivery,
     UserTurnDelivery,
 )
@@ -30,21 +29,18 @@ def _runtime_with_recorded_resume() -> tuple[CtxWeftRuntime, list[tuple]]:
     """构造一个 runtime，把 `recover_session` / 用户回合注入替换成记录桩。
 
     记录的元组形态：
-    - ``("recover_session", session_id, resumed_task_id)`` —— 未带 resume_hint 的
-      ToolResultDelivery 续跑；
-    - ``("recover_session", session_id, resumed_task_id, llm_model)`` —— 带了
-      resume_hint.llm_model 覆盖时多一位，值就是覆盖后的 model；
+    - ``("recover_session", session_id, resumed_task_id)`` —— ToolResultDelivery 续跑；
     - ``("inject_user_turn", session_id, task_id)`` —— UserTurnDelivery 续跑。
+
+    `recover_session` 批次 B 起不再接受 llm_account/llm_model（换模型走
+    `set_agent_llm`/`set_session_llm` 两条独立命令），桩签名同步收紧。
     """
     rt = _runtime()
     calls: list[tuple] = []
 
-    async def fake_recover_session(session_id, *, resumed_task_id=None, user_reply=None,
-                                    llm_account=None, llm_model=None):
+    async def fake_recover_session(session_id, *, resumed_task_id=None, user_reply=None):
         if user_reply is not None:
             calls.append(("inject_user_turn", session_id, resumed_task_id))
-        elif llm_model is not None:
-            calls.append(("recover_session", session_id, resumed_task_id, llm_model))
         else:
             calls.append(("recover_session", session_id, resumed_task_id))
 
@@ -131,15 +127,6 @@ async def test_replying_twice_resumes_at_most_once():
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted"))
     assert await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted")) is None
     assert len(calls) == 1
-
-
-async def test_resume_hint_overrides_the_model_for_this_resume_only():
-    rt, calls = _runtime_with_recorded_resume()
-    req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             tool_call_id="call_1", stage="tool")
-    await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
-                                     resume_hint=ResumeHint(llm_model="big")))
-    assert calls[0][-1] == "big"
 
 
 async def test_hitl_reply_intake_is_wired_to_the_runtime_shared_normalizer():

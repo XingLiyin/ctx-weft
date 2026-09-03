@@ -93,7 +93,6 @@ from ctx_weft.protocols.hitl import (
     PREFACE_AFTER_INTERRUPT_EDIT,
     HitlReply,
     HitlRequestView,
-    ResumeHint,
     ToolResultDelivery,
     UserTurnDelivery,
 )
@@ -859,6 +858,35 @@ class CtxWeftRuntime:
             self._release_session(session_id)
         return True
 
+    # ── 换模型：两条命令（批次 B）──────────────────────────────────────────────
+    #
+    # llm_* 此后只出现在这两条命令的入参里（以及「建一个 session」的入参里）。
+    # 两条都是纯赋值——不入队、不改任何 task 状态、不触发调度，对一个所有 task
+    # 都在等人的 agent 调用它完全安全。派发时 `AgentRegistry.resolve_model` 现读
+    # record，因此换模型对**尚未派发**的 run 立即生效；已经在跑的 run 手上的
+    # `ResolvedModel` 是那次 assemble() 时现解的快照，不会被这两条命令追改。
+
+    async def set_agent_llm(
+        self, agent_id: str, *, llm_account: str = "", llm_model: str = "",
+        reason: str = "user_selected",
+    ) -> bool:
+        """host 入口：把 `(llm_account, llm_model)` 包成 `ModelChoice`，转发给 registry。"""
+        return await self._agent_registry.set_agent_llm(
+            agent_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
+        )
+
+    async def set_session_llm(
+        self, session_id: str, *, llm_account: str = "", llm_model: str = "",
+        reason: str = "user_selected",
+    ) -> int:
+        """host 入口：作用于该 session 下 registry 持有的全部 agent record。
+
+        返回值 = 真正改动了 record 的 agent 数（幂等 no-op 不计数）。
+        """
+        return await self._agent_registry.set_session_llm(
+            session_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
+        )
+
     # ── Phase 1 compat ───────────────────────────────────────────────────────
 
     async def run_single_task(
@@ -1332,8 +1360,6 @@ class CtxWeftRuntime:
         session_id: str,
         *,
         user_reply: "PendingHitl | None" = None,
-        llm_account: str | None = None,
-        llm_model: str | None = None,
         resumed_task_id: str | None = None,
     ) -> None:
         """Serialize resume per session, then reuse the live owner or rebuild + drain.
@@ -1342,12 +1368,15 @@ class CtxWeftRuntime:
         就把应答作为消息投递给它、就地重驱（``_resume_in_existing_tm``），**不重建 TM**——从根上
         消除"多 TM 顶替/跨 TM 双跑"。仅当无存活 owner（真崩溃冷启动 / ``/resume`` / 活 TM 不含该
         task）才从事件日志重建。per-session 锁把整段过程串行化。
+
+        不收 llm_account/llm_model：续跑路径一概不碰模型（批次 B）。换模型走
+        `set_agent_llm`/`set_session_llm` 两条命令，registry 是模型选择的唯一
+        住所，续跑只负责把已经存在的选择重新派发出去。
         """
         lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             await self._recover_session_locked(
                 session_id, user_reply=user_reply,
-                llm_account=llm_account, llm_model=llm_model,
                 resumed_task_id=resumed_task_id,
             )
 
@@ -1356,8 +1385,6 @@ class CtxWeftRuntime:
         session_id: str,
         *,
         user_reply: "PendingHitl | None" = None,
-        llm_account: str | None = None,
-        llm_model: str | None = None,
         resumed_task_id: str | None = None,
     ) -> None:
         """Reuse the live owner TM, or rebuild it from the event store, then resume.
@@ -1379,7 +1406,6 @@ class CtxWeftRuntime:
                 and existing.is_alive() and existing.get_task(resumed_task_id) is not None):
             await self._resume_in_existing_tm(
                 existing, user_reply=user_reply,
-                llm_account=llm_account, llm_model=llm_model,
                 resumed_task_id=resumed_task_id,
             )
             return
@@ -1399,12 +1425,9 @@ class CtxWeftRuntime:
             task_from_projection,
         )
         session = session_from_projection(sess_proj)
-        # 调用方（host /resume）传入当前所选 LLM 时覆盖投影里的原始 model：用户改了 model 后
-        # 续跑须用新 model，而非 SessionCreated 记录的旧 model（投影不随重配更新）。
-        if llm_account is not None:
-            session.llm_provider = llm_account
-        if llm_model is not None:
-            session.llm_model = llm_model
+        # 模型选择不再由续跑覆盖——registry 是唯一住所（`AgentRegistry.load()` 下面
+        # 从 `view.agents` 读回，见批次 B）。`session.llm_provider`/`llm_model` 就是
+        # SessionCreated 记录的原始值，纯展示用途，派发从不读它们。
         all_tasks = [task_from_projection(tp) for tp in view.tasks.values()]
         # 重放出来的 prompt 带的是 **event ref**（事件 payload 的口径），而它下游要被
         # driver ingest 进 memory。两个 ref 命名空间互不相通，故必须在此过桥：
@@ -1655,13 +1678,12 @@ class CtxWeftRuntime:
         tm: "TaskManager",
         *,
         user_reply: "PendingHitl | None",
-        llm_account: str | None,
-        llm_model: str | None,
         resumed_task_id: str,
     ) -> None:
         """把冷 HITL 应答作为消息投递给**存活的 owner TM**，就地重驱——不重建 TM（单 owner 架构）。
 
-        - model = 会话状态：把本轮所选 model 写回 owner 的 session，下次 dispatch 经 run_task seam 生效。
+        - 不碰模型：换模型走 `set_agent_llm`/`set_session_llm`，registry 现读现解，
+          续跑只管把已经存在的选择重新派发出去（批次 B）。
         - 控制令牌随 run 在派发时发放（per-run registry），无需在此重建。
         - wait_for_user 冷应答注入用户回复到 task 层；approval 走 reconcile。
         - 重排被应答的 task 并重新 drain（``_register_and_drain`` 对同一 TM 幂等：重挂回调 + 派发）。
@@ -1669,10 +1691,6 @@ class CtxWeftRuntime:
         session = tm.session
         if session is None:  # 防御：存活 owner 一定注入过 session
             raise RuntimeError("live TaskManager has no session — cannot resume in place")
-        if llm_account is not None:
-            session.llm_provider = llm_account
-        if llm_model is not None:
-            session.llm_model = llm_model
         if user_reply is not None:
             await self._inject_user_reply(user_reply, session, tm)
         tm.resume_task(resumed_task_id)
@@ -1829,10 +1847,10 @@ class CtxWeftRuntime:
             return None                       # 幂等：已终局，不重复续跑
         if resolved.claimed:
             return resolved.to_view()         # 热投递已就地续跑，不得双投
-        await self._resume_after_hitl(resolved, reply.resume_hint)
+        await self._resume_after_hitl(resolved)
         return resolved.to_view()
 
-    async def _resume_after_hitl(self, req: "PendingHitl", hint: "ResumeHint") -> None:
+    async def _resume_after_hitl(self, req: "PendingHitl") -> None:
         """按 **delivery** 分流续跑——不看 form，不看 capability_id（spec §5）。
 
         由 `reply_to_hitl` 调用时，`req` 已经**不可逆地终局**（`registry.resolve()`
@@ -1848,12 +1866,10 @@ class CtxWeftRuntime:
             if isinstance(req.delivery, ToolResultDelivery):
                 await self.recover_session(
                     req.session_id, resumed_task_id=req.task_id,
-                    llm_account=hint.llm_account, llm_model=hint.llm_model,
                 )
             elif isinstance(req.delivery, UserTurnDelivery):
                 await self.recover_session(
                     req.session_id, user_reply=req, resumed_task_id=req.delivery.task_id,
-                    llm_account=hint.llm_account, llm_model=hint.llm_model,
                 )
             # NoResumeDelivery：纯通知 / 取消，无动作。
         except Exception:

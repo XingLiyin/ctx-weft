@@ -11,7 +11,6 @@ from ctx_weft.protocols.hitl import (
     HitlReply,
     HitlRequestView,
     NoResumeDelivery,
-    ResumeHint,
     ToolResultDelivery,
     UserTurnDelivery,
 )
@@ -48,17 +47,6 @@ def test_ask_fields_are_not_shared_between_instances():
 def test_decision_defaults_to_empty_message_and_no_modified_arguments():
     d = HitlDecision(outcome="accepted")
     assert d.message == "" and d.modified_arguments is None
-
-
-def test_reply_carries_resume_hint_separate_from_the_request():
-    r = HitlReply(hitl_id="hit_1", outcome="accepted",
-                  resume_hint=ResumeHint(llm_account="acc", llm_model="m"))
-    assert (r.resume_hint.llm_account, r.resume_hint.llm_model) == ("acc", "m")
-
-
-def test_reply_resume_hint_defaults_to_empty_hint():
-    r = HitlReply(hitl_id="hit_1", outcome="accepted")
-    assert r.resume_hint.llm_account is None and r.resume_hint.llm_model is None
 
 
 def test_view_resolved_is_derived_from_outcome():
