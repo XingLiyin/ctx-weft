@@ -24,6 +24,7 @@
 - **不碰 `origin`**：`Event` today 尚无 `origin` 字段（V2 §4 整节待接线），本计划不引入。
 - **不碰会话状态机**：不新增 `SessionManager` 的任何输入，不动六条会话事件，`SessionStatus` 值域不变。
 - **发射者即所有者**：agent 域的状态事实由 `AgentRegistry` 发。**绝不通过订阅总线来应用状态变更**——in-process bus 在 `emit()` 内同步 drain 且背压下丢事件；binding 是控制流数据，必须「先在内存里改完，再发」。
+- **行号是导航，符号名才是锚。** 本计划最初对着 `aa11802` 写，基线已推进到 `8a14fd4`（task 状态所有权重构落地，**agent 域未被触及**，全部前提已逐条复核成立）。行号已按 `8a14fd4` 刷新，但仍可能漂移——**以符号名 / 函数名定位，行号只作粗略指引**。
 - **回落而非报错**：模板解析不出、agent 未登记等恢复期缺口，一律降级 + WARNING 日志，不抛异常阻断恢复（沿用 `agents_from_projection` docstring 已确立的口径）。
 
 ## 分批上线
@@ -63,11 +64,11 @@
 `Agent` 十五个字段里六个只写不读。先清它们，后面每一步要搬的东西都小一圈。
 
 **Files:**
-- Modify: `src/ctx_weft/core/state/models.py:110-115`（`AgentStatus`）、`:258-285`（`Agent`）
+- Modify: `core/state/models.py`（`AgentStatus`）（`AgentStatus`）、`:264-291`（`Agent`）
 - Modify: `src/ctx_weft/core/state/__init__.py:7,24`（导出）
-- Modify: `src/ctx_weft/core/orchestrator/lifecycle_manager.py:66-79`
-- Modify: `src/ctx_weft/core/runtime.py:193-203`（`_flush_tracking_memory`）、`:2792`（`_default_agent`）、两处 `_flush_tracking_memory(...)` 调用
-- Modify: `src/ctx_weft/core/control/converters.py:81,93`
+- Modify: `src/ctx_weft/core/orchestrator/lifecycle_manager.py:67-80`
+- Modify: `src/ctx_weft/core/runtime.py:189-199`（`_flush_tracking_memory`）、`:2792`（`_default_agent`）、两处 `_flush_tracking_memory(...)` 调用
+- Modify: `src/ctx_weft/core/control/converters.py:75-104`
 - Test: `tests/unit/test_agent_field_domain.py`（新建）
 
 **Interfaces:**
@@ -140,13 +141,13 @@ Expected: FAIL —— `test_agent_field_set_is_pinned` 断言不等（actual 多
 - [ ] **Step 4: 删三个构造器里对应的赋值**
 
 `lifecycle_manager.py` 的 `Agent(...)` 去掉 `template_version=` / `status=` / `bound_capability_ids=`；
-`runtime.py:2792` 的 `_default_agent` 去掉 `template_version=` / `status=`；
-`converters.py:93` 的 `Agent(...)` 去掉 `template_version=` / `status=`，并删掉现在没有用户的 `fallback_template_version` 参数（连同 `agents_from_projection` 的签名与它在 `runtime.py:1479` 的调用实参）。
+`runtime.py:2870` 的 `_default_agent` 去掉 `template_version=` / `status=`；
+`converters.py:93` 的 `Agent(...)` 去掉 `template_version=` / `status=`，并删掉现在没有用户的 `fallback_template_version` 参数（连同 `agents_from_projection` 的签名与它在 `runtime.py:1495` 的调用实参）。
 
 - [ ] **Step 5: 删 `_flush_tracking_memory`**
 
 ```python
-# runtime.py:193-203 —— 整个函数删除
+# runtime.py:189-199 —— 整个函数删除
 # 它遍历 agent.tracking_task_ids（永远为空），把元素加进 fetched_tracking_ids（无人读）。
 # docstring 自己写着：「本函数仅保留 fetched_tracking_ids 记账，签名不变
 # （memory/task_manager 参数暂留待日落）」——日落就在这里。
@@ -183,7 +184,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `src/ctx_weft/core/orchestrator/lifecycle_manager.py`
-- Modify: `src/ctx_weft/core/runtime.py:607`（SM 构造参数）、删 `:923` `:1455` `:1620` `:1736` 四个临时实例、`:887` 附近的 `_release_session`
+- Modify: `src/ctx_weft/core/runtime.py:609`（SM 构造参数）、删 `:925` `:1471` `:1636` `:1752` 四个临时实例、`:887` 附近的 `_release_session`
 - Test: `tests/unit/test_agent_registry_state.py`（新建）
 
 **Interfaces:**
@@ -290,8 +291,8 @@ def release_session(self, session_id: str) -> None:
 
 - [ ] **Step 4: 收成 runtime 级单例**
 
-`runtime.py:607` 已经把一个 LM 传给 SM。把它提成 `self._agent_registry = LifecycleManager(template_lookup=self._template_lookup)`，再传给 SM。
-删除 `:923` / `:1455` / `:1620` / `:1736` 四处 `lm = LifecycleManager(...)`，改用 `self._agent_registry`。
+`runtime.py:609` 已经把一个 LM 传给 SM。把它提成 `self._agent_registry = LifecycleManager(template_lookup=self._template_lookup)`，再传给 SM。
+删除 `:925` / `:1471` / `:1636` / `:1752` 四处 `lm = LifecycleManager(...)`，改用 `self._agent_registry`。
 在 `runtime._release_session(session_id)` 里补一行 `self._agent_registry.release_session(session_id)`。
 
 - [ ] **Step 5: 跑测试**
@@ -318,11 +319,11 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ### Task 3: 拆 `instantiate` / `materialize`
 
-**这是整件事的支点。** `instantiate_agent(existing_agent_id=...)` 同时是「新建」和「按 id 水合」，五个调用点里只有两个是真新建，于是调用方必须自己算 `is_new_agent`（`runtime.py:2643`）——事件因此只能留在调用方。参数消失，歧义随之消失。
+**这是整件事的支点。** `instantiate_agent(existing_agent_id=...)` 同时是「新建」和「按 id 水合」，五个调用点里只有两个是真新建，于是调用方必须自己算 `is_new_agent`（`runtime.py:2713`）——事件因此只能留在调用方。参数消失，歧义随之消失。
 
 **Files:**
 - Modify: `src/ctx_weft/core/orchestrator/lifecycle_manager.py`
-- Modify: `src/ctx_weft/core/runtime.py:2791`（删 `_default_agent`）、`:2646`、`:1622`、`:1738`、`:2743`
+- Modify: `src/ctx_weft/core/runtime.py:2870`（删 `_default_agent`）、`:2646`、`:1622`、`:1738`、`:2743`
 - Modify: `src/ctx_weft/core/orchestrator/session_manager.py:197`
 - Test: `tests/unit/test_agent_registry_materialize.py`（新建）
 
@@ -456,13 +457,13 @@ def materialize(self, agent_id, *, context_limit, reserved_output_tokens) -> Age
 | 位置 | 改成 |
 |---|---|
 | `session_manager.py:197` | `await self.agent_registry.instantiate(...)`（root，无 parent） |
-| `runtime.py:2646`（subagent，`t.assigned_agent_id` 为空） | `await self._registry.instantiate(..., parent_agent_id=t.creator_agent_id)` |
-| `runtime.py:2646`（subagent，`t.assigned_agent_id` 有值） | `self._registry.materialize(t.assigned_agent_id, context_limit=..., reserved_output_tokens=...)` —— **分支由 `t.assigned_agent_id` 是否为空决定，这一步先保留调用方的 `is_new_agent`，Task 4 才删** |
-| `runtime.py:1622`（background observe） | `self._registry.materialize(agent_id, ...)` |
-| `runtime.py:1738`（compact_session） | `self._registry.materialize(target_agent_id, ...)` |
-| `runtime.py:2743`（`case _` 默认分支） | `self._registry.materialize(effective_agent_id(t, root), context_limit=self._session.context_limit, reserved_output_tokens=self._session.reserved_output_tokens)` |
+| `runtime.py:2716`（subagent，`t.assigned_agent_id` 为空） | `await self._registry.instantiate(..., parent_agent_id=t.creator_agent_id)` |
+| `runtime.py:2716`（subagent，`t.assigned_agent_id` 有值） | `self._registry.materialize(t.assigned_agent_id, context_limit=..., reserved_output_tokens=...)` —— **分支由 `t.assigned_agent_id` 是否为空决定，这一步先保留调用方的 `is_new_agent`，Task 4 才删** |
+| `runtime.py:1638`（background observe） | `self._registry.materialize(agent_id, ...)` |
+| `runtime.py:1754`（compact_session） | `self._registry.materialize(target_agent_id, ...)` |
+| `runtime.py:2812`（`case _` 默认分支） | `self._registry.materialize(effective_agent_id(t, root), context_limit=self._session.context_limit, reserved_output_tokens=self._session.reserved_output_tokens)` |
 
-删除 `runtime.py:2791` 的 `_default_agent`。
+删除 `runtime.py:2870` 的 `_default_agent`。
 
 - [ ] **Step 5: 跑测试**
 
@@ -476,7 +477,7 @@ git add -A
 git commit -m "refactor(agent): 拆 instantiate / materialize，去掉 existing_agent_id
 
 一个方法同时是「新建」和「按 id 水合」，五个调用点里只有两个是真新建，
-于是调用方必须自己算 is_new_agent（runtime.py:2643 的注释就是自白）——
+于是调用方必须自己算 is_new_agent（runtime.py:2713 的注释就是自白）——
 而只有算出这一步的人才知道该不该发出身事件。参数消失，歧义随之消失。
 
 三条 Agent 构造路径（LM / _default_agent / agents_from_projection）
@@ -493,7 +494,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `src/ctx_weft/core/orchestrator/lifecycle_manager.py`（加 `event_bus` 字段与三处 emit）
-- Modify: `src/ctx_weft/core/runtime.py:2643`（删 `is_new_agent`）、`:2651-2675`（删 `except SpawnDepthExceeded` 块）、`:2676-2720`（删两处 emit）
+- Modify: `src/ctx_weft/core/runtime.py:2713`（删 `is_new_agent`）、`:2651-2675`（删 `except SpawnDepthExceeded` 块）、`:2676-2720`（删两处 emit）
 - Modify: `src/ctx_weft/core/orchestrator/session_manager.py:233-236`（删 emit）
 - Test: `tests/unit/test_agent_registry_events.py`（新建）
 
@@ -501,7 +502,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: Task 3 的 `instantiate`。
 - Produces: `instantiate` 现在收 `task_id: str | None = None`（`AgentSpawned` / `SpawnRejected` 的 envelope 需要它），并在内部按下列顺序发事件。
 
-**因果顺序必须保持**（`runtime.py:2681-2685` 的注释）：`AgentSpawned` 先、`AgentInstantiated` 后。前者的主语是**父 agent 的一次 spawn 动作**（与 `SpawnRejected` 配对，构成对每次 spawn 尝试的完整审计），后者的主语是这个 agent 自己的出身。root agent 没有 spawn 动作 → 由 `parent_agent_id is None` 决定只发后者，**不需要调用方传标志**。
+**因果顺序必须保持**（`runtime.py:2750-2757` 的注释）：`AgentSpawned` 先、`AgentInstantiated` 后。前者的主语是**父 agent 的一次 spawn 动作**（与 `SpawnRejected` 配对，构成对每次 spawn 尝试的完整审计），后者的主语是这个 agent 自己的出身。root agent 没有 spawn 动作 → 由 `parent_agent_id is None` 决定只发后者，**不需要调用方传标志**。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -609,7 +610,7 @@ Expected: FAIL —— `LifecycleManager.__init__() got an unexpected keyword arg
 
 加 `event_bus: EventBus` 字段。`instantiate` 内部：深度检查失败 → emit `SPAWN_REJECTED`（envelope `agent_id=parent_agent_id`，payload `{"reason": "depth_limit", "fallback_to_inline": False, "attempted_subtask_id": task_id}`）后抛 `SpawnDepthExceeded`；成功且 `parent_agent_id is not None` → emit `AGENT_SPAWNED`（payload `{"parent_agent_id": parent_agent_id, "subtask_id": task_id}`）；然后无条件 emit `AGENT_INSTANTIATED`（payload `{"template_id": tmpl.id, "template_version": tmpl.version}`）。
 
-**payload 与 envelope 逐字段照抄今天 `runtime.py:2656-2720` 与 `session_manager.py:233-236` 的形状**——本 Task 只换发射者，不改内容。
+**payload 与 envelope 逐字段照抄今天 `runtime.py:2726-2790` 与 `session_manager.py:233-236` 的形状**——本 Task 只换发射者，不改内容。
 
 - [ ] **Step 4: 删调用方的事件与判定**
 
@@ -659,7 +660,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `src/ctx_weft/core/orchestrator/lifecycle_manager.py`
-- Modify: `src/ctx_weft/core/runtime.py:1479`、删 `:1322` `:2607` `:2620` 的 `pre_resolved_agents` / `_resolved_agents`、`:2641` 的父查找
+- Modify: `src/ctx_weft/core/runtime.py:1495`、删 `:1338` `:2685` `:2698` 的 `pre_resolved_agents` / `_resolved_agents`、`:2711` 的父查找
 - Delete: `src/ctx_weft/core/control/converters.py` 的 `agents_from_projection`
 - Test: `tests/unit/test_agents_from_projection.py` → 改写为 `tests/unit/test_agent_registry_load.py`
 
@@ -770,9 +771,9 @@ Expected: FAIL —— `AttributeError: ... has no attribute 'load'`。
 
 - [ ] **Step 4: 换终点，删缓存**
 
-`runtime.py:1479`：`pre_resolved = agents_from_projection(...)` → `await self._agent_registry.load(view.agents, session_id=session_id, tenant_id=sess_proj.tenant_id, fallback_template_id=template_id)`。
-删 `_run_session_tasks` / `TaskRunner` 的 `pre_resolved_agents` 参数（`:1322` `:2607`）与 `self._resolved_agents`（`:2620` `:2735` `:2748`）。
-`:2641` 的父查找 `self._resolved_agents.get(t.creator_agent_id)` → 直接把 `t.creator_agent_id` 作为 `parent_agent_id` 传给 `instantiate`（Task 3 已把签名改成收 id）。
+`runtime.py:1495`：`pre_resolved = agents_from_projection(...)` → `await self._agent_registry.load(view.agents, session_id=session_id, tenant_id=sess_proj.tenant_id, fallback_template_id=template_id)`。
+删 `_run_session_tasks` / `TaskRunner` 的 `pre_resolved_agents` 参数（`:1322` `:2607`）与 `self._resolved_agents`（`:2698` `:2804` `:2817`）。
+`:2711` 的父查找 `self._resolved_agents.get(t.creator_agent_id)` → 直接把 `t.creator_agent_id` 作为 `parent_agent_id` 传给 `instantiate`（Task 3 已把签名改成收 id）。
 删 `converters.py` 的 `agents_from_projection` 与 `runtime.py:1403` 的 import。
 `git rm tests/unit/test_agents_from_projection.py`。
 
@@ -861,7 +862,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Modify: `src/ctx_weft/core/orchestrator/agent_registry.py`
 - Modify: `src/ctx_weft/core/loop/llm_gateway.py:78-96`
 - Modify: `src/ctx_weft/core/loop/state.py`（`LoopState` 加 `resolved_model`）
-- Delete: `src/ctx_weft/core/runtime.py:759-781`（`_sync_session_llm_window`）+ 两处调用、`:2589-2594`（回填）
+- Delete: `src/ctx_weft/core/runtime.py:762-784`（`_sync_session_llm_window`）+ 两处调用、`:2589-2594`（回填）
 - Test: `tests/unit/test_model_resolution.py`（新建）
 
 **Interfaces:**
@@ -898,9 +899,9 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 | **client** | 解析出的 `LLMClient` | 不存，派发时现解 |
 | **身份** | `(client.account, client.model)` | 不存，进 LLM 事件 |
 
-> **回填必须删。** `runtime.py:2589-2594` 把「身份」写回「选择」，它的注释自陈理由是「事件层 `resolve_llm_identity` 以 session 为真值，空则误报 `"mock"`」——为了修一个读错对象的问题去写另一个对象。副作用是**账号默认被冻结**：`("", "")` 的含义是「跟随账号默认」，回填把它钉成具体模型名，此后 host 改账号默认对这个进程里的会话不再生效。
+> **回填必须删。** `runtime.py:2625-2630` 把「身份」写回「选择」，它的注释自陈理由是「事件层 `resolve_llm_identity` 以 session 为真值，空则误报 `"mock"`」——为了修一个读错对象的问题去写另一个对象。副作用是**账号默认被冻结**：`("", "")` 的含义是「跟随账号默认」，回填把它钉成具体模型名，此后 host 改账号默认对这个进程里的会话不再生效。
 
-> **Registry 不缓存 client。** 缓存客户端是 `LLMClientResolver` 的职责；Registry 再存一份就有第二个缓存和它自己的失效问题（host 换了账号凭据 → 陈旧 client 继续被用）。`get_client` 是纯查表（`runtime.py:911` 注释），每次派发一次，与今天开销相同。
+> **Registry 不缓存 client。** 缓存客户端是 `LLMClientResolver` 的职责；Registry 再存一份就有第二个缓存和它自己的失效问题（host 换了账号凭据 → 陈旧 client 继续被用）。`get_client` 是纯查表（`runtime.py:913` 注释），每次派发一次，与今天开销相同。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1087,7 +1088,7 @@ git add -A
 git commit -m "feat(agent): LLM 的真相源从 session 移到 agent record
 
 三样东西此前挤成一样：选择（可空，= 跟随账号默认）、解析出的 client、
-实际身份。runtime.py:2589 把身份回填进选择，唯一目的是让事件层报得出
+实际身份。runtime.py:2625 把身份回填进选择，唯一目的是让事件层报得出
 模型名——为了修一个读错对象的问题去写另一个对象，副作用是账号默认被冻结。
 
 现在：choice 住在 _AgentRecord.llm，client 由注入的 ModelResolver 现解、
@@ -1108,7 +1109,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `src/ctx_weft/protocols/events.py`（新增 `AGENT_LLM_CHANGED`）
 - Modify: `src/ctx_weft/core/control/types.py:70-80`（`AgentView` 加两个字段）
-- Modify: `src/ctx_weft/core/control/reducers.py:471-478`（`AGENT_INSTANTIATED` 分支）+ 新增 `AGENT_LLM_CHANGED` 分支
+- Modify: `src/ctx_weft/core/control/reducers.py:474-481`（`AGENT_INSTANTIATED` 分支）+ 新增 `AGENT_LLM_CHANGED` 分支
 - Modify: `src/ctx_weft/core/orchestrator/agent_registry.py`（`AgentInstantiated` payload 加字段、`load` 读新字段）
 - Test: `tests/unit/test_agent_llm_replay.py`（新建）
 
@@ -1126,7 +1127,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 # tests/unit/test_agent_llm_replay.py
 """agent 的模型选择跨重启存活——这是 D1「切换在重放里不存在」的修复。
 
-D1：SessionResumed 的 payload 带 llm_model，但 reducers.py:402-409 那个
+D1：SessionResumed 的 payload 带 llm_model，但 reducers.py:405-412 那个
 分支不读它；全仓唯一写 SessionView.llm_model 的地方是 SessionCreated。
 于是任何一次切换都不进投影，recover_session 每次把会话拉回创建时的模型。
 """
@@ -1237,7 +1238,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `src/ctx_weft/core/orchestrator/agent_registry.py`
 - Modify: `src/ctx_weft/core/runtime.py`（新增两个转发方法；删续跑路径的 llm 参数）
-- Modify: `src/ctx_weft/protocols/hitl.py:110-128`（删 `ResumeHint` 与 `HitlReply.resume_hint`）
+- Modify: `src/ctx_weft/protocols/hitl.py:112-128`（删 `ResumeHint` 与 `HitlReply.resume_hint`）
 - Modify: `src/ctx_weft/protocols/__init__.py:76,176`
 - Test: `tests/unit/test_set_llm_commands.py`（新建）
 
@@ -1261,10 +1262,10 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 | 保留 | 删 |
 |---|---|
-| `RunParams` / `RunParams.create`（`:388,404`） | `recover_session` + 两个内部转发（`:1318,1341,1365`） |
-| `start_session` / `run_session`（`:900`） | `_resume_in_existing_tm`（`:1658`） |
-| `_resolve_llm`（`:628`）→ 注入的 `ModelResolver` | `_execute_task`（`:2574`） |
-| | `TaskRunner._llm_account` / `_llm_model`（`:2638`） |
+| `RunParams` / `RunParams.create`（`:389,405`） | `recover_session` + 两个内部转发（`:1356,1380,1404`） |
+| `start_session` / `run_session`（`:901`） | `_resume_in_existing_tm`（`:1674`） |
+| `_resolve_llm`（`:628`）→ 注入的 `ModelResolver` | `_execute_task`（`:2610`） |
+| | `TaskRunner._llm_account` / `_llm_model`（`:2704`） |
 | | `HitlReply.resume_hint` + `ResumeHint` 类型 |
 
 - [ ] **Step 1: 写失败测试**
@@ -1464,21 +1465,21 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 两个缺陷同源：**「解除阻塞」和「开始执行」是两件事，今天挤在一起。**
 
-- **D4**：`TaskResumed` 全仓只有一个发射点（`task_manager.py:1135`，子任务全终态时父解挂）。HITL 唤醒走的 `resume_task()` 直接 `t.status = "PENDING"`，`_inject_user_reply` 也直接改 `target.status`——两处都不发事件，重放之后这些 task 还停在 `AWAITING_HUMAN`。
-- **D5**：`ACTIVE` 的正主是 `TaskStarted`（`task_manager.py:449`，TM 派发时发并回填 `assigned_agent_id`）。但 `_try_resume_parent` 在**入队之前**就把父任务置成 `ACTIVE`，reducer 的 `TaskResumed → ACTIVE` 是在镜像这个抢跑。
+- **D4**：`TaskResumed` 全仓只有一个发射点（`task_manager.py:1227`，子任务全终态时父解挂）。HITL 唤醒走的 `resume_task()` 直接 `t.status = "PENDING"`，`_inject_user_reply` 也直接改 `target.status`——两处都不发事件，重放之后这些 task 还停在 `AWAITING_HUMAN`。
+- **D5**：`ACTIVE` 的正主是 `TaskStarted`（`task_manager.py:~449（TM 派发时发 TASK_STARTED）`，TM 派发时发并回填 `assigned_agent_id`）。但 `_try_resume_parent` 在**入队之前**就把父任务置成 `ACTIVE`，reducer 的 `TaskResumed → ACTIVE` 是在镜像这个抢跑。
 
 **Files:**
 - Modify: `src/ctx_weft/protocols/events.py`（新增 `TASK_HUMAN_RESOLVED`）
-- Modify: `src/ctx_weft/core/control/reducers.py:56`（`TASK_RESUMED` 映射）+ 新增 `TASK_HUMAN_RESOLVED` 分支
-- Modify: `src/ctx_weft/core/orchestrator/task_manager.py:1162-1180`（`resume_task`）、`:1125`（`_try_resume_parent`）
-- Modify: `src/ctx_weft/core/runtime.py:1890-1895`（`_inject_user_reply`）
+- Modify: `src/ctx_weft/core/control/reducers.py:59`（`TASK_RESUMED` 映射）+ 新增 `TASK_HUMAN_RESOLVED` 分支
+- Modify: `src/ctx_weft/core/orchestrator/task_manager.py:1254-1272`（`resume_task`）、`:1125`（`_try_resume_parent`）
+- Modify: `src/ctx_weft/core/runtime.py:1905-1910`（`_inject_user_reply`）
 - Test: `tests/unit/test_task_unblock_events.py`（新建）
 
 **Interfaces:**
 - Produces: `EventType.TASK_HUMAN_RESOLVED = "TaskHumanResolved"`（**S 档**，payload `{hitl_id}`，→ `PENDING`）。
   `resume_task(task_id, *, hitl_id: str)` 加一个必填关键字参数。
 
-> **为什么不复用 `TaskRequeued`**——不是因为状态效果不同。两者都是 → `PENDING` 并清旧产出（`_inject_user_reply` 今天做的正是这件事，`runtime.py:1890` 的注释就写着「清旧进展、置 PENDING」）。理由是 `TaskRequeued` **已经背着两义**，各自靠 payload 区分：`{outcome:"retry", retry_count}`（observer 判重试）与 `{reason, user_prompt}`（reopen 重做）。塞进第三义，消费方就得读 payload 才能分辨「重试」「重做」「人答了」——这正是 V2 花一次重构把 `TaskSuspended` 的三义拆成三个类型时反对的东西。**判据是类型，不是 payload。**
+> **为什么不复用 `TaskRequeued`**——不是因为状态效果不同。两者都是 → `PENDING` 并清旧产出（`_inject_user_reply` 今天做的正是这件事，`runtime.py:1905` 的注释就写着「清旧进展、置 PENDING」）。理由是 `TaskRequeued` **已经背着两义**，各自靠 payload 区分：`{outcome:"retry", retry_count}`（observer 判重试）与 `{reason, user_prompt}`（reopen 重做）。塞进第三义，消费方就得读 payload 才能分辨「重试」「重做」「人答了」——这正是 V2 花一次重构把 `TaskSuspended` 的三义拆成三个类型时反对的东西。**判据是类型，不是 payload。**
 > 第二个理由是配对：`TaskAwaitingHuman{hitl_id}` 需要一个带同样 `hitl_id` 的解除事件，这段被挡住的区间才括得起来、才查得出「有 Awaiting 无 Resolved」。
 
 - [ ] **Step 1: 写失败测试**
@@ -1560,7 +1561,7 @@ Expected: FAIL —— `AttributeError: ... has no attribute 'TASK_HUMAN_RESOLVED
 - [ ] **Step 3: 加事件与映射**
 
 `events.py`：`TASK_HUMAN_RESOLVED = "TaskHumanResolved"  # payload: {hitl_id}`。
-`reducers.py:56`：`EventType.TASK_RESUMED: "ACTIVE"` → `"PENDING"`；`TASK_STATUS_BY_EVENT` 加 `EventType.TASK_HUMAN_RESOLVED: "PENDING"`。
+`reducers.py:59`：`EventType.TASK_RESUMED: "ACTIVE"` → `"PENDING"`；`TASK_STATUS_BY_EVENT` 加 `EventType.TASK_HUMAN_RESOLVED: "PENDING"`。
 把 `TASK_HUMAN_RESOLVED` 加进 `STATE_EVENT_TYPES`。
 
 - [ ] **Step 4: 补发射点，去掉抢跑**
