@@ -12,7 +12,7 @@
 > `src/ctx_weft/core/control/reducers.py`（S 档的状态含义）。
 > 决策依据与迁移工序见 `docs/events-v2-taxonomy-change-record.md`。
 
-**总量：56 个在用 + 9 个只读存量（L 档）。**
+**总量：58 个在用 + 9 个只读存量（L 档）。**
 
 ---
 
@@ -47,7 +47,7 @@
 
 | 档 | 判据 | 可改动程度 |
 |---|---|---|
-| **S** · 28 个 | 有状态消费者（reducer / host 投影）折叠它 | 语义冻结；改名须走别名表；payload 只可**加**字段 |
+| **S** · 30 个 | 有状态消费者（reducer / host 投影）折叠它 | 语义冻结；改名须走别名表；payload 只可**加**字段 |
 | **O** · 28 个 | 已发射、无状态消费者，纯观测/展示 | 可重命名 / 合并 / 删除，与 host SSE 同步即可 |
 | **L** · 9 个 | 曾发射、现已停发、重放仍须认识 | **只读**。不得再发射；删除须过退役闸门（§5） |
 | X · 0 个 | 从未发射 | V2 已清空——定义即必须发射 |
@@ -58,7 +58,7 @@
 
 ---
 
-## 2. S 档 · 28 个（承载状态）
+## 2. S 档 · 30 个（承载状态）
 
 ### 2.1 Session · 6
 
@@ -237,7 +237,7 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 
 > `step_name` 与新增的 `origin` 语义重复，但 reducer 在读它，**保留不动**。
 
-### 2.3 Task · 11
+### 2.3 Task · 12
 
 | 事件 | 存量名 | payload | 含义 · 状态效果 |
 |---|---|---|---|
@@ -246,7 +246,8 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 | `TaskSuspended` | | `summary` `spawn_titles` | **只剩「等子任务完成」这一个语义**。→ `SUSPENDED`（非终态） |
 | `TaskAwaitingHuman` | | `hitl_id` | 这个 task 被 HITL 挂起、需要人来解决。→ `AWAITING_HUMAN` |
 | `TaskInterrupted` | | `reason` `error_code` `error_message` `retry_count` | 这个 task 停在 `INTERRUPTED`，等 `/resume`。→ `INTERRUPTED` |
-| `TaskResumed` | | `{}` | 阻塞的子任务全部终态，父任务解除挂起 → `ACTIVE` |
+| `TaskResumed` | | `{}` | 阻塞的子任务全部终态，父任务解除挂起 → `PENDING` |
+| `TaskHumanResolved` | | `hitl_id` | 挡住这个 task 的那个 HITL 有了结果，与 `TaskAwaitingHuman{hitl_id}` 配对，同一个 `hitl_id` 括起被挡住的区间 → `PENDING` |
 | `TaskFinished` | | `outcome="success"` `summary` `outputs` | → `FINISHED`，并把会话的 `failure_counter` 清零 |
 | `TaskFailed` | | `error_code` `error_message` `retry_count` | → `FAILED`，`failure_counter += 1`。`error_code=TASK_FAILED_BY_THRESHOLD` 是熔断的聚合结果，**不计数** |
 | `TaskCanceled` | | `reason` | → `CANCELED` |
@@ -320,11 +321,12 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 > **它也不再写 task 状态**：已从 `TASK_STATUS_BY_EVENT` 移出，那份工作归
 > `TaskInterrupted`。理由见 §2.3——run 死了不等于 task 停在 `INTERRUPTED`。
 
-### 2.5 Agent · 1
+### 2.5 Agent · 2
 
 | 事件 | payload | 含义 · 状态效果 |
 |---|---|---|
-| `AgentInstantiated` | `template_id` `template_version` | **事件流里唯一记录「该 agent 用哪个模板」的地方**——树形结构推算不出模板，而授权按模板做策略。冷 resume 拿不到它，子 agent 就会顶着 root 的模板身份 |
+| `AgentInstantiated` | `template_id` `template_version` `llm_account` `llm_model` | **事件流里唯一记录「该 agent 用哪个模板」的地方**——树形结构推算不出模板，而授权按模板做策略。冷 resume 拿不到它，子 agent 就会顶着 root 的模板身份 |
+| `AgentLlmChanged` | `llm_account` `llm_model` `reason` | 换模型：写 `AgentView` 的 `llm_account` / `llm_model` 两个字段，不碰任何 task / session 状态 |
 
 ### 2.6 Context · 1
 

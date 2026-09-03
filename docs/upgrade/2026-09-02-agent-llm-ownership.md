@@ -106,6 +106,43 @@ n = await runtime.set_session_llm(session_id, llm_account="...", llm_model="..."
 
 ---
 
+## 4. 已知缺口
+
+### (a) `TaskAwaitingHuman` / `TaskHumanResolved` 目前不是严格 1:1 配对
+
+第 1 节说的是配对关系本身；这里说的是**它现在还没做到**。有两处会漏发解除事件：
+
+- **恢复路径**上（`recover_session` 直接调 `_inject_user_reply`，不像
+  `_resume_in_existing_tm` 那样随后还会跑一次 `resume_task`）：若 task 同时
+  「`SUSPENDED` 且尚有活子任务」又叠加 HITL，`_inject_user_reply` 命中
+  `_suspended_on_live_children` 分支提前返回——状态留给 `_try_resume_parent`
+  日后唤醒，`TaskHumanResolved` 这一条**不发**。
+  存活 owner 路径不受影响：那条路调用 `_inject_user_reply` 之后总会再跑一次
+  `tm.resume_task(...)`，其 `was_blocked` 判据（状态仍是 `AWAITING_HUMAN` /
+  `SUSPENDED`）在这种情况下命中，会补发这一条——没有丢。
+- 「答复已经落了 `HitlResolved`、进程在发出 `TaskHumanResolved` 之前死亡」这个
+  窄窗口：崩溃重建路径目前没有钩子去检测并补发它。
+
+后果：host 若查「有 `TaskAwaitingHuman` 没配到 `TaskHumanResolved`」来判断
+「这个 task 是否还卡着」，上面两种情形会**假阳性**——task 实际已经解除等待，
+只是少了一条记账事件。**本批次不建议 host 直接拿这个配对做告警**；补齐配对是
+后续任务的工作。
+
+### (b) `set_session_llm` 只对 registry **当前持有的** record 生效
+
+第 3 节说它「遍历该 session 下的全部 agent record」，没说清 record 什么时候
+才存在。`AgentRegistry` 是内存态：一个 session 跨进程重启后，若还没有
+`recover_session`（或任何触发 `load()` / `materialize()` 的调用）把它的
+agent record 重新装填进当前进程的 registry，`set_session_llm` 会在一个空
+候选集上遍历——**返回 `0`，不发任何 `AgentLlmChanged`**，不报错也不警告。
+
+host 若在这个时间点调用它，看到的是「返回成功（`0` 不是异常）但什么都没变」。
+要避免这种假成功，调用前先确认该 session 已经过一次 `recover_session`（或其
+等价的装填路径），或者直接检查返回值：`0` 且预期应该 > 0 时，视为「registry
+还没见过这些 agent」，而不是「没有 agent 需要改」。
+
+---
+
 ## 判断你是否受影响
 
 搜这些字符串，命中即需要检查：
