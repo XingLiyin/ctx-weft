@@ -16,6 +16,13 @@ from tests.integration.test_minimal_loop import (
 pytestmark = pytest.mark.asyncio
 
 
+class _Bus:
+    """本文件只测 registry 的状态语义，不关心事件——显式哨兵替身，不靠默认值。"""
+
+    async def emit(self, ev) -> None:
+        return None
+
+
 def _lm() -> LifecycleManager:
     from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
     from ctx_weft.core.runtime import ProviderRegistry
@@ -23,7 +30,7 @@ def _lm() -> LifecycleManager:
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    return LifecycleManager(template_lookup=TemplateLookup(providers=providers))
+    return LifecycleManager(template_lookup=TemplateLookup(providers=providers), event_bus=_Bus())
 
 
 async def test_instantiate_registers_a_record():

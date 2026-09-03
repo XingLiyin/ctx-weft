@@ -35,14 +35,15 @@ class SpawnDepthExceeded(CtxWeftError):
     pass
 
 
-class _NullEventBus:
-    """event_bus 的零参数默认值：existing 直接 new LifecycleManager 的测试/工具代码
-    （不关心事件、构造时不给 event_bus）保持零事件的旧行为，而不是被迫全部改造。
-    生产路径（runtime.py）总是显式传入真正的 EventBus。
-    """
+class DuplicateAgentId(CtxWeftError):
+    """instantiate(agent_id=...) 撞上已登记的 id——编程错误，不是「水合」。
 
-    async def emit(self, ev) -> None:
-        return None
+    这个参数的含义是「这个*新* agent 的 id」（今天只有 SessionManager.create_session
+    的 root 分支在用：它得先铸好 id 才能把 root_agent_id 塞进 SESSION_CREATED
+    payload，而 SESSION_CREATED 必须先于 AgentInstantiated——见该处调用注释）。
+    传一个已存在的 id 不是「可能是水合」的旧 existing_agent_id 语义（那个歧义已被
+    Task 3 消灭，水合走 materialize()）——撞上就是调用方算错了 id，直接抛错。
+    """
 
 
 @dataclass
@@ -74,7 +75,7 @@ class LifecycleManager:
     """
 
     template_lookup: "TemplateLookup"
-    event_bus: EventBus = field(default_factory=_NullEventBus)
+    event_bus: EventBus
     _agents: dict[str, _AgentRecord] = field(default_factory=dict)
     _sessions: dict[str, _SessionDefaults] = field(default_factory=dict)
 
@@ -105,9 +106,10 @@ class LifecycleManager:
         tenant_id: str,
         parent_agent_id: str | None = None,
         task_id: str | None = None,
+        agent_id: str | None = None,
         ctx: ProviderContext | None = None,
     ) -> tuple[Agent, AgentTemplate]:
-        """真新建：解析 template，生成新 id，登记 record，发出身事件。
+        """真新建：解析 template，生成新 id（或用调用方预铸的），登记 record，发出身事件。
 
         template_id 须为规范形式 provider:name；裸 id 由 TemplateLookup 抛 TemplateNotFoundError。
         深度超限发 SpawnRejected 并抛 SpawnDepthExceeded。
@@ -117,7 +119,15 @@ class LifecycleManager:
         task_id：AgentSpawned / SpawnRejected 的 envelope 需要——两条事件的主语都是
         「围绕这次 spawn 尝试」，task_id 标的是被 spawn 出来要跑的那个子任务。root
         agent 实例化没有 task（session 尚未建 root task），传 None 即可。
+
+        agent_id：调用方预先铸好的新 agent id，省略则内部照旧 generate_id("agt")。
+        目前只有 SessionManager.create_session 的 root 分支会传——它得先知道 id
+        才能把 root_agent_id 塞进 SESSION_CREATED payload，而 SESSION_CREATED 必须
+        先于这里发出的 AgentInstantiated（因果序 Session → Agent → Task）。传入的
+        id 若已登记过 → DuplicateAgentId：见该异常 docstring，这不是「水合」。
         """
+        if agent_id is not None and agent_id in self._agents:
+            raise DuplicateAgentId(f"agent_id {agent_id} already registered")
         resolve_ctx = ctx or ProviderContext(session_id=session_id, tenant_id=tenant_id)
         template: AgentTemplate = await self.template_lookup.get_template(
             template_id, None, ctx=resolve_ctx,
@@ -144,7 +154,7 @@ class LifecycleManager:
                     timestamp=now_utc(),
                     tenant_id=tenant_id,
                     task_id=task_id,
-                    agent_id=parent_agent_id,
+                    agent_id=parent_agent_id or None,
                     payload={
                         "reason": "depth_limit",
                         # 恒 False：spawn 被拒后降级为 inline 执行的能力今天不存在，
@@ -158,7 +168,7 @@ class LifecycleManager:
                     f"(current: {spawn_depth})"
                 )
 
-        agent_id = generate_id("agt")
+        agent_id = agent_id or generate_id("agt")
         self._agents[agent_id] = _AgentRecord(
             session_id=session_id,
             tenant_id=tenant_id,

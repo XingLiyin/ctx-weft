@@ -150,7 +150,7 @@ def _session_manager(bus) -> SessionManager:
     reg = ProviderRegistry()
     reg.register_capability(templates)
     return SessionManager(
-        lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(reg)),
+        lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(reg), event_bus=bus),
         event_bus=bus,
     )
 

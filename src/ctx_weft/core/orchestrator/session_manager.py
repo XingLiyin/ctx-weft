@@ -194,27 +194,38 @@ class SessionManager:
             user_prompt, user_prompt_event_jsonable, "create_session",
         )
 
-        agent, template = await self.lifecycle_manager.instantiate(
-            template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
-        )
+        # 同样是「入口即拒、不落库」：template 解析失败必须在任何 emit 之前抛出，
+        # 不能让 SESSION_CREATED 已经落库、随后才发现 template_id 是坏的。真正的
+        # 登记 + AgentInstantiated 发射交给下面的 instantiate()——这里只探路，
+        # 拿到的 template 对象仅用于 sanity（instantiate 会按同一 template_id 再
+        # 解析一次；provider 侧是幂等读取，不引入副作用）。
+        await self.lifecycle_manager.template_lookup.get_template(template_id, None, ctx=ctx)
+
+        # root agent id 得在 SESSION_CREATED 之前铸出来：事件因果序必须是
+        # Session → Agent → Task（host 侧 agents 表对 sessions.id 有 FK，
+        # AgentInstantiated 投影早于 SESSION_CREATED 会炸），但 SESSION_CREATED
+        # 的 payload 又需要 root_agent_id——所以先铸 id、后建 Session/emit，
+        # 真正的 registry 登记 + AgentInstantiated 发射留给下面的 instantiate()。
+        agent_id = generate_id("agt")
 
         session = Session(
             id=sid,
             user_prompt=user_prompt,
             status="RUNNING",
             tenant_id=tenant_id,
-            root_agent_id=agent.id,
+            root_agent_id=agent_id,
             llm_provider=llm_account or "",
             llm_model=llm_model or "",
             context_limit=context_limit,
             reserved_output_tokens=reserved_output_tokens,
             created_at=now_utc(),
         )
-        logger.info("Session %s created (template=%s, agent=%s)", sid, template_id, agent.id)
+        logger.info("Session %s created (template=%s, agent=%s)", sid, template_id, agent_id)
 
-        # Emit in causal order Session → Agent → Task. TASK_CREATED (from
+        # Emit in causal order Session → Agent → Task. AGENT_INSTANTIATED (from
+        # lifecycle_manager.instantiate, below) and TASK_CREATED (from
         # _make_root_task_manager → push_task) MUST follow SESSION_CREATED: the host
-        # projection inserts the task row with a FK on tasks.session_id → sessions.id,
+        # projection inserts the agent/task row with a FK on session_id → sessions.id,
         # so the session row must be projected first.
         ts = now_utc()
         # 保 ref、不落字节、不拍扁（裁定 2026-08-27）——本事件参与状态重建（reducers
@@ -222,7 +233,7 @@ class SessionManager:
         await self._emit(EventType.SESSION_CREATED, sid, tenant_id, timestamp=ts, payload={
             "template_id": template_id,
             "user_prompt": user_prompt_event_jsonable,
-            "root_agent_id": agent.id,
+            "root_agent_id": agent_id,
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
             "tenant_id": tenant_id,
@@ -230,8 +241,12 @@ class SessionManager:
             "context_limit": context_limit,
             "reserved_output_tokens": reserved_output_tokens,
         })
-        # AgentInstantiated 已由 LifecycleManager.instantiate（上面那次调用）发出——
-        # root/子 agent 现在共用同一条发射路径，此处不再重复发。
+        # 登记 record + 发 AgentInstantiated（root 没有 parent_agent_id，
+        # LifecycleManager.instantiate 内部只发这一条，不发 AgentSpawned）。
+        await self.lifecycle_manager.instantiate(
+            template_id=template_id, session_id=sid, tenant_id=tenant_id,
+            agent_id=agent_id, ctx=ctx,
+        )
         self.register_session(sid, tenant_id=tenant_id)
 
         root_task, task_manager = await self._make_root_task_manager(

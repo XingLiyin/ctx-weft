@@ -19,6 +19,13 @@ pytestmark = pytest.mark.asyncio
 TPL = "agent:tpl_echo"
 
 
+class _Bus:
+    """本文件测的是 instantiate/materialize 的返回值语义，不关心事件。"""
+
+    async def emit(self, ev) -> None:
+        return None
+
+
 def _lm() -> LifecycleManager:
     from ctx_weft.core.runtime import ProviderRegistry
 
@@ -26,7 +33,7 @@ def _lm() -> LifecycleManager:
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    lm = LifecycleManager(template_lookup=TemplateLookup(providers=providers))
+    lm = LifecycleManager(template_lookup=TemplateLookup(providers=providers), event_bus=_Bus())
     lm.register_session("s1", tenant_id="default", fallback_template_id=TPL)
     return lm
 

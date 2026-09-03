@@ -33,7 +33,8 @@ async def _runtime_and_sm():
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]),
                              agent_provider=InlineAgentTemplateProvider())
     sm = SessionManager(
-        lifecycle_manager=LifecycleManager(template_lookup=runtime._template_lookup),
+        lifecycle_manager=LifecycleManager(
+            template_lookup=runtime._template_lookup, event_bus=runtime.event_bus),
         event_bus=runtime.event_bus,
     )
     await runtime.event_store.append(_ev(

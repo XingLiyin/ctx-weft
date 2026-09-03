@@ -60,11 +60,17 @@ async def test_session_created_emitted_before_task_created() -> None:
     _reg = ProviderRegistry()
     _reg.register_capability(resolver)
     sm = SessionManager(
-        lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(_reg)),
+        lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(_reg), event_bus=bus),
         event_bus=bus,
     )
     await sm.create_session(template_id="agent:tpl", user_prompt="你好", context_limit=1000)
 
     assert EventType.SESSION_CREATED in order
+    assert EventType.AGENT_INSTANTIATED in order
     assert EventType.TASK_CREATED in order
-    assert order.index(EventType.SESSION_CREATED) < order.index(EventType.TASK_CREATED)
+    # 完整因果序：Session → Agent → Task（docstring 顶部所述）。
+    assert (
+        order.index(EventType.SESSION_CREATED)
+        < order.index(EventType.AGENT_INSTANTIATED)
+        < order.index(EventType.TASK_CREATED)
+    )
