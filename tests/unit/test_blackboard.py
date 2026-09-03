@@ -148,7 +148,7 @@ async def test_list_subscriptions_none_returns_all() -> None:
 
 def _request_for(task_id: str, m: InMemoryMemoryProvider) -> tuple[ContextRequest, AssemblerDeps]:
     task = Task(id=task_id, session_id="s1", status="ACTIVE")
-    agent = Agent(id="a", session_id="s1", template_id="t", template_version="1", status="IDLE")
+    agent = Agent(id="a", session_id="s1", template_id="t")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id=task_id, agent_id="a"),

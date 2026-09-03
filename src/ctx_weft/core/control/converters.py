@@ -78,7 +78,6 @@ def agents_from_projection(
     session_id: str,
     tenant_id: str,
     fallback_template_id: str,
-    fallback_template_version: str,
 ) -> dict[str, Agent]:
     """从投影重建 agent 实例（冷 resume 的 pre_resolved 种子）。
 
@@ -94,8 +93,6 @@ def agents_from_projection(
             id=av.id,
             session_id=session_id,
             template_id=av.template_id or fallback_template_id,
-            template_version=fallback_template_version,
-            status="IDLE",
             tenant_id=tenant_id,
             spawn_depth=av.spawn_depth,
             parent_agent_id=av.parent_agent_id,

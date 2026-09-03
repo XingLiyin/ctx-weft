@@ -45,9 +45,6 @@ class LifecycleManager:
         """解析 template，创建 Agent 对象。
 
         template_id 须为规范形式 provider:name；裸 id 由 TemplateLookup 抛 TemplateNotFoundError。
-
-        bound_capability_ids 留空：PrepareStep 每轮解析后写入 CapabilityCache，
-        agent.bound_capability_ids 仅作元数据记录，不驱动 capability 解析。
         """
         resolve_ctx = ctx or ProviderContext(session_id=session_id, tenant_id=tenant_id)
         template: AgentTemplate = await self.template_lookup.get_template(
@@ -67,12 +64,9 @@ class LifecycleManager:
             id=existing_agent_id or generate_id("agt"),
             session_id=session_id,
             template_id=template.id,
-            template_version=template.version,
-            status="IDLE",
             tenant_id=tenant_id,
             parent_agent_id=parent_agent.id if parent_agent else None,
             spawn_depth=spawn_depth,
-            bound_capability_ids=[ref.capability_id for ref in template.capability_refs if ref.mode != "forbidden"],
             memory_config=template.memory_config,
             loop_config=template.loop_config,
             created_at=now_utc(),

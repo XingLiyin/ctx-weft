@@ -29,7 +29,7 @@ def _views() -> dict[str, AgentView]:
 def test_subagent_keeps_its_own_template() -> None:
     agents = agents_from_projection(
         _views(), session_id="s1", tenant_id="default",
-        fallback_template_id=ROOT_TMPL, fallback_template_version="1",
+        fallback_template_id=ROOT_TMPL,
     )
 
     assert agents[SUB].template_id == SUB_TMPL
@@ -39,7 +39,7 @@ def test_missing_template_falls_back_to_session_template() -> None:
     """存量数据不得报错，行为与改动前逐字一致（回落 session 模板）。"""
     agents = agents_from_projection(
         _views(), session_id="s1", tenant_id="default",
-        fallback_template_id=ROOT_TMPL, fallback_template_version="1",
+        fallback_template_id=ROOT_TMPL,
     )
 
     assert agents[LEGACY].template_id == ROOT_TMPL
@@ -48,11 +48,10 @@ def test_missing_template_falls_back_to_session_template() -> None:
 def test_tree_fields_and_identity_preserved() -> None:
     agents = agents_from_projection(
         _views(), session_id="s1", tenant_id="t9",
-        fallback_template_id=ROOT_TMPL, fallback_template_version="1",
+        fallback_template_id=ROOT_TMPL,
     )
 
     sub = agents[SUB]
     assert (sub.id, sub.session_id, sub.tenant_id) == (SUB, "s1", "t9")
     assert (sub.spawn_depth, sub.parent_agent_id) == (1, ROOT)
-    assert sub.status == "IDLE"
     assert set(agents) == {ROOT, SUB, LEGACY}

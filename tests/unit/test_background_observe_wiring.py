@@ -248,7 +248,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = _make_root_task(status="ACTIVE")
-    agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
+    agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
@@ -308,7 +308,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     child = _make_child_task(status="ACTIVE")
-    agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
+    agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t2", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t2", agent_id="ag1")
 
@@ -363,7 +363,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = dataclasses.replace(_make_root_task(status="ACTIVE"), interaction_mode="interactive")
-    agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
+    agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
@@ -410,7 +410,7 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     child = dataclasses.replace(_make_child_task(status="ACTIVE"), interaction_mode="interactive")
-    agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
+    agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t2", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t2", agent_id="ag1")
 

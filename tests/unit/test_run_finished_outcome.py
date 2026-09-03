@@ -86,7 +86,7 @@ async def _events_from_park() -> list:
     task = Task(id="tsk_park_3", session_id="s_park_3", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_p3")
     agent = Agent(id="agt_p3", session_id="s_park_3", template_id="tpl_test",
-                 template_version="0.1", status="RUNNING", tenant_id="default",
+                 tenant_id="default",
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=LoopConfig())
     scope = MemoryAddress(session_id="s_park_3", task_id="tsk_park_3", agent_id="agt_p3")
@@ -174,7 +174,7 @@ async def _events_from_cancel() -> list:
     task = Task(id="tsk_cancel_3", session_id="s_cancel_3", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_c3")
     agent = Agent(id="agt_c3", session_id="s_cancel_3", template_id="tpl_test",
-                 template_version="0.1", status="RUNNING", tenant_id="default",
+                 tenant_id="default",
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=LoopConfig())
     scope = MemoryAddress(session_id="s_cancel_3", task_id="tsk_cancel_3", agent_id="agt_c3")
@@ -233,7 +233,7 @@ async def _events_from_crash(exc: BaseException) -> tuple[list, BaseException]:
     task = Task(id="tsk_crash_3", session_id="s_crash_3", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_x3")
     agent = Agent(id="agt_x3", session_id="s_crash_3", template_id="tpl_test",
-                 template_version="0.1", status="RUNNING", tenant_id="default",
+                 tenant_id="default",
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=LoopConfig())
     scope = MemoryAddress(session_id="s_crash_3", task_id="tsk_crash_3", agent_id="agt_x3")

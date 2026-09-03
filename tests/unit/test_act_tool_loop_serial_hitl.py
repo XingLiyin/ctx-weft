@@ -37,8 +37,7 @@ class _ParkingGateway:
 def _state() -> LoopState:
     session = Session(id="s1", user_prompt="x", status="RUNNING")
     task = Task(id="t1", session_id="s1", status="ACTIVE")
-    agent = Agent(id="ag1", session_id="s1", template_id="tpl", template_version="1",
-                  status="ACTIVE")
+    agent = Agent(id="ag1", session_id="s1", template_id="tpl")
     return LoopState(
         run_id="run_1", session=session, task=task, agent=agent,
         scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1"),

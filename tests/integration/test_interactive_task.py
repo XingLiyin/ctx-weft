@@ -45,7 +45,7 @@ def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
         title="Greet", description="say hi politely",
         interaction_mode=interaction_mode, settings=NormalTaskSettings(),
     )
-    agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
+    agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     # composer 形态：guidance 已拼在末条 user 尾部（ActStep 不再自行注入）。
     guidance = build_act_guidance(task, None)

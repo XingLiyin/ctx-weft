@@ -139,8 +139,7 @@ def _wire(*, report_verdict: bool) -> tuple[TaskManager, Task, Session, _SpyBus]
     runtime._event_bus = bus       # run 域事实（RunStarted/RunCanceled/RunFinished）也走这条
 
     session = Session(id="s1", user_prompt="hi", status="RUNNING", root_agent_id="agt1")
-    agent = Agent(id="agt1", session_id="s1", template_id="tpl", template_version="1",
-                  status="ACTIVE", loop_guard=LoopGuard())
+    agent = Agent(id="agt1", session_id="s1", template_id="tpl", loop_guard=LoopGuard())
     task = Task(id="A", session_id="s1", status="PENDING")
 
     tm = TaskManager(session_id="s1", event_bus=bus)

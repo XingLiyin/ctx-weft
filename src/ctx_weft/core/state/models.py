@@ -107,14 +107,6 @@ TaskStatus = Literal[
     "CANCELED",
 ]
 
-AgentStatus = Literal[
-    "IDLE",
-    "RUNNING",
-    "WAITING",
-    "FINISHED",
-    "FAILED",
-]
-
 # How the actor's plain-text (no tool call) turn is handled:
 #   "interactive" → pause and wait for a user message (HITL input cold park)
 #   "auto"        → autonomous; the actor must call finish_task to finish
@@ -267,23 +259,15 @@ class Agent:
     id: str
     session_id: str
     template_id: str
-    template_version: str
-    status: AgentStatus
     tenant_id: str = "default"
 
     parent_agent_id: str | None = None
     spawn_depth: int = 0
 
-    bound_capability_ids: list[str] = field(default_factory=list)
-    active_task_id: str | None = None
-
     loop_guard: LoopGuard = field(default_factory=LoopGuard)
 
     memory_config: MemoryConfig = field(default_factory=MemoryConfig)
     loop_config: LoopConfig = field(default_factory=LoopConfig)
-
-    tracking_task_ids: list[str] = field(default_factory=list)
-    fetched_tracking_ids: set[str] = field(default_factory=set)
 
     runtime: dict[str, Any] = field(default_factory=dict)
 

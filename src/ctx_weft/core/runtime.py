@@ -186,24 +186,6 @@ async def _copy_memory_for_inherit(
         )
 
 
-async def _flush_tracking_memory(
-    agent: "Agent",
-    task: "Task",
-    task_manager: "TaskManager",
-    memory: "MemoryProvider",
-    session_id: str,
-    tenant_id: str,
-) -> None:
-    """标记 tracking 任务已拉取（记账保留）。
-
-    v2 P1（2026-07-27）：OBSERVER_SUMMARY 写点已死——该类型不进装配，只污染计数/估算口径；
-    前序任务结果自 Phase 3 起经 memory recall（inherit/recall）与 observe cue 到达。
-    本函数仅保留 fetched_tracking_ids 记账，签名不变（memory/task_manager 参数暂留待日落）。
-    """
-    for tid in agent.tracking_task_ids:
-        agent.fetched_tracking_ids.add(tid)
-
-
 # ── ProviderRegistry ──────────────────────────────────────────────────────────
 
 
@@ -1497,7 +1479,6 @@ class CtxWeftRuntime:
             session_id=session.id,
             tenant_id=session.tenant_id,
             fallback_template_id=template_id,
-            fallback_template_version=template.version,
         )
 
         task_manager.set_runner(self._make_task_runner(
@@ -2786,7 +2767,6 @@ class _SessionTaskRunner:
                         agent_id=agent.id,
                         payload={"template_id": tmpl.id, "template_version": tmpl.version},
                     ))
-                await _flush_tracking_memory(agent, t, self._task_manager, self._memory, sess_id, tenant_id)
                 if s.inherit_memory and not t.user_prompt_in_memory:
                     # Parented sub-tasks copy from their parent; a root turn dispatched
                     # straight to a sub-agent has no parent_task_id, so fall back to the
@@ -2812,7 +2792,6 @@ class _SessionTaskRunner:
                 agent = self._default_agent(
                     effective_agent_id(t, self._session.root_agent_id or ""),
                 )
-                await _flush_tracking_memory(agent, t, self._task_manager, self._memory, sess_id, tenant_id)
                 initial = await self._reconcile_or(t, agent, "prepare")
                 self._resolved_agents[agent.id] = agent
                 return AgentBinding(agent_id=agent.id, agent=agent, template=self._template,
@@ -2872,8 +2851,6 @@ class _SessionTaskRunner:
             id=agent_id or generate_id("agt"),
             session_id=self._session.id,
             template_id=self._template.id,
-            template_version=self._template.version,
-            status="RUNNING",
             tenant_id=self._session.tenant_id,
             loop_guard=LoopGuard(
                 context_limit=self._session.context_limit,

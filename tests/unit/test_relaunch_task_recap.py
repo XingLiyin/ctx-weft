@@ -79,7 +79,7 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
 
     async def _fake_instantiate(self, *, template_id, session_id, tenant_id, existing_agent_id, ctx, parent_agent=None):
         agent = Agent(id=existing_agent_id, session_id=session_id, template_id=template_id,
-                      template_version="v1", status="IDLE", tenant_id=tenant_id)
+                      tenant_id=tenant_id)
         return agent, template
 
     monkeypatch.setattr(LifecycleManager, "instantiate_agent", _fake_instantiate)
@@ -157,7 +157,7 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
 
     async def _fake_instantiate(self, *, template_id, session_id, tenant_id, existing_agent_id, ctx, parent_agent=None):
         agent = Agent(id=existing_agent_id, session_id=session_id, template_id=template_id,
-                      template_version="v1", status="IDLE", tenant_id=tenant_id)
+                      tenant_id=tenant_id)
         return agent, template
 
     monkeypatch.setattr(LifecycleManager, "instantiate_agent", _fake_instantiate)

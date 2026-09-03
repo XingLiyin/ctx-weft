@@ -33,7 +33,7 @@ def _ctx() -> ProviderContext:
 
 def _request_for(task_id: str, m: InMemoryMemoryProvider) -> tuple[ContextRequest, AssemblerDeps]:
     task = Task(id=task_id, session_id="s1", status="ACTIVE")
-    agent = Agent(id="a", session_id="s1", template_id="t", template_version="1", status="IDLE")
+    agent = Agent(id="a", session_id="s1", template_id="t")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id=task_id, agent_id="a"),
@@ -45,7 +45,7 @@ def _request_for(task_id: str, m: InMemoryMemoryProvider) -> tuple[ContextReques
 
 def _bare_request() -> ContextRequest:
     task = Task(id="t", session_id="s1", status="ACTIVE")
-    agent = Agent(id="a", session_id="s1", template_id="t", template_version="1", status="IDLE")
+    agent = Agent(id="a", session_id="s1", template_id="t")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     return ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="t", agent_id="a"),

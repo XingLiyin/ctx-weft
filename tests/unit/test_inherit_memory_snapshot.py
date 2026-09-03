@@ -42,8 +42,7 @@ async def test_inherit_copies_parent_recall_into_child_scope() -> None:
     child_task = Task(id="c1", session_id="s1", status="PENDING", assigned_agent_id="ag2",
                       creator_agent_id="ag1", parent_task_id="p1", title="C",
                       settings=NormalTaskSettings(inherit_memory=True))
-    sub_agent = Agent(id="ag2", session_id="s1", template_id="t", template_version="1",
-                      status="IDLE", parent_agent_id="ag1")
+    sub_agent = Agent(id="ag2", session_id="s1", template_id="t", parent_agent_id="ag1")
 
     await _copy_memory_for_inherit(parent_task, child_task, sub_agent, mem, "s1", "default")
 
@@ -112,8 +111,7 @@ async def test_inherit_preserves_assistant_segment_summary() -> None:
     child_task = Task(id="c1", session_id="s1", status="PENDING", assigned_agent_id="ag2",
                       creator_agent_id="ag1", parent_task_id="p1", title="C",
                       settings=NormalTaskSettings(inherit_memory=True))
-    sub_agent = Agent(id="ag2", session_id="s1", template_id="t", template_version="1",
-                      status="IDLE", parent_agent_id="ag1")
+    sub_agent = Agent(id="ag2", session_id="s1", template_id="t", parent_agent_id="ag1")
 
     await _copy_memory_for_inherit(parent_task, child_task, sub_agent, mem, "s1", "default")
 

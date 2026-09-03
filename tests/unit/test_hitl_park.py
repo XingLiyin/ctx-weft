@@ -77,8 +77,6 @@ async def test_run_loop_catches_park_returns_awaiting_human() -> None:
         id="agt_p1",
         session_id="s_park_1",
         template_id="tpl_test",
-        template_version="0.1",
-        status="RUNNING",
         tenant_id="default",
         loop_guard=LoopGuard(),
         memory_config=MemoryConfig(),

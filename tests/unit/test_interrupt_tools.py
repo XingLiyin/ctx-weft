@@ -77,7 +77,7 @@ def _harness(llm, provider):
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING", token_budget=0)
     task = Task(id="t1", session_id="s1", status="ACTIVE", title="T",
                 interaction_mode="interactive", settings=NormalTaskSettings())
-    agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
+    agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     prompt = AssembledPrompt(system="", messages=[LLMMessage(role="user", content="hi")],
                              tools=[], token_count=1)

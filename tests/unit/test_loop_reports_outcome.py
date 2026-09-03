@@ -119,8 +119,7 @@ async def run_until_suspend(*, titles: list[str]):
     task.user_prompt_in_memory = True  # 跳过 ingest 分支（不是本测试关心的）
     session = Session(id="s1", user_prompt="do it", status="RUNNING",
                       tenant_id="default", root_agent_id="ag2")
-    agent = Agent(id="ag2", session_id="s1", template_id="tpl_test", template_version="0.1",
-                 status="RUNNING", tenant_id="default", loop_guard=LoopGuard(),
+    agent = Agent(id="ag2", session_id="s1", template_id="tpl_test", tenant_id="default", loop_guard=LoopGuard(),
                  memory_config=MemoryConfig(), loop_config=LoopConfig())
     state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope)
     # launch_background_observe 是 fire-and-forget：给它一个真 event_bus，否则它的
@@ -167,7 +166,7 @@ async def run_until_park():
     task = Task(id="tsk_park_2", session_id="s_park_2", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_p2")
     agent = Agent(id="agt_p2", session_id="s_park_2", template_id="tpl_test",
-                 template_version="0.1", status="RUNNING", tenant_id="default",
+                 tenant_id="default",
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=RTLoopConfig())
     scope = MemoryAddress(session_id="s_park_2", task_id="tsk_park_2", agent_id="agt_p2")
@@ -267,7 +266,7 @@ async def run_until_cancel():
     task = Task(id="tsk_cancel_2", session_id="s_cancel_2", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_c2")
     agent = Agent(id="agt_c2", session_id="s_cancel_2", template_id="tpl_test",
-                 template_version="0.1", status="RUNNING", tenant_id="default",
+                 tenant_id="default",
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=RTLoopConfig())
     scope = MemoryAddress(session_id="s_cancel_2", task_id="tsk_cancel_2", agent_id="agt_c2")
@@ -333,7 +332,7 @@ async def run_until_crash(exc: BaseException):
     task = Task(id="tsk_crash_2", session_id="s_crash_2", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_x2")
     agent = Agent(id="agt_x2", session_id="s_crash_2", template_id="tpl_test",
-                 template_version="0.1", status="RUNNING", tenant_id="default",
+                 tenant_id="default",
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=RTLoopConfig())
     scope = MemoryAddress(session_id="s_crash_2", task_id="tsk_crash_2", agent_id="agt_x2")
