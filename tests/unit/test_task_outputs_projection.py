@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.protocols.events import Event, EventType
 
 
 def _ev(t: EventType, payload: dict, *, task_id: str = "tsk_1") -> Event:
