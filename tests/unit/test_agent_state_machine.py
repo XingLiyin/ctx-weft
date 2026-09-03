@@ -38,11 +38,18 @@ def test_pause_resume_round_trip():
 
 
 def test_task_terminal_returns_agent_to_idle_not_terminal():
-    """task 终态 != agent 终态——agent 回 idle 等下一条消息。"""
-    t = next_agent_transition("running", AgentInput.SETTLED, reason="task_finished")
-    assert t.status == "idle"
-    assert t.event_type == "AgentIdle"
-    assert t.status not in TERMINAL_AGENT_STATUSES
+    """task 终态 != agent 终态——agent 回 idle 等下一条消息。
+
+    验证从所有非终态出发，SETTLED 都落到 idle 且不进终态集合。
+    这覆盖三条关键路径，特别是 waiting_human/interrupted 态下的外部收尾。
+    """
+    for src_status in ("running", "waiting_human", "interrupted"):
+        t = next_agent_transition(src_status, AgentInput.SETTLED, reason="task_finished")
+        assert t is not None, f"SETTLED from {src_status} should not be None"
+        assert t.status == "idle", f"SETTLED from {src_status} should go to idle"
+        assert t.event_type == "AgentIdle"
+        assert t.status not in TERMINAL_AGENT_STATUSES
+        assert t.payload["from_status"] == src_status
 
 
 def test_only_cancel_reaches_terminated():
