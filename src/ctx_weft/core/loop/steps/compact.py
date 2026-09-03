@@ -81,7 +81,33 @@ async def summarize_for_compact(
     stream_llm_resilient 自愈，自愈耗尽抛 LLMOutageError → 走 INTERRUPTED。**不再**在
     LLM 失败时静默退化为纯截断（旧的 except Exception 兜底已移除）。
 
-    task-4 复审修复：compact 走的这次 LLM 调用现在也经 gateway 的门禁（origin==
+    task-4 复审修复（第二轮）：``model`` 曾用 ``agent.runtime.get("llm_model", "mock")``
+    ——inline compact 路径下 ``agent.runtime`` 从不会被写入 ``llm_model``（正常任务执行
+    materialize() 出来的 Agent 就是空 runtime），这行代码因此在那条路径下恒回落
+    ``"mock"``。改用同子系统其余调用方（act.py 等）已经在用的 ``resolve_llm_identity``
+    ——真值来自 ``state.resolved_model``，是派发时 ``AgentRegistry.resolve_model`` 解出的
+    那一个，compact 的三条调用路径（inline PrepareStep 触发 / ``_maybe_predispatch_compact``
+    / 独立的 ``compact_session``）用的都是已经带 ``resolved_model`` 的 ``LoopState``（前两者
+    共享 ``_execute_task`` 构造的那份，同一份 state 上 act.py 的 ``resolve_llm_identity``
+    早就在成功调用；后者是 ``runtime.py::compact_session`` 显式 ``resolved_model=rm`` 构造
+    的孤儿 run），故不额外加 try/except 兜底——真出现 None 就该炸，不吞。
+
+    真实调查结论（供风险评估）：这次修复前，实际发给 LLM 服务商的模型**并不是**字面上的
+    "mock"——``providers/llm/anthropic.py``/``openai.py`` 的 ``_build_payload`` 都已有
+    ``model = request.model if request.model and request.model != "mock" else self._model``
+    这行兜底替换（``anthropic.py`` 的 ``model`` 属性文档字符串原话：「实际调用一直用它替换
+    "mock"……事件账面须与之同源」），而 ``self._model``（client 构造时配置的模型）与
+    ``AgentRegistry.resolve_model()`` 在 ``choice.model`` 为空时的回落值（``getattr(client,
+    "model", "")``）同源，与 ``state.resolved_model.model`` 基本一致。也就是说**运行时
+    行为本身不受影响**（真实 adapter 早已在暗中纠正这个 "mock" 哨兵），本次修复修的是
+    「事件 payload 撒谎」而非「调错模型」——`docs/events-v2.md` §3.6 要求 model/llm_account
+    是「实际用的那个」，撒谎的是事件，不是调用（`MockLLMAdapter` 例外：它没有这层兜底，
+    ``last_request.model`` 会原样收到调用方传入的值——`compact.py` 里那处
+    ``agent.runtime={"llm_model": rm.model}`` 桥接就是专给它搭的，见 `runtime.py`
+    ``compact_session``；本次改动后这座桥不再是唯一支撑，`resolve_llm_identity` 本身就
+    正确，桥不拆但也不再是必需）。
+
+    task-4 复审修复（第一轮）：compact 走的这次 LLM 调用现在也经 gateway 的门禁（origin==
     LOOP_COMPACT）自动获得 LLM_REQUEST_STARTED/LLM_PROMPT_SENT/LLM_TOKEN_STREAMED/
     LLM_REASONING_STREAMED；本函数补发收尾的 LLM_RESPONSE_FINISHED——两边必须成对，
     否则 host SSE 看到的是一条永远等不到收尾的挂死请求。payload 字段名/取值方式照抄
@@ -93,9 +119,10 @@ async def summarize_for_compact(
     ``state.origin == EventOrigin.LOOP_COMPACT``），而不是只看 ``bus``——否则本函数万一
     在别的 origin 下被调用（目前实际不会，但别指望调用方永远守规矩），会发一条没有配对
     REQUEST_STARTED 的孤儿 RESPONSE_FINISHED，比不发更糟。``bus is None``（多数单测的
-    ctx 不接总线）时整段事件收发都跳过——`agent.id` / `state.sequence_counter` 在这些
-    最小化 state 上不一定存在，故 request_id 的计算也放在同一个 guard 里，不会在 bus
-    缺失时因缺字段而崩。
+    ctx 不接总线）时事件收发跳过——`state.sequence_counter` 在这些最小化 state 上不一定
+    存在，故 request_id 的计算放在同一个 guard 里，不会在 bus 缺失时因缺字段而崩；
+    ``resolve_llm_identity`` 则不受这个 guard 保护（见上，本就该在 bus 缺失时也正确解析、
+    正确发送）。
     """
     agent = state.agent
     request = ContextRequest(
@@ -111,8 +138,9 @@ async def summarize_for_compact(
     )
     compact_prompt = await ctx.assembler.assemble(request)
 
+    model, llm_account = resolve_llm_identity(state)
     llm_request = LLMRequest(
-        model=agent.runtime.get("llm_model", "mock"),
+        model=model,
         system=compact_prompt.system,
         messages=compact_prompt.messages,
         tools=[],
@@ -138,7 +166,6 @@ async def summarize_for_compact(
             usage = chunk.usage
 
     if should_emit_finished:
-        model, llm_account = resolve_llm_identity(state)
         await bus.emit(make_event(
             state, EventType.LLM_RESPONSE_FINISHED,
             payload={

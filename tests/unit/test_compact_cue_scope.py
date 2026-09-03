@@ -74,9 +74,11 @@ async def test_summarize_for_compact_threads_scope(monkeypatch):
         return
 
     agent = SimpleNamespace(runtime={}, )
+    # resolve_llm_identity 的真值来自 resolved_model（task-4 复审第二轮：summarize_for_compact
+    # 不再读 agent.runtime.get("llm_model")，那个键正常任务执行永远不会被写入）。
     state = SimpleNamespace(
         agent=agent, scope=SimpleNamespace(), task=SimpleNamespace(), session=SimpleNamespace(),
-        extra={})
+        extra={}, resolved_model=SimpleNamespace(model="mock-model", account=""))
     ctx = SimpleNamespace(assembler=_FakeAssembler(), llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
     monkeypatch.setattr(compact_mod, "stream_llm_resilient", _fake_stream)
 

@@ -226,6 +226,35 @@ async def test_gateway_emits_stream_events_for_compact_origin_and_pairs_with_res
 
 
 @pytest.mark.asyncio
+async def test_compact_events_carry_resolved_model_not_mock_sentinel():
+    """task-4 复审第二轮：summarize_for_compact 的 llm_request.model 曾用
+    agent.runtime.get("llm_model", "mock")——inline compact 路径下 agent.runtime 从不会被
+    写入 llm_model，恒回落 "mock"。改用 resolve_llm_identity(state) 后，llm_request.model
+    与 LLM_REQUEST_STARTED/LLM_RESPONSE_FINISHED 里的 model/llm_account 都必须是
+    state.resolved_model 解出的真实值，不是 "mock" 字面量。这里刻意让 agent.runtime 为空
+    （模拟正常任务执行 materialize() 出来的 Agent，没有人给它填过 llm_model），
+    resolved_model 给一个与 "mock" 明显不同的真实模型名，钉住两者不再混用。"""
+    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+
+    bus = _RecordingBus()
+    state = _make_compact_state()
+    state.agent.runtime = {}  # 正常任务执行下 agent.runtime 就是这样——不含 llm_model
+    state.resolved_model = SimpleNamespace(model="claude-real-model", account="acct-real")
+    ctx = _make_compact_ctx(bus)
+
+    await summarize_for_compact(state, ctx, scope="task")
+
+    started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED][0]
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED][0]
+    assert started.payload["model"] == "claude-real-model"
+    assert started.payload["llm_account"] == "acct-real"
+    assert finished.payload["llm_model"] == "claude-real-model"
+    assert finished.payload["llm_account"] == "acct-real"
+    assert "mock" not in started.payload["model"]
+    assert "mock" not in finished.payload["llm_model"]
+
+
+@pytest.mark.asyncio
 async def test_gateway_still_gates_out_observe_origin_and_compact_stays_silent_too():
     """门禁维持不放行 observe/background_observe（Task 5 前的临时脚手架，不在本轮改动范围）；
     summarize_for_compact 万一在这种 origin 下被调用，也不该发孤儿 LLM_RESPONSE_FINISHED。"""
