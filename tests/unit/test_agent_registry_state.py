@@ -28,7 +28,7 @@ def _lm() -> LifecycleManager:
 
 async def test_instantiate_registers_a_record():
     lm = _lm()
-    agent, _tmpl = await lm.instantiate_agent(
+    agent, _tmpl = await lm.instantiate(
         template_id="agent:tpl_echo", session_id="s1", tenant_id="default",
     )
     assert lm.has(agent.id)
@@ -45,9 +45,9 @@ async def test_register_session_is_reentrant():
 
 async def test_release_session_drops_only_that_sessions_agents():
     lm = _lm()
-    a, _ = await lm.instantiate_agent(
+    a, _ = await lm.instantiate(
         template_id="agent:tpl_echo", session_id="s1", tenant_id="default")
-    b, _ = await lm.instantiate_agent(
+    b, _ = await lm.instantiate(
         template_id="agent:tpl_echo", session_id="s2", tenant_id="default")
     lm.release_session("s1")
     assert not lm.has(a.id)

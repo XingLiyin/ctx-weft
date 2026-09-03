@@ -194,7 +194,7 @@ class SessionManager:
             user_prompt, user_prompt_event_jsonable, "create_session",
         )
 
-        agent, template = await self.lifecycle_manager.instantiate_agent(
+        agent, template = await self.lifecycle_manager.instantiate(
             template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
         )
 

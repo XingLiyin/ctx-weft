@@ -77,12 +77,11 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
     tcid = await _seed_finish_pair(memory, session, task, agent_id)
     task.status = "FINISHED"
 
-    async def _fake_instantiate(self, *, template_id, session_id, tenant_id, existing_agent_id, ctx, parent_agent=None):
-        agent = Agent(id=existing_agent_id, session_id=session_id, template_id=template_id,
-                      tenant_id=tenant_id)
-        return agent, template
+    def _fake_materialize(self, agent_id, *, context_limit, reserved_output_tokens):
+        return Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
+                      tenant_id=session.tenant_id)
 
-    monkeypatch.setattr(LifecycleManager, "instantiate_agent", _fake_instantiate)
+    monkeypatch.setattr(LifecycleManager, "materialize", _fake_materialize)
 
     captured = {}
 
@@ -118,10 +117,10 @@ async def test_relaunch_is_best_effort_swallows_errors(minimal_runtime_with_sess
     """任何一步失败：不得抛出，只记日志跳过（best-effort）。"""
     runtime, session, template, task_manager, task, agent_id, memory = minimal_runtime_with_session
 
-    async def _boom(self, *args, **kwargs):
+    def _boom(self, *args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(LifecycleManager, "instantiate_agent", _boom)
+    monkeypatch.setattr(LifecycleManager, "materialize", _boom)
 
     await runtime._relaunch_task_recap(
         session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
@@ -155,12 +154,11 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
     runtime, session, template, task_manager, task, agent_id, memory = minimal_runtime_with_session
     task.status = "SUSPENDED"  # 委派挂起中崩溃的形态
 
-    async def _fake_instantiate(self, *, template_id, session_id, tenant_id, existing_agent_id, ctx, parent_agent=None):
-        agent = Agent(id=existing_agent_id, session_id=session_id, template_id=template_id,
-                      tenant_id=tenant_id)
-        return agent, template
+    def _fake_materialize(self, agent_id, *, context_limit, reserved_output_tokens):
+        return Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
+                      tenant_id=session.tenant_id)
 
-    monkeypatch.setattr(LifecycleManager, "instantiate_agent", _fake_instantiate)
+    monkeypatch.setattr(LifecycleManager, "materialize", _fake_materialize)
 
     registered = []
     monkeypatch.setattr(rt_mod, "register_close_synth",

@@ -115,7 +115,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     _reg = ProviderRegistry()
     _reg.register_capability(resolver)
     lm = LifecycleManager(template_lookup=TemplateLookup(_reg))
-    agent, template = await lm.instantiate_agent(
+    agent, template = await lm.instantiate(
         template_id="agent:tpl_mr", session_id=sid, tenant_id="default", ctx=pctx)
     session = Session(id=sid, user_prompt="do a long task", status="RUNNING",
                       tenant_id="default", root_agent_id=agent.id, llm_provider="",

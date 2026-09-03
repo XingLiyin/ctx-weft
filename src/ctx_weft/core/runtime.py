@@ -910,7 +910,7 @@ class CtxWeftRuntime:
         )
         lm = self._agent_registry
 
-        agent, template = await lm.instantiate_agent(
+        agent, template = await lm.instantiate(
             template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
         )
 
@@ -1456,6 +1456,11 @@ class CtxWeftRuntime:
             raise RuntimeError(f"Session {session_id!r} has no resumable tasks")
 
         lm = self._agent_registry
+        # 跨重启后本进程的 registry 可能是空的：下游经 assemble() 触发的
+        # materialize() 一旦撞见未登记的 agent id，需要这份 session 语境才能
+        # 回落到正确的 fallback_template_id，而不是「""（无模板）」。幂等：
+        # 已登记则不覆盖（同 SessionManager.register_session 口径）。
+        lm.register_session(session.id, tenant_id=session.tenant_id, fallback_template_id=template_id)
         template = await self._template_lookup.get_template(
             template_id, None,
             ctx=ProviderContext(session_id=session.id, tenant_id=session.tenant_id),
@@ -1620,11 +1625,16 @@ class CtxWeftRuntime:
         from ctx_weft.core.loop.steps.background_observe import _CLOSE_BOUNDARIES
         try:
             lm = self._agent_registry
-            pctx0 = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
-            agent, _tmpl = await lm.instantiate_agent(
-                template_id=template_id,
-                session_id=session.id, tenant_id=session.tenant_id,
-                existing_agent_id=agent_id, ctx=pctx0,
+            # 水合，不新建：这是重跑一个已存在 agent 打断的段 recap。register_session
+            # 保证跨重启后 registry 为空时 materialize 的回落有正确的 session 语境
+            # （幂等：session 已登记则不覆盖）。
+            lm.register_session(
+                session.id, tenant_id=session.tenant_id, fallback_template_id=template_id,
+            )
+            agent = lm.materialize(
+                agent_id,
+                context_limit=session.context_limit,
+                reserved_output_tokens=session.reserved_output_tokens,
             )
             memory = self.providers.get_memory()
             scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
@@ -1736,12 +1746,20 @@ class CtxWeftRuntime:
 
             lm = self._agent_registry
             pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
-            agent, template = await lm.instantiate_agent(
-                template_id=proj.template_id,
-                session_id=session.id,
-                tenant_id=session.tenant_id,
-                existing_agent_id=target_agent_id,
-                ctx=pctx,
+            # 水合，不新建：target_agent_id 是已存在 agent。register_session 保证跨
+            # 重启后 registry 为空时 materialize 的回落有正确的 session 语境（幂等）。
+            lm.register_session(
+                session.id, tenant_id=session.tenant_id, fallback_template_id=proj.template_id,
+            )
+            agent = lm.materialize(
+                target_agent_id,
+                context_limit=session.context_limit,
+                reserved_output_tokens=session.reserved_output_tokens,
+            )
+            # materialize 不返回 template（它只读 record，不碰 TemplateLookup）——
+            # state.extra 仍需要它（CompactStep 经 extra["template"] 读），单独取一次。
+            template = await self._template_lookup.get_template(
+                proj.template_id, None, ctx=pctx,
             )
             # 手动 compact_session 是「强制立即压」的一次性操作，不受预算门控（escalating_compact
             # 按 token_estimate vs target_tokens 判断是否需要压）——context_tokens=context_limit
@@ -1753,6 +1771,11 @@ class CtxWeftRuntime:
                     context_tokens=session.context_limit,
                     reserved_output_tokens=session.reserved_output_tokens,
                 ),
+                # 跨重启 registry 为空时 materialize 的回落只给得出默认
+                # memory_config/loop_config；用刚取到的真实 template 覆盖，
+                # 与旧 instantiate_agent(existing_agent_id=...) 每次按 template 现算一致。
+                memory_config=template.memory_config,
+                loop_config=template.loop_config,
                 runtime={"llm_model": session.llm_model or ""},
             )
 
@@ -2692,16 +2715,29 @@ class _SessionTaskRunner:
                     await self._runtime._template_lookup.resolve_qualified(s.subagent_template, ctx)
                     if s.subagent_template else ""
                 ) or self._template_id
-                parent_agent = self._resolved_agents.get(t.creator_agent_id) if t.creator_agent_id else None
                 # 本次是否**真的**新建一个 agent：assigned 已有值时下面只是按同一 id 重新
-                # 水合对象（重派发 / 恢复），那不是一次实例化，不该再发出身事件。
+                # 水合对象（重派发 / 恢复），那不是一次实例化，不该再发出身事件——分支由
+                # t.assigned_agent_id 是否为空决定：真新建走 instantiate，水合走
+                # materialize（后者零事件、只读 record，不会把 spawn_depth 重算成 0）。
                 is_new_agent = not t.assigned_agent_id
                 try:
-                    agent, tmpl = await self._lm.instantiate_agent(
-                        template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
-                        parent_agent=parent_agent, ctx=ctx,
-                        existing_agent_id=t.assigned_agent_id or None,
-                    )
+                    if is_new_agent:
+                        agent, tmpl = await self._lm.instantiate(
+                            template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
+                            parent_agent_id=t.creator_agent_id, ctx=ctx,
+                        )
+                    else:
+                        agent = self._lm.materialize(
+                            t.assigned_agent_id,
+                            context_limit=self._session.context_limit,
+                            reserved_output_tokens=self._session.reserved_output_tokens,
+                        )
+                        # materialize 不返回 template；沿用原行为按 sub_tmpl_id 重新解析
+                        # （与 create 分支同一个来源，agent 出身早已由 AgentInstantiated
+                        # 事件钉住，这里只是要一份可用的 AgentTemplate 对象）。
+                        tmpl = await self._runtime._template_lookup.get_template(
+                            sub_tmpl_id, None, ctx=ctx,
+                        )
                 except SpawnDepthExceeded:
                     # SpawnRejected 是 AgentSpawned 的另一半：被拒的 spawn 根本不会有
                     # agent 诞生，AgentInstantiated 覆盖不到，不发这条则事件流里看不出
@@ -2736,7 +2772,7 @@ class _SessionTaskRunner:
                     # 因果顺序。AgentSpawned 的主语是**父 agent 的一次 spawn 动作**（与
                     # SpawnRejected 配对，构成对每次 spawn 尝试的完整审计）；下面那条的
                     # 主语是这个 agent 自己的出身配置。两者都发在同一决定点上：唯一的
-                    # 权限门（深度检查）在 instantiate_agent 里、派发时才跑，若改在
+                    # 权限门（深度检查）在 LifecycleManager.instantiate 里、派发时才跑，若改在
                     # delegate_task 处发，会出现「先 Spawned、后 Rejected」的矛盾事件对。
                     await self._runtime._event_bus.emit(Event(
                         id=generate_id("evt"),
@@ -2793,8 +2829,10 @@ class _SessionTaskRunner:
                 # 非 subagent 任务在**创建者**的 agent scope 上跑（延续创建者对话），
                 # 而非一律 root——否则 subagent 派生的非 subagent 子会跑进 root scope、丢失
                 # 创建者上下文并污染 root。scope 键与调度串行判定共用 effective_agent_id 单一真相。
-                agent = self._default_agent(
+                agent = self._lm.materialize(
                     effective_agent_id(t, self._session.root_agent_id or ""),
+                    context_limit=self._session.context_limit,
+                    reserved_output_tokens=self._session.reserved_output_tokens,
                 )
                 initial = await self._reconcile_or(t, agent, "prepare")
                 self._resolved_agents[agent.id] = agent
@@ -2849,21 +2887,6 @@ class _SessionTaskRunner:
         return s.run_outcome
 
     # ── helpers（原闭包内嵌函数）───────────────────────────────────────────────
-
-    def _default_agent(self, agent_id: str | None = None) -> Agent:
-        return Agent(
-            id=agent_id or generate_id("agt"),
-            session_id=self._session.id,
-            template_id=self._template.id,
-            tenant_id=self._session.tenant_id,
-            loop_guard=LoopGuard(
-                context_limit=self._session.context_limit,
-                reserved_output_tokens=self._session.reserved_output_tokens,
-            ),
-            memory_config=self._template.memory_config,
-            loop_config=self._template.loop_config,
-            created_at=now_utc(),
-        )
 
     async def _reconcile_or(self, t: "Task", agent: "Agent", base: str) -> str:
         """base initial_step；若该 task 最近 assistant turn 有 dangling tool_call → reconcile。"""
