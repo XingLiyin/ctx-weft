@@ -4,9 +4,21 @@ import pytest
 
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Task
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import (
+    EVENT_TYPES,
+    L_TIER_EVENT_TYPES,
+    EventType,
+)
 
 pytestmark = pytest.mark.asyncio
+
+_NEW_AGENT_TYPES = {
+    EventType.AGENT_RUNNING,
+    EventType.AGENT_IDLE,
+    EventType.AGENT_WAITING_HUMAN,
+    EventType.AGENT_INTERRUPTED,
+    EventType.AGENT_TERMINATED,
+}
 
 
 class _SpyBus:
@@ -58,3 +70,22 @@ async def test_queue_level_event_has_no_agent_id():
     assert drained
     assert drained[0].agent_id is None
     assert drained[0].task_id is None
+
+
+def test_new_agent_types_registered():
+    """新增的 5 个 AGENT_* 状态事件应在 EVENT_TYPES 中注册。"""
+    assert _NEW_AGENT_TYPES <= set(EVENT_TYPES)
+
+
+def test_new_agent_types_are_s_tier():
+    """不变式 2：加一个枚举值就得显式选边。ALM 状态被 reducer 折叠 -> S 档。"""
+    assert not (_NEW_AGENT_TYPES & set(L_TIER_EVENT_TYPES))
+
+
+def test_agent_event_wire_values_are_pascal_case():
+    """验证 agent 状态事件的字符串值为 PascalCase。"""
+    assert EventType.AGENT_RUNNING == "AgentRunning"
+    assert EventType.AGENT_IDLE == "AgentIdle"
+    assert EventType.AGENT_WAITING_HUMAN == "AgentWaitingHuman"
+    assert EventType.AGENT_INTERRUPTED == "AgentInterrupted"
+    assert EventType.AGENT_TERMINATED == "AgentTerminated"
