@@ -195,6 +195,8 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "spawn_depth": a.spawn_depth,
                 "parent_agent_id": a.parent_agent_id,
                 "template_id": a.template_id,
+                "llm_account": a.llm_account,
+                "llm_model": a.llm_model,
             }
             for aid, a in view.agents.items()
         },
@@ -261,6 +263,9 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             parent_agent_id=a.get("parent_agent_id"),
             # 旧快照无该键 → 留空，调用方回落 session 模板（零数据迁移）。
             template_id=a.get("template_id", ""),
+            # 同上：旧快照无模型选择 → 空 ModelChoice，回落账号默认。
+            llm_account=a.get("llm_account", ""),
+            llm_model=a.get("llm_model", ""),
         )
 
     return RunStateView(
