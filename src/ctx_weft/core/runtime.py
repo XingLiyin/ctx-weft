@@ -1750,6 +1750,7 @@ class CtxWeftRuntime:
         if session_id in self._busy_sessions or self._run_tokens.get(session_id):
             raise SessionBusyError(session_id)
         self._busy_sessions.add(session_id)
+        token = CancelToken()
         try:
             view = await rebuild_view(self.event_store, session_id)
             proj = view.sessions.get(session_id)
@@ -2538,18 +2539,12 @@ class CtxWeftRuntime:
             # task 置 INTERRUPTED（非终态，与 HitlPark 同形）→ _run_task 走挂起分支不判 FINISHED，
             # restore() 在 /resume 时据非终态重排；不发 TASK_FAILED；不增 failure_counter；
             # run_error 保持 None → finally 不再抛出（不经 _handle_task_failure）。
-            # 是否非终态命中本分支——下面两处判断（是否置 INTERRUPTED / 是否发
-            # TASK_INTERRUPTED）必须同源，否则终态三元组日后加值时两处会漂移（M3）。
-            was_interrupted = task.status not in ("FINISHED", "FAILED", "CANCELED")
-            if was_interrupted:
-                # 成因随 task 走：TM 聚合 TaskQueueInterrupted 时读的就是它。
-                # error_code 是**码**，error 只是自由文本兜底：TM 的聚合优先读码
-                # （task_manager.py `_emit_queue_signal`），host 按码分流。不写码的话
-                # outage 会降级成 str(exc) 这种自由文本，三份契约（升级须知 /
-                # docs/events-v2.md §2.1.2 / spec/golden/07）要的都是
-                # `InterruptReason.LLM_OUTAGE`。
-                task.error_code = InterruptReason.LLM_OUTAGE
-                task.error = str(exc)
+            # task.error / task.error_code 不在这里写：上面构造的 RunOutcome 已带着
+            # error=str(exc)、error_code=InterruptReason.LLM_OUTAGE，`_run_task` 拿到
+            # 后交 `apply_run_outcome`（task_manager.py）按同样的值写回 task——写两遍是
+            # 纯冗余（Task 2 死代码清理）。`announce_queue_state` 读 task.error_code 做
+            # 分流发生在 `_settle` 里、`apply_run_outcome` 之后，读到的已经是它写的那份，
+            # 时序上稳（见 tests/unit/test_outage_interrupt_reason.py）。
             logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
             # run 级事实：这次执行死了。**无条件发**，与 task 后续怎么处置无关。
             # 会话状态由 TM 聚合后交给 SM 判定——这里不宣布会话怎么了。
