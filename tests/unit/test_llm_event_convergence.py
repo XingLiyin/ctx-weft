@@ -743,6 +743,78 @@ async def test_recognize_intent_swallowed_llm_failure_still_reports_run_complete
     assert finished_runs[0].payload["error"] is None
 
 
+# ── Task 6 复审修复第二轮：反向孤儿（FINISHED 无 STARTED 匹配）──
+#
+# 上一轮修复把「STARTED 已发出」与「补发 FINISHED」两件事绑在了同一个 except 块里，
+# 却没区分 except 触发时 STARTED 是否真的已经发出。stream_llm_resilient 是异步生成器，
+# LLM_REQUEST_STARTED 是它函数体内的第一段代码——真正进入 async for 迭代之前，生成器体
+# 一行都不会跑，STARTED 也就没发出。两条窄窗口会产出无 STARTED 匹配的孤儿 FINISHED：
+#   #3 recognize_intent.py 自己的前置计算（request_prompt_estimate）在调用
+#      stream_llm_resilient 之前抛异常——此时 gateway 函数体压根没被执行过。
+#   #4 gateway 内部的 apply_dynamic_max_tokens 原来排在 STARTED 发射**之前**，抛异常时
+#      同样是 STARTED 还没发出。
+# 修复：#3 挪进独立的 try（失败不发 FINISHED，直接空手退出）；#4 把 gateway 内的
+# apply_dynamic_max_tokens 挪到 STARTED/PROMPT_SENT 发射之后（连带删掉
+# recognize_intent.py 里那次已成为多余空操作的重复调用）。下面两条钉住「STARTED 为 0
+# 时 FINISHED 也必须为 0」，以及「STARTED 已发出时二者仍正确成对」。
+
+
+@pytest.mark.asyncio
+async def test_recognize_intent_prompt_estimate_failure_emits_no_started_or_finished():
+    """path #3：request_prompt_estimate 在 stream_llm_resilient 被调用之前跑，此刻
+    LLM_REQUEST_STARTED 不可能已经发出（gateway 函数体还没被执行过一行）。失败必须
+    整体空手退出——不能只补一条 FINISHED 而没有配对的 STARTED（那才是真正的反向孤儿：
+    无中生有一条收尾事件）。"""
+    from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+
+    class _BrokenTokenizer:
+        def count(self, text):
+            raise ValueError("boom-tokenizer")
+
+    class _BrokenTokenizerLLM:
+        context_limit = 100_000
+        tokenizer = _BrokenTokenizer()
+
+        async def complete(self, req, stream=True):
+            raise AssertionError("must never reach the actual LLM call")
+            yield  # pragma: no cover
+
+    bus = _RecordingBus()
+    state = _make_recognize_intent_state()
+    ctx = _make_recognize_intent_ctx(bus, llm=_BrokenTokenizerLLM())
+
+    outcome = await RecognizeIntentStep().execute(state, ctx)
+
+    assert outcome.next_step is None
+    started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    assert len(started) == 0 and len(finished) == 0, "STARTED 为 0 时 FINISHED 也必须为 0"
+
+
+@pytest.mark.asyncio
+async def test_recognize_intent_gateway_max_tokens_failure_still_pairs_events():
+    """path #4：gateway 的 apply_dynamic_max_tokens 现在排在 LLM_REQUEST_STARTED/
+    LLM_PROMPT_SENT 发射之后（llm_gateway.py 复审修复）——即使它自己抛异常，STARTED
+    也已经先发出去了，事件仍然正确成对（不再是反向孤儿）。用一个非法的
+    dynamic_max_tokens_margin 配置值诱发 apply_dynamic_max_tokens 内部 int(...) 转换
+    抛 ValueError。"""
+    from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+
+    bus = _RecordingBus()
+    state = _make_recognize_intent_state()
+    ctx = _make_recognize_intent_ctx(
+        bus, config=SimpleNamespace(dynamic_max_tokens_margin="not-a-number"))
+
+    outcome = await RecognizeIntentStep().execute(state, ctx)
+
+    assert outcome.next_step is None
+    started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
+    finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
+    assert len(started) == 1 and len(finished) == 1, "STARTED 已发出，必须配对 FINISHED"
+    assert finished[0].payload["request_id"] == started[0].payload["request_id"]
+    assert finished[0].payload["finish_reason"] == "error"
+
+
 # ── Task 5 复审修复 R1：origin 必须在 _run_background_observe 入口钉住，覆盖 ──
 # RUN_STARTED/TASK_RECAP_STARTED 以及两条早退路径（re-fold 幂等护栏、短段免折）——
 # 这几处此前发射时用的还是调用方快照进来的 origin（LOOP_OBSERVE / LOOP_ACT），只有

@@ -506,11 +506,16 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
     调用的任何事件被发射之前」求值（act.py 在调用本函数之前；本函数在 while 重试
     循环、也就是第一次 emit 之前），因此 ``state.sequence_counter`` 两处读到的是
     同一个值，算出来天然相等，不需要新增参数或跨函数传值。
+
+    ``apply_dynamic_max_tokens`` 的调用位置（task-6 复审修复第二轮）：故意排在
+    LLM_REQUEST_STARTED/LLM_PROMPT_SENT 发射**之后**，而不是紧挨在函数开头——这样
+    「进了这段代码往下走」就蕴含「STARTED 已经发出」，调用方（如
+    ``recognize_intent.py``）的收尾逻辑不必自己猜「STARTED 到底发没发」就能决定该不该
+    补发 ``LLM_RESPONSE_FINISHED``。两个事件的 payload 都不读 ``request.max_tokens``，
+    挪后不改变事件内容；``apply_dynamic_max_tokens`` 仍在真正发起 LLM 调用（下面
+    ``stream_llm``）之前完成，行为不变。
     """
     from ctx_weft.protocols import LLMCallError  # local to avoid re-export confusion
-
-    loop_guard = getattr(getattr(state, "agent", None), "loop_guard", None)
-    apply_dynamic_max_tokens(ctx, request, loop_guard)
 
     bus = getattr(ctx, "event_bus", None)
     emit_stream_events = bus is not None and state is not None
@@ -530,6 +535,9 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
                 for m in request.messages
             ],
             "tool_names": [t.name for t in request.tools]}))
+
+    loop_guard = getattr(getattr(state, "agent", None), "loop_guard", None)
+    apply_dynamic_max_tokens(ctx, request, loop_guard)
 
     max_attempts = int(_cfg_val(ctx, "llm_self_heal_max_attempts", _DEFAULT_MAX_ATTEMPTS))
     max_duration = _cfg_val(ctx, "llm_self_heal_max_duration_sec", _DEFAULT_MAX_DURATION_SEC)
