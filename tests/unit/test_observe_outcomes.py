@@ -17,6 +17,7 @@ import pytest
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.core.orchestrator.control_capability import ControlContext, report_task_outcome
 from ctx_weft.core.state.models import Task
+from ctx_weft.protocols.events import EventType
 
 
 def _task(**kw) -> Task:
@@ -406,3 +407,33 @@ def test_no_mechanical_synthetic_summary_text_left_in_source() -> None:
         if phrase in p.read_text(encoding="utf-8")
     ]
     assert not hits, hits
+
+
+def test_to_be_observed_is_gone() -> None:
+    """死值域成员不该留在类型里（总账 D2）。"""
+    import typing
+
+    from ctx_weft.core.state.models import TaskStatus
+    assert "TO_BE_OBSERVED" not in typing.get_args(TaskStatus)
+
+
+@pytest.mark.asyncio
+async def test_observe_emits_started_and_completed(monkeypatch) -> None:
+    """observe 的起止成对，与后台 recap 的 TaskRecapStarted/Done 同形。"""
+    _capture_launches(monkeypatch)
+    state, ctx = _mech_state_ctx()
+    outcome = await ObserveStep().execute(state, ctx)
+    types = [e.type for e in outcome.events]
+    assert EventType.OBSERVE_STARTED in types
+    assert EventType.OBSERVE_COMPLETED in types
+    assert types.index(EventType.OBSERVE_STARTED) < types.index(EventType.OBSERVE_COMPLETED)
+
+
+@pytest.mark.asyncio
+async def test_observe_started_payload_is_task_id_only(monkeypatch) -> None:
+    """起点事件 payload 只放 task_id——是否用 LLM 在起点还没定，不能猜。"""
+    _capture_launches(monkeypatch)
+    state, ctx = _mech_state_ctx()
+    outcome = await ObserveStep().execute(state, ctx)
+    started = next(e for e in outcome.events if e.type == EventType.OBSERVE_STARTED)
+    assert started.payload == {"task_id": state.task.id}

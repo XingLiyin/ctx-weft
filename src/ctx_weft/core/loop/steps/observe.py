@@ -249,6 +249,14 @@ class ObserveStep(Step):
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
         events: list[Any] = []
 
+        # 起点事件：先于下面任何分流决策（含取消 token 读取）——观测的开始时刻，
+        # 与 ObserveCompleted 成对，同形于后台 TaskRecapStarted/Done。payload 只放
+        # task_id：是否用 LLM 在起点还没定（取决于取消状态与 _should_use_llm），不猜。
+        events.append(make_event(
+            state, EventType.OBSERVE_STARTED,
+            payload={"task_id": state.task.id},
+        ))
+
         # 取消时不跑多轮 LLM observe：observe 是「整理现状」，**不中止**（用户裁定）——
         # 这里读 token 只为**选路径**，绝不是检查点：不 raise_if_cancelled、不提前 return，
         # observe 照常走完并交出 verdict（next_step="finalize"）。半途中止会留下既无判决、

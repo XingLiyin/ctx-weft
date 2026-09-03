@@ -159,6 +159,7 @@ class EventType(StrEnum):
     ACT_TURN_STARTED = "ActTurnStarted"
     ACT_TURN_COMPLETED = "ActTurnCompleted"
     MAX_TURNS_REACHED = "MaxTurnsReached"
+    OBSERVE_STARTED = "ObserveStarted"                 # observe 起点（与 Completed 成对）
     OBSERVE_COMPLETED = "ObserveCompleted"
     # ── Memory 域 ──
     MEMORY_INGESTED = "MemoryIngested"
