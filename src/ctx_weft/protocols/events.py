@@ -45,6 +45,7 @@ class Event:
     tenant_id: str = "default"
     task_id: str | None = None
     agent_id: str | None = None
+    origin: str = ""  # V2 新增：哪个组件发出的，见 docs/events-v2.md §4。存量事件读出空串
     payload: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     causation_id: str | None = None
@@ -193,6 +194,40 @@ class EventType(StrEnum):
 # 向后兼容：保持 `EVENT_TYPES` 为字符串 frozenset，供 `type not in EVENT_TYPES` 校验。
 # StrEnum 成员即字符串，故对原有 `"TaskCreated" in EVENT_TYPES` 用法等价。
 EVENT_TYPES: frozenset[str] = frozenset(EventType)
+
+
+class EventOrigin:
+    """`origin` 的 17 个取值（docs/events-v2.md §4）。
+
+    两级点号是为了让 host 能前缀匹配：`loop.` 取全部循环内事件，
+    `loop.background_observe` 精确排除后台观察的渲染。
+    分隔符用 `.` 不用 `:`——`:` 留给可路由的 capability id（`provider:tool`）。
+    """
+
+    ORCHESTRATOR_SESSION_MANAGER = "orchestrator.session_manager"
+    ORCHESTRATOR_TASK_MANAGER = "orchestrator.task_manager"
+    LOOP_DRIVER = "loop.driver"
+    LOOP_PREPARE = "loop.prepare"
+    LOOP_ACT = "loop.act"
+    LOOP_OBSERVE = "loop.observe"
+    LOOP_BACKGROUND_OBSERVE = "loop.background_observe"
+    LOOP_RECOGNIZE_INTENT = "loop.recognize_intent"
+    LOOP_COMPACT = "loop.compact"
+    LOOP_FINALIZE = "loop.finalize"
+    LOOP_SUSPEND = "loop.suspend"
+    LOOP_RECONCILE = "loop.reconcile"
+    LOOP_CAPABILITY_GATEWAY = "loop.capability_gateway"
+    LOOP_LLM_GATEWAY = "loop.llm_gateway"
+    HITL_SERVICE = "hitl.service"
+    RUNTIME = "runtime"
+    PERSISTENCE_SNAPSHOT_WRITER = "persistence.snapshot_writer"
+
+    @classmethod
+    def all(cls) -> frozenset[str]:
+        return frozenset(
+            v for k, v in vars(cls).items()
+            if not k.startswith("_") and isinstance(v, str)
+        )
 
 
 # 瞬态事件：高频流式 delta，仅供实时订阅（SSE）消费，**不进任何持久化 / 投影 / 快照路径**。
