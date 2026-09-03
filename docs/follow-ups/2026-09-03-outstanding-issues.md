@@ -155,7 +155,7 @@ FINISHED、又被 SUSPENDED）——和被修的那四处伪造 payload 是同�
 
 **不是本批次引入的**：批次一 task 5 只是把兜底从「吐散文」改成「吐码」——
 修复前，跨重启还原路径上 `error_code` 为空时会退到 `interrupted[0].error`
-这项自由文本（Task 2 让 `TaskView.error` 可还原之后，这项确实会有值，
+这项自由文本（**Task 1 / A1** 让 `TaskView.error` 可还原之后——Task 2 做的是 AgentView 快照，这项确实会有值，
 真的吐出过散文）；修复后统一退到 `"interrupted"` 这个码。批次一只是使该
 退化变得**明确**（恒是某个码，要么真实要么兜底码）而非混入自由文本，
 `error_code` 本身跨重启丢失这件事，批次一没有引入也没有修。
@@ -279,9 +279,11 @@ serialize/deserialize → converters → golden）。**属独立立项。**
 
 中间那项 `interrupted[0].error` 是**自由文本**（散文），于是当 `error_code`
 为空时，本该恒为码的字段会吐出散文，与「reason 是码」的自身契约相悖——
-虽然实测所有能走到这条聚合的路径（outage / 崩溃 / assembly failure）
-`error_code` 恒非空（`crash_error_code` 兜底到 `type(exc).__name__`，从不返回
-空串），这个分支目前是死路径，但作为兜底逻辑仍不该承诺一个自己不遵守的契约。
+**这条分支不是死路径**（曾有此论断，已被驳回）：进程内实时崩溃那条路上
+`error_code` 确实恒非空（`crash_error_code` 兜底到 `type(exc).__name__`），
+但**跨重启还原**的任务 `error_code` 必为 `None`——`TaskView` 没有这个字段、
+`task_from_projection` 不还原它（见 A9）。故恢复路径上兜底链真的会走到
+中间那项、真的会吐散文。
 
 **已在批次一修复**：删掉中间的自由文本项，`error_code` 为空时兜底改为码
 `"interrupted"`（本就是原先三态兜底串里的那个词，只是现在被提升成唯一的

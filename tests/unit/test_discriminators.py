@@ -21,7 +21,11 @@ def test_enum_values_are_the_wire_strings():
     assert TaskErrorCode.BY_THRESHOLD == "TASK_FAILED_BY_THRESHOLD"
 
 
-_SRC = pathlib.Path("src/ctx_weft")
+#: 锚定本文件位置，**不吃调用 cwd**：写成相对路径时，从 tests/ 下跑 rglob 会命中
+#: 0 个文件 → offenders 恒空 → 守卫报绿。零扫描即通过，正是本批次在治的那类假绿灯
+#: （与 golden `_GOLDEN_DIR` 那次同源）。
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_SRC = _REPO_ROOT / "src" / "ctx_weft"
 #: 守卫抓的是散落的**判别值**。下面这个文件里的同名字符串是**配置 schema 的
 #: 字段名**（模板作者面向的 YAML key），与判别值是两份独立演进的契约，恰好同名而已
 #: ——把 key 绑上枚举会让日后改判别值名字时静默读错 YAML key。这是假阳性，
@@ -36,7 +40,9 @@ def _literal_sites(literal: str) -> list[str]:
     hits: list[str] = []
     pat = re.compile(rf'"{re.escape(literal)}"')
     for p in _SRC.rglob("*.py"):
-        rel = p.as_posix()
+        # 相对仓根算，与 _ALLOWED 里存的口径一致——_SRC 现在是绝对路径（防 cwd 假绿灯），
+        # 直接 as_posix() 会让白名单永远失配。
+        rel = p.relative_to(_REPO_ROOT).as_posix()
         if rel in _ALLOWED:
             continue
         for lineno, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
@@ -61,3 +67,16 @@ def test_no_stray_task_error_code_literals():
                 "TASK_FAILED_BY_THRESHOLD"):
         offenders += _literal_sites(lit)
     assert offenders == [], f"散落的 error_code 字面量: {offenders}"
+
+
+def test_guard_scans_a_real_tree_not_an_empty_one():
+    """守卫必须真的扫到文件——零扫描也会报绿，那是假绿灯。
+
+    `_SRC` 曾写成相对路径 `pathlib.Path("src/ctx_weft")`，从 `tests/` 下跑时
+    rglob 命中 0 个文件、offenders 恒空、守卫报绿。本仓在同一种病上栽过两次
+    （golden 的 `_GOLDEN_DIR` 解析到仓根之上，导致 golden 测试从未真正跑过）。
+    这条把「扫到了东西」本身变成断言。
+    """
+    scanned = list(_SRC.rglob("*.py"))
+    assert len(scanned) > 50, f"守卫只扫到 {len(scanned)} 个文件，疑似路径解析错误"
+    assert (_SRC / "core" / "discriminators.py").exists(), "_SRC 没指向真的源码树"

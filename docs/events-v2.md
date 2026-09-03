@@ -421,7 +421,7 @@ host 自定义结局因此不必新增事件类型。
 
 ---
 
-## 3. O 档 · 28 个（纯观测 / 展示）
+## 3. O 档 · 29 个（纯观测 / 展示）
 
 删改只须与 host SSE 同步，不影响重放与投影。
 
@@ -522,11 +522,12 @@ O 档：reducer 不折叠它们（会话状态由 SM 发的事件承载），但
 | `ActTurnStarted` | `turn` | 一轮 act 开始 |
 | `MaxTurnsReached` | `max_turns` | act 因轮次上限退出。**唯一记录这件事的地方**——`act_exit_reason` 只进内存态，从不进事件流 |
 
-### 3.9 Observe · 1
+### 3.9 Observe · 2
 
 | 事件 | payload | 含义 |
 |---|---|---|
-| `ObserveCompleted` | `outcome` `summary_length` `used_llm` | observer 的**结论**，不是 observe 步骤的阶段标记（阶段由 `StepCompleted(origin=loop.observe)` 管）。`outcome` 含 `retry` / `needs_user_input` 等**非终态**取值——重试 3 轮的 task 会有 3 条，而 task 状态事件前两轮什么都不说 |
+| `ObserveStarted` **新增** | `task_id` | observe 的**起点**，与 `ObserveCompleted` 成对（同形于后台 recap 的 `TaskRecapStarted`/`TaskRecapDone`）。发在任何分流决策之前，故 payload 里**没有** `used_llm`——那时还没定。`execute` 无提前 return，取消路径下也照样成对 |
+| `ObserveCompleted` | `outcome` `summary_length` `used_llm` | observer 的**结论**（`used_llm` 自 2026-09-03 起表示「判决**真的出自** LLM」，而非「尝试过 LLM」），不是 observe 步骤的阶段标记（阶段由 `StepCompleted(origin=loop.observe)` 管）。`outcome` 含 `retry` / `needs_user_input` 等**非终态**取值——重试 3 轮的 task 会有 3 条，而 task 状态事件前两轮什么都不说 |
 
 ### 3.10 Memory · 4
 

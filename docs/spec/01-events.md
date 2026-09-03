@@ -98,7 +98,7 @@
 `CapabilityInvoked` `CapabilityProgress` `CapabilityFinished` `CapabilityFailed` `CapabilityCanceled`
 
 ### ActStep / ObserveStep
-`ActTurnStarted` `ActTurnCompleted` `MaxTurnsReached` `ObserveCompleted`
+`ActTurnStarted` `ActTurnCompleted` `MaxTurnsReached` `ObserveStarted` `ObserveCompleted`
 
 ### Memory
 `MemoryIngested` `CompactTriggered` `CompactDispatched` `MemoryCompactStarted`

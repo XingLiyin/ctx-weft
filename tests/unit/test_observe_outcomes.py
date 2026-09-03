@@ -255,7 +255,7 @@ def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
     """ObserveStep.execute() 的最小搭台：默认「无 observe ROLE 的子任务」= 机械路径。"""
     from ctx_weft.core.control.tokens import CancelToken
     from ctx_weft.core.loop.driver import LoopContext, LoopState
-    from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session
+    from ctx_weft.core.state.models import NormalTaskSettings, Session
     from ctx_weft.protocols import MemoryAddress, ProviderContext
     from ctx_weft.protocols.template import AgentTemplate, IdentityFacet
     from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -292,7 +292,7 @@ def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
     )
 
     class _Bus:
-        async def emit(self, event):  # noqa: D102
+        async def emit(self, event):
             pass
 
     tok = CancelToken()
