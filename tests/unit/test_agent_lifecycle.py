@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
 from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, _AgentRecord
@@ -435,3 +436,121 @@ def test_new_exception_codes_follow_existing_naming_style():
     assert AgentNotFound.code == "AGENT_NOT_FOUND"
     assert AgentBusyError.code == "AGENT_BUSY"
     assert AgentTerminatedError.code == "AGENT_TERMINATED"
+
+
+# ── Task 14: reducers 折叠 AGENT_* ──────────────────────────────────────────
+
+
+class _MemStore:
+    def __init__(self, events):
+        self._events = events
+
+    async def read_by_session(self, session_id, **_kw):
+        return list(self._events)
+
+    async def load_latest_snapshot(self, session_id):
+        # `rebuild_view` 把 NotImplementedError 当「这个 store 不支持快照」处理，
+        # 落到全量 `read_by_session` 重放（reducers.py:294-297）——这里没有快照
+        # 机制要模拟，直接选这条契约化的退路，而不是让 `_MemStore` 假装有快照。
+        raise NotImplementedError
+
+
+async def test_rebuild_view_folds_agent_status():
+    """不变式 3：S 档事件必须被 reducer 折叠，冷重建与内存态等价。"""
+    evs = [
+        _task_ev(EventType.AGENT_INSTANTIATED, "a1", {"template_id": "tpl"}),
+        _task_ev(EventType.AGENT_RUNNING, "a1", {"from_status": "idle", "trigger": "task_started"}),
+        _task_ev(EventType.AGENT_WAITING_HUMAN, "a1", {"from_status": "running", "hitl_id": "h1"}),
+    ]
+    view = await rebuild_view(_MemStore(evs), "s1")
+    assert view.agents["a1"].status == "waiting_human"
+
+
+async def test_rebuild_view_terminated_is_sticky():
+    evs = [
+        _task_ev(EventType.AGENT_INSTANTIATED, "a1", {"template_id": "tpl"}),
+        _task_ev(EventType.AGENT_TERMINATED, "a1", {"from_status": "idle", "reason": "user"}),
+        _task_ev(EventType.AGENT_RUNNING, "a1", {"from_status": "idle"}),
+    ]
+    view = await rebuild_view(_MemStore(evs), "s1")
+    assert view.agents["a1"].status == "terminated"
+
+
+async def test_rebuild_view_terminated_freezes_current_task_id():
+    """粘滞的反向验证，且比 `test_rebuild_view_terminated_is_sticky` 多钉一维：
+    迟到事件换了个不同的 task_id 也不能挪动 current_task_id——不只是 status 冻结，
+    「正在处理哪个 task」这一维同样冻结在终局那一刻。"""
+    def mk(t: str, task_id: str, payload: dict) -> Event:
+        return Event(
+            id="evt_x", run_id=None, sequence=0, session_id="s1", type=t,
+            timestamp=datetime.now(UTC), task_id=task_id, agent_id="a1", payload=payload,
+        )
+
+    evs = [
+        mk(EventType.AGENT_INSTANTIATED, "t1", {"template_id": "tpl"}),
+        mk(EventType.AGENT_RUNNING, "t1", {"from_status": "idle"}),
+        mk(EventType.AGENT_TERMINATED, "t1", {"from_status": "running", "reason": "user"}),
+        mk(EventType.AGENT_RUNNING, "t2", {"from_status": "idle"}),  # 迟到，换了个 task_id
+    ]
+    view = await rebuild_view(_MemStore(evs), "s1")
+    assert view.agents["a1"].status == "terminated"
+    assert view.agents["a1"].current_task_id == "t1"
+
+
+async def test_rebuild_view_and_load_agree_on_status():
+    """端到端：钉住「冷重建与运行时内存态等价」这个核心性质。
+
+    一串 AGENT_* 事件 → `rebuild_view` 折叠出 view → `load(views)` 灌进
+    registry → `registry.status_of()` 必须与折出的 `view.agents[id].status`
+    一致——否则冷恢复后 `assert_can_receive` 会错误放行、`send_message`
+    的路由判断也会失准（控制方在本任务追加的验收点）。
+    """
+    evs = [
+        _task_ev(EventType.AGENT_INSTANTIATED, "a1", {"template_id": "tpl"}),
+        _task_ev(EventType.AGENT_RUNNING, "a1", {"from_status": "idle", "trigger": "task_started"}),
+        _task_ev(EventType.AGENT_WAITING_HUMAN, "a1", {"from_status": "running", "hitl_id": "h1"}),
+    ]
+    view = await rebuild_view(_MemStore(evs), "s1")
+
+    reg = _reg()
+    n = await reg.load(view.agents, session_id="s1", tenant_id="default", fallback_template_id="tpl")
+
+    assert n == 1
+    assert view.agents["a1"].status == "waiting_human"
+    assert reg.status_of("a1") == view.agents["a1"].status
+    assert reg._agents["a1"].current_task_id == view.agents["a1"].current_task_id == "t1"
+
+
+def test_legacy_reducer_branches_still_present():
+    """确认已停发/待停发类型的 reducer 读取分支未被本任务动过——存量日志重放全靠它们
+    （events-v2.md §5）。`SESSION_INTERRUPTED`/`WAITING`/`RUNNING`/`FINISHED` 要等
+    Task 16（SessionManager 降格）才真正停止发射，但它们的分支现在就必须在场，
+    这样存量事件才能在那之后被继续正确重放；HITL 那 6 个（`HITL_REQUIRED` +
+    5 个终态镜像）与 `SESSION_STATUS_CHANGED` / `SESSION_PAUSED_HITL` 已经是
+    L 档（`L_TIER_EVENT_TYPES`）。
+
+    源码扫描而非只查 `L_TIER_EVENT_TYPES`：那张表登记的是「已经」停发的类型，
+    不包含仍在发射、但分支必须留到 Task 16 之后的 4 个 SESSION_* 运行态——真正
+    要钉住的是 reducers.py 这份源码本身，不是登记表。
+    """
+    import inspect
+
+    from ctx_weft.core.control import reducers as reducers_mod
+
+    src = inspect.getsource(reducers_mod)
+    legacy_refs = [
+        "EventType.SESSION_STATUS_CHANGED",
+        "EventType.SESSION_PAUSED_HITL",
+        "EventType.SESSION_INTERRUPTED",
+        "EventType.SESSION_WAITING",
+        "EventType.SESSION_RUNNING",
+        "EventType.SESSION_FINISHED",
+        "EventType.HITL_REQUIRED",
+        "EventType.HITL_APPROVED",
+        "EventType.HITL_MODIFIED",
+        "EventType.HITL_ANSWERED",
+        "EventType.HITL_REJECTED",
+        "EventType.HITL_CANCELLED",
+    ]
+    missing = [ref for ref in legacy_refs if ref not in src]
+    assert missing == [], f"reducer 分支缺失: {missing}"

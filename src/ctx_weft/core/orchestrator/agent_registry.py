@@ -387,6 +387,12 @@ class AgentRegistry:
                 # D1 修复：模型选择从 AgentView 读回，跨重启存活——不再是
                 # ModelChoice() 默认值（那是修复前 recover_session 静默降级的根因）。
                 llm=ModelChoice(account=av.llm_account, model=av.llm_model),
+                # Task 14：五态机状态从 AgentView 读回，跨重启存活——不这样做的话
+                # 冷恢复后每个 agent 都会被 `_AgentRecord.status` 的字段默认值
+                # 重置成 idle，即使它重启前正处于 waiting_human（有未决 HITL 挂着），
+                # 导致 `assert_can_receive` 错误放行、`send_message` 的路由判断失准。
+                status=av.status,
+                current_task_id=av.current_task_id,
             )
             if av.parent_agent_id is not None:
                 # 重建 _children——冷恢复必须让级联 cancel/pause（Task 19/20）在

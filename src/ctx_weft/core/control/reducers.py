@@ -82,6 +82,17 @@ _HITL_RESOLVE_TYPES = (
     EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
 )
 
+# Task 14：5 个 AGENT_* 状态事件 → AgentView.status。与 `AgentRegistry` 的五态机
+# （agent_state.py）同一词表——reducer 只折叠，不重新判定转移是否合法（那是 ALM
+# 在事件产生时的职责，此处只读它已经发生的结果）。
+_AGENT_STATUS_BY_EVENT: dict[str, str] = {
+    EventType.AGENT_RUNNING: "running",
+    EventType.AGENT_IDLE: "idle",
+    EventType.AGENT_WAITING_HUMAN: "waiting_human",
+    EventType.AGENT_INTERRUPTED: "interrupted",
+    EventType.AGENT_TERMINATED: "terminated",
+}
+
 
 def fold_pending_task_recap(events: list[Event]) -> dict[str, dict]:
     """折叠 TaskRecap 事件 → 仍未完成的 {task_id: {"boundary", "agent_id"}}（started 减去 done）。
@@ -198,6 +209,8 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "template_id": a.template_id,
                 "llm_account": a.llm_account,
                 "llm_model": a.llm_model,
+                "status": a.status,
+                "current_task_id": a.current_task_id,
             }
             for aid, a in view.agents.items()
         },
@@ -267,6 +280,9 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             # 同上：旧快照无模型选择 → 空 ModelChoice，回落账号默认。
             llm_account=a.get("llm_account", ""),
             llm_model=a.get("llm_model", ""),
+            # 旧快照无该键 → 回落默认值 "idle"/None，与其余字段同口径（零数据迁移）。
+            status=a.get("status", "idle"),
+            current_task_id=a.get("current_task_id"),
         )
 
     return RunStateView(
@@ -503,6 +519,16 @@ def _apply(view: RunStateView, ev: Event) -> None:
         slot = _agent_slot(view, ev.agent_id)
         slot.llm_account = p.get("llm_account", "")
         slot.llm_model = p.get("llm_model", "")
+
+    elif t in _AGENT_STATUS_BY_EVENT and ev.agent_id:
+        # terminated 粘滞：一旦进入终态就不再被迟到事件改回——与 SessionManager
+        # 已有的「已终态就不再转移」同构（见 `SESSION_RUNNING` 分支的
+        # `TERMINAL_SESSION_STATUSES` 判据）。
+        agent = view.agents.get(ev.agent_id)
+        if agent is not None and agent.status != "terminated":
+            agent.status = _AGENT_STATUS_BY_EVENT[t]
+            if ev.task_id:
+                agent.current_task_id = ev.task_id
 
     elif t == EventType.TASK_CREATED:
         task_data: dict = p.get("task", {})
