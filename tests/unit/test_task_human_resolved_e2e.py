@@ -1,11 +1,17 @@
-"""`TASK_HUMAN_RESOLVED` 焊死：两个真实发射点各走一次真实调用 + 真实 bus。
+"""`TASK_HUMAN_RESOLVED` 焊死：两条 HITL 解除路径各走一次真实调用 + 真实 bus。
 
 `tests/unit/test_task_unblock_events.py` 的 6 个用例全是 reducer 层合成事件
 （`_ev(...)` 手工捏造），没有一个走真实发射——这份文件补上真实路径。
 
-`TASK_HUMAN_RESOLVED` 有两个发射点，互斥（同一次 HITL 解决只会走其中一条）：
+`TASK_HUMAN_RESOLVED` 有两条触发路径，互斥（同一次 HITL 解决只会走其中一条）：
   - `TaskManager.resume_task`（approval 分支，`was_blocked` 判据）；
-  - `CtxWeftRuntime._inject_user_reply`（wait_for_user 分支）。
+  - `CtxWeftRuntime._inject_user_reply` → `TaskManager.mark_human_resolved`
+    （wait_for_user 分支）。
+
+**两者现在都只由 `TaskManager._emit` 发出**（Task 6：把 `_inject_user_reply` 里
+绕开 TM、就地构造 `Event` 的越界发射收拢进 `mark_human_resolved`）——不再是「一条
+在 TM 内、一条在 TM 外」的两个真实发射点，而是同一发射者的两条触发路径，合并成
+一个测试用例，分别驱动两条冷路径后断言事件。
 
 两条都借用 `tests/integration/test_hitl_e2e_v2.py` 已经搭好的真实端到端夹具
 （真实 `CtxWeftRuntime.start_session` → 真实 `TaskManager` / `HitlService` /
@@ -56,14 +62,23 @@ def _human_resolved_events(events, task_id: str):
     ]
 
 
-async def test_task_human_resolved_emitted_by_resume_task_approval_path() -> None:
-    """发射点 1：`TaskManager.resume_task` 的 approval 分支（`was_blocked` 判据）。
+async def test_task_human_resolved_emitted_via_task_manager() -> None:
+    """两条触发路径都只由 `TaskManager._emit` 发出 `TASK_HUMAN_RESOLVED`（Task 6）。
 
+    路径 1：`TaskManager.resume_task` 的 approval 分支（`was_blocked` 判据）——
     驱动与 `test_hitl_e2e_v2.test_cold_approval_reconciles_and_invokes_the_tool_exactly_once`
     完全相同的冷审批链路（零热窗强制驱逐 → AWAITING_HUMAN → `reply_to_hitl` accepted →
-    `recover_session` → `resume_task`），只是额外去读 `event_store` 断言
+    `recover_session` → `resume_task`），额外去读 `event_store` 断言
     `TASK_HUMAN_RESOLVED` 真的发出、`hitl_id` 与那次 HITL 请求一致。
+
+    路径 2：`CtxWeftRuntime._inject_user_reply` → `TaskManager.mark_human_resolved`
+    的 wait_for_user 分支——驱动与
+    `test_hitl_e2e_v2.test_plain_text_pause_injects_reply_once_and_ignores_duplicate`
+    完全相同的纯文本暂停冷路径（无 tool_call 的 act 回合 → 冷 park → `reply_to_hitl` →
+    `recover_session` → `_inject_user_reply`），同样断言事件真的发出，并额外验证重复
+    应答（no-op）不会催生第二条。
     """
+    # ── 路径 1：resume_task 的 approval 分支 ──────────────────────────────
     llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()])
     runtime, tool = _make_runtime_with_bash_tool(llm, hitl_timeout_sec=0)
 
@@ -103,15 +118,7 @@ async def test_task_human_resolved_emitted_by_resume_task_approval_path() -> Non
     )
     assert resolved[0].payload.get("hitl_id") == req.id
 
-
-async def test_task_human_resolved_emitted_by_inject_user_reply_wait_for_user_path() -> None:
-    """发射点 2：`CtxWeftRuntime._inject_user_reply` 的 wait_for_user 分支。
-
-    驱动与 `test_hitl_e2e_v2.test_plain_text_pause_injects_reply_once_and_ignores_duplicate`
-    完全相同的纯文本暂停冷路径（无 tool_call 的 act 回合 → 冷 park → `reply_to_hitl` →
-    `recover_session` → `_inject_user_reply`），额外断言 `TASK_HUMAN_RESOLVED` 真的发出、
-    且重复应答（no-op）不会催生第二条。
-    """
+    # ── 路径 2：_inject_user_reply → mark_human_resolved 的 wait_for_user 分支 ──
     llm = _ActRouterLLM(act_responses=[
         MockResponse(text="Hi! Anything else?"),  # 纯文本、无 tool_call → 冷 park
         _finish_call(),
