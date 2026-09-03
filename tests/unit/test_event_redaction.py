@@ -43,9 +43,8 @@ def test_recognize_intent_gets_text_not_empty():
 
 from types import SimpleNamespace
 
-import ctx_weft.core.loop.steps.act as _act_mod
 import ctx_weft.core.loop.steps.observe as _obs_mod
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.act import _run_llm_turn
 from ctx_weft.core.loop.steps.observe import run_observe_react
@@ -77,7 +76,7 @@ def _make_usage_chunk():
     )
 
 
-def _make_state():
+def _make_state(*, origin: str = EventOrigin.LOOP_ACT):
     agent = SimpleNamespace(
         id="a1",
         loop_config=SimpleNamespace(max_turns_per_observe=3, compact_keep_last=2),
@@ -94,24 +93,35 @@ def _make_state():
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
         resolved_model=SimpleNamespace(model="mock", account=""),
+        # act 走真实 llm_gateway.stream_llm_resilient（task 4 后 LLM_PROMPT_SENT 由 gateway
+        # 发射，且只在 origin==LOOP_ACT 时发射）。
+        origin=origin,
     )
 
 
-def _make_ctx(event_bus):
+class _FakeLLM:
+    """脚本化 LLMClient；context_limit 是 stream_llm_resilient 入口
+    apply_dynamic_max_tokens 的硬需求（task 4 后 act 不再 monkeypatch 掉整个
+    stream_llm_resilient，会真正跑到这段）。"""
+    tokenizer = HeuristicTokenizer()
+    context_limit = 100_000
+
+    def __init__(self, chunks=()):
+        self._chunks = list(chunks)
+
+    async def complete(self, req, stream=True):
+        for c in self._chunks:
+            yield c
+
+
+def _make_ctx(event_bus, *, llm=None):
     class _FakeAssembler:
         async def assemble(self, req):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 
-    class _FakeLLM:
-        tokenizer = HeuristicTokenizer()
-
-        async def complete(self, req, stream=True):
-            return
-            yield  # unreachable; stream_llm_resilient is monkeypatched
-
     return LoopContext(
         assembler=_FakeAssembler(),
-        llm=_FakeLLM(),
+        llm=llm if llm is not None else _FakeLLM(),
         memory=InMemoryMemoryProvider(),
         event_bus=event_bus,
         provider_ctx=ProviderContext(
@@ -120,14 +130,10 @@ def _make_ctx(event_bus):
     )
 
 
-async def test_act_prompt_sent_event_has_no_base64(monkeypatch):
-    async def _fake_stream(ctx, state, request):
-        yield _make_usage_chunk()
-
-    monkeypatch.setattr(_act_mod, "stream_llm_resilient", _fake_stream)
+async def test_act_prompt_sent_event_has_no_base64():
     bus = _RecordingBus()
     state = _make_state()
-    ctx = _make_ctx(bus)
+    ctx = _make_ctx(bus, llm=_FakeLLM(chunks=[_make_usage_chunk()]))
     prompt = SimpleNamespace(system="SYS", tools=[])
     current_messages = [LLMMessage(role="user", content=[TextPart(text="看图"), _img()])]
 

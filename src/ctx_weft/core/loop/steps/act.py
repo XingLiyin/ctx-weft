@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
-from ctx_weft.core.content import redact_content_for_event
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
     PROMPT_EST_BASE_KEY, PROMPT_EST_SEG_KEY, request_prompt_estimate, resolve_llm_identity,
@@ -214,22 +213,20 @@ async def _run_llm_turn(
     """
     agent = state.agent
     model, llm_account = resolve_llm_identity(state)
+    # req_id: 与 llm_gateway.stream_llm_resilient 内部用同一个确定性公式独立算出——两边都在
+    # 「本次 LLM 调用的任何事件被发射之前」求值（此处在调用 stream_llm_resilient 之前；gateway
+    # 侧在其 while 重试循环、也就是第一次 emit 之前），故 state.sequence_counter 两处读到同一个
+    # 值，无需新增参数或跨函数传值即可对齐（详见 llm_gateway.stream_llm_resilient 文档字符串）。
     req_id = f"req_{agent.id}_{state.sequence_counter}"
-    await ctx.event_bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={
-        "request_id": req_id, "model": model, "llm_account": llm_account, "turn": turn_num}))
 
     llm_request = LLMRequest(
         model=model, system=prompt.system, messages=list(current_messages), tools=prompt.tools)
     llm_request.prompt_token_estimate = request_prompt_estimate(
         ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
-
-    await ctx.event_bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
-        "request_id": req_id, "turn": turn_num, "system": prompt.system,
-        "messages": [
-            {"role": m.role, "content": redact_content_for_event(m.content)}
-            for m in current_messages
-        ],
-        "tool_names": [t.name for t in prompt.tools]}))
+    # turn：LLM_REQUEST_STARTED / LLM_PROMPT_SENT 现由 gateway 发射，但 turn_num 是本函数的局部
+    # 循环变量、state 上没有对应字段——经 metadata 这个既有的瞬态透传通道带给 gateway（同
+    # PROMPT_EST_BASE_KEY/PROMPT_EST_SEG_KEY 的做法），不新增函数参数。
+    llm_request.metadata["turn"] = turn_num
 
     text = ""
     reasoning = ""
@@ -247,14 +244,8 @@ async def _run_llm_turn(
         if chunk.kind == "token":
             ctx.run_phase.produced = True
             text += chunk.text
-            await ctx.event_bus.emit(make_event(
-                state, EventType.LLM_TOKEN_STREAMED,
-                payload={"request_id": req_id, "delta": chunk.text}))
         elif chunk.kind == "reasoning":
             reasoning += chunk.text
-            await ctx.event_bus.emit(make_event(
-                state, EventType.LLM_REASONING_STREAMED,
-                payload={"request_id": req_id, "delta": chunk.text}))
         elif chunk.kind == "tool_call" and chunk.tool_call is not None:
             tool_calls.append(chunk.tool_call)
         elif chunk.kind == "tool_call_partial":

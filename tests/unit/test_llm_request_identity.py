@@ -11,9 +11,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import ctx_weft.core.loop.steps.act as _act_mod
 import ctx_weft.core.loop.steps.observe as _obs_mod
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.llm_gateway import resolve_llm_identity
 from ctx_weft.core.loop.steps.act import _run_llm_turn
 from ctx_weft.core.loop.steps.observe import run_observe_react
@@ -53,7 +52,10 @@ def _make_tool_call_chunk(name: str):
     )
 
 
-def _make_state(*, model: str = "deepseek-v4-pro", account: str = "deepseek-rj"):
+def _make_state(
+    *, model: str = "deepseek-v4-pro", account: str = "deepseek-rj",
+    origin: str = EventOrigin.LOOP_ACT,
+):
     agent = SimpleNamespace(
         id="a1",
         loop_config=SimpleNamespace(max_turns_per_observe=3, compact_keep_last=2),
@@ -71,10 +73,30 @@ def _make_state(*, model: str = "deepseek-v4-pro", account: str = "deepseek-rj")
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
         resolved_model=SimpleNamespace(model=model, account=account),
+        # act 走真实 llm_gateway.stream_llm_resilient（task 4 后 LLM_REQUEST_STARTED/
+        # PROMPT_SENT 由 gateway 发射，且只在 origin==LOOP_ACT 时发射，见该函数文档字符串）。
+        origin=origin,
     )
 
 
-def _make_ctx(event_bus):
+class _FakeLLM:
+    """最小 LLMClient：按脚本 yield chunk。context_limit 是
+    llm_gateway.apply_dynamic_max_tokens（stream_llm_resilient 入口即调用）的硬需求——
+    此前这些测试整个 monkeypatch 掉 stream_llm_resilient，从未真正跑到这段，现在
+    改走真实 gateway 后必须补上。
+    """
+    tokenizer = HeuristicTokenizer()
+    context_limit = 100_000
+
+    def __init__(self, chunks=()):
+        self._chunks = list(chunks)
+
+    async def complete(self, req, stream=True):
+        for c in self._chunks:
+            yield c
+
+
+def _make_ctx(event_bus, *, llm=None):
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
@@ -83,16 +105,9 @@ def _make_ctx(event_bus):
         async def assemble(self, req):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 
-    class _FakeLLM:
-        tokenizer = HeuristicTokenizer()
-
-        async def complete(self, req, stream=True):
-            return
-            yield  # unreachable; stream_llm_resilient is monkeypatched
-
     return LoopContext(
         assembler=_FakeAssembler(),
-        llm=_FakeLLM(),
+        llm=llm if llm is not None else _FakeLLM(),
         memory=InMemoryMemoryProvider(),
         event_bus=event_bus,
         provider_ctx=ProviderContext(
@@ -122,17 +137,12 @@ def test_resolve_reports_the_mock_adapters_own_model():
 # ── act：_run_llm_turn 的请求/响应事件 ────────────────────────────────────────
 
 
-async def test_act_request_events_carry_resolved_model_identity(monkeypatch):
-    captured = {}
-
-    async def _fake_stream(ctx, state, request):
-        captured["model"] = request.model
-        yield _make_usage_chunk()
-
-    monkeypatch.setattr(_act_mod, "stream_llm_resilient", _fake_stream)
+async def test_act_request_events_carry_resolved_model_identity():
+    """act 走真实 llm_gateway.stream_llm_resilient（task 4 后 REQUEST_STARTED 由 gateway
+    发射），因此这里不再 monkeypatch stream_llm_resilient——用 _FakeLLM 脚本化 chunk。"""
     bus = _RecordingBus()
     state = _make_state(model="deepseek-v4-pro", account="deepseek-rj")
-    ctx = _make_ctx(bus)
+    ctx = _make_ctx(bus, llm=_FakeLLM(chunks=[_make_usage_chunk()]))
     prompt = SimpleNamespace(system="SYS", tools=[])
 
     await _run_llm_turn(state, ctx, prompt, [], 1)
@@ -140,20 +150,15 @@ async def test_act_request_events_carry_resolved_model_identity(monkeypatch):
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED][0]
     assert started.payload["model"] == "deepseek-v4-pro"
     assert started.payload["llm_account"] == "deepseek-rj"
-    assert captured["model"] == "deepseek-v4-pro"   # LLMRequest.model 同源
     finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED][0]
     assert finished.payload["llm_model"] == "deepseek-v4-pro"
     assert finished.payload["llm_account"] == "deepseek-rj"
 
 
-async def test_act_request_events_carry_mock_adapters_model(monkeypatch):
-    async def _fake_stream(ctx, state, request):
-        yield _make_usage_chunk()
-
-    monkeypatch.setattr(_act_mod, "stream_llm_resilient", _fake_stream)
+async def test_act_request_events_carry_mock_adapters_model():
     bus = _RecordingBus()
     state = _make_state(model="mock-adapter-model", account="")
-    ctx = _make_ctx(bus)
+    ctx = _make_ctx(bus, llm=_FakeLLM(chunks=[_make_usage_chunk()]))
 
     await _run_llm_turn(state, ctx, SimpleNamespace(system="SYS", tools=[]), [], 1)
 

@@ -49,8 +49,8 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
-from ctx_weft.core.content import rehydrate_content
-from ctx_weft.protocols.events import EventType
+from ctx_weft.core.content import rehydrate_content, redact_content_for_event
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.utils import (
     dynamic_max_tokens,
@@ -482,11 +482,51 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
     - 非 outage 的 retriable（如 _finalize 截断）与永久错 → 原样抛出（保留既有语义）。
     - 预算（max_attempts / max_duration）耗尽 → LLMOutageError。
     - 退避期间尊重 cancel_token。
+
+    「流式侧」4 种 LLM_* 事件（REQUEST_STARTED / PROMPT_SENT / TOKEN_STREAMED /
+    REASONING_STREAMED）在此发射（task-4 收敛，spec 2026-09-03 §9.5）。仅当
+    ``state.origin == EventOrigin.LOOP_ACT`` 时发射——本函数也被 observe /
+    background_observe（run_observe_react）与 compact（summarize_for_compact）
+    复用，它们各自已有自己的一套 LLM 交互事件（observe 用同名 LLM_* 但自己的
+    request_id 方案；background_observe 用 BACKGROUND_OBSERVE_* 专门把后台交互
+    挡在前端可见的 LLM_* 频道之外；compact 干脆不发）。不按 origin 收窄的话，
+    这里会在它们的调用上重复发射/串错 request_id，还会把本该隐藏的后台 LLM 调用
+    泄漏进 LLM_* 频道——origin 门禁把本次改动精确限定在 act.py 原来发射的那次
+    调用上，不影响另外三条路径的既有行为。
+    ``LLM_RESPONSE_FINISHED`` 仍留在 act.py（依赖软打断决策，见 task-4 brief）。
+
+    request_id：与 act.py 侧 ``_run_llm_turn`` 用同一个确定性公式
+    ``f"req_{agent.id}_{state.sequence_counter}"`` 独立算出——两边都在「本次 LLM
+    调用的任何事件被发射之前」求值（act.py 在调用本函数之前；本函数在 while 重试
+    循环、也就是第一次 emit 之前），因此 ``state.sequence_counter`` 两处读到的是
+    同一个值，算出来天然相等，不需要新增参数或跨函数传值。
     """
     from ctx_weft.protocols import LLMCallError  # local to avoid re-export confusion
 
     loop_guard = getattr(getattr(state, "agent", None), "loop_guard", None)
     apply_dynamic_max_tokens(ctx, request, loop_guard)
+
+    bus = getattr(ctx, "event_bus", None)
+    emit_stream_events = (
+        bus is not None and state is not None
+        and getattr(state, "origin", None) == EventOrigin.LOOP_ACT
+    )
+    request_id: str | None = None
+    if emit_stream_events:
+        agent = state.agent
+        request_id = f"req_{agent.id}_{state.sequence_counter}"
+        model, llm_account = resolve_llm_identity(state)
+        turn = request.metadata.get("turn", 0)
+        await bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={
+            "request_id": request_id, "model": model, "llm_account": llm_account,
+            "turn": turn}))
+        await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
+            "request_id": request_id, "turn": turn, "system": request.system,
+            "messages": [
+                {"role": m.role, "content": redact_content_for_event(m.content)}
+                for m in request.messages
+            ],
+            "tool_names": [t.name for t in request.tools]}))
 
     max_attempts = int(_cfg_val(ctx, "llm_self_heal_max_attempts", _DEFAULT_MAX_ATTEMPTS))
     max_duration = _cfg_val(ctx, "llm_self_heal_max_duration_sec", _DEFAULT_MAX_DURATION_SEC)
@@ -504,6 +544,15 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
                 blob_store=getattr(ctx, "blob_store", None),
                 provider_ctx=getattr(ctx, "provider_ctx", None),
             ):
+                if emit_stream_events:
+                    if chunk.kind == "token":
+                        await bus.emit(make_event(
+                            state, EventType.LLM_TOKEN_STREAMED,
+                            payload={"request_id": request_id, "delta": chunk.text}))
+                    elif chunk.kind == "reasoning":
+                        await bus.emit(make_event(
+                            state, EventType.LLM_REASONING_STREAMED,
+                            payload={"request_id": request_id, "delta": chunk.text}))
                 yielded_anything = True
                 yield chunk
             return  # success
