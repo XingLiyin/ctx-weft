@@ -62,11 +62,20 @@ class _RecordingBus:
 
 
 class _FakeLLM:
-    """脚本化 LLMClient：先吐两个 token chunk，再吐一个 usage chunk。"""
+    """脚本化 LLMClient：先吐两个 token chunk，再吐一个 usage chunk。记录收到的
+    ``request`` 供测试断言**实际发给 LLM client** 的 model/messages——这与事件 payload
+    里报的 model 是两回事：payload 由 resolve_llm_identity(state) 独立算出，request.model
+    是调用方传给 LLMRequest(...) 构造函数的那个值，两者可能不同源（compact.py 曾经的
+    bug 正是这种「payload 对、request 错」的分裂，见
+    test_compact_sends_resolved_model_to_llm_client_not_mock_sentinel）。"""
     tokenizer = HeuristicTokenizer()
     context_limit = 100_000
 
+    def __init__(self):
+        self.last_request = None
+
     async def complete(self, req, stream=True):
+        self.last_request = req
         yield SimpleNamespace(kind="token", text="he", tool_call=None, usage=None)
         yield SimpleNamespace(kind="token", text="llo", tool_call=None, usage=None)
         yield SimpleNamespace(
@@ -181,14 +190,14 @@ def _make_compact_state(*, origin: str = EventOrigin.LOOP_COMPACT):
     )
 
 
-def _make_compact_ctx(event_bus):
+def _make_compact_ctx(event_bus, *, llm=None):
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
 
     return LoopContext(
         assembler=_FakeCompactAssembler(),
-        llm=_FakeLLM(),
+        llm=llm if llm is not None else _FakeLLM(),
         memory=InMemoryMemoryProvider(),
         event_bus=event_bus,
         provider_ctx=ProviderContext(
@@ -227,13 +236,19 @@ async def test_gateway_emits_stream_events_for_compact_origin_and_pairs_with_res
 
 @pytest.mark.asyncio
 async def test_compact_events_carry_resolved_model_not_mock_sentinel():
-    """task-4 复审第二轮：summarize_for_compact 的 llm_request.model 曾用
-    agent.runtime.get("llm_model", "mock")——inline compact 路径下 agent.runtime 从不会被
-    写入 llm_model，恒回落 "mock"。改用 resolve_llm_identity(state) 后，llm_request.model
-    与 LLM_REQUEST_STARTED/LLM_RESPONSE_FINISHED 里的 model/llm_account 都必须是
-    state.resolved_model 解出的真实值，不是 "mock" 字面量。这里刻意让 agent.runtime 为空
-    （模拟正常任务执行 materialize() 出来的 Agent，没有人给它填过 llm_model），
-    resolved_model 给一个与 "mock" 明显不同的真实模型名，钉住两者不再混用。"""
+    """事件 payload 层面的健康检查（非本次改动的验收测试——见下面那条注释）：
+    LLM_REQUEST_STARTED/LLM_RESPONSE_FINISHED 的 model/llm_account 都来自
+    resolve_llm_identity(state)，不是 "mock" 字面量。
+
+    **复审纠偏**：gateway 的 LLM_REQUEST_STARTED/PROMPT_SENT（llm_gateway.py 内联
+    resolve_llm_identity 调用）与 compact 自己的 LLM_RESPONSE_FINISHED，从一开始就各自
+    独立算 model/llm_account，从未依赖过 llm_request.model——事件 payload 从来没撒过谎。
+    本测试因此测不出"summarize_for_compact 曾经把 model=agent.runtime.get('llm_model',
+    'mock') 传给 LLM client"这个真正的 bug（已实测核实：把那行代码改回旧写法，本测试
+    仍然全绿）。真正钉住那个 bug 的是下面
+    test_compact_sends_resolved_model_to_llm_client_not_mock_sentinel，直接检查发给
+    LLM client 的 request.model。本测试保留是因为它验证的东西本身仍然成立、仍然值得
+    有回归保护，只是不再声称自己是本次改动的验收测试。"""
     from ctx_weft.core.loop.steps.compact import summarize_for_compact
 
     bus = _RecordingBus()
@@ -252,6 +267,35 @@ async def test_compact_events_carry_resolved_model_not_mock_sentinel():
     assert finished.payload["llm_account"] == "acct-real"
     assert "mock" not in started.payload["model"]
     assert "mock" not in finished.payload["llm_model"]
+
+
+@pytest.mark.asyncio
+async def test_compact_sends_resolved_model_to_llm_client_not_mock_sentinel():
+    """真正钉住本次改动的验收测试：断言**实际发给 LLM client 的 request.model**
+    （不是事件 payload），验收标准是「把 summarize_for_compact 的
+    `model=model` 改回 `model=agent.runtime.get("llm_model", "mock")`，本测试必须变红」
+    ——已实测确认这一点（改回旧写法 → 本测试失败 `assert 'mock' == 'claude-real-model'`
+    这类；`test_compact_events_carry_resolved_model_not_mock_sentinel` 及全仓其余测试
+    在同样的回退下仍然全绿，测不出问题，这正是复审揪出的盲区）。
+
+    走 inline compact 语义的最小化 state/ctx（`_make_compact_state`/`_make_compact_ctx`
+    本就是给 inline 路径搭的最小夹具）——**不**走 `compact_session`，因为那条路径靠
+    `runtime.py:1809` 的 `agent.runtime={"llm_model": rm.model}` 桥接，一直是对的，
+    测不出 inline 路径这个 bug。
+    """
+    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+
+    state = _make_compact_state()
+    state.agent.runtime = {}  # 正常任务执行下 agent.runtime 就是这样——不含 llm_model
+    state.resolved_model = SimpleNamespace(model="claude-real-model", account="acct-real")
+    llm = _FakeLLM()
+    ctx = _make_compact_ctx(_RecordingBus(), llm=llm)
+
+    await summarize_for_compact(state, ctx, scope="task")
+
+    assert llm.last_request is not None
+    assert llm.last_request.model == "claude-real-model"
+    assert llm.last_request.model != "mock"
 
 
 @pytest.mark.asyncio
