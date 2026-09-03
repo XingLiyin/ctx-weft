@@ -107,9 +107,11 @@ class LifecycleManager:
         parent_agent_id: str | None = None,
         task_id: str | None = None,
         agent_id: str | None = None,
+        template: AgentTemplate | None = None,
         ctx: ProviderContext | None = None,
     ) -> tuple[Agent, AgentTemplate]:
-        """真新建：解析 template，生成新 id（或用调用方预铸的），登记 record，发出身事件。
+        """真新建：解析 template（或用调用方预解析的），生成新 id（或用调用方预铸的），
+        登记 record，发出身事件。
 
         template_id 须为规范形式 provider:name；裸 id 由 TemplateLookup 抛 TemplateNotFoundError。
         深度超限发 SpawnRejected 并抛 SpawnDepthExceeded。
@@ -125,13 +127,23 @@ class LifecycleManager:
         才能把 root_agent_id 塞进 SESSION_CREATED payload，而 SESSION_CREATED 必须
         先于这里发出的 AgentInstantiated（因果序 Session → Agent → Task）。传入的
         id 若已登记过 → DuplicateAgentId：见该异常 docstring，这不是「水合」。
+
+        template：调用方已经解析过的 template 对象，传了就直接用，不再自己
+        `get_template`。目前只有 SessionManager.create_session 会传——它得先解析
+        一次校验 template_id（入口即拒、不落库，必须在任何 emit 之前完成），若这
+        里再解析第二次，`LocalAgentTemplateProvider` 每次都重新扫盘（docstring
+        明写「热更新友好」），两次调用之间存在真实 TOCTOU 窗口：SESSION_CREATED
+        已经落库后，第二次解析可能拿到热更新后的不同版本甚至 TemplateNotFoundError，
+        击穿「入口即拒、不落库」。传预解析对象消灭这个窗口——全程只解析一次。
+        省略则照旧自己解析（子 agent 路径不受影响，它没有相同的两阶段需求）。
         """
         if agent_id is not None and agent_id in self._agents:
             raise DuplicateAgentId(f"agent_id {agent_id} already registered")
-        resolve_ctx = ctx or ProviderContext(session_id=session_id, tenant_id=tenant_id)
-        template: AgentTemplate = await self.template_lookup.get_template(
-            template_id, None, ctx=resolve_ctx,
-        )
+        if template is None:
+            resolve_ctx = ctx or ProviderContext(session_id=session_id, tenant_id=tenant_id)
+            template = await self.template_lookup.get_template(
+                template_id, None, ctx=resolve_ctx,
+            )
 
         spawn_depth = 0
         if parent_agent_id is not None:

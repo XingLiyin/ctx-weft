@@ -195,11 +195,14 @@ class SessionManager:
         )
 
         # 同样是「入口即拒、不落库」：template 解析失败必须在任何 emit 之前抛出，
-        # 不能让 SESSION_CREATED 已经落库、随后才发现 template_id 是坏的。真正的
-        # 登记 + AgentInstantiated 发射交给下面的 instantiate()——这里只探路，
-        # 拿到的 template 对象仅用于 sanity（instantiate 会按同一 template_id 再
-        # 解析一次；provider 侧是幂等读取，不引入副作用）。
-        await self.lifecycle_manager.template_lookup.get_template(template_id, None, ctx=ctx)
+        # 不能让 SESSION_CREATED 已经落库、随后才发现 template_id 是坏的。
+        # 只解析这一次——LocalAgentTemplateProvider 每次 get_template 都重新扫盘
+        # （热更新友好），解析两次会在 SESSION_CREATED 落库之后再开一个 TOCTOU
+        # 窗口（模板可能已被热更新/删除），把「入口即拒、不落库」击穿。这里解析出的
+        # template 对象直接传给下面的 instantiate(template=...)，它不会再自己解析。
+        template = await self.lifecycle_manager.template_lookup.get_template(
+            template_id, None, ctx=ctx,
+        )
 
         # root agent id 得在 SESSION_CREATED 之前铸出来：事件因果序必须是
         # Session → Agent → Task（host 侧 agents 表对 sessions.id 有 FK，
@@ -243,9 +246,10 @@ class SessionManager:
         })
         # 登记 record + 发 AgentInstantiated（root 没有 parent_agent_id，
         # LifecycleManager.instantiate 内部只发这一条，不发 AgentSpawned）。
+        # template=template：复用上面已经解析过的对象，全程只解析一次。
         await self.lifecycle_manager.instantiate(
             template_id=template_id, session_id=sid, tenant_id=tenant_id,
-            agent_id=agent_id, ctx=ctx,
+            agent_id=agent_id, template=template, ctx=ctx,
         )
         self.register_session(sid, tenant_id=tenant_id)
 
