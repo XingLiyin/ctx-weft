@@ -192,3 +192,16 @@ async def test_observe_request_events_carry_resolved_model_identity(monkeypatch)
     finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED][0]
     assert finished.payload["llm_model"] == "deepseek-v4-pro"
     assert finished.payload["llm_account"] == "deepseek-rj"
+
+
+def test_resolve_llm_identity_raises_readable_error_when_unset():
+    """resolved_model 未设置时给出可读报错，而不是裸 AttributeError。
+
+    调用方若在 asyncio.create_task 里跑且用无超时的 event.wait() 等待，
+    一个不可读的早期异常会表现为「挂起 30 秒无输出」——诊断成本极高。
+    """
+    import pytest
+
+    state = SimpleNamespace(resolved_model=None)
+    with pytest.raises(RuntimeError, match="resolved_model must be set"):
+        resolve_llm_identity(state)

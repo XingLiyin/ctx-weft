@@ -84,6 +84,10 @@ def resolve_llm_identity(state) -> tuple[str, str]:
     时恒报 "mock"。ResolvedModel 永远是解析过的确定值，报不出假数据。
     """
     rm = state.resolved_model
+    if rm is None:
+        raise RuntimeError(
+            "resolve_llm_identity: state.resolved_model must be set before dispatch"
+        )
     return rm.model, rm.account
 
 
