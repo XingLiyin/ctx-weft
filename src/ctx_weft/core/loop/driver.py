@@ -253,8 +253,11 @@ class StepDriver:
         while next_step_name is not None:
             # 软打断（interrupt）由 act 的 checkpoint 负责 park，这里不硬取消（否则 step 间命中会误终态）；
             # 仅硬取消（cancel 模式）在 step 边界抛 CancelledError。
+            # 曾经 CancelToken 上挂过 mode 字段区分 pause/cancel 两种模式，`mode == "cancel"`
+            # 这个条件是那段历史的残留；pause 模式早已退役、CancelToken 现在没有 mode 属性，
+            # getattr 恒回落默认值 "cancel"，条件恒真——删掉，不是漏判。
             tok = ctx.cancel_token
-            if tok is not None and tok.is_cancelled and getattr(tok, "mode", "cancel") == "cancel":
+            if tok is not None and tok.is_cancelled:
                 tok.raise_if_cancelled()
 
             step = self.steps.get(next_step_name)

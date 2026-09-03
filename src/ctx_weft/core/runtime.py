@@ -1750,7 +1750,6 @@ class CtxWeftRuntime:
         if session_id in self._busy_sessions or self._run_tokens.get(session_id):
             raise SessionBusyError(session_id)
         self._busy_sessions.add(session_id)
-        token = CancelToken()
         try:
             view = await rebuild_view(self.event_store, session_id)
             proj = view.sessions.get(session_id)
