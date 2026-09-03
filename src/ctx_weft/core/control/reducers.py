@@ -574,11 +574,22 @@ def _apply(view: RunStateView, ev: Event) -> None:
             if sess is not None:
                 sess.failure_counter = 0
 
+        # 成果物与死因：数据在 task 终态事件的 payload 里（总账 A1）。
+        # TaskFinalized 从不发这两个键，故不能挂在它上面读。
+        if task is not None:
+            if t == EventType.TASK_FINISHED:
+                if "outputs" in p:
+                    task.outputs = p.get("outputs")
+            elif t in (EventType.TASK_FAILED, EventType.TASK_INTERRUPTED):
+                msg = p.get("error_message")
+                if msg:
+                    task.error = msg
+
     elif t == EventType.TASK_FINALIZED and ev.task_id:
         task = view.tasks.get(ev.task_id)
         if task is not None:
-            task.outputs = p.get("outputs")
-            task.error = p.get("error")
+            # outputs/error 不在本事件的 payload 里（发射侧只发 task_id/outcome）——
+            # 它们由 TaskFinished/TaskFailed/TaskInterrupted 折入，见总账 A1。
             task.finished_at = ev.timestamp
 
     # ── LLM / Context ─────────────────────────────────────────────────────────
