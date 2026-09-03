@@ -149,8 +149,13 @@ async def test_inject_user_reply_awaits_pending_background_observe(monkeypatch):
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = Task(id="t1", session_id="s1", status="SUSPENDED",
                 assigned_agent_id="a1", creator_agent_id="a1")
+    async def _mark_human_resolved(tid, *, hitl_id):
+        if tid == "t1" and task.status not in ("FINISHED", "FAILED", "CANCELED"):
+            task.status = "PENDING"
+
     task_manager = SimpleNamespace(get_task=lambda tid: task if tid == "t1" else None,
-                                   children_of=lambda tid: set())
+                                   children_of=lambda tid: set(),
+                                   mark_human_resolved=_mark_human_resolved)
     req = PendingHitl(
         id="h1", form=HITL_FORM_WAIT, session_id="s1", task_id="t1", agent_id="a1",
         delivery=UserTurnDelivery(task_id="t1", preface=PREFACE_NORMAL),

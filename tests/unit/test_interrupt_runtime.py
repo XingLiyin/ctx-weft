@@ -90,7 +90,8 @@ async def test_inject_user_reply_phase1_adds_edit_note():
     task = SimpleNamespace(id="t1", status="SUSPENDED", outputs=None, process_report=None)
     # children_of：`_inject_user_reply` 现在据它跳过「SUSPENDED 在活子任务上」的父任务
     # （复审 I7）。这里的 fake 无子任务。
-    tm = SimpleNamespace(get_task=lambda tid: task, children_of=lambda tid: set())
+    tm = SimpleNamespace(get_task=lambda tid: task, children_of=lambda tid: set(),
+                         mark_human_resolved=_fake_mark_human_resolved({"t1": task}))
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
     await mem.ingest(MemoryEvent(
@@ -118,7 +119,8 @@ async def test_inject_user_reply_non_edit_has_no_note():
     task = SimpleNamespace(id="t1", status="SUSPENDED", outputs=None, process_report=None)
     # children_of：`_inject_user_reply` 现在据它跳过「SUSPENDED 在活子任务上」的父任务
     # （复审 I7）。这里的 fake 无子任务。
-    tm = SimpleNamespace(get_task=lambda tid: task, children_of=lambda tid: set())
+    tm = SimpleNamespace(get_task=lambda tid: task, children_of=lambda tid: set(),
+                         mark_human_resolved=_fake_mark_human_resolved({"t1": task}))
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
@@ -133,12 +135,26 @@ async def test_inject_user_reply_non_edit_has_no_note():
 # ── I7：reply 路径上的 task 状态重置必须是有条件的 ────────────────────────────
 
 
+def _fake_mark_human_resolved(by_id: dict):
+    """`TaskManager.mark_human_resolved` 的轻量替身：不看当前状态，非终态即置 PENDING。
+
+    与生产实现（`task_manager.py`）同形，只是不发事件——这些测试只关心 `_inject_user_reply`
+    交出的状态转移，事件真实发射由 `test_task_human_resolved_e2e.py` 走真实 TM 覆盖。
+    """
+    async def _mark_human_resolved(tid, *, hitl_id):
+        t = by_id.get(tid)
+        if t is not None and t.status not in ("FINISHED", "FAILED", "CANCELED"):
+            t.status = "PENDING"
+    return _mark_human_resolved
+
+
 def _tm_with_children(parent, children):
-    """真实 `TaskManager` 的两个被用到的读接口：`get_task` / `children_of`。"""
+    """真实 `TaskManager` 的三个被用到的读/写接口：`get_task` / `children_of` / `mark_human_resolved`。"""
     by_id = {t.id: t for t in [parent, *children]}
     return SimpleNamespace(
         get_task=lambda tid: by_id.get(tid),
         children_of=lambda tid: {c.id for c in children} if tid == parent.id else set(),
+        mark_human_resolved=_fake_mark_human_resolved(by_id),
     )
 
 
