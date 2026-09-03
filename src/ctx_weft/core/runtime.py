@@ -851,6 +851,11 @@ class CtxWeftRuntime:
         # 取消前判定会话是否已空闲挂起（无在跑任务）。RUNNING：在途 task 经 CancelToken→checkpoint
         # 协作取消→on_task_finished→is_done→_fire_session_done→_on_done 自行回收，故此处不抢着回收。
         idle = task_manager is not None and task_manager.is_done()
+        # 未决的 ask_user 一并终局，且**先于**下面 cancel_all 触发的 SessionFinished——
+        # 与熔断 trip 序列同一条纪律（HITL 终局须先于会话终态）。不终局的代价在重启后：
+        # rebuild_hitl 按「有 HitlOpened 无终局事件」折 pending，会把已取消会话的
+        # 提问当未决恢复出来（总账 A10）。
+        await self._cancel_session_hitl(session_id, message=CancelReason.USER_CANCEL)
         if task_manager is not None:
             await task_manager.cancel_all(reason=CancelReason.USER_CANCEL)
         for tokens in per.values():
@@ -1156,7 +1161,8 @@ class CtxWeftRuntime:
         # 熔断真终结（Task 10）三处注入：cancel 挂起 HITL / 协作取消在途 run / memory 闭合。
         # 均 best-effort——trip 序列本身不因这三者缺失或异常而崩溃（TaskManager 侧已兜底）。
         task_manager.set_cancel_pending_hitl(
-            lambda sid=session.id: self._cancel_session_hitl(sid)
+            lambda sid=session.id: self._cancel_session_hitl(
+                sid, message=CancelReason.FAILURE_THRESHOLD)
         )
         task_manager.set_cancel_inflight(
             lambda tid, sid=session.id: self._cancel_run_token(sid, tid)
@@ -1207,14 +1213,16 @@ class CtxWeftRuntime:
 
     # ── 熔断真终结（Task 10 runtime 侧）───────────────────────────────────────
 
-    async def _cancel_session_hitl(self, session_id: str) -> None:
-        """trip 序列第 3 步注入：取消该 session 全部未决 pending HITL（best-effort，逐个 cancel）。
+    async def _cancel_session_hitl(self, session_id: str, *, message: CancelReason) -> None:
+        """取消该 session 全部未决 pending HITL（best-effort，逐个 cancel）。两个调用方：
+        熔断 trip 序列第 3 步注入（`message=FAILURE_THRESHOLD`）、`cancel_session` 用户
+        主动取消会话（`message=USER_CANCEL`）——各传各的判别值，不再硬编码熔断专属。
 
-        单条取消失败不阻断其余——HitlCancelled 需尽量全部先于会话终态发出，但这不是硬要求。
+        单条取消失败不阻断其余——HitlResolved 需尽量全部先于会话终态发出，但这不是硬要求。
         """
         for req in list(self.hitl_registry.list_pending(session_id=session_id)):
             try:
-                await self.hitl.cancel(req.id, message=CancelReason.FAILURE_THRESHOLD)
+                await self.hitl.cancel(req.id, message=message)
             except Exception:
                 logger.exception(
                     "_cancel_session_hitl: cancel failed for session=%s hitl=%s", session_id, req.id,
