@@ -1361,6 +1361,7 @@ class CtxWeftRuntime:
         *,
         user_reply: "PendingHitl | None" = None,
         resumed_task_id: str | None = None,
+        hitl_id: str = "",
     ) -> None:
         """Serialize resume per session, then reuse the live owner or rebuild + drain.
 
@@ -1372,12 +1373,16 @@ class CtxWeftRuntime:
         不收 llm_account/llm_model：续跑路径一概不碰模型（批次 B）。换模型走
         `set_agent_llm`/`set_session_llm` 两条命令，registry 是模型选择的唯一
         住所，续跑只负责把已经存在的选择重新派发出去。
+
+        ``hitl_id``：冷 HITL 应答触发的续跑才有意义——``_resume_after_hitl`` 总是传
+        ``req.id``。纯 ``/resume``（无 hitl 语境）留空；活 owner 复用路径里它只在
+        approval 分支（无 ``user_reply``）真正被用到，见 `_resume_in_existing_tm`。
         """
         lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             await self._recover_session_locked(
                 session_id, user_reply=user_reply,
-                resumed_task_id=resumed_task_id,
+                resumed_task_id=resumed_task_id, hitl_id=hitl_id,
             )
 
     async def _recover_session_locked(
@@ -1386,6 +1391,7 @@ class CtxWeftRuntime:
         *,
         user_reply: "PendingHitl | None" = None,
         resumed_task_id: str | None = None,
+        hitl_id: str = "",
     ) -> None:
         """Reuse the live owner TM, or rebuild it from the event store, then resume.
 
@@ -1406,7 +1412,7 @@ class CtxWeftRuntime:
                 and existing.is_alive() and existing.get_task(resumed_task_id) is not None):
             await self._resume_in_existing_tm(
                 existing, user_reply=user_reply,
-                resumed_task_id=resumed_task_id,
+                resumed_task_id=resumed_task_id, hitl_id=hitl_id,
             )
             return
 
@@ -1679,21 +1685,28 @@ class CtxWeftRuntime:
         *,
         user_reply: "PendingHitl | None",
         resumed_task_id: str,
+        hitl_id: str = "",
     ) -> None:
         """把冷 HITL 应答作为消息投递给**存活的 owner TM**，就地重驱——不重建 TM（单 owner 架构）。
 
         - 不碰模型：换模型走 `set_agent_llm`/`set_session_llm`，registry 现读现解，
           续跑只管把已经存在的选择重新派发出去（批次 B）。
         - 控制令牌随 run 在派发时发放（per-run registry），无需在此重建。
-        - wait_for_user 冷应答注入用户回复到 task 层；approval 走 reconcile。
+        - wait_for_user 冷应答注入用户回复到 task 层（`_inject_user_reply` 自己发
+          `TaskHumanResolved`）；approval 走 reconcile，由本方法直接调 `resume_task`
+          发那条事件——两条路径合起来正好各发一次，不重不漏（D4）。
         - 重排被应答的 task 并重新 drain（``_register_and_drain`` 对同一 TM 幂等：重挂回调 + 派发）。
+
+        ``hitl_id``：仅 approval 分支（``user_reply is None``）用得到，直接传给
+        `resume_task`。wait_for_user 分支不需要它——`_inject_user_reply` 用的是自己
+        收到的 `user_reply.id`。省略时默认空串，仅供无真实 HITL 语境的既有测试兼容。
         """
         session = tm.session
         if session is None:  # 防御：存活 owner 一定注入过 session
             raise RuntimeError("live TaskManager has no session — cannot resume in place")
         if user_reply is not None:
             await self._inject_user_reply(user_reply, session, tm)
-        tm.resume_task(resumed_task_id)
+        await tm.resume_task(resumed_task_id, hitl_id=hitl_id)
         self._register_and_drain(session, tm)
 
     async def compact_session(
@@ -1865,11 +1878,12 @@ class CtxWeftRuntime:
         try:
             if isinstance(req.delivery, ToolResultDelivery):
                 await self.recover_session(
-                    req.session_id, resumed_task_id=req.task_id,
+                    req.session_id, resumed_task_id=req.task_id, hitl_id=req.id,
                 )
             elif isinstance(req.delivery, UserTurnDelivery):
                 await self.recover_session(
                     req.session_id, user_reply=req, resumed_task_id=req.delivery.task_id,
+                    hitl_id=req.id,
                 )
             # NoResumeDelivery：纯通知 / 取消，无动作。
         except Exception:
@@ -1896,6 +1910,13 @@ class CtxWeftRuntime:
         正是 `status == "SUSPENDED"`）。在这里无条件翻成 PENDING **却没有人入队**，那次
         合法唤醒就被静默吞掉，父任务永久停摆——与恢复路径上早已拆掉的正是同一个形状。
         `_resume_in_existing_tm` 那条分支不受影响：它随后调 `resume_task()`，会真的入队。
+
+        **本方法自己发 `TaskHumanResolved`（D4）**，不委托给 `resume_task`：重建路径上
+        `restore()` 早于本方法跑，且已把该 task 的状态从 `AWAITING_HUMAN` 翻成了
+        `PENDING`——等本方法执行到这里时状态已经"看不出"曾经被人挡住过，`resume_task`
+        那种"状态仍是 AWAITING_HUMAN/SUSPENDED 才发"的判据在这条路径上必然落空。
+        本方法反而不看当前状态，只要没走上面 SUSPENDED-on-children 的提前返回、且非
+        终态，就发一次——这是 `TaskAwaitingHuman{hitl_id}` 在这条路径上唯一的解除点。
         """
         target = task_manager.get_task(req.task_id)
         if target is None:
@@ -1915,6 +1936,15 @@ class CtxWeftRuntime:
         target.process_report_at = None
         if target.status not in ("FINISHED", "FAILED", "CANCELED"):
             target.status = "PENDING"
+            # 不经 task_manager._emit：这里只有真实 Session（tenant_id 从它取），
+            # task_manager 在部分既有单测里是不带 _emit 的轻量 fake——直接走
+            # runtime 自己的 event_bus，与 TaskManager._emit 构造同形。
+            await self._event_bus.emit(Event(
+                id=generate_id("evt"), run_id=None, sequence=0,
+                session_id=session.id, type=EventType.TASK_HUMAN_RESOLVED,
+                timestamp=now_utc(), tenant_id=session.tenant_id,
+                task_id=target.id, payload={"hitl_id": req.id},
+            ))
 
     async def _write_hitl_reply_turn(
         self, req: "PendingHitl", session: Session, target: "Task",

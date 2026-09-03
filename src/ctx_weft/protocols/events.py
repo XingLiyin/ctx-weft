@@ -109,6 +109,11 @@ class EventType(StrEnum):
     # 且不写 task 状态——task 停在哪由 TASK_INTERRUPTED 说（docs/events-v2.md §2.4）。
     RUN_INTERRUPTED = "RunInterrupted"          # payload: {reason, error_code?, error_message?}
     TASK_RESUMED = "TaskResumed"
+    # task 域：TaskAwaitingHuman{hitl_id} 的配对解除事件——「人已经答复/放行，这个 task
+    # 不再等人了」。同一个 hitl_id 把被挡住的区间括起来（D4）。**不复用 TaskRequeued**：
+    # 后者已经背着两义（retry / reopen），判据是类型不是 payload（docs/events-v2.md §2.3）。
+    # → PENDING，且清旧产出（与 TaskRequeued 效果相同，但类型不同）。
+    TASK_HUMAN_RESOLVED = "TaskHumanResolved"   # payload: {hitl_id}
     TASK_FINISHED = "TaskFinished"
     TASK_FAILED = "TaskFailed"
     TASK_CANCELED = "TaskCanceled"

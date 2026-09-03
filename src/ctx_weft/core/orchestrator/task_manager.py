@@ -1199,9 +1199,13 @@ class TaskManager:
         if parent_id is None:
             return
 
-        # 判定 all_done → 翻转 SUSPENDED→ACTIVE → push 三步必须在同一临界区内完成：
+        # 判定 all_done → 翻转 SUSPENDED→PENDING → push 三步必须在同一临界区内完成：
         # 否则两个（同 agent）子任务并发完成时会各自读到 all_done=True + status==SUSPENDED，
         # 双双 push/resume 父任务（父在同一 scope 上并发跑两遍，污染 memory）。drain 留到锁外。
+        #
+        # PENDING 不是 ACTIVE（D5）：ACTIVE 的正主是 TASK_STARTED（TM 派发时发、回填
+        # assigned_agent_id）。这里只是「解除阻塞、入队」，真正开始跑要等 drain 派发到它。
+        # 此前置 ACTIVE 是入队前的抢跑，投影因此在派发前的窗口就误报「在跑」。
         resumed = False
         async with self._lock:
             siblings = self._children_of.get(parent_id, set())
@@ -1214,7 +1218,7 @@ class TaskManager:
             if all_done:
                 parent_task = self._tasks.get(parent_id)
                 if parent_task and parent_task.status == "SUSPENDED":
-                    parent_task.status = "ACTIVE"
+                    parent_task.status = "PENDING"
                     self._queue.push(QueueEntry(
                         task_id=parent_id,
                         session_id=self._session_id,
@@ -1251,12 +1255,18 @@ class TaskManager:
             self._session.status = status
         await self._fire_session_done()
 
-    def resume_task(self, task_id: str) -> None:
+    async def resume_task(self, task_id: str, *, hitl_id: str) -> None:
         """重排一个被 HITL 应答唤醒的 task：置 PENDING 并入队，供**复用活 owner**的就地续跑路径。
 
         不重建 TM——直接把该 task 塞回本 owner 的队列。已终结/在跑/已在队列的任务不重复入队。
-        wait_for_user 冷应答已由 `_inject_user_reply` 置 PENDING，这里补入队；approval 走此路径重排后
-        由 reconcile 重放 dangling tool_call。
+        wait_for_user 冷应答已由 `_inject_user_reply` 置 PENDING（并自行发 `TaskHumanResolved`，
+        见其 docstring）；approval 走此路径重排后由 reconcile 重放 dangling tool_call——这里
+        才是 approval 分支唯一发 `TaskHumanResolved` 的地方，与 `TaskAwaitingHuman{hitl_id}`
+        配对（D4）。
+
+        **只在真的解除了「被人挡住」时才发那条事件**（`was_blocked` 判据）：`_inject_user_reply`
+        走 wait_for_user 分支时已经把状态改成 PENDING 并自己发过一次；若这里不做这个判断，
+        紧随其后的这次调用会对同一个 hitl_id 重复发 `TaskHumanResolved`——配对就不再是一对一。
         """
         t = self._tasks.get(task_id)
         if t is None or t.status in ("FINISHED", "FAILED", "CANCELED"):
@@ -1265,11 +1275,15 @@ class TaskManager:
             return
         if any(e.task_id == task_id for e in self._queue.peek_all()):
             return
+        was_blocked = t.status in ("AWAITING_HUMAN", "SUSPENDED")
         t.status = "PENDING"
         t.retry_count = 0  # 挂起期间的旧计数不带入新一轮 attempt
         self._queue.push(QueueEntry(
             task_id=task_id, session_id=self._session_id, priority=t.priority,
         ))
+        if was_blocked:
+            await self._emit(EventType.TASK_HUMAN_RESOLVED, task_id=task_id,
+                              payload={"hitl_id": hitl_id})
 
     def is_cancelled(self) -> bool:
         """本 TM 是否已被硬取消（cancel_all 置 _cancelled）——供派发点补投 born-cancel 判定。"""

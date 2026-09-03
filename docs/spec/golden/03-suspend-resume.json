@@ -1,6 +1,6 @@
 {
   "name": "suspend-resume",
-  "description": "tsk_1 ACTIVE → SUSPENDED（派生子任务挂起）→ RESUMED（子任务完成后重新入队）。验证 TASK_STATUS 映射的挂起/恢复分支。task 状态所有权重构（2026-09-02）后 TaskSuspended 由 TaskManager 发、不带 run_id；payload 照抄 `disposition_for`（`summary` + `spawn_titles`），不再带 `task_id`（envelope 已有，旧 suspend.py 的 payload 曾重复一份）。",
+  "description": "tsk_1 ACTIVE → SUSPENDED（派生子任务挂起）→ RESUMED（子任务完成后重新入队）。验证 TASK_STATUS 映射的挂起/恢复分支。task 状态所有权重构（2026-09-02）后 TaskSuspended 由 TaskManager 发、不带 run_id；payload 照抄 `disposition_for`（`summary` + `spawn_titles`），不再带 `task_id`（envelope 已有，旧 suspend.py 的 payload 曾重复一份）。TaskResumed → PENDING 不是 ACTIVE（Task 10 / D5）：ACTIVE 的正主是 TaskStarted（TM 派发时发、回填 assigned_agent_id）；解挂到真正派发之间那段窗口 task 在队列里，不是在跑。",
   "runId": "s1",
   "events": [
     {
@@ -33,9 +33,9 @@
   ],
   "expected": {
     "sessionStatus": "RUNNING",
-    "taskStatus": "ACTIVE",
+    "taskStatus": "PENDING",
     "tasks": {
-      "tsk_1": { "status": "ACTIVE" }
+      "tsk_1": { "status": "PENDING" }
     },
     "agents": ["agt_root"]
   }

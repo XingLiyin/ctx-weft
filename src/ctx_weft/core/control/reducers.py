@@ -56,8 +56,13 @@ TASK_STATUS_BY_EVENT: dict[EventType, TaskStatus] = {
     EventType.TASK_FINISHED: "FINISHED",
     EventType.TASK_FAILED: "FAILED",
     EventType.TASK_CANCELED: "CANCELED",
-    EventType.TASK_RESUMED: "ACTIVE",
+    # ACTIVE 的正主是 TASK_STARTED（TM 派发时发、回填 assigned_agent_id）。TaskResumed
+    # 只说「不再被子任务挡住了」——解挂到真正派发之间那段窗口 task 在队列里，不是在跑
+    # （D5：此前这里映射 ACTIVE 是在镜像 `_try_resume_parent` 入队前抢跑置位的缺陷）。
+    EventType.TASK_RESUMED: "PENDING",
     EventType.TASK_REQUEUED: "PENDING",
+    # 见下方专属分支（与 TASK_REQUEUED 一样需要清 outputs，这里仅供直接查表的消费方用）。
+    EventType.TASK_HUMAN_RESOLVED: "PENDING",
 }
 
 # L 档翻译表：存量日志里 `SessionStatusChanged.new_status` 可能带旧词表的值。
@@ -535,6 +540,16 @@ def _apply(view: RunStateView, ev: Event) -> None:
             oup = p.get("original_user_prompt")
             if oup is not None:
                 task.original_user_prompt = content_from_jsonable(oup)
+        view.task_status = "PENDING"
+
+    elif t == EventType.TASK_HUMAN_RESOLVED and ev.task_id:
+        # 「解除阻塞」不是「开始执行」：人已答复/放行，回 PENDING、清旧产出——与
+        # TASK_REQUEUED 效果相同（判据是类型不是 payload，D4/见 docs/events-v2.md §2.3），
+        # 但这是 TaskAwaitingHuman{hitl_id} 的配对解除事件，不是重排重试。
+        task = view.tasks.get(ev.task_id)
+        if task is not None:
+            task.status = "PENDING"
+            task.outputs = None
         view.task_status = "PENDING"
 
     elif t in TASK_STATUS_BY_EVENT and ev.task_id:

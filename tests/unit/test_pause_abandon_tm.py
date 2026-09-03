@@ -77,8 +77,9 @@ async def test_abandon_pending_resumes_suspended_parent_of_queued_children():
 
     cancelled = await tm.abandon_pending()
     assert set(cancelled) == {"tc1", "tc2"}
-    # 父任务被重排为唯一续跑点候选（派发后按出生信号 park/级联）
-    assert tm.get_task("tp").status == "ACTIVE"
+    # 父任务被重排为唯一续跑点候选（派发后按出生信号 park/级联）。PENDING 不是 ACTIVE
+    # （Task 10 / D5）：drain 空转（max_concurrent=0），派发前 ACTIVE 会是抢跑。
+    assert tm.get_task("tp").status == "PENDING"
     assert any(e.task_id == "tp" for e in tm._queue.peek_all())
 
 

@@ -176,13 +176,16 @@ def test_restore_requeues_crash_suspended_with_fresh_retries() -> None:
     assert entry is not None and entry.task_id == "A"
 
 
-def test_resume_task_resets_retry_count() -> None:
-    """就地续跑路径（resume_task）同样归零：挂起期间的旧计数不带入新一轮 attempt。"""
+async def test_resume_task_resets_retry_count() -> None:
+    """就地续跑路径（resume_task）同样归零：挂起期间的旧计数不带入新一轮 attempt。
+
+    resume_task 现在是 async 的（Task 10：解除阻塞要发 TaskHumanResolved，D4）。
+    """
     tm = TaskManager(session_id="s1")
     t = Task(id="A", session_id="s1", status="SUSPENDED", retry_count=2)
     tm.register_task(t)
 
-    tm.resume_task("A")
+    await tm.resume_task("A", hitl_id="hit_1")
 
     assert t.status == "PENDING"
     assert t.retry_count == 0

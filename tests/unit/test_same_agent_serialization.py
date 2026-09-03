@@ -174,7 +174,9 @@ async def test_resume_parent_when_all_children_terminal() -> None:
     tm.set_runner(StubRunner(tm, runner))
     await tm._try_resume_parent("B")
 
-    assert parent.status == "ACTIVE"
+    # PENDING 不是 ACTIVE（Task 10 / D5）：ACTIVE 的正主是 TASK_STARTED，_try_resume_parent
+    # 只负责解挂入队，不该在派发前抢跑声称「在跑」。
+    assert parent.status == "PENDING"
     assert tm._queue.has_pending()  # 父已重新入队
 
 
@@ -216,7 +218,11 @@ async def test_resume_parent_empty_children_set_no_resume() -> None:
 
 
 async def test_resume_parent_not_double_resumed() -> None:
-    """两个子任务先后触发 resume：父翻成 ACTIVE 后第二次不得再入队（原子性 + 状态守卫）。"""
+    """两个子任务先后触发 resume：父翻成 PENDING 后第二次不得再入队（原子性 + 状态守卫）。
+
+    PENDING 而非 ACTIVE（Task 10 / D5）——守卫判据是「不再是 SUSPENDED」，与具体
+    翻成哪个非 SUSPENDED 状态无关，故改动不影响这条不变式本身。
+    """
     tm = TaskManager(session_id="s1", max_concurrent=0)
     parent = Task(id="P", session_id="s1", status="SUSPENDED")
     a = Task(id="A", session_id="s1", status="FINISHED", parent_task_id="P")
@@ -231,8 +237,8 @@ async def test_resume_parent_not_double_resumed() -> None:
 
     tm.set_runner(StubRunner(tm, runner))
     await tm._try_resume_parent("A")
-    assert parent.status == "ACTIVE"
+    assert parent.status == "PENDING"
     n_after_first = tm._queue.pending_count()
 
-    await tm._try_resume_parent("B")  # 父已 ACTIVE → 不再入队
+    await tm._try_resume_parent("B")  # 父已不是 SUSPENDED → 不再入队
     assert tm._queue.pending_count() == n_after_first

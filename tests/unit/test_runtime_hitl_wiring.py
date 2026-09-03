@@ -38,7 +38,8 @@ def _runtime_with_recorded_resume() -> tuple[CtxWeftRuntime, list[tuple]]:
     rt = _runtime()
     calls: list[tuple] = []
 
-    async def fake_recover_session(session_id, *, resumed_task_id=None, user_reply=None):
+    async def fake_recover_session(session_id, *, resumed_task_id=None, user_reply=None,
+                                    hitl_id=""):
         if user_reply is not None:
             calls.append(("inject_user_turn", session_id, resumed_task_id))
         else:
