@@ -77,12 +77,18 @@ class HitlService:
         tool_call_id: str = "",
         stage: str,
         invocation_key: str = "",
+        tenant_id: str = "default",
     ) -> PendingHitl:
         """登记一个请求并发 `HitlOpened`。同 `(session_id, tool_call_id, stage,
         invocation_key)` 复用既有请求且**不重发事实**。
 
         `invocation_key` 见 `PendingHitl.invocation_key`：同一 tool_call id 下的**另一次**
         调用不得复用上一次的记录/决定（复审 I3）。
+
+        `tenant_id`：调用方从其上下文（`ProviderContext.tenant_id` / `Session.tenant_id`）
+        传入——本类自己不持有、也不去解——存进 `PendingHitl.tenant_id`，供 `_emit` 与
+        之后 `resolve`/`cancel` 时同一个 `req` 复用（总账 A5：漏填时事件落到 `Event` 的
+        默认值 `"default"`，非 default 租户的投影租户就错了）。
         """
         existing = self.registry.find_for_tool_call(
             session_id, tool_call_id, stage, invocation_key=invocation_key or None)
@@ -91,7 +97,7 @@ class HitlService:
         req = self.registry.open(
             ask, hitl_id=self._new_id(), session_id=session_id, task_id=task_id,
             agent_id=agent_id, tool_call_id=tool_call_id, stage=stage, created_at=self._now(),
-            invocation_key=invocation_key,
+            invocation_key=invocation_key, tenant_id=tenant_id,
         )
         logger.info("HITL opened [%s]: %s (%s)", req.form, req.id, req.prompt[:80])
         await self._emit(EventType.HITL_OPENED, req, {
@@ -191,6 +197,7 @@ class HitlService:
             session_id=req.session_id,
             type=event_type,
             timestamp=self._now(),
+            tenant_id=req.tenant_id,
             task_id=req.task_id or None,
             agent_id=req.agent_id or None,
             payload=payload,

@@ -58,6 +58,10 @@ class PendingHitl:
     agent_id: str
     delivery: Delivery
     created_at: datetime
+    #: 开出这条请求时那次调用所在的租户——`HitlService._emit` 据此发 `HitlOpened` /
+    #: `HitlResolved`（同一个 `req` 对象终局时沿用开局时的值，见 `_commit`）。不出
+    #: `to_view()`：host 不需要这个维度，只有事件流的 `Event.tenant_id` 需要（总账 A5）。
+    tenant_id: str = "default"
     subject_id: str = ""
     prompt: str = ""
     detail: str = ""
@@ -133,6 +137,7 @@ class HitlRegistry:
         stage: str,
         created_at: datetime,
         invocation_key: str = "",
+        tenant_id: str = "default",
     ) -> PendingHitl:
         """登记一个请求。同 `(session_id, tool_call_id, stage)` 已有记录 → **复用**，不新建
         （幂等，spec §10）。
@@ -146,6 +151,7 @@ class HitlRegistry:
         req = PendingHitl(
             id=hitl_id, form=ask.form, session_id=session_id, task_id=task_id,
             agent_id=agent_id, delivery=ask.delivery, created_at=created_at,
+            tenant_id=tenant_id,
             subject_id=ask.subject_id, prompt=ask.prompt, detail=ask.detail,
             fields=list(ask.fields), proposal=ask.proposal, tool_call_id=tool_call_id,
             stage=stage, invocation_key=invocation_key,

@@ -659,6 +659,7 @@ async def _park_wait_for_user(
         task_id=state.task.id,
         agent_id=state.agent.id,
         stage=HITL_STAGE_TOOL,
+        tenant_id=state.session.tenant_id,
     )
     # 不建等待槽 —— 本调用方随即 park 释放协程而非 await，应答必然走冷续跑。
     raise HitlPark(hitl_id=req.id)

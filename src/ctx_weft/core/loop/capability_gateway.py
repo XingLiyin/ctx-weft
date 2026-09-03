@@ -640,6 +640,7 @@ class CapabilityGateway:
             tool_call_id=tool_call_id,
             stage=stage,
             invocation_key=invocation_key,
+            tenant_id=ctx.provider_ctx.tenant_id,
         )
         human = await ctx.waiter.wait(req.id)
         if human is None:

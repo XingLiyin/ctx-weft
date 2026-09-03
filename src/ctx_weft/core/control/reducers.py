@@ -763,7 +763,7 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 id=rid, form=p.get("form", ""), session_id=ev.session_id,
                 task_id=ev.task_id or "", agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
                 delivery=_delivery_from_payload(p.get("delivery") or {}, hitl_id=rid),
-                created_at=ev.timestamp, subject_id=p.get("subject_id", ""),
+                created_at=ev.timestamp, tenant_id=ev.tenant_id, subject_id=p.get("subject_id", ""),
                 prompt=p.get("prompt", ""), detail=p.get("detail", ""),
                 fields=list(p.get("fields") or []), proposal=p.get("proposal"),
                 tool_call_id=p.get("tool_call_id", ""), stage=p.get("stage", ""),
@@ -787,7 +787,7 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 agent_id=p.get("agent_id", "") or (ev.agent_id or ""),
                 delivery=_legacy_delivery(form, tool_call_id, p.get("context", ""),
                                           ev.task_id or "", hitl_id=rid),
-                created_at=ev.timestamp, subject_id=p.get("capability_id", ""),
+                created_at=ev.timestamp, tenant_id=ev.tenant_id, subject_id=p.get("capability_id", ""),
                 stage=stage,
                 prompt=p.get("question", ""),
                 # wait 表单的旧 context 存的是模式标记（"plain_text"/"interrupt"/
