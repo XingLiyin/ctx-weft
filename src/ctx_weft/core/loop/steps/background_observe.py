@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
-from ctx_weft.core.utils import content_to_text, image_tokens
+from ctx_weft.core.utils import content_to_text, generate_id, image_tokens
 from ctx_weft.protocols import MemoryEventType, MemoryScope
 
 if TYPE_CHECKING:
@@ -346,7 +346,16 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
 def launch_background_observe(
     state: "LoopState", ctx: "LoopContext", *, boundary: str
 ) -> asyncio.Task:
-    snapshot = dataclasses.replace(state)
+    # 总账 A4：旧写法只 `dataclasses.replace(state)`——run_id 与主 run 相同，但
+    # sequence_counter 是一份独立的 int 副本（普通字段，不可变），此后两边各自
+    # +=1，(run_id, sequence) 就会撞号。后台 recap 本来就是一段独立的工作，有自己
+    # 的起止事件（TaskRecapStarted/Done，现在还加了 RunStarted/Finished），不该
+    # 蹭主 run 的号——给它自己的 run_id、序号从 0 重开。
+    snapshot = dataclasses.replace(
+        state,
+        run_id=generate_id("run"),
+        sequence_counter=0,
+    )
     task = asyncio.create_task(_run_background_observe(snapshot, ctx, boundary))
     _task_pending[state.task.id] = task
     tm = getattr(ctx, "task_manager", None)
