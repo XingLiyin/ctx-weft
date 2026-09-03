@@ -2176,15 +2176,23 @@ class CtxWeftRuntime:
                 # 恢复期不再有专门的「PAUSED_HITL vs INTERRUPTED」分支：装填内存 HITL 之后
                 # 照常报一句队列状态，会话状态仍由 SM 判定。
                 # 「复活不是一种状态」的落地（docs/events-v2.md §2.1.1）。
+                # tenant 必须先解出来：`_task_managers` 此刻恒为空（见下）,`_tenant_for_session`
+                # 会落到读事件日志那条路（SESSION_CREATED 首条即含真 tenant）——
+                # `register_session` 与代发的队列信号都要用同一个值，否则 SM 的 `_states`
+                # 留着 "default"，之后由它派生的会话级事件（SessionWaiting 等）照样落错
+                # 租户（总账 A5）。
+                tenant_id = await self._tenant_for_session(session_id)
                 n = await self.rebuild_hitl(session_id)
-                self._session_manager.register_session(session_id)
-                await self._announce_queue_state_as_tm_proxy(session_id, n)
+                self._session_manager.register_session(session_id, tenant_id=tenant_id)
+                await self._announce_queue_state_as_tm_proxy(session_id, n, tenant_id=tenant_id)
             except Exception:
                 logger.exception("Recovery: failed to recover session %s", session_id)
 
         return len(session_ids)
 
-    async def _announce_queue_state_as_tm_proxy(self, session_id: str, pending_hitl: int) -> None:
+    async def _announce_queue_state_as_tm_proxy(
+        self, session_id: str, pending_hitl: int, *, tenant_id: str = "default",
+    ) -> None:
         """启动恢复期**代 TaskManager** 发那一条队列状态信号（SM 的唯一输入）。
 
         为什么要代行：`recover()` 跑在进程刚起来的时候，`_task_managers` 恒为空——
@@ -2200,6 +2208,9 @@ class CtxWeftRuntime:
 
         「等的是审批面板还是一句话」不在这里区分：那是 delivery 的性质、只有前端需要
         （host 的只读入口 `session_status_after_recover`），会话只有一个 WAITING。
+
+        `tenant_id`：调用方（`recover`）用 `_tenant_for_session` 解出、随 `session_id`
+        一并传入——本方法不自己解（避免恢复路径里重复付一次读事件日志的代价）。
         """
         if pending_hitl:
             event_type = EventType.TASK_QUEUE_BLOCKED
@@ -2214,6 +2225,7 @@ class CtxWeftRuntime:
             session_id=session_id,
             type=event_type,
             timestamp=now_utc(),
+            tenant_id=tenant_id,
             payload=payload,
         ))
         logger.info("Recovery: session %s → %s (%d pending HITL)",
