@@ -129,6 +129,6 @@ async def test_error_message_prefers_task_error() -> None:
 async def test_error_message_empty_without_task_error() -> None:
     """无 task.error（如规则 observe 判死）→ error_message 置空，不拿过程复述冒充死因。"""
     mem = InMemoryMemoryProvider()
-    state = await _failed_state(mem, task_error=None, act_recap="[No actor execution recorded]")
+    state = await _failed_state(mem, task_error=None, act_recap="[test placeholder recap]")
     outcome = await FinalizeStep().execute(state, _loop_ctx(mem))
     assert _task_failed_payload(outcome, state.task)["error_message"] == ""

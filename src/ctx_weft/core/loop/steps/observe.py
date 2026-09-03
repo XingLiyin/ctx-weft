@@ -286,7 +286,7 @@ class ObserveStep(Step):
 
         # close 边界：root task 在 actor_done（finish_task 收尾 → boundary="finish"）或
         # normal（actor 产出最终文本正常结束 → boundary="normal"）时触发后台异步 observe，
-        # 产段摘要 + 折 raw。两者均由 _rule_observe 映射为 success/fail，属于 root 的
+        # 产段摘要 + 折 raw。两者均由 _mechanical_verdict 映射为 success/fail，属于 root 的
         # 单次终结点——task 只 close 一次，_close_report 槽写一次、弹一次，不存在乱序复用。
         # 注：纯文本暂停（plain_text 边界）由 act.py:_finish_plain_text_turn 单独触发，不经此处。
         # max_turns/context_limit 走同步 _fold_retry_segment；非 root 不触发（它们走 LLM observe）。
