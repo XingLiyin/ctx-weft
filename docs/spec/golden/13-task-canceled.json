@@ -12,7 +12,7 @@
     { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1", "taskId": "tsk_1",
       "type": "TaskStarted", "timestamp": "2026-06-05T00:00:03Z", "payload": { "assigned_agent_id": "agt_root" } },
     { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1",
-      "type": "RunCanceled", "timestamp": "2026-06-05T00:00:04Z", "payload": {} },
+      "type": "RunCanceled", "timestamp": "2026-06-05T00:00:04Z", "payload": { "source": "token" } },
     { "id": "evt_0005", "runId": null, "sequence": 0, "sessionId": "s1", "taskId": "tsk_1",
       "type": "TaskCanceled", "timestamp": "2026-06-05T00:00:05Z", "payload": {} }
   ],

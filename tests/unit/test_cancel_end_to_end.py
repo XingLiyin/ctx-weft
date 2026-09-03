@@ -20,6 +20,7 @@ CANCELED。旧路径 `report_task_outcome` 判 fail 时就地写 `task.status="F
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,7 @@ from ctx_weft.core.control.tokens import CancelToken
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, StepOutcome
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.control_capability import ControlContext, report_task_outcome
+from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_runner import AgentBinding
 from ctx_weft.core.state.models import Agent, LoopGuard, Session, Task
@@ -192,3 +194,100 @@ async def test_observer_fail_then_boundary_cancel_lands_on_canceled() -> None:
     # 会话随之落 CANCELED（`on_task_finished` 的 CANCELED 分支）——旧路径这里是
     # `on_task_finished(FAILED)`、failure_counter +1、会话按 _final_status() 判 FAILED。
     assert session.status == "CANCELED"
+
+
+# ── Task 3：`_run_loop` 分得清取消来源（总账 A3，仅剩这一条） ──────────────────
+
+
+def _make_loop_fixture() -> tuple[CtxWeftRuntime, Session, Agent, Task, _SpyBus]:
+    """搭一份最小的 `_run_loop` 入参：真 runtime，替身 driver 直接跑。"""
+    resolver = InlineAgentTemplateProvider()
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=resolver)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+    bus = _SpyBus(runtime._event_bus)
+    runtime._event_bus = bus
+
+    session = Session(id="s2", user_prompt="hi", status="RUNNING", root_agent_id="agt1")
+    agent = Agent(id="agt1", session_id="s2", template_id="tpl", loop_guard=LoopGuard())
+    task = Task(id="B", session_id="s2", status="ACTIVE")
+    return runtime, session, agent, task, bus
+
+
+async def _run_loop_with(
+    runtime: CtxWeftRuntime, session: Session, agent: Agent, task: Task,
+    bus: _SpyBus, driver: StepDriver, token: CancelToken | None,
+) -> LoopState:
+    scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
+    state = LoopState(run_id=generate_id("run"), session=session, task=task, agent=agent,
+                      scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
+    provider_ctx = ProviderContext(session_id=session.id, tenant_id="default",
+                                   task_id=task.id, agent_id=agent.id)
+    ctx = LoopContext(
+        assembler=None, llm=runtime._resolve_llm(), memory=runtime.providers.get_memory(),
+        event_bus=bus, provider_ctx=provider_ctx, capability_cache=CapabilityCache(),
+        cancel_token=token,
+    )
+    return await runtime._run_loop(
+        state, ctx, driver, run_id=state.run_id, initial_step="observe",
+        task=task, agent=agent,
+    )
+
+
+class _CancelTokenAtBoundaryStep:
+    """跑完之后置取消 token——由 driver 的 step 边界检查点抛出 CancelledError。"""
+
+    name = "observe"
+
+    def __init__(self, token: CancelToken) -> None:
+        self._tok = token
+
+    async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
+        self._tok.cancel()
+        return StepOutcome(next_step="finalize")
+
+
+class _ExternalCancelDriver:
+    """替身 driver：`run()` 直接抛 `CancelledError`，不碰 token——模拟外部 asyncio 取消
+    （进程 shutdown / `wait_for` 超时）。与 `StepDriver` 同形的 `run(state, ctx)` 接口。
+    """
+
+    async def run(self, state: LoopState, ctx: LoopContext):
+        raise asyncio.CancelledError("external shutdown")
+        yield  # pragma: no cover - 让本方法成为 async generator，永不执行到这里
+
+
+async def _run_until_token_cancel() -> tuple[LoopState, _SpyBus]:
+    runtime, session, agent, task, bus = _make_loop_fixture()
+    token = CancelToken()
+    driver = StepDriver(steps={"observe": _CancelTokenAtBoundaryStep(token)},
+                        initial_step="observe")
+    state = await _run_loop_with(runtime, session, agent, task, bus, driver, token)
+    return state, bus
+
+
+async def _run_with_external_cancelled_error() -> tuple[LoopState, _SpyBus]:
+    runtime, session, agent, task, bus = _make_loop_fixture()
+    driver = _ExternalCancelDriver()
+    state = await _run_loop_with(runtime, session, agent, task, bus, driver, token=None)
+    return state, bus
+
+
+async def test_token_cancel_is_labelled_token() -> None:
+    """CancelToken 触发的取消，`RunCanceled` 的 payload 标 `source: token`。
+
+    裁定（task-3-report.md「裁定后的实现」）：来源标签**不进** `RunOutcome.reason`
+    ——那会流进 `TaskCanceled.payload`，撞上刻意定下的 R5（CANCELED 不编造 reason）。
+    `RUN_CANCELED` 没有 reducer 消费它，纯增量放来源标签不破契约。
+    """
+    state, bus = await _run_until_token_cancel()
+    assert state.run_outcome.kind is RunOutcomeKind.CANCELED
+    assert state.run_outcome.reason == ""            # R5：TaskCanceled 不编造 reason
+    assert bus.of(EventType.RUN_CANCELED).payload["source"] == "token"
+
+
+async def test_external_cancel_is_labelled_external() -> None:
+    """非 token 来源的 CancelledError（如进程 shutdown），`RunCanceled` 标 `source: external`。"""
+    state, bus = await _run_with_external_cancelled_error()
+    assert state.run_outcome.kind is RunOutcomeKind.CANCELED
+    assert state.run_outcome.reason == ""
+    assert bus.of(EventType.RUN_CANCELED).payload["source"] == "external"

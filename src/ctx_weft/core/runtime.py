@@ -2493,6 +2493,7 @@ class CtxWeftRuntime:
         run_error: BaseException | None = None
         was_cancelled = False
         cancel_takes_effect = False
+        cancel_source = ""
         try:
             async for outcome in driver.run(state, loop_ctx):
                 if outcome.state_patch:
@@ -2516,6 +2517,16 @@ class CtxWeftRuntime:
             # 翻成 CANCELED」记成局部量给下面 RUN_CANCELED 的守卫用；task 侧的同一守卫
             # 长在 TaskManager 的处置入口（终态已坐实 → 不应用 run 的结局）。
             cancel_takes_effect = task.status not in ("FINISHED", "FAILED", "CANCELED")
+            # 取消来源（总账 A3 剩下的一条）：token 是本 runtime 的协作取消；否则是外部
+            # asyncio 取消（进程 shutdown / `wait_for` 超时）。二者产生同一个
+            # `CancelledError`，只有 token 自己能区分。`cancel_token` 不是 `_run_loop`
+            # 的形参，实测活在 `loop_ctx.cancel_token`。
+            # 裁定（task-3-report.md「裁定后的实现」）：来源标签只进 RUN_CANCELED 的
+            # payload，**不进 `RunOutcome.reason`**——后者会流进 `TaskCanceled.payload`，
+            # 撞上刻意定下的 R5（CANCELED 不编造 reason，`disposition_for` 里 reason
+            # 非空才放键）。RunOutcome.reason 保持空串，与之前行为等价。
+            by_token = loop_ctx.cancel_token is not None and loop_ctx.cancel_token.is_cancelled
+            cancel_source = "token" if by_token else "external"
             state = state.apply_patch({"run_outcome": RunOutcome(kind=RunOutcomeKind.CANCELED)})
         except LLMOutageError as exc:
             # Task 2（loop 产出 RunOutcome，尚无消费者）：outage 硬编码 retriable=False——
@@ -2597,7 +2608,12 @@ class CtxWeftRuntime:
             # 守卫（TaskManager 的处置入口）同源。TASK_CANCELED 不在这里发了（Task 4：task
             # 状态事件只从 TaskManager 出）。RUN_FINISHED 不受此守卫约束，无论如何都发（关 SSE）。
             if was_cancelled and cancel_takes_effect:
-                await self._event_bus.emit(make_event(state, EventType.RUN_CANCELED, payload={"run_id": run_id}))
+                # 取消来源标签（总账 A3）落在这里，不落进 RunOutcome/TaskCanceled：
+                # RUN_CANCELED 没有任何 reducer 分支，全仓只有测试查它「发没发」，
+                # 对无人消费的事件做纯增量不必顾虑 R5（CANCELED payload 不编造 reason）。
+                await self._event_bus.emit(make_event(state, EventType.RUN_CANCELED, payload={
+                    "run_id": run_id, "source": cancel_source,
+                }))
             # will_retry=True suppresses SSE close on the host side.
             # cancelled → False; retriable=False → TaskManager won't retry anyway.
             will_retry = (
