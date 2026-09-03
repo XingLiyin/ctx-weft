@@ -20,6 +20,7 @@ from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import (
     LLMClient, MemoryEvent, MemoryKind, MemoryScope, MemoryProvider, MemoryAddress, ProviderContext,
 )
+from ctx_weft.protocols.events import EventOrigin
 
 if TYPE_CHECKING:
     from ctx_weft.core.loop.steps.observe import Verdict
@@ -96,6 +97,8 @@ class LoopState:
     # 其他扩展字段
     extra: dict[str, Any] = field(default_factory=dict)
 
+    origin: str = ""  # driver 每步开始前写入，make_event 默认从这里取（events-v2.md §4）
+
     def apply_patch(self, patch: dict[str, Any]) -> "LoopState":
         """应用 state_patch 返回新 LoopState（浅拷贝）。"""
         if not patch:
@@ -160,6 +163,8 @@ def make_event(
     payload: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     causation_id: str | None = None,
+    *,
+    origin: str | None = None,
 ) -> Event:
     """构造一个 Event，自动分配 id + sequence + timestamp。"""
     if type not in EVENT_TYPES:
@@ -176,6 +181,7 @@ def make_event(
         tenant_id=state.session.tenant_id,
         task_id=state.task.id,
         agent_id=state.agent.id,
+        origin=origin if origin is not None else getattr(state, "origin", ""),
         payload=payload or {},
         metadata=metadata or {},
         causation_id=causation_id,
@@ -205,6 +211,18 @@ async def _persist_user_prompt(state, ctx) -> None:
 
 
 # ── StepDriver ────────────────────────────────────────────────────────────────
+
+
+_STEP_ORIGIN: dict[str, str] = {
+    "prepare": EventOrigin.LOOP_PREPARE,
+    "act": EventOrigin.LOOP_ACT,
+    "observe": EventOrigin.LOOP_OBSERVE,
+    "recognize_intent": EventOrigin.LOOP_RECOGNIZE_INTENT,
+    "compact": EventOrigin.LOOP_COMPACT,
+    "finalize": EventOrigin.LOOP_FINALIZE,
+    "suspend": EventOrigin.LOOP_SUSPEND,
+    "reconcile": EventOrigin.LOOP_RECONCILE,
+}
 
 
 @dataclass
@@ -264,16 +282,28 @@ class StepDriver:
             if step is None:
                 raise ValueError(f"Step '{next_step_name}' not registered")
 
+            # 每步开始前写 state.origin（driver 发的三条 STEP_* 事件覆盖为 LOOP_DRIVER）
+            state.origin = _STEP_ORIGIN.get(step.name, EventOrigin.LOOP_DRIVER)
+
             # emit StepStarted
-            start_ev = make_event(state, EventType.STEP_STARTED, payload={"step_name": step.name})
+            start_ev = make_event(
+                state, EventType.STEP_STARTED, {"step_name": step.name},
+                origin=EventOrigin.LOOP_DRIVER,
+            )
             await ctx.event_bus.emit(start_ev)
 
             try:
                 outcome = await step.execute(state, ctx)
             except Exception as e:
+                error_dict = {
+                    "step_name": step.name,
+                    "error_code": type(e).__name__,
+                    "error_message": str(e),
+                }
                 fail_ev = make_event(
                     state, EventType.STEP_FAILED,
-                    payload={"step_name": step.name, "error_code": type(e).__name__, "error_message": str(e)},
+                    error_dict,
+                    origin=EventOrigin.LOOP_DRIVER,
                 )
                 await ctx.event_bus.emit(fail_ev)
                 raise
@@ -289,7 +319,8 @@ class StepDriver:
             # emit StepCompleted
             done_ev = make_event(
                 state, EventType.STEP_COMPLETED,
-                payload={"step_name": step.name, "next_step": outcome.next_step},
+                {"step_name": step.name, "next_step": outcome.next_step},
+                origin=EventOrigin.LOOP_DRIVER,
             )
             await ctx.event_bus.emit(done_ev)
 
