@@ -65,6 +65,7 @@ class SqlEventStore(EventStore):
                 payload_json=json.dumps(event.payload),
                 metadata_json=json.dumps(event.metadata),
                 causation_id=event.causation_id,
+                origin=event.origin,
                 schema_version=event.schema_version,
                 timestamp=event.timestamp,
             ))
@@ -218,6 +219,8 @@ def _row_to_event(row: EventModel) -> Event:
         payload=json.loads(row.payload_json),
         metadata=json.loads(row.metadata_json),
         causation_id=row.causation_id,
+        # 存量行该列为 NULL → 回落 ""，与 docs/events-v2.md §0「存量事件读出空串」一致。
+        origin=row.origin if row.origin is not None else "",
         # 存量行（参考宿主写的）该列为 NULL → 回落 1，零迁移。
         schema_version=row.schema_version if row.schema_version is not None else 1,
     )

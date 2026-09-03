@@ -41,6 +41,9 @@ class EventModel(Base):
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     causation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # V2 新增：哪个组件发出的（Event.origin，docs/events-v2.md §4）。存量行没有这一列
+    # → 读侧回落 ""，与 `Event.origin` 默认值同口径，零迁移。
+    origin: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 存量行（参考宿主写的）没有这一列 → 读侧给默认值 1，零迁移。
     schema_version: Mapped[int] = mapped_column(Integer, default=1)
     timestamp: Mapped[datetime] = mapped_column(UtcDateTime, server_default=func.now())

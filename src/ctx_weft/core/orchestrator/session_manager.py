@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import EventBus
-from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
+from ctx_weft.protocols.events import EVENT_TYPES, Event, EventOrigin, EventType
 from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, ModelChoice
 from ctx_weft.core.orchestrator.session_state import (
     SessionInput, TERMINAL_SESSION_STATUSES, Transition, next_transition,
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
 logger = logging.getLogger(__name__)
+
+_ORIGIN = EventOrigin.ORCHESTRATOR_SESSION_MANAGER
 
 
 def _event_jsonable_or_fallback(
@@ -396,5 +398,6 @@ class SessionManager:
             timestamp=timestamp or now_utc(),
             tenant_id=tenant_id,
             agent_id=agent_id,
+            origin=_ORIGIN,
             payload=payload,
         ))

@@ -34,7 +34,7 @@ from ctx_weft.core.assembler.sources import (
 from ctx_weft.protocols.capability import Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
 from ctx_weft.core.discriminators import CancelReason, InterruptReason
-from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.protocols.events import Event, EventOrigin, EventType
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
 from ctx_weft.core.hitl.service import HitlService
@@ -1846,7 +1846,7 @@ class CtxWeftRuntime:
             await self._event_bus.emit(make_event(state, EventType.RUN_STARTED, payload={
                 "run_id": run_id,
                 "initial_step": "compact",
-            }))
+            }, origin=EventOrigin.RUNTIME))
             run_error: Exception | None = None
             try:
                 outcome = await CompactStep().execute(state, loop_ctx)
@@ -1867,7 +1867,7 @@ class CtxWeftRuntime:
                     "total_turns": len(state.transcript),
                     "error": str(run_error) if run_error else None,
                     "error_type": type(run_error).__name__ if run_error else None,
-                }))
+                }, origin=EventOrigin.RUNTIME))
 
             return {"session_id": session.id, "agent_id": agent.id, "task_id": task.id}
         finally:
@@ -2256,6 +2256,7 @@ class CtxWeftRuntime:
             type=event_type,
             timestamp=now_utc(),
             tenant_id=tenant_id,
+            origin=EventOrigin.RUNTIME,
             payload=payload,
         ))
         logger.info("Recovery: session %s → %s (%d pending HITL)",
@@ -2536,7 +2537,7 @@ class CtxWeftRuntime:
         await self._event_bus.emit(make_event(state, EventType.RUN_STARTED, payload={
             "run_id": run_id,
             "initial_step": initial_step,
-        }))
+        }, origin=EventOrigin.RUNTIME))
 
         run_error: BaseException | None = None
         was_cancelled = False
@@ -2599,7 +2600,8 @@ class CtxWeftRuntime:
             # run 级事实：这次执行死了。**无条件发**，与 task 后续怎么处置无关。
             # 会话状态由 TM 聚合后交给 SM 判定——这里不宣布会话怎么了。
             await self._event_bus.emit(make_event(state, EventType.RUN_INTERRUPTED, payload={
-                "reason": InterruptReason.LLM_OUTAGE, "error_message": str(exc)}))
+                "reason": InterruptReason.LLM_OUTAGE, "error_message": str(exc)},
+                origin=EventOrigin.RUNTIME))
             # task 级事实（TaskInterrupted）不在这里发：outage 的 RunOutcome 带着
             # retriable=False 交给 TaskManager，由处置表判成 INTERRUPTED 并发出——
             # 「outage 从不原地重试」的判据从路径隔离变成了这个显式标志位（Task 4）。
@@ -2641,7 +2643,7 @@ class CtxWeftRuntime:
                     "reason": InterruptReason.RUN_CRASH,
                     "error_code": crash_error_code(exc),
                     "error_message": str(exc),
-                }))
+                }, origin=EventOrigin.RUNTIME))
         finally:
             self._capability_cache.evict(agent.id)
             # A1 守卫：只有这次取消真的会让 task 翻成 CANCELED 时才发 RUN_CANCELED。熔断
@@ -2656,7 +2658,7 @@ class CtxWeftRuntime:
                 # 对无人消费的事件做纯增量不必顾虑 R5（CANCELED payload 不编造 reason）。
                 await self._event_bus.emit(make_event(state, EventType.RUN_CANCELED, payload={
                     "run_id": run_id, "source": cancel_source,
-                }))
+                }, origin=EventOrigin.RUNTIME))
             # will_retry=True suppresses SSE close on the host side.
             # cancelled → False; retriable=False → TaskManager won't retry anyway.
             will_retry = (
@@ -2685,7 +2687,7 @@ class CtxWeftRuntime:
                 "total_turns": len(state.transcript),
                 "error": str(run_error) if run_error else None,
                 "error_type": type(run_error).__name__ if run_error else None,
-            }))
+            }, origin=EventOrigin.RUNTIME))
 
         if run_error is not None:
             raise run_error

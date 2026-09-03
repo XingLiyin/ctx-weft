@@ -31,7 +31,7 @@ from ctx_weft.core.content import (
     redact_content_for_event,
     split_for_tool_result,
 )
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL
 from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
@@ -423,7 +423,7 @@ class CapabilityGateway:
             "capability_id": cap.id,
             "arguments": sanitized,
             "tool_call_id": tool_call_id,
-        }))
+        }, origin=EventOrigin.LOOP_CAPABILITY_GATEWAY))
         if is_dispatch:
             # 派发（spec 2026-06-28 §2.3；2026-07-03 修订）：**只有 delegate_plan 的 envelope 框**
             # 在此 eager 写（plan 框 + 配对 ack，避免 plan 框悬挂被 legalize 剥掉）。
@@ -534,7 +534,7 @@ class CapabilityGateway:
                             "invocation_id": invocation_id,
                             "kind": ev.kind,
                             "data": ev.payload.get("data", "")[:500],
-                        }))
+                        }, origin=EventOrigin.LOOP_CAPABILITY_GATEWAY))
                 elif ev.kind == "result":
                     result_parts.append(ev.payload.get("content", ""))
                     metadata.update(ev.payload.get("metadata", {}))
@@ -570,7 +570,7 @@ class CapabilityGateway:
             "result": redacted[:8000],
             "result_length": len(redacted),
             "tool_call_id": tool_call_id,
-        }))
+        }, origin=EventOrigin.LOOP_CAPABILITY_GATEWAY))
         if not is_dispatch and not is_silent:
             await self._memory.ingest(
                 MemoryEvent(

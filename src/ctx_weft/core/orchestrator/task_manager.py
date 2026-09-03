@@ -30,13 +30,15 @@ from ctx_weft.core.state.models import (
     TaskStatus,
 )
 from ctx_weft.core.utils import as_utc, generate_id, now_utc
-from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
+from ctx_weft.protocols.events import EVENT_TYPES, Event, EventOrigin, EventType
 
 if TYPE_CHECKING:
     from ctx_weft.core.orchestrator.session_manager import SessionManager
     from ctx_weft.protocols.events import EventBus
 
 logger = logging.getLogger(__name__)
+
+_ORIGIN = EventOrigin.ORCHESTRATOR_TASK_MANAGER
 
 #: 非终态的「停下来了」：run 已经退出、任务还没做完。三者的区别在于**解开它需要谁**——
 #: 等子任务（自愈）/ 等人答一句 / 等运维 /resume。判据是 task.status，不是任何字面量。
@@ -1138,6 +1140,7 @@ class TaskManager:
             timestamp=now_utc(),
             tenant_id=tenant_id,
             task_id=task_id,
+            origin=_ORIGIN,
             payload=payload or {},
         ))
 

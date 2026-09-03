@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
 from ctx_weft.core.utils import generate_id, now_utc
-from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.protocols.events import Event, EventOrigin, EventType
 from ctx_weft.protocols.hitl import (
     HITL_OUTCOME_CANCELLED,
     Delivery,
@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
 logger = logging.getLogger(__name__)
+
+_ORIGIN = EventOrigin.HITL_SERVICE
 
 
 def delivery_to_payload(delivery: Delivery) -> dict[str, Any]:
@@ -200,5 +202,6 @@ class HitlService:
             tenant_id=req.tenant_id,
             task_id=req.task_id or None,
             agent_id=req.agent_id or None,
+            origin=_ORIGIN,
             payload=payload,
         ))

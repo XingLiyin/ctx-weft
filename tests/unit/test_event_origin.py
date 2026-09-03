@@ -80,3 +80,78 @@ def test_make_event_explicit_origin_overrides_state():
         origin=EventOrigin.LOOP_BACKGROUND_OBSERVE,
     )
     assert ev.origin == "loop.background_observe"
+
+
+# ── Task 3: 循环外发射者补 origin + 端到端不变式 ──
+
+import pytest
+
+from ctx_weft.core import CtxWeftRuntime
+from ctx_weft.core.runtime import SessionStartParams
+from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider, make_echo_template, make_runtime,
+)
+
+
+@pytest.mark.asyncio
+async def test_every_emitted_event_has_nonempty_origin():
+    """docs/events-v2.md §6 外加条：所有发射出的事件 origin 非空。
+
+    本任务（Task 3）只管循环外 5 个发射者（session_manager/task_manager/
+    hitl.service/agent_registry/runtime）；`start_session` 只同步跑到「登记 +
+    起 drain 后台任务」为止就返回（真正的 loop 执行经
+    `asyncio.create_task(task_manager.drain())` 甩到后台，本测试不等它），故这里
+    收到的是 SessionCreated / AgentInstantiated / TaskCreated 一类会话建立期的
+    事件——循环内 40+ 发射点（含尚未在本任务范围内收敛的 RecognizeIntent 等）由
+    Task 2 与后续 Phase B 覆盖，不在本测试断言范围。
+    """
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    llm = MockLLMAdapter(responses=[MockResponse(text="hi")])
+    rt: CtxWeftRuntime = make_runtime(llm=llm, agent_provider=resolver)
+    rt.providers.register_memory(InMemoryMemoryProvider())
+
+    seen: list[tuple[str, str]] = []
+
+    async def _spy(ev):
+        seen.append((ev.type, ev.origin))
+
+    rt._event_bus.subscribe(None, _spy)
+
+    await rt.start_session(SessionStartParams.create(
+        template_id="agent:tpl_echo",
+        user_prompt="hi",
+        initial_task=None,
+        context_limit=8000,
+    ))
+
+    assert seen, "没有采集到任何事件"
+    blank = sorted({t for t, o in seen if not o})
+    assert blank == [], f"这些事件类型的 origin 为空：{blank}"
+
+
+# ── Task 3 / R7: SQL EventStore 往返持久化 origin ──
+
+
+async def test_sql_event_store_round_trips_origin(tmp_path):
+    from ctx_weft.providers.events.store.sql import open_sqlite_event_store
+
+    async with open_sqlite_event_store(tmp_path / "events.db") as store:
+        ev = _ev(id="evt_a", type="TaskStarted", origin=EventOrigin.LOOP_ACT)
+        await store.append(ev)
+        loaded = await store.read_by_session("s1")
+        assert len(loaded) == 1
+        assert loaded[0].origin == "loop.act"
+
+
+async def test_sql_event_store_round_trips_blank_origin(tmp_path):
+    from ctx_weft.providers.events.store.sql import open_sqlite_event_store
+
+    async with open_sqlite_event_store(tmp_path / "events.db") as store:
+        ev = _ev(id="evt_b", type="TaskStarted")  # origin 默认 ""
+        await store.append(ev)
+        loaded = await store.read_by_session("s1")
+        assert len(loaded) == 1
+        assert loaded[0].origin == ""

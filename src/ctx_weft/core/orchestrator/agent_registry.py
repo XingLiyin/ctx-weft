@@ -17,10 +17,12 @@ from ctx_weft.core.state.models import Agent, LoopGuard
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import LLMClient, LoopConfig, MemoryConfig
 from ctx_weft.protocols.context import ProviderContext
-from ctx_weft.protocols.events import Event, EventBus, EventType
+from ctx_weft.protocols.events import Event, EventBus, EventOrigin, EventType
 from ctx_weft.protocols.template import AgentTemplate
 
 logger = logging.getLogger(__name__)
+
+_ORIGIN = EventOrigin.RUNTIME
 
 
 @dataclass(frozen=True)
@@ -272,6 +274,7 @@ class AgentRegistry:
                     tenant_id=tenant_id,
                     task_id=task_id,
                     agent_id=parent_agent_id or None,
+                    origin=_ORIGIN,
                     payload={
                         "reason": "depth_limit",
                         # 恒 False：spawn 被拒后降级为 inline 执行的能力今天不存在，
@@ -340,6 +343,7 @@ class AgentRegistry:
                 tenant_id=tenant_id,
                 task_id=task_id,
                 agent_id=agent_id,
+                origin=_ORIGIN,
                 payload={
                     "parent_agent_id": parent_agent_id,
                     "subtask_id": task_id,
@@ -358,6 +362,7 @@ class AgentRegistry:
             tenant_id=tenant_id,
             task_id=task_id,
             agent_id=agent_id,
+            origin=_ORIGIN,
             payload={
                 "template_id": template.id,
                 "template_version": template.version,
@@ -392,6 +397,7 @@ class AgentRegistry:
             tenant_id=rec.tenant_id,
             task_id=None,
             agent_id=agent_id,
+            origin=_ORIGIN,
             payload={
                 "llm_account": choice.account,
                 "llm_model": choice.model,
