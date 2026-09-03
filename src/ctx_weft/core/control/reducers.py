@@ -15,6 +15,7 @@ from ctx_weft.core.content import (
     content_to_jsonable,
 )
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
+from ctx_weft.core.discriminators import TaskErrorCode
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
 from ctx_weft.core.orchestrator.session_state import TERMINAL_SESSION_STATUSES, WAITING
@@ -572,7 +573,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
         # TASK_FINISHED：成功清零（连败语义）
         if t == EventType.TASK_FAILED:
             sess = view.sessions.get(ev.session_id)
-            if sess is not None and (p or {}).get("error_code") != "TASK_FAILED_BY_THRESHOLD":
+            if sess is not None and (p or {}).get("error_code") != TaskErrorCode.BY_THRESHOLD:
                 sess.failure_counter += 1
         elif t == EventType.TASK_FINISHED:
             sess = view.sessions.get(ev.session_id)

@@ -36,6 +36,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ctx_weft.core.discriminators import CancelReason
 from ctx_weft.protocols.template import (
     AgentTemplate,
     CapabilityRef,
@@ -184,7 +185,10 @@ def _parse_loop_config(raw: dict) -> LoopConfig:
         max_turns_per_observe=int(raw.get("max_turns_per_observe", 5)),
         max_turns_per_agent=int(raw.get("max_turns_per_agent", 20)),
         timeout_per_step_sec=int(raw.get("timeout_per_step_sec", 120)),
-        failure_threshold=int(raw.get("failure_threshold", 3)),
+        # YAML 字段名与 CancelReason.FAILURE_THRESHOLD 同名非巧合：这个计数正是
+        # 熔断（_trip_failure_threshold）判定跳闸的阈值，跳闸后发出的 reason 正是
+        # 这个判别值——同一个概念，key 复用枚举成员避免散落字面量。
+        failure_threshold=int(raw.get(CancelReason.FAILURE_THRESHOLD, 3)),
         max_spawn_depth=int(raw.get("max_spawn_depth", 4)),
         compact_token_ratio=float(raw.get("compact_token_ratio", 0.8)),
         compact_message_delta=int(raw.get("compact_message_delta", 20)),

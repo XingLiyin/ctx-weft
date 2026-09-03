@@ -33,6 +33,7 @@ from ctx_weft.core.assembler.sources import (
 )
 from ctx_weft.protocols.capability import Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
+from ctx_weft.core.discriminators import CancelReason, InterruptReason
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
@@ -806,7 +807,9 @@ class CtxWeftRuntime:
             tm.set_pause_abandon(True)
             root_agent = (tm.session.root_agent_id or "") if tm.session is not None else ""
             # 保留 root agent 已入队未派发的那一条（keep_agent），其余排队任务弃子。
-            await tm.abandon_pending(reason="pause_abandon", keep_agent=root_agent or None)
+            await tm.abandon_pending(
+                reason=CancelReason.PAUSE_ABANDON, keep_agent=root_agent or None
+            )
         for task_id, tokens in list(per.items()):
             if root_agent and tm is not None and tm.running_agent_of(task_id) == root_agent:
                 tokens.pause.pause()
@@ -849,7 +852,7 @@ class CtxWeftRuntime:
         # 协作取消→on_task_finished→is_done→_fire_session_done→_on_done 自行回收，故此处不抢着回收。
         idle = task_manager is not None and task_manager.is_done()
         if task_manager is not None:
-            await task_manager.cancel_all(reason="user_cancel")
+            await task_manager.cancel_all(reason=CancelReason.USER_CANCEL)
         for tokens in per.values():
             tokens.cancel.cancel()
         if idle:
@@ -1211,7 +1214,7 @@ class CtxWeftRuntime:
         """
         for req in list(self.hitl_registry.list_pending(session_id=session_id)):
             try:
-                await self.hitl.cancel(req.id, message="failure_threshold")
+                await self.hitl.cancel(req.id, message=CancelReason.FAILURE_THRESHOLD)
             except Exception:
                 logger.exception(
                     "_cancel_session_hitl: cancel failed for session=%s hitl=%s", session_id, req.id,
@@ -2534,8 +2537,8 @@ class CtxWeftRuntime:
             # protocols/llm.py；今天"outage 从不原地重试"靠的是路径隔离，不是这个标志位，
             # 转发会让 outage 在预算充足时被错误地原地重试。见 task_disposition.py 顶部契约。
             state = state.apply_patch({"run_outcome": RunOutcome(
-                kind=RunOutcomeKind.INTERRUPTED, reason="llm_outage",
-                error_code="llm_outage", error=str(exc), retriable=False,
+                kind=RunOutcomeKind.INTERRUPTED, reason=InterruptReason.LLM_OUTAGE,
+                error_code=InterruptReason.LLM_OUTAGE, error=str(exc), retriable=False,
             )})
             # 瞬时 LLM 故障自愈耗尽 / 中途断流 → 可恢复中断，**不是** task 失败。
             # task 置 INTERRUPTED（非终态，与 HitlPark 同形）→ _run_task 走挂起分支不判 FINISHED，
@@ -2549,14 +2552,15 @@ class CtxWeftRuntime:
                 # error_code 是**码**，error 只是自由文本兜底：TM 的聚合优先读码
                 # （task_manager.py `_emit_queue_signal`），host 按码分流。不写码的话
                 # outage 会降级成 str(exc) 这种自由文本，三份契约（升级须知 /
-                # docs/events-v2.md §2.1.2 / spec/golden/07）要的都是 "llm_outage"。
-                task.error_code = "llm_outage"
+                # docs/events-v2.md §2.1.2 / spec/golden/07）要的都是
+                # `InterruptReason.LLM_OUTAGE`。
+                task.error_code = InterruptReason.LLM_OUTAGE
                 task.error = str(exc)
             logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
             # run 级事实：这次执行死了。**无条件发**，与 task 后续怎么处置无关。
             # 会话状态由 TM 聚合后交给 SM 判定——这里不宣布会话怎么了。
             await self._event_bus.emit(make_event(state, EventType.RUN_INTERRUPTED, payload={
-                "reason": "llm_outage", "error_message": str(exc)}))
+                "reason": InterruptReason.LLM_OUTAGE, "error_message": str(exc)}))
             # task 级事实（TaskInterrupted）不在这里发：outage 的 RunOutcome 带着
             # retriable=False 交给 TaskManager，由处置表判成 INTERRUPTED 并发出——
             # 「outage 从不原地重试」的判据从路径隔离变成了这个显式标志位（Task 4）。
@@ -2595,7 +2599,7 @@ class CtxWeftRuntime:
             # 但 task 已是终态时不发（见上面 was_interrupted 的注释）。
             if was_interrupted:
                 await self._event_bus.emit(make_event(state, EventType.RUN_INTERRUPTED, payload={
-                    "reason": "run_crash",
+                    "reason": InterruptReason.RUN_CRASH,
                     "error_code": crash_error_code(exc),
                     "error_message": str(exc),
                 }))

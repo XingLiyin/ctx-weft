@@ -11,6 +11,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
+from ctx_weft.core.discriminators import TaskErrorCode
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.media import placeholder_refs
@@ -569,8 +570,8 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
     `session_id` + task 字段直接推导 scope。
 
     调用点（TaskManager → runtime 侧 `_finalize_cancel_memory`）：
-      - `cancel_all` 清队（reason="user_cancel"）；
-      - 熔断清场对已启动的挂起/排队任务（reason="failure_threshold"）；
+      - `cancel_all` 清队（reason=`CancelReason.USER_CANCEL`）；
+      - 熔断清场对已启动的挂起/排队任务（reason=`CancelReason.FAILURE_THRESHOLD`）；
       - `on_task_finished(CANCELED)` funnel：在途协作取消终态坐实后（reason=task.error or 通用文案）。
 
     分支（同 `_close_one`）：
@@ -711,7 +712,7 @@ class FinalizeStep(Step):
         if retry_exhausted:
             outcome = "fail"
             task.observer_outcome = "fail"
-            task.error_code = "TASK_FAILED_RETRY_EXHAUSTED"
+            task.error_code = TaskErrorCode.RETRY_EXHAUSTED
 
         terminal = outcome in ("success", "fail")
         # 汇报给 parent（blackboard + cross_agent bubble）= 最终输出 + task_summary（process report 作用）；

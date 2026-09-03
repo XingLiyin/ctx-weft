@@ -11,11 +11,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
-from ctx_weft.core.errors import crash_error_code, crash_run_outcome
-from ctx_weft.core.utils import as_utc, generate_id, now_utc
-
 from ctx_weft.core.content import content_with_suffix
-from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
+from ctx_weft.core.discriminators import CancelReason, InterruptReason, TaskErrorCode
+from ctx_weft.core.errors import crash_error_code, crash_run_outcome
 from ctx_weft.core.orchestrator.task_disposition import (
     RunOutcome,
     RunOutcomeKind,
@@ -31,7 +29,8 @@ from ctx_weft.core.state.models import (
     Task,
     TaskStatus,
 )
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.utils import as_utc, generate_id, now_utc
+from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
 
 if TYPE_CHECKING:
     from ctx_weft.core.orchestrator.session_manager import SessionManager
@@ -175,8 +174,9 @@ class TaskManager:
     ) -> None:
         """注入统一取消胶囊闭合回调：(tasks, reason) -> None（Task 14）。
 
-        调用点：`cancel_all`（reason="user_cancel"）、`_trip_failure_threshold` 清场步骤对
-        已启动的挂起/排队任务（reason="failure_threshold"）、`on_task_finished` 的 CANCELED
+        调用点：`cancel_all`（reason=`CancelReason.USER_CANCEL`）、
+        `_trip_failure_threshold` 清场步骤对已启动的挂起/排队任务
+        （reason=`CancelReason.FAILURE_THRESHOLD`）、`on_task_finished` 的 CANCELED
         分支（在途协作取消 funnel，reason 取 task.error 回退通用文案）。异常记日志不阻断。
         """
         self._cancel_finalizer = cb
@@ -447,7 +447,7 @@ class TaskManager:
         except Exception as e:
             logger.exception("Task %s assembly failed: %s", task_id, e)
             await self._handle_task_failure(
-                task_id, error=str(e), exc=e, reason="assembly_failure",
+                task_id, error=str(e), exc=e, reason=InterruptReason.ASSEMBLY_FAILURE,
             )
             return
         if binding is None:
@@ -735,11 +735,12 @@ class TaskManager:
         """**装配失败**专用：先尝试自动 retry，耗尽或不可重试 → 挂起等恢复（绝不落终态 FAILED）。
 
         Task 4 起，**执行**（execute）崩溃不再走这里：它由 `_run_task` 的 `except
-        Exception` 就地构造 `RunOutcome(INTERRUPTED, reason="run_crash")`，喂
+        Exception` 就地构造 `RunOutcome(INTERRUPTED, reason=InterruptReason.RUN_CRASH)`，喂
         `disposition_for` 那张表（重试判断因此只剩一处）。本方法保留是因为装配阶段
         （assemble）没有 run、也就没有 RunOutcome，且它的 TASK_REQUEUED
-        `reason="assembly_failure"` 是对外可区分的契约。`reason` 因此改为必传：旧的默认值
-        `"run_failure_retry"` 随执行崩溃那条路径一起退场，留着只会是个再也不会出现的字面量。
+        `reason=InterruptReason.ASSEMBLY_FAILURE` 是对外可区分的契约。`reason` 因此改为
+        必传：旧的默认值 `"run_failure_retry"` 随执行崩溃那条路径一起退场，留着只会是个
+        再也不会出现的字面量。
 
 
         运行层崩溃（异常退出，未经 observer/FinalizeStep）是**可恢复中断**，不是任务失败：
@@ -807,11 +808,12 @@ class TaskManager:
             self._running_agents.pop(task_id, None)
             self._queue.unmark_running(task_id)
         # reason 只作**溯源**，不作路由——判据是 TASK_INTERRUPTED 这个类型本身。
-        # 值本身是对外契约的一部分（host 升级须知的映射表写的就是 reason="run_crash"），
-        # 故照旧；被删掉的是**拿它做条件判断**那件事，不是这个字面量的存在
+        # 值本身是对外契约的一部分（host 升级须知的映射表写的就是
+        # reason=InterruptReason.RUN_CRASH），故照旧；被删掉的是**拿它做条件判断**
+        # 那件事，不是这个值的存在
         # （tests/unit/test_layered_signals.py 检测的正是「分流」而非「出现」）。
         await self._emit(EventType.TASK_INTERRUPTED, task_id=task_id, payload={
-            "reason": "run_crash",
+            "reason": InterruptReason.RUN_CRASH,
             "error_code": error_code,
             "error_message": error,
             "retry_count": task.retry_count if task else 0,
@@ -959,7 +961,10 @@ class TaskManager:
                 continue
             t.status = "CANCELED"
             t.finished_at = now_utc()
-            await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": "failure_threshold"})
+            await self._emit(
+                EventType.TASK_CANCELED, task_id=tid,
+                payload={"reason": CancelReason.FAILURE_THRESHOLD},
+            )
             if t.started_at:
                 cancel_now_tasks.append(t)
 
@@ -977,7 +982,8 @@ class TaskManager:
                 t.status = "CANCELED"
                 t.finished_at = now_utc()
                 await self._emit(
-                    EventType.TASK_CANCELED, task_id=t.id, payload={"reason": "failure_threshold"},
+                    EventType.TASK_CANCELED, task_id=t.id,
+                    payload={"reason": CancelReason.FAILURE_THRESHOLD},
                 )
                 if t.started_at:
                     cancel_now_tasks.append(t)
@@ -994,7 +1000,7 @@ class TaskManager:
         #    任务的 ack-only 处理；在途任务保持 eager ack（上面 ack_tasks）+ funnel finish 对。
         if cancel_now_tasks and self._cancel_finalizer is not None:
             try:
-                await self._cancel_finalizer(cancel_now_tasks, "failure_threshold")
+                await self._cancel_finalizer(cancel_now_tasks, CancelReason.FAILURE_THRESHOLD)
             except Exception:
                 logger.exception("TaskManager: cancel_finalizer callback failed (threshold cleanup)")
 
@@ -1011,11 +1017,11 @@ class TaskManager:
             if t.status in ("FINISHED", "FAILED", "CANCELED"):
                 continue
             t.status = "FAILED"
-            t.error_code = "TASK_FAILED_BY_THRESHOLD"
+            t.error_code = TaskErrorCode.BY_THRESHOLD
             t.error = f"Session failure threshold reached ({counter} consecutive sub-task failures)."
             t.finished_at = now_utc()
             await self._emit(EventType.TASK_FAILED, task_id=t.id, payload={
-                "error_code": "TASK_FAILED_BY_THRESHOLD",
+                "error_code": TaskErrorCode.BY_THRESHOLD,
                 "error_message": t.error,
             })
             if t.started_at is not None:
@@ -1069,7 +1075,7 @@ class TaskManager:
             await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": reason})
         if to_close and self._cancel_finalizer is not None:
             try:
-                await self._cancel_finalizer(to_close, reason or "user_cancel")
+                await self._cancel_finalizer(to_close, reason or CancelReason.USER_CANCEL)
             except Exception:
                 logger.exception("TaskManager: cancel_finalizer callback failed (cancel_all)")
         if self._session is not None:
@@ -1136,6 +1142,16 @@ class TaskManager:
             # reason 优先取 error_code：host 按码分流（CONTEXT_OVERFLOW → 提示换更大
             # 窗口的模型恢复、LLM_AUTH_FAILED → 提示改配置）。自由文本只是没有码时的
             # 兜底，绝不能反过来把码降级成文本——那会让 host 的分流静默失效。
+            #
+            # C2（total 账）待修：这个 reason 键名义上叫「reason」实际装的是
+            # error_code，值域是「error_code ∪ 自由文本 ∪ 兜底串」的并集，语义混淆。
+            # brief（task-5-brief.md Step 5）建议拆成 error_code/reason 两个键，但
+            # `test_outage_interrupt_reason.py:51-55`、`test_run_crash_suspend.py:94-97/
+            # 138-140` 三处显式锁定「TaskQueueInterrupted.reason 必须是**码**，
+            # 不是 str(exc) 那种自由文本」——这是刻意定下的既有契约（注释原话）。
+            # 按任务纪律撞上既有测试锁定旧形状要停下报告、不改 fixture 迁就，
+            # 故本次收敛枚举暂不拆键，留待与既有契约的取舍单独决策
+            # （见 task-5-report.md「Step 5 payload 拆键」一节）。
             await self._emit(EventType.TASK_QUEUE_INTERRUPTED, payload={
                 "reason": (interrupted[0].error_code
                            or interrupted[0].error
@@ -1322,7 +1338,7 @@ class TaskManager:
         self._pause_abandon = flag
 
     async def abandon_pending(
-        self, *, reason: str = "pause_abandon", keep_agent: str | None = None,
+        self, *, reason: str = CancelReason.PAUSE_ABANDON, keep_agent: str | None = None,
     ) -> list[str]:
         """放弃排队中任务（标 CANCELED、发 TASK_CANCELED），不触碰 session 状态。
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ctx_weft.core.discriminators import InterruptReason, TaskErrorCode
+
 if TYPE_CHECKING:
     from ctx_weft.core.orchestrator.task_disposition import RunOutcome
 
@@ -155,7 +157,7 @@ def crash_run_outcome(exc: BaseException) -> "RunOutcome":
     from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
     return RunOutcome(
         kind=RunOutcomeKind.INTERRUPTED,
-        reason="run_crash",
+        reason=InterruptReason.RUN_CRASH,
         error=str(exc),
         error_code=crash_error_code(exc),
         retriable=getattr(exc, "retriable", True),
@@ -188,7 +190,7 @@ class BlobStoreRequiredError(CtxWeftError):
 
 
 class TaskFailedByObserver(CtxWeftError):
-    code = "TASK_FAILED_BY_OBSERVER"
+    code = TaskErrorCode.BY_OBSERVER
 
 
 class RunCanceledError(CtxWeftError):

@@ -8,12 +8,17 @@
 
 纯函数是刻意的：它不该知道事件总线、不该知道队列、不该 await 任何东西。
 loop 报「发生了什么」，这张表回答「那么 task 变成什么」，TaskManager 负责执行。
+
+本模块只引一个叶子枚举模块 `discriminators`（无 bus / 无队列 / 不 await，见其
+模块 docstring），不引任何其它 `ctx_weft` 运行期东西——纯函数的约束仍然成立。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+
+from ctx_weft.core.discriminators import TaskErrorCode
 
 __all__ = ["Disposition", "RunOutcome", "RunOutcomeKind", "disposition_for"]
 
@@ -38,7 +43,7 @@ class RunOutcome:
     outputs: object = None
     error: str = ""              # 死因 / 受阻原因（自由文本，只作溯源）
     error_code: str = ""
-    reason: str = ""             # INTERRUPTED：llm_outage / run_crash；CANCELED：取消原因
+    reason: str = ""             # INTERRUPTED：InterruptReason 成员；CANCELED：CancelReason 成员
     # INTERRUPTED 专用：这次打断允不允许原地重试。默认 False（不重试）与真实判据
     # `getattr(exc, "retriable", True)` 的缺省方向相反，是有意的：漏传导致"不重试"
     # 只是让 task 停在 INTERRUPTED 等 /resume，可恢复；漏传导致"重试"会烧预算。
@@ -79,8 +84,8 @@ def disposition_for(
       的第一个合取项 `run_error is not None` 直接短路。
     - `FinalizeStep`（finalize.py:695 附近）：`retry_exhausted = outcome == "retry"
       and task.retry_count >= task.max_retries`；耗尽时降级为 "fail" 且
-      `error_code="TASK_FAILED_RETRY_EXHAUSTED"`，否则 verdict=="fail" 时
-      `error_code="TASK_FAILED_BY_OBSERVER"`；两支的 `error_message` 都取
+      `error_code=TaskErrorCode.RETRY_EXHAUSTED`，否则 verdict=="fail" 时
+      `error_code=TaskErrorCode.BY_OBSERVER`；两支的 `error_message` 都取
       `task.error`（对应这里的 `outcome.error`）。未耗尽的 retry 分支同样先
       `task.retry_count += 1` 再把新值写进 payload。
     """
@@ -130,8 +135,8 @@ def disposition_for(
     # fail，或 retry 但预算耗尽 —— 后者降级成 fail（今天在 FinalizeStep:695）
     exhausted = outcome.verdict == "retry"
     return Disposition("FAILED", "TaskFailed", {
-        "error_code": ("TASK_FAILED_RETRY_EXHAUSTED" if exhausted
-                       else "TASK_FAILED_BY_OBSERVER"),
+        "error_code": (TaskErrorCode.RETRY_EXHAUSTED if exhausted
+                       else TaskErrorCode.BY_OBSERVER),
         "error_message": outcome.error,
         "retry_count": retry_count,
     })
