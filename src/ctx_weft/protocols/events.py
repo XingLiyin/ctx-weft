@@ -85,8 +85,6 @@ class EventType(StrEnum):
     SESSION_WAITING = "SessionWaiting"                # 停着但正常：都在等人 / 等外部输入（payload 空）
     SESSION_RUNNING = "SessionRunning"                # 重新开跑：human_replied / resumed
     RUN_STARTED = "RunStarted"
-    RUN_PAUSED = "RunPaused"
-    RUN_RESUMED = "RunResumed"
     RUN_CANCELED = "RunCanceled"
     RUN_FINISHED = "RunFinished"
     STEP_STARTED = "StepStarted"
@@ -129,9 +127,6 @@ class EventType(StrEnum):
     # ── Agent 域 ──
     AGENT_INSTANTIATED = "AgentInstantiated"
     AGENT_SPAWNED = "AgentSpawned"
-    AGENT_STATUS_CHANGED = "AgentStatusChanged"
-    AGENT_WAITING = "AgentWaiting"
-    AGENT_FINALIZED = "AgentFinalized"
     # agent 的模型选择变了（D1 修复：跨重启存活）。纯赋值，不碰 task / session 状态——
     # 「换模型」和「让 task 跑起来」是两件事（docs/events-v2.md 三条命令，见 spec §06）。
     AGENT_LLM_CHANGED = "AgentLlmChanged"   # payload: {llm_account, llm_model, reason}
@@ -139,9 +134,7 @@ class EventType(StrEnum):
     # ── Context 域 ──
     PREPARE_COMPLETED = "PrepareCompleted"
     CONTEXT_TOKENS_ESTIMATED = "ContextTokensEstimated"
-    CONTEXT_TOKENS_MEASURED = "ContextTokensMeasured"
     CONTEXT_ASSEMBLED = "ContextAssembled"
-    CONTEXT_OVERFLOWED = "ContextOverflowed"
     # ── LLM 域 ──
     LLM_REQUEST_STARTED = "LLMRequestStarted"
     LLM_PROMPT_SENT = "LLMPromptSent"           # 完整 prompt（system + messages + tools），供调试
@@ -153,8 +146,6 @@ class EventType(StrEnum):
     CAPABILITY_INVOKED = "CapabilityInvoked"
     CAPABILITY_PROGRESS = "CapabilityProgress"
     CAPABILITY_FINISHED = "CapabilityFinished"
-    CAPABILITY_FAILED = "CapabilityFailed"
-    CAPABILITY_CANCELED = "CapabilityCanceled"
     # ── ActStep / ObserveStep 子事件 ──
     ACT_TURN_STARTED = "ActTurnStarted"
     ACT_TURN_COMPLETED = "ActTurnCompleted"
@@ -163,20 +154,15 @@ class EventType(StrEnum):
     OBSERVE_COMPLETED = "ObserveCompleted"
     # ── Memory 域 ──
     MEMORY_INGESTED = "MemoryIngested"
-    COMPACT_TRIGGERED = "CompactTriggered"
-    COMPACT_DISPATCHED = "CompactDispatched"
     MEMORY_COMPACT_STARTED = "MemoryCompactStarted"
     MEMORY_COMPACTED = "MemoryCompacted"
     MEMORY_COMPACT_FINISHED = "MemoryCompactFinished"   # 一轮压缩收尾聚合（总折叠数/省 token/各级），供前端落一条持久标记
-    MEMORY_COMPACT_FAILED_FALLBACK = "MemoryCompactFailedFallback"
-    BLACKBOARD_SUBSCRIBED = "BlackboardSubscribed"
     # ── HITL 域 ──
     HITL_REQUIRED = "HitlRequired"
     HITL_APPROVED = "HitlApproved"       # approval kind 放行（无改参）
     HITL_ANSWERED = "HitlAnswered"       # input kind 取得人类文字答复
     HITL_REJECTED = "HitlRejected"
     HITL_MODIFIED = "HitlModified"       # approval kind 放行（带改参）
-    HITL_TIMEOUT = "HitlTimeout"
     HITL_CANCELLED = "HitlCancelled"   # session 关闭 / interrupt / GC：收口悬挂 pending，不 requeue
     # ── HITL v2（2026-09-01 重设计）──
     # outcome 是事实本身，不再由事件类型编码结局：approved vs modified 由
@@ -185,13 +171,7 @@ class EventType(StrEnum):
     HITL_OPENED = "HitlOpened"
     HITL_RESOLVED = "HitlResolved"
     # ── Guard 域 ──
-    TOKEN_BUDGET_WARNING = "TokenBudgetWarning"
-    TOKEN_BUDGET_EXCEEDED = "TokenBudgetExceeded"
     FAILURE_THRESHOLD_HIT = "FailureThresholdHit"
-    MAX_CONCURRENT_AGENTS_EXCEEDED = "MaxConcurrentAgentsExceeded"
-    # ── Provider 域 ──
-    MCP_SERVER_DISCONNECTED = "MCPServerDisconnected"
-    MCP_SERVER_RECONNECTED = "MCPServerReconnected"
     # ── RecognizeIntent 域 ──
     RECOGNIZE_INTENT_STARTED = "RecognizeIntentStarted"
     RECOGNIZE_INTENT_LLM_PROMPT = "RecognizeIntentLLMPrompt"
@@ -208,9 +188,6 @@ class EventType(StrEnum):
     #     与逐轮 BACKGROUND_OBSERVE_* 流式事件不同——这两条是"整段 recap 起/止"的记账）──
     TASK_RECAP_STARTED = "TaskRecapStarted"   # payload: {task_id, boundary, agent_id}
     TASK_RECAP_DONE = "TaskRecapDone"         # payload: {task_id}
-    # ── System / 元事件 ──
-    EVENTS_DROPPED = "EventsDropped"
-    SNAPSHOT_CREATED = "SnapshotCreated"
 
 
 # 向后兼容：保持 `EVENT_TYPES` 为字符串 frozenset，供 `type not in EVENT_TYPES` 校验。
