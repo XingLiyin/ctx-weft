@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import pytest
 
@@ -82,7 +83,8 @@ def _harness(llm, provider):
     prompt = AssembledPrompt(system="", messages=[LLMMessage(role="user", content="hi")],
                              tools=[], token_count=1)
     state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope,
-                      assembled_prompt=prompt)
+                      assembled_prompt=prompt,
+                      resolved_model=SimpleNamespace(model="mock", account=""))
     pause = PauseToken()
     ctx = LoopContext(
         assembler=None, llm=llm, memory=mem, event_bus=bus,

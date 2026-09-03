@@ -162,6 +162,7 @@ async def test_gateway_delegate_plan_still_eager_writes_envelope() -> None:
         run_id="run_1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1", parent_task_id=None),
         agent=SimpleNamespace(id="agt_1", template_id="t"), scope=scope,
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),
@@ -201,6 +202,7 @@ async def test_gateway_delegate_task_defers_frame_to_finalize() -> None:
         task=SimpleNamespace(id="tsk_1", parent_task_id=None),
         agent=SimpleNamespace(id="agt_1", template_id="t"),
         scope=scope,
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),
@@ -268,6 +270,7 @@ async def test_gateway_silent_tool_writes_nothing_to_task_layer() -> None:
         task=SimpleNamespace(id="tsk_1"),
         agent=SimpleNamespace(id="agt_1", template_id="t"),
         scope=scope,
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),

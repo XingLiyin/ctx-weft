@@ -114,14 +114,16 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     pctx = ProviderContext(session_id=sid, tenant_id="default")
     _reg = ProviderRegistry()
     _reg.register_capability(resolver)
-    lm = AgentRegistry(template_lookup=TemplateLookup(_reg), event_bus=runtime.event_bus)
+    lm = AgentRegistry(template_lookup=TemplateLookup(_reg), event_bus=runtime.event_bus,
+                       model_resolver=runtime._resolve_llm)
     agent, template = await lm.instantiate(
         template_id="agent:tpl_mr", session_id=sid, tenant_id="default", ctx=pctx)
+    resolved_model = lm.resolve_model(agent.id)
     session = Session(id=sid, user_prompt="do a long task", status="RUNNING",
                       tenant_id="default", root_agent_id=agent.id, llm_provider="",
                       created_at=now_utc())
-    session.context_limit = llm.context_limit
-    session.reserved_output_tokens = llm.output_reserve
+    session.context_limit = resolved_model.context_limit
+    session.reserved_output_tokens = resolved_model.reserved_output_tokens
     agent = _dc.replace(agent, loop_guard=LoopGuard(
         context_limit=session.context_limit,
         reserved_output_tokens=session.reserved_output_tokens))
@@ -143,7 +145,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
         task.retry_count = 0         # 由本循环掌控轮数，不让 max_retries 提前收尾
         state, _ = await runtime._execute_task(
             session=session, task=task, agent=agent, template=template,
-            run_id=f"run{r}", memory=mem, task_manager=tm)
+            run_id=f"run{r}", memory=mem, resolved_model=resolved_model, task_manager=tm)
         assert state.verdict is not None and state.verdict.task_outcome == "retry"
 
     ups = await mem.recall_recent(state.scope, [T.USER_PROMPT], 100, pctx)

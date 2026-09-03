@@ -94,7 +94,7 @@ def _state(active: Task, cfg: LoopConfig, context_limit: int = 1000,
     # 门总是打开）——迁移自旧 count-based _compact_scope 的测试显式传本参数模拟"未达预算"。
     agent.loop_guard.context_tokens = context_limit if context_tokens is None else context_tokens
     return LoopState(run_id="run1", session=session, task=active,
-                     agent=agent, scope=_sc(active.id, "ag1"))
+                     agent=agent, scope=_sc(active.id, "ag1"), resolved_model=SimpleNamespace(model="mock", account=""))
 
 
 def _loop_ctx(mem, tm, *, with_assembler: bool = False):

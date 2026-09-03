@@ -150,7 +150,11 @@ def _session_manager(bus) -> SessionManager:
     reg = ProviderRegistry()
     reg.register_capability(templates)
     return SessionManager(
-        agent_registry=AgentRegistry(template_lookup=TemplateLookup(reg), event_bus=bus),
+        agent_registry=AgentRegistry(
+            template_lookup=TemplateLookup(reg), event_bus=bus,
+            model_resolver=lambda a, m: _FixedModelClient(
+                MockLLMAdapter(responses=[]), "mdl_default", 200_000, 8192, account="acct_default"),
+        ),
         event_bus=bus,
     )
 

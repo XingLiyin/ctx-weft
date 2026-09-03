@@ -60,6 +60,7 @@ async def test_two_servers_same_tool_name_coexist_and_route() -> None:
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
         scope=scope,
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),

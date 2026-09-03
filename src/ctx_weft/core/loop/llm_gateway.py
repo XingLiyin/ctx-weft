@@ -76,24 +76,15 @@ PROMPT_EST_SEG_KEY = "prompt_est_seg"
 
 
 def resolve_llm_identity(state) -> tuple[str, str]:
-    """本次 LLM 调用实际使用的 ``(model, account)``。
+    """本次 LLM 调用实际使用的 (model, account)。
 
-    真值取 ``session.llm_model / llm_provider``——运行时正是用这两个字段解析
-    ``ctx.llm``（runtime._resolve_llm），切换模型/账号也同步更新它们；agent.runtime
-    仅作回退（模板注入场景），最后兜底 ``"mock"``（未配置/测试场景，adapter 会用
-    自身配置的 model 替换）。account 无兜底语义，缺省空串。
-
-    背景：此前请求事件只报 ``agent.runtime.get("llm_model", "mock")``（runtime 从不
-    填 llm_model → 恒为 "mock"），host 云端上报又在响应处理时读「当前会话账号」，
-    与「该次调用实际账号」存在切换竞态——事件自带真值后两处都有账可对。
+    真值是 state.resolved_model —— 派发时由 AgentRegistry 解出的那一个。
+    此前读 session.llm_model 并两级兜底到 agent.runtime / "mock"，那两级
+    永远命中不了（runtime 从不填 agent.runtime["llm_model"]），于是未配置
+    时恒报 "mock"。ResolvedModel 永远是解析过的确定值，报不出假数据。
     """
-    session = state.session
-    model = (
-        getattr(session, "llm_model", None)
-        or state.agent.runtime.get("llm_model", "mock")
-    )
-    account = getattr(session, "llm_provider", None) or ""
-    return model, account
+    rm = state.resolved_model
+    return rm.model, rm.account
 
 
 def drop_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:

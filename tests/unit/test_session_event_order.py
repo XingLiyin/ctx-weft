@@ -40,6 +40,15 @@ class _Resolver(AgentCapabilityProvider):
         return CapabilityProviderInfo(name=self.name)
 
 
+class _Client:
+    """model_resolver 的桩返回值——构造期注入、无默认值，测试替身须显式给出。"""
+
+    def __init__(self, account="acct_default", model="mdl_default",
+                 context_limit=200_000, output_reserve=8192):
+        self.account, self.model = account, model
+        self.context_limit, self.output_reserve = context_limit, output_reserve
+
+
 def _template() -> AgentTemplate:
     return AgentTemplate(
         id="tpl", name="t", version="1",
@@ -60,7 +69,10 @@ async def test_session_created_emitted_before_task_created() -> None:
     _reg = ProviderRegistry()
     _reg.register_capability(resolver)
     sm = SessionManager(
-        agent_registry=AgentRegistry(template_lookup=TemplateLookup(_reg), event_bus=bus),
+        agent_registry=AgentRegistry(
+            template_lookup=TemplateLookup(_reg), event_bus=bus,
+            model_resolver=lambda a, m: _Client(),
+        ),
         event_bus=bus,
     )
     await sm.create_session(template_id="agent:tpl", user_prompt="你好", context_limit=1000)

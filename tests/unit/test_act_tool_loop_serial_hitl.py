@@ -12,6 +12,8 @@ docs/events-v2.md §2.3 用 ⚠️ 明写这条不变式是**结构性巧合**�
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState
@@ -41,6 +43,7 @@ def _state() -> LoopState:
     return LoopState(
         run_id="run_1", session=session, task=task, agent=agent,
         scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1"),
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
 
 

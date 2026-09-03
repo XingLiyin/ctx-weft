@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from ctx_weft.core.control.tokens import CancelToken, PauseToken
     from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.orchestrator import CapabilityCache, TaskManager
+    from ctx_weft.core.orchestrator.agent_registry import ResolvedModel
     from ctx_weft.core.orchestrator.task_disposition import RunOutcome
     from ctx_weft.core.hitl.service import HitlService
     from ctx_weft.core.loop.hitl_waiter import HitlWaiter
@@ -86,6 +87,11 @@ class LoopState:
     #: loop 报「发生了什么」，不报「task 该变成什么」——后者是 TM 的活
     #: （docs/superpowers/plans/2026-09-02-task-status-ownership.md 的处置表）。
     run_outcome: "RunOutcome | None" = None
+
+    #: 本次 run 实际用的 (client, account, model, 窗口)——由派发方在构造 LoopState
+    #: 之前解出并塞入（AgentRegistry.resolve_model / materialize 的产物）。
+    #: resolve_llm_identity 的唯一真值来源，不再读 session.llm_model 兜底。
+    resolved_model: "ResolvedModel | None" = None
 
     # 其他扩展字段
     extra: dict[str, Any] = field(default_factory=dict)

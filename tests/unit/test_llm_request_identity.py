@@ -1,9 +1,11 @@
-"""LLM 请求事件携带实际使用的 account/model：以 session 为真值（运行时据
-session.llm_provider/llm_model 解析 ctx.llm，切换模型同步更新），回退 agent.runtime。
+"""LLM 请求事件携带实际使用的 account/model：真值是 ``state.resolved_model``——
+派发时由 ``AgentRegistry.resolve_model`` 解出的那一个（批次 B）。
 
-修复背景：LLMRequestStarted 此前恒报 agent.runtime 的 "mock"（runtime 从不填
-llm_model），host 云端上报又在响应处理时读"当前会话账号"，与"该次调用实际账号"
-存在切换竞态——事件自带真值后两处都有账可对。
+修复背景：LLMRequestStarted 此前以 session.llm_model/llm_provider 为真值，两级
+兜底到 agent.runtime 再到 "mock"（runtime 从不填 llm_model → 恒报 "mock"）。三样
+东西（host 的选择 / 解析出的 client / 实际身份）曾挤在 session 一个对象上，选择
+可空这件事因此没法表达。现在 resolved_model 由派发方在构造 LoopState 之前算好、
+塞入，不再有回退链——没有解析过的值不存在，也就报不出假数据。
 """
 from __future__ import annotations
 
@@ -51,21 +53,14 @@ def _make_tool_call_chunk(name: str):
     )
 
 
-def _make_state(*, session_llm: bool):
+def _make_state(*, model: str = "deepseek-v4-pro", account: str = "deepseek-rj"):
     agent = SimpleNamespace(
         id="a1",
         loop_config=SimpleNamespace(max_turns_per_observe=3, compact_keep_last=2),
         runtime={},
         loop_guard=SimpleNamespace(context_limit=100_000, context_tokens=0),
     )
-    if session_llm:
-        session = SimpleNamespace(
-            id="s1", tenant_id="default", token_used=0,
-            llm_provider="deepseek-rj", llm_model="deepseek-v4-pro",
-        )
-    else:
-        # 不带 llm 字段的 session（旧测试夹具形态）→ 走 agent.runtime 回退
-        session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+    session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
     task = SimpleNamespace(
         id="t1", parent_task_id="p1", status="RUNNING",
         observer_outcome=None, process_report=None,
@@ -75,6 +70,7 @@ def _make_state(*, session_llm: bool):
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
+        resolved_model=SimpleNamespace(model=model, account=account),
     )
 
 
@@ -108,37 +104,25 @@ def _make_ctx(event_bus):
 # ── resolve_llm_identity 单元语义 ─────────────────────────────────────────────
 
 
-def test_resolve_prefers_session_truth():
-    state = _make_state(session_llm=True)
+def test_resolve_reads_resolved_model():
+    state = _make_state(model="deepseek-v4-pro", account="deepseek-rj")
     model, account = resolve_llm_identity(state)
     assert model == "deepseek-v4-pro"
     assert account == "deepseek-rj"
 
 
-def test_resolve_falls_back_to_runtime_then_mock():
-    state = _make_state(session_llm=False)
+def test_resolve_reports_the_mock_adapters_own_model():
+    """未配置真实 provider 时，身份来自 mock adapter 自己公开的 model——不是恒定哨兵。"""
+    state = _make_state(model="mock-adapter-model", account="")
     model, account = resolve_llm_identity(state)
-    assert model == "mock"          # runtime 也没配 → 兜底哨兵
-    assert account == ""
-    state.agent.runtime["llm_model"] = "rt-model"
-    model, _ = resolve_llm_identity(state)
-    assert model == "rt-model"
-
-
-def test_resolve_ignores_empty_session_values():
-    state = _make_state(session_llm=True)
-    state.session.llm_model = ""     # 空串视同未设置（session 默认值形态）
-    state.session.llm_provider = None
-    state.agent.runtime["llm_model"] = "rt-model"
-    model, account = resolve_llm_identity(state)
-    assert model == "rt-model"
+    assert model == "mock-adapter-model"
     assert account == ""
 
 
 # ── act：_run_llm_turn 的请求/响应事件 ────────────────────────────────────────
 
 
-async def test_act_request_events_carry_session_llm_identity(monkeypatch):
+async def test_act_request_events_carry_resolved_model_identity(monkeypatch):
     captured = {}
 
     async def _fake_stream(ctx, state, request):
@@ -147,7 +131,7 @@ async def test_act_request_events_carry_session_llm_identity(monkeypatch):
 
     monkeypatch.setattr(_act_mod, "stream_llm_resilient", _fake_stream)
     bus = _RecordingBus()
-    state = _make_state(session_llm=True)
+    state = _make_state(model="deepseek-v4-pro", account="deepseek-rj")
     ctx = _make_ctx(bus)
     prompt = SimpleNamespace(system="SYS", tools=[])
 
@@ -162,26 +146,26 @@ async def test_act_request_events_carry_session_llm_identity(monkeypatch):
     assert finished.payload["llm_account"] == "deepseek-rj"
 
 
-async def test_act_request_events_fall_back_without_session_llm(monkeypatch):
+async def test_act_request_events_carry_mock_adapters_model(monkeypatch):
     async def _fake_stream(ctx, state, request):
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_act_mod, "stream_llm_resilient", _fake_stream)
     bus = _RecordingBus()
-    state = _make_state(session_llm=False)
+    state = _make_state(model="mock-adapter-model", account="")
     ctx = _make_ctx(bus)
 
     await _run_llm_turn(state, ctx, SimpleNamespace(system="SYS", tools=[]), [], 1)
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED][0]
-    assert started.payload["model"] == "mock"       # 旧行为兜底
+    assert started.payload["model"] == "mock-adapter-model"
     assert started.payload["llm_account"] == ""
 
 
 # ── observe：run_observe_react 的请求/响应事件（前台/后台共用路径）───────────────
 
 
-async def test_observe_request_events_carry_session_llm_identity(monkeypatch):
+async def test_observe_request_events_carry_resolved_model_identity(monkeypatch):
     captured = {}
 
     async def _fake_stream(ctx, state, request):
@@ -191,7 +175,7 @@ async def test_observe_request_events_carry_session_llm_identity(monkeypatch):
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
     bus = _RecordingBus()
-    state = _make_state(session_llm=True)
+    state = _make_state(model="deepseek-v4-pro", account="deepseek-rj")
     ctx = _make_ctx(bus)
 
     await run_observe_react(

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.protocols.events import EVENT_TYPES, Event, EventType
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
+from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, ModelChoice
 from ctx_weft.core.orchestrator.session_state import (
     SessionInput, TERMINAL_SESSION_STATUSES, Transition, next_transition,
 )
@@ -247,9 +247,12 @@ class SessionManager:
         # 登记 record + 发 AgentInstantiated（root 没有 parent_agent_id，
         # AgentRegistry.instantiate 内部只发这一条，不发 AgentSpawned）。
         # template=template：复用上面已经解析过的对象，全程只解析一次。
+        # llm=：host 这次的选择（可空 = 跟随账号默认），住进 root agent 的 record——
+        # 不再靠 session.llm_model/llm_provider 兼职当真值（批次 B）。
         await self.agent_registry.instantiate(
             template_id=template_id, session_id=sid, tenant_id=tenant_id,
             agent_id=agent_id, template=template, ctx=ctx,
+            llm=ModelChoice(account=llm_account or "", model=llm_model or ""),
         )
         self.register_session(sid, tenant_id=tenant_id)
 

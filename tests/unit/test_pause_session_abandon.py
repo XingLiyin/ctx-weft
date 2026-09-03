@@ -128,7 +128,7 @@ def _exec_runner(rt, tm, *, root_agent_id="agr") -> _SessionTaskRunner:
                    status="RUNNING", token_budget=0, root_agent_id=root_agent_id)
     return _SessionTaskRunner(
         runtime=rt, session=sess, template=None, template_id="tmpl",
-        lm=None, memory=None, llm_account=None, llm_model=None,
+        lm=None, memory=None,
         task_manager=tm, default_run_id="run1", handle=None,
     )
 

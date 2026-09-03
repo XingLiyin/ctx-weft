@@ -93,6 +93,7 @@ def _make_state():
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
 
 
@@ -200,6 +201,7 @@ async def test_recognize_intent_prompt_event_keeps_text_not_empty():
         task=SimpleNamespace(id="t1", title="", settings=SimpleNamespace()),
         scope=SimpleNamespace(session_id="s1", task_id="t1", agent_id="a1"),
         extra={"template": SimpleNamespace(), "bound_capabilities": [cap]},
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
 
     await RecognizeIntentStep().execute(state, ctx)

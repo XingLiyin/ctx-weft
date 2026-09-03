@@ -105,6 +105,7 @@ def _make_state():
         agent=agent,
         scope=scope,
         extra={"template": None, "bound_capabilities": []},
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     return state
 

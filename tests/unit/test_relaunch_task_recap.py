@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 import ctx_weft.core.runtime as rt_mod
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
+from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, ResolvedModel
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
@@ -15,6 +15,19 @@ from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
+
+
+class _Client:
+    account = "acct_default"
+    model = "mdl_default"
+    context_limit = 200_000
+    output_reserve = 8192
+
+
+def _fake_resolved_model() -> ResolvedModel:
+    c = _Client()
+    return ResolvedModel(client=c, account=c.account, model=c.model,
+                         context_limit=c.context_limit, reserved_output_tokens=c.output_reserve)
 
 
 def _make_runtime_and_session():
@@ -77,9 +90,9 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
     tcid = await _seed_finish_pair(memory, session, task, agent_id)
     task.status = "FINISHED"
 
-    def _fake_materialize(self, agent_id, *, context_limit, reserved_output_tokens):
-        return Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
-                      tenant_id=session.tenant_id)
+    def _fake_materialize(self, agent_id):
+        return (Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
+                       tenant_id=session.tenant_id), _fake_resolved_model())
 
     monkeypatch.setattr(AgentRegistry, "materialize", _fake_materialize)
 
@@ -154,9 +167,9 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
     runtime, session, template, task_manager, task, agent_id, memory = minimal_runtime_with_session
     task.status = "SUSPENDED"  # 委派挂起中崩溃的形态
 
-    def _fake_materialize(self, agent_id, *, context_limit, reserved_output_tokens):
-        return Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
-                      tenant_id=session.tenant_id)
+    def _fake_materialize(self, agent_id):
+        return (Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
+                       tenant_id=session.tenant_id), _fake_resolved_model())
 
     monkeypatch.setattr(AgentRegistry, "materialize", _fake_materialize)
 

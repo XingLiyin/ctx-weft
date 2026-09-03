@@ -131,7 +131,7 @@ def _state_ctx():
     session = SimpleNamespace(id="s1", tenant_id="default")
     task = _task()
     scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
-    state = LoopState(run_id="run_1", session=session, task=task, agent=agent, scope=scope)
+    state = LoopState(run_id="run_1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
     ctx = LoopContext(
         assembler=None, llm=None, memory=InMemoryMemoryProvider(),
         event_bus=InProcessEventBus(),

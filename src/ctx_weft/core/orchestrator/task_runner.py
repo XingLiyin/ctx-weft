@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from ctx_weft.core.state.models import NormalTaskSettings
 
 if TYPE_CHECKING:
+    from ctx_weft.core.orchestrator.agent_registry import ResolvedModel
     from ctx_weft.core.orchestrator.task_disposition import RunOutcome
     from ctx_weft.core.state.models import Task
 
@@ -21,8 +22,10 @@ if TYPE_CHECKING:
 class AgentBinding:
     """assemble 的产物：本次派发的执行 agent 绑定。
 
-    TaskManager 只读 agent_id；agent/template/initial_step/run_id 对 TM
-    不透明，由 execute 消费。
+    TaskManager 只读 agent_id；agent/template/initial_step/run_id/model 对 TM
+    不透明，由 execute 消费。model：assemble 期 `AgentRegistry.materialize` 顺带
+    解出的这次要用的 LLM（client + 身份 + 窗口，批次 B）——execute 直接用它，
+    不再自己解析。
     """
 
     agent_id: str
@@ -30,6 +33,7 @@ class AgentBinding:
     template: Any = None
     initial_step: str = "prepare"
     run_id: str = ""
+    model: "ResolvedModel | None" = None
 
 
 class TaskRunner(Protocol):

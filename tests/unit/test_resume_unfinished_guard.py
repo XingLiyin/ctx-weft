@@ -34,7 +34,8 @@ async def _runtime_and_sm():
                              agent_provider=InlineAgentTemplateProvider())
     sm = SessionManager(
         agent_registry=AgentRegistry(
-            template_lookup=runtime._template_lookup, event_bus=runtime.event_bus),
+            template_lookup=runtime._template_lookup, event_bus=runtime.event_bus,
+            model_resolver=runtime._resolve_llm),
         event_bus=runtime.event_bus,
     )
     await runtime.event_store.append(_ev(

@@ -36,6 +36,15 @@ class _Bus:
         return [e.type for e in self.events]
 
 
+class _Client:
+    """model_resolver 的桩返回值——构造期注入、无默认值，测试替身须显式给出。"""
+
+    def __init__(self, account="acct_default", model="mdl_default",
+                 context_limit=200_000, output_reserve=8192):
+        self.account, self.model = account, model
+        self.context_limit, self.output_reserve = context_limit, output_reserve
+
+
 def _lm(bus, *, max_depth=3):
     import dataclasses as _dc
 
@@ -48,7 +57,9 @@ def _lm(bus, *, max_depth=3):
     providers = ProviderRegistry()
     providers.register_capability(provider)
     lm = AgentRegistry(
-        template_lookup=TemplateLookup(providers=providers), event_bus=bus)
+        template_lookup=TemplateLookup(providers=providers), event_bus=bus,
+        model_resolver=lambda a, m: _Client(),
+    )
     lm.register_session("s1", tenant_id="default", fallback_template_id=TPL)
     return lm
 
@@ -94,5 +105,5 @@ async def test_materialize_emits_nothing():
     agent, _ = await lm.instantiate(
         template_id=TPL, session_id="s1", tenant_id="default")
     bus.events.clear()
-    lm.materialize(agent.id, context_limit=1, reserved_output_tokens=1)
+    lm.materialize(agent.id)
     assert bus.events == []

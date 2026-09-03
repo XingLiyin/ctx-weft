@@ -29,12 +29,24 @@ class _Bus:
         return None
 
 
+class _Client:
+    """model_resolver 的桩返回值——构造期注入、无默认值，测试替身须显式给出。"""
+
+    def __init__(self, account="acct_default", model="mdl_default",
+                 context_limit=200_000, output_reserve=8192):
+        self.account, self.model = account, model
+        self.context_limit, self.output_reserve = context_limit, output_reserve
+
+
 def _lm() -> AgentRegistry:
     provider = InlineAgentTemplateProvider()
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    return AgentRegistry(template_lookup=TemplateLookup(providers=providers), event_bus=_Bus())
+    return AgentRegistry(
+        template_lookup=TemplateLookup(providers=providers), event_bus=_Bus(),
+        model_resolver=lambda a, m: _Client(),
+    )
 
 
 async def test_load_fills_records_from_views():
@@ -60,7 +72,7 @@ async def test_load_resolves_template_config_not_dataclass_defaults():
     views = {"agt_a": AgentView(id="agt_a", template_id=TPL)}
     await lm.load(views, session_id="s1", tenant_id="default",
                   fallback_template_id=TPL)
-    got = lm.materialize("agt_a", context_limit=1, reserved_output_tokens=1)
+    got, _rm = lm.materialize("agt_a")
     assert got.memory_config == tmpl.memory_config
     assert got.loop_config == tmpl.loop_config
 

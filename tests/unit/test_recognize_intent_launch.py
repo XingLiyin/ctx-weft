@@ -45,6 +45,7 @@ async def test_launch_runs_step_on_snapshot(monkeypatch):
         transcript=[object()],
         verdict=object(),
         extra={"template": SimpleNamespace(), "bound_capabilities": ["CAP"]},
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = SimpleNamespace(task_manager=None)
 

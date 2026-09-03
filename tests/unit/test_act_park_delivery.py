@@ -46,7 +46,7 @@ def _act_env(*, interactive: bool = True):
     )
     agent = SimpleNamespace(id="agt_1", template_id="tmpl_a", session_id="s1")
     scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
-    state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope)
+    state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
 
     registry = HitlRegistry()
     bus = InProcessEventBus()

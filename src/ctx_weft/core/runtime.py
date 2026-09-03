@@ -59,7 +59,7 @@ from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
+from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, ModelChoice, ResolvedModel
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
@@ -569,8 +569,14 @@ class CtxWeftRuntime:
         # Agent 注册表：runtime 级长生命周期组件，_agents 是 agent 身份与配置的唯一住所。
         # 从前 AgentRegistry 是每次调用 new 一个的临时对象，见
         # docs/events-v2.md §2.1.1（与 SessionManager 同形的那次晋升）。
+        # model_resolver=self._resolve_llm：registry 现解不缓存（那是 LLMClientResolver
+        # 的职责），构造期注入、无默认值——单测跑的和生产跑的必须是同一个东西
+        # （core/hitl/reply_intake.py docstring 的既有立场，Task 4 因默认 bus 判过一次
+        # Critical，这里不重蹈）。self._resolve_llm 已带好「无 provider 时回落 self._llm」
+        # 那条分支，无需在此重复。
         self._agent_registry = AgentRegistry(
-            template_lookup=self._template_lookup, event_bus=self._event_bus)
+            template_lookup=self._template_lookup, event_bus=self._event_bus,
+            model_resolver=self._resolve_llm)
 
         # Capability cache (per-session, shared across all agents in runtime)
         self._capability_cache = CapabilityCache()
@@ -746,29 +752,6 @@ class CtxWeftRuntime:
             content, session_id, tenant_id=tenant_id,
         )
 
-    def _sync_session_llm_window(self, session: Session) -> None:
-        """换模型/账号续跑后，把会话窗口参数对齐新模型（context_limit / reserved_output_tokens）。
-
-        只在恢复方显式传入 llm 覆盖时调用：CONTEXT_OVERFLOW 挂起的会话换更大窗口的模型
-        恢复，若窗口仍沿用投影里旧模型的值，重装配会原样再溢出，切换等于无效。
-        duck-type 读取（镜像 run_single_task）：桩 client 缺属性时保持会话原值；解析失败
-        （如未注册 provider）不阻断恢复，只记日志、沿用原值。
-        """
-        try:
-            llm = self._resolve_llm(session.llm_provider or None, session.llm_model or None)
-        except Exception:
-            logger.warning(
-                "model-switch resume: cannot resolve LLM client for session %s; "
-                "keeping projected window params", session.id,
-            )
-            return
-        limit = getattr(llm, "context_limit", None)
-        if limit:
-            session.context_limit = limit
-        reserve = getattr(llm, "output_reserve", None)
-        if reserve is not None:
-            session.reserved_output_tokens = reserve
-
     def _register_run_tokens(
         self, session_id: str, task_id: str, *, root_run: bool = True,
     ) -> RunTokens:
@@ -889,15 +872,17 @@ class CtxWeftRuntime:
         llm_model: str | None = None,
     ) -> tuple[RunHandle, LoopState]:
         """Phase 1 compat: run a single task end-to-end and await completion."""
-        import dataclasses as _dc
-
         from ctx_weft.core.content import content_to_text
 
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
-        llm = self._resolve_llm(llm_account, llm_model)
         # 入口即拒、不落库：格式/blob 门控须在任何持久化（Session/Task/事件）之前完成
-        # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全。
+        # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全——
+        # 且必须先于 instantiate()：那一步会发 AgentInstantiated 事件，是这条路径上
+        # 第一个「persist」，llm 不可解析须在它之前失败，而非之后（此调用只为早失败，
+        # 结果不留用——agent 的窗口由下面 instantiate(llm=...) 内部按同一份 choice
+        # 重新解出，registry 不缓存 client，这里的返回值即弃是设计的一部分）。
+        self._resolve_llm(llm_account, llm_model)
         # validate → normalize 的顺序与另外两个入口共用同一个方法，不再各写一遍。
         # event 侧产物在这条路径上没有**入口事件**载得下它（run_single_task 自己
         # register_task、不经 push_task，也不发 SESSION_CREATED），但它必须挂到 Task 上：
@@ -911,9 +896,16 @@ class CtxWeftRuntime:
         )
         lm = self._agent_registry
 
+        # llm= 传选择（可空）——不是身份：这条创建路径唯一发 AgentInstantiated 的地方，
+        # 选择须住进 agent record，事件层才有真值可报（批次 B）。
         agent, template = await lm.instantiate(
             template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
+            llm=ModelChoice(account=llm_account or "", model=llm_model or ""),
         )
+        # 这次实际要用的 (client, 身份, 窗口)——agent.loop_guard 已由 instantiate()
+        # 内部的 materialize() 按同一份 choice 解出并 stamp，此处只是再取一份供
+        # session 窗口对齐 + _execute_task 使用（不缓存，现解现弃）。
+        resolved_model = lm.resolve_model(agent.id)
 
         session = Session(
             id=sid,
@@ -925,14 +917,15 @@ class CtxWeftRuntime:
             llm_model=llm_model or "",
             created_at=now_utc(),
         )
-        session.context_limit = llm.context_limit
-        # 真实 client 必有 output_reserve；duck-type 桩缺失则保留 session 既有默认（8192）。
-        _reserve = getattr(llm, "output_reserve", None)
-        if _reserve is not None:
-            session.reserved_output_tokens = _reserve
+        session.context_limit = resolved_model.context_limit
+        session.reserved_output_tokens = resolved_model.reserved_output_tokens
+        # instantiate() 刻意不解模型（惰性不变量，见 agent_registry.py 的
+        # _DEFAULT_CONTEXT_LIMIT 注释）；这条 compat 路径立刻要跑真实的一次 dispatch，
+        # 在此显式 stamp 上面已经解出的 resolved_model。
+        import dataclasses as _dc
         agent = _dc.replace(agent, loop_guard=LoopGuard(
-            context_limit=session.context_limit,
-            reserved_output_tokens=session.reserved_output_tokens,
+            context_limit=resolved_model.context_limit,
+            reserved_output_tokens=resolved_model.reserved_output_tokens,
         ))
         task = Task(
             id=generate_id("tsk"),
@@ -975,8 +968,7 @@ class CtxWeftRuntime:
                     template=template,
                     run_id=generate_id("run"),
                     memory=self.providers.get_memory(),
-                    llm_account=llm_account,
-                    llm_model=llm_model,
+                    resolved_model=resolved_model,
                     task_manager=task_manager,
                 )
             except Exception as e:
@@ -1093,8 +1085,6 @@ class CtxWeftRuntime:
             template_id=params.template_id,
             lm=lm,
             memory=memory,
-            llm_account=params.llm_account,
-            llm_model=params.llm_model,
             task_manager=task_manager,
             default_run_id=run_id,
             handle=handle,
@@ -1318,16 +1308,19 @@ class CtxWeftRuntime:
         template_id: str,
         lm: AgentRegistry,
         memory: MemoryProvider,
-        llm_account: str | None,
-        llm_model: str | None,
         task_manager: TaskManager,
         default_run_id: str,
         handle: "RunHandle | None" = None,
     ) -> "_SessionTaskRunner":
-        """构造本 session/run 的两阶段 runner（原闭包工厂的显式化）。"""
+        """构造本 session/run 的两阶段 runner（原闭包工厂的显式化）。
+
+        不再收 llm_account/llm_model：这次要用的模型由 assemble() 经
+        `AgentRegistry.materialize`/`resolve_model` 按 agent record 的
+        `ModelChoice` 现解，不再是 runner 构造期就定死的会话级值。
+        """
         return _SessionTaskRunner(
             runtime=self, session=session, template=template, template_id=template_id,
-            lm=lm, memory=memory, llm_account=llm_account, llm_model=llm_model,
+            lm=lm, memory=memory,
             task_manager=task_manager,
             default_run_id=default_run_id, handle=handle,
         )
@@ -1412,9 +1405,6 @@ class CtxWeftRuntime:
             session.llm_provider = llm_account
         if llm_model is not None:
             session.llm_model = llm_model
-        if llm_account is not None or llm_model is not None:
-            # 换模型恢复：窗口参数须随新模型，否则 CONTEXT_OVERFLOW 挂起换大模型也照旧溢出
-            self._sync_session_llm_window(session)
         all_tasks = [task_from_projection(tp) for tp in view.tasks.values()]
         # 重放出来的 prompt 带的是 **event ref**（事件 payload 的口径），而它下游要被
         # driver ingest 进 memory。两个 ref 命名空间互不相通，故必须在此过桥：
@@ -1495,8 +1485,6 @@ class CtxWeftRuntime:
             template_id=template_id,
             lm=lm,
             memory=self.providers.get_memory(),
-            llm_account=session.llm_provider,
-            llm_model=session.llm_model,
             task_manager=task_manager,
             default_run_id=generate_id("run"),
         ))
@@ -1619,6 +1607,8 @@ class CtxWeftRuntime:
         close 边界（finish/normal）：先从 memory 读占位 finish 对 tool_call_id + 据 task 状态定 outcome，
         register_close_synth，使重跑经 _replace_finish_report 替换占位对。best-effort：任何一步失败记日志、跳过。
         """
+        import dataclasses as _dc
+
         from ctx_weft.core.loop.steps.background_observe import _CLOSE_BOUNDARIES
         try:
             lm = self._agent_registry
@@ -1628,24 +1618,26 @@ class CtxWeftRuntime:
             lm.register_session(
                 session.id, tenant_id=session.tenant_id, fallback_template_id=template_id,
             )
-            agent = lm.materialize(
-                agent_id,
+            agent, rm = lm.materialize(agent_id)
+            # 窗口以 session.context_limit/reserved_output_tokens 为准（host 配置的预算
+            # 天花板，独立于 ModelChoice）——同 _SessionTaskRunner.assemble 的口径。
+            agent = _dc.replace(agent, loop_guard=LoopGuard(
                 context_limit=session.context_limit,
                 reserved_output_tokens=session.reserved_output_tokens,
-            )
+            ))
             memory = self.providers.get_memory()
             scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
             provider_ctx = self._build_provider_ctx(session, task, agent)
             skill_index = self._skill_provider_index()
             assembler = self._build_assembler(memory, provider_ctx, skill_index)
             gateway = self._build_gateway(memory)
-            llm = self._resolve_llm(session.llm_provider, session.llm_model)
+            llm = rm.client
             loop_ctx = self._build_loop_ctx(
                 assembler, llm, memory, provider_ctx, gateway, skill_index, None, task_manager,
             )
             state = LoopState(
                 run_id=generate_id("run"), session=session, task=task, agent=agent,
-                scope=scope, extra={"template": template},
+                scope=scope, extra={"template": template}, resolved_model=rm,
             )
             if boundary in _CLOSE_BOUNDARIES:
                 tcid = await self._find_finish_pair_tool_call_id(memory, scope, task.id, provider_ctx)
@@ -1681,9 +1673,6 @@ class CtxWeftRuntime:
             session.llm_provider = llm_account
         if llm_model is not None:
             session.llm_model = llm_model
-        if llm_account is not None or llm_model is not None:
-            # 同 recover_session：换模型就地续跑也要对齐窗口参数
-            self._sync_session_llm_window(session)
         if user_reply is not None:
             await self._inject_user_reply(user_reply, session, tm)
         tm.resume_task(resumed_task_id)
@@ -1748,11 +1737,7 @@ class CtxWeftRuntime:
             lm.register_session(
                 session.id, tenant_id=session.tenant_id, fallback_template_id=proj.template_id,
             )
-            agent = lm.materialize(
-                target_agent_id,
-                context_limit=session.context_limit,
-                reserved_output_tokens=session.reserved_output_tokens,
-            )
+            agent, rm = lm.materialize(target_agent_id)
             # materialize 不返回 template（它只读 record，不碰 TemplateLookup）——
             # state.extra 仍需要它（CompactStep 经 extra["template"] 读），单独取一次。
             template = await self._template_lookup.get_template(
@@ -1793,7 +1778,7 @@ class CtxWeftRuntime:
             skill_index = self._skill_provider_index()
             assembler = self._build_assembler(memory, provider_ctx, skill_index)
             gateway = self._build_gateway(memory)
-            llm = self._resolve_llm(session.llm_provider, session.llm_model)
+            llm = rm.client
             loop_ctx = self._build_loop_ctx(
                 assembler, llm, memory, provider_ctx, gateway, skill_index, token, None,
             )
@@ -1806,6 +1791,7 @@ class CtxWeftRuntime:
                 agent=agent,
                 scope=scope,
                 extra={"template": template},
+                resolved_model=rm,
             )
             outcome = await CompactStep().execute(state, loop_ctx)
             for ev in outcome.events:
@@ -2609,8 +2595,7 @@ class CtxWeftRuntime:
         template: AgentTemplate,
         run_id: str,
         memory: MemoryProvider,
-        llm_account: str | None = None,
-        llm_model: str | None = None,
+        resolved_model: ResolvedModel,
         cancel_token: CancelToken | None = None,
         pause_token: "PauseToken | None" = None,
         initial_step: str = "prepare",
@@ -2621,16 +2606,11 @@ class CtxWeftRuntime:
         skill_index = self._skill_provider_index()
         assembler = self._build_assembler(memory, provider_ctx, skill_index)
         gateway = self._build_gateway(memory)
-        llm = self._resolve_llm(llm_account, llm_model)
-        # 回填 session 真值（只补空缺，不覆盖切换恢复已写入的值）：创建路径不写
-        # llm_model/llm_provider，且 host 依赖账号 default_model 时连入参都为空——
-        # 实际身份只有解析出的 client 知道（_FixedModelClient 公开 model/account，
-        # duck-typed，裸 adapter 缺属性则维持原状走 "mock" 兜底）。事件层
-        # resolve_llm_identity 以 session 为真值，空则误报 "mock"。
-        if not session.llm_model:
-            session.llm_model = llm_model or getattr(llm, "model", "") or ""
-        if not session.llm_provider:
-            session.llm_provider = llm_account or getattr(llm, "account", "") or ""
+        # 这次 run 实际用的 client——调用方（AgentBinding.model / run_single_task 的
+        # resolved_model）已经解好，这里不再自己解析。三样东西各归各位：选择住
+        # agent record，身份/窗口住这份 ResolvedModel，都不回填进 session
+        # （回填冻结账号默认的问题见 agent_registry.py ModelChoice 的 docstring）。
+        llm = resolved_model.client
         loop_ctx = self._build_loop_ctx(assembler, llm, memory, provider_ctx, gateway, skill_index, cancel_token, task_manager, pause_token=pause_token)
 
         scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=scope_agent_id or agent.id)
@@ -2641,6 +2621,7 @@ class CtxWeftRuntime:
             agent=agent,
             scope=scope,
             extra={"template": template},
+            resolved_model=resolved_model,
         )
         driver = self._build_step_driver(initial_step)
         state = await self._run_loop(state, loop_ctx, driver, run_id, initial_step, task, agent)
@@ -2674,8 +2655,6 @@ class _SessionTaskRunner:
         template_id: str,
         lm: AgentRegistry,
         memory: MemoryProvider,
-        llm_account: str | None,
-        llm_model: str | None,
         task_manager: TaskManager,
         default_run_id: str,
         handle: "RunHandle | None" = None,
@@ -2686,8 +2665,6 @@ class _SessionTaskRunner:
         self._template_id = template_id
         self._registry = lm
         self._memory = memory
-        self._llm_account = llm_account
-        self._llm_model = llm_model
         self._task_manager = task_manager
         self._default_run_id = default_run_id
         self._handle = handle
@@ -2721,18 +2698,22 @@ class _SessionTaskRunner:
                         template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
                         parent_agent_id=t.creator_agent_id, task_id=t.id, ctx=ctx,
                     )
+                    # instantiate() 刻意不解模型（惰性不变量）；这里现解一次供
+                    # AgentBinding.model——不缓存，现解现弃是设计的一部分
+                    # （LLMClientResolver 才是那层缓存）。
+                    rm = self._registry.resolve_model(agent.id)
                 else:
-                    agent = self._registry.materialize(
-                        t.assigned_agent_id,
-                        context_limit=self._session.context_limit,
-                        reserved_output_tokens=self._session.reserved_output_tokens,
-                    )
+                    agent, rm = self._registry.materialize(t.assigned_agent_id)
                     # materialize 不返回 template；沿用原行为按 sub_tmpl_id 重新解析
                     # （与 create 分支同一个来源，agent 出身早已由 AgentInstantiated
                     # 事件钉住，这里只是要一份可用的 AgentTemplate 对象）。
                     tmpl = await self._runtime._template_lookup.get_template(
                         sub_tmpl_id, None, ctx=ctx,
                     )
+                # 窗口仍以 session.context_limit/reserved_output_tokens 为准——那是
+                # host 经 SessionStartParams 显式配置的预算天花板（必填字段，独立于
+                # ModelChoice/rm），与「用哪个模型」是两件事：host 完全可能故意配一个
+                # 小于模型真实窗口的预算。rm 只贡献 client/身份，不覆盖这里。
                 agent = _dc.replace(agent, loop_guard=LoopGuard(
                     context_limit=self._session.context_limit,
                     reserved_output_tokens=self._session.reserved_output_tokens,
@@ -2753,20 +2734,24 @@ class _SessionTaskRunner:
                         )
                 initial = await self._reconcile_or(t, agent, "prepare")
                 return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
-                                    initial_step=initial, run_id=generate_id("run"))
+                                    initial_step=initial, run_id=generate_id("run"), model=rm)
 
             case _:
                 # 非 subagent 任务在**创建者**的 agent scope 上跑（延续创建者对话），
                 # 而非一律 root——否则 subagent 派生的非 subagent 子会跑进 root scope、丢失
                 # 创建者上下文并污染 root。scope 键与调度串行判定共用 effective_agent_id 单一真相。
-                agent = self._registry.materialize(
+                agent, rm = self._registry.materialize(
                     effective_agent_id(t, self._session.root_agent_id or ""),
+                )
+                # 见上面 subagent 分支同一条注释：窗口以 session 配置为准，rm 只贡献
+                # client/身份。
+                agent = _dc.replace(agent, loop_guard=LoopGuard(
                     context_limit=self._session.context_limit,
                     reserved_output_tokens=self._session.reserved_output_tokens,
-                )
+                ))
                 initial = await self._reconcile_or(t, agent, "prepare")
                 return AgentBinding(agent_id=agent.id, agent=agent, template=self._template,
-                                    initial_step=initial, run_id=self._default_run_id)
+                                    initial_step=initial, run_id=self._default_run_id, model=rm)
 
     # ── 阶段 2：执行 ─────────────────────────────────────────────────────────
 
@@ -2800,8 +2785,7 @@ class _SessionTaskRunner:
                 template=binding.template,
                 run_id=binding.run_id,
                 memory=self._memory,
-                llm_account=self._session.llm_provider or self._llm_account,
-                llm_model=self._session.llm_model or self._llm_model,
+                resolved_model=binding.model,
                 initial_step=binding.initial_step,
                 task_manager=self._task_manager,
                 cancel_token=tokens.cancel,

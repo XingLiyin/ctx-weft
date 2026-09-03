@@ -47,6 +47,7 @@ def launch_recognize_intent(state: LoopState, ctx: LoopContext) -> asyncio.Task:
         agent=state.agent,
         scope=state.scope,
         extra=dict(state.extra),
+        resolved_model=state.resolved_model,
     )
 
     async def _run() -> None:

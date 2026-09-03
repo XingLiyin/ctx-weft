@@ -20,6 +20,8 @@ CANCELED。旧路径 `report_task_outcome` 判 fail 时就地写 `task.status="F
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
@@ -114,7 +116,7 @@ class _LoopRunner:
         scope = MemoryAddress(session_id=self._session.id, task_id=task.id,
                               agent_id=self._agent.id)
         state = LoopState(run_id=generate_id("run"), session=self._session, task=task,
-                          agent=self._agent, scope=scope)
+                          agent=self._agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
         provider_ctx = ProviderContext(session_id=self._session.id, tenant_id="default",
                                        task_id=task.id, agent_id=self._agent.id)
         ctx = LoopContext(

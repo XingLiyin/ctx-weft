@@ -23,6 +23,15 @@ class _Bus:
         return None
 
 
+class _Client:
+    """model_resolver 的桩返回值——构造期注入、无默认值，测试替身须显式给出。"""
+
+    def __init__(self, account="acct_default", model="mdl_default",
+                 context_limit=200_000, output_reserve=8192):
+        self.account, self.model = account, model
+        self.context_limit, self.output_reserve = context_limit, output_reserve
+
+
 def _lm() -> AgentRegistry:
     from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
     from ctx_weft.core.runtime import ProviderRegistry
@@ -30,7 +39,10 @@ def _lm() -> AgentRegistry:
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    return AgentRegistry(template_lookup=TemplateLookup(providers=providers), event_bus=_Bus())
+    return AgentRegistry(
+        template_lookup=TemplateLookup(providers=providers), event_bus=_Bus(),
+        model_resolver=lambda a, m: _Client(),
+    )
 
 
 async def test_instantiate_registers_a_record():

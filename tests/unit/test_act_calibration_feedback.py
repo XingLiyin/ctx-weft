@@ -77,6 +77,7 @@ def _make_state(*, context_tokens: int = 0):
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
+        resolved_model=SimpleNamespace(model="deepseek-v4-pro", account="deepseek-rj"),
     )
 
 

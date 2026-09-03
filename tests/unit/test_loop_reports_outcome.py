@@ -121,7 +121,7 @@ async def run_until_suspend(*, titles: list[str]):
                       tenant_id="default", root_agent_id="ag2")
     agent = Agent(id="ag2", session_id="s1", template_id="tpl_test", tenant_id="default", loop_guard=LoopGuard(),
                  memory_config=MemoryConfig(), loop_config=LoopConfig())
-    state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope)
+    state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
     # launch_background_observe 是 fire-and-forget：给它一个真 event_bus，否则它的
     # finally 块（无条件发 TASK_RECAP_DONE）会在测试结束后抛 "exception was never
     # retrieved"。段里没有任何 CONVERSATION_TURN → n_raw==0 幂等护栏立即 return，
@@ -170,7 +170,7 @@ async def run_until_park():
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=RTLoopConfig())
     scope = MemoryAddress(session_id="s_park_2", task_id="tsk_park_2", agent_id="agt_p2")
-    state = LoopState(run_id="run_p2", session=session, task=task, agent=agent, scope=scope)
+    state = LoopState(run_id="run_p2", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
 
     class _ParkingDriver:
         async def run(
@@ -270,7 +270,7 @@ async def run_until_cancel():
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=RTLoopConfig())
     scope = MemoryAddress(session_id="s_cancel_2", task_id="tsk_cancel_2", agent_id="agt_c2")
-    state = LoopState(run_id="run_c2", session=session, task=task, agent=agent, scope=scope)
+    state = LoopState(run_id="run_c2", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
 
     class _CancellingDriver:
         async def run(
@@ -336,7 +336,7 @@ async def run_until_crash(exc: BaseException):
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=RTLoopConfig())
     scope = MemoryAddress(session_id="s_crash_2", task_id="tsk_crash_2", agent_id="agt_x2")
-    state = LoopState(run_id="run_x2", session=session, task=task, agent=agent, scope=scope)
+    state = LoopState(run_id="run_x2", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
 
     class _CrashingDriver:
         async def run(

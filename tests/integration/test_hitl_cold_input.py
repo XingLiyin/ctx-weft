@@ -111,7 +111,7 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
     scope = MemoryAddress(session_id=session_id, task_id=task_id, agent_id=agent_id)
     agent = SimpleNamespace(id=agent_id, template_id="tmpl_a", session_id=session_id)
     state = LoopState(run_id="run_1", session=session, task=task, agent=agent, scope=scope,
-                      extra={"template": make_echo_template()})
+                      extra={"template": make_echo_template()}, resolved_model=SimpleNamespace(model="mock", account=""))
 
     pctx = ProviderContext(
         session_id=session_id,

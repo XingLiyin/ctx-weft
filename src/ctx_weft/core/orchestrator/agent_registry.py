@@ -8,24 +8,55 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.errors import CtxWeftError
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.state.models import Agent, LoopGuard
 from ctx_weft.core.utils import generate_id, now_utc
-from ctx_weft.protocols import LoopConfig, MemoryConfig
+from ctx_weft.protocols import LLMClient, LoopConfig, MemoryConfig
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.protocols.events import Event, EventBus, EventType
 from ctx_weft.protocols.template import AgentTemplate
 
-# LoopGuard() 的字段默认值——instantiate() 末尾水合时没有调用方给的真实窗口参数
-# 可用（那要到派发时才知道），借用 dataclass 默认值当占位；真正生效的窗口由后续
-# materialize() 调用（派发点）按 session/llm 传入覆盖。
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ModelChoice:
+    """host 要的 `(account, model)`——可以全空，空即「跟随账号默认」。
+
+    这是三样东西里唯一住进 `_AgentRecord` 的一样：解析出的 client 与实际身份
+    都不存，派发时从这个 choice 现解（见 `AgentRegistry.resolve_model`）。
+    """
+
+    account: str = ""
+    model: str = ""
+
+
+@dataclass(frozen=True)
+class ResolvedModel:
+    """一次解析的产物：client + 实际身份 + 窗口。三者同源，一次算出。"""
+
+    client: LLMClient
+    account: str
+    model: str
+    context_limit: int
+    reserved_output_tokens: int
+
+
+class ModelResolver(Protocol):
+    def __call__(self, account: str, model: str) -> LLMClient: ...
+
+
+# LoopGuard() 的字段默认值——instantiate() 末尾构造 Agent 时刻意不解模型：会话创建
+# （SessionManager.create_session）必须不碰 LLM，惰性解析要留到派发时才发生
+# （test_content_validation.py 钉死这条：纯文本 start_session 不注册 LLM provider
+# 也必须成功返回，_resolve_llm 一次都不许被调用）。真正生效的窗口由派发点的
+# materialize()/resolve_model() 按 agent record 的 ModelChoice 现解、stamp 进 loop_guard。
 _DEFAULT_CONTEXT_LIMIT = LoopGuard().context_limit
 _DEFAULT_RESERVED_OUTPUT_TOKENS = LoopGuard().reserved_output_tokens
-
-logger = logging.getLogger(__name__)
 
 
 class UnknownCapabilityError(CtxWeftError):
@@ -62,6 +93,7 @@ class _AgentRecord:
     spawn_depth: int
     memory_config: MemoryConfig
     loop_config: LoopConfig
+    llm: ModelChoice = field(default_factory=ModelChoice)
 
 
 @dataclass
@@ -77,6 +109,7 @@ class AgentRegistry:
 
     template_lookup: "TemplateLookup"
     event_bus: EventBus
+    model_resolver: ModelResolver
     _agents: dict[str, _AgentRecord] = field(default_factory=dict)
     _sessions: dict[str, _SessionDefaults] = field(default_factory=dict)
 
@@ -167,6 +200,7 @@ class AgentRegistry:
         agent_id: str | None = None,
         template: AgentTemplate | None = None,
         ctx: ProviderContext | None = None,
+        llm: ModelChoice | None = None,
     ) -> tuple[Agent, AgentTemplate]:
         """真新建：解析 template（或用调用方预解析的），生成新 id（或用调用方预铸的），
         登记 record，发出身事件。
@@ -175,6 +209,10 @@ class AgentRegistry:
         深度超限发 SpawnRejected 并抛 SpawnDepthExceeded。
 
         ★ 无 existing_agent_id 参数——水合走 materialize()，两件事不再共用一个入口。
+
+        llm：这个 agent 的 `(account, model)` 选择。省略（None）→ 继承**派生它的那个
+        agent**（`parent_agent_id` 的 record.llm）；无父（root）则 `ModelChoice()`——
+        跟随账号默认。是 root 时也允许显式传，不必是空。
 
         task_id：AgentSpawned / SpawnRejected 的 envelope 需要——两条事件的主语都是
         「围绕这次 spawn 尝试」，task_id 标的是被 spawn 出来要跑的那个子任务。root
@@ -244,6 +282,10 @@ class AgentRegistry:
                     f"(current: {spawn_depth})"
                 )
 
+        if llm is None:
+            # 继承**派生它的那个 agent**（parent_rec，上面 depth 检查已解出），不是 root。
+            llm = parent_rec.llm if parent_agent_id is not None else ModelChoice()
+
         agent_id = agent_id or generate_id("agt")
         self._agents[agent_id] = _AgentRecord(
             session_id=session_id,
@@ -253,16 +295,31 @@ class AgentRegistry:
             spawn_depth=spawn_depth,
             memory_config=template.memory_config,
             loop_config=template.loop_config,
+            llm=llm,
         )
 
         logger.info(
             "AgentRegistry: instantiated agent %s (template=%s, depth=%d)",
             agent_id, template_id, spawn_depth,
         )
-        agent = self.materialize(
-            agent_id,
-            context_limit=_DEFAULT_CONTEXT_LIMIT,
-            reserved_output_tokens=_DEFAULT_RESERVED_OUTPUT_TOKENS,
+        # 不走 materialize()/resolve_model()：这里刻意不碰模型解析——instantiate 是
+        # 会话/子 agent 创建路径，调用方（如 SessionManager.create_session）此刻常常
+        # 还没有真正要用的窗口、也不该为了造一个返回值就触发 LLM 解析（惰性不变量，
+        # 见上面 _DEFAULT_CONTEXT_LIMIT 的注释）。真实窗口留给派发时的 materialize()。
+        agent = Agent(
+            id=agent_id,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            template_id=template.id,
+            parent_agent_id=parent_agent_id,
+            spawn_depth=spawn_depth,
+            memory_config=template.memory_config,
+            loop_config=template.loop_config,
+            loop_guard=LoopGuard(
+                context_limit=_DEFAULT_CONTEXT_LIMIT,
+                reserved_output_tokens=_DEFAULT_RESERVED_OUTPUT_TOKENS,
+            ),
+            created_at=now_utc(),
         )
 
         if parent_agent_id is not None:
@@ -303,10 +360,24 @@ class AgentRegistry:
 
         return agent, template
 
-    def materialize(
-        self, agent_id: str, *, context_limit: int, reserved_output_tokens: int,
-    ) -> Agent:
-        """水合：按 id 从 record 造一个新的 Agent 对象。零事件，永不抛。
+    def resolve_model(self, agent_id: str) -> ResolvedModel:
+        """现解，不缓存：client/身份/窗口是同一次解析的三面，一次算出、当次即弃。
+
+        缓存 client 是 `LLMClientResolver` 的职责——Registry 再存一份就有第二个
+        缓存和它自己的失效问题（host 换了账号凭据，陈旧 client 继续被用）。
+        """
+        choice = self._agents[agent_id].llm
+        client = self.model_resolver(choice.account, choice.model)
+        return ResolvedModel(
+            client=client,
+            account=choice.account or getattr(client, "account", ""),
+            model=choice.model or getattr(client, "model", ""),
+            context_limit=client.context_limit,
+            reserved_output_tokens=client.output_reserve,
+        )
+
+    def materialize(self, agent_id: str) -> tuple[Agent, ResolvedModel]:
+        """水合：按 id 从 record 造一个新的 Agent 对象，顺带解出这次要用的模型。零事件，永不抛。
 
         未登记的 id（恢复期缺口——比如跨重启后本进程的 registry 是空的）走「按
         session 的 fallback_template_id 就地补登记 + WARNING」而不是 KeyError：
@@ -316,11 +387,16 @@ class AgentRegistry:
 
         每次调用产出一个新实例（不是共享引用）：Agent 带一次 run 的可变量
         （loop_guard.context_tokens 由 act.py 改写），派发时各自持有自己的份是对的。
+
+        窗口不再由调用方传入——`LLMClient` 协议本就把 context_limit / output_reserve
+        定义成抽象属性（protocols/llm.py），永远从这次解出的 client 现读，没有
+        「换模型后对齐窗口」这个动作要做，因为窗口从没存过、一直跟着 client 走。
         """
         rec = self._agents.get(agent_id)
         if rec is None:
             rec = self._register_fallback(agent_id)
-        return Agent(
+        rm = self.resolve_model(agent_id)
+        agent = Agent(
             id=agent_id,
             session_id=rec.session_id,
             tenant_id=rec.tenant_id,
@@ -330,11 +406,12 @@ class AgentRegistry:
             memory_config=rec.memory_config,
             loop_config=rec.loop_config,
             loop_guard=LoopGuard(
-                context_limit=context_limit,
-                reserved_output_tokens=reserved_output_tokens,
+                context_limit=rm.context_limit,
+                reserved_output_tokens=rm.reserved_output_tokens,
             ),
             created_at=now_utc(),
         )
+        return agent, rm
 
     def _register_fallback(
         self, agent_id: str, *, session_id: str | None = None, tenant_id: str | None = None,

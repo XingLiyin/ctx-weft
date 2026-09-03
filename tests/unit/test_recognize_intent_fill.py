@@ -52,6 +52,7 @@ def _state(bound):
         task=SimpleNamespace(id="t1", title="", settings=SimpleNamespace()),
         scope=SimpleNamespace(session_id="s1", task_id="t1", agent_id="a1"),
         extra={"template": SimpleNamespace(), "bound_capabilities": bound},
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
 
 

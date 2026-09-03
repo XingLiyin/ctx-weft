@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
@@ -55,6 +57,7 @@ def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
     )
     state = LoopState(
         run_id="r1", session=session, task=task, agent=agent, scope=scope, assembled_prompt=prompt,
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=llm, memory=mem, event_bus=bus,

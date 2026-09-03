@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
@@ -46,7 +48,7 @@ def _build_state_and_ctx(runtime: CtxWeftRuntime, task: Task):
     session = Session(id="s1", user_prompt="hi", status="RUNNING")
     agent = Agent(id="agt1", session_id="s1", template_id="tpl", loop_guard=LoopGuard())
     scope = MemoryAddress(session_id="s1", task_id=task.id, agent_id="agt1")
-    state = LoopState(run_id=generate_id("run"), session=session, task=task, agent=agent, scope=scope)
+    state = LoopState(run_id=generate_id("run"), session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
     provider_ctx = ProviderContext(session_id="s1", tenant_id="default", task_id=task.id, agent_id="agt1")
     ctx = LoopContext(
         assembler=None, llm=runtime._resolve_llm(), memory=runtime.providers.get_memory(),

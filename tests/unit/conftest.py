@@ -109,6 +109,9 @@ async def fake_state_ctx():
         agent=agent,
         scope=scope,
         extra={"template": None, "bound_capabilities": []},
+        # resolve_llm_identity 的真值来源（批次 B）：这里从不真的发 LLM 请求
+        # （complete() 被各测试自行打桩），但仍给个占位，防止误触真实调用时 AttributeError。
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
 
     # Fake task_manager with no-op track_background
