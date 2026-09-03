@@ -191,6 +191,60 @@ task 被清掉、会话正确落 `SessionFinished{CANCELED}`，
 **发现路径**：批次二 pre-flight 裁定「`HitlCancelled` 是 L 档不能删」之后，
 用户追问「那 ask_user 还能被取消吗」——顺着这条线查出来的。
 
+### A11. `(run_id, sequence)` 在每个多步 run 内都会撞号，且 `RunFinished.total_events` 恒偏小
+
+`_run_loop`（`runtime.py`）与 `driver.run`（`driver.py`）各自持有一份
+`LoopState` 局部变量。两者初始是**同一个对象**（`_run_loop` 把 `state` 原样传进
+`driver.run(state, loop_ctx)`），故 driver 早期的 `make_event`（就地
+`state.sequence_counter += 1`，`driver.py:168`）会同步推进两边的计数器——
+只要还没有任何一侧 `apply_patch` 过，两个变量名指向的仍是同一个对象。
+
+**但第一个 `state_patch` 落下的瞬间**，两侧各自独立地 `state =
+state.apply_patch(...)`：driver 内部一次（`driver.py:283`），`_run_loop` 的
+`async for outcome in driver.run(...)` 循环体里再一次（`runtime.py:2517-2518`）。
+`apply_patch` 是 `dataclasses.replace(self, **patch)`（`driver.py:103`），
+`sequence_counter` 不在 `patch` 里、按值拷贝——于是两侧各自造出一个**独立的新
+对象**，都以拷贝那一刻的计数器值为起点，此后互不相干。血脉自此分叉。
+
+此后每个 step 内部的全部 `make_event` 调用，用的都是 `step.execute(state, ctx)`
+收到的那个 `state` 参数——即 driver 那份持续演进的对象；`_run_loop` 手里的那份
+再没有任何 step 内部事件碰它，**冻结在 prepare 步 patch 落下那一刻的值**
+（即 prepare 步除 `StepCompleted` 外的最后一条内部事件之后）。run 收尾时，
+`_run_loop` 对**这份冻结的 state** 调 `make_event(state, RUN_FINISHED, ...)`
+（`runtime.py:2646`），把冻结值 +1——**确定性地**撞上 driver 那侧 prepare 步的
+`StepCompleted`（它也是「冻结值 +1」，因为 driver 那份对象在计算 `StepCompleted`
+时也才刚从同一个起点 +1）。`RUN_INTERRUPTED`（`runtime.py:2571/2610`）、
+`RUN_CANCELED`（`runtime.py:2627`）同理，用的是同一份冻结对象。
+
+**连带**：`runtime.py:2654` 的 `"total_events": state.sequence_counter` 取的正是
+这份冻结值——**每个 run 上报的 `total_events` 都远小于真实发生的事件数**（只数到
+prepare 步 patch 落下那一刻，之后 act/observe/finalize 等全部内部事件都没数进去）。
+
+**影响面**：**所有多步 run**，与 background observe / recognize_intent /
+compact_session 无关——批次二 Task 5 修的 A4（后台 recap 蹭主 run 的号）只是
+同一片地里的另一个坑：A4 是「两段不同工作共享一个 run_id」，A11 是「同一段工作
+自己内部两份计数器分叉」，机制相邻但成因、修法都不同，A4 修完不影响 A11。
+
+**验证范围**：在批次二 BASE（`0b231bc`，干净 worktree、经
+`ctx_weft.__file__` 核实解析到该 worktree 而非主仓的可编辑安装）上，用一个不涉及
+background observe/recognize_intent 的最简 `finish_task` 单任务场景复现——
+`RunFinished` 与 prepare 步的 `StepCompleted` 在同一个 run_id 下共享同一个
+`sequence`。**只验证到批次二 BASE 这一层**：机制上看是 `driver.py`/`runtime.py`
+的结构性设计（state 在 `_run_loop`/`driver.run` 两侧各自 `apply_patch`），推测
+存在已久，但未回溯验证批次一或更早的 commit，不下「自古以来就有」的结论。
+
+**若要修**：需重构 state 在 `_run_loop` 与 `driver.run` 之间的传递方式——
+要么用一个跨两侧共享的可变计数器对象（而不是 `LoopState` 里的裸 `int` 字段），
+要么让 `driver.run` 把每次 `apply_patch` 后演进的 state yield 回给调用方、
+`_run_loop` 用它替换自己手里的那份而不是各自独立 patch。两种都是**结构性改动**，
+牵动 `driver.py`/`runtime.py` 的核心状态流转，风险量级和改动面都远超「隔离一个
+快照的计数器 + 补三处起止」，与批次二 Task 5「除 A4/C5 两条命名修复外行为等价」
+的约束冲突。**属独立立项，留给后续批次。**
+
+**发现路径**：批次二 Task 5 按 brief 骨架写 `(run_id, sequence)` 全局唯一性
+测试时，即便 A4（后台 recap 隔离 run_id）已经修好，测试仍然红——追下去发现
+根因不在 background observe，而在 `_run_loop`/`driver.run` 本身。
+
 ---
 
 ## B. 不变量与守卫
