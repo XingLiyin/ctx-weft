@@ -146,14 +146,14 @@ async def test_cancel_finalizes_hitl_before_agent_terminated_event(monkeypatch):
     assert order == ["hitl_canceled:h1", "agent_terminated:a1"]
 
 
-# ── pause_agent（Task 20, R22：建在既有的 pause_task 之上）──────────────────────
+# ── pause_agent（Task 20, R22：建在既有的 _pause_task 之上）──────────────────────
 
 
 async def test_pause_agent_signals_running_descendants_only():
     """running 的目标 + running 的子孙都收到暂停信号；idle 的子孙原样不动。
 
     暂停是异步生效的（真正落 waiting_human 要等各自的 run 跑到检查点）——这里只
-    断言"信号已经递送到对应的 run token"（`pause_task` 命中），不断言状态已经翻转。
+    断言"信号已经递送到对应的 run token"（`_pause_task` 命中），不断言状态已经翻转。
     """
     rt = _rt()
     _plant(rt, "root", None, status="running", session_id="s1")
@@ -175,7 +175,7 @@ async def test_pause_agent_signals_running_descendants_only():
 
 
 async def test_pause_agent_skips_running_agent_with_no_live_run_token():
-    """running 但没有在册 run token（race / 陈旧 record）——`pause_task` 命不中,不计入返回值。"""
+    """running 但没有在册 run token（race / 陈旧 record）——`_pause_task` 命不中,不计入返回值。"""
     rt = _rt()
     _plant(rt, "root", None, status="running", session_id="s1")
     rt._agent_lifecycle_manager._agents["root"].current_task_id = "t_root"

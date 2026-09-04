@@ -699,6 +699,11 @@ class CtxWeftRuntime:
         - 在途 run 按真实执行 agent 划分：== root agent 的那一轮（同 agent 串行 ≤1）pause →
           park 一个 wait 气泡；其余（含被顶替旧 TM 的 inflight）cancel → 协作取消终态。
         - 闩锁由 _on_idle（root park 后会话空闲）或 _release_session 清除。
+
+        不是 `pause_agent` 的广播版：`pause_agent` 级联暂停一个 agent 子树、不杀任何
+        东西、对非 running 的子孙静默跳过；这里对非 root agent 做的是取消它们的**在途
+        run**（`_cancel_run_token`），run 收尾后 agent 落回 idle、仍然活着——不是把它们
+        挨个 `pause_agent` 一遍（2026-09-04 spec §7.1）。
         """
         per = self._run_tokens.get(session_id, {})
         tm = self._task_managers.get(session_id)
@@ -713,14 +718,18 @@ class CtxWeftRuntime:
             await tm.abandon_pending(
                 reason=CancelReason.PAUSE_ABANDON, keep_agent=root_agent or None
             )
-        for task_id, tokens in list(per.items()):
+        for task_id in list(per):
             if root_agent and tm is not None and tm.running_agent_of(task_id) == root_agent:
-                tokens.pause.pause()
+                self._pause_task(session_id, task_id)
                 # 在途 root run 即唯一续跑点：认领名额，闩锁窗口内此后派发的 root scope
                 # 任务（如被 _try_resume_parent 重排的 SUSPENDED root 任务）born-cancel。
                 self._pause_claimed.add(session_id)
             else:
-                tokens.cancel.cancel()
+                # 非 root：取消它的**在途 run**，不是取消这个 agent——它经 TASK_CANCELED
+                # → AgentInput.SETTLED 落回 idle，仍然活着、仍可被 send_message 寻址。
+                # 刻意不用 cancel_agent：那会把它推到 terminated，是语义变更
+                # （2026-09-04 spec §7.1）。
+                self._cancel_run_token(session_id, task_id)
         # 补 drain：把保留的 root 排队条目派发出去——它出生即 paused → act 首检查点 park 出唯一
         # 气泡，成为本次暂停的续跑点。对空队列 / 满并发是安全 no-op。放在信号循环后、兜底前。
         if tm is not None:
@@ -732,10 +741,13 @@ class CtxWeftRuntime:
             tm.set_pause_abandon(False)
         return True
 
-    def pause_task(self, session_id: str, task_id: str) -> bool:
-        """定向暂停（spec 2026-07-05 §2.3）：pause 指定在途 task 的 run → 它在检查点 park
-        自己的 wait 气泡，经多 pending 面板回复续跑。不在跑（无本 run 令牌）→ False。
-        只停该 task 本身的 run，不涉及其子任务。"""
+    def _pause_task(self, session_id: str, task_id: str) -> bool:
+        """内部原语：定向暂停指定在途 task 的 run（spec 2026-07-05 §2.3）。`pause_agent`
+        与 `pause_session` 是它仅有的两个调用方（2026-09-04 spec §8）。
+
+        pause 指定在途 task 的 run → 它在检查点 park 自己的 wait 气泡，经多 pending
+        面板回复续跑。不在跑（无本 run 令牌）→ False。只停该 task 本身的 run，不涉及
+        其子任务。"""
         tokens = self._run_tokens.get(session_id, {}).get(task_id)
         if tokens is None:
             return False
@@ -871,8 +883,8 @@ class CtxWeftRuntime:
         只对 `running` 生效——`agent_id` 本身非 running 直接报错（`AgentNotRunningError`）；
         级联展开到的子孙里非 running 的静默跳过（暂停不该殃及本就 idle/等待中的子孙）。
 
-        建在既有的**定向暂停原语** `pause_task`（spec 2026-07-05 §2.3）之上，不是把
-        `cancel_agent` 的「立即拍状态」搬过来抄一份——`pause_task` 只对准这一个 task
+        建在既有的**定向暂停原语** `_pause_task`（spec 2026-07-05 §2.3）之上，不是把
+        `cancel_agent` 的「立即拍状态」搬过来抄一份——`_pause_task` 只对准这一个 task
         的 run 发一次软打断信号，被暂停的 run 在自己的下一个检查点自行 park 出一个
         wait 气泡（`ActStep._interrupt_checkpoint` / `_run_llm_turn` /
         `_execute_tool_calls` 命中 `pause_token.is_paused` 后统一走
@@ -889,7 +901,7 @@ class CtxWeftRuntime:
         `waiting_human` 之外多出一条假的 `interrupted` 分支，且与实际状态不符
         （run 还没被暂停完，agent 已经被判定"暂停完成"）。
 
-        返回值是**已成功递送暂停信号**（`pause_task` 命中一个在途 run token）的
+        返回值是**已成功递送暂停信号**（`_pause_task` 命中一个在途 run token）的
         agent id 列表——暂停本身是异步生效的，返回时这些 agent 多半仍是 `running`，
         真正落 `waiting_human` 要等它们各自跑到下一个检查点。
         """
@@ -907,7 +919,7 @@ class CtxWeftRuntime:
             r = reg.record_of(aid)
             if r is None or r.status != "running" or not r.current_task_id:
                 continue
-            if self.pause_task(r.session_id, r.current_task_id):
+            if self._pause_task(r.session_id, r.current_task_id):
                 paused.append(aid)
         return paused
 

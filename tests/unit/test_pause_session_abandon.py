@@ -209,9 +209,11 @@ async def test_pause_session_keeps_queued_root_task():
 
 async def test_pause_task_targets_single_run():
     # 定向暂停单个在途 task，其他 task 不受影响；task 不在跑→False
+    # `_pause_task` 是内部原语（`pause_agent`/`pause_session` 仅有的两个调用方），
+    # 这里直接调用它测的就是这个原语本身。
     rt = _rt()
     a = rt._register_run_tokens("s1", "ta")
     b = rt._register_run_tokens("s1", "tb")
-    assert rt.pause_task("s1", "ta") is True
+    assert rt._pause_task("s1", "ta") is True
     assert a.pause.is_paused and not b.pause.is_paused
-    assert rt.pause_task("s1", "nope") is False    # 不在跑 → False
+    assert rt._pause_task("s1", "nope") is False    # 不在跑 → False
