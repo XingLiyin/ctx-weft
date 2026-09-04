@@ -38,7 +38,6 @@ from ctx_weft.protocols.events import Event, EventOrigin, EventType
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
 from ctx_weft.core.hitl.service import HitlService
-from ctx_weft.core.hitl.status import paused_status_for
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.hitl_waiter import HitlWaiter
@@ -2789,26 +2788,6 @@ class CtxWeftRuntime:
                     decision.message = downgrade_images_to_text(message)
                 except Exception:                       # pragma: no cover — 纯函数，防御性
                     logger.exception("HITL 恢复：降级占位也失败 (key=%s)", key)
-
-    def _derive_paused_status(self, session_id: str) -> str:
-        """由**未决 HITL 的 delivery** 推导**面板提示**；无未决 → `""`。
-
-        判据在 `core.hitl.status.paused_status_for`。返回的 `"PAUSED"` / `"PAUSED_HITL"`
-        **不是 `SessionStatus`**——那个值域已把两者合并成 `WAITING`。这里回答的是
-        「等的是面板还是一句话」，是 delivery 的性质。唯一去处是下面那个 host 只读入口。
-        """
-        return paused_status_for(
-            r.delivery for r in self.hitl_registry.list_pending(session_id=session_id))
-
-    async def session_status_after_recover(self, session_id: str) -> str:
-        """装填该 session 的 HITL 内存态并返回它应处的暂停态（`""` = 无未决，不该暂停）。
-
-        **host 面向的只读查询**：「等的是审批面板（PAUSED_HITL）还是一句话（PAUSED）」是
-        `delivery` 的性质、只有前端需要，不上升到会话状态——会话只有一个 WAITING
-        （docs/events-v2.md §2.8）。`recover()` 自 Task 6 起不再走这条推导（恢复不分流）。
-        """
-        await self.rebuild_hitl(session_id)
-        return self._derive_paused_status(session_id)
 
     async def rebuild_all_pending_hitl(self) -> int:
         """据事件重建**所有 active session** 的内存 pending HITL（不发中断、不 drain）,返回总条数。

@@ -12,9 +12,10 @@ from ctx_weft.protocols.events import EventType
 pytestmark = pytest.mark.asyncio
 
 
-# `SessionPausedHitl` 不再由 core 发出——会话暂停态改由 pending 集合的 delivery 推导
-# （`CtxWeftRuntime._derive_paused_status`，见 `test_hitl_recovery_v2.py` 的四条状态用例）。
-# 旧事件仍在存量日志里，故下面的 reducer 投影分支保留并继续被测。
+# `SessionPausedHitl` 不再由 core 发出——「等的是面板还是一句话」改由 pending 集合的
+# delivery 承载，host 直接从 `list_pending_hitl(...)` 的 `delivery` 字段读（2026-09-04
+# Task 14 起 core 不再替 host 派生这个串；delivery 相关断言见 `test_hitl_recovery_v2.py`
+# 的 delivery 用例）。旧事件仍在存量日志里，故下面的 reducer 投影分支保留并继续被测。
 
 
 def _paused_event(session_id: str, form: str):

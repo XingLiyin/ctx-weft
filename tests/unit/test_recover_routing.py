@@ -19,8 +19,9 @@ recover() 本身不 drain、不派发任何 task/agent，ALM 的五态机这时�
 本身（`_load_agents_of` 就在这个方法里被调用），所以 AGENT_* 现状广播现在**正是**这个调用点
 能拿到的观测点，不是退而求其次的替代品。
 
-「等的是审批面板还是一句话」不上升到任何状态事件——那是 delivery 的性质,由 host 的
-只读入口 session_status_after_recover 推导。决策只折叠 HITL 类事件,不全量回放。
+「等的是审批面板还是一句话」不上升到任何状态事件——那是 delivery 的性质,2026-09-04
+Task 14 起由 host 直接从 `list_pending_hitl(...)` 的 `delivery` 字段自判,core 不再
+提供派生的 session 级状态串。决策只折叠 HITL 类事件,不全量回放。
 """
 
 from __future__ import annotations

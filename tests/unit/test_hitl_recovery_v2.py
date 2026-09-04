@@ -343,33 +343,41 @@ async def test_hydration_never_raises_even_when_the_blob_store_explodes():
     assert "[image" in _text_of(decision.message)
 
 
-# ── 暂停态推导 ──────────────────────────────────────────────────────────────
+# ── delivery：面板提示的原始事实（2026-09-04 Task 14 起派生串已删，host 自判） ──
 
 
-async def test_session_status_paused_hitl_for_tool_result_delivery():
+async def test_legacy_approval_pending_has_tool_result_delivery():
+    """旧 approval 请求（有 tool_call_id、form != wait）折成 `ToolResultDelivery`——
+    host 据此知道「有面板可答」（旧串是 PAUSED_HITL）。"""
     rt = await _runtime_with_events(_pending_with_tool_result_delivery())
-    assert await rt.session_status_after_recover(SID) == "PAUSED_HITL"
+    await rt.rebuild_hitl(SID)
     assert isinstance(rt.hitl_registry.list_pending(SID)[0].delivery, ToolResultDelivery)
 
 
-async def test_session_status_paused_for_user_turn_delivery():
-    """UserTurn = 软待命，没有面板要答 —— 误标会让前端等一个不存在的面板。"""
+async def test_legacy_wait_only_pending_has_user_turn_delivery():
+    """UserTurn = 软待命，没有面板要答（旧串是 PAUSED）—— 误标会让前端等一个
+    不存在的面板。"""
     rt = await _runtime_with_events(_pending_with_user_turn_delivery())
-    assert await rt.session_status_after_recover(SID) == "PAUSED"
+    await rt.rebuild_hitl(SID)
     assert isinstance(rt.hitl_registry.list_pending(SID)[0].delivery, UserTurnDelivery)
 
 
-async def test_status_is_derived_from_delivery_not_from_form():
-    """host 自定义 form 也能拿到正确的暂停态（旧实现按 form == "wait" 字面量判定）。"""
+async def test_delivery_is_carried_by_the_explicit_field_not_by_form():
+    """host 自定义 form 也能拿到正确的 delivery（旧的 PAUSED/PAUSED_HITL 判据曾经
+    按 `form == "wait"` 字面量判定，那条路子对 host 自定义 form 会判错；新两事件
+    模型下 `delivery` 是 `HITL_OPENED` 携带的显式字段，与 `form` 无关）。"""
     rt = await _runtime_with_events(_pending_with_custom_form_and_user_turn())
     pend = await rt.rebuild_hitl(SID)
     assert pend == 1 and rt.hitl_registry.list_pending(SID)[0].form == "host:triage"
-    assert await rt.session_status_after_recover(SID) == "PAUSED"
+    assert isinstance(rt.hitl_registry.list_pending(SID)[0].delivery, UserTurnDelivery)
 
 
-async def test_session_status_is_empty_when_nothing_is_pending():
+async def test_nothing_is_pending_once_the_hitl_is_resolved_but_never_resumed():
+    """决定已落盘、进程在续跑前死了：这条 HITL 已终局，恢复期装填后不应再出现在
+    未决列表里（旧串在这种情况下是 `""`，即「无未决，不该暂停」）。"""
     rt = await _runtime_with_events(_resolved_but_never_resumed_tool_result())
-    assert await rt.session_status_after_recover(SID) == ""
+    await rt.rebuild_hitl(SID)
+    assert rt.hitl_registry.list_pending(SID) == []
 
 
 # ── 两个方向 ────────────────────────────────────────────────────────────────

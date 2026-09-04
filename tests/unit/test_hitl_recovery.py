@@ -185,12 +185,14 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     整体退役（会话状态机随 SessionRegistry 降格一并删除）。2026-09-04（Task 12，
     events-v2 §5）起 `TaskQueueBlocked` 本身也停发——`recover()` 不再代 TM 合成
     这条会话级信号（其消费者早已不存在）。「等的是审批面板（PAUSED_HITL）还是
-    一句话（PAUSED）」这条区分本就不靠它——那是 delivery 的性质、只有前端需要，
-    由 host 的只读入口 `session_status_after_recover` 单独推导，本测试因此只钉
-    这一个入口；`_no_stray_session_status_changed` 仍守着「已退役的通用 setter
-    别再复活」这条不相关的回归线。
+    一句话（PAUSED）」这条区分本就不靠它——那是 delivery 的性质，2026-09-04
+    Task 14 起 core 不再替 host 派生这个串；host 自己拿 `list_pending_hitl(...)`
+    的 `delivery` 字段判就是了，本测试因此只钉这一个原始事实；
+    `_no_stray_session_status_changed` 仍守着「已退役的通用 setter 别再复活」
+    这条不相关的回归线。
     """
     from ctx_weft.protocols.events import EventType
+    from ctx_weft.protocols.hitl import ToolResultDelivery
 
     runtime, signals = _recover_runtime_with_regression_guard()
     seed = [
@@ -205,8 +207,9 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
 
     await runtime.recover()
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
-    # 面板 vs 一句话的区分仍在，只是搬去了 host 的只读入口。
-    assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
+    # 面板 vs 一句话的区分仍在，只是原始事实（delivery）搬去了 host 的只读入口。
+    pending = runtime.list_pending_hitl(session_id="ses_1")
+    assert isinstance(pending[0].delivery, ToolResultDelivery)
 
 
 def _recover_runtime_with_regression_guard():
@@ -215,9 +218,10 @@ def _recover_runtime_with_regression_guard():
     Task 16 前这里还捕 SM 译出的会话级事件（`SessionWaiting`/`SessionInterrupted`），
     Task 12（2026-09-04，events-v2 §5）前还捕 `TaskManager` 代发的队列聚合信号
     （`TaskQueueBlocked`/`TaskQueueInterrupted`）——两者现已先后停发，本文件不再
-    钉着它们（`session_status_after_recover` 这一只读入口才是这几条测试的真实
-    观测点，见各测试 docstring）。仍然保留 `SessionStatusChanged`：那是更早一轮
-    退役的通用 setter，一旦重新出现也要当场被抓到。
+    钉着它们（`list_pending_hitl(...)` 的 `delivery` 字段才是这几条测试的真实
+    观测点，见各测试 docstring；2026-09-04 Task 14 起 core 不再替 host 派生
+    `session_status_after_recover` 这个串）。仍然保留 `SessionStatusChanged`：
+    那是更早一轮退役的通用 setter，一旦重新出现也要当场被抓到。
     """
     from ctx_weft.protocols.events import EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
@@ -243,14 +247,16 @@ def _mk_ev(seq, type_, **payload):
 
 
 async def test_recover_emits_paused_for_wait_only_pending() -> None:
-    """wait-only pending（纯文本软待命）：会话判 WAITING，host 侧推导出 PAUSED 而非
-    PAUSED_HITL——与 SESSION_PAUSED_HITL 的 reducer/投影语义一致（form=wait → 无面板）。
+    """wait-only pending（纯文本软待命）：会话判 WAITING，host 侧从 `delivery` 判出
+    「没有面板要答」（旧串是 PAUSED）——与 SESSION_PAUSED_HITL 的 reducer/投影语义
+    一致（form=wait → 无面板）。
 
     2026-09-04（Task 12）起不再断言 TaskQueueBlocked（已停发，见上一条测试
-    docstring）——PAUSED vs PAUSED_HITL 的区分从来就只由 `session_status_after_recover`
-    推导，不靠这条信号本身分流表单类型。
+    docstring）；2026-09-04（Task 14）起 PAUSED vs PAUSED_HITL 这条派生串本身
+    也已删除，不靠这条信号分流表单类型的事实改由 `delivery` 类型直接钉。
     """
     from ctx_weft.protocols.events import EventType
+    from ctx_weft.protocols.hitl import UserTurnDelivery
 
     runtime, signals = _recover_runtime_with_regression_guard()
     seed = [
@@ -265,14 +271,17 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
 
     await runtime.recover()
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
-    # wait-only 不应误标 PAUSED_HITL——前端会等一个不存在的面板。
-    assert await runtime.session_status_after_recover("ses_1") == "PAUSED"
+    # wait-only 不应误标「有面板」——前端会等一个不存在的面板。
+    pending = runtime.list_pending_hitl(session_id="ses_1")
+    assert isinstance(pending[0].delivery, UserTurnDelivery)
 
 
 async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None:
-    """混合 pending（wait + question/approval）：会话仍判 WAITING，host 侧推导成
-    PAUSED_HITL——有面板可答。"""
+    """混合 pending（wait + question/approval）：会话仍判 WAITING，host 侧从
+    `delivery` 判出「有面板可答」（旧串是 PAUSED_HITL）——wait 那条是
+    `UserTurnDelivery`，question 那条带 `tool_call_id`,是 `ToolResultDelivery`。"""
     from ctx_weft.protocols.events import EventType
+    from ctx_weft.protocols.hitl import ToolResultDelivery, UserTurnDelivery
 
     runtime, signals = _recover_runtime_with_regression_guard()
     seed = [
@@ -289,7 +298,9 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
 
     await runtime.recover()
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
-    assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
+    pending = {r.id: r for r in runtime.list_pending_hitl(session_id="ses_1")}
+    assert isinstance(pending["h1"].delivery, UserTurnDelivery)
+    assert isinstance(pending["h2"].delivery, ToolResultDelivery)
 
 
 async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:

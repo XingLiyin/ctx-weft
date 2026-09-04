@@ -82,3 +82,31 @@ def test_view_delivery_defaults_to_no_resume():
         created_at=datetime.now(UTC),
     )
     assert isinstance(v.delivery, NoResumeDelivery)
+
+
+# ── 2026-09-04 spec §6.5：派生的 session 级状态串删除 ──────────────────────
+
+
+def test_session_status_after_recover_is_gone():
+    from ctx_weft.core.runtime import CtxWeftRuntime
+    assert not hasattr(CtxWeftRuntime, "session_status_after_recover")
+    assert not hasattr(CtxWeftRuntime, "_derive_paused_status")
+
+
+def test_hitl_status_module_is_gone():
+    import importlib
+
+    import pytest
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("ctx_weft.core.hitl.status")
+
+
+def test_host_can_derive_the_same_thing_from_delivery():
+    """删掉的那个判据，host 用 delivery 自己就能算——这才是删它的前提。"""
+    from ctx_weft.protocols.hitl import UserTurnDelivery
+
+    reg = HitlRegistry()
+    _open(reg, "h1", session_id="s1", agent_id="agt_1", delivery=UserTurnDelivery(task_id="tsk_1"))
+    views = [r.to_view() for r in reg.list_pending(session_id="s1")]
+    only_user_turns = all(isinstance(v.delivery, UserTurnDelivery) for v in views)
+    assert only_user_turns is True          # 等价于旧的 "PAUSED"
