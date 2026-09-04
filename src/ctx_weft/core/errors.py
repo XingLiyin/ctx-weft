@@ -43,6 +43,14 @@ class AgentTerminatedError(CtxWeftError):
     code = "AGENT_TERMINATED"
 
 
+class AgentNotRunningError(CtxWeftError):
+    """`pause_agent` 的目标不是 `running`（spec 7：只对 running 生效，其余状态直接
+    报错，不静默降级）。对位 `AgentBusyError`（那个是「忙碌拒收」，这个是「不忙没得停」）。
+    """
+
+    code = "AGENT_NOT_RUNNING"
+
+
 class TaskNotFound(CtxWeftError):
     code = "TASK_NOT_FOUND"
 

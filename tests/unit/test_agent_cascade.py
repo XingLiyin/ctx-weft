@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import pytest
 
+from ctx_weft.core.errors import AgentNotFound, AgentNotRunningError
+from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.hitl import (
+    HITL_FORM_QUESTION,
+    HITL_FORM_WAIT,
+    PREFACE_AFTER_INTERRUPT,
+    PREFACE_AFTER_INTERRUPT_EDIT,
+    PREFACE_NORMAL,
+    HitlAsk,
+    ToolResultDelivery,
+    UserTurnDelivery,
+)
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.unit.test_runtime_agent_api import _plant
 
@@ -132,3 +144,173 @@ async def test_cancel_finalizes_hitl_before_agent_terminated_event(monkeypatch):
     await rt.cancel_agent("a1")
 
     assert order == ["hitl_canceled:h1", "agent_terminated:a1"]
+
+
+# ── pause_agent（Task 20, R22：建在既有的 pause_task 之上）──────────────────────
+
+
+async def test_pause_agent_signals_running_descendants_only():
+    """running 的目标 + running 的子孙都收到暂停信号；idle 的子孙原样不动。
+
+    暂停是异步生效的（真正落 waiting_human 要等各自的 run 跑到检查点）——这里只
+    断言"信号已经递送到对应的 run token"（`pause_task` 命中），不断言状态已经翻转。
+    """
+    rt = _rt()
+    _plant(rt, "root", None, status="running", session_id="s1")
+    _plant(rt, "busy_kid", "root", status="running", session_id="s1")
+    _plant(rt, "idle_kid", "root", status="idle", session_id="s1")
+    rt._agent_registry._agents["root"].current_task_id = "t_root"
+    rt._agent_registry._agents["busy_kid"].current_task_id = "t_kid"
+    root_tokens = rt._register_run_tokens("s1", "t_root")
+    kid_tokens = rt._register_run_tokens("s1", "t_kid")
+
+    paused = await rt.pause_agent("root")
+
+    assert set(paused) == {"root", "busy_kid"}, "idle 的子孙不动"
+    assert root_tokens.pause.is_paused is True
+    assert kid_tokens.pause.is_paused is True
+    # 信号只是递送了，状态转移要等真实的 TASK_AWAITING_HUMAN 事件（R24）——此刻仍是 running。
+    assert rt._agent_registry.status_of("root") == "running"
+    assert rt._agent_registry.status_of("idle_kid") == "idle"
+
+
+async def test_pause_agent_skips_running_agent_with_no_live_run_token():
+    """running 但没有在册 run token（race / 陈旧 record）——`pause_task` 命不中,不计入返回值。"""
+    rt = _rt()
+    _plant(rt, "root", None, status="running", session_id="s1")
+    rt._agent_registry._agents["root"].current_task_id = "t_root"
+    # 故意不注册 run token
+
+    paused = await rt.pause_agent("root")
+
+    assert paused == []
+
+
+async def test_pause_agent_non_running_raises():
+    """spec 7：只对 running 生效，其余状态直接报错。"""
+    rt = _rt()
+    _plant(rt, "a1", None, status="idle")
+    with pytest.raises(AgentNotRunningError):
+        await rt.pause_agent("a1")
+
+
+async def test_pause_agent_unknown_raises():
+    rt = _rt()
+    with pytest.raises(AgentNotFound):
+        await rt.pause_agent("ghost")
+
+
+# ── resume_agent（Task 20, R24：只解析暂停产生的气泡，不误答 ask_user）───────────
+
+
+def _open_pause_bubble(rt, *, agent_id, task_id, session_id="s1", edit=False):
+    """与 `act._park_wait_for_user(source="interrupt", ...)` 完全同形的构造
+    （act.py 656-671 行：`form=HITL_FORM_WAIT`，`delivery=UserTurnDelivery(task_id=...,
+    preface=PREFACE_AFTER_INTERRUPT[_EDIT])`）——`pause_agent` 递送信号后，run 在
+    检查点自己 park 出的正是这一种。"""
+    preface = PREFACE_AFTER_INTERRUPT_EDIT if edit else PREFACE_AFTER_INTERRUPT
+    return rt.hitl.open(
+        HitlAsk(form=HITL_FORM_WAIT, delivery=UserTurnDelivery(task_id=task_id, preface=preface)),
+        session_id=session_id, task_id=task_id, agent_id=agent_id, stage=HITL_STAGE_TOOL,
+    )
+
+
+def _open_ask_user_bubble(rt, *, agent_id, task_id, session_id="s1", tool_call_id="tc1"):
+    """与 `control_capability.py` 的 `ask_user` 构造完全同形：`form=HITL_FORM_QUESTION`，
+    `delivery=ToolResultDelivery(...)`，`reply_as_result=True`。"""
+    return rt.hitl.open(
+        HitlAsk(form=HITL_FORM_QUESTION, delivery=ToolResultDelivery(tool_call_id=tool_call_id),
+                reply_as_result=True),
+        session_id=session_id, task_id=task_id, agent_id=agent_id, stage=HITL_STAGE_TOOL,
+    )
+
+
+def _open_plain_text_wait_bubble(rt, *, agent_id, task_id, session_id="s1"):
+    """与 `act._finish_plain_text_turn` 的 `source="plain_text"` 完全同形：同为
+    `UserTurnDelivery`，但 `preface=PREFACE_NORMAL`——不是暂停产生的，是正常一轮
+    说完话后的自然等待。"""
+    return rt.hitl.open(
+        HitlAsk(form=HITL_FORM_WAIT,
+                delivery=UserTurnDelivery(task_id=task_id, preface=PREFACE_NORMAL)),
+        session_id=session_id, task_id=task_id, agent_id=agent_id, stage=HITL_STAGE_TOOL,
+    )
+
+
+async def test_resume_agent_resolves_the_pause_bubble_via_cold_resume(monkeypatch):
+    """resume_agent 命中暂停气泡：真走 `reply_to_hitl` → `hitl.resolve`（真实组件）
+    → 未被热投递消费 → `_resume_after_hitl` → `recover_session`（这里桩掉，只记调用
+    参数——它自己的行为由别处的 recover_session 测试覆盖，不是本测试要盯的东西）。"""
+    rt = _rt()
+    _plant(rt, "root", None, status="waiting_human", session_id="s1")
+    recovered: list[tuple] = []
+
+    async def _fake_recover_session(session_id, **kw):
+        recovered.append((session_id, kw))
+
+    monkeypatch.setattr(rt, "recover_session", _fake_recover_session)
+    req = await _open_pause_bubble(rt, agent_id="root", task_id="t_root")
+
+    resumed = await rt.resume_agent("root")
+
+    assert resumed == ["root"]
+    assert rt.hitl_registry.get(req.id).resolved is True
+    assert recovered and recovered[0][0] == "s1"
+    assert recovered[0][1]["hitl_id"] == req.id
+    assert recovered[0][1]["resumed_task_id"] == "t_root"
+
+
+async def test_resume_agent_does_not_answer_a_real_ask_user_question(monkeypatch):
+    """R24 的核心止损点：ask_user 的真实提问必须原样悬着，不能被 resume_agent 顺手答了。"""
+    rt = _rt()
+    _plant(rt, "root", None, status="waiting_human", session_id="s1")
+    monkeypatch.setattr(rt, "recover_session", _unreachable_recover_session)
+    req = await _open_ask_user_bubble(rt, agent_id="root", task_id="t_root")
+
+    resumed = await rt.resume_agent("root")
+
+    assert resumed == []
+    assert rt.hitl_registry.get(req.id).resolved is False
+
+
+async def test_resume_agent_does_not_touch_plain_text_wait_bubble(monkeypatch):
+    """同为 UserTurnDelivery 的软待命（正常一轮结束后的自然等待，非暂停产生）不该被续跑。"""
+    rt = _rt()
+    _plant(rt, "root", None, status="waiting_human", session_id="s1")
+    monkeypatch.setattr(rt, "recover_session", _unreachable_recover_session)
+    req = await _open_plain_text_wait_bubble(rt, agent_id="root", task_id="t_root")
+
+    resumed = await rt.resume_agent("root")
+
+    assert resumed == []
+    assert rt.hitl_registry.get(req.id).resolved is False
+
+
+async def _unreachable_recover_session(*_a, **_kw):
+    raise AssertionError("resume_agent 不该对这种气泡触发冷续跑")
+
+
+async def test_resume_agent_cascades_to_waiting_human_descendants_only(monkeypatch):
+    rt = _rt()
+    _plant(rt, "root", None, status="waiting_human", session_id="s1")
+    _plant(rt, "kid", "root", status="waiting_human", session_id="s1")
+    _plant(rt, "other", "root", status="idle", session_id="s1")
+
+    async def _fake_recover_session(session_id, **kw):
+        return None
+
+    monkeypatch.setattr(rt, "recover_session", _fake_recover_session)
+    r1 = await _open_pause_bubble(rt, agent_id="root", task_id="t_root")
+    r2 = await _open_pause_bubble(rt, agent_id="kid", task_id="t_kid", edit=True)
+
+    resumed = await rt.resume_agent("root")
+
+    assert set(resumed) == {"root", "kid"}
+    assert rt._agent_registry.status_of("other") == "idle"
+    assert rt.hitl_registry.get(r1.id).resolved is True
+    assert rt.hitl_registry.get(r2.id).resolved is True
+
+
+async def test_resume_agent_unknown_raises():
+    rt = _rt()
+    with pytest.raises(AgentNotFound):
+        await rt.resume_agent("ghost")

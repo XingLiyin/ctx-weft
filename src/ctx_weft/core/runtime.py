@@ -68,7 +68,12 @@ from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKi
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.state.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
-from ctx_weft.core.errors import AgentNotFound, crash_error_code, crash_run_outcome
+from ctx_weft.core.errors import (
+    AgentNotFound,
+    AgentNotRunningError,
+    crash_error_code,
+    crash_run_outcome,
+)
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import (
     AgentTemplate,
@@ -93,6 +98,8 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.protocols.hitl import (
+    HITL_OUTCOME_ACCEPTED,
+    PREFACE_AFTER_INTERRUPT,
     PREFACE_AFTER_INTERRUPT_EDIT,
     HitlReply,
     HitlRequestView,
@@ -101,6 +108,12 @@ from ctx_weft.protocols.hitl import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: `resume_agent` 冷续跑一个暂停气泡时喂给 `_write_hitl_reply_turn` 的 message——
+#: 操作者的"继续跑"没有新指示可言，空串会落到那边的 `"(no response)"` 兜底文案
+#: （读起来像"问了没人答"，语义不对：这不是一次没人回答的提问）。与
+#: `act.INTERRUPTED_MARK` / `act.CANCELLED_MARK` 同一方括号风格的合成标记。
+_RESUME_MARK = "[resumed by operator]"
 
 
 def _latest_prior_root_task(task_manager: "TaskManager", t: "Task") -> "Task | None":
@@ -846,9 +859,18 @@ class CtxWeftRuntime:
         return True
 
     async def cancel_session(self, session_id: str) -> bool:
-        """硬取消：取消全部在途 run（per-run CancelToken）+ 全部后续 task（drain 队列）→ 会话 CANCELED。
+        """硬取消：取消全部在途 run（per-run CancelToken）+ 全部后续 task（drain 队列）→ 会话 CANCELED
+        + 该 session 下**每个 agent** 显式转 `terminated`（R23）。
 
         memory 保留。开新对话由调用方另起（新 /messages → 同 session_id 的 new run）。
+
+        R23（task-20 核实结论）：`cancel_all` 让 task 发 `TASK_CANCELED`，经 ALM
+        （`_INPUT_BY_EVENT[TASK_CANCELED] = AgentInput.SETTLED`）只会把 agent 打回
+        `idle`——不是 `terminated`。会话被取消后 agent 却还"活着"（`idle`，能再收
+        `send_message`），与"会话取消"这个动作的意图不符。故在既有的会话级取消机制
+        （`cancel_all` 清队列 + 全部 run token cancel + `_release_session` 回收
+        per-session 状态）之外，**额外**用 Task 19 的 `cancel_agent`——唯一的 agent
+        终态入口——把该 session 下每个 agent 都真正推到 `terminated`。
         """
         per = self._run_tokens.get(session_id, {})
         task_manager = self._task_managers.get(session_id)
@@ -866,6 +888,15 @@ class CtxWeftRuntime:
             await task_manager.cancel_all(reason=CancelReason.USER_CANCEL)
         for tokens in per.values():
             tokens.cancel.cancel()
+        # R23：显式终态化每个 agent——必须在 `_release_session` 之前做（那一步会把
+        # agent record 从 registry 摘掉，届时 `cancel_agent` 查无此 agent，只能静默
+        # 跳过、发不出 `AgentTerminated`）。上面的 `_cancel_session_hitl` 已经把该
+        # session 全部未决 HITL 收口过一轮，`cancel_agent` 内部对 `waiting_human` 的
+        # HITL 终局分支这里必是 no-op——HITL 终局先于 agent 终态的纪律因此自动成立，
+        # 不需要在这里再插一次序。走 `cancel_agent`（Task 19 的唯一 agent 终态入口），
+        # 不直接拍 `apply_input`/改 `rec.status`。
+        for aid in list(self._agent_registry.agent_ids_of_session(session_id)):
+            await self.cancel_agent(aid, reason="session_canceled")
         if idle:
             # 已暂停/中断（无在跑 task）的会话被取消：cancel_all 不经 _fire_session_done，_on_done
             # 不会触发，故显式回收 runtime 侧 per-session 状态（含较重的 TaskManager），避免滞留。
@@ -947,6 +978,114 @@ class CtxWeftRuntime:
                 logger.exception(
                     "_cancel_pending_hitl_of: cancel failed for agent=%s hitl=%s", agent_id, v.id,
                 )
+
+    # ── Agent 级暂停 / 恢复（Task 20）────────────────────────────────────────
+
+    async def pause_agent(self, agent_id: str, *, reason: str | None = None) -> list[str]:
+        """暂停 agent 及其全部**当前 running** 的子孙（spec 7）。
+
+        只对 `running` 生效——`agent_id` 本身非 running 直接报错（`AgentNotRunningError`）；
+        级联展开到的子孙里非 running 的静默跳过（暂停不该殃及本就 idle/等待中的子孙）。
+
+        建在既有的**定向暂停原语** `pause_task`（spec 2026-07-05 §2.3）之上，不是把
+        `cancel_agent` 的「立即拍状态」搬过来抄一份——`pause_task` 只对准这一个 task
+        的 run 发一次软打断信号，被暂停的 run 在自己的下一个检查点自行 park 出一个
+        wait 气泡（`ActStep._interrupt_checkpoint` / `_run_llm_turn` /
+        `_execute_tool_calls` 命中 `pause_token.is_paused` 后统一走
+        `act._park_wait_for_user(source="interrupt", ...)`），agent 状态由那次
+        **真实**的 `TASK_AWAITING_HUMAN` 事件经 ALM 转成 `waiting_human`——不是本方法
+        直接拍的。
+
+        R24（本任务的核实结论，见 task-20-report.md）：spec/brief 写的
+        `running --pause--> interrupted` 与实现不符——`interrupted` 只由
+        `TaskManager._suspend_task_interrupted`（宿主 outage/崩溃）驱动，操作者暂停
+        经检查点 park，落的是 `waiting_human`。本方法因此**不**调用
+        `AgentRegistry.apply_input`，全部转移留给真实的 `TASK_AWAITING_HUMAN` 事件
+        走 ALM 唯一入口——这里若手动拍一个 `AgentInput.INTERRUPTED`，就会在
+        `waiting_human` 之外多出一条假的 `interrupted` 分支，且与实际状态不符
+        （run 还没被暂停完，agent 已经被判定"暂停完成"）。
+
+        返回值是**已成功递送暂停信号**（`pause_task` 命中一个在途 run token）的
+        agent id 列表——暂停本身是异步生效的，返回时这些 agent 多半仍是 `running`，
+        真正落 `waiting_human` 要等它们各自跑到下一个检查点。
+        """
+        reg = self._agent_registry
+        rec = reg._agents.get(agent_id)
+        if rec is None:
+            raise AgentNotFound(f"unknown agent: {agent_id}")
+        if rec.status != "running":
+            raise AgentNotRunningError(
+                f"agent {agent_id} is {rec.status}, not running; nothing to pause"
+            )
+
+        paused: list[str] = []
+        for aid in [agent_id, *reg.descendants_of(agent_id)]:
+            r = reg._agents.get(aid)
+            if r is None or r.status != "running" or not r.current_task_id:
+                continue
+            if self.pause_task(r.session_id, r.current_task_id):
+                paused.append(aid)
+        return paused
+
+    async def resume_agent(self, agent_id: str) -> list[str]:
+        """恢复 agent 及其全部**由暂停产生**的等待气泡（spec 7；R24）。
+
+        `resume_agent` **不能**无差别恢复 `waiting_human` 的子孙——那个状态同时是
+        「被 `pause_agent` 暂停、park 在检查点」和「agent 主动 `ask_user` 正在等
+        用户真答」两种截然不同情形的落点，无差别放行等于替用户回答了那个真问题。
+
+        判据（实测确认，见 task-20-report.md）是 `PendingHitl.delivery`：
+        - `pause_agent`/`pause_session` 产生的气泡恒为
+          `UserTurnDelivery(preface ∈ {PREFACE_AFTER_INTERRUPT, PREFACE_AFTER_INTERRUPT_EDIT})`
+          （`act._park_wait_for_user(source="interrupt", ...)` 的唯一产物）；
+        - `ask_user` 的真实结构化提问用的是 `ToolResultDelivery`
+          （`reply_as_result=True`，见 `control_capability.py` 的 `ask_user`
+          构造），与前者的类型本身就不同，天然互斥；
+        - act 纯文本收尾的软待命（`source="plain_text"`）虽然**同样**是
+          `UserTurnDelivery`，但 `preface == PREFACE_NORMAL`——那不是暂停产生的，
+          是正常一轮说完话后的自然等待，`resume_agent` 若把它也放行，等于没有
+          任何新用户输入就凭空续了一轮，同样不对。
+
+        三者叠在一起，只有 `UserTurnDelivery` 且 `preface` 落在
+        `{PREFACE_AFTER_INTERRUPT, PREFACE_AFTER_INTERRUPT_EDIT}` 才是本方法该碰的。
+
+        续跑走既有的 HITL 冷续跑通路（`reply_to_hitl` → `_resume_after_hitl` →
+        `recover_session`），不直接 `apply_input(AgentInput.RESUMED)`——那样会把
+        agent 状态拍成 `running`，但驱动它真正再跑起来的 task 这时其实还没有被
+        重排/派发，状态与现实不符；`apply_input` 的唯一入口纪律也要求转移经由
+        真事件发生，不由调用方越过 TaskManager 直接拍。真正的 `running` 由续跑
+        起来之后的那次**真实** `TASK_STARTED` 事件驱动。
+        """
+        reg = self._agent_registry
+        if agent_id not in reg._agents:
+            raise AgentNotFound(f"unknown agent: {agent_id}")
+
+        resumed: list[str] = []
+        for aid in [agent_id, *reg.descendants_of(agent_id)]:
+            r = reg._agents.get(aid)
+            if r is None or r.status != "waiting_human":
+                continue
+            req = self._pause_bubble_of(aid, session_id=r.session_id)
+            if req is None:
+                continue
+            await self.reply_to_hitl(
+                HitlReply(hitl_id=req.id, outcome=HITL_OUTCOME_ACCEPTED, message=_RESUME_MARK)
+            )
+            resumed.append(aid)
+        return resumed
+
+    def _pause_bubble_of(self, agent_id: str, *, session_id: str) -> "PendingHitl | None":
+        """该 agent 名下**由暂停产生**的未决 wait 气泡（`resume_agent` 的判据，R24）；
+        没有则 `None`。判据见 `resume_agent` 文档字符串。
+        """
+        for req in self.hitl_registry.list_pending(session_id=session_id):
+            if (
+                req.agent_id == agent_id
+                and isinstance(req.delivery, UserTurnDelivery)
+                and req.delivery.preface in (PREFACE_AFTER_INTERRUPT, PREFACE_AFTER_INTERRUPT_EDIT)
+            ):
+                return req
+        return None
 
     # ── 换模型：两条命令（批次 B）──────────────────────────────────────────────
     #

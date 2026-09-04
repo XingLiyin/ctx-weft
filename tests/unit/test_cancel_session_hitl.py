@@ -15,6 +15,7 @@ from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import HITL_OUTCOME_CANCELLED, HitlAsk, UserTurnDelivery
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+from tests.unit.test_runtime_agent_api import _plant
 
 pytestmark = pytest.mark.asyncio
 
@@ -33,11 +34,18 @@ def _runtime():
     return make_runtime(agent_provider=InlineAgentTemplateProvider())
 
 
-async def _wire_pending_session(rt, session_id: str, task_id: str) -> None:
+async def _wire_pending_session(
+    rt, session_id: str, task_id: str, *, agent_id: str = "ag1",
+) -> None:
     """手搭一个「有 task 正等 ask_user」的会话：不真跑 TaskManager.drain，只登记
     runtime 侧的两处状态（`_task_managers` 映射 + SessionManager 的会话状态），
     使 `cancel_session` 的守卫（`per` 或 `task_manager` 非空）与 `cancel_all`
     内部对 `_session_manager` 的透传都落在真实组件上。
+
+    额外在 `AgentRegistry` 里种一个该 session 下的 agent（R23 需要它：
+    `cancel_session` 现在要把这个 session 下每个 agent 显式转 `terminated`，
+    没有 agent 记录就没有可观测的 `AgentTerminated`）。`_plant` 是纯 dict 注入，
+    不发事件，不影响其余只盯 `HitlResolved` 的既有测试。
     """
     session = Session(
         id=session_id, user_prompt="hi", status="RUNNING",
@@ -50,6 +58,7 @@ async def _wire_pending_session(rt, session_id: str, task_id: str) -> None:
     tm.register_task(task)
     rt._task_managers[session_id] = tm
     rt._session_manager.register_session(session_id, tenant_id="default")
+    _plant(rt, agent_id, None, session_id=session_id, status="waiting_human")
 
 
 @pytest.fixture
@@ -91,31 +100,31 @@ async def test_cancel_session_resolves_pending_hitl(runtime_with_pending_hitl):
     assert rt.hitl_registry.list_pending(session_id=session_id) == []
 
 
-@pytest.mark.skip(
-    reason=(
-        "依赖 Task 20 才会实现的 cancel_session 逐 agent 广播（Task 16 R20/进度台账）。"
-        "本测试原意是钉住『HitlResolved 必须先于会话终态事件』的顺序纪律，与熔断 trip "
-        "序列同一条约束；但会话状态机随 SessionManager 降格于 Task 15 整体退役后，"
-        "TaskManager.cancel_all() 已不再发任何『会话终态』事件可供排序——它只发 "
-        "TASK_CANCELED 并直接改写内存态 `self._session.status`（既不走 "
-        "announce_queue_state()/TaskQueueDrained，也没有 SessionFinished 的下游消费者了；"
-        "见 task_manager.py:cancel_all）。这条纪律要等 Task 20 给 cancel_session 补上"
-        "逐 agent 的终局广播（AgentTerminated 之类）之后，才有正确的事件可以拿来重新"
-        "钉这条『HITL 先于终局』的顺序——现在硬改会退化成『没抛异常』，验证强度不能接受。"
-    )
-)
 async def test_hitl_cancelled_before_session_terminal(runtime_with_pending_hitl):
-    """HitlResolved 必须先于 SessionFinished——与熔断 trip 序列同一条纪律。"""
+    """HitlResolved 必须先于该 session 下 agent 的终态事件——与熔断 trip 序列同一条纪律。
+
+    观测点由 `SessionFinished` 换成 `AgentTerminated`（Task 20 R23）：
+    `SessionFinished` 事件本身已经停发（`TaskManager.cancel_all()` 只发
+    `TASK_CANCELED` 并直接改写内存态 `self._session.status`，不再有任何『会话终态』
+    事件可供排序，见 `task_manager.py:cancel_all` 与本任务报告 §6）；`cancel_session`
+    现在改为额外广播 `cancel_agent`，把该 session 下每个 agent 显式转
+    `terminated` 并发 `AgentTerminated`——这条纪律因此有了新的、真实存在的下游锚点。
+    """
     rt, bus, session_id, _ = runtime_with_pending_hitl
 
     await rt.cancel_session(session_id)
 
     types = [e.type for e in bus.events]
     assert EventType.HITL_RESOLVED in types
-    assert EventType.SESSION_FINISHED in types
-    assert types.index(EventType.HITL_RESOLVED) < types.index(EventType.SESSION_FINISHED), (
-        "已取消会话的 HITL 终局事件晚于会话终态"
+    assert EventType.AGENT_TERMINATED in types
+    assert types.index(EventType.HITL_RESOLVED) < types.index(EventType.AGENT_TERMINATED), (
+        "已取消会话的 HITL 终局事件晚于该 session 下 agent 的终态事件"
     )
+    # 事件本身即是终态化的证据——`_release_session`（会话此刻已空闲挂起，随
+    # `cancel_session` 一并触发）随后会把 registry 里的 agent record 摘掉，
+    # `status_of` 事后查不再可靠，不作为观测点。
+    terminated = [e for e in bus.events if e.type == EventType.AGENT_TERMINATED]
+    assert any(e.agent_id == "ag1" for e in terminated)
 
 
 async def test_cancel_session_without_pending_hitl_is_noop(runtime_without_hitl):
