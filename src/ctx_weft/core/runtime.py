@@ -70,7 +70,7 @@ from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKi
 from ctx_weft.core.orchestrator.task.queue import QueueEntry
 from ctx_weft.core.orchestrator.task.runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
-from ctx_weft.core.event_envelope import emit_event
+from ctx_weft.core.util import emit_event
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.models.session import Session
@@ -81,7 +81,7 @@ from ctx_weft.core.models.errors import (
     crash_error_code,
     crash_run_outcome,
 )
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.util import generate_id, now_utc
 from ctx_weft.protocols import (
     AgentTemplate,
     Capability,

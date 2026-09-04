@@ -23,7 +23,7 @@ from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.util import now_utc
 from ctx_weft.protocols.events import Event, EventType
 from tests.unit._stub_runner import StubRunner
 

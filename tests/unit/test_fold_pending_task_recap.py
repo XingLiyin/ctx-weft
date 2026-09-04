@@ -1,7 +1,7 @@
 from ctx_weft.core.control.reducers import fold_pending_task_recap
 from ctx_weft.protocols.events import Event
 from ctx_weft.protocols.events import EventType
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.util import generate_id, now_utc
 
 
 def _ev(type_, payload):

@@ -45,7 +45,7 @@ from ctx_weft.core.content import (
     content_to_jsonable,
     extract_blob_refs,
 )
-from ctx_weft.core.utils import generate_id
+from ctx_weft.core.util import generate_id
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
     MemoryAddress,

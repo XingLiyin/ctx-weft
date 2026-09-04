@@ -6,7 +6,7 @@
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.prepare import _estimate_assembled_tokens, _estimate_record_tokens
-from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.core.estimate import estimate_tokens
 from ctx_weft.protocols import LLMMessage
 
 

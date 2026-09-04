@@ -279,7 +279,7 @@ class LLMClient(Protocol):
         """输入侧为输出预留的 token 量 → 喂 session.reserved_output_tokens
         （→ effective_limit → 装配预算 / compact 触发 / 限额停机）。**不**参与 per-request
         的输出上限（那是 output_ceiling）。经 ModelConfig 配置，未配时按窗口尺寸取默认
-        （core.utils.default_output_reserve）。"""
+        （core.estimate.default_output_reserve）。"""
         ...
 
     # 可选（duck-typed，非协议必需）：output_ceiling -> int | None

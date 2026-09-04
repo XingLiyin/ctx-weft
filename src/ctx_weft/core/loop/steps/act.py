@@ -23,7 +23,8 @@ from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME
 from ctx_weft.core.models.task import NormalTaskSettings
-from ctx_weft.core.utils import effective_limit, now_utc
+from ctx_weft.core.estimate import effective_limit
+from ctx_weft.core.util import now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
 from ctx_weft.protocols.hitl import (
     HITL_FORM_WAIT,

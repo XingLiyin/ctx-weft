@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ctx_weft.core.assembler import AssembledPrompt, ContextAssembler
-from ctx_weft.core.event_envelope import new_event
+from ctx_weft.core.util import new_event
 from ctx_weft.protocols.events import Event, EventBus, EventType
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
@@ -170,7 +170,7 @@ def make_event(
 ) -> Event:
     """构造一个 run 级 Event：从 LoopState 抽字段 + 自增 sequence。
 
-    封套本身与 `EVENT_TYPES` 白名单校验交 `core.event_envelope.new_event`——那是
+    封套本身与 `EVENT_TYPES` 白名单校验交 `core.util.new_event`——那是
     全仓唯一一份。本函数只保留 run 域真正属于自己的两件事：LoopState 的字段抽取，
     与 `sequence_counter` 自增。
 
@@ -202,7 +202,7 @@ async def _persist_user_prompt(state, ctx) -> None:
     task = state.task
     if not task.user_prompt or task.user_prompt_in_memory:
         return
-    from ctx_weft.core.utils import now_utc
+    from ctx_weft.core.util import now_utc
     await ctx.memory.ingest(
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,

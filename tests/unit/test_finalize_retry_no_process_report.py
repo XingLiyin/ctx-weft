@@ -3,7 +3,7 @@ import pytest
 
 from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.assembler import ContextBlock
-from ctx_weft.core.utils import content_to_text
+from ctx_weft.core.content import content_to_text
 
 pytestmark = pytest.mark.asyncio
 

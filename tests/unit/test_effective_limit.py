@@ -1,4 +1,4 @@
-from ctx_weft.core.utils import effective_limit
+from ctx_weft.core.estimate import effective_limit
 
 
 def test_subtracts_reserve():

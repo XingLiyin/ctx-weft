@@ -20,7 +20,7 @@ from ctx_weft.core.assembler.composer import (
     _RECOGNIZE_INTENT_INSTRUCTION,
     DefaultComposer,
 )
-from ctx_weft.core.utils import content_to_text
+from ctx_weft.core.content import content_to_text
 
 PURPOSES = ["act", "observe", "compact", "recognize_intent"]
 

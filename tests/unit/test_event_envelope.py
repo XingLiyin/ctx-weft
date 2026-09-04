@@ -1,4 +1,4 @@
-"""core.event_envelope：全仓事件封套的唯一构造点 + 唯一一份白名单校验。"""
+"""core.util：全仓事件封套的唯一构造点 + 唯一一份白名单校验。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from ctx_weft.core.event_envelope import emit_event, new_event
+from ctx_weft.core.util import emit_event, new_event
 from ctx_weft.protocols.events import EventOrigin, EventType
 
 

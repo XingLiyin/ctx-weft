@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 
-from ctx_weft.core.utils import extract_schema
+from ctx_weft.core.capabilities.schema import extract_schema
 from ctx_weft.protocols.capability import (
     Capability,
     CapabilityEvent,

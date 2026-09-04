@@ -6,7 +6,8 @@ import pytest
 from ctx_weft.core.orchestrator.lifecycle.session_registry import SessionRegistry
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.core.models.session import Session
-from ctx_weft.core.utils import content_to_text, now_utc
+from ctx_weft.core.content import content_to_text
+from ctx_weft.core.util import now_utc
 from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore
 from ctx_weft.providers.llm.mock import MockLLMAdapter
@@ -200,7 +201,7 @@ async def test_resume_session_without_jsonable_falls_back_to_the_text_prompt():
     from unittest.mock import MagicMock
 
     from ctx_weft.protocols.events import Event
-    from ctx_weft.core.utils import generate_id
+    from ctx_weft.core.util import generate_id
     from ctx_weft.providers.events import InMemoryEventStore
 
     bus = _CapturingBus()

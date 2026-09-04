@@ -34,7 +34,9 @@ from ctx_weft.core.loop.llm_gateway import (
 # 惰性 import，就是为了让这一条能写在模块级（Task 4 台账）。若日后 media 模块级引入了
 # `core.loop` 的东西，这里要退回函数级 import。
 from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
-from ctx_weft.core.utils import content_to_text, effective_limit, image_tokens, now_utc
+from ctx_weft.core.content import content_to_text, image_tokens
+from ctx_weft.core.estimate import effective_limit
+from ctx_weft.core.util import now_utc
 from ctx_weft.protocols import (
     LLMRequest, LLMUsage, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
 )

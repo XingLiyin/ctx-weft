@@ -1,4 +1,5 @@
-from ctx_weft.core.utils import estimate_content_tokens, image_part_count, image_tokens
+from ctx_weft.core.content import image_part_count, image_tokens
+from ctx_weft.core.estimate import estimate_content_tokens
 from ctx_weft.protocols import ImagePart, TextPart
 
 

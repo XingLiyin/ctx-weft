@@ -28,7 +28,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.core.estimate import estimate_tokens
 
 import pytest
 
@@ -39,7 +39,7 @@ from ctx_weft.core.loop.steps.finalize import (
     _synthesize_dispatch_pair,
 )
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from ctx_weft.core.utils import generate_id
+from ctx_weft.core.util import generate_id
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

@@ -15,7 +15,8 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any
 
-from ctx_weft.core.utils import SUBTASKS_REVIEW_HEADING, extract_schema, generate_id, now_utc
+from ctx_weft.core.capabilities.schema import extract_schema
+from ctx_weft.core.util import SUBTASKS_REVIEW_HEADING, generate_id, now_utc
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.protocols.capability import (
     CapabilityEvent,

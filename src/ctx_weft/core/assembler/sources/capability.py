@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils import generate_id
+from ctx_weft.core.util import generate_id
 from ctx_weft.protocols.capability import AgentCapability, SkillCapability, ToolCapability, qualify
 
 if TYPE_CHECKING:

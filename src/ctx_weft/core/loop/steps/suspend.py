@@ -10,7 +10,7 @@ from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.util import now_utc
 from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
 
 logger = logging.getLogger(__name__)

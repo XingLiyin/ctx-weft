@@ -5,7 +5,7 @@ import pytest
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.util import now_utc
 
 pytestmark = pytest.mark.asyncio
 

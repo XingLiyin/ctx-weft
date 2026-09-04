@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
-from ctx_weft.core.event_envelope import emit_event
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.util import emit_event
+from ctx_weft.core.util import generate_id, now_utc
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.protocols.hitl import (
     HITL_OUTCOME_CANCELLED,

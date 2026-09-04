@@ -37,7 +37,7 @@ from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL
 from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
 from ctx_weft.core.capabilities.cache import CapabilityCache
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.util import generate_id, now_utc
 from ctx_weft.protocols.capability import (
     AuthorizationDecision, Authorizer, CapabilityProvider, ToolCapabilityProvider, qualify,
 )

@@ -283,7 +283,7 @@ async def test_closed_capsule_summary_has_no_progress_heading() -> None:
     """`## Progress So Far` 是「当前 task 上一段的复述」标题。闭合后的胶囊由**别的** task
     装配，段摘要不得再冠这个标题（否则新任务会把旧任务的进度读成自己的）。"""
     from ctx_weft.core.assembler.sources._history import record_to_history_block
-    from ctx_weft.core.utils import PROGRESS_SO_FAR_HEADING
+    from ctx_weft.core.assembler.sources._history import PROGRESS_SO_FAR_HEADING
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await mem.ingest(_ev(T.USER_PROMPT, scope, "hello", 0, role="user", task_id="t1"), _pctx())

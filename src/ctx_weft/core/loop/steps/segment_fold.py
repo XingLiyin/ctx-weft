@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from ctx_weft.core.media import placeholder_refs
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.util import now_utc
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,

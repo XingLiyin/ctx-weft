@@ -12,7 +12,7 @@ min_sample_tokens 或 act ≤ 0 的样本噪声占主导，跳过。
 """
 from __future__ import annotations
 
-from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.core.estimate import estimate_tokens
 
 
 class HeuristicTokenizer:

@@ -12,7 +12,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from ctx_weft.core.utils import default_output_reserve
+from ctx_weft.core.estimate import default_output_reserve
 from ctx_weft.protocols import LLMClient, LLMMessage, LLMRequest
 from ctx_weft.providers.llm.store import LLMAccountStoreProtocol
 

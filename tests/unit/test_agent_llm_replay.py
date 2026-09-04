@@ -7,7 +7,7 @@ D1：SessionResumed 的 payload 带 llm_model，但 reducers.py:405-412 那个
 from __future__ import annotations
 
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.util import generate_id, now_utc
 from ctx_weft.protocols.events import Event, EventType
 
 

@@ -18,7 +18,7 @@ from ctx_weft.protocols.hitl import (
     HitlDecision,
     UserTurnDelivery,
 )
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.util import now_utc
 from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter

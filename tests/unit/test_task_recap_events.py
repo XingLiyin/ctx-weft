@@ -2,7 +2,7 @@ from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
 from ctx_weft.protocols.events import EVENT_TYPES, EventType, TRANSIENT_EVENT_TYPES
 from ctx_weft.core.control.reducers import reduce_events
 from ctx_weft.protocols.events import Event
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.util import generate_id, now_utc
 
 
 def _ev(type_, session_id="ses1", payload=None):

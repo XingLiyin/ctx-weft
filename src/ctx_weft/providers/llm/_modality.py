@@ -10,7 +10,7 @@ import dataclasses
 import logging
 
 from ctx_weft.core.content import downgrade_images_to_text
-from ctx_weft.core.utils import image_part_count
+from ctx_weft.core.content import image_part_count
 from ctx_weft.protocols import LLMMessage, LLMRequest
 
 logger = logging.getLogger(__name__)

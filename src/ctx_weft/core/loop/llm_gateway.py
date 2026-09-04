@@ -52,12 +52,7 @@ from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
 from ctx_weft.core.content import rehydrate_content, redact_content_for_event
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
-from ctx_weft.core.utils import (
-    dynamic_max_tokens,
-    estimate_content_tokens,
-    estimate_tool_calls_tokens,
-)
-
+from ctx_weft.core.estimate import dynamic_max_tokens, estimate_content_tokens, estimate_tool_calls_tokens
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
 
@@ -277,7 +272,7 @@ def _estimate_message_tokens(m: LLMMessage, count) -> int:
     """单条消息的 provider 计费估算（往大了估）：文本 content + 图片 part + framing +
     tool_calls 参数 + reasoning_content。
 
-    计费项定义在 core.utils（``estimate_content_tokens`` / ``estimate_tool_calls_tokens``）——
+    计费项定义在 core.estimate（``estimate_content_tokens`` / ``estimate_tool_calls_tokens``）——
     单一真源，prepare/composer 对 memory 记录/装配消息共用同口径。tool_calls 的 arguments、
     reasoning、图片此前都没计入，是"单轮新增里一坨数不到的东西 > margin"致 400 的洞。
 

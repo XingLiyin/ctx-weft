@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.assembler.sources.identity import IdentitySource
-from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.core.estimate import estimate_tokens
 
 
 def _facet(text): return SimpleNamespace(text=text, style="")

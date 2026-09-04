@@ -12,12 +12,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils import (
-    PROGRESS_SO_FAR_HEADING,
-    content_to_text,
-    generate_id,
-    image_tokens,
-)
+from ctx_weft.core.content import content_to_text, image_tokens
+from ctx_weft.core.util import generate_id
 from ctx_weft.protocols import MemoryEventType
 
 if TYPE_CHECKING:
@@ -38,6 +34,16 @@ ASSISTANT_SUMMARY_NOTE = (
     "forward; it is not your reply to the user. Continue the current task from it and call tools as "
     "needed — do not imitate the summary's form when you answer.]"
 )
+
+
+# 当前任务「上一段执行复述」的统一渲染标题：composer 的非压缩 retry 进度块、以及压缩
+# 复用 act_recap 的 task 层段摘要（role=assistant、task_conversation 来源）都冠以此标题，
+# 确保观察者/actor 总能识别「先前进度」锚点。
+#
+# 改造前住在 `core/utils.py`，理由写的是「供 composer 与 _history 共享」——实际
+# **唯一的 src 消费者就是本模块**（composer 只经本模块的渲染函数间接用到），
+# 测试也早已从这里引。归位到渲染它的地方。
+PROGRESS_SO_FAR_HEADING = "## Progress So Far"
 
 
 def annotate_assistant_summary(text: str) -> str:

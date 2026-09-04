@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ctx_weft.core.utils import dynamic_max_tokens, estimate_tokens
+from ctx_weft.core.estimate import dynamic_max_tokens, estimate_tokens
 from ctx_weft.protocols import LLMMessage, LLMRequest
 from ctx_weft.core.loop.llm_gateway import (
     apply_dynamic_max_tokens,
@@ -286,7 +286,7 @@ def test_prompt_token_estimate_not_in_payload():
 # ── output_reserve / output_ceiling 配置透传 ─────────────────────────────────────
 from ctx_weft.providers.llm.provider import ModelConfig, LLMProvider, _FixedModelClient
 from ctx_weft.providers.llm.mock import MockLLMAdapter
-from ctx_weft.core.utils import default_output_reserve
+from ctx_weft.core.estimate import default_output_reserve
 
 
 def test_fixed_model_client_exposes_reserve_and_ceiling():

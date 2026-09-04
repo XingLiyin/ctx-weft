@@ -29,15 +29,8 @@ from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.core.content import content_from_jsonable, content_to_jsonable
 from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.core.loop.steps.prepare import PrepareStep
-from ctx_weft.core.utils import (
-    _IMAGE_BYTES_PER_TOKEN,
-    _IMAGE_PART_TOKENS,
-    effective_limit,
-    estimate_tokens,
-    image_byte_size,
-    image_part_count,
-    image_tokens,
-)
+from ctx_weft.core.content import _IMAGE_BYTES_PER_TOKEN, _IMAGE_PART_TOKENS, image_byte_size, image_part_count, image_tokens
+from ctx_weft.core.estimate import effective_limit, estimate_tokens
 from ctx_weft.protocols import (
     ImagePart,
     MemoryAddress,

@@ -71,5 +71,5 @@ def test_empty_list_yields_single_text_part():
 # ── re-export ────────────────────────────────────────────────────────────
 
 def test_content_to_text_reexported():
-    from ctx_weft.core.utils import content_to_text as util_impl
+    from ctx_weft.core.content import content_to_text as util_impl
     assert content_to_text is util_impl

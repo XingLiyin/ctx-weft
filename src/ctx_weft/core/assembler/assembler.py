@@ -45,7 +45,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     Purpose,
 )
-from ctx_weft.core.utils import effective_limit, estimate_tokens
+from ctx_weft.core.estimate import effective_limit, estimate_tokens
 from ctx_weft.protocols.knowledge import KnowledgeProvider
 
 if TYPE_CHECKING:

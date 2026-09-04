@@ -39,7 +39,8 @@ from ctx_weft.core.capabilities.control_tools import (
     FINISH_TASK_NAME,
 )
 from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
-from ctx_weft.core.utils import as_utc, content_to_text
+from ctx_weft.core.content import content_to_text
+from ctx_weft.core.util import as_utc
 
 _TERMINAL_STATUSES = TERMINAL_TASK_STATUSES  # 词表见 core.domain.status
 _TASK_LABEL_MAX = 80

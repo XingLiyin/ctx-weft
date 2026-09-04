@@ -77,7 +77,7 @@ class SnapshotWriter:
 
     async def _write(self, session_id: str, event: "Event", reason: str) -> None:
         from ctx_weft.core.control.reducers import rebuild_view, serialize_view
-        from ctx_weft.core.utils import generate_id, now_utc
+        from ctx_weft.core.util import generate_id, now_utc
         from ctx_weft.protocols.events import RunSnapshot
 
         # rebuild_view = 上一张快照 + delta（无快照时全量）。本事件此刻**已被先注册的

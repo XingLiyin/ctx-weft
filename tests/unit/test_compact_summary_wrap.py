@@ -10,7 +10,7 @@ from ctx_weft.core.assembler.sources._history import (
     ASSISTANT_SUMMARY_NOTE, COMPACT_SUMMARY_WRAPPER_PREFIX, PROGRESS_SO_FAR_HEADING,
     record_to_history_block, wrap_compact_summary,
 )
-from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.core.estimate import estimate_tokens
 from ctx_weft.protocols import MemoryEventType, MemoryRecord
 
 T = MemoryEventType

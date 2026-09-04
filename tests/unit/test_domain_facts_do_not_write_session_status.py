@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.util import generate_id, now_utc
 from ctx_weft.protocols.events import Event, EventType
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.prepare import PrepareStep
-from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.core.estimate import estimate_tokens
 
 
 class _SpyEscalatingCompact:

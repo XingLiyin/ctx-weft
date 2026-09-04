@@ -39,7 +39,7 @@ from ctx_weft.core.capabilities.control_tools import (
 )
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.util import now_utc
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.hitl import HitlDecision

@@ -129,10 +129,10 @@ class ContextOverflowError(CtxWeftError):
                 f"（= 模型窗口 {context_limit} − 输出预留 {reserved_output_tokens}）。"
             )
             if image_count:
-                # 函数内 import：errors.py 是被广泛引入的底层模块，故意保持依赖轻量，
-                # 不在模块顶层拉 core.utils（已确认 core/utils.py 只导入 stdlib + ulid，
-                # 模块级 import 也不会成环——此处仍就地导入是刻意的，不是遗留待清理项）。
-                from ctx_weft.core.utils import _IMAGE_PART_TOKENS
+                # 函数内 import，且现在是**必须**的：`core.content` 模块级就引本模块
+                # （ContextOverflowError 等），顶层引它会成真环。常量随 utils 拆分搬进
+                # content 之后，这条理由从「刻意保持轻量」升级成「不这样写就成环」。
+                from ctx_weft.core.content import _IMAGE_PART_TOKENS
                 message += (
                     f"其中不可裁的当前消息含 {image_count} 张图片，"
                     f"约占 {image_count * _IMAGE_PART_TOKENS} tokens。"
