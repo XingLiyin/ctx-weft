@@ -67,6 +67,7 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
+from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.domain.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
 from ctx_weft.core.errors import (
     AgentNotFound,
@@ -503,10 +504,9 @@ def _suspended_on_live_children(task_manager: "TaskManager", task: "Task") -> bo
     """
     if task.status != "SUSPENDED":
         return False
-    _TERMINAL = ("FINISHED", "FAILED", "CANCELED")
     for cid in task_manager.children_of(task.id):
         child = task_manager.get_task(cid)
-        if child is None or child.status not in _TERMINAL:
+        if child is None or child.status not in TERMINAL_TASK_STATUSES:
             return True
     return False
 
@@ -1712,9 +1712,8 @@ class CtxWeftRuntime:
         # 注入进对话——任务重排了但答复没注入，人说的话就静默消失。见下面
         # `_inject_resolved_user_turns`。
 
-        _TERMINAL = {"FINISHED", "FAILED", "CANCELED"}
-        terminal_ids = {t.id for t in all_tasks if t.status in _TERMINAL}
-        resumable = [t for t in all_tasks if t.status not in _TERMINAL]
+        terminal_ids = {t.id for t in all_tasks if t.status in TERMINAL_TASK_STATUSES}
+        resumable = [t for t in all_tasks if t.status not in TERMINAL_TASK_STATUSES]
 
         # 折出被崩溃打断的段 recap（started 无 done）——覆盖全部 observe 段边界。
         from ctx_weft.core.control.reducers import fold_pending_task_recap
@@ -2259,7 +2258,7 @@ class CtxWeftRuntime:
         task = tm.get_task(task_id)
         if task is None:
             return True
-        return task.status in ("FINISHED", "FAILED", "CANCELED")
+        return task.status in TERMINAL_TASK_STATUSES
 
     async def _inject_user_turn(
         self, task_id: str, content: "str | list[ContentPart]", *, session_id: str,
@@ -2659,7 +2658,7 @@ class CtxWeftRuntime:
                     or req.task_id in parked_or_inflight_task_ids):
                 continue
             target = task_manager.get_task(req.task_id)
-            if target is None or target.status in ("FINISHED", "FAILED", "CANCELED"):
+            if target is None or target.status in TERMINAL_TASK_STATUSES:
                 continue                      # 已终态的 task 不再需要（也不该收到）新输入
             candidates.append((req, target))
         if not candidates:
@@ -3105,7 +3104,7 @@ class CtxWeftRuntime:
             # CANCELED。本 run 不再写 task.status（Task 4：状态归 TM），故把「本来会不会
             # 翻成 CANCELED」记成局部量给下面 RUN_CANCELED 的守卫用；task 侧的同一守卫
             # 长在 TaskManager 的处置入口（终态已坐实 → 不应用 run 的结局）。
-            cancel_takes_effect = task.status not in ("FINISHED", "FAILED", "CANCELED")
+            cancel_takes_effect = task.status not in TERMINAL_TASK_STATUSES
             # 取消来源（总账 A3 剩下的一条）：token 是本 runtime 的协作取消；否则是外部
             # asyncio 取消（进程 shutdown / `wait_for` 超时）。二者产生同一个
             # `CancelledError`，只有 token 自己能区分。`cancel_token` 不是 `_run_loop`
@@ -3166,7 +3165,7 @@ class CtxWeftRuntime:
             # 让「靠类型存在与否判断这次执行是否非正常终止」的 host（docs/events-v2.md
             # §2.4）误报一次「非正常终止」（M1）。与上面 A1 守卫、outage 支的
             # was_interrupted 同一个判据（M3 的教训：别让两处判断各写一份）。
-            was_interrupted = task.status not in ("FINISHED", "FAILED", "CANCELED")
+            was_interrupted = task.status not in TERMINAL_TASK_STATUSES
             if was_interrupted:
                 task.error = str(exc)
             if getattr(exc, "retriable", False):

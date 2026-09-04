@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ctx_weft.core.content import content_with_suffix
 from ctx_weft.core.discriminators import CancelReason, InterruptReason, TaskErrorCode
+from ctx_weft.core.domain.status import PARKED_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ctx_weft.core.errors import crash_error_code, crash_run_outcome
 from ctx_weft.core.orchestrator.task_disposition import (
     RunOutcome,
@@ -40,14 +41,12 @@ logger = logging.getLogger(__name__)
 
 _ORIGIN = EventOrigin.ORCHESTRATOR_TASK_MANAGER
 
-#: 非终态的「停下来了」：run 已经退出、任务还没做完。三者的区别在于**解开它需要谁**——
-#: 等子任务（自愈）/ 等人答一句 / 等运维 /resume。判据是 task.status，不是任何字面量。
-_PARKED_STATUSES: frozenset[str] = frozenset({"SUSPENDED", "AWAITING_HUMAN", "INTERRUPTED"})
+#: 词表住在 `core.domain.status`（会话/task/agent 三套并排，见该模块 docstring）。
+#: 这里的两个别名只为不改动本文件里的既有引用点。
+_PARKED_STATUSES = PARKED_TASK_STATUSES
 
-#: 已经坐实的终态。TM 自己写过其中之一（熔断 trip 的 root 判死）之后，run 的结局
-#: 不得再把它盖掉——这条守卫此前长在 `_run_loop` 的三个 except 支里
-#: （`if task.status not in ("FINISHED", "FAILED", "CANCELED")`），随发射一起搬来。
-_TERMINAL_STATUSES: frozenset[str] = frozenset({"FINISHED", "FAILED", "CANCELED"})
+#: 这条守卫此前长在 `_run_loop` 的三个 except 支里，随发射一起搬来。
+_TERMINAL_STATUSES = TERMINAL_TASK_STATUSES
 
 # 默认值；实际值由 host 经 RuntimeConfig → TaskManager 构造参数注入。
 _DEFAULT_MAX_RETRIES    = 3
@@ -235,7 +234,6 @@ class TaskManager:
         task found in a replayed event stream is skipped (never re-queued). Recovery is
         condition-based.
         """
-        _TERMINAL = {"FINISHED", "FAILED", "CANCELED"}
         parked = parked_task_ids or set()
 
         for t in all_tasks:
@@ -248,7 +246,7 @@ class TaskManager:
             self._queue._completed.add(tid)
 
         for t in all_tasks:
-            if t.status in _TERMINAL:
+            if t.status in TERMINAL_TASK_STATUSES:
                 continue
             if isinstance(t.settings, (CompactTaskSettings, MetadataFillerTaskSettings)):
                 continue  # obsolete ephemeral helpers — never re-scheduled (recovery is condition-based)
@@ -1048,7 +1046,7 @@ class TaskManager:
         for t in list(self._tasks.values()):
             if t.parent_task_id is not None:
                 continue
-            if t.status in ("FINISHED", "FAILED", "CANCELED"):
+            if t.status in TERMINAL_TASK_STATUSES:
                 continue
             t.status = "FAILED"
             t.error_code = TaskErrorCode.BY_THRESHOLD
@@ -1268,7 +1266,7 @@ class TaskManager:
             # 空集守卫：无已登记子任务时绝不 resume（all([]) 恒为 True 的 vacuous-truth 防御）。
             all_done = bool(siblings) and all(
                 (self._tasks[tid].status if tid in self._tasks else "PENDING")
-                in ("FINISHED", "FAILED", "CANCELED")
+                in TERMINAL_TASK_STATUSES
                 for tid in siblings
             )
             if all_done:
@@ -1331,7 +1329,7 @@ class TaskManager:
         紧随其后的这次调用会对同一个 hitl_id 重复发 `TaskHumanResolved`——配对就不再是一对一。
         """
         t = self._tasks.get(task_id)
-        if t is None or t.status in ("FINISHED", "FAILED", "CANCELED"):
+        if t is None or t.status in TERMINAL_TASK_STATUSES:
             return
         if task_id in self._running_tasks:
             return

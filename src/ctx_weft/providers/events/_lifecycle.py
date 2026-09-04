@@ -23,6 +23,12 @@ __all__ = [
 ]
 
 #: `SessionStatusChanged.payload["new_status"]` 取这些值时视为会话已终结。
+#:
+#: **刻意不复用 `core.domain.status.TERMINAL_SESSION_STATUSES`**：这里多一个
+#: `INTERRUPTED`。两者语义不同——那个是「会话终态」（到达后任何输入都不再引发转移），
+#: 这个是「不必再当作活跃会话查询」的**活跃性**判据，被打断的会话虽非终态，但在
+#: SQL 侧收窄查询时同样不该算活跃。看着像第五份复制，其实不是；合并会让
+#: INTERRUPTED 会话被误判成终态。
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "CANCELED", "INTERRUPTED"})
 
 #: 会改变活跃性的事件类型。SQL 侧据此收窄查询范围；`SessionCreated` 本身在

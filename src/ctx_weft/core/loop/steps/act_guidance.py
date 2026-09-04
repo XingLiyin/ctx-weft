@@ -38,9 +38,10 @@ from ctx_weft.core.orchestrator.control_capability import (
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
 )
+from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.utils import as_utc, content_to_text
 
-_TERMINAL_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELED"})
+_TERMINAL_STATUSES = TERMINAL_TASK_STATUSES  # 词表见 core.domain.status
 _TASK_LABEL_MAX = 80
 _SUBTASK_RESULT_MAX = 150
 

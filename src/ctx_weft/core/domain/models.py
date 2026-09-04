@@ -1,4 +1,10 @@
-"""Core state dataclasses：TaskSettings / Session / Task / Agent / LoopGuard。"""
+"""领域实体：TaskSettings / Session / Task / Agent / LoopGuard。
+
+状态词表（`SessionStatus` / `TaskStatus` / `AgentStatus` 与各自的终态判据）住在
+同包的 `status.py`——本模块只引用它们做注解，不再自己定义。
+`TaskInteractionMode` 留在这里：它是「纯文本 turn 怎么处理」的行为模式，不是
+生命周期状态。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from ctx_weft.core.domain.status import SessionStatus, TaskStatus
 from ctx_weft.protocols import LoopConfig, MemoryConfig
 
 if TYPE_CHECKING:
@@ -77,44 +84,6 @@ def deserialize_settings(d: dict | None) -> TaskSettings:
     known = {k: v for k, v in d.items() if k in NormalTaskSettings.__dataclass_fields__}
     return NormalTaskSettings(**known)
 
-
-# ── Status types ──────────────────────────────────────────────────────────────
-
-
-SessionStatus = Literal[
-    "RUNNING",          # 有 task 在跑
-    "WAITING",          # 停着，但正常——都在等人 / 等外部输入
-    "INTERRUPTED",      # 停着，异常——系统故障，等 /resume（非终态）
-    "SUCCEEDED",
-    "FAILED",
-    "CANCELED",
-]
-# 已删除：`QUEUED` / `TIMEOUT`（core 从未赋值）；`PAUSED` / `PAUSED_HITL`
-# （两者的差别是「前端要不要出面板」，那是 `HitlOpened.delivery` 的性质，不是会话状态，
-# 已合并成 `WAITING`）。存量日志里的旧值由 `core.control.reducers` 折叠，见
-# `docs/upgrade/2026-09-02-session-status-ownership.md`。
-
-#: 会话终态。到达之后任何输入都不再引发转移（`core.control.reducers` 据此拒绝迟到的
-#: `SessionRunning` 复活一个已收尾的会话）。原住在已删除的 `core.orchestrator.session_state`
-#: （会话状态机，随 `SessionRegistry` 降格于 Task 15/16 一并退役）——搬到这里是因为
-#: 状态机本体没了之后，这两个常量是那个文件仅剩的、`reducers.py` 仍在用的两块砖
-#: （Task 16）。
-TERMINAL_SESSION_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "CANCELED"})
-
-#: 「停着但正常」的那个状态。**只有一个**——「等的是审批面板还是一句话」是
-#: `HitlOpened.delivery` 的性质，前端渲染面板时已经拿到，会话状态不复制它。
-WAITING: str = "WAITING"
-
-TaskStatus = Literal[
-    "PENDING",
-    "ACTIVE",
-    "SUSPENDED",         # 等子任务完成——**只剩这一个语义**
-    "AWAITING_HUMAN",    # 被 HITL 挂起，需要人来解决
-    "INTERRUPTED",       # 被外部打断（LLM outage / run 崩溃），等 /resume
-    "FINISHED",
-    "FAILED",
-    "CANCELED",
-]
 
 # How the actor's plain-text (no tool call) turn is handled:
 #   "interactive" → pause and wait for a user message (HITL input cold park)

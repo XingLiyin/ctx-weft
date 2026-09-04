@@ -14,11 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
 
-AgentStatus = Literal["idle", "running", "waiting_human", "interrupted", "terminated"]
-
-TERMINAL_AGENT_STATUSES: frozenset[str] = frozenset({"terminated"})
+from ctx_weft.core.domain.status import TERMINAL_AGENT_STATUSES
 
 
 class AgentInput(StrEnum):

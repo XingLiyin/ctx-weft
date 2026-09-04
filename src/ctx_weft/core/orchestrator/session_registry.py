@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.protocols.events import EVENT_TYPES, Event, EventOrigin, EventType
+from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.domain.models import Session, Task
@@ -247,7 +248,7 @@ class SessionRegistry:
         # 阻塞会把会话永久锁死（与 TaskManager.restore 的跳过口径一致）。
         unfinished = [
             tid for tid, t in view.tasks.items()
-            if t.status not in ("FINISHED", "FAILED", "CANCELED")
+            if t.status not in TERMINAL_TASK_STATUSES
             and (t.settings_raw or {}).get("_type") not in (
                 "CompactTaskSettings", "MetadataFillerTaskSettings")
         ]
