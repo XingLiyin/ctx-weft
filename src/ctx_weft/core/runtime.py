@@ -1970,6 +1970,164 @@ class CtxWeftRuntime:
             current_task_status=task_status,
         )
 
+    async def send_message(
+        self,
+        agent_id: str,
+        content: "str | list[ContentPart]",
+        *,
+        session_id: str | None = None,
+    ) -> str:
+        """向指定 agent 发一条外部消息，返回本次消息落到的 `task_id`（spec §4.1）——
+        agent-centric 改造的核心新入口：外部消息从此按 agent 显式寻址，不再隐式挂
+        「当前唯一活跃 task」。
+
+        守卫：不存在 / `terminated` / `running` 一律抛错，**不排队**
+        （`AgentRegistry.assert_can_receive`，Task 13）；调用方自行重试，或先
+        pause/cancel。`session_id` 是可选参数，只用于提前发现「这个 agent 不属于该
+        session」这类误用，**不参与路由**——`agent_id` 全局唯一，路由永远只看
+        `current_task_id`。
+
+        路由（spec §4.2）：
+        - `current_task_id` 对应的 task 已终态（或压根没有）—— 新建一个 task 挂给
+          该 agent（`_start_task_for_agent`，走既有 `push_task` 通路）。
+        - 未终态 —— 把消息注入这个仍在活的 task 的对话（`_inject_user_turn`，复用
+          HITL 回复已经在用的落盘通路）。这一支覆盖了 agent 因 `delegate_task` 处于
+          `idle`（当前 task `SUSPENDED` 等子任务）时收到外部消息的场景：消息先落进
+          对话，`_try_resume_parent` 在子任务收尾时按既有判据自然唤醒父 task。
+        """
+        reg = self._agent_registry
+        reg.assert_can_receive(agent_id)
+        rec = reg._agents[agent_id]
+        if session_id is not None and session_id != rec.session_id:
+            raise ValueError(
+                f"agent {agent_id} belongs to session {rec.session_id!r}, not {session_id!r}"
+            )
+
+        current = rec.current_task_id
+        if current and not self._task_is_terminal(rec.session_id, current):
+            await self._inject_user_turn(current, content, session_id=rec.session_id)
+            return current
+        return await self._start_task_for_agent(agent_id, content)
+
+    def _task_is_terminal(self, session_id: str, task_id: str) -> bool:
+        """`current_task_id` 是否已终态——`send_message` 路由的唯一判据。
+
+        TM 或 task 查无 -> 视为终态：宁可保守地新建一个 task，也不要把外部消息注进
+        一个此刻已经不可寻的旧 task（比如该 session 的 TM 已被 `_release_session`
+        回收——见 `get_agent` 同一判据下的降级口径）。
+        """
+        tm = self._task_managers.get(session_id)
+        if tm is None:
+            return True
+        task = tm.get_task(task_id)
+        if task is None:
+            return True
+        return task.status in ("FINISHED", "FAILED", "CANCELED")
+
+    async def _inject_user_turn(
+        self, task_id: str, content: "str | list[ContentPart]", *, session_id: str,
+    ) -> None:
+        """`send_message` 的注入分支：`current_task` 未终态 -> 把新消息当一轮用户
+        发言写进该 task 的对话——复用 HITL 回复已经在用的落盘通路
+        （`_ingest_user_turn`，从 `_write_hitl_reply_turn` 抽出，两边共用同一次
+        memory ingest），不另起一套。
+
+        与 HITL 回复的分野只在"content 怎么来"：那边要从 `PendingHitl.decision`
+        派生（拒绝措辞 / 打断续接前缀），这里 content 就是调用方给的原样消息，未经
+        任何 HITL 专属加工。
+
+        是否要把 task 重新排进队列执行：
+        - `_suspended_on_live_children`（spec §4.2：agent 因 `delegate_task` 处于
+          `idle`，当前 task `SUSPENDED` 且仍有未终态子任务）—— 只写记忆、不碰状态：
+          `_try_resume_parent` 会在子任务收尾时按 `status == "SUSPENDED"` 这道门
+          自然唤醒它，那时它进 act 就看得见这里写下的这一轮（与 `_inject_user_reply`
+          完全同一判据、同一处理）。
+        - 其余非终态（`PENDING` / `AWAITING_HUMAN` / `INTERRUPTED` / 无子任务的
+          `SUSPENDED`）—— `TaskManager.resume_task` 重排：已排队 / 已在跑 / 已终态
+          它自身 no-op；真正被挡住的会置 `PENDING` 入队并发 `TaskHumanResolved`
+          （该方法本就不是 HITL 专属——见其 docstring 里 wait_for_user 冷应答与
+          approval 两条既有调用来源，`_resume_in_existing_tm` 走的正是这同一条）。
+        """
+        tm = self._task_managers.get(session_id)
+        if tm is None or tm.session is None:
+            raise ValueError(f"no active TaskManager for session {session_id!r}")
+        target = tm.get_task(task_id)
+        if target is None:
+            raise ValueError(f"task {task_id!r} not found in session {session_id!r}")
+        session = tm.session
+        # agent_id 必须是本 task 对话真正所在的 agent scope，与 `_write_hitl_reply_turn`
+        # 走 `_reply_turn_agent_id` 同一回退口径（assigned 优先、creator 兜底）——这里
+        # 没有 `PendingHitl.agent_id` 可用（不是 HITL 应答），直接从 task 上取。
+        agent_id = target.assigned_agent_id or target.creator_agent_id or ""
+        scope = MemoryAddress(session_id=session.id, task_id=target.id, agent_id=agent_id)
+        pctx = ProviderContext(
+            session_id=session.id, tenant_id=session.tenant_id,
+            task_id=target.id, agent_id=agent_id,
+        )
+        normalized, _event_jsonable = await self._validate_and_normalize_content(
+            content, session.id, tenant_id=session.tenant_id,
+        )
+        await self._ingest_user_turn(
+            scope, pctx, normalized, event_id=generate_id("mem"),
+            task_id=target.id, source="send_message",
+        )
+        if _suspended_on_live_children(tm, target):
+            logger.info(
+                "_inject_user_turn: task %s is SUSPENDED on live children — message "
+                "written, state left alone so _try_resume_parent still wakes it",
+                target.id)
+            return
+        # 清旧进展，同 `_inject_user_reply`：新消息意味着有新工作要做，陈旧的
+        # outputs/process_report 留着会让 success-guardrail 误判"已经产出过"。
+        target.outputs = None
+        target.process_report = None
+        target.process_report_at = None
+        await tm.resume_task(task_id, hitl_id="")
+
+    async def _start_task_for_agent(
+        self, agent_id: str, content: "str | list[ContentPart]", **_kw: Any,
+    ) -> str:
+        """`send_message` 的新建分支：`current_task` 已终态（或压根没有）-> 起一个
+        新 task 挂给该 agent，走既有的 `push_task` 通路——与
+        `SessionManager._make_root_task_manager` 起 root task 同一套写法，不新造
+        一条派发路径。
+
+        复用同一个正在跑的 TaskManager（`self._task_managers[session_id]`）：会话
+        建立时 `_register_and_drain` 已经给它 `set_runner` / `set_is_current` /
+        挂好 done/idle 回调，这里只管 push 一个新 task 再补一次 drain，不重新接线。
+
+        `assert_can_receive` 已保证 `agent_id` 存在，该 session 的 TM 因此也必然
+        还活着——`_release_session` 回收 TM 的同时会一并 `AgentRegistry.
+        release_session` 摘掉这个 session 下的全部 agent record（两者同一次调用），
+        agent 还在 == TM 还在，故此处直接下标、不再判 None。
+        """
+        reg = self._agent_registry
+        rec = reg._agents[agent_id]
+        tm = self._task_managers[rec.session_id]
+        normalized, event_jsonable = await self._validate_and_normalize_content(
+            content, rec.session_id, tenant_id=rec.tenant_id,
+        )
+        from ctx_weft.core.content import content_to_text
+        task = Task(
+            id=generate_id("tsk"),
+            session_id=rec.session_id,
+            status="ACTIVE",
+            tenant_id=rec.tenant_id,
+            assigned_agent_id=agent_id,
+            creator_agent_id=agent_id,
+            title="User Message",
+            description=content_to_text(normalized)[:200],
+            user_prompt=normalized,
+            # 外部消息 = 用户对话：actor 纯文本即暂停等下一条消息（非自动完成）——
+            # 与 root task 同一口径（`_make_root_task_manager` 的注释）。
+            interaction_mode="interactive",
+            created_at=now_utc(),
+        )
+        await tm.push_task(task, user_prompt_event_jsonable=event_jsonable)
+        rec.current_task_id = task.id
+        asyncio.create_task(tm.drain())
+        return task.id
+
     async def reply_to_hitl(self, reply: "HitlReply") -> "HitlRequestView | None":
         """host 应答的唯一入口。返回已终局请求的视图；已终局再答 → `None`。
 
@@ -2086,7 +2244,6 @@ class CtxWeftRuntime:
         `req.delivery.preface`（不再 sniff legacy 的 `context` 字符串）。
         """
         from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
-        from ctx_weft.protocols import MemoryEvent, MemoryEventType
 
         # 强一致屏障：上一轮 plain_text/interrupt park 甩出的后台 observe（fire-and-forget 段折叠）
         # 可能仍在跑。先等它落库，再注入本轮 USER_PROMPT——保证折叠摘要的时间戳早于新消息，
@@ -2129,18 +2286,37 @@ class CtxWeftRuntime:
                 prev = await self._last_user_prompt(scope, pctx)
                 prefix = _interrupt_edit_prefix(prev)
                 content = content_with_prefix(content, prefix)
+        # 应答可能被重试（host 超时重发 / 用户连点）：`resolve()` 对已终局请求已幂等
+        # no-op（不会二次调用本方法），但这里再加一道幂等键——`id` 是 memory 层的幂等键
+        # （provider 已实现），确定性地由 hitl_id 派生（spec §7.3/§12.2）。
+        await self._ingest_user_turn(
+            scope, pctx, content, event_id=f"hitlreply:{req.id}",
+            task_id=target.id, source="hitl_reply",
+        )
+
+    async def _ingest_user_turn(
+        self, scope: "MemoryAddress", pctx: ProviderContext,
+        content: "str | list[ContentPart]", *, event_id: str, task_id: str, source: str,
+    ) -> None:
+        """把一条**已经算好**的用户侧内容，作为一轮 `CONVERSATION_TURN`（role=user）
+        写进 `scope`（TASK 视图）——纯落盘这一步，不判断内容该怎么来、也不碰 task 状态。
+
+        `_write_hitl_reply_turn`（HITL 应答，上面）与 `_inject_user_turn`
+        （`send_message` 的注入分支，Task 18）共用同一次 `ingest`：两边的差别只在
+        content 怎么派生（HITL 要拒绝措辞/打断续接前缀，`send_message` 就是调用方给的
+        原样消息）与幂等键怎么起（`hitlreply:{hitl_id}` vs. 一个新生成的 id）——那部分
+        差异留在各自调用方，这里不重复实现第二套 ingest。
+        """
+        from ctx_weft.protocols import MemoryEvent
         await self.providers.get_memory().ingest(
             MemoryEvent(
-                # 应答可能被重试（host 超时重发 / 用户连点）：`resolve()` 对已终局请求
-                # 已幂等 no-op（不会二次调用本方法），但这里再加一道幂等键——`id` 是
-                # memory 层的幂等键（provider 已实现），确定性地由 hitl_id 派生（spec §7.3/§12.2）。
-                id=f"hitlreply:{req.id}",
+                id=event_id,
                 kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
                 address=scope,
                 content=content,
                 timestamp=now_utc(),
                 role="user",
-                metadata={"task_id": target.id, "source": "hitl_reply"},
+                metadata={"task_id": task_id, "source": source},
             ),
             pctx,
         )
