@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ctx_weft.core.errors import UnfinishedTasksError
-from ctx_weft.protocols.events import EventBus
-from ctx_weft.protocols.events import EVENT_TYPES, Event, EventOrigin, EventType
+from ctx_weft.protocols.events import Event, EventBus, EventOrigin, EventType
 from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
+from ctx_weft.core.event_envelope import emit_event
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.domain.models import Session, Task
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_ORIGIN = EventOrigin.ORCHESTRATOR_SESSION_MANAGER
+_ORIGIN = EventOrigin.ORCHESTRATOR_SESSION_REGISTRY
 
 
 def _event_jsonable_or_fallback(
@@ -337,18 +337,13 @@ class SessionRegistry:
         agent_id: str | None = None,
         timestamp=None,
     ) -> None:
-        # 与 make_event 一致的白名单校验：直接构造 Event 的路径此前会绕过它。
-        if event_type not in EVENT_TYPES:
-            raise ValueError(f"Unknown event type: {event_type}; not in EVENT_TYPES")
-        await self.event_bus.emit(Event(
-            id=generate_id("evt"),
-            run_id=None,
-            sequence=0,
+        await emit_event(
+            self.event_bus,
+            event_type,
             session_id=session_id,
-            type=event_type,
-            timestamp=timestamp or now_utc(),
             tenant_id=tenant_id,
-            agent_id=agent_id,
             origin=_ORIGIN,
+            agent_id=agent_id,
             payload=payload,
-        ))
+            timestamp=timestamp,
+        )

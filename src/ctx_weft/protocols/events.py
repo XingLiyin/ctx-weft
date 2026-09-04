@@ -210,7 +210,7 @@ class EventOrigin:
     分隔符用 `.` 不用 `:`——`:` 留给可路由的 capability id（`provider:tool`）。
     """
 
-    ORCHESTRATOR_SESSION_MANAGER = "orchestrator.session_registry"
+    ORCHESTRATOR_SESSION_REGISTRY = "orchestrator.session_registry"
     ORCHESTRATOR_TASK_MANAGER = "orchestrator.task_manager"
     LOOP_DRIVER = "loop.driver"
     LOOP_PREPARE = "loop.prepare"

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from ctx_weft.core.content import content_with_suffix
 from ctx_weft.core.discriminators import CancelReason, InterruptReason, TaskErrorCode
 from ctx_weft.core.domain.status import PARKED_TASK_STATUSES, TERMINAL_TASK_STATUSES
+from ctx_weft.core.event_envelope import emit_event
 from ctx_weft.core.errors import crash_error_code, crash_run_outcome
 from ctx_weft.core.orchestrator.task_disposition import (
     RunOutcome,
@@ -30,8 +31,8 @@ from ctx_weft.core.domain.models import (
     Task,
     TaskStatus,
 )
-from ctx_weft.core.utils import as_utc, generate_id, now_utc
-from ctx_weft.protocols.events import EVENT_TYPES, Event, EventOrigin, EventType
+from ctx_weft.core.utils import as_utc, now_utc
+from ctx_weft.protocols.events import EventOrigin, EventType
 
 if TYPE_CHECKING:
     from ctx_weft.core.orchestrator.session_registry import SessionRegistry
@@ -1135,27 +1136,19 @@ class TaskManager:
         （先查在跑登记 ``_running_agents``，查不到再回落到 ``Task.assigned_agent_id``）；
         无 ``task_id``（如 TASK_QUEUE_* 队列级聚合信号）则 agent_id 保持 None，不乱填。
         """
-        if self._event_bus is None:
-            return
-        # 与 make_event 一致的白名单校验：直接构造 Event 的路径此前会绕过它。
-        if event_type not in EVENT_TYPES:
-            raise ValueError(f"Unknown event type: {event_type}; not in EVENT_TYPES")
-        tenant_id = self._session.tenant_id if self._session else "default"
-        if agent_id is None and task_id is not None:
-            agent_id = self._agent_id_of(task_id)
-        await self._event_bus.emit(Event(
-            id=generate_id("evt"),
-            run_id=None,
-            sequence=0,
+        await emit_event(
+            self._event_bus,
+            event_type,
             session_id=self._session_id,
-            type=event_type,
-            timestamp=now_utc(),
-            tenant_id=tenant_id,
-            task_id=task_id,
-            agent_id=agent_id,
+            tenant_id=self._session.tenant_id if self._session else "default",
             origin=_ORIGIN,
-            payload=payload or {},
-        ))
+            task_id=task_id,
+            agent_id=(
+                agent_id if agent_id is not None
+                else (self._agent_id_of(task_id) if task_id is not None else None)
+            ),
+            payload=payload,
+        )
 
     # ── 会话级聚合信号：SM 的唯一输入 ──────────────────────────────────────
 

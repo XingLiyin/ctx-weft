@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
+from ctx_weft.core.event_envelope import emit_event
 from ctx_weft.core.utils import generate_id, now_utc
-from ctx_weft.protocols.events import Event, EventOrigin, EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.protocols.hitl import (
     HITL_OUTCOME_CANCELLED,
     Delivery,
@@ -192,16 +193,16 @@ class HitlService:
         return resolved
 
     async def _emit(self, event_type: EventType, req: PendingHitl, payload: dict) -> None:
-        await self._bus.emit(Event(
-            id=generate_id("evt"),
-            run_id=None,
-            sequence=0,
+        await emit_event(
+            self._bus,
+            event_type,
             session_id=req.session_id,
-            type=event_type,
-            timestamp=self._now(),
             tenant_id=req.tenant_id,
+            origin=_ORIGIN,
             task_id=req.task_id or None,
             agent_id=req.agent_id or None,
-            origin=_ORIGIN,
             payload=payload,
-        ))
+            # **显式传**：HitlService 持有一个可注入的时钟（单测靠它冻结时间），
+            # 丢掉它会让时间源静默换成 emit_event 内部的 now_utc()。
+            timestamp=self._now(),
+        )

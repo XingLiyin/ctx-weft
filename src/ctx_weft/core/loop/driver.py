@@ -12,11 +12,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ctx_weft.core.assembler import AssembledPrompt, ContextAssembler
+from ctx_weft.core.event_envelope import new_event
 from ctx_weft.protocols.events import Event, EventBus, EventType
-from ctx_weft.protocols.events import EVENT_TYPES
-
 from ctx_weft.core.domain.models import Agent, Session, Task
-from ctx_weft.core.utils import generate_id, now_utc
+
 from ctx_weft.protocols import (
     LLMClient, MemoryEvent, MemoryKind, MemoryScope, MemoryProvider, MemoryAddress, ProviderContext,
 )
@@ -166,26 +165,33 @@ def make_event(
     *,
     origin: str | None = None,
 ) -> Event:
-    """构造一个 Event，自动分配 id + sequence + timestamp。"""
-    if type not in EVENT_TYPES:
-        # V1 严格：未在白名单的类型直接拒绝（设计文档 §14.3）
-        raise ValueError(f"Unknown event type: {type}; not in EVENT_TYPES")
-    state.sequence_counter += 1
-    return Event(
-        id=generate_id("evt"),
-        run_id=state.run_id,
-        sequence=state.sequence_counter,
+    """构造一个 run 级 Event：从 LoopState 抽字段 + 自增 sequence。
+
+    封套本身与 `EVENT_TYPES` 白名单校验交 `core.event_envelope.new_event`——那是
+    全仓唯一一份。本函数只保留 run 域真正属于自己的两件事：LoopState 的字段抽取，
+    与 `sequence_counter` 自增。
+
+    **先算后提交**：新值先算出来交给 `new_event`，它校验通过、真的造出事件之后才写回
+    counter。这样「坏类型不改 counter」这条改造前的行为逐字保留——`llm_gateway` 与
+    `act` 都在 emit 之前读 `state.sequence_counter` 拼 request_id，不该因为一次校验
+    失败就跳号。
+    """
+    seq = state.sequence_counter + 1
+    ev = new_event(
+        type,
         session_id=state.session.id,
-        type=type,
-        timestamp=now_utc(),
         tenant_id=state.session.tenant_id,
+        origin=origin if origin is not None else getattr(state, "origin", ""),
+        run_id=state.run_id,
+        sequence=seq,
         task_id=state.task.id,
         agent_id=state.agent.id,
-        origin=origin if origin is not None else getattr(state, "origin", ""),
-        payload=payload or {},
-        metadata=metadata or {},
+        payload=payload,
+        metadata=metadata,
         causation_id=causation_id,
     )
+    state.sequence_counter = seq
+    return ev
 
 
 async def _persist_user_prompt(state, ctx) -> None:

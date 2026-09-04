@@ -68,6 +68,7 @@ from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKi
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
+from ctx_weft.core.event_envelope import emit_event
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.domain.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
 from ctx_weft.core.errors import (
@@ -2630,17 +2631,11 @@ class CtxWeftRuntime:
         else:
             event_type = EventType.TASK_QUEUE_INTERRUPTED
             payload = {"reason": "process_restart"}
-        await self._event_bus.emit(Event(
-            id=generate_id("evt"),
-            run_id=None,
-            sequence=0,
-            session_id=session_id,
-            type=event_type,
-            timestamp=now_utc(),
-            tenant_id=tenant_id,
-            origin=EventOrigin.RUNTIME,
-            payload=payload,
-        ))
+        await emit_event(
+            self._event_bus, event_type,
+            session_id=session_id, tenant_id=tenant_id,
+            origin=EventOrigin.RUNTIME, payload=payload,
+        )
         logger.info("Recovery: session %s → %s (%d pending HITL)",
                     session_id, event_type, pending_hitl)
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
 
 from ctx_weft.core.control.types import AgentView
+from ctx_weft.core.event_envelope import emit_event
 from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError, CtxWeftError
 from ctx_weft.core.orchestrator.agent_state import AgentInput, next_agent_transition
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
@@ -218,19 +219,15 @@ class AgentLifecycleManager:
         if tr is None:
             return False
         rec.status = tr.status
-        await self.event_bus.emit(Event(
-            id=generate_id("evt"),
-            run_id=None,
-            sequence=0,
+        await emit_event(
+            self.event_bus, tr.event_type,
             session_id=rec.session_id,
-            type=tr.event_type,
-            timestamp=now_utc(),
             tenant_id=rec.tenant_id,
+            origin=_ORIGIN,
             task_id=task_id,
             agent_id=agent_id,
-            origin=_ORIGIN,
             payload=dict(tr.payload),
-        ))
+        )
         return True
 
     # ── 登记 ─────────────────────────────────────────────────────────────
@@ -483,25 +480,21 @@ class AgentLifecycleManager:
                 # agent 诞生，AgentInstantiated 覆盖不到，不发这条则事件流里看不出
                 # 「有人想 spawn 但被挡了」。envelope 的 agent_id 填**父**——子 agent
                 # 没诞生，没有 id 可填，而这条事件的主语正是发起 spawn 的那个 agent。
-                await self.event_bus.emit(Event(
-                    id=generate_id("evt"),
-                    run_id=None,
-                    sequence=0,
+                await emit_event(
+                    self.event_bus, EventType.SPAWN_REJECTED,
                     session_id=session_id,
-                    type=EventType.SPAWN_REJECTED,
-                    timestamp=now_utc(),
                     tenant_id=tenant_id,
+                    origin=_ORIGIN,
                     task_id=task_id,
                     agent_id=parent_agent_id or None,
-                    origin=_ORIGIN,
                     payload={
-                        "reason": "depth_limit",
-                        # 恒 False：spawn 被拒后降级为 inline 执行的能力今天不存在，
-                        # 如实反映现状而不是留一个骗人的 True。
-                        "fallback_to_inline": False,
-                        "attempted_subtask_id": task_id,
+                    "reason": "depth_limit",
+                    # 恒 False：spawn 被拒后降级为 inline 执行的能力今天不存在，
+                    # 如实反映现状而不是留一个骗人的 True。
+                    "fallback_to_inline": False,
+                    "attempted_subtask_id": task_id,
                     },
-                ))
+                )
                 raise SpawnDepthExceeded(
                     f"Max spawn depth {template.loop_config.max_spawn_depth} exceeded "
                     f"(current: {spawn_depth})"
@@ -554,43 +547,35 @@ class AgentLifecycleManager:
             # 因果顺序。AgentSpawned 的主语是**父 agent 的一次 spawn 动作**（与
             # SpawnRejected 配对，构成对每次 spawn 尝试的完整审计）；下面那条的
             # 主语是这个 agent 自己的出身配置。
-            await self.event_bus.emit(Event(
-                id=generate_id("evt"),
-                run_id=None,
-                sequence=0,
+            await emit_event(
+                self.event_bus, EventType.AGENT_SPAWNED,
                 session_id=session_id,
-                type=EventType.AGENT_SPAWNED,
-                timestamp=now_utc(),
                 tenant_id=tenant_id,
+                origin=_ORIGIN,
                 task_id=task_id,
                 agent_id=agent_id,
-                origin=_ORIGIN,
                 payload={
-                    "parent_agent_id": parent_agent_id,
-                    "subtask_id": task_id,
+                "parent_agent_id": parent_agent_id,
+                "subtask_id": task_id,
                 },
-            ))
+            )
         # 事件流里唯一记录「该 agent 用的哪个模板」的地方——`_rebuild_agents` 从
         # session/task 树推算 AgentView，推得出 parent/depth，推不出模板。root 与
         # 子 agent 现在共用同一条发射路径，不再分落 session_registry 与 runtime 两处。
-        await self.event_bus.emit(Event(
-            id=generate_id("evt"),
-            run_id=None,
-            sequence=0,
+        await emit_event(
+            self.event_bus, EventType.AGENT_INSTANTIATED,
             session_id=session_id,
-            type=EventType.AGENT_INSTANTIATED,
-            timestamp=now_utc(),
             tenant_id=tenant_id,
+            origin=_ORIGIN,
             task_id=task_id,
             agent_id=agent_id,
-            origin=_ORIGIN,
             payload={
-                "template_id": template.id,
-                "template_version": template.version,
-                "llm_account": llm.account,
-                "llm_model": llm.model,
+            "template_id": template.id,
+            "template_version": template.version,
+            "llm_account": llm.account,
+            "llm_model": llm.model,
             },
-        ))
+        )
 
         return agent, template
 
@@ -608,24 +593,19 @@ class AgentLifecycleManager:
         if rec is None or rec.llm == choice:
             return False
         rec.llm = choice
-        await self.event_bus.emit(Event(
-            id=generate_id("evt"),
-            run_id=None,
-            sequence=0,
+        await emit_event(
+            self.event_bus, EventType.AGENT_LLM_CHANGED,
             session_id=rec.session_id,
-            type=EventType.AGENT_LLM_CHANGED,
-            timestamp=now_utc(),
             tenant_id=rec.tenant_id,
-            task_id=None,
-            agent_id=agent_id,
             origin=_ORIGIN,
+            agent_id=agent_id,
             payload={
-                "llm_account": choice.account,
-                "llm_model": choice.model,
-                "reason": reason,
+            "llm_account": choice.account,
+            "llm_model": choice.model,
+            "reason": reason,
             },
             causation_id=causation_id,
-        ))
+        )
         return True
 
     async def set_session_llm(self, session_id: str, choice: ModelChoice, *, reason: str) -> int:
