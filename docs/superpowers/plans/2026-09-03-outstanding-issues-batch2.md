@@ -459,6 +459,9 @@ async def test_non_terminal_task_still_handled(tm_with_bus):
 
 ## Task 5: `sequence` 重号与孤儿 run
 
+> **已并入 `docs/superpowers/plans/2026-09-04-runtime-agent-centric-surface.md`（Task 7/8/9）** —— 2026-09-04。
+> 「一轮一个 run_id」是那份计划的地基（删 `_default_run_id`），A4/C5 两项修复与它同源，分开做会两次改同一批文件。本 Task 不再单独执行。
+
 **Files:**
 - Modify: `src/ctx_weft/core/loop/steps/background_observe.py`（快照方式）
 - Modify: `src/ctx_weft/core/runtime.py`（`compact_session` 的孤儿 run）
