@@ -1240,11 +1240,12 @@ Expected: FAIL —— `test_two_turns_do_not_share_a_run_id` 报「两轮共用�
 Run: `python -m pytest tests/unit/test_run_id_per_turn.py -q`
 Expected: `test_two_turns_do_not_share_a_run_id` / `test_session_task_runner_has_no_default_run_id` PASS。
 
-`test_sequence_is_unique_per_run` 与 `test_runs_are_paired` **此时可能仍 FAIL** —— 那是
-Task 7（background observe 快照共号）与 Task 8（recognize_intent 孤儿 run）的责任。
-若失败，确认失败原因确实指向 `BackgroundObserve` / `RecognizeIntent` 相关的 run_id，
-用 `@pytest.mark.xfail(reason="Task 7/8 未完成", strict=False)` 临时标记这两条，并在
-Task 8 的 Step 4 里去掉标记。
+`test_sequence_is_unique_per_run` 与 `test_runs_are_paired` **必须直接为绿**。
+
+> **控制方裁定 P8 修订（2026-09-04）**：原文这里写「此时可能仍 FAIL，用 xfail 临时标记，
+> 等 Task 8 摘掉」——该过渡指令**作废**。A4/C5 已由 commit `920bb05` 在本计划开工前修完，
+> background observe 与 recognize_intent 两条路径已经干净，删掉 `_default_run_id` 后两条
+> 不变式应当当场成立。**不得使用 xfail。** 若仍红，那是本 Task 自身的问题，按真实失败处理。
 
 - [ ] **Step 5: 全量回归 + lint**
 
@@ -1271,7 +1272,13 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 7: `background_observe` 快照另起 run_id 并补起止
+### Task 7: `background_observe` 快照另起 run_id 并补起止 —— **已取消（控制方裁定 P8，2026-09-04）**
+
+> 本 Task 要修的 A4 在本计划开工前就已修好：commit `920bb05` 及其前一条已让
+> `background_observe.py` 走 `dataclasses.replace(state, run_id=generate_id("run"), sequence_counter=0)`
+> 并发 `RunStarted`/`RunFinished`，`tests/unit/test_run_id_sequence_integrity.py` 三条全绿。
+> **不派发。** 原文保留于下，仅作记录。
+
 
 **Files:**
 - Modify: `src/ctx_weft/core/loop/steps/background_observe.py`（`launch_background_observe` 的 `dataclasses.replace` 快照处、`:399` 附近）
@@ -1361,7 +1368,11 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 8: `recognize_intent` 补 run 起止
+### Task 8: `recognize_intent` 补 run 起止 —— **已取消（控制方裁定 P8，2026-09-04）**
+
+> 同 Task 7：C5 已由 commit `920bb05` 修完（recognize_intent 与 compact_session 两处孤儿 run
+> 均已补配对）。**不派发。** 原文保留于下，仅作记录。
+
 
 **Files:**
 - Modify: `src/ctx_weft/core/loop/steps/recognize_intent.py:44`
