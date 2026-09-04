@@ -108,3 +108,38 @@ async def test_broadcast_carries_the_folded_status_not_a_default() -> None:
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
     await rt.recover()
     assert rt.get_agent("agt_root").status == "waiting_human"
+
+
+async def test_running_and_terminated_are_not_broadcast() -> None:
+    """Ruling F 收口：running/terminated 折出来的现状绝不广播。
+
+    `running` 危害最大——进程刚起来什么都没派发，把折出来的 `running` 照发会让 host
+    以为有活在跑（它在事件流里的真实含义是「崩溃时正在跑」，恢复后等 /resume 重新
+    派发）。`terminated` 是粘滞终态，host 投影本就已经是终态，重发没有信息。
+
+    这条测试要挡住的具体改动是：有人往 `_RECOVERY_BROADCAST_BY_STATUS` 里加一条
+    `"running": EventType.AGENT_RUNNING`——见 fix report 里记录的反向验证。
+    """
+    seen: list[Event] = []
+
+    async def recorder(ev: Event) -> None:
+        seen.append(ev)
+
+    rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    rt.event_bus.subscribe(None, recorder)
+    store = rt.event_store
+    await _seed_crashed_session(store, "S1", "agt_root")
+    # 额外两个 agent：一个折成 running，一个折成 terminated——同一条 AGENT_INSTANTIATED
+    # + 五态机状态事件的种法，只是换了状态事件类型（见 _seed_crashed_session 的折叠依据）。
+    await store.append(_ev(5, "S1", EventType.AGENT_INSTANTIATED, agent_id="agt_running",
+                            template_id="tpl_x"))
+    await store.append(_ev(6, "S1", EventType.AGENT_RUNNING, agent_id="agt_running"))
+    await store.append(_ev(7, "S1", EventType.AGENT_INSTANTIATED, agent_id="agt_terminated",
+                            template_id="tpl_x"))
+    await store.append(_ev(8, "S1", EventType.AGENT_TERMINATED, agent_id="agt_terminated"))
+
+    await rt.recover()
+
+    for aid in ("agt_running", "agt_terminated"):
+        agent_events = [e.type for e in seen if getattr(e, "agent_id", None) == aid]
+        assert agent_events == [], f"unexpected broadcast for {aid}: {agent_events}"
