@@ -71,16 +71,25 @@ _KNOWN_READ_ONLY_MODULES = frozenset({
     "protocols/events.py",              # EventType 定义 + TRANSIENT_EVENT_TYPES 等只读集合
     "core/control/reducers.py",         # 主 reducer：折叠存量日志，读这 13 个类型的分支都在这
     "providers/events/_lifecycle.py",   # 会话活跃性重放（apply_lifecycle/replay_lifecycle）
-    # Task 16：SnapshotWriter.on_event 只**消费**、不**发射**——它是挂在活总线上的旁路
-    # 订阅者，靠 `event.type == "SessionFinished"` 字符串匹配决定要不要在会话终态落一张
-    # 快照，本身从不 `Event(...)` 构造这个类型。SessionManager 状态机退役后，没有任何
-    # 组件还会把这个类型送上总线，这个分支变成永久不可达的死分支（无害：判据落空，
-    # 直接掉进下面的 periodic 计数分支，不抛错、不误写）。把它换成会话真正的终态信号
-    # （比如 TM 的 `TaskQueueDrained` 聚合信号）需要同时改写 6 个既有快照测试对「触发
-    # 事件是什么」的契约断言（`test_event_persistence_wiring.py`），超出本任务范围
-    # （4 个 SESSION_* 停发 + session_state.py 清理 + 19 处红测试），留给后续任务，
-    # 见 task-16-report.md。
-    "providers/events/snapshot.py",
+})
+
+#: 已知的死分支引用：某个模块在**活总线**上消费某个 L 档字符串，但那条分支已经永久
+#: 不可达（判据恒假，不抛错、不误写）。与 `_KNOWN_READ_ONLY_MODULES` 语义不同——那张表
+#: 是给 `reducers.py`/`_lifecycle.py` 这类**离线重放存量日志**的模块用的（不构造新
+#: 事件，只读已落盘的 `event.type` 做折叠）；这里登记的模块恰恰相反，是挂在
+#: `EventBus` 上的实时订阅者（`event_bus.subscribe(None, ...)`），只是判据字符串命中
+#: 的那个类型停发了。**按 (模块, 取值) 对认，不按整个文件豁免**——避免该模块里除这条
+#: 已知死分支之外，再出现别的、真正需要被这条守卫抓到的 L 档引用（新发射点或误用）
+#: 时被这张表连带放行（file-level 白名单的这个盲区，Task 16 审查指出过一次）。
+_KNOWN_DEAD_BRANCH_REFS: frozenset[tuple[str, str]] = frozenset({
+    # SnapshotWriter.on_event 靠 `event.type == "SessionFinished"` 决定要不要在会话
+    # 终态落一张快照。SessionManager 状态机随 Task 15/16 退役后，没有任何组件还会把
+    # `SessionFinished` 送上总线——这个分支变成永久不可达的死分支，直接掉进下面的
+    # periodic 计数分支，不抛错、不误写。把它换成会话真正的终态信号（比如 TM 的
+    # `TaskQueueDrained` 聚合信号）需要同时改写 6 个既有快照测试对「触发事件是什么」
+    # 的契约断言（`test_event_persistence_wiring.py`），超出 Task 16 范围，留给后续
+    # 任务——见 task-16-report.md。
+    ("providers/events/snapshot.py", "SessionFinished"),
 })
 
 
@@ -100,13 +109,17 @@ def test_l_tier_types_have_no_emission_point():
             rel = p.relative_to(_SRC).as_posix().replace("\\", "/")
             if rel in _KNOWN_READ_ONLY_MODULES:
                 continue
+            if (rel, value) in _KNOWN_DEAD_BRANCH_REFS:
+                continue
             text = p.read_text(encoding="utf-8")
             if f"EventType.{member}" in text or f'"{value}"' in text:
                 found.append(rel)
         if found:
             hits[value] = found
     assert hits == {}, (
-        f"这些 L 档类型在已知只读重放模块之外仍被引用，可能是一个新发射点（应移除或"
-        f"重新审视是否还该留在 L 档），也可能是新增了一个合法的只读重放模块（应把它"
-        f"加进 _KNOWN_READ_ONLY_MODULES 并说明理由）: {hits}"
+        f"这些 L 档类型在已知只读重放模块 / 已登记的死分支引用之外仍被引用，可能是一个"
+        f"新发射点（应移除或重新审视是否还该留在 L 档），也可能是新增了一个合法的只读"
+        f"重放模块（应把它加进 _KNOWN_READ_ONLY_MODULES 并说明理由），也可能是另一处"
+        f"活总线上的已知死分支（应把 (模块, 取值) 加进 _KNOWN_DEAD_BRANCH_REFS 并说明"
+        f"理由）: {hits}"
     )

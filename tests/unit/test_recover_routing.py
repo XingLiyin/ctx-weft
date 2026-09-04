@@ -11,6 +11,16 @@ SessionWaiting/SessionInterrupted 事件——本文件因此直接钉住 TM 的
 本身（它是 recover() 真正发出的、也是退役前 SM 唯一消费的同一条输入）,不再断言
 已经不存在的会话级事件或 `SessionManager.status_of`。
 
+**为什么这里没有等强的替代观测点**（不是漏补，是这个调用点确实没有）：
+recover() 本身不 drain、不派发任何 task/agent——`_announce_queue_state_as_tm_proxy`
+只是**代 TM** 发一条队列信号就返回，此刻 AgentRegistry 的五态机（ALM）根本没跑起来，
+没有 `AGENT_*` 事件可捕、`agent_registry.status_of()` 这时查也查不到任何有意义的东西
+（很多时候 agent 记录本身还没通过这条路径装填）。唯一还在运作的只读入口
+`session_status_after_recover()` 只推导 `PAUSED`/`PAUSED_HITL` 两个值，对**无 pending**
+的分支（原来 B/C 两个会话对应的场景）直接返回空字符串——同样没有区分度。
+故这里删除 `status_of()` 断言之后，`_capture_interrupted_signal`/`_capture_blocked_signal`
+钉住的 TM 聚合信号本身，就是本次改造后这个调用点能拿到的最强观测点。
+
 「等的是审批面板还是一句话」不上升到任何状态事件——那是 delivery 的性质,由 host 的
 只读入口 session_status_after_recover 推导。决策只折叠 HITL 类事件,不全量回放。
 """
@@ -95,6 +105,10 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
     assert set(interrupted) == {"B", "C"}
     # 有人在等回话的那个 → TaskQueueBlocked，不是 Interrupted（绝不把 parked 任务孤立）。
     assert blocked == ["A"]
+    # 不再断言 `runtime._session_manager.status_of(...)`（该方法本身已在 Task 15 被
+    # 摘除）——且此刻也没有等强的替代：recover() 不 drain，ALM 还没跑起来，
+    # session_status_after_recover() 对无 pending 的分支只返回空串。见模块 docstring
+    # 「为什么这里没有等强的替代观测点」。
 
 
 async def test_recover_multi_hitl_partial_resolve_still_pending() -> None:
