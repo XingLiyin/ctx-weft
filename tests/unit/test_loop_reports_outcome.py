@@ -20,7 +20,7 @@ import pytest
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.loop.steps.observe import Verdict
 from ctx_weft.core.loop.steps.suspend import SuspendStep
-from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
+from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.core.domain.models import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryAddress,
@@ -380,7 +380,7 @@ async def test_crash_outcome_contract_non_retriable_exception_never_requeues() -
     """`ContextOverflowError.retriable = False`——按崩溃支 `getattr(exc, "retriable",
     True)` 的同一构造方式喂给 disposition_for，即使预算充足也不该原地重试。"""
     from ctx_weft.core.errors import ContextOverflowError, crash_error_code
-    from ctx_weft.core.orchestrator.task_disposition import RunOutcome, disposition_for
+    from ctx_weft.core.orchestrator.task.disposition import RunOutcome, disposition_for
 
     exc = ContextOverflowError("溢出了")
     outcome = RunOutcome(
@@ -395,7 +395,7 @@ async def test_crash_outcome_contract_non_retriable_exception_never_requeues() -
 async def test_crash_outcome_contract_default_exception_retries_with_budget() -> None:
     """没有 `retriable` 属性的普通异常按契约缺省为 `True`——预算充足时该原地重试。"""
     from ctx_weft.core.errors import crash_error_code
-    from ctx_weft.core.orchestrator.task_disposition import RunOutcome, disposition_for
+    from ctx_weft.core.orchestrator.task.disposition import RunOutcome, disposition_for
 
     exc = ValueError("随便什么崩溃")
     outcome = RunOutcome(

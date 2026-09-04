@@ -60,14 +60,15 @@ from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
-from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice, ResolvedModel
-from ctx_weft.core.orchestrator.agent_state import AgentInput
-from ctx_weft.core.orchestrator.session_registry import SessionRegistry
-from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
-from ctx_weft.core.orchestrator.task_queue import QueueEntry
-from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.model import ModelChoice, ResolvedModel
+from ctx_weft.core.orchestrator.lifecycle.agent_state import AgentInput
+from ctx_weft.core.orchestrator.lifecycle.session_registry import SessionRegistry
+from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
+from ctx_weft.core.orchestrator.task.queue import QueueEntry
+from ctx_weft.core.orchestrator.task.runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.event_envelope import emit_event
 from ctx_weft.core.registry import ProviderRegistry
@@ -438,7 +439,7 @@ class CtxWeftRuntime:
                 "ProviderRegistry — register one before constructing, e.g. "
                 "providers.register_capability(LocalAgentTemplateProvider(templates_dir))"
             )
-        from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+        from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
         self._template_lookup = TemplateLookup(self.providers)
         # Agent 注册表：runtime 级长生命周期组件，_agents 是 agent 身份与配置的唯一住所。
         # 从前 AgentLifecycleManager 是每次调用 new 一个的临时对象，见

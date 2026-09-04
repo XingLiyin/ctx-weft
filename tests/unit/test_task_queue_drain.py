@@ -1,6 +1,6 @@
 """TaskQueue.drain_pending: remove and return all pending task ids."""
 
-from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
+from ctx_weft.core.orchestrator.task.queue import QueueEntry, TaskQueue
 
 
 def test_drain_pending_returns_and_clears_entries():

@@ -24,7 +24,7 @@ class _CapturingBus:
 @pytest.fixture
 async def task_manager_with_image_task():
     """用 Task 3 的新签名 push_task(..., user_prompt_event_jsonable=...) 造一个携图 task。"""
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Task
 
     bus = _CapturingBus()
@@ -43,7 +43,7 @@ async def task_manager_with_image_task():
 async def test_task_manager_holds_no_event_blob_store():
     """「reopen 零 blob IO」是**结构性**保证，不是运行时哨兵：本任务把 TaskManager
     的 event blob store 整体删掉之后，它根本没有能力发起一次 blob 调用。"""
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
 
     assert not hasattr(TaskManager, "set_event_blob_store")
 
@@ -68,7 +68,7 @@ async def task_manager_with_image_then_text_task():
     追加的 section 合并进已有的尾部 text part；event 侧的 `_append_text_sections`
     必须复现同一合并语义，否则两侧在事件流里的形状会分歧（review round 2 finding 1）。
     """
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Task
 
     bus = _CapturingBus()
@@ -109,7 +109,7 @@ def test_append_text_sections_empty_list_base_collapses_to_str():
     """base 为空列表（jsonable == []）时，memory 侧 `if base_prompt:` 判空退回纯文本
     join（str，无前导空行）；event 侧必须跟着收敛成同样的 str，不能停留成 list
     （review round 2 finding 2）。"""
-    from ctx_weft.core.orchestrator.task_reopen import (
+    from ctx_weft.core.orchestrator.task.reopen import (
         append_text_sections as _append_text_sections,
     )
 
@@ -121,7 +121,7 @@ def test_append_text_sections_empty_list_base_collapses_to_str():
 def test_append_text_sections_empty_str_base_no_leading_blank_line():
     """base 为空字符串（jsonable == ""）同理：memory 侧同一 else 分支产出
     'a\\n\\nb'，不带前导 '\\n\\n'。"""
-    from ctx_weft.core.orchestrator.task_reopen import (
+    from ctx_weft.core.orchestrator.task.reopen import (
         append_text_sections as _append_text_sections,
     )
 
@@ -130,7 +130,7 @@ def test_append_text_sections_empty_str_base_no_leading_blank_line():
 
 def test_append_text_sections_none_base_no_leading_blank_line():
     """base 为 None 同理：与空字符串 / 空列表走同一 memory 侧 else 分支。"""
-    from ctx_weft.core.orchestrator.task_reopen import (
+    from ctx_weft.core.orchestrator.task.reopen import (
         append_text_sections as _append_text_sections,
     )
 

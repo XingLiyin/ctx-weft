@@ -14,17 +14,17 @@ from typing import TYPE_CHECKING
 from ctx_weft.core.discriminators import CancelReason, InterruptReason, TaskErrorCode
 from ctx_weft.core.domain.status import PARKED_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ctx_weft.core.event_envelope import emit_event
-from ctx_weft.core.orchestrator.failure_threshold import plan_threshold_trip
-from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
-from ctx_weft.core.orchestrator.task_reopen import build_reopen_prompt
+from ctx_weft.core.orchestrator.task.failure_threshold import plan_threshold_trip
+from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task.reopen import build_reopen_prompt
 from ctx_weft.core.errors import crash_error_code, crash_run_outcome
-from ctx_weft.core.orchestrator.task_disposition import (
+from ctx_weft.core.orchestrator.task.disposition import (
     RunOutcome,
     RunOutcomeKind,
     disposition_for,
 )
-from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
-from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
+from ctx_weft.core.orchestrator.task.queue import QueueEntry, TaskQueue
+from ctx_weft.core.orchestrator.task.runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.domain.models import (
     CompactTaskSettings,
     MetadataFillerTaskSettings,

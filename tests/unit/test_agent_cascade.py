@@ -364,7 +364,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     没有本次修复时：第 3 步之后 `stale_bubble` 仍未终局，第 5 步 `resume_agent`
     会命中它、触发 `recover_session`（这里桩成必炸），断言失败，复现该缺口。
     """
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Session, Task
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 

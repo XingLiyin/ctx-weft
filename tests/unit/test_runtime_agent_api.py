@@ -24,7 +24,7 @@ def _rt():
 
 
 def _plant(rt, agent_id, parent, session_id="s1", status="idle"):
-    from ctx_weft.core.orchestrator.agent_lifecycle_manager import _AgentRecord
+    from ctx_weft.core.orchestrator.lifecycle.agent_manager import _AgentRecord
 
     reg = rt._agent_lifecycle_manager
     reg._agents[agent_id] = _AgentRecord(
@@ -45,7 +45,7 @@ def _plant_live_task(rt, agent_id, task_id, *, task_status, agent_status, sessio
     被 drain 派发起来，`drain()` 因此在这里被替换成 no-op（否则会因为没有
     `TaskRunner` 而抛错——那不是本测试要盯的东西）。
     """
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Session, Task
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 

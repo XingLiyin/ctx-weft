@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT, reduce_events
 from ctx_weft.core.errors import ContextOverflowError
-from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.domain.models import Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols.events import Event, EventType

@@ -36,7 +36,7 @@ from ctx_weft.core.loop.steps.finalize import (
     finalize_task_memory,
 )
 from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
-from ctx_weft.core.orchestrator.task_manager import task_payload
+from ctx_weft.core.orchestrator.task.manager import task_payload
 from ctx_weft.core.domain.models import NormalTaskSettings, Task
 from ctx_weft.core.utils import estimate_tokens, generate_id
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext

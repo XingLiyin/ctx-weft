@@ -14,7 +14,7 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.config import RuntimeConfig
 from ctx_weft.core.errors import ContextOverflowError
-from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols.events import EventType

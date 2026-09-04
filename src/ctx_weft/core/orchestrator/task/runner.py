@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 from ctx_weft.core.domain.models import NormalTaskSettings
 
 if TYPE_CHECKING:
-    from ctx_weft.core.orchestrator.agent_lifecycle_manager import ResolvedModel
-    from ctx_weft.core.orchestrator.task_disposition import RunOutcome
+    from ctx_weft.core.orchestrator.model import ResolvedModel
+    from ctx_weft.core.orchestrator.task.disposition import RunOutcome
     from ctx_weft.core.domain.models import Task
 
 

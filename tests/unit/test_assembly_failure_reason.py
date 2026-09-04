@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from ctx_weft.core.discriminators import InterruptReason
-from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.domain.models import Session, Task
 from ctx_weft.protocols.events import EventType
 from tests.unit._stub_runner import StubRunner

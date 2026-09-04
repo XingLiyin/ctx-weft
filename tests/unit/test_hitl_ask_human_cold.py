@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.hitl.registry import PendingHitl
-from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.protocols.hitl import (
     HITL_FORM_WAIT,
     PREFACE_NORMAL,

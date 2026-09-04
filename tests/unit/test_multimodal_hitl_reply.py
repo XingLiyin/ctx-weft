@@ -33,7 +33,7 @@ def test_interrupt_edit_prefix_keeps_image_via_content_with_prefix():
 
 
 from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.domain.models import Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import ProviderContext

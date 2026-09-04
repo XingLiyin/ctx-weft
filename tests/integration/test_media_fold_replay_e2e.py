@@ -1079,7 +1079,7 @@ async def test_recovery_then_reopen_preserves_text_only_prompt(runtime_with_imag
     内存里当场看不出任何异常（`task.user_prompt` 仍是对的），所以断言必须落在
     **事件载荷**上，而不是 task 的 memory 侧字段。
     """
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Task
 
     runtime, _mem_store, _evt_store = runtime_with_images
@@ -1113,7 +1113,7 @@ async def test_reopen_falls_back_to_original_prompt_when_jsonable_missing() -> N
     这是与上一条正交的第二道闸——即便日后又出现一条没填 `user_prompt_event_jsonable`
     的路径，「字段没填」也不该再伪装成「原始 prompt 是空的」。
     """
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Task
 
     bus = _CapturingBus()

@@ -3,8 +3,8 @@
 import pytest
 
 from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.task_queue import QueueEntry
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.queue import QueueEntry
 from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
 from tests.unit._stub_runner import StubRunner
 

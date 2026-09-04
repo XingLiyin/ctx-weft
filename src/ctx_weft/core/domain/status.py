@@ -4,13 +4,13 @@
 改造前它们散在四个地方，同一个概念的两个实例甚至一个公开一个私有：
 
     SessionStatus / TaskStatus / TERMINAL_SESSION_STATUSES   core/state/models.py
-    AgentStatus / TERMINAL_AGENT_STATUSES                    orchestrator/agent_state.py
-    task 的终态与 park 判据（两个私有 frozenset）             orchestrator/task_manager.py
+    AgentStatus / TERMINAL_AGENT_STATUSES                    orchestrator/lifecycle/agent_state.py
+    task 的终态与 park 判据（两个私有 frozenset）             orchestrator/task/manager.py
     终态三元组的第四份逐字复制                                 loop/steps/act_guidance.py
 
 **纯 stdlib 叶子**：本模块不 import 任何 `ctx_weft` 运行期东西。词表在这里，
-状态机在别处——`orchestrator/agent_state.py`（agent 五态机）与
-`orchestrator/task_disposition.py`（run 结局 → task 处置）都是只吃词表的纯函数层。
+状态机在别处——`orchestrator/lifecycle/agent_state.py`（agent 五态机）与
+`orchestrator/task/disposition.py`（run 结局 → task 处置）都是只吃词表的纯函数层。
 """
 
 from __future__ import annotations

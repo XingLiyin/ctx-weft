@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.protocols.events import EventType
-from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
-from ctx_weft.core.orchestrator.session_registry import SessionRegistry
-from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.lifecycle.session_registry import SessionRegistry
+from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.protocols import (
     AgentCapabilityProvider,

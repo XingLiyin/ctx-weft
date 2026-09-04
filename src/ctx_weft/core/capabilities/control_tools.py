@@ -29,7 +29,7 @@ from ctx_weft.protocols.capability import (
 from ctx_weft.protocols.context import ProviderContext
 
 if TYPE_CHECKING:
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Session, Task
 
 logger = logging.getLogger(__name__)

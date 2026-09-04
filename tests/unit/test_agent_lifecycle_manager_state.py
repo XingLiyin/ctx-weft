@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -33,7 +33,7 @@ class _Client:
 
 
 def _lm() -> AgentLifecycleManager:
-    from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+    from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
     from ctx_weft.core.registry import ProviderRegistry
     provider = InlineAgentTemplateProvider()
     provider.register(make_echo_template())

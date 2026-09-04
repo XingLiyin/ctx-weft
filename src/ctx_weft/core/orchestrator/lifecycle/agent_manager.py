@@ -13,8 +13,9 @@ from typing import ClassVar, Protocol
 from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.event_envelope import emit_event
 from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError, CtxWeftError
-from ctx_weft.core.orchestrator.agent_state import AgentInput, next_agent_transition
-from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+from ctx_weft.core.orchestrator.lifecycle.agent_state import AgentInput, next_agent_transition
+from ctx_weft.core.orchestrator.model import ModelChoice, ModelResolver, ResolvedModel
+from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
 from ctx_weft.core.domain.models import Agent, LoopGuard
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import LLMClient, LoopConfig, MemoryConfig
@@ -36,33 +37,6 @@ _SETTLE_REASON: dict[str, str] = {
     EventType.TASK_REQUEUED: "task_requeued",
     EventType.TASK_SUSPENDED: "task_suspended",
 }
-
-
-@dataclass(frozen=True)
-class ModelChoice:
-    """host 要的 `(account, model)`——可以全空，空即「跟随账号默认」。
-
-    这是三样东西里唯一住进 `_AgentRecord` 的一样：解析出的 client 与实际身份
-    都不存，派发时从这个 choice 现解（见 `AgentLifecycleManager.resolve_model`）。
-    """
-
-    account: str = ""
-    model: str = ""
-
-
-@dataclass(frozen=True)
-class ResolvedModel:
-    """一次解析的产物：client + 实际身份 + 窗口。三者同源，一次算出。"""
-
-    client: LLMClient
-    account: str
-    model: str
-    context_limit: int
-    reserved_output_tokens: int
-
-
-class ModelResolver(Protocol):
-    def __call__(self, account: str, model: str) -> LLMClient: ...
 
 
 # LoopGuard() 的字段默认值——instantiate() 末尾构造 Agent 时刻意不解模型：会话创建

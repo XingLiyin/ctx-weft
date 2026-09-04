@@ -17,9 +17,9 @@ from ctx_weft.protocols import (
 import dataclasses as _dc
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
-from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 from ctx_weft.core.domain.models import LoopGuard, Session, Task

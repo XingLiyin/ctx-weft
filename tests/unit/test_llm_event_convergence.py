@@ -713,7 +713,7 @@ async def test_recognize_intent_swallowed_llm_failure_still_reports_run_complete
     from ctx_weft.protocols import LLMCallError
     from ctx_weft.core.loop.driver import LoopState
     from ctx_weft.core.loop.steps.recognize_intent import launch_recognize_intent
-    from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
+    from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 
     class _PermFailLLM:
         tokenizer = HeuristicTokenizer()

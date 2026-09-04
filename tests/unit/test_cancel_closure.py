@@ -22,9 +22,9 @@ from ctx_weft.core.loop.steps.finalize import (
     _put_dispatch_result,
     synthesize_cancel_closure,
 )
-from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.task_queue import QueueEntry
+from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.queue import QueueEntry
 from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext

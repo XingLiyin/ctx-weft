@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from typing import Any, Callable, Coroutine
 
-from ctx_weft.core.orchestrator.task_disposition import RunOutcome
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.task_runner import AgentBinding, effective_agent_id
+from ctx_weft.core.orchestrator.task.disposition import RunOutcome
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.runner import AgentBinding, effective_agent_id
 
 ExecuteFn = Callable[[str, str], Coroutine[Any, Any, Any]]
 

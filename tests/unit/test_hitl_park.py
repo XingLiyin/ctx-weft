@@ -44,7 +44,7 @@ async def test_run_loop_catches_park_returns_awaiting_human() -> None:
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import CtxWeftRuntime, ProviderRegistry
-    from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
+    from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
     from ctx_weft.protocols.events import EventType
     from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome

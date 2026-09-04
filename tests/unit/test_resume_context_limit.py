@@ -18,7 +18,7 @@ import pytest
 
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.orchestrator.session_registry import SessionRegistry
+from ctx_weft.core.orchestrator.lifecycle.session_registry import SessionRegistry
 from ctx_weft.providers.events import InMemoryEventStore
 from ctx_weft.providers.events import EventPersister
 

@@ -20,9 +20,9 @@ import pathlib
 
 import pytest
 
-from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.task_runner import AgentBinding, effective_agent_id
+from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.runner import AgentBinding, effective_agent_id
 from ctx_weft.core.domain.models import Session, Task
 from ctx_weft.protocols.events import EventType
 
@@ -33,9 +33,9 @@ TASK_STATUS_EVENTS = (
 )
 #: 比 `reducers.TASK_STATUS_BY_EVENT` 少一个 `TASK_STARTED`，是刻意的、不是漏记：
 #: 下面的判据匹配**任意** `EventType.X` 属性引用，不分「发射」还是「查表读」；
-#: 而 `session_registry.py` 里有 `EventType.TASK_STARTED: SessionInput.TASK_STARTED`
+#: 而 `lifecycle/session_registry.py` 里有 `EventType.TASK_STARTED: SessionInput.TASK_STARTED`
 #: 这样一条纯读的映射条目，加进这张清单会把它当误报抓出来。TASK_STARTED 自己的
-#: 唯一发射点在 `task_manager.py`，不需要这道守卫再管。
+#: 唯一发射点在 `task/manager.py`，不需要这道守卫再管。
 
 #: 锚定本文件位置，**不吃调用 cwd**：写成相对路径 `pathlib.Path("src/ctx_weft")`
 #: 时，从别的 cwd 下跑 rglob 会命中 0 个文件 → offenders 恒空 → 守卫报绿。
@@ -49,17 +49,17 @@ _SRC = _REPO_ROOT / "src" / "ctx_weft"
 #: **按仓根相对路径认，不按 basename**——按 basename 放行会连带豁免 `src/` 下任何
 #: 同名新文件（再出现一个 `reducers.py` / `events.py` 就白白开了个口子）。
 _ALLOWED = {
-    "src/ctx_weft/core/orchestrator/task_manager.py",
+    "src/ctx_weft/core/orchestrator/task/manager.py",
     "src/ctx_weft/protocols/events.py",
     "src/ctx_weft/core/control/reducers.py",
-    "src/ctx_weft/core/orchestrator/task_disposition.py",
+    "src/ctx_weft/core/orchestrator/task/disposition.py",
     # Task 12：AgentLifecycleManager（ALM）的 `_INPUT_BY_EVENT` / `_SETTLE_REASON` 把全部
     # 11 种 TASK_* 当纯读的映射键——翻译成 AgentInput、驱动 agent 五态机，自己只
     # 发 AGENT_*，不发一条 TASK_* 事件。与上面 TASK_STARTED 被逐出 TASK_STATUS_EVENTS
     # 清单本身是同一类豁免（session_registry.py 那条），只是这里读的类型更多、判据
     # 不区分「发射」与「查表读」，只能靠按文件放行，不能靠收窄清单（清单收窄到
     # 只剩 TASK_STARTED 会连 task_manager.py 自己的发射点都放过）。
-    "src/ctx_weft/core/orchestrator/agent_lifecycle_manager.py",
+    "src/ctx_weft/core/orchestrator/lifecycle/agent_manager.py",
 }
 
 #: 上面 `TASK_STATUS_EVENTS` 里每个名字对应的 wire 字符串值（`EventType` 的值），
@@ -76,7 +76,7 @@ def test_guard_a_scans_a_real_tree_not_an_empty_one() -> None:
     """守卫必须真的扫到文件——零扫描也会报绿，那是假绿灯。"""
     scanned = list(_SRC.rglob("*.py"))
     assert len(scanned) > 50, f"守卫只扫到 {len(scanned)} 个文件，疑似路径解析错误"
-    assert (_SRC / "core" / "orchestrator" / "task_manager.py").exists(), \
+    assert (_SRC / "core" / "orchestrator" / "task" / "manager.py").exists(), \
         "_SRC 没指向真的源码树"
 
 
@@ -143,7 +143,7 @@ def test_guard_b_scans_a_real_tree_not_an_empty_one() -> None:
     """守卫必须真的扫到文件——零扫描也会报绿，那是假绿灯。"""
     scanned = list(_SRC.rglob("*.py"))
     assert len(scanned) > 50, f"守卫只扫到 {len(scanned)} 个文件，疑似路径解析错误"
-    assert (_SRC / "core" / "orchestrator" / "task_manager.py").exists(), \
+    assert (_SRC / "core" / "orchestrator" / "task" / "manager.py").exists(), \
         "_SRC 没指向真的源码树"
 
 
@@ -154,10 +154,10 @@ def test_guard_b_scans_a_real_tree_not_an_empty_one() -> None:
 #:   一律算命中是刻意的——被删掉的那批 loop 侧写入绝大多数长成 `task.status=` / `t.status=`，
 #:   收窄判据比列几个白名单文件危险得多）。
 _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
-    "src/ctx_weft/core/orchestrator/task_manager.py",
+    "src/ctx_weft/core/orchestrator/task/manager.py",
     "src/ctx_weft/core/control/reducers.py",
-    "src/ctx_weft/core/orchestrator/session_registry.py",
-    # 不放 agent_lifecycle_manager.py：它 700+ 行、职责杂、随 Task 19/20 还会继续长——文件级
+    "src/ctx_weft/core/orchestrator/lifecycle/session_registry.py",
+    # 不放 lifecycle/agent_manager.py：它近 700 行、职责杂、随 Task 19/20 还会继续长——文件级
     # 豁免会让守卫对它整体失明。它唯一一处 `.status` 赋值走下面 _ALLOWED_STATUS_WRITES
     # 的函数级豁免（review 2026-09-03，Task 12 修复轮）。
 })
@@ -176,10 +176,10 @@ _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
 #: 撤销后守卫是否仍能抓人，由下面的 `test_removed_exemption_still_catches_a_reinstated_write`
 #: 常驻钉住——这张表不空不代表它是摆设，它下面的全树扫描仍然覆盖 runtime.py。
 #:
-#: Task 12（review 2026-09-03 修复轮）新增一条：`agent_lifecycle_manager.py` 的 `apply_input`
+#: Task 12（review 2026-09-03 修复轮）新增一条：`lifecycle/agent_manager.py` 的 `apply_input`
 #: 写 `rec.status = tr.status`——agent 五态机状态（spec 3.1），不是 task 状态，判据
-#: 认裸变量形态（`<name>.status=`）撞上同一属性名纯属误伤，与 `session_registry.py`
-#: 被 `_ALLOWED_STATUS_WRITE_FILES` 放行的原因相同；但 `agent_lifecycle_manager.py` 体量大、
+#: 认裸变量形态（`<name>.status=`）撞上同一属性名纯属误伤，与 `lifecycle/session_registry.py`
+#: 被 `_ALLOWED_STATUS_WRITE_FILES` 放行的原因相同；但 `lifecycle/agent_manager.py` 体量大、
 #: 还会随 Task 19/20 继续长，改用这里的函数级豁免——只放 `apply_input` 这一个函数，
 #: 该文件里任何其它函数新写一行 `xxx.status = ...` 仍然会被守卫抓到——已用一份
 #: 临时补丁手工验证过（review 2026-09-03 修复轮，见 task-12-report.md），未固化
@@ -187,7 +187,7 @@ _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
 #: 独立判断（见其内部 `_walk` 按 `func` 传参），新函数不命中这条豁免元组是判据的
 #: 结构性质，不依赖额外测试维持。
 _ALLOWED_STATUS_WRITES: frozenset[tuple[str, str]] = frozenset({
-    ((_SRC / "core" / "orchestrator" / "agent_lifecycle_manager.py").as_posix(), "apply_input"),
+    ((_SRC / "core" / "orchestrator" / "lifecycle" / "agent_manager.py").as_posix(), "apply_input"),
 })
 
 
@@ -422,7 +422,7 @@ async def test_tm_terminal_status_wins_over_run_outcome() -> None:
 @pytest.mark.parametrize("kind", list(RunOutcomeKind))
 def test_every_run_outcome_kind_is_handled(kind: RunOutcomeKind) -> None:
     """处置表对五个结局都给得出状态——新增结局忘了接会在这里红。"""
-    from ctx_weft.core.orchestrator.task_disposition import disposition_for
+    from ctx_weft.core.orchestrator.task.disposition import disposition_for
 
     disp = disposition_for(RunOutcome(kind=kind), retry_count=0, max_retries=3)
     assert disp.status and disp.event_type
@@ -453,5 +453,5 @@ def test_exemption_table_is_empty_by_design():
     不再是空的，但依旧只精确放行这一个 (path, 函数) 组合。
     """
     assert _ALLOWED_STATUS_WRITES == frozenset({
-        ((_SRC / "core" / "orchestrator" / "agent_lifecycle_manager.py").as_posix(), "apply_input"),
+        ((_SRC / "core" / "orchestrator" / "lifecycle" / "agent_manager.py").as_posix(), "apply_input"),
     })

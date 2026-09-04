@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ctx_weft.core.orchestrator.agent_state import (
+from ctx_weft.core.orchestrator.lifecycle.agent_state import (
     TERMINAL_AGENT_STATUSES,
     AgentInput,
     next_agent_transition,

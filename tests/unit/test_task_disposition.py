@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.task_disposition import (
+from ctx_weft.core.orchestrator.task.disposition import (
     RunOutcome,
     RunOutcomeKind,
     disposition_for,

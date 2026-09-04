@@ -17,7 +17,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome,
 from ctx_weft.core.loop.llm_gateway import (
     stream_llm_resilient, request_prompt_estimate, resolve_llm_identity,
 )
-from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
+from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols.capability import ToolCapability

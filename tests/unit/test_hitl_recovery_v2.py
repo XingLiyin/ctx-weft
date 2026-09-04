@@ -480,7 +480,7 @@ async def test_a_task_still_parked_on_another_hitl_gets_no_injection():
 async def test_restore_leaves_a_parent_with_live_children_suspended():
     """删掉 `resumable_task_ids` 之后的守卫：父任务提前置 PENDING 会让
     `_try_resume_parent`（以 status == "SUSPENDED" 为门）在子任务收尾时静默失效。"""
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Task
 
     tm = TaskManager(session_id=SID)

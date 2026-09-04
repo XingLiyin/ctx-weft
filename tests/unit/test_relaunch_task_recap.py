@@ -7,8 +7,9 @@ import asyncio
 import pytest
 
 import ctx_weft.core.runtime as rt_mod
-from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ResolvedModel
-from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.model import ResolvedModel
+from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.domain.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import qualify

@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.agent_lifecycle_manager import (
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import (
     AgentLifecycleManager,
     ModelChoice,
 )
-from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,

@@ -6,8 +6,8 @@ import dataclasses
 
 import pytest
 
-from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
-from ctx_weft.core.orchestrator.task_manager import TaskManager
+from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task.manager import TaskManager
 
 
 def _tm() -> TaskManager:

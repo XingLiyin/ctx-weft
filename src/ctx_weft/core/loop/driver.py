@@ -28,8 +28,8 @@ if TYPE_CHECKING:
     from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.orchestrator import TaskManager
-    from ctx_weft.core.orchestrator.agent_lifecycle_manager import ResolvedModel
-    from ctx_weft.core.orchestrator.task_disposition import RunOutcome
+    from ctx_weft.core.orchestrator.model import ResolvedModel
+    from ctx_weft.core.orchestrator.task.disposition import RunOutcome
     from ctx_weft.core.hitl.service import HitlService
     from ctx_weft.core.loop.hitl_waiter import HitlWaiter
     from ctx_weft.protocols.capability import CapabilityProvider

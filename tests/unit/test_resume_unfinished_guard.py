@@ -12,8 +12,8 @@ import pytest
 
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
-from ctx_weft.core.orchestrator.session_registry import SessionRegistry
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.lifecycle.session_registry import SessionRegistry
 
 pytestmark = pytest.mark.asyncio
 

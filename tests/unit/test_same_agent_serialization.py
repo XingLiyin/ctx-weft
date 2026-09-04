@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.queue import QueueEntry, TaskQueue
 from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
 from ctx_weft.protocols.events import EventType
 from tests.unit._stub_runner import StubRunner

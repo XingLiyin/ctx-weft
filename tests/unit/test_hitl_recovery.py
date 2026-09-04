@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
-from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
+from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
 from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
 
 
 def test_restore_keeps_hitl_parked_task_suspended() -> None:
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Task
     tm = TaskManager(session_id="s1")
     parked = Task(id="t1", session_id="s1", status="SUSPENDED")
@@ -27,7 +27,7 @@ def test_restore_keeps_hitl_parked_task_suspended() -> None:
 
 
 def test_restore_requeues_suspended_on_children_when_all_terminal() -> None:
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Task
     tm = TaskManager(session_id="s1")
     parent = Task(id="p", session_id="s1", status="SUSPENDED")
@@ -37,7 +37,7 @@ def test_restore_requeues_suspended_on_children_when_all_terminal() -> None:
 
 
 def test_restore_parked_ids_default_none_is_old_behavior() -> None:
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Task
     tm = TaskManager(session_id="s1")
     parent = Task(id="p", session_id="s1", status="SUSPENDED")
@@ -94,7 +94,7 @@ def test_restore_keeps_active_parked_task_out_of_queue() -> None:
 
     park 判据应看"有无未决 HITL"（parked_task_ids），而非 task.status==SUSPENDED。
     """
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Task
     tm = TaskManager(session_id="s1")
     parked = Task(id="t1", session_id="s1", status="ACTIVE")   # 审批热等 → ACTIVE
@@ -106,7 +106,7 @@ def test_restore_keeps_active_parked_task_out_of_queue() -> None:
 def _tm_with_bus():
     """一个挂着真实 bus、能观察聚合信号的 TaskManager（本文件两条会话收尾用例共用）。"""
     from ctx_weft.providers.events import InProcessEventBus
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import Session
 
     bus = InProcessEventBus()
@@ -287,7 +287,7 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     from datetime import datetime, timezone
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.protocols.events import Event, EventType
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
@@ -338,7 +338,7 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     """
     import asyncio
     from ctx_weft.core import CtxWeftRuntime
-    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime

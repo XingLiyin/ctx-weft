@@ -12,8 +12,9 @@ from __future__ import annotations
 import pytest
 
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice
-from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.model import ModelChoice
+from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
 from ctx_weft.core.registry import ProviderRegistry
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
