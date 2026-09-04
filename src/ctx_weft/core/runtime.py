@@ -2088,24 +2088,28 @@ class CtxWeftRuntime:
         content: "str | list[ContentPart]",
         *,
         session_id: str | None = None,
-    ) -> str:
-        """向指定 agent 发一条外部消息，返回本次消息落到的 `task_id`（spec §4.1）——
-        agent-centric 改造的核心新入口：外部消息从此按 agent 显式寻址，不再隐式挂
-        「当前唯一活跃 task」。
+    ) -> TurnHandle:
+        """向指定 agent 发一条外部消息，返回这次交互的 `TurnHandle`（spec §4.1；
+        2026-09-04 spec §3.3）——agent-centric 的核心入口：外部消息按 agent 显式寻址，
+        不再隐式挂「当前唯一活跃 task」。
 
         守卫：不存在 / `terminated` / `running` 一律抛错，**不排队**
-        （`AgentLifecycleManager.assert_can_receive`，Task 13）；调用方自行重试，或先
-        pause/cancel。`session_id` 是可选参数，只用于提前发现「这个 agent 不属于该
-        session」这类误用，**不参与路由**——`agent_id` 全局唯一，路由永远只看
-        `current_task_id`。
+        （`AgentLifecycleManager.assert_can_receive`）；调用方自行重试，或先
+        pause/cancel。`session_id` 只用于提前发现「这个 agent 不属于该 session」这类
+        误用，**不参与路由**——`agent_id` 全局唯一，路由永远只看 `current_task_id`。
 
-        路由（spec §4.2）：
-        - `current_task_id` 对应的 task 已终态（或压根没有）—— 新建一个 task 挂给
-          该 agent（`_start_task_for_agent`，走既有 `push_task` 通路）。
-        - 未终态 —— 把消息注入这个仍在活的 task 的对话（`_inject_user_turn`，复用
-          HITL 回复已经在用的落盘通路）。这一支覆盖了 agent 因 `delegate_task` 处于
-          `idle`（当前 task `SUSPENDED` 等子任务）时收到外部消息的场景：消息先落进
-          对话，`_try_resume_parent` 在子任务收尾时按既有判据自然唤醒父 task。
+        路由三条路径（spec §4.2）：
+
+        - `current_task_id` 已终态或为空 —— 新建 task 挂给该 agent
+          （`_start_task_for_agent`，走既有 `push_task` 通路）。
+        - 未终态、且不是「SUSPENDED 等子任务」—— 注入并重排该活 task。
+        - 未终态、且 `_suspended_on_live_children` —— 只把消息写进对话，
+          `_try_resume_parent` 在子任务收尾时自然唤醒它。
+
+        三条都返回句柄，`task_id` 恒非空。调用方要区分「开了新一轮」还是「并进旧的」，
+        比对返回的 `task_id` 与调用前 `get_agent(agent_id).current_task_id` 即可——
+        句柄里不放这个布尔，也不放 run_id（第三条路径在返回那一刻还没有新一轮，
+        见 2026-09-04 spec §3.2）。
         """
         reg = self._agent_lifecycle_manager
         reg.assert_can_receive(agent_id)
@@ -2119,9 +2123,18 @@ class CtxWeftRuntime:
 
         current = rec.current_task_id
         if current and not self._task_is_terminal(rec.session_id, current):
-            await self._inject_user_turn(current, content, session_id=rec.session_id)
-            return current
-        return await self._start_task_for_agent(agent_id, content)
+            task_id = await self._inject_user_turn(
+                current, content, session_id=rec.session_id)
+        else:
+            task_id = await self._start_task_for_agent(agent_id, content)
+
+        return TurnHandle(
+            session_id=rec.session_id,
+            agent_id=agent_id,
+            task_id=task_id,
+            template_id=rec.template_id,
+            event_bus=self._event_bus,
+        )
 
     def _task_is_terminal(self, session_id: str, task_id: str) -> bool:
         """`current_task_id` 是否已终态——`send_message` 路由的唯一判据。
@@ -2140,7 +2153,7 @@ class CtxWeftRuntime:
 
     async def _inject_user_turn(
         self, task_id: str, content: "str | list[ContentPart]", *, session_id: str,
-    ) -> None:
+    ) -> str:
         """`send_message` 的注入分支：`current_task` 未终态 -> 把新消息当一轮用户
         发言写进该 task 的对话——复用 HITL 回复已经在用的落盘通路
         （`_ingest_user_turn`，从 `_write_hitl_reply_turn` 抽出，两边共用同一次
@@ -2198,7 +2211,7 @@ class CtxWeftRuntime:
                 "_inject_user_turn: task %s is SUSPENDED on live children — message "
                 "written, state left alone so _try_resume_parent still wakes it",
                 target.id)
-            return
+            return target.id
         # 收口该 agent 名下未决 HITL（若有，典型是 `waiting_human` 的 agent 被
         # send_message 打断——旧提问再没人会去回答了）。顺序纪律与 `cancel_agent`/
         # `_cancel_session_hitl` 一致：必须先于下面 `requeue_for_message` 可能触发的
@@ -2223,6 +2236,7 @@ class CtxWeftRuntime:
         requeued = await tm.requeue_for_message(task_id)
         if requeued:
             asyncio.create_task(tm.drain())
+        return target.id
 
     async def _start_task_for_agent(
         self, agent_id: str, content: "str | list[ContentPart]", **_kw: Any,

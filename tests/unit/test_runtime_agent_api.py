@@ -155,11 +155,12 @@ async def test_send_message_reuses_live_task(monkeypatch):
 
     async def _fake_inject(task_id, content, **_kw):
         injected.append((task_id, content))
+        return task_id
 
     monkeypatch.setattr(rt, "_inject_user_turn", _fake_inject, raising=False)
     monkeypatch.setattr(rt, "_task_is_terminal", lambda _s, _t: False, raising=False)
 
-    tid = await rt.send_message("a1", "hello")
+    tid = (await rt.send_message("a1", "hello")).task_id
     assert tid == "t-live"
     assert injected == [("t-live", "hello")]
 
@@ -178,7 +179,7 @@ async def test_send_message_creates_new_task_when_current_is_terminal(monkeypatc
     monkeypatch.setattr(rt, "_start_task_for_agent", _fake_new_task, raising=False)
     monkeypatch.setattr(rt, "_task_is_terminal", lambda _s, _t: True, raising=False)
 
-    tid = await rt.send_message("a1", "hello")
+    tid = (await rt.send_message("a1", "hello")).task_id
     assert tid == "t-new"
     assert created == ["a1"]
 
@@ -197,7 +198,7 @@ async def test_inject_requeue_does_not_emit_task_human_resolved():
     rt = _rt()
     _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
 
-    tid = await rt.send_message("a1", "please continue")
+    tid = (await rt.send_message("a1", "please continue")).task_id
     assert tid == "t1"
 
     events = await rt.event_store.read_by_session("s1")
@@ -230,12 +231,12 @@ async def test_send_message_twice_in_a_row_is_not_rejected_as_busy():
     rt = _rt()
     _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
 
-    tid1 = await rt.send_message("a1", "first message")
+    tid1 = (await rt.send_message("a1", "first message")).task_id
     assert tid1 == "t1"
 
     # 第一次注入之后 task 仍是同一个未终态 task（只是被塞回队列，没被 drain 真派发），
     # 第二次消息应该继续走注入分支、落到同一个 task，而不是被拒绝。
-    tid2 = await rt.send_message("a1", "second message right after")
+    tid2 = (await rt.send_message("a1", "second message right after")).task_id
     assert tid2 == "t1"
 
 
@@ -313,3 +314,54 @@ async def test_list_agents_session_id_still_filters():
     _plant(rt, "agt_a", None, session_id="s1")
     _plant(rt, "agt_b", None, session_id="s2")
     assert [a.agent_id for a in rt.list_agents(session_id="s1")] == ["agt_a"]
+
+
+# ── 2026-09-04 spec §3.3：send_message 返回 TurnHandle ─────────────────────
+
+
+async def test_send_message_returns_turn_handle():
+    """四个身份字段恒非空——用注入分支（`_plant_live_task` 搭一个真活着的
+    TaskManager + task），不走 `start_session` 全流程。"""
+    from ctx_weft.core.runtime import TurnHandle
+
+    rt = _rt()
+    _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
+
+    h = await rt.send_message("a1", "hello")
+
+    assert isinstance(h, TurnHandle)
+    assert h.agent_id == "a1"
+    assert h.session_id == "s1"
+    assert h.task_id            # 恒非空
+    assert h.template_id        # 恒非空
+
+
+async def test_new_task_branch_yields_a_different_task_id():
+    """上一轮已终态 → 新建 task。调用方比对 task_id 就知道是新一轮还是并进旧的。
+
+    控制方裁定 A：brief 原写法（`start_session` → `wait_for_finish` → `send_message`）
+    在 session 转 idle 后会被 `_release_session` 回收 TaskManager、连带
+    `ALM.release_session` 摘掉这个 session 下的全部 agent record，随后的
+    `send_message` 在 `assert_can_receive` 处直接报错——这是既有、已知、与本 task
+    无关的 teardown 竞态（不在本 task 修复范围，也不允许改 `_release_session` /
+    `ALM.release_session` 去迁就它）。改用与注入分支同款的 `_plant_live_task` 搭一个
+    仍然活着的 TaskManager，只是把 task 种成终态，让路由走新建分支——不依赖
+    session 收尾时序。
+    """
+    rt = _rt()
+    _plant_live_task(rt, "a1", "t-old", task_status="FINISHED", agent_status="idle")
+
+    h = await rt.send_message("a1", "again")
+
+    assert h.task_id != "t-old"
+    assert h.agent_id == "a1"
+
+
+async def test_inject_branch_reuses_the_live_task_id():
+    """注入分支：消息并进仍在活的那条 task，task_id 与它相同。"""
+    rt = _rt()
+    _plant_live_task(rt, "agt_1", "tsk_live",
+                     task_status="AWAITING_HUMAN", agent_status="waiting_human")
+    h = await rt.send_message("agt_1", "外部消息")
+    assert h.task_id == "tsk_live"
+    assert h.agent_id == "agt_1"

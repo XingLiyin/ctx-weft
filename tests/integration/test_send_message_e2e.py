@@ -145,7 +145,7 @@ async def test_send_message_injects_into_suspended_parent_and_survives_child_wak
 
     # 2. send_message：必须走注入分支（不新建 task），且此刻子任务尚未完成
     #    （被 release_gate 挡住），消除真实场景里的竞态窗口。
-    tid = await runtime.send_message(root_agent_id, MARKER_TEXT)
+    tid = (await runtime.send_message(root_agent_id, MARKER_TEXT)).task_id
     assert tid == root_task_id, "current_task 未终态 -> 必须注入现有 task，不新建"
 
     # 注入是纯写内存，不该改变 root task 仍 SUSPENDED、子任务仍未完成的事实。

@@ -331,7 +331,7 @@ async def test_send_message_finalizes_all_pending_hitl_of_target_agent():
     _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
     req = await _open_ask_user_bubble(rt, agent_id="a1", task_id="t1")
 
-    tid = await rt.send_message("a1", "please continue without answering that")
+    tid = (await rt.send_message("a1", "please continue without answering that")).task_id
 
     assert tid == "t1"
     assert rt.hitl_registry.get(req.id).resolved is True
@@ -407,7 +407,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
 
     # 3. 用户此刻改口，发了条新消息（没有专门回答那条暂停气泡）——这正是本次修复
     #    要收口的缺口：send_message 必须把这条陈旧气泡终局掉。
-    tid = await rt.send_message("root", "actually let's change the plan")
+    tid = (await rt.send_message("root", "actually let's change the plan")).task_id
     assert tid == "t_root"
     assert rt.hitl_registry.get(stale_bubble.id).resolved is True, (
         "send_message 必须终局这条陈旧暂停气泡；否则它会一直挂在 pending 列表里"

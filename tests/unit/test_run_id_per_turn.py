@@ -31,10 +31,9 @@ RunStarted/RunFinished。
   收尾，session 判定为"idle"而非"done"（`_fire_session_idle`，不回收任何映射），
   `send_message` 走「task 未终态 → 注入同一个 task」的分支（`_inject_user_turn`），
   全程不换 task_id，也不触碰 `_release_session`。
-- 本 commit 这一层 `send_message` 还没升级成 `TurnHandle`（Task 10 才落地）；就算
-  升级了，这条路径返回的也还是原 task_id（同一个 task 被再次驱动，不是新开一个）。
-  用事件计数 `_poll`，而非对 task 状态做终态判断——`AWAITING_HUMAN` 之前之后都一
-  样，状态本身分不出"第二轮跑完了没有"。
+- Task 10 落地后 `send_message` 返回 `TurnHandle`，第二轮直接 `await h2.
+  wait_for_finish(...)` 等它进终态即可，不再需要按 `RunFinished` 事件计数手工轮询
+  （回填此前 Task 6 期间 `send_message` 还只返回裸 `task_id` 时留下的临时写法）。
 
 `test_sequence_is_unique_per_run` 的豁免范围（**不是本 task 的 xfail**，控制方已
 明确禁止：这里 `assert_no_duplicate_sequence` 照常跑、照常能失败，只是把一种已经
@@ -64,10 +63,8 @@ state 传递方式完全没在本 task 的改动清单里）。
 
 from __future__ import annotations
 
-import asyncio
 import collections
 import inspect
-import time
 
 import pytest
 
@@ -126,20 +123,6 @@ def assert_every_run_has_one_start_and_finish(events):
         if starts[rid] != 1 or finishes[rid] != 1:
             problems.append(f"{rid}: {starts[rid]} started / {finishes[rid]} finished")
     assert problems == [], f"run 起止不成对: {problems}"
-
-
-async def _poll(predicate, *, timeout: float = 5.0, interval: float = 0.02):
-    """轮询直到 predicate() 为真——本文件用它等"第二轮那个 run 也发了 RunFinished"，
-    照抄 `test_run_id_sequence_integrity.py::_poll` 的手法（那边等后台 recap，这边等
-    `send_message` 注入触发的第二个 run）。
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        await asyncio.sleep(interval)
-    raise AssertionError("timed out waiting for second turn's run to finish")
 
 
 class _TurnRouterLLM(MockLLMAdapter):
@@ -221,21 +204,13 @@ async def _two_turn_session():
         f"第一轮应以纯文本冷 park 收尾，实际 status={state.task.status if state else None}"
     )
 
-    def _main_run_finishes():
-        return sum(
-            1 for e in seen
-            if e.type == EventType.RUN_FINISHED and e.origin == EventOrigin.RUNTIME
-        )
-
-    runs_before = _main_run_finishes()
-
-    task_id = await rt.send_message(handle.agent_id, "second turn")
-    assert task_id == handle.task_id, (
+    h2 = await rt.send_message(handle.agent_id, "second turn")
+    assert h2.task_id == handle.task_id, (
         "第一轮以 AWAITING_HUMAN（非终态）收尾，send_message 应注入同一个 task，"
-        f"而不是新建一个（got {task_id!r}, expected {handle.task_id!r}）"
+        f"而不是新建一个（got {h2.task_id!r}, expected {handle.task_id!r}）"
     )
 
-    await _poll(lambda: _main_run_finishes() > runs_before, timeout=5.0)
+    await h2.wait_for_finish(timeout=5.0)
     return seen
 
 
