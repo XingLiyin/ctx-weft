@@ -1,6 +1,13 @@
 """CapabilityCache：per-session capability 快照。
 
-实例化时填充（AgentLifecycleManager.instantiate），运行期只读。
+**填充方是 PrepareStep，不是 ALM**：全仓唯一的 `put()` 调用点在
+`core/loop/steps/_capabilities.py`——每次 run 的 prepare 阶段解析完 capability 后写入，
+`core/loop/capability_gateway.py` 在每次工具调用时读。改造前这里写的是「实例化时填充
+（AgentLifecycleManager.instantiate）」，那条线早已搬去 PrepareStep，文件与注释都没跟着走
+（同批还查出 `TaskManager._session_registry` 的 docstring 也在描述一个已不存在的关系）。
+
+对象本身由 `runtime` 在装配期构造，跨 run 存活；per-agent 快照可被 `evict` 逐出，
+`register_global` 存的 session 全局控制工具不随之逐出。
 """
 
 from __future__ import annotations

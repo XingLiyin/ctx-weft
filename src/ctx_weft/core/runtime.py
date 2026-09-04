@@ -58,8 +58,8 @@ from ctx_weft.core.loop.steps.background_observe import (
 from ctx_weft.core.loop.steps.compact import CompactStep
 from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
+from ctx_weft.core.capabilities.cache import CapabilityCache
+from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice, ResolvedModel
 from ctx_weft.core.orchestrator.agent_state import AgentInput
 from ctx_weft.core.orchestrator.session_registry import SessionRegistry
@@ -413,7 +413,7 @@ class CtxWeftRuntime:
         control_provider = ControlCapabilityProvider()
         self.providers.register_capability(control_provider)
 
-        from ctx_weft.core.orchestrator.skill_executor_capability import (
+        from ctx_weft.core.capabilities.skill_executor import (
             SkillExecutorCapabilityProvider,
         )
         skill_executor = SkillExecutorCapabilityProvider(self.providers)

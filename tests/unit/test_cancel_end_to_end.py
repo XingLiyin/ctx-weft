@@ -28,8 +28,8 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.tokens import CancelToken
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, StepOutcome
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-from ctx_weft.core.orchestrator.control_capability import ControlContext, report_task_outcome
+from ctx_weft.core.capabilities.cache import CapabilityCache
+from ctx_weft.core.capabilities.control_tools import ControlContext, report_task_outcome
 from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_runner import AgentBinding

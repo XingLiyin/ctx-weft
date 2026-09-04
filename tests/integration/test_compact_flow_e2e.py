@@ -21,7 +21,7 @@ from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleMan
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.registry import ProviderRegistry
-from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
+from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 from ctx_weft.core.domain.models import LoopGuard, Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer

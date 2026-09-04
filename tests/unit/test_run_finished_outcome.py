@@ -76,7 +76,7 @@ async def _events_from_park() -> list:
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.loop.park import HitlPark
-    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.domain.models import Agent, LoopGuard, Session, Task
     from ctx_weft.protocols import LoopConfig, MemoryAddress, MemoryConfig, ProviderContext
     from ctx_weft.providers.events import InProcessEventBus
@@ -164,7 +164,7 @@ async def _events_from_cancel() -> list:
 
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
-    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.domain.models import Agent, LoopGuard, Session, Task
     from ctx_weft.protocols import LoopConfig, MemoryAddress, MemoryConfig, ProviderContext
     from ctx_weft.providers.events import InProcessEventBus
@@ -223,7 +223,7 @@ async def _events_from_crash(exc: BaseException) -> tuple[list, BaseException]:
 
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
-    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.domain.models import Agent, LoopGuard, Session, Task
     from ctx_weft.protocols import LoopConfig, MemoryAddress, MemoryConfig, ProviderContext
     from ctx_weft.providers.events import InProcessEventBus

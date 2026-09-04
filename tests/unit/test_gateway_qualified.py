@@ -12,7 +12,7 @@ from ctx_weft.core.loop.capability_gateway import (
     CapabilityGateway,
 )
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
@@ -100,7 +100,7 @@ async def test_control_tool_resolves_from_global_region_when_agent_uncached() ->
     resolves them even when the per-agent snapshot is empty — e.g. a fire-and-forget background
     observe invoking collect_process_report AFTER its run ended and the per-agent cache was evicted.
     """
-    from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
+    from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 
     mem, state, ctx = _state_ctx()
     provider = ControlCapabilityProvider()
@@ -123,7 +123,7 @@ async def test_collect_process_report_silent_no_task_ingest() -> None:
     """collect_process_report 是 SILENT：gateway 不把 TOOL_INVOCATION/TOOL_RESULT 写进 task 对话
     （否则 background observe 在 task close 后调用会污染冻结对话、泄漏进后续 task prompt），
     但仍正常返回 ControlResult.content——background observe 据此取报告落 close 槽。"""
-    from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
+    from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
     from ctx_weft.protocols import MemoryEventType
 
     mem, state, ctx = _state_ctx()

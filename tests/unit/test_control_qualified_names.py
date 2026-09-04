@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ctx_weft.core.orchestrator.control_capability import (
+from ctx_weft.core.capabilities.control_tools import (
     DELEGATE_PLAN_NAME,
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,

@@ -711,7 +711,7 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
 
     场景：无 eager 框（delegate_task 不再 eager 写），短 child close。
     """
-    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+    from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
     mem = InMemoryMemoryProvider()
 
     parent_agent = "ag1"

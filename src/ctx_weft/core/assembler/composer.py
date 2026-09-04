@@ -107,7 +107,7 @@ from ctx_weft.core.content import (
     content_with_suffix,
     downgrade_images_to_text,
 )
-from ctx_weft.core.orchestrator.control_capability import (
+from ctx_weft.core.capabilities.control_tools import (
     DELEGATE_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
 )

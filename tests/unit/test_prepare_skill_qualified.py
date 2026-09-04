@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.prepare import PrepareStep
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols.capability import SkillCapability, SkillDefinition
 from ctx_weft.protocols.context import ProviderContext
 

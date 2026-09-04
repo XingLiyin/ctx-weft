@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ctx_weft.core.orchestrator.capability_resolver import CapabilityResolver
+from ctx_weft.core.capabilities.resolver import CapabilityResolver
 from ctx_weft.protocols.capability import (
     AgentCapability, AgentCapabilityProvider, CapabilityProviderInfo,
 )

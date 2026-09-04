@@ -32,7 +32,7 @@ class _RecordingBus:
 
 class _FakeGateway:
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id=None):
-        from ctx_weft.core.orchestrator.control_capability import ControlResult
+        from ctx_weft.core.capabilities.control_tools import ControlResult
         return ControlResult(content="DONE")
 
 

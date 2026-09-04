@@ -25,8 +25,8 @@ from ctx_weft.core.hitl.service import HitlService
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.hitl_waiter import HitlWaiter
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-from ctx_weft.core.orchestrator.control_capability import (
+from ctx_weft.core.capabilities.cache import CapabilityCache
+from ctx_weft.core.capabilities.control_tools import (
     PROVIDER_NAME,
     ControlCapabilityProvider,
 )

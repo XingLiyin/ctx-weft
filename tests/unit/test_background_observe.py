@@ -9,7 +9,7 @@ import pytest
 
 import ctx_weft.core.loop.steps.background_observe as bo
 import ctx_weft.core.loop.steps.observe as _obs_mod
-from ctx_weft.core.orchestrator.control_capability import (
+from ctx_weft.core.capabilities.control_tools import (
     BACKGROUND_PROCESS_REPORT_NAME,
     ControlResult,
 )

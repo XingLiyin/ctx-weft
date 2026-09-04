@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.capability_cache import (
+from ctx_weft.core.capabilities.cache import (
     CapabilityCache,
     DuplicateCapabilityName,
 )

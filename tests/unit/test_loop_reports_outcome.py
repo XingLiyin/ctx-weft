@@ -153,7 +153,7 @@ async def run_until_park():
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.loop.park import HitlPark
-    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.domain.models import Agent, LoopGuard, Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
     from ctx_weft.protocols import MemoryConfig
@@ -253,7 +253,7 @@ async def run_until_cancel():
 
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
-    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.domain.models import Agent, LoopGuard, Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
     from ctx_weft.protocols import MemoryConfig
@@ -319,7 +319,7 @@ async def run_until_crash(exc: BaseException):
 
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
-    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.domain.models import Agent, LoopGuard, Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
     from ctx_weft.protocols import MemoryConfig

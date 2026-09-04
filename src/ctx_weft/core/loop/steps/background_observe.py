@@ -206,7 +206,7 @@ def _lock_for(task_id: str) -> asyncio.Lock:
 
 async def _run_background_observe(state: "LoopState", ctx: "LoopContext", boundary: str) -> None:
     from ctx_weft.core.assembler import ContextRequest
-    from ctx_weft.core.orchestrator.control_capability import BACKGROUND_PROCESS_REPORT_NAME
+    from ctx_weft.core.capabilities.control_tools import BACKGROUND_PROCESS_REPORT_NAME
 
     # Task 5 复审修复：origin 必须在本函数**任何**发射点之前钉住，不能拖到调
     # run_observe_react 前才改——RUN_STARTED/TASK_RECAP_STARTED（下面紧接着）以及

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import logging
 
-from ctx_weft.core.orchestrator.capability_resolver import CapabilityResolver
-from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
-from ctx_weft.core.orchestrator.skill_executor_capability import SkillExecutorCapabilityProvider
+from ctx_weft.core.capabilities.resolver import CapabilityResolver
+from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
+from ctx_weft.core.capabilities.skill_executor import SkillExecutorCapabilityProvider
 from ctx_weft.core.domain.models import NormalTaskSettings
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ async def resolve_and_bind(state, ctx) -> list:
     （register_global，不随 per-run evict 逐出）；其余 per-run 解析的能力（skill/mcp/agent）按
     per-agent put。返回的 bound 仍含全部（供本 run 的 assembly）。
     """
-    from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as _CONTROL
+    from ctx_weft.core.capabilities.control_tools import PROVIDER_NAME as _CONTROL
     bound = await resolve_capabilities(state, ctx)
     if ctx.capability_cache is not None:
         _control_prefix = f"{_CONTROL}:"

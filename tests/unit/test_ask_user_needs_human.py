@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
+from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 from ctx_weft.core.domain.models import Session, Task
 from ctx_weft.protocols import ProviderContext
 from ctx_weft.protocols.hitl import HITL_FORM_QUESTION, ToolResultDelivery

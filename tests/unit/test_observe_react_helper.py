@@ -8,7 +8,7 @@ import pytest
 import ctx_weft.core.loop.steps.observe as _obs_mod
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.steps.observe import run_observe_react
-from ctx_weft.core.orchestrator.control_capability import ControlResult
+from ctx_weft.core.capabilities.control_tools import ControlResult
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryAddress
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 

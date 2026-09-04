@@ -15,8 +15,8 @@ import pytest
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-from ctx_weft.core.orchestrator.control_capability import (
+from ctx_weft.core.capabilities.cache import CapabilityCache
+from ctx_weft.core.capabilities.control_tools import (
     PROVIDER_NAME,
     ControlCapabilityProvider,
     ControlContext,
@@ -148,7 +148,7 @@ class _PlanDispatchProvider(ToolCapabilityProvider):
 async def test_gateway_delegate_plan_still_eager_writes_envelope() -> None:
     """delegate_plan 的 envelope 框 + 配对 ack 仍由 gateway eager 写（per-child 框才走 finalize 铸）——
     2026-07-03 只移除了 delegate_task 的 eager 写，plan envelope 不受影响。"""
-    from ctx_weft.core.orchestrator.control_capability import _PLAN_DISPATCH_ACK
+    from ctx_weft.core.capabilities.control_tools import _PLAN_DISPATCH_ACK
     mem = InMemoryMemoryProvider()
     cache = CapabilityCache()
     cap = ToolCapability(id="control:delegate_plan", name="delegate_plan", description="plan")
@@ -245,7 +245,7 @@ class _AssessProvider(ToolCapabilityProvider):
 
 @pytest.mark.asyncio
 async def test_delegate_plan_returns_envelope_ack() -> None:
-    from ctx_weft.core.orchestrator.control_capability import delegate_plan, _PLAN_DISPATCH_ACK
+    from ctx_weft.core.capabilities.control_tools import delegate_plan, _PLAN_DISPATCH_ACK
     tm = _FakeTM()
     res = delegate_plan(tasks=[{"title": "a"}, {"title": "b"}], ctx=_ctx(tm, "tc_plan"))
     assert res.content == _PLAN_DISPATCH_ACK

@@ -35,7 +35,7 @@ from ctx_weft.core.loop.steps.finalize import (
     ensure_dispatch_frame_at_start,
     finalize_task_memory,
 )
-from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
 from ctx_weft.core.orchestrator.task_manager import task_payload
 from ctx_weft.core.domain.models import NormalTaskSettings, Task
 from ctx_weft.core.utils import estimate_tokens, generate_id

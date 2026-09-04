@@ -12,7 +12,7 @@ def _recap_types(bus_events):
 async def test_started_and_done_emitted_on_success(fake_state_ctx, monkeypatch):
     state, ctx = fake_state_ctx  # ctx.event_bus 收集 emit 到 ctx.event_bus.emitted
     async def _fake_react(*a, **k):
-        from ctx_weft.core.orchestrator.control_capability import ControlResult
+        from ctx_weft.core.capabilities.control_tools import ControlResult
         return ControlResult(content="recap text", metadata={"task_summary": "sum"}), ""
     monkeypatch.setattr(bo, "run_observe_react", _fake_react)
 

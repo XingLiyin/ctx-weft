@@ -1,7 +1,7 @@
 """collect_process_report：零状态写——只回传内容，不碰 task 任何状态字段。"""
 from __future__ import annotations
 
-from ctx_weft.core.orchestrator.control_capability import (
+from ctx_weft.core.capabilities.control_tools import (
     collect_process_report, BACKGROUND_PROCESS_REPORT_NAME,
 )
 from ctx_weft.core.domain.models import Task, NormalTaskSettings

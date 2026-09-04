@@ -39,7 +39,7 @@ async def test_close_boundary_not_guarded(fake_state_ctx, monkeypatch):
     called = {"react": False}
     async def _react(*a, **k):
         called["react"] = True
-        from ctx_weft.core.orchestrator.control_capability import ControlResult
+        from ctx_weft.core.capabilities.control_tools import ControlResult
         return ControlResult(content="r", metadata={}), ""
     monkeypatch.setattr(bo, "run_observe_react", _react)
 
@@ -112,7 +112,7 @@ async def test_segment_over_threshold_folds_as_before(fake_state_ctx, monkeypatc
         type=MemoryEventType.LLM_RESPONSE, address=state.scope,
         content="second llm", role="assistant",
         timestamp=datetime(2024, 1, 1, 12, 0, 0, 4, tzinfo=UTC)), ctx.provider_ctx)
-    from ctx_weft.core.orchestrator.control_capability import ControlResult
+    from ctx_weft.core.capabilities.control_tools import ControlResult
     called = {"react": False}
     async def _react(*a, **k):
         called["react"] = True
@@ -136,7 +136,7 @@ async def test_close_boundary_ignores_short_segment_gate(fake_state_ctx, monkeyp
         compact_keep_last=2, max_turns_per_observe=3,
         short_segment_token_threshold=10**9,  # 巨大阈值也拦不住 close 路径
     )
-    from ctx_weft.core.orchestrator.control_capability import ControlResult
+    from ctx_weft.core.capabilities.control_tools import ControlResult
     called = {"react": False}
     async def _react(*a, **k):
         called["react"] = True
@@ -165,7 +165,7 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
 
-    from ctx_weft.core.orchestrator.control_capability import ControlResult
+    from ctx_weft.core.capabilities.control_tools import ControlResult
 
     calls: list[int] = []
 

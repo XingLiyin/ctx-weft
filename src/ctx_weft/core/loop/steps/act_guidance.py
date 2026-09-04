@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from ctx_weft.core.orchestrator.control_capability import (
+from ctx_weft.core.capabilities.control_tools import (
     ASK_USER_NAME,
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,

@@ -27,7 +27,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome,
 from ctx_weft.core.loop.llm_gateway import (
     request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
 )
-from ctx_weft.core.orchestrator.control_capability import REPORT_TASK_OUTCOME_NAME, ControlResult
+from ctx_weft.core.capabilities.control_tools import REPORT_TASK_OUTCOME_NAME, ControlResult
 from ctx_weft.core.utils import now_utc
 
 if TYPE_CHECKING:

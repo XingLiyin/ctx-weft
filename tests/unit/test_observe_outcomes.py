@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.observe import ObserveStep
-from ctx_weft.core.orchestrator.control_capability import ControlContext, report_task_outcome
+from ctx_weft.core.capabilities.control_tools import ControlContext, report_task_outcome
 from ctx_weft.core.domain.models import Task
 from ctx_weft.protocols.events import EventType
 

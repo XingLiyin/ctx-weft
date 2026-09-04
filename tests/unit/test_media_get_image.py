@@ -29,7 +29,7 @@ from ctx_weft.core.media.capability import (
     _ordinal,
 )
 from ctx_weft.core.media.refs import encode_image_placeholder
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.protocols import (

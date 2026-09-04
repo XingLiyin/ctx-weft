@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from ctx_weft.core.orchestrator.skill_executor_capability import (
+from ctx_weft.core.capabilities.skill_executor import (
     SkillExecutorCapabilityProvider,
 )
 from ctx_weft.protocols.capability import (

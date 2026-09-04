@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ctx_weft.core.orchestrator.control_capability import update_task_metadata, ControlContext
+from ctx_weft.core.capabilities.control_tools import update_task_metadata, ControlContext
 from ctx_weft.core.domain.models import NormalTaskSettings, Task
 
 

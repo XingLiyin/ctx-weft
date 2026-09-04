@@ -77,7 +77,7 @@ async def test_same_agent_child_mints_frame_and_writes_ack() -> None:
     """§2.5(2026-07-03)：同 agent child close → finalize **铸**派发框 + 配对静态 ack，二者**同锚
     task.started_at**（gateway 不再为 delegate_task eager 写框）→ 框与 result 严格相邻、落在「任务开始
     执行」时间线上。框名取 task.origin_tool_name（delegate_task 子 = 真名，保真）。"""
-    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+    from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
     await _seed_conv_nonshort(mem, child_scope)
@@ -119,7 +119,7 @@ async def test_same_agent_child_mints_frame_and_writes_ack() -> None:
 # ── start 时铸框 + running ack（driver.run 钩子）────────────────────────────
 
 def _child_task(started, *, parent="p1", tcid="oc1", agent="ag1") -> Task:
-    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+    from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
     return Task(id="c1", session_id="s1", status="ACTIVE", tenant_id="default",
                 assigned_agent_id=agent, creator_agent_id=agent, parent_task_id=parent,
                 origin_tool_call_id=tcid, origin_tool_name=DELEGATE_TASK_NAME,
@@ -138,7 +138,7 @@ async def test_start_hook_mints_frame_and_running_ack_at_started_at() -> None:
     自己的来历，那条 task_prompt 的 user 回合不再像用户凭空插话。
     """
     from ctx_weft.core.loop.steps.finalize import ensure_dispatch_frame_at_start
-    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+    from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
 
     mem = InMemoryMemoryProvider()
     started = _BASE + timedelta(seconds=5)
@@ -342,7 +342,7 @@ async def test_same_agent_close_mints_frame_and_ack_co_anchored() -> None:
     """§2.5(2026-07-03)：同 agent close（_close_one）铸派发框 + 配对静态 ack，
     框与 ack 同锚 task.started_at（同时间戳 → 相邻），无 eager 框预置；框名取真名 delegate_task。"""
     from ctx_weft.core.loop.steps.finalize import _close_one, _dispatch_ack
-    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+    from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
 
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
@@ -424,7 +424,7 @@ async def test_concurrent_same_agent_dispatch_pairs_stay_adjacent() -> None:
     (timestamp, seq_no) 排序严格成对相邻（F0,R0,F1,R1,F2,R2），不再 F,F,F,R,R,R 堆叠错序。
     再过 legalize_messages 确认 provider 合法（每 assistant tool_use 紧跟其 tool result）。"""
     from ctx_weft.core.loop.llm_gateway import legalize_messages
-    from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
+    from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
     from ctx_weft.protocols import LLMMessage
 
     mem = InMemoryMemoryProvider()
