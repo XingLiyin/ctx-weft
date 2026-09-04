@@ -147,6 +147,10 @@ class HitlRequestView:
     fields: list[dict[str, Any]] = field(default_factory=list)
     proposal: dict[str, Any] | None = None
     outcome: HitlOutcome = ""
+    #: 这条未决项要怎么把人的答复送回去——`UserTurnDelivery` = 等一句话，
+    #: `ToolResultDelivery` / `NoResumeDelivery` = 有面板要拍板。host 据此
+    #: 自行渲染，core 不再提供派生的会话级状态串（2026-09-04 spec §6.5）。
+    delivery: Delivery = field(default_factory=NoResumeDelivery)
     resolved_at: datetime | None = None
 
     @property

@@ -1962,17 +1962,25 @@ class CtxWeftRuntime:
         finally:
             self._busy_sessions.discard(session_id)
 
-    def list_pending_hitl(self, session_id: str | None = None) -> "list[HitlRequestView]":
-        """未决 HITL 的**只读视图**列表（`session_id=None` = 全部会话）。
+    def list_pending_hitl(
+        self, *, session_id: str | None = None, agent_id: str | None = None,
+    ) -> "list[HitlRequestView]":
+        """未决 HITL 的**只读视图**列表。两个过滤都可选、可叠加，都不传 = 全部。
 
         host 面向 HITL 的读入口。刻意不暴露 `HitlRegistry`：`PendingHitl` 是 core 的活
         记录（带等待槽、stage、invocation_key 这些内部键），它自己的 docstring 就写着
         「不出 core」。经由本方法拿到的 `HitlRequestView` 才是契约层类型。
 
+        `agent_id` 是 agent-centric 下的主用过滤轴（2026-09-04 spec §5.2）：HITL 自
+        09-03 起已彻底 agent 化，只有这个查询入口此前停在 session 维度。
+
         **只读内存**：注意重启之后 registry 要先被装填（`recover()` / `rebuild_hitl()`）
         才有内容——「恢复是喂进来、不是查回去」（spec §3.1）。
         """
-        return [r.to_view() for r in self.hitl_registry.list_pending(session_id=session_id)]
+        return [
+            r.to_view()
+            for r in self.hitl_registry.list_pending(session_id=session_id, agent_id=agent_id)
+        ]
 
     def list_agents(
         self,

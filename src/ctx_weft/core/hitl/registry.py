@@ -110,6 +110,7 @@ class PendingHitl:
             prompt=self.prompt, detail=self.detail, fields=list(self.fields),
             proposal=self.proposal,
             outcome=self.decision.outcome if self.decision else "",
+            delivery=self.delivery,
             resolved_at=self.resolved_at,
         )
 
@@ -301,10 +302,14 @@ class HitlRegistry:
             return None
         return req.decision, req.resume_state
 
-    def list_pending(self, session_id: str | None = None) -> list[PendingHitl]:
+    def list_pending(
+        self, session_id: str | None = None, *, agent_id: str | None = None,
+    ) -> list[PendingHitl]:
         return [
             r for r in self._requests.values()
-            if not r.resolved and (session_id is None or r.session_id == session_id)
+            if not r.resolved
+            and (session_id is None or r.session_id == session_id)
+            and (agent_id is None or r.agent_id == agent_id)
         ]
 
     def resolved_for_session(self, session_id: str) -> list[PendingHitl]:
