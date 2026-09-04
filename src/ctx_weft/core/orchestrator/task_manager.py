@@ -1347,6 +1347,47 @@ class TaskManager:
             await self._emit(EventType.TASK_HUMAN_RESOLVED, task_id=task_id,
                               payload={"hitl_id": hitl_id})
 
+    async def requeue_for_message(self, task_id: str, *, reason: str = "send_message") -> bool:
+        """把一个被**外部消息**（`CtxWeftRuntime.send_message`，Task 18）重新激活的
+        task 放回队列——发 `TaskRequeued`，**不是** `TaskHumanResolved`。
+
+        `TaskHumanResolved` 是 `TaskAwaitingHuman{hitl_id}` 的**一对一配对解除事件**
+        （见 `resume_task` docstring："唯一发 TaskHumanResolved 的地方…配对就不再是
+        一对一"；`reducers.py` 同一断言）——它只属于 HITL 应答路径。外部消息注入
+        没有对应的 `TaskAwaitingHuman`，硬发它会在事件流里留一个配不上对的孤儿，还
+        会经 ALM（`_INPUT_BY_EVENT` 把它译成 `AgentInput.HUMAN_RESOLVED`）把 agent
+        状态**提前**翻成 `running`——task 这时只是入了队，真正的 `TASK_STARTED`
+        要等 `drain()` 真派发才发，这个窗口里 agent 报 running 但其实没在跑，会让
+        紧接着的下一次 `send_message` 被 `assert_can_receive` 误判成 `AgentBusyError`
+        拒收。
+
+        `TASK_REQUEUED` 才是语义对的事实：`reducers.py` 自己的注释说它和
+        `TaskHumanResolved` "效果相同（判据是类型不是 payload）"，区别只在后者多背
+        了一层 HITL 配对；ALM 把它译成 `AgentInput.SETTLED` → agent 回 `idle`，
+        正确反映"已入队、尚未开跑"，`drain()` 真正派发时 `TASK_STARTED` 才会把它
+        翻成 `running`——时序对得上。
+
+        与 `resume_task` 同样的三道幂等闸（已终态 / 已在跑 / 已在队列 -> no-op，
+        不重复入队不重发事实）；不看 `was_blocked`——不管当前是哪种非终态挡着，
+        只要真的把它塞回了队列就发一次。返回是否真的发生了重排（供调用方决定要不要
+        补一次 `drain()`——本方法本身不 drain，与 `resume_task` 同一分工，drain
+        交给调用方，见 `_resume_in_existing_tm` / `_try_resume_parent` 的既有先例）。
+        """
+        t = self._tasks.get(task_id)
+        if t is None or t.status in _TERMINAL_STATUSES:
+            return False
+        if task_id in self._running_tasks:
+            return False
+        if any(e.task_id == task_id for e in self._queue.peek_all()):
+            return False
+        t.status = "PENDING"
+        t.retry_count = 0  # 挂起期间的旧计数不带入新一轮 attempt
+        self._queue.push(QueueEntry(
+            task_id=task_id, session_id=self._session_id, priority=t.priority,
+        ))
+        await self._emit(EventType.TASK_REQUEUED, task_id=task_id, payload={"reason": reason})
+        return True
+
     async def mark_human_resolved(self, task_id: str, *, hitl_id: str) -> None:
         """HITL 应答落地后把 task 置回 PENDING 并发事实——**不看当前状态**。
 

@@ -28,6 +28,44 @@ def _plant(rt, agent_id, parent, session_id="s1", status="idle"):
         reg._children.setdefault(parent, set()).add(agent_id)
 
 
+def _plant_live_task(rt, agent_id, task_id, *, task_status, agent_status, session_id="s1"):
+    """给 `_inject_user_turn` 的真实（未 mock）注入分支搭一个可跑的最小环境：
+    一个真的 `TaskManager`（挂进 `rt._task_managers`，带 `session`、登记好 task）+
+    一个真的 memory provider——`requeue_for_message` 与 `_ingest_user_turn` 都要
+    真跑一遍，不是 monkeypatch 掉。不给它 `set_runner`：这几个回归只关心
+    `_inject_user_turn` 同步做的那部分（事件 + agent 状态转移），不需要 task 真的
+    被 drain 派发起来，`drain()` 因此在这里被替换成 no-op（否则会因为没有
+    `TaskRunner` 而抛错——那不是本测试要盯的东西）。
+    """
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import Session, Task
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+    rt.providers.register_memory(InMemoryMemoryProvider())
+
+    _plant(rt, agent_id, None, session_id=session_id, status=agent_status)
+    rt._agent_registry._agents[agent_id].current_task_id = task_id
+
+    tm = TaskManager(session_id=session_id, event_bus=rt._event_bus)
+    session = Session(
+        id=session_id, user_prompt="hi", status="RUNNING", tenant_id="default",
+        root_agent_id=agent_id, created_at=None,
+    )
+    tm.set_session(session)
+    task = Task(
+        id=task_id, session_id=session_id, status=task_status, tenant_id="default",
+        assigned_agent_id=agent_id, creator_agent_id=agent_id,
+    )
+    tm.register_task(task)
+    rt._task_managers[session_id] = tm
+
+    async def _noop_drain():
+        return None
+
+    tm.drain = _noop_drain  # type: ignore[method-assign]
+    return tm
+
+
 async def test_list_agents_returns_flat_list():
     rt = _rt()
     _plant(rt, "root", None)
@@ -132,3 +170,59 @@ async def test_send_message_creates_new_task_when_current_is_terminal(monkeypatc
     tid = await rt.send_message("a1", "hello")
     assert tid == "t-new"
     assert created == ["a1"]
+
+
+# ── coordinator fix: 注入分支不得借道 TaskHumanResolved（HITL 专属配对事件）──────
+
+
+async def test_inject_requeue_does_not_emit_task_human_resolved():
+    """`_inject_user_turn` 的重排分支必须发 `TaskRequeued`，不是 `TaskHumanResolved`
+    ——后者是 `TaskAwaitingHuman{hitl_id}` 的一对一配对解除事件，只属于 HITL 应答
+    （`TaskManager.resume_task` docstring / `reducers.py`）。外部消息注入没有对应的
+    `TaskAwaitingHuman`，硬发它会留一个配不上对的孤儿事件。
+    """
+    from ctx_weft.protocols.events import EventType
+
+    rt = _rt()
+    _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
+
+    tid = await rt.send_message("a1", "please continue")
+    assert tid == "t1"
+
+    events = await rt.event_store.read_by_session("s1")
+    types = [e.type for e in events]
+    assert EventType.TASK_HUMAN_RESOLVED not in types, (
+        f"must not emit TaskHumanResolved for a non-HITL wakeup, got {types}"
+    )
+    assert EventType.TASK_REQUEUED in types, f"expected TaskRequeued, got {types}"
+
+
+async def test_inject_requeue_leaves_agent_idle_not_running():
+    """入队 ≠ 已经在跑：`TaskRequeued` 必须让 agent 回 `idle`（ALM: SETTLED），不能
+    像 `TaskHumanResolved` 那样提前把它翻成 `running`——真正的 `running` 要等
+    `drain()` 派发出真实的 `TaskStarted`。
+    """
+    rt = _rt()
+    _plant_live_task(rt, "a1", "t1", task_status="INTERRUPTED", agent_status="interrupted")
+
+    await rt.send_message("a1", "resume with this extra context")
+
+    assert rt._agent_registry.status_of("a1") == "idle", (
+        "task 只是被塞回队列、还没真正 drain 派发，agent 不该报 running"
+    )
+
+
+async def test_send_message_twice_in_a_row_is_not_rejected_as_busy():
+    """连续两次 `send_message` 到同一个 agent（第一次注入后立刻第二次）不能被
+    `AgentBusyError` 误拒——回归的正是"注入把 agent 提前翻成 running"那个 bug。
+    """
+    rt = _rt()
+    _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
+
+    tid1 = await rt.send_message("a1", "first message")
+    assert tid1 == "t1"
+
+    # 第一次注入之后 task 仍是同一个未终态 task（只是被塞回队列，没被 drain 真派发），
+    # 第二次消息应该继续走注入分支、落到同一个 task，而不是被拒绝。
+    tid2 = await rt.send_message("a1", "second message right after")
+    assert tid2 == "t1"

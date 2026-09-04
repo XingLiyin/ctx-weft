@@ -2043,10 +2043,13 @@ class CtxWeftRuntime:
           自然唤醒它，那时它进 act 就看得见这里写下的这一轮（与 `_inject_user_reply`
           完全同一判据、同一处理）。
         - 其余非终态（`PENDING` / `AWAITING_HUMAN` / `INTERRUPTED` / 无子任务的
-          `SUSPENDED`）—— `TaskManager.resume_task` 重排：已排队 / 已在跑 / 已终态
-          它自身 no-op；真正被挡住的会置 `PENDING` 入队并发 `TaskHumanResolved`
-          （该方法本就不是 HITL 专属——见其 docstring 里 wait_for_user 冷应答与
-          approval 两条既有调用来源，`_resume_in_existing_tm` 走的正是这同一条）。
+          `SUSPENDED`）—— `TaskManager.requeue_for_message` 重排：已排队 / 已在跑 /
+          已终态它自身 no-op；真正被挡住的会置 `PENDING` 入队并发 `TaskRequeued`
+          （**不是** `TaskHumanResolved`——那是 `TaskAwaitingHuman{hitl_id}` 的一对一
+          配对解除事件，只属于 HITL 应答路径，发生在这里会留一个配不上对的孤儿事件，
+          还会经 ALM 把 agent 状态提前翻成 `running`——task 明明还没真正开跑，见
+          `requeue_for_message` 自己的 docstring）。重排成功后补一次 `drain()`——
+          `requeue_for_message` 只管入队、不 drain，与 `resume_task` 同一分工。
         """
         tm = self._task_managers.get(session_id)
         if tm is None or tm.session is None:
@@ -2082,7 +2085,9 @@ class CtxWeftRuntime:
         target.outputs = None
         target.process_report = None
         target.process_report_at = None
-        await tm.resume_task(task_id, hitl_id="")
+        requeued = await tm.requeue_for_message(task_id)
+        if requeued:
+            asyncio.create_task(tm.drain())
 
     async def _start_task_for_agent(
         self, agent_id: str, content: "str | list[ContentPart]", **_kw: Any,
