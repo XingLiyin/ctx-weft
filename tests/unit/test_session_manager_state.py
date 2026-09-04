@@ -1,71 +1,76 @@
-"""SessionManager 持有会话状态并按状态机转移（Task 4）。"""
+"""SessionManager 降格为会话内 agent 登记表（Task 15）。"""
 
 from __future__ import annotations
 
-from ctx_weft.core.orchestrator.session_manager import SessionManager
-from ctx_weft.core.orchestrator.session_state import SessionInput
-from ctx_weft.protocols.events import EventType
+from datetime import UTC, datetime
 
-from tests.unit._session_helpers import RecordingBus
+import pytest
 
+from ctx_weft.core.orchestrator.session_manager import SessionManager, _SessionState
+from ctx_weft.protocols.events import Event, EventType
 
-def _sm(bus: RecordingBus) -> SessionManager:
-    sm = SessionManager(agent_registry=None, event_bus=bus)
-    sm.register_session("sess_1", tenant_id="t1")
-    return sm
+pytestmark = pytest.mark.asyncio
 
 
-async def test_register_session_starts_running():
-    assert _sm(RecordingBus()).status_of("sess_1") == "RUNNING"
+class _SpyBus:
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def emit(self, ev) -> None:
+        self.events.append(ev)
+
+    def subscribe(self, _flt, _handler) -> None:
+        pass
 
 
-async def test_unknown_session_has_empty_status_not_an_exception():
-    """host 会拿任意 id 来问；抛异常会把一次查询变成一次 500。"""
-    sm = SessionManager(agent_registry=None, event_bus=RecordingBus())
-    assert sm.status_of("nope") == ""
+def _sm() -> SessionManager:
+    return SessionManager(agent_registry=None, event_bus=_SpyBus())
 
 
-async def test_blocked_on_human_emits_awaiting_and_moves_state():
-    bus = RecordingBus()
-    sm = _sm(bus)
-    await sm._apply("sess_1", SessionInput.QUEUE_BLOCKED)
-    assert sm.status_of("sess_1") == "WAITING"
-    assert bus.types() == [EventType.SESSION_WAITING]
-    assert bus.events[0].payload == {}          # 会话事件不带展示数据（裁定 R3）
-    assert bus.events[0].session_id == "sess_1"
-    assert bus.events[0].run_id is None          # 会话级事件不属于任何 run
-    assert bus.events[0].tenant_id == "t1"
+def _agent_ev(t: str, agent_id: str, payload: dict | None = None) -> Event:
+    return Event(
+        id="evt_x", run_id=None, sequence=0, session_id="s1", type=t,
+        timestamp=datetime.now(UTC), agent_id=agent_id, payload=payload or {},
+    )
 
 
-async def test_repeating_the_same_signal_emits_nothing():
-    bus = RecordingBus()
-    sm = _sm(bus)
-    await sm._apply("sess_1", SessionInput.QUEUE_BLOCKED)
-    await sm._apply("sess_1", SessionInput.QUEUE_BLOCKED)
-    assert bus.types() == [EventType.SESSION_WAITING]
+def test_session_state_has_no_status_field():
+    """状态整体挪到 agent 身上（spec 2）。"""
+    st = _SessionState()
+    assert not hasattr(st, "status")
+    assert st.agent_ids == set()
 
 
-async def test_terminal_state_absorbs_every_later_input():
-    bus = RecordingBus()
-    sm = _sm(bus)
-    await sm._apply("sess_1", SessionInput.CANCEL)
-    before = len(bus.events)
-    await sm._apply("sess_1", SessionInput.QUEUE_BLOCKED)
-    await sm._apply("sess_1", SessionInput.QUEUE_INTERRUPTED, reason="llm_outage")
-    await sm._apply("sess_1", SessionInput.TASK_STARTED)
-    assert sm.status_of("sess_1") == "CANCELED"
-    assert len(bus.events) == before
-    assert sm.is_terminal("sess_1") is True
+async def test_agent_instantiated_joins_member_set():
+    sm = _sm()
+    sm.register_session("s1")
+    await sm.handle_event(_agent_ev(EventType.AGENT_INSTANTIATED, "root", {"template_id": "t"}))
+    assert sm.agent_ids_of("s1") == {"root"}
 
 
-async def test_applying_to_an_unregistered_session_is_a_noop():
-    bus = RecordingBus()
-    sm = SessionManager(agent_registry=None, event_bus=bus)
-    await sm._apply("nope", SessionInput.QUEUE_DRAINED, final_status="SUCCEEDED")
-    assert bus.types() == []
+async def test_agent_spawned_joins_member_set():
+    sm = _sm()
+    sm.register_session("s1")
+    await sm.handle_event(_agent_ev(EventType.AGENT_INSTANTIATED, "root", {}))
+    await sm.handle_event(
+        _agent_ev(EventType.AGENT_SPAWNED, "kid", {"parent_agent_id": "root"})
+    )
+    assert sm.agent_ids_of("s1") == {"root", "kid"}
 
 
-async def test_forget_session_releases_the_state():
-    sm = _sm(RecordingBus())
-    sm.forget_session("sess_1")
-    assert sm.status_of("sess_1") == ""
+async def test_session_manager_no_longer_consumes_queue_signals():
+    """三条 TaskQueue* 原是 SM 唯一输入，现在不再消费（保留发射作可观测信号）。"""
+    sm = _sm()
+    sm.register_session("s1")
+    for t in (
+        EventType.TASK_QUEUE_BLOCKED,
+        EventType.TASK_QUEUE_INTERRUPTED,
+        EventType.TASK_QUEUE_DRAINED,
+        EventType.TASK_STARTED,
+    ):
+        await sm.handle_event(_agent_ev(t, "root", {"count": 1}))
+    assert sm.event_bus.events == [], "SM 不应再因队列信号发任何事件"
+
+
+def test_input_by_event_table_is_gone():
+    assert not hasattr(SessionManager, "_INPUT_BY_EVENT")

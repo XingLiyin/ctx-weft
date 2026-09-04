@@ -1114,9 +1114,6 @@ class TaskManager:
                 logger.exception("TaskManager: cancel_finalizer callback failed (cancel_all)")
         if self._session is not None:
             self._session.status = "CANCELED"
-        # 外部命令的透传：会话终态由 SM 落定（SessionFinished(CANCELED)）。
-        if self._session_manager is not None:
-            await self._session_manager.cancel(self._session_id)
 
     def _agent_id_of(self, task_id: str) -> str | None:
         """先看正在跑的登记，再回落到 task 自己的 assigned_agent_id。"""
