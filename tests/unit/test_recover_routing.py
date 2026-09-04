@@ -33,7 +33,12 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -102,11 +107,11 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
                             template_id="t"))
     await store.append(_ev(3, "C", EventType.AGENT_INTERRUPTED, agent_id="agtC"))
 
-    # 启动不应调 recover_session（task 重建推迟到应答）
+    # 启动不应调 recover_agent（task 重建推迟到应答）
     called: list[str] = []
-    async def fail_recover_session(sid, **kw):
-        called.append(sid)
-    monkeypatch.setattr(runtime, "recover_session", fail_recover_session)
+    async def fail_recover_agent(aid, **kw):
+        called.append(aid)
+    monkeypatch.setattr(runtime, "recover_agent", fail_recover_agent)
     waiting_human = _capture_waiting_human_broadcast(runtime)
     interrupted = _capture_interrupted_broadcast(runtime)
 
@@ -153,3 +158,93 @@ async def test_recover_multi_hitl_partial_resolve_still_pending() -> None:
     assert n == 1                                                 # 一个 session、一个 agent
     assert interrupted == []
     assert waiting_human == ["M"]
+
+
+# ── 2026-09-04 spec §6.2：恢复入口换轴 ─────────────────────────────────────
+
+
+def test_recover_session_is_gone():
+    assert not hasattr(CtxWeftRuntime, "recover_session")
+
+
+async def _crashed_session(rt: CtxWeftRuntime) -> tuple[str, str]:
+    """在 `rt` 的事件库里种一个「崩溃前挂着未决 HITL」的 session，返回 (session_id, root_agent_id)。
+
+    复用 `test_hitl_recovery.py::test_recover_agent_rebuilds_pending_hitl_and_parks`
+    验证过的种子形状：task 停在未决 HITL 上 → 续跑只装填 registry、保持 parked，不
+    真的驱动 LLM——这让「续跑准确定位到了正确的 session」这件事可以脱离一整条
+    LLM 驱动的 loop 单独断言，也不需要 llm/echo template 之外的任何装配。
+    """
+    ts = _TS
+    sid = "ses_recover_agent"
+    aid = "agt_root"
+
+    def ev(seq, type_, **payload):
+        task_id = payload.pop("task_id", None)
+        return Event(id=f"evt_{sid}_{seq:04d}", run_id="run_1", sequence=seq, session_id=sid,
+                     type=type_, timestamp=ts, task_id=task_id, payload=payload)
+
+    seed = [
+        ev(1, EventType.SESSION_CREATED, user_prompt="do it", template_id="agent:tpl_echo",
+           root_agent_id=aid),
+        ev(2, EventType.RUN_STARTED),
+        ev(3, EventType.TASK_CREATED, task={
+            "id": "tsk_1", "status": "PENDING", "title": "T1",
+            "assigned_agent_id": aid, "creator_agent_id": aid}),
+        ev(4, EventType.TASK_STARTED, task_id="tsk_1", assigned_agent_id=aid),
+        ev(5, EventType.HITL_REQUIRED, task_id="tsk_1", hitl_id="hit_1", form="question",
+           capability_id="control:ask_user", tool_call_id="tcA", question="Which DB?"),
+        ev(6, EventType.TASK_SUSPENDED, task_id="tsk_1"),
+    ]
+    for e in seed:
+        await rt.event_store.append(e)
+    return sid, aid
+
+
+def _runtime_for_recover_agent() -> CtxWeftRuntime:
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    llm = MockLLMAdapter(responses=[MockResponse(text="should not run")])
+    rt = make_runtime(llm=llm, agent_provider=resolver)
+    rt.providers.register_memory(InMemoryMemoryProvider())
+    return rt
+
+
+async def test_recover_agent_resolves_session_from_the_record() -> None:
+    """调用方只给 agent_id，session 由 ALM 记录反查——这就是「换轴」的全部含义。"""
+    rt = _runtime_for_recover_agent()
+    session_id, root_agent_id = await _crashed_session(rt)
+    await rt.recover()
+    await rt.recover_agent(root_agent_id)          # 不传 session_id 也能跑通
+    assert rt.get_agent(root_agent_id).session_id == session_id
+
+
+async def test_recover_agent_unknown_raises() -> None:
+    """未登记、且事件库里也确实不存在的 agent_id → 自愈（`rebuild_agent`）之后仍然
+    找不到 → 才真的抛 `AgentNotFound`（控制方裁决：不是一撞见 registry miss 就抛）。"""
+    from ctx_weft.core.models.errors import AgentNotFound
+
+    rt = _runtime_for_recover_agent()
+    with pytest.raises(AgentNotFound):
+        await rt.recover_agent("agt_nope")
+
+
+async def test_recover_agent_self_heals_a_cold_registry_before_giving_up() -> None:
+    """这是 controller ruling 要守的那条线：`_resume_after_hitl` 在冷启动（registry
+    尚未被 `recover()` 填过）时调用 `recover_agent`，如果这里对 miss 直接抛，人类
+    答完一句话、会话却永远醒不过来——`reply_to_hitl` 已经把 HITL 判成终局，没有
+    重试的第二次机会。种下事件后**不调 `rt.recover()`**（模拟进程重启后 ALM 还是
+    空的），直接 `recover_agent(root_agent_id)`：必须能自愈装填并跑通，而不是撞见
+    `AgentNotFound`。"""
+    rt = _runtime_for_recover_agent()
+    session_id, root_agent_id = await _crashed_session(rt)
+
+    # 冷启动断言：这个进程从没跑过 recover()/rebuild_agent()，registry 应确实是空的。
+    assert rt._agent_lifecycle_manager.record_of(root_agent_id) is None
+
+    await rt.recover_agent(root_agent_id)          # 必须自愈，不抛 AgentNotFound
+
+    assert rt.get_agent(root_agent_id).session_id == session_id
+    assert [r.id for r in rt.hitl_registry.list_pending(session_id=session_id)] == ["hit_1"]

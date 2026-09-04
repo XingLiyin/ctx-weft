@@ -11,7 +11,7 @@ boundary 分流（Task 6）：
     免折的段 raw **永久保 raw**：折叠带 since_last=USER_PROMPT 只折当前段，前段残留
     从不跨段合折（否则合并摘要会锚到前一条 UP 之前，UP 失去回答位，2026-07-21）
 
-崩溃恢复竞态（spec §5.1/§3.6；2026-07-16 起同进程内闭合）：`recover_session` 对一个
+崩溃恢复竞态（spec §5.1/§3.6；2026-07-16 起同进程内闭合）：`recover_agent` 对一个
 SUSPENDED-且-有待完成段 recap 的 task，会（a）经 TaskManager.restore 重排该 task 的新一轮
 run，（b）经 `_relaunch_task_recap` 重跑被打断的段 recap。relaunch 先于 register_and_drain
 发生，且 `_run_loop` 入口 await_pending_background_observe——新 run 开跑前必等 recap 完成，

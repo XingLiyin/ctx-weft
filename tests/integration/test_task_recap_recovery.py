@@ -8,7 +8,7 @@ RUNNING). On ``/resume`` the old ``_recover_session_locked`` found no resumable 
 (the only task is terminal) and raised ``RuntimeError("has no resumable tasks")`` →
 the resume click hung.
 
-Test A reproduces that stuck state and asserts recover_session re-runs the pending
+Test A reproduces that stuck state and asserts recover_agent re-runs the pending
 recap and finalizes the session to SUCCEEDED. Test B guards the genuinely-empty
 projection: a session with no tasks at all must still raise RuntimeError.
 
@@ -21,7 +21,7 @@ one consumer (the session state machine) was already gone. ``finalize_idle_sessi
 still computes the same terminal verdict, it just writes it directly onto the
 ``TaskManager``-held ``Session`` object instead of broadcasting it as an event. Two of
 the tests below spy on ``finalize_idle_session``'s ``status`` argument directly (by the
-time ``recover_session()`` returns, the session may already be fully released and the
+time ``recover_agent()`` returns, the session may already be fully released and the
 ``TaskManager`` gone from ``runtime._task_managers``, so reading ``tm.session.status``
 back after the fact isn't reliable there); the third reads ``tm.session.status`` off a
 ``TaskManager`` reference captured while it's still guaranteed live. They still don't
@@ -97,7 +97,7 @@ def _ev(seq: int, type_, **payload) -> Event:
 
 async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
     """root task FINISHED + TaskRecapStarted (no Done) + session projection RUNNING
-    (no SESSION_FINISHED) → recover_session re-runs the recap and finalizes SUCCEEDED."""
+    (no SESSION_FINISHED) → recover_agent re-runs the recap and finalizes SUCCEEDED."""
     runtime, mem, seen = _make_runtime()
     sid, tid, aid = "ses_recap", "tsk_recap", "agt_root"
 
@@ -145,7 +145,7 @@ async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
     # finalize_idle_session's terminal verdict used to be observable as a
     # TaskQueueDrained(final_status) event; 2026-09-04 (Task 12, events-v2 §5) retired
     # that broadcast (its one consumer, the session state machine, was already gone).
-    # Spy on the call itself instead — by the time recover_session() returns, the
+    # Spy on the call itself instead — by the time recover_agent() returns, the
     # session may already be fully released (`_release_session` pops the TaskManager
     # out of `runtime._task_managers`), so reading `tm.session.status` back after the
     # fact isn't reliable; capturing the argument at the call site is.
@@ -159,7 +159,7 @@ async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
     monkeypatch.setattr(TaskManager, "finalize_idle_session", _spy_finalize)
 
     # ── Recover ────────────────────────────────────────────────────────────────
-    await runtime.recover_session(sid)
+    await runtime.recover_agent(aid)
 
     # finalize_idle_session awaits the relaunched recap before finalizing the session,
     # so it should already be persisted; drain any stragglers defensively.
@@ -258,7 +258,7 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed(monkeypatch) -
     monkeypatch.setattr(TaskManager, "finalize_idle_session", _spy_finalize)
 
     # ── Recover ────────────────────────────────────────────────────────────────
-    await runtime.recover_session(sid)
+    await runtime.recover_agent(aid)
 
     tm = runtime._task_managers.get(sid)
     if tm is not None and tm._background_asyncio_tasks:
@@ -318,7 +318,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
 
     Simulates a crash where the root task was interrupted mid-act (e.g. an LLM outage,
     TaskSuspended persisted) while a background observe segment recap was also
-    mid-flight (TaskRecapStarted boundary="interrupt", no Done). recover_session must
+    mid-flight (TaskRecapStarted boundary="interrupt", no Done). recover_agent must
     do BOTH: re-queue/re-dispatch the SUSPENDED task (TaskManager.restore) AND
     re-launch the pending recap (_relaunch_task_recap) — and the re-fold guard in
     background_observe._run_background_observe must let it fold exactly once (no
@@ -375,7 +375,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     ), pctx)
 
     # ── Recover ────────────────────────────────────────────────────────────────
-    await runtime.recover_session(sid)
+    await runtime.recover_agent(aid)
 
     # Drive to quiescence: repeatedly gather whatever background tasks the TM is
     # tracking (the relaunched recap, plus any recap the resumed task's own close
@@ -430,11 +430,11 @@ async def test_no_tasks_at_all_still_raises() -> None:
     """A session with no tasks at all is a genuinely empty/broken projection and must
     still raise RuntimeError (the empty-session guard)."""
     runtime, _mem, _seen = _make_runtime()
-    sid, aid = "ses_recap", "agt_root"
+    aid = "agt_root"
 
     await runtime.event_store.append(_ev(
         1, EventType.SESSION_CREATED, user_prompt="do it",
         template_id="agent:tpl_echo", root_agent_id=aid))
 
     with pytest.raises(RuntimeError, match="no resumable tasks"):
-        await runtime.recover_session(sid)
+        await runtime.recover_agent(aid)

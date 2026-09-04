@@ -238,23 +238,23 @@ def _open_plain_text_wait_bubble(rt, *, agent_id, task_id, session_id="s1"):
 
 async def test_resume_agent_resolves_the_pause_bubble_via_cold_resume(monkeypatch):
     """resume_agent 命中暂停气泡：真走 `reply_to_hitl` → `hitl.resolve`（真实组件）
-    → 未被热投递消费 → `_resume_after_hitl` → `recover_session`（这里桩掉，只记调用
-    参数——它自己的行为由别处的 recover_session 测试覆盖，不是本测试要盯的东西）。"""
+    → 未被热投递消费 → `_resume_after_hitl` → `recover_agent`（这里桩掉，只记调用
+    参数——它自己的行为由别处的 recover_agent 测试覆盖，不是本测试要盯的东西）。"""
     rt = _rt()
     _plant(rt, "root", None, status="waiting_human", session_id="s1")
     recovered: list[tuple] = []
 
-    async def _fake_recover_session(session_id, **kw):
-        recovered.append((session_id, kw))
+    async def _fake_recover_agent(agent_id, **kw):
+        recovered.append((agent_id, kw))
 
-    monkeypatch.setattr(rt, "recover_session", _fake_recover_session)
+    monkeypatch.setattr(rt, "recover_agent", _fake_recover_agent)
     req = await _open_pause_bubble(rt, agent_id="root", task_id="t_root")
 
     resumed = await rt.resume_agent("root")
 
     assert resumed == ["root"]
     assert rt.hitl_registry.get(req.id).resolved is True
-    assert recovered and recovered[0][0] == "s1"
+    assert recovered and recovered[0][0] == "root"
     assert recovered[0][1]["hitl_id"] == req.id
     assert recovered[0][1]["resumed_task_id"] == "t_root"
 
@@ -263,7 +263,7 @@ async def test_resume_agent_does_not_answer_a_real_ask_user_question(monkeypatch
     """R24 的核心止损点：ask_user 的真实提问必须原样悬着，不能被 resume_agent 顺手答了。"""
     rt = _rt()
     _plant(rt, "root", None, status="waiting_human", session_id="s1")
-    monkeypatch.setattr(rt, "recover_session", _unreachable_recover_session)
+    monkeypatch.setattr(rt, "recover_agent", _unreachable_recover_agent)
     req = await _open_ask_user_bubble(rt, agent_id="root", task_id="t_root")
 
     resumed = await rt.resume_agent("root")
@@ -276,7 +276,7 @@ async def test_resume_agent_does_not_touch_plain_text_wait_bubble(monkeypatch):
     """同为 UserTurnDelivery 的软待命（正常一轮结束后的自然等待，非暂停产生）不该被续跑。"""
     rt = _rt()
     _plant(rt, "root", None, status="waiting_human", session_id="s1")
-    monkeypatch.setattr(rt, "recover_session", _unreachable_recover_session)
+    monkeypatch.setattr(rt, "recover_agent", _unreachable_recover_agent)
     req = await _open_plain_text_wait_bubble(rt, agent_id="root", task_id="t_root")
 
     resumed = await rt.resume_agent("root")
@@ -285,7 +285,7 @@ async def test_resume_agent_does_not_touch_plain_text_wait_bubble(monkeypatch):
     assert rt.hitl_registry.get(req.id).resolved is False
 
 
-async def _unreachable_recover_session(*_a, **_kw):
+async def _unreachable_recover_agent(*_a, **_kw):
     raise AssertionError("resume_agent 不该对这种气泡触发冷续跑")
 
 
@@ -295,10 +295,10 @@ async def test_resume_agent_cascades_to_waiting_human_descendants_only(monkeypat
     _plant(rt, "kid", "root", status="waiting_human", session_id="s1")
     _plant(rt, "other", "root", status="idle", session_id="s1")
 
-    async def _fake_recover_session(session_id, **kw):
+    async def _fake_recover_agent(agent_id, **kw):
         return None
 
-    monkeypatch.setattr(rt, "recover_session", _fake_recover_session)
+    monkeypatch.setattr(rt, "recover_agent", _fake_recover_agent)
     r1 = await _open_pause_bubble(rt, agent_id="root", task_id="t_root")
     r2 = await _open_pause_bubble(rt, agent_id="kid", task_id="t_kid", edit=True)
 
@@ -362,7 +362,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     专门设的止损点（"真问题悬而未决时不能替用户放行"）要防的场景。
 
     没有本次修复时：第 3 步之后 `stale_bubble` 仍未终局，第 5 步 `resume_agent`
-    会命中它、触发 `recover_session`（这里桩成必炸），断言失败，复现该缺口。
+    会命中它、触发 `recover_agent`（这里桩成必炸），断言失败，复现该缺口。
     """
     from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.models.session import Session
@@ -424,7 +424,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     # 5. 核心断言：resume_agent 不能被那条早该终局的陈旧气泡误导去冷续跑——陈旧
     #    气泡已经被第 3 步收口，此刻 pending 列表里只有真问题（ToolResultDelivery），
     #    `_pause_bubble_of` 的类型过滤天然不会命中它。
-    monkeypatch.setattr(rt, "recover_session", _unreachable_recover_session)
+    monkeypatch.setattr(rt, "recover_agent", _unreachable_recover_agent)
     resumed = await rt.resume_agent("root")
 
     assert resumed == [], "不该有任何气泡被当成暂停续跑气泡放行"

@@ -840,7 +840,7 @@ async def test_recovery_converts_event_refs_into_memory_refs(runtime_with_images
         _seed_event(1, sid, EventType.SESSION_CREATED, user_prompt="look at this",
                     template_id="agent:tpl_echo", root_agent_id=aid),
         _seed_event(2, sid, EventType.RUN_STARTED),
-        # status 刻意用非终态（ACTIVE）：终态 task 会让 recover_session 判定「无可恢复
+        # status 刻意用非终态（ACTIVE）：终态 task 会让 recover_agent 判定「无可恢复
         # task」，同步走 finalize_idle_session 收尾并把 TaskManager 从
         # `runtime._task_managers` 里摘掉——本用例要在恢复**之后**立刻查 Task 对象，
         # 必须让它留在可恢复集合里、TM 保持挂着（`_register_and_drain` 用
@@ -853,7 +853,7 @@ async def test_recovery_converts_event_refs_into_memory_refs(runtime_with_images
     for e in events:
         await runtime.event_store.append(e)
 
-    await runtime.recover_session(sid)
+    await runtime.recover_agent(aid)
 
     tm = runtime._task_managers[sid]
     task = tm.get_task(tid)
@@ -880,7 +880,7 @@ async def test_recovery_populates_both_event_jsonable_fields_for_reopen(runtime_
     留在可恢复集合里，TaskManager 才不会被 `finalize_idle_session` 同步收尾摘掉
     （摘掉后 `runtime._task_managers` 查不到、Task 对象也就无从断言）。本用例只验证
     `_restore_task_prompts` 这一段的落地结果，不依赖真实 LLM 跑完一轮
-    （`recover_session` 用 `asyncio.create_task` 派发真正的执行，不 await 就不会被
+    （`recover_agent` 用 `asyncio.create_task` 派发真正的执行，不 await 就不会被
     后台协程抢跑）。
     """
     runtime, mem_store, evt_store = runtime_with_images
@@ -911,7 +911,7 @@ async def test_recovery_populates_both_event_jsonable_fields_for_reopen(runtime_
     for e in events:
         await runtime.event_store.append(e)
 
-    await runtime.recover_session(sid)
+    await runtime.recover_agent(aid)
 
     tm = runtime._task_managers[sid]
     task = tm.get_task(tid)
@@ -1027,7 +1027,7 @@ async def test_restore_task_prompts_isolates_one_bad_task_and_logs_error(
 
     import logging
     with caplog.at_level(logging.ERROR, logger="ctx_weft.core.runtime"):
-        await runtime.recover_session(sid)  # 必须不抛——整场恢复不能因一个 task 坏数据而死
+        await runtime.recover_agent(aid)  # 必须不抛——整场恢复不能因一个 task 坏数据而死
 
     tm = runtime._task_managers[sid]
 

@@ -1,7 +1,7 @@
 """溢出 = 可恢复中断（INTERRUPTED），不是终态 FAILED。
 
 溢出不再终态：retriable=False → 不重试、挂起等 /resume；用户换更大窗口的模型恢复
-（recover_session 的 llm_model 覆盖 + 窗口参数同步）。错误文案仍随 task.error 抵达 host。
+（recover_agent 的 llm_model 覆盖 + 窗口参数同步）。错误文案仍随 task.error 抵达 host。
 
 Task 4 起状态由 TaskManager 据 RunOutcome 落：崩溃 + retriable=False → INTERRUPTED
 （`disposition_for` 的 INTERRUPTED 支）。此前 `_run_loop` 在崩溃支就地写的那个

@@ -197,13 +197,26 @@ async def test_current_tm_drain_dispatches() -> None:
     await asyncio.sleep(0)
 
 
-async def test_recover_session_serialized_per_session(monkeypatch) -> None:
-    """per-session resume 锁：同一 session 的两次并发 recover_session 串行执行（不并发建两套 drain）。
+def _plant_agent(rt: CtxWeftRuntime, agent_id: str, session_id: str) -> None:
+    """直接种一条最小 ALM 记录，让 `record_of` 立即命中——这两条用例要测的是
+    `_recover_session_locked` 本身的 per-session 锁，不是 `recover_agent` 的
+    registry-miss 自愈路径（自愈会去扫事件日志，而这两个 session 压根没有事件）。
+    """
+    from ctx_weft.core.orchestrator.lifecycle.agent_manager import _AgentRecord
+    rt._agent_lifecycle_manager._agents[agent_id] = _AgentRecord(
+        session_id=session_id, tenant_id="default", template_id="tpl",
+        parent_agent_id=None, spawn_depth=0, memory_config=None, loop_config=None,
+    )
+
+
+async def test_recover_agent_serialized_per_session(monkeypatch) -> None:
+    """per-session resume 锁：同一 session 的两次并发 recover_agent 串行执行（不并发建两套 drain）。
 
     用一个在闸门处阻塞的 fake rebuild_view 观测并发度：有锁 → 峰值并发 1；无锁 → 2。
     """
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                         agent_provider=InlineAgentTemplateProvider())
+    _plant_agent(rt, "a1", "s1")
     active = {"n": 0, "max": 0}
     gate = asyncio.Event()
 
@@ -216,8 +229,8 @@ async def test_recover_session_serialized_per_session(monkeypatch) -> None:
 
     monkeypatch.setattr("ctx_weft.core.control.reducers.rebuild_view", fake_rebuild_view)
 
-    t1 = asyncio.create_task(rt.recover_session("s1"))
-    t2 = asyncio.create_task(rt.recover_session("s1"))
+    t1 = asyncio.create_task(rt.recover_agent("a1"))
+    t2 = asyncio.create_task(rt.recover_agent("a1"))
     await asyncio.sleep(0.02)  # 两个都尝试进入锁
     assert active["max"] == 1, "per-session 锁应串行化两次 recover（峰值并发=1）"
     gate.set()
@@ -225,10 +238,12 @@ async def test_recover_session_serialized_per_session(monkeypatch) -> None:
     assert all(isinstance(r, RuntimeError) for r in res)
 
 
-async def test_recover_session_different_sessions_not_serialized(monkeypatch) -> None:
+async def test_recover_agent_different_sessions_not_serialized(monkeypatch) -> None:
     """不同 session 之间不应被 resume 锁串行化（各自独立锁，可并发）。"""
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                         agent_provider=InlineAgentTemplateProvider())
+    _plant_agent(rt, "aA", "sA")
+    _plant_agent(rt, "aB", "sB")
     active = {"n": 0, "max": 0}
     gate = asyncio.Event()
 
@@ -241,8 +256,8 @@ async def test_recover_session_different_sessions_not_serialized(monkeypatch) ->
 
     monkeypatch.setattr("ctx_weft.core.control.reducers.rebuild_view", fake_rebuild_view)
 
-    t1 = asyncio.create_task(rt.recover_session("sA"))
-    t2 = asyncio.create_task(rt.recover_session("sB"))
+    t1 = asyncio.create_task(rt.recover_agent("aA"))
+    t2 = asyncio.create_task(rt.recover_agent("aB"))
     await asyncio.sleep(0.02)
     assert active["max"] == 2, "不同 session 的 recover 应能并发（峰值并发=2）"
     gate.set()

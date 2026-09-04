@@ -241,7 +241,7 @@ async def test_hot_approval_rewrites_arguments_and_result_reaches_the_model() ->
 
 async def test_cold_approval_reconciles_and_invokes_the_tool_exactly_once() -> None:
     """驱动：`hitl_timeout_sec=0` 强制热窗即刻驱逐 → `ActStep` 抛 `HitlPark` → task
-    落 `AWAITING_HUMAN`、工具**尚未**执行 → `reply_to_hitl` 驱动 `recover_session` →
+    落 `AWAITING_HUMAN`、工具**尚未**执行 → `reply_to_hitl` 驱动 `recover_agent` →
     `ReconcileStep` 命中 authz 阶段的决定缓存短路，重跑该 dangling tool_call。
 
     会因下列任一项回归而失败：
@@ -298,7 +298,7 @@ _IMAGE_B64 = "ZmFrZWJhc2U2NGRhdGE="  # 任意合法 base64；内容不重要，�
 
 async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> None:
     """驱动：`ask_user` 让出 `needs_human`（`reply_as_result=True`）→ 零热窗立即驱逐 →
-    `reply_to_hitl` 携带多模态 `message`（文本 + 图片）→ `recover_session` → reconcile
+    `reply_to_hitl` 携带多模态 `message`（文本 + 图片）→ `recover_agent` → reconcile
     命中工具阶段的决定缓存短路 → `_human_reply_as_result` 把答复（含图）拼进 TOOL_RESULT。
 
     会因下列任一项回归而失败：

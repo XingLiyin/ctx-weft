@@ -68,14 +68,14 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     路径 1：`TaskManager.resume_task` 的 approval 分支（`was_blocked` 判据）——
     驱动与 `test_hitl_e2e_v2.test_cold_approval_reconciles_and_invokes_the_tool_exactly_once`
     完全相同的冷审批链路（零热窗强制驱逐 → AWAITING_HUMAN → `reply_to_hitl` accepted →
-    `recover_session` → `resume_task`），额外去读 `event_store` 断言
+    `recover_agent` → `resume_task`），额外去读 `event_store` 断言
     `TASK_HUMAN_RESOLVED` 真的发出、`hitl_id` 与那次 HITL 请求一致。
 
     路径 2：`CtxWeftRuntime._inject_user_reply` → `TaskManager.mark_human_resolved`
     的 wait_for_user 分支——驱动与
     `test_hitl_e2e_v2.test_plain_text_pause_injects_reply_once_and_ignores_duplicate`
     完全相同的纯文本暂停冷路径（无 tool_call 的 act 回合 → 冷 park → `reply_to_hitl` →
-    `recover_session` → `_inject_user_reply`），同样断言事件真的发出，并额外验证重复
+    `recover_agent` → `_inject_user_reply`），同样断言事件真的发出，并额外验证重复
     应答（no-op）不会催生第二条。
     """
     # ── 路径 1：resume_task 的 approval 分支 ──────────────────────────────

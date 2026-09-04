@@ -26,26 +26,29 @@ def _runtime() -> CtxWeftRuntime:
 
 
 def _runtime_with_recorded_resume() -> tuple[CtxWeftRuntime, list[tuple]]:
-    """构造一个 runtime，把 `recover_session` / 用户回合注入替换成记录桩。
+    """构造一个 runtime，把 `recover_agent` / 用户回合注入替换成记录桩。
+
+    2026-09-04（Task 15）起主键换成 agent：`_resume_after_hitl` 传的是
+    ``req.agent_id``，不再是 ``req.session_id``——桩记的第二个字段跟着换轴。
 
     记录的元组形态：
-    - ``("recover_session", session_id, resumed_task_id)`` —— ToolResultDelivery 续跑；
-    - ``("inject_user_turn", session_id, task_id)`` —— UserTurnDelivery 续跑。
+    - ``("recover_agent", agent_id, resumed_task_id)`` —— ToolResultDelivery 续跑；
+    - ``("inject_user_turn", agent_id, task_id)`` —— UserTurnDelivery 续跑。
 
-    `recover_session` 批次 B 起不再接受 llm_account/llm_model（换模型走
+    `recover_agent` 不再接受 llm_account/llm_model（换模型走
     `set_agent_llm`/`set_session_llm` 两条独立命令），桩签名同步收紧。
     """
     rt = _runtime()
     calls: list[tuple] = []
 
-    async def fake_recover_session(session_id, *, resumed_task_id=None, user_reply=None,
-                                    hitl_id=""):
+    async def fake_recover_agent(agent_id, *, resumed_task_id=None, user_reply=None,
+                                  hitl_id=""):
         if user_reply is not None:
-            calls.append(("inject_user_turn", session_id, resumed_task_id))
+            calls.append(("inject_user_turn", agent_id, resumed_task_id))
         else:
-            calls.append(("recover_session", session_id, resumed_task_id))
+            calls.append(("recover_agent", agent_id, resumed_task_id))
 
-    rt.recover_session = fake_recover_session  # type: ignore[method-assign]
+    rt.recover_agent = fake_recover_agent  # type: ignore[method-assign]
     return rt, calls
 
 
@@ -91,7 +94,10 @@ async def test_reply_returns_the_view_and_drives_resume_by_delivery():
     view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                             agent_id=req.agent_id))
     assert view is not None and view.outcome == "accepted"
-    assert calls == [("recover_session", "s1", "t1")]
+    # 这个请求开在没传 agent_id 的调用上，req.agent_id 落到默认空串——`_resume_after_hitl`
+    # 原样把它转给 `recover_agent`,证明的是「续跑按 delivery 路由、参数原样透传」这条线,
+    # 不是「必须有一个非空 agent_id」。
+    assert calls == [("recover_agent", "", "t1")]
 
 
 async def test_user_turn_delivery_injects_instead_of_reconciling():
@@ -185,7 +191,7 @@ async def test_a_failed_cold_resume_after_commit_is_logged_loudly_and_still_rais
     async def _boom(*a, **kw):
         raise RuntimeError("owner TM rebuild exploded")
 
-    rt.recover_session = _boom  # type: ignore[method-assign]
+    rt.recover_agent = _boom  # type: ignore[method-assign]
 
     with caplog.at_level("ERROR"):
         with pytest.raises(RuntimeError, match="owner TM rebuild exploded"):
@@ -269,7 +275,7 @@ async def test_reply_to_hitl_agent_id_match_proceeds_normally():
         HitlReply(hitl_id=req.id, outcome="accepted", agent_id="agent-a")
     )
     assert view is not None and view.outcome == "accepted"
-    assert calls == [("recover_session", "s1", "t1")]
+    assert calls == [("recover_agent", "agent-a", "t1")]
 
 
 def test_hitl_reply_requires_agent_id():

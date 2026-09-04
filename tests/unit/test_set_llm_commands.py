@@ -111,8 +111,8 @@ def test_resume_hint_is_gone():
     assert "resume_hint" not in inspect.signature(HitlReply).parameters
 
 
-def test_recover_session_takes_no_llm_params():
+def test_recover_agent_takes_no_llm_params():
     from ctx_weft.core.runtime import CtxWeftRuntime
-    sig = inspect.signature(CtxWeftRuntime.recover_session)
+    sig = inspect.signature(CtxWeftRuntime.recover_agent)
     assert "llm_account" not in sig.parameters
     assert "llm_model" not in sig.parameters

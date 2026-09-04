@@ -45,7 +45,7 @@ def test_restore_parked_ids_default_none_is_old_behavior() -> None:
     assert tm.get_task("p").status == "PENDING"
 
 
-async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
+async def test_recover_agent_rebuilds_pending_hitl_and_parks() -> None:
     import asyncio
     from datetime import datetime, timezone
     from ctx_weft.core import CtxWeftRuntime
@@ -81,7 +81,7 @@ async def test_recover_session_rebuilds_pending_hitl_and_parks() -> None:
     for e in seed:
         await runtime.event_store.append(e)
 
-    await runtime.recover_session("ses_1")
+    await runtime.recover_agent("agt_root")
     await asyncio.sleep(0)
 
     pend = runtime.hitl_registry.list_pending(session_id="ses_1")
@@ -348,7 +348,7 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     for e in seed:
         await runtime.event_store.append(e)
 
-    await runtime.recover_session("ses_1")
+    await runtime.recover_agent("agt_root")
     await asyncio.sleep(0)
 
     assert llm.last_request is None, "X 正被老 TM 执行，新 TM 不应重复派发"
@@ -358,8 +358,8 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     """单 owner 架构：冷 HITL 应答且存活 owner 拥有该 task → 就地重驱、**不重建 TM**。
 
     验证：(1) rebuild_view 未被调用(走复用而非重建)；(2) 被应答的 task 重新派发；
-    (3) owner TM 未被顶替。**不再验证**「model 写回 session」——`recover_session`
-    批次 B 起不再接受 llm_account/llm_model，换模型走 `set_agent_llm`/
+    (3) owner TM 未被顶替。**不再验证**「model 写回 session」——`recover_agent`
+    不再接受 llm_account/llm_model，换模型走 `set_agent_llm`/
     `set_session_llm` 两条独立命令（Task 9）。
     """
     import asyncio
@@ -384,6 +384,14 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
 
     session = Session(id="ses_1", tenant_id="default", user_prompt="x", status="RUNNING",
                       root_agent_id="agt", llm_provider="acct1", llm_model="m1", token_budget=0)
+    # `recover_agent` 的主键是 agent_id，session_id 由 ALM 记录反查——这个测试从不
+    # 经事件回放建 agent 记录（直接手搭 Session/TaskManager），故种一条最小记录，
+    # 绕开 instantiate 的模板依赖（同 `test_agent_lifecycle.py::_plant` 的口径）。
+    from ctx_weft.core.orchestrator.lifecycle.agent_manager import _AgentRecord
+    runtime._agent_lifecycle_manager._agents["agt"] = _AgentRecord(
+        session_id="ses_1", tenant_id="default", template_id="tpl",
+        parent_agent_id=None, spawn_depth=0, memory_config=None, loop_config=None,
+    )
     tm = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
     tm.set_session(session)
     tm.set_hooks(TaskManagerHooks(
@@ -402,7 +410,7 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     tm.register_task(Task(id="tsk_A", session_id="ses_1", status="SUSPENDED", settings=NormalTaskSettings()))
     runtime._task_managers["ses_1"] = tm
 
-    await runtime.recover_session("ses_1", resumed_task_id="tsk_A")
+    await runtime.recover_agent("agt", resumed_task_id="tsk_A")
     for _ in range(10):
         await asyncio.sleep(0)
 

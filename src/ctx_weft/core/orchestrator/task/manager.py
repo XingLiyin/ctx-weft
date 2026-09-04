@@ -331,7 +331,7 @@ class TaskManager:
             return
 
         while True:
-            # 被同一 session 上更新的 TM 顶替（recover_session 覆盖了 _task_managers 映射）→
+            # 被同一 session 上更新的 TM 顶替（recover_agent 覆盖了 _task_managers 映射）→
             # 立即停止派发，无声（不发事件、不改状态）。避免重叠 resume 下两套 drain 并行派发
             # 同一批任务；在跑协程照旧靠 _fire_session_done 处的 _is_current 收敛（spec/07 §9）。
             if self._hooks.is_current is not None and not self._hooks.is_current():
@@ -1236,7 +1236,7 @@ class TaskManager:
     def is_alive(self) -> bool:
         """本 TM 是否仍在驱动该 session（未终结、且仍是当前 owner）。
 
-        供 recover_session 判断"是否有活 TM 正在跑"，以决定新 TM 是否要跳过其在跑任务。
+        供 recover_agent 判断"是否有活 TM 正在跑"，以决定新 TM 是否要跳过其在跑任务。
         终结之后 runtime 的 `_release_session` 会把它从 `_task_managers` 摘掉，
         `_is_current` 随即为 False——不再另存一份「已收尾」的闩。
         """

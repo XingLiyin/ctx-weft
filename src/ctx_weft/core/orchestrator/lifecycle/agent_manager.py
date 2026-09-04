@@ -421,9 +421,9 @@ class AgentLifecycleManager:
         # 不分界、每次 `load()` 都无条件广播的后果是真实的、已经复现过：
         # `tests/integration/test_outage_resume.py::test_idempotent_outage_resume_completes`
         # 的 `_wait_for_interrupted_event` 把「看到一条新 AgentInterrupted」当成
-        # 「刚发生了一次新的中断」，若 `recover_session()` 每次都在真实转移之外
+        # 「刚发生了一次新的中断」，若 `recover_agent()` 每次都在真实转移之外
         # 额外回声一遍现状，这个假设就被推翻——测试会在上一轮 drain 还没跑完时就
-        # 发起下一轮 `recover_session()`，两个 TaskManager 竞争同一个 session，
+        # 发起下一轮 `recover_agent()`，两个 TaskManager 竞争同一个 session，
         # 任务卡死在 INTERRUPTED 永不完成（不是这个测试脆弱，是这类消费者对「事件
         # 到达 = 新事实发生」的假设本就合理，广播不该在没有新事实时重复兑现它）。
         cold_ids = {av.id for av in agent_views.values() if av.id not in self._agents}
@@ -452,7 +452,7 @@ class AgentLifecycleManager:
                 memory_config=memory_config,
                 loop_config=loop_config,
                 # D1 修复：模型选择从 AgentView 读回，跨重启存活——不再是
-                # ModelChoice() 默认值（那是修复前 recover_session 静默降级的根因）。
+                # ModelChoice() 默认值（那是修复前 recover_agent 静默降级的根因）。
                 llm=ModelChoice(account=av.llm_account, model=av.llm_model),
                 # Task 14：五态机状态从 AgentView 读回，跨重启存活——不这样做的话
                 # 冷恢复后每个 agent 都会被 `_AgentRecord.status` 的字段默认值

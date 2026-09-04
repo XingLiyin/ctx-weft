@@ -21,6 +21,7 @@ from ctx_weft.protocols.hitl import ToolResultDelivery, UserTurnDelivery
 pytestmark = pytest.mark.asyncio
 
 SID = "ses_1"
+AID = "agt_root"          # root agent id planted by `_session_prelude()`（`recover_agent` 主键）
 TID = "tsk_1"
 TS = datetime(2026, 9, 1, tzinfo=UTC)
 PNG = b"\x89PNG\r\n\x1a\nfake-bytes"
@@ -251,7 +252,7 @@ async def _runtime_with_events(events, *, event_blob_store=None):
 
 def _task_status(rt, task_id: str) -> str:
     tm = rt._task_managers.get(SID)
-    assert tm is not None, "recover_session should have registered a TaskManager"
+    assert tm is not None, "recover_agent should have registered a TaskManager"
     task = tm.get_task(task_id)
     assert task is not None
     return task.status
@@ -259,7 +260,7 @@ def _task_status(rt, task_id: str) -> str:
 
 def _tm(rt):
     tm = rt._task_managers.get(SID)
-    assert tm is not None, "recover_session should have registered a TaskManager"
+    assert tm is not None, "recover_agent should have registered a TaskManager"
     return tm
 
 
@@ -386,12 +387,12 @@ async def test_nothing_is_pending_once_the_hitl_is_resolved_but_never_resumed():
 async def test_a_task_with_an_unresolved_hitl_stays_parked_and_is_not_requeued():
     """最高风险的一条：人还没答，任务绝不能自己跑起来。
 
-    断言是**确定性**的：`restore` 在 `recover_session` 返回之前同步跑完，被重排的 task
+    断言是**确定性**的：`restore` 在 `recover_agent` 返回之前同步跑完，被重排的 task
     在那一刻就已经被改成 `PENDING` 并入队。所以「仍是 SUSPENDED 且队列里没有它」是一个
     不依赖时序的判据——不必去轮询一个「不该发生」的事件。
     """
     rt = await _runtime_with_events(_pending_with_tool_result_delivery())
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
     tm = _tm(rt)
     assert tm.get_task(TID).status == "SUSPENDED"
     assert not tm._queue.has_pending()
@@ -402,7 +403,7 @@ async def test_a_new_model_unresolved_hitl_also_keeps_its_task_parked():
     """基线的 Critical：旧投影 reducer 没有 HITL_OPENED 分支 → parked 集合为空 → 人还
     没答，任务就被重排跑起来了。parked 真相源改成 registry 之后这条才成立。"""
     rt = await _runtime_with_events(_new_model_unresolved_tool_result())
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
     tm = _tm(rt)
     assert [r.tool_call_id for r in rt.hitl_registry.list_pending(SID)] == ["call_1"]
     assert tm.get_task(TID).status == "SUSPENDED"
@@ -413,14 +414,14 @@ async def test_a_new_model_unresolved_hitl_also_keeps_its_task_parked():
 async def test_a_task_parked_on_an_already_resolved_hitl_is_requeued():
     """崩溃窗口：决定已落盘、但进程在续跑之前死了 —— 任务必须重新跑起来。"""
     rt = await _runtime_with_events(_resolved_but_never_resumed_tool_result())
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
     assert TID in await _drained_tasks(rt)
 
 
 async def test_a_task_on_a_resolved_new_model_hitl_is_requeued():
     """新两事件模型（HITL_OPENED + HITL_RESOLVED）的同一条路。旧投影对这条流是瞎的。"""
     rt = await _runtime_with_events(_new_model_resolved_tool_result())
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
     assert rt.hitl_registry.list_pending(SID) == []          # 已终局 → 不 park
     assert rt.hitl_registry.decision_for(SID, "call_1", "authz")[0].outcome == "accepted"
     assert TID in await _drained_tasks(rt)
@@ -452,7 +453,7 @@ async def test_recovery_injects_the_answer_of_a_resolved_user_turn():
     那句话就彻底消失。
     """
     rt = await _runtime_with_events(_resolved_user_turn_never_injected())
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
     prompts = await _hitl_reply_prompts(rt)
     assert len(prompts) == 1
     from ctx_weft.core.utils.content import content_to_text
@@ -465,8 +466,8 @@ async def test_requeue_of_a_resolved_user_turn_does_not_duplicate_the_injection(
     恢复可以反复跑（重启、/resume、冷应答各来一遍），注入必须只留一条。
     """
     rt = await _runtime_with_events(_resolved_user_turn_never_injected())
-    await rt.recover_session(SID)
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
+    await rt.recover_agent(AID)
     assert len(await _hitl_reply_prompts(rt)) == 1
 
 
@@ -479,7 +480,7 @@ async def test_a_task_still_parked_on_another_hitl_gets_no_injection():
             tool_call_id="call_9", stage="authz", prompt="ok?"),
     ]
     rt = await _runtime_with_events(events)
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
     tm = _tm(rt)
     assert tm.get_task(TID).status == "SUSPENDED"
     assert await _hitl_reply_prompts(rt) == []
@@ -517,7 +518,7 @@ async def test_recovery_does_not_touch_a_parent_suspended_on_a_live_child():
     中途产出目前确实无法从事件流恢复，这不是本测试要保护的东西。
     """
     rt = await _runtime_with_events(_resolved_user_turn_on_a_parent_with_a_live_child())
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
     parent = _tm(rt).get_task(TID)
     assert parent.status == "SUSPENDED"                  # 留给 _try_resume_parent
     assert parent.outputs is None                        # 从未 FINISHED 过，本就没有 outputs——实测确认，非猜测
@@ -528,8 +529,8 @@ async def test_recovery_does_not_touch_a_parent_suspended_on_a_live_child():
 async def test_recovery_backfill_survives_repeated_recovery_without_state_drift():
     """反复恢复：状态不漂移、注入不重复。"""
     rt = await _runtime_with_events(_resolved_user_turn_on_a_parent_with_a_live_child())
-    await rt.recover_session(SID)
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
+    await rt.recover_agent(AID)
     parent = _tm(rt).get_task(TID)
     assert parent.status == "SUSPENDED"
     assert parent.outputs is None                        # 见上一个测试的注释：本就没有，不因重复恢复而变
@@ -542,7 +543,7 @@ async def test_legacy_origin_user_turns_are_not_backfilled():
     await rt.rebuild_hitl(SID)
     resolved = rt.hitl_registry.resolved_for_session(SID)
     assert len(resolved) == 1 and resolved[0].legacy_origin is True
-    await rt.recover_session(SID)
+    await rt.recover_agent(AID)
     assert await _hitl_reply_prompts(rt) == []
 
 
@@ -557,6 +558,13 @@ async def test_inflight_tasks_are_excluded_from_the_backfill():
     TaskManager 跑着的 task 也被补写、状态在两个 TM 之间打架（复审 Important）。"""
 
     class _LiveTM:
+        #: `recover_agent` 在 registry miss 时先自愈（`rebuild_agent` →
+        #: `rebuild_all_agents` → `_tenant_for_session`），后者会探一次
+        #: `_task_managers[sid].session`——真实 TaskManager 恒有这个属性，这个
+        #: 最小桩必须补上，否则会在自愈路径上撞 AttributeError（`_tenant_for_session`
+        #: 自己的纪律是「绝不抛」，但那份纪律管不到桩缺属性这件事）。
+        session = None
+
         def is_alive(self) -> bool:
             return True
 
@@ -565,5 +573,5 @@ async def test_inflight_tasks_are_excluded_from_the_backfill():
 
     rt = await _runtime_with_events(_resolved_user_turn_never_injected())
     rt._task_managers[SID] = _LiveTM()          # 上一个 TM 还在跑 TID
-    await rt.recover_session(SID)               # 不带 resumed_task_id → 走重建路径
+    await rt.recover_agent(AID)               # 不带 resumed_task_id → 走重建路径
     assert await _hitl_reply_prompts(rt) == []

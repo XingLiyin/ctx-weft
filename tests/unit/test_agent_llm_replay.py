@@ -2,7 +2,7 @@
 
 D1：SessionResumed 的 payload 带 llm_model，但 reducers.py:405-412 那个
 分支不读它；全仓唯一写 SessionView.llm_model 的地方是 SessionCreated。
-于是任何一次切换都不进投影，recover_session 每次把会话拉回创建时的模型。
+于是任何一次切换都不进投影，recover_agent 每次把会话拉回创建时的模型。
 """
 from __future__ import annotations
 

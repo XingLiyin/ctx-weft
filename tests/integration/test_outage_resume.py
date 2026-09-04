@@ -19,10 +19,10 @@ to the host (docs/events-v2.md §2.1.1), not a regression.
 
 API contract (confirmed by reading runtime.py):
 - ``start_session(params)`` → ``TurnHandle``; emits SESSION_CREATED so the event store can
-  be queried by ``recover_session``.  ``run_single_task`` is a phase-1 compat shim that
-  does NOT emit SESSION_CREATED, making ``recover_session`` fail with "not found".
+  be queried by ``recover_agent``.  ``run_single_task`` is a phase-1 compat shim that
+  does NOT emit SESSION_CREATED, making ``recover_agent`` fail with "not found".
 - ``handle.wait_for_finish(timeout)`` streams events until RunFinished (or timeout).
-- ``recover_session(session_id)`` → ``None``; re-queues non-terminal tasks and launches
+- ``recover_agent(agent_id)`` → ``None``; re-queues non-terminal tasks and launches
   drain as ``asyncio.create_task`` (fire-and-forget).
 - Task status and session status are read back via ``rebuild_view`` from the event store.
 
@@ -157,7 +157,7 @@ async def _wait_for_task_finished(
 ) -> None:
     """Poll rebuild_view until at least one task reaches FINISHED.
 
-    recover_session() launches drain as an asyncio background task
+    recover_agent() launches drain as an asyncio background task
     (asyncio.create_task inside _register_and_drain), so we must yield control
     until the drain completes.
     """
@@ -177,7 +177,7 @@ async def _wait_for_interrupted_event(
 ) -> None:
     """Wait until a new AgentInterrupted event appears in the spy list.
 
-    recover_session() launches drain as asyncio.create_task, so we need to yield
+    recover_agent() launches drain as asyncio.create_task, so we need to yield
     to the event loop and poll until the event is captured by the spy. (Task 16:
     SessionInterrupted is retired along with the SessionRegistry state machine —
     AgentInterrupted is the still-live successor signal, see module docstring.)
@@ -219,12 +219,12 @@ def _agent_not_left_interrupted(seen: list, agent_id: str) -> bool:
 
 
 async def test_outage_then_resume_completes():
-    """Single outage → INTERRUPTED; then recover_session re-drives to FINISHED.
+    """Single outage → INTERRUPTED; then recover_agent re-drives to FINISHED.
 
     With _DEFAULT_MAX_ATTEMPTS=1 (patched above), the first complete() call raises
     LLMOutageError immediately and stream_llm_resilient exhausts its budget after 1
     attempt, propagating LLMOutageError to _run_loop which sets task SUSPENDED.
-    After recover_session(), _FlakyLLM(fail_for=1) succeeds (raised >= fail_for), so
+    After recover_agent(), _FlakyLLM(fail_for=1) succeeds (raised >= fail_for), so
     the resume re-drive produces a normal response and task reaches FINISHED.
     """
     # Act responses (only consumed by non-recognize_intent LLM calls):
@@ -293,8 +293,8 @@ async def test_outage_then_resume_completes():
     )
 
     # ── Resume with healthy LLM ────────────────────────────────────────────────
-    # recover_session() returns None; drain runs as asyncio background task.
-    result = await runtime.recover_session(session_id)
+    # recover_agent() returns None; drain runs as asyncio background task.
+    result = await runtime.recover_agent(root_agent_id)
     assert result is None  # confirm the API contract (returns None)
 
     # Wait for the async drain to complete.
@@ -324,7 +324,7 @@ async def test_idempotent_outage_resume_completes():
       - Initial run: call 1 raises → SUSPENDED.
       - First resume re-drive: call 2 raises → SUSPENDED again.
       - Second resume re-drive: call 3 succeeds → FINISHED.
-    No exception must leak out of recover_session(); the final state must be FINISHED.
+    No exception must leak out of recover_agent(); the final state must be FINISHED.
     """
     # Act responses (two failures + one success): fail 1 (first run), fail 2 (first resume),
     # then succeed on the second resume.
@@ -385,7 +385,7 @@ async def test_idempotent_outage_resume_completes():
 
     # ── First resume → second outage → still SUSPENDED ────────────────────────
     seen.clear()
-    await runtime.recover_session(session_id)
+    await runtime.recover_agent(root_agent_id)
 
     # Wait until the second outage fires: poll the spy list for the new
     # SessionInterrupted event from the background drain.
@@ -419,7 +419,7 @@ async def test_idempotent_outage_resume_completes():
 
     # ── Second resume → healthy LLM → FINISHED ────────────────────────────────
     seen.clear()
-    await runtime.recover_session(session_id)
+    await runtime.recover_agent(root_agent_id)
     await _wait_for_task_finished(runtime, session_id)
 
     view_final = await rebuild_view(runtime.event_store, session_id)

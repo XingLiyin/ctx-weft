@@ -1,4 +1,4 @@
-"""恢复是「喂进来」——recover_session 折出 AgentView，显式装填进 Registry。
+"""恢复是「喂进来」——recover_agent 折出 AgentView，显式装填进 Registry。
 
 替代 tests/unit/test_agents_from_projection.py：那个函数已并入 load()。
 行为差异（有意的）：装填出来的 record 带**真正的 template 配置**，

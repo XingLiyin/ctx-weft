@@ -246,7 +246,7 @@ class SessionRegistry:
             )
 
         # 弃轮禁止：仍有未终结任务时不许开新轮（本方法只建带新 root task 的全新 TM,滞留
-        # 任务会被无声遗弃,之后 recover_session 全量重建又把它们复活重跑）。调用方应走
+        # 任务会被无声遗弃,之后 recover_agent 全量重建又把它们复活重跑）。调用方应走
         # 恢复路径续跑/收尾。辅助任务（compact/metadata）豁免——restore 也从不重排它们,
         # 阻塞会把会话永久锁死（与 TaskManager.restore 的跳过口径一致）。
         unfinished = [
@@ -321,7 +321,7 @@ class SessionRegistry:
         # `push_task` 之前必须先注入 session：`TaskManager._emit` 取
         # `self._session.tenant_id if self._session else "default"`，晚注入会让 root
         # task 的 TaskCreated 落到 default 租户（总账 A5）。runtime 侧后续仍会再调一次
-        # `set_session`（`start_session`/`recover_session` 里另有用途——注入 llm 参数复用等），
+        # `set_session`（`start_session`/`recover_agent` 里另有用途——注入 llm 参数复用等），
         # 幂等、原样保留。
         task_manager.set_session(session)
         # root task 的 user_prompt 与 SESSION_CREATED 是同一份内容，故 event 侧载荷

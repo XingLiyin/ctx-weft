@@ -511,7 +511,7 @@ class CtxWeftRuntime:
         # SM 的输入端：只认 TaskManager 的四类事件（_INPUT_BY_EVENT），本 task
         # 之后 TM 还没开始发这三条信号，运行时行为不变（docs/events-v2.md §2.1.1）。
         self._session_registry.attach_to_bus()
-        # Per-session resume 锁：串行化同一 session 的 recover_session，避免重叠的冷 HITL 应答 /
+        # Per-session resume 锁：串行化同一 session 的 recover_agent，避免重叠的冷 HITL 应答 /
         # /resume 并发建出两个 TaskManager、两套 drain 竞争派发（spec/07 §9）。惰性建、不回收
         # （体量微小、按 session 数有界）。
         self._resume_locks: dict[str, asyncio.Lock] = {}
@@ -934,7 +934,7 @@ class CtxWeftRuntime:
         `{PREFACE_AFTER_INTERRUPT, PREFACE_AFTER_INTERRUPT_EDIT}` 才是本方法该碰的。
 
         续跑走既有的 HITL 冷续跑通路（`reply_to_hitl` → `_resume_after_hitl` →
-        `recover_session`），不直接 `apply_input(AgentInput.RESUMED)`——那样会把
+        `recover_agent`），不直接 `apply_input(AgentInput.RESUMED)`——那样会把
         agent 状态拍成 `running`，但驱动它真正再跑起来的 task 这时其实还没有被
         重排/派发，状态与现实不符；`apply_input` 的唯一入口纪律也要求转移经由
         真事件发生，不由调用方越过 TaskManager 直接拍。真正的 `running` 由续跑
@@ -1462,29 +1462,53 @@ class CtxWeftRuntime:
 
     # ── Crash recovery ───────────────────────────────────────────────────────
 
-    async def recover_session(
+    async def recover_agent(
         self,
-        session_id: str,
+        agent_id: str,
         *,
         user_reply: "PendingHitl | None" = None,
         resumed_task_id: str | None = None,
         hitl_id: str = "",
     ) -> None:
-        """Serialize resume per session, then reuse the live owner or rebuild + drain.
+        """续跑一个 agent：复用活 owner TM，或据事件重建后 drain。
 
-        单 owner 架构：若该 session 已有**存活的 owner TM** 且拥有被应答的 ``resumed_task_id``，
-        就把应答作为消息投递给它、就地重驱（``_resume_in_existing_tm``），**不重建 TM**——从根上
-        消除"多 TM 顶替/跨 TM 双跑"。仅当无存活 owner（真崩溃冷启动 / ``/resume`` / 活 TM 不含该
-        task）才从事件日志重建。per-session 锁把整段过程串行化。
+        **主键是 agent**（2026-09-04 spec §6.2）；``session_id`` 由 ALM 记录反查。
+        session 仍是串行化与资源回收的单位——per-session 锁、owner TM 复用这些
+        **实现事实**一行未改，它只是不再是对外的语义单位（spec §6.1）。
 
-        不收 llm_account/llm_model：续跑路径一概不碰模型（批次 B）。换模型走
-        `set_agent_llm`/`set_session_llm` 两条命令，registry 是模型选择的唯一
-        住所，续跑只负责把已经存在的选择重新派发出去。
+        单 owner 架构：若该 agent 所在 session 已有**存活的 owner TM** 且拥有被应答的
+        ``resumed_task_id``，就把应答作为消息投递给它、就地重驱
+        （``_resume_in_existing_tm``），**不重建 TM**——从根上消除"多 TM 顶替/跨 TM
+        双跑"。仅当无存活 owner（真崩溃冷启动 / ``/resume`` / 活 TM 不含该 task）才从
+        事件日志重建。
+
+        不收 llm_account/llm_model：续跑路径一概不碰模型。换模型走 `set_agent_llm` /
+        `set_session_llm`，registry 是模型选择的唯一住所，续跑只负责把已经存在的选择
+        重新派发出去。
 
         ``hitl_id``：冷 HITL 应答触发的续跑才有意义——``_resume_after_hitl`` 总是传
-        ``req.id``。纯 ``/resume``（无 hitl 语境）留空；活 owner 复用路径里它只在
-        approval 分支（无 ``user_reply``）真正被用到，见 `_resume_in_existing_tm`。
+        ``req.id``。纯 ``/resume``（无 hitl 语境）留空。
+
+        **未登记的 ``agent_id`` 先自愈、仍缺才抛**：冷启动重启后 ALM registry 可能
+        是空的（`recover()` 还没跑过，或者跑了但这个 agent 属于一个当时未被扫到的
+        session），若这里直接对 miss 报 `AgentNotFound`，`_resume_after_hitl` 的冷
+        HITL 应答路径就会在人类刚回答完问题时把这次续跑摔在地上——`reply_to_hitl`
+        已经把 HITL 判成终局（`registry.resolve()` 幂等），没有第二次机会，会话永久
+        卡住。这正是 `rebuild_hitl` 自己的纪律要防的那类事故（见其 docstring：
+        "应答入口也可在内存为空时按需自愈……避免应答 KeyError"）——`recover_agent`
+        对 `record_of` 一次 miss 不是终局判决，而是"还没装填"的信号：先调
+        `rebuild_agent(agent_id)`（据事件扫活跃 session 装填）把记录喂进来，再查一次；
+        仍然找不到（这个 agent_id 压根不存在、或它的 session 已终结/不活跃）才真的
+        抛 `AgentNotFound`。不要把这一步"简化"回直接抛——那正是本方法要避免的冷启动
+        应答丢失。
         """
+        rec = self._agent_lifecycle_manager.record_of(agent_id)
+        if rec is None:
+            await self.rebuild_agent(agent_id)
+            rec = self._agent_lifecycle_manager.record_of(agent_id)
+        if rec is None:
+            raise AgentNotFound(f"unknown agent: {agent_id}")
+        session_id = rec.session_id
         lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             await self._recover_session_locked(
@@ -2316,7 +2340,7 @@ class CtxWeftRuntime:
 
         由 `reply_to_hitl` 调用时，`req` 已经**不可逆地终局**（`registry.resolve()`
         已提交、事实已发）——这是「唯一驱动方」路径本身，不是一个可以撤销重试的准备
-        阶段。若这里 `recover_session` 抛出，重试 `reply_to_hitl` 只会撞见
+        阶段。若这里 `recover_agent` 抛出，重试 `reply_to_hitl` 只会撞见
         `hitl.resolve()` 对已终局请求的幂等 `None`（不重发事实、不重新触发续跑），
         会话就此永久卡住、且没有第二次机会补上——这正是「既没热投递、也没冷续跑」的
         那个「都没有」路径。异常仍然原样传给调用方（host 需要知道这次应答的续跑没
@@ -2325,12 +2349,12 @@ class CtxWeftRuntime:
         """
         try:
             if isinstance(req.delivery, ToolResultDelivery):
-                await self.recover_session(
-                    req.session_id, resumed_task_id=req.task_id, hitl_id=req.id,
+                await self.recover_agent(
+                    req.agent_id, resumed_task_id=req.task_id, hitl_id=req.id,
                 )
             elif isinstance(req.delivery, UserTurnDelivery):
-                await self.recover_session(
-                    req.session_id, user_reply=req, resumed_task_id=req.delivery.task_id,
+                await self.recover_agent(
+                    req.agent_id, user_reply=req, resumed_task_id=req.delivery.task_id,
                     hitl_id=req.id,
                 )
             # NoResumeDelivery：纯通知 / 取消，无动作。
@@ -2616,7 +2640,7 @@ class CtxWeftRuntime:
         那条信号唯一的消费者（会话状态机）早已降格，信号本身现已停发（events-v2 §5）。
         **恢复期的可观测性现在整个由下面这段 ALM 装填 + `AGENT_*` 现状广播承担**：
         每个 session 的 agent 记录也在这里装填进 `AgentLifecycleManager`（2026-09-04
-        spec §6.3 补上的一步）：此前只有 `recover_session` 会调 `ALM.load()`，重启后
+        spec §6.3 补上的一步）：此前只有 `recover_agent` 会调 `ALM.load()`，重启后
         `list_agents` / `get_agent` / `send_message` 在第一条冷应答或 `/resume` 恰好
         跑过那条路之前全部是瞎的（`list_agents` 空、`get_agent` 抛 `AgentNotFound`）。
         装填之后 `ALM.load()` 会按折出来的现状发 `AGENT_*`（spec §6.4），host 投影
@@ -2747,7 +2771,7 @@ class CtxWeftRuntime:
         memory ref），纯文本零成本直通。
 
         **best-effort，绝不抛**：抛错会卡住整条恢复路径（`recover` 的每个 session、
-        `recover_session` 的每次续跑都过这里）。失败一律降级为文本占位——降级本身
+        `recover_agent` 的每次续跑都过这里）。失败一律降级为文本占位——降级本身
         （`downgrade_images_to_text`，纯函数）也在 try 里兜一道，宁可留着原内容也不让
         恢复崩掉。
         """
@@ -3201,7 +3225,7 @@ class _SessionTaskRunner:
 
     原 _make_task_runner 闭包的显式化：闭包捕获 → 实例字段。恢复播种不再靠
     per-runner 缓存——agent 身份/配置的唯一住所是 runtime 级 `AgentLifecycleManager`
-    registry（`lm`），恢复路径由 `recover_session`/`recover()` 经共用的
+    registry（`lm`），恢复路径由 `recover_agent`/`recover()` 经共用的
     `_load_agents_of` 显式调 `lm.load()` 装填。
     assigned_agent_id 回填 / started_at / TASK_STARTED 均归 TaskManager（两阶段契约）。
     """

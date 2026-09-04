@@ -1,7 +1,7 @@
 """崩溃恢复 → reconcile 端到端:mid-tool 重启后重跑未完成的工具,而非裸重发 LLM（spec/07 §6/§9）。
 
 构造一个"崩在工具批次中途"的持久态:事件流有 session+task,memory 里有一条带 dangling tool_call
-的 assistant LLM_RESPONSE（无对应 TOOL_RESULT）。recover_session 后,_resolve 的 dangling 检测应把
+的 assistant LLM_RESPONSE（无对应 TOOL_RESULT）。recover_agent 后,_resolve 的 dangling 检测应把
 initial_step 路由到 reconcile,由 ReconcileStep 经 gateway 重跑该工具(写出真实 TOOL_RESULT),再进 act。
 """
 
@@ -98,7 +98,7 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
         "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
         return_value=None,
     ):
-        await runtime.recover_session(sid)
+        await runtime.recover_agent(aid)
         for _ in range(50):
             if tool.invoked:
                 break

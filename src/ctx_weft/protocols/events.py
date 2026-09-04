@@ -79,7 +79,7 @@ class EventType(StrEnum):
 
     # ── Session / Run / Step 域 ──
     SESSION_CREATED = "SessionCreated"
-    SESSION_RESUMED = "SessionResumed"     # recover_session 续跑被打断的 session 时发
+    SESSION_RESUMED = "SessionResumed"     # recover_agent 续跑被打断的 session 时发
     SESSION_STATUS_CHANGED = "SessionStatusChanged"
     SESSION_FINISHED = "SessionFinished"   # TaskManager 确定 session 真正结束时发（含 final_status）
     SESSION_PAUSED_HITL = "SessionPausedHitl"

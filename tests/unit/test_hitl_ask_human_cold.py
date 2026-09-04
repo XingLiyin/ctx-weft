@@ -1,7 +1,7 @@
 """act 纯文本暂停（wait_for_user）的冷路径——**注入侧**。
 
 热路径：actor 纯文本 → HITL park → 用户回复经冷 resume 注入 task 层 → 重入 act。
-冷路径：超时驱逐 / 重启使 reconcile 覆盖不到（无 dangling tool_call）→ recover_session 收到
+冷路径：超时驱逐 / 重启使 reconcile 覆盖不到（无 dangling tool_call）→ recover_agent 收到
 user_reply 时在 drain 前注入回复。本文件钉死 `_inject_user_reply` 的注入逻辑。
 
 「哪种请求走注入、哪种走 reconcile」的分流原先也在这里（按 `form` 判），现在由

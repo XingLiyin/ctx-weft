@@ -237,8 +237,8 @@ class UnfinishedTasksError(CtxWeftError):
     """开新一轮（resume_session）被拒：事件里仍有未终结任务。
 
     弃轮（不恢复、直接开新轮）会把滞留的非终态任务永久遗弃在事件库,之后任何
-    recover_session 全量重建又会把它们复活重跑（僵尸重跑）。调用方应引导用户走
-    恢复路径（/resume → recover_session）续跑或收尾这些任务。"""
+    recover_agent 全量重建又会把它们复活重跑（僵尸重跑）。调用方应引导用户走
+    恢复路径（/resume → recover_agent）续跑或收尾这些任务。"""
 
     code = "SESSION_HAS_UNFINISHED_TASKS"
 
