@@ -61,6 +61,7 @@ from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
 from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, ModelChoice, ResolvedModel
+from ctx_weft.core.orchestrator.agent_state import AgentInput
 from ctx_weft.core.orchestrator.session_manager import SessionManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
@@ -870,6 +871,82 @@ class CtxWeftRuntime:
             # 不会触发，故显式回收 runtime 侧 per-session 状态（含较重的 TaskManager），避免滞留。
             self._release_session(session_id)
         return True
+
+    # ── Agent 级取消（Task 19）───────────────────────────────────────────────
+
+    async def cancel_agent(self, agent_id: str, *, reason: str | None = None) -> list[str]:
+        """终止 agent 及其全部子孙（spec 6）。返回被终结的 agent id 列表。
+
+        级联向下展开（`AgentRegistry.descendants_of`，自带成环防御），避免孤儿子
+        agent 永远挂着无人管。每个目标按各自**当前**状态分别处理，再统一转
+        `terminated`：
+        - `waiting_human`：先终局它名下的未决 HITL——按 `agent_id` 过滤
+          （`_cancel_pending_hitl_of`），不殃及同 session 其他 agent 的未决提问。
+          `_cancel_session_hitl` 是 session 粒度，这里要的是 agent 粒度，不能复用。
+        - `running`：`_cancel_run_token` 对其在途 run 发协作取消信号——按 task_id
+          索引，不是 TaskManager 的会话级 `cancel_all`。只发信号，不代表立即终结：
+          `TASK_CANCELED` 是否发出由 run 收尾时的既有守卫按 task 状态判定，这里不等。
+        - `idle` / `interrupted`：无需额外动作，直接转 `terminated`。
+
+        全部转移经 `AgentRegistry.apply_input` 一处发生——那是状态转移与事件发射的
+        唯一入口，不允许绕过它自己拼 AgentTerminated 事件。对已经是 `terminated`
+        的目标，`apply_input` 按五态机定义返回 False，天然跳过、不重复终结。
+
+        HITL 终局必须**先于**该 agent 转 `terminated`——与 `cancel_session` 里
+        `_cancel_session_hitl` 先于 `cancel_all` 同一条纪律：重启后 `rebuild_hitl`
+        按「有 HitlOpened 无终局事件」把已取消的提问当未决恢复出来，顺序错了会把这条
+        恢复不变量搞坏（见 `_cancel_session_hitl` 调用处注释）。
+
+        `agent_id` 直接指定的那个 `cascaded_from=None`；因级联被带上的子孙传发起者
+        的 `agent_id`，供 host 侧区分「用户直接点了取消」还是「祖先被取消带下来的」。
+
+        agent 不存在 -> 返回空列表，不抛错（幂等友好，与 `AgentRegistry.has()` 之类
+        既有「查无則静默」的读路径同一口径）。
+        """
+        reg = self._agent_registry
+        if agent_id not in reg._agents:
+            return []
+
+        targets = [agent_id, *reg.descendants_of(agent_id)]
+        killed: list[str] = []
+        for aid in targets:
+            rec = reg._agents.get(aid)
+            if rec is None or rec.status == "terminated":
+                continue
+
+            if rec.status == "waiting_human":
+                await self._cancel_pending_hitl_of(aid, session_id=rec.session_id)
+            if rec.status == "running" and rec.current_task_id:
+                self._cancel_run_token(rec.session_id, rec.current_task_id)
+
+            ok = await reg.apply_input(
+                aid,
+                AgentInput.CANCEL,
+                task_id=rec.current_task_id,
+                reason=reason or "canceled",
+                cascaded_from=None if aid == agent_id else agent_id,
+            )
+            if ok:
+                killed.append(aid)
+        return killed
+
+    async def _cancel_pending_hitl_of(self, agent_id: str, *, session_id: str) -> None:
+        """终局**该 agent 名下**全部未决 HITL（`cancel_agent` 专用）。
+
+        与 `_cancel_session_hitl` 同一模式（best-effort，单条失败不阻断其余），区别
+        在粒度：`_cancel_session_hitl` 按 session 收口全部未决请求，这里额外按
+        `agent_id` 过滤（`HitlRequestView.agent_id`）——`cancel_agent` 只该终局这一个
+        agent 名下的未决提问，不能误伤同一 session 里其他 agent 仍然合法在等的提问。
+        """
+        for v in self.list_pending_hitl(session_id=session_id):
+            if v.agent_id != agent_id or v.resolved:
+                continue
+            try:
+                await self.hitl.cancel(v.id, message=CancelReason.USER_CANCEL)
+            except Exception:
+                logger.exception(
+                    "_cancel_pending_hitl_of: cancel failed for agent=%s hitl=%s", agent_id, v.id,
+                )
 
     # ── 换模型：两条命令（批次 B）──────────────────────────────────────────────
     #
