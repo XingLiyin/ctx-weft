@@ -31,6 +31,11 @@ class SessionView:
     context_limit: int = 180_000
     reserved_output_tokens: int = 8192
     failure_counter: int = 0
+    #: 本轮是否已熔断（`FailureThresholdHit` 置位，`SessionResumed` 清零）。
+    #: `failure_counter` 的折叠据此判断一条 `TaskFailed` 是不是「熔断自己发的那条」
+    #: ——trip 序列第 6 步给 root 判死也发 TaskFailed，那是聚合结果、不是第 N+1 次
+    #: 新败，重复计入会让恢复后的计数比内存真值多一。
+    threshold_tripped: bool = False
     created_at: datetime | None = None
 
 

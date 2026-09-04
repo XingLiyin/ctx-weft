@@ -124,16 +124,22 @@ def test_task_failed_reset_failed_again() -> None:
 
 
 def test_task_failed_by_threshold_not_counted() -> None:
-    """TASK_FAILED with error_code="TASK_FAILED_BY_THRESHOLD" → 不计。
+    """熔断给 root 判死的那条 TASK_FAILED 不计——它是聚合结果，不是新败。
 
-    熔断聚合失败不算新败，因为计数器本身驱动了熔断。
+    判据已从 payload 的 `error_code` 改为**前置的 FAILURE_THRESHOLD_HIT 事件**，
+    故此处补上那条事件。这不是为了迁就实现而放宽断言：改造前的写法构造了一条
+    **生产者造不出来的**事件流——`TASK_FAILED_BY_THRESHOLD` 的唯一发射点是
+    `TaskManager._trip_failure_threshold` 第 6 步，而同一函数第 2 步无条件先发
+    `FAILURE_THRESHOLD_HIT`，两者恒成对且顺序固定。`error_code` 仍照发（对外契约
+    不变），只是 reducer 不再拿它当判据。
     """
     events = [
         _session_created(),
         _task_created(2),
         _task_started(3),
         _task_failed(4),  # 普通失败，counter = 1
-        _task_failed(5, error_code="TASK_FAILED_BY_THRESHOLD"),  # 熔断失败，不计，counter = 1
+        _failure_threshold_hit(5),  # trip 第 2 步
+        _task_failed(6, error_code="TASK_FAILED_BY_THRESHOLD"),  # trip 第 6 步，不计
     ]
     view = reduce_events(events, run_id="run_1")
     assert view.sessions["s1"].failure_counter == 1
@@ -184,3 +190,86 @@ def test_snapshot_roundtrip_preserves_failure_counter() -> None:
     ]
     final_view = apply_events(delta_events, restored_view)
     assert final_view.sessions["s1"].failure_counter == 1
+
+
+# ── 熔断闩位：判据是事件，不是 payload 字符串 ────────────────────────────────
+
+
+def _session_resumed(seq: int) -> Event:
+    return _ev(seq, EventType.SESSION_RESUMED, root_agent_id="agt_root")
+
+
+def test_threshold_hit_latches_and_stops_counting() -> None:
+    """FAILURE_THRESHOLD_HIT 之后的 TASK_FAILED 不计——不看 error_code。
+
+    真实 trip 序列：第 2 步发 HIT，第 6 步 root 判死发 TASK_FAILED。
+    reducer 据前者置闩，后者因此不计。
+    """
+    events = [
+        _session_created(),
+        _task_created(2, task_id="tsk_1"),
+        _task_started(3, task_id="tsk_1"),
+        _task_failed(4, task_id="tsk_1"),        # 普通失败，counter = 1
+        _failure_threshold_hit(5),               # 熔断闩位
+        _task_failed(6, task_id="tsk_root"),     # root 判死，不计
+    ]
+    view = reduce_events(events, run_id="run_1")
+    assert view.sessions["s1"].failure_counter == 1
+    assert view.sessions["s1"].threshold_tripped is True
+
+
+def test_latch_holds_for_late_inflight_failures() -> None:
+    """trip 之后在途任务的迟到失败同样不计——会话已终结，不存在“又一次新败”。"""
+    events = [
+        _session_created(),
+        _task_created(2, task_id="tsk_1"),
+        _task_started(3, task_id="tsk_1"),
+        _task_failed(4, task_id="tsk_1"),        # counter = 1
+        _failure_threshold_hit(5),
+        _task_failed(6, task_id="tsk_root"),     # root 判死
+        _task_failed(7, task_id="tsk_2"),        # 在途任务迟到失败
+    ]
+    view = reduce_events(events, run_id="run_1")
+    assert view.sessions["s1"].failure_counter == 1
+
+
+def test_session_resumed_clears_the_latch() -> None:
+    """续跑开新一轮：闩位清掉，新一轮的失败照常计数。
+
+    与内存侧同形——resume_session 造的是全新 Session（failure_counter=0）
+    和全新 TaskManager（_threshold_tripped=False）。
+    """
+    events = [
+        _session_created(),
+        _task_created(2, task_id="tsk_1"),
+        _task_started(3, task_id="tsk_1"),
+        _task_failed(4, task_id="tsk_1"),
+        _failure_threshold_hit(5),
+        _task_failed(6, task_id="tsk_root"),
+        _session_resumed(7),
+        _task_created(8, task_id="tsk_3"),
+        _task_started(9, task_id="tsk_3"),
+        _task_failed(10, task_id="tsk_3"),       # 新一轮的失败，照常计
+    ]
+    view = reduce_events(events, run_id="run_1")
+    assert view.sessions["s1"].threshold_tripped is False
+    assert view.sessions["s1"].failure_counter == 2
+
+
+def test_snapshot_roundtrip_preserves_the_latch() -> None:
+    """闩位必须随快照往返——否则快照点之后的迟到失败会被重新计入。"""
+    events = [
+        _session_created(),
+        _task_created(2, task_id="tsk_1"),
+        _task_started(3, task_id="tsk_1"),
+        _task_failed(4, task_id="tsk_1"),
+        _failure_threshold_hit(5),
+    ]
+    view = reduce_events(events, run_id="run_1")
+    assert view.sessions["s1"].threshold_tripped is True
+
+    restored = deserialize_view(serialize_view(view))
+    assert restored.sessions["s1"].threshold_tripped is True
+
+    final = apply_events([_task_failed(6, task_id="tsk_root")], restored)
+    assert final.sessions["s1"].failure_counter == 1

@@ -15,7 +15,6 @@ from ctx_weft.core.content import (
     content_to_jsonable,
 )
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
-from ctx_weft.core.discriminators import TaskErrorCode
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
 from ctx_weft.core.state.models import TERMINAL_SESSION_STATUSES, WAITING, TaskStatus
@@ -168,6 +167,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "context_limit": s.context_limit,
                 "reserved_output_tokens": s.reserved_output_tokens,
                 "failure_counter": s.failure_counter,
+                "threshold_tripped": s.threshold_tripped,
                 "created_at": _dt(s.created_at),
             }
             for sid, s in view.sessions.items()
@@ -237,6 +237,7 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             context_limit=s.get("context_limit", 180_000),
             reserved_output_tokens=s.get("reserved_output_tokens", 8192),
             failure_counter=s.get("failure_counter", 0),
+            threshold_tripped=s.get("threshold_tripped", False),
             created_at=_dt(s.get("created_at")),
         )
 
@@ -428,9 +429,19 @@ def _apply(view: RunStateView, ev: Event) -> None:
         view.sessions[ev.session_id] = sess
         view.session_status = "RUNNING"
 
+    elif t == EventType.FAILURE_THRESHOLD_HIT:
+        # 只置闩，不动计数：这条事件本身不是一次新失败，它是「计数已经到阈值」的宣告。
+        # trip 序列第 2 步发它，第 6 步才给 root 判死——闩位因此恒在那条 TaskFailed 之前。
+        sess = view.sessions.get(ev.session_id)
+        if sess is not None:
+            sess.threshold_tripped = True
+
     elif t == EventType.SESSION_RESUMED:
         sess = view.sessions.get(ev.session_id)
         if sess is not None:
+            # 续跑开新一轮 → 清闩。与内存侧同形：`resume_session` 造的是全新 Session
+            # 与全新 TaskManager（`_threshold_tripped` 回到 False），新一轮的失败照常计。
+            sess.threshold_tripped = False
             _up = p.get("user_prompt")
             if _up is not None:
                 sess.user_prompt = content_from_jsonable(_up)
@@ -593,12 +604,21 @@ def _apply(view: RunStateView, ev: Event) -> None:
                     task.assigned_agent_id = assigned
         view.task_status = TASK_STATUS_BY_EVENT[t]
 
-        # ── failure_counter 折叠（Task 11）──
-        # TASK_FAILED：普通失败 +1（熔断失败 TASK_FAILED_BY_THRESHOLD 不计，它是聚合结果非新失败）
-        # TASK_FINISHED：成功清零（连败语义）
+        # ── failure_counter 折叠 ──
+        # TASK_FAILED：普通失败 +1；TASK_FINISHED：成功清零（连败语义）。
+        # 熔断闩位（`FailureThresholdHit` 置位）期间一律不计：trip 序列第 6 步给 root
+        # 判死也发一条 TaskFailed，那是**聚合结果**而非第 N+1 次新败，计入会让恢复后的
+        # 计数比内存真值多一，进而可能误触发下一次熔断。
+        #
+        # 判据是**事件**，不是 payload 里的 `error_code` 字符串。改造前这里比的是
+        # `error_code != TaskErrorCode.BY_THRESHOLD`，那依赖一条没有类型保障的隐含
+        # 约定——`error_code` 字段同时接受 `TaskErrorCode` 与 `InterruptReason` 的值
+        # （见 runtime 的 outage 支 `error_code=InterruptReason.LLM_OUTAGE`），一旦
+        # 将来有谁给 TaskFailed 也塞一个非 TaskErrorCode 的码，那个 `!=` 会静默放行。
+        # 闩位与 `TaskManager._threshold_tripped` 同源同形，不看任何自由文本。
         if t == EventType.TASK_FAILED:
             sess = view.sessions.get(ev.session_id)
-            if sess is not None and (p or {}).get("error_code") != TaskErrorCode.BY_THRESHOLD:
+            if sess is not None and not sess.threshold_tripped:
                 sess.failure_counter += 1
         elif t == EventType.TASK_FINISHED:
             sess = view.sessions.get(ev.session_id)
