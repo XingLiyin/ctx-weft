@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import ClassVar, Protocol
 
 from ctx_weft.core.control.types import AgentView
@@ -86,6 +87,10 @@ class _AgentRecord:
     llm: ModelChoice = field(default_factory=ModelChoice)
     status: str = "idle"                     # spec 3.1 五态机的当前值
     current_task_id: str | None = None       # 消息路由据此判断新建还是复用 task
+    #: 实例化时刻。恢复路径（`load`）留 None——`AgentView` 不带该字段，
+    #: 硬造一个「恢复时刻」当创建时刻是在撒谎。host 侧要精确值可读
+    #: AgentInstantiated 事件的 timestamp。
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +109,7 @@ class AgentRecordView:
     spawn_depth: int
     status: str
     current_task_id: str | None
+    created_at: datetime | None
 
 
 @dataclass
@@ -295,6 +301,7 @@ class AgentLifecycleManager:
             spawn_depth=rec.spawn_depth,
             status=rec.status,
             current_task_id=rec.current_task_id,
+            created_at=rec.created_at,
         )
 
     def set_current_task(self, agent_id: str, task_id: str | None) -> None:
@@ -351,6 +358,10 @@ class AgentLifecycleManager:
 
     def agent_ids_of_session(self, session_id: str) -> list[str]:
         return [k for k, r in self._agents.items() if r.session_id == session_id]
+
+    def all_agent_ids(self) -> list[str]:
+        """全部已登记 agent 的 id——`list_agents()` 不传 session_id 时的数据源。"""
+        return list(self._agents)
 
     async def load(
         self,
@@ -538,6 +549,7 @@ class AgentLifecycleManager:
             memory_config=template.memory_config,
             loop_config=template.loop_config,
             llm=llm,
+            created_at=now_utc(),
         )
         if parent_agent_id is not None:
             self._children.setdefault(parent_agent_id, set()).add(agent_id)

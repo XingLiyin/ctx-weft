@@ -1984,30 +1984,27 @@ class CtxWeftRuntime:
 
     def list_agents(
         self,
-        session_id: str,
         *,
+        session_id: str | None = None,
         parent_agent_id: str | None = None,
         include_terminated: bool = False,
     ) -> "list[AgentSummary]":
-        """列出该 session 下的 agent（spec 5）——host 面向 agent 发现的读入口。
+        """列出 agent（spec 5；2026-09-04 spec §8 放宽 session_id）——host 的发现入口。
 
-        不传 `parent_agent_id`：返回该 session 全部 agent 的扁平列表；传了：只返回其
-        **直接**子 agent（不展开子孙——层级关系不在接口层嵌套，调用方按 `parent_agent_id`
-        自行还原成树）。`include_terminated` 默认 False，避免列表随时间无限膨胀。
+        三个过滤都可选、可叠加。`session_id` 不传 = 跨 session 列出全部登记 agent
+        （`agent_id` 全局唯一，按 session 分片只是历史惯性）；传了则只列该 session。
+        `parent_agent_id` 只返回其**直接**子 agent（不展开子孙——层级关系不在接口层
+        嵌套，调用方按 `parent_agent_id` 自行还原成树）。`include_terminated` 默认
+        False，避免列表随时间无限膨胀。
 
-        数据源用 `AgentLifecycleManager.agent_ids_of_session`（registry 自扫），不用
-        `SessionRegistry.agent_ids_of`（成员登记表）：后者只在 AGENT_INSTANTIATED /
-        AGENT_SPAWNED 时新增、且 runtime 当前从不调用 `forget_session`（见
-        `_release_session` 内 "不 forget_session" 的注释），是一份只增不减、
-        与 session 同寿命的历史成员名单；而 `AgentLifecycleManager.release_session`
-        （由 runtime 的 `_release_session` 在会话终结/取消已空闲会话时调用）会把
-        agent 记录从 `_agents` 中真正摘除。若改用前者做 id 源，会话释放之后
-        `list_agents` 要么对着已经从 `_agents` 消失的 id 抛 KeyError，要么得再加一层
-        "静默跳过缺失记录" 的补丁——不如直接以 `_agents` 自身的 in-memory 现实为准：
-        两个来源同出一个 dict，天然自洽，也不会把已经不存在于内存里的 agent 报告出去。
+        数据源用 `AgentLifecycleManager` 自己的记录（经 `record_of`），不用
+        `SessionRegistry.agent_ids_of`（成员登记表）：后者只增不减、与 session 同寿命，
+        而 ALM 的 `release_session` 会真正摘除记录。以 ALM 的内存现实为准，不会把
+        已经不存在于内存里的 agent 报告出去。
         """
         reg = self._agent_lifecycle_manager
-        ids = reg.agent_ids_of_session(session_id)
+        ids = (reg.agent_ids_of_session(session_id) if session_id is not None
+               else reg.all_agent_ids())
         out: list[AgentSummary] = []
         for aid in ids:
             rec = reg.record_of(aid)
@@ -2023,6 +2020,7 @@ class CtxWeftRuntime:
                 status=rec.status,
                 current_task_id=rec.current_task_id,
                 spawn_depth=rec.spawn_depth,
+                created_at=rec.created_at,
             ))
         return out
 
@@ -2052,6 +2050,7 @@ class CtxWeftRuntime:
             spawn_depth=rec.spawn_depth,
             session_id=rec.session_id,
             template_id=rec.template_id,
+            created_at=rec.created_at,
             current_task_status=task_status,
         )
 

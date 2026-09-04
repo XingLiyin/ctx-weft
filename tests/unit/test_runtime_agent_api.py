@@ -80,7 +80,7 @@ async def test_list_agents_returns_flat_list():
     _plant(rt, "root", None)
     _plant(rt, "kid", "root")
 
-    out = rt.list_agents("s1")
+    out = rt.list_agents(session_id="s1")
     assert {a.agent_id for a in out} == {"root", "kid"}
     assert all(isinstance(a, AgentSummary) for a in out)
     kid = next(a for a in out if a.agent_id == "kid")
@@ -93,7 +93,7 @@ async def test_list_agents_filtered_by_parent():
     _plant(rt, "kid1", "root")
     _plant(rt, "grandkid", "kid1")
 
-    out = rt.list_agents("s1", parent_agent_id="root")
+    out = rt.list_agents(session_id="s1", parent_agent_id="root")
     assert {a.agent_id for a in out} == {"kid1"}, "只返回直接子 agent"
 
 
@@ -102,8 +102,10 @@ async def test_list_agents_excludes_terminated_by_default():
     _plant(rt, "alive", None)
     _plant(rt, "dead", None, status="terminated")
 
-    assert {a.agent_id for a in rt.list_agents("s1")} == {"alive"}
-    assert {a.agent_id for a in rt.list_agents("s1", include_terminated=True)} == {"alive", "dead"}
+    assert {a.agent_id for a in rt.list_agents(session_id="s1")} == {"alive"}
+    assert {a.agent_id for a in rt.list_agents(session_id="s1", include_terminated=True)} == {
+        "alive", "dead",
+    }
 
 
 async def test_get_agent_returns_detail():
@@ -266,3 +268,48 @@ async def test_start_session_agent_id_is_addressable_root_agent():
     detail = rt.get_agent(handle.agent_id)
     assert detail.session_id == handle.session_id
     assert detail.parent_agent_id is None
+
+
+# ── 2026-09-04 spec §5.4 / §8：created_at 与 list_agents 签名 ──────────────
+
+
+async def test_summary_carries_created_at_for_live_agents():
+    """字段 2026-09-03 就声明了，一直是 None——运行期实例化的 agent 必须有值。
+
+    `_rt()` 用的 `InlineAgentTemplateProvider` 没有预注册 template/memory
+    provider（那两个是各测试自己按需搭建的桩），故这里照抄
+    `test_start_session_agent_id_is_addressable_root_agent` 的搭建方式，而不是
+    裸调 `_rt()` + 未注册的 `template_id="echo"`（会在 `start_session` 里于
+    template 解析或 memory 校验处提前炸掉，测的就不是 created_at 了）。
+    """
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    llm = MockLLMAdapter(responses=[
+        MockResponse(tool_calls=[
+            ToolCall(id="tc1", name="control__finish_task", arguments={"result": "done"}),
+        ]),
+    ])
+    rt = make_runtime(llm=llm, agent_provider=resolver)
+    rt.providers.register_memory(InMemoryMemoryProvider())
+
+    handle = await rt.start_session(SessionStartParams.create(
+        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
+    ))
+    [summary] = [a for a in rt.list_agents(session_id=handle.session_id)
+                 if a.agent_id == handle.agent_id]
+    assert summary.created_at is not None
+
+
+async def test_list_agents_without_session_id_spans_sessions():
+    rt = _rt()
+    _plant(rt, "agt_a", None, session_id="s1")
+    _plant(rt, "agt_b", None, session_id="s2")
+    ids = {a.agent_id for a in rt.list_agents()}
+    assert {"agt_a", "agt_b"} <= ids
+
+
+async def test_list_agents_session_id_still_filters():
+    rt = _rt()
+    _plant(rt, "agt_a", None, session_id="s1")
+    _plant(rt, "agt_b", None, session_id="s2")
+    assert [a.agent_id for a in rt.list_agents(session_id="s1")] == ["agt_a"]
