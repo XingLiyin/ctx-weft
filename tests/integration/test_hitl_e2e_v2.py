@@ -213,7 +213,8 @@ async def test_hot_approval_rewrites_arguments_and_result_reaches_the_model() ->
     assert isinstance(req.delivery, ToolResultDelivery)
 
     view = await runtime.reply_to_hitl(HitlReply(
-        hitl_id=req.id, outcome="accepted", modified_arguments={"command": "ls -l"},
+        hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
+        modified_arguments={"command": "ls -l"},
     ))
     assert view is not None and view.outcome == "accepted"
 
@@ -269,7 +270,8 @@ async def test_cold_approval_reconciles_and_invokes_the_tool_exactly_once() -> N
     assert req.form == "approval"
 
     view = await runtime.reply_to_hitl(HitlReply(
-        hitl_id=req.id, outcome="accepted", modified_arguments={"command": "ls -l"},
+        hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
+        modified_arguments={"command": "ls -l"},
     ))
     assert view is not None and view.outcome == "accepted"
 
@@ -339,7 +341,7 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
         ImagePart(data=_IMAGE_B64, media_type="image/png"),
     ]
     view = await runtime.reply_to_hitl(HitlReply(
-        hitl_id=req.id, outcome="accepted", message=reply_message,
+        hitl_id=req.id, outcome="accepted", agent_id=req.agent_id, message=reply_message,
     ))
     assert view is not None
 
@@ -413,7 +415,8 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
     assert isinstance(req.delivery, UserTurnDelivery)
     assert req.delivery.task_id == req.task_id
 
-    reply = HitlReply(hitl_id=req.id, outcome="accepted", message="use postgres too")
+    reply = HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
+                      message="use postgres too")
     first_view = await runtime.reply_to_hitl(reply)
     assert first_view is not None and first_view.outcome == "accepted"
 

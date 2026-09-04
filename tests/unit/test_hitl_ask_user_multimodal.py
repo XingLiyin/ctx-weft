@@ -105,7 +105,8 @@ async def _ask_and_respond(reply_kwargs: dict):
         await asyncio.sleep(0)
     else:
         raise AssertionError("no pending HITL request appeared")
-    await service.resolve(HitlReply(hitl_id=pend[0].id, **reply_kwargs))
+    await service.resolve(HitlReply(hitl_id=pend[0].id, agent_id=pend[0].agent_id,
+                                    **reply_kwargs))
     return await asyncio.wait_for(handle, timeout=1.0)
 
 

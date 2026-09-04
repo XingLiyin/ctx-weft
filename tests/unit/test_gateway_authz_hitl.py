@@ -188,7 +188,7 @@ async def test_hot_approval_lets_the_call_through_with_modified_arguments():
                                          _state(), _ctx(), tool_call_id="call_1"))
     await asyncio.sleep(0)
     pending = reg.list_pending()[0]
-    await svc.resolve(HitlReply(hitl_id=pending.id, outcome="accepted",
+    await svc.resolve(HitlReply(hitl_id=pending.id, outcome="accepted", agent_id=_AGENT_ID,
                                 modified_arguments={"command": "ls -l"}))
     result = await task
     assert result.is_error is False
@@ -202,7 +202,7 @@ async def test_hot_rejection_never_calls_the_provider():
                                          _state(), _ctx(), tool_call_id="call_1"))
     await asyncio.sleep(0)
     await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="rejected",
-                                message="别删"))
+                                agent_id=_AGENT_ID, message="别删"))
     result = await task
     assert result.is_error is True
     assert "别删" in _text_of(result.content)
@@ -285,7 +285,8 @@ async def test_needs_human_without_the_gated_interface_is_a_contract_violation()
     task = asyncio.create_task(gw.invoke(_TOOL_NAME, {}, _state(), _ctx(),
                                          tool_call_id="call_1"))
     await asyncio.sleep(0)
-    await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted"))
+    await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted",
+                                agent_id=_AGENT_ID))
     result = await task
     assert result.is_error is True
     assert "does not implement" in _text_of(result.content)
@@ -300,7 +301,7 @@ async def _approve_hot(gw, reg, svc, args, *, tool_call_id="call_1", modified=No
         gw.invoke(_TOOL_NAME, args, _state(), _ctx(), tool_call_id=tool_call_id))
     await asyncio.sleep(0)
     await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted",
-                                modified_arguments=modified))
+                                agent_id=_AGENT_ID, modified_arguments=modified))
     return await task
 
 

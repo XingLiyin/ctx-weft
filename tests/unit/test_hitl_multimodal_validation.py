@@ -141,9 +141,12 @@ async def _pending(rt: CtxWeftRuntime, session_id: str = "ses-hitl",
 
 async def _reply(rt: CtxWeftRuntime, hid: str, message, *, outcome: str = "accepted",
                  modified_arguments=None):
-    """经**唯一的生产应答入口**回话。"""
+    """经**唯一的生产应答入口**回话。`agent_id` 如实取自该请求的系统记录（`_pending`
+    没传 `agent_id` 时那就是真实值 `""`），不是拍脑袋的占位值——防呆校验本身不是
+    本文件的测试对象，但仍要让它按真实记录通过，而不是悄悄绕过。"""
+    agent_id = rt.hitl_registry.get(hid).agent_id
     return await rt.reply_to_hitl(HitlReply(
-        hitl_id=hid, outcome=outcome, message=message,
+        hitl_id=hid, outcome=outcome, agent_id=agent_id, message=message,
         modified_arguments=modified_arguments,
     ))
 

@@ -209,7 +209,8 @@ async def test_needs_human_stops_stream_consumption_immediately():
     task = asyncio.create_task(gw.invoke("deploy__apply", {}, _state(), _ctx(),
                                          tool_call_id="call_1"))
     await asyncio.sleep(0)
-    await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted"))
+    await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted",
+                                agent_id=_AGENT_ID))
     result = await task
     assert "SHOULD NOT BE SEEN" not in _text_of(result.content)
     assert _text_of(result.content).strip().endswith("deployed")
@@ -221,7 +222,8 @@ async def test_resume_gets_the_resume_state_and_does_not_recompute():
     task = asyncio.create_task(gw.invoke("deploy__apply", {}, _state(), _ctx(),
                                          tool_call_id="call_1"))
     await asyncio.sleep(0)
-    await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted"))
+    await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted",
+                                agent_id=_AGENT_ID))
     await task
     assert provider.computed == 1                                  # 没重算
     assert provider.applied_with == ({"plan": "deploy-7"}, "accepted")
@@ -233,7 +235,7 @@ async def test_reply_as_result_short_circuits_without_reentry():
                                          tool_call_id="call_1"))
     await asyncio.sleep(0)
     await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted",
-                                message="小明"))
+                                agent_id=_AGENT_ID, message="小明"))
     result = await task
     assert "小明" in _text_of(result.content)
 
@@ -247,7 +249,7 @@ async def test_reply_as_result_carries_multimodal_answers_through():
                                          tool_call_id="call_1"))
     await asyncio.sleep(0)
     await svc.resolve(HitlReply(
-        hitl_id=reg.list_pending()[0].id, outcome="accepted",
+        hitl_id=reg.list_pending()[0].id, outcome="accepted", agent_id=_AGENT_ID,
         message=[TextPart(text="就这张"),
                  ImagePart(data="abc", media_type="image/png", source_type="base64")]))
     result = await task
@@ -259,7 +261,8 @@ async def test_needs_human_without_resumable_is_a_contract_violation():
     task = asyncio.create_task(gw.invoke("broken__x", {}, _state(), _ctx(),
                                          tool_call_id="call_1"))
     await asyncio.sleep(0)
-    await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted"))
+    await svc.resolve(HitlReply(hitl_id=reg.list_pending()[0].id, outcome="accepted",
+                                agent_id=_AGENT_ID))
     result = await task
     assert result.is_error is True and "does not implement" in _text_of(result.content)
 
@@ -279,5 +282,5 @@ async def test_the_ask_is_recorded_under_the_tool_stage():
     await asyncio.sleep(0)
     pending = reg.list_pending()[0]
     assert pending.stage == HITL_STAGE_TOOL
-    await svc.resolve(HitlReply(hitl_id=pending.id, outcome="accepted"))
+    await svc.resolve(HitlReply(hitl_id=pending.id, outcome="accepted", agent_id=_AGENT_ID))
     await task

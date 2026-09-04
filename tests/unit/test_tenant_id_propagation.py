@@ -58,7 +58,9 @@ async def test_hot_approval_session_events_all_carry_the_sessions_tenant() -> No
     assert req.form == "approval"
     assert isinstance(req.delivery, ToolResultDelivery)
 
-    view = await runtime.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted"))
+    view = await runtime.reply_to_hitl(
+        HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id)
+    )
     assert view is not None and view.outcome == "accepted"
 
     state = await handle.wait_for_finish(timeout=5.0)

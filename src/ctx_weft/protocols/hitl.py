@@ -115,10 +115,15 @@ class HitlReply:
     不再携带模型选择——换模型走 `CtxWeftRuntime.set_agent_llm`/`set_session_llm`
     两条独立命令（批次 B）。原来一次 `reply_to_hitl(reply, resume_hint=...)`
     同时做「换模型」+「应答」两件事；现在是两条调用。
+
+    `agent_id` 是**防呆**，不是路由必需——路由仍全靠 `hitl_id`（全局唯一）。
+    要求调用方显式声明「我以为在回复哪个 agent」，与 `PendingHitl.agent_id`
+    不符则 `reply_to_hitl` 拒绝，而不是静默按 `hitl_id` 走掉（spec 4.3）。
     """
 
     hitl_id: str
     outcome: HitlOutcome
+    agent_id: str  # 必填：调用方声明「我以为在回复哪个 agent」，与记录不符则拒绝（spec 4.3）
     message: "str | list[ContentPart]" = ""
     modified_arguments: dict[str, Any] | None = None
 

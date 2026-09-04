@@ -1069,7 +1069,8 @@ class CtxWeftRuntime:
             if req is None:
                 continue
             await self.reply_to_hitl(
-                HitlReply(hitl_id=req.id, outcome=HITL_OUTCOME_ACCEPTED, message=_RESUME_MARK)
+                HitlReply(hitl_id=req.id, outcome=HITL_OUTCOME_ACCEPTED,
+                          agent_id=req.agent_id, message=_RESUME_MARK)
             )
             resumed.append(aid)
         return resumed
@@ -2359,7 +2360,23 @@ class CtxWeftRuntime:
         **claimed 分流**：`resolved.claimed` 由 `HitlService._commit` 在取走等待槽的
         同一原子段里判定——True 说明一个活协程正在等这个 hitl_id，投递已把它就地叫醒，
         再触发一次冷续跑就是同一个 task 被驱动两次。
+
+        **`agent_id` 防呆**（spec 4.3）：路由仍全靠 `hitl_id`（全局唯一），这一步不是
+        路由必需——它要求调用方显式声明「我以为在回复哪个 agent」，与系统记录
+        （`PendingHitl.agent_id`）不符则拒绝，而不是静默按 `hitl_id` 走掉。必须在任何
+        副作用（消息外部化、状态终局、发事实）之前做，因此在这里、在调
+        `self.hitl.resolve()` 之前完成。**严格相等**，空串也不例外：装填期占位项与
+        折叠自旧事件的记录可能确无 `agent_id`（`""`），但 host 从 `HitlRequestView`
+        读到的正是同一个空串，如实回填即可对上——没有理由放行「我不知道/不声明」。
+        未知 `hitl_id` 时 `pending` 为 `None`，这一步不拦（未知 id 的报错留给
+        `HitlService.resolve` 的 `KeyError`，与改动前行为一致）。
         """
+        pending = self.hitl_registry.get(reply.hitl_id)
+        if pending is not None and reply.agent_id != pending.agent_id:
+            raise ValueError(
+                f"agent_id mismatch: reply says {reply.agent_id!r}, "
+                f"hitl {reply.hitl_id} belongs to {pending.agent_id!r}"
+            )
         resolved = await self.hitl.resolve(reply)
         if resolved is None:
             return None                       # 幂等：已终局，不重复续跑

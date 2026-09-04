@@ -88,7 +88,8 @@ async def test_reply_returns_the_view_and_drives_resume_by_delivery():
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
                              tool_call_id="call_1", stage="tool")
-    view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted"))
+    view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
+                                            agent_id=req.agent_id))
     assert view is not None and view.outcome == "accepted"
     assert calls == [("recover_session", "s1", "t1")]
 
@@ -96,14 +97,15 @@ async def test_reply_returns_the_view_and_drives_resume_by_delivery():
 async def test_user_turn_delivery_injects_instead_of_reconciling():
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_user_turn("t1"), session_id="s1", task_id="t1", stage="tool")
-    await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted", message="继续"))
+    await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
+                                     agent_id=req.agent_id, message="继续"))
     assert calls[0][0] == "inject_user_turn"
 
 
 async def test_no_resume_delivery_triggers_nothing():
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_no_resume(), session_id="s1", task_id="t1", stage="tool")
-    await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="cancelled"))
+    await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="cancelled", agent_id=req.agent_id))
     assert calls == []
 
 
@@ -113,7 +115,8 @@ async def test_a_claimed_hot_reply_does_not_trigger_cold_resume():
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
                              tool_call_id="call_1", stage="tool")
     rt.hitl_registry.attach_slot(req.id, _AcceptingSlot())
-    view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted"))
+    view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
+                                            agent_id=req.agent_id))
     # 不能只看 calls == []——resolve() 失败（未知 id / 已终局）时同样不产生任何 call，
     # 两种情况必须区分开：这里断言的是「已终局且真被消费」，不是「resolve 失败了」。
     assert view is not None and view.outcome == "accepted"
@@ -125,8 +128,10 @@ async def test_replying_twice_resumes_at_most_once():
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
                              tool_call_id="call_1", stage="tool")
-    await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted"))
-    assert await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted")) is None
+    await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id))
+    assert await rt.reply_to_hitl(
+        HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id)
+    ) is None
     assert len(calls) == 1
 
 
@@ -159,7 +164,7 @@ async def test_reply_with_a_disallowed_image_media_type_is_rejected_and_stays_pe
 
     with pytest.raises(InvalidContentError):
         await rt.reply_to_hitl(HitlReply(
-            hitl_id=req.id, outcome="accepted",
+            hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
             message=[ImagePart(data="AAAA", media_type="image/bmp")],
         ))
 
@@ -184,7 +189,8 @@ async def test_a_failed_cold_resume_after_commit_is_logged_loudly_and_still_rais
 
     with caplog.at_level("ERROR"):
         with pytest.raises(RuntimeError, match="owner TM rebuild exploded"):
-            await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted"))
+            await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
+                                             agent_id=req.agent_id))
 
     assert req.id in caplog.text
     # 应答本身已经不可逆地提交——即便续跑失败，请求也真的终局了。
@@ -214,5 +220,61 @@ async def test_list_pending_hitl_returns_views_not_core_records():
     assert [v.id for v in only_s1] == [req.id]
 
     # 经 service 终局（不走 reply_to_hitl，那会去事件库找一个本测试没建的会话）
-    await rt.hitl.resolve(HitlReply(hitl_id=req.id, outcome="accepted"))
+    await rt.hitl.resolve(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id))
     assert rt.list_pending_hitl(session_id="s1") == []
+
+
+# ── agent_id 防呆校验（Task 21，spec 4.3）───────────────────────────────────
+
+
+async def test_reply_to_hitl_rejects_agent_id_mismatch():
+    """调用方声明的 agent 与系统记录不符 → 拒绝，不静默按 hitl_id 走掉。"""
+    rt = _runtime()
+    req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+    with pytest.raises(ValueError):
+        await rt.reply_to_hitl(
+            HitlReply(hitl_id=req.id, outcome="accepted", agent_id="wrong-agent")
+        )
+
+
+async def test_reply_to_hitl_agent_id_mismatch_rejected_before_any_side_effect():
+    """拒绝必须发生在任何副作用之前——不能先把回复写进去再报错。"""
+    rt = _runtime()
+    req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+    events: list = []
+
+    async def _record(ev):
+        events.append(ev)
+
+    rt._event_bus.subscribe(None, _record)  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError):
+        await rt.reply_to_hitl(
+            HitlReply(hitl_id=req.id, outcome="accepted", agent_id="wrong-agent")
+        )
+
+    pending = rt.hitl_registry.get(req.id)
+    assert pending is not None and pending.resolved is False
+    assert events == []
+
+
+async def test_reply_to_hitl_agent_id_match_proceeds_normally():
+    """agent_id 与记录相符 → 正常终局并续跑，新增校验不影响正路。"""
+    rt, calls = _runtime_with_recorded_resume()
+    req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+    view = await rt.reply_to_hitl(
+        HitlReply(hitl_id=req.id, outcome="accepted", agent_id="agent-a")
+    )
+    assert view is not None and view.outcome == "accepted"
+    assert calls == [("recover_session", "s1", "t1")]
+
+
+def test_hitl_reply_requires_agent_id():
+    import dataclasses
+
+    f = {x.name: x for x in dataclasses.fields(HitlReply)}
+    assert "agent_id" in f
+    assert f["agent_id"].default is dataclasses.MISSING, "agent_id 必填"

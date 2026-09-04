@@ -131,7 +131,8 @@ async def test_resolve_emits_hitl_resolved_with_outcome_and_message():
     bus = RecordingBus()
     svc = _service(bus)
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
-    req = await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", message="go"))
+    req = await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id="",
+                                      message="go"))
     assert req is not None and req.decision.outcome == "accepted"
     assert bus.types() == [EventType.HITL_OPENED, EventType.HITL_RESOLVED]
     p = bus.payload_of(EventType.HITL_RESOLVED)
@@ -144,7 +145,7 @@ async def test_resolve_marks_claimed_true_when_a_hot_slot_takes_it():
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
     slot = FakeSlot()
     svc.registry.attach_slot("hit_1", slot)
-    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", message="go"))
+    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id="", message="go"))
     assert slot.delivered.message == "go"
     assert bus.payload_of(EventType.HITL_RESOLVED)["claimed"] is True
 
@@ -153,7 +154,7 @@ async def test_resolve_marks_claimed_false_when_no_slot():
     bus = RecordingBus()
     svc = _service(bus)
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
-    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted"))
+    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id=""))
     assert bus.payload_of(EventType.HITL_RESOLVED)["claimed"] is False
 
 
@@ -163,7 +164,7 @@ async def test_resolve_marks_claimed_false_when_slot_refuses():
     svc = _service(bus)
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
     svc.registry.attach_slot("hit_1", FakeSlot(accepts=False))
-    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted"))
+    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id=""))
     assert bus.payload_of(EventType.HITL_RESOLVED)["claimed"] is False
 
 
@@ -175,7 +176,7 @@ async def test_resolve_still_emits_hitl_resolved_when_slot_deliver_raises():
     svc = _service(bus)
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
     svc.registry.attach_slot("hit_1", RaisingSlot())
-    req = await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted"))
+    req = await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id=""))
     assert req is not None
     assert bus.types() == [EventType.HITL_OPENED, EventType.HITL_RESOLVED]
     assert bus.payload_of(EventType.HITL_RESOLVED)["claimed"] is False
@@ -185,22 +186,22 @@ async def test_second_resolve_is_a_noop_and_emits_nothing():
     bus = RecordingBus()
     svc = _service(bus)
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
-    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted"))
-    assert await svc.resolve(HitlReply(hitl_id="hit_1", outcome="rejected")) is None
+    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id=""))
+    assert await svc.resolve(HitlReply(hitl_id="hit_1", outcome="rejected", agent_id="")) is None
     assert bus.types().count(EventType.HITL_RESOLVED) == 1
 
 
 async def test_resolve_unknown_id_raises_keyerror():
     svc = _service(RecordingBus())
     with pytest.raises(KeyError):
-        await svc.resolve(HitlReply(hitl_id="nope", outcome="accepted"))
+        await svc.resolve(HitlReply(hitl_id="nope", outcome="accepted", agent_id=""))
 
 
 async def test_modified_arguments_ride_along_in_the_payload():
     bus = RecordingBus()
     svc = _service(bus)
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
-    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted",
+    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id="",
                                 modified_arguments={"command": "ls -l"}))
     assert bus.payload_of(EventType.HITL_RESOLVED)["modified_arguments"] == {
         "command": "ls -l"}
@@ -212,7 +213,8 @@ async def test_validation_failure_leaves_the_request_pending_and_emits_nothing()
     svc = _service(bus, normalizer=RejectingNormalizer())
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
     with pytest.raises(ValueError):
-        await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", message="bad"))
+        await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id="",
+                                    message="bad"))
     assert svc.registry.get("hit_1").resolved is False
     assert bus.types() == [EventType.HITL_OPENED]
 
@@ -231,7 +233,7 @@ async def test_cancel_on_resolved_request_is_a_noop():
     bus = RecordingBus()
     svc = _service(bus)
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ)
-    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted"))
+    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id=""))
     assert await svc.cancel("hit_1", message="too late") is None
     assert bus.types().count(EventType.HITL_RESOLVED) == 1
 
