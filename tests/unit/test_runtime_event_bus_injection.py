@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.runtime import CtxWeftRuntime, ProviderRegistry
+from ctx_weft.core.registry import ProviderRegistry
+from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.providers.agent_template_local import LocalAgentTemplateProvider
 from ctx_weft.providers.events import InProcessEventBus
 

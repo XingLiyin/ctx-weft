@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 import jsonschema
 
 from ctx_weft.core.content import (
+    CONTENT_PARTS_KEY,
     content_with_prefix,
     content_with_suffix,
     normalize_content_parts,
@@ -100,7 +101,10 @@ SILENT_TOOLS = frozenset({
 # 流式协议本身不改：`_stream_tool` 依旧只聚合文本块（`result_parts: list[str]`）。
 # 于是落盘截断（`_maybe_spill`）、human note 拼接、事件 payload 截断这些既有加工
 # 全部只作用于**文本部分**——因为 parts 是在它们之后才拼上去的。
-CONTENT_PARTS_KEY = "content_parts"
+#
+# 定义已移至 `core.content`（两边共同的下游叶子）——`core.media` 的 provider 也要用
+# 这个键，常量留在这里会逼它 import `core.loop`，造出 loop ⇄ media 的环。此处保留
+# re-export 之外的说明性注释，值本身不在这里定义。
 
 
 def invocation_key(tool_name: str, arguments: dict[str, Any] | None) -> str:

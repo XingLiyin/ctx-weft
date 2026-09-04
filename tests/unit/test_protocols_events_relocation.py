@@ -173,7 +173,8 @@ async def test_runtime_still_gets_a_working_default_store() -> None:
     """
     from datetime import datetime, timezone
 
-    from ctx_weft.core.runtime import CtxWeftRuntime, ProviderRegistry
+    from ctx_weft.core.registry import ProviderRegistry
+    from ctx_weft.core.runtime import CtxWeftRuntime
     from ctx_weft.protocols.capability import (
         AgentCapability,
         AgentCapabilityProvider,
@@ -292,7 +293,7 @@ def test_memory_blob_store_is_renamed() -> None:
 
 
 def test_registry_methods_are_renamed() -> None:
-    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.core.registry import ProviderRegistry
 
     reg = ProviderRegistry()
     assert hasattr(reg, "register_memory_blob_store")

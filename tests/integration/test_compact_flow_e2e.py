@@ -20,7 +20,7 @@ from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
-from ctx_weft.core.runtime import ProviderRegistry
+from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
 from ctx_weft.core.domain.models import LoopGuard, Session, Task
 from ctx_weft.core.utils import now_utc

@@ -289,6 +289,26 @@ class Authorizer(ABC):
 
 
 @runtime_checkable
+class SkillIndexConsumer(Protocol):
+    """持有 skill 索引、需要在 skill 目录变动时被通知重建的 provider。
+
+    存在的理由是**打断一条 import 环**：`ProviderRegistry` 在
+    `register_capability` / `deregister_capability` 里要通知
+    `SkillExecutorCapabilityProvider` 重建索引，但后者住在 `core.orchestrator`，
+    而 orchestrator 反过来要 `ProviderRegistry` 的类型——registry 靠函数内惰性
+    import 绕了这个环。改成对本 Protocol 做 `isinstance`，registry 就完全不必知道
+    那个具体类，环真正消失而不是被挪个地方继续绕。
+
+    `runtime_checkable` 的 isinstance 只查方法名存在性，对这里够用：能被通知的
+    条件就是「有 mark_dirty」。
+    """
+
+    def mark_dirty(self) -> None:
+        """下次 list() 前重建索引。"""
+        ...
+
+
+@runtime_checkable
 class HumanGatedAuthorizer(Protocol):
     """**可选**能力接口：只有会问人的 authorizer 实现它。
 

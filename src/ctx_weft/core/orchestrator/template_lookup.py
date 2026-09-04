@@ -18,7 +18,7 @@ from ctx_weft.protocols.capability import (
 )
 
 if TYPE_CHECKING:
-    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.core.registry import ProviderRegistry
     from ctx_weft.protocols.context import ProviderContext
     from ctx_weft.protocols.template import AgentTemplate
 

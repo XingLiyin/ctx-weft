@@ -34,7 +34,7 @@ class _Client:
 
 def _lm() -> AgentLifecycleManager:
     from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
-    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.core.registry import ProviderRegistry
     provider = InlineAgentTemplateProvider()
     provider.register(make_echo_template())
     providers = ProviderRegistry()

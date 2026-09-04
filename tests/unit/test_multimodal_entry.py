@@ -142,7 +142,7 @@ class _CapturingBus:
 
 def _session_registry(bus) -> SessionRegistry:
     from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
-    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.core.registry import ProviderRegistry
     from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 
     templates = InlineAgentTemplateProvider()

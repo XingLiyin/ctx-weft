@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.runtime import CtxWeftRuntime, ProviderRegistry
+from ctx_weft.core.registry import ProviderRegistry
+from ctx_weft.core.runtime import CtxWeftRuntime
 
 
 def test_runtime_requires_agent_capability_provider() -> None:

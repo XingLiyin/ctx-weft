@@ -798,6 +798,18 @@ def downgrade_images_to_text(
     return out
 
 
+#: provider 经 ``metadata`` 回传非文本 part 的通道键。gateway 收到后拼成
+#: ``[TextPart(text), *parts]`` 交给 LLM。
+#:
+#: **住在这里而不是 gateway**：`core.media` 的 provider 也要用它产出图片 part，
+#: 而 gateway 属 `core.loop`——常量长在 gateway 里会逼 media 去 import loop，造出
+#: `loop ⇄ media` 的 import 环（`media/capability.py` 此前正是靠函数内惰性 import
+#: 绕开它，并留了注释说明自己在绕什么）。`core.content` 是两边共同的下游叶子，
+#: 且这个键本就属于「内容怎么传」的话题——`split_for_tool_result` 的 docstring
+#: 早就在讲它了。
+CONTENT_PARTS_KEY = "content_parts"
+
+
 def split_for_tool_result(
     content: "str | list[ContentPart] | None",
 ) -> "tuple[str, list[ContentPart]]":

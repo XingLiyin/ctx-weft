@@ -12,7 +12,7 @@ import pytest
 
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
-from ctx_weft.core.runtime import ProviderRegistry
+from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.protocols.events import EventType
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,

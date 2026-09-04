@@ -1,8 +1,8 @@
 """ctx-weft: Agent Runtime SDK."""
 
+from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.runtime import (
     CtxWeftRuntime,
-    ProviderRegistry,
     RunHandle,
     SessionStartParams,
 )

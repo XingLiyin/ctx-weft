@@ -31,7 +31,7 @@ from ctx_weft.protocols.capability import (
 from ctx_weft.protocols.context import ProviderContext
 
 if TYPE_CHECKING:
-    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.core.registry import ProviderRegistry
 
 logger = logging.getLogger(__name__)
 

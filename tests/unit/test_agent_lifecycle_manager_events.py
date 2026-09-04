@@ -48,7 +48,7 @@ class _Client:
 def _lm(bus, *, max_depth=3):
     import dataclasses as _dc
 
-    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.core.registry import ProviderRegistry
 
     tmpl = make_echo_template()
     tmpl = _dc.replace(tmpl, loop_config=_dc.replace(tmpl.loop_config, max_spawn_depth=max_depth))

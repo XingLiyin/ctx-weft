@@ -24,7 +24,8 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from ctx_weft.core.runtime import CtxWeftRuntime, ProviderRegistry
+from ctx_weft.core.registry import ProviderRegistry
+from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.protocols.capability import (
     AgentCapability,
     AgentCapabilityProvider,

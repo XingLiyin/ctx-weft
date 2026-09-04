@@ -13,7 +13,7 @@ from ctx_weft.protocols.events import EventType
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
 from ctx_weft.core.orchestrator.session_registry import SessionRegistry
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
-from ctx_weft.core.runtime import ProviderRegistry
+from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.protocols import (
     AgentCapabilityProvider,
     AgentTemplate,

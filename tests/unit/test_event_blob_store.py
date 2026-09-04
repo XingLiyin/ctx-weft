@@ -14,7 +14,7 @@ import hashlib
 import pytest
 
 from ctx_weft.core.content import normalize_content
-from ctx_weft.core.runtime import ProviderRegistry
+from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore, NullEventBlobStore
 from ctx_weft.protocols.memory import MemoryBlobStore

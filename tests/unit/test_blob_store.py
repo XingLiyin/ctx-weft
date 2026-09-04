@@ -1,6 +1,6 @@
 import pytest
 
-from ctx_weft.core.runtime import ProviderRegistry
+from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.protocols import BLOB_REF_PREFIX, MemoryBlobStore, NullMemoryBlobStore, ProviderContext
 
 
@@ -56,7 +56,7 @@ async def test_memory_blob_store_does_not_auto_resolve_from_memory_provider():
     那一级的唯一服务对象是 SqlMemoryProvider 的字节存储，字节移出 RDBMS 后无对象可服务。
     """
     from ctx_weft.protocols import MemoryBlobStore, NullMemoryBlobStore
-    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.core.registry import ProviderRegistry
 
     class _MemoryThatIsAlsoBlobStore(MemoryBlobStore):
         name = "fake"
@@ -73,7 +73,7 @@ async def test_memory_blob_store_does_not_auto_resolve_from_memory_provider():
 
 
 async def test_memory_blob_store_returns_explicit_registration():
-    from ctx_weft.core.runtime import ProviderRegistry
+    from ctx_weft.core.registry import ProviderRegistry
     from ctx_weft.providers.blob.fs import FsBlobStore
     import tempfile
     from pathlib import Path

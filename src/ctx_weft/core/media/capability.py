@@ -64,6 +64,7 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ctx_weft.core.content import CONTENT_PARTS_KEY
 from ctx_weft.core.media.refs import find_image_placeholders
 from ctx_weft.protocols import (
     ContentPart,
@@ -413,10 +414,6 @@ class MediaCapabilityProvider(ToolCapabilityProvider):
     async def _handle(
         self, capability_id: str, arguments: dict[str, Any], ctx: ProviderContext,
     ) -> AsyncIterator[CapabilityEvent]:
-        # 惰性 import：`capability_gateway` 属 core.loop，而 Task 5 会让 core.orchestrator
-        # 的 compact 反过来 import core.media —— 模块级引用会把两边绑成一个 import 环。
-        from ctx_weft.core.loop.capability_gateway import CONTENT_PARTS_KEY
-
         if capability_id.split(":")[-1] != GET_IMAGE:
             yield CapabilityEvent(kind="error", payload={
                 "code": "UNKNOWN_MEDIA_CAPABILITY",
