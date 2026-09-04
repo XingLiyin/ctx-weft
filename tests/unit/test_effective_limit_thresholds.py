@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.act import _account_tokens
-from ctx_weft.core.state.models import LoopGuard
+from ctx_weft.core.domain.models import LoopGuard
 from ctx_weft.core.utils import effective_limit
 from ctx_weft.protocols import LLMUsage, MemoryAddress
 

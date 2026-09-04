@@ -142,7 +142,7 @@ async def test_task_label_does_not_crash_on_multimodal_user_prompt() -> None:
     """退而求其次的直接单元覆盖（防端到端 fixture 未来漂移时这条根因仍被盯住）：
     _task_label 对 title="" 的多模态-prompt task 不抛 AttributeError。"""
     from ctx_weft.core.loop.steps.act_guidance import _task_label
-    from ctx_weft.core.state.models import Task
+    from ctx_weft.core.domain.models import Task
 
     task = Task(
         id="t1", session_id="s1", status="ACTIVE",

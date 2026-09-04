@@ -22,7 +22,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
-from ctx_weft.core.state.models import (
+from ctx_weft.core.domain.models import (
     Agent,
     NormalTaskSettings,
     Session,

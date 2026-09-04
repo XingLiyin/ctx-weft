@@ -25,7 +25,7 @@ from ctx_weft.protocols.hitl import (
     HitlDecision,
     UserTurnDelivery,
 )
-from ctx_weft.core.state.models import Session, Task
+from ctx_weft.core.domain.models import Session, Task
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime

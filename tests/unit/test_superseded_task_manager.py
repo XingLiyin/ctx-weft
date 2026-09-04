@@ -18,7 +18,7 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.unit._stub_runner import StubRunner

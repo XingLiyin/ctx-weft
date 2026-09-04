@@ -4,7 +4,7 @@ from __future__ import annotations
 from ctx_weft.core.orchestrator.control_capability import (
     collect_process_report, BACKGROUND_PROCESS_REPORT_NAME,
 )
-from ctx_weft.core.state.models import Task, NormalTaskSettings
+from ctx_weft.core.domain.models import Task, NormalTaskSettings
 
 
 def _task() -> Task:

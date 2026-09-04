@@ -1,4 +1,4 @@
-from ctx_weft.core.state.models import Session
+from ctx_weft.core.domain.models import Session
 
 
 def test_session_carries_context_limit():

@@ -14,7 +14,7 @@ from ctx_weft.core.orchestrator.control_capability import (
     finish_task,
     _CONTROL_TOOLS,
 )
-from ctx_weft.core.state.models import Task
+from ctx_weft.core.domain.models import Task
 
 
 def _ctx(task: Task) -> ControlContext:

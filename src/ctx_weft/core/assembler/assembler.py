@@ -49,7 +49,7 @@ from ctx_weft.core.utils import effective_limit, estimate_tokens
 from ctx_weft.protocols.knowledge import KnowledgeProvider
 
 if TYPE_CHECKING:
-    from ctx_weft.core.state.models import Agent, Session, Task
+    from ctx_weft.core.domain.models import Agent, Session, Task
 
 
 # ── ContextRequest ────────────────────────────────────────────────────────────

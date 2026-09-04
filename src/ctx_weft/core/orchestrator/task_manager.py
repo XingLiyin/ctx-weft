@@ -21,7 +21,7 @@ from ctx_weft.core.orchestrator.task_disposition import (
 )
 from ctx_weft.core.orchestrator.task_queue import QueueEntry, TaskQueue
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
-from ctx_weft.core.state.models import (
+from ctx_weft.core.domain.models import (
     CompactTaskSettings,
     MetadataFillerTaskSettings,
     NormalTaskSettings,

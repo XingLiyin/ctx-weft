@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from ctx_weft.protocols.capability import Capability, CapabilityProvider
 
 if TYPE_CHECKING:
-    from ctx_weft.core.state.models import Task
+    from ctx_weft.core.domain.models import Task
     from ctx_weft.protocols.context import ProviderContext
     from ctx_weft.protocols.template import AgentTemplate
 

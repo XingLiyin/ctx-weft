@@ -19,7 +19,7 @@ from ctx_weft.core.orchestrator.control_capability import (
     BACKGROUND_PROCESS_REPORT_NAME,
     ControlResult,
 )
-from ctx_weft.core.state.models import NormalTaskSettings, Task
+from ctx_weft.core.domain.models import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer

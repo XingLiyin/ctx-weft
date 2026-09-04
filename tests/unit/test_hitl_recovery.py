@@ -17,7 +17,7 @@ pytestmark = pytest.mark.asyncio
 
 def test_restore_keeps_hitl_parked_task_suspended() -> None:
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Task
+    from ctx_weft.core.domain.models import Task
     tm = TaskManager(session_id="s1")
     parked = Task(id="t1", session_id="s1", status="SUSPENDED")
     tm.restore([parked], terminal_ids=set(), parked_task_ids={"t1"})
@@ -27,7 +27,7 @@ def test_restore_keeps_hitl_parked_task_suspended() -> None:
 
 def test_restore_requeues_suspended_on_children_when_all_terminal() -> None:
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Task
+    from ctx_weft.core.domain.models import Task
     tm = TaskManager(session_id="s1")
     parent = Task(id="p", session_id="s1", status="SUSPENDED")
     child = Task(id="c", session_id="s1", status="FINISHED", parent_task_id="p")
@@ -37,7 +37,7 @@ def test_restore_requeues_suspended_on_children_when_all_terminal() -> None:
 
 def test_restore_parked_ids_default_none_is_old_behavior() -> None:
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Task
+    from ctx_weft.core.domain.models import Task
     tm = TaskManager(session_id="s1")
     parent = Task(id="p", session_id="s1", status="SUSPENDED")
     tm.restore([parent], terminal_ids=set())   # no parked_task_ids → old behavior: requeue
@@ -94,7 +94,7 @@ def test_restore_keeps_active_parked_task_out_of_queue() -> None:
     park 判据应看"有无未决 HITL"（parked_task_ids），而非 task.status==SUSPENDED。
     """
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Task
+    from ctx_weft.core.domain.models import Task
     tm = TaskManager(session_id="s1")
     parked = Task(id="t1", session_id="s1", status="ACTIVE")   # 审批热等 → ACTIVE
     tm.restore([parked], terminal_ids=set(), parked_task_ids={"t1"})
@@ -106,7 +106,7 @@ def _tm_with_bus():
     """一个挂着真实 bus、能观察聚合信号的 TaskManager（本文件两条会话收尾用例共用）。"""
     from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Session
+    from ctx_weft.core.domain.models import Session
 
     bus = InProcessEventBus()
     seen: list = []
@@ -132,7 +132,7 @@ async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
     任务自己表达；会话终不终结是 SM 看到哪条聚合信号决定的。
     """
     from ctx_weft.protocols.events import EventType
-    from ctx_weft.core.state.models import NormalTaskSettings, Task
+    from ctx_weft.core.domain.models import NormalTaskSettings, Task
 
     tm, seen = _tm_with_bus()
     tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
@@ -151,7 +151,7 @@ async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
 async def test_session_finishes_when_no_pending_hitl() -> None:
     """对照：没有任何等人/中断的任务时，TM 报 TaskQueueDrained（SM 据此终结会话）。"""
     from ctx_weft.protocols.events import EventType
-    from ctx_weft.core.state.models import NormalTaskSettings, Task
+    from ctx_weft.core.domain.models import NormalTaskSettings, Task
 
     tm, seen = _tm_with_bus()
     tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
@@ -338,7 +338,7 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     import asyncio
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+    from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 

@@ -6,7 +6,7 @@ from ctx_weft.core.runtime import (
     RunHandle,
     SessionStartParams,
 )
-from ctx_weft.core.state.models import (
+from ctx_weft.core.domain.models import (
     CompactTaskSettings,
     MetadataFillerTaskSettings,
     NormalTaskSettings,

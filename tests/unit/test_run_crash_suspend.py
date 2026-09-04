@@ -29,7 +29,7 @@ from __future__ import annotations
 from ctx_weft.core.errors import ContextOverflowError
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.state.models import Session, Task
+from ctx_weft.core.domain.models import Session, Task
 from tests.unit._stub_runner import StubRunner
 
 

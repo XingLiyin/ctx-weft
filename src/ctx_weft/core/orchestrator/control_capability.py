@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any
 
 from ctx_weft.core.utils import SUBTASKS_REVIEW_HEADING, extract_schema, generate_id, now_utc
-from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.core.domain.models import NormalTaskSettings
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
     CapabilityProviderInfo,
@@ -30,7 +30,7 @@ from ctx_weft.protocols.context import ProviderContext
 
 if TYPE_CHECKING:
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Session, Task
+    from ctx_weft.core.domain.models import Session, Task
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ def delegate_task(
     ctx: ControlContext = None,
 ) -> ControlResult:
     """Delegate ONE new sub-task to run separately; the current task suspends until its sub-tasks finish. To finish your OWN task instead, use control__finish_task."""
-    from ctx_weft.core.state.models import Task as TaskModel
+    from ctx_weft.core.domain.models import Task as TaskModel
 
     if ctx is None or ctx.task_manager is None or ctx.task is None:
         return ControlResult(content=f"Sub-task '{title}' scheduled.")
@@ -231,7 +231,7 @@ def delegate_plan(
     ctx: ControlContext = None,
 ) -> ControlResult:
     """Delegate SEVERAL ordered sub-tasks in one call (each runs after the previous); the current task suspends until they all finish. For a single sub-task use control__delegate_task; to finish your OWN task use control__finish_task."""
-    from ctx_weft.core.state.models import Task as TaskModel
+    from ctx_weft.core.domain.models import Task as TaskModel
 
     if not isinstance(tasks, list):
         tasks = []

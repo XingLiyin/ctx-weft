@@ -14,7 +14,7 @@ import pytest
 import ctx_weft.core.loop.steps.background_observe as bo
 from ctx_weft.core.loop.driver import LoopState
 from ctx_weft.core.runtime import CtxWeftRuntime
-from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
 from ctx_weft.protocols import MemoryAddress
 
 pytestmark = pytest.mark.asyncio

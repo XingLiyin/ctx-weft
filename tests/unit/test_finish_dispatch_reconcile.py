@@ -17,7 +17,7 @@ from ctx_weft.core.orchestrator.control_capability import (
     FINISH_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
 )
-from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.core.domain.models import NormalTaskSettings
 from ctx_weft.protocols import ToolCall
 
 

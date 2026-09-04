@@ -19,7 +19,7 @@ import pytest
 
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, finalize_task_memory
-from ctx_weft.core.state.models import NormalTaskSettings, Task
+from ctx_weft.core.domain.models import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer

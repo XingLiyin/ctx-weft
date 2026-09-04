@@ -14,7 +14,7 @@ from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError, CtxWeftError
 from ctx_weft.core.orchestrator.agent_state import AgentInput, next_agent_transition
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
-from ctx_weft.core.state.models import Agent, LoopGuard
+from ctx_weft.core.domain.models import Agent, LoopGuard
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import LLMClient, LoopConfig, MemoryConfig
 from ctx_weft.protocols.context import ProviderContext

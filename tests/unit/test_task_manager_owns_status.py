@@ -23,7 +23,7 @@ import pytest
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, effective_agent_id
-from ctx_weft.core.state.models import Session, Task
+from ctx_weft.core.domain.models import Session, Task
 from ctx_weft.protocols.events import EventType
 
 TASK_STATUS_EVENTS = (

@@ -21,7 +21,7 @@ from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.loop.steps.observe import Verdict
 from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.orchestrator.task_disposition import RunOutcomeKind
-from ctx_weft.core.state.models import NormalTaskSettings, Task
+from ctx_weft.core.domain.models import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryConfig,
@@ -108,7 +108,7 @@ async def run_until_suspend(*, titles: list[str]):
     `dataclasses.replace(state)` 快照（background_observe），SimpleNamespace 不是
     dataclass 会在那一步炸掉。"""
     from ctx_weft.core.loop.driver import LoopState
-    from ctx_weft.core.state.models import Agent, LoopGuard, Session
+    from ctx_weft.core.domain.models import Agent, LoopGuard, Session
 
     mem = InMemoryMemoryProvider()
     scope = MemoryAddress(session_id="s1", task_id="c1", agent_id="ag2")
@@ -154,7 +154,7 @@ async def run_until_park():
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.loop.park import HitlPark
     from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-    from ctx_weft.core.state.models import Agent, LoopGuard, Session
+    from ctx_weft.core.domain.models import Agent, LoopGuard, Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
     from ctx_weft.protocols import MemoryConfig
     from ctx_weft.providers.events import InProcessEventBus
@@ -254,7 +254,7 @@ async def run_until_cancel():
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-    from ctx_weft.core.state.models import Agent, LoopGuard, Session
+    from ctx_weft.core.domain.models import Agent, LoopGuard, Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
     from ctx_weft.protocols import MemoryConfig
     from ctx_weft.providers.events import InProcessEventBus
@@ -320,7 +320,7 @@ async def run_until_crash(exc: BaseException):
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-    from ctx_weft.core.state.models import Agent, LoopGuard, Session
+    from ctx_weft.core.domain.models import Agent, LoopGuard, Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
     from ctx_weft.protocols import MemoryConfig
     from ctx_weft.providers.events import InProcessEventBus

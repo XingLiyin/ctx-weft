@@ -10,12 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.core.domain.models import NormalTaskSettings
 
 if TYPE_CHECKING:
     from ctx_weft.core.orchestrator.agent_lifecycle_manager import ResolvedModel
     from ctx_weft.core.orchestrator.task_disposition import RunOutcome
-    from ctx_weft.core.state.models import Task
+    from ctx_weft.core.domain.models import Task
 
 
 @dataclass

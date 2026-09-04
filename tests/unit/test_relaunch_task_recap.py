@@ -9,7 +9,7 @@ import pytest
 import ctx_weft.core.runtime as rt_mod
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ResolvedModel
 from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.core.domain.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

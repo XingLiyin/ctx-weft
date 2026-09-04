@@ -17,7 +17,7 @@ from ctx_weft.core.loop.steps.compact import (
     fold_root_experience,
 )
 from ctx_weft.core.loop.steps.prepare import PrepareStep
-from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.core.domain.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

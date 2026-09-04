@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
 
 ROOT = "root_agt"
 

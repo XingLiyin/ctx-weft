@@ -24,7 +24,7 @@ from ctx_weft.core.loop.steps.finalize import (
 )
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
-from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
+from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

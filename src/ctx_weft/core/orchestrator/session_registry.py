@@ -11,8 +11,8 @@ from ctx_weft.protocols.events import EventBus
 from ctx_weft.protocols.events import EVENT_TYPES, Event, EventOrigin, EventType
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice
 from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.state.models import Session, Task
-from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.core.domain.models import Session, Task
+from ctx_weft.core.domain.models import NormalTaskSettings
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.context import ProviderContext
 

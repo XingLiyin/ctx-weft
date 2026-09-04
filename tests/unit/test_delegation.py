@@ -23,7 +23,7 @@ from ctx_weft.core.orchestrator.control_capability import (
     delegate_plan,
     delegate_task,
 )
-from ctx_weft.core.state.models import Session, Task
+from ctx_weft.core.domain.models import Session, Task
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent,

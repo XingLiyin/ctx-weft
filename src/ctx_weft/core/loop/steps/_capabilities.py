@@ -11,7 +11,7 @@ import logging
 from ctx_weft.core.orchestrator.capability_resolver import CapabilityResolver
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
 from ctx_weft.core.orchestrator.skill_executor_capability import SkillExecutorCapabilityProvider
-from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.core.domain.models import NormalTaskSettings
 
 logger = logging.getLogger(__name__)
 

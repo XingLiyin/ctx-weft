@@ -17,7 +17,7 @@ from ctx_weft.core.loop.steps.act import CANCELLED_MARK, INTERRUPTED_MARK, ActSt
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from tests.hitl_env import make_hitl
 from ctx_weft.core.assembler.assembler import AssembledPrompt
-from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.core.domain.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import (
     LLMMessage, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
 )

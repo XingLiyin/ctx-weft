@@ -11,7 +11,7 @@ from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedE
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, _AgentRecord
 from ctx_weft.core.orchestrator.agent_state import AgentInput
 from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.state.models import Task
+from ctx_weft.core.domain.models import Task
 from ctx_weft.protocols.events import (
     EVENT_TYPES,
     L_TIER_EVENT_TYPES,

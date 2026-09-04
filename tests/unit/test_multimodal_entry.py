@@ -5,7 +5,7 @@ import pytest
 
 from ctx_weft.core.orchestrator.session_registry import SessionRegistry
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.core.state.models import Session
+from ctx_weft.core.domain.models import Session
 from ctx_weft.core.utils import content_to_text, now_utc
 from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore

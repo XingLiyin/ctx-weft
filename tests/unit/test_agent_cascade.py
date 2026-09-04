@@ -365,7 +365,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     会命中它、触发 `recover_session`（这里桩成必炸），断言失败，复现该缺口。
     """
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Session, Task
+    from ctx_weft.core.domain.models import Session, Task
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     rt = _rt()

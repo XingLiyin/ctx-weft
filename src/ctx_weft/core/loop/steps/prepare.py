@@ -29,7 +29,7 @@ from ctx_weft.core.loop.steps.recognize_intent import (
     launch_recognize_intent,
     should_recognize_intent,
 )
-from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.core.domain.models import NormalTaskSettings
 from ctx_weft.core.utils import (
     effective_limit,
     estimate_content_tokens,

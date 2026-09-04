@@ -16,7 +16,7 @@ import pytest
 
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.core.orchestrator.control_capability import ControlContext, report_task_outcome
-from ctx_weft.core.state.models import Task
+from ctx_weft.core.domain.models import Task
 from ctx_weft.protocols.events import EventType
 
 
@@ -212,7 +212,7 @@ def test_verdict_has_act_recap_and_task_summary_fields():
 
 
 def test_task_model_has_task_summary_field():
-    from ctx_weft.core.state.models import Task
+    from ctx_weft.core.domain.models import Task
     t = Task(id="t1", session_id="s1", status="ACTIVE")
     assert t.task_summary is None
     t.task_summary = "comprehensive"
@@ -255,7 +255,7 @@ def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
     """ObserveStep.execute() 的最小搭台：默认「无 observe ROLE 的子任务」= 机械路径。"""
     from ctx_weft.core.control.tokens import CancelToken
     from ctx_weft.core.loop.driver import LoopContext, LoopState
-    from ctx_weft.core.state.models import NormalTaskSettings, Session
+    from ctx_weft.core.domain.models import NormalTaskSettings, Session
     from ctx_weft.protocols import MemoryAddress, ProviderContext
     from ctx_weft.protocols.template import AgentTemplate, IdentityFacet
     from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -413,7 +413,7 @@ def test_to_be_observed_is_gone() -> None:
     """死值域成员不该留在类型里（总账 D2）。"""
     import typing
 
-    from ctx_weft.core.state.models import TaskStatus
+    from ctx_weft.core.domain.models import TaskStatus
     assert "TO_BE_OBSERVED" not in typing.get_args(TaskStatus)
 
 

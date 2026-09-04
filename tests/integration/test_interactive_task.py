@@ -21,7 +21,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep
 from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
-from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.core.domain.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import (
     LLMMessage, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
 )

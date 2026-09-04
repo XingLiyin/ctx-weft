@@ -7,7 +7,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 
 from ctx_weft.core.runtime import _copy_memory_for_inherit
-from ctx_weft.core.state.models import Task, NormalTaskSettings
+from ctx_weft.core.domain.models import Task, NormalTaskSettings
 from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

@@ -15,7 +15,7 @@ from ctx_weft.core.assembler import AssembledPrompt, ContextAssembler
 from ctx_weft.protocols.events import Event, EventBus, EventType
 from ctx_weft.protocols.events import EVENT_TYPES
 
-from ctx_weft.core.state.models import Agent, Session, Task
+from ctx_weft.core.domain.models import Agent, Session, Task
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import (
     LLMClient, MemoryEvent, MemoryKind, MemoryScope, MemoryProvider, MemoryAddress, ProviderContext,

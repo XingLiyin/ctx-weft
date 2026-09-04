@@ -7,7 +7,7 @@ assigned / creator / root / 全空 per-task 兜底。
 from __future__ import annotations
 
 from ctx_weft.core.orchestrator.task_runner import effective_agent_id
-from ctx_weft.core.state.models import NormalTaskSettings, Task
+from ctx_weft.core.domain.models import NormalTaskSettings, Task
 
 
 def _task(tid: str = "T", **kw) -> Task:

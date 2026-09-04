@@ -67,7 +67,7 @@ from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
-from ctx_weft.core.state.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
+from ctx_weft.core.domain.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
 from ctx_weft.core.errors import (
     AgentNotFound,
     AgentNotRunningError,
@@ -405,7 +405,7 @@ class SessionStartParams:
         reserved_output_tokens: int = 8192,
         resume: bool = False,
     ) -> "SessionStartParams":
-        from ctx_weft.core.state.models import deserialize_settings
+        from ctx_weft.core.domain.models import deserialize_settings
         return cls(
             template_id=template_id,
             user_prompt=user_prompt,
@@ -1999,7 +1999,7 @@ class CtxWeftRuntime:
         from ctx_weft.core.control.reducers import rebuild_view
         from ctx_weft.core.errors import SessionBusyError
         from ctx_weft.core.loop.steps.compact import CompactStep
-        from ctx_weft.core.state.models import LoopGuard, NormalTaskSettings, Task
+        from ctx_weft.core.domain.models import LoopGuard, NormalTaskSettings, Task
         from ctx_weft.protocols import MemoryAddress, ProviderContext
 
         # ── idle-guard: claim the slot synchronously (no await before the claim) ──

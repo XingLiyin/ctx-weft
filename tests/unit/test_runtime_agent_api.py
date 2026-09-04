@@ -46,7 +46,7 @@ def _plant_live_task(rt, agent_id, task_id, *, task_status, agent_status, sessio
     `TaskRunner` 而抛错——那不是本测试要盯的东西）。
     """
     from ctx_weft.core.orchestrator.task_manager import TaskManager
-    from ctx_weft.core.state.models import Session, Task
+    from ctx_weft.core.domain.models import Session, Task
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     rt.providers.register_memory(InMemoryMemoryProvider())

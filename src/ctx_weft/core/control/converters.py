@@ -6,7 +6,7 @@ Used by resume_session to rebuild Session/Task objects from event replay.
 from __future__ import annotations
 
 from ctx_weft.core.control.types import SessionView, TaskView
-from ctx_weft.core.state.models import Session, Task, deserialize_settings
+from ctx_weft.core.domain.models import Session, Task, deserialize_settings
 from ctx_weft.core.utils import as_utc
 
 

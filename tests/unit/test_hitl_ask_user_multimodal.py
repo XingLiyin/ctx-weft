@@ -30,7 +30,7 @@ from ctx_weft.core.orchestrator.control_capability import (
     PROVIDER_NAME,
     ControlCapabilityProvider,
 )
-from ctx_weft.core.state.models import Session, Task
+from ctx_weft.core.domain.models import Session, Task
 from ctx_weft.protocols import ImagePart, MemoryAddress, ProviderContext, TextPart
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.hitl import HitlReply
