@@ -96,7 +96,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
 )
-from ctx_weft.protocols.agent import AgentDetail, AgentSummary
+from ctx_weft.protocols.agent import AgentDetail, AgentSummary, CompactReceipt
 from ctx_weft.protocols.capability import (
     AgentCapabilityProvider,
     CapabilityProvider,
@@ -1821,18 +1821,21 @@ class CtxWeftRuntime:
         await tm.resume_task(resumed_task_id, hitl_id=hitl_id)
         self._register_and_drain(session, tm)
 
-    async def compact_session(
+    async def compact_agent(
         self,
-        session_id: str,
+        agent_id: str,
         *,
-        agent_id: str | None = None,
         task_id: str = "",
-    ) -> dict[str, str]:
-        """Run a one-shot, compact-only operation over an IDLE session's memory.
+    ) -> CompactReceipt:
+        """Run a one-shot, compact-only operation over an IDLE agent's memory.
 
-        Folds the agent layer (dispatch log) of ``agent_id`` (default: the session
-        root agent). Pass a real ``task_id`` to also make that task's task layer
-        eligible. Raises ``SessionBusyError`` if the session is currently running.
+        Folds the agent layer (dispatch log) of ``agent_id``. Pass a real ``task_id``
+        to also make that task's task layer eligible. Raises ``SessionBusyError`` if
+        the agent's session is currently running.
+
+        ``session_id`` is looked up from the agent record (2026-09-04 spec §7.3:
+        compact was always an agent-grained operation — hanging it off the session
+        had it backwards). An unregistered ``agent_id`` raises ``AgentNotFound``.
 
         Calls ``CompactStep.execute`` directly (no step driver) but does emit a
         matching RunStarted/RunFinished pair around it (总账 C5: an orphan run_id
@@ -1840,9 +1843,10 @@ class CtxWeftRuntime:
         still untouched, since RunStarted/RunFinished are reducer no-ops just like
         MemoryCompactStarted / MemoryCompacted.
 
-        Returns ``{"session_id", "agent_id", "task_id"}``. When ``task_id`` is not
-        supplied, the returned ``task_id`` is a transient in-memory carrier id with no
-        event-store record (it only scopes the fold); callers should not try to look it up.
+        Returns a ``CompactReceipt``. When ``task_id`` is not supplied, the receipt's
+        ``task_id`` is a transient in-memory carrier id with no event-store record (it
+        only scopes the fold) and ``task_id_is_transient`` is ``True``; callers should
+        not try to look it up.
 
         Note: a concurrent ``pause_session`` while a compact is in flight is not
         honoured mid-compact — ``CompactStep`` does not poll the pause token — but the
@@ -1858,6 +1862,14 @@ class CtxWeftRuntime:
         from ctx_weft.core.models.task import NormalTaskSettings, Task
         from ctx_weft.protocols import MemoryAddress, ProviderContext
 
+        lm = self._agent_lifecycle_manager
+        rec = lm.record_of(agent_id)
+        if rec is None:
+            raise AgentNotFound(f"unknown agent: {agent_id}")
+        session_id = rec.session_id
+        target_agent_id = agent_id
+        transient = not task_id
+
         # ── idle-guard: claim the slot synchronously (no await before the claim) ──
         if session_id in self._busy_sessions or self._run_tokens.get(session_id):
             raise SessionBusyError(session_id)
@@ -1872,11 +1884,6 @@ class CtxWeftRuntime:
                 raise RuntimeError(f"Session {session_id!r} has no template_id — cannot compact")
 
             session = session_from_projection(proj)
-            target_agent_id = agent_id or session.root_agent_id
-            if not target_agent_id:
-                raise RuntimeError(f"Session {session_id!r} has no agent to compact")
-
-            lm = self._agent_lifecycle_manager
             pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
             # 水合，不新建：target_agent_id 是已存在 agent。register_session 保证跨
             # 重启后 registry 为空时 materialize 的回落有正确的 session 语境（幂等）。
@@ -1889,7 +1896,7 @@ class CtxWeftRuntime:
             template = await self._template_lookup.get_template(
                 proj.template_id, None, ctx=pctx,
             )
-            # 手动 compact_session 是「强制立即压」的一次性操作，不受预算门控（escalating_compact
+            # 手动 compact_agent 是「强制立即压」的一次性操作，不受预算门控（escalating_compact
             # 按 token_estimate vs target_tokens 判断是否需要压）——context_tokens=context_limit
             # 使门总是打开，交给各级内部的可折性判断决定实际动多少。
             agent = _dc.replace(
@@ -1976,7 +1983,10 @@ class CtxWeftRuntime:
                     "error_type": type(run_error).__name__ if run_error else None,
                 }, origin=EventOrigin.RUNTIME))
 
-            return {"session_id": session.id, "agent_id": agent.id, "task_id": task.id}
+            return CompactReceipt(
+                session_id=session.id, agent_id=agent.id, task_id=task.id,
+                task_id_is_transient=transient,
+            )
         finally:
             self._busy_sessions.discard(session_id)
 

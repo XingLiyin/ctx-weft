@@ -290,8 +290,8 @@ async def test_capability_gateway_events_have_loop_capability_gateway_origin():
     )
 
 
-async def test_compact_session_run_events_have_runtime_origin():
-    """`CtxWeftRuntime.compact_session` 的 RunStarted/RunFinished 恒是 EventOrigin.RUNTIME。
+async def test_compact_agent_run_events_have_runtime_origin():
+    """`CtxWeftRuntime.compact_agent` 的 RunStarted/RunFinished 恒是 EventOrigin.RUNTIME。
 
     覆盖 runtime.py 里独立于主 `_run_loop` 之外的第二条 RUN_* 发射路径
     （compact-only，走 `origin=EventOrigin.RUNTIME` 显式覆盖，不继承 state.origin）
@@ -334,7 +334,7 @@ async def test_compact_session_run_events_have_runtime_origin():
 
     rt._event_bus.subscribe(None, _spy)
 
-    await rt.compact_session(sid)
+    await rt.compact_agent(aid)
 
     run_events = [ev for ev in seen if ev.type in (EventType.RUN_STARTED, EventType.RUN_FINISHED)]
     assert len(run_events) == 2, "RunStarted + RunFinished"

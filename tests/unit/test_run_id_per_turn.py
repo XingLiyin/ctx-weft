@@ -47,7 +47,7 @@ A11——「`(run_id, sequence)` 在每个多步 run 内都会撞号」——是
 `sequence_counter` 冻结在 prepare 步 patch 落下那一刻的值，run 收尾时
 `RunFinished` 把这份冻结值 +1，确定性地撞上 driver 那侧 prepare 步的
 `StepCompleted`（它也是同一起点 +1）。跟踪文档明载「影响面：**所有多步
-run**，与 background observe / recognize_intent / compact_session 无关」，且
+run**，与 background observe / recognize_intent / compact_agent 无关」，且
 「结构性改动……属独立立项，留给后续批次」——即在本 task 动手之前就已存在、
 且明确排除在「run_id 一轮一个」这个修复范围之外（`_run_loop`/`driver.run` 的
 state 传递方式完全没在本 task 的改动清单里）。

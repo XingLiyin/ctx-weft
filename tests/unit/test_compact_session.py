@@ -42,23 +42,30 @@ def test_session_busy_error_carries_session_id() -> None:
     assert "ses_1" in str(err)
 
 
-async def test_compact_session_rejects_busy_session() -> None:
+async def test_compact_agent_rejects_busy_session() -> None:
     rt = _runtime()
-    rt._busy_sessions.add("ses_busy")  # simulate an active drain
+    sid, aid = "ses_busy", "agt_root"
+    rt._agent_lifecycle_manager.register_session(
+        sid, tenant_id="default", fallback_template_id="agent:tpl_echo",
+    )
+    rt._agent_lifecycle_manager.materialize(aid)
+    rt._busy_sessions.add(sid)  # simulate an active drain
     with pytest.raises(SessionBusyError):
-        await rt.compact_session("ses_busy")
+        await rt.compact_agent(aid)
 
 
-async def test_compact_session_unknown_session_raises() -> None:
+async def test_compact_agent_unknown_agent_raises() -> None:
+    from ctx_weft.core.models.errors import AgentNotFound
+
     rt = _runtime()
-    with pytest.raises(RuntimeError):
-        await rt.compact_session("ses_missing")
+    with pytest.raises(AgentNotFound):
+        await rt.compact_agent("agt_missing")
 
 
-async def test_compact_session_uses_agent_lifecycle_managers_current_model_not_stale_session_field() -> None:
+async def test_compact_agent_uses_agent_lifecycle_managers_current_model_not_stale_session_field() -> None:
     """`set_agent_llm` 换模型后手动 compact：送出的 LLMRequest.model 必须是新模型。
 
-    钉住评审 finding：compact_session 里 `agent.runtime["llm_model"]` 曾经取自
+    钉住评审 finding：compact_agent 里 `agent.runtime["llm_model"]` 曾经取自
     `session.llm_model`（批次 B 前的真相源，早已停止权威），而不是本次 `materialize()`
     同一处返回的 `ResolvedModel.model`——client 派对了（`rm.client`），模型名却掰旧的。
     """
@@ -121,7 +128,7 @@ async def test_compact_session_uses_agent_lifecycle_managers_current_model_not_s
     assert changed is True
 
     # ……再手动 compact：materialize() 拿到的 client 与 model 必须同源一致。
-    await rt.compact_session(sid)
+    await rt.compact_agent(aid)
 
     assert old_llm.last_request is None, "旧模型不该被调用"
     assert new_llm.last_request is not None, "新模型该被调用（client 派对了）"
@@ -130,13 +137,13 @@ async def test_compact_session_uses_agent_lifecycle_managers_current_model_not_s
     )
 
 
-async def test_compact_session_folds_agent_layer() -> None:
+async def test_compact_agent_folds_agent_layer() -> None:
     resolver = InlineAgentTemplateProvider()
     # small keep_last so a handful of dispatch pairs is over budget
     tmpl = dataclasses.replace(make_echo_template(),
                                loop_config=LoopConfig(compact_keep_last=2))
     resolver.register(tmpl)
-    # escalating_compact 预算门总开（compact_session 强制立即压）→ L1 折 agent 层一次调用
+    # escalating_compact 预算门总开（compact_agent 强制立即压）→ L1 折 agent 层一次调用
     # summarize_for_compact；本例 task_id="" 的当前 task 层无材料可折，L3 guard 拦下、不再空调
     # 第二次 LLM，故只需 1 条 mock 响应。
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
@@ -175,10 +182,18 @@ async def test_compact_session_folds_agent_layer() -> None:
             timestamp=ts + timedelta(seconds=i * 10 + 1),
             metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
 
-    result = await rt.compact_session(sid)
+    # 先水合 record（生产路径里这一步发生在 root agent 实例化时；此处手工建 session
+    # 只走了 event_store，registry 还没见过这个 agent_id——compact_agent 现在先经
+    # record_of() 校验存在性，未注册的 agent_id 会被当成 AgentNotFound 挡在门外）。
+    rt._agent_lifecycle_manager.register_session(
+        sid, tenant_id="default", fallback_template_id=f"agent:{tmpl.id}",
+    )
+    rt._agent_lifecycle_manager.materialize(aid)
 
-    assert result["session_id"] == sid
-    assert result["agent_id"] == aid
+    result = await rt.compact_agent(aid)
+
+    assert result.session_id == sid
+    assert result.agent_id == aid
     # agent-layer scope key ignores task_id (spec/06 §2), so task_id="" matches the seeded layer
     summaries = await mem.recall_recent(
         scope=MemoryAddress(session_id=sid, task_id="", agent_id=aid),

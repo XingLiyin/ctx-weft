@@ -221,7 +221,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
 
     # 总账 C5（控制方裁定 R1）：`launch_background_observe` 给这段快照发了自己的
     # run_id（解 A4）——它在 host 眼里就是一段独立的 run，得有起有止，不能只补
-    # recognize_intent / compact_session 两处而漏掉它自己。payload 结构照抄
+    # recognize_intent / compact_agent 两处而漏掉它自己。payload 结构照抄
     # `_run_loop` 的实际发射点（`runtime.py`，见 task-5-report）；`initial_step`
     # 用它实际做的事 "background_observe"（这条路径没有 StepDriver，取不到真实
     # step 名）。TaskRecapStarted/Done 是任务级的 recap 记账，与这里的 run 级起止

@@ -144,7 +144,7 @@ async def bus_after_recap_run() -> _RecapRun:
     # （runtime.py，`await self._event_bus.emit(make_event(..., origin=EventOrigin.RUNTIME))`），
     # 而 recap（LOOP_BACKGROUND_OBSERVE）与 recognize_intent（LOOP_RECOGNIZE_INTENT）两条
     # 孤儿 run 都不做这个覆盖、各自沿用自己快照的 origin。本 fixture 不触发
-    # compact_session（唯一另一处同样显式钉 RUNTIME 的路径），故 origin=RUNTIME 在这里
+    # compact_agent（唯一另一处同样显式钉 RUNTIME 的路径），故 origin=RUNTIME 在这里
     # 无歧义地唯一指向主 run。
     main_run_started = next(
         e for e in seen
@@ -181,8 +181,8 @@ async def test_every_run_id_has_start_and_finish(bus_after_recap_run):
     _assert_every_run_has_start_and_finish(bus_after_recap_run.events)
 
 
-async def test_compact_session_run_has_start_and_finish():
-    """C5 的第三种孤儿 run：`compact_session` 手动压缩，不经 `_run_loop`。"""
+async def test_compact_agent_run_has_start_and_finish():
+    """C5 的第三种孤儿 run：`compact_agent` 手动压缩，不经 `_run_loop`。"""
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
@@ -216,7 +216,7 @@ async def test_compact_session_run_has_start_and_finish():
     )
     runtime._agent_lifecycle_manager.materialize(aid)
 
-    await runtime.compact_session(sid)
+    await runtime.compact_agent(aid)
 
     _assert_no_duplicate_sequence(seen)
     _assert_every_run_has_start_and_finish(seen)

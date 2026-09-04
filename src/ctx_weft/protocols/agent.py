@@ -30,3 +30,18 @@ class AgentDetail:
     template_id: str
     created_at: datetime | None = None
     current_task_status: str | None = None
+
+
+@dataclass(frozen=True)
+class CompactReceipt:
+    """`compact_agent` 的回执。
+
+    `task_id_is_transient=True` 表示 `task_id` 是一个**只用于圈定折叠范围的内存
+    载体 id**，事件库里没有对应记录——调用方不要拿它去查。改动前这条约定只活在
+    `compact_session` 的 docstring 里，调用方只能靠「我传没传 task_id」自己反推。
+    """
+
+    session_id: str
+    agent_id: str
+    task_id: str
+    task_id_is_transient: bool

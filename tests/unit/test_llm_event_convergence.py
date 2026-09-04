@@ -279,7 +279,7 @@ async def test_compact_sends_resolved_model_to_llm_client_not_mock_sentinel():
     在同样的回退下仍然全绿，测不出问题，这正是复审揪出的盲区）。
 
     走 inline compact 语义的最小化 state/ctx（`_make_compact_state`/`_make_compact_ctx`
-    本就是给 inline 路径搭的最小夹具）——**不**走 `compact_session`，因为那条路径靠
+    本就是给 inline 路径搭的最小夹具）——**不**走 `compact_agent`，因为那条路径靠
     `runtime.py:1809` 的 `agent.runtime={"llm_model": rm.model}` 桥接，一直是对的，
     测不出 inline 路径这个 bug。
     """

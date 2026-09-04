@@ -89,9 +89,9 @@ async def summarize_for_compact(
     ``"mock"``。改用同子系统其余调用方（act.py 等）已经在用的 ``resolve_llm_identity``
     ——真值来自 ``state.resolved_model``，是派发时 ``AgentLifecycleManager.resolve_model`` 解出的
     那一个，compact 的三条调用路径（inline PrepareStep 触发 / ``_maybe_predispatch_compact``
-    / 独立的 ``compact_session``）用的都是已经带 ``resolved_model`` 的 ``LoopState``（前两者
+    / 独立的 ``compact_agent``）用的都是已经带 ``resolved_model`` 的 ``LoopState``（前两者
     共享 ``_execute_task`` 构造的那份，同一份 state 上 act.py 的 ``resolve_llm_identity``
-    早就在成功调用；后者是 ``runtime.py::compact_session`` 显式 ``resolved_model=rm`` 构造
+    早就在成功调用；后者是 ``runtime.py::compact_agent`` 显式 ``resolved_model=rm`` 构造
     的孤儿 run），故不额外加 try/except 兜底——真出现 None 就该炸，不吞。
 
     真实调查结论（供风险评估）：这次修复前，实际发给 LLM 服务商的模型**并不是**字面上的
@@ -106,7 +106,7 @@ async def summarize_for_compact(
     是「实际用的那个」，撒谎的是事件，不是调用（`MockLLMAdapter` 例外：它没有这层兜底，
     ``last_request.model`` 会原样收到调用方传入的值——`compact.py` 里那处
     ``agent.runtime={"llm_model": rm.model}`` 桥接就是专给它搭的，见 `runtime.py`
-    ``compact_session``；本次改动后这座桥不再是唯一支撑，`resolve_llm_identity` 本身就
+    ``compact_agent``；本次改动后这座桥不再是唯一支撑，`resolve_llm_identity` 本身就
     正确，桥不拆但也不再是必需）。
 
     task-4 复审修复（第一轮）：compact 走的这次 LLM 调用现在也经 gateway 的门禁（origin==
