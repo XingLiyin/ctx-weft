@@ -2828,6 +2828,44 @@ class CtxWeftRuntime:
                 logger.exception("rebuild_all_pending_hitl: failed for session %s", sid)
         return total
 
+    async def rebuild_agent(self, agent_id: str) -> bool:
+        """据事件把**单个** agent 装填进 ALM；找不到返回 False。
+
+        `rebuild_hitl` 的 agent 侧对应物（2026-09-04 spec §6.2）。用于 `recover()`
+        没跑过的进程（测试、嵌入场景），或运行期发现某个 agent 记录缺失时的按需自愈。
+
+        **实现是 `_load_agents_of` 的一次调用后再查一次**，不另写折叠逻辑：
+        `agent_id` 全局唯一但事件按 session 分区存（spec §6.1），要定位它就得先知道
+        它属于哪个 session——已在内存里的直接读 `record_of`，不在内存里的扫活跃
+        session 逐个装填（`rebuild_all_agents` 的路径），装完再查一次。
+
+        幂等：`ALM.load` 对同一批 `AgentView` 重复调用只是覆盖同值。
+        """
+        rec = self._agent_lifecycle_manager.record_of(agent_id)
+        if rec is not None:
+            return True
+        await self.rebuild_all_agents()
+        return self._agent_lifecycle_manager.record_of(agent_id) is not None
+
+    async def rebuild_all_agents(self) -> int:
+        """据事件把**所有 active session** 的 agent 装填进 ALM，返回总条数。
+
+        `rebuild_all_pending_hitl` 的 agent 侧对应物。不发中断、不 drain、不派发任何
+        任务——与 `recover()` 的「启动时 nothing runs」同一纪律，区别只是它不碰 HITL。
+        """
+        try:
+            session_ids = await self.event_store.list_active_session_ids()
+        except NotImplementedError:
+            return 0
+        total = 0
+        for sid in session_ids:
+            try:
+                tenant_id = await self._tenant_for_session(sid)
+                total += await self._load_agents_of(sid, tenant_id=tenant_id)
+            except Exception:
+                logger.exception("rebuild_all_agents: failed for session %s", sid)
+        return total
+
     # ── Internal execution ───────────────────────────────────────────────────
 
     def _build_provider_ctx(self, session: Session, task: Task, agent: Agent) -> ProviderContext:
