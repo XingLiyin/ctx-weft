@@ -80,7 +80,7 @@ class EventType(StrEnum):
     SESSION_FINISHED = "SessionFinished"   # TaskManager 确定 session 真正结束时发（含 final_status）
     SESSION_PAUSED_HITL = "SessionPausedHitl"
     # ── 会话状态 v2（2026-09-02 所有权重构）──
-    # 只有 SessionManager 发这三条 + SESSION_FINISHED。通用 setter
+    # 只有 SessionRegistry 发这三条 + SESSION_FINISHED。通用 setter
     # SESSION_STATUS_CHANGED 就此退役（L 档，只读存量）。
     SESSION_INTERRUPTED = "SessionInterrupted"        # 断了，等 /resume，非终态
     SESSION_WAITING = "SessionWaiting"                # 停着但正常：都在等人 / 等外部输入（payload 空）
@@ -210,7 +210,7 @@ class EventOrigin:
     分隔符用 `.` 不用 `:`——`:` 留给可路由的 capability id（`provider:tool`）。
     """
 
-    ORCHESTRATOR_SESSION_MANAGER = "orchestrator.session_manager"
+    ORCHESTRATOR_SESSION_MANAGER = "orchestrator.session_registry"
     ORCHESTRATOR_TASK_MANAGER = "orchestrator.task_manager"
     LOOP_DRIVER = "loop.driver"
     LOOP_PREPARE = "loop.prepare"
@@ -268,7 +268,7 @@ L_TIER_EVENT_TYPES: frozenset[str] = frozenset({
     # 不新建常量、不搬到 events.py（那是下一个任务的事），不从 EventType 枚举里删除。
     "RecognizeIntentLLMPrompt",
     # Task 16（2026-09-03-agent-centric-interaction）：会话状态机（session_state.py）
-    # 随 SessionManager 降格（Task 15）一并退役，这 4 个 session 运行态类型不再有
+    # 随 SessionRegistry 降格（Task 15）一并退役，这 4 个 session 运行态类型不再有
     # 发射点。reducer 分支原样保留（存量日志重放靠它们），枚举成员不删——
     # docs/events-v2.md §5：只删发射，不删枚举，删枚举须另过退役闸门。
     "SessionRunning", "SessionWaiting", "SessionInterrupted", "SessionFinished",

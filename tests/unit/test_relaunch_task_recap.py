@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 import ctx_weft.core.runtime as rt_mod
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, ResolvedModel
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ResolvedModel
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
@@ -94,7 +94,7 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
         return (Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
                        tenant_id=session.tenant_id), _fake_resolved_model())
 
-    monkeypatch.setattr(AgentRegistry, "materialize", _fake_materialize)
+    monkeypatch.setattr(AgentLifecycleManager, "materialize", _fake_materialize)
 
     captured = {}
 
@@ -133,7 +133,7 @@ async def test_relaunch_is_best_effort_swallows_errors(minimal_runtime_with_sess
     def _boom(self, *args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(AgentRegistry, "materialize", _boom)
+    monkeypatch.setattr(AgentLifecycleManager, "materialize", _boom)
 
     await runtime._relaunch_task_recap(
         session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
@@ -171,7 +171,7 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
         return (Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
                        tenant_id=session.tenant_id), _fake_resolved_model())
 
-    monkeypatch.setattr(AgentRegistry, "materialize", _fake_materialize)
+    monkeypatch.setattr(AgentLifecycleManager, "materialize", _fake_materialize)
 
     registered = []
     monkeypatch.setattr(rt_mod, "register_close_synth",

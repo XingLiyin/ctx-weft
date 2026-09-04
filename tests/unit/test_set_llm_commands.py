@@ -10,7 +10,7 @@ import inspect
 
 import pytest
 
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, ModelChoice
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.runtime import ProviderRegistry
 from ctx_weft.protocols.events import EventType
@@ -42,7 +42,7 @@ def _reg():
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    reg = AgentRegistry(
+    reg = AgentLifecycleManager(
         template_lookup=TemplateLookup(providers),
         event_bus=_Bus(),
         model_resolver=lambda a, m: _Client(),

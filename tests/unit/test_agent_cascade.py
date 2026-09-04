@@ -35,7 +35,7 @@ async def test_cancel_cascades_to_all_descendants():
     killed = await rt.cancel_agent("root", reason="user")
     assert set(killed) == {"root", "kid1", "kid2", "grandkid"}
     for a in killed:
-        assert rt._agent_registry.status_of(a) == "terminated"
+        assert rt._agent_lifecycle_manager.status_of(a) == "terminated"
 
 
 async def test_cancel_marks_cascade_source_in_payload():
@@ -111,8 +111,8 @@ async def test_cancel_only_finalizes_hitl_of_target_agent(monkeypatch):
     await rt.cancel_agent("a1")
 
     assert canceled == ["h1"]
-    assert rt._agent_registry.status_of("a1") == "terminated"
-    assert rt._agent_registry.status_of("a2") == "waiting_human"
+    assert rt._agent_lifecycle_manager.status_of("a1") == "terminated"
+    assert rt._agent_lifecycle_manager.status_of("a2") == "waiting_human"
 
 
 async def test_cancel_finalizes_hitl_before_agent_terminated_event(monkeypatch):
@@ -159,8 +159,8 @@ async def test_pause_agent_signals_running_descendants_only():
     _plant(rt, "root", None, status="running", session_id="s1")
     _plant(rt, "busy_kid", "root", status="running", session_id="s1")
     _plant(rt, "idle_kid", "root", status="idle", session_id="s1")
-    rt._agent_registry._agents["root"].current_task_id = "t_root"
-    rt._agent_registry._agents["busy_kid"].current_task_id = "t_kid"
+    rt._agent_lifecycle_manager._agents["root"].current_task_id = "t_root"
+    rt._agent_lifecycle_manager._agents["busy_kid"].current_task_id = "t_kid"
     root_tokens = rt._register_run_tokens("s1", "t_root")
     kid_tokens = rt._register_run_tokens("s1", "t_kid")
 
@@ -170,15 +170,15 @@ async def test_pause_agent_signals_running_descendants_only():
     assert root_tokens.pause.is_paused is True
     assert kid_tokens.pause.is_paused is True
     # 信号只是递送了，状态转移要等真实的 TASK_AWAITING_HUMAN 事件（R24）——此刻仍是 running。
-    assert rt._agent_registry.status_of("root") == "running"
-    assert rt._agent_registry.status_of("idle_kid") == "idle"
+    assert rt._agent_lifecycle_manager.status_of("root") == "running"
+    assert rt._agent_lifecycle_manager.status_of("idle_kid") == "idle"
 
 
 async def test_pause_agent_skips_running_agent_with_no_live_run_token():
     """running 但没有在册 run token（race / 陈旧 record）——`pause_task` 命不中,不计入返回值。"""
     rt = _rt()
     _plant(rt, "root", None, status="running", session_id="s1")
-    rt._agent_registry._agents["root"].current_task_id = "t_root"
+    rt._agent_lifecycle_manager._agents["root"].current_task_id = "t_root"
     # 故意不注册 run token
 
     paused = await rt.pause_agent("root")
@@ -305,7 +305,7 @@ async def test_resume_agent_cascades_to_waiting_human_descendants_only(monkeypat
     resumed = await rt.resume_agent("root")
 
     assert set(resumed) == {"root", "kid"}
-    assert rt._agent_registry.status_of("other") == "idle"
+    assert rt._agent_lifecycle_manager.status_of("other") == "idle"
     assert rt.hitl_registry.get(r1.id).resolved is True
     assert rt.hitl_registry.get(r2.id).resolved is True
 
@@ -371,7 +371,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     rt = _rt()
     rt.providers.register_memory(InMemoryMemoryProvider())
     _plant(rt, "root", None, status="running", session_id="s1")
-    rt._agent_registry._agents["root"].current_task_id = "t_root"
+    rt._agent_lifecycle_manager._agents["root"].current_task_id = "t_root"
     root_tokens = rt._register_run_tokens("s1", "t_root")
 
     tm = TaskManager(session_id="s1", event_bus=rt._event_bus)
@@ -402,7 +402,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     #    真实 run loop。
     stale_bubble = await _open_pause_bubble(rt, agent_id="root", task_id="t_root")
     task.status = "AWAITING_HUMAN"
-    rt._agent_registry._agents["root"].status = "waiting_human"
+    rt._agent_lifecycle_manager._agents["root"].status = "waiting_human"
 
     # 3. 用户此刻改口，发了条新消息（没有专门回答那条暂停气泡）——这正是本次修复
     #    要收口的缺口：send_message 必须把这条陈旧气泡终局掉。
@@ -415,10 +415,10 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     # 4. task 被重排、agent 回 idle（真正的 running 要等 drain 派发——这里 drain
     #    是 no-op），之后模拟它再跑一轮、真的问了一个新问题（真实 ask_user），再次
     #    落 waiting_human。
-    assert rt._agent_registry.status_of("root") == "idle"
+    assert rt._agent_lifecycle_manager.status_of("root") == "idle"
     real_question = await _open_ask_user_bubble(rt, agent_id="root", task_id="t_root")
     task.status = "AWAITING_HUMAN"
-    rt._agent_registry._agents["root"].status = "waiting_human"
+    rt._agent_lifecycle_manager._agents["root"].status = "waiting_human"
 
     # 5. 核心断言：resume_agent 不能被那条早该终局的陈旧气泡误导去冷续跑——陈旧
     #    气泡已经被第 3 步收口，此刻 pending 列表里只有真问题（ToolResultDelivery），

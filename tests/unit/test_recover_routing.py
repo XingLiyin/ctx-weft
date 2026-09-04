@@ -6,15 +6,15 @@ Task 6 起路由判据换了层：recover() 不再自己宣布会话状态,而�
 - 有未决 pending HITL → TaskQueueBlocked
 - 没有                → TaskQueueInterrupted（等 /resume）
 
-Task 16 起：SessionManager 随会话状态机一并降格,不再消费这条信号译成会话级
+Task 16 起：SessionRegistry 随会话状态机一并降格,不再消费这条信号译成会话级
 SessionWaiting/SessionInterrupted 事件——本文件因此直接钉住 TM 的这条聚合信号
 本身（它是 recover() 真正发出的、也是退役前 SM 唯一消费的同一条输入）,不再断言
-已经不存在的会话级事件或 `SessionManager.status_of`。
+已经不存在的会话级事件或 `SessionRegistry.status_of`。
 
 **为什么这里没有等强的替代观测点**（不是漏补，是这个调用点确实没有）：
 recover() 本身不 drain、不派发任何 task/agent——`_announce_queue_state_as_tm_proxy`
-只是**代 TM** 发一条队列信号就返回，此刻 AgentRegistry 的五态机（ALM）根本没跑起来，
-没有 `AGENT_*` 事件可捕、`agent_registry.status_of()` 这时查也查不到任何有意义的东西
+只是**代 TM** 发一条队列信号就返回，此刻 AgentLifecycleManager 的五态机（ALM）根本没跑起来，
+没有 `AGENT_*` 事件可捕、`agent_lifecycle_manager.status_of()` 这时查也查不到任何有意义的东西
 （很多时候 agent 记录本身还没通过这条路径装填）。唯一还在运作的只读入口
 `session_status_after_recover()` 只推导 `PAUSED`/`PAUSED_HITL` 两个值，对**无 pending**
 的分支（原来 B/C 两个会话对应的场景）直接返回空字符串——同样没有区分度。
@@ -105,7 +105,7 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
     assert set(interrupted) == {"B", "C"}
     # 有人在等回话的那个 → TaskQueueBlocked，不是 Interrupted（绝不把 parked 任务孤立）。
     assert blocked == ["A"]
-    # 不再断言 `runtime._session_manager.status_of(...)`（该方法本身已在 Task 15 被
+    # 不再断言 `runtime._session_registry.status_of(...)`（该方法本身已在 Task 15 被
     # 摘除）——且此刻也没有等强的替代：recover() 不 drain，ALM 还没跑起来，
     # session_status_after_recover() 对无 pending 的分支只返回空串。见模块 docstring
     # 「为什么这里没有等强的替代观测点」。

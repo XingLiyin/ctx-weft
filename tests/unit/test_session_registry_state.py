@@ -1,4 +1,4 @@
-"""SessionManager 降格为会话内 agent 登记表（Task 15）。"""
+"""SessionRegistry 降格为会话内 agent 登记表（Task 15）。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ctx_weft.core.orchestrator.session_manager import SessionManager, _SessionState
+from ctx_weft.core.orchestrator.session_registry import SessionRegistry, _SessionState
 from ctx_weft.protocols.events import Event, EventType
 
 pytestmark = pytest.mark.asyncio
@@ -23,8 +23,8 @@ class _SpyBus:
         pass
 
 
-def _sm() -> SessionManager:
-    return SessionManager(agent_registry=None, event_bus=_SpyBus())
+def _sm() -> SessionRegistry:
+    return SessionRegistry(agent_lifecycle_manager=None, event_bus=_SpyBus())
 
 
 def _agent_ev(t: str, agent_id: str, payload: dict | None = None) -> Event:
@@ -58,7 +58,7 @@ async def test_agent_spawned_joins_member_set():
     assert sm.agent_ids_of("s1") == {"root", "kid"}
 
 
-async def test_session_manager_no_longer_consumes_queue_signals():
+async def test_session_registry_no_longer_consumes_queue_signals():
     """三条 TaskQueue* 原是 SM 唯一输入，现在不再消费（保留发射作可观测信号）。"""
     sm = _sm()
     sm.register_session("s1")
@@ -73,19 +73,19 @@ async def test_session_manager_no_longer_consumes_queue_signals():
 
 
 def test_input_by_event_table_is_gone():
-    assert not hasattr(SessionManager, "_INPUT_BY_EVENT")
+    assert not hasattr(SessionRegistry, "_INPUT_BY_EVENT")
 
 
 async def test_attach_to_bus_registers_one_handler():
-    """迁自 `test_session_manager_inputs.py`（Task 16，随会话状态机一并退役该文件）。
+    """迁自 `test_session_registry_inputs.py`（Task 16，随会话状态机一并退役该文件）。
 
     `_SpyBus.subscribe` 是空实现，验证不了订阅是否真的发生——换成会记录 handler 的
     `RecordingBus`，直接断言 `attach_to_bus()` 确实调用了一次 `subscribe`。这条与
-    `AgentRegistry` 的同名测试（`test_agent_lifecycle.py`）互为对等先例，各自钉住
+    `AgentLifecycleManager` 的同名测试（`test_agent_lifecycle.py`）互为对等先例，各自钉住
     一个组件的接线，不是重复覆盖。
     """
     from tests.unit._session_helpers import RecordingBus
 
     bus = RecordingBus()
-    SessionManager(agent_registry=None, event_bus=bus).attach_to_bus()
+    SessionRegistry(agent_lifecycle_manager=None, event_bus=bus).attach_to_bus()
     assert len(bus.handlers) == 1

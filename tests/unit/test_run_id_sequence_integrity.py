@@ -61,7 +61,7 @@ class _RouterLLM(MockLLMAdapter):
     `control__update_task_metadata`）恒回空文本；root task 的 act 首轮回纯文本、
     无 tool_call。
 
-    root task 恒 `interaction_mode="interactive"`（`session_manager.py:355`），
+    root task 恒 `interaction_mode="interactive"`（`session_registry.py:355`），
     纯文本首轮触发冷 park（`act.py::_finish_plain_text_turn`），同时并发一次
     `launch_background_observe(boundary="plain_text")`（`act.py:491-493`）——
     这是 A4 的最小复现：该段第一条事件（ACT_TURN_COMPLETED "await_user"）之后，
@@ -200,10 +200,10 @@ async def test_compact_session_run_has_start_and_finish():
         payload={"template_id": "agent:tpl_echo", "user_prompt": "x",
                  "root_agent_id": aid, "llm_model": "mock", "context_limit": 180000},
     ))
-    runtime._agent_registry.register_session(
+    runtime._agent_lifecycle_manager.register_session(
         sid, tenant_id="default", fallback_template_id="agent:tpl_echo",
     )
-    runtime._agent_registry.materialize(aid)
+    runtime._agent_lifecycle_manager.materialize(aid)
 
     await runtime.compact_session(sid)
 

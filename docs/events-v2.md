@@ -11,8 +11,20 @@
 > 真相源：`src/ctx_weft/protocols/events.py`（类型）、各发射点（payload）、
 > `src/ctx_weft/core/control/reducers.py`（S 档的状态含义）。
 > 决策依据与迁移工序见 `docs/events-v2-taxonomy-change-record.md`。
+>
+> **已知过期（2026-09-03 agent-centric 改造，未随本次重命名一并补齐，记账用）**：
+> §2.1（`Session*` 四条状态事件：`SessionInterrupted`/`SessionWaiting`/
+> `SessionRunning`/`SessionFinished`）随会话状态机（`session_state.py`）整体退役
+> **全部停发**，已转入 L 档（`EventType.L_TIER_EVENT_TYPES`，见
+> `src/ctx_weft/protocols/events.py` Task 16 处的内联注释）——§2.1.1 的「唯一持有者」
+> 表述已随之作废（见该节的更正说明）；§5 尚未把这 4 个加进 L 档清单；§2.5（`Agent`）
+> 尚未补上新增的 5 个 `AGENT_*` 状态事件（`AgentRunning`/`AgentIdle`/
+> `AgentWaitingHuman`/`AgentInterrupted`/`AgentTerminated`，`AgentLifecycleManager.
+> apply_input` 发出）。这些都是本文档自身滞后于代码的已知缺口，不是本次重命名的
+> 范围——本次改名只保证「文中出现的类名跟得上现状」，不重算总数/表格。当前权威
+> 状态见 `docs/upgrade/2026-09-03-agent-centric-interaction.md` 第 5 节。
 
-**总量：58 个在用 + 9 个只读存量（L 档）。**
+**总量：58 个在用 + 9 个只读存量（L 档）——上面这条已知过期未反映在这个数字里。**
 
 ---
 
@@ -62,17 +74,31 @@
 
 ### 2.1 Session · 6
 
-#### 2.1.1 所有权：会话状态只有一个主人
+#### 2.1.1 所有权：本节描述的模型已被 2026-09-03 agent-centric 改造取代
 
-**`SessionManager` 是会话状态的唯一持有者与唯一改写者。** 其余组件一概不写会话状态，
-它们只发自己领域的事实。
+> **过期提醒**：以下描述的是 2026-09-02 落地、2026-09-03 又整体推翻的架构——
+> `session_state.py` 连同它的状态机已被删除，`SessionManager` 随之降格为
+> `SessionRegistry`（`src/ctx_weft/core/orchestrator/session_registry.py`），
+> **不再持有、也不再改写任何会话状态**，只剩「这个 session 里登记了哪些
+> agent」这一件事（`register_session`/`agent_ids_of`）。「会话状态」这个概念
+> 本身不再存在：状态整体搬到了各 agent 自己身上，由 `AgentLifecycleManager`
+> 的五态机（idle/running/waiting_human/interrupted/terminated）持有。host 若
+> 需要「这个会话整体是什么状况」，自己聚合该 session 下各 `AgentSummary.status`
+> （`CtxWeftRuntime.list_agents`），系统不再预先算好广播。下文表格与流程图仍
+> 保留供历史对照，但**不代表当前行为**；当前权威说明见
+> `docs/upgrade/2026-09-03-agent-centric-interaction.md` 第 2、5 节。
 
-事件因此分成两类，**这是本节的全部要点**：
+以下是取代前（2026-09-02 版）的模型，仅供理解演进脉络：
+
+**`SessionRegistry`（原 `SessionManager`）曾是会话状态的唯一持有者与唯一改写者。**
+其余组件一概不写会话状态，它们只发自己领域的事实。
+
+事件因此分成两类，**这是本节（历史版本）的全部要点**：
 
 | | 谁发 | 例子 | 对会话状态 |
 |---|---|---|---|
 | **领域事实** | 各组件发自己领域的事 | `HitlOpened` `TaskAwaitingHuman` `RunInterrupted` `TaskStarted` `TaskFinished` `RunFinished` … | **一概不写**。reducer 里这些事件的 `session_status` 写入全部删除 |
-| **会话状态事件** | 只有 `SessionManager` | 本节表里这 6 条 | 唯一的写入者 |
+| **会话状态事件** | 只有 `SessionRegistry` | 本节表里这 6 条 | 唯一的写入者 |
 
 #### 严格分层：每层只跟下一层说话
 
@@ -123,7 +149,7 @@ SM     ──►  会话状态                      SessionWaiting / SessionInte
 它们各自维护一份对会话状态的判断，口径不同、位置分散——这正是通用 setter
 `SessionStatusChanged` 存在的土壤。收进 SM 之后，「已终态就不再转移」写在状态机里一次。
 
-> **前置改造已完成**：`SessionManager` 从前是 `runtime.py` 里 `new` 出来用完即弃的
+> **前置改造已完成**：`SessionRegistry` 从前是 `runtime.py` 里 `new` 出来用完即弃的
 > dataclass，无状态、不订阅事件；现在是 runtime 级的长生命周期组件，订阅 TM 的四类信号。
 
 #### 2.1.2 会话状态事件 · 6

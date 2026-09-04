@@ -75,7 +75,7 @@ async def test_overflow_marks_task_suspended_not_failed():
     assert task.status == "INTERRUPTED"
     assert "171808" in task.error or "171,808" in task.error
 
-    # 会话状态不由 TM 改写（归 SessionManager，判据是 TM 的聚合信号）——
+    # 会话状态不由 TM 改写（归 SessionRegistry，判据是 TM 的聚合信号）——
     # 此处仍应为空（SessionStatusChanged 的覆盖见 test_run_crash_suspend.py）。
     status_events = [
         e for e in seen

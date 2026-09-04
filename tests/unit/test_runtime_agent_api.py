@@ -24,9 +24,9 @@ def _rt():
 
 
 def _plant(rt, agent_id, parent, session_id="s1", status="idle"):
-    from ctx_weft.core.orchestrator.agent_registry import _AgentRecord
+    from ctx_weft.core.orchestrator.agent_lifecycle_manager import _AgentRecord
 
-    reg = rt._agent_registry
+    reg = rt._agent_lifecycle_manager
     reg._agents[agent_id] = _AgentRecord(
         session_id=session_id, tenant_id="default", template_id="tpl",
         parent_agent_id=parent, spawn_depth=0 if parent is None else 1,
@@ -52,7 +52,7 @@ def _plant_live_task(rt, agent_id, task_id, *, task_status, agent_status, sessio
     rt.providers.register_memory(InMemoryMemoryProvider())
 
     _plant(rt, agent_id, None, session_id=session_id, status=agent_status)
-    rt._agent_registry._agents[agent_id].current_task_id = task_id
+    rt._agent_lifecycle_manager._agents[agent_id].current_task_id = task_id
 
     tm = TaskManager(session_id=session_id, event_bus=rt._event_bus)
     session = Session(
@@ -146,7 +146,7 @@ async def test_send_message_reuses_live_task(monkeypatch):
     """current_task 未终态 -> 注入现有 task，不新建。"""
     rt = _rt()
     _plant(rt, "a1", None)
-    rt._agent_registry._agents["a1"].current_task_id = "t-live"
+    rt._agent_lifecycle_manager._agents["a1"].current_task_id = "t-live"
 
     injected: list[tuple[str, object]] = []
 
@@ -164,7 +164,7 @@ async def test_send_message_reuses_live_task(monkeypatch):
 async def test_send_message_creates_new_task_when_current_is_terminal(monkeypatch):
     rt = _rt()
     _plant(rt, "a1", None)
-    rt._agent_registry._agents["a1"].current_task_id = "t-done"
+    rt._agent_lifecycle_manager._agents["a1"].current_task_id = "t-done"
 
     created: list[str] = []
 
@@ -215,7 +215,7 @@ async def test_inject_requeue_leaves_agent_idle_not_running():
 
     await rt.send_message("a1", "resume with this extra context")
 
-    assert rt._agent_registry.status_of("a1") == "idle", (
+    assert rt._agent_lifecycle_manager.status_of("a1") == "idle", (
         "task 只是被塞回队列、还没真正 drain 派发，agent 不该报 running"
     )
 
@@ -241,7 +241,7 @@ async def test_start_session_agent_id_is_addressable_root_agent():
     调用方拿到 handle 后可以直接用 `handle.agent_id` 去 `get_agent()` / `send_message`，
     它就是这条 session 可寻址的 root agent（`parent_agent_id is None`），不是空字符串
     （裁定 R25：`RunHandle` 已有 `agent_id`，不再新增 `root_agent_id` 字段；`session
-    .root_agent_id or ""` 里的 `or ""` 只是防御性写法——`SessionManager.create_session`
+    .root_agent_id or ""` 里的 `or ""` 只是防御性写法——`SessionRegistry.create_session`
     / `resume_session` 都保证它非空，这里钉住「非空 + 可查到」这条实际契约）。
     """
     resolver = InlineAgentTemplateProvider()

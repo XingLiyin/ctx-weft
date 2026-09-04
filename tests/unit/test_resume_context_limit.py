@@ -18,7 +18,7 @@ import pytest
 
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.orchestrator.session_manager import SessionManager
+from ctx_weft.core.orchestrator.session_registry import SessionRegistry
 from ctx_weft.providers.events import InMemoryEventStore
 from ctx_weft.providers.events import EventPersister
 
@@ -57,11 +57,11 @@ async def test_resume_session_preserves_context_limit() -> None:
                            token_budget=200_000,
                            context_limit=NON_DEFAULT_CONTEXT_LIMIT))
 
-    # Build a minimal agent_registry mock — resume_session does NOT call
+    # Build a minimal agent_lifecycle_manager mock — resume_session does NOT call
     # instantiate, so any object with the right shape works.
     lm = MagicMock()
 
-    sm = SessionManager(agent_registry=lm, event_bus=bus)
+    sm = SessionRegistry(agent_lifecycle_manager=lm, event_bus=bus)
 
     # resume_session emits events on the bus; we don't need to assert them here.
     session, root_task, task_manager = await sm.resume_session(

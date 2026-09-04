@@ -1,6 +1,6 @@
 """CtxWeftRuntime：顶层 API。
 
-Phase 4 版本：完整 SessionManager + TaskManager + AgentRegistry 支持；
+Phase 4 版本：完整 SessionRegistry + TaskManager + AgentLifecycleManager 支持；
 同时保留 run_single_task() 兼容 Phase 1 测试。
 """
 
@@ -60,9 +60,9 @@ from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
 from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, ModelChoice, ResolvedModel
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice, ResolvedModel
 from ctx_weft.core.orchestrator.agent_state import AgentInput
-from ctx_weft.core.orchestrator.session_manager import SessionManager
+from ctx_weft.core.orchestrator.session_registry import SessionRegistry
 from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
@@ -434,7 +434,7 @@ class RunHandle:
 
     - From ``start_session`` (runtime.py, in-method): the session's **root agent**
       (``session.root_agent_id``, minted before ``SESSION_CREATED`` — see
-      ``SessionManager.create_session`` / ``resume_session``, always non-empty on
+      ``SessionRegistry.create_session`` / ``resume_session``, always non-empty on
       this path). Pass it straight to ``send_message(agent_id, ...)`` to talk to the
       session, or to ``get_agent(agent_id)`` for its detail view (``parent_agent_id
       is None`` — it has no parent).
@@ -596,20 +596,20 @@ class CtxWeftRuntime:
         from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
         self._template_lookup = TemplateLookup(self.providers)
         # Agent 注册表：runtime 级长生命周期组件，_agents 是 agent 身份与配置的唯一住所。
-        # 从前 AgentRegistry 是每次调用 new 一个的临时对象，见
-        # docs/events-v2.md §2.1.1（与 SessionManager 同形的那次晋升）。
+        # 从前 AgentLifecycleManager 是每次调用 new 一个的临时对象，见
+        # docs/events-v2.md §2.1.1（与 SessionRegistry 同形的那次晋升）。
         # model_resolver=self._resolve_llm：registry 现解不缓存（那是 LLMClientResolver
         # 的职责），构造期注入、无默认值——单测跑的和生产跑的必须是同一个东西
         # （core/hitl/reply_intake.py docstring 的既有立场，Task 4 因默认 bus 判过一次
         # Critical，这里不重蹈）。self._resolve_llm 已带好「无 provider 时回落 self._llm」
         # 那条分支，无需在此重复。
-        self._agent_registry = AgentRegistry(
+        self._agent_lifecycle_manager = AgentLifecycleManager(
             template_lookup=self._template_lookup, event_bus=self._event_bus,
             model_resolver=self._resolve_llm)
         # ALM 的输入端：只认 TASK_*（_INPUT_BY_EVENT），发 AGENT_*。与
-        # SessionManager.attach_to_bus 之间无顺序依赖——两者各订各的事件类型，互不
+        # SessionRegistry.attach_to_bus 之间无顺序依赖——两者各订各的事件类型，互不
         # 消费对方发出的事件（docs/events-v2.md §2.1.1，Task 12）。
-        self._agent_registry.attach_to_bus()
+        self._agent_lifecycle_manager.attach_to_bus()
 
         # Capability cache (per-session, shared across all agents in runtime)
         self._capability_cache = CapabilityCache()
@@ -628,11 +628,11 @@ class CtxWeftRuntime:
         # compact 等一次性操作的忙位（原先借 _cancel_tokens dict 占位）。
         self._busy_sessions: set[str] = set()
         self._task_managers: dict[str, TaskManager] = {}
-        # 会话状态的唯一住所。从前 SessionManager 是每次调用 new 一个的临时对象
+        # 会话状态的唯一住所。从前 SessionRegistry 是每次调用 new 一个的临时对象
         # （无状态、用完即弃），状态因此无处可放，被 TaskManager / runtime / reducer
         # 各写一份。见 docs/events-v2.md §2.1.1。
-        self._session_manager = SessionManager(
-            agent_registry=self._agent_registry,
+        self._session_registry = SessionRegistry(
+            agent_lifecycle_manager=self._agent_lifecycle_manager,
             event_bus=self._event_bus,
             task_max_concurrent=self._config.task_max_concurrent,
             task_max_retries=self._config.task_max_retries,
@@ -640,7 +640,7 @@ class CtxWeftRuntime:
         )
         # SM 的输入端：只认 TaskManager 的四类事件（_INPUT_BY_EVENT），本 task
         # 之后 TM 还没开始发这三条信号，运行时行为不变（docs/events-v2.md §2.1.1）。
-        self._session_manager.attach_to_bus()
+        self._session_registry.attach_to_bus()
         # Per-session resume 锁：串行化同一 session 的 recover_session，避免重叠的冷 HITL 应答 /
         # /resume 并发建出两个 TaskManager、两套 drain 竞争派发（spec/07 §9）。惰性建、不回收
         # （体量微小、按 session 数有界）。
@@ -909,7 +909,7 @@ class CtxWeftRuntime:
         # HITL 终局分支这里必是 no-op——HITL 终局先于 agent 终态的纪律因此自动成立，
         # 不需要在这里再插一次序。走 `cancel_agent`（Task 19 的唯一 agent 终态入口），
         # 不直接拍 `apply_input`/改 `rec.status`。
-        for aid in list(self._agent_registry.agent_ids_of_session(session_id)):
+        for aid in list(self._agent_lifecycle_manager.agent_ids_of_session(session_id)):
             await self.cancel_agent(aid, reason="session_canceled")
         if idle:
             # 已暂停/中断（无在跑 task）的会话被取消：cancel_all 不经 _fire_session_done，_on_done
@@ -922,7 +922,7 @@ class CtxWeftRuntime:
     async def cancel_agent(self, agent_id: str, *, reason: str | None = None) -> list[str]:
         """终止 agent 及其全部子孙（spec 6）。返回被终结的 agent id 列表。
 
-        级联向下展开（`AgentRegistry.descendants_of`，自带成环防御），避免孤儿子
+        级联向下展开（`AgentLifecycleManager.descendants_of`，自带成环防御），避免孤儿子
         agent 永远挂着无人管。每个目标按各自**当前**状态分别处理，再统一转
         `terminated`：
         - `waiting_human`：先终局它名下的未决 HITL——按 `agent_id` 过滤
@@ -933,7 +933,7 @@ class CtxWeftRuntime:
           `TASK_CANCELED` 是否发出由 run 收尾时的既有守卫按 task 状态判定，这里不等。
         - `idle` / `interrupted`：无需额外动作，直接转 `terminated`。
 
-        全部转移经 `AgentRegistry.apply_input` 一处发生——那是状态转移与事件发射的
+        全部转移经 `AgentLifecycleManager.apply_input` 一处发生——那是状态转移与事件发射的
         唯一入口，不允许绕过它自己拼 AgentTerminated 事件。对已经是 `terminated`
         的目标，`apply_input` 按五态机定义返回 False，天然跳过、不重复终结。
 
@@ -945,10 +945,10 @@ class CtxWeftRuntime:
         `agent_id` 直接指定的那个 `cascaded_from=None`；因级联被带上的子孙传发起者
         的 `agent_id`，供 host 侧区分「用户直接点了取消」还是「祖先被取消带下来的」。
 
-        agent 不存在 -> 返回空列表，不抛错（幂等友好，与 `AgentRegistry.has()` 之类
+        agent 不存在 -> 返回空列表，不抛错（幂等友好，与 `AgentLifecycleManager.has()` 之类
         既有「查无則静默」的读路径同一口径）。
         """
-        reg = self._agent_registry
+        reg = self._agent_lifecycle_manager
         if agent_id not in reg._agents:
             return []
 
@@ -1014,7 +1014,7 @@ class CtxWeftRuntime:
         `running --pause--> interrupted` 与实现不符——`interrupted` 只由
         `TaskManager._suspend_task_interrupted`（宿主 outage/崩溃）驱动，操作者暂停
         经检查点 park，落的是 `waiting_human`。本方法因此**不**调用
-        `AgentRegistry.apply_input`，全部转移留给真实的 `TASK_AWAITING_HUMAN` 事件
+        `AgentLifecycleManager.apply_input`，全部转移留给真实的 `TASK_AWAITING_HUMAN` 事件
         走 ALM 唯一入口——这里若手动拍一个 `AgentInput.INTERRUPTED`，就会在
         `waiting_human` 之外多出一条假的 `interrupted` 分支，且与实际状态不符
         （run 还没被暂停完，agent 已经被判定"暂停完成"）。
@@ -1023,7 +1023,7 @@ class CtxWeftRuntime:
         agent id 列表——暂停本身是异步生效的，返回时这些 agent 多半仍是 `running`，
         真正落 `waiting_human` 要等它们各自跑到下一个检查点。
         """
-        reg = self._agent_registry
+        reg = self._agent_lifecycle_manager
         rec = reg._agents.get(agent_id)
         if rec is None:
             raise AgentNotFound(f"unknown agent: {agent_id}")
@@ -1070,7 +1070,7 @@ class CtxWeftRuntime:
         真事件发生，不由调用方越过 TaskManager 直接拍。真正的 `running` 由续跑
         起来之后的那次**真实** `TASK_STARTED` 事件驱动。
         """
-        reg = self._agent_registry
+        reg = self._agent_lifecycle_manager
         if agent_id not in reg._agents:
             raise AgentNotFound(f"unknown agent: {agent_id}")
 
@@ -1106,7 +1106,7 @@ class CtxWeftRuntime:
     #
     # llm_* 此后只出现在这两条命令的入参里（以及「建一个 session」的入参里）。
     # 两条都是纯赋值——不入队、不改任何 task 状态、不触发调度，对一个所有 task
-    # 都在等人的 agent 调用它完全安全。派发时 `AgentRegistry.resolve_model` 现读
+    # 都在等人的 agent 调用它完全安全。派发时 `AgentLifecycleManager.resolve_model` 现读
     # record，因此换模型对**尚未派发**的 run 立即生效；已经在跑的 run 手上的
     # `ResolvedModel` 是那次 assemble() 时现解的快照，不会被这两条命令追改。
 
@@ -1115,7 +1115,7 @@ class CtxWeftRuntime:
         reason: str = "user_selected",
     ) -> bool:
         """host 入口：把 `(llm_account, llm_model)` 包成 `ModelChoice`，转发给 registry。"""
-        return await self._agent_registry.set_agent_llm(
+        return await self._agent_lifecycle_manager.set_agent_llm(
             agent_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
         )
 
@@ -1127,7 +1127,7 @@ class CtxWeftRuntime:
 
         返回值 = 真正改动了 record 的 agent 数（幂等 no-op 不计数）。
         """
-        return await self._agent_registry.set_session_llm(
+        return await self._agent_lifecycle_manager.set_session_llm(
             session_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
         )
 
@@ -1166,7 +1166,7 @@ class CtxWeftRuntime:
         user_prompt, user_prompt_event_jsonable = await self._validate_and_normalize_content(
             user_prompt, sid, tenant_id=tenant_id,
         )
-        lm = self._agent_registry
+        lm = self._agent_lifecycle_manager
 
         # llm= 传选择（可空）——不是身份：这条创建路径唯一发 AgentInstantiated 的地方，
         # 选择须住进 agent record，事件层才有真值可报（批次 B）。
@@ -1191,7 +1191,7 @@ class CtxWeftRuntime:
         )
         session.context_limit = resolved_model.context_limit
         session.reserved_output_tokens = resolved_model.reserved_output_tokens
-        # instantiate() 刻意不解模型（惰性不变量，见 agent_registry.py 的
+        # instantiate() 刻意不解模型（惰性不变量，见 agent_lifecycle_manager.py 的
         # _DEFAULT_CONTEXT_LIMIT 注释）；这条 compat 路径立刻要跑真实的一次 dispatch，
         # 在此显式 stamp 上面已经解出的 resolved_model。
         import dataclasses as _dc
@@ -1224,8 +1224,8 @@ class CtxWeftRuntime:
         # compat 路径也走同一条会话状态链：这里不经 _register_and_drain（没有队列、
         # 没有 drain），但 run 结束后一样要把「我这边什么情况」报出去，否则 outage /
         # park 的会话状态无人落定（判据只有一条：TM 的聚合信号）。
-        task_manager.set_session_manager(self._session_manager)
-        self._session_manager.register_session(sid, tenant_id=tenant_id)
+        task_manager.set_session_registry(self._session_registry)
+        self._session_registry.register_session(sid, tenant_id=tenant_id)
 
         for p in self.providers.get_capability_providers():
             if isinstance(p, ControlCapabilityProvider):
@@ -1307,8 +1307,8 @@ class CtxWeftRuntime:
             # 与从前逐字节一致；memory 不可外部化时 `normalized` 就是 params.user_prompt
             # 同一对象，故这一支对纯 event 组合也是无害的。
             params = _dc.replace(params, session_id=sid, user_prompt=normalized)
-        sm = self._session_manager
-        lm = sm.agent_registry
+        sm = self._session_registry
+        lm = sm.agent_lifecycle_manager
 
         if not params.resume:
             session, root_task, task_manager = await sm.create_session(
@@ -1396,10 +1396,10 @@ class CtxWeftRuntime:
         # 会话状态的持有者。TM 只往它发事实（announce_queue_state 的三条聚合信号）+
         # 透传 cancel；「有人在等」不再靠注入的 pending-HITL 谓词，而是由 AWAITING_HUMAN
         # 的任务表达（docs/events-v2.md §2.1.1）。
-        task_manager.set_session_manager(self._session_manager)
+        task_manager.set_session_registry(self._session_registry)
         # 纳入 SM 管理。setdefault 语义，重入安全：多轮对话/恢复重建都会走到这里，
         # 已有状态不被重置（新一轮的显式 RUNNING 由 resume_session 负责）。
-        self._session_manager.register_session(session.id, tenant_id=session.tenant_id)
+        self._session_registry.register_session(session.id, tenant_id=session.tenant_id)
         # 熔断真终结（Task 10）三处注入：cancel 挂起 HITL / 协作取消在途 run / memory 闭合。
         # 均 best-effort——trip 序列本身不因这三者缺失或异常而崩溃（TaskManager 侧已兜底）。
         task_manager.set_cancel_pending_hitl(
@@ -1448,7 +1448,7 @@ class CtxWeftRuntime:
         self._pausing.discard(session_id)
         self._pause_claimed.discard(session_id)
         self._task_managers.pop(session_id, None)
-        self._agent_registry.release_session(session_id)
+        self._agent_lifecycle_manager.release_session(session_id)
         for _p in self.providers.get_capability_providers():
             if isinstance(_p, SessionScopedCapabilityProvider):
                 _p.deregister_session(session_id)
@@ -1587,7 +1587,7 @@ class CtxWeftRuntime:
         session: Session,
         template: "AgentTemplate",
         template_id: str,
-        lm: AgentRegistry,
+        lm: AgentLifecycleManager,
         memory: MemoryProvider,
         task_manager: TaskManager,
         default_run_id: str,
@@ -1596,7 +1596,7 @@ class CtxWeftRuntime:
         """构造本 session/run 的两阶段 runner（原闭包工厂的显式化）。
 
         不再收 llm_account/llm_model：这次要用的模型由 assemble() 经
-        `AgentRegistry.materialize`/`resolve_model` 按 agent record 的
+        `AgentLifecycleManager.materialize`/`resolve_model` 按 agent record 的
         `ModelChoice` 现解，不再是 runner 构造期就定死的会话级值。
         """
         return _SessionTaskRunner(
@@ -1684,7 +1684,7 @@ class CtxWeftRuntime:
             task_from_projection,
         )
         session = session_from_projection(sess_proj)
-        # 模型选择不再由续跑覆盖——registry 是唯一住所（`AgentRegistry.load()` 下面
+        # 模型选择不再由续跑覆盖——registry 是唯一住所（`AgentLifecycleManager.load()` 下面
         # 从 `view.agents` 读回，见批次 B）。`session.llm_provider`/`llm_model` 就是
         # SessionCreated 记录的原始值，纯展示用途，派发从不读它们。
         all_tasks = [task_from_projection(tp) for tp in view.tasks.values()]
@@ -1725,11 +1725,11 @@ class CtxWeftRuntime:
         if not resumable and not all_tasks:
             raise RuntimeError(f"Session {session_id!r} has no resumable tasks")
 
-        lm = self._agent_registry
+        lm = self._agent_lifecycle_manager
         # 跨重启后本进程的 registry 可能是空的：下游经 assemble() 触发的
         # materialize() 一旦撞见未登记的 agent id，需要这份 session 语境才能
         # 回落到正确的 fallback_template_id，而不是「""（无模板）」。幂等：
-        # 已登记则不覆盖（同 SessionManager.register_session 口径）。
+        # 已登记则不覆盖（同 SessionRegistry.register_session 口径）。
         lm.register_session(session.id, tenant_id=session.tenant_id, fallback_template_id=template_id)
         template = await self._template_lookup.get_template(
             template_id, None,
@@ -1754,7 +1754,7 @@ class CtxWeftRuntime:
 
         # 各 agent 取自己的 template_id（AgentInstantiated 事件投影而来）；投影里没有的
         # （存量事件流）回落 session 模板——喂进 registry，registry 就是那份缓存。
-        await self._agent_registry.load(
+        await self._agent_lifecycle_manager.load(
             view.agents,
             session_id=session.id,
             tenant_id=session.tenant_id,
@@ -1893,7 +1893,7 @@ class CtxWeftRuntime:
 
         from ctx_weft.core.loop.steps.background_observe import _CLOSE_BOUNDARIES
         try:
-            lm = self._agent_registry
+            lm = self._agent_lifecycle_manager
             # 水合，不新建：这是重跑一个已存在 agent 打断的段 recap。register_session
             # 保证跨重启后 registry 为空时 materialize 的回落有正确的 session 语境
             # （幂等：session 已登记则不覆盖）。
@@ -2020,7 +2020,7 @@ class CtxWeftRuntime:
             if not target_agent_id:
                 raise RuntimeError(f"Session {session_id!r} has no agent to compact")
 
-            lm = self._agent_registry
+            lm = self._agent_lifecycle_manager
             pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
             # 水合，不新建：target_agent_id 是已存在 agent。register_session 保证跨
             # 重启后 registry 为空时 materialize 的回落有正确的 session 语境（幂等）。
@@ -2149,18 +2149,18 @@ class CtxWeftRuntime:
         **直接**子 agent（不展开子孙——层级关系不在接口层嵌套，调用方按 `parent_agent_id`
         自行还原成树）。`include_terminated` 默认 False，避免列表随时间无限膨胀。
 
-        数据源用 `AgentRegistry.agent_ids_of_session`（registry 自扫），不用
-        `SessionManager.agent_ids_of`（成员登记表）：后者只在 AGENT_INSTANTIATED /
+        数据源用 `AgentLifecycleManager.agent_ids_of_session`（registry 自扫），不用
+        `SessionRegistry.agent_ids_of`（成员登记表）：后者只在 AGENT_INSTANTIATED /
         AGENT_SPAWNED 时新增、且 runtime 当前从不调用 `forget_session`（见
         `_release_session` 内 "不 forget_session" 的注释），是一份只增不减、
-        与 session 同寿命的历史成员名单；而 `AgentRegistry.release_session`
+        与 session 同寿命的历史成员名单；而 `AgentLifecycleManager.release_session`
         （由 runtime 的 `_release_session` 在会话终结/取消已空闲会话时调用）会把
         agent 记录从 `_agents` 中真正摘除。若改用前者做 id 源，会话释放之后
         `list_agents` 要么对着已经从 `_agents` 消失的 id 抛 KeyError，要么得再加一层
         "静默跳过缺失记录" 的补丁——不如直接以 `_agents` 自身的 in-memory 现实为准：
         两个来源同出一个 dict，天然自洽，也不会把已经不存在于内存里的 agent 报告出去。
         """
-        reg = self._agent_registry
+        reg = self._agent_lifecycle_manager
         ids = reg.agent_ids_of_session(session_id)
         if parent_agent_id is not None:
             ids = [i for i in ids if reg._agents[i].parent_agent_id == parent_agent_id]
@@ -2187,7 +2187,7 @@ class CtxWeftRuntime:
         情况都不是编程错误，是「这条任务此刻在内存里已经不可寻」的正常状态，因此都
         原样降级成 `None`，不崩、不拿一个假状态字符串糊弄调用方。
         """
-        reg = self._agent_registry
+        reg = self._agent_lifecycle_manager
         rec = reg._agents.get(agent_id)
         if rec is None:
             raise AgentNotFound(f"unknown agent: {agent_id}")
@@ -2219,7 +2219,7 @@ class CtxWeftRuntime:
         「当前唯一活跃 task」。
 
         守卫：不存在 / `terminated` / `running` 一律抛错，**不排队**
-        （`AgentRegistry.assert_can_receive`，Task 13）；调用方自行重试，或先
+        （`AgentLifecycleManager.assert_can_receive`，Task 13）；调用方自行重试，或先
         pause/cancel。`session_id` 是可选参数，只用于提前发现「这个 agent 不属于该
         session」这类误用，**不参与路由**——`agent_id` 全局唯一，路由永远只看
         `current_task_id`。
@@ -2232,7 +2232,7 @@ class CtxWeftRuntime:
           `idle`（当前 task `SUSPENDED` 等子任务）时收到外部消息的场景：消息先落进
           对话，`_try_resume_parent` 在子任务收尾时按既有判据自然唤醒父 task。
         """
-        reg = self._agent_registry
+        reg = self._agent_lifecycle_manager
         reg.assert_can_receive(agent_id)
         rec = reg._agents[agent_id]
         if session_id is not None and session_id != rec.session_id:
@@ -2352,7 +2352,7 @@ class CtxWeftRuntime:
     ) -> str:
         """`send_message` 的新建分支：`current_task` 已终态（或压根没有）-> 起一个
         新 task 挂给该 agent，走既有的 `push_task` 通路——与
-        `SessionManager._make_root_task_manager` 起 root task 同一套写法，不新造
+        `SessionRegistry._make_root_task_manager` 起 root task 同一套写法，不新造
         一条派发路径。
 
         复用同一个正在跑的 TaskManager（`self._task_managers[session_id]`）：会话
@@ -2360,11 +2360,11 @@ class CtxWeftRuntime:
         挂好 done/idle 回调，这里只管 push 一个新 task 再补一次 drain，不重新接线。
 
         `assert_can_receive` 已保证 `agent_id` 存在，该 session 的 TM 因此也必然
-        还活着——`_release_session` 回收 TM 的同时会一并 `AgentRegistry.
+        还活着——`_release_session` 回收 TM 的同时会一并 `AgentLifecycleManager.
         release_session` 摘掉这个 session 下的全部 agent record（两者同一次调用），
         agent 还在 == TM 还在，故此处直接下标、不再判 None。
         """
-        reg = self._agent_registry
+        reg = self._agent_lifecycle_manager
         rec = reg._agents[agent_id]
         tm = self._task_managers[rec.session_id]
         normalized, event_jsonable = await self._validate_and_normalize_content(
@@ -2724,7 +2724,7 @@ class CtxWeftRuntime:
 
         Decision is made **in core, from events** (no host projection, no full replay):
         the in-memory ``HitlRegistry`` is refilled (so ``/hitl/pending`` and the reply endpoints
-        work), the session is registered with the ``SessionManager``, and **this method stands in
+        work), the session is registered with the ``SessionRegistry``, and **this method stands in
         for the TaskManager**（进程刚起来，`_task_managers` 还是空的）：它拿 `rebuild_hitl`
         刚从日志折出来的未决集合——那正是 TM 会用来聚合的同一份事实——发那一条 TM 信号。
         **恢复不是一种状态**：会话状态照常由 SM 据 TM 的聚合信号判定，恢复路径与正常路径
@@ -2753,7 +2753,7 @@ class CtxWeftRuntime:
                 # 租户（总账 A5）。
                 tenant_id = await self._tenant_for_session(session_id)
                 n = await self.rebuild_hitl(session_id)
-                self._session_manager.register_session(session_id, tenant_id=tenant_id)
+                self._session_registry.register_session(session_id, tenant_id=tenant_id)
                 await self._announce_queue_state_as_tm_proxy(session_id, n, tenant_id=tenant_id)
             except Exception:
                 logger.exception("Recovery: failed to recover session %s", session_id)
@@ -3256,7 +3256,7 @@ class CtxWeftRuntime:
         # 这次 run 实际用的 client——调用方（AgentBinding.model / run_single_task 的
         # resolved_model）已经解好，这里不再自己解析。三样东西各归各位：选择住
         # agent record，身份/窗口住这份 ResolvedModel，都不回填进 session
-        # （回填冻结账号默认的问题见 agent_registry.py ModelChoice 的 docstring）。
+        # （回填冻结账号默认的问题见 agent_lifecycle_manager.py ModelChoice 的 docstring）。
         llm = resolved_model.client
         loop_ctx = self._build_loop_ctx(assembler, llm, memory, provider_ctx, gateway, skill_index, cancel_token, task_manager, pause_token=pause_token)
 
@@ -3292,7 +3292,7 @@ class _SessionTaskRunner:
     """两阶段 TaskRunner（每个 owner-TM 一个实例）：assemble 装配执行 agent，execute 驱动 step loop。
 
     原 _make_task_runner 闭包的显式化：闭包捕获 → 实例字段。恢复播种不再靠
-    per-runner 缓存——agent 身份/配置的唯一住所是 runtime 级 `AgentRegistry`
+    per-runner 缓存——agent 身份/配置的唯一住所是 runtime 级 `AgentLifecycleManager`
     registry（`lm`），恢复路径由 `recover_session` 显式调 `lm.load()` 装填。
     assigned_agent_id 回填 / started_at / TASK_STARTED 均归 TaskManager（两阶段契约）。
     """
@@ -3304,7 +3304,7 @@ class _SessionTaskRunner:
         session: Session,
         template: "AgentTemplate",
         template_id: str,
-        lm: AgentRegistry,
+        lm: AgentLifecycleManager,
         memory: MemoryProvider,
         task_manager: TaskManager,
         default_run_id: str,

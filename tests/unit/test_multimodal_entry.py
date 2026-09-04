@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ctx_weft.core.orchestrator.session_manager import SessionManager
+from ctx_weft.core.orchestrator.session_registry import SessionRegistry
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.core.state.models import Session
 from ctx_weft.core.utils import content_to_text, now_utc
@@ -60,8 +60,8 @@ async def test_session_start_params_still_accepts_str():
 
 
 async def test_root_task_carries_full_content_session_carries_summary():
-    sm = SessionManager(
-        agent_registry=SimpleNamespace(),
+    sm = SessionRegistry(
+        agent_lifecycle_manager=SimpleNamespace(),
         event_bus=SimpleNamespace(emit=AsyncMock()),
     )
     session = Session(
@@ -131,7 +131,7 @@ async def test_run_single_task_root_task_description_is_text_not_truncated_parts
 
 
 class _CapturingBus:
-    """记下每条 emit 的事件（SessionManager._emit 只用 bus.emit）。"""
+    """记下每条 emit 的事件（SessionRegistry._emit 只用 bus.emit）。"""
 
     def __init__(self) -> None:
         self.events: list = []
@@ -140,8 +140,8 @@ class _CapturingBus:
         self.events.append(event)
 
 
-def _session_manager(bus) -> SessionManager:
-    from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
+def _session_registry(bus) -> SessionRegistry:
+    from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
     from ctx_weft.core.runtime import ProviderRegistry
     from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 
@@ -149,8 +149,8 @@ def _session_manager(bus) -> SessionManager:
     templates.register(make_echo_template())
     reg = ProviderRegistry()
     reg.register_capability(templates)
-    return SessionManager(
-        agent_registry=AgentRegistry(
+    return SessionRegistry(
+        agent_lifecycle_manager=AgentLifecycleManager(
             template_lookup=TemplateLookup(reg), event_bus=bus,
             model_resolver=lambda a, m: _FixedModelClient(
                 MockLLMAdapter(responses=[]), "mdl_default", 200_000, 8192, account="acct_default"),
@@ -162,7 +162,7 @@ def _session_manager(bus) -> SessionManager:
 async def test_create_session_without_jsonable_falls_back_to_the_text_prompt():
     """纯文本 prompt 漏传载荷 → 事件里仍是那段文本，不得变成 None。"""
     bus = _CapturingBus()
-    sm = _session_manager(bus)
+    sm = _session_registry(bus)
 
     await sm.create_session(
         template_id="agent:tpl_echo", user_prompt="你好", context_limit=1000,
@@ -180,7 +180,7 @@ async def test_create_session_without_jsonable_raises_on_multimodal_prompt():
     这里没有原始字节可用（`user_prompt` 可能已是 memory ref），唯一诚实的选择是拒绝。
     """
     bus = _CapturingBus()
-    sm = _session_manager(bus)
+    sm = _session_registry(bus)
 
     with pytest.raises(ValueError):
         await sm.create_session(
@@ -211,9 +211,9 @@ async def test_resume_session_without_jsonable_falls_back_to_the_text_prompt():
         payload={"template_id": "tpl", "user_prompt": "第一轮",
                  "root_agent_id": "agt_root", "context_limit": 1000},
     ))
-    # resume_session 不调 instantiate，故 agent_registry 用桩即可（同
+    # resume_session 不调 instantiate，故 agent_lifecycle_manager 用桩即可（同
     # tests/unit/test_resume_context_limit.py 的既有做法）。
-    sm = SessionManager(agent_registry=MagicMock(), event_bus=bus)
+    sm = SessionRegistry(agent_lifecycle_manager=MagicMock(), event_bus=bus)
 
     await sm.resume_session(
         session_id="ses-resume", event_store=store, user_prompt="第二轮",

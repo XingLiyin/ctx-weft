@@ -36,40 +36,7 @@ row.origin is not None else ""`），历史行不需要回填。但对**写**不
 
 ---
 
-## 🟡 2. `session_state.py` 整体删除
-
-会话运行态状态机文件已删，两个此前从那里 import 的常量搬到了
-`ctx_weft.core.state.models`：
-
-```python
-# 旧
-from ctx_weft.core.session_state import TERMINAL_SESSION_STATUSES, WAITING
-# 新
-from ctx_weft.core.state.models import TERMINAL_SESSION_STATUSES, WAITING
-```
-
-`TERMINAL_SESSION_STATUSES` 取值不变（`{"SUCCEEDED", "FAILED", "CANCELED"}`），
-`WAITING = "WAITING"` 同样不变——纯粹是 import 路径变化。
-
----
-
-## 🟡 3. `SessionManager` 删除三个公开方法
-
-`status_of` / `is_terminal` / `cancel` 已从 `SessionManager` 移除。这三者原先是
-session 状态机时代的读/写入口；agent-centric 改造后，session 的「是否终态」不再
-是一个独立可查的一等公民，等价能力分别搬到别处：
-
-- 会话是否已终结：改看该 session 下 root agent 的状态（`get_agent(root_agent_id)`）
-  或 `TaskManager` 是否仍在 `_task_managers` 里存活（`is_alive()`）。
-- 取消会话：改调 `CtxWeftRuntime.cancel_session(session_id)`（级联终止全部 agent，
-  R23）。
-
-若你的代码直接 `session_manager.status_of(...)` / `.is_terminal(...)` /
-`.cancel(...)`，编译期就会报 `AttributeError`——这条不是静默失败。
-
----
-
-## 🟡 4. 新增四个领域异常，`AGENT_NOT_FOUND` 现在真的会抛了
+## 🟡 2. 新增四个领域异常，`AGENT_NOT_FOUND` 现在真的会抛了
 
 `ctx_weft.core.errors` 新增：
 
@@ -95,7 +62,7 @@ AgentNotRunningError  code = "AGENT_NOT_RUNNING"
 
 ---
 
-## 🟡 5. `HitlReply` 新增必填字段 `agent_id`
+## 🟡 3. `HitlReply` 新增必填字段 `agent_id`
 
 ```python
 @dataclass
@@ -118,7 +85,7 @@ host 侧所有构造 `HitlReply(...)` 的地方都要补上这个字段——旧
 
 ---
 
-## 🟡 6. `Event` 信封新增 `origin`；不要再读 `payload["caller"]`
+## 🟡 4. `Event` 信封新增 `origin`；不要再读 `payload["caller"]`
 
 ```python
 @dataclass
@@ -133,7 +100,7 @@ class Event:
 
 ---
 
-## 🟡 7. 9 个事件类型停发进 L 档，新增 5 个 `AGENT_*`
+## 🟡 5. 9 个事件类型停发进 L 档，新增 5 个 `AGENT_*`
 
 **停发（转入 `EventType.L_TIER_EVENT_TYPES`，reducer 仍读它们重放存量日志，但
 不会再有新事件）**：
@@ -155,7 +122,8 @@ loop.recognize_intent`）取代了它。后 4 个原因：会话状态机（`ses
 「这条 token 是不是后台观察产生的」），**必须改按 `origin` 前缀匹配**——具体前缀
 见 `docs/events-v2.md` §4 与各发射点的 `make_event`/`ctx.event_bus.emit` 调用。
 
-**新增（agent 五态机的状态转移事实，`AgentRegistry.apply_input` 唯一入口发出）**：
+**新增（agent 五态机的状态转移事实，`AgentLifecycleManager.apply_input` 唯一入口
+发出）**：
 
 ```
 AgentRunning   AgentIdle   AgentWaitingHuman   AgentInterrupted   AgentTerminated
@@ -172,7 +140,7 @@ AgentRunning   AgentIdle   AgentWaitingHuman   AgentInterrupted   AgentTerminate
 
 ---
 
-## 🟡 8. `RunSnapshot` 的 agent 条目新增 `status` / `current_task_id`
+## 🟡 6. `RunSnapshot` 的 agent 条目新增 `status` / `current_task_id`
 
 `serialize_view` 序列化 `state_blob["agents"]` 时新增这两个字段（`reducers.py`
 第 211-212 行一带）。**向后兼容**：旧快照读回时走 `.get("current_task_id")` 这类
@@ -182,7 +150,7 @@ AgentRunning   AgentIdle   AgentWaitingHuman   AgentInterrupted   AgentTerminate
 
 ---
 
-## 🟡 9. `AgentSummary.created_at` / `AgentDetail.created_at` 恒为 `None`
+## 🟡 7. `AgentSummary.created_at` / `AgentDetail.created_at` 恒为 `None`
 
 `list_agents` / `get_agent` 构造这两个视图对象时都没有传 `created_at`——底层
 `_AgentRecord` 本就不携带这个字段，构造点也没有补。**host 不要依赖它排序或展示
@@ -191,7 +159,7 @@ AgentRunning   AgentIdle   AgentWaitingHuman   AgentInterrupted   AgentTerminate
 
 ---
 
-## 🟡 10. `RunHandle.agent_id` 就是 root agent id；**没有**新增 `root_agent_id` 字段
+## 🟡 8. `RunHandle.agent_id` 就是 root agent id；**没有**新增 `root_agent_id` 字段
 
 早期设计文档提过要给 `RunHandle` 加一个独立的 `root_agent_id` 字段，实际未做
 （裁定见 `RunHandle` 自身 docstring）。`start_session` 返回的 `handle.agent_id`
@@ -201,7 +169,7 @@ AgentRunning   AgentIdle   AgentWaitingHuman   AgentInterrupted   AgentTerminate
 
 ---
 
-## 🟡 11. 已知行为差异：`send_message` 到暂停窗口内的子 agent，消息会静默丢失
+## 🟡 9. 已知行为差异：`send_message` 到暂停窗口内的子 agent，消息会静默丢失
 
 `cancel_session`/`pause_session` 级联收尾时有一个短暂的 `_pausing` 窗口
 （`CtxWeftRuntime._pausing`，`_register_run_tokens` 按 root/非 root 分流出生
@@ -214,13 +182,62 @@ AgentRunning   AgentIdle   AgentWaitingHuman   AgentInterrupted   AgentTerminate
 
 ---
 
+## 内部变更（host 无需动作）
+
+以下几条曾在本文档草稿里按「破坏性变更」列出，复核后发现判据用错了：判断标准是
+「是否出现在 `CtxWeftRuntime` 公开方法签名里，或 host 是否必须构造/捕获它」，而
+不是「这个类/模块是不是 core 内部的组织重心」。以下几条都够不到这条线——host 除了
+`CtxWeftRuntime`（`ctx_weft/__init__.py` 唯一导出的运行时入口）之外拿不到、也传不
+进任何一个内部对象，因此对 host 完全无感，记账用，不要求 host 做任何改动。
+
+### `session_state.py` 整体删除
+
+会话运行态状态机文件已删，两个此前从那里 import 的常量搬到了
+`ctx_weft.core.state.models`：
+
+```python
+# 旧（从未是公开 API 的一部分）
+from ctx_weft.core.session_state import TERMINAL_SESSION_STATUSES, WAITING
+# 新
+from ctx_weft.core.state.models import TERMINAL_SESSION_STATUSES, WAITING
+```
+
+`TERMINAL_SESSION_STATUSES` / `WAITING` 从未从 `ctx_weft` 顶层 `__init__.py` 导出，
+也不出现在 `CtxWeftRuntime` 任何公开方法的签名里——host 需要的等价信息（会话是否
+仍在等待）一直是通过 `session_status_after_recover(session_id) -> str` 这个只读
+入口拿字符串，不需要（也从未被支持）直接 import 这两个内部常量。除非 host 代码
+越过公开契约直接伸手进 `ctx_weft.core.session_state`（不受支持的用法），否则这条
+改动不可见。
+
+### `SessionManager`（现 `SessionRegistry`）删除三个方法：`status_of` / `is_terminal` / `cancel`
+
+这三者原先是 session 状态机时代的读/写入口；agent-centric 改造后被删除。但
+`SessionManager`/`SessionRegistry` 本身从未是 `ctx_weft` 的公开导出（`core/
+orchestrator/__init__.py` 的 `__all__` 只是包内组织边界，不是对外 API 边界），host
+拿不到这个类的实例，也就无从调用它的任何方法——这三个方法的删除对 host 不可能
+造成任何影响。等价能力（会话是否终结、如何取消）host 一直是通过
+`CtxWeftRuntime.get_agent(root_agent_id)` / `CtxWeftRuntime.cancel_session
+(session_id)` 这类公开方法拿到的，删除前后这条路径没有变化。
+
+### 类改名：`AgentRegistry` → `AgentLifecycleManager`，`SessionManager` → `SessionRegistry`
+
+这两个类改了名字（连带模块文件 `agent_registry.py` → `agent_lifecycle_manager.py`、
+`session_manager.py` → `session_registry.py`），理由是名字要跟上改造后的实际职责：
+`AgentRegistry` 早已从被动登记表变成持五态机、发 `AGENT_*` 事件的生命周期管理者；
+`SessionManager` 的状态机整体删除后只剩会话登记这一件事。两个类都不出现在
+`ctx_weft/__init__.py` 的导出列表里，也都不出现在 `CtxWeftRuntime` 任何公开方法的
+参数或返回类型里——纯 core 内部重构，host 不需要改任何代码，也不会在运行期观察到
+任何差异。
+
+---
+
 ## 已知遗留（不阻塞本次上线，记账用）
 
 ### (a) `SnapshotWriter` 的会话收尾快照分支已死；`_since_snapshot` 因此无界增长
 
 `SnapshotWriter.on_event`（`src/ctx_weft/providers/events/snapshot.py`）靠
 `event.type == "SessionFinished"` 触发「会话终态补一张快照」的分支——该事件已随
-第 7 节的 L 档化停止发射，这个分支永久不可达（不抛错、不误写，直接掉进下面的
+第 5 节的 L 档化停止发射，这个分支永久不可达（不抛错、不误写，直接掉进下面的
 周期性快照计数分支）。
 
 **周期性快照不受影响**（`RunFinished` 每累计 50 条非瞬态事件一张，逻辑独立）。
@@ -258,23 +275,24 @@ provider 侧错误），流式循环提前退出，`LLM_RESPONSE_FINISHED` 补�
 搜这些字符串，命中即需要检查：
 
 ```
-session_state              status_of(              is_terminal(
-session_manager.cancel(    HitlReply(               payload["caller"]
+HitlReply(                  payload["caller"]
 BackgroundObserveRequestStarted   RecognizeIntentLLMPrompt
 SessionRunning              SessionWaiting           SessionFinished
 root_agent_id               created_at
 ```
 
-- 命中 `from ... import session_state` 或 `session_state.py` 里定义的名字 →
-  见第 2 节，改 import 路径。
-- 命中 `session_manager.status_of` / `.is_terminal(` / `session_manager.cancel(` →
-  见第 3 节，改用 `get_agent`/`cancel_session`。
-- 命中 `HitlReply(` 但没传 `agent_id` → 见第 5 节，补上这个必填字段。
-- 命中 `payload["caller"]` → 见第 6 节，改读 `Event.origin`。
+- 命中 `HitlReply(` 但没传 `agent_id` → 见第 3 节，补上这个必填字段。
+- 命中 `payload["caller"]` → 见第 4 节，改读 `Event.origin`。
 - 命中 `BackgroundObserveRequestStarted` / `RecognizeIntentLLMPrompt` /
-  `SessionRunning` 等 → 见第 7 节，这些事件已停发，改按 `origin` 分流或对接新的
+  `SessionRunning` 等 → 见第 5 节，这些事件已停发，改按 `origin` 分流或对接新的
   `AGENT_*`。
-- 命中 `handle.root_agent_id` → 见第 10 节，没有这个字段，改用 `handle.agent_id`。
-- 命中对 `AgentSummary`/`AgentDetail.created_at` 的排序/展示逻辑 → 见第 9 节。
+- 命中 `handle.root_agent_id` → 见第 8 节，没有这个字段，改用 `handle.agent_id`。
+- 命中对 `AgentSummary`/`AgentDetail.created_at` 的排序/展示逻辑 → 见第 7 节。
 - SQL 部署（非全新建库）→ 必须执行第 1 节的 `ALTER TABLE`，这是唯一会让宿主
   启动即报错的一条。
+
+以下字符串即使命中也**不需要 host 改代码**（详见「内部变更（host 无需动作）」
+一节）：`session_state`、`session_manager.status_of(`、`.is_terminal(`、
+`session_manager.cancel(`、`AgentRegistry`、`SessionManager`——除非你的代码确实
+越界直接 import 了 core 内部模块（不受支持的用法），否则这些改动对走公开 API 的
+host 不可见。

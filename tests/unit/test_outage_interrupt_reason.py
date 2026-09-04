@@ -2,7 +2,7 @@
 so the host/frontend can tell it apart from a generic interrupt (e.g. restart).
 
 Task 6 起会话状态不在这里宣布：loop 发 RunInterrupted（带 reason），TM 聚合成
-TaskQueueInterrupted，SessionManager 才把会话判成 INTERRUPTED。
+TaskQueueInterrupted，SessionRegistry 才把会话判成 INTERRUPTED。
 """
 import pytest
 

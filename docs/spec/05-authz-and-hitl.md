@@ -120,9 +120,13 @@ AuthorizationDecision { allowed: bool, message: str | list[ContentPart] = "",
 - 热窗口被驱逐 → `HitlPark` unwind → 发 `TaskAwaitingHuman{hitl_id}`，task 落
   `AWAITING_HUMAN`（不是 `SUSPENDED`——那个值现在只表示「等子任务」）；冷应答到达后经
   reconcile 重入 `gateway.invoke`，命中决定缓存执行（spec/07 §4）。
-- **会话状态不在这条路上写**：task 落 `AWAITING_HUMAN` 后由 TM 报 `TaskQueueBlocked`、
-  `SessionManager` 发 `SessionWaiting` → 会话 `WAITING`（spec/07 §7）。
-  **热等待窗口期间会话仍是 `RUNNING`**——审批面板由 `HitlOpened` 驱动，不受影响。
+- **会话状态不在这条路上写**：task 落 `AWAITING_HUMAN` 后由 TM 报 `TaskQueueBlocked`。
+  **已过期（2026-09-03 agent-centric 改造）**：下一步「`SessionRegistry` 发
+  `SessionWaiting` → 会话 `WAITING`」已不成立——会话状态机整体删除，`SessionWaiting`
+  已停发（转 L 档），`SessionRegistry`（原 `SessionManager`）不再据此推导任何状态。
+  host 若要等价信息，改看该 task 所属 agent 的状态（`waiting_human`）。审批面板仍由
+  `HitlOpened` 驱动，不受影响。详见
+  `docs/upgrade/2026-09-03-agent-centric-interaction.md` 第 5 节。
 
 改写参数同样过 `_sanitize`，审计 / memory 记录用实际执行的有效参数。
 

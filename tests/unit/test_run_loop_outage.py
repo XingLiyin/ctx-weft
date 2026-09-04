@@ -58,7 +58,7 @@ async def test_outage_marks_session_interrupted_not_failed():
     agent_interrupted = [e for e in seen if e.type == EventType.AGENT_INTERRUPTED]
     assert agent_interrupted, "expected AgentInterrupted (ALM verdict, replaces retired SM session verdict)"
     aid = agent_interrupted[0].agent_id
-    assert aid and runtime._agent_registry.status_of(aid) == "interrupted"
+    assert aid and runtime._agent_lifecycle_manager.status_of(aid) == "interrupted"
     # 通用 setter 退役：谁都不许再发它。
     assert EventType.SESSION_STATUS_CHANGED not in types
     # no TASK_FAILED emitted

@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from ctx_weft.core.control.types import AgentView
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.runtime import ProviderRegistry
 from tests.integration.test_minimal_loop import (
@@ -38,12 +38,12 @@ class _Client:
         self.context_limit, self.output_reserve = context_limit, output_reserve
 
 
-def _lm() -> AgentRegistry:
+def _lm() -> AgentLifecycleManager:
     provider = InlineAgentTemplateProvider()
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    return AgentRegistry(
+    return AgentLifecycleManager(
         template_lookup=TemplateLookup(providers=providers), event_bus=_Bus(),
         model_resolver=lambda a, m: _Client(),
     )

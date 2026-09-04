@@ -40,7 +40,7 @@ async def test_session_paused_hitl_folds_to_waiting_regardless_of_form(form) -> 
 #
 # 上面这段旧注释描述的是 Task 6 引入、Task 7 收回的行为：`HITL_OPENED` 分支已整个删除，
 # `HITL_RESOLVED`（新模型）也已从会话回 RUNNING 的 elif 元组里移出——「等人」这件事的
-# 会话状态改由 SessionManager 承载（docs/events-v2.md §2.1.1）。正面用例见
+# 会话状态改由 SessionRegistry 承载（docs/events-v2.md §2.1.1）。正面用例见
 # `tests/unit/test_domain_facts_do_not_write_session_status.py`
 # （`test_hitl_opened_no_longer_pauses_the_session` /
 # `test_hitl_resolved_no_longer_returns_the_session_to_running`）。

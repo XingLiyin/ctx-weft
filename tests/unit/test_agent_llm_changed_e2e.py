@@ -2,7 +2,7 @@
 
 Task 8 评审指出这条链逐行读码是通的，但没有测试焊死；Task 8 结束时
 `AGENT_LLM_CHANGED` 还没有真实发射点，只能手工捏造事件。Task 9 给了真实发射点
-（`AgentRegistry.set_agent_llm`），本文件走真实路径钉住整条链：
+（`AgentLifecycleManager.set_agent_llm`），本文件走真实路径钉住整条链：
 
     set_agent_llm(...)  →  AgentLlmChanged 事件  →  reduce_events 折叠成 AgentView
                         →  load()  →  _AgentRecord.llm  →  resolve_model() 拿到新 choice
@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, ModelChoice
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.runtime import ProviderRegistry
 from tests.integration.test_minimal_loop import (
@@ -39,12 +39,12 @@ class _RecordingBus:
         self.events.append(ev)
 
 
-def _make_registry(bus) -> AgentRegistry:
+def _make_registry(bus) -> AgentLifecycleManager:
     provider = InlineAgentTemplateProvider()
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    return AgentRegistry(
+    return AgentLifecycleManager(
         template_lookup=TemplateLookup(providers),
         event_bus=bus,
         # 拿账号/模型现造一个 client——校验 resolve_model 真的把新 choice 传下去。

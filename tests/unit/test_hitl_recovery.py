@@ -167,7 +167,7 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     而非停在崩溃前的 RUNNING。
 
     Task 16 起：SM 那层「代 TM 发 TaskQueueBlocked → 译成 SessionWaiting」的翻译
-    整体退役（会话状态机随 SessionManager 降格一并删除），故这里改钉 recover() 真正
+    整体退役（会话状态机随 SessionRegistry 降格一并删除），故这里改钉 recover() 真正
     发出的那条 TM 聚合信号本身——它就是退役前 SM 唯一消费的输入，观测点往上游挪
     一层，验证强度不降。「等的是审批面板（PAUSED_HITL）还是一句话（PAUSED）」是
     delivery 的性质、只有前端需要，由 host 的只读入口推导，不上升到任何状态事件。

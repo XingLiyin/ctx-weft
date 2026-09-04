@@ -38,11 +38,11 @@ async def _wire_pending_session(
     rt, session_id: str, task_id: str, *, agent_id: str = "ag1",
 ) -> None:
     """手搭一个「有 task 正等 ask_user」的会话：不真跑 TaskManager.drain，只登记
-    runtime 侧的两处状态（`_task_managers` 映射 + SessionManager 的会话状态），
+    runtime 侧的两处状态（`_task_managers` 映射 + SessionRegistry 的会话状态），
     使 `cancel_session` 的守卫（`per` 或 `task_manager` 非空）与 `cancel_all`
-    内部对 `_session_manager` 的透传都落在真实组件上。
+    内部对 `_session_registry` 的透传都落在真实组件上。
 
-    额外在 `AgentRegistry` 里种一个该 session 下的 agent（R23 需要它：
+    额外在 `AgentLifecycleManager` 里种一个该 session 下的 agent（R23 需要它：
     `cancel_session` 现在要把这个 session 下每个 agent 显式转 `terminated`，
     没有 agent 记录就没有可观测的 `AgentTerminated`）。`_plant` 是纯 dict 注入，
     不发事件，不影响其余只盯 `HitlResolved` 的既有测试。
@@ -53,11 +53,11 @@ async def _wire_pending_session(
     )
     tm = TaskManager(session_id=session_id, event_bus=rt._event_bus, max_concurrent=0)
     tm.set_session(session)
-    tm.set_session_manager(rt._session_manager)
+    tm.set_session_registry(rt._session_registry)
     task = Task(id=task_id, session_id=session_id, status="SUSPENDED", tenant_id="default")
     tm.register_task(task)
     rt._task_managers[session_id] = tm
-    rt._session_manager.register_session(session_id, tenant_id="default")
+    rt._session_registry.register_session(session_id, tenant_id="default")
     _plant(rt, agent_id, None, session_id=session_id, status="waiting_human")
 
 

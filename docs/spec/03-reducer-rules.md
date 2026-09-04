@@ -72,7 +72,17 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 > `TaskQueueBlocked`，或直接数未决 HITL / `AWAITING_HUMAN` 的 task。
 > 状态机里这条转移的 payload 是硬编码的空字典
 > （`session_state.py::next_transition` 的 `QUEUE_BLOCKED` 分支），
-> `SessionManager.handle_event` 也只从源事件转发 `reason` / `final_status` 两个字段。
+> `SessionRegistry.handle_event` 也只从源事件转发 `reason` / `final_status` 两个字段。
+>
+> **已过期（2026-09-03 agent-centric 改造）**：`session_state.py` 与它的
+> `next_transition` 状态机整体已删；`SessionRegistry`（原 `SessionManager`）现在
+> 只做「登记这个 session 里有哪些 agent」，不再 `handle_event` 推导/改写会话状态，
+> 也不再发 `SessionInterrupted`/`SessionWaiting`/`SessionRunning`/`SessionFinished`
+> （四者均已转入 L 档，reducer 的这几条分支只为重放存量日志保留，不会再被新事件
+> 触发）。`sessions[sessionId].status` 字段对该改造之后创建的 session 会永远停在
+> 初始值——host 若要判断会话整体状况，改聚合各 agent 的状态
+> （`CtxWeftRuntime.list_agents`）。详见
+> `docs/upgrade/2026-09-03-agent-centric-interaction.md` 第 5 节。
 
 ### Task
 | type | 变更 |

@@ -1,6 +1,6 @@
-"""agent 域四条事件的唯一发射点是 AgentRegistry。
+"""agent 域四条事件的唯一发射点是 AgentLifecycleManager。
 
-搬迁之前：AgentInstantiated 由 session_manager.py:233（root）与
+搬迁之前：AgentInstantiated 由 session_registry.py:233（root）与
 runtime.py:2713（子 agent）两处发，AgentSpawned/SpawnRejected 在
 runtime.py —— 而深度判定（SpawnDepthExceeded）本来就在 LM 里。
 判定在这边、事件在那边。
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.agent_registry import (
-    AgentRegistry,
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import (
+    AgentLifecycleManager,
     SpawnDepthExceeded,
 )
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
@@ -56,7 +56,7 @@ def _lm(bus, *, max_depth=3):
     provider.register(tmpl)
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    lm = AgentRegistry(
+    lm = AgentLifecycleManager(
         template_lookup=TemplateLookup(providers=providers), event_bus=bus,
         model_resolver=lambda a, m: _Client(),
     )

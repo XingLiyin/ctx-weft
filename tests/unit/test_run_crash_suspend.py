@@ -12,7 +12,7 @@ Exception` → `crash_run_outcome(exc)` → `disposition_for` → `apply_run_out
 
 判据是**事件类型**：TM 的挂起收尾发 task 域的 `TaskInterrupted`（run 域的
 `RunInterrupted` 由 runtime._run_loop 发，TM 在 run 外面、拿不到 run_id），TM 聚合成
-`TaskQueueInterrupted`，会话状态由 SessionManager 判定（TM 不再自己写 session.status，
+`TaskQueueInterrupted`，会话状态由 SessionRegistry 判定（TM 不再自己写 session.status，
 也不再发 `SessionStatusChanged`）。
 
 覆盖：
@@ -97,7 +97,7 @@ async def test_non_retriable_crash_suspends_not_fails() -> None:
     assert queue_sig and queue_sig[0].payload["reason"] == "LLM_AUTH_FAILED"
     assert t.status == "INTERRUPTED"
     assert t.error == "401 unauthorized"
-    assert session.status == "RUNNING"   # 会话状态不再由 TM 改写（归 SessionManager）
+    assert session.status == "RUNNING"   # 会话状态不再由 TM 改写（归 SessionRegistry）
 
 
 async def test_retry_exhausted_suspends_not_fails() -> None:
@@ -160,7 +160,7 @@ async def test_crash_suspended_task_blocks_session_finish() -> None:
     # TM 报的是「断了」而不是「跑完了」——SM 据此不会终结会话（TaskQueueDrained 才会）。
     assert EventType.TASK_QUEUE_DRAINED not in _types(bus)
     assert _types(bus).count(EventType.TASK_QUEUE_INTERRUPTED) >= 1
-    assert session.status == "RUNNING"  # 会话状态归 SessionManager，TM 不写
+    assert session.status == "RUNNING"  # 会话状态归 SessionRegistry，TM 不写
 
 
 def test_restore_requeues_crash_suspended_with_fresh_retries() -> None:

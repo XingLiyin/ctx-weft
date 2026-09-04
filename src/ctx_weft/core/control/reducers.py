@@ -81,7 +81,7 @@ _HITL_RESOLVE_TYPES = (
     EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
 )
 
-# Task 14：5 个 AGENT_* 状态事件 → AgentView.status。与 `AgentRegistry` 的五态机
+# Task 14：5 个 AGENT_* 状态事件 → AgentView.status。与 `AgentLifecycleManager` 的五态机
 # （agent_state.py）同一词表——reducer 只折叠，不重新判定转移是否合法（那是 ALM
 # 在事件产生时的职责，此处只读它已经发生的结果）。
 _AGENT_STATUS_BY_EVENT: dict[str, str] = {
@@ -403,7 +403,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
         view.current_step = p.get("next_step")
     elif t == EventType.RUN_STARTED:
         view.task_status = "ACTIVE"
-        # 会话状态不在此写：run 是任务级的，会话状态归 SessionManager
+        # 会话状态不在此写：run 是任务级的，会话状态归 SessionRegistry
         # （docs/events-v2.md §2.1.1）。
     elif t == EventType.RUN_FINISHED:
         pass   # run 的记账，不承载状态——它在 §3.2 已是 O 档
@@ -520,7 +520,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
         slot.llm_model = p.get("llm_model", "")
 
     elif t in _AGENT_STATUS_BY_EVENT and ev.agent_id:
-        # terminated 粘滞：一旦进入终态就不再被迟到事件改回——与 SessionManager
+        # terminated 粘滞：一旦进入终态就不再被迟到事件改回——与 SessionRegistry
         # 已有的「已终态就不再转移」同构（见 `SESSION_RUNNING` 分支的
         # `TERMINAL_SESSION_STATUSES` 判据）。
         agent = view.agents.get(ev.agent_id)

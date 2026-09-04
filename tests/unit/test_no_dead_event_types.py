@@ -61,7 +61,7 @@ def test_legacy_read_only_members_still_exist():
 #
 # 直接用语法规则分辨「这处引用是不是一次真正的发射」在本仓库里不可靠：发射点经常是
 # 间接的（例如 `session_state.py::Transition(...)` 只构造一个裸字符串字面量，真正
-# 调 `Event(...)` 的地方在另一个文件的 `session_manager.py::_emit_session_event`，
+# 调 `Event(...)` 的地方在另一个文件的 `session_registry.py::_emit_session_event`，
 # 靠 `transition.event_type` 传递，两处文本上毫无关联），若按「必须紧邻
 # emit(/make_event(/Event( 调用」来判定，会对这类合法发射产生漏报。
 #
@@ -88,7 +88,7 @@ _KNOWN_READ_ONLY_MODULES = frozenset({
 #: 时被这张表连带放行（file-level 白名单的这个盲区，Task 16 审查指出过一次）。
 _KNOWN_DEAD_BRANCH_REFS: frozenset[tuple[str, str]] = frozenset({
     # SnapshotWriter.on_event 靠 `event.type == "SessionFinished"` 决定要不要在会话
-    # 终态落一张快照。SessionManager 状态机随 Task 15/16 退役后，没有任何组件还会把
+    # 终态落一张快照。SessionRegistry 状态机随 Task 15/16 退役后，没有任何组件还会把
     # `SessionFinished` 送上总线——这个分支变成永久不可达的死分支，直接掉进下面的
     # periodic 计数分支，不抛错、不误写。把它换成会话真正的终态信号（比如 TM 的
     # `TaskQueueDrained` 聚合信号）需要同时改写 6 个既有快照测试对「触发事件是什么」

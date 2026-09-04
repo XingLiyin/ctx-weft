@@ -113,10 +113,14 @@ key 随 `HitlOpened` 落盘、随折叠装填回来；旧事件折出来的记�
 → `_hydrate_snapshot_messages`（event blob ref → memory 侧内容，纯文本零 IO）
 → `HitlRegistry.load_snapshot`。此后 registry 的一切查询只读内存。
 
-- `CtxWeftRuntime.recover()`：**不再按未决与否分流会话状态**，它代 TM 发一条队列信号，
-  由 `SessionManager` 推会话状态——有未决 → `TaskQueueBlocked{count}` → `SessionWaiting` →
-  `WAITING`；无未决 → `TaskQueueInterrupted{reason}` → `SessionInterrupted` → `INTERRUPTED`，
-  等 `/resume`。两条路都**什么都不跑**（重排推迟到应答）。
+- `CtxWeftRuntime.recover()`：**不再按未决与否分流会话状态**，它代 TM 发一条队列信号——
+  有未决 → `TaskQueueBlocked{count}`；无未决 → `TaskQueueInterrupted{reason}`。**已过期
+  （2026-09-03 agent-centric 改造）**：下一步「由 `SessionRegistry` 推会话状态 →
+  `SessionWaiting`/`SessionInterrupted`」已不成立——会话状态机整体删除，这两个事件
+  均已停发（转 L 档），`SessionRegistry`（原 `SessionManager`）不再消费队列信号推导
+  任何状态。等价信息现在住在各 agent 自己的状态里。两条路仍然都**什么都不跑**
+  （重排推迟到应答）。详见 `docs/upgrade/2026-09-03-agent-centric-interaction.md`
+  第 5 节。
 - 装填出来的 pending **不带等待槽**：重启后一切皆冷。
 - 崩溃窗口兜底：已终局的 `UserTurn` 请求，其答复若还没进过对话，由
   `_inject_resolved_user_turns` 在恢复期补写（幂等键 `MemoryEvent.id = "hitlreply:{hitl_id}"`）。

@@ -1,4 +1,4 @@
-"""AgentRegistry：Agent 实例化 + spawn 深度检查。
+"""AgentLifecycleManager：Agent 实例化 + spawn 深度检查。
 
 Capability 解析已移至 PrepareStep（CapabilityResolver），
 此处只负责从 template 创建 Agent 对象。
@@ -42,7 +42,7 @@ class ModelChoice:
     """host 要的 `(account, model)`——可以全空，空即「跟随账号默认」。
 
     这是三样东西里唯一住进 `_AgentRecord` 的一样：解析出的 client 与实际身份
-    都不存，派发时从这个 choice 现解（见 `AgentRegistry.resolve_model`）。
+    都不存，派发时从这个 choice 现解（见 `AgentLifecycleManager.resolve_model`）。
     """
 
     account: str = ""
@@ -65,7 +65,7 @@ class ModelResolver(Protocol):
 
 
 # LoopGuard() 的字段默认值——instantiate() 末尾构造 Agent 时刻意不解模型：会话创建
-# （SessionManager.create_session）必须不碰 LLM，惰性解析要留到派发时才发生
+# （SessionRegistry.create_session）必须不碰 LLM，惰性解析要留到派发时才发生
 # （test_content_validation.py 钉死这条：纯文本 start_session 不注册 LLM provider
 # 也必须成功返回，_resolve_llm 一次都不许被调用）。真正生效的窗口由派发点的
 # materialize()/resolve_model() 按 agent record 的 ModelChoice 现解、stamp 进 loop_guard。
@@ -84,7 +84,7 @@ class SpawnDepthExceeded(CtxWeftError):
 class DuplicateAgentId(CtxWeftError):
     """instantiate(agent_id=...) 撞上已登记的 id——编程错误，不是「水合」。
 
-    这个参数的含义是「这个*新* agent 的 id」（今天只有 SessionManager.create_session
+    这个参数的含义是「这个*新* agent 的 id」（今天只有 SessionRegistry.create_session
     的 root 分支在用：它得先铸好 id 才能把 root_agent_id 塞进 SESSION_CREATED
     payload，而 SESSION_CREATED 必须先于 AgentInstantiated——见该处调用注释）。
     传一个已存在的 id 不是「可能是水合」的旧 existing_agent_id 语义（那个歧义已被
@@ -113,12 +113,12 @@ class _AgentRecord:
 
 
 @dataclass
-class AgentRegistry:
+class AgentLifecycleManager:
     """Agent 实例化 + 注册表。
 
     从前是「runtime.py 里 new 五次、用完即弃的无状态 dataclass」，现在是
     runtime 级长生命周期组件，`_agents` 是 agent 身份与配置的唯一住所——
-    与 SessionManager 在 2026-09-02 做过的那次晋升同形（docs/events-v2.md §2.1.1）。
+    与 SessionRegistry 在 2026-09-02 做过的那次晋升同形（docs/events-v2.md §2.1.1）。
     Capability 解析已移至 PrepareStep（CapabilityResolver），此处只负责从
     template 创建 Agent 对象并登记。
     """
@@ -135,10 +135,10 @@ class AgentRegistry:
 
     # ── ALM：TASK_* 驱动五态机，发 AGENT_* ─────────────────────────────────
 
-    #: ALM 的全部事件输入 → 状态机输入。**只含 TASK_***：`AgentRegistry.apply_input`
+    #: ALM 的全部事件输入 → 状态机输入。**只含 TASK_***：`AgentLifecycleManager.apply_input`
     #: 发出的是 AGENT_*，若这张表也收 AGENT_*，内置 InProcessEventBus 的同步 drain
     #: 会在 `emit()` 返回前把刚发的事件回流给 `handle_event` 自己，一次转移变成
-    #: 递归——与 `SessionManager._INPUT_BY_EVENT` 当初避开同一坑同一口径（该文件
+    #: 递归——与 `SessionRegistry._INPUT_BY_EVENT` 当初避开同一坑同一口径（该文件
     #: docstring 原话）。
     _INPUT_BY_EVENT: ClassVar[dict[str, AgentInput]] = {
         EventType.TASK_STARTED: AgentInput.TASK_STARTED,
@@ -169,7 +169,7 @@ class AgentRegistry:
         brief 明确要求的过滤。
 
         没有再加别的过滤：见 `apply_input` 与本方法上方关于「要不要防语义误用」的
-        分析（agent_registry 模块 docstring 之外，写在本任务的报告里）——结论是
+        分析（agent_lifecycle_manager 模块 docstring 之外，写在本任务的报告里）——结论是
         TaskManager 的派发本身保证「同一 agent 同时只挂一个在跑 task」（busy_agents
         校验，task_manager.py `abandon_pending` 等处可见同一不变量），ALM 没有独立
         证据表明还有别的「语义上不该发生」的组合需要在这一层补挡；再加会变成
@@ -238,7 +238,7 @@ class AgentRegistry:
     def register_session(
         self, session_id: str, *, tenant_id: str, fallback_template_id: str,
     ) -> None:
-        """纳入管理。已存在则保留原状态（重入安全），与 SessionManager 同口径。"""
+        """纳入管理。已存在则保留原状态（重入安全），与 SessionRegistry 同口径。"""
         self._sessions.setdefault(
             session_id, _SessionDefaults(tenant_id=tenant_id, fallback_template_id=fallback_template_id),
         )
@@ -369,7 +369,7 @@ class AgentRegistry:
                 loop_config = template.loop_config
             except Exception:
                 logger.warning(
-                    "AgentRegistry.load: template %r unresolvable for agent %s; "
+                    "AgentLifecycleManager.load: template %r unresolvable for agent %s; "
                     "using default configs (recovery-time gap, degrading not crashing)",
                     template_id, av.id,
                 )
@@ -443,13 +443,13 @@ class AgentRegistry:
         agent 实例化没有 task（session 尚未建 root task），传 None 即可。
 
         agent_id：调用方预先铸好的新 agent id，省略则内部照旧 generate_id("agt")。
-        目前只有 SessionManager.create_session 的 root 分支会传——它得先知道 id
+        目前只有 SessionRegistry.create_session 的 root 分支会传——它得先知道 id
         才能把 root_agent_id 塞进 SESSION_CREATED payload，而 SESSION_CREATED 必须
         先于这里发出的 AgentInstantiated（因果序 Session → Agent → Task）。传入的
         id 若已登记过 → DuplicateAgentId：见该异常 docstring，这不是「水合」。
 
         template：调用方已经解析过的 template 对象，传了就直接用，不再自己
-        `get_template`。目前只有 SessionManager.create_session 会传——它得先解析
+        `get_template`。目前只有 SessionRegistry.create_session 会传——它得先解析
         一次校验 template_id（入口即拒、不落库，必须在任何 emit 之前完成），若这
         里再解析第二次，`LocalAgentTemplateProvider` 每次都重新扫盘（docstring
         明写「热更新友好」），两次调用之间存在真实 TOCTOU 窗口：SESSION_CREATED
@@ -526,11 +526,11 @@ class AgentRegistry:
             self._children.setdefault(parent_agent_id, set()).add(agent_id)
 
         logger.info(
-            "AgentRegistry: instantiated agent %s (template=%s, depth=%d)",
+            "AgentLifecycleManager: instantiated agent %s (template=%s, depth=%d)",
             agent_id, template_id, spawn_depth,
         )
         # 不走 materialize()/resolve_model()：这里刻意不碰模型解析——instantiate 是
-        # 会话/子 agent 创建路径，调用方（如 SessionManager.create_session）此刻常常
+        # 会话/子 agent 创建路径，调用方（如 SessionRegistry.create_session）此刻常常
         # 还没有真正要用的窗口、也不该为了造一个返回值就触发 LLM 解析（惰性不变量，
         # 见上面 _DEFAULT_CONTEXT_LIMIT 的注释）。真实窗口留给派发时的 materialize()。
         agent = Agent(
@@ -572,7 +572,7 @@ class AgentRegistry:
             ))
         # 事件流里唯一记录「该 agent 用的哪个模板」的地方——`_rebuild_agents` 从
         # session/task 树推算 AgentView，推得出 parent/depth，推不出模板。root 与
-        # 子 agent 现在共用同一条发射路径，不再分落 session_manager 与 runtime 两处。
+        # 子 agent 现在共用同一条发射路径，不再分落 session_registry 与 runtime 两处。
         await self.event_bus.emit(Event(
             id=generate_id("evt"),
             run_id=None,
@@ -716,7 +716,7 @@ class AgentRegistry:
         路径），不是本方法本身必须用猜的。
         """
         logger.warning(
-            "AgentRegistry: unregistered agent %s; "
+            "AgentLifecycleManager: unregistered agent %s; "
             "falling back to a session default (recovery-time gap, degrading not crashing)",
             agent_id,
         )

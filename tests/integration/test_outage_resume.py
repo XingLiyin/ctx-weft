@@ -6,7 +6,7 @@ Two invariants:
 2. After resume with healthy LLM: task reaches FINISHED; agent not left interrupted.
 3. Idempotent: a second outage+resume cycle behaves identically; final resume completes.
 
-Task 16 note: ``SessionInterrupted`` (and the SessionManager state machine that used to
+Task 16 note: ``SessionInterrupted`` (and the SessionRegistry state machine that used to
 emit it) is retired — the SM was demoted to a plain agent registry in Task 15. These
 assertions now pin the agent-level ALM verdict (``AgentInterrupted`` / ``status_of() ==
 "interrupted"``) instead: TaskInterrupted (the task-domain fact TaskManager still emits
@@ -179,7 +179,7 @@ async def _wait_for_interrupted_event(
 
     recover_session() launches drain as asyncio.create_task, so we need to yield
     to the event loop and poll until the event is captured by the spy. (Task 16:
-    SessionInterrupted is retired along with the SessionManager state machine —
+    SessionInterrupted is retired along with the SessionRegistry state machine —
     AgentInterrupted is the still-live successor signal, see module docstring.)
     """
     deadline = asyncio.get_running_loop().time() + timeout
@@ -199,7 +199,7 @@ def _agent_not_left_interrupted(seen: list, agent_id: str) -> bool:
 
     Deliberately event-log-based rather than a live ``status_of(agent_id)`` check: a
     session that finishes draining releases its agent registry records
-    (``CtxWeftRuntime._release_session`` → ``AgentRegistry.release_session``), so by
+    (``CtxWeftRuntime._release_session`` → ``AgentLifecycleManager.release_session``), so by
     the time "after resume" assertions run following a successful completion the
     agent may already be gone from the registry — that's expected, not a bug. Also
     tolerant of a ``seen.clear()`` between phases (test_idempotent_outage_resume_
@@ -282,9 +282,9 @@ async def test_outage_then_resume_completes():
     assert sess_after_outage is not None
     root_agent_id = sess_after_outage.root_agent_id
     assert root_agent_id
-    assert runtime._agent_registry.status_of(root_agent_id) == "interrupted", (
+    assert runtime._agent_lifecycle_manager.status_of(root_agent_id) == "interrupted", (
         f"Expected root agent {root_agent_id!r} interrupted after outage, got "
-        f"{runtime._agent_registry.status_of(root_agent_id)!r}"
+        f"{runtime._agent_lifecycle_manager.status_of(root_agent_id)!r}"
     )
 
     # No TASK_FAILED must have been emitted.
@@ -368,9 +368,9 @@ async def test_idempotent_outage_resume_completes():
     assert sess_after_first is not None
     root_agent_id = sess_after_first.root_agent_id
     assert root_agent_id
-    assert runtime._agent_registry.status_of(root_agent_id) == "interrupted", (
+    assert runtime._agent_lifecycle_manager.status_of(root_agent_id) == "interrupted", (
         f"Expected root agent {root_agent_id!r} interrupted after first outage, got "
-        f"{runtime._agent_registry.status_of(root_agent_id)!r}"
+        f"{runtime._agent_lifecycle_manager.status_of(root_agent_id)!r}"
     )
     interrupted_1 = [
         e for e in seen
@@ -401,9 +401,9 @@ async def test_idempotent_outage_resume_completes():
     )
     sess_mid = view_mid.sessions.get(session_id)
     assert sess_mid is not None
-    assert runtime._agent_registry.status_of(root_agent_id) == "interrupted", (
+    assert runtime._agent_lifecycle_manager.status_of(root_agent_id) == "interrupted", (
         f"Expected root agent {root_agent_id!r} interrupted after second outage, got "
-        f"{runtime._agent_registry.status_of(root_agent_id)!r}"
+        f"{runtime._agent_lifecycle_manager.status_of(root_agent_id)!r}"
     )
 
     # _wait_for_interrupted_event already confirmed AgentInterrupted is in seen.

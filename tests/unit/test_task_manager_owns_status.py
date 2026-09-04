@@ -33,7 +33,7 @@ TASK_STATUS_EVENTS = (
 )
 #: 比 `reducers.TASK_STATUS_BY_EVENT` 少一个 `TASK_STARTED`，是刻意的、不是漏记：
 #: 下面的判据匹配**任意** `EventType.X` 属性引用，不分「发射」还是「查表读」；
-#: 而 `session_manager.py` 里有 `EventType.TASK_STARTED: SessionInput.TASK_STARTED`
+#: 而 `session_registry.py` 里有 `EventType.TASK_STARTED: SessionInput.TASK_STARTED`
 #: 这样一条纯读的映射条目，加进这张清单会把它当误报抓出来。TASK_STARTED 自己的
 #: 唯一发射点在 `task_manager.py`，不需要这道守卫再管。
 
@@ -53,13 +53,13 @@ _ALLOWED = {
     "src/ctx_weft/protocols/events.py",
     "src/ctx_weft/core/control/reducers.py",
     "src/ctx_weft/core/orchestrator/task_disposition.py",
-    # Task 12：AgentRegistry（ALM）的 `_INPUT_BY_EVENT` / `_SETTLE_REASON` 把全部
+    # Task 12：AgentLifecycleManager（ALM）的 `_INPUT_BY_EVENT` / `_SETTLE_REASON` 把全部
     # 11 种 TASK_* 当纯读的映射键——翻译成 AgentInput、驱动 agent 五态机，自己只
     # 发 AGENT_*，不发一条 TASK_* 事件。与上面 TASK_STARTED 被逐出 TASK_STATUS_EVENTS
-    # 清单本身是同一类豁免（session_manager.py 那条），只是这里读的类型更多、判据
+    # 清单本身是同一类豁免（session_registry.py 那条），只是这里读的类型更多、判据
     # 不区分「发射」与「查表读」，只能靠按文件放行，不能靠收窄清单（清单收窄到
     # 只剩 TASK_STARTED 会连 task_manager.py 自己的发射点都放过）。
-    "src/ctx_weft/core/orchestrator/agent_registry.py",
+    "src/ctx_weft/core/orchestrator/agent_lifecycle_manager.py",
 }
 
 #: 上面 `TASK_STATUS_EVENTS` 里每个名字对应的 wire 字符串值（`EventType` 的值），
@@ -150,14 +150,14 @@ def test_guard_b_scans_a_real_tree_not_an_empty_one() -> None:
 #: 整份文件放行的写入者，按**仓根相对路径**认（不按 basename——同名新文件不该白拿豁免）：
 #: - `task_manager.py`：task 状态的唯一所有者，本守卫存在的目的就是把写入收进它。
 #: - `reducers.py`：投影层，按事件重放 task 状态，不产生判决。
-#: - `session_manager.py`：只写 `sess.status`，被判据的**裸变量**形态误伤（`<name>.status`
+#: - `session_registry.py`：只写 `sess.status`，被判据的**裸变量**形态误伤（`<name>.status`
 #:   一律算命中是刻意的——被删掉的那批 loop 侧写入绝大多数长成 `task.status=` / `t.status=`，
 #:   收窄判据比列几个白名单文件危险得多）。
 _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
     "src/ctx_weft/core/orchestrator/task_manager.py",
     "src/ctx_weft/core/control/reducers.py",
-    "src/ctx_weft/core/orchestrator/session_manager.py",
-    # 不放 agent_registry.py：它 700+ 行、职责杂、随 Task 19/20 还会继续长——文件级
+    "src/ctx_weft/core/orchestrator/session_registry.py",
+    # 不放 agent_lifecycle_manager.py：它 700+ 行、职责杂、随 Task 19/20 还会继续长——文件级
     # 豁免会让守卫对它整体失明。它唯一一处 `.status` 赋值走下面 _ALLOWED_STATUS_WRITES
     # 的函数级豁免（review 2026-09-03，Task 12 修复轮）。
 })
@@ -176,10 +176,10 @@ _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
 #: 撤销后守卫是否仍能抓人，由下面的 `test_removed_exemption_still_catches_a_reinstated_write`
 #: 常驻钉住——这张表不空不代表它是摆设，它下面的全树扫描仍然覆盖 runtime.py。
 #:
-#: Task 12（review 2026-09-03 修复轮）新增一条：`agent_registry.py` 的 `apply_input`
+#: Task 12（review 2026-09-03 修复轮）新增一条：`agent_lifecycle_manager.py` 的 `apply_input`
 #: 写 `rec.status = tr.status`——agent 五态机状态（spec 3.1），不是 task 状态，判据
-#: 认裸变量形态（`<name>.status=`）撞上同一属性名纯属误伤，与 `session_manager.py`
-#: 被 `_ALLOWED_STATUS_WRITE_FILES` 放行的原因相同；但 `agent_registry.py` 体量大、
+#: 认裸变量形态（`<name>.status=`）撞上同一属性名纯属误伤，与 `session_registry.py`
+#: 被 `_ALLOWED_STATUS_WRITE_FILES` 放行的原因相同；但 `agent_lifecycle_manager.py` 体量大、
 #: 还会随 Task 19/20 继续长，改用这里的函数级豁免——只放 `apply_input` 这一个函数，
 #: 该文件里任何其它函数新写一行 `xxx.status = ...` 仍然会被守卫抓到——已用一份
 #: 临时补丁手工验证过（review 2026-09-03 修复轮，见 task-12-report.md），未固化
@@ -187,7 +187,7 @@ _ALLOWED_STATUS_WRITE_FILES: frozenset[str] = frozenset({
 #: 独立判断（见其内部 `_walk` 按 `func` 传参），新函数不命中这条豁免元组是判据的
 #: 结构性质，不依赖额外测试维持。
 _ALLOWED_STATUS_WRITES: frozenset[tuple[str, str]] = frozenset({
-    ((_SRC / "core" / "orchestrator" / "agent_registry.py").as_posix(), "apply_input"),
+    ((_SRC / "core" / "orchestrator" / "agent_lifecycle_manager.py").as_posix(), "apply_input"),
 })
 
 
@@ -449,9 +449,9 @@ def test_exemption_table_is_empty_by_design():
     """`_ALLOWED_STATUS_WRITES` 不是想加就能加的摆设——改动它需要一条明确理由，
     这条测试把「当前理由」钉成断言：谁想再加一条，得同时改这里，等于逼着他把
     理由写进 PR。Task 6 之后曾经是空集合；Task 12（review 2026-09-03 修复轮）
-    为 `agent_registry.py::apply_input` 开了唯一一条函数级豁免（见上方大段注释），
+    为 `agent_lifecycle_manager.py::apply_input` 开了唯一一条函数级豁免（见上方大段注释），
     不再是空的，但依旧只精确放行这一个 (path, 函数) 组合。
     """
     assert _ALLOWED_STATUS_WRITES == frozenset({
-        ((_SRC / "core" / "orchestrator" / "agent_registry.py").as_posix(), "apply_input"),
+        ((_SRC / "core" / "orchestrator" / "agent_lifecycle_manager.py").as_posix(), "apply_input"),
     })

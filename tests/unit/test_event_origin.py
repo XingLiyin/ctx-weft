@@ -140,7 +140,7 @@ async def test_every_emitted_event_has_nonempty_origin():
     （recognize_intent / background_observe / compact / driver 兜底）、以及
     正常经 StepDriver 每步覆盖 origin 的常规循环内事件。
 
-    不设豁免：`SessionWaiting`（`session_manager._emit_session_event`）曾在此临时
+    不设豁免：`SessionWaiting`（`session_registry._emit_session_event`）曾在此临时
     豁免过（当时它还在发射、且计划随会话状态机一并拆掉），现在 `session_state.py`
     已随 Task 15/16 整体退役、`SessionWaiting` 停止发射并转入 L 档只读存量
     （`events.py::L_TIER_EVENT_TYPES`），这条豁免已死，删掉。若还暴露出别的
@@ -324,8 +324,8 @@ async def test_compact_session_run_events_have_runtime_origin():
             content=f"turn {i}", role="user", timestamp=ts + timedelta(seconds=i),
             metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
 
-    rt._agent_registry.register_session(sid, tenant_id="default", fallback_template_id="agent:tpl_echo")
-    rt._agent_registry.materialize(aid)
+    rt._agent_lifecycle_manager.register_session(sid, tenant_id="default", fallback_template_id="agent:tpl_echo")
+    rt._agent_lifecycle_manager.materialize(aid)
 
     seen: list[Event] = []
 

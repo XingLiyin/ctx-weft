@@ -1,6 +1,6 @@
 """CapabilityCache：per-session capability 快照。
 
-实例化时填充（AgentRegistry.instantiate），运行期只读。
+实例化时填充（AgentLifecycleManager.instantiate），运行期只读。
 """
 
 from __future__ import annotations

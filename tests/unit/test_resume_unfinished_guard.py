@@ -12,8 +12,8 @@ import pytest
 
 from ctx_weft.core.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
-from ctx_weft.core.orchestrator.session_manager import SessionManager
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.session_registry import SessionRegistry
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,8 +32,8 @@ async def _runtime_and_sm():
 
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]),
                              agent_provider=InlineAgentTemplateProvider())
-    sm = SessionManager(
-        agent_registry=AgentRegistry(
+    sm = SessionRegistry(
+        agent_lifecycle_manager=AgentLifecycleManager(
             template_lookup=runtime._template_lookup, event_bus=runtime.event_bus,
             model_resolver=runtime._resolve_llm),
         event_bus=runtime.event_bus,

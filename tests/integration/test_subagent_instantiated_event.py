@@ -1,7 +1,7 @@
 """子 agent 实例化时必须发 AgentInstantiated，带**自己**的 template_id。
 
 事件流是 agent 出身的唯一记录：`_rebuild_agents` 从 session/task 树推算 AgentView，
-推得出 parent/depth，推不出模板。root agent 在 session_manager 里发过这条事件，
+推得出 parent/depth，推不出模板。root agent 在 session_registry 里发过这条事件，
 子 agent 那条一直没发 —— 于是冷 resume 的 pre_resolved 只能把每个 agent 都填成
 session root 的模板，授权（AllowListAuthorizer 按 ctx.agent_template_id 做策略）
 会让重建后的子 agent 顶着 root 的模板身份。

@@ -43,12 +43,12 @@
 
 **后果**：只要该 session 存在快照，`rebuild_view` 走「快照 + delta」路径；
 delta 里若没有新的 `AgentInstantiated`/`AgentLlmChanged`，两个字段就是 `""`
-→ `AgentRegistry.load` 据此建 `ModelChoice("", "")`（`agent_registry.py:190`）
+→ `AgentLifecycleManager.load` 据此建 `ModelChoice("", "")`（`agent_lifecycle_manager.py:190`）
 → **静默回落「跟随账号默认」**。
 
 快照每 50 条非瞬态事件（或 `SessionFinished`）就落一次，
 **中等长度以上的会话必然命中**。无 warning、无测试。
-即 `agent_registry.py:188-189` 注释里那条「D1 修复：跨重启存活」在有快照时不成立。
+即 `agent_lifecycle_manager.py:188-189` 注释里那条「D1 修复：跨重启存活」在有快照时不成立。
 
 ### A3. 取消可能被完全丢弃（finalize 期间）
 
@@ -84,7 +84,7 @@ task 落 FINISHED/FAILED、token 随 run 注销，`RunCanceled` 与 `TaskCancele
 - `HitlService._emit`（`hitl/service.py:187`）→ `HitlOpened` / `HitlResolved`
 - `runtime._announce_queue_state_as_tm_proxy`（`runtime.py:2204`）→ 恢复期的两条队列信号
 - **root task 的 `TaskCreated`**：`_make_root_task_manager`
-  （`session_manager.py:359-369`）先建 TM 就立刻 `push_task`，**从不调 `set_session`**；
+  （`session_registry.py:359-369`）先建 TM 就立刻 `push_task`，**从不调 `set_session`**；
   而 `TaskManager._emit` 取 `self._session.tenant_id if self._session else "default"`
   （`task_manager.py:1093`）。reducer 照抄 envelope（`reducers.py:523`）
   → 非 default 租户的 root task 投影租户错。
@@ -269,7 +269,7 @@ background observe/recognize_intent 的最简 `finish_task` 单任务场景复�
 
 **修守卫时注意**：`TASK_STATUS_EVENTS` 应补 `TASK_HUMAN_RESOLVED` 与 `TASK_RESUMED`
 （后者唯一发射点在 TM，安全）；**但不要顺手加 `TASK_STARTED`**——
-它会误报 `session_manager.py:114` 的查表读，说明守卫 A「属性访问即违规」
+它会误报 `session_registry.py:114` 的查表读，说明守卫 A「属性访问即违规」
 的判据对「读表」没有免疫。
 
 ### B2. 守卫 A 认不出字符串字面量形态
@@ -387,8 +387,8 @@ background observe/recognize_intent 的最简 `finish_task` 单任务场景复�
 
 ### C4. 25 类事件无 `run_id`、无 `sequence`
 
-六个发射器：`TaskManager._emit`、`SessionManager` 的两个 emit、`HitlService._emit`、
-`AgentRegistry`（四处 inline 构造）、`runtime` 的两处。
+六个发射器：`TaskManager._emit`、`SessionRegistry` 的两个 emit、`HitlService._emit`、
+`AgentLifecycleManager`（四处 inline 构造）、`runtime` 的两处。
 
 **这条影响随每次收口而变大**——task 状态事件已由 9 条增至 10 条
 （`TaskHumanResolved`），`AgentLlmChanged` 是本批次新增的第 25 类。
@@ -503,7 +503,7 @@ FINISHED/FAILED 的事件又同时写专属分支，counter 会静默漏折。
 | E5 | `docs/upgrade/2026-09-02-session-status-ownership.md:49-53` | 把 `TO_BE_OBSERVED` 列进「本次新增的值域」——那次新增的是 `AWAITING_HUMAN` 与 `INTERRUPTED`，它是搭便车被列进去的 |
 | E6 | `task_manager.py:928` / `runtime.py:1210` | 两处注释声称会发 `HitlCancelled`，实际 `HitlService.cancel` 发的是 `HitlResolved{outcome: cancelled}`。`HitlCancelled` 全仓零发射 |
 | E7 | `act_guidance.py:61` / `:111` | docstring 枚举非终态时漏了 `AWAITING_HUMAN`/`INTERRUPTED`、多了 `TO_BE_OBSERVED`；实际代码用的是终态补集 |
-| E8 | `task_manager.py:1114`、`agent_registry.py:146` | 前者（`announce_queue_state`）说调用点在「`_run_task` 的挂起出口」（已搬到 `_settle`），且漏了 compat 路径 `runtime.py:1016` 的直调与 `_try_resume_parent`；后者（`load`）说「`AgentView` 只有四个字段」，与下方第 190 行读 `llm_*` 的代码自相矛盾 |
+| E8 | `task_manager.py:1114`、`agent_lifecycle_manager.py:146` | 前者（`announce_queue_state`）说调用点在「`_run_task` 的挂起出口」（已搬到 `_settle`），且漏了 compat 路径 `runtime.py:1016` 的直调与 `_try_resume_parent`；后者（`load`）说「`AgentView` 只有四个字段」，与下方第 190 行读 `llm_*` 的代码自相矛盾 |
 | E9 | `docs/events-v2.md` | **不能当作当前事实来源**。它自述「其余各节仍是已定案、**未实施**的改名/合并」：`TaskOutcomeRecorded` / `TaskRecapCompleted` / `PromptAssembled` / `StepSkipped` / `IntentRecognized`、envelope 上的 `origin` 字段，代码里都不存在。TRANSIENT 集合文档说 3 个、代码是 4 个，根因也是这个未实施的合并 |
 
 ---

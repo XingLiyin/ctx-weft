@@ -85,7 +85,7 @@ async def summarize_for_compact(
     ——inline compact 路径下 ``agent.runtime`` 从不会被写入 ``llm_model``（正常任务执行
     materialize() 出来的 Agent 就是空 runtime），这行代码因此在那条路径下恒回落
     ``"mock"``。改用同子系统其余调用方（act.py 等）已经在用的 ``resolve_llm_identity``
-    ——真值来自 ``state.resolved_model``，是派发时 ``AgentRegistry.resolve_model`` 解出的
+    ——真值来自 ``state.resolved_model``，是派发时 ``AgentLifecycleManager.resolve_model`` 解出的
     那一个，compact 的三条调用路径（inline PrepareStep 触发 / ``_maybe_predispatch_compact``
     / 独立的 ``compact_session``）用的都是已经带 ``resolved_model`` 的 ``LoopState``（前两者
     共享 ``_execute_task`` 构造的那份，同一份 state 上 act.py 的 ``resolve_llm_identity``
@@ -97,7 +97,7 @@ async def summarize_for_compact(
     ``model = request.model if request.model and request.model != "mock" else self._model``
     这行兜底替换（``anthropic.py`` 的 ``model`` 属性文档字符串原话：「实际调用一直用它替换
     "mock"……事件账面须与之同源」），而 ``self._model``（client 构造时配置的模型）与
-    ``AgentRegistry.resolve_model()`` 在 ``choice.model`` 为空时的回落值（``getattr(client,
+    ``AgentLifecycleManager.resolve_model()`` 在 ``choice.model`` 为空时的回落值（``getattr(client,
     "model", "")``）同源，与 ``state.resolved_model.model`` 基本一致。也就是说**运行时
     行为本身不受影响**（真实 adapter 早已在暗中纠正这个 "mock" 哨兵），本次修复修的是
     「事件 payload 撒谎」而非「调错模型」——`docs/events-v2.md` §3.6 要求 model/llm_account

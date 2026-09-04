@@ -96,7 +96,7 @@ SessionStatus = Literal[
 
 #: 会话终态。到达之后任何输入都不再引发转移（`core.control.reducers` 据此拒绝迟到的
 #: `SessionRunning` 复活一个已收尾的会话）。原住在已删除的 `core.orchestrator.session_state`
-#: （会话状态机，随 `SessionManager` 降格于 Task 15/16 一并退役）——搬到这里是因为
+#: （会话状态机，随 `SessionRegistry` 降格于 Task 15/16 一并退役）——搬到这里是因为
 #: 状态机本体没了之后，这两个常量是那个文件仅剩的、`reducers.py` 仍在用的两块砖
 #: （Task 16）。
 TERMINAL_SESSION_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "CANCELED"})
@@ -206,7 +206,7 @@ class Task:
     user_prompt_in_memory: bool = False
     settings: TaskSettings = field(default_factory=NormalTaskSettings)
     # 纯文本(无 tool call)turn 的处理方式：interactive=暂停等用户 / auto=自治需调 finish_task。
-    # root task 由 session_manager 设为 interactive；委派子任务默认 auto（delegate_task/plan 可显式置 interactive）。
+    # root task 由 session_registry 设为 interactive；委派子任务默认 auto（delegate_task/plan 可显式置 interactive）。
     interaction_mode: TaskInteractionMode = "auto"
     outputs: Any | None = None
     process_report: str | None = None

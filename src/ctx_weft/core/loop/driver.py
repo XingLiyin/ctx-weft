@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from ctx_weft.core.control.tokens import CancelToken, PauseToken
     from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.orchestrator import CapabilityCache, TaskManager
-    from ctx_weft.core.orchestrator.agent_registry import ResolvedModel
+    from ctx_weft.core.orchestrator.agent_lifecycle_manager import ResolvedModel
     from ctx_weft.core.orchestrator.task_disposition import RunOutcome
     from ctx_weft.core.hitl.service import HitlService
     from ctx_weft.core.loop.hitl_waiter import HitlWaiter
@@ -90,7 +90,7 @@ class LoopState:
     run_outcome: "RunOutcome | None" = None
 
     #: 本次 run 实际用的 (client, account, model, 窗口)——由派发方在构造 LoopState
-    #: 之前解出并塞入（AgentRegistry.resolve_model / materialize 的产物）。
+    #: 之前解出并塞入（AgentLifecycleManager.resolve_model / materialize 的产物）。
     #: resolve_llm_identity 的唯一真值来源，不再读 session.llm_model 兜底。
     resolved_model: "ResolvedModel | None" = None
 

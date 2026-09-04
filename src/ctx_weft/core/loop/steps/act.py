@@ -645,7 +645,7 @@ async def _park_wait_for_user(
 ) -> None:
     """起 wait_for_user 冷 park：抛 HitlPark（task 落 AWAITING_HUMAN 由 TaskManager 定）。
 
-    **不写会话状态**：会话状态的唯一写者是 `SessionManager`，它由 TM 的
+    **不写会话状态**：会话状态的唯一写者是 `SessionRegistry`，它由 TM 的
     `TaskQueueBlocked` 信号推出 `SessionWaiting`（2026-09-02 会话状态所有权重构）。
 
     续跑方式由 **delivery 显式声明**，不再靠 `form == "wait"` + sentinel capability_id

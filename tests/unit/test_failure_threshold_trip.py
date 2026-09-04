@@ -2,7 +2,7 @@
 
 覆盖 task-9-brief.md 「机制设计（全量）」的 _trip_failure_threshold 步骤 1-8：
 - 事件序：FAILURE_THRESHOLD_HIT → TASK_CANCELED*（非 root）→ TASK_FAILED(root) →
-  TASK_QUEUE_DRAINED(final_status=FAILED)。Task 6 起会话终态由 SessionManager 据这条
+  TASK_QUEUE_DRAINED(final_status=FAILED)。Task 6 起会话终态由 SessionRegistry 据这条
   聚合信号发 SessionFinished，TM 不再自己发 SESSION_STATUS_CHANGED/SESSION_FINISHED。
 - 队列/挂起任务全 CANCELED，root FAILED（error_code=TASK_FAILED_BY_THRESHOLD）。
 - 幂等闩：第 4 败不重进 trip、不重发事件。

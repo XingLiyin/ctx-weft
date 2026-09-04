@@ -12,7 +12,7 @@ Test A reproduces that stuck state and asserts recover_session re-runs the pendi
 recap and finalizes the session to SUCCEEDED. Test B guards the genuinely-empty
 projection: a session with no tasks at all must still raise RuntimeError.
 
-Task 16 note: ``SessionFinished`` itself (and the SessionManager state machine that
+Task 16 note: ``SessionFinished`` itself (and the SessionRegistry state machine that
 used to emit it) is retired — the SM was demoted to a plain agent registry in Task 15.
 The tests below now pin ``TaskQueueDrained`` instead: it's the real, still-emitted
 TaskManager aggregate signal that ``SessionFinished`` used to be translated from, and
@@ -143,7 +143,7 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
         await asyncio.gather(*list(tm._background_asyncio_tasks), return_exceptions=True)
 
     # TaskQueueDrained(SUCCEEDED) was emitted — this is the TM aggregate signal that
-    # used to feed SessionManager's now-retired SessionFinished translation (Task 16:
+    # used to feed SessionRegistry's now-retired SessionFinished translation (Task 16:
     # the session-state-machine SM was demoted to an agent registry and no longer
     # consumes/emits it). It's still the real, live "the session's work is done, and
     # it finished cleanly" signal, so it's what this test pins instead.
@@ -364,7 +364,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     # Drive to quiescence: repeatedly gather whatever background tasks the TM is
     # tracking (the relaunched recap, plus any recap the resumed task's own close
     # spawns) until the resumed task itself reaches a terminal status. Task 16 retired
-    # SessionFinished (SessionManager's state machine was demoted to an agent registry
+    # SessionFinished (SessionRegistry's state machine was demoted to an agent registry
     # in Task 15), and with it every live path that could ever move the event-store
     # projection's session_status off RUNNING — polling on the task's own status is
     # the still-real completion signal for this loop.

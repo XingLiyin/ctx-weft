@@ -33,7 +33,7 @@ from ctx_weft.core.utils import as_utc, generate_id, now_utc
 from ctx_weft.protocols.events import EVENT_TYPES, Event, EventOrigin, EventType
 
 if TYPE_CHECKING:
-    from ctx_weft.core.orchestrator.session_manager import SessionManager
+    from ctx_weft.core.orchestrator.session_registry import SessionRegistry
     from ctx_weft.protocols.events import EventBus
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ _DEFAULT_MAX_CONCURRENT = 4
 class TaskManager:
     """Manages a per-session TaskQueue and drives task execution.
 
-    The caller (SessionManager / CtxWeftRuntime) must:
+    The caller (SessionRegistry / CtxWeftRuntime) must:
     1. Register a task_runner callback (runs a single task).
     2. Call push_task() to add tasks.
     3. Call tick() or rely on event-driven draining.
@@ -95,7 +95,7 @@ class TaskManager:
         self._background_asyncio_tasks: set[asyncio.Task] = set()
         # 会话状态的持有者。TM 对它**只查询、只发事实**；唯一的方法调用是 `cancel`，
         # 那是外部命令的透传，不是 TM 在驱动 SM（docs/events-v2.md §2.1.1）。
-        self._session_manager: "SessionManager | None" = None
+        self._session_registry: "SessionRegistry | None" = None
         # 归属权谓词：runtime 注入，返回本 TM 是否仍是该 session 的当前 owner。
         # None = 不受管（永远视为 current，保持旧行为）。被同 session 上更新的 TM
         # 顶替后返回 False → 迟到的收尾变 no-op（不发 SessionFinished、不 _release_session）。
@@ -139,10 +139,10 @@ class TaskManager:
         """注入归属权谓词：本 TM 是否仍是该 session 的当前 owner（见 `_is_current`）。"""
         self._is_current = predicate
 
-    def set_session_manager(self, sm: "SessionManager") -> None:
+    def set_session_registry(self, sm: "SessionRegistry") -> None:
         """注入会话状态的持有者。TM 对它**只查询、只发事实**；唯一的方法调用是
         `cancel`，那是外部命令的透传，不是 TM 在驱动 SM。"""
-        self._session_manager = sm
+        self._session_registry = sm
 
     def set_cancel_pending_hitl(self, cb: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """注入"取消该 session 所有未决 pending HITL"回调（runtime 侧遍历 HitlService.cancel）。
@@ -285,7 +285,7 @@ class TaskManager:
         """入队一个新任务并发 TASK_CREATED。
 
         ``user_prompt_event_jsonable``：TASK_CREATED 里 user_prompt 的 event 侧载荷，
-        由**入口**（`SessionManager.create_session` ← `CtxWeftRuntime.start_session`）
+        由**入口**（`SessionRegistry.create_session` ← `CtxWeftRuntime.start_session`）
         从**归一化之前的原始** content 算好传进来。本方法不自己算：`task.user_prompt`
         到这里已是 memory 侧归一化过的内容，图片 part 是 memory ref，再算一次只会把
         一个 event store 打不开的引用写进事件（blob-store 解耦 Task 3）。

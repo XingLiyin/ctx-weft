@@ -140,8 +140,8 @@ async def test_send_message_injects_into_suspended_parent_and_survives_child_wak
     await _wait_until(_root_suspended)
 
     # root agent 此刻必须是 idle（spec 4.2 前提）——current_task 未终态。
-    assert runtime._agent_registry.status_of(root_agent_id) == "idle"
-    assert runtime._agent_registry._agents[root_agent_id].current_task_id == root_task_id
+    assert runtime._agent_lifecycle_manager.status_of(root_agent_id) == "idle"
+    assert runtime._agent_lifecycle_manager._agents[root_agent_id].current_task_id == root_task_id
 
     # 2. send_message：必须走注入分支（不新建 task），且此刻子任务尚未完成
     #    （被 release_gate 挡住），消除真实场景里的竞态窗口。

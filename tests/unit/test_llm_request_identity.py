@@ -1,5 +1,5 @@
 """LLM 请求事件携带实际使用的 account/model：真值是 ``state.resolved_model``——
-派发时由 ``AgentRegistry.resolve_model`` 解出的那一个（批次 B）。
+派发时由 ``AgentLifecycleManager.resolve_model`` 解出的那一个（批次 B）。
 
 修复背景：LLMRequestStarted 此前以 session.llm_model/llm_provider 为真值，两级
 兜底到 agent.runtime 再到 "mock"（runtime 从不填 llm_model → 恒报 "mock"）。三样

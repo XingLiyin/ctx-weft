@@ -8,7 +8,7 @@ import pytest
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry, _AgentRecord
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, _AgentRecord
 from ctx_weft.core.orchestrator.agent_state import AgentInput
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.state.models import Task
@@ -100,13 +100,13 @@ def test_agent_event_wire_values_are_pascal_case():
     assert EventType.AGENT_TERMINATED == "AgentTerminated"
 
 
-def _reg() -> AgentRegistry:
-    return AgentRegistry(
+def _reg() -> AgentLifecycleManager:
+    return AgentLifecycleManager(
         template_lookup=None, event_bus=_SpyBus(), model_resolver=lambda a, m: None
     )
 
 
-def _plant(reg: AgentRegistry, agent_id: str, parent: str | None, session_id: str = "s1") -> None:
+def _plant(reg: AgentLifecycleManager, agent_id: str, parent: str | None, session_id: str = "s1") -> None:
     """直接种记录，绕开 instantiate 的模板依赖。"""
     reg._agents[agent_id] = _AgentRecord(
         session_id=session_id, tenant_id="default", template_id="tpl",
@@ -347,9 +347,9 @@ async def test_handle_event_does_not_recurse_on_its_own_agent_events():
 
 
 async def test_attach_to_bus_registers_one_handler():
-    """对等 SessionManager 的同名先例（test_session_manager_state.py 的
+    """对等 SessionRegistry 的同名先例（test_session_registry_state.py 的
     test_attach_to_bus_registers_one_handler，Task 16 起该测试从
-    test_session_manager_inputs.py 迁来——原文件随会话状态机一并整体退役）：
+    test_session_registry_inputs.py 迁来——原文件随会话状态机一并整体退役）：
     `_SpyBus.subscribe` 是空实现，
     验证不了订阅是否真的发生——这里换成会记录 handler 的 `RecordingBus`，
     直接断言 `attach_to_bus()` 确实调用了一次 `subscribe`（review Important #2）。
@@ -357,7 +357,7 @@ async def test_attach_to_bus_registers_one_handler():
     from tests.unit._session_helpers import RecordingBus
 
     bus = RecordingBus()
-    reg = AgentRegistry(template_lookup=None, event_bus=bus, model_resolver=lambda a, m: None)
+    reg = AgentLifecycleManager(template_lookup=None, event_bus=bus, model_resolver=lambda a, m: None)
     reg.attach_to_bus()
     assert len(bus.handlers) == 1
 
@@ -372,7 +372,7 @@ async def test_attach_to_bus_with_real_event_bus_drives_transition_without_recur
     from ctx_weft.providers.events import InProcessEventBus
 
     bus = InProcessEventBus()
-    reg = AgentRegistry(template_lookup=None, event_bus=bus, model_resolver=lambda a, m: None)
+    reg = AgentLifecycleManager(template_lookup=None, event_bus=bus, model_resolver=lambda a, m: None)
     _plant(reg, "a1", None)
     reg.attach_to_bus()
 
@@ -527,7 +527,7 @@ async def test_rebuild_view_and_load_agree_on_status():
 def test_legacy_reducer_branches_still_present():
     """确认已停发/待停发类型的 reducer 读取分支未被本任务动过——存量日志重放全靠它们
     （events-v2.md §5）。`SESSION_INTERRUPTED`/`WAITING`/`RUNNING`/`FINISHED` 要等
-    Task 16（SessionManager 降格）才真正停止发射，但它们的分支现在就必须在场，
+    Task 16（SessionRegistry 降格）才真正停止发射，但它们的分支现在就必须在场，
     这样存量事件才能在那之后被继续正确重放；HITL 那 6 个（`HITL_REQUIRED` +
     5 个终态镜像）与 `SESSION_STATUS_CHANGED` / `SESSION_PAUSED_HITL` 已经是
     L 档（`L_TIER_EVENT_TYPES`）。

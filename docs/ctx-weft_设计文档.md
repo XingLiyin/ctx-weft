@@ -104,7 +104,7 @@ ctx-weft 改进了 miniAgents 的两个核心问题：
 │  CtxWeft.core           (Runtime Core)                            │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │ Orchestrator                                                │  │
-│  │   SessionManager · TaskManager · LifecycleManager           │  │
+│  │   SessionRegistry · TaskManager · LifecycleManager           │  │
 │  │   TaskQueue (内存LIFO + blocked DAG)                         │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────────┐  │
@@ -149,7 +149,7 @@ context 归位口诀：
 一次 task 的执行典型路径：
 
 ```
-User → SessionManager.create_session
+User → SessionRegistry.create_session
      → TaskManager.start_session
      → LoopEngine.run(task)
        │
@@ -3757,7 +3757,7 @@ class Event:
 
 | Type | 触发时机 | Reducer | 关键 payload 字段 |
 |------|---------|--------|----------------|
-| `SessionCreated` | SessionManager.create_session 创建 session 记录后 | **S** | `goal`, `user_prompt`, `root_agent_id`, `token_budget`, `context_limit` |
+| `SessionCreated` | SessionRegistry.create_session 创建 session 记录后 | **S** | `goal`, `user_prompt`, `root_agent_id`, `token_budget`, `context_limit` |
 | `SessionStatusChanged` | 任何 session.status 字段变更 | **S** | `from_status`, `to_status`, `reason` |
 | `SessionFinished` | session 进入 SUCCEEDED / FAILED / TIMEOUT / CANCELED | **S** | `final_status`, `token_used`, `runtime_summary` |
 | `SessionPausedHitl` | failure_counter 触达 threshold 自动暂停 | **S** | `failure_counter`, `pending_approval_ids` |
@@ -4385,7 +4385,7 @@ JWT / API Key，挂在 ASGI middleware，与 core 解耦。所有请求带 `tena
 CtxWeft/
 ├── core/                       ← 纯 runtime，pip install ctx-weft
 │   ├── orchestrator/
-│   │   ├── session_manager.py
+│   │   ├── session_registry.py
 │   │   ├── task_manager.py
 │   │   ├── lifecycle_manager.py     # instantiate_agent / spawn / settle
 │   │   ├── capability_cache.py       # 实例化时 resolve 的 capability 快照
@@ -4563,7 +4563,7 @@ V1 冻结 §9.3 列出的事件类型。**新增事件必须经过协议升级**
 | 多进程 | EventBus → Redis Streams；TaskQueue 引入分布式锁 |
 | 全量 Event Sourcing | `apply_event` 实现从"先 state 后 event"切换到"先 event 后投影" |
 | TS SDK | 协议 → JSON Schema；core 关键算法剥离到 WASM / 重写 |
-| 实时 multi-agent | SessionManager 支持 root_agent_list；MemoryProvider 加 sibling 互订阅 topic |
+| 实时 multi-agent | SessionRegistry 支持 root_agent_list；MemoryProvider 加 sibling 互订阅 topic |
 | Cost / Plan 优化 | BudgetStrategy 增加学习型 / 成本驱动型实现 |
 | Effective Replay | RunHandle.replay 支持 fork-and-rerun（从历史点改参数重跑） |
 | 外部 LongMemory 标杆集成 | 提供 Mem0 / LightRAG / Zep 的官方 adapter |
@@ -4617,7 +4617,7 @@ v0.1 文档列出的 5 个 TBD 在 v0.2 中决议如下：
 | **BACKGROUND.md** | **MemoryProvider blackboard topic `project:*:background`** | 归位为长期记忆；进入 messages |
 | AgentTemplate (元数据) | host 层管理；core 持 template_id 引用 | host 负责 template 解析与注册 |
 | TaskQueue (内存 LIFO) | TaskQueue (核心保留，含 DAG) | 复用思路 |
-| SessionManager / TaskManager / LifecycleManager | 同名，在 `CtxWeft.core.orchestrator/` | 复用思路，去耦合 |
+| SessionRegistry / TaskManager / LifecycleManager | 同名，在 `CtxWeft.core.orchestrator/` | 复用思路，去耦合 |
 | AgentLoop | LoopEngine (Step Driver) | 重写 |
 | Control Tools (submit_plan/submit_task/...) | 特殊 Capability + Step 路由；purposes 明确 | 协议化 |
 | Event Bus | EventBus 协议 + InProcess 实现 | 抽象化 |

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.agent_registry import (
-    AgentRegistry,
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import (
+    AgentLifecycleManager,
     ModelChoice,
 )
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
@@ -45,7 +45,7 @@ def _reg(resolver=None):
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    reg = AgentRegistry(
+    reg = AgentLifecycleManager(
         template_lookup=TemplateLookup(providers=providers),
         event_bus=_Bus(),
         model_resolver=resolver or (lambda a, m: _Client()),

@@ -1,7 +1,7 @@
 """agent 五态机的纯函数层。
 
 与 `session_state.py` 同构：只做「当前状态 + 输入 -> 下一状态 + 该发哪条事件」，
-不碰事件总线、不持有实例状态。副作用全在 `AgentRegistry`（lifecycle manager）。
+不碰事件总线、不持有实例状态。副作用全在 `AgentLifecycleManager`（lifecycle manager）。
 
 设计要点（spec 3.1）：
 - `idle` 既是初始态，也是每轮交互处理完后回到的态；它**不等于**「没有活着的 task」。

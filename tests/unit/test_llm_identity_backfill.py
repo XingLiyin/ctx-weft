@@ -2,11 +2,11 @@
 而非 "mock" 兜底。
 
 背景（批次 B 之前）：resolve_llm_identity 以 session.llm_model 为真值，但三条创建路径
-（run_single_task / SessionManager.create_session / resume_session）从不写该字段——
+（run_single_task / SessionRegistry.create_session / resume_session）从不写该字段——
 host 即便显式传了 model，事件仍恒报 "mock"；依赖账号 default_model 时更无处可读。
 当时的修法是 _execute_task 执行前把解析出的 client 身份**回填**进 session 空缺字段。
 
-批次 B 把回填删了：真值改住 `AgentRegistry._AgentRecord.llm`（`ModelChoice`，可空 =
+批次 B 把回填删了：真值改住 `AgentLifecycleManager._AgentRecord.llm`（`ModelChoice`，可空 =
 跟随账号默认），派发时经 `resolve_model` 现解出 `ResolvedModel`（client + 身份 + 窗口），
 直接进 `LoopState.resolved_model`，不再经过 session 这一站——回填的副作用是把
 `("", "")`「跟随账号默认」这个含义钉成具体模型名，账号默认从此对该会话失效。

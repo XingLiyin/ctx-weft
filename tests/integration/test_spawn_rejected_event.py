@@ -2,7 +2,7 @@
 
 `AgentSpawned` / `SpawnRejected` 是一对，构成对**每一次 spawn 尝试**的完整审计：
 被拒的尝试根本不会有 agent 诞生，所以 `AgentInstantiated` 里找不到它们的痕迹。
-今天唯一的门是 `AgentRegistry.instantiate` 里的深度检查（用**子模板**的
+今天唯一的门是 `AgentLifecycleManager.instantiate` 里的深度检查（用**子模板**的
 `loop_config.max_spawn_depth`），它抛 SpawnDepthExceeded，此前只会落进 TaskManager
 的通用 assembly_failure 分支 —— 事件流里看不出「有人想 spawn 但被挡了」。
 """

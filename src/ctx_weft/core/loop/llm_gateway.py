@@ -79,7 +79,7 @@ PROMPT_EST_SEG_KEY = "prompt_est_seg"
 def resolve_llm_identity(state) -> tuple[str, str]:
     """本次 LLM 调用实际使用的 (model, account)。
 
-    真值是 state.resolved_model —— 派发时由 AgentRegistry 解出的那一个。
+    真值是 state.resolved_model —— 派发时由 AgentLifecycleManager 解出的那一个。
     此前读 session.llm_model 并两级兜底到 agent.runtime / "mock"，那两级
     永远命中不了（runtime 从不填 agent.runtime["llm_model"]），于是未配置
     时恒报 "mock"。ResolvedModel 永远是解析过的确定值，报不出假数据。

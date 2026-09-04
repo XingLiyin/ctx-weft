@@ -17,7 +17,7 @@ from ctx_weft.protocols import (
 import dataclasses as _dc
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.runtime import ProviderRegistry
@@ -135,7 +135,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     pctx = ProviderContext(session_id=sid, tenant_id="default")
     _reg = ProviderRegistry()
     _reg.register_capability(resolver)
-    lm = AgentRegistry(template_lookup=TemplateLookup(_reg), event_bus=runtime.event_bus,
+    lm = AgentLifecycleManager(template_lookup=TemplateLookup(_reg), event_bus=runtime.event_bus,
                        model_resolver=runtime._resolve_llm)
     agent, template = await lm.instantiate(
         template_id="agent:tpl_mr", session_id=sid, tenant_id="default", ctx=pctx)

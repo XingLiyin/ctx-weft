@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.protocols.events import EventType
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
-from ctx_weft.core.orchestrator.session_manager import SessionManager
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.session_registry import SessionRegistry
 from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
 from ctx_weft.core.runtime import ProviderRegistry
 from ctx_weft.protocols import (
@@ -68,8 +68,8 @@ async def test_session_created_emitted_before_task_created() -> None:
     resolver = _Resolver(_template())
     _reg = ProviderRegistry()
     _reg.register_capability(resolver)
-    sm = SessionManager(
-        agent_registry=AgentRegistry(
+    sm = SessionRegistry(
+        agent_lifecycle_manager=AgentLifecycleManager(
             template_lookup=TemplateLookup(_reg), event_bus=bus,
             model_resolver=lambda a, m: _Client(),
         ),

@@ -1,13 +1,13 @@
-"""AgentRegistry 持有 agent 的身份与配置——注册表，不是状态机。
+"""AgentLifecycleManager 持有 agent 的身份与配置——注册表，不是状态机。
 
-镜像 SessionManager 的 _SessionState / _states / register_session 形状
+镜像 SessionRegistry 的 _SessionState / _states / register_session 形状
 （docs/events-v2.md §2.1.1 的那次晋升）。区别：它零订阅。
 """
 from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.agent_registry import AgentRegistry
+from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -32,14 +32,14 @@ class _Client:
         self.context_limit, self.output_reserve = context_limit, output_reserve
 
 
-def _lm() -> AgentRegistry:
+def _lm() -> AgentLifecycleManager:
     from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
     from ctx_weft.core.runtime import ProviderRegistry
     provider = InlineAgentTemplateProvider()
     provider.register(make_echo_template())
     providers = ProviderRegistry()
     providers.register_capability(provider)
-    return AgentRegistry(
+    return AgentLifecycleManager(
         template_lookup=TemplateLookup(providers=providers), event_bus=_Bus(),
         model_resolver=lambda a, m: _Client(),
     )
@@ -58,7 +58,7 @@ async def test_register_session_is_reentrant():
     lm = _lm()
     lm.register_session("s1", tenant_id="t1", fallback_template_id="agent:tpl_echo")
     lm.register_session("s1", tenant_id="OTHER", fallback_template_id="OTHER")
-    # 已存在则保留原状态——与 SessionManager.register_session 同口径
+    # 已存在则保留原状态——与 SessionRegistry.register_session 同口径
     assert lm._sessions["s1"].tenant_id == "t1"
 
 

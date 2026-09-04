@@ -55,7 +55,7 @@ async def test_compact_session_unknown_session_raises() -> None:
         await rt.compact_session("ses_missing")
 
 
-async def test_compact_session_uses_agent_registrys_current_model_not_stale_session_field() -> None:
+async def test_compact_session_uses_agent_lifecycle_managers_current_model_not_stale_session_field() -> None:
     """`set_agent_llm` 换模型后手动 compact：送出的 LLMRequest.model 必须是新模型。
 
     钉住评审 finding：compact_session 里 `agent.runtime["llm_model"]` 曾经取自
@@ -111,10 +111,10 @@ async def test_compact_session_uses_agent_registrys_current_model_not_stale_sess
 
     # 先水合 record（生产路径里这一步发生在 root agent 实例化时；此处手工建 session
     # 只走了 event_store，registry 还没见过这个 agent_id）。
-    rt._agent_registry.register_session(
+    rt._agent_lifecycle_manager.register_session(
         sid, tenant_id="default", fallback_template_id=f"agent:{tmpl.id}",
     )
-    rt._agent_registry.materialize(aid)
+    rt._agent_lifecycle_manager.materialize(aid)
 
     # host 先经 registry 的真相源换模型……
     changed = await rt.set_agent_llm(aid, llm_model="model-new")
