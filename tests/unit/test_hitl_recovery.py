@@ -166,13 +166,15 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     """缺陷 C：启动恢复时，有 pending HITL 的会话必须如实反映「在等人」，
     而非停在崩溃前的 RUNNING。
 
-    Task 6 起走的是同一条链：recover() 代 TM 发 `TaskQueueBlocked` → SM 判 WAITING
-    → 发 `SessionWaiting`。「等的是审批面板（PAUSED_HITL）还是一句话（PAUSED）」是
-    delivery 的性质、只有前端需要，由 host 的只读入口推导，不上升到会话状态。
+    Task 16 起：SM 那层「代 TM 发 TaskQueueBlocked → 译成 SessionWaiting」的翻译
+    整体退役（会话状态机随 SessionManager 降格一并删除），故这里改钉 recover() 真正
+    发出的那条 TM 聚合信号本身——它就是退役前 SM 唯一消费的输入，观测点往上游挪
+    一层，验证强度不降。「等的是审批面板（PAUSED_HITL）还是一句话（PAUSED）」是
+    delivery 的性质、只有前端需要，由 host 的只读入口推导，不上升到任何状态事件。
     """
     from ctx_weft.protocols.events import EventType
 
-    runtime, verdicts = _recover_runtime_with_status_capture()
+    runtime, signals = _recover_runtime_with_queue_signal_capture()
     seed = [
         _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
         _mk_ev(2, EventType.RUN_STARTED),
@@ -184,32 +186,38 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert verdicts == [EventType.SESSION_WAITING], "有 pending HITL 的会话恢复应判 WAITING"
+    assert [s.type for s in signals] == [EventType.TASK_QUEUE_BLOCKED], (
+        "有 pending HITL 的会话恢复应报 TaskQueueBlocked（TM 聚合信号）"
+    )
+    assert signals[0].payload == {"count": 1}
     # 面板 vs 一句话的区分仍在，只是搬去了 host 的只读入口。
     assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
 
 
-def _recover_runtime_with_status_capture():
-    """构造会捕获**全部会话级宣告**的 runtime（recover 状态语义测试共用）。
+def _recover_runtime_with_queue_signal_capture():
+    """构造会捕获 recover() 代 TM 发的队列聚合信号的 runtime（recover 状态语义测试共用）。
 
-    捕的是 SM 发的会话事件类型，不是 TM 的聚合信号——断言要钉的是「会话最终被判成
-    什么」，而退役的通用 setter `SessionStatusChanged` 一旦重新出现也会当场被抓到。
+    Task 16 前这里捕的是 SM 译出的会话级事件（`SessionWaiting`/`SessionInterrupted`）；
+    SM 退役后那条翻译不存在了，改捕 TM 的聚合信号本身（`TaskQueueBlocked`/
+    `TaskQueueInterrupted`）——它是 recover() 真正发出的、也是退役前 SM 唯一消费
+    的同一条输入。仍然保留 `SessionStatusChanged`：那是已停发的通用 setter，
+    一旦重新出现也要当场被抓到（不属于本次观测点迁移的对象）。
     """
     from ctx_weft.protocols.events import EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
-    verdicts: list = []
-    watched = (EventType.SESSION_STATUS_CHANGED, EventType.SESSION_INTERRUPTED,
-               EventType.SESSION_WAITING, EventType.SESSION_FINISHED)
+    signals: list = []
+    watched = (EventType.SESSION_STATUS_CHANGED, EventType.TASK_QUEUE_BLOCKED,
+               EventType.TASK_QUEUE_INTERRUPTED)
 
     async def _cap(ev):
         if ev.type in watched:
-            verdicts.append(ev.type)
+            signals.append(ev)
 
     runtime.event_bus.subscribe(None, _cap)
-    return runtime, verdicts
+    return runtime, signals
 
 
 def _mk_ev(seq, type_, **payload):
@@ -225,7 +233,7 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
     PAUSED_HITL——与 SESSION_PAUSED_HITL 的 reducer/投影语义一致（form=wait → 无面板）。"""
     from ctx_weft.protocols.events import EventType
 
-    runtime, verdicts = _recover_runtime_with_status_capture()
+    runtime, signals = _recover_runtime_with_queue_signal_capture()
     seed = [
         _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
         _mk_ev(2, EventType.RUN_STARTED),
@@ -237,8 +245,9 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    # 会话状态只有一个 WAITING：软待命和等面板都是「停着但正常」。
-    assert verdicts == [EventType.SESSION_WAITING]
+    # TM 的路由不分 form：软待命和等面板都只是「还有人在等」→ TaskQueueBlocked。
+    assert [s.type for s in signals] == [EventType.TASK_QUEUE_BLOCKED]
+    assert signals[0].payload == {"count": 1}
     # wait-only 不应误标 PAUSED_HITL——前端会等一个不存在的面板。
     assert await runtime.session_status_after_recover("ses_1") == "PAUSED"
 
@@ -248,7 +257,7 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
     PAUSED_HITL——有面板可答。"""
     from ctx_weft.protocols.events import EventType
 
-    runtime, verdicts = _recover_runtime_with_status_capture()
+    runtime, signals = _recover_runtime_with_queue_signal_capture()
     seed = [
         _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
         _mk_ev(2, EventType.RUN_STARTED),
@@ -262,7 +271,8 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert verdicts == [EventType.SESSION_WAITING]
+    assert [s.type for s in signals] == [EventType.TASK_QUEUE_BLOCKED]
+    assert signals[0].payload == {"count": 2}
     assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
 
 

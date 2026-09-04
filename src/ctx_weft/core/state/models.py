@@ -89,11 +89,21 @@ SessionStatus = Literal[
     "FAILED",
     "CANCELED",
 ]
-# 值域 == `core.orchestrator.session_state` 状态机的可达状态。
 # 已删除：`QUEUED` / `TIMEOUT`（core 从未赋值）；`PAUSED` / `PAUSED_HITL`
 # （两者的差别是「前端要不要出面板」，那是 `HitlOpened.delivery` 的性质，不是会话状态，
 # 已合并成 `WAITING`）。存量日志里的旧值由 `core.control.reducers` 折叠，见
 # `docs/upgrade/2026-09-02-session-status-ownership.md`。
+
+#: 会话终态。到达之后任何输入都不再引发转移（`core.control.reducers` 据此拒绝迟到的
+#: `SessionRunning` 复活一个已收尾的会话）。原住在已删除的 `core.orchestrator.session_state`
+#: （会话状态机，随 `SessionManager` 降格于 Task 15/16 一并退役）——搬到这里是因为
+#: 状态机本体没了之后，这两个常量是那个文件仅剩的、`reducers.py` 仍在用的两块砖
+#: （Task 16）。
+TERMINAL_SESSION_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "CANCELED"})
+
+#: 「停着但正常」的那个状态。**只有一个**——「等的是审批面板还是一句话」是
+#: `HitlOpened.delivery` 的性质，前端渲染面板时已经拿到，会话状态不复制它。
+WAITING: str = "WAITING"
 
 TaskStatus = Literal[
     "PENDING",

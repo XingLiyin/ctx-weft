@@ -91,6 +91,19 @@ async def test_cancel_session_resolves_pending_hitl(runtime_with_pending_hitl):
     assert rt.hitl_registry.list_pending(session_id=session_id) == []
 
 
+@pytest.mark.skip(
+    reason=(
+        "依赖 Task 20 才会实现的 cancel_session 逐 agent 广播（Task 16 R20/进度台账）。"
+        "本测试原意是钉住『HitlResolved 必须先于会话终态事件』的顺序纪律，与熔断 trip "
+        "序列同一条约束；但会话状态机随 SessionManager 降格于 Task 15 整体退役后，"
+        "TaskManager.cancel_all() 已不再发任何『会话终态』事件可供排序——它只发 "
+        "TASK_CANCELED 并直接改写内存态 `self._session.status`（既不走 "
+        "announce_queue_state()/TaskQueueDrained，也没有 SessionFinished 的下游消费者了；"
+        "见 task_manager.py:cancel_all）。这条纪律要等 Task 20 给 cancel_session 补上"
+        "逐 agent 的终局广播（AgentTerminated 之类）之后，才有正确的事件可以拿来重新"
+        "钉这条『HITL 先于终局』的顺序——现在硬改会退化成『没抛异常』，验证强度不能接受。"
+    )
+)
 async def test_hitl_cancelled_before_session_terminal(runtime_with_pending_hitl):
     """HitlResolved 必须先于 SessionFinished——与熔断 trip 序列同一条纪律。"""
     rt, bus, session_id, _ = runtime_with_pending_hitl

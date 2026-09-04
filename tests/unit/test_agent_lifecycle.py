@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pathlib
 from datetime import UTC, datetime
 
 import pytest
@@ -346,8 +347,10 @@ async def test_handle_event_does_not_recurse_on_its_own_agent_events():
 
 
 async def test_attach_to_bus_registers_one_handler():
-    """对等 SessionManager 的同名先例（test_session_manager_inputs.py 的
-    test_attach_to_bus_registers_one_handler）：`_SpyBus.subscribe` 是空实现，
+    """对等 SessionManager 的同名先例（test_session_manager_state.py 的
+    test_attach_to_bus_registers_one_handler，Task 16 起该测试从
+    test_session_manager_inputs.py 迁来——原文件随会话状态机一并整体退役）：
+    `_SpyBus.subscribe` 是空实现，
     验证不了订阅是否真的发生——这里换成会记录 handler 的 `RecordingBus`，
     直接断言 `attach_to_bus()` 确实调用了一次 `subscribe`（review Important #2）。
     """
@@ -554,3 +557,40 @@ def test_legacy_reducer_branches_still_present():
     ]
     missing = [ref for ref in legacy_refs if ref not in src]
     assert missing == [], f"reducer 分支缺失: {missing}"
+
+
+# ── Task 16：4 个 SESSION_* 运行态停发进 L 档 ──────────────────────────────────
+
+_RETIRED_SESSION_TYPES = {
+    "SessionRunning", "SessionWaiting", "SessionInterrupted", "SessionFinished",
+}
+
+
+def test_retired_session_types_in_l_tier():
+    assert _RETIRED_SESSION_TYPES <= set(L_TIER_EVENT_TYPES)
+
+
+def test_retired_session_types_still_in_enum():
+    """§5：只删发射，不删枚举。"""
+    assert _RETIRED_SESSION_TYPES <= set(EVENT_TYPES)
+
+
+def test_retired_session_types_not_emitted_in_core():
+    """外加条：L 档 ∩ 实际发射集合 = ∅。"""
+    members = [
+        "SESSION_RUNNING", "SESSION_WAITING", "SESSION_INTERRUPTED", "SESSION_FINISHED",
+    ]
+    hits = []
+    for py in pathlib.Path("src/ctx_weft/core").rglob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        for m in members:
+            if f"EventType.{m}" in text and "reducers.py" not in str(py):
+                hits.append(f"{py}:{m}")
+    assert hits == [], f"停发类型仍在被发射：{hits}"
+
+
+def test_reducers_still_understands_retired_session_types():
+    """reducer 分支必须保留——存量日志靠它重建。"""
+    src = pathlib.Path("src/ctx_weft/core/control/reducers.py").read_text(encoding="utf-8")
+    for m in ("SESSION_RUNNING", "SESSION_WAITING", "SESSION_INTERRUPTED", "SESSION_FINISHED"):
+        assert f"EventType.{m}" in src, f"reducers 丢了 {m} 的重放分支"

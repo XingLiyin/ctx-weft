@@ -267,6 +267,11 @@ L_TIER_EVENT_TYPES: frozenset[str] = frozenset({
     # loop.recognize_intent）取代了这条 step 专属的镜像事件，停止发射。就地登记 L 档，
     # 不新建常量、不搬到 events.py（那是下一个任务的事），不从 EventType 枚举里删除。
     "RecognizeIntentLLMPrompt",
+    # Task 16（2026-09-03-agent-centric-interaction）：会话状态机（session_state.py）
+    # 随 SessionManager 降格（Task 15）一并退役，这 4 个 session 运行态类型不再有
+    # 发射点。reducer 分支原样保留（存量日志重放靠它们），枚举成员不删——
+    # docs/events-v2.md §5：只删发射，不删枚举，删枚举须另过退役闸门。
+    "SessionRunning", "SessionWaiting", "SessionInterrupted", "SessionFinished",
 })
 
 

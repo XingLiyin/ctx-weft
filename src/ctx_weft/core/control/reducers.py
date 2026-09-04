@@ -18,8 +18,7 @@ from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, Ta
 from ctx_weft.core.discriminators import TaskErrorCode
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
-from ctx_weft.core.orchestrator.session_state import TERMINAL_SESSION_STATUSES, WAITING
-from ctx_weft.core.state.models import TaskStatus
+from ctx_weft.core.state.models import TERMINAL_SESSION_STATUSES, WAITING, TaskStatus
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import (
     HITL_FORM_QUESTION,

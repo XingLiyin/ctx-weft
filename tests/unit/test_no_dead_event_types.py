@@ -71,6 +71,16 @@ _KNOWN_READ_ONLY_MODULES = frozenset({
     "protocols/events.py",              # EventType 定义 + TRANSIENT_EVENT_TYPES 等只读集合
     "core/control/reducers.py",         # 主 reducer：折叠存量日志，读这 13 个类型的分支都在这
     "providers/events/_lifecycle.py",   # 会话活跃性重放（apply_lifecycle/replay_lifecycle）
+    # Task 16：SnapshotWriter.on_event 只**消费**、不**发射**——它是挂在活总线上的旁路
+    # 订阅者，靠 `event.type == "SessionFinished"` 字符串匹配决定要不要在会话终态落一张
+    # 快照，本身从不 `Event(...)` 构造这个类型。SessionManager 状态机退役后，没有任何
+    # 组件还会把这个类型送上总线，这个分支变成永久不可达的死分支（无害：判据落空，
+    # 直接掉进下面的 periodic 计数分支，不抛错、不误写）。把它换成会话真正的终态信号
+    # （比如 TM 的 `TaskQueueDrained` 聚合信号）需要同时改写 6 个既有快照测试对「触发
+    # 事件是什么」的契约断言（`test_event_persistence_wiring.py`），超出本任务范围
+    # （4 个 SESSION_* 停发 + session_state.py 清理 + 19 处红测试），留给后续任务，
+    # 见 task-16-report.md。
+    "providers/events/snapshot.py",
 })
 
 
