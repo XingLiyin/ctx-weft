@@ -426,7 +426,21 @@ class SessionStartParams:
 
 @dataclass
 class RunHandle:
-    """Handle to a running or completed session/task."""
+    """Handle to a running or completed session/task.
+
+    ``agent_id`` is the **addressable agent** this handle hands the caller together
+    with the session/task ids — the host does not need a separate lookup to find
+    something it can act on right away:
+
+    - From ``start_session`` (runtime.py, in-method): the session's **root agent**
+      (``session.root_agent_id``, minted before ``SESSION_CREATED`` — see
+      ``SessionManager.create_session`` / ``resume_session``, always non-empty on
+      this path). Pass it straight to ``send_message(agent_id, ...)`` to talk to the
+      session, or to ``get_agent(agent_id)`` for its detail view (``parent_agent_id
+      is None`` — it has no parent).
+    - From ``run_single_task`` (the phase-1 single-task convenience wrapper): the
+      agent that executed that one task, for the same immediate-use purpose.
+    """
 
     run_id: str
     session_id: str
@@ -1323,6 +1337,12 @@ class CtxWeftRuntime:
             )
 
         run_id = generate_id("run")
+        # `or ""` is defensive only: `Session.root_agent_id` is typed `str | None` for
+        # Session's general use, but on this path it is always non-empty — create_session
+        # mints it via generate_id("agt") before SESSION_CREATED, and resume_session raises
+        # RuntimeError up front if the recovered projection has no root_agent_id (verified
+        # 2026-09-03, Task 22). handle.agent_id is therefore always the addressable root
+        # agent (see RunHandle docstring), never "".
         handle = RunHandle(
             run_id=run_id,
             session_id=session.id,

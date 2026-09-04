@@ -3,8 +3,16 @@ from __future__ import annotations
 import pytest
 
 from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
+from ctx_weft.core.runtime import SessionStartParams
+from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.agent import AgentDetail, AgentSummary
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -226,3 +234,34 @@ async def test_send_message_twice_in_a_row_is_not_rejected_as_busy():
     # 第二次消息应该继续走注入分支、落到同一个 task，而不是被拒绝。
     tid2 = await rt.send_message("a1", "second message right after")
     assert tid2 == "t1"
+
+
+async def test_start_session_agent_id_is_addressable_root_agent():
+    """`RunHandle.agent_id`（`start_session` 构造点，runtime.py:1330）契约钉入测试：
+    调用方拿到 handle 后可以直接用 `handle.agent_id` 去 `get_agent()` / `send_message`，
+    它就是这条 session 可寻址的 root agent（`parent_agent_id is None`），不是空字符串
+    （裁定 R25：`RunHandle` 已有 `agent_id`，不再新增 `root_agent_id` 字段；`session
+    .root_agent_id or ""` 里的 `or ""` 只是防御性写法——`SessionManager.create_session`
+    / `resume_session` 都保证它非空，这里钉住「非空 + 可查到」这条实际契约）。
+    """
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    llm = MockLLMAdapter(responses=[
+        MockResponse(tool_calls=[
+            ToolCall(id="tc1", name="control__finish_task", arguments={"result": "done"}),
+        ]),
+    ])
+    rt = make_runtime(llm=llm, agent_provider=resolver)
+    rt.providers.register_memory(InMemoryMemoryProvider())
+
+    handle = await rt.start_session(SessionStartParams.create(
+        template_id="agent:tpl_echo",
+        user_prompt="hi",
+        context_limit=100_000,
+    ))
+    await handle.wait_for_finish(timeout=5.0)
+
+    assert handle.agent_id
+    detail = rt.get_agent(handle.agent_id)
+    assert detail.session_id == handle.session_id
+    assert detail.parent_agent_id is None
