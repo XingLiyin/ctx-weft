@@ -798,13 +798,13 @@ class CtxWeftRuntime:
         既有「查无則静默」的读路径同一口径）。
         """
         reg = self._agent_lifecycle_manager
-        if agent_id not in reg._agents:
+        if not reg.has(agent_id):
             return []
 
         targets = [agent_id, *reg.descendants_of(agent_id)]
         killed: list[str] = []
         for aid in targets:
-            rec = reg._agents.get(aid)
+            rec = reg.record_of(aid)
             if rec is None or rec.status == "terminated":
                 continue
 
@@ -873,7 +873,7 @@ class CtxWeftRuntime:
         真正落 `waiting_human` 要等它们各自跑到下一个检查点。
         """
         reg = self._agent_lifecycle_manager
-        rec = reg._agents.get(agent_id)
+        rec = reg.record_of(agent_id)
         if rec is None:
             raise AgentNotFound(f"unknown agent: {agent_id}")
         if rec.status != "running":
@@ -883,7 +883,7 @@ class CtxWeftRuntime:
 
         paused: list[str] = []
         for aid in [agent_id, *reg.descendants_of(agent_id)]:
-            r = reg._agents.get(aid)
+            r = reg.record_of(aid)
             if r is None or r.status != "running" or not r.current_task_id:
                 continue
             if self.pause_task(r.session_id, r.current_task_id):
@@ -920,12 +920,12 @@ class CtxWeftRuntime:
         起来之后的那次**真实** `TASK_STARTED` 事件驱动。
         """
         reg = self._agent_lifecycle_manager
-        if agent_id not in reg._agents:
+        if not reg.has(agent_id):
             raise AgentNotFound(f"unknown agent: {agent_id}")
 
         resumed: list[str] = []
         for aid in [agent_id, *reg.descendants_of(agent_id)]:
-            r = reg._agents.get(aid)
+            r = reg.record_of(aid)
             if r is None or r.status != "waiting_human":
                 continue
             req = self._pause_bubble_of(aid, session_id=r.session_id)
@@ -2008,11 +2008,13 @@ class CtxWeftRuntime:
         """
         reg = self._agent_lifecycle_manager
         ids = reg.agent_ids_of_session(session_id)
-        if parent_agent_id is not None:
-            ids = [i for i in ids if reg._agents[i].parent_agent_id == parent_agent_id]
         out: list[AgentSummary] = []
         for aid in ids:
-            rec = reg._agents[aid]
+            rec = reg.record_of(aid)
+            if rec is None:
+                continue
+            if parent_agent_id is not None and rec.parent_agent_id != parent_agent_id:
+                continue
             if not include_terminated and rec.status == "terminated":
                 continue
             out.append(AgentSummary(
@@ -2034,7 +2036,7 @@ class CtxWeftRuntime:
         原样降级成 `None`，不崩、不拿一个假状态字符串糊弄调用方。
         """
         reg = self._agent_lifecycle_manager
-        rec = reg._agents.get(agent_id)
+        rec = reg.record_of(agent_id)
         if rec is None:
             raise AgentNotFound(f"unknown agent: {agent_id}")
         task_status: str | None = None
@@ -2080,7 +2082,9 @@ class CtxWeftRuntime:
         """
         reg = self._agent_lifecycle_manager
         reg.assert_can_receive(agent_id)
-        rec = reg._agents[agent_id]
+        rec = reg.record_of(agent_id)
+        if rec is None:
+            raise AgentNotFound(f"unknown agent: {agent_id}")
         if session_id is not None and session_id != rec.session_id:
             raise ValueError(
                 f"agent {agent_id} belongs to session {rec.session_id!r}, not {session_id!r}"
@@ -2211,7 +2215,7 @@ class CtxWeftRuntime:
         agent 还在 == TM 还在，故此处直接下标、不再判 None。
         """
         reg = self._agent_lifecycle_manager
-        rec = reg._agents[agent_id]
+        rec = reg.record_of(agent_id)
         tm = self._task_managers[rec.session_id]
         normalized, event_jsonable = await self._validate_and_normalize_content(
             content, rec.session_id, tenant_id=rec.tenant_id,
@@ -2233,7 +2237,7 @@ class CtxWeftRuntime:
             created_at=now_utc(),
         )
         await tm.push_task(task, user_prompt_event_jsonable=event_jsonable)
-        rec.current_task_id = task.id
+        reg.set_current_task(agent_id, task.id)
         asyncio.create_task(tm.drain())
         return task.id
 

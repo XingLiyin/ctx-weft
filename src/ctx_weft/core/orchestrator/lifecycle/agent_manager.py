@@ -88,6 +88,24 @@ class _AgentRecord:
     current_task_id: str | None = None       # 消息路由据此判断新建还是复用 task
 
 
+@dataclass(frozen=True)
+class AgentRecordView:
+    """`_AgentRecord` 的只读快照——ALM 对外（core 内部）唯一的记录读法。
+
+    是**快照**不是引用：取出之后 registry 再变也不影响手上这份，调用方不会拿到
+    一个会自己变的「只读」对象。要最新值就再调一次 `record_of`。
+    """
+
+    agent_id: str
+    session_id: str
+    tenant_id: str
+    template_id: str
+    parent_agent_id: str | None
+    spawn_depth: int
+    status: str
+    current_task_id: str | None
+
+
 @dataclass
 class AgentLifecycleManager:
     """Agent 实例化 + 注册表。
@@ -257,6 +275,37 @@ class AgentLifecycleManager:
         if rec is None:
             raise AgentNotFound(f"unknown agent: {agent_id}")
         return rec.status
+
+    def record_of(self, agent_id: str) -> AgentRecordView | None:
+        """该 agent 的只读记录快照；未登记返回 None。
+
+        取代 runtime 对 `_agents` 的私有穿透（2026-09-04 spec §5.3）。返回 None
+        而不是抛错：调用方各有各的报错口径（`send_message` 抛 `AgentNotFound`、
+        `_task_is_terminal` 静默降级），由它们自己决定。
+        """
+        rec = self._agents.get(agent_id)
+        if rec is None:
+            return None
+        return AgentRecordView(
+            agent_id=agent_id,
+            session_id=rec.session_id,
+            tenant_id=rec.tenant_id,
+            template_id=rec.template_id,
+            parent_agent_id=rec.parent_agent_id,
+            spawn_depth=rec.spawn_depth,
+            status=rec.status,
+            current_task_id=rec.current_task_id,
+        )
+
+    def set_current_task(self, agent_id: str, task_id: str | None) -> None:
+        """外部消息新建 task 时同步 `current_task_id`——`send_message` 的路由依据。
+
+        运行期这个字段由 `AGENT_*` 事件的折叠维护；`_start_task_for_agent` 是唯一
+        「task 还没派发、但路由已经必须认它」的时刻，故留这一个显式写口。
+        """
+        rec = self._agents.get(agent_id)
+        if rec is not None:
+            rec.current_task_id = task_id
 
     def assert_can_receive(self, agent_id: str) -> None:
         """外部消息投递前的同步守卫（spec §3.5 / §4.1）。判断逻辑收敛在此一处，
