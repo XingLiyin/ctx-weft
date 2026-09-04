@@ -19,7 +19,7 @@ from ctx_weft.core.loop.llm_gateway import (
 )
 from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.protocols.events import EventOrigin, EventType
-from ctx_weft.core.util import generate_id
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.capability import ToolCapability
 
 logger = logging.getLogger(__name__)

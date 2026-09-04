@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ctx_weft.core.assembler import AssembledPrompt, ContextAssembler
-from ctx_weft.core.util import new_event
+from ctx_weft.core.utils.event import new_event
 from ctx_weft.protocols.events import Event, EventBus, EventType
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
@@ -202,7 +202,7 @@ async def _persist_user_prompt(state, ctx) -> None:
     task = state.task
     if not task.user_prompt or task.user_prompt_in_memory:
         return
-    from ctx_weft.core.util import now_utc
+    from ctx_weft.core.utils.clock import now_utc
     await ctx.memory.ingest(
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,

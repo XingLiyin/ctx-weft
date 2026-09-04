@@ -10,7 +10,7 @@ from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.capabilities.cache import CapabilityCache
-from ctx_weft.core.estimate import estimate_tokens
+from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,

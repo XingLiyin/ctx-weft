@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.util import generate_id
+from ctx_weft.core.utils.ids import generate_id
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest

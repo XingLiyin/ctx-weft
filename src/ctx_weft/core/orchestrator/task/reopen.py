@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.core.content import content_with_suffix
+from ctx_weft.core.utils.content import content_with_suffix
 
 if TYPE_CHECKING:
     from ctx_weft.core.models.task import Task

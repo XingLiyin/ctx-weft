@@ -16,8 +16,9 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome,
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.media import placeholder_refs
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
-from ctx_weft.core.content import content_to_text, image_tokens
-from ctx_weft.core.util import as_utc, generate_id, now_utc
+from ctx_weft.core.utils.content import content_to_text, image_tokens
+from ctx_weft.core.utils.clock import as_utc, now_utc
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress
 from ctx_weft.protocols.capability import qualify
 

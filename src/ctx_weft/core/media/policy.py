@@ -33,7 +33,7 @@ N 张」，一张不可降的 base64 图同样占着模型的视线，故它照�
 
 占位是**落库、永久**的，写下去就把原图从记录里换走了。inline base64 的图一旦换成占位，
 ref 无从取回 = 图**永久丢失**——那不是降级，是删除。故判据是「这张图能不能被
-`media:get_image` 取回来」，即 `core.content.extract_blob_refs` 认得的 `blob:<sha>`
+`media:get_image` 取回来」，即 `core.utils.content.extract_blob_refs` 认得的 `blob:<sha>`
 （复用归一层这个**唯一真源**，不在本模块另写一遍 isinstance，见该函数 docstring）。
 
 这与 §10「`MemoryBlobStore` 未注册 → 返回 0、不降级」**不冲突，且严格更细**：未注册时
@@ -91,7 +91,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ctx_weft.core.content import extract_blob_refs
+from ctx_weft.core.utils.content import extract_blob_refs
 
 __all__ = [
     "DemotionPlan",

@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from ctx_weft.core.content import (
+from ctx_weft.core.utils.content import (
     content_from_jsonable,
     content_to_jsonable,
 )

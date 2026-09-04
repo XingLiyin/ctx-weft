@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from ctx_weft.core.content import collect_blob_refs
+from ctx_weft.core.utils.content import collect_blob_refs
 from ctx_weft.core.loop.steps.segment_fold import SegmentFoldResult, segment_fold
 from ctx_weft.core.media.refs import encode_image_placeholder
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

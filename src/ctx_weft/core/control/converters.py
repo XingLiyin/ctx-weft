@@ -8,7 +8,7 @@ from __future__ import annotations
 from ctx_weft.core.control.types import SessionView, TaskView
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task, deserialize_settings
-from ctx_weft.core.util import as_utc
+from ctx_weft.core.utils.clock import as_utc
 
 
 def _as_utc_opt(dt):

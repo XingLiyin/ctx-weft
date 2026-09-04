@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.estimate import estimate_tokens
+from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 

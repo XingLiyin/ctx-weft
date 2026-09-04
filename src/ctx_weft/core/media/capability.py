@@ -64,7 +64,7 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ctx_weft.core.content import CONTENT_PARTS_KEY
+from ctx_weft.core.utils.content import CONTENT_PARTS_KEY
 from ctx_weft.core.media.refs import find_image_placeholders
 from ctx_weft.protocols import (
     ContentPart,

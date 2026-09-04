@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.assembler.sources._history import record_to_history_block, wrap_compact_summary
-from ctx_weft.core.content import content_to_text
-from ctx_weft.core.util import generate_id
+from ctx_weft.core.utils.content import content_to_text
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
 from ctx_weft.protocols.memory_compat import legacy_type_of as _legacy_type_of
 

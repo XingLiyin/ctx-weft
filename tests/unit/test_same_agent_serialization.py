@@ -281,7 +281,8 @@ async def test_resume_parent_emits_before_dispatch_and_replay_lands_active() -> 
        重放到 TaskStarted 落地那一刻，投影确实是 ACTIVE——证明顺序不只是「调用
        顺序对了」，落到事件流里、喂给 reducer 也确实得到期望的最终状态。
     """
-    from ctx_weft.core.util import generate_id, now_utc
+    from ctx_weft.core.utils.clock import now_utc
+    from ctx_weft.core.utils.ids import generate_id
     from ctx_weft.protocols.events import Event
 
     bus = _CapturingBus()

@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any
 
-from ctx_weft.core.util import generate_id
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.capability import (
     Capability,
     CapabilityEvent,

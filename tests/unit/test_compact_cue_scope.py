@@ -6,8 +6,8 @@ from ctx_weft.core.assembler.composer import (
     DefaultComposer, _AGENT_COMPACTION_INSTRUCTION, _COMPACTION_INSTRUCTION,
 )
 from ctx_weft.core.assembler.assembler import ContextBlock
-from ctx_weft.core.content import content_to_text
-from ctx_weft.core.estimate import estimate_tokens
+from ctx_weft.core.utils.content import content_to_text
+from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio

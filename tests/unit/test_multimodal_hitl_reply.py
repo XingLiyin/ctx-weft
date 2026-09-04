@@ -14,7 +14,7 @@ def _content():
 
 def test_rejected_reply_keeps_image_via_prefix():
     """拒绝路径把「Human declined:」拼到回复前——必须保 parts。"""
-    from ctx_weft.core.content import content_with_prefix
+    from ctx_weft.core.utils.content import content_with_prefix
     out = content_with_prefix(_content(), "Human declined: ")
     assert any(not hasattr(p, "text") for p in out), "图片不得在拼接中丢失"
     assert out[0].text.startswith("Human declined: ")
@@ -22,7 +22,7 @@ def test_rejected_reply_keeps_image_via_prefix():
 
 def test_interrupt_edit_prefix_keeps_image_via_content_with_prefix():
     """① 打断续接说明拼到多模态回复前——必须保 parts，走 content_with_prefix 而非 f-string。"""
-    from ctx_weft.core.content import content_with_prefix
+    from ctx_weft.core.utils.content import content_with_prefix
     from ctx_weft.core.loop.steps.act import _interrupt_edit_prefix
 
     prefix = _interrupt_edit_prefix("do X")
@@ -35,7 +35,7 @@ def test_interrupt_edit_prefix_keeps_image_via_content_with_prefix():
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.util import now_utc
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols import ProviderContext
 
 
@@ -62,7 +62,7 @@ class _StubEventBlobStore:
 
 
 async def _finished_task_manager(prompt):
-    from ctx_weft.core.content import content_to_event_jsonable
+    from ctx_weft.core.utils.content import content_to_event_jsonable
 
     tm = TaskManager(session_id="s1", event_bus=InProcessEventBus())
     store = _StubEventBlobStore()

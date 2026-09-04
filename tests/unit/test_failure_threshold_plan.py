@@ -12,7 +12,7 @@ import pytest
 
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.core.orchestrator.task.failure_threshold import TripPlan, plan_threshold_trip
-from ctx_weft.core.util import now_utc
+from ctx_weft.core.utils.clock import now_utc
 
 
 def _t(tid: str, *, parent: str | None = "root", status: str = "ACTIVE",

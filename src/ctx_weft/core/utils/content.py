@@ -111,7 +111,7 @@ def image_byte_size(part: Any) -> int | None:
     """一个图片 part 的原始（解码后）字节数；无从得知时返回 None。
 
     两条来源，按可靠度排序：
-    1. ``byte_size`` 字段——由 ``core.content`` 在**还有字节**的时候填上
+    1. ``byte_size`` 字段——由 ``core.utils.content`` 在**还有字节**的时候填上
        （validate 解码 inline base64 / normalize 外部化拿到 raw bytes），
        并经 ``content_to_jsonable`` 往返持久化。ref 形态只有这一条路。
     2. inline base64 的载荷长度反解：``len(data) * 3 // 4`` 减去 padding。
@@ -930,7 +930,7 @@ def downgrade_images_to_text(
 #: **住在这里而不是 gateway**：`core.media` 的 provider 也要用它产出图片 part，
 #: 而 gateway 属 `core.loop`——常量长在 gateway 里会逼 media 去 import loop，造出
 #: `loop ⇄ media` 的 import 环（`media/capability.py` 此前正是靠函数内惰性 import
-#: 绕开它，并留了注释说明自己在绕什么）。`core.content` 是两边共同的下游叶子，
+#: 绕开它，并留了注释说明自己在绕什么）。`core.utils.content` 是两边共同的下游叶子，
 #: 且这个键本就属于「内容怎么传」的话题——`split_for_tool_result` 的 docstring
 #: 早就在讲它了。
 CONTENT_PARTS_KEY = "content_parts"

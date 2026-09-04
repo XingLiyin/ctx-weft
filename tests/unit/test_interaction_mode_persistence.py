@@ -15,7 +15,8 @@ from ctx_weft.core.control.types import TaskView
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.task.manager import task_payload
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.util import generate_id, now_utc
+from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.ids import generate_id
 
 
 def _interactive_task() -> Task:

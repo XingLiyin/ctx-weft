@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import jsonschema
 
-from ctx_weft.core.content import (
+from ctx_weft.core.utils.content import (
     CONTENT_PARTS_KEY,
     content_with_prefix,
     content_with_suffix,
@@ -37,7 +37,8 @@ from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL
 from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
 from ctx_weft.core.capabilities.cache import CapabilityCache
-from ctx_weft.core.util import generate_id, now_utc
+from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.capability import (
     AuthorizationDecision, Authorizer, CapabilityProvider, ToolCapabilityProvider, qualify,
 )
@@ -102,7 +103,7 @@ SILENT_TOOLS = frozenset({
 # 于是落盘截断（`_maybe_spill`）、human note 拼接、事件 payload 截断这些既有加工
 # 全部只作用于**文本部分**——因为 parts 是在它们之后才拼上去的。
 #
-# 定义已移至 `core.content`（两边共同的下游叶子）——`core.media` 的 provider 也要用
+# 定义已移至 `core.utils.content`（两边共同的下游叶子）——`core.media` 的 provider 也要用
 # 这个键，常量留在这里会逼它 import `core.loop`，造出 loop ⇄ media 的环。此处保留
 # re-export 之外的说明性注释，值本身不在这里定义。
 
@@ -141,7 +142,7 @@ class InvocationResult:
     # `list[ContentPart]`（形如 `[TextPart(文本), *parts]`）。
     # 读取方注意：对 list 做 `.strip()` / `join` / `content[:N]` 都是错的
     # （切片一个 list 不报错，但切出来的是前 N 个 part）——文本化请走
-    # `core.content` 的 `content_to_text` / `redact_content_for_event`。
+    # `core.utils.content` 的 `content_to_text` / `redact_content_for_event`。
     content: str | list[ContentPart]
     metadata: dict[str, Any] = field(default_factory=dict)  # control signals
     is_error: bool = False

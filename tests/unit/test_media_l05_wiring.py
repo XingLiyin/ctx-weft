@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.content import collect_blob_refs
+from ctx_weft.core.utils.content import collect_blob_refs
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.media import demote_for_budget, get_image
 from ctx_weft.core.media.refs import (
@@ -31,7 +31,7 @@ from ctx_weft.core.media.refs import (
     encode_image_placeholder,
     find_image_placeholders,
 )
-from ctx_weft.core.content import content_to_text
+from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.protocols import (
     ImagePart,
     MemoryAddress,

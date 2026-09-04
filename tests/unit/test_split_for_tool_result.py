@@ -1,6 +1,6 @@
 """provider 经 CONTENT_PARTS_KEY 回传时要把文本与非文本 part 分开，这是那个拆分器。"""
 
-from ctx_weft.core.content import split_for_tool_result
+from ctx_weft.core.utils.content import split_for_tool_result
 from ctx_weft.protocols import ImagePart, TextPart
 
 

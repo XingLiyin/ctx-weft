@@ -1,4 +1,4 @@
-from ctx_weft.core.content import content_to_text, redact_content_for_event
+from ctx_weft.core.utils.content import content_to_text, redact_content_for_event
 from ctx_weft.protocols import ImagePart, LLMMessage, TextPart
 
 _LONG_B64 = "QUJDRA==" * 500          # 模拟真实图片的体量

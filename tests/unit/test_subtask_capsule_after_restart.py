@@ -38,8 +38,8 @@ from ctx_weft.core.loop.steps.finalize import (
 from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
 from ctx_weft.core.orchestrator.task.manager import task_payload
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from ctx_weft.core.estimate import estimate_tokens
-from ctx_weft.core.util import generate_id
+from ctx_weft.core.utils.estimate import estimate_tokens
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer

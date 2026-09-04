@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from ctx_weft.core.content import collect_blob_refs
+from ctx_weft.core.utils.content import collect_blob_refs
 from ctx_weft.protocols import (
     ImagePart, MemoryAddress, MemoryEvent, MemoryKind, MemoryRecord,
     MemoryScope, TextPart,

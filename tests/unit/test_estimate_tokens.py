@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from math import ceil
 
-from ctx_weft.core.estimate import estimate_tokens
+from ctx_weft.core.utils.estimate import estimate_tokens
 
 
 def test_empty_is_zero():
@@ -132,7 +132,7 @@ def test_cjk_not_double_counted_as_non_ascii():
 
 
 # ── estimate_content_tokens / estimate_tool_calls_tokens（gateway 与 prepare/composer 共用）──
-from ctx_weft.core.estimate import estimate_content_tokens, estimate_tool_calls_tokens
+from ctx_weft.core.utils.estimate import estimate_content_tokens, estimate_tool_calls_tokens
 from ctx_weft.protocols.context import ImagePart, TextPart
 
 

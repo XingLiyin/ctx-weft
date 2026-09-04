@@ -70,7 +70,7 @@ from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKi
 from ctx_weft.core.orchestrator.task.queue import QueueEntry
 from ctx_weft.core.orchestrator.task.runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
-from ctx_weft.core.util import emit_event
+from ctx_weft.core.utils.event import emit_event
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.models.session import Session
@@ -81,7 +81,8 @@ from ctx_weft.core.models.errors import (
     crash_error_code,
     crash_run_outcome,
 )
-from ctx_weft.core.util import generate_id, now_utc
+from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import (
     AgentTemplate,
     Capability,
@@ -554,7 +555,7 @@ class CtxWeftRuntime:
         memory 侧不能外部化（`NullMemoryBlobStore`）时第一个产物是原样的同一对象；
         纯文本 content 两侧都是零 IO 直通（两个函数对 `str` 都原样返回）。
         """
-        from ctx_weft.core.content import (
+        from ctx_weft.core.utils.content import (
             content_to_event_jsonable,
             normalize_content,
             validate_content,
@@ -992,7 +993,7 @@ class CtxWeftRuntime:
         llm_model: str | None = None,
     ) -> tuple[RunHandle, LoopState]:
         """Phase 1 compat: run a single task end-to-end and await completion."""
-        from ctx_weft.core.content import content_to_text
+        from ctx_weft.core.utils.content import content_to_text
 
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
@@ -1663,7 +1664,7 @@ class CtxWeftRuntime:
         悄悄吞掉。崩溃恢复是最不能再崩一次的地方——一个 task 的坏数据不该拖垮
         整场会话恢复。
         """
-        from ctx_weft.core.content import (
+        from ctx_weft.core.utils.content import (
             content_to_jsonable, downgrade_images_to_text, hydrate_event_content,
             normalize_content,
         )
@@ -2207,7 +2208,7 @@ class CtxWeftRuntime:
         normalized, event_jsonable = await self._validate_and_normalize_content(
             content, rec.session_id, tenant_id=rec.tenant_id,
         )
-        from ctx_weft.core.content import content_to_text
+        from ctx_weft.core.utils.content import content_to_text
         task = Task(
             id=generate_id("tsk"),
             session_id=rec.session_id,
@@ -2380,7 +2381,7 @@ class CtxWeftRuntime:
             session_id=session.id, tenant_id=session.tenant_id,
             task_id=target.id, agent_id=agent_id,
         )
-        from ctx_weft.core.content import content_with_prefix
+        from ctx_weft.core.utils.content import content_with_prefix
         from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
 
         message = req.decision.message if req.decision else ""
@@ -2552,7 +2553,7 @@ class CtxWeftRuntime:
             )
         except Exception:
             return ""
-        from ctx_weft.core.content import content_to_text
+        from ctx_weft.core.utils.content import content_to_text
         ups = [r for r in view if r.role == "user"]
         return content_to_text(ups[-1].content) if ups else ""
 
@@ -2703,7 +2704,7 @@ class CtxWeftRuntime:
                 targets.setdefault(id(req.decision), (hitl_id, req.decision))
         if not targets:
             return
-        from ctx_weft.core.content import (
+        from ctx_weft.core.utils.content import (
             downgrade_images_to_text, hydrate_event_content, normalize_content,
         )
         ctx: ProviderContext | None = None

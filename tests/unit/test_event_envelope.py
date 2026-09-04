@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from ctx_weft.core.util import emit_event, new_event
+from ctx_weft.core.utils.event import emit_event, new_event
 from ctx_weft.protocols.events import EventOrigin, EventType
 
 

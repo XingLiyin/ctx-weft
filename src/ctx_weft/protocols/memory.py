@@ -345,7 +345,7 @@ class MemoryProvider(Protocol):
     1. 持久化时保持原样——若 ingest 接收 list[ContentPart]，则无损保存整体结构；
     2. 召回时原样返回——load_view / recall_topic / recall_semantic 返回的 MemoryRecord.content
        形态必与入库时相同（str 返 str，list 返 list，无转换）；
-    3. 落库推荐形态：``ctx_weft.core.content.content_to_jsonable`` 用于持久化前的 JSON 序列化
+    3. 落库推荐形态：``ctx_weft.core.utils.content.content_to_jsonable`` 用于持久化前的 JSON 序列化
       （ContentPart 是普通 dataclass，需过此转换才能 json.dumps；取回时用 ``content_from_jsonable`` 还原）；
     4. 禁止在持久化层拍扁成纯文本——装配期是否拍扁为 str 由框架决定（见 composer.py），
        provider 的职责仅是无损存取。

@@ -30,7 +30,7 @@ from ctx_weft.core.loop.steps.recognize_intent import (
     should_recognize_intent,
 )
 from ctx_weft.core.models.task import NormalTaskSettings
-from ctx_weft.core.estimate import effective_limit, estimate_content_tokens, estimate_tokens, estimate_tool_calls_tokens
+from ctx_weft.core.utils.estimate import effective_limit, estimate_content_tokens, estimate_tokens, estimate_tool_calls_tokens
 from ctx_weft.protocols import MemoryEventType
 from ctx_weft.protocols.capability import SkillCapability
 
@@ -59,7 +59,7 @@ def wrap_skill_instructions(instructions: str) -> str:
 def _estimate_record_tokens(r, count: Callable[[str], int] | None = None) -> int:
     """一条 memory 记录的 compact 估算：content + tool_calls 参数（在 metadata）+ reasoning。
 
-    与 gateway._estimate_message_tokens 同口径（同 core.estimate 计费项），使 prepare 的触发估算
+    与 gateway._estimate_message_tokens 同口径（同 core.utils.estimate 计费项），使 prepare 的触发估算
     不再漏 tool_calls 参数/图片/framing（此前只 join content 文本、且丢弃非 str content）。
 
     count：文本费率经 count 回调走 tokenizer（通常是 ``ctx.llm.tokenizer.count``，已校准）；

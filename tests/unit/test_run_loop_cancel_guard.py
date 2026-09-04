@@ -22,7 +22,7 @@ from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.util import generate_id
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

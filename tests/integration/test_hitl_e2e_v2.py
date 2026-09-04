@@ -25,7 +25,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.models.config import RuntimeConfig
-from ctx_weft.core.content import content_to_text
+from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import (
     ImagePart,

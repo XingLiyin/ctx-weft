@@ -293,7 +293,7 @@ def _is_event_side_ref(message) -> bool:
 
 
 def _text_of(message) -> str:
-    from ctx_weft.core.content import content_to_text
+    from ctx_weft.core.utils.content import content_to_text
     return content_to_text(message)
 
 
@@ -447,7 +447,7 @@ async def test_recovery_injects_the_answer_of_a_resolved_user_turn():
     await rt.recover_session(SID)
     prompts = await _hitl_reply_prompts(rt)
     assert len(prompts) == 1
-    from ctx_weft.core.content import content_to_text
+    from ctx_weft.core.utils.content import content_to_text
     assert "use postgres" in content_to_text(prompts[0].content)
 
 

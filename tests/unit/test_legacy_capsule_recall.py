@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from ctx_weft.core.estimate import estimate_tokens
+from ctx_weft.core.utils.estimate import estimate_tokens
 
 import pytest
 

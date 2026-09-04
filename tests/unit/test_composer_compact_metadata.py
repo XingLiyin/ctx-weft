@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.assembler.composer import DefaultComposer
-from ctx_weft.core.estimate import estimate_tokens
+from ctx_weft.core.utils.estimate import estimate_tokens
 
 
 def _identity(text):

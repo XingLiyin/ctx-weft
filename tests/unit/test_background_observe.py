@@ -612,7 +612,7 @@ async def test_replace_finish_report_declares_surviving_placeholder_refs():
     """
     from datetime import datetime, timezone
 
-    from ctx_weft.core.content import collect_blob_refs
+    from ctx_weft.core.utils.content import collect_blob_refs
     from ctx_weft.core.media.refs import encode_image_placeholder
     from ctx_weft.protocols import (
         MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext,

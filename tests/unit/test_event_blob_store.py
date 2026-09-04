@@ -13,7 +13,7 @@ import hashlib
 
 import pytest
 
-from ctx_weft.core.content import normalize_content
+from ctx_weft.core.utils.content import normalize_content
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore, NullEventBlobStore
@@ -178,7 +178,7 @@ async def test_ref_parts_are_not_re_externalized() -> None:
 
 # ── content_to_event_jsonable（Task 3）─────────────────────────────────────
 
-from ctx_weft.core.content import content_to_event_jsonable
+from ctx_weft.core.utils.content import content_to_event_jsonable
 
 
 async def test_inline_base64_is_externalized_here() -> None:
@@ -208,7 +208,7 @@ async def test_plain_text_returns_same_object() -> None:
 
 async def test_transitional_helper_is_gone() -> None:
     """`content_to_jsonable_refs_only` 是本设计落地前的过渡实现，应已删除。"""
-    import ctx_weft.core.content as c
+    import ctx_weft.core.utils.content as c
     assert not hasattr(c, "content_to_jsonable_refs_only")
 
 

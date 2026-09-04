@@ -2,7 +2,7 @@ import base64
 
 import pytest
 
-from ctx_weft.core.content import content_has_image, validate_content
+from ctx_weft.core.utils.content import content_has_image, validate_content
 from ctx_weft.core.models.errors import InvalidContentError
 from ctx_weft.protocols import ImagePart, TextPart
 

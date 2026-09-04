@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from ctx_weft.core.content import normalize_content, rehydrate_content
+from ctx_weft.core.utils.content import normalize_content, rehydrate_content
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,

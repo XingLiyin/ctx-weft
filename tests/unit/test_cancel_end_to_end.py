@@ -36,7 +36,7 @@ from ctx_weft.core.orchestrator.task.runner import AgentBinding
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.util import generate_id
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter

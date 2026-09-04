@@ -16,7 +16,7 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.loop.steps.finalize import _dispatch_running_ack, _ensure_dispatch_frame, _put_dispatch_result
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.util import now_utc
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime

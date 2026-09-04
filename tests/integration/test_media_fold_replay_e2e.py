@@ -43,7 +43,7 @@ from typing import Any
 
 import pytest
 
-from ctx_weft.core.content import content_to_jsonable
+from ctx_weft.core.utils.content import content_to_jsonable
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.loop.steps.segment_fold import segment_fold
 from ctx_weft.core.media.refs import find_image_placeholders
@@ -939,7 +939,7 @@ async def test_recovery_populates_both_event_jsonable_fields_for_reopen(runtime_
 @pytest.mark.asyncio
 async def test_hydrate_event_content_degrades_to_placeholder_when_blob_missing() -> None:
     """event blob 取不回字节（过期 / 宿主换机 / GC 误删）→ 降级成确定性文本占位，不抛。"""
-    from ctx_weft.core.content import hydrate_event_content
+    from ctx_weft.core.utils.content import hydrate_event_content
 
     evt_store = _PrefixedEventBlobStore()
     # 刻意不 put：这个 ref 在 evt_store 里查无此物，get() 恒返回 None。
@@ -963,7 +963,7 @@ async def test_hydrate_event_content_degrades_to_placeholder_when_blob_missing()
 @pytest.mark.asyncio
 async def test_hydrate_event_content_missing_blob_placeholder_is_deterministic() -> None:
     """占位文本对同一张图必须逐字节确定（用户裁定 D2 的硬约束），不得含 ref/sha。"""
-    from ctx_weft.core.content import hydrate_event_content
+    from ctx_weft.core.utils.content import hydrate_event_content
 
     evt_store = _PrefixedEventBlobStore()
     missing_ref = f"{BLOB_REF_PREFIX}evt-does-not-exist"
@@ -1175,14 +1175,14 @@ async def test_hydrate_event_content_degrades_when_store_cannot_externalize(capl
     """`hydrate_event_content` 自身的口径：拿不到 store 与拿不回字节是同一种情形（I1）。"""
     import logging
 
-    from ctx_weft.core.content import hydrate_event_content
+    from ctx_weft.core.utils.content import hydrate_event_content
     from ctx_weft.protocols.events import NullEventBlobStore
 
     content = [
         TextPart(text="look at this"),
         ImagePart(data=f"{BLOB_REF_PREFIX}evt-x", media_type="image/png", source_type="ref"),
     ]
-    with caplog.at_level(logging.WARNING, logger="ctx_weft.core.content"):
+    with caplog.at_level(logging.WARNING, logger="ctx_weft.core.utils.content"):
         out = await hydrate_event_content(
             content, event_blob_store=NullEventBlobStore(), ctx=_ctx())
 

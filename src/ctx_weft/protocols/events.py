@@ -463,7 +463,7 @@ class EventBlobStore(ABC):
 class NullEventBlobStore(EventBlobStore):
     """未注册 `EventBlobStore` 时的默认实现。
 
-    `put` 刻意抛错而不是静默产出假 ref：调用方（`core.content`）先探询
+    `put` 刻意抛错而不是静默产出假 ref：调用方（`core.utils.content`）先探询
     `can_externalize` 决定是否外部化，**不**捕获这里的 NotImplementedError——
     它仍是接线错误的响亮信号。
     """

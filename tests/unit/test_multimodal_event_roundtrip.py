@@ -2,13 +2,13 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from ctx_weft.core.content import content_to_event_jsonable, content_to_jsonable
+from ctx_weft.core.utils.content import content_to_event_jsonable, content_to_jsonable
 from ctx_weft.core.control.converters import task_from_projection
 from ctx_weft.core.control.reducers import reduce_events, serialize_view
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.task.manager import task_payload
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.util import now_utc
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore
 

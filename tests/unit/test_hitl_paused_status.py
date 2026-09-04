@@ -19,7 +19,8 @@ pytestmark = pytest.mark.asyncio
 
 def _paused_event(session_id: str, form: str):
     from ctx_weft.protocols.events import Event
-    from ctx_weft.core.util import generate_id, now_utc
+    from ctx_weft.core.utils.clock import now_utc
+    from ctx_weft.core.utils.ids import generate_id
     return Event(
         id=generate_id("evt"), run_id=None, sequence=0, session_id=session_id,
         type=EventType.SESSION_PAUSED_HITL, timestamp=now_utc(), task_id=None,
@@ -49,7 +50,8 @@ async def test_session_paused_hitl_folds_to_waiting_regardless_of_form(form) -> 
 
 def _hitl_event(session_id: str, etype, payload: dict):
     from ctx_weft.protocols.events import Event
-    from ctx_weft.core.util import generate_id, now_utc
+    from ctx_weft.core.utils.clock import now_utc
+    from ctx_weft.core.utils.ids import generate_id
     return Event(
         id=generate_id("evt"), run_id=None, sequence=0, session_id=session_id,
         type=etype, timestamp=now_utc(), task_id="t1", payload=payload,
@@ -65,7 +67,8 @@ async def test_hitl_resolved_does_not_overwrite_a_terminal_status() -> None:
     """仅当仍处暂停态才掰回 RUNNING——迟到的 HITL_RESOLVED 不得复活一个已收尾的会话。"""
     from ctx_weft.core.control.reducers import reduce_events
     from ctx_weft.protocols.events import Event
-    from ctx_weft.core.util import generate_id, now_utc
+    from ctx_weft.core.utils.clock import now_utc
+    from ctx_weft.core.utils.ids import generate_id
     finished = Event(
         id=generate_id("evt"), run_id=None, sequence=0, session_id="s1",
         type=EventType.SESSION_FINISHED, timestamp=now_utc(), task_id=None,

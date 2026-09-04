@@ -12,7 +12,7 @@ import pytest
 
 from ctx_weft.core.loop.steps.act import _account_tokens
 from ctx_weft.core.models.agent import LoopGuard
-from ctx_weft.core.estimate import effective_limit
+from ctx_weft.core.utils.estimate import effective_limit
 from ctx_weft.protocols import LLMUsage, MemoryAddress
 
 pytestmark = pytest.mark.asyncio

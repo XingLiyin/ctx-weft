@@ -8,7 +8,7 @@ Task E 删掉 adapter 的 dict 分支后，dict 图片在出网路径上被**静
 
 修法仍是归一（不是在 adapter 里 raise——adapter 在同步出网主路径上，抛异常会掀掉整个
 LLM 请求，同 Phase 3b 对 ``MemoryBlobStore.get`` 恒不抛的取向）。三处边界
-（``MemoryRecord`` / ``MemoryEvent`` / ``LLMMessage``）共用 ``core.content`` 里的
+（``MemoryRecord`` / ``MemoryEvent`` / ``LLMMessage``）共用 ``core.utils.content`` 里的
 **同一个** ``normalize_content_parts``——spec §3① 明令形态转换收在归一层，不得散成三份。
 """
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ctx_weft.core.content import normalize_content_parts
+from ctx_weft.core.utils.content import normalize_content_parts
 from ctx_weft.protocols import ImagePart, LLMMessage, TextPart
 from ctx_weft.protocols.memory import (
     MemoryAddress,
@@ -199,7 +199,7 @@ def test_three_boundaries_call_the_one_shared_implementation(monkeypatch):
     能这样断言的前提是三处都用**函数级** import（Task E 已定的手法：protocols 是比
     core 低的层，模块级导入会把依赖反向）——patch 模块属性才对调用生效。
     """
-    import ctx_weft.core.content as content_mod
+    import ctx_weft.core.utils.content as content_mod
 
     calls: list = []
     real = content_mod.normalize_content_parts

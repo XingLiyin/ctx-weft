@@ -17,7 +17,7 @@ import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.core.content import content_to_text, image_tokens
+from ctx_weft.core.utils.content import content_to_text, image_tokens
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart

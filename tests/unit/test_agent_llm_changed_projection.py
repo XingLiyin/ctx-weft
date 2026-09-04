@@ -9,7 +9,8 @@ golden 覆盖——本文件把两个方向各钉一条。
 from __future__ import annotations
 
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.core.util import generate_id, now_utc
+from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.events import Event, EventType
 
 

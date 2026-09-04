@@ -16,7 +16,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any
 
 from ctx_weft.core.capabilities.schema import extract_schema
-from ctx_weft.core.util import SUBTASKS_REVIEW_HEADING, generate_id, now_utc
+from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.headings import SUBTASKS_REVIEW_HEADING
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.protocols.capability import (
     CapabilityEvent,

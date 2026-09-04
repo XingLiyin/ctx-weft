@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from ctx_weft.core.content import collect_blob_refs
+from ctx_weft.core.utils.content import collect_blob_refs
 from ctx_weft.protocols import (
     EventBlobStore,
     MemoryAddress,

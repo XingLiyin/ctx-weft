@@ -21,9 +21,9 @@ import pytest
 from ctx_weft.core.assembler import composer as composer_mod
 from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.assembler.composer import DefaultComposer
-from ctx_weft.core.content import downgrade_images_to_text
-from ctx_weft.core.content import _IMAGE_PART_TOKENS, content_to_text, image_tokens
-from ctx_weft.core.estimate import estimate_tokens
+from ctx_weft.core.utils.content import downgrade_images_to_text
+from ctx_weft.core.utils.content import _IMAGE_PART_TOKENS, content_to_text, image_tokens
+from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.protocols import ImagePart, TextPart
 
 ALL_PURPOSES = ("act", "compact", "observe", "recognize_intent", "background_observe")

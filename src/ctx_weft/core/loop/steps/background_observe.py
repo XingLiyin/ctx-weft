@@ -28,8 +28,8 @@ from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
 from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
-from ctx_weft.core.content import content_to_text, image_tokens
-from ctx_weft.core.util import generate_id
+from ctx_weft.core.utils.content import content_to_text, image_tokens
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryEventType, MemoryScope
 
 if TYPE_CHECKING:

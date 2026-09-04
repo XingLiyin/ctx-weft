@@ -8,7 +8,7 @@ from ctx_weft.core.orchestrator.task.runner import AgentBinding
 from ctx_weft.core.runtime import _SessionTaskRunner
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
-from ctx_weft.core.util import now_utc
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 

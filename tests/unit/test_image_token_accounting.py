@@ -26,11 +26,11 @@ from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.assembler.budget import PriorityBudgetStrategy
 from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources._history import record_to_history_block
-from ctx_weft.core.content import content_from_jsonable, content_to_jsonable
+from ctx_weft.core.utils.content import content_from_jsonable, content_to_jsonable
 from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.core.loop.steps.prepare import PrepareStep
-from ctx_weft.core.content import _IMAGE_BYTES_PER_TOKEN, _IMAGE_PART_TOKENS, image_byte_size, image_part_count, image_tokens
-from ctx_weft.core.estimate import effective_limit, estimate_tokens
+from ctx_weft.core.utils.content import _IMAGE_BYTES_PER_TOKEN, _IMAGE_PART_TOKENS, image_byte_size, image_part_count, image_tokens
+from ctx_weft.core.utils.estimate import effective_limit, estimate_tokens
 from ctx_weft.protocols import (
     ImagePart,
     MemoryAddress,
@@ -204,7 +204,7 @@ async def test_externalize_records_byte_size_so_ref_keeps_its_size():
     """normalize_content 是最后一个还握着 raw bytes 的地方——必须在那里记下体积，
     否则外部化之后 data 变成 ``blob:<sha>``，体积信息永久丢失（image_tokens 是同步的，
     不能回 MemoryBlobStore 取回来）。"""
-    from ctx_weft.core.content import normalize_content
+    from ctx_weft.core.utils.content import normalize_content
 
     raw_len = 1024 * 1024
 
@@ -226,7 +226,7 @@ def test_validate_content_does_not_mutate_input():
     """入口校验是校验器，不改内容——``task.user_prompt == 原 content`` 这条既有不变量
     （tests/unit/test_multimodal_entry.py）依赖它。inline 形态的体积由 image_tokens
     自己从载荷长度反解，validate 无需（也不该）就地写 byte_size。"""
-    from ctx_weft.core.content import validate_content
+    from ctx_weft.core.utils.content import validate_content
 
     content = [TextPart(text="hi"), _inline_img(16)]
     validate_content(content)

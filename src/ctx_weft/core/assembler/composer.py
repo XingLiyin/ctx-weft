@@ -101,9 +101,9 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ctx_weft.protocols import LLMMessage, LLMTool
 from ctx_weft.protocols.capability import qualify
-from ctx_weft.core.content import content_to_text, image_tokens
-from ctx_weft.core.util import SUBTASKS_REVIEW_HEADING
-from ctx_weft.core.content import (
+from ctx_weft.core.utils.content import content_to_text, image_tokens
+from ctx_weft.core.utils.headings import SUBTASKS_REVIEW_HEADING
+from ctx_weft.core.utils.content import (
     content_with_prefix,
     content_with_suffix,
     downgrade_images_to_text,
