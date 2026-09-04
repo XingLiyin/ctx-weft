@@ -1501,6 +1501,16 @@ class CtxWeftRuntime:
         仍然找不到（这个 agent_id 压根不存在、或它的 session 已终结/不活跃）才真的
         抛 `AgentNotFound`。不要把这一步"简化"回直接抛——那正是本方法要避免的冷启动
         应答丢失。
+
+        **这条自愈是「只有 agent_id、不知道 session」时的最后手段，不是常态路径**：
+        `rebuild_agent` 找不到活内存记录时落到 `rebuild_all_agents`——扫**全部** active
+        session 各读一遍事件日志，因为除了 registry 本身，没有别的 agent_id→session_id
+        索引。持有 `session_id` 的调用方（`_resume_after_hitl` 就是——`PendingHitl`
+        本来就两个字段都带）应该在调用这里之前就用 `_load_agents_of(session_id, ...)`
+        精确装填那一个 session，让这里的 `record_of` 直接命中、永不落到这条 sweep——
+        复审 Important：不然一次冷 HITL 应答会退化成 O(active session 数) 次事件日志
+        读取，而调用方明明知道是哪个 session。这条 sweep 因此只应该被真正「没有
+        session 语境」的调用方触达（比如未来某个只给 agent_id 的 host 端点）。
         """
         rec = self._agent_lifecycle_manager.record_of(agent_id)
         if rec is None:
@@ -2346,18 +2356,37 @@ class CtxWeftRuntime:
         那个「都没有」路径。异常仍然原样传给调用方（host 需要知道这次应答的续跑没
         成），但**先**用 `hitl_id` 记一条响亮的 exception 日志，让运维不必去反查
         「host 报的这次失败对应哪个已经提交但没跑起来的 HITL」。
+
+        **冷路径先精确装填这一个 session，不让 `recover_agent` 落到它的 sweep 兜底**：
+        `req` 本来就同时带着 `agent_id` **和** `session_id`（`PendingHitl` 两个字段都
+        有），比 `recover_agent` 自己的 registry-miss 自愈（`rebuild_agent` → 扫全部
+        active session）精确得多——那条 sweep 是留给「只有 agent_id、不知道 session」
+        的调用方的最后手段，这里明明手握 session_id，没有理由让它多付这个代价
+        （复审 Important：一次冷应答不该变成 O(active session 数) 次事件日志读取）。
+        `record_of` 命中就直接跳过——热路径（registry 已装填）里 `_load_agents_of`
+        每次都要付一次 `rebuild_view` 的折叠代价，不能让它变成每次应答都白付一遍。
+
+        **只在真会续跑的两个分支里做**，不是方法入口的无条件前置步骤：
+        `NoResumeDelivery`（纯通知/取消）本来就不碰事件日志、不解 tenant——这是
+        `test_hitl_multimodal_validation.py` 锁死的既有不变式（「纯文本应答不得为
+        了解 tenant 去读事件日志」），预装填若挪到方法顶部会在这条路径上凭空引入
+        一次从未需要过的事件日志读取，连带把该文件另一条「事件日志故障必须回落、
+        不得抛出」的用例也带炸——那条用例期待的失败面是 tenant 解析（已有 best-
+        effort 回落），不是本次新增的这次读。
         """
         try:
             if isinstance(req.delivery, ToolResultDelivery):
+                await self._hydrate_agent_for_cold_resume(req)
                 await self.recover_agent(
                     req.agent_id, resumed_task_id=req.task_id, hitl_id=req.id,
                 )
             elif isinstance(req.delivery, UserTurnDelivery):
+                await self._hydrate_agent_for_cold_resume(req)
                 await self.recover_agent(
                     req.agent_id, user_reply=req, resumed_task_id=req.delivery.task_id,
                     hitl_id=req.id,
                 )
-            # NoResumeDelivery：纯通知 / 取消，无动作。
+            # NoResumeDelivery：纯通知 / 取消，无动作——连预装填都不做。
         except Exception:
             logger.exception(
                 "_resume_after_hitl: cold resume failed after the HITL was already "
@@ -2367,6 +2396,24 @@ class CtxWeftRuntime:
                 req.id, req.session_id, req.task_id, type(req.delivery).__name__,
             )
             raise
+
+    async def _hydrate_agent_for_cold_resume(self, req: PendingHitl) -> None:
+        """在真会触发 `recover_agent` 的那一刻，用 `req.session_id` 精确装填一次——
+        只有 `_resume_after_hitl` 的 `ToolResultDelivery`/`UserTurnDelivery` 分支调用
+        本方法，`NoResumeDelivery` 不碰它（见调用点注释）。
+
+        `record_of` 命中直接跳过：热路径（registry 已装填，常态）零额外开销，不必
+        为每次应答都白付一次 `_load_agents_of` 的 `rebuild_view` 折叠代价。只有真
+        遇到 miss（冷启动 / 这个 agent 恰好属于本进程还没扫到的 session）才解一次
+        tenant、装填这一个 session——不让 `recover_agent` 自己的 registry-miss 自愈
+        （`rebuild_agent` → 扫全部 active session）替我们兜底：调用方明明手握
+        `session_id`，没理由付 sweep 那一份 O(active session 数) 的代价（复审
+        Important）。`recover_agent` 的 sweep 因此仍然保留，作为「只有 agent_id、
+        不知道 session」的调用方的最后手段——这里只是从不落到那条路而已。
+        """
+        if self._agent_lifecycle_manager.record_of(req.agent_id) is None:
+            tenant_id = await self._tenant_for_session(req.session_id)
+            await self._load_agents_of(req.session_id, tenant_id=tenant_id)
 
     async def _inject_user_reply(
         self, req: "PendingHitl", session: Session, task_manager: TaskManager,

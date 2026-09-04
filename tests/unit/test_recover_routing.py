@@ -32,6 +32,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.protocols.hitl import HitlAsk, HitlReply, ToolResultDelivery
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from tests.integration.test_minimal_loop import (
@@ -248,3 +249,69 @@ async def test_recover_agent_self_heals_a_cold_registry_before_giving_up() -> No
 
     assert rt.get_agent(root_agent_id).session_id == session_id
     assert [r.id for r in rt.hitl_registry.list_pending(session_id=session_id)] == ["hit_1"]
+
+
+async def test_cold_hitl_reply_hydrates_only_its_own_session_not_a_sweep() -> None:
+    """复审 Important：冷 HITL 应答手上明明有 session_id（`PendingHitl.session_id`
+    本来就有），不该让 `recover_agent` 的 registry-miss 自愈退化成
+    `rebuild_all_agents` 扫**全部** active session——`_resume_after_hitl` 现在会先
+    用 `session_id` 精确装填这一个 session，让随后 `recover_agent` 里的
+    `record_of` 直接命中，永不落到它自己的 sweep 兜底。
+
+    种两个都在事件库里「活着」的 session：S1 是这次真正要续跑的，S2 只是一个真实
+    存在、若 sweep 被触达就会被顺带扫进 ALM 的旁观者。全程不调 `rt.recover()`
+    （冷启动），只走一次真实的 `reply_to_hitl`。断言 S2 的 agent 事后仍然不在
+    registry 里——如果 `recover_agent` 的 sweep 兜底被触达，`rebuild_all_agents`
+    会把 S2 也扫进来，这条断言就会失败，正是它在守住这次修复。
+    """
+    rt = _runtime_for_recover_agent()
+
+    # S1：真正要续跑的 session。tsk_1 上开两个 ToolResultDelivery 请求——只答其中
+    # 一个（hit_1），另一个（hit_2）留着不答，让 task 恢复后仍保持 parked（不触发
+    # 真实 LLM 派发），断言可以只盯 registry 内容，不必陪一整条 run 走完。
+    sid1, aid1, tid1 = "ses_1", "agt_1", "tsk_1"
+
+    def ev1(seq, type_, **payload):
+        task_id = payload.pop("task_id", None)
+        return Event(id=f"evt_s1_{seq:04d}", run_id="r1", sequence=seq, session_id=sid1,
+                     type=type_, timestamp=_TS, task_id=task_id, payload=payload)
+
+    await rt.event_store.append(ev1(1, EventType.SESSION_CREATED, user_prompt="do it",
+                                     template_id="agent:tpl_echo", root_agent_id=aid1))
+    await rt.event_store.append(ev1(2, EventType.TASK_CREATED, task={
+        "id": tid1, "status": "PENDING", "title": "T1",
+        "assigned_agent_id": aid1, "creator_agent_id": aid1}))
+
+    req1 = await rt.hitl.open(
+        HitlAsk(form="approval", delivery=ToolResultDelivery(tool_call_id="tcA")),
+        session_id=sid1, task_id=tid1, agent_id=aid1, tool_call_id="tcA", stage=HITL_STAGE_TOOL,
+    )
+    await rt.hitl.open(
+        HitlAsk(form="approval", delivery=ToolResultDelivery(tool_call_id="tcB")),
+        session_id=sid1, task_id=tid1, agent_id=aid1, tool_call_id="tcB", stage=HITL_STAGE_TOOL,
+    )
+
+    # S2：另一个真实 active 的 session——事件库里有它自己的 agent。若 recover_agent
+    # 的自愈退化成 `rebuild_all_agents` 的 sweep，它会被顺带扫进 ALM。
+    sid2, aid2 = "ses_2", "agt_2"
+    await rt.event_store.append(Event(
+        id="evt_s2_0001", run_id="r2", sequence=1, session_id=sid2,
+        type=EventType.SESSION_CREATED, timestamp=_TS,
+        payload={"user_prompt": "hi", "template_id": "agent:tpl_echo", "root_agent_id": aid2},
+    ))
+
+    # 冷启动断言：全程不调 `rt.recover()`，ALM 对两个 session 都还没装填。
+    assert rt._agent_lifecycle_manager.record_of(aid1) is None
+    assert rt._agent_lifecycle_manager.record_of(aid2) is None
+
+    await rt.reply_to_hitl(HitlReply(hitl_id=req1.id, outcome="accepted", agent_id=aid1))
+
+    # S1 被精确装填——这次续跑真正需要的那个 session。
+    assert rt.get_agent(aid1).session_id == sid1
+    # tsk_1 仍有一个未决请求（hit_2）挂着，保持 parked：断言不必陪一整条 LLM run 走完。
+    assert [r.id for r in rt.hitl_registry.list_pending(session_id=sid1)] == \
+        [r.id for r in rt.hitl_registry.list_pending(session_id=sid1) if r.tool_call_id == "tcB"]
+
+    # S2 一个字节都没被碰——sweep 没有发生，只有 S1 被喂进 ALM。
+    assert rt._agent_lifecycle_manager.record_of(aid2) is None
+    assert rt.list_agents(session_id=sid2) == []
