@@ -103,64 +103,78 @@ def test_restore_keeps_active_parked_task_out_of_queue() -> None:
     assert tm.get_task("t1").status == "ACTIVE", "parked 任务状态不应被改成 PENDING"
 
 
-def _tm_with_bus():
-    """一个挂着真实 bus、能观察聚合信号的 TaskManager（本文件两条会话收尾用例共用）。"""
-    from ctx_weft.providers.events import InProcessEventBus
+def _tm_with_hooks():
+    """一个装好 on_session_idle/on_session_done 回调探针的 TaskManager（本文件两条
+    会话收尾用例共用）。
+
+    2026-09-04（Task 12）起 `announce_queue_state`/`TaskQueueBlocked`/`TaskQueueDrained`
+    已停发（其消费者——会话状态机——早已退役，events-v2 §5）：「会话终不终结」不再
+    有事件可观测，只能从 `_fire_session_idle`/`_fire_session_done` 有没有被调、
+    调用后 `session.status` 落到了什么值来判断。不再需要真实 event bus——
+    `TaskManager._emit` 对 `event_bus=None` 是 no-op（既有语义），本文件这两条用例
+    从来不关心事件本身，只关心收尾走哪条分支。
+    """
     from ctx_weft.core.orchestrator.task.manager import TaskManager
+    from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
     from ctx_weft.core.models.session import Session
 
-    bus = InProcessEventBus()
-    seen: list = []
+    session = Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING", token_budget=0)
+    tm = TaskManager(session_id="s1", max_concurrent=1)
+    tm.set_session(session)
 
-    async def _cap(ev):
-        seen.append(ev)
+    idle_calls: list = []
+    done_calls: list = []
 
-    bus.subscribe(None, _cap)
-    tm = TaskManager(session_id="s1", event_bus=bus, max_concurrent=1)
-    tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING", token_budget=0))
+    async def _on_idle():
+        idle_calls.append(1)
+
+    async def _on_done():
+        done_calls.append(1)
+
+    tm.set_hooks(TaskManagerHooks(on_session_idle=_on_idle, on_session_done=_on_done))
 
     async def _noop_runner(_sid, _tid):
         return None
 
     tm.set_runner(StubRunner(tm, _noop_runner))
-    return tm, seen
+    return tm, session, idle_calls, done_calls
 
 
 async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
-    """多任务：一个完成、另一个仍在等人 → TM 报 TaskQueueBlocked 而不是 TaskQueueDrained。
+    """多任务：一个完成、另一个仍在等人 → 走 idle 收尾，不落终态。
 
     Task 6：「还有人在等」不再靠注入的 pending-HITL 谓词，而是由 AWAITING_HUMAN 的
-    任务自己表达；会话终不终结是 SM 看到哪条聚合信号决定的。
+    任务自己表达。2026-09-04（Task 12）起「会话终不终结」不再由 SM 据 TaskQueueBlocked/
+    TaskQueueDrained 判定（那条信号已停发）——直接看走的是 `_fire_session_idle`
+    （on_session_idle 回调）还是 `_fire_session_done`（on_session_done 回调 +
+    落定终态）。
     """
-    from ctx_weft.protocols.events import EventType
     from ctx_weft.core.models.task import NormalTaskSettings, Task
 
-    tm, seen = _tm_with_bus()
+    tm, session, idle_calls, done_calls = _tm_with_hooks()
     tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
     tm.register_task(Task(id="B", session_id="s1", status="AWAITING_HUMAN",
                           settings=NormalTaskSettings()))
     tm._running_tasks.add("A")
     await tm.on_task_finished("A", status="FINISHED")
 
-    types = [e.type for e in seen]
-    assert EventType.TASK_QUEUE_DRAINED not in types, "仍有等人的任务时不得报「跑完了」"
-    assert EventType.SESSION_FINISHED not in types
-    blocked = [e for e in seen if e.type == EventType.TASK_QUEUE_BLOCKED]
-    assert blocked and blocked[0].payload["count"] == 1
+    assert idle_calls == [1], "仍有等人的任务时应走 idle 收尾"
+    assert done_calls == [], "仍有等人的任务时不得报「跑完了」"
+    assert session.status == "RUNNING", "会话未终结，状态不应被改写"
 
 
 async def test_session_finishes_when_no_pending_hitl() -> None:
-    """对照：没有任何等人/中断的任务时，TM 报 TaskQueueDrained（SM 据此终结会话）。"""
-    from ctx_weft.protocols.events import EventType
+    """对照：没有任何等人/中断的任务时，走终态收尾，session.status 落定 SUCCEEDED。"""
     from ctx_weft.core.models.task import NormalTaskSettings, Task
 
-    tm, seen = _tm_with_bus()
+    tm, session, idle_calls, done_calls = _tm_with_hooks()
     tm.register_task(Task(id="A", session_id="s1", status="ACTIVE", settings=NormalTaskSettings()))
     tm._running_tasks.add("A")
     await tm.on_task_finished("A", status="FINISHED")
 
-    drained = [e for e in seen if e.type == EventType.TASK_QUEUE_DRAINED]
-    assert len(drained) == 1 and drained[0].payload["final_status"] == "SUCCEEDED"
+    assert done_calls == [1]
+    assert idle_calls == []
+    assert session.status == "SUCCEEDED"
 
 
 async def test_recover_emits_paused_hitl_for_pending_session() -> None:
@@ -168,14 +182,17 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     而非停在崩溃前的 RUNNING。
 
     Task 16 起：SM 那层「代 TM 发 TaskQueueBlocked → 译成 SessionWaiting」的翻译
-    整体退役（会话状态机随 SessionRegistry 降格一并删除），故这里改钉 recover() 真正
-    发出的那条 TM 聚合信号本身——它就是退役前 SM 唯一消费的输入，观测点往上游挪
-    一层，验证强度不降。「等的是审批面板（PAUSED_HITL）还是一句话（PAUSED）」是
-    delivery 的性质、只有前端需要，由 host 的只读入口推导，不上升到任何状态事件。
+    整体退役（会话状态机随 SessionRegistry 降格一并删除）。2026-09-04（Task 12，
+    events-v2 §5）起 `TaskQueueBlocked` 本身也停发——`recover()` 不再代 TM 合成
+    这条会话级信号（其消费者早已不存在）。「等的是审批面板（PAUSED_HITL）还是
+    一句话（PAUSED）」这条区分本就不靠它——那是 delivery 的性质、只有前端需要，
+    由 host 的只读入口 `session_status_after_recover` 单独推导，本测试因此只钉
+    这一个入口；`_no_stray_session_status_changed` 仍守着「已退役的通用 setter
+    别再复活」这条不相关的回归线。
     """
     from ctx_weft.protocols.events import EventType
 
-    runtime, signals = _recover_runtime_with_queue_signal_capture()
+    runtime, signals = _recover_runtime_with_regression_guard()
     seed = [
         _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
         _mk_ev(2, EventType.RUN_STARTED),
@@ -187,22 +204,20 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert [s.type for s in signals] == [EventType.TASK_QUEUE_BLOCKED], (
-        "有 pending HITL 的会话恢复应报 TaskQueueBlocked（TM 聚合信号）"
-    )
-    assert signals[0].payload == {"count": 1}
+    assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     # 面板 vs 一句话的区分仍在，只是搬去了 host 的只读入口。
     assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
 
 
-def _recover_runtime_with_queue_signal_capture():
-    """构造会捕获 recover() 代 TM 发的队列聚合信号的 runtime（recover 状态语义测试共用）。
+def _recover_runtime_with_regression_guard():
+    """构造一个会捕获已退役 `SessionStatusChanged` 的 runtime（recover 状态语义测试共用）。
 
-    Task 16 前这里捕的是 SM 译出的会话级事件（`SessionWaiting`/`SessionInterrupted`）；
-    SM 退役后那条翻译不存在了，改捕 TM 的聚合信号本身（`TaskQueueBlocked`/
-    `TaskQueueInterrupted`）——它是 recover() 真正发出的、也是退役前 SM 唯一消费
-    的同一条输入。仍然保留 `SessionStatusChanged`：那是已停发的通用 setter，
-    一旦重新出现也要当场被抓到（不属于本次观测点迁移的对象）。
+    Task 16 前这里还捕 SM 译出的会话级事件（`SessionWaiting`/`SessionInterrupted`），
+    Task 12（2026-09-04，events-v2 §5）前还捕 `TaskManager` 代发的队列聚合信号
+    （`TaskQueueBlocked`/`TaskQueueInterrupted`）——两者现已先后停发，本文件不再
+    钉着它们（`session_status_after_recover` 这一只读入口才是这几条测试的真实
+    观测点，见各测试 docstring）。仍然保留 `SessionStatusChanged`：那是更早一轮
+    退役的通用 setter，一旦重新出现也要当场被抓到。
     """
     from ctx_weft.protocols.events import EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter
@@ -210,11 +225,9 @@ def _recover_runtime_with_queue_signal_capture():
 
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
     signals: list = []
-    watched = (EventType.SESSION_STATUS_CHANGED, EventType.TASK_QUEUE_BLOCKED,
-               EventType.TASK_QUEUE_INTERRUPTED)
 
     async def _cap(ev):
-        if ev.type in watched:
+        if ev.type == EventType.SESSION_STATUS_CHANGED:
             signals.append(ev)
 
     runtime.event_bus.subscribe(None, _cap)
@@ -231,10 +244,15 @@ def _mk_ev(seq, type_, **payload):
 
 async def test_recover_emits_paused_for_wait_only_pending() -> None:
     """wait-only pending（纯文本软待命）：会话判 WAITING，host 侧推导出 PAUSED 而非
-    PAUSED_HITL——与 SESSION_PAUSED_HITL 的 reducer/投影语义一致（form=wait → 无面板）。"""
+    PAUSED_HITL——与 SESSION_PAUSED_HITL 的 reducer/投影语义一致（form=wait → 无面板）。
+
+    2026-09-04（Task 12）起不再断言 TaskQueueBlocked（已停发，见上一条测试
+    docstring）——PAUSED vs PAUSED_HITL 的区分从来就只由 `session_status_after_recover`
+    推导，不靠这条信号本身分流表单类型。
+    """
     from ctx_weft.protocols.events import EventType
 
-    runtime, signals = _recover_runtime_with_queue_signal_capture()
+    runtime, signals = _recover_runtime_with_regression_guard()
     seed = [
         _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
         _mk_ev(2, EventType.RUN_STARTED),
@@ -246,9 +264,7 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    # TM 的路由不分 form：软待命和等面板都只是「还有人在等」→ TaskQueueBlocked。
-    assert [s.type for s in signals] == [EventType.TASK_QUEUE_BLOCKED]
-    assert signals[0].payload == {"count": 1}
+    assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     # wait-only 不应误标 PAUSED_HITL——前端会等一个不存在的面板。
     assert await runtime.session_status_after_recover("ses_1") == "PAUSED"
 
@@ -258,7 +274,7 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
     PAUSED_HITL——有面板可答。"""
     from ctx_weft.protocols.events import EventType
 
-    runtime, signals = _recover_runtime_with_queue_signal_capture()
+    runtime, signals = _recover_runtime_with_regression_guard()
     seed = [
         _mk_ev(1, EventType.SESSION_CREATED, user_prompt="x", template_id="tpl", root_agent_id="agt"),
         _mk_ev(2, EventType.RUN_STARTED),
@@ -272,8 +288,7 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
         await runtime.event_store.append(e)
 
     await runtime.recover()
-    assert [s.type for s in signals] == [EventType.TASK_QUEUE_BLOCKED]
-    assert signals[0].payload == {"count": 2}
+    assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     assert await runtime.session_status_after_recover("ses_1") == "PAUSED_HITL"
 
 

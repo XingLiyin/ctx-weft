@@ -1,25 +1,23 @@
 """recover() 启动恢复（spec/07 §9）——core 内闭环,无回调,启动不 drain。
 
-Task 6 起路由判据换了层：recover() 不再自己宣布会话状态,而是**代 TaskManager**
-（进程刚起来,_task_managers 恒为空）发那一条队列状态信号:
+2026-09-04（Task 12）起：`TaskManager.announce_queue_state` / `_announce_queue_state_as_tm_proxy`
+——recover() 曾经代 TaskManager 发的那条会话级 TaskQueueBlocked/TaskQueueInterrupted 队列聚合
+信号——已停发（其唯一消费者、会话状态机，早在 2026-09-03 就已降格；枚举成员与 L 档登记见
+events-v2 §5）。恢复期的可观测性现在由（2026-09-04 spec §6.3/§6.4）补上的一步接管：recover()
+把每个 session 的 agent 记录装填进 `AgentLifecycleManager`，装填完按折出来的现状发
+AGENT_IDLE / AGENT_WAITING_HUMAN / AGENT_INTERRUPTED（`_load_agents_of` →
+`AgentLifecycleManager.load`）。本文件因此改钉这一条广播本身：
+`_capture_waiting_human_broadcast` / `_capture_interrupted_broadcast` 捕获的是恢复期 ALM
+的现状广播，不再是已经停发的 TM 聚合信号。
 
-- 有未决 pending HITL → TaskQueueBlocked
-- 没有                → TaskQueueInterrupted（等 /resume）
+- 崩溃前 agent 停在 waiting_human（有未决 HITL 等人答）→ 恢复后重发 AGENT_WAITING_HUMAN
+- 崩溃前 agent 停在 interrupted（没有未决 HITL，进程重启打断）→ 恢复后重发 AGENT_INTERRUPTED
 
-Task 16 起：SessionRegistry 随会话状态机一并降格,不再消费这条信号译成会话级
-SessionWaiting/SessionInterrupted 事件——本文件因此直接钉住 TM 的这条聚合信号
-本身（它是 recover() 真正发出的、也是退役前 SM 唯一消费的同一条输入）,不再断言
-已经不存在的会话级事件或 `SessionRegistry.status_of`。
-
-**为什么这里没有等强的替代观测点**（不是漏补，是这个调用点确实没有）：
-recover() 本身不 drain、不派发任何 task/agent——`_announce_queue_state_as_tm_proxy`
-只是**代 TM** 发一条队列信号就返回，此刻 AgentLifecycleManager 的五态机（ALM）根本没跑起来，
-没有 `AGENT_*` 事件可捕、`agent_lifecycle_manager.status_of()` 这时查也查不到任何有意义的东西
-（很多时候 agent 记录本身还没通过这条路径装填）。唯一还在运作的只读入口
-`session_status_after_recover()` 只推导 `PAUSED`/`PAUSED_HITL` 两个值，对**无 pending**
-的分支（原来 B/C 两个会话对应的场景）直接返回空字符串——同样没有区分度。
-故这里删除 `status_of()` 断言之后，`_capture_interrupted_signal`/`_capture_blocked_signal`
-钉住的 TM 聚合信号本身，就是本次改造后这个调用点能拿到的最强观测点。
+**这曾经不是最强观测点，现在是**（旧 docstring 在此的论点已被推翻，不是漏补）：旧论点是
+recover() 本身不 drain、不派发任何 task/agent，ALM 的五态机这时候根本没跑起来，没有 AGENT_*
+可捕。Task 11 起这个前提不再成立——ALM 的装填 + 广播这一步被直接搬进了 recover() 的调用链
+本身（`_load_agents_of` 就在这个方法里被调用），所以 AGENT_* 现状广播现在**正是**这个调用点
+能拿到的观测点，不是退而求其次的替代品。
 
 「等的是审批面板还是一句话」不上升到任何状态事件——那是 delivery 的性质,由 host 的
 只读入口 session_status_after_recover 推导。决策只折叠 HITL 类事件,不全量回放。
@@ -41,29 +39,34 @@ pytestmark = pytest.mark.asyncio
 _TS = datetime(2026, 6, 13, tzinfo=timezone.utc)
 
 
-def _ev(seq: int, sid: str, type_: EventType, **payload) -> Event:
+def _ev(seq: int, sid: str, type_: EventType, *, agent_id: str | None = None, **payload) -> Event:
     return Event(id=f"evt_{sid}_{seq:04d}", run_id="r1", sequence=seq, session_id=sid,
-                 type=type_, timestamp=_TS, task_id="t1", payload=payload)
+                 type=type_, timestamp=_TS, task_id="t1", agent_id=agent_id, payload=payload)
 
 
-def _capture_interrupted_signal(runtime) -> list[str]:
-    """记下被 TM 报 TaskQueueInterrupted 的 session（无 pending、被进程重启打断）。
+def _capture_waiting_human_broadcast(runtime) -> list[str]:
+    """记下恢复期被 ALM 现状广播成 waiting_human 的 session（该 agent 崩溃前正等人答复）。
 
-    Task 16 起：这是 recover() 真正发出的信号本身,不再是已退役的 SM 会话级事件。
+    2026-09-04（Task 12）起这是 `AgentLifecycleManager.load()` 装填完发的
+    `AGENT_WAITING_HUMAN`——不再是已停发的会话级 `TaskQueueBlocked`。
     """
     seen: list[str] = []
     async def recorder(ev: Event) -> None:
-        if ev.type == EventType.TASK_QUEUE_INTERRUPTED:
+        if ev.type == EventType.AGENT_WAITING_HUMAN:
             seen.append(ev.session_id)
     runtime.event_bus.subscribe(None, recorder)
     return seen
 
 
-def _capture_blocked_signal(runtime) -> list[str]:
-    """记下被 TM 报 TaskQueueBlocked 的 session（有人在等回话）。"""
+def _capture_interrupted_broadcast(runtime) -> list[str]:
+    """记下恢复期被 ALM 现状广播成 interrupted 的 session（该 agent 崩溃前没有未决 HITL）。
+
+    2026-09-04（Task 12）起这是 `AgentLifecycleManager.load()` 装填完发的
+    `AGENT_INTERRUPTED`——不再是已停发的会话级 `TaskQueueInterrupted`。
+    """
     seen: list[str] = []
     async def recorder(ev: Event) -> None:
-        if ev.type == EventType.TASK_QUEUE_BLOCKED:
+        if ev.type == EventType.AGENT_INTERRUPTED:
             seen.append(ev.session_id)
     runtime.event_bus.subscribe(None, recorder)
     return seen
@@ -73,32 +76,46 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
     runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
     store = runtime.event_store
 
-    # A: 有未解决 pending HITL → 只装填 HitlRegistry
-    await store.append(_ev(1, "A", EventType.SESSION_CREATED, template_id="t"))
-    await store.append(_ev(2, "A", EventType.HITL_REQUIRED, hitl_id="hA", form="question", tool_call_id="tcA"))
-    # B: HITL 已答复 → 无 pending → TaskQueueInterrupted
-    await store.append(_ev(1, "B", EventType.SESSION_CREATED, template_id="t"))
-    await store.append(_ev(2, "B", EventType.HITL_REQUIRED, hitl_id="hB", form="question"))
-    await store.append(_ev(3, "B", EventType.HITL_ANSWERED, hitl_id="hB"))
-    # C: 从无 HITL → TaskQueueInterrupted
-    await store.append(_ev(1, "C", EventType.SESSION_CREATED, template_id="t"))
+    # A: 有未解决 pending HITL，agent 崩溃前停在 waiting_human → 只装填 HitlRegistry，
+    #    恢复后重发 AGENT_WAITING_HUMAN。
+    await store.append(_ev(1, "A", EventType.SESSION_CREATED, template_id="t",
+                            root_agent_id="agtA"))
+    await store.append(_ev(2, "A", EventType.AGENT_INSTANTIATED, agent_id="agtA",
+                            template_id="t"))
+    await store.append(_ev(3, "A", EventType.HITL_REQUIRED, hitl_id="hA", form="question",
+                            tool_call_id="tcA"))
+    await store.append(_ev(4, "A", EventType.AGENT_WAITING_HUMAN, agent_id="agtA"))
+    # B: HITL 已答复 → 无 pending，agent 应完之后又被进程重启打断 → 恢复后重发
+    #    AGENT_INTERRUPTED。
+    await store.append(_ev(1, "B", EventType.SESSION_CREATED, template_id="t",
+                            root_agent_id="agtB"))
+    await store.append(_ev(2, "B", EventType.AGENT_INSTANTIATED, agent_id="agtB",
+                            template_id="t"))
+    await store.append(_ev(3, "B", EventType.HITL_REQUIRED, hitl_id="hB", form="question"))
+    await store.append(_ev(4, "B", EventType.HITL_ANSWERED, hitl_id="hB"))
+    await store.append(_ev(5, "B", EventType.AGENT_INTERRUPTED, agent_id="agtB"))
+    # C: 从无 HITL、直接被进程重启打断 → 恢复后重发 AGENT_INTERRUPTED。
+    await store.append(_ev(1, "C", EventType.SESSION_CREATED, template_id="t",
+                            root_agent_id="agtC"))
+    await store.append(_ev(2, "C", EventType.AGENT_INSTANTIATED, agent_id="agtC",
+                            template_id="t"))
+    await store.append(_ev(3, "C", EventType.AGENT_INTERRUPTED, agent_id="agtC"))
 
     # 启动不应调 recover_session（task 重建推迟到应答）
     called: list[str] = []
     async def fail_recover_session(sid, **kw):
         called.append(sid)
     monkeypatch.setattr(runtime, "recover_session", fail_recover_session)
-    interrupted = _capture_interrupted_signal(runtime)
-    blocked = _capture_blocked_signal(runtime)
+    waiting_human = _capture_waiting_human_broadcast(runtime)
+    interrupted = _capture_interrupted_broadcast(runtime)
 
     n = await runtime.recover()
 
     # Task 11 起 recover() 的返回值语义换成「恢复的 agent 数」，不再是 session 数
-    # （2026-09-04 spec §6.2）。这三个 session 的事件流里没有一个发过 AGENT_INSTANTIATED，
-    # SESSION_CREATED 也没带 root_agent_id——reducer 折不出任何 AgentView（见
-    # `core/control/reducers.py` 的 `_rebuild_agents`/`AGENT_INSTANTIATED` 分支），
-    # 所以这里的正确值是 0，不是凑一个能让断言通过的数字。
-    assert n == 0
+    # （2026-09-04 spec §6.2）。三个 session 各自发过一条 AGENT_INSTANTIATED、
+    # SESSION_CREATED 也各带了 root_agent_id——reducer 能折出恰好 3 个 AgentView
+    # （`core/control/reducers.py` 的 `_rebuild_agents`/`AGENT_INSTANTIATED` 分支）。
+    assert n == 3
     assert called == []                                          # 启动不 drain/不重建 task
     assert [r.id for r in runtime.hitl_registry.list_pending(session_id="A")] == ["hA"]
     # 决定缓存键是三维的 (session, tool_call, stage)——只按 tool_call_id 查会让 A 会话的
@@ -108,27 +125,30 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
     assert runtime.hitl_registry.list_pending(session_id="B") == []
     # 无 pending 的两个 → 被进程重启打断，等 /resume。
     assert set(interrupted) == {"B", "C"}
-    # 有人在等回话的那个 → TaskQueueBlocked，不是 Interrupted（绝不把 parked 任务孤立）。
-    assert blocked == ["A"]
+    # 有人在等回话的那个 → AGENT_WAITING_HUMAN，不是 interrupted（绝不把 parked 任务孤立）。
+    assert waiting_human == ["A"]
     # 不再断言 `runtime._session_registry.status_of(...)`（该方法本身已在 Task 15 被
-    # 摘除）——且此刻也没有等强的替代：recover() 不 drain，ALM 还没跑起来，
-    # session_status_after_recover() 对无 pending 的分支只返回空串。见模块 docstring
-    # 「为什么这里没有等强的替代观测点」。
+    # 摘除）——现在的观测点换成了 AGENT_* 现状广播本身，见模块 docstring。
 
 
 async def test_recover_multi_hitl_partial_resolve_still_pending() -> None:
-    """两个 pending、只解决一个 → 仍 pending → 重建剩余、报 TaskQueueBlocked 而非 Interrupted。"""
+    """两个 pending、只解决一个 → 仍 pending → 重建剩余、重发 AGENT_WAITING_HUMAN 而非 interrupted。"""
     runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
     store = runtime.event_store
-    await store.append(_ev(1, "M", EventType.SESSION_CREATED, template_id="t"))
-    await store.append(_ev(2, "M", EventType.HITL_REQUIRED, hitl_id="h1", form="question"))
-    await store.append(_ev(3, "M", EventType.HITL_REQUIRED, hitl_id="h2", form="approval"))
-    await store.append(_ev(4, "M", EventType.HITL_ANSWERED, hitl_id="h1"))
+    await store.append(_ev(1, "M", EventType.SESSION_CREATED, template_id="t",
+                            root_agent_id="agtM"))
+    await store.append(_ev(2, "M", EventType.AGENT_INSTANTIATED, agent_id="agtM",
+                            template_id="t"))
+    await store.append(_ev(3, "M", EventType.HITL_REQUIRED, hitl_id="h1", form="question"))
+    await store.append(_ev(4, "M", EventType.HITL_REQUIRED, hitl_id="h2", form="approval"))
+    await store.append(_ev(5, "M", EventType.HITL_ANSWERED, hitl_id="h1"))
+    await store.append(_ev(6, "M", EventType.AGENT_WAITING_HUMAN, agent_id="agtM"))
 
-    interrupted = _capture_interrupted_signal(runtime)
-    blocked = _capture_blocked_signal(runtime)
-    await runtime.recover()
+    waiting_human = _capture_waiting_human_broadcast(runtime)
+    interrupted = _capture_interrupted_broadcast(runtime)
+    n = await runtime.recover()
 
     assert {r.id for r in runtime.hitl_registry.list_pending(session_id="M")} == {"h2"}
+    assert n == 1                                                 # 一个 session、一个 agent
     assert interrupted == []
-    assert blocked == ["M"]
+    assert waiting_human == ["M"]

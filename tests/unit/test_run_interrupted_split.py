@@ -117,9 +117,9 @@ async def test_retry_exhausted_falls_through_to_task_interrupted() -> None:
     assert EventType.TASK_REQUEUED not in _types(bus)
     assert TASK_INTERRUPTED in _types(bus)
     assert t.status == "INTERRUPTED"
-    # 聚合读的是内存 status，与改动前同口径
-    queue_sig = [e for e in bus.events if e.type == EventType.TASK_QUEUE_INTERRUPTED]
-    assert queue_sig
+    # 2026-09-04（Task 12，events-v2 §5）起没有会话级 TaskQueueInterrupted 聚合信号
+    # 再复读一遍这份内存 status 了（`announce_queue_state` 已停发）。
+    assert EventType.TASK_QUEUE_INTERRUPTED not in _types(bus)
 
 
 async def test_context_overflow_still_reaches_task_interrupted() -> None:

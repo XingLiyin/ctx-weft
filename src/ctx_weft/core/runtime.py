@@ -70,7 +70,6 @@ from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKi
 from ctx_weft.core.orchestrator.task.queue import QueueEntry
 from ctx_weft.core.orchestrator.task.runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
-from ctx_weft.core.utils.event import emit_event
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.models.session import Session
@@ -1093,9 +1092,8 @@ class CtxWeftRuntime:
         )
         task_manager.set_session(session)
         task_manager.register_task(task)
-        # compat 路径也走同一条会话状态链：这里不经 _register_and_drain（没有队列、
-        # 没有 drain），但 run 结束后一样要把「我这边什么情况」报出去，否则 outage /
-        # park 的会话状态无人落定（判据只有一条：TM 的聚合信号）。
+        # compat 路径不经 _register_and_drain（没有队列、没有 drain），但一样要登记，
+        # 使 /hitl 等入口在这条路径上也查得到该 session。
         self._session_registry.register_session(sid, tenant_id=tenant_id)
 
         for p in self.providers.get_capability_providers():
@@ -1128,12 +1126,12 @@ class CtxWeftRuntime:
                     kind=RunOutcomeKind.COMPLETED, verdict="success"),
             )
         finally:
-            await task_manager.announce_queue_state()
-            # **不 forget_session**：状态忘掉之后 SM 就不再「吸收」后续输入了——
-            # 冷 HITL 走这条 compat 路径时，park 已把会话推到 WAITING，忘掉之后
-            # 应答期的 register_session 拿回默认 RUNNING，之后的 TaskStarted 因
-            # 「current 已是 RUNNING」不转移、不发 SessionRunning，投影会整个续跑期
-            # 停在 WAITING。本 task 用来替换 _session_done_fired 闩的正是这份记忆。
+            # **不 forget_session**：2026-09-04（Task 12）起这里不再代 TM 报队列状态
+            # （`announce_queue_state` 已停发，events-v2 §5），但仍然不 forget——
+            # `forget_session` 会连同该 session 已登记的成员 agent 集合一起清空
+            # （`_SessionState.agent_ids`），冷 HITL 应答期 `register_session` 是
+            # `setdefault`（重入保留原状态），一旦这里先 forget 就等于把成员集合
+            # 归零，把已经跑过的 agent 从这个 session 里凭空摘掉。
             for p in self.providers.get_capability_providers():
                 if isinstance(p, SessionScopedCapabilityProvider):
                     p.deregister_session(sid)
@@ -2612,12 +2610,12 @@ class CtxWeftRuntime:
 
         Decision is made **in core, from events** (no host projection, no full replay):
         the in-memory ``HitlRegistry`` is refilled (so ``/hitl/pending`` and the reply endpoints
-        work), the session is registered with the ``SessionRegistry``, and **this method stands in
-        for the TaskManager**（进程刚起来，`_task_managers` 还是空的）：它拿 `rebuild_hitl`
-        刚从日志折出来的未决集合——那正是 TM 会用来聚合的同一份事实——发那一条 TM 信号。
-        **恢复不是一种状态**：会话状态照常由 SM 据 TM 的聚合信号判定，恢复路径与正常路径
-        走同一条链，SM 的输入类型一个都没变。
+        work) and the session is registered with the ``SessionRegistry`` for membership lookup.
 
+        2026-09-04（Task 12）前这里还会**代 TaskManager**（进程刚起来，`_task_managers`
+        还是空的）发一条会话级 `TaskQueueBlocked`/`TaskQueueInterrupted` 队列聚合信号——
+        那条信号唯一的消费者（会话状态机）早已降格，信号本身现已停发（events-v2 §5）。
+        **恢复期的可观测性现在整个由下面这段 ALM 装填 + `AGENT_*` 现状广播承担**：
         每个 session 的 agent 记录也在这里装填进 `AgentLifecycleManager`（2026-09-04
         spec §6.3 补上的一步）：此前只有 `recover_session` 会调 `ALM.load()`，重启后
         `list_agents` / `get_agent` / `send_message` 在第一条冷应答或 `/resume` 恰好
@@ -2644,16 +2642,17 @@ class CtxWeftRuntime:
         for session_id in session_ids:
             try:
                 # 恢复期不再有专门的「PAUSED_HITL vs INTERRUPTED」分支：装填内存 HITL 之后
-                # 照常报一句队列状态，会话状态仍由 SM 判定。
+                # 「现状」由下面 ALM 装填时按折出来的 AgentView.status 广播，不再由这里
+                # 代 TM 合成一条会话级信号（2026-09-04 Task 12 起 `announce_queue_state`/
+                # `TaskQueueBlocked`/`TaskQueueInterrupted` 已停发）。
                 # 「复活不是一种状态」的落地（docs/events-v2.md §2.1.1）。
                 # tenant 必须先解出来：`_task_managers` 此刻恒为空（见下）,`_tenant_for_session`
                 # 会落到读事件日志那条路（SESSION_CREATED 首条即含真 tenant）——
-                # `register_session`、代发的队列信号、以及 ALM 装填都要用同一个值，
-                # 否则由它们派生的事件会落错租户（总账 A5）。
+                # `register_session`、ALM 装填都要用同一个值，否则由它们派生的事件会落错
+                # 租户（总账 A5）。
                 tenant_id = await self._tenant_for_session(session_id)
-                n = await self.rebuild_hitl(session_id)
+                await self.rebuild_hitl(session_id)
                 self._session_registry.register_session(session_id, tenant_id=tenant_id)
-                await self._announce_queue_state_as_tm_proxy(session_id, n, tenant_id=tenant_id)
                 total_agents += await self._load_agents_of(session_id, tenant_id=tenant_id)
             except Exception:
                 logger.exception("Recovery: failed to recover session %s", session_id)
@@ -2693,42 +2692,6 @@ class CtxWeftRuntime:
             view.agents, session_id=session_id,
             tenant_id=tenant_id, fallback_template_id=fallback_template_id,
         )
-
-    async def _announce_queue_state_as_tm_proxy(
-        self, session_id: str, pending_hitl: int, *, tenant_id: str = "default",
-    ) -> None:
-        """启动恢复期**代 TaskManager** 发那一条队列状态信号（SM 的唯一输入）。
-
-        为什么要代行：`recover()` 跑在进程刚起来的时候，`_task_managers` 恒为空——
-        没有代行者的话崩溃会话一条会话级事件都收不到，投影停在崩溃前的 RUNNING，
-        「看着在跑却卡住」。而**不能**在这里顺手建一个真 TM：本方法的契约是
-        「启动时 nothing drains/runs」，建 TM 有启动即跑活的风险。
-
-        判据与 `TaskManager.announce_queue_state` 同源——有人在等就是 blocked，
-        没人在等就是被进程重启打断：
-
-        - 有未决 HITL → ``TaskQueueBlocked{count}``  → SM 判 WAITING
-        - 没有        → ``TaskQueueInterrupted``     → SM 判 INTERRUPTED，等 /resume
-
-        「等的是审批面板还是一句话」不在这里区分：那是 delivery 的性质、只有前端需要
-        （host 的只读入口 `session_status_after_recover`），会话只有一个 WAITING。
-
-        `tenant_id`：调用方（`recover`）用 `_tenant_for_session` 解出、随 `session_id`
-        一并传入——本方法不自己解（避免恢复路径里重复付一次读事件日志的代价）。
-        """
-        if pending_hitl:
-            event_type = EventType.TASK_QUEUE_BLOCKED
-            payload: dict = {"count": pending_hitl}
-        else:
-            event_type = EventType.TASK_QUEUE_INTERRUPTED
-            payload = {"reason": "process_restart"}
-        await emit_event(
-            self._event_bus, event_type,
-            session_id=session_id, tenant_id=tenant_id,
-            origin=EventOrigin.RUNTIME, payload=payload,
-        )
-        logger.info("Recovery: session %s → %s (%d pending HITL)",
-                    session_id, event_type, pending_hitl)
 
     async def rebuild_hitl(self, session_id: str) -> int:
         """从事件**装填**该 session 的 HITL 内存态，返回 pending 条数。
@@ -3061,9 +3024,9 @@ class CtxWeftRuntime:
             # task.error / task.error_code 不在这里写：上面构造的 RunOutcome 已带着
             # error=str(exc)、error_code=InterruptReason.LLM_OUTAGE，`_run_task` 拿到
             # 后交 `apply_run_outcome`（task_manager.py）按同样的值写回 task——写两遍是
-            # 纯冗余（Task 2 死代码清理）。`announce_queue_state` 读 task.error_code 做
-            # 分流发生在 `_settle` 里、`apply_run_outcome` 之后，读到的已经是它写的那份，
-            # 时序上稳（见 tests/unit/test_outage_interrupt_reason.py）。
+            # 纯冗余（Task 2 死代码清理）。`apply_run_outcome` 在 `_settle` 之前把这份
+            # error_code 落到 task 对象上，`get_task(task_id)` 等内存态查询读到的
+            # 已经是它写的那份，时序上稳（见 tests/unit/test_outage_interrupt_reason.py）。
             logger.warning("_run_loop: task %s interrupted by LLM outage: %s", task.id, exc)
             # run 级事实：这次执行死了。**无条件发**，与 task 后续怎么处置无关。
             # 会话状态由 TM 聚合后交给 SM 判定——这里不宣布会话怎么了。
@@ -3087,7 +3050,8 @@ class CtxWeftRuntime:
             # 真失败只有 observer 判 fail 一条路（FinalizeStep 闭合胶囊、回传父亲）。
             # ContextOverflowError 不再特判终态：retriable=False 使其跳过重试直接挂起，
             # 溢出文案随 task.error / RUN_INTERRUPTED.error_message 抵达 host，错误码
-            # 再经 TaskQueueInterrupted.reason 上浮（提示换大窗口模型）。
+            # 随 TASK_INTERRUPTED.error_code 直接上浮（提示换大窗口模型）——不再绕经
+            # 已停发的会话级 TaskQueueInterrupted（events-v2 §5）。
             # 崩溃发生时 task 是否已是终态（如 observer 已判 FAILED、随后 FinalizeStep 又
             # 抛异常那条窄路径）——是的话下面 RUN_INTERRUPTED 也不发：那次执行的终局
             # 已经由 TaskFailed/RunFinished{FAILED} 宣布过，再发一条 RunInterrupted 会

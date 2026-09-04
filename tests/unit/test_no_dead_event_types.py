@@ -90,10 +90,12 @@ _KNOWN_DEAD_BRANCH_REFS: frozenset[tuple[str, str]] = frozenset({
     # SnapshotWriter.on_event 靠 `event.type == "SessionFinished"` 决定要不要在会话
     # 终态落一张快照。SessionRegistry 状态机随 Task 15/16 退役后，没有任何组件还会把
     # `SessionFinished` 送上总线——这个分支变成永久不可达的死分支，直接掉进下面的
-    # periodic 计数分支，不抛错、不误写。把它换成会话真正的终态信号（比如 TM 的
-    # `TaskQueueDrained` 聚合信号）需要同时改写 6 个既有快照测试对「触发事件是什么」
-    # 的契约断言（`test_event_persistence_wiring.py`），超出 Task 16 范围，留给后续
-    # 任务——见 task-16-report.md。
+    # periodic 计数分支，不抛错、不误写。Task 16 报告里设想过把它换成 TM 的
+    # `TaskQueueDrained` 聚合信号，但 2026-09-04（Task 12，events-v2 §5）连这条替身
+    # 也停发了——`AGENT_*` 现状广播（events-v2 §6.4）是逐 agent 的，不是一次性的会话
+    # 终态信号，不能直接顶替。换成任何真正的终态信号都需要同时改写 6 个既有快照测试
+    # 对「触发事件是什么」的契约断言（`test_event_persistence_wiring.py`），仍然超出
+    # 本次任务范围，留给后续任务——见 task-16-report.md。
     ("providers/events/snapshot.py", "SessionFinished"),
 })
 

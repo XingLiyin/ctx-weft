@@ -143,3 +143,51 @@ async def test_running_and_terminated_are_not_broadcast() -> None:
     for aid in ("agt_running", "agt_terminated"):
         agent_events = [e.type for e in seen if getattr(e, "agent_id", None) == aid]
         assert agent_events == [], f"unexpected broadcast for {aid}: {agent_events}"
+
+
+# ── 2026-09-04 spec §6.4 / §9：TASK_QUEUE_* 停发 ──────────────────────────
+
+
+async def test_no_task_queue_events_are_emitted() -> None:
+    """三个类型进 L 档：枚举与 reducer 分支保留，但不再有发射点。
+
+    `_seed_crashed_session` 种出一个带未决 HITL 的 root agent（非空装填，避免
+    断言在零 agent 上退化成没有意义的检查），`recover()` 走完整条恢复链
+    （rebuild_hitl → register_session → ALM.load 广播 AGENT_*）之后，事件流里
+    不应再出现任何 TaskQueue* 类型——它们已随 `announce_queue_state` /
+    `_announce_queue_state_as_tm_proxy` 一并停发。
+    """
+    seen: list[Event] = []
+
+    async def recorder(ev: Event) -> None:
+        seen.append(ev)
+
+    rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    rt.event_bus.subscribe(None, recorder)
+    await _seed_crashed_session(rt.event_store, "S1", "agt_root")
+
+    await rt.recover()
+
+    queue_events = [e.type for e in seen if str(e.type).startswith("TaskQueue")]
+    assert queue_events == [], f"仍在发 TASK_QUEUE_*: {queue_events}"
+
+
+def test_task_queue_types_are_registered_in_l_tier() -> None:
+    from ctx_weft.protocols.events import L_TIER_EVENT_TYPES
+    assert {"TaskQueueBlocked", "TaskQueueInterrupted", "TaskQueueDrained"} <= L_TIER_EVENT_TYPES
+
+
+def test_l_tier_has_twenty_entries() -> None:
+    """17 + 3。数字写死是为了让「悄悄多停一个」这件事必须显式改测试。"""
+    from ctx_weft.protocols.events import L_TIER_EVENT_TYPES
+    assert len(L_TIER_EVENT_TYPES) == 20
+
+
+def test_proxy_announcer_is_gone() -> None:
+    from ctx_weft.core.runtime import CtxWeftRuntime
+    assert not hasattr(CtxWeftRuntime, "_announce_queue_state_as_tm_proxy")
+
+
+def test_task_manager_has_no_announce_queue_state() -> None:
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
+    assert not hasattr(TaskManager, "announce_queue_state")

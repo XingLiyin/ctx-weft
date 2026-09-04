@@ -14,13 +14,21 @@ projection: a session with no tasks at all must still raise RuntimeError.
 
 Task 16 note: ``SessionFinished`` itself (and the SessionRegistry state machine that
 used to emit it) is retired — the SM was demoted to a plain agent registry in Task 15.
-The tests below now pin ``TaskQueueDrained`` instead: it's the real, still-emitted
-TaskManager aggregate signal that ``SessionFinished`` used to be translated from, and
-carries the same ``final_status``. They no longer assert on the event-store
-projection's ``session_status`` reaching a terminal value, because nothing emits
-``SessionFinished`` any more to drive that reducer branch — that's an accepted
-consequence of session-state ownership moving to the host (docs/events-v2.md §2.1.1),
-not a regression this file should guard against.
+The tests below used to pin ``TaskQueueDrained`` instead (the TM aggregate signal that
+``SessionFinished`` was translated from). Task 12 (2026-09-04, events-v2 §5) retired
+that signal too — ``TaskManager.announce_queue_state`` stopped emitting it, since its
+one consumer (the session state machine) was already gone. ``finalize_idle_session``
+still computes the same terminal verdict, it just writes it directly onto the
+``TaskManager``-held ``Session`` object instead of broadcasting it as an event. Two of
+the tests below spy on ``finalize_idle_session``'s ``status`` argument directly (by the
+time ``recover_session()`` returns, the session may already be fully released and the
+``TaskManager`` gone from ``runtime._task_managers``, so reading ``tm.session.status``
+back after the fact isn't reliable there); the third reads ``tm.session.status`` off a
+``TaskManager`` reference captured while it's still guaranteed live. They still don't
+assert on the event-store projection's ``session_status`` reaching a terminal value,
+because nothing emits ``SessionFinished`` any more to drive that reducer branch — that's
+an accepted consequence of session-state ownership moving to the host
+(docs/events-v2.md §2.1.1), not a regression this file should guard against.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
+from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.capabilities.control_tools import BACKGROUND_PROCESS_REPORT_NAME
 from ctx_weft.protocols import (
@@ -86,7 +95,7 @@ def _ev(seq: int, type_, **payload) -> Event:
     )
 
 
-async def test_stuck_finish_session_recovers_and_finalizes() -> None:
+async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
     """root task FINISHED + TaskRecapStarted (no Done) + session projection RUNNING
     (no SESSION_FINISHED) → recover_session re-runs the recap and finalizes SUCCEEDED."""
     runtime, mem, seen = _make_runtime()
@@ -133,28 +142,33 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
         metadata={"origin_task_id": tid, "tool_call_id": fin_tcid},
     ), pctx)
 
+    # finalize_idle_session's terminal verdict used to be observable as a
+    # TaskQueueDrained(final_status) event; 2026-09-04 (Task 12, events-v2 §5) retired
+    # that broadcast (its one consumer, the session state machine, was already gone).
+    # Spy on the call itself instead — by the time recover_session() returns, the
+    # session may already be fully released (`_release_session` pops the TaskManager
+    # out of `runtime._task_managers`), so reading `tm.session.status` back after the
+    # fact isn't reliable; capturing the argument at the call site is.
+    finalized: list[str] = []
+    orig_finalize = TaskManager.finalize_idle_session
+
+    async def _spy_finalize(self, status, *, _orig=orig_finalize):
+        finalized.append(status)
+        return await _orig(self, status)
+
+    monkeypatch.setattr(TaskManager, "finalize_idle_session", _spy_finalize)
+
     # ── Recover ────────────────────────────────────────────────────────────────
     await runtime.recover_session(sid)
 
-    # finalize_idle_session awaits the relaunched recap before reporting the queue
-    # drained, so it should already be persisted; drain any stragglers defensively.
+    # finalize_idle_session awaits the relaunched recap before finalizing the session,
+    # so it should already be persisted; drain any stragglers defensively.
     tm = runtime._task_managers.get(sid)
     if tm is not None and tm._background_asyncio_tasks:
         await asyncio.gather(*list(tm._background_asyncio_tasks), return_exceptions=True)
 
-    # TaskQueueDrained(SUCCEEDED) was emitted — this is the TM aggregate signal that
-    # used to feed SessionRegistry's now-retired SessionFinished translation (Task 16:
-    # the session-state-machine SM was demoted to an agent registry and no longer
-    # consumes/emits it). It's still the real, live "the session's work is done, and
-    # it finished cleanly" signal, so it's what this test pins instead.
-    drained = [
-        e for e in seen
-        if getattr(e, "type", None) == EventType.TASK_QUEUE_DRAINED
-        and (e.payload or {}).get("final_status") == "SUCCEEDED"
-    ]
-    assert drained, (
-        "expected TaskQueueDrained(SUCCEEDED) after recovery; got "
-        f"{[(getattr(e, 'type', None), (e.payload or {}).get('final_status')) for e in seen]}"
+    assert finalized == ["SUCCEEDED"], (
+        f"expected finalize_idle_session to finalize SUCCEEDED exactly once, got {finalized!r}"
     )
 
     # NOTE: the event-store *projection*'s session_status can no longer reach a
@@ -172,7 +186,7 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
     ), "expected TASK_RECAP_DONE from the relaunched recap"
 
 
-async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
+async def test_stuck_failed_session_recovers_and_finalizes_failed(monkeypatch) -> None:
     """Variant of Test A seeded with TASK_FAILED (+ FAILURE_THRESHOLD_HIT) instead of
     TASK_FINISHED: finalize_idle_session's FAILED branch (``session.failure_counter > 0``
     in ``_recover_session_locked``) must report TaskQueueDrained(FAILED), not SUCCEEDED.
@@ -231,6 +245,18 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
         metadata={"origin_task_id": tid, "tool_call_id": fin_tcid},
     ), pctx)
 
+    # See the identically-worded note in test_stuck_finish_session_recovers_and_
+    # finalizes just above for why this spies on finalize_idle_session's argument
+    # rather than pinning a TaskQueueDrained event (Task 12 retired it, events-v2 §5).
+    finalized: list[str] = []
+    orig_finalize = TaskManager.finalize_idle_session
+
+    async def _spy_finalize(self, status, *, _orig=orig_finalize):
+        finalized.append(status)
+        return await _orig(self, status)
+
+    monkeypatch.setattr(TaskManager, "finalize_idle_session", _spy_finalize)
+
     # ── Recover ────────────────────────────────────────────────────────────────
     await runtime.recover_session(sid)
 
@@ -238,19 +264,9 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
     if tm is not None and tm._background_asyncio_tasks:
         await asyncio.gather(*list(tm._background_asyncio_tasks), return_exceptions=True)
 
-    # TaskQueueDrained(FAILED) was emitted — not SUCCEEDED (Test A's happy path). The
-    # TM aggregate signal replaces the now-retired SessionFinished translation (Task 16
-    # demoted SM; see the identically-worded note in test_stuck_finish_session_recovers_
-    # and_finalizes just above for why the projection's session_status is no longer
-    # asserted here).
-    drained = [
-        e for e in seen
-        if getattr(e, "type", None) == EventType.TASK_QUEUE_DRAINED
-        and (e.payload or {}).get("final_status") == "FAILED"
-    ]
-    assert drained, (
-        "expected TaskQueueDrained(FAILED) after recovery of a failed session; got "
-        f"{[(getattr(e, 'type', None), (e.payload or {}).get('final_status')) for e in seen]}"
+    # finalize_idle_session finalized FAILED — not SUCCEEDED (Test A's happy path).
+    assert finalized == ["FAILED"], (
+        f"expected finalize_idle_session to finalize FAILED exactly once, got {finalized!r}"
     )
 
     # The pending finish-boundary recap was still closed out despite the failure.
@@ -398,17 +414,15 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     ]
     assert recap_done, "expected TASK_RECAP_DONE from the relaunched interrupt-boundary recap"
 
-    # Recovery composed both threads to completion — TM reports the queue drained
-    # with a terminal final_status (the aggregate signal that used to feed the now-
-    # retired SessionFinished translation; see the note above the polling loop).
-    drained = [
-        e for e in seen
-        if getattr(e, "type", None) == EventType.TASK_QUEUE_DRAINED
-        and (e.payload or {}).get("final_status") in ("SUCCEEDED", "FAILED")
-    ]
-    assert drained, (
-        f"expected a terminal TaskQueueDrained after recovery, got "
-        f"{[(getattr(e, 'type', None), (e.payload or {}).get('final_status')) for e in seen]}"
+    # Recovery composed both threads to completion — the TM-held Session reaches a
+    # terminal status (2026-09-04 Task 12 retired TaskQueueDrained, the aggregate
+    # signal that used to feed the now-retired SessionFinished translation; see the
+    # note above the polling loop — the verdict is written directly onto
+    # ``tm.session.status`` now, not broadcast as an event).
+    assert tm is not None, "expected a TaskManager to still be registered for the session"
+    assert tm.session is not None and tm.session.status in ("SUCCEEDED", "FAILED"), (
+        f"expected the session to reach a terminal status after recovery, got "
+        f"{tm.session.status if tm.session is not None else None!r}"
     )
 
 

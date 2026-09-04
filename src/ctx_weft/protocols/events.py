@@ -276,6 +276,11 @@ L_TIER_EVENT_TYPES: frozenset[str] = frozenset({
     # 发射点。reducer 分支原样保留（存量日志重放靠它们），枚举成员不删——
     # docs/events-v2.md §5：只删发射，不删枚举，删枚举须另过退役闸门。
     "SessionRunning", "SessionWaiting", "SessionInterrupted", "SessionFinished",
+    # 2026-09-04（runtime 对外面 agent-centric 对齐 Task 12）：这 3 个队列级聚合信号
+    # 在 core 里已无消费者——SessionRegistry 自 2026-09-03 起只订阅 AGENT_INSTANTIATED /
+    # AGENT_SPAWNED，不再消费队列信号。恢复期的可观测性由 ALM 装填后的 AGENT_* 现状
+    # 广播承担（spec §6.4）。枚举成员与 reducer 分支按 docs/events-v2.md §5 保留。
+    "TaskQueueBlocked", "TaskQueueInterrupted", "TaskQueueDrained",
 })
 
 

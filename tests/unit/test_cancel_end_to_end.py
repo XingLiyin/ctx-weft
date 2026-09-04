@@ -173,10 +173,14 @@ async def test_cancel_seam_run_loop_to_task_manager() -> None:
     types = bus.types()
     assert EventType.RUN_CANCELED in types
     assert types.index(EventType.RUN_FINISHED) < types.index(EventType.TASK_CANCELED)
-    # 队列动作：终态出口 → 移出 running set、不重排、会话收尾（队列空 → drained）。
+    # 队列动作：终态出口 → 移出 running set、不重排、会话收尾（队列空 → 终态落定）。
+    # 2026-09-04（Task 12，events-v2 §5）起收尾不再额外发一条会话级 TaskQueueDrained
+    # ——落定的终态直接写在 `_session.status` 上，这里改读它。
     assert "A" not in tm.running_task_ids()
     assert tm._queue.pop() is None
-    assert EventType.TASK_QUEUE_DRAINED in types
+    # CANCELED 走的是 on_task_finished 自己的显式分支（"用户主动中断：标记 session 为
+    # CANCELED"），不经 `_final_status()`——与 FINISHED/FAILED 走的收尾支同源但判据不同。
+    assert _session.status == "CANCELED"
     assert EventType.TASK_REQUEUED not in types
 
 

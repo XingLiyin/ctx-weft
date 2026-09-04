@@ -21,9 +21,9 @@ async def test_finalize_idle_session_emits_status_and_finished():
 
     await tm.finalize_idle_session("SUCCEEDED")
 
-    # Task 6：TM 只报「我这边空了、结论是 SUCCEEDED」，SessionFinished 由 SM 发。
-    kinds = [(e.type, (e.payload or {}).get("final_status")) for e in bus.emitted]
-    assert (EventType.TASK_QUEUE_DRAINED, "SUCCEEDED") in kinds
+    # 2026-09-04（Task 12，events-v2 §5）起 TM 不再报 TaskQueueDrained（其消费者，
+    # 会话状态机，早已退役）——结论直接写在 `tm.session.status` 上，不再对外广播。
+    assert EventType.TASK_QUEUE_DRAINED not in [e.type for e in bus.emitted]
     assert EventType.SESSION_STATUS_CHANGED not in [e.type for e in bus.emitted]
     assert tm.session.status == "SUCCEEDED"
 
@@ -43,4 +43,4 @@ async def test_finalize_idle_session_gathers_background_recap():
 
     await tm.finalize_idle_session("SUCCEEDED")
 
-    assert done["bg"] is True  # 报队列状态（→ SessionFinished）前 gather 了后台 recap
+    assert done["bg"] is True  # 落定终态、触发收尾回调前 gather 了后台 recap

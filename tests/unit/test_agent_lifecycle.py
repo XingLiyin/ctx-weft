@@ -70,7 +70,12 @@ async def test_task_event_agent_id_prefers_running_agent_over_assigned():
 
 
 async def test_queue_level_event_has_no_agent_id():
-    """TASK_QUEUE_* 是队列级聚合信号，无 task_id，不应乱填 agent_id。"""
+    """无 task_id 的事件不应乱填 agent_id——`_emit` 的通用规则，与事件类型本身无关。
+
+    这里借用 TASK_QUEUE_DRAINED 只是因为它恰好是「无 task_id」的老例子：本类型已随
+    2026-09-04（Task 12，events-v2 §5）停发（L 档，只读存量），测的不是它还会不会被
+    发出，而是直接调 `tm._emit(...)` 时的通用填充逻辑本身。
+    """
     bus = _SpyBus()
     tm = TaskManager("s1", event_bus=bus)
     await tm._emit(EventType.TASK_QUEUE_DRAINED, payload={})

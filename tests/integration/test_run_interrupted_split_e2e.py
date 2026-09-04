@@ -151,4 +151,6 @@ async def test_outage_emits_both_run_and_task_interrupted() -> None:
     # 故这条 task 域事实的 run_id 是 None（run 域那条照旧带，见上面 run_evs 的断言）。
     assert task_evs[0].run_id is None
     assert task_evs[0].payload["reason"] == "llm_outage"
-    assert EventType.TASK_QUEUE_INTERRUPTED in [e.type for e in seen]
+    # 2026-09-04（Task 12，events-v2 §5）起 TaskManager 不再额外聚合出一条会话级
+    # TaskQueueInterrupted——上面两条 task/run 域事实已经是完整的观测点。
+    assert EventType.TASK_QUEUE_INTERRUPTED not in [e.type for e in seen]

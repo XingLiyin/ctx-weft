@@ -68,7 +68,13 @@ async def _fail_n_times(tm: TaskManager, task_ids: list[str]) -> None:
 
 
 async def test_trip_event_sequence_on_third_failure() -> None:
-    """3 连败：THRESHOLD_HIT → TASK_CANCELED*（非 root）→ TASK_FAILED(root) → TASK_QUEUE_DRAINED(FAILED)。"""
+    """3 连败：THRESHOLD_HIT → TASK_CANCELED*（非 root）→ TASK_FAILED(root) → session.status=FAILED。
+
+    2026-09-04（Task 12，events-v2 §5）起第 8 步不再额外发一条会话级 TaskQueueDrained
+    落定终态——`_trip_failure_threshold` 直接把 `session.status` 写成 "FAILED"（trip
+    序列 8 号步骤，紧接在 6 号步骤 TASK_FAILED 之后、同一次同步调用内），已经没有
+    独立事件可用来做「在 TASK_FAILED 之后」的顺序断言，改成直接断言这个值。
+    """
     bus = _CapturingBus()
     tm, session = _tm(bus)
     root = _root()
@@ -82,10 +88,9 @@ async def test_trip_event_sequence_on_third_failure() -> None:
     assert EventType.FAILURE_THRESHOLD_HIT in types
     hit_idx = types.index(EventType.FAILURE_THRESHOLD_HIT)
     failed_idx = types.index(EventType.TASK_FAILED)
-    status_idx = max(i for i, t in enumerate(types) if t == EventType.TASK_QUEUE_DRAINED
-                      and bus.events[i].payload.get("final_status") == "FAILED")
-    assert hit_idx < failed_idx < status_idx
+    assert hit_idx < failed_idx
     assert EventType.SESSION_STATUS_CHANGED not in types
+    assert EventType.TASK_QUEUE_DRAINED not in types
     assert session.status == "FAILED"
 
 
@@ -317,7 +322,13 @@ async def test_root_already_terminal_skips_finalization() -> None:
 
 
 async def test_cancel_pending_hitl_invoked_before_terminal_status() -> None:
-    """cancel_pending_hitl 在 TASK_QUEUE_DRAINED(FAILED)（→ SessionFinished）之前被 await 调用。"""
+    """cancel_pending_hitl 在终态落定（→ 收尾）之前被 await 调用。
+
+    2026-09-04（Task 12，events-v2 §5）起 trip 序列第 8 步不再发 TASK_QUEUE_DRAINED
+    （`announce_queue_state` 已停发）——`session.status = "FAILED"` 直接写定,紧接着
+    调 `_fire_session_done()`。没有事件可拦截了,改拦 `_fire_session_done` 本身的调用
+    时机（它是终态写定之后**唯一**还在的、可挂钩的收尾点）。
+    """
     bus = _CapturingBus()
     tm, session = _tm(bus)
     root = _root()
@@ -331,14 +342,14 @@ async def test_cancel_pending_hitl_invoked_before_terminal_status() -> None:
         call_order.append("cancel_hitl")
 
     tm.set_hooks(TaskManagerHooks(cancel_pending_hitl=_cancel_hitl))
-    orig_emit = tm._emit
+    orig_fire_session_done = tm._fire_session_done
 
-    async def _tracking_emit(event_type, task_id=None, payload=None):
-        if event_type == EventType.TASK_QUEUE_DRAINED and (payload or {}).get("final_status") == "FAILED":
+    async def _tracking_fire_session_done():
+        if session.status == "FAILED":
             call_order.append("session_failed")
-        await orig_emit(event_type, task_id=task_id, payload=payload)
+        await orig_fire_session_done()
 
-    tm._emit = _tracking_emit
+    tm._fire_session_done = _tracking_fire_session_done
 
     await _fail_n_times(tm, ["c1", "c2", "c3"])
 

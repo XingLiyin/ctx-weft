@@ -53,14 +53,13 @@ def _tm(bus: InProcessEventBus) -> TaskManager:
 
 
 async def test_superseded_tm_skips_finish_when_replaced_during_gather() -> None:
+    """顶替发生在 `_fire_session_done` 的 gather 期间：旧 TM 恢复后必须发现自己已非
+    owner，no-op（不触发 `on_session_done` → 不会误 `_release_session` 掉新 TM）。
+
+    2026-09-04（Task 12）起不再额外断言「不报队列状态」——`announce_queue_state`
+    已停发（events-v2 §5），`done_called` 才是这条不变量唯一还在的观测点。
+    """
     bus = InProcessEventBus()
-    finished: list = []
-
-    async def _capture(ev):
-        finished.append(ev)
-
-    bus.subscribe(EventType.TASK_QUEUE_DRAINED, _capture)
-
     tm = _tm(bus)
     done_called: list = []
 
@@ -89,20 +88,18 @@ async def test_superseded_tm_skips_finish_when_replaced_during_gather() -> None:
     release.set()
     await fire
 
-    assert finished == [], "被顶替的旧 TM 不应报队列状态（→ 不会有 SessionFinished）"
     assert done_called == [], "被顶替的旧 TM 不应触发终结回调（_release_session）"
 
 
 async def test_current_tm_still_fires_session_finished() -> None:
-    """Task 6：TM 报 TaskQueueDrained（SessionFinished 由 SM 据它发），回调照常触发。"""
+    """对照：current TM（未被顶替）的 `_fire_session_done` 照常触发终结回调。
+
+    Task 6 起：TM 曾报 TaskQueueDrained（SessionFinished 由 SM 据它发）。2026-09-04
+    （Task 12，events-v2 §5）起 `announce_queue_state`/`TaskQueueDrained` 已停发——
+    它唯一的消费者（会话状态机）早已随 SessionRegistry 降格退役——`on_session_done`
+    回调是否触发因此是这条不变量唯一还在的观测点。
+    """
     bus = InProcessEventBus()
-    drained: list = []
-
-    async def _capture(ev):
-        drained.append(ev)
-
-    bus.subscribe(EventType.TASK_QUEUE_DRAINED, _capture)
-
     tm = _tm(bus)
     done_called: list = []
 
@@ -113,77 +110,30 @@ async def test_current_tm_still_fires_session_finished() -> None:
 
     await tm._fire_session_done()
 
-    assert len(drained) == 1
-    assert drained[0].payload["final_status"] == "SUCCEEDED"
     assert done_called == [True]
 
 
-async def test_superseded_tm_park_does_not_announce_queue_state() -> None:
-    """**idle 路径**同样受归属权守卫：被顶替的旧 TM 迟到的 park 收尾不得报队列状态。
-
-    这条是 `_fire_session_done` 那条不变量的孪生兄弟，而且更隐蔽：`announce_queue_state`
-    发的是**会话级**信号，SM 按 session_id 无条件应用——旧 TM 报一句 TaskQueueBlocked，
-    新一轮正在跑的会话就被翻成 WAITING。`_fire_session_idle` 从前 docstring 明写「不发
-    事件」、因此无守卫；它现在会发了，守卫必须跟上。
-    """
-    tm = _tm(InProcessEventBus())
-    signals: list = []
-
-    async def _cap(ev):
-        if ev.type in (EventType.TASK_QUEUE_BLOCKED, EventType.TASK_QUEUE_INTERRUPTED,
-                       EventType.TASK_QUEUE_DRAINED):
-            signals.append(ev.type)
-
-    tm._event_bus.subscribe(None, _cap)
-    idle_called: list = []
-
-    async def _on_idle():
-        idle_called.append(True)
-
-    current = {"v": True}
-    tm.set_hooks(TaskManagerHooks(
-        on_session_idle=_on_idle, is_current=lambda: current["v"]))
-    tm.register_task(Task(id="A", session_id="s1", status="AWAITING_HUMAN",
-                          assigned_agent_id="a", creator_agent_id="a",
-                          settings=NormalTaskSettings()))
-
-    await tm._fire_session_idle()
-    assert signals == [EventType.TASK_QUEUE_BLOCKED], "对照：current TM 照常报「有人在等」"
-
-    signals.clear()
-    current["v"] = False                      # 被同 session 上更新的 TM 顶替
-    await tm._fire_session_idle()
-    assert signals == [], "被顶替的旧 TM 的 park 收尾不得报队列状态（会翻掉新一轮的会话）"
-
-
-async def test_superseded_tm_crash_suspend_does_not_announce_queue_state() -> None:
-    """同上，走 `_suspend_task_interrupted` 那条裸调用路径（崩溃收尾）。"""
-    tm = _tm(InProcessEventBus())
-    signals: list = []
-
-    async def _cap(ev):
-        if ev.type == EventType.TASK_QUEUE_INTERRUPTED:
-            signals.append(ev.type)
-
-    tm._event_bus.subscribe(None, _cap)
-
-    async def _noop_runner(_sid, _tid):
-        return None
-
-    tm.set_runner(StubRunner(tm, _noop_runner))
-    tm.register_task(Task(id="A", session_id="s1", status="ACTIVE",
-                          assigned_agent_id="a", creator_agent_id="a",
-                          settings=NormalTaskSettings()))
-    tm.set_hooks(TaskManagerHooks(is_current=lambda: False))  # 已被顶替
-
-    class _NonRetriable(Exception):
-        retriable = False
-
-    await tm._handle_task_failure(
-        "A", reason="assembly_failure", error="boom", exc=_NonRetriable("boom"),
-    )
-
-    assert signals == [], "被顶替的旧 TM 的崩溃收尾不得报队列状态"
+# 2026-09-04（Task 12，events-v2 §5）删除说明：这里原有两条测试——
+# `test_superseded_tm_park_does_not_announce_queue_state` 与
+# `test_superseded_tm_crash_suspend_does_not_announce_queue_state`——分别钉着
+# `announce_queue_state` 内部的 is_current 守卫在 idle 路径（`_fire_session_idle`）
+# 与崩溃挂起路径（`_suspend_task_interrupted`/`_handle_task_failure`）上不让被顶替的
+# 旧 TM 补发一句会话级 TaskQueueBlocked/TaskQueueInterrupted。`announce_queue_state`
+# 本身已随本任务删除，这两条守卫的**对象**不复存在——不是「弱化验证强度」，是
+# 「被验证的行为已经不存在」：
+#   - `_fire_session_idle`（删除 announce_queue_state 调用后）不再检查 is_current，
+#     旧 TM 与 current TM 现在行为完全一致（这一点在删除前也成立——is_current 守卫
+#     原本只长在 announce_queue_state 内部，只挡事件发射，从不挡 `_fire_session_idle`
+#     里紧随其后的 `on_session_idle` 回调调用）；
+#   - `_suspend_task_interrupted` 从来没有自己的 is_current 守卫，TASK_INTERRUPTED
+#     （task 级事实）无论是否被顶替都无条件发出，这一点也不因本任务而改变。
+# idle 路径真正生产环境下的顶替防护活在 `runtime.py::_on_idle` 闭包自己的
+# compare-and-check（`self._task_managers.get(session.id) is task_manager`），
+# 与本文件测的 TaskManager 层 is_current 守卫是两回事，不受本次改动影响、也不需要
+# 在这里补一条新测试替代——它已经是一段独立、稳定的既有代码路径。
+# done 路径的孪生守卫仍然真实存在（`_fire_session_done` 里的 is_current 检查），
+# 由 `test_superseded_tm_skips_finish_when_replaced_during_gather` /
+# `test_current_tm_still_fires_session_finished` 继续覆盖。
 
 
 async def test_register_and_drain_marks_older_tm_not_current() -> None:
@@ -344,20 +294,19 @@ async def test_slow_prior_turn_bg_observe_does_not_clobber_next_turn() -> None:
 async def test_probe_prior_turn_finishing_after_supersession() -> None:
     """探针：强制让旧轮的 on_task_finished 在被顶替**之后**才跑（forced ordering）。
 
-    验证关键不变量仍成立：不释放新 TM、不发 SessionFinished。
-    is_done 分支已加归属权守卫，被顶替旧 TM 收尾时连 stale 的会话级聚合信号
-    （TaskQueueDrained）也不再发出——这里断言其为空。
+    验证关键不变量仍成立：不释放新 TM、不发 SessionFinished、旧轮的 Session 对象
+    不被误落定终态。2026-09-04（Task 12，events-v2 §5）起不再断言「连 stale 的
+    TaskQueueDrained 也不发出」——`announce_queue_state` 本身已停发，没有信号可断言；
+    `_settle` 里的归属权守卫（`is_current` 检查）现在真正防的是
+    ``sess6.status = self._final_status()`` 这一步被越权执行，所以改断言这个。
     """
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                         agent_provider=InlineAgentTemplateProvider())
     sid = "s1"
-    statuses: list = []
     finished: list = []
 
     async def _cap(ev):
-        if ev.type == EventType.TASK_QUEUE_DRAINED:
-            statuses.append(ev.payload.get("final_status"))
-        elif ev.type == EventType.SESSION_FINISHED:
+        if ev.type == EventType.SESSION_FINISHED:
             finished.append(ev)
 
     rt._event_bus.subscribe(None, _cap)
@@ -376,7 +325,6 @@ async def test_probe_prior_turn_finishing_after_supersession() -> None:
     assert rt._task_managers[sid] is tm7
     assert sid in rt._pausing, "新一轮的 pause 闩锁不得被旧 TM 迟到收尾清除"
     assert finished == [], "被顶替的旧 TM 不得发 SessionFinished"
-
-    # is_done 分支已加归属权守卫：被顶替旧 TM 的迟到收尾连 stale 的 TaskQueueDrained
-    # 也不发出（新 owner 的状态才是真相），故这里 statuses 为空。
-    assert statuses == []
+    # is_done 分支的归属权守卫在 `self._session.status = self._final_status()` 之前
+    # 就 return 掉了——旧轮的 Session 对象因此不被越权落定终态，仍停在 RUNNING。
+    assert sess6.status == "RUNNING", "被顶替的旧 TM 不得越权落定 session.status"

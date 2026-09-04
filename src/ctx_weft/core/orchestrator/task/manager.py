@@ -453,8 +453,9 @@ class TaskManager:
                 # 否则重试预算永不消耗、同一个 task 无限重排（旧路径是先 `+= 1` 再写 payload）。
                 task.retry_count = disp.payload["retry_count"]
             if outcome.kind is RunOutcomeKind.INTERRUPTED:
-                # 成因随 task 走：`announce_queue_state` 聚合 TaskQueueInterrupted 时
-                # 优先读 error_code（host 按码分流），自由文本只是兜底。
+                # 成因随 task 走：`disp.payload` 里的 error_code 只随这一条事件走一次，
+                # `get_task(task_id)` 等后续内存态查询要看的是 task 对象上的这份存档
+                # （注意 TaskView 不带该字段、跨重启不还原，见总账 A9）。
                 task.error = outcome.error or task.error
                 if outcome.error_code:
                     task.error_code = outcome.error_code
@@ -693,8 +694,12 @@ class TaskManager:
         置 INTERRUPTED（非终态）+ 发 TASK_INTERRUPTED——投影只认事件类型
         （TASK_STATUS_BY_EVENT），不发则任务停留 ACTIVE、restore 语义错位。这是一条
         **task 级事实**：TM 在 run 外面、不拥有 run（连 run_id 都拿不到），run 域的
-        `RunInterrupted` 由 `runtime._run_loop` 自己发。会话怎么了也不在这里宣布，
-        由 `announce_queue_state` 聚合后交 SM 判定（判据是事件类型，不是 reason 字面量）。
+        `RunInterrupted` 由 `runtime._run_loop` 自己发。会话/agent 怎么了也不在这里
+        宣布——本方法发的这条 TASK_INTERRUPTED 由 `AgentLifecycleManager` 的五态机
+        （`_INPUT_BY_EVENT`）接手，折成对应 agent 的 AGENT_INTERRUPTED（判据是事件
+        类型，不是 reason 字面量）。2026-09-04（Task 12）前这里还会额外经
+        `announce_queue_state` 聚合出一条会话级 TaskQueueInterrupted，现已停发
+        （events-v2 §5：那条信号唯一的消费者早已降格）。
         **发射时机是重试判定之后**：`_handle_task_failure` 决定原地重试的那一支发的是
         TASK_REQUEUED（→ PENDING），只有落到本方法才是「停在 INTERRUPTED 等 /resume」。
         不发 TASK_FAILED、不增 failure_counter、不闭合胶囊：真失败只有 observer 判 fail
@@ -797,8 +802,9 @@ class TaskManager:
             if self._hooks.is_current is not None and not self._hooks.is_current():
                 return
             # 「还有人在等」不再靠注入的 pending-HITL 谓词判断，而是由 AWAITING_HUMAN 的
-            # 任务表达；「断了」由 INTERRUPTED 的任务表达。两者都在 announce_queue_state
-            # 里聚合。这里只区分「要不要走终结收尾」——后者要 gather 后台协程 + 回调。
+            # 任务表达；「断了」由 INTERRUPTED 的任务表达。这里只区分「要不要走终结
+            # 收尾」——后者要 gather 后台协程 + 回调（2026-09-04 Task 12 起两者都不再
+            # 额外经 `announce_queue_state` 聚合成会话级信号，那条信号已停发）。
             if self._blocked_or_interrupted():
                 await self._fire_session_idle()
             else:
@@ -908,8 +914,9 @@ class TaskManager:
             except Exception:
                 logger.exception("TaskManager: threshold_finalizer callback failed")
 
-        # 8) 会话终态 + 收尾事件。终态由 SM 据 TaskQueueDrained 落定（`_final_status()`
-        #    此刻恒为 FAILED——熔断的前提就是 failure_counter 已达阈值）。
+        # 8) 会话终态 + 收尾事件。终态直接写定为 FAILED（2026-09-04 Task 12 起不再
+        #    经由已停发的 TaskQueueDrained/会话状态机——熔断的前提就是 failure_counter
+        #    已达阈值，`_final_status()` 此刻本就恒为 FAILED，无需绕一圈再落定）。
         if self._session is not None:
             self._session.status = "FAILED"
         await self._fire_session_done()
@@ -993,7 +1000,8 @@ class TaskManager:
 
         V2 §0：envelope 管身份。``agent_id`` 未显式传且有 ``task_id`` 时自动解析
         （先查在跑登记 ``_running_agents``，查不到再回落到 ``Task.assigned_agent_id``）；
-        无 ``task_id``（如 TASK_QUEUE_* 队列级聚合信号）则 agent_id 保持 None，不乱填。
+        无 ``task_id``（如 ``FAILURE_THRESHOLD_HIT`` 这类会话级聚合信号）则 agent_id
+        保持 None，不乱填。
         """
         await emit_event(
             self._event_bus,
@@ -1009,55 +1017,14 @@ class TaskManager:
             payload=payload,
         )
 
-    # ── 会话级聚合信号：SM 的唯一输入 ──────────────────────────────────────
-
-    async def announce_queue_state(self) -> None:
-        """把「我这边现在什么情况」告诉外界。**SM 的唯一输入。**
-
-        三个独立事件而不是一个带 discriminator 的：消费方收到哪条就知道怎么办，
-        不必读 payload 分流（本次重构的核心约束）。
-
-        调用点：每次可能改变「有没有能跑的任务」的地方——`_run_task` 的挂起出口、
-        `_suspend_task_interrupted` 尾部、`on_task_finished` 收尾（后两者经
-        `_fire_session_idle` / `_fire_session_done`）。多调无害：状态没变时
-        SM 不会发事件（`next_transition` 返回 `None`）。
-
-        **归属权守卫长在这里**，而不是长在三个调用点上：本方法一发就是**会话级**
-        信号，SM 按 session_id 无条件应用。被同 session 上更新的 TM 顶替之后，
-        旧 TM 迟到的 park / 崩溃收尾若还报一句，就会把**新一轮正在跑的会话**
-        翻成 WAITING / INTERRUPTED。守卫贴着发射点，新增调用点不必各自记得加。
-        """
-        if self._hooks.is_current is not None and not self._hooks.is_current():
-            return                                   # 已被顶替：新 owner 的状态才是真相
-        if self._queue.has_pending() or self._running_tasks:
-            return                                   # 还有活干，没什么好报的
-        interrupted = [t for t in self._tasks.values() if t.status == "INTERRUPTED"]
-        blocked = [t for t in self._tasks.values()
-                   if t.status in ("AWAITING_HUMAN", "SUSPENDED")]
-        if interrupted:
-            # 优先级判据是「解开它需要谁」：INTERRUPTED 要运维介入（/resume），
-            # AWAITING_HUMAN 只要用户答一句。一个 task 断了、另一个在等人，先报
-            # 「断了」——人答完了那个断的还是断的，而且它需要更重的介入。
-            #
-            # 契约：本字段是**码**，host 据此分流（三份契约：升级须知 /
-            # docs/events-v2.md §2.1.2 / spec/golden/07）。
-            # 兜底吐码而非散文：跨重启还原的 task 没有 error_code
-            # （TaskView 不带该字段、converters 不还原，见总账 A9），此时退到
-            # "interrupted" 这个码，而不是把 task.error 的自由文本塞进来。
-            await self._emit(EventType.TASK_QUEUE_INTERRUPTED, payload={
-                "reason": (interrupted[0].error_code or "interrupted")})
-        elif blocked:
-            await self._emit(EventType.TASK_QUEUE_BLOCKED, payload={"count": len(blocked)})
-        else:
-            await self._emit(EventType.TASK_QUEUE_DRAINED,
-                             payload={"final_status": self._final_status()})
-
     def _final_status(self) -> str:
         """全部终态时的会话结论。failure_counter > 0 表示本轮有任务失败。
 
-        **只返回终态值**：它是 `TaskQueueDrained.final_status` 的唯一数据源，而状态机
-        拿它直接构造 `Transition(final_status, ...)` 且不做校验——空串或别的东西会
-        当场把会话钉死在一个不存在的状态上。
+        2026-09-04（Task 12）起 `announce_queue_state`/`TaskQueueDrained` 已停发
+        （L 档登记，events-v2 §5），本方法不再是谁的数据源——唯一读者是本文件
+        `_settle` 里的 ``self._session.status = self._final_status()``（终态收尾
+        直接写 session 状态，不再经由已退役的会话状态机）。**只返回终态值**：
+        空串或别的东西会把 `_session.status` 写成一个不存在的状态。
         """
         if self._session is not None and self._session.failure_counter > 0:
             return "FAILED"
@@ -1068,8 +1035,11 @@ class TaskManager:
         return any(t.status in _PARKED_STATUSES for t in self._tasks.values())
 
     async def _fire_session_idle(self) -> None:
-        """会话空闲挂起（park/suspend，非终结）：报队列状态 + 通知 runtime 回收 per-run 控制信号。"""
-        await self.announce_queue_state()
+        """会话空闲挂起（park/suspend，非终结）：通知 runtime 回收 per-run 控制信号。
+
+        2026-09-04（Task 12）起不再先报队列状态——`announce_queue_state` 已停发
+        （其消费者会话状态机早已降格，见 events-v2 §5），本方法只剩通知这一件事。
+        """
         if self._hooks.on_session_idle is not None:
             try:
                 await self._hooks.on_session_idle()
@@ -1077,10 +1047,10 @@ class TaskManager:
                 logger.exception("TaskManager: session_idle callback failed")
 
     async def _fire_session_done(self) -> None:
-        """会话可能已经走完：先等后台协程，再报队列状态（终态事件由 SM 发）+ 可选回调。
+        """会话可能已经走完：先等后台协程，再走可选回调。
 
-        幂等不再靠 TM 自持的闩：状态机「已终态吸收一切」保证重复的 `TaskQueueDrained`
-        不会重复发 `SessionFinished`；`_on_session_done` 侧的回收本就幂等。
+        2026-09-04（Task 12）起不再报队列状态——`announce_queue_state` 已停发
+        （events-v2 §5），幂等因此全靠 `_on_session_done` 侧的回收本身幂等。
         """
         # 等待所有后台协程完成，确保 RecognizeIntent 等事件全部 emit 后再关闭 SSE 流
         if self._background_asyncio_tasks:
@@ -1090,10 +1060,9 @@ class TaskManager:
         # 已非 owner → 收尾变 no-op，绝不发 SessionFinished、绝不触发 _release_session，
         # 否则会冲掉新一轮的 HITL 挂起态、把任务卡在 ACTIVE。
         if self._hooks.is_current is not None and not self._hooks.is_current():
-            logger.info("TaskManager(%s): superseded during session-done; skip announce + callback",
+            logger.info("TaskManager(%s): superseded during session-done; skip callback",
                         self._session_id)
             return
-        await self.announce_queue_state()
         if self._hooks.on_session_done is not None:
             try:
                 await self._hooks.on_session_done()
@@ -1160,8 +1129,10 @@ class TaskManager:
         """恢复专用：会话所有 task 已终态但 session 因崩溃未落终态 —— 设终态并复用
         _fire_session_done（先 gather 重跑的后台 recap，再发 SESSION_FINISHED + 回调）。
 
-        镜像 on_task_finished 的会话收尾：走同一条 `_fire_session_done` 链，终态由 SM 据
-        `TaskQueueDrained` 落定。幂等由状态机的「已终态吸收一切」承担。
+        镜像 on_task_finished 的会话收尾：走同一条 `_fire_session_done` 链，终态由调用方
+        传入的 `status` 直接写定（2026-09-04 Task 12 起不再经由已停发的 `TaskQueueDrained`/
+        会话状态机）。幂等由 `_fire_session_done` 内的归属权判定 + `_on_session_done`
+        自身幂等承担。
         """
         if self._session is not None:
             self._session.status = status
