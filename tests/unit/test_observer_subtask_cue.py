@@ -2,7 +2,7 @@
 independent of any blackboard subscription."""
 from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.assembler import ContextRequest, ContextBlock
-from ctx_weft.core.domain.models import Task, NormalTaskSettings
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryAddress
 
 

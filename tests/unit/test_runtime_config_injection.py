@@ -1,4 +1,4 @@
-from ctx_weft.core.config import RuntimeConfig
+from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.protocols import AgentCapabilityProvider, CapabilityProviderInfo
 from tests.integration.test_minimal_loop import make_runtime
 

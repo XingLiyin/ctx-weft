@@ -19,7 +19,9 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.capabilities.cache import CapabilityCache
-from ctx_weft.core.domain.models import Agent, LoopGuard, Session, Task
+from ctx_weft.core.models.agent import Agent, LoopGuard
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.providers.llm.mock import MockLLMAdapter

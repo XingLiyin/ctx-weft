@@ -1,7 +1,7 @@
 import pytest
 from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.domain.models import Session
+from ctx_weft.core.models.session import Session
 from ctx_weft.protocols.events import EventType
 
 

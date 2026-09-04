@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.finalize import finalize_task_memory, _descendant_task_ids, _dispatch_ack
-from ctx_weft.core.domain.models import NormalTaskSettings, Task
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,

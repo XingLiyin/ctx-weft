@@ -41,7 +41,7 @@ class SuspendStep(Step):
             task.user_prompt_in_memory = True
 
         # 2) Build suspension summary from spawn titles written by control tool
-        from ctx_weft.core.domain.models import NormalTaskSettings
+        from ctx_weft.core.models.task import NormalTaskSettings
         titles: list[str] = []
         if isinstance(task.settings, NormalTaskSettings):
             titles = list(task.settings.spawn_titles)

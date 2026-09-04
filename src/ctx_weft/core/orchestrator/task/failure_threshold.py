@@ -13,12 +13,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
+from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence, Set as AbstractSet
 
-    from ctx_weft.core.domain.models import Task
+    from ctx_weft.core.models.task import Task
 
 __all__ = ["TripPlan", "plan_threshold_trip"]
 

@@ -26,7 +26,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.domain.models import Session, Task
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,

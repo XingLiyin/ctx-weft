@@ -1,4 +1,4 @@
-from ctx_weft.core.errors import ContextOverflowError
+from ctx_weft.core.models.errors import ContextOverflowError
 
 
 def test_message_unchanged_when_no_images():

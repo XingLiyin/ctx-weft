@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ctx_weft.core.domain.models import Task
+    from ctx_weft.core.models.task import Task
 
 __all__ = ["TaskManagerHooks"]
 

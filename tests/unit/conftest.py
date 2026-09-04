@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.domain.models import NormalTaskSettings
+from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,

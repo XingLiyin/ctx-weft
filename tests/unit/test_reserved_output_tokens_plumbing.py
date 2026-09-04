@@ -1,4 +1,5 @@
-from ctx_weft.core.domain.models import LoopGuard, Session
+from ctx_weft.core.models.agent import LoopGuard
+from ctx_weft.core.models.session import Session
 from ctx_weft.core.control.types import SessionView
 
 

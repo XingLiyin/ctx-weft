@@ -25,7 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.errors import InvalidContentError
+from ctx_weft.core.models.errors import InvalidContentError
 from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
@@ -472,7 +472,7 @@ async def test_hitl_image_reaches_memory():
 def _install_live_owner(rt, session_id: str, tenant_id: str):
     """给 session 装一个活 owner TaskManager（热应答的主路径就是从它读 tenant）。"""
     from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.core.domain.models import Session
+    from ctx_weft.core.models.session import Session
 
     tm = TaskManager(session_id=session_id, event_bus=rt.event_bus)
     tm.set_session(Session(

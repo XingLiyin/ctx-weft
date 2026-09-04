@@ -21,7 +21,7 @@ from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.loop.steps.observe import Verdict
 from ctx_weft.core.loop.steps.suspend import SuspendStep
 from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
-from ctx_weft.core.domain.models import NormalTaskSettings, Task
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryConfig,
@@ -108,7 +108,8 @@ async def run_until_suspend(*, titles: list[str]):
     `dataclasses.replace(state)` 快照（background_observe），SimpleNamespace 不是
     dataclass 会在那一步炸掉。"""
     from ctx_weft.core.loop.driver import LoopState
-    from ctx_weft.core.domain.models import Agent, LoopGuard, Session
+    from ctx_weft.core.models.agent import Agent, LoopGuard
+    from ctx_weft.core.models.session import Session
 
     mem = InMemoryMemoryProvider()
     scope = MemoryAddress(session_id="s1", task_id="c1", agent_id="ag2")
@@ -154,7 +155,8 @@ async def run_until_park():
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.loop.park import HitlPark
     from ctx_weft.core.capabilities.cache import CapabilityCache
-    from ctx_weft.core.domain.models import Agent, LoopGuard, Session
+    from ctx_weft.core.models.agent import Agent, LoopGuard
+    from ctx_weft.core.models.session import Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
     from ctx_weft.protocols import MemoryConfig
     from ctx_weft.providers.events import InProcessEventBus
@@ -208,7 +210,7 @@ async def test_hitl_park_produces_awaiting_human_with_hitl_id() -> None:
 
 async def run_until_outage():
     """同 test_run_loop_outage.py::test_outage_marks_session_interrupted_not_failed 的搭台。"""
-    from ctx_weft.core.config import RuntimeConfig
+    from ctx_weft.core.models.config import RuntimeConfig
     from ctx_weft.protocols import LLMOutageError
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import (
@@ -254,7 +256,8 @@ async def run_until_cancel():
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.capabilities.cache import CapabilityCache
-    from ctx_weft.core.domain.models import Agent, LoopGuard, Session
+    from ctx_weft.core.models.agent import Agent, LoopGuard
+    from ctx_weft.core.models.session import Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
     from ctx_weft.protocols import MemoryConfig
     from ctx_weft.providers.events import InProcessEventBus
@@ -320,7 +323,8 @@ async def run_until_crash(exc: BaseException):
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.capabilities.cache import CapabilityCache
-    from ctx_weft.core.domain.models import Agent, LoopGuard, Session
+    from ctx_weft.core.models.agent import Agent, LoopGuard
+    from ctx_weft.core.models.session import Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
     from ctx_weft.protocols import MemoryConfig
     from ctx_weft.providers.events import InProcessEventBus
@@ -379,7 +383,7 @@ async def test_run_crash_reraises_and_outcome_is_unreachable_to_caller() -> None
 async def test_crash_outcome_contract_non_retriable_exception_never_requeues() -> None:
     """`ContextOverflowError.retriable = False`——按崩溃支 `getattr(exc, "retriable",
     True)` 的同一构造方式喂给 disposition_for，即使预算充足也不该原地重试。"""
-    from ctx_weft.core.errors import ContextOverflowError, crash_error_code
+    from ctx_weft.core.models.errors import ContextOverflowError, crash_error_code
     from ctx_weft.core.orchestrator.task.disposition import RunOutcome, disposition_for
 
     exc = ContextOverflowError("溢出了")
@@ -394,7 +398,7 @@ async def test_crash_outcome_contract_non_retriable_exception_never_requeues() -
 
 async def test_crash_outcome_contract_default_exception_retries_with_budget() -> None:
     """没有 `retriable` 属性的普通异常按契约缺省为 `True`——预算充足时该原地重试。"""
-    from ctx_weft.core.errors import crash_error_code
+    from ctx_weft.core.models.errors import crash_error_code
     from ctx_weft.core.orchestrator.task.disposition import RunOutcome, disposition_for
 
     exc = ValueError("随便什么崩溃")

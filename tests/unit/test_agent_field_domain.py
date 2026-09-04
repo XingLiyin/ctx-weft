@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from ctx_weft.core.domain.models import Agent
+from ctx_weft.core.models.agent import Agent
 
 EXPECTED_FIELDS = {
     "id", "session_id", "tenant_id",
@@ -35,11 +35,11 @@ def test_removed_fields_stay_removed():
 def test_agent_status_type_is_gone():
     """Agent 的状态不再是 `Agent` 的字段，也不由领域模型层定义。
 
-    2026-09-04：`core.state` 更名为 `core.domain`，断言对象随之改为
-    `core.domain.models`（原先断言的是包 `core.state`，而 `core.domain` 刻意不做
+    2026-09-04：`core.state` → `core.domain` → `core.models` 包，断言对象随之改为
+    定义 `Agent` 的那个子模块 `core.models.agent`（原先断言的是包 `core.state`，而 `core.domain` 刻意不做
     re-export，断在子模块上更贴近「这个符号没有从这里出去」的本意）。
-    agent 五态机的词表住在 `core.domain.status`，状态本身住在
+    agent 五态机的词表住在 `core.models.status`，状态本身住在
     `AgentLifecycleManager._AgentRecord`。
     """
-    import ctx_weft.core.domain.models as models
-    assert not hasattr(models, "AgentStatus")
+    import ctx_weft.core.models.agent as agent_models
+    assert not hasattr(agent_models, "AgentStatus")

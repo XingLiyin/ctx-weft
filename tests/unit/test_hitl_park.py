@@ -50,7 +50,9 @@ async def test_run_loop_catches_park_returns_awaiting_human() -> None:
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.loop.park import HitlPark
     from ctx_weft.core.capabilities.cache import CapabilityCache
-    from ctx_weft.core.domain.models import Agent, LoopGuard, Session, Task
+    from ctx_weft.core.models.agent import Agent, LoopGuard
+    from ctx_weft.core.models.session import Session
+    from ctx_weft.core.models.task import Task
     from ctx_weft.protocols import (
         LoopConfig,
         MemoryConfig,

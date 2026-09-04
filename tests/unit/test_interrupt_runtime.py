@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.hitl.registry import PendingHitl
-from ctx_weft.core.domain.models import Session
+from ctx_weft.core.models.session import Session
 from ctx_weft.protocols.hitl import (
     HITL_FORM_WAIT,
     PREFACE_AFTER_INTERRUPT,

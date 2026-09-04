@@ -31,7 +31,7 @@ from ctx_weft.core.capabilities.control_tools import REPORT_TASK_OUTCOME_NAME, C
 from ctx_weft.core.utils import now_utc
 
 if TYPE_CHECKING:
-    from ctx_weft.core.domain.models import Task
+    from ctx_weft.core.models.task import Task
 
 logger = logging.getLogger(__name__)
 

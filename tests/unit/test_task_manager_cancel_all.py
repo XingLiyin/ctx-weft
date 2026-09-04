@@ -5,7 +5,8 @@ import pytest
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.orchestrator.task.queue import QueueEntry
-from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio

@@ -6,12 +6,7 @@ from ctx_weft.core.runtime import (
     RunHandle,
     SessionStartParams,
 )
-from ctx_weft.core.domain.models import (
-    CompactTaskSettings,
-    MetadataFillerTaskSettings,
-    NormalTaskSettings,
-    TaskSettings,
-)
+from ctx_weft.core.models.task import CompactTaskSettings, MetadataFillerTaskSettings, NormalTaskSettings, TaskSettings
 from ctx_weft.protocols.events import EventStore
 from ctx_weft.providers.events import InMemoryEventStore
 

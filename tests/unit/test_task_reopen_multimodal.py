@@ -25,7 +25,7 @@ class _CapturingBus:
 async def task_manager_with_image_task():
     """用 Task 3 的新签名 push_task(..., user_prompt_event_jsonable=...) 造一个携图 task。"""
     from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.core.domain.models import Task
+    from ctx_weft.core.models.task import Task
 
     bus = _CapturingBus()
     tm = TaskManager(session_id="s1", event_bus=bus)
@@ -69,7 +69,7 @@ async def task_manager_with_image_then_text_task():
     必须复现同一合并语义，否则两侧在事件流里的形状会分歧（review round 2 finding 1）。
     """
     from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.core.domain.models import Task
+    from ctx_weft.core.models.task import Task
 
     bus = _CapturingBus()
     tm = TaskManager(session_id="s1", event_bus=bus)

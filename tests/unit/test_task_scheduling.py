@@ -14,7 +14,7 @@ import pytest
 
 from ctx_weft.protocols.events import EVENT_TYPES, EventType
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.domain.models import Task
+from ctx_weft.core.models.task import Task
 from tests.unit._stub_runner import StubRunner
 
 

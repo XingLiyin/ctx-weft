@@ -27,7 +27,7 @@ pytestmark = pytest.mark.asyncio
 
 async def _events_from_outage() -> list:
     """同 test_run_loop_outage.py::test_outage_marks_session_interrupted_not_failed 的搭台。"""
-    from ctx_weft.core.config import RuntimeConfig
+    from ctx_weft.core.models.config import RuntimeConfig
     from ctx_weft.protocols import LLMOutageError
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -77,7 +77,9 @@ async def _events_from_park() -> list:
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.loop.park import HitlPark
     from ctx_weft.core.capabilities.cache import CapabilityCache
-    from ctx_weft.core.domain.models import Agent, LoopGuard, Session, Task
+    from ctx_weft.core.models.agent import Agent, LoopGuard
+    from ctx_weft.core.models.session import Session
+    from ctx_weft.core.models.task import Task
     from ctx_weft.protocols import LoopConfig, MemoryAddress, MemoryConfig, ProviderContext
     from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -165,7 +167,9 @@ async def _events_from_cancel() -> list:
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.capabilities.cache import CapabilityCache
-    from ctx_weft.core.domain.models import Agent, LoopGuard, Session, Task
+    from ctx_weft.core.models.agent import Agent, LoopGuard
+    from ctx_weft.core.models.session import Session
+    from ctx_weft.core.models.task import Task
     from ctx_weft.protocols import LoopConfig, MemoryAddress, MemoryConfig, ProviderContext
     from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -224,7 +228,9 @@ async def _events_from_crash(exc: BaseException) -> tuple[list, BaseException]:
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.capabilities.cache import CapabilityCache
-    from ctx_weft.core.domain.models import Agent, LoopGuard, Session, Task
+    from ctx_weft.core.models.agent import Agent, LoopGuard
+    from ctx_weft.core.models.session import Session
+    from ctx_weft.core.models.task import Task
     from ctx_weft.protocols import LoopConfig, MemoryAddress, MemoryConfig, ProviderContext
     from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

@@ -9,7 +9,7 @@ from __future__ import annotations
 import typing
 
 from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT, reduce_events
-from ctx_weft.core.domain.models import TaskStatus
+from ctx_weft.core.models.status import TaskStatus
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.events import Event, EventType
 

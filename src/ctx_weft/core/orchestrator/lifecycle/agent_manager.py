@@ -12,11 +12,11 @@ from typing import ClassVar, Protocol
 
 from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.event_envelope import emit_event
-from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError, CtxWeftError
+from ctx_weft.core.models.errors import AgentBusyError, AgentNotFound, AgentTerminatedError, CtxWeftError
 from ctx_weft.core.orchestrator.lifecycle.agent_state import AgentInput, next_agent_transition
 from ctx_weft.core.orchestrator.model import ModelChoice, ModelResolver, ResolvedModel
 from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
-from ctx_weft.core.domain.models import Agent, LoopGuard
+from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols import LLMClient, LoopConfig, MemoryConfig
 from ctx_weft.protocols.context import ProviderContext

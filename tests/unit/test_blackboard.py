@@ -26,7 +26,9 @@ from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.blackboard import BlackboardSource
 from ctx_weft.core.loop.driver import StepDriver
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.domain.models import Agent, Session, Task
+from ctx_weft.core.models.agent import Agent
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     MemoryEvent,

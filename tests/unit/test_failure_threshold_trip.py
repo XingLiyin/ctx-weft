@@ -19,7 +19,8 @@ from ctx_weft.protocols.events import EventType
 from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.orchestrator.task.queue import QueueEntry
-from ctx_weft.core.domain.models import Session, Task
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.core.utils import now_utc
 from tests.unit._stub_runner import StubRunner
 

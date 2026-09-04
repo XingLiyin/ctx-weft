@@ -26,10 +26,11 @@ Exception` → `crash_run_outcome(exc)` → `disposition_for` → `apply_run_out
 
 from __future__ import annotations
 
-from ctx_weft.core.errors import ContextOverflowError
+from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.domain.models import Session, Task
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from tests.unit._stub_runner import StubRunner
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.capabilities.control_tools import update_task_metadata, ControlContext
-from ctx_weft.core.domain.models import NormalTaskSettings, Task
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 
 
 def _root_task():

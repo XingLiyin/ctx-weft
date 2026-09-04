@@ -7,7 +7,7 @@ import inspect
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.errors import InvalidContentError
+from ctx_weft.core.models.errors import InvalidContentError
 from ctx_weft.protocols import ImagePart
 from ctx_weft.protocols.hitl import (
     HitlAsk,

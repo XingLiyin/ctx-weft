@@ -22,7 +22,7 @@ def test_hitl_cancelled_is_registered_event() -> None:
 
 def test_hitl_config_defaults() -> None:
     """RuntimeConfig default leaves hitl_timeout_sec as None (no eviction)."""
-    from ctx_weft.core.config import RuntimeConfig
+    from ctx_weft.core.models.config import RuntimeConfig
     cfg = RuntimeConfig()
     assert cfg.hitl_timeout_sec is None
     assert cfg.hitl_max_resolved == 1000
@@ -37,7 +37,7 @@ def test_runtime_wires_hitl_timeout() -> None:
     那个对象」；这里必须走完同样的最后一跳——只断言 `rt._hitl_timeout_sec` 等于只测了
     一次属性赋值，`HitlWaiter(...)` 那行掉了实参照样绿。
     """
-    from ctx_weft.core.config import RuntimeConfig
+    from ctx_weft.core.models.config import RuntimeConfig
     from ctx_weft.protocols import ProviderContext
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     cfg = RuntimeConfig(hitl_timeout_sec=45)

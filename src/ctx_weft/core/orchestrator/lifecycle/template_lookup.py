@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.errors import TemplateNotFoundError
+from ctx_weft.core.models.errors import TemplateNotFoundError
 from ctx_weft.protocols.capability import (
     AgentCapability, AgentCapabilityProvider, qualify,
 )

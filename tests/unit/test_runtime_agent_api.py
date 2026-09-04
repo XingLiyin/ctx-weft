@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
+from ctx_weft.core.models.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.agent import AgentDetail, AgentSummary
@@ -46,7 +46,8 @@ def _plant_live_task(rt, agent_id, task_id, *, task_status, agent_status, sessio
     `TaskRunner` 而抛错——那不是本测试要盯的东西）。
     """
     from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.core.domain.models import Session, Task
+    from ctx_weft.core.models.session import Session
+    from ctx_weft.core.models.task import Task
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     rt.providers.register_memory(InMemoryMemoryProvider())

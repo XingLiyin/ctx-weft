@@ -27,7 +27,7 @@ from ctx_weft.core.assembler.budget import PriorityBudgetStrategy
 from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.core.content import content_from_jsonable, content_to_jsonable
-from ctx_weft.core.errors import ContextOverflowError
+from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.utils import (
     _IMAGE_BYTES_PER_TOKEN,

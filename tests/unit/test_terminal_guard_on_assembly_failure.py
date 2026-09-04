@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.discriminators import InterruptReason
+from ctx_weft.core.models.discriminators import InterruptReason
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.domain.models import Session, Task
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.protocols.events import EventType
 from tests.unit._stub_runner import StubRunner
 

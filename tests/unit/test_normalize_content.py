@@ -11,7 +11,7 @@ import hashlib
 import pytest
 
 from ctx_weft.core.content import normalize_content, validate_content
-from ctx_weft.core.errors import InvalidContentError
+from ctx_weft.core.models.errors import InvalidContentError
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
     MemoryBlobStore,

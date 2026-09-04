@@ -1,4 +1,4 @@
-from ctx_weft.core.errors import ContextOverflowError
+from ctx_weft.core.models.errors import ContextOverflowError
 
 
 def test_carries_fields_and_non_retriable():

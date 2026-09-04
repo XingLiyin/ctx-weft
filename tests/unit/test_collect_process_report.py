@@ -4,7 +4,7 @@ from __future__ import annotations
 from ctx_weft.core.capabilities.control_tools import (
     collect_process_report, BACKGROUND_PROCESS_REPORT_NAME,
 )
-from ctx_weft.core.domain.models import Task, NormalTaskSettings
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 
 
 def _task() -> Task:

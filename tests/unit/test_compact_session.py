@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.errors import SessionBusyError
+from ctx_weft.core.models.errors import SessionBusyError
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols import (
     LoopConfig,

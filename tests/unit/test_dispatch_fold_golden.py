@@ -20,7 +20,7 @@ from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext,
 )
-from ctx_weft.core.domain.models import NormalTaskSettings, Task
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 T = MemoryEventType

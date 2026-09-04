@@ -2,7 +2,7 @@
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.config import RuntimeConfig
+from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import LLMOutageError

@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from ctx_weft.core.domain.status import TERMINAL_AGENT_STATUSES
+from ctx_weft.core.models.status import TERMINAL_AGENT_STATUSES
 
 
 class AgentInput(StrEnum):

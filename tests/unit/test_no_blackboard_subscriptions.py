@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.driver import StepDriver
-from ctx_weft.core.domain.models import Task
+from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import ProviderContext
 
 

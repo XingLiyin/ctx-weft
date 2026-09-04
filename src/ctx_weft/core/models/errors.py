@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.discriminators import InterruptReason, TaskErrorCode
+from ctx_weft.core.models.discriminators import InterruptReason, TaskErrorCode
 
 if TYPE_CHECKING:
     from ctx_weft.core.orchestrator.task.disposition import RunOutcome

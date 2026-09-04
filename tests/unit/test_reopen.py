@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from ctx_weft.core.capabilities.control_tools import ControlContext, _collect_reviews
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.domain.models import Task
+from ctx_weft.core.models.task import Task
 
 
 def _task(tid: str, title: str, status: str = "FINISHED",

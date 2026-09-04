@@ -7,7 +7,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ctx_weft.core.runtime import _copy_memory_for_inherit, _latest_prior_root_task
-from ctx_weft.core.domain.models import Agent, NormalTaskSettings, Task
+from ctx_weft.core.models.agent import Agent
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,

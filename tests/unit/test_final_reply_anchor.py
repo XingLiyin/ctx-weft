@@ -22,7 +22,7 @@ import ctx_weft.core.loop.steps.background_observe as bo
 from ctx_weft.core.loop.steps.finalize import (
     FINAL_REPLY_NOTE, FINAL_REPLY_NOTE_UNTITLED, finalize_task_memory,
 )
-from ctx_weft.core.domain.models import NormalTaskSettings, Task
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, ProviderContext,
 )

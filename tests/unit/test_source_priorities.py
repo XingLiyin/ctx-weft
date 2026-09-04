@@ -14,7 +14,9 @@ from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextRequest
 from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.core.assembler.sources.blackboard import BlackboardSource
-from ctx_weft.core.domain.models import Agent, Session, Task
+from ctx_weft.core.models.agent import Agent
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     MemoryEvent,

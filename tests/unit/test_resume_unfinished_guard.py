@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from ctx_weft.core.errors import UnfinishedTasksError
+from ctx_weft.core.models.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
 from ctx_weft.core.orchestrator.lifecycle.session_registry import SessionRegistry

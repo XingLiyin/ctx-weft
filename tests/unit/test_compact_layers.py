@@ -14,7 +14,7 @@ from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, CompactStep
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
-from ctx_weft.core.domain.models import Task
+from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer

@@ -30,7 +30,8 @@ from ctx_weft.core.capabilities.control_tools import (
     PROVIDER_NAME,
     ControlCapabilityProvider,
 )
-from ctx_weft.core.domain.models import Session, Task
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import ImagePart, MemoryAddress, ProviderContext, TextPart
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.hitl import HitlReply

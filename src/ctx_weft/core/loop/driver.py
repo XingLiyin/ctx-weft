@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ctx_weft.core.assembler import AssembledPrompt, ContextAssembler
 from ctx_weft.core.event_envelope import new_event
 from ctx_weft.protocols.events import Event, EventBus, EventType
-from ctx_weft.core.domain.models import Agent, Session, Task
+from ctx_weft.core.models.agent import Agent
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 
 from ctx_weft.protocols import (
     LLMClient, MemoryEvent, MemoryKind, MemoryScope, MemoryProvider, MemoryAddress, ProviderContext,

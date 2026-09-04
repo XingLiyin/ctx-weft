@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from ctx_weft.core.content import content_with_suffix
 
 if TYPE_CHECKING:
-    from ctx_weft.core.domain.models import Task
+    from ctx_weft.core.models.task import Task
     from ctx_weft.protocols import ContentPart
 
 __all__ = [

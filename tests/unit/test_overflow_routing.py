@@ -12,8 +12,8 @@ INTERRUPTED，compat 路径（run_single_task）因为没人接手才把它留�
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.config import RuntimeConfig
-from ctx_weft.core.errors import ContextOverflowError
+from ctx_weft.core.models.config import RuntimeConfig
+from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

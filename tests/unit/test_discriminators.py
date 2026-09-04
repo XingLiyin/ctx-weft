@@ -5,7 +5,7 @@ from __future__ import annotations
 import pathlib
 import re
 
-from ctx_weft.core.discriminators import CancelReason, InterruptReason, TaskErrorCode
+from ctx_weft.core.models.discriminators import CancelReason, InterruptReason, TaskErrorCode
 
 
 def test_enum_values_are_the_wire_strings():
@@ -28,7 +28,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src" / "ctx_weft"
 #: `discriminators.py` 本身整份豁免：那是判别值的定义处，枚举成员的值字面量
 #: 天然就长在这个文件里，不是「散落」。
-_DISCRIMINATORS_FILE = "src/ctx_weft/core/discriminators.py"
+_DISCRIMINATORS_FILE = "src/ctx_weft/core/models/discriminators.py"
 
 #: 守卫抓的是散落的**判别值**。`_loader.py` 里的 `failure_threshold` 是**配置
 #: schema 的字段名**（模板作者面向的 YAML key），与判别值 `CancelReason.
@@ -85,4 +85,4 @@ def test_guard_scans_a_real_tree_not_an_empty_one():
     """
     scanned = list(_SRC.rglob("*.py"))
     assert len(scanned) > 50, f"守卫只扫到 {len(scanned)} 个文件，疑似路径解析错误"
-    assert (_SRC / "core" / "discriminators.py").exists(), "_SRC 没指向真的源码树"
+    assert (_SRC / "core" / "models" / "discriminators.py").exists(), "_SRC 没指向真的源码树"

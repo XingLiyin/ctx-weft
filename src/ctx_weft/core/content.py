@@ -15,7 +15,7 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.core.errors import (
+from ctx_weft.core.models.errors import (
     BlobStoreRequiredError,
     InvalidContentError,
 )

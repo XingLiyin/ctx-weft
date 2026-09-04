@@ -11,7 +11,7 @@ from ctx_weft.core.capabilities.control_tools import (
     delegate_plan,
     delegate_task,
 )
-from ctx_weft.core.domain.models import Task
+from ctx_weft.core.models.task import Task
 
 
 class _FakeTM:

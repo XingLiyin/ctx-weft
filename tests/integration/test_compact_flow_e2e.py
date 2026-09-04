@@ -22,7 +22,9 @@ from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
-from ctx_weft.core.domain.models import LoopGuard, Session, Task
+from ctx_weft.core.models.agent import LoopGuard
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime

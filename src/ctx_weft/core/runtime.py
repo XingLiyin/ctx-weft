@@ -33,7 +33,7 @@ from ctx_weft.core.assembler.sources import (
 )
 from ctx_weft.protocols.capability import Authorizer
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
-from ctx_weft.core.discriminators import CancelReason, InterruptReason
+from ctx_weft.core.models.discriminators import CancelReason, InterruptReason
 from ctx_weft.protocols.events import Event, EventOrigin, EventType
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
@@ -69,11 +69,13 @@ from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.orchestrator.task.queue import QueueEntry
 from ctx_weft.core.orchestrator.task.runner import AgentBinding, TaskRunner, effective_agent_id
-from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
+from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.event_envelope import emit_event
 from ctx_weft.core.registry import ProviderRegistry
-from ctx_weft.core.domain.models import Agent, LoopGuard, NormalTaskSettings, Session, Task
-from ctx_weft.core.errors import (
+from ctx_weft.core.models.agent import Agent, LoopGuard
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import NormalTaskSettings, Task
+from ctx_weft.core.models.errors import (
     AgentNotFound,
     AgentNotRunningError,
     crash_error_code,
@@ -252,7 +254,7 @@ class SessionStartParams:
         reserved_output_tokens: int = 8192,
         resume: bool = False,
     ) -> "SessionStartParams":
-        from ctx_weft.core.domain.models import deserialize_settings
+        from ctx_weft.core.models.task import deserialize_settings
         return cls(
             template_id=template_id,
             user_prompt=user_prompt,
@@ -375,7 +377,7 @@ class CtxWeftRuntime:
         config: "RuntimeConfig | None" = None,
         snapshot_every_n: int = 0,
     ) -> None:
-        from ctx_weft.core.config import RuntimeConfig
+        from ctx_weft.core.models.config import RuntimeConfig
         self._config = config or RuntimeConfig()
         self._llm = llm  # fallback for backward compat / tests
         self.providers = providers or ProviderRegistry()
@@ -1831,9 +1833,10 @@ class CtxWeftRuntime:
 
         from ctx_weft.core.control.converters import session_from_projection
         from ctx_weft.core.control.reducers import rebuild_view
-        from ctx_weft.core.errors import SessionBusyError
+        from ctx_weft.core.models.errors import SessionBusyError
         from ctx_weft.core.loop.steps.compact import CompactStep
-        from ctx_weft.core.domain.models import LoopGuard, NormalTaskSettings, Task
+        from ctx_weft.core.models.agent import LoopGuard
+        from ctx_weft.core.models.task import NormalTaskSettings, Task
         from ctx_weft.protocols import MemoryAddress, ProviderContext
 
         # ── idle-guard: claim the slot synchronously (no await before the claim) ──

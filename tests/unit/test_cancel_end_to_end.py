@@ -33,7 +33,9 @@ from ctx_weft.core.capabilities.control_tools import ControlContext, report_task
 from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.orchestrator.task.runner import AgentBinding
-from ctx_weft.core.domain.models import Agent, LoopGuard, Session, Task
+from ctx_weft.core.models.agent import Agent, LoopGuard
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.events import EventType

@@ -40,7 +40,7 @@ import asyncio
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.config import RuntimeConfig
+from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.runtime import SessionStartParams

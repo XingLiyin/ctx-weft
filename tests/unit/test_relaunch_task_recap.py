@@ -10,7 +10,9 @@ import ctx_weft.core.runtime as rt_mod
 from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
 from ctx_weft.core.orchestrator.model import ResolvedModel
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.domain.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.core.models.agent import Agent
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

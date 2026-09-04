@@ -8,7 +8,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from ctx_weft.core.errors import ContextOverflowError
+from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.core.utils import image_part_count
 
 if TYPE_CHECKING:

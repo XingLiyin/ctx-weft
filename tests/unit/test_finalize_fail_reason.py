@@ -21,7 +21,7 @@ import pytest
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.orchestrator.task.disposition import disposition_for
 from ctx_weft.core.loop.steps.observe import Verdict
-from ctx_weft.core.domain.models import NormalTaskSettings, Task
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,

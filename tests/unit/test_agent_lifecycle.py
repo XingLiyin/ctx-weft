@@ -7,11 +7,11 @@ import pytest
 
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.control.types import AgentView
-from ctx_weft.core.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
+from ctx_weft.core.models.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
 from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager, _AgentRecord
 from ctx_weft.core.orchestrator.lifecycle.agent_state import AgentInput
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.domain.models import Task
+from ctx_weft.core.models.task import Task
 from ctx_weft.protocols.events import (
     EVENT_TYPES,
     L_TIER_EVENT_TYPES,

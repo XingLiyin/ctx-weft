@@ -38,7 +38,7 @@ from ctx_weft.core.capabilities.control_tools import (
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
 )
-from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
+from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.utils import as_utc, content_to_text
 
 _TERMINAL_STATUSES = TERMINAL_TASK_STATUSES  # 词表见 core.domain.status

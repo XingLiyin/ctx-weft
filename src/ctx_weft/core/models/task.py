@@ -1,9 +1,11 @@
-"""领域实体：TaskSettings / Session / Task / Agent / LoopGuard。
+"""Task 与它的 settings。
 
-状态词表（`SessionStatus` / `TaskStatus` / `AgentStatus` 与各自的终态判据）住在
-同包的 `status.py`——本模块只引用它们做注解，不再自己定义。
-`TaskInteractionMode` 留在这里：它是「纯文本 turn 怎么处理」的行为模式，不是
-生命周期状态。
+`TaskSettings` 三种形态里只有 `NormalTaskSettings` 还在运行期产生，另两种保留
+只为反序列化存量事件流（见各自 docstring）。它们与 `Task` 同住一个模块，因为
+`Task.settings` 直接引用这个联合类型，两者一起改、一起读。
+
+`TaskInteractionMode` 也在这里：它是「纯文本 turn 怎么处理」的行为模式，不是生命
+周期状态，故不进 `status.py`。
 """
 
 from __future__ import annotations
@@ -12,8 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from ctx_weft.core.domain.status import SessionStatus, TaskStatus
-from ctx_weft.protocols import LoopConfig, MemoryConfig
+from ctx_weft.core.models.status import TaskStatus
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
@@ -89,56 +90,6 @@ def deserialize_settings(d: dict | None) -> TaskSettings:
 #   "interactive" → pause and wait for a user message (HITL input cold park)
 #   "auto"        → autonomous; the actor must call finish_task to finish
 TaskInteractionMode = Literal["interactive", "auto"]
-
-
-# ── LoopGuard ─────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class LoopGuard:
-    """Agent 运行时计数与测量值（mutable，每轮可能更新）。"""
-
-    turns_used: int = 0
-    context_tokens: int = 0
-    context_message_count: int = 0
-    context_limit: int = 180_000
-    reserved_output_tokens: int = 8192
-
-
-# ── Session ───────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class Session:
-    """会话容器。"""
-
-    id: str
-    # 多模态：保 ref 形态（裁定 2026-08-27）。不拍扁——否则事件流重放不出
-    # 「曾有一张图」；也不内联字节——见 content_to_event_jsonable（dual-blob-store §6）。
-    user_prompt: "str | list[ContentPart]"
-    status: SessionStatus
-    goal: str = ""
-    tenant_id: str = "default"
-    root_agent_id: str | None = None
-
-    token_budget: int = 200_000
-    token_used: int = 0
-    context_limit: int = 180_000
-    reserved_output_tokens: int = 8192
-    max_concurrent_tasks: int = 8
-    max_concurrent_agents: int = 4
-    failure_counter: int = 0
-    failure_threshold: int = 3
-
-    llm_provider: str | None = None
-    llm_model: str | None = None
-
-    config: dict[str, Any] = field(default_factory=dict)
-    runtime_summary: dict[str, Any] = field(default_factory=dict)
-
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-    finished_at: datetime | None = None
 
 
 # ── Task ──────────────────────────────────────────────────────────────────────
@@ -225,29 +176,3 @@ class Task:
     # 排在子 body 之前、反映真实启动顺序（避免 created_at 的兄弟碰撞/乱序）。每次 run 重置。
     started_at: datetime | None = None
     finished_at: datetime | None = None
-
-
-# ── Agent ─────────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class Agent:
-    """Agent 实例。"""
-
-    id: str
-    session_id: str
-    template_id: str
-    tenant_id: str = "default"
-
-    parent_agent_id: str | None = None
-    spawn_depth: int = 0
-
-    loop_guard: LoopGuard = field(default_factory=LoopGuard)
-
-    memory_config: MemoryConfig = field(default_factory=MemoryConfig)
-    loop_config: LoopConfig = field(default_factory=LoopConfig)
-
-    runtime: dict[str, Any] = field(default_factory=dict)
-
-    created_at: datetime | None = None
-    updated_at: datetime | None = None

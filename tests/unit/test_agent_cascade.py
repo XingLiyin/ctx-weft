@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.errors import AgentNotFound, AgentNotRunningError
+from ctx_weft.core.models.errors import AgentNotFound, AgentNotRunningError
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import (
@@ -365,7 +365,8 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     会命中它、触发 `recover_session`（这里桩成必炸），断言失败，复现该缺口。
     """
     from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.core.domain.models import Session, Task
+    from ctx_weft.core.models.session import Session
+    from ctx_weft.core.models.task import Task
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     rt = _rt()

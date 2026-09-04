@@ -6,15 +6,16 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from ctx_weft.core.errors import UnfinishedTasksError
+from ctx_weft.core.models.errors import UnfinishedTasksError
 from ctx_weft.protocols.events import Event, EventBus, EventOrigin, EventType
-from ctx_weft.core.domain.status import TERMINAL_TASK_STATUSES
+from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.event_envelope import emit_event
 from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
 from ctx_weft.core.orchestrator.model import ModelChoice
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.domain.models import Session, Task
-from ctx_weft.core.domain.models import NormalTaskSettings
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
+from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.core.utils import generate_id, now_utc
 from ctx_weft.protocols.context import ProviderContext
 

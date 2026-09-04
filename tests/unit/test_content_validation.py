@@ -3,7 +3,7 @@ import base64
 import pytest
 
 from ctx_weft.core.content import content_has_image, validate_content
-from ctx_weft.core.errors import InvalidContentError
+from ctx_weft.core.models.errors import InvalidContentError
 from ctx_weft.protocols import ImagePart, TextPart
 
 _PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 100).decode()
@@ -128,7 +128,7 @@ def test_content_has_image_with_image_part_is_true():
 async def test_run_single_task_rejects_image_before_persisting_anything_without_event_blob_store():
     from types import SimpleNamespace
 
-    from ctx_weft.core.errors import BlobStoreRequiredError
+    from ctx_weft.core.models.errors import BlobStoreRequiredError
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from ctx_weft.providers.llm.provider import _FixedModelClient
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -248,7 +248,7 @@ async def test_start_session_dict_text_does_not_eagerly_resolve_llm():
     content_has_image 误判为「含图」，但 validate_content 对纯文本零影响、恒
     通过——不再是 RuntimeError("No LLM available...")，_resolve_llm 也从未被
     调用。"""
-    from ctx_weft.core.errors import InvalidContentError
+    from ctx_weft.core.models.errors import InvalidContentError
     from ctx_weft.core.runtime import SessionStartParams
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
@@ -332,7 +332,7 @@ async def test_image_requires_event_blob_store() -> None:
 
     口径统一：事件库恒不含字节、恒可回读，没有例外分支。
     """
-    from ctx_weft.core.errors import BlobStoreRequiredError
+    from ctx_weft.core.models.errors import BlobStoreRequiredError
     from ctx_weft.protocols.events import NullEventBlobStore
 
     with pytest.raises(BlobStoreRequiredError):
@@ -355,7 +355,7 @@ def test_gate_order_format_before_blob() -> None:
 
     畸形内容必须报 InvalidContentError，不能被 blob 门控抢先——那会掩盖真正的问题。
     """
-    from ctx_weft.core.errors import InvalidContentError
+    from ctx_weft.core.models.errors import InvalidContentError
     from ctx_weft.protocols.events import NullEventBlobStore
 
     with pytest.raises(InvalidContentError):

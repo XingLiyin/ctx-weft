@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.orchestrator.task.runner import AgentBinding
-from ctx_weft.core.domain.models import Session, Task
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 
 from tests.unit._stub_runner import StubRunner
 

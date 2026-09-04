@@ -10,7 +10,7 @@ import dataclasses
 
 import pytest
 
-from ctx_weft.core.domain.models import NormalTaskSettings, Task
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.core.orchestrator.task.failure_threshold import TripPlan, plan_threshold_trip
 from ctx_weft.core.utils import now_utc
 

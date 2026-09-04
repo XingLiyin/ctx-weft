@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from ctx_weft.core.discriminators import TaskErrorCode
+from ctx_weft.core.models.discriminators import TaskErrorCode
 
 __all__ = ["Disposition", "RunOutcome", "RunOutcomeKind", "disposition_for"]
 

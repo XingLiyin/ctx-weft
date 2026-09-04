@@ -29,7 +29,8 @@ import pytest
 from ctx_weft.core.control.reducers import fold_hitl_snapshot
 from ctx_weft.core.hitl.registry import PendingHitl
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.domain.models import Session, Task
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.hitl import (
     HITL_FORM_WAIT,

@@ -38,7 +38,7 @@ from ctx_weft.core.loop.steps.finalize import (
     _supersede_final_raw_segment,
     _synthesize_dispatch_pair,
 )
-from ctx_weft.core.domain.models import NormalTaskSettings, Task
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.core.utils import generate_id
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import qualify

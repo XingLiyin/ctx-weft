@@ -22,12 +22,9 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
-from ctx_weft.core.domain.models import (
-    Agent,
-    NormalTaskSettings,
-    Session,
-    Task,
-)
+from ctx_weft.core.models.agent import Agent
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     LLMChunk,
     MemoryEventType,

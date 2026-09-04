@@ -1080,7 +1080,7 @@ async def test_recovery_then_reopen_preserves_text_only_prompt(runtime_with_imag
     **事件载荷**上，而不是 task 的 memory 侧字段。
     """
     from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.core.domain.models import Task
+    from ctx_weft.core.models.task import Task
 
     runtime, _mem_store, _evt_store = runtime_with_images
     sid, tid = "ses_c1", "tsk_c1"
@@ -1114,7 +1114,7 @@ async def test_reopen_falls_back_to_original_prompt_when_jsonable_missing() -> N
     的路径，「字段没填」也不该再伪装成「原始 prompt 是空的」。
     """
     from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.core.domain.models import Task
+    from ctx_weft.core.models.task import Task
 
     bus = _CapturingBus()
     tm = TaskManager(session_id="s_fb", event_bus=bus)
@@ -1147,7 +1147,7 @@ async def test_recovery_degrades_event_refs_when_event_store_unregistered() -> N
     runtime.providers.register_memory_blob_store(mem_store)
     # 刻意不注册 EventBlobStore（NullEventBlobStore.can_externalize is False）
 
-    from ctx_weft.core.domain.models import Task
+    from ctx_weft.core.models.task import Task
 
     evt_ref = f"{BLOB_REF_PREFIX}evt-orphan"
     task = Task(
