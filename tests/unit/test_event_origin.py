@@ -140,10 +140,11 @@ async def test_every_emitted_event_has_nonempty_origin():
     （recognize_intent / background_observe / compact / driver 兜底）、以及
     正常经 StepDriver 每步覆盖 origin 的常规循环内事件。
 
-    **唯一显式豁免**：`SessionWaiting`（`session_manager._emit_session_event`）。
-    该方法按控制方裁定本任务不动——它将在 Task 15/16 随会话状态机整体拆掉，
-    现在给它补 origin 字段是白费工。除这一条外，若还暴露出别的 origin 为空的
-    事件类型，本测试直接失败（不再收窄断言范围）。
+    不设豁免：`SessionWaiting`（`session_manager._emit_session_event`）曾在此临时
+    豁免过（当时它还在发射、且计划随会话状态机一并拆掉），现在 `session_state.py`
+    已随 Task 15/16 整体退役、`SessionWaiting` 停止发射并转入 L 档只读存量
+    （`events.py::L_TIER_EVENT_TYPES`），这条豁免已死，删掉。若还暴露出别的
+    origin 为空的事件类型，本测试直接失败（不收窄断言范围）。
     """
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
@@ -168,8 +169,7 @@ async def test_every_emitted_event_has_nonempty_origin():
     await _poll(lambda: sum(1 for t, _ in seen if t == EventType.RUN_FINISHED) >= 3)
 
     assert seen, "没有采集到任何事件"
-    _EXEMPT = {EventType.SESSION_WAITING}  # Task 15/16 随会话状态机整体删除，见上方 docstring
-    blank = sorted({t for t, o in seen if not o and t not in _EXEMPT})
+    blank = sorted({t for t, o in seen if not o})
     assert blank == [], f"这些事件类型的 origin 为空：{blank}"
 
 

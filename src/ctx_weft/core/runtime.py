@@ -2287,6 +2287,11 @@ class CtxWeftRuntime:
           还会经 ALM 把 agent 状态提前翻成 `running`——task 明明还没真正开跑，见
           `requeue_for_message` 自己的 docstring）。重排成功后补一次 `drain()`——
           `requeue_for_message` 只管入队、不 drain，与 `resume_task` 同一分工。
+
+        非 `_suspended_on_live_children` 分支还会在 `requeue_for_message` 之前先
+        终局该 agent 名下全部未决 HITL（`_cancel_pending_hitl_of`，`cancel_agent`
+        专用方法，这里直接复用）——`waiting_human` 的 agent 收到外部消息本就意味着
+        旧提问不会再有人去应答了，具体理由见下方内联注释。
         """
         tm = self._task_managers.get(session_id)
         if tm is None or tm.session is None:
@@ -2317,6 +2322,22 @@ class CtxWeftRuntime:
                 "written, state left alone so _try_resume_parent still wakes it",
                 target.id)
             return
+        # 收口该 agent 名下未决 HITL（若有，典型是 `waiting_human` 的 agent 被
+        # send_message 打断——旧提问再没人会去回答了）。顺序纪律与 `cancel_agent`/
+        # `_cancel_session_hitl` 一致：必须先于下面 `requeue_for_message` 可能触发的
+        # 状态推进（TaskRequeued -> ALM 让 agent 离开 waiting_human）；不然重启后
+        # `rebuild_hitl` 会把这条「有 HitlOpened 无终局事件」的陈旧提问当未决恢复
+        # 出来，且它会一直挂在 `list_pending_hitl` 里，被 `resume_agent` 的
+        # `_pause_bubble_of` 误当作暂停气泡命中、放行一次冷续跑（那正是 R24 那条
+        # 止损点要防的场景：真问题悬而未决时替用户放行）。
+        #
+        # message 复用 `CancelReason.USER_CANCEL`（`_cancel_pending_hitl_of` 内部
+        # 硬编码这个值，直接复用不新写一套）。语义上不算精确——这里不是用户显式取消
+        # 了那个提问，而是用户发了条新消息、使旧提问失去意义——但 `CancelReason` 目前
+        # 只有 USER_CANCEL / FAILURE_THRESHOLD / PAUSE_ABANDON 三个值，后两个分别专属
+        # 熔断跳闸与暂停弃子链路，语义上更不贴切；USER_CANCEL 是三者里最接近的近似值
+        # （旧提问的作废终究是由用户的动作触发的），故不为此新增枚举值。
+        await self._cancel_pending_hitl_of(agent_id, session_id=session_id)
         # 清旧进展，同 `_inject_user_reply`：新消息意味着有新工作要做，陈旧的
         # outputs/process_report 留着会让 success-guardrail 误判"已经产出过"。
         target.outputs = None

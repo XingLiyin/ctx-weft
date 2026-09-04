@@ -16,11 +16,16 @@ _SRC = _REPO_ROOT / "src" / "ctx_weft"
 
 
 def _referenced_outside_definition(member: str, value: str) -> bool:
+    # 只认 `EventType.<member>` 这一种形式。裸字符串字面量 `f'"{value}"'` 曾经也算数，
+    # 但那半条判据会命中源码里*任何位置*出现的同名带引号字符串——不止发射点，状态机
+    # 把事件名当成返回值字面量写着也会被误判成"有发射点"，造成假阴性。已核实（最终
+    # 审查修复波 #1）：当前全部非 L 档 EventType 成员都能靠 `EventType.<member>` 这一
+    # 种形式判绿，删掉这半条不改变任何既有判定结果。
     for p in _SRC.rglob("*.py"):
         if p.name == "events.py":
             continue
         text = p.read_text(encoding="utf-8")
-        if f"EventType.{member}" in text or f'"{value}"' in text:
+        if f"EventType.{member}" in text:
             return True
     return False
 

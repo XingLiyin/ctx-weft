@@ -16,7 +16,7 @@ from ctx_weft.protocols.hitl import (
     UserTurnDelivery,
 )
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
-from tests.unit.test_runtime_agent_api import _plant
+from tests.unit.test_runtime_agent_api import _plant, _plant_live_task
 
 pytestmark = pytest.mark.asyncio
 
@@ -314,3 +314,119 @@ async def test_resume_agent_unknown_raises():
     rt = _rt()
     with pytest.raises(AgentNotFound):
         await rt.resume_agent("ghost")
+
+
+# ── send_message 收口未决 HITL（最终审查修复波 #1）───────────────────────────
+#
+# 缺口：`send_message` 对 `waiting_human` 的 agent 放行（`assert_can_receive`
+# 允许），但 `_inject_user_turn` 全程不碰 HITL registry——留下一条永久孤儿化的
+# 未决提问：`list_pending_hitl` 一直挂着它；重启后 `rebuild_hitl` 会把它当未决
+# 复活；`resume_agent` 的 `_pause_bubble_of` 还可能命中它、误放行冷续跑（见下面
+# 的组合回归）。
+
+
+async def test_send_message_finalizes_all_pending_hitl_of_target_agent():
+    """钉住核心修复：`send_message` 之后，该 agent 名下不该再有任何未决 HITL。"""
+    rt = _rt()
+    _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
+    req = await _open_ask_user_bubble(rt, agent_id="a1", task_id="t1")
+
+    tid = await rt.send_message("a1", "please continue without answering that")
+
+    assert tid == "t1"
+    assert rt.hitl_registry.get(req.id).resolved is True
+    assert [v for v in rt.list_pending_hitl(session_id="s1") if v.agent_id == "a1"] == []
+
+
+async def test_send_message_does_not_touch_other_agents_pending_hitl():
+    """不误伤：同 session 下另一个 agent 的未决提问不受影响（按 agent_id 过滤）。"""
+    rt = _rt()
+    _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
+    _plant(rt, "a2", None, status="waiting_human", session_id="s1")
+    req_a1 = await _open_ask_user_bubble(rt, agent_id="a1", task_id="t1")
+    req_a2 = await _open_ask_user_bubble(rt, agent_id="a2", task_id="t2")
+
+    await rt.send_message("a1", "hello")
+
+    assert rt.hitl_registry.get(req_a1.id).resolved is True
+    assert rt.hitl_registry.get(req_a2.id).resolved is False
+
+
+async def test_send_message_resolves_stale_pause_bubble_before_new_real_question_arrives(
+    monkeypatch,
+):
+    """组合路径回归（本次修复的核心危害场景）：`pause_agent` 产生的暂停气泡若不被
+    `send_message` 收口，之后一次真实 `ask_user` 再把该 agent 落 `waiting_human`
+    时，`resume_agent` 的 `_pause_bubble_of` 会先命中那条陈旧气泡、误放行一次冷
+    续跑——用一句陈旧的"继续吧"回复顶替了用户还没来得及回答的真问题，正是 R24
+    专门设的止损点（"真问题悬而未决时不能替用户放行"）要防的场景。
+
+    没有本次修复时：第 3 步之后 `stale_bubble` 仍未终局，第 5 步 `resume_agent`
+    会命中它、触发 `recover_session`（这里桩成必炸），断言失败，复现该缺口。
+    """
+    from ctx_weft.core.orchestrator.task_manager import TaskManager
+    from ctx_weft.core.state.models import Session, Task
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+    rt = _rt()
+    rt.providers.register_memory(InMemoryMemoryProvider())
+    _plant(rt, "root", None, status="running", session_id="s1")
+    rt._agent_registry._agents["root"].current_task_id = "t_root"
+    root_tokens = rt._register_run_tokens("s1", "t_root")
+
+    tm = TaskManager(session_id="s1", event_bus=rt._event_bus)
+    session = Session(
+        id="s1", user_prompt="hi", status="RUNNING", tenant_id="default",
+        root_agent_id="root", created_at=None,
+    )
+    tm.set_session(session)
+    task = Task(
+        id="t_root", session_id="s1", status="RUNNING", tenant_id="default",
+        assigned_agent_id="root", creator_agent_id="root",
+    )
+    tm.register_task(task)
+    rt._task_managers["s1"] = tm
+
+    async def _noop_drain():
+        return None
+
+    tm.drain = _noop_drain  # type: ignore[method-assign]
+
+    # 1. 真实暂停信号递送（root 此刻仍是 running，暂停异步生效）。
+    paused = await rt.pause_agent("root")
+    assert paused == ["root"]
+    assert root_tokens.pause.is_paused is True
+
+    # 2. 模拟 run 到下一个检查点真正 park（`act._park_wait_for_user(source=
+    #    "interrupt", ...)` 的产物）——与 test_resume_agent_* 系列同一构造，不跑
+    #    真实 run loop。
+    stale_bubble = await _open_pause_bubble(rt, agent_id="root", task_id="t_root")
+    task.status = "AWAITING_HUMAN"
+    rt._agent_registry._agents["root"].status = "waiting_human"
+
+    # 3. 用户此刻改口，发了条新消息（没有专门回答那条暂停气泡）——这正是本次修复
+    #    要收口的缺口：send_message 必须把这条陈旧气泡终局掉。
+    tid = await rt.send_message("root", "actually let's change the plan")
+    assert tid == "t_root"
+    assert rt.hitl_registry.get(stale_bubble.id).resolved is True, (
+        "send_message 必须终局这条陈旧暂停气泡；否则它会一直挂在 pending 列表里"
+    )
+
+    # 4. task 被重排、agent 回 idle（真正的 running 要等 drain 派发——这里 drain
+    #    是 no-op），之后模拟它再跑一轮、真的问了一个新问题（真实 ask_user），再次
+    #    落 waiting_human。
+    assert rt._agent_registry.status_of("root") == "idle"
+    real_question = await _open_ask_user_bubble(rt, agent_id="root", task_id="t_root")
+    task.status = "AWAITING_HUMAN"
+    rt._agent_registry._agents["root"].status = "waiting_human"
+
+    # 5. 核心断言：resume_agent 不能被那条早该终局的陈旧气泡误导去冷续跑——陈旧
+    #    气泡已经被第 3 步收口，此刻 pending 列表里只有真问题（ToolResultDelivery），
+    #    `_pause_bubble_of` 的类型过滤天然不会命中它。
+    monkeypatch.setattr(rt, "recover_session", _unreachable_recover_session)
+    resumed = await rt.resume_agent("root")
+
+    assert resumed == [], "不该有任何气泡被当成暂停续跑气泡放行"
+    assert rt.hitl_registry.get(real_question.id).resolved is False, (
+        "真实 ask_user 问题必须原样悬着，不能被 resume_agent 顺手答了"
+    )
