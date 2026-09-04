@@ -3,8 +3,8 @@
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.runtime import (
     CtxWeftRuntime,
-    RunHandle,
     SessionStartParams,
+    TurnHandle,
 )
 from ctx_weft.core.models.task import CompactTaskSettings, MetadataFillerTaskSettings, NormalTaskSettings, TaskSettings
 from ctx_weft.protocols.events import EventStore
@@ -13,7 +13,7 @@ from ctx_weft.providers.events import InMemoryEventStore
 __all__ = [
     "CtxWeftRuntime",
     "ProviderRegistry",
-    "RunHandle",
+    "TurnHandle",
     "SessionStartParams",
     "EventStore",
     "InMemoryEventStore",

@@ -170,7 +170,7 @@ async def test_run_single_task_rejects_image_before_persisting_anything_without_
 # "解析不出 LLM" 这件事会从"任务执行时才失败"变成"start_session 里同步失败"，
 # 这是本 Phase 明令禁止的行为变化（纯文本逐字节不变）。这条测试锁死：没有注册
 # 任何 LLM provider、也没有 llm= fallback 时，纯文本 start_session 仍应正常返回
-# RunHandle，而不是同步抛 RuntimeError("No LLM available...")。
+# TurnHandle，而不是同步抛 RuntimeError("No LLM available...")。
 
 
 @pytest.mark.asyncio
@@ -198,7 +198,7 @@ async def test_start_session_plain_text_does_not_eagerly_resolve_llm():
         )
     )
     assert handle is not None, (
-        "纯文本 start_session 应像改动前一样正常返回 RunHandle——"
+        "纯文本 start_session 应像改动前一样正常返回 TurnHandle——"
         "LLM 解析失败应推迟到任务执行时才发生，不应被新增校验提前触发"
     )
 

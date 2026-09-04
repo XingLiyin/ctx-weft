@@ -18,7 +18,7 @@ file stops asserting on it — an accepted consequence of session-state ownershi
 to the host (docs/events-v2.md §2.1.1), not a regression.
 
 API contract (confirmed by reading runtime.py):
-- ``start_session(params)`` → ``RunHandle``; emits SESSION_CREATED so the event store can
+- ``start_session(params)`` → ``TurnHandle``; emits SESSION_CREATED so the event store can
   be queried by ``recover_session``.  ``run_single_task`` is a phase-1 compat shim that
   does NOT emit SESSION_CREATED, making ``recover_session`` fail with "not found".
 - ``handle.wait_for_finish(timeout)`` streams events until RunFinished (or timeout).

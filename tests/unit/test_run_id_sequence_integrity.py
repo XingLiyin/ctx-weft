@@ -24,7 +24,7 @@ from dataclasses import dataclass
 import pytest
 
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
@@ -139,7 +139,18 @@ async def bus_after_recap_run() -> _RecapRun:
     # 只等主 run 的 RunFinished，还要等它们各自的 RunFinished 落地才算收齐。
     await _poll(lambda: sum(1 for e in seen if e.type == EventType.RUN_FINISHED) >= 3)
 
-    return _RecapRun(events=seen, main_run_id=handle.run_id)
+    # `TurnHandle` 不再带 `run_id`（Task 5，句柄改轴成 agent+task）——主 run 的 run_id
+    # 从事件信封里读：`_run_loop` 发 RunStarted 时把 origin 显式钉成 RUNTIME
+    # （runtime.py，`await self._event_bus.emit(make_event(..., origin=EventOrigin.RUNTIME))`），
+    # 而 recap（LOOP_BACKGROUND_OBSERVE）与 recognize_intent（LOOP_RECOGNIZE_INTENT）两条
+    # 孤儿 run 都不做这个覆盖、各自沿用自己快照的 origin。本 fixture 不触发
+    # compact_session（唯一另一处同样显式钉 RUNTIME 的路径），故 origin=RUNTIME 在这里
+    # 无歧义地唯一指向主 run。
+    main_run_started = next(
+        e for e in seen
+        if e.type == EventType.RUN_STARTED and e.origin == EventOrigin.RUNTIME
+    )
+    return _RecapRun(events=seen, main_run_id=main_run_started.run_id)
 
 
 async def test_background_observe_does_not_reuse_main_run_sequence(bus_after_recap_run):

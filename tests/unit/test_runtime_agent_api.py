@@ -240,10 +240,10 @@ async def test_send_message_twice_in_a_row_is_not_rejected_as_busy():
 
 
 async def test_start_session_agent_id_is_addressable_root_agent():
-    """`RunHandle.agent_id`（`start_session` 构造点，runtime.py:1330）契约钉入测试：
+    """`TurnHandle.agent_id`（`start_session` 构造点，runtime.py:1330）契约钉入测试：
     调用方拿到 handle 后可以直接用 `handle.agent_id` 去 `get_agent()` / `send_message`，
     它就是这条 session 可寻址的 root agent（`parent_agent_id is None`），不是空字符串
-    （裁定 R25：`RunHandle` 已有 `agent_id`，不再新增 `root_agent_id` 字段；`session
+    （裁定 R25：`TurnHandle` 已有 `agent_id`，不再新增 `root_agent_id` 字段；`session
     .root_agent_id or ""` 里的 `or ""` 只是防御性写法——`SessionRegistry.create_session`
     / `resume_session` 都保证它非空，这里钉住「非空 + 可查到」这条实际契约）。
     """

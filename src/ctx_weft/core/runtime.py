@@ -271,47 +271,70 @@ class SessionStartParams:
         )
 
 
-# ── RunHandle ─────────────────────────────────────────────────────────────────
+# ── TurnHandle ────────────────────────────────────────────────────────────────
 
 
 @dataclass
-class RunHandle:
-    """Handle to a running or completed session/task.
+class TurnHandle:
+    """一次外部交互的句柄：**agent + task 两个轴**（2026-09-04 spec §3）。
 
-    ``agent_id`` is the **addressable agent** this handle hands the caller together
-    with the session/task ids — the host does not need a separate lookup to find
-    something it can act on right away:
+    四个身份字段恒非空：
 
-    - From ``start_session`` (runtime.py, in-method): the session's **root agent**
-      (``session.root_agent_id``, minted before ``SESSION_CREATED`` — see
-      ``SessionRegistry.create_session`` / ``resume_session``, always non-empty on
-      this path). Pass it straight to ``send_message(agent_id, ...)`` to talk to the
-      session, or to ``get_agent(agent_id)`` for its detail view (``parent_agent_id
-      is None`` — it has no parent).
-    - From ``run_single_task`` (the phase-1 single-task convenience wrapper): the
-      agent that executed that one task, for the same immediate-use purpose.
+    - ``agent_id`` —— 被寻址的 agent。`start_session` 给的是该 session 的 **root
+      agent**（`session.root_agent_id`，在 `SESSION_CREATED` 之前铸好，见
+      `SessionRegistry.create_session` / `resume_session`）；`send_message` 给的是
+      调用方点名的那个；`run_single_task` 给的是执行那一条 task 的 agent。
+      直接传给 `send_message(agent_id, ...)` 或 `get_agent(agent_id)`。
+    - ``task_id`` —— 这次交互落到的 task。
+
+    **不含 ``run_id``。** run 是引擎内部一轮循环的相关性 id，句柄不需要它：
+    `events()` 按 agent + task 订阅，`wait_for_finish()` 等 task 终态。host 若要按轮
+    聚合，每条事件的信封里都带 `run_id`，直接读。放进句柄反而会多一个无法诚实填写的
+    字段——`send_message` 的「注入且不重排」分支在返回那一刻确实还没有新一轮。
     """
 
-    run_id: str
     session_id: str
-    task_id: str
     agent_id: str
+    task_id: str
     template_id: str
     event_bus: EventBus
     _state: LoopState | None = None
 
     async def events(self) -> AsyncIterator[Event]:
         from ctx_weft.protocols.events import EventFilter
-        async for ev in self.event_bus.stream(EventFilter(run_id=self.run_id)):
+        async for ev in self.event_bus.stream(
+            EventFilter(agent_id=self.agent_id, task_id=self.task_id)
+        ):
             yield ev
 
     async def wait_for_finish(self, timeout: float = 300.0) -> LoopState | None:
-        """Block until RunFinished event or timeout."""
+        """阻塞到该 task 进终态或超时。
+
+        判据是 **task 终态事件**，不是 `RunFinished`：一轮 run 结束不等于这条 task
+        结束（还可能有 finalize、还可能被重排再跑一轮）。四个终态事件与
+        `TERMINAL_TASK_STATUSES` 同源，外加 `TaskFinalized`——它是 finalize 阶段的
+        收尾信号，落在 `TaskFinished` 之后，等它才不会返回过早。
+
+        **不直接写 `EventType.TASK_FINISHED` / `TASK_FAILED` / `TASK_CANCELED` 字面量**：
+        `test_task_manager_owns_status.py::test_only_task_manager_emits_task_status_events`
+        是一道全树 AST 守卫——「只有 TaskManager 能发 task 状态事件」，判据不分「发射」
+        与「查表读」，`runtime.py` 不在它的 `_ALLOWED` 白名单里。改从 `reducers.
+        TASK_STATUS_BY_EVENT`（该守卫已放行的文件）按值反查终态三个事件类型，绕开
+        字面量，语义不变——那张表本就是「事件类型 → 任务状态」的单一真源。
+        `TaskFinalized` 不在该表里（它不对应任何任务状态转移），不受此守卫管辖，直接引用。
+        """
+        from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
+        from ctx_weft.protocols.events import EventFilter
+        terminal = {
+            et for et, st in TASK_STATUS_BY_EVENT.items() if st in TERMINAL_TASK_STATUSES
+        }
+        terminal.add(EventType.TASK_FINALIZED)
         try:
             async with asyncio.timeout(timeout):
-                from ctx_weft.protocols.events import EventFilter
-                async for ev in self.event_bus.stream(EventFilter(run_id=self.run_id)):
-                    if ev.type == "RunFinished":
+                async for ev in self.event_bus.stream(
+                    EventFilter(agent_id=self.agent_id, task_id=self.task_id)
+                ):
+                    if ev.type in terminal:
                         return self._state
         except TimeoutError:
             pass
@@ -991,7 +1014,7 @@ class CtxWeftRuntime:
         tenant_id: str = "default",
         llm_account: str | None = None,
         llm_model: str | None = None,
-    ) -> tuple[RunHandle, LoopState]:
+    ) -> tuple[TurnHandle, LoopState]:
         """Phase 1 compat: run a single task end-to-end and await completion."""
         from ctx_weft.core.utils.content import content_to_text
 
@@ -1118,7 +1141,7 @@ class CtxWeftRuntime:
 
     # ── Phase 4 full session ─────────────────────────────────────────────────
 
-    async def start_session(self, params: SessionStartParams) -> RunHandle:
+    async def start_session(self, params: SessionStartParams) -> TurnHandle:
         """Create or resume a session and start execution.
 
         params.resume is False → new session (session_id=None → runtime generates it;
@@ -1190,12 +1213,11 @@ class CtxWeftRuntime:
         # mints it via generate_id("agt") before SESSION_CREATED, and resume_session raises
         # RuntimeError up front if the recovered projection has no root_agent_id (verified
         # 2026-09-03, Task 22). handle.agent_id is therefore always the addressable root
-        # agent (see RunHandle docstring), never "".
-        handle = RunHandle(
-            run_id=run_id,
+        # agent (see TurnHandle docstring), never "".
+        handle = TurnHandle(
             session_id=session.id,
-            task_id=root_task.id,
             agent_id=session.root_agent_id or "",
+            task_id=root_task.id,
             template_id=params.template_id,
             event_bus=self._event_bus,
         )
@@ -1429,7 +1451,7 @@ class CtxWeftRuntime:
         memory: MemoryProvider,
         task_manager: TaskManager,
         default_run_id: str,
-        handle: "RunHandle | None" = None,
+        handle: "TurnHandle | None" = None,
     ) -> "_SessionTaskRunner":
         """构造本 session/run 的两阶段 runner（原闭包工厂的显式化）。
 
@@ -3091,7 +3113,7 @@ class CtxWeftRuntime:
         initial_step: str = "prepare",
         task_manager: "TaskManager | None" = None,
         scope_agent_id: str | None = None,
-    ) -> tuple[LoopState, RunHandle]:
+    ) -> tuple[LoopState, TurnHandle]:
         provider_ctx = self._build_provider_ctx(session, task, agent)
         skill_index = self._skill_provider_index()
         assembler = self._build_assembler(memory, provider_ctx, skill_index)
@@ -3119,11 +3141,10 @@ class CtxWeftRuntime:
         )
         driver = self._build_step_driver(initial_step)
         state = await self._run_loop(state, loop_ctx, driver, run_id, initial_step, task, agent)
-        handle = RunHandle(
-            run_id=run_id,
+        handle = TurnHandle(
             session_id=session.id,
-            task_id=task.id,
             agent_id=agent.id,
+            task_id=task.id,
             template_id=template.id,
             event_bus=self._event_bus,
             _state=state,
@@ -3151,7 +3172,7 @@ class _SessionTaskRunner:
         memory: MemoryProvider,
         task_manager: TaskManager,
         default_run_id: str,
-        handle: "RunHandle | None" = None,
+        handle: "TurnHandle | None" = None,
     ) -> None:
         self._runtime = runtime
         self._session = session
