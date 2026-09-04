@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ctx_weft.core.control.reducers import reduce_events
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.orchestrator.task_manager import _task_payload
+from ctx_weft.core.orchestrator.task_manager import task_payload
 from ctx_weft.core.domain.models import Task
 from ctx_weft.core.utils import generate_id, now_utc
 
@@ -24,7 +24,7 @@ def _ev(seq: int, type_: str, task_id: str | None = None, payload: dict | None =
 def _root_task_created(seq: int) -> Event:
     task = Task(id="t1", session_id="s1", status="ACTIVE", title="")
     return _ev(seq, EventType.TASK_CREATED, task_id="t1",
-               payload=_task_payload(task, user_prompt_jsonable=None))
+               payload=task_payload(task, user_prompt_jsonable=None))
 
 
 def test_recognize_intent_tool_call_fills_task_title_and_description() -> None:

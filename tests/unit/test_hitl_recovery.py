@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from tests.unit._stub_runner import StubRunner
 
@@ -299,7 +300,7 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
 
     # 老 TM：alive，正在跑 X
     old_tm = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
-    old_tm.set_is_current(lambda: True)
+    old_tm.set_hooks(TaskManagerHooks(is_current=lambda: True))
     old_tm._running_tasks.add("tsk_X")
     runtime._task_managers["ses_1"] = old_tm
 
@@ -358,7 +359,8 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
                       root_agent_id="agt", llm_provider="acct1", llm_model="m1", token_budget=0)
     tm = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
     tm.set_session(session)
-    tm.set_is_current(lambda: runtime._task_managers.get("ses_1") is tm)
+    tm.set_hooks(TaskManagerHooks(
+        is_current=lambda: runtime._task_managers.get("ses_1") is tm))
 
     ran: list = []
 

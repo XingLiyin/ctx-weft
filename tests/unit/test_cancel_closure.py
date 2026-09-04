@@ -22,6 +22,7 @@ from ctx_weft.core.loop.steps.finalize import (
     _put_dispatch_result,
     synthesize_cancel_closure,
 )
+from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
@@ -204,7 +205,7 @@ async def test_cancel_all_routes_only_started_tasks_zero_writes_for_unstarted() 
         captured["ids"] = sorted(t.id for t in tasks)
         captured["reason"] = reason
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
     await tm.cancel_all(reason="user_cancel")
 
     assert captured["ids"] == ["a"]  # unstarted "b" never reaches the finalizer
@@ -228,7 +229,7 @@ async def test_cancel_all_routes_started_root_too() -> None:
     async def _finalizer(tasks, reason):
         captured["ids"] = [t.id for t in tasks]
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
     await tm.cancel_all(reason="user_cancel")
 
     assert captured["ids"] == ["root"]
@@ -244,7 +245,7 @@ async def test_inflight_cancel_funnel_signal_time_no_call_terminal_time_one_call
     async def _finalizer(tasks, reason):
         calls.append((sorted(t.id for t in tasks), reason))
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
 
     inflight = Task(
         id="c1", session_id="s1", status="ACTIVE", parent_task_id="root",
@@ -272,7 +273,7 @@ async def test_race_normal_finish_does_not_call_cancel_finalizer() -> None:
     async def _finalizer(tasks, reason):
         calls.append(tasks)
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
 
     task = Task(
         id="c1", session_id="s1", status="ACTIVE", parent_task_id="root",
@@ -296,7 +297,7 @@ async def test_unstarted_task_cancel_never_calls_finalizer() -> None:
     async def _finalizer(tasks, reason):
         calls.append(tasks)
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
 
     task = Task(id="c1", session_id="s1", status="PENDING", parent_task_id="root",
                settings=NormalTaskSettings())

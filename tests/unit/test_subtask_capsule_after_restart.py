@@ -6,7 +6,7 @@
 `[assistant delegate_task]` + 一条「子任务执行如下」的 tool 文本，胶囊不见了。
 
 根因链（本文件两条断言分别钉在链的两端）：
-  `Task.origin_tool_call_id` 是纯瞬态字段——`_task_payload`(TASK_CREATED) 不带它、
+  `Task.origin_tool_call_id` 是纯瞬态字段——`task_payload`(TASK_CREATED) 不带它、
   `TaskView` 不存它、`task_from_projection` 不还原它。于是任何跨进程重启 / 崩溃恢复 /
   冷 resume 之后重建出来的子任务，`origin_tool_call_id is None`：
     - `finalize._close_one` 的 bubble 分支 `if task.parent_task_id and task.origin_tool_call_id
@@ -36,7 +36,7 @@ from ctx_weft.core.loop.steps.finalize import (
     finalize_task_memory,
 )
 from ctx_weft.core.orchestrator.control_capability import DELEGATE_TASK_NAME
-from ctx_weft.core.orchestrator.task_manager import _task_payload
+from ctx_weft.core.orchestrator.task_manager import task_payload
 from ctx_weft.core.domain.models import NormalTaskSettings, Task
 from ctx_weft.core.utils import estimate_tokens, generate_id
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
@@ -113,11 +113,11 @@ def _child_task() -> Task:
 
 
 def _restart_roundtrip(task: Task) -> Task:
-    """生产重启链：Task → _task_payload(TASK_CREATED) → reducer(TaskView) → task_from_projection。"""
+    """生产重启链：Task → task_payload(TASK_CREATED) → reducer(TaskView) → task_from_projection。"""
     ev = Event(
         id=generate_id("evt"), run_id=None, sequence=1, session_id=SESSION,
         type=EventType.TASK_CREATED, timestamp=_ts(3), tenant_id="default",
-        task_id=task.id, payload=_task_payload(task, user_prompt_jsonable=task.user_prompt),
+        task_id=task.id, payload=task_payload(task, user_prompt_jsonable=task.user_prompt),
     )
     view = reduce_events([ev], run_id="run1")
     return task_from_projection(view.tasks[task.id])

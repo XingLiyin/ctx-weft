@@ -6,7 +6,7 @@ from ctx_weft.core.content import content_to_event_jsonable, content_to_jsonable
 from ctx_weft.core.control.converters import task_from_projection
 from ctx_weft.core.control.reducers import reduce_events, serialize_view
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.orchestrator.task_manager import _task_payload
+from ctx_weft.core.orchestrator.task_manager import task_payload
 from ctx_weft.core.domain.models import Task
 from ctx_weft.core.utils import now_utc
 from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
@@ -51,11 +51,11 @@ def _ev(seq: int, type_: str, **payload) -> Event:
 
 # ── 写侧：payload 必须是可 json 化的形态 ──────────────────────────────────
 
-async def test_task_payload_is_json_serializable():
+async def testtask_payload_is_json_serializable():
     """ContentPart 是普通 dataclass，直接进 payload 会让宿主的 json 持久化炸掉。
 
     ``user_prompt_jsonable`` 现在是必传参数（I2）：调用方须先经
-    ``content_to_event_jsonable`` 把 base64 外部化成 ref，_task_payload 不再有
+    ``content_to_event_jsonable`` 把 base64 外部化成 ref，task_payload 不再有
     「退回同步 content_to_jsonable、原样塞回 base64」的隐藏分支——这里传入的正是
     event-jsonable 结果，而不是含字节的 ``content_to_jsonable(_content())``。
     """
@@ -67,20 +67,20 @@ async def test_task_payload_is_json_serializable():
     evt = _StubEventBlobStore()
     user_prompt_jsonable = await content_to_event_jsonable(
         task.user_prompt, event_blob_store=evt, ctx=_ctx())
-    payload = _task_payload(task, user_prompt_jsonable=user_prompt_jsonable)
+    payload = task_payload(task, user_prompt_jsonable=user_prompt_jsonable)
     json.dumps(payload)  # 不抛即通过
     assert payload["task"]["user_prompt"] == user_prompt_jsonable
     # 事件 payload 里绝不能出现原始字节：base64 已被替换成 ref
     assert "ZGF0YQ==" not in json.dumps(payload)
 
 
-def test_task_payload_plain_text_unchanged():
+def testtask_payload_plain_text_unchanged():
     task = Task(
         id="tsk_1", session_id="s1", status="ACTIVE", tenant_id="default",
         assigned_agent_id="a1", creator_agent_id="a1",
         title="T", description="d", user_prompt="纯文本", created_at=now_utc(),
     )
-    payload = _task_payload(task, user_prompt_jsonable="纯文本")
+    payload = task_payload(task, user_prompt_jsonable="纯文本")
     assert payload["task"]["user_prompt"] == "纯文本"
 
 

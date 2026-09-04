@@ -63,7 +63,8 @@ from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvi
 from ctx_weft.core.orchestrator.agent_lifecycle_manager import AgentLifecycleManager, ModelChoice, ResolvedModel
 from ctx_weft.core.orchestrator.agent_state import AgentInput
 from ctx_weft.core.orchestrator.session_registry import SessionRegistry
-from ctx_weft.core.orchestrator.task_manager import TaskManager, _task_payload
+from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task_manager import TaskManager, task_payload
 from ctx_weft.core.orchestrator.task_disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.orchestrator.task_runner import AgentBinding, TaskRunner, effective_agent_id
@@ -1068,7 +1069,6 @@ class CtxWeftRuntime:
         # compat 路径也走同一条会话状态链：这里不经 _register_and_drain（没有队列、
         # 没有 drain），但 run 结束后一样要把「我这边什么情况」报出去，否则 outage /
         # park 的会话状态无人落定（判据只有一条：TM 的聚合信号）。
-        task_manager.set_session_registry(self._session_registry)
         self._session_registry.register_session(sid, tenant_id=tenant_id)
 
         for p in self.providers.get_capability_providers():
@@ -1231,37 +1231,9 @@ class CtxWeftRuntime:
 
         self._task_managers[session.id] = task_manager
 
-        # 归属权谓词：多轮对话里每次 resume 都新建 TM 并覆盖此映射。旧 TM 的收尾若迟到
-        # （被其慢的 background observe 拖住），必须认出自己已被顶替、变 no-op，否则会
-        # 冲掉新一轮的会话状态（详见 TaskManager._is_current）。
-        task_manager.set_is_current(
-            lambda tm=task_manager: self._task_managers.get(session.id) is tm
-        )
-        # 会话状态的持有者。TM 只往它发事实（announce_queue_state 的三条聚合信号）+
-        # 透传 cancel；「有人在等」不再靠注入的 pending-HITL 谓词，而是由 AWAITING_HUMAN
-        # 的任务表达（docs/events-v2.md §2.1.1）。
-        task_manager.set_session_registry(self._session_registry)
         # 纳入 SM 管理。setdefault 语义，重入安全：多轮对话/恢复重建都会走到这里，
         # 已有状态不被重置（新一轮的显式 RUNNING 由 resume_session 负责）。
         self._session_registry.register_session(session.id, tenant_id=session.tenant_id)
-        # 熔断真终结（Task 10）三处注入：cancel 挂起 HITL / 协作取消在途 run / memory 闭合。
-        # 均 best-effort——trip 序列本身不因这三者缺失或异常而崩溃（TaskManager 侧已兜底）。
-        task_manager.set_cancel_pending_hitl(
-            lambda sid=session.id: self._cancel_session_hitl(
-                sid, message=CancelReason.FAILURE_THRESHOLD)
-        )
-        task_manager.set_cancel_inflight(
-            lambda tid, sid=session.id: self._cancel_run_token(sid, tid)
-        )
-        task_manager.set_threshold_finalizer(
-            lambda root, ack_tasks, failures, sess=session: self._finalize_threshold_memory(
-                sess, root, ack_tasks, failures)
-        )
-        # 统一取消胶囊闭合（Task 14）：cancel_all / 熔断清场（已启动挂起排队） / 在途协作取消
-        # funnel 三处调用点共用同一注入点。
-        task_manager.set_cancel_finalizer(
-            lambda tasks, reason, sess=session: self._finalize_cancel_memory(sess, tasks, reason)
-        )
 
         async def _on_done() -> None:
             # compare-and-clear：仅当本 TM 仍是当前 owner 才回收，避免顶替它的新 TM 被误释放。
@@ -1276,8 +1248,26 @@ class CtxWeftRuntime:
                 self._pause_claimed.discard(session.id)
                 task_manager.set_pause_abandon(False)
 
-        task_manager.set_session_done_callback(_on_done)
-        task_manager.set_session_idle_callback(_on_idle)
+        # 一次性接线：7 个回调整体装好，装不出半接线的中间态（见 orchestrator/hooks.py）。
+        task_manager.set_hooks(TaskManagerHooks(
+            # 归属权谓词：多轮对话里每次 resume 都新建 TM 并覆盖 _task_managers。旧 TM 的
+            # 收尾若迟到（被其慢的 background observe 拖住），必须认出自己已被顶替、变
+            # no-op，否则会冲掉新一轮的会话状态。
+            is_current=lambda tm=task_manager: self._task_managers.get(session.id) is tm,
+            # 熔断真终结的三处注入：cancel 挂起 HITL / 协作取消在途 run / memory 闭合。
+            # 均 best-effort——trip 序列本身不因缺失或异常而崩溃（TaskManager 侧已兜底）。
+            cancel_pending_hitl=lambda sid=session.id: self._cancel_session_hitl(
+                sid, message=CancelReason.FAILURE_THRESHOLD),
+            cancel_inflight=lambda tid, sid=session.id: self._cancel_run_token(sid, tid),
+            threshold_finalizer=lambda root, ack_tasks, failures, sess=session: (
+                self._finalize_threshold_memory(sess, root, ack_tasks, failures)),
+            # 统一取消胶囊闭合：cancel_all / 熔断清场（已启动挂起排队）/ 在途协作取消
+            # funnel 三处调用点共用同一注入点。
+            cancel_finalizer=lambda tasks, reason, sess=session: (
+                self._finalize_cancel_memory(sess, tasks, reason)),
+            on_session_done=_on_done,
+            on_session_idle=_on_idle,
+        ))
 
         asyncio.create_task(task_manager.drain())
 

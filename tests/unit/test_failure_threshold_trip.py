@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from ctx_weft.protocols.events import EventType
+from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.orchestrator.task_queue import QueueEntry
 from ctx_weft.core.domain.models import Session, Task
@@ -215,7 +216,7 @@ async def test_ack_tasks_and_failures_passed_to_finalizer() -> None:
         captured["ack_ids"] = sorted(t.id for t in ack_tasks)
         captured["failures"] = failures
 
-    tm.set_threshold_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(threshold_finalizer=_finalizer))
     await _fail_n_times(tm, ["d1", "d2", "d3"])
 
     assert captured["root"] is root
@@ -250,7 +251,7 @@ async def test_suspended_started_task_routed_to_cancel_finalizer() -> None:
         captured["ids"] = sorted(t.id for t in tasks)
         captured["reason"] = reason
 
-    tm.set_cancel_finalizer(_cancel_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_cancel_finalizer))
     await _fail_n_times(tm, ["d1", "d2", "d3"])
 
     assert captured["ids"] == ["framed_susp"]
@@ -278,7 +279,7 @@ async def test_cancel_inflight_called_for_inflight_non_root_and_root() -> None:
         called.append(tid)
         return True
 
-    tm.set_cancel_inflight(_cancel_inflight)
+    tm.set_hooks(TaskManagerHooks(cancel_inflight=_cancel_inflight))
 
     await _fail_n_times(tm, ["c1", "c2", "c3"])
 
@@ -328,7 +329,7 @@ async def test_cancel_pending_hitl_invoked_before_terminal_status() -> None:
     async def _cancel_hitl():
         call_order.append("cancel_hitl")
 
-    tm.set_cancel_pending_hitl(_cancel_hitl)
+    tm.set_hooks(TaskManagerHooks(cancel_pending_hitl=_cancel_hitl))
     orig_emit = tm._emit
 
     async def _tracking_emit(event_type, task_id=None, payload=None):

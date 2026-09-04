@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,15 @@ class TaskQueue:
     def unmark_running(self, task_id: str) -> None:
         """Remove from running set without marking as complete/failed. Used for retries."""
         self._running.discard(task_id)
+
+    def seed_completed(self, task_ids: "Iterable[str]") -> None:
+        """恢复期批量装填「已终态」集合。
+
+        `TaskManager.restore` 此前直接写 `self._completed`——那是穿透私有。与
+        `mark_complete` 的区别：这里不刷新已排队条目的 `blocked_by`，因为 restore 的
+        调用顺序是**先装填、后 push**，而 `push` 首行就会摘掉已完成依赖，无需重复扫描。
+        """
+        self._completed.update(task_ids)
 
     def unmark_completed(self, task_id: str) -> None:
         """Remove from completed set so a reopened task can be scheduled again."""

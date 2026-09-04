@@ -15,6 +15,7 @@ from ctx_weft.core.content import content_with_suffix
 from ctx_weft.core.discriminators import CancelReason, InterruptReason, TaskErrorCode
 from ctx_weft.core.domain.status import PARKED_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ctx_weft.core.event_envelope import emit_event
+from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
 from ctx_weft.core.errors import crash_error_code, crash_run_outcome
 from ctx_weft.core.orchestrator.task_disposition import (
     RunOutcome,
@@ -35,7 +36,6 @@ from ctx_weft.core.utils import as_utc, now_utc
 from ctx_weft.protocols.events import EventOrigin, EventType
 
 if TYPE_CHECKING:
-    from ctx_weft.core.orchestrator.session_registry import SessionRegistry
     from ctx_weft.protocols.events import EventBus
 
 logger = logging.getLogger(__name__)
@@ -90,16 +90,12 @@ class TaskManager:
         self._lock = asyncio.Lock()
         self._session: Session | None = None  # 注入后供 failure_counter 维护使用
         self._event_bus: "EventBus | None" = event_bus
-        self._on_session_done: Callable[[], Coroutine[Any, Any, None]] | None = None
-        self._on_session_idle: Callable[[], Coroutine[Any, Any, None]] | None = None
         self._background_asyncio_tasks: set[asyncio.Task] = set()
-        # 会话状态的持有者。TM 对它**只查询、只发事实**；唯一的方法调用是 `cancel`，
-        # 那是外部命令的透传，不是 TM 在驱动 SM（docs/events-v2.md §2.1.1）。
-        self._session_registry: "SessionRegistry | None" = None
+        #: 一次性接线的 7 个回调（见 hooks.py）。整体替换，不逐字段合并。
+        self._hooks = TaskManagerHooks()
         # 归属权谓词：runtime 注入，返回本 TM 是否仍是该 session 的当前 owner。
         # None = 不受管（永远视为 current，保持旧行为）。被同 session 上更新的 TM
         # 顶替后返回 False → 迟到的收尾变 no-op（不发 SessionFinished、不 _release_session）。
-        self._is_current: Callable[[], bool] | None = None
         # pause 弃子窗口标记（runtime.pause_session 置位、_on_idle/_release 复位）：
         # 置位期间任务取消不改 session 状态、run 收尾 staged 直接丢弃。
         self._pause_abandon = False
@@ -111,16 +107,8 @@ class TaskManager:
         self._recent_failures: list[tuple[str, str]] = []
         # 三个 trip 序列的注入点（接线方式镜像 set_is_current）：None = 该副作用跳过，
         # trip 序列本身永远不因缺注入而崩溃。runtime 侧实现见 Task 10。
-        self._cancel_pending_hitl: Callable[[], Coroutine[Any, Any, None]] | None = None
-        self._cancel_inflight: Callable[[str], bool] | None = None
-        self._threshold_finalizer: (
-            Callable[["Task | None", list[Task], list[tuple[str, str]]], Coroutine[Any, Any, None]] | None
-        ) = None
         # 统一取消胶囊闭合（Task 14）：cancel_all / 熔断清场（已启动挂起排队） / 在途协作取消 funnel
         # 三处调用点共用同一注入点。None-tolerant：缺注入时三处调用点自身各自跳过、不崩溃。
-        self._cancel_finalizer: (
-            Callable[[list[Task], str], Coroutine[Any, Any, None]] | None
-        ) = None
         # 事件侧 blob store 的注入点（set_event_blob_store / _event_blob_store /
         # _event_ctx）已删除：TASK_CREATED 自 Task 3 起、TASK_REQUEUED 自本任务
         # （blob-store 解耦 Task 5）起都改由调用方/task 上携带的现成 event jsonable
@@ -135,53 +123,9 @@ class TaskManager:
     def set_runner(self, runner: TaskRunner) -> None:
         self._runner = runner
 
-    def set_is_current(self, predicate: "Callable[[], bool]") -> None:
-        """注入归属权谓词：本 TM 是否仍是该 session 的当前 owner（见 `_is_current`）。"""
-        self._is_current = predicate
-
-    def set_session_registry(self, sm: "SessionRegistry") -> None:
-        """注入会话状态的持有者。TM 对它**只查询、只发事实**；唯一的方法调用是
-        `cancel`，那是外部命令的透传，不是 TM 在驱动 SM。"""
-        self._session_registry = sm
-
-    def set_cancel_pending_hitl(self, cb: Callable[[], Coroutine[Any, Any, None]]) -> None:
-        """注入"取消该 session 所有未决 pending HITL"回调（runtime 侧遍历 HitlService.cancel）。
-
-        trip 序列第 3 步 best-effort 调用；HitlCancelled 需全部先于会话终态发出。
-        """
-        self._cancel_pending_hitl = cb
-
-    def set_cancel_inflight(self, cb: Callable[[str], bool]) -> None:
-        """注入"对指定在途 task 发协作取消信号"回调（runtime 侧查 _run_tokens 发 cancel）。
-
-        只发信号不代表任务立即终结——该任务的 TASK_CANCELED（非 root）由 run 结束后的
-        `apply_run_outcome` 发（Task 4 之前是 _run_loop 退出路径）；root 则由 trip 序列
-        自己先标 FAILED（顺序见 _trip_failure_threshold）。
-        """
-        self._cancel_inflight = cb
-
-    def set_threshold_finalizer(
-        self,
-        cb: Callable[["Task | None", list[Task], list[tuple[str, str]]], Coroutine[Any, Any, None]],
-    ) -> None:
-        """注入熔断收尾回调：(root_we_failed_and_started|None, ack_tasks, failures) -> None。
-
-        trip 序列第 7 步内联 await（不是后台甩），保证 memory 落盘发生在 SESSION_FINISHED
-        （SSE 关闭）之前；异常只记日志不阻断终结。
-        """
-        self._threshold_finalizer = cb
-
-    def set_cancel_finalizer(
-        self, cb: Callable[[list[Task], str], Coroutine[Any, Any, None]],
-    ) -> None:
-        """注入统一取消胶囊闭合回调：(tasks, reason) -> None（Task 14）。
-
-        调用点：`cancel_all`（reason=`CancelReason.USER_CANCEL`）、
-        `_trip_failure_threshold` 清场步骤对已启动的挂起/排队任务
-        （reason=`CancelReason.FAILURE_THRESHOLD`）、`on_task_finished` 的 CANCELED
-        分支（在途协作取消 funnel，reason 取 task.error 回退通用文案）。异常记日志不阻断。
-        """
-        self._cancel_finalizer = cb
+    def set_hooks(self, hooks: TaskManagerHooks) -> None:
+        """一次性装好全部回调。**整体替换**，不逐字段合并（见 TaskManagerHooks）。"""
+        self._hooks = hooks
 
     def set_session(self, session: Session) -> None:
         """注入 Session 对象，供 failure_counter 维护使用。"""
@@ -191,23 +135,6 @@ class TaskManager:
     def session(self) -> "Session | None":
         """注入的 Session 对象（复用路径据它读/写本轮 llm 参数——model=会话状态）。"""
         return self._session
-
-    def set_session_done_callback(self, cb: Callable[[], Coroutine[Any, Any, None]]) -> None:
-        """session 真正结束（所有任务处理完、无重试待执行）时调用的回调。
-
-        幂等由调用方承担（runtime 侧 `_release_session` 本就幂等）：会话「已终态吸收
-        一切」的闩锁现在长在状态机里，TM 不再自持一份。
-        """
-        self._on_session_done = cb
-
-    def set_session_idle_callback(self, cb: Callable[[], Coroutine[Any, Any, None]]) -> None:
-        """session 进入**空闲挂起**（有任务 park/suspend 且无其它在跑任务、非终结）时调用的回调。
-
-        区别于 `_on_session_done`：那是终结回调（FINISHED/FAILED/CANCELED，回收全部 per-session 状态）；
-        这是「会话暂停、待续接」的信号，供 runtime 回收按 run 计、续跑会重建的控制信号（pause/cancel token）。
-        可多次触发（每次 park 一次）；回调须幂等。
-        """
-        self._on_session_idle = cb
 
     def register_task(self, task: Task) -> None:
         self._tasks[task.id] = task
@@ -243,8 +170,7 @@ class TaskManager:
                 self._parent_map[t.id] = t.parent_task_id
                 self._children_of.setdefault(t.parent_task_id, set()).add(t.id)
 
-        for tid in terminal_ids:
-            self._queue._completed.add(tid)
+        self._queue.seed_completed(terminal_ids)
 
         for t in all_tasks:
             if t.status in TERMINAL_TASK_STATUSES:
@@ -330,7 +256,7 @@ class TaskManager:
         task.user_prompt_event_jsonable = user_prompt_jsonable
         await self._emit(
             EventType.TASK_CREATED, task_id=task.id,
-            payload=_task_payload(task, user_prompt_jsonable=user_prompt_jsonable),
+            payload=task_payload(task, user_prompt_jsonable=user_prompt_jsonable),
         )
 
     def stage_task(
@@ -412,7 +338,7 @@ class TaskManager:
             # 被同一 session 上更新的 TM 顶替（recover_session 覆盖了 _task_managers 映射）→
             # 立即停止派发，无声（不发事件、不改状态）。避免重叠 resume 下两套 drain 并行派发
             # 同一批任务；在跑协程照旧靠 _fire_session_done 处的 _is_current 收敛（spec/07 §9）。
-            if self._is_current is not None and not self._is_current():
+            if self._hooks.is_current is not None and not self._hooks.is_current():
                 return
             async with self._lock:
                 if len(self._running_tasks) >= self._max_concurrent:
@@ -551,9 +477,7 @@ class TaskManager:
             # 三种非终态停顿共用这一条出口：SUSPENDED（等子任务）、AWAITING_HUMAN
             # （HitlPark，等人应答）、INTERRUPTED（LLM 故障 / run 崩溃，待 /resume 由 restore 重排）。
             async with self._lock:
-                self._running_tasks.discard(task_id)
-                self._running_agents.pop(task_id, None)
-                self._queue.unmark_running(task_id)
+                self._release_slot(task_id)
             await self.drain()
             # 整个会话因 park/suspend 进入空闲（无在跑任务、无待派子任务）→ 通知 runtime 回收
             # 按 run 计的控制信号。注意是 is_done（而非"本 task 挂起"）：父等子时子仍在跑，
@@ -564,9 +488,7 @@ class TaskManager:
         if status == "PENDING":
             # observer 判 retry（本轮未完成，含机械退出）或崩溃后可重试：重新入队。
             async with self._lock:
-                self._running_tasks.discard(task_id)
-                self._running_agents.pop(task_id, None)
-                self._queue.unmark_running(task_id)
+                self._release_slot(task_id)
                 self._queue.push(QueueEntry(task_id=task_id, session_id=self._session_id))
             await self.drain()
             return
@@ -774,9 +696,7 @@ class TaskManager:
             # `_on_session_idle` 回调不是幂等收尾专用的 `_on_session_done`，不该在
             # 这里替它多按一次。
             async with self._lock:
-                self._running_tasks.discard(task_id)
-                self._running_agents.pop(task_id, None)
-                self._queue.unmark_running(task_id)
+                self._release_slot(task_id)
             await self.drain()
             return
         # 不可重试的错误（如认证失败 / 上下文溢出），不重试、直接挂起等恢复
@@ -797,9 +717,7 @@ class TaskManager:
                 task_id, task.retry_count, task.max_retries, error,
             )
             async with self._lock:
-                self._running_tasks.discard(task_id)
-                self._running_agents.pop(task_id, None)
-                self._queue.unmark_running(task_id)  # 清除 queue._running，使 pop() 能再次调度
+                self._release_slot(task_id)
                 entry = QueueEntry(task_id=task_id, session_id=self._session_id)
                 self._queue.push(entry)
             # 重排落事件：使投影从 ACTIVE 回到 PENDING；进程在重试间隙崩溃时
@@ -834,9 +752,7 @@ class TaskManager:
             task.error = error
             task.error_code = error_code
         async with self._lock:
-            self._running_tasks.discard(task_id)
-            self._running_agents.pop(task_id, None)
-            self._queue.unmark_running(task_id)
+            self._release_slot(task_id)
         # reason 只作**溯源**，不作路由——判据是 TASK_INTERRUPTED 这个类型本身。
         # 值本身是对外契约的一部分（host 升级须知的映射表按 reason 分流展示文案），
         # 故按调用方透传的 `reason` 原样发出，不再在这里硬编码单一来源——
@@ -858,8 +774,7 @@ class TaskManager:
 
     async def on_task_finished(self, task_id: str, status: TaskStatus) -> None:
         async with self._lock:
-            self._running_tasks.discard(task_id)
-            self._running_agents.pop(task_id, None)
+            self._clear_running(task_id)
             if status == "FAILED":
                 self._queue.mark_failed(task_id)
             else:
@@ -880,9 +795,9 @@ class TaskManager:
         # 空）不会有派发框/own scope 可闭，交由 synthesize_cancel_closure 的 find-only 兜底判定
         # 即可，这里额外用 started_at 提前短路只是省一次无意义调用。
         if status == "CANCELED" and task is not None and task.started_at \
-                and self._cancel_finalizer is not None:
+                and self._hooks.cancel_finalizer is not None:
             try:
-                await self._cancel_finalizer([task], task.error or "cancelled")
+                await self._hooks.cancel_finalizer([task], task.error or "cancelled")
             except Exception:
                 logger.exception("TaskManager: cancel_finalizer callback failed for %s", task_id)
 
@@ -924,7 +839,7 @@ class TaskManager:
             # 被顶替旧 TM 的迟到收尾不得代表会话发信号——新 owner 的状态才是真相。
             # runtime 侧回调本就 compare-and-check，这里连事件也一并静默，避免污染
             # 事件流的 host 显示与重放。
-            if self._is_current is not None and not self._is_current():
+            if self._hooks.is_current is not None and not self._hooks.is_current():
                 return
             # 「还有人在等」不再靠注入的 pending-HITL 谓词判断，而是由 AWAITING_HUMAN 的
             # 任务表达；「断了」由 INTERRUPTED 的任务表达。两者都在 announce_queue_state
@@ -963,9 +878,9 @@ class TaskManager:
 
         # 3) 取消该 session 所有未决 pending HITL（best-effort）：HitlCancelled 须全部
         #    先于会话终态发出，防止 host 投影翻态早于 hitl 侧收尾。
-        if self._cancel_pending_hitl is not None:
+        if self._hooks.cancel_pending_hitl is not None:
             try:
-                await self._cancel_pending_hitl()
+                await self._hooks.cancel_pending_hitl()
             except Exception:
                 logger.exception("TaskManager: cancel_pending_hitl callback failed")
 
@@ -1021,9 +936,9 @@ class TaskManager:
                 if t.started_at:
                     cancel_now_tasks.append(t)
             elif t.id in self._running_tasks:
-                if self._cancel_inflight is not None:
+                if self._hooks.cancel_inflight is not None:
                     try:
-                        self._cancel_inflight(t.id)
+                        self._hooks.cancel_inflight(t.id)
                     except Exception:
                         logger.exception("TaskManager: cancel_inflight callback failed for %s", t.id)
                 if _has_dispatch_frame(t):
@@ -1031,9 +946,9 @@ class TaskManager:
 
         # 5.5) 立即整对闭合已终态的取消任务（清队 + 挂起，均已启动）——替代 Task 10 里对这批
         #    任务的 ack-only 处理；在途任务保持 eager ack（上面 ack_tasks）+ funnel finish 对。
-        if cancel_now_tasks and self._cancel_finalizer is not None:
+        if cancel_now_tasks and self._hooks.cancel_finalizer is not None:
             try:
-                await self._cancel_finalizer(cancel_now_tasks, CancelReason.FAILURE_THRESHOLD)
+                await self._hooks.cancel_finalizer(cancel_now_tasks, CancelReason.FAILURE_THRESHOLD)
             except Exception:
                 logger.exception("TaskManager: cancel_finalizer callback failed (threshold cleanup)")
 
@@ -1059,17 +974,17 @@ class TaskManager:
             })
             if t.started_at is not None:
                 root_we_failed_and_started = t
-            if t.id in self._running_tasks and self._cancel_inflight is not None:
+            if t.id in self._running_tasks and self._hooks.cancel_inflight is not None:
                 try:
-                    self._cancel_inflight(t.id)
+                    self._hooks.cancel_inflight(t.id)
                 except Exception:
                     logger.exception("TaskManager: cancel_inflight callback failed for root %s", t.id)
 
         # 7) finalizer：内联 await（不是后台甩），保证 memory 落盘先于 SESSION_FINISHED（SSE 关闭）；
         #    异常只记日志不阻断终结。
-        if self._threshold_finalizer is not None:
+        if self._hooks.threshold_finalizer is not None:
             try:
-                await self._threshold_finalizer(
+                await self._hooks.threshold_finalizer(
                     root_we_failed_and_started, ack_tasks, list(self._recent_failures),
                 )
             except Exception:
@@ -1106,13 +1021,30 @@ class TaskManager:
                 if t.started_at:
                     to_close.append(t)
             await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": reason})
-        if to_close and self._cancel_finalizer is not None:
+        if to_close and self._hooks.cancel_finalizer is not None:
             try:
-                await self._cancel_finalizer(to_close, reason or CancelReason.USER_CANCEL)
+                await self._hooks.cancel_finalizer(to_close, reason or CancelReason.USER_CANCEL)
             except Exception:
                 logger.exception("TaskManager: cancel_finalizer callback failed (cancel_all)")
         if self._session is not None:
             self._session.status = "CANCELED"
+
+    def _clear_running(self, task_id: str) -> None:
+        """从「在跑」登记里摘掉这个 task。**调用方须已持 `self._lock`。**"""
+        self._running_tasks.discard(task_id)
+        self._running_agents.pop(task_id, None)
+
+    def _release_slot(self, task_id: str) -> None:
+        """归还一个派发槽位：清在跑登记 + 解除队列的 running 标记。
+
+        **调用方须已持 `self._lock`。** 五个非终态出口（park / 重排 / 装配失败的终态
+        守卫 / 装配失败的重试 / INTERRUPTED 挂起）逐字共用这三行——不摘干净会话就永久
+        少一个并发槽位。终态出口（`on_task_finished`）不走这里：它的队列侧动作是
+        `mark_complete` / `mark_failed`（两者内部已 `_running.discard`），只需
+        `_clear_running`。
+        """
+        self._clear_running(task_id)
+        self._queue.unmark_running(task_id)
 
     def _agent_id_of(self, task_id: str) -> str | None:
         """先看正在跑的登记，再回落到 task 自己的 assigned_agent_id。"""
@@ -1168,7 +1100,7 @@ class TaskManager:
         旧 TM 迟到的 park / 崩溃收尾若还报一句，就会把**新一轮正在跑的会话**
         翻成 WAITING / INTERRUPTED。守卫贴着发射点，新增调用点不必各自记得加。
         """
-        if self._is_current is not None and not self._is_current():
+        if self._hooks.is_current is not None and not self._hooks.is_current():
             return                                   # 已被顶替：新 owner 的状态才是真相
         if self._queue.has_pending() or self._running_tasks:
             return                                   # 还有活干，没什么好报的
@@ -1211,9 +1143,9 @@ class TaskManager:
     async def _fire_session_idle(self) -> None:
         """会话空闲挂起（park/suspend，非终结）：报队列状态 + 通知 runtime 回收 per-run 控制信号。"""
         await self.announce_queue_state()
-        if self._on_session_idle is not None:
+        if self._hooks.on_session_idle is not None:
             try:
-                await self._on_session_idle()
+                await self._hooks.on_session_idle()
             except Exception:
                 logger.exception("TaskManager: session_idle callback failed")
 
@@ -1230,14 +1162,14 @@ class TaskManager:
         # background observe 拖久了，用户已开启下一轮、新 TM 接管了 session）。此时本 TM
         # 已非 owner → 收尾变 no-op，绝不发 SessionFinished、绝不触发 _release_session，
         # 否则会冲掉新一轮的 HITL 挂起态、把任务卡在 ACTIVE。
-        if self._is_current is not None and not self._is_current():
+        if self._hooks.is_current is not None and not self._hooks.is_current():
             logger.info("TaskManager(%s): superseded during session-done; skip announce + callback",
                         self._session_id)
             return
         await self.announce_queue_state()
-        if self._on_session_done is not None:
+        if self._hooks.on_session_done is not None:
             try:
-                await self._on_session_done()
+                await self._hooks.on_session_done()
             except Exception:
                 logger.exception("TaskManager: session_done callback failed")
 
@@ -1410,7 +1342,7 @@ class TaskManager:
         终结之后 runtime 的 `_release_session` 会把它从 `_task_managers` 摘掉，
         `_is_current` 随即为 False——不再另存一份「已收尾」的闩。
         """
-        return self._is_current is None or self._is_current()
+        return self._hooks.is_current is None or self._hooks.is_current()
 
     def running_task_ids(self) -> set[str]:
         """当前正在执行（已派发、_run_task 未返回）的 task id 集合。"""
@@ -1515,7 +1447,7 @@ def _outputs_to_text(outputs: Any) -> str:
     return ""
 
 
-def _task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None") -> dict:
+def task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None") -> dict:
     """TaskCreated 事件的 payload，供 sessions.py translate_event 构建前端 task 对象。
 
     ``user_prompt_jsonable``：`push_task` 在 `await self._emit(...)` 之前备好的

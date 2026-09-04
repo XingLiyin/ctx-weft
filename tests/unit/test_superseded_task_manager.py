@@ -17,6 +17,7 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.domain.models import NormalTaskSettings, Session, Task
 from ctx_weft.providers.llm.mock import MockLLMAdapter
@@ -65,10 +66,9 @@ async def test_superseded_tm_skips_finish_when_replaced_during_gather() -> None:
     async def _on_done():
         done_called.append(True)
 
-    tm.set_session_done_callback(_on_done)
-
     current = {"v": True}
-    tm.set_is_current(lambda: current["v"])
+    tm.set_hooks(TaskManagerHooks(
+        on_session_done=_on_done, is_current=lambda: current["v"]))
 
     # 后台任务：卡住 gather 直到我们放行（模拟慢的 background observe）
     release = asyncio.Event()
@@ -108,8 +108,7 @@ async def test_current_tm_still_fires_session_finished() -> None:
     async def _on_done():
         done_called.append(True)
 
-    tm.set_session_done_callback(_on_done)
-    tm.set_is_current(lambda: True)
+    tm.set_hooks(TaskManagerHooks(on_session_done=_on_done, is_current=lambda: True))
 
     await tm._fire_session_done()
 
@@ -140,17 +139,18 @@ async def test_superseded_tm_park_does_not_announce_queue_state() -> None:
     async def _on_idle():
         idle_called.append(True)
 
-    tm.set_session_idle_callback(_on_idle)
+    current = {"v": True}
+    tm.set_hooks(TaskManagerHooks(
+        on_session_idle=_on_idle, is_current=lambda: current["v"]))
     tm.register_task(Task(id="A", session_id="s1", status="AWAITING_HUMAN",
                           assigned_agent_id="a", creator_agent_id="a",
                           settings=NormalTaskSettings()))
 
-    tm.set_is_current(lambda: True)
     await tm._fire_session_idle()
     assert signals == [EventType.TASK_QUEUE_BLOCKED], "对照：current TM 照常报「有人在等」"
 
     signals.clear()
-    tm.set_is_current(lambda: False)          # 被同 session 上更新的 TM 顶替
+    current["v"] = False                      # 被同 session 上更新的 TM 顶替
     await tm._fire_session_idle()
     assert signals == [], "被顶替的旧 TM 的 park 收尾不得报队列状态（会翻掉新一轮的会话）"
 
@@ -173,7 +173,7 @@ async def test_superseded_tm_crash_suspend_does_not_announce_queue_state() -> No
     tm.register_task(Task(id="A", session_id="s1", status="ACTIVE",
                           assigned_agent_id="a", creator_agent_id="a",
                           settings=NormalTaskSettings()))
-    tm.set_is_current(lambda: False)          # 已被顶替
+    tm.set_hooks(TaskManagerHooks(is_current=lambda: False))  # 已被顶替
 
     class _NonRetriable(Exception):
         retriable = False
@@ -202,8 +202,8 @@ async def test_register_and_drain_marks_older_tm_not_current() -> None:
     rt._register_and_drain(sess, tm_old)
     rt._register_and_drain(sess, tm_new)
 
-    assert tm_old._is_current is not None and tm_old._is_current() is False
-    assert tm_new._is_current is not None and tm_new._is_current() is True
+    assert tm_old._hooks.is_current is not None and tm_old._hooks.is_current() is False
+    assert tm_new._hooks.is_current is not None and tm_new._hooks.is_current() is True
 
 
 async def test_superseded_tm_drain_does_not_dispatch() -> None:
@@ -215,7 +215,7 @@ async def test_superseded_tm_drain_does_not_dispatch() -> None:
         started.append(tid)
 
     tm.set_runner(StubRunner(tm, runner))
-    tm.set_is_current(lambda: False)  # 已被同 session 上更新的 TM 顶替
+    tm.set_hooks(TaskManagerHooks(is_current=lambda: False))  # 已被顶替
     await tm.push_task(Task(id="A", session_id="s1", status="PENDING",
                             assigned_agent_id="a", creator_agent_id="a",
                             settings=NormalTaskSettings()))
@@ -235,7 +235,7 @@ async def test_current_tm_drain_dispatches() -> None:
         await release.wait()  # park 住，避免收尾级联干扰断言
 
     tm.set_runner(StubRunner(tm, runner))
-    tm.set_is_current(lambda: True)
+    tm.set_hooks(TaskManagerHooks(is_current=lambda: True))
     await tm.push_task(Task(id="A", session_id="s1", status="PENDING",
                             assigned_agent_id="a", creator_agent_id="a",
                             settings=NormalTaskSettings()))

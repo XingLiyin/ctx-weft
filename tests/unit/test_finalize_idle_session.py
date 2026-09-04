@@ -1,4 +1,5 @@
 import pytest
+from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task_manager import TaskManager
 from ctx_weft.core.domain.models import Session
 from ctx_weft.protocols.events import EventType
@@ -16,7 +17,7 @@ async def test_finalize_idle_session_emits_status_and_finished():
     bus = _Bus()
     tm = TaskManager(session_id="ses1", event_bus=bus)
     tm.set_session(Session(id="ses1", user_prompt="", status="RUNNING", tenant_id="default"))
-    tm.set_is_current(lambda: True)
+    tm.set_hooks(TaskManagerHooks(is_current=lambda: True))
 
     await tm.finalize_idle_session("SUCCEEDED")
 
@@ -33,7 +34,7 @@ async def test_finalize_idle_session_gathers_background_recap():
     bus = _Bus()
     tm = TaskManager(session_id="ses1", event_bus=bus)
     tm.set_session(Session(id="ses1", user_prompt="", status="RUNNING", tenant_id="default"))
-    tm.set_is_current(lambda: True)
+    tm.set_hooks(TaskManagerHooks(is_current=lambda: True))
     done = {"bg": False}
     async def _bg():
         await asyncio.sleep(0.01)

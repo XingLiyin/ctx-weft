@@ -1,6 +1,6 @@
 """interaction_mode 跨事件投影 / 快照 / 恢复保留（否则 resume 后 interactive 任务退化为 auto）。
 
-链路：Task → _task_payload(TASK_CREATED) → reducer(TaskView) → snapshot 往返 → task_from_projection。
+链路：Task → task_payload(TASK_CREATED) → reducer(TaskView) → snapshot 往返 → task_from_projection。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from ctx_weft.core.control.reducers import (
 )
 from ctx_weft.core.control.types import TaskView
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.orchestrator.task_manager import _task_payload
+from ctx_weft.core.orchestrator.task_manager import task_payload
 from ctx_weft.core.domain.models import Task
 from ctx_weft.core.utils import generate_id, now_utc
 
@@ -25,8 +25,8 @@ def _interactive_task() -> Task:
     )
 
 
-def test_task_payload_carries_interaction_mode() -> None:
-    payload = _task_payload(_interactive_task(), user_prompt_jsonable=None)
+def testtask_payload_carries_interaction_mode() -> None:
+    payload = task_payload(_interactive_task(), user_prompt_jsonable=None)
     assert payload["task"]["interaction_mode"] == "interactive"
 
 
@@ -45,7 +45,7 @@ def test_interaction_mode_survives_reduce_and_snapshot() -> None:
     ev = Event(
         id=generate_id("evt"), run_id=None, sequence=1, session_id="s1",
         type=EventType.TASK_CREATED, timestamp=now_utc(), tenant_id="default",
-        task_id="t1", payload=_task_payload(_interactive_task(), user_prompt_jsonable=None),
+        task_id="t1", payload=task_payload(_interactive_task(), user_prompt_jsonable=None),
     )
     view = reduce_events([ev], run_id="run1")
     assert view.tasks["t1"].interaction_mode == "interactive"

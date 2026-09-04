@@ -53,7 +53,6 @@ async def _wire_pending_session(
     )
     tm = TaskManager(session_id=session_id, event_bus=rt._event_bus, max_concurrent=0)
     tm.set_session(session)
-    tm.set_session_registry(rt._session_registry)
     task = Task(id=task_id, session_id=session_id, status="SUSPENDED", tenant_id="default")
     tm.register_task(task)
     rt._task_managers[session_id] = tm
