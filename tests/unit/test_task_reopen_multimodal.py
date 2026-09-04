@@ -109,7 +109,9 @@ def test_append_text_sections_empty_list_base_collapses_to_str():
     """base 为空列表（jsonable == []）时，memory 侧 `if base_prompt:` 判空退回纯文本
     join（str，无前导空行）；event 侧必须跟着收敛成同样的 str，不能停留成 list
     （review round 2 finding 2）。"""
-    from ctx_weft.core.orchestrator.task_manager import _append_text_sections
+    from ctx_weft.core.orchestrator.task_reopen import (
+        append_text_sections as _append_text_sections,
+    )
 
     result = _append_text_sections([], ["a", "b"])
     assert result == "a\n\nb"
@@ -119,13 +121,17 @@ def test_append_text_sections_empty_list_base_collapses_to_str():
 def test_append_text_sections_empty_str_base_no_leading_blank_line():
     """base 为空字符串（jsonable == ""）同理：memory 侧同一 else 分支产出
     'a\\n\\nb'，不带前导 '\\n\\n'。"""
-    from ctx_weft.core.orchestrator.task_manager import _append_text_sections
+    from ctx_weft.core.orchestrator.task_reopen import (
+        append_text_sections as _append_text_sections,
+    )
 
     assert _append_text_sections("", ["a", "b"]) == "a\n\nb"
 
 
 def test_append_text_sections_none_base_no_leading_blank_line():
     """base 为 None 同理：与空字符串 / 空列表走同一 memory 侧 else 分支。"""
-    from ctx_weft.core.orchestrator.task_manager import _append_text_sections
+    from ctx_weft.core.orchestrator.task_reopen import (
+        append_text_sections as _append_text_sections,
+    )
 
     assert _append_text_sections(None, ["a", "b"]) == "a\n\nb"

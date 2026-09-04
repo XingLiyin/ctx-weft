@@ -9,13 +9,14 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from typing import TYPE_CHECKING
 
-from ctx_weft.core.content import content_with_suffix
 from ctx_weft.core.discriminators import CancelReason, InterruptReason, TaskErrorCode
 from ctx_weft.core.domain.status import PARKED_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ctx_weft.core.event_envelope import emit_event
+from ctx_weft.core.orchestrator.failure_threshold import plan_threshold_trip
 from ctx_weft.core.orchestrator.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task_reopen import build_reopen_prompt
 from ctx_weft.core.errors import crash_error_code, crash_run_outcome
 from ctx_weft.core.orchestrator.task_disposition import (
     RunOutcome,
@@ -569,41 +570,7 @@ class TaskManager:
         if task is None or task.status != "FINISHED":
             return False
 
-        # base = 首次执行的原始 prompt（首次 reopen 时快照下来）
-        if task.original_user_prompt is None:
-            # 原样保留（含多模态）：这是 reopen 的 base，拍扁会让重开后图片永久消失。
-            task.original_user_prompt = task.user_prompt or ""
-            task.original_user_prompt_event_jsonable = task.user_prompt_event_jsonable
-        base_prompt = task.original_user_prompt
-
-        prev_output = _outputs_to_text(task.outputs) or (task.process_report or "")
-        sections: list[str] = []
-        if prev_output:
-            sections.append(f"## Previous attempt (rejected)\n{prev_output}")
-        if upstream is not None:
-            head_title, head_reason = upstream
-            sections.append(
-                f"## Upstream task revised\n"
-                f"Predecessor '{head_title}' was reopened (reason: {head_reason}). "
-                f"Its updated result appears in the conversation above. "
-                f"Redo this task based on the updated result."
-            )
-        elif reason:
-            sections.append(f"## Revision required\n{reason}")
-        # base 可能是多模态（list[ContentPart]），不能进 "\n\n".join()。
-        # 有 base 时从 base 起逐段 content_with_suffix；无 base 时退回纯文本 join。
-        # 两条路径对 str base 的产物与改造前**逐字节相同**（已逐例核对，见 brief §5）。
-        if base_prompt:
-            # 无 section 时 new_prompt 必须与 base_prompt 是不同对象：list base 若直接
-            # 复用同一引用，task.user_prompt 与 task.original_user_prompt 会别名同一份
-            # parts，日后任一方被就地修改都会污染另一方（str 不可变故无此风险）。
-            new_prompt = (
-                list(base_prompt) if isinstance(base_prompt, list) else base_prompt
-            )
-            for sec in sections:
-                new_prompt = content_with_suffix(new_prompt, f"\n\n{sec}")
-        else:
-            new_prompt = "\n\n".join(sections) if sections else base_prompt
+        prompt = build_reopen_prompt(task, reason, upstream)
 
         async with self._lock:
             self._queue.unmark_completed(task_id)
@@ -613,7 +580,14 @@ class TaskManager:
             task.retry_count = 0
             task.outputs = None
             task.finished_at = None
-            task.user_prompt = new_prompt
+            task.user_prompt = prompt.user_prompt
+            # 无条件写回（幂等）：非首次 reopen 时 build_reopen_prompt 返回的就是
+            # task 上已有的那份 base，不会把快照冲掉。
+            task.original_user_prompt = prompt.original_user_prompt
+            task.original_user_prompt_event_jsonable = (
+                prompt.original_user_prompt_event_jsonable
+            )
+            task.user_prompt_event_jsonable = prompt.user_prompt_event_jsonable
             task.user_prompt_in_memory = False  # let the driver re-ingest the revised prompt
             if blocked_by is not None:
                 task.dag_deps = list(blocked_by)  # restart 时由 dag_deps 重建依赖链
@@ -621,31 +595,17 @@ class TaskManager:
                 task_id=task_id, session_id=self._session_id, priority=task.priority,
                 blocked_by=set(blocked_by or []),
             ))
-        # 把改写后的 prompt 一并落进事件，使崩溃恢复（event replay）能重建修订后的 user_prompt。
-        # reopen 只在 prompt 尾部追加**文本** section（见上方 new_prompt 构造），
-        # 不可能引入事件流没见过的图。故事件形态直接由首次发射那份 + 文本拼出，
-        # 零 blob IO，且同一张图的 event ref 跨 reopen 逐字节相同（重放确定性）。
-        original_user_prompt_jsonable = task.original_user_prompt_event_jsonable
-        if original_user_prompt_jsonable is None and isinstance(base_prompt, str) and base_prompt:
-            # 兜底：event jsonable 没被填上（历史上 `_restore_task_prompts` 跳过纯文本、
-            # `run_single_task` 丢弃它，都出过这个洞——终审 C1），而 base 又是非空 str。
-            # 纯文本的事件形态就是它自己，直接补上；决不能让「字段没填」被
-            # `_append_text_sections` 读成「base 为空」，那会把用户的原始指令从
-            # TASK_REQUEUED 里抹掉、并在下一次重放时永久生效。
-            # 只兜 str：list base 的事件形态含 event ref，core 无从凭空重建（重建
-            # 就意味着拿 memory ref 冒充 event ref，正是两个命名空间不得相通的红线）。
-            original_user_prompt_jsonable = base_prompt
-            task.original_user_prompt_event_jsonable = base_prompt
-        user_prompt_jsonable = _append_text_sections(
-            original_user_prompt_jsonable, sections)
-        task.user_prompt_event_jsonable = user_prompt_jsonable
+        # 把改写后的 prompt 一并落进事件，使崩溃恢复（event replay）能重建修订后的
+        # user_prompt。reopen 只在 prompt 尾部追加**文本** section，不可能引入事件流
+        # 没见过的图。故事件形态直接由首次发射那份 + 文本拼出，零 blob IO，且同一张图
+        # 的 event ref 跨 reopen 逐字节相同（重放确定性）。
         await self._emit(
             EventType.TASK_REQUEUED,
             task_id=task_id,
             payload={
                 "reason": "observer_review_reopen",
-                "user_prompt": user_prompt_jsonable,
-                "original_user_prompt": original_user_prompt_jsonable,
+                "user_prompt": prompt.user_prompt_event_jsonable,
+                "original_user_prompt": prompt.original_user_prompt_event_jsonable,
             },
         )
         logger.info("TaskManager.reopen_task: re-queued %s", task_id)
@@ -873,7 +833,8 @@ class TaskManager:
         await self._emit(EventType.FAILURE_THRESHOLD_HIT, payload={
             "failure_counter": counter,
             "threshold": threshold,
-            "failures": [{"title": title, "reason": reason} for title, reason in self._recent_failures],
+            "failures": [{"title": title, "reason": reason}
+                         for title, reason in self._recent_failures],
         })
 
         # 3) 取消该 session 所有未决 pending HITL（best-effort）：HitlCancelled 须全部
@@ -884,108 +845,70 @@ class TaskManager:
             except Exception:
                 logger.exception("TaskManager: cancel_pending_hitl callback failed")
 
-        # ack_tasks：只收在途（未终结、仅发了协作取消信号）的已启动带框任务——它们的
-        # finish 对要等 on_task_finished(CANCELED) 终态坐实后由取消胶囊闭合 funnel 补写
-        # （Task 14），threshold_finalizer 这里只做 eager ack 替换（幂等自愈）。
-        # cancel_now_tasks：已经直接标 CANCELED 的任务（清队 + 挂起），终态已坐实，
-        # 经 _cancel_finalizer 立即整对闭合（ack + finish 对一次写完）。
-        ack_tasks: list[Task] = []
-        cancel_now_tasks: list[Task] = []
-
-        def _has_dispatch_frame(t: Task) -> bool:
-            # 「已启动的子任务必有框」：框由 ensure_dispatch_frame_at_start 在 start 时铸。
-            # 不再看 origin_tool_call_id——它是瞬态字段，重启重建后为 None，拿它当条件会把
-            # 跨重启的在途子任务误判成「无框」而漏掉 ack 替换（框其实在，靠 child_task_id 认）。
-            return bool(t.started_at and t.parent_task_id)
-
-        # 4) 清队：非 root 条目 → CANCELED + TASK_CANCELED（已启动者收进 cancel_now_tasks，
-        #    经 _cancel_finalizer 闭合）；root 条目直接丢弃（它的去向是第 6 步的 root 判死，
-        #    不在此处发事件）。
+        # 清场**分类**交纯函数（见 failure_threshold.py）；**顺序**留在这里。
         async with self._lock:
             pending = self._queue.drain_pending()
-        for tid in pending:
-            t = self._tasks.get(tid)
-            if t is None or t.parent_task_id is None:
-                continue
+        plan = plan_threshold_trip(
+            self._tasks, pending_ids=pending, running_ids=self._running_tasks,
+        )
+
+        # 4) 清队 + 5) 取消挂起：非 root 直接标 CANCELED + 发事件。
+        #    发事件的顺序仍是「先清队条目、后挂起条目」，与改造前一致。
+        for tid in (*plan.cancel_queued, *plan.cancel_suspended):
+            t = self._tasks[tid]
             t.status = "CANCELED"
             t.finished_at = now_utc()
             await self._emit(
                 EventType.TASK_CANCELED, task_id=tid,
                 payload={"reason": CancelReason.FAILURE_THRESHOLD},
             )
-            if t.started_at:
-                cancel_now_tasks.append(t)
 
-        # 5) 取消挂起：SUSPENDED 且非 root → CANCELED + 事件（已启动者收进 cancel_now_tasks，
-        #    立即整对闭合——不再走 ack_tasks/threshold_finalizer 的 ack-only 半闭合，因为它已经
-        #    是终态，没有后续 on_task_finished 会来补 finish 对）；
-        #    在途非 root run → 只发协作取消信号，不发事件（其 TASK_CANCELED 由 run 结束后的
-        #    `apply_run_outcome` 发——Task 4 之前是 _run_loop 退出路径；finish 对交由
-        #    on_task_finished 的取消胶囊闭合 funnel；已启动带框者
-        #    收进 ack_tasks，供 threshold_finalizer 做 eager ack 替换）。
-        for t in list(self._tasks.values()):
-            if t.parent_task_id is None:
-                continue
-            if t.status == "SUSPENDED":
-                t.status = "CANCELED"
-                t.finished_at = now_utc()
-                await self._emit(
-                    EventType.TASK_CANCELED, task_id=t.id,
-                    payload={"reason": CancelReason.FAILURE_THRESHOLD},
-                )
-                if t.started_at:
-                    cancel_now_tasks.append(t)
-            elif t.id in self._running_tasks:
-                if self._hooks.cancel_inflight is not None:
-                    try:
-                        self._hooks.cancel_inflight(t.id)
-                    except Exception:
-                        logger.exception("TaskManager: cancel_inflight callback failed for %s", t.id)
-                if _has_dispatch_frame(t):
-                    ack_tasks.append(t)
+        # 5b) 在途非 root：只发协作取消信号，不发事件（其 TASK_CANCELED 由 run 结束后的
+        #     `apply_run_outcome` 发；finish 对交由 on_task_finished 的取消胶囊闭合 funnel；
+        #     已启动带框者进 plan.ack_task_ids，供 threshold_finalizer 做 eager ack 替换）。
+        for tid in plan.signal_inflight:
+            self._signal_cancel(tid)
 
-        # 5.5) 立即整对闭合已终态的取消任务（清队 + 挂起，均已启动）——替代 Task 10 里对这批
-        #    任务的 ack-only 处理；在途任务保持 eager ack（上面 ack_tasks）+ funnel finish 对。
-        if cancel_now_tasks and self._hooks.cancel_finalizer is not None:
+        # 5.5) 立即整对闭合已终态的取消任务（清队 + 挂起，均已启动）——它已经是终态，
+        #      没有后续 on_task_finished 会来补 finish 对。在途任务保持 eager ack + funnel。
+        if plan.cancel_now_ids and self._hooks.cancel_finalizer is not None:
             try:
-                await self._hooks.cancel_finalizer(cancel_now_tasks, CancelReason.FAILURE_THRESHOLD)
+                await self._hooks.cancel_finalizer(
+                    [self._tasks[tid] for tid in plan.cancel_now_ids],
+                    CancelReason.FAILURE_THRESHOLD,
+                )
             except Exception:
-                logger.exception("TaskManager: cancel_finalizer callback failed (threshold cleanup)")
+                logger.exception(
+                    "TaskManager: cancel_finalizer callback failed (threshold cleanup)")
 
-        # 6) root 判 FAILED：所有 parent_task_id is None 且非终态的任务判死；
-        #    已终态的 root（自己就是第 N 败，FinalizeStep 已闭合；或时序尾巴已 FINISHED）
-        #    不改状态、不发事件——闭合跳过。**先标 FAILED 再**对在跑的 root 调 cancel_inflight
-        #    （顺序保证两道守卫都接得住：task 侧是 `apply_run_outcome` 的终态守卫——不把 FAILED
-        #    盖回 CANCELED；run 侧是 `_run_loop` 的 cancel_takes_effect——不发 RUN_CANCELED。
-        #    Task 4 之前 task 侧那道也长在 _run_loop 里，见 Task 10）。
+        # 6) root 判 FAILED。**先标 FAILED 再**对在跑的 root 发 cancel_inflight——顺序
+        #    保证两道守卫都接得住：task 侧是 `apply_run_outcome` 的终态守卫（不把 FAILED
+        #    盖回 CANCELED）；run 侧是 `_run_loop` 的 cancel_takes_effect（不发 RUN_CANCELED）。
         root_we_failed_and_started: Task | None = None
-        for t in list(self._tasks.values()):
-            if t.parent_task_id is not None:
-                continue
-            if t.status in TERMINAL_TASK_STATUSES:
-                continue
+        for tid in plan.fail_roots:
+            t = self._tasks[tid]
             t.status = "FAILED"
             t.error_code = TaskErrorCode.BY_THRESHOLD
-            t.error = f"Session failure threshold reached ({counter} consecutive sub-task failures)."
+            t.error = (f"Session failure threshold reached "
+                       f"({counter} consecutive sub-task failures).")
             t.finished_at = now_utc()
-            await self._emit(EventType.TASK_FAILED, task_id=t.id, payload={
+            await self._emit(EventType.TASK_FAILED, task_id=tid, payload={
                 "error_code": TaskErrorCode.BY_THRESHOLD,
                 "error_message": t.error,
             })
             if t.started_at is not None:
                 root_we_failed_and_started = t
-            if t.id in self._running_tasks and self._hooks.cancel_inflight is not None:
-                try:
-                    self._hooks.cancel_inflight(t.id)
-                except Exception:
-                    logger.exception("TaskManager: cancel_inflight callback failed for root %s", t.id)
+        for tid in plan.signal_roots:
+            self._signal_cancel(tid)
 
-        # 7) finalizer：内联 await（不是后台甩），保证 memory 落盘先于 SESSION_FINISHED（SSE 关闭）；
-        #    异常只记日志不阻断终结。
+        # 7) finalizer：内联 await（不是后台甩），保证 memory 落盘先于 SESSION_FINISHED
+        #    （SSE 关闭）；异常只记日志不阻断终结。
         if self._hooks.threshold_finalizer is not None:
             try:
                 await self._hooks.threshold_finalizer(
-                    root_we_failed_and_started, ack_tasks, list(self._recent_failures),
+                    root_we_failed_and_started,
+                    [self._tasks[tid] for tid in plan.ack_task_ids],
+                    list(self._recent_failures),
                 )
             except Exception:
                 logger.exception("TaskManager: threshold_finalizer callback failed")
@@ -1028,6 +951,15 @@ class TaskManager:
                 logger.exception("TaskManager: cancel_finalizer callback failed (cancel_all)")
         if self._session is not None:
             self._session.status = "CANCELED"
+
+    def _signal_cancel(self, task_id: str) -> None:
+        """对在途 task 发协作取消信号（best-effort：缺注入或异常都不阻断 trip 序列）。"""
+        if self._hooks.cancel_inflight is None:
+            return
+        try:
+            self._hooks.cancel_inflight(task_id)
+        except Exception:
+            logger.exception("TaskManager: cancel_inflight callback failed for %s", task_id)
 
     def _clear_running(self, task_id: str) -> None:
         """从「在跑」登记里摘掉这个 task。**调用方须已持 `self._lock`。**"""
@@ -1400,51 +1332,6 @@ class TaskManager:
         for tid in cancelled:
             await self._try_resume_parent(tid)
         return cancelled
-
-
-def _append_text_sections(
-    jsonable: "str | list[dict] | None", sections: "list[str]",
-) -> "str | list[dict] | None":
-    """把 reopen 的文本 section 追加到事件侧 jsonable 尾部，与 `reopen_task` 对
-    `new_prompt`（memory 侧）的构造逐分支同构（review round 2 finding 1 + 2 修正）：
-
-    - base 为空（``None`` / ``""`` / ``[]``）→ 与 memory 侧 ``else`` 分支
-      （``"\\n\\n".join(sections)``）一致：产出**不带前导空行**的 str，类型也收敛
-      为 str（哪怕 base 原本是空 list）——`if base_prompt:` 对三者一视同仁地判假，
-      event 侧必须跟着一视同仁。
-    - base 非空 → 与 memory 侧逐 section 调 `content_with_suffix` 的**等效**结果
-      一致：suffix 逐 section 以 ``"\\n\\n"`` 为前缀拼接（迭代调用 `content_with_suffix`
-      与一次性拼接完整 suffix 对同一批纯文本 section 等价——合并只发生在字符串层面，
-      不受分几次调用影响）；str base 直接接在尾部；list base 若尾部已是 text part
-      则原地合并进那个 part（同 `content_with_suffix` 对连续 text part 的合并语义，
-      否则事件侧会比 memory 侧多出一个独立 text part、两边形状分歧），否则新增一个
-      text part。
-    """
-    if not sections:
-        return jsonable
-    if not jsonable:  # None / "" / [] —— 与 memory 侧 `if base_prompt:` 判据一致
-        return "\n\n".join(sections)
-    suffix = "".join(f"\n\n{sec}" for sec in sections)
-    if isinstance(jsonable, str):
-        return jsonable + suffix
-    if isinstance(jsonable[-1], dict) and jsonable[-1].get("type") == "text":
-        tail = jsonable[-1]
-        merged = {**tail, "text": tail.get("text", "") + suffix}
-        return [*jsonable[:-1], merged]
-    return [*jsonable, {"type": "text", "text": suffix}]
-
-
-def _outputs_to_text(outputs: Any) -> str:
-    """把 task.outputs（str 或 ContentPart 列表）渲染成纯文本，供 reopen prompt 复用。"""
-    if isinstance(outputs, str):
-        return outputs
-    if isinstance(outputs, list):
-        return "\n".join(
-            p.get("text", "")
-            for p in outputs
-            if isinstance(p, dict) and p.get("type") == "text"
-        )
-    return ""
 
 
 def task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None") -> dict:
