@@ -128,6 +128,8 @@ def _matches(event: Event, filter: EventFilter) -> bool:
         return False
     if filter.task_id and event.task_id != filter.task_id:
         return False
+    if filter.agent_id and event.agent_id != filter.agent_id:
+        return False
     if filter.types is not None and event.type not in filter.types:
         return False
     return True

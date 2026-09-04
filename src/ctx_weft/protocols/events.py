@@ -59,6 +59,10 @@ class EventFilter:
     session_id: str | None = None
     run_id: str | None = None
     task_id: str | None = None
+    # agent 维度：信封的 agent_id 是 agent-centric 下 host 最常用的订阅轴
+    # （只渲染某一个 agent 的事件流）。事件 agent_id 为 None 时不匹配任何
+    # 具体 agent_id——「没有归属」不等于「属于你要的那个」。
+    agent_id: str | None = None
     types: list[str] | None = None  # None=全部
 
 
