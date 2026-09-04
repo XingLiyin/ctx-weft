@@ -1610,12 +1610,9 @@ class CtxWeftRuntime:
 
         # 各 agent 取自己的 template_id（AgentInstantiated 事件投影而来）；投影里没有的
         # （存量事件流）回落 session 模板——喂进 registry，registry 就是那份缓存。
-        await self._agent_lifecycle_manager.load(
-            view.agents,
-            session_id=session.id,
-            tenant_id=session.tenant_id,
-            fallback_template_id=template_id,
-        )
+        # 与 `recover()` 共用同一条装填路径（`_load_agents_of`），折叠逻辑只此一份
+        # （Task 11）：这里为此重付一次 `rebuild_view` 的代价，换来两处永不漂移。
+        await self._load_agents_of(session.id, tenant_id=session.tenant_id)
 
         task_manager.set_runner(self._make_task_runner(
             session=session,
@@ -2621,10 +2618,21 @@ class CtxWeftRuntime:
         **恢复不是一种状态**：会话状态照常由 SM 据 TM 的聚合信号判定，恢复路径与正常路径
         走同一条链，SM 的输入类型一个都没变。
 
+        每个 session 的 agent 记录也在这里装填进 `AgentLifecycleManager`（2026-09-04
+        spec §6.3 补上的一步）：此前只有 `recover_session` 会调 `ALM.load()`，重启后
+        `list_agents` / `get_agent` / `send_message` 在第一条冷应答或 `/resume` 恰好
+        跑过那条路之前全部是瞎的（`list_agents` 空、`get_agent` 抛 `AgentNotFound`）。
+        装填之后 `ALM.load()` 会按折出来的现状发 `AGENT_*`（spec §6.4），host 投影
+        因此不会停在崩溃前的状态——细节见 `_load_agents_of` 与 `AgentLifecycleManager.load`。
+
         So at startup **nothing drains/runs**: a waiting session waits for a reply, an interrupted
         one waits for ``/resume``. No host callback — the session-level events are handled by the
         host's existing subscribers (projection + SSE). Call in the app lifespan after providers
-        are registered, before serving. Returns the count handled.
+        are registered, before serving.
+
+        **返回恢复的 agent 数**（spec §6.2：报告单位换成 agent），不是 session 数——
+        一个 session 可能挂 0 个、1 个或多个 agent，用 session 数汇报不出「这次恢复
+        实际装填了多少 agent 记录」这个更有意义的数字。
         """
         try:
             session_ids = await self.event_store.list_active_session_ids()
@@ -2632,6 +2640,7 @@ class CtxWeftRuntime:
             logger.warning("Recovery: EventStore does not support list_active_session_ids — skipped")
             return 0
 
+        total_agents = 0
         for session_id in session_ids:
             try:
                 # 恢复期不再有专门的「PAUSED_HITL vs INTERRUPTED」分支：装填内存 HITL 之后
@@ -2639,17 +2648,51 @@ class CtxWeftRuntime:
                 # 「复活不是一种状态」的落地（docs/events-v2.md §2.1.1）。
                 # tenant 必须先解出来：`_task_managers` 此刻恒为空（见下）,`_tenant_for_session`
                 # 会落到读事件日志那条路（SESSION_CREATED 首条即含真 tenant）——
-                # `register_session` 与代发的队列信号都要用同一个值，否则 SM 的 `_states`
-                # 留着 "default"，之后由它派生的会话级事件（SessionWaiting 等）照样落错
-                # 租户（总账 A5）。
+                # `register_session`、代发的队列信号、以及 ALM 装填都要用同一个值，
+                # 否则由它们派生的事件会落错租户（总账 A5）。
                 tenant_id = await self._tenant_for_session(session_id)
                 n = await self.rebuild_hitl(session_id)
                 self._session_registry.register_session(session_id, tenant_id=tenant_id)
                 await self._announce_queue_state_as_tm_proxy(session_id, n, tenant_id=tenant_id)
+                total_agents += await self._load_agents_of(session_id, tenant_id=tenant_id)
             except Exception:
                 logger.exception("Recovery: failed to recover session %s", session_id)
 
-        return len(session_ids)
+        return total_agents
+
+    async def _load_agents_of(self, session_id: str, *, tenant_id: str) -> int:
+        """据事件折出该 session 的 `AgentView` 并喂进 ALM，返回装填条数。
+
+        `recover()` 与（Task 13 起的）单 agent 恢复共用的唯一装填路径——「恢复是
+        喂进来、不是查回去」（spec §3.1），折叠逻辑只此一份，避免两边各写一套
+        随时间漂移。
+
+        **绝不抛**：`ALM.load()` 自己的纪律是「这条路要在 `recover()` 的每个
+        session 上都跑通，抛一次就卡住整条恢复链」（见其 docstring）——本方法与它
+        同一口径。session 投影缺失、或有投影但 `template_id` 为空（两者都是恢复期
+        真实会遇到的缺口：事件日志损坏、或存量会话从未记过模板）→ 记一条 warning、
+        用 `""` 当 fallback 传给 `ALM.load()`（它已经对无法解析的模板回落默认
+        配置），照常继续装填该 session 能装填的 agent，不中断整条恢复链、也不让
+        这一个 session 的缺口拖累其余 session。
+        """
+        from ctx_weft.core.control.reducers import rebuild_view
+
+        view = await rebuild_view(self.event_store, session_id)
+        sess_proj = view.sessions.get(session_id)
+        if sess_proj is None or not sess_proj.template_id:
+            logger.warning(
+                "_load_agents_of: session %s has no projection or no template_id; "
+                "loading its agents with an empty fallback template "
+                "(recovery-time gap, degrading not crashing)",
+                session_id,
+            )
+            fallback_template_id = ""
+        else:
+            fallback_template_id = sess_proj.template_id
+        return await self._agent_lifecycle_manager.load(
+            view.agents, session_id=session_id,
+            tenant_id=tenant_id, fallback_template_id=fallback_template_id,
+        )
 
     async def _announce_queue_state_as_tm_proxy(
         self, session_id: str, pending_hitl: int, *, tenant_id: str = "default",
@@ -3177,7 +3220,8 @@ class _SessionTaskRunner:
 
     原 _make_task_runner 闭包的显式化：闭包捕获 → 实例字段。恢复播种不再靠
     per-runner 缓存——agent 身份/配置的唯一住所是 runtime 级 `AgentLifecycleManager`
-    registry（`lm`），恢复路径由 `recover_session` 显式调 `lm.load()` 装填。
+    registry（`lm`），恢复路径由 `recover_session`/`recover()` 经共用的
+    `_load_agents_of` 显式调 `lm.load()` 装填。
     assigned_agent_id 回填 / started_at / TASK_STARTED 均归 TaskManager（两阶段契约）。
     """
 

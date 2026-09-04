@@ -155,6 +155,15 @@ class AgentLifecycleManager:
         EventType.TASK_SUSPENDED: AgentInput.SETTLED,
     }
 
+    #: 恢复期现状广播的状态 → 事件映射。`terminated` 刻意不在表里（粘滞终态，重发无信息）；
+    #: `running` 也不在——进程刚起来没有任何 run 在跑，把折出来的 `running` 照发会让 host
+    #: 以为有活在跑。它在事件流里的真实含义是「崩溃时正在跑」，恢复后等 /resume 重新派发。
+    _RECOVERY_BROADCAST_BY_STATUS: ClassVar[dict[str, EventType]] = {
+        "idle": EventType.AGENT_IDLE,
+        "waiting_human": EventType.AGENT_WAITING_HUMAN,
+        "interrupted": EventType.AGENT_INTERRUPTED,
+    }
+
     def attach_to_bus(self) -> None:
         """订阅。runtime 构造期调一次。"""
         self.event_bus.subscribe(None, self.handle_event)
@@ -386,12 +395,38 @@ class AgentLifecycleManager:
         `MemoryConfig()`/`LoopConfig()` 默认值继续。**绝不抛**：这条路要在
         `recover()` 的每个 session 上都跑通，抛一次就卡住整条恢复链——回落而非
         报错的口径与 `_register_fallback` 一致。
+
+        装填完按每个 `AgentView` 折出来的现状发一条 `AGENT_*`（idle/waiting_human/
+        interrupted；`terminated`/`running` 不发，见 `_RECOVERY_BROADCAST_BY_STATUS`
+        旁的注释），host 的投影因此不会停在崩溃前的状态。这是广播已成立的事实，
+        不是新状态转移，不经 `apply_input`。
+
+        **只对这次调用之前 registry 里还没有的 agent 广播**（见方法体 `cold_ids`
+        旁的注释）：`load()` 不止被 `recover()` 的冷启动路径调用，`_recover_session_locked`
+        每次 `/resume`、每次冷 HITL 应答都会重新 load 一遍已经在内存里的 agent——
+        那种情形不该每次都把「现状」再回声一遍，真实转移各自已经发过自己的
+        `AGENT_*`，重复广播会让下游把「装填回声」误当成「刚发生了一次新转移」。
         """
         self.register_session(
             session_id, tenant_id=tenant_id, fallback_template_id=fallback_template_id,
         )
         ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
         n = 0
+        # 广播只认「这次调用之前 registry 里确实还没有这条记录」的 agent——记在覆盖
+        # `self._agents[av.id]` 之前，覆盖后 membership 判据就没了。这是真正的**冷**
+        # 装填（`recover()` 重启后的首次装填）与**热**重装（`_recover_session_locked`
+        # 每次 `/resume`、每次冷 HITL 应答都会重新调一次 `load()`，把已经在内存里的
+        # record 幂等覆盖一遍，这不是本 spec 要补的缺口）之间唯一站得住脚的分界。
+        #
+        # 不分界、每次 `load()` 都无条件广播的后果是真实的、已经复现过：
+        # `tests/integration/test_outage_resume.py::test_idempotent_outage_resume_completes`
+        # 的 `_wait_for_interrupted_event` 把「看到一条新 AgentInterrupted」当成
+        # 「刚发生了一次新的中断」，若 `recover_session()` 每次都在真实转移之外
+        # 额外回声一遍现状，这个假设就被推翻——测试会在上一轮 drain 还没跑完时就
+        # 发起下一轮 `recover_session()`，两个 TaskManager 竞争同一个 session，
+        # 任务卡死在 INTERRUPTED 永不完成（不是这个测试脆弱，是这类消费者对「事件
+        # 到达 = 新事实发生」的假设本就合理，广播不该在没有新事实时重复兑现它）。
+        cold_ids = {av.id for av in agent_views.values() if av.id not in self._agents}
         for av in agent_views.values():
             template_id = av.template_id or fallback_template_id
             try:
@@ -443,6 +478,29 @@ class AgentLifecycleManager:
                 # 不会留下指向「已被移除的 agent」的悬垂值。
                 self._children.setdefault(av.parent_agent_id, set()).add(av.id)
             n += 1
+
+        # 恢复期现状广播（2026-09-04 spec §6.4）：装填完把折出来的状态照实发一遍，
+        # 取代此前由 runtime 代 TaskManager 发的 TASK_QUEUE_*（那条信号的消费者
+        # SessionRegistry 早已不订阅它）。只对上面记下的 `cold_ids` 发——见那段注释。
+        #
+        # 「恢复不是一种状态」：这里发的是**现状**不是新状态，不引入 RECOVERING
+        # 之类的值域，也不经状态机——`apply_input` 是给真实转移用的，这里是把已经
+        # 成立的事实广播出去，走同一个发射点（ALM 是 AGENT_* 的唯一发射者）。
+        #
+        # `terminated` 不发：它是粘滞终态，host 投影里本就已经是终态，重发没有信息。
+        for av in agent_views.values():
+            if av.id not in cold_ids:
+                continue
+            event_type = self._RECOVERY_BROADCAST_BY_STATUS.get(av.status)
+            if event_type is None:
+                continue
+            await emit_event(
+                self.event_bus, event_type,
+                session_id=session_id, tenant_id=tenant_id,
+                origin=_ORIGIN, task_id=av.current_task_id, agent_id=av.id,
+                payload={"reason": "recovered"},
+            )
+
         return n
 
     async def instantiate(

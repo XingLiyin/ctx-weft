@@ -93,7 +93,12 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
 
     n = await runtime.recover()
 
-    assert n == 3
+    # Task 11 起 recover() 的返回值语义换成「恢复的 agent 数」，不再是 session 数
+    # （2026-09-04 spec §6.2）。这三个 session 的事件流里没有一个发过 AGENT_INSTANTIATED，
+    # SESSION_CREATED 也没带 root_agent_id——reducer 折不出任何 AgentView（见
+    # `core/control/reducers.py` 的 `_rebuild_agents`/`AGENT_INSTANTIATED` 分支），
+    # 所以这里的正确值是 0，不是凑一个能让断言通过的数字。
+    assert n == 0
     assert called == []                                          # 启动不 drain/不重建 task
     assert [r.id for r in runtime.hitl_registry.list_pending(session_id="A")] == ["hA"]
     # 决定缓存键是三维的 (session, tool_call, stage)——只按 tool_call_id 查会让 A 会话的

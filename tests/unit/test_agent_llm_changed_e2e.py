@@ -16,6 +16,7 @@ from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleMan
 from ctx_weft.core.orchestrator.model import ModelChoice
 from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
 from ctx_weft.core.registry import ProviderRegistry
+from ctx_weft.protocols.events import EventType
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -86,8 +87,13 @@ async def test_llm_switch_survives_a_full_replay_and_reload():
 
     resolved = fresh_registry.resolve_model(agent.id)
     assert (resolved.account, resolved.model) == ("acct-new", "model-new")
-    # load() 装填期间纯读，不该再广播任何事件。
-    assert fresh_bus.events == []
+    # Task 11（2026-09-04 spec §6.4）起：load() 装填一个此前 registry 里没有的
+    # agent（真正的冷装填，这里正是——`fresh_registry` 全新、`_agents` 是空的）
+    # 之后会按折出来的现状广播一条 AGENT_*，取代旧断言「load() 纯读、不广播任何
+    # 事件」——那条断言钉的正是本 task 要修的缺口（重启后 host 投影冻在崩溃前
+    # 状态,直到某条冷路径偶然把 ALM 重新装填）。这里没设置 llm 之外的任何状态
+    # 事件,AgentView.status 因此是字段默认值 "idle" → 广播 AgentIdle。
+    assert [e.type for e in fresh_bus.events] == [EventType.AGENT_IDLE]
 
 
 async def test_session_llm_switch_also_survives_replay_for_every_agent():
