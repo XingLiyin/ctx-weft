@@ -240,11 +240,24 @@ async def _two_turn_session():
 
 
 async def test_two_turns_do_not_share_a_run_id():
+    """headline 不变式必须只看**主循环**（`_run_loop`，origin=RUNTIME）自己的两个
+    run——`recognize_intent` / `background_observe` 在这条改动完全没碰过的代码路径
+    上，每轮都会各自铸一个新 run_id（`launch_recognize_intent`/
+    `launch_background_observe` 早已各自 `generate_id("run")`，与 `_default_run_id`
+    无关），若把它们也计进 `run_ids` 的全局集合，即使主任务两轮共用同一个
+    `_default_run_id`（本 task 要修的那个 bug），`len(run_ids) >= 2` 依旧会因为这些
+    旁路 run 而碰巧为真——对 headline 不变式是假阳性。用 `origin == RUNTIME` 隔离出
+    主循环自己的 RunStarted，只数这一路的 run_id，与 `_main_run_finishes`/
+    `_two_turn_session` 里判定"第二轮那个主 run 完了没有"用的同一个过滤条件。
+    """
     events = await _two_turn_session()
-    run_ids = {e.run_id for e in events if e.run_id is not None}
-    starts = [e for e in events if e.type == EventType.RUN_STARTED]
-    assert len(starts) >= 2, "两轮至少两个 run"
-    assert len(run_ids) >= 2, f"两轮共用了 run_id: {run_ids}"
+    main_starts = [
+        e for e in events
+        if e.type == EventType.RUN_STARTED and e.origin == EventOrigin.RUNTIME
+    ]
+    main_run_ids = {e.run_id for e in main_starts if e.run_id is not None}
+    assert len(main_starts) >= 2, f"两轮的主循环至少两个 run，实际 {len(main_starts)} 个"
+    assert len(main_run_ids) >= 2, f"两轮的主循环共用了 run_id: {main_run_ids}"
 
 
 async def test_sequence_is_unique_per_run():
