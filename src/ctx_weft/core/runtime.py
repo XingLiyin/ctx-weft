@@ -1207,7 +1207,6 @@ class CtxWeftRuntime:
                 user_prompt_event_jsonable=user_prompt_event_jsonable,
             )
 
-        run_id = generate_id("run")
         # `or ""` is defensive only: `Session.root_agent_id` is typed `str | None` for
         # Session's general use, but on this path it is always non-empty — create_session
         # mints it via generate_id("agt") before SESSION_CREATED, and resume_session raises
@@ -1234,7 +1233,6 @@ class CtxWeftRuntime:
             lm=lm,
             memory=memory,
             task_manager=task_manager,
-            default_run_id=run_id,
             handle=handle,
         ))
         task_manager.set_session(session)
@@ -1450,7 +1448,6 @@ class CtxWeftRuntime:
         lm: AgentLifecycleManager,
         memory: MemoryProvider,
         task_manager: TaskManager,
-        default_run_id: str,
         handle: "TurnHandle | None" = None,
     ) -> "_SessionTaskRunner":
         """构造本 session/run 的两阶段 runner（原闭包工厂的显式化）。
@@ -1463,7 +1460,7 @@ class CtxWeftRuntime:
             runtime=self, session=session, template=template, template_id=template_id,
             lm=lm, memory=memory,
             task_manager=task_manager,
-            default_run_id=default_run_id, handle=handle,
+            handle=handle,
         )
 
     # ── Crash recovery ───────────────────────────────────────────────────────
@@ -1627,7 +1624,6 @@ class CtxWeftRuntime:
             lm=lm,
             memory=self.providers.get_memory(),
             task_manager=task_manager,
-            default_run_id=generate_id("run"),
         ))
         # act 纯文本暂停（wait_for_user）冷应答：把用户回复注入 task 层并重排（reconcile 覆盖不到,见上）。
         if user_reply is not None:
@@ -3171,7 +3167,6 @@ class _SessionTaskRunner:
         lm: AgentLifecycleManager,
         memory: MemoryProvider,
         task_manager: TaskManager,
-        default_run_id: str,
         handle: "TurnHandle | None" = None,
     ) -> None:
         self._runtime = runtime
@@ -3181,7 +3176,6 @@ class _SessionTaskRunner:
         self._registry = lm
         self._memory = memory
         self._task_manager = task_manager
-        self._default_run_id = default_run_id
         self._handle = handle
 
     # ── 阶段 1：装配 ─────────────────────────────────────────────────────────
@@ -3266,7 +3260,7 @@ class _SessionTaskRunner:
                 ))
                 initial = await self._reconcile_or(t, agent, "prepare")
                 return AgentBinding(agent_id=agent.id, agent=agent, template=self._template,
-                                    initial_step=initial, run_id=self._default_run_id, model=rm)
+                                    initial_step=initial, run_id=generate_id("run"), model=rm)
 
     # ── 阶段 2：执行 ─────────────────────────────────────────────────────────
 
