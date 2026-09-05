@@ -1,6 +1,12 @@
 """ctx-weft: Agent Runtime SDK."""
 
-from ctx_weft.core.models.errors import AgentNotFound, AgentNotRunningError
+from ctx_weft.core.models.errors import (
+    AgentBusyError,
+    AgentNotFound,
+    AgentNotRunningError,
+    AgentTerminatedError,
+    SessionBusyError,
+)
 from ctx_weft.core.models.task import (
     CompactTaskSettings,
     MetadataFillerTaskSettings,
@@ -30,6 +36,9 @@ __all__ = [
     # 错误
     "AgentNotFound",
     "AgentNotRunningError",
+    "AgentBusyError",
+    "AgentTerminatedError",
+    "SessionBusyError",
     # 事件
     "EventStore",
     "InMemoryEventStore",

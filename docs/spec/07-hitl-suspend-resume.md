@@ -47,18 +47,22 @@
 
 | delivery | 续跑动作 |
 |----------|----------|
-| `ToolResultDelivery(tool_call_id)` | 热：就地重入；冷：`recover_session` → reconcile 精确重入 |
+| `ToolResultDelivery(tool_call_id)` | 热：就地重入；冷：`recover_agent` → reconcile 精确重入 |
 | `UserTurnDelivery(task_id, preface)` | 把答复作一条 user 消息注入 task 对话并重排 |
 | `NoResumeDelivery` | 纯通知 / 取消，不续跑 |
 
 **面板提示**（前端要不要出一块要人拍板的面板）由**未决请求的 delivery** 推导，同样不看
-form：全是 `UserTurnDelivery`（软待命，无面板）→ `"PAUSED"`，其余 → `"PAUSED_HITL"`。
-判据只有一份：`core/hitl/status.py::paused_status_for`，唯一消费方是 host 只读入口
-`CtxWeftRuntime.session_status_after_recover`。
+form：全是 `UserTurnDelivery`（软待命，无面板）→ 无面板，其余 → 有面板。
+2026-09-04（runtime 对外面 agent-centric 对齐 Task 14）起，判据不再是一个专门方法：
+`core/hitl/status.py::paused_status_for` 与它唯一的消费方
+`CtxWeftRuntime.session_status_after_recover` 已一并删除——host 直接读
+`HitlRequestView.delivery` 自判，同一份原始事实，不再派生 `"PAUSED"` / `"PAUSED_HITL"`
+这两个字面量。
 
-> **这两个字面量不是会话状态。** 会话状态的值域自 2026-09-02 起不含 `PAUSED` /
-> `PAUSED_HITL`——「等的是面板还是一句话」是 delivery 的性质，`HitlOpened` 已经载着它到了
-> 前端，会话状态再复制一份只会失步。会话级只回答「停着且正常」= `WAITING`。
+> **这两个字面量从来不是会话状态**（如今更已随派生它们的方法一起删除）。会话状态的
+> 值域自 2026-09-02 起不含 `PAUSED` / `PAUSED_HITL`——「等的是面板还是一句话」是
+> delivery 的性质，`HitlOpened` 已经载着它到了前端，会话状态再复制一份只会失步。
+> 会话级只回答「停着且正常」= `WAITING`。
 
 ## 4. 精确重入：dangling tool_call 对账
 

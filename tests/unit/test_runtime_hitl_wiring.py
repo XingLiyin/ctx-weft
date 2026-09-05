@@ -90,19 +90,22 @@ async def test_reply_returns_the_view_and_drives_resume_by_delivery():
     """冷续跑由**返回值**驱动，不挂总线订阅（spec §7.3 订正）。"""
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
     view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                             agent_id=req.agent_id))
     assert view is not None and view.outcome == "accepted"
-    # 这个请求开在没传 agent_id 的调用上，req.agent_id 落到默认空串——`_resume_after_hitl`
-    # 原样把它转给 `recover_agent`,证明的是「续跑按 delivery 路由、参数原样透传」这条线,
-    # 不是「必须有一个非空 agent_id」。
-    assert calls == [("recover_agent", "", "t1")]
+    # `_resume_after_hitl` 按 delivery 路由，参数原样透传给 `recover_agent`——真实生产
+    # 路径的 `hitl.open()` 调用方（`capability_gateway.py`/`act.py`）恒传非空 `agent_id`，
+    # 这里种一个真实形态的请求验证这条透传，而不是巧合地依赖签名默认值 `agent_id=""`
+    # 那个专供「legacy 折叠、真没有 agent_id 可传」场景的回退分支
+    # （见 `tests/unit/test_cold_hitl_legacy_agent_id_resume.py`，终审 CRITICAL 2）。
+    assert calls == [("recover_agent", "agent-a", "t1")]
 
 
 async def test_user_turn_delivery_injects_instead_of_reconciling():
     rt, calls = _runtime_with_recorded_resume()
-    req = await rt.hitl.open(_ask_user_turn("t1"), session_id="s1", task_id="t1", stage="tool")
+    req = await rt.hitl.open(_ask_user_turn("t1"), session_id="s1", task_id="t1",
+                             agent_id="agent-a", stage="tool")
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                      agent_id=req.agent_id, message="继续"))
     assert calls[0][0] == "inject_user_turn"
@@ -110,7 +113,8 @@ async def test_user_turn_delivery_injects_instead_of_reconciling():
 
 async def test_no_resume_delivery_triggers_nothing():
     rt, calls = _runtime_with_recorded_resume()
-    req = await rt.hitl.open(_ask_no_resume(), session_id="s1", task_id="t1", stage="tool")
+    req = await rt.hitl.open(_ask_no_resume(), session_id="s1", task_id="t1",
+                             agent_id="agent-a", stage="tool")
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="cancelled", agent_id=req.agent_id))
     assert calls == []
 
@@ -119,7 +123,7 @@ async def test_a_claimed_hot_reply_does_not_trigger_cold_resume():
     """热投递已就地续跑，再触发一次冷续跑就是双投。"""
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
     rt.hitl_registry.attach_slot(req.id, _AcceptingSlot())
     view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                             agent_id=req.agent_id))
@@ -133,12 +137,42 @@ async def test_replying_twice_resumes_at_most_once():
     """应答入口可能被重试（host 超时重发 / 用户连点）——第二次是 no-op。"""
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id))
     assert await rt.reply_to_hitl(
         HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id)
     ) is None
     assert len(calls) == 1
+
+
+async def test_empty_agent_id_falls_back_to_session_id_not_recover_agent():
+    """终审 CRITICAL 2 的单元级接线守卫：legacy 折叠出的空 `agent_id` 必须走
+    `_recover_session_locked(session_id, ...)` 的回退，绝不能再原样喂给
+    `recover_agent("")`（那必然自愈失败 → `AgentNotFound`，见
+    `tests/unit/test_cold_hitl_legacy_agent_id_resume.py` 的完整端到端复现）。
+    这里只钉「路由选了哪条分支」这个快速的接线事实，不跑真实事件日志重建。
+    """
+    rt = _runtime()
+    recover_agent_calls: list[str] = []
+    session_calls: list[tuple] = []
+
+    async def fake_recover_agent(agent_id, **kw):
+        recover_agent_calls.append(agent_id)
+
+    async def fake_recover_session_locked(session_id, **kw):
+        session_calls.append((session_id, kw.get("resumed_task_id")))
+
+    rt.recover_agent = fake_recover_agent  # type: ignore[method-assign]
+    rt._recover_session_locked = fake_recover_session_locked  # type: ignore[method-assign]
+
+    req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
+                             tool_call_id="call_1", stage="tool")  # 无 agent_id -> 落到默认空串
+    assert req.agent_id == ""
+
+    await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=""))
+
+    assert recover_agent_calls == [], "空 agent_id 不该再喂给 recover_agent"
+    assert session_calls == [("s1", "t1")], "必须回退到 session_id 精确装填"
 
 
 async def test_hitl_reply_intake_is_wired_to_the_runtime_shared_normalizer():
@@ -186,7 +220,7 @@ async def test_a_failed_cold_resume_after_commit_is_logged_loudly_and_still_rais
     响亮地留痕,而不是只悄悄传给 host（复审 cheap fix）。"""
     rt = _runtime()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
 
     async def _boom(*a, **kw):
         raise RuntimeError("owner TM rebuild exploded")

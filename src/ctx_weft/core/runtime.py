@@ -413,6 +413,27 @@ class TurnHandle:
         再落到超时兜底返回，宿主体感就是「挂住了」。终态事件那处 `ev.type in
         terminal` 判据本就用集合成员测试（`in` 走 `__hash__`/`__eq__`，`StrEnum` 与
         裸字符串两边一致，天然兼容），不受影响、不用改；只有这一处 `is` 改成 `==`。
+
+        ## 7. recap 先到、终态后到也不能挂住（终审 IMPORTANT 3）
+
+        上面第 5 节的判据默认了「先见终态、再等 recap」这个到达顺序，但两者是各自
+        独立发出的事件，顺序不是保证的：close 边界的后台 observe 可能在
+        `emit(RUN_FINISHED)` 内部让出控制权的那个窗口里，比 `TaskFinished` 更早把
+        它自己的 `TaskRecapDone` 送上总线。原实现的外层循环只在 `ev.type in
+        terminal` 时才有反应，先到的 `TaskRecapDone` 被当成"不认识的事件"直接丢弃
+        （**流是单向消费的，丢过去的事件读不回来**）；等终态事件终于到达、内层循环
+        才开始等那个 `run_id`——可它已经过去了，`pending.done()` 此刻仍是 `False`
+        （后台任务是否已经跑完与它的 `TaskRecapDone` 是否已经送达是两回事，见第 5
+        节），内层循环于是无休止地等一条不会再来的事件，直到 `timeout` 耗尽才靠
+        兜底返回——不抛异常，只是静默地把调用方晾到超时。
+
+        修法：不再假定顺序，全程只用**一个**循环，边走边把见到的每个 `TaskRecapDone`
+        记进 `seen_recap_run_ids`（按 `run_id`，不区分它是不是这次终态触发的那次
+        ——反正只在真等到终态、拿到 `pending_run_id` 之后才去查这张表）。终态事件
+        到达时，`pending_run_id` 若已经在这张"提前到账"的表里，直接返回，不再进入
+        任何等待；否则才转入"接下来盯住这一个 run_id"的模式，继续消费同一条流。
+        `waiting_for_run_id is None` 这道门保证这个决策只做一次——后续再来的终态
+        事件（重试等罕见情形）不会重新触发它。
         """
         from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
         from ctx_weft.core.loop.steps.background_observe import (
@@ -427,15 +448,20 @@ class TurnHandle:
                 stream = self.event_bus.stream(
                     EventFilter(agent_id=self.agent_id, task_id=self.task_id)
                 )
+                seen_recap_run_ids: set[str] = set()
+                waiting_for_run_id: str | None = None
                 async for ev in stream:
-                    if ev.type in terminal:
+                    if ev.type == EventType.TASK_RECAP_DONE:
+                        seen_recap_run_ids.add(ev.run_id)
+                        if waiting_for_run_id is not None and ev.run_id == waiting_for_run_id:
+                            return self._state
+                    if waiting_for_run_id is None and ev.type in terminal:
                         pending_run_id = pending_background_observe_run_id(self.task_id)
                         if pending_run_id is None:
                             return self._state
-                        async for ev2 in stream:
-                            if (ev2.type == EventType.TASK_RECAP_DONE
-                                    and ev2.run_id == pending_run_id):
-                                return self._state
+                        if pending_run_id in seen_recap_run_ids:
+                            return self._state
+                        waiting_for_run_id = pending_run_id
         except TimeoutError:
             pass
         return self._state
@@ -487,7 +513,7 @@ class CtxWeftRuntime:
     """Top-level runtime.
 
     Supports two modes:
-    - run_single_task(): Phase 1 compat — simple single-task execution
+    - run_single_task(): single-task testing convenience entry point
     - start_session(): Phase 4 orchestration; session_id=None creates, session_id=<id> resumes
     """
 
@@ -1126,7 +1152,10 @@ class CtxWeftRuntime:
         llm_account: str | None = None,
         llm_model: str | None = None,
     ) -> tuple[TurnHandle, LoopState]:
-        """Phase 1 compat: run a single task end-to-end and await completion."""
+        """单任务测试便利入口：起一个 task 端到端跑完并等它结束（2026-09-04 spec §2）。
+
+        60 处测试在用，返回的句柄已带 `agent_id`，与 agent-centric 不冲突——保留它是
+        纯收益、删它是纯成本。"""
         from ctx_weft.core.utils.content import content_to_text
 
         sid = session_id or generate_id("ses")
@@ -1582,8 +1611,18 @@ class CtxWeftRuntime:
         user_reply: "PendingHitl | None" = None,
         resumed_task_id: str | None = None,
         hitl_id: str = "",
+        keep_alive: bool = False,
     ) -> None:
         """续跑一个 agent：复用活 owner TM，或据事件重建后 drain。
+
+        ``keep_alive``：仅供 `_start_task_for_agent` 使用（终审 CRITICAL 1）。该调用方
+        马上要把一个**新** task 塞进刚建好的 TM——普通续跑在"这个 session 已无可恢复
+        task"时的两个结论（既empty history 报 `RuntimeError`，又 all-terminal 报
+        `finalize_idle_session`）在这里都是错的：前者会让"从没跑过、刚被 send_message
+        选中"的合法起点被错判成损坏投影；后者会在 TM 刚建好、`_start_task_for_agent`
+        还没来得及 push 之前就把它和这个 session 下全部 ALM agent record 一并释放
+        （`_fire_session_done` -> `_release_session`），原地把刚建好的东西拆掉。见
+        `_recover_session_locked` 里两处按 `keep_alive` 短路的分支与各自的注释。
 
         **主键是 agent**（2026-09-04 spec §6.2）；``session_id`` 由 ALM 记录反查。
         session 仍是串行化与资源回收的单位——per-session 锁、owner TM 复用这些
@@ -1637,6 +1676,7 @@ class CtxWeftRuntime:
             await self._recover_session_locked(
                 session_id, user_reply=user_reply,
                 resumed_task_id=resumed_task_id, hitl_id=hitl_id,
+                keep_alive=keep_alive,
             )
 
     async def _recover_session_locked(
@@ -1646,12 +1686,18 @@ class CtxWeftRuntime:
         user_reply: "PendingHitl | None" = None,
         resumed_task_id: str | None = None,
         hitl_id: str = "",
+        keep_alive: bool = False,
     ) -> None:
         """Reuse the live owner TM, or rebuild it from the event store, then resume.
 
         Called by the host on /resume (INTERRUPTED session) and internally on a cold
         HITL reply. Internally replays events (or loads snapshot + delta) to reconstruct
         Session/Task state. Raises RuntimeError with a descriptive message on failure.
+
+        ``keep_alive``: see `recover_agent`'s docstring — threaded through unchanged so
+        the two decision points below (empty-history guard, finalize-when-idle) can be
+        short-circuited for `_start_task_for_agent`'s "bring the TM up, I'm about to push
+        a new task onto it" call, without duplicating the rebuild machinery above them.
 
         ``user_reply``: when a cold reply resolves an act plain-text pause (``wait_for_user``)
         HITL, reconcile cannot cover it (no dangling tool_call in the task layer), so the
@@ -1721,8 +1767,13 @@ class CtxWeftRuntime:
         events_all = await self.event_store.read_by_session(session_id)
         pending_recap = fold_pending_task_recap(events_all)
 
-        # 既无可恢复 task 又无 task（空/损坏投影）→ 确无事可做，保留原抛错。
-        if not resumable and not all_tasks:
+        # 既无可恢复 task 又无 task（空/损坏投影）→ 确无事可做，保留原抛错——
+        # 除非 `keep_alive`：`_start_task_for_agent` 调这里正是为了给一个从没跑过
+        # task 的 agent（冷启动只被 ALM.load() 装填、从未真正执行过）建一个空 TM，
+        # 空历史在这条调用路径上是合法起点，不是损坏投影（终审 CRITICAL 1；
+        # `tests/integration/test_task_recap_recovery.py::test_no_tasks_at_all_still_raises`
+        # 钉死的是 `keep_alive=False` 的默认路径，不受影响）。
+        if not resumable and not all_tasks and not keep_alive:
             raise RuntimeError(f"Session {session_id!r} has no resumable tasks")
 
         lm = self._agent_lifecycle_manager
@@ -1795,7 +1846,13 @@ class CtxWeftRuntime:
 
         # 无可恢复 task（所有 task 已终态）但 session 因崩溃未落终态 → 显式收尾：
         # gather 重跑的后台 recap 后发 SESSION_FINISHED（终态镜像 on_task_finished）。
-        if not resumable:
+        # `keep_alive` 短路这一步：finalize -> `_fire_session_done` -> `_release_session`
+        # 会把刚在上面 `_register_and_drain` 里塞进 `_task_managers` 的这个 TM，连同
+        # `AgentLifecycleManager` 里这个 session 下的全部 agent record 一起摘掉——
+        # `_start_task_for_agent` 调用这里正是为了拿到一个能塞新 task 的活 TM，原地
+        # 把它拆掉等于白建（终审 CRITICAL 1）。resumable 是否为空交给调用方接下来
+        # push 的新 task 去填，不在这里替它下判决。
+        if not resumable and not keep_alive:
             final_status = "FAILED" if session.failure_counter > 0 else "SUCCEEDED"
             await task_manager.finalize_idle_session(final_status)
 
@@ -2391,14 +2448,46 @@ class CtxWeftRuntime:
         建立时 `_register_and_drain` 已经给它 `set_runner` / `set_is_current` /
         挂好 done/idle 回调，这里只管 push 一个新 task 再补一次 drain，不重新接线。
 
-        `assert_can_receive` 已保证 `agent_id` 存在，该 session 的 TM 因此也必然
-        还活着——`_release_session` 回收 TM 的同时会一并 `AgentLifecycleManager.
-        release_session` 摘掉这个 session 下的全部 agent record（两者同一次调用），
-        agent 还在 == TM 还在，故此处直接下标、不再判 None。
+        **"agent 还在 == TM 还在"不成立**（终审 CRITICAL 1，订正此前这条docstring
+        的错误断言）：`recover()` 冷启动只装填 `AgentLifecycleManager`（`_load_agents_of`），
+        从不建 TaskManager（"startup runs nothing"，见 `recover()` 自己的 docstring）——
+        一个刚被 `recover()` 装填、还没被任何 `/resume` 或冷 HITL 应答碰过的 agent，
+        `record_of` 命中但 `self._task_managers[rec.session_id]` 会是纯粹的
+        `KeyError`。这里因此先探测 TM 是否活着，缺失/已被顶替时调用
+        `recover_agent(agent_id, keep_alive=True)` 走**同一条**事件重建路径（不另写
+        一套）把它建出来——`keep_alive=True` 让 `_recover_session_locked` 跳过它对
+        "空历史"的报错与"无可恢复 task 就 finalize"的收尾（两者都会在这个新 TM
+        刚建好、还没来得及塞进新 task 之前就把它连同 ALM record 一并拆掉，见
+        `recover_agent`/`_recover_session_locked` 的 docstring）。**已经活着的会话
+        不付这次重建**：探测放在最前面，是快路径。
         """
         reg = self._agent_lifecycle_manager
         rec = reg.record_of(agent_id)
-        tm = self._task_managers[rec.session_id]
+        tm = self._task_managers.get(rec.session_id)
+        if tm is None or not tm.is_alive():
+            await self.recover_agent(agent_id, keep_alive=True)
+            rec = reg.record_of(agent_id)
+            if rec is None:
+                # recover_agent 内部的自愈（rebuild_agent）已经跑过一轮，仍然找不到
+                # 这个 agent —— 不该发生（keep_alive 只短路了"没有可恢复 task"这一条
+                # 判据，不影响"session 在事件日志里压根不存在"那条更早的 RuntimeError，
+                # 那条会直接从上面 `recover_agent` 里抛出、传播到这里之前）。防御性地
+                # 给一个可诊断的类型化错误，而不是让下面的 `rec.session_id` 撞
+                # AttributeError。
+                from ctx_weft.core.models.errors import AgentNotFound as _ANF
+                raise _ANF(
+                    f"agent {agent_id!r} disappeared during cold recovery — "
+                    f"the session may have been released concurrently; retry send_message"
+                )
+            tm = self._task_managers.get(rec.session_id)
+            if tm is None:
+                from ctx_weft.core.models.errors import SessionNotFound
+                raise SessionNotFound(
+                    f"agent {agent_id!r} (session {rec.session_id!r}) has no live "
+                    f"TaskManager even after recover_agent(keep_alive=True) — this is "
+                    f"a bug in the recovery path, not a transient condition; do not retry "
+                    f"blindly, file it"
+                )
         normalized, event_jsonable = await self._validate_and_normalize_content(
             content, rec.session_id, tenant_id=rec.tenant_id,
         )
@@ -2490,13 +2579,15 @@ class CtxWeftRuntime:
         try:
             if isinstance(req.delivery, ToolResultDelivery):
                 await self._hydrate_agent_for_cold_resume(req)
-                await self.recover_agent(
-                    req.agent_id, resumed_task_id=req.task_id, hitl_id=req.id,
+                await self._recover_after_cold_hitl(
+                    req.agent_id, req.session_id,
+                    resumed_task_id=req.task_id, hitl_id=req.id,
                 )
             elif isinstance(req.delivery, UserTurnDelivery):
                 await self._hydrate_agent_for_cold_resume(req)
-                await self.recover_agent(
-                    req.agent_id, user_reply=req, resumed_task_id=req.delivery.task_id,
+                await self._recover_after_cold_hitl(
+                    req.agent_id, req.session_id,
+                    user_reply=req, resumed_task_id=req.delivery.task_id,
                     hitl_id=req.id,
                 )
             # NoResumeDelivery：纯通知 / 取消，无动作——连预装填都不做。
@@ -2509,6 +2600,41 @@ class CtxWeftRuntime:
                 req.id, req.session_id, req.task_id, type(req.delivery).__name__,
             )
             raise
+
+    async def _recover_after_cold_hitl(
+        self, agent_id: str, session_id: str, **recover_kwargs: Any,
+    ) -> None:
+        """`_resume_after_hitl` 的两条真续跑分支（`ToolResultDelivery`/
+        `UserTurnDelivery`）共用的唯一路由（终审 CRITICAL 2）——两个调用点都过这里，
+        谁也不能独自漂移出一份不带这个回退的重复写法。
+
+        **legacy 冷 HITL 的 `agent_id == ""` 必须回退到 `session_id`**：一条折叠自
+        旧版 `HITL_REQUIRED` 事件的 `PendingHitl`（该事件从未持久化 `agent_id`，见
+        `_reply_turn_agent_id` 与 `tests/unit/test_cold_resume_agent_scope.py`）永远
+        没有 `agent_id` 可给 `recover_agent` 路由——`record_of("")` 必 miss，落到它
+        自己的 registry-miss 自愈（`rebuild_agent("")` → `rebuild_all_agents()` 扫
+        全部 active session）也不可能命中键为 `""` 的记录，最终必然
+        `AgentNotFound: unknown agent: `（空 id 原样拼进消息）。这一步发生在
+        `HitlService._commit` 已经把这条 HITL 判成终局**之后**（`reply_to_hitl` 的
+        docstring："冷续跑由本返回值驱动，不挂总线订阅"），没有第二次机会——会话因此
+        永久卡住。
+
+        换轴前，这条续跑走的是 `recover_session(session_id)`，天然不受这个问题影响
+        （它压根不看 agent_id）。换轴后 `recover_session` 整个改名成了以 agent_id 为
+        主键的 `recover_agent`，但 `PendingHitl` 本来就两个字段都有——`session_id`
+        永远可用（`HITL_REQUIRED`/`HITL_OPENED` 的信封本身就带 `session_id`，不像
+        `agent_id` 那样可能是旧 payload 里没有的字段）。回退因此直接绕开
+        `recover_agent` 的 agent_id 反查那一层，改走它内部真正做事的
+        `_recover_session_locked`（同一份重建逻辑，只是不经 agent_id → session_id
+        这道找不到路的间接层）——与 `recover_agent` 本身一样，须持同一把
+        per-session 锁（`_resume_locks`），不能绕过串行化。
+        """
+        if agent_id:
+            await self.recover_agent(agent_id, **recover_kwargs)
+            return
+        lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            await self._recover_session_locked(session_id, **recover_kwargs)
 
     async def _hydrate_agent_for_cold_resume(self, req: PendingHitl) -> None:
         """在真会触发 `recover_agent` 的那一刻，用 `req.session_id` 精确装填一次——

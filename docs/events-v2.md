@@ -17,14 +17,14 @@
 > `SessionRunning`/`SessionFinished`）随会话状态机（`session_state.py`）整体退役
 > **全部停发**，已转入 L 档（`EventType.L_TIER_EVENT_TYPES`，见
 > `src/ctx_weft/protocols/events.py` Task 16 处的内联注释）——§2.1.1 的「唯一持有者」
-> 表述已随之作废（见该节的更正说明）；§5 尚未把这 4 个加进 L 档清单；§2.5（`Agent`）
-> 尚未补上新增的 5 个 `AGENT_*` 状态事件（`AgentRunning`/`AgentIdle`/
-> `AgentWaitingHuman`/`AgentInterrupted`/`AgentTerminated`，`AgentLifecycleManager.
-> apply_input` 发出）。这些都是本文档自身滞后于代码的已知缺口，不是本次重命名的
-> 范围——本次改名只保证「文中出现的类名跟得上现状」，不重算总数/表格。当前权威
-> 状态见 `docs/upgrade/2026-09-03-agent-centric-interaction.md` 第 5 节。
+> 表述已随之作废（见该节的更正说明）；这 4 个已随 2026-09-04 的 L 档核账一并补进
+> §5（见 §5.5）；§2.5（`Agent`）仍**尚未**补上新增的 5 个 `AGENT_*` 状态事件
+> （`AgentRunning`/`AgentIdle`/`AgentWaitingHuman`/`AgentInterrupted`/
+> `AgentTerminated`，`AgentLifecycleManager.apply_input` 发出）——这是本文档自身
+> 滞后于代码的已知缺口，不是本次重命名或 2026-09-04 核账的范围。当前权威状态见
+> `docs/upgrade/2026-09-03-agent-centric-interaction.md` 第 5 节。
 
-**总量：58 个在用 + 9 个只读存量（L 档）——上面这条已知过期未反映在这个数字里。**
+**总量：58 个在用 + 20 个只读存量（L 档）——上面这条 §2.5 缺口未反映在这个数字里。**
 
 ---
 
@@ -61,7 +61,7 @@
 |---|---|---|
 | **S** · 30 个 | 有状态消费者（reducer / host 投影）折叠它 | 语义冻结；改名须走别名表；payload 只可**加**字段 |
 | **O** · 28 个 | 已发射、无状态消费者，纯观测/展示 | 可重命名 / 合并 / 删除，与 host SSE 同步即可 |
-| **L** · 9 个 | 曾发射、现已停发、重放仍须认识 | **只读**。不得再发射；删除须过退役闸门（§5） |
+| **L** · 20 个 | 曾发射、现已停发、重放仍须认识 | **只读**。不得再发射；删除须过退役闸门（§5） |
 | X · 0 个 | 从未发射 | V2 已清空——定义即必须发射 |
 
 其中 3 个是 **TRANSIENT**（⊂ O）：`LLMTokenStreamed` / `LLMReasoningStreamed` /
@@ -418,12 +418,12 @@ host 自定义结局因此不必新增事件类型。
 > 新模型里**会话状态**这一侧的判定整个不存在了：`PAUSED` / `PAUSED_HITL` 已从
 > `SessionStatus` 值域删除，合并成单一 `WAITING`。
 >
-> `core/hitl/status.py::paused_status_for` **保留**，但它答的是另一个问题——它服务
-> `CtxWeftRuntime.session_status_after_recover` 这个 host 只读入口，返回的
-> `"PAUSED"` / `"PAUSED_HITL"` 是**面板提示**（panel hint），按 `delivery` 判、
-> 不按 form，**不是 `SessionStatus` 值**。
-> （遗留项：`session_status_after_recover` 这个名字现在名不副实——它返回的不是会话
-> 状态。改名要动 host 契约，已记为延后项。）
+> **2026-09-04（runtime 对外面 agent-centric 对齐 Task 14）起，两者都已删除**：
+> `core/hitl/status.py::paused_status_for` 与它唯一的消费方
+> `CtxWeftRuntime.session_status_after_recover` 一并删掉了（上面那条"改名待办"因此
+> 也一并消失，不再需要）。它们原来答的是**面板提示**（panel hint：按 `delivery`
+> 判、不按 form，**不是 `SessionStatus` 值**）这个问题，现在由 host 直接读
+> `HitlRequestView.delivery` 自判——同一份原始事实，少一层会漂移的派生。
 
 > **热等待窗口期间会话仍是 `RUNNING`**（2026-09-02 定案的行为变更）。热等待时 task
 > 真的还在跑——阻塞在一个 `await` 里，和阻塞在一次 LLM 调用上没有区别，没有 park、
@@ -484,17 +484,28 @@ run 真正的用处是**事件流的分段与 SSE 的开关**：`run_id` 把一�
 | `RunStarted` | `run_id` `initial_step` | 一次 step 链执行开始。一个 task 可以有多个 run（重试 / 重排 / 挂起后恢复各一个新 run），一个 session 可以同时有多个 run 在跑 |
 | `RunFinished` | `outcome` `final_status`（废弃） `will_retry` `total_events` `total_turns` `error` `error_type` | 一次执行结束，**无论成败必发**——host 靠它关 SSE。`outcome` 是**run 自己**的结局（run 词表五值，见 §2.4）；`final_status` 已废弃（仍装 `task.status`，保留一个发布周期供旧断言过渡）；`will_retry=true` 时 host 先别关流 |
 
-### 3.3 TaskManager 信号 · 3
+### 3.3 TaskManager 信号 · 0（原 3 个，已停发，见 §5.6）
 
-TM 对它手上全部任务的聚合结论，**SM 的唯一输入**。三个独立类型而不是一个带
+> **2026-09-04（runtime 对外面 agent-centric 对齐 Task 12）起停发**：这三个类型
+> 唯一的消费者是 SM（`SessionRegistry` 的状态机），它自 2026-09-03 起已经降格、
+> 只订阅 `AGENT_INSTANTIATED` / `AGENT_SPAWNED`，不再消费队列信号——`TaskManager.
+> announce_queue_state` 与 `runtime._announce_queue_state_as_tm_proxy`（后者是
+> "代 TaskManager 给 SessionRegistry 发它唯一的输入"这层代理，消费者已不存在，
+> 整个方法一并删除）两处发射点都已停发。枚举成员与下面的 reducer 分支按 §5.6
+> 保留（存量日志重放靠它们）。前端要的「这一轮跑完了」不再靠 `TaskQueueDrained`
+> 提前收到信号——改订 `AgentLifecycleManager` 发的 `AGENT_IDLE`（正常收工，无未决
+> HITL）/ `AGENT_WAITING_HUMAN`（挂在人身上）/ `AGENT_INTERRUPTED`（被进程重启
+> 打断），这本就是 agent 该承担的信号；恢复期的可观测性也由同一套广播承担
+> （`recover()` 装填 `AgentLifecycleManager` 后按折出来的现状重发，不再需要
+> 代 TM 合成一条会话级队列信号）。下表描述的是停发前的行为，留作存量事件的读法
+> 参考。
+
+TM 对它手上全部任务的聚合结论曾是 **SM 的唯一输入**。三个独立类型而不是一个带
 discriminator 的类型——SM 收到哪条就转到哪个状态，不读任何字面量。
 
 **有活在跑时一条都不发**（`if self._queue or self._running_tasks: return`）。
 全停下来后按「解开它需要谁」挑一条：`Interrupted`（运维）> `Blocked`（用户）> `Drained`（无需）。
 TM 区分前两者靠的是 **task 状态**，那本来就是它自己的领域，不需要知道 HITL 的任何事。
-
-O 档：reducer 不折叠它们（会话状态由 SM 发的事件承载），但 host 可以拿来做提前提示——
-前端要的「这一轮跑完了」正是 `TaskQueueDrained`。
 
 | 事件 | payload | 含义 |
 |---|---|---|
@@ -603,28 +614,26 @@ persistence.snapshot_writer
 
 ---
 
-## 5. L 档 · 9 个（只读存量，不得再发射）
+## 5. L 档 · 20 个（只读存量，不得再发射）
 
 共同点：**还在 `EventType` 里、新流量里不再出现、重放存量日志时仍会被读到、不进别名表**
 （别名表的语义是「旧名折进新分支」，这些没有对应新分支，用的是自己的旧分支）。
-两批的退役条件不同，分开列。
+真相源是 `EventType.L_TIER_EVENT_TYPES`（`src/ctx_weft/protocols/events.py`）；下面按
+退役批次分列，每批的退役条件不同。
 
-### 5.1 HITL 那批 · 8 个
+### 5.1 HITL 那批 · 7 个
 
 `HitlRequired` `HitlApproved` `HitlModified` `HitlAnswered` `HitlRejected`
-`HitlCancelled` `HitlTimeout` `SessionPausedHitl`
+`HitlCancelled` `SessionPausedHitl`
 
 `fold_hitl_snapshot` 新旧双读，`_apply` 保留旧分支。旧事件折出来的 HITL 记录
 `invocation_key` 为 `""`（通配），行为与升级前逐条同构。
-
-`HitlTimeout` 是这 8 个里唯一从未发射过的。放进 L 档只为和另外 7 个同批退役，
-省一次跨仓核对。
 
 **退役闸门（两级，缺一即停）：**
 
 1. **删双读折叠**：升级点之前产生的 `HitlRequired` 全部已有对应终态事件（无悬挂未决），
    且这些 session 均已归档 / 超出最长存活期。
-2. **删枚举值**（更严）：确认没有任何回放会碰到这 8 个字符串。通常要等一整个归档周期。
+2. **删枚举值**（更严）：确认没有任何回放会碰到这 7 个字符串。通常要等一整个归档周期。
 
 ### 5.2 `SessionStatusChanged` · 1 个
 
@@ -635,7 +644,41 @@ persistence.snapshot_writer
 **退役闸门比 HITL 那批简单**：它没有双读折叠，只有 `_apply` 的一个分支；条件只有一条——
 确认没有任何回放会碰到这个字符串（同 5.1 的第 2 级）。
 
-### 5.3 共同的
+### 5.3 BackgroundObserve 那批 · 4 个（2026-09-03 起停发）
+
+`BackgroundObserveRequestStarted` `BackgroundObservePromptSent`
+`BackgroundObserveTokenStreamed` `BackgroundObserveResponseFinished`
+
+`observe.py` 的 `ReactEventTypes` 间接层删除后，`run_observe_react` 统一发
+`LLM_*`（靠 `state.origin` 区分前台/后台），这 4 个专属镜像类型停止发射。
+`_apply` 分支原样保留，枚举成员按控制方裁定暂不删除（退役闸门是后续任务的事）。
+
+### 5.4 `RecognizeIntentLLMPrompt` · 1 个（2026-09-03 起停发）
+
+`recognize_intent.py` 切到 `stream_llm_resilient` 后，通用 `LLM_PROMPT_SENT`
+（由 gateway 发，`origin=loop.recognize_intent`）取代了这条 step 专属的镜像事件。
+
+### 5.5 SESSION_* 运行态 · 4 个（2026-09-03 起停发）
+
+`SessionRunning` `SessionWaiting` `SessionInterrupted` `SessionFinished`
+
+会话状态机（`session_state.py`）随 `SessionRegistry` 降格一并退役，这 4 个类型
+不再有发射点。`_apply` 分支原样保留（存量日志重放靠它们）。
+
+### 5.6 `TaskQueue*` · 3 个（2026-09-04 起停发）
+
+`TaskQueueBlocked` `TaskQueueInterrupted` `TaskQueueDrained`
+
+见 §3.3：唯一消费者（会话状态机）早已降格，两处发射点
+（`TaskManager.announce_queue_state`、`runtime._announce_queue_state_as_tm_proxy`）
+一并停发。恢复期的可观测性改由 `AgentLifecycleManager` 装填后的 `AGENT_*` 现状
+广播承担。
+
+### 5.7 共同的
+
+5.3–5.6 这四批与 5.1/5.2 的退役条件不同：它们没有专属的双读折叠，`_apply`
+分支原样保留即可支持存量日志重放，因此**没有"删双读折叠"这一级**，退役闸门只剩
+5.1/5.2 式的第 2 级——确认没有任何回放会碰到这些字符串。
 
 第 2 级闸门过了 L 档才清空。**在那之前 L 档非空是正常状态，不是待办积压。**
 

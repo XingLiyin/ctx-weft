@@ -205,6 +205,57 @@ async def test_wait_for_finish_matches_task_recap_done_by_value_not_identity():
         bg._task_pending_run_id.pop("tsk_1", None)
 
 
+async def test_wait_for_finish_does_not_hang_when_recap_done_arrives_before_terminal():
+    """终审 IMPORTANT 3 回归：`TaskRecapDone` 先于终态事件到达时不能挂住。
+
+    原实现的外层循环只在 `ev.type in terminal` 时才有反应；先到的 `TaskRecapDone`
+    被当成"不认识的事件"直接丢弃（流是单向消费的，丢过去的事件读不回来）。等终态
+    事件终于到达、内层循环才开始等那个 `run_id`——它已经过去了，`pending.done()`
+    此刻仍是 `False`（后台任务是否跑完与它的 `TaskRecapDone` 是否已送达是两回事），
+    内层循环于是无休止地等一条不会再来的事件，直到 `timeout` 耗尽才靠兜底返回——
+    不抛异常，只是把调用方晾到超时（这正是最坏的失败形态）。
+
+    本测试给 `wait_for_finish` 一个短 `timeout`：修复后必须远早于这个超时返回
+    （证明是被"提前到账"的 `TaskRecapDone` 放行的，不是靠超时兜底）；未修复时会
+    原地耗尽这个 `timeout` 才返回——用耗时区分两者，与
+    `test_wait_for_finish_matches_task_recap_done_by_value_not_identity` 同一手法。
+    """
+    from ctx_weft.core.loop.steps import background_observe as bg
+
+    class _NeverDoneTask:
+        def done(self) -> bool:
+            return False
+
+    bus = InProcessEventBus()
+    h = TurnHandle(session_id="s1", agent_id="agt_1", task_id="tsk_1",
+                   template_id="tpl", event_bus=bus)
+
+    bg._task_pending["tsk_1"] = _NeverDoneTask()
+    bg._task_pending_run_id["tsk_1"] = "run_close_launch"
+    try:
+        waiter = asyncio.create_task(h.wait_for_finish(timeout=0.3))
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        t0 = asyncio.get_running_loop().time()
+        # TaskRecapDone 先到账——这次终态触发的那次折叠先落地，事件先送达。
+        await bus.emit(_ev(id="e1", type=EventType.TASK_RECAP_DONE, run_id="run_close_launch"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        # 终态事件随后才到。
+        await bus.emit(_ev(id="e2", type="TaskFinished"))
+
+        await asyncio.wait_for(waiter, timeout=2.0)
+        elapsed = asyncio.get_running_loop().time() - t0
+        assert elapsed < 0.2, (
+            f"wait_for_finish 耗时 {elapsed:.3f}s——像是靠 0.3s 超时兜底返回的，"
+            "说明先到账的 TaskRecapDone 没被记住，白等了一条已经过去的事件"
+        )
+    finally:
+        bg._task_pending.pop("tsk_1", None)
+        bg._task_pending_run_id.pop("tsk_1", None)
+
+
 class _CloseFoldLLM(MockLLMAdapter):
     """单 root task：finish_task 收尾触发 close 边界后台 observe（launch_background_observe
     fire-and-forget），验证 `wait_for_finish` 返回**那一刻**该次折叠已经落地——不是靠

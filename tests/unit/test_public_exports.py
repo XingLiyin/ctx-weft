@@ -15,6 +15,7 @@ def test_agent_centric_types_are_exported():
         "AgentSummary", "AgentDetail", "CompactReceipt",
         "HitlReply", "HitlRequestView",
         "AgentNotFound", "AgentNotRunningError",
+        "AgentBusyError", "AgentTerminatedError", "SessionBusyError",
     ):
         assert hasattr(ctx_weft, name), f"{name} 不在顶层导出面上"
         assert name in ctx_weft.__all__, f"{name} 不在 __all__ 里"
