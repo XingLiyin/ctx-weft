@@ -160,9 +160,18 @@ class ActStep(Step):
             and not state.task.suspend_requested
             and transcript
         ):
-            outputs = _compose_final_outputs(transcript)
+            body, summary = _compose_final_outputs(transcript)
+            # 拼接留在调用方：`task.outputs` 的既有契约（**拼好的单串**）一个字不变——
+            # 它有 6 处读取方（_build_memory_content / background_observe / finalize 的
+            # final_reply 等），改形态会把这些一并掀翻。
+            outputs = f"{body}\n\n{summary}" if (body and summary) else (body or summary)
             if outputs:
                 state.task.outputs = outputs
+            # 两段另存一份：TASK_FINALIZED 需要它们**分开**出核——output 是交付物本身，
+            # summary 是 agent 给 reviewer 的自评清单。混在一起正是 host 侧打印「最终
+            # 答复」时把自评清单当答案一起打出来的成因。
+            state.extra["final_body"] = body
+            state.extra["final_summary"] = summary
 
         return StepOutcome(
             next_step=next_step,
@@ -173,12 +182,15 @@ class ActStep(Step):
         )
 
 
-def _compose_final_outputs(transcript: list[TurnRecord]) -> str:
-    """合成收尾交付物 = 收尾回合正文 + finish_task 的 deliverables_summary（spec 2026-07-01）。
+def _compose_final_outputs(transcript: list[TurnRecord]) -> tuple[str, str]:
+    """拆出收尾交付物的两段 `(body, summary)`（spec 2026-07-01）。
 
     body = 收尾回合(transcript[-1])正文；空则回溯本段最近一段非空 assistant_text（兼容模型把
     答复写在上一回合、收尾回合只调 finish_task 的情况）。summary = 收尾回合 finish_task 调用的
-    deliverables_summary（可空）。两段按存在情况拼接；全空返回 "" → 交给 observer 护栏。
+    deliverables_summary（可空）。两段都空 → `("", "")`，交给 observer 护栏。
+
+    **只拆不拼**：拼接是调用方的事。两段语义不同（body 是答复本身，summary 是给 reviewer 的
+    交付物清单），下游有需要分开的消费者（TASK_FINALIZED 事件），在这里拼死就再也分不开了。
     """
     last = transcript[-1]
     body = (last.assistant_text or "").strip()
@@ -194,9 +206,7 @@ def _compose_final_outputs(transcript: list[TurnRecord]) -> str:
             val = (tc.arguments or {}).get("deliverables_summary", "")
             summary = val.strip() if isinstance(val, str) else ""
             break
-    if body and summary:
-        return f"{body}\n\n{summary}"
-    return body or summary
+    return body, summary
 
 
 @dataclass

@@ -627,8 +627,10 @@ def _apply(view: RunStateView, ev: Event) -> None:
     elif t == EventType.TASK_FINALIZED and ev.task_id:
         task = view.tasks.get(ev.task_id)
         if task is not None:
-            # outputs/error 不在本事件的 payload 里（发射侧只发 task_id/outcome）——
-            # 它们由 TaskFinished/TaskFailed/TaskInterrupted 折入，见总账 A1。
+            # 本事件的 payload 里**有** outputs{output,summary}/error（2026-09-05 起，
+            # 供 host 落 tasks 表与 CLI 打印），但这里刻意不折：投影的 outputs/error 只认
+            # TaskFinished/TaskFailed/TaskInterrupted 一个来源（总账 A1）——两处都写会让
+            # 先到的 TaskFinalized 覆盖或清空后到的成果，正是 A1 当初要治的那个漂移。
             task.finished_at = ev.timestamp
 
     # ── LLM / Context ─────────────────────────────────────────────────────────

@@ -87,6 +87,16 @@
 > `TaskRequeued`（task → `PENDING`），不是这条。run 层同时发的 `RunInterrupted`
 > 说的是另一件事（那次执行死了），不写 task 状态。
 
+> `TaskFinalized{task_id, outcome, outputs:{output, summary}, error}`：**只记结果，
+> 不改状态**（状态是 `TaskFinished` / `TaskFailed` 的事）。交付物两段分开送
+> （2026-09-05）：`output` 是**答复正文本身**——收尾回合的 assistant 正文；`summary`
+> 是 agent 调 `finish_task` 时给的 `deliverables_summary`，写给 reviewer 的交付物自评
+> 清单。**两段绝不可合成一串**：host 打印「最终答复」只取 `output`，混在一起就会把
+> agent 的自评清单当答案打出来。判据以 `task.outputs` 为准绳——observer 判 retry 驳回
+> 会把它置空，此时两段一起归空，不送已被驳回的废稿。`output` 恒为**纯文本**：这个字段
+> 的消费者是 host 的 `tasks.outputs_json` 与 CLI 打印，多模态交付物走 blob store 那条
+> 正路，不让事件载荷背图片。reducer 侧不折这两个字段（见 `03-reducer-rules.md`）。
+
 ### ~~TaskManager 信号（会话状态机的输入）~~ · 已删除
 
 > `TaskQueueBlocked` / `TaskQueueInterrupted` / `TaskQueueDrained` 于 2026-09-04 停发、

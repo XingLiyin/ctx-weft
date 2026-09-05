@@ -764,9 +764,38 @@ class FinalizeStep(Step):
                 payload={"topic": task.id, "content_length": len(mem_content), "parent_task_id": task.parent_task_id},
             ))
 
+        # ── TASK_FINALIZED：结局 + 交付物出核 ────────────────────────────────
+        # 交付物分两段送：`output` 是答复本身，`summary` 是 agent 给 reviewer 的自评
+        # 清单（finish_task 的 deliverables_summary）。**必须分开**——host 打印「最终
+        # 答复」只该拿 output；此前只送 task_id/outcome，host 的 tasks 表 outputs_json /
+        # error 两列因此恒空。
+        #
+        # 判据以 `task.outputs` 为准绳，不直接读 state.extra，两条边界都在这一句里：
+        # ① retry 驳回：observer 判本段不合格会把 task.outputs 置空（上面 retry 分支、
+        #    task/manager.py 的 requeue 各有一次），但 state.extra 里还留着上一轮的废稿；
+        #    直接读 extra 会让 host 把一份已被驳回的稿子写进 tasks 表。所以 deliverable
+        #    为空 → 两段一起归空。
+        # ② extra 空但 outputs 有货：多段任务的末段可能没正文，recap 重启路径更是根本
+        #    没跑过 ActStep（state.extra 全空）——这时 task.outputs 才是真答复，回落它。
+        # `getattr(..., None) or {}` 只为容忍用 SimpleNamespace 造 state 的单测替身
+        # （test_finalize_fail_reason / test_subtask_nesting），生产路径必命中真字段。
+        #
+        # output 送**纯文本**（_output_text 提取），不送 content parts：这个字段的消费者
+        # 是 tasks.outputs_json 与 CLI 打印，两个都是文本场景；多模态交付物有 blob store
+        # 那条正路，不该让事件载荷背图片。
+        extra = getattr(state, "extra", None) or {}
+        deliverable = _output_text(task.outputs)
         events.append(make_event(
             state, EventType.TASK_FINALIZED,
-            payload={"task_id": task.id, "outcome": outcome},
+            payload={
+                "task_id": task.id,
+                "outcome": outcome,
+                "outputs": {
+                    "output": (extra.get("final_body", "") or deliverable) if deliverable else "",
+                    "summary": extra.get("final_summary", "") if deliverable else "",
+                },
+                "error": task.error or "",
+            },
         ))
 
         return StepOutcome(next_step=None, state_patch={"run_outcome": run_outcome}, events=events)

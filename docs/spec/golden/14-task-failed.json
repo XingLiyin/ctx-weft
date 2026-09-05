@@ -1,6 +1,6 @@
 {
   "name": "task-failed",
-  "description": "失败路径：TaskFailed → FAILED，error 由 TaskFailed.error_message 折入；TaskFinalized 只补 finished_at（发射侧只带 task_id/outcome，不带 outputs/error）。task 状态所有权重构（2026-09-02）后 TaskFailed 由 TaskManager 发、不带 run_id。",
+  "description": "失败路径：TaskFailed → FAILED，error 由 TaskFailed.error_message 折入；TaskFinalized 只补 finished_at——它自 2026-09-05 起**确实带** `outputs:{output,summary}` 与 `error`（供 host 落 tasks 表），但 reducer 刻意不折：投影的 outputs/error 只认 TaskFinished/TaskFailed 一个来源。本例 fail 路径 outputs 两段皆空。task 状态所有权重构（2026-09-02）后 TaskFailed 由 TaskManager 发、不带 run_id。",
   "runId": "s1",
   "events": [
     { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
@@ -15,7 +15,9 @@
       "type": "TaskFailed", "timestamp": "2026-06-05T00:00:04Z",
       "payload": { "error_code": "TASK_FAILED_BY_OBSERVER", "error_message": "boom: tool crashed", "retry_count": 0 } },
     { "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1", "taskId": "tsk_1",
-      "type": "TaskFinalized", "timestamp": "2026-06-05T00:00:05Z", "payload": { "task_id": "tsk_1", "outcome": "fail" } }
+      "type": "TaskFinalized", "timestamp": "2026-06-05T00:00:05Z",
+      "payload": { "task_id": "tsk_1", "outcome": "fail",
+                   "outputs": { "output": "", "summary": "" }, "error": "boom: tool crashed" } }
   ],
   "expected": {
     "taskStatus": "FAILED",

@@ -1,6 +1,6 @@
 {
   "name": "reopen-requeue",
-  "description": "tsk_1 跑完并 finalize 出 outputs；reopen 触发 TaskRequeued → 回 PENDING、清 outputs、恢复改写后的 prompt。验证 TaskRequeued reducer 规则。task 状态所有权重构（2026-09-02）后 TaskFinished 由 TaskManager 在 run 返回之后发、不带 run_id；本用例的 TaskRequeued 是 reopen（显式操作，不经 RunOutcome），不受本次重构影响。",
+  "description": "tsk_1 跑完并 finalize 出 outputs（TaskFinalized 自 2026-09-05 起带 `outputs:{output,summary}` + `error`：output=答复正文，summary=finish_task 的交付物自评清单；reducer 仍不折它们，投影里的 outputs 只认 TaskFinished）；reopen 触发 TaskRequeued → 回 PENDING、清 outputs、恢复改写后的 prompt。验证 TaskRequeued reducer 规则。task 状态所有权重构（2026-09-02）后 TaskFinished 由 TaskManager 在 run 返回之后发、不带 run_id；本用例的 TaskRequeued 是 reopen（显式操作，不经 RunOutcome），不受本次重构影响。",
   "runId": "s1",
   "events": [
     {
@@ -29,7 +29,10 @@
     {
       "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1", "taskId": "tsk_1",
       "type": "TaskFinalized", "timestamp": "2026-06-05T00:00:05Z",
-      "payload": { "outputs": { "result": "v1" }, "error": null }
+      "payload": {
+        "task_id": "tsk_1", "outcome": "success",
+        "outputs": { "output": "v1", "summary": "wrote v1" }, "error": ""
+      }
     },
     {
       "id": "evt_0006", "runId": "run_1", "sequence": 6, "sessionId": "s1", "taskId": "tsk_1",

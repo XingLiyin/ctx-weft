@@ -85,7 +85,7 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 | `TaskCreated` | 建 `TaskView`（取 `payload.task`，id 缺省回落 `event.taskId`）；若 view.taskId 空则填入 |
 | `TaskRequeued` | 该 task：`status="PENDING"`、`outputs=null`；若带 `user_prompt`/`original_user_prompt` 则一并恢复；`taskStatus="PENDING"` |
 | `type ∈ TASK_STATUS_BY_EVENT`（且有 taskId） | 该 task.status = 映射值；`TaskStarted` 额外回填 `assigned_agent_id`；`taskStatus` 置之。另折叠 `session.failureCounter`：`TaskFailed` +1（`error_code="TASK_FAILED_BY_THRESHOLD"` 不计）、`TaskFinished` 清零 |
-| `TaskFinalized` | 该 task：`outputs=payload.outputs`、`error=payload.error`、`finishedAt=ts` |
+| `TaskFinalized` | 该 task：`finishedAt=ts`，**仅此一项**。它的 `payload.outputs{output,summary}` / `payload.error` 是给 host 落 `tasks` 表用的，reducer 刻意不折——投影里的 `outputs`/`error` 只认 `TaskFinished`/`TaskFailed` 一个来源，两处都写会让先到的 `TaskFinalized` 覆盖或清空后到的成果（见 golden `14-task-failed`）|
 | `RecognizeIntentToolCall`（且有 taskId） | 该 task：`title`/`description` 非空则更新（root task 创建时为空、recognize_intent 并发补填；空值不覆盖） |
 
 ### Agent

@@ -45,7 +45,7 @@
 | `11-compact-task.json` | compact 子任务作为普通 task；compact 域事件 no-op |
 | `12-inert-events-noop.json` | token budget / capability / HITL / LLM 事件对投影无副作用 |
 | `13-task-canceled.json` | TaskCanceled → CANCELED；**RunCanceled 在 reducer 中 no-op**（会话取消看 SessionFinished{CANCELED}） |
-| `14-task-failed.json` | TaskFailed → FAILED；TaskFinalized 回填 error |
+| `14-task-failed.json` | TaskFailed → FAILED，error 由 `TaskFailed.error_message` 折入；TaskFinalized 只补 `finishedAt`——它带的 `outputs{output,summary}`/`error` 是给 host 的，reducer 不折 |
 | `15-recognize-intent-metadata.json` | RecognizeIntentToolCall 更新 task title/description + session.goal（空值不覆盖） |
 
 > 覆盖范围：`reducers._apply` 的全部分支 + `_rebuild_agents` 的 root/子 agent 推算 + 惰性事件 no-op。
