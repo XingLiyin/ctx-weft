@@ -698,8 +698,8 @@ class TaskManager:
         宣布——本方法发的这条 TASK_INTERRUPTED 由 `AgentLifecycleManager` 的五态机
         （`_INPUT_BY_EVENT`）接手，折成对应 agent 的 AGENT_INTERRUPTED（判据是事件
         类型，不是 reason 字面量）。2026-09-04（Task 12）前这里还会额外经
-        `announce_queue_state` 聚合出一条会话级 TaskQueueInterrupted，现已停发
-        （events-v2 §5：那条信号唯一的消费者早已降格）。
+        `announce_queue_state` 聚合出一条会话级队列信号，现已停发、其事件类型也已于
+        2026-09-05 删除（那条信号唯一的消费者早已降格）。
         **发射时机是重试判定之后**：`_handle_task_failure` 决定原地重试的那一支发的是
         TASK_REQUEUED（→ PENDING），只有落到本方法才是「停在 INTERRUPTED 等 /resume」。
         不发 TASK_FAILED、不增 failure_counter、不闭合胶囊：真失败只有 observer 判 fail
@@ -915,8 +915,8 @@ class TaskManager:
                 logger.exception("TaskManager: threshold_finalizer callback failed")
 
         # 8) 会话终态 + 收尾事件。终态直接写定为 FAILED（2026-09-04 Task 12 起不再
-        #    经由已停发的 TaskQueueDrained/会话状态机——熔断的前提就是 failure_counter
-        #    已达阈值，`_final_status()` 此刻本就恒为 FAILED，无需绕一圈再落定）。
+        #    经由队列聚合信号/会话状态机——熔断的前提就是 failure_counter 已达阈值，
+        #    `_final_status()` 此刻本就恒为 FAILED，无需绕一圈再落定）。
         if self._session is not None:
             self._session.status = "FAILED"
         await self._fire_session_done()
@@ -1020,8 +1020,8 @@ class TaskManager:
     def _final_status(self) -> str:
         """全部终态时的会话结论。failure_counter > 0 表示本轮有任务失败。
 
-        2026-09-04（Task 12）起 `announce_queue_state`/`TaskQueueDrained` 已停发
-        （L 档登记，events-v2 §5），本方法不再是谁的数据源——唯一读者是本文件
+        2026-09-04（Task 12）起 `announce_queue_state` 及其队列聚合事件已停发（事件
+        类型于 2026-09-05 删除），本方法不再是谁的数据源——唯一读者是本文件
         `_settle` 里的 ``self._session.status = self._final_status()``（终态收尾
         直接写 session 状态，不再经由已退役的会话状态机）。**只返回终态值**：
         空串或别的东西会把 `_session.status` 写成一个不存在的状态。
@@ -1130,8 +1130,7 @@ class TaskManager:
         _fire_session_done（先 gather 重跑的后台 recap，再发 SESSION_FINISHED + 回调）。
 
         镜像 on_task_finished 的会话收尾：走同一条 `_fire_session_done` 链，终态由调用方
-        传入的 `status` 直接写定（2026-09-04 Task 12 起不再经由已停发的 `TaskQueueDrained`/
-        会话状态机）。幂等由 `_fire_session_done` 内的归属权判定 + `_on_session_done`
+        传入的 `status` 直接写定（2026-09-04 Task 12 起不再经由队列聚合信号/会话状态机）。幂等由 `_fire_session_done` 内的归属权判定 + `_on_session_done`
         自身幂等承担。
         """
         if self._session is not None:

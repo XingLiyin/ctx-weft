@@ -172,15 +172,24 @@ async def test_no_task_queue_events_are_emitted() -> None:
     assert queue_events == [], f"仍在发 TASK_QUEUE_*: {queue_events}"
 
 
-def test_task_queue_types_are_registered_in_l_tier() -> None:
-    from ctx_weft.protocols.events import L_TIER_EVENT_TYPES
-    assert {"TaskQueueBlocked", "TaskQueueInterrupted", "TaskQueueDrained"} <= L_TIER_EVENT_TYPES
+def test_task_queue_types_are_deleted_outright() -> None:
+    """2026-09-05：三个类型连枚举一并删除，不进 L 档。
+
+    退役闸门（events-v2.md §5 第 2 级）对它们天然成立——`master` 的 `EventType` 里
+    从来没有这三个名字，它们只在 2026-09-02→09-04 之间的分支内部存在过，任何从
+    master 迁移来的事件流都不可能含有它们。
+    """
+    from ctx_weft.protocols.events import EVENT_TYPES, L_TIER_EVENT_TYPES
+    gone = {"TaskQueueBlocked", "TaskQueueInterrupted", "TaskQueueDrained"}
+    assert not (gone & set(EVENT_TYPES))
+    assert not (gone & set(L_TIER_EVENT_TYPES))
 
 
-def test_l_tier_has_twenty_entries() -> None:
-    """17 + 3。数字写死是为了让「悄悄多停一个」这件事必须显式改测试。"""
+def test_l_tier_has_fourteen_entries() -> None:
+    """20 - 6（3 个 TaskQueue* + 3 个分支内部的 SESSION_* 运行态一并删除）。
+    数字写死是为了让「悄悄多停一个」这件事必须显式改测试。"""
     from ctx_weft.protocols.events import L_TIER_EVENT_TYPES
-    assert len(L_TIER_EVENT_TYPES) == 20
+    assert len(L_TIER_EVENT_TYPES) == 14
 
 
 def test_proxy_announcer_is_gone() -> None:

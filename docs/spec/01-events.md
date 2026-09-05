@@ -33,13 +33,17 @@
 
 ### Session / Run / Step
 `SessionCreated` `SessionResumed` `SessionFinished`
-`SessionInterrupted` `SessionWaiting` `SessionRunning`
-`RunStarted` `RunPaused` `RunResumed` `RunCanceled` `RunFinished` `RunInterrupted`
+`RunStarted` `RunCanceled` `RunFinished` `RunInterrupted`
 `StepStarted` `StepCompleted` `StepFailed`
 
-> **已过期（2026-09-03 agent-centric 改造）**：下面这四条已随会话状态机
-> （`session_state.py`）整体删除而**全部停发、转入 L 档**——`SessionInterrupted` /
-> `SessionWaiting` / `SessionRunning` / `SessionFinished` 不再由任何组件发出（含
+> **2026-09-05：`SessionInterrupted` / `SessionWaiting` / `SessionRunning` 已连枚举
+> 一并删除**（`docs/events-v2.md` §5.8）。它们生于 2026-09-02、死于 09-03，全程落在
+> `master` 之后的分支内部——`master` 的 `EventType` 里从来没有这三个名字，任何存量
+> 事件流都不可能含有它们，退役闸门天然成立。`SessionFinished` **仍在枚举里**，只是
+> 同样已停发，进 L 档（存量日志重放要用）。
+>
+> **已过期（2026-09-03 agent-centric 改造）**：这几条已随会话状态机
+> （`session_state.py`）整体删除而**全部停发**——不再由任何组件发出（含
 > `SessionRegistry`，原 `SessionManager`）。「会话状态」这个概念本身不再存在：状态
 > 整体搬到了各 agent 自己身上，见 `docs/upgrade/2026-09-03-agent-centric-interaction.md`
 > 第 5 节与新增的 5 个 `AGENT_*` 事件。以下段落保留描述这四条曾经的语义供历史对照：
@@ -47,8 +51,8 @@
 > 都在等人）/ `SessionRunning`（重新开跑）/ `SessionFinished`（终态）。它们说「会话
 > 到了什么状态」，不带命令语气。
 >
-> **L 档（只读存量，不得再发射）**：`SessionStatusChanged` `SessionPausedHitl`，以及
-> 上面新停发的 `SessionInterrupted` `SessionWaiting` `SessionRunning` `SessionFinished`。
+> **L 档（只读存量，不得再发射）**：`SessionStatusChanged` `SessionPausedHitl`
+> `SessionFinished`。
 > 前者是事实流里唯一的命令式事件（「把状态写成 X」），6 个发射点混着三类不同的东西，
 > 已按上面四条拆解；后者的两档（`PAUSED` / `PAUSED_HITL`）在新值域里合并成单一
 > `WAITING`。**reducer 的读分支保留**——存量日志还要回放。详见 `docs/events-v2.md` §5
@@ -83,13 +87,16 @@
 > `TaskRequeued`（task → `PENDING`），不是这条。run 层同时发的 `RunInterrupted`
 > 说的是另一件事（那次执行死了），不写 task 状态。
 
-### TaskManager 信号（会话状态机的输入）
-`TaskQueueBlocked` `TaskQueueInterrupted` `TaskQueueDrained`
+### ~~TaskManager 信号（会话状态机的输入）~~ · 已删除
 
-> TM 报「队列此刻是什么形状」，`SessionRegistry` 据此推会话状态。三条都是 O 档：
-> reducer 不折叠它们（会话状态由 `Session*` 承载），host **不必**订阅；但它们比会话
-> 状态事件更早到达，想做「这一轮跑完了」的提前提示，订 `TaskQueueDrained` 最准。
-> payload：`{count}` / `{reason}` / `{final_status}`。
+> `TaskQueueBlocked` / `TaskQueueInterrupted` / `TaskQueueDrained` 于 2026-09-04 停发、
+> 2026-09-05 连枚举一并删除（`docs/events-v2.md` §5.8）。原义：TM 报「队列此刻是什么
+> 形状」，`SessionRegistry` 据此推会话状态；payload 依次是 `{count}` / `{reason}` /
+> `{final_status}`。消费者（会话状态机）随 `SessionRegistry` 降格退役后它们就没了读者，
+> 而 `master` 从未有过这三个类型，存量流里也不会有。
+>
+> 想做「这一轮跑完了」的判断，改用本轮 task 的终态事件（`TaskFinished` / `TaskFailed` /
+> `TaskCanceled`），即 `TurnHandle.wait_for_finish()` 用的那套判据。
 
 ### Agent
 `AgentInstantiated` `AgentSpawned` `AgentStatusChanged` `AgentWaiting` `AgentFinalized` `SpawnRejected`

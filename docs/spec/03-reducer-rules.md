@@ -43,20 +43,20 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 |------|------|
 | `SessionCreated` | 建 `SessionView`（`user_prompt`（jsonable）/`template_id`/`root_agent_id`/`llm_model`/`llm_account`/`tenant_id`（缺省回落 `event.tenantId`）/`token_budget`/`context_limit`/`reserved_output_tokens`，`created_at=ts`，`status="RUNNING"`）；`sessionStatus="RUNNING"` |
 | `SessionResumed` | 该 session 的 `userPrompt`、`status="RUNNING"`；`sessionStatus="RUNNING"` |
-| `SessionInterrupted` | payload `reason`（仅展示，**不做路由**）；`sessionStatus` 与该 session.status 置 `"INTERRUPTED"` |
-| `SessionWaiting` | **payload 恒为空** `{}`；`sessionStatus` 与该 session.status 置 `"WAITING"` |
-| `SessionRunning` | payload `reason`（`"human_replied"` / `"resumed"`，**溯源用，仅展示**）；**守卫**：`sessionStatus ∈ {SUCCEEDED, FAILED, CANCELED}` 时**整条跳过**（迟到的续跑事件不得复活已终结的会话）；否则置 `"RUNNING"` |
-| `SessionFinished` | `final_status ?? "SUCCEEDED"` 置 `sessionStatus` 与 session.status |
+| `SessionFinished` **L 档** | `final_status ?? "SUCCEEDED"` 置 `sessionStatus` 与 session.status。已停发，分支保留只为读存量日志 |
 | `SessionStatusChanged` **L 档** | 只读存量。若有 `new_status`：`sessionStatus` 与该 session.status 置之。**新流量里不再发出**，但分支必须保留——存量日志靠它才能重建 |
 | `SessionPausedHitl` **L 档** | 只读存量。置 `"WAITING"`，**不读 `form`**：旧模型按 form 分 `PAUSED` / `PAUSED_HITL` 两档，新值域里两档合并成单一 `WAITING` |
 | `RecognizeIntentToolCall` | 若有 `session_goal`：置该 session.goal |
 | `FailureThresholdHit` | **无投影副作用**——它是聚合播报。计数由 `TaskFailed` / `TaskFinished` 折叠（见 Task 段） |
 
-> **新流量里改变会话状态的只有这四条**（2026-09-02 会话状态所有权重构）：
-> `SessionInterrupted` / `SessionWaiting` / `SessionRunning` / `SessionFinished`
-> ——外加 `SessionCreated` / `SessionResumed` 各写一次 `RUNNING` 作为起点。
-> 移植时**漏掉前三条**的后果是会话状态永远停在 `SessionCreated` 写下的 `RUNNING`
-> ——不会报错，只是再也不动。golden `06` / `07` 喂的正是这三条事件。
+> **新流量里已经没有会话状态事件了。** 2026-09-02 的所有权重构曾把写者收敛成
+> `SessionInterrupted` / `SessionWaiting` / `SessionRunning` / `SessionFinished` 四条；
+> 前三条于 2026-09-03 停发、2026-09-05 **连枚举一并删除**（`docs/events-v2.md` §5.8
+> ——它们生于 09-02 死于 09-03，全程在 `master` 之后的分支内部，`master` 从来没有过
+> 这三个类型，存量流里也不会有），`SessionFinished` 停发但留在 L 档。
+> 现在写 `sessionStatus` 的只剩 `SessionCreated` / `SessionResumed` 写下的起点 `RUNNING`，
+> 外加两条 L 档 setter 用于重放存量日志。会话整体状况由 host 聚合各 agent 的
+> `AGENT_*` 状态推导。
 >
 > 表中凡置 `sessionStatus` 的规则，都**同时**写 run 级标量 `sessionStatus` 与
 > `sessions[sessionId].status` 两处（实现里的 `_set_session_status`）。只写一处
@@ -66,20 +66,15 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 > `SUCCEEDED` / `FAILED` / `CANCELED`。回放存量日志时旧值 `PAUSED` / `PAUSED_HITL`
 > 一律折进 `WAITING`（`QUEUED` / `TIMEOUT` 从未被写出过）。
 >
-> **`SessionWaiting` 刻意不带「有几个在等」的计数**（裁定 R3）。那个数字停在
-> `TaskQueueBlocked{count}` 那一层，**不进会话事件**——展示数据不该穿过状态判据，
-> 同本次重构删掉 `needs_panel` 用的是同一条理由。想显示计数的 host 订
-> `TaskQueueBlocked`，或直接数未决 HITL / `AWAITING_HUMAN` 的 task。
-> 状态机里这条转移的 payload 是硬编码的空字典
-> （`session_state.py::next_transition` 的 `QUEUE_BLOCKED` 分支），
-> `SessionRegistry.handle_event` 也只从源事件转发 `reason` / `final_status` 两个字段。
+> **历史注（裁定 R3）**：`SessionWaiting` 当初刻意不带「有几个在等」的计数，那个数字
+> 停在 `TaskQueueBlocked{count}` 那一层——展示数据不该穿过状态判据。两个类型现均已删除；
+> 想显示计数的 host 直接数未决 HITL / `AWAITING_HUMAN` 的 task。
 >
 > **已过期（2026-09-03 agent-centric 改造）**：`session_state.py` 与它的
 > `next_transition` 状态机整体已删；`SessionRegistry`（原 `SessionManager`）现在
 > 只做「登记这个 session 里有哪些 agent」，不再 `handle_event` 推导/改写会话状态，
-> 也不再发 `SessionInterrupted`/`SessionWaiting`/`SessionRunning`/`SessionFinished`
-> （四者均已转入 L 档，reducer 的这几条分支只为重放存量日志保留，不会再被新事件
-> 触发）。`sessions[sessionId].status` 字段对该改造之后创建的 session 会永远停在
+> 也不再发 `SessionFinished`（已转入 L 档，reducer 的这条分支只为重放存量日志保留，
+> 不会再被新事件触发；同批的另三条已于 2026-09-05 连枚举删除）。`sessions[sessionId].status` 字段对该改造之后创建的 session 会永远停在
 > 初始值——host 若要判断会话整体状况，改聚合各 agent 的状态
 > （`CtxWeftRuntime.list_agents`）。详见
 > `docs/upgrade/2026-09-03-agent-centric-interaction.md` 第 5 节。
@@ -103,8 +98,8 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 |------|------|
 | `HitlApproved` / `HitlModified` / `HitlAnswered` / `HitlRejected` / `HitlCancelled` | **仅当** `sessionStatus == "WAITING"` 时置回 `"RUNNING"`（不覆盖已到的终态）。五条都不再发射，分支保留只为读存量日志 |
 
-> `HitlOpened` / `HitlResolved`（新模型的两条）**对投影无副作用**——新流量里会话状态由
-> `SessionWaiting` / `SessionRunning` 承载，pending 列表的真相源是 `HitlRegistry`，
+> `HitlOpened` / `HitlResolved`（新模型的两条）**对投影无副作用**——新流量里会话状态不再
+> 由任何会话级事件承载（host 按 agent 聚合推导），pending 列表的真相源是 `HitlRegistry`，
 > **不在 `RunStateView` 里另存一份**（spec/07 §7）。
 
 ### LLM / Context

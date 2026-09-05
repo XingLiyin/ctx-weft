@@ -1,38 +1,102 @@
 {
   "name": "session-resumed",
-  "description": "崩溃恢复续跑的分层链路（2026-09-02 所有权重构 + RunInterrupted/TaskInterrupted 分家）：run 层 RunInterrupted 只说「这次执行死了」，**不写 task 状态**；task 层 TaskInterrupted 把 task 打成 INTERRUPTED；TM 层 TaskQueueInterrupted（reducer no-op）；会话层 SessionInterrupted→INTERRUPTED。随后 SessionResumed 更新 userPrompt 并回 RUNNING。payload 照抄发射点：outage 支的 RunInterrupted 只有 {reason, error_message}（runtime._run_loop），TaskInterrupted 带四个溯源字段。task 状态所有权重构（2026-09-02，task-status-ownership 计划）后 TaskInterrupted 改由 TaskManager 发，不带 run_id（TM 不属于任何一次 run）。",
+  "description": "崩溃恢复续跑的分层链路（2026-09-02 所有权重构 + RunInterrupted/TaskInterrupted 分家）：run 层 RunInterrupted 只说「这次执行死了」，**不写 task 状态**；task 层 TaskInterrupted 把 task 打成 INTERRUPTED；随后 SessionResumed 更新 userPrompt 并回 RUNNING。payload 照抄发射点：outage 支的 RunInterrupted 只有 {reason, error_message}（runtime._run_loop），TaskInterrupted 带四个溯源字段。task 状态所有权重构（2026-09-02，task-status-ownership 计划）后 TaskInterrupted 改由 TaskManager 发，不带 run_id（TM 不属于任何一次 run）。原先在 TaskInterrupted 之后还有 TM 层 TaskQueueInterrupted(no-op) 与会话层 SessionInterrupted→INTERRUPTED 两级：那两个类型生于 2026-09-02、死于 09-03/09-04，全在 master 之后的分支内部，已于 2026-09-05 连枚举一并删除（events-v2.md §5），留在这里只会让用例空转（reducer 无分支、事件被静默略过）。",
   "runId": "s1",
   "events": [
-    { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
-      "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
-      "payload": { "user_prompt": "first prompt", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
-    { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
-      "type": "TaskCreated", "timestamp": "2026-06-05T00:00:02Z",
-      "payload": { "task": { "id": "tsk_1", "status": "PENDING", "title": "T1",
-        "assigned_agent_id": "agt_root", "creator_agent_id": "agt_root" } } },
-    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1", "taskId": "tsk_1",
-      "type": "TaskStarted", "timestamp": "2026-06-05T00:00:03Z",
-      "payload": { "assigned_agent_id": "agt_root" } },
-    { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1", "taskId": "tsk_1",
-      "type": "RunInterrupted", "timestamp": "2026-06-05T00:00:04Z",
-      "payload": { "reason": "llm_outage", "error_message": "LLM self-heal exhausted" } },
-    { "id": "evt_0005", "runId": null, "sequence": 0, "sessionId": "s1", "taskId": "tsk_1",
-      "type": "TaskInterrupted", "timestamp": "2026-06-05T00:00:05Z",
-      "payload": { "reason": "llm_outage", "error_code": "llm_outage",
-        "error_message": "LLM self-heal exhausted", "retry_count": 0 } },
-    { "id": "evt_0006", "runId": "run_1", "sequence": 6, "sessionId": "s1",
-      "type": "TaskQueueInterrupted", "timestamp": "2026-06-05T00:00:06Z",
-      "payload": { "reason": "llm_outage" } },
-    { "id": "evt_0007", "runId": "run_1", "sequence": 7, "sessionId": "s1",
-      "type": "SessionInterrupted", "timestamp": "2026-06-05T00:00:07Z",
-      "payload": { "reason": "llm_outage" } },
-    { "id": "evt_0008", "runId": "run_2", "sequence": 8, "sessionId": "s1",
-      "type": "SessionResumed", "timestamp": "2026-06-05T00:00:08Z",
-      "payload": { "user_prompt": "continue please" } }
+    {
+      "id": "evt_0001",
+      "runId": "run_1",
+      "sequence": 1,
+      "sessionId": "s1",
+      "type": "SessionCreated",
+      "timestamp": "2026-06-05T00:00:01Z",
+      "payload": {
+        "user_prompt": "first prompt",
+        "template_id": "tmpl_a",
+        "root_agent_id": "agt_root"
+      }
+    },
+    {
+      "id": "evt_0002",
+      "runId": "run_1",
+      "sequence": 2,
+      "sessionId": "s1",
+      "type": "TaskCreated",
+      "timestamp": "2026-06-05T00:00:02Z",
+      "payload": {
+        "task": {
+          "id": "tsk_1",
+          "status": "PENDING",
+          "title": "T1",
+          "assigned_agent_id": "agt_root",
+          "creator_agent_id": "agt_root"
+        }
+      }
+    },
+    {
+      "id": "evt_0003",
+      "runId": "run_1",
+      "sequence": 3,
+      "sessionId": "s1",
+      "taskId": "tsk_1",
+      "type": "TaskStarted",
+      "timestamp": "2026-06-05T00:00:03Z",
+      "payload": {
+        "assigned_agent_id": "agt_root"
+      }
+    },
+    {
+      "id": "evt_0004",
+      "runId": "run_1",
+      "sequence": 4,
+      "sessionId": "s1",
+      "taskId": "tsk_1",
+      "type": "RunInterrupted",
+      "timestamp": "2026-06-05T00:00:04Z",
+      "payload": {
+        "reason": "llm_outage",
+        "error_message": "LLM self-heal exhausted"
+      }
+    },
+    {
+      "id": "evt_0005",
+      "runId": null,
+      "sequence": 0,
+      "sessionId": "s1",
+      "taskId": "tsk_1",
+      "type": "TaskInterrupted",
+      "timestamp": "2026-06-05T00:00:05Z",
+      "payload": {
+        "reason": "llm_outage",
+        "error_code": "llm_outage",
+        "error_message": "LLM self-heal exhausted",
+        "retry_count": 0
+      }
+    },
+    {
+      "id": "evt_0008",
+      "runId": "run_2",
+      "sequence": 8,
+      "sessionId": "s1",
+      "type": "SessionResumed",
+      "timestamp": "2026-06-05T00:00:08Z",
+      "payload": {
+        "user_prompt": "continue please"
+      }
+    }
   ],
   "expected": {
     "sessionStatus": "RUNNING",
-    "sessions": { "s1": { "status": "RUNNING", "userPrompt": "continue please" } },
-    "tasks": { "tsk_1": { "status": "INTERRUPTED" } }
+    "sessions": {
+      "s1": {
+        "status": "RUNNING",
+        "userPrompt": "continue please"
+      }
+    },
+    "tasks": {
+      "tsk_1": {
+        "status": "INTERRUPTED"
+      }
+    }
   }
 }

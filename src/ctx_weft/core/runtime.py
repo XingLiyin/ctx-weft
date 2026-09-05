@@ -2922,8 +2922,8 @@ class CtxWeftRuntime:
         work) and the session is registered with the ``SessionRegistry`` for membership lookup.
 
         2026-09-04（Task 12）前这里还会**代 TaskManager**（进程刚起来，`_task_managers`
-        还是空的）发一条会话级 `TaskQueueBlocked`/`TaskQueueInterrupted` 队列聚合信号——
-        那条信号唯一的消费者（会话状态机）早已降格，信号本身现已停发（events-v2 §5）。
+        还是空的）发一条会话级队列聚合信号——那条信号唯一的消费者（会话状态机）早已
+        降格，信号本身现已停发、其事件类型也已于 2026-09-05 删除。
         **恢复期的可观测性现在整个由下面这段 ALM 装填 + `AGENT_*` 现状广播承担**：
         每个 session 的 agent 记录也在这里装填进 `AgentLifecycleManager`（2026-09-04
         spec §6.3 补上的一步）：此前只有 `recover_agent` 会调 `ALM.load()`，重启后
@@ -2952,8 +2952,8 @@ class CtxWeftRuntime:
             try:
                 # 恢复期不再有专门的「PAUSED_HITL vs INTERRUPTED」分支：装填内存 HITL 之后
                 # 「现状」由下面 ALM 装填时按折出来的 AgentView.status 广播，不再由这里
-                # 代 TM 合成一条会话级信号（2026-09-04 Task 12 起 `announce_queue_state`/
-                # `TaskQueueBlocked`/`TaskQueueInterrupted` 已停发）。
+                # 代 TM 合成一条会话级信号（2026-09-04 Task 12 起 `announce_queue_state`
+                # 及其队列聚合事件已停发）。
                 # 「复活不是一种状态」的落地（docs/events-v2.md §2.1.1）。
                 # tenant 必须先解出来：`_task_managers` 此刻恒为空（见下）,`_tenant_for_session`
                 # 会落到读事件日志那条路（SESSION_CREATED 首条即含真 tenant）——
@@ -3378,7 +3378,7 @@ class CtxWeftRuntime:
             # ContextOverflowError 不再特判终态：retriable=False 使其跳过重试直接挂起，
             # 溢出文案随 task.error / RUN_INTERRUPTED.error_message 抵达 host，错误码
             # 随 TASK_INTERRUPTED.error_code 直接上浮（提示换大窗口模型）——不再绕经
-            # 已停发的会话级 TaskQueueInterrupted（events-v2 §5）。
+            # 已停发的会话级队列聚合信号。
             # 崩溃发生时 task 是否已是终态（如 observer 已判 FAILED、随后 FinalizeStep 又
             # 抛异常那条窄路径）——是的话下面 RUN_INTERRUPTED 也不发：那次执行的终局
             # 已经由 TaskFailed/RunFinished{FAILED} 宣布过，再发一条 RunInterrupted 会

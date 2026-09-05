@@ -647,11 +647,10 @@ async def _park_wait_for_user(
     """起 wait_for_user 冷 park：抛 HitlPark（task 落 AWAITING_HUMAN 由 TaskManager 定）。
 
     **不写会话状态**：这不是本方法的职责。2026-09-02 那次重构曾把会话状态的唯一写者
-    定为 `SessionRegistry`（由 TM 的 `TaskQueueBlocked` 信号推出 `SessionWaiting`）；
-    那条翻译链路已随会话状态机整体退役——`SessionRegistry` 自 2026-09-03 起降格为
-    纯 agent 登记表，`TaskQueueBlocked` 本身也已于 2026-09-04（Task 12，events-v2 §5）
-    停发。会话级别的展示状态目前不由 core 预先算好广播，由 host 自行按 agent 状态
-    聚合推导（docs/events-v2.md §2.1.1）。
+    定为 `SessionRegistry`，由一条队列级聚合信号翻译成会话级状态；那整条链路已随会话
+    状态机退役——`SessionRegistry` 自 2026-09-03 起降格为纯 agent 登记表，两端的事件
+    类型也已于 2026-09-05 一并删除。会话级别的展示状态目前不由 core 预先算好广播，
+    由 host 自行按 agent 状态聚合推导（docs/events-v2.md §2.1.1）。
 
     续跑方式由 **delivery 显式声明**，不再靠 `form == "wait"` + sentinel capability_id
     这组跨三个模块的魔法字符串（spec §5）。``source``/``edit`` 只决定 preface：

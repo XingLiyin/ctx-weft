@@ -17,7 +17,7 @@ from ctx_weft.core.utils.content import (
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
-from ctx_weft.core.models.status import TERMINAL_SESSION_STATUSES, WAITING, TaskStatus
+from ctx_weft.core.models.status import WAITING, TaskStatus
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import (
     HITL_FORM_QUESTION,
@@ -465,17 +465,6 @@ def _apply(view: RunStateView, ev: Event) -> None:
             if sess is not None:
                 sess.status = new_status
 
-    elif t == EventType.SESSION_INTERRUPTED:
-        _set_session_status(view, ev.session_id, "INTERRUPTED")
-
-    elif t == EventType.SESSION_WAITING:
-        _set_session_status(view, ev.session_id, "WAITING")
-
-    elif t == EventType.SESSION_RUNNING:
-        # 迟到的续跑事件不得复活已终结的会话。判据与 session_state 同源。
-        if view.session_status not in TERMINAL_SESSION_STATUSES:
-            _set_session_status(view, ev.session_id, "RUNNING")
-
     elif t == EventType.SESSION_PAUSED_HITL:
         # L 档：只读存量日志。旧模型按 form 分 PAUSED / PAUSED_HITL 两档，
         # 新模型合并成一个 WAITING——「等的是审批面板还是一句话」是 delivery 的性质，
@@ -532,8 +521,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
 
     elif t in _AGENT_STATUS_BY_EVENT and ev.agent_id:
         # terminated 粘滞：一旦进入终态就不再被迟到事件改回——与 SessionRegistry
-        # 已有的「已终态就不再转移」同构（见 `SESSION_RUNNING` 分支的
-        # `TERMINAL_SESSION_STATUSES` 判据）。
+        # 已有的「已终态就不再转移」同构。
         agent = view.agents.get(ev.agent_id)
         if agent is not None and agent.status != "terminated":
             agent.status = _AGENT_STATUS_BY_EVENT[t]
@@ -655,7 +643,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
     # 「重建了 pending 却没重建已解决」那类漂移的来源。
     elif t in (
         # L 档：这五个不再发射，保留只为读存量日志。HITL_RESOLVED（新模型）**不在其中**
-        # ——新流量里会话状态由 SM 的 SessionRunning 承载。
+        # ——新流量里会话状态由 AGENT_* 折叠推出，不再由会话级事件承载。
         EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
         EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
     ):

@@ -23,7 +23,7 @@ async def test_finalize_idle_session_emits_status_and_finished():
 
     # 2026-09-04（Task 12，events-v2 §5）起 TM 不再报 TaskQueueDrained（其消费者，
     # 会话状态机，早已退役）——结论直接写在 `tm.session.status` 上，不再对外广播。
-    assert EventType.TASK_QUEUE_DRAINED not in [e.type for e in bus.emitted]
+    assert "TaskQueueDrained" not in [str(e.type) for e in bus.emitted]
     assert EventType.SESSION_STATUS_CHANGED not in [e.type for e in bus.emitted]
     assert tm.session.status == "SUCCEEDED"
 

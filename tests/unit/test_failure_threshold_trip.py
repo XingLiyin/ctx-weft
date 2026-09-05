@@ -90,7 +90,7 @@ async def test_trip_event_sequence_on_third_failure() -> None:
     failed_idx = types.index(EventType.TASK_FAILED)
     assert hit_idx < failed_idx
     assert EventType.SESSION_STATUS_CHANGED not in types
-    assert EventType.TASK_QUEUE_DRAINED not in types
+    assert "TaskQueueDrained" not in [str(t) for t in types]
     assert session.status == "FAILED"
 
 

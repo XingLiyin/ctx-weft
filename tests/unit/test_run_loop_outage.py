@@ -55,7 +55,7 @@ async def test_outage_marks_session_interrupted_not_failed():
     run_interrupted = [e for e in seen if e.type == EventType.RUN_INTERRUPTED]
     assert run_interrupted, "expected RunInterrupted (run-level fact)"
     assert run_interrupted[0].payload["reason"] == "llm_outage"
-    assert EventType.TASK_QUEUE_INTERRUPTED not in types, "TaskQueueInterrupted 已停发（Task 12）"
+    assert "TaskQueueInterrupted" not in [str(t) for t in types], "TaskQueueInterrupted 已停发/已删"
     agent_interrupted = [e for e in seen if e.type == EventType.AGENT_INTERRUPTED]
     assert agent_interrupted, "expected AgentInterrupted (ALM verdict, replaces retired SM session verdict)"
     aid = agent_interrupted[0].agent_id

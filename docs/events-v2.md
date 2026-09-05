@@ -23,8 +23,17 @@
 > `AgentTerminated`，`AgentLifecycleManager.apply_input` 发出）——这是本文档自身
 > 滞后于代码的已知缺口，不是本次重命名或 2026-09-04 核账的范围。当前权威状态见
 > `docs/upgrade/2026-09-03-agent-centric-interaction.md` 第 5 节。
+>
+> **2026-09-05 · 退役闸门第 2 级已对 6 个类型执行**：`SessionRunning` /
+> `SessionWaiting` / `SessionInterrupted`（§2.1.2、§5.5）与 `TaskQueueBlocked` /
+> `TaskQueueInterrupted` / `TaskQueueDrained`（§3.3、§5.6）**已连枚举一并删除**，
+> 不再是 L 档。判据：这 6 个类型生于 2026-09-02、死于 09-03/09-04，全部落在 `master`
+> 之后的分支内部——`master` 的 `EventType` 里从来没有它们，任何从 master 迁移来的
+> 事件流都不可能含有这些字符串，§5.7 的闸门条件因此天然成立，无需等归档周期。
+> 受影响的正文段落（§2.1.2 的三行、§2.1.3 的拆解表、§2.1.4 的转移表、§3.3 的三行）
+> 各自就地标注，**未逐段重写**——它们记录的是那次重构的推理，仍有阅读价值。
 
-**总量：58 个在用 + 20 个只读存量（L 档）——上面这条 §2.5 缺口未反映在这个数字里。**
+**总量：55 个在用 + 14 个只读存量（L 档）——上面这条 §2.5 缺口未反映在这个数字里。**
 
 ---
 
@@ -60,8 +69,8 @@
 | 档 | 判据 | 可改动程度 |
 |---|---|---|
 | **S** · 30 个 | 有状态消费者（reducer / host 投影）折叠它 | 语义冻结；改名须走别名表；payload 只可**加**字段 |
-| **O** · 28 个 | 已发射、无状态消费者，纯观测/展示 | 可重命名 / 合并 / 删除，与 host SSE 同步即可 |
-| **L** · 20 个 | 曾发射、现已停发、重放仍须认识 | **只读**。不得再发射；删除须过退役闸门（§5） |
+| **O** · 25 个 | 已发射、无状态消费者，纯观测/展示 | 可重命名 / 合并 / 删除，与 host SSE 同步即可 |
+| **L** · 14 个 | 曾发射、现已停发、重放仍须认识 | **只读**。不得再发射；删除须过退役闸门（§5） |
 | X · 0 个 | 从未发射 | V2 已清空——定义即必须发射 |
 
 其中 3 个是 **TRANSIENT**（⊂ O）：`LLMTokenStreamed` / `LLMReasoningStreamed` /
@@ -158,9 +167,15 @@ SM     ──►  会话状态                      SessionWaiting / SessionInte
 |---|---|---|---|
 | `SessionCreated` | | `template_id` `user_prompt`（jsonable，保 ref 不落字节） `root_agent_id` `llm_model` `llm_account` `tenant_id` `token_budget` `context_limit` `reserved_output_tokens` | 会话诞生。建 `SessionView`，`status=RUNNING` |
 | `SessionResumed` | | `user_prompt` `root_agent_id` `llm_model` `llm_account` | 在已有会话上**开新一轮**：带新的 user_prompt 建新 root task。前置拒绝有未终结任务的会话。`status` 回 `RUNNING`，并把 `SessionView.user_prompt` 覆写成本轮的 |
-| `SessionWaiting` | | （空） | 会话停着，但是**正常地停**——所有任务都在等人 / 等外部输入。→ `WAITING` |
-| `SessionInterrupted` | | `reason` | 会话停着，**异常**——系统故障，等 `/resume`。`reason` ∈ `llm_outage` / run 崩溃的 `error_code` / `process_restart`。→ `INTERRUPTED` |
-| `SessionRunning` | | `reason` | 会话（重新）开跑。`reason` ∈ `human_replied`（从 `WAITING` 回来）/ `resumed`（从 `INTERRUPTED` 回来）。→ `RUNNING` |
+| ~~`SessionWaiting`~~ | | （空） | **已删除（2026-09-05）**。原义：会话停着但**正常地停**——所有任务都在等人 / 等外部输入 → `WAITING` |
+| ~~`SessionInterrupted`~~ | | `reason` | **已删除（2026-09-05）**。原义：会话停着，**异常**——系统故障，等 `/resume` → `INTERRUPTED` |
+| ~~`SessionRunning`~~ | | `reason` | **已删除（2026-09-05）**。原义：会话（重新）开跑 → `RUNNING` |
+
+> **上面三行已连枚举一并删除**（见文首 2026-09-05 记账）：会话状态机随
+> `SessionRegistry` 降格整体退役后它们就无发射点，而 `master` 从未有过这三个类型，
+> 存量流里也不会有。会话级别的展示状态现在不由 core 预先算好广播，由 host 按 agent
+> 状态（`AGENT_*`）自行聚合推导。**`SessionCreated` / `SessionResumed` /
+> `SessionFinished` 三条不受影响**，其中 `SessionFinished` 仍在 L 档。
 | `SessionFinished` | | `final_status` | **唯一的会话终态事件**。全部任务终态，或 `cancel_all` 硬取消。→ `final_status` |
 
 > **`SessionStatusChanged` 已删除**（进 L 档，§5）。它是事实流里唯一的命令式事件——别的都说「发生了什么」，只有它说「把状态写成 X」，于是 6 个发射点混着三类完全不同的东西。拆解如下：
@@ -507,11 +522,15 @@ discriminator 的类型——SM 收到哪条就转到哪个状态，不读任何
 全停下来后按「解开它需要谁」挑一条：`Interrupted`（运维）> `Blocked`（用户）> `Drained`（无需）。
 TM 区分前两者靠的是 **task 状态**，那本来就是它自己的领域，不需要知道 HITL 的任何事。
 
+> **这三个类型已于 2026-09-05 连枚举一并删除**（§5.8）：唯一消费者（会话状态机）
+> 早已降格，两处发射点在 2026-09-04 停发；`master` 从未有过它们，存量流里不会出现。
+> 下表保留的是那次设计的推理，不是现状。
+
 | 事件 | payload | 含义 |
 |---|---|---|
-| `TaskQueueBlocked` | `count` | 没有能跑的任务了，剩下的都**正常地**停着（`AWAITING_HUMAN` / `SUSPENDED`）。`count` 供展示，SM 不读 |
-| `TaskQueueInterrupted` | `reason` | 没有能跑的了，且**有任务被打断**（等 `/resume`）。优先于 `Blocked`——解开它需要运维 |
-| `TaskQueueDrained` | `final_status` | 全部任务终态，可以收工 |
+| ~~`TaskQueueBlocked`~~ | `count` | 没有能跑的任务了，剩下的都**正常地**停着（`AWAITING_HUMAN` / `SUSPENDED`）。`count` 供展示，SM 不读 |
+| ~~`TaskQueueInterrupted`~~ | `reason` | 没有能跑的了，且**有任务被打断**（等 `/resume`）。优先于 `Blocked`——解开它需要运维 |
+| ~~`TaskQueueDrained`~~ | `final_status` | 全部任务终态，可以收工 |
 
 ### 3.4 Task / Agent · 3
 
@@ -614,7 +633,7 @@ persistence.snapshot_writer
 
 ---
 
-## 5. L 档 · 20 个（只读存量，不得再发射）
+## 5. L 档 · 14 个（只读存量，不得再发射）
 
 共同点：**还在 `EventType` 里、新流量里不再出现、重放存量日志时仍会被读到、不进别名表**
 （别名表的语义是「旧名折进新分支」，这些没有对应新分支，用的是自己的旧分支）。
@@ -658,31 +677,50 @@ persistence.snapshot_writer
 `recognize_intent.py` 切到 `stream_llm_resilient` 后，通用 `LLM_PROMPT_SENT`
 （由 gateway 发，`origin=loop.recognize_intent`）取代了这条 step 专属的镜像事件。
 
-### 5.5 SESSION_* 运行态 · 4 个（2026-09-03 起停发）
+### 5.5 `SessionFinished` · 1 个（2026-09-03 起停发）
 
-`SessionRunning` `SessionWaiting` `SessionInterrupted` `SessionFinished`
+会话状态机（`session_state.py`）随 `SessionRegistry` 降格一并退役，它不再有发射点。
+`_apply` 分支原样保留（存量日志重放靠它——`master` 发过这条，宿主库里有）。
 
-会话状态机（`session_state.py`）随 `SessionRegistry` 降格一并退役，这 4 个类型
-不再有发射点。`_apply` 分支原样保留（存量日志重放靠它们）。
+同批停发的 `SessionRunning` / `SessionWaiting` / `SessionInterrupted` **不在 L 档**：
+见 §5.8。
 
-### 5.6 `TaskQueue*` · 3 个（2026-09-04 起停发）
+### 5.6 `TaskQueue*` · 0 个（2026-09-04 停发，2026-09-05 删除）
 
-`TaskQueueBlocked` `TaskQueueInterrupted` `TaskQueueDrained`
+`TaskQueueBlocked` `TaskQueueInterrupted` `TaskQueueDrained` 已不在 L 档，见 §5.8。
 
-见 §3.3：唯一消费者（会话状态机）早已降格，两处发射点
+原委见 §3.3：唯一消费者（会话状态机）早已降格，两处发射点
 （`TaskManager.announce_queue_state`、`runtime._announce_queue_state_as_tm_proxy`）
 一并停发。恢复期的可观测性改由 `AgentLifecycleManager` 装填后的 `AGENT_*` 现状
 广播承担。
 
 ### 5.7 共同的
 
-5.3–5.6 这四批与 5.1/5.2 的退役条件不同：它们没有专属的双读折叠，`_apply`
+5.3–5.5 这三批与 5.1/5.2 的退役条件不同：它们没有专属的双读折叠，`_apply`
 分支原样保留即可支持存量日志重放，因此**没有"删双读折叠"这一级**，退役闸门只剩
 5.1/5.2 式的第 2 级——确认没有任何回放会碰到这些字符串。
 
 第 2 级闸门过了 L 档才清空。**在那之前 L 档非空是正常状态，不是待办积压。**
 
 > 例外：host 的迁移脚本读的就是历史事件，**闸门再怎么过它都得留着旧字符串**。
+
+### 5.8 已过闸门 · 6 个（2026-09-05 连枚举一并删除）
+
+`SessionRunning` `SessionWaiting` `SessionInterrupted`
+`TaskQueueBlocked` `TaskQueueInterrupted` `TaskQueueDrained`
+
+**它们是「分支内部生死」的类型**：2026-09-02 随会话状态所有权重构上线，09-03（前三个）
+与 09-04（后三个）停发，全程落在 `master` 之后的分支内部。`master` 的 `EventType`
+里从来没有这 6 个名字，因此 §5.7 的第 2 级闸门（「确认没有任何回放会碰到这些字符串」）
+对它们**天然成立**——任何从 master 迁移来的事件流都不可能含有它们，不必等一整个归档周期。
+
+一并删除的：`EventType` 枚举成员、`L_TIER_EVENT_TYPES` 登记、`reducers.py` 的三个
+`_apply` 分支、`providers/events/_lifecycle.py` 的三个活跃性分支与收窄元组项、
+golden 用例 06/07 里的对应事件。
+
+守卫：`tests/unit/test_agent_lifecycle.py::test_intra_branch_session_types_are_gone`、
+`tests/unit/test_recover_loads_agents.py::test_task_queue_types_are_deleted_outright`、
+`tests/unit/test_lifecycle_active_sessions.py::test_deleted_types_are_not_in_the_narrowing_tuple`。
 
 ---
 

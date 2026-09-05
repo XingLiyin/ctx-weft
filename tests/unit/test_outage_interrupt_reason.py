@@ -59,6 +59,6 @@ async def test_outage_interrupt_carries_llm_outage_reason():
     assert task_sig, "expected TaskInterrupted"
     assert (task_sig[0].payload or {}).get("reason") == "llm_outage"
     assert EventType.SESSION_STATUS_CHANGED not in [getattr(e, "type", None) for e in seen]
-    assert EventType.TASK_QUEUE_INTERRUPTED not in [getattr(e, "type", None) for e in seen], (
-        "TaskQueueInterrupted 已停发（Task 12），不应再出现"
+    assert "TaskQueueInterrupted" not in [str(getattr(e, "type", "")) for e in seen], (
+        "TaskQueueInterrupted 已停发（Task 12）、类型已删（2026-09-05），不应再出现"
     )

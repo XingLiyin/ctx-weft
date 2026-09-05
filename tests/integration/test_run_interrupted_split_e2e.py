@@ -153,4 +153,4 @@ async def test_outage_emits_both_run_and_task_interrupted() -> None:
     assert task_evs[0].payload["reason"] == "llm_outage"
     # 2026-09-04（Task 12，events-v2 §5）起 TaskManager 不再额外聚合出一条会话级
     # TaskQueueInterrupted——上面两条 task/run 域事实已经是完整的观测点。
-    assert EventType.TASK_QUEUE_INTERRUPTED not in [e.type for e in seen]
+    assert "TaskQueueInterrupted" not in [str(e.type) for e in seen]

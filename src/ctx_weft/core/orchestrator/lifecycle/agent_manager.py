@@ -480,7 +480,7 @@ class AgentLifecycleManager:
             n += 1
 
         # 恢复期现状广播（2026-09-04 spec §6.4）：装填完把折出来的状态照实发一遍，
-        # 取代此前由 runtime 代 TaskManager 发的 TASK_QUEUE_*（那条信号的消费者
+        # 取代此前由 runtime 代 TaskManager 发的队列聚合信号（那条信号的消费者
         # SessionRegistry 早已不订阅它）。只对上面记下的 `cold_ids` 发——见那段注释。
         #
         # 「恢复不是一种状态」：这里发的是**现状**不是新状态，不引入 RECOVERING

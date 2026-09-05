@@ -72,18 +72,18 @@ async def test_task_event_agent_id_prefers_running_agent_over_assigned():
 async def test_queue_level_event_has_no_agent_id():
     """无 task_id 的事件不应乱填 agent_id——`_emit` 的通用规则，与事件类型本身无关。
 
-    这里借用 TASK_QUEUE_DRAINED 只是因为它恰好是「无 task_id」的老例子：本类型已随
-    2026-09-04（Task 12，events-v2 §5）停发（L 档，只读存量），测的不是它还会不会被
-    发出，而是直接调 `tm._emit(...)` 时的通用填充逻辑本身。
+    这里借用 SESSION_FINISHED 只是因为它是会话级、天然「无 task_id」的一个例子
+    （此前借的 TASK_QUEUE_DRAINED 已于 2026-09-05 连枚举一并删除）：测的不是这个
+    类型本身，而是直接调 `tm._emit(...)` 时的通用填充逻辑。
     """
     bus = _SpyBus()
     tm = TaskManager("s1", event_bus=bus)
-    await tm._emit(EventType.TASK_QUEUE_DRAINED, payload={})
+    await tm._emit(EventType.SESSION_FINISHED, payload={})
 
-    drained = [e for e in bus.events if e.type == EventType.TASK_QUEUE_DRAINED]
-    assert drained
-    assert drained[0].agent_id is None
-    assert drained[0].task_id is None
+    emitted = [e for e in bus.events if e.type == EventType.SESSION_FINISHED]
+    assert emitted
+    assert emitted[0].agent_id is None
+    assert emitted[0].task_id is None
 
 
 def test_new_agent_types_registered():
@@ -530,16 +530,15 @@ async def test_rebuild_view_and_load_agree_on_status():
 
 
 def test_legacy_reducer_branches_still_present():
-    """确认已停发/待停发类型的 reducer 读取分支未被本任务动过——存量日志重放全靠它们
-    （events-v2.md §5）。`SESSION_INTERRUPTED`/`WAITING`/`RUNNING`/`FINISHED` 要等
-    Task 16（SessionRegistry 降格）才真正停止发射，但它们的分支现在就必须在场，
-    这样存量事件才能在那之后被继续正确重放；HITL 那 6 个（`HITL_REQUIRED` +
-    5 个终态镜像）与 `SESSION_STATUS_CHANGED` / `SESSION_PAUSED_HITL` 已经是
-    L 档（`L_TIER_EVENT_TYPES`）。
+    """确认 L 档类型的 reducer 读取分支未被动过——存量日志重放全靠它们（events-v2.md §5）。
 
-    源码扫描而非只查 `L_TIER_EVENT_TYPES`：那张表登记的是「已经」停发的类型，
-    不包含仍在发射、但分支必须留到 Task 16 之后的 4 个 SESSION_* 运行态——真正
-    要钉住的是 reducers.py 这份源码本身，不是登记表。
+    HITL 那 6 个（`HITL_REQUIRED` + 5 个终态镜像）、`SESSION_STATUS_CHANGED` /
+    `SESSION_PAUSED_HITL`、以及 `SESSION_FINISHED` 都在册。同批退役的
+    `SESSION_INTERRUPTED`/`WAITING`/`RUNNING` 已于 2026-09-05 连枚举一并删除
+    （`master` 从未有过这三个类型，不可能出现在任何存量流里），故不在此列。
+
+    源码扫描而非只查 `L_TIER_EVENT_TYPES`：要钉住的是 reducers.py 这份源码本身，
+    不是登记表。
     """
     import inspect
 
@@ -549,9 +548,6 @@ def test_legacy_reducer_branches_still_present():
     legacy_refs = [
         "EventType.SESSION_STATUS_CHANGED",
         "EventType.SESSION_PAUSED_HITL",
-        "EventType.SESSION_INTERRUPTED",
-        "EventType.SESSION_WAITING",
-        "EventType.SESSION_RUNNING",
         "EventType.SESSION_FINISHED",
         "EventType.HITL_REQUIRED",
         "EventType.HITL_APPROVED",
@@ -564,11 +560,11 @@ def test_legacy_reducer_branches_still_present():
     assert missing == [], f"reducer 分支缺失: {missing}"
 
 
-# ── Task 16：4 个 SESSION_* 运行态停发进 L 档 ──────────────────────────────────
+# ── Task 16：SESSION_* 运行态停发进 L 档 ──────────────────────────────────────
+# 同批的 SessionRunning / SessionWaiting / SessionInterrupted 已于 2026-09-05 连枚举
+# 一并删除（见 `test_intra_branch_session_types_are_gone`），只剩这一个留在 L 档。
 
-_RETIRED_SESSION_TYPES = {
-    "SessionRunning", "SessionWaiting", "SessionInterrupted", "SessionFinished",
-}
+_RETIRED_SESSION_TYPES = {"SessionFinished"}
 
 
 def test_retired_session_types_in_l_tier():
@@ -582,9 +578,7 @@ def test_retired_session_types_still_in_enum():
 
 def test_retired_session_types_not_emitted_in_core():
     """外加条：L 档 ∩ 实际发射集合 = ∅。"""
-    members = [
-        "SESSION_RUNNING", "SESSION_WAITING", "SESSION_INTERRUPTED", "SESSION_FINISHED",
-    ]
+    members = ["SESSION_FINISHED"]
     hits = []
     for py in pathlib.Path("src/ctx_weft/core").rglob("*.py"):
         text = py.read_text(encoding="utf-8")
@@ -597,5 +591,19 @@ def test_retired_session_types_not_emitted_in_core():
 def test_reducers_still_understands_retired_session_types():
     """reducer 分支必须保留——存量日志靠它重建。"""
     src = pathlib.Path("src/ctx_weft/core/control/reducers.py").read_text(encoding="utf-8")
-    for m in ("SESSION_RUNNING", "SESSION_WAITING", "SESSION_INTERRUPTED", "SESSION_FINISHED"):
+    for m in ("SESSION_FINISHED",):
         assert f"EventType.{m}" in src, f"reducers 丢了 {m} 的重放分支"
+
+
+def test_intra_branch_session_types_are_gone():
+    """2026-09-05：分支内部生死的 3 个会话运行态类型已连枚举一并删除。
+
+    退役闸门（events-v2.md §5 第 2 级「确认没有任何回放会碰到这些字符串」）对它们
+    天然成立：`master` 的 `EventType` 里从来没有这三个名字，它们只在 2026-09-02→09-03
+    之间的分支内部存在过，任何从 master 迁移来的事件流都不可能含有它们。
+    """
+    for m in ("SESSION_RUNNING", "SESSION_WAITING", "SESSION_INTERRUPTED"):
+        assert not hasattr(EventType, m), f"{m} 应已删除"
+    for v in ("SessionRunning", "SessionWaiting", "SessionInterrupted"):
+        assert v not in set(EVENT_TYPES)
+        assert v not in set(L_TIER_EVENT_TYPES)

@@ -83,12 +83,6 @@ class EventType(StrEnum):
     SESSION_STATUS_CHANGED = "SessionStatusChanged"
     SESSION_FINISHED = "SessionFinished"   # TaskManager 确定 session 真正结束时发（含 final_status）
     SESSION_PAUSED_HITL = "SessionPausedHitl"
-    # ── 会话状态 v2（2026-09-02 所有权重构）──
-    # 只有 SessionRegistry 发这三条 + SESSION_FINISHED。通用 setter
-    # SESSION_STATUS_CHANGED 就此退役（L 档，只读存量）。
-    SESSION_INTERRUPTED = "SessionInterrupted"        # 断了，等 /resume，非终态
-    SESSION_WAITING = "SessionWaiting"                # 停着但正常：都在等人 / 等外部输入（payload 空）
-    SESSION_RUNNING = "SessionRunning"                # 重新开跑：human_replied / resumed
     RUN_STARTED = "RunStarted"
     RUN_CANCELED = "RunCanceled"
     RUN_FINISHED = "RunFinished"
@@ -122,12 +116,6 @@ class EventType(StrEnum):
     TASK_CANCELED = "TaskCanceled"
     TASK_FINALIZED = "TaskFinalized"
     TASK_REQUEUED = "TaskRequeued"
-    # ── TaskManager 的聚合信号（SM 的唯一输入）──
-    # 三个独立类型而不是一个带 discriminator 的类型：SM 收到哪条就转到哪个状态，
-    # 不读任何字面量。O 档——reducer 不折叠，会话状态由 SM 发的事件承载。
-    TASK_QUEUE_BLOCKED = "TaskQueueBlocked"                  # payload: {count}
-    TASK_QUEUE_INTERRUPTED = "TaskQueueInterrupted"          # payload: {reason}
-    TASK_QUEUE_DRAINED = "TaskQueueDrained"                  # payload: {final_status}
     BLACKBOARD_PUBLISHED = "BlackboardPublished"
     # ── Agent 域 ──
     AGENT_INSTANTIATED = "AgentInstantiated"
@@ -272,15 +260,17 @@ L_TIER_EVENT_TYPES: frozenset[str] = frozenset({
     # 不新建常量、不搬到 events.py（那是下一个任务的事），不从 EventType 枚举里删除。
     "RecognizeIntentLLMPrompt",
     # Task 16（2026-09-03-agent-centric-interaction）：会话状态机（session_state.py）
-    # 随 SessionRegistry 降格（Task 15）一并退役，这 4 个 session 运行态类型不再有
-    # 发射点。reducer 分支原样保留（存量日志重放靠它们），枚举成员不删——
-    # docs/events-v2.md §5：只删发射，不删枚举，删枚举须另过退役闸门。
-    "SessionRunning", "SessionWaiting", "SessionInterrupted", "SessionFinished",
-    # 2026-09-04（runtime 对外面 agent-centric 对齐 Task 12）：这 3 个队列级聚合信号
-    # 在 core 里已无消费者——SessionRegistry 自 2026-09-03 起只订阅 AGENT_INSTANTIATED /
-    # AGENT_SPAWNED，不再消费队列信号。恢复期的可观测性由 ALM 装填后的 AGENT_* 现状
-    # 广播承担（spec §6.4）。枚举成员与 reducer 分支按 docs/events-v2.md §5 保留。
-    "TaskQueueBlocked", "TaskQueueInterrupted", "TaskQueueDrained",
+    # 随 SessionRegistry 降格（Task 15）一并退役，这条不再有发射点。reducer 分支原样
+    # 保留（存量日志重放靠它）。
+    #
+    # 同批退役的 `SessionRunning` / `SessionWaiting` / `SessionInterrupted` 与
+    # 2026-09-04 停发的 `TaskQueueBlocked` / `TaskQueueInterrupted` /
+    # `TaskQueueDrained` **已于 2026-09-05 连枚举一并删除**，不在本档内：这 6 个类型
+    # 生于 2026-09-02、死于 09-03/09-04，全部在 `master` 之后的分支内部，`master`
+    # 的 `EventType` 里从来没有它们——任何从 master 迁移来的事件流都不可能含有这些
+    # 字符串，docs/events-v2.md §5 的退役闸门第 2 级（「确认没有任何回放会碰到」）
+    # 因此天然成立，无需等归档周期。
+    "SessionFinished",
 })
 
 

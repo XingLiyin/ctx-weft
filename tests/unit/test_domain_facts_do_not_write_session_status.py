@@ -29,7 +29,9 @@ def test_hitl_opened_no_longer_pauses_the_session():
 def test_hitl_resolved_no_longer_returns_the_session_to_running():
     view = reduce_events([
         _created(),
-        _ev(EventType.SESSION_WAITING, {}, 1),
+        # 先把会话推到 WAITING（用 L 档 setter——分支内部的 SESSION_WAITING 已于
+        # 2026-09-05 删除；这里只是脚手架，断言的是 HITL_RESOLVED 不动它）。
+        _ev(EventType.SESSION_STATUS_CHANGED, {"new_status": "WAITING"}, 1),
         _ev(EventType.HITL_RESOLVED, {"hitl_id": "hit_1", "outcome": "accepted"}, 2),
     ], "run_1")
     assert view.session_status == "WAITING"
@@ -45,7 +47,7 @@ def test_run_finished_no_longer_writes_the_session_status():
 def test_run_started_no_longer_writes_the_session_status():
     view = reduce_events([
         _created(),
-        _ev(EventType.SESSION_WAITING, {}, 1),
+        _ev(EventType.SESSION_STATUS_CHANGED, {"new_status": "WAITING"}, 1),
         _ev(EventType.RUN_STARTED, {"run_id": "run_1", "initial_step": "prepare"}, 2),
     ], "run_1")
     assert view.session_status == "WAITING"

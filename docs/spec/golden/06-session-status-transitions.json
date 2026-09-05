@@ -1,19 +1,12 @@
 {
   "name": "session-status-transitions",
-  "description": "会话状态的分层链路（2026-09-02 所有权重构）：SessionCreated→RUNNING；TM 报 TaskQueueBlocked{count}（reducer 中 no-op，它是 SessionManager 的输入而非投影输入；**计数停在这一层**）→ SessionManager 发 SessionWaiting（**payload 恒为空**，裁定 R3）→WAITING；有 task 重新开跑 → SessionRunning→RUNNING；SessionFinished→SUCCEEDED。通用 setter SessionStatusChanged 已停发（L 档，只读存量），本用例锁定它的四个替代者。",
+  "description": "会话状态的分层链路：SessionCreated→RUNNING；SessionFinished→SUCCEEDED。2026-09-02 那次所有权重构曾在中间插入 TaskQueueBlocked(no-op) → SessionWaiting → SessionRunning 三层，但那三个类型生于 09-02、死于 09-03/09-04，全在 master 之后的分支内部，已于 2026-09-05 连枚举一并删除（events-v2.md §5）——保留它们只会让本用例变成空转（reducer 里已无分支，事件静默略过，而末态断言仍靠 SessionFinished 成立）。中间的「停着/重新开跑」现由 agent 侧的 AGENT_* 折叠承担，见 12-agent-status.json 一类用例。通用 setter SessionStatusChanged 已停发但仍在 L 档（存量日志重放），本用例锁定它退役后仍在发的那两条。",
   "runId": "s1",
   "events": [
     { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
       "type": "SessionCreated", "timestamp": "2026-06-05T00:00:01Z",
       "payload": { "user_prompt": "do it", "template_id": "tmpl_a", "root_agent_id": "agt_root" } },
     { "id": "evt_0002", "runId": "run_1", "sequence": 2, "sessionId": "s1",
-      "type": "TaskQueueBlocked", "timestamp": "2026-06-05T00:00:02Z", "payload": { "count": 1 } },
-    { "id": "evt_0003", "runId": "run_1", "sequence": 3, "sessionId": "s1",
-      "type": "SessionWaiting", "timestamp": "2026-06-05T00:00:03Z", "payload": {} },
-    { "id": "evt_0004", "runId": "run_1", "sequence": 4, "sessionId": "s1",
-      "type": "SessionRunning", "timestamp": "2026-06-05T00:00:04Z",
-      "payload": { "reason": "human_replied" } },
-    { "id": "evt_0005", "runId": "run_1", "sequence": 5, "sessionId": "s1",
       "type": "SessionFinished", "timestamp": "2026-06-05T00:00:05Z",
       "payload": { "final_status": "SUCCEEDED" } }
   ],

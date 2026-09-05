@@ -61,17 +61,16 @@ async def test_agent_spawned_joins_member_set():
 async def test_session_registry_no_longer_consumes_queue_signals():
     """三条 TaskQueue* 原是 SM 唯一输入，现在不再消费。
 
-    2026-09-04（Task 12，events-v2 §5）起这三个类型连发射点都没有了（`TaskManager.
-    announce_queue_state` 已删除）——枚举成员仍保留（只读存量、供旧事件日志重放），
-    这里直接构造事件喂给 `handle_event` 模拟「重放一条历史日志里的 TaskQueue* 记录」，
-    验证 `_MEMBER_EVENTS` 白名单确实把它们挡在外面，不依赖任何组件还会不会发它们。
+    2026-09-04（Task 12）起发射点已删除，2026-09-05 起枚举成员也删了。这里用**裸
+    字符串**构造事件喂给 `handle_event`，验证 `_MEMBER_EVENTS` 白名单是按「在不在册」
+    挡的——任何不认识的 `type` 都进不来，不依赖这三个名字还在不在枚举里。
     """
     sm = _sm()
     sm.register_session("s1")
     for t in (
-        EventType.TASK_QUEUE_BLOCKED,
-        EventType.TASK_QUEUE_INTERRUPTED,
-        EventType.TASK_QUEUE_DRAINED,
+        "TaskQueueBlocked",
+        "TaskQueueInterrupted",
+        "TaskQueueDrained",
         EventType.TASK_STARTED,
     ):
         await sm.handle_event(_agent_ev(t, "root", {"count": 1}))

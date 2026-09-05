@@ -44,8 +44,7 @@ SessionStatus = Literal[
 # 已合并成 `WAITING`）。存量日志里的旧值由 `core.control.reducers` 折叠，见
 # `docs/upgrade/2026-09-02-session-status-ownership.md`。
 
-#: 会话终态。到达之后任何输入都不再引发转移（`core.control.reducers` 据此拒绝迟到的
-#: `SessionRunning` 复活一个已收尾的会话）。
+#: 会话终态。到达之后任何输入都不再引发转移。
 TERMINAL_SESSION_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "CANCELED"})
 
 #: 「停着但正常」的那个状态。**只有一个**——「等的是审批面板还是一句话」是
