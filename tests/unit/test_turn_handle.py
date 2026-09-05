@@ -21,7 +21,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     ToolCall,
 )
-from ctx_weft.protocols.events import Event
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.events.bus.in_process.bus import InProcessEventBus
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -91,6 +91,62 @@ async def test_wait_for_finish_ignores_run_finished():
     await asyncio.sleep(0)
     await bus.emit(_ev(id="e1", type="RunFinished"))
     await asyncio.wait_for(waiter, timeout=2.0)   # 靠超时返回，不是靠 RunFinished
+
+
+async def test_wait_for_finish_ignores_an_earlier_overlapping_launchs_recap_done():
+    """二轮修复的回归守卫（2026-09-04）：`_task_pending` 只挂最新一次 launch，但同一个
+    task 一生里可能有多次 fire-and-forget 后台 observe（`interrupt`/`mechanical`/
+    `dispatch`/`finish` 等不同 boundary，跨 suspend/resume、重试多轮发生），不重叠只是
+    **通常**情况——上一轮（例如 `interrupt`/`mechanical` 边界）launch 的 `TaskRecapDone`
+    完全可能在这一轮终态事件之后、这一轮（close 边界）自己的 `TaskRecapDone` 之前才
+    姗姗来迟地送达。`wait_for_finish` 若只按事件类型匹配，会把这条迟到的、不相干的
+    `TaskRecapDone` 误当成「这次终态触发的那次折叠」，提前返回——同一个 bug 在更窄的
+    窗口里复现。
+
+    这里不跑真实 runtime（两次真实 launch 重叠是一场难以确定性复现的调度竞态），直接
+    摆弄 `background_observe` 的模块级登记表，模拟「更早一次 launch 仍在途、这次终态
+    事件之后才等到它迟到的 TaskRecapDone」这个精确场景——与
+    `test_wait_for_finish_returns_after_deferred_fold_lands` 互补：那条测真实折叠
+    落地，这条测「等的必须是对的那次」。"""
+    from ctx_weft.core.loop.steps import background_observe as bg
+
+    class _NeverDoneTask:
+        """占位：只需要 `.done()` 恒为 False，不需要真的是 asyncio.Task。"""
+
+        def done(self) -> bool:
+            return False
+
+    bus = InProcessEventBus()
+    h = TurnHandle(session_id="s1", agent_id="agt_1", task_id="tsk_1",
+                   template_id="tpl", event_bus=bus)
+
+    # 登记「这次（close 边界）launch」为当前在途——`_task_pending`/`_task_pending_run_id`
+    # 本就总是相邻一起写（见 launch_background_observe），这里手动摆出同样的形状。
+    bg._task_pending["tsk_1"] = _NeverDoneTask()
+    bg._task_pending_run_id["tsk_1"] = "run_close_launch"
+    try:
+        waiter = asyncio.create_task(h.wait_for_finish(timeout=2.0))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        await bus.emit(_ev(id="e1", type="TaskFinished"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        # 更早一次（interrupt/mechanical 边界）launch 的 TaskRecapDone 迟到——run_id
+        # 对不上这次登记的 "run_close_launch"。
+        await bus.emit(_ev(id="e2", type=EventType.TASK_RECAP_DONE, run_id="run_earlier_launch"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not waiter.done(), (
+            "wait_for_finish 不该被更早一次 launch 的 TaskRecapDone 提前放行"
+        )
+
+        # 这次 launch 自己的 TaskRecapDone 才是真正该等的那个。
+        await bus.emit(_ev(id="e3", type=EventType.TASK_RECAP_DONE, run_id="run_close_launch"))
+        await asyncio.wait_for(waiter, timeout=2.0)
+    finally:
+        bg._task_pending.pop("tsk_1", None)
+        bg._task_pending_run_id.pop("tsk_1", None)
 
 
 class _CloseFoldLLM(MockLLMAdapter):

@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 
 _task_locks: dict[str, asyncio.Lock] = {}
 _task_pending: dict[str, asyncio.Task] = {}
+# task_id -> 该 task 当前在途后台 observe 那次 launch 的 run_id（与 _task_pending 同步写入，
+# launch_background_observe 里两行相邻赋值；TaskRecapDone 事件信封上的 run_id 就是它——
+# 见 pending_background_observe_run_id docstring）。
+_task_pending_run_id: dict[str, str] = {}
 _orphan_tasks: set[asyncio.Task] = set()
 
 # close 路径结果槽：task_id → (act_recap, task_summary)（finalize Task 8 通过 pop_close_report 取用）
@@ -195,6 +199,7 @@ def _clear_pending(t: asyncio.Task, tid: str) -> None:
     """Compare-and-clear: only remove _task_pending[tid] if it still refers to this task."""
     if _task_pending.get(tid) is t:
         del _task_pending[tid]
+        _task_pending_run_id.pop(tid, None)
 
 
 def _lock_for(task_id: str) -> asyncio.Lock:
@@ -401,6 +406,7 @@ def launch_background_observe(
     )
     task = asyncio.create_task(_run_background_observe(snapshot, ctx, boundary))
     _task_pending[state.task.id] = task
+    _task_pending_run_id[state.task.id] = snapshot.run_id
     tm = getattr(ctx, "task_manager", None)
     if tm is not None and hasattr(tm, "track_background"):
         tm.track_background(task)
@@ -420,8 +426,9 @@ async def await_pending_background_observe(task_id: str) -> None:
         await asyncio.shield(pending)
 
 
-def has_pending_background_observe(task_id: str) -> bool:
-    """非阻塞地探一眼：该 task 此刻是否有一个还没跑完的后台 observe（同步字典读，无 await）。
+def pending_background_observe_run_id(task_id: str) -> str | None:
+    """非阻塞地探一眼：该 task 此刻是否有一个还没跑完的后台 observe（同步字典读，无 await）；
+    有就返回**那次 launch** 的 `run_id`，没有返回 `None`。
 
     `TurnHandle.wait_for_finish`（`runtime.py`）用它决定终态事件到达后要不要在**同一条
     事件流订阅**上继续等对应的 `TaskRecapDone`——而不是另起一个等这个 asyncio.Task 本身
@@ -436,6 +443,22 @@ def has_pending_background_observe(task_id: str) -> bool:
     事件塞进订阅者各自的队列，不等任何人处理）、之后才真正从协程函数 return、其
     `asyncio.Task` 才转入 done 态——事件总线的那次唤醒排在 Task-done 的唤醒之前，
     `wait_for_finish` 借着「早就在等这条流」的事件订阅，比 `_fire_session_done` 的
-    `gather` 更早被唤醒返回，不会撞见会话已经被拆完的中间态。"""
+    `gather` 更早被唤醒返回，不会撞见会话已经被拆完的中间态。
+
+    **为什么要返回 run_id、不能只返回 bool（2026-09-04 二轮修复）**：`_task_pending`
+    只挂**最新一次** launch——同一个 task 的一生里可能有多次 fire-and-forget 后台
+    observe（`interrupt`/`mechanical`/`dispatch`/`finish` 等不同 boundary，跨
+    suspend/resume、重试多轮发生），彼此不重叠是**通常**情况，不是**保证**情况。
+    若这次 close 边界 launch 之前，上一次的后台任务碰巧还没来得及被下一轮 `_run_loop`
+    入口的 `await_pending_background_observe` 收口（例如两次 launch 之间调度得足够
+    密集），`wait_for_finish` 在终态事件之后看到的第一个 `TaskRecapDone` 可能是**那次
+    更早的 launch** 发的，不是我们真正要等的这次——只按事件类型匹配会在这种重叠窗口里
+    复现同一类「提前返回」问题，只是窗口更窄。`launch_background_observe` 给每次
+    launch 都铸一个独立 `run_id`（`dataclasses.replace(state, run_id=generate_id(
+    "run"), ...)`），`make_event` 把它写进事件信封的 `run_id` 字段——`TaskRecapDone`
+    也不例外。返回这个 run_id，让调用方把匹配钉死到「这一次 launch 发的 TaskRecapDone」，
+    而不是「随便哪次 launch 发的、类型对得上的事件」。"""
     pending = _task_pending.get(task_id)
-    return pending is not None and not pending.done()
+    if pending is None or pending.done():
+        return None
+    return _task_pending_run_id.get(task_id)

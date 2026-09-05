@@ -375,18 +375,35 @@ class TurnHandle:
         **之前**，`wait_for_finish` 借着「早就在等这条流」的订阅比 `_fire_session_done`
         的 `gather` 更早被唤醒返回，不会撞见会话已经被拆完的中间态。
 
-        ## 4. 为什么不会挂起
+        ## 4. `TaskRecapDone` 必须钉死到具体那次 launch（2026-09-04 二轮修复）
 
-        `has_pending_background_observe` 只做一次同步字典读（无 await，见其
+        `_task_pending[task_id]` 只挂**最新一次** launch；同一个 task 一生里可能有
+        多次 fire-and-forget 后台 observe（`interrupt`/`mechanical`/`dispatch`/
+        `finish` 等不同 boundary，跨 suspend/resume、重试多轮发生），不重叠只是
+        **通常**情况，不是**保证**情况——上一轮 launch 的 `TaskRecapDone` 完全可能在
+        这一轮终态事件之后、这一轮 `TaskRecapDone` 之前才姗姗来迟地送达。第一版实现
+        只按 `ev2.type is EventType.TASK_RECAP_DONE` 匹配，等到的可能是**任意一次**
+        launch 发的、不一定是这一次终态触发的那次——同一个 bug 在更窄的窗口里复现。
+        `pending_background_observe_run_id` 返回的不是 bool，是这一次在途 launch 的
+        `run_id`（`launch_background_observe` 给每次 launch 铸的独立 `run_id`，
+        `make_event` 把它写进事件信封；`TaskRecapDone` 不例外——见其 docstring）；
+        下面同时匹配 `ev2.type` 与 `ev2.run_id == pending_run_id`，把「等哪次折叠」
+        钉死到具体那次 launch，不是「这个 task_id 底下随便哪次」。
+
+        ## 5. 为什么不会挂起
+
+        `pending_background_observe_run_id` 只做一次同步字典读（无 await，见其
         docstring）：终态事件到达那一刻，若查到确有在途后台任务，才继续在同一条流上
-        等 `TaskRecapDone`；查不到（这次终态没触发 close 边界，或走的是熔断收尾等从
-        不 launch 它的路径）就是 no-op，立即返回——不会为不存在的后台任务空等，故
-        `TaskFailed`/`TaskCanceled` 依旧能及时返回。整个等待仍套在原有的
-        `asyncio.timeout(timeout)` 里，超时预算不变；成功/超时两条路径都仍然
-        `return self._state`。
+        等**那次 launch 自己的** `TaskRecapDone`；查不到（这次终态没触发 close 边界，
+        或走的是熔断收尾等从不 launch 它的路径）就是 no-op，立即返回——不会为不存在
+        的后台任务空等，故 `TaskFailed`/`TaskCanceled` 依旧能及时返回。整个等待仍套
+        在原有的 `asyncio.timeout(timeout)` 里，超时预算不变；成功/超时两条路径都
+        仍然 `return self._state`。
         """
         from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
-        from ctx_weft.core.loop.steps.background_observe import has_pending_background_observe
+        from ctx_weft.core.loop.steps.background_observe import (
+            pending_background_observe_run_id,
+        )
         from ctx_weft.protocols.events import EventFilter
         terminal = {
             et for et, st in TASK_STATUS_BY_EVENT.items() if st in TERMINAL_TASK_STATUSES
@@ -398,10 +415,12 @@ class TurnHandle:
                 )
                 async for ev in stream:
                     if ev.type in terminal:
-                        if not has_pending_background_observe(self.task_id):
+                        pending_run_id = pending_background_observe_run_id(self.task_id)
+                        if pending_run_id is None:
                             return self._state
                         async for ev2 in stream:
-                            if ev2.type is EventType.TASK_RECAP_DONE:
+                            if (ev2.type is EventType.TASK_RECAP_DONE
+                                    and ev2.run_id == pending_run_id):
                                 return self._state
         except TimeoutError:
             pass
