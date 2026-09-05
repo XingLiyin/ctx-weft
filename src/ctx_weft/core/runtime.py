@@ -306,34 +306,103 @@ class TurnHandle:
             yield ev
 
     async def wait_for_finish(self, timeout: float = 300.0) -> LoopState | None:
-        """阻塞到该 task 进终态或超时。
+        """阻塞到该 task 的这轮交互**完全落定**，或超时。
 
-        判据是 **task 终态事件**，不是 `RunFinished`：一轮 run 结束不等于这条 task
-        结束（还可能有 finalize、还可能被重排再跑一轮）。四个终态事件与
-        `TERMINAL_TASK_STATUSES` 同源，外加 `TaskFinalized`——它是 finalize 阶段的
-        收尾信号，落在 `TaskFinished` 之后，等它才不会返回过早。
+        **契约（调用方能指望什么）**：一旦本方法返回（非超时路径），这条 task 不仅已经
+        进了终态（FINISHED/FAILED/CANCELED），该次终态触发的一切收尾副作用——尤其是
+        close 边界后台 observe 的段折叠/胶囊化（spec 2026-07-20 延迟折叠）——也已经
+        落地在 memory 里。host 典型用法是 `send_message` → `await wait_for_finish()`
+        → 从 memory 读回对话渲染给用户；如果这时折叠还没落地，读到的就是还没胶囊化的
+        原始 raw 记录，渲染出来的对话是「半成品」。这不是可选的锦上添花，是这个句柄
+        「finished」这个词本身的含义——返回了就必须是真的处理完了，不能是「处理完了，
+        除了数据还没就绪」。**这是一份新确立的保证，不是旧行为的复原**：改造前的
+        `RunFinished`-based 等待同样不保证这一点——`test_dispatch_boundary_recap_e2e`
+        在这轮改造的起点提交上就以约 1/3 的概率失败。
 
-        **不直接写 `EventType.TASK_FINISHED` / `TASK_FAILED` / `TASK_CANCELED` 字面量**：
+        为什么不能见到第一个终态事件就返回：判据是 **task 终态事件**，不是
+        `RunFinished`——一轮 run 结束不等于这条 task 结束（还可能有 finalize、还可能
+        被重排再跑一轮）；而即便等到了三个终态事件之一（同 `TERMINAL_TASK_STATUSES`），
+        触发它的那次 close 边界后台 observe 仍可能还没跑完——它是 `ObserveStep` 里
+        fire-and-forget 出去的（`background_observe.launch_background_observe`），
+        与「task 进终态」这两件事之间没有天然的先后保证，只是一场 asyncio 调度竞态
+        （下面第 2 部分有实测证据）。`TaskFailed`/`TaskCanceled` 不受影响——见下面
+        「不会挂起」——依旧在终态事件到达后就近乎立即返回。
+
+        ## 1. `EventType.TASK_FINISHED`/`TASK_FAILED`/`TASK_CANCELED` 不写字面量
+
         `test_task_manager_owns_status.py::test_only_task_manager_emits_task_status_events`
         是一道全树 AST 守卫——「只有 TaskManager 能发 task 状态事件」，判据不分「发射」
         与「查表读」，`runtime.py` 不在它的 `_ALLOWED` 白名单里。改从 `reducers.
         TASK_STATUS_BY_EVENT`（该守卫已放行的文件）按值反查终态三个事件类型，绕开
         字面量，语义不变——那张表本就是「事件类型 → 任务状态」的单一真源。
-        `TaskFinalized` 不在该表里（它不对应任何任务状态转移），不受此守卫管辖，直接引用。
+
+        ## 2. 实测事件顺序：曾经的假设是错的
+
+        2026-09-04 之前的版本把 `TaskFinalized` 也塞进终态集合，指望它比 `TaskFinished`
+        晚到、借它的时序当「收尾已完工」的替身。用真实 e2e 场景订阅总线实测（见
+        `fix-wait-for-finish-report.md`）发现时序恰恰相反——`TaskFinalized` 由
+        `FinalizeStep` 在本轮 run **内**发出，落在 `TaskManager.apply_run_outcome` 发
+        的 `TaskFinished` **之前**；「先到先得」的判据下，把它加进终态集合只会让
+        `wait_for_finish` 比只等 `TaskFinished` 更早返回，达不到「等收尾」的目的
+        （已从终态集合里删掉，不再引用它）。真正滞后于 `TaskFinished` 的是 close 边界
+        后台 observe 自己的完成——它在 `ObserveStep` 里以 `asyncio.create_task`
+        fire-and-forget 方式登记进 `_task_pending[task_id]`（这一步发生在
+        `TaskFinalized`/`TaskFinished` 之前，同一协程、无 await 间隔，先后关系恒定），
+        但**登记**与**跑完**是两回事——它的执行体、连同它自己的 `TaskRecapStarted/
+        Done`，何时被事件循环调度、相对 `TaskFinished` 谁先谁后，是一场纯粹的 asyncio
+        调度竞态。
+
+        ## 3. 被否决的替代方案：直接 `await` 那个 `asyncio.Task`
+
+        第一版实现直接等后台 observe 的 `asyncio.Task` 对象本身
+        （`background_observe.await_pending_background_observe` + `asyncio.shield`，
+        `_run_loop` 入口、`_inject_user_reply` 用的正是这条路）。这条路被**实测证否**：
+        `TaskManager._fire_session_done` 也在等同一个后台任务收尾（`asyncio.gather(
+        *self._background_asyncio_tasks)`），且它的等待从 `_run_task` 发出
+        `TaskFinished` 到调用那次 `gather` 之间只隔几行同步代码、中途不把控制权交还
+        事件循环，故**总是先于** `wait_for_finish` 注册上这个等待。若这里也去 `shield`
+        同一个 `asyncio.Task` 对象，两个等待者都挂在它的完成回调清单上，`_fire_session_
+        done` 先注册、先被唤醒——它会抢在 `wait_for_finish` 前面跑完 `on_session_done`/
+        `_release_session`，把 session 一并拆掉。复现：`test_runtime_agent_api.py::
+        test_start_session_agent_id_is_addressable_root_agent` 在这版实现下会于
+        `wait_for_finish` 返回后 `get_agent()` 查无此 agent（`AgentNotFound`）——
+        session 已经在返回前被拆了。
+
+        改成继续消费**这条已经在订阅的事件流**、等它上面的 `TaskRecapDone` 就不撞这
+        个问题：后台 observe 在 `finally` 里先 `emit(TaskRecapDone)`——这一步只是把
+        事件放进各订阅者自己的队列，不等任何人处理——之后才真正从协程函数 return、它
+        的 `asyncio.Task` 才转入 done 态；事件总线上的那次唤醒排在 Task-done 的唤醒
+        **之前**，`wait_for_finish` 借着「早就在等这条流」的订阅比 `_fire_session_done`
+        的 `gather` 更早被唤醒返回，不会撞见会话已经被拆完的中间态。
+
+        ## 4. 为什么不会挂起
+
+        `has_pending_background_observe` 只做一次同步字典读（无 await，见其
+        docstring）：终态事件到达那一刻，若查到确有在途后台任务，才继续在同一条流上
+        等 `TaskRecapDone`；查不到（这次终态没触发 close 边界，或走的是熔断收尾等从
+        不 launch 它的路径）就是 no-op，立即返回——不会为不存在的后台任务空等，故
+        `TaskFailed`/`TaskCanceled` 依旧能及时返回。整个等待仍套在原有的
+        `asyncio.timeout(timeout)` 里，超时预算不变；成功/超时两条路径都仍然
+        `return self._state`。
         """
         from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
+        from ctx_weft.core.loop.steps.background_observe import has_pending_background_observe
         from ctx_weft.protocols.events import EventFilter
         terminal = {
             et for et, st in TASK_STATUS_BY_EVENT.items() if st in TERMINAL_TASK_STATUSES
         }
-        terminal.add(EventType.TASK_FINALIZED)
         try:
             async with asyncio.timeout(timeout):
-                async for ev in self.event_bus.stream(
+                stream = self.event_bus.stream(
                     EventFilter(agent_id=self.agent_id, task_id=self.task_id)
-                ):
+                )
+                async for ev in stream:
                     if ev.type in terminal:
-                        return self._state
+                        if not has_pending_background_observe(self.task_id):
+                            return self._state
+                        async for ev2 in stream:
+                            if ev2.type is EventType.TASK_RECAP_DONE:
+                                return self._state
         except TimeoutError:
             pass
         return self._state

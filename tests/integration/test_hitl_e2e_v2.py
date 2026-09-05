@@ -158,6 +158,34 @@ async def _poll(predicate, *, timeout: float = 5.0, interval: float = 0.02):
     raise AssertionError("timed out waiting for condition")
 
 
+async def _wait_task_terminal(handle, *, timeout: float = 5.0):
+    """等 task 到终态就返回，**不经** `handle.wait_for_finish`。
+
+    `wait_for_finish`（2026-09-04 起）多了一层更强的保证：终态事件到达后，若 close
+    边界的后台 observe（段折叠/胶囊化，spec 2026-07-20 延迟折叠）确有在途，还会继续
+    等它把折叠落地才返回——这是 host「等 wait_for_finish 返回就去读 memory 渲染」
+    这条真实用法需要的durability，不是可选项。
+
+    但下面这条测试要看的恰恰是**折叠落地前**的中间状态（第二轮 act 请求数、工具结果
+    回灌），如果借道 `wait_for_finish` 就会连带等到后台 observe 自己也跑一轮 LLM
+    调用，把这条测试的桩计数搅乱（它没有像 `test_dispatch_boundary_recap_e2e` 那样
+    特判后台 observe 的终止工具名）。这里直接复刻 `wait_for_finish` 曾经的（也是现在
+    `TaskFailed`/`TaskCanceled` 仍然沿用的）「见到 task 终态事件就返回」判据，绕开新增
+    的那层等待，只钉住「task 到终态」这一刻——断言内容不变，只是不再途经
+    `wait_for_finish` 这个更强的契约。"""
+    from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
+    from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
+    from ctx_weft.protocols.events import EventFilter
+    terminal = {et for et, st in TASK_STATUS_BY_EVENT.items() if st in TERMINAL_TASK_STATUSES}
+    async with asyncio.timeout(timeout):
+        async for ev in handle.event_bus.stream(
+            EventFilter(agent_id=handle.agent_id, task_id=handle.task_id)
+        ):
+            if ev.type in terminal:
+                return handle._state
+    return handle._state
+
+
 def _make_runtime_with_bash_tool(llm, *, hitl_timeout_sec: int | None = None):
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
@@ -218,7 +246,9 @@ async def test_hot_approval_rewrites_arguments_and_result_reaches_the_model() ->
     ))
     assert view is not None and view.outcome == "accepted"
 
-    state = await handle.wait_for_finish(timeout=5.0)
+    # 不经 wait_for_finish：这条测试要看 close 边界后台 observe 折叠落地**前**的
+    # act 请求数（见 _wait_task_terminal docstring），故只等 task 到终态。
+    state = await _wait_task_terminal(handle, timeout=5.0)
     assert state is not None and state.task.status == "FINISHED", (
         f"expected FINISHED, got {state.task.status if state else None}"
     )

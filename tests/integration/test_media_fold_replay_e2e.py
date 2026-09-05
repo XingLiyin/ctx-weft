@@ -35,6 +35,7 @@ stub LLM 只做一件真模型也会做的事：**扫 prompt 文本找占位、�
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses as _dc
 from collections.abc import AsyncIterator
@@ -305,6 +306,32 @@ class _WireCapturingOpenAILLM(_PlaceholderReadingLLM, OpenAIMultimodalAdapter):
 #   最老的 A，且下一轮不会把刚取回的图又降掉。
 
 
+async def _wait_task_terminal(handle, *, timeout: float = 5.0):
+    """等 task 到终态就返回，**不经** `handle.wait_for_finish`。
+
+    `wait_for_finish`（2026-09-04 起）多了一层更强的保证：终态事件到达后，若 close
+    边界的后台 observe（段折叠/胶囊化，spec 2026-07-20 延迟折叠）确有在途，还会继续
+    等它把折叠落地才返回——这是 host「等 wait_for_finish 返回就去读 memory 渲染」这条
+    真实用法需要的durability，不是可选项。
+
+    但本文件的断言恰恰要看**折叠落地前**的中间状态（取回的图仍以一条普通记录挂在
+    对话尾部，还没被 close 时的段折叠 supersede 掉）。这里直接复刻 `wait_for_finish`
+    曾经的（也是现在 `TaskFailed`/`TaskCanceled` 仍然沿用的）「见到 task 终态事件就
+    返回」判据，绕开新增的那层等待，只钉住「task 到终态」这一刻——断言内容不变，只是
+    不再途经 `wait_for_finish` 这个更强的契约。"""
+    from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
+    from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
+    from ctx_weft.protocols.events import EventFilter
+    terminal = {et for et, st in TASK_STATUS_BY_EVENT.items() if st in TERMINAL_TASK_STATUSES}
+    async with asyncio.timeout(timeout):
+        async for ev in handle.event_bus.stream(
+            EventFilter(agent_id=handle.agent_id, task_id=handle.task_id)
+        ):
+            if ev.type in terminal:
+                return handle._state
+    return handle._state
+
+
 async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
                        prompt=None):
     resolver = InlineAgentTemplateProvider()
@@ -324,7 +351,9 @@ async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
         template_id="agent:tpl_echo",
         user_prompt=_prompt() if prompt is None else prompt,
         context_limit=4300, reserved_output_tokens=0))
-    state = await handle.wait_for_finish(timeout=20.0)
+    # 不经 wait_for_finish：本文件要看 close 边界后台 observe 折叠落地**前**的中间状态
+    # （见 _wait_task_terminal docstring），故只等 task 到终态。
+    state = await _wait_task_terminal(handle, timeout=20.0)
     assert state is not None
     assert state.task.status == "FINISHED", f"expected FINISHED, got {state.task.status}"
     return runtime, memory, state

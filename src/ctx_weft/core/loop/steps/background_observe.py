@@ -418,3 +418,24 @@ async def await_pending_background_observe(task_id: str) -> None:
     pending = _task_pending.get(task_id)
     if pending is not None and not pending.done():
         await asyncio.shield(pending)
+
+
+def has_pending_background_observe(task_id: str) -> bool:
+    """非阻塞地探一眼：该 task 此刻是否有一个还没跑完的后台 observe（同步字典读，无 await）。
+
+    `TurnHandle.wait_for_finish`（`runtime.py`）用它决定终态事件到达后要不要在**同一条
+    事件流订阅**上继续等对应的 `TaskRecapDone`——而不是另起一个等这个 asyncio.Task 本身
+    （`await_pending_background_observe`/`asyncio.shield`）的等待者。两者看似等价，调度
+    顺序却不同：`TaskManager._fire_session_done` 也在等这同一个后台任务（`asyncio.gather`），
+    且它的等待**总是先注册**（`_run_task` 那条协程从发 TaskFinished 到那次 gather 之间不
+    过几行同步代码，中途不会把控制权交还事件循环）；若 `wait_for_finish` 也去等**同一个
+    Task 对象**，两个等待者的回调都挂在它的完成清单上，`_fire_session_done` 那个先注册、
+    先被唤醒——它会在 `wait_for_finish` 之前跑完 `on_session_done`/`_release_session`，
+    把 session 一并拆了（agent record 也没了）。改成等**事件总线上的 TaskRecapDone**
+    则不出现这个问题：后台 observe 在 `finally` 里先 `emit(TaskRecapDone)`（这一步只是把
+    事件塞进订阅者各自的队列，不等任何人处理）、之后才真正从协程函数 return、其
+    `asyncio.Task` 才转入 done 态——事件总线的那次唤醒排在 Task-done 的唤醒之前，
+    `wait_for_finish` 借着「早就在等这条流」的事件订阅，比 `_fire_session_done` 的
+    `gather` 更早被唤醒返回，不会撞见会话已经被拆完的中间态。"""
+    pending = _task_pending.get(task_id)
+    return pending is not None and not pending.done()
