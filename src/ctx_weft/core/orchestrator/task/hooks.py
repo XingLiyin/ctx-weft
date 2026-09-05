@@ -12,6 +12,8 @@
     threshold_finalizer   同上
     on_session_done       回收 run 令牌 / pause 闩 / scoped provider，全是 runtime 内存
     on_session_idle       同上
+    on_task_terminal      清 CapabilityCache 里该 task 的 pin——cache 归 core.capabilities，
+                          TM 不认识它，也不该知道「工具面」这回事
 
 改造前它们是 8 个独立 setter（外加一个 `set_session_registry`，实测**从未被读过**，
 已随本次一并删除），构造完的 TaskManager 因此是个半成品，接线顺序成了隐含契约。
@@ -20,9 +22,9 @@
 类型层面就表示不出来。逐字段 setter 恰恰相反，允许任意子集，而任意子集里绝大多数
 是错的。
 
-**这不是消除坏味道，是把它集中起来。** 7 个 Optional 回调本身就意味着 TM 有 7 处
+**这不是消除坏味道，是把它集中起来。** 8 个 Optional 回调本身就意味着 TM 有 8 处
 越界；真正消除得让 TM 不再需要它们（例如把熔断整条序列移交一个 SessionSupervisor），
-那是比本次大得多的一次重构。本模块的价值在于：以后有人想加第 8 个，得先在这个
+那是比本次大得多的一次重构。本模块的价值在于：以后有人想再加一个，得先在这个
 dataclass 上加字段，那一刻就会被问一句「这东西为什么不能是 TM 自己的」。
 
 仍是独立方法的三个（它们在不同时刻被多次调用，不属于一次性接线）：
@@ -73,6 +75,12 @@ class TaskManagerHooks:
 
     #: session 真正结束时调用。幂等由调用方承担（runtime 侧 `_release_session` 本就幂等）。
     on_session_done: "Callable[[], Coroutine[Any, Any, None]] | None" = None
+
+    #: task 落**终态**（FINISHED/FAILED/CANCELED）时调用，参数是 task_id。用于回收挂在
+    #: task 上、run 生命周期管不着的运行期状态（当前唯一使用者：清 CapabilityCache 里该
+    #: task 的 pin）。**只在终态那条路上触发**：`_settle` 的 PENDING（retry）分支先 return，
+    #: 故重试天然不触发——重试保住 pin 正是它该有的语义。同步回调、异常只记日志不阻断收尾。
+    on_task_terminal: "Callable[[str], None] | None" = None
 
     #: session 进入**空闲挂起**（park/suspend 且无其它在跑任务、非终结）时调用。
     #: 区别于 `on_session_done`：那是终结回调；这是「暂停待续接」的信号，供 runtime

@@ -207,7 +207,7 @@ class CapabilityGateway:
 
         # 1. Lookup capability（只处理 kind="tool"）。控制工具的全局可达性由 CapabilityCache 的
         # session 全局区保证（get_by_qualified_name 回退），gateway 无需特殊逻辑。
-        cap = self._cache.get_by_qualified_name(state.agent.id, tool_name)
+        cap = self._cache.get_by_qualified_name(state.agent.id, tool_name, state.task.id)
         if cap is None or cap.kind != "tool":
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,
@@ -518,6 +518,9 @@ class CapabilityGateway:
         事件——其后 provider 让出的任何东西都不可见。provider 的局部状态随之消失，这正是
         `HitlAsk.resume_state` 存在的理由。
 
+        **`pin` 恰好相反，不终止流**：它只是把一批能力加进当前 task 的可用面，工具随后照常
+        yield 自己的 result（见 `CapabilityEvent.kind` 的注释）。
+
         **提前退出时显式 `aclose()`，不把关闭寄给 GC**：第三方 provider 的 `invoke` 是个
         异步生成器，它的 `finally` 里可能要杀进程、关连接、释放锁。靠 GC 意味着那些清理在
         一个不确定的时刻发生（`aclose()` 是协程，GC 只能凑合地安排它），而契约文本对实现者
@@ -549,6 +552,12 @@ class CapabilityGateway:
                         f"[Error {ev.payload.get('code', 'ERR')}: "
                         f"{ev.payload.get('message', '')}]"
                     )
+                elif ev.kind == "pin":
+                    # 「把这批能力加进当前 task 的可用面」。**与 needs_human 相反，不 break**：
+                    # pin 不是流的终点，工具随后照常 yield 自己的 result。落进 cache 即当轮
+                    # 生效——AssembledPrompt.tools 每次读都问 cache，不是装配期的快照。
+                    self._cache.pin(
+                        state.agent.id, state.task.id, ev.payload.get("capabilities") or [])
         finally:
             aclose = getattr(events, "aclose", None)
             if aclose is not None:

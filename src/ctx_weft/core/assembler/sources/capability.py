@@ -17,10 +17,41 @@ from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils.ids import generate_id
-from ctx_weft.protocols.capability import AgentCapability, SkillCapability, ToolCapability, qualify
+from ctx_weft.protocols.capability import (
+    AgentCapability,
+    Capability,
+    SkillCapability,
+    ToolCapability,
+    qualify,
+)
+from ctx_weft.protocols.llm import LLMTool
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
+
+
+def build_llm_tools(caps: list[Capability], purpose: str) -> list[LLMTool]:
+    """capability 列表 → LLM 线上工具数组（按 purpose 与 kind=="tool" 过滤）。
+
+    **模块级纯函数，不是 CapabilityCache 的方法**：LLMTool 是 LLM 线上格式、属渲染层，
+    cache 只是存储；把它挂上去会让存储层认识线上协议。散文段渲染（下面的 fetch）与
+    活工具面（assembler 装在 AssembledPrompt.tools_fn 上的闭包）共用这一份，两条路
+    因此不可能算出不同的工具集。
+
+    **但两条路可以不等长，这是刻意的**：散文段是 ContextBlock，会被 budget 按预算裁剪；
+    工具数组读 cache，不受裁剪。于是预算吃紧时，prompt 里介绍到的工具可能少于 API 实际
+    提供的。取舍方向明确——工具数组是权威声明、散文段是补充说明；宁可模型能调到一个没被
+    介绍的工具，也不要它被告知了却调不到。
+    """
+    return [
+        LLMTool(
+            name=qualify(cap.id),
+            description=cap.description,
+            input_schema=cap.input_schema,
+        )
+        for cap in caps
+        if isinstance(cap, ToolCapability) and purpose in cap.purposes
+    ]
 
 
 class CapabilitySource:
@@ -32,7 +63,6 @@ class CapabilitySource:
         deps: "AssemblerDeps",
     ) -> AsyncIterator["ContextBlock"]:
         from ctx_weft.core.assembler.assembler import ContextBlock
-        from ctx_weft.protocols import LLMTool
 
         tools: list[ToolCapability] = []
         skills: list[SkillCapability] = []
@@ -62,13 +92,13 @@ class CapabilitySource:
             provider = provider_index.get(pname)
             return pname, (getattr(provider, "description", "") if provider else "")
 
+        # metadata["llm_tool"] 仍随块携带（qualified 名的既有断言点在读它），但它不再是
+        # AssembledPrompt.tools 的来源——工具面已改由 cache 现算（见 build_llm_tools 文档）。
+        llm_tool_by_name = {t.name: t for t in build_llm_tools(tools, request.purpose)}
+
         for cap in tools:
             qname = qualify(cap.id)
-            llm_tool = LLMTool(
-                name=qname,
-                description=cap.description,
-                input_schema=cap.input_schema,
-            )
+            llm_tool = llm_tool_by_name[qname]
             provider_name, provider_description = _provider_meta(cap.id)
             yield ContextBlock(
                 id=generate_id("blk"),

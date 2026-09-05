@@ -23,6 +23,8 @@ ContextSource 是数据获取接口。
           │
           ▼
     AssembledPrompt（system / messages / tools / token_count）
+                    tools 不是这条流水线的产物：它由 assemble() 装上的闭包现读
+                    CapabilityCache（唯一真相源），故运行期 pin 进来的能力当轮可见。
 
 详见设计文档 §5.2。
 """
@@ -30,6 +32,7 @@ ContextSource 是数据获取接口。
 from __future__ import annotations
 
 import asyncio
+import logging
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -47,6 +50,8 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.core.utils.estimate import effective_limit, estimate_tokens
 from ctx_weft.protocols.knowledge import KnowledgeProvider
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ctx_weft.core.models.agent import Agent
@@ -120,15 +125,71 @@ class ContextBlock:
 # ── AssembledPrompt ───────────────────────────────────────────────────────────
 
 
-@dataclass
 class AssembledPrompt:
-    """Composer 输出：装配好的最终 prompt。"""
+    """Composer 输出：装配好的最终 prompt。
 
-    system: str
-    messages: list[LLMMessage]
-    tools: list[LLMTool]
-    token_count: int
-    metadata: dict[str, Any] = field(default_factory=dict)
+    **`tools` 是 property，不是字段**——这是本类不再是 dataclass 的唯一理由。ActStep 的
+    每一轮读的都是**同一个** prompt 对象（PrepareStep 一次装配、act 循环内不重装配），
+    若 tools 是装配期的一份拷贝，运行期新增的能力就永远进不了工具面，且它与
+    CapabilityCache 两份之间没有任何同步机制。装上 `tools_fn` 后每次读都问 cache 现算
+    （闭包见 ContextAssembler.assemble），cache 成为唯一真相源。
+
+    构造签名与参数名保持与旧 dataclass 逐字相同（含按位置传），既有构造点零改动；
+    不装 tools_fn 时 `tools` 就是构造时传进来的那份，行为逐字节不变。
+    """
+
+    def __init__(
+        self,
+        system: str,
+        messages: list[LLMMessage],
+        tools: list[LLMTool],
+        token_count: int,
+        metadata: dict[str, Any] | None = None,
+        tools_fn: Callable[[], list[LLMTool]] | None = None,
+    ) -> None:
+        self.system = system
+        self.messages = messages
+        self._tools = tools
+        self.token_count = token_count
+        self.metadata: dict[str, Any] = metadata if metadata is not None else {}
+        self.tools_fn = tools_fn
+
+    @property
+    def tools(self) -> list[LLMTool]:
+        if self.tools_fn is None:
+            return self._tools
+        try:
+            return self.tools_fn()
+        except Exception:
+            # 活来源出问题不该让整轮 LLM 调用崩：回落装配期那份快照（可能偏旧，但可用）。
+            logger.warning("AssembledPrompt: tools_fn failed, falling back to assembled snapshot",
+                           exc_info=True)
+            return self._tools
+
+    @tools.setter
+    def tools(self, value: list[LLMTool]) -> None:
+        # 少数调用方（测试替身、临时裁剪）直接赋值：写进快照槽，语义与旧 dataclass 一致。
+        self._tools = value
+
+    def __eq__(self, other: object) -> bool:
+        # 逐字段相等，与改造前的 dataclass 语义一致（比较的是**当前** tools 视图）。
+        # 有测试拿它作「两次装配逐字节相同」的判据，不能退化成身份比较。
+        if not isinstance(other, AssembledPrompt):
+            return NotImplemented
+        return (
+            self.system == other.system
+            and self.messages == other.messages
+            and self.tools == other.tools
+            and self.token_count == other.token_count
+            and self.metadata == other.metadata
+        )
+
+    __hash__ = None  # type: ignore[assignment]  # 同 dataclass(eq=True)：可变、不可哈希
+
+    def __repr__(self) -> str:  # pragma: no cover — 调试用
+        return (f"AssembledPrompt(system={self.system!r}, messages={self.messages!r}, "
+                f"tools={self.tools!r}, token_count={self.token_count!r}, "
+                f"metadata={self.metadata!r})")
 
 
 # ── Source protocol ────────────────────────────────────────────────────────────
@@ -162,6 +223,12 @@ class AssemblerDeps:
     # provider_name → CapabilityProvider（持有 live 对象，fetch 时读取 .description；
     # MCP 在 connect 后才有 description，故须 live 读取而非装配时快照）
     capability_provider_index: dict[str, Any] = field(default_factory=dict)
+    # CapabilityCache（工具面唯一真相源）+ 本次装配的 agent。assemble() 据此给
+    # AssembledPrompt 装上活工具面闭包；为 None 时退回「composer 产什么就是什么」的旧行为，
+    # 故直接构造 ContextAssembler 的测试无需改动。类型写 Any 避免 assembler → core.capabilities
+    # 的硬依赖（assembler 层不认识 cache 的具体类型）。
+    capability_cache: Any = None
+    agent_id: str = ""
 
 
 # ── ContextAssembler ───────────────────────────────────────────────────────────
@@ -192,7 +259,31 @@ class ContextAssembler:
 
         # compose
         prompt = await self.composer.compose(kept, request)
+        self._install_live_tools(prompt, request)
         return prompt
+
+    def _install_live_tools(self, prompt: AssembledPrompt, request: ContextRequest) -> None:
+        """给 prompt 装上活工具面：每次读 `.tools` 都问 CapabilityCache 现算。
+
+        装配期的一份拷贝与 cache 之间没有同步机制，而 ActStep 整轮循环读的是同一个 prompt
+        对象——运行期 pin 进来的能力若不走这条闭包就永远不可见。渲染仍复用
+        `build_llm_tools`（同一个 purpose 过滤），故活工具面与散文段清单不可能算出两套。
+
+        compact 不装：它的工具面按契约恒为空（composer 的 else 分支），装了会凭空长出工具。
+        cache 缺失（直接构造 assembler 的测试路径）也不装，保持旧行为。
+        """
+        cache = self.deps.capability_cache
+        if cache is None or request.purpose == "compact":
+            return
+        from ctx_weft.core.assembler.sources.capability import build_llm_tools
+
+        # agent/task 优先取 request 自己的（它就是这次装配的对象）；deps 侧作兜底——
+        # provider_ctx 与 request 恒同源，但 deps 是按 run 构造的、request 是按次装配的。
+        agent_id = getattr(request.agent, "id", "") or self.deps.agent_id
+        task_id = getattr(request.task, "id", "") or getattr(
+            self.deps.provider_ctx, "task_id", "")
+        purpose = request.purpose
+        prompt.tools_fn = lambda: build_llm_tools(cache.available(agent_id, task_id), purpose)
 
     async def _collect(self, source: ContextSource, request: ContextRequest) -> list[ContextBlock]:
         blocks: list[ContextBlock] = []

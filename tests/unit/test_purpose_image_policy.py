@@ -175,8 +175,8 @@ def test_text_only_content_returned_as_same_object(content):
 async def test_text_only_compose_is_byte_identical(purpose, monkeypatch):
     """纯文本会话：五个 purpose 的产出与「根本没有降级逻辑」时逐字节相同。
 
-    基线由把 ``downgrade_images_to_text`` 换成恒等函数得到——AssembledPrompt 是
-    dataclass，相等即 system / messages / tools / token_count 全部逐字节相等。
+    基线由把 ``downgrade_images_to_text`` 换成恒等函数得到——AssembledPrompt 的
+    ``__eq__`` 逐字段比较，相等即 system / messages / tools / token_count 全部逐字节相等。
     """
     text_only = [TextPart(text="看这段文字")]
     monkeypatch.setattr(composer_mod, "downgrade_images_to_text", lambda c: c)

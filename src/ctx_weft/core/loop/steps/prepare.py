@@ -192,7 +192,8 @@ class PrepareStep(Step):
         if not skill_name or not ctx.skill_provider_index:
             return ""
         skill_cap = (
-            ctx.capability_cache.get_by_qualified_name(state.agent.id, skill_name)
+            ctx.capability_cache.get_by_qualified_name(
+                state.agent.id, skill_name, task_id=state.task.id)
             if ctx.capability_cache else None
         )
         if not isinstance(skill_cap, SkillCapability):

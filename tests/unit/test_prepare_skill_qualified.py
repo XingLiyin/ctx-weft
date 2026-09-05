@@ -26,7 +26,7 @@ async def test_loads_by_bare_name_from_qualified_skill_name() -> None:
     cache = CapabilityCache()
     cache.put("agt_1", [SkillCapability(id="local_skill:pdf", name="pdf", description="d")])
     provider = _SkillProvider()
-    state = SimpleNamespace(agent=SimpleNamespace(id="agt_1"))
+    state = SimpleNamespace(agent=SimpleNamespace(id="agt_1"), task=SimpleNamespace(id="tsk_1"))
     ctx = SimpleNamespace(
         capability_cache=cache,
         skill_provider_index={"local_skill": provider},

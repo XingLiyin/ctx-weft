@@ -104,6 +104,12 @@ class ActStep(Step):
                 await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
                     "turn": turn_num, "reason": "context_limit"}))
                 exit_reason = "context_limit"
+                # 上下文爆了还留着运行期 pin 进来的额外工具描述，是朝根因加码——下一轮
+                # 重新装配时那些工具会原样再占一遍额度。**max_turns 那条退出不清**：它走
+                # 另一个事件、另一条路径，且语义相反——agent 接近轮数上限才找到对的工具，
+                # 清掉等于让它从零重来、再次耗尽轮数，是个会自我复现的活锁。
+                if ctx.capability_cache is not None:
+                    ctx.capability_cache.clear_pins(state.task.id)
                 logger.warning(
                     "ActStep context_limit_hit: prompt_tokens=%d >= %d * 0.8 for agent %s",
                     turn.usage.prompt_tokens, agent.loop_guard.context_limit, agent.id)

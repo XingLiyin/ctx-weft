@@ -1411,7 +1411,7 @@ class CtxWeftRuntime:
                 self._pause_claimed.discard(session.id)
                 task_manager.set_pause_abandon(False)
 
-        # 一次性接线：7 个回调整体装好，装不出半接线的中间态（见 orchestrator/hooks.py）。
+        # 一次性接线：8 个回调整体装好，装不出半接线的中间态（见 orchestrator/hooks.py）。
         task_manager.set_hooks(TaskManagerHooks(
             # 归属权谓词：多轮对话里每次 resume 都新建 TM 并覆盖 _task_managers。旧 TM 的
             # 收尾若迟到（被其慢的 background observe 拖住），必须认出自己已被顶替、变
@@ -1430,6 +1430,10 @@ class CtxWeftRuntime:
                 self._finalize_cancel_memory(sess, tasks, reason)),
             on_session_done=_on_done,
             on_session_idle=_on_idle,
+            # task 落终态 → 清掉该 task 运行期 pin 进来的能力。挂在终态而非 run 收尾，
+            # 因为同一个 task 可以跑多个 run（retry/resume），pin 要跨得过重试
+            # （run 收尾的 evict 已明确不碰 pin 区，见 CapabilityCache.evict）。
+            on_task_terminal=lambda tid: self._capability_cache.clear_pins(tid),
         ))
 
         asyncio.create_task(task_manager.drain())
@@ -3190,6 +3194,10 @@ class CtxWeftRuntime:
             capability_provider_index={
                 p.name: p for p in self.providers.get_capability_providers()
             },
+            # 工具面唯一真相源：assembler 据此给 AssembledPrompt 装活工具面闭包
+            # （每轮读 .tools 都问 cache 现算，见 ContextAssembler._install_live_tools）。
+            capability_cache=self._capability_cache,
+            agent_id=provider_ctx.agent_id,
         )
         return ContextAssembler(
             sources=[

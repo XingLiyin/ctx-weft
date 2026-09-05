@@ -104,7 +104,13 @@ class SkillDefinition:
 
 @dataclass
 class CapabilityEvent:
-    kind: Literal["progress", "stdout", "stderr", "result", "error", "needs_human"]
+    kind: Literal["progress", "stdout", "stderr", "result", "error", "needs_human", "pin"]
+    # pin：provider 声明「把 payload["capabilities"]（list[Capability]）加进当前 task 的可用面」。
+    # **与 needs_human 不同，它不终止流**——gateway 就地把这批能力 pin 进 CapabilityCache，
+    # 然后继续消费，工具随后照常 yield 自己的 result。用于「一个工具在运行中才发现下一步该用
+    # 哪些工具」（按需展开工具面）：pin 进去的能力当轮即对 LLM 可见，因为 AssembledPrompt.tools
+    # 是活的（每次读都问 cache），不是装配期的快照。
+    # 生命周期挂在 task 上：同 task 的 retry 保留，task 落终态或 context_limit 退出时清。
     # needs_human：provider 声明「我需要一个人的决定」，payload["ask"] 是 HitlAsk。
     # **必须是流的最后一个事件**——gateway 见之即停止消费本流，其后 yield 的一律不可见
     # （spec §2）。让出时生成器被关闭，局部状态随之消失，故让出前的工作要放进

@@ -733,6 +733,16 @@ class TaskManager:
             await self._fire_session_idle()
 
     async def on_task_finished(self, task_id: str, status: TaskStatus) -> None:
+        # task 落终态 → 通知外部回收挂在 task 上的运行期状态（当前是 CapabilityCache 的 pin）。
+        # **这里就是「终态」那条路**：`_settle` 判 retry（status == "PENDING"）时先 return，
+        # 根本走不到这个函数，所以重试自动保住 pin，不需要额外判据。best-effort：清理失败
+        # 不该拦住任务收尾。
+        if self._hooks.on_task_terminal is not None:
+            try:
+                self._hooks.on_task_terminal(task_id)
+            except Exception:
+                logger.exception("TaskManager: on_task_terminal callback failed for %s", task_id)
+
         async with self._lock:
             self._clear_running(task_id)
             if status == "FAILED":

@@ -59,4 +59,6 @@ async def test_metadata_system_is_act_facet_and_persona_in_trailing():
     last_user = [m for m in prompt.messages if m.role == "user"][-1].content
     assert "## Your Current Role\n\nMD-PERSONA" in last_user  # persona under a heading
     assert "update_task_metadata" in last_user      # metadata cue names the tool
-    assert any(t.name == "update_task_metadata" for t in prompt.tools)
+    # 工具数组不再由 composer 产出（它只管散文段）：LLM 工具面改由 AssembledPrompt.tools_fn
+    # 现读 CapabilityCache，覆盖见 tests/unit/test_assembled_prompt_live_tools.py。
+    assert prompt.tools == []

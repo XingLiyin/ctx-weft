@@ -51,13 +51,21 @@ async def resolve_and_bind(state, ctx) -> list:
     控制工具是 session 全局的（每个 agent 都拿全部、生命周期为 session），注册到 cache 全局区
     （register_global，不随 per-run evict 逐出）；其余 per-run 解析的能力（skill/mcp/agent）按
     per-agent put。返回的 bound 仍含全部（供本 run 的 assembly）。
+
+    模板的 forbidden 集合一并交给 cache：解析路径靠它把禁用能力过滤掉，而运行期经
+    `pin` 加进来的能力不走解析路径——cache 记着这份集合才挡得住（模板禁用是硬边界，
+    运行期绕不过去）。
     """
     from ctx_weft.core.capabilities.control_tools import PROVIDER_NAME as _CONTROL
     bound = await resolve_capabilities(state, ctx)
     if ctx.capability_cache is not None:
+        template = state.extra.get("template")
+        forbidden_ids = {
+            ref.capability_id for ref in template.capability_refs if ref.mode == "forbidden"
+        } if template is not None else set()
         _control_prefix = f"{_CONTROL}:"
         control = [c for c in bound if c.id.startswith(_control_prefix)]
         other = [c for c in bound if not c.id.startswith(_control_prefix)]
         ctx.capability_cache.register_global(control)
-        ctx.capability_cache.put(state.agent.id, other)
+        ctx.capability_cache.put(state.agent.id, other, forbidden_ids=forbidden_ids)
     return bound

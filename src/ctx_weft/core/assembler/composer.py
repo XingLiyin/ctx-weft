@@ -87,6 +87,11 @@ messages —— 组装步骤（_build_actor_messages）：
   recognize_intent   METADATA facet → 元数据 cue（update_task_metadata 恰一次）。
                      tools = update_task_metadata。
 
+上表的 tools 一栏是**结果**而非本模块的产物：composer 只渲染散文段，工具数组由
+AssembledPrompt.tools 现读 CapabilityCache（按同一个 purpose 过滤，见
+sources/capability.py::build_llm_tools）。compact 的 tools = [] 也由那条闭包保证
+（assembler 对 compact 不装 tools_fn）。
+
 历史沿革：格式源自 miniAgents prompt_builder.py（refactor 非 redesign）；
 Phase 3 (2026-06-30) 移除 ## Task Background blackboard 段，predecessor 结果
 改经 memory recall 浮现。裁剪保护阶梯见 priority.py；预算裁剪见 budget.py。
@@ -99,7 +104,7 @@ import re
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from ctx_weft.protocols import LLMMessage, LLMTool
+from ctx_weft.protocols import LLMMessage
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.headings import SUBTASKS_REVIEW_HEADING
@@ -414,29 +419,28 @@ class DefaultComposer(Composer):
     ) -> "AssembledPrompt":
         from ctx_weft.core.assembler.assembler import AssembledPrompt
 
+        # tools 恒为 []：**composer 不再产工具数组**。它此前从 capabilities blocks 的
+        # metadata["llm_tool"] 收一份拷贝，与 CapabilityCache 各存一套、装配后再无同步。
+        # 现由 ContextAssembler 给 AssembledPrompt 装 tools_fn（读 cache 现算），composer
+        # 只管散文段渲染——同一批能力在 prompt 文本与工具数组里因此不会各说各话。
         if request.purpose == "act":
             system = self._build_actor_system(blocks)
             messages = self._build_actor_messages(blocks, request)
-            tools = self._collect_llm_tools(blocks)
         elif request.purpose == "observe":
             system = self._build_act_system(blocks, request)
             messages = self._build_observer_messages(blocks, request)
-            tools = self._collect_llm_tools(blocks)
         elif request.purpose == "recognize_intent":
             system = self._build_act_system(blocks, request)
             messages = self._build_facet_trailing_messages(blocks, request, _RECOGNIZE_INTENT_INSTRUCTION)
-            tools = self._collect_llm_tools(blocks)
         elif request.purpose == "background_observe":
             system = self._build_act_system(blocks, request)
             messages = self._build_background_observe_messages(blocks, request)
-            tools = self._collect_llm_tools(blocks)
         else:  # compact
             system = self._build_act_system(blocks, request)
             cue = (_AGENT_COMPACTION_INSTRUCTION
                    if (getattr(request, "extra", None) or {}).get("compact_scope") == "agent"
                    else _COMPACTION_INSTRUCTION)
             messages = self._build_facet_trailing_messages(blocks, request, cue)
-            tools = []
 
         # per-purpose 图片策略（用户裁定 D2）：只有 act 需要模型真看图，其余四个 purpose
         # 一律把图降级成确定性文本占位。**必须在 token_count 之前**（架构裁定 T1）——
@@ -456,7 +460,7 @@ class DefaultComposer(Composer):
         return AssembledPrompt(
             system=system,
             messages=messages,
-            tools=tools,
+            tools=[],
             token_count=token_count,
         )
 
@@ -1109,20 +1113,3 @@ class DefaultComposer(Composer):
         user_prompt = up if isinstance(up, str) else (content_to_text(up) if up else "")
         return title, description, user_prompt
 
-    def _collect_llm_tools(self, blocks: list["ContextBlock"]) -> list[LLMTool]:
-        """从 capabilities blocks 抽出 LLMTool 数组传给 LLM API。"""
-        tools: list[LLMTool] = []
-        for b in blocks:
-            if b.kind != "capabilities":
-                continue
-            llm_tool = b.metadata.get("llm_tool")
-            if isinstance(llm_tool, LLMTool):
-                tools.append(llm_tool)
-            elif b.metadata.get("capability_kind") == "tool":
-                # 构造一个 LLMTool
-                tools.append(LLMTool(
-                    name=b.metadata.get("capability_name", "?"),
-                    description=content_to_text(b.content),
-                    input_schema=b.metadata.get("input_schema", {}),
-                ))
-        return tools
