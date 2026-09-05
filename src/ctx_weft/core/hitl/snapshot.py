@@ -42,7 +42,7 @@ class HitlSnapshot:
     #: **键是 `hitl_id`，不是 `decisions_for` 的三元组**：`decisions_for` 是决定缓存，
     #: 它的三维键（session / tool_call / stage）是一条安全边界，不能动；而本表要回答的是
     #: 「这个 session 里哪些请求已终局」，对**没有 tool_call_id 的请求同样成立**——
-    #: `_park_wait_for_user`（`act.py`）开的 `UserTurn` park 就没有 tool_call_id，用三元组
+    #: `_cold_park`（`act.py`）开的 `UserTurn` park 就没有 tool_call_id，用三元组
     #: 做键会把整整一类请求排除在外（Task 9 复审 Finding 2）。
     #:
     #: 为什么单开一份而不只留 `decisions_for` 的 `(decision, resume_state)`：那个值里

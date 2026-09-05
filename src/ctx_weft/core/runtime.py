@@ -1020,7 +1020,7 @@ class CtxWeftRuntime:
         的 run 发一次软打断信号，被暂停的 run 在自己的下一个检查点自行 park 出一个
         wait 气泡（`ActStep._interrupt_checkpoint` / `_run_llm_turn` /
         `_execute_tool_calls` 命中 `pause_token.is_paused` 后统一走
-        `act._park_wait_for_user(source="interrupt", ...)`），agent 状态由那次
+        `act._park_for_interrupt(...)`），agent 状态由那次
         **真实**的 `TASK_AWAITING_HUMAN` 事件经 ALM 转成 `waiting_human`——不是本方法
         直接拍的。
 
@@ -1065,11 +1065,11 @@ class CtxWeftRuntime:
         判据（实测确认，见 task-20-report.md）是 `PendingHitl.delivery`：
         - `pause_agent`/`pause_session` 产生的气泡恒为
           `UserTurnDelivery(preface ∈ {PREFACE_AFTER_INTERRUPT, PREFACE_AFTER_INTERRUPT_EDIT})`
-          （`act._park_wait_for_user(source="interrupt", ...)` 的唯一产物）；
+          （`act._park_for_interrupt(...)` 的唯一产物）；
         - `ask_user` 的真实结构化提问用的是 `ToolResultDelivery`
           （`reply_as_result=True`，见 `control_capability.py` 的 `ask_user`
           构造），与前者的类型本身就不同，天然互斥；
-        - act 纯文本收尾的软待命（`source="plain_text"`）虽然**同样**是
+        - act 纯文本收尾的软待命（`act._park_await_user(...)` 的产物）虽然**同样**是
           `UserTurnDelivery`，但 `preface == PREFACE_NORMAL`——那不是暂停产生的，
           是正常一轮说完话后的自然等待，`resume_agent` 若把它也放行，等于没有
           任何新用户输入就凭空续了一轮，同样不对。

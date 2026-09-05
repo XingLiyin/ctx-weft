@@ -280,7 +280,7 @@ async def _run_llm_turn(
         if _is_own_root(state.task):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
             launch_background_observe(state, ctx, boundary="interrupt")
-        await _park_wait_for_user(state, ctx, source="interrupt", edit=not has_partial)
+        await _park_for_interrupt(state, ctx, edit=not has_partial)
 
     # token 自校准回喂：真实 usage 与发送前估算段作比（基线不参与），喂给该模型 tokenizer。
     # 估算段取 PROMPT_EST_SEG_KEY（tokenizer.count 直接产出）而非
@@ -425,7 +425,7 @@ async def _execute_tool_calls(
             if _is_own_root(state.task):
                 from ctx_weft.core.loop.steps.background_observe import launch_background_observe
                 launch_background_observe(state, ctx, boundary="interrupt")
-            await _park_wait_for_user(state, ctx, source="interrupt")
+            await _park_for_interrupt(state, ctx)
         if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
             ctx.cancel_token.raise_if_cancelled()
 
@@ -441,7 +441,7 @@ async def _execute_tool_calls(
                 if _is_own_root(state.task):
                     from ctx_weft.core.loop.steps.background_observe import launch_background_observe
                     launch_background_observe(state, ctx, boundary="interrupt")
-                await _park_wait_for_user(state, ctx, source="interrupt")
+                await _park_for_interrupt(state, ctx)
             if ctx.cancel_token is not None:
                 ctx.cancel_token.raise_if_cancelled()  # 硬取消
         try:
@@ -499,22 +499,20 @@ def _reconcile_finish_vs_dispatch(
 async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: int) -> None:
     """纯文本回合（无 tool call）收尾。
 
-    interactive 普通任务：让位给用户 → HITL input 冷 park（raises HitlPark；用户回复经 runtime
-    冷 resume 作 USER_PROMPT 注入后重入 act）。auto / 非普通任务 / 无 hitl：纯文本即任务
-    产出，发 stop 事件路由 observe。
+    interactive 普通任务：请求让位给用户 → `_park_await_user`（有人值守则 HITL input
+    冷 park、raises HitlPark，用户回复经 runtime 冷 resume 作 USER_PROMPT 注入后重入
+    act）。auto / 非普通任务 / 无 hitl：纯文本即任务产出，发 stop 事件路由 observe。
+
+    下面这条 `stop` 是「没让位」的收尾，与让位严格互斥：真让位了就抛 HitlPark，压根
+    走不到这里；`_park_await_user` 正常返回就意味着这一轮不让位（无人值守），它保证
+    零副作用返回，所以 `stop` 是这个回合唯一的一条 ACT_TURN_COMPLETED。
     """
     if (
         isinstance(state.task.settings, NormalTaskSettings)
         and state.task.interaction_mode == "interactive"
         and ctx.hitl is not None
     ):
-        await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
-            "turn": turn_num, "reason": "await_user"}))
-        # 纯文本暂停 = 软待命(允许但不强制回复) → PAUSED,区别于 ask_user 的 PAUSED_HITL。
-        if _is_own_root(state.task):
-            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-            launch_background_observe(state, ctx, boundary="plain_text")
-        await _park_wait_for_user(state, ctx, source="plain_text")
+        await _park_await_user(state, ctx, turn_num)
     await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
         "turn": turn_num, "reason": "stop"}))
 
@@ -657,33 +655,26 @@ def interrupt_edit_note(prev_request: str, new_input: str) -> str:
     return f"{prefix}{new_input}" if prefix else new_input
 
 
-async def _park_wait_for_user(
-    state: LoopState, ctx: LoopContext, *, source: str, edit: bool = False,
+async def _cold_park(
+    state: LoopState, ctx: LoopContext, preface: str, *, unattended: bool,
 ) -> None:
-    """起 wait_for_user 冷 park：抛 HitlPark（task 落 AWAITING_HUMAN 由 TaskManager 定）。
+    """起 wait_for_user 冷 park：登记 HITL 请求 + 抛 HitlPark（task 落 AWAITING_HUMAN
+    由 TaskManager 据 RunOutcome 定）。
 
-    **不写会话状态**：这不是本方法的职责。2026-09-02 那次重构曾把会话状态的唯一写者
+    **纯机械动作，不含任何策略判断**：preface 选哪条、这次让不让位，都由上面两个具名
+    包装（`_park_for_interrupt` / `_park_await_user`）决定后传进来。此前这些判断和动作
+    挤在同一个函数里，靠一个 `source` 字符串同时表达「选哪条 preface」与「要不要豁免
+    无人值守守卫」两件毫不相干的事。
+
+    **不写会话状态**：这不是本函数的职责。2026-09-02 那次重构曾把会话状态的唯一写者
     定为 `SessionRegistry`，由一条队列级聚合信号翻译成会话级状态；那整条链路已随会话
     状态机退役——`SessionRegistry` 自 2026-09-03 起降格为纯 agent 登记表，两端的事件
     类型也已于 2026-09-05 一并删除。会话级别的展示状态目前不由 core 预先算好广播，
     由 host 自行按 agent 状态聚合推导（docs/events-v2.md §2.1.1）。
 
     续跑方式由 **delivery 显式声明**，不再靠 `form == "wait"` + sentinel capability_id
-    这组跨三个模块的魔法字符串（spec §5）。``source``/``edit`` 只决定 preface：
-    ``plain_text`` → normal；``interrupt`` 已吐过 token/已进工具 → after_interrupt；
-    ``interrupt`` 且 ``edit=True``（未吐任何 token、未进工具）→ after_interrupt_edit。
-
-    TODO（park 语义拆分，下一个提交）：无人值守时 `ctx.hitl.open` 会抛
-    `UnattendedHitl`，本函数**故意不接**——这里已经走到「让位」的副作用一侧，接住它
-    也没有一个诚实的去处（既不能让位、也没有工具结果可回灌）。正解是把「要不要让位」
-    的判断**前置到副作用之前**：无人值守的 task 根本不该走到 `_park_wait_for_user`
-    （它的 `interaction_mode` 由设置点强制为 `auto`，纯文本回合本就该转成「继续自
-    己干」而非等人），届时这条路径连触发条件都不存在。在那之前它是暂时的：设置点的
-    不变式 `unattended ⟹ auto` 已经挡住了唯一一条正常进来的路。
+    这组跨三个模块的魔法字符串（spec §5）。
     """
-    preface = (PREFACE_AFTER_INTERRUPT_EDIT if (source == "interrupt" and edit)
-               else PREFACE_AFTER_INTERRUPT if source == "interrupt"
-               else PREFACE_NORMAL)
     req = await ctx.hitl.open(
         HitlAsk(
             form=HITL_FORM_WAIT,
@@ -693,11 +684,63 @@ async def _park_wait_for_user(
         task_id=state.task.id,
         agent_id=state.agent.id,
         stage=HITL_STAGE_TOOL,
-        unattended=state.task.unattended,
+        unattended=unattended,
         tenant_id=state.session.tenant_id,
     )
     # 不建等待槽 —— 本调用方随即 park 释放协程而非 await，应答必然走冷续跑。
     raise HitlPark(hitl_id=req.id)
+
+
+async def _park_for_interrupt(
+    state: LoopState, ctx: LoopContext, *, edit: bool = False,
+) -> None:
+    """人按了暂停键 → park 等他续接。**对无人值守守卫豁免**（`unattended=False`）。
+
+    守卫要挡的是「没有人可问」，不是「没有人在场」：按下暂停键的就是一个人，续接的
+    也会是那个人——运维暂停一个后台无人值守作业是完全合法的操作，那时 park 正是对的
+    行为。这条路径不属于守卫要挡的场景，所以豁免写死在这个具名函数里，而不是让四个
+    调用点各传一个 `allow_unattended=True`（那种写法太容易被后来人顺手改掉）。
+
+    ``edit`` 只决定 preface：已吐过 token / 已进工具循环 → after_interrupt；未吐任何
+    token 且未进工具 → after_interrupt_edit（续接时需补一句「上一条请求被取消」）。
+    """
+    preface = PREFACE_AFTER_INTERRUPT_EDIT if edit else PREFACE_AFTER_INTERRUPT
+    await _cold_park(state, ctx, preface, unattended=False)
+
+
+async def _park_await_user(state: LoopState, ctx: LoopContext, turn_num: int) -> None:
+    """agent 说完一段纯文本、想让位给用户 → 发 await_user + 折叠 + 冷 park。
+
+    与 `_park_for_interrupt` 相反，这条**没有人保证会回来**：让位是 agent 自己提的，
+    无人值守的 task 里根本没人会发下一条消息，park 即永久挂起。所以守卫在这里生效。
+
+    **判断前置于一切副作用**，这是本函数存在的全部意义：`hitl.open()` 里的守卫抛
+    `UnattendedHitl` 时，`await_user` 事件早已发出、background observe 早已起飞，
+    两个结局都坏——异常逸出打挂整个 run，或就地 catch 继续走、同一回合发出两条
+    `ACT_TURN_COMPLETED`（`await_user` 一条、`stop` 一条），前端看到的是「agent 说
+    它在等用户，紧接着又说它停了」。
+
+    这里**刻意不包 `try/except UnattendedHitl` 兜底**：判断读的和守卫查的是同一个
+    `Task.unattended`，只有一个真相源，不存在漂移。守卫仍留在 `open()` 里，所以将来
+    若有人加了新路径又忘了前置判断，行为是当场抛异常而不是静默挂死——那正是我们要的。
+
+    让位与不让位严格互斥：让位则抛 `HitlPark`，调用方那条 `stop` 根本到不了；不让位
+    则零副作用返回，`stop` 是这个回合唯一的收尾事件。
+    """
+    if state.task.unattended:
+        logger.warning(
+            "act: task %s is unattended — not yielding to the user after a plain-text turn; "
+            "treating the text as this turn's output and stopping normally",
+            state.task.id,
+        )
+        return
+    await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
+        "turn": turn_num, "reason": "await_user"}))
+    # 纯文本暂停 = 软待命(允许但不强制回复) → PAUSED,区别于 ask_user 的 PAUSED_HITL。
+    if _is_own_root(state.task):
+        from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+        launch_background_observe(state, ctx, boundary="plain_text")
+    await _cold_park(state, ctx, PREFACE_NORMAL, unattended=state.task.unattended)
 
 
 async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
@@ -707,7 +750,7 @@ async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
         if _is_own_root(state.task):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
             launch_background_observe(state, ctx, boundary="interrupt")
-        await _park_wait_for_user(state, ctx, source="interrupt", edit=edit)  # raises HitlPark
+        await _park_for_interrupt(state, ctx, edit=edit)  # raises HitlPark
     tok = ctx.cancel_token
     if tok is not None and tok.is_cancelled:
         tok.raise_if_cancelled()

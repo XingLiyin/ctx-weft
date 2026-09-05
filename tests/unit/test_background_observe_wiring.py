@@ -3,8 +3,8 @@
 测试四个触发点（均为 root-gated）：
   1. observe.py ask_human 边界（act_exit_reason="normal"，root task）→ 触发一次
   2. observe.py root normal-exit finish（act_exit_reason="actor_done"，root task）→ 触发一次
-  3. act.py 软打断 park（source="interrupt"，root task）→ 触发一次
-  4. act.py 纯文本暂停 park（source="plain_text"，root task）→ 触发一次（Task 13）
+  3. act.py 软打断 park（`_park_for_interrupt`，root task）→ 触发一次
+  4. act.py 纯文本暂停 park（`_park_await_user`，root task）→ 触发一次（Task 13）
   5. 子任务（parent_task_id 非空、同 agent）走相同路径 → 不触发
 """
 
@@ -225,7 +225,7 @@ async def test_observe_child_task_does_not_fire_close_boundary(monkeypatch):
 
 
 async def test_act_soft_interrupt_fires_for_root(monkeypatch):
-    """act soft-interrupt park (source='interrupt', root task) → launch_background_observe called once."""
+    """act soft-interrupt park (_park_for_interrupt, root task) → launch_background_observe called once."""
     from ctx_weft.core.control.tokens import PauseToken
     from ctx_weft.core.loop.steps.act import ActStep
     from tests.hitl_env import make_hitl
@@ -346,7 +346,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
 
 
 async def test_act_plain_text_pause_fires_for_root(monkeypatch):
-    """act plain-text pause (source='plain_text', root task, interactive) → launch_background_observe called once."""
+    """act plain-text pause (_park_await_user, root task, interactive) → launch_background_observe called once."""
     from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
     from tests.hitl_env import make_hitl
     from ctx_weft.providers.events import InProcessEventBus

@@ -204,7 +204,7 @@ async def test_pause_agent_unknown_raises():
 
 
 def _open_pause_bubble(rt, *, agent_id, task_id, session_id="s1", edit=False):
-    """与 `act._park_wait_for_user(source="interrupt", ...)` 完全同形的构造
+    """与 `act._park_for_interrupt(...)` 完全同形的构造
     （act.py 656-671 行：`form=HITL_FORM_WAIT`，`delivery=UserTurnDelivery(task_id=...,
     preface=PREFACE_AFTER_INTERRUPT[_EDIT])`）——`pause_agent` 递送信号后，run 在
     检查点自己 park 出的正是这一种。"""
@@ -226,7 +226,7 @@ def _open_ask_user_bubble(rt, *, agent_id, task_id, session_id="s1", tool_call_i
 
 
 def _open_plain_text_wait_bubble(rt, *, agent_id, task_id, session_id="s1"):
-    """与 `act._finish_plain_text_turn` 的 `source="plain_text"` 完全同形：同为
+    """与 `act._park_await_user`（纯文本让位）完全同形：同为
     `UserTurnDelivery`，但 `preface=PREFACE_NORMAL`——不是暂停产生的，是正常一轮
     说完话后的自然等待。"""
     return rt.hitl.open(
@@ -398,9 +398,8 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     assert paused == ["root"]
     assert root_tokens.pause.is_paused is True
 
-    # 2. 模拟 run 到下一个检查点真正 park（`act._park_wait_for_user(source=
-    #    "interrupt", ...)` 的产物）——与 test_resume_agent_* 系列同一构造，不跑
-    #    真实 run loop。
+    # 2. 模拟 run 到下一个检查点真正 park（`act._park_for_interrupt(...)` 的产物）
+    #    ——与 test_resume_agent_* 系列同一构造，不跑真实 run loop。
     stale_bubble = await _open_pause_bubble(rt, agent_id="root", task_id="t_root")
     task.status = "AWAITING_HUMAN"
     rt._agent_lifecycle_manager._agents["root"].status = "waiting_human"

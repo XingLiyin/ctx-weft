@@ -169,7 +169,7 @@ def _new_model_unresolved_tool_result() -> list[Event]:
 def _resolved_user_turn_never_injected() -> list[Event]:
     """`wait_for_user` 已被应答，但进程在注入之前就死了。
 
-    关键形状：`UserTurn` 的 park **没有 tool_call_id**（`act.py:_park_wait_for_user`）。
+    关键形状：`UserTurn` 的 park **没有 tool_call_id**（`act.py:_cold_park`）。
     """
     return [
         *_session_prelude(),

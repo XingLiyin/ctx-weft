@@ -75,7 +75,7 @@ async def _run_plain_text_pause(state, ctx):
 async def _run_interrupt(state, ctx, *, edit: bool):
     import ctx_weft.core.loop.steps.act as act
 
-    await act._park_wait_for_user(state, ctx, source="interrupt", edit=edit)
+    await act._park_for_interrupt(state, ctx, edit=edit)
 
 
 async def test_plain_text_pause_opens_a_user_turn_request():
