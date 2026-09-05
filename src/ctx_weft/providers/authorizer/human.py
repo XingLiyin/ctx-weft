@@ -46,7 +46,14 @@ class HumanConfirmationAuthorizer(Authorizer):
     async def on_decision(self, capability, ctx, arguments, tool_call_id,
                           decision: HitlDecision) -> AuthorizationDecision:
         """解释人给的决定。**未知 outcome 落 else 分支 = 不放行**——放行是安全决定，
-        未知值必须落到拒绝侧，而这个默认由本实现显式写出。"""
+        未知值必须落到拒绝侧，而这个默认由本实现显式写出。
+
+        **无人值守（`Task.unattended`）也走这条路**：本类仍然「总是让出」，但 gateway
+        在唯一的 HITL 登记入口被 `UnattendedHitl` 挡下后，会合成一条 rejected 决定
+        （message 说明「这个任务在后台无人值守运行，没有人能批准工具调用」）喂回这里，
+        由本方法照常翻成一个**拒绝授权**的 `AuthorizationDecision`——gateway 再把它包成
+        `[Blocked by human: ...]` 回灌 LLM。本类因此不必认识 unattended 这个概念，也
+        绝不会看见那个异常：它是控制流信号，不能逸出到 agent loop。"""
         if decision.outcome == HITL_OUTCOME_ACCEPTED:
             return AuthorizationDecision(
                 allowed=True,

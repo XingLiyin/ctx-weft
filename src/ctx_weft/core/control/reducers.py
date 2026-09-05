@@ -185,6 +185,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "user_prompt": content_to_jsonable(t.user_prompt),
                 "original_user_prompt": content_to_jsonable(t.original_user_prompt),
                 "interaction_mode": t.interaction_mode,
+                "unattended": t.unattended,
                 "origin_tool_call_id": t.origin_tool_call_id,
                 "origin_tool_name": t.origin_tool_name,
                 "settings_raw": t.settings_raw,
@@ -255,6 +256,8 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             user_prompt=content_from_jsonable(t.get("user_prompt", "")),
             original_user_prompt=content_from_jsonable(t.get("original_user_prompt", "")),
             interaction_mode=t.get("interaction_mode", "auto"),
+            # 存量快照无此键 → False（无人值守是新增语义，旧数据一律「有人在」）。
+            unattended=t.get("unattended", False),
             origin_tool_call_id=t.get("origin_tool_call_id", ""),
             origin_tool_name=t.get("origin_tool_name", ""),
             settings_raw=t.get("settings_raw", {}),
@@ -543,6 +546,8 @@ def _apply(view: RunStateView, ev: Event) -> None:
                 parent_task_id=task_data.get("parent_task_id", ""),
                 user_prompt=content_from_jsonable(task_data.get("user_prompt", "")),
                 interaction_mode=task_data.get("interaction_mode", "auto"),
+                # 存量事件流无此键 → False，见 deserialize_view 同一口径。
+                unattended=task_data.get("unattended", False),
                 origin_tool_call_id=task_data.get("origin_tool_call_id", ""),
                 origin_tool_name=task_data.get("origin_tool_name", ""),
                 settings_raw=task_data.get("settings", {}),

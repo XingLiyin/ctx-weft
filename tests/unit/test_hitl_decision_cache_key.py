@@ -105,7 +105,7 @@ async def test_stage_survives_a_restart_via_the_event_payload():
     await svc.open(HitlAsk(form="approval",
                            delivery=ToolResultDelivery(tool_call_id="call_1")),
                    session_id="s1", task_id="t1", tool_call_id="call_1",
-                   stage=STAGE_TOOL)
+                   stage=STAGE_TOOL, unattended=False)
     snap = fold_hitl_snapshot(bus.events)
     assert next(iter(snap.pending.values())).stage == STAGE_TOOL
 
@@ -181,7 +181,7 @@ def test_open_emits_and_folds_the_invocation_key():
             HitlAsk(form="approval",
                     delivery=ToolResultDelivery(tool_call_id="call_1")),
             session_id="s1", task_id="t1", tool_call_id="call_1",
-            stage=STAGE_AUTHZ, invocation_key="bash:AAA")
+            stage=STAGE_AUTHZ, unattended=False, invocation_key="bash:AAA")
 
     req = asyncio.run(_go())
     opened = [e for e in bus.events if e.type is EventType.HITL_OPENED][0]

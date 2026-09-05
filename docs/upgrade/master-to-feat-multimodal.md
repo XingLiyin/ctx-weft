@@ -47,7 +47,7 @@
 |---|---|---|
 | `start_session(params) -> RunHandle` | `start_session(params) -> TurnHandle` | 返回类型 |
 | `run_single_task(...) -> tuple[RunHandle, LoopState]` | `... -> tuple[TurnHandle, LoopState]` | 返回类型 |
-| **（无）** | `send_message(agent_id, content, *, session_id=None) -> TurnHandle` | **新增**：多轮对话入口 |
+| **（无）** | `send_message(agent_id, content, *, session_id=None, unattended=False) -> TurnHandle` | **新增**：多轮对话入口（`unattended` 见 §5.6） |
 | `recover_session(session_id, *, user_reply, llm_account, llm_model, resumed_task_id)` | `recover_agent(agent_id, *, user_reply, resumed_task_id, hitl_id, keep_alive)` | 换主键 + 去掉模型参数 |
 | `compact_session(session_id, *, agent_id=None, task_id="") -> dict[str, str]` | `compact_agent(agent_id, *, task_id="") -> CompactReceipt` | 主键翻转 + 类型化 |
 
@@ -297,7 +297,7 @@ root_agent_id = handle.agent_id                # ← 记下它，后续多轮全
 ```
 
 `SessionStartParams` 字段一个没删，只有 `user_prompt` 的类型从 `str` 放宽成
-`str | list[ContentPart]`。
+`str | list[ContentPart]`；另**新增一个可选字段** `unattended: bool = False`，见 §5.6。
 
 ### 5.2 第二轮及以后：`send_message`，不是 `recover_session`
 
@@ -373,6 +373,42 @@ receipt.session_id; receipt.agent_id; receipt.task_id; receipt.task_id_is_transi
 ```
 
 `session_id` 由 `agent_id` 反查，不用传。返回值从裸 dict 变成冻结 dataclass。
+
+### 5.6 无人值守：`unattended`（新增）
+
+`master` 没有这个概念。后台跑的自治作业没有人可问——agent 调 `ask_user`、某个工具触发
+人工授权、或纯文本回合想让位给用户，都会 park 到死（没有人会来应答）。把这类作业**在
+入口处**标出来：
+
+```python
+# 起一个后台自治会话
+handle = await runtime.start_session(SessionStartParams.create(
+    template_id="assistant", user_prompt="每晚跑一遍回归", context_limit=200_000,
+    unattended=True,
+))
+
+# 或者：给一个已有 agent 投喂一条后台消息（只影响这条消息**新开**的 task）
+handle = await runtime.send_message(agent_id, "再跑一次", unattended=True)
+```
+
+| 面 | 变化 |
+|---|---|
+| `SessionStartParams` | 新增字段 `unattended: bool = False`（`create()` 同名形参），落到 root task |
+| `send_message` | 新增 keyword `unattended: bool = False`，只作用于它**新建**的那个 task |
+| `TaskCreated` 事件 | payload 的 `task` 对象新增 `unattended` 布尔（存量事件无此键 → `False`） |
+
+语义与两条相邻旋钮**不重合**：`interaction_mode` 答「纯文本回合要不要停」、
+`token_budget` 答「允许花多少」，`unattended` 答的是**有没有人在**。宿主只需要设置它，
+其余是引擎的事：
+
+- 标记挂在 **task** 上（`Task.unattended`），委派出去的子任务**继承**它（LLM 没有这个
+  旋钮，`delegate_task` / `delegate_plan` 的 schema 里不存在该参数）。
+- 入口处强制不变式 `unattended ⟹ interaction_mode == "auto"`：没有人会发下一条消息，
+  interactive 的纯文本 park 就是永久挂起。
+- 任何 HITL 在唯一的登记入口（`HitlService.open()`）被挡下，**不会**留下 pending、
+  **不会**让 task 落 `AWAITING_HUMAN`。宿主侧的观感是：需要审批的工具调用当场被拒
+  （`[Blocked by human: …]` 回灌模型），`ask_user` 当场收到「没有人可答，自己决定或
+  `control__finish_task` 说清卡在哪」，作业继续往终态走。
 
 ---
 

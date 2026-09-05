@@ -1348,6 +1348,7 @@ def task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None")
             "timeout_ms": task.timeout_ms,
             "dag_deps": task.dag_deps,
             "interaction_mode": task.interaction_mode,
+            "unattended": task.unattended,
             "origin_tool_call_id": task.origin_tool_call_id or "",
             "origin_tool_name": task.origin_tool_name or "",
             "settings": settings_d,

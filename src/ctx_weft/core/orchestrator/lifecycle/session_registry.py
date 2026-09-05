@@ -134,8 +134,12 @@ class SessionRegistry:
         session_id: str | None = None,
         initial_task_settings: NormalTaskSettings | None = None,
         user_prompt_event_jsonable: "str | list[dict] | None" = None,
+        unattended: bool = False,
     ) -> tuple[Session, Task, TaskManager]:
         """Create a new session, instantiate root agent, push initial task.
+
+        ``unattended``：这一轮没有人看顾（后台自治作业）。原样落到 root task，并由
+        `_make_root_task_manager` 强制 `interaction_mode="auto"`。见 `Task.unattended`。
 
         ``user_prompt_event_jsonable``：调用方（`CtxWeftRuntime.start_session`）由
         **归一化之前的原始** user_prompt 算好的 event 侧载荷（见
@@ -215,6 +219,7 @@ class SessionRegistry:
 
         root_task, task_manager = await self._make_root_task_manager(
             session, user_prompt, initial_task_settings, user_prompt_event_jsonable,
+            unattended=unattended,
         )
 
         return session, root_task, task_manager
@@ -229,6 +234,7 @@ class SessionRegistry:
         llm_account: str | None = None,
         initial_task_settings: NormalTaskSettings | None = None,
         user_prompt_event_jsonable: "str | list[dict] | None" = None,
+        unattended: bool = False,
     ) -> tuple[Session, Task, TaskManager]:
         """Resume an existing session: recover root_agent_id from event store, push a new root task.
 
@@ -272,6 +278,7 @@ class SessionRegistry:
         )
         root_task, task_manager = await self._make_root_task_manager(
             session, user_prompt, initial_task_settings, user_prompt_event_jsonable,
+            unattended=unattended,
         )
 
         logger.info("Session %s resumed (agent=%s)", session_id, sess_proj.root_agent_id)
@@ -295,6 +302,8 @@ class SessionRegistry:
         user_prompt: "str | list[ContentPart]",
         settings: NormalTaskSettings | None,
         user_prompt_event_jsonable: "str | list[dict] | None" = None,
+        *,
+        unattended: bool = False,
     ) -> tuple[Task, TaskManager]:
         task = Task(
             id=generate_id("tsk"),
@@ -307,8 +316,12 @@ class SessionRegistry:
             description="",
             user_prompt=user_prompt,
             settings=settings or NormalTaskSettings(),
+            unattended=unattended,
             # root task = 用户对话：actor 纯文本即暂停等下一条用户消息（非自动完成）。
-            interaction_mode="interactive",
+            # **无人值守时强制 auto**（不变式 `unattended ⟹ auto`，见 `Task.unattended`）：
+            # 后台作业没有人会发下一条消息，interactive 的纯文本 park 就是永久挂起——
+            # 没有人来应答，那条 HITL 也永远不会被终局。
+            interaction_mode="auto" if unattended else "interactive",
             timeout_ms=self.default_task_timeout_ms,
             created_at=now_utc(),
         )

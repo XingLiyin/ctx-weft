@@ -35,7 +35,7 @@ from ctx_weft.core.utils.content import (
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL
-from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
+from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED, HitlDecision
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.ids import generate_id
@@ -44,18 +44,38 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.context import ContentPart, TextPart
 from ctx_weft.protocols.llm import RAW_ARGS_KEY
-from ctx_weft.core.capabilities.control_tools import PROVIDER_NAME as CONTROL, _PLAN_DISPATCH_ACK
+from ctx_weft.core.capabilities.control_tools import (
+    ASK_USER_NAME,
+    ASK_USER_UNATTENDED_RESULT,
+    PROVIDER_NAME as CONTROL,
+    _PLAN_DISPATCH_ACK,
+)
+from ctx_weft.core.hitl.service import UnattendedHitl
 from ctx_weft.protocols.filesystem import SpillSink
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType, MemoryScope, MemoryProvider, MemoryAddress
 from ctx_weft.protocols.memory_compat import MemoryKind
 
 if TYPE_CHECKING:
     from ctx_weft.core.loop.driver import LoopState, LoopContext
-    from ctx_weft.protocols.hitl import HitlAsk, HitlDecision
+    from ctx_weft.protocols.hitl import HitlAsk
 
 logger = logging.getLogger(__name__)
 
 _REDACT_HEADERS = frozenset({"authorization", "cookie", "x-api-key", "x-auth-token"})
+
+# 无人值守撞上 HITL 时的两句措辞（`ask_user` 例外，它的文本住在 control_tools）。
+# 授权侧这一句被合成进一个「人拒绝了」的 `HitlDecision`，由发起方 authorizer 原样
+# 转成 `AuthorizationDecision.message`，最终以 `[Blocked by human: ...]` 回灌 LLM。
+_UNATTENDED_AUTHZ_NOTE = (
+    "this task runs unattended in the background — there is nobody who could approve "
+    "this tool call, so it is denied. Continue without it, or finish the task and say "
+    "what you could not do."
+)
+_UNATTENDED_TOOL_NOTE = (
+    "[No human available: this task runs unattended in the background, so nobody can "
+    "respond. Continue with what you already know, or finish the task and state what "
+    "blocked you.]"
+)
 
 # 畸形 {"_raw": ...} 报错里回吐原文的上限：畸形原文可能是大 write_file 的几 KB 内容，
 # 整段回灌会炸 context，超长截断。
@@ -239,9 +259,21 @@ class CapabilityGateway:
             )
             if decision.needs_human is not None:
                 # 等待权归 gateway：authorizer 只是**声明**需要人，不自己等。
-                _hitl_id, human = await self._resolve_human(
-                    decision.needs_human, state, ctx, tool_call_id,
-                    stage=HITL_STAGE_AUTHZ, invocation_key=inv_key)
+                try:
+                    _hitl_id, human = await self._resolve_human(
+                        decision.needs_human, state, ctx, tool_call_id,
+                        stage=HITL_STAGE_AUTHZ, invocation_key=inv_key)
+                except UnattendedHitl:
+                    # 无人值守：没有人能批准这次调用。**不抛给 agent loop**——把它合成
+                    # 一个「人拒绝了」的决定，交回**发起方**去解释（与真人拒绝走同一条
+                    # `on_decision` 路径，authorizer 因此不必认识 unattended 这个概念，
+                    # 见 `providers/authorizer/human.py`）。它返回 allowed=False，
+                    # 下面照常包成 `[Blocked by human: ...]` 回灌 LLM。
+                    logger.info(
+                        "Capability '%s' auto-denied: task %s runs unattended, "
+                        "nobody can approve it", cap.id, state.task.id)
+                    human = HitlDecision(
+                        outcome=HITL_OUTCOME_REJECTED, message=_UNATTENDED_AUTHZ_NOTE)
                 decision = await self._authz_after_human(
                     authorizer, cap, ctx, arguments, tool_call_id, human)
         if decision is None:
@@ -333,30 +365,52 @@ class CapabilityGateway:
         # 6b. provider 让出了 needs_human：流已停在此处（其后 yield 的事件从未被消费，见
         # `_stream_events`）。等待权归 gateway——provider 只**声明**需要人。
         if needs_human_ask is not None:
-            needs_human_ask_id, human = await self._resolve_human(
-                needs_human_ask, state, ctx, tool_call_id, stage=HITL_STAGE_TOOL,
-                invocation_key=inv_key)
-            if needs_human_ask.reply_as_result:
-                # 答复即结果：重入根本不发生（`ask_user` 走这条）。
-                result_parts, metadata, is_error = _human_reply_as_result(
-                    human, needs_human_ask)
+            try:
+                needs_human_ask_id, human = await self._resolve_human(
+                    needs_human_ask, state, ctx, tool_call_id, stage=HITL_STAGE_TOOL,
+                    invocation_key=inv_key)
+            except UnattendedHitl:
+                # 无人值守：没有人可答。**不抛给 agent loop**——转成一条说得清楚的工具
+                # 结果，让 actor 自己拿主意。`ask_user` 的措辞由它自己出（文本住在
+                # control_tools，与该工具的语义配套）；其余 provider 走通用措辞。
+                # 这一条 logger.info 是刻意的：后台作业「遇到问题自己拿了主意」是运维
+                # 最需要在日志里看见的一幕，比任何指标都早。
+                #
+                # 不早退、不走 `_error_and_record`：这条结果与普通工具结果的记账义务
+                # 完全一样（CapabilityFinished + 配对 TOOL_RESULT），落回下面的公共
+                # 出口即可，也就不必再复制一遍那套记账。`is_error` 保持 False——「没人
+                # 可问」不是工具出错，是这次调用得到的答复。
+                logger.info(
+                    "Tool '%s' asked for a human in unattended task %s — answering "
+                    "'no human available' and letting the actor decide",
+                    tool_name, state.task.id)
+                result_parts = [ASK_USER_UNATTENDED_RESULT if tool_name == ASK_USER_NAME
+                                else _UNATTENDED_TOOL_NOTE]
+                metadata, is_error = {}, False
             else:
-                from ctx_weft.protocols.capability import HumanResumable
-                if not isinstance(provider, HumanResumable):
-                    return await self._error_and_record(
-                        state, ctx, tool_name, invocation_id,
-                        f"[Error: {type(provider).__name__} yielded needs_human but does "
-                        f"not implement HumanResumable]",
-                        is_dispatch, is_silent, tool_call_id,
+                # 拿到了真人的决定：原有两条路，逐字节未改。
+                if needs_human_ask.reply_as_result:
+                    # 答复即结果：重入根本不发生（`ask_user` 走这条）。
+                    result_parts, metadata, is_error = _human_reply_as_result(
+                        human, needs_human_ask)
+                else:
+                    from ctx_weft.protocols.capability import HumanResumable
+                    if not isinstance(provider, HumanResumable):
+                        return await self._error_and_record(
+                            state, ctx, tool_name, invocation_id,
+                            f"[Error: {type(provider).__name__} yielded needs_human but does "
+                            f"not implement HumanResumable]",
+                            is_dispatch, is_silent, tool_call_id,
+                        )
+                    # 重入是**新调用** resume（不是恢复挂起的生成器）——局部状态已随原生成器
+                    # 关闭而消失，全靠 ask.resume_state 带回。
+                    result_parts, metadata, is_error, _ = await self._stream_events_safe(
+                        provider.resume(
+                            needs_human_ask_id, human, needs_human_ask.resume_state,
+                            provider_ctx,
+                        ),
+                        provider, provider_ctx, state, invocation_id,
                     )
-                # 重入是**新调用** resume（不是恢复挂起的生成器）——局部状态已随原生成器
-                # 关闭而消失，全靠 ask.resume_state 带回。
-                result_parts, metadata, is_error, _ = await self._stream_events_safe(
-                    provider.resume(
-                        needs_human_ask_id, human, needs_human_ask.resume_state, provider_ctx,
-                    ),
-                    provider, provider_ctx, state, invocation_id,
-                )
 
         text = "\n".join(result_parts)
         if not text:
@@ -653,6 +707,10 @@ class CapabilityGateway:
             agent_id=state.agent.id,
             tool_call_id=tool_call_id,
             stage=stage,
+            # 无人值守 → `open()` 抛 `UnattendedHitl`（守卫在唯一登记入口一处堵死）。
+            # 本方法**不接**它：两个调用点各自有贴合上下文的转译（授权侧翻成拒绝、
+            # 工具侧翻成一条工具结果），在这里统一兜住只会把两者压成同一句废话。
+            unattended=state.task.unattended,
             invocation_key=invocation_key,
             tenant_id=ctx.provider_ctx.tenant_id,
         )

@@ -128,6 +128,16 @@ class Task:
     # 纯文本(无 tool call)turn 的处理方式：interactive=暂停等用户 / auto=自治需调 finish_task。
     # root task 由 session_registry 设为 interactive；委派子任务默认 auto（delegate_task/plan 可显式置 interactive）。
     interaction_mode: TaskInteractionMode = "auto"
+    # 「这个任务没有人看顾」——后台自治作业的标记，**不是** interaction_mode 的别名。
+    # 三个字段各答一个不同的问题：`interaction_mode` 答「纯文本回合要不要停下来等人」，
+    # `settings.token_budget` 之类答「允许花多少」，本字段答的是**有没有人在**。
+    # 唯一用途：在 `HitlService.open()`（HITL 的唯一登记入口）一处堵死——无人值守的
+    # task 发起任何 HITL 都会 park 到死，因为没有人会来应答。
+    # 不变式 `unattended ⟹ interaction_mode == "auto"` 由**设置点**保证（root task 见
+    # `SessionRegistry._make_root_task_manager`、外部消息见 `Runtime._start_task_for_agent`，
+    # 委派子任务见 `control_tools._child_mode` 的「父不 interactive 则子不 interactive」）：
+    # 无人值守却 interactive，意味着一次纯文本回合就永久挂起。
+    unattended: bool = False
     outputs: Any | None = None
     process_report: str | None = None
     # 何时设置 process_report（= 上一轮 observe 产出反馈的时刻，落在该 attempt 之后、下一 attempt 之前）。

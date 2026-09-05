@@ -284,11 +284,11 @@ async def test_cold_hitl_reply_hydrates_only_its_own_session_not_a_sweep() -> No
 
     req1 = await rt.hitl.open(
         HitlAsk(form="approval", delivery=ToolResultDelivery(tool_call_id="tcA")),
-        session_id=sid1, task_id=tid1, agent_id=aid1, tool_call_id="tcA", stage=HITL_STAGE_TOOL,
+        session_id=sid1, task_id=tid1, agent_id=aid1, tool_call_id="tcA", stage=HITL_STAGE_TOOL, unattended=False,
     )
     await rt.hitl.open(
         HitlAsk(form="approval", delivery=ToolResultDelivery(tool_call_id="tcB")),
-        session_id=sid1, task_id=tid1, agent_id=aid1, tool_call_id="tcB", stage=HITL_STAGE_TOOL,
+        session_id=sid1, task_id=tid1, agent_id=aid1, tool_call_id="tcB", stage=HITL_STAGE_TOOL, unattended=False,
     )
 
     # S2：另一个真实 active 的 session——事件库里有它自己的 agent。若 recover_agent

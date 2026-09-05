@@ -55,6 +55,9 @@ class TaskView:
     # reopen 重写前的原始 prompt 快照（防多轮累加，跨重启保留）
     original_user_prompt: "str | list[ContentPart]" = ""
     interaction_mode: str = "auto"  # interactive=纯文本暂停等用户 / auto=自治（跨重启保留，否则 resume 后丢失暂停语义）
+    # 无人值守（跨重启保留）：丢了它，resume 之后一个后台自治任务就变回「有人看顾」，
+    # 随后第一次 HITL 会把它 park 到死。见 `Task.unattended`。
+    unattended: bool = False
     # 派发来源（跨重启保留）：子任务是被父的哪一次 delegate 调用派出来的。丢了则 finalize
     # 认不出自己的派发框，子任务 close 时既不闭合父的 ack、也不合成 finish 对（胶囊丢失）。
     # memory 侧另有 child_task_id 做一等事实，本字段是 in-run 快捷路径 + 存量数据回退。

@@ -147,7 +147,7 @@ _shared: dict = {}
 
 def _state() -> LoopState:
     session = SimpleNamespace(id="s1", tenant_id="default")
-    task = SimpleNamespace(id="tsk_1")
+    task = SimpleNamespace(id="tsk_1", unattended=False)
     agent = SimpleNamespace(id=_AGENT_ID, template_id="tmpl_a", session_id="s1")
     scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id=_AGENT_ID)
     return LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))

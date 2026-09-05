@@ -57,6 +57,18 @@ UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
 _PLAN_DISPATCH_ACK = ("Plan created. Its sub-tasks will now be started one by one "
                       "via start_task.")
 
+# `ask_user` 撞上无人值守（`UnattendedHitl`）时回灌给 actor 的工具结果。
+#
+# 文本住在这里而不是 gateway：这是**给 ask_user 的调用者看的**上下文化答复，与该工具
+# 自身的语义（「我需要一个人的决定」）配套；gateway 只负责在唯一的登记入口被守卫挡下时
+# 把它取出来。绝不能让 `UnattendedHitl` 逸出到 agent loop——那会把「没人可问」变成一次
+# run 失败，而 actor 该收到的是一个说得清楚的结果。
+ASK_USER_UNATTENDED_RESULT = (
+    "[No human available: this task runs unattended in the background, so nobody can "
+    "answer your question. Decide for yourself based on the information you already "
+    "have, or call control__finish_task and state clearly what blocked you.]"
+)
+
 
 def _mode(interactive: bool) -> str:
     """Map the LLM-facing `interactive` bool to Task.interaction_mode."""
@@ -195,6 +207,11 @@ def delegate_task(
         origin_tool_call_id=ctx.tool_call_id or None,
         origin_tool_name=DELEGATE_TASK_NAME,  # 保真：actor 确实调了 delegate_task → finalize 铸框用真名
         interaction_mode=_child_mode(bool(interactive), ctx.task),
+        # 无人值守**继承**，不给 LLM 旋钮（schema 里没有这个参数）：「有没有人在」是
+        # 作业被怎么起起来的事实，不是 actor 可以自行宣布的。子任务的 interaction_mode
+        # 不用在这里单独处理——父任务无人值守即 auto，`_child_mode` 的「父不 interactive
+        # 则子不 interactive」规则已经把子任务一并按住了。
+        unattended=ctx.task.unattended,
         settings=NormalTaskSettings(
             skill_name=skill_name,
             use_subagent=bool(use_subagent),
@@ -263,6 +280,8 @@ def delegate_plan(
             origin_tool_call_id=generate_id("tcall"),
             tracking_task_ids=list(prev_ids),
             interaction_mode=_child_mode(bool(spec.get("interactive", False)), ctx.task),
+            # 同 delegate_task：继承而非声明；interaction_mode 由 `_child_mode` 接住。
+            unattended=ctx.task.unattended,
             settings=NormalTaskSettings(
                 skill_name=spec.get("skill_name", ""),
                 use_subagent=bool(spec.get("use_subagent", False)),

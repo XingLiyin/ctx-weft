@@ -39,6 +39,7 @@ def _act_env(*, interactive: bool = True):
         id="tsk_1",
         status="ACTIVE",
         interaction_mode="interactive" if interactive else "auto",
+        unattended=False,
         settings=NormalTaskSettings(),
         creator_agent_id="agt_1",
         assigned_agent_id="agt_1",

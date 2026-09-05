@@ -90,7 +90,7 @@ async def test_reply_returns_the_view_and_drives_resume_by_delivery():
     """冷续跑由**返回值**驱动，不挂总线订阅（spec §7.3 订正）。"""
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
     view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                             agent_id=req.agent_id))
     assert view is not None and view.outcome == "accepted"
@@ -105,7 +105,7 @@ async def test_reply_returns_the_view_and_drives_resume_by_delivery():
 async def test_user_turn_delivery_injects_instead_of_reconciling():
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_user_turn("t1"), session_id="s1", task_id="t1",
-                             agent_id="agent-a", stage="tool")
+                             agent_id="agent-a", stage="tool", unattended=False)
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                      agent_id=req.agent_id, message="继续"))
     assert calls[0][0] == "inject_user_turn"
@@ -114,7 +114,7 @@ async def test_user_turn_delivery_injects_instead_of_reconciling():
 async def test_no_resume_delivery_triggers_nothing():
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_no_resume(), session_id="s1", task_id="t1",
-                             agent_id="agent-a", stage="tool")
+                             agent_id="agent-a", stage="tool", unattended=False)
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="cancelled", agent_id=req.agent_id))
     assert calls == []
 
@@ -123,7 +123,7 @@ async def test_a_claimed_hot_reply_does_not_trigger_cold_resume():
     """热投递已就地续跑，再触发一次冷续跑就是双投。"""
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
     rt.hitl_registry.attach_slot(req.id, _AcceptingSlot())
     view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                             agent_id=req.agent_id))
@@ -137,7 +137,7 @@ async def test_replying_twice_resumes_at_most_once():
     """应答入口可能被重试（host 超时重发 / 用户连点）——第二次是 no-op。"""
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id))
     assert await rt.reply_to_hitl(
         HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id)
@@ -166,7 +166,7 @@ async def test_empty_agent_id_falls_back_to_session_id_not_recover_agent():
     rt._recover_session_locked = fake_recover_session_locked  # type: ignore[method-assign]
 
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             tool_call_id="call_1", stage="tool")  # 无 agent_id -> 落到默认空串
+                             tool_call_id="call_1", stage="tool", unattended=False)  # 无 agent_id -> 落到默认空串
     assert req.agent_id == ""
 
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=""))
@@ -194,7 +194,7 @@ async def test_reply_with_a_disallowed_image_media_type_is_rejected_and_stays_pe
     """
     rt = _runtime()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             tool_call_id="call_1", stage="tool")
+                             tool_call_id="call_1", stage="tool", unattended=False)
     events: list = []
 
     async def _record(ev):
@@ -220,7 +220,7 @@ async def test_a_failed_cold_resume_after_commit_is_logged_loudly_and_still_rais
     响亮地留痕,而不是只悄悄传给 host（复审 cheap fix）。"""
     rt = _runtime()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
 
     async def _boom(*a, **kw):
         raise RuntimeError("owner TM rebuild exploded")
@@ -247,9 +247,9 @@ async def test_list_pending_hitl_returns_views_not_core_records():
 
     rt = _runtime()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             tool_call_id="call_1", stage="tool")
+                             tool_call_id="call_1", stage="tool", unattended=False)
     await rt.hitl.open(_ask_tool_result("call_2"), session_id="s2", task_id="t9",
-                       tool_call_id="call_2", stage="tool")
+                       tool_call_id="call_2", stage="tool", unattended=False)
 
     all_pending = rt.list_pending_hitl()
     assert len(all_pending) == 2
@@ -271,7 +271,7 @@ async def test_reply_to_hitl_rejects_agent_id_mismatch():
     """调用方声明的 agent 与系统记录不符 → 拒绝，不静默按 hitl_id 走掉。"""
     rt = _runtime()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
     with pytest.raises(ValueError):
         await rt.reply_to_hitl(
             HitlReply(hitl_id=req.id, outcome="accepted", agent_id="wrong-agent")
@@ -282,7 +282,7 @@ async def test_reply_to_hitl_agent_id_mismatch_rejected_before_any_side_effect()
     """拒绝必须发生在任何副作用之前——不能先把回复写进去再报错。"""
     rt = _runtime()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
     events: list = []
 
     async def _record(ev):
@@ -304,7 +304,7 @@ async def test_reply_to_hitl_agent_id_match_proceeds_normally():
     """agent_id 与记录相符 → 正常终局并续跑，新增校验不影响正路。"""
     rt, calls = _runtime_with_recorded_resume()
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
-                             agent_id="agent-a", tool_call_id="call_1", stage="tool")
+                             agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
     view = await rt.reply_to_hitl(
         HitlReply(hitl_id=req.id, outcome="accepted", agent_id="agent-a")
     )

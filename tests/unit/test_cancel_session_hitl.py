@@ -72,7 +72,7 @@ async def runtime_with_pending_hitl():
 
     req = await rt.hitl.open(
         HitlAsk(form="wait", delivery=UserTurnDelivery(task_id=task_id)),
-        session_id=session_id, task_id=task_id, stage="tool",
+        session_id=session_id, task_id=task_id, stage="tool", unattended=False,
     )
     return rt, bus, session_id, req.id
 

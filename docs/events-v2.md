@@ -282,7 +282,7 @@ SM 的输入只有四类，全部来自 TaskManager，每一类都是一个独�
 
 | 事件 | 存量名 | payload | 含义 · 状态效果 |
 |---|---|---|---|
-| `TaskCreated` | | `task: {id, session_id, status, title, description, creator_agent_id, assigned_agent_id, parent_task_id, user_prompt, priority, max_retries, timeout_ms, dag_deps, interaction_mode, origin_tool_call_id, origin_tool_name, settings}` | 任务入队。建 `TaskView` |
+| `TaskCreated` | | `task: {id, session_id, status, title, description, creator_agent_id, assigned_agent_id, parent_task_id, user_prompt, priority, max_retries, timeout_ms, dag_deps, interaction_mode, unattended, origin_tool_call_id, origin_tool_name, settings}` | 任务入队。建 `TaskView` |
 | `TaskStarted` | | `assigned_agent_id` | → `ACTIVE`，并回填 `assigned_agent_id` |
 | `TaskSuspended` | | `summary` `spawn_titles` | **只剩「等子任务完成」这一个语义**。→ `SUSPENDED`（非终态） |
 | `TaskAwaitingHuman` | | `hitl_id` | 这个 task 被 HITL 挂起、需要人来解决。→ `AWAITING_HUMAN` |

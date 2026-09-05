@@ -207,7 +207,7 @@ async def test_hitl_service_emits_with_hitl_service_origin():
     )
     req = await svc.open(
         HitlAsk(form="approval", delivery=ToolResultDelivery(tool_call_id="tc_1")),
-        session_id="s1", task_id="t1", stage="tool",
+        session_id="s1", task_id="t1", stage="tool", unattended=False,
     )
     await svc.resolve(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id))
 

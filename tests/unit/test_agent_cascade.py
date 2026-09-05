@@ -211,7 +211,7 @@ def _open_pause_bubble(rt, *, agent_id, task_id, session_id="s1", edit=False):
     preface = PREFACE_AFTER_INTERRUPT_EDIT if edit else PREFACE_AFTER_INTERRUPT
     return rt.hitl.open(
         HitlAsk(form=HITL_FORM_WAIT, delivery=UserTurnDelivery(task_id=task_id, preface=preface)),
-        session_id=session_id, task_id=task_id, agent_id=agent_id, stage=HITL_STAGE_TOOL,
+        session_id=session_id, task_id=task_id, agent_id=agent_id, stage=HITL_STAGE_TOOL, unattended=False,
     )
 
 
@@ -221,7 +221,7 @@ def _open_ask_user_bubble(rt, *, agent_id, task_id, session_id="s1", tool_call_i
     return rt.hitl.open(
         HitlAsk(form=HITL_FORM_QUESTION, delivery=ToolResultDelivery(tool_call_id=tool_call_id),
                 reply_as_result=True),
-        session_id=session_id, task_id=task_id, agent_id=agent_id, stage=HITL_STAGE_TOOL,
+        session_id=session_id, task_id=task_id, agent_id=agent_id, stage=HITL_STAGE_TOOL, unattended=False,
     )
 
 
@@ -232,7 +232,7 @@ def _open_plain_text_wait_bubble(rt, *, agent_id, task_id, session_id="s1"):
     return rt.hitl.open(
         HitlAsk(form=HITL_FORM_WAIT,
                 delivery=UserTurnDelivery(task_id=task_id, preface=PREFACE_NORMAL)),
-        session_id=session_id, task_id=task_id, agent_id=agent_id, stage=HITL_STAGE_TOOL,
+        session_id=session_id, task_id=task_id, agent_id=agent_id, stage=HITL_STAGE_TOOL, unattended=False,
     )
 
 

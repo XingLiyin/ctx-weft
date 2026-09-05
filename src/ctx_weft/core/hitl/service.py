@@ -55,6 +55,28 @@ def delivery_to_payload(delivery: Delivery) -> dict[str, Any]:
     raise ValueError(f"Unknown delivery: {delivery!r}")
 
 
+class UnattendedHitl(Exception):
+    """无人值守的 task 里发起了 HITL。
+
+    这是控制流信号，不是故障——调用方必须 catch 并转成贴合上下文的工具结果，
+    **绝不能让它逸出到 agent loop**：agent 该收到一个说得清楚的结果，而不是一次 run 失败。
+
+    与 `HitlPark` 同一摆法（住在抛它的那个模块里，而不是集中式的 `models/errors.py`）：
+    两者都是 HITL 控制流的信号类型，只有直接调用方需要认识它们。
+    """
+
+    def __init__(self, form: str = "", subject_id: str = "", *,
+                 session_id: str = "", task_id: str = "") -> None:
+        self.form = form
+        self.subject_id = subject_id
+        self.session_id = session_id
+        self.task_id = task_id
+        super().__init__(
+            f"HITL requested in an unattended task: form={form!r} subject={subject_id!r} "
+            f"(session={session_id!r} task={task_id!r}) — nobody is there to answer"
+        )
+
+
 class HitlService:
     def __init__(
         self,
@@ -80,6 +102,7 @@ class HitlService:
         agent_id: str = "",
         tool_call_id: str = "",
         stage: str,
+        unattended: bool,
         invocation_key: str = "",
         tenant_id: str = "default",
     ) -> PendingHitl:
@@ -93,7 +116,17 @@ class HitlService:
         传入——本类自己不持有、也不去解——存进 `PendingHitl.tenant_id`，供 `_emit` 与
         之后 `resolve`/`cancel` 时同一个 `req` 复用（总账 A5：漏填时事件落到 `Event` 的
         默认值 `"default"`，非 default 租户的投影租户就错了）。
+
+        `unattended`：发起方那个 task 的 `Task.unattended`。**必填 keyword-only、无默认值**
+        （同上面的 `stage`）：这是全仓唯一的 HITL 登记入口，也就是唯一能把「没有人会来
+        应答」这件事一处堵死的地方；给它一个默认值，等于把守卫交给下一个调用点的记性。
+        为真时抛 `UnattendedHitl`，由调用方转成贴合上下文的工具结果。
         """
+        if unattended:
+            # **排在幂等复用之前**：无人值守的 task 本就不该存在任何「等人回答」的记录，
+            # 把同键的旧记录当答案返回，等于让一条它根本不该有的 pending 复活。
+            raise UnattendedHitl(
+                ask.form, ask.subject_id, session_id=session_id, task_id=task_id)
         existing = self.registry.find_for_tool_call(
             session_id, tool_call_id, stage, invocation_key=invocation_key or None)
         if existing is not None:

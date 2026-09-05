@@ -134,7 +134,7 @@ async def _pending(rt: CtxWeftRuntime, session_id: str = "ses-hitl",
     不该顺带触发一次 session 续跑。"""
     req = await rt.hitl.open(
         HitlAsk(form=form, delivery=NoResumeDelivery()),
-        session_id=session_id, task_id="tsk-1", stage="tool",
+        session_id=session_id, task_id="tsk-1", stage="tool", unattended=False,
     )
     return req.id
 

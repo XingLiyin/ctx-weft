@@ -236,6 +236,9 @@ class SessionStartParams:
     token_budget: int = 200_000
     reserved_output_tokens: int = 8192
     resume: bool = False
+    # 这一轮没有人看顾（后台自治作业）：透传到 root task 的 `Task.unattended`，并强制
+    # 它的 `interaction_mode="auto"`。见 `Task.unattended` / `HitlService.open`。
+    unattended: bool = False
 
     @classmethod
     def create(
@@ -252,6 +255,7 @@ class SessionStartParams:
         token_budget: int = 200_000,
         reserved_output_tokens: int = 8192,
         resume: bool = False,
+        unattended: bool = False,
     ) -> "SessionStartParams":
         from ctx_weft.core.models.task import deserialize_settings
         return cls(
@@ -266,6 +270,7 @@ class SessionStartParams:
             token_budget=token_budget,
             reserved_output_tokens=reserved_output_tokens,
             resume=resume,
+            unattended=unattended,
         )
 
 
@@ -1333,6 +1338,7 @@ class CtxWeftRuntime:
                 token_budget=params.token_budget,
                 reserved_output_tokens=params.reserved_output_tokens,
                 user_prompt_event_jsonable=user_prompt_event_jsonable,
+                unattended=params.unattended,
             )
         else:
             session, root_task, task_manager = await sm.resume_session(
@@ -1344,6 +1350,7 @@ class CtxWeftRuntime:
                 llm_account=params.llm_account,
                 initial_task_settings=params.initial_task_settings,
                 user_prompt_event_jsonable=user_prompt_event_jsonable,
+                unattended=params.unattended,
             )
 
         # `or ""` is defensive only: `Session.root_agent_id` is typed `str | None` for
@@ -2290,6 +2297,7 @@ class CtxWeftRuntime:
         content: "str | list[ContentPart]",
         *,
         session_id: str | None = None,
+        unattended: bool = False,
     ) -> TurnHandle:
         """向指定 agent 发一条外部消息，返回这次交互的 `TurnHandle`（spec §4.1；
         2026-09-04 spec §3.3）——agent-centric 的核心入口：外部消息按 agent 显式寻址，
@@ -2312,6 +2320,10 @@ class CtxWeftRuntime:
         比对返回的 `task_id` 与调用前 `get_agent(agent_id).current_task_id` 即可——
         句柄里不放这个布尔，也不放 run_id（第三条路径在返回那一刻还没有新一轮，
         见 2026-09-04 spec §3.2）。
+
+        ``unattended``：这条消息**开出的新 task** 无人看顾（后台自治作业）——只对上面
+        第一条路径（新建 task）生效，注入既有 task 的两条路径沿用那个 task 自己的标记
+        （改写一个已在跑的 task 的「有没有人在」不属于本入口的职责）。见 `Task.unattended`。
         """
         reg = self._agent_lifecycle_manager
         reg.assert_can_receive(agent_id)
@@ -2328,7 +2340,8 @@ class CtxWeftRuntime:
             task_id = await self._inject_user_turn(
                 current, content, session_id=rec.session_id)
         else:
-            task_id = await self._start_task_for_agent(agent_id, content)
+            task_id = await self._start_task_for_agent(
+                agent_id, content, unattended=unattended)
 
         return TurnHandle(
             session_id=rec.session_id,
@@ -2441,7 +2454,8 @@ class CtxWeftRuntime:
         return target.id
 
     async def _start_task_for_agent(
-        self, agent_id: str, content: "str | list[ContentPart]", **_kw: Any,
+        self, agent_id: str, content: "str | list[ContentPart]", *,
+        unattended: bool = False, **_kw: Any,
     ) -> str:
         """`send_message` 的新建分支：`current_task` 已终态（或压根没有）-> 起一个
         新 task 挂给该 agent，走既有的 `push_task` 通路——与
@@ -2506,9 +2520,13 @@ class CtxWeftRuntime:
             title="User Message",
             description=content_to_text(normalized)[:200],
             user_prompt=normalized,
+            unattended=unattended,
             # 外部消息 = 用户对话：actor 纯文本即暂停等下一条消息（非自动完成）——
             # 与 root task 同一口径（`_make_root_task_manager` 的注释）。
-            interaction_mode="interactive",
+            # **无人值守时强制 auto**（不变式 `unattended ⟹ auto`）：既然是后台投喂的
+            # 一条消息、没有人守着，就不会有下一条消息来解 park——interactive 的纯文本
+            # 让位在这里等于永久挂起。
+            interaction_mode="auto" if unattended else "interactive",
             created_at=now_utc(),
         )
         await tm.push_task(task, user_prompt_event_jsonable=event_jsonable)

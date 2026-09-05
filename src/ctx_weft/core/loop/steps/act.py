@@ -672,6 +672,14 @@ async def _park_wait_for_user(
     这组跨三个模块的魔法字符串（spec §5）。``source``/``edit`` 只决定 preface：
     ``plain_text`` → normal；``interrupt`` 已吐过 token/已进工具 → after_interrupt；
     ``interrupt`` 且 ``edit=True``（未吐任何 token、未进工具）→ after_interrupt_edit。
+
+    TODO（park 语义拆分，下一个提交）：无人值守时 `ctx.hitl.open` 会抛
+    `UnattendedHitl`，本函数**故意不接**——这里已经走到「让位」的副作用一侧，接住它
+    也没有一个诚实的去处（既不能让位、也没有工具结果可回灌）。正解是把「要不要让位」
+    的判断**前置到副作用之前**：无人值守的 task 根本不该走到 `_park_wait_for_user`
+    （它的 `interaction_mode` 由设置点强制为 `auto`，纯文本回合本就该转成「继续自
+    己干」而非等人），届时这条路径连触发条件都不存在。在那之前它是暂时的：设置点的
+    不变式 `unattended ⟹ auto` 已经挡住了唯一一条正常进来的路。
     """
     preface = (PREFACE_AFTER_INTERRUPT_EDIT if (source == "interrupt" and edit)
                else PREFACE_AFTER_INTERRUPT if source == "interrupt"
@@ -685,6 +693,7 @@ async def _park_wait_for_user(
         task_id=state.task.id,
         agent_id=state.agent.id,
         stage=HITL_STAGE_TOOL,
+        unattended=state.task.unattended,
         tenant_id=state.session.tenant_id,
     )
     # 不建等待槽 —— 本调用方随即 park 释放协程而非 await，应答必然走冷续跑。
