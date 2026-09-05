@@ -399,6 +399,20 @@ class TurnHandle:
         的后台任务空等，故 `TaskFailed`/`TaskCanceled` 依旧能及时返回。整个等待仍套
         在原有的 `asyncio.timeout(timeout)` 里，超时预算不变；成功/超时两条路径都
         仍然 `return self._state`。
+
+        ## 6. `ev2.type` 的比较用 `==`，不用 `is`（2026-09-04 三轮修复）
+
+        `EventBus` 是宿主可自行实现的协议（docs 明确把换成 Redis Streams 当作支持的
+        范例）；序列化往返一趟的宿主总线，投出来的 `.type` 会是裸 `str`，不再是
+        `EventType` 枚举成员实例。`EventType` 是 `StrEnum`，`EventType.TASK_RECAP_DONE
+        == "TaskRecapDone"` 恒真（值相等），但 `is` 是身份比较——裸 `str` 与枚举成员
+        永远不是同一个对象，`is` 恒假。第一版实现里 `ev2.type is EventType.
+        TASK_RECAP_DONE` 在本仓库内从未出过问题（`make_event`/`new_event` 造出来的
+        永远是真枚举实例），但换一个把事件类型还原成裸字符串的宿主总线，这个判据会
+        悄无声息地永远不匹配——`wait_for_finish` 不会抛异常，会耗光整个 `timeout`
+        再落到超时兜底返回，宿主体感就是「挂住了」。终态事件那处 `ev.type in
+        terminal` 判据本就用集合成员测试（`in` 走 `__hash__`/`__eq__`，`StrEnum` 与
+        裸字符串两边一致，天然兼容），不受影响、不用改；只有这一处 `is` 改成 `==`。
         """
         from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
         from ctx_weft.core.loop.steps.background_observe import (
@@ -419,7 +433,7 @@ class TurnHandle:
                         if pending_run_id is None:
                             return self._state
                         async for ev2 in stream:
-                            if (ev2.type is EventType.TASK_RECAP_DONE
+                            if (ev2.type == EventType.TASK_RECAP_DONE
                                     and ev2.run_id == pending_run_id):
                                 return self._state
         except TimeoutError:

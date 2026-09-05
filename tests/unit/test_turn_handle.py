@@ -149,6 +149,62 @@ async def test_wait_for_finish_ignores_an_earlier_overlapping_launchs_recap_done
         bg._task_pending_run_id.pop("tsk_1", None)
 
 
+async def test_wait_for_finish_matches_task_recap_done_by_value_not_identity():
+    """三轮修复的回归守卫（2026-09-04）：`ev2.type` 与 `EventType.TASK_RECAP_DONE` 的
+    匹配必须用 `==`（值相等），不能用 `is`（身份相等）。
+
+    `EventBus` 是宿主可自行实现的协议（docs 明确把换成 Redis Streams 当作支持的范例）；
+    序列化往返一趟的宿主总线，投出来的 `.type` 会是裸 `str`，不再是 `EventType` 枚举
+    成员实例——`EventType` 是 `StrEnum`，`EventType.TASK_RECAP_DONE == "TaskRecapDone"`
+    恒真，但两者 `is` 恒假（裸 str 与枚举成员永远不是同一个对象）。若判据用 `is`，这
+    条真正该等的 `TaskRecapDone`（`run_id` 对得上）会被裸字符串这个事实悄无声息地
+    滤掉——`wait_for_finish` 不抛异常，会耗光整个 `timeout` 才落到超时兜底返回，宿主
+    体感就是「挂住了」。
+
+    这里构造的 `TaskRecapDone` 事件 `type` 字段是裸字符串 `"TaskRecapDone"`（模拟一个
+    序列化往返的宿主总线投出来的事件），`run_id` 与登记的在途 launch 一致——断言
+    `wait_for_finish` 依然认得出它、正常返回，而不是耗光 `timeout` 才靠超时兜底返回。"""
+    from ctx_weft.core.loop.steps import background_observe as bg
+
+    class _NeverDoneTask:
+        def done(self) -> bool:
+            return False
+
+    bus = InProcessEventBus()
+    h = TurnHandle(session_id="s1", agent_id="agt_1", task_id="tsk_1",
+                   template_id="tpl", event_bus=bus)
+
+    bg._task_pending["tsk_1"] = _NeverDoneTask()
+    bg._task_pending_run_id["tsk_1"] = "run_close_launch"
+    try:
+        # 短超时：判据若退化回 `is`，这条裸字符串事件永远不匹配，测试会在这个超时
+        # 上原地耗尽——短超时让那种失败又快又好认，而不是拖到默认的几百秒。
+        waiter = asyncio.create_task(h.wait_for_finish(timeout=0.3))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        await bus.emit(_ev(id="e1", type="TaskFinished"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        # 裸字符串 type（不是 EventType 枚举成员）——模拟序列化往返的宿主总线；
+        # run_id 与登记的在途 launch 一致，`wait_for_finish` 该认得出它。
+        t0 = asyncio.get_running_loop().time()
+        await bus.emit(_ev(id="e2", type="TaskRecapDone", run_id="run_close_launch"))
+
+        await asyncio.wait_for(waiter, timeout=2.0)
+        elapsed = asyncio.get_running_loop().time() - t0
+        # 关键断言：必须是被这条事件放行的，不是耗光 0.3s 的 timeout 兜底才返回——
+        # `state is None` 本身在两条路径下都成立（这个裸 TurnHandle 没喂真实
+        # LoopState），区分不出「匹配上了」和「超时了」，只有耗时能区分。
+        assert elapsed < 0.2, (
+            f"wait_for_finish 耗时 {elapsed:.3f}s——像是靠 0.3s 超时兜底返回的，"
+            "说明 TaskRecapDone 没被裸字符串 type 认出来"
+        )
+    finally:
+        bg._task_pending.pop("tsk_1", None)
+        bg._task_pending_run_id.pop("tsk_1", None)
+
+
 class _CloseFoldLLM(MockLLMAdapter):
     """单 root task：finish_task 收尾触发 close 边界后台 observe（launch_background_observe
     fire-and-forget），验证 `wait_for_finish` 返回**那一刻**该次折叠已经落地——不是靠
