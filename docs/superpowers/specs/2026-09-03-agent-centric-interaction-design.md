@@ -136,6 +136,11 @@ resume_agent(agent_id: str) -> None
 
 `pause_session`/`cancel_session`/`set_session_llm` 保留，作为广播便捷入口：对该 session 下（`SessionManager` 维护的成员集合里）每个 agent 逐个调用对应的 agent 级接口（`pause_agent`/`cancel_agent`/`set_agent_llm`）。不新增独立的 session 级执行逻辑。
 
+> **2026-09-04 修订**：本节「不新增独立的 session 级执行逻辑」这句对 `pause_session`
+> 不成立且不应成立——它的语义（弃排队 + 只留 root 那一轮当续跑点）与 `pause_agent`
+> 相反，不是它的广播。见 `docs/superpowers/specs/2026-09-04-runtime-agent-centric-surface-design.md`
+> §7.1。`cancel_session` / `set_session_llm` 仍按本节描述，执行部分建在 agent 级接口上。
+
 ## 9. LLM 事件收敛
 
 这是与 agent 中心化并行的一项独立收敛，因同样改动事件类型清单而并入本 spec。
