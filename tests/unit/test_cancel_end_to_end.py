@@ -34,14 +34,17 @@ from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.orchestrator.task.runner import AgentBinding
 from ctx_weft.core.models.agent import Agent, LoopGuard
+from ctx_weft.core.models.errors import AgentNotFound
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+from tests.unit.test_runtime_agent_api import _plant
 
 pytestmark = pytest.mark.asyncio
 
@@ -297,3 +300,78 @@ async def test_external_cancel_is_labelled_external() -> None:
     assert state.run_outcome.kind is RunOutcomeKind.CANCELED
     assert state.run_outcome.reason == ""
     assert bus.of(EventType.RUN_CANCELED).payload["source"] == "external"
+
+
+# ── 2026-09-04 spec §7.2：cancel_session 收成三步 ──────────────────────────
+
+
+class _RecordingBus:
+    """挂在 runtime 真实事件总线上的记录桩——不替换总线，只旁听（与
+    `test_cancel_session_hitl.py` 同一手法）。"""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def _record(self, ev) -> None:
+        self.events.append(ev)
+
+
+async def _wire_multi_agent_session(
+    rt, session_id: str, task_id: str, root_id: str, child_id: str,
+) -> None:
+    """搭一个「root + 子 agent 都在跑」的会话：两条 agent record（`_plant` 挂好
+    parent/child 关系）+ 一个挂着的 TaskManager，让 `cancel_session` 的守卫
+    （`per` 或 `task_manager` 非空）落在真实组件上，`agent_ids_of_session` 也确实能
+    读到两个目标。"""
+    session = Session(
+        id=session_id, user_prompt="hi", status="RUNNING",
+        tenant_id="default", root_agent_id=root_id, created_at=now_utc(),
+    )
+    tm = TaskManager(session_id=session_id, event_bus=rt._event_bus, max_concurrent=0)
+    tm.set_session(session)
+    task = Task(id=task_id, session_id=session_id, status="SUSPENDED", tenant_id="default")
+    tm.register_task(task)
+    rt._task_managers[session_id] = tm
+    rt._session_registry.register_session(session_id, tenant_id="default")
+    _plant(rt, root_id, None, session_id=session_id, status="idle")
+    _plant(rt, child_id, root_id, session_id=session_id, status="idle")
+
+
+async def test_cancel_session_terminates_every_agent() -> None:
+    """回归护栏：行为不变。改动前就该绿（2026-09-04 spec §7.2）。
+
+    不读 registry 断言最终 status：本例会话已空闲挂起（无在跑 task），
+    `cancel_session` 会走 `_release_session`，把 agent record 从 registry 摘掉，
+    之后 `get_agent` 会抛 `AgentNotFound`——brief 里的 `rt.record_gone(aid)` 是伪代码，
+    实际没有这个方法。改断言 `AgentTerminated` 事件本身：即便 record 事后被摘掉，
+    事件已经发出过，是持久事实（与 `test_cancel_session_hitl.py` 里
+    `test_hitl_cancelled_before_session_terminal` 同一手法）。
+    """
+    rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    bus = _RecordingBus()
+    rt._event_bus.subscribe(None, bus._record)  # type: ignore[attr-defined]
+
+    session_id, root_id, child_id = "s3", "root", "kid"
+    await _wire_multi_agent_session(rt, session_id, "t1", root_id, child_id)
+
+    result = await rt.cancel_session(session_id)
+
+    assert result is True
+    terminated_ids = {e.agent_id for e in bus.events if e.type == EventType.AGENT_TERMINATED}
+    assert terminated_ids == {root_id, child_id}
+    with pytest.raises(AgentNotFound):
+        rt.get_agent(root_id)
+
+
+async def test_cancel_session_no_longer_walks_run_tokens_itself() -> None:
+    """结构性守卫：那圈自己遍历 `_run_tokens` 拍 cancel 的代码应当消失。
+
+    `cancel_agent` 对 `running` 目标内部就会调 `_cancel_run_token`，覆盖同一批
+    在途 run，`cancel_session` 不需要再自己走一遍（2026-09-04 spec §7.2）。
+    """
+    import inspect
+
+    from ctx_weft.core.runtime import CtxWeftRuntime
+
+    src = inspect.getsource(CtxWeftRuntime.cancel_session)
+    assert "tokens.cancel.cancel()" not in src

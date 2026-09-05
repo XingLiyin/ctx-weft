@@ -24,6 +24,7 @@ from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+from tests.unit.test_runtime_agent_api import _plant
 
 pytestmark = pytest.mark.asyncio
 
@@ -58,8 +59,14 @@ async def test_pause_session_without_tm_cancels_all_runs():
 
 
 async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
+    """2026-09-04 spec §7.2 起，在途 run 的取消经 `cancel_agent`（对 `running` 目标
+    内部调 `_cancel_run_token`）覆盖，runtime 不再自己遍历 `_run_tokens`——因此这里
+    要有一个 `running` 且 `current_task_id="t1"` 的 agent record，`cancel_agent` 才会
+    找到并取消这个 run token（与 `_plant_live_task` 同一手法）。"""
     rt = _runtime()
     tokens = rt._register_run_tokens("s1", "t1")
+    _plant(rt, "ag1", None, session_id="s1", status="running")
+    rt._agent_lifecycle_manager._agents["ag1"].current_task_id = "t1"
     drained = {"called": False}
 
     class _TM:

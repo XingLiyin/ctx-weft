@@ -755,18 +755,15 @@ class CtxWeftRuntime:
         return True
 
     async def cancel_session(self, session_id: str) -> bool:
-        """硬取消：取消全部在途 run（per-run CancelToken）+ 全部后续 task（drain 队列）→ 会话 CANCELED
-        + 该 session 下**每个 agent** 显式转 `terminated`（R23）。
+        """硬取消：清队列 + 该 session 下**每个 agent** 经 `cancel_agent` 显式转
+        `terminated`（2026-09-04 spec §7.2）。
 
         memory 保留。开新对话由调用方另起（新 /messages → 同 session_id 的 new run）。
 
-        R23（task-20 核实结论）：`cancel_all` 让 task 发 `TASK_CANCELED`，经 ALM
-        （`_INPUT_BY_EVENT[TASK_CANCELED] = AgentInput.SETTLED`）只会把 agent 打回
-        `idle`——不是 `terminated`。会话被取消后 agent 却还"活着"（`idle`，能再收
-        `send_message`），与"会话取消"这个动作的意图不符。故在既有的会话级取消机制
-        （`cancel_all` 清队列 + 全部 run token cancel + `_release_session` 回收
-        per-session 状态）之外，**额外**用 Task 19 的 `cancel_agent`——唯一的 agent
-        终态入口——把该 session 下每个 agent 都真正推到 `terminated`。
+        收成三步：① `_cancel_session_hitl` 终局未决 HITL；② `cancel_all` 清队列；
+        ③ 对该 session 下每个 agent 调 `cancel_agent`——唯一的 agent 终态入口，它对
+        `running` 目标内部会调 `_cancel_run_token`，在途 run 的协作取消由它覆盖，
+        不再需要 runtime 自己遍历 `_run_tokens` 拍 `cancel()`。
         """
         per = self._run_tokens.get(session_id, {})
         task_manager = self._task_managers.get(session_id)
@@ -775,27 +772,29 @@ class CtxWeftRuntime:
         # 取消前判定会话是否已空闲挂起（无在跑任务）。RUNNING：在途 task 经 CancelToken→checkpoint
         # 协作取消→on_task_finished→is_done→_fire_session_done→_on_done 自行回收，故此处不抢着回收。
         idle = task_manager is not None and task_manager.is_done()
-        # 未决的 ask_user 一并终局，且**先于**下面 cancel_all 触发的 SessionFinished——
+        # ① 未决的 ask_user 一并终局，且**先于**下面 cancel_all 触发的会话终态——
         # 与熔断 trip 序列同一条纪律（HITL 终局须先于会话终态）。不终局的代价在重启后：
         # rebuild_hitl 按「有 HitlOpened 无终局事件」折 pending，会把已取消会话的
         # 提问当未决恢复出来（总账 A10）。
         await self._cancel_session_hitl(session_id, message=CancelReason.USER_CANCEL)
+        # ② 清队列。
         if task_manager is not None:
             await task_manager.cancel_all(reason=CancelReason.USER_CANCEL)
-        for tokens in per.values():
-            tokens.cancel.cancel()
-        # R23：显式终态化每个 agent——必须在 `_release_session` 之前做（那一步会把
-        # agent record 从 registry 摘掉，届时 `cancel_agent` 查无此 agent，只能静默
-        # 跳过、发不出 `AgentTerminated`）。上面的 `_cancel_session_hitl` 已经把该
-        # session 全部未决 HITL 收口过一轮，`cancel_agent` 内部对 `waiting_human` 的
-        # HITL 终局分支这里必是 no-op——HITL 终局先于 agent 终态的纪律因此自动成立，
-        # 不需要在这里再插一次序。走 `cancel_agent`（Task 19 的唯一 agent 终态入口），
-        # 不直接拍 `apply_input`/改 `rec.status`。
+        # ③ 逐个 agent 终态化。cancel_agent 是唯一的 agent 终态入口，它对 running
+        # 目标内部会调 _cancel_run_token——在途 run 的协作取消由它覆盖，runtime 不再
+        # 自己遍历 _run_tokens（2026-09-04 spec §7.2）。上面的 _cancel_session_hitl
+        # 已经把该 session 全部未决 HITL 收口过一轮，cancel_agent 内部对
+        # waiting_human 的 HITL 终局分支这里必是 no-op——HITL 终局先于 agent 终态的
+        # 纪律因此自动成立，不需要在这里再插一次序。
+        #
+        # 必须在 `_release_session` **之前**：那一步会把 agent record 从 registry
+        # 摘掉，届时 cancel_agent 查无此 agent，只能静默跳过、发不出 AgentTerminated。
         for aid in list(self._agent_lifecycle_manager.agent_ids_of_session(session_id)):
             await self.cancel_agent(aid, reason="session_canceled")
         if idle:
-            # 已暂停/中断（无在跑 task）的会话被取消：cancel_all 不经 _fire_session_done，_on_done
-            # 不会触发，故显式回收 runtime 侧 per-session 状态（含较重的 TaskManager），避免滞留。
+            # 已暂停/中断（无在跑 task）的会话被取消：cancel_all 不经 _fire_session_done，
+            # _on_done 不会触发，故显式回收 runtime 侧 per-session 状态（含较重的
+            # TaskManager），避免滞留。
             self._release_session(session_id)
         return True
 
