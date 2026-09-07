@@ -1,5 +1,6 @@
 """ctx-weft: Agent Runtime SDK."""
 
+from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.models.errors import (
     AgentBusyError,
     AgentNotFound,
@@ -26,6 +27,10 @@ __all__ = [
     "ProviderRegistry",
     "SessionStartParams",
     "TurnHandle",
+    # 运行时配置：`CtxWeftRuntime(config=...)` 要求宿主传它，故它必须在受支持的
+    # 导出面上——否则「只从顶层与 protocols 取名字」这条纪律对它无解，宿主只能深挖
+    # `core.models.config`（迁移期实测踩到）。
+    "RuntimeConfig",
     # agent 发现与回执
     "AgentDetail",
     "AgentSummary",

@@ -115,9 +115,10 @@
 | `core.state.models.{TaskSettings, NormalTaskSettings, CompactTaskSettings, MetadataFillerTaskSettings}` | `core.models.task` | ✅ |
 | `core.state.models.{SessionStatus, TaskStatus, TERMINAL_SESSION_STATUSES, WAITING}` | `core.models.status` | ❌（core 内部） |
 | `core.errors.*` | `core.models.errors` | 五个 agent/session 异常 ✅，其余 ❌ |
-| `core.config.RuntimeConfig` | `core.models.config.RuntimeConfig` | ❌ |
+| `core.config.RuntimeConfig` | `core.models.config.RuntimeConfig` | ✅（构造 runtime 要传它，必须在受支持面上） |
 | `core.events.types.{Event, EventFilter, EventType, RunSnapshot}` | `protocols.events` | ❌（从 `ctx_weft.protocols` 取） |
 | `core.events.bus.InProcessEventBus` | `providers.events.InProcessEventBus` | ❌（从 `ctx_weft.providers.events` 取） |
+| `core.utils.{generate_id,now_utc,content_to_text}` | `core.utils.{ids,clock,content}` | ❌ —— `core/utils` 从模块变成包且**不做 re-export**（「一个符号只有一条 import 路径」）。宿主本就不该跨库拿这两个工具，自己实现即可 |
 | `core.auth.authorizer.{Authorizer, AuthorizationDecision}` | `protocols.capability`（`ctx_weft.protocols` 导出） | ❌ |
 | `core.auth.authorizer.{AllowAllAuthorizer, AllowListAuthorizer, HumanConfirmationAuthorizer}` | `providers.authorizer` | ❌ |
 | `providers.memory_blackboard.InMemoryMemoryProvider` | `providers.memory.InMemoryMemoryProvider` | ❌ |
