@@ -64,7 +64,6 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ctx_weft.core.utils.content import CONTENT_PARTS_KEY
 from ctx_weft.core.media.refs import find_image_placeholders
 from ctx_weft.protocols import (
     ContentPart,
@@ -438,12 +437,8 @@ class MediaCapabilityProvider(ToolCapabilityProvider):
         parts = await get_image(memory, address, ctx, arguments.get("ref"),
                                 blob_store=blob_store)
 
-        # 文本走正常的工具文本输出，图片 part 走 CONTENT_PARTS_KEY 通道交给 gateway
-        # （Task 3 建好的通用接缝）——不在这里自己拼 content。
-        # 判据 `not hasattr(p, "text")` 冻结（裁定 D1）。
-        text = "\n".join(p.text for p in parts if hasattr(p, "text"))
-        media_parts = [p for p in parts if not hasattr(p, "text")]
-        payload: dict[str, Any] = {"content": text, "metadata": {}}
-        if media_parts:
-            payload["metadata"] = {CONTENT_PARTS_KEY: media_parts}
-        yield CapabilityEvent(kind="result", payload=payload)
+        # `get_image` 已经产出 `[TextPart(位置信息), ImagePart(ref)]` 这个形状，直接
+        # 作 result 的 content 交出去即可——它是 `str | list[ContentPart]`，与三个执行
+        # 入口同一个联合类型。拆成「文本 + 非文本」是 gateway 自己的事
+        # （`_stream_events` 一次 `split_for_tool_result`），provider 不必替它拆。
+        yield CapabilityEvent(kind="result", payload={"content": parts})

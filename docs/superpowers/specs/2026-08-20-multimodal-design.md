@@ -699,6 +699,41 @@ core 侧统一表达为 `LLMMessage(role="tool", content=[TextPart, ImagePart])`
   `metadata["content_parts"]` 由 provider 贡献，§6.6 的 adapter 改造对任意工具通用。
   **机制到位，但本期只有 `media:get_image` 使用**；让第三方 capability provider 用上
   它，需要额外的协议文档、大小限流与授权审查，独立立项。
+
+  > **已部分兑现（2026-09-05）**：本条列的两个前置里，**大小限流**已经补上，
+  > **协议文档**随之落在 `protocols/capability.py` 的 `CapabilityEvent` 注释与
+  > `legalize_tool_result_parts` 的 docstring 里；**授权审查**仍未做（见下）。
+  >
+  > 同批把 `metadata["content_parts"]` 侧信道**删掉**了：`payload["content"]` 现在是
+  > `str | list[ContentPart]`，与三个执行入口、`HitlReply.message` 同一个联合类型，
+  > provider 不再需要自己拆文本。拆分归 gateway（`_ToolStream`）。理由与组装顺序见
+  > 子设计 §4.2 的「订正（2026-09-05）」。
+  >
+  > 缺的那一课具体是什么：`media:get_image` 交出来的本就是 `source_type="ref"`
+  > （字节早在 blob store 里），于是这条路一直没有「校验 + 外部化」这一步——那两件事
+  > 只长在三个执行入口与 HITL 应答上（`runtime._validate_and_normalize_content`）。
+  > 第三方 provider 一交 **inline base64**，三个洞同时出现：白名单/5 MiB 上限一次
+  > 不跑、裸 base64 直接落进 memory 记录、宿主注册了 blob store 也用不上。
+  >
+  > 补法是在 gateway 那个**汇聚点**补一道合法化（`core/utils/content.py::
+  > legalize_tool_result_parts`，`capability_gateway.invoke` 调），而不是让每个
+  > provider 自己去认识 blob store：
+  > - 只管 `source_type == "base64"` 的图；ref/url 与文本原样透传——ref 只可能由仓内
+  >   产出，重跑白名单反而会**误伤**（占位里的 media_type 允许回落成 `"image"`，
+  >   见 `media/refs.py::_UNKNOWN_MEDIA_TYPE`，而它不在白名单里）。
+  > - **恒不抛**（同 `media/capability.py` 的取向）：不合格的换确定性占位
+  >   `[image dropped: {reason}]`（占位清单第 6 条），其余 part 照走。
+  > - 接了 blob store 就外部化；`put` 失败降级成占位并 `logger.error`，**不偷偷退回
+  >   inline**（宿主接了 store 就是表态「字节不进记录行」）。没接 store 则 inline
+  >   原样跑，与 Phase 2 形态一致。
+  >
+  > 第一个真实生产者：**MCP 的 `ImageContent`**（`capability_mcp/provider.py::
+  > _parse_tool_result`）。改造前它被**静默丢弃**——只收 `item.text`，图片连一条占位
+  > 都不留，模型不知道自己少拿了东西。
+  >
+  > **仍未做**：授权审查（工具返图目前不经任何单独的门控，与工具返文本同一条授权
+  > 路径）；`read_file` 读图与 `http_request` 按 content-type 返图（两者仍是纯文本，
+  > 见本节其余条目与 2026-09-05 的分支审视）。
 - **音频 / 视频**：`ContentPart` 联合类型可扩，但 token 口径、折叠策略、provider
   支持面都是另一套问题。
 - **摘要内含图**：见 §8，本期明确排除。

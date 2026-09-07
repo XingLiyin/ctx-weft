@@ -19,6 +19,7 @@ Task 2 的降级（写占位）与 Task 4 的 `media:get_image`（读占位取 r
 | 3 | ``[image unavailable: {media_type}]`` | `core/content.py::_IMAGE_UNAVAILABLE_TMPL` | 出网 rehydrate 取不回 blob 时的降级 | 否 |
 | 4 | ``[image see the following message]`` | `providers/llm/openai.py::_TOOL_IMAGE_NOTICE` | OpenAI `role="tool"` 只收文本，图重定位到随后的 user 消息 | 否 |
 | 5 | ``[image unavailable]`` | `providers/memory/sql/*.py` docstring | 仅文档举例，**不是活代码** | 否 |
+| 6 | ``[image dropped: {reason}]`` | `core/content.py::_IMAGE_DROPPED_TMPL`，产出方 `legalize_tool_result_parts` | **工具返图的合法化降级**：provider 在 result content 里交上来的 inline 图未过校验 / 外部化失败 | 否 |
 
 ⚠️ 2 与 1 **并存、互不替代**：per-purpose 是「这次不发」，L0.5 是「从记忆里收起来」。
 改 1 不要顺手动 2。

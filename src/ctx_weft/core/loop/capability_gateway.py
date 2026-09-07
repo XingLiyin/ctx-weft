@@ -25,9 +25,9 @@ from typing import TYPE_CHECKING, Any
 import jsonschema
 
 from ctx_weft.core.utils.content import (
-    CONTENT_PARTS_KEY,
     content_with_prefix,
     content_with_suffix,
+    legalize_tool_result_parts,
     normalize_content_parts,
     redact_content_for_event,
     split_for_tool_result,
@@ -58,6 +58,7 @@ from ctx_weft.protocols.memory_compat import MemoryKind
 if TYPE_CHECKING:
     from ctx_weft.core.loop.driver import LoopState, LoopContext
     from ctx_weft.protocols.hitl import HitlAsk
+    from ctx_weft.protocols.memory import MemoryBlobStore
 
 logger = logging.getLogger(__name__)
 
@@ -110,22 +111,20 @@ SILENT_TOOLS = frozenset({
 })
 
 
-# 「工具返回非文本内容」的通用接缝（子设计 §4.2）。
+# 「工具返回非文本内容」的通用接缝（子设计 §4.2；2026-09-05 收成 content 单口径）。
 #
-# provider 在 `CapabilityEvent(kind="result")` 的 `payload["metadata"]` 里挂一个
-# `list[ContentPart]`（或等价的 dict 形态，gateway 侧过归一层），gateway 把它拼在
-# 文本部分之后，使 `InvocationResult.content` 变成 `list[ContentPart]`。
+# provider 把 `ImagePart` 直接放进 `CapabilityEvent(kind="result")` 的
+# `payload["content"]`——它是 `str | list[ContentPart]`，**与三个执行入口、
+# `HitlReply.message`、`AuthorizationDecision.message` 同一个联合类型**。曾经另有一条
+# `metadata["content_parts"]` 侧信道，要求 provider 把文本与 part 分两处交；已删除：
+# 同一件事两种写法，且与本仓其余所有内容口子都不一样。
 #
-# **通道是通用的，不认发布者**：本期只有 `media:get_image` 用（Phase 4 Task 4），
-# 但浏览器截图、图表生成等能力将来走同一条路，gateway 不做来源白名单。
+# **通道是通用的，不认发布者**：`media:get_image`、MCP 的 `ImageContent`、将来的浏览器
+# 截图/图表生成走同一条路，gateway 不做来源白名单。
 #
-# 流式协议本身不改：`_stream_tool` 依旧只聚合文本块（`result_parts: list[str]`）。
-# 于是落盘截断（`_maybe_spill`）、human note 拼接、事件 payload 截断这些既有加工
-# 全部只作用于**文本部分**——因为 parts 是在它们之后才拼上去的。
-#
-# 定义已移至 `core.utils.content`（两边共同的下游叶子）——`core.media` 的 provider 也要用
-# 这个键，常量留在这里会逼它 import `core.loop`，造出 loop ⇄ media 的环。此处保留
-# re-export 之外的说明性注释，值本身不在这里定义。
+# 「拆开」的活由 gateway 自己干（`_stream_events` 里一次 `split_for_tool_result`）：
+# 落盘截断（`_maybe_spill`）、human note 拼接、事件 payload 脱敏这些既有加工全部只
+# 作用于**文本部分**，parts 在它们之后才拼回去。provider 因此不需要知道这些加工存在。
 
 
 def invocation_key(tool_name: str, arguments: dict[str, Any] | None) -> str:
@@ -158,7 +157,7 @@ class InvocationResult:
     invocation_id: str
     tool_name: str
     # 拼好的 result，追加进 LLM messages。默认是**文本**（与改造前逐字节相同）；
-    # 仅当 provider 经 metadata[CONTENT_PARTS_KEY] 贡献了非文本部分时才是
+    # 仅当 provider 的 result content 里带了非文本 part（或人类备注带图）时才是
     # `list[ContentPart]`（形如 `[TextPart(文本), *parts]`）。
     # 读取方注意：对 list 做 `.strip()` / `join` / `content[:N]` 都是错的
     # （切片一个 list 不报错，但切出来的是前 N 个 part）——文本化请走
@@ -166,6 +165,26 @@ class InvocationResult:
     content: str | list[ContentPart]
     metadata: dict[str, Any] = field(default_factory=dict)  # control signals
     is_error: bool = False
+
+
+@dataclass
+class _ToolStream:
+    """一次工具流（或一次人类答复）聚合出来的东西。
+
+    `content` 是 ``str | list[ContentPart]``（与三个执行入口、`HitlReply.message`
+    同一个联合类型），但 gateway 内部必须把**文本**单独拿在手上：它还要过 spill
+    截断、还要在前面接 ``[Human note: …]``，两件事都只作用于文本。于是流一进来就用
+    `split_for_tool_result` 拆成 `texts` / `parts` 两半，末尾再拼回去。
+
+    多条 result 事件的文本按 ``
+`` 累加（与改造前同），part 按到达顺序累加。
+    """
+
+    texts: list[str] = field(default_factory=list)
+    parts: list[ContentPart] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    is_error: bool = False
+    needs_human_ask: "HitlAsk | None" = None
 
 
 # ── CapabilityGateway ─────────────────────────────────────────────────────────
@@ -184,6 +203,7 @@ class CapabilityGateway:
         default_authorizer: Authorizer | None = None,
         spill_threshold: int = 4000,
         spill_preview_chars: int = 1000,
+        memory_blob_store: "MemoryBlobStore | None" = None,
     ) -> None:
         self._cache = capability_cache
         self._providers = capability_providers
@@ -192,6 +212,11 @@ class CapabilityGateway:
             if isinstance(p, ToolCapabilityProvider)
         }
         self._memory = memory
+        # provider 在 result content 里交上来的 inline 图片在这里外部化（见
+        # `legalize_tool_result_parts`）。`None` = 不外部化，inline 原样跑——与「宿主
+        # 没接 blob store」同一口径，也让不关心多模态的构造点（含全部既有测试）行为
+        # 逐字节不变。
+        self._memory_blob_store = memory_blob_store
         self._event_bus = event_bus
         self._provider_authorizers: dict[str, Authorizer] = provider_authorizers or {}
         if default_authorizer is None:
@@ -358,13 +383,14 @@ class CapabilityGateway:
             invocation_id=invocation_id,
             extra={**ctx.provider_ctx.extra, "tool_call_id": tool_call_id},
         )
-        result_parts, metadata, is_error, needs_human_ask = await self._stream_tool(
+        streamed = await self._stream_tool(
             provider, cap.id, sanitized, provider_ctx, state, invocation_id,
         )
 
         # 6b. provider 让出了 needs_human：流已停在此处（其后 yield 的事件从未被消费，见
         # `_stream_events`）。等待权归 gateway——provider 只**声明**需要人。
-        if needs_human_ask is not None:
+        if streamed.needs_human_ask is not None:
+            needs_human_ask = streamed.needs_human_ask
             try:
                 needs_human_ask_id, human = await self._resolve_human(
                     needs_human_ask, state, ctx, tool_call_id, stage=HITL_STAGE_TOOL,
@@ -384,15 +410,14 @@ class CapabilityGateway:
                     "Tool '%s' asked for a human in unattended task %s — answering "
                     "'no human available' and letting the actor decide",
                     tool_name, state.task.id)
-                result_parts = [ASK_USER_UNATTENDED_RESULT if tool_name == ASK_USER_NAME
-                                else _UNATTENDED_TOOL_NOTE]
-                metadata, is_error = {}, False
+                streamed = _ToolStream(texts=[
+                    ASK_USER_UNATTENDED_RESULT if tool_name == ASK_USER_NAME
+                    else _UNATTENDED_TOOL_NOTE])
             else:
                 # 拿到了真人的决定：原有两条路，逐字节未改。
                 if needs_human_ask.reply_as_result:
                     # 答复即结果：重入根本不发生（`ask_user` 走这条）。
-                    result_parts, metadata, is_error = _human_reply_as_result(
-                        human, needs_human_ask)
+                    streamed = _human_reply_as_result(human, needs_human_ask)
                 else:
                     from ctx_weft.protocols.capability import HumanResumable
                     if not isinstance(provider, HumanResumable):
@@ -404,7 +429,7 @@ class CapabilityGateway:
                         )
                     # 重入是**新调用** resume（不是恢复挂起的生成器）——局部状态已随原生成器
                     # 关闭而消失，全靠 ask.resume_state 带回。
-                    result_parts, metadata, is_error, _ = await self._stream_events_safe(
+                    streamed = await self._stream_events_safe(
                         provider.resume(
                             needs_human_ask_id, human, needs_human_ask.resume_state,
                             provider_ctx,
@@ -412,12 +437,13 @@ class CapabilityGateway:
                         provider, provider_ctx, state, invocation_id,
                     )
 
-        text = "\n".join(result_parts)
+        metadata, is_error = streamed.metadata, streamed.is_error
+        text = "\n".join(streamed.texts)
         if not text:
-            # 空文本但 metadata 里挂着非文本 part（例如 ask_user 只回了一张图）时，
-            # 别说「(no output)」——那会让模型以为真的什么都没拿到，图却已经在 content 里了。
+            # 空文本但流里带了非文本 part（例如 ask_user 只回了一张图）时，别说
+            # 「(no output)」——那会让模型以为真的什么都没拿到，图却已经在 content 里了。
             # 其余分支（真的什么都没有 / is_error）逐字节保留原行为。
-            text = "" if is_error or metadata.get(CONTENT_PARTS_KEY) else "(no output)"
+            text = "" if is_error or streamed.parts else "(no output)"
         # 工具输出过长 → 委托 fs provider 落盘；在 human note / 审计 / memory ingest 之前，使下游拿到截断版。
         text = await self._maybe_spill(text, ctx, invocation_id, tool_name, cap.spillable)
         # 人类备注：文本前置进 text，备注里的图片 part 与工具结果的 part 一起进最终 content。
@@ -426,8 +452,21 @@ class CapabilityGateway:
         if note_text or note_parts:
             text = f"[Human note: {note_text}]\n{text}"
         content: str | list[ContentPart] = text
-        parts = metadata.get(CONTENT_PARTS_KEY)
-        parts = list(parts) if isinstance(parts, (list, tuple)) else []
+        # provider 在 result content 里交上来的非文本 part 要补上入口那三件套
+        # （校验 / 外部化），**不合格的换占位、恒不抛**——见 `legalize_tool_result_parts`。
+        # 「一律」包括 `_human_reply_as_result` 带回来的人类答复：它与 provider 的产出
+        # 走同一条路，gateway 在这里也分不出来，而这恰恰是想要的——宿主若没接
+        # `set_content_normalizer`，人递进来的字节在入口一次都没被校验过，这里是它唯一
+        # 的关口。已经过过入口的（ref 形态）在 `legalize_tool_result_parts` 里直接透传，
+        # 不重复付 put。
+        #
+        # `note_parts` **不**过这一道：它来自 `AuthorizationDecision.message`，源头同样
+        # 是 HITL；放它进来只会在「备注带图 + 无 blob store」时多解一次 base64，换不到
+        # 任何新保障。
+        parts = streamed.parts
+        if parts:
+            parts = await legalize_tool_result_parts(
+                parts, blob_store=self._memory_blob_store, ctx=ctx.provider_ctx)
         if note_parts or parts:
             # 过归一层：宿主 provider 可能给 dict 形态的 part（JSON 往返），
             # 与 MemoryEvent / LLMMessage 的 __post_init__ 共用同一份归一。
@@ -534,7 +573,7 @@ class CapabilityGateway:
 
     async def _stream_tool(
         self, provider, cap_id, sanitized, provider_ctx, state, invocation_id,
-    ) -> tuple[list[str], dict[str, Any], bool, "HitlAsk | None"]:
+    ) -> "_ToolStream":
         """流式执行 provider.invoke，聚合 result/metadata/error（含 needs_human 让出的 ask）。
 
         事件消费循环与错误/取消处理分别由 `_stream_events` / `_stream_events_safe` 承担，
@@ -547,7 +586,7 @@ class CapabilityGateway:
 
     async def _stream_events_safe(
         self, events, provider, provider_ctx, state, invocation_id,
-    ) -> tuple[list[str], dict[str, Any], bool, "HitlAsk | None"]:
+    ) -> "_ToolStream":
         """`_stream_events` 外面套一层取消/异常安全网，`invoke` 与 `resume` 两处调用点共用。
 
         CancelledError（在途被打断）→ 调 provider.cancel 作安全网后重抛（provider 自身的 finally，
@@ -561,12 +600,19 @@ class CapabilityGateway:
             raise
         except Exception as exc:
             logger.exception("CapabilityGateway: invoke failed for invocation %s", invocation_id)
-            return [f"[Exception: {exc}]"], {}, True, None
+            return _ToolStream(texts=[f"[Exception: {exc}]"], is_error=True)
 
     async def _stream_events(
         self, events, state, invocation_id,
-    ) -> tuple[list[str], dict[str, Any], bool, "HitlAsk | None"]:
+    ) -> "_ToolStream":
         """消费一个 `CapabilityEvent` 流，聚合 result/metadata/error。
+
+        **`result` 事件的 `payload["content"]` 是 `str | list[ContentPart]`**——与三个
+        执行入口、`HitlReply.message` 同一个联合类型，provider 想返图就把 `ImagePart`
+        直接放进 content，不必分两处交。这里用 `split_for_tool_result` 把它拆成文本与
+        非文本两半（先过 `normalize_content_parts`，否则 dict 形态的文本 part 会被那个
+        冻结判据误判成图片），文本按 ``\n`` 累加、part 按到达顺序累加。`str` 进来时
+        拆分器返回同一对象与空列表，纯文本路径零开销、逐字节不变。
 
         **`needs_human` 是流的终点**（spec §2）：见到即 `break`，不再从 `events` 拉下一个
         事件——其后 provider 让出的任何东西都不可见。provider 的局部状态随之消失，这正是
@@ -581,14 +627,11 @@ class CapabilityGateway:
         承诺的是「让出即关闭」。正常跑完的流 `aclose()` 是 no-op。
         """
         from ctx_weft.core.loop.driver import make_event
-        result_parts: list[str] = []
-        metadata: dict[str, Any] = {}
-        is_error = False
-        needs_human_ask = None
+        out = _ToolStream()
         try:
             async for ev in events:
                 if ev.kind == "needs_human":
-                    needs_human_ask = ev.payload.get("ask")
+                    out.needs_human_ask = ev.payload.get("ask")
                     break
                 if ev.kind in ("stdout", "progress"):
                     await self._event_bus.emit(make_event(
@@ -598,11 +641,14 @@ class CapabilityGateway:
                             "data": ev.payload.get("data", "")[:500],
                         }, origin=EventOrigin.LOOP_CAPABILITY_GATEWAY))
                 elif ev.kind == "result":
-                    result_parts.append(ev.payload.get("content", ""))
-                    metadata.update(ev.payload.get("metadata", {}))
+                    ev_text, ev_parts = split_for_tool_result(
+                        normalize_content_parts(ev.payload.get("content", "")))
+                    out.texts.append(ev_text)
+                    out.parts.extend(ev_parts)
+                    out.metadata.update(ev.payload.get("metadata", {}))
                 elif ev.kind == "error":
-                    is_error = True
-                    result_parts.append(
+                    out.is_error = True
+                    out.texts.append(
                         f"[Error {ev.payload.get('code', 'ERR')}: "
                         f"{ev.payload.get('message', '')}]"
                     )
@@ -618,14 +664,14 @@ class CapabilityGateway:
                 # provider 的 finally 自身出错不该盖掉已聚合好的结果 / 正在传播的取消。
                 with contextlib.suppress(Exception):
                     await aclose()
-        return result_parts, metadata, is_error, needs_human_ask
+        return out
 
     async def _record_result(
         self, state, ctx, tool_name, invocation_id, sanitized, content, is_error, is_dispatch, is_silent, tool_call_id,
     ) -> None:
         """发 CapabilityFinished + ingest TOOL_RESULT（派发暂挂 / SILENT 不入 / 普通写 task 层）。"""
         from ctx_weft.core.loop.driver import make_event
-        # 事件 payload 必须先脱敏再截断：content 可能是 list[ContentPart]（见 CONTENT_PARTS_KEY），
+        # 事件 payload 必须先脱敏再截断：content 可能是 list[ContentPart]（工具返图时），
         # 直接 `content[:8000]` 切的是**前 8000 个 part**——不报错、语义完全错，且图片 part 的
         # base64 会随 repr 泄漏进事件库。`redact_content_for_event` 对 str 输入返回同一对象，
         # 纯文本路径逐字节不变。
@@ -800,12 +846,12 @@ class CapabilityGateway:
 
 def _human_reply_as_result(
     human: "HitlDecision", ask: "HitlAsk",
-) -> tuple[list[str], dict, bool]:
+) -> "_ToolStream":
     """把人的答复直接变成工具结果（`HitlAsk.reply_as_result=True` 的出口，如 `ask_user`）。
 
-    多模态部分经 metadata 的 `CONTENT_PARTS_KEY` 透出，与 provider 自己产出的非文本 part
-    走同一条路（`invoke` 里 `metadata.get(CONTENT_PARTS_KEY)` 拼进最终 content）——否则带图
-    答复会被 `split_for_tool_result` 拆开后只剩文本部分被使用，图片就此丢失。
+    返回的 `_ToolStream` 与一次真的 provider 流**同型**：文本与非文本 part 分放两处，
+    invoke 的公共出口一视同仁地处理（拼 content、合法化、落库）。人的答复因此与
+    provider 自己产出的图走完全同一条路——包括 gateway 的校验/外部化那一道。
 
     两条**非空的**语义，从旧 `control_capability` 的出口原样移过来（Task 10）：
 
@@ -821,8 +867,7 @@ def _human_reply_as_result(
         text = f"Human declined: {text}" if text else "Human rejected the request."
     elif not text and not parts:
         text = ask.prompt
-    metadata: dict = {CONTENT_PARTS_KEY: parts} if parts else {}
-    return ([text] if text else []), metadata, False
+    return _ToolStream(texts=[text] if text else [], parts=parts)
 
 
 def _tool_scope(state: "LoopState") -> MemoryAddress:

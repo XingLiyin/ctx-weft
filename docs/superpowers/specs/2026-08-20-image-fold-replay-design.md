@@ -170,6 +170,21 @@ if parts := metadata.get("content_parts"):
 这个 `metadata["content_parts"]` 通道同时是**将来「工具返图」的接缝**（浏览器截图、
 图表生成），本期只有 `media:get_image` 使用。
 
+> **订正（2026-09-05）：侧信道已删除，收成 `content` 单口径。**
+> `CapabilityEvent(kind="result")` 的 `payload["content"]` 现在是
+> `str | list[ContentPart]`——**与三个执行入口、`HitlReply.message`、
+> `AuthorizationDecision.message` 同一个联合类型**。provider 把 `ImagePart` 直接放进
+> content 即可，不再分两处交。
+>
+> 本节推导的「文本要单独拿在手上」是**对的**（spill / human note / 事件脱敏都只作用于
+> 文本），错的是把这个内部需要**外化成了 provider 的义务**：本仓其余所有内容口子都是
+> 一个联合类型，唯独工具结果要求调用方自己拆，多一种写法、也多一个会被忘掉的键。
+> 现在拆分由 gateway 自己做（`_stream_events` 里一次 `split_for_tool_result`，聚合进
+> `_ToolStream` 的 `texts` / `parts` 两半，末尾拼回去），本节的组装顺序一字未变。
+>
+> 同批补上的还有 provider 交 **inline base64** 时缺的那一课（校验 + 外部化）——见
+> `core/utils/content.py::legalize_tool_result_parts` 与多模态设计 §9 的兑现注记。
+
 ### 4.3 provider 差异在 adapter 层吸收
 
 core 侧统一：`LLMMessage(role="tool", content=[TextPart, ImagePart])`。

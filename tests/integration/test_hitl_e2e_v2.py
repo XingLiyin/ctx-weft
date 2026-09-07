@@ -332,7 +332,7 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
     命中工具阶段的决定缓存短路 → `_human_reply_as_result` 把答复（含图）拼进 TOOL_RESULT。
 
     会因下列任一项回归而失败：
-    - 冷路径下 `ask_user` 的图片被丢弃或降级成文字描述（`CONTENT_PARTS_KEY` 没有被
+    - 冷路径下 `ask_user` 的图片被丢弃或降级成文字描述（非文本 part 没有被
       正确拼进最终 content）——断言的是 memory 里 TOOL_RESULT 含**真实 `ImagePart`**、
       逐字节等于原始 base64，而不是「文本里提到了图片」；
     - 冷路径没有真正续跑（任务卡在 AWAITING_HUMAN，断言 FINISHED 会失败）。

@@ -115,6 +115,26 @@ class CapabilityEvent:
     # **必须是流的最后一个事件**——gateway 见之即停止消费本流，其后 yield 的一律不可见
     # （spec §2）。让出时生成器被关闭，局部状态随之消失，故让出前的工作要放进
     # ask.resume_state。
+    #
+    # ── result 的 payload 形状（工具返图看这里）────────────────────────────────
+    # {"content": str | list[ContentPart], "metadata": dict}。``content`` 与三个执行
+    # 入口、``HitlReply.message``、``AuthorizationDecision.message`` **是同一个联合
+    # 类型**：要返图就把 ``ImagePart`` 直接放进去，不必分两处交，也不必自己拆文本。
+    #
+    #     yield CapabilityEvent(kind="result", payload={"content": [
+    #         TextPart(text="这是刚才那个页面的截图"),
+    #         ImagePart(data=b64, media_type="image/png"),   # source_type 默认 base64
+    #     ]})
+    #
+    # 交 **inline base64 是允许**的：字节的校验（media_type 白名单 / 单图 5 MiB）与
+    # 外部化（写进宿主的 MemoryBlobStore、换成 ``blob:<sha>`` ref）由 gateway 统一
+    # 做（`core.utils.content.legalize_tool_result_parts`），provider 不必认识 blob
+    # store。不合格的那张会被换成确定性文本占位、其余 part 照走——**gateway 恒不抛**，
+    # 一张图不合格不会掀掉整次工具调用。
+    #
+    # 文本侧的既有加工（spill 落盘截断、``[Human note: …]`` 前缀、事件 payload 脱敏）
+    # 只作用于 content 里的文本 part：gateway 收到就用 `split_for_tool_result` 拆开、
+    # 加工完再拼回去。provider 不需要知道这些加工存在。
     payload: dict[str, Any] = field(default_factory=dict)
 
 

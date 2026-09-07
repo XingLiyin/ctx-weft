@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.utils.content import collect_blob_refs
-from ctx_weft.core.loop.capability_gateway import CONTENT_PARTS_KEY, CapabilityGateway
+from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols import ImagePart, MemoryAddress, MemoryScope, ProviderContext, TextPart
@@ -41,8 +41,8 @@ def _img(ref: str) -> ImagePart:
 class _Prov(ToolCapabilityProvider):
     name = "mcp:t"
 
-    def __init__(self, text: str, metadata: dict | None = None) -> None:
-        self._text, self._metadata = text, metadata
+    def __init__(self, text: str, parts: list | None = None) -> None:
+        self._text, self._parts = text, parts
 
     def _cap(self) -> ToolCapability:
         return ToolCapability(id="mcp:t:go", name="go", description="d")
@@ -54,10 +54,9 @@ class _Prov(ToolCapabilityProvider):
 
     def invoke(self, capability_id, arguments, ctx) -> AsyncIterator[CapabilityEvent]:
         async def _run():
-            payload: dict = {"content": self._text}
-            if self._metadata is not None:
-                payload["metadata"] = self._metadata
-            yield CapabilityEvent(kind="result", payload=payload)
+            content = ([TextPart(text=self._text), *self._parts]
+                       if self._parts else self._text)
+            yield CapabilityEvent(kind="result", payload={"content": content})
         return _run()
 
 
@@ -115,7 +114,7 @@ async def test_human_note_with_image_reaches_the_model():
 @pytest.mark.asyncio
 async def test_note_parts_precede_tool_result_parts():
     """顺序裁定：备注图在工具图之前——与文本顺序一致（[Human note: …] 也在前）。"""
-    res, _ = await _run(_Prov("out", {CONTENT_PARTS_KEY: [_img(TOOL_REF)]}),
+    res, _ = await _run(_Prov("out", [_img(TOOL_REF)]),
                         _Az([TextPart(text="注意"), _img(NOTE_REF)]))
     assert [p.data for p in res.content if not hasattr(p, "text")] == [NOTE_REF, TOOL_REF]
 

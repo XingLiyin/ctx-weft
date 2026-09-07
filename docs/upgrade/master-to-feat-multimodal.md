@@ -780,6 +780,45 @@ class DeployTool(ToolCapabilityProvider, HumanResumable):
 从不问人的工具 provider、只返回 bool 的 authorizer，同样看不到任何 HITL 概念。这是
 刻意的设计。
 
+### 10.5 工具可以返图了（MCP 的行为变化，宿主要知情）
+
+`CapabilityEvent(kind="result")` 的 `payload["content"]` 从 `str` 放宽成
+**`str | list[ContentPart]`**——与 `user_prompt` / `send_message(content=)` /
+`HitlReply.message` / `AuthorizationDecision.message` 同一个联合类型（§9.1）。要返图就
+直接放进去：
+
+```python
+yield CapabilityEvent(kind="result", payload={"content": [
+    TextPart(text="这是刚才那个页面的截图"),
+    ImagePart(data=b64, media_type="image/png"),
+]})
+```
+
+文本侧的既有加工（spill 落盘截断、`[Human note: …]` 前缀、事件 payload 脱敏）只作用于
+content 里的文本 part——gateway 收到就拆开、加工完再拼回去，provider 不需要知道。
+
+交 **inline base64 是允许的**：校验（media_type 白名单 / 单图 5 MiB）与外部化（写进
+`MemoryBlobStore`、换成 `blob:<sha>`）由 gateway 统一做，provider 不必认识 blob store。
+不合格的那张换成占位 `[image dropped: …]`，其余照走，**gateway 恒不抛**。
+
+**对宿主的实际变化在 MCP 那条**：`MCPCapabilityProvider` 现在会把 MCP server 回的
+`ImageContent` 带进上下文（此前是**静默丢弃**）。于是：
+
+| 影响 | 说明 |
+|---|---|
+| token 账单 | 截图类 MCP 工具的返回值此前恒为 0 图；现在按 `image_tokens` 计（体积 ÷128，地板 1600）。装配期的预算与 compact 会跟着变。 |
+| 模型 | 纯文本 adapter（`style="anthropic"` / `"openai"`）会把它们降级成 `[image {media_type}]` 并告警；要真看图得注册 `*-multimodal` adapter（§3.2）。 |
+| blob | 没注册 `MemoryBlobStore` 时图以 inline base64 留在 memory 记录里（与不接 blob 的既有口径一致）；注册了则自动落 blob、记录里只留 ref。 |
+
+不想要这个行为就在自己的 authorizer 里拦那个工具——core 侧没有单独的「工具返图」开关
+（授权审查是本条明确未做的部分）。
+
+**破坏性**：曾经短暂存在过一条 `metadata["content_parts"]` 侧信道（常量
+`CONTENT_PARTS_KEY`），要求 provider 把文本与 part 分两处交。**已删除**，没有兼容期——
+它是 `feat/multimodal` 分支内生死的内部机制，`master` 上不存在，故对从 `master` 迁移的
+宿主没有影响。若你 fork 过分支中途的版本并写了用它的 provider：把 parts 挪进 `content`
+即可，gateway 的组装顺序与结果一字未变。
+
 ---
 
 ## 11. 可执行的 grep 清单

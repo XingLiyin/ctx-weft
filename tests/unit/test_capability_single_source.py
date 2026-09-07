@@ -160,11 +160,12 @@ async def test_gateway_pin_event_pins_and_keeps_consuming() -> None:
         yield CapabilityEvent(kind="pin", payload={"capabilities": [_tool("mcp:b:pinned")]})
         yield CapabilityEvent(kind="result", payload={"content": "done"})
 
-    parts, _metadata, is_error, ask = await gateway._stream_events(_events(), state, "inv_1")
+    streamed = await gateway._stream_events(_events(), state, "inv_1")
 
-    assert parts == ["done"]        # pin 之后的事件仍被消费
-    assert is_error is False
-    assert ask is None
+    assert streamed.texts == ["done"]        # pin 之后的事件仍被消费
+    assert streamed.parts == []
+    assert streamed.is_error is False
+    assert streamed.needs_human_ask is None
     assert cache.get_by_qualified_name("agt_1", "mcp__b__pinned", "tsk_1").id == "mcp:b:pinned"
 
 

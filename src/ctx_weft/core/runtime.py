@@ -3234,6 +3234,12 @@ class CtxWeftRuntime:
         )
 
     def _build_gateway(self, memory: MemoryProvider) -> CapabilityGateway:
+        """本方法只在**派发时**被调（`_execute_task` / 恢复路径），不在 `__init__`——
+        故此处现取 blob store 是安全的：宿主 `register_memory_blob_store()` 无论排在
+        构造之前还是之后，跑到这里时都已经接上（同 `media/capability.py` 记的那个
+        「先取后注册」坑，那边为此改成了调用时解析）。`get_memory_blob_store()`
+        文档化为从不抛，未注册回落 `NullMemoryBlobStore`（`can_externalize` 恒 False）。
+        """
         return CapabilityGateway(
             capability_cache=self._capability_cache,
             capability_providers=self.providers.get_capability_providers(),
@@ -3242,6 +3248,7 @@ class CtxWeftRuntime:
             provider_authorizers=self.providers.get_capability_authorizers(),
             spill_threshold=self._config.spill_threshold,
             spill_preview_chars=self._config.spill_preview_chars,
+            memory_blob_store=self.providers.get_memory_blob_store(),
         )
 
     def _build_loop_ctx(

@@ -1,9 +1,13 @@
-"""Task 3：`InvocationResult.content` 放宽 + `metadata["content_parts"]` 通道。
+"""`InvocationResult.content` 放宽 + provider 用 result `content` 交非文本 part。
 
-子设计 §4.2。要点：
-- 有 `content_parts` → content 变 `[TextPart(文本), *parts]`；
-- 无 `content_parts` → content 仍是 **str**，且与改造前**逐字节相同**（最重要的兼容性约束）；
-- spill / human note 只作用于**文本部分**（parts 在它们之后才拼上）；
+子设计 §4.2；2026-09-05 把曾经的 `metadata["content_parts"]` 侧信道收成 content 单口径
+——`CapabilityEvent(kind="result")` 的 `payload["content"]` 是 `str | list[ContentPart]`，
+与三个执行入口、`HitlReply.message` 同一个联合类型。要点：
+
+- content 里有非文本 part → `InvocationResult.content` 变 `[TextPart(文本), *parts]`；
+- content 是 str（或拆完没有非文本 part）→ 仍是 **str**，且与改造前**逐字节相同**
+  （最重要的兼容性约束）；
+- spill / human note 只作用于**文本部分**（gateway 拆开加工完再把 parts 拼回去）；
 - 事件 payload 走 `redact_content_for_event`：不泄漏 base64、不对 list 做切片。
 """
 
@@ -13,7 +17,7 @@ from types import SimpleNamespace
 from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.core.loop.capability_gateway import CONTENT_PARTS_KEY, CapabilityGateway
+from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols import ImagePart, MemoryAddress, ProviderContext, TextPart
@@ -38,12 +42,14 @@ def _img(data: str = FAKE_B64, source_type: str = "base64") -> ImagePart:
 
 
 class _Prov(ToolCapabilityProvider):
-    """按构造参数回吐一次 result 事件：文本 + 可选 metadata。"""
+    """按构造参数回吐一次 result 事件：文本（+ 可选非文本 part）+ 可选 metadata。"""
 
     name = "mcp:t"
 
-    def __init__(self, text: str, metadata: dict | None = None, spillable: bool = True) -> None:
+    def __init__(self, text: str, parts: list | None = None,
+                 metadata: dict | None = None, spillable: bool = True) -> None:
         self._text = text
+        self._parts = parts
         self._metadata = metadata
         self._spillable = spillable
 
@@ -57,7 +63,10 @@ class _Prov(ToolCapabilityProvider):
 
     def invoke(self, capability_id, arguments, ctx) -> AsyncIterator[CapabilityEvent]:
         async def _run():
-            payload: dict = {"content": self._text}
+            # provider 把混合内容整个放进 content，不再分两处交。
+            content = ([TextPart(text=self._text), *self._parts]
+                       if self._parts is not None else self._text)
+            payload: dict = {"content": content}
             if self._metadata is not None:
                 payload["metadata"] = self._metadata
             yield CapabilityEvent(kind="result", payload=payload)
@@ -128,12 +137,12 @@ async def _run(provider, *, spill=None, authorizer=None, spill_threshold=4000):
     return res, (seen[0] if seen else {}), mem
 
 
-# ── 1. content_parts 有值 → [TextPart(文本), *parts] ──────────────────────────
+# ── 1. content 里带非文本 part → [TextPart(文本), *parts] ─────────────────────
 
 
 async def test_content_parts_are_appended_after_the_text_part():
     part = _img()
-    res, _, _ = await _run(_Prov("here it is", {CONTENT_PARTS_KEY: [part]}))
+    res, _, _ = await _run(_Prov("here it is", [part]))
 
     assert isinstance(res.content, list), f"预期 list[ContentPart]，实得 {type(res.content)}"
     assert len(res.content) == 2
@@ -143,23 +152,23 @@ async def test_content_parts_are_appended_after_the_text_part():
 
 
 async def test_channel_is_generic_not_bound_to_the_media_provider():
-    """通道不认发布者：任意 provider（这里叫 mcp:t，不是 media）都能贡献 parts。"""
-    res, _, _ = await _run(_Prov("shot", {CONTENT_PARTS_KEY: [_img()]}))
+    """不认发布者：任意 provider（这里叫 mcp:t，不是 media）都能在 content 里带 part。"""
+    res, _, _ = await _run(_Prov("shot", [_img()]))
     assert isinstance(res.content, list)
     assert res.tool_name == "mcp__t__go"
 
 
 async def test_multiple_parts_keep_provider_order():
     a, b = _img(data="AAAA"), _img(data="BBBB")
-    res, _, _ = await _run(_Prov("two", {CONTENT_PARTS_KEY: [a, b]}))
+    res, _, _ = await _run(_Prov("two", [a, b]))
     assert [p.data for p in res.content[1:]] == ["AAAA", "BBBB"]
 
 
 async def test_dict_shaped_parts_are_normalized_to_dataclasses():
     """宿主 provider 可能给 JSON 形态；gateway 过归一层，不把 dict 泄进 content。"""
-    res, _, _ = await _run(_Prov("json shape", {CONTENT_PARTS_KEY: [
+    res, _, _ = await _run(_Prov("json shape", [
         {"type": "image", "data": "ZZZZ", "media_type": "image/png", "source_type": "base64"},
-    ]}))
+    ]))
     assert isinstance(res.content, list)
     assert not isinstance(res.content[1], dict), "dict 形态的 part 未被归一"
     assert res.content[1].data == "ZZZZ"
@@ -167,8 +176,8 @@ async def test_dict_shaped_parts_are_normalized_to_dataclasses():
 
 async def test_memory_record_keeps_the_parts():
     """TOOL_RESULT 落库带着 ImagePart —— §4.2 靠这条实现「跨重启天然成立」。"""
-    _, _, mem = await _run(_Prov("kept", {CONTENT_PARTS_KEY: [_img(data="ref-ish",
-                                                                  source_type="ref")]}))
+    _, _, mem = await _run(_Prov("kept", [_img(data="ref-ish",
+                                                                  source_type="ref")]))
     ctxp = ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1")
     from ctx_weft.protocols import MemoryScope
     view = await mem.load_view(
@@ -182,7 +191,7 @@ async def test_memory_record_keeps_the_parts():
     assert any(getattr(p, "data", None) == "ref-ish" for p in stored)
 
 
-# ── 2. 无 content_parts → 仍是 str，且逐字节与改造前相同 ──────────────────────
+# ── 2. content 是 str → 仍是 str，且逐字节与改造前相同 ────────────────────────
 #
 # 「某件事没有发生」型断言：靠 `is` 同一性 + 精确逐字节相等 + 类型守卫三重钉死，
 # 并由 Step 6 的变异 M1/M2 证明其非永真。
@@ -204,29 +213,46 @@ async def test_no_content_parts_byte_for_byte_no_output_sentinel():
 async def test_image_only_result_does_not_claim_no_output():
     """provider 只回了图（result_parts 为空，metadata 里挂着 content_parts）时，
     不该说「(no output)」——模型会以为真的什么都没拿到，图却已经在 content 里了。"""
-    res, _, _ = await _run(_Prov("", {CONTENT_PARTS_KEY: [_img()]}))
+    res, _, _ = await _run(_Prov("", [_img()]))
     assert isinstance(res.content, list)
     assert res.content[0].text == "", f"文本槽不该被塞进 (no output)：{res.content[0].text!r}"
     assert res.content[1].data == FAKE_B64
 
 
-async def test_empty_content_parts_list_does_not_switch_to_parts_mode():
-    """空列表/None 不该把 content 变成 [TextPart(...)]——那会让纯文本路径悄悄换形态。"""
-    for value in ([], None):
-        res, _, _ = await _run(_Prov("still text", {CONTENT_PARTS_KEY: value}))
-        assert type(res.content) is str, f"content_parts={value!r} 时 content 变成了 {type(res.content)}"
-        assert res.content == "still text"
+async def test_all_text_content_list_does_not_switch_to_parts_mode():
+    """content 是 list 但**拆完没有非文本 part** → 仍回落成 str。
+
+    否则纯文本路径会因为 provider 换了个写法就悄悄换形态（下游 `.strip()` /
+    `content[:N]` 全是按 str 写的）。空列表与 None 同理。
+    """
+    class _P(_Prov):
+        def __init__(self, content) -> None:
+            super().__init__("")
+            self._raw = content
+
+        def invoke(self, capability_id, arguments, ctx) -> AsyncIterator[CapabilityEvent]:
+            async def _run():
+                yield CapabilityEvent(kind="result", payload={"content": self._raw})
+            return _run()
+
+    for value, expect in (([TextPart(text="still text")], "still text"),
+                          ([], "(no output)"),
+                          (None, "(no output)")):
+        res, _, _ = await _run(_P(value))
+        assert type(res.content) is str, f"content={value!r} 时变成了 {type(res.content)}"
+        assert res.content == expect
 
 
-async def test_non_list_content_parts_is_ignored_not_splatted():
-    """守卫：字符串是可迭代的，`[TextPart(t), *"ab"]` 会静默产出裸 str 元素。"""
-    res, _, _ = await _run(_Prov("guarded", {CONTENT_PARTS_KEY: "ab"}))
+async def test_str_content_is_never_splatted_into_parts():
+    """守卫：字符串是可迭代的。content 走 `split_for_tool_result` 的 str 早退分支，
+    不会被当成 part 列表 splat 成一串裸 str 元素。"""
+    res, _, _ = await _run(_Prov("ab"))
     assert type(res.content) is str
-    assert res.content == "guarded"
+    assert res.content == "ab"
 
 
 async def test_no_content_parts_keeps_other_metadata_intact():
-    res, _, _ = await _run(_Prov("ok", {"task_summary": "s"}))
+    res, _, _ = await _run(_Prov("ok", metadata={"task_summary": "s"}))
     assert type(res.content) is str and res.content == "ok"
     assert res.metadata["task_summary"] == "s"
 
@@ -237,7 +263,7 @@ async def test_no_content_parts_keeps_other_metadata_intact():
 async def test_human_note_prefixes_only_the_text_part():
     part = _img()
     res, _, _ = await _run(
-        _Prov("tool said this", {CONTENT_PARTS_KEY: [part]}),
+        _Prov("tool said this", [part]),
         authorizer=_NoteAuthorizer(),
     )
     assert isinstance(res.content, list)
@@ -252,7 +278,7 @@ async def test_spill_truncates_only_the_text_part_and_keeps_parts_whole():
     spy = _SpySpill()
     long_text = "x" * 20_000
     res, _, _ = await _run(
-        _Prov(long_text, {CONTENT_PARTS_KEY: [part]}),
+        _Prov(long_text, [part]),
         spill=spy, spill_threshold=8000,
     )
     assert spy.called is True
@@ -266,7 +292,7 @@ async def test_spill_and_human_note_compose_in_order_before_parts():
     """两者叠加：note 前缀在 spill 提示之上，parts 仍在最后、且只有一个文本 part。"""
     spy = _SpySpill()
     res, _, _ = await _run(
-        _Prov("y" * 20_000, {CONTENT_PARTS_KEY: [_img()]}),
+        _Prov("y" * 20_000, [_img()]),
         spill=spy, authorizer=_NoteAuthorizer(), spill_threshold=8000,
     )
     text = res.content[0].text
@@ -278,7 +304,7 @@ async def test_spill_and_human_note_compose_in_order_before_parts():
 
 
 async def test_finished_event_does_not_leak_base64_for_parts_content():
-    _, payload, _ = await _run(_Prov("see image", {CONTENT_PARTS_KEY: [_img()]}))
+    _, payload, _ = await _run(_Prov("see image", [_img()]))
     result = payload["result"]
     assert isinstance(result, str), f"事件 payload 的 result 应是字符串，实得 {type(result)}"
     assert FAKE_B64 not in result
@@ -289,7 +315,7 @@ async def test_finished_event_does_not_leak_base64_for_parts_content():
 
 async def test_finished_event_result_length_counts_characters_not_parts():
     """`len(content)` 在 list 上会退化成 part 数（2）——脱敏后应是字符数。"""
-    _, payload, _ = await _run(_Prov("see image", {CONTENT_PARTS_KEY: [_img()]}))
+    _, payload, _ = await _run(_Prov("see image", [_img()]))
     assert payload["result_length"] == len(payload["result"])
     assert payload["result_length"] > 20, "result_length 看起来是 part 数而不是字符数"
 
@@ -308,7 +334,7 @@ async def test_reader_act_step_wraps_parts_into_an_llm_message():
     """act.py `_execute_tool_calls` → LLMMessage(role="tool", content=...)：
     LLMMessage.content 声明即 `str | list[ContentPart]`，list 原样保留。"""
     from ctx_weft.protocols.llm import LLMMessage
-    res, _, _ = await _run(_Prov("t", {CONTENT_PARTS_KEY: [_img()]}))
+    res, _, _ = await _run(_Prov("t", [_img()]))
     msg = LLMMessage(role="tool", content=res.content, tool_call_id="tc1")
     assert isinstance(msg.content, list) and len(msg.content) == 2
 
@@ -322,7 +348,7 @@ async def test_reader_background_observe_recap_does_not_crash_on_parts(fake_stat
     import ctx_weft.core.loop.steps.segment_fold as sf
 
     state, ctx = fake_state_ctx
-    res, _, _ = await _run(_Prov("  recap text  ", {CONTENT_PARTS_KEY: [_img()]}))
+    res, _, _ = await _run(_Prov("  recap text  ", [_img()]))
     assert isinstance(res.content, list)  # 前提守卫：确实是 parts 形态
 
     state.agent.loop_config.max_turns_per_observe = 2
@@ -351,5 +377,5 @@ async def test_reader_background_observe_recap_does_not_crash_on_parts(fake_stat
 
 async def test_reader_content_to_text_skips_images():
     from ctx_weft.core.utils.content import content_to_text
-    res, _, _ = await _run(_Prov("only text survives", {CONTENT_PARTS_KEY: [_img()]}))
+    res, _, _ = await _run(_Prov("only text survives", [_img()]))
     assert content_to_text(res.content) == "only text survives"

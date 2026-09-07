@@ -10,7 +10,7 @@ Task 1-5b 各自都有单元测试，但都是在打过桩的边界上验的：r
       → 归一层把 base64 外部化成 blob:<sha>
       → PrepareStep 预算触发 escalating_compact → L0.5 `demote_for_budget` 落库
       → 模型（stub LLM）**从 prompt 里读出占位里的 ref**，调 media__get_image
-      → CapabilityGateway → MediaCapabilityProvider → CONTENT_PARTS_KEY 通道
+      → CapabilityGateway → MediaCapabilityProvider（图直接在 result content 里）
       → 工具结果作为普通 TOOL_RESULT 记录落库（图在对话尾部）
       → 下一轮 PrepareStep 装配把它带上
       → llm_gateway rehydrate ref→base64 → adapter 出网 wire payload
@@ -127,7 +127,7 @@ class _EchoToolProvider(ToolCapabilityProvider):
     """一个只返回文本的宿主工具。
 
     存在的理由有两个：(1) 覆盖 5 需要一条**纯文本**工具结果，用来钉住它的 wire 形态
-    没有被 Task 3 的 `content_parts` 通道改掉；(2) 覆盖 4 需要「同批两个 tool call」，
+    没有被工具返图那条路改掉；(2) 覆盖 4 需要「同批两个 tool call」，
     OpenAI 追加的那条 user 消息必须落在**整段 tool 之后**而不是夹在中间。
     """
 
@@ -440,7 +440,7 @@ async def test_full_round_trip_demoted_image_comes_back_decodable_on_the_wire(tm
     下一轮装配带上它 → wire 上是**能解码回原始字节**的 base64。
 
     这条把 Task 1/2/3/4/5 的全部接缝串成一条线。任何一处没接上——占位写错解不出 ref、
-    `content_parts` 通道没接、工具结果没落库、装配把 parts 拍扁、rehydrate 取错 blob
+    provider 没把图放进 content、工具结果没落库、装配把 parts 拍扁、rehydrate 取错 blob
     ——都会在下面某一条断言上炸，而不是静默降级成「没有图」。
     """
     blobs = FsBlobStore(tmp_path / "blobs")
@@ -600,10 +600,11 @@ async def test_restored_image_is_folded_at_segment_boundary_and_can_be_restored_
     events = [ev async for ev in provider.invoke("media:get_image", {"ref": ref_a}, ctxp)]
     assert [e.kind for e in events] == ["result"], f"provider 报错：{events}"
     payload = events[0].payload
-    parts = payload["metadata"].get("content_parts") or []
-    imgs = [p for p in parts if getattr(p, "type", None) == "image"]
+    content = payload["content"]
+    imgs = [p for p in (content if isinstance(content, list) else [])
+            if getattr(p, "type", None) == "image"]
     assert len(imgs) == 1 and imgs[0].data == ref_a, (
-        f"第二次取回没拿到图：content={payload['content']!r}")
+        f"第二次取回没拿到图：content={content!r}")
     assert (await blobs.get(imgs[0].data, ctxp))[0] == _RAW_A
 
 
@@ -678,7 +679,7 @@ async def test_regression_no_blob_store_keeps_everything_inline_and_text_tool_wi
         wire 上照常出网。主断言取**正向逐字节相等**而不是「没有出现 blob:」：后者对
         「图被整个丢掉」同样成立。
     (b) **纯文本工具结果的 wire 形态逐字节不变**——Task 3 放宽 `InvocationResult.content`
-        之后，没有 `content_parts` 的工具结果必须仍是一条 `str`：Anthropic 的
+        之后，不带图的工具结果必须仍是一条 `str`：Anthropic 的
         `tool_result` 只有三个键且 `content` 是那段原文，OpenAI 的 tool 消息同理，
         且**其后不追加任何 user 消息**。
     """
@@ -704,7 +705,7 @@ async def test_regression_no_blob_store_keeps_everything_inline_and_text_tool_wi
     decoded = {base64.b64decode(b["source"]["data"]) for b in wire_images}
     assert decoded == {_RAW_A, _RAW_B}, "inline base64 出网时内容变了"
 
-    # (b) 纯文本工具结果：两家 adapter 的形态都不因 content_parts 通道而改变
+    # (b) 纯文本工具结果：两家 adapter 的形态都不因「工具能返图」而改变
     await _assert_text_tool_wire_shape_unchanged()
 
 

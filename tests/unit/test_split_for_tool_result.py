@@ -1,4 +1,7 @@
-"""provider 经 CONTENT_PARTS_KEY 回传时要把文本与非文本 part 分开，这是那个拆分器。"""
+"""gateway 收到 result content 后要把文本与非文本 part 分开加工，这是那个拆分器。
+
+（provider 不调它——它把混合内容整个放进 `payload["content"]` 即可。）
+"""
 
 from ctx_weft.core.utils.content import split_for_tool_result
 from ctx_weft.protocols import ImagePart, TextPart

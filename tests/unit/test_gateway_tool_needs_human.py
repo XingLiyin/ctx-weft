@@ -241,7 +241,13 @@ async def test_reply_as_result_short_circuits_without_reentry():
 
 
 async def test_reply_as_result_carries_multimodal_answers_through():
-    """人的答复带图时，图必须进最终 content，不能被拍成文本。"""
+    """人的答复带图时，图必须进最终 content，不能被拍成文本。
+
+    ``data`` 用**真** base64：答复与 provider 交的 part 走同一条路（`_ToolStream.parts`），
+    因此同样过 gateway 的 `legalize_tool_result_parts`（校验 + 外部化）。这是
+    有意为之的兜底——宿主若没接 `set_content_normalizer`，人递进来的字节在入口一次都
+    没被校验过。畸形 base64 在那里会被换成占位，那是**正确**行为，不该用假数据绕开。
+    """
     from ctx_weft.protocols import ImagePart, TextPart
 
     gw, reg, svc = _make_gateway(_AsksAsResult())
@@ -251,7 +257,8 @@ async def test_reply_as_result_carries_multimodal_answers_through():
     await svc.resolve(HitlReply(
         hitl_id=reg.list_pending()[0].id, outcome="accepted", agent_id=_AGENT_ID,
         message=[TextPart(text="就这张"),
-                 ImagePart(data="abc", media_type="image/png", source_type="base64")]))
+                 ImagePart(data="QUJDREVG", media_type="image/png",
+                           source_type="base64")]))
     result = await task
     assert any(isinstance(p, ImagePart) for p in result.content)
 

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.core.loop.capability_gateway import CONTENT_PARTS_KEY, CapabilityGateway
+from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.media import demote_for_budget, get_image
 from ctx_weft.core.media.capability import (
@@ -365,7 +365,7 @@ def test_single_ref_is_a_tunable_not_a_hardcoded_assumption() -> None:
     assert _requested_refs(f"  {REF} ") == [REF]       # 去空白
 
 
-# ── 6. 经 gateway 走一遍（对接 Task 3 的 CONTENT_PARTS_KEY 通道）──────────────
+# ── 6. 经 gateway 走一遍（provider 把 parts 直接放进 result content）──────────
 
 
 def _loop_state_ctx(mem):
@@ -410,8 +410,9 @@ async def test_gateway_result_content_is_text_part_then_image_part() -> None:
     assert len(res.content) == 2
     assert hasattr(res.content[0], "text") and "your 2nd message" in res.content[0].text
     assert res.content[1].data == REF and res.content[1].source_type == "ref"
-    # 图片经 metadata 通道交给 gateway，不由 provider 自己拼 content。
-    assert [p.data for p in res.metadata[CONTENT_PARTS_KEY]] == [REF]
+    # provider 交的就是 `[TextPart, ImagePart]` 这个 content，拆分与拼回都归 gateway；
+    # metadata 不再承载任何内容（那条侧信道已删除）。
+    assert res.metadata == {}
 
 
 async def test_gateway_records_the_restored_image_into_task_memory() -> None:
@@ -429,7 +430,8 @@ async def test_gateway_records_the_restored_image_into_task_memory() -> None:
 
 
 async def test_gateway_unknown_ref_content_stays_a_plain_string() -> None:
-    """取不到时不走 parts 通道：content 仍是 str（纯文本路径逐字节不变的那条）。"""
+    """取不到时 content 里只有一个 TextPart → gateway 拆完没有非文本 part，
+    最终 content 仍是 str（纯文本路径逐字节不变的那条）。"""
     mem = InMemoryMemoryProvider()
     await _seed(mem, [("user", [_ph()])])
 
@@ -437,7 +439,6 @@ async def test_gateway_unknown_ref_content_stays_a_plain_string() -> None:
 
     assert not res.is_error
     assert isinstance(res.content, str)
-    assert CONTENT_PARTS_KEY not in res.metadata
     assert OTHER_REF in res.content
 
 

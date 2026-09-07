@@ -32,7 +32,7 @@ from ctx_weft.protocols.capability import (
     ToolCapability,
     ToolCapabilityProvider,
 )
-from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.protocols.context import ContentPart, ImagePart, ProviderContext, TextPart
 import httpx
 
 if TYPE_CHECKING:
@@ -343,10 +343,15 @@ class MCPCapabilityProvider(ToolCapabilityProvider):
                 self._session.call_tool(tool_name, arguments=arguments),
                 timeout=self._cfg.timeout_per_call_sec,
             )
-            text = _parse_tool_result(result)
+            text, images = _parse_tool_result(result)
+            # 图片直接进 content（`str | list[ContentPart]`，与三个执行入口同一个联合
+            # 类型）。拆分、校验、外部化都归 gateway，provider 不必认识 blob store。
+            content: "str | list[ContentPart]" = text
+            if images:
+                content = ([TextPart(text=text), *images] if text else list(images))
             yield CapabilityEvent(
                 kind="result",
-                payload={"content": text, "metadata": {"is_error": bool(result.isError)}},
+                payload={"content": content, "metadata": {"is_error": bool(result.isError)}},
             )
         except TimeoutError:
             yield CapabilityEvent(kind="error", payload={"code": "TIMEOUT", "message": "MCP call timed out"})
@@ -383,19 +388,52 @@ class MCPCapabilityProvider(ToolCapabilityProvider):
         )
 
 
-def _parse_tool_result(result: mcp_types.CallToolResult) -> str:
-    """从 CallToolResult 抽取文本：优先 text content，退回 structuredContent JSON。"""
-    texts = [
-        item.text
-        for item in (result.content or [])
-        if getattr(item, "text", None)
-    ]
+def _parse_tool_result(
+    result: mcp_types.CallToolResult,
+) -> "tuple[str, list[ImagePart]]":
+    """从 CallToolResult 抽出 ``(文本, 图片 part)``。
+
+    **文本口径逐字节不变**：优先 text content，退回 structuredContent JSON，都没有则
+    空串——图片的有无不参与这个判断（一个 server 同时给 structuredContent 与图是合法的，
+    两样都该到模型手上）。
+
+    ``ImageContent``（``type == "image"``，字段 ``data`` = base64、``mimeType``）改造前
+    在这里被**静默丢弃**：只收 ``item.text``，图片连一条占位都不留，模型不知道自己少拿
+    了东西。现在映射成 ``ImagePart``，由 `_invoke_impl` 放进 result 的 ``content``
+    （`str | list[ContentPart]`）交给 gateway。
+
+    ``mimeType`` **原样带过去、不在这里归一**：白名单匹配那侧
+    （`core.utils.content._normalize_media_type`）自己会处理大小写 / ``; charset=`` /
+    ``image/jpg`` 这些变体，而 wire 序列化要的是 server 报的原值。类型不合规、base64
+    畸形、超 5 MiB 都由 gateway 的 `legalize_tool_result_parts` 换成占位——本函数不校验、
+    不外部化、也不抛（MCP server 是外部输入，畸形是常态而非异常）。
+
+    ``EmbeddedResource`` / ``AudioContent`` 暂不处理（音视频不在本期范围，见多模态设计
+    §9）：它们既无 ``.text`` 也非 ``type == "image"``，落到最后被跳过，与改造前同。
+    """
+    texts: list[str] = []
+    images: list[ImagePart] = []
+    for item in (result.content or []):
+        text_field = getattr(item, "text", None)
+        if text_field:
+            texts.append(text_field)
+            continue
+        # 全程 getattr 而非属性访问：`result.content` 是五个 content 类型的联合
+        # （TextContent / ImageContent / AudioContent / ResourceLink / EmbeddedResource），
+        # 按 `type` 取值判分支不会让类型收窄，直接写 `item.data` 是 union-attr 错。
+        data = getattr(item, "data", None)
+        if getattr(item, "type", "") == "image" and data:
+            images.append(ImagePart(
+                data=data,
+                media_type=getattr(item, "mimeType", "") or "",
+                source_type="base64",
+            ))
     if texts:
-        return "\n".join(texts)
+        return "\n".join(texts), images
     structured = getattr(result, "structuredContent", None)
     if structured is not None:
-        return json.dumps(structured, ensure_ascii=False)
-    return ""
+        return json.dumps(structured, ensure_ascii=False), images
+    return "", images
 
 
 def _short_error(exc: BaseException) -> str:

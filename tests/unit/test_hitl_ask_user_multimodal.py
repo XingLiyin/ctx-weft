@@ -2,7 +2,7 @@
 
 背景（提交 99afb15 / 6284929，「带图时不再静默丢图」）：此前 control_capability 用
 `content_to_text` 展平人的答复、并把 metadata 硬写成 `{}`——非文本 part 被静默丢弃
-（`content_to_text` 连占位都不留）。而 CONTENT_PARTS_KEY 通道就在旁边，media:get_image
+（`content_to_text` 连占位都不留）。而带 part 的工具结果通道就在旁边，media:get_image
 走的正是它。
 
 **段 2 之后这条路换了主人**：`ask_user` 只 yield `needs_human`（`reply_as_result=True`），
@@ -122,7 +122,7 @@ def _text(content) -> str:
 
 
 async def test_accepted_answer_with_image_carries_the_part():
-    """🔴 本文件存在的理由：图经 CONTENT_PARTS_KEY 进最终 content，不再被展平掉。"""
+    """🔴 本文件存在的理由：图进最终 content，不再被展平掉。"""
     result = await _ask_and_respond(
         {"outcome": "accepted", "message": [TextPart(text="就是这个"), _img()]})
     assert result.is_error is False

@@ -30,9 +30,8 @@ from ctx_weft.core.loop.llm_gateway import (
     request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
 )
 # 模块级 import（**实测不成环**）：`core.media` 的模块级依赖只到 `core.utils.content` /
-# `protocols`，不回指 `core.loop`——`capability.py` 对 `CONTENT_PARTS_KEY` 用的正是
-# 惰性 import，就是为了让这一条能写在模块级（Task 4 台账）。若日后 media 模块级引入了
-# `core.loop` 的东西，这里要退回函数级 import。
+# `protocols`，不回指 `core.loop`。若日后 media 模块级引入了 `core.loop` 的东西，
+# 这里要退回函数级 import。
 from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.estimate import effective_limit

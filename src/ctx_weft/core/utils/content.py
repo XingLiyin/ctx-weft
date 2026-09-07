@@ -42,6 +42,7 @@ __all__ = [
     "hydrate_event_content",
     "downgrade_images_to_text",
     "split_for_tool_result",
+    "legalize_tool_result_parts",
     "extract_blob_refs",
     "collect_blob_refs",
 ]
@@ -924,32 +925,24 @@ def downgrade_images_to_text(
     return out
 
 
-#: provider 经 ``metadata`` 回传非文本 part 的通道键。gateway 收到后拼成
-#: ``[TextPart(text), *parts]`` 交给 LLM。
-#:
-#: **住在这里而不是 gateway**：`core.media` 的 provider 也要用它产出图片 part，
-#: 而 gateway 属 `core.loop`——常量长在 gateway 里会逼 media 去 import loop，造出
-#: `loop ⇄ media` 的 import 环（`media/capability.py` 此前正是靠函数内惰性 import
-#: 绕开它，并留了注释说明自己在绕什么）。`core.utils.content` 是两边共同的下游叶子，
-#: 且这个键本就属于「内容怎么传」的话题——`split_for_tool_result` 的 docstring
-#: 早就在讲它了。
-CONTENT_PARTS_KEY = "content_parts"
-
-
 def split_for_tool_result(
     content: "str | list[ContentPart] | None",
 ) -> "tuple[str, list[ContentPart]]":
-    """拆成 ``(文本, 非文本 part)``，供 provider 经 ``CONTENT_PARTS_KEY`` 回传给 gateway。
+    """拆成 ``(文本, 非文本 part)``。
 
-    gateway 收到 ``metadata[CONTENT_PARTS_KEY]`` 后会自己拼成 ``[TextPart(text), *parts]``
-    （``capability_gateway.py`` 的 ``CONTENT_PARTS_KEY`` 一节），所以 provider 必须把两者
-    分开交出去，不能自己拼好。
+    **不是 provider 要调的东西**——provider 把混合内容整个放进
+    `CapabilityEvent(kind="result")` 的 ``payload["content"]`` 即可（那是
+    ``str | list[ContentPart]``，与三个执行入口同一个联合类型）。本函数是 **gateway
+    自己**的拆分器：文本还要过 spill 截断、还要在前面接 ``[Human note: …]``，两件事
+    都只作用于文本，所以流一进来就拆、末尾再拼回去（`capability_gateway._ToolStream`）。
 
     ``str`` 进 → 返回**同一个对象**与空列表；``None`` / 空列表 → ``("", [])``。
     纯文本路径因此零开销、逐字节不变。
 
     非文本判据 ``not hasattr(p, "text")`` 与 ``utils.content_to_text`` /
     ``utils.image_part_count`` 同源（spec 2026-08-20 §13 冻结），不在此另写一份。
+    **dict 形态先过 `normalize_content_parts`** 再进来——那个冻结判据对 dict 是瞎的，
+    会把 ``{"type":"text",...}`` 判成非文本 part。
     """
     if content is None:
         return "", []
@@ -958,3 +951,107 @@ def split_for_tool_result(
     text = "".join(p.text for p in content if hasattr(p, "text"))
     parts = [p for p in content if not hasattr(p, "text")]
     return text, parts
+
+
+# 本仓所有图片占位的清单在 `core/media/refs.py` 的模块 docstring（L6 收口，裁定 R1）。
+# 这一条与 `_IMAGE_PLACEHOLDER_TMPL` / `_IMAGE_UNAVAILABLE_TMPL` 同类：单向渲染、永不回读。
+_IMAGE_DROPPED_TMPL = "[image dropped: {reason}]"
+
+
+async def legalize_tool_result_parts(
+    parts: "list[ContentPart] | None",
+    *,
+    blob_store: "Any" = None,
+    ctx: "Any" = None,
+) -> "list[ContentPart]":
+    """provider 在 result ``content`` 里交上来的非文本 part 的**合法化**——工具返图
+    这条路在入口三件套（validate → 外部化）之外，这里是它唯一的补课点。
+
+    三个入口（`start_session` / `run_single_task` / `send_message`）与 HITL 应答都走
+    `runtime._validate_and_normalize_content`，字节在**进系统之前**就已校验并外部化。
+    工具结果绕开了那条路：`_record_result` 只管 ingest。在 `media:get_image` 是唯一
+    生产者的年代这没问题——它交出来的本就是 ``source_type="ref"``（字节早在 blob store
+    里）。一旦第三方 provider（MCP 的 ``ImageContent``、将来的截图工具）开始交
+    **inline base64**，缺的这一课就变成三个洞：白名单/尺寸上限一次都不跑、裸 base64
+    直接落进 memory 记录、宿主注册了 blob store 也用不上。
+
+    调用方只有 `capability_gateway.invoke` 一处（`_ToolStream.parts` 拆好之后）。
+
+    ════════════════════════════════════════════════════════════════════════
+    三条规则
+    ════════════════════════════════════════════════════════════════════════
+
+    **只管 ``source_type == "base64"`` 的图。** 文本 part 与 ``ref`` / ``url`` 形态
+    原样透传：ref 形态只可能由仓内产出（`media:get_image` 从占位解出来的那份），字节
+    进 blob store 之前已经过过一次 `validate_content`，在这里重跑白名单只会**误伤**
+    ——占位里的 ``media_type`` 允许回落成 ``"image"``（`media/refs.py` 的
+    ``_UNKNOWN_MEDIA_TYPE``），而那个值不在 `ALLOWED_IMAGE_MEDIA_TYPES` 里。
+
+    **恒不抛。** 这条路在工具调用循环上，与 `media:get_image`「一律不抛」同一取向
+    （见 `core/media/capability.py` 模块 docstring）：一张图不合格不该掀掉整次工具
+    调用，更不该掀掉整个 loop。不合格的那张**换成确定性文本占位**，其余 part 照走。
+    换占位而不是静默丢弃——模型得知道「这里本来有张图，没能给你」，否则它会以为工具
+    什么都没返回（这正是改造前 MCP 那条路的病：`ImageContent` 连痕迹都不留）。
+
+    **占位逐字节确定**（与 `downgrade_images_to_text` 同一硬约束）：``reason`` 只由
+    ``media_type`` 与失败类别拼出，不含 sha / 随机 id / 时间戳——工具结果处在 prompt
+    前缀里，每次不同会砸掉其后整段自动前缀缓存。
+
+    ════════════════════════════════════════════════════════════════════════
+    参数与失败姿态
+    ════════════════════════════════════════════════════════════════════════
+
+    ``blob_store`` = memory 侧 blob store（``None`` 或 ``can_externalize`` 为假 →
+    **不外部化，inline 原样保留**）。这与「宿主没接 blob」的既定口径一致：不接 blob
+    的会话本来就是 inline base64 跑（多模态设计 Phase 2 的形态），不因为多了这道
+    合法化就把图丢掉。
+
+    ``put`` 真的抛了则是另一回事——宿主**接了**store、意图明确是「字节不进记录行」，
+    那就不能偷偷退回 inline（一张图几 MB，直接进 memory 行 / SQL 列）。此时降级成占位
+    并 ``logger.error``，姿态与 `runtime._restore_task_prompts` / `_cold_hitl_decision`
+    一致：绝不让不该流下去的字节流下去，但也绝不静默。
+
+    **这里刻意不传 ``event_blob_store``**（即不跑 `validate_content` 的第二道门）：
+    那道门管的是「携图内容进事件流」，而工具结果进事件 payload 走
+    `redact_content_for_event`——恒渲染成短标记，字节根本不上事件流。在这里跑那道门
+    会让「宿主没接 EventBlobStore」变成「工具永远返不了图」，与事实不符。
+    """
+    normalized = normalize_content_parts(parts) if parts else None
+    # isinstance 那半今日不可达（入参是 list，归一层对 list 恒回 list），写出来是为了把
+    # `str | list | None` 收窄成 `list`——否则下面每次 append 都得单独忽略类型。
+    if not normalized or isinstance(normalized, str):
+        return []
+    from ctx_weft.protocols import TextPart
+
+    can_externalize = bool(blob_store is not None and blob_store.can_externalize)
+    out: "list[ContentPart]" = []
+    for part in normalized:
+        if _is_text_part(part) or getattr(part, "source_type", "base64") != "base64":
+            out.append(part)                      # 文本 / ref / url —— 见规则一
+            continue
+        # 占位用的 media_type 取原始值（不经 _normalize_media_type）：那个归一只服务于
+        # 白名单匹配，占位要如实报出 provider 给的是什么，才诊断得动。
+        media_type = str(getattr(part, "media_type", "") or "") or "image"
+        try:
+            validate_content([part])
+        except InvalidContentError as exc:
+            logger.warning(
+                "工具结果里的图片未通过校验（media_type=%s），换成占位：%s",
+                media_type, exc)
+            out.append(TextPart(text=_IMAGE_DROPPED_TMPL.format(
+                reason=f"{media_type} rejected by content validation")))
+            continue
+        if not can_externalize:
+            out.append(part)                      # 不接 blob 的宿主：inline 原样跑
+            continue
+        try:
+            # 逐 part 外部化而非整批：一张图 put 失败不该连累同一次结果里的其它图。
+            done = await normalize_content([part], blob_store=blob_store, ctx=ctx)
+            out.extend(done if isinstance(done, list) else [part])
+        except Exception:
+            logger.error(
+                "工具结果里的图片外部化失败（media_type=%s），换成占位", media_type,
+                exc_info=True)
+            out.append(TextPart(text=_IMAGE_DROPPED_TMPL.format(
+                reason=f"{media_type} could not be stored")))
+    return out
