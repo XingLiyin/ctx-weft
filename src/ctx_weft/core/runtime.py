@@ -51,6 +51,7 @@ from ctx_weft.core.loop.steps import (
 )
 from ctx_weft.core.loop.steps.background_observe import (
     await_pending_background_observe,
+    await_pending_background_observe_for_agent,
     launch_background_observe,
     register_close_synth,
 )
@@ -3314,16 +3315,30 @@ class CtxWeftRuntime:
 
         Raises on non-retriable errors (after emitting RunFinished).
         """
-        # 段 recap 强一致（spec 2026-07-16 §2）：本 task 若有在途后台 recap
-        # （dispatch/interrupt/plain_text 边界），先等它折完再开跑——run 的一切
-        # memory 读写都落在折叠结果之上。无 pending 零开销直通。recap 的护栏区
-        # （幂等护栏/短段门/事件 emit）在其自吞 try 之外、可能以异常终结，故此处
-        # 防御吞掉（降级 = 不等待、段保 raw）；shield 保证 run 被取消时不牵连 recap。
+        # 段 recap 强一致（spec 2026-07-16 §2）：**本 task 或本 agent** 若有在途后台
+        # recap（dispatch/interrupt/plain_text/close 边界），先等它折完再开跑——run 的
+        # 一切 memory 读写都落在折叠结果之上。无 pending 零开销直通。
+        #
+        # 两个轴都要等，缺一个都有洞：
+        #   task 轴  —— 同一个 task 的下一轮 run（retry / resume / reconcile 重放）。
+        #   agent 轴 —— 同一个 agent 的**下一个 task**。`send_message` 打到已终态的
+        #               agent 上会走 `_start_task_for_agent` 建新 task，新 task 的
+        #               task 轴是空的，够不着上一轮那次仍在飞的 close 边界折叠。
+        #               而 close 边界的 launch 恒在 `TaskFinished` **之前**登记（同协程、
+        #               无 await 间隔），所以「上一轮刚结束、用户立刻发下一条」这个窗口
+        #               里折叠必然在飞——不等的话，新 task 的首次装配会经
+        #               `recall_recent_by_agent` 读到上一轮未被 supersede 的 raw
+        #               而非胶囊，prompt 白胀一轮的量。
+        #
+        # recap 的护栏区（幂等护栏/短段门/事件 emit）在其自吞 try 之外、可能以异常终结，
+        # 故此处防御吞掉（降级 = 不等待、段保 raw）；shield 保证 run 被取消时不牵连 recap。
         try:
             await await_pending_background_observe(task.id)
+            await await_pending_background_observe_for_agent(agent.id)
         except Exception:
             logger.exception(
-                "_run_loop: pending recap await failed (ignored); task=%s", task.id)
+                "_run_loop: pending recap await failed (ignored); task=%s agent=%s",
+                task.id, agent.id)
 
         await self._event_bus.emit(make_event(state, EventType.RUN_STARTED, payload={
             "run_id": run_id,

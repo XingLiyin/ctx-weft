@@ -43,6 +43,19 @@ _task_pending: dict[str, asyncio.Task] = {}
 # launch_background_observe 里两行相邻赋值；TaskRecapDone 事件信封上的 run_id 就是它——
 # 见 pending_background_observe_run_id docstring）。
 _task_pending_run_id: dict[str, str] = {}
+# agent_id -> 该 agent **最近一次** launch 的在途后台 observe。与 _task_pending 同步写入。
+#
+# 为什么按 task 键还不够：`send_message` 打到一个已终态 agent 上时走
+# `_start_task_for_agent` 建的是**新 task**，新 task 的 `_run_loop` 入口等的是
+# `_task_pending[新 task_id]`（空），上一个 task 的折叠挂在旧 task_id 下、无人等。
+# 而 close 边界的 launch 恒发生在 `TaskFinished` 之前（同协程、无 await 间隔），
+# 所以「上一轮刚结束、用户立刻发下一条」这个窗口里折叠必然在飞——新 task 的首次装配
+# 会经 `recall_recent_by_agent`（过滤 `not is_superseded`）读到上一轮**未被 supersede
+# 的 raw**，而不是折出来的胶囊：prompt 白白胀一轮的量。
+#
+# 一个 agent 同时只可能有一次在途后台 observe（它自己那条 run 是串行的），故这里
+# 一个槽足够；子 agent 各自一个 agent_id、互不干扰。
+_agent_pending: dict[str, asyncio.Task] = {}
 _orphan_tasks: set[asyncio.Task] = set()
 
 # close 路径结果槽：task_id → (act_recap, task_summary)（finalize Task 8 通过 pop_close_report 取用）
@@ -195,11 +208,17 @@ async def _replace_finish_report(memory, provider_ctx, scope, task_id: str,
     await memory.fold([r.id for r in (*recap_slot, *asst, *tool)], events, provider_ctx)
 
 
-def _clear_pending(t: asyncio.Task, tid: str) -> None:
-    """Compare-and-clear: only remove _task_pending[tid] if it still refers to this task."""
+def _clear_pending(t: asyncio.Task, tid: str, aid: str = "") -> None:
+    """Compare-and-clear：两个轴各自比对身份后再删，互不影响。
+
+    比对身份（`is t`）而不是无条件 del：同一个 key 上可能已经被更晚的一次 launch 覆盖，
+    那时这次 done 回调不该把别人的登记删掉。
+    """
     if _task_pending.get(tid) is t:
         del _task_pending[tid]
         _task_pending_run_id.pop(tid, None)
+    if aid and _agent_pending.get(aid) is t:
+        del _agent_pending[aid]
 
 
 def _lock_for(task_id: str) -> asyncio.Lock:
@@ -407,13 +426,15 @@ def launch_background_observe(
     task = asyncio.create_task(_run_background_observe(snapshot, ctx, boundary))
     _task_pending[state.task.id] = task
     _task_pending_run_id[state.task.id] = snapshot.run_id
+    _agent_pending[state.agent.id] = task
     tm = getattr(ctx, "task_manager", None)
     if tm is not None and hasattr(tm, "track_background"):
         tm.track_background(task)
     else:
         _orphan_tasks.add(task)
         task.add_done_callback(_orphan_tasks.discard)
-    task.add_done_callback(lambda t, tid=state.task.id: _clear_pending(t, tid))
+    task.add_done_callback(
+        lambda t, tid=state.task.id, aid=state.agent.id: _clear_pending(t, tid, aid))
     return task
 
 
@@ -422,6 +443,22 @@ async def await_pending_background_observe(task_id: str) -> None:
     `prepare` 与 `reconcile` dangling tool_call 重放两条 resume 路径，`runtime.py`）、
     用户冷应答注入（`_inject_user_reply`，`runtime.py`）。"""
     pending = _task_pending.get(task_id)
+    if pending is not None and not pending.done():
+        await asyncio.shield(pending)
+
+
+async def await_pending_background_observe_for_agent(agent_id: str) -> None:
+    """等该 **agent** 在途后台 observe 完成。
+
+    与 `await_pending_background_observe(task_id)` 是同一份强一致保证的两个轴，一起用：
+    task 轴覆盖「同一个 task 的下一轮 run」（retry / resume / reconcile 重放），agent 轴
+    覆盖「同一个 agent 的**下一个 task**」——后者正是 `send_message` 在 agent 已终态时
+    走 `_start_task_for_agent` 建新 task 的那条路，task 轴够不着（见 `_agent_pending`）。
+
+    两轴常常指向同一个对象（同 task 的下一轮），重复 await 无害：第二次 `pending.done()`
+    为真，直接返回。
+    """
+    pending = _agent_pending.get(agent_id)
     if pending is not None and not pending.done():
         await asyncio.shield(pending)
 
