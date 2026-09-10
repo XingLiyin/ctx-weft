@@ -71,3 +71,45 @@ async def test_unknown_qualified_skill_errors() -> None:
         ev async for ev in executor.invoke("skill_executor:list_files", {}, ctx)
     ]
     assert any(e.kind == "error" and e.payload.get("code") == "SKILL_NOT_FOUND" for e in events)
+
+
+class _LongFileSkillProvider(_FakeSkillProvider):
+    async def load_resource(self, skill_name, resource_path, ctx) -> str:
+        return "".join(f"line{i}\n" for i in range(1, 5001))
+
+
+async def test_read_file_returns_one_window_not_the_whole_file() -> None:
+    executor = SkillExecutorCapabilityProvider(_Registry([_LongFileSkillProvider()]))
+    ctx = ProviderContext(session_id="s1", tenant_id="default", skill_name="local_skill__pdf")
+    events = [
+        ev async for ev in executor.invoke(
+            "skill_executor:read_file", {"path": "references/long.md"}, ctx,
+        )
+    ]
+    content = next(e.payload["content"] for e in events if e.kind == "result")
+    assert "line2000" in content and "line2001" not in content   # 默认 2000 行一屏
+    assert "offset=2001" in content                              # 尾部给出续读方式
+
+
+async def test_read_file_pages_forward_by_offset() -> None:
+    executor = SkillExecutorCapabilityProvider(_Registry([_LongFileSkillProvider()]))
+    ctx = ProviderContext(session_id="s1", tenant_id="default", skill_name="local_skill__pdf")
+    events = [
+        ev async for ev in executor.invoke(
+            "skill_executor:read_file", {"path": "x", "offset": 2001, "limit": 2}, ctx,
+        )
+    ]
+    content = next(e.payload["content"] for e in events if e.kind == "result")
+    assert "line2001" in content and "line2002" in content
+    assert "line2000" not in content and "line2003" not in content
+
+
+async def test_read_file_bad_window_is_tool_error_not_crash() -> None:
+    executor = SkillExecutorCapabilityProvider(_Registry([_LongFileSkillProvider()]))
+    ctx = ProviderContext(session_id="s1", tenant_id="default", skill_name="local_skill__pdf")
+    events = [
+        ev async for ev in executor.invoke(
+            "skill_executor:read_file", {"path": "x", "offset": 0}, ctx,
+        )
+    ]
+    assert any(e.kind == "error" and e.payload.get("code") == "SKILL_EXEC_ERROR" for e in events)
