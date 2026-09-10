@@ -701,6 +701,7 @@ def _set_session_status(view: RunStateView, session_id: str, status: str) -> Non
 HITL_FOLD_EVENT_TYPES: tuple[EventType, ...] = (
     EventType.HITL_OPENED,
     EventType.HITL_RESOLVED,
+    EventType.HITL_REPLY_RETRACTED,
     EventType.HITL_REQUIRED,
     *_HITL_RESOLVE_TYPES,
 )
@@ -890,6 +891,23 @@ def fold_hitl_snapshot(events: list[Event]) -> HitlSnapshot:
                 if req.tool_call_id:
                     key = (req.session_id, req.tool_call_id, req.stage)
                     snap.decisions_for[key] = (decision, req.resume_state)
+
+        elif ev.type == EventType.HITL_REPLY_RETRACTED:
+            # 一次已收下的答复被收回（spec 2026-09-09）：气泡回到未决，并记一笔
+            # 「撤过几次」——后者是 memory 幂等键的第二维（`reply_memory_id`），
+            # 撤销之后重启时只有这个数能让重答不撞上上一次的 superseded 记录。
+            #
+            # 正常流程下这条之前**没有** `HitlResolved`（两阶段：撤销的那次从不发终局
+            # 事实），所以这里 pop 通常是 no-op。仍然 pop 是为了对付「先 Resolved 再
+            # Retracted」这种外部/存量流：撤回就是撤回，不管它之前算没算终局。
+            req = opened.get(rid)
+            if req is None:
+                continue
+            snap.resolved.pop(rid, None)
+            req.decision = None
+            req.resolved_at = None
+            req.reply_attempt += 1
+            snap.pending[rid] = req
 
         elif ev.type in _HITL_RESOLVE_TYPES:
             snap.pending.pop(rid, None)

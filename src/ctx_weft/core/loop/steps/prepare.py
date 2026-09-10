@@ -165,11 +165,20 @@ class PrepareStep(Step):
             prompt = await _assemble()
 
         # ── 6. 会话意图识别：root task 首轮（无标题）判定在这里，**起飞在 act 的提交点** ──
-        # 判定留在这里是因为只有这里手握 `bound_capabilities`；起飞挪走是因为它会发一串
-        # 自己的事件（RUN_STARTED / RECOGNIZE_INTENT_* / LLM_*），而这一轮在 LLM 开口之前
-        # 随时可能被整轮丢弃——提前起飞就会在日志里留下一批指向不存在 task 的孤儿事件，
-        # 「零残留」便有了个恰好落在会话第一条消息上的例外（spec 2026-09-09）。
-        # 代价只是标题晚一个 TTFT 出来，它本就是 fire-and-forget 的旁路。
+        #
+        # 判定留在这里是因为只有这里手握 `bound_capabilities`；起飞挪到提交点是因为
+        # 旁路只该为**真的发生过**的那一轮花一次 LLM 调用。
+        #
+        # 别再把 `launch_` 挪回这一行。曾经挪回来过一次，理由是「第一句就按暂停的会话
+        # 到不了提交点、会没有名字」——那个理由是**夸大的**：判据是「root task 且无
+        # title」，那一轮夭折之后 title 仍是空的，下一轮 PrepareStep 照样判定成立、照样
+        # 在那一轮的提交点起飞。代价只是标题晚一轮，不是永远没有。
+        #
+        # 而挪回来的代价是实打实的：root task 从**第二句**起每一轮都开未提交窗口
+        # （消息注入既有 task 的那两条路 `begin_round(target.id, owns_task=False)`），
+        # 只要它的 title 还是空的（旁路失败 / 模型没调 update_task_metadata / 上一轮的
+        # 旁路还在飞），判据就成立——旁路于是跑在窗口里：这一轮被撤销时它的整串事件
+        # 随缓冲一起丢掉，那次 LLM 调用白烧。
         if should_recognize_intent(state.task) and bound_capabilities:
             state.extra[RECOGNIZE_INTENT_PENDING_KEY] = True
 

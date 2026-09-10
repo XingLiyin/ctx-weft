@@ -158,8 +158,9 @@ class LoopContext:
 
 #: `state.extra` 键：本轮是否已过提交点（`act._commit_round` 的幂等标志）。
 ROUND_COMMITTED_KEY = "_round_committed"
-#: `state.extra` 键：`PrepareStep` 判定该跑 recognize_intent，但要等提交点才起飞——
-#: 提交之前起飞，一旦这一轮被丢弃就会在日志里留下指向不存在 task 的孤儿事件。
+#: `state.extra` 键：`PrepareStep` 判定该跑 recognize_intent，但要等提交点才起飞。
+#: 判定留在 prepare 是因为只有那里手握 `bound_capabilities`；起飞在提交点是因为
+#: 旁路只该为**真的发生过**的那一轮花一次 LLM 调用（见 `act._commit_round`）。
 RECOGNIZE_INTENT_PENDING_KEY = "_recognize_intent_pending"
 
 

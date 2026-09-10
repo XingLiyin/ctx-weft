@@ -139,10 +139,21 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     assert await rt.pause_session(sid) is True
     await asyncio.sleep(0.5)
 
-    # ① 日志逐条不变：`HitlResolved` 从来没发过，`HitlOpened` 还在原地
+    # ① 日志只多**一条**：`HitlReplyRetracted`。
+    #
+    # `HitlResolved` 从来没发过 —— 被撤回的那句话不在日志里，这是两阶段买到的东西。
+    # 而撤回这件事本身要留痕：不留的话「这条气泡被答过又撤了」跨不过重启，重答时
+    # memory 的幂等键就会撞上上一次留下的 superseded 记录（见 ⑦ 与下一个用例）。
     types_after = await _stored_types(rt, sid)
-    assert types_after == types_before, (
-        f"这一轮当作没发生过；多出来的是 {types_after[len(types_before):]}"
+    assert types_after == types_before + [EventType.HITL_REPLY_RETRACTED], (
+        f"这一轮只该留下那一条不含正文的撤回事实；实得 {types_after[len(types_before):]}"
+    )
+    retraction = (await rt.event_store.read_by_session(sid))[-1]
+    assert retraction.payload == {"hitl_id": bubble.id}, (
+        f"撤回事件不得带正文——被撤回的话留在日志里就白撤了：{retraction.payload}"
+    )
+    assert not retraction.task_id, (
+        "带上 task_id 会被未提交窗口挡住、随缓冲一起丢掉，等于没发"
     )
 
     # ② 气泡回到 pending —— (a) 方案的核心：撤销之后 RAM 与日志都停在「人还没回答」
@@ -166,11 +177,85 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
 
     # ⑥ 重答一次照常跑起来（会话没被这次撤销搞坏）
     llm.stalling = False
+    retyped = "ok, a different question then"
     view2 = await rt.reply_to_hitl(HitlReply(
         hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
-        message="ok, a different question then"))
+        message=retyped))
     assert view2 is not None
     await asyncio.sleep(1.5)
     assert EventType.HITL_RESOLVED in await _stored_types(rt, sid), (
         "重答之后这一轮真的跑起来了，HitlResolved 应当在提交点发出"
+    )
+
+    # ⑦ **重打的那句话必须真的进 memory。**
+    #
+    # 这条不是锦上添花：memory 的 record-id 契约是「已存在的 id（**含已 superseded**）
+    # = no-op，不比对内容、不重复写入」，而两次应答的幂等键都是从同一个 hitl_id 派生的。
+    # 第一次的记录被撤销时 fold 成了 superseded——它**仍然占着那个 id**。所以只要键不带
+    # 「第几次」这一维，用户重打的话就会被静默吞掉：界面上消息在、模型永远看不见。
+    texts2 = await _user_texts(rt, sid, aid, task_id)
+    assert any(retyped in t for t in texts2), (
+        f"重答的内容没能进 memory（被 superseded 记录的幂等键吞了）：{texts2}"
+    )
+
+
+async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
+    """撤销之后**重启**，再重答同一个气泡——那句话仍然必须进 memory。
+
+    `reply_attempt` 是内存态（`PendingHitl` 上的计数，`release_claim` 时 +1）。撤销
+    这条曾经真的坏过，而且修错过一次。
+
+    第一版修法是给 `PendingHitl` 加一个「这是第几次应答」的计数，让幂等键带上那一维。
+    它在同一个进程里成立，**跨重启不成立**：撤销刻意不发任何事件，所以「这条气泡被答过
+    又撤了」在事件日志里没有痕迹，重启后从事件折出来的记录计数必然归零，键必然撞回那条
+    superseded 记录。任何内存计数器都救不了这个形状。
+
+    第二版（现行）把「注没注入过」的判据从 id 约定挪到记录的
+    `metadata[REPLY_HITL_ID_KEY]`，写入侧每次用新 id —— 那份判据跨重启存活，而 id 不必
+    再复用，也就不会撞。
+
+    窗口很窄（要正好在"撤销之后、重答之前"重启），但后果是**静默丢消息**：用户重打
+    的那句话进不了 memory，模型永远看不见，而界面上一切正常。
+    """
+    llm = _StallsBeforeFirstChunkLLM(
+        responses=[MockResponse(text=f"answer {i}") for i in range(8)],
+        context_limit=_MOCK_CONTEXT_LIMIT)
+    rt = _runtime(llm)
+
+    handle = await rt.start_session(SessionStartParams.create(
+        template_id="agent:tpl_echo", user_prompt="hi",
+        context_limit=_MOCK_CONTEXT_LIMIT))
+    sid, aid = handle.session_id, handle.agent_id
+    bubble = await _wait_for_wait_bubble(rt, sid)
+    task_id = bubble.task_id
+
+    llm.stalling = True
+    await rt.reply_to_hitl(HitlReply(hitl_id=bubble.id, outcome="accepted",
+                                     agent_id=bubble.agent_id, message=_RETRACTED))
+    await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
+    await rt.pause_session(sid)
+    await asyncio.sleep(0.5)
+
+    # ── 模拟重启：HITL 内存态从事件日志重建 ──────────────────────────────────
+    # 真正的重启 = **注册表先空掉**再从事件重建。只调 `rebuild_hitl` 不够：它对内存里
+    # 已有的活记录是保留的（`load_snapshot` 的既有纪律），那样测到的还是同一个内存对象
+    # ——这条测试曾经因此假绿过一次。
+    rt.hitl_registry.forget_session(sid)
+    await rt.rebuild_hitl(sid)
+    rebuilt = rt.hitl_registry.get(bubble.id)
+    assert rebuilt is not None, "重建之后这个气泡必须还在（撤销不发事件，日志里它仍是未决）"
+    assert rebuilt.claim_pending is False and rebuilt.pending_decision is None, (
+        "重建出来的必须是干净的 pending —— 它是从事件折的，而那次应答从没进过日志"
+    )
+
+    llm.stalling = False
+    retyped = "restart then retype"
+    assert await rt.reply_to_hitl(HitlReply(
+        hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
+        message=retyped)) is not None
+    await asyncio.sleep(1.5)
+
+    texts = await _user_texts(rt, sid, aid, task_id)
+    assert any(retyped in t for t in texts), (
+        f"重启之后重答的内容没能进 memory —— 幂等键被上一次的 superseded 记录占着：{texts}"
     )

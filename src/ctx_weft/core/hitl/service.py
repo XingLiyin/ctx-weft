@@ -211,10 +211,34 @@ class HitlService:
     async def release(self, hitl_id: str) -> PendingHitl | None:
         """两阶段的回退：待终局 → 回 pending。这一轮被丢弃，那条答复当作没说过。
 
-        **一条事件都不发**——`HitlResolved` 从来没发过，`HitlOpened` 还在原地，日志
-        描述的就是撤销之前的世界。会话状态折叠因此自然回到 `PAUSED`。
+        **`HitlResolved` 从来没发过**，所以被撤回的那句话不会留在日志里；`HitlOpened`
+        还在原地，折出来的状态就是撤销之前的 pending，会话状态因此自然回到 `PAUSED`。
+
+        但要发一条 `HitlReplyRetracted`（**不含正文**）。理由是「这条气泡被答过又撤了」
+        必须**可还原**：撤销之后重启，内存里什么都没有，而重答时 memory 的幂等键要靠
+        「这是第几次」才不会撞上上一次留下的 superseded 记录（见 `reply_memory_id`）。
+        不发这条事件，那个数就只能是内存计数器，而内存计数器跨不过重启——那正是
+        `test_retyped_reply_survives_a_restart_in_the_discard_window` 钉住的形状。
+
+        ⚠ **发的时候不带 `task_id`**。撤销发生在未提交窗口关闭**之前**（那是丢弃路径
+        的顺序纪律），而那道闸正是按 task_id 定的——带上 task_id 这条事件就会落进缓冲、
+        随之被一起丢掉，等于没发。与 `RoundCommitted` / `RoundDiscarded` 同一处理。
         """
-        return self.registry.release_claim(hitl_id)
+        released = self.registry.release_claim(hitl_id)
+        if released is None:
+            return None
+        await emit_event(
+            self._bus,
+            EventType.HITL_REPLY_RETRACTED,
+            session_id=released.session_id,
+            tenant_id=released.tenant_id,
+            origin=_ORIGIN,
+            task_id=None,                    # 见 docstring：带上就会被未提交窗口挡住
+            agent_id=released.agent_id or None,
+            payload={"hitl_id": released.id},
+            timestamp=self._now(),
+        )
+        return released
 
     # ── internals ─────────────────────────────────────────────────────────────
 

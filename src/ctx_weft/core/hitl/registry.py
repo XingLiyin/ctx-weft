@@ -103,6 +103,10 @@ class PendingHitl:
     #: `pending_decision` 配套的事件载荷（`ReplyIntake.normalize` 的产物）。提交时才
     #: 发 `HitlResolved`，那时不能拿 `decision.message` 重算——它已是 memory 侧的 ref。
     pending_event_payload: "str | list[dict] | None" = None
+    #: 这条气泡被撤回过几次答复。**从事件日志折出来**（`HitlReplyRetracted` 的条数，
+    #: 见 `fold_hitl_snapshot`），不是内存计数器——撤销之后重启，只有日志说得清。
+    #: 唯一用途是 memory 幂等键的第二维，见 `reply_memory_id`。
+    reply_attempt: int = 0
     resolved_at: datetime | None = None
     slot: WaitSlot | None = None
     #: 本次终局是否被一个活等待槽热消费（`HitlService._commit` 在取槽的同一原子段里
@@ -158,6 +162,22 @@ class PendingHitl:
             delivery=self.delivery,
             resolved_at=self.resolved_at,
         )
+
+
+def reply_memory_id(req: "PendingHitl") -> str:
+    """这条应答落 memory 时的幂等键。**唯一派生点**（写入侧与恢复期补写侧共用）。
+
+    第一次应答恒是 `hitlreply:{hitl_id}` —— 与改造前逐字节相同，存量记录不受影响。
+    被撤销过再重答的才带上 `:{n}`：上一次那条记录已被 `fold` 成 superseded，而 memory
+    的 record-id 契约是「已存在的 id（**含已 superseded**）= no-op，不比对内容、不重复
+    写入」——它**仍然占着旧键**，不换键的话用户重打的那句话会被静默吞掉。
+
+    `n` 来自 `reply_attempt`，而那个数是**从事件日志折出来的**（`HitlReplyRetracted`
+    的条数，见 `fold_hitl_snapshot`），不是内存计数器。这一点是本函数正确性的全部：
+    撤销之后重启，内存里什么都没有，只有日志能告诉你这是第几次。
+    """
+    base = f"hitlreply:{req.id}"
+    return base if req.reply_attempt == 0 else f"{base}:{req.reply_attempt}"
 
 
 class HitlRegistry:
@@ -275,6 +295,9 @@ class HitlRegistry:
             return None
         req.pending_decision = None
         req.pending_event_payload = None
+        # 与 `HitlReplyRetracted` 折出来的口径保持一致：内存里也 +1，好让**同一进程内**
+        # 紧接着的重答不必等重启折叠就拿到对的键。日志是真相源，这里只是同步。
+        req.reply_attempt += 1
         return req
 
     def forget_session(self, session_id: str) -> int:

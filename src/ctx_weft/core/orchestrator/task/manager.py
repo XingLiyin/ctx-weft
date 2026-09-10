@@ -358,6 +358,10 @@ class TaskManager:
            `release` 回 pending（两样都在 orchestrator 之下，TM 够不到，见 hooks.py）。
         2. 还原快照：`status` / `retry_count` / `outputs` / `process_report*`。后三样
            是 `_inject_user_turn` 就地清掉的，没有别处存过旧值。
+
+           **`title` / `description` 不在其列**：唯一会就地改它们的是
+           `update_task_metadata`（`recognize_intent` 调），而旁路的起飞点在
+           `act._commit_round` —— 那时窗口已经关了，它跑在窗口之外，改不到窗口里的状态。
         3. 发一条把 agent 拨回原位的 task 事件——**这是关键的一步**，且必须先于第 4 步
            （事件的 agent_id 从 `_running_agents` 反查，先清就发不出去了）：
            · owns_task → `TASK_CANCELED`（ALM 映射成 `SETTLED` → `idle`）

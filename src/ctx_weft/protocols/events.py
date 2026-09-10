@@ -176,6 +176,17 @@ class EventType(StrEnum):
     # outcome 是事实本身，不再由事件类型编码结局：approved vs modified 由
     # payload 有无 modified_arguments 推出，其余由 outcome 推出。host 自定义
     # outcome 因此无需新增事件类型。上方 6 个 legacy HITL 事件在段 3 才退役。
+    # 一次已收下的答复被收回了（spec 2026-09-09）：这一轮在 LLM 开口之前被撤销，
+    # 那条答复当作没说过，气泡回到未决。
+    #
+    # **不含正文**——被撤回的那句话不该留在日志里，而这条事件也不需要它：折叠只用它
+    # 把气泡放回 pending、并数出「这条气泡被撤过几次」。后者是 memory 幂等键的第二维
+    # （见 `HitlRegistry.reply_memory_id`）：撤销后重答会写一条新记录，而上一条已被
+    # `fold` 成 superseded、**仍占着旧键**，键不带这一维就会被静默吞掉。
+    #
+    # 那个计数**必须从日志折出来**，不能是内存计数器：撤销之后重启，内存里什么都没有，
+    # 键必然撞回去。这条事件的存在就是为了让它可还原。
+    HITL_REPLY_RETRACTED = "HitlReplyRetracted"   # payload: {hitl_id}
     HITL_OPENED = "HitlOpened"
     HITL_RESOLVED = "HitlResolved"
     # ── Guard 域 ──

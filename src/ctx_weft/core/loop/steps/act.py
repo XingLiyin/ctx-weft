@@ -269,13 +269,16 @@ async def _stream_until_stop(agen: Any, ctx: LoopContext) -> "AsyncIterator[Any]
 async def _commit_round(state: LoopState, ctx: LoopContext) -> None:
     """提交本轮：LLM 开口了，这一轮算数（spec 2026-09-09）。**幂等**，每个 chunk 都调。
 
-    在此之前，这一轮的三样东西还没落地：
+    在此之前，这一轮的两样东西还没落地：
 
     1. `TASK_CREATED` / `TASK_STARTED` / `RUN_STARTED` / `LLM_PROMPT_SENT` 攒在总线的
        未提交窗口里（只到达了进程内状态机，见 `EventBus` 类 docstring）；
     2. 把这一轮唤醒的那条 HITL 答复还停在**待终局**（`pending_decision`），
-       `HitlResolved` 一直没发——日志里那个气泡仍是 pending；
-    3. `recognize_intent` 还没起飞（判定仍在 `PrepareStep`，起飞挪到了这里）。
+       `HitlResolved` 一直没发——日志里那个气泡仍是 pending。
+
+    3. `recognize_intent` 还没起飞（判定在 `PrepareStep`，起飞在这里）——旁路只该为
+       **真的发生过**的那一轮花一次 LLM 调用。它跑在 root task 上，而 root task 从第二句
+       起每一轮都开窗，放在 prepare 起飞就会在窗口里跑、被撤销时整串事件白丢。
 
     **用户消息的落库不在此列**：它照旧在 run 启动时就写进 memory（`_persist_user_prompt`）。
     推迟它的代价是 PrepareStep 的预算折叠（L0.5 图片降级 / L1 / L3）在每一轮的首次装配
@@ -298,6 +301,10 @@ async def _commit_round(state: LoopState, ctx: LoopContext) -> None:
     # `send_message` 对旧气泡的收口）现在才算数，`HitlResolved` 在此刻才发。
     # **必须排在 `commit_round` 之后**：那一句先把窗口里攒的 `TASK_*` / `RUN_STARTED`
     # 放出去，`HitlResolved` 才不会落在一个下游还没建键的 task 上。
+    if state.extra.pop(RECOGNIZE_INTENT_PENDING_KEY, False):
+        from ctx_weft.core.loop.steps.recognize_intent import launch_recognize_intent
+        launch_recognize_intent(state, ctx)
+
     if ctx.hitl is not None:
         # 按 task 查，而不是把一串 hitl_id 顺着 LoopState 穿三层管道下来——与丢弃侧的
         # `_revert_round` 同一口径（它也按 task 全量 release），两边判据只有一份。
@@ -305,9 +312,6 @@ async def _commit_round(state: LoopState, ctx: LoopContext) -> None:
                 state.session.id, state.task.id):
             await ctx.hitl.commit(req.id)
 
-    if state.extra.pop(RECOGNIZE_INTENT_PENDING_KEY, False):
-        from ctx_weft.core.loop.steps.recognize_intent import launch_recognize_intent
-        launch_recognize_intent(state, ctx)
 
 
 async def _discard_round_if_uncommitted(state: LoopState, ctx: LoopContext) -> None:

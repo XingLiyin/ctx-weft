@@ -41,6 +41,7 @@ from ctx_weft.core.hitl.service import HitlService
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.hitl_waiter import HitlWaiter
+from ctx_weft.core.hitl.registry import reply_memory_id
 from ctx_weft.core.loop.park import HitlPark, RoundDiscarded
 from ctx_weft.core.loop.steps import (
     ActStep,
@@ -3253,7 +3254,14 @@ class CtxWeftRuntime:
         # 应答可能被重试（host 超时重发 / 用户连点）：`resolve()` 对已终局请求已幂等
         # no-op（不会二次调用本方法），但这里再加一道幂等键——`id` 是 memory 层的幂等键
         # （provider 已实现），确定性地由 hitl_id 派生（spec §7.3/§12.2）。
-        reply_mem_id = f"hitlreply:{req.id}"
+        # 幂等键带上「这是第几次应答」（`reply_memory_id`）。一轮被撤销时（spec
+        # 2026-09-09）这条记录会被 `fold` 成 superseded，而 memory 的 record-id 契约是
+        # 「已存在的 id（**含已 superseded**）= no-op」——它仍然占着旧键。不换键的话，
+        # 用户重答同一个气泡时重打的那句话会被**静默吞掉**：界面上消息在、模型永远看不见。
+        #
+        # 那个「第几次」是从事件日志折出来的（`HitlReplyRetracted` 的条数），不是内存
+        # 计数器——撤销之后重启，内存里什么都没有，只有日志说得清。
+        reply_mem_id = reply_memory_id(req)
         await self._ingest_user_turn(
             scope, pctx, content, event_id=reply_mem_id,
             task_id=target.id, source="hitl_reply",
@@ -3359,7 +3367,7 @@ class CtxWeftRuntime:
             already |= await self._injected_reply_ids(session, *scope_key)
 
         for req, target in candidates:
-            if f"hitlreply:{req.id}" in already:
+            if reply_memory_id(req) in already:
                 continue                      # 已经注入过（见上「界」）
             try:
                 await self._write_hitl_reply_turn(req, session, target)
