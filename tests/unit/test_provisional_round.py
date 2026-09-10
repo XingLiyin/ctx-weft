@@ -165,7 +165,11 @@ async def test_push_task_provisional_holds_task_created():
     assert tm.is_round_open("tsk_1")
 
     await tm.commit_round("tsk_1")
-    assert [e.type for e in outside] == [EventType.TASK_CREATED]
+    # `RoundCommitted` 必须排在补投的那批**前面**：host 据它 flush 攒着的用户消息帧，
+    # 那一帧要落在这一轮的 task/run 帧之前——用户先说话，agent 才开跑。
+    assert [e.type for e in outside] == [
+        EventType.ROUND_COMMITTED, EventType.TASK_CREATED,
+    ]
     assert not tm.is_round_open("tsk_1")
 
 
@@ -197,10 +201,13 @@ async def test_discard_settles_the_agent_in_memory_but_writes_nothing_to_the_log
     await tm.push_task(_task(), provisional=True)
     await tm.discard_round("tsk_1")
 
-    assert [e.type for e in inside] == [EventType.TASK_CREATED, EventType.TASK_CANCELED], (
-        "进程内状态机要看到 TASK_CANCELED，否则 agent 永远停在 running"
-    )
-    assert outside == [], "日志/host 一条都不该看到——这一轮当作没发生过"
+    assert [e.type for e in inside] == [
+        EventType.TASK_CREATED, EventType.TASK_CANCELED, EventType.ROUND_DISCARDED,
+    ], "进程内状态机要看到 TASK_CANCELED，否则 agent 永远停在 running"
+    # 唯一出去的是那条会话级的丢弃信号：它不带 task_id（绕开闸），host 据它把攒着的
+    # 用户消息帧丢掉。这一轮自己的事件一条都没出去。
+    assert [e.type for e in outside] == [EventType.ROUND_DISCARDED]
+    assert outside[0].task_id in (None, ""), "丢弃信号带上 task_id 就会被自己那道闸挡住"
     assert tm.get_task("tsk_1") is None, "被丢弃的 task 不得留在登记里"
     assert not tm.is_round_open("tsk_1")
 
@@ -214,4 +221,6 @@ async def test_discard_is_idempotent():
     await tm.push_task(_task(), provisional=True)
     await tm.discard_round("tsk_1")
     await tm.discard_round("tsk_1")      # 二次调用不得再发一条 TASK_CANCELED
-    assert outside == []
+    assert [e.type for e in outside] == [EventType.ROUND_DISCARDED], (
+        "第二次 discard 必须是彻底的 no-op —— 多发一条信号会让 host 把下一轮的帧丢掉"
+    )

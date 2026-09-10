@@ -83,6 +83,15 @@ class EventType(StrEnum):
     SESSION_STATUS_CHANGED = "SessionStatusChanged"
     SESSION_FINISHED = "SessionFinished"   # TaskManager 确定 session 真正结束时发（含 final_status）
     SESSION_PAUSED_HITL = "SessionPausedHitl"
+    # 一轮对话的两个结局信号（spec 2026-09-09）。**会话级、不带 task_id、不含正文**：
+    # 它们要绕过未提交窗口（那道闸按 task_id 定）才能到达 host——host 正是靠它们决定
+    # 那条攒着的用户消息帧是 flush 还是丢弃。
+    #
+    # 为什么需要显式的两条，而不是让 host「看到 TaskStarted 就 flush」：后者是隐式契约，
+    # 加一个新事件类型、或哪天窗口里事件的顺序变了，它就会静默失准。
+    ROUND_COMMITTED = "RoundCommitted"      # payload: {task_id}
+    # payload: {task_id, reason} —— reason 目前恒为 discarded_before_first_chunk
+    ROUND_DISCARDED = "RoundDiscarded"
     RUN_STARTED = "RunStarted"
     RUN_CANCELED = "RunCanceled"
     RUN_FINISHED = "RunFinished"
@@ -237,6 +246,12 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = frozenset({
     EventType.LLM_REASONING_STREAMED,
     EventType.LLM_RETRY_TRIGGERED,
     EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED,
+    # 一轮的两个结局信号（spec 2026-09-09）：给 host 的**实时**指令（把攒着的用户消息
+    # 帧 flush 还是丢掉），不是事实。落库会破掉这套设计要保的那条不变式——「丢弃之后
+    # 事件日志逐条不变」；而重放也不需要它们：host 的待发帧是内存态，重放时该在的帧
+    # 早已在帧日志里、该没有的从来没进去过。
+    EventType.ROUND_COMMITTED,
+    EventType.ROUND_DISCARDED,
 })
 
 

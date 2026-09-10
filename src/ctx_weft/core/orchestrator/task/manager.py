@@ -338,6 +338,12 @@ class TaskManager:
         """
         if self._rounds.pop(task_id, None) is None:
             return
+        # `ROUND_COMMITTED` **先于**补投，且**不带 task_id**（那道闸按 task_id 定，带上
+        # 就会被自己挡住）。顺序是给 host 看的：它据此把攒着的用户消息帧 flush 出去，
+        # 那一帧必须排在这一轮的 task/run 帧**之前**——用户先说话，agent 才开跑。
+        await self._emit(
+            EventType.ROUND_COMMITTED, task_id=None, payload={"task_id": task_id},
+        )
         bus = self._event_bus
         if bus is not None:
             await bus.commit_provisional(task_id)
@@ -417,6 +423,14 @@ class TaskManager:
         bus = self._event_bus
         if bus is not None:
             bus.discard_provisional(task_id)
+
+        # 关窗之后才发这条：它**不带 task_id**（绕开那道闸），host 据此把攒着的用户
+        # 消息帧丢掉、把文本退回输入框当草稿。放在最后是为了「host 看到它的时候，这一轮
+        # 已经确定不会再有任何事件出来了」。
+        await self._emit(
+            EventType.ROUND_DISCARDED, task_id=None,
+            payload={"task_id": task_id, "reason": "discarded_before_first_chunk"},
+        )
 
     def stage_task(
         self,
