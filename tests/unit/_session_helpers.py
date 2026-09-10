@@ -19,7 +19,7 @@ class RecordingBus:
     async def emit(self, event: Event) -> None:
         self.events.append(event)
 
-    def subscribe(self, event_type, handler):        # noqa: ANN001 - 测试替身
+    def subscribe(self, event_type, handler, *, provisional=False):  # noqa: ANN001 - 测试替身
         self.handlers.append(handler)
         return None
 

@@ -474,8 +474,10 @@ def pending_background_observe_run_id(task_id: str) -> str | None:
     且它的等待**总是先注册**（`_run_task` 那条协程从发 TaskFinished 到那次 gather 之间不
     过几行同步代码，中途不会把控制权交还事件循环）；若 `wait_for_finish` 也去等**同一个
     Task 对象**，两个等待者的回调都挂在它的完成清单上，`_fire_session_done` 那个先注册、
-    先被唤醒——它会在 `wait_for_finish` 之前跑完 `on_session_done`/`_release_session`，
-    把 session 一并拆了（agent record 也没了）。改成等**事件总线上的 TaskRecapDone**
+    先被唤醒——它会在 `wait_for_finish` 之前跑完 `on_session_done`，抢先把这一轮判成
+    收尾（2026-09-08 之前那一步还连着 `_release_session`，会把 session 连同 agent
+    record 一并拆掉，后果更重；现在只剩清控制信号，但顺序问题本身没变）。
+    改成等**事件总线上的 TaskRecapDone**
     则不出现这个问题：后台 observe 在 `finally` 里先 `emit(TaskRecapDone)`（这一步只是把
     事件塞进订阅者各自的队列，不等任何人处理）、之后才真正从协程函数 return、其
     `asyncio.Task` 才转入 done 态——事件总线的那次唤醒排在 Task-done 的唤醒之前，

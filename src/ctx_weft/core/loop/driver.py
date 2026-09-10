@@ -156,6 +156,13 @@ class LoopContext:
     blob_store: "Any" = None
 
 
+#: `state.extra` 键：本轮是否已过提交点（`act._commit_round` 的幂等标志）。
+ROUND_COMMITTED_KEY = "_round_committed"
+#: `state.extra` 键：`PrepareStep` 判定该跑 recognize_intent，但要等提交点才起飞——
+#: 提交之前起飞，一旦这一轮被丢弃就会在日志里留下指向不存在 task 的孤儿事件。
+RECOGNIZE_INTENT_PENDING_KEY = "_recognize_intent_pending"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -198,12 +205,18 @@ def make_event(
 
 
 async def _persist_user_prompt(state, ctx) -> None:
-    """task 启动时持久化 raw user_prompt（呈现态框架由 composer 渲染期生成，不落库）。"""
+    """task 启动时持久化 raw user_prompt（呈现态框架由 composer 渲染期生成，不落库）。
+
+    记下这条记录的 id（`task.user_prompt_memory_id`）：用户在 LLM 开口之前按暂停时，
+    act 的丢弃路径要靠它把这一轮的用户消息 `fold` 掉（spec 2026-09-09）。**必须记 id
+    而不是事后「取视图里最后一条 user」**——用户连发两条、或上一条是 HITL 应答时，
+    那种取法会撤错人。
+    """
     task = state.task
     if not task.user_prompt or task.user_prompt_in_memory:
         return
     from ctx_weft.core.utils.clock import now_utc
-    await ctx.memory.ingest(
+    record_id = await ctx.memory.ingest(
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
             address=state.scope,
@@ -216,6 +229,7 @@ async def _persist_user_prompt(state, ctx) -> None:
         ),
         ctx.provider_ctx,
     )
+    task.user_prompt_memory_id = record_id
     task.user_prompt_in_memory = True
 
 
@@ -268,7 +282,17 @@ class StepDriver:
         await ensure_dispatch_frame_at_start(state, ctx)
 
         # 任务启动时立即持久化 raw user_prompt，保证 resume 时对话上下文完整可重建
-        # （呈现态框架 ## Current Task/Message 由 composer 渲染期生成，不落库）
+        # （呈现态框架 ## Current Task/Message 由 composer 渲染期生成，不落库）。
+        #
+        # ⚠ spec 2026-09-09 推迟的是**事件**，不是这一次 memory 写入——两者的推迟代价
+        # 完全不同。落库若推迟到 act 的提交点，PrepareStep 的预算折叠（L0.5 图片降级、
+        # L1/L3 折叠）在**每一轮的首次装配**时都看不见这条记录：带图的第一条消息因此
+        # 一张都降不了，直接顶着满额图片去撞窗口。这条已由
+        # `tests/integration/test_media_fold_replay_e2e.py` 实测钉住。
+        #
+        # 所以这一份照旧立刻落库；它的「撤销」由 act 的丢弃路径用 `memory.fold([id], [])`
+        # 完成（纯遗忘，标 superseded，`load_view` 自然滤掉）——那是 provider 早就有的
+        # 原语，compact / finalize / background_observe 都在用，不是为此新造的东西。
         await _persist_user_prompt(state, ctx)
 
         # Blackboard 订阅：本 task 订阅相关任务的结果 topic，下一次 reason 即可感知。

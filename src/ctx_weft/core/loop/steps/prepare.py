@@ -17,7 +17,10 @@ from typing import Callable
 
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.protocols.events import EventType
-from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
+from ctx_weft.core.loop.driver import (
+    RECOGNIZE_INTENT_PENDING_KEY,
+    LoopContext, LoopState, Step, StepOutcome, make_event,
+)
 from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
 from ctx_weft.core.loop.steps.act_guidance import build_act_guidance, build_resume_cue
 from ctx_weft.core.capabilities.skill_executor import (
@@ -26,7 +29,6 @@ from ctx_weft.core.capabilities.skill_executor import (
     READ_FILE_NAME,
 )
 from ctx_weft.core.loop.steps.recognize_intent import (
-    launch_recognize_intent,
     should_recognize_intent,
 )
 from ctx_weft.core.models.task import NormalTaskSettings
@@ -162,9 +164,14 @@ class PrepareStep(Step):
                 await ctx.event_bus.emit(ev)
             prompt = await _assemble()
 
-        # ── 6. 会话意图识别：root task 首轮（无标题）时旁路快照运行，与后续 act 并发（不阻塞）──
+        # ── 6. 会话意图识别：root task 首轮（无标题）判定在这里，**起飞在 act 的提交点** ──
+        # 判定留在这里是因为只有这里手握 `bound_capabilities`；起飞挪走是因为它会发一串
+        # 自己的事件（RUN_STARTED / RECOGNIZE_INTENT_* / LLM_*），而这一轮在 LLM 开口之前
+        # 随时可能被整轮丢弃——提前起飞就会在日志里留下一批指向不存在 task 的孤儿事件，
+        # 「零残留」便有了个恰好落在会话第一条消息上的例外（spec 2026-09-09）。
+        # 代价只是标题晚一个 TTFT 出来，它本就是 fire-and-forget 的旁路。
         if should_recognize_intent(state.task) and bound_capabilities:
-            launch_recognize_intent(state, ctx)
+            state.extra[RECOGNIZE_INTENT_PENDING_KEY] = True
 
         # ── 7. 发事件 + 返回 ─────────────────────────────────────────────────
         return StepOutcome(

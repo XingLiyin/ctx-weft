@@ -50,7 +50,7 @@ class TaskManagerHooks:
 
     #: 归属权谓词：本 TM 是否仍是该 session 的当前 owner。None = 不受管（永远视为
     #: current）。被同 session 上更新的 TM 顶替后返回 False → 迟到的收尾变 no-op
-    #: （不发 SessionFinished、不 _release_session）。
+    #: （不发 SessionFinished、不触发 on_session_done）。
     is_current: "Callable[[], bool] | None" = None
 
     #: 「取消该 session 所有未决 pending HITL」。trip 序列第 3 步 best-effort 调用；
@@ -60,6 +60,15 @@ class TaskManagerHooks:
     #: 「对指定在途 task 发协作取消信号」。只发信号不代表任务立即终结——非 root 的
     #: TASK_CANCELED 由 run 结束后的 `apply_run_outcome` 发；root 由 trip 序列先标 FAILED。
     cancel_inflight: "Callable[[str], bool] | None" = None
+
+    #: 「撤销这一轮里**不属于 TM** 的那部分」（两阶段提交的丢弃路径，spec 2026-09-09）。
+    #: 由 `discard_round` 在关窗**之前**调用，做两件 TM 结构上碰不到的事：
+    #:   · `memory.fold([user_prompt_memory_id], [])` —— 把这一轮的用户消息纯遗忘掉；
+    #:   · `hitl.release(hitl_id)` —— 把被这条消息收口的旧气泡退回 pending。
+    #: 与本 dataclass 里其余几条同一理由：memory 与 hitl 都在 orchestrator **之下**，
+    #: TM 向上够不到；而「什么时候撤」只有 TM 知道。best-effort，抛异常只记日志——
+    #: 一次撤销失败不该把「用户按了暂停」变成一次 run 崩溃。
+    revert_round: "Callable[[str], Coroutine[Any, Any, None]] | None" = None
 
     #: 熔断收尾：(root_we_failed_and_started|None, ack_tasks, failures) -> None。
     #: trip 序列第 7 步内联 await（不是后台甩），保证 memory 落盘先于 SESSION_FINISHED
@@ -73,7 +82,9 @@ class TaskManagerHooks:
     #: 熔断清场对已启动的挂起/排队任务、`on_task_finished` 的 CANCELED funnel。
     cancel_finalizer: "Callable[[list[Task], str], Coroutine[Any, Any, None]] | None" = None
 
-    #: session 真正结束时调用。幂等由调用方承担（runtime 侧 `_release_session` 本就幂等）。
+    #: session 真正结束时调用。幂等由调用方承担（runtime 侧 `_release_round` 本就幂等）。
+#: ⚠ 2026-09-08 起它**不再回收 TaskManager / agent record**——那是显式
+#: `forget_session` 的职责。这里只清这一轮的 per-run 控制信号残余。
     on_session_done: "Callable[[], Coroutine[Any, Any, None]] | None" = None
 
     #: task 落**终态**（FINISHED/FAILED/CANCELED）时调用，参数是 task_id。用于回收挂在

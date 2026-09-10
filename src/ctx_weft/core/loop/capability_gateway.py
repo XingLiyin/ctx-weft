@@ -744,8 +744,10 @@ class CapabilityGateway:
         cached = ctx.hitl.registry.find_for_tool_call(
             ctx.provider_ctx.session_id, tool_call_id, stage,
             invocation_key=invocation_key or None)
-        if cached is not None and cached.decision is not None:
-            return cached.id, cached.decision
+        # 同 `HitlRegistry.decision_for_tool_call`：待终局的应答也算数，它就是本轮的
+        # 那一条（两阶段，spec 2026-09-09）。
+        if cached is not None and cached.effective_decision is not None:
+            return cached.id, cached.effective_decision
         req = await ctx.hitl.open(
             ask,
             session_id=ctx.provider_ctx.session_id,

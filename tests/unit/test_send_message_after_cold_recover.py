@@ -22,6 +22,7 @@ from tests.integration.test_minimal_loop import (
     make_echo_template,
     make_runtime,
 )
+from tests.unit._legacy_recover import rebuild_all_active
 
 pytestmark = pytest.mark.asyncio
 
@@ -64,7 +65,7 @@ async def test_send_message_self_heals_a_cold_recovered_agents_missing_task_mana
                                      template_id="agent:tpl_echo"))
     await rt.event_store.append(_ev(3, sid, EventType.AGENT_IDLE, agent_id=aid))
 
-    n = await rt.recover()
+    n = await rebuild_all_active(rt)
     assert n == 1
     assert {a.agent_id for a in rt.list_agents()} == {aid}
     assert sid not in rt._task_managers, "recover() 不该建 TM——这是本 bug 的前提条件"
@@ -95,7 +96,7 @@ async def test_send_message_fast_path_does_not_rebuild_when_session_already_live
     await rt.event_store.append(_ev(2, sid, EventType.AGENT_INSTANTIATED, agent_id=aid,
                                      template_id="agent:tpl_echo"))
     await rt.event_store.append(_ev(3, sid, EventType.AGENT_IDLE, agent_id=aid))
-    await rt.recover()
+    await rebuild_all_active(rt)
 
     # 先自愈一次，把 TM 建起来、留活。
     first = await rt.send_message(aid, "hi")

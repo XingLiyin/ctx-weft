@@ -155,8 +155,18 @@ class HitlService:
         })
         return req
 
-    async def resolve(self, reply: HitlReply) -> PendingHitl | None:
-        """终局一个请求。已终局 → `None`（幂等 no-op，不重发事实）；未知 id → `KeyError`。"""
+    async def resolve(self, reply: HitlReply, *, defer: bool = False) -> PendingHitl | None:
+        """终局一个请求。已终局 / 已有待终局答复 → `None`（幂等 no-op，不重发事实）；
+        未知 id → `KeyError`。
+
+        ``defer=True``（两阶段，spec 2026-09-09）：**冷**应答只登记 `pending_decision`，
+        不发 `HitlResolved`、不 gc——那条答复会开出新的一轮，而一轮在 LLM 真的开口之前
+        不算发生。真终局由 `commit(hitl_id)` 在 act 的提交点完成，`release(hitl_id)` 则
+        把它退回 pending（用户在 TTFT 窗口里按了暂停）。
+
+        **热投递不受 `defer` 影响**：有活等待槽意味着一个协程正就地醒来继续跑，没有
+        「新一轮」可言，也就没有可撤销的东西——那条路照旧一步终局，与改造前逐字节同义。
+        """
         req = self.registry.get(reply.hitl_id)
         if req is None:
             raise KeyError(f"No HITL request found: {reply.hitl_id}")
@@ -164,21 +174,47 @@ class HitlService:
         message, event_payload = await self._intake.normalize(reply.message, req)
         decision = HitlDecision(outcome=reply.outcome, message=message,
                                 modified_arguments=reply.modified_arguments)
-        return await self._commit(req, decision, event_payload)
+        return await self._commit(req, decision, event_payload, defer=defer)
 
     async def cancel(self, hitl_id: str, *, message: "str | list[ContentPart]" = "",
-                     ) -> PendingHitl | None:
+                     defer: bool = False) -> PendingHitl | None:
         """收口一个悬挂 pending（会话关闭 / 熔断）。终态、不 requeue；已终局则 no-op。
 
         message 与 resolve 同走 `ReplyIntake`——不走同一条路就会发出「message 为真、
         载荷为 None」的事实，把「为什么被取消」从重放流里抹掉。
+
+        ``defer`` 同 `resolve`：`send_message` 注入一条新消息时对旧气泡的收口要跟着
+        那一轮走（撤销时旧气泡得回来）；会话销毁 / 熔断那些调用方必须用默认的 False。
         """
         req = self.registry.get(hitl_id)
         if req is None:
             raise KeyError(f"No HITL request found: {hitl_id}")
         normalized, event_payload = await self._intake.normalize(message, req)
         decision = HitlDecision(outcome=HITL_OUTCOME_CANCELLED, message=normalized)
-        return await self._commit(req, decision, event_payload)
+        return await self._commit(req, decision, event_payload, defer=defer)
+
+    async def commit(self, hitl_id: str) -> PendingHitl | None:
+        """两阶段的第二阶段：待终局 → 终局 + 发 `HitlResolved`。
+
+        由 act 的提交点调用（这一轮的 LLM 真的开口了）。无待终局答复 / 已终局 → `None`。
+        """
+        payload_carrier = self.registry.get(hitl_id)
+        event_payload = payload_carrier.pending_event_payload if payload_carrier else None
+        resolved = self.registry.commit_claim(hitl_id, self._now())
+        if resolved is None:
+            return None
+        resolved.pending_event_payload = None
+        await self._emit_resolved(resolved, resolved.decision, event_payload, claimed=False)
+        self.registry.gc()
+        return resolved
+
+    async def release(self, hitl_id: str) -> PendingHitl | None:
+        """两阶段的回退：待终局 → 回 pending。这一轮被丢弃，那条答复当作没说过。
+
+        **一条事件都不发**——`HitlResolved` 从来没发过，`HitlOpened` 还在原地，日志
+        描述的就是撤销之前的世界。会话状态折叠因此自然回到 `PAUSED`。
+        """
+        return self.registry.release_claim(hitl_id)
 
     # ── internals ─────────────────────────────────────────────────────────────
 
@@ -187,20 +223,30 @@ class HitlService:
         req: PendingHitl,
         decision: HitlDecision,
         message_event_payload: "str | list[dict] | None",
+        *,
+        defer: bool = False,
     ) -> PendingHitl | None:
         """状态转移 → 取槽 → 投递 → 发事实。
 
-        转移与取槽在 `registry.resolve()` 里同步完成（无 await ⟹ 原子），因此
-        「热投递」与「冷续跑」互斥、不双投。投递与发事实在其后，不占原子段。
+        转移与取槽在 `registry.resolve()` / `registry.claim()` 里同步完成
+        （无 await ⟹ 原子），因此「热投递」与「冷续跑」互斥、不双投。投递与发事实
+        在其后，不占原子段。
+
+        ``defer=True`` 时走 `claim()`：**只在没有热等待槽**的情形下真的推迟——有槽
+        意味着一个协程正就地醒来，那条路上没有「新一轮」可撤销，推迟只会让它拿着一份
+        永远不终局的答复继续跑。故取槽之后按结果分流，而不是在入口按 `defer` 分流。
         """
-        transferred = self.registry.resolve(req.id, decision, self._now())
+        transferred = (
+            self.registry.claim(req.id, decision, message_event_payload) if defer
+            else self.registry.resolve(req.id, decision, self._now())
+        )
         if transferred is None:
-            return None                              # 已终局：幂等 no-op
+            return None                              # 已终局 / 已待终局：幂等 no-op
         resolved, slot = transferred
         claimed = False
         if slot is not None:
             # deliver 声明为不抛（-> bool），但对一个已完成的 future 再次 set 会抛
-            # InvalidStateError。resolve() 已不可逆——这里若真抛出且不接住，请求就停在
+            # InvalidStateError。转移已不可逆——这里若真抛出且不接住，请求就停在
             # 「已终局」却没有 HitlResolved 事实，跨重启无法恢复。发事实的义务优先于
             # 让这个异常继续传播。
             try:
@@ -210,7 +256,30 @@ class HitlService:
                     "HitlService._commit: slot.deliver raised for hitl_id=%s; "
                     "treating as unclaimed and still emitting HitlResolved", resolved.id)
                 claimed = False
+        if defer:
+            if not claimed:
+                # 冷路径：待终局，事件留到 act 的提交点再发（`commit`）。
+                return resolved
+            # 热投递抢到了：没有「新一轮」，就地终局，与 defer=False 逐字节同义。
+            promoted = self.registry.commit_claim(req.id, self._now())
+            if promoted is None:                      # 不该发生；防御性保持幂等
+                return resolved
+            resolved = promoted
+            resolved.pending_event_payload = None
         resolved.claimed = claimed
+        await self._emit_resolved(resolved, decision, message_event_payload, claimed=claimed)
+        self.registry.gc()
+        return resolved
+
+    async def _emit_resolved(
+        self,
+        resolved: PendingHitl,
+        decision: HitlDecision,
+        message_event_payload: "str | list[dict] | None",
+        *,
+        claimed: bool,
+    ) -> None:
+        """发 `HitlResolved`。一步终局与两阶段提交共用，载荷口径只此一份。"""
         payload: dict[str, Any] = {
             "hitl_id": resolved.id,
             "outcome": decision.outcome,
@@ -223,8 +292,6 @@ class HitlService:
         if decision.modified_arguments is not None:
             payload["modified_arguments"] = decision.modified_arguments
         await self._emit(EventType.HITL_RESOLVED, resolved, payload)
-        self.registry.gc()
-        return resolved
 
     async def _emit(self, event_type: EventType, req: PendingHitl, payload: dict) -> None:
         await emit_event(

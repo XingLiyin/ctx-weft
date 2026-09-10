@@ -71,6 +71,9 @@ def _make_state(*, context_tokens: int = 0):
     task = SimpleNamespace(
         id="t1", parent_task_id="p1", status="RUNNING",
         observer_outcome=None, process_report=None,
+        # act 的提交点（spec 2026-09-09）会调 persist_user_prompt——这两个字段是它的判据。
+        # 本文件只测一次 LLM turn，没有待落库的 user_prompt：标成「已落库」即 no-op。
+        user_prompt=None, user_prompt_in_memory=True,
     )
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
     from ctx_weft.core.loop.driver import LoopState

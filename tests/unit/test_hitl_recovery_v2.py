@@ -564,6 +564,9 @@ async def test_inflight_tasks_are_excluded_from_the_backfill():
         #: 最小桩必须补上，否则会在自愈路径上撞 AttributeError（`_tenant_for_session`
         #: 自己的纪律是「绝不抛」，但那份纪律管不到桩缺属性这件事）。
         session = None
+        #: 同上：`_load_agents_of` 会问一次「哪些 task 还在未提交窗口里」
+        #: （spec 2026-09-09，用于保住热重装时的路由判据）。真 TM 恒有此属性。
+        open_round_task_ids: frozenset[str] = frozenset()
 
         def is_alive(self) -> bool:
             return True

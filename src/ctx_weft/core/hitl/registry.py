@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -24,6 +25,8 @@ from ctx_weft.protocols.hitl import (
 
 if TYPE_CHECKING:
     from ctx_weft.core.hitl.snapshot import HitlSnapshot
+
+logger = logging.getLogger(__name__)
 
 #: 装填决定时的占位创建时间——占位项只为回答 `decision_for`，永不出现在 pending 列表里，
 #: 故取最小值即可（GC 排序用 resolved_at，装填项无 resolved_at 时回落到它）。
@@ -84,6 +87,22 @@ class PendingHitl:
     reply_as_result: bool = False
     #: 终局决定。**唯一的结局存储**——`resolved` 由它推导，不存第二份。
     decision: HitlDecision | None = None
+    #: **已收到、尚未终局**的答复（两阶段终局，spec 2026-09-09）。
+    #:
+    #: 一条冷应答会开出新的一轮（注入对话 + 重排 + 跑 act）。那一轮在 LLM 真的开口
+    #: 之前不算发生，所以这条答复也不能先终局：用户在 TTFT 窗口里按暂停要能把整轮撤掉，
+    #: 而「气泡已经收口」是撤不回来的。于是先落在这里，act 的提交点才挪进 `decision`
+    #: （`commit_claim`），丢弃则原样扔掉、气泡回到 pending（`release_claim`）。
+    #:
+    #: **`resolved` 仍只看 `decision`** —— 结局的唯一存储没有变成两份。带着
+    #: `pending_decision` 的请求在事件日志里也仍然只有 `HitlOpened`，所以崩溃重启后
+    #: 它如实地回到 pending，人重答一次即可。那正是要的语义。
+    #:
+    #: 热投递（有活等待槽）不走这条：那条路上没有「新一轮」，`HitlService` 就地提交。
+    pending_decision: HitlDecision | None = None
+    #: `pending_decision` 配套的事件载荷（`ReplyIntake.normalize` 的产物）。提交时才
+    #: 发 `HitlResolved`，那时不能拿 `decision.message` 重算——它已是 memory 侧的 ref。
+    pending_event_payload: "str | list[dict] | None" = None
     resolved_at: datetime | None = None
     slot: WaitSlot | None = None
     #: 本次终局是否被一个活等待槽热消费（`HitlService._commit` 在取槽的同一原子段里
@@ -103,13 +122,39 @@ class PendingHitl:
     def resolved(self) -> bool:
         return self.decision is not None
 
+    @property
+    def effective_decision(self) -> "HitlDecision | None":
+        """人**已经给出**的那个决定，不管它终局了没有。
+
+        续跑路径要读的是这一份：两阶段之下（spec 2026-09-09）冷应答先落成
+        `pending_decision`，而把它注入对话、按 outcome 分流的那些代码跑在提交点
+        **之前** —— 读 `decision` 会拿到 None，用户说的那句话就静默变成空串。
+
+        判「终局了没有」仍然只看 `decision`（`resolved`），两个问题各答各的。
+        """
+        return self.decision or self.pending_decision
+
+    @property
+    def claim_pending(self) -> bool:
+        """有一条已收到但尚未终局的答复（见 `pending_decision`）。
+
+        这样的请求**不该出现在 `list_pending` 里**：host 拿它去渲染面板，会让人对着
+        一个自己刚答过的问题再答一次。但它在事件日志里仍是 pending —— 内存与日志的
+        这处分歧是故意的，见 `pending_decision` 的说明。
+        """
+        return self.pending_decision is not None
+
     def to_view(self) -> HitlRequestView:
         return HitlRequestView(
             id=self.id, form=self.form, session_id=self.session_id, task_id=self.task_id,
             created_at=self.created_at, agent_id=self.agent_id, subject_id=self.subject_id,
             prompt=self.prompt, detail=self.detail, fields=list(self.fields),
             proposal=self.proposal,
-            outcome=self.decision.outcome if self.decision else "",
+            # 待终局的答复也要如实回报：调用方（host）刚把人的决定交进来，它读这个字段
+            # 是为了确认「我这次应答被收下了」，而不是问「事实落盘了没有」。两阶段之下
+            # 收下与落盘不再是同一刻，但「收下」仍然是真的。落盘时刻另有 `resolved_at`，
+            # 它在提交之前保持 None —— 两个字段各答各的问题。
+            outcome=self.effective_decision.outcome if self.effective_decision else "",
             delivery=self.delivery,
             resolved_at=self.resolved_at,
         )
@@ -187,6 +232,80 @@ class HitlRegistry:
         req.resolved_at = resolved_at
         slot, req.slot = req.slot, None
         return req, slot
+
+    def claim(
+        self, hitl_id: str, decision: HitlDecision,
+        event_payload: "str | list[dict] | None" = None,
+    ) -> "tuple[PendingHitl, WaitSlot | None] | None":
+        """**待终局**转移 + 原子地取走等待槽（两阶段的第一阶段，spec 2026-09-09）。
+
+        与 `resolve` 只差一处：写的是 `pending_decision` 而不是 `decision`，于是
+        `resolved` 仍为 False、这条请求在事件日志里仍然只有 `HitlOpened`。取槽仍在
+        同一段无 await 的代码里完成，「热投递」与「冷续跑」的互斥不受影响。
+
+        已终局 / 已有待终局答复 / 未知 id → `None`（调用方据此保持幂等：不重发事实）。
+        """
+        req = self._requests.get(hitl_id)
+        if req is None or req.resolved or req.claim_pending:
+            return None
+        req.pending_decision = decision
+        req.pending_event_payload = event_payload
+        slot, req.slot = req.slot, None
+        return req, slot
+
+    def commit_claim(self, hitl_id: str, resolved_at: datetime) -> "PendingHitl | None":
+        """待终局 → 终局。无待终局答复 / 已终局 / 未知 id → `None`。"""
+        req = self._requests.get(hitl_id)
+        if req is None or req.resolved or not req.claim_pending:
+            return None
+        req.decision = req.pending_decision
+        req.pending_decision = None
+        req.resolved_at = resolved_at
+        return req
+
+    def release_claim(self, hitl_id: str) -> "PendingHitl | None":
+        """待终局 → 回 pending：这一轮被丢弃了，那条答复当作没说过。
+
+        **等待槽不还**：`claim` 取走它的那一刻，热投递要么已经发生（那条路根本不会
+        走到本方法）、要么这个槽本就不存在（冷路径）。凭空造一个槽回去只会让下一次
+        应答误以为有人在同步等着。
+        """
+        req = self._requests.get(hitl_id)
+        if req is None or req.resolved or not req.claim_pending:
+            return None
+        req.pending_decision = None
+        req.pending_event_payload = None
+        return req
+
+    def forget_session(self, session_id: str) -> int:
+        """把该 session 的**全部**记录（未决 + 已终局）摘出内存，返回摘掉的条数。
+
+        `gc()` 的定向版本：那个按 `_max_resolved` 裁剪最旧的已终局项、且 pending 永不
+        裁剪——它管的是"长跑进程别无界增长"。这个管的是"这条会话不存在了"，所以连
+        pending 一起摘，也不看年龄。
+
+        **只在会话被销毁时调**（`CtxWeftRuntime.purge_session`）。普通的内存逐出
+        （`forget_session` 那条路）**不该**调它：那条路上会话随时能从事件日志装填回来，
+        而已终局记录还有用——`resolved_for_session()` 是恢复期的崩溃窗口兜底（决定已
+        落盘、进程在续跑前就死了；对 `UserTurn` 那一类，续跑动作是"把人的答复注入进
+        对话"，不补的话人说的那句话静默消失）。摘了它，那条兜底就失效。
+
+        **纯机制**：不发事件、不投递决定、不管谁在等。摘掉一条**未决**记录等于让它的
+        热等待者（若有）永远醒不过来，所以调用方必须先把它们终局掉
+        （`purge_session` 的上一步 `cancel_session` 就是干这个的）。真摘到未决的会记一条
+        WARNING——那说明上一步没做干净，是要查的，不是要忍的。
+        """
+        doomed = [r for r in self._requests.values() if r.session_id == session_id]
+        unresolved = [r.id for r in doomed if not r.resolved]
+        if unresolved:
+            logger.warning(
+                "HitlRegistry.forget_session(%s): 摘掉了 %d 条**未决**请求 %s——"
+                "调用方本应先终局它们（热等待者会就此永远挂着）",
+                session_id, len(unresolved), unresolved[:5],
+            )
+        for r in doomed:
+            self._requests.pop(r.id, None)
+        return len(doomed)
 
     def gc(self) -> None:
         """裁剪已终局项，pending 永不裁剪。"""
@@ -298,18 +417,36 @@ class HitlRegistry:
         tool_call id 时旧决定会替新调用开门（复审 I3）。
         """
         req = self.find_for_tool_call(session_id, tool_call_id, stage, invocation_key)
-        if req is None or req.decision is None:
+        # `effective_decision`：批准这次调用的那条应答可能还停在待终局（两阶段，
+        # spec 2026-09-09）——它正是**这一轮**的应答，而 gateway 重放被批准的
+        # tool_call 恰恰发生在这一轮的 act 里、在提交点前后都可能。读 `decision`
+        # 会查不到，gateway 于是再问一次人，会话就此卡死。这一轮若被丢弃，
+        # `release_claim` 会把它一并撤掉，缓存不会留下幽灵批准。
+        eff = req.effective_decision if req is not None else None
+        if eff is None:
             return None
-        return req.decision, req.resume_state
+        return eff, req.resume_state
 
     def list_pending(
         self, session_id: str | None = None, *, agent_id: str | None = None,
     ) -> list[PendingHitl]:
         return [
             r for r in self._requests.values()
-            if not r.resolved
+            if not r.resolved and not r.claim_pending
             and (session_id is None or r.session_id == session_id)
             and (agent_id is None or r.agent_id == agent_id)
+        ]
+
+    def claim_pending_for_task(self, session_id: str, task_id: str) -> list[PendingHitl]:
+        """该 task 上**已收到答复但尚未终局**的请求（两阶段，见 `PendingHitl.pending_decision`）。
+
+        `_revert_round` 用它把这一轮收口掉的气泡全部退回 pending —— 按 task 查而不是
+        记一个 hitl_id，是因为 `_cancel_pending_hitl_of` 收口的是该 agent 名下**全部**
+        未决请求，可能不止一条。
+        """
+        return [
+            r for r in self._requests.values()
+            if r.claim_pending and r.session_id == session_id and r.task_id == task_id
         ]
 
     def resolved_for_session(self, session_id: str) -> list[PendingHitl]:

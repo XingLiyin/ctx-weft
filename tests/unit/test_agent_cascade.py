@@ -16,7 +16,9 @@ from ctx_weft.protocols.hitl import (
     UserTurnDelivery,
 )
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
-from tests.unit.test_runtime_agent_api import _plant, _plant_live_task
+from tests.unit.test_runtime_agent_api import (
+    _plant, _plant_live_task, _reach_commit_point,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -334,6 +336,12 @@ async def test_send_message_finalizes_all_pending_hitl_of_target_agent():
     tid = (await rt.send_message("a1", "please continue without answering that")).task_id
 
     assert tid == "t1"
+    # 两阶段（spec 2026-09-09）：收口先落成「待终局」——对调用方而言这个气泡已经不是
+    # 未决的（`list_pending` 立刻就不列它了），只是要等这一轮的 LLM 真的开口才终局。
+    assert rt.hitl_registry.get(req.id).claim_pending is True
+    assert [v for v in rt.list_pending_hitl(session_id="s1") if v.agent_id == "a1"] == []
+
+    await _reach_commit_point(rt)
     assert rt.hitl_registry.get(req.id).resolved is True
     assert [v for v in rt.list_pending_hitl(session_id="s1") if v.agent_id == "a1"] == []
 
@@ -348,8 +356,11 @@ async def test_send_message_does_not_touch_other_agents_pending_hitl():
 
     await rt.send_message("a1", "hello")
 
+    await _reach_commit_point(rt)
     assert rt.hitl_registry.get(req_a1.id).resolved is True
+    # 不误伤：另一个 agent 的提问既没被终局、也没被拉进这一轮的待终局。
     assert rt.hitl_registry.get(req_a2.id).resolved is False
+    assert rt.hitl_registry.get(req_a2.id).claim_pending is False
 
 
 async def test_send_message_resolves_stale_pause_bubble_before_new_real_question_arrives(
@@ -408,9 +419,15 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     #    要收口的缺口：send_message 必须把这条陈旧气泡终局掉。
     tid = (await rt.send_message("root", "actually let's change the plan")).task_id
     assert tid == "t_root"
-    assert rt.hitl_registry.get(stale_bubble.id).resolved is True, (
-        "send_message 必须终局这条陈旧暂停气泡；否则它会一直挂在 pending 列表里"
+    # 两阶段（spec 2026-09-09）：收口先落成待终局。**本用例要防的危害与终不终局无关**
+    # ——它防的是「这条陈旧气泡还挂在 pending 列表里被 `_pause_bubble_of` 命中」，而
+    # 待终局的请求同样已经不在那份列表里了（`list_pending` 排除 `claim_pending`）。
+    assert rt.hitl_registry.get(stale_bubble.id).claim_pending is True, (
+        "send_message 必须收口这条陈旧暂停气泡；否则它会一直挂在 pending 列表里"
     )
+    assert stale_bubble.id not in [v.id for v in rt.list_pending_hitl(session_id="s1")]
+    await _reach_commit_point(rt, task_id="t_root")
+    assert rt.hitl_registry.get(stale_bubble.id).resolved is True
 
     # 4. task 被重排、agent 回 idle（真正的 running 要等 drain 派发——这里 drain
     #    是 no-op），之后模拟它再跑一轮、真的问了一个新问题（真实 ask_user），再次

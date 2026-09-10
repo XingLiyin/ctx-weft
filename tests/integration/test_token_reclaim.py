@@ -34,7 +34,17 @@ async def test_idle_park_reclaims_tokens_keeps_task_manager():
     assert sid not in rt._run_tokens, "per-run tokens deregister when the run parks"
     assert sid in rt._task_managers, "task_manager must be kept while the session is only paused"
 
-    # A — cancelling the idle (parked) session reclaims the heavy TaskManager too.
+    # A — 取消一个已空闲挂起的会话：清掉这一轮的控制信号，但**不逐出** TaskManager。
+    #
+    # 2026-09-08 生命周期改造前这里断言的是「cancel 必须回收 TaskManager」。现在回收
+    # 只由显式 forget_session 触发：取消 = 这一轮不跑了，不等于这条会话不要了——用户
+    # 多半还要看它的历史、甚至接着聊，而那时 TM 还在就不必重建一份。
     assert await rt.cancel_session(sid) is True
-    assert sid not in rt._task_managers, "cancel of an idle session must reclaim the task_manager"
+    assert sid not in rt._run_tokens, "per-run 控制信号照旧随取消清掉"
+    assert sid in rt._task_managers, "取消不逐出：TaskManager 留到显式 forget_session"
+
+    # A' — forget_session 才是回收入口，它把重对象一并拆掉。
+    assert rt.forget_session(sid) is True, "已终结、已空闲 → 该能忘掉"
+    assert sid not in rt._task_managers, "forget_session 必须回收 TaskManager"
     assert sid not in rt._run_tokens
+    assert rt.list_agents(session_id=sid) == [], "agent record 一并逐出"

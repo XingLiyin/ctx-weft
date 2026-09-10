@@ -40,6 +40,7 @@ from tests.integration.test_minimal_loop import (
     make_echo_template,
     make_runtime,
 )
+from tests.unit._legacy_recover import rebuild_all_active
 
 pytestmark = pytest.mark.asyncio
 
@@ -116,7 +117,7 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
     waiting_human = _capture_waiting_human_broadcast(runtime)
     interrupted = _capture_interrupted_broadcast(runtime)
 
-    n = await runtime.recover()
+    n = await rebuild_all_active(runtime)
 
     # Task 11 起 recover() 的返回值语义换成「恢复的 agent 数」，不再是 session 数
     # （2026-09-04 spec §6.2）。三个 session 各自发过一条 AGENT_INSTANTIATED、
@@ -153,7 +154,7 @@ async def test_recover_multi_hitl_partial_resolve_still_pending() -> None:
 
     waiting_human = _capture_waiting_human_broadcast(runtime)
     interrupted = _capture_interrupted_broadcast(runtime)
-    n = await runtime.recover()
+    n = await rebuild_all_active(runtime)
 
     assert {r.id for r in runtime.hitl_registry.list_pending(session_id="M")} == {"h2"}
     assert n == 1                                                 # 一个 session、一个 agent
@@ -217,7 +218,7 @@ async def test_recover_agent_resolves_session_from_the_record() -> None:
     """调用方只给 agent_id，session 由 ALM 记录反查——这就是「换轴」的全部含义。"""
     rt = _runtime_for_recover_agent()
     session_id, root_agent_id = await _crashed_session(rt)
-    await rt.recover()
+    await rebuild_all_active(rt)
     await rt.recover_agent(root_agent_id)          # 不传 session_id 也能跑通
     assert rt.get_agent(root_agent_id).session_id == session_id
 

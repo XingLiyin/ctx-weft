@@ -29,6 +29,7 @@ from tests.integration.test_hitl_e2e_v2 import (
     _make_runtime_with_bash_tool,
     _poll,
 )
+from tests.unit._legacy_recover import rebuild_all_active
 
 pytestmark = pytest.mark.asyncio
 
@@ -115,7 +116,7 @@ async def test_recovery_queue_signal_carries_the_recovered_sessions_tenant() -> 
 
     runtime2._event_bus.subscribe(None, _record)  # type: ignore[attr-defined]
 
-    n = await runtime2.recover()
+    n = await rebuild_all_active(runtime2)
     assert n == 1
 
     broadcasts = [e for e in events

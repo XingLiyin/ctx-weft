@@ -19,7 +19,7 @@ class _SpyBus:
     async def emit(self, ev) -> None:
         self.events.append(ev)
 
-    def subscribe(self, _flt, _handler) -> None:
+    def subscribe(self, _flt, _handler, *, provisional: bool = False) -> None:
         pass
 
 

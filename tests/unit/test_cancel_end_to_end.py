@@ -338,14 +338,15 @@ async def _wire_multi_agent_session(
 
 
 async def test_cancel_session_terminates_every_agent() -> None:
-    """回归护栏：行为不变。改动前就该绿（2026-09-04 spec §7.2）。
+    """回归护栏：`cancel_session` 必须把每个 agent 都终态化（2026-09-04 spec §7.2）。
 
-    不读 registry 断言最终 status：本例会话已空闲挂起（无在跑 task），
-    `cancel_session` 会走 `_release_session`，把 agent record 从 registry 摘掉，
-    之后 `get_agent` 会抛 `AgentNotFound`——brief 里的 `rt.record_gone(aid)` 是伪代码，
-    实际没有这个方法。改断言 `AgentTerminated` 事件本身：即便 record 事后被摘掉，
-    事件已经发出过，是持久事实（与 `test_cancel_session_hitl.py` 里
-    `test_hitl_cancelled_before_session_terminal` 同一手法）。
+    2026-09-08 生命周期改造前这里只能断言 `AgentTerminated` 事件、然后断言
+    `get_agent` 抛 `AgentNotFound`——因为那时 `cancel_session` 对已空闲挂起的会话会走
+    `_release_session`，把 agent record 从 registry 摘掉，最终 status 根本读不到。
+
+    现在取消**不逐出**（回收只由显式 `forget_session` 触发），于是可以直接断言真正
+    在意的那件事：record 还在，且状态是 `terminated`。事件断言一并保留——两者是不同
+    层面的事实（一个是持久事件流，一个是内存现状），都该成立。
     """
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
     bus = _RecordingBus()
@@ -359,6 +360,17 @@ async def test_cancel_session_terminates_every_agent() -> None:
     assert result is True
     terminated_ids = {e.agent_id for e in bus.events if e.type == EventType.AGENT_TERMINATED}
     assert terminated_ids == {root_id, child_id}
+
+    # 取消 ≠ 逐出：record 还在，状态是终态。
+    assert rt.get_agent(root_id).status == "terminated"
+    assert rt.get_agent(child_id).status == "terminated"
+    # 默认过滤掉终态 agent（避免列表随时间膨胀），显式要才给。
+    assert rt.list_agents(session_id=session_id) == []
+    assert {a.agent_id for a in rt.list_agents(session_id=session_id, include_terminated=True)} == {
+        root_id, child_id}
+
+    # 逐出之后才真的查无此 agent。
+    assert rt.forget_session(session_id) is True, "全部 terminated → 安静了，该能忘掉"
     with pytest.raises(AgentNotFound):
         rt.get_agent(root_id)
 

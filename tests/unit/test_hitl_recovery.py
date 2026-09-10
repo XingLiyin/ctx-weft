@@ -12,6 +12,7 @@ import pytest
 from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
 from tests.unit._stub_runner import StubRunner
+from tests.unit._legacy_recover import rebuild_all_active
 
 pytestmark = pytest.mark.asyncio
 
@@ -205,7 +206,7 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     for e in seed:
         await runtime.event_store.append(e)
 
-    await runtime.recover()
+    await rebuild_all_active(runtime)
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     # 面板 vs 一句话的区分仍在，只是原始事实（delivery）搬去了 host 的只读入口。
     pending = runtime.list_pending_hitl(session_id="ses_1")
@@ -269,7 +270,7 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
     for e in seed:
         await runtime.event_store.append(e)
 
-    await runtime.recover()
+    await rebuild_all_active(runtime)
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     # wait-only 不应误标「有面板」——前端会等一个不存在的面板。
     pending = runtime.list_pending_hitl(session_id="ses_1")
@@ -296,7 +297,7 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
     for e in seed:
         await runtime.event_store.append(e)
 
-    await runtime.recover()
+    await rebuild_all_active(runtime)
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     pending = {r.id: r for r in runtime.list_pending_hitl(session_id="ses_1")}
     assert isinstance(pending["h1"].delivery, UserTurnDelivery)

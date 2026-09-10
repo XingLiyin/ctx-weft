@@ -9,18 +9,22 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
-from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
+from ctx_weft.core.loop.driver import (
+    RECOGNIZE_INTENT_PENDING_KEY, ROUND_COMMITTED_KEY,
+    LoopContext, LoopState, Step, StepOutcome, make_event,
+)
 from ctx_weft.core.loop.llm_gateway import (
     PROMPT_EST_BASE_KEY, PROMPT_EST_SEG_KEY, request_prompt_estimate, resolve_llm_identity,
     stream_llm_resilient,
 )
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
-from ctx_weft.core.loop.park import HitlPark
+from ctx_weft.core.loop.park import HitlPark, RoundDiscarded
 from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.core.utils.estimate import effective_limit
@@ -209,6 +213,151 @@ def _compose_final_outputs(transcript: list[TurnRecord]) -> tuple[str, str]:
     return body, summary
 
 
+async def _stream_until_stop(agen: Any, ctx: LoopContext) -> "AsyncIterator[Any]":
+    """按 chunk 迭代 LLM 流；**等待下一个 chunk 的过程中**也能被软打断/硬取消掐断。
+
+    改造前这里是裸 `async for`，暂停检查写在循环体里——只有 chunk 到达才执行得到。
+    于是请求发出到首个 chunk 之间（TTFT；思考模型、provider 排队、冷路由都能到几十秒）
+    协程挂在 `__anext__` 上，`pause_token` 被置位也没有任何人读它：用户按下暂停毫无反应。
+    退避重试期间更长——gateway 的自愈最多 300s，adapter 自己的 HTTP 重试还能各睡 60s，
+    那两段同样一个 chunk 都不产出。
+
+    这里改成与 `_await_tool_or_stop` **同一形状**（那条路早就是对的：在跑的工具能被当场
+    掐掉）：把 `__anext__` 和两个停止信号赛跑。
+
+    停止信号胜出 → 取消挂起的 `__anext__`。那个 `CancelledError` 会打进生成器内部当前
+    挂着的 await —— 包括 adapter 退避里的 `asyncio.sleep` 与 httpx 的
+    `async with client.stream(...)`，后者退出上下文即**真正掐断这次请求**，不再空烧
+    token。`CancelledError` 是 `BaseException`，gateway 的 `except LLMCallError` 与
+    adapter 的各处 `except Exception` 都拦不住它（已核实两处均无裸 `except`）。
+
+    本函数**不判断是 pause 还是 cancel**，只负责停下来并收干净——分流由调用方在循环
+    之后做，判据仍是那两个 token 本身，不引入第二处真相。
+    """
+    waiters: list[asyncio.Future] = []
+    if ctx.cancel_token is not None:
+        waiters.append(asyncio.ensure_future(ctx.cancel_token.wait()))
+    if ctx.pause_token is not None:
+        waiters.append(asyncio.ensure_future(ctx.pause_token.wait_paused()))
+    try:
+        while True:
+            nxt = asyncio.ensure_future(agen.__anext__())
+            if waiters:
+                await asyncio.wait({nxt, *waiters}, return_when=asyncio.FIRST_COMPLETED)
+            else:
+                await asyncio.wait({nxt})
+            if not nxt.done():
+                # 停止信号先到：掐断挂起的取流，等它真的收完尾再走。
+                nxt.cancel()
+                await asyncio.wait({nxt})
+                return
+            try:
+                chunk = nxt.result()
+            except StopAsyncIteration:
+                return
+            yield chunk
+    finally:
+        for w in waiters:
+            w.cancel()
+        if waiters:
+            await asyncio.wait(set(waiters))
+        # 生成器可能仍挂在某个 yield 上（调用方 break 出去时）：关掉它，让 httpx 的
+        # 流上下文退出。已经被上面的 cancel 拆完的生成器对此是 no-op。
+        await agen.aclose()
+
+
+async def _commit_round(state: LoopState, ctx: LoopContext) -> None:
+    """提交本轮：LLM 开口了，这一轮算数（spec 2026-09-09）。**幂等**，每个 chunk 都调。
+
+    在此之前，这一轮的三样东西还没落地：
+
+    1. `TASK_CREATED` / `TASK_STARTED` / `RUN_STARTED` / `LLM_PROMPT_SENT` 攒在总线的
+       未提交窗口里（只到达了进程内状态机，见 `EventBus` 类 docstring）；
+    2. 把这一轮唤醒的那条 HITL 答复还停在**待终局**（`pending_decision`），
+       `HitlResolved` 一直没发——日志里那个气泡仍是 pending；
+    3. `recognize_intent` 还没起飞（判定仍在 `PrepareStep`，起飞挪到了这里）。
+
+    **用户消息的落库不在此列**：它照旧在 run 启动时就写进 memory（`_persist_user_prompt`）。
+    推迟它的代价是 PrepareStep 的预算折叠（L0.5 图片降级 / L1 / L3）在每一轮的首次装配
+    都看不见这条记录，带图的第一条消息一张也降不了——`test_media_fold_replay_e2e` 实测钉住。
+    它的撤销走 `_discard_round_if_uncommitted` 里的 `memory.fold`，那是纯遗忘原语，不是补偿写。
+
+    顺序不可换：`TASK_CREATED` 必须最先出闸，它是下游 reducer 与 host 建 task 键的那一条；
+    `recognize_intent` 必须在它之后起飞，它会发自己的一串事件，且要写 `task.title/description`
+    ——那两个字段正是窗口里 `TASK_CREATED` 的 payload 在出闸那一刻现算的来源。
+    """
+    if state.extra.get(ROUND_COMMITTED_KEY):
+        return
+    state.extra[ROUND_COMMITTED_KEY] = True
+
+    tm = ctx.task_manager
+    if tm is not None:
+        await tm.commit_round(state.task.id)
+
+    # 两阶段终局的第二阶段：这一轮真的开跑了，那条把它唤醒的答复（HITL 冷续跑 /
+    # `send_message` 对旧气泡的收口）现在才算数，`HitlResolved` 在此刻才发。
+    # **必须排在 `commit_round` 之后**：那一句先把窗口里攒的 `TASK_*` / `RUN_STARTED`
+    # 放出去，`HitlResolved` 才不会落在一个下游还没建键的 task 上。
+    if ctx.hitl is not None:
+        # 按 task 查，而不是把一串 hitl_id 顺着 LoopState 穿三层管道下来——与丢弃侧的
+        # `_revert_round` 同一口径（它也按 task 全量 release），两边判据只有一份。
+        for req in ctx.hitl.registry.claim_pending_for_task(
+                state.session.id, state.task.id):
+            await ctx.hitl.commit(req.id)
+
+    if state.extra.pop(RECOGNIZE_INTENT_PENDING_KEY, False):
+        from ctx_weft.core.loop.steps.recognize_intent import launch_recognize_intent
+        launch_recognize_intent(state, ctx)
+
+
+async def _discard_round_if_uncommitted(state: LoopState, ctx: LoopContext) -> None:
+    """用户在 LLM 开口之前按了停 → 整轮丢弃（spec 2026-09-09）。已提交则原样返回。
+
+    只对**由一条用户消息新开出来的 task**（`send_message` 的新建分支，`TaskManager`
+    给它开了未提交窗口）成立。注入既有 task 的那两条路径（agent 本就在
+    `AWAITING_HUMAN` / 挂起等子任务）不在此列——那个 task 早就提交过、是一段正在进行的
+    对话，丢不得；它们照常 park 出续跑气泡，只是那条刚注入的用户消息同样还没落 memory，
+    所以照样零残留。
+
+    本函数做两件事，然后抛信号：
+
+    1. **把这一轮的用户消息从 memory 里纯遗忘掉**——`fold([id], [])`，标 superseded，
+       `load_view` 自然滤掉。这是 provider 早就有的原语（compact / finalize /
+       background_observe 都在用），不是补偿写。id 来自 `task.user_prompt_memory_id`，
+       在落库那一刻记下的；**不能**改用「读视图取最后一条 user」那种事后推断——用户连发
+       两条、或上一条是 HITL 应答时会撤错人。
+    2. 抛 `RoundDiscarded`，一路 unwind 到 `_run_task`。
+
+    **一条事件都不发**：task 状态事件的发射点只有 TaskManager 一处（Task 4 的不变式，
+    `test_task_manager_owns_status` 有静态守卫盯着）。把 agent 送回 `idle` 的那条
+    `TASK_CANCELED`、以及关窗丢弃，都在 `TaskManager.discard_provisional` 里按正确顺序完成。
+    """
+    if state.extra.get(ROUND_COMMITTED_KEY):
+        return
+    tm = ctx.task_manager
+    if tm is None or not tm.is_round_open(state.task.id):
+        return
+
+    record_id = getattr(state.task, "user_prompt_memory_id", None)
+    if record_id and ctx.memory is not None:
+        try:
+            await ctx.memory.fold([record_id], [], ctx.provider_ctx)
+        except Exception:
+            # 遗忘失败不该把「用户按了暂停」变成一次 run 崩溃：那会把一个干净的丢弃
+            # 变成一条 TASK_FAILED + 满屏栈。记一行，照常丢弃——最坏结果是 memory 里
+            # 多留一条没人应答的 user 回合，比会话炸掉轻得多。
+            logger.exception(
+                "discard_round: failed to fold user prompt %s of task %s",
+                record_id, state.task.id)
+        else:
+            state.task.user_prompt_memory_id = None
+            # 记录没了，落库标志也要跟着回落：这个 task 若被重排（本路径下不会，但
+            # 语义上必须自洽），`_persist_user_prompt` 应当重新写一条，而不是以为写过了。
+            state.task.user_prompt_in_memory = False
+
+    raise RoundDiscarded(state.task.id)
+
+
 @dataclass
 class _LLMTurnOutput:
     """单轮 LLM 流式产出。"""
@@ -251,13 +400,22 @@ async def _run_llm_turn(
     usage = LLMUsage()
     interrupted = False
 
-    async for chunk in stream_llm_resilient(ctx, state, llm_request):
+    async for chunk in _stream_until_stop(
+        stream_llm_resilient(ctx, state, llm_request), ctx,
+    ):
         tok = ctx.cancel_token
         if _interrupt_pending(ctx):
             interrupted = True          # ② 软打断：停收 token，下面提交半截
             break
         if tok is not None and tok.is_cancelled:
             tok.raise_if_cancelled()    # 硬取消 → CancelledError
+        # ── 提交点：本轮第一个 chunk ──────────────────────────────────────────
+        # 「一轮对话直到 LLM 真的开口才算发生」（spec 2026-09-09）。判据是**任意
+        # chunk**，不是第一个 token：模型第一句就调工具、一个字都不吐的回合很常见，
+        # 那种回合 `chunk.kind` 恒不是 "token"，等 token 就是永远等不到、整轮永不提交。
+        # 这也正是 gateway 内部 `yielded_anything` 的那条界（首 chunk 之前失败可重试、
+        # 之后断流直接抛 outage）——同一条界，这里把它从 gateway 的局部规则升成整轮的。
+        await _commit_round(state, ctx)
         if chunk.kind == "token":
             ctx.run_phase.produced = True
             text += chunk.text
@@ -272,9 +430,19 @@ async def _run_llm_turn(
         elif chunk.kind == "usage" and chunk.usage is not None:
             usage = chunk.usage
 
+    # 流在**首个 chunk 到达之前**被停止信号掐断时，上面的循环体一次都没执行到——
+    # 判定必须补在循环之后，否则一次 TTFT 窗口里的暂停会被当成「流正常结束」。
+    if not interrupted and _interrupt_pending(ctx):
+        interrupted = True
+    tok = ctx.cancel_token
+    if tok is not None and tok.is_cancelled:
+        tok.raise_if_cancelled()
+
     if interrupted:
+        # ⓪ 一个 chunk 都没到就被中止 → 整轮丢弃，不 park、不留任何痕迹。
+        await _discard_round_if_uncommitted(state, ctx)   # 命中则 raises RoundDiscarded
         # ② 已吐 token：把半截 assistant 文本入 memory 并标注「被用户打断」；
-        # ① 未吐任何内容：不留记录、续接补说明。随后 park 待用户续接。
+        # ① 已开口但本回合没吐正文（纯工具调用后被打断）：不留记录。随后 park 待用户续接。
         has_partial = bool(text.strip() or reasoning.strip())
         await _commit_interrupted_partial(state, ctx, text, reasoning, turn_num)
         if _is_own_root(state.task):
@@ -744,8 +912,13 @@ async def _park_await_user(state: LoopState, ctx: LoopContext, turn_num: int) ->
 
 
 async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
-    """协作式停止点：软打断（pause）→ park；硬取消（cancel）→ CancelledError。"""
+    """协作式停止点：软打断（pause）→ park；硬取消（cancel）→ CancelledError。
+
+    提交点之前命中（act 第一轮的循环顶部，LLM 还没被调用过）→ 整轮丢弃而非 park，
+    见 `_discard_round_if_uncommitted`。
+    """
     if _interrupt_pending(ctx):
+        await _discard_round_if_uncommitted(state, ctx)   # 命中则 raises RoundDiscarded
         edit = not ctx.run_phase.produced and not ctx.run_phase.in_tool_loop
         if _is_own_root(state.task):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe

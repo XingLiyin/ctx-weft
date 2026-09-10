@@ -24,6 +24,7 @@ from tests.integration.test_minimal_loop import (
     make_echo_template,
     make_runtime,
 )
+from tests.unit._legacy_recover import rebuild_all_active
 
 pytestmark = pytest.mark.asyncio
 
@@ -69,7 +70,7 @@ async def test_legacy_cold_hitl_reply_resumes_via_session_id_fallback() -> None:
     sid, aid, tid, hid = "ses_legacy", "agt_root", "tsk_1", "hit_1"
     await _seed_legacy_wait_for_user_session(rt, sid, aid, tid, hid)
 
-    await rt.recover()  # ALM.load() 装填了 aid，但键是 aid，不是 ""
+    await rebuild_all_active(rt)  # ALM.load() 装填了 aid，但键是 aid，不是 ""
 
     pending = rt.hitl_registry.get(hid)
     assert pending is not None and pending.agent_id == "", (
@@ -99,7 +100,7 @@ async def test_legacy_cold_hitl_reply_without_fix_would_raise_agent_not_found() 
     rt = _runtime_for_legacy_resume()
     sid, aid, tid, hid = "ses_legacy2", "agt_root2", "tsk_2", "hit_2"
     await _seed_legacy_wait_for_user_session(rt, sid, aid, tid, hid)
-    await rt.recover()
+    await rebuild_all_active(rt)
 
     with pytest.raises(AgentNotFound):
         await rt.recover_agent("", resumed_task_id=tid, hitl_id=hid)

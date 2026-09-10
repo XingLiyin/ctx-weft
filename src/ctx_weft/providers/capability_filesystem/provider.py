@@ -629,7 +629,12 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink,
         logger.info("Filesystem: registered workspace for session %s → %s", session_id, path)
 
     def deregister_session(self, session_id: str) -> None:
-        """SessionScopedCapabilityProvider：session 结束时由 core 调用，释放 workspace 映射。"""
+        """SessionScopedCapabilityProvider：会话被**逐出内存**时由 core 调用，释放映射。
+
+        触发点是 `forget_session` / `purge_session`，**不是「会话跑完」**（2026-09-08
+        生命周期改造前是后者）。所以宿主在每条执行入口之前都要确保重新登记——映射是
+        内存缓存，真值住在宿主自己的存储里（本 provider 不认识那个存储，也不该认识）。
+        """
         self._workspaces.pop(session_id, None)
 
     def workspace_for(self, ctx: ProviderContext) -> str | None:

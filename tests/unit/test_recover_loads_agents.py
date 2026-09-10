@@ -16,6 +16,7 @@ import pytest
 
 from ctx_weft.protocols.events import Event, EventType
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+from tests.unit._legacy_recover import rebuild_all_active
 
 pytestmark = pytest.mark.asyncio
 
@@ -50,7 +51,7 @@ async def test_recover_populates_agent_registry() -> None:
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
 
     assert rt.list_agents(session_id="S1") == []      # 装填前
-    await rt.recover()
+    await rebuild_all_active(rt)
     ids = {a.agent_id for a in rt.list_agents(session_id="S1")}
     assert "agt_root" in ids
 
@@ -69,7 +70,7 @@ async def test_recover_returns_agent_count_not_session_count() -> None:
                             template_id="tpl_x"))
     await store.append(_ev(6, "S2", EventType.AGENT_IDLE, agent_id="agt_child_2"))
 
-    n = await rt.recover()
+    n = await rebuild_all_active(rt)
 
     assert n == 3
     assert n == len(rt.list_agents())
@@ -78,7 +79,7 @@ async def test_recover_returns_agent_count_not_session_count() -> None:
 async def test_get_agent_works_right_after_recover() -> None:
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
-    await rt.recover()
+    await rebuild_all_active(rt)
     d = rt.get_agent("agt_root")
     assert d.session_id == "S1"
 
@@ -94,7 +95,7 @@ async def test_load_broadcasts_current_status() -> None:
     rt.event_bus.subscribe(None, recorder)
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
 
-    await rt.recover()
+    await rebuild_all_active(rt)
 
     agent_events = [e.type for e in seen if str(e.type).startswith("Agent")]
     assert any(t in agent_events for t in (
@@ -106,19 +107,25 @@ async def test_broadcast_carries_the_folded_status_not_a_default() -> None:
     """有未决 HITL 的 agent 恢复后必须是 waiting_human，不是被字段默认值重置成 idle。"""
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
-    await rt.recover()
+    await rebuild_all_active(rt)
     assert rt.get_agent("agt_root").status == "waiting_human"
 
 
-async def test_running_and_terminated_are_not_broadcast() -> None:
-    """Ruling F 收口：running/terminated 折出来的现状绝不广播。
+async def test_crashed_running_is_settled_to_interrupted_and_terminated_stays_silent() -> None:
+    """Ruling F 收口 + 2026-09-09 恢复期裁定。
 
-    `running` 危害最大——进程刚起来什么都没派发，把折出来的 `running` 照发会让 host
-    以为有活在跑（它在事件流里的真实含义是「崩溃时正在跑」，恢复后等 /resume 重新
-    派发）。`terminated` 是粘滞终态，host 投影本就已经是终态，重发没有信息。
+    `running` 折出来的现状**绝不照发**——进程刚起来什么都没派发，发 `AgentRunning` 会让
+    host 以为有活在跑。这条测试要挡住的具体改动仍然是：有人往
+    `_RECOVERY_BROADCAST_BY_STATUS` 里加一条 `"running": EventType.AGENT_RUNNING`
+    （见 fix report 里记录的反向验证）。
 
-    这条测试要挡住的具体改动是：有人往 `_RECOVERY_BROADCAST_BY_STATUS` 里加一条
-    `"running": EventType.AGENT_RUNNING`——见 fix report 里记录的反向验证。
+    但"不照发"不等于"什么都不说"。折出来的 `running` 在事件流里的真实含义是**崩溃时
+    正在跑**，而 core 从前对此保持沉默、把缺口留给宿主自己补（宿主只能去折一遍事件流，
+    等于替 core 的五态机下判决）。现在由 `_settle_crashed_agents` 走 `apply_input` 判成
+    `interrupted`——那是一次真转移，`interrupted` 本就是为"被打断、可恢复、等 /resume
+    重新派发"而存在的。
+
+    `terminated` 仍然零事件：粘滞终态，host 投影本就已经是终态，重发没有信息。
     """
     seen: list[Event] = []
 
@@ -138,11 +145,24 @@ async def test_running_and_terminated_are_not_broadcast() -> None:
                             template_id="tpl_x"))
     await store.append(_ev(8, "S1", EventType.AGENT_TERMINATED, agent_id="agt_terminated"))
 
-    await rt.recover()
+    await rebuild_all_active(rt)
 
-    for aid in ("agt_running", "agt_terminated"):
-        agent_events = [e.type for e in seen if getattr(e, "agent_id", None) == aid]
-        assert agent_events == [], f"unexpected broadcast for {aid}: {agent_events}"
+    running_events = [e.type for e in seen if getattr(e, "agent_id", None) == "agt_running"]
+    assert EventType.AGENT_RUNNING not in running_events, (
+        f"绝不能把折出来的 running 照发出去: {running_events}")
+    assert running_events == [EventType.AGENT_INTERRUPTED], (
+        f"崩溃时在跑的 agent 该被判成 interrupted，实得: {running_events}")
+    assert rt.get_agent("agt_running").status == "interrupted"
+
+    terminated_events = [e.type for e in seen if getattr(e, "agent_id", None) == "agt_terminated"]
+    assert terminated_events == [], f"unexpected broadcast for agt_terminated: {terminated_events}"
+
+    # 幂等性（再装填一次不重复发 AgentInterrupted）在
+    # `tests/integration/test_session_lifecycle_forget_rebuild.py` 里验。**不能在这里验**：
+    # 本文件的 `_ev` 造的 id 是 `evt_<sid>_<seq>`，而 `InMemoryEventStore.read_by_session`
+    # 按**事件 id** 排序——真 ULID（`evt_01M2…`）会排在 `evt_S1_…` 之前，于是刚发出的
+    # `AgentInterrupted` 折叠时反而落在种子事件**前面**，折出来仍是 running。那是 fixture
+    # 的假象，不是生产行为（生产里 ULID 单调，后发的必然排在后面）。
 
 
 # ── 2026-09-04 spec §6.4 / §9：TASK_QUEUE_* 停发 ──────────────────────────
@@ -166,7 +186,7 @@ async def test_no_task_queue_events_are_emitted() -> None:
     rt.event_bus.subscribe(None, recorder)
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
 
-    await rt.recover()
+    await rebuild_all_active(rt)
 
     queue_events = [e.type for e in seen if str(e.type).startswith("TaskQueue")]
     assert queue_events == [], f"仍在发 TASK_QUEUE_*: {queue_events}"

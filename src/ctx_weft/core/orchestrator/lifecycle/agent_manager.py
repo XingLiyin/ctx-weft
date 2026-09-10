@@ -129,8 +129,8 @@ class AgentLifecycleManager:
     _agents: dict[str, _AgentRecord] = field(default_factory=dict)
     _sessions: dict[str, _SessionDefaults] = field(default_factory=dict)
     # parent_agent_id -> {child_agent_id, ...}。只在 instantiate 落 record 后维护；
-    # release_session 必须把摘除的 agent 从键和所有值集合里都清掉，否则 descendants_of
-    # 会经由悬垂引用「复活」已释放的 agent（见 release_session 内注释）。
+    # forget_session / forget_agent 必须把摘除的 agent 从键和所有值集合里都清掉，否则
+    # descendants_of 会经由悬垂引用「复活」已逐出的 agent（见二者内注释）。
     _children: dict[str, set[str]] = field(default_factory=dict)
 
     # ── ALM：TASK_* 驱动五态机，发 AGENT_* ─────────────────────────────────
@@ -165,8 +165,14 @@ class AgentLifecycleManager:
     }
 
     def attach_to_bus(self) -> None:
-        """订阅。runtime 构造期调一次。"""
-        self.event_bus.subscribe(None, self.handle_event)
+        """订阅。runtime 构造期调一次。
+
+        ``provisional=True``：未提交窗口（见 `EventBus` 类 docstring）里的 `TASK_STARTED`
+        也要照收。ALM 反映的是「现在真实发生了什么」，不是「哪一轮算数」——收不到就意味着
+        派发出去的 agent 停在 `idle`，`pause_agent` 会拿 `AgentNotRunningError` 拒掉那个
+        窗口里的暂停请求、host 的会话状态折叠会把会话判成上一轮终态，并发闸门一并失效。
+        """
+        self.event_bus.subscribe(None, self.handle_event, provisional=True)
 
     async def handle_event(self, ev: Event) -> None:
         """总线回调。**只读事件、只喂状态机**，不碰其他组件。
@@ -248,21 +254,61 @@ class AgentLifecycleManager:
             session_id, _SessionDefaults(tenant_id=tenant_id, fallback_template_id=fallback_template_id),
         )
 
-    def release_session(self, session_id: str) -> None:
-        ids = self.agent_ids_of_session(session_id)
-        removed = set(ids)
-        for aid in ids:
-            self._agents.pop(aid, None)
-        # 清 _children 索引：既要摘掉被移除 agent 自己的键（它的子列表跟着它一起
-        # 消失——子 agent 属于同一 session，已经在上面的 removed 里），也要把它们
-        # 从其它 agent（多半是它们自己的父）的值集合里摘掉，否则父的 children_of
-        # 会指向一个 self._agents 里已经不存在的 id，descendants_of 遍历到它时
-        # 仍会把它当成「活着」吐出来——这就是「悬垂引用」的具体后果。
+    def _drop(self, ids: set[str]) -> int:
+        """把这批 agent 从 `_agents` 与 `_children` 索引里摘干净，返回真正摘掉的条数。
+        `forget_session` / `forget_agent` 共用——索引清理只写一份。
+
+        `_children` 的**两侧**都要清：既摘掉被移除 agent 自己的键（它的子列表跟着它
+        一起消失），也把它们从其它 agent（多半是它们自己的父）的值集合里摘掉。只清一侧
+        的话，父的 `children_of` 会指向一个 `_agents` 里已经不存在的 id，
+        `descendants_of` 遍历到它时仍会把它当「活着」吐出来——级联 cancel/pause 会去
+        操作一个幽灵。这就是「悬垂引用」的具体后果。
+        """
+        removed = {aid for aid in ids if self._agents.pop(aid, None) is not None}
         for aid in ids:
             self._children.pop(aid, None)
-        for children in self._children.values():
-            children -= removed
+        if removed:
+            for children in self._children.values():
+                children -= removed
+        return len(removed)
+
+    def forget_session(self, session_id: str) -> int:
+        """把该 session 的**全部** agent record 逐出内存，返回逐出条数。
+
+        **只由显式逐出调用，不由「会话跑完」触发**（2026-09-08 生命周期改造）。从前
+        它挂在 `_fire_session_done` -> `_release_session` 上：任务一跑完 record 就没了，
+        而 agent 在概念上只是回到 `idle`（spec 3.1：task 终态不是 agent 终态），
+        `send_message` / `list_agents` / `get_agent` 随即全部瞎掉。现在 registry 是
+        「只增不删」的缓存。
+
+        **纯机制**：同 `forget_agent`，本方法不判断这条会话该不该被忘掉——那要看 task
+        队列、未决 HITL 这些 ALM 不认识的东西。判据在 `CtxWeftRuntime.forget_session`。
+
+        真相源始终是事件日志：逐出之后任何入口都能用 `rebuild_session` /
+        `rebuild_agent` 把它装填回来，所以这里删得干净不必手软。
+        """
+        n = self._drop(set(self.agent_ids_of_session(session_id)))
         self._sessions.pop(session_id, None)
+        return n
+
+    def forget_agent(self, agent_id: str) -> bool:
+        """逐出**单个** agent record。返回是否真的删了（不在册 → False）。
+
+        `forget_session` 的单点版本。`_children` 的两侧都要清，见 `_drop`。
+
+        **纯机制，不判断该不该逐**：「这个 agent 现在能不能被忘掉」要同时看它的 task
+        队列、未决 HITL、以及同 session 其他 agent 的状态——ALM 一样都不认识。判据在
+        `CtxWeftRuntime.forget_agent` / `forget_session`（组合根，那里才看得全）。
+        本类只负责"摘干净"这一件事。
+
+        `_sessions[session_id]` 的默认值**不动**：同 session 可能还有别的 agent 在册，
+        而它是 `materialize()` 回落时要用的 session 语境。整条会话的清理走
+        `forget_session`。
+        """
+        if agent_id not in self._agents:
+            return False
+        self._drop({agent_id})
+        return True
 
     def has(self, agent_id: str) -> bool:
         return agent_id in self._agents
@@ -379,6 +425,7 @@ class AgentLifecycleManager:
         session_id: str,
         tenant_id: str,
         fallback_template_id: str,
+        protected_current_tasks: "set[str] | None" = None,
     ) -> int:
         """恢复期喂入：把 reducer 折出的 `AgentView` 逐条装填进 registry。
 
@@ -393,7 +440,7 @@ class AgentLifecycleManager:
         `view.template_id` 为空（存量事件流子 agent 没发过 AgentInstantiated）
         → 回落 `fallback_template_id`；模板解析失败 → `logger.warning` 后用
         `MemoryConfig()`/`LoopConfig()` 默认值继续。**绝不抛**：这条路要在
-        `recover()` 的每个 session 上都跑通，抛一次就卡住整条恢复链——回落而非
+        恢复路径的每个 session 上都跑通，抛一次就卡住整条恢复链——回落而非
         报错的口径与 `_register_fallback` 一致。
 
         装填完按每个 `AgentView` 折出来的现状发一条 `AGENT_*`（idle/waiting_human/
@@ -402,10 +449,16 @@ class AgentLifecycleManager:
         不是新状态转移，不经 `apply_input`。
 
         **只对这次调用之前 registry 里还没有的 agent 广播**（见方法体 `cold_ids`
-        旁的注释）：`load()` 不止被 `recover()` 的冷启动路径调用，`_recover_session_locked`
+        旁的注释）：`load()` 不止被 `rebuild_session` 的按需装填调用，`_recover_session_locked`
         每次 `/resume`、每次冷 HITL 应答都会重新 load 一遍已经在内存里的 agent——
         那种情形不该每次都把「现状」再回声一遍，真实转移各自已经发过自己的
         `AGENT_*`，重复广播会让下游把「装填回声」误当成「刚发生了一次新转移」。
+
+        ``protected_current_tasks``：这些 task 正处在**未提交窗口**里（spec 2026-09-09），
+        它们的 `TASK_CREATED` 还没落盘，因此**折不进 `AgentView`**。此时按 view 覆盖
+        `current_task_id` 就会把路由判据倒回上一个已终态的 task——下一条消息于是凭空
+        再开一个 task，同一个 agent 挂两个（`test_agent_current_task_fold` 正是为这个
+        形状写的回归）。内存里那份才是真的：命中就保住它，不被日志折出来的旧值盖掉。
         """
         self.register_session(
             session_id, tenant_id=tenant_id, fallback_template_id=fallback_template_id,
@@ -414,7 +467,7 @@ class AgentLifecycleManager:
         n = 0
         # 广播只认「这次调用之前 registry 里确实还没有这条记录」的 agent——记在覆盖
         # `self._agents[av.id]` 之前，覆盖后 membership 判据就没了。这是真正的**冷**
-        # 装填（`recover()` 重启后的首次装填）与**热**重装（`_recover_session_locked`
+        # 装填（重启后对这条会话的首次装填）与**热**重装（`_recover_session_locked`
         # 每次 `/resume`、每次冷 HITL 应答都会重新调一次 `load()`，把已经在内存里的
         # record 幂等覆盖一遍，这不是本 spec 要补的缺口）之间唯一站得住脚的分界。
         #
@@ -443,6 +496,13 @@ class AgentLifecycleManager:
                 resolved_template_id = template_id
                 memory_config = MemoryConfig()
                 loop_config = LoopConfig()
+            # 未提交窗口里的路由判据不得被日志折出来的旧值倒回（见 docstring）。
+            current_task_id = av.current_task_id
+            if protected_current_tasks:
+                live = self._agents.get(av.id)
+                if (live is not None and live.current_task_id
+                        and live.current_task_id in protected_current_tasks):
+                    current_task_id = live.current_task_id
             self._agents[av.id] = _AgentRecord(
                 session_id=session_id,
                 tenant_id=tenant_id,
@@ -459,7 +519,7 @@ class AgentLifecycleManager:
                 # 重置成 idle，即使它重启前正处于 waiting_human（有未决 HITL 挂着），
                 # 导致 `assert_can_receive` 错误放行、`send_message` 的路由判断失准。
                 status=av.status,
-                current_task_id=av.current_task_id,
+                current_task_id=current_task_id,
             )
             if av.parent_agent_id is not None:
                 # 重建 _children——冷恢复必须让级联 cancel/pause（Task 19/20）在
@@ -472,9 +532,9 @@ class AgentLifecycleManager:
                 # 加载顺序。父若是彻底的幽灵（事件流损坏、永远不会被登记）——
                 # 边挂在一个未注册的 id 下，无害：没有已知调用路径会拿一个未
                 # `has()` 通过的 id 去发起级联遍历，`children_of`/`descendants_of`
-                # 该 id 之外的查询结果不受影响；`release_session` 释放这个子
+                # 该 id 之外的查询结果不受影响；`forget_session` 逐出这个子
                 # agent 所在的 session 时，会把它从这条边的值集合里摘掉（见
-                # release_session 对 `self._children.values()` 的全量清理），
+                # forget_session 对 `self._children.values()` 的全量清理），
                 # 不会留下指向「已被移除的 agent」的悬垂值。
                 self._children.setdefault(av.parent_agent_id, set()).add(av.id)
             n += 1

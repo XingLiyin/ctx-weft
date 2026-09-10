@@ -640,7 +640,12 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
         self._sessions[session_id] = (task_manager, session)
 
     def deregister_session(self, session_id: str) -> None:
-        """session 结束后注销，防止内存泄漏。"""
+        """会话被**逐出内存**时注销（`forget_session` / `purge_session`），防止内存泄漏。
+
+        不是「会话跑完」时（2026-09-08 生命周期改造前是那样）。重新登记由
+        `_register_and_drain` 承担：逐出会连 TaskManager 一起摘掉，下一条执行入口重建
+        TM 时那里会把本 provider 一并接回来。
+        """
         self._sessions.pop(session_id, None)
 
     async def list(self, ctx: ProviderContext) -> list[ToolCapability]:

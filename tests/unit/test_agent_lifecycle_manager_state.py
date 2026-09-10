@@ -62,13 +62,13 @@ async def test_register_session_is_reentrant():
     assert lm._sessions["s1"].tenant_id == "t1"
 
 
-async def test_release_session_drops_only_that_sessions_agents():
+async def test_forget_session_drops_only_that_sessions_agents():
     lm = _lm()
     a, _ = await lm.instantiate(
         template_id="agent:tpl_echo", session_id="s1", tenant_id="default")
     b, _ = await lm.instantiate(
         template_id="agent:tpl_echo", session_id="s2", tenant_id="default")
-    lm.release_session("s1")
+    lm.forget_session("s1")
     assert not lm.has(a.id)
     assert lm.has(b.id)
 

@@ -293,7 +293,30 @@ class SubscriptionHandle:
 
 @runtime_checkable
 class EventBus(Protocol):
-    """事件总线。"""
+    """事件总线。
+
+    ## 未提交窗口（provisional gate）
+
+    一轮对话在 LLM 真的开口之前不算发生（spec 2026-09-09）：那之前的 `TASK_CREATED` /
+    `TASK_STARTED` / `RUN_STARTED` / `LLM_PROMPT_SENT` 都不该进事件日志、也不该到达
+    host，否则用户一按暂停就留下一个半截回合。但它们**必须**立刻到达进程内的状态机
+    （`AgentLifecycleManager`），否则 agent 停在 `idle`：`pause_agent` 会以
+    `AgentNotRunningError` 拒绝（那恰好正是要暂停的那个窗口）、host 的会话状态折叠会把
+    会话判成上一轮终态、并发闸门一并失效。
+
+    两个诉求的分野不在「发不发」，而在**发给谁**：
+
+    - `subscribe(..., provisional=True)` 的订阅者恒收全量——进程内状态机反映「现在真实
+      发生了什么」；
+    - 其余订阅者（`EventPersister`、host 的消费者）在窗口关闭前收不到该 task 的任何
+      事件——事件日志只记录「哪一轮算数」。
+
+    窗口由 `TaskManager` 开合（它是 task 生命周期的所有者），见
+    `begin_provisional` / `commit_provisional` / `discard_provisional`。
+
+    **不实现这三个方法的总线**（外部 Redis Streams 等）拿到的是默认实现：窗口是
+    no-op，事件照常全量投递。行为退化成改造之前——夭折的回合仍会留痕，但不会出错。
+    """
 
     @abstractmethod
     async def emit(self, event: Event) -> None: ...
@@ -303,7 +326,26 @@ class EventBus(Protocol):
         self,
         event_type: str | None,
         handler: Callable[[Event], Awaitable[None]],
+        *,
+        provisional: bool = False,
     ) -> SubscriptionHandle: ...
+
+    # ── 未提交窗口（默认 no-op，见类 docstring）────────────────────────────────
+
+    def begin_provisional(self, task_id: str) -> None:
+        """开窗：此后该 task 的事件只投给 provisional 订阅者，其余按序缓冲。
+
+        幂等——重复开窗不清空已有缓冲（`retry` 重排会重进同一条路径）。
+        """
+        return None
+
+    async def commit_provisional(self, task_id: str) -> None:
+        """关窗并**按发生顺序**把缓冲补投给其余订阅者。未开窗时 no-op。"""
+        return None
+
+    def discard_provisional(self, task_id: str) -> None:
+        """关窗并丢弃缓冲——这一轮当作没发生过。未开窗时 no-op。"""
+        return None
 
     @abstractmethod
     def stream(

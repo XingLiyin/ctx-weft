@@ -41,7 +41,7 @@ from ctx_weft.core.hitl.service import HitlService
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.hitl_waiter import HitlWaiter
-from ctx_weft.core.loop.park import HitlPark
+from ctx_weft.core.loop.park import HitlPark, RoundDiscarded
 from ctx_weft.core.loop.steps import (
     ActStep,
     FinalizeStep,
@@ -368,11 +368,14 @@ class TurnHandle:
         `TaskFinished` 到调用那次 `gather` 之间只隔几行同步代码、中途不把控制权交还
         事件循环，故**总是先于** `wait_for_finish` 注册上这个等待。若这里也去 `shield`
         同一个 `asyncio.Task` 对象，两个等待者都挂在它的完成回调清单上，`_fire_session_
-        done` 先注册、先被唤醒——它会抢在 `wait_for_finish` 前面跑完 `on_session_done`/
-        `_release_session`，把 session 一并拆掉。复现：`test_runtime_agent_api.py::
-        test_start_session_agent_id_is_addressable_root_agent` 在这版实现下会于
-        `wait_for_finish` 返回后 `get_agent()` 查无此 agent（`AgentNotFound`）——
-        session 已经在返回前被拆了。
+        done` 先注册、先被唤醒——它会抢在 `wait_for_finish` 前面跑完 `on_session_done`。
+        复现：`test_runtime_agent_api.py::test_start_session_agent_id_is_addressable_
+        root_agent` 在那版实现下会于 `wait_for_finish` 返回后 `get_agent()` 查无此
+        agent（`AgentNotFound`）——session 已经在返回前被拆了。
+
+        （2026-09-08 生命周期改造后 `on_session_done` 只剩 `_release_round`，不再拆
+        TM/agent，这条竞态的**后果**已经没那么严重；但下面「继续消费这条事件流」的
+        写法本身仍然成立，不因此回退——先注册先唤醒的顺序问题依旧存在。）
 
         改成继续消费**这条已经在订阅的事件流**、等它上面的 `TaskRecapDone` 就不撞这
         个问题：后台 observe 在 `finally` 里先 `emit(TaskRecapDone)`——这一步只是把
@@ -627,7 +630,7 @@ class CtxWeftRuntime:
         self._pausing: set[str] = set()
         # 本轮暂停的续跑点名额（一次性）：pause_session pause 到在途 root run、或闩锁窗口内
         # 第一个 root run born-pause 时认领；此后窗口内再派发的 root run 一律 born-cancel。
-        # 与 _pausing 同生命周期（_on_idle / _release_session / pause_session 兜底一起清）。
+        # 与 _pausing 同生命周期（_on_idle / _release_round / pause_session 兜底一起清）。
         self._pause_claimed: set[str] = set()
         # compact 等一次性操作的忙位（原先借 _cancel_tokens dict 占位）。
         self._busy_sessions: set[str] = set()
@@ -832,7 +835,7 @@ class CtxWeftRuntime:
         - 排队任务全部放弃（abandon_pending：标 CANCELED，不动 session 状态、不封 drain）。
         - 在途 run 按真实执行 agent 划分：== root agent 的那一轮（同 agent 串行 ≤1）pause →
           park 一个 wait 气泡；其余（含被顶替旧 TM 的 inflight）cancel → 协作取消终态。
-        - 闩锁由 _on_idle（root park 后会话空闲）或 _release_session 清除。
+        - 闩锁由 _on_idle（root park 后会话空闲）或 _release_round 清除。
 
         不是 `pause_agent` 的广播版：`pause_agent` 级联暂停一个 agent 子树、不杀任何
         东西、对非 running 的子孙静默跳过；这里对非 root agent 做的是取消它们的**在途
@@ -845,13 +848,24 @@ class CtxWeftRuntime:
             return False
         self._pausing.add(session_id)
         root_agent = ""
+        # 有轮窗口开着 → **跳过排队弃子**（spec 2026-09-09）。
+        #
+        # `abandon_pending` 会把队列里每一个 task 标 CANCELED、发 TaskCanceled、再逐个
+        # `_try_resume_parent`。那些 task 有自己的 task_id，**不在本轮窗口里**，事件照常
+        # 落盘。而本轮马上就要被整体撤销——一次「当作没发生过」的撤销顺手永久杀掉别人
+        # 排着的工作，是说不通的。这个窗口只有 TTFT 那么宽，少弃一次子的代价是那些排队
+        # 任务在本轮续跑时照常被派发，与用户按暂停之前的预期一致。
+        #
+        # 窗口没开（普通的运行中暂停）时行为逐字节不变。
+        rounds_open = bool(tm.open_round_task_ids) if tm is not None else False
         if tm is not None:
             tm.set_pause_abandon(True)
             root_agent = (tm.session.root_agent_id or "") if tm.session is not None else ""
-            # 保留 root agent 已入队未派发的那一条（keep_agent），其余排队任务弃子。
-            await tm.abandon_pending(
-                reason=CancelReason.PAUSE_ABANDON, keep_agent=root_agent or None
-            )
+            if not rounds_open:
+                # 保留 root agent 已入队未派发的那一条（keep_agent），其余排队任务弃子。
+                await tm.abandon_pending(
+                    reason=CancelReason.PAUSE_ABANDON, keep_agent=root_agent or None
+                )
         for task_id in list(per):
             if root_agent and tm is not None and tm.running_agent_of(task_id) == root_agent:
                 self._pause_task(session_id, task_id)
@@ -899,9 +913,19 @@ class CtxWeftRuntime:
         `running` 目标内部会调 `_cancel_run_token`，在途 run 的协作取消由它覆盖，
         不再需要 runtime 自己遍历 `_run_tokens` 拍 `cancel()`。
         """
+        # 「有没有东西要取消」的判据看三处，不是只看 TaskManager 在不在内存里：
+        # ALM 里还登记着 agent（跑完的会话现在 record 常驻，按需装填也只装
+        # 填 ALM 不建 TM），或者还挂着未决 HITL——这两种情形下 TM 都可能不在内存，而
+        # 该做的事（把 agent 转 `terminated`、把提问收口）一件都没少。
+        #
+        # 只看 TM 的旧判据会让这些会话**静默早退**：`/cancel` 什么都没做就返回 False，
+        # 未决提问留成「有 HitlOpened 无终局事件」的孤儿，重启后 `rebuild_hitl` 又把它
+        # 当未决恢复出来（总账 A10 要防的正是这个）。
         per = self._run_tokens.get(session_id, {})
         task_manager = self._task_managers.get(session_id)
-        if not per and task_manager is None:
+        has_agents = bool(self._agent_lifecycle_manager.agent_ids_of_session(session_id))
+        has_pending_hitl = bool(self.hitl_registry.list_pending(session_id=session_id))
+        if not per and task_manager is None and not has_agents and not has_pending_hitl:
             return False
         # 取消前判定会话是否已空闲挂起（无在跑任务）。RUNNING：在途 task 经 CancelToken→checkpoint
         # 协作取消→on_task_finished→is_done→_fire_session_done→_on_done 自行回收，故此处不抢着回收。
@@ -921,15 +945,18 @@ class CtxWeftRuntime:
         # waiting_human 的 HITL 终局分支这里必是 no-op——HITL 终局先于 agent 终态的
         # 纪律因此自动成立，不需要在这里再插一次序。
         #
-        # 必须在 `_release_session` **之前**：那一步会把 agent record 从 registry
-        # 摘掉，届时 cancel_agent 查无此 agent，只能静默跳过、发不出 AgentTerminated。
         for aid in list(self._agent_lifecycle_manager.agent_ids_of_session(session_id)):
             await self.cancel_agent(aid, reason="session_canceled")
         if idle:
             # 已暂停/中断（无在跑 task）的会话被取消：cancel_all 不经 _fire_session_done，
-            # _on_done 不会触发，故显式回收 runtime 侧 per-session 状态（含较重的
-            # TaskManager），避免滞留。
-            self._release_session(session_id)
+            # _on_done 不会触发，故在此显式清掉这一轮的控制信号残余。
+            #
+            # **不逐出**（2026-09-08 生命周期改造）：取消 = 这一轮不跑了，不等于这条
+            # 会话不要了——用户多半还要看它的历史，甚至接着聊。逐出由持有方显式调
+            # `forget_session`。从前这里调的是 `_release_session`，会连 agent record
+            # 一起摘掉，于是「取消后再发消息」和「跑完后再发消息」撞同一个
+            # `AgentNotFound`。
+            self._release_round(session_id)
         return True
 
     # ── Agent 级取消（Task 19）───────────────────────────────────────────────
@@ -990,23 +1017,93 @@ class CtxWeftRuntime:
                 killed.append(aid)
         return killed
 
-    async def _cancel_pending_hitl_of(self, agent_id: str, *, session_id: str) -> None:
+    async def _cancel_pending_hitl_of(
+        self, agent_id: str, *, session_id: str, defer: bool = False,
+    ) -> None:
         """终局**该 agent 名下**全部未决 HITL（`cancel_agent` 专用）。
 
         与 `_cancel_session_hitl` 同一模式（best-effort，单条失败不阻断其余），区别
         在粒度：`_cancel_session_hitl` 按 session 收口全部未决请求，这里额外按
         `agent_id` 过滤（`HitlRequestView.agent_id`）——`cancel_agent` 只该终局这一个
         agent 名下的未决提问，不能误伤同一 session 里其他 agent 仍然合法在等的提问。
+
+        ``defer``：两个调用方口径不同。`cancel_agent` 用默认的 False——那是真终结，
+        没有可撤销的一轮。`_inject_user_turn` 传 True——旧气泡的收口跟着新消息那一轮走，
+        用户在 LLM 开口之前按暂停时它要回到 pending（spec 2026-09-09）。
         """
         for v in self.list_pending_hitl(session_id=session_id):
             if v.agent_id != agent_id or v.resolved:
                 continue
             try:
-                await self.hitl.cancel(v.id, message=CancelReason.USER_CANCEL)
+                await self.hitl.cancel(
+                    v.id, message=CancelReason.USER_CANCEL, defer=defer)
             except Exception:
                 logger.exception(
                     "_cancel_pending_hitl_of: cancel failed for agent=%s hitl=%s", agent_id, v.id,
                 )
+
+    async def _revert_round(self, session_id: str, task_id: str) -> None:
+        """撤销一轮里**不属于 TaskManager** 的那两样（`revert_round` 钩子，spec 2026-09-09）。
+
+        1. **memory**：把这一轮的用户消息 `fold([id], [])` 掉——纯遗忘，标 superseded，
+           `load_view` 自然滤掉。id 是落库那一刻记在 `Task.user_prompt_memory_id` 上的；
+           **绝不**改用「读视图取最后一条 user」那种事后推断——用户连发两条、或上一条
+           是 HITL 应答时会撤错人。
+        2. **HITL**：把被这条消息收口的旧气泡 `release` 回 pending。它从来没发过
+           `HitlResolved`，`HitlOpened` 还在原地，于是日志描述的正是撤销之前的世界，
+           会话状态折叠自然回到 `PAUSED`。
+
+        两步各自 best-effort：一次撤销失败不该把「用户按了暂停」变成 run 崩溃。最坏
+        结果是 memory 里多留一条没人应答的 user 回合、或一个气泡停在待终局——都比会话
+        炸掉轻得多，且都会记一条 exception 日志。
+        """
+        tm = self._task_managers.get(session_id)
+        task = tm.get_task(task_id) if tm is not None else None
+
+        record_id = getattr(task, "user_prompt_memory_id", None) if task else None
+        if record_id:
+            try:
+                memory = self.providers.get_memory()
+                pctx = ProviderContext(
+                    session_id=session_id,
+                    tenant_id=getattr(task, "tenant_id", "default"),
+                    task_id=task_id,
+                    agent_id=(task.assigned_agent_id or task.creator_agent_id or ""),
+                )
+                await memory.fold([record_id], [], pctx)
+            except Exception:
+                logger.exception(
+                    "_revert_round: fold user prompt %s of task %s failed",
+                    record_id, task_id)
+            else:
+                task.user_prompt_memory_id = None
+                # 记录没了，落库标志也要跟着回落，否则这个 task 若被重排，
+                # `_persist_user_prompt` 会以为写过了、不再补写。
+                task.user_prompt_in_memory = False
+
+        # 按 task 全量退回，而不是记一个 id：`_cancel_pending_hitl_of` 收口的是该 agent
+        # 名下**全部**未决请求，可能不止一条。
+        for req in self.hitl_registry.claim_pending_for_task(session_id, task_id):
+            try:
+                await self.hitl.release(req.id)
+            except Exception:
+                logger.exception(
+                    "_revert_round: release hitl %s of task %s failed", req.id, task_id)
+
+        # 3. **清暂停闩锁。** 这一步不清，下一轮会出生即取消。
+        #
+        #    `pause_session` 置 `_pausing`（窗口内新派发的 run 按闩锁分流）并让本轮的 run
+        #    认领了 `_pause_claimed`（"一次暂停恰一个续跑点"）。正常路径上这两个由
+        #    `_on_idle` 在会话静止时清——但丢弃之后 task 退回 `AWAITING_HUMAN`（D/B 类）
+        #    而不是终态，`tm.is_done()` 不成立，`_on_idle` 根本不触发，闩锁就留在那里：
+        #    用户重答一次，新 run 一出生就被 born-cancel，会话看起来"答了没反应"。
+        #
+        #    实测钉在 `test_round_discarded_hitl_reply_e2e` 的第 ⑥ 步（重答后必须真的
+        #    跑起来）。本轮已经整个撤销，闩锁的两个目的（弃子、留一个续跑点）都不再成立。
+        self._pausing.discard(session_id)
+        self._pause_claimed.discard(session_id)
+        if tm is not None:
+            tm.set_pause_abandon(False)
 
     # ── Agent 级暂停 / 恢复（Task 20）────────────────────────────────────────
 
@@ -1407,9 +1504,15 @@ class CtxWeftRuntime:
         self._session_registry.register_session(session.id, tenant_id=session.tenant_id)
 
         async def _on_done() -> None:
-            # compare-and-clear：仅当本 TM 仍是当前 owner 才回收，避免顶替它的新 TM 被误释放。
+            # compare-and-clear：仅当本 TM 仍是当前 owner 才清，避免顶替它的新 TM 被误清。
+            #
+            # **这里不再拆 TaskManager、也不再摘 agent record**（2026-09-08 生命周期
+            # 改造）：一轮跑完不等于这条会话不要了——agent 只是回到 `idle`，随时可以
+            # 接下一条消息，TM 也照旧能接新 task（`drain` 只被 `_cancelled` 与
+            # `is_current` 挡，`_fire_session_done` 不设任何闩）。真正的回收是显式的
+            # `forget_session`，由持有方按它自己的策略调用。
             if self._task_managers.get(session.id) is task_manager:
-                self._release_session(session.id)
+                self._release_round(session.id)
 
         async def _on_idle() -> None:
             # per-run token 生命周期已随 run 对齐（execute finally 注销），无需在此回收。
@@ -1430,6 +1533,9 @@ class CtxWeftRuntime:
             cancel_pending_hitl=lambda sid=session.id: self._cancel_session_hitl(
                 sid, message=CancelReason.FAILURE_THRESHOLD),
             cancel_inflight=lambda tid, sid=session.id: self._cancel_run_token(sid, tid),
+            # 丢弃一轮时把 TM 够不到的两样东西撤回来：memory 里那条用户消息、
+            # 被这条消息收口的旧 HITL 气泡。见 `_revert_round`。
+            revert_round=lambda tid, sid=session.id: self._revert_round(sid, tid),
             threshold_finalizer=lambda root, ack_tasks, failures, sess=session: (
                 self._finalize_threshold_memory(sess, root, ack_tasks, failures)),
             # 统一取消胶囊闭合：cancel_all / 熔断清场（已启动挂起排队）/ 在途协作取消
@@ -1446,21 +1552,245 @@ class CtxWeftRuntime:
 
         asyncio.create_task(task_manager.drain())
 
-    def _release_session(self, session_id: str) -> None:
-        """回收 runtime 侧全部 per-session 内存状态：per-run 令牌 registry 残余 + pause 闩锁 +
-        TaskManager 映射 + scoped providers（fs workspace、control 的 TaskManager 注册等）。幂等。
+    def _release_round(self, session_id: str) -> None:
+        """一轮跑完之后的**轻量**清理：只清这一轮的控制信号残余。幂等。
 
-        会话终结(_on_done) 或取消一个**已空闲挂起**的会话(cancel_session) 时调用——后者 cancel_all
-        不经 on_task_finished/_fire_session_done，故不会自动触发 _on_done，须显式回收避免 TaskManager 滞留。
+        **不碰 TaskManager、不碰 agent record、不碰 scoped provider**（2026-09-08 生命
+        周期改造）。从前这里是 `_release_session`，会话一跑完就把 TM 和该 session 下
+        全部 ALM record 一起拆掉——而 agent 在概念上只是回到 `idle`（spec 3.1），
+        `send_message` / `list_agents` / `get_agent` 却随即全部瞎掉（一条正常结束的
+        会话再发消息 → `AgentNotFound`）。现在内存里的东西是**缓存**：只增不删，
+        什么时候收由持有方显式调 `forget_session` / `forget_agent` 决定。
+
+        留在这里的三样都是**per-run 控制信号**，跨轮留着有害而非有用：
+        `_run_tokens` 的空壳（真正的注销在 `_SessionTaskRunner.execute` 的 finally）、
+        以及 pause 弃子的两个闩锁——`_on_idle` 只在 park 那条路上清它们，done 这条路
+        不清的话下一轮开跑会撞上一个上一轮遗留的"正在暂停"标志。
         """
         self._run_tokens.pop(session_id, None)
         self._pausing.discard(session_id)
         self._pause_claimed.discard(session_id)
+
+    #: 「安静」的 agent 状态：不在跑、不等人、不等 /resume。只有这两态的 agent 可以被
+    #: 忘掉——其余三态各自还有人/事在等它，record 是那件事的载体。
+    _QUIESCENT_AGENT_STATUSES = frozenset({"idle", "terminated"})
+
+    def session_is_quiescent(self, session_id: str) -> bool:
+        """这条会话此刻安静吗？= 没有在跑的活、没有人在等它。`forget_*` 的准入判据。
+
+        三条都要满足，缺一条就还不能忘：
+
+        - **TaskManager 队列已空、无 task 在跑**（`is_done()`）。光看 agent 状态不够：
+          一个 `PENDING` 还没被派发的 task，其 agent 在 ALM 里仍是 `idle`——此时逐出
+          会把 TM 连同那个排着队的 task 一起丢掉，它永远不会跑。TM 不在内存里视为满足
+          （压根没有队列可言）。
+        - **没有未决 HITL**：有人正等着回答，`hitl_registry` 里那条记录还要用。
+        - **每个 agent 都处于 `idle` / `terminated`**：`running` 在跑；`waiting_human`
+          在等人；`interrupted` 在等 `/resume`，而续跑要用那份内存状态。
+
+        判据放在 runtime 而不是 ALM：这三样分属 `_task_managers` / `hitl_registry` /
+        `AgentLifecycleManager`，只有组合根同时认识它们。
+        """
+        tm = self._task_managers.get(session_id)
+        if tm is not None and not tm.is_done():
+            return False
+        if self.hitl_registry.list_pending(session_id=session_id):
+            return False
+        reg = self._agent_lifecycle_manager
+        for aid in reg.agent_ids_of_session(session_id):
+            rec = reg.record_of(aid)
+            if rec is not None and rec.status not in self._QUIESCENT_AGENT_STATUSES:
+                return False
+        return True
+
+    def forget_session(self, session_id: str) -> bool:
+        """忘掉一条**已经安静下来**的会话，释放它占的内存。返回是否真的忘了。
+
+        这是**缓存逐出**，不是删除：不终结任何东西、不发任何事件、不碰事件日志。会话
+        本身一点没少——真相源始终是事件日志，任何入口撞上 miss 都能用 `rebuild_session`
+        装填回来（`send_message` 自己就会走这条自愈）。所以调它是安全的，随便调。
+
+        **还在跑 / 还有人等着 → 拒绝，返回 False，什么都不做**（判据见
+        `session_is_quiescent`）。不是"由调用方保证"，是这里自己把关：一个安全的逐出
+        接口不该要求每个调用方都先背一遍不变量。硬要销毁一条还活着的会话是**另一件
+        事**，走 `purge_session`。
+
+        逐出什么：TaskManager、该 session 的全部 agent record、成员登记、per-run 控制
+        信号残余、scoped provider（fs workspace、control 的 TM 注册等）。
+
+        **`_resume_locks[session_id]` 刻意不收**：它可能正被一个在
+        `_recover_session_locked` 里的协程持有着。把字典项弹掉不会让那个协程放手，只会
+        让下一个 `recover_agent` `setdefault` 出**第二把锁**并直接进去——同一 session 上
+        两条重建路径并行，正是这把锁存在的理由。它按 session 数有界、体量微小，不回收
+        是构造期就定下的（见 `__init__` 里那行注释）。
+        """
+        if not self.session_is_quiescent(session_id):
+            logger.info("forget_session: %s 还没安静下来（在跑 / 有人在等），不逐出", session_id)
+            return False
+        self._evict_session_memory(session_id)
+        return True
+
+    def forget_agent(self, agent_id: str) -> bool:
+        """忘掉**单个**已经安静下来的 agent record。返回是否真的忘了。
+
+        `forget_session` 的单点版本，用于"一棵委派子树跑完、父会话还开着"这类精确回收。
+        同样是缓存逐出、同样自己把关：`running` / `waiting_human` / `interrupted` 一律
+        拒绝——record 是五态机的载体，而 `ALM.handle_event` 对未登记的 agent_id 是**静默
+        return**，删掉一个还活着的 agent 等于让它后续的 `TASK_*` 全部落进黑洞，状态机
+        停在原地再也不动。要终结一个在跑的 agent 用 `cancel_agent`（唯一的 agent 终态
+        入口，会发 `AgentTerminated`），终结之后它就是 `terminated`，可以忘了。
+
+        **不看同 session 其他 agent，也不看 task 队列**：那是 `forget_session` 的粒度。
+        这里只对这一个 agent 负责。
+        """
+        rec = self._agent_lifecycle_manager.record_of(agent_id)
+        if rec is None:
+            return False
+        if rec.status not in self._QUIESCENT_AGENT_STATUSES:
+            logger.info("forget_agent: agent %s 处于 %s，不逐出", agent_id, rec.status)
+            return False
+        return self._agent_lifecycle_manager.forget_agent(agent_id)
+
+    async def purge_session(self, session_id: str) -> None:
+        """**销毁**一条会话的运行时存在：终结还在跑的一切，然后把内存清干净。
+
+        与 `forget_session` 的分野就是"要不要动这条会话本身"：
+
+        - `forget_session` 只是**忘记**——不终结任何东西、不发任何事件，会话一点没少，
+          随时能装填回来。所以它对还活着的会话直接拒绝。
+        - `purge_session` 是**销毁**——先 `cancel_session`（收口未决 HITL → 清队列 →
+          逐个 `cancel_agent` 到 `terminated`，顺序纪律在那里），再无条件逐出内存。
+          调用方拿它来实现"删除这条会话"这类不可逆操作。
+
+        逐出的范围也比 `forget_session` 宽一档：它额外摘掉 `hitl_registry` 里这条会话的
+        全部记录。`forget_session` 刻意留着那些已终局记录（`resolved_for_session` 的崩溃
+        窗口兜底要用，而那条路上会话随时能装填回来）；purge 之后会话不会回来了，留着
+        就是孤儿。
+
+        ⚠ 它**不删事件日志**。core 不管持久化：会话的事实住在 event store 里，那是
+        调用方（host）自己的删除步骤，本方法只负责运行时这一半。所以严格说它是"停掉
+        并遗忘"，不是"抹掉存在过"。
+
+        逐出这一步**不再过 `session_is_quiescent`**：`cancel_agent` 是协作取消，在途 run
+        要跑到下一个检查点才真正收尾，`tm.is_done()` 在这一刻很可能还是 False。既然
+        整条会话都要销毁了，等它把这一轮跑完没有意义——那些 run 的结局不会有人再看。
+
+        **终结之前先确保它在内存里**：`cancel_session` 读的是 `hitl_registry` 与 ALM
+        的内存现状——一条已经被 `forget_session` 逐出（或进程刚起来还没 `recover` 到）
+        的会话，那两处都是空的，于是「收口未决 HITL」「逐个 `cancel_agent`」全都一次
+        不进，静默跳过。表现是删掉的会话在重启后又冒出一条未决提问：`rebuild_hitl` 按
+        「有 `HitlOpened` 无终局事件」把它当未决恢复了出来。装填一次只是读事件日志喂
+        内存，不跑任何东西；会话本就不在事件日志里则装填出 0 条，后面几步自然全是
+        no-op。
+        """
+        try:
+            if not self._agent_lifecycle_manager.agent_ids_of_session(session_id):
+                await self.rebuild_session(session_id)
+            await self.cancel_session(session_id)
+        except Exception:
+            # 终结失败不该让内存永远留着（调用方多半正在删这条会话，没有第二次机会）。
+            logger.exception("purge_session: cancel_session 失败，仍继续逐出内存 (%s)", session_id)
+        # HITL 记录也摘掉。**只有这条路摘**，`forget_session` 那条不摘——那边会话随时能
+        # 从事件日志装填回来，已终局记录还要给 `resolved_for_session` 的崩溃窗口兜底用；
+        # 这边会话要没了，留着就是指向一个再也重建不出来的 session 的孤儿，而 `gc()` 只按
+        # `max_resolved` 裁剪最旧的，要等它被后来的挤出去才消失。
+        # 放在 `cancel_session` **之后**：那一步刚把未决的逐个终局掉，此刻摘的应当全是
+        # 已终局项（真摘到未决的，registry 会记一条 WARNING）。
+        self.hitl_registry.forget_session(session_id)
+        self._evict_session_memory(session_id)
+
+    def _evict_session_memory(self, session_id: str) -> None:
+        """无条件把该 session 的运行时内存摘干净。`forget_session`（过判据之后）与
+        `purge_session`（销毁路径）共用——摘什么、摘的顺序只写一份。幂等。
+
+        **不收 `hitl_registry` 里该 session 的条目**：`HitlRegistry` 没有按 session 清的
+        口子（`gc()` 是全局的，resolved 那半由 `max_resolved` 自己封顶）。两条调用路径
+        都不需要它：`forget_session` 的判据本就要求无未决 HITL；`purge_session` 之前的
+        `cancel_session` 已经把它们逐个终局。要真按 session 清，得先给 registry 加那个
+        口，不该在这里伸手进它的内部结构。
+        """
+        self._release_round(session_id)
         self._task_managers.pop(session_id, None)
-        self._agent_lifecycle_manager.release_session(session_id)
+        self._agent_lifecycle_manager.forget_session(session_id)
+        self._session_registry.forget_session(session_id)
         for _p in self.providers.get_capability_providers():
             if isinstance(_p, SessionScopedCapabilityProvider):
                 _p.deregister_session(session_id)
+
+    async def rebuild_session(self, session_id: str) -> int:
+        """把这条 session 的内存状态**装填**回来：agent record + 未决 HITL + 成员登记。
+        返回装填的 agent 条数。
+
+        **只装填，不跑**——与 `rebuild_agent` / `rebuild_all_agents` / `rebuild_hitl`
+        同族（`rebuild_*` = 喂内存，`recover_*` = 喂内存 + 建 TM + drain）。`forget_session`
+        的逆操作：host 的缓存回填走这条，把一条冷会话拉回内存**不会**把它的任务跑起来。
+        要续跑用 `recover_agent`。
+
+        **这是唯一的按需装填入口。** 从前另有一个 `recover()`：进程启动时扫「全部 active
+        session」各装填一遍。它于 2026-09-09 删除——两个理由。其一，它的循环体逐字就是本
+        方法，同一件事写两处。其二更要命：「active」的判据（`providers/events/_lifecycle`）
+        只会 add、不会 discard——两条 discard 依据 `SessionFinished` / `SessionStatusChanged`
+        早已随会话状态机退役而停发，于是「active 集」= 这台机器历史上跑过的**全部**会话，
+        启动开销与历史会话数线性增长且永不收敛。恢复因此整体改成用户驱动：用到哪条装哪条。
+
+        **绝不抛**：`_load_agents_of` 自己就是绝不抛的，`rebuild_hitl` 的失败也只记日志。
+        装不出来（session 在事件日志里压根不存在）返回 0，由调用方决定这算不算错。
+        """
+        tenant_id = await self._tenant_for_session(session_id)
+        try:
+            await self.rebuild_hitl(session_id)
+        except Exception:
+            logger.exception("rebuild_session: rebuild_hitl failed for %s", session_id)
+        n = await self._load_agents_of(session_id, tenant_id=tenant_id)
+        self._session_registry.register_session(session_id, tenant_id=tenant_id)
+        await self._settle_crashed_agents(session_id)
+        return n
+
+    async def _settle_crashed_agents(self, session_id: str) -> int:
+        """装填之后：把「折出来是 running、而此刻没有任何 run 在跑它」的 agent 判成
+        `interrupted`。返回真的发生了转移的条数。
+
+        **这是恢复期裁定，属于 core。** `ALM.load()` 把 `AgentView.status` 照实读回来，
+        崩溃时正在跑的 agent 因此回到内存里仍是 `running`；而 `_RECOVERY_BROADCAST_BY_STATUS`
+        **刻意不广播 running**（"进程刚起来没有任何 run 在跑，照发会让 host 以为有活在跑；
+        它在事件流里的真实含义是「崩溃时正在跑」"）。也就是说 core 认得出这是崩溃残留，
+        却什么都不说——留下的缺口只能由宿主自己去补，而"这个 agent 现在算什么状态"本就
+        是五态机的话语权。这一步把它说出来。
+
+        `interrupted` 正是为这件事存在的：它由 `TaskManager._suspend_task_interrupted`
+        （宿主 outage / 崩溃）驱动，语义就是"被打断、可恢复，等 `/resume` 重新派发"。
+
+        **与 `pause_agent` 那处「不要手动拍 INTERRUPTED」的告诫不冲突**：那里的 agent
+        **还在真跑**（暂停信号刚发出、run 要到下一个检查点才 park），拍 interrupted 是
+        撒谎。这里恰恰相反——能走到 `rebuild_session` 就说明该 session 的记录是刚从事件
+        日志装填回来的，这个进程里没有任何 run 属于它，`running` 是上一次进程留下的残影。
+
+        **只在 `rebuild_session` 这条路上做，不在 `_recover_session_locked` 里做**：后者
+        装填完立刻 `restore` + `drain`，agent 马上就会拿到真的 `AGENT_RUNNING`；在那之前
+        插一条 `AgentInterrupted` 只会让宿主的界面闪一下中断态。分工因此是——
+        `rebuild_session` 装填 + 裁定（不跑），`recover_agent` 装填 + 跑（不裁定）。
+
+        幂等：转移发出的 `AgentInterrupted` 会落库，下次装填折出来就是 `interrupted`，
+        `next_agent_transition` 对同态输入返回 `None`，不重复发。
+        """
+        reg = self._agent_lifecycle_manager
+        settled = 0
+        for aid in list(reg.agent_ids_of_session(session_id)):
+            rec = reg.record_of(aid)
+            if rec is None or rec.status != "running":
+                continue
+            try:
+                if await reg.apply_input(aid, AgentInput.INTERRUPTED, reason="crash_recovery",
+                                         task_id=rec.current_task_id):
+                    settled += 1
+            except Exception:
+                # 单个 agent 判不了不该拖垮整条装填——最坏是它继续显示成在跑，
+                # 下一次装填还有机会。
+                logger.exception("_settle_crashed_agents: %s 判定中断失败", aid)
+        if settled:
+            logger.info("Recovery: session %s 有 %d 个 agent 崩溃时在跑 → 判为 interrupted，等 /resume",
+                        session_id, settled)
+        return settled
 
     # ── 熔断真终结（Task 10 runtime 侧）───────────────────────────────────────
 
@@ -1632,9 +1962,13 @@ class CtxWeftRuntime:
         task"时的两个结论（既empty history 报 `RuntimeError`，又 all-terminal 报
         `finalize_idle_session`）在这里都是错的：前者会让"从没跑过、刚被 send_message
         选中"的合法起点被错判成损坏投影；后者会在 TM 刚建好、`_start_task_for_agent`
-        还没来得及 push 之前就把它和这个 session 下全部 ALM agent record 一并释放
-        （`_fire_session_done` -> `_release_session`），原地把刚建好的东西拆掉。见
-        `_recover_session_locked` 里两处按 `keep_alive` 短路的分支与各自的注释。
+        还没来得及 push 之前就发一条 `SessionFinished` 并把 session 写成终态——给一个
+        正要开始的新一轮先宣告结束。见 `_recover_session_locked` 里两处按 `keep_alive`
+        短路的分支与各自的注释。
+
+        （2026-09-08 之前后果更重：那时 `_fire_session_done` -> `_release_session` 还会
+        把刚建好的 TM 连同该 session 全部 ALM record 一并拆掉，等于原地白建。现在
+        `on_session_done` 只剩 `_release_round`，但「替新一轮宣告结束」这条理由没变。）
 
         **主键是 agent**（2026-09-04 spec §6.2）；``session_id`` 由 ALM 记录反查。
         session 仍是串行化与资源回收的单位——per-session 锁、owner TM 复用这些
@@ -1654,8 +1988,8 @@ class CtxWeftRuntime:
         ``req.id``。纯 ``/resume``（无 hitl 语境）留空。
 
         **未登记的 ``agent_id`` 先自愈、仍缺才抛**：冷启动重启后 ALM registry 可能
-        是空的（`recover()` 还没跑过，或者跑了但这个 agent 属于一个当时未被扫到的
-        session），若这里直接对 miss 报 `AgentNotFound`，`_resume_after_hitl` 的冷
+        是空的（这条会话还没被 `rebuild_session` 装填过），若这里直接对 miss 报
+        `AgentNotFound`，`_resume_after_hitl` 的冷
         HITL 应答路径就会在人类刚回答完问题时把这次续跑摔在地上——`reply_to_hitl`
         已经把 HITL 判成终局（`registry.resolve()` 幂等），没有第二次机会，会话永久
         卡住。这正是 `rebuild_hitl` 自己的纪律要防的那类事故（见其 docstring：
@@ -1720,6 +2054,22 @@ class CtxWeftRuntime:
         # 冷 HITL 应答且已有存活 TM 拥有该 task → 就地重驱，不重建。避免每次冷应答造新 TM →
         # 顶替 → 跨 TM 双跑（根因 II）。/resume（无 resumed_task_id）与崩溃冷启动仍走重建。
         existing = self._task_managers.get(session_id)
+        # `keep_alive` 的调用方（`_start_task_for_agent`）要的只是「一个能塞新 task 的
+        # 活 TM」——已经有了就直接用它，**不重建**。这条和下面那条是同一条纪律的两半：
+        # 下面那条按 `resumed_task_id` 复用（续跑既有 task，要就地重驱），这条按
+        # `keep_alive` 复用（调用方马上自己 push，这里什么都不用做）。语义不同，故
+        # 不合并分支体。
+        #
+        # 不补这一条的后果是并发下的**无谓顶替**：两个 send_message 同时撞上「TM 不在
+        # 内存里」（冷启动，或持有方 `forget_session` 过），第一个建出 TM_A 并出锁，
+        # 第二个进锁时即便看见 TM_A
+        # 活着也照样建 TM_B 顶掉它——此时第一个还卡在 `_validate_and_normalize_content`
+        # 上没来得及 push，它随后 push 到的 TM_A 已经 `is_current() == False`，那个 task
+        # 永远不会被派发（`inflight` 那道护栏也救不了：它只覆盖「已派发、正在跑」的
+        # task，刚 push 还没派发的不在集合里）。表现是消息发出去了、事件流里有
+        # `TaskCreated`、然后会话一动不动。
+        if keep_alive and existing is not None and existing.is_alive():
+            return
         if (resumed_task_id is not None and existing is not None
                 and existing.is_alive() and existing.get_task(resumed_task_id) is not None):
             await self._resume_in_existing_tm(
@@ -1817,7 +2167,7 @@ class CtxWeftRuntime:
 
         # 各 agent 取自己的 template_id（AgentInstantiated 事件投影而来）；投影里没有的
         # （存量事件流）回落 session 模板——喂进 registry，registry 就是那份缓存。
-        # 与 `recover()` 共用同一条装填路径（`_load_agents_of`），折叠逻辑只此一份
+        # 与 `rebuild_session` 共用同一条装填路径（`_load_agents_of`），折叠逻辑只此一份
         # （Task 11）：这里为此重付一次 `rebuild_view` 的代价，换来两处永不漂移。
         await self._load_agents_of(session.id, tenant_id=session.tenant_id)
 
@@ -1858,12 +2208,12 @@ class CtxWeftRuntime:
 
         # 无可恢复 task（所有 task 已终态）但 session 因崩溃未落终态 → 显式收尾：
         # gather 重跑的后台 recap 后发 SESSION_FINISHED（终态镜像 on_task_finished）。
-        # `keep_alive` 短路这一步：finalize -> `_fire_session_done` -> `_release_session`
-        # 会把刚在上面 `_register_and_drain` 里塞进 `_task_managers` 的这个 TM，连同
-        # `AgentLifecycleManager` 里这个 session 下的全部 agent record 一起摘掉——
-        # `_start_task_for_agent` 调用这里正是为了拿到一个能塞新 task 的活 TM，原地
-        # 把它拆掉等于白建（终审 CRITICAL 1）。resumable 是否为空交给调用方接下来
-        # push 的新 task 去填，不在这里替它下判决。
+        # `keep_alive` 短路这一步：`_start_task_for_agent` 调用这里正是为了拿到一个能塞
+        # 新 task 的活 TM，紧接着就要 push——在那之前 finalize 一次（发 SessionFinished、
+        # 把 session 写成终态）等于替一个正要开始的新一轮宣告结束（终审 CRITICAL 1；
+        # 2026-09-08 前后果更重：那时还会连带 `_release_session` 把刚建好的 TM 和全部
+        # agent record 一起拆掉）。resumable 是否为空交给调用方接下来 push 的新 task
+        # 去填，不在这里替它下判决。
         if not resumable and not keep_alive:
             final_status = "FAILED" if session.failure_counter > 0 else "SUCCEEDED"
             await task_manager.finalize_idle_session(final_status)
@@ -2212,7 +2562,7 @@ class CtxWeftRuntime:
         `agent_id` 是 agent-centric 下的主用过滤轴（2026-09-04 spec §5.2）：HITL 自
         09-03 起已彻底 agent 化，只有这个查询入口此前停在 session 维度。
 
-        **只读内存**：注意重启之后 registry 要先被装填（`recover()` / `rebuild_hitl()`）
+        **只读内存**：注意重启之后 registry 要先被装填（`rebuild_session()` / `rebuild_hitl()`）
         才有内容——「恢复是喂进来、不是查回去」（spec §3.1）。
         """
         return [
@@ -2235,10 +2585,13 @@ class CtxWeftRuntime:
         嵌套，调用方按 `parent_agent_id` 自行还原成树）。`include_terminated` 默认
         False，避免列表随时间无限膨胀。
 
-        数据源用 `AgentLifecycleManager` 自己的记录（经 `record_of`），不用
-        `SessionRegistry.agent_ids_of`（成员登记表）：后者只增不减、与 session 同寿命，
-        而 ALM 的 `release_session` 会真正摘除记录。以 ALM 的内存现实为准，不会把
-        已经不存在于内存里的 agent 报告出去。
+        数据源用 `AgentLifecycleManager` 自己的记录（经 `record_of`）：以 ALM 的内存
+        现实为准，不会把已经不在内存里的 agent 报告出去。
+
+        ⚠ **内存现实 ≠ 全部事实**：2026-09-08 起 ALM 是只增不删的缓存，但持有方可以
+        显式 `forget_session` 把一条会话逐出。逐出之后这里返回空列表——那不表示这条
+        会话没有 agent，只表示它此刻不在内存里。要「不管在不在内存里都列出来」，先
+        `rebuild_session(session_id)` 装填再列。
         """
         reg = self._agent_lifecycle_manager
         ids = (reg.agent_ids_of_session(session_id) if session_id is not None
@@ -2266,8 +2619,8 @@ class CtxWeftRuntime:
         """该 agent 的详情视图（spec 5）。未登记的 `agent_id` 抛 `AgentNotFound`。
 
         `current_task_status`：经 `_task_managers[session_id].get_task(current_task_id)`
-        取。两处都可能落空——该 session 的 TaskManager 已被 `_release_session` 回收
-        （会话终结/取消已空闲会话后 `_task_managers.pop`），或 task 本身查不到——两种
+        取。两处都可能落空——该 session 的 TaskManager 不在内存里（冷启动尚未
+        `recover_agent` 过，或持有方 `forget_session` 过），或 task 本身查不到——两种
         情况都不是编程错误，是「这条任务此刻在内存里已经不可寻」的正常状态，因此都
         原样降级成 `None`，不崩、不拿一个假状态字符串糊弄调用方。
         """
@@ -2306,8 +2659,14 @@ class CtxWeftRuntime:
 
         守卫：不存在 / `terminated` / `running` 一律抛错，**不排队**
         （`AgentLifecycleManager.assert_can_receive`）；调用方自行重试，或先
-        pause/cancel。`session_id` 只用于提前发现「这个 agent 不属于该 session」这类
-        误用，**不参与路由**——`agent_id` 全局唯一，路由永远只看 `current_task_id`。
+        pause/cancel。但「不存在」的判据是**事件日志里也没有**，不是「内存 registry 里
+        没有」——registry 的一次 miss 只说明还没喂进来（见 `_hydrate_agent_for_send`），
+        故守卫排在自愈之后。
+
+        `session_id` 不参与路由（`agent_id` 全局唯一，路由永远只看 `current_task_id`），
+        但有两个用途：提前发现「这个 agent 不属于该 session」这类误用；以及给上面那次
+        自愈当精确索引——手握 session_id 就只装填这一个 session，落不到
+        `rebuild_agent` 的全量 sweep。调用方**应该**传它。
 
         路由三条路径（spec §4.2）：
 
@@ -2327,14 +2686,20 @@ class CtxWeftRuntime:
         （改写一个已在跑的 task 的「有没有人在」不属于本入口的职责）。见 `Task.unattended`。
         """
         reg = self._agent_lifecycle_manager
-        reg.assert_can_receive(agent_id)
         rec = reg.record_of(agent_id)
         if rec is None:
-            raise AgentNotFound(f"unknown agent: {agent_id}")
+            await self._hydrate_agent_for_send(agent_id, session_id)
+            rec = reg.record_of(agent_id)
+            if rec is None:
+                raise AgentNotFound(f"unknown agent: {agent_id}")
         if session_id is not None and session_id != rec.session_id:
             raise ValueError(
                 f"agent {agent_id} belongs to session {rec.session_id!r}, not {session_id!r}"
             )
+        # 守卫在装填**之后**：装填前 registry 的 miss 只说明「还没喂进来」，不说明
+        # 这个 agent 不能收消息。放在前面会让上面那次自愈永远执行不到（`status_of`
+        # 对未登记的 id 抛 `AgentNotFound`，而它正是本方法要修的那个误判）。
+        reg.assert_can_receive(agent_id)
 
         current = rec.current_task_id
         if current and not self._task_is_terminal(rec.session_id, current):
@@ -2352,12 +2717,56 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
         )
 
+    async def _hydrate_agent_for_send(self, agent_id: str, session_id: str | None) -> None:
+        """`send_message` 的 registry-miss 自愈：把这个 agent 装填回 ALM。
+
+        **为什么 miss 是常态而不是错误**：2026-09-08 起 ALM 是**只增不删的缓存**，
+        回收由持有方显式发起（`forget_session` / `forget_agent`）——host 会按自己的
+        策略把久未使用的会话逐出内存。此外进程刚起来时 registry 整个是空的（恢复已改成
+        用户驱动的按需装填，启动不再预热）。三种情形都不是"这个 agent
+        不存在"，只是"还没喂进来"。事实一直在事件日志里。
+
+        （2026-09-08 之前 miss 还有第四个、也是最常见的来源：会话一跑完
+        `_fire_session_done` → `_release_session` 就把该 session 全部 record 摘掉，
+        于是「正常结束的会话再发一条消息」必然撞 `AgentNotFound`。那条已经不再发生，
+        但本方法仍是必要的——上面三种来源都还在。）
+
+        与 `_hydrate_agent_for_cold_resume` 同一形状、同一理由（那边是冷 HITL 应答，
+        这边是终态后续聊）：手握 `session_id` 就用 `_load_agents_of` 精确装填这一个
+        session，**不让 `recover_agent` 自己的 registry-miss 自愈（`rebuild_agent` →
+        扫全部 active session）替我们兜底**——一次续聊不该退化成 O(active session 数)
+        次事件日志读取。没有 `session_id` 的调用方才落到那条 sweep（`rebuild_agent`），
+        它仍是「只有 agent_id、不知道 session」时的最后手段。
+
+        **走 `rebuild_session` 而不是只调 `_load_agents_of`**：后者只喂 agent record，
+        而 `send_message` 的注入分支会 `_cancel_pending_hitl_of`（`waiting_human` 的
+        agent 收到外部消息 ⟹ 旧提问不会再有人答了）——那一步读的是 `hitl_registry`
+        的内存。registry 冷着的话它一条都找不到，旧提问就成了「有 HitlOpened、无终局
+        事件」的孤儿，重启后 `rebuild_hitl` 会把它当未决恢复出来，还会被 `resume_agent`
+        的 `_pause_bubble_of` 误当成暂停气泡放行一次冷续跑。装填要装齐。
+
+        **只装填 ALM + HITL，不建 TaskManager**：TM 那一半由 `_start_task_for_agent`
+        已有的探测接住（`tm is None or not tm.is_alive()` → `recover_agent(keep_alive=True)`），
+        那时 `record_of` 已经命中，`recover_agent` 内部的 `rebuild_agent` 直接返回，
+        不会触发 sweep。两段各管一半，不重复。
+
+        **绝不抛**：`rebuild_session` 自己就是绝不抛的。装填不成，调用方那边
+        `record_of` 仍是 None，照常抛 `AgentNotFound`——那才是真的查无此 agent。
+        """
+        if session_id is None:
+            # 没有 session 语境 → 只能走全量 sweep（`rebuild_agent` 内部扫全部 active
+            # session）。HITL 那半在这条路上装不了：`rebuild_hitl` 按 session 定址，而
+            # 这里恰恰不知道是哪个 session。调用方**应该**传 session_id。
+            await self.rebuild_agent(agent_id)
+            return
+        await self.rebuild_session(session_id)
+
     def _task_is_terminal(self, session_id: str, task_id: str) -> bool:
         """`current_task_id` 是否已终态——`send_message` 路由的唯一判据。
 
         TM 或 task 查无 -> 视为终态：宁可保守地新建一个 task，也不要把外部消息注进
-        一个此刻已经不可寻的旧 task（比如该 session 的 TM 已被 `_release_session`
-        回收——见 `get_agent` 同一判据下的降级口径）。
+        一个此刻已经不可寻的旧 task（比如该 session 的 TM 不在内存里——见 `get_agent`
+        同一判据下的降级口径）。
         """
         tm = self._task_managers.get(session_id)
         if tm is None:
@@ -2418,10 +2827,14 @@ class CtxWeftRuntime:
         normalized, _event_jsonable = await self._validate_and_normalize_content(
             content, session.id, tenant_id=session.tenant_id,
         )
+        mem_id = generate_id("mem")
         await self._ingest_user_turn(
-            scope, pctx, normalized, event_id=generate_id("mem"),
+            scope, pctx, normalized, event_id=mem_id,
             task_id=target.id, source="send_message",
         )
+        # 撤销这一轮时要靠它把这条消息 fold 掉（`_revert_round`）。记在落库那一刻，
+        # 不做事后推断——连发两条时「取视图最后一条 user」会撤错人。
+        target.user_prompt_memory_id = mem_id
         if _suspended_on_live_children(tm, target):
             logger.info(
                 "_inject_user_turn: task %s is SUSPENDED on live children — message "
@@ -2443,7 +2856,18 @@ class CtxWeftRuntime:
         # 只有 USER_CANCEL / FAILURE_THRESHOLD / PAUSE_ABANDON 三个值，后两个分别专属
         # 熔断跳闸与暂停弃子链路，语义上更不贴切；USER_CANCEL 是三者里最接近的近似值
         # （旧提问的作废终究是由用户的动作触发的），故不为此新增枚举值。
-        await self._cancel_pending_hitl_of(agent_id, session_id=session_id)
+        # 开窗要先于收口与重排：两者都改内存态，而这一轮在 LLM 开口之前随时可能被撤销。
+        # **只在这里开**，不在函数入口——上面那条 `_suspended_on_live_children` 早退分支
+        # 没有为这条消息新开的 run（消息只是写进对话，等 `_try_resume_parent` 自然唤醒），
+        # 没有「这一轮」可言，也就没有提交点会来关窗（spec 2026-09-09 §6）。
+        stale_hitl = next(
+            (v.id for v in self.list_pending_hitl(session_id=session_id)
+             if v.agent_id == agent_id and not v.resolved),
+            "",
+        )
+        tm.begin_round(target.id, owns_task=False, hitl_id=stale_hitl)
+        # `defer=True`：旧气泡的收口跟着这一轮走——撤销时它要回到 pending。
+        await self._cancel_pending_hitl_of(agent_id, session_id=session_id, defer=True)
         # 清旧进展，同 `_inject_user_reply`：新消息意味着有新工作要做，陈旧的
         # outputs/process_report 留着会让 success-guardrail 误判"已经产出过"。
         target.outputs = None
@@ -2452,6 +2876,16 @@ class CtxWeftRuntime:
         requeued = await tm.requeue_for_message(task_id)
         if requeued:
             asyncio.create_task(tm.drain())
+        else:
+            # 重排是 no-op（task 已在队列 / 已在跑 / 已终态）→ **没有为这条消息新开的
+            # run**，也就没有提交点会来关窗。窗口留着就是永久缓冲：这条消息以及它收口
+            # 掉的气泡再也不会落盘。就地提交，让它与改造前同样立刻算数。
+            #
+            # 这是 spec 2026-09-09 §6 说的那个例外：消息被并进一个已经在跑/将跑的
+            # task，没有「这一轮」可言，撤销也就无从谈起。
+            await tm.commit_round(task_id)
+            for req in self.hitl_registry.claim_pending_for_task(session_id, task_id):
+                await self.hitl.commit(req.id)
         return target.id
 
     async def _start_task_for_agent(
@@ -2468,9 +2902,9 @@ class CtxWeftRuntime:
         挂好 done/idle 回调，这里只管 push 一个新 task 再补一次 drain，不重新接线。
 
         **"agent 还在 == TM 还在"不成立**（终审 CRITICAL 1，订正此前这条docstring
-        的错误断言）：`recover()` 冷启动只装填 `AgentLifecycleManager`（`_load_agents_of`），
-        从不建 TaskManager（"startup runs nothing"，见 `recover()` 自己的 docstring）——
-        一个刚被 `recover()` 装填、还没被任何 `/resume` 或冷 HITL 应答碰过的 agent，
+        的错误断言）：`rebuild_session` 只装填 `AgentLifecycleManager`（`_load_agents_of`），
+        从不建 TaskManager（`rebuild_*` = 喂内存不跑）——一个刚被装填、还没被任何
+        `/resume` 或冷 HITL 应答碰过的 agent，
         `record_of` 命中但 `self._task_managers[rec.session_id]` 会是纯粹的
         `KeyError`。这里因此先探测 TM 是否活着，缺失/已被顶替时调用
         `recover_agent(agent_id, keep_alive=True)` 走**同一条**事件重建路径（不另写
@@ -2482,6 +2916,16 @@ class CtxWeftRuntime:
         """
         reg = self._agent_lifecycle_manager
         rec = reg.record_of(agent_id)
+        if rec is None:
+            # 从前这里靠 `send_message` 的 `assert_can_receive` 兜底（未登记必先抛
+            # `AgentNotFound`），所以敢直接 `rec.session_id`。守卫现在排在自愈之后、
+            # 且自愈可能在这两步之间被并发的 `forget_session` 冲掉，那条隐含保证
+            # 没了——不补这一句就是 `AttributeError: 'NoneType' has no 'session_id'`，
+            # 一个比原错误更难查的形状。
+            raise AgentNotFound(
+                f"agent {agent_id!r} disappeared before its task could be started — "
+                f"the session may have been released concurrently; retry send_message"
+            )
         tm = self._task_managers.get(rec.session_id)
         if tm is None or not tm.is_alive():
             await self.recover_agent(agent_id, keep_alive=True)
@@ -2493,8 +2937,7 @@ class CtxWeftRuntime:
                 # 那条会直接从上面 `recover_agent` 里抛出、传播到这里之前）。防御性地
                 # 给一个可诊断的类型化错误，而不是让下面的 `rec.session_id` 撞
                 # AttributeError。
-                from ctx_weft.core.models.errors import AgentNotFound as _ANF
-                raise _ANF(
+                raise AgentNotFound(
                     f"agent {agent_id!r} disappeared during cold recovery — "
                     f"the session may have been released concurrently; retry send_message"
                 )
@@ -2530,7 +2973,12 @@ class CtxWeftRuntime:
             interaction_mode="auto" if unattended else "interactive",
             created_at=now_utc(),
         )
-        await tm.push_task(task, user_prompt_event_jsonable=event_jsonable)
+        # `provisional=True`：一条用户消息开出的新一轮，在 LLM 真的开口之前不算发生
+        # （spec 2026-09-09）。这个 task 的创建/启动事件先只到达进程内状态机，act 收到
+        # 首个 chunk 才提交、用户在那之前按暂停则整轮丢弃。委派子任务不走这条。
+        await tm.push_task(
+            task, user_prompt_event_jsonable=event_jsonable, provisional=True,
+        )
         reg.set_current_task(agent_id, task.id)
         asyncio.create_task(tm.drain())
         return task.id
@@ -2562,7 +3010,22 @@ class CtxWeftRuntime:
                 f"agent_id mismatch: reply says {reply.agent_id!r}, "
                 f"hitl {reply.hitl_id} belongs to {pending.agent_id!r}"
             )
-        resolved = await self.hitl.resolve(reply)
+        # 开窗必须先于 `resolve`：那一步会取走等待槽、改内存态，而这一轮在 LLM 真的
+        # 开口之前随时可能被整体撤销（spec 2026-09-09）。`owns_task=False` —— 这条应答
+        # 唤醒的是一个**既有** task，撤销只把它退回开窗前的样子，不摘掉它。
+        #
+        # **开不出窗就不推迟**：没有 TaskManager（冷启动、会话已被逐出内存）时这条应答
+        # 不会经由本进程的某个 run 走到提交点，推迟等于让它永远停在待终局——那正是
+        # `reply_to_hitl` 一向要避免的「人答了但会话不动」。开不出窗就照旧一步终局。
+        round_task_id = ""
+        if pending is not None and pending.task_id:
+            _tm = self._task_managers.get(pending.session_id)
+            if _tm is not None:
+                _tm.begin_round(pending.task_id, owns_task=False, hitl_id=pending.id)
+                round_task_id = pending.task_id
+        # `defer`：冷应答只登记待终局，`HitlResolved` 留到 act 的提交点才发。
+        # 热投递（有活等待槽）不受影响，`HitlService` 会就地终局——那条路上没有新一轮。
+        resolved = await self.hitl.resolve(reply, defer=bool(round_task_id))
         if resolved is None:
             return None                       # 幂等：已终局，不重复续跑
         if resolved.claimed:
@@ -2764,8 +3227,12 @@ class CtxWeftRuntime:
         from ctx_weft.core.utils.content import content_with_prefix
         from ctx_weft.protocols.hitl import HITL_OUTCOME_REJECTED
 
-        message = req.decision.message if req.decision else ""
-        outcome = req.decision.outcome if req.decision else ""
+        # `effective_decision` 而不是 `decision`：两阶段之下（spec 2026-09-09）冷应答
+        # 在提交点之前只落成 `pending_decision`，而本方法正是跑在提交点之前的——读
+        # `decision` 会拿到 None，用户说的那句话会静默变成空串注进对话。
+        eff = req.effective_decision
+        message = eff.message if eff else ""
+        outcome = eff.outcome if eff else ""
         is_edit_interrupt = (
             isinstance(req.delivery, UserTurnDelivery)
             and req.delivery.preface == PREFACE_AFTER_INTERRUPT_EDIT
@@ -2786,10 +3253,14 @@ class CtxWeftRuntime:
         # 应答可能被重试（host 超时重发 / 用户连点）：`resolve()` 对已终局请求已幂等
         # no-op（不会二次调用本方法），但这里再加一道幂等键——`id` 是 memory 层的幂等键
         # （provider 已实现），确定性地由 hitl_id 派生（spec §7.3/§12.2）。
+        reply_mem_id = f"hitlreply:{req.id}"
         await self._ingest_user_turn(
-            scope, pctx, content, event_id=f"hitlreply:{req.id}",
+            scope, pctx, content, event_id=reply_mem_id,
             task_id=target.id, source="hitl_reply",
         )
+        # 撤销这一轮时要靠它把这条答复 fold 掉（`_revert_round`）。与 `_inject_user_turn`
+        # 那条同一口径：记在落库那一刻，不做事后推断。
+        target.user_prompt_memory_id = reply_mem_id
 
     async def _ingest_user_turn(
         self, scope: "MemoryAddress", pctx: ProviderContext,
@@ -2872,7 +3343,7 @@ class CtxWeftRuntime:
             if (req.id == skip_hitl_id
                     or req.legacy_origin
                     or not isinstance(req.delivery, UserTurnDelivery)
-                    or req.decision is None
+                    or req.effective_decision is None
                     or not req.task_id
                     or req.task_id in parked_or_inflight_task_ids):
                 continue
@@ -2937,69 +3408,15 @@ class CtxWeftRuntime:
         ups = [r for r in view if r.role == "user"]
         return content_to_text(ups[-1].content) if ups else ""
 
-    async def recover(self) -> int:
-        """Recover every still-active session (SessionCreated, no SessionFinished) after a restart.
-
-        Decision is made **in core, from events** (no host projection, no full replay):
-        the in-memory ``HitlRegistry`` is refilled (so ``/hitl/pending`` and the reply endpoints
-        work) and the session is registered with the ``SessionRegistry`` for membership lookup.
-
-        2026-09-04（Task 12）前这里还会**代 TaskManager**（进程刚起来，`_task_managers`
-        还是空的）发一条会话级队列聚合信号——那条信号唯一的消费者（会话状态机）早已
-        降格，信号本身现已停发、其事件类型也已于 2026-09-05 删除。
-        **恢复期的可观测性现在整个由下面这段 ALM 装填 + `AGENT_*` 现状广播承担**：
-        每个 session 的 agent 记录也在这里装填进 `AgentLifecycleManager`（2026-09-04
-        spec §6.3 补上的一步）：此前只有 `recover_agent` 会调 `ALM.load()`，重启后
-        `list_agents` / `get_agent` / `send_message` 在第一条冷应答或 `/resume` 恰好
-        跑过那条路之前全部是瞎的（`list_agents` 空、`get_agent` 抛 `AgentNotFound`）。
-        装填之后 `ALM.load()` 会按折出来的现状发 `AGENT_*`（spec §6.4），host 投影
-        因此不会停在崩溃前的状态——细节见 `_load_agents_of` 与 `AgentLifecycleManager.load`。
-
-        So at startup **nothing drains/runs**: a waiting session waits for a reply, an interrupted
-        one waits for ``/resume``. No host callback — the session-level events are handled by the
-        host's existing subscribers (projection + SSE). Call in the app lifespan after providers
-        are registered, before serving.
-
-        **返回恢复的 agent 数**（spec §6.2：报告单位换成 agent），不是 session 数——
-        一个 session 可能挂 0 个、1 个或多个 agent，用 session 数汇报不出「这次恢复
-        实际装填了多少 agent 记录」这个更有意义的数字。
-        """
-        try:
-            session_ids = await self.event_store.list_active_session_ids()
-        except NotImplementedError:
-            logger.warning("Recovery: EventStore does not support list_active_session_ids — skipped")
-            return 0
-
-        total_agents = 0
-        for session_id in session_ids:
-            try:
-                # 恢复期不再有专门的「PAUSED_HITL vs INTERRUPTED」分支：装填内存 HITL 之后
-                # 「现状」由下面 ALM 装填时按折出来的 AgentView.status 广播，不再由这里
-                # 代 TM 合成一条会话级信号（2026-09-04 Task 12 起 `announce_queue_state`
-                # 及其队列聚合事件已停发）。
-                # 「复活不是一种状态」的落地（docs/events-v2.md §2.1.1）。
-                # tenant 必须先解出来：`_task_managers` 此刻恒为空（见下）,`_tenant_for_session`
-                # 会落到读事件日志那条路（SESSION_CREATED 首条即含真 tenant）——
-                # `register_session`、ALM 装填都要用同一个值，否则由它们派生的事件会落错
-                # 租户（总账 A5）。
-                tenant_id = await self._tenant_for_session(session_id)
-                await self.rebuild_hitl(session_id)
-                self._session_registry.register_session(session_id, tenant_id=tenant_id)
-                total_agents += await self._load_agents_of(session_id, tenant_id=tenant_id)
-            except Exception:
-                logger.exception("Recovery: failed to recover session %s", session_id)
-
-        return total_agents
-
     async def _load_agents_of(self, session_id: str, *, tenant_id: str) -> int:
         """据事件折出该 session 的 `AgentView` 并喂进 ALM，返回装填条数。
 
-        `recover()` 与（Task 13 起的）单 agent 恢复共用的唯一装填路径——「恢复是
+        `rebuild_session` 与（Task 13 起的）单 agent 恢复共用的唯一装填路径——「恢复是
         喂进来、不是查回去」（spec §3.1），折叠逻辑只此一份，避免两边各写一套
         随时间漂移。
 
-        **绝不抛**：`ALM.load()` 自己的纪律是「这条路要在 `recover()` 的每个
-        session 上都跑通，抛一次就卡住整条恢复链」（见其 docstring）——本方法与它
+        **绝不抛**：`ALM.load()` 自己的纪律是「这条路抛一次就卡住整条恢复链」
+        （见其 docstring）——本方法与它
         同一口径。session 投影缺失、或有投影但 `template_id` 为空（两者都是恢复期
         真实会遇到的缺口：事件日志损坏、或存量会话从未记过模板）→ 记一条 warning、
         用 `""` 当 fallback 传给 `ALM.load()`（它已经对无法解析的模板回落默认
@@ -3020,9 +3437,14 @@ class CtxWeftRuntime:
             fallback_template_id = ""
         else:
             fallback_template_id = sess_proj.template_id
+        # 未提交窗口里的 task（spec 2026-09-09）折不进 `view`——它们的 `TASK_CREATED`
+        # 还没落盘。把它们的 id 交给 `load()`，让它别拿日志折出来的旧值把路由判据倒回去。
+        tm = self._task_managers.get(session_id)
+        protected = set(tm.open_round_task_ids) if tm is not None else set()
         return await self._agent_lifecycle_manager.load(
             view.agents, session_id=session_id,
             tenant_id=tenant_id, fallback_template_id=fallback_template_id,
+            protected_current_tasks=protected,
         )
 
     async def rebuild_hitl(self, session_id: str) -> int:
@@ -3143,8 +3565,9 @@ class CtxWeftRuntime:
     async def rebuild_agent(self, agent_id: str) -> bool:
         """据事件把**单个** agent 装填进 ALM；找不到返回 False。
 
-        `rebuild_hitl` 的 agent 侧对应物（2026-09-04 spec §6.2）。用于 `recover()`
-        没跑过的进程（测试、嵌入场景），或运行期发现某个 agent 记录缺失时的按需自愈。
+        `rebuild_hitl` 的 agent 侧对应物（2026-09-04 spec §6.2）。用于「只有 agent_id、
+        不知道 session」的调用方，或运行期发现某个 agent 记录缺失时的按需自愈。手上有
+        session_id 的应当直接用 `rebuild_session`，别落到本方法的全量 sweep。
 
         **实现是 `_load_agents_of` 的一次调用后再查一次**，不另写折叠逻辑：
         `agent_id` 全局唯一但事件按 session 分区存（spec §6.1），要定位它就得先知道
@@ -3163,7 +3586,7 @@ class CtxWeftRuntime:
         """据事件把**所有 active session** 的 agent 装填进 ALM，返回总条数。
 
         `rebuild_all_pending_hitl` 的 agent 侧对应物。不发中断、不 drain、不派发任何
-        任务——与 `recover()` 的「启动时 nothing runs」同一纪律，区别只是它不碰 HITL。
+        任务——与 `rebuild_session` 的「装填不跑」同一纪律，区别只是它不碰 HITL。
         """
         try:
             session_ids = await self.event_store.list_active_session_ids()
@@ -3353,6 +3776,18 @@ class CtxWeftRuntime:
             async for outcome in driver.run(state, loop_ctx):
                 if outcome.state_patch:
                     state = state.apply_patch(outcome.state_patch)
+        except RoundDiscarded:
+            # 这一轮在 LLM 开口之前被用户中止 → 当作没发生过（spec 2026-09-09）。
+            #
+            # 这里**不需要**任何抑制：窗口在整条 unwind 路径上都还开着（丢弃是
+            # `_run_task` 在最后一步做的），所以 `finally` 照常发的那条 RUN_FINISHED
+            # 同样落进缓冲、同样被一起丢掉。抛出点已经在窗口里发过 `TASK_CANCELED`
+            # 把 agent 送回 `idle`，那条也一样。原样重抛，交给 `_run_task` 收尾。
+            #
+            # 反过来说：**丢弃之后**再发任何事件都会直接落盘。所以顺序不能动——
+            # 「先在窗口里把状态摆平，最后一步才关窗丢弃」是这套设计的全部纪律。
+            logger.info("_run_loop: task %s discarded before first chunk", task.id)
+            raise
         except HitlPark as park:
             # run 的结局：这次执行停在「等人答一句」。**task 变成什么不在这里决定**
             # （Task 4）：TaskManager 据本 outcome 走处置表落 AWAITING_HUMAN 并发
@@ -3559,7 +3994,7 @@ class _SessionTaskRunner:
 
     原 _make_task_runner 闭包的显式化：闭包捕获 → 实例字段。恢复播种不再靠
     per-runner 缓存——agent 身份/配置的唯一住所是 runtime 级 `AgentLifecycleManager`
-    registry（`lm`），恢复路径由 `recover_agent`/`recover()` 经共用的
+    registry（`lm`），恢复路径由 `recover_agent`/`rebuild_session` 经共用的
     `_load_agents_of` 显式调 `lm.load()` 装填。
     assigned_agent_id 回填 / started_at / TASK_STARTED 均归 TaskManager（两阶段契约）。
     """

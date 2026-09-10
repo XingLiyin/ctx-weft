@@ -9,7 +9,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.models.discriminators import CancelReason, InterruptReason, TaskErrorCode
 from ctx_weft.core.models.status import PARKED_TASK_STATUSES, TERMINAL_TASK_STATUSES
@@ -18,6 +18,7 @@ from ctx_weft.core.orchestrator.task.failure_threshold import plan_threshold_tri
 from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task.reopen import build_reopen_prompt
 from ctx_weft.core.models.errors import crash_error_code, crash_run_outcome
+from ctx_weft.core.loop.park import RoundDiscarded
 from ctx_weft.core.orchestrator.task.disposition import (
     RunOutcome,
     RunOutcomeKind,
@@ -83,6 +84,10 @@ class TaskManager:
         # 派发后登记的「真实执行 agent id」（task_id → binding.agent_id）——
         # 同 agent 串行判定对在跑任务用真值，只有队列候选才走 effective_agent_id 预测。
         self._running_agents: dict[str, str] = {}
+        #: task_id → 这一轮的开窗快照（spec 2026-09-09）。键存在即「窗口开着」：
+        #: 这个 task 的事件只到达进程内状态机，不落盘、不到 host，直到 act 收到本轮
+        #: 第一个 chunk 才提交。详见 `EventBus` 的类 docstring 与 `begin_round`。
+        self._rounds: dict[str, RoundSnapshot] = {}
         self._lock = asyncio.Lock()
         self._session: Session | None = None  # 注入后供 failure_counter 维护使用
         self._event_bus: "EventBus | None" = event_bus
@@ -91,7 +96,7 @@ class TaskManager:
         self._hooks = TaskManagerHooks()
         # 归属权谓词：runtime 注入，返回本 TM 是否仍是该 session 的当前 owner。
         # None = 不受管（永远视为 current，保持旧行为）。被同 session 上更新的 TM
-        # 顶替后返回 False → 迟到的收尾变 no-op（不发 SessionFinished、不 _release_session）。
+        # 顶替后返回 False → 迟到的收尾变 no-op（不发 SessionFinished、不清新一轮的控制信号）。
         # pause 弃子窗口标记（runtime.pause_session 置位、_on_idle/_release 复位）：
         # 置位期间任务取消不改 session 状态、run 收尾 staged 直接丢弃。
         self._pause_abandon = False
@@ -202,8 +207,18 @@ class TaskManager:
         parent_task_id: str | None = None,
         *,
         user_prompt_event_jsonable: "str | list[dict] | None" = None,
+        provisional: bool = False,
     ) -> None:
         """入队一个新任务并发 TASK_CREATED。
+
+        ``provisional=True``：这个 task 由一条**用户消息**开出（`send_message` 的新建
+        分支），在 LLM 真的开口之前它不算发生——开一道未提交窗口（`begin_round`，
+        `owns_task=True`），本方法发出的 `TASK_CREATED` 连同随后的 `TASK_STARTED` /
+        `RUN_STARTED` / `LLM_PROMPT_SENT` 一并只到达进程内状态机，不落盘、不到 host。
+        act 收到本轮第一个 chunk 时 `commit_round` 补投，用户在那之前按暂停则
+        `discard_round` 整轮丢弃。
+        委派子任务（`_flush_staged`）**不走这条**：它们不是一轮对话的开端，且
+        「创建即落盘」对它们仍然必要（见下方注释）。
 
         ``user_prompt_event_jsonable``：TASK_CREATED 里 user_prompt 的 event 侧载荷，
         由**入口**（`SessionRegistry.create_session` ← `CtxWeftRuntime.start_session`）
@@ -219,6 +234,9 @@ class TaskManager:
         """
         # 统一用 TaskManager 级别的 max_retries，覆盖 Task 模型的硬编码默认值
         task.max_retries = self._task_max_retries
+        # 开窗**必须先于**下面那条 TASK_CREATED——晚一步它就已经落盘了。
+        if provisional:
+            self.begin_round(task.id, owns_task=True)
         self._tasks[task.id] = task
         if parent_task_id:
             self._parent_map[task.id] = parent_task_id
@@ -254,6 +272,151 @@ class TaskManager:
             EventType.TASK_CREATED, task_id=task.id,
             payload=task_payload(task, user_prompt_jsonable=user_prompt_jsonable),
         )
+
+    # ── 未提交窗口（spec 2026-09-09）────────────────────────────────────────
+    #
+    # 窗口的所有权在 TaskManager：它是 task 生命周期的主人，「这一轮算不算数」是它的
+    # 判断。总线只负责执行分流（谁收得到），act 只负责在正确的时刻喊一声提交或丢弃。
+
+    def begin_round(
+        self, task_id: str, *, owns_task: bool, hitl_id: str = "",
+    ) -> None:
+        """开窗 + 拍这一轮的回滚快照。
+
+        ``owns_task``：这个 task 是不是**这条消息开出来的**。
+          · True（`send_message` 的新建分支）—— 丢弃要连 task 一起摘掉，agent 回 `idle`。
+          · False（消息注入一个既有 task：HITL 冷续跑 / `/messages` 注入）—— task 早就
+            存在、是一段正在进行的对话，丢弃只把它退回开窗前的样子，agent 回
+            `waiting_human`。
+
+        ``hitl_id``：被这条消息收口的那个旧气泡（有的话）。丢弃时经 `revert_round`
+        钩子 `release` 回 pending —— 那正是「撤销前的世界」。
+
+        幂等：重复开窗不覆盖已拍的快照、也不清空已攒的缓冲（retry 重排会重进同一条路径）。
+        """
+        if not task_id or task_id in self._rounds:
+            return
+        task = self._tasks.get(task_id)
+        self._rounds[task_id] = RoundSnapshot(
+            owns_task=owns_task,
+            hitl_id=hitl_id,
+            task_status=getattr(task, "status", ""),
+            retry_count=getattr(task, "retry_count", 0),
+            outputs=getattr(task, "outputs", None),
+            process_report=getattr(task, "process_report", None),
+            process_report_at=getattr(task, "process_report_at", None),
+        )
+        bus = self._event_bus
+        if bus is not None:
+            bus.begin_provisional(task_id)
+
+    def is_round_open(self, task_id: str) -> bool:
+        return task_id in self._rounds
+
+    def round_hitl_id(self, task_id: str) -> str:
+        """这一轮收口了哪个旧气泡（没有则空串）。供 `revert_round` 钩子 release 用。"""
+        snap = self._rounds.get(task_id)
+        return snap.hitl_id if snap is not None else ""
+
+    @property
+    def open_round_task_ids(self) -> "frozenset[str]":
+        """当前开着窗口的 task id。
+
+        两个读者：`Runtime._load_agents_of` 用它保住路由判据（这些 task 的
+        `TASK_CREATED` 还没落盘，折不进 `AgentView`，热重装若照 view 覆盖
+        `current_task_id` 就会把它倒回上一个已终态的 task）；`Runtime.pause_session`
+        用它决定要不要跳过排队弃子（见那里）。
+        """
+        return frozenset(self._rounds)
+
+    async def commit_round(self, task_id: str) -> None:
+        """这一轮算数了：按序补投缓冲里的事件，关窗，丢掉快照。
+
+        触发点有两个，**都不在本类**：act 收到本轮第一个 chunk（正常路径），以及
+        `_run_task` 的收尾兜底（见那里——失败、outage 耗尽、装配炸掉一律提交，
+        只有用户主动中止才丢弃）。
+        """
+        if self._rounds.pop(task_id, None) is None:
+            return
+        bus = self._event_bus
+        if bus is not None:
+            await bus.commit_provisional(task_id)
+
+    async def discard_round(self, task_id: str) -> None:
+        """这一轮当作没发生过。**只用于用户主动中止**（首 chunk 之前按暂停 / 取消）。
+
+        五步，顺序就是这段代码的全部要点——**每一步都必须发生在关窗之前**，窗口一关，
+        此后发的任何事件都直接落盘：
+
+        1. `revert_round` 钩子：memory 里那条用户消息 `fold` 掉、被收口的旧气泡
+           `release` 回 pending（两样都在 orchestrator 之下，TM 够不到，见 hooks.py）。
+        2. 还原快照：`status` / `retry_count` / `outputs` / `process_report*`。后三样
+           是 `_inject_user_turn` 就地清掉的，没有别处存过旧值。
+        3. 发一条把 agent 拨回原位的 task 事件——**这是关键的一步**，且必须先于第 4 步
+           （事件的 agent_id 从 `_running_agents` 反查，先清就发不出去了）：
+           · owns_task → `TASK_CANCELED`（ALM 映射成 `SETTLED` → `idle`）
+           · 否则     → `TASK_AWAITING_HUMAN{hitl_id}`（ALM → `waiting_human`）
+           两者都是 ALM 本来就有的转移，不需要给它引入任何可回滚状态；而它们自己也在
+           窗口里，随缓冲一起被丢掉 —— **内存状态正确，日志干净**。
+        4. 队列与登记复位：新建的连 task 一起摘；既有的把重排塞进去的那个条目撤掉。
+        5. 关窗丢缓冲。
+        """
+        snap = self._rounds.get(task_id)
+        if snap is None:
+            return
+
+        # ① TM 够不到的那部分
+        if self._hooks.revert_round is not None:
+            try:
+                await self._hooks.revert_round(task_id)
+            except Exception:
+                logger.exception(
+                    "discard_round: revert_round hook failed for task %s "
+                    "(继续丢弃——一次撤销失败不该把暂停变成 run 崩溃)", task_id)
+
+        task = self._tasks.get(task_id)
+        if task is not None and not snap.owns_task:
+            # ② 还原被这条消息就地改掉的字段
+            task.status = snap.task_status
+            task.retry_count = snap.retry_count
+            task.outputs = snap.outputs
+            task.process_report = snap.process_report
+            task.process_report_at = snap.process_report_at
+
+        # ③ 把 agent 拨回原位（事件在窗口里，只到 ALM，不落盘）。
+        #
+        #    **必须先于下面的清理**：`_emit` 的 agent_id 是从 `_running_agents` /
+        #    `Task.assigned_agent_id` 反查的，先清后发会发出一条没有 agent_id 的事件，
+        #    而 ALM 的 `handle_event` 对没有 agent_id 的事件直接返回——agent 就永远停在
+        #    `running` 了。（这条踩过一次，别再把顺序调回去。）
+        if snap.owns_task:
+            await self._emit(
+                EventType.TASK_CANCELED, task_id=task_id,
+                payload={"reason": "discarded_before_first_chunk"},
+            )
+        else:
+            await self._emit(
+                EventType.TASK_AWAITING_HUMAN, task_id=task_id,
+                payload={"hitl_id": snap.hitl_id,
+                         "reason": "discarded_before_first_chunk"},
+            )
+
+        # ④ 队列与登记复位。用 `cancel` + `unmark_running` 而**不是** `mark_complete` /
+        #    `mark_failed`：后两者会把 task_id 塞进 `_completed`（给依赖解阻塞用的
+        #    「已了结」集合）。一轮没发生过的 task 不该出现在那里。
+        self._queue.cancel(task_id)
+        self._queue.unmark_running(task_id)
+        self._running_agents.pop(task_id, None)
+        self._running_tasks.discard(task_id)
+        self._staged.pop(task_id, None)
+        if snap.owns_task:
+            self._tasks.pop(task_id, None)
+
+        # ⑤ 关窗——必须最后
+        self._rounds.pop(task_id, None)
+        bus = self._event_bus
+        if bus is not None:
+            bus.discard_provisional(task_id)
 
     def stage_task(
         self,
@@ -369,6 +532,8 @@ class TaskManager:
             binding = await self._runner.assemble(task_id)
         except Exception as e:
             logger.exception("Task %s assembly failed: %s", task_id, e)
+            # 装配就炸了也算数（同下方收尾兜底的理由）：先提交，再发失败事件。
+            await self.commit_round(task_id)
             await self._handle_task_failure(
                 task_id, error=str(e), exc=e, reason=InterruptReason.ASSEMBLY_FAILURE,
             )
@@ -395,6 +560,19 @@ class TaskManager:
         try:
             try:
                 outcome = await self._runner.execute(binding, task_id)
+            except RoundDiscarded:
+                # 这一轮在 LLM 开口之前被用户中止（spec 2026-09-09）：整轮抹掉。
+                #
+                # **不走 `apply_run_outcome`**——那会发一条 task 状态事件，而窗口这时
+                # 已经要关了，那条事件会直接落盘，等于白丢。agent 回 `idle` 由抛出点
+                # 在窗口内发的那条 `TASK_CANCELED` 负责（ALM 映射成 `SETTLED`），到这里
+                # 内存状态已经摆平，只剩「关窗 + 抹痕迹」。
+                #
+                # `discard_round` 必须是本分支的**最后一步**，理由同上：窗口一关，
+                # 此后任何事件都直接落盘。
+                self._staged.pop(task_id, None)
+                await self.discard_round(task_id)
+                return
             except BaseException:
                 # cancel(CancelledError) / 异常退出：丢弃未 flush 的缓冲，
                 # 防止泄漏或日后 resume 时被误入队。再交回外层原有处理。
@@ -412,6 +590,17 @@ class TaskManager:
             # 处置**先于** _flush_staged：子任务一入队就可能跑完、回头唤醒父亲，而
             # `_try_resume_parent` 的门是 `parent.status == "SUSPENDED"`——父亲必须在
             # 子任务入队前落到 SUSPENDED（旧路径由 control tool 在 run 内写，同一时序）。
+            # 未提交窗口的收尾兜底：这一轮跑到了有结局的地步（正常收尾 / park /
+            # 挂起 / 失败都算），那它就**算数**——哪怕一个 chunk 都没吐出来（outage
+            # 重试耗尽、provider 永久错、装配炸掉）。补一次提交，让那条用户消息和这个
+            # task 如实进日志，`/resume` 才有东西可续。
+            #
+            # 只有用户主动中止走 `discard_round`，那条路由 act 抛 `RoundDiscarded`
+            # 触发、发生在这之前，到这里 `_rounds` 已经没有它了 → 本句 no-op。
+            #
+            # 位置要在 `apply_run_outcome` **之前**：那一句会发 task 状态事件，得先让
+            # 窗口里攒的 `TASK_CREATED` 出去，不然状态事件会先于创建事件落盘。
+            await self.commit_round(task_id)
             status = await self.apply_run_outcome(task_id, outcome)
             # runner 正常跑完才把本轮 spawn 的子任务入队（“一轮跑完之后 push”）
             await self._flush_staged(task_id)
@@ -421,6 +610,8 @@ class TaskManager:
                 logger.warning("Task %s failed (retriable): %s", task_id, e)
             else:
                 logger.exception("Task %s failed: %s", task_id, e)
+            # 同上：崩溃也算数，先提交再发终态事件。
+            await self.commit_round(task_id)
             # 崩溃入口：结局的构造在 `crash_run_outcome` 一处（retriable 的取法是崩溃
             # 专用的，与 outage 支硬编码的 False 不同源——契约见那个工厂的 docstring）。
             status = await self.apply_run_outcome(task_id, crash_run_outcome(e))
@@ -1067,7 +1258,7 @@ class TaskManager:
             await asyncio.gather(*list(self._background_asyncio_tasks), return_exceptions=True)
         # 归属权判定放在 gather **之后**：顶替可能发生在等待后台任务期间（旧 TM 的
         # background observe 拖久了，用户已开启下一轮、新 TM 接管了 session）。此时本 TM
-        # 已非 owner → 收尾变 no-op，绝不发 SessionFinished、绝不触发 _release_session，
+        # 已非 owner → 收尾变 no-op，绝不发 SessionFinished、绝不触发 on_session_done，
         # 否则会冲掉新一轮的 HITL 挂起态、把任务卡在 ACTIVE。
         if self._hooks.is_current is not None and not self._hooks.is_current():
             logger.info("TaskManager(%s): superseded during session-done; skip callback",
@@ -1243,11 +1434,19 @@ class TaskManager:
         return self._cancelled
 
     def is_alive(self) -> bool:
-        """本 TM 是否仍在驱动该 session（未终结、且仍是当前 owner）。
+        """本 TM 是否仍是该 session 的当前 owner。
 
-        供 recover_agent 判断"是否有活 TM 正在跑"，以决定新 TM 是否要跳过其在跑任务。
-        终结之后 runtime 的 `_release_session` 会把它从 `_task_managers` 摘掉，
-        `_is_current` 随即为 False——不再另存一份「已收尾」的闩。
+        供 recover_agent 判断"是否有活 TM"，以决定复用还是重建、以及新 TM 要跳过哪些
+        在跑任务。
+
+        ⚠ **它只表达「有没有被顶替」，不表达「这一轮跑完没有」**（2026-09-08 生命周期
+        改造后的口径收窄）。从前 `_fire_session_done` -> `_release_session` 会把终结的
+        TM 从 `_task_managers` 摘掉，`is_current` 随即为 False，于是这个方法顺带兼了
+        「未终结」的意思；现在 TM 常驻到显式 `forget_session`，一个已经发过
+        `SessionFinished` 的 TM 在这里照样是 alive——**这是有意的**：它确实还能接新
+        task（`drain` 只被 `_cancelled` 与 `is_current` 挡，`_fire_session_done` 不设
+        任何闩），`_start_task_for_agent` 因此可以直接复用它，不必重建一份。
+        要判断「这一轮是不是走完了」请用 `is_done()`。
         """
         return self._hooks.is_current is None or self._hooks.is_current()
 
@@ -1307,6 +1506,27 @@ class TaskManager:
         for tid in cancelled:
             await self._try_resume_parent(tid)
         return cancelled
+
+
+@dataclass
+class RoundSnapshot:
+    """开窗那一刻的可回滚状态（spec 2026-09-09）。
+
+    只装 **TaskManager 自己拥有** 的东西。memory 记录 id 挂在 `Task.user_prompt_memory_id`
+    上（落库那一刻记下的），HITL 与 ALM 归 runtime —— 那两样经 `revert_round` 钩子回退。
+
+    后三个字段是这份快照存在的主要理由：`_inject_user_turn` 会就地把 `outputs` /
+    `process_report` / `process_report_at` 清空（"新消息意味着有新工作要做"），而旧值
+    **没有任何别处存过**。不拍这一张，撤销就只能撤一半：消息没了，上一轮的进展也没了。
+    """
+
+    owns_task: bool
+    hitl_id: str = ""
+    task_status: str = ""
+    retry_count: int = 0
+    outputs: Any | None = None
+    process_report: str | None = None
+    process_report_at: "datetime | None" = None
 
 
 def task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None") -> dict:

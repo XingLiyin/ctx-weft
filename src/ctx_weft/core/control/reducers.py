@@ -561,6 +561,30 @@ def _apply(view: RunStateView, ev: Event) -> None:
             view.tasks[task_id] = task
             if not view.task_id:
                 view.task_id = task_id
+            # 被指派的 agent 的 `current_task_id` 在这里就更新，不等 `TASK_STARTED`
+            # 折出的 `AgentRunning`。
+            #
+            # 理由是内存那边有一个**无事件的写口**：`_start_task_for_agent` push 完新
+            # task 会立刻 `ALM.set_current_task(agent_id, task.id)`（"task 还没派发、但
+            # 路由已经必须认它"，见该方法自己的 docstring），而这一步不发任何事件。若
+            # 投影只从 `AGENT_*` 折这个字段，push 之后、`TASK_STARTED` 之前这段窗口里
+            # 投影里还是**上一个已终态的 task**——而 `ALM.load()` 是无条件整条覆盖
+            # record 的，这段窗口内任何一次热重装（`/resume`、冷 HITL 应答、
+            # `send_message` 的自愈重建都会调 `_load_agents_of`）都会把路由判据倒回去。
+            # 倒回之后下一条消息看到的 `current_task_id` 已终态 → 又新建一个 task，
+            # 而刚才那个还在队列里：同一个 agent 挂两个 task（`assert_can_receive` 拦
+            # 不住——那个窗口里 agent 还是 `idle`，`TASK_STARTED` 没发）。
+            #
+            # 补上这一折之后，内存写口与事件轴同源：`load()` 覆盖回来的就是同一个值，
+            # "恢复是喂进来、不是查回去"那条纪律不必为此开特例。
+            #
+            # `terminated` 粘滞：与下面 `_AGENT_STATUS_BY_EVENT` 分支同一口径，已终态的
+            # agent 不被迟到的 task 事件改回。
+            assigned = task_data.get("assigned_agent_id", "")
+            if assigned:
+                slot = view.agents.get(assigned)
+                if slot is not None and slot.status != "terminated":
+                    slot.current_task_id = task_id
 
     elif t == EventType.TASK_REQUEUED and ev.task_id:
         # 重排（observer active 或 review reopen）：状态回 PENDING、清旧产出；

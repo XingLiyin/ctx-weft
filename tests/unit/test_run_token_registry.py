@@ -49,7 +49,7 @@ async def test_pause_claim_cleared_with_latch():
     rt = _rt()
     rt._pausing.add("s1")
     rt._register_run_tokens("s1", "t1", root_run=True)   # 认领
-    rt._release_session("s1")
+    rt._release_round("s1")   # 一轮跑完的轻量清理（2026-09-08 前叫 _release_session）
     assert "s1" not in rt._pausing
     assert "s1" not in rt._pause_claimed
     rt._pausing.add("s1")                                 # 下一轮暂停

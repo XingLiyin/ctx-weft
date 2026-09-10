@@ -36,6 +36,19 @@ def _plant(rt, agent_id, parent, session_id="s1", status="idle"):
         reg._children.setdefault(parent, set()).add(agent_id)
 
 
+async def _reach_commit_point(rt, *, session_id="s1", task_id="t1"):
+    """把这一轮推到提交点——act 收到首个 chunk 时做的那两件事（spec 2026-09-09）。
+
+    `_plant_live_task` 刻意不 `set_runner`，这几个回归也不真的 drain 起一个 run，
+    所以提交点不会自己到来：`_inject_user_turn` 发出的 `TaskRequeued` 等事件停在
+    未提交窗口里、被它收口的气泡停在待终局。手动推一次，等价于「LLM 开口了」。
+    """
+    tm = rt._task_managers[session_id]
+    await tm.commit_round(task_id)
+    for req in rt.hitl_registry.claim_pending_for_task(session_id, task_id):
+        await rt.hitl.commit(req.id)
+
+
 def _plant_live_task(rt, agent_id, task_id, *, task_status, agent_status, session_id="s1"):
     """给 `_inject_user_turn` 的真实（未 mock）注入分支搭一个可跑的最小环境：
     一个真的 `TaskManager`（挂进 `rt._task_managers`，带 `session`、登记好 task）+
@@ -200,6 +213,10 @@ async def test_inject_requeue_does_not_emit_task_human_resolved():
 
     tid = (await rt.send_message("a1", "please continue")).task_id
     assert tid == "t1"
+
+    # 注入分支的事件停在未提交窗口里（spec 2026-09-09）——推到提交点再看日志。
+    # 本用例盯的是「发的是哪一条」，不是「什么时候发」。
+    await _reach_commit_point(rt)
 
     events = await rt.event_store.read_by_session("s1")
     types = [e.type for e in events]

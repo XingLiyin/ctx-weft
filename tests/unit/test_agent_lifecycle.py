@@ -37,7 +37,7 @@ class _SpyBus:
     async def emit(self, ev) -> None:
         self.events.append(ev)
 
-    def subscribe(self, _flt, _handler) -> None:
+    def subscribe(self, _flt, _handler, *, provisional: bool = False) -> None:
         pass
 
 
@@ -157,8 +157,8 @@ def test_agent_ids_of_session():
     assert reg.agent_ids_of_session("s1") == ["a"]
 
 
-def test_release_session_cleans_children_index():
-    """release_session 之后 _children 不能留悬垂键，也不能留悬垂值。
+def test_forget_session_cleans_children_index():
+    """forget_session 之后 _children 不能留悬垂键，也不能留悬垂值。
 
     root/kid1/kid2/grandkid 都在 s1；额外种一个 s2 的 other，其 _children
     指向 s1 的 kid1（模拟索引本不该出现、但要能被安全清理的悬垂引用来源）。
@@ -173,7 +173,7 @@ def test_release_session_cleans_children_index():
     _plant(reg, "other", None, session_id="s2")
     reg._children.setdefault("other", set()).add("kid1")
 
-    reg.release_session("s1")
+    reg.forget_session("s1")
 
     removed = {"root", "kid1", "kid2", "grandkid"}
     assert not (removed & set(reg._children.keys()))
@@ -182,6 +182,46 @@ def test_release_session_cleans_children_index():
     assert reg.children_of("other") == set()
     assert reg.agent_ids_of_session("s1") == []
     assert reg.agent_ids_of_session("s2") == ["other"]
+
+
+def test_forget_agent_cleans_children_index_on_both_sides():
+    """单点逐出与 forget_session 同一纪律：既摘键，也从每个父的值集合里摘掉。
+
+    只 pop 键不摘值的话，父的 children_of 会指向一个 _agents 里已经不存在的 id，
+    descendants_of 遍历到它时仍把它当活的吐出来（级联 cancel/pause 会去操作一个
+    幽灵）。
+    """
+    reg = _reg()
+    _plant(reg, "root", None, session_id="s1")
+    _plant(reg, "kid", "root", session_id="s1")
+    _plant(reg, "grandkid", "kid", session_id="s1")
+
+    assert reg.forget_agent("kid") is True
+
+    assert not reg.has("kid")
+    assert reg.has("root") and reg.has("grandkid"), "只逐出这一个，不牵连别人"
+    assert "kid" not in reg._children            # 键
+    assert "kid" not in reg.children_of("root")  # 值
+    assert reg.forget_agent("kid") is False, "已经不在了 → False，幂等"
+
+
+def test_forget_agent_is_pure_mechanism_and_does_not_judge_status():
+    """ALM 侧的 forget_* 是**纯机制**：只管摘干净，不判断该不该摘。
+
+    「这个 agent 现在能不能被忘掉」要同时看 task 队列、未决 HITL、以及同 session 其他
+    agent 的状态——ALM 一样都不认识。判据住在 `CtxWeftRuntime.forget_agent` /
+    `forget_session`（组合根，那里才看得全），行为由
+    `tests/integration/test_session_lifecycle_forget_rebuild.py` 覆盖。
+
+    这条用例钉的是"策略别再爬回 ALM 里"：一旦有人在这里加状态检查，两处判据就会各说
+    各话，而 runtime 那份才是被调用方依赖的那份。
+    """
+    reg = _reg()
+    _plant(reg, "busy", None, session_id="s1")
+    reg._agents["busy"].status = "running"
+
+    assert reg.forget_agent("busy") is True, "ALM 不看状态——把关是 runtime 的事"
+    assert not reg.has("busy")
 
 
 async def test_load_rebuilds_children_index_for_cold_recovery():
