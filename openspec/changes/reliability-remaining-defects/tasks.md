@@ -5,10 +5,10 @@
 
 ## WP3 提交门与通知分离（H1 + 附①）
 
-- [ ] 3.1 新建 `tests/unit/test_commit_gate.py`：required 提交确认（store 失败 → 调用方收错、无 committed 通知）/ best_effort 显式告警 / 自定义 bus 不支持 → 构造失败；先基线红（现状吞异常）
-- [ ] 3.2 新建 `core/events/commit_gate.py` 并替换 runtime 构造期 persister 接线；ALM/SessionRegistry 订阅改经 gate 注册为 required consumer；观察者独立有界队列 + `EventsDropped` 元事件（带 position 区间）；有意改写 `test_persister_swallows_store_errors` 为双契约形态（方案 WP3 明令）
-- [ ] 3.3 provisional 批次：commit_provisional 走 append_batch（round batch_id）、COMMITTING 竞态、round_id 经执行上下文传播（E-T08/E-T09）；新建 `tests/unit/test_observer_backpressure.py`（慢观察者不挂死、丢弃可观测，E-T10/E-T11）
-- [ ] 3.4 `PersistenceUnavailableError` 链路：TM/后台 recap 先于通用重试、会话隔离可查询、wait_for_finish 显式抛错、batch_id 确认未知提交（E-T01/E-T12/E-T14）；新建 `tests/integration/test_runtime_storage_failure.py` 的 required 形态（翻转 WP0 夹具：drop-table → 隔离而非伪装成功）
+- [x] 3.1 新建 `tests/unit/test_commit_gate.py`：required 提交确认（store 失败 → 调用方收错、无 committed 通知）/ best_effort 显式告警 / 自定义 bus 不支持 → 构造失败；先基线红（现状吞异常）
+- [x] 3.2 新建 `core/events/commit_gate.py` 并替换 runtime 构造期 persister 接线；ALM/SessionRegistry 订阅改经 gate 注册为 required consumer；观察者独立有界队列 + `EventsDropped` 元事件（带 position 区间）；有意改写 `test_persister_swallows_store_errors` 为双契约形态（方案 WP3 明令）
+- [x] 3.3 provisional 批次：commit_provisional 走 append_batch（round batch_id）、COMMITTING 竞态、round_id 经执行上下文传播（E-T08/E-T09）；新建 `tests/unit/test_observer_backpressure.py`（慢观察者不挂死、丢弃可观测，E-T10/E-T11）
+- [x] 3.4 `PersistenceUnavailableError` 链路：TM/后台 recap 先于通用重试、会话隔离可查询、wait_for_finish 显式抛错、batch_id 确认未知提交（E-T01/E-T12/E-T14）；新建 `tests/integration/test_runtime_storage_failure.py` 的 required 形态（翻转 WP0 夹具：drop-table → 隔离而非伪装成功）
 
 ## WP4 快照一致切面与迁移（H2）
 
