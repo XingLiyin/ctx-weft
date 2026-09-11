@@ -318,10 +318,12 @@ async def run_h2(workdir: Path) -> dict:
 
     full_tasks, snap_tasks = sorted(full.tasks), sorted(restored.tasks)
     return {
-        "snapshot_cursor": snap.last_event_id if snap else None,
+        "note": "WP4 翻转后契约：position 一致切面——两条恢复路径等价（旧行为见方案 §1.2 H2）",
+        "snapshot_cursor": snap.last_commit_position if snap else None,
         "full_replay_tasks": full_tasks,
         "snapshot_replay_tasks": snap_tasks,
-        "defect_reproduced": full_tasks == ["a", "b"] and snap_tasks == ["b"],
+        "defect_reproduced": False,   # H2 已由 reliability-wp4 修复
+        "fixed": full_tasks == ["a", "b"] and snap_tasks == ["a", "b"],
     }
 
 

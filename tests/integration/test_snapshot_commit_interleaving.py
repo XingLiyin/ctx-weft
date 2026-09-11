@@ -1,17 +1,12 @@
-"""WP0 基线夹具（H2）：延迟提交的旧事件 ID 被快照增量恢复跳过。
+"""WP0 夹具（H2）——已随 reliability-wp4（spec: snapshot-recovery）翻转。
 
-钉住 2026-09-11 可靠性方案 H2 的**缺陷现状**（探针 verify_agent_architecture.py
-`late_commit` 的 pytest 移植；上游 docs/plans/2026-09-11-agent-core-reliability-
-plan.md §1.2/§4.1/§4.8）：快照游标取触发事件 ID（snapshot.py `_write`），增量恢复
-按事件 ID 过滤（reducers.rebuild_view `read_after`）；事件 ID 在创建时铸造（ULID），
-提交顺序可与之不同（并发未提交窗口）——后提交的旧 ID 永久落在快照游标之外。
-
-⚠️ 本文件断言的是**旧契约**（缺陷行为），供 WP4（position 游标 + 一致切面）实施时
-**有意翻转**：翻转后全量回放与 snapshot(C)+delta(>C) 等价，两条恢复路径都见 a、b。
+历史：本文件原钉「延迟提交的旧事件 ID 被快照增量恢复跳过」的缺陷现状。WP4 落地
+position 一致切面后翻转：全量回放与快照增量**两条恢复路径都见 a、b**——快照游标是
+存储分配的提交位置（last_commit_position），不再是触发事件 ID。
 
 时序说明：begin/commit_provisional 正是 TaskManager.begin_round/commit_round 包装的
-同一对 bus 钩子（orchestrator/task/manager.py）——这里直接驱动 bus 即驱动了 round
-生命周期，交错顺序由代码顺序确定性保证，不需要 barrier。
+同一对 bus 钩子（orchestrator/task/manager.py）——直接驱动 bus 即驱动了 round 生命
+周期，交错顺序由代码顺序确定性保证，不需要 barrier。
 """
 from __future__ import annotations
 
@@ -66,10 +61,13 @@ async def test_late_committed_event_is_skipped_by_snapshot_recovery():
         f"full replay must see both tasks; got {sorted(full.tasks)}"
     )
 
-    # 快照增量恢复（缺陷）：read_after(evt_0004) 永远排除 evt_0002 → a 丢失
+    # WP4 翻转后：快照按 position 一致切面（游标=committed_head），延迟提交的旧事件
+    # 经 position 增量进入恢复视图——两条路径等价
     restored = await rebuild_view(store, "s")
-    assert sorted(restored.tasks) == ["b"], (
-        "OLD CONTRACT PIN: snapshot recovery currently DROPS late-committed task 'a' "
-        f"(expected defect: only ['b']); got {sorted(restored.tasks)}. "
-        "WP4 (position-based cursor + consistent cut) must flip this to ['a', 'b']."
+    assert sorted(restored.tasks) == ["a", "b"], (
+        f"snapshot recovery must match full replay after WP4 consistent cut; "
+        f"got {sorted(restored.tasks)}"
     )
+    snap = await store.load_latest_snapshot("s")
+    assert snap is not None and snap.last_commit_position is not None
+    assert snap.projection_version == 1

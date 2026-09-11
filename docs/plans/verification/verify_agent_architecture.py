@@ -80,6 +80,9 @@ async def persistence_failure():
 
 
 async def late_commit():
+    """H2 探针（reliability-wp4 接口演进）：故障交错不变（延迟提交的旧 ID 落在快照
+    触发之后），断言从「快照恢复丢 a」改为「两条恢复路径等价见 a、b」——WP4 的
+    position 一致切面使然。快照游标断言从触发事件 ID 改为 last_commit_position。"""
     bus = InProcessEventBus()
     store = InMemoryEventStore()
     attach_persistence(bus, store, snapshot_every_n=1)
@@ -220,9 +223,11 @@ async def main(expect):
         "H4": await execution_redaction(),
     }
     baseline = {
-        "H1": observed["H1"] == {"emit_rejected": False, "observer_count": 1, "stored_count": 0},
+        # H1/H2 已修复（wp3/wp4）：baseline 期望改为与 fixed 一致，探针的「复现旧缺陷」
+        # 语义只保留给 H3（WP5/6 未做）。--expect baseline 与 fixed 的差别只剩 H3。
+        "H1": observed["H1"] == {"emit_rejected": True, "observer_count": 0, "stored_count": 0},
         "H2": observed["H2"] == {
-            "snapshot_created": True, "full_replay_tasks": ["a", "b"], "snapshot_replay_tasks": ["b"],
+            "snapshot_created": True, "full_replay_tasks": ["a", "b"], "snapshot_replay_tasks": ["a", "b"],
         },
         "H3": observed["H3"] == {
             "result_write_failed": True, "external_effect_count": 2,
