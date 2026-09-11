@@ -42,6 +42,11 @@ class ReconcileStep(Step):
             if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
                 ctx.cancel_token.raise_if_cancelled()
             logger.info("ReconcileStep: re-invoking dangling tool_call %s (%s)", tc["id"], tc["name"])
+            # 同一逻辑调用跨重启同 id：用原回合的 record_id + ordinal 派生（spec: tool-operations）
+            from ctx_weft.protocols.operations import operation_id_for
+            ctx.provider_ctx.operation_id = operation_id_for(
+                getattr(state.session, "tenant_id", "default"), state.session.id,
+                state.agent.id, tc.get("_record_id", ""), tc.get("_ordinal", 0))
             await gateway.invoke(
                 tool_name=tc["name"],
                 arguments=tc.get("input", {}) or {},
@@ -78,4 +83,10 @@ async def _dangling_tool_calls(memory, scope, provider_ctx) -> list[dict]:
         r.metadata.get("tool_call_id") for r in view
         if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "tool"
     }
-    return [tc for tc in tool_calls if tc.get("id") not in done_ids]
+    # spec: tool-operations（wp5）——dangling 携带出处 record_id + 原 ordinal：
+    # 冷恢复重入经确定性派生得到与首次执行**相同**的 operation_id（账本 completed
+    # 短路的输入）。ordinal 取该 tc 在原回合 tool_calls 中的下标。
+    dangling = [dict(tc, _record_id=last_asst.id, _ordinal=i)
+                for i, tc in enumerate(tool_calls)
+                if tc.get("id") not in done_ids]
+    return dangling

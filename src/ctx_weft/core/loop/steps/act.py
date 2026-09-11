@@ -93,8 +93,10 @@ class ActStep(Step):
                 baseline_msg_count = sent_msg_count
 
             # 3) assistant 回合落 memory + 接回 message 历史 + 记 transcript
-            asst_tool_dicts = await _ingest_assistant_turn(
+            persisted_turn = await _ingest_assistant_turn(
                 state, ctx, turn.text, turn.tool_calls, turn.usage, turn_num)
+            asst_tool_dicts = persisted_turn.tool_calls
+            state.extra["assistant_record_id"] = persisted_turn.record_id
             current_messages.append(LLMMessage(
                 role="assistant", content=turn.text, tool_calls=asst_tool_dicts,
                 reasoning_content=turn.reasoning or None))
@@ -513,11 +515,24 @@ async def _account_tokens(state: LoopState, ctx: LoopContext, usage: LLMUsage) -
     )
 
 
+@dataclasses.dataclass
+class PersistedAssistantTurn:
+    """`_ingest_assistant_turn` 的结构化返回（spec: tool-operations，wp5）。
+
+    ``record_id`` 是 LLM_RESPONSE 回合的 memory 记录 id——operation_id 的派生输入之一
+    （确定性派生 → 同一逻辑调用跨重启同 id）。``tool_calls`` 直通旧形态（message
+    重建消费点零语义变化）。
+    """
+
+    record_id: str
+    tool_calls: list[dict]
+
+
 async def _ingest_assistant_turn(
     state: LoopState, ctx: LoopContext, text: str, tool_calls: list[ToolCall],
     usage: LLMUsage, turn_num: int,
-) -> list[dict]:
-    """把本轮 assistant 回合入 task 层 memory；返回完整 tool_call dicts 供 message 重建。
+) -> PersistedAssistantTurn:
+    """把本轮 assistant 回合入 task 层 memory；返回结构化（record_id + tool_calls）。
 
     派发(submit_*)/silent 工具的 tool_call 排除出 LLM_RESPONSE.metadata（派发落 agent 层
     delegate conversation turn、silent 结果不入对话），避免无配对 TOOL_RESULT 的悬挂调用破坏
@@ -527,7 +542,7 @@ async def _ingest_assistant_turn(
     asst_tool_dicts = [{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls]
     _excluded = DISPATCH_TOOLS | SILENT_TOOLS
     non_dispatch_tool_dicts = [d for d in asst_tool_dicts if d["name"] not in _excluded]
-    await ctx.memory.ingest(
+    record_id = await ctx.memory.ingest(
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
             address=state.scope,
@@ -543,7 +558,7 @@ async def _ingest_assistant_turn(
         ),
         ctx.provider_ctx,
     )
-    return asst_tool_dicts
+    return PersistedAssistantTurn(record_id=record_id or "", tool_calls=asst_tool_dicts)
 
 
 async def _maybe_predispatch_compact(
@@ -588,7 +603,19 @@ async def _execute_tool_calls(
     tool_results: list[dict] = []
     ctx.run_phase.in_tool_loop = True
 
+    from ctx_weft.protocols.operations import operation_id_for
+    record_id = state.extra.get("assistant_record_id", "")
     for i, tc in enumerate(tool_calls):
+        # spec: tool-operations（wp5）——调用侧铸稳定逻辑身份（gateway 保持无状态）：
+        # (tenant, session, agent, assistant_record_id, ordinal) 确定性派生 → 跨重启同 id。
+        # record_id 缺失（理论不可达 / 测试替身无 provider_ctx）→ None/跳过 →
+        # gateway 账本旁路（D6 兼容缝），不阻断执行。
+        if ctx.provider_ctx is not None:
+            ctx.provider_ctx.operation_id = (
+                operation_id_for(
+                    getattr(state.session, "tenant_id", "default"), state.session.id,
+                    state.agent.id, record_id, i)
+                if record_id else None)
         # 工具间命中：软打断 → 本 tc 及之后全部「未开始」→ 补「已取消」+ park；硬取消 → CancelledError。
         if _interrupt_pending(ctx):
             for rest in tool_calls[i:]:

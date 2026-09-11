@@ -204,6 +204,7 @@ class CapabilityGateway:
         spill_threshold: int = 4000,
         spill_preview_chars: int = 1000,
         memory_blob_store: "MemoryBlobStore | None" = None,
+        operation_store=None,
     ) -> None:
         self._cache = capability_cache
         self._providers = capability_providers
@@ -217,6 +218,9 @@ class CapabilityGateway:
         # 没接 blob store」同一口径，也让不关心多模态的构造点（含全部既有测试）行为
         # 逐字节不变。
         self._memory_blob_store = memory_blob_store
+        # spec: tool-operations（wp5）——操作账本（None = 调用方未接线，operation_id
+        # 存在也旁路；runtime 构造期从 registry 解析注入）。
+        self._operation_store = operation_store
         self._event_bus = event_bus
         self._provider_authorizers: dict[str, Authorizer] = provider_authorizers or {}
         if default_authorizer is None:
@@ -249,6 +253,13 @@ class CapabilityGateway:
         invocation_id = generate_id("inv")
         is_dispatch = tool_name in DISPATCH_TOOLS
         is_silent = tool_name in SILENT_TOOLS  # 不入 task 对话的编排/裁决工具
+        # spec: tool-operations（wp5）——operation_id 取用即清（ownership transfer）：
+        # 调用侧（act/reconcile）为**这一次**调用铸好放进共享 provider_ctx；这里入口
+        # 立即取走并置 None——不清理会泄漏到后续无关 invoke（如后台 observe 的
+        # collect_process_report），命中别的操作 completed 短路、回放错结果（实测回归）。
+        op_id = ctx.provider_ctx.operation_id if ctx.provider_ctx is not None else None
+        if ctx.provider_ctx is not None:
+            ctx.provider_ctx.operation_id = None
 
         # 1. Lookup capability（只处理 kind="tool"）。控制工具的全局可达性由 CapabilityCache 的
         # session 全局区保证（get_by_qualified_name 回退），gateway 无需特殊逻辑。
@@ -407,9 +418,75 @@ class CapabilityGateway:
             invocation_id=invocation_id,
             extra={**ctx.provider_ctx.extra, "tool_call_id": tool_call_id},
         )
-        streamed = await self._stream_tool(
-            provider, cap.id, effective_args, provider_ctx, state, invocation_id,
-        )
+
+        # ── 操作账本（spec: tool-operations，wp5；方案 §5.3 执行序）──────────────
+        # 步骤 ②③：prepare → CAS started。operation_id 由调用侧（act/reconcile）铸好放进
+        # provider_ctx；**缺失（裸调）→ 账本全程旁路**——既有单测/宿主直构 gateway 零改动。
+        # 已 completed → 短路复用账本结果（O-T08 前半：同逻辑调用重入不再打 provider）。
+        ledger = self._operation_store
+        short_circuit: "InvocationResult | None" = None
+        ledger_record = None
+        if ledger is not None and op_id:
+            from ctx_weft.protocols.operations import (
+                OperationRecord as _OpRec, OperationStatus as _OpSt,
+                OperationUpdate as _Upd2, operation_memory_result_id,
+            )
+            existing = await ledger.get(op_id, ctx.provider_ctx)
+            if existing is not None and existing.status == _OpSt.COMPLETED:
+                # O-T08 前半：同逻辑调用重入——账本已有完整结局，不再打 provider、
+                # 不重复写 memory（首次执行已写 TOOL_RESULT）。
+                result_text = existing.result if isinstance(existing.result, str) else (
+                    "[Replayed completed operation result]")
+                logger.info(
+                    "CapabilityGateway: operation %s completed in ledger — replaying "
+                    "result, provider not re-invoked", op_id)
+                return InvocationResult(
+                    invocation_id=invocation_id, tool_name=tool_name,
+                    content=result_text, is_error=False)
+            # 账本写失败 → PersistenceUnavailableError（复用 WP3 隔离语义；D3：
+            # 账本是 H3 恢复的依据，静默降级会重新制造「伪装成功」）
+            from ctx_weft.protocols.events import PersistenceUnavailableError as _PUE
+            try:
+                ledger_record = await ledger.prepare(_OpRec(
+                    operation_id=op_id,
+                    tenant_id=state.session.tenant_id,
+                    session_id=state.session.id,
+                    agent_id=state.agent.id,
+                    assistant_record_id=str(ctx.provider_ctx.extra.get("assistant_record_id", "")),
+                    tool_ordinal=int(ctx.provider_ctx.extra.get("tool_ordinal", 0)),
+                    tool_name=tool_name,
+                    args_hash=inv_key,
+                    memory_result_id=operation_memory_result_id(op_id),
+                ), ctx.provider_ctx)
+                if existing is not None and existing.status == _OpSt.STARTED:
+                    # 重入（HITL 等待超时后同逻辑调用再执行）：状态已 started——不重复
+                    # 转移（started→started 非法），只追加 attempt。
+                    ledger_record = await ledger.compare_and_set(
+                        op_id, existing.revision,
+                        _Upd2(append_attempt=invocation_id), ctx.provider_ctx)
+                else:
+                    # waiting_human → started（人答了续跑）/ prepared → started（首启）
+                    ledger_record = await ledger.compare_and_set(
+                        op_id, ledger_record.revision,
+                        _Upd2(status=_OpSt.STARTED, append_attempt=invocation_id),
+                        ctx.provider_ctx)
+            except Exception as _led_exc:
+                # 账本写失败 → PersistenceUnavailableError（复用 WP3 隔离语义；D3：
+                # 账本是 H3 恢复的依据，静默降级会重新制造「伪装成功」）
+                from ctx_weft.protocols.events import PersistenceUnavailableError as _PUE
+                raise _PUE(
+                    f"operation ledger unavailable for {op_id!r}: {_led_exc}"
+                ) from _led_exc
+
+        try:
+            streamed = await self._stream_tool(
+                provider, cap.id, effective_args, provider_ctx, state, invocation_id,
+            )
+        except Exception:
+            if ledger is not None and op_id and ledger_record is not None:
+                # 执行崩溃：账本留在 started——副作用可能已发生；结果判定归 WP6 的策略表。
+                pass
+            raise
 
         # 6b. provider 让出了 needs_human：流已停在此处（其后 yield 的事件从未被消费，见
         # `_stream_events`）。等待权归 gateway——provider 只**声明**需要人。
@@ -437,6 +514,24 @@ class CapabilityGateway:
                 streamed = _ToolStream(texts=[
                     ASK_USER_UNATTENDED_RESULT if tool_name == ASK_USER_NAME
                     else _UNATTENDED_TOOL_NOTE])
+            except Exception as _park_exc:
+                from ctx_weft.core.loop.park import HitlPark as _HP
+                if not isinstance(_park_exc, _HP):
+                    raise
+                # spec: tool-operations——park 上抛前把账本标到 waiting_human
+                # （started→waiting_human 合法）：冷/热恢复据此识别「同身份续跑」。
+                if ledger is not None and op_id and ledger_record is not None:
+                    from ctx_weft.protocols.operations import (
+                        OperationStatus as _Wh, OperationUpdate as _Wu)
+                    try:
+                        await ledger.compare_and_set(
+                            op_id, ledger_record.revision,
+                            _Wu(status=_Wh.WAITING_HUMAN), ctx.provider_ctx)
+                    except Exception:
+                        logger.exception(
+                            "ledger waiting_human mark failed for %s (park proceeds)",
+                            op_id)
+                raise
             else:
                 # 拿到了真人的决定：原有两条路，逐字节未改。
                 if needs_human_ask.reply_as_result:
@@ -495,6 +590,17 @@ class CapabilityGateway:
             # 过归一层：宿主 provider 可能给 dict 形态的 part（JSON 往返），
             # 与 MemoryEvent / LLMMessage 的 __post_init__ 共用同一份归一。
             content = normalize_content_parts([TextPart(text=text), *note_parts, *parts])
+
+        # ── 步骤⑤：账本 completed（持久确认）——先于 TOOL_RESULT 写与事件（spec §5.3：
+        # completed 后 memory 写失败 → 恢复按 operation_memory_result_id(op_id) 幂等补写，
+        # 不再执行工具）。完整结果入账本（非审计截断文本；parts/blob ref 原样）。
+        if ledger is not None and op_id and ledger_record is not None:
+            from ctx_weft.protocols.operations import OperationStatus as _St, OperationUpdate as _Upd2
+            ledger_record = await ledger.compare_and_set(
+                op_id, ledger_record.revision,
+                _Upd2(status=_St.COMPLETED, result=text, result_set=True,
+                     error=str(metadata.get("error", "")) or None if is_error else None),
+                ctx.provider_ctx)
 
         # 7. 记录 result（事件 + TOOL_RESULT 入 memory）——审计通道（脱敏副本）
         await self._record_result(state, ctx, tool_name, invocation_id, audit_args, content, is_error, is_dispatch, is_silent, tool_call_id)

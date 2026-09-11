@@ -3758,6 +3758,8 @@ class CtxWeftRuntime:
             spill_threshold=self._config.spill_threshold,
             spill_preview_chars=self._config.spill_preview_chars,
             memory_blob_store=self.providers.get_memory_blob_store(),
+            # spec: tool-operations（wp5）——操作账本：显式注册 > 内存默认（registry 惰性）
+            operation_store=self.providers.get_operation_store(),
         )
 
     def _build_loop_ctx(
