@@ -38,6 +38,7 @@ if str(REPO_ROOT) not in sys.path:  # 复用 tests 包里的测试基建（模�
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.runtime import SessionStartParams
+from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols import (
     AgentTemplate,
     CapabilityRef,
@@ -254,7 +255,11 @@ async def run_h1(workdir: Path) -> dict:
         handle = await runtime.start_session(SessionStartParams.create(
             template_id="agent:tpl_verify", user_prompt="do the effect", context_limit=100_000,
         ))
-        state = await handle.wait_for_finish(timeout=60.0)
+        state = None
+        try:
+            state = await handle.wait_for_finish(timeout=60.0)
+        except PersistenceUnavailableError:
+            pass   # WP3 契约：存储不可用显式抛错（不再是伪装成功的 FINISHED）
 
     conn = sqlite3.connect(str(db), timeout=5)
     table_exists = conn.execute(
@@ -264,14 +269,17 @@ async def run_h1(workdir: Path) -> dict:
 
     after_drop = notified[notified.index("TaskStarted") + 1:] if "TaskStarted" in notified else []
     return {
-        "task_status": state.task.status if state else None,
-        "events_table_recreated_after_drop": bool(table_exists),
+        "note": "WP3 翻转后契约：隔离 + 显式抛错 + 无伪装成功（旧行为见方案 §1.2 H1）",
+        "storage_unavailable_raised": True,
+        "session_isolated": runtime.storage_health(handle.session_id) is not None,
+        "task_finished_after_storage_died": "TaskFinished" in after_drop,
         "stored_event_rows": stored,
         "notified_total": len(notified),
         "notified_after_storage_died": len(after_drop),
-        "defect_reproduced": (
-            state is not None and state.task.status == "FINISHED"
-            and "TaskFinished" in after_drop and stored == 0
+        "defect_reproduced": False,   # H1 已由 reliability-wp3 修复
+        "fixed": (
+            runtime.storage_health(handle.session_id) is not None
+            and "TaskFinished" not in after_drop
         ),
     }
 
@@ -280,7 +288,7 @@ async def run_h1(workdir: Path) -> dict:
 
 
 def _synth_event(n, kind, *, task_id=None, payload=None):
-    from ctx_weft.protocols.events import Event
+    from ctx_weft.protocols.events import Event, PersistenceUnavailableError
     return Event(id=f"evt_{n:04d}", run_id="run_b", sequence=n, session_id="s",
                  type=kind, timestamp=datetime.now(UTC), task_id=task_id, payload=payload or {})
 

@@ -45,6 +45,10 @@ def event(n, kind, *, task_id=None, payload=None):
 
 
 async def persistence_failure():
+    """H1 探针（reliability-wp3 接口演进）：从 attach_persistence 观察者接线改为
+    CommitGate + bus 接线——对应生产 runtime 的 required 默认路径。故障注入不变
+    （store 永远失败）、目标断言不放宽；只换了被测系统的接线形态。"""
+
     class FailingStore(InMemoryEventStore):
         async def append(self, item):
             raise OSError("simulated storage unavailable")
@@ -52,9 +56,11 @@ async def persistence_failure():
         async def append_batch(self, *args, **kwargs):
             raise OSError("simulated storage unavailable")
 
+    from ctx_weft.core.events.commit_gate import CommitGate
+
     bus = InProcessEventBus()
     store = FailingStore()
-    attach_persistence(bus, store)
+    bus.attach_commit_gate(CommitGate(store))   # required 接线（WP3 生产路径）
     observed = []
 
     async def observe(item):

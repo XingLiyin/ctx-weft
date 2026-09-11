@@ -48,7 +48,7 @@
                           TaskManager.apply_run_outcome
                                     │ make_event(...) / emit
                                     ▼
-                EventBus（InProcessEventBus，append-only + 未提交窗口）
+                EventBus（+ CommitGate：先确认提交再通知，spec: event-commit）
                                      │ 订阅
                           ┌──────────┴──────────┐
                      EventStore            外部订阅者（SSE / 日志）
@@ -401,5 +401,6 @@ v2 里「子任务结果怎么到父」有三条，全部落在 memory、由 `Ag
 - **总线**：`InProcessEventBus`（`providers/events/bus/in_process/bus.py:41`），`emit` `:53` 进程内**同步 drain**（结局走返回值的根因，见 §1）；`subscribe` `:115` / `stream` `:157`；未提交窗口 `begin/commit/discard_provisional` `:141`-`:155`（夭折轮的事件不进日志）。
 - **持久化**：单一入口 `attach_persistence`（`providers/events/persister.py:73`，`core/runtime.py:572`）——persister 订阅先于 SnapshotWriter（顺序契约），返回可 detach 的公开 handle；`snapshot_every_n=0` 默认不接快照。InMemory 与 SQL 两实现都支撑 `read_after` 增量回放与快照。
 - **顺序与因果**：`sequence` 来自 `LoopState.sequence_counter`（`core/loop/driver.py:190`-`:204`，同 run 内单调递增）；`id` 是 `evt_ULID`（`core/utils/event.py new_event`）；类型白名单校验同在 `new_event`（`:57`）。`causation_id` 串因果链。
+- **提交门与通知分离（spec: event-commit，change reliability-wp3）**：`event_commit_policy="required"`（默认，RuntimeConfig）下，`CtxWeftRuntime` 构造期把 `CommitGate`（`core/events/commit_gate.py`）经 `EventBus.attach_commit_gate` 接进 emit 路径——**先确认提交（WP2 的 append_batch）、再 fanout**；窗口外单事件走单事件批（batch_id=event.id），未提交窗口在 `commit_provisional` 时**整批一次**提交（round batch_id，失败缓冲保留、同 id 重试恰好一次）。`subscribe(..., required=True)` 的必要消费者（ALM/SessionRegistry）异常穿出 emit、推测态照看；观察者（stream 订阅者）队列溢出的丢弃以 `EventsDropped` 元事件通报（transient、payload 带 position，可按 `read_range` 补读）。派生事件经 contextvar 继承窗口归属，不逃逸。存储失败：会话标记 `storage_unavailable`（`runtime.storage_health()` 可查）+ `PersistenceUnavailableError` 显式抛出（`wait_for_finish` 轮询健康、TM 三处前置分支停推进不发终态事件）；`best_effort` 显式退回旧 `attach_persistence` 路径（吞错 + 启动告警）。微基准：required 单事件提交路径较旧 persister 路径 -20%（in-memory）。
 - **「事件流即单一事实源」的两个限定**：① 未提交窗口——夭折轮（RoundDiscarded）的事件被 discard，不进日志；② TRANSIENT 集合跳过持久化。除这两点外没有旁路状态。
 - **有序提交扩展（spec: event-log，change reliability-wp2）**：`OrderedEventStore` 协议（`protocols/events.py` 末段）给两个 store 实现（in_memory / sql）加上 `append_batch`（原子批次 + batch_id 幂等，`EventConflictError` 拒绝异内容重放）、`read_range(after, through)` 与 `committed_head`——`position` 是存储层在提交时分配的位置（同会话唯一递增，与 ULID 铸造序无关）。SQL 侧经会话 head 行同事务原子 UPDATE 串行化分配（`event_session_head` / `event_batches` 两张新表，禁无锁 MAX+1）；`append` 改道单事件批次（batch_id=event.id），既有调用方零改动；`read_by_session` / `read_session_events_of_types` 改按 position 序（存量 NULL 行排前按 id 序），`read_after(id)` 保留 legacy。**地基已铺、暂未启用**：persister 仍逐条 append（行为零变化），提交门（WP3）与快照 position 截断（WP4）在其上启用；存量库回填走 `scripts/migrate_event_positions.py`（默认 dry-run；分配的是 (session_id, event.id) 确定性顺序，非历史提交顺序）。
