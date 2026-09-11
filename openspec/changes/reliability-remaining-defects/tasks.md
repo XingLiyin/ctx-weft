@@ -31,9 +31,9 @@
 
 ## WP7 ExecutionLimits（H5）
 
-- [ ] 7.1 `core/control/execution_budget.py` + RuntimeConfig 注入 + 可注入 monotonic clock；`tests/unit/test_execution_budget.py` 验证计量算术（active time 排除等待 L-T02、retry 不重置 L-T03、重启恢复 L-T04、checkpoint 漏记声明）
-- [ ] 7.2 barrier 驱动集成 `tests/integration/test_execution_limits.py`（L-T01/L-T05：合作型超时 + 不合作 Provider 标记未终止）；错误码四态、超时取消先走 unknown 规则
-- [ ] 7.3 三个旧字段（max_turns_per_agent / timeout_ms / timeout_per_step_sec）去重 DeprecationWarning + README 迁移说明，验证「警告但不激活」（L-T06）
+- [x] 7.1 `core/control/execution_budget.py` + RuntimeConfig 注入 + 可注入 monotonic clock；`tests/unit/test_execution_budget.py` 验证计量算术（active time 排除等待 L-T02、retry 不重置 L-T03、重启恢复 L-T04、checkpoint 漏记声明）
+- [x] 7.2 barrier 驱动集成 `tests/integration/test_execution_limits.py`（L-T01/L-T05：合作型超时 + 不合作 Provider 标记未终止）；错误码四态、超时取消先走 unknown 规则
+- [x] 7.3 三个旧字段（max_turns_per_agent / timeout_ms / timeout_per_step_sec）去重 DeprecationWarning + README 迁移说明，验证「警告但不激活」（L-T06）
 
 ## WP8 整体验收与性能门禁
 

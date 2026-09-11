@@ -13,7 +13,7 @@
 2. **附① 丢弃不可见**：bus 背压丢事件只有 warning 日志；代码注释宣称的 `EventsDropped` 元事件不存在，订阅者无从感知缺口。
 3. **H2 快照漏事件**：快照游标取触发事件 ID + 增量按 ID 过滤；延迟提交的旧 ID 永久丢失（无桩实测：全量 [a,b] vs 快照恢复 [b]）。
 4. **H3 恢复盲重跑副作用**：dangling tool_call 一律重执行，无 operation_id/幂等账本（无桩实测：真硬杀 + recover_agent 冷恢复，副作用 1→2）。
-5. **H5 死配置限制**（截至 2026-09-11 记分板：H1 ✅ wp3、H2 ✅ wp4、H4 ✅ wp0-wp1——**H1/H2 发布单元（WP2+WP3+WP4）仓内齐备，按方案 §3 宣布解决**；剩 H5、H6）——**H3 ✅ wp5+wp6**，六项假设仅余 H5（wp7 执行限制）与 H6（wp9 可选拆分）：`max_turns_per_agent` / `Task.timeout_ms` / `timeout_per_step_sec` 公开声明却零执行点。
+5. **H5 死配置限制**（截至 2026-09-11 记分板：H1 ✅ wp3、H2 ✅ wp4、H4 ✅ wp0-wp1——**H1/H2 发布单元（WP2+WP3+WP4）仓内齐备，按方案 §3 宣布解决**；剩 H6）——**H3 ✅ wp5+wp6 · H5 ✅ wp7**，六项假设仅余 H6（wp9 可选拆分，无收益证据可整体否决）：`max_turns_per_agent` / `Task.timeout_ms` / `timeout_per_step_sec` 公开声明却零执行点。
 6. **H6 Runtime 耦合**：编排/恢复/交互/装配共存 4173 行，sources/budget/composer 无注入口（定性，方案允许独立否决）。
 
 ## What Changes
