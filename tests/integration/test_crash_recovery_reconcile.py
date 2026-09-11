@@ -24,6 +24,9 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.protocols import MemoryScope as _MS
+from ctx_weft.protocols.memory import MemoryKind as _MK
+_MEM_TASK_SCOPE = _MS.TASK
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
@@ -36,7 +39,10 @@ class _RecordingTool(ToolCapabilityProvider):
         self.invoked: list[dict] = []
 
     async def list(self, ctx) -> list[ToolCapability]:
-        return [ToolCapability(id="test:web", name="web", description="fetch a page")]
+        # wp6（spec: tool-operations）：声明 retry_safe —— 崩溃后同 op_id 重跑恰好一次。
+        # 默认 manual 的行为由 test_tool_outcome_unknown.py 钉（unknown 停住）。
+        return [ToolCapability(id="test:web", name="web", description="fetch a page",
+                               recovery_policy="retry_safe")]
 
     async def retrieve(self, ctx) -> list[ToolCapability]:
         return await self.list(ctx)        # 让 CapabilityResolver 绑定 web 进 cache
@@ -93,6 +99,24 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
     await mem.ingest(MemoryEvent(type=MemoryEventType.LLM_RESPONSE, address=scope, content="",
         timestamp=ts, role="assistant",
         metadata={"tool_calls": [{"id": tcid, "name": "test__web", "input": {"url": "x"}}]}), pctx)
+
+    # wp6：账本注入 STARTED 记录（确定性派生同一 op_id）——retry_safe 分支的输入。
+    from ctx_weft.protocols.operations import (
+        OperationRecord, OperationStatus, operation_id_for)
+    from ctx_weft.providers.operations import InMemoryOperationStore
+    ops = runtime.providers.get_operation_store()
+    assert isinstance(ops, InMemoryOperationStore)
+    # 找 assistant 回合的 memory record id（op_id 派生输入）——直查 in-memory provider
+    view = await mem.load_view(scope, _MEM_TASK_SCOPE, pctx)
+    last_asst = next(r for r in reversed(view)
+                     if r.kind is _MK.CONVERSATION_TURN and r.role == "assistant")
+    op_id = operation_id_for("default", sid, aid, last_asst.id, 0)
+    from ctx_weft.protocols.context import ProviderContext as _PC
+    await ops.prepare(OperationRecord(
+        operation_id=op_id, tenant_id="default", session_id=sid, agent_id=aid,
+        assistant_record_id=last_asst.id, tool_ordinal=0, tool_name="test__web",
+        status=OperationStatus.STARTED, revision=2, attempts=["inv_first"]),
+        _PC(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid))
 
     with mock.patch(
         "ctx_weft.core.loop.steps.background_observe.launch_background_observe",

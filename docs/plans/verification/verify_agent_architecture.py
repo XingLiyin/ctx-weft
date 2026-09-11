@@ -202,6 +202,10 @@ async def recovery_duplicate():
     recovery_error = None
     # The cache is already bound. Bypass only discovery, not reconciliation,
     # gateway execution, persistence, or the simulated external side effect.
+    # wp6（reliability-wp6）：RecordingTool 默认 manual → 恢复保守停住（unknown），
+    # 副作用不再重跑；操作账本记 unknown、task 带 TOOL_OUTCOME_UNKNOWN。
+    state.task = SimpleNamespace(id="task1", status="ACTIVE")
+    state.sequence_counter = 0
     with patch("ctx_weft.core.loop.steps.reconcile.resolve_and_bind", new=AsyncMock()):
         try:
             await ReconcileStep().execute(state, ctx)
@@ -223,16 +227,14 @@ async def main(expect):
         "H4": await execution_redaction(),
     }
     baseline = {
-        # H1/H2 已修复（wp3/wp4）：baseline 期望改为与 fixed 一致，探针的「复现旧缺陷」
-        # 语义只保留给 H3（WP5/6 未做）。--expect baseline 与 fixed 的差别只剩 H3。
+        # H1/H2/H3 均已修复（wp3/wp4/wp5+wp6）：baseline 与 fixed 同值——探针保留
+        # 「复现旧缺陷」的历史语义文档，--expect 两个模式现等价（全 True）。
         "H1": observed["H1"] == {"emit_rejected": True, "observer_count": 0, "stored_count": 0},
         "H2": observed["H2"] == {
             "snapshot_created": True, "full_replay_tasks": ["a", "b"], "snapshot_replay_tasks": ["a", "b"],
         },
-        "H3": observed["H3"] == {
-            "result_write_failed": True, "external_effect_count": 2,
-            "distinct_invocation_ids": 2, "recovery_error": None,
-        },
+        "H3": observed["H3"]["result_write_failed"]
+        and observed["H3"]["external_effect_count"] == 1,
         "H4": observed["H4"]["provider_authorization"] == "***",
     }
     fixed = {
@@ -242,7 +244,7 @@ async def main(expect):
         },
         "H3": observed["H3"]["result_write_failed"] and observed["H3"]["external_effect_count"] == 1,
         "H4": observed["H4"]["provider_authorization"] == "FAKE_TEST_TOKEN",
-    }
+    }  # H3 wp6 语义：manual 停住 → 计数 1（原 baseline 判据计数 2 已随修复失效）
     checks = baseline if expect == "baseline" else fixed
     print(json.dumps({"expect": expect, "observed": observed, "checks": checks}, indent=2))
     return 0 if all(checks.values()) else 1

@@ -76,6 +76,8 @@ class _ExternalEffectTool(ToolCapabilityProvider):
         return ToolCapability(
             id="probe:record", name="record", description="Simulated external operation",
             side_effects=True,
+            # wp6：显式 manual——钉「未知结果不自动重跑」的默认保守语义
+            recovery_policy="manual",
         )
 
     async def list(self, ctx):
@@ -129,7 +131,7 @@ def _fixture(db_path):
 
 
 async def test_result_write_failure_then_reconcile_reruns_side_effect(tmp_path):
-    """旧契约锚：副作用完成后结果写失败 → ReconcileStep 盲重跑 → 外部计数 = 2。"""
+    """wp6 契约锚：副作用完成后结果写失败 → manual 策略保守停住 → 外部计数 = 1。"""
     db = tmp_path / "effects.sqlite"
     memory, state, ctx, tool = _fixture(db)
 
@@ -167,11 +169,9 @@ async def test_result_write_failure_then_reconcile_reruns_side_effect(tmp_path):
     with patch("ctx_weft.core.loop.steps.reconcile.resolve_and_bind", new=AsyncMock()):
         await ReconcileStep().execute(state, ctx)
 
-    # 旧契约（缺陷）：dangling 被盲重跑，副作用第二次发生
+    # wp6 翻转后契约（spec: tool-operations）：默认 manual → 副作用保持 1 次，
+    # 不盲重跑（unknown 等宿主 resolve_operation——tests/unit/test_resolve_operation.py）
     external_effects = _read_effects(db)
-    assert external_effects == 2, (
-        "OLD CONTRACT PIN: reconcile currently RE-RUNS the completed side effect "
-        f"(count={external_effects}). WP6 (recovery policy + operation ledger) must "
-        "flip this to 1 with the operation in 'unknown' awaiting host decision."
-    )
-    assert len(set(tool.invocations)) == 2, "each attempt got a distinct invocation_id"
+    assert external_effects == 1, (
+        f"manual policy must NOT re-run the completed side effect (got {external_effects})")
+    assert len(set(tool.invocations)) == 1

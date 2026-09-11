@@ -24,10 +24,10 @@
 
 ## WP6 恢复策略与 unknown 处置（H3 后半）
 
-- [ ] 6.1 `ToolCapability.recovery_policy` 四态 + Registry/启动校验（queryable 未实现即失败）；`tests/unit/test_operation_recovery_policy.py` 覆盖策略表全分支（O-T04/O-T05/O-T08/O-T15/O-T16）
-- [ ] 6.2 Reconcile 完成匹配改 operation_id；存量无身份 dangling 默认 unknown；有意更新「所有 dangling 都重跑」的既有测试（仅 retry_safe 夹具保留重跑断言）；控制工具幂等核验（delegate 找回子任务 O-T14、finish/ask_user 复用）
-- [ ] 6.3 `TOOL_OUTCOME_UNKNOWN` + `resolve_operation`（supply_result/retry_confirmed/cancel_task + revision 乐观锁 O-T12；unknown 下 recover_agent 不可绕过 O-T11）；HITL 热/冷竞态单执行者（O-T10）；新建 `tests/integration/test_tool_outcome_unknown.py` required 形态（翻转 WP0 夹具：manual 副作用保持 1 次）
-- [ ] 6.4 子进程强退矩阵：`tests/integration/test_operation_crash_matrix.py`（O-T05/O-T06 至少各一条真子进程退出 + 新 Runtime 实例）；无桩验证 h3 翻转（after_recovery_effects == 1）
+- [x] 6.1 `ToolCapability.recovery_policy` 四态 + Registry/启动校验（queryable 未实现即失败）；`tests/unit/test_operation_recovery_policy.py` 覆盖策略表全分支（O-T04/O-T05/O-T08/O-T15/O-T16）
+- [x] 6.2 Reconcile 完成匹配改 operation_id；存量无身份 dangling 默认 unknown；有意更新「所有 dangling 都重跑」的既有测试（仅 retry_safe 夹具保留重跑断言）；控制工具幂等核验（delegate 找回子任务 O-T14、finish/ask_user 复用）
+- [x] 6.3 `TOOL_OUTCOME_UNKNOWN` + `resolve_operation`（supply_result/retry_confirmed/cancel_task + revision 乐观锁 O-T12；unknown 下 recover_agent 不可绕过 O-T11）；HITL 热/冷竞态单执行者（O-T10）；新建 `tests/integration/test_tool_outcome_unknown.py` required 形态（翻转 WP0 夹具：manual 副作用保持 1 次）
+- [x] 6.4 子进程强退矩阵：`tests/integration/test_operation_crash_matrix.py`（O-T05/O-T06 至少各一条真子进程退出 + 新 Runtime 实例）；无桩验证 h3 翻转（after_recovery_effects == 1）
 
 ## WP7 ExecutionLimits（H5）
 

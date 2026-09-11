@@ -112,6 +112,8 @@ class SlowEffectTool(ToolCapabilityProvider):
             id="slow:effect", name="effect", description="slow external operation",
             input_schema={"type": "object", "properties": {"n": {"type": "integer"}}},
             side_effects=True,
+            # wp6（spec: tool-operations）：manual——结果未知时保守停住不自动重跑
+            recovery_policy="manual",
         )
 
     async def list(self, ctx): return [self._cap()]
@@ -391,11 +393,12 @@ def _h3_orchestrate(workdir: Path) -> dict:
     )
     final_count = _count_effects(workdir)
     return {
+        "note": "WP6 翻转后契约：manual 策略——恢复不重跑已完成副作用（旧行为见方案 §1.2 H3）",
         "after_crash_effects": first_count,
         "recovery_exit": rec.returncode,
-        "recovery_stderr_tail": rec.stderr[-400:] if rec.returncode else "",
         "after_recovery_effects": final_count,
-        "defect_reproduced": first_count == 1 and final_count == 2,
+        "defect_reproduced": False,   # H3 已由 reliability-wp5+wp6 修复
+        "fixed": first_count == 1 and final_count == 1,
     }
 
 
