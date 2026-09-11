@@ -1,6 +1,6 @@
 # ctx-weft 内部实现逻辑
 
-> 本文讲 **引擎内部如何运转**：循环引擎、Step 流水线、上下文装配、任务编排、记忆写入时机、会话生命周期与崩溃恢复、事件系统内部。
+> 本文讲 **引擎内部如何运转**：循环引擎、Step 流水线、上下文装配、任务编排、记忆模型 v2、会话生命周期与崩溃恢复、事件系统内部。
 >
 > 想知道**怎么调用 SDK**，见 [README.md](./README.md)。这里的内容对编写自定义 Provider、调试事件流、扩展引擎有帮助，但日常使用不必读。
 
@@ -15,10 +15,10 @@
 5. [上下文装配（ContextAssembler）](#5-上下文装配contextassembler)
 6. [能力解析与调用（CapabilityGateway）](#6-能力解析与调用capabilitygateway)
 7. [任务编排与 Agent 解析](#7-任务编排与-agent-解析)
-8. [记忆写入时机](#记忆写入时机)
-9. [Blackboard / Topic 机制](#blackboard--topic-机制)
-10. [会话生命周期与崩溃恢复](#会话生命周期与崩溃恢复)
-11. [事件系统内部](#10-事件系统内部)
+8. [记忆模型 v2 与写入时机](#8-记忆模型-v2-与写入时机)
+9. [Blackboard / Topic 机制](#9-blackboard--topic-机制)
+10. [会话生命周期与崩溃恢复](#10-会话生命周期与崩溃恢复)
+11. [事件系统内部](#11-事件系统内部)
 
 ---
 
@@ -27,189 +27,185 @@
 ```
                          ┌──────────────────────────────────────┐
                          │           CtxWeftRuntime              │
-                         │                                        │
- TemplateResolver ──────▶│  AgentRegistry   instantiate           │
-                         │  SessionManager     create/resume      │
- ProviderRegistry ──────▶│  TaskManager        队列 / drain        │
-   memory/cap/know/llm   │                                        │
+                         │  SessionRegistry   create/resume      │
+  TemplateLookup ───────▶│  AgentLifecycleManager（ALM）          │
+  ProviderRegistry ─────▶│  TaskManager        队列 / drain        │
+   memory/cap/know/llm   │  HitlService/Registry/ReplyIntake      │
                          └───────────────┬────────────────────────┘
-                                         │ _execute_task(task, agent, template)
+                                         │ 两阶段派发（task/runner.py）
                                          ▼
         ┌──────────────────────  一次 loop run  ──────────────────────┐
-        │  ContextAssembler ──▶ AssembledPrompt                        │
-        │  CapabilityGateway ──▶ invoke / 鉴权 / 写 memory             │
-        │  LLMClient         ──▶ 流式 chunk                            │
-        │                                                              │
-        │  StepDriver: reason → act → observe → finalize               │
-        │              （compact / suspend / metadata_filler 按需）     │
-        └───────────────────────────┬──────────────────────────────────┘
-                                     │ make_event(...)
-                                     ▼
-                EventBus（InProcessEventBus，append-only）
+        │  assemble: ALM instantiate/materialize → AgentBinding        │
+        │  execute : ContextAssembler ──▶ AssembledPrompt              │
+        │            CapabilityGateway ──▶ invoke / 鉴权 / HITL        │
+        │            LLMClient         ──▶ 流式 chunk                  │
+        │                                                                │
+        │  StepDriver: prepare → act → observe → finalize               │
+        │     （compact 内联于 prepare；recognize_intent 旁路并发）        │
+        └───────────────────────────┬────────────────────────────────────┘
+                                    │ RunOutcome（execute 的返回值）
+                                    ▼
+                          TaskManager.apply_run_outcome
+                                    │ make_event(...) / emit
+                                    ▼
+                EventBus（InProcessEventBus，append-only + 未提交窗口）
                                      │ 订阅
                           ┌──────────┴──────────┐
                      EventStore            外部订阅者（SSE / 日志）
-                  (InMemoryEventStore)
+              (InMemory / SQL + 快照)
 ```
 
-**一句话**：`CtxWeftRuntime` 把一个 `(Task, Agent, AgentTemplate)` 交给 `_execute_task`，后者组装好
-`LoopContext` 与 `LoopState`，由 `StepDriver` 按 `next_step` 顺序跑 Step；每个 Step 产生
-`StepOutcome`（状态补丁 + 事件），事件全部经 `EventBus` 流出，`EventStore` 默认订阅落盘。
+**一句话**：`CtxWeftRuntime` 把 task 交给**两阶段 TaskRunner**——`assemble` 装配执行 agent（`AgentBinding`），`execute` 驱动 StepDriver 按 `next_step` 顺序跑 Step；run 的**结局**以 `RunOutcome` 返回值交回 TaskManager（task 状态由 TM 据[处置表](#7-任务编排与-agent-解析)落地，loop 不写状态），事件全部经 `EventBus` 流出、`EventStore` 落盘。
+
+**为什么结局走返回值而非事件**：进程内 bus 在 `emit()` 里同步 drain——TM 拿到结局后要动队列、派下一个 task、发更多事件，全嵌套在最初那次 `emit()` 里层层重入。数据走返回值，TM 在 run 返回**之后**动手（`core/orchestrator/task/runner.py:44`）。
 
 ---
 
 ## 2. 核心组件职责
 
-> 路径均相对 `ctx-weft/`，行号对应当前 `master`，可点击跳转。
+> 路径相对 `src/ctx_weft/`，行号对应当前分支（`feat/multimodal`）工作区，可点击跳转。
 
 | 组件 | 源码（file:line） | 职责 |
 |------|------------------|------|
-| `CtxWeftRuntime` | `src/ctx_weft/core/runtime.py:343` | 顶层编排：构造依赖、5 种运行入口、`_execute_task` |
-| `ProviderRegistry` | `src/ctx_weft/core/runtime.py:163` | 四类 provider 注册表（memory 唯一 / cap 列表 / knowledge 按 priority / llm 唯一） |
-| `AgentRegistry` | `src/ctx_weft/core/orchestrator/agent_registry.py:30` | 从 template 实例化 `Agent`（`instantiate` `:35`，含 spawn_depth / 父子关系） |
-| `SessionManager` | `src/ctx_weft/core/orchestrator/session_manager.py:22` | `create_session` `:28` / `resume_session` `:77`，建 Session + root Task + TaskManager |
-| `TaskManager` | `src/ctx_weft/core/orchestrator/task_manager.py:41` | 任务队列、`drain()` `:204` 调度、`track_background` `:76`（后台协程登记）、`restore` `:96` |
-| `ContextAssembler` | `src/ctx_weft/core/assembler/assembler.py:140` | 多 Source 取数 → budget 裁剪 → composer 拼 prompt |
-| `CapabilityGateway` | `src/ctx_weft/core/loop/capability_gateway.py:52` | capability 解析、鉴权、`invoke` `:75`、把调用/结果写 memory + 发事件 |
-| `CapabilityCache` | `src/ctx_weft/core/orchestrator/capability_cache.py:21` | per-agent 能力缓存，loop 结束 `evict(agent.id)` |
-| `StepDriver` | `src/ctx_weft/core/loop/driver.py:155` | 按 `initial_step` 起步，`run()` `:162` 循环执行 Step，发 StepStarted/Completed/Failed |
-| `EventBus` / `InProcessEventBus` | `src/ctx_weft/protocols/events.py:212` / `src/ctx_weft/providers/events/bus/in_process/bus.py:36` | 协议 + 进程内实现，`emit()` `src/ctx_weft/providers/events/bus/in_process/bus.py:45` / `stream()` `:99` |
-| `EventStore` / `InMemoryEventStore` | `src/ctx_weft/protocols/events.py:256` / `src/ctx_weft/providers/events/store/in_memory/store.py:22` | 协议 + 内存实现，`list_active_session_ids` `src/ctx_weft/providers/events/store/in_memory/store.py:51` + 回放支撑 |
-| `HitlManager` | `src/ctx_weft/core/orchestrator/hitl_manager.py:40` | 人工介入请求/应答（`approve` `:96` / `reject` `:120`） |
+| `CtxWeftRuntime` | `core/runtime.py:522` | 顶层编排。运行入口：`run_single_task` `:1249`（compat）、`start_session` `:1387`、`send_message` `:2649`、`reply_to_hitl` `:2987`、`recover_agent` `:1950`、`compact_agent` `:2385`、`pause_session` `:828` / `pause_agent` `:1111` / `resume_agent` `:1157`、`cancel_session` `:906` / `cancel_agent` `:965`、`rebuild_session` `:1721` 等 |
+| `ProviderRegistry` | `core/registry.py:35` | 四类 provider（memory 唯一 / cap 列表 / knowledge 按 priority / llm 唯一）+ per-provider authorizer（`:107`）+ memory/event blob store（`:143` / `:170`）+ skill provider 增减的 `mark_dirty`（`:115`） |
+| `AgentLifecycleManager`（ALM） | `core/orchestrator/lifecycle/agent_manager.py:116` | agent 生命周期的唯一住所：`instantiate` `:566`（真新建，发 AgentSpawned/SpawnRejected/AgentInstantiated）、`materialize` `:799`（水合，零事件）、`resolve_model` `:783`、事件驱动 `load` `:421`（吃 TASK_* 事件回放装填 registry） |
+| `TemplateLookup` | `core/orchestrator/lifecycle/template_lookup.py` | 模板解析；`resolve_qualified` 接受限定形式（`agent__x`），裸 id 抛 `TemplateNotFoundError` |
+| `SessionRegistry` | `core/orchestrator/lifecycle/session_registry.py:68` | `create_session` `:128`（发 SESSION_CREATED，因果序 Session→Agent→Task）、`resume_session` `:231`（回放重建 + `UnfinishedTasksError` 弃轮禁止 `:262`） |
+| `TaskManager` | `core/orchestrator/task/manager.py:54` | 任务队列与调度：`drain` `:502`、`_run_task` `:536`、`apply_run_outcome` `:638`、`reopen_chain` `:707` / `reopen_task` `:746`、`restore` `:143`（崩溃恢复重建）、`track_background` `:119`、未提交窗口 `begin_round` `:281` / `commit_round` / `discard_round` |
+| `ContextAssembler` | `core/assembler/assembler.py:238` | 多 Source 取数 → budget 裁剪 → composer 拼 prompt（`assemble` `:246`） |
+| `CapabilityGateway` | `core/loop/capability_gateway.py:193` | capability 解析、鉴权/HITL、参数校验、`invoke` `:236`、memory 写入 + 事件 |
+| `CapabilityCache` | `core/capabilities/cache.py:28` | **per-session 共享**能力缓存（含 pin / clear_pins / available `:140`-`:170`）；run 结束 `evict`（`core/runtime.py:3898`），pin 清理挂 task 终态（`core/runtime.py:1539`） |
+| `StepDriver` | `core/loop/driver.py:253` | 按 `initial_step` 起步，`run` `:270` 循环执行 Step，发 StepStarted/Completed/Failed |
+| `EventBus` / `InProcessEventBus` | `protocols/events.py:320` / `providers/events/bus/in_process/bus.py:41` | `emit` `:53`、`subscribe` `:115`（支持 provisional）、未提交窗口 `begin/commit/discard_provisional` `:141`-`:155`、`stream` `:157`。进程内 emit **同步 drain**、不跨进程 |
+| `EventStore` / `InMemory` + SQL | `protocols/events.py:406` / `providers/events/store/in_memory/store.py:22` / `providers/events/store/sql/` | `append` `:34`、`list_active_session_ids` `:51`、`read_after` `:54`（增量回放）、快照读写 `:75` / `:88` |
+| HITL 三件套 | `core/hitl/registry.py:183`（决定缓存）、`core/hitl/service.py:80`（`open` `:96` / `resolve` `:158` / `cancel` `:179`）、`core/hitl/reply_intake.py:29`（人类答复入核） | 人工介入请求/应答；等待协程栈在 `core/loop/hitl_waiter.py` |
 
-**自动注册的内置 Capability**（在 `CtxWeftRuntime.__init__`，`src/ctx_weft/core/runtime.py:369`）：
-- `ControlCapabilityProvider`（`src/ctx_weft/core/orchestrator/control_capability.py:366`）— submit_task / submit_plan / replan / submit_task_assessment / update_task_metadata / request_human_input
-- `SkillExecutorCapabilityProvider`（`src/ctx_weft/core/orchestrator/skill_executor_capability.py:124`）— 把 LLM 的 skill 调用路由到对应的 `SkillCapabilityProvider`；`ProviderRegistry` 在 skill provider 增减时调用 `mark_dirty()` 让它重建索引。
+**构造期自动注册的内置 Capability**（`CtxWeftRuntime.__init__`，`core/runtime.py:575`-`590`）：
+
+- `ControlCapabilityProvider`（`core/capabilities/control_tools.py:623`）— 控制工具：`delegate_task` `:167` / `delegate_plan` `:234` / `finish_task` `:309` / `report_task_outcome` `:391` / `update_task_metadata` `:525` / `collect_process_report` `:504` / `ask_user` `:600`。（旧名 submit_task / submit_plan / submit_task_assessment / request_human_input 已改名。）
+- `SkillExecutorCapabilityProvider`（`core/capabilities/skill_executor.py:151`）— 把 LLM 的 skill 调用路由到对应 `SkillCapabilityProvider`；`mark_dirty` `:167` 重建索引。
+- `MediaCapabilityProvider`（`core/media/capability.py:341`）— `media:get_image` 等媒体工具。
+
+构造期还硬校验**至少一个 `AgentCapabilityProvider`**（`core/runtime.py:594`-`603`）。
 
 ---
 
 ## 3. Loop 引擎与 Step 流水线
 
-`StepDriver.run()`（`src/ctx_weft/core/loop/driver.py:162`）是引擎心脏。流程：
+`StepDriver.run()`（`core/loop/driver.py:270`）是引擎心脏。流程：
 
-1. **起步前持久化 user_prompt**：若 `task.user_prompt` 未入库，先 `ingest` 一条
-   `USER_PROMPT`（拼成 `## Current Task` + `## Current Message`），并置 `user_prompt_in_memory=True`——
-   保证 resume 时对话上下文可完整重建。
-2. 从 `initial_step` 开始循环：
-   - 每轮先检查 `cancel_token`，已取消则抛出（→ 上层标记 `CANCELED`）。
-   - 发 `StepStarted` → 执行 `step.execute(state, ctx)` → 应用 `outcome.state_patch` →
-     发 `outcome.events` → 发 `StepCompleted`。
-   - Step 抛异常时发 `StepFailed` 再 raise。
+1. **起步前持久化 user_prompt**（`_persist_user_prompt` `core/loop/driver.py:208`）：落库的是**原样 raw content**（多模态无损，`MemoryKind.CONVERSATION_TURN / TASK / role=user`）；`## Current Task` / `## Current Message` 框架由 composer **渲染期**生成、不落库。记录 id 存 `task.user_prompt_memory_id` 供丢弃路径 fold。
+2. **起步钩子**：`ensure_dispatch_frame_at_start`（见 [§8](#8-记忆模型-v2-与写入时机)）——子任务此刻在父 scope 铸派发框 + running ack。
+3. 从 `initial_step` 开始循环：
+   - 每轮先检查 `cancel_token`，已取消则抛出。
+   - 发 `StepStarted` → `step.execute(state, ctx)` → 应用 `outcome.state_patch` → 发 `outcome.events` → 发 `StepCompleted`；异常发 `StepFailed` 再 raise。
    - `next_step = outcome.next_step`；为 `None` 时循环结束。
 
 ### Step 注册表与跳转
 
-`_build_step_driver(initial_step)`（`src/ctx_weft/core/runtime.py:900`）注册 7 个 Step：
+`_build_step_driver(initial_step)`（`core/runtime.py:3720`）注册 **8 个** Step：
 
-| Step | 源码（file:line） | 作用 | `next_step` |
+| Step | 源码（name= 行） | 作用 | `next_step` |
 |------|------------------|------|-------------|
-| `reason` | `src/ctx_weft/core/loop/steps/reason.py:29` | 装配 prompt（ContextAssembler）；命中阈值则内联直调 CompactStep 后重装配 | `"act"` |
-| `act` | `src/ctx_weft/core/loop/steps/act.py:35` | ReAct 循环：调 LLM → 执行 tool_call → 写 memory，直到无工具调用 / max_turns | `"observe"`；若 task 变 `SUSPENDED` 则 `"suspend"` |
-| `observe` | `src/ctx_weft/core/loop/steps/observe.py:38` | Observer 评估，产出 `Verdict`（outcome + summary） | `"finalize"` |
-| `finalize` | `src/ctx_weft/core/loop/steps/finalize.py:20` | 写 `OBSERVER_SUMMARY`、置 task 终态、发 TaskFinished | `None` |
-| `suspend` | `src/ctx_weft/core/loop/steps/suspend.py:18` | 当前 task 等子任务，挂起 | `None`（TaskManager 在子任务完成后重新入队） |
-| `compact` | `src/ctx_weft/core/loop/steps/compact.py:30` | 记忆压缩：复用 act 装配 + 尾部压缩指令，产出 `[Context so far]` 摘要、调 `apply_compact`；由 ReasonStep 内联直调（非 task） | `None` |
-| `metadata_filler` | `src/ctx_weft/core/loop/steps/metadata_filler.py:25` | 单发步骤：回填 title/description/session goal；由后台协程 `runtime._launch_metadata_filler` 直跑在 root task 上 | `None` |
+| `prepare` | `core/loop/steps/prepare.py:103` | 能力解析/绑定 + token 估算 + 命中阈值时内联升级压缩 + 装配 prompt + guidance/resume cue 注入 | `"act"`（`core/loop/steps/prepare.py:187`） |
+| `act` | `core/loop/steps/act.py:60` | ReAct 循环：调 LLM → gateway 执行 tool_call → 写 memory，直到 actor_done / max_turns / context_limit / 纯文本 | `suspend_requested` → `"suspend"`（`core/loop/steps/act.py:156`），否则 `"observe"` |
+| `observe` | `core/loop/steps/observe.py:216` | 裁决：root/跨 agent 任务走机械判决 + 后台 observe；子任务走 LLM observe（`report_task_outcome` 为终止工具） | `"finalize"`（`core/loop/steps/observe.py:293`） |
+| `finalize` | `core/loop/steps/finalize.py:686` | 写 finish 对 / 派发结果回填父 scope / blackboard 发布 / 发 TASK_FINALIZED；**不写 task 状态** | `None`（`core/loop/steps/finalize.py:801`） |
+| `suspend` | `core/loop/steps/suspend.py:22` | 当前 task 等子任务，挂起；TaskManager 在子任务完成后重新入队 | `None` |
+| `compact` | `core/loop/steps/compact.py:733` | 记忆压缩（不再作为 task 起步；由 PrepareStep 内联直调或 `compact_agent` 主动触发） | `None` |
+| `recognize_intent` | `core/loop/steps/recognize_intent.py:99` | 旁路意图识别：回填 root task 的 title/description/session goal（`update_task_metadata`） | `None`（单发） |
+| `reconcile` | `core/loop/steps/reconcile.py:23` | resume 后补 dangling tool_call：已有结果的复用、悬挂的经 gateway 重执行 | `"prepare"` |
 
-**典型链路**：`reason → act → observe → finalize → (None)`。
-- `act` 中若 LLM 调了 `submit_task` 等控制工具把当前 task 置 `SUSPENDED`，则走 `act → suspend`。
-- `reason` 检测到 token 超阈值时，**内联直调** `CompactStep`（不派发 task、不挂起），压缩复用 act 装配 + 尾部压缩指令；压缩后在新 memory 上重装配 prompt，继续 `→ act`。
-- 也可经 `CtxWeftRuntime.compact_session(session_id, *, agent_id=None, task_id="")` **主动**对一个**空闲**（非 draining）session 触发一次 compact-only 操作：重建 session + agent，直接调 `CompactStep().execute()`（不走 step driver、不发 Run 生命周期事件），默认折叠 root agent 的 agent 层；session 正在运行时抛 `SessionBusyError`。
+**`initial_step` 的选定**（`_SessionTaskRunner.assemble` 里的 `_reconcile_or`，`core/runtime.py:4163`）：最近 assistant turn 有 dangling tool_call → `"reconcile"`（探测函数 `_task_has_dangling_tool_call` `core/runtime.py:480`），否则 `"prepare"`。`AgentBinding.initial_step` 默认 `"prepare"`（`core/orchestrator/task/runner.py:34`）。
+
+**compact 的两个触发面**：
+
+- **内联（自动）**：PrepareStep 估算 token（对齐 miniAgents 基线）→ 命中阈值 → `escalating_compact` 逐级升级——L0.5 图片降级 → L1 agent 层折 → L2 胶囊降级 → L3 task 层坍缩（`core/loop/steps/prepare.py:155`-`166`）→ 重装配后继续 `→ act`。
+- **主动**：`CtxWeftRuntime.compact_agent(agent_id, *, task_id="")`（`core/runtime.py:2385`）对一个 idle（非 busy）agent 直调 `CompactStep().execute()`（现在**补发 RunStarted/RunFinished 对**），返回 `CompactReceipt`；强制压不受预算门控。
+
+**recognize_intent（取代已删除的 metadata_filler 后台协程）**：PrepareStep 判定需要时置 pending 标记（`core/loop/steps/prepare.py:178`），**起飞在 act 的提交点**（`core/loop/steps/act.py:304`-`306` `launch_recognize_intent`）——与 ActStep 并发、单发、不进 step 状态机。`MetadataFillerTaskSettings` 仅作 dataclass 残留（反序列化兼容）。
 
 ### Step 状态机
 
-`initial_step` 由 `_resolve` 选定：普通 task 一律 `reason`。`compact` 不再作为 task 起步（由 ReasonStep 内联直调），
-`metadata_filler` 不再作为 task 起步（由后台协程直跑）。`None` 表示本次 loop run 结束（`RunFinished`）；
-`SUSPENDED` 任务的子任务全部完成后，由 `TaskManager` 重新入队、以 `reason` 再次起步。
-
 ```mermaid
 stateDiagram-v2
-    [*] --> reason: 普通任务
+    [*] --> prepare: 普通任务（dangling tool_call 则先 reconcile）
 
-    reason --> reason: 命中阈值<br/>内联直调 CompactStep + 重装配
-    reason --> act: prompt 装配完成
+    prepare --> prepare: 命中阈值<br/>内联 escalating_compact + 重装配
+    prepare --> act: prompt 装配完成
 
-    act --> observe: exit_reason=normal / max_turns
-    act --> suspend: task 变 SUSPENDED<br/>(调了 submit_task 等)
+    act --> observe: actor_done / 纯文本 / max_turns
+    act --> suspend: suspend_requested<br/>(调了 delegate_task 等)
 
-    observe --> finalize: 产出 Verdict
+    observe --> finalize: 产出判决（或机械判决）
 
-    finalize --> [*]: task 置终态<br/>FINISHED / FAILED
+    finalize --> [*]: RunOutcome 交回 TM<br/>TM 落 FINISHED/FAILED/…
 
     suspend --> [*]: 挂起，等子任务
     note right of suspend
         子任务全部完成后
         TaskManager 重新入队
-        → 再次从 reason 起步
+        → 再次从 prepare 起步
     end note
-    note left of reason
-        metadata_filler 为单发步骤，
-        由后台协程 _launch_metadata_filler
-        直跑在 root task 上，不在此状态机内。
-    end note
-
-    note left of reason
-        每个 Step 前后由 StepDriver 发
-        StepStarted / StepCompleted；
-        异常发 StepFailed 并 raise。
-        每轮检查 cancel_token。
+    note left of prepare
+        recognize_intent 为旁路单发，
+        在 act 提交点起飞、并发运行；
+        不在本状态机内。
     end note
 ```
 
 ASCII 版（同一张图）：
 
 ```
-                    initial_step = reason（普通 task 一律如此）
+          initial_step = prepare（dangling tool_call → 先 reconcile → prepare）
         │
-        │  命中 token 阈值：内联直调 CompactStep（非 task，无 suspend）
+        │  命中 token 阈值：内联 escalating_compact（L0.5 图片→L1 折→L2 降级→L3 坍缩）
         │  ┌──────────────────────────────────────────────────┐
-        │  │ compact: 复用 act 装配 + 尾部压缩指令              │
-        │  │  → 写 COMPACT_SUMMARY + apply_compact → 重装配     │
+        │  │ compact: 复用 act 装配 + 压缩指令 → fold → 重装配  │
         │  └──────────────────────────────────────────────────┘
         ▼
-   ┌─────────┐   task 变 SUSPENDED   ┌──────────┐  挂起等子任务   None
-   │ reason  │                       │          │
+   ┌─────────┐   suspend_requested   ┌──────────┐  挂起等子任务     None
+   │ prepare │                       │          │
    │  →act   ├──────────────────────►│ suspend  ├──────────────► (TaskManager
-   └────┬────┘  (调 submit_task 等)  └──────────┘   子任务完成后    重新入队 → reason)
-        │ exit_reason = normal / max_turns
+   └────┬────┘  (调 delegate_task 等) └──────────┘   子任务完成后    重新入队 → prepare)
+        │ actor_done / 纯文本 / max_turns
         ▼
-   ┌─────────┐      ┌──────────┐   task 置终态
-   │ observe ├─────►│ finalize ├──────────────► None  (RunFinished)
-   └─────────┘      └──────────┘   FINISHED / FAILED
-
-  ※ metadata_filler 为单发步骤，由后台协程 _launch_metadata_filler
-    直跑在 root task 上，复用 act 装配 + 尾部 metadata 指令；不在主状态机内。
-  ※ 每个 Step：StepDriver 发 StepStarted → execute → 应用 state_patch
-    → 发 events → StepCompleted；异常发 StepFailed 后 raise。
-    每轮起始检查 cancel_token，已取消则抛出 → CANCELED + RunCanceled。
+   ┌─────────┐      ┌──────────┐   RunOutcome 交回
+   │ observe ├─────►│ finalize ├──▶ TM：处置表落终态 ──▶ None
+   └─────────┘      └──────────┘   FINISHED / FAILED / RETRY…
 ```
 
 ### `_run_loop`：生命周期与错误语义
 
-`_run_loop`（`src/ctx_weft/core/runtime.py:915`）包裹 driver：
+`_run_loop`（`core/runtime.py:3735`）包裹 driver：
 
-- 开始发 `RunStarted`（带 `run_id` + `initial_step`）。
-- `asyncio.CancelledError` → `was_cancelled=True`，task 置 `CANCELED`，发 `RunCanceled` + `TaskCanceled`。
-- 其他异常 → task 置 `FAILED` + `task.error`；按 `exc.retriable` 决定日志级别。
-- `finally`：`capability_cache.evict(agent.id)`；计算 `will_retry`（有错 + `retry_count < max_retries` +
-  `retriable`）；发 `RunFinished`（含 `final_status` / `will_retry` / `total_events` / `total_turns` / `error` / `error_type`）。
-- 有非取消错误时 `_run_loop` 末尾 re-raise，交由 `TaskManager` 决定是否重试。
+- 入口先 `await` 在途后台 recap（`:3766`-`3772`），再发 `RunStarted`（带 run_id + initial_step）。
+- `RoundDiscarded`（`:3787`）→ 整轮抹掉（未提交窗口 discard，见 §7）。
+- `HitlPark`（`:3799`）→ `RunOutcomeKind.AWAITING_HUMAN`。
+- `LLMOutageError`（`:3829`）→ RUN_INTERRUPTED，`retriable=False`。
+- 普通异常（`:3892`）→ RUN_INTERRUPTED(RUN_CRASH)；**真失败只有 observer 判 fail 一条路**——loop 不再直接判 FAILED。
+- `finally`：`capability_cache.evict(agent.id)`（`:3898`）；A1 守卫的 RUN_CANCELED（`:3905`）；发 `RUN_FINISHED`（`:3928`，payload 的 `outcome` 用 `RunOutcomeKind` 词表；旧 `final_status` 已废弃）。
+- **task 状态不在 loop 落地**：`TaskManager.apply_run_outcome`（`core/orchestrator/task/manager.py:638`）按处置表 `disposition_for`（`core/orchestrator/task/disposition.py:65`）决定 FINISHED / FAILED / RETRY 重排等，并统一发 TaskFinished / TaskFailed / TaskRequeued。
 
 ---
 
 ## 4. LoopState / LoopContext / StepOutcome
 
-> 三者均定义于 `src/ctx_weft/core/loop/driver.py`：`StepOutcome` `:38`、`LoopState` `:63`、`LoopContext` `:95`、`make_event` `:124`。
+> 三者均定义于 `core/loop/driver.py`：`StepOutcome` `:46`、`LoopState` `:71`、`RunPhase` `:115`（新增：produced / in_tool_loop）、`LoopContext` `:127`、`make_event` `:170`。
 
 ```python
 @dataclass
 class LoopState:                 # 跨 Step 的可变状态，Driver 维护，按 patch 增量更新
     run_id; session; task; agent; scope
     sequence_counter: int = 0    # 每发一个事件 +1（事件 sequence 来源）
-    assembled_prompt: AssembledPrompt | None   # ReasonStep 写入
-    transcript: list[TurnRecord]               # ActStep 写入（每轮 LLM 文本/工具）
-    act_exit_reason: str                       # "normal" / "max_turns"
-    verdict: Verdict | None                    # ObserveStep 写入
+    assembled_prompt: AssembledPrompt | None
+    transcript: list[TurnRecord]
+    act_exit_reason: str                       # "normal" / "max_turns" / …
+    verdict: Verdict | None                    # task_outcome / act_recap / task_summary / reported
+    run_outcome: RunOutcome | None             # v2：run 的结局，execute 的返回源
+    resolved_model: ResolvedModel | None       # 本次 run 实际用的 LLM（assemble 期解析）
+    origin: str                                # 每步由 _STEP_ORIGIN 表覆写（事件 origin 来源）
     extra: dict                                # 如 {"template": AgentTemplate}
     def apply_patch(self, patch) -> LoopState  # dataclasses.replace 浅拷贝
 
@@ -217,282 +213,191 @@ class LoopState:                 # 跨 Step 的可变状态，Driver 维护，�
 class LoopContext:               # 每次 run 一个，包所有跨 Step 依赖（只读为主）
     assembler; llm; memory; event_bus; provider_ctx
     capability_cache; capability_providers; capability_gateway
-    skill_provider_index         # provider_name → SkillCapabilityProvider（ReasonStep 加载 Level2）
-    cancel_token; pause_token; template_resolver; task_manager
+    skill_provider_index
+    cancel_token; pause_token; task_manager
+    run_phase; config                            # v2 新增
+    hitl: HitlService; waiter: HitlWaiter        # v2 新增（管账 / 管协程栈）
+    blob_store                                  # v2 新增（工具输出 spill / 媒体）
 
 @dataclass
 class StepOutcome:               # 每个 Step 的统一返回
     next_step: str | None
-    state_patch: dict = {}       # 合并进 LoopState
-    events: list[Event] = []     # Driver 负责 emit
+    state_patch: dict = {}
+    events: list[Event] = []
     request_pause: bool = False
 ```
 
-`make_event(state, type, payload, ...)`（`src/ctx_weft/core/loop/driver.py:124`）：自增
-`state.sequence_counter`，生成 `evt_ULID`，填好 `run_id / session_id / task_id / agent_id / tenant_id`。
-**类型不在 `EVENT_TYPES` 直接 `ValueError`**。
+`make_event`（`core/loop/driver.py:170`）只做字段抽取 + sequence 自增；**类型白名单校验**在 `core/utils/event.py:35 new_event`（全仓唯一一份，`type not in EVENT_TYPES → ValueError`）。
 
 ---
 
 ## 5. 上下文装配（ContextAssembler）
 
-`_build_assembler`（`src/ctx_weft/core/runtime.py`）固定装配 7 个 Source + budget + composer：
+`_build_assembler`（`core/runtime.py:3633`）固定装配 **8 个** Source + budget + composer：
 
 ```python
-ContextAssembler(                    # src/ctx_weft/core/assembler/assembler.py
+ContextAssembler(                    # core/assembler/assembler.py:238
     sources=[
-        IdentitySource(),            # sources/identity.py       → system prompt（SOUL/ROLE）
+        IdentitySource(),            # sources/identity.py       → system prompt（SOUL/ROLE facet）
         CapabilitySource(),          # sources/capability.py     → 首条 user message 前缀 + LLM tools
-        TaskSpecSource(),            # sources/task_spec.py      → task_spec block（composer 读 metadata 装饰当前消息）
-        AgentRecallSource(),         # sources/agent_recall.py   → messages（task 层 body + agent 层胶囊）
-        BlackboardSource(),          # sources/blackboard.py     → messages（订阅 topic；Phase 3 起无订阅）
-        SemanticRecallSource(),      # sources/long_memory.py    → messages（recall_semantic）
-        KnowledgeRetrievalSource(),  # sources/knowledge.py      → messages（user 引用块）
+        TaskSpecSource(),            # sources/task_spec.py      → task_spec block
+        AgentRecallSource(),         # sources/agent_recall.py:43 → task 层 body + agent 层胶囊（load_view 归并）
+        BlackboardSource(),          # core/assembler/sources/blackboard.py:27  → 宿主自建订阅的 topic 召回（见 §9）
+        SemanticRecallSource(),      # sources/long_memory.py    → recall_semantic
+        KnowledgeRetrievalSource(),  # sources/knowledge.py      → user 引用块
+        GuidanceSource(),            # sources/guidance.py:25    → act 运行时态势文本（恒拼末条 user 尾部）
     ],
-    budget=PriorityBudgetStrategy(),  # assembler/budget.py:32   按 priority 填充，超预算裁剪
-    composer=DefaultComposer(),       # assembler/composer.py:99 拼成单条 user message + system
-    deps=AssemblerDeps(memory, knowledge_providers, provider_ctx, skill_provider_index),
+    budget=PriorityBudgetStrategy(),  # assembler/budget.py:33
+    composer=DefaultComposer(),       # assembler/composer.py:406
+    deps=AssemblerDeps(memory, knowledge_providers, provider_ctx, skill_provider_index,
+                       capability_provider_index, capability_cache, agent_id),  # core/assembler/assembler.py:216
 )
 ```
 
-> Source 均位于 `src/ctx_weft/core/assembler/sources/`，budget/composer 位于 `src/ctx_weft/core/assembler/`。
+产物 `AssembledPrompt`（`core/assembler/assembler.py:128`）：`system`、`messages`（通常压成单条 user message，内含 `## Current Message` 段——框架是**渲染期**产物）、`tools`、`token_count`。
 
-产物 `AssembledPrompt`：含 `system` 文本、`messages`（通常压成单条 user message，内含
-`## Current Message` 段）、`tools`（LLMTool 列表）、`token_count`。
+要点：
 
-**Identity 是一等公民**：直接来自 `AgentTemplate.identity[purpose]`，不经过 capability。
-**Knowledge 作为 user 引用块**进 messages（"这是我刚查到的资料"），不进 system prompt。
+- **工具面是活闭包**：`_install_live_tools`（`core/assembler/assembler.py:265`）让 `AssembledPrompt.tools` 每轮现算，工具集唯一真相源在 AssemblerDeps 的 cache/provider index。
+- **AgentRecallSource（v2）**：`load_view` 取 TASK 视图（CONVERSATION_TURN+SUMMARY，半址按 agent_id 跨 task）+ AGENT 视图（finish 对 / 派发对 / 经验摘要），按 `(timestamp, seq_no)` 归并成 history block；共享 helper 在 `sources/_history.py`。
+- **Identity 是一等公民**：直接来自 `AgentTemplate.identity[purpose]`，不经 capability。Knowledge 作为 user 引用块进 messages，不进 system prompt。
 
 ---
 
 ## 6. 能力解析与调用（CapabilityGateway）
 
-`_build_gateway`（`src/ctx_weft/core/runtime.py:865`）每次 run 新建一个 `CapabilityGateway`
-（`src/ctx_weft/core/loop/capability_gateway.py:52`），注入：`capability_cache`、
-`capability_providers`、`memory`、`event_bus`、`provider_authorizers`。
+`_build_gateway`（`core/runtime.py:3668`）每次 run 新建 `CapabilityGateway`（`core/loop/capability_gateway.py:193`），注入：capability_cache、capability_providers、memory、event_bus、provider_authorizers、spill 阈值、memory_blob_store。
 
-ActStep 里一次工具调用（`_invoke_tool`，`src/ctx_weft/core/loop/steps/act.py:266`，
-最终走 `CapabilityGateway.invoke` `:75`）的链路：
+ActStep 一次工具调用（最终走 `CapabilityGateway.invoke` `:236`）的链路：
 
-1. 按 `tool_call.name` 在已 retrieve 的 capability 中解析出 `capability_id` 与归属 provider。
-2. **鉴权**：查 `provider_authorizers`（key 可为 `provider_name` 或完整 `capability_id`），
-   命中 `HumanConfirmationAuthorizer` 则走 HITL 暂停等待。
-3. 发 `CapabilityStarted`，`ingest` 一条 `TOOL_INVOCATION`。
-4. 调 `provider.invoke()`，逐 `CapabilityEvent` 转发为 `CapabilityProgress`；`result`/`error`
-   汇总后发 `CapabilityFinished`，`ingest` 一条 `TOOL_RESULT`。
+1. **解析**：`cache.get_by_qualified_name(agent_id, tool_name, task_id)`（`:255`）；控制工具靠 cache 的 session 全局区兜底可达；只处理 `kind="tool"`。
+2. **鉴权**：按 cap.id 前缀取 per-provider authorizer。**HITL 决定缓存**按 `(session, tool_call_id, stage)` + `invocation_key`（工具名+原始参数指纹，`invocation_key()` `:130`）四维短路——同一次调用的合法重入（冷路径 reconcile）放行、同 id 的另一次调用不开门。authorizer 声明 needs_human 时由 gateway 等待（`_resolve_human` `:722`）；**无人值守任务**合成「人拒绝」决定回灌（`:291`-`:303`），不挂起。
+3. **参数管线**（`:334`-`:369`，按序）——**三通道分离**：`original_arguments`（调用方入参，不被修改，审批指纹用）→ `effective_args`（授权/HITL 改写 + 校验后，**未脱敏**，执行通道）→ `audit_args`（`_sanitize` 脱敏副本，只进事件与 TOOL_AUDIT，审计通道）：
+   - `_coerce_args`（`:904`）：字符串→schema 声明标量收敛；
+   - `_raw` 哨兵（`:341`）：adapter 对「参数没解析成 JSON」的兜底，带畸形原文（截断）直白报错；
+   - `_strip_unknown_keys`（`:921`）：对**任意工具（含控制工具）**剥掉 schema 未声明的顶层键——未声明参数永远到不了工具实现（模型臆造键、畸形缓冲救援碎片的容错；组合关键字/`$ref`/显式 additionalProperties 的 schema fail-open 不剥）；
+   - `_validate_args`（`:956`）：只拦 required / type / enum（spec B），失败回灌重试。
+4. **执行与记录**：发 `CAPABILITY_INVOKED`（`:521`，payload 带脱敏副本）；普通非 silent 工具写 `TOOL_AUDIT`（TASK scope，`:566`；`_record_invocation` `:515`）+ 结果写 `role=tool` CONVERSATION_TURN（`_record_result` `:675`）；`SILENT_TOOLS`（report_task_outcome / update_task_metadata / finish_task / collect_process_report）不入 task 对话；派发工具（delegate_plan）eager 写 AGENT 层派发框（`:534`）。执行走 `_stream_tool`（收**未脱敏**的 effective 参数，Provider 永远拿不到 `***`）；工具输出过大 spill 落盘（`_maybe_spill` `:799`）；结果 parts 合法化/图片外部化；`CAPABILITY_FINISHED`（`:685`）。
 
-`CapabilityCache` 按 `agent.id` 缓存「本次会话内某 agent 可见的 capability 集合」，loop 结束
-`evict(agent.id)`。
+**observe ReAct 的终止容错**（`core/loop/steps/observe.py:172`）：`run_observe_react` 中终止工具（`report_task_outcome` / `collect_process_report`）返回 `is_error=True` 时**不终止循环**——错误照常 append 进 messages 供模型改参重试，仅成功结果作为终止结果；轮次耗尽返回 `(None, last_text)` 走机械判决兜底。
 
-> `gateway` 为 `None` 时 ActStep 退化为旧 inline 路径（仅向后兼容，正常不会发生）。
+> `CapabilityCache` per-session 共享；同 agent 的 run 结束 `evict`，pin 项挂 task 终态清理（§2）。
 
 ---
 
 ## 7. 任务编排与 Agent 解析
 
-### TaskManager.drain()
+### 两阶段 TaskRunner
 
-`start_session` / `recover_session` 末尾 `_register_and_drain`（`src/ctx_weft/core/runtime.py:570`）会：
-1. 把 session 注册进 `ControlCapabilityProvider`（让控制工具能操作 Task/Session）。
-2. 设置 `session_done_callback`（清理 cancel_token + 注销 session）。
-3. （恢复路径）按条件重新拉起 metadata_filler 后台协程（root title 为空时，`runtime._launch_metadata_filler`）。
-4. `asyncio.create_task(task_manager.drain())` —— 后台调度循环。
+`TaskRunner` 协议（`core/orchestrator/task/runner.py:39`）：
 
-`drain()`（`src/ctx_weft/core/orchestrator/task_manager.py:153`）从队列取 `PENDING` 任务，受
-`max_concurrent_tasks` 限制并发，调用 `runner(session_id, task_id)`。子任务由控制工具
-（submit_task/submit_plan）入队；父任务 `SUSPENDED` 等子任务，子任务全部完成后父任务重新入队。
+- `assemble(task_id) → AgentBinding | None`——决定并实例化执行 agent + memory 预备。`AgentBinding`（`:22`）：`agent_id / agent / template / initial_step（默认 "prepare"）/ run_id / model: ResolvedModel`。`None` = task 已不存在（装配空转）。
+- `execute(binding, task_id) → RunOutcome | None`——驱动 step loop，交回**结局**（不是 task 状态）。`RunOutcome / RunOutcomeKind / disposition_for` 在 `core/orchestrator/task/disposition.py:37 / :26 / :65`。
 
-### `_make_task_runner` 的 `_resolve`
+`TaskManager._run_task`（`core/orchestrator/task/manager.py:536`）：assemble 失败 → `commit_round` + `_handle_task_failure(reason=ASSEMBLY_FAILURE)`；成功 → TM 回填 `assigned_agent_id` / `started_at` 并**由 TM 发 TASK_STARTED**（`:575`）→ execute → `commit_round` → `apply_run_outcome`（处置表）→ `_flush_staged`（子任务入队）→ `_settle`。`RoundDiscarded` → `discard_round` 整轮抹掉（未提交窗口：`begin_round` `:281` / `commit_round` / `discard_round`——夭折轮的事件不进日志）。
 
-`runner`（`_make_task_runner`，`src/ctx_weft/core/runtime.py:602`）拿到 `task_id` 后，
-`_resolve(task, session_id)`（`src/ctx_weft/core/runtime.py:640`）依据 `task.settings` 决定
-`(agent, template, initial_step, run_id)`——这是「一个 task 用什么 agent、从哪个 Step 起步」的核心分派：
+`_register_and_drain`（`core/runtime.py:1490`）：注册 ControlCapabilityProvider → 装一次性 `TaskManagerHooks`（`core/orchestrator/task/hooks.py:48`：is_current / cancel_pending_hitl / cancel_inflight / revert_round / threshold_finalizer / cancel_finalizer / on_session_done / on_session_idle / on_task_terminal）→ `asyncio.create_task(task_manager.drain())`。（2026-09-08 生命周期改造：一轮跑完**不拆 TM / 不摘 agent record**，只做 `_release_round` 轻清理 `core/runtime.py:1556`。）
 
-| `task.settings` | agent 来源 | initial_step |
-|-----------------|-----------|--------------|
-| `NormalTaskSettings(use_subagent=True)` | 实例化子 agent（继承父 agent）；按需 flush tracking + 继承 memory | `"reason"` |
-| 其它（普通任务） | 默认 / 复用 root agent | `"reason"` |
+### drain 调度
 
-compact 与 metadata_filler 不再作为 task 起步：compact 由 ReasonStep 命中阈值后**内联直调**，
-metadata_filler 由后台协程 `runtime._launch_metadata_filler` 直跑在 root task 上。`CompactTaskSettings`
-保留为 dataclass（反序列化兼容 + done 检测），但 `_resolve` 已不再据其分派 initial_step。
+`drain()`（`core/orchestrator/task/manager.py:502`）从队列取 PENDING 任务，受 `max_concurrent_tasks` 限制并发，且**同 agent 不并发**（`:505`-`:528` busy_agents skip）+ `is_current` 归属权守卫（被顶替的旧 TM 静默停派发）。
 
-两个记忆相关副作用（仅子 agent 路径）：
-- `_flush_tracking_memory`（`src/ctx_weft/core/runtime.py:108`）：把 `agent.tracking_task_ids`
-  里前序任务的结果/报告作为 `OBSERVER_SUMMARY` 写入当前 agent scope，写完标记 `fetched`。
-- `_copy_memory_for_inherit`（`src/ctx_weft/core/runtime.py:63`，`inherit_memory=True`）：把父
-  agent scope 的近期 `USER_PROMPT / OBSERVER_SUMMARY / COMPACT_SUMMARY`（≤50 条）快照复制到子 agent scope。
+### `_SessionTaskRunner.assemble`（原 `_resolve` 的显式化）
 
-每个 task 起跑前发 `TaskStarted`。run 结束后把终态 `LoopState` 回写 `handle._state`。
+`core/runtime.py:4000`（工厂 `_make_task_runner` `:1924`）。`assemble`（`:4033`）按 `task.settings` 分派：
+
+| 分支 | agent 来源 | initial_step |
+|------|-----------|--------------|
+| `NormalTaskSettings(use_subagent=True)` | 无 assigned → `ALM.instantiate`（解析 `subagent_template` 限定名；发 AgentSpawned/SpawnRejected/AgentInstantiated；深度超限上抛 `SpawnDepthExceeded`）；已有 assigned → `materialize`（水合，零事件） | `_reconcile_or` → `prepare` / `reconcile` |
+| 其它（普通任务） | **创建者**的 agent scope（`effective_agent_id`，`core/orchestrator/task/runner.py:59`——非 subagent 任务延续创建者对话，不污染 root） | 同上 |
+
+两支都套 session 窗口的 `LoopGuard`（context_limit / reserved_output_tokens 以 SessionStartParams 为准，模型只贡献 client/身份）。
+
+记忆相关副作用（仅 subagent 路径，`inherit_memory=True`）：`_copy_memory_for_inherit`（`core/runtime.py:146`）——**镜像父 agent 当前召回视图**（TASK+AGENT 双层 load_view 归并）→ 逐条以 CONVERSATION_TURN/AGENT re-ingest 进 child scope（`:199`-`:208`）；root 轮直派 subagent 时回退 `_latest_prior_root_task`（`:127`）。（旧 `_flush_tracking_memory` 已删除。）
+
+### RunTokens（取消/暂停的执行面）
+
+每次派发在 per-run registry `_run_tokens[session_id][task_id]` 登记一对 `RunTokens`（`CancelToken` + `PauseToken`，`core/control/tokens.py`），run 结束注销（登记 `core/runtime.py:796` / 注销 `:820`，由 `_SessionTaskRunner.execute` `:4132` 驱动）；root run 的出生信号分流 born-pause / born-cancel。`StepDriver` 每轮检查 token。
 
 ---
 
-## 记忆写入时机
+## 8. 记忆模型 v2 与写入时机
 
-core 在以下时机自动 `ingest`（provider 自由决定是否持久化/索引）：
+### 数据模型（`protocols/memory.py`）
 
-| MemoryEventType | 写入位置（file:line） | 说明 |
-|-----------------|---------------------|------|
-| `USER_PROMPT` | `StepDriver.run` 起步 · `loop/driver.py:162` | 任务首次进入，拼 `## Current Task` + `## Current Message` |
-| `LLM_RESPONSE` | ActStep 每轮 LLM 调用后 · `loop/steps/act.py:35` | actor 一轮完整输出 |
-| `TOOL_INVOCATION` | CapabilityGateway invoke 前 · `loop/capability_gateway.py:75` | 一次 capability 调用 |
-| `TOOL_RESULT` | CapabilityGateway invoke 后 · `loop/capability_gateway.py:75` | capability 返回值 |
-| `OBSERVER_SUMMARY` | FinalizeStep · `loop/steps/finalize.py:20` | Observer 的 `verdict.summary`；也用于子任务结果回灌父 agent |
-| `COMPACT_SUMMARY` | CompactStep · `loop/steps/compact.py:61` | 压缩产出的 `[Context so far]` |
-| `BLACKBOARD_PUBLISH` | 显式发布 | topic 发布（父子/跨 session 通信） |
+- `MemoryScope`（`:85`）：`TASK` / `AGENT` / `SESSION`——三层记忆落位。
+- `MemoryKind`（`:102`）：`CONVERSATION_TURN` / `SUMMARY` / `TOOL_AUDIT` / `PUBLICATION`（封死集合，v2 主词表）。
+- `MemoryAddress`（`:142`）：`(session_id, task_id, agent_id)` 坐标；scope 决定哪些字段有效（half address 校验）。
+- `MemoryEventType`（`:33`，14 值）是 legacy 兼容词表：`OBSERVER_SUMMARY` / `COMPACT_SUMMARY` 等 core 已无写入点，仅投影/旧数据归一还在读。
+- **写入面**：`ingest`（`:359`，按事件 id 幂等）+ `fold(supersede_ids, replacements)`（`:376`，遗忘+替换一次原子完成；旧 `apply_compact`/`supersede` 已删）。
+- **读取面**：`load_view(address, scope, kinds)`（`:396`，时间正序全量幸存、无 limit）+ `recall_topic(topic, since)`（`:426`）+ `recall_semantic`（`:445`）。旧 `recall_recent` / `recall_recent_by_agent` 已从协议删除。
 
-> 路径相对 `src/ctx_weft/core/`。
+### 写入时机表
 
-`apply_compact(scope, summary, keep_last, ctx)`：写入一条 `COMPACT_SUMMARY`，并把 scope 内此事件
-之前、超出 `keep_last` 的事件标记 `superseded`（内存实现物理归档，外部实现可仅更新索引）。
+| 记录（Kind/Scope/role） | 写入位置 | 说明 |
+|------------------------|---------|------|
+| `CONVERSATION_TURN / TASK / user` | `driver._persist_user_prompt` `core/loop/driver.py:208`；runtime 侧 `_ingest_user_turn` `core/runtime.py:3273`；suspend 兜底 `core/loop/steps/suspend.py:32` | raw 原样（多模态无损）；`## Current Task/Message` 框架渲染期生成 |
+| `CONVERSATION_TURN / TASK / assistant` | `act._ingest_assistant_turn` `core/loop/steps/act.py:515`；打断半截 `_commit_interrupted_partial` `core/loop/steps/act.py:790` | 一轮完整输出（tool_calls 排除 dispatch/silent 入 metadata） |
+| `TOOL_AUDIT / TASK` | gateway `_record_invocation` `core/loop/capability_gateway.py:515`→`:566` | 一次 capability 调用审计 |
+| `CONVERSATION_TURN / TASK / tool` | gateway `_record_result` `:675`→`:697`；打断补挂 `core/loop/steps/act.py:723` | 工具结果对话回合（silent 工具不写） |
+| `SUMMARY`（段摘要） | `segment_fold.fold_segment` `core/loop/steps/segment_fold.py:88` | replacement 经 `fold` 原子写入；observe retry 段折与 bg 边界段折共用 |
+| agent 层折（L1 压缩） | `core/loop/steps/compact.py:521` | 升级压缩的 agent 层产物 |
+| `PUBLICATION / SESSION` | `core/loop/steps/finalize.py:751`（仅 task success） | topic=task.id，content=outputs+task_summary；随后发 EventBus `BLACKBOARD_PUBLISHED` `:763` |
+| 派发框 + running ack（`CONVERSATION_TURN / AGENT`） | `finalize.ensure_dispatch_frame_at_start` `core/loop/steps/finalize.py:226`（driver.run 每轮调用 `core/loop/driver.py:282`）；plan 框 eager 写 `gateway:534`-`:562` | 子任务真正 start 时在**父 scope** 铸；没跑起来的子任务从不写框（零清理） |
+| 派发结果终态化（tool 槽替换） | `_close_one` `core/loop/steps/finalize.py:487`：跨 agent 分支 `:526` / 同 agent 分支 `:540` | close 时把 running ack **fold 替换**为终态结果（跨 agent=交付物内容；同 agent=终态文案） |
+| finish 对 | `_synthesize_dispatch_pair` `core/loop/steps/finalize.py:636`、`build_finish_slots` `:343`；bg 替换 `core/loop/steps/background_observe.py:184`-`:207` | assistant(recap) + assistant(可选 final_reply 锚) + tool(process report)；后台 observe 事后原子替换 report 槽 |
+| 继承快照（subagent） | `_copy_memory_for_inherit` `core/runtime.py:146`→`:199` | 镜像父召回视图进 child scope |
 
----
+### 父子通信的真实通道
 
-## Blackboard / Topic 机制
+v2 里「子任务结果怎么到父」有三条，全部落在 memory、由 `AgentRecallSource` 的 AGENT 视图召回：
 
-> 核心认知：**ctx-weft 没有独立的 blackboard 存储**。blackboard / 短期记忆 / 长期记忆是
-> 同一个 `MemoryProvider` 的不同用法。所谓 blackboard，就是「带 `topic` 标签的 memory 事件 + 订阅」。
-
-### 数据模型
-
-- `MemoryEvent`（`protocols/memory.py`）：`type / scope / content / timestamp / role / topic / metadata`。
-- `MemoryEventType`：`USER_PROMPT / LLM_RESPONSE / TOOL_INVOCATION / TOOL_RESULT / OBSERVER_SUMMARY / COMPACT_SUMMARY / BLACKBOARD_PUBLISH`。
-- `Subscription`：`session_id / task_id / topic / cursor / intent`（`task_id` = 订阅方任务，`""` 表示 session 级）。
-- `intent`：`subtask`（自己派生的子任务结果，可 review/reopen）/ `predecessor`（同 plan 前序结果，只读）/ `long_term_background`（→system）/ `long_term_project_log`（→messages）。`subtask` vs `predecessor` 的区分用于 observe 渲染分段与 review 权限校验。
-
-### 两条索引轴
-
-每条 ingest 同时拿两个序号：
-
-| 轴 | key | 序号 | 用途 |
-|---|---|---|---|
-| scope 轴 | `tenant\|session\|agent`（**task_id 被忽略**） | `seq_no` | `recall_recent`——agent 历史 |
-| topic 轴 | `topic` 字符串（全局，跨 scope/session） | `topic_seq_no` | `recall_topic`——跨 task 通信 |
-
-### 三种召回
-
-- `recall_recent(scope, types, limit)`：按 `tenant\|session\|agent` + 类型，`seq_no` 倒序，跳过 superseded。
-- `recall_topic(topic, since)`：按 `topic` + `topic_seq_no > since`，正序，返回 `(records, new_cursor)`，**跳过 superseded**。
-- `recall_semantic`：V1 返空。
-
-### 发布（Publish）
-
-唯一发布点 `FinalizeStep`（仅 task `success`）：`ingest(MemoryEvent(type=BLACKBOARD_PUBLISH, topic=task.id, content=outputs+process_report, metadata={task_id, title, outcome, parent_task_id}))`。
-随后另发一个 EventBus 的 `BLACKBOARD_PUBLISHED`（投影/SSE 用，非 memory）。
-
-**覆盖语义**：`ingest` 写入 `BLACKBOARD_PUBLISH` 时，把同 `topic` 之前未 superseded 的
-`BLACKBOARD_PUBLISH` 标记为 superseded——同一 task 的结果 topic **只保留最新一条**，reopen 重跑后自动覆盖旧结果。
-
-### 订阅（Subscribe）
-
-`subscribe_topic(session_id, topic, intent, ctx, task_id="")`：存一条 `Subscription`，键
-`(session_id, task_id, topic)`，**幂等**（已存在则保留 cursor）。
-
-订阅在 **driver 的 task 启动钩子**（`StepDriver.run` 起步，持有 `ctx.memory` + `ctx.task_manager`）里按需建立，每次 run 幂等执行：
-- **前序订阅**：`task.tracking_task_ids`（同 plan 的全部前序）→ `subscribe_topic(topic=pred_id, intent="predecessor", task_id=task.id)`。
-- **子任务订阅**：`task_manager.children_of(task.id)`（父 resume 后才有子任务）→ `subscribe_topic(topic=child_id, intent="subtask", task_id=task.id)`。
-- 同一 topic 同时是前序又是子任务时按前序（只读）处理，避免重复订阅。
-
-### 消费与渲染
-
-`BlackboardSource.fetch`：`list_subscriptions(session_id, task_id=request.task.id)`（只取本 task 的订阅 + session 级订阅）→ 逐个 `recall_topic(topic, since=cursor)` → 产出
-`ContextBlock`（`subtask`/`predecessor`/`project_log`→messages，`background`→system），`intent` 透传进 block.metadata。
-Composer 在 observe 阶段按 `intent` **分段渲染**（每行 `- {title} [{outcome}]: {content}`，标题取自 record.metadata）：
-- `subtask` → **"Your sub-task results (you may confirm / reopen these)"**——review/reopen 工具按标题引用的就是这一段。
-- `predecessor` → **"Upstream task results (read-only context)"**——只读，不可 review/reopen。
-
-### Review / Reopen 权限与级联
-
-observe 的 `submit_task_assessment` 可携带 `task_reviews`：
-- **权限范围**：只能 review 当前 task 自己派生的子任务（`children_of(self)`，即 "Your sub-task results" 那一段）。前序与其它任务越权 → `_collect_reviews` 拒绝并把越权标题反馈给 LLM。
-- **级联 reopen**：reopen 一个 plan 步骤会触发 `TaskManager.reopen_chain(head, reason)`——head + 其同 plan 后续（`tracking_task_ids` 含 head、FINISHED、按 `created_at` 排序）一并重排，重建 `blocked_by` 链，使每个后续等前驱重跑完（重新 publish 覆盖旧结果）后再跑。
-- **prompt 改写**：head 用 `## Revision required\n{reason}`；后续用 `## Upstream task revised`（指向 head 更新后的结果，结果经 blackboard 订阅自然送达）。改写均基于 `original_user_prompt`，重复 reopen 不累积。
-- 因 reopen 范围限定为子任务，当前任务（parent）不是其子任务的后续，**不会被卷入级联**。
-
-### 数据流
-
-```
-finalize(success) ──ingest(topic=task.id, supersede 旧)──> MemoryProvider(topic 轴)
-                                                                  ▲
-driver task-start ──subscribe_topic(task_id=自己, topic=前序/子任务)─┤
-                                                                  │ recall_topic(topic, since=cursor)
-BlackboardSource(task_id=当前 task) ──list_subscriptions(session, task_id)┘
-        ▼
-   ContextBlock ──composer(按 intent 分段)──> "Your sub-task results" / "Upstream task results"
-```
-
-### 与 OBSERVER_SUMMARY 通道的关系
-
-父 agent 还有一条**独立**通道看到子结果：finalize 把 `OBSERVER_SUMMARY` 写进**父 scope**
-（`agent_id=creator_agent_id`），父 agent 用 `recall_recent`（scope key 忽略 task_id）即可召回。
-blackboard 的 topic 通道是「按需、按标题、可覆盖」的补充，二者并存。
-
-### Provider 对齐要点
-
-`in_memory` 与 `postgres` 两个实现必须保持一致：`subscribe_topic` 幂等 + `task_id` 维度、
-`ingest` 对 `BLACKBOARD_PUBLISH` 的 topic 覆盖、`recall_topic` 跳过 superseded、`_to_record` 透传 metadata。
-postgres 的 `MemorySubscriptionModel` 需含 `task_id` 列。
+1. **派发对**：父 scope 的 assistant 框（带 tool_calls）+ tool 槽（start 时 running ack → close 时终态替换，同锚 `started_at` 严格相邻）。
+2. **finish 对**：子任务自己的收尾胶囊（recap / final_reply 锚 / process report），同 agent 子任务写进共享 scope，跨 agent 子任务写自己 scope。
+3. **blackboard PUBLICATION**：按 topic（=task.id）精确召回的补充通道（§9）。
 
 ---
 
-## 会话生命周期与崩溃恢复
+## 9. Blackboard / Topic 机制
 
-### 新建（`start_session` `src/ctx_weft/core/runtime.py:491`，`session_id=None`）
-
-`SessionManager.create_session`（`src/ctx_weft/core/orchestrator/session_manager.py:28`）→ 建
-`Session` + root `Task` + `TaskManager` → `set_runner(_make_task_runner(...))` → 若 root_task 无标题则
-启动 metadata_filler 后台协程（`runtime._launch_metadata_filler`，经 `track_background` 登记，直跑在 root task 上）→
-`_register_and_drain` 启动 `drain()`。立即返回 `RunHandle`（任务在后台跑）。
-
-### 恢复续跑（`start_session`，`session_id=<id>`）
-
-`SessionManager.resume_session`（`src/ctx_weft/core/orchestrator/session_manager.py:77`）：回放
-事件重建 Session 状态、找回 `root_agent_id`，把新的 `user_prompt` 作为后续输入，其余同新建路径。
-
-### 崩溃恢复（进程重启）
-
-两步，通常在应用 lifespan 启动、provider 注册完成、接收新请求之前调用：
-
-1. **`recover()`**（`src/ctx_weft/core/runtime.py:794`）：调
-   `event_store.list_active_session_ids()`（`src/ctx_weft/protocols/events.py:280`，查无终态
-   事件的 session，不依赖 host 投影表），逐个回调把它标记/拉起，返回数量。`list_active_session_ids`
-   未实现时跳过并告警。
-2. **`recover_session(session_id)`**（`src/ctx_weft/core/runtime.py:723`）：
-   - `rebuild_view(event_store, session_id)`（`src/ctx_weft/core/control/reducers.py:185`）回放事件成投影。
-   - `session_from_projection`（`control/converters.py:13`）/ `task_from_projection`（`control/converters.py:31`）转回 dataclass。
-   - 区分终态任务（FINISHED/FAILED/CANCELED）与 `resumable`；无 resumable → `RuntimeError`。
-   - `TaskManager.restore(all_tasks, terminal_ids, parked_task_ids)`（`src/ctx_weft/core/orchestrator/task_manager.py:96`）重建队列、重入队 resumable（跳过已废弃的 compact / metadata_filler ephemeral task）。
-   - 用投影里的 agent 视图预建 `pre_resolved_agents`（保留 spawn_depth / parent）。
-   - 条件式恢复：若 root title 仍为空则重启 metadata_filler 后台协程（`_launch_metadata_filler`）。
-   - `set_runner(...)` + `_register_and_drain(session, task_manager)` 续跑。
-   - 缺 `template_id` / session 不存在 → `RuntimeError`。
-
-### 取消（`interrupt_session` `src/ctx_weft/core/runtime.py:402`）
-
-每次任务派发（`_SessionTaskRunner.execute`）在 per-run registry `_run_tokens[session_id][task_id]`
-登记一对 `RunTokens`（`CancelToken` + `PauseToken`，`src/ctx_weft/core/control/tokens.py`），run 结束随即注销。
-取消时遍历该 session 名下全部在途 run 的 token 并 `cancel()`，返回 `bool`。
-`StepDriver` 每轮检查该 token，已取消则抛出，经 `_run_loop` 转成 `CANCELED` + `RunCanceled`/`TaskCanceled`。
-（`run_single_task` 不注册 token，故对它调用返回 `False`。）
+- **发布**：唯一发布点 FinalizeStep（仅 success）——`ingest(MemoryKind.PUBLICATION, scope=SESSION, topic=task.id, content=最终输出+task_summary)`（`core/loop/steps/finalize.py:751`）+ EventBus 的 `BLACKBOARD_PUBLISHED`（投影/SSE 用）。`recall_topic` 对同 topic 只保留最新（覆盖语义，`protocols/memory.py:436`）。
+- **订阅现状（Phase 3 起）**：`StepDriver._ensure_blackboard_subscriptions` 已 no-op（`core/loop/driver.py:259`-`:268`）——前序结果改经 memory recall 送达，observe 的子任务 review 面由 task_manager 出，**core 内已无 `subscribe_topic` 调用点**（协议与 provider 实现仍在）。`BlackboardSource`（`core/assembler/sources/blackboard.py:27`）仍读 `list_subscriptions` + `recall_topic`，只对**宿主自建**订阅生效。
+- **Review / Reopen**：observe 的 `report_task_outcome` 可带 `task_reviews`（`control_tools._collect_reviews` `:329`，权限=当前 task 直接派生的子任务）；reopen 走 `TaskManager.reopen_chain`（`core/orchestrator/task/manager.py:707`）/ `reopen_task`（`:746`）——head + 同 plan 后续一并重排、重建 blocked_by 链、改写 prompt 后重跑（结果经 PUBLICATION 覆盖旧值）。
+- **Provider 对齐要点**：`ingest` 对 PUBLICATION 的 topic 覆盖、`recall_topic` 跳过 superseded、tenant 维度隔离（多租户契约 `protocols/memory.py:324`-`:341`）。
 
 ---
 
-## 10. 事件系统内部
+## 10. 会话生命周期与崩溃恢复
 
-- **总线**：协议 `EventBus`（`src/ctx_weft/protocols/events.py:212`）、内置实现
-  `InProcessEventBus`（`src/ctx_weft/providers/events/bus/in_process/bus.py:36`），`emit(event)` `:45`
-  广播给所有匹配 `EventFilter(session_id / run_id / task_id / types)` 的 `stream()` `:99` 订阅者。进程内、不跨进程。
-- **顺序**：`sequence` 来自 `LoopState.sequence_counter`，在同一 `run_id` 内单调递增；
-  `id` 是 `evt_ULID`（时间有序、全局唯一）。
-- **白名单冻结**：`EVENT_TYPES`（`src/ctx_weft/protocols/events.py:179`）是 V1 冻结集合，`make_event`
-  对未登记类型直接 `ValueError`——保证下游 reducer 的分支封闭。
-- **持久化**：`CtxWeftRuntime` 默认用协议 `EventStore`（`src/ctx_weft/protocols/events.py:256`）的内置实现
-  `InMemoryEventStore()`（`src/ctx_weft/providers/events/store/in_memory/store.py`），落盘非瞬态事件并支撑
-  `list_active_session_ids` 与回放；订阅总线是独立的 `EventPersister`
-  （`src/ctx_weft/providers/events/persister.py`）的职责，`CtxWeftRuntime` 用
-  `EventPersister(self.event_store, self._event_bus)` 把两者接起来。传入自定义
-  `event_store` 时同样走这条 persister。
-- **因果链**：`causation_id` 串起「哪个事件导致了这个事件」，用于调试与回放重建。
+### 新建 / 续聊（`start_session`，`core/runtime.py:1387`）
 
-> 因为所有状态变更都先变成事件再流出，事件流即「单一事实源」：UI 实时渲染、审计、崩溃恢复、回放
-> 全部基于同一条事件流，没有旁路状态。
+`SessionStartParams.create(...)` → `TurnHandle`（`events()` `:308` / `wait_for_finish()` `:315`）。create/resume 分派到 `SessionRegistry.create_session`（`core/orchestrator/lifecycle/session_registry.py:128`，发 SESSION_CREATED，因果序 Session→Agent→Task）或 `resume_session`（`:231`，回放 `rebuild_view` + **UnfinishedTasksError 弃轮禁止** `:262`）。续跑走 `_register_and_drain`（§7）。
+
+### 崩溃恢复（进程重启，主键=agent）
+
+旧 `recover()` / `recover_session()` 已删除；现在的面：
+
+- `rebuild_session`（`core/runtime.py:1721`）/ `rebuild_all_agents`（`:3593`）/ `rebuild_agent`（`:3573`）/ `rebuild_hitl`（`:3458`）；active session 判定用 `providers/events/_lifecycle.py` 的 `apply_lifecycle` / `replay_lifecycle`（`:45` / `:65`）。
+- `recover_agent(agent_id, ...)`（`core/runtime.py:1950`；per-session resume 锁 `:653`）→ `_recover_session_locked`（`:2029`），**单 owner 架构**：
+  - 有活 owner TM 且含被应答 task → `_resume_in_existing_tm`（`:2355`）就地重驱、不重建；
+  - 否则 `rebuild_view`（`core/control/reducers.py:308`，快照+增量 `read_after`）→ converters 转 dataclass（`core/control/converters.py:21` / `:41`）→ `TaskManager.restore(all_tasks, terminal_ids, parked_task_ids)`（`core/orchestrator/task/manager.py:143`，跳过已废弃的 compact/metadata ephemeral task `:179`）→ `_load_agents_of` 装填 ALM（`:3419`）→ set_runner + `_register_and_drain` 续跑。
+
+### 取消 / 暂停
+
+`cancel_session`（`:906`：先取消 HITL → `cancel_all` 清队 → 逐 agent `cancel_agent` 转 terminated）；`cancel_agent`（`:965`）；`pause_session`（`:828`）/ `pause_agent`（`:1111`）/ `resume_agent`（`:1157`）。取消经 RunTokens 广播到该 session 全部在途 run（§7）；统一取消胶囊闭合 `synthesize_cancel_closure`（`core/loop/steps/finalize.py:569`）。
+
+### `run_single_task`（compat）
+
+`:1249`——直接 `_execute_task` + `apply_run_outcome`，不经 TaskManager 队列；不注册 RunTokens（故对其 cancel 返回 False）。
+
+---
+
+## 11. 事件系统内部
+
+- **类型集合**：`EventType` StrEnum（`protocols/events.py:72`-`:209`，**78 个成员**）+ `EVENT_TYPES = frozenset(EventType)`（`:214`，向后兼容字符串用法）。新域：ROUND_COMMITTED/DISCARDED、TASK_AWAITING_HUMAN / TASK_HUMAN_RESOLVED / TASK_INTERRUPTED / RUN_INTERRUPTED、AGENT_LLM_CHANGED / AGENT_RUNNING / AGENT_IDLE / AGENT_WAITING_HUMAN / AGENT_INTERRUPTED / AGENT_TERMINATED、PREPARE_COMPLETED、HITL_OPENED / HITL_RESOLVED / HITL_REPLY_RETRACTED、FAILURE_THRESHOLD_HIT、RECOGNIZE_INTENT_*×5、BACKGROUND_OBSERVE_*×4、TASK_RECAP_STARTED/DONE 等。
+- **两个治理集合**：`TRANSIENT_EVENT_TYPES`（`:255`，流式 delta + ROUND_* 不落盘）与 `L_TIER_EVENT_TYPES`（`:272`，已停发但 reducer 仍读：SessionStatusChanged、legacy HITL、BackgroundObserve* 等）。
+- **Event 字段**：`agent_id`、`origin`（`EventOrigin` 17 值 `:217`-`:248`）、`schema_version`；`EventFilter` 支持 agent_id 轴。
+- **总线**：`InProcessEventBus`（`providers/events/bus/in_process/bus.py:41`），`emit` `:53` 进程内**同步 drain**（结局走返回值的根因，见 §1）；`subscribe` `:115` / `stream` `:157`；未提交窗口 `begin/commit/discard_provisional` `:141`-`:155`（夭折轮的事件不进日志）。
+- **持久化**：单一入口 `attach_persistence`（`providers/events/persister.py:73`，`core/runtime.py:572`）——persister 订阅先于 SnapshotWriter（顺序契约），返回可 detach 的公开 handle；`snapshot_every_n=0` 默认不接快照。InMemory 与 SQL 两实现都支撑 `read_after` 增量回放与快照。
+- **顺序与因果**：`sequence` 来自 `LoopState.sequence_counter`（`core/loop/driver.py:190`-`:204`，同 run 内单调递增）；`id` 是 `evt_ULID`（`core/utils/event.py new_event`）；类型白名单校验同在 `new_event`（`:57`）。`causation_id` 串因果链。
+- **「事件流即单一事实源」的两个限定**：① 未提交窗口——夭折轮（RoundDiscarded）的事件被 discard，不进日志；② TRANSIENT 集合跳过持久化。除这两点外没有旁路状态。
