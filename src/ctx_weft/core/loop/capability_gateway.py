@@ -383,7 +383,11 @@ class CapabilityGateway:
                 f"[Error: invalid arguments for '{tool_name}': {err}]",
                 is_dispatch, is_silent, tool_call_id,
             )
-        sanitized = _sanitize(effective_args)
+        # 审计副本（spec: capability-gateway「执行参数与审计参数分离」）：只进事件与
+        # TOOL_AUDIT，**不进执行通道**——Provider 收 effective_args（授权后未脱敏原值，
+        # 含 HITL 改写）。执行与审计共用同一份脱敏对象会把 Authorization 等功能参数
+        # 销毁成 '***' 后才交给 provider（上游方案 H4）。
+        audit_args = _sanitize(effective_args)
 
         # 4. Find provider
         provider = self._find_provider(cap.id)
@@ -393,18 +397,18 @@ class CapabilityGateway:
                 f"[Error: no provider found for '{cap.id}']", is_dispatch, is_silent, tool_call_id,
             )
 
-        # 5. 记录 invocation（事件 + TOOL_INVOCATION / delegate conversation turn 入 memory）
-        await self._record_invocation(state, ctx, tool_name, cap, invocation_id, sanitized, is_dispatch, is_silent, tool_call_id)
+        # 5. 记录 invocation（事件 + TOOL_INVOCATION / delegate conversation turn 入 memory）——审计通道
+        await self._record_invocation(state, ctx, tool_name, cap, invocation_id, audit_args, is_dispatch, is_silent, tool_call_id)
 
-        # 6. 执行（流式）。透传 invocation_id（provider 据此登记在途句柄，供 cancel 对应）与
-        # tool_call_id（控制工具据此把 origin_tool_call_id 写到 child）。
+        # 6. 执行（流式）——执行通道：effective_args（未脱敏）。透传 invocation_id（provider 据此
+        # 登记在途句柄，供 cancel 对应）与 tool_call_id（控制工具据此把 origin_tool_call_id 写到 child）。
         provider_ctx = dataclasses.replace(
             ctx.provider_ctx,
             invocation_id=invocation_id,
             extra={**ctx.provider_ctx.extra, "tool_call_id": tool_call_id},
         )
         streamed = await self._stream_tool(
-            provider, cap.id, sanitized, provider_ctx, state, invocation_id,
+            provider, cap.id, effective_args, provider_ctx, state, invocation_id,
         )
 
         # 6b. provider 让出了 needs_human：流已停在此处（其后 yield 的事件从未被消费，见
@@ -492,8 +496,8 @@ class CapabilityGateway:
             # 与 MemoryEvent / LLMMessage 的 __post_init__ 共用同一份归一。
             content = normalize_content_parts([TextPart(text=text), *note_parts, *parts])
 
-        # 7. 记录 result（事件 + TOOL_RESULT 入 memory）
-        await self._record_result(state, ctx, tool_name, invocation_id, sanitized, content, is_error, is_dispatch, is_silent, tool_call_id)
+        # 7. 记录 result（事件 + TOOL_RESULT 入 memory）——审计通道（脱敏副本）
+        await self._record_result(state, ctx, tool_name, invocation_id, audit_args, content, is_error, is_dispatch, is_silent, tool_call_id)
 
         return InvocationResult(
             invocation_id=invocation_id, tool_name=tool_name,
@@ -592,15 +596,18 @@ class CapabilityGateway:
             )
 
     async def _stream_tool(
-        self, provider, cap_id, sanitized, provider_ctx, state, invocation_id,
+        self, provider, cap_id, execution_args, provider_ctx, state, invocation_id,
     ) -> "_ToolStream":
         """流式执行 provider.invoke，聚合 result/metadata/error（含 needs_human 让出的 ask）。
+
+        ``execution_args`` 是执行通道参数（授权/HITL 修改 + schema 校验后的 effective 值，
+        **未脱敏**——审计脱敏副本不进这里，见 invoke 第 5/6 步注释）。
 
         事件消费循环与错误/取消处理分别由 `_stream_events` / `_stream_events_safe` 承担，
         `resume` 复用同一对 helper——不重复写这段循环（spec §2 的编排约束）。
         """
         return await self._stream_events_safe(
-            provider.invoke(cap_id, sanitized, provider_ctx), provider, provider_ctx,
+            provider.invoke(cap_id, execution_args, provider_ctx), provider, provider_ctx,
             state, invocation_id,
         )
 

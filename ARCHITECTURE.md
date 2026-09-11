@@ -272,13 +272,13 @@ ActStep 一次工具调用（最终走 `CapabilityGateway.invoke` `:236`）的�
 
 1. **解析**：`cache.get_by_qualified_name(agent_id, tool_name, task_id)`（`:248`）；控制工具靠 cache 的 session 全局区兜底可达；只处理 `kind="tool"`。
 2. **鉴权**：按 cap.id 前缀取 per-provider authorizer。**HITL 决定缓存**按 `(session, tool_call_id, stage)` + `invocation_key`（工具名+原始参数指纹，`invocation_key()` `:130`）四维短路——同一次调用的合法重入（冷路径 reconcile）放行、同 id 的另一次调用不开门。authorizer 声明 needs_human 时由 gateway 等待（`_resolve_human` `:716`）；**无人值守任务**合成「人拒绝」决定回灌（`:286`-`299`），不挂起。
-3. **参数管线**（`:334`-`:381`，按序）：
-   - `_coerce_args`（`:905`）：字符串→schema 声明标量收敛；
+3. **参数管线**（`:334`-`:388`，按序）——**三通道分离**（spec: capability-gateway）：`original_arguments`（调用方入参，不被修改，审批指纹用）→ `effective_args`（授权/HITL 改写 + 校验后，**未脱敏**，执行通道）→ `audit_args`（`_sanitize` 脱敏副本，只进事件与 TOOL_AUDIT，审计通道）：
+   - `_coerce_args`（`:925`）：字符串→schema 声明标量收敛；
    - `_raw` 哨兵（`:341`）：adapter 对「参数没解析成 JSON」的兜底，带畸形原文（截断）直白报错；
-   - **控制工具严格校验**（本仓 2026-09 起，spec: capability-gateway）：`cap.id` 以 `control:` 开头且存在未知顶层参数 → 返回 `[Error: invalid arguments for '{tool}': unknown parameter(s): …; declared parameters: … — re-send the call with only the declared parameters]`（`is_error=True`），**不调 provider**，错误回灌 LLM 同 run 改参重试。资格判定与剥键共用 `_declarable_props`（`:935`，组合关键字/`$ref`/显式 additionalProperties 一律 fail-open）；
-   - `_strip_unknown_keys`（`:957`）：对**非控制工具**静默剥未知顶层键（模型臆造键、畸形缓冲救援碎片的容错）；
-   - `_validate_args`（`:983`）：只拦 required / type / enum（spec B），失败回灌重试。
-4. **执行与记录**：发 `CAPABILITY_INVOKED`（`:538`）；普通非 silent 工具写 `TOOL_AUDIT`（TASK scope，`:583`；`_record_invocation` `:532`）+ 结果写 `role=tool` CONVERSATION_TURN（`_record_result` `:689`）；`SILENT_TOOLS`（report_task_outcome / update_task_metadata / finish_task / collect_process_report）不入 task 对话；派发工具（delegate_plan）eager 写 AGENT 层派发框（`:551`）。工具输出过大 spill 落盘（`_maybe_spill` `:813`）；结果 parts 合法化/图片外部化；`CAPABILITY_FINISHED`（`:699`）。
+   - **控制工具严格校验**（本仓 2026-09 起，spec: capability-gateway）：`cap.id` 以 `control:` 开头且存在未知顶层参数 → 返回 `[Error: invalid arguments for '{tool}': unknown parameter(s): …; declared parameters: … — re-send the call with only the declared parameters]`（`is_error=True`），**不调 provider**，错误回灌 LLM 同 run 改参重试。资格判定与剥键共用 `_declarable_props`（`:942`，组合关键字/`$ref`/显式 additionalProperties 一律 fail-open）；
+   - `_strip_unknown_keys`（`:964`）：对**非控制工具**静默剥未知顶层键（模型臆造键、畸形缓冲救援碎片的容错）；
+   - `_validate_args`（`:990`）：只拦 required / type / enum（spec B），失败回灌重试。
+4. **执行与记录**：发 `CAPABILITY_INVOKED`（`:542`，payload 带脱敏副本）；普通非 silent 工具写 `TOOL_AUDIT`（TASK scope，`:587`；`_record_invocation` `:536`）+ 结果写 `role=tool` CONVERSATION_TURN（`_record_result` `:696`）；`SILENT_TOOLS`（report_task_outcome / update_task_metadata / finish_task / collect_process_report）不入 task 对话；派发工具（delegate_plan）eager 写 AGENT 层派发框（`:555`）。执行走 `_stream_tool`（收**未脱敏**的 effective 参数，Provider 永远拿不到 `***`）；工具输出过大 spill 落盘（`_maybe_spill` `:820`）；结果 parts 合法化/图片外部化；`CAPABILITY_FINISHED`（`:706`）。
 
 **observe ReAct 的终止容错**（`core/loop/steps/observe.py:172`）：`run_observe_react` 中终止工具（`report_task_outcome` / `collect_process_report`）返回 `is_error=True` 时**不终止循环**——错误照常 append 进 messages 供模型改参重试，仅成功结果作为终止结果；轮次耗尽返回 `(None, last_text)` 走机械判决兜底。
 
