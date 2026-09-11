@@ -18,9 +18,9 @@
 
 ## WP5 稳定操作身份与账本（H3 前半）
 
-- [ ] 5.1 新建 `tests/unit/test_operation_identity.py`：五元组确定性（跨重启不变）、同参两次合法调用不去重（O-T09）、call_1 复用不串扰；先基线红（现状无 operation_id）
-- [ ] 5.2 `protocols/operations.py` + 内存/SQL OperationStore（prepare/CAS/get，prepared→started→completed/waiting_human/unknown）；`tests/unit/test_operation_store_conformance.py` 参数化
-- [ ] 5.3 接线：`_ingest_assistant_turn` 返回 PersistedAssistantTurn、执行入口带 record_id+ordinal、`ProviderContext.operation_id`、silent/dispatch 工具账本身份；执行顺序按 spec（prepared→CAS started→Provider→completed→幂等 memory→事件，O-T03/O-T06/O-T07）；大结果/多模态入账本（O-T13）
+- [x] 5.1 新建 `tests/unit/test_operation_identity.py`：五元组确定性（跨重启不变）、同参两次合法调用不去重（O-T09）、call_1 复用不串扰；先基线红（现状无 operation_id）
+- [x] 5.2 `protocols/operations.py` + 内存/SQL OperationStore（prepare/CAS/get，prepared→started→completed/waiting_human/unknown）；`tests/unit/test_operation_store_conformance.py` 参数化
+- [x] 5.3 接线：`_ingest_assistant_turn` 返回 PersistedAssistantTurn、执行入口带 record_id+ordinal、`ProviderContext.operation_id`、silent/dispatch 工具账本身份；执行顺序按 spec（prepared→CAS started→Provider→completed→幂等 memory→事件，O-T03/O-T06/O-T07）；大结果/多模态入账本（O-T13）
 
 ## WP6 恢复策略与 unknown 处置（H3 后半）
 
