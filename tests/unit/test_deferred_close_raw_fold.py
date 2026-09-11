@@ -189,7 +189,7 @@ def _tool_call_chunk():
     return SimpleNamespace(
         kind="tool_call",
         tool_call=SimpleNamespace(id="tc_obs", name=BACKGROUND_PROCESS_REPORT_NAME,
-                                  arguments={"task_process_report": "真报告act"}),
+                                  arguments={"act_recap": "真报告act"}),
         text="", usage=None,
     )
 
@@ -206,7 +206,10 @@ def _usage_chunk():
 
 class _FakeGateway:
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
-        return ControlResult(content="真报告act")
+        # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
+        # 读该字段判定 terminal 失败，缺字段会 AttributeError。
+        from types import SimpleNamespace
+        return SimpleNamespace(content="真报告act", is_error=False, metadata={})
 
 
 async def _preset_placeholder_pair(mem, scope, task_id: str, pctx) -> None:

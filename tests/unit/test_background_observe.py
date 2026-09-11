@@ -38,7 +38,7 @@ def _clear_module_state():
 def _make_tool_call_chunk(name: str, call_id: str = "tc1"):
     return SimpleNamespace(
         kind="tool_call",
-        tool_call=SimpleNamespace(id=call_id, name=name, arguments={"task_process_report": "段总结X"}),
+        tool_call=SimpleNamespace(id=call_id, name=name, arguments={"act_recap": "段总结X"}),
         text="",
         usage=None,
     )
@@ -85,7 +85,9 @@ class _FakeGateway:
         self._report_text = report_text
 
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
-        return ControlResult(content=self._report_text)
+        # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
+        # 读该字段判定 terminal 失败，缺字段会 AttributeError。
+        return SimpleNamespace(content=self._report_text, is_error=False, metadata={})
 
 
 async def _fake_stream_collect_process_report(ctx, state, request):
@@ -281,7 +283,9 @@ async def test_two_plain_text_observes_accumulate_both_summaries(monkeypatch, fa
 
         async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
             self.n += 1
-            return ControlResult(content=f"S{self.n}")
+            # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
+            # 读该字段判定 terminal 失败，缺字段会 AttributeError。
+            return SimpleNamespace(content=f"S{self.n}", is_error=False, metadata={})
 
     ctx.capability_gateway = _CountingGateway()
 
