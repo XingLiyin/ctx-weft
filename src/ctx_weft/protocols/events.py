@@ -417,6 +417,10 @@ class RunSnapshot:
     state_blob: dict[str, Any]
     snapshot_reason: str = ""
     snapshot_at: datetime | None = None
+    # spec: snapshot-recovery（reliability-wp4）——一致切面的提交位置与投影版本。
+    # 旧快照/旧实现读出为 None/1 → 恢复路径忽略快照走全量回放重建（不猜测位置）。
+    last_commit_position: int | None = None
+    projection_version: int = 1
 
 
 # ── EventStore Protocol ───────────────────────────────────────────────────────

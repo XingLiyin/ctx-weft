@@ -318,6 +318,8 @@ class SqlEventStore(EventStore, OrderedEventStore):
                 last_event_sequence=snapshot.last_event_sequence,
                 state_blob_json=json.dumps(snapshot.state_blob),
                 snapshot_reason=snapshot.snapshot_reason,
+                last_commit_position=snapshot.last_commit_position,
+                projection_version=snapshot.projection_version,
                 created_at=snapshot.snapshot_at,
             ))
             await db.flush()          # 让新行参与下面的「保留最新」排序
@@ -363,6 +365,8 @@ class SqlEventStore(EventStore, OrderedEventStore):
                 state_blob=json.loads(row.state_blob_json),
                 snapshot_reason=row.snapshot_reason,
                 snapshot_at=row.created_at,
+                last_commit_position=row.last_commit_position,
+                projection_version=row.projection_version if row.projection_version is not None else 1,
             )
 
 
@@ -417,6 +421,16 @@ async def open_sqlite_event_store(
             await conn.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_events_session_position "
                 "ON events (session_id, position)"))
+            # spec: snapshot-recovery——既有 event_snapshots 表补两列（旧行 NULL/1 =
+            # legacy 快照，恢复路径据此忽略走全量重建）
+            snap_cols = {r[1] for r in await conn.execute(
+                text("PRAGMA table_info(event_snapshots)"))}
+            if "last_commit_position" not in snap_cols:
+                await conn.execute(text(
+                    "ALTER TABLE event_snapshots ADD COLUMN last_commit_position INTEGER"))
+            if "projection_version" not in snap_cols:
+                await conn.execute(text(
+                    "ALTER TABLE event_snapshots ADD COLUMN projection_version INTEGER"))
         yield SqlEventStore(factory, keep_snapshots=keep_snapshots)
     finally:
         await engine.dispose()

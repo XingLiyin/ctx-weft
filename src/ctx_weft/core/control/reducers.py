@@ -305,16 +305,55 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
     )
 
 
-async def rebuild_view(event_store: Any, session_id: str) -> RunStateView:
-    """Rebuild RunStateView via snapshot + delta, or full replay as fallback.
+#: 恢复路径认可的投影版本（spec: snapshot-recovery）：不匹配的快照被忽略走全量。
+#: 与 SnapshotWriter.PROJECTION_VERSION 同步 bump。
+_PROJECTION_VERSION = 1
 
-    Works with any EventStore; snapshot methods are optional (NotImplementedError → full replay).
+
+async def rebuild_view(event_store: Any, session_id: str) -> RunStateView:
+    """按快照+增量或全量回放重建 RunStateView（spec: snapshot-recovery，wp4 改造）。
+
+    路径选择（按序）：
+
+    1. **position 一致切面**（store 具备 OrderedEventStore 能力且快照有效）：
+       快照携带 ``last_commit_position``、``projection_version`` 匹配、且位置不超前于
+       ``committed_head`` → ``read_range((cursor, head])`` 增量 apply。
+    2. **全量回放**：无快照 / 快照缺 position（legacy）/ 版本不匹配 / 引用未来位置
+       （数据异常）→ ``read_range(0..head)``（无能力时 ``read_by_session``）全量折。
+       忽略坏快照是性能降级不是数据丢失（日志是真相）。
+
+    ``read_after(id)`` 自本改造起为纯 legacy API——生产无调用点；MUST NOT 用于
+    新版快照增量（ID 铸造序 ≠ 提交序，正是 H2 的根因）。
     """
     try:
         snapshot = await event_store.load_latest_snapshot(session_id)
     except NotImplementedError:
         snapshot = None
 
+    has_ordered = (
+        hasattr(event_store, "committed_head") and hasattr(event_store, "read_range"))
+
+    if has_ordered:
+        head = await event_store.committed_head(session_id)
+        if (
+            snapshot is not None
+            and snapshot.last_commit_position is not None
+            and snapshot.projection_version == _PROJECTION_VERSION
+            and snapshot.last_commit_position <= head
+        ):
+            view = deserialize_view(snapshot.state_blob)
+            delta = await event_store.read_range(
+                session_id,
+                after_position=snapshot.last_commit_position,
+                through_position=head,
+            )
+            return apply_events([se.event for se in delta], view)
+        # 全量：忽略快照（legacy/损坏/超前），按 position 序重放并重造快照由 writer 负责
+        stored = await event_store.read_range(
+            session_id, after_position=0, through_position=head)
+        return reduce_events([se.event for se in stored], run_id=session_id)
+
+    # ── legacy store（无 OrderedEventStore 能力）：维持旧 ID 游标路径 ──────────
     if snapshot:
         view = deserialize_view(snapshot.state_blob)
         delta = await event_store.read_after(session_id, snapshot.last_event_id)
