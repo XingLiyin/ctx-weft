@@ -268,8 +268,8 @@ async def test_start_session_agent_id_is_addressable_root_agent():
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[
-        MockResponse(tool_calls=[
-            ToolCall(id="tc1", name="control__finish_task", arguments={"result": "done"}),
+        MockResponse(text="done", tool_calls=[
+            ToolCall(id="tc1", name="control__finish_task", arguments={}),
         ]),
     ])
     rt = make_runtime(llm=llm, agent_provider=resolver)
@@ -303,8 +303,8 @@ async def test_summary_carries_created_at_for_live_agents():
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[
-        MockResponse(tool_calls=[
-            ToolCall(id="tc1", name="control__finish_task", arguments={"result": "done"}),
+        MockResponse(text="done", tool_calls=[
+            ToolCall(id="tc1", name="control__finish_task", arguments={}),
         ]),
     ])
     rt = make_runtime(llm=llm, agent_provider=resolver)

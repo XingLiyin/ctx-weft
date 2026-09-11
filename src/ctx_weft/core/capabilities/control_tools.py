@@ -412,7 +412,8 @@ def report_task_outcome(
         "Required when task_status is 'success' or 'fail': a CONCISE process report of the WHOLE task — "
         "the important steps taken and lessons/experience, incorporating any sub-task results. "
         "Keep it high-signal, NOT a verbose blow-by-blow. This is NOT the final output: the final "
-        "deliverable shown to the user goes in finish_task's `result`, not here. Leave empty for 'retry'.",
+        "deliverable shown to the user is the actor's closing message text (the same turn that calls "
+        "finish_task), not any tool argument. Leave empty for 'retry'.",
     ] = "",
     task_failure_reason: Annotated[
         str,
@@ -511,7 +512,8 @@ def collect_process_report(
         str,
         "For a close (finish/normal) segment: a CONCISE process report of the WHOLE task — important steps "
         "and lessons, incorporating any sub-task results. High-signal, not verbose. NOT the final output "
-        "(that is the actor's finish_task result). Leave empty for non-close segments.",
+        "(that is the actor's closing message text, delivered in the same turn as finish_task). "
+        "Leave empty for non-close segments.",
     ] = "",
     *,
     ctx: ControlContext = None,

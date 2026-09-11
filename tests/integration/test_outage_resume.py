@@ -60,9 +60,10 @@ def _finish_task_response(text: str = "done") -> MockResponse:
 
     start_session creates the root task with interaction_mode='interactive', which
     requires the LLM to call control__finish_task (not plain-text reply).
+    交付物 = 收尾回合正文（finish_task 没有 result 参数，见 act._compose_final_outputs）。
     """
-    return MockResponse(tool_calls=[
-        ToolCall(id="tc1", name="control__finish_task", arguments={"result": text}),
+    return MockResponse(text=text, tool_calls=[
+        ToolCall(id="tc1", name="control__finish_task", arguments={}),
     ])
 
 

@@ -200,7 +200,7 @@ _BACKGROUND_BOUNDARY_DESC = {
 }
 
 
-# close 段（finish/normal）：actor 以 finish_task 收尾，其 result 落 task.outputs。
+# close 段（finish/normal）：actor 纯文本或 finish_task 收尾，收尾回合正文落 task.outputs。
 # 与 loop.steps.background_observe._CLOSE_BOUNDARIES 保持一致（此处避免跨层 import）。
 _CLOSE_BOUNDARIES = {"finish", "normal"}
 

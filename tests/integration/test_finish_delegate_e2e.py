@@ -66,30 +66,32 @@ class _RouterLLM(MockLLMAdapter):
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("obs"), name="control__report_task_outcome",
                          arguments={"task_status": "success",
-                                    "task_process_report": "done"}),
+                                    "act_recap": "done",
+                                    "task_summary": "done"}),
             ]), request)
 
         if "control__collect_process_report" in names:
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("bg"), name="control__collect_process_report",
-                         arguments={"task_process_report": "segment summary"}),
+                         arguments={"act_recap": "segment summary"}),
             ]), request)
 
         # act
         self._act_calls += 1
         if self._act_calls == 1:
             # Root act: finish + delegate IN THE SAME BATCH (the case under test).
-            return self._stream(MockResponse(tool_calls=[
+            # 交付物 = 收尾回合正文（finish_task 没有 result 参数，见 act._compose_final_outputs）。
+            return self._stream(MockResponse(text="root done", tool_calls=[
                 ToolCall(id=self._id("fin"), name="control__finish_task",
-                         arguments={"result": "root done"}),
+                         arguments={}),
                 ToolCall(id=self._id("del"), name="control__delegate_task",
                          arguments={"title": _CHILD_TITLE,
                                     "task_prompt": "do the unrelated follow-up"}),
             ]), request)
         # Detached follow-up act (and any later act): finish only.
-        return self._stream(MockResponse(tool_calls=[
+        return self._stream(MockResponse(text="child done", tool_calls=[
             ToolCall(id=self._id("fin"), name="control__finish_task",
-                     arguments={"result": "child done"}),
+                     arguments={}),
         ]), request)
 
 

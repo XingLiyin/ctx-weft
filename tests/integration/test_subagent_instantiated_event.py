@@ -63,12 +63,13 @@ class _SpawnLLM(MockLLMAdapter):
         if "control__report_task_outcome" in names:
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("obs"), name="control__report_task_outcome",
-                         arguments={"task_status": "success", "task_process_report": "done"}),
+                         arguments={"task_status": "success", "act_recap": "done",
+                                    "task_summary": "done"}),
             ]), request)
         if "control__collect_process_report" in names:
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("bg"), name="control__collect_process_report",
-                         arguments={"task_process_report": "segment summary"}),
+                         arguments={"act_recap": "segment summary"}),
             ]), request)
 
         self._act_calls += 1
@@ -82,9 +83,10 @@ class _SpawnLLM(MockLLMAdapter):
                              "subagent_template": SUB_TEMPLATE_REF,
                          }),
             ]), request)
-        return self._stream(MockResponse(tool_calls=[
+        # 交付物 = 收尾回合正文（finish_task 没有 result 参数，见 act._compose_final_outputs）
+        return self._stream(MockResponse(text="done", tool_calls=[
             ToolCall(id=self._id("fin"), name="control__finish_task",
-                     arguments={"result": "done"}),
+                     arguments={}),
         ]), request)
 
 

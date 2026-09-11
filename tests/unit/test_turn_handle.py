@@ -348,8 +348,8 @@ async def test_start_session_returns_turn_handle():
     """
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    llm = MockLLMAdapter(responses=[MockResponse(tool_calls=[
-        ToolCall(id="tc1", name="control__finish_task", arguments={"result": "done"})])])
+    llm = MockLLMAdapter(responses=[MockResponse(text="done", tool_calls=[
+        ToolCall(id="tc1", name="control__finish_task", arguments={})])])
     rt = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
 
