@@ -91,6 +91,22 @@ class ProviderRegistry:
             self._capability_authorizers[provider.name] = authorizer
         if tool_authorizers:
             self._capability_authorizers.update(tool_authorizers)
+        # spec: tool-operations（wp6）——queryable 声明与实现的对齐校验（响亮，不静默
+        # 降级为 manual）：cap 声明 queryable 而 provider 未实现 QueryResult → 注册即拒。
+        # 同步探测：list() 是 async，注册面是同步——先异步跑不了就交给首个 retrieve/list
+        # 时机？不——保持同步注册语义：只查 provider 类型（QueryResult protocol）与
+        # 其**已物化**的 caps（构造期常已建好）；拿不到 list（需 ctx）时降为「实现即过」
+        # 的弱校验。强校验在 runtime 构造期（异步面）补一次。
+        from ctx_weft.protocols.operations import QueryResult
+        if isinstance(provider, QueryResult):
+            pass  # 实现了接口——任何 queryable 声明都自洽
+        elif hasattr(provider, "_wp6_caps") and any(
+            getattr(c, "recovery_policy", "manual") == "queryable"
+            for c in provider._wp6_caps  # noqa: SLF001 —— 构造期物化清单（弱路径）
+        ):
+            raise ValueError(
+                f"provider {provider.name!r} declares queryable capabilities but does "
+                f"not implement QueryResult (query_result).")
         if isinstance(provider, SkillCapabilityProvider):
             self._notify_skill_executor_dirty()
 

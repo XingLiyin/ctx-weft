@@ -90,7 +90,7 @@ _LEGAL = {
     "prepared": {"started", "completed"},
     "started": {"completed", "waiting_human", "unknown"},
     "waiting_human": {"started", "completed", "unknown"},
-    "unknown": set(),
+    "unknown": {"completed", "started"},
     "completed": set(),
 }
 

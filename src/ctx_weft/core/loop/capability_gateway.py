@@ -447,7 +447,10 @@ class CapabilityGateway:
             # 账本是 H3 恢复的依据，静默降级会重新制造「伪装成功」）
             from ctx_weft.protocols.events import PersistenceUnavailableError as _PUE
             try:
-                ledger_record = await ledger.prepare(_OpRec(
+                # 已有记录（重入/恢复）→ 不再 prepare：op_id 即身份，reconcile 注入的
+                # 记录身份字段来自原回合（gateway 的 extra 里未必带），prepare 的身份
+                # 比对会误拒。直接沿用 existing；只有无记录时才铸新行。
+                ledger_record = existing if existing is not None else await ledger.prepare(_OpRec(
                     operation_id=op_id,
                     tenant_id=state.session.tenant_id,
                     session_id=state.session.id,
@@ -455,6 +458,7 @@ class CapabilityGateway:
                     assistant_record_id=str(ctx.provider_ctx.extra.get("assistant_record_id", "")),
                     tool_ordinal=int(ctx.provider_ctx.extra.get("tool_ordinal", 0)),
                     tool_name=tool_name,
+                    task_id=state.task.id if state.task is not None else "",
                     args_hash=inv_key,
                     memory_result_id=operation_memory_result_id(op_id),
                 ), ctx.provider_ctx)

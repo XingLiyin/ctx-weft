@@ -32,6 +32,9 @@ __all__ = [
     "OperationStore",
     "operation_id_for",
     "operation_memory_result_id",
+    "QueryOutcome",
+    "QueryResultOutcome",
+    "QueryResult",
 ]
 
 
@@ -63,6 +66,9 @@ class OperationRecord:
     assistant_record_id: str
     tool_ordinal: int
     tool_name: str
+    # 派生 task 维度（wp6 resolve_operation 补写 memory 用；空=未携带，宿主可经
+    # OperationUncertain payload 自行定位 task）
+    task_id: str = ""
     status: OperationStatus = OperationStatus.PREPARED
     revision: int = 1
     args_hash: str = ""
@@ -135,3 +141,39 @@ def operation_memory_result_id(operation_id: str) -> str:
     """TOOL_RESULT 的 memory 记录 id 由 operation_id 确定性派生（spec §5.3）：
     completed 后 memory 写失败时，恢复路径按同一 id 幂等补写。"""
     return f"res_{operation_id[3:]}"
+
+
+# ── QueryResult（spec: tool-operations，wp6）──────────────────────────────────
+
+
+class QueryOutcome(StrEnum):
+    """queryable 策略下查询外部系统的三态结论（方案 §5.4）。
+
+    ``DEFINITELY_NOT_STARTED`` 是**权威否定**——Provider 查得到完整执行记录才算；
+    「暂时查不到」必须归 UNKNOWN，不得用否定冒充（否则会重跑已发生的副作用）。
+    """
+
+    COMPLETED = "completed"                    # 外部已完成（携带结果）
+    DEFINITELY_NOT_STARTED = "definitely_not_started"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class QueryResultOutcome:
+    """query_result 的返回：outcome + completed 时外部结果（Provider 结果结构）。"""
+
+    outcome: QueryOutcome
+    result: Any = None
+
+
+@runtime_checkable
+class QueryResult(Protocol):
+    """声明 `recovery_policy="queryable"` 的 Provider MUST 实现本接口。
+
+    未实现 → ProviderRegistry 注册期 ValueError（响亮，不静默降级为 manual）。
+    """
+
+    async def query_result(
+        self, operation_id: str, ctx: ProviderContext,
+    ) -> QueryResultOutcome:
+        raise NotImplementedError

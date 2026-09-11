@@ -40,3 +40,6 @@ class TaskErrorCode(StrEnum):
     BY_OBSERVER = "TASK_FAILED_BY_OBSERVER"
     RETRY_EXHAUSTED = "TASK_FAILED_RETRY_EXHAUSTED"
     BY_THRESHOLD = "TASK_FAILED_BY_THRESHOLD"
+    # spec: tool-operations（wp6）——工具副作用结果未知：恢复保守停住等宿主
+    # resolve_operation 处置（supply_result / retry_confirmed / cancel_task）。
+    TOOL_OUTCOME_UNKNOWN = "TASK_INTERRUPTED_TOOL_OUTCOME_UNKNOWN"

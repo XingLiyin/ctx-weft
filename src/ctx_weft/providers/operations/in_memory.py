@@ -96,7 +96,9 @@ _LEGAL = {
     OperationStatus.WAITING_HUMAN: {
         OperationStatus.STARTED, OperationStatus.COMPLETED, OperationStatus.UNKNOWN,
     },
-    OperationStatus.UNKNOWN: set(),          # WP6：宿主处置前冻结
+    # wp6 宿主处置出口：supply_result→completed / retry_confirmed→started；
+    # 取消保持 unknown 留痕。
+    OperationStatus.UNKNOWN: {OperationStatus.COMPLETED, OperationStatus.STARTED},
     OperationStatus.COMPLETED: set(),        # 终态
 }
 
