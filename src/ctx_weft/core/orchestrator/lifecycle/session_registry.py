@@ -109,7 +109,7 @@ class SessionRegistry:
         ``provisional=True`` 与 ALM 同理：这是进程内登记表，成员集合要反映当下的真实，
         不受未提交窗口影响。
         """
-        self.event_bus.subscribe(None, self.handle_event, provisional=True)
+        self.event_bus.subscribe(None, self.handle_event, provisional=True, required=True)
 
     async def handle_event(self, ev: Event) -> None:
         """总线回调。把新登场的 agent 收进该 session 的成员集合，别的一概不管。"""

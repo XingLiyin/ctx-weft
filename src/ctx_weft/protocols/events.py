@@ -207,6 +207,9 @@ class EventType(StrEnum):
     #     与逐轮 BACKGROUND_OBSERVE_* 流式事件不同——这两条是"整段 recap 起/止"的记账）──
     TASK_RECAP_STARTED = "TaskRecapStarted"   # payload: {task_id, boundary, agent_id}
     TASK_RECAP_DONE = "TaskRecapDone"         # payload: {task_id}
+    # ── 观察者背压（spec: event-commit）：观察者队列溢出丢弃的实时通报。transient
+    #     不落库——补读走持久日志（payload 带 position 区间，read_range 可回放）──
+    EVENTS_DROPPED = "EventsDropped"          # payload: {subscriber_id, position, dropped}
 
 
 # 向后兼容：保持 `EVENT_TYPES` 为字符串 frozenset，供 `type not in EVENT_TYPES` 校验。
@@ -253,6 +256,7 @@ class EventOrigin:
 # 故跳过它们不影响回放、投影与崩溃恢复，只是不再把每个 token 写进事件存储与 DB。
 # 持久化/投影/快照各订阅者统一引用此集合（此前 host 以字符串字面量各维护一份）。
 TRANSIENT_EVENT_TYPES: frozenset[str] = frozenset({
+    EventType.EVENTS_DROPPED,
     EventType.LLM_TOKEN_STREAMED,
     EventType.LLM_REASONING_STREAMED,
     EventType.LLM_RETRY_TRIGGERED,
@@ -354,7 +358,22 @@ class EventBus(Protocol):
         handler: Callable[[Event], Awaitable[None]],
         *,
         provisional: bool = False,
+        required: bool = False,
     ) -> SubscriptionHandle: ...
+
+    # ── 提交门（spec: event-commit；默认不支持——required 模式构造期据此显式失败）──
+
+    def attach_commit_gate(self, gate: "object") -> None:
+        """接入提交门：emit 在 fanout 之前先经 gate 确认存储提交（required 语义）。
+
+        不支持的总线不实现/继承本默认实现：required 模式下 Runtime 构造期探测到不支持
+        即失败并附适配说明，**不静默退化**为观察者路径。实现方契约见
+        ``providers/events/bus/in_process/bus.py``。
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support attach_commit_gate; "
+            "implement it (commit before fanout in emit/commit_provisional) or "
+            "configure event_commit_policy='best_effort' explicitly.")
 
     # ── 未提交窗口（默认 no-op，见类 docstring）────────────────────────────────
 
@@ -547,6 +566,17 @@ class NullEventBlobStore(EventBlobStore):
 
     async def get(self, ref: str, ctx: "ProviderContext") -> "tuple[bytes, str] | None":
         return None
+
+
+# ── 存储不可用（spec: event-commit）────────────────────────────────────────────
+
+
+class PersistenceUnavailableError(Exception):
+    """事件提交未获存储确认（required 模式下 emit 抛出；spec: event-commit）。
+
+    语义：调用方不得把本错误当作普通可重试失败——会话已进入 ``storage_unavailable``
+    隔离（停止调度新副作用），恢复前须以 batch_id 确认未知提交（幂等重试拿原 receipt）。
+    """
 
 
 # ── OrderedEventStore（有序提交扩展，spec: event-log）─────────────────────────

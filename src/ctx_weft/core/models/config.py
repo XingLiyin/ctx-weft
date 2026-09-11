@@ -12,6 +12,10 @@ from dataclasses import dataclass
 class RuntimeConfig:
     hitl_timeout_sec: int | None = None
     hitl_max_resolved: int = 1000
+    # 事件提交策略（spec: event-commit）：required（默认）= emit 先经 CommitGate 确认
+    # 存储提交再对外通知，存储失败显式抛 PersistenceUnavailableError 并隔离会话；
+    # best_effort = 旧观察者路径（吞存储错误），启动告警、不可靠恢复。
+    event_commit_policy: str = "required"
     task_max_concurrent: int = 4
     task_max_retries: int = 3
     default_token_budget: int = 200_000
