@@ -193,6 +193,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "priority": t.priority,
                 "max_retries": t.max_retries,
                 "timeout_ms": t.timeout_ms,
+                "budget_consumed": getattr(t, "budget_consumed", None),
                 "tenant_id": t.tenant_id,
                 "outputs": t.outputs,
                 "error": t.error,
@@ -265,6 +266,7 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             priority=t.get("priority", 5),
             max_retries=t.get("max_retries", 3),
             timeout_ms=t.get("timeout_ms", 60_000),
+            budget_consumed=t.get("budget_consumed"),
             tenant_id=t.get("tenant_id", "default"),
             outputs=t.get("outputs"),
             error=t.get("error"),
@@ -594,6 +596,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
                 priority=task_data.get("priority", 5),
                 max_retries=task_data.get("max_retries", 3),
                 timeout_ms=task_data.get("timeout_ms", 60_000),
+                budget_consumed=task_data.get("budget_consumed"),
                 tenant_id=ev.tenant_id or "default",
                 created_at=ev.timestamp,
             )

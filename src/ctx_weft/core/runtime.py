@@ -3956,6 +3956,13 @@ class CtxWeftRuntime:
         # 注入 loop_ctx，未注入限制时为 None（零行为变化）。
         _budget = getattr(loop_ctx, "execution_budget", None)
         if _budget is not None:
+            # spec: execution-limits（wp8）——task 有持久化已消费量时 restore（跨
+            # retry / 跨重启续用剩余预算；算术由 wp7 单测背书）
+            _consumed = getattr(task, "budget_consumed", None)
+            if _consumed:
+                from ctx_weft.core.control.execution_budget import ExecutionBudget as _EB
+                loop_ctx.execution_budget = _EB.restore(_budget.limits, _consumed)
+                _budget = loop_ctx.execution_budget
             _budget.run_started()
 
         run_error: BaseException | None = None
@@ -4130,6 +4137,14 @@ class CtxWeftRuntime:
             # spec: event-commit——存储隔离后 finally 的收尾事件不再发：emit 要过
             # 提交门，会再撞同一故障并把 PersistenceUnavailableError 抛出 finally、
             # 掩掉真正的 run_error。会话状态由健康表承载，不缺这条事件。
+            # spec: execution-limits（wp8）——budget 已消费量写回 task（随下一次
+            # TASK_* 事件投影 budget_consumed 落库，崩溃恢复续用）
+            _fb = getattr(loop_ctx, "execution_budget", None) if loop_ctx is not None else None
+            if _fb is not None:
+                try:
+                    task.budget_consumed = _fb.snapshot()
+                except Exception:
+                    pass  # budget 快照不掀 run——只是计量优化
             if not isinstance(run_error, PersistenceUnavailableError):
                 await self._event_bus.emit(make_event(state, EventType.RUN_FINISHED, payload={
                     "outcome": outcome_kind.value,
