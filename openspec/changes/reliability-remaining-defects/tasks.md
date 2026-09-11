@@ -12,9 +12,9 @@
 
 ## WP4 快照一致切面与迁移（H2）
 
-- [ ] 4.1 新建 `tests/unit/test_snapshot_consistent_cut.py`：head 截断算法（延迟提交不丢 E-T04、并发提交不混入 E-T05、版本不匹配降级 E-T06）与两路恢复等价（session/task/agent/HITL/outputs 逐项）
-- [ ] 4.2 SnapshotWriter 改三步切面 + `RunSnapshot.last_commit_position/projection_version`；rebuild_view 优先 position 游标、`read_after` 降 legacy；翻转夹具 `test_snapshot_commit_interleaving` 与无桩验证 h2（两条路径都见 a、b）
-- [ ] 4.3 迁移实装与验收：`scripts/migrate_event_positions.py --execute` + 旧快照失效重建 + 新建 `tests/integration/test_event_position_migration.py`（E-T13）；WP2–WP4 联合验收后才允许生产宿主切日志格式（方案 §8-WP4）
+- [x] 4.1 新建 `tests/unit/test_snapshot_consistent_cut.py`：head 截断算法（延迟提交不丢 E-T04、并发提交不混入 E-T05、版本不匹配降级 E-T06）与两路恢复等价（session/task/agent/HITL/outputs 逐项）
+- [x] 4.2 SnapshotWriter 改三步切面 + `RunSnapshot.last_commit_position/projection_version`；rebuild_view 优先 position 游标、`read_after` 降 legacy；翻转夹具 `test_snapshot_commit_interleaving` 与无桩验证 h2（两条路径都见 a、b）
+- [x] 4.3 迁移实装与验收：`scripts/migrate_event_positions.py --execute` + 旧快照失效重建 + 新建 `tests/integration/test_event_position_migration.py`（E-T13）；WP2–WP4 联合验收后才允许生产宿主切日志格式（方案 §8-WP4）
 
 ## WP5 稳定操作身份与账本（H3 前半）
 
