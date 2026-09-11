@@ -32,6 +32,7 @@ from ctx_weft.core.assembler.sources import (
     TaskSpecSource,
 )
 from ctx_weft.protocols.capability import Authorizer
+from ctx_weft.core.control.execution_budget import ExecutionLimitExceeded
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
 from ctx_weft.core.models.discriminators import CancelReason, InterruptReason
 from ctx_weft.protocols.events import Event, EventOrigin, EventType
@@ -3848,6 +3849,8 @@ class CtxWeftRuntime:
             memory_blob_store=self.providers.get_memory_blob_store(),
             # spec: tool-operations（wp5）——操作账本：显式注册 > 内存默认（registry 惰性）
             operation_store=self.providers.get_operation_store(),
+            # spec: execution-limits（wp7）——provider 超时与不合作名单
+            limits=getattr(self._config, "execution_limits", None),
         )
 
     def _build_loop_ctx(
@@ -3881,6 +3884,13 @@ class CtxWeftRuntime:
             # 出网前 rehydrate ref→base64 用（Phase 3b）；未注册时是 NullMemoryBlobStore，
             # rehydrate_content 据其 can_externalize=False 原样返回、零开销。
             blob_store=self.providers.get_memory_blob_store(),
+            # spec: execution-limits（wp7）——limits 未注入（None）时 budget 也为 None：
+            # 所有检查点容忍 None，零行为变化。per-task budget 实例由派发方覆盖写入。
+            execution_budget=(
+                __import__("ctx_weft.core.control.execution_budget",
+                           fromlist=["ExecutionBudget"]).ExecutionBudget(
+                    self._config.execution_limits)
+                if getattr(self._config, "execution_limits", None) is not None else None),
         )
 
     @staticmethod
@@ -3942,6 +3952,11 @@ class CtxWeftRuntime:
             "run_id": run_id,
             "initial_step": initial_step,
         }, origin=EventOrigin.RUNTIME))
+        # spec: execution-limits（wp7）——本 run 计时起步；budget 由派发方（TM/_SessionTaskRunner）
+        # 注入 loop_ctx，未注入限制时为 None（零行为变化）。
+        _budget = getattr(loop_ctx, "execution_budget", None)
+        if _budget is not None:
+            _budget.run_started()
 
         run_error: BaseException | None = None
         was_cancelled = False
@@ -3973,6 +3988,9 @@ class CtxWeftRuntime:
             state = state.apply_patch({"run_outcome": RunOutcome(
                 kind=RunOutcomeKind.AWAITING_HUMAN, hitl_id=park.hitl_id,
             )})
+            _budget = getattr(loop_ctx, "execution_budget", None)
+            if _budget is not None:
+                _budget.park()   # 等 HITL 不计 active time（spec）
             logger.info("_run_loop: task %s parked on HITL", task.id)
         except asyncio.CancelledError:
             was_cancelled = True
@@ -4021,6 +4039,15 @@ class CtxWeftRuntime:
             # task 级事实（TaskInterrupted）不在这里发：outage 的 RunOutcome 带着
             # retriable=False 交给 TaskManager，由处置表判成 INTERRUPTED 并发出——
             # 「outage 从不原地重试」的判据从路径隔离变成了这个显式标志位（Task 4）。
+        except ExecutionLimitExceeded as exc:
+            # spec: execution-limits——超限：错误码置位后走既有 INTERRUPTED 通道
+            # （retriable=False 已在异常上；task.error_code 由 except Exception 共通段写 task.error，
+            #  code 在此显式落）
+            task.error_code = exc.code
+            task.error = exc.message
+            run_error = exc
+            logger.warning("_run_loop: task %s hit execution limit: %s", task.id, exc.message)
+            raise
         except PersistenceUnavailableError as exc:
             # spec: event-commit——存储不可用：不进通用重试语义。task 状态不动、
             # 不发 RUN_INTERRUPTED/终态事件（emit 同样要过提交门、会再撞同一故障）；

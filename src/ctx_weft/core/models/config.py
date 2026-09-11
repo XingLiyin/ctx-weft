@@ -16,6 +16,8 @@ class RuntimeConfig:
     # 存储提交再对外通知，存储失败显式抛 PersistenceUnavailableError 并隔离会话；
     # best_effort = 旧观察者路径（吞存储错误），启动告警、不可靠恢复。
     event_commit_policy: str = "required"
+    # opt-in 执行限制（spec: execution-limits，wp7）：None = 不注入 = 零行为变化。
+    execution_limits: "object | None" = None  # ExecutionLimits（避免 import 环）
     task_max_concurrent: int = 4
     task_max_retries: int = 3
     default_token_budget: int = 200_000
