@@ -57,16 +57,18 @@ class _FinishLLM(MockLLMAdapter):
         if "control__report_task_outcome" in names:
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("obs"), name="control__report_task_outcome",
-                         arguments={"task_status": "success", "task_process_report": "done"}),
+                         arguments={"task_status": "success", "act_recap": "done",
+                                    "task_summary": "done"}),
             ]), request)
         if "control__collect_process_report" in names:
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("bg"), name="control__collect_process_report",
-                         arguments={"task_process_report": "seg"}),
+                         arguments={"act_recap": "seg"}),
             ]), request)
-        return self._stream(MockResponse(tool_calls=[
+        # 交付物 = 收尾回合正文（finish_task 不带未声明参数，spec: capability-gateway）
+        return self._stream(MockResponse(text="done", tool_calls=[
             ToolCall(id=self._id("fin"), name="control__finish_task",
-                     arguments={"result": "done"}),
+                     arguments={}),
         ]), request)
 
 

@@ -33,8 +33,9 @@ class _RecordingBus:
 
 class _FakeGateway:
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id=None):
-        from ctx_weft.core.capabilities.control_tools import ControlResult
-        return ControlResult(content="DONE")
+        from types import SimpleNamespace
+        # 返回形态对齐生产 InvocationResult（含 is_error）
+        return SimpleNamespace(content="DONE", is_error=False, metadata={})
 
 
 class _SpyTokenizer(HeuristicTokenizer):

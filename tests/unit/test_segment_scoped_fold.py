@@ -197,7 +197,7 @@ async def test_is_short_segment_counts_image_parts():
 def _make_tool_call_chunk(name: str, call_id: str = "tc1"):
     return SimpleNamespace(
         kind="tool_call",
-        tool_call=SimpleNamespace(id=call_id, name=name, arguments={"task_process_report": "S2"}),
+        tool_call=SimpleNamespace(id=call_id, name=name, arguments={"act_recap": "S2"}),
         text="", usage=None,
     )
 
@@ -216,7 +216,10 @@ async def _fake_stream(ctx, state, request):
 
 class _FakeGateway:
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
-        return ControlResult(content="S2")
+        # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
+        # 读该字段判定 terminal 失败，缺字段会 AttributeError。
+        from types import SimpleNamespace
+        return SimpleNamespace(content="S2", is_error=False, metadata={})
 
 
 @pytest.mark.asyncio
