@@ -37,9 +37,9 @@
 
 ## WP8 整体验收与性能门禁
 
-- [ ] 8.1 方案 §9 剩余矩阵条目补齐（E-T02/E-T03/E-T07 回调嵌套与批次重试等）；全量 `uv run pytest tests -q` + skip/xfail 审阅 + PostgreSQL 未运行时如实报告
-- [ ] 8.2 `scripts/benchmark_runtime_commit.py`（固定负载五场景、机器可读 JSON、原始数据留存；15% p95 为待验证预算）；四个验证脚本判定终核：h1/h2/h3 defect_reproduced 全 false、h4 fixed 保持 true
-- [ ] 8.3 方案 §10.3 核验表逐项填写实测（空项写「未验证」）；ARCHITECTURE.md 对应章节更新（提交门/快照/账本/限制）
+- [x] 8.1 方案 §9 剩余矩阵条目补齐（E-T02/E-T03/E-T07 回调嵌套与批次重试等）；全量 `uv run pytest tests -q` + skip/xfail 审阅 + PostgreSQL 未运行时如实报告
+- [x] 8.2 `scripts/benchmark_runtime_commit.py`（固定负载五场景、机器可读 JSON、原始数据留存；15% p95 为待验证预算）；四个验证脚本判定终核：h1/h2/h3 defect_reproduced 全 false、h4 fixed 保持 true
+- [x] 8.3 方案 §10.3 核验表逐项填写实测（空项写「未验证」）；ARCHITECTURE.md 对应章节更新（提交门/快照/账本/限制）
 
 ## WP9 Runtime 职责拆分（H6，可选，可整体否决）
 
