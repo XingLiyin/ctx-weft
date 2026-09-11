@@ -547,3 +547,84 @@ class NullEventBlobStore(EventBlobStore):
 
     async def get(self, ref: str, ctx: "ProviderContext") -> "tuple[bytes, str] | None":
         return None
+
+
+# ── OrderedEventStore（有序提交扩展，spec: event-log）─────────────────────────
+
+
+@dataclass(frozen=True)
+class StoredEvent:
+    """事件 + 其在本会话日志中的提交位置。
+
+    `position` 由存储层在提交时分配：同会话内唯一、严格递增，**与事件 ID（铸造序）
+    无关**——延迟提交的旧 ID 会拿到较大的 position，这正是快照恢复改用 position 截断
+    的原因（可靠性方案 H2）。
+    """
+
+    event: Event
+    position: int
+
+
+@dataclass(frozen=True)
+class CommitReceipt:
+    """一次批次提交的确认：batch_id + 按提交顺序排列的 StoredEvent。
+
+    调用方收到 receipt 即意味着该批已获存储确认（required 语义的依据，WP3 提交门）。
+    重试幂等：同 batch_id 同内容重复提交返回原 receipt（position 不变）。
+    """
+
+    batch_id: str
+    records: tuple[StoredEvent, ...]
+
+
+class EventConflictError(Exception):
+    """相同 batch_id 以不同内容重放，或事件 ID 已被另一批次提交。
+
+    幂等重试必须**原样**（逐字段一致，忽略 position）；顶替/改写已提交批次不被允许。
+    调用方不得换一个新 batch_id 猜测性重发——那是双写，不是重试。
+    """
+
+
+@runtime_checkable
+class OrderedEventStore(Protocol):
+    """EventStore 的有序提交扩展（spec: event-log；WP3 提交门 / WP4 快照切面的地基）。
+
+    ## position 与批次
+
+    - `append_batch` 是**原子**提交：整批要么全部落库（各自分配连续递增 position）、
+      要么全部不存在；批内事件必须同属一个 session。
+    - `batch_id` 在第一次提交前生成、重试不换；相同 batch_id + 相同内容（忽略
+      position）→ 原 receipt；不同内容 → `EventConflictError`。
+    - `committed_head` 返回该会话最新已确认提交的 position；无提交时为 0。
+    - `read_range` 按 position 升序只读已提交事件，`through_position` 含端点。
+
+    ## 兼容
+
+    `append(event)` 由单事件 `append_batch` 实现（batch_id 确定性取 event.id），
+    既有调用方语义不变。`read_by_session` / `read_session_events_of_types` 在新版
+    Store 统一按 position 排序（legacy 行 position 为 NULL 时排在前、按 id 序）；
+    `read_after(id)` 保留 legacy 口径，新版快照恢复不再使用它。
+
+    存储实现**不得**用无锁 `MAX(position)+1` 分配——必须经会话 head 行（同事务
+    UPDATE）串行化（SQLite `BEGIN IMMEDIATE` 等价路径 / PostgreSQL 行锁）。
+    """  # noqa: D418
+
+    async def append_batch(
+        self, session_id: str, batch_id: str, events: "list[Event]",
+    ) -> CommitReceipt:
+        """原子提交一批事件，返回带提交位置的 receipt。"""
+        raise NotImplementedError
+
+    async def read_range(
+        self,
+        session_id: str,
+        *,
+        after_position: int = 0,
+        through_position: int | None = None,
+    ) -> "list[StoredEvent]":
+        """按 position 升序读取 (after_position, through_position] 的已提交事件。"""
+        raise NotImplementedError
+
+    async def committed_head(self, session_id: str) -> int:
+        """该会话最新已确认提交的 position；无提交时为 0。"""
+        raise NotImplementedError
