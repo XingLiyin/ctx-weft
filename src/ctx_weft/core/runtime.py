@@ -561,6 +561,14 @@ class CtxWeftRuntime:
         self._config = config or RuntimeConfig()
         self._llm = llm  # fallback for backward compat / tests
         self.providers = providers or ProviderRegistry()
+        # spec: tool-result-recovery——回读工具是核心回取通路（收敛文本里的引用指向它），
+        # 构造期自动注册；store 经 getter 惰性两级解析（显式注册 > 内存默认）。
+        from ctx_weft.providers.capability_results import ResultsCapabilityProvider
+        if not any(
+            getattr(p, "name", "") == "results" for p in self.providers.get_capability_providers()
+        ):
+            self.providers.register_capability(
+                ResultsCapabilityProvider(self.providers.get_tool_result_store))
         # 默认实现只在 host 没给时才解析——避免「默认」从运行期选择退化成 import 期耦合。
         if event_bus is None:
             from ctx_weft.providers.events import InProcessEventBus
@@ -941,17 +949,30 @@ class CtxWeftRuntime:
         if decision == "supply_result":
             await _cas(OperationUpdate(status=OperationStatus.COMPLETED,
                                        result=result, result_set=True))
-            # 确定性 id 幂等补写 memory（TOOL_RESULT）——memory 的 id 契约保证 no-op
+            # 确定性 id 幂等补写 memory（TOOL_RESULT）——memory 的 id 契约保证 no-op。
+            # spec: tool-result-recovery——宿主补结果统一过收敛（禁全文直灌）；store 逐出
+            # 后以账本全文重新入库（restore）。引用沿用原执行 id（attempts 尾项）。
             from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
             from ctx_weft.protocols.operations import operation_memory_result_id
+            from ctx_weft.core.loop.capability_gateway import converge_tool_output
             from ctx_weft.core.utils.clock import now_utc
             memory = self.providers.get_memory()
+            supplied = str(result)
+            ref_inv = (rec.attempts[-1]
+                       if getattr(rec, "attempts", None) else operation_id)
+            converged = await converge_tool_output(
+                supplied, ref_inv, self.providers.get_tool_result_store(), None, None,
+                threshold=self._config.spill_threshold,
+                preview_chars=self._config.spill_preview_chars,
+                tail_chars=self._config.spill_tail_chars,
+                restore=True,
+            )
             await memory.ingest(MemoryEvent(
                 id=operation_memory_result_id(operation_id),
                 kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
                 address=MemoryAddress(session_id=rec.session_id,
                                        task_id=rec.task_id or None, agent_id=rec.agent_id),
-                content=str(result), timestamp=now_utc(), role="tool",
+                content=converged, timestamp=now_utc(), role="tool",
                 metadata={"operation_id": operation_id, "resolved_via": "supply_result"},
             ), ProviderContext(session_id=rec.session_id, tenant_id=rec.tenant_id))
         elif decision == "retry_confirmed":
@@ -3826,7 +3847,10 @@ class CtxWeftRuntime:
                 KnowledgeRetrievalSource(),
                 GuidanceSource(),
             ],
-            budget=PriorityBudgetStrategy(),
+            budget=PriorityBudgetStrategy(
+                evidence_top_k=self._config.evidence_top_k,
+                evidence_score_floor=self._config.evidence_score_floor,
+            ),
             composer=DefaultComposer(),
             deps=deps,
         )
@@ -3846,9 +3870,12 @@ class CtxWeftRuntime:
             provider_authorizers=self.providers.get_capability_authorizers(),
             spill_threshold=self._config.spill_threshold,
             spill_preview_chars=self._config.spill_preview_chars,
+            spill_tail_chars=self._config.spill_tail_chars,
             memory_blob_store=self.providers.get_memory_blob_store(),
             # spec: tool-operations（wp5）——操作账本：显式注册 > 内存默认（registry 惰性）
             operation_store=self.providers.get_operation_store(),
+            # spec: tool-result-recovery——全文可回取存储（同口径两级解析）
+            result_store=self.providers.get_tool_result_store(),
             # spec: execution-limits（wp7）——provider 超时与不合作名单
             limits=getattr(self._config, "execution_limits", None),
         )
