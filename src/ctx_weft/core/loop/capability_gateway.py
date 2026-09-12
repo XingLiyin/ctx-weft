@@ -62,6 +62,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class _ProviderDeadlineExceeded(Exception):
+    """provider 活动时间超限（spec: execution-limits）。由 ActStep 收敛为工具错误。"""
+
 _REDACT_HEADERS = frozenset({"authorization", "cookie", "x-api-key", "x-auth-token"})
 
 # 无人值守撞上 HITL 时的两句措辞（`ask_user` 例外，它的文本住在 control_tools）。
@@ -204,6 +208,8 @@ class CapabilityGateway:
         spill_threshold: int = 4000,
         spill_preview_chars: int = 1000,
         memory_blob_store: "MemoryBlobStore | None" = None,
+        operation_store=None,
+        limits=None,
     ) -> None:
         self._cache = capability_cache
         self._providers = capability_providers
@@ -217,6 +223,13 @@ class CapabilityGateway:
         # 没接 blob store」同一口径，也让不关心多模态的构造点（含全部既有测试）行为
         # 逐字节不变。
         self._memory_blob_store = memory_blob_store
+        # spec: tool-operations（wp5）——操作账本（None = 调用方未接线，operation_id
+        # 存在也旁路；runtime 构造期从 registry 解析注入）。
+        self._operation_store = operation_store
+        # spec: execution-limits（wp7）——执行限制（None = 未注入，零行为变化）
+        # 与不合作 provider 名单（超时且宽限后仍未收尾）
+        self._limits = limits
+        self._uncooperative_providers: set = set()
         self._event_bus = event_bus
         self._provider_authorizers: dict[str, Authorizer] = provider_authorizers or {}
         if default_authorizer is None:
@@ -249,6 +262,13 @@ class CapabilityGateway:
         invocation_id = generate_id("inv")
         is_dispatch = tool_name in DISPATCH_TOOLS
         is_silent = tool_name in SILENT_TOOLS  # 不入 task 对话的编排/裁决工具
+        # spec: tool-operations（wp5）——operation_id 取用即清（ownership transfer）：
+        # 调用侧（act/reconcile）为**这一次**调用铸好放进共享 provider_ctx；这里入口
+        # 立即取走并置 None——不清理会泄漏到后续无关 invoke（如后台 observe 的
+        # collect_process_report），命中别的操作 completed 短路、回放错结果（实测回归）。
+        op_id = ctx.provider_ctx.operation_id if ctx.provider_ctx is not None else None
+        if ctx.provider_ctx is not None:
+            ctx.provider_ctx.operation_id = None
 
         # 1. Lookup capability（只处理 kind="tool"）。控制工具的全局可达性由 CapabilityCache 的
         # session 全局区保证（get_by_qualified_name 回退），gateway 无需特殊逻辑。
@@ -351,8 +371,28 @@ class CapabilityGateway:
                 f"well-formed JSON arguments object]",
                 is_dispatch, is_silent, tool_call_id,
             )
+        # 控制工具严格校验（spec: capability-gateway）：未知顶层参数不静默剥除，而是显式报错
+        # 回灌 LLM 改参重试。控制工具的参数语义是状态机性的——如 finish_task 的交付物在
+        # 收尾回合正文，误传 result= 会被吞掉且 outputs/result 回流/blackboard 全链路静默跳过。
+        # 外部工具（MCP/builtin/skill）不收紧：剥键容错（臆造键、畸形救援碎片）对它们仍是对的。
+        # 资格判定与剥键共用 _declarable_props——strip 不适用的 schema（组合/$ref/显式
+        # additionalProperties）这里同样不拒，两条路径行为严格一致。
+        if str(cap.id).startswith(f"{CONTROL}:"):
+            props = _declarable_props(schema)
+            if props is not None:
+                unknown = [k for k in effective_args if k not in props]
+                if unknown:
+                    declared = ", ".join(sorted(props)) or "(none)"
+                    return await self._error_and_record(
+                        state, ctx, tool_name, invocation_id,
+                        f"[Error: invalid arguments for '{tool_name}': unknown parameter(s): "
+                        f"{', '.join(repr(k) for k in unknown)}; declared parameters: {declared} "
+                        f"— re-send the call with only the declared parameters]",
+                        is_dispatch, is_silent, tool_call_id,
+                    )
         # 剥掉 schema 未声明的顶层键（对任意调用生效）。放在 _raw 兜底之后，避免把哨兵剥空
         # 而丢掉「参数非法」信号；放在 required 校验之前，使「只发了未知键」被剥空后照样触发 required。
+        # 控制工具到此处必然无未知键（上面已拒），strip 对其为恒等操作。
         effective_args = _strip_unknown_keys(effective_args, schema)
         # 参数校验：放在 coerce 之后，看到的是收敛后的类型（3 而非 "3"），不会假阳性。
         # 只拦 required/type/enum（见 _validate_args），失败回灌 LLM 让其改参重试，与 unknown-tool 同出口。
@@ -363,9 +403,10 @@ class CapabilityGateway:
                 f"[Error: invalid arguments for '{tool_name}': {err}]",
                 is_dispatch, is_silent, tool_call_id,
             )
-        # 审计副本：只进事件与 TOOL_AUDIT，**不进执行通道**——Provider 收 effective_args
-        # （授权后未脱敏原值，含 HITL 改写）。执行与审计共用同一份脱敏对象会把 Authorization
-        # 等功能参数销毁成 '***' 后才交给 provider。
+        # 审计副本（spec: capability-gateway「执行参数与审计参数分离」）：只进事件与
+        # TOOL_AUDIT，**不进执行通道**——Provider 收 effective_args（授权后未脱敏原值，
+        # 含 HITL 改写）。执行与审计共用同一份脱敏对象会把 Authorization 等功能参数
+        # 销毁成 '***' 后才交给 provider（上游方案 H4）。
         audit_args = _sanitize(effective_args)
 
         # 4. Find provider
@@ -386,9 +427,79 @@ class CapabilityGateway:
             invocation_id=invocation_id,
             extra={**ctx.provider_ctx.extra, "tool_call_id": tool_call_id},
         )
-        streamed = await self._stream_tool(
-            provider, cap.id, effective_args, provider_ctx, state, invocation_id,
-        )
+
+        # ── 操作账本（spec: tool-operations，wp5；方案 §5.3 执行序）──────────────
+        # 步骤 ②③：prepare → CAS started。operation_id 由调用侧（act/reconcile）铸好放进
+        # provider_ctx；**缺失（裸调）→ 账本全程旁路**——既有单测/宿主直构 gateway 零改动。
+        # 已 completed → 短路复用账本结果（O-T08 前半：同逻辑调用重入不再打 provider）。
+        ledger = self._operation_store
+        short_circuit: "InvocationResult | None" = None
+        ledger_record = None
+        if ledger is not None and op_id:
+            from ctx_weft.protocols.operations import (
+                OperationRecord as _OpRec, OperationStatus as _OpSt,
+                OperationUpdate as _Upd2, operation_memory_result_id,
+            )
+            existing = await ledger.get(op_id, ctx.provider_ctx)
+            if existing is not None and existing.status == _OpSt.COMPLETED:
+                # O-T08 前半：同逻辑调用重入——账本已有完整结局，不再打 provider、
+                # 不重复写 memory（首次执行已写 TOOL_RESULT）。
+                result_text = existing.result if isinstance(existing.result, str) else (
+                    "[Replayed completed operation result]")
+                logger.info(
+                    "CapabilityGateway: operation %s completed in ledger — replaying "
+                    "result, provider not re-invoked", op_id)
+                return InvocationResult(
+                    invocation_id=invocation_id, tool_name=tool_name,
+                    content=result_text, is_error=False)
+            # 账本写失败 → PersistenceUnavailableError（复用 WP3 隔离语义；D3：
+            # 账本是 H3 恢复的依据，静默降级会重新制造「伪装成功」）
+            from ctx_weft.protocols.events import PersistenceUnavailableError as _PUE
+            try:
+                # 已有记录（重入/恢复）→ 不再 prepare：op_id 即身份，reconcile 注入的
+                # 记录身份字段来自原回合（gateway 的 extra 里未必带），prepare 的身份
+                # 比对会误拒。直接沿用 existing；只有无记录时才铸新行。
+                ledger_record = existing if existing is not None else await ledger.prepare(_OpRec(
+                    operation_id=op_id,
+                    tenant_id=state.session.tenant_id,
+                    session_id=state.session.id,
+                    agent_id=state.agent.id,
+                    assistant_record_id=str(ctx.provider_ctx.extra.get("assistant_record_id", "")),
+                    tool_ordinal=int(ctx.provider_ctx.extra.get("tool_ordinal", 0)),
+                    tool_name=tool_name,
+                    task_id=state.task.id if state.task is not None else "",
+                    args_hash=inv_key,
+                    memory_result_id=operation_memory_result_id(op_id),
+                ), ctx.provider_ctx)
+                if existing is not None and existing.status == _OpSt.STARTED:
+                    # 重入（HITL 等待超时后同逻辑调用再执行）：状态已 started——不重复
+                    # 转移（started→started 非法），只追加 attempt。
+                    ledger_record = await ledger.compare_and_set(
+                        op_id, existing.revision,
+                        _Upd2(append_attempt=invocation_id), ctx.provider_ctx)
+                else:
+                    # waiting_human → started（人答了续跑）/ prepared → started（首启）
+                    ledger_record = await ledger.compare_and_set(
+                        op_id, ledger_record.revision,
+                        _Upd2(status=_OpSt.STARTED, append_attempt=invocation_id),
+                        ctx.provider_ctx)
+            except Exception as _led_exc:
+                # 账本写失败 → PersistenceUnavailableError（复用 WP3 隔离语义；D3：
+                # 账本是 H3 恢复的依据，静默降级会重新制造「伪装成功」）
+                from ctx_weft.protocols.events import PersistenceUnavailableError as _PUE
+                raise _PUE(
+                    f"operation ledger unavailable for {op_id!r}: {_led_exc}"
+                ) from _led_exc
+
+        try:
+            streamed = await self._stream_tool(
+                provider, cap.id, effective_args, provider_ctx, state, invocation_id,
+            )
+        except Exception:
+            if ledger is not None and op_id and ledger_record is not None:
+                # 执行崩溃：账本留在 started——副作用可能已发生；结果判定归 WP6 的策略表。
+                pass
+            raise
 
         # 6b. provider 让出了 needs_human：流已停在此处（其后 yield 的事件从未被消费，见
         # `_stream_events`）。等待权归 gateway——provider 只**声明**需要人。
@@ -416,6 +527,24 @@ class CapabilityGateway:
                 streamed = _ToolStream(texts=[
                     ASK_USER_UNATTENDED_RESULT if tool_name == ASK_USER_NAME
                     else _UNATTENDED_TOOL_NOTE])
+            except Exception as _park_exc:
+                from ctx_weft.core.loop.park import HitlPark as _HP
+                if not isinstance(_park_exc, _HP):
+                    raise
+                # spec: tool-operations——park 上抛前把账本标到 waiting_human
+                # （started→waiting_human 合法）：冷/热恢复据此识别「同身份续跑」。
+                if ledger is not None and op_id and ledger_record is not None:
+                    from ctx_weft.protocols.operations import (
+                        OperationStatus as _Wh, OperationUpdate as _Wu)
+                    try:
+                        await ledger.compare_and_set(
+                            op_id, ledger_record.revision,
+                            _Wu(status=_Wh.WAITING_HUMAN), ctx.provider_ctx)
+                    except Exception:
+                        logger.exception(
+                            "ledger waiting_human mark failed for %s (park proceeds)",
+                            op_id)
+                raise
             else:
                 # 拿到了真人的决定：原有两条路，逐字节未改。
                 if needs_human_ask.reply_as_result:
@@ -474,6 +603,17 @@ class CapabilityGateway:
             # 过归一层：宿主 provider 可能给 dict 形态的 part（JSON 往返），
             # 与 MemoryEvent / LLMMessage 的 __post_init__ 共用同一份归一。
             content = normalize_content_parts([TextPart(text=text), *note_parts, *parts])
+
+        # ── 步骤⑤：账本 completed（持久确认）——先于 TOOL_RESULT 写与事件（spec §5.3：
+        # completed 后 memory 写失败 → 恢复按 operation_memory_result_id(op_id) 幂等补写，
+        # 不再执行工具）。完整结果入账本（非审计截断文本；parts/blob ref 原样）。
+        if ledger is not None and op_id and ledger_record is not None:
+            from ctx_weft.protocols.operations import OperationStatus as _St, OperationUpdate as _Upd2
+            ledger_record = await ledger.compare_and_set(
+                op_id, ledger_record.revision,
+                _Upd2(status=_St.COMPLETED, result=text, result_set=True,
+                     error=str(metadata.get("error", "")) or None if is_error else None),
+                ctx.provider_ctx)
 
         # 7. 记录 result（事件 + TOOL_RESULT 入 memory）——审计通道（脱敏副本）
         await self._record_result(state, ctx, tool_name, invocation_id, audit_args, content, is_error, is_dispatch, is_silent, tool_call_id)
@@ -585,10 +725,50 @@ class CapabilityGateway:
         事件消费循环与错误/取消处理分别由 `_stream_events` / `_stream_events_safe` 承担，
         `resume` 复用同一对 helper——不重复写这段循环（spec §2 的编排约束）。
         """
-        return await self._stream_events_safe(
-            provider.invoke(cap_id, execution_args, provider_ctx), provider, provider_ctx,
-            state, invocation_id,
-        )
+        # spec: execution-limits（wp7）——provider 活动时间上限（progress 不续命）。
+        # 不合作 provider（此前超时未收尾）在同会话被拒绝：超时不证明副作用未发生，
+        # 不能假装 asyncio 能终止不合作的 Python 代码。
+        if provider in self._uncooperative_providers:
+            # _ToolStream 形态（非 InvocationResult）——与 _stream_tool 的返回契约一致，
+            # 下游 6b 的 needs_human_ask / _record_result 正常消费
+            return _ToolStream(
+                texts=[f"[Error: provider for '{cap_id}' previously exceeded its "
+                       f"cleanup grace and is marked uncooperative — further "
+                       f"side-effecting calls in this session are refused. Host "
+                       f"must isolate the provider process.]"],
+                is_error=True)
+        limits = getattr(self._limits, "provider_timeout_sec", None)
+        grace = getattr(self._limits, "cleanup_grace_sec", 5.0)
+        stream = provider.invoke(cap_id, execution_args, provider_ctx)
+        if limits is None:
+            return await self._stream_events_safe(
+                stream, provider, provider_ctx, state, invocation_id)
+        try:
+            return await asyncio.wait_for(
+                self._stream_events_safe(
+                    stream, provider, provider_ctx, state, invocation_id),
+                timeout=limits)
+        except asyncio.TimeoutError:
+            # 取消防护网 + 宽限等待；仍未收尾 → 标记不合作。suppress 兜 CancelledError
+            # （3.11+ 是 BaseException，裸 suppress(Exception) 拦不住取消链的尾巴）。
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await provider.cancel(invocation_id, provider_ctx)
+            try:
+                await asyncio.wait_for(self._drain_quietly(stream), timeout=grace)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._uncooperative_providers.add(provider)
+                logger.error(
+                    "provider for '%s' exceeded cleanup grace %.1fs — marked "
+                    "uncooperative; session side effects refused until host isolates",
+                    cap_id, grace)
+            raise _ProviderDeadlineExceeded(
+                f"provider '{cap_id}' exceeded {limits}s active-time limit")
+
+    async def _drain_quietly(self, events) -> None:
+        """宽限期静默排空（防 unhandled iterator warning；含取消尾巴）。"""
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            async for _ in events:
+                pass
 
     async def _stream_events_safe(
         self, events, provider, provider_ctx, state, invocation_id,
@@ -918,6 +1098,28 @@ def _coerce_args(arguments: dict[str, Any], schema: dict[str, Any] | None) -> di
     return out
 
 
+def _declarable_props(schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """剥键与控制工具严格校验共用的资格判定：能明确「什么是已知键」时返回
+    ``properties``，否则 ``None``（fail-open——不剥、也不拒）。
+
+    仅当 schema 自身可判定时才生效：
+      - schema 非 dict / 无 ``properties`` → 不可判定；
+      - 含组合关键字 ``allOf/anyOf/oneOf/not`` 或顶层 ``$ref`` → 键可能由子 schema 声明；
+      - ``additionalProperties`` 显式为 ``True`` 或子 schema（schema 主动允许附加属性）。
+    """
+    if not isinstance(schema, dict):
+        return None
+    props = schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return None
+    if any(k in schema for k in ("allOf", "anyOf", "oneOf", "not", "$ref")):
+        return None
+    ap = schema.get("additionalProperties")
+    if ap is True or isinstance(ap, dict):
+        return None
+    return props
+
+
 def _strip_unknown_keys(arguments: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
     """丢弃 input_schema.properties 未声明的顶层键（对任意调用生效）。
 
@@ -925,21 +1127,12 @@ def _strip_unknown_keys(arguments: dict[str, Any], schema: dict[str, Any] | None
     ``{"b": 2}`` 当参数）。剥掉它们，只把 schema 声明的参数交给工具，避免杂键流进工具实现，
     也避免错碎片被当成合法调用执行。
 
-    仅当能明确「什么是已知键」时才剥（否则 fail-open 原样返回）：
-      - schema 非 dict / 无 ``properties`` → 不剥；
-      - 含组合关键字 ``allOf/anyOf/oneOf/not`` 或顶层 ``$ref`` → 键可能由子 schema 声明，不剥；
-      - ``additionalProperties`` 显式为 ``True`` 或子 schema（schema 主动允许附加属性）→ 不剥。
     仅剥顶层，不递归进嵌套对象（组合/``$ref`` 下递归易误删）。
+    资格判定见 ``_declarable_props``；控制工具不走本函数的静默语义——
+    见 invoke() 内的严格检查（spec: capability-gateway）。
     """
-    if not isinstance(schema, dict):
-        return arguments
-    props = schema.get("properties")
-    if not isinstance(props, dict) or not props:
-        return arguments
-    if any(k in schema for k in ("allOf", "anyOf", "oneOf", "not", "$ref")):
-        return arguments
-    ap = schema.get("additionalProperties")
-    if ap is True or isinstance(ap, dict):
+    props = _declarable_props(schema)
+    if props is None:
         return arguments
     unknown = [k for k in arguments if k not in props]
     if not unknown:

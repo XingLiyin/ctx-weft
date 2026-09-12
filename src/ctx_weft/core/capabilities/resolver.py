@@ -34,6 +34,25 @@ class CapabilityResolver:
         ctx: ProviderContext,
     ) -> list[Capability]:
         """三阶段解析：required → retrieve → 去 forbidden。"""
+        # spec: tool-operations（wp6）——queryable 对齐的强校验（异步面、cap 已物化）：
+        # registry 的同步弱校验拿不到 list()；这里在首个绑定点响亮失败。
+        from ctx_weft.protocols.capability import ToolCapability
+        from ctx_weft.protocols.operations import QueryResult
+        from ctx_weft.protocols.capability import ToolCapabilityProvider
+        for p in providers:
+            if not isinstance(p, ToolCapabilityProvider) or isinstance(p, QueryResult):
+                continue
+            try:
+                caps = await p.list(ctx)
+            except Exception:
+                continue
+            for cap in caps:
+                if (isinstance(cap, ToolCapability)
+                        and getattr(cap, "recovery_policy", "manual") == "queryable"):
+                    raise ValueError(
+                        f"capability {cap.id!r} declares recovery_policy='queryable' "
+                        f"but provider {p.name!r} does not implement QueryResult "
+                        f"(query_result). Implement it or use another policy.")
         refs_by_id = {ref.capability_id: ref for ref in template.capability_refs}
         forbidden_ids = {
             ref.capability_id

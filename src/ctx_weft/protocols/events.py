@@ -207,6 +207,12 @@ class EventType(StrEnum):
     #     与逐轮 BACKGROUND_OBSERVE_* 流式事件不同——这两条是"整段 recap 起/止"的记账）──
     TASK_RECAP_STARTED = "TaskRecapStarted"   # payload: {task_id, boundary, agent_id}
     TASK_RECAP_DONE = "TaskRecapDone"         # payload: {task_id}
+    # ── 观察者背压（spec: event-commit）：观察者队列溢出丢弃的实时通报。transient
+    #     不落库——补读走持久日志（payload 带 position 区间，read_range 可回放）──
+    EVENTS_DROPPED = "EventsDropped"          # payload: {subscriber_id, position, dropped}
+    # ── 操作结果未知（spec: tool-operations，wp6）：副作用可能已发生但结果不可判定——
+    #     task 停在 INTERRUPTED 等宿主 resolve_operation。payload 带 revision 供处置。──
+    OPERATION_UNCERTAIN = "OperationUncertain"   # payload: {operation_id, tool_name, revision, actions, summary}
 
 
 # 向后兼容：保持 `EVENT_TYPES` 为字符串 frozenset，供 `type not in EVENT_TYPES` 校验。
@@ -253,6 +259,7 @@ class EventOrigin:
 # 故跳过它们不影响回放、投影与崩溃恢复，只是不再把每个 token 写进事件存储与 DB。
 # 持久化/投影/快照各订阅者统一引用此集合（此前 host 以字符串字面量各维护一份）。
 TRANSIENT_EVENT_TYPES: frozenset[str] = frozenset({
+    EventType.EVENTS_DROPPED,
     EventType.LLM_TOKEN_STREAMED,
     EventType.LLM_REASONING_STREAMED,
     EventType.LLM_RETRY_TRIGGERED,
@@ -354,7 +361,22 @@ class EventBus(Protocol):
         handler: Callable[[Event], Awaitable[None]],
         *,
         provisional: bool = False,
+        required: bool = False,
     ) -> SubscriptionHandle: ...
+
+    # ── 提交门（spec: event-commit；默认不支持——required 模式构造期据此显式失败）──
+
+    def attach_commit_gate(self, gate: "object") -> None:
+        """接入提交门：emit 在 fanout 之前先经 gate 确认存储提交（required 语义）。
+
+        不支持的总线不实现/继承本默认实现：required 模式下 Runtime 构造期探测到不支持
+        即失败并附适配说明，**不静默退化**为观察者路径。实现方契约见
+        ``providers/events/bus/in_process/bus.py``。
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support attach_commit_gate; "
+            "implement it (commit before fanout in emit/commit_provisional) or "
+            "configure event_commit_policy='best_effort' explicitly.")
 
     # ── 未提交窗口（默认 no-op，见类 docstring）────────────────────────────────
 
@@ -398,6 +420,10 @@ class RunSnapshot:
     state_blob: dict[str, Any]
     snapshot_reason: str = ""
     snapshot_at: datetime | None = None
+    # spec: snapshot-recovery（reliability-wp4）——一致切面的提交位置与投影版本。
+    # 旧快照/旧实现读出为 None/1 → 恢复路径忽略快照走全量回放重建（不猜测位置）。
+    last_commit_position: int | None = None
+    projection_version: int = 1
 
 
 # ── EventStore Protocol ───────────────────────────────────────────────────────
@@ -547,3 +573,95 @@ class NullEventBlobStore(EventBlobStore):
 
     async def get(self, ref: str, ctx: "ProviderContext") -> "tuple[bytes, str] | None":
         return None
+
+
+# ── 存储不可用（spec: event-commit）────────────────────────────────────────────
+
+
+class PersistenceUnavailableError(Exception):
+    """事件提交未获存储确认（required 模式下 emit 抛出；spec: event-commit）。
+
+    语义：调用方不得把本错误当作普通可重试失败——会话已进入 ``storage_unavailable``
+    隔离（停止调度新副作用），恢复前须以 batch_id 确认未知提交（幂等重试拿原 receipt）。
+    """
+
+
+# ── OrderedEventStore（有序提交扩展，spec: event-log）─────────────────────────
+
+
+@dataclass(frozen=True)
+class StoredEvent:
+    """事件 + 其在本会话日志中的提交位置。
+
+    `position` 由存储层在提交时分配：同会话内唯一、严格递增，**与事件 ID（铸造序）
+    无关**——延迟提交的旧 ID 会拿到较大的 position，这正是快照恢复改用 position 截断
+    的原因（可靠性方案 H2）。
+    """
+
+    event: Event
+    position: int
+
+
+@dataclass(frozen=True)
+class CommitReceipt:
+    """一次批次提交的确认：batch_id + 按提交顺序排列的 StoredEvent。
+
+    调用方收到 receipt 即意味着该批已获存储确认（required 语义的依据，WP3 提交门）。
+    重试幂等：同 batch_id 同内容重复提交返回原 receipt（position 不变）。
+    """
+
+    batch_id: str
+    records: tuple[StoredEvent, ...]
+
+
+class EventConflictError(Exception):
+    """相同 batch_id 以不同内容重放，或事件 ID 已被另一批次提交。
+
+    幂等重试必须**原样**（逐字段一致，忽略 position）；顶替/改写已提交批次不被允许。
+    调用方不得换一个新 batch_id 猜测性重发——那是双写，不是重试。
+    """
+
+
+@runtime_checkable
+class OrderedEventStore(Protocol):
+    """EventStore 的有序提交扩展（spec: event-log；WP3 提交门 / WP4 快照切面的地基）。
+
+    ## position 与批次
+
+    - `append_batch` 是**原子**提交：整批要么全部落库（各自分配连续递增 position）、
+      要么全部不存在；批内事件必须同属一个 session。
+    - `batch_id` 在第一次提交前生成、重试不换；相同 batch_id + 相同内容（忽略
+      position）→ 原 receipt；不同内容 → `EventConflictError`。
+    - `committed_head` 返回该会话最新已确认提交的 position；无提交时为 0。
+    - `read_range` 按 position 升序只读已提交事件，`through_position` 含端点。
+
+    ## 兼容
+
+    `append(event)` 由单事件 `append_batch` 实现（batch_id 确定性取 event.id），
+    既有调用方语义不变。`read_by_session` / `read_session_events_of_types` 在新版
+    Store 统一按 position 排序（legacy 行 position 为 NULL 时排在前、按 id 序）；
+    `read_after(id)` 保留 legacy 口径，新版快照恢复不再使用它。
+
+    存储实现**不得**用无锁 `MAX(position)+1` 分配——必须经会话 head 行（同事务
+    UPDATE）串行化（SQLite `BEGIN IMMEDIATE` 等价路径 / PostgreSQL 行锁）。
+    """  # noqa: D418
+
+    async def append_batch(
+        self, session_id: str, batch_id: str, events: "list[Event]",
+    ) -> CommitReceipt:
+        """原子提交一批事件，返回带提交位置的 receipt。"""
+        raise NotImplementedError
+
+    async def read_range(
+        self,
+        session_id: str,
+        *,
+        after_position: int = 0,
+        through_position: int | None = None,
+    ) -> "list[StoredEvent]":
+        """按 position 升序读取 (after_position, through_position] 的已提交事件。"""
+        raise NotImplementedError
+
+    async def committed_head(self, session_id: str) -> int:
+        """该会话最新已确认提交的 position；无提交时为 0。"""
+        raise NotImplementedError

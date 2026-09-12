@@ -68,6 +68,8 @@ class TaskView:
     priority: int = 5
     max_retries: int = 3
     timeout_ms: int = 60_000
+    # spec: execution-limits（wp8）——budget 已消费量投影
+    budget_consumed: "dict[str, Any] | None" = None
     tenant_id: str = "default"
     outputs: Any = None
     error: str | None = None

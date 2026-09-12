@@ -422,7 +422,7 @@ class _RecordingBusFull:
         self.events.append(event)
 
 
-# ── terminal 工具失败不终止循环 ──────────────────────────────────────────────
+# ── terminal 工具失败不终止循环（spec: capability-gateway）────────────────────
 
 
 class _FlakyTerminalGateway:

@@ -613,6 +613,12 @@ class RunHandle:
 
 ## 事件系统
 
+> **快照恢复（2026-09 起，spec: snapshot-recovery）**：快照边界 = 已确认提交位置（`committed_head` 一致切面），恢复增量按 position 区间；旧格式快照自动忽略并全量重建，无需手工迁移事件数据（存量库回填用 `scripts/migrate_event_positions.py`）。
+>
+> **执行限制（2026-09 起，spec: execution-limits）**：`RuntimeConfig.execution_limits = ExecutionLimits(...)` opt-in 注入——`task/step/provider_active_timeout_sec` + `max_actor_turns_per_task`（默认全 None = 不限制）。计量语义：等 HITL/子任务不计 active time；actor turns 按逻辑 LLM 请求计；跨 retry 累计；monotonic clock。超限 → INTERRUPTED + 专用错误码。**旧字段**（`max_turns_per_agent` / `timeout_per_step_sec` / `Task.timeout_ms`）从未被执行——已发 DeprecationWarning，不激活、不映射，请迁移到 `ExecutionLimits`。
+
+> **提交策略（2026-09 起，spec: event-commit）**：默认 `event_commit_policy="required"`——事件先经提交门确认存储写入、再对外通知（存储失败显式抛 `PersistenceUnavailableError` 并隔离会话）。**自定义 EventBus 必须实现 `attach_commit_gate` 扩展**，否则 required 模式构造期失败；不接受该约束的宿主可显式配置 `RuntimeConfig(event_commit_policy="best_effort")` 退回旧的吞错路径（启动告警、不可靠恢复）。
+
 所有状态变更都通过事件总线发布，append-only。
 
 ### Event 结构

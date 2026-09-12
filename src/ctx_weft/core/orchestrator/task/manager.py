@@ -30,6 +30,7 @@ from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.status import TaskStatus
 from ctx_weft.core.models.task import CompactTaskSettings, MetadataFillerTaskSettings, NormalTaskSettings, Task
 from ctx_weft.core.utils.clock import as_utc, now_utc
+from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols.events import EventOrigin, EventType
 
 if TYPE_CHECKING:
@@ -94,6 +95,9 @@ class TaskManager:
         self._background_asyncio_tasks: set[asyncio.Task] = set()
         #: 一次性接线的 7 个回调（见 hooks.py）。整体替换，不逐字段合并。
         self._hooks = TaskManagerHooks()
+        # spec: event-commit：会话存储健康检查（runtime 注入；None = 无健康面）。
+        # drain 据此跳过隔离会话的派发——存储不可用时不再开新副作用。
+        self._unhealthy_check = None
         # 归属权谓词：runtime 注入，返回本 TM 是否仍是该 session 的当前 owner。
         # None = 不受管（永远视为 current，保持旧行为）。被同 session 上更新的 TM
         # 顶替后返回 False → 迟到的收尾变 no-op（不发 SessionFinished、不清新一轮的控制信号）。
@@ -120,6 +124,10 @@ class TaskManager:
         """Track a fire-and-forget background coroutine so the session awaits it before close."""
         self._background_asyncio_tasks.add(t)
         t.add_done_callback(self._background_asyncio_tasks.discard)
+
+    def set_unhealthy_check(self, check) -> None:
+        """注入会话健康检查（spec: event-commit）。drain 跳过隔离会话的派发。"""
+        self._unhealthy_check = check
 
     def set_runner(self, runner: TaskRunner) -> None:
         self._runner = runner
@@ -499,6 +507,15 @@ class TaskManager:
         root = self._session.root_agent_id if self._session else ""
         return effective_agent_id(task, root)
 
+    def _session_unhealthy(self, task_id: str) -> bool:
+        """该 task 所属会话是否处于存储隔离（spec: event-commit）。无健康面时恒 False。"""
+        if self._unhealthy_check is None:
+            return False
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        return bool(self._unhealthy_check(task.session_id))
+
     async def drain(self) -> None:
         """Pop and run tasks until queue is empty or max_concurrent reached.
 
@@ -525,7 +542,10 @@ class TaskManager:
                     for tid in self._running_tasks
                 }
                 entry = self._queue.pop(
-                    skip=lambda e: self._effective_agent(self._tasks.get(e.task_id)) in busy_agents
+                    skip=lambda e: (
+                        self._effective_agent(self._tasks.get(e.task_id)) in busy_agents
+                        or self._session_unhealthy(e.task_id)
+                    )
                 )
                 if entry is None:
                     break
@@ -548,6 +568,12 @@ class TaskManager:
         # 共用重试路径，但 TASK_REQUEUED.reason=assembly_failure 可区分。
         try:
             binding = await self._runner.assemble(task_id)
+        except PersistenceUnavailableError:
+            # spec: event-commit——存储不可用：不 commit_round（会再撞同一故障）、
+            # 不走失败处置（不发终态事件——emit 同样要过提交门）、不重排。会话已被
+            # CommitGate 先标记 storage_unavailable；本 run 就此停住。
+            logger.error("Task %s halted: session storage unavailable", task_id)
+            return
         except Exception as e:
             logger.exception("Task %s assembly failed: %s", task_id, e)
             # 装配就炸了也算数（同下方收尾兜底的理由）：先提交，再发失败事件。
@@ -623,6 +649,11 @@ class TaskManager:
             # runner 正常跑完才把本轮 spawn 的子任务入队（“一轮跑完之后 push”）
             await self._flush_staged(task_id)
             await self._settle(task_id, status)
+        except PersistenceUnavailableError:
+            # spec: event-commit——同 assemble 分支：不提交、不处置、不重排。
+            # 会话隔离已由 CommitGate 标记；drain 的健康检查挡住后续派发。
+            logger.error("Task %s halted: session storage unavailable", task_id)
+            return
         except Exception as e:
             if getattr(e, "retriable", False):
                 logger.warning("Task %s failed (retriable): %s", task_id, e)

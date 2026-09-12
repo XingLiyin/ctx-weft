@@ -111,9 +111,16 @@ async def test_append_read_roundtrip_preserves_every_field(store):
 
 
 async def test_read_by_session_is_ordered(store):
+    """read_by_session 按提交序（= position 序）返回。
+
+    旧契约钉的是 id（ULID）排序——对乱序 append 做防御性归一。2026-09 起（change
+    reliability-wp2，spec: event-log）有意改为提交序：append/append_batch 全在锁内按
+    提交顺序入列，position 是它的记录；全量回放与快照+增量必须同一排序语义（可靠性
+    方案 E5），按 id 排会让延迟提交的旧 ID 在全量回放里错位。
+    """
     for seq in (3, 1, 2):
         await store.append(_ev(seq))
-    assert [e.sequence for e in await store.read_by_session("s1")] == [1, 2, 3]
+    assert [e.sequence for e in await store.read_by_session("s1")] == [3, 1, 2]
 
 
 async def test_read_by_session_isolates_sessions(store):

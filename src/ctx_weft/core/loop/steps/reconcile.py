@@ -1,11 +1,27 @@
-"""ReconcileStep：resume 后、任何 LLM turn 之前，补完 dangling tool_call（spec/07 §6）。
+"""ReconcileStep：resume 后、任何 LLM turn 之前，补完 dangling tool_call。
 
 被 park（HITL）或崩溃中途打断时，最近一个 assistant turn 的部分 tool_call 没有对应
-TOOL_RESULT。直接把含 dangling 的消息序列喂给 LLM 会非法报错。本步对账：
-  - 已有 TOOL_RESULT 的 tool_call → 跳过（复用持久结果，不重跑）
-  - dangling 的 → gateway.invoke 执行（HITL 决定缓存按 tool_call_id 短路门控），
-    由 gateway 写唯一 TOOL_RESULT
-→ next_step="act"：assembler 重建出完整 turn，LLM 续跑。
+TOOL_RESULT。直接把含 dangling 的消息序列喂给 LLM 会非法报错。本步对账（spec: tool-operations，wp6 改造）：
+
+  完成判定（双通道，spec §5.4 / design D1）：
+    done(op_id) = 账本 get(op_id).status == COMPLETED
+              或 task view 存在 id == operation_memory_result_id(op_id) 的 tool 记录
+    ——判据是**逻辑身份**（op_id），与 wire id 无关：call_1 复用不再串扰。
+
+  未完成的 → 按「状态 × recovery_policy」分派（design D2）：
+    None（存量无身份）        → unknown（保守停住——方案明令不用随机 id 执行副作用）
+    PREPARED                  → gateway.invoke（首执；授权链自然重查）
+    STARTED + retry_safe      → invoke（同 op_id 重试）
+    STARTED + idempotent      → invoke（op_id 即幂等键，Provider 兑现承诺）
+    STARTED + queryable       → provider.query_result：completed→入账本+补 memory 不执行；
+                                definitely_not_started→invoke；unknown→置 unknown
+    STARTED + manual          → 置 unknown
+    WAITING_HUMAN             → 既有 HITL 恢复路径（不 invoke）
+    COMPLETED                 → 不应到达（完成判定已滤）；防御性跳过
+
+  置 unknown = 账本 CAS unknown + task INTERRUPTED(TOOL_OUTCOME_UNKNOWN)
+  + OperationUncertain 事件（revision 供 resolve_operation）+ 短路停止后续 dangling。
+→ next_step="prepare"：assembler 重建出完整 turn，LLM 续跑。
 """
 
 from __future__ import annotations
@@ -14,7 +30,6 @@ import logging
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome
 from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
-from ctx_weft.protocols import MemoryEventType
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +40,8 @@ class ReconcileStep(Step):
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
         # → "prepare"（非 "act"）：填完 dangling 后须由 PrepareStep 用补齐的 memory 重装 assembled_prompt
         # 并绑定 capability,再 act 调 LLM。直接 "act" 会因缺 assembled_prompt 报错（spec/07 §6）。
-        dangling = await _dangling_tool_calls(ctx.memory, state.scope, ctx.provider_ctx)
+        dangling, tool_record_ids = await _dangling_tool_calls(
+            ctx.memory, state.scope, ctx.provider_ctx)
         if not dangling:
             logger.info("ReconcileStep: no dangling tool_calls for task %s", state.task.id)
             return StepOutcome(next_step="prepare")
@@ -38,10 +54,102 @@ class ReconcileStep(Step):
         # 找不到 dangling 工具（spec/07 §6 端到端缺陷修复）。
         await resolve_and_bind(state, ctx)
 
+        from ctx_weft.protocols.operations import (
+            OperationStatus, OperationUpdate, operation_id_for,
+            operation_memory_result_id, QueryOutcome,
+        )
+
         for tc in dangling:
             if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
                 ctx.cancel_token.raise_if_cancelled()
-            logger.info("ReconcileStep: re-invoking dangling tool_call %s (%s)", tc["id"], tc["name"])
+            # 同一逻辑调用跨重启同 id：用原回合的 record_id + ordinal 派生（spec: tool-operations）
+            op_id = operation_id_for(
+                getattr(state.session, "tenant_id", "default"), state.session.id,
+                state.agent.id, tc.get("_record_id", ""), tc.get("_ordinal", 0))
+
+            # ── 双通道完成判定（D1）：账本 / 确定性 memory id ─────────────────────
+            ledger = getattr(gateway, "_operation_store", None)
+            rec = await ledger.get(op_id, ctx.provider_ctx) if ledger is not None else None
+            if (rec is not None and rec.status == OperationStatus.COMPLETED) or (
+                    operation_memory_result_id(op_id) in tool_record_ids):
+                logger.info("ReconcileStep: op %s completed — reusing, not re-running", op_id)
+                continue
+
+            # ── 策略分派（D2）：policy 来自 capability 声明（默认 manual）─────────
+            _cache = getattr(gateway, "_cache", None)
+            cap = _cache.get_by_qualified_name(
+                state.agent.id, tc["name"], state.task.id) if _cache is not None else None
+            policy = getattr(cap, "recovery_policy", "manual") if cap is not None else "manual"
+            if rec is None:
+                from ctx_weft.core.capabilities.control_tools import PROVIDER_NAME as _CTL
+                from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
+                hitl = getattr(ctx, "hitl", None)
+                from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ
+                _sid = getattr(state.session, "id", "")
+                _tcid = tc.get("id", "")
+                decision_on_record = hitl is not None and (
+                    hitl.registry.decision_for(_sid, _tcid, HITL_STAGE_TOOL) is not None
+                    or hitl.registry.decision_for(_sid, _tcid, HITL_STAGE_AUTHZ) is not None
+                )
+                if tc["name"].startswith(f"{_CTL}__"):
+                    # 控制工具（方案 §5.4「单独核验」）：core 自有的幂等状态迁移——
+                    # finish/metadata 同身份幂等、ask_user 复用既有请求（HITL 决定缓存
+                    # 门控）、delegate 经 gateway completed 短路防双建。无账本记录按
+                    # 首执处理（PREPARED 语义），不进 unknown。
+                    pass
+                elif decision_on_record:
+                    # 冷 HITL 重入：该 tool_call 的人工决定已在案（crash 发生在等待处、
+                    # provider 从未启动）= 「prepared 且从未进入 started」——首执安全。
+                    pass
+                else:
+                    # 存量无身份（WP5 之前的数据）或账本未接线的外部副作用工具：保守 unknown
+                    await self._mark_unknown(state, ctx, op_id, tc["name"], ledger, rec,
+                                              reason="no-ledger-record")
+                    return StepOutcome(next_step=None)
+            if rec is None:
+                pass  # 控制工具 / 冷 HITL 首执 carve-out（上方已分流其它到 unknown）
+            elif rec.status == OperationStatus.WAITING_HUMAN:
+                logger.info("ReconcileStep: op %s waiting_human — HITL path resumes", op_id)
+                continue  # 既有 HITL 恢复路径处理
+            elif rec.status == OperationStatus.PREPARED:
+                pass  # 首次执行（此前无副作用）
+            elif rec.status == OperationStatus.STARTED:
+                from ctx_weft.core.capabilities.control_tools import PROVIDER_NAME as _CTL2
+                if tc["name"].startswith(f"{_CTL2}__"):
+                    pass  # 控制工具 started：幂等状态迁移（同上 carve-out 理由）
+                elif policy in ("retry_safe", "idempotent"):
+                    pass  # 同 op_id 重试
+                elif policy == "queryable":
+                    q = await self._query(gateway, op_id, tc, state, ctx)
+                    if q is not None and q.outcome == QueryOutcome.COMPLETED:
+                        # 外部已完成：入账本 + 补 memory，不执行
+                        await ledger.compare_and_set(
+                            op_id, rec.revision,
+                            OperationUpdate(status=OperationStatus.COMPLETED,
+                                            result=q.result, result_set=True),
+                            ctx.provider_ctx)
+                        await self._backfill_memory(state, ctx, op_id, q.result, tc)
+                        continue
+                    if q is not None and q.outcome == QueryOutcome.DEFINITELY_NOT_STARTED:
+                        pass  # 权威否定 → 重跑
+                    else:
+                        await self._mark_unknown(
+                            state, ctx, op_id, tc["name"], ledger, rec,
+                            reason="query-unknown")
+                        return StepOutcome(next_step=None)
+                else:  # manual
+                    await self._mark_unknown(state, ctx, op_id, tc["name"], ledger, rec,
+                                             reason="manual-policy")
+                    return StepOutcome(next_step=None)
+            else:  # UNKNOWN 状态（宿主未处置）——闸门：不绕过决策
+                logger.info("ReconcileStep: op %s already unknown — awaiting host resolution", op_id)
+                return StepOutcome(next_step=None)
+
+            logger.info(
+                "ReconcileStep: executing op %s (tool %s, ledger=%s, policy=%s)",
+                op_id, tc["name"],
+                rec.status if rec is not None else "no-record", policy)
+            ctx.provider_ctx.operation_id = op_id
             await gateway.invoke(
                 tool_name=tc["name"],
                 arguments=tc.get("input", {}) or {},
@@ -52,9 +160,104 @@ class ReconcileStep(Step):
 
         return StepOutcome(next_step="prepare")
 
+    # ── helpers ────────────────────────────────────────────────────────────────
 
-async def _dangling_tool_calls(memory, scope, provider_ctx) -> list[dict]:
-    """最近一个 assistant turn 里，无对应 tool result 的 tool_call（按原顺序）。"""
+    async def _query(self, gateway, op_id, tc, state, ctx):
+        """queryable：找 provider 查外部真值。找不到 provider/接口缺失 → None（视 unknown）。"""
+        from ctx_weft.protocols.operations import QueryResult
+        _cache = getattr(gateway, "_cache", None)
+        cap = _cache.get_by_qualified_name(
+            state.agent.id, tc["name"], state.task.id) if _cache is not None else None
+        _find = getattr(gateway, "_find_provider", None)
+        provider = _find(cap.id) if (cap is not None and _find is not None) else None
+        if provider is None or not isinstance(provider, QueryResult):
+            logger.error("ReconcileStep: queryable op %s but provider lacks QueryResult", op_id)
+            return None
+        try:
+            return await provider.query_result(op_id, ctx.provider_ctx)
+        except Exception:
+            logger.exception("ReconcileStep: query_result failed for %s", op_id)
+            return None
+
+    async def _mark_unknown(self, state, ctx, op_id, tool_name, ledger, rec, *, reason):
+        """置 unknown：账本 CAS + task INTERRUPTED + OperationUncertain 事件（带 revision）。"""
+        from ctx_weft.core.loop.driver import make_event
+        from ctx_weft.core.models.discriminators import TaskErrorCode
+        from ctx_weft.core.models.task import Task as _T
+        from ctx_weft.protocols.events import EventType
+        from ctx_weft.protocols.operations import OperationStatus, OperationUpdate
+
+        revision = 0
+        if ledger is not None and rec is not None:
+            try:
+                updated = await ledger.compare_and_set(
+                    rec.operation_id, rec.revision,
+                    OperationUpdate(status=OperationStatus.UNKNOWN,
+                                    error=f"outcome uncertain ({reason})"),
+                    ctx.provider_ctx)
+                revision = updated.revision
+            except Exception:
+                logger.exception("ReconcileStep: ledger unknown-mark failed for %s", op_id)
+
+        state.task.error_code = TaskErrorCode.TOOL_OUTCOME_UNKNOWN
+        state.task.error = f"operation {op_id} ({tool_name}) outcome uncertain ({reason})"
+        # 事件构造容忍 SimpleNamespace 测试替身（make_event 要 LoopState 全字段）：
+        # 逐字段 getattr 兜底，身份字段尽量真实。
+        from ctx_weft.core.utils.ids import generate_id
+        from ctx_weft.core.utils.clock import now_utc as _now
+        from ctx_weft.protocols.events import Event
+        try:
+            await ctx.event_bus.emit(make_event(state, EventType.OPERATION_UNCERTAIN, payload={
+                "operation_id": op_id,
+                "tool_name": tool_name,
+                "revision": revision,
+                "actions": ["supply_result", "retry_confirmed", "cancel_task"],
+                "reason": reason,
+                "summary": f"side effect may have occurred; ledger={getattr(rec, 'status', None)}",
+            }))
+        except Exception:
+            await ctx.event_bus.emit(Event(
+                id=generate_id("evt"), run_id=getattr(state, "run_id", "") or "",
+                sequence=0,
+                session_id=getattr(getattr(state, "session", None), "id", "") or "",
+                type=EventType.OPERATION_UNCERTAIN, timestamp=_now(),
+                task_id=getattr(getattr(state, "task", None), "id", "") or None,
+                agent_id=getattr(getattr(state, "agent", None), "id", "") or None,
+                payload={
+                    "operation_id": op_id,
+                    "tool_name": tool_name,
+                    "revision": revision,
+                    "actions": ["supply_result", "retry_confirmed", "cancel_task"],
+                    "reason": reason,
+                    "summary": "side effect may have occurred",
+                }))
+        logger.error(
+            "ReconcileStep: op %s (%s) outcome uncertain [%s] — task %s INTERRUPTED, "
+            "awaiting resolve_operation",
+            op_id, tool_name, reason, state.task.id)
+
+    async def _backfill_memory(self, state, ctx, op_id, result, tc):
+        """query completed：按确定性 id 补写 TOOL_RESULT。幂等由 memory 的 id 契约保证
+        （同 id ingest = no-op，见 InMemoryMemoryProvider.ingest）。"""
+        from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
+        from ctx_weft.protocols.operations import operation_memory_result_id
+        from ctx_weft.core.utils.clock import now_utc
+        await ctx.memory.ingest(MemoryEvent(
+            id=operation_memory_result_id(op_id),
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+            address=state.scope, content=str(result), timestamp=now_utc(),
+            role="tool",
+            metadata={"tool_call_id": tc.get("id"), "operation_id": op_id,
+                      "recovered_via": "queryable"},
+        ), ctx.provider_ctx)
+
+
+async def _dangling_tool_calls(memory, scope, provider_ctx) -> tuple[list[dict], set[str]]:
+    """最近一个 assistant turn 里未完成的 tool_call（按逻辑身份判定）。
+
+    返回 (dangling, tool_record_ids)：前者带 _record_id/_ordinal/_recovery_policy，
+    后者是 task view 里全部 tool 记录的 id 集合（memory 通道完成判据的输入）。
+    """
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
 
     view = await memory.load_view(
@@ -70,12 +273,26 @@ async def _dangling_tool_calls(memory, scope, provider_ctx) -> list[dict]:
         None,
     )
     if last_asst is None:
-        return []
+        return [], set()
     tool_calls = last_asst.metadata.get("tool_calls") or []
     if not tool_calls:
-        return []
-    done_ids = {
-        r.metadata.get("tool_call_id") for r in view
-        if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "tool"
-    }
-    return [tc for tc in tool_calls if tc.get("id") not in done_ids]
+        return [], set()
+    # tool 记录集合（双通道之一：确定性 id 存在 = 已完成）。刻意**不看 wire id**：
+    # call_1 复用是常态，wire 配对会把新调用误判为完成（串扰——正是 H3 判据切换要
+    # 根治的形态）。旧数据的 tool 记录（无确定性 id）经 wire 配对曾判 done 的场景，
+    # 由账本通道（COMPLETED）或 unknown 分支兜底。
+    tool_records = [r for r in view
+                    if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "tool"]
+    tool_record_ids = {r.id for r in tool_records}
+
+    from ctx_weft.protocols.operations import operation_id_for, operation_memory_result_id
+    dangling: list[dict] = []
+    for i, tc in enumerate(tool_calls):
+        op_id = operation_id_for(
+            getattr(provider_ctx, "tenant_id", "default"),
+            scope.session_id, scope.agent_id or "", last_asst.id, i)
+        if operation_memory_result_id(op_id) in tool_record_ids:
+            continue
+        dangling.append(dict(tc, _record_id=last_asst.id, _ordinal=i,
+                             _op_id=op_id))
+    return dangling, tool_record_ids

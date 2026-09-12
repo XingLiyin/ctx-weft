@@ -20,6 +20,25 @@ from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.context import ProviderContext
 
+
+_TIMEOUT_MS_WARNED = False
+
+
+def _timeout_ms_field(default_ms: int) -> int:
+    """spec: execution-limits（wp7）——Task.timeout_ms 从未被执行：非默认值时发一次
+    去重 DeprecationWarning（值照常透传，行为不变）。"""
+    global _TIMEOUT_MS_WARNED
+    if default_ms != 60_000 and not _TIMEOUT_MS_WARNED:
+        _TIMEOUT_MS_WARNED = True
+        import warnings
+        warnings.warn(
+            "Task.timeout_ms / default_task_timeout_ms is declared but never "
+            "enforced; it will be removed in a future breaking release. Migrate to "
+            "RuntimeConfig.execution_limits (ExecutionLimits.task_active_timeout_sec).",
+            DeprecationWarning, stacklevel=2)
+    return default_ms
+
+
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
@@ -109,7 +128,7 @@ class SessionRegistry:
         ``provisional=True`` 与 ALM 同理：这是进程内登记表，成员集合要反映当下的真实，
         不受未提交窗口影响。
         """
-        self.event_bus.subscribe(None, self.handle_event, provisional=True)
+        self.event_bus.subscribe(None, self.handle_event, provisional=True, required=True)
 
     async def handle_event(self, ev: Event) -> None:
         """总线回调。把新登场的 agent 收进该 session 的成员集合，别的一概不管。"""
@@ -326,7 +345,7 @@ class SessionRegistry:
             # 后台作业没有人会发下一条消息，interactive 的纯文本 park 就是永久挂起——
             # 没有人来应答，那条 HITL 也永远不会被终局。
             interaction_mode="auto" if unattended else "interactive",
-            timeout_ms=self.default_task_timeout_ms,
+            timeout_ms=_timeout_ms_field(self.default_task_timeout_ms),
             created_at=now_utc(),
         )
         task_manager = TaskManager(

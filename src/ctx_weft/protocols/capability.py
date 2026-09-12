@@ -71,6 +71,13 @@ class ToolCapability(Capability):
     input_schema: dict[str, Any] = field(default_factory=dict)
     side_effects: bool = False
     spillable: bool = True  # 输出超长时是否允许 gateway 落盘；可重新派生的只读工具置 False
+    # spec: tool-operations（wp6）——恢复策略（崩溃后该工具的 started 操作能不能自动重跑）：
+    #   retry_safe  重试无有害副作用（同 op_id 直接重跑）
+    #   idempotent  Provider 以 op_id 为幂等键保证不重复
+    #   queryable   Provider 实现 QueryResult，可权威查询外部真值
+    #   manual      默认——副作用结果未知时保守停住（unknown），等宿主 resolve_operation
+    # 刻意不从 side_effects 推断：MCP/旧 Provider 的副作用声明可能不完整（方案 §5.4）。
+    recovery_policy: str = "manual"
 
 
 @dataclass

@@ -1,17 +1,24 @@
-"""已知缺陷（H3）：工具副作用已发生、结果没写进 memory，恢复时被再执行一遍。
+"""WP0 基线夹具（H3）：工具副作用完成后结果写入失败，恢复盲目重跑。
 
-现状：ReconcileStep（core/loop/steps/reconcile.py）把「最近 assistant 回合里没有配对
-TOOL_RESULT 的 tool_call」一律经 gateway 重新执行，不区分两种 dangling：
-  - HITL park：工具从未执行（安全不变式保证），重跑是对的；
-  - 执行中/执行后崩溃：外部副作用已经发生，只是结果没落库——重跑会把非幂等操作做两遍。
-gateway 在执行**前**已写 TOOL_AUDIT（`_record_invocation`），「这次调用已经开始过」的证据
-其实在，只是 reconcile 没用它。
+钉住 2026-09-11 可靠性方案 H3 的**缺陷现状**（探针 verify_agent_architecture.py
+`recovery_duplicate` 的 pytest 移植；上游 docs/plans/2026-09-11-agent-core-
+reliability-plan.md §1.2/§5）：ReconcileStep 对无配对 TOOL_RESULT 的 dangling
+tool_call 一律经 gateway 重新执行（reconcile.py）——外部副作用已发生、只是结果没写进
+memory 的场合，恢复会把非幂等副作用再执行一遍。全仓无 operation_id/幂等账本。
 
-本文件断言**应有行为**（已开始过的副作用调用恢复时不得盲目重跑），用 `xfail(strict=True)`
-标记为已知缺陷；修好后 XPASS 报红，届时删掉标记。前置条件用 `pytest.fail`，不被 xfail 吞掉。
+外部副作用用**独立子进程 + SQLite 计数器**承载（design D5）：副作用证据落在外部
+文件里，不随测试进程内存消失——「Runtime 崩溃后副作用仍在」由新开连接可读来模拟。
+真正的进程退出矩阵归 WP6（方案 O-T05/O-T06），本夹具只要「故障点之后计数器可读」。
+
+⚠️ 本文件断言的是**旧契约**（缺陷行为），供 WP6（恢复策略 + 操作账本）实施时
+**有意翻转**：翻转后 manual 策略下外部副作用计数保持 1、操作进入 unknown 等宿主处置。
 """
 from __future__ import annotations
 
+import asyncio
+import sqlite3
+import subprocess
+import sys
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
@@ -33,19 +40,44 @@ from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 
+# 子进程副作用计数器：一次 INSERT = 一次外部副作用。只用 stdlib，跨平台无端口。
+_COUNTER_SCRIPT = """
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("CREATE TABLE IF NOT EXISTS effects (n INTEGER)")
+conn.execute("INSERT INTO effects VALUES (1)")
+conn.commit()
+conn.close()
+"""
+
+
+def _read_effects(db_path) -> int:
+    """新开连接读取副作用计数——模拟 Runtime 进程退出后证据仍可核验。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT COUNT(*) FROM effects").fetchone()
+        return int(rows[0])
+    except sqlite3.OperationalError:  # 表还没建
+        return 0
+    finally:
+        conn.close()
+
 
 class _ExternalEffectTool(ToolCapabilityProvider):
-    """每次 invoke 做一次「外部副作用」（计数 +1）。"""
+    """每次 invoke 起一个子进程做一次「外部副作用」（SQLite 计数 +1）。"""
 
     name = "probe"
 
-    def __init__(self) -> None:
-        self.effects = 0
+    def __init__(self, db_path) -> None:
+        self.db_path = str(db_path)
+        self.invocations: list[str] = []
 
     def capability(self) -> ToolCapability:
         return ToolCapability(
             id="probe:record", name="record", description="Simulated external operation",
             side_effects=True,
+            # wp6：显式 manual——钉「未知结果不自动重跑」的默认保守语义
+            recovery_policy="manual",
         )
 
     async def list(self, ctx):
@@ -59,7 +91,12 @@ class _ExternalEffectTool(ToolCapabilityProvider):
 
     def invoke(self, capability_id, arguments, ctx):
         async def _run():
-            self.effects += 1
+            self.invocations.append(ctx.invocation_id)
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", _COUNTER_SCRIPT, self.db_path,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            await proc.wait()
             yield CapabilityEvent(kind="result", payload={"content": "operation completed"})
         return _run()
 
@@ -67,7 +104,7 @@ class _ExternalEffectTool(ToolCapabilityProvider):
         return None
 
 
-def _fixture():
+def _fixture(db_path):
     memory = InMemoryMemoryProvider()
     bus = InProcessEventBus()
     state = LoopState(
@@ -82,24 +119,23 @@ def _fixture():
         assembler=None, llm=None, memory=memory, event_bus=bus,
         provider_ctx=ProviderContext(session_id="s1", task_id="task1", agent_id="agent1"),
     )
-    tool = _ExternalEffectTool()
+    tool = _ExternalEffectTool(db_path)
     cache = CapabilityCache()
     cache.put("agent1", [tool.capability()])
-    ctx.capability_gateway = CapabilityGateway(
+    gateway = CapabilityGateway(
         capability_cache=cache, capability_providers=[tool],
         memory=memory, event_bus=bus,
     )
+    ctx.capability_gateway = gateway
     return memory, state, ctx, tool
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="H3 未修复：ReconcileStep 对已开始执行的 dangling tool_call 盲目重跑",
-)
-async def test_reconcile_does_not_rerun_started_side_effect():
-    memory, state, ctx, tool = _fixture()
+async def test_result_write_failure_then_reconcile_reruns_side_effect(tmp_path):
+    """wp6 契约锚：副作用完成后结果写失败 → manual 策略保守停住 → 外部计数 = 1。"""
+    db = tmp_path / "effects.sqlite"
+    memory, state, ctx, tool = _fixture(db)
 
-    # 崩溃前已持久化 assistant 回合（带 tool_call），TOOL_RESULT 尚未写入
+    # 崩溃前持久化了 assistant 回合（带 dangling tool_call），但 TOOL_RESULT 没写成功
     await memory.ingest(MemoryEvent(
         type=MemoryEventType.LLM_RESPONSE, address=state.scope, content="",
         role="assistant", timestamp=datetime.now(UTC),
@@ -109,7 +145,7 @@ async def test_reconcile_does_not_rerun_started_side_effect():
         }]},
     ), ctx.provider_ctx)
 
-    # 第一次执行：副作用成功；写结果（role=tool 的 ingest）时模拟崩溃
+    # 第一次执行：子进程副作用成功；结果写 memory 时模拟崩溃（role=tool 的 ingest 抛错）
     ingest = memory.ingest
 
     async def _fail_tool_writes(item, provider_ctx):
@@ -117,19 +153,25 @@ async def test_reconcile_does_not_rerun_started_side_effect():
             raise OSError("simulated tool-result persistence failure")
         return await ingest(item, provider_ctx)
 
+    write_failed = False
     with patch.object(memory, "ingest", side_effect=_fail_tool_writes):
-        with pytest.raises(OSError):
+        try:
             await ctx.capability_gateway.invoke(
                 "probe__record", {"operation": "increment"}, state, ctx,
                 tool_call_id="effect_test",
             )
-    if tool.effects != 1:
-        pytest.fail(f"fixture broken: first execution should run once, ran {tool.effects}")
+        except OSError:
+            write_failed = True
+    assert write_failed, "result write should have failed (simulated crash point)"
+    assert _read_effects(db) == 1, "first execution: external side effect happened exactly once"
 
-    # 恢复：真实 ReconcileStep，只绕过能力发现（能力已绑定进 cache）
+    # 恢复（真实 ReconcileStep，只绕过能力发现——能力已绑定；与探针同一口径）
     with patch("ctx_weft.core.loop.steps.reconcile.resolve_and_bind", new=AsyncMock()):
         await ReconcileStep().execute(state, ctx)
 
-    assert tool.effects == 1, (
-        f"reconcile re-ran a side effect that had already happened (effects={tool.effects})"
-    )
+    # wp6 翻转后契约（spec: tool-operations）：默认 manual → 副作用保持 1 次，
+    # 不盲重跑（unknown 等宿主 resolve_operation——tests/unit/test_resolve_operation.py）
+    external_effects = _read_effects(db)
+    assert external_effects == 1, (
+        f"manual policy must NOT re-run the completed side effect (got {external_effects})")
+    assert len(set(tool.invocations)) == 1

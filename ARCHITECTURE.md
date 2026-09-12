@@ -48,7 +48,7 @@
                           TaskManager.apply_run_outcome
                                     │ make_event(...) / emit
                                     ▼
-                EventBus（InProcessEventBus，append-only + 未提交窗口）
+                EventBus（+ CommitGate：先确认提交再通知，spec: event-commit）
                                      │ 订阅
                           ┌──────────┴──────────┐
                      EventStore            外部订阅者（SSE / 日志）
@@ -270,14 +270,17 @@ ContextAssembler(                    # core/assembler/assembler.py:238
 
 ActStep 一次工具调用（最终走 `CapabilityGateway.invoke` `:236`）的链路：
 
-1. **解析**：`cache.get_by_qualified_name(agent_id, tool_name, task_id)`（`:255`）；控制工具靠 cache 的 session 全局区兜底可达；只处理 `kind="tool"`。
-2. **鉴权**：按 cap.id 前缀取 per-provider authorizer。**HITL 决定缓存**按 `(session, tool_call_id, stage)` + `invocation_key`（工具名+原始参数指纹，`invocation_key()` `:130`）四维短路——同一次调用的合法重入（冷路径 reconcile）放行、同 id 的另一次调用不开门。authorizer 声明 needs_human 时由 gateway 等待（`_resolve_human` `:722`）；**无人值守任务**合成「人拒绝」决定回灌（`:291`-`:303`），不挂起。
-3. **参数管线**（`:334`-`:369`，按序）——**三通道分离**：`original_arguments`（调用方入参，不被修改，审批指纹用）→ `effective_args`（授权/HITL 改写 + 校验后，**未脱敏**，执行通道）→ `audit_args`（`_sanitize` 脱敏副本，只进事件与 TOOL_AUDIT，审计通道）：
-   - `_coerce_args`（`:904`）：字符串→schema 声明标量收敛；
+1. **解析**：`cache.get_by_qualified_name(agent_id, tool_name, task_id)`（`:248`）；控制工具靠 cache 的 session 全局区兜底可达；只处理 `kind="tool"`。
+2. **鉴权**：按 cap.id 前缀取 per-provider authorizer。**HITL 决定缓存**按 `(session, tool_call_id, stage)` + `invocation_key`（工具名+原始参数指纹，`invocation_key()` `:130`）四维短路——同一次调用的合法重入（冷路径 reconcile）放行、同 id 的另一次调用不开门。authorizer 声明 needs_human 时由 gateway 等待（`_resolve_human` `:716`）；**无人值守任务**合成「人拒绝」决定回灌（`:286`-`299`），不挂起。
+3. **参数管线**（`:334`-`:388`，按序）——**三通道分离**（spec: capability-gateway）：`original_arguments`（调用方入参，不被修改，审批指纹用）→ `effective_args`（授权/HITL 改写 + 校验后，**未脱敏**，执行通道）→ `audit_args`（`_sanitize` 脱敏副本，只进事件与 TOOL_AUDIT，审计通道）：
+   - `_coerce_args`（`:925`）：字符串→schema 声明标量收敛；
    - `_raw` 哨兵（`:341`）：adapter 对「参数没解析成 JSON」的兜底，带畸形原文（截断）直白报错；
-   - `_strip_unknown_keys`（`:921`）：对**任意工具（含控制工具）**剥掉 schema 未声明的顶层键——未声明参数永远到不了工具实现（模型臆造键、畸形缓冲救援碎片的容错；组合关键字/`$ref`/显式 additionalProperties 的 schema fail-open 不剥）；
-   - `_validate_args`（`:956`）：只拦 required / type / enum（spec B），失败回灌重试。
-4. **执行与记录**：发 `CAPABILITY_INVOKED`（`:521`，payload 带脱敏副本）；普通非 silent 工具写 `TOOL_AUDIT`（TASK scope，`:566`；`_record_invocation` `:515`）+ 结果写 `role=tool` CONVERSATION_TURN（`_record_result` `:675`）；`SILENT_TOOLS`（report_task_outcome / update_task_metadata / finish_task / collect_process_report）不入 task 对话；派发工具（delegate_plan）eager 写 AGENT 层派发框（`:534`）。执行走 `_stream_tool`（收**未脱敏**的 effective 参数，Provider 永远拿不到 `***`）；工具输出过大 spill 落盘（`_maybe_spill` `:799`）；结果 parts 合法化/图片外部化；`CAPABILITY_FINISHED`（`:685`）。
+   - **控制工具严格校验**（本仓 2026-09 起，spec: capability-gateway）：`cap.id` 以 `control:` 开头且存在未知顶层参数 → 返回 `[Error: invalid arguments for '{tool}': unknown parameter(s): …; declared parameters: … — re-send the call with only the declared parameters]`（`is_error=True`），**不调 provider**，错误回灌 LLM 同 run 改参重试。资格判定与剥键共用 `_declarable_props`（`:942`，组合关键字/`$ref`/显式 additionalProperties 一律 fail-open）；
+   - `_strip_unknown_keys`（`:964`）：对**非控制工具**静默剥未知顶层键（模型臆造键、畸形缓冲救援碎片的容错）；
+   - `_validate_args`（`:990`）：只拦 required / type / enum（spec B），失败回灌重试。
+4. **执行与记录**：发 `CAPABILITY_INVOKED`（`:542`，payload 带脱敏副本）；普通非 silent 工具写 `TOOL_AUDIT`（TASK scope，`:587`；`_record_invocation` `:536`）+ 结果写 `role=tool` CONVERSATION_TURN（`_record_result` `:696`）；`SILENT_TOOLS`（report_task_outcome / update_task_metadata / finish_task / collect_process_report）不入 task 对话；派发工具（delegate_plan）eager 写 AGENT 层派发框（`:555`）。执行走 `_stream_tool`（收**未脱敏**的 effective 参数，Provider 永远拿不到 `***`）；工具输出过大 spill 落盘（`_maybe_spill` `:820`）；结果 parts 合法化/图片外部化；`CAPABILITY_FINISHED`（`:706`）。
+
+**操作账本（spec: tool-operations，change reliability-wp5）**：gateway 是所有工具调用（含 silent/dispatch）的单一咽喉，按五步序记账——持久身份 → 授权 → prepared → CAS started → provider → completed（持久确认）→ 幂等 TOOL_RESULT → CapabilityFinished。`operation_id` 由调用侧（act 铸于 `_execute_tool_calls`、reconcile 铸于 dangling 重入）从 `(tenant, session, agent, assistant_record_id, ordinal)` 确定性派生（跨重启同 id；同参两次合法调用不同 id），gateway 入口**取用即清**（防泄漏到无关调用）。账本已 completed → 短路回放结果不再打 provider（同逻辑调用重入）；HITL park → `waiting_human`。`OperationStore`（内存默认 / SQL）写失败 → PersistenceUnavailableError 隔离。**恢复策略（spec: tool-operations，reliability-wp6）**：reconcile 完成判定按**逻辑身份**（账本 COMPLETED / 确定性 memory_result_id 双通道，不再看 wire id——call_1 复用不串扰）；未完成的按「状态 × recovery_policy」分派（默认 manual：结果不定 → unknown 停住，task INTERRUPTED + TOOL_OUTCOME_UNKNOWN + OperationUncertain 事件带 revision）。控制工具（core 幂等状态迁移）与冷 HITL 决定在案（prepared-未-started 语义）走首执；queryable 经 Provider 的 QueryResult 权威查询；`runtime.resolve_operation(op_id, decision, expected_revision)` 是 unknown 的唯一出口（supply_result 补写 memory 不重执行 / retry_confirmed 同 op_id 重排 / cancel_task 终态不撤外部动作；revision 乐观锁双宿主互斥）；unknown 的 task 在 assemble 闸门拒绝续跑（recover_agent 不得绕过处置）。裸调（无 operation_id）账本全程旁路。
 
 **observe ReAct 的终止容错**（`core/loop/steps/observe.py:172`）：`run_observe_react` 中终止工具（`report_task_outcome` / `collect_process_report`）返回 `is_error=True` 时**不终止循环**——错误照常 append 进 messages 供模型改参重试，仅成功结果作为终止结果；轮次耗尽返回 `(None, last_text)` 走机械判决兜底。
 
@@ -338,12 +341,12 @@ ActStep 一次工具调用（最终走 `CapabilityGateway.invoke` `:236`）的�
 |------------------------|---------|------|
 | `CONVERSATION_TURN / TASK / user` | `driver._persist_user_prompt` `core/loop/driver.py:208`；runtime 侧 `_ingest_user_turn` `core/runtime.py:3273`；suspend 兜底 `core/loop/steps/suspend.py:32` | raw 原样（多模态无损）；`## Current Task/Message` 框架渲染期生成 |
 | `CONVERSATION_TURN / TASK / assistant` | `act._ingest_assistant_turn` `core/loop/steps/act.py:515`；打断半截 `_commit_interrupted_partial` `core/loop/steps/act.py:790` | 一轮完整输出（tool_calls 排除 dispatch/silent 入 metadata） |
-| `TOOL_AUDIT / TASK` | gateway `_record_invocation` `core/loop/capability_gateway.py:515`→`:566` | 一次 capability 调用审计 |
-| `CONVERSATION_TURN / TASK / tool` | gateway `_record_result` `:675`→`:697`；打断补挂 `core/loop/steps/act.py:723` | 工具结果对话回合（silent 工具不写） |
+| `TOOL_AUDIT / TASK` | gateway `_record_invocation` `core/loop/capability_gateway.py:512`→`:561` | 一次 capability 调用审计 |
+| `CONVERSATION_TURN / TASK / tool` | gateway `_record_result` `:669`→`:688`；打断补挂 `core/loop/steps/act.py:723` | 工具结果对话回合（silent 工具不写） |
 | `SUMMARY`（段摘要） | `segment_fold.fold_segment` `core/loop/steps/segment_fold.py:88` | replacement 经 `fold` 原子写入；observe retry 段折与 bg 边界段折共用 |
 | agent 层折（L1 压缩） | `core/loop/steps/compact.py:521` | 升级压缩的 agent 层产物 |
 | `PUBLICATION / SESSION` | `core/loop/steps/finalize.py:751`（仅 task success） | topic=task.id，content=outputs+task_summary；随后发 EventBus `BLACKBOARD_PUBLISHED` `:763` |
-| 派发框 + running ack（`CONVERSATION_TURN / AGENT`） | `finalize.ensure_dispatch_frame_at_start` `core/loop/steps/finalize.py:226`（driver.run 每轮调用 `core/loop/driver.py:282`）；plan 框 eager 写 `gateway:534`-`:562` | 子任务真正 start 时在**父 scope** 铸；没跑起来的子任务从不写框（零清理） |
+| 派发框 + running ack（`CONVERSATION_TURN / AGENT`） | `finalize.ensure_dispatch_frame_at_start` `core/loop/steps/finalize.py:226`（driver.run 每轮调用 `core/loop/driver.py:282`）；plan 框 eager 写 `gateway:494`-`:560` | 子任务真正 start 时在**父 scope** 铸；没跑起来的子任务从不写框（零清理） |
 | 派发结果终态化（tool 槽替换） | `_close_one` `core/loop/steps/finalize.py:487`：跨 agent 分支 `:526` / 同 agent 分支 `:540` | close 时把 running ack **fold 替换**为终态结果（跨 agent=交付物内容；同 agent=终态文案） |
 | finish 对 | `_synthesize_dispatch_pair` `core/loop/steps/finalize.py:636`、`build_finish_slots` `:343`；bg 替换 `core/loop/steps/background_observe.py:184`-`:207` | assistant(recap) + assistant(可选 final_reply 锚) + tool(process report)；后台 observe 事后原子替换 report 槽 |
 | 继承快照（subagent） | `_copy_memory_for_inherit` `core/runtime.py:146`→`:199` | 镜像父召回视图进 child scope |
@@ -398,6 +401,10 @@ v2 里「子任务结果怎么到父」有三条，全部落在 memory、由 `Ag
 - **两个治理集合**：`TRANSIENT_EVENT_TYPES`（`:255`，流式 delta + ROUND_* 不落盘）与 `L_TIER_EVENT_TYPES`（`:272`，已停发但 reducer 仍读：SessionStatusChanged、legacy HITL、BackgroundObserve* 等）。
 - **Event 字段**：`agent_id`、`origin`（`EventOrigin` 17 值 `:217`-`:248`）、`schema_version`；`EventFilter` 支持 agent_id 轴。
 - **总线**：`InProcessEventBus`（`providers/events/bus/in_process/bus.py:41`），`emit` `:53` 进程内**同步 drain**（结局走返回值的根因，见 §1）；`subscribe` `:115` / `stream` `:157`；未提交窗口 `begin/commit/discard_provisional` `:141`-`:155`（夭折轮的事件不进日志）。
-- **持久化**：单一入口 `attach_persistence`（`providers/events/persister.py:73`，`core/runtime.py:572`）——persister 订阅先于 SnapshotWriter（顺序契约），返回可 detach 的公开 handle；`snapshot_every_n=0` 默认不接快照。InMemory 与 SQL 两实现都支撑 `read_after` 增量回放与快照。
+- **持久化**：单一入口 `attach_persistence`（best_effort 兼容路径）/ `CommitGate`（required，见上条）——persister 订阅先于 SnapshotWriter（顺序契约）；`snapshot_every_n=0` 默认不接快照。
+- **快照一致切面（spec: snapshot-recovery，change reliability-wp4）**：SnapshotWriter 写快照时三步取界——`C = committed_head(session)` → `read_range(0..C)` 全量折 → 存 `last_commit_position=C` + `projection_version`（触发事件只是信号不是边界）。恢复 `rebuild_view` 按序选路：快照有 position 且版本匹配且不超前 → `read_range((cursor, head])` 增量；否则（legacy/损坏/版本不匹配/超前）忽略快照全量回放重建。全量与快照+增量共用同一 apply 语义（E5 两路等价）。`read_after(id)` 为纯 legacy API（生产无调用点——ID 铸造序 ≠ 提交序正是 H2 根因）。
 - **顺序与因果**：`sequence` 来自 `LoopState.sequence_counter`（`core/loop/driver.py:190`-`:204`，同 run 内单调递增）；`id` 是 `evt_ULID`（`core/utils/event.py new_event`）；类型白名单校验同在 `new_event`（`:57`）。`causation_id` 串因果链。
+- **提交门与通知分离（spec: event-commit，change reliability-wp3）**：`event_commit_policy="required"`（默认，RuntimeConfig）下，`CtxWeftRuntime` 构造期把 `CommitGate`（`core/events/commit_gate.py`）经 `EventBus.attach_commit_gate` 接进 emit 路径——**先确认提交（WP2 的 append_batch）、再 fanout**；窗口外单事件走单事件批（batch_id=event.id），未提交窗口在 `commit_provisional` 时**整批一次**提交（round batch_id，失败缓冲保留、同 id 重试恰好一次）。`subscribe(..., required=True)` 的必要消费者（ALM/SessionRegistry）异常穿出 emit、推测态照看；观察者（stream 订阅者）队列溢出的丢弃以 `EventsDropped` 元事件通报（transient、payload 带 position，可按 `read_range` 补读）。派生事件经 contextvar 继承窗口归属，不逃逸。存储失败：会话标记 `storage_unavailable`（`runtime.storage_health()` 可查）+ `PersistenceUnavailableError` 显式抛出（`wait_for_finish` 轮询健康、TM 三处前置分支停推进不发终态事件）；`best_effort` 显式退回旧 `attach_persistence` 路径（吞错 + 启动告警）。微基准：required 单事件提交路径较旧 persister 路径 -20%（in-memory）。
 - **「事件流即单一事实源」的两个限定**：① 未提交窗口——夭折轮（RoundDiscarded）的事件被 discard，不进日志；② TRANSIENT 集合跳过持久化。除这两点外没有旁路状态。
+- **执行限制（spec: execution-limits，change reliability-wp7）**：`ExecutionLimits`（RuntimeConfig opt-in，默认全 None = 零行为变化）——task/step/provider 三级 deadline + actor 轮数，monotonic 计量、park/resume 排除 HITL 与等子任务时段、跨 retry 累计。超限 → INTERRUPTED + 四专用错误码（TASK/STEP/PROVIDER_DEADLINE_EXCEEDED、ACTOR_TURN_LIMIT）；provider 超时后 cancel 安全网 + cleanup 宽限，仍不合作则标记并拒绝同会话后续副作用。旧字段（max_turns_per_agent / timeout_per_step_sec / Task.timeout_ms）发去重 DeprecationWarning、不激活。
+- **有序提交扩展（spec: event-log，change reliability-wp2）**：`OrderedEventStore` 协议（`protocols/events.py` 末段）给两个 store 实现（in_memory / sql）加上 `append_batch`（原子批次 + batch_id 幂等，`EventConflictError` 拒绝异内容重放）、`read_range(after, through)` 与 `committed_head`——`position` 是存储层在提交时分配的位置（同会话唯一递增，与 ULID 铸造序无关）。SQL 侧经会话 head 行同事务原子 UPDATE 串行化分配（`event_session_head` / `event_batches` 两张新表，禁无锁 MAX+1）；`append` 改道单事件批次（batch_id=event.id），既有调用方零改动；`read_by_session` / `read_session_events_of_types` 改按 position 序（存量 NULL 行排前按 id 序），`read_after(id)` 保留 legacy。**地基已铺、暂未启用**：persister 仍逐条 append（行为零变化），提交门（WP3）与快照 position 截断（WP4）在其上启用；存量库回填走 `scripts/migrate_event_positions.py`（默认 dry-run；分配的是 (session_id, event.id) 确定性顺序，非历史提交顺序）。

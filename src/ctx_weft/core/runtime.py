@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +32,7 @@ from ctx_weft.core.assembler.sources import (
     TaskSpecSource,
 )
 from ctx_weft.protocols.capability import Authorizer
+from ctx_weft.core.control.execution_budget import ExecutionLimitExceeded
 from ctx_weft.core.control.tokens import CancelToken, PauseToken, RunTokens
 from ctx_weft.core.models.discriminators import CancelReason, InterruptReason
 from ctx_weft.protocols.events import Event, EventOrigin, EventType
@@ -104,7 +105,7 @@ from ctx_weft.protocols.capability import (
     SkillCapabilityProvider,
     qualify,
 )
-from ctx_weft.protocols.events import EventBus
+from ctx_weft.protocols.events import EventBus, PersistenceUnavailableError
 from ctx_weft.protocols.hitl import (
     HITL_OUTCOME_ACCEPTED,
     PREFACE_AFTER_INTERRUPT,
@@ -304,6 +305,9 @@ class TurnHandle:
     template_id: str
     event_bus: EventBus
     _state: LoopState | None = None
+    # 存储不可用健康查询（spec: event-commit）：runtime 构造时注入；None（测试替身）
+    # 表示无健康面，wait_for_finish 按旧行为等超时。
+    _storage_health: "Callable[[str], str | None] | None" = None
 
     async def events(self) -> AsyncIterator[Event]:
         from ctx_weft.protocols.events import EventFilter
@@ -457,10 +461,25 @@ class TurnHandle:
             async with asyncio.timeout(timeout):
                 stream = self.event_bus.stream(
                     EventFilter(agent_id=self.agent_id, task_id=self.task_id)
-                )
+                ).__aiter__()
                 seen_recap_run_ids: set[str] = set()
                 waiting_for_run_id: str | None = None
-                async for ev in stream:
+                # 轮询式消费（spec: event-commit）：存储隔离后**没有事件再流出**，
+                # 健康检查不能只在「收到事件」时做——每个 tick 先查健康再等下一条，
+                # 0.25s 内把 PersistenceUnavailableError 交给宿主，不等通用超时。
+                while True:
+                    if self._storage_health is not None:
+                        reason = self._storage_health(self.session_id)
+                        if reason is not None:
+                            raise PersistenceUnavailableError(
+                                f"session {self.session_id!r} is storage_unavailable: "
+                                f"{reason}")
+                    try:
+                        ev = await asyncio.wait_for(stream.__anext__(), timeout=0.25)
+                    except TimeoutError:
+                        continue          # 本 tick 无事件：回到健康检查
+                    except StopAsyncIteration:
+                        break
                     if ev.type == EventType.TASK_RECAP_DONE:
                         seen_recap_run_ids.add(ev.run_id)
                         if waiting_for_run_id is not None and ev.run_id == waiting_for_run_id:
@@ -480,7 +499,8 @@ class TurnHandle:
 async def _task_has_dangling_tool_call(memory, scope, provider_ctx) -> bool:
     """该 scope 最近一个 assistant turn 是否存在「有 tool_call、无 TOOL_RESULT」（spec/07 §6）。"""
     from ctx_weft.core.loop.steps.reconcile import _dangling_tool_calls
-    return bool(await _dangling_tool_calls(memory, scope, provider_ctx))
+    dangling, _ = await _dangling_tool_calls(memory, scope, provider_ctx)
+    return bool(dangling)
 
 
 
@@ -562,15 +582,49 @@ class CtxWeftRuntime:
             from ctx_weft.providers.events import InMemoryEventStore
             event_store = InMemoryEventStore()
         self.event_store = event_store
-        # 单一入口交给 attach_persistence（spec 2026-08-29 §6.4 + final review R15）：
-        # ① EventPersister 与 SnapshotWriter 的订阅顺序契约（persister 必须先于 snapshot
-        #   writer 订阅，否则 rebuild_view 看不到当前事件）统一由它保证，宿主不必懂顺序；
-        # ② snapshot_every_n=0（默认）时不接 SnapshotWriter —— 与改造前行为零变化；
-        # ③ 返回的 handle 存成**公开**属性 `self.persistence`（而不是私有的
-        #   `_event_persister`），因为 `EventPersister.detach` 的 docstring 明确要求宿主
-        #   换持久 store 时调用 detach，私有且无调用点会让那个用例本就是坏的。
-        self.persistence = attach_persistence(
-            self._event_bus, self.event_store, snapshot_every_n=snapshot_every_n)
+        # 存储不可用健康表（spec: event-commit）：session_id → 原因。CommitGate 失败时
+        # **先标记后抛**；公开查询走 storage_health()。内存态——崩溃后由持久日志重建。
+        self._storage_unavailable: dict[str, str] = {}
+        # 提交策略分岔（spec: event-commit，change reliability-wp3）：
+        # - required（默认）：CommitGate 接进 emit 路径（提交确认先于通知）；persister
+        #   不再接线；SnapshotWriter（若启用）单独接——它消费的已是确认提交流。
+        # - best_effort：旧 attach_persistence 路径（吞存储错误），启动告警、不可靠恢复。
+        policy = self._config.event_commit_policy
+        if policy not in ("required", "best_effort"):
+            raise ValueError(
+                f"event_commit_policy must be 'required' or 'best_effort', got {policy!r}")
+        if policy == "required":
+            attacher = getattr(self._event_bus, "attach_commit_gate", None)
+            if not callable(attacher):
+                raise ValueError(
+                    "event_commit_policy='required' 需要支持提交门的事件总线（实现 "
+                    "EventBus.attach_commit_gate：emit/commit_provisional 在 fanout 前 "
+                    "先经 gate 确认存储提交）。InProcessEventBus 已支持；自定义总线请实现"
+                    "该扩展，或显式配置 event_commit_policy='best_effort' 并接受丢事件风险。")
+            if not hasattr(self.event_store, "append_batch"):
+                raise ValueError(
+                    "event_commit_policy='required' 需要 OrderedEventStore 兼容的事件存储"
+                    "（实现 append_batch / read_range / committed_head）；自定义 store 请"
+                    "升级，或显式配置 event_commit_policy='best_effort'。")
+            from ctx_weft.core.events.commit_gate import CommitGate
+            self._event_bus.attach_commit_gate(CommitGate(
+                self.event_store, on_unavailable=self._mark_storage_unavailable))
+            from ctx_weft.providers.events import PersistenceHandle
+            writer = None
+            if snapshot_every_n > 0:
+                from ctx_weft.providers.events.snapshot import SnapshotWriter
+                writer = SnapshotWriter(self.event_store, self._event_bus,
+                                        every_n_events=snapshot_every_n)
+            # handle 统一暴露：required 模式 persister=None（提交走 gate）、writer 可 detach。
+            self.persistence = PersistenceHandle(None, writer)
+        else:
+            logger.warning(
+                "event_commit_policy='best_effort'：存储失败将被吞掉（不可靠恢复）；"
+                "仅建议显式接受丢事件的观测用途。")
+            # 旧路径（spec 2026-08-29 §6.4 + final review R15）：persister 必须先于
+            # snapshot writer 订阅；handle 存公开属性 persistence 供宿主 detach。
+            self.persistence = attach_persistence(
+                self._event_bus, self.event_store, snapshot_every_n=snapshot_every_n)
 
         # Auto-register 内置 providers（与用户注册的 providers 无关）
         control_provider = ControlCapabilityProvider()
@@ -824,6 +878,112 @@ class CtxWeftRuntime:
         per.pop(task_id, None)
         if not per:
             self._run_tokens.pop(session_id, None)
+
+    # ── 存储不可用健康（spec: event-commit）────────────────────────────────────
+
+    def _mark_storage_unavailable(self, session_id: str, cause: BaseException) -> None:
+        """CommitGate 失败回调：先标记后抛（并发路径读到的健康状态与异常一致）。"""
+        prev = self._storage_unavailable.get(session_id)
+        if prev is None:
+            self._storage_unavailable[session_id] = f"{type(cause).__name__}: {cause}"
+            logger.error(
+                "session %s enters storage_unavailable isolation: %r", session_id, cause)
+
+    def storage_health(self, session_id: str) -> str | None:
+        """None = 健康；否则返回隔离原因（storage_unavailable）。"""
+        return self._storage_unavailable.get(session_id)
+
+    # ── 操作结果未知处置（spec: tool-operations，wp6）────────────────────────────
+
+    async def resolve_operation(
+        self,
+        operation_id: str,
+        *,
+        decision: str,
+        result: object = None,
+        expected_revision: int,
+    ) -> str:
+        """宿主处置一个 unknown 操作（spec §5.5）。返回处置后的 task_id。
+
+        - ``supply_result``：宿主已核实外部结果 → 账本 CAS completed + 按确定性 id
+          幂等补写 TOOL_RESULT + task 重排续跑。provider 不被调用。
+        - ``retry_confirmed``：宿主显式承担重复执行风险 → CAS 回 started（attempt 记
+          ``resolve:retry_confirmed`` 审计）+ task 重排；原 operation_id 不变。
+        - ``cancel_task``：task 终态 CANCELED；**不声称撤销已发生的外部动作**。
+        ``expected_revision`` 取自 OperationUncertain payload——CAS 不匹配即拒绝
+        （双宿主并发处置恰好一个成功）。
+        """
+        from ctx_weft.protocols.operations import (
+            OperationStatus, OperationUpdate, RevisionConflict)
+
+        if decision not in ("supply_result", "retry_confirmed", "cancel_task"):
+            raise ValueError(f"unknown decision {decision!r}")
+        ops = self.providers.get_operation_store()
+        ctx0 = ProviderContext(session_id="", tenant_id="default")
+        rec = await ops.get(operation_id, ctx0)
+        if rec is None:
+            raise KeyError(f"operation {operation_id!r} not found in ledger")
+        if rec.status != OperationStatus.UNKNOWN:
+            raise ValueError(
+                f"operation {operation_id!r} is {rec.status}, not unknown — nothing to resolve")
+
+        async def _cas(update: OperationUpdate) -> None:
+            nonlocal rec
+            try:
+                rec = await ops.compare_and_set(
+                    operation_id, expected_revision, update, ctx0)
+            except RevisionConflict as exc:
+                raise RuntimeError(
+                    f"revision mismatch for {operation_id!r} — another client already "
+                    f"resolved it (expected {expected_revision}, current {rec.revision})"
+                ) from exc
+
+        if decision == "supply_result":
+            await _cas(OperationUpdate(status=OperationStatus.COMPLETED,
+                                       result=result, result_set=True))
+            # 确定性 id 幂等补写 memory（TOOL_RESULT）——memory 的 id 契约保证 no-op
+            from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
+            from ctx_weft.protocols.operations import operation_memory_result_id
+            from ctx_weft.core.utils.clock import now_utc
+            memory = self.providers.get_memory()
+            await memory.ingest(MemoryEvent(
+                id=operation_memory_result_id(operation_id),
+                kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+                address=MemoryAddress(session_id=rec.session_id,
+                                       task_id=rec.task_id or None, agent_id=rec.agent_id),
+                content=str(result), timestamp=now_utc(), role="tool",
+                metadata={"operation_id": operation_id, "resolved_via": "supply_result"},
+            ), ProviderContext(session_id=rec.session_id, tenant_id=rec.tenant_id))
+        elif decision == "retry_confirmed":
+            await _cas(OperationUpdate(status=OperationStatus.STARTED,
+                                       append_attempt="resolve:retry_confirmed"))
+        # cancel_task：不动账本（unknown 留痕）；task 终态化在下方
+
+        task_id = self._task_id_of(rec)
+        tm = self._task_managers.get(rec.session_id)
+        task = tm.get_task(task_id) if tm is not None else None
+        if task is not None:
+            if decision == "cancel_task":
+                task.status = "CANCELED"
+                task.error = (f"operation {operation_id} cancelled by host; external "
+                              f"side effects (if any) are NOT undone")
+            else:
+                task.status = "PENDING"
+                task.error_code = None
+                task.error = None
+        if tm is not None and decision != "cancel_task":
+            tm.drain()  # type: ignore[func-returns-value]
+        return task_id
+
+    @staticmethod
+    def _task_id_of(rec) -> str:
+        """账本记录 → 所属 task_id（wp6 起随 OperationRecord 持久化）。"""
+        return getattr(rec, "task_id", "") or ""
+
+    def clear_storage_isolation(self, session_id: str) -> None:
+        """宿主确认存储恢复后解除隔离（恢复流程须先按 batch_id 收口未知提交）。"""
+        if self._storage_unavailable.pop(session_id, None) is not None:
+            logger.info("session %s storage isolation cleared", session_id)
 
     async def pause_session(self, session_id: str) -> bool:
         """软打断（spec 2026-07-05）：放弃其余在途/排队任务，只留 root agent 当前那一轮。
@@ -1464,6 +1624,7 @@ class CtxWeftRuntime:
             task_id=root_task.id,
             template_id=params.template_id,
             event_bus=self._event_bus,
+            _storage_health=self.storage_health,
         )
 
         template = await self._template_lookup.get_template(
@@ -1471,6 +1632,8 @@ class CtxWeftRuntime:
             None,
             ctx=ProviderContext(session_id=session.id, tenant_id=params.tenant_id),
         )
+        task_manager.set_unhealthy_check(
+            lambda sid: self.storage_health(sid) is not None)  # spec: event-commit
         task_manager.set_runner(self._make_task_runner(
             session=session,
             template=template,
@@ -2172,6 +2335,8 @@ class CtxWeftRuntime:
         # （Task 11）：这里为此重付一次 `rebuild_view` 的代价，换来两处永不漂移。
         await self._load_agents_of(session.id, tenant_id=session.tenant_id)
 
+        task_manager.set_unhealthy_check(
+            lambda sid: self.storage_health(sid) is not None)  # spec: event-commit
         task_manager.set_runner(self._make_task_runner(
             session=session,
             template=template,
@@ -2716,6 +2881,7 @@ class CtxWeftRuntime:
             task_id=task_id,
             template_id=rec.template_id,
             event_bus=self._event_bus,
+            _storage_health=self.storage_health,
         )
 
     async def _hydrate_agent_for_send(self, agent_id: str, session_id: str | None) -> None:
@@ -3681,6 +3847,10 @@ class CtxWeftRuntime:
             spill_threshold=self._config.spill_threshold,
             spill_preview_chars=self._config.spill_preview_chars,
             memory_blob_store=self.providers.get_memory_blob_store(),
+            # spec: tool-operations（wp5）——操作账本：显式注册 > 内存默认（registry 惰性）
+            operation_store=self.providers.get_operation_store(),
+            # spec: execution-limits（wp7）——provider 超时与不合作名单
+            limits=getattr(self._config, "execution_limits", None),
         )
 
     def _build_loop_ctx(
@@ -3714,6 +3884,13 @@ class CtxWeftRuntime:
             # 出网前 rehydrate ref→base64 用（Phase 3b）；未注册时是 NullMemoryBlobStore，
             # rehydrate_content 据其 can_externalize=False 原样返回、零开销。
             blob_store=self.providers.get_memory_blob_store(),
+            # spec: execution-limits（wp7）——limits 未注入（None）时 budget 也为 None：
+            # 所有检查点容忍 None，零行为变化。per-task budget 实例由派发方覆盖写入。
+            execution_budget=(
+                __import__("ctx_weft.core.control.execution_budget",
+                           fromlist=["ExecutionBudget"]).ExecutionBudget(
+                    self._config.execution_limits)
+                if getattr(self._config, "execution_limits", None) is not None else None),
         )
 
     @staticmethod
@@ -3775,6 +3952,18 @@ class CtxWeftRuntime:
             "run_id": run_id,
             "initial_step": initial_step,
         }, origin=EventOrigin.RUNTIME))
+        # spec: execution-limits（wp7）——本 run 计时起步；budget 由派发方（TM/_SessionTaskRunner）
+        # 注入 loop_ctx，未注入限制时为 None（零行为变化）。
+        _budget = getattr(loop_ctx, "execution_budget", None)
+        if _budget is not None:
+            # spec: execution-limits（wp8）——task 有持久化已消费量时 restore（跨
+            # retry / 跨重启续用剩余预算；算术由 wp7 单测背书）
+            _consumed = getattr(task, "budget_consumed", None)
+            if _consumed:
+                from ctx_weft.core.control.execution_budget import ExecutionBudget as _EB
+                loop_ctx.execution_budget = _EB.restore(_budget.limits, _consumed)
+                _budget = loop_ctx.execution_budget
+            _budget.run_started()
 
         run_error: BaseException | None = None
         was_cancelled = False
@@ -3806,6 +3995,9 @@ class CtxWeftRuntime:
             state = state.apply_patch({"run_outcome": RunOutcome(
                 kind=RunOutcomeKind.AWAITING_HUMAN, hitl_id=park.hitl_id,
             )})
+            _budget = getattr(loop_ctx, "execution_budget", None)
+            if _budget is not None:
+                _budget.park()   # 等 HITL 不计 active time（spec）
             logger.info("_run_loop: task %s parked on HITL", task.id)
         except asyncio.CancelledError:
             was_cancelled = True
@@ -3854,6 +4046,23 @@ class CtxWeftRuntime:
             # task 级事实（TaskInterrupted）不在这里发：outage 的 RunOutcome 带着
             # retriable=False 交给 TaskManager，由处置表判成 INTERRUPTED 并发出——
             # 「outage 从不原地重试」的判据从路径隔离变成了这个显式标志位（Task 4）。
+        except ExecutionLimitExceeded as exc:
+            # spec: execution-limits——超限：错误码置位后走既有 INTERRUPTED 通道
+            # （retriable=False 已在异常上；task.error_code 由 except Exception 共通段写 task.error，
+            #  code 在此显式落）
+            task.error_code = exc.code
+            task.error = exc.message
+            run_error = exc
+            logger.warning("_run_loop: task %s hit execution limit: %s", task.id, exc.message)
+            raise
+        except PersistenceUnavailableError as exc:
+            # spec: event-commit——存储不可用：不进通用重试语义。task 状态不动、
+            # 不发 RUN_INTERRUPTED/终态事件（emit 同样要过提交门、会再撞同一故障）；
+            # 会话已由 CommitGate 先标记 storage_unavailable，drain 停止派发。
+            # re-raise 交 TaskManager 的同名分支收尾（那边同样不再发任何事件）。
+            run_error = exc
+            logger.error("_run_loop: task %s halted — session storage unavailable", task.id)
+            raise
         except Exception as exc:
             run_error = exc
             # 这份 outcome **不是**给 TaskManager 的（本分支下面 `raise run_error`，
@@ -3925,19 +4134,31 @@ class CtxWeftRuntime:
                 state.run_outcome.kind if state.run_outcome is not None
                 else RunOutcomeKind.COMPLETED
             )
-            await self._event_bus.emit(make_event(state, EventType.RUN_FINISHED, payload={
-                "outcome": outcome_kind.value,
+            # spec: event-commit——存储隔离后 finally 的收尾事件不再发：emit 要过
+            # 提交门，会再撞同一故障并把 PersistenceUnavailableError 抛出 finally、
+            # 掩掉真正的 run_error。会话状态由健康表承载，不缺这条事件。
+            # spec: execution-limits（wp8）——budget 已消费量写回 task（随下一次
+            # TASK_* 事件投影 budget_consumed 落库，崩溃恢复续用）
+            _fb = getattr(loop_ctx, "execution_budget", None) if loop_ctx is not None else None
+            if _fb is not None:
+                try:
+                    task.budget_consumed = _fb.snapshot()
+                except Exception:
+                    pass  # budget 快照不掀 run——只是计量优化
+            if not isinstance(run_error, PersistenceUnavailableError):
+                await self._event_bus.emit(make_event(state, EventType.RUN_FINISHED, payload={
+                    "outcome": outcome_kind.value,
                 # `final_status` 已废弃，下个周期删除——host 应改读上面的 `outcome`
                 # （run 词表）。Task 4 起 run 不再写 task 状态，故这里只是**发 RUN_FINISHED
                 # 那一刻** task 的状态（多半仍是 ACTIVE）：真正的终态由随后 TaskManager 的
                 # 处置写定，靠它推 task 状态的 host 一定要改。
-                "final_status": task.status,
-                "will_retry": will_retry,
-                "total_events": state.sequence_counter,
-                "total_turns": len(state.transcript),
-                "error": str(run_error) if run_error else None,
-                "error_type": type(run_error).__name__ if run_error else None,
-            }, origin=EventOrigin.RUNTIME))
+                    "final_status": task.status,
+                    "will_retry": will_retry,
+                    "total_events": state.sequence_counter,
+                    "total_turns": len(state.transcript),
+                    "error": str(run_error) if run_error else None,
+                    "error_type": type(run_error).__name__ if run_error else None,
+                }, origin=EventOrigin.RUNTIME))
 
         if run_error is not None:
             raise run_error
@@ -3993,6 +4214,7 @@ class CtxWeftRuntime:
             template_id=template.id,
             event_bus=self._event_bus,
             _state=state,
+            _storage_health=self.storage_health,
         )
         return state, handle
 
@@ -4161,6 +4383,13 @@ class _SessionTaskRunner:
     # ── helpers（原闭包内嵌函数）───────────────────────────────────────────────
 
     async def _reconcile_or(self, t: "Task", agent: "Agent", base: str) -> str:
+        # spec: tool-operations（wp6）闸门：unknown 中断的 task 未经 resolve_operation
+        # 不得续跑（recover_agent 不得绕过宿主决策重跑工具）。
+        from ctx_weft.core.models.discriminators import TaskErrorCode as _TEC
+        if getattr(t, "error_code", None) == _TEC.TOOL_OUTCOME_UNKNOWN:
+            raise RuntimeError(
+                f"task {t.id} is interrupted with TOOL_OUTCOME_UNKNOWN — resolve the "
+                f"uncertain operation via runtime.resolve_operation() before resuming")
         """base initial_step；若该 task 最近 assistant turn 有 dangling tool_call → reconcile。"""
         from ctx_weft.protocols.context import ProviderContext as _PCtx
         from ctx_weft.protocols.memory import MemoryAddress as _Scope

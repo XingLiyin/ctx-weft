@@ -171,7 +171,7 @@ async def run_observe_react(
                 content = result.content
                 # terminal 工具的失败（is_error，如参数非法）不终止循环：错误内容照常 append
                 # 进 messages（下方）供模型下一轮改参重试；只有成功结果才是终止结果。否则一次
-                # 坏调用的错误文案会被当成 Process Report 终结整个观察。
+                # 坏调用的错误文案会被当成 Process Report 终结整个观察（spec: capability-gateway）。
                 if tc.name == terminal_tool_name and not result.is_error:
                     terminal_result = result
             else:

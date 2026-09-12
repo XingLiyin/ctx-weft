@@ -52,6 +52,10 @@ class ProviderRegistry:
         self._null_blob_store: "MemoryBlobStore | None" = None
         self._event_blob_store: "EventBlobStore | None" = None
         self._null_event_blob_store: "EventBlobStore | None" = None
+        # spec: tool-operations（wp5）——操作账本：显式注册 > 内存默认（惰性单例）
+        self._operation_store = None
+        self._operation_store_registered = False
+        self._in_memory_operation_store = None
 
     # ── Memory ────────────────────────────────────────────────────────────────
 
@@ -87,6 +91,22 @@ class ProviderRegistry:
             self._capability_authorizers[provider.name] = authorizer
         if tool_authorizers:
             self._capability_authorizers.update(tool_authorizers)
+        # spec: tool-operations（wp6）——queryable 声明与实现的对齐校验（响亮，不静默
+        # 降级为 manual）：cap 声明 queryable 而 provider 未实现 QueryResult → 注册即拒。
+        # 同步探测：list() 是 async，注册面是同步——先异步跑不了就交给首个 retrieve/list
+        # 时机？不——保持同步注册语义：只查 provider 类型（QueryResult protocol）与
+        # 其**已物化**的 caps（构造期常已建好）；拿不到 list（需 ctx）时降为「实现即过」
+        # 的弱校验。强校验在 runtime 构造期（异步面）补一次。
+        from ctx_weft.protocols.operations import QueryResult
+        if isinstance(provider, QueryResult):
+            pass  # 实现了接口——任何 queryable 声明都自洽
+        elif hasattr(provider, "_wp6_caps") and any(
+            getattr(c, "recovery_policy", "manual") == "queryable"
+            for c in provider._wp6_caps  # noqa: SLF001 —— 构造期物化清单（弱路径）
+        ):
+            raise ValueError(
+                f"provider {provider.name!r} declares queryable capabilities but does "
+                f"not implement QueryResult (query_result).")
         if isinstance(provider, SkillCapabilityProvider):
             self._notify_skill_executor_dirty()
 
@@ -164,6 +184,29 @@ class ProviderRegistry:
             from ctx_weft.protocols import NullMemoryBlobStore
             self._null_blob_store = NullMemoryBlobStore()
         return self._null_blob_store
+
+    # ── OperationStore（spec: tool-operations，wp5）───────────────────────────
+
+    def register_operation_store(self, store: "object") -> None:
+        """注册工具操作账本。未注册时 get_operation_store() 返回内存默认实现
+        （进程内可用；跨进程恢复需宿主显式注入 SQL/持久实现——runtime 起动时据
+        registered 标志如实报告能力差异）。"""
+        self._operation_store = store
+        self._operation_store_registered = True
+
+    def get_operation_store(self):
+        """取操作账本。两级：显式注册 > InMemoryOperationStore（惰性单例）。"""
+        if self._operation_store is not None:
+            return self._operation_store
+        if self._in_memory_operation_store is None:
+            from ctx_weft.providers.operations import InMemoryOperationStore
+            self._in_memory_operation_store = InMemoryOperationStore()
+        return self._in_memory_operation_store
+
+    @property
+    def operation_store_registered(self) -> bool:
+        """宿主是否显式注册了持久账本（False = 内存默认，跨进程恢复能力缺失）。"""
+        return self._operation_store_registered
 
     # ── EventBlobStore ───────────────────────────────────────────────────────
 

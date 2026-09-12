@@ -10,6 +10,11 @@
 
 ⚠️ **必须在 EventPersister 之后订阅**，否则 `rebuild_view` 看不到当前这条事件。
 用 `attach_persistence()` 接线，顺序由它保证。
+
+一致切面（spec: snapshot-recovery，change reliability-wp4）：快照边界 = 写那一刻的
+``committed_head``（C），内容 = ``read_range(0..C)`` 的全量折——触发事件只是「现在写
+一张」的信号，不是边界。单一 apply 语义让「全量回放 vs 快照+增量」两路恢复天然等价
+（E5）。store 不具备 OrderedEventStore 能力时回落旧路径（触发事件 ID 当游标）并告警。
 """
 
 from __future__ import annotations
@@ -75,18 +80,56 @@ class SnapshotWriter:
         except Exception:
             logger.exception("SnapshotWriter: failed for session %s", session_id)
 
+    #: 当前投影版本（spec: snapshot-recovery）——apply 语义变更时 bump，旧快照据此
+    #: 在恢复路径被忽略并全量重建。
+    PROJECTION_VERSION = 1
+
     async def _write(self, session_id: str, event: "Event", reason: str) -> None:
-        from ctx_weft.core.control.reducers import rebuild_view, serialize_view
+        from ctx_weft.core.control.reducers import reduce_events, serialize_view
         from ctx_weft.core.utils.clock import now_utc
         from ctx_weft.core.utils.ids import generate_id
         from ctx_weft.protocols.events import RunSnapshot
 
-        # rebuild_view = 上一张快照 + delta（无快照时全量）。本事件此刻**已被先注册的
-        # EventPersister 落库**（attach_persistence 保证顺序），故 view 已包含它，
-        # last_event_id=event.id 与 view 一致。
+        # ── 一致切面（spec: snapshot-recovery，reliability-wp4）───────────────
+        # C = committed_head；内容 = read_range(0..C) 的全量折。触发事件只是信号
+        # （WP3 后 writer 收到的都是已确认事件，C ≥ 触发事件 position，不会漏折它）。
+        # 全量折是刻意的：与恢复路径共用同一个 apply 语义，两路等价（E5）不需要额外
+        # 证明；增量维护 writer 内存 view 的方案被否决见 design D1。
+        head = None
+        if hasattr(self._store, "committed_head") and hasattr(self._store, "read_range"):
+            head = await self._store.committed_head(session_id)
+            stored = await self._store.read_range(
+                session_id, after_position=0, through_position=head)
+            view = reduce_events([se.event for se in stored], run_id=session_id)
+            if not view.session_id:
+                return  # 该 session 尚无任何已提交事件，跳过
+            snapshot = RunSnapshot(
+                id=generate_id("snp"),
+                run_id=event.run_id or "",
+                session_id=session_id,
+                last_event_id=event.id,
+                last_event_sequence=event.sequence,
+                state_blob=serialize_view(view),
+                snapshot_reason=reason,
+                snapshot_at=now_utc(),
+                last_commit_position=head,
+                projection_version=self.PROJECTION_VERSION,
+            )
+            await self._store.save_snapshot(snapshot)
+            logger.info(
+                "SnapshotWriter: snapshot %s for session %s (reason=%s, cut=%d events)",
+                snapshot.id, session_id, reason, len(stored),
+            )
+            return
+
+        # ── legacy 回落（store 无 OrderedEventStore 能力）──────────────────────
+        from ctx_weft.core.control.reducers import rebuild_view
+        logger.warning(
+            "SnapshotWriter: store lacks committed_head/read_range; falling back to "
+            "legacy id-cursor snapshot (recovery will ignore it and full-replay)")
         view = await rebuild_view(self._store, session_id)
         if not view.session_id:
-            return  # 该 session 尚无任何已持久化事件，跳过
+            return
         snapshot = RunSnapshot(
             id=generate_id("snp"),
             run_id=event.run_id or "",
@@ -98,7 +141,3 @@ class SnapshotWriter:
             snapshot_at=now_utc(),
         )
         await self._store.save_snapshot(snapshot)
-        logger.info(
-            "SnapshotWriter: snapshot %s written for session %s (reason=%s, seq=%d)",
-            snapshot.id, session_id, reason, event.sequence,
-        )

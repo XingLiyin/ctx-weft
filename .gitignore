@@ -37,3 +37,6 @@ coverage.xml
 *.swo
 .DS_Store
 Thumbs.db
+
+# ZCode session artifacts
+.zcode/plans/

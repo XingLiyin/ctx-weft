@@ -1,4 +1,7 @@
-"""Gateway 参数校验（spec B）：只拦 required/type/enum，忽略 additionalProperties/format。"""
+"""Gateway 参数校验（spec B）：只拦 required/type/enum，忽略 additionalProperties/format。
+
+控制工具（spec: capability-gateway）例外收紧：未知顶层参数显式拒绝并回灌错误。
+"""
 
 from __future__ import annotations
 
@@ -9,6 +12,10 @@ from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway, _validate_args
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.capabilities.cache import CapabilityCache
+from ctx_weft.core.capabilities.control_tools import (
+    _CONTROL_TOOLS,
+    ControlCapabilityProvider,
+)
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
@@ -199,3 +206,92 @@ async def test_invoke_raw_wrapper_error_truncates_huge_text() -> None:
     assert res.is_error is True
     assert len(res.content) < 2000  # 截断，不整段回灌
     assert "truncated" in res.content
+
+
+# ── 控制工具未知参数严格拒绝（spec: capability-gateway）───────────────────────
+#
+# 收紧只针对控制工具（cap.id 以 "control:" 开头）：未知顶层参数显式报错回灌 LLM 重试，
+# 不再静默剥除——finish_task 误传 result= 会被吞掉且 outputs/结果回流/blackboard
+# 全链路静默跳过。外部工具的剥键容错（上方用例）不变。
+
+
+class _SpyControl(ControlCapabilityProvider):
+    """记录是否真正下发到 provider——严格拒绝的安全不变式断言用。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invoked = False
+
+    def invoke(self, capability_id, arguments, ctx) -> AsyncIterator[CapabilityEvent]:
+        self.invoked = True
+        return super().invoke(capability_id, arguments, ctx)
+
+
+def _control_gw(mem, cap_id="control:finish_task", schema=None):
+    """真实 control provider + 指定 cap 入缓存；schema 给 None 时用 finish_task 真实 schema。"""
+    provider = _SpyControl()
+    cap = (
+        ToolCapability(id=cap_id, name=cap_id.split(":")[-1], description="d",
+                       input_schema=schema)
+        if schema is not None
+        else _CONTROL_TOOLS[cap_id.split(":")[-1]][0]
+    )
+    cache = CapabilityCache()
+    cache.put("agt_1", [cap])
+    return CapabilityGateway(
+        capability_cache=cache, capability_providers=[provider],
+        memory=mem, event_bus=InProcessEventBus(),
+    ), provider
+
+
+async def test_control_tool_unknown_arg_rejected_with_declared_list() -> None:
+    # finish_task 误带 result=（旧契约遗习）→ 报错含未知键名与声明参数清单，绝不下发
+    mem, state, ctx = _state_ctx()
+    gw, provider = _control_gw(mem)
+    res = await gw.invoke("control__finish_task", {"result": "root done"}, state, ctx)
+    assert res.is_error is True
+    assert "unknown parameter" in res.content
+    assert "'result'" in res.content
+    assert "deliverables_summary" in res.content  # 声明参数清单引导改参重试
+    assert provider.invoked is False
+
+
+async def test_control_tool_declared_args_pass() -> None:
+    # 全声明参数正常放行，行为与收紧前一致
+    mem, state, ctx = _state_ctx()
+    gw, provider = _control_gw(mem)
+    res = await gw.invoke("control__finish_task", {"deliverables_summary": "2 files"}, state, ctx)
+    assert res.is_error is False
+    assert provider.invoked is True
+
+
+async def test_control_tool_failopen_schema_not_rejected() -> None:
+    # 剥键不适用的 schema（组合关键字）严格校验同样不拒——两条路径资格判定一致。
+    # 探测工具不是真控制工具（真实 provider 会报 UNKNOWN_CONTROL），用 _Echo 假冒
+    # control: 前缀 id 即可：被测的是 gateway 的前缀判定 + 资格判定，不是工具本体。
+    class _ProbeEcho(_Echo):
+        name = "control"
+
+        def _cap(self) -> ToolCapability:
+            return ToolCapability(
+                id="control:probe", name="probe", description="d",
+                input_schema=self._schema)
+
+    p = _ProbeEcho({"type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "allOf": [{"required": ["q"]}]})
+    mem, state, ctx = _state_ctx()
+    res = await _gw(p, mem).invoke("control__probe", {"q": "x", "junk": 1}, state, ctx)
+    assert res.is_error is False
+    assert p.invoked is True
+
+
+async def test_non_control_unknown_key_still_stripped_silently() -> None:
+    # 回归锚：收紧只限控制工具；外部工具保持剥键容错（与 test_invoke_strips_unknown_keys_
+    # before_provider 同行为，并排在此处钉住对照契约）
+    p = _Echo({"type": "object", "properties": {"q": {"type": "string"}}})
+    mem, state, ctx = _state_ctx()
+    res = await _gw(p, mem).invoke("mcp__a__search", {"q": "x", "junk": 99}, state, ctx)
+    assert res.is_error is False
+    assert "unknown parameter" not in res.content
+    assert p.received == {"q": "x"}
