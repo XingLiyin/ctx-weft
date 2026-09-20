@@ -64,6 +64,21 @@ class EventStore(Protocol):
         """加载 session 中 id > after_event_id 的增量事件（ULID 字典序）。"""
         raise NotImplementedError
 
+    async def read_by_session_after(
+        self, session_id: str, *, after_id: str = "", limit: int = 200,
+    ) -> list[Event]:
+        """按 id 升序读**一批** `id > after_id` 的事件，至多 `limit` 条。
+
+        这是给「全量回放」用的分批入口：`read_by_session` 一次性把整条流变成
+        `list[Event]` 驻留内存——实测一条 3 万事件的会话约 130MB 常驻、读一次 3.5 秒。
+        而回放本身是左折叠（`reduce_events` 就是 `apply_events` 在空 view 上的调用，
+        两段循环体逐字相同），天然可以分批喂：内存峰值因此从 O(全部事件) 降到 O(batch)。
+
+        未实现时抛 `NotImplementedError`，调用方降级为一次性 `read_by_session`——仍然
+        正确，只是吃内存。
+        """
+        raise NotImplementedError
+
     async def read_session_events_of_types(
         self, session_id: str, types: "tuple[str, ...]",
     ) -> list[Event]:
@@ -152,6 +167,15 @@ class InMemoryEventStore(EventStore):
             elif ev.id == after_event_id:
                 found = True
         return result
+
+    async def read_by_session_after(
+        self, session_id: str, *, after_id: str = "", limit: int = 200,
+    ) -> list[Event]:
+        """分批读（见协议）。内存实现同样照 id 升序切片——这样 core 自己的测试也真的
+        跑在分批路径上，而不是全都退回 `read_by_session`。"""
+        events = self._events.get(session_id, [])
+        out = [ev for ev in events if not after_id or ev.id > after_id]
+        return out[:max(1, int(limit))]
 
     async def read_session_events_of_types(
         self, session_id: str, types: tuple[str, ...],

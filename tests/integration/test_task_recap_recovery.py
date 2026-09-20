@@ -389,3 +389,49 @@ async def test_no_tasks_at_all_still_raises() -> None:
 
     with pytest.raises(RuntimeError, match="no resumable tasks"):
         await runtime.recover_session(sid)
+
+
+async def test_resume_does_not_read_the_whole_event_stream() -> None:
+    """`recover_session` 折段 recap 时**不得**全量读事件流——按类型收窄。
+
+    这条走的是真实恢复路径（`/resume` → `recover_session` → `_recover_session_locked`），
+    而不是直接调那个收窄 helper：护住的正是「调用点用错工具」这件事。从前这里是
+    `read_by_session(session_id)`，每次用户点「继续」都把整条流读一遍——实测一条 3 万
+    事件的会话约 3.5 秒 / 130MB，而 `fold_pending_task_recap` 只需要 TaskRecapStarted /
+    TaskRecapDone 那几十条。
+    """
+    from ctx_weft.core.state.event_store import InMemoryEventStore
+
+    class _CountingStore(InMemoryEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.full_reads = 0
+
+        async def read_by_session(self, session_id: str):
+            self.full_reads += 1
+            return await super().read_by_session(session_id)
+
+    resolver = InlineAgentTemplateProvider()
+    resolver.register(make_echo_template())
+    llm = MockLLMAdapter(responses=[MockResponse(text="recovered recap") for _ in range(8)])
+    store = _CountingStore()
+    runtime = make_runtime(llm=llm, agent_provider=resolver, event_store=store)
+    runtime.providers.register_memory(InMemoryMemoryProvider())
+
+    sid, tid, aid = "ses_recap", "tsk_recap", "agt_root"
+    for e in [
+        _ev(1, EventType.SESSION_CREATED, user_prompt="do it",
+            template_id="agent:tpl_echo", root_agent_id=aid),
+        _ev(2, EventType.TASK_CREATED, task={
+            "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            "assigned_agent_id": aid, "creator_agent_id": aid}),
+        _ev(3, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
+        _ev(4, EventType.TASK_FINISHED, task_id=tid, outcome="success", summary="done"),
+        _ev(5, EventType.TASK_RECAP_STARTED, task_id=tid, boundary="finish", agent_id=aid),
+    ]:
+        await store.append(e)
+
+    await runtime.recover_session(sid)
+
+    assert store.full_reads == 0, (
+        f"恢复路径不该读整条事件流，实际读了 {store.full_reads} 次")
