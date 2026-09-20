@@ -104,3 +104,18 @@ class RunStateView:
 
     # Pending HITL requests folded from events (only unresolved; spec/07 §9)
     pending_hitl: dict[str, "HitlRequest"] = field(default_factory=dict)
+
+    #: 被崩溃打断的段 recap：{task_id: {"boundary", "agent_id"}}。
+    #:
+    #: 某 task 有 `TASK_RECAP_STARTED` 而无其后的 `TASK_RECAP_DONE`，说明那段 background
+    #: observe 的 memory 写没落完，恢复据此重跑。
+    #:
+    #: **为什么它该进投影**：这个判断没有时间下界——几个月前那条无 done 的 started 今天
+    #: 仍然要重跑。所以从前每次 `/resume` 都要把该会话**全部** recap 事件读回来折一遍，
+    #: 即便收窄到那两种类型，代价仍随会话长度线性增长（实测 1000 个 task 的会话：取回
+    #: 1999 条折出 1 个，272ms / 5.1MB，读放大 1999×）。进了投影就随快照 + 增量走，
+    #: 变成 O(delta)——与 `pending_hitl` 同一档待遇。
+    #:
+    #: **为什么它进得起投影**：每个条目由它自己的 `TASK_RECAP_DONE` 删掉，所以大小 =
+    #: 「崩溃打断且尚未修复的 recap 数」≈ 0~2，与会话长度无关。
+    pending_recap: dict[str, dict] = field(default_factory=dict)

@@ -53,33 +53,6 @@ def unresolved_hitl_ids(events: list[Event]) -> set[str]:
     return set(fold_pending_hitl(events))
 
 
-#: `fold_pending_task_recap` 需要的事件类型全集。供调用方按类型收窄读取——那个折叠只关心
-#: 这两种，不该为它全量回放整条事件流（超长会话里一次全量读 ≈ 3.5s / 130MB）。
-TASK_RECAP_EVENT_TYPES: tuple[str, ...] = (
-    EventType.TASK_RECAP_STARTED,
-    EventType.TASK_RECAP_DONE,
-)
-
-
-def fold_pending_task_recap(events: list[Event]) -> dict[str, dict]:
-    """折叠 TaskRecap 事件 → 仍未完成的 {task_id: {"boundary", "agent_id"}}（started 减去 done）。
-
-    某 task 有 TASK_RECAP_STARTED 而无其后的 TASK_RECAP_DONE，说明该段 background observe 的
-    memory 写未持久完成（崩溃在中途）——恢复据此重跑。同 task_id last-write-wins（仿 fold_pending_hitl）。
-    """
-    pending: dict[str, dict] = {}
-    for ev in events:
-        p = ev.payload or {}
-        tid = p.get("task_id", "")
-        if not tid:
-            continue
-        if ev.type == EventType.TASK_RECAP_STARTED:
-            pending[tid] = {"boundary": p.get("boundary", ""), "agent_id": p.get("agent_id", "")}
-        elif ev.type == EventType.TASK_RECAP_DONE:
-            pending.pop(tid, None)
-    return pending
-
-
 def fold_cold_hitl_decision(events: list[Event], tool_call_id: str) -> HitlRequest | None:
     """折出某 tool_call 的**可用**人工决定（冷决定查询,reconcile 短路的跨重启版,spec/07 §6）。
 
@@ -216,6 +189,10 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
             }
             for aid, a in view.agents.items()
         },
+        "pending_recap": {
+            tid: {"boundary": info.get("boundary", ""), "agent_id": info.get("agent_id", "")}
+            for tid, info in view.pending_recap.items()
+        },
         "pending_hitl": {
             rid: {
                 "id": h.id, "form": h.form, "session_id": h.session_id,
@@ -228,7 +205,19 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
 
 
 def deserialize_view(data: dict[str, Any]) -> RunStateView:
-    """从快照 dict 还原 RunStateView（用于快照读取后恢复）。"""
+    """从快照 dict 还原 RunStateView（用于快照读取后恢复）。
+
+    ⚠️ **存量 blob 缺键一律回落默认值**，因为本分支的 `RunSnapshot` 没有
+    `projection_version`——没有东西能把「投影语义变过的老 blob」判废，所以新加的投影字段
+    只能靠这里的默认值兜。
+
+    这对 `pending_recap`（段 recap 的待重跑账）意味着一次性的代价：部署后每个会话的**第一次**
+    恢复，如果它用的还是不带该键的老快照，就会把「有崩溃打断的 recap」读成「没有」，那一段
+    memory 写这次补不上。暴露窗口只有那一次——每轮对话结束的 `SessionFinished` 都会无条件
+    写新快照（`SnapshotWriter.on_event`），下一轮带上这个键就自愈了。选这条而不是再留一条
+    「老快照就兜一次收窄查询」的分支，是因为那条分支得有人记得删；`pending_hitl` 当初也是
+    这个口径。
+    """
     def _dt(s: str | None) -> datetime | None:
         return datetime.fromisoformat(s) if s else None
 
@@ -313,6 +302,13 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
         tasks=tasks,
         agents=agents,
         pending_hitl=pending_hitl,
+        # 存量 blob 无此键 → 空，与 `pending_hitl` 同口径（本分支的快照没有
+        # projection_version 可用来判废，所以只能这样）。代价与自愈见 `deserialize_view`
+        # 上方的说明。
+        pending_recap={
+            tid: {"boundary": v.get("boundary", ""), "agent_id": v.get("agent_id", "")}
+            for tid, v in (data.get("pending_recap") or {}).items()
+        },
     )
 
 
@@ -568,6 +564,26 @@ def _apply(view: RunStateView, ev: Event) -> None:
         view.assembled_prompt_tokens = p.get("assembled_token_count", 0)
     elif t == EventType.ACT_TURN_COMPLETED:
         view.transcript_turns = p.get("turn", view.transcript_turns)
+
+    # ── 段 recap（被崩溃打断的 background observe）──────────────────────────────
+    # started 记账、done 销账，剩下的就是要重跑的。**这里是唯一的折叠实现**——从前它是
+    # 独立函数 `fold_pending_task_recap` + 恢复路径上一次按类型收窄的查询，那条查询随会话
+    # 长度线性增长（见 `RunStateView.pending_recap`）。与 `pending_hitl` 同一档待遇，
+    # 就放在它旁边。
+    #
+    # 键取 payload 的 `task_id` 而不是 `ev.task_id`：这两个事件把它写在 payload 里，
+    # 事件头上的 task_id 在段边界上可能是父任务。
+    elif t in (EventType.TASK_RECAP_STARTED, EventType.TASK_RECAP_DONE):
+        rtid = p.get("task_id", "")
+        if rtid:
+            if t == EventType.TASK_RECAP_STARTED:
+                # 同 task_id last-write-wins：重跑失败会再发一条 started。
+                view.pending_recap[rtid] = {
+                    "boundary": p.get("boundary", ""),
+                    "agent_id": p.get("agent_id", ""),
+                }
+            else:
+                view.pending_recap.pop(rtid, None)
 
     # ── HITL projection (spec/07 §9) ───────────────────────────────────────────
     elif t == EventType.HITL_REQUIRED:

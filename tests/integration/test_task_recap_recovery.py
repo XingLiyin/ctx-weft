@@ -392,13 +392,19 @@ async def test_no_tasks_at_all_still_raises() -> None:
 
 
 async def test_resume_does_not_read_the_whole_event_stream() -> None:
-    """`recover_session` 折段 recap 时**不得**全量读事件流——按类型收窄。
+    """`recover_session` 折段 recap 时**不发任何额外查询**——它搭 `rebuild_view` 的车。
 
     这条走的是真实恢复路径（`/resume` → `recover_session` → `_recover_session_locked`），
-    而不是直接调那个收窄 helper：护住的正是「调用点用错工具」这件事。从前这里是
-    `read_by_session(session_id)`，每次用户点「继续」都把整条流读一遍——实测一条 3 万
-    事件的会话约 3.5 秒 / 130MB，而 `fold_pending_task_recap` 只需要 TaskRecapStarted /
-    TaskRecapDone 那几十条。
+    而不是直接调折叠：护住的正是「调用点用错工具」这件事。它经历过两版收紧——
+
+    1. 最初这里是 `read_by_session(session_id)`，每次用户点「继续」都把整条流读一遍
+       （实测一条 3 万事件的会话约 3.5 秒 / 130MB）；
+    2. 然后收窄成「只读那两种类型」，代价降到 272ms / 5.1MB，但**仍随会话长度线性增长**
+       ——recap 事件只增不减，1 万个 task 就是 ~2.7s / 51MB；
+    3. 现在它是投影字段（`RunStateView.pending_recap`），随快照 + 增量走。
+
+    所以断言同时钉两件事：不读整条流（第 1 版的病），**也不为它单发类型查询**（第 2 版的
+    病）。后者是这次收紧新加的——只钉 `full_reads == 0` 的话，退回第 2 版不会变红。
     """
     from ctx_weft.core.state.event_store import InMemoryEventStore
 
@@ -406,10 +412,15 @@ async def test_resume_does_not_read_the_whole_event_stream() -> None:
         def __init__(self) -> None:
             super().__init__()
             self.full_reads = 0
+            self.typed_reads: list[tuple[str, ...]] = []
 
         async def read_by_session(self, session_id: str):
             self.full_reads += 1
             return await super().read_by_session(session_id)
+
+        async def read_session_events_of_types(self, session_id: str, types):
+            self.typed_reads.append(tuple(str(t) for t in types))
+            return await super().read_session_events_of_types(session_id, types)
 
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
@@ -435,3 +446,6 @@ async def test_resume_does_not_read_the_whole_event_stream() -> None:
 
     assert store.full_reads == 0, (
         f"恢复路径不该读整条事件流，实际读了 {store.full_reads} 次")
+    recap_reads = [t for t in store.typed_reads if any("TaskRecap" in x for x in t)]
+    assert recap_reads == [], (
+        f"段 recap 现在是投影字段，不该再为它单发类型查询，实际发了 {recap_reads}")
