@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ctx_weft.core.events.types import TRANSIENT_EVENT_TYPES, Event
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ctx_weft.core.events.bus import EventBus
 
 
@@ -64,20 +66,50 @@ class EventStore(Protocol):
         """加载 session 中 id > after_event_id 的增量事件（ULID 字典序）。"""
         raise NotImplementedError
 
-    async def read_by_session_after(
-        self, session_id: str, *, after_id: str = "", limit: int = 200,
-    ) -> list[Event]:
-        """按 id 升序读**一批** `id > after_id` 的事件，至多 `limit` 条。
+    #: `replay` 每批多少条。见 `replay` 的 docstring。
+    REPLAY_BATCH: int = 2000
 
-        这是给「全量回放」用的分批入口：`read_by_session` 一次性把整条流变成
-        `list[Event]` 驻留内存——实测一条 3 万事件的会话约 130MB 常驻、读一次 3.5 秒。
-        而回放本身是左折叠（`reduce_events` 就是 `apply_events` 在空 view 上的调用，
-        两段循环体逐字相同），天然可以分批喂：内存峰值因此从 O(全部事件) 降到 O(batch)。
+    async def replay(self, session_id: str) -> "AsyncIterator[list[Event]]":
+        """按 id 升序**分批**产出该会话的全部事件，供全量重放折叠。
 
-        未实现时抛 `NotImplementedError`，调用方降级为一次性 `read_by_session`——仍然
-        正确，只是吃内存。
+        为什么不是 `read_by_session`：它一次性把整条流变成 `list[Event]` 驻留内存——实测
+        一条 3 万事件 / 45MB `events` 表的会话约 **130MB 常驻、读一次 3.5 秒**（SQLite
+        本地文件；Postgres 走网更慢）。而重放本身是左折叠（`reduce_events` 就是
+        `apply_events` 在空 view 上的调用，reducers.py 里两段循环体逐字相同），且 apply 是
+        for 循环、可结合，所以
+            reduce(0..n) == apply(batch_k, ... apply(batch_1, 空 view))
+        分批与整批**逐字段等价**，内存峰值从 O(全部事件) 降到 O(batch)。
+
+        **分批是 store 的事，不是 core 的事。** core 只 `async for batch in store.replay(sid)`
+        然后折叠：它既不问「你支不支持分页」，也不替谁挑降级路。从前那个判断写在 core 里
+        （`getattr` 探一次 `read_by_session_after`、再 `except NotImplementedError`），
+        一个坏设计生出两个分支和两种失败形态——后者上线时炸掉了 6 条宿主测试。游标怎么走、
+        一批多大，只有 store 知道。
+
+        默认实现**只能一次性**产出：本协议的必需读法只有 `read_by_session`，没有游标可用，
+        所以基类不假装能分批。能分批的 store 自己覆盖它（`InMemoryEventStore` 照 id 切片；
+        宿主的 Postgres 实现走 `id > after_id LIMIT` 查询）。
+
+        `REPLAY_BATCH` 取 2000 是实测的权衡点（3 万事件，SQLite 本地）：
+
+            批大小    查询次数    耗时      内存峰值
+            一次性        1      3.75s    121.5 MB
+             1000       30      6.10s      6.3 MB
+             2000       15      5.09s     12.3 MB     ← 取这档
+             5000        6      4.58s     30.2 MB
+            10000        3      4.47s     60.1 MB
+
+        判据是「内存是硬约束、耗时是软约束」：121MB 单会话在并发恢复下会叠成几百 MB ~ GB，
+        那是会崩的；而这条路只在**无快照**时走（罕见），多花一秒用户等得起。数字来自 SQLite
+        本地文件——Postgres 每次查询多一个 RTT，真要调就在目标库上照这个方法重测。
+
+        一致切面：分批期间若有新事件写入，最后几批会把它们一并读到。那不是问题——重放的
+        口径本就是「读到当下为止」，多读到的是真事实。（本分支的 store 没有 `committed_head`
+        这类提交位点可用作上界，所以这里不假装有。）
         """
-        raise NotImplementedError
+        events = await self.read_by_session(session_id)
+        if events:
+            yield events
 
     async def read_session_events_of_types(
         self, session_id: str, types: "tuple[str, ...]",
@@ -168,14 +200,22 @@ class InMemoryEventStore(EventStore):
                 found = True
         return result
 
-    async def read_by_session_after(
-        self, session_id: str, *, after_id: str = "", limit: int = 200,
-    ) -> list[Event]:
-        """分批读（见协议）。内存实现同样照 id 升序切片——这样 core 自己的测试也真的
-        跑在分批路径上，而不是全都退回 `read_by_session`。"""
-        events = self._events.get(session_id, [])
-        out = [ev for ev in events if not after_id or ev.id > after_id]
-        return out[:max(1, int(limit))]
+    async def replay(self, session_id: str) -> "AsyncIterator[list[Event]]":
+        """真分批产出（覆盖协议默认的一次性）。
+
+        不是为了省内存——这些事件本来就在进程里驻留着。是为了**契约保真**：core 自己的
+        重放测试因此跑在真分批路径上，而不是全都退回一次性；而且游标语义照 `id > after_id`
+        走，和宿主 Postgres 实现同形，两边不容易分叉。
+        """
+        after_id = ""
+        while True:
+            batch = [
+                ev for ev in self._events.get(session_id, []) if ev.id > after_id
+            ][: self.REPLAY_BATCH]
+            if not batch:
+                return
+            yield batch
+            after_id = batch[-1].id
 
     async def read_session_events_of_types(
         self, session_id: str, types: tuple[str, ...],

@@ -316,78 +316,21 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
     )
 
 
-#: 全量回放的分批大小。回放是左折叠、可分批（见 `_replay_in_batches`），所以内存峰值
-#: 由它而不是会话长度决定。
-#:
-#: 取 2000 是实测的权衡点（3 万条事件 / 45MB 的 events 表，SQLite 本地）：
-#:
-#:     批大小    查询次数    耗时      内存峰值
-#:     一次性        1      3.75s    121.5 MB
-#:      1000       30      6.10s      6.3 MB
-#:      2000       15      5.09s     12.3 MB     ← 取这档
-#:      5000        6      4.58s     30.2 MB
-#:     10000        3      4.47s     60.1 MB
-#:
-#: 判据是「内存是硬约束、耗时是软约束」：121MB 单会话在并发恢复下会叠成几百 MB ~ GB，
-#: 那是会崩的；而这条路只在**无快照**时走（罕见），多花一秒用户等得起。1000 那档为了
-#: 再省 6MB 多付一秒不划算。
-#:
-#: ⚠️ 这组数字来自 SQLite 本地文件。Postgres 走网络时每次查询多一个 RTT，分批的耗时
-#: 劣势会放大（但单次大查询传 45MB 也更慢）；真要调，照上面的方法在目标库上重测。
-_REPLAY_BATCH = 2000
-
-
-async def _replay_in_batches(event_store: Any, session_id: str) -> RunStateView:
-    """分批读 + 逐批折叠地重放整条事件流，**不把它整条驻留内存**。
-
-    为什么要分批：`read_by_session` 一次性返回 `list[Event]`，一条 3 万事件的会话实测
-    约 130MB 常驻、读一次 3.5 秒。而重放本身是左折叠——`reduce_events(evts)` 就是
-    `apply_events(evts, 空 view)`（本文件里两段循环体逐字相同），且 apply 是 for 循环、
-    可结合，所以
-        reduce(0..n) == apply(batch_k, ... apply(batch_1, 空 view))
-    分批与整批**逐字段等价**。内存峰值因此从 O(全部事件) 降到 O(batch)。
-
-    `read_by_session_after` 是可选协议方法，而「不支持」有**两种**形态，都要降级为一次性
-    `read_by_session`（仍然正确，只是吃内存）：
-
-    1. 继承了 `EventStore` 但没覆盖它 → 基类抛 `NotImplementedError`；
-    2. **鸭子类型的 store 压根没有这个属性** → `AttributeError`。第 2 种是测试替身与第三方
-       实现的常态（只实现自己用得到的方法），所以这里先 `getattr` 探一次再调，而不是把
-       `AttributeError` 一并 `except` 掉——后者会顺手吞掉方法**内部**的真 AttributeError。
-
-    一致切面：分批期间若有新事件写入，最后几批会把它们一并读到。那不是问题——重放的
-    口径本就是「读到当下为止」，多读到的是真事实。（master 的 store 没有
-    `committed_head` 这类提交位点可用作上界，所以这里不假装有。）
-    """
-    async def _one_shot() -> RunStateView:
-        return reduce_events(
-            await event_store.read_by_session(session_id), run_id=session_id)
-
-    reader = getattr(event_store, "read_by_session_after", None)
-    if reader is None:
-        return await _one_shot()          # 形态 2：没有这个属性
-
-    view = RunStateView(run_id=session_id, session_id="", task_id="", agent_id="")
-    after_id = ""
-    while True:
-        try:
-            batch = await reader(session_id, after_id=after_id, limit=_REPLAY_BATCH)
-        except NotImplementedError:
-            return await _one_shot()      # 形态 1：继承了但没覆盖
-        if not batch:
-            break
-        apply_events(batch, view)
-        after_id = batch[-1].id
-        if len(batch) < _REPLAY_BATCH:
-            break                      # 末批，不必再问一次空查询
-    return view
-
-
 async def rebuild_view(event_store: Any, session_id: str) -> RunStateView:
     """Rebuild RunStateView via snapshot + delta, or batched full replay as fallback.
 
     Works with any EventStore; snapshot methods are optional (NotImplementedError → full replay).
-    无快照时走 `_replay_in_batches`——**不把整条事件流一次性读进内存**，见那里的说明。
+
+    无快照时走 `EventStore.replay`——**不把整条事件流一次性读进内存**。一条 3 万事件的会话
+    实测约 130MB 常驻、读一次 3.5 秒，并发恢复几条就是几百 MB。
+
+    **分批由 store 产出**，这里只管折叠。从前这段先 `getattr` 探一次「这个 store 支不支持
+    分页」、再 `except NotImplementedError` 兜一手，两条降级路都通往一次性全量读——那是把
+    store 的知识和能力判断漏进了 core，一个坏设计生出两个分支与两种失败形态。现在 core
+    不问、不选、不降级：能不能分批是 store 自己的事，它的默认实现就是一次性。
+
+    分批与整批逐字段等价：重放是左折叠（`reduce_events` 就是 `apply_events` 在空 view 上的
+    调用，本文件里两段循环体逐字相同），而 apply 是 for 循环、可结合。
     """
     try:
         snapshot = await event_store.load_latest_snapshot(session_id)
@@ -399,7 +342,10 @@ async def rebuild_view(event_store: Any, session_id: str) -> RunStateView:
         delta = await event_store.read_after(session_id, snapshot.last_event_id)
         return apply_events(delta, view)
 
-    return await _replay_in_batches(event_store, session_id)
+    view = RunStateView(run_id=session_id, session_id="", task_id="", agent_id="")
+    async for batch in event_store.replay(session_id):
+        apply_events(batch, view)
+    return view
 
 
 def reduce_events(events: list[Event], run_id: str) -> RunStateView:

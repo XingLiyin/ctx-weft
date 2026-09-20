@@ -8,6 +8,11 @@
 这里钉两件事：
 1. 只关心少数类型的折叠**不得**触发全量读（段 recap 折叠曾经就是全量，每次 `/resume` 付一次）；
 2. 无快照的全量重放走分批，且**分批与整批逐字段等价**（重放是左折叠，可结合）。
+
+第 2 条的分批**由 store 产出**（`EventStore.replay`）。core 只
+`async for batch in store.replay(sid)`，不问「你支不支持分页」、不替谁选降级路：那种能力
+探测曾经写在 core 里，一个坏设计生出两个分支和两种失败形态。本分支的必需读法里没有游标，
+所以协议的默认实现就是一次性；能分批的 store 自己覆盖 `replay`。
 """
 
 from __future__ import annotations
@@ -17,13 +22,15 @@ from datetime import UTC, datetime
 import pytest
 
 from ctx_weft.core.control.reducers import (
-    _REPLAY_BATCH,
     TASK_RECAP_EVENT_TYPES,
     rebuild_view,
     reduce_events,
 )
 from ctx_weft.core.events.types import Event, EventType
-from ctx_weft.core.state.event_store import InMemoryEventStore
+from ctx_weft.core.state.event_store import EventStore, InMemoryEventStore
+
+#: 分批大小现在是 store 的事（`EventStore.REPLAY_BATCH`），core 不持有它。
+_REPLAY_BATCH = EventStore.REPLAY_BATCH
 
 pytestmark = pytest.mark.asyncio
 
@@ -45,7 +52,7 @@ class _CountingStore(InMemoryEventStore):
         super().__init__()
         self.full_reads = 0
         self.typed_reads: list[tuple[str, ...]] = []
-        self.batch_reads = 0
+        self.batches: list[int] = []
 
     async def read_by_session(self, session_id: str):
         self.full_reads += 1
@@ -55,10 +62,10 @@ class _CountingStore(InMemoryEventStore):
         self.typed_reads.append(tuple(str(t) for t in types))
         return await super().read_session_events_of_types(session_id, types)
 
-    async def read_by_session_after(self, session_id: str, *, after_id="", limit=200):
-        self.batch_reads += 1
-        return await super().read_by_session_after(
-            session_id, after_id=after_id, limit=limit)
+    async def replay(self, session_id: str):
+        async for batch in super().replay(session_id):
+            self.batches.append(len(batch))
+            yield batch
 
 
 async def _seed(store: InMemoryEventStore, n_noise: int) -> None:
@@ -125,14 +132,19 @@ async def test_recap_type_set_matches_what_the_fold_actually_reads() -> None:
 
 
 async def test_full_replay_is_batched_not_one_shot() -> None:
-    """无快照时走分批读，**一次全量读都不发**。"""
+    """无快照时由 store 分多批产出，**一次全量读都不发**。
+
+    连带钉住每批都不超过 `REPLAY_BATCH`：批大小失控就等于没分批（内存峰值又回到 O(n)）。
+    """
     store = _CountingStore()
     await _seed(store, n_noise=_REPLAY_BATCH * 2 + 17)   # 跨 3 批，末批不满
 
     view = await rebuild_view(store, _SID)
 
     assert store.full_reads == 0, "分批路径不该再触发 read_by_session"
-    assert store.batch_reads >= 3, f"应分多批读，实际 {store.batch_reads} 批"
+    assert len(store.batches) >= 3, f"应分多批，实际 {len(store.batches)} 批"
+    assert max(store.batches) <= _REPLAY_BATCH, f"批大小失控：{store.batches}"
+    assert sum(store.batches) == _REPLAY_BATCH * 2 + 21, "不重不漏：每条事件恰好折一次"
     assert view.session_id == _SID
 
 
@@ -155,47 +167,35 @@ async def test_batched_replay_equals_one_shot_replay() -> None:
     assert batched.task_status == one_shot.task_status
 
 
-async def test_replay_falls_back_when_store_raises_not_implemented() -> None:
-    """形态 1：继承了 `EventStore` 但没覆盖分批读 → 抛 NotImplementedError → 降级。"""
+async def test_protocol_default_replay_is_one_shot_and_that_is_the_whole_story() -> None:
+    """没覆盖 `replay` 的 store → 协议默认实现一次性读完，**不是** AttributeError、也不是
+    core 里的某条降级分支。
+
+    从前这里是两条用例，钉的是 core 的两种降级形态（继承了没覆盖 → `NotImplementedError`；
+    鸭子类型没这个属性 → `AttributeError`）。那两种形态是那个坏设计的产物，不是世界的性质：
+    分批归 store 之后，「不能分批」就只有一种表现——默认实现返回一整批。
+    """
     class _NoBatch(_CountingStore):
-        async def read_by_session_after(self, session_id, *, after_id="", limit=200):
-            raise NotImplementedError
+        replay = EventStore.replay          # 退回协议默认实现
 
     store = _NoBatch()
     await _seed(store, n_noise=10)
 
     view = await rebuild_view(store, _SID)
 
-    assert store.full_reads == 1, "降级路径应当只读一次全量"
+    assert store.full_reads == 1, "默认实现就是读一次全量"
     assert view.session_id == _SID
+    assert view.events_total == 14
 
 
-async def test_replay_falls_back_when_store_has_no_such_attribute() -> None:
-    """形态 2：**鸭子类型的 store 压根没有这个属性** → 也必须降级，不是 AttributeError。
+async def test_default_replay_of_an_empty_session_yields_nothing() -> None:
+    """空会话：默认实现不产出空批（省掉一次 `apply_events([])`）。"""
+    class _NoBatch(_CountingStore):
+        replay = EventStore.replay
 
-    这是测试替身与第三方实现的常态（只实现自己用得到的方法）。第一版只 catch 了
-    `NotImplementedError`，结果宿主的 `_FakeEventStore` 直接 AttributeError——6 条
-    resume 用例集体挂掉。可选协议方法的「不支持」有两种形态，两种都要接住。
-    """
-    class _Duck:
-        """只实现重放真正需要的两个方法，没有 read_by_session_after。"""
+    store = _NoBatch()
 
-        def __init__(self, events):
-            self._events = events
-            self.full_reads = 0
+    view = await rebuild_view(store, "s_empty")
 
-        async def load_latest_snapshot(self, session_id):
-            return None
-
-        async def read_by_session(self, session_id):
-            self.full_reads += 1
-            return list(self._events)
-
-    seeded = _CountingStore()
-    await _seed(seeded, n_noise=10)
-    duck = _Duck(await seeded.read_by_session(_SID))
-
-    view = await rebuild_view(duck, _SID)
-
-    assert duck.full_reads == 1, "没有分批读的 store 应当降级为一次全量"
-    assert view.session_id == _SID
+    assert view.tasks == {}
+    assert view.events_total == 0
