@@ -347,23 +347,33 @@ async def _replay_in_batches(event_store: Any, session_id: str) -> RunStateView:
         reduce(0..n) == apply(batch_k, ... apply(batch_1, 空 view))
     分批与整批**逐字段等价**。内存峰值因此从 O(全部事件) 降到 O(batch)。
 
-    `read_by_session_after` 是可选协议方法：未实现的极简 store 降级为一次性
-    `read_by_session`——仍然正确，只是吃内存。
+    `read_by_session_after` 是可选协议方法，而「不支持」有**两种**形态，都要降级为一次性
+    `read_by_session`（仍然正确，只是吃内存）：
+
+    1. 继承了 `EventStore` 但没覆盖它 → 基类抛 `NotImplementedError`；
+    2. **鸭子类型的 store 压根没有这个属性** → `AttributeError`。第 2 种是测试替身与第三方
+       实现的常态（只实现自己用得到的方法），所以这里先 `getattr` 探一次再调，而不是把
+       `AttributeError` 一并 `except` 掉——后者会顺手吞掉方法**内部**的真 AttributeError。
 
     一致切面：分批期间若有新事件写入，最后几批会把它们一并读到。那不是问题——重放的
     口径本就是「读到当下为止」，多读到的是真事实。（master 的 store 没有
     `committed_head` 这类提交位点可用作上界，所以这里不假装有。）
     """
+    async def _one_shot() -> RunStateView:
+        return reduce_events(
+            await event_store.read_by_session(session_id), run_id=session_id)
+
+    reader = getattr(event_store, "read_by_session_after", None)
+    if reader is None:
+        return await _one_shot()          # 形态 2：没有这个属性
+
     view = RunStateView(run_id=session_id, session_id="", task_id="", agent_id="")
     after_id = ""
     while True:
         try:
-            batch = await event_store.read_by_session_after(
-                session_id, after_id=after_id, limit=_REPLAY_BATCH)
+            batch = await reader(session_id, after_id=after_id, limit=_REPLAY_BATCH)
         except NotImplementedError:
-            # 极简 store：退回一次性全量（正确但吃内存）
-            return reduce_events(
-                await event_store.read_by_session(session_id), run_id=session_id)
+            return await _one_shot()      # 形态 1：继承了但没覆盖
         if not batch:
             break
         apply_events(batch, view)

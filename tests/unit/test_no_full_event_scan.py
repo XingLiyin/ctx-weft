@@ -155,8 +155,8 @@ async def test_batched_replay_equals_one_shot_replay() -> None:
     assert batched.task_status == one_shot.task_status
 
 
-async def test_replay_falls_back_when_store_lacks_batched_read() -> None:
-    """极简 store 未实现分批读 → 退回一次性全量：仍然正确，只是吃内存。"""
+async def test_replay_falls_back_when_store_raises_not_implemented() -> None:
+    """形态 1：继承了 `EventStore` 但没覆盖分批读 → 抛 NotImplementedError → 降级。"""
     class _NoBatch(_CountingStore):
         async def read_by_session_after(self, session_id, *, after_id="", limit=200):
             raise NotImplementedError
@@ -167,4 +167,35 @@ async def test_replay_falls_back_when_store_lacks_batched_read() -> None:
     view = await rebuild_view(store, _SID)
 
     assert store.full_reads == 1, "降级路径应当只读一次全量"
+    assert view.session_id == _SID
+
+
+async def test_replay_falls_back_when_store_has_no_such_attribute() -> None:
+    """形态 2：**鸭子类型的 store 压根没有这个属性** → 也必须降级，不是 AttributeError。
+
+    这是测试替身与第三方实现的常态（只实现自己用得到的方法）。第一版只 catch 了
+    `NotImplementedError`，结果宿主的 `_FakeEventStore` 直接 AttributeError——6 条
+    resume 用例集体挂掉。可选协议方法的「不支持」有两种形态，两种都要接住。
+    """
+    class _Duck:
+        """只实现重放真正需要的两个方法，没有 read_by_session_after。"""
+
+        def __init__(self, events):
+            self._events = events
+            self.full_reads = 0
+
+        async def load_latest_snapshot(self, session_id):
+            return None
+
+        async def read_by_session(self, session_id):
+            self.full_reads += 1
+            return list(self._events)
+
+    seeded = _CountingStore()
+    await _seed(seeded, n_noise=10)
+    duck = _Duck(await seeded.read_by_session(_SID))
+
+    view = await rebuild_view(duck, _SID)
+
+    assert duck.full_reads == 1, "没有分批读的 store 应当降级为一次全量"
     assert view.session_id == _SID
