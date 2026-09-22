@@ -19,6 +19,7 @@ from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from ctx_weft.core.models.errors import crash_error_code, crash_run_outcome
 from ctx_weft.core.loop.park import RoundDiscarded
 from ctx_weft.core.orchestrator.task.disposition import (
+    Disposition,
     RunOutcome,
     RunOutcomeKind,
     disposition_for,
@@ -922,6 +923,17 @@ class TaskManager:
             # 的 root 发协作取消，那次取消的 CANCELED 不得盖回已写定的 FAILED。run 侧的
             # 同一守卫是 `_run_loop` 的 cancel_takes_effect（它据此决定发不发 RUN_CANCELED）。
             return task.status
+        disp = self._decide_and_write(task_id, outcome)
+        await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload)
+        return disp.status
+
+    def _decide_and_write(self, task_id: str, outcome: RunOutcome) -> "Disposition":
+        """结局 → 处置，并就地把状态写进 task。**纯同步、不发事件**。
+
+        抽出来是为了让带外判决（`apply_out_of_band_verdict`）能在**同一个锁内**完成
+        「仲裁 + 转移」——事件发射带 await，留在锁里会把临界区撑开，那正是竞态的来源。
+        """
+        task = self._tasks.get(task_id)
         disp = disposition_for(
             outcome,
             retry_count=task.retry_count if task is not None else 0,
@@ -940,8 +952,60 @@ class TaskManager:
                 task.error = outcome.error or task.error
                 if outcome.error_code:
                     task.error_code = outcome.error_code
+        return disp
+
+    async def apply_out_of_band_verdict(
+        self,
+        task_id: str,
+        outcome: RunOutcome,
+        *,
+        process_report: str = "",
+        task_summary: str = "",
+        next_step_hint: str = "",
+    ) -> bool:
+        """**带外判决**：一条不属于任何活跃 run 的结局（2026-09-22）。
+
+        唯一调用方是后台 observe：park 之后 run 就地结束了（`_cold_park` 抛 `HitlPark`
+        释放协程），它判完时这个 task 没有任何 run 在跑，`_close_report` 那条「同 run 内
+        由 finalize 取用」的路走不通。
+
+        返回 **True = 被接受并已落定**，**False = 被仲裁拒绝、task 一个字段都没动**。
+
+        仲裁判据：只接受仍停在 `AWAITING_HUMAN` 的 task。人可能已经开口重排了它——
+        `_inject_user_turn` 写 USER_PROMPT 时**不等**后台 observe，所以「人先开口」是
+        常态而非边角。那时这份判决已经过时：人还有话说，这个 task 显然没完。
+
+        **检查与转移在同一个锁内**，中间没有 await。否则「检查时还是 AWAITING_HUMAN、
+        转移时已被重排」的窗口依然在，仲裁就成了摆设。事件发射与队列收尾留在锁外：
+        那时 `task.status` 已是终态，人的消息会在 `send_message` 层走
+        「current_task 已终态 → `_start_task_for_agent` 建新 task」，不会丢。
+
+        observer 的三个文本字段由调用方传进来在锁内一并写：后台 observe 跑在
+        `readonly` 的 ControlContext 上（见 `ControlContext.readonly`），工具自己没写，
+        判决被拒时它们也就不该落地。
+        """
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.status != "AWAITING_HUMAN":
+                logger.info(
+                    "out-of-band verdict rejected for task %s (status=%s): it is no longer "
+                    "parked — the user spoke first",
+                    task_id, getattr(task, "status", "<missing>"),
+                )
+                return False
+            if process_report:
+                task.process_report = process_report
+                task.process_report_at = now_utc()
+            if task_summary:
+                task.task_summary = task_summary
+            task.next_step_hint = next_step_hint or None
+            if outcome.verdict:
+                task.observer_outcome = outcome.verdict
+            disp = self._decide_and_write(task_id, outcome)
+
         await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload)
-        return disp.status
+        await self._settle(task_id, disp.status)
+        return True
 
     async def _settle(self, task_id: str, status: str) -> None:
         """处置落定之后的队列收尾：挂起出口 / 重排出口 / 终态收尾，三选一。
