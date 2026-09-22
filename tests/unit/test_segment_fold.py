@@ -138,3 +138,58 @@ async def test_counts_reported() -> None:
     # before：UP+A+T = 3；after：UP + 摘要 = 2
     assert result.events_before == 3
     assert result.events_after == 2
+
+
+# ── 段界水位线（2026-09-22）───────────────────────────────────────────────────
+#
+# 后台 observe 是 fire-and-forget，它判完时人可能已经开口、新的 USER_PROMPT 已落库。
+# 段界若仍动态查找，那条新消息就成了「最后一条 user 回合」，折叠池随之变空——要折的
+# 那一段一条都没折，摘要还落到 `now_utc()` 分支排到末尾。这两条用例正是那个 bug 与
+# 它的修法。
+
+async def test_without_watermark_a_late_user_turn_steals_the_boundary() -> None:
+    """不设水位线时的既有行为：新 UP 抢走段界，上一段一条都没折。"""
+    m = InMemoryMemoryProvider()
+    await m.ingest(_turn("UP1", 0, "user"), _ctx())
+    await m.ingest(_turn("A1", 1, "assistant"), _ctx())
+    await m.ingest(_turn("A2", 2, "assistant"), _ctx())
+    await m.ingest(_turn("UP2-人中途开口", 3, "user"), _ctx())
+
+    res = await segment_fold(m, _ADDR, MemoryScope.TASK, "段摘要", _ctx())
+
+    contents = [c for _k, c in await _view(m)]
+    # A1/A2 一条没折，摘要还排到了所有记录的末尾——正是水位线要治的那个形态。
+    assert contents == ["UP1", "A1", "A2", "UP2-人中途开口", "段摘要"]
+    assert res.events_after == res.events_before + 1           # 只多了一条摘要
+
+
+async def test_watermark_keeps_the_boundary_at_launch_time() -> None:
+    """钉住水位线：要折的仍是原来那段，摘要落回新 UP 之前。"""
+    m = InMemoryMemoryProvider()
+    await m.ingest(_turn("UP1", 0, "user"), _ctx())
+    await m.ingest(_turn("A1", 1, "assistant"), _ctx())
+    await m.ingest(_turn("A2", 2, "assistant"), _ctx())
+    watermark = _T0 + timedelta(minutes=2)                     # 后台 observe 开跑的时刻
+    await m.ingest(_turn("UP2-人中途开口", 3, "user"), _ctx())
+
+    await segment_fold(m, _ADDR, MemoryScope.TASK, "段摘要", _ctx(), watermark)
+
+    contents = [c for _k, c in await _view(m)]
+    assert "A1" not in contents and "A2" not in contents       # 折掉了
+    assert contents == ["UP1", "段摘要", "UP2-人中途开口"]      # 摘要锚在新 UP 之前
+
+
+async def test_watermark_does_not_swallow_the_new_user_turn() -> None:
+    """水位线之后的记录既不进折叠池，也不被 supersede——它是下一段的开头。"""
+    m = InMemoryMemoryProvider()
+    await m.ingest(_turn("UP1", 0, "user"), _ctx())
+    await m.ingest(_turn("A1", 1, "assistant"), _ctx())
+    await m.ingest(_turn("A2", 2, "assistant"), _ctx())
+    watermark = _T0 + timedelta(minutes=2)
+    await m.ingest(_turn("UP2", 3, "user"), _ctx())
+    await m.ingest(_turn("A3", 4, "assistant"), _ctx())        # 下一段已经开跑
+
+    await segment_fold(m, _ADDR, MemoryScope.TASK, "段摘要", _ctx(), watermark)
+
+    contents = [c for _k, c in await _view(m)]
+    assert contents == ["UP1", "段摘要", "UP2", "A3"]

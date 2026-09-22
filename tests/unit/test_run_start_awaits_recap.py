@@ -1,7 +1,10 @@
-"""_run_loop 入口的段 recap 强一致等待（spec 2026-07-16 §2）。
+"""_run_loop 入口**不再**等在途段 recap（2026-09-22 拆除两道屏障）。
 
-驱动 CtxWeftRuntime._run_loop（unbound + fake self）：driver 首步必须在
-本 task 在途后台 recap 完成之后才执行；无 pending 时直通。
+原先 driver 首步必须排在本 task 在途后台 recap 之后（spec 2026-07-16 §2）。拆除的依据：
+正确性那一半已由**段界水位线**接管——`launch_background_observe` 钉住段界，
+`segment_fold` 按它算折叠池，迟到的折叠不再抢走段界、也不再排到新消息之后
+（见 tests/unit/test_segment_fold.py 的水位线三条）。剩下的只是性能：首次装配可能读到
+尚未被 supersede 的 raw，prompt 白胀一轮——这条代价已确认接受。
 """
 
 from __future__ import annotations
@@ -65,8 +68,8 @@ def _fake_runtime_self():
     )
 
 
-async def test_run_start_waits_for_pending_recap():
-    """有在途 recap：driver 首步必须排在 recap 完成之后。"""
+async def test_run_start_does_not_wait_for_pending_recap():
+    """有在途 recap：driver 首步**照常先跑**，不为它等一次后台 LLM 往返。"""
     order: list = []
 
     async def slow_recap():
@@ -74,15 +77,18 @@ async def test_run_start_waits_for_pending_recap():
         order.append("recap_done")
 
     state, task, agent = _make_state_and_task()
-    bo._task_pending[task.id] = asyncio.create_task(slow_recap())
+    recap = asyncio.create_task(slow_recap())
+    bo._task_pending[task.id] = recap
 
     await CtxWeftRuntime._run_loop(
         _fake_runtime_self(), state, None, _RecordingDriver(order),
         "r1", "prepare", task, agent,
     )
 
-    assert order == ["recap_done", "driver_started"], \
-        f"run 必须等 recap 折完才开跑，实得 {order}"
+    assert order == ["driver_started"], f"run 不该再等 recap，实得 {order}"
+    await recap                              # 收尾，别留 pending task
+    assert order == ["driver_started", "recap_done"]
+
 
 
 async def test_run_start_passthrough_without_pending():
@@ -98,19 +104,20 @@ async def test_run_start_passthrough_without_pending():
     assert order == ["driver_started"]
 
 
-async def test_run_start_swallows_errored_recap():
-    """在途 recap 以异常终结：run 启动 await 防御吞掉，driver 照常执行（段保 raw 降级）。"""
+async def test_run_start_unaffected_by_errored_recap():
+    """在途 recap 以异常终结：run 压根不看它，driver 照常执行（段保 raw 降级）。
+
+    拆掉屏障之前，这条测的是入口那圈 try/except 把异常吞住；现在没有那圈 await，
+    隔离是结构性的——留着它是为了守住「recap 炸了不牵连 run」这个不变量本身。
+    """
     order: list = []
 
     async def errored_recap():
         raise RuntimeError("guard region boom")
 
     state, task, agent = _make_state_and_task()
-    bo._task_pending[task.id] = asyncio.create_task(errored_recap())
-    # 注意：不 sleep(0) 先驱动 task——一旦它先落异常终态，
-    # await_pending_background_observe 的 `not pending.done()` 短路会跳过 shield，
-    # 异常永不出这个函数，测试就测不到 _run_loop 这层的防御。保持 task 未跑完时进入
-    # _run_loop，让 shield-await 在途中真正接住异常。
+    recap = asyncio.create_task(errored_recap())
+    bo._task_pending[task.id] = recap
 
     await CtxWeftRuntime._run_loop(
         _fake_runtime_self(), state, None, _RecordingDriver(order),
@@ -118,3 +125,5 @@ async def test_run_start_swallows_errored_recap():
     )
 
     assert order == ["driver_started"], "recap 异常不得阻断 run"
+    with pytest.raises(RuntimeError):
+        await recap

@@ -22,12 +22,14 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
 from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryEventType, MemoryScope
@@ -77,7 +79,9 @@ _SEGMENT_RAW_TYPES = [
 ]
 
 
-async def is_short_segment(state: "LoopState", ctx: "LoopContext") -> bool:
+async def is_short_segment(
+    state: "LoopState", ctx: "LoopContext", watermark: "datetime | None" = None,
+) -> bool:
     """短段免折门：**当前段**（最后一条 active USER_PROMPT 之后）满足以下任一即为短段：
 
     - 段内 LLM 回复（role=assistant 回合）≤ 1 条——**不看 token**：一条回复折成摘要
@@ -104,6 +108,10 @@ async def is_short_segment(state: "LoopState", ctx: "LoopContext") -> bool:
         state.scope, MemoryScope.TASK, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT],
     )
+    # 段界水位线（2026-09-22，同 `segment_fold`）：只认这段后台 observe 开跑时就已存在
+    # 的记录。不设限的话，人中途说的话会成为新段界，把「当前段」判成空段而误判为短段。
+    if watermark is not None:
+        view = [r for r in view if r.timestamp <= watermark]
     seg_records: list = []
     for r in view:
         if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user":
@@ -229,7 +237,10 @@ def _lock_for(task_id: str) -> asyncio.Lock:
     return lock
 
 
-async def _run_background_observe(state: "LoopState", ctx: "LoopContext", boundary: str) -> None:
+async def _run_background_observe(
+    state: "LoopState", ctx: "LoopContext", boundary: str,
+    *, watermark: "datetime | None" = None,
+) -> None:
     from ctx_weft.core.assembler import ContextRequest
     from ctx_weft.core.capabilities.control_tools import BACKGROUND_PROCESS_REPORT_NAME
 
@@ -283,7 +294,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                 # 跳过折叠——花一次后台 LLM 调用换一段常比原文还长的摘要不划算。跳过 = 该段
                 # **永久**保 raw（与观察失败的降级同语义）：后续折叠带 since_last=USER_PROMPT
                 # 只折各自的当前段，免折残留不会被跨段合折。
-                if await is_short_segment(state, ctx):
+                if await is_short_segment(state, ctx, watermark):
                     logger.info(
                         "short segment kept raw (task=%s boundary=%s); skip fold",
                         state.task.id, boundary,
@@ -375,7 +386,7 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
                     from ctx_weft.core.loop.steps.segment_fold import segment_fold
                     await segment_fold(
                         ctx.memory, state.scope, MemoryScope.TASK, act_recap,
-                        ctx.provider_ctx,
+                        ctx.provider_ctx, watermark,
                     )
             except Exception:
                 # close 边界防泄漏：finalize 可能已 register_close_synth，本次失败后永远无人
@@ -471,7 +482,12 @@ def launch_background_observe(
         run_id=generate_id("run"),
         sequence_counter=0,
     )
-    task = asyncio.create_task(_run_background_observe(snapshot, _readonly_ctx(ctx), boundary))
+    # 段界水位线（2026-09-22）：**在这里**取时刻，而不是等协程跑起来再取——launch 与
+    # 协程首次获得控制权之间隔着至少一次事件循环让渡（`_cold_park` 紧接着就 await
+    # `hitl.open()`），人的消息完全可能挤进那道缝。钉住它，迟到的折叠自己落回原位，
+    # 两条用户注入路径都不必为此等待。
+    task = asyncio.create_task(
+        _run_background_observe(snapshot, _readonly_ctx(ctx), boundary, watermark=now_utc()))
     _task_pending[state.task.id] = task
     _task_pending_run_id[state.task.id] = snapshot.run_id
     _agent_pending[state.agent.id] = task
@@ -487,9 +503,16 @@ def launch_background_observe(
 
 
 async def await_pending_background_observe(task_id: str) -> None:
-    """等该 task 在途后台 observe 完成（强一致）。调用点：`_run_loop` 入口（覆盖常规
-    `prepare` 与 `reconcile` dangling tool_call 重放两条 resume 路径，`runtime.py`）、
-    用户冷应答注入（`_inject_user_reply`，`runtime.py`）。"""
+    """等该 task 在途后台 observe 完成。
+
+    **2026-09-22 起生产代码不再调用它**：`_run_loop` 入口与 `_inject_user_reply` 那三道
+    屏障已拆除，正确性由段界水位线接管（见 `launch_background_observe` 的 watermark），
+    剩下的「首次装配可能读到未 supersede 的 raw、prompt 白胀一轮」是已接受的性能代价。
+
+    保留它是因为**测试仍需要一个同步原语**来等那条 fire-and-forget 的协程。若将来要把
+    等待加回某条路径，先想清楚换回来的是什么——那三道屏障拆掉换的是「人回复不为一次
+    后台 LLM 往返买单」。
+    """
     pending = _task_pending.get(task_id)
     if pending is not None and not pending.done():
         await asyncio.shield(pending)
@@ -498,10 +521,11 @@ async def await_pending_background_observe(task_id: str) -> None:
 async def await_pending_background_observe_for_agent(agent_id: str) -> None:
     """等该 **agent** 在途后台 observe 完成。
 
-    与 `await_pending_background_observe(task_id)` 是同一份强一致保证的两个轴，一起用：
-    task 轴覆盖「同一个 task 的下一轮 run」（retry / resume / reconcile 重放），agent 轴
-    覆盖「同一个 agent 的**下一个 task**」——后者正是 `send_message` 在 agent 已终态时
-    走 `_start_task_for_agent` 建新 task 的那条路，task 轴够不着（见 `_agent_pending`）。
+    与 `await_pending_background_observe(task_id)` 同源，**同样自 2026-09-22 起无生产
+    调用方**（见那一个的 docstring）。两者曾是同一份强一致保证的两个轴：task 轴覆盖
+    「同一个 task 的下一轮 run」（retry / resume / reconcile 重放），agent 轴覆盖「同一个
+    agent 的**下一个 task**」——后者正是 `send_message` 在 agent 已终态时走
+    `_start_task_for_agent` 建新 task 的那条路，task 轴够不着（见 `_agent_pending`）。
 
     两轴常常指向同一个对象（同 task 的下一轮），重复 await 无害：第二次 `pending.done()`
     为真，直接返回。

@@ -20,7 +20,7 @@ provider 只执行显式 id 集的原子 fold；哪些该折由本模块决定�
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from ctx_weft.core.media import placeholder_refs
 from ctx_weft.core.utils.clock import now_utc
@@ -59,18 +59,31 @@ async def segment_fold(
     layer: MemoryScope,
     summary: str,
     ctx: ProviderContext,
+    watermark: "datetime | None" = None,
 ) -> SegmentFoldResult:
-    """折叠当前段并原子写入段摘要；返回前后计数与摘要 id。"""
+    """折叠当前段并原子写入段摘要；返回前后计数与摘要 id。
+
+    ``watermark``：段界水位线（2026-09-22）。给定时**只把它之前就已存在的记录**看作
+    「当前段」——后台 observe 是 fire-and-forget，它判完时人可能已经开口，新的
+    USER_PROMPT 已经落库。段界若仍动态查找，那条新消息就成了「最后一条 user 回合」，
+    于是折叠池空、`to_archive` 空、`summary_ts` 落到 `now_utc()` 分支排到末尾，而要折
+    的那一段一条都没折——锚点逻辑根本没机会生效。钉住水位线之后，迟到的折叠自己落回
+    原位，调用方不必为此等待。None = 不设限（前台同步段折用，它没有迟到可言）。
+    """
     view = await memory.load_view(address, layer, ctx, kinds=_VIEW_KINDS)
     events_before = len(view)
 
+    # 段界与折叠池都只在水位线之内认；`following`（锚点）仍看**完整** view——新来的
+    # USER_PROMPT 正是要被它认出来，好让摘要锚到它之前 1μs。
+    in_scope = view if watermark is None else [r for r in view if r.timestamp <= watermark]
+
     # 段界：最后一条 role=user 回合之后为折叠池；无 user 回合 → 整分区（防御，同旧行为）
     boundary_idx = next(
-        (i for i in range(len(view) - 1, -1, -1) if _is_user_turn(view[i])),
+        (i for i in range(len(in_scope) - 1, -1, -1) if _is_user_turn(in_scope[i])),
         None,
     )
     pool_start = 0 if boundary_idx is None else boundary_idx + 1
-    pool = view[pool_start:]
+    pool = in_scope[pool_start:]
 
     to_archive = [r for r in pool if not _protected(r)]
 

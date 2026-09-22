@@ -117,9 +117,16 @@ async def test_user_prompt_after_trailing_fold_sorts_newest():
 # ── Fix 1: resume barrier ──────────────────────────────────────────────────────
 
 
-async def test_inject_user_reply_awaits_pending_background_observe(monkeypatch):
-    """_inject_user_reply must await the resumed task's in-flight background observe before
-    ingesting the new USER_PROMPT, so the fold's write precedes the new turn's prompt."""
+async def test_inject_user_reply_does_not_await_pending_background_observe(monkeypatch):
+    """_inject_user_reply 不再等在途后台折叠——2026-09-22 拆除那道屏障。
+
+    原先要等，理由是「折叠摘要的时间戳必须早于新消息，否则迟到的摘要会越到新消息之后、
+    令下一轮装配误判续跑并埋掉新输入」。问题的根其实不在时间戳（`segment_fold` 的锚点
+    早就取 `following[0].timestamp - 1μs`），在段界是动态查找的——新 USER_PROMPT 一落库
+    就成了「最后一条 user 回合」，折叠池随之变空。改由 `launch_background_observe` 钉住
+    段界水位线（见 tests/unit/test_segment_fold.py），迟到的折叠自己落回原位，这里不必
+    再等。人的回复因此不为任何后台 LLM 往返买单。
+    """
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     from ctx_weft.core import CtxWeftRuntime
     import ctx_weft.core.loop.steps.background_observe as bo
@@ -166,6 +173,8 @@ async def test_inject_user_reply_awaits_pending_background_observe(monkeypatch):
 
     await runtime._inject_user_reply(req, session, task_manager)
 
-    assert order == ["fold", "ingest"], (
-        f"expected the fold to complete before the reply is ingested, got {order}"
+    assert order == ["ingest"], (
+        f"回复的注入不该等折叠落地（段界水位线已接管正确性），got {order}"
     )
+    await bo._task_pending["t1"]
+    assert order == ["ingest", "fold"]

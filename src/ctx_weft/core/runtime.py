@@ -60,8 +60,6 @@ from ctx_weft.core.loop.steps import (
     RecognizeIntentStep,
 )
 from ctx_weft.core.loop.steps.background_observe import (
-    await_pending_background_observe,
-    await_pending_background_observe_for_agent,
     launch_background_observe,
     register_close_synth,
 )
@@ -4130,14 +4128,13 @@ class CtxWeftRuntime:
         `req` 是新契约的 `PendingHitl`：内容经 `req.decision` 取，打断续接判据经
         `req.delivery.preface`（不再 sniff legacy 的 `context` 字符串）。
         """
-        from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
-
-        # 强一致屏障：上一轮 plain_text/interrupt park 甩出的后台 observe（fire-and-forget 段折叠）
-        # 可能仍在跑。先等它落库，再注入本轮 USER_PROMPT——保证折叠摘要的时间戳早于新消息，
-        # 否则迟到的摘要会越到新消息之后、令下一轮装配误判「续跑」并埋掉新输入（见
-        # background_observe.apply_compact 的段尾锚点 + composer 续跑 cue）。同进程有在跑 fold 才等；
-        # 真崩溃冷启动 _task_pending 为空 → no-op。
-        await await_pending_background_observe(req.task_id)
+        # 这里曾有一道强一致屏障：等上一轮 park 甩出的后台 observe 落库，再注入本轮
+        # USER_PROMPT，否则迟到的摘要会越到新消息之后、令下一轮装配误判「续跑」并埋掉
+        # 新输入。2026-09-22 拆除——问题的根不在时间戳（`segment_fold` 的锚点早就取
+        # `following[0].timestamp - 1μs`、不用 `now_utc()`），在段界是动态查找的：新
+        # USER_PROMPT 一落库就成了「最后一条 user 回合」，折叠池随之变空。改由
+        # `launch_background_observe` 钉住段界水位线，迟到的折叠自己落回原位，这里不必
+        # 再等。人的回复因此不为任何后台 LLM 往返买单。
 
         # agent_id 必须是本 task 对话真正所在的 agent scope——AgentRecallSource 用
         # recall_recent_by_agent 按 scope.agent_id 过滤召回 task body（≠ recall_recent 的 task_id 键）。
@@ -4839,13 +4836,16 @@ class CtxWeftRuntime:
         #
         # recap 的护栏区（幂等护栏/短段门/事件 emit）在其自吞 try 之外、可能以异常终结，
         # 故此处防御吞掉（降级 = 不等待、段保 raw）；shield 保证 run 被取消时不牵连 recap。
-        try:
-            await await_pending_background_observe(task.id)
-            await await_pending_background_observe_for_agent(agent.id)
-        except Exception:
-            logger.exception(
-                "_run_loop: pending recap await failed (ignored); task=%s agent=%s",
-                task.id, agent.id)
+        # **正确性那一半已由段界水位线接管**（`launch_background_observe` 钉住段界，
+        # `segment_fold` 按它算折叠池）：迟到的折叠不再抢走段界、也不再排到新消息之后。
+        #
+        # **剩下的是性能**：不等的话首次装配可能读到上一轮尚未被 supersede 的 raw，拿
+        # 原文而非胶囊——prompt 白胀一轮的量。这条代价已确认接受（2026-09-22），换来的
+        # 是人回复后不必为一次后台 LLM 往返买单。
+        #
+        # 已知的边缘情况：一个 run 通常只在 `prepare` 装配一次，中途 fold 落地不影响它；
+        # 但若这一轮触发了 context recovery 的 `prepare` 重入，第二次装配会读到折叠后的
+        # 结果，同一个 run 内上下文前后不一致（变小）。不是错误，代价是 cache 前缀打穿。
 
         await self._event_bus.emit(make_event(state, EventType.RUN_STARTED, payload={
             "run_id": run_id,

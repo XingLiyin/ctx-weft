@@ -20,8 +20,18 @@ retry、resume、reconcile 重放。而 agent-centric 那批改造新增的
 raw 还没被 supersede，于是它们**整段**进了新一轮的 prompt，而不是折出来的那一条胶囊。
 不报错、不产生错误内容，只是白胀一轮的量（长会话上会顶到 context 上限）。
 
-修法是把等待从 task 轴提到 agent 轴：`_agent_pending[agent_id]` 与 `_task_pending[task_id]`
-同步登记，`_run_loop` 入口两个轴都等。
+原修法是把等待从 task 轴提到 agent 轴：两轴同步登记，`_run_loop` 入口都等。
+
+## 2026-09-22：两道屏障一并拆除，这个窗口被**接受**为代价
+
+拆除的依据是那次的另一半改造——**段界水位线**（`launch_background_observe` 钉住段界，
+`segment_fold` 按它算折叠池）。它治的是真正的正确性问题：迟到的折叠会抢走段界、把
+折叠池变空，摘要落到 `now_utc()` 分支排到新消息之后（见 tests/unit/test_segment_fold.py）。
+
+上面描述的那个窗口**不是正确性问题**：不报错、不产生错误内容，只是 prompt 白胀一轮。
+用它换掉「人回复要等一次后台 LLM 往返」，已确认接受。下面第 2 条用例因此反了过来——
+它现在守的是「不等」，以及守住两轴登记本身（水位线之外，`TurnHandle.wait_for_finish`
+与 `_fire_session_done` 仍在用这两个槽）。
 """
 
 from __future__ import annotations
@@ -114,11 +124,12 @@ async def test_clear_pending_clears_both_axes_but_only_its_own_registration():
 # ── 2. 真正的回归：新 task 的 run 不得越过在途折叠 ────────────────────────────
 
 
-async def test_new_task_run_waits_for_previous_tasks_pending_fold():
-    """回归：agent 已终态 → `send_message` 建新 task，其 run 必须等上一轮折叠落地。
+async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
+    """agent 已终态 → `send_message` 建新 task，其 run **不等**上一轮折叠落地。
 
-    没有 agent 轴那次等待时，本用例里的 LLM 会在 `release` 之前就被调到——也就是新一轮的
-    装配读了还没折完的 memory。
+    这条曾是「agent 轴 recap 强一致」的回归守卫，2026-09-22 随两道屏障一并反转（理由见
+    模块 docstring）。它现在守的是那次拆除真的生效了：新一轮不为上一轮的后台 LLM 往返
+    买单。代价是这一轮的装配可能读到尚未 supersede 的 raw——prompt 白胀一轮，已接受。
     """
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 
@@ -158,11 +169,11 @@ async def test_new_task_run_waits_for_previous_tasks_pending_fold():
     llm_saw_fold_done.clear()
     send = asyncio.create_task(runtime.send_message(agent_id, "第二轮"))
 
-    # 给新 run 充分的调度机会：没有 agent 轴等待的话，它这时早就调过 LLM 了。
+    # 给新 run 充分的调度机会：屏障拆掉之后，它该在 `release` 之前就把 LLM 调起来。
     for _ in range(50):
         await asyncio.sleep(0)
-    assert llm_saw_fold_done == [], (
-        "新 task 的 run 在上一轮折叠落地之前就调了 LLM —— agent 轴的 recap 强一致没生效"
+    assert llm_saw_fold_done and not any(llm_saw_fold_done), (
+        "新 task 的 run 仍在等上一轮折叠 —— 两道屏障没拆干净，人回复还在为后台往返买单"
     )
 
     release.set()
@@ -170,7 +181,9 @@ async def test_new_task_run_waits_for_previous_tasks_pending_fold():
     await handle2.wait_for_finish(timeout=30)
 
     assert llm_saw_fold_done, "新一轮始终没跑起来"
-    assert all(llm_saw_fold_done), (
-        "新一轮的 LLM 调用里仍有发生在折叠落地之前的 —— "
+    # 这一轮从头到尾都跑在折叠之前——正是「不等」的直接证据。反过来说，若将来有人给
+    # 这条路重新加上等待，上面那条断言会先炸，不会静默地把延迟加回来。
+    assert not any(llm_saw_fold_done), (
+        "新一轮有 LLM 调用发生在折叠落地之后 —— 屏障可能被重新引入，"
         f"逐次观测到的 fold_done={llm_saw_fold_done}"
     )
