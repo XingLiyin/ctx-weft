@@ -15,7 +15,7 @@
 |---|---|---|---|
 | S1 | drain 单交互线闸门 | 并发收紧（非 unattended） | — |
 | S2 | 装配路径合并 | 无（纯重构） | — |
-| S3 | terminal tool 统一 | 无 | S2 |
+| S3 | 只读模式 + 结构化回传（为统一做准备） | 无 | — |
 | S4 | 带外判决入口 + 段界水位线 + 拆掉三处 await | 无（暂无调用方） | — |
 | S5 | 后台 observe 产 verdict | **root task 开始被判定终结** | S3 S4 |
 | S6 | act 分流切换 | **子任务开始 park** | S1 S5 |
@@ -77,34 +77,43 @@
 
 ---
 
-## S3 · terminal tool 统一
+## S3 · 只读模式 + 结构化回传（为 terminal tool 统一做准备）
+
+> **范围调整（2026-09-22 实施时）**：原计划是「这一步就把 terminal tool 换成
+> `report_task_outcome`，行为不变」。动手查下来有三处低估，直接换会破功，故本步只做
+> 纯增量的准备，切换推迟到 S5：
+>
+> 1. **`ControlContext.task` 是活对象**——从 `TaskManager._tasks` 取的，不是快照。
+>    后台一旦改调 `report_task_outcome`，会隔着时间直接写主线程 task。
+> 2. **返回值形状不兼容**——`collect_process_report` 返回 `content=act_recap` +
+>    `metadata={"task_summary": ...}`；`report_task_outcome` 的 `content` 是一段话术
+>    （"Assessment recorded: outcome=… "），`metadata` **恒为空**。直接换，段摘要会
+>    变成带前缀的那句话，`task_summary` 还拿不到。
+> 3. **purposes 是白名单**——`report_task_outcome` 只声明了 `["observe"]`，后台的工具面
+>    里根本看不见它。
 
 **改**：`core/capabilities/control_tools.py`、`core/loop/steps/background_observe.py`。
 
-1. 后台 observe 的 `terminal_tool_name` 从 `BACKGROUND_PROCESS_REPORT_NAME` 换成
-   `REPORT_TASK_OUTCOME_NAME`。
-2. **按 boundary 决定消不消费 `task_status`**（设计文档 §3.3.2）——本步一律**不**消费，
-   行为因此不变：
+1. **`ControlContext.readonly`**（默认 False）：工具可以**读** `task`，一个字段都不许写。
+   由 `ProviderContext.extra["control_readonly"]` 传入，`_handle` 读取。
+2. **`report_task_outcome` 尊重 readonly**：写 task 的那一段整体跳过；
+   success-without-outputs 护栏**照跑**——它读 `task.outputs`、改的是本地判决，不碰 task，
+   跳过它会让后台把没交付的判成功。
+3. **结构化回传**：`ControlMetaKey` 新增五个 `OBSERVER_*` key，`report_task_outcome`
+   把 `task_status` / `act_recap` / `task_summary` / `next_step_hint` /
+   `task_failure_reason` 填进 `metadata`。前台不读 metadata（它读 task 字段），故无影响。
+4. **`launch_background_observe` 用 `_readonly_ctx(ctx)`**：给 `provider_ctx.extra` 打上
+   标记的 ctx 副本（`CapabilityGateway` 在 `dataclasses.replace` 时原样带上 extra）。
 
-   | boundary | 本步消费 verdict? | S5 之后 |
-   |---|---|---|
-   | `plain_text` | 否 | **是** |
-   | `mechanical` / `finish` / `normal` / `interrupt` / `dispatch` | 否 | 否 |
+**本步行为不变**：后台的 terminal tool 仍是 `collect_process_report`，而它本来就
+「Zero state write」，readonly 对它是 no-op。`collect_process_report` 也**暂不删**。
 
-3. 删 `collect_process_report`（签名是 `report_task_outcome` 的真子集）。
-
-**一个要当心的地方**：`report_task_outcome` 的实现会直接写 `ctx.task` 的
-`process_report` / `next_step_hint` / `observer_outcome` / `actor_done`。后台 observe
-跑在 `launch_background_observe` 快照出来的 state 上，且常在主 run 的
-`finally evict(agent.id)` **之后**才真正执行——**必须确认这些写落在快照的 task 副本上、
-不会污染主线程那个 task**。若是同一对象引用，本步就要先把写入隔离掉（例如后台路径
-传一个 `write_through=False` 的 ctx），否则 S3 表面行为不变、实际已经在偷偷改 task。
-
-**验证**
-- 现有 `test_background_observe_wiring.py` 全绿。
-- 新单测：后台 observe 跑完后，主线程 task 的 `observer_outcome` / `next_step_hint`
-  未被改写。
-- 全局 grep 确认 `collect_process_report` 无残留引用。
+**验证**（`tests/unit/test_control_readonly_and_metadata.py`，10 条）
+- 前台逐字不变：仍写全部字段、retry 仍暂存 failure_reason 到 `task.error`。
+- readonly 一个字段都不写；但 no-outputs 护栏仍把 success 改判 retry。
+- metadata 在两种模式下都带干净的判决值；`content` 带前缀、不能当 recap 用。
+- `_readonly_ctx` 设标记且不就地改写原 ctx；`provider_ctx` 缺失时原样返回。
+- 端到端走真 provider：带标记不写 / 不带标记照写（守住 `_handle` 读 extra 那一行）。
 
 ---
 
@@ -225,9 +234,14 @@ supersede 的 raw，拿原文而非胶囊，prompt 白胀一轮。fold 还没发
 
 ## S5 · 后台 observe 在 `plain_text` 边界产 verdict ← **第一个行为切换点**
 
-**改**：`background_observe.py`、`composer.py`（cue）。
+**改**：`background_observe.py`、`composer.py`（cue）、`control_tools.py`。
 
-1. `plain_text` 边界消费 `task_status`，经 S4 的入口提交。
+0. **S3 推迟过来的三件事**：`report_task_outcome` 的 purposes 加上
+   `background_observe`；后台 `terminal_tool_name` 换成它；取值从 `result.content` /
+   `metadata["task_summary"]` 改为读 S3 那五个 `OBSERVER_*` key。之后删
+   `collect_process_report`（签名是真子集），并全局 grep 确认无残留。
+1. `plain_text` 边界消费 `task_status`，经 S4 的入口提交。**其余 boundary 不消费**
+   （设计文档 §3.3.2 的分流表），否则会把 `actor_done` 路径的前台判决覆盖掉。
 2. cue 换掉：`_background_observe_cue("plain_text")` 改成判定版（`judge=True` 那条），
    并给 `_BACKGROUND_BOUNDARY_DESC` 加一条 `plain_text` 的状态描述（「这段以纯文本收尾，
    人在旁边等着」）。

@@ -426,6 +426,38 @@ async def _run_background_observe(state: "LoopState", ctx: "LoopContext", bounda
         }))
 
 
+def _readonly_ctx(ctx: "LoopContext") -> "LoopContext":
+    """把控制工具钉成只读的 ctx 副本（2026-09-22）。
+
+    `ControlContext.task` 是从 `TaskManager._tasks` 取的**活对象**。后台 observe 是
+    fire-and-forget，常在主 run 收尾、agent 已被 evict 之后才真正跑到——它调用的工具
+    若写 task，就是隔着时间改主线程状态。标记经 `provider_ctx.extra` 透传
+    （`CapabilityGateway` 在 `dataclasses.replace` 时原样带上 extra），落到
+    `ControlContext.readonly`。
+
+    拿不到副本时（`provider_ctx` 缺失，或 ctx / provider_ctx 是手构的替身而非
+    dataclass——测试里很常见）原样返回，不强行造一个。**但要在日志里看得见**：S5 之后
+    后台的 terminal tool 会写 task，标记丢失就意味着隔着时间改主线程状态。
+    """
+    provider_ctx = getattr(ctx, "provider_ctx", None)
+    if provider_ctx is None:
+        return ctx
+    if not (dataclasses.is_dataclass(ctx) and dataclasses.is_dataclass(provider_ctx)):
+        logger.warning(
+            "background observe: cannot derive a readonly ctx (ctx=%s, provider_ctx=%s); "
+            "control tools will run in write mode",
+            type(ctx).__name__, type(provider_ctx).__name__,
+        )
+        return ctx
+    return dataclasses.replace(
+        ctx,
+        provider_ctx=dataclasses.replace(
+            provider_ctx,
+            extra={**(provider_ctx.extra or {}), "control_readonly": True},
+        ),
+    )
+
+
 def launch_background_observe(
     state: "LoopState", ctx: "LoopContext", *, boundary: str
 ) -> asyncio.Task:
@@ -439,7 +471,7 @@ def launch_background_observe(
         run_id=generate_id("run"),
         sequence_counter=0,
     )
-    task = asyncio.create_task(_run_background_observe(snapshot, ctx, boundary))
+    task = asyncio.create_task(_run_background_observe(snapshot, _readonly_ctx(ctx), boundary))
     _task_pending[state.task.id] = task
     _task_pending_run_id[state.task.id] = snapshot.run_id
     _agent_pending[state.agent.id] = task

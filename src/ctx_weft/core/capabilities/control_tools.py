@@ -102,6 +102,15 @@ class ControlMetaKey:
     CONTROL_ACTION = "control_action"
     HITL_REQUESTED = "hitl_requested"
 
+    #: `report_task_outcome` 的结构化回传（2026-09-22）。`ControlResult.content` 是给
+    #: LLM 看的确认话术，形状不稳定、不该被解析；拿不到 task 字段的调用方（readonly
+    #: 的后台 observe）从这几个 key 取干净的值。
+    OBSERVER_OUTCOME = "observer_outcome"
+    OBSERVER_ACT_RECAP = "observer_act_recap"
+    OBSERVER_TASK_SUMMARY = "observer_task_summary"
+    OBSERVER_NEXT_STEP_HINT = "observer_next_step_hint"
+    OBSERVER_FAILURE_REASON = "observer_failure_reason"
+
 
 # ── ControlContext ─────────────────────────────────────────────────────────────
 
@@ -116,6 +125,16 @@ class ControlContext:
     task_manager: "TaskManager | None"
     session: "Session | None"
     tool_call_id: str = ""  # 发起本次调用的 LLM tool_call id（spec/06 §5，委派回填用）
+    #: 只读模式：工具可以**读** `task`，但一个字段都不许写（2026-09-22）。
+    #:
+    #: 为什么需要它：`task` 是从 `TaskManager._tasks` 取的**活对象**，不是快照。后台
+    #: observe 是 fire-and-forget、常在主 run 收尾之后才跑到，它若调用写 task 的工具
+    #: 就会隔着时间改主线程状态——而它的判决还要先过带外入口的仲裁（人可能已经开口
+    #: 重排了这个 task）。判决结果改走 `ControlResult.metadata` 回传，由 TaskManager
+    #: 在仲裁通过后统一写，「task 状态的唯一改写者」因此不破。
+    #:
+    #: 由 `ProviderContext.extra["control_readonly"]` 传入，见 `_handle`。
+    readonly: bool = False
 
 
 # ── ControlResult ─────────────────────────────────────────────────────────────
@@ -409,6 +428,7 @@ def report_task_outcome(
     metadata: dict[str, Any] = {}
     if task is not None:
         # 护栏：没有最终产出就不允许判成功，改判 retry（提示下一轮调 finish_task 收尾）。
+        # **只读也跑**：它读的是 `task.outputs`，改的是本地的 task_status/hint，不碰 task。
         if task_status == "success" and not task.outputs:
             task_status = "retry"
             _hint = ("The previous round ended without a final output. Review the recap above "
@@ -418,6 +438,9 @@ def report_task_outcome(
                      "to complete the task — your message text is the reply and the deliverable.")
             hint = f"{hint}\n\n{_hint}" if hint else _hint
 
+    # `readonly` 的调用方（后台 observe）一个字段都不写——判决改走下面的 metadata 回传，
+    # 由 TaskManager 在带外仲裁通过后统一写。见 `ControlContext.readonly`。
+    if task is not None and not ctx.readonly:
         task.process_report = act_recap
         task.next_step_hint = hint or None
         task.task_summary = task_summary
@@ -434,6 +457,17 @@ def report_task_outcome(
             # 本轮受阻原因暂存 task.error：retry 耗尽降级 fail 时它就是真死因
             # （TaskFailed 的 TASK_FAILED_RETRY_EXHAUSTED 携带）；下一轮判决必然覆盖或清空。
             task.error = task_failure_reason or None
+
+    # 结构化回传（2026-09-22）：`content` 是给 LLM 看的确认话术，形状不稳定也不该被解析。
+    # 调用方——尤其是 readonly 的后台路径，它拿不到任何 task 字段——从这里取干净的值。
+    # 前台不读 metadata（它读 task 字段），所以这几行对既有路径无影响。
+    metadata.update({
+        ControlMetaKey.OBSERVER_OUTCOME: task_status,
+        ControlMetaKey.OBSERVER_ACT_RECAP: act_recap,
+        ControlMetaKey.OBSERVER_TASK_SUMMARY: task_summary,
+        ControlMetaKey.OBSERVER_NEXT_STEP_HINT: hint,
+        ControlMetaKey.OBSERVER_FAILURE_REASON: task_failure_reason,
+    })
 
     failure_part = f" Failure reason: {task_failure_reason}" if task_status == "fail" and task_failure_reason else ""
     return ControlResult(
@@ -640,6 +674,7 @@ class ControlCapabilityProvider(ToolCapabilityProvider, SessionScopedCapabilityP
                     task_manager=tm,
                     session=session,
                     tool_call_id=ctx.extra.get("tool_call_id", ""),
+                    readonly=bool(ctx.extra.get("control_readonly")),
                 )
 
             result: ControlResult = fn(**filtered)
