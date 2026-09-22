@@ -40,8 +40,9 @@ def _task(tid: str, parent: str | None = None) -> Task:
     return Task(id=tid, session_id="s1", status="PENDING", parent_task_id=parent)
 
 
-def _subagent_task(tid: str, parent: str | None = None) -> Task:
+def _subagent_task(tid: str, parent: str | None = None, *, unattended: bool = False) -> Task:
     return Task(id=tid, session_id="s1", status="PENDING", parent_task_id=parent,
+                unattended=unattended,
                 settings=NormalTaskSettings(use_subagent=True))
 
 
@@ -142,6 +143,12 @@ async def test_same_agent_tasks_do_not_run_concurrently() -> None:
 
 
 async def test_distinct_subagents_run_in_parallel() -> None:
+    """不同 subagent 的有效 agent 各异 → agent 闸门不该把它们串起来。
+
+    **用 unattended 任务**是为了隔离测试对象：单交互线闸门（2026-09-22，
+    `_interactive_line_held`）会让非 unattended 的任务串行，那是另一道闸门的语义，
+    由 `test_interactive_line_gate.py` 覆盖。这里只问 agent 闸门有没有过度串行化。
+    """
     tm = TaskManager(session_id="s1", max_concurrent=4)
     tm.set_session(_session("root"))
 
@@ -153,8 +160,8 @@ async def test_distinct_subagents_run_in_parallel() -> None:
         await release[tid].wait()
 
     tm.set_runner(StubRunner(tm, runner))
-    await tm.push_task(_subagent_task("A"))
-    await tm.push_task(_subagent_task("B"))
+    await tm.push_task(_subagent_task("A", unattended=True))
+    await tm.push_task(_subagent_task("B", unattended=True))
 
     await tm.drain()
     # 不同 subagent 有效 agent 各异 → 两者都应启动

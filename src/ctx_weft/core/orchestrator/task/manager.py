@@ -658,11 +658,40 @@ class TaskManager:
             return False
         return bool(self._unhealthy_check(task.session_id))
 
+    def _task_unattended(self, task_id: str) -> bool:
+        """该 task 是不是无人值守作业。查不到的按「有人」算——保守压向受闸门约束那边。"""
+        task = self._tasks.get(task_id)
+        return bool(task.unattended) if task is not None else False
+
+    def _interactive_line_held(self) -> bool:
+        """这个 session 的交互线此刻是否被占着（单交互线闸门的判据，2026-09-22）。
+
+        占着 = 存在一个**非 unattended** 的 task 处于「在跑 **或** `AWAITING_HUMAN`」。
+
+        **必须算上 `AWAITING_HUMAN`，只看在跑是不够的**：park 一发生槽位就还回来了
+        （`_settle` 对 `_PARKED_STATUSES` 先 `_release_slot` 再立刻 `drain()`），于是
+        下一个非 unattended task 被派发、它也 park——host 侧就出现两条同时等人说话的线，
+        而 host 的回合状态机（status / turn_seq / 开轮临界区）是 session 级单值的。
+
+        另外两个 park 态**不算**，它们等的不是人：
+        - `SUSPENDED`（等子任务）——父等子时子正该跑，算进来整个 DAG 立刻死锁；
+        - `INTERRUPTED`（等 `/resume` 的故障态）——故障不该把正常工作一并按住。
+        """
+        for task_id, task in self._tasks.items():
+            if task.unattended:
+                continue
+            if task_id in self._running_tasks or task.status == "AWAITING_HUMAN":
+                return True
+        return False
+
     async def drain(self) -> None:
         """Pop and run tasks until queue is empty or max_concurrent reached.
 
         同 agent 不并发：跳过"目标 agent 正忙（已有同 agent 任务在跑）"的队列条目，
         它们留在队列里，等该 agent 空闲（某任务完成 → on_task_finished → 再 drain）时被选中。
+
+        单交互线闸门（2026-09-22）：非 unattended 的 task 在一个 session 内同时至多一个
+        「占着交互线」，见 `_interactive_line_held`。unattended 的后台作业不受此限。
         """
         if self._runner is None:
             raise RuntimeError("No task runner registered")
@@ -683,10 +712,14 @@ class TaskManager:
                     self._running_agents.get(tid) or self._effective_agent(self._tasks.get(tid))
                     for tid in self._running_tasks
                 }
+                # 每次循环重算：上一轮 pop 出的 task 已进 `_running_tasks`（同在本锁内），
+                # 它若是非 unattended 的，这一轮就该把闸门关上。
+                line_held = self._interactive_line_held()
                 entry = self._queue.pop(
                     skip=lambda e: (
                         self._effective_agent(self._tasks.get(e.task_id)) in busy_agents
                         or self._session_unhealthy(e.task_id)
+                        or (line_held and not self._task_unattended(e.task_id))
                     )
                 )
                 if entry is None:
