@@ -96,7 +96,7 @@ def _observer_cue(subtasks):
                            content="do the work", priority=3, token_estimate=3,
                            metadata={"role": "user", "type": "user_prompt",
                                      "timestamp": "2026-06-30T00:00:00+00:00"})]
-    return DefaultComposer()._build_observer_messages(blocks, req)[-1].content
+    return DefaultComposer()._build_observe_messages(blocks, req)[-1].content
 
 
 def test_observer_review_face_carries_both_for_every_entry():

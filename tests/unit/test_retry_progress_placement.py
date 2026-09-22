@@ -48,7 +48,7 @@ async def test_observe_includes_finish_output_labeled() -> None:
     ]
     req = SimpleNamespace(purpose="observe", task=_task(), session=SimpleNamespace(user_prompt="do X"),
                           template=None)
-    msgs = DefaultComposer()._build_observer_messages(blocks, req)
+    msgs = DefaultComposer()._build_observe_messages(blocks, req)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "THE FINAL ANSWER" in joined
     assert "finish_task" in joined  # explicit label that this was the act-phase finish_task result

@@ -245,7 +245,7 @@ async def test_composer_renders_subtask_results_with_title() -> None:
     req_no_extra = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
-    msgs = comp._build_observer_messages([block], req_no_extra)
+    msgs = comp._build_observe_messages([block], req_no_extra)
     text = msgs[-1].content
     assert "Your sub-task results (you may confirm / reopen these):" not in text, (
         "Phase 3: blackboard subtask blocks must not render as a subtask section"
@@ -256,7 +256,7 @@ async def test_composer_renders_subtask_results_with_title() -> None:
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],        extra={"subtasks": [{"task_id": "K1", "title": "Build report", "outcome": "success"}]},
     )
-    msgs2 = comp._build_observer_messages([block], req_with_extra)
+    msgs2 = comp._build_observe_messages([block], req_with_extra)
     text2 = msgs2[-1].content
     assert "## Your sub-tasks" in text2 and "K1" in text2, (
         "Phase 3: sub-task handles must appear via the extra cue"
@@ -286,7 +286,7 @@ async def test_composer_splits_subtask_and_predecessor_sections() -> None:
         content="upstream output", priority=2, token_estimate=5,
         metadata={"title": "Upstream", "outcome": "success", "intent": "predecessor"},
     )
-    text = comp._build_observer_messages([sub, pred], req)[-1].content
+    text = comp._build_observe_messages([sub, pred], req)[-1].content
     # Both old blackboard sections must be absent.
     assert "Your sub-task results" not in text, (
         "Phase 3: blackboard subtask section must not appear in observer prompt"
@@ -307,7 +307,7 @@ async def test_composer_no_related_results_when_empty() -> None:
     req = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
-    msgs = comp._build_observer_messages([], req)
+    msgs = comp._build_observe_messages([], req)
     joined = " ".join(m.content for m in msgs if isinstance(m.content, str))
     assert "Your sub-task results" not in joined   # Phase 3: old blackboard heading removed
     assert "## Your sub-tasks" not in joined        # no extra["subtasks"] → no cue section

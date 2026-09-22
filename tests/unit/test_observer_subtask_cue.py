@@ -32,7 +32,7 @@ def test_observer_cue_lists_subtasks_from_extra():
         {"task_id": "tsk_amy", "title": "向 Amy 问好", "outcome": "finished"},
         {"task_id": "tsk_lily", "title": "向 Lily 问好", "outcome": "failed"},
     ]})
-    msgs = composer._build_observer_messages(blocks, req)
+    msgs = composer._build_observe_messages(blocks, req)
     cue = msgs[-1].content
     assert "tsk_amy" in cue and "tsk_lily" in cue, f"cue must list child task_ids; got: {cue}"
     assert "向 Amy 问好" in cue and "failed" in cue
@@ -46,7 +46,7 @@ def test_observer_cue_no_subtask_section_when_no_children():
                            content="do the work", priority=3, token_estimate=3,
                            metadata={"role": "user", "type": "user_prompt", "timestamp": "2026-06-30T00:00:00+00:00"})]
     req = _req({"subtasks": []})
-    msgs = composer._build_observer_messages(blocks, req)
+    msgs = composer._build_observe_messages(blocks, req)
     assert "tsk_" not in msgs[-1].content
 
 
@@ -61,6 +61,6 @@ def test_observer_cue_renders_blocked_cancel_note():
         {"task_id": "tsk_b", "title": "final", "outcome": "canceled",
          "note": "blocked by failed/canceled predecessor tsk_a"},
     ]})
-    cue = composer._build_observer_messages(blocks, req)[-1].content
+    cue = composer._build_observe_messages(blocks, req)[-1].content
     assert "tsk_b" in cue and "canceled" in cue
     assert "blocked by failed/canceled predecessor tsk_a" in cue

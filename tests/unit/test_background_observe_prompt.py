@@ -32,7 +32,7 @@ def _req(boundary, outputs=""):
 
 
 def test_background_cue_only_process_report_no_verdict():
-    msgs = DefaultComposer()._build_background_observe_messages(_blocks(), _req("interrupt"))
+    msgs = DefaultComposer()._build_observe_messages(_blocks(), _req("interrupt"))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "collect_process_report" in joined
     assert "do not judge success/retry/fail" in joined   # 抑制三态裁决
@@ -41,7 +41,7 @@ def test_background_cue_only_process_report_no_verdict():
 
 @pytest.mark.parametrize("boundary", ["interrupt", "plain_text", "finish", "normal", "dispatch"])
 def test_background_cue_injects_each_boundary(boundary):
-    msgs = DefaultComposer()._build_background_observe_messages(_blocks(), _req(boundary))
+    msgs = DefaultComposer()._build_observe_messages(_blocks(), _req(boundary))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert _BACKGROUND_BOUNDARY_DESC[boundary] in joined
 
@@ -64,7 +64,7 @@ _FINISH_RESULT = "工作目录现状：仅一个 即兴演讲训练.pptx，无�
 @pytest.mark.parametrize("boundary", ["finish", "normal"])
 def test_close_boundary_injects_finish_result(boundary):
     """close 段把 actor 最终产出注入 prompt，使观察者据实总结、不虚构。"""
-    msgs = DefaultComposer()._build_background_observe_messages(
+    msgs = DefaultComposer()._build_observe_messages(
         _blocks(), _req(boundary, outputs=_FINISH_RESULT))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert _FINISH_RESULT in joined
@@ -76,7 +76,7 @@ def test_close_boundary_injects_finish_result(boundary):
 @pytest.mark.parametrize("boundary", ["interrupt", "plain_text"])
 def test_non_close_boundary_does_not_inject_finish_result(boundary):
     """非 close 段有真实 actor 动作可见，不注入 finish 产出。"""
-    msgs = DefaultComposer()._build_background_observe_messages(
+    msgs = DefaultComposer()._build_observe_messages(
         _blocks(), _req(boundary, outputs=_FINISH_RESULT))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "Actor's Final Output" not in joined
@@ -84,7 +84,7 @@ def test_non_close_boundary_does_not_inject_finish_result(boundary):
 
 def test_close_boundary_no_outputs_no_injection():
     """close 段但无产出（task.outputs 空）→ 不注入，保持原行为。"""
-    msgs = DefaultComposer()._build_background_observe_messages(
+    msgs = DefaultComposer()._build_observe_messages(
         _blocks(), _req("finish", outputs=""))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "Actor's Final Output" not in joined
@@ -149,7 +149,7 @@ def test_background_observe_prompt_usable_with_no_identity_block_at_all():
     hist = [ContextBlock(id="b1", source="task_conversation", kind="history",
                          target="messages", content="原始诉求", priority=3, token_estimate=1,
                          metadata={"role": "user", "timestamp": "2026-01-01T00:00:00+00:00"})]
-    msgs = DefaultComposer()._build_background_observe_messages(hist, _req("normal"))
+    msgs = DefaultComposer()._build_observe_messages(hist, _req("normal"))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert _OBSERVER_ROLE_FALLBACK in joined
     assert "collect_process_report" in joined

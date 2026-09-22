@@ -96,7 +96,7 @@ def _build_for_purpose(blocks: list[ContextBlock], purpose: str):
     if purpose == "act":
         return c._build_actor_messages(blocks, req)
     if purpose == "observe":
-        return c._build_observer_messages(blocks, req)
+        return c._build_observe_messages(blocks, req)
     if purpose == "compact":
         return c._build_facet_trailing_messages(blocks, req, _COMPACTION_INSTRUCTION)
     if purpose == "recognize_intent":

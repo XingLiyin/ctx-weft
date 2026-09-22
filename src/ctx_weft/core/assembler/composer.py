@@ -483,15 +483,14 @@ class DefaultComposer(Composer):
         if request.purpose == "act":
             system = self._build_actor_system(blocks)
             messages = self._build_actor_messages(blocks, request)
-        elif request.purpose == "observe":
+        elif request.purpose in ("observe", "background_observe"):
+            # 前台与后台同一条装配路径，差异在 `_build_observe_messages` 内按 purpose
+            # 分流（2026-09-22 合并）。
             system = self._build_act_system(blocks, request)
-            messages = self._build_observer_messages(blocks, request)
+            messages = self._build_observe_messages(blocks, request)
         elif request.purpose == "recognize_intent":
             system = self._build_act_system(blocks, request)
             messages = self._build_facet_trailing_messages(blocks, request, _RECOGNIZE_INTENT_INSTRUCTION)
-        elif request.purpose == "background_observe":
-            system = self._build_act_system(blocks, request)
-            messages = self._build_background_observe_messages(blocks, request)
         else:  # compact
             system = self._build_act_system(blocks, request)
             cue = (_AGENT_COMPACTION_INSTRUCTION
@@ -1056,78 +1055,101 @@ class DefaultComposer(Composer):
             parts.append(f"## Project Background\n\n{content_to_text(background.content)}")
         return "\n\n---\n\n".join(parts)
 
-    def _build_observer_messages(
+    def _build_observe_messages(
         self,
         blocks: list[ContextBlock],
         request: ContextRequest,
     ) -> list[LLMMessage]:
-        """act 风格完整会话 + 尾部一条 observe user message（仅发送，不入 memory）。
+        """observe 装配的**唯一**实现——前台与后台共用（2026-09-22 合并两条平行路径）。
 
-        复用 _build_facet_trailing_messages：observe facet（ROLE）+ 判定提示 + 可复核清单。
-        subtask 清单只作信息（供 next_step_hint 指名），predecessor 只读。
+        system、骨架、对话主体三者本来就一样（`_build_act_system` +
+        `_build_facet_trailing_messages` + 同一批 blocks 重建的 act 风格会话）。
+        差的只有三处，全部在本函数头部算清：
+
+        | | 前台 `observe` | 后台 `background_observe` |
+        |---|---|---|
+        | cue | 判定（定 success/retry/fail） | 按 boundary，且明令「只摘要、不判定」 |
+        | subtask 指名清单 | 有（供 `next_step_hint` 点名） | 无 |
+        | actor 产出注入 | `outputs` 非空即注入 | 仅 close 边界 |
+
+        第三处两边的**文案不同**（前台 `## Final output`、后台 `## Actor's Final
+        Output`），不是同一段话，合并时逐字保留各自的——它们的来由也不同：前台是
+        「`finish_task` 走 SILENT、产出不在重建的对话里」，后台是「仅由 finish(+delegate)
+        组成的段看不见任何 actor 动作，观察者会虚构完成叙述」。
         """
-        # Phase 3 (2026-06-30): blackboard subtask/predecessor block rendering removed.
-        # Predecessor results surface via memory recall (Phase 2); subtask review handles come
-        # from task_manager via request.extra["subtasks"] (Task 1 below).
-        # The blackboard mechanism (subscribe_topic/recall_topic/BlackboardSource) is kept intact.
+        # getattr 防御 + 默认前台：与本函数里 `request.extra` 的取法同一口径（鸭子类型的
+        # 手构 request 在测试里很常见）。判据写成「不是后台」而不是「是前台」，因为后台
+        # 才是那个特例——缺 purpose 的调用方要的是判定，不是只摘要。
+        foreground = getattr(request, "purpose", "observe") != "background_observe"
 
-        extra_sections: list[str] = []
-
-        # Phase 3: the sub-task list comes from task_manager via request.extra (not blackboard).
-        # The observer reads each child's RESULT from the conversation (Phase 2); this clause only
-        # surfaces the handles (task_id/title/outcome) so it can NAME one in next_step_hint when
-        # its result falls short. Nothing here re-runs anything — `task_reviews` (and reopen with
-        # it) was removed 2026-09-19; what to do about a bad result is the next actor turn's call.
-        subtasks = (getattr(request, "extra", {}) or {}).get("subtasks") or []
-        if subtasks:
-            lines = [f"{SUBTASKS_HEADING} (their results are in the conversation above; refer to "
-                     "one by its exact task_id if you need to flag it in `next_step_hint`):"]
-            for r in subtasks:
-                note = r.get("note")
-                suffix = f" — {note}" if note else ""
-                ref = task_ref_parts(r.get("task_id", "") or "", r.get("title", "") or "")
-                lines.append(f"- {ref} [{r.get('outcome', '')}]{suffix}")
-            extra_sections.append("\n".join(lines))
-
-        # finish_task 的产出走 SILENT，不入 task 层、不在重建的对话里——但 observer 须看到 actor
-        # 最终提交了什么。显式补一段并标注来源（act 阶段调用 finish_task 的结果），置于判定提示之前。
-        pre_cue_sections: list[str] = []
-        outputs = getattr(request.task, "outputs", None)
-        outputs_text = outputs if isinstance(outputs, str) else (content_to_text(outputs) if outputs else "")
-        if outputs_text:
-            pre_cue_sections.append(
-                "## Final output\n"
-                "The actor ended the act phase by calling the `finish_task` tool; the result it "
-                "submitted (shown to the user) was:\n\n"
-                + outputs_text
-            )
+        if foreground:
+            cue = _OBSERVE_JUDGMENT_CUE
+            # Phase 3 (2026-06-30): blackboard subtask/predecessor block rendering removed.
+            # Predecessor results surface via memory recall (Phase 2); subtask review handles
+            # come from task_manager via request.extra["subtasks"].
+            # The blackboard mechanism (subscribe_topic/recall_topic/BlackboardSource) is kept.
+            subtasks = (getattr(request, "extra", {}) or {}).get("subtasks") or []
+            pre_cue_sections = self._observe_outputs_section(request)
+        else:
+            boundary = (getattr(request, "extra", {}) or {}).get("observe_boundary", "normal")
+            cue = _background_observe_cue(boundary)
+            subtasks = []
+            pre_cue_sections = None
+            if boundary in _CLOSE_BOUNDARIES:
+                section = _finish_result_section(request)
+                if section:
+                    pre_cue_sections = [section]
 
         return self._build_facet_trailing_messages(
             blocks,
             request,
-            _OBSERVE_JUDGMENT_CUE,
-            extra_sections=extra_sections,
+            cue,
+            extra_sections=self._observe_subtasks_sections(subtasks),
             pre_cue_sections=pre_cue_sections,
             facet_fallback=_OBSERVER_ROLE_FALLBACK,
         )
 
-    def _build_background_observe_messages(self, blocks, request):
-        """act 风格会话 + 尾部 background-observe cue（ROLE facet + boundary 状态 + 只给 process_report）。
+    @staticmethod
+    def _observe_subtasks_sections(subtasks: list) -> list[str]:
+        """子任务**指名清单**——只作信息，不重跑任何东西。
 
-        close 段（finish/normal）额外把 actor 的最终产出（task.outputs）注入 cue 之前——否则仅由
-        finish(+delegate) 组成的段在对话重建里无 actor 动作可见，观察者会虚构完成叙述。
+        observer 从对话里读每个子任务的 RESULT（Phase 2）；这里只把句柄
+        （task_id/title/outcome）摆出来，好让它在产出不合格时于 `next_step_hint` 里
+        **指名**是哪一个。`task_reviews`（以及随它的 reopen）已于 2026-09-19 删除——
+        对一个坏结果做什么，是下一个 actor 回合自己的事。
         """
-        boundary = (getattr(request, "extra", {}) or {}).get("observe_boundary", "normal")
-        pre_cue: list[str] | None = None
-        if boundary in _CLOSE_BOUNDARIES:
-            section = _finish_result_section(request)
-            if section:
-                pre_cue = [section]
-        return self._build_facet_trailing_messages(
-            blocks, request, _background_observe_cue(boundary),
-            pre_cue_sections=pre_cue,
-            facet_fallback=_OBSERVER_ROLE_FALLBACK,
+        if not subtasks:
+            return []
+        lines = [f"{SUBTASKS_HEADING} (their results are in the conversation above; refer to "
+                 "one by its exact task_id if you need to flag it in `next_step_hint`):"]
+        for r in subtasks:
+            note = r.get("note")
+            suffix = f" — {note}" if note else ""
+            ref = task_ref_parts(r.get("task_id", "") or "", r.get("title", "") or "")
+            lines.append(f"- {ref} [{r.get('outcome', '')}]{suffix}")
+        return ["\n".join(lines)]
+
+    @staticmethod
+    def _observe_outputs_section(request: ContextRequest) -> list[str]:
+        """前台 observe 的产出注入段（无产出 → 空列表）。
+
+        `finish_task` 的产出走 SILENT，不入 task 层、不在重建的对话里——但 observer
+        须看到 actor 最终提交了什么。显式补一段并标注来源（act 阶段调用 finish_task
+        的结果），置于判定提示之前。
+        """
+        outputs = getattr(request.task, "outputs", None)
+        outputs_text = (
+            outputs if isinstance(outputs, str)
+            else (content_to_text(outputs) if outputs else "")
         )
+        if not outputs_text:
+            return []
+        return [
+            "## Final output\n"
+            "The actor ended the act phase by calling the `finish_task` tool; the result it "
+            "submitted (shown to the user) was:\n\n"
+            + outputs_text
+        ]
 
     # ── 共用工具 ──────────────────────────────────────────────────────────────
 

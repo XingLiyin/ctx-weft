@@ -57,7 +57,7 @@ async def test_observer_reuses_act_conversation_plus_observe_message() -> None:
                              user_prompt_in_memory=True, process_report=None),
         session=SimpleNamespace(user_prompt="up"),
     )
-    msgs = DefaultComposer()._build_observer_messages(blocks, request)
+    msgs = DefaultComposer()._build_observe_messages(blocks, request)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "round1 reply" in joined and "round2 reply" in joined  # 全部轮次
     assert "dispatch stuff" in joined                             # act 风格：派发日志一并复用
