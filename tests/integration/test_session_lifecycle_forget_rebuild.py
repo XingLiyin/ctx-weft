@@ -39,8 +39,21 @@ from tests.integration.test_minimal_loop import (
 )
 from tests._event_helpers import append_one
 
+
+
 pytestmark = pytest.mark.asyncio
 
+
+def _is_background_observe(request) -> bool:
+    """后台 observe（只摘要边界）的判据。
+
+    2026-09-22 起后台与前台共用 `report_task_outcome`，**工具名不再能分流**；改看 cue——
+    只摘要的边界带 `_background_observe_cue` 的开头那句「Status of the current task:」，
+    前台的判定 cue 没有。判定边界（plain_text）用的正是前台那条 cue，但那时前台 observe
+    不跑（纯文本回合走后台），不存在歧义。
+    """
+    msgs = getattr(request, "messages", None) or []
+    return any("Status of the current task:" in str(getattr(m, "content", "")) for m in msgs)
 
 class _FinishLLM(MockLLMAdapter):
     def __init__(self, **kw) -> None:
@@ -55,16 +68,16 @@ class _FinishLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:
             return self._stream(MockResponse(text=""), request)
-        if "control__report_task_outcome" in names:
+        if "control__report_task_outcome" in names and not _is_background_observe(request):
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("obs"), name="control__report_task_outcome",
                          arguments={"task_status": "success", "act_recap": "done",
                                     "task_summary": "done"}),
             ]), request)
-        if "control__collect_process_report" in names:
+        if "control__report_task_outcome" in names and _is_background_observe(request):
             return self._stream(MockResponse(tool_calls=[
-                ToolCall(id=self._id("bg"), name="control__collect_process_report",
-                         arguments={"act_recap": "seg"}),
+                ToolCall(id=self._id("bg"), name="control__report_task_outcome",
+                         arguments={"task_status": "success", "act_recap": "seg"}),
             ]), request)
         # 交付物 = 收尾回合正文（finish_task 不带未声明参数，spec: capability-gateway）
         return self._stream(MockResponse(text="done", tool_calls=[

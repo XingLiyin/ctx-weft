@@ -28,7 +28,8 @@ from typing import TYPE_CHECKING
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.steps.observe import run_observe_react
-from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
+from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.ids import generate_id
@@ -77,6 +78,79 @@ _SEGMENT_RAW_TYPES = [
     MemoryEventType.TOOL_INVOCATION,
     MemoryEventType.TOOL_RESULT,
 ]
+
+
+def _judges(boundary: str) -> bool:
+    """这个边界的后台 observe 要不要产 verdict（2026-09-22）。
+
+    **只有 `plain_text`**：人在旁边等着，而「这段话是想问人还是交付完了」只有判定能
+    区分。其余边界的判定已由别处给出——`mechanical` 是机械判决刚判过、close 边界是
+    actor 自己调 finish_task 宣布的、`interrupt` / `dispatch` 压根不是一个结局——后台
+    再判一次只会把那份判决覆盖掉。
+    """
+    return boundary == "plain_text"
+
+
+def _subtask_handles(state: "LoopState", ctx: "LoopContext") -> list[dict]:
+    """子任务句柄清单（task_id / title / outcome），与前台 observe 同一形状。
+
+    只作信息：observer 据它在 `next_step_hint` 里**指名**哪个子任务的产出不合格，
+    重派还是自己做由下一轮 actor 决定。拿不到 TaskManager 就返回空——清单缺失只是让
+    hint 无法指名，不该把这次观察打挂。
+    """
+    tm = getattr(ctx, "task_manager", None)
+    if tm is None or not hasattr(tm, "children_of"):
+        return []
+    out: list[dict] = []
+    for cid in tm.children_of(state.task.id):
+        child = tm.get_task(cid)
+        if child is None:
+            continue
+        entry = {"task_id": child.id, "title": child.title or "",
+                 "outcome": (child.status or "").lower()}
+        if child.status == "CANCELED" and child.error_code:
+            entry["note"] = child.error or child.error_code
+        out.append(entry)
+    return out
+
+
+async def _submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> None:
+    """把 observer 的判决交给 TaskManager 的带外入口。
+
+    **verdict 缺失 ≡ retry**：拿不到判决（LLM 失败、没调 terminal tool、字段为空）就
+    什么都不提交，task 维持 park 等人。默认态是 park，只有 success 触发状态转移——
+    绝不因为观察失败而静默放行 DAG 后继。
+
+    带外入口自己做仲裁（task 是否仍在 `AWAITING_HUMAN`），这里不必先查一遍：人可能在
+    这两行之间开口，查了也不作数。
+    """
+    verdict = (meta.get(K.OBSERVER_OUTCOME) or "").strip()
+    if not verdict:
+        logger.info(
+            "background observe produced no verdict (task=%s); staying parked", state.task.id)
+        return
+    tm = getattr(ctx, "task_manager", None)
+    if tm is None or not hasattr(tm, "apply_out_of_band_verdict"):
+        logger.warning(
+            "background observe: no TaskManager to submit the verdict to (task=%s)",
+            state.task.id)
+        return
+    outcome = RunOutcome(
+        kind=RunOutcomeKind.COMPLETED,
+        verdict=verdict,
+        summary=meta.get(K.OBSERVER_TASK_SUMMARY, "") or "",
+        outputs=getattr(state.task, "outputs", None),
+        error=meta.get(K.OBSERVER_FAILURE_REASON, "") or "",
+    )
+    accepted = await tm.apply_out_of_band_verdict(
+        state.task.id, outcome,
+        process_report=meta.get(K.OBSERVER_ACT_RECAP, "") or "",
+        task_summary=meta.get(K.OBSERVER_TASK_SUMMARY, "") or "",
+        next_step_hint=meta.get(K.OBSERVER_NEXT_STEP_HINT, "") or "",
+    )
+    logger.info(
+        "background observe verdict '%s' for task %s: %s",
+        verdict, state.task.id, "accepted" if accepted else "rejected (the user spoke first)")
 
 
 async def is_short_segment(
@@ -294,7 +368,8 @@ async def _run_background_observe(
                 # 跳过折叠——花一次后台 LLM 调用换一段常比原文还长的摘要不划算。跳过 = 该段
                 # **永久**保 raw（与观察失败的降级同语义）：后续折叠带 since_last=USER_PROMPT
                 # 只折各自的当前段，免折残留不会被跨段合折。
-                if await is_short_segment(state, ctx, watermark):
+                short_segment = await is_short_segment(state, ctx, watermark)
+                if short_segment and not _judges(boundary):
                     logger.info(
                         "short segment kept raw (task=%s boundary=%s); skip fold",
                         state.task.id, boundary,
@@ -313,6 +388,11 @@ async def _run_background_observe(
                     if ctx.capability_cache is not None
                     else []
                 )
+                # 判定边界要带子任务清单：判 retry 时 observer 要在 `next_step_hint`
+                # 里指名哪个子任务的产出不合格（与前台 observe 同一用途）。
+                extra: dict = {"observe_boundary": boundary}
+                if _judges(boundary):
+                    extra["subtasks"] = _subtask_handles(state, ctx)
                 request = ContextRequest(
                     purpose="background_observe",
                     scope=state.scope,
@@ -322,7 +402,7 @@ async def _run_background_observe(
                     template=state.extra.get("template"),
                     bound_capabilities=bound_caps,
                     token_counter=ctx.llm.tokenizer.count,
-                    extra={"observe_boundary": boundary},
+                    extra=extra,
                 )
                 prompt = await ctx.assembler.assemble(request)
                 # Task 5：不再有 event_types 间接层——LLM_* 的「后台 vs 前台」区分改靠
@@ -336,12 +416,17 @@ async def _run_background_observe(
                     max_rounds=agent.loop_config.max_turns_per_observe,
                     terminal_tool_name=BACKGROUND_PROCESS_REPORT_NAME,
                 )
-                # 报告取值：terminal 工具产出 → 纯文本复述兜底（observer 把复述写成正文而没调工具）。
-                # content_to_text：InvocationResult.content 可能是 list[ContentPart]
-                # （provider 的 result content 里带了图，任何 provider 都可能）——对 list
-                # 直接 `.strip()` 会 AttributeError 掀掉后台 observe。str 输入原样返回。
-                act_recap = (content_to_text(result.content if result else "") or last_text or "").strip()
-                task_summary = (result.metadata or {}).get("task_summary", "") if result else ""
+                # 报告取值：terminal 工具的**结构化回传**（S3 的 OBSERVER_* key）→ 纯文本
+                # 复述兜底（observer 把复述写成正文而没调工具）。
+                #
+                # 不再解析 `result.content`：2026-09-22 起 terminal tool 与前台同一个
+                # （`report_task_outcome`），它的 content 是给 LLM 看的确认话术
+                # （"Assessment recorded: outcome=…"），拿它当 act_recap 会把话术折进段摘要。
+                # content_to_text 仍留给兜底那一支：`last_text` 可能是 list[ContentPart]。
+                meta = (result.metadata or {}) if result else {}
+                act_recap = (meta.get(K.OBSERVER_ACT_RECAP)
+                             or content_to_text(last_text or "") or "").strip()
+                task_summary = meta.get(K.OBSERVER_TASK_SUMMARY, "") or ""
                 if not act_recap:
                     # 无任何可用报告：与异常路径同语义——段保 raw，不写占位摘要、不动 finish 对。
                     if boundary in _CLOSE_BOUNDARIES:
@@ -378,16 +463,23 @@ async def _run_background_observe(
                         # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
                         # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。
                         _close_report[state.task.id] = (act_recap, task_summary)  # 不写 memory（不变量 3）
-                else:
+                elif not short_segment:
                     # v2 P3c：策展上移——段作用域折叠（护 user 回合与既有段摘要、锚点/
                     # 段尾语义，与 observe._fold_retry_segment 同门）由框架侧 segment_fold
                     # 执行原子 fold。旧 apply_compact 的 TypeError 协议错配特判随之消亡
                     # （segment_fold 是框架内函数，签名错配不再是运行时 provider 风险）。
+                    #
+                    # `short_segment` 为真时跳到这里之外：**免折不免判**（2026-09-22）——
+                    # 判定必须跑（短回合恰恰是提问最典型的形态），但短段的 recap 常比原文
+                    # 还长，折它是净亏，段保 raw。
                     from ctx_weft.core.loop.steps.segment_fold import segment_fold
                     await segment_fold(
                         ctx.memory, state.scope, MemoryScope.TASK, act_recap,
                         ctx.provider_ctx, watermark,
                     )
+
+                if _judges(boundary):
+                    await _submit_verdict(state, ctx, meta)
             except Exception:
                 # close 边界防泄漏：finalize 可能已 register_close_synth，本次失败后永远无人
                 # 消费（task_id 唯一 + close 单入口），弹掉——与「无可用报告」分支对称。

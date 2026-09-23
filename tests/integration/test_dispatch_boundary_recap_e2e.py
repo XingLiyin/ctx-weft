@@ -18,12 +18,25 @@ from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext, 
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
+
+
     InlineAgentTemplateProvider, make_echo_template,
     make_runtime,
 )
 
 pytestmark = pytest.mark.asyncio
 
+
+def _is_background_observe(request) -> bool:
+    """后台 observe（只摘要边界）的判据。
+
+    2026-09-22 起后台与前台共用 `report_task_outcome`，**工具名不再能分流**；改看 cue——
+    只摘要的边界带 `_background_observe_cue` 的开头那句「Status of the current task:」，
+    前台的判定 cue 没有。判定边界（plain_text）用的正是前台那条 cue，但那时前台 observe
+    不跑（纯文本回合走后台），不存在歧义。
+    """
+    msgs = getattr(request, "messages", None) or []
+    return any("Status of the current task:" in str(getattr(m, "content", "")) for m in msgs)
 
 class _RouterLLM(MockLLMAdapter):
     """按 request.tools 路由；act 次序：root delegate → child finish → root finish。"""
@@ -45,7 +58,7 @@ class _RouterLLM(MockLLMAdapter):
         if "control__update_task_metadata" in names:  # recognize_intent
             return self._stream(MockResponse(text=""), request)
 
-        if "control__report_task_outcome" in names:  # LLM observe（子任务 close）
+        if "control__report_task_outcome" in names and not _is_background_observe(request):  # LLM observe（子任务 close）
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("obs"), name="control__report_task_outcome",
                          arguments={"task_status": "success",
@@ -53,12 +66,12 @@ class _RouterLLM(MockLLMAdapter):
                                     "task_summary": "done"}),
             ]), request)
 
-        if "control__collect_process_report" in names:  # background observe
+        if "control__report_task_outcome" in names and _is_background_observe(request):  # background observe
             self._bg_calls += 1
             report = "DISPATCH段摘要" if self._bg_calls == 1 else "CLOSE复述"
             return self._stream(MockResponse(tool_calls=[
-                ToolCall(id=self._id("bg"), name="control__collect_process_report",
-                         arguments={"act_recap": report}),
+                ToolCall(id=self._id("bg"), name="control__report_task_outcome",
+                         arguments={"task_status": "success", "act_recap": report}),
             ]), request)
 
         # act

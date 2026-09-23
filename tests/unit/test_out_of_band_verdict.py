@@ -70,22 +70,6 @@ async def test_success_verdict_finishes_the_parked_task() -> None:
     assert EventType.TASK_FINISHED in _types(bus)
 
 
-async def test_retry_verdict_requeues_it() -> None:
-    """retry 走处置表既有的 PENDING 分支——带外入口不特殊化任何一态。"""
-    tm, bus = _tm()
-    task = _parked(tm, retry_count=0, max_retries=3)
-
-    accepted = await tm.apply_out_of_band_verdict(
-        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="retry"),
-        next_step_hint="Next Step Hint: 先取凭据",
-    )
-
-    assert accepted is True
-    assert task.status == "PENDING"
-    assert task.next_step_hint == "Next Step Hint: 先取凭据"
-    assert EventType.TASK_REQUEUED in _types(bus)
-
-
 async def test_hint_is_cleared_when_not_supplied() -> None:
     """不给 hint 就清掉，不留上一轮的过期指令。"""
     tm, _ = _tm()
@@ -151,3 +135,45 @@ async def test_second_verdict_is_rejected() -> None:
     before = len(bus.events)
     assert await tm.apply_out_of_band_verdict("A", _success()) is False
     assert len(bus.events) == before
+
+
+# ── retry / fail 维持 park（S5）────────────────────────────────────────────────
+
+async def test_retry_verdict_keeps_it_parked() -> None:
+    """观察者说「没做完」→ 字段落地，但状态不动：有人在场时该由人拍板下一步。
+
+    这与 `test_retry_verdict_requeues_it` 的差别是那条用的是**旧**语义（走处置表重排）。
+    S5 之后 retry 不再自动重跑，也不烧 `retry_count`——`max_retries` 是给无人值守的自动
+    重跑设的失控护栏，不该被一段正常的多轮对话烧光。
+    """
+    tm, bus = _tm()
+    task = _parked(tm, retry_count=0, max_retries=3)
+
+    accepted = await tm.apply_out_of_band_verdict(
+        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="retry"),
+        process_report="卡住了", next_step_hint="Next Step Hint: 先取凭据",
+    )
+
+    assert accepted is True                       # 判决被接受：字段落地了
+    assert task.status == "AWAITING_HUMAN"        # 但仍在等人
+    assert task.observer_outcome == "retry"
+    assert task.process_report == "卡住了"
+    assert task.next_step_hint == "Next Step Hint: 先取凭据"
+    assert task.retry_count == 0                  # 预算一点没烧
+    assert bus.events == []                       # 没有状态事件
+
+
+async def test_fail_verdict_keeps_it_parked_too() -> None:
+    """fail 同理：agent 说它做不到，也让人来决定，而不是系统直接判死。"""
+    tm, bus = _tm()
+    task = _parked(tm)
+
+    accepted = await tm.apply_out_of_band_verdict(
+        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="fail", error="外部接口下线"),
+        process_report="查清了原因",
+    )
+
+    assert accepted is True
+    assert task.status == "AWAITING_HUMAN"
+    assert task.observer_outcome == "fail"
+    assert bus.events == []

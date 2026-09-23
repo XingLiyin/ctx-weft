@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
+
 import pytest
 
 import ctx_weft.core.loop.steps.background_observe as bo
@@ -87,7 +89,15 @@ class _FakeGateway:
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
         # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
         # 读该字段判定 terminal 失败，缺字段会 AttributeError。
-        return SimpleNamespace(content=self._report_text, is_error=False, metadata={})
+        # 对齐 `report_task_outcome` 的真实返回：content 是给 LLM 看的话术，干净的
+        # recap 在 metadata 里（2026-09-22 起后台与前台同一个 terminal tool）。
+        return SimpleNamespace(
+            content=f"Assessment recorded: outcome=success. {self._report_text}",
+            is_error=False,
+            metadata={K.OBSERVER_OUTCOME: "success",
+                      K.OBSERVER_ACT_RECAP: self._report_text,
+                      K.OBSERVER_TASK_SUMMARY: ""},
+        )
 
 
 async def _fake_stream_collect_process_report(ctx, state, request):
@@ -285,7 +295,13 @@ async def test_two_plain_text_observes_accumulate_both_summaries(monkeypatch, fa
             self.n += 1
             # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
             # 读该字段判定 terminal 失败，缺字段会 AttributeError。
-            return SimpleNamespace(content=f"S{self.n}", is_error=False, metadata={})
+            return SimpleNamespace(
+                content=f"Assessment recorded: outcome=success. S{self.n}",
+                is_error=False,
+                metadata={K.OBSERVER_OUTCOME: "success",
+                          K.OBSERVER_ACT_RECAP: f"S{self.n}",
+                          K.OBSERVER_TASK_SUMMARY: ""},
+            )
 
     ctx.capability_gateway = _CountingGateway()
 

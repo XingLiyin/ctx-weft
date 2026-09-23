@@ -29,6 +29,8 @@ from tests.integration.test_minimal_loop import (
 )
 from tests._event_helpers import all_events
 
+
+
 pytestmark = pytest.mark.asyncio
 
 SUB_TEMPLATE_ID = "tpl_researcher"
@@ -36,6 +38,17 @@ SUB_TEMPLATE_ID = "tpl_researcher"
 # 按 qualify(cap.id) 匹配，裸 id 原样透传给 get_template 后报 TemplateNotFoundError。
 SUB_TEMPLATE_REF = "agent__tpl_researcher"
 
+
+def _is_background_observe(request) -> bool:
+    """后台 observe（只摘要边界）的判据。
+
+    2026-09-22 起后台与前台共用 `report_task_outcome`，**工具名不再能分流**；改看 cue——
+    只摘要的边界带 `_background_observe_cue` 的开头那句「Status of the current task:」，
+    前台的判定 cue 没有。判定边界（plain_text）用的正是前台那条 cue，但那时前台 observe
+    不跑（纯文本回合走后台），不存在歧义。
+    """
+    msgs = getattr(request, "messages", None) or []
+    return any("Status of the current task:" in str(getattr(m, "content", "")) for m in msgs)
 
 def _researcher_template():
     """与 root 的 tpl_echo 不同的第二个模板——差异正是本测试要观察的东西。"""
@@ -61,16 +74,16 @@ class _SpawnLLM(MockLLMAdapter):
 
         if "control__update_task_metadata" in names:
             return self._stream(MockResponse(text=""), request)
-        if "control__report_task_outcome" in names:
+        if "control__report_task_outcome" in names and not _is_background_observe(request):
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("obs"), name="control__report_task_outcome",
                          arguments={"task_status": "success", "act_recap": "done",
                                     "task_summary": "done"}),
             ]), request)
-        if "control__collect_process_report" in names:
+        if "control__report_task_outcome" in names and _is_background_observe(request):
             return self._stream(MockResponse(tool_calls=[
-                ToolCall(id=self._id("bg"), name="control__collect_process_report",
-                         arguments={"act_recap": "segment summary"}),
+                ToolCall(id=self._id("bg"), name="control__report_task_outcome",
+                         arguments={"task_status": "success", "act_recap": "segment summary"}),
             ]), request)
 
         self._act_calls += 1

@@ -71,7 +71,7 @@ class _RouterLLM(MockLLMAdapter):
     task-5-report.md）。is_short_segment 的「段内 ≤1 条 assistant 回复」免折规则
     使这条边界不需要第二次 LLM 调用（`background_observe.py::is_short_segment`），
     所以本路由器只需处理两类工具集，不用另处理
-    `control__collect_process_report`。同一次 root task 还会并发跑一次
+    `control__report_task_outcome`。同一次 root task 还会并发跑一次
     recognize_intent（root task 无 title），顺带覆盖 C5 的另一个孤儿 run
     （recognize_intent）。
     """

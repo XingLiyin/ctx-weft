@@ -32,6 +32,17 @@ from tests.integration.test_minimal_loop import (  # noqa: E402
 TOOL_SLEEP_SEC = 3.0
 
 
+def _is_background_observe(request) -> bool:
+    """后台 observe（只摘要边界）的判据。
+
+    2026-09-22 起后台与前台共用 `report_task_outcome`，**工具名不再能分流**；改看 cue——
+    只摘要的边界带 `_background_observe_cue` 的开头那句「Status of the current task:」，
+    前台的判定 cue 没有。判定边界（plain_text）用的正是前台那条 cue，但那时前台 observe
+    不跑（纯文本回合走后台），不存在歧义。
+    """
+    msgs = getattr(request, "messages", None) or []
+    return any("Status of the current task:" in str(getattr(m, "content", "")) for m in msgs)
+
 class _SlowEffectTool(ToolCapabilityProvider):
     """副作用（计数文件 + marker）→ 睡 3s → 返回。默认 reviewed 策略。"""
 
@@ -79,12 +90,12 @@ class _RouterLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:
             return self._stream(MockResponse(text=""), request)
-        if "control__collect_process_report" in names:
+        if "control__report_task_outcome" in names and not _is_background_observe(request):
             self._n += 1
             return self._stream(MockResponse(tool_calls=[
-                ToolCall(id=f"bg{self._n}", name="control__collect_process_report",
-                         arguments={"act_recap": "d", "task_summary": "d"})]), request)
-        if "control__report_task_outcome" in names:
+                ToolCall(id=f"bg{self._n}", name="control__report_task_outcome",
+                         arguments={"task_status": "success", "act_recap": "d", "task_summary": "d"})]), request)
+        if "control__report_task_outcome" in names and _is_background_observe(request):
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id="obs", name="control__report_task_outcome",
                          arguments={"task_status": "success", "act_recap": "d"})]), request)
@@ -170,6 +181,8 @@ async def ot05_recover(workdir: Path) -> dict:
 
 
 import json  # noqa: E402
+
+
 
 
 if __name__ == "__main__":

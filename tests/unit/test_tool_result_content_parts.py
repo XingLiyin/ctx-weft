@@ -29,6 +29,7 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.filesystem import SpillSink
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 
 # 一段够长、能在 repr 里被一眼认出的假 base64。
 FAKE_B64 = "QUJDREVG" * 200
@@ -348,7 +349,8 @@ async def test_reader_background_observe_recap_does_not_crash_on_parts(fake_stat
     import ctx_weft.core.loop.steps.segment_fold as sf
 
     state, ctx = fake_state_ctx
-    res, _, _ = await _run(_Prov("  recap text  ", [_img()]))
+    res, _, _ = await _run(_Prov("  recap text  ", [_img()],
+                                 metadata={K.OBSERVER_ACT_RECAP: "  recap text  "}))
     assert isinstance(res.content, list)  # 前提守卫：确实是 parts 形态
 
     state.agent.loop_config.max_turns_per_observe = 2

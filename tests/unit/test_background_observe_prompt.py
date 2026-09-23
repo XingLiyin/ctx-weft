@@ -39,7 +39,9 @@ def test_background_cue_only_process_report_no_verdict():
     assert _BACKGROUND_BOUNDARY_DESC["interrupt"] in joined
 
 
-@pytest.mark.parametrize("boundary", ["interrupt", "plain_text", "finish", "normal", "dispatch"])
+# `plain_text` 不在此列：2026-09-22 起它用**判定版** cue（人在旁边等着，而「这段话是
+# 想问人还是交付完了」只有判定能区分），不再带 boundary 状态描述。见本文件末尾两条。
+@pytest.mark.parametrize("boundary", ["interrupt", "finish", "normal", "dispatch"])
 def test_background_cue_injects_each_boundary(boundary):
     msgs = DefaultComposer()._build_observe_messages(_blocks(), _req(boundary))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
@@ -154,3 +156,23 @@ def test_background_observe_prompt_usable_with_no_identity_block_at_all():
     assert _OBSERVER_ROLE_FALLBACK in joined
     assert "collect_process_report" in joined
     assert _BACKGROUND_BOUNDARY_DESC["normal"] in joined
+
+
+def test_plain_text_boundary_uses_the_judging_cue():
+    """S5：plain_text 边界要产 verdict，所以拿的是前台那条判定 cue。"""
+    cue = DefaultComposer()._build_observe_messages(_blocks(), _req("plain_text"))[-1].content
+    assert "report_task_outcome" in cue
+    assert "do not judge" not in cue
+
+
+def test_plain_text_boundary_lists_subtasks_for_the_hint():
+    """判 retry 时要在 next_step_hint 里指名子任务——判定版才需要这份清单。"""
+    req = _req("plain_text")
+    req.extra["subtasks"] = [{"task_id": "tsk_a", "title": "甲", "outcome": "failed"}]
+    cue = DefaultComposer()._build_observe_messages(_blocks(), req)[-1].content
+    assert "tsk_a" in cue
+
+    # 只摘要的边界即便给了清单也不渲染——它不产 hint，列出来是噪音。
+    other = _req("interrupt")
+    other.extra["subtasks"] = [{"task_id": "tsk_a", "title": "甲", "outcome": "failed"}]
+    assert "tsk_a" not in DefaultComposer()._build_observe_messages(_blocks(), other)[-1].content

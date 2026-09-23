@@ -5,9 +5,9 @@
 工具就是隔着时间改主线程状态——而它的判决还要先过带外入口的仲裁（人可能已经开口重排
 了这个 task）。判决改走 `ControlResult.metadata`，由 TaskManager 在仲裁通过后统一写。
 
-本步是纯增量：前台照旧写 task（下面第一组用例逐字守住），只读能力和 metadata 回传
-暂时只有后台路径打开标记，而后台今天的 terminal tool 仍是不写 task 的
-`collect_process_report`。S5 切换 terminal tool 时才真正用上。
+本文件同时**接手了 `test_collect_process_report.py` 的职责**：那个工具在 S5 被删——它的
+签名本就是 `report_task_outcome` 的真子集，存在的唯一理由「Zero state write」正是这里的
+`readonly` 所保证的（见下面「只读：一个字段都不写」那一组）。
 """
 
 from __future__ import annotations

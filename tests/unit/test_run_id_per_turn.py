@@ -133,7 +133,7 @@ class _TurnRouterLLM(MockLLMAdapter):
       task**（第一轮是 `AWAITING_HUMAN` 冷 park，不是新建 task），title 落地后第二
       轮 `should_recognize_intent` 见 title 非空直接跳过，不用再照顾第二次
       `recognize_intent` 请求。
-    - `control__collect_process_report`（`background_observe`，纯文本冷 park的
+    - `control__report_task_outcome`（`background_observe`，纯文本冷 park的
       boundary="plain_text" 触发）：回一个真的 recap，让它一轮成功——不这样做的话
       它会把手里任何认不出的回复都当"没产出摘要"，内部重试到认输才罢休（既有降级
       路径，非本 task 改动范围），拖慢且不必要。
@@ -166,8 +166,8 @@ class _TurnRouterLLM(MockLLMAdapter):
                 "title": "Echo smoke test", "description": "two-turn run_id fixture",
                 "session_goal": "",
             })])
-        elif "control__collect_process_report" in names:
-            response = MockResponse(tool_calls=[self._tc("control__collect_process_report", {
+        elif "control__report_task_outcome" in names:
+            response = MockResponse(tool_calls=[self._tc("control__report_task_outcome", {
                 "act_recap": "said hi, awaiting the user's next message", "task_summary": "",
             })])
         elif "control__finish_task" in names:

@@ -38,6 +38,7 @@ from ctx_weft.protocols import (
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.core.loop.steps.segment_fold import segment_fold
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 
 MT = MemoryEventType
 
@@ -219,7 +220,10 @@ class _FakeGateway:
         # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
         # 读该字段判定 terminal 失败，缺字段会 AttributeError。
         from types import SimpleNamespace
-        return SimpleNamespace(content="S2", is_error=False, metadata={})
+        return SimpleNamespace(content="Assessment recorded: outcome=success. S2",
+                               is_error=False,
+                               metadata={K.OBSERVER_ACT_RECAP: "S2",
+                                         K.OBSERVER_OUTCOME: "success"})
 
 
 @pytest.mark.asyncio

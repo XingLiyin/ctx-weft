@@ -1092,8 +1092,16 @@ class DefaultComposer(Composer):
             pre_cue_sections = self._observe_outputs_section(request)
         else:
             boundary = (getattr(request, "extra", {}) or {}).get("observe_boundary", "normal")
-            cue = _background_observe_cue(boundary)
-            subtasks = []
+            # `plain_text` 边界要产 verdict（S5）：人在旁边等着，而「这段话是想问人还是
+            # 交付完了」只有判定能区分。其余边界照旧只摘要——判定已由别处给出
+            # （`mechanical` 是机械判决，close 边界是 actor 自己宣布的），后台再判一次
+            # 会把那份判决覆盖掉。
+            judging = boundary == "plain_text"
+            cue = _OBSERVE_JUDGMENT_CUE if judging else _background_observe_cue(boundary)
+            # 判 retry 时要在 `next_step_hint` 里指名哪个子任务产出不合格，所以判定版
+            # 才需要这份清单。
+            subtasks = ((getattr(request, "extra", {}) or {}).get("subtasks") or []
+                        if judging else [])
             pre_cue_sections = None
             if boundary in _CLOSE_BOUNDARIES:
                 section = _finish_result_section(request)

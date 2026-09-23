@@ -40,27 +40,27 @@ def test_duplicate_cap_id_still_raises() -> None:
 def test_global_region_survives_evict() -> None:
     """register_global 的控制工具不随 per-agent evict 逐出，get_by_qualified_name 仍命中。"""
     cache = CapabilityCache()
-    cache.register_global([_cap("control:collect_process_report", "collect_process_report")])
+    cache.register_global([_cap("control:report_task_outcome", "report_task_outcome")])
     cache.put("agt_1", [_cap("mcp:a:search", "search")])
 
     # evict 前：per-agent + 全局都命中
-    assert cache.get_by_qualified_name("agt_1", "control__collect_process_report").id == "control:collect_process_report"
+    assert cache.get_by_qualified_name("agt_1", "control__report_task_outcome").id == "control:report_task_outcome"
     assert cache.get_by_qualified_name("agt_1", "mcp__a__search").id == "mcp:a:search"
 
     cache.evict("agt_1")  # per-agent 清空（模拟 run 收尾）
 
     # evict 后：控制工具（全局）仍命中；per-agent 的 mcp 已没
-    assert cache.get_by_qualified_name("agt_1", "control__collect_process_report").id == "control:collect_process_report"
+    assert cache.get_by_qualified_name("agt_1", "control__report_task_outcome").id == "control:report_task_outcome"
     assert cache.get_by_qualified_name("agt_1", "mcp__a__search") is None
 
 
 def test_get_merges_global_control_tools() -> None:
     """get(agent) 返回 per-agent 快照 + session 全局控制工具（供 background observe 装配）。"""
     cache = CapabilityCache()
-    cache.register_global([_cap("control:collect_process_report", "collect_process_report")])
+    cache.register_global([_cap("control:report_task_outcome", "report_task_outcome")])
     cache.put("agt_1", [_cap("mcp:a:search", "search")])
     ids = {c.id for c in cache.get("agt_1")}
-    assert ids == {"mcp:a:search", "control:collect_process_report"}
+    assert ids == {"mcp:a:search", "control:report_task_outcome"}
 
 
 def test_global_does_not_leak_across_evict_into_store() -> None:

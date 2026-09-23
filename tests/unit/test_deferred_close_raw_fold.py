@@ -24,6 +24,7 @@ from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, Prov
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 
 pytestmark = pytest.mark.asyncio
 
@@ -189,7 +190,7 @@ def _tool_call_chunk():
     return SimpleNamespace(
         kind="tool_call",
         tool_call=SimpleNamespace(id="tc_obs", name=BACKGROUND_PROCESS_REPORT_NAME,
-                                  arguments={"act_recap": "真报告act"}),
+                                  arguments={"task_status": "success", "act_recap": "真报告act"}),
         text="", usage=None,
     )
 
@@ -209,7 +210,13 @@ class _FakeGateway:
         # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
         # 读该字段判定 terminal 失败，缺字段会 AttributeError。
         from types import SimpleNamespace
-        return SimpleNamespace(content="真报告act", is_error=False, metadata={})
+        # 对齐 `report_task_outcome`：content 是话术，干净的 recap 在 metadata 里。
+        return SimpleNamespace(
+            content="Assessment recorded: outcome=success. 真报告act",
+            is_error=False,
+            metadata={K.OBSERVER_OUTCOME: "success",
+                      K.OBSERVER_ACT_RECAP: "真报告act",
+                      K.OBSERVER_TASK_SUMMARY: "真报告summary"})
 
 
 async def _preset_placeholder_pair(mem, scope, task_id: str, pctx) -> None:

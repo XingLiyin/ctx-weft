@@ -969,7 +969,10 @@ class TaskManager:
         释放协程），它判完时这个 task 没有任何 run 在跑，`_close_report` 那条「同 run 内
         由 finalize 取用」的路走不通。
 
-        返回 **True = 被接受并已落定**，**False = 被仲裁拒绝、task 一个字段都没动**。
+        返回 **True = 判决被接受**（observer 字段已落地），**False = 被仲裁拒绝、task 一个
+        字段都没动**。注意 True 不等于「task 终结了」：只有 `success` 才走处置表，
+        `retry` / `fail` 维持 park——「没做完」在有人在场时该由人拍板，不该由系统自动
+        重排或判死（`max_retries` 是给无人值守的自动重跑设的失控护栏）。
 
         仲裁判据：只接受仍停在 `AWAITING_HUMAN` 的 task。人可能已经开口重排了它——
         `_inject_user_turn` 写 USER_PROMPT 时**不等**后台 observe，所以「人先开口」是
@@ -1001,6 +1004,15 @@ class TaskManager:
             task.next_step_hint = next_step_hint or None
             if outcome.verdict:
                 task.observer_outcome = outcome.verdict
+            if outcome.verdict != "success":
+                # retry / fail → 维持 park。字段已写（hint 供下一轮 act 用），但不转移
+                # 状态：观察者说「没做完」时，在有人在场的会话里该由人决定下一步。
+                logger.info(
+                    "out-of-band verdict '%s' for task %s: fields recorded, staying parked "
+                    "for the user",
+                    outcome.verdict, task_id,
+                )
+                return True
             disp = self._decide_and_write(task_id, outcome)
 
         await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload)

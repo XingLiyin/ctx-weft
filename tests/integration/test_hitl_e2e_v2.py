@@ -28,6 +28,7 @@ from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import (
+    MemoryKind,
     ImagePart,
     MemoryEventType,
     ProviderContext,
@@ -137,6 +138,18 @@ class _ActRouterLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:
             return self._stream(MockResponse(text=""), request)
+        if "control__report_task_outcome" in names:
+            # observe 回合——**不消费 act 队列**。2026-09-22 起 `plain_text` 边界的后台
+            # observe 也跑 LLM（「免折不免判」：短回合恰恰是提问最典型的形态），此前短段
+            # 门让它在调 LLM 之前就早退，于是这个分支从来不需要存在；没有它，后台会偷吃
+            # 一个 act 响应，把队列顺序整个打乱。
+            #
+            # 判 `retry`：本文件的用例测的是「人回来接着说」，对应的正是观察者说「还没
+            # 做完」。判 success 会让 task 终结、park 随之消失，那是另一条路径的语义。
+            return self._stream(MockResponse(tool_calls=[ToolCall(
+                id="obs_bg", name="control__report_task_outcome",
+                arguments={"task_status": "retry", "act_recap": "观察者：本段小结"},
+            )]), request)
         self.act_requests.append(request)
         response = self._act_responses[self._act_idx]
         self._act_idx += 1
@@ -381,16 +394,25 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
         t = tm.get_task(req.task_id)
         return t if (t is not None and t.status in ("FINISHED", "FAILED", "CANCELED")) else None
 
+    ctxp = ProviderContext(session_id=sid, tenant_id="default")
+    scope = state.scope
+
     task = await _poll(_final_task)
     assert task.status == "FINISHED", f"expected FINISHED, got {task.status}"
 
-    ctxp = ProviderContext(session_id=sid, tenant_id="default")
-    scope = state.scope
-    results = await memory.recall_recent(scope, [MemoryEventType.TOOL_RESULT], 20, ctxp)
+    # 直接读 in-memory provider 的底层行，**不经 `recall_recent`**：task 收尾时 close
+    # 边界的后台 observe 会折叠末段 raw，把这条 TOOL_RESULT 标成 superseded，而那个查询
+    # 只看 active 的。2026-09-22 之前这里能在终态之后查到，靠的是后台 observe 恰好拿不到
+    # 报告（mock 的工具面判据认不出 observe 回合）——那是偶然，不是契约。本用例要断言的
+    # 是「图片进了 TOOL_RESULT 的 content parts」这个**写入事实**，它不因后续折叠而改变。
     # tool_call_id 已是摄入点铸造的内部标识（spec: conversation-integrity）——按 tool_name
-    # 定位 ask_user 的 TOOL_RESULT；raw id（tc_ask）可在 assistant 回合 metadata.raw_tool_call_id 追溯。
-    matching = [r for r in results if r.metadata.get("tool_name") == "control__ask_user"]
-    assert matching, f"no TOOL_RESULT recorded for ask_user; got {[r.metadata for r in results]}"
+    # 定位；raw id（tc_ask）可在 assistant 回合 metadata.raw_tool_call_id 追溯。
+    # v2 的行不带旧 `type`（恒 None），按 kind + role 认：tool 结果 = CONVERSATION_TURN
+    # 且 role="tool"（同 kind 的 tool_audit 那条是审计副本，content 形态不是这里要断言的）。
+    matching = [e.event for e in memory._events
+                if e.kind is MemoryKind.CONVERSATION_TURN and e.event.role == "tool"
+                and (e.event.metadata or {}).get("tool_name") == "control__ask_user"]
+    assert matching, "no TOOL_RESULT recorded for ask_user"
     content = matching[0].content
     assert isinstance(content, list), (
         f"TOOL_RESULT content should carry parts (text + image), got {type(content).__name__}"

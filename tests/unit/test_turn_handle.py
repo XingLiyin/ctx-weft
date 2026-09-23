@@ -260,7 +260,7 @@ class _CloseFoldLLM(MockLLMAdapter):
     """单 root task：finish_task 收尾触发 close 边界后台 observe（launch_background_observe
     fire-and-forget），验证 `wait_for_finish` 返回**那一刻**该次折叠已经落地——不是靠
     调用方碰巧多等了一会儿。按 request.tools 路由：recognize_intent → 空文本；
-    background observe（`control__collect_process_report`）→ 折叠摘要；其余（act）→
+    background observe（`control__report_task_outcome`）→ 折叠摘要；其余（act）→
     finish_task 收尾。"""
 
     def __init__(self, **kw) -> None:
@@ -275,10 +275,13 @@ class _CloseFoldLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:  # recognize_intent
             return self._stream(MockResponse(text=""), request)
-        if "control__collect_process_report" in names:  # background observe
+        # 后台 observe 的 terminal tool 自 2026-09-22 起与前台同一个
+        # （`report_task_outcome`）；这里靠「没有 act 的工具面」把它与 act 区分开。
+        if "control__report_task_outcome" in names:  # observe（前台或后台）
             return self._stream(MockResponse(tool_calls=[
-                ToolCall(id=self._id("bg"), name="control__collect_process_report",
-                         arguments={"act_recap": "CLOSE段摘要"}),
+                ToolCall(id=self._id("bg"), name="control__report_task_outcome",
+                         arguments={"task_status": "success", "act_recap": "CLOSE段摘要",
+                                    "task_summary": "CLOSE小结"}),
             ]), request)
         return self._stream(MockResponse(text="done", tool_calls=[
             ToolCall(id=self._id("fin"), name="control__finish_task",

@@ -52,7 +52,11 @@ DELEGATE_TASK_NAME = qualify(f"{PROVIDER_NAME}:delegate_task")
 DELEGATE_PLAN_NAME = qualify(f"{PROVIDER_NAME}:delegate_plan")
 ASK_USER_NAME = qualify(f"{PROVIDER_NAME}:ask_user")
 REPORT_TASK_OUTCOME_NAME = qualify(f"{PROVIDER_NAME}:report_task_outcome")
-BACKGROUND_PROCESS_REPORT_NAME = qualify(f"{PROVIDER_NAME}:collect_process_report")
+#: 后台 observe 的 terminal tool。2026-09-22 起与前台同一个——`collect_process_report`
+#: 的签名本就是 `report_task_outcome` 的真子集，它存在的唯一理由「Zero state write」
+#: 已由 `ControlContext.readonly` 取代（S3）。保留这个别名是因为调用方按「后台用哪个
+#: terminal tool」来读它，语义比直接写 REPORT_TASK_OUTCOME_NAME 清楚。
+BACKGROUND_PROCESS_REPORT_NAME = REPORT_TASK_OUTCOME_NAME
 UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
 
 # delegate_plan 的 actor-visible ack 及 gateway 配对 tool result 内容。
@@ -366,7 +370,7 @@ def finish_task(
     return ControlResult(content="Task finished.")
 
 
-@control_tool(purposes=["observe"])
+@control_tool(purposes=["observe", "background_observe"])
 def report_task_outcome(
     task_status: Annotated[
         str,
@@ -474,28 +478,6 @@ def report_task_outcome(
         content=f"Assessment recorded: outcome={task_status}.{failure_part} {act_recap}",
         metadata=metadata,
     )
-
-
-@control_tool(purposes=["background_observe"])
-def collect_process_report(
-    act_recap: Annotated[
-        str,
-        "Honest recap of what the LAST act phase actually did: what was changed/produced, which tools "
-        "were called and whether any failed. First-person, faithful to the transcript, this segment only.",
-    ],
-    task_summary: Annotated[
-        str,
-        "For a close (finish/normal) segment: a CONCISE process report of the WHOLE task — important steps "
-        "and lessons, incorporating any sub-task results. High-signal, not verbose. NOT the final output "
-        "(that is the actor's closing message text, delivered in the same turn as finish_task). "
-        "Leave empty for non-close segments.",
-    ] = "",
-    *,
-    ctx: ControlContext = None,
-) -> ControlResult:
-    """Summarize the current segment. Zero state write: never touches task.status / process_report / etc.
-    Returns act_recap as content + task_summary in metadata for the close-out finish 对."""
-    return ControlResult(content=act_recap, metadata={"task_summary": task_summary})
 
 
 @control_tool(purposes=["recognize_intent"])
