@@ -393,8 +393,13 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
 # ── act.py: plain-text pause does NOT fire for child (Task 13) ──────────────
 
 
-async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
-    """act plain-text pause with child task → launch_background_observe NOT called."""
+async def test_act_plain_text_pause_child_task_fires(monkeypatch):
+    """子任务的纯文本 park **也**触发后台 observe（2026-09-22 去掉 `_is_own_root` 闸）。
+
+    那个闸原先的理由是「非 root 走 LLM observe 向 parent 上报」——但纯文本回合压根到不了
+    前台 observe（它在 park 处就退出了），于是子任务的这一段既没人判也没人折。并发不会
+    因此失控：单交互线闸门保证一个 session 同时只有一条非 unattended 的线。
+    """
     from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
     from tests.hitl_env import make_hitl
     from ctx_weft.providers.events import InProcessEventBus
@@ -418,7 +423,7 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
     hitl, _hitl_reg = make_hitl(bus)
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
-    child = dataclasses.replace(_make_child_task(status="ACTIVE"), interaction_mode="interactive")
+    child = dataclasses.replace(_make_child_task(status="ACTIVE"), unattended=False)
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t2", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t2", agent_id="ag1")
@@ -435,7 +440,7 @@ async def test_act_plain_text_pause_child_task_does_not_fire(monkeypatch):
     with pytest.raises(HitlPark):
         await _finish_plain_text_turn(state, ctx, turn_num=1)
 
-    assert len(launched) == 0, f"Expected 0 launches for child plain-text pause, got {len(launched)}"
+    assert [t for (t,) in launched] == ["t2"],         f"子任务的纯文本 park 应触发一次后台 observe，实得 {launched}"
 
 
 # ── suspend.py: dispatch boundary (spec 2026-07-16) fires for all delegate parents ──

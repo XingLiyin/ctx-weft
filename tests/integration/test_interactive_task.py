@@ -36,10 +36,16 @@ from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, mak
 pytestmark = pytest.mark.asyncio
 
 
-def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
+def _act_state_ctx(unattended: bool, llm: MockLLMAdapter):
     """返回 (state, ctx, task, registry, mem)。第 4 项是 `HitlRegistry`——`list_pending`
     的持有者从 `HitlManager` 换成了它，断言口径不变（仍是「这个 session 上挂着哪些未决
-    请求」）。"""
+    请求」）。
+
+    参数 2026-09-22 从 `interaction_mode: str` 换成 `unattended: bool`：纯文本回合的
+    归宿判据改成了「有没有人在」（`interaction_mode` 随 S7 删除）。映射是逐字的——
+    旧的 `"auto"`（自治、纯文本即产出）≡ `unattended=True`，旧的 `"interactive"`
+    （让位等人）≡ `unattended=False`。
+    """
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
     hitl_service, hitl = make_hitl(bus)
@@ -47,7 +53,7 @@ def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
     task = Task(
         id="t1", session_id="s1", status="ACTIVE",
         title="Greet", description="say hi politely",
-        interaction_mode=interaction_mode, settings=NormalTaskSettings(),
+        unattended=unattended, settings=NormalTaskSettings(),
     )
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
@@ -71,7 +77,7 @@ def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
 
 async def test_interactive_plain_text_parks_for_user() -> None:
     llm = MockLLMAdapter(responses=[MockResponse(text="Hi! Anything else?")])
-    state, ctx, task, hitl, mem = _act_state_ctx("interactive", llm)
+    state, ctx, task, hitl, mem = _act_state_ctx(False, llm)
 
     with pytest.raises(HitlPark):
         await ActStep().execute(state, ctx)
@@ -94,7 +100,7 @@ async def test_interactive_plain_text_parks_for_user() -> None:
 
 async def test_auto_plain_text_completes() -> None:
     llm = MockLLMAdapter(responses=[MockResponse(text="Hi! Anything else?")])
-    state, ctx, task, hitl, _mem = _act_state_ctx("auto", llm)
+    state, ctx, task, hitl, _mem = _act_state_ctx(True, llm)
 
     outcome = await ActStep().execute(state, ctx)
 

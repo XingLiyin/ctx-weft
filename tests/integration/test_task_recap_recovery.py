@@ -109,6 +109,10 @@ async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
         _ev(2, EventType.RUN_STARTED),
         _ev(3, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
             "assigned_agent_id": aid, "creator_agent_id": aid}),
         _ev(4, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         _ev(5, EventType.TASK_FINISHED, task_id=tid,
@@ -211,6 +215,10 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed(monkeypatch) -
         _ev(2, EventType.RUN_STARTED),
         _ev(3, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
             "assigned_agent_id": aid, "creator_agent_id": aid}),
         _ev(4, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         _ev(5, EventType.TASK_FAILED, task_id=tid,
@@ -342,6 +350,10 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
         _ev(2, EventType.RUN_STARTED),
         _ev(3, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
             "assigned_agent_id": aid, "creator_agent_id": aid}),
         _ev(4, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         # Crash mid interrupt-boundary observe while the task itself is suspended
@@ -360,7 +372,8 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
         recap_responses=[
             MockResponse(tool_calls=[
                 ToolCall(id=f"tc_recap_{i}", name=BACKGROUND_PROCESS_REPORT_NAME,
-                          arguments={"act_recap": "recovered recap"}),
+                          arguments={"task_status": "success",
+                                     "act_recap": "recovered recap"}),
             ])
             for i in range(4)
         ],
@@ -469,6 +482,10 @@ async def test_all_tasks_terminal_with_a_pruned_snapshot_does_not_raise() -> Non
             template_id="agent:tpl_echo", root_agent_id=aid),
         _ev(2, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
             "assigned_agent_id": aid, "creator_agent_id": aid}),
         _ev(3, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         _ev(4, EventType.TASK_FINISHED, task_id=tid, outcome="success",
@@ -533,6 +550,10 @@ async def test_resume_does_not_read_the_whole_event_stream() -> None:
             template_id="agent:tpl_echo", root_agent_id=aid),
         _ev(2, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
             "assigned_agent_id": aid, "creator_agent_id": aid}),
         _ev(3, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         _ev(4, EventType.TASK_FINISHED, task_id=tid, outcome="success", summary="done"),

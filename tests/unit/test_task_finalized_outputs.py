@@ -88,7 +88,7 @@ def test_compose_body_backtracks_to_last_nonempty_text() -> None:
 async def test_act_outputs_stays_joined_string_for_plain_text() -> None:
     """纯文本收尾：outputs = 正文（无 summary），逐字不变。"""
     llm = MockLLMAdapter(responses=[MockResponse(text="Hi! Anything else?")])
-    state, ctx, task, _hitl, _mem = _act_state_ctx("auto", llm)
+    state, ctx, task, _hitl, _mem = _act_state_ctx(True, llm)
 
     await ActStep().execute(state, ctx)
 
@@ -104,7 +104,7 @@ async def test_act_outputs_stays_joined_string_with_summary(monkeypatch) -> None
         tool_calls=[ToolCall(id="tc1", name=FINISH_TASK_NAME,
                              arguments={"deliverables_summary": "checked the math twice"})],
     )])
-    state, ctx, task, _hitl, _mem = _act_state_ctx("auto", llm)
+    state, ctx, task, _hitl, _mem = _act_state_ctx(True, llm)
 
     async def _fake_exec(st, _c, tool_calls):
         # 只替代 gateway 那一段：finish_task 的真实副作用就是置 actor_done。

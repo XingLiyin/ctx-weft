@@ -1507,6 +1507,10 @@ class CtxWeftRuntime:
             description=content_to_text(user_prompt)[:200],
             user_prompt=user_prompt,
             user_prompt_event_jsonable=user_prompt_event_jsonable,
+            # 无人值守（2026-09-22）：这条入口的语义就是「跑到完成再返回」，没有人会
+            # 发下一条消息。不标的话，纯文本收尾会 park 等一个永远不来的人——判据自
+            # `interaction_mode` 退场后只剩「有没有人在」，而这里答案明确是没有。
+            unattended=True,
             created_at=now_utc(),
         )
 

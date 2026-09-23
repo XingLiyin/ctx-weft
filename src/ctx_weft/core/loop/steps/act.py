@@ -824,9 +824,15 @@ def _reconcile_finish_vs_dispatch(
 async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: int) -> None:
     """纯文本回合（无 tool call）收尾。
 
-    interactive 普通任务：请求让位给用户 → `_park_await_user`（有人值守则 HITL input
-    冷 park、raises HitlPark，用户回复经 runtime 冷 resume 作 USER_PROMPT 注入后重入
-    act）。auto / 非普通任务 / 无 hitl：纯文本即任务产出，发 stop 事件路由 observe。
+    **有人在场**就让位 → `_park_await_user`（HITL input 冷 park、raises HitlPark；park
+    与后台 observe 并行，observer 判 success 则经带外入口终结本 task、判 retry/fail 则
+    维持 park 等人）。unattended / 非普通任务 / 无 hitl：纯文本即任务产出，发 stop 事件
+    路由前台 observe。
+
+    判据 2026-09-22 从 `interaction_mode == "interactive"` 换成 `not unattended`：
+    「这段话是想问人还是交付完了」是**逐回合**的语义，不该由 task 上的一个静态字段
+    统一回答——那样 interactive 的 task 里 agent 交付完了也得 park，auto 的 task 里
+    agent 想停下来说句话也停不了。现在交给 observer 逐次判定，这里只问「有没有人」。
 
     下面这条 `stop` 是「没让位」的收尾，与让位严格互斥：真让位了就抛 HitlPark，压根
     走不到这里；`_park_await_user` 正常返回就意味着这一轮不让位（无人值守），它保证
@@ -834,7 +840,7 @@ async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: 
     """
     if (
         isinstance(state.task.settings, NormalTaskSettings)
-        and state.task.interaction_mode == "interactive"
+        and not state.task.unattended
         and ctx.hitl is not None
     ):
         await _park_await_user(state, ctx, turn_num)
@@ -1055,9 +1061,14 @@ async def _park_await_user(state: LoopState, ctx: LoopContext, turn_num: int) ->
     await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
         "turn": turn_num, "reason": "await_user"}))
     # 纯文本暂停 = 软待命(允许但不强制回复) → PAUSED,区别于 ask_user 的 PAUSED_HITL。
-    if _is_own_root(state.task):
-        from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-        launch_background_observe(state, ctx, boundary="plain_text")
+    #
+    # 2026-09-22 去掉了这里的 `_is_own_root` 闸：子任务的纯文本回合同样 park、同样要
+    # 判定。当时那个闸的理由是「非 root 走 LLM observe 向 parent 上报」——但纯文本回合
+    # 压根到不了前台 observe（它在这里就 park 了），于是子任务的这一段既没人判也没人折。
+    # 并发不会因此失控：单交互线闸门保证一个 session 同时只有一条非 unattended 的线
+    # （见 `TaskManager._interactive_line_held`）。
+    from ctx_weft.core.loop.steps.background_observe import launch_background_observe
+    launch_background_observe(state, ctx, boundary="plain_text")
     await _cold_park(state, ctx, PREFACE_NORMAL, unattended=state.task.unattended)
 
 

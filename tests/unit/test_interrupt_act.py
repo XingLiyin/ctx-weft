@@ -48,7 +48,7 @@ class _PauseMidStream:
 
 async def test_interrupt_parks_instead_of_cancel():
     llm = MockLLMAdapter(responses=[MockResponse(text="hello")])
-    state, ctx, task, hitl, _mem = _act_state_ctx("interactive", llm)
+    state, ctx, task, hitl, _mem = _act_state_ctx(False, llm)
     pause = PauseToken()
     pause.pause()
     ctx.pause_token = pause
@@ -65,7 +65,7 @@ async def test_interrupt_parks_instead_of_cancel():
 
 async def test_hard_cancel_raises_cancellederror():
     llm = MockLLMAdapter(responses=[MockResponse(text="hello")])
-    state, ctx, task, hitl, _mem = _act_state_ctx("interactive", llm)
+    state, ctx, task, hitl, _mem = _act_state_ctx(False, llm)
     tok = CancelToken()
     tok.cancel()
     ctx.cancel_token = tok
@@ -78,7 +78,7 @@ async def test_hard_cancel_raises_cancellederror():
 async def test_interrupt_midstream_commits_partial_marked():
     pause = PauseToken()
     llm = _PauseMidStream(pause, "partial reply")
-    state, ctx, task, hitl, mem = _act_state_ctx("interactive", llm)
+    state, ctx, task, hitl, mem = _act_state_ctx(False, llm)
     ctx.pause_token = pause
 
     with pytest.raises(HitlPark):
@@ -111,7 +111,7 @@ async def test_interrupt_before_token_marks_edit_phase():
     pause = PauseToken()
     pause.pause()
     llm = MockLLMAdapter(responses=[MockResponse(text="x")])
-    state, ctx, task, hitl, _mem = _act_state_ctx("interactive", llm)
+    state, ctx, task, hitl, _mem = _act_state_ctx(False, llm)
     ctx.pause_token = pause
 
     with pytest.raises(HitlPark):
@@ -123,7 +123,7 @@ async def test_interrupt_after_token_is_not_edit_phase():
     # ② 已吐 token → 非 edit（preface = interrupt）。
     pause = PauseToken()
     llm = _PauseMidStream(pause, "partial")
-    state, ctx, task, hitl, _mem = _act_state_ctx("interactive", llm)
+    state, ctx, task, hitl, _mem = _act_state_ctx(False, llm)
     ctx.pause_token = pause
 
     with pytest.raises(HitlPark):
@@ -136,7 +136,7 @@ async def test_interrupt_before_any_token_does_not_persist_response():
     pause = PauseToken()
     pause.pause()                               # paused before streaming starts
     llm = MockLLMAdapter(responses=[MockResponse(text="unused")])
-    state, ctx, task, hitl, mem = _act_state_ctx("interactive", llm)
+    state, ctx, task, hitl, mem = _act_state_ctx(False, llm)
     ctx.pause_token = pause
 
     with pytest.raises(HitlPark):
