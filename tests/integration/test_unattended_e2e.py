@@ -3,7 +3,7 @@
 两条链路，均从真实 `CtxWeftRuntime` 起（真实 `TaskManager` / `CapabilityGateway` /
 `HitlService` / `HitlRegistry`），只在 LLM 与工具 provider 两处打桩：
 
-1. `start_session(unattended=True)`：root task 无人值守且被强制 `interaction_mode="auto"`；
+1. `start_session(unattended=True)`：root task 无人值守且被强制 `unattended=True`；
    一次被 `HumanConfirmationAuthorizer` 门控的工具调用**当场被拒**（不登记、不 park），
    actor 收到 `[Blocked by human: ...]` 后照常收尾 → FINISHED。
 2. `send_message(unattended=True)`：它开出的新 task 同样带标记、同样被强制 auto。
@@ -40,7 +40,7 @@ pytestmark = pytest.mark.asyncio
 class _RouterLLM(MockLLMAdapter):
     """同 `test_hitl_e2e_v2._ActRouterLLM`，但 act 队列耗尽时回一句空文本而不是 IndexError。
 
-    空文本在 `interaction_mode="auto"` 下不会让位等用户（那正是本文件要验证的），
+    空文本在 `unattended=True` 下不会让位等用户（那正是本文件要验证的），
     只是把这一轮走完——用来吸收 close 边界后台 observe 之类的额外调用，让断言只钉
     真正关心的那几轮。
     """
@@ -102,7 +102,7 @@ async def test_unattended_session_finishes_instead_of_parking_on_hitl() -> None:
     assert runtime.hitl_registry.list_pending(session_id=handle.session_id) == []
     assert tool.invocations == 0, "unapprovable tool must not run"
     assert state.task.unattended is True
-    assert state.task.interaction_mode == "auto"
+    assert state.task.unattended
 
     assert len(llm.act_requests) >= 2
     assert "[Blocked by human" in _all_request_text(llm.act_requests[1]), (
@@ -123,11 +123,11 @@ async def test_send_message_unattended_marks_the_task_it_opens() -> None:
     assert first is not None and first.task.status == "FINISHED"
     # 对照组：普通 session 的 root task 仍是 interactive、仍不是无人值守。
     assert first.task.unattended is False
-    assert first.task.interaction_mode == "interactive"
+    assert not first.task.unattended
 
     new_handle = await runtime.send_message(handle.agent_id, "second", unattended=True)
     tm = runtime._task_managers[handle.session_id]
     task = tm.get_task(new_handle.task_id)
     assert task is not None
     assert task.unattended is True
-    assert task.interaction_mode == "auto"
+    assert task.unattended

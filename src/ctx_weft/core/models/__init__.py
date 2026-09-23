@@ -1,7 +1,7 @@
 """数据类型层：这个系统的名词、词表、错误与旋钮。
 
     session.py         Session
-    task.py            Task + TaskSettings ×3 + deserialize_settings + TaskInteractionMode
+    task.py            Task + TaskSettings ×3 + deserialize_settings
     agent.py           Agent + LoopGuard
     status.py          三种实体的生命周期状态词表 + 终态与 park 判据
     discriminators.py  事件 payload 里的判别值（reason / error_code）

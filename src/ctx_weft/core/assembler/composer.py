@@ -17,7 +17,7 @@ messages —— 组装步骤（_build_actor_messages）：
        finish/dispatch 对 + 折叠摘要，按 (timestamp, seq_no) 正序（见
        sources/_history.py）。当前 task 段摘要已冠 ## Progress So Far，
        user 身份摘要已套「压缩摘要」消歧前缀。
-    ② 当前 task 的 user_prompt 回合就地装饰，分两处（interactive 多轮下不同回合）：
+    ② 当前 task 的 user_prompt 回合就地装饰，分两处（多轮追问下分属不同回合）：
        - **首条**（按 task_id 定位，匹配不到回退末条）：## Current Task 框 +
          ## Opening Message 标注原文；directive（skill 指令）仅 act 拼在此回合尾部；
          ## Capabilities 全文（所有 purpose）拼在 directive 之后——随此稳定回合
@@ -44,7 +44,7 @@ messages —— 组装步骤（_build_actor_messages）：
        {resume cue：仍在做任务 X、盘点已完成、只做剩余
         + 确有 FINISHED 子任务时一句「清单见下方态势注记」}
        ---（guidance 起，见下）
-  C. 追问回合 —— interactive 任务里用户新消息本身是末条 user：
+  C. 追问回合 —— 用户新消息本身是末条 user（park 后续接的那一轮）：
        ## Current Message {用户消息原文}（+ 同语言回复提示）
        ---（guidance 起；此形态下 Current Task 框远在历史深处，
            就近任务锚由 guidance 锚定行承担）
@@ -673,7 +673,8 @@ class DefaultComposer(Composer):
         """定位「当前 task」**首条** user_prompt 的下标：task_id 精确匹配取首条，回退最后一条 user_prompt。
 
         history_pairs 是 _history_to_messages_with_sources 的 (msg, src, mem_type, task_id) 四元组。
-        - 匹配取首条：interactive 任务同一 task 会累积多条 user_prompt（用户每条新消息一条），
+        - 匹配取首条：同一 task 会累积多条 user_prompt（observer 判 retry → park → 人回复
+          → 冷 resume 同一个 task，每条新消息一条），
           ## Current Task 框 / directive / capabilities 须钉在**开启该 task 的首条消息**上。
           取末条会让这些重量级注入跟着每条新消息漂移——上一轮被装饰的回合在下一轮重建时恢复
           原文，cache 前缀每轮被打穿。（## Current Message 框不在此列：它语义上就是最新一条，
@@ -694,7 +695,7 @@ class DefaultComposer(Composer):
         """In-memory 路径：渲染期就地装饰「当前 task」的 USER_PROMPT 回合（不落库）。
 
         history_pairs 是 _history_to_messages_with_sources 返回的 (msg, src, mem_type, task_id) 四元组。
-        两处装饰（interactive 多轮下分属不同回合）：
+        两处装饰（多轮追问下分属不同回合）：
         - ## Current Task 框 + ## Opening Message 标注原文 → task_id == task.id 的**首条**
           （开启该 task 的消息；与 directive/capabilities 同回合，钉住不随新消息漂移，
           cache 前缀稳定。Opening Message 标题在无任务框时也加，把原文和随后追加的
@@ -741,7 +742,7 @@ class DefaultComposer(Composer):
     def _latest_task_user_index(history_pairs, task_id) -> int | None:
         """「当前 task」**最新一条** user_prompt 的下标（## Current Message 框的落点）。
 
-        task_id 精确匹配取末条（interactive 追问里最新那条才是「当前消息」；同 agent 更晚的
+        task_id 精确匹配取末条（追问里最新那条才是「当前消息」；同 agent 更晚的
         其它 task user_prompt——如子 body——被过滤掉），匹配不到回退整个列表的末条 user_prompt
         （与 _current_task_user_index 的回退一致，此时两者同指一条、合并框）。
         """

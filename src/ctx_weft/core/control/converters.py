@@ -62,7 +62,6 @@ def task_from_projection(proj: TaskView) -> Task:
         priority=proj.priority,
         max_retries=proj.max_retries,
         settings=deserialize_settings(proj.settings_raw),
-        interaction_mode=proj.interaction_mode,  # type: ignore[arg-type]
         unattended=proj.unattended,
         origin_tool_call_id=proj.origin_tool_call_id or None,
         origin_tool_name=proj.origin_tool_name or None,

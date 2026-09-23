@@ -163,7 +163,7 @@ async def is_short_segment(
     - 段内 raw token ≤ short_segment_token_threshold。
 
     「短 → 原文成胶囊」决策（finalize._is_short_leaf）在段级的判定，
-    `_run_background_observe`（interactive/interrupt 边界）与
+    `_run_background_observe`（plain_text/interrupt 边界）与
     `observe._fold_retry_segment`（retry 段折）共用。配置缺失（手构 state /
     单测）→ False = 门关闭，照常折叠。
 

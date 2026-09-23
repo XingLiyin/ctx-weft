@@ -28,11 +28,11 @@ def _task(id, title="", status="PENDING", parent=None, description="", created_a
     )
 
 
-def _cur(title="", description="", mode="auto", id="t1", next_step_hint=None):
+def _cur(title="", description="", unattended=True, id="t1", next_step_hint=None):
     """当前 task（build_act_guidance 第一参）。"""
     return SimpleNamespace(
         id=id, title=title, description=description,
-        interaction_mode=mode, user_prompt="", next_step_hint=next_step_hint,
+        unattended=unattended, user_prompt="", next_step_hint=next_step_hint,
     )
 
 
@@ -67,7 +67,7 @@ def test_no_hint_omits_the_section_entirely():
 def test_hint_section_absent_for_task_without_the_field():
     """旧数据 / 替身 task 无该字段 → getattr 兜底，不炸、不出段。"""
     legacy = SimpleNamespace(id="t1", title="T", description="",
-                             interaction_mode="auto", user_prompt="")
+                             unattended=True, user_prompt="")
     g = build_act_guidance(legacy, _tm())
     assert "## Note from the review of your previous attempt" not in g
 
@@ -106,8 +106,8 @@ def test_anchor_line_uses_bare_id_when_untitled():
 
 
 def test_ask_user_reminder_present_in_all_modes():
-    for mode in ("auto", "interactive"):
-        g = build_act_guidance(_cur(title="T", mode=mode), _tm())
+    for unattended in (True, False):
+        g = build_act_guidance(_cur(title="T", unattended=unattended), _tm())
         assert "control__ask_user" in g
 
 
@@ -325,18 +325,18 @@ def test_failed_canceled_children_not_listed_as_completed():
     assert "CanceledChild" not in g
 
 
-def test_interactive_mode_keeps_pause_note_with_tree():
+def test_attended_task_keeps_pause_note_with_tree():
     cur = _task("t1", "Cur", "ACTIVE")
     sib = _task("t2", "Other", "PENDING")
-    g = build_act_guidance(_cur(mode="interactive", id="t1"), _tm(tasks=[cur, sib]))
+    g = build_act_guidance(_cur(unattended=False, id="t1"), _tm(tasks=[cur, sib]))
     assert "## The overall plan" in g
     assert "keeps the task open" in g
 
 
 def test_finish_reminder_leads_with_completion_gate():
     # 判据在前：仅目标完全达成才 finish，措辞不得以收尾为默认动作。
-    for mode in ("interactive", "autonomous"):
-        g = build_act_guidance(_cur(mode=mode), _tm())
+    for unattended in (False, True):
+        g = build_act_guidance(_cur(unattended=unattended), _tm())
         assert "ONLY once the task goal is fully achieved" in g
         assert "keep working instead of finishing" in g
 

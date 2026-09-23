@@ -52,7 +52,6 @@ class TaskView:
     creator_agent_id: str = ""
     parent_task_id: str = ""
     user_prompt: "str | list[ContentPart]" = ""
-    interaction_mode: str = "auto"  # interactive=纯文本暂停等用户 / auto=自治（跨重启保留，否则 resume 后丢失暂停语义）
     # 无人值守（跨重启保留）：丢了它，resume 之后一个后台自治任务就变回「有人看顾」，
     # 随后第一次 HITL 会把它 park 到死。见 `Task.unattended`。
     unattended: bool = False

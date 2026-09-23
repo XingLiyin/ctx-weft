@@ -1,4 +1,7 @@
-"""interactive vs auto task + finish_task + 临时 guidance 注入。
+"""纯文本回合的两种归宿（有人在场 park / 无人值守即产出）+ finish_task + 临时 guidance 注入。
+
+判据 2026-09-22 起是 `Task.unattended`——`interaction_mode` 已删（它是个 task 级静态
+配置，却在回答一个逐回合的语义）。文件名沿用旧称，内容测的是同一组语义。
 
 - interactive 任务 actor 纯文本 → HITL input 冷 park（等用户），不产出、不完成。
 - auto 任务 actor 纯文本 → 文本即 outputs，路由 observe。

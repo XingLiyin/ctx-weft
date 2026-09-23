@@ -76,28 +76,6 @@ ASK_USER_UNATTENDED_RESULT = (
 )
 
 
-def _mode(interactive: bool) -> str:
-    """Map the LLM-facing `interactive` bool to Task.interaction_mode."""
-    return "interactive" if interactive else "auto"
-
-
-def _child_mode(interactive: bool, parent: "Task | None") -> str:
-    """Resolve a delegated child's interaction_mode under its parent.
-
-    interactive 只能沿用户面向链路向下传递：父任务非 interactive（auto=自治）时，子任务即使
-    请求 interactive 也**静默降级为 auto**——自治分支不该凭空长出对话子任务（要用户输入用 ask_user）。
-    否则一个没人盯的自治分支会冷 park 等用户，甚至永不回交父任务而卡死该分支。
-    """
-    mode = _mode(interactive)
-    if mode == "interactive" and parent is not None and parent.interaction_mode != "interactive":
-        logger.warning(
-            "delegate: downgrading interactive sub-task to auto under non-interactive parent task %s",
-            parent.id,
-        )
-        return "auto"
-    return mode
-
-
 # ── ControlMetaKey ────────────────────────────────────────────────────────────
 
 
@@ -211,12 +189,6 @@ def delegate_task(
     use_subagent: Annotated[bool, "True if the task should run in a dedicated sub-agent"] = False,
     subagent_template: Annotated[str, "Template id for the sub-agent; empty = system default"] = "",
     inherit_memory: Annotated[bool, "True if the sub-agent should inherit session memory"] = True,
-    interactive: Annotated[
-        bool,
-        "True if this sub-task is human-interactive: a plain-text turn pauses and waits "
-        "for the user. Default False = autonomous (the actor must call finish_task "
-        "to finish).",
-    ] = False,
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
@@ -238,11 +210,9 @@ def delegate_task(
         user_prompt=task_prompt or description,
         origin_tool_call_id=ctx.tool_call_id or None,
         origin_tool_name=DELEGATE_TASK_NAME,  # 保真：actor 确实调了 delegate_task → finalize 铸框用真名
-        interaction_mode=_child_mode(bool(interactive), ctx.task),
         # 无人值守**继承**，不给 LLM 旋钮（schema 里没有这个参数）：「有没有人在」是
-        # 作业被怎么起起来的事实，不是 actor 可以自行宣布的。子任务的 interaction_mode
-        # 不用在这里单独处理——父任务无人值守即 auto，`_child_mode` 的「父不 interactive
-        # 则子不 interactive」规则已经把子任务一并按住了。
+        # 作业被怎么起起来的事实，不是 actor 可以自行宣布的。它同时决定子任务的纯文本
+        # 回合要不要 park——父任务有人在，子任务的话也有人听。
         unattended=ctx.task.unattended,
         settings=NormalTaskSettings(
             skill_name=skill_name,
@@ -278,8 +248,6 @@ def delegate_plan(
             "skill_name (str, skill to assign or empty), "
             "use_subagent (bool), subagent_template (str), "
             "inherit_memory (bool, default true), "
-            "interactive (bool, default false — true makes the task human-interactive: "
-            "a plain-text turn pauses and waits for the user instead of requiring control__finish_task). "
             "Tasks run strictly in order and each one starts ONLY if its predecessor succeeded — "
             "if a step fails, the rest are canceled. Put independent work in separate "
             "control__delegate_task calls instead, so one failure does not cancel the others."
@@ -316,8 +284,7 @@ def delegate_plan(
             description=spec.get("description", ""),
             user_prompt=spec.get("task_prompt") or spec.get("description", ""),
             origin_tool_call_id=generate_id("tcall"),
-            interaction_mode=_child_mode(bool(spec.get("interactive", False)), ctx.task),
-            # 同 delegate_task：继承而非声明；interaction_mode 由 `_child_mode` 接住。
+            # 同 delegate_task：继承而非声明——「有没有人在」是作业被怎么起起来的事实。
             unattended=ctx.task.unattended,
             settings=NormalTaskSettings(
                 skill_name=spec.get("skill_name", ""),

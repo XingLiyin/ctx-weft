@@ -37,8 +37,7 @@ def _act_env(*, interactive: bool = True):
     session = SimpleNamespace(id="s1", tenant_id="default", status="RUNNING")
     task = SimpleNamespace(
         id="tsk_1",
-        status="ACTIVE",
-        interaction_mode="interactive" if interactive else "auto",
+        status="ACTIVE" if interactive else "auto",
         unattended=False,
         settings=NormalTaskSettings(),
         creator_agent_id="agt_1",

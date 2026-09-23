@@ -154,7 +154,7 @@ class SessionRegistry:
         ``user_prompt`` 在这条路上应为 `""`：没有 root task 就没有「这一轮的用户输入」。
 
         ``unattended``：这一轮没有人看顾（后台自治作业）。原样落到 root task，并由
-        `_make_root_task_manager` 强制 `interaction_mode="auto"`。见 `Task.unattended`。
+        `_make_root_task_manager`。见 `Task.unattended`。
 
         ``user_prompt_event_jsonable``：调用方（`CtxWeftRuntime.start_session`）由
         **归一化之前的原始** user_prompt 算好的 event 侧载荷（见
@@ -372,12 +372,10 @@ class SessionRegistry:
             description="",
             user_prompt=user_prompt,
             settings=settings or NormalTaskSettings(),
+            # root task = 用户对话。纯文本回合的归宿由 `unattended` 单独决定（见
+            # `Task.unattended`）：有人在就 park 让位，无人值守则当作任务产出——后台
+            # 作业没有人会发下一条消息，park 就是永久挂起。
             unattended=unattended,
-            # root task = 用户对话：actor 纯文本即暂停等下一条用户消息（非自动完成）。
-            # **无人值守时强制 auto**（不变式 `unattended ⟹ auto`，见 `Task.unattended`）：
-            # 后台作业没有人会发下一条消息，interactive 的纯文本 park 就是永久挂起——
-            # 没有人来应答，那条 HITL 也永远不会被终局。
-            interaction_mode="auto" if unattended else "interactive",
             created_at=now_utc(),
         )
         if task_manager is None:

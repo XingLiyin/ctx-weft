@@ -100,7 +100,7 @@ async def test_pause_before_first_chunk_discards_the_whole_round() -> None:
         context_limit=_MOCK_CONTEXT_LIMIT)
     rt = _runtime(llm)
 
-    # `unattended=True` 把 root task 压成 `interaction_mode="auto"`：第一轮的纯文本回合
+    # `unattended=True` 把 root task 压成 `unattended=True`：第一轮的纯文本回合
     # 就是任务产出、task 落 FINISHED。**这是本用例的前提**——只有上一轮已终态，下一条
     # `send_message` 才走「新建 task」那条分支（`_start_task_for_agent`），也才有未提交
     # 窗口可言。interactive 的 root task 会 park 在 wait 气泡上，下一条消息注入的是同一个

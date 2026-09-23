@@ -277,7 +277,7 @@ async def test_estimate_feedback_log_carries_tools_fields(caplog):
         run_id="r1",
         session=SimpleNamespace(id="s1", tenant_id="default", token_used=0),
         task=Task(id="tsk_1", session_id="s1", status="ACTIVE", title="T",
-                  interaction_mode="auto", settings=NormalTaskSettings()),
+                  unattended=True, settings=NormalTaskSettings()),
         agent=Agent(id="ag1", session_id="s1", template_id="t"),
         scope=scope,
         resolved_model=SimpleNamespace(model="mock", account=""),

@@ -4,7 +4,7 @@
 `HitlService.open()` 都会 park 到死（没人会来应答）。守卫因此落在 `open()` 上，
 参数是**必填 keyword-only**：漏传就是 TypeError 当场炸，不会静默失效。
 
-本文件覆盖守卫本身、必填性、设置点的不变式（`unattended ⟹ interaction_mode=="auto"`）、
+本文件覆盖守卫本身、必填性、继承（子任务不得凭空发明「有没有人在」）、
 委派继承，以及两个 catch 点（授权侧拒绝 / `ask_user` 侧自决）。
 """
 
@@ -196,7 +196,7 @@ async def test_unattended_root_task_is_auto() -> None:
     _s, root, _tm = await sm.create_session(
         template_id="agent:tpl", user_prompt="go", context_limit=1000, unattended=True)
     assert root.unattended is True
-    assert root.interaction_mode == "auto"
+    assert root.unattended
 
 
 async def test_attended_root_task_stays_interactive() -> None:
@@ -204,7 +204,7 @@ async def test_attended_root_task_stays_interactive() -> None:
     _s, root, _tm = await sm.create_session(
         template_id="agent:tpl", user_prompt="go", context_limit=1000)
     assert root.unattended is False
-    assert root.interaction_mode == "interactive"
+    assert not root.unattended
 
 
 # ── 8. 委派继承 ───────────────────────────────────────────────────────────────
@@ -225,8 +225,6 @@ def _ctl_ctx(tm: _FakeTM, *, unattended: bool) -> ControlContext:
     parent = Task(
         id="p1", session_id="s1", status="ACTIVE", title="P",
         unattended=unattended,
-        # 设置点保证的不变式，父任务上原样成立。
-        interaction_mode="auto" if unattended else "interactive",
     )
     return ControlContext(session_id="s1", task_id="p1", agent_id="a1", task=parent,
                           task_manager=tm, session=None, tool_call_id="tc")
@@ -234,19 +232,14 @@ def _ctl_ctx(tm: _FakeTM, *, unattended: bool) -> ControlContext:
 
 def test_delegate_task_inherits_unattended() -> None:
     tm = _FakeTM()
-    delegate_task(title="c", task_prompt="p", interactive=True,
-                  ctx=_ctl_ctx(tm, unattended=True))
+    delegate_task(title="c", task_prompt="p", ctx=_ctl_ctx(tm, unattended=True))
     child = tm.staged[0]
     assert child.unattended is True
-    # 子任务的 interaction_mode 不用单独处理：`_child_mode` 的「父不 interactive 则
-    # 子不 interactive」规则已经接住（父 auto → 子 auto）。
-    assert child.interaction_mode == "auto"
 
 
 def test_delegate_task_does_not_invent_unattended() -> None:
     tm = _FakeTM()
-    delegate_task(title="c", task_prompt="p", interactive=True,
-                  ctx=_ctl_ctx(tm, unattended=False))
+    delegate_task(title="c", task_prompt="p", ctx=_ctl_ctx(tm, unattended=False))
     assert tm.staged[0].unattended is False
 
 
@@ -255,7 +248,7 @@ def test_delegate_plan_inherits_unattended() -> None:
     delegate_plan(tasks=[{"title": "a", "interactive": True}, {"title": "b"}],
                   ctx=_ctl_ctx(tm, unattended=True))
     assert [c.unattended for c in tm.staged] == [True, True]
-    assert [c.interaction_mode for c in tm.staged] == ["auto", "auto"]
+    assert [c.unattended for c in tm.staged] == [True, True]
 
 
 def test_delegate_is_not_a_knob_for_the_llm() -> None:
@@ -346,8 +339,7 @@ def _gateway_env(provider, cap: ToolCapability, *, authorizers=None):
 
 def _state(*, unattended: bool) -> LoopState:
     from types import SimpleNamespace
-    task = Task(id="tsk_1", session_id="s1", status="ACTIVE", unattended=unattended,
-                interaction_mode="auto" if unattended else "interactive")
+    task = Task(id="tsk_1", session_id="s1", status="ACTIVE", unattended=unattended)
     return LoopState(
         run_id="r1",
         session=SimpleNamespace(id="s1", tenant_id="default"),

@@ -1954,7 +1954,6 @@ def task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None")
             "priority": task.priority,
             "max_retries": task.max_retries,
             "dag_deps": task.dag_deps,
-            "interaction_mode": task.interaction_mode,
             "unattended": task.unattended,
             "origin_tool_call_id": task.origin_tool_call_id or "",
             "origin_tool_name": task.origin_tool_name or "",

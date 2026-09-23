@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
-    from ctx_weft.core.models.task import TaskInteractionMode
 
 from ctx_weft.core.assembler import (
     ContextAssembler,
@@ -272,7 +271,7 @@ class SessionStartParams:
     reserved_output_tokens: int = 8192
     resume: bool = False
     # 这一轮没有人看顾（后台自治作业）：透传到 root task 的 `Task.unattended`，并强制
-    # 它的 `interaction_mode="auto"`。见 `Task.unattended` / `HitlService.open`。
+    # 它不 park。见 `Task.unattended` / `HitlService.open`。
     unattended: bool = False
 
     @classmethod
@@ -3604,13 +3603,10 @@ class CtxWeftRuntime:
             title="User Message",
             description=content_to_text(normalized)[:200],
             user_prompt=normalized,
+            # 外部消息 = 用户对话，与 root task 同一口径：纯文本回合的归宿由
+            # `unattended` 单独决定（见 `Task.unattended`）。既然是后台投喂的一条消息、
+            # 没有人守着，就不会有下一条消息来解 park，那时纯文本让位等于永久挂起。
             unattended=unattended,
-            # 外部消息 = 用户对话：actor 纯文本即暂停等下一条消息（非自动完成）——
-            # 与 root task 同一口径（`_make_root_task_manager` 的注释）。
-            # **无人值守时强制 auto**（不变式 `unattended ⟹ auto`）：既然是后台投喂的
-            # 一条消息、没有人守着，就不会有下一条消息来解 park——interactive 的纯文本
-            # 让位在这里等于永久挂起。
-            interaction_mode="auto" if unattended else "interactive",
             created_at=now_utc(),
         )
         # `provisional=True`：一条用户消息开出的新一轮，在 LLM 真的开口之前不算发生
@@ -3634,7 +3630,6 @@ class CtxWeftRuntime:
         settings: "NormalTaskSettings | dict | None" = None,
         title: str = "",
         description: str = "",
-        interaction_mode: "TaskInteractionMode" = "auto",
         unattended: bool = False,
         llm_account: str | None = None,
         llm_model: str | None = None,
@@ -3719,13 +3714,6 @@ class CtxWeftRuntime:
             raise ValueError(
                 "dispatch_task: settings.subagent_template is required when "
                 "use_subagent=True (qualified form, e.g. 'agent:researcher')"
-            )
-        if unattended and interaction_mode == "interactive":
-            # 不变式 `unattended ⟹ auto`。`_child_mode` 对 LLM 的请求是静默降级 + warning
-            # （调用方是模型，只能容错）；host 显式写了两个互斥参数，响亮报错才对。
-            raise ValueError(
-                "dispatch_task: unattended=True is incompatible with "
-                "interaction_mode='interactive' — nobody is there to answer the park"
             )
         if s.inherit_from_agent_id and not s.use_subagent:
             # 分寸：`inherit_memory` 默认就是 True，`use_subagent=False` 时它静默无效是
@@ -3825,7 +3813,6 @@ class CtxWeftRuntime:
             user_prompt_event_jsonable=event_jsonable,
             settings=s,
             unattended=unattended,
-            interaction_mode=interaction_mode,
             created_at=now_utc(),
         )
         # `provisional=False`（对比 `_start_task_for_agent` 的 True）：未提交窗口是给

@@ -25,7 +25,7 @@ guidance 内容分两类（composer 拼在末条 user 尾部；## Capabilities �
   只发不入 memory，随任务终结自然消失，且 priority 1 比段摘要（动态档 4）更难被预算裁掉。
 - **静态段**（指针级，刻意压缩）：finish 收尾、无关新请求 finish+delegate 双发、
   ask_user 三条只留一句提醒。完整协议已有三处承载——SOUL、工具 description、
-  以及机械兜底（observer 的 success-without-outputs→retry 护栏、interactive
+  以及机械兜底（observer 的 success-without-outputs→retry 护栏、有人在场时
   纯文本自动 park），此处不再复读全文。
 """
 
@@ -176,7 +176,7 @@ def build_act_guidance(task, task_manager) -> str:
 
     段序 = 当前任务锚定 → plan 全景（任务树）→ 已完成子任务清单 → 静态指针。
     锚定行每个 act 回合都有：fresh 回合虽与同消息前部的 ``## Current Task`` 框
-    略有重复，但长对话/续跑/interactive 追问回合里该框远在历史深处，此处是
+    略有重复，但长对话/续跑/追问回合里该框远在历史深处，此处是
     生成点附近唯一的任务锚。description 不重复（由 Current Task 框承载）。
     session 仅剩当前 task 一个非终态节点时，任务树整段不出现。
     """
@@ -239,12 +239,12 @@ def build_act_guidance(task, task_manager) -> str:
         "user as your normal message text and call it in that same turn; the message text is "
         "the reply and the deliverable, not the tool arguments (details in the tool description)."
     )
-    if task.interaction_mode == "interactive":
+    if not task.unattended:
         parts.append(
             finish_core
-            + " In this interactive task a plain-text reply keeps the task open and hands "
-            "the floor to the user — the right move mid-conversation; finish only when the "
-            "whole request is served."
+            + " Someone is there: a plain-text reply keeps the task open and hands the floor "
+            "to them — the right move mid-conversation; finish only when the whole request "
+            "is served."
         )
     elif has_other_tasks:
         parts.append(finish_core + " Do not start the other tasks yourself.")

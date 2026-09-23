@@ -62,7 +62,7 @@ class _RouterLLM(MockLLMAdapter):
     `control__update_task_metadata`）恒回空文本；root task 的 act 首轮回纯文本、
     无 tool_call。
 
-    root task 恒 `interaction_mode="interactive"`（`session_registry.py:355`），
+    root task 恒 ``（`session_registry.py:355`），
     纯文本首轮触发冷 park（`act.py::_finish_plain_text_turn`），同时并发一次
     `launch_background_observe(boundary="plain_text")`（`act.py:491-493`）——
     这是 A4 的最小复现：该段第一条事件（ACT_TURN_COMPLETED "await_user"）之后，

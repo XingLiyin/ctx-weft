@@ -15,7 +15,7 @@ RunStarted/RunFinished。
   `recorder` 而非 `lambda ev: seen.append(ev) or None`（同步 lambda 不满足协议）。
 - `start_session` 必须用 `template_id="agent:tpl_echo"`（`InlineAgentTemplateProvider`
   的 provider 前缀是 `agent:`），且要注册 memory provider，否则跑不起来。
-- root task 恒 `interaction_mode="interactive"`：第一轮 LLM 回纯文本触发冷 park
+- root task 恒 ``：第一轮 LLM 回纯文本触发冷 park
   （`AWAITING_HUMAN`）——`wait_for_finish` 在这一步就返回（它等的是"这个 run
   结束"，不是"task 终态"，同一口径见 `test_run_id_sequence_integrity.py` 的
   `bus_after_recap_run` fixture）。**刻意不用 `control__finish_task` 收尾第一

@@ -48,10 +48,11 @@ class _RecordingBus:
         self.events.append(event)
 
 
-def _env(*, unattended: bool, interaction_mode: str = "interactive", llm=None):
+def _env(*, unattended: bool, llm=None):
     """最小 act 环境：真 Task / 真 HitlService（守卫住在 `open()` 里，必须是真的）。
 
-    `unattended` 与 `interaction_mode` 分开给：设置点的不变式（unattended ⟹ auto）在
+    只给 `unattended`：纯文本回合的归宿判据 2026-09-22 起只剩它一个（`interaction_mode`
+    已删）。设置点的不变式（曾经的 unattended ⟹ auto）在
     这里**故意不施加**，好让测试能手工摆出「无人值守却 interactive」这个越过不变式的
     组合——那正是本次改动要堵的口子。
     """
@@ -61,7 +62,7 @@ def _env(*, unattended: bool, interaction_mode: str = "interactive", llm=None):
     task = Task(
         id="t1", session_id="s1", status="ACTIVE",
         title="Greet", description="say hi",
-        interaction_mode=interaction_mode, unattended=unattended,
+        unattended=unattended,
         settings=NormalTaskSettings(),
     )
     agent = Agent(id="ag1", session_id="s1", template_id="t")
@@ -149,7 +150,7 @@ async def test_attended_plain_text_turn_parks_and_never_reaches_stop(monkeypatch
 )
 async def test_unattended_interrupt_still_parks(edit, preface):
     """守卫挡的是「没有人可问」，不是「没有人在场」：按下暂停键的就是一个人。"""
-    state, ctx, task, reg, bus = _env(unattended=True, interaction_mode="auto")
+    state, ctx, task, reg, bus = _env(unattended=True)
 
     with pytest.raises(HitlPark):
         await act._park_for_interrupt(state, ctx, edit=edit)
@@ -170,7 +171,7 @@ async def test_unattended_interactive_task_runs_to_stop_end_to_end(monkeypatch):
     launched = _spy_observe(monkeypatch)
     llm = MockLLMAdapter(responses=[MockResponse(text="Hi! Anything else?")])
     state, ctx, task, reg, bus = _env(
-        unattended=True, interaction_mode="interactive", llm=llm)
+        unattended=True, llm=llm)
     from ctx_weft.core.assembler.assembler import AssembledPrompt
     from ctx_weft.protocols import LLMMessage
     state.assembled_prompt = AssembledPrompt(

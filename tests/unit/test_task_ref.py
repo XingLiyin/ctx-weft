@@ -44,7 +44,7 @@ def test_missing_attrs_do_not_raise():
 
 
 def _cur(task_id="t1", title="T"):
-    return SimpleNamespace(id=task_id, title=title, description="", interaction_mode="auto",
+    return SimpleNamespace(id=task_id, title=title, description="", unattended=True,
                            user_prompt="", next_step_hint=None)
 
 

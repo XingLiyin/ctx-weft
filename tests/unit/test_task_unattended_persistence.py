@@ -25,7 +25,7 @@ from ctx_weft.protocols.events import Event, EventType
 def _unattended_task() -> Task:
     return Task(
         id="t1", session_id="s1", status="ACTIVE", title="Nightly",
-        unattended=True, interaction_mode="auto",
+        unattended=True,
     )
 
 

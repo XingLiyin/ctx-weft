@@ -21,7 +21,7 @@ def _created() -> Event:
         "id": "tsk_1", "session_id": "sess_1", "status": "PENDING", "title": "t",
         "description": "", "creator_agent_id": "", "assigned_agent_id": "",
         "parent_task_id": None, "user_prompt": "p", "priority": 0, "max_retries": 3,
-        "timeout_ms": 0, "dag_deps": [], "interaction_mode": "", "settings": {},
+        "timeout_ms": 0, "dag_deps": [], "settings": {},
         "origin_tool_call_id": None, "origin_tool_name": None,
         "result": None, "outputs": {}, "error": None,
         "created_at": None, "updated_at": None,

@@ -275,8 +275,6 @@ async def test_fresh_tree_can_inherit_from_an_unrelated_agent():
 @pytest.mark.parametrize("kwargs, why", [
     (dict(settings=NormalTaskSettings(use_subagent=False)),
      "V1: agent_id=None 且 use_subagent=False"),
-    (dict(agent_id="__ROOT__", unattended=True, interaction_mode="interactive"),
-     "V2: unattended ⟹ auto 的不变式冲突"),
     (dict(agent_id="__ROOT__",
           settings=NormalTaskSettings(use_subagent=False, inherit_from_agent_id="agt_x")),
      "V3: 显式继承源在非 subagent 下无处安放"),
