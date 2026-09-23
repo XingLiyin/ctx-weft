@@ -143,6 +143,13 @@ class PrepareStep(Step):
         if purpose == "act" and isinstance(settings, NormalTaskSettings):
             act_guidance = build_act_guidance(state.task, ctx.task_manager)
             act_resume_cue = build_resume_cue(state.task, ctx.task_manager)
+            # `next_step_hint` 是**一次性转向**：给下一次 act attempt 用，用过就作废。
+            # 2026-09-22 之前它没有清除点，只靠「下次 observer 判决覆写」——而 observe
+            # 走机械判决那几条路（无 observe ROLE / LLM 失败 / 已取消）压根不调
+            # `report_task_outcome`，覆写就不会发生，上一轮的 hint 会继续出现在再下一轮，
+            # 变成过期指令。此前少见是因为 root task 极少产 hint；纯文本回合改由后台
+            # observer 判定之后它变成常态，必须在消费点显式清掉。
+            state.task.next_step_hint = None
         else:
             act_guidance = ""
             act_resume_cue = ""
