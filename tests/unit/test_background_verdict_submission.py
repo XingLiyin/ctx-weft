@@ -9,6 +9,7 @@
 - **verdict 缺失 ≡ retry**。拿不到判决就什么都不提交，task 维持 park。默认态是 park，
   只有 success 触发状态转移——绝不因为观察失败而静默放行后继。
 - **免折不免判**。短段仍跑判定（短回合恰恰是提问最典型的形态），只是不折。
+- **判决不碰 park 气泡**。判 success 终结 task，但会话仍停在「等你说话」——见下方那一节。
 """
 
 from __future__ import annotations
@@ -117,11 +118,19 @@ async def test_rejected_verdict_is_not_an_error() -> None:
     assert len(tm.calls) == 1
 
 
-# ── park 气泡的收口（2026-09-24 线上 bug）────────────────────────────────────
+# ── 判决不碰 park 气泡（2026-09-24 订正）─────────────────────────────────────
 #
-# 不收的后果：气泡还挂着 → 前端认为「agent 在等你说话」→ 把用户的下一条输入当成对这个
-# 气泡的应答投过来 → 消息注进已 FINISHED 的 task、重排被终态守卫挡掉 → 死在那里。
-# 用户看到的是「发了没反应，再发一遍才回」。
+# 纯文本让位是第一性的：agent 说完一段话就停下让人能开口。后台 observe 是借 commit
+# 机制起的**旁路监控**，它的结论落在 task 层（终结、放行 DAG 后继），不该改变「有人
+# 可以开口」这个事实——success 和 retry 在用户眼里应该没有区别，都是「等你说话」。
+#
+# 宿主按未决 HITL 折会话状态（气泡在 ⟹ PAUSED，且优先于 task 终态）。所以判决一旦收掉
+# 气泡，`TaskFinished` 写下的 SUCCEEDED 当场浮出来，会话在用户正要打字的那一刻跳成
+# 「已完成」——一次纯文本回合之后连闪两个状态，且用户打字落在跳变前后会走到两条不同的
+# 投递路径（续跑老 task / 新建 task）。曾经有过一版在这里收气泡，就是这个形状。
+#
+# 气泡的收口属于**用户真的开口**那一刻，在 Runtime 的两条投递分支里
+# （`_start_task_for_agent` / `_inject_user_turn`），不在这里。
 
 class _Bubble:
     def __init__(self, hid: str, task_id: str) -> None:
@@ -155,14 +164,16 @@ def _state_with_session():
                            session=SimpleNamespace(id="s1"))
 
 
-async def test_success_closes_the_park_bubble() -> None:
+async def test_success_leaves_the_bubble_alone() -> None:
+    """**要害**：判 success 终结了 task，但那个气泡要留着——它是「会话在等你说话」
+    这个事实的载体。收掉它等于替用户宣布「不用说了」。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
     await _submit_verdict(_state_with_session(), _ctx_with_hitl(_RecordingTM(), hitl), _meta())
-    assert hitl.cancelled == ["hit_1"]
+    assert hitl.cancelled == []
 
 
 async def test_retry_leaves_the_bubble_alone() -> None:
-    """retry 维持 park——那个气泡正是它等人的入口，收掉会把会话变哑。"""
+    """retry 维持 park——同样留着。两条判决对用户可见的行为必须一致。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
     await _submit_verdict(_state_with_session(), _ctx_with_hitl(_RecordingTM(), hitl),
                           _meta("retry"))
@@ -170,30 +181,16 @@ async def test_retry_leaves_the_bubble_alone() -> None:
 
 
 async def test_rejected_verdict_leaves_the_bubble_alone() -> None:
-    """判决被仲裁拒绝（人先开口）→ task 没终结，气泡照旧归它用。"""
+    """判决被仲裁拒绝（人先开口）→ 更不该碰。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
     await _submit_verdict(_state_with_session(),
                           _ctx_with_hitl(_RecordingTM(accepted=False), hitl), _meta())
     assert hitl.cancelled == []
 
 
-async def test_only_this_tasks_bubbles_are_closed() -> None:
-    """同 agent 上别的请求（例如子任务的 ask_user）不归这次判决管。"""
-    hitl = _Hitl([_Bubble("hit_mine", "t1"), _Bubble("hit_other", "t2")])
-    await _submit_verdict(_state_with_session(), _ctx_with_hitl(_RecordingTM(), hitl), _meta())
-    assert hitl.cancelled == ["hit_mine"]
-
-
-async def test_cancel_failure_does_not_break_the_verdict() -> None:
-    """收不掉气泡只记日志——绝不让它把一次已经落定的判决变成异常。"""
-    class _Boom(_Hitl):
-        async def cancel(self, hitl_id, **kw):
-            raise RuntimeError("registry is cold")
-
-    await _submit_verdict(_state_with_session(),
-                          _ctx_with_hitl(_RecordingTM(), _Boom([_Bubble("h", "t1")])), _meta())
-
-
 async def test_missing_hitl_service_is_tolerated() -> None:
+    """判决这条路根本不该碰 hitl——手构 ctx 里没有它也照常落定。"""
+    tm = _RecordingTM()
     await _submit_verdict(_state_with_session(),
-                          SimpleNamespace(task_manager=_RecordingTM(), hitl=None), _meta())
+                          SimpleNamespace(task_manager=tm, hitl=None), _meta())
+    assert len(tm.calls) == 1

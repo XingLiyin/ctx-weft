@@ -71,12 +71,6 @@ _close_synth: dict[str, tuple] = {}
 
 _CLOSE_BOUNDARIES = {"finish", "normal"}
 
-#: 带外判决终结 task 时收口 park 气泡的理由（进 HitlCancelled 的载荷，供重放溯源）。
-_PARK_CLOSED_BY_VERDICT = (
-    "[Closed by the reviewer: this task was judged complete, so it is no longer "
-    "waiting for you. Your next message will start a new turn.]"
-)
-
 # 段边界折叠会 supersede 的 raw 类型（= apply_compact 的非保护类型；与 finalize._FINAL_RAW_TYPES
 # 同构，本地定义避免与 finalize 交叉 import——finalize 已反向 import 本模块的 pop_close_report）
 _SEGMENT_RAW_TYPES = [
@@ -157,41 +151,14 @@ async def _submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) ->
     logger.info(
         "background observe verdict '%s' for task %s: %s",
         verdict, state.task.id, "accepted" if accepted else "rejected (the user spoke first)")
-    if accepted and verdict == "success":
-        await _close_park_bubble(state, ctx)
-
-
-async def _close_park_bubble(state: "LoopState", ctx: "LoopContext") -> None:
-    """task 被带外判决终结之后，收口它 park 时开的那个 `wait_for_user` 气泡。
-
-    **不收的后果（2026-09-24 线上撞到）**：气泡还挂着，前端据它认为「agent 在等你说话」，
-    于是把用户的下一条输入当成**对这个气泡的应答**投过来——而那条路会把消息注进已经
-    FINISHED 的 task，`mark_human_resolved` 的重排被终态守卫挡掉，消息就死在那里。用户
-    看到的是「发了没反应，再发一遍才回」：第二遍时气泡已被第一次应答收口，前端才改走
-    `send_message` 建新 task。
-
-    只对 `success` 做：`retry`/`fail` 维持 park，那个气泡正是它等人的入口，收掉就等于
-    把会话变哑。
-
-    按 task 过滤而非 agent：同一 agent 上可能还挂着别的请求（例如某个子任务的
-    `ask_user`），那些不归这次判决管。best-effort——收不掉只记日志，绝不让它把一次
-    已经落定的判决变成异常。
-    """
-    hitl = getattr(ctx, "hitl", None)
-    if hitl is None or getattr(hitl, "registry", None) is None:
-        return
-    try:
-        pending = [r for r in hitl.registry.list_pending(state.session.id)
-                   if getattr(r, "task_id", None) == state.task.id]
-        for req in pending:
-            await hitl.cancel(req.id, message=_PARK_CLOSED_BY_VERDICT)
-            logger.info(
-                "closed the park bubble %s for task %s (observer judged it done)",
-                req.id, state.task.id)
-    except Exception:
-        logger.exception(
-            "failed to close the park bubble for task %s; the user's next message may land "
-            "on a finished task", state.task.id)
+    # **判决不碰那个 park 气泡**（2026-09-24 订正）。判 success 会终结 task，但会话该
+    # 一直停在「等你说话」——纯文本让位是第一性的，后台 observe 只是借 commit 机制旁路
+    # 盯 task 状态转移，它的结论落在 task 层（终结、放行 DAG 后继），不该改变「有人可以
+    # 开口」这个事实。宿主按未决 HITL 折会话状态：收掉气泡，`_pending_hitl` 一空，
+    # `TaskFinished` 写下的终态就浮出来，会话在用户正要打字的那一刻跳成已完成。
+    #
+    # 气泡由**用户真的开口**时收口，在 `Runtime._start_task_for_agent` / `_inject_user_turn`
+    # 两条投递分支里——那才是这个入口被用掉的时刻。
 
 
 async def is_short_segment(

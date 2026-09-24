@@ -3589,6 +3589,19 @@ class CtxWeftRuntime:
                     f"a bug in the recovery path, not a transient condition; do not retry "
                     f"blindly, file it"
                 )
+        # 用户开口 ⟹ 该 agent 名下的旧未决 HITL 不会再有人答了——收口它们。
+        #
+        # 注入分支（`_inject_user_turn`）一直在做这件事，新建分支从前漏了。以前漏得起：
+        # 走到这里说明 `current_task` 已终态，而终态 task 的气泡从前总是在终结时就被
+        # 一并收掉。**纯文本 park 之后不再如此**（2026-09-24）：后台 observe 判 success
+        # 会把 task 终结，而那个 `wait_for_user` 气泡要**留着**——它是「会话在等你说话」
+        # 这个事实的载体，宿主按未决 HITL 折会话状态（PAUSED），判决替用户把它收掉就等于
+        # 替用户宣布「不用说了」，会话会当场跳成已完成。于是收口的时机从「判决落定」挪到
+        # 了这里：**用户真的开口，那个入口才算被用掉**。
+        #
+        # `defer=False`（与注入分支相反）：走到这条路的气泡都挂在一个已经终态的 task 上，
+        # 没有「回到 pending 等重来」的意义——新一轮若被撤销，它也不该复活。
+        await self._cancel_pending_hitl_of(agent_id, session_id=rec.session_id)
         normalized, event_jsonable = await self._validate_and_normalize_content(
             content, rec.session_id, tenant_id=rec.tenant_id,
         )
