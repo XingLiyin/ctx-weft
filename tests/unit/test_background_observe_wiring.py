@@ -385,7 +385,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
     )
 
     with pytest.raises(HitlPark):
-        await _finish_plain_text_turn(state, ctx, turn_num=1)
+        await _finish_plain_text_turn(state, ctx, turn_num=1, transcript=[])
 
     assert len(launched) == 1, f"Expected 1 launch for root plain-text pause, got {len(launched)}"
 
@@ -438,7 +438,7 @@ async def test_act_plain_text_pause_child_task_fires(monkeypatch):
     )
 
     with pytest.raises(HitlPark):
-        await _finish_plain_text_turn(state, ctx, turn_num=1)
+        await _finish_plain_text_turn(state, ctx, turn_num=1, transcript=[])
 
     assert [t for (t,) in launched] == ["t2"],         f"子任务的纯文本 park 应触发一次后台 observe，实得 {launched}"
 

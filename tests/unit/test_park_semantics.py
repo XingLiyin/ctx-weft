@@ -107,7 +107,7 @@ async def test_unattended_plain_text_turn_emits_exactly_one_completed_event(monk
     launched = _spy_observe(monkeypatch)
     state, ctx, task, reg, bus = _env(unattended=True)
 
-    await act._finish_plain_text_turn(state, ctx, turn_num=1)   # 不抛 HitlPark
+    await act._finish_plain_text_turn(state, ctx, turn_num=1, transcript=[])   # 不抛 HitlPark
 
     assert _completed(bus) == ["stop"], (
         "无人值守回合必须只有一条收尾事件；出现 await_user 说明判断没有前置到副作用之前")
@@ -133,7 +133,7 @@ async def test_attended_plain_text_turn_parks_and_never_reaches_stop(monkeypatch
     state, ctx, task, reg, bus = _env(unattended=False)
 
     with pytest.raises(HitlPark):
-        await act._finish_plain_text_turn(state, ctx, turn_num=1)
+        await act._finish_plain_text_turn(state, ctx, turn_num=1, transcript=[])
 
     assert _completed(bus) == ["await_user"], "让位则 stop 那条根本到不了"
     assert launched == ["plain_text"]

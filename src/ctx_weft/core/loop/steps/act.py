@@ -123,7 +123,7 @@ class ActStep(Step):
             # 把一次正常收尾误报成机械退出，经 observe 强制改判 retry、白吃一次重试预算。
             if not turn.tool_calls:
                 transcript.append(turn_record)
-                await _finish_plain_text_turn(state, ctx, turn_num)
+                await _finish_plain_text_turn(state, ctx, turn_num, transcript)
                 break
 
             # 5) 派发前压缩（含派发调用且越阈值时；在 dispatch 执行 / 子 spawn-inherit 之前）
@@ -213,23 +213,8 @@ class ActStep(Step):
         # 收尾路径 = 纯文本收尾(normal) 或 finish_task 收尾(actor_done 且未挂起)；答复即消息正文，
         # finish_task 的 deliverables_summary 为可选产出小结。max_turns / context_limit /
         # delegate-suspend 不在此列（不产最终输出，维持现状）。
-        if (
-            exit_reason in ("normal", "actor_done")
-            and not state.task.suspend_requested
-            and transcript
-        ):
-            body, summary = _compose_final_outputs(transcript)
-            # 拼接留在调用方：`task.outputs` 的既有契约（**拼好的单串**）一个字不变——
-            # 它有 6 处读取方（_build_memory_content / background_observe / finalize 的
-            # final_reply 等），改形态会把这些一并掀翻。
-            outputs = f"{body}\n\n{summary}" if (body and summary) else (body or summary)
-            if outputs:
-                state.task.outputs = outputs
-            # 两段另存一份：TASK_FINALIZED 需要它们**分开**出核——output 是交付物本身，
-            # summary 是 agent 给 reviewer 的自评清单。混在一起正是 host 侧打印「最终
-            # 答复」时把自评清单当答案一起打出来的成因。
-            state.extra["final_body"] = body
-            state.extra["final_summary"] = summary
+        if exit_reason in ("normal", "actor_done"):
+            _synthesize_final_outputs(state, transcript)
 
         return StepOutcome(
             next_step=next_step,
@@ -821,7 +806,41 @@ def _reconcile_finish_vs_dispatch(
     )
 
 
-async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: int) -> None:
+def _synthesize_final_outputs(state: LoopState, transcript: list) -> None:
+    """把收尾回合的正文合成 `task.outputs`（幂等，可重复调用）。
+
+    收尾路径 = 纯文本收尾(normal) 或 finish_task 收尾(actor_done 且未挂起)；答复即消息
+    正文，finish_task 的 deliverables_summary 为可选产出小结。max_turns / context_limit /
+    delegate-suspend 不在此列（不产最终输出）。
+
+    **必须能在 park 之前被调到**（2026-09-24 修）：park 走 `_cold_park` 抛 `HitlPark`
+    释放协程，`ActStep.execute` 就地中断——循环之后那次合成永远执行不到。于是 park 的
+    task 恒 `outputs=None`，而 `report_task_outcome` 的 success-without-outputs 护栏据它
+    把 success 改判 retry，**park 的 task 因此永远不会被判成功终结、DAG 后继永远放不行**。
+    日志里的形态是 `arguments={'task_status':'success'}` 而
+    `result="Assessment recorded: outcome=retry."`。
+    """
+    # getattr 防御：手构的替身 task 未必带这个字段（本函数现在也从 park 路径被调，
+    # 而那条路上的单测惯用 SimpleNamespace）。
+    if getattr(state.task, "suspend_requested", False) or not transcript:
+        return
+    body, summary = _compose_final_outputs(transcript)
+    # 拼接留在这里：`task.outputs` 的既有契约（**拼好的单串**）一个字不变——它有 6 处
+    # 读取方（_build_memory_content / background_observe / finalize 的 final_reply 等），
+    # 改形态会把这些一并掀翻。
+    outputs = f"{body}\n\n{summary}" if (body and summary) else (body or summary)
+    if outputs:
+        state.task.outputs = outputs
+    # 两段另存一份：TASK_FINALIZED 需要它们**分开**出核——output 是交付物本身，summary
+    # 是 agent 给 reviewer 的自评清单。混在一起正是 host 侧打印「最终答复」时把自评清单
+    # 当答案一起打出来的成因。
+    state.extra["final_body"] = body
+    state.extra["final_summary"] = summary
+
+
+async def _finish_plain_text_turn(
+    state: LoopState, ctx: LoopContext, turn_num: int, transcript: list,
+) -> None:
     """纯文本回合（无 tool call）收尾。
 
     **有人在场**就让位 → `_park_await_user`（HITL input 冷 park、raises HitlPark；park
@@ -838,6 +857,10 @@ async def _finish_plain_text_turn(state: LoopState, ctx: LoopContext, turn_num: 
     走不到这里；`_park_await_user` 正常返回就意味着这一轮不让位（无人值守），它保证
     零副作用返回，所以 `stop` 是这个回合唯一的一条 ACT_TURN_COMPLETED。
     """
+    # **先合成 outputs，再决定让不让位**：下面那条 park 会抛 `HitlPark` 就地中断整个
+    # ActStep，循环之后那次合成到不了。见 `_synthesize_final_outputs` 的 docstring。
+    _synthesize_final_outputs(state, transcript)
+
     if (
         isinstance(state.task.settings, NormalTaskSettings)
         and not state.task.unattended

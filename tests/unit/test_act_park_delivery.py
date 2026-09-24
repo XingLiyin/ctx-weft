@@ -68,7 +68,7 @@ def _act_env(*, interactive: bool = True):
 async def _run_plain_text_pause(state, ctx):
     import ctx_weft.core.loop.steps.act as act
 
-    await act._finish_plain_text_turn(state, ctx, turn_num=1)
+    await act._finish_plain_text_turn(state, ctx, turn_num=1, transcript=[])
 
 
 async def _run_interrupt(state, ctx, *, edit: bool):

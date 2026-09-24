@@ -87,7 +87,11 @@ async def test_interactive_plain_text_parks_for_user() -> None:
 
     # park 不写 task 状态（Task 4）：AWAITING_HUMAN 由 TaskManager 据 RunOutcome 落。
     assert task.status == "ACTIVE"
-    assert task.outputs is None                       # 纯文本不是产出
+    # 纯文本**就是**这一段的产出（2026-09-24 修）：park 之前必须先合成 `outputs`，
+    # 否则 `report_task_outcome` 的 success-without-outputs 护栏会把 observer 的
+    # success 改判 retry，park 的 task 永远终结不了。见
+    # `tests/unit/test_outputs_synthesized_before_park.py`。
+    assert task.outputs == "Hi! Anything else?"
     pend = hitl.list_pending("s1")
     assert len(pend) == 1
     assert pend[0].form == "wait"
