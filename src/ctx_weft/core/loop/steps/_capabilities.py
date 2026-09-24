@@ -41,6 +41,10 @@ async def resolve_capabilities(state, ctx) -> list:
 
     resolved = await CapabilityResolver().resolve(
         template=template, task=state.task, providers=other_providers, ctx=ctx.provider_ctx,
+        # 内建那批（控制工具 / skill executor）已在上面绑好，但它们被从 `other_providers`
+        # 里摘出去了——不告诉 resolver 的话，模板里声明它们为 required 的每一条都会报一条
+        # "not found"，而那些工具其实就在工具面里。
+        already_bound={c.id for c in builtin_caps},
     )
     return builtin_caps + resolved
 

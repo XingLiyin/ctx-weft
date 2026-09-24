@@ -29,9 +29,17 @@ class TemplateLookup:
     def __init__(self, providers: "ProviderRegistry") -> None:
         self._providers = providers
 
-    def _agent_providers(self) -> list[AgentCapabilityProvider]:
+    def agent_providers(self) -> list[AgentCapabilityProvider]:
+        """当前注册的 agent 模板 provider。
+
+        公开是给恢复期的存量兼容用的（`AgentLifecycleManager._resolve_for_recovery` 要
+        对裸 id 逐个补前缀重试）。热路径仍走 `get_template` 的精确路由。
+        """
         return [p for p in self._providers.get_capability_providers()
                 if isinstance(p, AgentCapabilityProvider)]
+
+    #: 内部沿用旧名，避免改动本文件其余三个调用点。
+    _agent_providers = agent_providers
 
     async def resolve_qualified(self, qualified: str, ctx: "ProviderContext") -> str:
         """qualified 工具名（agent__planner）→ 规范 cap.id（agent:planner）。

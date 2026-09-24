@@ -450,6 +450,73 @@ class AgentLifecycleManager:
         """全部已登记 agent 的 id——`list_agents()` 不传 session_id 时的数据源。"""
         return list(self._agents)
 
+    async def _normalise_template_id(
+        self, template_id: str, ctx: "ProviderContext",
+    ) -> str:
+        """`provider__name` → `provider:name`；已是规范形态或归一不出则原样返回。
+
+        两步，精确优先：① 问 provider（`resolve_qualified` 逐个比对 `qualify(cap.id)`，
+        能处理 `qualify` 的固有歧义——它是 `":" → "__"` 的无损替换，名字本身含 `__` 时
+        反向拆不唯一）；② provider 的 `list()` 没暴露 AgentCapability 时退回字符串归一，
+        只换**第一个** `__`——agent 模板 provider 名是单段（`agent` / `cowork`），第一个
+        分隔符就是边界。
+        """
+        try:
+            resolved = await self.template_lookup.resolve_qualified(template_id, ctx)
+            if ":" in resolved:
+                return resolved
+        except Exception:
+            logger.exception(
+                "AgentLifecycleManager: resolve_qualified failed for %r", template_id)
+        return template_id.replace("__", ":", 1) if "__" in template_id else template_id
+
+    async def _resolve_for_recovery(
+        self, template_id: str, agent_id: str, ctx: "ProviderContext",
+    ) -> "AgentTemplate | None":
+        """恢复期解析模板；解析不出返回 None，由调用方降级为默认 configs。
+
+        **存量兼容那一跳**：2026-09-24 之前 `instantiate` 存的是 `template.id`——provider
+        内部的 local name（`ipmaster`），而 `get_template` 按前缀精确路由、裸 id 一律抛
+        `TemplateNotFoundError`。那批 agent 恢复时必然解析失败、静默降级用默认 configs。
+        写入侧已改存可路由形态，但**日志里的历史事件改不了**，所以这里对裸 id 再试一次：
+        用已注册的 agent provider 名逐个补前缀。
+
+        只在恢复期做、只对裸 id 做：热路径的精确路由一个字不动（`get_template` 那条
+        「路由已确定，不问其他 provider」的设计意图是对的，避免跨 provider 歧义）。补齐
+        命中多个 provider 时取第一个并留 warning——存量数据本就没保留是哪一家，猜一次
+        总比整个 agent 降级强，但要让人看得见。
+        """
+        try:
+            return await self.template_lookup.get_template(template_id, None, ctx=ctx)
+        except Exception:
+            pass
+        # 手构的替身 lookup（单测里常见）可能没有这个入口——拿不到就直接降级，
+        # 补前缀只是存量兼容的锦上添花，不该把它变成崩溃点。
+        list_providers = getattr(self.template_lookup, "agent_providers", None)
+        if ":" not in template_id and callable(list_providers):
+            candidates = []
+            for provider in list_providers():
+                try:
+                    tpl = await self.template_lookup.get_template(
+                        f"{provider.name}:{template_id}", None, ctx=ctx)
+                except Exception:
+                    continue
+                candidates.append((provider.name, tpl))
+            if candidates:
+                if len(candidates) > 1:
+                    logger.warning(
+                        "AgentLifecycleManager.load: bare template id %r matches %d providers "
+                        "(%s) for agent %s; taking the first — legacy events do not record "
+                        "which one it came from",
+                        template_id, len(candidates), [n for n, _ in candidates], agent_id)
+                return candidates[0][1]
+        logger.warning(
+            "AgentLifecycleManager.load: template %r unresolvable for agent %s; "
+            "using default configs (recovery-time gap, degrading not crashing)",
+            template_id, agent_id,
+        )
+        return None
+
     async def load(
         self,
         agent_views: dict[str, AgentView],
@@ -528,17 +595,12 @@ class AgentLifecycleManager:
         cold_ids = {av.id for av in agent_views.values() if av.id not in self._agents}
         for av in agent_views.values():
             template_id = av.template_id or fallback_template_id
-            try:
-                template = await self.template_lookup.get_template(template_id, None, ctx=ctx)
-                resolved_template_id = template.id
+            template = await self._resolve_for_recovery(template_id, av.id, ctx)
+            if template is not None:
+                resolved_template_id = template_id
                 memory_config = template.memory_config
                 loop_config = template.loop_config
-            except Exception:
-                logger.warning(
-                    "AgentLifecycleManager.load: template %r unresolvable for agent %s; "
-                    "using default configs (recovery-time gap, degrading not crashing)",
-                    template_id, av.id,
-                )
+            else:
                 resolved_template_id = template_id
                 memory_config = MemoryConfig()
                 loop_config = LoopConfig()
@@ -665,6 +727,22 @@ class AgentLifecycleManager:
                 template_id, None, ctx=resolve_ctx,
             )
 
+        # 存储用的 id 必须是**可路由**的规范形态（`provider:name`）。三个候选各有问题，
+        # 所以这里显式归一：
+        #   - `template.id`  是 provider 内部的 local name（`ipmaster`）——裸 id，
+        #     `get_template` 按前缀精确路由、裸的一律抛，恢复时根本找不回来；
+        #   - 入参 `template_id` **形态不唯一**：host 建根 agent 时给的是规范形态
+        #     （`agent:ipmaster`），而 LLM 委派子 agent 时给的是 LLM-facing 的
+        #     qualified 名（`agent__researcher`，见 `delegate_task` 的 subagent_template）；
+        #   - 两者都存错，后果一样：恢复期静默降级用 MemoryConfig()/LoopConfig() 默认值。
+        # `resolve_qualified` 把 `provider__name` 折回 `provider:name`，已是规范形态的
+        # 原样返回（它未命中就返回字面值），所以一次调用覆盖两种入参。
+        routable_template_id = template_id or template.id
+        if routable_template_id and ":" not in routable_template_id:
+            routable_template_id = await self._normalise_template_id(
+                routable_template_id,
+                ctx or ProviderContext(session_id=session_id, tenant_id=tenant_id))
+
         spawn_depth = 0
         if parent_agent_id is not None:
             # .get() + 回落而非裸下标：父 agent 若因跨重启未被本进程重新登记
@@ -710,7 +788,7 @@ class AgentLifecycleManager:
         self._agents[agent_id] = _AgentRecord(
             session_id=session_id,
             tenant_id=tenant_id,
-            template_id=template.id,
+            template_id=routable_template_id,
             parent_agent_id=parent_agent_id,
             spawn_depth=spawn_depth,
             memory_config=template.memory_config,
@@ -733,7 +811,7 @@ class AgentLifecycleManager:
             id=agent_id,
             session_id=session_id,
             tenant_id=tenant_id,
-            template_id=template.id,
+            template_id=routable_template_id,
             parent_agent_id=parent_agent_id,
             spawn_depth=spawn_depth,
             memory_config=template.memory_config,
@@ -773,7 +851,7 @@ class AgentLifecycleManager:
             task_id=task_id,
             agent_id=agent_id,
             payload={
-            "template_id": template.id,
+            "template_id": routable_template_id,
             "template_version": template.version,
             "llm_account": llm.account,
             "llm_model": llm.model,

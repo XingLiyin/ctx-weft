@@ -32,6 +32,7 @@ class CapabilityResolver:
         task: Task,
         providers: list[CapabilityProvider],
         ctx: ProviderContext,
+        already_bound: "set[str] | None" = None,
     ) -> list[Capability]:
         """三阶段解析：required → retrieve → 去 forbidden。"""
         # spec: tool-operations（wp6）——recovery_policy 取值校验（响亮，不静默兜底）：
@@ -67,6 +68,12 @@ class CapabilityResolver:
         required_caps: list[Capability] = []
         for ref in template.capability_refs:
             if ref.mode != "required":
+                continue
+            if already_bound and ref.capability_id in already_bound:
+                # 调用方已经绑上了（内建控制工具 / skill executor 走的是旁路，见
+                # `loop/steps/_capabilities.py`：它们被从 `providers` 里摘出去单独处理）。
+                # 不跳过的话这里会对每个这样的 ref 报一条 "not found"——**纯噪音**，而且
+                # 极具误导性：它看着像「工具没绑上」，实际那些工具好端端在工具面里。
                 continue
             cap = await self._find(ref.capability_id, providers, ctx)
             if cap is None:

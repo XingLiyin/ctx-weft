@@ -34,6 +34,10 @@ from tests._event_helpers import all_events
 pytestmark = pytest.mark.asyncio
 
 SUB_TEMPLATE_ID = "tpl_researcher"
+#: agent record / 事件里**存**的形态：规范的 `provider:name`。与下面 LLM 传的
+#: `SUB_TEMPLATE_REF`（`provider__name`）是同一个模板的两种写法——存的必须是可路由的
+#: 那个，否则恢复时 `get_template` 路由不回去（2026-09-24）。
+SUB_TEMPLATE_CANONICAL = f"agent:{SUB_TEMPLATE_ID}"
 # delegate_task 收的是**限定工具名**形式（agent__x）——TemplateLookup.resolve_qualified
 # 按 qualify(cap.id) 匹配，裸 id 原样透传给 get_template 后报 TemplateNotFoundError。
 SUB_TEMPLATE_REF = "agent__tpl_researcher"
@@ -155,7 +159,7 @@ async def test_subagent_instantiation_emits_event_with_own_template():
         f"emitted agent ids = "
         f"{[e.agent_id for e in events if e.type == EventType.AGENT_INSTANTIATED]}"
     )
-    assert instantiated[-1].payload.get("template_id") == SUB_TEMPLATE_ID
+    assert instantiated[-1].payload.get("template_id") == SUB_TEMPLATE_CANONICAL
 
 
 async def test_replayed_view_gives_subagent_its_own_template():
@@ -175,8 +179,8 @@ async def test_replayed_view_gives_subagent_its_own_template():
     sub_av = view.agents[sub_task.assigned_agent_id]
     root_av = view.agents[view.sessions[handle.session_id].root_agent_id]
 
-    assert sub_av.template_id == SUB_TEMPLATE_ID
-    assert root_av.template_id != SUB_TEMPLATE_ID
+    assert sub_av.template_id == SUB_TEMPLATE_CANONICAL
+    assert root_av.template_id != SUB_TEMPLATE_CANONICAL
 
 
 # ── spawn 动作本身的事件：AgentSpawned / SpawnRejected ────────────────────────

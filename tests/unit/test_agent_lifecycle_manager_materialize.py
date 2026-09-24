@@ -62,7 +62,10 @@ async def test_materialize_carries_template_config():
     got, rm = lm.materialize(          # 不再收窗口参数
         agent.id, session_id=agent.session_id, tenant_id=agent.tenant_id)
     assert got.id == agent.id
-    assert got.template_id == tmpl.id
+    # 存的是**可路由**的 id（`provider:name`），不是 provider 内部的 local name——
+    # `tmpl.id` 是后者，恢复时 `get_template` 路由不回去（2026-09-24）。
+    assert got.template_id == TPL
+    assert got.template_id.endswith(f":{tmpl.id}")
     # 从 template 来，不是 dataclass 默认 —— 这修掉了 agents_from_projection 的旧行为
     assert got.memory_config == tmpl.memory_config
     assert got.loop_config == tmpl.loop_config
