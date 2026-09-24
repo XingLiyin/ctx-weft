@@ -115,3 +115,85 @@ async def test_rejected_verdict_is_not_an_error() -> None:
     tm = _RecordingTM(accepted=False)
     await _submit_verdict(_state(), _ctx(tm), _meta())
     assert len(tm.calls) == 1
+
+
+# ── park 气泡的收口（2026-09-24 线上 bug）────────────────────────────────────
+#
+# 不收的后果：气泡还挂着 → 前端认为「agent 在等你说话」→ 把用户的下一条输入当成对这个
+# 气泡的应答投过来 → 消息注进已 FINISHED 的 task、重排被终态守卫挡掉 → 死在那里。
+# 用户看到的是「发了没反应，再发一遍才回」。
+
+class _Bubble:
+    def __init__(self, hid: str, task_id: str) -> None:
+        self.id, self.task_id = hid, task_id
+
+
+class _Registry:
+    def __init__(self, bubbles: list) -> None:
+        self._bubbles = bubbles
+
+    def list_pending(self, session_id=None, **kw):
+        return list(self._bubbles)
+
+
+class _Hitl:
+    def __init__(self, bubbles: list) -> None:
+        self.registry = _Registry(bubbles)
+        self.cancelled: list[str] = []
+
+    async def cancel(self, hitl_id, *, message="", defer=False):
+        self.cancelled.append(hitl_id)
+        return None
+
+
+def _ctx_with_hitl(tm, hitl):
+    return SimpleNamespace(task_manager=tm, hitl=hitl)
+
+
+def _state_with_session():
+    return SimpleNamespace(task=SimpleNamespace(id="t1", outputs="交付物"),
+                           session=SimpleNamespace(id="s1"))
+
+
+async def test_success_closes_the_park_bubble() -> None:
+    hitl = _Hitl([_Bubble("hit_1", "t1")])
+    await _submit_verdict(_state_with_session(), _ctx_with_hitl(_RecordingTM(), hitl), _meta())
+    assert hitl.cancelled == ["hit_1"]
+
+
+async def test_retry_leaves_the_bubble_alone() -> None:
+    """retry 维持 park——那个气泡正是它等人的入口，收掉会把会话变哑。"""
+    hitl = _Hitl([_Bubble("hit_1", "t1")])
+    await _submit_verdict(_state_with_session(), _ctx_with_hitl(_RecordingTM(), hitl),
+                          _meta("retry"))
+    assert hitl.cancelled == []
+
+
+async def test_rejected_verdict_leaves_the_bubble_alone() -> None:
+    """判决被仲裁拒绝（人先开口）→ task 没终结，气泡照旧归它用。"""
+    hitl = _Hitl([_Bubble("hit_1", "t1")])
+    await _submit_verdict(_state_with_session(),
+                          _ctx_with_hitl(_RecordingTM(accepted=False), hitl), _meta())
+    assert hitl.cancelled == []
+
+
+async def test_only_this_tasks_bubbles_are_closed() -> None:
+    """同 agent 上别的请求（例如子任务的 ask_user）不归这次判决管。"""
+    hitl = _Hitl([_Bubble("hit_mine", "t1"), _Bubble("hit_other", "t2")])
+    await _submit_verdict(_state_with_session(), _ctx_with_hitl(_RecordingTM(), hitl), _meta())
+    assert hitl.cancelled == ["hit_mine"]
+
+
+async def test_cancel_failure_does_not_break_the_verdict() -> None:
+    """收不掉气泡只记日志——绝不让它把一次已经落定的判决变成异常。"""
+    class _Boom(_Hitl):
+        async def cancel(self, hitl_id, **kw):
+            raise RuntimeError("registry is cold")
+
+    await _submit_verdict(_state_with_session(),
+                          _ctx_with_hitl(_RecordingTM(), _Boom([_Bubble("h", "t1")])), _meta())
+
+
+async def test_missing_hitl_service_is_tolerated() -> None:
+    await _submit_verdict(_state_with_session(),
+                          SimpleNamespace(task_manager=_RecordingTM(), hitl=None), _meta())
