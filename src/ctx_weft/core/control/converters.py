@@ -63,6 +63,7 @@ def task_from_projection(proj: TaskView) -> Task:
         max_retries=proj.max_retries,
         settings=deserialize_settings(proj.settings_raw),
         unattended=proj.unattended,
+        port_key=proj.port_key,
         origin_tool_call_id=proj.origin_tool_call_id or None,
         origin_tool_name=proj.origin_tool_name or None,
         outputs=proj.outputs,

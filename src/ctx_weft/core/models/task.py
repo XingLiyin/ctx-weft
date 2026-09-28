@@ -17,6 +17,32 @@ if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
 
+# ── 交互口（port）────────────────────────────────────────────────────────────
+#
+# port 是 session 的**对外交互端口**：session 边界之内的事靠 task DAG（依赖、父子
+# 挂起），跨出边界的往返靠 port。对端是人、是另一个 agent、还是外部系统，SDK 不
+# 关心——它只保证**同一个口上至多一个 task 占着往返**（`TaskManager._held_ports`）。
+#
+# 互斥的理由不是「人只有一个」，而是一次往返的应答必须能路由回发起方：两个 task
+# 同时在一个口上问话，回来的答复无从归属。所以需要串行化的往返才叫 port；不需要
+# 串行的对端（无状态、带 correlation id、随便打）根本不必是 port，那就是普通并发。
+
+#: 默认交互口。没有显式声明的 task 都接在这里——这个库里最常见的情形是有人在对话。
+PORT_MAIN = "main"
+#: 不接任何口：自治作业，既不往返也不推送。
+PORT_NONE = ""
+
+
+def default_port_for(unattended: bool) -> str:
+    """没有显式 port 声明时的回落。
+
+    `unattended` 与 `port_key` 是**两个问题**（见 `Task.port_key`），但在没有第二
+    个字段的年代，「无人值守」同时兼任了「不接口」。存量事件流与尚未打通 port 参数
+    的构造点都靠这条公式回落，两边共用同一个真相，避免 reducer 与运行期各推一套。
+    """
+    return PORT_NONE if unattended else PORT_MAIN
+
+
 # ── TaskSettings ──────────────────────────────────────────────────────────────
 
 
@@ -130,8 +156,25 @@ class Task:
     #
     # 它还有两个更早的用途，都源自同一个事实「有没有人在」：`HitlService.open()`
     # （HITL 的唯一登记入口）据它堵死无人值守的 HITL——没人应答就是 park 到死；
-    # `TaskManager._interactive_line_held` 据它把非 unattended 的 task 串成一条交互线。
+    # `TaskManager._held_ports` 据它判断这个 task 占不占交互口。
+    #
+    # 与 `port_key` 的分工（见下）：本字段答「这一轮**要不要等**对端」，那个答
+    # 「对端**是谁**」。两者正交，四种组合里三种合法——尤其 `port_key` 非空 +
+    # `unattended=True` 是「接口但自治」：跑完把产出推到那个口，中途不问、不让位。
     unattended: bool = False
+    #: 这个 task 接在 session 的哪个交互口上（见模块顶部的 port 段）。空 = 不接任何口。
+    #:
+    #: 不变式：``unattended=False ⟹ port_key 非空``——要等对端，就得先有个口。
+    #: 校验落在 `TaskManager.push_task`（唯一的新建路径），不落 `__post_init__`：
+    #: 崩溃重建走 `restore` 不经那条路，把校验放构造器只会让恢复在坏数据上炸。
+    #:
+    #: **占口判据**（`TaskManager._held_ports`）：``port_key 非空 且 not unattended
+    #: 且（在跑 or AWAITING_HUMAN）``。`AWAITING_HUMAN` 必须算——park 一发生槽位就
+    #: 还回来了，只看在跑会让同一个口上出现两条同时等应答的往返。
+    #:
+    #: 沿 task 树继承（`delegate_task` / `delegate_plan` 与 `unattended` 一起传），
+    #: 不给 LLM 旋钮：子任务的产出流向同一个对端，这是作业被怎么起起来的事实。
+    port_key: str = PORT_MAIN
     outputs: Any | None = None
     process_report: str | None = None
     # 何时设置 process_report（= 上一轮 observe 产出反馈的时刻，落在该 attempt 之后、下一 attempt 之前）。
@@ -147,6 +190,15 @@ class Task:
 
     retry_count: int = 0
     max_retries: int = 3
+    #: 自治作业从 `INTERRUPTED` 被自动退避重排过几次（见
+    #: `TaskManager._schedule_autonomous_requeue`）。与 `retry_count` **不同源**：那个数
+    #: 的是 run 内的原地重试，这个数的是「停下来、退避、再起一次」的轮数，而后者的触发
+    #: 条件（LLM outage、崩溃）恰恰是前者不允许原地重试的那些。
+    #:
+    #: **刻意不持久化**（不进 TASK_CREATED payload / `TaskView` / reducers）：`restore`
+    #: 今天就无条件、无预算地重排一切非终态 task，所以「进程重启后预算归零」与既有行为
+    #: 一致，不是新的放松；持久化要多改四处，换的是一个既有路径本来就没有的严格性。
+    interrupt_requeue_count: int = 0
 
     compensation: dict[str, Any] | None = None
     priority: int = 5

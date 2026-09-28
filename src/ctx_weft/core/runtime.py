@@ -80,7 +80,7 @@ from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.models.session import Session
-from ctx_weft.core.models.task import NormalTaskSettings, Task
+from ctx_weft.core.models.task import PORT_NONE, NormalTaskSettings, Task, default_port_for
 from ctx_weft.core.models.errors import (
     AgentNotFound,
     AgentNotLoaded,
@@ -273,6 +273,9 @@ class SessionStartParams:
     # 这一轮没有人看顾（后台自治作业）：透传到 root task 的 `Task.unattended`，并强制
     # 它不 park。见 `Task.unattended` / `HitlService.open`。
     unattended: bool = False
+    # 这一轮接在 session 的哪个交互口上（见 `Task.port_key`）。None = 未声明，按
+    # `unattended` 回落；显式给口才会产出「接口但自治」那一格。
+    port_key: str | None = None
 
     @classmethod
     def create(
@@ -290,6 +293,7 @@ class SessionStartParams:
         reserved_output_tokens: int = 8192,
         resume: bool = False,
         unattended: bool = False,
+        port_key: str | None = None,
     ) -> "SessionStartParams":
         from ctx_weft.core.models.task import deserialize_settings
         return cls(
@@ -305,6 +309,7 @@ class SessionStartParams:
             reserved_output_tokens=reserved_output_tokens,
             resume=resume,
             unattended=unattended,
+            port_key=port_key,
         )
 
 
@@ -765,6 +770,9 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
             task_max_concurrent=self._config.task_max_concurrent,
             task_max_retries=self._config.task_max_retries,
+            autonomous_requeue_max=self._config.autonomous_requeue_max,
+            autonomous_requeue_backoff_base_sec=(
+                self._config.autonomous_requeue_backoff_base_sec),
         )
         # SM 的输入端：只认 TaskManager 的四类事件（_INPUT_BY_EVENT），本 task
         # 之后 TM 还没开始发这三条信号，运行时行为不变（docs/events-v2.md §2.1.1）。
@@ -1510,6 +1518,8 @@ class CtxWeftRuntime:
             # 发下一条消息。不标的话，纯文本收尾会 park 等一个永远不来的人——判据自
             # `interaction_mode` 退场后只剩「有没有人在」，而这里答案明确是没有。
             unattended=True,
+            # 同理不接任何交互口：没有对端可往返，产出由本方法同步返回给调用方。
+            port_key=PORT_NONE,
             created_at=now_utc(),
         )
 
@@ -1518,6 +1528,9 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
             max_concurrent=self._config.task_max_concurrent,
             task_max_retries=self._config.task_max_retries,
+            autonomous_requeue_max=self._config.autonomous_requeue_max,
+            autonomous_requeue_backoff_base_sec=(
+                self._config.autonomous_requeue_backoff_base_sec),
         )
         task_manager.set_session(session)
         task_manager.register_task(task)
@@ -1746,6 +1759,7 @@ class CtxWeftRuntime:
                 reserved_output_tokens=params.reserved_output_tokens,
                 user_prompt_event_jsonable=user_prompt_event_jsonable,
                 unattended=params.unattended,
+                port_key=params.port_key,
             )
         else:
             # 有活 owner 就把新 root task 推进它（单例）；没有才由 resume_session 新建。
@@ -1768,6 +1782,7 @@ class CtxWeftRuntime:
                 initial_task_settings=params.initial_task_settings,
                 user_prompt_event_jsonable=user_prompt_event_jsonable,
                 unattended=params.unattended,
+                port_key=params.port_key,
                 task_manager=existing,
             )
 
@@ -2620,6 +2635,9 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
             max_concurrent=self._config.task_max_concurrent,
             task_max_retries=self._config.task_max_retries,
+            autonomous_requeue_max=self._config.autonomous_requeue_max,
+            autonomous_requeue_backoff_base_sec=(
+                self._config.autonomous_requeue_backoff_base_sec),
         )
         task_manager.set_session(session)
         # 走到这里就意味着内存里没有活 owner（有的话上面已经就地复用并 return 了），
@@ -3260,6 +3278,7 @@ class CtxWeftRuntime:
         *,
         session_id: str | None = None,
         unattended: bool = False,
+        port_key: str | None = None,
     ) -> TurnHandle:
         """向指定 agent 发一条外部消息，返回这次交互的 `TurnHandle`（spec §4.1；
         2026-09-04 spec §3.3）——agent-centric 的核心入口：外部消息按 agent 显式寻址，
@@ -3297,6 +3316,10 @@ class CtxWeftRuntime:
         ``unattended``：这条消息**开出的新 task** 无人看顾（后台自治作业）——只对上面
         第一条路径（新建 task）生效，注入既有 task 的两条路径沿用那个 task 自己的标记
         （改写一个已在跑的 task 的「有没有人在」不属于本入口的职责）。见 `Task.unattended`。
+
+        ``port_key``：同上，只对新建分支生效——这条消息开出的新 task 接在哪个交互口上
+        （见 `Task.port_key`）。注入分支沿用那个 task 自己的口：一条消息不该把一个正在
+        跟某个对端往返的 task 改接到别处。
         """
         reg = self._agent_lifecycle_manager
         rec = reg.record_of(agent_id)
@@ -3320,7 +3343,7 @@ class CtxWeftRuntime:
                 current, content, session_id=rec.session_id)
         else:
             task_id = await self._start_task_for_agent(
-                agent_id, content, unattended=unattended)
+                agent_id, content, unattended=unattended, port_key=port_key)
 
         return TurnHandle(
             session_id=rec.session_id,
@@ -3529,7 +3552,7 @@ class CtxWeftRuntime:
 
     async def _start_task_for_agent(
         self, agent_id: str, content: "str | list[ContentPart]", *,
-        unattended: bool = False, **_kw: Any,
+        unattended: bool = False, port_key: str | None = None, **_kw: Any,
     ) -> str:
         """`send_message` 的新建分支：`current_task` 已终态（或压根没有）-> 起一个
         新 task 挂给该 agent，走既有的 `push_task` 通路——与
@@ -3620,6 +3643,8 @@ class CtxWeftRuntime:
             # `unattended` 单独决定（见 `Task.unattended`）。既然是后台投喂的一条消息、
             # 没有人守着，就不会有下一条消息来解 park，那时纯文本让位等于永久挂起。
             unattended=unattended,
+            # 交互口：调用方显式给的那个；未声明（None）则按 `unattended` 回落。
+            port_key=(port_key if port_key is not None else default_port_for(unattended)),
             created_at=now_utc(),
         )
         # `provisional=True`：一条用户消息开出的新一轮，在 LLM 真的开口之前不算发生
@@ -3644,6 +3669,7 @@ class CtxWeftRuntime:
         title: str = "",
         description: str = "",
         unattended: bool = False,
+        port_key: str | None = None,
         llm_account: str | None = None,
         llm_model: str | None = None,
         tenant_id: str | None = None,
@@ -3652,6 +3678,17 @@ class CtxWeftRuntime:
         host 侧对等物。
 
         ``tenant_id``：同 `rebuild_session`——host 给什么就是什么，不给则 ``"default"``。
+
+        ``port_key``：这条 task 接在 session 的哪个交互口上（见 `Task.port_key`）。
+        **旁支交互线由这里开出来**——给一个新口名，它就与主线并行，各自等自己的对端：
+
+            dispatch_task(sid, "...", agent_id=None, port_key="btw",
+                          settings=NormalTaskSettings(
+                              use_subagent=True, subagent_template="agent:btw",
+                              inherit_from_agent_id=root_agent_id))
+
+        口是**涌现的**：没有 open/close API，给一个没见过的名字就等于开了一条，那个口
+        上最后一个 task 终态就等于关了。``None`` = 未声明，按 `unattended` 回落。
 
         与 `send_message` 的分工：那个是**对话**（有活 task 就并进去，路由归 core），
         这个是**派发**（永不注入既有 task，开不开新 agent、挂谁、继承谁全由调用方声明）。
@@ -3826,6 +3863,8 @@ class CtxWeftRuntime:
             user_prompt_event_jsonable=event_jsonable,
             settings=s,
             unattended=unattended,
+            # 交互口：调用方显式给的那个；未声明（None）则按 `unattended` 回落。
+            port_key=(port_key if port_key is not None else default_port_for(unattended)),
             created_at=now_utc(),
         )
         # `provisional=False`（对比 `_start_task_for_agent` 的 True）：未提交窗口是给

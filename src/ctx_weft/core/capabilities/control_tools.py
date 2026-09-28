@@ -239,6 +239,8 @@ def delegate_task(
         # 作业被怎么起起来的事实，不是 actor 可以自行宣布的。它同时决定子任务的纯文本
         # 回合要不要 park——父任务有人在，子任务的话也有人听。
         unattended=ctx.task.unattended,
+        # 交互口同样继承：子任务的产出流向同一个对端。
+        port_key=ctx.task.port_key,
         settings=NormalTaskSettings(
             skill_name=skill_name,
             use_subagent=bool(use_subagent),
@@ -309,8 +311,10 @@ def delegate_plan(
             description=spec.get("description", ""),
             user_prompt=spec.get("task_prompt") or spec.get("description", ""),
             origin_tool_call_id=generate_id("tcall"),
-            # 同 delegate_task：继承而非声明——「有没有人在」是作业被怎么起起来的事实。
+            # 同 delegate_task：继承而非声明——「有没有人在」「对端是谁」都是作业被
+            # 怎么起起来的事实。
             unattended=ctx.task.unattended,
+            port_key=ctx.task.port_key,
             settings=NormalTaskSettings(
                 skill_name=spec.get("skill_name", ""),
                 use_subagent=bool(spec.get("use_subagent", False)),

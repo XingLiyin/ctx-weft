@@ -14,7 +14,7 @@ from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleMan
 from ctx_weft.core.orchestrator.model import ModelChoice
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.models.session import Session
-from ctx_weft.core.models.task import Task
+from ctx_weft.core.models.task import Task, default_port_for
 from ctx_weft.core.models.task import (
     CompactTaskSettings, MetadataFillerTaskSettings, NormalTaskSettings,
 )
@@ -82,6 +82,9 @@ class SessionRegistry:
     event_bus: EventBus
     task_max_concurrent: int = 4
     task_max_retries: int = 3
+    #: 自治作业的 INTERRUPTED 退避重排预算，透传给它建的每个 TaskManager。
+    autonomous_requeue_max: int = 3
+    autonomous_requeue_backoff_base_sec: float = 30.0
 
     #: session_id → 容器状态（tenant + 成员 agent 集合）。
     _states: dict[str, _SessionState] = field(default_factory=dict, init=False, repr=False)
@@ -142,6 +145,7 @@ class SessionRegistry:
         initial_task_settings: NormalTaskSettings | None = None,
         user_prompt_event_jsonable: "str | list[dict] | None" = None,
         unattended: bool = False,
+        port_key: str | None = None,
         with_root_task: bool = True,
     ) -> tuple[Session, "Task | None", TaskManager]:
         """Create a new session, instantiate root agent, push initial task.
@@ -155,6 +159,12 @@ class SessionRegistry:
 
         ``unattended``：这一轮没有人看顾（后台自治作业）。原样落到 root task，并由
         `_make_root_task_manager`。见 `Task.unattended`。
+
+        ``port_key``：这一轮接在 session 的哪个交互口上（见 `Task.port_key`）。
+        与 ``unattended`` 正交：那个答「要不要等对端」，本参数答「对端是谁」。
+        ``None`` = **未声明**，按 `unattended` 回落（有人在 → 主口，自治 → 不接口）；
+        显式传 `PORT_MAIN` + ``unattended=True`` 才是「接口但自治」——那一格必须由调用方
+        说出来，不能由一个没人传过的默认值替它宣布。
 
         ``user_prompt_event_jsonable``：调用方（`CtxWeftRuntime.start_session`）由
         **归一化之前的原始** user_prompt 算好的 event 侧载荷（见
@@ -241,7 +251,7 @@ class SessionRegistry:
 
         root_task, task_manager = await self._make_root_task_manager(
             session, user_prompt, initial_task_settings, user_prompt_event_jsonable,
-            unattended=unattended,
+            unattended=unattended, port_key=port_key,
         )
 
         return session, root_task, task_manager
@@ -257,6 +267,7 @@ class SessionRegistry:
         initial_task_settings: NormalTaskSettings | None = None,
         user_prompt_event_jsonable: "str | list[dict] | None" = None,
         unattended: bool = False,
+        port_key: str | None = None,
         task_manager: TaskManager | None = None,
     ) -> tuple[Session, Task, TaskManager]:
         """Resume an existing session: recover root_agent_id from event store, push a new root task.
@@ -313,7 +324,7 @@ class SessionRegistry:
         )
         root_task, task_manager = await self._make_root_task_manager(
             session, user_prompt, initial_task_settings, user_prompt_event_jsonable,
-            unattended=unattended, task_manager=task_manager,
+            unattended=unattended, port_key=port_key, task_manager=task_manager,
         )
 
         logger.info("Session %s resumed (agent=%s)", session_id, sess_proj.root_agent_id)
@@ -345,6 +356,8 @@ class SessionRegistry:
             event_bus=self.event_bus,
             max_concurrent=self.task_max_concurrent,
             task_max_retries=self.task_max_retries,
+            autonomous_requeue_max=self.autonomous_requeue_max,
+            autonomous_requeue_backoff_base_sec=self.autonomous_requeue_backoff_base_sec,
         )
         tm.set_session(session)
         return tm
@@ -357,6 +370,7 @@ class SessionRegistry:
         user_prompt_event_jsonable: "str | list[dict] | None" = None,
         *,
         unattended: bool = False,
+        port_key: str | None = None,
         task_manager: TaskManager | None = None,
     ) -> tuple[Task, TaskManager]:
         """建 root task 并推进 TaskManager。``task_manager`` 给了就用它（该 session 的
@@ -376,6 +390,8 @@ class SessionRegistry:
             # `Task.unattended`）：有人在就 park 让位，无人值守则当作任务产出——后台
             # 作业没有人会发下一条消息，park 就是永久挂起。
             unattended=unattended,
+            # 交互口：调用方显式给的那个；未声明（None）则按 `unattended` 回落。
+            port_key=(port_key if port_key is not None else default_port_for(unattended)),
             created_at=now_utc(),
         )
         if task_manager is None:

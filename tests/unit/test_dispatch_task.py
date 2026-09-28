@@ -24,7 +24,7 @@ from ctx_weft.core.models.errors import (
     SessionAlreadyExistsError,
     UnfinishedTasksError,
 )
-from ctx_weft.core.models.task import NormalTaskSettings
+from ctx_weft.core.models.task import PORT_MAIN, PORT_NONE, NormalTaskSettings
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import MemoryAddress, MemoryEventType, ProviderContext, ToolCall
 from ctx_weft.protocols.events import EventType
@@ -106,6 +106,68 @@ async def test_fresh_tree_has_no_parent_and_does_not_touch_root_agent():
     assert rec.spawn_depth == 0
     # root agent 一个字节都不改——森林只是 ALM 里多一条无父 record
     assert rt._task_managers[sid].session.root_agent_id == root
+
+
+# ── 交互口（port_key）───────────────────────────────────────────────────────────
+
+
+async def test_port_key_lands_on_the_task():
+    """`port_key` 透传到 task 上——旁支交互线就是从这里开出来的（见 `Task.port_key`）。
+
+    口是涌现的：给一个没见过的名字就等于开了一条，没有 open/close API。
+    """
+    rt, sid, root, _ = await _runtime_with_session()
+
+    h = await rt.dispatch_task(
+        sid, "顺便问一句",
+        settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo",
+                                    inherit_from_agent_id=root),
+        port_key="btw",
+    )
+    await h.wait_for_finish(timeout=10.0)
+
+    task = rt._task_managers[sid].get_task(h.task_id)
+    assert task is not None
+    # 接在 btw 口上、要等对端——与主线（main 口）并行，互不相拦。
+    assert (task.port_key, task.unattended) == ("btw", False)
+
+
+async def test_unattended_without_port_key_falls_back_to_no_port():
+    """未声明 port + `unattended=True` → 回落成「不接任何口」，即老 `unattended` 的原义。
+
+    这条钉住迁移口径：加了 port_key 之后，存量的 `unattended=True` 调用方语义不漂。
+    """
+    rt, sid, root, _ = await _runtime_with_session()
+
+    h = await rt.dispatch_task(
+        sid, "background job",
+        settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
+        unattended=True,
+    )
+    await h.wait_for_finish(timeout=10.0)
+
+    task = rt._task_managers[sid].get_task(h.task_id)
+    assert task is not None
+    assert (task.port_key, task.unattended) == (PORT_NONE, True)
+
+
+async def test_explicit_main_port_with_unattended_is_the_third_cell():
+    """显式给口 + `unattended=True` = 「接口但自治」：跑完把产出推到那个口，不参与往返。
+
+    这一格只能由调用方说出来——它正是两个字段共存（而非合并成一个）的理由。
+    """
+    rt, sid, root, _ = await _runtime_with_session()
+
+    h = await rt.dispatch_task(
+        sid, "nightly report",
+        settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
+        unattended=True, port_key=PORT_MAIN,
+    )
+    await h.wait_for_finish(timeout=10.0)
+
+    task = rt._task_managers[sid].get_task(h.task_id)
+    assert task is not None
+    assert (task.port_key, task.unattended) == (PORT_MAIN, True)
 
 
 # ── §9.2 派生 ─────────────────────────────────────────────────────────────────

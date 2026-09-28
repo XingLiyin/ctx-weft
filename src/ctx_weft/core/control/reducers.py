@@ -16,6 +16,7 @@ from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, Ta
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
 from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES, WAITING, TaskStatus
+from ctx_weft.core.models.task import default_port_for
 from ctx_weft.core.utils.content import (
     content_from_jsonable,
     content_to_jsonable,
@@ -349,6 +350,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "parent_task_id": t.parent_task_id,
                 "user_prompt": content_to_jsonable(t.user_prompt),
                 "unattended": t.unattended,
+                "port_key": t.port_key,
                 "origin_tool_call_id": t.origin_tool_call_id,
                 "origin_tool_name": t.origin_tool_name,
                 "settings_raw": t.settings_raw,
@@ -422,6 +424,8 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             user_prompt=content_from_jsonable(t.get("user_prompt", "")),
             # 存量快照无此键 → False（无人值守是新增语义，旧数据一律「有人在」）。
             unattended=t.get("unattended", False),
+            # 存量快照无 port_key → 按 unattended 回落（两者曾是同一个字段兼任的两件事）。
+            port_key=t.get("port_key", default_port_for(t.get("unattended", False))),
             origin_tool_call_id=t.get("origin_tool_call_id", ""),
             origin_tool_name=t.get("origin_tool_name", ""),
             settings_raw=t.get("settings_raw", {}),
@@ -1002,6 +1006,9 @@ def _apply(view: RunStateView, ev: Event) -> None:
                 user_prompt=content_from_jsonable(task_data.get("user_prompt", "")),
                 # 存量事件流无此键 → False，见 deserialize_view 同一口径。
                 unattended=task_data.get("unattended", False),
+                port_key=task_data.get(
+                    "port_key", default_port_for(task_data.get("unattended", False)),
+                ),
                 origin_tool_call_id=task_data.get("origin_tool_call_id", ""),
                 origin_tool_name=task_data.get("origin_tool_name", ""),
                 settings_raw=task_data.get("settings", {}),

@@ -24,6 +24,10 @@ class InterruptReason(StrEnum):
     LLM_OUTAGE = "llm_outage"
     RUN_CRASH = "run_crash"
     ASSEMBLY_FAILURE = "assembly_failure"
+    #: 自治作业从 `INTERRUPTED` 被 SDK 自己退避重排（`TaskRequeued` 专用；见
+    #: `TaskManager._schedule_autonomous_requeue`）。其余三个答「为什么停下来」，
+    #: 这个答「为什么又起来」——同一个 `reason` 槽位，两件事，故不复用上面任何一个。
+    AUTONOMOUS_REQUEUE = "autonomous_requeue"
 
 
 class CancelReason(StrEnum):
@@ -45,3 +49,7 @@ class TaskErrorCode(StrEnum):
     # 注：工具结果不确定**不在此列**——它是一种工具结果而非 task 结局，不设专属错误码
     # （spec: tool-operations）。
     BLOCKED_BY_FAILED_DEP = "BLOCKED_BY_FAILED_DEP"
+    #: 自治作业的 INTERRUPTED 退避重排预算耗尽（`TaskManager._schedule_autonomous_requeue`）。
+    #: 与 `RETRY_EXHAUSTED` 同族但不同源：那个数的是 run 内的重试，这个数的是「停下来、
+    #: 退避、再起一次」的轮数。分开是为了让 host 能区分「任务本身做不成」与「环境一直不行」。
+    AUTONOMOUS_REQUEUE_EXHAUSTED = "TASK_FAILED_AUTONOMOUS_REQUEUE_EXHAUSTED"

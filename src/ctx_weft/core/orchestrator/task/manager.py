@@ -53,7 +53,10 @@ _TERMINAL_STATUSES = TERMINAL_TASK_STATUSES
 
 # 默认值；实际值由 host 经 RuntimeConfig → TaskManager 构造参数注入。
 _DEFAULT_MAX_RETRIES    = 3
+#: 并发池的基准上限（交互 task 可临时顶上去，见 `drain` 的 docstring 第 3 条）。
 _DEFAULT_MAX_CONCURRENT = 4
+_DEFAULT_AUTONOMOUS_REQUEUE_MAX          = 3
+_DEFAULT_AUTONOMOUS_REQUEUE_BACKOFF_BASE = 30.0
 
 
 class TaskManager:
@@ -71,10 +74,25 @@ class TaskManager:
         max_concurrent: int | None = None,
         task_max_retries: int | None = None,
         event_bus: "EventBus | None" = None,
+        autonomous_requeue_max: int | None = None,
+        autonomous_requeue_backoff_base_sec: float | None = None,
     ) -> None:
         self._session_id = session_id
         self._max_concurrent = max_concurrent if max_concurrent is not None else _DEFAULT_MAX_CONCURRENT
         self._task_max_retries = task_max_retries if task_max_retries is not None else _DEFAULT_MAX_RETRIES
+        # 自治作业的 INTERRUPTED 退避重排预算（见 `_schedule_autonomous_requeue`）。
+        self._autonomous_requeue_max = (
+            autonomous_requeue_max if autonomous_requeue_max is not None
+            else _DEFAULT_AUTONOMOUS_REQUEUE_MAX
+        )
+        self._autonomous_requeue_backoff_base_sec = (
+            autonomous_requeue_backoff_base_sec if autonomous_requeue_backoff_base_sec is not None
+            else _DEFAULT_AUTONOMOUS_REQUEUE_BACKOFF_BASE
+        )
+        #: task_id → 在飞的退避定时器。**刻意不进 `_background_asyncio_tasks`**：
+        #: 那个集合是 `_fire_session_done` 要 gather 的，把一个最长 120s 的定时器放进去
+        #: 等于让会话收尾等它。取消由 `cancel_all` 显式做，协程自己醒来后也三重自检。
+        self._autonomous_requeue_timers: dict[str, asyncio.Task] = {}
         self._queue: TaskQueue = TaskQueue()
         self._cancelled: bool = False
         self._tasks: dict[str, Task] = {}
@@ -252,6 +270,16 @@ class TaskManager:
         它自己，没有字节、也无处取原始字节。真出现 part 列表则**响亮拒绝**——静默
         塞进 payload 会直接击穿「事件库恒不含字节」。
         """
+        # 不变式 `unattended=False ⟹ port_key 非空`（见 `Task.port_key`）：要等对端，
+        # 就得先有个口。校验只落在这一条**新建**路径上——retry / resume / 恢复重排走
+        # `_queue.push`，`restore` 重建的是既有事实，在那些地方拦只会让恢复在坏数据上
+        # 炸。排在任何副作用之前，与下方 user_prompt 那条同一口径（入口即拒、不落库）。
+        if not task.unattended and not task.port_key:
+            raise ValueError(
+                f"push_task({task.id}): unattended=False 的 task 必须接在某个交互口上"
+                f"（port_key 非空）——要等对端应答，就得先有个口把应答路由回来。"
+                f"自治作业请一并标 unattended=True。"
+            )
         # 统一用 TaskManager 级别的 max_retries，覆盖 Task 模型的硬编码默认值
         task.max_retries = self._task_max_retries
         # 开窗**必须先于**下面那条 TASK_CREATED——晚一步它就已经落盘了。
@@ -667,35 +695,67 @@ class TaskManager:
         task = self._tasks.get(task_id)
         return bool(task.unattended) if task is not None else False
 
-    def _interactive_line_held(self) -> bool:
-        """这个 session 的交互线此刻是否被占着（单交互线闸门的判据，2026-09-22）。
+    def _port_of(self, task_id: str) -> str:
+        """该 task 接在哪个交互口上。查不到的按主口算——同 `_task_unattended`，
+        保守压向受闸门约束那边（宁可多串行一次，不可让两条往返撞进同一个口）。"""
+        task = self._tasks.get(task_id)
+        return task.port_key if task is not None else PORT_MAIN
 
-        占着 = 存在一个**非 unattended** 的 task 处于「在跑 **或** `AWAITING_HUMAN`」。
+    def _held_ports(self) -> "set[str]":
+        """此刻被占着的交互口（port 闸门的判据；单值版本始于 2026-09-22）。
 
-        **必须算上 `AWAITING_HUMAN`，只看在跑是不够的**：park 一发生槽位就还回来了
-        （`_settle` 对 `_PARKED_STATUSES` 先 `_release_slot` 再立刻 `drain()`），于是
-        下一个非 unattended task 被派发、它也 park——host 侧就出现两条同时等人说话的线，
-        而 host 的回合状态机（status / turn_seq / 开轮临界区）是 session 级单值的。
+        占着 = 存在一个 task **接在这个口上**（`port_key` 非空）、**要等对端**
+        （非 unattended）、且处于「在跑 **或** `AWAITING_HUMAN`」。
 
-        另外两个 park 态**不算**，它们等的不是人：
+        互斥的理由是一次往返的应答必须能路由回发起方：同一个口上两条并行的问话，
+        回来的答复无从归属。所以**必须算上 `AWAITING_HUMAN`，只看在跑是不够的**——
+        park 一发生槽位就还回来了（`_settle` 对 `_PARKED_STATUSES` 先 `_release_slot`
+        再立刻 `drain()`），于是下一个同口 task 被派发、它也 park，那个口上就有两条
+        同时等应答的往返。
+
+        另外两个 park 态**不算**，它们等的不是对端：
         - `SUSPENDED`（等子任务）——父等子时子正该跑，算进来整个 DAG 立刻死锁；
         - `INTERRUPTED`（等 `/resume` 的故障态）——故障不该把正常工作一并按住。
+
+        「接口但自治」（`port_key` 非空 + `unattended=True`）**不占口**：它不参与往返，
+        只是跑完把产出推到那个口。它既不被别人拦，也不拦别人——见 `drain` 的谓词。
         """
-        for task_id, task in self._tasks.items():
-            if task.unattended:
-                continue
-            if task_id in self._running_tasks or task.status == "AWAITING_HUMAN":
-                return True
-        return False
+        return {
+            task.port_key
+            for task_id, task in self._tasks.items()
+            if task.port_key and not task.unattended
+            and (task_id in self._running_tasks or task.status == "AWAITING_HUMAN")
+        }
 
     async def drain(self) -> None:
-        """Pop and run tasks until queue is empty or max_concurrent reached.
+        """Pop and run unblocked tasks until nothing more can be dispatched.
 
-        同 agent 不并发：跳过"目标 agent 正忙（已有同 agent 任务在跑）"的队列条目，
-        它们留在队列里，等该 agent 空闲（某任务完成 → on_task_finished → 再 drain）时被选中。
+        三道闸门，形状同构（都是「按某个键去重」），只是键不同：
 
-        单交互线闸门（2026-09-22）：非 unattended 的 task 在一个 session 内同时至多一个
-        「占着交互线」，见 `_interactive_line_held`。unattended 的后台作业不受此限。
+        1. **同 agent 不并发**（键 = `effective_agent_id`）：跳过"目标 agent 正忙"的
+           条目，它们留在队列里，等该 agent 空闲（某任务完成 → on_task_finished →
+           再 drain）时被选中。
+        2. **交互口闸门**（键 = `port_key`，2026-09-22 起为单值，现按 port 分桶）：
+           同一个交互口上同时至多一个 task 占着往返，见 `_held_ports`。两类 task 不受
+           此限——自治作业（含「接口但自治」：只把产出推过去，不参与往返），以及接在
+           别的口上的 task（btw 之类的旁支交互线与主线并行）。
+        3. **并发槽**（无键，计数）：一个池，**所有 task 都计入**；但交互 task 可以
+           临时把池顶上去（2026-09-28）。
+
+        第 3 条的形状值得说清。池只有一个（`max_concurrent`），在跑的自治作业和交互
+        task 一起算在里面。差别在于**谁会被它挡住**：
+
+        - **自治作业**严格受限：在跑总数够了就排队等。
+        - **交互 task 不看这个数**，等于自带一份临时额度。额度不会失控，因为第 2 条
+          已经保证每个口至多一个往返——**一条口最多让池涨 1**。
+
+        于是有效上限 = ``max_concurrent + 当前要派发的交互口数``，而自治作业会被交互
+        挤压（交互占了槽，自治的可用空间就少了）。这正是想要的优先级：一个有人在等的
+        往返被压在队列里干等、而队列对那个人不可见，是最糟的结果；自治作业多等一会儿
+        没人在意。
+
+        **`max_concurrent <= 0` 仍是总闸**：一个都不派，交互 task 也不例外。这条既有
+        语义刻意保留——它是「这个 session 暂不派发」的表达方式，被多处依赖。
         """
         if self._runner is None:
             raise RuntimeError("No task runner registered")
@@ -710,20 +770,28 @@ class TaskManager:
             if self._hooks.is_current is not None and not self._hooks.is_current():
                 return
             async with self._lock:
-                if len(self._running_tasks) >= self._max_concurrent:
-                    break
+                if self._max_concurrent <= 0:
+                    break       # 总闸（见 docstring）：一个都不派，交互 task 也不例外
                 busy_agents = {
                     self._running_agents.get(tid) or self._effective_agent(self._tasks.get(tid))
                     for tid in self._running_tasks
                 }
                 # 每次循环重算：上一轮 pop 出的 task 已进 `_running_tasks`（同在本锁内），
-                # 它若是非 unattended 的，这一轮就该把闸门关上。
-                line_held = self._interactive_line_held()
+                # 它若占着某个口，这一轮就该把那个口关上。
+                held_ports = self._held_ports()
+                # 一个池，所有 task 都计入（见 docstring 第 3 条）。同样每轮重算——
+                # 上一轮 pop 出的 task 已进 `_running_tasks`（同在本锁内）。
+                running_count = len(self._running_tasks)
                 entry = self._queue.pop(
                     skip=lambda e: (
                         self._effective_agent(self._tasks.get(e.task_id)) in busy_agents
                         or self._session_unhealthy(e.task_id)
-                        or (line_held and not self._task_unattended(e.task_id))
+                        or (not self._task_unattended(e.task_id)
+                            and self._port_of(e.task_id) in held_ports)
+                        # 自治作业严格受池约束；交互 task 不看这个数（自带临时额度，
+                        # 上限由第 2 条的「一口一往返」兜住）。
+                        or (self._task_unattended(e.task_id)
+                            and running_count >= self._max_concurrent)
                     )
                 )
                 if entry is None:
@@ -1063,6 +1131,10 @@ class TaskManager:
             # （HitlPark，等人应答）、INTERRUPTED（LLM 故障 / run 崩溃，待 /resume 由 restore 重排）。
             async with self._lock:
                 self._release_slot(task_id)
+            # 自治作业停在 INTERRUPTED 时没有对端会来救它（见 `_schedule_autonomous_requeue`）
+            # ——SDK 自己安排恢复。返回 True 表示耗尽支已落 FAILED 并自行收完，就地 return。
+            if status == "INTERRUPTED" and await self._schedule_autonomous_requeue(task_id):
+                return
             await self.drain()
             # 整个会话因 park/suspend 进入空闲（无在跑任务、无待派子任务）→ 通知 runtime 回收
             # 按 run 计的控制信号。注意是 is_done（而非"本 task 挂起"）：父等子时子仍在跑，
@@ -1162,6 +1234,108 @@ class TaskManager:
         else:
             await self._suspend_task_interrupted(task_id, error, exc, reason=reason)
 
+    # ── 自治作业的 INTERRUPTED 自动恢复（2026-09-28）────────────────────────
+    #
+    # `INTERRUPTED` 的定义是「等 `/resume`」，而 `/resume` 预设了一个操作者：它的唯一
+    # 运行期入口是 `requeue_resumable` ← `_resume_in_existing_tm` ← host 主动调用。
+    # 自治作业（`Task.unattended`）没有对端，没有人会对一个后台作业按「继续跑」——于是
+    # 它只能靠下一次 `recover_session` 被 `restore` 顺带捡回来，也就是说**恢复依赖一个
+    # SDK 无法保证的外部事件**，期间会话既不 idle 收尾也不 done
+    # （`_blocked_or_interrupted()` 恒为 True）。
+    #
+    # 修法是让 SDK 自己发起那个恢复动作。**追加式**：既有的 INTERRUPTED 出口一个字节
+    # 不改（`TASK_INTERRUPTED` 照发、槽位照放、投影照旧），只在末尾多安排一次退避重排。
+    #
+    # 判据刻意**不按 `reason` 分类**：`LLM_OUTAGE` 是最典型的暂时故障，它的
+    # `RunOutcome.retriable` 却被刻意设成 False（那个字段答的是「允不允许原地立即重
+    # 试」，不是「故障是不是暂时的」，见 `disposition_for` 的契约），而 `RUN_CRASH` /
+    # `ASSEMBLY_FAILURE` 两边都可能。统一退避 + 有限预算，让「退几次都不成」自己回答
+    # 「有没有希望」，比维护一张暂时/永久对照表可靠。
+
+    async def _schedule_autonomous_requeue(self, task_id: str) -> bool:
+        """自治作业停在 INTERRUPTED → 安排退避重排；预算耗尽则落 FAILED。
+
+        返回 **True = 本方法已接管这个 task 的收尾**（耗尽支自己跑完了
+        `on_task_finished`，含 drain / is_done / 会话信号），调用方应当就地 return，
+        别再发一次 idle——对一个已经终态收场的会话报 "idle" 是错的信号。
+        返回 False = 没接管（不是自治作业 / 状态已被别的路径改过 / 只是起了个定时器），
+        调用方按原路径继续。
+        """
+        task = self._tasks.get(task_id)
+        if task is None or not task.unattended:
+            return False            # 有对端的 task：那个 /resume 有人会按
+        if task.status != "INTERRUPTED":
+            return False            # 已被别的路径改写（重排 / 取消 / 终态）→ 不插手
+        if self._cancelled:
+            return False
+        if task.interrupt_requeue_count >= self._autonomous_requeue_max:
+            # 预算耗尽 → 响亮失败。**不能**停在 INTERRUPTED：那是个没有对端会来碰的
+            # 非终态，会话因此永不收敛。落 FAILED 则 failure_counter 递增、可能触发
+            # 熔断——这是刻意的（熔断的意义就是「环境不对了，别硬撑」），阈值已随之
+            # 从 3 提到 5，见 `Session.failure_threshold`。
+            logger.warning(
+                "Autonomous task %s exhausted its requeue budget (%d) — failing loudly",
+                task_id, self._autonomous_requeue_max,
+            )
+            task.error_code = TaskErrorCode.AUTONOMOUS_REQUEUE_EXHAUSTED
+            await self._emit(EventType.TASK_FAILED, task_id=task_id, payload={
+                "error_code": TaskErrorCode.AUTONOMOUS_REQUEUE_EXHAUSTED,
+                "error_message": task.error or "",
+                "retry_count": task.retry_count,
+            })
+            await self.on_task_finished(task_id, status="FAILED")
+            return True
+        delay = self._autonomous_requeue_backoff_base_sec * (2 ** task.interrupt_requeue_count)
+        prev = self._autonomous_requeue_timers.get(task_id)
+        if prev is not None and not prev.done():
+            return False            # 已经有一个在飞，不叠第二个
+        timer = asyncio.create_task(self._requeue_autonomous_after(task_id, delay))
+        self._autonomous_requeue_timers[task_id] = timer
+        logger.info(
+            "Autonomous task %s interrupted — auto-requeue in %.0fs (%d/%d)",
+            task_id, delay, task.interrupt_requeue_count + 1, self._autonomous_requeue_max,
+        )
+        return False
+
+    async def _requeue_autonomous_after(self, task_id: str, delay: float) -> None:
+        """退避 `delay` 秒后把自治作业放回队列。取消即静默退出。
+
+        醒来后三重自检：会话已硬取消 / 本 TM 已被顶替 / task 状态已不是 INTERRUPTED
+        （被 `/resume`、`restore`、取消或别的路径处理过）——任一成立就什么都不做。
+        退避期间世界会变，定时器不该拿着一份过期的判断去改状态。
+        """
+        try:
+            await asyncio.sleep(delay)
+            if self._cancelled:
+                return
+            if self._hooks.is_current is not None and not self._hooks.is_current():
+                return
+            task = self._tasks.get(task_id)
+            if task is None or task.status != "INTERRUPTED":
+                return
+            async with self._lock:
+                if task_id in self._running_tasks:
+                    return          # 已经被别的路径派发了
+                if any(e.task_id == task_id for e in self._queue.peek_all()):
+                    return          # 已经在队列里
+                task.interrupt_requeue_count += 1
+                task.status = "PENDING"
+                # retry_count 归零，与 `restore` / `requeue_resumable` 同口径：这是
+                # 「重新起一次」，不是「接着上次的重试预算跑」。
+                task.retry_count = 0
+                self._queue.push(QueueEntry(
+                    task_id=task_id, session_id=self._session_id, priority=task.priority,
+                ))
+            await self._emit(EventType.TASK_REQUEUED, task_id=task_id, payload={
+                "reason": InterruptReason.AUTONOMOUS_REQUEUE,
+                "retry_count": task.retry_count,
+            })
+            await self.drain()
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._autonomous_requeue_timers.pop(task_id, None)
+
     async def _suspend_task_interrupted(
         self, task_id: str, error: str, exc: BaseException | None, *, reason: str,
     ) -> None:
@@ -1203,6 +1377,9 @@ class TaskManager:
             "error_message": error,
             "retry_count": task.retry_count if task else 0,
         })
+        # 同 `_settle` 的 park 出口：自治作业没有对端会按 /resume，SDK 自己安排恢复。
+        if await self._schedule_autonomous_requeue(task_id):
+            return
         # 其它 agent 的排队任务照常派发；全会话静止则通知 runtime 回收 per-run 控制信号
         await self.drain()
         if self.is_done():
@@ -1496,6 +1673,11 @@ class TaskManager:
         的任务从未铸框/写过任何 memory，跳过——零 memory 写。
         """
         self._cancelled = True
+        # 在飞的自治退避定时器一并取消：它们醒来后本来也会自检 `_cancelled` 而静默退出，
+        # 但那意味着最多再挂 120s。硬取消让 session 立刻关得干净。
+        for timer in list(self._autonomous_requeue_timers.values()):
+            timer.cancel()
+        self._autonomous_requeue_timers.clear()
         async with self._lock:
             pending = self._queue.drain_pending()
         to_close: list[Task] = []
@@ -1986,6 +2168,7 @@ def task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None")
             "max_retries": task.max_retries,
             "dag_deps": task.dag_deps,
             "unattended": task.unattended,
+            "port_key": task.port_key,
             "origin_tool_call_id": task.origin_tool_call_id or "",
             "origin_tool_name": task.origin_tool_name or "",
             "settings": settings_d,

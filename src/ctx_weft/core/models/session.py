@@ -37,10 +37,16 @@ class Session:
     token_used: int = 0
     context_limit: int = 180_000
     reserved_output_tokens: int = 8192
-    max_concurrent_tasks: int = 8
-    max_concurrent_agents: int = 4
     failure_counter: int = 0
-    failure_threshold: int = 3
+    #: 连续失败到这个数就熔断（`TaskManager._trip_failure_threshold`）。2026-09-28 从 3
+    #: 提到 5：自治作业的 INTERRUPTED 退避重排耗尽会落 FAILED 并计入本计数（见
+    #: `TaskManager._schedule_autonomous_requeue`），环境性故障因此比从前更容易累积，
+    #: 阈值 3 会让一次较长的 LLM outage 把整个多任务会话熔断掉。
+    #:
+    #: **今天没有注入路径**：`Session` 由 `SessionRegistry.create_session` 构造、从不
+    #: 显式传这个字段，所以这个默认值就是实际生效值。`LoopConfig.failure_threshold`
+    #: （protocols/template.py）看着像是模板侧的同一个旋钮，实际零读点、从未接线。
+    failure_threshold: int = 5
 
     llm_provider: str | None = None
     llm_model: str | None = None

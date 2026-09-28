@@ -16,8 +16,25 @@ class RuntimeConfig:
     # 存储提交再对外通知，存储失败显式抛 PersistenceUnavailableError 并隔离会话；
     # best_effort = 旧观察者路径（吞存储错误），启动告警、不可靠恢复。
     event_commit_policy: str = "required"
+    # 并发池的**基准**上限：在跑的自治作业和交互 task 一起算在里面。挡住的只有自治
+    # 作业——交互 task 不看这个数，等于自带临时额度，而额度由「一个交互口至多一个
+    # 往返」兜住（`TaskManager._held_ports`），所以一条口最多让池涨 1。有效上限因此是
+    # `task_max_concurrent + 当前要派发的交互口数`，且自治作业会被交互挤压。
+    # `<= 0` 仍是总闸：一个都不派，交互 task 也不例外。详见 `TaskManager.drain`。
     task_max_concurrent: int = 4
     task_max_retries: int = 3
+    # 自治作业（`Task.unattended`）落 INTERRUPTED 后的自动退避重排预算。
+    #
+    # 为什么只给自治作业：`INTERRUPTED` 的定义是「等 /resume」，而 `/resume` 预设了一个
+    # 操作者。自治作业没有对端，那个「等」永远不会结束——今天它只能靠一次
+    # `recover_session` 被 `restore` 顺带捡回来，也就是说恢复依赖一个 SDK 无法保证的外部
+    # 事件。这两个旋钮让 SDK 自己发起那个恢复动作。
+    #
+    # 退避是 `base * 2**n`（默认 30s / 60s / 120s）。预算耗尽落 FAILED——响亮失败，会话
+    # 得以收敛，host 从 `TASK_FAILED` + `AUTONOMOUS_REQUEUE_EXHAUSTED` 得知；停在
+    # INTERRUPTED 才是那个谁也不会碰的静默死亡。
+    autonomous_requeue_max: int = 3
+    autonomous_requeue_backoff_base_sec: float = 30.0
     default_token_budget: int = 200_000
     # 工具输出落盘（spill）阈值：CapabilityGateway 读取。host 可覆盖。
     spill_threshold: int = 4000

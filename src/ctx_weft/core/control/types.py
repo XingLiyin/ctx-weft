@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from ctx_weft.core.models.task import PORT_MAIN
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
@@ -55,6 +56,9 @@ class TaskView:
     # 无人值守（跨重启保留）：丢了它，resume 之后一个后台自治任务就变回「有人看顾」，
     # 随后第一次 HITL 会把它 park 到死。见 `Task.unattended`。
     unattended: bool = False
+    # 交互口（跨重启保留）：丢了它，resume 之后一条旁支交互线就并回主口，与主线互斥。
+    # 见 `Task.port_key`。存量事件流无此键时按 `unattended` 回落（`default_port_for`）。
+    port_key: str = PORT_MAIN
     # 派发来源（跨重启保留）：子任务是被父的哪一次 delegate 调用派出来的。丢了则 finalize
     # 认不出自己的派发框，子任务 close 时既不闭合父的 ack、也不合成 finish 对（胶囊丢失）。
     # memory 侧另有 child_task_id 做一等事实，本字段是 in-run 快捷路径 + 存量数据回退。
