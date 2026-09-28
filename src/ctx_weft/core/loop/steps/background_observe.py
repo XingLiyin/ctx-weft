@@ -157,11 +157,61 @@ async def _submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) ->
         next_step_hint=meta.get(K.OBSERVER_NEXT_STEP_HINT, "") or "",
         # 带外收尾：只在真发生转移（success）时被调，跑在「状态已写定」与「转移已宣布」
         # 之间。见 `apply_out_of_band_verdict` 的 docstring 对那个窗口的三条约束。
-        finalize=partial(_close_park_bubble, state, ctx),
+        finalize=partial(_out_of_band_finalize, state, ctx, meta),
     )
     logger.info(
         "background observe verdict '%s' for task %s: %s",
         verdict, state.task.id, "accepted" if accepted else "rejected (the user spoke first)")
+
+
+async def _out_of_band_finalize(
+    state: "LoopState", ctx: "LoopContext", meta: dict,
+) -> None:
+    """判 success 终结了这个 task 之后的收尾——**`FinalizeStep` 在这条路上没跑过**。
+
+    park 在 `ActStep` 里抛 `HitlPark`，driver 到不了 observe/finalize。于是 S5/S6 之后每个
+    「park → 后台判 success」的 task 都跳过了整个 `FinalizeStep`，而它是三件事的唯一发生地：
+
+    - `finalize_task_memory` → `_close_one`：bubble 给 parent、同 agent 派发 ack 终态化、
+      写 finish 对、折末段 raw。**子任务漏得最重**——parent 醒来只看到「派发框 + 停在
+      running 的 ack」，拿不到任何产出。
+    - `BLACKBOARD_PUBLISHED`（topic=task.id）：parent `recall_topic(task.id)` 的正路。
+    - `TASK_FINALIZED`：host 的 `tasks.outputs_json` / `error` 两列。S5 起一直是空的。
+
+    所以这里把 `apply_task_close` + `task_finalized_event` 照原样跑一遍，两个调用方共用同
+    一份实现（不是在这里另写一份镜像——`synthesize_cancel_closure` 就是那样来的，它的
+    docstring 自己承认在镜像 `_close_one`，两份必然漂）。
+
+    手里的料都是全的：`state` 是 `launch_background_observe` 的快照（`scope` / `agent` /
+    活的 `task` 都在，`extra` 里还有 `ActStep` 在 park **之前**写好的
+    `final_body`/`final_summary`），`ctx` 是 `_readonly_ctx` 整份 replace 出来的
+    （`memory` / `llm` / `event_bus` / `provider_ctx` 全在；那面 `control_readonly` 旗只
+    gate 控制工具，不 gate `ctx.memory` 直写）。
+
+    `has_llm_summary=True`：判决方就是 LLM，`act_recap` 是真摘要，close 即折末段 raw，不走
+    「占位 + `_replace_finish_report` 替换」那条为「finalize 先跑、bg 后到」设计的延迟路径
+    ——带外路径顺序正好反过来。
+
+    事件用这份快照发，于是带着 `LOOP_BACKGROUND_OBSERVE` 的 origin。这是对的：host 按
+    origin 把后台事件挡在**会话状态折叠**和**对话流**之外（两者都不该被一段后台工作改写），
+    而投影更新器的 `TASK_FINALIZED` 支不按 origin 过滤，`outputs_json` 照样落库。
+
+    best-effort 在调用方：`apply_out_of_band_verdict` 把本函数包在 try 里，抛了也照常宣布
+    转移——状态已是终态，不宣布会让槽位永不释放、交互线永久占着。
+    """
+    from ctx_weft.core.loop.steps.finalize import apply_task_close, task_finalized_event
+
+    events = await apply_task_close(
+        state, state.task, ctx,
+        outcome="success",
+        act_recap=meta.get(K.OBSERVER_ACT_RECAP, "") or "",
+        task_summary=meta.get(K.OBSERVER_TASK_SUMMARY, "") or "",
+        has_llm_summary=True,
+    )
+    events.append(task_finalized_event(state, state.task, outcome="success"))
+    for event in events:
+        await ctx.event_bus.emit(event)
+    await _close_park_bubble(state, ctx)
 
 
 async def _close_park_bubble(state: "LoopState", ctx: "LoopContext") -> None:

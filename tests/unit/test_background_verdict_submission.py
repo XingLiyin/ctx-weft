@@ -26,27 +26,23 @@ from ctx_weft.core.loop.steps.background_observe import (
 
 
 class _RecordingTM:
-    """带外入口的替身。**照真品的契约调 `finalize`**——只在判决被接受且是 `success` 时
-    （真品里那是「状态已写定、转移尚未宣布」之间的那个窗口，见
-    `TaskManager.apply_out_of_band_verdict`）。
+    """带外入口的替身：**只记下收到了什么，不代替真品去调 `finalize`**。
 
-    不照着调的话，下面那些气泡断言会因为「根本没人调过收尾」而全部通过——测的就不是契约
-    而是替身的偷懒了。这个坑真踩过：`finalize` 参数刚加上时，旧替身让「子任务气泡该被收」
-    的新测试直接绿灯。
+    分层是刻意的。「什么时候调收尾」是带外入口自己的契约（只在判决被接受且是 `success`
+    时，且跑在「状态已写定」与「转移已宣布」之间），那三条约束钉在
+    `test_out_of_band_verdict.py` 里、打的是**真** `TaskManager`——替身复述一遍只会让两处
+    对同一件事各有一份说法。本文件管的是另一半：传了什么进去、那个回调自己做了什么。
+
+    曾经让这个替身照契约调过一次 `finalize`，于是它必须背上 memory / llm / event_bus 一整套
+    替身，而气泡规则本身反倒读不清了。
     """
 
     def __init__(self, accepted: bool = True) -> None:
         self.calls: list[tuple] = []
         self._accepted = accepted
-        self.finalized = 0
 
     async def apply_out_of_band_verdict(self, task_id, outcome, **kw):
         self.calls.append((task_id, outcome, kw))
-        if self._accepted and outcome.verdict == "success":
-            fin = kw.get("finalize")
-            if fin is not None:
-                self.finalized += 1
-                await fin()
         return self._accepted
 
 
@@ -56,6 +52,9 @@ def _state():
 
 def _ctx(tm):
     return SimpleNamespace(task_manager=tm)
+
+
+_ctx_with_tm = _ctx
 
 
 def _meta(outcome: str = "success", **kw) -> dict:
@@ -150,7 +149,15 @@ async def test_rejected_verdict_is_not_an_error() -> None:
 #
 # 判据是 `parent_task_id`，**不是 `_is_own_root`**——后者对跨 agent 子任务返回 True，会把
 # 整类漏掉。那一格下面单独钉了一条。
+#
+# 这一节直接测 `_close_park_bubble`：它是气泡规则的所在，而它的兄弟（带外 finalize 的
+# memory 那一半）要一整套 memory/llm 替身，混在一个用例里只会让规则本身读不清。两者怎么
+# 组装、由谁调，钉在下一节。
 
+from ctx_weft.core.loop.steps.background_observe import (  # noqa: E402
+    _close_park_bubble,
+    _out_of_band_finalize,
+)
 from ctx_weft.protocols.hitl import ToolResultDelivery, UserTurnDelivery  # noqa: E402
 
 
@@ -178,8 +185,8 @@ class _Hitl:
         return None
 
 
-def _ctx_with_hitl(tm, hitl):
-    return SimpleNamespace(task_manager=tm, hitl=hitl)
+def _ctx_with_hitl(hitl):
+    return SimpleNamespace(hitl=hitl)
 
 
 def _state_with_session(*, parent: str | None = None, creator="ag_1", assigned="ag_1"):
@@ -192,12 +199,10 @@ def _state_with_session(*, parent: str | None = None, creator="ag_1", assigned="
 
 # ── 子任务：收 ────────────────────────────────────────────────────────────────
 
-async def test_a_subtask_bubble_is_closed_by_the_verdict() -> None:
+async def test_a_subtask_bubble_is_closed() -> None:
     """**要害**：线交回 parent 了，这个气泡再没有人会来答——留着会把会话钉死在 PAUSED。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
-    tm = _RecordingTM()
-    await _submit_verdict(_state_with_session(parent="t0"), _ctx_with_hitl(tm, hitl), _meta())
-    assert tm.finalized == 1
+    await _close_park_bubble(_state_with_session(parent="t0"), _ctx_with_hitl(hitl))
     assert hitl.cancelled == ["hit_1"]
 
 
@@ -205,43 +210,22 @@ async def test_a_cross_agent_subtask_bubble_is_closed_too() -> None:
     """**判据不能写 `_is_own_root`**：它对跨 agent 子任务（parent 非空、creator≠assigned）
     返回 True，照它过滤会把整类漏掉——而这类任务的线同样是交回 parent 的。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
-    await _submit_verdict(
-        _state_with_session(parent="t0", creator="ag_1", assigned="ag_2"),
-        _ctx_with_hitl(_RecordingTM(), hitl), _meta())
+    await _close_park_bubble(
+        _state_with_session(parent="t0", creator="ag_1", assigned="ag_2"), _ctx_with_hitl(hitl))
     assert hitl.cancelled == ["hit_1"]
 
 
 # ── root：留 ──────────────────────────────────────────────────────────────────
 
-async def test_a_root_bubble_survives_the_verdict() -> None:
+async def test_a_root_bubble_is_left_alone() -> None:
     """`faedd25` 保下来的那条：root 的 `TaskFinished` 会写 `_terminal`，气泡一收
     SUCCEEDED 当场浮出来，会话在用户正要打字的那一刻跳成「已完成」。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
-    tm = _RecordingTM()
-    await _submit_verdict(_state_with_session(parent=None), _ctx_with_hitl(tm, hitl), _meta())
-    assert tm.finalized == 1, "收尾照常被调（S-a 之后它还要做别的事），只是不碰气泡"
+    await _close_park_bubble(_state_with_session(parent=None), _ctx_with_hitl(hitl))
     assert hitl.cancelled == []
 
 
-# ── 什么都不该碰的三种 ────────────────────────────────────────────────────────
-
-async def test_retry_never_reaches_the_closer() -> None:
-    """retry 维持 park，那个气泡正是它等人的入口；带外入口根本不会调收尾。"""
-    hitl = _Hitl([_Bubble("hit_1", "t1")])
-    tm = _RecordingTM()
-    await _submit_verdict(_state_with_session(parent="t0"), _ctx_with_hitl(tm, hitl),
-                          _meta("retry"))
-    assert tm.finalized == 0
-    assert hitl.cancelled == []
-
-
-async def test_a_rejected_verdict_never_reaches_the_closer() -> None:
-    """人先开口 → 仲裁拒绝 → task 没终结，一个字都不能改。"""
-    hitl = _Hitl([_Bubble("hit_1", "t1")])
-    await _submit_verdict(_state_with_session(parent="t0"),
-                          _ctx_with_hitl(_RecordingTM(accepted=False), hitl), _meta())
-    assert hitl.cancelled == []
-
+# ── 过滤 ──────────────────────────────────────────────────────────────────────
 
 async def test_only_this_task_and_only_user_turn_bubbles() -> None:
     """双重过滤：兄弟任务的气泡不归这次判决管；同一 task 上「等人拍板」那一档也不归——
@@ -251,14 +235,84 @@ async def test_only_this_task_and_only_user_turn_bubbles() -> None:
         _Bubble("hit_sibling", "t2"),
         _Bubble("hit_approval", "t1", delivery=ToolResultDelivery(tool_call_id="tc_1")),
     ])
-    await _submit_verdict(_state_with_session(parent="t0"),
-                          _ctx_with_hitl(_RecordingTM(), hitl), _meta())
+    await _close_park_bubble(_state_with_session(parent="t0"), _ctx_with_hitl(hitl))
     assert hitl.cancelled == ["hit_mine"]
 
 
-async def test_missing_hitl_service_is_tolerated() -> None:
-    """手构 ctx 里没有 hitl：收尾静默跳过，判决照常落定。"""
+async def test_a_missing_hitl_service_is_tolerated() -> None:
+    """手构 ctx 里没有 hitl（单测替身很常见）：静默跳过，不炸。"""
+    await _close_park_bubble(_state_with_session(parent="t0"), SimpleNamespace(hitl=None))
+
+
+# ── 收尾怎么组装、由谁调（2026-09-27）────────────────────────────────────────
+#
+# park 之后 `FinalizeStep` 压根没跑过（`HitlPark` 在 ActStep 里就把 run 结束了），而它是
+# close/bubble、blackboard、TASK_FINALIZED 三者的唯一发生地。带外收尾把同一份实现照样跑
+# 一遍——这一节只钉「调了什么、事件发出去了、谁来调它」，memory 那一半的语义归 finalize
+# 自己的用例。
+
+class _Bus:
+    def __init__(self) -> None:
+        self.emitted: list = []
+
+    async def emit(self, event) -> None:
+        self.emitted.append(event)
+
+
+async def test_out_of_band_finalize_runs_close_and_emits_its_events(monkeypatch) -> None:
+    """**要害**：带外收尾把 `apply_task_close` 的产物发出去，并补上 `TASK_FINALIZED`。
+
+    不发 TASK_FINALIZED 的后果是 host 的 `tasks.outputs_json` 恒空——S5 起一直如此。
+    """
+    import ctx_weft.core.loop.steps.finalize as fin
+
+    calls: dict = {}
+
+    async def _fake_close(state, task, ctx, **kw):
+        calls["close"] = kw
+        return ["close-event"]
+
+    monkeypatch.setattr(fin, "apply_task_close", _fake_close)
+    monkeypatch.setattr(fin, "task_finalized_event",
+                        lambda state, task, *, outcome: f"finalized:{outcome}")
+
+    bus = _Bus()
+    state = _state_with_session(parent="t0")
+    ctx = SimpleNamespace(hitl=_Hitl([]), event_bus=bus)
+    await _out_of_band_finalize(state, ctx, _meta())
+
+    assert bus.emitted == ["close-event", "finalized:success"]
+    assert calls["close"]["outcome"] == "success"
+    assert calls["close"]["act_recap"] == "做了甲乙丙"
+    assert calls["close"]["task_summary"] == "全程小结"
+    # 判决方就是 LLM，摘要是真的 → close 即折末段 raw，不走占位-替换那条延迟路径。
+    assert calls["close"]["has_llm_summary"] is True
+
+
+async def test_out_of_band_finalize_also_closes_the_bubble(monkeypatch) -> None:
+    """收尾与收气泡是同一次带外动作的两半，别让将来有人只接一半。"""
+    import ctx_weft.core.loop.steps.finalize as fin
+
+    async def _fake_close(state, task, ctx, **kw):
+        return []
+
+    monkeypatch.setattr(fin, "apply_task_close", _fake_close)
+    monkeypatch.setattr(fin, "task_finalized_event", lambda *a, **kw: "finalized")
+
+    hitl = _Hitl([_Bubble("hit_1", "t1")])
+    ctx = SimpleNamespace(hitl=hitl, event_bus=_Bus())
+    await _out_of_band_finalize(_state_with_session(parent="t0"), ctx, _meta())
+    assert hitl.cancelled == ["hit_1"]
+
+
+async def test_the_verdict_entry_is_handed_the_finalize_callback() -> None:
+    """`_submit_verdict` 必须把收尾交给带外入口，而不是自己就地跑。
+
+    位置是要害：带外入口在「状态已写定」与「转移已宣布」之间调它（见
+    `apply_out_of_band_verdict` 的三条约束）。自己就地跑 = 跑在 `_settle` 之后，parent 可能
+    已经醒过来装配、而子任务的产出还没落地。
+    """
     tm = _RecordingTM()
-    await _submit_verdict(_state_with_session(parent="t0"),
-                          SimpleNamespace(task_manager=tm, hitl=None), _meta())
-    assert len(tm.calls) == 1
+    await _submit_verdict(_state_with_session(parent="t0"), _ctx_with_tm(tm), _meta())
+    _tid, _outcome, kw = tm.calls[0]
+    assert callable(kw["finalize"])

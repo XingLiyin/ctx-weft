@@ -695,6 +695,101 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
             register_close_synth(task.id, tool_call_id, scope, outcome, raw_fold_scope)
 
 
+async def apply_task_close(
+    state, task, ctx, *, outcome: str, act_recap: str, task_summary: str,
+    has_llm_summary: bool,
+) -> list:
+    """终态收尾的 memory 侧：统一 close + blackboard。返回要发的事件。
+
+    **抽出来是为了让带外判决也能做这件事**（2026-09-27）。park 之后 run 就地结束
+    （`_cold_park` 抛 `HitlPark`），driver 到不了 observe/finalize——于是 S5/S6 之后每个
+    「park → 后台判 success」的 task 都跳过了整个 `FinalizeStep`，而本函数里这两件事
+    （加上 `task_finalized_event`）此前只在那里发生过。子任务漏得最重：parent 醒来只看到
+    「派发框 + 停在 running 的 ack」，拿不到任何产出。调用方见
+    `background_observe._out_of_band_finalize`。
+
+    两道 `mem_content` 门与拆出来之前逐字相同：close 要 `terminal and mem_content`
+    （terminal 由调用方判），blackboard 要 `outcome == "success" and mem_content`。
+    mem_content 在这里现算（`task.outputs` + `task_summary or act_recap`），两个调用方
+    因此不会各算一份、算歪一份。
+    """
+    events: list[Any] = []
+    mem_content = _build_memory_content(task.outputs, task_summary or act_recap)
+    if not mem_content:
+        return events
+
+    # 统一 close：bubble / 自身残留 / 软删自身对话 / GC 子树（spec 2026-06-23）。
+    # has_llm_summary：规则 observe 占位 close 不即折末段 raw，等 bg 真摘要落地后补删
+    # （spec 2026-07-20 延迟折叠）。带外路径恒 True——判决方就是 LLM，真摘要已在手。
+    events.extend(await finalize_task_memory(
+        ctx.memory, state, task, mem_content, outcome, ctx,
+        act_recap=act_recap, task_summary=task_summary,
+        has_llm_summary=has_llm_summary,
+    ))
+
+    # success 时发布 BLACKBOARD，供任何 agent 按 task_id 精确召回
+    if outcome == "success":
+        await ctx.memory.ingest(
+            MemoryEvent(
+                kind=MemoryKind.PUBLICATION, scope=MemoryScope.SESSION,
+                address=state.scope,
+                content=mem_content,
+                timestamp=now_utc(),
+                role="assistant",
+                topic=task.id,
+                metadata={"task_id": task.id, "title": task.title, "outcome": outcome,
+                          "parent_task_id": task.parent_task_id},
+            ),
+            ctx.provider_ctx,
+        )
+        events.append(make_event(
+            state, EventType.BLACKBOARD_PUBLISHED,
+            payload={"topic": task.id, "content_length": len(mem_content),
+                     "parent_task_id": task.parent_task_id},
+        ))
+    return events
+
+
+def task_finalized_event(state, task, *, outcome: str):
+    """`TASK_FINALIZED`：结局 + 交付物出核。**每条收尾路径都要发一次**。
+
+    交付物分两段送：`output` 是答复本身，`summary` 是 agent 给 reviewer 的自评清单
+    （`finish_task` 的 deliverables_summary）。**必须分开**——host 打印「最终答复」只该拿
+    output；此前只送 task_id/outcome，host 的 tasks 表 outputs_json / error 两列因此恒空。
+
+    判据以 `task.outputs` 为准绳，不直接读 state.extra，两条边界都在这一句里：
+    ① retry 驳回：observer 判本段不合格会把 task.outputs 置空（FinalizeStep 的 retry 分支、
+       task/manager.py 的 requeue 各有一次），但 state.extra 里还留着上一轮的废稿；直接读
+       extra 会让 host 把一份已被驳回的稿子写进 tasks 表。所以 deliverable 为空 → 两段一起
+       归空。
+    ② extra 空但 outputs 有货：多段任务的末段可能没正文，recap 重启路径更是根本没跑过
+       ActStep（state.extra 全空）——这时 task.outputs 才是真答复，回落它。
+    `getattr(..., None) or {}` 只为容忍用 SimpleNamespace 造 state 的单测替身
+    （test_finalize_fail_reason / test_subtask_nesting），生产路径必命中真字段。
+
+    output 送**纯文本**（_output_text 提取），不送 content parts：这个字段的消费者是
+    tasks.outputs_json 与 CLI 打印，两个都是文本场景；多模态交付物有 blob store 那条正路，
+    不该让事件载荷背图片。
+
+    **`retry` 也要发**（拆出来时差点漏掉）：那时 outputs 刚被置空，这一条把 host 投影里
+    上一次的 outputs_json 清掉。只在 terminal 时发会留下一份已被驳回的稿子。
+    """
+    extra = getattr(state, "extra", None) or {}
+    deliverable = _output_text(task.outputs)
+    return make_event(
+        state, EventType.TASK_FINALIZED,
+        payload={
+            "task_id": task.id,
+            "outcome": outcome,
+            "outputs": {
+                "output": (extra.get("final_body", "") or deliverable) if deliverable else "",
+                "summary": extra.get("final_summary", "") if deliverable else "",
+            },
+            "error": task.error or "",
+        },
+    )
+
+
 class FinalizeStep(Step):
     name = "finalize"
 
@@ -730,17 +825,14 @@ class FinalizeStep(Step):
             task.error_code = TaskErrorCode.RETRY_EXHAUSTED
 
         terminal = outcome in ("success", "fail")
-        # 汇报给 parent（blackboard + cross_agent bubble）= 最终输出 + task_summary（process report 作用）；
-        # task_summary 空时回退 act_recap。
-        mem_content = _build_memory_content(task.outputs, task_summary or summary)
+        # mem_content（= 最终输出 + task_summary，空则回退 act_recap）现在由
+        # `apply_task_close` 自己算——两个调用方各算一份必然有一份算歪。
 
-        # 1) 统一 close：bubble / 自身残留 / 软删自身对话 / GC 子树（spec 2026-06-23）。
-        # has_llm_summary=verdict.reported：规则 observe 占位 close 不即折末段 raw，
-        # 等 bg 真摘要落地后补删（spec 2026-07-20 延迟折叠）。
-        if terminal and mem_content:
-            events.extend(await finalize_task_memory(
-                ctx.memory, state, task, mem_content, outcome, ctx,
-                act_recap=summary, task_summary=task_summary,
+        # 1) 统一 close + blackboard（`apply_task_close`，与带外 finalize 共用同一份）。
+        if terminal:
+            events.extend(await apply_task_close(
+                state, task, ctx, outcome=outcome, act_recap=summary,
+                task_summary=task_summary,
                 has_llm_summary=bool(verdict and verdict.reported),
             ))
 
@@ -757,59 +849,9 @@ class FinalizeStep(Step):
             # （在这里先加会让 TM 二次自增，重试预算一轮烧两格）。
             task.outputs = None
 
-        # 3) success 时发布 BLACKBOARD，供任何 agent 按 task_id 精确召回
-        if outcome == "success" and mem_content:
-            await ctx.memory.ingest(
-                MemoryEvent(
-                    kind=MemoryKind.PUBLICATION, scope=MemoryScope.SESSION,
-                    address=state.scope,
-                    content=mem_content,
-                    timestamp=now_utc(),
-                    role="assistant",
-                    topic=task.id,
-                    metadata={"task_id": task.id, "title": task.title, "outcome": outcome,
-                              "parent_task_id": task.parent_task_id},
-                ),
-                ctx.provider_ctx,
-            )
-            events.append(make_event(
-                state, EventType.BLACKBOARD_PUBLISHED,
-                payload={"topic": task.id, "content_length": len(mem_content), "parent_task_id": task.parent_task_id},
-            ))
-
-        # ── TASK_FINALIZED：结局 + 交付物出核 ────────────────────────────────
-        # 交付物分两段送：`output` 是答复本身，`summary` 是 agent 给 reviewer 的自评
-        # 清单（finish_task 的 deliverables_summary）。**必须分开**——host 打印「最终
-        # 答复」只该拿 output；此前只送 task_id/outcome，host 的 tasks 表 outputs_json /
-        # error 两列因此恒空。
-        #
-        # 判据以 `task.outputs` 为准绳，不直接读 state.extra，两条边界都在这一句里：
-        # ① retry 驳回：observer 判本段不合格会把 task.outputs 置空（上面 retry 分支、
-        #    task/manager.py 的 requeue 各有一次），但 state.extra 里还留着上一轮的废稿；
-        #    直接读 extra 会让 host 把一份已被驳回的稿子写进 tasks 表。所以 deliverable
-        #    为空 → 两段一起归空。
-        # ② extra 空但 outputs 有货：多段任务的末段可能没正文，recap 重启路径更是根本
-        #    没跑过 ActStep（state.extra 全空）——这时 task.outputs 才是真答复，回落它。
-        # `getattr(..., None) or {}` 只为容忍用 SimpleNamespace 造 state 的单测替身
-        # （test_finalize_fail_reason / test_subtask_nesting），生产路径必命中真字段。
-        #
-        # output 送**纯文本**（_output_text 提取），不送 content parts：这个字段的消费者
-        # 是 tasks.outputs_json 与 CLI 打印，两个都是文本场景；多模态交付物有 blob store
-        # 那条正路，不该让事件载荷背图片。
-        extra = getattr(state, "extra", None) or {}
-        deliverable = _output_text(task.outputs)
-        events.append(make_event(
-            state, EventType.TASK_FINALIZED,
-            payload={
-                "task_id": task.id,
-                "outcome": outcome,
-                "outputs": {
-                    "output": (extra.get("final_body", "") or deliverable) if deliverable else "",
-                    "summary": extra.get("final_summary", "") if deliverable else "",
-                },
-                "error": task.error or "",
-            },
-        ))
+        # 3) TASK_FINALIZED：**每条路径都发**，retry 也发（它把 host 投影里上一次的
+        #    outputs_json 清掉）。blackboard 已随 close 搬进 `apply_task_close`。
+        events.append(task_finalized_event(state, task, outcome=outcome))
 
         return StepOutcome(next_step=None, state_patch={"run_outcome": run_outcome}, events=events)
 
