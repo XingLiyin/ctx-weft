@@ -196,7 +196,7 @@ async def test_finalized_payload_empty_when_retry_rejects_outputs() -> None:
     一份已被驳回的稿子写进 tasks 表。"""
     mem = InMemoryMemoryProvider()
     state = await _finalize_state(
-        mem, outputs="rejected draft", outcome="retry",
+        mem, outputs="rejected draft", outcome="continue",
         extra={"final_body": "rejected draft", "final_summary": "stale checklist"})
 
     payload = _finalized_payload(await FinalizeStep().execute(state, _loop_ctx(mem)))

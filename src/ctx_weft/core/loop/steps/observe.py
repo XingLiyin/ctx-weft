@@ -29,6 +29,12 @@ from ctx_weft.core.loop.llm_gateway import (
 )
 from ctx_weft.core.capabilities.control_tools import REPORT_TASK_OUTCOME_NAME, ControlResult
 from ctx_weft.core.utils.ids import generate_id, mint_turn_call_ids
+from ctx_weft.core.utils.verdict import (
+    VERDICT_CONTINUE,
+    VERDICT_FAIL,
+    VERDICT_SUCCESS,
+    normalize_verdict,
+)
 
 if TYPE_CHECKING:
     from ctx_weft.core.models.task import Task
@@ -216,7 +222,7 @@ def _is_own_root(task) -> bool:
 @dataclass
 class Verdict:
     """Observer 输出（三态）。"""
-    task_outcome: str   # "retry" | "success" | "fail"
+    task_outcome: str   # "success" | "continue" | "fail"（见 core.utils.verdict）
     act_recap: str      # 诚实复述本段 act 做了什么 → finish 对 assistant；retry 作 Progress So Far
     task_summary: str = ""  # 整段综合总结（执行历程+结果）→ finish 对 tool 槽（仅终态有意义）
     reported: bool = False  # 本轮是否真的走成 report_task_outcome；压缩摘要据此取信
@@ -261,14 +267,15 @@ class ObserveStep(Step):
 
         # 机械退出（max_turns/context_limit）：任务未完成、只是耗尽 turn/context，非终态——
         # 强制 retry 重排（覆盖 success/fail）；用 replace 保留 summary 与 reported 标记。
-        if state.act_exit_reason in ("max_turns", "context_limit") and verdict.task_outcome != "retry":
-            verdict = dataclasses.replace(verdict, task_outcome="retry")
+        if (state.act_exit_reason in ("max_turns", "context_limit")
+                and verdict.task_outcome != VERDICT_CONTINUE):
+            verdict = dataclasses.replace(verdict, task_outcome=VERDICT_CONTINUE)
             self._apply_assessment(state.task, verdict)
 
         # retry（三来源：max_turns/context_limit/observer-retry）→ 前台同步段折：
         # 本轮 attempt raw 折成一条 TASK_COMPACT_SUMMARY（复用 act_recap），删本轮 raw。
         # 「马上要重跑」故同步做好，下个 run 一进 prepare 即见折后段摘要。
-        if verdict.task_outcome == "retry":
+        if verdict.task_outcome == VERDICT_CONTINUE:
             await self._fold_retry_segment(state, ctx, verdict, events)
 
         # close 边界：root task 在 actor_done（finish_task 收尾 → boundary="finish"）或
@@ -279,7 +286,7 @@ class ObserveStep(Step):
         # max_turns/context_limit 走同步 _fold_retry_segment；非 root 不触发（它们走 LLM observe）。
         launched = False
         if (state.act_exit_reason in ("normal", "actor_done")
-                and verdict.task_outcome != "retry" and _is_own_root(state.task)):
+                and verdict.task_outcome != VERDICT_CONTINUE and _is_own_root(state.task)):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
             boundary = "finish" if state.act_exit_reason == "actor_done" else "normal"
             launch_background_observe(state, ctx, boundary=boundary)
@@ -357,7 +364,11 @@ class ObserveStep(Step):
             template=state.extra.get("template"),
             bound_capabilities=bound_caps,
             token_counter=ctx.llm.tokenizer.count,
-            extra={"subtasks": subtasks},
+            # 边界也传给前台（2026-09-28）：装配层据它出「这一段是怎么结束的」那句事实，
+            # 以及要不要注入 actor 产出。此前前台不传，只能用一段写死「调了 finish_task」
+            # 的文案——`normal`（纯文本收尾）那格是假话，与同条 prompt 的其余部分打架。
+            extra={"subtasks": subtasks,
+                   "observe_boundary": state.act_exit_reason or "normal"},
         )
         prompt = await ctx.assembler.assemble(request)
 
@@ -373,7 +384,7 @@ class ObserveStep(Step):
         if terminal_result is not None:
             # report_task_outcome 已写 task.observer_outcome / task.process_report / task.task_summary
             return Verdict(
-                task_outcome=state.task.observer_outcome or "success",
+                task_outcome=normalize_verdict(state.task.observer_outcome or VERDICT_SUCCESS),
                 act_recap=state.task.process_report or last_text[:500],
                 task_summary=state.task.task_summary or "",
                 reported=True,
@@ -397,7 +408,7 @@ class ObserveStep(Step):
 
         三条映射逐字对齐删除前的 `_rule_observe` 结局，故 task 终态不变：
           空 transcript                        → fail
-          max_turns / context_limit（机械退出）→ retry
+          max_turns / context_limit（机械退出）→ continue
           normal / actor_done                  → success
 
         不写 task 状态：判决三态经 FinalizeStep 的 RunOutcome 交 TaskManager 处置
@@ -406,10 +417,10 @@ class ObserveStep(Step):
         actor_done 在下一轮 `TaskManager._run_task` 入口被重置为 False）。
         """
         if not state.transcript:
-            return Verdict(task_outcome="fail", act_recap="")
+            return Verdict(task_outcome=VERDICT_FAIL, act_recap="")
         if state.act_exit_reason in ("max_turns", "context_limit"):
-            return Verdict(task_outcome="retry", act_recap="")
-        return Verdict(task_outcome="success", act_recap="")
+            return Verdict(task_outcome=VERDICT_CONTINUE, act_recap="")
+        return Verdict(task_outcome=VERDICT_SUCCESS, act_recap="")
 
     @staticmethod
     def _apply_assessment(task: Task, verdict: Verdict) -> None:
@@ -449,7 +460,7 @@ class ObserveStep(Step):
         protect TASK_COMPACT_SUMMARY → 多轮 retry 段摘要累积（不替换），由 L3 按 collapse_keep_last
         坍缩控界。无 keep_last 门、无额外 LLM。
 
-        仅当 verdict.task_outcome=="retry" 才折（三来源：max_turns/context_limit/observer-retry）；
+        仅当 verdict.task_outcome=="continue" 才折（三来源：max_turns/context_limit/observer 判未完）；
         其余 outcome 不折，no-op。
 
         act_recap 来源：本轮真走成 report_task_outcome（reported）用其可信 report，否则用 verdict.act_recap
@@ -462,7 +473,7 @@ class ObserveStep(Step):
         """
         from ctx_weft.core.loop.steps.background_observe import is_short_segment
 
-        if verdict.task_outcome != "retry":
+        if verdict.task_outcome != VERDICT_CONTINUE:
             return
         summary = (verdict.act_recap or "").strip()
         if not summary:

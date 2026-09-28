@@ -106,6 +106,7 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ctx_weft.core.capabilities.control_tools import (
+    COLLECT_PROCESS_REPORT_NAME,
     DELEGATE_TASK_NAME,
     REPORT_TASK_OUTCOME_NAME,
 )
@@ -117,7 +118,7 @@ from ctx_weft.core.utils.content import (
     image_tokens,
 )
 from ctx_weft.core.utils.headings import SUBTASKS_HEADING
-from ctx_weft.core.utils.task_ref import task_ref_parts
+from ctx_weft.core.utils.task_ref import task_label, task_ref_parts
 from ctx_weft.protocols import LLMMessage
 from ctx_weft.protocols.capability import qualify
 
@@ -143,21 +144,45 @@ if TYPE_CHECKING:
     )
 
 
-_OBSERVER_ROLE_FALLBACK = "You are an objective observer evaluating task execution results."
+#: 模板压根没有 ROLE facet（连 act 都没有）时的兜底身份。
+#:
+#: 2026-09-28 从一句话扩成三段：新分工把「怎么判」整段交给了 ROLE，那么没有 ROLE 的 agent 就等于
+#: 什么判断准则都没有——而 cue 只说「这一次做什么」、schema 只说「字段是什么」，两边都不该替 ROLE
+#: 讲业务。这里放的是那份准则的压缩版，尤其最后一段：那条规则没有任何机械护栏兜着
+#: （success-without-outputs 护栏读 `task.outputs`，而 park 之前合成的 outputs 正是那段提问本身、
+#: 非空，护栏原地失效），只能靠文字。
+_OBSERVER_ROLE_FALLBACK = (
+    "You are the observer in the execution loop. You take over after the actor finishes a segment: "
+    "you record what happened and, when asked, judge whether the task is done. You never re-execute "
+    "anything and you never decide on the actor's behalf.\n\n"
+    "Judge from what the conversation shows actually ran — tool calls and their results, files and "
+    "data produced. The actor's own claim that something worked is not evidence: if a step's result "
+    "is not visible, treat it as not done. The user's request is the standard for completion, not "
+    "the actor's account of it — every part of it addressed, the deliverable verifiable, and any "
+    "sub-task results actually serving the goal.\n\n"
+    "If the actor's message asks the user for anything — a question, missing information, a choice "
+    "between options, a confirmation, or an action only the user can take — the task is not over. "
+    "That is `continue`: never `success`, never `fail`. It holds even when the message is polished "
+    "and everything the actor could do alone is done."
+)
 
-# 尾部 observe user message 的判定提示（拼在 ROLE 之后）。
-_OBSERVE_JUDGMENT_CUE = (
-    "Now act as the observer for the current task. Based on the execution above, judge the "
-    f"task's completion status and call `{REPORT_TASK_OUTCOME_NAME}` exactly once with: a `task_status` "
-    "of `success` / `retry` / `fail`; an `act_recap` honestly recapping ONLY this act segment — the actor's "
-    "execution AFTER the most recent `## Progress So Far` section OR the latest user message, whichever "
-    "comes later (`## Progress So Far` is the previous observation's recap; if neither exists this is the "
-    "first observation, so start after `## Current Task`). Don't re-narrate anything before that point. "
-    "And — when status is success/fail — a concise `task_summary`: the important steps and lessons of the "
-    "whole task (a process report, not verbose, and NOT the final output), incorporating the results of any "
-    "sub-tasks you dispatched. If one of your sub-tasks' results does not actually achieve its goal, "
-    "name it in `next_step_hint` and say what must be different — the next actor turn decides what to do "
-    "about it. Call no other tools."
+# ── observe 的尾部 cue（拼在 ROLE 之后）───────────────────────────────────────
+#
+# 三面分工（2026-09-28）：**schema 答「字段是什么」，cue 答「这一次做什么」，ROLE 答「怎么判」**。
+# 改造前这三者各写了一遍 `act_recap` 的作用域规则、一遍字段清单、一遍子任务指名规则——同一句话
+# 三处维护，而且其中两处的工具名已经过期（指向早就不存在的 `collect_process_report`）。
+#
+# 所以 cue 从此只有三样东西：本段的**边界事实**、调哪个工具、这一次填哪些字段。字段语义一概不
+# 复述——它们在工具 schema 上，模型填参数时就在眼前。
+
+_JUDGMENT_ASK = (
+    "Judge whether the task is complete, by the standard in your role above, and call "
+    f"`{REPORT_TASK_OUTCOME_NAME}` exactly once — no other tools. Don't over-think it: call as "
+    "soon as the picture is clear.\n\n"
+    "Fill `task_status` and `act_recap`. Add `task_summary` when the status is `success` or "
+    "`fail`; `task_failure_reason` when it is `fail`, or when a `continue` was genuinely blocked; "
+    "`next_step_hint` only if the next actor turn needs a warning. Each field's own contract is "
+    "on the tool itself."
 )
 
 # task compact cue：整体式——坍缩会替掉原始 prompt + 之前所有 `## Progress So Far`，故须概括
@@ -233,68 +258,125 @@ _RECOGNIZE_INTENT_INSTRUCTION = (
     "is now clear (it is the only optional field). Then stop and call no other tools."
 )
 
-_BACKGROUND_BOUNDARY_DESC = {
-    "interrupt": "this segment was interrupted by the user part-way through",
-    "plain_text": "you replied in prose and yielded the floor, pausing for the user's input",
-    "finish": "the task was closed out with finish_task",
-    # S-b（2026-09-27）：root 的 finish_task 改成 park + 后台判定，于是它有了自己的边界。
-    # **不进 `_CLOSE_BOUNDARIES`**——那一档走「占位 close 对 + 真摘要替换」的延迟路径，而这条
-    # 路上 finalize 压根没跑过（park 抛 HitlPark 就地结束了 run），没有占位可替换。
-    "finish_park": ("you called finish_task to declare this task done, and the floor is now with "
-                    "the user, who is waiting"),
-    "normal": "the task ended normally with its final output",
-    "dispatch": "you delegated a sub-task, and this task is suspended until it completes "
-                "(the dispatch pair above names it)",
-    # 机械判决路径（observe 无可用 LLM observer / 已取消）：结局由规则定，摘要全靠这次
-    # 后台观察补 —— 段可能刚结束、也可能马上要重跑，故措辞不预设收尾。**非 close 边界**
-    # （不进 _CLOSE_BOUNDARIES）：不写 _close_report，走段折。
-    "mechanical": ("this segment just ended and was judged by rule (no LLM observer ran), "
-                   "so this recap is the only account of it"),
+#: 边界 → (这一段是**怎么结束**的, 要不要把 actor 的最终产出注入 prompt)。
+#:
+#: **前台与后台共用一张表**（2026-09-28）：此前前台的注入段与后台的注入段是两个函数、两套措辞，
+#: 而两者都把「调了 `finish_task`」写死在标题里——于是 `normal` 边界（纯文本收尾，压根没调
+#: finish_task）会拿到一条自相矛盾的 prompt：注入段说「closed out with finish_task」，紧跟的边界
+#: 事实句说「ended normally with its final output」。同一段 prompt 一边命令「别虚构没发生过的工具
+#: 调用」，一边告诉它发生过一次，而那份 recap 是要进记忆当段摘要的。
+#:
+#: 注入与否也按边界定，不按前台/后台定：`finish_task` 是 SILENT 工具、产出不写任务层对话，不喂
+#: 进来观察者只能虚构一段完成叙述；而 `plain_text` / `normal` 的产出**本身就是**一条 assistant
+#: 回合、在重建的对话里看得见，注入等于让它出现两遍。
+_BOUNDARY_FACTS: dict[str, tuple[str, bool]] = {
+    # —— 以 finish_task 收尾：产出不在对话里，必须注入 ——
+    "actor_done": ("The actor called `finish_task` to declare this task done.", True),
+    "finish": ("The actor closed this task out with `finish_task`.", True),
+    "finish_park": ("The actor called `finish_task` to declare this task done and yielded the "
+                    "floor — the user is waiting.", True),
+    # —— 以消息正文收尾：那段正文就在对话里 ——
+    "normal": ("The actor ended the segment with its closing message; it did not call "
+               "`finish_task`.", False),
+    "plain_text": ("The actor replied in prose and yielded the floor — the user is waiting.",
+                   False),
+    # —— 压根没跑完 ——
+    "max_turns": ("The segment was cut short by the per-segment turn limit, not by the actor.",
+                  False),
+    "context_limit": ("The segment was cut short by the context limit, not by the actor.", False),
+    "interrupt": ("The user interrupted this segment part-way through.", False),
+    "dispatch": ("The actor delegated a sub-task; this task is suspended until the sub-task "
+                 "returns (the dispatch pair above names it).", False),
+    "mechanical": ("This segment was already judged by rule, with no LLM observer — your recap "
+                   "is the only account of it.", False),
 }
 
+_DEFAULT_BOUNDARY = "normal"
 
-# close 段（finish/normal）：actor 纯文本或 finish_task 收尾，收尾回合正文落 task.outputs。
-# 与 loop.steps.background_observe._CLOSE_BOUNDARIES 保持一致（此处避免跨层 import）。
+#: 让位给人的两个边界要额外顶一句：这是「把提问判成 success」的高发地，而那条判断**没有任何机械
+#: 护栏**——success-without-outputs 护栏读 `task.outputs`，而 park 之前合成的 outputs 正是那段
+#: 提问本身、非空，护栏原地失效（见 tests/unit/test_verdict_vocabulary.py 的末条）。完整的准则在
+#: ROLE 里，这里只在生成点附近顶一句。
+_YIELDED_REMINDER = {
+    "plain_text": "If that message asks the user for anything — a question, missing information, "
+                  "a choice, a confirmation — the task is not over: judge `continue`.",
+    "finish_park": "A closing message that still asks the user for something is not a completed "
+                   "task: judge `continue`.",
+}
+
+#: 与 loop.steps.background_observe._CLOSE_BOUNDARIES 保持一致（此处避免跨层 import）。
 _CLOSE_BOUNDARIES = {"finish", "normal"}
 
 #: 要产 verdict 的后台边界——即「让位给人」的那两个。与
 #: `loop.steps.background_observe._judges` 保持一致（此处避免跨层 import）。
 _JUDGING_BOUNDARIES = {"plain_text", "finish_park"}
 
-#: 要把 `task.outputs` 注入观察 prompt 的边界：凡是以 `finish_task` 收尾的。它是 SILENT
-#: 工具，产出不写任务层对话——不喂进来观察者会虚构完成叙述。`plain_text` 不在此列（那段
-#: 文本本身就在重建的对话里）。
-_OUTPUTS_BEARING_BOUNDARIES = _CLOSE_BOUNDARIES | {"finish_park"}
+#: 要把 `task.outputs` 注入观察 prompt 的边界，由上表推出（唯一真相源是那张表）。
+_OUTPUTS_BEARING_BOUNDARIES = frozenset(b for b, (_desc, inject) in _BOUNDARY_FACTS.items()
+                                        if inject)
 
 
-def _background_observe_cue(boundary: str) -> str:
-    desc = _BACKGROUND_BOUNDARY_DESC.get(boundary, _BACKGROUND_BOUNDARY_DESC["normal"])
-    is_close = boundary in _CLOSE_BOUNDARIES
-    summary_ask = (
-        " Also give `task_summary`: a concise process report of the WHOLE task's execution "
-        "(call out the important steps and lessons, skip the trivia; it is not the final output), "
-        "incorporating the results of any completed sub-tasks."
-        if is_close else ""
+def _boundary_fact(boundary: str) -> str:
+    return _BOUNDARY_FACTS.get(boundary, _BOUNDARY_FACTS[_DEFAULT_BOUNDARY])[0]
+
+
+def _judgment_cue(boundary: str) -> str:
+    """判定档的 cue = （让位边界的那句提醒）+ 这一次要做什么。
+
+    **边界事实句不在这里**：它作为 pre-cue 段渲染，好排在「actor 的最终产出」注入段**之前**
+    ——「这一段是怎么结束的 → 它交了什么 → 你要做什么」才是能读的顺序。
+    """
+    parts = []
+    reminder = _YIELDED_REMINDER.get(boundary)
+    if reminder:
+        parts.append(reminder)
+    parts.append(_JUDGMENT_ASK)
+    return "\n\n".join(parts)
+
+
+def _recap_cue(boundary: str) -> str:
+    """只摘要档的 cue。边界事实句同样不在这里（见 `_judgment_cue`）。
+
+    **不说「不要判」**——那一档的工具面里压根没有判决工具（`_judges` 为假时装配走
+    `background_recap` purpose，能力面只有 `collect_process_report`），说了反而像在暗示它有得选。
+    改造前那句「do not judge success/retry/fail」正与「`task_status` 必填」直接冲突。
+    """
+    ask = (
+        f"Record what happened: call `{COLLECT_PROCESS_REPORT_NAME}` exactly once — no other "
+        "tools.\n\nFill `act_recap`."
     )
-    return (
-        f"Status of the current task: {desc}. Based on the execution above, call "
-        "`collect_process_report` exactly once: give `act_recap` (recap ONLY this segment's act — "
-        "the work the actor newly did after the last `## Progress So Far` or the **last user "
-        "message** in the conversation, whichever is later; if there is neither, this is the first "
-        "observation, so start from after `## Current Task`; do not restate anything before that "
-        "point)"
-        + summary_ask +
-        " Just summarize — do not judge success/retry/fail, and do not call any other tool."
-    )
+    if boundary in _CLOSE_BOUNDARIES:
+        ask += (" Also fill `task_summary` — the task has ended, so that field carries the whole "
+                "task's process report.")
+    return ask
+
+
+def _task_anchor(request) -> str:
+    """生成点附近的任务锚（2026-09-28）。
+
+    act 的 guidance 有一行**恒有**的锚定行，理由写在那里：「长对话/续跑/追问回合里
+    `## Current Task` 框远在历史深处，此处是生成点附近唯一的任务锚」。observe 的处境一样、而且
+    更糟——判定边界恰恰多发生在追问之后——但 guidance 是 act-only，observe 从来没有这道锚。
+
+    与 act 共用 `task_label`：title 空时退回开启该 task 的 prompt 首行（root task 在
+    `recognize_intent` 填完标题之前恒空）。**不带 description**，那由 `## Current Task` 框承载
+    ——与 act 的取舍逐字一致。
+    """
+    task = getattr(request, "task", None)
+    ref = task_label(task) if task is not None and getattr(task, "id", None) else ""
+    return f"Current task: {ref}" if ref else "Current task: (as framed in the conversation above)"
 
 
 def _finish_result_section(request) -> str:
-    """close 段（finish/normal）把 actor 的最终产出（task.outputs）注入 prompt。
+    """把 actor 的最终产出（`task.outputs`）注入 prompt。**前台与后台共用这一份**。
 
-    finish_task 是 SILENT 工具：其 result 进 task.outputs，**不写任务层对话**；delegate_task
-    是 DISPATCH 工具、也排除出对话重建。若某段仅由 finish(+delegate) 组成，从记忆重建的对话里
-    看不到任何 actor 动作，观察者会**虚构**一段完成叙述。把 task.outputs 显式喂进来，让它据实总结。
-    返回空串表示无产出可注入（保持原行为）。
+    为什么要注入：`finish_task` 是 SILENT 工具，它的 result 进 `task.outputs`、**不写任务层
+    对话**；`delegate_task` 是 DISPATCH 工具、同样排除出对话重建。若某段仅由 finish(+delegate)
+    组成，从记忆重建的对话里看不到任何 actor 动作，观察者会**虚构**一段完成叙述。
+
+    谁该注入由 `_BOUNDARY_FACTS` 那张表定（`_OUTPUTS_BEARING_BOUNDARIES` 由它推出），本函数只
+    管渲染；标题里**不再写死「closed out with finish_task」**——那句话在 `normal` 边界上是假的
+    （2026-09-28 修，见那张表的注释）。返回空串表示无产出可注入。
     """
     task = getattr(request, "task", None)
     outputs = getattr(task, "outputs", None) if task is not None else None
@@ -305,11 +387,12 @@ def _finish_result_section(request) -> str:
     if not text:
         return ""
     return (
-        "## Actor's Final Output (this segment was closed out with finish_task)\n\n"
+        "## Actor's Final Output\n\n"
         f"{text}\n\n"
         "(The above is the final result the actor submitted — the only authoritative evidence of "
-        "what this segment produced. Summarize the segment faithfully from it; do not invent tool "
-        "calls, steps, or artifacts that did not actually happen.)"
+        "what this segment produced, and it is NOT part of the conversation above. Summarize "
+        "the segment faithfully from it; do not invent tool calls, steps, or artifacts that did "
+        "not actually happen.)"
     )
 
 
@@ -1078,57 +1161,38 @@ class DefaultComposer(Composer):
         """observe 装配的**唯一**实现——前台与后台共用（2026-09-22 合并两条平行路径）。
 
         system、骨架、对话主体三者本来就一样（`_build_act_system` +
-        `_build_facet_trailing_messages` + 同一批 blocks 重建的 act 风格会话）。
-        差的只有三处，全部在本函数头部算清：
+        `_build_facet_trailing_messages` + 同一批 blocks 重建的 act 风格会话）。差的四处全在
+        本函数头部算清，而且**四处都由同一个 `observe_boundary` 推出**（2026-09-28）：
 
-        | | 前台 `observe` | 后台 `background_observe` |
-        |---|---|---|
-        | cue | 判定（定 success/retry/fail） | 按 boundary，且明令「只摘要、不判定」 |
-        | subtask 指名清单 | 有（供 `next_step_hint` 点名） | 无 |
-        | actor 产出注入 | `outputs` 非空即注入 | 仅 close 边界 |
+        | 差异 | 由什么决定 |
+        |---|---|
+        | 任务锚定行 | 恒有，与 act 的 guidance 共用 `task_label` |
+        | 边界事实句 | `_BOUNDARY_FACTS`（前台后台同一张表） |
+        | 调哪个工具 / 这次填哪些字段 | 判定档 `_judgment_cue` / 只摘要档 `_recap_cue` |
+        | 注入 actor 产出 | `_OUTPUTS_BEARING_BOUNDARIES`（由那张表推出） |
 
-        第三处两边的**文案不同**（前台 `## Final output`、后台 `## Actor's Final
-        Output`），不是同一段话，合并时逐字保留各自的——它们的来由也不同：前台是
-        「`finish_task` 走 SILENT、产出不在重建的对话里」，后台是「仅由 finish(+delegate)
-        组成的段看不见任何 actor 动作，观察者会虚构完成叙述」。
+        前台**恒判定**（它本身就是判决路径）；后台看边界。前台的 boundary 由 `ObserveStep` 传
+        `act_exit_reason` 进来——此前它压根不传，于是前台只能用一段写死「调了 finish_task」的注入
+        文案，而那在纯文本收尾（`normal`）时是假话。
         """
-        # getattr 防御 + 默认前台：与本函数里 `request.extra` 的取法同一口径（鸭子类型的
-        # 手构 request 在测试里很常见）。判据写成「不是后台」而不是「是前台」，因为后台
-        # 才是那个特例——缺 purpose 的调用方要的是判定，不是只摘要。
-        foreground = getattr(request, "purpose", "observe") != "background_observe"
-
-        if foreground:
-            cue = _OBSERVE_JUDGMENT_CUE
-            # Phase 3 (2026-06-30): blackboard subtask/predecessor block rendering removed.
-            # Predecessor results surface via memory recall (Phase 2); subtask review handles
-            # come from task_manager via request.extra["subtasks"].
-            # The blackboard mechanism (subscribe_topic/recall_topic/BlackboardSource) is kept.
-            subtasks = (getattr(request, "extra", {}) or {}).get("subtasks") or []
-            pre_cue_sections = self._observe_outputs_section(request)
-        else:
-            boundary = (getattr(request, "extra", {}) or {}).get("observe_boundary", "normal")
-            # 让位的两个边界要产 verdict：`plain_text`（S5——人在旁边等着，而「这段话是想
-            # 问人还是交付完了」只有判定能区分）与 `finish_park`（S-b——root 的 finish_task
-            # 从此也让位，而它此前在 root 上是**零复核**的：`_should_use_llm` 对
-            # `parent_task_id is None` 降级，`_mechanical_verdict` 把 actor_done 无条件映射
-            # 成 success，而那道 success-without-outputs 护栏长在 `report_task_outcome` 里、
-            # 不在机械判决的路上）。其余边界照旧只摘要——判定已由别处给出，后台再判一次会把
-            # 那份判决覆盖掉。
-            judging = boundary in _JUDGING_BOUNDARIES
-            cue = _OBSERVE_JUDGMENT_CUE if judging else _background_observe_cue(boundary)
-            # 判 retry 时要在 `next_step_hint` 里指名哪个子任务产出不合格，所以判定版
-            # 才需要这份清单。
-            subtasks = ((getattr(request, "extra", {}) or {}).get("subtasks") or []
-                        if judging else [])
-            # outputs 注入按边界分，不按前台/后台分（S2 合并装配路径时记成了后者）：
-            # `finish_task` 是 SILENT 工具，产出**不写任务层对话**，不显式喂进来观察者会
-            # 虚构一段完成叙述（见 `_finish_result_section`）。`plain_text` 相反——那段文本
-            # 本身就是 assistant 回合、在重建的对话里看得见，注入等于让它出现两遍。
-            pre_cue_sections = None
-            if boundary in _OUTPUTS_BEARING_BOUNDARIES:
-                section = _finish_result_section(request)
-                if section:
-                    pre_cue_sections = [section]
+        # getattr 防御 + 默认前台：与本函数里 `request.extra` 的取法同一口径（鸭子类型的手构
+        # request 在测试里很常见）。判据写成「不是后台」而不是「是前台」，因为后台才是那个特例
+        # ——缺 purpose 的调用方要的是判定，不是只摘要。
+        foreground = getattr(request, "purpose", "observe") not in (
+            "background_observe", "background_recap")
+        extra = getattr(request, "extra", {}) or {}
+        boundary = extra.get("observe_boundary") or _DEFAULT_BOUNDARY
+        judging = foreground or boundary in _JUDGING_BOUNDARIES
+        cue = _judgment_cue(boundary) if judging else _recap_cue(boundary)
+        # 子任务指名清单只有判定档用得上：判 continue 时要在 `next_step_hint` 里点名哪个子任务的
+        # 产出不合格。只摘要档不产 hint，列出来是噪音。
+        subtasks = (extra.get("subtasks") or []) if judging else []
+        # 顺序即阅读顺序：任务锚 → 这一段怎么结束的 → 它交了什么 → 你要做什么（cue）。
+        pre_cue_sections = [_task_anchor(request), _boundary_fact(boundary)]
+        if boundary in _OUTPUTS_BEARING_BOUNDARIES:
+            section = _finish_result_section(request)
+            if section:
+                pre_cue_sections.append(section)
 
         return self._build_facet_trailing_messages(
             blocks,
@@ -1158,28 +1222,6 @@ class DefaultComposer(Composer):
             ref = task_ref_parts(r.get("task_id", "") or "", r.get("title", "") or "")
             lines.append(f"- {ref} [{r.get('outcome', '')}]{suffix}")
         return ["\n".join(lines)]
-
-    @staticmethod
-    def _observe_outputs_section(request: ContextRequest) -> list[str]:
-        """前台 observe 的产出注入段（无产出 → 空列表）。
-
-        `finish_task` 的产出走 SILENT，不入 task 层、不在重建的对话里——但 observer
-        须看到 actor 最终提交了什么。显式补一段并标注来源（act 阶段调用 finish_task
-        的结果），置于判定提示之前。
-        """
-        outputs = getattr(request.task, "outputs", None)
-        outputs_text = (
-            outputs if isinstance(outputs, str)
-            else (content_to_text(outputs) if outputs else "")
-        )
-        if not outputs_text:
-            return []
-        return [
-            "## Final output\n"
-            "The actor ended the act phase by calling the `finish_task` tool; the result it "
-            "submitted (shown to the user) was:\n\n"
-            + outputs_text
-        ]
 
     # ── 共用工具 ──────────────────────────────────────────────────────────────
 

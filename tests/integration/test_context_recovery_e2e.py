@@ -274,7 +274,7 @@ async def test_gives_up_when_compaction_cannot_free_anything(monkeypatch):
     assert steps.count("prepare") == 2, f"应在第一次恢复无果后就放弃，实际 {steps}"
     assert "observe" in steps, steps
     # 退回老路：机械退出 → 强制 retry
-    assert state.verdict is not None and state.verdict.task_outcome == "retry"
+    assert state.verdict is not None and state.verdict.task_outcome == "continue"
     # 只看 escalating_compact 那一类折叠（trigger="compact"）。退回老路后 observe 的
     # `_fold_retry_segment` 也会发 MEMORY_COMPACTED（trigger="observe_retry"）——那是 retry
     # 路径本来的动作，不是「压缩有效」的证据。本分支上它恰好不发（机械判决的 act_recap 为空
@@ -358,7 +358,7 @@ async def test_quota_exhaustion_falls_back_to_the_retry_path(monkeypatch):
     assert _steps(seen).count("prepare") == 3, f"配额 2 → 恰好恢复两次，实际 {_steps(seen)}"
     assert [p for p in _types(seen, EventType.MEMORY_COMPACTED)
             if p.get("trigger") == "compact"], "本例的压缩是有效的（与 give-up 那条相区分）"
-    assert state.verdict is not None and state.verdict.task_outcome == "retry"
+    assert state.verdict is not None and state.verdict.task_outcome == "continue"
 
 
 async def test_recovery_disabled_keeps_legacy_retry_path(monkeypatch):
@@ -368,4 +368,4 @@ async def test_recovery_disabled_keeps_legacy_retry_path(monkeypatch):
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
     assert _steps(seen).count("prepare") == 1
-    assert state.verdict is not None and state.verdict.task_outcome == "retry"
+    assert state.verdict is not None and state.verdict.task_outcome == "continue"

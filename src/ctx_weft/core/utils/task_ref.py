@@ -21,7 +21,10 @@ id 稳定但不可读。两个一起印，各自补上对方的短板，代价�
 
 from __future__ import annotations
 
-__all__ = ["task_ref", "task_ref_parts"]
+__all__ = ["task_ref", "task_label", "task_ref_parts"]
+
+#: `task_label` 的标题回退长度上限（取 prompt 首行时截断）。
+TASK_LABEL_MAX = 80
 
 
 def task_ref(task) -> str:
@@ -44,3 +47,25 @@ def task_ref_parts(task_id: str, title: str) -> str:
     if not task_id:
         return f"{title!r}" if title else ""
     return f"{title!r} ({task_id})" if title else task_id
+
+
+def task_label(task) -> str:
+    """任务的规范称呼，**标题空时退回开启它的 prompt 首行**（截断）。
+
+    与 `task_ref` 的分野只有一条：这个会回退。用在「生成点附近的任务锚」上——act 每回合
+    guidance 的锚定行、observe 的 cue 锚定行、任务树/已完成清单的每一行。那些位置必须
+    印出一个人能读的名字，而 root task 在 `recognize_intent` 填完标题之前 `title` 恒空
+    （`start_session` 建它时就是空的），只印裸 id 等于什么都没说。
+
+    从 `act_guidance._task_label` 移来（2026-09-28）：observe 的 cue 也要这道锚，而
+    composer 在 assembler 层、不该反向 import loop 层。放这里两边共用一份，不写第二套回退。
+    """
+    title = (getattr(task, "title", "") or "").strip()
+    if not title:
+        from ctx_weft.core.utils.content import content_to_text
+
+        prompt = content_to_text(getattr(task, "user_prompt", None) or "").strip()
+        if prompt:
+            first = prompt.splitlines()[0].strip()
+            title = first[:TASK_LABEL_MAX] + "…" if len(first) > TASK_LABEL_MAX else first
+    return task_ref_parts(getattr(task, "id", "") or "", title)

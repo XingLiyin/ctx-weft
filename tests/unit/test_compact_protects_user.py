@@ -141,7 +141,7 @@ async def test_fold_retry_segment_protects_user_prompts():
     await _seed_events(mem)
 
     events: list = []
-    verdict = Verdict(task_outcome="retry", act_recap="段摘要", reported=True)
+    verdict = Verdict(task_outcome="continue", act_recap="段摘要", reported=True)
 
     await ObserveStep()._fold_retry_segment(_state("max_turns"), _ctx(mem), verdict, events)
 

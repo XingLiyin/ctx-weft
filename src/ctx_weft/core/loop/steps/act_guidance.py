@@ -40,28 +40,11 @@ from ctx_weft.core.capabilities.control_tools import (
 )
 from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.utils.content import content_to_text
-from ctx_weft.core.utils.task_ref import task_ref_parts
+from ctx_weft.core.utils.task_ref import task_label
 from ctx_weft.core.utils.clock import as_utc
 
 _TERMINAL_STATUSES = TERMINAL_TASK_STATUSES  # 词表见 core.domain.status
-_TASK_LABEL_MAX = 80
 _SUBTASK_RESULT_MAX = 150
-
-
-def _task_label(t) -> str:
-    """任务树/已完成清单里一行的标签：**标题与 id 恒同时出现**（spec: task-handoff）。
-
-    这两处是模型建立「整个计划长什么样」的地方，而它随后要用 `task_id` 去
-    `report_task_outcome` 操作其中的子任务——只印标题就是让它自己去猜映射。
-    无 title 时退回开启该 task 的 prompt 首行（截断）当描述性名字，id 照印。
-    """
-    title = (t.title or "").strip()
-    if not title:
-        prompt = content_to_text(getattr(t, "user_prompt", None) or "").strip()
-        if prompt:
-            first = prompt.splitlines()[0].strip()
-            title = first[:_TASK_LABEL_MAX] + "…" if len(first) > _TASK_LABEL_MAX else first
-    return task_ref_parts(getattr(t, "id", "") or "", title)
 
 
 def _nonterminal_tasks(task_manager) -> list:
@@ -139,7 +122,7 @@ def _session_task_tree(task, task_manager) -> str:
         for t in children.get(node_id, []):
             indent = "  " * depth
             marker = "▶ " if t.id == task.id else ""
-            lines.append(f"{indent}- [{t.status}] {marker}{_task_label(t)}")
+            lines.append(f"{indent}- [{t.status}] {marker}{task_label(t)}")
             _walk(t.id, depth + 1)
 
     _walk(None, 0)
@@ -153,7 +136,7 @@ def build_resume_cue(task, task_manager) -> str:
     清单的提示（具体条目由 build_act_guidance 的 ALREADY COMPLETED 段承载，
     此处不重复展开）。
     """
-    ref = _task_label(task) if getattr(task, "id", None) else ""
+    ref = task_label(task) if getattr(task, "id", None) else ""
     subject = f"the task: {ref}" if ref else "the task above"
     cue = (
         f"You are still working on {subject}, resuming from the state recorded above. "
@@ -182,7 +165,7 @@ def build_act_guidance(task, task_manager) -> str:
     """
     parts: list[str] = ["---"]
 
-    ref = _task_label(task) if getattr(task, "id", None) else ""
+    ref = task_label(task) if getattr(task, "id", None) else ""
     parts.append(
         f"Current task: {ref}" if ref
         else "Current task: (as framed in the conversation above)"
@@ -216,7 +199,7 @@ def build_act_guidance(task, task_manager) -> str:
             "yourself, whichever is the better use of this turn:"
         )
         for t in done:
-            parts.append(f"- [FINISHED] {_task_label(t)}")
+            parts.append(f"- [FINISHED] {task_label(t)}")
             snippet = _subtask_result_snippet(t)
             if snippet:
                 parts.append(f"    → {snippet}")

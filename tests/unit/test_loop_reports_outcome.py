@@ -94,10 +94,10 @@ async def test_observer_success_produces_a_completed_outcome() -> None:
 
 async def test_observer_retry_produces_the_verdict_not_the_disposition() -> None:
     """loop 只报「observer 说重试」，**不判**预算够不够——那是 TM 的活。"""
-    state = await run_until_finalize(verdict="retry", summary="进行中", retry_count=99)
+    state = await run_until_finalize(verdict="continue", summary="进行中", retry_count=99)
     assert state.run_outcome.kind is RunOutcomeKind.COMPLETED
     # 即使预算早耗尽（max_retries=3），这里仍是 retry
-    assert state.run_outcome.verdict == "retry"
+    assert state.run_outcome.verdict == "continue"
 
 
 # ── suspend ─────────────────────────────────────────────────────────────────

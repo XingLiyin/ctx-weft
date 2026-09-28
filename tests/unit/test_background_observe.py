@@ -12,7 +12,8 @@ import pytest
 import ctx_weft.core.loop.steps.background_observe as bo
 import ctx_weft.core.loop.steps.observe as _obs_mod
 from ctx_weft.core.capabilities.control_tools import (
-    BACKGROUND_PROCESS_REPORT_NAME,
+    COLLECT_PROCESS_REPORT_NAME,
+    REPORT_TASK_OUTCOME_NAME,
     ControlResult,
 )
 from ctx_weft.protocols import MemoryEventType
@@ -101,9 +102,20 @@ class _FakeGateway:
 
 
 async def _fake_stream_collect_process_report(ctx, state, request):
-    """Fake LLM that calls collect_process_report once."""
+    """Fake LLM that calls collect_process_report once —— **只摘要那一档**的 terminal tool。"""
     yield _make_token_chunk("thinking...")
-    yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+    yield _make_tool_call_chunk(COLLECT_PROCESS_REPORT_NAME)
+    yield _make_usage_chunk()
+
+
+async def _fake_stream_report_task_outcome(ctx, state, request):
+    """判定那一档的 terminal tool（2026-09-28 起两档是两个工具）。
+
+    名字必须对得上 `run_observe_react` 的 `terminal_tool_name`，否则那个循环不会终止——
+    它会一直跑到 max_rounds，terminal_result 恒为 None，报告只能从 last_text 兜底取。
+    """
+    yield _make_token_chunk("judging...")
+    yield _make_tool_call_chunk(REPORT_TASK_OUTCOME_NAME)
     yield _make_usage_chunk()
 
 
@@ -153,7 +165,7 @@ async def test_serialized_per_task(monkeypatch, fake_state_ctx):
     async def slow_stream(c, s, req):
         order.append("start")
         await asyncio.sleep(0.01)
-        yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+        yield _make_tool_call_chunk(COLLECT_PROCESS_REPORT_NAME)
         yield _make_usage_chunk()
         order.append("end")
 
@@ -188,7 +200,7 @@ async def test_await_pending_waits_for_latest_when_two_launched(monkeypatch, fak
         else:
             await asyncio.sleep(0.05)
             second_done = True
-        yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+        yield _make_tool_call_chunk(COLLECT_PROCESS_REPORT_NAME)
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", vary_speed)
@@ -283,7 +295,7 @@ async def test_two_plain_text_observes_accumulate_both_summaries(monkeypatch, fa
     state, ctx = fake_state_ctx  # task 层预置 [UP1, LLM, TOOL]
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
-    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_report_task_outcome)
 
     class _CountingGateway:
         """Distinct report per observe so we can tell S1 from S2."""
@@ -568,7 +580,7 @@ async def test_dispatch_recap_completes_benignly_after_cancel(monkeypatch, fake_
 
     async def slow_stream(c, s, req):
         await asyncio.sleep(0.02)  # 给取消留出交叉窗口
-        yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+        yield _make_tool_call_chunk(COLLECT_PROCESS_REPORT_NAME)
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", slow_stream)
@@ -599,7 +611,7 @@ async def test_segment_fold_failure_keeps_raw_and_does_not_raise(
     ctx.capability_gateway = _FakeGateway("段总结X")
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
-    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_report_task_outcome)
 
     async def boom(*args, **kwargs):
         raise RuntimeError("fold backend down")
@@ -726,7 +738,11 @@ async def _run_judging(monkeypatch, state, ctx, *, boundary, verdict, accepted=T
     ctx.capability_gateway = _verdict_gateway(verdict)
     tm = _VerdictTM(accepted=accepted)
     ctx.task_manager = tm
-    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+    # 判定档与摘要档的 terminal tool 不同名，替身要跟着分：`_run_judging` 也被
+    # `boundary="interrupt"`（不判）那条用例复用，故按 `_judges` 选，不写死。
+    stream = (_fake_stream_report_task_outcome if bo._judges(boundary)
+              else _fake_stream_collect_process_report)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", stream)
     await bo.launch_background_observe(state, ctx, boundary=boundary)
     return tm
 
@@ -754,9 +770,9 @@ async def test_a_closing_verdict_leaves_the_segment_to_the_finish_pair(
 async def test_a_retry_verdict_still_folds_the_segment(monkeypatch, fake_state_ctx, boundary):
     """判 retry → 维持 park，没有 close，这一段仍归段摘要（下一轮 act 要靠它看见进度）。"""
     state, ctx = fake_state_ctx
-    tm = await _run_judging(monkeypatch, state, ctx, boundary=boundary, verdict="retry")
+    tm = await _run_judging(monkeypatch, state, ctx, boundary=boundary, verdict="continue")
 
-    assert tm.submitted == ["retry"]
+    assert tm.submitted == ["continue"]
     assert len(await _summaries(state, ctx)) == 1
 
 

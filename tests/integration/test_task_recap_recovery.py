@@ -42,7 +42,7 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.capabilities.control_tools import BACKGROUND_PROCESS_REPORT_NAME
+from ctx_weft.core.capabilities.control_tools import COLLECT_PROCESS_REPORT_NAME
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
 )
@@ -312,7 +312,7 @@ class _RoutingLLM(MockLLMAdapter):
     @staticmethod
     def _is_background_observe(request) -> bool:
         tools = getattr(request, "tools", None) or []
-        return any(getattr(t, "name", "") == BACKGROUND_PROCESS_REPORT_NAME for t in tools)
+        return any(getattr(t, "name", "") == COLLECT_PROCESS_REPORT_NAME for t in tools)
 
     def complete(self, request, stream: bool = True):
         self.last_request = request
@@ -371,7 +371,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
         responses=[MockResponse(text="resumed and done")],
         recap_responses=[
             MockResponse(tool_calls=[
-                ToolCall(id=f"tc_recap_{i}", name=BACKGROUND_PROCESS_REPORT_NAME,
+                ToolCall(id=f"tc_recap_{i}", name=COLLECT_PROCESS_REPORT_NAME,
                           arguments={"task_status": "success",
                                      "act_recap": "recovered recap"}),
             ])

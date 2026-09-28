@@ -120,7 +120,7 @@ async def test_finalize_retry_no_process_report_no_user_message() -> None:
     """retry：observe 分析结果已由折叠出的 TASK_COMPACT_SUMMARY 段摘要承载；finalize 不再写
     process_report/process_report_at，也不注入 user message（spec 2026-07-01 §3.1）。"""
     task = Task(id="T1", session_id="s1", status="PENDING", title="X")
-    task.observer_outcome = "retry"
+    task.observer_outcome = "continue"
     mem = InMemoryMemoryProvider()
     state = LoopState(
         run_id="r1",
@@ -128,7 +128,7 @@ async def test_finalize_retry_no_process_report_no_user_message() -> None:
         task=task,
         agent=SimpleNamespace(id="ag1", loop_config=SimpleNamespace(compact_keep_last=6)),
         scope=MemoryAddress(session_id="s1", task_id="T1", agent_id="ag1"),
-        verdict=SimpleNamespace(task_outcome="retry", act_recap="missing X; do Y next",
+        verdict=SimpleNamespace(task_outcome="continue", act_recap="missing X; do Y next",
                                 task_summary=""),
         resolved_model=SimpleNamespace(model="mock", account=""),
     )

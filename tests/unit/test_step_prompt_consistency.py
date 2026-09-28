@@ -26,7 +26,10 @@ PURPOSES = ["act", "observe", "compact", "recognize_intent"]
 
 # stable substrings of each step's trailing cue (see composer module constants)
 _STEP_CUE = {
-    "observe": "act as the observer",
+    # 2026-09-28：observe 的 cue 重写成「边界事实 + 调哪个工具 + 这次填哪些字段」，开场那句
+    # 「Now act as the observer…」随之消失（角色由 ROLE facet 讲，cue 不再复述）。哨兵改用
+    # 那句必然出现的工具指令。
+    "observe": "call `control__report_task_outcome` exactly once",
     "compact": "act as a memory compactor",
     "recognize_intent": "set this task's metadata",
 }

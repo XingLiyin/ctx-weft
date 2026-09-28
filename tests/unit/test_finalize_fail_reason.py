@@ -87,7 +87,7 @@ async def _retry_exhausted_state(mem, *, task_error: str | None):
                 title="Doomed Task", user_prompt="do it", settings=NormalTaskSettings())
     task.retry_count = task.max_retries
     task.error = task_error
-    verdict = Verdict(task_outcome="retry", act_recap="第 3 轮尝试仍未通过校验", task_summary="")
+    verdict = Verdict(task_outcome="continue", act_recap="第 3 轮尝试仍未通过校验", task_summary="")
     agent = SimpleNamespace(id="ag2", loop_config=LoopConfig())
     session = SimpleNamespace(id="s1", tenant_id="default")
     return SimpleNamespace(run_id="r1", sequence_counter=0, session=session,

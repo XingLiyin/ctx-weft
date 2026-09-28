@@ -23,7 +23,7 @@ import ctx_weft.core.loop.steps.background_observe as bo
 import ctx_weft.core.loop.steps.observe as _obs_mod
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
 from ctx_weft.core.capabilities.control_tools import (
-    BACKGROUND_PROCESS_REPORT_NAME,
+    REPORT_TASK_OUTCOME_NAME,
     ControlResult,
 )
 from ctx_weft.protocols import (
@@ -211,7 +211,9 @@ def _make_usage_chunk():
 
 
 async def _fake_stream(ctx, state, request):
-    yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+    # 判定档（`plain_text`）的 terminal tool 是 `report_task_outcome`——2026-09-28 起两档是两个
+    # 工具，名字对不上 `run_observe_react` 就不会终止，报告只能从 last_text 兜底取。
+    yield _make_tool_call_chunk(REPORT_TASK_OUTCOME_NAME)
     yield _make_usage_chunk()
 
 
@@ -278,7 +280,7 @@ async def test_fold_retry_segment_keeps_previous_segment_raw():
         llm=SimpleNamespace(tokenizer=HeuristicTokenizer()),
         task_manager=None,
     )
-    verdict = Verdict(task_outcome="retry", act_recap="S2", reported=True)
+    verdict = Verdict(task_outcome="continue", act_recap="S2", reported=True)
 
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, [])
 

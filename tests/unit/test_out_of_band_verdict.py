@@ -150,13 +150,13 @@ async def test_retry_verdict_keeps_it_parked() -> None:
     task = _parked(tm, retry_count=0, max_retries=3)
 
     accepted = await tm.apply_out_of_band_verdict(
-        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="retry"),
+        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="continue"),
         process_report="卡住了", next_step_hint="Next Step Hint: 先取凭据",
     )
 
     assert accepted is True                       # 判决被接受：字段落地了
     assert task.status == "AWAITING_HUMAN"        # 但仍在等人
-    assert task.observer_outcome == "retry"
+    assert task.observer_outcome == "continue"
     assert task.process_report == "卡住了"
     assert task.next_step_hint == "Next Step Hint: 先取凭据"
     assert task.retry_count == 0                  # 预算一点没烧
@@ -258,7 +258,7 @@ async def test_finalize_is_not_called_for_retry() -> None:
     called = []
 
     await tm.apply_out_of_band_verdict(
-        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="retry"),
+        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="continue"),
         finalize=lambda: called.append(1) or _noop())
     assert called == []
     assert tm.get_task("A").status == "AWAITING_HUMAN"

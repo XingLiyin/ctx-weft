@@ -1,7 +1,7 @@
 """端到端：多模态 user_prompt 走完至少一个 actor 回合（评审 I3，spec 2026-08-23）。
 
 C1 的复现条件不是理论上的：``start_session`` 派生的 root task 用 ``title=""``
-（``session_registry._make_root_task_manager``），使 ``act_guidance._task_label``
+（``session_registry._make_root_task_manager``），使 ``task_ref.task_label``
 必然从 ``title`` 分支落到 ``user_prompt`` 分支。任何多模态 ``user_prompt``（``list[ContentPart]``）
 若不经 ``content_to_text`` 拍扁就直接 ``.strip()``，第一个 act 回合就会 ``AttributeError``。
 
@@ -148,8 +148,8 @@ async def test_multimodal_prompt_completes_one_actor_round_without_crashing() ->
 @pytest.mark.asyncio
 async def test_task_label_does_not_crash_on_multimodal_user_prompt() -> None:
     """退而求其次的直接单元覆盖（防端到端 fixture 未来漂移时这条根因仍被盯住）：
-    _task_label 对 title="" 的多模态-prompt task 不抛 AttributeError。"""
-    from ctx_weft.core.loop.steps.act_guidance import _task_label
+    task_label 对 title="" 的多模态-prompt task 不抛 AttributeError。"""
+    from ctx_weft.core.utils.task_ref import task_label
     from ctx_weft.core.models.task import Task
 
     task = Task(
@@ -157,7 +157,7 @@ async def test_task_label_does_not_crash_on_multimodal_user_prompt() -> None:
         title="", description="",
         user_prompt=_MULTIMODAL_PROMPT,
     )
-    label = _task_label(task)
+    label = task_label(task)
     assert label  # 不抛；取到 user_prompt 首个 TextPart 的文本
     assert "describe this image" in label
 

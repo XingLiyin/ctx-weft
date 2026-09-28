@@ -57,10 +57,10 @@ def test_foreground_still_writes_every_field() -> None:
 def test_foreground_retry_stashes_failure_reason() -> None:
     task = _task()
     report_task_outcome(
-        task_status="retry", act_recap="卡住了", task_failure_reason="缺凭据",
+        task_status="continue", act_recap="卡住了", task_failure_reason="缺凭据",
         next_step_hint="先去取凭据", ctx=_ctx(task),
     )
-    assert task.observer_outcome == "retry"
+    assert task.observer_outcome == "continue"
     assert task.error == "缺凭据"
     assert task.next_step_hint == "Next Step Hint: 先去取凭据"
 
@@ -88,7 +88,7 @@ def test_readonly_still_runs_the_no_outputs_guard() -> None:
         task_status="success", act_recap="其实没交付",
         ctx=_ctx(task, readonly=True),
     )
-    assert res.metadata[K.OBSERVER_OUTCOME] == "retry"
+    assert res.metadata[K.OBSERVER_OUTCOME] == "continue"
     assert "without a final output" in res.metadata[K.OBSERVER_NEXT_STEP_HINT]
     assert task.observer_outcome is None       # 仍然一个字段都没写
 

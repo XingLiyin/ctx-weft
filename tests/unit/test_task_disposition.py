@@ -36,7 +36,7 @@ def test_observer_fail_fails_with_its_own_code():
 
 
 def test_retry_with_budget_requeues():
-    d = disposition_for(_completed("retry", summary="再来"), retry_count=1, max_retries=3)
+    d = disposition_for(_completed("continue", summary="再来"), retry_count=1, max_retries=3)
     assert d.status == "PENDING"
     assert d.event_type == "TaskRequeued"
     assert d.payload["retry_count"] == 2      # 已 +1，与今天 finalize 的行为一致
@@ -44,7 +44,7 @@ def test_retry_with_budget_requeues():
 
 def test_retry_exhausted_degrades_to_failed():
     """这条判断今天在 FinalizeStep 里——它是重试预算，属于处置不属于判决。"""
-    d = disposition_for(_completed("retry", error="本轮受阻"), retry_count=3, max_retries=3)
+    d = disposition_for(_completed("continue", error="本轮受阻"), retry_count=3, max_retries=3)
     assert d.status == "FAILED"
     assert d.event_type == "TaskFailed"
     assert d.payload["error_code"] == "TASK_FAILED_RETRY_EXHAUSTED"

@@ -125,7 +125,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     # 判定序列 retry → success：这一轮会被判两次。第一次是纯文本让位那一段，要判 retry
     # 才保得住那次 park（本段正要测它）；人回话之后 finish_task 收尾那一段要判 success，
     # 否则 2026-09-27 起（S-b）它同样 park，下面那句 `_poll(_final_task)` 永远等不到。
-    llm = _ActRouterLLM(observer_verdicts=["retry", "success"], act_responses=[
+    llm = _ActRouterLLM(observer_verdicts=["continue", "success"], act_responses=[
         MockResponse(text="Hi! Anything else?"),  # 纯文本、无 tool_call → 冷 park
         _finish_call(),
     ])

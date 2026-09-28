@@ -49,7 +49,17 @@ if TYPE_CHECKING:
 
 # ── Purpose ───────────────────────────────────────────────────────────────────
 
-Purpose = Literal["act", "observe", "compact", "recognize_intent"]
+#: 装配与能力门控的 purpose。后两个是后台 observe 的两档——它们此前一直以字符串在用
+#: （`ContextRequest(purpose="background_observe")`）却没登记进这里，类型检查看不见。
+#:
+#: `background_observe`（判定档）与 `background_recap`（只摘要档）**必须是两个值**，因为
+#: 工具面按 `request.purpose in cap.purposes` 裁：判定档给 `report_task_outcome`，摘要档给
+#: `collect_process_report`。这样「这个边界不判」是**工具面的事实**，不靠 cue 里一句叮嘱
+#: ——那句叮嘱曾与「`task_status` 必填」直接冲突（2026-09-28）。
+Purpose = Literal[
+    "act", "observe", "compact", "recognize_intent",
+    "background_observe", "background_recap",
+]
 
 
 # ── Qualified tool name ────────────────────────────────────────────────────────

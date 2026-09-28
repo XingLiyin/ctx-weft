@@ -165,7 +165,7 @@ async def test_context_limit_retry_without_recap_keeps_raw_and_defers_to_backgro
         template_id="agent:tpl_actonly", user_prompt="do a long task")
 
     # 结局逐字不变：机械退出 → retry（非终态）
-    assert state.verdict is not None and state.verdict.task_outcome == "retry"
+    assert state.verdict is not None and state.verdict.task_outcome == "continue"
     assert state.task.status == "PENDING"
     assert not getattr(state.task, "process_report", None)  # retry 不写 process_report
     assert state.verdict.act_recap == "", "机械判决不得产出任何合成摘要"
@@ -223,10 +223,10 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     # recap 才会折段。此前这份 recap 是后台观察**偷吃一条 act 响应**、拿它的正文当 recap 得来的
     # ——2026-09-27 给 `MockLLMAdapter` 加的观察兜底堵住了偷吃（那个偷吃会把 act 队列的序号整个
     # 错开），于是必须显式应这一轮。判决值在这里无关：`mechanical` 边界不产 verdict
-    # （`background_observe._judges`），传 "retry" 只是为了让兜底回一个带 `act_recap` 的回合。
+    # （`background_observe._judges`），传 "continue" 只是为了让兜底回一个带 `act_recap` 的回合。
     llm = _UsageInflatingMock(responses=_working_turn(200), context_limit=3000,
                               output_reserve=0, prompt_tokens_override=2800,
-                              observer_verdict="retry")
+                              observer_verdict="continue")
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
@@ -276,7 +276,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
         state, _ = await runtime._execute_task(
             session=session, task=task, agent=agent, template=template,
             run_id=f"run{r}", memory=mem, resolved_model=resolved_model, task_manager=tm)
-        assert state.verdict is not None and state.verdict.task_outcome == "retry"
+        assert state.verdict is not None and state.verdict.task_outcome == "continue"
 
     ups = await mem.recall_recent(state.scope, [T.USER_PROMPT], 100, pctx)
     collapsed = [u.content for u in ups if COLLAPSE_DELIM in u.content]

@@ -39,7 +39,7 @@ async def test_retry_folds_current_attempt_and_deletes_raw():
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
-    verdict = SimpleNamespace(task_outcome="retry", act_recap="本段摘要：调了工具X", reported=False)
+    verdict = SimpleNamespace(task_outcome="continue", act_recap="本段摘要：调了工具X", reported=False)
 
     events = []
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
@@ -71,7 +71,7 @@ async def test_retry_accumulates_prior_segments():
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
-    verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要②", reported=False)
+    verdict = SimpleNamespace(task_outcome="continue", act_recap="段摘要②", reported=False)
 
     events = []
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
@@ -102,7 +102,7 @@ async def test_retry_short_segment_kept_raw():
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
-    verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要：短段不该写我", reported=False)
+    verdict = SimpleNamespace(task_outcome="continue", act_recap="段摘要：短段不该写我", reported=False)
 
     events = []
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
@@ -129,7 +129,7 @@ async def test_retry_long_segment_still_folds_when_threshold_set():
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
-    verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要", reported=False)
+    verdict = SimpleNamespace(task_outcome="continue", act_recap="段摘要", reported=False)
 
     events = []
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)

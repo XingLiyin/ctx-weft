@@ -105,10 +105,10 @@ async def test_retry_verdict_is_submitted_too() -> None:
     """retry 也提交——hint 要落地供下一轮用；「维持 park」是带外入口那边的分支。"""
     tm = _RecordingTM()
     await _submit_verdict(_state(), _ctx(tm), _meta(
-        "retry", **{K.OBSERVER_FAILURE_REASON: "缺凭据"}))
+        "continue", **{K.OBSERVER_FAILURE_REASON: "缺凭据"}))
 
     _tid, outcome, _kw = tm.calls[0]
-    assert outcome.verdict == "retry"
+    assert outcome.verdict == "continue"
     assert outcome.error == "缺凭据"
 
 

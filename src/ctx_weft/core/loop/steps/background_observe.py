@@ -34,6 +34,7 @@ from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKi
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.ids import generate_id
+from ctx_weft.core.utils.verdict import VERDICT_SUCCESS, normalize_verdict
 from ctx_weft.protocols import MemoryEventType, MemoryScope
 
 if TYPE_CHECKING:
@@ -149,7 +150,11 @@ async def _submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) ->
     带外入口自己做仲裁（task 是否仍在 `AWAITING_HUMAN`），这里不必先查一遍：人可能在
     这两行之间开口，查了也不作数。
     """
-    verdict = (meta.get(K.OBSERVER_OUTCOME) or "").strip()
+    raw = (meta.get(K.OBSERVER_OUTCOME) or "").strip()
+    # 空 = 压根没判（工具没被调 / LLM 失败）→ 维持 park。非空才归一：`retry` 是别名，
+    # 认不出的归 continue。**不能**把空串也喂进 normalize_verdict——那会把「没判决」
+    # 变成「判了 continue」，两者对本函数的意义相同（都维持 park），但日志会说谎。
+    verdict = normalize_verdict(raw) if raw else ""
     if not verdict:
         logger.info(
             "background observe produced no verdict (task=%s); staying parked", state.task.id)
@@ -179,7 +184,7 @@ async def _submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) ->
     logger.info(
         "background observe verdict '%s' for task %s: %s",
         verdict, state.task.id, "accepted" if accepted else "rejected (the user spoke first)")
-    return bool(accepted) and verdict == "success"
+    return bool(accepted) and verdict == VERDICT_SUCCESS
 
 
 async def _out_of_band_finalize(
@@ -221,12 +226,12 @@ async def _out_of_band_finalize(
 
     events = await apply_task_close(
         state, state.task, ctx,
-        outcome="success",
+        outcome=VERDICT_SUCCESS,
         act_recap=meta.get(K.OBSERVER_ACT_RECAP, "") or "",
         task_summary=meta.get(K.OBSERVER_TASK_SUMMARY, "") or "",
         has_llm_summary=True,
     )
-    events.append(task_finalized_event(state, state.task, outcome="success"))
+    events.append(task_finalized_event(state, state.task, outcome=VERDICT_SUCCESS))
     for event in events:
         await ctx.event_bus.emit(event)
     await _close_park_bubble(state, ctx)
@@ -445,7 +450,10 @@ async def _run_background_observe(
     *, watermark: "datetime | None" = None,
 ) -> None:
     from ctx_weft.core.assembler import ContextRequest
-    from ctx_weft.core.capabilities.control_tools import BACKGROUND_PROCESS_REPORT_NAME
+    from ctx_weft.core.capabilities.control_tools import (
+        COLLECT_PROCESS_REPORT_NAME,
+        REPORT_TASK_OUTCOME_NAME,
+    )
 
     # Task 5 复审修复：origin 必须在本函数**任何**发射点之前钉住，不能拖到调
     # run_observe_react 前才改——RUN_STARTED/TASK_RECAP_STARTED（下面紧接着）以及
@@ -519,11 +527,18 @@ async def _run_background_observe(
                 )
                 # 判定边界要带子任务清单：判 retry 时 observer 要在 `next_step_hint`
                 # 里指名哪个子任务的产出不合格（与前台 observe 同一用途）。
+                # 两档（2026-09-28）：判定档给判决工具，只摘要档给 `collect_process_report`。
+                # **由 purpose 裁工具面**（`request.purpose in cap.purposes`），于是「这个边界不判」
+                # 是工具面的事实，不靠 cue 里一句叮嘱——那句叮嘱曾与「task_status 必填」冲突。
+                judging = _judges(boundary)
+                purpose = "background_observe" if judging else "background_recap"
+                terminal_tool = (
+                    REPORT_TASK_OUTCOME_NAME if judging else COLLECT_PROCESS_REPORT_NAME)
                 extra: dict = {"observe_boundary": boundary}
-                if _judges(boundary):
+                if judging:
                     extra["subtasks"] = _subtask_handles(state, ctx)
                 request = ContextRequest(
-                    purpose="background_observe",
+                    purpose=purpose,
                     scope=state.scope,
                     task=state.task,
                     agent=agent,
@@ -543,7 +558,7 @@ async def _run_background_observe(
                     messages=list(prompt.messages),
                     tools=prompt.tools,
                     max_rounds=agent.loop_config.max_turns_per_observe,
-                    terminal_tool_name=BACKGROUND_PROCESS_REPORT_NAME,
+                    terminal_tool_name=terminal_tool,
                 )
                 # 报告取值：terminal 工具的**结构化回传**（S3 的 OBSERVER_* key）→ 纯文本
                 # 复述兜底（observer 把复述写成正文而没调工具）。

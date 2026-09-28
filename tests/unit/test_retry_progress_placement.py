@@ -41,13 +41,19 @@ def _task(**over) -> SimpleNamespace:
 
 
 async def test_observe_includes_finish_output_labeled() -> None:
-    """Observer sees the finish_task output, labeled as the act-phase finish_task result."""
+    """Observer sees the finish_task output, labeled as the act-phase finish_task result.
+
+    `observe_boundary="actor_done"` 是 2026-09-28 加的：注入的判据从「前台就注入」改成**这一
+    段是不是以 `finish_task` 收尾**。纯文本收尾（`normal`）的产出本身就是一条 assistant 回合、
+    已在重建的对话里，注入等于让它出现两遍。`ObserveStep` 现在把 `act_exit_reason` 当 boundary
+    传进来，本用例照它摆。
+    """
     blocks = [
         _hist("user", "## Current Message\ndo X", 1),
         _hist("assistant", "ATTEMPT2 did Y", 10),
     ]
     req = SimpleNamespace(purpose="observe", task=_task(), session=SimpleNamespace(user_prompt="do X"),
-                          template=None)
+                          template=None, extra={"observe_boundary": "actor_done"})
     msgs = DefaultComposer()._build_observe_messages(blocks, req)
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "THE FINAL ANSWER" in joined

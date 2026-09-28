@@ -26,10 +26,11 @@ from ctx_weft.core.orchestrator.task.disposition import (
 )
 from ctx_weft.core.orchestrator.task.queue import QueueEntry, TaskQueue
 from ctx_weft.core.utils.task_ref import task_ref, task_ref_parts
+from ctx_weft.core.utils.verdict import VERDICT_SUCCESS, normalize_verdict
 from ctx_weft.core.orchestrator.task.runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.status import TaskStatus
-from ctx_weft.core.models.task import CompactTaskSettings, MetadataFillerTaskSettings, NormalTaskSettings, Task
+from ctx_weft.core.models.task import PORT_MAIN, CompactTaskSettings, MetadataFillerTaskSettings, NormalTaskSettings, Task
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols.events import EventOrigin, EventType
@@ -809,7 +810,7 @@ class TaskManager:
                 # 当前接线下本分支不可达（`_tasks` 从不删条目；`_SessionTaskRunner.execute`
                 # 只在 `get_task(task_id) is None` 时返回 None，而 `_execute_task` 恒返回
                 # 非 None 的 state），故不是行为差异；留着是给未来的 runner 实现兜底。
-                outcome = RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="success")
+                outcome = RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict=VERDICT_SUCCESS)
             # 处置**先于** _flush_staged：子任务一入队就可能跑完、回头唤醒父亲，而
             # `_try_resume_parent` 的门是 `parent.status == "SUSPENDED"`——父亲必须在
             # 子任务入队前落到 SUSPENDED（旧路径由 control tool 在 run 内写，同一时序）。
@@ -1021,15 +1022,18 @@ class TaskManager:
             if task_summary:
                 task.task_summary = task_summary
             task.next_step_hint = next_step_hint or None
-            if outcome.verdict:
-                task.observer_outcome = outcome.verdict
-            if outcome.verdict != "success":
+            # 归一后再落地与比较（`retry` 是别名，认不出的归 continue——决不归 fail）：
+            # 这条入口的入参直接来自 LLM 的工具回传，不能假定它已经是规范值。
+            verdict = normalize_verdict(outcome.verdict) if outcome.verdict else ""
+            if verdict:
+                task.observer_outcome = verdict
+            if verdict != VERDICT_SUCCESS:
                 # retry / fail → 维持 park。字段已写（hint 供下一轮 act 用），但不转移
                 # 状态：观察者说「没做完」时，在有人在场的会话里该由人决定下一步。
                 logger.info(
                     "out-of-band verdict '%s' for task %s: fields recorded, staying parked "
                     "for the user",
-                    outcome.verdict, task_id,
+                    verdict, task_id,
                 )
                 return True
             disp = self._decide_and_write(task_id, outcome)

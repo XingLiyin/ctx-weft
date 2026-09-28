@@ -19,6 +19,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ctx_weft.core.models.discriminators import TaskErrorCode
+from ctx_weft.core.utils.verdict import (
+    VERDICT_CONTINUE,
+    VERDICT_SUCCESS,
+    normalize_verdict,
+)
 
 __all__ = ["Disposition", "RunOutcome", "RunOutcomeKind", "disposition_for"]
 
@@ -123,20 +128,32 @@ def disposition_for(
             "retry_count": retry_count,
         })
 
-    # COMPLETED：observer 的判决 + 重试预算
-    if outcome.verdict == "success":
+    # COMPLETED：observer 的判决 + 重试预算。
+    #
+    # 三态**显式匹配**（2026-09-28）：改名前这里是「success → / retry → / 其余 → FAILED」，
+    # 那个兜底同时服务 `fail` 和**任何认不出的值**——一个错别字就让 task 无声判死。现在先经
+    # `normalize_verdict` 归一（认不出归 continue，不是 fail），`fail` 单独一支。
+    verdict = normalize_verdict(outcome.verdict)
+    if verdict == VERDICT_SUCCESS:
         return Disposition("FINISHED", "TaskFinished", {
-            "outcome": "success", "summary": outcome.summary, "outputs": outcome.outputs,
+            "outcome": VERDICT_SUCCESS, "summary": outcome.summary, "outputs": outcome.outputs,
         })
-    if outcome.verdict == "retry" and retry_count < max_retries:
-        return Disposition("PENDING", "TaskRequeued", {
-            "outcome": "retry", "summary": outcome.summary, "retry_count": retry_count + 1,
+    if verdict == VERDICT_CONTINUE:
+        if retry_count < max_retries:
+            return Disposition("PENDING", "TaskRequeued", {
+                "outcome": VERDICT_CONTINUE, "summary": outcome.summary,
+                "retry_count": retry_count + 1,
+            })
+        # 预算耗尽 → 降级成 fail（今天在 FinalizeStep:695）。这一支只在**无人值守**那条前台
+        # 路径上走得到：park 的 task 判 continue 时压根不进本函数（带外入口在 success 之前
+        # 就返回了），所以「人正在等着」永远不会被重试预算判死。
+        return Disposition("FAILED", "TaskFailed", {
+            "error_code": TaskErrorCode.RETRY_EXHAUSTED,
+            "error_message": outcome.error,
+            "retry_count": retry_count,
         })
-    # fail，或 retry 但预算耗尽 —— 后者降级成 fail（今天在 FinalizeStep:695）
-    exhausted = outcome.verdict == "retry"
     return Disposition("FAILED", "TaskFailed", {
-        "error_code": (TaskErrorCode.RETRY_EXHAUSTED if exhausted
-                       else TaskErrorCode.BY_OBSERVER),
+        "error_code": TaskErrorCode.BY_OBSERVER,
         "error_message": outcome.error,
         "retry_count": retry_count,
     })

@@ -92,7 +92,7 @@ def _verdict(task: Task) -> str:
 
 def test_without_outputs_the_guard_downgrades_success() -> None:
     """前提复现：没有 outputs 时护栏确实把 success 改判 retry。"""
-    assert _verdict(_task()) == "retry"
+    assert _verdict(_task()) == "continue"
 
 
 def test_with_outputs_synthesized_success_survives() -> None:

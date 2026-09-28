@@ -19,6 +19,12 @@ from ctx_weft.core.capabilities.schema import extract_schema
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.headings import SUBTASKS_HEADING
 from ctx_weft.core.utils.ids import generate_id
+from ctx_weft.core.utils.verdict import (
+    VERDICT_CONTINUE,
+    VERDICT_FAIL,
+    VERDICT_SUCCESS,
+    normalize_verdict,
+)
 from ctx_weft.core.utils.task_ref import task_ref
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.protocols.capability import (
@@ -52,12 +58,31 @@ DELEGATE_TASK_NAME = qualify(f"{PROVIDER_NAME}:delegate_task")
 DELEGATE_PLAN_NAME = qualify(f"{PROVIDER_NAME}:delegate_plan")
 ASK_USER_NAME = qualify(f"{PROVIDER_NAME}:ask_user")
 REPORT_TASK_OUTCOME_NAME = qualify(f"{PROVIDER_NAME}:report_task_outcome")
-#: 后台 observe 的 terminal tool。2026-09-22 起与前台同一个——`collect_process_report`
-#: 的签名本就是 `report_task_outcome` 的真子集，它存在的唯一理由「Zero state write」
-#: 已由 `ControlContext.readonly` 取代（S3）。保留这个别名是因为调用方按「后台用哪个
-#: terminal tool」来读它，语义比直接写 REPORT_TASK_OUTCOME_NAME 清楚。
-BACKGROUND_PROCESS_REPORT_NAME = REPORT_TASK_OUTCOME_NAME
+#: 只摘要那一档后台 observe 的 terminal tool（2026-09-28 恢复为**真工具**）。
+#:
+#: 它 2026-09-22 曾被合并进 `report_task_outcome`（当时的理由：签名是真子集，而它存在的唯一
+#: 理由「Zero state write」已由 `ControlContext.readonly` 取代）。那次合并留下一个活的缺陷：
+#: 不判决的那几个边界，cue 让模型调一个**已经不存在**的 `collect_process_report`，同一段话又
+#: 说「不要判 success/retry/fail」，而桌面上唯一的工具把 `task_status` 列为**必填**——指令自
+#: 相矛盾，模型只能违背其一（不调工具 → 段保 raw；或硬填一个没人看的 status）。
+#:
+#: 拆回两个工具之后，「这个边界不判」成为**工具面的事实**：摘要档的能力面里压根没有判决工具，
+#: 不需要任何叮嘱。两档由 purpose 区分（`background_recap` / `background_observe`）。
+COLLECT_PROCESS_REPORT_NAME = qualify(f"{PROVIDER_NAME}:collect_process_report")
 UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
+
+#: `act_recap` 的字段契约，两个 observe terminal tool **逐字共用**一份。
+#:
+#: 这段文字是「字段是什么」的唯一真相源——cue 不再复述它（2026-09-28）。scope 规则放在这里而
+#: 不放 cue，是因为它**恒定**、不随边界变，而且模型读字段时它就在眼前。
+_ACT_RECAP_DESC = (
+    "An honest recap of what this segment's act did: what you changed or produced, which tools "
+    "you called, and whether anything failed. First person, faithful to what actually ran. "
+    "Scope = the work the actor newly did after the last `## Progress So Far` or the last user "
+    "message in the conversation, whichever is later (on a first observation, start from the "
+    "beginning of the task); do not restate anything before that point. Written to memory, and "
+    "reused as the next round's `## Progress So Far` when the task continues."
+)
 
 # delegate_plan 的 actor-visible ack 及 gateway 配对 tool result 内容。
 _PLAN_DISPATCH_ACK = ("Plan created. Its sub-tasks will now be started one by one "
@@ -341,37 +366,35 @@ def finish_task(
 def report_task_outcome(
     task_status: Annotated[
         str,
-        "Outcome of the current task — one of 'success' | 'retry' | 'fail'. "
-        "Don't over-think — once the situation is clear, call this tool promptly. "
-        "'success' if completed successfully (give a thorough act_recap of the outcome and key steps); "
-        "'retry' if this attempt fell short but is worth another try (act_recap describes what is missing, "
-        "task_failure_reason the concrete blocker of this attempt, next_step_hint the concrete next step); "
-        "'fail' if it cannot be completed and should NOT be retried (act_recap/task_failure_reason explain why).",
+        "Outcome of the current task — one of 'success' | 'continue' | 'fail'. "
+        "'success': the task's goal is achieved and the task ends here. "
+        "'continue': the task is NOT over — it needs another actor turn, or it is waiting on the user. "
+        "IF THE ACTOR'S MESSAGE ASKS THE USER FOR ANYTHING — a question, missing information, a choice "
+        "between options, a confirmation, or an action only the user can take — THE ANSWER IS ALWAYS "
+        "'continue', never 'success' and never 'fail'. That holds even when the message is polished and "
+        "everything the actor could do alone is done: a turn that ends by handing the floor back is not a "
+        "delivered task. 'continue' carries no criticism of the actor; it only says the task has not ended. "
+        "'fail': the goal cannot be achieved as stated and should NOT be attempted again. "
+        "Don't over-think — once the situation is clear, call this tool promptly.",
     ],
-    act_recap: Annotated[
-        str,
-        "An honest recap of what this segment's act did: what you changed or produced, which tools "
-        "you called, and whether anything failed. First person, faithful to what actually ran. "
-        "Scope = the work the actor newly did after the last `## Progress So Far` or the last user "
-        "message in the conversation, whichever is later (on a first observation, start from the "
-        "beginning of the task); do not restate anything before that point. Written to memory, and "
-        "reused as the next round's `## Progress So Far` on retry.",
-    ],
+    act_recap: Annotated[str, _ACT_RECAP_DESC],
     task_summary: Annotated[
         str,
         "Required when task_status is 'success' or 'fail': a CONCISE process report of the WHOLE task — "
         "the important steps taken and lessons/experience, incorporating any sub-task results. "
         "Keep it high-signal, NOT a verbose blow-by-blow. This is NOT the final output: the final "
         "deliverable shown to the user is the actor's closing message text (the same turn that calls "
-        "finish_task), not any tool argument. Leave empty for 'retry'.",
+        "finish_task), not any tool argument. Leave empty for 'continue'.",
     ] = "",
     task_failure_reason: Annotated[
         str,
-        "Required when task_status is 'fail' or 'retry'. "
-        "For 'fail': explain specifically what went wrong: which step failed, what error or unexpected result "
-        "was encountered, and what the root cause is. "
-        "For 'retry': state what concretely blocked or fell short in this attempt — if the retry limit is hit, "
-        "this is shown to the user as the failure reason. Leave empty only for 'success'.",
+        "Required when task_status is 'fail'. For 'continue', fill it ONLY when something actually blocked "
+        "or fell short this round — LEAVE IT EMPTY when the actor is simply waiting on the user, or the work "
+        "is merely unfinished. Do not invent a failure in order to fill this field. "
+        "For 'fail': explain specifically what went wrong — which step failed, what error or unexpected "
+        "result was encountered, and the root cause. "
+        "For a genuinely blocked 'continue': state what concretely blocked this attempt; if the attempt limit "
+        "is later hit, this text is what the user sees as the failure reason. Empty for 'success'.",
     ] = "",
     next_step_hint: Annotated[
         str,
@@ -389,8 +412,9 @@ def report_task_outcome(
     """Record the review verdict for the current task (success / retry / fail)."""
     task = ctx.task if ctx else None
     # observe 裁决三态。机械退出（max_turns/context_limit）由系统在 ObserveStep 归为 retry。
-    if task_status not in ("success", "retry", "fail"):
-        task_status = "retry"
+    # 归一到三态（`retry` 是永久别名，认不出的归 continue——决不归 fail）。见
+    # `core.utils.verdict` 的模块 docstring。
+    task_status = normalize_verdict(task_status)
     # 一次性转向（只对下一次 attempt 有效）与永久记录（act_recap）分开累积：act_recap 会经
     # process_report → 段摘要 / finish 对进永久记忆，把 hint 拌进去会让它在任务完成后仍留在
     # 历史里（过期的 Next Step Hint）。hint 走 task.next_step_hint → guidance，不入 memory。
@@ -400,8 +424,8 @@ def report_task_outcome(
     if task is not None:
         # 护栏：没有最终产出就不允许判成功，改判 retry（提示下一轮调 finish_task 收尾）。
         # **只读也跑**：它读的是 `task.outputs`，改的是本地的 task_status/hint，不碰 task。
-        if task_status == "success" and not task.outputs:
-            task_status = "retry"
+        if task_status == VERDICT_SUCCESS and not task.outputs:
+            task_status = VERDICT_CONTINUE
             _hint = ("The previous round ended without a final output. Review the recap above "
                      "and judge whether this task still needs more work. If it does, continue with the "
                      "necessary tool calls. Once everything required is done, write your final reply to "
@@ -420,11 +444,11 @@ def report_task_outcome(
         # 交给 TaskManager，由处置表决定 task 落 FINISHED / FAILED / PENDING。
         task.observer_outcome = task_status
         task.actor_done = True
-        if task_status == "success":
-            task.error = None  # 清掉上一轮 retry 暂存的受阻原因，FINISHED 任务不携带 error
-        elif task_status == "fail":
+        if task_status == VERDICT_SUCCESS:
+            task.error = None  # 清掉上一轮暂存的受阻原因，FINISHED 任务不携带 error
+        elif task_status == VERDICT_FAIL:
             task.error = task_failure_reason
-        else:  # retry
+        else:  # continue
             # 本轮受阻原因暂存 task.error：retry 耗尽降级 fail 时它就是真死因
             # （TaskFailed 的 TASK_FAILED_RETRY_EXHAUSTED 携带）；下一轮判决必然覆盖或清空。
             task.error = task_failure_reason or None
@@ -440,10 +464,41 @@ def report_task_outcome(
         ControlMetaKey.OBSERVER_FAILURE_REASON: task_failure_reason,
     })
 
-    failure_part = f" Failure reason: {task_failure_reason}" if task_status == "fail" and task_failure_reason else ""
+    failure_part = f" Failure reason: {task_failure_reason}" if task_status == VERDICT_FAIL and task_failure_reason else ""
     return ControlResult(
         content=f"Assessment recorded: outcome={task_status}.{failure_part} {act_recap}",
         metadata=metadata,
+    )
+
+
+@control_tool(purposes=["background_recap"])
+def collect_process_report(
+    act_recap: Annotated[str, _ACT_RECAP_DESC],
+    task_summary: Annotated[
+        str,
+        "Fill this only when the trailing prompt says the task has ended (a close-out segment): a "
+        "CONCISE process report of the WHOLE task — the important steps taken and lessons/experience, "
+        "incorporating any sub-task results. Keep it high-signal, NOT a verbose blow-by-blow. It is "
+        "NOT the final output: the deliverable shown to the user is the actor's closing message text. "
+        "Leave empty otherwise.",
+    ] = "",
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Record what this segment did. No verdict — this segment is not being adjudicated."""
+    # **不写 task，一个字段都不写**（与 `report_task_outcome` 的分野不止于少一个参数）：这一档
+    # 的存在意义就是「这个边界不产判决」，而 `observer_outcome` / `actor_done` / `process_report`
+    # 那几个字段全是判决的产物。调用方（`background_observe._run_background_observe`）从
+    # metadata 取报告，自己决定写进段摘要还是 close report 槽。
+    #
+    # 也因此不需要 `ctx.readonly` 那道闸——它保护的是「后台隔着时间改主线程 task 状态」，而这里
+    # 压根没有写。`ctx` 仍收下：签名与其余控制工具一致，gateway 无条件传它。
+    return ControlResult(
+        content=f"Process report recorded. {act_recap}",
+        metadata={
+            ControlMetaKey.OBSERVER_ACT_RECAP: act_recap,
+            ControlMetaKey.OBSERVER_TASK_SUMMARY: task_summary,
+        },
     )
 
 

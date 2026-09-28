@@ -298,7 +298,7 @@ async def test_retry_exhausted_now_decided_by_task_manager() -> None:
     bus = _CapturingBus()
     tm, t = _setup(bus, retry_count=3, max_retries=3)
     tm.set_runner(_OutcomeRunner(tm, RunOutcome(
-        kind=RunOutcomeKind.COMPLETED, verdict="retry", error="stuck")))
+        kind=RunOutcomeKind.COMPLETED, verdict="continue", error="stuck")))
 
     await _run(tm)
 
@@ -314,7 +314,7 @@ async def test_retry_within_budget_writes_back_retry_count() -> None:
     tm, t = _setup(bus, retry_count=1, max_retries=3)
     tm._max_concurrent = 0                       # drain 空转，不再次派发
     tm.set_runner(_OutcomeRunner(tm, RunOutcome(
-        kind=RunOutcomeKind.COMPLETED, verdict="retry", summary="again")))
+        kind=RunOutcomeKind.COMPLETED, verdict="continue", summary="again")))
 
     await _run(tm)
 

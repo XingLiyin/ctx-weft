@@ -20,6 +20,11 @@ from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.clock import as_utc, now_utc
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.core.utils.task_ref import task_ref, task_ref_parts
+from ctx_weft.core.utils.verdict import (
+    VERDICT_CONTINUE,
+    VERDICT_FAIL,
+    VERDICT_SUCCESS,
+)
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress
 from ctx_weft.protocols.capability import qualify
 
@@ -812,19 +817,19 @@ class FinalizeStep(Step):
             error=task.error or "",
         )
 
-        # retry 超过上限 → 降级 fail（不再重试）。专属 error_code 区分「程序按重试上限
+        # 判 continue 但超过重试上限 → 降级 fail（不再重试）。专属 error_code 区分「程序按上限
         # 熔断」与 observer 主动判死；死因 = 最后一轮 retry 判决暂存的受阻原因（task.error，
-        # report_task_outcome 判 retry 时写入），机械退出轮没有判决则为空。
+        # report_task_outcome 判 continue 且确有阻塞时写入），机械退出轮没有判决则为空。
         # **本地降级只为收尾副作用服务**（下面的 close/bubble/blackboard 与 TASK_FINALIZED
         # 的 outcome），不再决定 task 状态：状态与 TaskFailed 事件由 TM 据同一条判据算出
         # （disposition_for 的 exhausted 分支）。两处判据逐字同形，改一处必须改另一处。
-        retry_exhausted = outcome == "retry" and task.retry_count >= task.max_retries
+        retry_exhausted = outcome == VERDICT_CONTINUE and task.retry_count >= task.max_retries
         if retry_exhausted:
-            outcome = "fail"
-            task.observer_outcome = "fail"
+            outcome = VERDICT_FAIL
+            task.observer_outcome = VERDICT_FAIL
             task.error_code = TaskErrorCode.RETRY_EXHAUSTED
 
-        terminal = outcome in ("success", "fail")
+        terminal = outcome in (VERDICT_SUCCESS, VERDICT_FAIL)
         # mem_content（= 最终输出 + task_summary，空则回退 act_recap）现在由
         # `apply_task_close` 自己算——两个调用方各算一份必然有一份算歪。
 
@@ -838,11 +843,11 @@ class FinalizeStep(Step):
 
         # 2) 按 outcome 收尾（只写「判决的产物」，不写状态、不发状态事件——Task 4：
         #    TaskFinished / TaskFailed / TaskRequeued 三条统一由 TaskManager 据 RunOutcome 发）
-        if outcome in ("success", "fail"):
+        if outcome in (VERDICT_SUCCESS, VERDICT_FAIL):
             task.finished_at = now_utc()
             task.process_report = summary
-        elif outcome == "retry":
-            # retry 反馈由 observe 前台段折写的 TASK_COMPACT_SUMMARY 承载（spec 2026-07-01 §3.1）；
+        elif outcome == VERDICT_CONTINUE:
+            # 未完的反馈由 observe 前台段折写的 TASK_COMPACT_SUMMARY 承载（spec 2026-07-01 §3.1）；
             # 不再写 process_report/process_report_at（旧 Progress So Far 字段路径已废）。
             # 机械退出（max_turns/context_limit）也归到这里：重排再跑，受 max_retries 兜底。
             # retry_count 的 +1 也搬走了：处置表算出新值，TaskManager 写回 task

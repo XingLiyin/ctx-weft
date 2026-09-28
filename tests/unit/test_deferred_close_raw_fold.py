@@ -16,7 +16,7 @@ import ctx_weft.core.loop.steps.background_observe as bo
 import ctx_weft.core.loop.steps.observe as _obs_mod
 from ctx_weft.core.loop.steps.finalize import finalize_task_memory
 from ctx_weft.core.capabilities.control_tools import (
-    BACKGROUND_PROCESS_REPORT_NAME,
+    COLLECT_PROCESS_REPORT_NAME,
     ControlResult,
 )
 from ctx_weft.core.models.task import NormalTaskSettings, Task
@@ -189,7 +189,7 @@ async def test_same_agent_child_defers_with_child_task_scope() -> None:
 def _tool_call_chunk():
     return SimpleNamespace(
         kind="tool_call",
-        tool_call=SimpleNamespace(id="tc_obs", name=BACKGROUND_PROCESS_REPORT_NAME,
+        tool_call=SimpleNamespace(id="tc_obs", name=COLLECT_PROCESS_REPORT_NAME,
                                   arguments={"task_status": "success", "act_recap": "真报告act"}),
         text="", usage=None,
     )

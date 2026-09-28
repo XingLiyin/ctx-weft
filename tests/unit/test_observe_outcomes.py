@@ -55,7 +55,7 @@ def test_assessment_retry_records_blocker() -> None:
     """retry 判决的 task_failure_reason（本轮受阻原因）落 task.error——耗尽降级时即真死因。"""
     t = _task(outputs="partial")
     report_task_outcome(
-        task_status="retry", act_recap="more needed",
+        task_status="continue", act_recap="more needed",
         task_failure_reason="登录页有人机校验，自动化被拦", ctx=_ctx(t),
     )
     assert t.error == "登录页有人机校验，自动化被拦"
@@ -74,9 +74,9 @@ def test_assessment_success_clears_stale_blocker() -> None:
 def test_assessment_retry() -> None:
     t = _task(outputs="partial")
     report_task_outcome(
-        task_status="retry", act_recap="more needed", next_step_hint="do X", ctx=_ctx(t)
+        task_status="continue", act_recap="more needed", next_step_hint="do X", ctx=_ctx(t)
     )
-    assert t.observer_outcome == "retry"
+    assert t.observer_outcome == "continue"
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
     # 生命周期分离：act_recap 是永久记录（→ 段摘要 / finish 对），恒为纯复述；
     # next_step_hint 是只对下一次 attempt 有效的一次性转向 → 单独字段 → guidance（不入 memory）。
@@ -90,7 +90,7 @@ def test_assessment_retry() -> None:
 def test_assessment_success_without_outputs_downgrades_to_retry() -> None:
     t = _task(outputs=None)
     report_task_outcome(task_status="success", act_recap="claims done", ctx=_ctx(t))
-    assert t.observer_outcome == "retry"  # 护栏：无终稿 → 重试
+    assert t.observer_outcome == "continue"  # 护栏：无终稿 → 重试
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
@@ -125,7 +125,7 @@ def test_no_hint_leaves_field_empty() -> None:
 def test_assessment_invalid_defaults_to_retry() -> None:
     t = _task(outputs="x")
     report_task_outcome(task_status="active", act_recap="r", ctx=_ctx(t))
-    assert t.observer_outcome == "retry"  # 'active' 不在工具允许集
+    assert t.observer_outcome == "continue"  # 'active' 不在工具允许集
 
 
 # ── ObserveStep 机械判决（原 _rule_observe，Task 4 起不产摘要）─────────────────
@@ -143,7 +143,7 @@ def test_mechanical_verdict_mechanical_exit_is_retry() -> None:
     for reason in ("max_turns", "context_limit"):
         t = _task()
         v = ObserveStep()._mechanical_verdict(_state(reason, t))
-        assert v.task_outcome == "retry", reason
+        assert v.task_outcome == "continue", reason
         assert v.act_recap == ""  # 不产合成摘要（用户裁定）
         assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
         # 机械判决只定结局、不写 task：原 _rule_observe 的 _apply_assessment 副作用已删。
@@ -208,7 +208,7 @@ def test_verdict_has_act_recap_and_task_summary_fields():
     assert v.task_summary == "whole journey"
     assert v.reported is False
     # task_summary 默认空
-    assert Verdict(task_outcome="retry", act_recap="r").task_summary == ""
+    assert Verdict(task_outcome="continue", act_recap="r").task_summary == ""
 
 
 def test_task_model_has_task_summary_field():
@@ -236,14 +236,25 @@ def test_report_task_outcome_writes_act_recap_and_task_summary() -> None:
 # ── persona prompt 守护 ───────────────────────────────────────────────────────
 
 
-def test_default_role_prompt_uses_two_fields():
-    import pathlib
-    root = pathlib.Path(__file__).resolve().parents[3]  # ctx-weft/tests/unit → repo root
-    for rel in ["resources/agents/default/ROLE.md",
-                "packaging/default_data/agents/default/ROLE.md"]:
-        text = (root / rel).read_text(encoding="utf-8")
-        assert "act_recap" in text and "task_summary" in text, f"missing new fields in {rel}"
-        assert "task_process_report" not in text, f"old field still present in {rel}"
+def test_the_observer_fallback_carries_the_judgement_criteria() -> None:
+    """模板没有任何 ROLE facet 时的兜底身份，必须仍带着那条最要紧的准则。
+
+    这条测试**取代**了原先那个 `test_default_role_prompt_uses_two_fields`：它从 core 去读
+    `Loome-02/resources/agents/default/ROLE.md`，而那份 ROLE 自两仓拆分起就住在 host 仓，
+    路径失效、长期红着。ROLE 的守护搬去 host（它是那些文件的主人），core 这边守自己的兜底。
+
+    为什么兜底不能只有一句自我介绍（2026-09-28 的新分工）：「怎么判」整段归 ROLE，cue 只说
+    「这一次做什么」、schema 只说「字段是什么」——那么没有 ROLE 的 agent 就等于什么判断准则都
+    没有。而「向用户要东西一律 continue」这条**没有任何机械护栏**兜着，只能靠文字。
+    """
+    from ctx_weft.core.assembler.composer import _OBSERVER_ROLE_FALLBACK as fb
+
+    assert "never re-execute" in fb and "never decide on the actor's behalf" in fb
+    assert "is not evidence" in fb, "证据准则丢了"
+    assert "`continue`: never `success`, never `fail`" in fb, "「在问人就不是完成」这条丢了"
+    # 字段语义不在这里（那在工具 schema 上），别把 ROLE 写成第二份契约。
+    for leaked in ("## Progress So Far", "whichever comes later", "First person"):
+        assert leaked not in fb, f"兜底身份复述了字段语义：{leaked!r}"
 
 
 
@@ -358,7 +369,7 @@ async def test_mechanical_verdict_preserves_today_outcomes(monkeypatch) -> None:
     """判决逐字不变：机械退出 → retry；正常/actor_done → success；空 transcript → fail。"""
     _capture_launches(monkeypatch)
     for exit_reason, expected in [
-        ("max_turns", "retry"), ("context_limit", "retry"),
+        ("max_turns", "continue"), ("context_limit", "continue"),
         ("normal", "success"), ("actor_done", "success"),
     ]:
         state, ctx = _mech_state_ctx(exit_reason=exit_reason)

@@ -30,10 +30,12 @@ class IdentitySource:
         template = request.template
         if template is None:
             return
-        # background_observe 复用 observe 的 ROLE facet；缺 observe 再回退 act。
+        # 两档后台 observe（判定 `background_observe` / 只摘要 `background_recap`）都复用
+        # observe 的 ROLE facet——观察者的判断准则与「这一次要不要判」无关；缺 observe 再回退 act。
         facet = (
             template.identity.get(request.purpose)
-            or (template.identity.get("observe") if request.purpose == "background_observe" else None)
+            or (template.identity.get("observe")
+                if request.purpose in ("background_observe", "background_recap") else None)
             or template.identity.get("act")
         )
         if facet is None:

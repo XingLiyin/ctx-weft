@@ -27,16 +27,15 @@ from tests.integration.test_minimal_loop import (
 pytestmark = pytest.mark.asyncio
 
 
-def _is_background_observe(request) -> bool:
-    """后台 observe（只摘要边界）的判据。
+def _is_background_recap(request) -> bool:
+    """只摘要那一档后台 observe 的判据：**工具名**。
 
-    2026-09-22 起后台与前台共用 `report_task_outcome`，**工具名不再能分流**；改看 cue——
-    只摘要的边界带 `_background_observe_cue` 的开头那句「Status of the current task:」，
-    前台的判定 cue 没有。判定边界（plain_text）用的正是前台那条 cue，但那时前台 observe
-    不跑（纯文本回合走后台），不存在歧义。
+    2026-09-22 到 2026-09-28 之间两档共用 `report_task_outcome`，工具名分流失效，这里曾改成嗅
+    cue 开头那句「Status of the current task:」。现在 `collect_process_report` 拆回真工具
+    （判定档桌上才有判决工具），判据回到工具名——比嗅文案稳得多。
     """
-    msgs = getattr(request, "messages", None) or []
-    return any("Status of the current task:" in str(getattr(m, "content", "")) for m in msgs)
+    names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
+    return "control__collect_process_report" in names
 
 class _RouterLLM(MockLLMAdapter):
     """按 request.tools 路由；act 次序：root delegate → child finish → root finish。"""
@@ -58,20 +57,20 @@ class _RouterLLM(MockLLMAdapter):
         if "control__update_task_metadata" in names:  # recognize_intent
             return self._stream(MockResponse(text=""), request)
 
-        if "control__report_task_outcome" in names and not _is_background_observe(request):  # LLM observe（子任务 close）
+        if _is_background_recap(request):  # 只摘要档（dispatch / close 边界）
+            self._bg_calls += 1
+            report = "DISPATCH段摘要" if self._bg_calls == 1 else "CLOSE复述"
+            return self._stream(MockResponse(tool_calls=[
+                ToolCall(id=self._id("bg"), name="control__collect_process_report",
+                         arguments={"act_recap": report, "task_summary": report}),
+            ]), request)
+
+        if "control__report_task_outcome" in names:  # 判定档（这里只有子任务的前台 LLM observe）
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id=self._id("obs"), name="control__report_task_outcome",
                          arguments={"task_status": "success",
                                     "act_recap": "done",
                                     "task_summary": "done"}),
-            ]), request)
-
-        if "control__report_task_outcome" in names and _is_background_observe(request):  # background observe
-            self._bg_calls += 1
-            report = "DISPATCH段摘要" if self._bg_calls == 1 else "CLOSE复述"
-            return self._stream(MockResponse(tool_calls=[
-                ToolCall(id=self._id("bg"), name="control__report_task_outcome",
-                         arguments={"task_status": "success", "act_recap": report}),
             ]), request)
 
         # act
