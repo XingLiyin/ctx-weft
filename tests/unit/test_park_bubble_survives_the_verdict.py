@@ -1,24 +1,17 @@
-"""**root** 的 park 气泡：判决不收，用户开口才收（2026-09-24 订正，2026-09-27 收窄）。
+"""用户开口时，`send_message` 的两条投递分支都收口该 agent 名下的旧 park 气泡。
 
-纯文本回合让位是第一性的——agent 说完一段话就停下，让人能开口。后台 observe 是借
-commit 机制起的旁路监控，它的结论落在 task 层（终结、放行 DAG 后继），不该改变「有人
-可以开口」这个事实。
+**这个文件测的是投递侧，不是判决侧**（2026-09-27 订正）。判决侧的规则已经换了：判 success
+就收气泡（`background_observe._close_park_bubble`，不分 root 与子任务）——task 判完成了，那个
+让位入口就用掉了，人后面还想说话由 `send_message` 开新的一轮。文件名沿用旧称（它曾经钉的是
+`faedd25` 那条「判决不收」），内容如下。
 
-曾经有过一版让判决在判 success 时顺手收掉气泡，理由是「task 都终结了，气泡留着没用」。
-那是错的，而且错得不显眼：宿主按未决 HITL 折会话状态，且**气泡优先于 task 终态**。
-气泡一收，`TaskFinished` 写下的 SUCCEEDED 当场浮出来——用户刚读完回复正要打字，会话
-在他眼皮底下从「等你说话」跳成「已完成」。更糟的是投递路径也跟着状态分叉：跳变之前
-发的消息续跑老 task，之后发的新建 task，同一个动作因为打字快慢走两条路。
+投递侧的收口仍然必需，`retry` / `fail` 那两种判决就是它的用武之地：那时 task 维持 PAUSED、
+气泡留着当入口，用户回话时得有人把它终局掉。注入分支（`_inject_user_turn`）一直在做；新建
+分支（`_start_task_for_agent`）是 `faedd25` 补的。
 
-正确的时机是**这个入口被用掉的那一刻**，也就是用户真的开口：`send_message` 的两条
-投递分支。注入分支（`_inject_user_turn`）一直在做；新建分支（`_start_task_for_agent`）
-从前漏了——以前漏得起，因为终态 task 的气泡总是在终结时就被一并收掉了；纯文本 park
-之后不再如此，所以补上。
-
-**2026-09-27 收窄**：上面这条只对 `parent_task_id is None` 的 task 成立（会话 root，以及
-每条用户消息新开的 task）——只有它们的 `TaskFinished` 会写 `SessionStatusFold._terminal`，
-也只有它们「没有别的线接管」。子任务的气泡由判决当场收掉（线交回 parent，再没有人会来答
-它），那一半钉在 `test_background_verdict_submission.py`。本文件测的全是 root。
+本文件把现场手工摆成「气泡挂在一个已终态 task 上」（直接写 `status = "FINISHED"`，不经判决
+路径），验的就是这种残留照样能被下一条消息收掉——判决侧现在会自己收，但崩在中途、老数据、
+或将来又多一条终结路径时，这道防线还得在。
 """
 
 from __future__ import annotations

@@ -9,9 +9,8 @@
 - **verdict 缺失 ≡ retry**。拿不到判决就什么都不提交，task 维持 park。默认态是 park，
   只有 success 触发状态转移——绝不因为观察失败而静默放行后继。
 - **免折不免判**。短段仍跑判定（短回合恰恰是提问最典型的形态），只是不折。
-- **park 气泡只收交出去了的那条线**。判 success 终结 task 时：子任务的气泡跟着收（线交回
-  parent，没人会来答它），`parent_task_id is None` 的留着（没有别的线接管，用户下一句还是
-  给它）——见下方那一节。
+- **判 success 就收 park 气泡**，不分 root 与子任务：让位入口已经用掉了，人后面还想说话由
+  `send_message` 开新的一轮——见下方那一节。
 """
 
 from __future__ import annotations
@@ -134,21 +133,20 @@ async def test_rejected_verdict_is_not_an_error() -> None:
     assert len(tm.calls) == 1
 
 
-# ── park 气泡：只收交出去了的那条线（2026-09-27）────────────────────────────
+# ── park 气泡：判 success 就收，不分 root 与子任务（2026-09-27）──────────────
 #
-# 判 success 终结 task 之后那个「等你说话」的气泡该不该收，取决于**这条线交回给谁了**：
+# task 被判完成了，那个让位入口就用掉了。人后面还想说话就再发一条消息——`send_message`
+# 看到 `current_task_id` 已终态，自己会开新的一轮（`_start_task_for_agent`），不需要留着
+# 这个气泡当入口。
 #
-# - **子任务**（`parent_task_id` 非空，含跨 agent）→ 线交回 parent，`_try_resume_parent`
-#   随即接管，再没有人会来答这个气泡 → 收。不收的后果实测过：宿主折会话状态时气泡优先于
-#   task 终态（`SessionStatusFold.status` 里 `pending_hitl` 排在 `terminal` 之前），于是
-#   父任务收尾之后**会话永久停在 PAUSED**，SSE 的终态收口不触发，每个这样的子任务留一个。
-# - **`parent_task_id is None`**（会话 root / 每条用户消息新开的 task）→ 没有别的线接管，
-#   用户下一句还是给它 → 留。收掉它的后果同样实测过（`2ee524b` → `faedd25`）：root 的
-#   `TaskFinished` 会写 `_terminal`，气泡一收 SUCCEEDED 当场浮出来，会话在用户正要打字的
-#   那一刻跳成「已完成」。它由用户真的开口时收口（Runtime 的两条投递分支）。
+# 留着的代价两头都疼：宿主折会话状态时气泡**优先于** task 终态（`SessionStatusFold.status`
+# 里 `pending_hitl` 排在 `terminal` 之前），于是会话永久停在 PAUSED，SSE 的终态收口不触发、
+# `session_is_quiescent` 一律拒绝逐出；子任务更糟——线已经交回 parent，再没有人会来答它，
+# 每个这样的子任务留一个、会累积。
 #
-# 判据是 `parent_task_id`，**不是 `_is_own_root`**——后者对跨 agent 子任务返回 True，会把
-# 整类漏掉。那一格下面单独钉了一条。
+# `faedd25` 曾为 root 保下这个气泡。两条理由只有一条成立（「会话会显示已完成」——而判决说它
+# 完成了，显示已完成是实话），另一条「投递路径跟着状态分叉」本就与气泡无关：`send_message`
+# 的路由只看 `current_task_id` 是否终态，从不看气泡。
 #
 # 这一节直接测 `_close_park_bubble`：它是气泡规则的所在，而它的兄弟（带外 finalize 的
 # memory 那一半）要一整套 memory/llm 替身，混在一个用例里只会让规则本身读不清。两者怎么
@@ -197,32 +195,41 @@ def _state_with_session(*, parent: str | None = None, creator="ag_1", assigned="
     )
 
 
-# ── 子任务：收 ────────────────────────────────────────────────────────────────
+# ── 收，不看 parent ───────────────────────────────────────────────────────────
 
 async def test_a_subtask_bubble_is_closed() -> None:
-    """**要害**：线交回 parent 了，这个气泡再没有人会来答——留着会把会话钉死在 PAUSED。"""
+    """线交回 parent 了，这个气泡再没有人会来答——留着会把会话钉死在 PAUSED。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
     await _close_park_bubble(_state_with_session(parent="t0"), _ctx_with_hitl(hitl))
     assert hitl.cancelled == ["hit_1"]
 
 
-async def test_a_cross_agent_subtask_bubble_is_closed_too() -> None:
-    """**判据不能写 `_is_own_root`**：它对跨 agent 子任务（parent 非空、creator≠assigned）
-    返回 True，照它过滤会把整类漏掉——而这类任务的线同样是交回 parent 的。"""
+async def test_a_root_bubble_is_closed_too() -> None:
+    """**要害**：root 也收。人后面还想说话就再发一条消息，`send_message` 看到
+    `current_task_id` 已终态自己会开新的一轮——不需要留着这个气泡当入口。
+
+    留着它的后果是会话永久停在 PAUSED（气泡在折叠里优先于 task 终态），连
+    `forget_session` 都一律被拒。
+    """
     hitl = _Hitl([_Bubble("hit_1", "t1")])
-    await _close_park_bubble(
-        _state_with_session(parent="t0", creator="ag_1", assigned="ag_2"), _ctx_with_hitl(hitl))
+    await _close_park_bubble(_state_with_session(parent=None), _ctx_with_hitl(hitl))
     assert hitl.cancelled == ["hit_1"]
 
 
-# ── root：留 ──────────────────────────────────────────────────────────────────
+async def test_the_parent_task_id_is_not_part_of_the_predicate() -> None:
+    """判据里没有 `parent_task_id`，也没有 `_is_own_root`——三种形态一视同仁。
 
-async def test_a_root_bubble_is_left_alone() -> None:
-    """`faedd25` 保下来的那条：root 的 `TaskFinished` 会写 `_terminal`，气泡一收
-    SUCCEEDED 当场浮出来，会话在用户正要打字的那一刻跳成「已完成」。"""
-    hitl = _Hitl([_Bubble("hit_1", "t1")])
-    await _close_park_bubble(_state_with_session(parent=None), _ctx_with_hitl(hitl))
-    assert hitl.cancelled == []
+    曾经按「这条线交回给谁了」分过 root 与子任务（2026-09-27 上午），当天下午取消：判完成
+    就是判完成，下一句话本来就该开新一轮。
+    """
+    for parent, creator, assigned in (("t0", "ag_1", "ag_1"),      # 同 agent 子任务
+                                      ("t0", "ag_1", "ag_2"),      # 跨 agent 子任务
+                                      (None, "ag_1", "ag_1")):     # root
+        hitl = _Hitl([_Bubble("hit_1", "t1")])
+        await _close_park_bubble(
+            _state_with_session(parent=parent, creator=creator, assigned=assigned),
+            _ctx_with_hitl(hitl))
+        assert hitl.cancelled == ["hit_1"], f"parent={parent} assigned={assigned} 漏收了"
 
 
 # ── 过滤 ──────────────────────────────────────────────────────────────────────

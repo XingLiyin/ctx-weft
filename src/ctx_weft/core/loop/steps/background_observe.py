@@ -72,11 +72,11 @@ _close_synth: dict[str, tuple] = {}
 
 _CLOSE_BOUNDARIES = {"finish", "normal"}
 
-#: 收口子任务 park 气泡时写进 `HitlResolved` 的理由（供重放溯源；没有人看得见它——那个
-#: 气泡从头到尾没被渲染过，前端两个入口都滤掉 `form=wait`）。
+#: 收口 park 气泡时写进 `HitlResolved` 的理由（供重放溯源；没有人看得见它——那个气泡从头到
+#: 尾没被渲染过，前端两个入口都滤掉 `form=wait`）。
 _PARK_CLOSED_BY_VERDICT = (
-    "[Closed by the reviewer: this sub-task was judged complete and its line was handed "
-    "back to the parent task, so nobody is going to reply here.]"
+    "[Closed by the reviewer: this task was judged complete. Send another message to open "
+    "a new round.]"
 )
 
 # 段边界折叠会 supersede 的 raw 类型（= apply_compact 的非保护类型；与 finalize._FINAL_RAW_TYPES
@@ -217,36 +217,36 @@ async def _out_of_band_finalize(
 async def _close_park_bubble(state: "LoopState", ctx: "LoopContext") -> None:
     """判 success 终结了这个 task 之后，收口它 park 时开的那个「等你说话」气泡。
 
-    **只收交出去了的那条线**（判据 `parent_task_id is not None`，2026-09-27）。语义是
-    「这条线判 success 之后交回给谁了」：
+    **不分 root 与子任务**（2026-09-27 定）：task 被判完成了，那个让位入口就用掉了。人后面
+    还想说话就再发一条消息——`send_message` 看到 `current_task_id` 已终态，自己会开新的一轮
+    （`_start_task_for_agent`），根本不需要留着这个气泡当入口。
 
-    - **子任务**（含跨 agent）→ 线交回 parent，`_try_resume_parent` 随即接管，再没有人
-      会来答这个气泡 → 收。不收的后果实测过：气泡永远未决，而宿主折会话状态时气泡优先
-      于 task 终态（`SessionStatusFold.status` 的 `pending_hitl` 排在 `terminal` 之前），
-      于是父任务收尾之后**会话永久停在 PAUSED**——SSE 的终态收口不触发，投影里
-      `sessions.status` 一直 PAUSED，重启还被 `list_active_session_ids` 当活会话捞回来。
-      每个 park 后被判 success 的子任务留一个，会累积。
-    - **`parent_task_id is None`**（会话 root，以及每条用户消息新开的 task）→ 没有别的线
-      接管，用户下一句还是给它 → **留**。这条是 `faedd25` 保下来的：root 的
-      `TaskFinished` 会写 `SessionStatusFold._terminal`，气泡一收 SUCCEEDED 当场浮出来，
-      会话在用户正要打字的那一刻跳成「已完成」。它由用户真的开口时收口
-      （`Runtime._start_task_for_agent` / `_inject_user_turn` 两条投递分支）。
+    留着它的代价是实打实的，两头都疼：
 
-    ⚠️ **判据不能写 `_is_own_root`**——它对跨 agent 子任务（parent 非空、
-    creator≠assigned）返回 True，而那种任务的线同样是交回 parent 的，会被整类漏掉。
-    这个仓里 root 判定习惯性就写 `_is_own_root`，这里正是那个习惯会出错的地方。
+    - 宿主折会话状态时气泡**优先于** task 终态（`SessionStatusFold.status` 里 `pending_hitl`
+      排在 `terminal` 之前），于是会话永久停在 PAUSED——SSE 的终态收口不触发，投影里
+      `sessions.status` 一直 PAUSED，重启还被 `list_active_session_ids` 当活会话捞回来，
+      `session_is_quiescent` 也一律拒绝逐出（宿主的空闲逐出器形同虚设）。
+    - 子任务更糟：线已经交回 parent（`_try_resume_parent` 随即接管），再没有人会来答它，
+      每个这样的子任务留一个、会累积。
+
+    `faedd25` 曾为 root 保下这个气泡，两条理由只有一条成立，而那条也只是「会话会显示
+    已完成」——判决说它完成了，显示已完成是实话。另一条「投递路径跟着状态分叉」本就与气泡
+    无关：`send_message` 的路由只看 `current_task_id` 是否终态（`_task_is_terminal`），从不
+    看气泡；那个分叉来自「判决抵达 vs 人先开口」的仲裁，收不收气泡都在。
 
     按 **task + user_turn 投递** 双重过滤：task 收窄是因为同一 agent 上可能还挂着别的
     请求（某个兄弟任务的 `ask_user`），投递收窄是因为「等人开口」和「等人拍板」是两回事
     ——后者即便挂在这个 task 上也该由它自己的路径处置，本函数只认前者。
+
+    只在 `success` 时被调到（带外入口只在真发生转移时调 `finalize`）。`retry`/`fail` 维持
+    park，那个气泡正是它等人的入口。
 
     best-effort：收不掉只记日志。判决已经落定，不能让收尾把它变成异常。
     """
     from ctx_weft.protocols.hitl import UserTurnDelivery
 
     task = state.task
-    if getattr(task, "parent_task_id", None) is None:
-        return
     hitl = getattr(ctx, "hitl", None)
     if hitl is None or getattr(hitl, "registry", None) is None:
         return
@@ -256,12 +256,12 @@ async def _close_park_bubble(state: "LoopState", ctx: "LoopContext") -> None:
                 continue
             await hitl.cancel(req.id, message=_PARK_CLOSED_BY_VERDICT)
             logger.info(
-                "closed the park bubble %s of sub-task %s (judged complete; the line goes "
-                "back to parent %s)", req.id, task.id, task.parent_task_id)
+                "closed the park bubble %s of task %s (judged complete; the next message "
+                "opens a new round)", req.id, task.id)
     except Exception:
         logger.exception(
-            "failed to close the park bubble of sub-task %s; it will stay pending and hold "
-            "the session at PAUSED", task.id)
+            "failed to close the park bubble of task %s; it will stay pending and hold the "
+            "session at PAUSED", task.id)
 
 
 async def is_short_segment(

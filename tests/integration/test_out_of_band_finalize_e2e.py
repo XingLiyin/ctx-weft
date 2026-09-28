@@ -149,20 +149,21 @@ async def test_the_parent_scope_gets_the_dispatch_result() -> None:
 
 
 async def test_the_park_bubble_is_closed() -> None:
-    """线交回 parent 了 → 那个气泡再没有人会来答；留着会把会话钉死在 PAUSED。"""
+    """让位入口用掉了 → 收。留着会把会话钉死在 PAUSED（气泡在折叠里优先于 task 终态）。"""
     state, ctx, _mem, hitl, _rec, bid = await _fixture()
     await _out_of_band_finalize(state, ctx, _meta())
     assert [r.id for r in hitl.list_pending(_SID) if not r.resolved] == []
     assert bid is not None
 
 
-async def test_a_root_task_keeps_its_bubble_but_still_gets_finalized() -> None:
-    """root（`parent_task_id is None`）：收尾照做，气泡留着等用户开口。
+async def test_a_root_task_is_closed_and_finalized_the_same_way() -> None:
+    """root（`parent_task_id is None`）走的是同一条路：收尾做完，气泡也收。
 
-    两件事互不牵连——`faedd25` 保的是气泡，S-a 补的是收尾，别把它们绑在一个判据上。
+    人后面还想说话就再发一条消息——`send_message` 看到 `current_task_id` 已终态自己会开新
+    的一轮，不需要留着这个气泡当入口。
     """
-    state, ctx, _mem, hitl, rec, bid = await _fixture(parent=None)
+    state, ctx, _mem, hitl, rec, _bid = await _fixture(parent=None)
     await _out_of_band_finalize(state, ctx, _meta())
 
     assert EventType.TASK_FINALIZED in rec.types()
-    assert [r.id for r in hitl.list_pending(_SID) if not r.resolved] == [bid]
+    assert [r.id for r in hitl.list_pending(_SID) if not r.resolved] == []
