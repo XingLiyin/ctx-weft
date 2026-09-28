@@ -117,7 +117,7 @@ finalize 抛异常 → 记日志、**继续**发 `TaskFinished` + `_settle`。�
 单交互线永久占着。降级 = 该 task 缺 bubble / blackboard，状态机不卡。与 `on_task_terminal`
 钩子的 best-effort 口径一致。
 
-### S-a.7 悬空 park 气泡（已查证，独立的一步，建议先修）
+### S-a.7 悬空 park 气泡（✅ 已落地 `8bc9b65`）
 
 与 S-a 无因果关系，但同属「park→success 留了尾巴」这一类。2026-09-27 逐环验完。
 
@@ -190,6 +190,9 @@ PAUSED，挪到前面顺手消掉。
 
 ## S-0 · 显式寻址：park 信号的 agent_id 不许在 host 侧丢掉
 
+> ✅ 已落地：core 侧 `8bc9b65`（S-a.7）、host 侧 `NetliveCoworkPy@34e0887` +
+> vendor 同步 `60462dd`。**实际做了四处**，第四处见本节末尾。
+
 2026-09-27 定。**core 侧已经满足**：`HitlService.open` 把 `agent_id` 登记进 `PendingHitl`，
 `HITL_OPENED` 出核时信封（`_emit(agent_id=req.agent_id)`）与 payload 各带一份，
 `HitlRequestView.agent_id` 也在。断链全在 host——它在三个出口把这个已声明的事实丢掉，
@@ -217,6 +220,14 @@ PAUSED，挪到前面顺手消掉。
    `runtime.send_message(agent_id=...)`。给了就用；没给（老客户端）才回落现有扫描。
 
 `send_message` 那一侧不动——它本来就是 agent 寻址的，`agent_id` 全局唯一、路由只看它。
+
+**第四处（实施中发现，必须一起改）**：`sessions.send_message` 末尾那句
+`entry.root_agent_id = handle.agent_id`。这一轮可能跑在某个 park 中的子 agent 上（自
+`0d35668` 起就可能），而 `root_agent_id` 的 setter 会把值喂给 `SessionStatusFold`，终态那
+一档只认 root 的 task——写进一个子 agent 就等于让它的子任务终结冒充整轮结束，会话会在子任务
+刚跑完的那一刻显示「已完成」。那句的本意（冷 entry 解析出 root 后回填）`_root_agent_id`
+自己就做了，所以它在 root 的情形下多余、在子 agent 的情形下有害。改成只在「还不知道 root
+是谁」时补一次。显式寻址会放大这个 bug（更多轮次落在子 agent 上），所以同一步修掉。
 
 ---
 
