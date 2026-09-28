@@ -237,6 +237,11 @@ _BACKGROUND_BOUNDARY_DESC = {
     "interrupt": "this segment was interrupted by the user part-way through",
     "plain_text": "you replied in prose and yielded the floor, pausing for the user's input",
     "finish": "the task was closed out with finish_task",
+    # S-b（2026-09-27）：root 的 finish_task 改成 park + 后台判定，于是它有了自己的边界。
+    # **不进 `_CLOSE_BOUNDARIES`**——那一档走「占位 close 对 + 真摘要替换」的延迟路径，而这条
+    # 路上 finalize 压根没跑过（park 抛 HitlPark 就地结束了 run），没有占位可替换。
+    "finish_park": ("you called finish_task to declare this task done, and the floor is now with "
+                    "the user, who is waiting"),
     "normal": "the task ended normally with its final output",
     "dispatch": "you delegated a sub-task, and this task is suspended until it completes "
                 "(the dispatch pair above names it)",
@@ -251,6 +256,15 @@ _BACKGROUND_BOUNDARY_DESC = {
 # close 段（finish/normal）：actor 纯文本或 finish_task 收尾，收尾回合正文落 task.outputs。
 # 与 loop.steps.background_observe._CLOSE_BOUNDARIES 保持一致（此处避免跨层 import）。
 _CLOSE_BOUNDARIES = {"finish", "normal"}
+
+#: 要产 verdict 的后台边界——即「让位给人」的那两个。与
+#: `loop.steps.background_observe._judges` 保持一致（此处避免跨层 import）。
+_JUDGING_BOUNDARIES = {"plain_text", "finish_park"}
+
+#: 要把 `task.outputs` 注入观察 prompt 的边界：凡是以 `finish_task` 收尾的。它是 SILENT
+#: 工具，产出不写任务层对话——不喂进来观察者会虚构完成叙述。`plain_text` 不在此列（那段
+#: 文本本身就在重建的对话里）。
+_OUTPUTS_BEARING_BOUNDARIES = _CLOSE_BOUNDARIES | {"finish_park"}
 
 
 def _background_observe_cue(boundary: str) -> str:
@@ -1093,18 +1107,25 @@ class DefaultComposer(Composer):
             pre_cue_sections = self._observe_outputs_section(request)
         else:
             boundary = (getattr(request, "extra", {}) or {}).get("observe_boundary", "normal")
-            # `plain_text` 边界要产 verdict（S5）：人在旁边等着，而「这段话是想问人还是
-            # 交付完了」只有判定能区分。其余边界照旧只摘要——判定已由别处给出
-            # （`mechanical` 是机械判决，close 边界是 actor 自己宣布的），后台再判一次
-            # 会把那份判决覆盖掉。
-            judging = boundary == "plain_text"
+            # 让位的两个边界要产 verdict：`plain_text`（S5——人在旁边等着，而「这段话是想
+            # 问人还是交付完了」只有判定能区分）与 `finish_park`（S-b——root 的 finish_task
+            # 从此也让位，而它此前在 root 上是**零复核**的：`_should_use_llm` 对
+            # `parent_task_id is None` 降级，`_mechanical_verdict` 把 actor_done 无条件映射
+            # 成 success，而那道 success-without-outputs 护栏长在 `report_task_outcome` 里、
+            # 不在机械判决的路上）。其余边界照旧只摘要——判定已由别处给出，后台再判一次会把
+            # 那份判决覆盖掉。
+            judging = boundary in _JUDGING_BOUNDARIES
             cue = _OBSERVE_JUDGMENT_CUE if judging else _background_observe_cue(boundary)
             # 判 retry 时要在 `next_step_hint` 里指名哪个子任务产出不合格，所以判定版
             # 才需要这份清单。
             subtasks = ((getattr(request, "extra", {}) or {}).get("subtasks") or []
                         if judging else [])
+            # outputs 注入按边界分，不按前台/后台分（S2 合并装配路径时记成了后者）：
+            # `finish_task` 是 SILENT 工具，产出**不写任务层对话**，不显式喂进来观察者会
+            # 虚构一段完成叙述（见 `_finish_result_section`）。`plain_text` 相反——那段文本
+            # 本身就是 assistant 回合、在重建的对话里看得见，注入等于让它出现两遍。
             pre_cue_sections = None
-            if boundary in _CLOSE_BOUNDARIES:
+            if boundary in _OUTPUTS_BEARING_BOUNDARIES:
                 section = _finish_result_section(request)
                 if section:
                     pre_cue_sections = [section]

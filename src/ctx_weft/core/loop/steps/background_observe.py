@@ -88,15 +88,28 @@ _SEGMENT_RAW_TYPES = [
 ]
 
 
-def _judges(boundary: str) -> bool:
-    """这个边界的后台 observe 要不要产 verdict（2026-09-22）。
+#: 要产 verdict 的边界 = 「让位给人」的那两个。与 `assembler.composer._JUDGING_BOUNDARIES`
+#: 保持一致（避免跨层 import；改一处必须改另一处）。
+_JUDGING_BOUNDARIES = {"plain_text", "finish_park"}
 
-    **只有 `plain_text`**：人在旁边等着，而「这段话是想问人还是交付完了」只有判定能
-    区分。其余边界的判定已由别处给出——`mechanical` 是机械判决刚判过、close 边界是
-    actor 自己调 finish_task 宣布的、`interrupt` / `dispatch` 压根不是一个结局——后台
-    再判一次只会把那份判决覆盖掉。
+
+def _judges(boundary: str) -> bool:
+    """这个边界的后台 observe 要不要产 verdict（2026-09-22，2026-09-27 加 `finish_park`）。
+
+    **让位给人的那两个**：人在旁边等着，而「这段话/这次收尾到底成没成」得有人判。
+
+    - `plain_text`（S5）：「这段话是想问人还是交付完了」只有判定能区分。
+    - `finish_park`（S-b）：root 的 `finish_task` 从此也让位。它此前在 root 上是**零复核**
+      的——`_should_use_llm` 对 `parent_task_id is None` 降级走机械判决，而
+      `_mechanical_verdict` 把 `actor_done` 无条件映射成 success，那道 success-without-outputs
+      护栏又长在 `report_task_outcome` 里、不在机械判决的路上。于是「纯文本被判、明确宣布
+      完成反而不被判」这个不对称，等于给 LLM 留了一个能绕开复核的开关。
+
+    其余边界的判定已由别处给出——`mechanical` 是机械判决刚判过、close 边界（`finish` /
+    `normal`，即**不让位**的那条 finish_task：unattended 或子任务）是前台 observe 判的、
+    `interrupt` / `dispatch` 压根不是一个结局——后台再判一次只会把那份判决覆盖掉。
     """
-    return boundary == "plain_text"
+    return boundary in _JUDGING_BOUNDARIES
 
 
 def _subtask_handles(state: "LoopState", ctx: "LoopContext") -> list[dict]:
@@ -122,8 +135,12 @@ def _subtask_handles(state: "LoopState", ctx: "LoopContext") -> list[dict]:
     return out
 
 
-async def _submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> None:
+async def _submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> bool:
     """把 observer 的判决交给 TaskManager 的带外入口。
+
+    返回 **这次判决是否把 task close 掉了**（= 判 success 且仲裁接受）。调用方据它决定
+    这一段归谁记账：close 掉了就由带外 finalize 的 finish 对承载，**不能再产段摘要**
+    （`finalize._supersede_final_raw_segment` 的不变量：同一段不记两遍）。
 
     **verdict 缺失 ≡ retry**：拿不到判决（LLM 失败、没调 terminal tool、字段为空）就
     什么都不提交，task 维持 park 等人。默认态是 park，只有 success 触发状态转移——
@@ -136,13 +153,13 @@ async def _submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) ->
     if not verdict:
         logger.info(
             "background observe produced no verdict (task=%s); staying parked", state.task.id)
-        return
+        return False
     tm = getattr(ctx, "task_manager", None)
     if tm is None or not hasattr(tm, "apply_out_of_band_verdict"):
         logger.warning(
             "background observe: no TaskManager to submit the verdict to (task=%s)",
             state.task.id)
-        return
+        return False
     outcome = RunOutcome(
         kind=RunOutcomeKind.COMPLETED,
         verdict=verdict,
@@ -162,6 +179,7 @@ async def _submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) ->
     logger.info(
         "background observe verdict '%s' for task %s: %s",
         verdict, state.task.id, "accepted" if accepted else "rejected (the user spoke first)")
+    return bool(accepted) and verdict == "success"
 
 
 async def _out_of_band_finalize(
@@ -547,6 +565,17 @@ async def _run_background_observe(
                         "segment kept raw", state.task.id, boundary,
                     )
                     return
+                # **判决先落地，折叠再决定**（2026-09-27）：判 success 会经带外 finalize 走
+                # close（写 finish 对 + 折末段 raw），而那条路**刻意不产段摘要**——
+                # `finalize._supersede_final_raw_segment` 的不变量是「末段 raw 与真实 Process
+                # Report 至少存其一」，段摘要与 finish 对同时存在就是把同一段记了两遍。所以
+                # 「这一段归谁记账」只有拿到判决才知道，不能先折了再判。
+                #
+                # 判 retry/fail、判决缺失、仲裁被拒（人先开口）→ 没有 close，段摘要照产；
+                # 人先开口那一支还多一层保障：段界水位线让折叠只认这次 launch 之前的记录，
+                # 新那条 user 回合不会被卷进来。
+                closed = await _submit_verdict(state, ctx, meta) if _judges(boundary) else False
+
                 if boundary in _CLOSE_BOUNDARIES:
                     synth = pop_close_synth(state.task.id)  # sync check-and-clear（无 await）
                     if synth is not None:
@@ -574,7 +603,7 @@ async def _run_background_observe(
                         # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
                         # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。
                         _close_report[state.task.id] = (act_recap, task_summary)  # 不写 memory（不变量 3）
-                elif not short_segment:
+                elif not short_segment and not closed:
                     # v2 P3c：策展上移——段作用域折叠（护 user 回合与既有段摘要、锚点/
                     # 段尾语义，与 observe._fold_retry_segment 同门）由框架侧 segment_fold
                     # 执行原子 fold。旧 apply_compact 的 TypeError 协议错配特判随之消亡
@@ -588,9 +617,6 @@ async def _run_background_observe(
                         ctx.memory, state.scope, MemoryScope.TASK, act_recap,
                         ctx.provider_ctx, watermark,
                     )
-
-                if _judges(boundary):
-                    await _submit_verdict(state, ctx, meta)
             except Exception:
                 # close 边界防泄漏：finalize 可能已 register_close_synth，本次失败后永远无人
                 # 消费（task_id 唯一 + close 单入口），弹掉——与「无可用报告」分支对称。

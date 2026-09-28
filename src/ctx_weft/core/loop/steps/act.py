@@ -216,6 +216,44 @@ class ActStep(Step):
         if exit_reason in ("normal", "actor_done"):
             _synthesize_final_outputs(state, transcript)
 
+        # ── finish_task 收尾也让位（S-b，2026-09-27）────────────────────────────
+        # `actor_done` 走到这里只有一个来源：`finish_task`（delegate 那条置了
+        # `suspend_requested`，上面已经路由去 suspend 了）。它此前在 root 上是**零复核**的
+        # ——`observe._should_use_llm` 对 `parent_task_id is None` 降级走机械判决，而
+        # `_mechanical_verdict` 把 `actor_done` 无条件映射成 success，那道
+        # success-without-outputs 护栏又长在 `report_task_outcome` 里、不在机械判决的路上。
+        # 于是「说了段话要被判、明确宣布做完了反而不被判」，等于给 LLM 留了一个绕开复核的
+        # 开关。改成与纯文本同一条归宿：park + 后台判定。
+        #
+        # **先只对 root 生效**（`parent_task_id is None`），与 S5 同一个收窄办法：子任务的
+        # `finish_task` 今天走前台 LLM observe，那条路有真复核、`FinalizeStep` 也照常跑，
+        # 先别动。代价是同一个子任务两种收尾走两条路，观察一段之后再决定要不要推广。
+        #
+        # 三条判据与 `_finish_plain_text_turn` 逐字相同（`NormalTaskSettings` / 非 unattended
+        # / hitl 在），只多一条 root。park 会抛 `HitlPark`，下面那个 StepOutcome 到不了；
+        # 不让位则零副作用返回，照旧走 observe。
+        #
+        # 位置在 `_synthesize_final_outputs` **之后**：park 的 task 恒 `outputs=None` 会让
+        # 护栏把 success 改判 retry（2026-09-24 那个坑，见该函数 docstring）。`_commit_round`
+        # 也已经在本轮第一个 chunk 就跑过了，与纯文本 park 同样是「已提交之后才 park」。
+        if (
+            next_step == "observe"
+            and exit_reason == "actor_done"
+            and state.task.parent_task_id is None
+            and isinstance(state.task.settings, NormalTaskSettings)
+            and not state.task.unattended
+            and ctx.hitl is not None
+        ):
+            # 这一回合会发出**第二条** `ACT_TURN_COMPLETED`（先 `tool_calls_processed`、
+            # 再 `await_user`）。刻意的：两者不矛盾——工具确实处理完了，然后这一回合以让位
+            # 收尾。别为了「一回合一条」把哪一条删掉，那条纪律来自纯文本路径（那里
+            # `await_user` 与 `stop` 是互斥的两个结局），不适用于这里。
+            # 轮号取 `state.extra` 而不是循环变量：这里在 for 之外，靠 `turn_num` 泄漏出来
+            # 虽然眼下不会 unbound（循环一次都没跑意味着 `exit_reason == "max_turns"`，走不到
+            # 这条分支），但那是两处代码的巧合，不是这一行自己成立。
+            await _park_await_user(
+                state, ctx, state.extra.get(ACT_TURNS_USED_KEY, 0), boundary="finish_park")
+
         return StepOutcome(
             next_step=next_step,
             state_patch={
@@ -1055,8 +1093,21 @@ async def _park_for_interrupt(
     await _cold_park(state, ctx, preface, unattended=False)
 
 
-async def _park_await_user(state: LoopState, ctx: LoopContext, turn_num: int) -> None:
-    """agent 说完一段纯文本、想让位给用户 → 发 await_user + 折叠 + 冷 park。
+async def _park_await_user(
+    state: LoopState, ctx: LoopContext, turn_num: int, *, boundary: str = "plain_text",
+) -> None:
+    """agent 想让位给用户 → 发 await_user + 起后台判定 + 冷 park。
+
+    ``boundary`` 区分让位的**方式**，它一路传到装配层决定两件事（见
+    `composer._JUDGING_BOUNDARIES` / `_OUTPUTS_BEARING_BOUNDARIES`）：
+
+    - ``plain_text``：说了段话就停下。那段文本本身在重建的对话里看得见，不注入 outputs。
+    - ``finish_park``：调了 `finish_task` 宣布完成（S-b，2026-09-27）。`finish_task` 是
+      SILENT 工具、产出不写任务层对话，**必须**把 `task.outputs` 注入，否则观察者会虚构
+      一段完成叙述。
+
+    两者都产 verdict，都 park，归宿完全一样——这正是 S-b 要的：root 上「说了段话」与
+    「宣布做完了」不该一个被复核、一个不被。
 
     与 `_park_for_interrupt` 相反，这条**没有人保证会回来**：让位是 agent 自己提的，
     无人值守的 task 里根本没人会发下一条消息，park 即永久挂起。所以守卫在这里生效。
@@ -1091,7 +1142,7 @@ async def _park_await_user(state: LoopState, ctx: LoopContext, turn_num: int) ->
     # 并发不会因此失控：单交互线闸门保证一个 session 同时只有一条非 unattended 的线
     # （见 `TaskManager._interactive_line_held`）。
     from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-    launch_background_observe(state, ctx, boundary="plain_text")
+    launch_background_observe(state, ctx, boundary=boundary)
     await _cold_park(state, ctx, PREFACE_NORMAL, unattended=state.task.unattended)
 
 
