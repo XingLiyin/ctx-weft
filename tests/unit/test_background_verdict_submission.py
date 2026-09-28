@@ -9,7 +9,9 @@
 - **verdict 缺失 ≡ retry**。拿不到判决就什么都不提交，task 维持 park。默认态是 park，
   只有 success 触发状态转移——绝不因为观察失败而静默放行后继。
 - **免折不免判**。短段仍跑判定（短回合恰恰是提问最典型的形态），只是不折。
-- **判决不碰 park 气泡**。判 success 终结 task，但会话仍停在「等你说话」——见下方那一节。
+- **park 气泡只收交出去了的那条线**。判 success 终结 task 时：子任务的气泡跟着收（线交回
+  parent，没人会来答它），`parent_task_id is None` 的留着（没有别的线接管，用户下一句还是
+  给它）——见下方那一节。
 """
 
 from __future__ import annotations
@@ -24,12 +26,27 @@ from ctx_weft.core.loop.steps.background_observe import (
 
 
 class _RecordingTM:
+    """带外入口的替身。**照真品的契约调 `finalize`**——只在判决被接受且是 `success` 时
+    （真品里那是「状态已写定、转移尚未宣布」之间的那个窗口，见
+    `TaskManager.apply_out_of_band_verdict`）。
+
+    不照着调的话，下面那些气泡断言会因为「根本没人调过收尾」而全部通过——测的就不是契约
+    而是替身的偷懒了。这个坑真踩过：`finalize` 参数刚加上时，旧替身让「子任务气泡该被收」
+    的新测试直接绿灯。
+    """
+
     def __init__(self, accepted: bool = True) -> None:
         self.calls: list[tuple] = []
         self._accepted = accepted
+        self.finalized = 0
 
     async def apply_out_of_band_verdict(self, task_id, outcome, **kw):
         self.calls.append((task_id, outcome, kw))
+        if self._accepted and outcome.verdict == "success":
+            fin = kw.get("finalize")
+            if fin is not None:
+                self.finalized += 1
+                await fin()
         return self._accepted
 
 
@@ -118,23 +135,29 @@ async def test_rejected_verdict_is_not_an_error() -> None:
     assert len(tm.calls) == 1
 
 
-# ── 判决不碰 park 气泡（2026-09-24 订正）─────────────────────────────────────
+# ── park 气泡：只收交出去了的那条线（2026-09-27）────────────────────────────
 #
-# 纯文本让位是第一性的：agent 说完一段话就停下让人能开口。后台 observe 是借 commit
-# 机制起的**旁路监控**，它的结论落在 task 层（终结、放行 DAG 后继），不该改变「有人
-# 可以开口」这个事实——success 和 retry 在用户眼里应该没有区别，都是「等你说话」。
+# 判 success 终结 task 之后那个「等你说话」的气泡该不该收，取决于**这条线交回给谁了**：
 #
-# 宿主按未决 HITL 折会话状态（气泡在 ⟹ PAUSED，且优先于 task 终态）。所以判决一旦收掉
-# 气泡，`TaskFinished` 写下的 SUCCEEDED 当场浮出来，会话在用户正要打字的那一刻跳成
-# 「已完成」——一次纯文本回合之后连闪两个状态，且用户打字落在跳变前后会走到两条不同的
-# 投递路径（续跑老 task / 新建 task）。曾经有过一版在这里收气泡，就是这个形状。
+# - **子任务**（`parent_task_id` 非空，含跨 agent）→ 线交回 parent，`_try_resume_parent`
+#   随即接管，再没有人会来答这个气泡 → 收。不收的后果实测过：宿主折会话状态时气泡优先于
+#   task 终态（`SessionStatusFold.status` 里 `pending_hitl` 排在 `terminal` 之前），于是
+#   父任务收尾之后**会话永久停在 PAUSED**，SSE 的终态收口不触发，每个这样的子任务留一个。
+# - **`parent_task_id is None`**（会话 root / 每条用户消息新开的 task）→ 没有别的线接管，
+#   用户下一句还是给它 → 留。收掉它的后果同样实测过（`2ee524b` → `faedd25`）：root 的
+#   `TaskFinished` 会写 `_terminal`，气泡一收 SUCCEEDED 当场浮出来，会话在用户正要打字的
+#   那一刻跳成「已完成」。它由用户真的开口时收口（Runtime 的两条投递分支）。
 #
-# 气泡的收口属于**用户真的开口**那一刻，在 Runtime 的两条投递分支里
-# （`_start_task_for_agent` / `_inject_user_turn`），不在这里。
+# 判据是 `parent_task_id`，**不是 `_is_own_root`**——后者对跨 agent 子任务返回 True，会把
+# 整类漏掉。那一格下面单独钉了一条。
+
+from ctx_weft.protocols.hitl import ToolResultDelivery, UserTurnDelivery  # noqa: E402
+
 
 class _Bubble:
-    def __init__(self, hid: str, task_id: str) -> None:
+    def __init__(self, hid: str, task_id: str, delivery=None) -> None:
         self.id, self.task_id = hid, task_id
+        self.delivery = delivery if delivery is not None else UserTurnDelivery(task_id=task_id)
 
 
 class _Registry:
@@ -159,38 +182,83 @@ def _ctx_with_hitl(tm, hitl):
     return SimpleNamespace(task_manager=tm, hitl=hitl)
 
 
-def _state_with_session():
-    return SimpleNamespace(task=SimpleNamespace(id="t1", outputs="交付物"),
-                           session=SimpleNamespace(id="s1"))
+def _state_with_session(*, parent: str | None = None, creator="ag_1", assigned="ag_1"):
+    return SimpleNamespace(
+        task=SimpleNamespace(id="t1", outputs="交付物", parent_task_id=parent,
+                             creator_agent_id=creator, assigned_agent_id=assigned),
+        session=SimpleNamespace(id="s1"),
+    )
 
 
-async def test_success_leaves_the_bubble_alone() -> None:
-    """**要害**：判 success 终结了 task，但那个气泡要留着——它是「会话在等你说话」
-    这个事实的载体。收掉它等于替用户宣布「不用说了」。"""
+# ── 子任务：收 ────────────────────────────────────────────────────────────────
+
+async def test_a_subtask_bubble_is_closed_by_the_verdict() -> None:
+    """**要害**：线交回 parent 了，这个气泡再没有人会来答——留着会把会话钉死在 PAUSED。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
-    await _submit_verdict(_state_with_session(), _ctx_with_hitl(_RecordingTM(), hitl), _meta())
+    tm = _RecordingTM()
+    await _submit_verdict(_state_with_session(parent="t0"), _ctx_with_hitl(tm, hitl), _meta())
+    assert tm.finalized == 1
+    assert hitl.cancelled == ["hit_1"]
+
+
+async def test_a_cross_agent_subtask_bubble_is_closed_too() -> None:
+    """**判据不能写 `_is_own_root`**：它对跨 agent 子任务（parent 非空、creator≠assigned）
+    返回 True，照它过滤会把整类漏掉——而这类任务的线同样是交回 parent 的。"""
+    hitl = _Hitl([_Bubble("hit_1", "t1")])
+    await _submit_verdict(
+        _state_with_session(parent="t0", creator="ag_1", assigned="ag_2"),
+        _ctx_with_hitl(_RecordingTM(), hitl), _meta())
+    assert hitl.cancelled == ["hit_1"]
+
+
+# ── root：留 ──────────────────────────────────────────────────────────────────
+
+async def test_a_root_bubble_survives_the_verdict() -> None:
+    """`faedd25` 保下来的那条：root 的 `TaskFinished` 会写 `_terminal`，气泡一收
+    SUCCEEDED 当场浮出来，会话在用户正要打字的那一刻跳成「已完成」。"""
+    hitl = _Hitl([_Bubble("hit_1", "t1")])
+    tm = _RecordingTM()
+    await _submit_verdict(_state_with_session(parent=None), _ctx_with_hitl(tm, hitl), _meta())
+    assert tm.finalized == 1, "收尾照常被调（S-a 之后它还要做别的事），只是不碰气泡"
     assert hitl.cancelled == []
 
 
-async def test_retry_leaves_the_bubble_alone() -> None:
-    """retry 维持 park——同样留着。两条判决对用户可见的行为必须一致。"""
+# ── 什么都不该碰的三种 ────────────────────────────────────────────────────────
+
+async def test_retry_never_reaches_the_closer() -> None:
+    """retry 维持 park，那个气泡正是它等人的入口；带外入口根本不会调收尾。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
-    await _submit_verdict(_state_with_session(), _ctx_with_hitl(_RecordingTM(), hitl),
+    tm = _RecordingTM()
+    await _submit_verdict(_state_with_session(parent="t0"), _ctx_with_hitl(tm, hitl),
                           _meta("retry"))
+    assert tm.finalized == 0
     assert hitl.cancelled == []
 
 
-async def test_rejected_verdict_leaves_the_bubble_alone() -> None:
-    """判决被仲裁拒绝（人先开口）→ 更不该碰。"""
+async def test_a_rejected_verdict_never_reaches_the_closer() -> None:
+    """人先开口 → 仲裁拒绝 → task 没终结，一个字都不能改。"""
     hitl = _Hitl([_Bubble("hit_1", "t1")])
-    await _submit_verdict(_state_with_session(),
+    await _submit_verdict(_state_with_session(parent="t0"),
                           _ctx_with_hitl(_RecordingTM(accepted=False), hitl), _meta())
     assert hitl.cancelled == []
 
 
+async def test_only_this_task_and_only_user_turn_bubbles() -> None:
+    """双重过滤：兄弟任务的气泡不归这次判决管；同一 task 上「等人拍板」那一档也不归——
+    它有自己的处置路径，本函数只认「等人开口」。"""
+    hitl = _Hitl([
+        _Bubble("hit_mine", "t1"),
+        _Bubble("hit_sibling", "t2"),
+        _Bubble("hit_approval", "t1", delivery=ToolResultDelivery(tool_call_id="tc_1")),
+    ])
+    await _submit_verdict(_state_with_session(parent="t0"),
+                          _ctx_with_hitl(_RecordingTM(), hitl), _meta())
+    assert hitl.cancelled == ["hit_mine"]
+
+
 async def test_missing_hitl_service_is_tolerated() -> None:
-    """判决这条路根本不该碰 hitl——手构 ctx 里没有它也照常落定。"""
+    """手构 ctx 里没有 hitl：收尾静默跳过，判决照常落定。"""
     tm = _RecordingTM()
-    await _submit_verdict(_state_with_session(),
+    await _submit_verdict(_state_with_session(parent="t0"),
                           SimpleNamespace(task_manager=tm, hitl=None), _meta())
     assert len(tm.calls) == 1

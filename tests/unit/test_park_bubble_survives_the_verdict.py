@@ -1,4 +1,4 @@
-"""park 气泡的归属：判决不收，**用户开口才收**（2026-09-24 订正）。
+"""**root** 的 park 气泡：判决不收，用户开口才收（2026-09-24 订正，2026-09-27 收窄）。
 
 纯文本回合让位是第一性的——agent 说完一段话就停下，让人能开口。后台 observe 是借
 commit 机制起的旁路监控，它的结论落在 task 层（终结、放行 DAG 后继），不该改变「有人
@@ -14,6 +14,11 @@ commit 机制起的旁路监控，它的结论落在 task 层（终结、放行 
 投递分支。注入分支（`_inject_user_turn`）一直在做；新建分支（`_start_task_for_agent`）
 从前漏了——以前漏得起，因为终态 task 的气泡总是在终结时就被一并收掉了；纯文本 park
 之后不再如此，所以补上。
+
+**2026-09-27 收窄**：上面这条只对 `parent_task_id is None` 的 task 成立（会话 root，以及
+每条用户消息新开的 task）——只有它们的 `TaskFinished` 会写 `SessionStatusFold._terminal`，
+也只有它们「没有别的线接管」。子任务的气泡由判决当场收掉（线交回 parent，再没有人会来答
+它），那一半钉在 `test_background_verdict_submission.py`。本文件测的全是 root。
 """
 
 from __future__ import annotations
@@ -110,8 +115,16 @@ async def test_the_next_message_closes_the_stale_bubble(monkeypatch) -> None:
     """用户开口 = 这个入口被用掉了 → 收口。
 
     不收的后果不在这一轮（新 task 一跑起来宿主就折成 RUNNING，显示不会错），而在之后：
-    孤儿气泡会被重启后的 `rebuild_hitl` 当未决恢复出来，还会被 `resume_agent` 的
-    `_pause_bubble_of` 误当成暂停气泡放行一次冷续跑。
+    孤儿气泡把会话**永久钉在 PAUSED**。宿主折状态时 `pending_hitl` 排在 `terminal` 之前
+    （`SessionStatusFold.status`），于是 root task 的终态再也浮不出来——SSE 的终态收口不
+    触发，投影里 `sessions.status` 一直 PAUSED，重启还被 `list_active_session_ids` 当活
+    会话捞回来。
+
+    （2026-09-27 查证：它**不会**被 `resume_agent` 的 `_pause_bubble_of` 误当成暂停气泡
+    放行冷续跑——那个函数按 `delivery.preface in (AFTER_INTERRUPT, AFTER_INTERRUPT_EDIT)`
+    过滤，而 park 用的是 `PREFACE_NORMAL`；`resume_agent` 还要求 agent 处于
+    `waiting_human`，而带外判决已经把它 `SETTLED` 成 idle。两道门都挡住了。曾经写在这里
+    的那个担心是错的。）
     """
     rt, _tm, _tid, _hid = await _live_session(monkeypatch)
     await rt.send_message(_AID, "再讲一个")

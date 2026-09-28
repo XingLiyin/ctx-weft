@@ -177,3 +177,92 @@ async def test_fail_verdict_keeps_it_parked_too() -> None:
     assert task.status == "AWAITING_HUMAN"
     assert task.observer_outcome == "fail"
     assert bus.events == []
+
+
+# ── 带外收尾钩子（2026-09-27）──────────────────────────────────────────────────
+#
+# `finalize` 跑在「状态已写定」与「转移已宣布」之间那个窗口里。三条约束各钉一侧，下面
+# 一条一测。第一个用户是收 park 气泡（子任务那一档），S-a 之后 bubble 给 parent /
+# blackboard / TASK_FINALIZED 也挂在这里。
+
+async def test_finalize_runs_after_the_status_is_written() -> None:
+    """**在仲裁之后**：钩子被调到的那一刻，task 已经是终态了。
+
+    这是竞态的关门点——status 一落终态，人的消息在 `send_message` 层就按
+    `_task_is_terminal` 走新建分支，不会再 requeue 这个正在收尾的 task。所以带 IO 的
+    收尾跑在锁外是安全的。
+    """
+    tm, _bus = _tm()
+    task = _parked(tm, outputs="交付物")
+    seen: list[str] = []
+
+    async def _fin() -> None:
+        seen.append(task.status)
+
+    await tm.apply_out_of_band_verdict("A", _success(), finalize=_fin)
+    assert seen == ["FINISHED"]
+
+
+async def test_finalize_runs_before_the_transition_is_announced() -> None:
+    """**在 `_settle` 之前**：`_settle` → `on_task_finished` → `_try_resume_parent` 会
+    唤醒 parent，parent 不能在子任务的产出落地之前醒过来装配。
+
+    用「钩子跑的时候 `TaskFinished` 还没发出去」来钉这个顺序。
+    """
+    tm, bus = _tm()
+    _parked(tm)
+    at_hook: list[list] = []
+
+    async def _fin() -> None:
+        at_hook.append(_types(bus))
+
+    await tm.apply_out_of_band_verdict("A", _success(), finalize=_fin)
+    assert at_hook == [[]], "钩子跑在任何事件之前"
+    assert EventType.TASK_FINISHED in _types(bus), "之后照常宣布"
+
+
+async def test_a_failing_finalize_does_not_swallow_the_transition() -> None:
+    """收尾抛异常 → 记日志，照常往下发事件 + `_settle`。
+
+    状态已经是终态了：不发事件宿主永远不知道这个 task 结束了，不 `_settle` 则槽位永不
+    释放、单交互线永久占着。降级成「这个 task 少了收尾副作用」远好过卡住整个会话。
+    """
+    tm, bus = _tm()
+    _parked(tm)
+
+    async def _boom() -> None:
+        raise RuntimeError("bubble service is down")
+
+    accepted = await tm.apply_out_of_band_verdict("A", _success(), finalize=_boom)
+    assert accepted is True
+    assert tm.get_task("A").status == "FINISHED"
+    assert EventType.TASK_FINISHED in _types(bus)
+
+
+async def test_finalize_is_not_called_when_the_verdict_is_rejected() -> None:
+    """人先开口 → 仲裁拒绝 → 没有转移，也就没有收尾。"""
+    tm, _bus = _tm()
+    _parked(tm)
+    tm.get_task("A").status = "PENDING"        # 人的消息已把它重排
+    called = []
+
+    await tm.apply_out_of_band_verdict(
+        "A", _success(), finalize=lambda: called.append(1) or _noop())
+    assert called == []
+
+
+async def test_finalize_is_not_called_for_retry() -> None:
+    """retry 维持 park——task 没终结，没有收尾可言。"""
+    tm, _bus = _tm()
+    _parked(tm)
+    called = []
+
+    await tm.apply_out_of_band_verdict(
+        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="retry"),
+        finalize=lambda: called.append(1) or _noop())
+    assert called == []
+    assert tm.get_task("A").status == "AWAITING_HUMAN"
+
+
+async def _noop() -> None:
+    return None

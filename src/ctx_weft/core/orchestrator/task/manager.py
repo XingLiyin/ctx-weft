@@ -35,6 +35,8 @@ from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols.events import EventOrigin, EventType
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ctx_weft.protocols.events import EventBus
 
 logger = logging.getLogger(__name__)
@@ -962,6 +964,7 @@ class TaskManager:
         process_report: str = "",
         task_summary: str = "",
         next_step_hint: str = "",
+        finalize: "Callable[[], Awaitable[None]] | None" = None,
     ) -> bool:
         """**带外判决**：一条不属于任何活跃 run 的结局（2026-09-22）。
 
@@ -986,6 +989,22 @@ class TaskManager:
         observer 的三个文本字段由调用方传进来在锁内一并写：后台 observe 跑在
         `readonly` 的 ControlContext 上（见 `ControlContext.readonly`），工具自己没写，
         判决被拒时它们也就不该落地。
+
+        ``finalize``：**带外收尾**——在「状态已写定」与「转移已宣布」之间那个窗口里跑
+        （2026-09-27）。三条约束各钉一侧，顺序不能动：
+
+        - **在仲裁之后**：判决被拒时一个字都不能写。收气泡、bubble 给 parent、软删自身
+          对话，对一个还要继续跑的 task 全是破坏。
+        - **在 `_settle` 之前**：`_settle` → `on_task_finished` → `_try_resume_parent`
+          会唤醒 parent，parent 不能在子任务的产出落地之前醒过来装配。
+        - **状态写留在锁内**，这是关门点：`task.status` 一落终态，人的消息在
+          `send_message` 层就按 `_task_is_terminal` 走新建分支，不会再 `requeue` 这个
+          正在收尾的 task。所以带 IO 的这一段跑在锁外是安全的。
+
+        只在真发生了转移（即 `success`）时调用——`retry`/`fail` 维持 park，没有收尾可言。
+        **失败不吞掉转移**：抛异常只记日志，照常往下发 `TaskFinished` + `_settle`。状态
+        已经是终态了，不发事件宿主永远不知道、不 `_settle` 则槽位永不释放、交互线永久
+        占着；降级成「这个 task 少了收尾副作用」远好过卡住整个会话。
         """
         async with self._lock:
             task = self._tasks.get(task_id)
@@ -1015,6 +1034,14 @@ class TaskManager:
                 return True
             disp = self._decide_and_write(task_id, outcome)
 
+        if finalize is not None:
+            try:
+                await finalize()
+            except Exception:
+                logger.exception(
+                    "out-of-band finalize failed for task %s; announcing the transition "
+                    "anyway (the task is already terminal; skipping the announcement would "
+                    "strand the slot and hold the interaction line forever)", task_id)
         await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload)
         await self._settle(task_id, disp.status)
         return True
