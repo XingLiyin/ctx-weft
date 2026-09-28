@@ -77,7 +77,11 @@ def test_close_boundary_injects_finish_result(boundary):
 
 @pytest.mark.parametrize("boundary", ["interrupt", "plain_text"])
 def test_non_close_boundary_does_not_inject_finish_result(boundary):
-    """非 close 段有真实 actor 动作可见，不注入 finish 产出。"""
+    """非 close 段有真实 actor 动作可见，不注入 finish 产出。
+
+    `plain_text` 尤其不能注入：那段文本本身就是一条 assistant 回合、在重建的对话里看得见，
+    注入等于让它在同一个 prompt 里出现两遍。与 `finish_park` 的分野见下一条。
+    """
     msgs = DefaultComposer()._build_observe_messages(
         _blocks(), _req(boundary, outputs=_FINISH_RESULT))
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
@@ -176,3 +180,56 @@ def test_plain_text_boundary_lists_subtasks_for_the_hint():
     other = _req("interrupt")
     other.extra["subtasks"] = [{"task_id": "tsk_a", "title": "甲", "outcome": "failed"}]
     assert "tsk_a" not in DefaultComposer()._build_observe_messages(_blocks(), other)[-1].content
+
+
+# ── S-b（2026-09-27）：finish_park —— root 的 finish_task 让位 ─────────────────
+
+
+def test_finish_park_uses_the_judging_cue():
+    """它和 `plain_text` 同档：要的是判决，不是只要一份摘要。
+
+    这条钉的是「`finish_park` 没有被漏在判定名单之外」。漏了的后果不是报错而是静默降级：
+    后台只产摘要、不产 verdict，而 verdict 缺失 ≡ retry——task 就永远停在 park。
+    """
+    cue = DefaultComposer()._build_observe_messages(_blocks(), _req("finish_park"))[-1].content
+    assert "report_task_outcome" in cue
+    assert "collect_process_report" not in cue
+    assert "do not judge" not in cue
+
+
+def test_finish_park_injects_the_final_output():
+    """**必须**注入：`finish_task` 是 SILENT 工具，产出不写任务层对话。
+
+    不喂进来，观察者手里就只有「actor 调了 finish_task」这件事、没有它到底交付了什么——
+    只能虚构一段完成叙述，然后照着自己虚构的东西判 success。
+    """
+    msgs = DefaultComposer()._build_observe_messages(
+        _blocks(), _req("finish_park", outputs=_FINISH_RESULT))
+    joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
+    assert _FINISH_RESULT in joined
+    assert "Actor's Final Output" in joined
+    # 注入段在 cue 之前：先看产出，再被要求判决。
+    assert joined.index(_FINISH_RESULT) < joined.index("report_task_outcome")
+
+
+def test_finish_park_lists_subtasks_for_the_hint():
+    """判 retry 时要在 `next_step_hint` 里指名子任务——判定版才需要这份清单。"""
+    req = _req("finish_park")
+    req.extra["subtasks"] = [{"task_id": "tsk_a", "title": "甲", "outcome": "failed"}]
+    cue = DefaultComposer()._build_observe_messages(_blocks(), req)[-1].content
+    assert "tsk_a" in cue
+
+
+def test_the_two_boundary_sets_stay_in_sync_with_the_loop_side():
+    """两套名单各在 composer 与 loop 里写了一份（避免跨层 import），这里钉住它们不漂。"""
+    from ctx_weft.core.assembler.composer import (
+        _CLOSE_BOUNDARIES, _JUDGING_BOUNDARIES, _OUTPUTS_BEARING_BOUNDARIES,
+    )
+    from ctx_weft.core.loop.steps.background_observe import (
+        _CLOSE_BOUNDARIES as loop_close, _JUDGING_BOUNDARIES as loop_judging,
+    )
+
+    assert _JUDGING_BOUNDARIES == loop_judging
+    assert _CLOSE_BOUNDARIES == loop_close
+    # 凡是以 finish_task 收尾的都要喂产出：两个 close 边界 + 让位的那个。
+    assert _OUTPUTS_BEARING_BOUNDARIES == _CLOSE_BOUNDARIES | {"finish_park"}

@@ -54,8 +54,12 @@ def _ask(tc_id: str, question: str) -> MockResponse:
 class _ScriptedLLM(_ActRouterLLM):
     """act 回合按剧本出；剧本项可以是 `MockResponse` 或上面两个卡住标记。耗尽后一律卡住。"""
 
-    def __init__(self, script: list) -> None:
-        super().__init__(act_responses=[], context_limit=100_000)
+    def __init__(self, script: list, *, observer_verdicts: list[str] | None = None) -> None:
+        # `observer_verdicts` 原样透给基类：默认（retry）不变，要让 root 的 `finish_task`
+        # 真正终结的用例显式传 `["success"]`——2026-09-27 起（S-b）那条收尾也 park + 后台
+        # 判定，而 verdict 缺失 ≡ retry。
+        super().__init__(act_responses=[], context_limit=100_000,
+                         observer_verdicts=observer_verdicts)
         self.script = list(script)
         self.stalled = asyncio.Event()
 
@@ -157,7 +161,10 @@ async def test_second_hot_question_is_visible_to_live_subscribers() -> None:
 
 @pytest.mark.parametrize("hitl_timeout_sec", [None, 0], ids=["hot", "cold"])
 async def test_ask_user_reply_is_retracted_by_pause_before_first_chunk(hitl_timeout_sec) -> None:
-    llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK, _finish_call()])
+    # 判定 `success`：末轮 `finish_task` 收尾如今也 park + 后台判定（S-b）。暂停那一段走的是
+    # `interrupt` 边界、不产判决，所以整条用例只有这一次判定。
+    llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK, _finish_call()],
+                       observer_verdicts=["success"])
     rt = _runtime(llm, hitl_timeout_sec=hitl_timeout_sec)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
@@ -202,7 +209,13 @@ async def test_ask_user_reply_is_retracted_by_pause_before_first_chunk(hitl_time
     assert "RETYPED" in last and "RETRACTED" not in last
     results = await _ask_user_results(rt, sid, q1)
     assert len(results) == 1 and "RETYPED" in results[0], results
-    assert (await _stored_types(rt, sid)).count(EventType.HITL_RESOLVED) == 1
+    # **按 hitl_id 数**（2026-09-27 改）：这一轮现在有两个气泡终局——`ask_user` 那个（本条要
+    # 数的）和末轮 `finish_task` 让位开出的那个 wait 气泡（S-b），后者由判 success 的带外收尾
+    # 自己收掉。本条问的是「撤回之后重答只终局一次，不会留下上一次的残迹」，那是 q1 的事。
+    resolved_ids = [(e.payload or {}).get("hitl_id")
+                    for e in await all_events(rt.event_store, sid)
+                    if e.type == EventType.HITL_RESOLVED]
+    assert resolved_ids.count(q1.id) == 1, resolved_ids
 
 
 async def test_replying_to_an_already_resolved_request_opens_no_window() -> None:

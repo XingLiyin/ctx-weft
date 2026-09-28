@@ -674,3 +674,112 @@ async def test_replace_finish_report_declares_surviving_placeholder_refs():
     assert ref in collect_blob_refs(recap_rec), (
         "折叠重写的 finish 对没有声明幸存占位的 ref，GC 会在宽限期后误删"
     )
+
+
+# ── 判决与折叠的顺序（2026-09-27）──────────────────────────────────────────────
+#
+# 判 success 会经带外 finalize 走 close（写 finish 对 + 折末段 raw），而那条路**刻意不产段
+# 摘要**——`finalize._supersede_final_raw_segment` 的不变量是「末段 raw 与真实 Process Report
+# 至少存其一」，段摘要与 finish 对同时存在就是把同一段记了两遍。
+#
+# 所以「这一段归谁记账」只有拿到判决才知道，不能先折了再判。此前（2280761 起）plain_text
+# 判 success 就是先折后判，两份都写。
+
+
+class _VerdictTM:
+    """带外入口的最小替身：只回「接不接受」。
+
+    **刻意不调 `finalize`**：本组用例钉的是「折不折」这条分支，判据只是带外入口的返回值。
+    「判 success 时 finalize 必须被调、且排在仲裁之后 / `_settle` 之前」那条契约由真
+    `TaskManager` 的用例钉（`tests/unit/test_out_of_band_verdict.py`），不在这里用替身自证
+    ——替身自证等于让测试去核对自己的假设。
+    """
+
+    def __init__(self, *, accepted: bool = True) -> None:
+        self._accepted = accepted
+        self.submitted: list[str] = []
+
+    async def apply_out_of_band_verdict(self, task_id, outcome, **kw) -> bool:
+        self.submitted.append(outcome.verdict)
+        return self._accepted
+
+
+def _verdict_gateway(verdict: str, recap: str = "段摘要文本"):
+    class _G:
+        async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
+            return SimpleNamespace(
+                content=f"Assessment recorded: outcome={verdict}.",
+                is_error=False,
+                metadata={K.OBSERVER_OUTCOME: verdict,
+                          K.OBSERVER_ACT_RECAP: recap,
+                          K.OBSERVER_TASK_SUMMARY: ""},
+            )
+
+    return _G()
+
+
+async def _run_judging(monkeypatch, state, ctx, *, boundary, verdict, accepted=True):
+    # 不带 short_segment_token_threshold → 阈值取 0 → 短段门关闭，照常折叠（与本文件其他
+    # 用例同一手法）。预置段只有一条 assistant，带上真实默认阈值会被判成短段而免折。
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+    ctx.capability_gateway = _verdict_gateway(verdict)
+    tm = _VerdictTM(accepted=accepted)
+    ctx.task_manager = tm
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+    await bo.launch_background_observe(state, ctx, boundary=boundary)
+    return tm
+
+
+async def _summaries(state, ctx) -> list:
+    return await ctx.memory.recall_recent(
+        state.scope, [MemoryEventType.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["plain_text", "finish_park"])
+async def test_a_closing_verdict_leaves_the_segment_to_the_finish_pair(
+        monkeypatch, fake_state_ctx, boundary):
+    """判 success 且仲裁接受 → 这一段归 close 的 finish 对，**不产段摘要**。"""
+    state, ctx = fake_state_ctx
+    tm = await _run_judging(monkeypatch, state, ctx, boundary=boundary, verdict="success")
+
+    assert tm.submitted == ["success"], "前提不成立：判决压根没提交"
+    assert await _summaries(state, ctx) == [], (
+        "判 success 之后还产了段摘要——同一段会被记两遍（段摘要 + close 的 finish 对）")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["plain_text", "finish_park"])
+async def test_a_retry_verdict_still_folds_the_segment(monkeypatch, fake_state_ctx, boundary):
+    """判 retry → 维持 park，没有 close，这一段仍归段摘要（下一轮 act 要靠它看见进度）。"""
+    state, ctx = fake_state_ctx
+    tm = await _run_judging(monkeypatch, state, ctx, boundary=boundary, verdict="retry")
+
+    assert tm.submitted == ["retry"]
+    assert len(await _summaries(state, ctx)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_verdict_still_folds_the_segment(monkeypatch, fake_state_ctx):
+    """仲裁拒（人先开口）→ task 一个字段都没动，这一段同样要有人记。
+
+    水位线保证只折这次 launch 之前的记录，人刚说的那句话不会被卷进来。
+    """
+    state, ctx = fake_state_ctx
+    tm = await _run_judging(
+        monkeypatch, state, ctx, boundary="plain_text", verdict="success", accepted=False)
+
+    assert tm.submitted == ["success"]
+    assert len(await _summaries(state, ctx)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_non_judging_boundary_never_asks_the_entry(monkeypatch, fake_state_ctx):
+    """不判的边界连带外入口都不碰——那份判决已由别处给出，覆盖它是纯破坏。"""
+    state, ctx = fake_state_ctx
+    tm = await _run_judging(monkeypatch, state, ctx, boundary="interrupt", verdict="success")
+
+    assert tm.submitted == []
+    assert len(await _summaries(state, ctx)) == 1
+

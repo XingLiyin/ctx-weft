@@ -45,7 +45,9 @@ from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import LLMOutageError, ToolCall
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.mock import (
+    MockLLMAdapter, MockResponse, is_observer_request,
+)
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
@@ -107,6 +109,11 @@ class _FlakyLLM(MockLLMAdapter):
                 return self._stream(resp, request)
             # If ri_responses exhausted, return empty text response.
             return self._stream(MockResponse(text=""), request)
+        # 判定回合不算 act，也不烧故障预算（2026-09-27）：S-b 起 root 的 finish_task 也
+        # park + 后台判定，让那次观察去撞 outage 等于既烧掉一个故障名额、又让 verdict 永不
+        # 抵达（≡ retry，task 停在 park）。交给基类——那边的 `observer_verdict` 开关会回判决。
+        if is_observer_request(request):
+            return super().complete(request, stream=stream)
         # Act calls: fail for the first `fail_for` times, then succeed.
         if self._raised < self._fail_for:
             self._raised += 1
@@ -233,6 +240,8 @@ async def test_outage_then_resume_completes():
     # Recognize-intent responses (separate queue, never fail):
     # - Extra buffers for any background recognize_intent tasks from leftover runs.
     llm = _FlakyLLM(
+        # 见 _FlakyLLM.complete 里判定回合那一支。
+        observer_verdict="success",
         fail_for=1,
         responses=[_finish_task_response("done")],
         ri_responses=[MockResponse(text=""), MockResponse(text=""), MockResponse(text="")],
@@ -331,6 +340,8 @@ async def test_idempotent_outage_resume_completes():
     # then succeed on the second resume.
     # Recognize-intent responses: extra buffers for concurrent/leftover RI tasks.
     llm = _FlakyLLM(
+        # 见 _FlakyLLM.complete 里判定回合那一支。
+        observer_verdict="success",
         fail_for=2,
         responses=[_finish_task_response("ok")],
         ri_responses=[

@@ -52,7 +52,11 @@ async def _runtime_with_session(*, responses: list[MockResponse] | None = None):
     """起一个跑完 root task 的真实会话，返回 (runtime, session_id, root_agent_id, events)。"""
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    rt = make_runtime(llm=MockLLMAdapter(responses=responses or _finish()),
+    # `observer_verdict="success"`：2026-09-27 起 root 的 finish_task 也 park + 后台判定
+    # （S-b），而 verdict 缺失 ≡ retry——不开这个开关，下面那句 `wait_for_finish` 等不到终态，
+    # 本文件几乎每条用例的前置都塌掉。
+    rt = make_runtime(llm=MockLLMAdapter(responses=responses or _finish(),
+                                         observer_verdict="success"),
                       agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
 

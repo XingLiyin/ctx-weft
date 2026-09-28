@@ -52,8 +52,15 @@ class _StallsBeforeFirstChunkLLM(MockLLMAdapter):
 
     @staticmethod
     def _is_sidecar(request) -> bool:
+        """旁路调用——不该被 TTFT 卡住的那些。
+
+        除 recognize_intent，还包括**判定回合**（2026-09-27）：S-b 起 root 的 `finish_task`
+        也 park + 后台判定，卡住它等于让 verdict 永不抵达（≡ retry），task 永远停在 park。
+        这里要模拟的是 act 那一轮的 TTFT，不是观察。
+        """
         tools = getattr(request, "tools", None) or []
-        return any(getattr(t, "name", "") == "control__update_task_metadata" for t in tools)
+        names = {getattr(t, "name", "") for t in tools}
+        return bool(names & {"control__update_task_metadata", "control__report_task_outcome"})
 
     def complete(self, request, stream=True):
         self.last_request = request

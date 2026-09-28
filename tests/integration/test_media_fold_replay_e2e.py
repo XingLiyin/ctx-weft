@@ -245,6 +245,13 @@ class _PlaceholderReadingLLM:
         if "control__update_task_metadata" in _tool_names(payload):  # recognize_intent 旁路快照
             self.calls.append("intent")
             return "", []
+        if "control__report_task_outcome" in _tool_names(payload):
+            # 判定回合。2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），而
+            # verdict 缺失 ≡ retry——不应这一轮，task 停在 AWAITING_HUMAN，等终态的用例超时。
+            self.calls.append("observe")
+            return "", [ToolCall(id=self._tid(), name="control__report_task_outcome",
+                                 arguments={"task_status": "success", "act_recap": "seg",
+                                            "task_summary": "ok"})]
         pending = [r for r in _refs_offered(payload) if r not in self.asked]
         if pending:
             ref = pending[0]
@@ -350,10 +357,19 @@ async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
     if blob_store is not None:
         runtime.providers.register_memory_blob_store(blob_store)
 
+    # `unattended=True`：本文件测的是媒体的降级 / 取回 / 重放，与「让位给人」无关，而 2026-09-27
+    # 起（S-b）root 的 `finish_task` 在**有人在场**时会 park + 后台判定，判 success 的 close 把
+    # 末段 raw（取回的那张图就在里面）折在 `TaskFinished` **之前**——于是下面按终态取视图必然
+    # 看不到它。此前看得到并不是因为 close 不折，而是因为那次折叠被推迟到后台回调（占位 finish
+    # 对 + 真报告替换才折），测试跑赢了那个窗口：是竞态，不是契约。
+    #
+    # 无人值守把 root 的收尾留在原来那条前台路径上（前台 observe → FinalizeStep → 延迟折叠），
+    # 本文件的每一条断言因此逐字保持它原本的含义。「取回的图在 park 路径上怎么走」是另一件事，
+    # 归 park 那组用例管。
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_prompt() if prompt is None else prompt,
-        context_limit=6000, reserved_output_tokens=0))
+        context_limit=6000, reserved_output_tokens=0, unattended=True))
     # 不经 wait_for_finish：本文件要看 close 边界后台 observe 折叠落地**前**的中间状态
     # （见 _wait_task_terminal docstring），故只等 task 到终态。
     state = await _wait_task_terminal(handle, timeout=20.0)

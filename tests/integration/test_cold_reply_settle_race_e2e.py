@@ -28,6 +28,7 @@ from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols.events import EventFilter, EventType
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events
 from tests.integration.test_hitl_e2e_v2 import _all_request_text, _finish_call, _poll
 from tests.integration.test_hitl_hot_reply_round_window_e2e import (
     _ask, _ask_user_results, _next_question, _ScriptedLLM, _stored_types,
@@ -70,7 +71,9 @@ def _runtime(llm):
 @pytest.mark.parametrize("gated_step", ["_commit_round_or_halt", "_flush_staged"],
                          ids=["before-commit", "after-commit"])
 async def test_reply_during_the_settle_window_still_wakes_the_task(gated_step) -> None:
-    llm = _ScriptedLLM([_ask("tc1", "Q1?"), _finish_call()])
+    # 判定 `success`：应答之后那一轮调 `finish_task` 收尾，而它如今也 park + 后台判定（S-b），
+    # 不给判决下面等 FINISHED 就永远等不到。
+    llm = _ScriptedLLM([_ask("tc1", "Q1?"), _finish_call()], observer_verdicts=["success"])
     rt = _runtime(llm)
     gate = _Gate()
 
@@ -120,9 +123,23 @@ async def test_reply_during_the_settle_window_still_wakes_the_task(gated_step) -
     assert types.count(EventType.RUN_STARTED) >= 2, "被应答唤醒的那一轮 run 必须可见"
 
     # ③ 配对事实一对一：TaskAwaitingHuman{hitl} ↔ TaskHumanResolved{hitl}
-    stored = await _stored_types(rt, sid)
-    assert stored.count(EventType.TASK_AWAITING_HUMAN) == \
-        stored.count(EventType.TASK_HUMAN_RESOLVED)
+    #
+    # **按 hitl_id 配，不按总数配**（2026-09-27 改）：这一轮现在有两次 park——`ask_user`
+    # 那一次由人应答收口，末轮 `finish_task` 的让位（S-b）由后台判决收口。而判决的收口是
+    # **终态事件**，不是 `TaskHumanResolved`：后者在 core 的 reducer 与 host 的 task 投影里
+    # 都映射成 `PENDING`，对一个刚判 FINISHED 的 task 发它会把两边的投影一起写坏。所以
+    # 「这个问题有没有被收口」本来就该按 hitl_id 问；按总数配只是当时一轮只有一次 park 才
+    # 恰好成立。
+    evs = [e for e in await all_events(rt.event_store, sid)
+           if e.type in (EventType.TASK_AWAITING_HUMAN, EventType.TASK_HUMAN_RESOLVED)]
+
+    def _hitl_ids(t):
+        return [(e.payload or {}).get("hitl_id") for e in evs if e.type == t]
+
+    assert _hitl_ids(EventType.TASK_AWAITING_HUMAN).count(q1.id) == 1, (
+        f"这个问题应当恰好开出一次 park，实为 {_hitl_ids(EventType.TASK_AWAITING_HUMAN)}")
+    assert _hitl_ids(EventType.TASK_HUMAN_RESOLVED).count(q1.id) == 1, (
+        f"这个问题应当恰好被收口一次，实为 {_hitl_ids(EventType.TASK_HUMAN_RESOLVED)}")
 
     # ④ 没有留下开着的窗
     assert not rt._task_managers[sid].open_round_task_ids

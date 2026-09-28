@@ -279,6 +279,7 @@ class _SlowAuthorizer(Authorizer):
 
 async def test_pause_between_tools_after_a_hot_reply_retracts_it() -> None:
     tool, authz = _SlowTool(), _SlowAuthorizer()
+    # 判定 `success`：重答之后那一轮调 `finish_task` 收尾，而它如今也 park + 后台判定（S-b）。
     llm = _ScriptedLLM([
         MockResponse(text="", tool_calls=[
             ToolCall(id="tc1", name="control__ask_user",
@@ -286,7 +287,7 @@ async def test_pause_between_tools_after_a_hot_reply_retracts_it() -> None:
             ToolCall(id="tc2", name="slow__work", arguments={}),
         ]),
         _finish_call(),
-    ])
+    ], observer_verdicts=["success"])
     rt = _build(llm, hitl_timeout_sec=None, register=lambda r: r.providers.register_capability(
         tool, tool_authorizers={"slow:work": authz}))
     sid = await _start(rt)

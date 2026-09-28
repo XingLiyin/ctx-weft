@@ -80,7 +80,8 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     应答（no-op）不会催生第二条。
     """
     # ── 路径 1：resume_task 的 approval 分支 ──────────────────────────────
-    llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()])
+    llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()],
+                          observer_verdicts=["success"])
     runtime, tool = _make_runtime_with_bash_tool(llm, hitl_timeout_sec=0)
 
     handle = await runtime.start_session(SessionStartParams.create(
@@ -121,7 +122,10 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     assert resolved[0].payload.get("hitl_id") == req.id
 
     # ── 路径 2：_inject_user_reply → mark_human_resolved 的 wait_for_user 分支 ──
-    llm = _ActRouterLLM(act_responses=[
+    # 判定序列 retry → success：这一轮会被判两次。第一次是纯文本让位那一段，要判 retry
+    # 才保得住那次 park（本段正要测它）；人回话之后 finish_task 收尾那一段要判 success，
+    # 否则 2026-09-27 起（S-b）它同样 park，下面那句 `_poll(_final_task)` 永远等不到。
+    llm = _ActRouterLLM(observer_verdicts=["retry", "success"], act_responses=[
         MockResponse(text="Hi! Anything else?"),  # 纯文本、无 tool_call → 冷 park
         _finish_call(),
     ])

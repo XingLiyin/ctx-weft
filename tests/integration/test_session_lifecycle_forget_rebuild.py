@@ -387,13 +387,18 @@ async def test_registry_forget_session_warns_when_it_drops_an_unresolved_one(cap
 
     rt = _make_runtime()
     sid, aid, _ = await _run_one_round(rt)
-    _plant_hitl(rt, sid, aid, resolved=False)
+    hid = _plant_hitl(rt, sid, aid, resolved=False)
 
     with caplog.at_level(logging.WARNING, logger="ctx_weft.core.hitl.registry"):
         n = rt.hitl_registry.forget_session(sid)
 
-    assert n == 1
-    assert any("未决" in r.getMessage() for r in caplog.records), caplog.text
+    # 条数不再恒为 1（2026-09-27）：跑完一轮本身现在也会留下一条**已终局**的 wait 气泡——
+    # root 的 `finish_task` 让位 park、后台判 success 时把它收口（S-b），收口留记录不留未决。
+    # 本条钉的是「摘到未决的会被摘掉、而且会吼一声」，不是总条数。
+    assert n >= 1
+    assert rt.hitl_registry.get(hid) is None, "那条未决的必须真的被摘掉"
+    assert any("未决" in r.getMessage() and hid in r.getMessage() for r in caplog.records), (
+        caplog.text)
 
 
 # ── forget 之后重新启用：不只是"句柄回来了"，得真的跑完 ───────────────────────

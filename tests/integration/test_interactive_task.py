@@ -39,7 +39,8 @@ from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, mak
 pytestmark = pytest.mark.asyncio
 
 
-def _act_state_ctx(unattended: bool, llm: MockLLMAdapter):
+def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
+                   parent_task_id: str | None = None, gateway=None):
     """返回 (state, ctx, task, registry, mem)。第 4 项是 `HitlRegistry`——`list_pending`
     的持有者从 `HitlManager` 换成了它，断言口径不变（仍是「这个 session 上挂着哪些未决
     请求」）。
@@ -48,6 +49,11 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter):
     归宿判据改成了「有没有人在」（`interaction_mode` 随 S7 删除）。映射是逐字的——
     旧的 `"auto"`（自治、纯文本即产出）≡ `unattended=True`，旧的 `"interactive"`
     （让位等人）≡ `unattended=False`。
+
+    ``parent_task_id`` / ``gateway`` 是 2026-09-27 加的（S-b）：root 的 `finish_task` 现在也
+    让位，而「是不是 root」与「工具真被调过」正是那条路由的两个判据——前者要能摆出子任务，
+    后者要一个能把 `task.actor_done` 置上的 gateway（见
+    `tests/unit/test_finish_task_parks_on_root.py`）。两者都默认不变。
     """
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
@@ -57,6 +63,7 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter):
         id="t1", session_id="s1", status="ACTIVE",
         title="Greet", description="say hi politely",
         unattended=unattended, settings=NormalTaskSettings(),
+        parent_task_id=parent_task_id,
     )
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
@@ -74,6 +81,7 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter):
         assembler=None, llm=llm, memory=mem, event_bus=bus,
         provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1"),
         hitl=hitl_service,
+        capability_gateway=gateway,
     )
     return state, ctx, task, hitl, mem
 

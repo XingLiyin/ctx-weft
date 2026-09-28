@@ -56,6 +56,15 @@ class _RouterLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:
             return self._stream(MockResponse(text=""), request)
+        if "control__report_task_outcome" in names:
+            # 判定回合——**不消费 act 队列**。2026-09-27 起 root 的 `finish_task` 也 park +
+            # 后台判定（S-b），而 verdict 缺失 ≡ retry：不应这一轮，本文件那个「对照组：
+            # 普通 session 的 root task 仍是 interactive」的前置（root 跑完、FINISHED）就
+            # 永远等不到。判 success = 「它确实做完了」，正是这里要的。
+            return self._stream(MockResponse(tool_calls=[ToolCall(
+                id="obs", name="control__report_task_outcome",
+                arguments={"task_status": "success", "act_recap": "seg", "task_summary": "ok"},
+            )]), request)
         self.act_requests.append(request)
         if self._act_idx >= len(self._act_responses):
             return self._stream(MockResponse(text=""), request)

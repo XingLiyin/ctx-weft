@@ -193,6 +193,10 @@ def test_the_two_semantics_no_longer_share_one_function():
     assert "_park_wait_for_user" not in src, "双语义的旧函数应已拆掉"
     assert 'source="interrupt"' not in src and 'source="plain_text"' not in src, (
         "`source` 这个既选 preface 又管豁免的字符串开关应已消失")
-    # 四个 interrupt 调用点 + 纯文本让位那一个，各自走具名函数。
+    # 四个 interrupt 调用点 + 两个让位调用点（纯文本 / finish_task），各自走具名函数。
+    # 让位从 1 个变 2 个：S-b（2026-09-27）把 `actor_done` 那条出口也并进了让位分支——
+    # root 上「说了段话」与「宣布做完了」不该一个被复核、一个不被。
     assert src.count("_park_for_interrupt(state, ctx") == 4
-    assert src.count("_park_await_user(state, ctx") == 1
+    # 让位那两个按**调用点**数，不按 "(state, ctx" 这个字面数：`finish_task` 那一处是多行写法
+    # （轮号取 `state.extra[ACT_TURNS_USED_KEY]`，不借 for 循环泄漏出来的变量）。
+    assert src.count("_park_await_user(") - src.count("async def _park_await_user(") == 2

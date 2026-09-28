@@ -72,9 +72,11 @@ class _StubEventBlobStore:
 
 
 class _RouterLLM(MockLLMAdapter):
-    """按 request.tools 路由：recognize_intent → 空；act → finish_task 收尾。
+    """按 request.tools 路由：recognize_intent → 空；判定回合 → success；act → finish_task。
 
-    root task 无 parent → ObserveStep 走规则降级，不需要路由 report_task_outcome。
+    判定那一支是 2026-09-27 加的（S-b）：root 的 `finish_task` 从此也 park + 后台判定，而
+    verdict 缺失 ≡ retry——不应这一轮，task 就停在 AWAITING_HUMAN 永不终结。
+    （这里没走 `MockLLMAdapter` 里那条同名兜底，因为本类整个覆写了 `complete`。）
     """
 
     def __init__(self, **kw) -> None:
@@ -90,6 +92,11 @@ class _RouterLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:  # recognize_intent
             return self._stream(MockResponse(text=""), request)
+        if "control__report_task_outcome" in names:   # 判定回合（前台或后台）
+            return self._stream(MockResponse(tool_calls=[ToolCall(
+                id=self._id(), name="control__report_task_outcome",
+                arguments={"task_status": "success", "act_recap": "seg", "task_summary": "ok"},
+            )]), request)
         # act：finish_task 收尾（interaction_mode=interactive 的 root task 只能靠工具调用收尾，
         # 纯文本只会 park 等用户 —— 这里要让它真正跑完一个回合并终结，故显式 finish）。
         return self._stream(
@@ -161,7 +168,7 @@ _TEXT_ONLY_PROMPT = [TextPart(text="describe this image")]
 
 
 class _FinishRouterLLM(MockLLMAdapter):
-    """同 _RouterLLM，抽出复用：recognize_intent → 空；act → finish_task 收尾。"""
+    """同 _RouterLLM，抽出复用：recognize_intent → 空；判定回合 → success；act → finish_task。"""
 
     def __init__(self, **kw) -> None:
         super().__init__(responses=[], **kw)
@@ -176,6 +183,15 @@ class _FinishRouterLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:
             return self._stream(MockResponse(text=""), request)
+        if "control__report_task_outcome" in names:
+            # 判定回合。2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），而
+            # verdict 缺失 ≡ retry——不应这一轮，task 停在 AWAITING_HUMAN，下面等 FINISHED 就
+            # 永远等不到。本类整个覆写了 `complete`，走不到 `MockLLMAdapter` 里那条同名兜底
+            # （而且那条兜底刻意不替人判 success）。
+            return self._stream(MockResponse(tool_calls=[ToolCall(
+                id=self._id(), name="control__report_task_outcome",
+                arguments={"task_status": "success", "act_recap": "seg", "task_summary": "ok"},
+            )]), request)
         return self._stream(
             MockResponse(
                 text="ok",
@@ -252,6 +268,14 @@ class _WireCapturingAnthropicAdapter(AnthropicMultimodalAdapter):
         names = {t.get("name", "") for t in (payload.get("tools") or [])}
         if "control__update_task_metadata" in names:
             return self._fake_stream(text="", tool_calls=[])
+        if "control__report_task_outcome" in names:
+            # 判定回合。2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），而
+            # verdict 缺失 ≡ retry——不应这一轮，`_run_multimodal_session` 里那句
+            # 「expected FINISHED」就永远等不到。
+            return self._fake_stream(text="", tool_calls=[ToolCall(
+                id=self._id(), name="control__report_task_outcome",
+                arguments={"task_status": "success", "act_recap": "seg", "task_summary": "ok"},
+            )])
         return self._fake_stream(
             text="ok",
             tool_calls=[ToolCall(

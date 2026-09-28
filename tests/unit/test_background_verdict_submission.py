@@ -70,8 +70,16 @@ def _meta(outcome: str = "success", **kw) -> dict:
 
 # ── 只有 plain_text 判定 ──────────────────────────────────────────────────────
 
-def test_only_plain_text_boundary_judges() -> None:
+def test_the_two_yielding_boundaries_judge() -> None:
+    """产 verdict 的恰是「让位给人」的那两个：说了段话（`plain_text`）与宣布做完了
+    （`finish_park`，S-b 2026-09-27）。root 上这两种收尾不该一个被复核、一个不被。
+
+    `finish` / `normal` 是**不让位**的那条 finish_task（无人值守 / 子任务 / 无 hitl），判定由
+    前台给出；`mechanical` 是机械判决刚判过；`interrupt` / `dispatch` 压根不是一个结局。后台
+    再判一次只会把那份判决覆盖掉。
+    """
     assert _judges("plain_text") is True
+    assert _judges("finish_park") is True
     for boundary in ("mechanical", "finish", "normal", "interrupt", "dispatch"):
         assert _judges(boundary) is False, f"{boundary} 不该产 verdict"
 

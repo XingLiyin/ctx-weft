@@ -127,11 +127,20 @@ class _ActRouterLLM(MockLLMAdapter):
     出现在下一轮送给模型的 prompt 里」（而不仅仅是「memory 里有 TOOL_RESULT」）。
     """
 
-    def __init__(self, act_responses: list[MockResponse], **kw) -> None:
+    def __init__(self, act_responses: list[MockResponse], *,
+                 observer_verdicts: list[str] | None = None, **kw) -> None:
         super().__init__(responses=[], **kw)
         self._act_responses = list(act_responses)
         self._act_idx = 0
         self.act_requests: list = []
+        #: 每次判定回合依次回什么，**末项粘滞**（用完就一直用最后那个）。默认 `["retry"]`
+        #: ——本文件测的是「人回来接着说」，观察者说「还没做完」正是那个语义。
+        #:
+        #: 要序列而不是单值：2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），
+        #: 于是「先纯文本 park 等人、人回话后 finish_task 收尾」这种用例一轮里会被判两次，
+        #: 而它要的是先 retry（保住那次 park）后 success（真收尾）。
+        self._observer_verdicts = list(observer_verdicts or ["retry"])
+        self._obs_idx = 0
 
     def complete(self, request, stream: bool = True):
         self.last_request = request
@@ -144,11 +153,18 @@ class _ActRouterLLM(MockLLMAdapter):
             # 门让它在调 LLM 之前就早退，于是这个分支从来不需要存在；没有它，后台会偷吃
             # 一个 act 响应，把队列顺序整个打乱。
             #
-            # 判 `retry`：本文件的用例测的是「人回来接着说」，对应的正是观察者说「还没
-            # 做完」。判 success 会让 task 终结、park 随之消失，那是另一条路径的语义。
+            # 判决默认 `retry`：本文件的用例测的是「人回来接着说」，对应的正是观察者说
+            # 「还没做完」。判 success 会让 task 终结、park 随之消失，那是另一条路径的语义。
+            #
+            # 但**别的文件会 import 这个替身**（`test_task_human_resolved_e2e`），它们要的
+            # 恰恰是「这一轮真的做完了」——2026-09-27 起 root 的 `finish_task` 也 park + 后台
+            # 判定（S-b），默认 retry 会让那些用例永远等不到终态。故留一个构造参数。
+            verdict = self._observer_verdicts[
+                min(self._obs_idx, len(self._observer_verdicts) - 1)]
+            self._obs_idx += 1
             return self._stream(MockResponse(tool_calls=[ToolCall(
-                id="obs_bg", name="control__report_task_outcome",
-                arguments={"task_status": "retry", "act_recap": "观察者：本段小结"},
+                id=f"obs_bg{self._obs_idx}", name="control__report_task_outcome",
+                arguments={"task_status": verdict, "act_recap": "观察者：本段小结"},
             )]), request)
         self.act_requests.append(request)
         response = self._act_responses[self._act_idx]
@@ -240,7 +256,11 @@ async def test_hot_approval_rewrites_arguments_and_result_reaches_the_model() ->
     - 工具结果没有真正回灌进下一轮发给 LLM 的 prompt（例如结果只写了 memory 却没被
       装配进下一轮 messages）。
     """
-    llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()])
+    # 判定 `success`：2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），而
+    # verdict 缺失 ≡ retry——本用例只有 finish_task 那一次判定（审批的冷/热 park 不起后台
+    # 观察），不给它判决下面等终态就永远等不到。
+    llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()],
+                        observer_verdicts=["success"])
     runtime, tool = _make_runtime_with_bash_tool(llm)
 
     handle = await runtime.start_session(SessionStartParams.create(
@@ -293,7 +313,11 @@ async def test_cold_approval_reconciles_and_invokes_the_tool_exactly_once() -> N
       本设计要堵住的洞，故断言的是**计数**而非「发生过」；
     - 改写后的参数在冷路径上丢失（只放行、参数打回原样）。
     """
-    llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()])
+    # 判定 `success`：2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），而
+    # verdict 缺失 ≡ retry——本用例只有 finish_task 那一次判定（审批的冷/热 park 不起后台
+    # 观察），不给它判决下面等终态就永远等不到。
+    llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()],
+                        observer_verdicts=["success"])
     runtime, tool = _make_runtime_with_bash_tool(llm, hitl_timeout_sec=0)
 
     handle = await runtime.start_session(SessionStartParams.create(
@@ -352,7 +376,9 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
     """
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    llm = _ActRouterLLM(act_responses=[
+    # 判定 `success`：唯一那次判定来自 finish_task 收尾（S-b）；`ask_user` 的冷 park 不起
+    # 后台观察。不给判决 → verdict 缺失 ≡ retry → 下面断言 FINISHED 会超时。
+    llm = _ActRouterLLM(observer_verdicts=["success"], act_responses=[
         MockResponse(text="", tool_calls=[ToolCall(
             id="tc_ask", name="control__ask_user",
             arguments={"questions": [{"question": "Which DB?"}]},
@@ -443,7 +469,10 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
     - 重复应答被误当作新事实处理，写出第二条注入（无论是因为 `resolve()` 对已终局请求
       不再幂等，还是因为幂等键失效）。
     """
-    llm = _ActRouterLLM(act_responses=[
+    # 判定序列 retry → success：这一轮会被判两次。纯文本让位那一段必须判 retry 才保得住
+    # 那次 park（本用例正要测它）；人应答之后 finish_task 收尾那一段要判 success，否则
+    # 2026-09-27 起（S-b）它同样 park，下面等 FINISHED 就永远等不到。
+    llm = _ActRouterLLM(observer_verdicts=["retry", "success"], act_responses=[
         MockResponse(text="Hi! Anything else?"),  # 纯文本、无 tool_call → 冷 park
         _finish_call(),
     ])
