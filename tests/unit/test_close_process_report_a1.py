@@ -5,7 +5,7 @@
    _synthesize_dispatch_pair 合成的 finish tool 记录 == "Process Report: 好报告"。
 2. test_a1_placeholder_then_async_replace — 槽空 → 先用占位；随后 bg 回调替换；
    旧记录被 supersede，新记录 content=="Process Report: 好报告"，tool_call_id 配对完整。
-3. test_a1_no_await_blocking — _synthesize_dispatch_pair 不调 await_pending_background_observe。
+3. test_a1_no_await_blocking — _synthesize_dispatch_pair 不调 await_pending_recap。
 """
 from __future__ import annotations
 
@@ -14,11 +14,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps import background_observe as bg_mod
-from ctx_weft.core.loop.steps.background_observe import (
-    _replace_finish_report,
+from ctx_weft.core.loop.background import runner
+from ctx_weft.core.loop import finish_pair as fp
+from ctx_weft.core.loop.finish_pair import (
     pop_close_report,
     register_close_synth,
+    replace_finish_report,
 )
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
 from ctx_weft.core.models.task import NormalTaskSettings, Task
@@ -83,13 +84,13 @@ async def _get_finish_asst(mem: InMemoryMemoryProvider, scope: MemoryAddress) ->
 @pytest.fixture(autouse=True)
 def _clear_bg_dicts():
     """每个测试前后清空 _close_report 和 _close_synth，隔离状态。"""
-    bg_mod._close_report.clear()
-    if hasattr(bg_mod, "_close_synth"):
-        bg_mod._close_synth.clear()
+    fp._close_report.clear()
+    if hasattr(fp, "_close_synth"):
+        fp._close_synth.clear()
     yield
-    bg_mod._close_report.clear()
-    if hasattr(bg_mod, "_close_synth"):
-        bg_mod._close_synth.clear()
+    fp._close_report.clear()
+    if hasattr(fp, "_close_synth"):
+        fp._close_synth.clear()
 
 
 # ─── TEST 1: slot hit ─────────────────────────────────────────────────────────
@@ -109,7 +110,7 @@ async def test_a1_slot_hit_uses_background_report() -> None:
     task = _make_task()
 
     # 预置 bg 结果（background 先到）——两段化 tuple
-    bg_mod._close_report["t1"] = ("好报告_act", "好报告_sum")
+    fp._close_report["t1"] = ("好报告_act", "好报告_sum")
 
     await _synthesize_dispatch_pair(mem, asc, task, "占位 act_recap", "占位 task_summary", "success", _pctx())
 
@@ -128,8 +129,8 @@ async def test_a1_slot_hit_uses_background_report() -> None:
     assert pop_close_report("t1") is None, "_close_report slot must be cleared after pop"
 
     # _close_synth 不应登记（slot 命中不需要异步替换）
-    if hasattr(bg_mod, "_close_synth"):
-        assert "t1" not in bg_mod._close_synth, (
+    if hasattr(fp, "_close_synth"):
+        assert "t1" not in fp._close_synth, (
             "slot hit must NOT register _close_synth (no async replace needed)"
         )
 
@@ -169,24 +170,24 @@ async def test_a1_placeholder_then_async_replace() -> None:
     )
 
     # _close_synth 已登记
-    assert hasattr(bg_mod, "_close_synth"), "background_observe must have _close_synth dict"
-    assert "t1" in bg_mod._close_synth, (
+    assert hasattr(fp, "_close_synth"), "finish_pair must have the _close_synth slot"
+    assert "t1" in fp._close_synth, (
         "_close_synth must have t1 registered after placeholder path"
     )
-    synth = bg_mod._close_synth["t1"]
+    synth = fp._close_synth["t1"]
     registered_tool_call_id = synth[0]
     registered_scope = synth[1]
     assert registered_tool_call_id == placeholder_tool_call_id, (
         "registered tool_call_id must match placeholder finish tool"
     )
 
-    # 模拟 bg 回调：先 pop_close_synth（正如 _run_background_observe 那样），再调 _replace_finish_report
-    from ctx_weft.core.loop.steps.background_observe import pop_close_synth
+    # 模拟 bg 回调：先 pop_close_synth（正如 _run_recap 那样），再调 _replace_finish_report
+    from ctx_weft.core.loop.finish_pair import pop_close_synth
     popped = pop_close_synth("t1")
     assert popped is not None, "pop_close_synth must return the registered synth"
     p_tool_call_id, p_scope, p_outcome, p_raw_fold_scope = popped
     assert p_raw_fold_scope is None, "未传 raw_fold_scope 时登记应为 None（无延迟折叠）"
-    await _replace_finish_report(
+    await replace_finish_report(
         mem, _pctx(), p_scope, "t1",
         p_tool_call_id, "好报告_act", "好报告_sum", p_outcome, task.title,
     )
@@ -219,7 +220,7 @@ async def test_a1_placeholder_then_async_replace() -> None:
     )
 
     # _close_synth 应已被 pop_close_synth 清空
-    assert "t1" not in bg_mod._close_synth, (
+    assert "t1" not in fp._close_synth, (
         "_close_synth must be cleared after pop_close_synth in bg callback simulation"
     )
 
@@ -227,14 +228,14 @@ async def test_a1_placeholder_then_async_replace() -> None:
 # ─── TEST 3: no blocking await ────────────────────────────────────────────────
 
 async def test_a1_no_await_blocking(monkeypatch) -> None:
-    """_synthesize_dispatch_pair 不调 await_pending_background_observe（非阻塞）。"""
+    """_synthesize_dispatch_pair 不调 await_pending_recap（非阻塞）。"""
     called = []
 
     async def _fake_await(task_id: str) -> None:
         called.append(task_id)
 
     # Monkeypatch the function in the background_observe module
-    monkeypatch.setattr(bg_mod, "await_pending_background_observe", _fake_await)
+    monkeypatch.setattr(runner, "await_pending_recap", _fake_await)
 
     mem = InMemoryMemoryProvider()
     tsc = _task_scope("t1")
@@ -247,7 +248,7 @@ async def test_a1_no_await_blocking(monkeypatch) -> None:
     await _synthesize_dispatch_pair(mem, asc, task, "act_recap", "task_summary", "success", _pctx())
 
     assert called == [], (
-        f"_synthesize_dispatch_pair must NOT call await_pending_background_observe (A1 non-blocking); "
+        f"_synthesize_dispatch_pair must NOT call await_pending_recap (A1 non-blocking); "
         f"called with: {called}"
     )
 
@@ -274,7 +275,7 @@ async def test_slot_hit_replaces_report_no_raw_mirror() -> None:
     await _ingest_user_plus_raw(mem, tsc)
 
     task = _make_task()
-    bg_mod._close_report["t1"] = ("真实段_act", "真实段总结")  # background 先完成（两段化 tuple）
+    fp._close_report["t1"] = ("真实段_act", "真实段总结")  # background 先完成（两段化 tuple）
 
     await _synthesize_dispatch_pair(mem, asc, task, "占位_act", "占位_sum", "success", _pctx())
 
@@ -356,7 +357,7 @@ async def test_synthesize_dispatch_pair_two_segments() -> None:
 @pytest.mark.filterwarnings("ignore::pytest.PytestWarning")
 def test_finish_tool_text_falls_back():
     """_finish_tool_text 优先用 task_summary；空则退 act_recap；都空给占位（不掺 outputs）。"""
-    from ctx_weft.core.loop.steps.finalize import _finish_tool_text
+    from ctx_weft.core.loop.finish_pair import _finish_tool_text
     # task_summary（process report）优先；空则退 act_recap；都空给占位（不掺 outputs——outputs 在 call 入参）
     assert _finish_tool_text("综合 process report", "recap", "success") == "综合 process report"
     assert _finish_tool_text("", "recap", "success") == "recap"

@@ -58,10 +58,8 @@ from ctx_weft.core.loop.steps import (
     PrepareStep,
     RecognizeIntentStep,
 )
-from ctx_weft.core.loop.steps.background_observe import (
-    launch_background_observe,
-    register_close_synth,
-)
+from ctx_weft.core.loop.finish_pair import register_close_synth
+from ctx_weft.core.loop.background import launch_recap
 from ctx_weft.core.loop.steps.compact import CompactStep
 from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
@@ -370,7 +368,7 @@ class TurnHandle:
         `RunFinished`——一轮 run 结束不等于这条 task 结束（还可能有 finalize、还可能
         被重排再跑一轮）；而即便等到了三个终态事件之一（同 `TERMINAL_TASK_STATUSES`），
         触发它的那次 close 边界后台 observe 仍可能还没跑完——它是 `ObserveStep` 里
-        fire-and-forget 出去的（`background_observe.launch_background_observe`），
+        fire-and-forget 出去的（`background.launch_recap`），
         与「task 进终态」这两件事之间没有天然的先后保证，只是一场 asyncio 调度竞态
         （下面第 2 部分有实测证据）。`TaskFailed`/`TaskCanceled` 不受影响——见下面
         「不会挂起」——依旧在终态事件到达后就近乎立即返回。
@@ -402,7 +400,7 @@ class TurnHandle:
         ## 3. 被否决的替代方案：直接 `await` 那个 `asyncio.Task`
 
         第一版实现直接等后台 observe 的 `asyncio.Task` 对象本身
-        （`background_observe.await_pending_background_observe` + `asyncio.shield`，
+        （`background.await_pending_recap` + `asyncio.shield`，
         `_run_loop` 入口、`_inject_user_reply` 用的正是这条路）。这条路被**实测证否**：
         `TaskManager._fire_session_done` 也在等同一个后台任务收尾（`asyncio.gather(
         *self._background_asyncio_tasks)`），且它的等待从 `_run_task` 发出
@@ -434,15 +432,15 @@ class TurnHandle:
         这一轮终态事件之后、这一轮 `TaskRecapDone` 之前才姗姗来迟地送达。第一版实现
         只按 `ev2.type is EventType.TASK_RECAP_DONE` 匹配，等到的可能是**任意一次**
         launch 发的、不一定是这一次终态触发的那次——同一个 bug 在更窄的窗口里复现。
-        `pending_background_observe_run_id` 返回的不是 bool，是这一次在途 launch 的
-        `run_id`（`launch_background_observe` 给每次 launch 铸的独立 `run_id`，
+        `pending_recap_run_id` 返回的不是 bool，是这一次在途 launch 的
+        `run_id`（`launch_recap` 给每次 launch 铸的独立 `run_id`，
         `make_event` 把它写进事件信封；`TaskRecapDone` 不例外——见其 docstring）；
         下面同时匹配 `ev2.type` 与 `ev2.run_id == pending_run_id`，把「等哪次折叠」
         钉死到具体那次 launch，不是「这个 task_id 底下随便哪次」。
 
         ## 5. 为什么不会挂起
 
-        `pending_background_observe_run_id` 只做一次同步字典读（无 await，见其
+        `pending_recap_run_id` 只做一次同步字典读（无 await，见其
         docstring）：终态事件到达那一刻，若查到确有在途后台任务，才继续在同一条流上
         等**那次 launch 自己的** `TaskRecapDone`；查不到（这次终态没触发 close 边界，
         或走的是熔断收尾等从不 launch 它的路径）就是 no-op，立即返回——不会为不存在
@@ -486,9 +484,7 @@ class TurnHandle:
         事件（重试等罕见情形）不会重新触发它。
         """
         from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
-        from ctx_weft.core.loop.steps.background_observe import (
-            pending_background_observe_run_id,
-        )
+        from ctx_weft.core.loop.background import pending_recap_run_id
         from ctx_weft.protocols.events import EventFilter
         terminal = {
             et for et, st in TASK_STATUS_BY_EVENT.items() if st in TERMINAL_TASK_STATUSES
@@ -521,7 +517,7 @@ class TurnHandle:
                         if waiting_for_run_id is not None and ev.run_id == waiting_for_run_id:
                             return self._state
                     if waiting_for_run_id is None and ev.type in terminal:
-                        pending_run_id = pending_background_observe_run_id(self.task_id)
+                        pending_run_id = pending_recap_run_id(self.task_id)
                         if pending_run_id is None:
                             return self._state
                         if pending_run_id in seen_recap_run_ids:
@@ -2849,11 +2845,11 @@ class CtxWeftRuntime:
         """恢复：重建 LoopState 重跑一个被崩溃打断的段 recap，登记到传入 TM（track_background）。
 
         close 边界（finish/normal）：先从 memory 读占位 finish 对 tool_call_id + 据 task 状态定 outcome，
-        register_close_synth，使重跑经 _replace_finish_report 替换占位对。best-effort：任何一步失败记日志、跳过。
+        register_close_synth，使重跑经 replace_finish_report 替换占位对。best-effort：任何一步失败记日志、跳过。
         """
         import dataclasses as _dc
 
-        from ctx_weft.core.loop.steps.background_observe import _CLOSE_BOUNDARIES
+        from ctx_weft.core.loop.background import CLOSE_BOUNDARIES
         try:
             lm = self._agent_lifecycle_manager
             # 水合，不新建：这是重跑一个已存在 agent 打断的段 recap。register_session
@@ -2884,18 +2880,18 @@ class CtxWeftRuntime:
                 run_id=generate_id("run"), session=session, task=task, agent=agent,
                 scope=scope, extra={"template": template}, resolved_model=rm,
                 # 孤儿 run：不走 StepDriver.run，构造时显式钉住 origin，否则
-                # launch_background_observe 内部经 make_event(state, ...) 发的
+                # launch_recap 内部经 make_event(state, ...) 发的
                 # 事件 origin 都会是空串。
                 origin=EventOrigin.LOOP_BACKGROUND_OBSERVE,
             )
-            if boundary in _CLOSE_BOUNDARIES:
+            if boundary in CLOSE_BOUNDARIES:
                 tcid = await self._find_finish_pair_tool_call_id(memory, scope, task.id, provider_ctx)
                 if tcid is not None:
                     outcome = "fail" if task.status == "FAILED" else "success"
                     # raw_fold_scope=scope：pending close recap 只在规则 observe 占位 close 时
                     # 存在（延迟折叠，raw 尚 active），重跑替换成功后补删；对已折 raw 是幂等 no-op。
                     register_close_synth(task.id, tcid, scope, outcome, scope)
-            launch_background_observe(state, loop_ctx, boundary=boundary)
+            launch_recap(state, loop_ctx, boundary=boundary)
         except Exception:
             logger.exception("recover: failed to relaunch task recap for task=%s", task.id)
 
@@ -4176,7 +4172,7 @@ class CtxWeftRuntime:
         # 新输入。2026-09-22 拆除——问题的根不在时间戳（`segment_fold` 的锚点早就取
         # `following[0].timestamp - 1μs`、不用 `now_utc()`），在段界是动态查找的：新
         # USER_PROMPT 一落库就成了「最后一条 user 回合」，折叠池随之变空。改由
-        # `launch_background_observe` 钉住段界水位线，迟到的折叠自己落回原位，这里不必
+        # `launch_recap` 钉住段界水位线，迟到的折叠自己落回原位，这里不必
         # 再等。人的回复因此不为任何后台 LLM 往返买单。
 
         # agent_id 必须是本 task 对话真正所在的 agent scope——AgentRecallSource 用
@@ -4879,7 +4875,7 @@ class CtxWeftRuntime:
         #
         # recap 的护栏区（幂等护栏/短段门/事件 emit）在其自吞 try 之外、可能以异常终结，
         # 故此处防御吞掉（降级 = 不等待、段保 raw）；shield 保证 run 被取消时不牵连 recap。
-        # **正确性那一半已由段界水位线接管**（`launch_background_observe` 钉住段界，
+        # **正确性那一半已由段界水位线接管**（`launch_recap` 钉住段界，
         # `segment_fold` 按它算折叠池）：迟到的折叠不再抢走段界、也不再排到新消息之后。
         #
         # **剩下的是性能**：不等的话首次装配可能读到上一轮尚未被 supersede 的 raw，拿

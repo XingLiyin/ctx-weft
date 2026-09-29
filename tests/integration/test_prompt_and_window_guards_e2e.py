@@ -104,7 +104,7 @@ async def test_recovery_keeps_exactly_one_prompt(status_event, record_id) -> Non
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
     await rt.rebuild_session(SID)
     with mock.patch(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         return_value=None,
     ):
         await rt.recover_agent(AID)
@@ -143,7 +143,7 @@ async def test_requeued_task_with_revised_prompt_still_writes_it() -> None:
 
     await rt.rebuild_session(SID)
     with mock.patch(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         return_value=None,
     ):
         await rt.recover_agent(AID)
@@ -230,7 +230,7 @@ async def test_truncated_recorded_result_is_not_backfilled() -> None:
 
     await rt.rebuild_session(SID)
     with mock.patch(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         return_value=None,
     ):
         await rt.recover_agent(AID)

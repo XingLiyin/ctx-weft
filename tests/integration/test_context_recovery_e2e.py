@@ -151,7 +151,7 @@ def _wire(monkeypatch, *, digest=_DIGEST, responses=None, inflate_on=frozenset({
         monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
     # 后台 observe 与本文件无关，挡掉以免多消耗 mock 响应。
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         lambda state, ctx, *, boundary: None)
 
     resolver = InlineAgentTemplateProvider()

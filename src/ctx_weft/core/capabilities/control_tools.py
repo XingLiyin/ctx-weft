@@ -496,7 +496,7 @@ def collect_process_report(
     """Record what this segment did. No verdict — this segment is not being adjudicated."""
     # **不写 task，一个字段都不写**（与 `report_task_outcome` 的分野不止于少一个参数）：这一档
     # 的存在意义就是「这个边界不产判决」，而 `observer_outcome` / `actor_done` / `process_report`
-    # 那几个字段全是判决的产物。调用方（`background_observe._run_background_observe`）从
+    # 那几个字段全是判决的产物。调用方（`loop.background.recap`）从
     # metadata 取报告，自己决定写进段摘要还是 close report 槽。
     #
     # 也因此不需要 `ctx.readonly` 那道闸——它保护的是「后台隔着时间改主线程 task 状态」，而这里

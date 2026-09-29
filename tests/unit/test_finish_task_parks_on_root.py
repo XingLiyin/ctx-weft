@@ -31,6 +31,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from ctx_weft.core.loop import background as background_pkg
+from ctx_weft.core.loop.background import runner
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep
 from ctx_weft.protocols import ToolCall
@@ -76,15 +78,14 @@ def _spy_launch(monkeypatch) -> list[str]:
     """拦下 background observe，只记 boundary。act 是在函数体内 import 的，patch 模块属性即中。"""
     import asyncio
 
-    import ctx_weft.core.loop.steps.background_observe as bo
-
+    
     seen: list[str] = []
 
     def _fake(state, ctx, *, boundary=""):
         seen.append(boundary)
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    monkeypatch.setattr(bo, "launch_background_observe", _fake, raising=False)
+    monkeypatch.setattr(background_pkg, "launch_recap", _fake, raising=False)
     return seen
 
 
@@ -114,6 +115,32 @@ async def test_root_finish_task_parks_with_the_finish_park_boundary(monkeypatch)
     # 产出必须在 park **之前**合成好：否则 `report_task_outcome` 的 success-without-outputs
     # 护栏会把判决改判 retry，这个 task 永远终结不了（2026-09-24 那个坑的同形复现）。
     assert task.outputs, "park 之前没合成 outputs——判决会被护栏改判 retry"
+
+
+async def test_no_observe_role_means_no_yielding(monkeypatch) -> None:
+    """模板没有 ROLE → **不让位**，照旧回 observe（2026-09-28）。
+
+    这条不是「少一个可选特性」，是防挂死：park 之后前台 ObserveStep 跑不到
+    （`HitlPark` 在 `runtime._run_loop` unwind 的是 `driver.run` 整个循环），于是 park
+    之后唯一的判决来源就是后台那次带外判决；而没有 ROLE 时后台判定档已降成只摘要档
+    （`_judges` 与 `has_observe_role` 相与）。两头一凑就是「让了位却没人判」，task 永远
+    停在 AWAITING_HUMAN。
+
+    不让位则一切照旧：机械判决拿 `actor_done` 判 success，`FinalizeStep` 正常跑——即
+    S-b 之前那条本来就在的路。
+    """
+    launched = _spy_launch(monkeypatch)
+    gw = _FinishTaskGateway()
+    state, ctx, task, hitl, _mem = _act_state_ctx(
+        False, _finish_llm(), gateway=gw, observe_role=False)
+
+    outcome = await ActStep().execute(state, ctx)  # 不抛 HitlPark
+
+    assert gw.invoked == ["control__finish_task"], "前提不成立：那次工具调用没发生"
+    assert outcome.next_step == "observe"
+    assert outcome.state_patch["act_exit_reason"] == "actor_done"
+    assert launched == [], "没让位就不该起 finish_park 的后台判定"
+    assert hitl.list_pending("s1") == [], "没让位就不该挂等人的气泡"
 
 
 async def test_the_round_ends_with_two_completed_events(monkeypatch) -> None:

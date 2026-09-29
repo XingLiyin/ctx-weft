@@ -51,7 +51,7 @@ from types import SimpleNamespace
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.act import _run_llm_turn
-from ctx_weft.core.loop.steps.observe import run_observe_react
+from ctx_weft.core.loop.observing import run_observe_react
 from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
 from ctx_weft.protocols import LLMUsage, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import ToolCapability

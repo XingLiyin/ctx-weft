@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ctx_weft.core.loop.background import runner
 from ctx_weft.core.control.reducers import fold_hitl_snapshot
 from ctx_weft.core.hitl.registry import PendingHitl
 from ctx_weft.protocols.events import Event, EventType
@@ -69,9 +70,8 @@ async def test_inject_user_reply_reply_visible_to_agent_recall(monkeypatch):
     recall_recent_by_agent (the actor's history path), which filters by scope.agent_id."""
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     from ctx_weft.core import CtxWeftRuntime
-    import ctx_weft.core.loop.steps.background_observe as bo
-
-    monkeypatch.setattr(bo, "_task_pending", {})
+    
+    monkeypatch.setattr(runner, "_task_pending", {})
 
     runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
     mem = InMemoryMemoryProvider()

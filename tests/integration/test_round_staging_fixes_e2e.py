@@ -148,7 +148,7 @@ async def test_restart_after_crash_mid_commit_uses_the_new_answer() -> None:
     pending = [p for p in rt2.hitl_registry.list_pending(session_id=sid) if p.id == q1.id]
     assert pending, "重启后问题必须回到待答"
     with mock.patch(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         return_value=None,
     ):
         await rt2.reply_to_hitl(HitlReply(
@@ -208,7 +208,7 @@ async def test_recovery_restores_an_appended_message_from_the_event_log(message_
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
     await rt.rebuild_session(sid)
     with mock.patch(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         return_value=None,
     ):
         await rt.recover_agent(aid)

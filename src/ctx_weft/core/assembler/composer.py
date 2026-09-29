@@ -151,7 +151,15 @@ if TYPE_CHECKING:
 #: 讲业务。这里放的是那份准则的压缩版，尤其最后一段：那条规则没有任何机械护栏兜着
 #: （success-without-outputs 护栏读 `task.outputs`，而 park 之前合成的 outputs 正是那段提问本身、
 #: 非空，护栏原地失效），只能靠文字。
-_OBSERVER_ROLE_FALLBACK = (
+#: 判定档的 ROLE 兜底——模板没给 observe facet 时顶上。
+#:
+#: 它到得了的场合只剩边角：`request.template is None`，或 facet 存在但正文为空（目录 loader
+#: 产生不了后者，正文空就不写 key；host 自实现的 provider 和测试替身可以）。**正常的「模板没有
+#: ROLE」走不到这里**——那种 agent 判定档压根不开（`_judges` 与 `observe.has_observe_role`
+#: 相与），前台 observe 也走机械判决。
+#:
+#: 与 `_OBSERVER_ROLE_RECAP_FALLBACK` 分开的理由见后者。
+_OBSERVER_ROLE_JUDGE_FALLBACK = (
     "You are the observer in the execution loop. You take over after the actor finishes a segment: "
     "you record what happened and, when asked, judge whether the task is done. You never re-execute "
     "anything and you never decide on the actor's behalf.\n\n"
@@ -164,6 +172,28 @@ _OBSERVER_ROLE_FALLBACK = (
     "between options, a confirmation, or an action only the user can take — the task is not over. "
     "That is `continue`: never `success`, never `fail`. It holds even when the message is polished "
     "and everything the actor could do alone is done."
+)
+
+#: 只摘要档的 ROLE 兜底（2026-09-28 从判定版拆出来）。
+#:
+#: 拆的理由：去掉 default ROLE 兜底之后，「没有 ROLE」成了一个真实配置，而那种 agent **唯一**
+#: 到得了的观察路径就是只摘要档——于是原来那份判定版文案的主要用武之地，恰恰是它最不该出现的
+#: 地方。它三段里有两段半在讲判决（证据标准、完成标准、`continue`/`success`/`fail` 三个字面
+#: 值），而这一档的工具面里没有判决工具、schema 里没有任何字段收那三个值。
+#:
+#: 那正是三面分工（`_JUDGMENT_ASK` 上方那段注释）要消灭的形状：prompt 命令模型做工具面不允许
+#: 的事。`_recap_cue` 连「don't judge」都不说（说了像暗示它有得选），ROLE 位上更不能反过来要求
+#: 它判。
+#:
+#: 保留的是证据纪律——那对摘要的准确性同样成立；删掉的是完成标准与判决词汇。
+_OBSERVER_ROLE_RECAP_FALLBACK = (
+    "You are the observer in the execution loop. You take over after the actor finishes a "
+    "segment and write the account of it: what was attempted, what actually ran, what came of "
+    "it. You never re-execute anything and you never decide on the actor's behalf.\n\n"
+    "Write from what the conversation shows actually happened — tool calls and their results, "
+    "files and data produced — not from the actor's narration of it. Your account replaces those "
+    "turns in memory, so it is the only record a later turn will have of this segment: keep it "
+    "short, but leave out nothing that a later turn would need in order to carry on."
 )
 
 # ── observe 的尾部 cue（拼在 ROLE 之后）───────────────────────────────────────
@@ -314,12 +344,8 @@ _YIELDED_REMINDER = {
                    "task: judge `continue` — never `success`, never `fail`.",
 }
 
-#: 与 loop.steps.background_observe._CLOSE_BOUNDARIES 保持一致（此处避免跨层 import）。
-_CLOSE_BOUNDARIES = {"finish", "normal"}
-
-#: 要产 verdict 的后台边界——即「让位给人」的那两个。与
-#: `loop.steps.background_observe._judges` 保持一致（此处避免跨层 import）。
-_JUDGING_BOUNDARIES = {"plain_text", "finish_park"}
+#: 与 loop.background.boundaries.CLOSE_BOUNDARIES 保持一致（此处避免跨层 import）。
+CLOSE_BOUNDARIES = {"finish", "normal"}
 
 #: 要把 `task.outputs` 注入观察 prompt 的边界，由上表推出（唯一真相源是那张表）。
 _OUTPUTS_BEARING_BOUNDARIES = frozenset(b for b, (_desc, inject) in _BOUNDARY_FACTS.items()
@@ -355,7 +381,7 @@ def _recap_cue(boundary: str) -> str:
         f"Record what happened: call `{COLLECT_PROCESS_REPORT_NAME}` exactly once — no other "
         "tools.\n\nFill `act_recap`."
     )
-    if boundary in _CLOSE_BOUNDARIES:
+    if boundary in CLOSE_BOUNDARIES:
         ask += (" Also fill `task_summary` — the task has ended, so that field carries the whole "
                 "task's process report.")
     return ask
@@ -1188,11 +1214,16 @@ class DefaultComposer(Composer):
         # getattr 防御 + 默认前台：与本函数里 `request.extra` 的取法同一口径（鸭子类型的手构
         # request 在测试里很常见）。判据写成「不是后台」而不是「是前台」，因为后台才是那个特例
         # ——缺 purpose 的调用方要的是判定，不是只摘要。
-        foreground = getattr(request, "purpose", "observe") not in (
-            "background_observe", "background_recap")
+        purpose = getattr(request, "purpose", "observe")
         extra = getattr(request, "extra", {}) or {}
         boundary = extra.get("observe_boundary") or _DEFAULT_BOUNDARY
-        judging = foreground or boundary in _JUDGING_BOUNDARIES
+        # 判不判**只看 purpose**（2026-09-28）：唯一真相源是 `background.boundaries.judges`
+        # 与 `has_observe_role` 相与的结果，它已经体现在调用方选的 purpose 上（判定档
+        # `background_observe` / 只摘要档 `background_recap`）。装配层此前在这里照 boundary
+        # 又判了一遍（一张镜像的 `_JUDGING_BOUNDARIES`），那在「让位边界 + 无 ROLE」这个组合
+        # 上会给出与工具面相反的答案：cue 要它调 `report_task_outcome`，而按 purpose 裁出来的
+        # 工具面里只有 `collect_process_report`。
+        judging = purpose != "background_recap"
         cue = _judgment_cue(boundary) if judging else _recap_cue(boundary)
         # 子任务指名清单只有判定档用得上：判 continue 时要在 `next_step_hint` 里点名哪个子任务的
         # 产出不合格。只摘要档不产 hint，列出来是噪音。
@@ -1210,7 +1241,8 @@ class DefaultComposer(Composer):
             cue,
             extra_sections=self._observe_subtasks_sections(subtasks),
             pre_cue_sections=pre_cue_sections,
-            facet_fallback=_OBSERVER_ROLE_FALLBACK,
+            facet_fallback=(_OBSERVER_ROLE_JUDGE_FALLBACK if judging
+                            else _OBSERVER_ROLE_RECAP_FALLBACK),
         )
 
     @staticmethod

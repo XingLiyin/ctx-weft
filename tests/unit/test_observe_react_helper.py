@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctx_weft.core.loop.steps.observe as _obs_mod
+import ctx_weft.core.loop.observing as _obs_mod
 from ctx_weft.protocols.events import EventOrigin, EventType
-from ctx_weft.core.loop.steps.observe import run_observe_react
+from ctx_weft.core.loop.observing import run_observe_react
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryAddress
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 

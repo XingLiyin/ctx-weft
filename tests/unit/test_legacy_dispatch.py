@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch
+from ctx_weft.protocols._legacy_dispatch import normalize_legacy_dispatch
 from ctx_weft.protocols import MemoryEventType, MemoryRecord
 
 T = MemoryEventType

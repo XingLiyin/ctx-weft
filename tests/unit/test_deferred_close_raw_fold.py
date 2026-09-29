@@ -12,8 +12,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctx_weft.core.loop.steps.background_observe as bo
-import ctx_weft.core.loop.steps.observe as _obs_mod
+import ctx_weft.core.loop.observing as _obs_mod
+from ctx_weft.core.loop.background import recap as recap_mod
+from ctx_weft.core.loop.background import runner
+from ctx_weft.core.loop import finish_pair as fp
 from ctx_weft.core.loop.steps.finalize import finalize_task_memory
 from ctx_weft.core.capabilities.control_tools import (
     COLLECT_PROCESS_REPORT_NAME,
@@ -34,15 +36,15 @@ _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 @pytest.fixture(autouse=True)
 def _clear_bg_state():
-    bo._task_locks.clear()
-    bo._task_pending.clear()
-    bo._close_report.clear()
-    bo._close_synth.clear()
+    recap_mod._task_locks.clear()
+    runner._task_pending.clear()
+    fp._close_report.clear()
+    fp._close_synth.clear()
     yield
-    bo._task_locks.clear()
-    bo._task_pending.clear()
-    bo._close_report.clear()
-    bo._close_synth.clear()
+    recap_mod._task_locks.clear()
+    runner._task_pending.clear()
+    fp._close_report.clear()
+    fp._close_synth.clear()
 
 
 # ─── finalize 侧 helpers（对齐 test_close_task.py）────────────────────────────
@@ -111,7 +113,7 @@ async def test_close_without_llm_summary_keeps_raw_and_registers_fold() -> None:
 
     assert await _active_raw(mem, scope), \
         "无 LLM 总结时 close 不得删末段 raw（占位 finish 对不承载执行内容）"
-    synth = bo._close_synth.get("t1")
+    synth = fp._close_synth.get("t1")
     assert synth is not None, "占位路径须登记 _close_synth 等 bg 替换"
     assert len(synth) == 4 and synth[3] == scope, \
         f"登记须带 raw_fold_scope（task scope）供 bg 替换后补删；实得 {synth!r}"
@@ -143,7 +145,7 @@ async def test_slot_hit_folds_raw_immediately() -> None:
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
     task = _root_task()
-    bo._close_report["t1"] = ("bg_act", "bg_sum")
+    fp._close_report["t1"] = ("bg_act", "bg_sum")
 
     await finalize_task_memory(mem, _state(task, scope), task, "out", "success",
                                _loop_ctx(mem), act_recap="占位 recap", task_summary="",
@@ -155,7 +157,7 @@ async def test_slot_hit_folds_raw_immediately() -> None:
         f"slot 命中 finish tool 应为真报告；实得 {[r.content for r in tool]!r}"
     assert await _active_raw(mem, scope) == [], \
         "真摘要已落地（slot 命中替换后）应立即补删末段 raw"
-    assert "t1" not in bo._close_synth, "slot 命中不需要再登记异步替换"
+    assert "t1" not in fp._close_synth, "slot 命中不需要再登记异步替换"
 
 
 # ─── TEST 4: 同 agent 子任务延迟折叠登记的 raw scope = 子 task scope ──────────
@@ -177,7 +179,7 @@ async def test_same_agent_child_defers_with_child_task_scope() -> None:
                                has_llm_summary=False)
 
     assert await _active_raw(mem, child_scope), "无 LLM 总结时子任务末段 raw 也须保留"
-    synth = bo._close_synth.get("c1")
+    synth = fp._close_synth.get("c1")
     assert synth is not None and len(synth) == 4
     assert synth[3] == child_scope, \
         f"raw_fold_scope 应为子 task scope（raw 所在层）；实得 {synth[3]!r}"
@@ -248,8 +250,8 @@ async def test_bg_replace_success_folds_raw(monkeypatch, fake_state_ctx) -> None
         yield _usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _stream)
-    bo.register_close_synth(state.task.id, "tc9", state.scope, "success", state.scope)
-    await bo.launch_background_observe(state, ctx, boundary="finish")
+    fp.register_close_synth(state.task.id, "tc9", state.scope, "success", state.scope)
+    await runner.launch_recap(state, ctx, boundary="finish")
 
     turns = await ctx.memory.recall_recent(
         state.scope, [T.AGENT_CONVERSATION_TURN], 100, ctx.provider_ctx)
@@ -274,8 +276,8 @@ async def test_bg_no_usable_report_keeps_raw_and_placeholder(monkeypatch, fake_s
         yield _usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
-    bo.register_close_synth(state.task.id, "tc9", state.scope, "success", state.scope)
-    await bo.launch_background_observe(state, ctx, boundary="finish")
+    fp.register_close_synth(state.task.id, "tc9", state.scope, "success", state.scope)
+    await runner.launch_recap(state, ctx, boundary="finish")
 
     raw = await ctx.memory.recall_recent(
         state.scope, [T.LLM_RESPONSE, T.TOOL_RESULT], 100, ctx.provider_ctx)
@@ -284,4 +286,4 @@ async def test_bg_no_usable_report_keeps_raw_and_placeholder(monkeypatch, fake_s
         state.scope, [T.AGENT_CONVERSATION_TURN], 100, ctx.provider_ctx)
     assert sorted(r.content for r in turns) == ["占位 recap", "占位 summary"], \
         "占位 finish 对保持原样"
-    assert bo._close_synth == {}, "登记须弹掉防泄漏"
+    assert fp._close_synth == {}, "登记须弹掉防泄漏"

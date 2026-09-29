@@ -4,7 +4,8 @@
   agents/
     default/
       SOUL.md    frontmatter(name/version/description/tools/loop_config) + body(actor soul)
-      ROLE.md    frontmatter(tools) + body(observer role)（可选）
+      ROLE.md    frontmatter(tools) + body(observer role)（可选；缺了 = 这个 agent 没有
+                 observer，见 core/loop/steps/observe.py::has_observe_role 的三个下游）
 
 SOUL.md frontmatter 示例：
   ---
@@ -269,15 +270,3 @@ def _parse_yaml(text: str) -> dict[str, Any]:
         i += 1
 
     return result
-
-
-# ── 默认 facet 合并（自 host resolver.py 上移）───────────────────────────────
-
-DEFAULT_MERGE_PURPOSES = ("compact", "recognize_intent", "observe")
-
-
-def merge_default_facets(template: AgentTemplate, default: AgentTemplate, purposes) -> None:
-    """Fill the template's missing identity facets (in-place) from the default template."""
-    for purpose in purposes:
-        if purpose not in template.identity and purpose in default.identity:
-            template.identity[purpose] = default.identity[purpose]

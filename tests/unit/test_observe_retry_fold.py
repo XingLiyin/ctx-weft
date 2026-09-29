@@ -163,7 +163,7 @@ def test_should_use_llm_on_root_context_limit():
     去当段摘要。root 门删掉之后那条特例成了死码，一并删了；现在它绿是因为**根本没有 root
     降级可绕**。
     """
-    template = SimpleNamespace(identity={"observe": object()})
+    template = SimpleNamespace(identity={"observe": SimpleNamespace(text="ROLE")})
     state = SimpleNamespace(
         extra={"template": template},
         act_exit_reason="context_limit",

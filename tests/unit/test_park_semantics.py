@@ -18,6 +18,8 @@ from types import SimpleNamespace
 import pytest
 
 import ctx_weft.core.loop.steps.act as act
+from ctx_weft.core.loop import background as background_pkg
+from ctx_weft.core.loop.background import runner
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.models.agent import Agent
@@ -84,15 +86,14 @@ def _spy_observe(monkeypatch) -> list[str]:
     """拦下 background observe：act 是在函数体内 import 的，patch 模块属性即可命中。"""
     import asyncio
 
-    import ctx_weft.core.loop.steps.background_observe as bo
-
+    
     launched: list[str] = []
 
     def _fake(state, ctx, *, boundary=""):
         launched.append(boundary)
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    monkeypatch.setattr(bo, "launch_background_observe", _fake, raising=False)
+    monkeypatch.setattr(background_pkg, "launch_recap", _fake, raising=False)
     return launched
 
 

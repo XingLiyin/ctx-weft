@@ -1,4 +1,4 @@
-"""Task 5 & 13: 在交互 / finish 段边界接线 launch_background_observe 的接线单测。
+"""Task 5 & 13: 在交互 / finish 段边界接线 launch_recap 的接线单测。
 
 测试四个触发点（均为 root-gated）：
   1. observe.py ask_human 边界（act_exit_reason="normal"，root task）→ 触发一次
@@ -131,7 +131,7 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
 
 
 async def test_observe_ask_human_boundary_fires_for_root(monkeypatch):
-    """root task, act_exit_reason='normal' → launch_background_observe called once."""
+    """root task, act_exit_reason='normal' → launch_recap called once."""
     launched = []
 
     def fake_launch(state, ctx, *, boundary=""):
@@ -140,13 +140,13 @@ async def test_observe_ask_human_boundary_fires_for_root(monkeypatch):
         fut.set_result(None)
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
 
-    # Patch launch_background_observe in observe module's namespace
+    # Patch launch_recap in observe module's namespace
     import ctx_weft.core.loop.steps.observe as obs_mod
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch,
         raising=False,
     )
@@ -163,17 +163,17 @@ async def test_observe_ask_human_boundary_fires_for_root(monkeypatch):
 
 
 async def test_observe_finish_fires_for_root(monkeypatch):
-    """root task, act_exit_reason='actor_done' → launch_background_observe called once."""
+    """root task, act_exit_reason='actor_done' → launch_recap called once."""
     launched = []
 
     def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch,
         raising=False,
     )
@@ -194,7 +194,7 @@ async def test_observe_child_task_does_not_fire_close_boundary(monkeypatch):
 
     Task 4 起它仍会 launch 一次，但边界是 "mechanical"：该子任务无 observe ROLE
     （template=None）→ 走机械判决，判决无摘要，摘要交 background observe 补。
-    close 边界仍严格只属 root——mechanical 不在 _CLOSE_BOUNDARIES，不写 _close_report。
+    close 边界仍严格只属 root——mechanical 不在 CLOSE_BOUNDARIES，不写 _close_report。
     """
     launched = []
 
@@ -202,10 +202,10 @@ async def test_observe_child_task_does_not_fire_close_boundary(monkeypatch):
         launched.append((state.task.id, boundary))
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch,
         raising=False,
     )
@@ -215,9 +215,9 @@ async def test_observe_child_task_does_not_fire_close_boundary(monkeypatch):
 
     await ObserveStep().execute(state, ctx)
 
-    from ctx_weft.core.loop.steps.background_observe import _CLOSE_BOUNDARIES
+    from ctx_weft.core.loop.background.boundaries import CLOSE_BOUNDARIES
     assert launched == [("t2", "mechanical")], launched
-    assert not [b for _, b in launched if b in _CLOSE_BOUNDARIES], (
+    assert not [b for _, b in launched if b in CLOSE_BOUNDARIES], (
         f"child task must never take a close boundary, got {launched}")
 
 
@@ -225,17 +225,17 @@ async def test_observe_child_task_does_not_fire_close_boundary(monkeypatch):
 
 
 def _spy_launch(monkeypatch) -> list:
-    """把 `launch_background_observe` 换成记录器，返回 (task_id, boundary) 列表。"""
+    """把 `launch_recap` 换成记录器，返回 (task_id, boundary) 列表。"""
     launched: list = []
 
     def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id, boundary))
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch,
         raising=False,
     )
@@ -244,7 +244,7 @@ def _spy_launch(monkeypatch) -> list:
 
 def _with_observe_role(state) -> None:
     """给 state 装上一个有 observe facet 的 template，让 `_should_use_llm` 放行。"""
-    state.extra["template"] = SimpleNamespace(identity={"observe": object()})
+    state.extra["template"] = SimpleNamespace(identity={"observe": SimpleNamespace(text="ROLE")})
 
 
 async def test_foreground_verdict_cancels_the_close_boundary_recap(monkeypatch):
@@ -309,7 +309,7 @@ async def test_a_failed_foreground_verdict_still_gets_the_close_boundary_recap(m
 
 
 async def test_act_soft_interrupt_fires_for_root(monkeypatch):
-    """act soft-interrupt park (_park_for_interrupt, root task) → launch_background_observe called once."""
+    """act soft-interrupt park (_park_for_interrupt, root task) → launch_recap called once."""
     from ctx_weft.core.control.tokens import PauseToken
     from ctx_weft.core.loop.steps.act import ActStep
     from tests.hitl_env import make_hitl
@@ -323,10 +323,10 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch,
         raising=False,
     )
@@ -370,7 +370,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
 
 
 async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
-    """act soft-interrupt park with child task → launch_background_observe NOT called."""
+    """act soft-interrupt park with child task → launch_recap NOT called."""
     from ctx_weft.core.control.tokens import PauseToken
     from ctx_weft.core.loop.steps.act import ActStep
     from tests.hitl_env import make_hitl
@@ -384,10 +384,10 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch,
         raising=False,
     )
@@ -430,7 +430,7 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
 
 
 async def test_act_plain_text_pause_fires_for_root(monkeypatch):
-    """act plain-text pause (_park_await_user, root task, interactive) → launch_background_observe called once."""
+    """act plain-text pause (_park_await_user, root task, interactive) → launch_recap called once."""
     from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
     from tests.hitl_env import make_hitl
     from ctx_weft.providers.events import InProcessEventBus
@@ -441,10 +441,10 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch,
         raising=False,
     )
@@ -494,10 +494,10 @@ async def test_act_plain_text_pause_child_task_fires(monkeypatch):
         launched.append((state.task.id,))
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch,
         raising=False,
     )
@@ -556,17 +556,17 @@ def _make_suspend_state_ctx(task: Task):
 
 
 async def test_suspend_step_fires_dispatch_boundary_for_root(monkeypatch):
-    """root task delegate suspend → launch_background_observe(boundary='dispatch') once."""
+    """root task delegate suspend → launch_recap(boundary='dispatch') once."""
     launched = []
 
     def fake_launch(state, ctx, *, boundary=""):
         launched.append((state.task.id, boundary))
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch, raising=False,
     )
 
@@ -586,10 +586,10 @@ async def test_suspend_step_fires_dispatch_boundary_for_child(monkeypatch):
         launched.append((state.task.id, boundary))
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    from ctx_weft.core.loop.background import runner as bo_mod
     monkeypatch.setattr(bo_mod, "_task_pending", {})
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         fake_launch, raising=False,
     )
 

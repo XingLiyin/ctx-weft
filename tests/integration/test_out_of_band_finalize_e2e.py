@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.loop.steps.background_observe import _out_of_band_finalize
+from ctx_weft.core.loop.background.verdict import _out_of_band_finalize
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session

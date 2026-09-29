@@ -201,7 +201,9 @@ def test_mechanical_verdict_no_transcript_is_fail() -> None:
 
 
 def _llm_gate_state(exit_reason: str, parent_task_id, has_role: bool = True):
-    identity = {"observe": SimpleNamespace()} if has_role else {}
+    # 正文非空才算「有 ROLE」（与装配层同口径，见 `has_observe_role`）——空正文的 facet
+    # 在 composer 那边会被当成不存在、改用框架兜底文案。
+    identity = {"observe": SimpleNamespace(text="ROLE")} if has_role else {}
     return SimpleNamespace(
         extra={"template": SimpleNamespace(identity=identity)},
         act_exit_reason=exit_reason,
@@ -297,7 +299,7 @@ def test_the_observer_fallback_carries_the_judgement_criteria() -> None:
     「这一次做什么」、schema 只说「字段是什么」——那么没有 ROLE 的 agent 就等于什么判断准则都
     没有。而「向用户要东西一律 continue」这条**没有任何机械护栏**兜着，只能靠文字。
     """
-    from ctx_weft.core.assembler.composer import _OBSERVER_ROLE_FALLBACK as fb
+    from ctx_weft.core.assembler.composer import _OBSERVER_ROLE_JUDGE_FALLBACK as fb
 
     assert "never re-execute" in fb and "never decide on the actor's behalf" in fb
     assert "is not evidence" in fb, "证据准则丢了"
@@ -305,6 +307,20 @@ def test_the_observer_fallback_carries_the_judgement_criteria() -> None:
     # 字段语义不在这里（那在工具 schema 上），别把 ROLE 写成第二份契约。
     for leaked in ("## Progress So Far", "whichever comes later", "First person"):
         assert leaked not in fb, f"兜底身份复述了字段语义：{leaked!r}"
+
+
+def test_the_recap_fallback_carries_no_judgement_at_all() -> None:
+    """只摘要档的兜底身份**不得**谈判决（2026-09-28 从判定版拆出来）。
+
+    这一档的工具面里没有判决工具、schema 里没有任何字段收 `continue`/`success`/`fail`。ROLE
+    位上要求它判，就是 prompt 命令模型做工具面不允许的事——三面分工那一轮刚消灭的形状。而且
+    这一档正是「没有 ROLE 的 agent」唯一到得了的观察路径，兜底文案在这里最要紧。
+    """
+    from ctx_weft.core.assembler.composer import _OBSERVER_ROLE_RECAP_FALLBACK as fb
+
+    assert "never re-execute" in fb and "never decide on the actor's behalf" in fb
+    for leaked in ("judge", "`continue`", "`success`", "`fail`", "task_status"):
+        assert leaked not in fb, f"只摘要档的兜底身份谈了判决：{leaked!r}"
 
 
 
@@ -380,7 +396,7 @@ def _capture_launches(monkeypatch) -> list[str]:
         return None
 
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe", _fake
+        "ctx_weft.core.loop.background.launch_recap", _fake
     )
     return launched
 

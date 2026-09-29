@@ -14,6 +14,7 @@
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
+from ctx_weft.core.loop.background import recap as recap_mod
 from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events import InProcessEventBus
@@ -342,11 +343,10 @@ async def test_reader_act_step_wraps_parts_into_an_llm_message():
 
 async def test_reader_background_observe_recap_does_not_crash_on_parts(fake_state_ctx, monkeypatch):
     """background_observe 的 `act_recap` 原先对 content 直接 `.strip()`——list 会
-    AttributeError，而该异常被 `_run_background_observe` 整段吞掉（只 log），于是
+    AttributeError，而该异常被 `_run_recap` 整段吞掉（只 log），于是
     **段摘要静默丢失、段保 raw**。所以断言必须钉在「segment_fold 真的被调用且拿到文本」，
     而不是「没抛异常」——后者在吞异常的函数里恒成立。"""
-    import ctx_weft.core.loop.steps.background_observe as bo
-    import ctx_weft.core.loop.steps.segment_fold as sf
+    import ctx_weft.core.loop.fold as sf
 
     state, ctx = fake_state_ctx
     res, _, _ = await _run(_Prov("  recap text  ", [_img()],
@@ -361,17 +361,17 @@ async def test_reader_background_observe_recap_does_not_crash_on_parts(fake_stat
     async def _not_short(*a, **k):
         return False
 
-    monkeypatch.setattr(bo, "is_short_segment", _not_short)
+    monkeypatch.setattr(recap_mod, "is_short_segment", _not_short)
 
     folded: list = []
 
     async def _spy_fold(memory, scope, mscope, summary, pctx, *a, **k):
         folded.append(summary)
 
-    monkeypatch.setattr(bo, "run_observe_react", _fake_react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _fake_react)
     monkeypatch.setattr(sf, "segment_fold", _spy_fold)
 
-    await bo._run_background_observe(state, ctx, boundary="interrupt")
+    await recap_mod._run_recap(state, ctx, boundary="interrupt")
 
     assert folded == ["recap text"], f"段摘要没落到 segment_fold（实得 {folded!r}）"
     assert FAKE_B64 not in folded[0]

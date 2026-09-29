@@ -102,7 +102,7 @@ async def test_crash_between_result_event_and_memory_keeps_the_image_retrievable
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
     await rt.rebuild_session(SID)
     with mock.patch(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         return_value=None,
     ):
         await rt.recover_agent(AID)

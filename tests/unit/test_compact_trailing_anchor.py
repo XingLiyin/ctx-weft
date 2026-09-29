@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ctx_weft.core.loop.background import runner
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import (
@@ -70,7 +71,7 @@ async def _fold_trailing_segment(mem: InMemoryMemoryProvider) -> None:
                                  timestamp=_ts(1), role="user"), pctx)
     await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, address=scope, content="上一轮回复",
                                  timestamp=_ts(2), role="assistant"), pctx)
-    from ctx_weft.core.loop.steps.segment_fold import segment_fold
+    from ctx_weft.core.loop.fold import segment_fold
     await segment_fold(mem, scope, MemoryScope.TASK, "段摘要", pctx)
 
 
@@ -117,20 +118,19 @@ async def test_user_prompt_after_trailing_fold_sorts_newest():
 # ── Fix 1: resume barrier ──────────────────────────────────────────────────────
 
 
-async def test_inject_user_reply_does_not_await_pending_background_observe(monkeypatch):
+async def test_inject_user_reply_does_not_await_pending_recap(monkeypatch):
     """_inject_user_reply 不再等在途后台折叠——2026-09-22 拆除那道屏障。
 
     原先要等，理由是「折叠摘要的时间戳必须早于新消息，否则迟到的摘要会越到新消息之后、
     令下一轮装配误判续跑并埋掉新输入」。问题的根其实不在时间戳（`segment_fold` 的锚点
     早就取 `following[0].timestamp - 1μs`），在段界是动态查找的——新 USER_PROMPT 一落库
-    就成了「最后一条 user 回合」，折叠池随之变空。改由 `launch_background_observe` 钉住
+    就成了「最后一条 user 回合」，折叠池随之变空。改由 `launch_recap` 钉住
     段界水位线（见 tests/unit/test_segment_fold.py），迟到的折叠自己落回原位，这里不必
     再等。人的回复因此不为任何后台 LLM 往返买单。
     """
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     from ctx_weft.core import CtxWeftRuntime
-    import ctx_weft.core.loop.steps.background_observe as bo
-
+    
     order: list[str] = []
 
     class _RecordingMem(InMemoryMemoryProvider):
@@ -146,13 +146,13 @@ async def test_inject_user_reply_does_not_await_pending_background_observe(monke
     mem = _RecordingMem()
     runtime.providers.register_memory(mem)
 
-    monkeypatch.setattr(bo, "_task_pending", {})
+    monkeypatch.setattr(runner, "_task_pending", {})
 
     async def _slow_fold():
         await asyncio.sleep(0.05)
         order.append("fold")
 
-    bo._task_pending["t1"] = asyncio.ensure_future(_slow_fold())
+    runner._task_pending["t1"] = asyncio.ensure_future(_slow_fold())
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = Task(id="t1", session_id="s1", status="SUSPENDED",
@@ -176,5 +176,5 @@ async def test_inject_user_reply_does_not_await_pending_background_observe(monke
     assert order == ["ingest"], (
         f"回复的注入不该等折叠落地（段界水位线已接管正确性），got {order}"
     )
-    await bo._task_pending["t1"]
+    await runner._task_pending["t1"]
     assert order == ["ingest", "fold"]

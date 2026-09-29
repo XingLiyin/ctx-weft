@@ -96,7 +96,7 @@ async def test_task_fold_leaves_agent_layer_untouched() -> None:
 
 async def test_agent_segment_fold_writes_agent_summary() -> None:
     """v2 P4a：AGENT 层折叠经 segment_fold（半址）；摘要跨 task 可见。"""
-    from ctx_weft.core.loop.steps.segment_fold import segment_fold
+    from ctx_weft.core.loop.fold import segment_fold
     from ctx_weft.protocols import MemoryAddress
 
     m = InMemoryMemoryProvider()

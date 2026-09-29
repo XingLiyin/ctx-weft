@@ -3,7 +3,9 @@ from datetime import UTC, datetime
 
 import pytest
 from types import SimpleNamespace
-import ctx_weft.core.loop.steps.background_observe as bo
+from ctx_weft.core.loop.background import recap as recap_mod
+from ctx_weft.core.loop.background import runner
+from ctx_weft.core.loop import finish_pair as fp
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols import MemoryEvent, MemoryEventType
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
@@ -22,9 +24,9 @@ async def test_compact_boundary_skips_when_no_active_raw(fake_state_ctx, monkeyp
     async def _react(*a, **k):
         called["react"] = True
         return None, ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="interrupt")
+    await recap_mod._run_recap(state, ctx, boundary="interrupt")
 
     assert called["react"] is False  # 护栏跳过，未跑 LLM observe
 
@@ -42,9 +44,9 @@ async def test_close_boundary_not_guarded(fake_state_ctx, monkeypatch):
         called["react"] = True
         from ctx_weft.core.capabilities.control_tools import ControlResult
         return ControlResult(content="r", metadata={K.OBSERVER_ACT_RECAP: "r"}), ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="finish")
+    await recap_mod._run_recap(state, ctx, boundary="finish")
 
     assert called["react"] is True  # close 边界照常跑
 
@@ -56,15 +58,15 @@ async def test_close_boundary_exception_pops_close_synth(fake_state_ctx, monkeyp
     异常被吞（不外抛），finally 仍发 TASK_RECAP_DONE。"""
     state, ctx = fake_state_ctx
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
-    bo.register_close_synth(state.task.id, "tcall_x", state.scope, "success")
+    fp.register_close_synth(state.task.id, "tcall_x", state.scope, "success")
 
     async def _boom(*a, **k):
         raise RuntimeError("llm outage")
-    monkeypatch.setattr(bo, "run_observe_react", _boom)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _boom)
 
-    await bo._run_background_observe(state, ctx, boundary="finish")  # 不应外抛
+    await recap_mod._run_recap(state, ctx, boundary="finish")  # 不应外抛
 
-    assert bo.pop_close_synth(state.task.id) is None, "异常路径应弹掉登记（防泄漏）"
+    assert fp.pop_close_synth(state.task.id) is None, "异常路径应弹掉登记（防泄漏）"
     done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
     assert len(done_events) == 1
 
@@ -85,9 +87,9 @@ async def test_short_segment_on_summary_only_boundary_skips_the_llm(fake_state_c
     async def _react(*a, **k):
         called["react"] = True
         return None, ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="interrupt")
+    await recap_mod._run_recap(state, ctx, boundary="interrupt")
 
     assert called["react"] is False  # 短段直接跳过，连 LLM 都不跑
     n_raw = await ctx.memory.count_recent(
@@ -121,9 +123,9 @@ async def test_segment_over_threshold_folds_as_before(fake_state_ctx, monkeypatc
     async def _react(*a, **k):
         called["react"] = True
         return ControlResult(content="segment recap", metadata={K.OBSERVER_ACT_RECAP: "segment recap"}), ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="plain_text")
+    await recap_mod._run_recap(state, ctx, boundary="plain_text")
 
     assert called["react"] is True
     n_raw = await ctx.memory.count_recent(
@@ -145,9 +147,9 @@ async def test_close_boundary_ignores_short_segment_gate(fake_state_ctx, monkeyp
     async def _react(*a, **k):
         called["react"] = True
         return ControlResult(content="r", metadata={K.OBSERVER_ACT_RECAP: "r"}), ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="finish")
+    await recap_mod._run_recap(state, ctx, boundary="finish")
 
     assert called["react"] is True
 
@@ -159,10 +161,10 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
     """端到端（真实 ctx.memory，不 mock count_recent）：同一 task 背靠背两次 interrupt
     边界 observe——第一次真实折叠该段（LLM_RESPONSE 被 supersede），第二次落到该段
     count_recent(LLM_RESPONSE)==0，护栏应跳过其 LLM/observe 工作，但 finally 仍须为
-    两次启动各发一条 TASK_RECAP_DONE，且 await_pending_background_observe 对被跳过的
+    两次启动各发一条 TASK_RECAP_DONE，且 await_pending_recap 对被跳过的
     第二个任务也要正常收尾（不挂起、不报错）。
 
-    若把 _run_background_observe 里的护栏摘掉，第二次也会真的调 run_observe_react，
+    若把 _run_recap 里的护栏摘掉，第二次也会真的调 run_observe_react，
     本测试的 call_count 断言会失败（变成 2）。
     """
     state, ctx = fake_state_ctx
@@ -177,12 +179,12 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
         calls.append(1)
         return ControlResult(content=f"S{len(calls)}", metadata={K.OBSERVER_ACT_RECAP: f"S{len(calls)}"}), ""
 
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
     # 背靠背发起两次同 task interrupt observe（不 await 第一个就发第二个），
     # 同 task 锁下第一次先真正折叠，第二次落到已折叠的段上。
-    t1 = bo.launch_background_observe(state, ctx, boundary="interrupt")
-    t2 = bo.launch_background_observe(state, ctx, boundary="interrupt")
+    t1 = runner.launch_recap(state, ctx, boundary="interrupt")
+    t2 = runner.launch_recap(state, ctx, boundary="interrupt")
     await asyncio.gather(t1, t2)
 
     # 1) 第一次真的跑了、折了段：该段 active LLM_RESPONSE 计数归零
@@ -200,9 +202,9 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
     done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
     assert len(done_events) == 2, f"两次启动都应发 TASK_RECAP_DONE，实得 {len(done_events)} 条"
 
-    # 4) await_pending_background_observe 对被跳过的第二个任务也能正常收尾（不挂起/不报错）
+    # 4) await_pending_recap 对被跳过的第二个任务也能正常收尾（不挂起/不报错）
     await asyncio.wait_for(
-        bo.await_pending_background_observe(state.task.id), timeout=1.0,
+        runner.await_pending_recap(state.task.id), timeout=1.0,
     )
 
 
@@ -224,9 +226,9 @@ async def test_short_segment_on_plain_text_still_judges(fake_state_ctx, monkeypa
         called["react"] = True
         return ControlResult(content="话术", metadata={K.OBSERVER_ACT_RECAP: "短段 recap"}), ""
 
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="plain_text")
+    await recap_mod._run_recap(state, ctx, boundary="plain_text")
 
     assert called["react"] is True, "短段也要跑判定"
     n_raw = await ctx.memory.count_recent(

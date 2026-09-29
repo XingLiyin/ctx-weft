@@ -127,7 +127,7 @@ async def test_context_limit_retry_without_recap_keeps_raw_and_defers_to_backgro
     前台同步折出一条 TASK_COMPACT_SUMMARY。用户裁定禁止任何机械合成摘要后，机械判决的
     act_recap 恒为空，`_fold_retry_segment` 按其既有口径「空则不折、段保 raw（不写占位摘要）」
     降级——真摘要改由这里 launch 的 background observe（boundary="mechanical"）异步产，
-    下一轮 `_run_loop` 入口 `await_pending_background_observe` 保证它先落地。
+    下一轮 `_run_loop` 入口 `await_pending_recap` 保证它先落地。
 
     `_fold_retry_segment` 真折叠那条路径由 tests/unit/test_observe_retry_fold.py 专测覆盖。
     """
@@ -138,7 +138,7 @@ async def test_context_limit_retry_without_recap_keeps_raw_and_defers_to_backgro
         return None
 
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe", _spy)
+        "ctx_weft.core.loop.background.launch_recap", _spy)
 
     resolver = InlineAgentTemplateProvider()
     # 关短段免折门，隔离出「空 recap 才是不折的原因」（短段免折是另一条已单测的路径）。

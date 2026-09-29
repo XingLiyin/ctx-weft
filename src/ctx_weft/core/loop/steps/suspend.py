@@ -48,9 +48,11 @@ class SuspendStep(Step):
         # summary / spawn_titles 随 RunOutcome 交给 TaskManager，由它落状态并发事件。
         # dispatch 段边界（spec 2026-07-16）：父坐实 SUSPENDED 后 fire-and-forget 后台
         # recap，折派发前 raw——挂起空窗跑 LLM。所有委派父生效（不加 _is_own_root 门控）；
-        # resume 竞态由 _run_loop 入口 await_pending_background_observe 封死。
-        from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-        launch_background_observe(state, ctx, boundary="dispatch")
+        # resume 竞态由 launch 时钉住的段界水位线接管（2026-09-22 起 `_run_loop` 入口那道
+        # 屏障已拆除，`await_pending_recap` 只剩测试在调）：迟到的折叠只认这次 launch 之前
+        # 的记录，不抢段界、也不排到新消息之后。
+        from ctx_weft.core.loop.background import launch_recap
+        launch_recap(state, ctx, boundary="dispatch")
 
         run_outcome = RunOutcome(
             kind=RunOutcomeKind.SUSPENDED_ON_CHILDREN,

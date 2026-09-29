@@ -1,7 +1,14 @@
-"""segment_fold：段作用域折叠的框架侧策展（v2 P3c，策展上移）。
+"""段作用域折叠：框架侧的策展（`segment_fold`）与它的免折门（`is_short_segment`）。
+
+两者是一件事的两面——「这一段要不要折」与「折的时候折哪些」，判据（段界 = 末条 role=user
+回合、水位线只认开跑前的记录）逐字相同。2026-09-29 从 `steps/` 搬来合并：门此前住在
+`steps/background_observe.py`，与它唯一的同门调用方 `observe._fold_retry_segment` 隔着
+一个模块，而那个模块还管着并发、判决提交、close 交接三件无关的事。
+
+`segment_fold` 的策展语义（v2 P3c，策展上移）：
 
 移植自 provider ``apply_compact`` 的段折语义（spec/06 §7 + 2026-07-21 排序契约），
-政策收拢为两调用点（observe retry 段折 / background_observe 边界段折）共用的固定形态：
+政策收拢为两调用点（observe retry 段折 / 后台 recap 的边界段折）共用的固定形态：
 
 - keep_last=0：折叠池内可折记录全折；
 - protect = role=user 的 CONVERSATION_TURN + SUMMARY kind（段锚点 + 多段摘要累积，
@@ -21,9 +28,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from ctx_weft.core.media import placeholder_refs
 from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
@@ -34,6 +43,10 @@ from ctx_weft.protocols import (
 )
 
 _VIEW_KINDS = [MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT]
+
+
+if TYPE_CHECKING:
+    from ctx_weft.core.loop.driver import LoopContext, LoopState
 
 
 @dataclass
@@ -119,3 +132,60 @@ async def segment_fold(
         events_after=events_before - len(to_archive) + 1,
         summary_event_id=new_ids[0] if new_ids else "",
     )
+
+
+# ── 免折门 ────────────────────────────────────────────────────────────────────
+
+
+async def is_short_segment(
+    state: "LoopState", ctx: "LoopContext", watermark: "datetime | None" = None,
+) -> bool:
+    """短段免折门：**当前段**（最后一条 active USER_PROMPT 之后）满足以下任一即为短段：
+
+    - 段内 LLM 回复（role=assistant 回合）≤ 1 条——**不看 token**：一条回复折成摘要
+      是净亏（recap 常比原文还长，且原文对下一轮信息更全），折它只是白花一次 LLM；
+    - 段内 raw token ≤ short_segment_token_threshold。
+
+    「短 → 原文成胶囊」决策（finalize._is_short_leaf）在段级的判定，
+    `background.recap`（plain_text/interrupt 边界）与
+    `observe._fold_retry_segment`（retry 段折）共用。配置缺失（手构 state /
+    单测）→ False = 门关闭，照常折叠。
+
+    段作用域（2026-07-21）：只数末条 UP 之后的 raw，与折叠的 since_last=USER_PROMPT
+    对齐——免折残留的前段 raw 不计入，否则「前段累积 + 当前段极短」会被误判为可折，
+    而折叠又只折当前段，产出比原文还长的摘要。
+    """
+    threshold = getattr(state.agent.loop_config, "short_segment_token_threshold", 0)
+    if threshold <= 0:
+        return False
+    from ctx_weft.protocols import MemoryKind, MemoryScope
+
+    # v2 P3a：TASK 视图（对话 + audit，无 SUMMARY——旧类型清单不含段摘要）升序；
+    # 段界 = 末条 role=user 回合，其后即当前段 raw。
+    view = await ctx.memory.load_view(
+        state.scope, MemoryScope.TASK, ctx.provider_ctx,
+        kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT],
+    )
+    # 段界水位线（2026-09-22，同 `segment_fold`）：只认这段后台 observe 开跑时就已存在
+    # 的记录。不设限的话，人中途说的话会成为新段界，把「当前段」判成空段而误判为短段。
+    if watermark is not None:
+        view = [r for r in view if r.timestamp <= watermark]
+    seg_records: list = []
+    for r in view:
+        if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user":
+            seg_records = []  # 新段界：清空重计
+            continue
+        seg_records.append(r)
+    # 单回复段免折（2026-08-19）：token 再多也不折——见 docstring。
+    n_llm = sum(1 for r in seg_records
+                if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "assistant")
+    if n_llm <= 1:
+        return True
+    seg_text = " ".join(
+        r.content if isinstance(r.content, str) else content_to_text(r.content)
+        for r in seg_records
+    )
+    # 保留「join 后数一次」的文本口径（逐条估算会引入 4×N 的 framing 漂移），
+    # 图片另行求和补上——不补则图片密集段被误判短段免折、该段 raw 永久保留。
+    seg_images = sum(image_tokens(r.content) for r in seg_records)
+    return ctx.llm.tokenizer.count(seg_text) + seg_images <= threshold

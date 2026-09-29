@@ -123,18 +123,18 @@ async def run_until_suspend(*, titles: list[str]):
     agent = Agent(id="ag2", session_id="s1", template_id="tpl_test", tenant_id="default", loop_guard=LoopGuard(),
                  memory_config=MemoryConfig(), loop_config=LoopConfig())
     state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
-    # launch_background_observe 是 fire-and-forget：给它一个真 event_bus，否则它的
+    # launch_recap 是 fire-and-forget：给它一个真 event_bus，否则它的
     # finally 块（无条件发 TASK_RECAP_DONE）会在测试结束后抛 "exception was never
     # retrieved"。段里没有任何 CONVERSATION_TURN → n_raw==0 幂等护栏立即 return，
     # 不会真的调 LLM。
-    from ctx_weft.core.loop.steps.background_observe import await_pending_background_observe
+    from ctx_weft.core.loop.background import await_pending_recap
     from ctx_weft.providers.events import InProcessEventBus
     ctx = _loop_ctx(mem)
     ctx.event_bus = InProcessEventBus()
     outcome = await SuspendStep().execute(state, ctx)
     state.run_outcome = outcome.state_patch.get("run_outcome")
     # 等后台 recap task 真正跑完（它的幂等护栏会立即 return），不留悬空 task 到测试之外。
-    await await_pending_background_observe(task.id)
+    await await_pending_recap(task.id)
     return state
 
 

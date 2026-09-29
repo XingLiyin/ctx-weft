@@ -14,7 +14,7 @@ _CTX = ProviderContext(session_id="s1", tenant_id="default")
 
 
 def _make_dir(root: Path, name: str, *, extra_fm: str = "", compact: str | None = None,
-              metadata: str | None = None) -> Path:
+              metadata: str | None = None, role: str | None = None) -> Path:
     d = root / name
     d.mkdir(parents=True)
     (d / "SOUL.md").write_text(
@@ -25,6 +25,8 @@ def _make_dir(root: Path, name: str, *, extra_fm: str = "", compact: str | None 
         (d / "COMPACT.md").write_text(compact, encoding="utf-8")
     if metadata is not None:
         (d / "METADATA.md").write_text(metadata, encoding="utf-8")
+    if role is not None:
+        (d / "ROLE.md").write_text(role, encoding="utf-8")
     return d
 
 
@@ -49,21 +51,28 @@ async def test_get_template_miss_returns_none(tmp_path: Path) -> None:
     assert await prov.get_template("nope", None, _CTX) is None
 
 
-async def test_default_facet_merge(tmp_path: Path) -> None:
-    _make_dir(tmp_path, "default", compact="DEF-COMPACT", metadata="DEF-MD")
+async def test_no_facet_is_ever_borrowed_from_another_template(tmp_path: Path) -> None:
+    """缺 facet **不从 default 借**（2026-09-28 移出：那是宿主的部署约定）。
+
+    缺 facet 时的兜底全在 core 自己手里——compact / recognize_intent 由 IdentitySource 回退
+    act，observe 家族不回退、走装配层的通用 observer 文案。所以这里只钉一件事：本 provider
+    交出去的 template 就是磁盘上那一份，没有任何东西被别的模板填过。
+    """
+    _make_dir(tmp_path, "default", role="DEF-ROLE", compact="DEF-COMPACT", metadata="DEF-MD")
     _make_dir(tmp_path, "foo")
     prov = LocalAgentTemplateProvider(tmp_path)
     t = await prov.get_template("foo", None, _CTX)
-    assert t.identity["compact"].text == "DEF-COMPACT"
-    assert t.identity["recognize_intent"].text == "DEF-MD"
-    assert t.identity["act"].text == "foo soul"  # 自己的 facet 不被覆盖
+    assert set(t.identity) == {"act"}
+    assert t.identity["act"].text == "foo soul"
 
 
-async def test_default_itself_not_self_merged(tmp_path: Path) -> None:
-    _make_dir(tmp_path, "default", compact="DEF-COMPACT")
+async def test_a_template_keeps_its_own_facets(tmp_path: Path) -> None:
+    _make_dir(tmp_path, "default", role="DEF-ROLE")
+    _make_dir(tmp_path, "foo", role="FOO-ROLE", compact="FOO-COMPACT")
     prov = LocalAgentTemplateProvider(tmp_path)
-    t = await prov.get_template("default", None, _CTX)
-    assert t.identity["compact"].text == "DEF-COMPACT"
+    t = await prov.get_template("foo", None, _CTX)
+    assert t.identity["observe"].text == "FOO-ROLE"
+    assert t.identity["compact"].text == "FOO-COMPACT"
 
 
 async def test_retrieve_defaults_empty(tmp_path: Path) -> None:

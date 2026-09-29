@@ -218,7 +218,7 @@ async def test_two_turns_do_not_share_a_run_id():
     """headline 不变式必须只看**主循环**（`_run_loop`，origin=RUNTIME）自己的两个
     run——`recognize_intent` / `background_observe` 在这条改动完全没碰过的代码路径
     上，每轮都会各自铸一个新 run_id（`launch_recognize_intent`/
-    `launch_background_observe` 早已各自 `generate_id("run")`，与 `_default_run_id`
+    `launch_recap` 早已各自 `generate_id("run")`，与 `_default_run_id`
     无关），若把它们也计进 `run_ids` 的全局集合，即使主任务两轮共用同一个
     `_default_run_id`（本 task 要修的那个 bug），`len(run_ids) >= 2` 依旧会因为这些
     旁路 run 而碰巧为真——对 headline 不变式是假阳性。用 `origin == RUNTIME` 隔离出

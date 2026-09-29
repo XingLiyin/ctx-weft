@@ -18,10 +18,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
-from ctx_weft.core.loop.steps.background_observe import (
-    _judges,
-    _submit_verdict,
-)
+from ctx_weft.core.loop.background.boundaries import judges
+from ctx_weft.core.loop.background.verdict import submit_verdict
 
 
 class _RecordingTM:
@@ -78,17 +76,17 @@ def test_the_two_yielding_boundaries_judge() -> None:
     前台给出；`mechanical` 是机械判决刚判过；`interrupt` / `dispatch` 压根不是一个结局。后台
     再判一次只会把那份判决覆盖掉。
     """
-    assert _judges("plain_text") is True
-    assert _judges("finish_park") is True
+    assert judges("plain_text") is True
+    assert judges("finish_park") is True
     for boundary in ("mechanical", "finish", "normal", "interrupt", "dispatch"):
-        assert _judges(boundary) is False, f"{boundary} 不该产 verdict"
+        assert judges(boundary) is False, f"{boundary} 不该产 verdict"
 
 
 # ── 提交 ──────────────────────────────────────────────────────────────────────
 
 async def test_success_verdict_is_submitted_with_every_field() -> None:
     tm = _RecordingTM()
-    await _submit_verdict(_state(), _ctx(tm), _meta(
+    await submit_verdict(_state(), _ctx(tm), _meta(
         **{K.OBSERVER_NEXT_STEP_HINT: "Next Step Hint: 下一步"}))
 
     assert len(tm.calls) == 1
@@ -104,7 +102,7 @@ async def test_success_verdict_is_submitted_with_every_field() -> None:
 async def test_retry_verdict_is_submitted_too() -> None:
     """retry 也提交——hint 要落地供下一轮用；「维持 park」是带外入口那边的分支。"""
     tm = _RecordingTM()
-    await _submit_verdict(_state(), _ctx(tm), _meta(
+    await submit_verdict(_state(), _ctx(tm), _meta(
         "continue", **{K.OBSERVER_FAILURE_REASON: "缺凭据"}))
 
     _tid, outcome, _kw = tm.calls[0]
@@ -116,20 +114,20 @@ async def test_retry_verdict_is_submitted_too() -> None:
 
 async def test_missing_verdict_submits_nothing() -> None:
     tm = _RecordingTM()
-    await _submit_verdict(_state(), _ctx(tm), _meta(outcome=""))
+    await submit_verdict(_state(), _ctx(tm), _meta(outcome=""))
     assert tm.calls == []
 
 
 async def test_empty_metadata_submits_nothing() -> None:
     """LLM 没调 terminal tool → metadata 空 → 绝不静默放行后继。"""
     tm = _RecordingTM()
-    await _submit_verdict(_state(), _ctx(tm), {})
+    await submit_verdict(_state(), _ctx(tm), {})
     assert tm.calls == []
 
 
 async def test_missing_task_manager_is_tolerated() -> None:
     """拿不到 TaskManager（手构 ctx / 已拆会话）：记日志，不炸。"""
-    await _submit_verdict(_state(), SimpleNamespace(task_manager=None), _meta())
+    await submit_verdict(_state(), SimpleNamespace(task_manager=None), _meta())
 
 
 # ── 被拒绝不是错误 ────────────────────────────────────────────────────────────
@@ -137,7 +135,7 @@ async def test_missing_task_manager_is_tolerated() -> None:
 async def test_rejected_verdict_is_not_an_error() -> None:
     """人先开口 → 仲裁拒绝。后台只记一笔，不抛、不重试。"""
     tm = _RecordingTM(accepted=False)
-    await _submit_verdict(_state(), _ctx(tm), _meta())
+    await submit_verdict(_state(), _ctx(tm), _meta())
     assert len(tm.calls) == 1
 
 
@@ -160,7 +158,7 @@ async def test_rejected_verdict_is_not_an_error() -> None:
 # memory 那一半）要一整套 memory/llm 替身，混在一个用例里只会让规则本身读不清。两者怎么
 # 组装、由谁调，钉在下一节。
 
-from ctx_weft.core.loop.steps.background_observe import (  # noqa: E402
+from ctx_weft.core.loop.background.verdict import (  # noqa: E402
     _close_park_bubble,
     _out_of_band_finalize,
 )
@@ -328,6 +326,6 @@ async def test_the_verdict_entry_is_handed_the_finalize_callback() -> None:
     已经醒过来装配、而子任务的产出还没落地。
     """
     tm = _RecordingTM()
-    await _submit_verdict(_state_with_session(parent="t0"), _ctx_with_tm(tm), _meta())
+    await submit_verdict(_state_with_session(parent="t0"), _ctx_with_tm(tm), _meta())
     _tid, _outcome, kw = tm.calls[0]
     assert callable(kw["finalize"])

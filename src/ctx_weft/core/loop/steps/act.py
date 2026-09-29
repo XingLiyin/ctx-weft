@@ -28,6 +28,7 @@ from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.core.loop.park import HitlPark, RoundDiscarded
 from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME
 from ctx_weft.core.models.task import NormalTaskSettings
+from ctx_weft.core.loop.observing import has_observe_role
 from ctx_weft.core.utils.estimate import effective_limit
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.ids import MintedCall, generate_id, mint_turn_call_ids
@@ -230,8 +231,19 @@ class ActStep(Step):
         # 先别动。代价是同一个子任务两种收尾走两条路，观察一段之后再决定要不要推广。
         #
         # 三条判据与 `_finish_plain_text_turn` 逐字相同（`NormalTaskSettings` / 非 unattended
-        # / hitl 在），只多一条 root。park 会抛 `HitlPark`，下面那个 StepOutcome 到不了；
-        # 不让位则零副作用返回，照旧走 observe。
+        # / hitl 在），只多两条：root，以及**这个 agent 得真有 observer**。park 会抛
+        # `HitlPark`，下面那个 StepOutcome 到不了；不让位则零副作用返回，照旧走 observe。
+        #
+        # `has_observe_role` 那条（2026-09-28，随 default ROLE 兜底一起加）：这个 park 的
+        # 全部意义就是「先别收尾，等 observer 复核」，而 park 之后**前台 ObserveStep 跑不到**
+        # ——`HitlPark` 在 `runtime._run_loop` 那里 unwind 的是 `driver.run` 整个循环。于是
+        # park 之后系统里唯一的判决来源就是后台那次带外判决；模板没有 ROLE 时它降成只摘要
+        # 档（`background.recap` 里 `judges` 与 `has_observe_role` 相与），没人再终结这个
+        # task，root 就永远停在 AWAITING_HUMAN。
+        #
+        # 所以没有 observer 时**压根不让位**：走下面那个 `StepOutcome` 回 observe，机械判决
+        # 拿 `actor_done` 判 success，`FinalizeStep` 照常跑，后台照常产 recap
+        # （`boundary="finish"`）——即 S-b 之前那条本来就在的路。
         #
         # 位置在 `_synthesize_final_outputs` **之后**：park 的 task 恒 `outputs=None` 会让
         # 护栏把 success 改判 retry（2026-09-24 那个坑，见该函数 docstring）。`_commit_round`
@@ -240,6 +252,7 @@ class ActStep(Step):
             next_step == "observe"
             and exit_reason == "actor_done"
             and state.task.parent_task_id is None
+            and has_observe_role(state)
             and isinstance(state.task.settings, NormalTaskSettings)
             and not state.task.unattended
             and ctx.hitl is not None
@@ -521,8 +534,8 @@ async def _run_llm_turn(
         has_partial = bool(text.strip() or reasoning.strip())
         await _commit_interrupted_partial(state, ctx, text, reasoning, turn_num)
         if _is_own_root(state.task):
-            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-            launch_background_observe(state, ctx, boundary="interrupt")
+            from ctx_weft.core.loop.background import launch_recap
+            launch_recap(state, ctx, boundary="interrupt")
         await _park_for_interrupt(state, ctx, edit=not has_partial)
 
     # 摄入前铸造内部调用标识（spec: conversation-integrity）：LLM 复用 wire id（call_1
@@ -768,8 +781,8 @@ async def _execute_tool_calls(
                 await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
             ctx.run_phase.in_tool_loop = False
             if _is_own_root(state.task):
-                from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-                launch_background_observe(state, ctx, boundary="interrupt")
+                from ctx_weft.core.loop.background import launch_recap
+                launch_recap(state, ctx, boundary="interrupt")
             await _park_for_interrupt(state, ctx)
         if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
             ctx.cancel_token.raise_if_cancelled()
@@ -787,8 +800,8 @@ async def _execute_tool_calls(
                     await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
                 ctx.run_phase.in_tool_loop = False
                 if _is_own_root(state.task):
-                    from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-                    launch_background_observe(state, ctx, boundary="interrupt")
+                    from ctx_weft.core.loop.background import launch_recap
+                    launch_recap(state, ctx, boundary="interrupt")
                 await _park_for_interrupt(state, ctx)
             if ctx.cancel_token is not None:
                 ctx.cancel_token.raise_if_cancelled()  # 硬取消
@@ -1099,7 +1112,7 @@ async def _park_await_user(
     """agent 想让位给用户 → 发 await_user + 起后台判定 + 冷 park。
 
     ``boundary`` 区分让位的**方式**，它一路传到装配层决定两件事（见
-    `composer._JUDGING_BOUNDARIES` / `_OUTPUTS_BEARING_BOUNDARIES`）：
+    `composer._BOUNDARY_FACTS` / `_OUTPUTS_BEARING_BOUNDARIES`）：
 
     - ``plain_text``：说了段话就停下。那段文本本身在重建的对话里看得见，不注入 outputs。
     - ``finish_park``：调了 `finish_task` 宣布完成（S-b，2026-09-27）。`finish_task` 是
@@ -1141,8 +1154,8 @@ async def _park_await_user(
     # 压根到不了前台 observe（它在这里就 park 了），于是子任务的这一段既没人判也没人折。
     # 并发不会因此失控：单交互线闸门保证一个 session 同时只有一条非 unattended 的线
     # （见 `TaskManager._interactive_line_held`）。
-    from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-    launch_background_observe(state, ctx, boundary=boundary)
+    from ctx_weft.core.loop.background import launch_recap
+    launch_recap(state, ctx, boundary=boundary)
     await _cold_park(state, ctx, PREFACE_NORMAL, unattended=state.task.unattended)
 
 
@@ -1156,8 +1169,8 @@ async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
         await _discard_round_if_uncommitted(state, ctx)   # 命中则 raises RoundDiscarded
         edit = not ctx.run_phase.produced and not ctx.run_phase.in_tool_loop
         if _is_own_root(state.task):
-            from ctx_weft.core.loop.steps.background_observe import launch_background_observe
-            launch_background_observe(state, ctx, boundary="interrupt")
+            from ctx_weft.core.loop.background import launch_recap
+            launch_recap(state, ctx, boundary="interrupt")
         await _park_for_interrupt(state, ctx, edit=edit)  # raises HitlPark
     tok = ctx.cancel_token
     if tok is not None and tok.is_cancelled:

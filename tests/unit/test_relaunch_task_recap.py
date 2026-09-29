@@ -113,7 +113,7 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
         launched["boundary"] = boundary
         return asyncio.create_task(asyncio.sleep(0))
 
-    monkeypatch.setattr(rt_mod, "launch_background_observe", _fake_launch, raising=False)
+    monkeypatch.setattr(rt_mod, "launch_recap", _fake_launch, raising=False)
 
     await runtime._relaunch_task_recap(
         session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
@@ -186,7 +186,7 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
         launched["boundary"] = boundary
         return asyncio.create_task(asyncio.sleep(0))
 
-    monkeypatch.setattr(rt_mod, "launch_background_observe", _fake_launch, raising=False)
+    monkeypatch.setattr(rt_mod, "launch_recap", _fake_launch, raising=False)
 
     await runtime._relaunch_task_recap(
         session=session, template=template, template_id="tpl_echo", task_manager=task_manager,

@@ -23,11 +23,12 @@ import pytest
 
 from ctx_weft.core.assembler.composer import (
     _BOUNDARY_FACTS,
-    _CLOSE_BOUNDARIES,
-    _JUDGING_BOUNDARIES,
+    CLOSE_BOUNDARIES,
     _OUTPUTS_BEARING_BOUNDARIES,
     DefaultComposer,
 )
+# 判定档名单的唯一真相源在 loop 侧（装配层改为只看 purpose，不再镜像这张表，2026-09-28）。
+from ctx_weft.core.loop.background.boundaries import JUDGING_BOUNDARIES
 
 
 def _blocks():
@@ -42,8 +43,14 @@ def _blocks():
     ]
 
 
-def _req(boundary, outputs="", *, purpose="background_observe", title="理一遍工作目录",
+def _req(boundary, outputs="", *, purpose=None, title="理一遍工作目录",
          task_id="tsk_1", user_prompt="把工作目录理一遍"):
+    # purpose 默认按 boundary 推——生产里这两者恒一致（`background_observe._run_recap`
+    # 就是按 `_judges(boundary)` 选的 purpose）。装配层只看 purpose，手构 request 时让它们
+    # 对齐，测的才是真实组合。
+    if purpose is None:
+        purpose = ("background_observe" if boundary in JUDGING_BOUNDARIES
+                   else "background_recap")
     return SimpleNamespace(
         purpose=purpose,
         task=SimpleNamespace(
@@ -174,7 +181,7 @@ def test_the_reading_order_is_anchor_then_fact_then_output_then_cue() -> None:
 # ── ④ 判定档 vs 只摘要档 ──────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("boundary", sorted(_JUDGING_BOUNDARIES))
+@pytest.mark.parametrize("boundary", sorted(JUDGING_BOUNDARIES))
 def test_judging_boundaries_ask_for_the_verdict_tool(boundary: str) -> None:
     text = _text(_req(boundary))
     assert "control__report_task_outcome" in text
@@ -182,7 +189,7 @@ def test_judging_boundaries_ask_for_the_verdict_tool(boundary: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "boundary", sorted(set(_ALL_BOUNDARIES) - _JUDGING_BOUNDARIES - {"actor_done"}))
+    "boundary", sorted(set(_ALL_BOUNDARIES) - JUDGING_BOUNDARIES - {"actor_done"}))
 def test_recap_boundaries_ask_for_the_recap_tool(boundary: str) -> None:
     """只摘要档拿的是另一个工具。`actor_done` 不在此列：它只作为**前台**边界出现，而前台恒判定。"""
     text = _text(_req(boundary))
@@ -201,7 +208,7 @@ def test_the_recap_cue_does_not_tell_it_not_to_judge() -> None:
     assert "task_status" not in text
 
 
-@pytest.mark.parametrize("boundary", sorted(_CLOSE_BOUNDARIES))
+@pytest.mark.parametrize("boundary", sorted(CLOSE_BOUNDARIES))
 def test_close_boundaries_also_ask_for_the_whole_task_summary(boundary: str) -> None:
     """close 边界是 `task_summary` 的**唯一**来源：root 的前台 observe 走机械判决、没有摘要，
     finish 对的 tool 槽只能靠这一档填。
@@ -225,7 +232,7 @@ def test_the_foreground_always_judges_whatever_the_boundary() -> None:
 # ── ⑤ 「向用户要东西 → 一律 continue」那句硬提醒 ───────────────────────────────
 
 
-@pytest.mark.parametrize("boundary", sorted(_JUDGING_BOUNDARIES))
+@pytest.mark.parametrize("boundary", sorted(JUDGING_BOUNDARIES))
 def test_the_yielding_boundaries_carry_the_continue_reminder(boundary: str) -> None:
     """让位的两个边界是「把提问判成 success」的高发地，而那条判断**没有任何机械护栏**——
     success-without-outputs 护栏读 `task.outputs`，而 park 之前合成的 outputs 正是那段提问本身、
@@ -236,7 +243,7 @@ def test_the_yielding_boundaries_carry_the_continue_reminder(boundary: str) -> N
 
 
 @pytest.mark.parametrize(
-    "boundary", sorted(set(_ALL_BOUNDARIES) - _JUDGING_BOUNDARIES))
+    "boundary", sorted(set(_ALL_BOUNDARIES) - JUDGING_BOUNDARIES))
 def test_other_boundaries_do_not_carry_the_reminder(boundary: str) -> None:
     """没人在等的边界顶这句是噪音（子任务的 finish_task、无人值守的收尾都没有「用户」在场）。"""
     assert "judge `continue`" not in _text(_req(boundary))
@@ -258,17 +265,17 @@ def test_the_cue_never_restates_a_field_contract(boundary: str) -> None:
         assert leaked not in text, f"{boundary} 的 cue 复述了字段语义：{leaked!r}"
 
 
-def test_the_two_boundary_sets_stay_in_sync_with_the_loop_side() -> None:
-    """两套名单各在 composer 与 loop 里写了一份（避免跨层 import），这里钉住它们不漂。"""
-    from ctx_weft.core.loop.steps.background_observe import (
-        _CLOSE_BOUNDARIES as loop_close,
-    )
-    from ctx_weft.core.loop.steps.background_observe import (
-        _JUDGING_BOUNDARIES as loop_judging,
+def test_the_close_boundary_set_stays_in_sync_with_the_loop_side() -> None:
+    """close 名单仍各写了一份（避免跨层 import），这里钉住它不漂。
+
+    判定名单已不在此列：装配层 2026-09-28 起只看 `request.purpose`，那张镜像的
+    `JUDGING_BOUNDARIES` 随之删除——「判不判」只剩 loop 侧一个真相源。
+    """
+    from ctx_weft.core.loop.background import (
+        CLOSE_BOUNDARIES as loop_close,
     )
 
-    assert _JUDGING_BOUNDARIES == loop_judging
-    assert _CLOSE_BOUNDARIES == loop_close
+    assert CLOSE_BOUNDARIES == loop_close
 
 
 # ── ⑦ 子任务指名清单只在判定档 ────────────────────────────────────────────────
@@ -322,27 +329,61 @@ def test_both_background_purposes_reuse_the_observe_role(purpose: str) -> None:
 
 
 @pytest.mark.parametrize("purpose", ["background_observe", "background_recap"])
-def test_background_identity_falls_back_to_act_without_observe_role(purpose: str) -> None:
-    """无 observe facet → 回落 act facet（identity.py），不空转。"""
-    blocks = _identity_blocks_for(_template({"act": "ACT-SOUL-BODY"}), purpose)
-    assert len(blocks) == 1
-    assert blocks[0].content == "ACT-SOUL-BODY"
-    assert blocks[0].metadata["facet_purpose"] == purpose
+def test_background_identity_never_falls_back_to_the_actor_soul(purpose: str) -> None:
+    """无 observe facet → **不产 identity block**（2026-09-28 反转）。
+
+    回落 act 是这条路上最坏的一种「有总比没有好」：observer 的全部意义在于它不是 actor，
+    顶着 actor 的 SOUL 判 actor 等于没判；而 system 提示本来就是同一段 SOUL
+    （`_build_act_system`），回落还让它出现两遍。空着交给 `_OBSERVER_ROLE_JUDGE_FALLBACK`。
+    """
+    assert _identity_blocks_for(_template({"act": "ACT-SOUL-BODY"}), purpose) == []
 
 
-def test_the_prompt_is_usable_with_no_identity_block_at_all() -> None:
-    """连 act facet 都没有 → composer 用 `_OBSERVER_ROLE_FALLBACK`，cue 仍完整产出。"""
+def test_the_actor_soul_fallback_still_holds_for_the_actors_own_purposes() -> None:
+    """compact / recognize_intent 缺 facet 时仍回落 act——它们是 actor 自己的内部工序。"""
+    for purpose in ("compact", "recognize_intent"):
+        blocks = _identity_blocks_for(_template({"act": "ACT-SOUL-BODY"}), purpose)
+        assert [b.content for b in blocks] == ["ACT-SOUL-BODY"], purpose
+
+
+def _joined(boundary: str) -> str:
+    """没有任何 identity block 时装出来的整段 observe prompt。"""
     from ctx_weft.core.assembler.assembler import ContextBlock
-    from ctx_weft.core.assembler.composer import _OBSERVER_ROLE_FALLBACK
-
-    assert _identity_blocks_for(_template({})) == []
-    assert _identity_blocks_for(None) == []
 
     hist = [ContextBlock(id="b1", source="task_conversation", kind="history",
                          target="messages", content="原始诉求", priority=3, token_estimate=1,
                          metadata={"role": "user", "timestamp": "2026-01-01T00:00:00+00:00"})]
-    msgs = DefaultComposer()._build_observe_messages(hist, _req("normal"))
-    joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
-    assert _OBSERVER_ROLE_FALLBACK in joined
+    msgs = DefaultComposer()._build_observe_messages(hist, _req(boundary))
+    return "\n".join(m.content for m in msgs if isinstance(m.content, str))
+
+
+def test_the_prompt_is_usable_with_no_identity_block_at_all() -> None:
+    """连 act facet 都没有 → composer 用兜底身份，cue 仍完整产出。"""
+    from ctx_weft.core.assembler.composer import _OBSERVER_ROLE_RECAP_FALLBACK
+
+    assert _identity_blocks_for(_template({})) == []
+    assert _identity_blocks_for(None) == []
+
+    joined = _joined("normal")
+    assert _OBSERVER_ROLE_RECAP_FALLBACK in joined
     assert "control__collect_process_report" in joined
     assert _BOUNDARY_FACTS["normal"][0] in joined
+
+
+def test_the_two_fallback_identities_follow_the_tier_not_the_boundary() -> None:
+    """兜底身份跟着档走：判定档给判定版，只摘要档给摘要版。
+
+    两者必须与工具面一致——判定版通篇在讲怎么判，而只摘要档的桌面上没有判决工具，把它发过去
+    就是在要求模型做工具面不允许的事。
+    """
+    from ctx_weft.core.assembler.composer import (
+        _OBSERVER_ROLE_JUDGE_FALLBACK, _OBSERVER_ROLE_RECAP_FALLBACK,
+    )
+
+    judging = _joined("plain_text")      # → purpose=background_observe
+    assert _OBSERVER_ROLE_JUDGE_FALLBACK in judging
+    assert _OBSERVER_ROLE_RECAP_FALLBACK not in judging
+
+    recap = _joined("interrupt")         # → purpose=background_recap
+    assert _OBSERVER_ROLE_RECAP_FALLBACK in recap
+    assert _OBSERVER_ROLE_JUDGE_FALLBACK not in recap

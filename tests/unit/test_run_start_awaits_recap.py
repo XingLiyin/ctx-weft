@@ -1,7 +1,7 @@
 """_run_loop 入口**不再**等在途段 recap（2026-09-22 拆除两道屏障）。
 
 原先 driver 首步必须排在本 task 在途后台 recap 之后（spec 2026-07-16 §2）。拆除的依据：
-正确性那一半已由**段界水位线**接管——`launch_background_observe` 钉住段界，
+正确性那一半已由**段界水位线**接管——`launch_recap` 钉住段界，
 `segment_fold` 按它算折叠池，迟到的折叠不再抢走段界、也不再排到新消息之后
 （见 tests/unit/test_segment_fold.py 的水位线三条）。剩下的只是性能：首次装配可能读到
 尚未被 supersede 的 raw，prompt 白胀一轮——这条代价已确认接受。
@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctx_weft.core.loop.steps.background_observe as bo
+from ctx_weft.core.loop.background import runner
 from ctx_weft.core.loop.driver import LoopState
 from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.core.models.session import Session
@@ -26,9 +26,9 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.fixture(autouse=True)
 def _clear_pending():
-    bo._task_pending.clear()
+    runner._task_pending.clear()
     yield
-    bo._task_pending.clear()
+    runner._task_pending.clear()
 
 
 class _FakeBus:
@@ -78,7 +78,7 @@ async def test_run_start_does_not_wait_for_pending_recap():
 
     state, task, agent = _make_state_and_task()
     recap = asyncio.create_task(slow_recap())
-    bo._task_pending[task.id] = recap
+    runner._task_pending[task.id] = recap
 
     await CtxWeftRuntime._run_loop(
         _fake_runtime_self(), state, None, _RecordingDriver(order),
@@ -117,7 +117,7 @@ async def test_run_start_unaffected_by_errored_recap():
 
     state, task, agent = _make_state_and_task()
     recap = asyncio.create_task(errored_recap())
-    bo._task_pending[task.id] = recap
+    runner._task_pending[task.id] = recap
 
     await CtxWeftRuntime._run_loop(
         _fake_runtime_self(), state, None, _RecordingDriver(order),

@@ -339,7 +339,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     mid-flight (TaskRecapStarted boundary="interrupt", no Done). recover_agent must
     do BOTH: re-queue/re-dispatch the SUSPENDED task (TaskManager.restore) AND
     re-launch the pending recap (_relaunch_task_recap) — and the re-fold guard in
-    background_observe._run_background_observe must let it fold exactly once (no
+    background_observe._run_recap must let it fold exactly once (no
     duplicate TaskRecapDone / no hang). The resumed task then runs to completion
     (its own normal-boundary close triggers a *second*, unrelated recap — expected,
     accepted best-effort concurrency per spec §5.1/§3.6), and the session reaches a
@@ -389,7 +389,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
 
     # Seed one un-folded raw LLM_RESPONSE so the interrupt-boundary recap's re-fold
     # guard sees active raw and takes the real fold path (rather than the "already
-    # folded, nothing to do" no-op skip — see background_observe._run_background_observe).
+    # folded, nothing to do" no-op skip — see background_observe._run_recap).
     scope = MemoryAddress(session_id=sid, task_id=tid, agent_id=aid)
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
     await mem.ingest(MemoryEvent(

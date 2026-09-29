@@ -39,8 +39,28 @@ from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, mak
 pytestmark = pytest.mark.asyncio
 
 
+def _template(*, observe_role: bool):
+    """最小 template。``observe_role`` = 这个 agent 有没有 observer（ROLE facet）。
+
+    没有 observer 的模板（2026-09-28 起 ROLE 不再从 default 借）在三条路上降级：前台
+    observe 走机械判决、后台判定档降成只摘要档、`finish_task` 不再让位。
+    """
+    from ctx_weft.protocols.template import (
+        AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
+    )
+
+    identity = {"act": IdentityFacet(text="SOUL")}
+    if observe_role:
+        identity["observe"] = IdentityFacet(text="ROLE")
+    return AgentTemplate(
+        id="t", name="t", version="1.0.0", identity=identity,
+        capability_refs=[], memory_config=MemoryConfig(), loop_config=LoopConfig(),
+    )
+
+
 def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
-                   parent_task_id: str | None = None, gateway=None):
+                   parent_task_id: str | None = None, gateway=None,
+                   observe_role: bool = True):
     """返回 (state, ctx, task, registry, mem)。第 4 项是 `HitlRegistry`——`list_pending`
     的持有者从 `HitlManager` 换成了它，断言口径不变（仍是「这个 session 上挂着哪些未决
     请求」）。
@@ -76,6 +96,7 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
     state = LoopState(
         run_id="r1", session=session, task=task, agent=agent, scope=scope, assembled_prompt=prompt,
         resolved_model=SimpleNamespace(model="mock", account=""),
+        extra={"template": _template(observe_role=observe_role)},
     )
     ctx = LoopContext(
         assembler=None, llm=llm, memory=mem, event_bus=bus,

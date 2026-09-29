@@ -74,7 +74,7 @@ async def test_recovery_restores_a_started_tasks_prompt_from_the_event_log(promp
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
     await runtime.rebuild_session(sid)
     with mock.patch(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         return_value=None,
     ):
         await runtime.recover_agent(aid)

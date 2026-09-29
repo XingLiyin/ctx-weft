@@ -20,6 +20,19 @@ from ctx_weft.protocols import (
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
+def _template_with_role():
+    from ctx_weft.protocols.template import (
+        AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
+    )
+
+    return AgentTemplate(
+        id="tpl1", name="tpl1", version="1.0.0",
+        identity={"act": IdentityFacet(text="SOUL"),
+                  "observe": IdentityFacet(text="ROLE")},
+        capability_refs=[], memory_config=MemoryConfig(), loop_config=LoopConfig(),
+    )
+
+
 def _ts(offset_us: int) -> datetime:
     base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     return base + timedelta(microseconds=offset_us)
@@ -75,7 +88,7 @@ async def fake_state_ctx():
         id="a1",
         # 字段须与 protocols/template.py::LoopConfig 的默认值一致。
         # 缺字段的后果不是「测试报错」而是「测试假绿」：被测代码读到不存在的属性抛
-        # AttributeError，而 _run_background_observe 之类会整段吞掉它，于是用例走的是
+        # AttributeError，而 _run_recap 之类会整段吞掉它，于是用例走的是
         # 异常路径却自称验了成功路径。实测探针确认曾有 1 条如此（详见下）。
         loop_config=SimpleNamespace(
             compact_keep_last=2,
@@ -112,7 +125,10 @@ async def fake_state_ctx():
         task=task,
         agent=agent,
         scope=scope,
-        extra={"template": None, "bound_capabilities": []},
+        # 带 observe facet 的最小模板：`has_observe_role`（2026-09-28）是「有没有
+        # observer」的判据，后台判定档、前台 LLM observe、`finish_park` 让位三条路都认它。
+        # template=None 会让这三条路全部降级成机械判决，用例就不是在测它自称测的东西了。
+        extra={"template": _template_with_role(), "bound_capabilities": []},
         # resolve_llm_identity 的真值来源（批次 B）：这里从不真的发 LLM 请求
         # （complete() 被各测试自行打桩），但仍给个占位，防止误触真实调用时 AttributeError。
         resolved_model=SimpleNamespace(model="mock", account=""),

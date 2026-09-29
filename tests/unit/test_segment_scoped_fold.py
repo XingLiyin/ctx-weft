@@ -7,7 +7,7 @@ Bug：短段免折（is_short_segment）让上一段 raw 以 active 状态跨过
 修复契约（三层收口）：
 1. apply_compact 新增 since_last：归档池限定在「最后一条 active since_last 类型记录之后」；
 2. is_short_segment 只统计当前段（末条 UP 之后）的 raw；
-3. 两个折叠调用方（_run_background_observe 非 close 分支、_fold_retry_segment）传
+3. 两个折叠调用方（_run_recap 非 close 分支、_fold_retry_segment）传
    since_last=USER_PROMPT——更早的短段 raw 永久保 raw（「短 → 原文成胶囊」）。
 """
 
@@ -19,8 +19,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctx_weft.core.loop.steps.background_observe as bo
-import ctx_weft.core.loop.steps.observe as _obs_mod
+import ctx_weft.core.loop.observing as _obs_mod
+from ctx_weft.core.loop.background import recap as recap_mod
+from ctx_weft.core.loop.background import runner
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
 from ctx_weft.core.capabilities.control_tools import (
     REPORT_TASK_OUTCOME_NAME,
@@ -36,7 +37,7 @@ from ctx_weft.protocols import (
     TextPart,
 )
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from ctx_weft.core.loop.steps.segment_fold import segment_fold
+from ctx_weft.core.loop.fold import segment_fold
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 
@@ -136,7 +137,7 @@ async def test_is_short_segment_counts_only_current_segment():
         timestamp=_ts(55), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await bo.is_short_segment(state, ctx) is True, \
+    assert await recap_mod.is_short_segment(state, ctx) is True, \
         "免折门只该看当前段（末条 UP 之后）的 raw"
 
 
@@ -149,7 +150,7 @@ async def test_is_short_segment_long_current_segment_not_short():
         timestamp=_ts(60), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await bo.is_short_segment(state, ctx) is False
+    assert await recap_mod.is_short_segment(state, ctx) is False
 
 
 async def test_is_short_segment_single_llm_reply_is_short_regardless_of_tokens():
@@ -169,7 +170,7 @@ async def test_is_short_segment_single_llm_reply_is_short_regardless_of_tokens()
         timestamp=_ts(80), role="tool"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await bo.is_short_segment(state, ctx) is True,         "单条 LLM 回复的段不该折，无论多长"
+    assert await recap_mod.is_short_segment(state, ctx) is True,         "单条 LLM 回复的段不该折，无论多长"
 
 
 async def test_is_short_segment_counts_image_parts():
@@ -186,7 +187,7 @@ async def test_is_short_segment_counts_image_parts():
         timestamp=_ts(55), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await bo.is_short_segment(state, ctx) is False, \
+    assert await recap_mod.is_short_segment(state, ctx) is False, \
         "一张图 1600 token 已超阈值 400，不得因图算 0 而误判短段免折"
 
 
@@ -249,7 +250,7 @@ async def test_background_fold_after_short_skip_keeps_previous_segment_raw(
         type=MT.LLM_RESPONSE, address=state.scope, content="A2 当前段",
         timestamp=datetime.now(UTC), role="assistant"), ctx.provider_ctx)
 
-    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+    await runner.launch_recap(state, ctx, boundary="plain_text")
 
     chrono = await _chrono(ctx.memory, state.scope, ctx.provider_ctx)
     contents = [r.content for r in chrono]

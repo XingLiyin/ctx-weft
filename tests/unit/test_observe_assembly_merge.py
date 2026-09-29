@@ -4,9 +4,10 @@
 本文件钉住的是**分流本身**——合并没有把两边的特征串味，也没有把任何一边的文案改掉。
 三处差异（cue / subtask 指名清单 / actor 产出注入）各有一对用例。
 
-2026-09-28 起分流的判据从「前台 vs 后台」变成**同一个 `observe_boundary`**：前台恒判定、后台
-看边界，而「注入产出」「事实句」两者都由一张共用的边界表定。本文件只留粗粒度的分流断言，
-逐边界的细节在 `test_background_observe_prompt.py`。
+2026-09-28 起「判不判」只看 `request.purpose`（判定档 `background_observe` / 只摘要档
+`background_recap`）——选 purpose 的是 loop 侧（`_judges(boundary)` 与 `has_observe_role`
+相与），装配层不再自己按 boundary 判一遍。「注入产出」「事实句」仍由一张共用的边界表定。
+本文件只留粗粒度的分流断言，逐边界的细节在 `test_background_observe_prompt.py`。
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ def test_the_recap_tier_has_no_verdict_tool_at_all() -> None:
     的「`task_status` 必填」直接冲突（2026-09-28 拆回两个工具后删掉了）。现在「这一档不判」是
     工具面的事实，不是一句叮嘱。
     """
-    cue = _cue("background_observe", extra={"observe_boundary": "interrupt"})
+    cue = _cue("background_recap", extra={"observe_boundary": "interrupt"})
     assert "collect_process_report" in cue
     assert "report_task_outcome" not in cue
     assert "do not judge" not in cue
@@ -78,7 +79,7 @@ def test_foreground_lists_subtasks_for_next_step_hint() -> None:
 def test_background_omits_subtasks_even_when_supplied() -> None:
     """后台今天不产 hint，所以不给指名清单——传了也不渲染。"""
     extra = {"observe_boundary": "interrupt", **_SUBTASKS}
-    assert "tsk_a" not in _cue("background_observe", extra=extra)
+    assert "tsk_a" not in _cue("background_recap", extra=extra)
 
 
 # ── 差异三：actor 产出注入（2026-09-28 起两边共用一段文案，按边界决定注不注）──────

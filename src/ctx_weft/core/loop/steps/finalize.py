@@ -8,18 +8,22 @@ miniAgents 对齐版：
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 from typing import Any
 
 from ctx_weft.core.models.discriminators import TaskErrorCode
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
+from ctx_weft.core.loop.finish_pair import (
+    build_finish_slots,
+    pop_close_report,
+    register_close_synth,
+    replace_finish_report,
+)
 from ctx_weft.protocols.events import EventType
-from ctx_weft.core.media import placeholder_refs
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.clock import as_utc, now_utc
 from ctx_weft.core.utils.ids import generate_id
-from ctx_weft.core.utils.task_ref import task_ref, task_ref_parts
+from ctx_weft.core.utils.task_ref import task_ref
 from ctx_weft.core.utils.verdict import (
     VERDICT_CONTINUE,
     VERDICT_FAIL,
@@ -270,145 +274,6 @@ async def ensure_dispatch_frame_at_start(state, ctx) -> None:
     )
 
 
-def _finish_report_prefix(ref: str, outcome: str) -> str:
-    """finish 对 tool 槽的前缀：`[task: '<title>' (<id>)] ` 标明归属（+ fail 标记）。
-
-    归属标记的必要性：finish 对的 assistant 槽是**无参**收尾标记（`finish_task{}`，反转契约），
-    自身不带任何归属信息。派发侧不存在这个问题——框带 `input:{title, description}` 自描述；
-    收尾侧此前没有对称物，于是同 agent 嵌套（孙→子相继 close）时，父重建出的对话里会出现两组
-    完全同形的 `[assistant finish_task{}][tool …]`，只能靠正文猜是哪个 task 收的尾。
-
-    标记落 tool 槽而非 `input`：`input` 受 finish_task 的 schema 约束，而
-    ControlCapabilityProvider._handle 会过滤 schema 未声明的 key（见 control_capability.py），
-    塞进去只会被静默丢弃；且历史里出现未声明参数会诱导模型照此形状调用。tool 槽是自由文本，
-    与既有 `[outcome=fail]` 前缀同一惯例。归属在前、outcome 标记在后；title 为空则不产空标记。
-
-    `outcome == "cancelled"`（统一取消胶囊闭合，见 synthesize_cancel_closure）→ `[outcome=cancelled]`，
-    与既有 `[outcome=fail]` 同一惯例，标明这条 finish 对是取消收尾而非正常/失败终态。
-    """
-    parts: list[str] = []
-    ref = (ref or "").strip()
-    if ref:
-        # 带 id 才真的消歧：本前缀存在的理由就是「同 agent 嵌套时两组同形的 finish 对
-        # 只能靠正文猜归属」，而同名兄弟任务恰好让只印标题的版本原地失效。
-        parts.append(f"[task: {ref}]")
-    if outcome == "fail":
-        parts.append("[outcome=fail]")
-    elif outcome == "cancelled":
-        parts.append("[outcome=cancelled]")
-    return "".join(f"{p} " for p in parts)
-
-
-# 最终回复锚点（close 折末段 raw 时补位）：反转契约下答复正文是收尾回合的普通消息，
-# 随末段 raw 一起被删；锚点把它留在 task 层胶囊里。提示词用 assistant 第一人称，与
-# 「以上为系统压缩摘要」的尾注互不交叉（各自只描述自己那条消息的正文）。
-FINAL_REPLY_NOTE = (
-    "[Final reply for task {ref} — the answer I delivered on finishing it, "
-    "verbatim; not a summary.]"
-)
-FINAL_REPLY_NOTE_UNTITLED = (
-    "[Final reply — the answer I delivered on finishing this task, verbatim; not a summary.]"
-)
-# 收束尾注：锚点是**真回复**，比段摘要更容易被读成「我刚刚就是这么答的」——紧随其后的往往是
-# 新的用户消息或另一个 task，没有收束就会照抄/续写它。作用与段摘要的 ASSISTANT_SUMMARY_NOTE
-# 对称，措辞同为方括号系统注解。
-FINAL_REPLY_CLOSING_NOTE = (
-    "[End of that final reply. It was delivered to the user when the task closed — do not repeat "
-    "it, do not imitate its form, and do not treat it as the answer to whatever is being asked "
-    "now.]"
-)
-
-
-def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
-    """finish 对 tool 槽内容 = task_summary（process report）。R2 兜底：空则退 act_recap，
-    再空给占位。**不掺 outputs**——最终输出由 task 层的最终回复锚点承载
-    （见 _supersede_final_raw_segment），tool 槽只讲过程、不重复它。
-    绝不返回空串（避免空 tool 回合 / 400）。"""
-    for cand in (task_summary, act_recap):
-        if cand and cand.strip():
-            return cand
-    return ("(no final output)" if outcome == "fail"
-            else "(nothing further to report for this segment)")
-
-
-# recap 槽的收束尾注：它是 agent 层普通 assistant 回合，拿不到段摘要那条尾注
-# （_history.annotate_assistant_summary 只贴 TASK_COMPACT_SUMMARY），而形态上同样像
-# 「我上一轮就是这么答的」，同样会被模仿。与 FINAL_REPLY_CLOSING_NOTE 一并夹住胶囊：
-# 前者说「这段是过程」，后者说「那段答复已经交付过了」。
-PROCESS_RECAP_NOTE = (
-    "[The above is a system-written recap of how this task was carried out, kept for context — "
-    "it is not your reply to the user. Do not imitate its form when you answer.]"
-)
-
-_RECAP_PLACEHOLDER = "(no process recap for this segment)"
-
-
-def _recap_block(act_recap: str) -> str:
-    """recap 槽正文 = 过程复述 + 收束尾注（正文为空时用占位，注解照贴）。"""
-    body = (act_recap or "").strip() or _RECAP_PLACEHOLDER
-    return f"{body}\n\n{PROCESS_RECAP_NOTE}"
-
-
-def _final_reply_block(ref: str, reply: str) -> str:
-    """锚点正文 = 前置提示 + 答复原文 + 收束尾注。"""
-    note = (FINAL_REPLY_NOTE.format(ref=ref.strip()) if (ref or "").strip()
-            else FINAL_REPLY_NOTE_UNTITLED)
-    return f"{note}\n\n{reply.strip()}\n\n{FINAL_REPLY_CLOSING_NOTE}"
-
-
-def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outcome: str,
-                       act_recap: str, task_summary: str, final_reply: str,
-                       base, tool_call_id: str) -> list[MemoryEvent]:
-    """finish 对的槽位事件。close 合成与 bg 事后重写共用，保证两处形态永远一致。
-
-    `final_reply` 非空 → **三槽**：
-
-        assistant  act_recap                      过程复述，不挂 tool_calls
-        assistant  提示 + 答复 + 收束尾注           锚点，finish_task{} 挂这条（metadata.final_reply）
-        tool       process report                 与锚点配对
-
-    finish_task 挂在答复那条、而不是 recap 那条：重建出的历史因此示范了 finish_task 的真实
-    用法——答复正文与收尾调用同一轮（见 control_capability.finish_task 的说明）。挂在 recap
-    上等于反过来教模型「收尾时正文写过程复述」。
-
-    `final_reply` 空 → **两槽**（旧形态，finish_task 挂 recap）。用于末段 raw 没被折的场景：
-    short leaf 原文即胶囊、observer 护栏兜底导致 outputs 为空、以及占位 close（raw 还在，
-    等 bg 真报告落地时再由 _replace_finish_report 升三槽）。
-
-    时间戳按槽位递增 1µs：顺序由写入点定死，不依赖后续记录的时刻。
-    """
-    # 任务的规范称呼（标题 + id）在此合成：本函数本来就同时持有两者，调用方无需改动。
-    ref = task_ref_parts(task_id, title)
-    md = {"origin_task_id": task_id, "parent_task_id": parent_task_id}
-    call = [{"id": tool_call_id, "name": qualify("control:finish_task"), "input": {}}]
-    report = f"{_finish_report_prefix(ref, outcome)}"              f"{_finish_tool_text(task_summary, act_recap, outcome)}"
-    reply = (final_reply or "").strip()
-
-    def turn(content, ts, role, extra):
-        # act_recap / task_summary / final_reply 都可能是折叠产物，逐字带着 L0.5 占位向前走
-        # （见 `placeholder_refs` docstring）。这三槽既经 `_replace_finish_report` 的 fold
-        # 写入（旧记录被 supersede），也经 `_synthesize_dispatch_pair` 的裸 ingest 写入
-        # （无 supersede，但 mark 判据一视同仁、同样只看结构化字段）——两条路都要声明，
-        # 故放在两个调用方共用的这一层，而不是分别在各自的调用点补。
-        return MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
-            content=content, timestamp=ts, role=role, metadata={**md, **extra},
-            blob_refs=placeholder_refs(content),
-        )
-
-    if reply:
-        return [
-            turn(_recap_block(act_recap), base, "assistant", {}),
-            turn(_final_reply_block(ref, reply), base + timedelta(microseconds=1),
-                 "assistant", {"tool_calls": call, "final_reply": True}),
-            turn(report, base + timedelta(microseconds=2), "tool", {"tool_call_id": tool_call_id}),
-        ]
-    return [
-        turn(_recap_block(act_recap), base, "assistant", {"tool_calls": call}),
-        turn(report, base, "tool", {"tool_call_id": tool_call_id}),
-    ]
-
-
 def _descendant_task_ids(root_id: str, task_manager) -> set[str]:
     """BFS over children_of → 该 task 名下所有后代 task_id（不含自身）。"""
     if task_manager is None:
@@ -444,7 +309,7 @@ async def _is_short_leaf(memory, scope, task, loop_config, ctx, has_descendants:
         content_to_text(r.content) if not isinstance(r.content, str) else r.content
         for r in records
     )
-    # 同 background_observe.is_short_segment：保留 join 后数一次的文本口径，图片另计。
+    # 同 fold.is_short_segment：保留 join 后数一次的文本口径，图片另计。
     images = sum(image_tokens(r.content) for r in records)
     return (ctx.llm.tokenizer.count(text) + images) <= loop_config.short_task_token_threshold
 
@@ -477,7 +342,7 @@ async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
     TOOL_RESULT），保留 USER_PROMPT + TASK_COMPACT_SUMMARY 锚点（spec 2026-06-28 §3.2）。
 
     段作用域（2026-07-21）：末段 = 最后一条 active USER_PROMPT 之后。此前假设「active raw
-    即末段」（中间段在各自边界已折），但短段免折（background_observe.is_short_segment）会让
+    即末段」（中间段在各自边界已折），但短段免折（fold.is_short_segment）会让
     前段 raw 以 active 状态残留——它们无胶囊代表，删了即信息丢失（其 UP 失去回答位），故保留
     （「短 → 原文成胶囊」）。无 UP（防御）→ 全删（旧行为）。
 
@@ -656,10 +521,10 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
                                     raw_fold_scope=None, final_reply: str = "") -> None:
     """close 合成 agent 层 finish 对（spec 2026-06-30 两段化）：
     assistant{content=act_recap + finish_task 调用} / tool{content=task_summary 综合总结}。
-    own-root：占位先写，bg close observe 产新两段后经 _replace_finish_report 替换（A1）。
+    own-root：占位先写，bg close observe 产新两段后经 replace_finish_report 替换（A1）。
 
     register_bg=False（熔断收尾等 runtime 侧一次性合成路径）：跳过 pop_close_report /
-    register_close_synth / _replace_finish_report 整段 bg-observe 联动——这条 finish 对不是
+    register_close_synth / replace_finish_report 整段 bg-observe 联动——这条 finish 对不是
     正常 close 流程产生的、没有对应的后台 observe 会来替换它，登记只会累积永不消费的状态。
 
     raw_fold_scope（spec 2026-07-20 延迟折叠）：非 None = close 时占位、末段 raw 尚未删，
@@ -667,13 +532,10 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     register_close_synth 登记，bg 替换成功后补删。register_bg=False 路径忽略（取消/熔断
     收尾从不折 raw）。
     """
-    from ctx_weft.core.loop.steps.background_observe import (
-        pop_close_report, register_close_synth, _replace_finish_report,
-    )
     base = now_utc()
     tool_call_id = generate_id("tcall")
     # 占位 close（raw_fold_scope 非 None = 末段 raw 还没折）先写两槽：答复此刻仍在 raw 里，
-    # 提前塞锚点会让它出现两遍；等 bg 真报告落地、raw 真被折时由 _replace_finish_report 升三槽。
+    # 提前塞锚点会让它出现两遍；等 bg 真报告落地、raw 真被折时由 replace_finish_report 升三槽。
     embed_reply = "" if raw_fold_scope is not None else final_reply
     # 反转契约（spec 2026-07-01）：finish_task 退化为无参收尾标记（答复不再塞进 input.result）。
     # 槽位形态见 build_finish_slots：有答复 → recap / 答复+finish_task / 报告 三槽，
@@ -690,7 +552,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
         bg = pop_close_report(task.id)
         if bg is not None:
             bg_recap, bg_summary = bg
-            await _replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
+            await replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
                                          bg_recap, bg_summary, outcome, task.title or "",
                                          final_reply=(final_reply if raw_fold_scope else ""))
             if raw_fold_scope is not None:
@@ -711,7 +573,7 @@ async def apply_task_close(
     「park → 后台判 success」的 task 都跳过了整个 `FinalizeStep`，而本函数里这两件事
     （加上 `task_finalized_event`）此前只在那里发生过。子任务漏得最重：parent 醒来只看到
     「派发框 + 停在 running 的 ack」，拿不到任何产出。调用方见
-    `background_observe._out_of_band_finalize`。
+    `background.verdict._out_of_band_finalize`。
 
     两道 `mem_content` 门与拆出来之前逐字相同：close 要 `terminal and mem_content`
     （terminal 由调用方判），blackboard 要 `outcome == "success" and mem_content`。

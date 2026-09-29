@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ctx_weft.core.loop.background import recap as recap_mod
 from ctx_weft.core.loop import llm_gateway
 from ctx_weft.core.loop.steps import act
 from ctx_weft.core.loop.steps.act import _run_llm_turn
@@ -419,7 +420,7 @@ async def test_observe_path_events_share_origin_and_request_id():
     """observe 前台：gateway 的 4 个流式事件 + run_observe_react 自己补发的收尾事件，
     5 个事件共用一个 request_id，且 origin 全部是 loop.observe（state.origin 由调用方
     设好，run_observe_react 不用管、也不该管——它只管跑 ReAct）。"""
-    from ctx_weft.core.loop.steps.observe import run_observe_react
+    from ctx_weft.core.loop.observing import run_observe_react
 
     bus = _RecordingBus()
     state = _make_state()
@@ -449,10 +450,10 @@ async def test_observe_path_events_share_origin_and_request_id():
 @pytest.mark.asyncio
 async def test_background_observe_path_events_share_origin_and_request_id():
     """background_observe：调用前把 state.origin 显式改写为 loop.background_observe
-    （同 background_observe.py:_run_background_observe 在调 run_observe_react 前做的事）
+    （同 background_observe.py:_run_recap 在调 run_observe_react 前做的事）
     ——同样 5 个事件的 origin 全部随之变成 loop.background_observe，且从不出现已废弃的
     BACKGROUND_OBSERVE_* 类型。"""
-    from ctx_weft.core.loop.steps.observe import run_observe_react
+    from ctx_weft.core.loop.observing import run_observe_react
 
     bus = _RecordingBus()
     state = _make_state()
@@ -819,7 +820,7 @@ async def test_recognize_intent_gateway_max_tokens_failure_still_pairs_events():
     assert finished[0].payload["finish_reason"] == "error"
 
 
-# ── Task 5 复审修复 R1：origin 必须在 _run_background_observe 入口钉住，覆盖 ──
+# ── Task 5 复审修复 R1：origin 必须在 _run_recap 入口钉住，覆盖 ──
 # RUN_STARTED/TASK_RECAP_STARTED 以及两条早退路径（re-fold 幂等护栏、短段免折）——
 # 这几处此前发射时用的还是调用方快照进来的 origin（LOOP_OBSERVE / LOOP_ACT），只有
 # 走到 run_observe_react 那句才被改写成 LOOP_BACKGROUND_OBSERVE，两条早退路径根本
@@ -833,8 +834,7 @@ async def test_background_observe_origin_pinned_on_refold_guard_early_exit(
     """re-fold 幂等护栏早退（非 close 边界、视图内无 active raw）：函数体内已经发出的
     RUN_STARTED/TASK_RECAP_STARTED，以及 finally 里的 TASK_RECAP_DONE/RUN_FINISHED，
     origin 必须全部是 loop.background_observe——即使调用方快照带进来的是别的 origin。"""
-    from ctx_weft.core.loop.steps import background_observe as bo
-
+    
     state, ctx = fake_state_ctx
     state.origin = EventOrigin.LOOP_OBSERVE  # 模拟调用方快照带进来的「错误」origin
 
@@ -843,7 +843,7 @@ async def test_background_observe_origin_pinned_on_refold_guard_early_exit(
 
     monkeypatch.setattr(ctx.memory, "load_view", _empty_view)
 
-    await bo._run_background_observe(state, ctx, boundary="interrupt")
+    await recap_mod._run_recap(state, ctx, boundary="interrupt")
 
     assert ctx.event_bus.emitted
     origins = {e.origin for e in ctx.event_bus.emitted}
@@ -858,12 +858,11 @@ async def test_background_observe_origin_pinned_on_short_segment_early_exit(fake
     """短段免折早退（is_short_segment 命中，同 test_task_recap_refold_guard.py 里
     test_short_segment_kept_raw_no_llm_call 的 fixture 配置：默认 threshold=400、
     种子 raw 远低于此）：同上，origin 必须全部是 loop.background_observe。"""
-    from ctx_weft.core.loop.steps import background_observe as bo
-
+    
     state, ctx = fake_state_ctx
     state.origin = EventOrigin.LOOP_ACT  # 模拟 act.py interrupt 边界快照带进来的「错误」origin
 
-    await bo._run_background_observe(state, ctx, boundary="plain_text")
+    await recap_mod._run_recap(state, ctx, boundary="plain_text")
 
     assert ctx.event_bus.emitted
     origins = {e.origin for e in ctx.event_bus.emitted}
@@ -881,7 +880,7 @@ async def test_observe_multi_round_request_id_and_turn_increment():
     """审查者手工验证过多轮机制（round 内 5 个事件共用一个 request_id、跨轮各不相同，
     turn 依次递增）成立，但此前没有回归测试钉住——补上。默认 `_FakeLLM` 每轮都只吐
     纯文本 + usage、从不产 tool_call，配 max_rounds=3 保证跑满 3 轮不提前终止。"""
-    from ctx_weft.core.loop.steps.observe import run_observe_react
+    from ctx_weft.core.loop.observing import run_observe_react
 
     bus = _RecordingBus()
     state = _make_state()

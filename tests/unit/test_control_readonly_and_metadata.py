@@ -20,7 +20,7 @@ from ctx_weft.core.capabilities.control_tools import (
     report_task_outcome,
 )
 from ctx_weft.core.loop.driver import LoopContext
-from ctx_weft.core.loop.steps.background_observe import _readonly_ctx
+from ctx_weft.core.loop.background.runner import _readonly_ctx
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
 from ctx_weft.protocols.context import ProviderContext

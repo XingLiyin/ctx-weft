@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from ctx_weft.core.loop.background import runner
 from ctx_weft.core.runtime import SessionStartParams, TurnHandle
 from ctx_weft.protocols import (
     MemoryAddress,
@@ -108,8 +109,7 @@ async def test_wait_for_finish_ignores_an_earlier_overlapping_launchs_recap_done
     事件之后才等到它迟到的 TaskRecapDone」这个精确场景——与
     `test_wait_for_finish_returns_after_deferred_fold_lands` 互补：那条测真实折叠
     落地，这条测「等的必须是对的那次」。"""
-    from ctx_weft.core.loop.steps import background_observe as bg
-
+    
     class _NeverDoneTask:
         """占位：只需要 `.done()` 恒为 False，不需要真的是 asyncio.Task。"""
 
@@ -121,9 +121,9 @@ async def test_wait_for_finish_ignores_an_earlier_overlapping_launchs_recap_done
                    template_id="tpl", event_bus=bus)
 
     # 登记「这次（close 边界）launch」为当前在途——`_task_pending`/`_task_pending_run_id`
-    # 本就总是相邻一起写（见 launch_background_observe），这里手动摆出同样的形状。
-    bg._task_pending["tsk_1"] = _NeverDoneTask()
-    bg._task_pending_run_id["tsk_1"] = "run_close_launch"
+    # 本就总是相邻一起写（见 launch_recap），这里手动摆出同样的形状。
+    runner._task_pending["tsk_1"] = _NeverDoneTask()
+    runner._task_pending_run_id["tsk_1"] = "run_close_launch"
     try:
         waiter = asyncio.create_task(h.wait_for_finish(timeout=2.0))
         for _ in range(5):
@@ -145,8 +145,8 @@ async def test_wait_for_finish_ignores_an_earlier_overlapping_launchs_recap_done
         await bus.emit(_ev(id="e3", type=EventType.TASK_RECAP_DONE, run_id="run_close_launch"))
         await asyncio.wait_for(waiter, timeout=2.0)
     finally:
-        bg._task_pending.pop("tsk_1", None)
-        bg._task_pending_run_id.pop("tsk_1", None)
+        runner._task_pending.pop("tsk_1", None)
+        runner._task_pending_run_id.pop("tsk_1", None)
 
 
 async def test_wait_for_finish_matches_task_recap_done_by_value_not_identity():
@@ -164,8 +164,7 @@ async def test_wait_for_finish_matches_task_recap_done_by_value_not_identity():
     这里构造的 `TaskRecapDone` 事件 `type` 字段是裸字符串 `"TaskRecapDone"`（模拟一个
     序列化往返的宿主总线投出来的事件），`run_id` 与登记的在途 launch 一致——断言
     `wait_for_finish` 依然认得出它、正常返回，而不是耗光 `timeout` 才靠超时兜底返回。"""
-    from ctx_weft.core.loop.steps import background_observe as bg
-
+    
     class _NeverDoneTask:
         def done(self) -> bool:
             return False
@@ -174,8 +173,8 @@ async def test_wait_for_finish_matches_task_recap_done_by_value_not_identity():
     h = TurnHandle(session_id="s1", agent_id="agt_1", task_id="tsk_1",
                    template_id="tpl", event_bus=bus)
 
-    bg._task_pending["tsk_1"] = _NeverDoneTask()
-    bg._task_pending_run_id["tsk_1"] = "run_close_launch"
+    runner._task_pending["tsk_1"] = _NeverDoneTask()
+    runner._task_pending_run_id["tsk_1"] = "run_close_launch"
     try:
         # 短超时：判据若退化回 `is`，这条裸字符串事件永远不匹配，测试会在这个超时
         # 上原地耗尽——短超时让那种失败又快又好认，而不是拖到默认的几百秒。
@@ -201,8 +200,8 @@ async def test_wait_for_finish_matches_task_recap_done_by_value_not_identity():
             "说明 TaskRecapDone 没被裸字符串 type 认出来"
         )
     finally:
-        bg._task_pending.pop("tsk_1", None)
-        bg._task_pending_run_id.pop("tsk_1", None)
+        runner._task_pending.pop("tsk_1", None)
+        runner._task_pending_run_id.pop("tsk_1", None)
 
 
 async def test_wait_for_finish_does_not_hang_when_recap_done_arrives_before_terminal():
@@ -220,8 +219,7 @@ async def test_wait_for_finish_does_not_hang_when_recap_done_arrives_before_term
     原地耗尽这个 `timeout` 才返回——用耗时区分两者，与
     `test_wait_for_finish_matches_task_recap_done_by_value_not_identity` 同一手法。
     """
-    from ctx_weft.core.loop.steps import background_observe as bg
-
+    
     class _NeverDoneTask:
         def done(self) -> bool:
             return False
@@ -230,8 +228,8 @@ async def test_wait_for_finish_does_not_hang_when_recap_done_arrives_before_term
     h = TurnHandle(session_id="s1", agent_id="agt_1", task_id="tsk_1",
                    template_id="tpl", event_bus=bus)
 
-    bg._task_pending["tsk_1"] = _NeverDoneTask()
-    bg._task_pending_run_id["tsk_1"] = "run_close_launch"
+    runner._task_pending["tsk_1"] = _NeverDoneTask()
+    runner._task_pending_run_id["tsk_1"] = "run_close_launch"
     try:
         waiter = asyncio.create_task(h.wait_for_finish(timeout=0.3))
         for _ in range(5):
@@ -252,12 +250,12 @@ async def test_wait_for_finish_does_not_hang_when_recap_done_arrives_before_term
             "说明先到账的 TaskRecapDone 没被记住，白等了一条已经过去的事件"
         )
     finally:
-        bg._task_pending.pop("tsk_1", None)
-        bg._task_pending_run_id.pop("tsk_1", None)
+        runner._task_pending.pop("tsk_1", None)
+        runner._task_pending_run_id.pop("tsk_1", None)
 
 
 class _CloseFoldLLM(MockLLMAdapter):
-    """单 root task：finish_task 收尾触发 close 边界后台 observe（launch_background_observe
+    """单 root task：finish_task 收尾触发 close 边界后台 observe（launch_recap
     fire-and-forget），验证 `wait_for_finish` 返回**那一刻**该次折叠已经落地——不是靠
     调用方碰巧多等了一会儿。按 request.tools 路由：recognize_intent → 空文本；
     background observe（`control__report_task_outcome`）→ 折叠摘要；其余（act）→

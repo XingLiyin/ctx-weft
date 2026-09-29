@@ -1,8 +1,13 @@
 """LocalAgentTemplateProvider：单根目录扫描版 agent template provider（core 内置参考实现）。
 
 根目录下每个含 SOUL.md 的子目录即一个模板；list()/get_template() 每次重新扫盘，
-热更新友好（与 capability_skill_local 同族）。非 default 模板缺
-compact/recognize_intent/observe facet 时从 default 模板补齐（merge_default_facets）。
+热更新友好（与 capability_skill_local 同族）。
+
+**不做「缺 facet 从 default 模板借」**（2026-09-28 移出）：那是部署约定，不是模板加载的
+一部分——「有一个叫 default 的母版」是宿主的产品概念。缺 facet 时的兜底全在 core 自己手里：
+compact / recognize_intent 回退 act facet，observe 家族不回退、由装配层的通用 observer 文案
+接手（见 `core/assembler/sources/identity.py::_OBSERVE_PURPOSES`）。宿主要「借母版」就在它自己
+的 AgentCapabilityProvider 里做。
 """
 
 from __future__ import annotations
@@ -18,11 +23,7 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.protocols.template import AgentTemplate
-from ctx_weft.providers.agent_template_local._loader import (
-    DEFAULT_MERGE_PURPOSES,
-    TemplateLoader,
-    merge_default_facets,
-)
+from ctx_weft.providers.agent_template_local._loader import TemplateLoader
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +38,9 @@ class LocalAgentTemplateProvider(AgentCapabilityProvider):
     def __init__(
         self,
         templates_root: Path,
-        default_template_id: str = "default",
         loader: TemplateLoader | None = None,
     ) -> None:
         self._root = Path(templates_root)
-        self._default_template_id = default_template_id
         self._loader = loader or TemplateLoader()
 
     async def list(self, ctx: ProviderContext) -> list[Capability]:
@@ -59,18 +58,10 @@ class LocalAgentTemplateProvider(AgentCapabilityProvider):
     async def get_template(
         self, template_id: str, version: str | None, ctx: ProviderContext,
     ) -> AgentTemplate | None:
-        found: AgentTemplate | None = None
-        default: AgentTemplate | None = None
         for _, t in self._loader.scan(self._root):
             if t.id == template_id:
-                found = t
-            if t.id == self._default_template_id:
-                default = t
-        if found is None:
-            return None
-        if found.id != self._default_template_id and default is not None:
-            merge_default_facets(found, default, DEFAULT_MERGE_PURPOSES)
-        return found
+                return t
+        return None
 
     async def describe(self, ctx: ProviderContext) -> CapabilityProviderInfo:
         return CapabilityProviderInfo(
