@@ -117,7 +117,7 @@ from ctx_weft.core.utils.content import (
     downgrade_images_to_text,
     image_tokens,
 )
-from ctx_weft.core.utils.headings import SUBTASKS_HEADING
+from ctx_weft.core.utils.headings import FINAL_OUTPUT_HEADING, SUBTASKS_HEADING
 from ctx_weft.core.utils.task_ref import task_label, task_ref_parts
 from ctx_weft.protocols import LLMMessage
 from ctx_weft.protocols.capability import qualify
@@ -175,14 +175,19 @@ _OBSERVER_ROLE_FALLBACK = (
 # 所以 cue 从此只有三样东西：本段的**边界事实**、调哪个工具、这一次填哪些字段。字段语义一概不
 # 复述——它们在工具 schema 上，模型填参数时就在眼前。
 
+#: 判定档的「这一次要做什么」。
+#:
+#: 第二段 2026-09-28 收过一次：此前它把四个条件字段的填写条件逐条列了一遍
+#: （`task_summary` 何时加、`task_failure_reason` 何时填、`next_step_hint` 何时填），然后紧跟
+#: 一句「Each field's own contract is on the tool itself」——先抄一遍 schema，再说契约在 schema
+#: 上。`task_failure_reason` 因此在 cue / schema / ROLE 三处各有一份填写条件，正是这轮改造要
+#: 消掉的形状。现在只点**恒填**的那两个，条件字段交给模型填参数时眼前的 schema。
 _JUDGMENT_ASK = (
     "Judge whether the task is complete, by the standard in your role above, and call "
     f"`{REPORT_TASK_OUTCOME_NAME}` exactly once — no other tools. Don't over-think it: call as "
     "soon as the picture is clear.\n\n"
-    "Fill `task_status` and `act_recap`. Add `task_summary` when the status is `success` or "
-    "`fail`; `task_failure_reason` when it is `fail`, or when a `continue` was genuinely blocked; "
-    "`next_step_hint` only if the next actor turn needs a warning. Each field's own contract is "
-    "on the tool itself."
+    "`task_status` and `act_recap` are always required; fill the remaining fields on the "
+    "conditions the tool states for each."
 )
 
 # task compact cue：整体式——坍缩会替掉原始 prompt + 之前所有 `## Progress So Far`，故须概括
@@ -293,15 +298,20 @@ _BOUNDARY_FACTS: dict[str, tuple[str, bool]] = {
 
 _DEFAULT_BOUNDARY = "normal"
 
+
 #: 让位给人的两个边界要额外顶一句：这是「把提问判成 success」的高发地，而那条判断**没有任何机械
 #: 护栏**——success-without-outputs 护栏读 `task.outputs`，而 park 之前合成的 outputs 正是那段
 #: 提问本身、非空，护栏原地失效（见 tests/unit/test_verdict_vocabulary.py 的末条）。完整的准则在
 #: ROLE 里，这里只在生成点附近顶一句。
+#:
+#: **只留结论，不重复列举**（2026-09-28 收）：`plain_text` 那句此前把「问题/缺信息/选择/确认」
+#: 四项照 ROLE 抄了一遍，却漏了 ROLE 的第五项（「只有用户能做的动作」）也漏了「决不 fail」——
+#: 抄一半是最容易漂的形态：ROLE 加第六项时没人会想到还要来改这里。列举归 ROLE，这里只顶结论。
 _YIELDED_REMINDER = {
-    "plain_text": "If that message asks the user for anything — a question, missing information, "
-                  "a choice, a confirmation — the task is not over: judge `continue`.",
+    "plain_text": "If that message asks the user for anything at all, the task is not over: "
+                  "judge `continue` — never `success`, never `fail`.",
     "finish_park": "A closing message that still asks the user for something is not a completed "
-                   "task: judge `continue`.",
+                   "task: judge `continue` — never `success`, never `fail`.",
 }
 
 #: 与 loop.steps.background_observe._CLOSE_BOUNDARIES 保持一致（此处避免跨层 import）。
@@ -387,7 +397,7 @@ def _finish_result_section(request) -> str:
     if not text:
         return ""
     return (
-        "## Actor's Final Output\n\n"
+        f"{FINAL_OUTPUT_HEADING}\n\n"
         f"{text}\n\n"
         "(The above is the final result the actor submitted — the only authoritative evidence of "
         "what this segment produced, and it is NOT part of the conversation above. Summarize "

@@ -378,8 +378,10 @@ def report_task_outcome(
         "'continue', never 'success' and never 'fail'. That holds even when the message is polished and "
         "everything the actor could do alone is done: a turn that ends by handing the floor back is not a "
         "delivered task. 'continue' carries no criticism of the actor; it only says the task has not ended. "
-        "'fail': the goal cannot be achieved as stated and should NOT be attempted again. "
-        "Don't over-think — once the situation is clear, call this tool promptly.",
+        # 「别想太多、尽快调」不写在这里（2026-09-28 删）：那是关于**这次调用**的指令，归尾部
+        # cue（`composer._JUDGMENT_ASK` 有一句），不是字段语义。此前两处各一句，同一个 prompt
+        # 里出现两遍。
+        "'fail': the goal cannot be achieved as stated and should NOT be attempted again.",
     ],
     act_recap: Annotated[str, _ACT_RECAP_DESC],
     task_summary: Annotated[
@@ -404,11 +406,13 @@ def report_task_outcome(
         str,
         "Optional. If there are obvious risks, blockers, or important concerns the next actor turn should be "
         "aware of, describe them here. Leave empty if nothing notable. "
+        # 这里只说「这个字段也承载这件事」。**「你不决定下一步」那条职权规则不写在这里**
+        # （2026-09-28 删）：它是 ROLE 的地盘，而 ROLE 已有一份近乎逐字的同款文本——连
+        # `## Your sub-tasks` 这个标题名都两边各存一份。字段描述越界写职权规则，与「ROLE 越界
+        # 写字段契约」是同一个病的两个方向。
         "This is also where you flag a sub-task whose result does not actually achieve its goal: "
         f"name it (title + id, as listed under '{SUBTASKS_HEADING}') and say what is wrong and "
-        "what must be different. You do not decide what happens next — the actor reads this hint on its "
-        "next turn and chooses for itself whether to delegate a fresh sub-task for that work or "
-        "just do it directly.",
+        "what must be different.",
     ] = "",
     *,
     ctx: ControlContext = None,
