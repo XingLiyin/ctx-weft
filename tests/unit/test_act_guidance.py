@@ -341,6 +341,39 @@ def test_finish_reminder_leads_with_completion_gate():
         assert "keep working instead of finishing" in g
 
 
+def test_unattended_task_is_told_prose_alone_does_not_end_it():
+    """无人值守下纯文本不算收尾——这一支此前什么都没说。
+
+    两边的纯文本语义恰好相反，而只有一边写了出来：有人在场时纯文本是**正确的**中途动作
+    （park，把话语权交回去，见 `test_attended_task_keeps_pause_note_with_tree`）；无人值守时
+    它什么也不是，没人会读那段话。
+
+    2026-09-28 起这条有牙齿了：`observe._mechanical_verdict` 对 `normal` 收尾判 continue，
+    于是不调 `finish_task` 就是一轮轮重跑，撞上 `max_retries` 后落 FAILED / RETRY_EXHAUSTED。
+    这段常驻文案是**预防**（这一轮别犯），`observe._PLAIN_TEXT_NEEDS_FINISH` 那句一次性 hint
+    是**补救**（上一轮已经犯了）。两处都得在。
+    """
+    g = build_act_guidance(_cur(unattended=True), _tm())
+    assert "does not end this task" in g
+    assert "attempt limit" in g, "没说清后果——模型不知道拖着不 finish 会失败"
+    # 有人值守那一支不该收到这段：那里纯文本正是该做的事
+    attended = build_act_guidance(_cur(unattended=False), _tm())
+    assert "does not end this task" not in attended
+    assert "keeps the task open" in attended
+
+
+def test_unattended_with_siblings_keeps_both_notes():
+    """带兄弟任务时，「别自己去开那些任务」与纯文本那句必须同时在。
+
+    这一支原本是 `elif has_other_tasks`，加纯文本那句时容易把它改成互斥的二选一。
+    """
+    cur = _task("t1", "Cur", "ACTIVE")
+    sib = _task("t2", "Other", "PENDING")
+    g = build_act_guidance(_cur(unattended=True, id="t1"), _tm(tasks=[cur, sib]))
+    assert "Do not start the other tasks yourself" in g
+    assert "does not end this task" in g
+
+
 # ── 装配管线：GuidanceSource + composer 落位 ──────────────────────────────────
 
 

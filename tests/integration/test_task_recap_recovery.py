@@ -68,7 +68,11 @@ def _make_runtime() -> tuple[CtxWeftRuntime, InMemoryMemoryProvider, list]:
     resolver.register(make_echo_template())
     # Enough plain-text responses to outlast the observe ReAct loop
     # (max_turns_per_observe defaults to 5) without exhausting the mock.
-    llm = MockLLMAdapter(responses=[MockResponse(text="recovered recap") for _ in range(8)])
+    # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被机械
+    # 判 success（`_mechanical_verdict` 判 continue）——不给这条路由，task 会一路重试到
+    # max_retries 然后落 FAILED。
+    llm = MockLLMAdapter(responses=[MockResponse(text="recovered recap") for _ in range(8)],
+                         observer_verdict="success")
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)

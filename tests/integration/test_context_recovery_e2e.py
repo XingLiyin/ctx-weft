@@ -28,7 +28,11 @@ from ctx_weft.protocols import (
     MemoryEventType as T, ProviderContext, ToolCall,
 )
 from ctx_weft.protocols.events import EventType
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.mock import (
+    MockLLMAdapter,
+    MockResponse,
+    is_observer_request,
+)
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_compact_flow_e2e import _NOOP_NAME, _NoopToolProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
@@ -53,7 +57,17 @@ _CTX_LIMIT, _INFLATED = 3000, 2800
 
 
 def _template(**loop_kwargs) -> AgentTemplate:
-    """act-only（无 observe facet）→ 机械退出走规则 observe，不必脚本化 observe LLM。
+    """带 observe facet → 收尾由 observer 判（`_wire` 的 `observer_verdict="success"` 供货）。
+
+    2026-09-28 之前这里刻意**不带** observe facet（「机械退出走规则 observe，不必脚本化
+    observe LLM」）。现在不行了：纯文本收尾在机械路径上判 continue（`_mechanical_verdict`
+    没有任何办法知道那段正文交付了没有，安全默认只能是「没完」），于是一个没有 observer 的
+    agent 回一段正文永远到不了终态——而 `test_plain_text_finish_wins_over_the_stop_line` 的
+    docstring 早就写着「该不该算做完是 observer 的事」，那就得真有一个 observer。
+    脚本化的代价是零：`observer_verdict="success"` 一行供货，不占 act 响应池。
+
+    `_CrossThenSettleMock` 把判定回合从三本账（`_calls` / `seen` / `shapes`）里全滤掉了，
+    所以 `inflate_on` 的序号、`seen` 的条数一个都没动。
 
     `collapse_keep_last=1`：L3 按回合切，保留区至少要装下越线的那一整轮；时间线上只要越线
     之前还有**一轮**历史，L3 就有东西可折。默认的 3 会把这个最小时间线整个保留下来（各级全
@@ -63,7 +77,8 @@ def _template(**loop_kwargs) -> AgentTemplate:
     lc.update(loop_kwargs)
     return AgentTemplate(
         id="tpl_recover", name="recover", version="0.1.0",
-        identity={"act": IdentityFacet(text="You are a worker. Keep working.")},
+        identity={"act": IdentityFacet(text="You are a worker. Keep working."),
+                  "observe": IdentityFacet(text="You are the reviewer.")},
         description="context-recovery e2e", capability_refs=[],
         memory_config=MemoryConfig(), loop_config=LoopConfig(**lc),
     )
@@ -89,6 +104,14 @@ class _CrossThenSettleMock(MockLLMAdapter):
         self.shapes: list[list[tuple]] = []
 
     async def complete(self, request, stream: bool = True):
+        # 判定回合完全不计账（2026-09-28）：`_calls` / `seen` / `shapes` 三本账都只记 act。
+        # 模板加上 observe facet 之后每次收尾都多一次 observer 调用，若计进去，`inflate_on`
+        # 的序号、`seen` 的条数、`shapes` 的下标全要跟着漂——而这三样断言说的都是「actor
+        # 发了什么」。滤掉它，本文件既有的每一条序号/条数断言逐字保持原意。
+        if is_observer_request(request):
+            async for chunk in super().complete(request, stream=stream):
+                yield chunk
+            return
         self._calls += 1
         inflate = self._calls in self._inflate_on
         self.seen.append("\n".join(
@@ -133,8 +156,12 @@ def _wire(monkeypatch, *, digest=_DIGEST, responses=None, inflate_on=frozenset({
 
     resolver = InlineAgentTemplateProvider()
     resolver.register(_template(**loop_kwargs))
+    # `observer_verdict="success"`：本文件的 actor 一律以一段正文收尾，而 2026-09-28 起纯文本
+    # 不再被机械判 success（`_mechanical_verdict` 判 continue）。给整个 _wire 加是安全的：
+    # 以 max_turns / context_limit 结束的段照旧被 `execute` 那道强制覆盖压成 continue，重试
+    # 路径一个字没变。
     llm = _CrossThenSettleMock(responses=responses or _working_then_done(),
-                               inflate_on=inflate_on,
+                               inflate_on=inflate_on, observer_verdict="success",
                                context_limit=_CTX_LIMIT, output_reserve=0)
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())

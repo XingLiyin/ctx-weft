@@ -185,7 +185,14 @@ async def test_normal_finish_still_works_e2e():
     """正常收尾回归：整条 loop 仍跑通到 FINISHED（Task 3 去 process_report 渲染不破主流程）。"""
     resolver = InlineAgentTemplateProvider()
     resolver.register(_act_only_template())
-    llm = MockLLMAdapter(responses=[MockResponse(text="Here is the final answer.")])  # 正常 context_limit
+    # 以 `finish_task` 收尾（2026-09-28）：本例的模板是 act-only（无 observe facet），于是
+    # 判决必然走机械路径，而纯文本收尾在那条路上已不再判 success——`_mechanical_verdict`
+    # 判它 continue（机械判决没法知道那段正文交付了没有，安全默认只能是「没完」）。
+    # 没有 observer 的 agent 想终结任务，只剩明确调 `finish_task` 这一条路，本例照此排。
+    llm = MockLLMAdapter(responses=[MockResponse(
+        text="Here is the final answer.",
+        tool_calls=[ToolCall(id="tc_fin", name="control__finish_task", arguments={})],
+    )])
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 

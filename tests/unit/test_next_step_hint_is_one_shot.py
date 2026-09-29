@@ -59,13 +59,26 @@ async def test_prepare_clears_the_hint_after_building_guidance(monkeypatch) -> N
 
 
 def test_stale_hint_does_not_survive_a_mechanical_verdict() -> None:
-    """回归：机械判决不写 hint，所以「靠下次覆写」在那条路上不成立。
+    """回归：机械判决**多数分支不写 hint**，所以「靠下次覆写」在那条路上不成立。
 
-    这条不驱动 observe，只把那个前提钉死——`_mechanical_verdict` 产出的 `Verdict` 里
-    没有 hint 字段可写，覆写永远不会发生。清除因此必须在消费侧做。
+    这条不驱动 observe，只把那个前提钉死：清除必须在消费侧做（`prepare` 那句
+    `next_step_hint = None`），不能指望下一轮的判决把旧 hint 盖掉。
+
+    2026-09-28 起 `_mechanical_verdict` 确实会写 hint 了——但**只在纯文本收尾那一格**
+    （`normal` 判 continue 时那句「去调 finish_task」）。另外三格（`max_turns` /
+    `context_limit` / 空 transcript）照旧一个字都不写，于是「上一轮的 hint 会活到再下一轮」
+    这个洞原封不动，消费侧清除仍然是唯一的堵法。
     """
-    from dataclasses import fields
+    from types import SimpleNamespace
 
-    from ctx_weft.core.loop.steps.observe import Verdict
+    from ctx_weft.core.loop.steps.observe import ObserveStep
 
-    assert "next_step_hint" not in {f.name for f in fields(Verdict)}
+    step = ObserveStep()
+    for exit_reason in ("max_turns", "context_limit"):
+        state = SimpleNamespace(
+            transcript=[object()], act_exit_reason=exit_reason,
+            task=_task("上一轮的陈旧转向"))
+        assert step._mechanical_verdict(state).next_step_hint == "", exit_reason
+    empty = SimpleNamespace(transcript=[], act_exit_reason="normal",
+                            task=_task("上一轮的陈旧转向"))
+    assert step._mechanical_verdict(empty).next_step_hint == ""

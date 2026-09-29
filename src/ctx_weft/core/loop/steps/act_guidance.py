@@ -229,10 +229,25 @@ def build_act_guidance(task, task_manager) -> str:
             "to them — the right move mid-conversation; finish only when the whole request "
             "is served."
         )
-    elif has_other_tasks:
-        parts.append(finish_core + " Do not start the other tasks yourself.")
     else:
-        parts.append(finish_core)
+        # 无人值守（2026-09-28）：与上面那句对称的另一半。此前这一支什么都没说，而两边的
+        # 纯文本语义恰好相反——有人在场时纯文本是**正确的**中途动作（park，把话语权交回去），
+        # 无人值守时它什么也不是：没人会读那段话，任务也不会因此结束。
+        #
+        # 而这条现在有牙齿：`observe._mechanical_verdict` 对 `normal` 收尾判 continue（机械判决
+        # 没有任何办法知道那段正文交付了没有，安全默认只能是「没完」），于是不调 finish_task
+        # 就是一轮轮重跑，撞上 `max_retries` 后 task 落 FAILED / RETRY_EXHAUSTED。说清楚比让它
+        # 自己撞上去便宜得多。
+        unattended_note = (
+            " No one is there to read a reply: a prose answer alone does not end this task and "
+            "nobody will follow up on it. When the goal is achieved you must call it in the same "
+            "turn as your final reply, or this task will just be run again until its attempt "
+            "limit runs out."
+        )
+        if has_other_tasks:
+            parts.append(finish_core + unattended_note + " Do not start the other tasks yourself.")
+        else:
+            parts.append(finish_core + unattended_note)
     parts.append(
         f"If the user's latest message is an unrelated NEW request, emit `{FINISH_TASK_NAME}` "
         f"AND `{DELEGATE_TASK_NAME}` together in ONE response — finishing alone would lose "

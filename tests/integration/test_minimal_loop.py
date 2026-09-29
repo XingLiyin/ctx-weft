@@ -102,6 +102,11 @@ async def test_minimal_echo_loop() -> None:
         responses=[
             MockResponse(text="Hello! You said: say hello"),
         ],
+        # `observer_verdict="success"`：2026-09-28 起纯文本收尾不再机械判 success
+        # （`observe._mechanical_verdict` 判它 continue——机械判决没法知道那段正文交付了
+        # 没有，安全默认只能是「没完」）。本例的 actor 就是回一段正文、不调 finish_task，
+        # 所以要让它真正终结，得显式排一条判定路由——判断由 observer 做，不由规则做。
+        observer_verdict="success",
     )
 
     runtime = make_runtime(llm=llm, agent_provider=resolver)
@@ -118,9 +123,14 @@ async def test_minimal_echo_loop() -> None:
     assert state.task.user_prompt == "say hello"
     assert state.verdict is not None
     assert state.verdict.task_outcome == "success"
-    # root agent 正常结束走机械判决：只定结局、**不产任何摘要**（用户裁定：不允许机械
-    # 合成的摘要）。摘要由 close 边界的 background observe 异步产。
-    assert state.verdict.act_recap == ""
+    # 判决出自 observer（2026-09-28）：echo 模板带 observe facet，而 root 的收尾不再免检
+    # （`_should_use_llm` 删掉了那道 `parent_task_id is None` 降级门）。于是这里能看到一份
+    # 真 recap——此前这条断言是 `== ""`，因为 root 走机械判决，而机械判决只定结局、不产摘要。
+    #
+    # 「不允许任何机械合成的摘要」那条裁定没变，守它的是
+    # `test_observe_outcomes.py::test_no_mechanical_synthetic_summary_text_left_in_source`。
+    assert state.verdict.act_recap, "observer 判了 success 却没给出 recap"
+    assert state.verdict.reported is True
 
     # transcript 应有 1 个 turn；assistant 文本回显在 transcript（而非 verdict.act_recap）
     assert len(state.transcript) == 1

@@ -142,7 +142,10 @@ def test_provider_get_client_carries_resolved_identity():
 @pytest.mark.asyncio
 async def test_events_carry_resolved_default_model():
     """host 不显式传 model（依赖账号 default_model）→ 事件报实际解析出的模型，非 mock。"""
-    resolver = _OneAccountResolver(MockLLMAdapter(responses=[MockResponse(text="hi")]))
+    # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被
+    # 机械判 success（`_mechanical_verdict` 判 continue）——要让它终结得让 observer 去判。
+    resolver = _OneAccountResolver(MockLLMAdapter(
+        responses=[MockResponse(text="hi")], observer_verdict="success"))
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 
@@ -165,7 +168,10 @@ async def test_events_carry_resolved_default_model():
 @pytest.mark.asyncio
 async def test_events_carry_explicit_model():
     """host 显式传 model/account → 事件按传入值计账。"""
-    resolver = _OneAccountResolver(MockLLMAdapter(responses=[MockResponse(text="hi")]))
+    # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被
+    # 机械判 success（`_mechanical_verdict` 判 continue）——要让它终结得让 observer 去判。
+    resolver = _OneAccountResolver(MockLLMAdapter(
+        responses=[MockResponse(text="hi")], observer_verdict="success"))
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 

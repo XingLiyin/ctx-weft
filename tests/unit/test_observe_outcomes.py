@@ -151,13 +151,41 @@ def test_mechanical_verdict_mechanical_exit_is_retry() -> None:
         assert t.actor_done is False
 
 
-def test_mechanical_verdict_normal_exit_is_success() -> None:
+def test_mechanical_verdict_plain_text_exit_is_continue_with_a_finish_reminder() -> None:
+    """**2026-09-28 反转**：纯文本收尾（`normal`）从 success 改判 continue。
+
+    机械判决**没有任何办法**知道那段正文有没有交付目标——它只看得见「这一段是怎么停的」。
+    那它的安全默认就必须是「没完」：continue 可回头（retry），success 是终态、不可逆。同一条
+    原则已在另外两处落地（`normalize_verdict` 认不出的值归 continue 而决不归 fail、
+    `report_task_outcome` 的 success-without-outputs 护栏把 success 改判 continue）。
+
+    于是「一个 task 怎么才算成功」收敛成一句话：**actor 明确调了 `finish_task`**。
+
+    判 continue 就得给下一轮一个「该干什么不一样的事」，否则它只会把同一段正文再写一遍——
+    所以这一支必须带 hint。
+    """
     t = _task()
     v = ObserveStep()._mechanical_verdict(_state("normal", t))
-    assert v.task_outcome == "success"
+    assert v.task_outcome == "continue"
     assert v.act_recap == ""
+    assert "finish_task" in v.next_step_hint, "判 continue 却没告诉它去调 finish_task"
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
     assert t.observer_outcome is None
+    # hint 也不由判决自己写进 task——那是 `execute` 的事（见
+    # test_mechanical_continue_lands_the_finish_reminder_on_the_task）。
+    assert t.next_step_hint is None
+
+
+def test_mechanical_verdict_actor_done_is_success() -> None:
+    """唯一还判 success 的一格：actor 明确调了 `finish_task`。
+
+    注意这一格仍然**无条件**——不看 `task.outputs`、不看子任务成败。那道
+    success-without-outputs 护栏长在 `report_task_outcome` 里，机械判决不经过它。
+    """
+    t = _task()
+    v = ObserveStep()._mechanical_verdict(_state("actor_done", t))
+    assert v.task_outcome == "success"
+    assert v.next_step_hint == "", "终态判决不该给下一轮留转向"
 
 
 def test_mechanical_verdict_no_transcript_is_fail() -> None:
@@ -377,9 +405,13 @@ async def test_non_llm_path_launches_background_observe(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_close_boundary_not_double_launched(monkeypatch) -> None:
-    """root + normal/actor_done 已在 close 边界 launch 过 → 机械路径不再重复 launch
-    （重复虽有 per-task 锁兜着，但会多发一对 TaskRecapStarted/Done）。"""
-    for reason, expected in [("normal", "normal"), ("actor_done", "finish")]:
+    """root 在 close 边界 launch 过 → 机械路径不再重复 launch（重复虽有 per-task 锁兜着，
+    但会多发一对 TaskRecapStarted/Done）。
+
+    `normal` 自 2026-09-28 起不再是 close 边界：机械判决判它 continue，close 那一支要求
+    `verdict != continue`，于是它落到 `mechanical`。仍然只 launch 一次——本用例守的就是「一次」。
+    """
+    for reason, expected in [("normal", "mechanical"), ("actor_done", "finish")]:
         launched = _capture_launches(monkeypatch)
         state, ctx = _mech_state_ctx(exit_reason=reason, parent_task_id=None)
         await ObserveStep().execute(state, ctx)
@@ -387,12 +419,13 @@ async def test_close_boundary_not_double_launched(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mechanical_verdict_preserves_today_outcomes(monkeypatch) -> None:
-    """判决逐字不变：机械退出 → retry；正常/actor_done → success；空 transcript → fail。"""
+async def test_mechanical_verdict_full_mapping_through_execute(monkeypatch) -> None:
+    """整张表走一遍 `execute`（含那道 max_turns 强制覆盖）：只有 `actor_done` 判 success。"""
     _capture_launches(monkeypatch)
     for exit_reason, expected in [
         ("max_turns", "continue"), ("context_limit", "continue"),
-        ("normal", "success"), ("actor_done", "success"),
+        ("normal", "continue"),          # 2026-09-28：纯文本不算收尾
+        ("actor_done", "success"),       # 唯一的 success
     ]:
         state, ctx = _mech_state_ctx(exit_reason=exit_reason)
         outcome = await ObserveStep().execute(state, ctx)
@@ -401,6 +434,34 @@ async def test_mechanical_verdict_preserves_today_outcomes(monkeypatch) -> None:
     state, ctx = _mech_state_ctx(transcript=[])
     outcome = await ObserveStep().execute(state, ctx)
     assert outcome.state_patch["verdict"].task_outcome == "fail"
+
+
+@pytest.mark.asyncio
+async def test_mechanical_continue_lands_the_finish_reminder_on_the_task(monkeypatch) -> None:
+    """纯文本判 continue 时，那句提醒必须真的落到 `task.next_step_hint`。
+
+    渠道全在：`act_guidance` 把它渲染成「## Note from the review of your previous attempt」，
+    `prepare` 在消费点清掉（一次性）。判决只把 hint 带出来，落地是 `execute` 的事——所以这条
+    钉的是那一步接上了，光有 `Verdict.next_step_hint` 不算。
+    """
+    _capture_launches(monkeypatch)
+    state, ctx = _mech_state_ctx(exit_reason="normal")
+    assert state.task.next_step_hint is None
+    await ObserveStep().execute(state, ctx)
+    hint = state.task.next_step_hint or ""
+    assert "finish_task" in hint, f"提醒没落到 task 上，实得 {hint!r}"
+
+
+@pytest.mark.asyncio
+async def test_mechanical_success_does_not_leave_a_hint(monkeypatch) -> None:
+    """`actor_done` 判 success 时不许留转向——task 已经结束，下一轮不存在。
+
+    反面对照：没有它，上面那条用「恒写 hint」也能过。
+    """
+    _capture_launches(monkeypatch)
+    state, ctx = _mech_state_ctx(exit_reason="actor_done")
+    await ObserveStep().execute(state, ctx)
+    assert not state.task.next_step_hint
 
 
 @pytest.mark.asyncio
@@ -419,7 +480,11 @@ async def test_cancelled_run_skips_llm_observe(monkeypatch) -> None:
     outcome = await ObserveStep().execute(state, ctx)
     assert not called, "取消后不应再跑多轮 LLM observe"
     assert outcome.next_step == "finalize", "observe 仍须走完，不得中止"
-    assert outcome.state_patch["verdict"].task_outcome == "success"
+    # 判决就是机械映射对 `normal` 的那一格（2026-09-28 起 continue）。它**不会**让已取消的
+    # task 被重排：driver 在每个 step 边界都查 token 并抛 `CancelledError`
+    # （driver.py 的 `raise_if_cancelled`），observe 之后那次检查先于 finalize 命中，
+    # run_outcome 落 CANCELED、task 落 CANCELED，这份 verdict 到不了 `disposition_for`。
+    assert outcome.state_patch["verdict"].task_outcome == "continue"
     assert launched == ["mechanical"], "取消是降级，不是中止——摘要仍交 background observe"
 
 

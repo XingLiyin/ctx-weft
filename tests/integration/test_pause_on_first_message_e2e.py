@@ -211,8 +211,13 @@ async def test_new_task_branch_does_not_re_run_recognize_intent() -> None:
     判据的后半截才不成立。那个占位一旦被改成空（"让 recognize_intent 给每个新话题起名"
     是个很自然的想法），每条新消息都会多烧一次旁路 LLM 调用，而且不会有任何地方报错。
     """
+    # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被机械
+    # 判 success（`_mechanical_verdict` 判 continue）——下面那句「前提：root task 已终态」
+    # 需要它真的终结。**只给这一个用例**：本文件另外两条钉的是 park / 暂停的竞态形态，
+    # 替它们判 success 会让 task 终结、整条应答路径走去另一支（见 MockLLMAdapter 的 docstring）。
     llm = _StallsFirstActLLM(
         responses=[MockResponse(text=f"answer {i}") for i in range(12)],
+        observer_verdict="success",
         context_limit=_MOCK_CONTEXT_LIMIT)
     llm.stalling = False
     rt = _runtime(llm)

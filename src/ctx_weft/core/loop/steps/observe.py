@@ -29,7 +29,11 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome,
 from ctx_weft.core.loop.llm_gateway import (
     request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
 )
-from ctx_weft.core.capabilities.control_tools import REPORT_TASK_OUTCOME_NAME, ControlResult
+from ctx_weft.core.capabilities.control_tools import (
+    FINISH_TASK_NAME,
+    REPORT_TASK_OUTCOME_NAME,
+    ControlResult,
+)
 from ctx_weft.core.utils.ids import generate_id, mint_turn_call_ids
 from ctx_weft.core.utils.verdict import (
     VERDICT_CONTINUE,
@@ -42,6 +46,21 @@ if TYPE_CHECKING:
     from ctx_weft.core.models.task import Task
 
 logger = logging.getLogger(__name__)
+
+
+#: 机械判决对纯文本收尾（`act_exit_reason == "normal"`）判 continue 时给下一轮的一次性转向。
+#:
+#: 落到 `task.next_step_hint` → `act_guidance` 渲染成「## Note from the review of your previous
+#: attempt」→ `prepare` 消费后清掉（一次性，见 `prepare.py` 那句 `next_step_hint = None`）。
+#:
+#: 它是**事后补救**；预防写在 `act_guidance` 的 unattended 分支里（那段常驻文案明说纯文本不算
+#: 收尾）。两处都要有：常驻那句管「这一轮别犯」，这一句管「上一轮已经犯了」。
+_PLAIN_TEXT_NEEDS_FINISH = (
+    "Your previous turn ended with a prose reply and no tool call, so this task is still open — "
+    f"prose alone never ends it. Nobody is waiting to read that reply: only `{FINISH_TASK_NAME}` "
+    "ends a task. If the goal is now achieved, write the final reply as your normal message text "
+    f"and call `{FINISH_TASK_NAME}` in that same turn. If work remains, do the work."
+)
 
 
 # ── Shared ReAct helper ───────────────────────────────────────────────────────
@@ -228,6 +247,12 @@ class Verdict:
     act_recap: str      # 诚实复述本段 act 做了什么 → finish 对 assistant；retry 作 Progress So Far
     task_summary: str = ""  # 整段综合总结（执行历程+结果）→ finish 对 tool 槽（仅终态有意义）
     reported: bool = False  # 本轮是否真的走成 report_task_outcome；压缩摘要据此取信
+    #: 给下一次 act attempt 的一次性转向 → `task.next_step_hint`（由 `execute` 落地）。
+    #:
+    #: 只有机械判决用得上：LLM 路径的 hint 由 `report_task_outcome` 自己写进 task，这里恒空。
+    #: 它与判决**绑在同一个对象上**是有意的——机械判决判 continue 总得给出一个「下一轮该干什么
+    #: 不一样的事」，分开放两处必然有一处先漂。
+    next_step_hint: str = ""
 
 
 class ObserveStep(Step):
@@ -273,6 +298,13 @@ class ObserveStep(Step):
                 and verdict.task_outcome != VERDICT_CONTINUE):
             verdict = dataclasses.replace(verdict, task_outcome=VERDICT_CONTINUE)
             self._apply_assessment(state.task, verdict)
+
+        # 机械判决带出来的一次性转向落到 task（唯一来源：纯文本收尾判 continue 时那句「去调
+        # finish_task」）。LLM 路径的 hint 由 `report_task_outcome` 自己写，`verdict.next_step_hint`
+        # 恒空，这里是 no-op——所以不会覆盖 observer 写的那份。
+
+        if verdict.next_step_hint:
+            state.task.next_step_hint = verdict.next_step_hint
 
         # retry（三来源：max_turns/context_limit/observer-retry）→ 前台同步段折：
         # 本轮 attempt raw 折成一条 TASK_COMPACT_SUMMARY（复用 act_recap），删本轮 raw。
@@ -415,20 +447,43 @@ class ObserveStep(Step):
         act_recap 留空——`_fold_retry_segment` 对空摘要的口径是「不折、段保 raw」
         （见其 docstring），不会写占位。
 
-        三条映射逐字对齐删除前的 `_rule_observe` 结局，故 task 终态不变：
-          空 transcript                        → fail
+        判据只有两个——`act_exit_reason`（这一段是怎么结束的）与 transcript 空不空。**两个
+        都不描述「活干成了没有」**，所以这张表只能表达「谁把这一段停下来的」：
+
+          actor_done                           → success   ← 只有明确调了 finish_task 才算成功
+          normal（纯文本收尾）                 → continue + 提醒去调 finish_task
           max_turns / context_limit（机械退出）→ continue
-          normal / actor_done                  → success
+          空 transcript                        → fail
+
+        `normal → continue`（2026-09-28 改，此前是 success）：机械判决**没有任何办法**知道那段
+        正文有没有交付目标，那它的安全默认就必须是「没完」而不是「完了」——「没完」可回头
+        （retry），「完了」是终态、不可逆。同一条原则已经写在另外两处：`normalize_verdict` 把
+        认不出的值归 continue 而决不归 fail，`report_task_outcome` 的 success-without-outputs
+        护栏把 success 改判 continue。于是「一个 task 怎么才算成功」收敛成一句话：**actor 明确
+        调了 `finish_task`**。
+
+        **LLM 判定那条路不受此约束**，那里判 `normal` 为 success 是合法的：observer 手里有
+        `task.outputs`、有正文、有 ROLE 的准则，它做的是一次真判断。用机械规则去覆盖真判断，
+        方向正好相反。两档策略不同不是疏漏——差别在于一个有判断力、一个没有。
+
+        空 transcript → fail 这条**产不出最终的 fail**：transcript 每轮 break 前都 append 过、
+        且跨上下文恢复累加（`act.py` 那句 `transcript = list(state.transcript)`），所以「空」
+        只可能是循环体一次都没进，而那必然走 `for...else` → `exit_reason="max_turns"`，随后被
+        `execute` 里那道强制覆盖改写成 continue。留着它是为了别让「零回合」悄悄落到下面某条。
 
         不写 task 状态：判决三态经 FinalizeStep 的 RunOutcome 交 TaskManager 处置
         （删掉的 `_rule_observe` 里那句 `_apply_assessment` 只写 observer_outcome /
         task_summary / actor_done，均无下游依赖——observer_outcome 只被 LLM 路径回读，
-        actor_done 在下一轮 `TaskManager._run_task` 入口被重置为 False）。
+        actor_done 在下一轮 `TaskManager._run_task` 入口被重置为 False）。`next_step_hint`
+        同样只是随 Verdict 带出去，由 `execute` 落地。
         """
         if not state.transcript:
             return Verdict(task_outcome=VERDICT_FAIL, act_recap="")
         if state.act_exit_reason in ("max_turns", "context_limit"):
             return Verdict(task_outcome=VERDICT_CONTINUE, act_recap="")
+        if state.act_exit_reason == "normal":
+            return Verdict(task_outcome=VERDICT_CONTINUE, act_recap="",
+                           next_step_hint=_PLAIN_TEXT_NEEDS_FINISH)
         return Verdict(task_outcome=VERDICT_SUCCESS, act_recap="")
 
     @staticmethod
