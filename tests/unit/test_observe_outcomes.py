@@ -186,9 +186,31 @@ def test_max_turns_forces_llm_even_for_root() -> None:
     assert ObserveStep()._should_use_llm(s) is True
 
 
-def test_root_normal_exit_stays_rule() -> None:
+def test_root_normal_exit_is_judged_by_the_llm() -> None:
+    """**2026-09-28 反转**：root 的正常收尾从此也过 LLM observer。
+
+    此前这里断言 `is False`（`_should_use_llm` 对 `parent_task_id is None` 降级走机械判决），
+    而 `_mechanical_verdict` 把 `normal`/`actor_done` **无条件**映射成 success——那道
+    success-without-outputs 护栏长在 `report_task_outcome` 里、不在机械判决的路上。于是 root
+    上「这个 task 到底完没完」全凭 actor 自己说，零复核。
+
+    不对称到了荒谬的程度：纯文本回合（S5，`plain_text` 边界）要被判、让位的 finish_task
+    （S-b，`finish_park` 边界）要被判，唯独**不让位的那条收尾**——也就是 actor 明确宣布
+    完成的那一次——不被判。等于给模型留了一个能绕开复核的开关。
+    """
     s = _llm_gate_state("normal", None, has_role=True)
-    assert ObserveStep()._should_use_llm(s) is False
+    assert ObserveStep()._should_use_llm(s) is True
+
+
+def test_root_actor_done_is_judged_by_the_llm() -> None:
+    """同上，`finish_task` 收尾那一格（`act_exit_reason == "actor_done"`）。
+
+    这一格只有在**不让位**时才走到 observe：有人值守的 root 调 `finish_task` 会在 act 里就
+    park（S-b，`boundary="finish_park"`），压根到不了这里。所以这条覆盖的是 unattended root
+    与没有 hitl provider 的部署——恰恰是此前那个零复核洞的全部栖息地。
+    """
+    s = _llm_gate_state("actor_done", None, has_role=True)
+    assert ObserveStep()._should_use_llm(s) is True
 
 
 def test_no_role_stays_rule_even_at_max_turns() -> None:

@@ -221,6 +221,90 @@ async def test_observe_child_task_does_not_fire_close_boundary(monkeypatch):
         f"child task must never take a close boundary, got {launched}")
 
 
+# ── observe.py: 前台真判过 → close 边界那次后台调用取消（2026-09-28）──────────
+
+
+def _spy_launch(monkeypatch) -> list:
+    """把 `launch_background_observe` 换成记录器，返回 (task_id, boundary) 列表。"""
+    launched: list = []
+
+    def fake_launch(state, ctx, *, boundary=""):
+        launched.append((state.task.id, boundary))
+        return asyncio.ensure_future(asyncio.sleep(0))
+
+    import ctx_weft.core.loop.steps.background_observe as bo_mod
+    monkeypatch.setattr(bo_mod, "_task_pending", {})
+    monkeypatch.setattr(
+        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        fake_launch,
+        raising=False,
+    )
+    return launched
+
+
+def _with_observe_role(state) -> None:
+    """给 state 装上一个有 observe facet 的 template，让 `_should_use_llm` 放行。"""
+    state.extra["template"] = SimpleNamespace(identity={"observe": object()})
+
+
+async def test_foreground_verdict_cancels_the_close_boundary_recap(monkeypatch):
+    """前台 LLM 真报了判决 → close 边界**不发**后台 observe。
+
+    这道门是随「删掉 `_should_use_llm` 的 root 降级」一起加的，删不得：那次后台调用的全部
+    用途就是替机械判决补一份摘要，前台报过之后它不只是多余，而是**有害**。
+
+    `has_llm_summary = verdict.reported`（finalize）为真时，close 当场就把真摘要写进 finish
+    对、末段 raw 同步折。但 `_synthesize_dispatch_pair` 仍带 `register_bg=True`，此刻
+    `pop_close_report` 必然是空的（后台才刚 launch），于是走 `register_close_synth` 登记；
+    等这次只摘要档回来，`_replace_finish_report` 就把前台那份好摘要**覆盖**成 recap-only 的
+    产物。一次白烧的 LLM 换一次内容降级。
+    """
+    launched = _spy_launch(monkeypatch)
+    from ctx_weft.core.loop.steps.observe import Verdict
+
+    async def fake_llm_observe(self, state, ctx, events):
+        return Verdict(task_outcome="success", act_recap="真 recap",
+                       task_summary="真 summary", reported=True)
+
+    monkeypatch.setattr(ObserveStep, "_llm_observe", fake_llm_observe, raising=True)
+
+    task = _make_root_task(actor_done=True)
+    state, ctx = _make_observe_state_ctx(task, act_exit_reason="actor_done")
+    _with_observe_role(state)
+
+    outcome = await ObserveStep().execute(state, ctx)
+
+    assert launched == [], f"前台已产判决，不该再发任何后台 observe；实得 {launched}"
+    assert outcome.state_patch["verdict"].reported is True
+
+
+async def test_a_failed_foreground_verdict_still_gets_the_close_boundary_recap(monkeypatch):
+    """同一格的另一半：前台 LLM 落空（抛异常 / 耗尽轮次没调工具）→ close 边界照发。
+
+    这是那整套 close 机制（`_close_report` / `_close_synth` / `_replace_finish_report` /
+    延迟折叠）在 2026-09-28 之后的**唯一**存在理由——它从「root 的常规路径」降级成「前台
+    判决没摘要时的兜底」，但不能删：机械判决的 `act_recap` 是空的，末段 raw 的账要么由这次
+    后台 recap 记，要么永久保 raw。
+    """
+    launched = _spy_launch(monkeypatch)
+
+    async def boom(self, state, ctx, events):
+        raise RuntimeError("observer 掉线")
+
+    monkeypatch.setattr(ObserveStep, "_llm_observe", boom, raising=True)
+
+    task = _make_root_task(actor_done=True)
+    state, ctx = _make_observe_state_ctx(task, act_exit_reason="actor_done")
+    _with_observe_role(state)
+
+    outcome = await ObserveStep().execute(state, ctx)
+
+    assert launched == [("t1", "finish")], launched
+    # 机械判决兜底，且它没有摘要——正是上面那次后台调用要补的东西。
+    assert outcome.state_patch["verdict"].reported is False
+    assert outcome.state_patch["verdict"].act_recap == ""
+
+
 # ── act.py: soft-interrupt park fires for root ───────────────────────────────
 
 

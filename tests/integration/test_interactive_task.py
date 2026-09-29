@@ -158,7 +158,9 @@ async def test_guidance_injected_into_prompt_not_memory() -> None:
     _handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hello")
 
     # 发送的 prompt 含 guidance
-    sent = llm.last_request.messages[-1].content
+    # `last_act_request` 而非 `last_request`：2026-09-28 起 root 的收尾也过前台 observe
+    # （`_should_use_llm` 删掉了 root 降级），一次 run 的最后一个 request 是观察者的。
+    sent = llm.last_act_request.messages[-1].content
     assert "finish_task" in sent
     # memory 的 USER_PROMPT 不含 guidance（仅原始用户输入）
     ctxp = ProviderContext(session_id=state.session.id, agent_id=state.agent.id)

@@ -107,6 +107,14 @@ class MockLLMAdapter(LLMClient):
         self._output_reserve = output_reserve
         # 记录最近一次调用的 request（供测试断言）
         self.last_request: LLMRequest | None = None
+        #: 最近一次**actor** 回合的 request（`is_observer_request` 为假的那些）。
+        #:
+        #: 2026-09-28 加：`observe._should_use_llm` 删掉 root 降级后，root task 的收尾也要过
+        #: 前台 observe，于是「一次 run 的最后一个 request」不再是 actor 的那个——断言 act
+        #: prompt 结构的用例拿 `last_request` 会读到观察者回合（而且脚本通常没为观察者准备
+        #: 回复 → 走空回合兜底 → 被 ReAct 的催促轮又推了几条消息，面目全非）。
+        #: 想断言「actor 收到了什么」就用这个。
+        self.last_act_request: LLMRequest | None = None
         self._tokenizers: dict[str, HeuristicTokenizer] = {}
 
     def tokenizer_for(self, model: str) -> HeuristicTokenizer:
@@ -137,6 +145,8 @@ class MockLLMAdapter(LLMClient):
         stream: bool = True,
     ) -> AsyncIterator[LLMChunk]:
         self.last_request = request
+        if not is_observer_request(request):
+            self.last_act_request = request
 
         # observer 回合的兜底（见类 docstring）：只在**脚本没为它准备**时接手——判据是
         # 「下一条脚本不是判定回合」。回空回合（= 拿不到 verdict ≡ retry，与改造前同结果），

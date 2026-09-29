@@ -46,7 +46,6 @@ import pytest
 
 from ctx_weft.core.utils.content import content_to_jsonable
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.loop.steps.segment_fold import segment_fold
 from ctx_weft.core.media.refs import find_image_placeholders
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import (
@@ -342,6 +341,47 @@ async def _wait_task_terminal(handle, *, timeout: float = 5.0):
     return handle._state
 
 
+class _FoldSnapshottingMemory(InMemoryMemoryProvider):
+    """每次 `fold` 之前留一份 TASK 视图快照。
+
+    本文件有几条断言看的是**段折叠落地前**的中间状态——取回的图以一条普通 `role="tool"`
+    记录挂在对话尾部。此前它能在「跑完之后取视图」里看到，是因为 root 走机械判决：判决没有
+    摘要 → `has_llm_summary=False` → close 只写占位 finish 对、把末段 raw 的折叠**推迟**到
+    后台 recap 回调，测试跑赢了那个窗口。**那是竞态，不是契约**（这句话在 2026-09-27 那轮就
+    已经写在 `_run_session` 里了）。
+
+    2026-09-28 窗口彻底关了：`observe._should_use_llm` 删掉 root 降级之后，root 的收尾也过
+    前台 observe，判决带真摘要 → `_close_one` 当场 `_supersede_final_raw_segment`。于是不再
+    有「折叠前」这个可以靠时序蹲到的时刻，改成**显式在折叠前取样**。
+
+    `snapshots[-1]` = 最后一次 fold 之前的视图 = close 那次段折叠之前的视图（close 之后不再
+    有 fold）。它比原来那份更强：原来是「跑完还没被折走」，现在是「就在被折走的前一刻」。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.snapshots: list[list] = []
+        self._task_address = None
+
+    async def ingest(self, event, ctx):
+        addr = getattr(event, "address", None)
+        if self._task_address is None and getattr(addr, "task_id", None):
+            self._task_address = addr
+        return await super().ingest(event, ctx)
+
+    async def fold(self, supersede_ids, replacements, ctx):
+        if self._task_address is not None:
+            self.snapshots.append(
+                await self.load_view(self._task_address, MemoryScope.TASK, ctx))
+        return await super().fold(supersede_ids, replacements, ctx)
+
+
+def _view_before_close_fold(memory) -> list:
+    """close 那次段折叠之前的 TASK 视图（见 `_FoldSnapshottingMemory`）。"""
+    assert memory.snapshots, "一次 fold 都没发生——L0.5 和 close 折叠都没跑，本用例前提不成立"
+    return memory.snapshots[-1]
+
+
 async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
                        prompt=None):
     resolver = InlineAgentTemplateProvider()
@@ -350,7 +390,7 @@ async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
         loop_config=LoopConfig(compact_keep_recent_images=1, compact_token_ratio=0.5)))
     llm.batch_with_echo = batch_with_echo
     runtime = make_runtime(llm=llm, agent_provider=resolver)
-    memory = InMemoryMemoryProvider()
+    memory = _FoldSnapshottingMemory()
     runtime.providers.register_memory(memory)
     runtime.providers.register_capability(_EchoToolProvider())
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
@@ -358,20 +398,17 @@ async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
         runtime.providers.register_memory_blob_store(blob_store)
 
     # `unattended=True`：本文件测的是媒体的降级 / 取回 / 重放，与「让位给人」无关，而 2026-09-27
-    # 起（S-b）root 的 `finish_task` 在**有人在场**时会 park + 后台判定，判 success 的 close 把
-    # 末段 raw（取回的那张图就在里面）折在 `TaskFinished` **之前**——于是下面按终态取视图必然
-    # 看不到它。此前看得到并不是因为 close 不折，而是因为那次折叠被推迟到后台回调（占位 finish
-    # 对 + 真报告替换才折），测试跑赢了那个窗口：是竞态，不是契约。
+    # 起（S-b）root 的 `finish_task` 在**有人在场**时会 park + 后台判定，走的是另一条收尾路。
+    # 「取回的图在 park 路径上怎么走」是另一件事，归 park 那组用例管。
     #
-    # 无人值守把 root 的收尾留在原来那条前台路径上（前台 observe → FinalizeStep → 延迟折叠），
-    # 本文件的每一条断言因此逐字保持它原本的含义。「取回的图在 park 路径上怎么走」是另一件事，
-    # 归 park 那组用例管。
+    # 至于「取回的图还在不在视图里」：2026-09-28 起一律**不在**——root 的收尾也过前台 observe，
+    # 判决带真摘要 → `_close_one` 当场折末段 raw。看那一刻之前的状态用
+    # `_view_before_close_fold`（见 `_FoldSnapshottingMemory`），不要靠时序去蹲。
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_prompt() if prompt is None else prompt,
         context_limit=6000, reserved_output_tokens=0, unattended=True))
-    # 不经 wait_for_finish：本文件要看 close 边界后台 observe 折叠落地**前**的中间状态
-    # （见 _wait_task_terminal docstring），故只等 task 到终态。
+    # 不经 wait_for_finish：见 _wait_task_terminal docstring，只等 task 到终态。
     state = await _wait_task_terminal(handle, timeout=20.0)
     assert state is not None
     assert state.task.status == "FINISHED", f"expected FINISHED, got {state.task.status}"
@@ -496,12 +533,22 @@ async def test_full_round_trip_demoted_image_comes_back_decodable_on_the_wire(tm
     assert llm.asked == {ref_a}, f"模型没有照占位调 get_image：asked={llm.asked}"
 
     # ④ 图回到了**对话尾部**：最后一条带图的记录是 tool 角色的工具结果
-    img_recs = [r for r in view if _image_parts(r.content)]
+    #
+    # 在 close 那次段折叠**之前**的视图上看（`_FoldSnapshottingMemory`）：取回是短时的，
+    # close 会把末段 raw 连它一起折走（§5，覆盖 3 钉的就是这件事）。此前这里用的是跑完之后
+    # 的视图，能看到只是因为那次折叠曾被推迟到后台回调、测试跑赢了窗口。
+    pre_fold = _view_before_close_fold(memory)
+    pre_user = [r for r in pre_fold if r.role == "user"]
+    assert len(pre_user) == 1
+    img_recs = [r for r in pre_fold if _image_parts(r.content)]
     restored = [r for r in img_recs if any(p.data == ref_a for p in _image_parts(r.content))]
     assert len(restored) == 1, "取回的图没有作为一条普通记录落库"
     assert restored[0].role == "tool"
-    assert view.index(restored[0]) > view.index(user_recs[0]), (
+    assert pre_fold.index(restored[0]) > pre_fold.index(pre_user[0]), (
         "取回的图没有排在原 user 回合之后——它应该在对话尾部")
+    # 而跑完之后它已被 close 的段折叠收走（占位仍在原位，见覆盖 3）
+    assert not any(p.data == ref_a for r in view for p in _image_parts(r.content)), (
+        "close 的段折叠没把取回的图收走——§5「取回是短时的」不成立")
     restored_text = _record_text(restored[0])
     assert ref_a in restored_text and "1st message in this task" in restored_text, (
         f"取回结果缺少位置信息文本，实为 {restored_text!r}")
@@ -565,12 +612,15 @@ async def test_openai_relocated_user_message_is_wire_only_and_never_lands_in_mem
         f"{[(r.role, _record_text(r)[:40]) for r in user_recs]}——"
         "adapter 重定位的 user 消息落库了，段边界会被打乱")
     # 图在 memory 里活在 role="tool" 的工具结果记录上，不是 user 记录上
-    img_recs = [r for r in view if _image_parts(r.content)]
+    # （取 close 段折叠**之前**的视图——取回是短时的，见覆盖 1 ④ 与 `_FoldSnapshottingMemory`）
+    pre_fold = _view_before_close_fold(memory)
+    img_recs = [r for r in pre_fold if _image_parts(r.content)]
     assert [r.role for r in img_recs if any(
         p.data in llm.asked for p in _image_parts(r.content))] == ["tool"]
-    # 那条 wire 专属消息的标记文本一个字都没进 memory
-    assert not any(_TOOL_IMAGE_NOTICE.strip() in _record_text(r) for r in view), (
-        "wire 专属的图片重定位标记出现在了 memory 记录里")
+    # 那条 wire 专属消息的标记文本一个字都没进 memory——折叠前后都不许有
+    for recs, where in ((pre_fold, "折叠前"), (view, "折叠后")):
+        assert not any(_TOOL_IMAGE_NOTICE.strip() in _record_text(r) for r in recs), (
+            f"wire 专属的图片重定位标记出现在了 memory 记录里（{where}）")
 
 
 # ── 覆盖 3：生命周期（§5）────────────────────────────────────────────────────
@@ -580,11 +630,18 @@ async def test_openai_relocated_user_message_is_wire_only_and_never_lands_in_mem
 async def test_restored_image_is_folded_at_segment_boundary_and_can_be_restored_again(
     tmp_path,
 ) -> None:
-    """§5：取回天然是短时的——下一个段边界到来时被 `segment_fold` 折走（段内 raw 不受
-    保护），而**占位仍在原位、ref 一直可见**，所以再取一次照样能拿到图。
+    """§5：取回天然是短时的——段边界一到就被折走（段内 raw 不受保护），而**占位仍在原位、
+    ref 一直可见**，所以再取一次照样能拿到图。
 
-    用真 `segment_fold`（生产函数，非桩）制造段边界，再经**真的 `MediaCapabilityProvider`
-    实例**（runtime 构造期注册的那一个，走 registry 现解析 memory / blob store）取第二次。
+    2026-09-28：段边界不再由本用例手工制造。此前这里自己调一次真 `segment_fold` 是因为跑完
+    之后取回的图还在视图里（root 走机械判决 → close 只写占位 finish 对、折叠推迟到后台回调），
+    得自己造个边界才能把它折掉。现在 root 的收尾也过前台 observe、判决带真摘要，`_close_one`
+    当场就 `_supersede_final_raw_segment`——**收尾本身就是那个段边界**，而且是生产路径上真正
+    会发生的那一次，比手工调一次更贴。`segment_fold` 函数自身的行为归
+    `tests/unit/test_segment_scoped_fold.py`。
+
+    第二次取回仍经**真的 `MediaCapabilityProvider` 实例**（runtime 构造期注册的那一个，走
+    registry 现解析 memory / blob store）。
     """
     blobs = FsBlobStore(tmp_path / "blobs")
     llm = _WireCapturingAnthropicLLM()
@@ -592,15 +649,10 @@ async def test_restored_image_is_folded_at_segment_boundary_and_can_be_restored_
     ctxp = _pctx(state)
     (ref_a,) = tuple(llm.asked)
 
-    before = await _view(memory, state)
+    # 前提：图**确实**曾经作为一条普通记录取回过（折叠前的那一刻）
+    before = _view_before_close_fold(memory)
     assert any(p.data == ref_a for r in before for p in _image_parts(r.content)), (
-        "前提不成立：取回的图不在视图里")
-
-    # 段边界：真 segment_fold 把末条 user 回合之后的 raw 折成一条段摘要
-    result = await segment_fold(memory, state.scope, MemoryScope.TASK,
-                                "the agent looked at the screenshot", ctxp)
-    assert result.events_before > result.events_after, (
-        f"段折叠什么都没折（{result.events_before} → {result.events_after}）")
+        "前提不成立：取回的图从未进过视图")
 
     after = await _view(memory, state)
     assert not any(p.data == ref_a for r in after for p in _image_parts(r.content)), (

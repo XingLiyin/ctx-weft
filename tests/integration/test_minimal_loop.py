@@ -170,7 +170,10 @@ async def test_prompt_structure_matches_miniagents() -> None:
     )
 
     # 验证 mock 接到的 request 形态符合 miniAgents 风格
-    req = llm.last_request
+    # `last_act_request` 而非 `last_request`：这条断言的对象是 **act** prompt 的形态，而
+    # 2026-09-28 起 root 的收尾也过前台 observe（`_should_use_llm` 删掉了 root 降级），
+    # 一次 run 的最后一个 request 已经是观察者的了。
+    req = llm.last_act_request
     assert req is not None
     # System prompt 含 SOUL 文本
     assert "You are a helpful echo agent" in req.system

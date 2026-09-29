@@ -1,16 +1,18 @@
 """ObserveStep：评估 actor transcript，产出 verdict。
 
-miniAgents 对齐版：
-- 有 ROLE 配置 + 非 root-normal 场景 → LLM 多轮 ReAct（用 report_task_outcome 工具）
-- 其他情况 → **机械判决**：只从 transcript + exit_reason 定三态结局，**不产任何摘要**；
+- 有 observe ROLE → LLM 多轮 ReAct（用 report_task_outcome 工具）
+- 否则 → **机械判决**：只从 transcript + exit_reason 定三态结局，**不产任何摘要**；
   摘要改由 background observe 异步产（用户裁定：不允许任何机械合成的摘要）。
 
-走机械判决的场景：
-  1. template 未配置 identity["observe"]（assigned agent 无 ROLE）
-  2. root task（task.parent_task_id is None）——顶层任务无 parent 可上报，不需要 LLM observer
-  3. LLM 调用失败，或耗尽轮次没调 report_task_outcome
-  4. 本 run 已被取消——不再烧多轮 LLM。注意这是**选路径**，不是检查点：observe 是
+走机械判决的场景（**只剩降级**，2026-09-28）：
+  1. template 未配置 identity["observe"]（assigned agent 无 ROLE，装不出 observer）
+  2. LLM 调用失败，或耗尽轮次没调 report_task_outcome
+  3. 本 run 已被取消——不再烧多轮 LLM。注意这是**选路径**，不是检查点：observe 是
      「整理现状」，取消到达时降级但仍走完并交出 verdict，绝不半途中止（用户裁定）。
+
+2026-09-28 从这张单子上删掉了「root task（parent_task_id is None）」那一条。它不是降级、
+是一个**按身份免检**的口子：机械判决对 `normal`/`actor_done` 无条件判 success，于是 root 上
+「这个 task 完没完」全凭 actor 自己说。见 `_should_use_llm`。
 """
 
 from __future__ import annotations
@@ -280,12 +282,19 @@ class ObserveStep(Step):
 
         # close 边界：root task 在 actor_done（finish_task 收尾 → boundary="finish"）或
         # normal（actor 产出最终文本正常结束 → boundary="normal"）时触发后台异步 observe，
-        # 产段摘要 + 折 raw。两者均由 _mechanical_verdict 映射为 success/fail，属于 root 的
-        # 单次终结点——task 只 close 一次，_close_report 槽写一次、弹一次，不存在乱序复用。
+        # 产段摘要 + 折 raw。root 的单次终结点——task 只 close 一次，_close_report 槽写一次、
+        # 弹一次，不存在乱序复用。
         # 注：纯文本暂停（plain_text 边界）由 act.py:_finish_plain_text_turn 单独触发，不经此处。
         # max_turns/context_limit 走同步 _fold_retry_segment；非 root 不触发（它们走 LLM observe）。
+        #
+        # `not used_llm` 这道门（2026-09-28，随 `_should_use_llm` 删掉 root 降级一起加）：
+        # 这次后台调用的**全部用途**就是替机械判决补一份摘要。前台真判过之后它不只是多余，
+        # 而是有害——`has_llm_summary = verdict.reported` 为真时 close 当场就把真摘要写进
+        # finish 对、末段 raw 同步折，但 `_synthesize_dispatch_pair` 仍会 `register_close_synth`
+        # 登记（槽空），于是这次后台只摘要档回来后 `_replace_finish_report` 会把前台那份好摘要
+        # **覆盖**成 recap-only 的产物。一次白烧的 LLM 换一次内容降级。
         launched = False
-        if (state.act_exit_reason in ("normal", "actor_done")
+        if (not used_llm and state.act_exit_reason in ("normal", "actor_done")
                 and verdict.task_outcome != VERDICT_CONTINUE and _is_own_root(state.task)):
             from ctx_weft.core.loop.steps.background_observe import launch_background_observe
             boundary = "finish" if state.act_exit_reason == "actor_done" else "normal"
@@ -437,20 +446,28 @@ class ObserveStep(Step):
     # ── 条件判断 ──────────────────────────────────────────────────────────────
 
     def _should_use_llm(self, state: LoopState) -> bool:
-        """规则降级条件（按 task 排除）：无 observe ROLE → 规则；root → 规则，
-        但 max_turns/context_limit 机械退出强制 LLM（产出可信 act_recap 作压缩摘要）。"""
-        # assigned agent 没有 observe ROLE → 规则降级（无可用 observer 装配）
-        template = state.extra.get("template")
-        if template is None or template.identity.get("observe") is None:
-            return False
-        # 机械退出（max_turns/context_limit）：即使 root 也要 LLM observe，产有质量 act_recap 作段摘要
-        if state.act_exit_reason in ("max_turns", "context_limit"):
-            return True
-        # root task（无 parent）→ 规则降级；委派出的子任务才需要 LLM observer
-        if state.task.parent_task_id is None:
-            return False
+        """唯一的降级理由：**装不出 observer**（assigned agent 没有 observe ROLE facet）。
 
-        return True
+        2026-09-28 删掉了这里的 `parent_task_id is None → return False`。那道门让 root 的
+        正常收尾（`normal` / `actor_done`）永远走机械判决，而机械判决对这两个退出原因是
+        **无条件 success**（见 `_mechanical_verdict`）——那道 success-without-outputs 护栏长在
+        `report_task_outcome` 里、不在机械判决的路上。于是 root 上「宣布完成」这件事零复核，
+        任务完没完全凭 actor 自己说。攻不破的不对称：纯文本回合（S5）和让位的 finish_task
+        （S-b）都要被判，唯独不让位的那条收尾不被判。
+
+        它当初的理由是「非 root 才需要向 parent 上报」——把「要不要上报」和「要不要复核」
+        当成了同一件事。现在分开：上报是子任务的事，复核是每个收尾的事。
+
+        同时删掉了 `max_turns`/`context_limit` 那条强制 LLM 的前置——它当年存在**只为**绕开
+        上面那道 root 门（root 机械退出也得有可信 act_recap 去当段摘要），门没了它就是死码。
+
+        代价：无人值守 root 每次收尾多一次前台 LLM 往返。其实 LLM 总次数不变——此前那次
+        判决虽是机械的，摘要仍要靠一次后台 observe 补（`boundary="finish"/"normal"`），现在
+        前台一次就把判决和摘要一起拿到，那次后台调用随之取消（见 `execute` 里的 `used_llm`
+        门）。真正变的是它从后台挪到了前台关键路径上。
+        """
+        template = state.extra.get("template")
+        return not (template is None or template.identity.get("observe") is None)
 
     async def _fold_retry_segment(
         self, state: LoopState, ctx: LoopContext, verdict: Verdict, events: list[Any]
