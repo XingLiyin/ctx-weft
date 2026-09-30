@@ -44,7 +44,9 @@ class LifecycleManager:
     ) -> tuple[Agent, AgentTemplate]:
         """解析 template，创建 Agent 对象。
 
-        template_id 须为规范形式 provider:name；裸 id 由 TemplateLookup 抛 TemplateNotFoundError。
+        template_id 须为规范形式 provider:name；裸 id 由 TemplateLookup 抛 TemplateNotFoundError
+        （除非 host 配了 `RuntimeConfig.fallback_template_ref`——那时 TemplateLookup 自己
+        先补前缀、再回落，只有连回落目标都解析不出才抛）。
 
         bound_capability_ids 留空：PrepareStep 每轮解析后写入 CapabilityCache，
         agent.bound_capability_ids 仅作元数据记录，不驱动 capability 解析。
