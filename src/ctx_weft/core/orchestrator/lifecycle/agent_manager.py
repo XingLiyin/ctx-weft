@@ -481,6 +481,10 @@ class AgentLifecycleManager:
         写入侧已改存可路由形态，但**日志里的历史事件改不了**，所以这里对裸 id 再试一次：
         用已注册的 agent provider 名逐个补前缀。
 
+        **配了 `RuntimeConfig.fallback_template_ref` 时这一跳走不到**：`get_template` 自己
+        就会补前缀（那边的 ②），第一次调用直接成功。但没配回落时它仍是唯一的补前缀路径，
+        所以两处都留着——不是重复，是同一件事在开关两侧各有一份。
+
         只在恢复期做、只对裸 id 做：热路径的精确路由一个字不动（`get_template` 那条
         「路由已确定，不问其他 provider」的设计意图是对的，避免跨 provider 歧义）。补齐
         命中多个 provider 时取第一个并留 warning——存量数据本就没保留是哪一家，猜一次
@@ -687,7 +691,9 @@ class AgentLifecycleManager:
         """真新建：解析 template（或用调用方预解析的），生成新 id（或用调用方预铸的），
         登记 record，发出身事件。
 
-        template_id 须为规范形式 provider:name；裸 id 由 TemplateLookup 抛 TemplateNotFoundError。
+        template_id 须为规范形式 provider:name；裸 id 由 TemplateLookup 抛 TemplateNotFoundError
+        （除非 host 配了 `RuntimeConfig.fallback_template_ref`——那时 TemplateLookup 自己
+        先补前缀、再回落，只有连回落目标都解析不出才抛）。
         深度超限发 SpawnRejected 并抛 SpawnDepthExceeded。
 
         ★ 无 existing_agent_id 参数——水合走 materialize()，两件事不再共用一个入口。

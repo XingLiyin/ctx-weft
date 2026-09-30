@@ -724,7 +724,8 @@ class CtxWeftRuntime:
                 "providers.register_capability(LocalAgentTemplateProvider(templates_dir))"
             )
         from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
-        self._template_lookup = TemplateLookup(self.providers)
+        self._template_lookup = TemplateLookup(
+            self.providers, self._config.fallback_template_ref)
         # Agent 注册表：runtime 级长生命周期组件，_agents 是 agent 身份与配置的唯一住所。
         # 从前 AgentLifecycleManager 是每次调用 new 一个的临时对象，见
         # docs/events-v2.md §2.1.1（与 SessionRegistry 同形的那次晋升）。

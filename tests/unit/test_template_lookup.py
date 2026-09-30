@@ -121,3 +121,82 @@ async def test_provider_fault_propagates() -> None:
     lookup = _lookup(_Prov("agent", {"planner": _template("planner")}, get_error=True))
     with pytest.raises(RuntimeError, match="get boom"):
         await lookup.get_template("agent:planner", None, _CTX)
+
+
+# ── 回落开关（fallback_template_ref，2026-09-29）──────────────────────────────
+#
+# 四段：① 精确路由 → ② 裸 id 补前缀 → ③ 回落 → ④ 抛。②③ 只在配了回落时存在，
+# 所以上面那批「不配就抛」的用例一条都没改——那正是「默认=历史行为」的守护。
+
+
+def _lookup_fb(*provs: _Prov, fallback: str) -> TemplateLookup:
+    reg = ProviderRegistry()
+    for p in provs:
+        reg.register_capability(p)
+    return TemplateLookup(reg, fallback)
+
+
+async def test_fallback_used_when_routed_provider_misses() -> None:
+    d = _template("default")
+    lookup = _lookup_fb(_Prov("agent", {"default": d}), fallback="agent:default")
+    assert await lookup.get_template("agent:nope", None, _CTX) is d
+
+
+async def test_fallback_used_for_unknown_prefix() -> None:
+    d = _template("default")
+    lookup = _lookup_fb(_Prov("agent", {"default": d}), fallback="agent:default")
+    assert await lookup.get_template("nope:planner", None, _CTX) is d
+
+
+async def test_bare_id_completed_before_falling_back() -> None:
+    """裸 id 先补前缀找回真模板，绝不能直接掉进母版——掉进去就再也发现不了。"""
+    t = _template("planner")
+    lookup = _lookup_fb(_Prov("agent", {"planner": t, "default": _template("default")}),
+                        fallback="agent:default")
+    assert await lookup.get_template("planner", None, _CTX) is t
+
+
+async def test_bare_id_falls_back_when_no_provider_has_it() -> None:
+    d = _template("default")
+    lookup = _lookup_fb(_Prov("agent", {"default": d}), fallback="agent:default")
+    assert await lookup.get_template("ghost", None, _CTX) is d
+
+
+async def test_bare_id_completion_takes_first_of_several() -> None:
+    first = _template("planner")
+    second = _template("planner")
+    lookup = _lookup_fb(_Prov("a", {"planner": first}), _Prov("b", {"planner": second}),
+                        fallback="a:planner")
+    assert await lookup.get_template("planner", None, _CTX) is first
+
+
+async def test_bare_id_completion_skips_broken_provider() -> None:
+    """② 是推测性的一轮：一个坏 provider 不该把补前缀这条兜底路整条掐断。"""
+    t = _template("planner")
+    lookup = _lookup_fb(_Prov("bad", {}, get_error=True), _Prov("agent", {"planner": t}),
+                        fallback="agent:planner")
+    assert await lookup.get_template("planner", None, _CTX) is t
+
+
+async def test_missing_fallback_still_raises() -> None:
+    """连回落目标都解析不出 → 仍抛。这已不是「某个模板没装好」，是部署坏了。"""
+    lookup = _lookup_fb(_Prov("agent", {}), fallback="agent:default")
+    with pytest.raises(TemplateNotFoundError):
+        await lookup.get_template("agent:nope", None, _CTX)
+
+
+async def test_fallback_not_retried_for_itself() -> None:
+    """请求的就是回落目标而它不在 → 不自我回落（否则是一次白跑的重复解析）。"""
+    prov = _Prov("agent", {})
+    lookup = _lookup_fb(prov, fallback="agent:default")
+    with pytest.raises(TemplateNotFoundError):
+        await lookup.get_template("agent:default", None, _CTX)
+    assert prov.get_calls == ["default"]
+
+
+async def test_routed_provider_fault_propagates_before_fallback() -> None:
+    """① 的故障是故障，不是 miss——不该被回落掩盖成「模板不在」。"""
+    lookup = _lookup_fb(_Prov("agent", {"default": _template("default")}, get_error=True),
+                        fallback="agent:default")
+    with pytest.raises(RuntimeError, match="get boom"):
+        await lookup.get_template("agent:planner", None, _CTX)
