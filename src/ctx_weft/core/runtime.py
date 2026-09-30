@@ -440,7 +440,8 @@ class CtxWeftRuntime:
                 "providers.register_capability(LocalAgentTemplateProvider(templates_dir))"
             )
         from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
-        self._template_lookup = TemplateLookup(self.providers)
+        self._template_lookup = TemplateLookup(
+            self.providers, self._config.fallback_template_ref)
 
         # Capability cache (per-session, shared across all agents in runtime)
         self._capability_cache = CapabilityCache()

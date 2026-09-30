@@ -12,6 +12,10 @@ from dataclasses import dataclass
 class RuntimeConfig:
     hitl_timeout_sec: int | None = None
     hitl_max_resolved: int = 1000
+    # 模板解析不出来时改用的 ref（规范形式 'provider:name'）。空 = 不回落，照抛
+    # TemplateNotFoundError（历史行为）。core 不解释这个值，只把它当 ref 再解析一次——
+    # 「有一个兜底模板」是 host 的部署约定，不是框架不变量。见 TemplateLookup.get_template。
+    fallback_template_ref: str = ""
     task_max_concurrent: int = 4
     task_max_retries: int = 3
     default_token_budget: int = 200_000
