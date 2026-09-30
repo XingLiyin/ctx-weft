@@ -248,3 +248,51 @@ async def test_live_tool_surface_matches_pre_refactor_pipeline() -> None:
     live = build_llm_tools(cache.available("agt_1", "tsk_1"), "act")
     assert live[: len(expected)] == expected
     assert [t.name for t in live[len(expected):]] == ["mcp__github__pinned"]
+
+
+# ── 全局区：模板 forbidden 对控制工具同样是硬边界 ──────────────────────────────
+
+
+def _control_cache() -> CapabilityCache:
+    """两个 agent 各跑过一轮 prepare 的现场：root 不禁，sub 禁 control:finish_task。
+
+    root 先跑是常态（会话从 root 起），所以全局区里必然有那条被 sub 禁掉的工具——
+    register_global 只写不删，key 也不含 agent_id。
+    """
+    cache = CapabilityCache()
+    # root 的 prepare：解析出全部控制工具
+    cache.register_global([_tool("control:finish_task"), _tool("control:ask_user")])
+    cache.put("agt_root", [], forbidden_ids=set())
+    # sub 的 prepare：解析期已滤掉 finish_task，只注册剩下的
+    cache.register_global([_tool("control:ask_user")])
+    cache.put("agt_sub", [], forbidden_ids={"control:finish_task"})
+    return cache
+
+
+def test_forbidden_control_tool_is_off_the_sub_agents_tool_surface() -> None:
+    """全局区是并集（root 注册过全集），裁剪只能在出口做——否则 sub 的禁用形同虚设。"""
+    cache = _control_cache()
+
+    assert [c.id for c in cache.available("agt_sub", "tsk_1")] == ["control:ask_user"]
+    # 不禁它的 agent 一条不少（裁剪按 agent 分，不是把工具从全局区删掉）
+    assert {c.id for c in cache.available("agt_root", "tsk_1")} == {
+        "control:finish_task", "control:ask_user"}
+
+
+def test_forbidden_control_tool_is_not_dispatchable() -> None:
+    """工具面里没有 ≠ 调不到：gateway 走 get_by_qualified_name，模型凭记忆硬调也得挡住。"""
+    cache = _control_cache()
+
+    assert cache.get_by_qualified_name("agt_sub", "control__finish_task", "tsk_1") is None
+    assert cache.get_by_name("agt_sub", "finish_task") is None
+    assert cache.get_by_qualified_name("agt_root", "control__finish_task", "tsk_1") is not None
+
+
+def test_forbidden_control_tool_stays_forbidden_after_evict() -> None:
+    """background observe 在 run 收尾 evict 之后才跑到——那条路径正是全局区存在的理由，
+    也正是禁用最容易漏掉的地方（_forbidden 刻意不随 evict 清）。"""
+    cache = _control_cache()
+    cache.evict("agt_sub")
+
+    assert [c.id for c in cache.get("agt_sub")] == ["control:ask_user"]
+    assert cache.get_by_qualified_name("agt_sub", "control__finish_task", "tsk_1") is None
