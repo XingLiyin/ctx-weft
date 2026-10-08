@@ -212,7 +212,12 @@ def delegate_task(
     task_prompt: Annotated[str, "Detailed prompt extracted from the user request for this task"] = "",
     skill_name: Annotated[str, "Skill to assign to the task, or empty if none"] = "",
     use_subagent: Annotated[bool, "True if the task should run in a dedicated sub-agent"] = False,
-    subagent_template: Annotated[str, "Template id for the sub-agent; empty = system default"] = "",
+    subagent_template: Annotated[
+        str,
+        "Template id for the sub-agent, from '### Available Sub-Agents'. Leave EMPTY to get a "
+        "sub-agent built from your own template — same persona, same tools, same limits — which "
+        "is what you want when you just need another pair of hands rather than a specialist.",
+    ] = "",
     inherit_memory: Annotated[bool, "True if the sub-agent should inherit session memory"] = True,
     *,
     ctx: ControlContext = None,
@@ -273,7 +278,9 @@ def delegate_plan(
             "`## Current Task` and off-goal words mislead it), "
             "task_prompt (str, detailed prompt — goal/content only, same rule as description), "
             "skill_name (str, skill to assign or empty), "
-            "use_subagent (bool), subagent_template (str), "
+            "use_subagent (bool), "
+            "subagent_template (str, from '### Available Sub-Agents'; empty = built from your "
+            "own template, i.e. another pair of hands rather than a specialist), "
             "inherit_memory (bool, default true), "
             "Tasks run strictly in order and each one starts ONLY if its predecessor succeeded — "
             "if a step fails, the rest are canceled. Put independent work in separate "

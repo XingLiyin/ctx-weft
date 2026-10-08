@@ -711,6 +711,13 @@ class AgentLifecycleManager:
         先补前缀、再回落，只有连回落目标都解析不出才抛）。
         深度超限发 SpawnRejected 并抛 SpawnDepthExceeded。
 
+        **空 template_id = 继承**（2026-10-07）：有父时继承**派生它的那个 agent** 的
+        `record.template_id`（与 `llm` 同一条规则，见下）。从前空值会一路落到
+        `TemplateLookup` 的 `fallback_template_ref`——那是「解析不出来」的故障兜底，被
+        当成「没说要造什么」的答案用，于是 `delegate_task(use_subagent=True)` 不填模板
+        派出来的子 agent 跑的是宿主母版：没有父模板的领域红线，父 `capability_refs` 里
+        的 forbidden 一并失效。无父（root）时空值仍然落兜底——那时没有可继承的东西。
+
         ★ 无 existing_agent_id 参数——水合走 materialize()，两件事不再共用一个入口。
 
         llm：这个 agent 的 `(account, model)` 选择。省略（None）→ 继承**派生它的那个
@@ -742,6 +749,23 @@ class AgentLifecycleManager:
         agent_id = agent_id or generate_id("agt")
         if agent_id in self._agents:
             raise DuplicateAgentId(f"agent_id {agent_id} already registered")
+        # 模板继承（2026-10-07）：没说要造什么型号 → 造一个和**派生它的那个 agent**
+        # 同型号的。与下面 `llm` 的继承是同一条规则的另一个轴，见那里。
+        #
+        # 必须在解析之前——解析要用这个 id。**只在这条路上提前查父**：父查找带
+        # `_register_fallback` 的副作用（WARNING + 占位 record），它的原位置在模板解析
+        # 之后，提前到所有路径上会让「模板解析失败」额外留下一条占位记录。幂等，所以
+        # 下面 depth 检查那次 `.get()` 不会重复付代价、也不会重复 warning。
+        #
+        # 父的 `template_id` 自己为空（恢复期缺口补出来的占位 record）→ 继承到空，原样
+        # 落回 `TemplateLookup` 的 `fallback_template_ref`。不特判：一个不知道自己是谁的
+        # 父，派生出来的子也不该假装知道。
+        if template is None and not template_id and parent_agent_id is not None:
+            template_id = (
+                self._agents.get(parent_agent_id)
+                or self._register_fallback(
+                    parent_agent_id, session_id=session_id, tenant_id=tenant_id)
+            ).template_id
         if template is None:
             resolve_ctx = ctx or ProviderContext(session_id=session_id, tenant_id=tenant_id)
             template = await self.template_lookup.get_template(
@@ -804,6 +828,7 @@ class AgentLifecycleManager:
 
         if llm is None:
             # 继承**派生它的那个 agent**（parent_rec，上面 depth 检查已解出），不是 root。
+            # 模板的空值走同一条规则（见方法开头那段，以及 docstring）。
             llm = parent_rec.llm if parent_agent_id is not None else ModelChoice()
 
         self._agents[agent_id] = _AgentRecord(
