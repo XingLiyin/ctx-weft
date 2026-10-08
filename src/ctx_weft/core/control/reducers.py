@@ -322,7 +322,6 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 # RunSnapshot.state_blob——即写回事件库外的另一处持久层。窄（只影响
                 # 存量事件的重放快照），但真实，此处不修，仅记录在案。
                 "user_prompt": content_to_jsonable(s.user_prompt),
-                "template_id": s.template_id,
                 "status": s.status,
                 "goal": s.goal,
                 "root_agent_id": s.root_agent_id,
@@ -395,7 +394,6 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
         sessions[sid] = SessionView(
             id=s["id"],
             user_prompt=content_from_jsonable(s.get("user_prompt", "")),
-            template_id=s.get("template_id", ""),
             status=s.get("status", "UNKNOWN"),
             goal=s.get("goal", ""),
             root_agent_id=s.get("root_agent_id", ""),
@@ -877,7 +875,6 @@ def _apply(view: RunStateView, ev: Event) -> None:
             id=ev.session_id,
             # 存量事件是裸 str → content_from_jsonable 原样返回，零数据迁移。
             user_prompt=content_from_jsonable(p.get("user_prompt", "")),
-            template_id=p.get("template_id", ""),
             root_agent_id=p.get("root_agent_id", ""),
             llm_model=p.get("llm_model", ""),
             llm_account=p.get("llm_account", ""),

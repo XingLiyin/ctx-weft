@@ -91,8 +91,10 @@ async def test_rebuild_from_pruned_snapshot_keeps_the_created_count() -> None:
     view = await rebuild_view(store, _SID)
     assert view.tasks == {}
     assert view.tasks_total == 2
-    # session 投影本身没被裁，恢复仍拿得到模板等必需信息
-    assert view.sessions[_SID].template_id == "agent:tpl_echo"
+    # session 投影本身没被裁，恢复仍拿得到必需信息。样本取 `root_agent_id`——它是恢复链
+    # 真正依赖的那个（`resume_session` 会拒 root 为空的投影）。从前这里还断言
+    # `template_id == "agent:tpl_echo"`，而 `SessionView` 2026-10-07 起没有那个字段了：
+    # 「会话的模板」不成立，模板是 per-agent 的（见 types.py）。
     assert view.sessions[_SID].root_agent_id == "agt_root"
 
 

@@ -219,8 +219,17 @@ class SessionRegistry:
         ts = now_utc()
         # 保 ref、不落字节、不拍扁（裁定 2026-08-27）——本事件参与状态重建（reducers
         # 的 SESSION_CREATED 分支），拍扁会让重放后「曾有一张图」无痕。
+        # **不带 template_id**（2026-10-07）：「会话的模板」这个概念已经不存在了。模板是
+        # per-agent 的——一个 session 里同时跑着不同型号的 agent 是常态，真相是每个 agent
+        # record 的 `template_id`（`AgentInstantiated` 钉死），而 root agent 的那份就在紧
+        # 接着发出的那条事件里。
+        #
+        # 它最后的用途是宿主拿它反推「这条会话属于哪个 cowork」：事件载荷 → 投影 →
+        # config_json → entry → 回查 → `bare_id()`。那是把宿主的业务字段寄生在内核的事件
+        # 流上——宿主自己的 sessions 表一直有带索引的 cowork_id 列，建会话时就写好了，只是
+        # 运行期没人读。代价是修归属得去改**历史事件**（host 的 m010 就是这么干的），而那
+        # 本该是一条 UPDATE。宿主已改为直接读那一列，这里就没有读者了。
         await self._emit(EventType.SESSION_CREATED, sid, tenant_id, timestamp=ts, payload={
-            "template_id": template_id,
             "user_prompt": user_prompt_event_jsonable,
             "root_agent_id": agent_id,
             "llm_model": llm_model or "",

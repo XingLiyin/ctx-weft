@@ -21,7 +21,10 @@ class SessionView:
 
     id: str
     user_prompt: "str | list[ContentPart]" = ""
-    template_id: str = ""
+    # **没有 template_id**（2026-10-07）：「会话的模板」这个概念不存在。模板是 per-agent
+    # 的（见 `AgentView.template_id`）——一个 session 里同时跑着不同型号的 agent 是常态。
+    # 该字段最后的读者是宿主拿它反推会话归属，已改为读宿主自己的列，见
+    # `SessionRegistry.create_session` 发 SESSION_CREATED 那里的注释。
     status: str = "RUNNING"
     goal: str = ""
     root_agent_id: str = ""
