@@ -35,7 +35,8 @@ class _Provider:
             return None
         from ctx_weft.protocols.template import LoopConfig, MemoryConfig
         return AgentTemplate(
-            id=self._local, name=self._local, version="1.0.0",
+            # 协议的 ⚠（2026-10-07）：入参是局部名，返回的 id 带自己的归属前缀。
+            id=f"{self.name}:{self._local}", name=self._local, version="1.0.0",
             identity={"act": IdentityFacet(text="soul")},
             capability_refs=[], memory_config=MemoryConfig(), loop_config=LoopConfig(),
         )
@@ -86,7 +87,7 @@ async def test_instantiate_stores_the_routable_id() -> None:
         template_id="agent:tpl", session_id="s1", tenant_id="default")
 
     assert agent.template_id == "agent:tpl", "存的必须是能再路由回去的形态"
-    assert tpl.id == "tpl", "provider 返回的仍是 local name —— 正是不能直接存的那个"
+    assert tpl.id == "agent:tpl", "provider 返回的也已是可路由形态（前缀下移，2026-10-07）"
 
 
 async def test_stored_id_survives_a_round_trip() -> None:
@@ -97,7 +98,7 @@ async def test_stored_id_survives_a_round_trip() -> None:
         template_id="agent:tpl", session_id="s1", tenant_id="default")
 
     again = await lookup.get_template(agent.template_id, None, None)
-    assert again.id == "tpl"
+    assert again.id == "agent:tpl"
 
 
 # ── 恢复侧：存量裸 id 的补前缀重试 ────────────────────────────────────────────
@@ -106,7 +107,7 @@ async def test_recovery_resolves_a_bare_legacy_id() -> None:
     """历史事件里存着裸 id，改不了——恢复期补前缀救回来。"""
     alm = _alm([_Provider("agent")])
     tpl = await alm._resolve_for_recovery("tpl", "agt_1", None)
-    assert tpl is not None and tpl.id == "tpl"
+    assert tpl is not None and tpl.id == "agent:tpl"
 
 
 async def test_recovery_prefers_the_exact_route() -> None:
@@ -174,4 +175,78 @@ async def test_instantiate_normalises_the_llm_facing_form() -> None:
         template_id="agent__tpl", session_id="s1", tenant_id="default", template=tpl)
 
     assert agent.template_id == "agent:tpl"
-    assert (await lookup.get_template(agent.template_id, None, None)).id == "tpl"
+    assert (await lookup.get_template(agent.template_id, None, None)).id == "agent:tpl"
+
+
+# ── 契约：前缀由 provider 在出口贴（2026-10-07）────────────────────────────────
+#
+# 从前 `AgentTemplate.id` 是裸的 local name，于是解析结果**不携带归属**：拿到一份
+# template 的人无法知道该补哪个前缀。`instantiate` 因此只能在 `template_id` 为空时把
+# 裸 `template.id` 存进 record（`_normalise_template_id` 管的是 `__`→`:`，救不了裸
+# id），而裸 id 在多 provider 部署下不唯一——恢复期只能「逐个 provider 试、命中多个取
+# 第一个 + warning」去猜，且猜错是自洽的、不会再被任何一处发现。
+#
+# 下面三条钉的是契约本身，不是某一个 provider 的实现。
+
+
+async def test_the_reference_provider_prefixes_what_it_returns(tmp_path) -> None:
+    """真实现（目录版）：`get_template` 的出口必须贴自己的 name。"""
+    from ctx_weft.providers.agent_template_local import (
+        PROVIDER_NAME, LocalAgentTemplateProvider,
+    )
+
+    d = tmp_path / "tpl_x"
+    d.mkdir()
+    (d / "SOUL.md").write_text(
+        "---\nname: tpl_x\nversion: 1.0.0\n---\n\nsoul body\n", encoding="utf-8")
+    provider = LocalAgentTemplateProvider(tmp_path)
+
+    # 入参是局部名（前缀已被 TemplateLookup 剥掉）——这一点没变。
+    tpl = await provider.get_template("tpl_x", None, None)
+
+    assert tpl is not None
+    assert tpl.id == f"{PROVIDER_NAME}:tpl_x"
+    assert tpl.name == "tpl_x", "`name` 仍是 SOUL 里那行字，core 不读它"
+
+
+async def test_listing_still_speaks_local_names(tmp_path) -> None:
+    """`list()` 的两侧语义不同，前缀下移不许把它们弄混。
+
+    `cap.id` 是 ref（带前缀），`template_name` 是**传回 get_template 的那个入参**
+    （局部名）。发现与加载同源靠的就是后者，它一旦带上前缀，`TemplateLookup` 剥一次
+    前缀再传进去就会变成找 `agent:tpl_x` 这个局部名，必然 miss。
+    """
+    from ctx_weft.providers.agent_template_local import (
+        PROVIDER_NAME, LocalAgentTemplateProvider,
+    )
+
+    d = tmp_path / "tpl_x"
+    d.mkdir()
+    (d / "SOUL.md").write_text(
+        "---\nname: tpl_x\nversion: 1.0.0\n---\n\nsoul body\n", encoding="utf-8")
+    provider = LocalAgentTemplateProvider(tmp_path)
+
+    caps = await provider.list(None)
+
+    assert [c.id for c in caps] == [f"{PROVIDER_NAME}:tpl_x"]
+    assert [c.template_name for c in caps] == ["tpl_x"]
+    # 同源自证：list() 报的 template_name 必须喂得回 get_template。
+    assert await provider.get_template(caps[0].template_name, None, None) is not None
+
+
+async def test_an_empty_template_id_no_longer_stores_a_bare_id() -> None:
+    """前缀下移买到的那件事：`template_id or template.id` 的回落不再产出裸 id。
+
+    空 `template_id` 是 `instantiate` 唯一会去读 `template.id` 的路径（root 建会话、
+    或父也不知道自己是谁），从前它就是裸 id 流进 record 的入口。
+    """
+    lookup = _Lookup([_Provider("agent")])
+    alm = _mgr(lookup)
+    tpl = await _Provider("agent").get_template("tpl", None, None)
+
+    agent, _ = await alm.instantiate(
+        template_id="", session_id="s1", tenant_id="default", template=tpl)
+
+    assert agent.template_id == "agent:tpl"
+    # 要害不是「等于这个字面量」，是「存进去的还解析得回来」。
+    assert (await lookup.get_template(agent.template_id, None, None)) is not None

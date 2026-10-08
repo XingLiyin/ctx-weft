@@ -356,7 +356,16 @@ class AgentCapabilityProvider(CapabilityProvider, ABC):
     ) -> "AgentTemplate | None":
         """加载模板定义。不认识该 id → 返回 None（由 TemplateLookup 转成
         TemplateNotFoundError）；仅真实故障（IO/网络/解析错误）才抛异常。
-        version=None 取最新。"""
+        version=None 取最新。
+
+        ⚠ **入参是局部名，返回的 `AgentTemplate.id` 必须是 `f"{self.name}:{局部名}"`**
+        （2026-10-07）：前缀是归属标记，只有本 provider 知道自己叫什么，所以只能由它
+        贴。不贴的后果见 `AgentTemplate.id` 的字段注释——调用方拿不到归属就补不出前缀，
+        裸 id 一路存进 agent record，在多 provider 部署下不唯一。
+
+        典型实现是在 return 那一行 `dataclasses.replace(t, id=f"{self.name}:{t.id}")`，
+        内部的查找与 `list()` 照旧用裸名，不必改（见 `LocalAgentTemplateProvider`）。
+        """
         ...
 
     async def retrieve(self, ctx: ProviderContext) -> list[Capability]:

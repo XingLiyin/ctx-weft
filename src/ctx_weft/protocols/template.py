@@ -122,7 +122,23 @@ class LoopConfig:
 class AgentTemplate:
     """Agent 实例化的蓝图。core 通过 AgentCapabilityProvider 读取。"""
 
+    #: **规范形态 `provider:name`**（2026-10-07 起）——可直接当 ref 用：喂给
+    #: `TemplateLookup.get_template`、存进 agent record、落进事件流都成立。
+    #:
+    #: 前缀是**归属标记**，由 provider 在 `get_template()` 的出口贴上（用它自己的
+    #: `name`），因为只有 provider 知道自己叫什么。目录/DB 里的那个裸名是 provider
+    #: 的内部坐标（`AgentCapability.template_name`、`get_template` 的入参都是它），
+    #: 两者不是一回事，别拿这个字段去查 provider 的内部表。
+    #:
+    #: 从前它是裸的 local name，于是解析结果不携带归属：拿到一个 AgentTemplate 的人
+    #: 无法知道该补哪个前缀，`instantiate` 只能把裸 id 存进 record，而那在多 provider
+    #: 部署下不唯一——恢复期按前缀精确路由找不回来，只能靠「逐个 provider 试、命中多个
+    #: 取第一个 + warning」去猜。语义写在这里而不只写在调用点，就是为了不再让每个
+    #: 调用点各自假设一遍。
     id: str
+    #: 套件作者在 SOUL.md 里写的 `name:`。**core 不读**——仅供 provider / host 做展示
+    #: 与按名查找（host 的 `TemplateStore.find_by_name` 是唯一真实消费者）。
+    #: 身份一律用 `id`：它才是可路由的那个。
     name: str
     version: str  # semver；既是 template 版本也是 identity 版本
 

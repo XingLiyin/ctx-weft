@@ -103,7 +103,7 @@ async def test_an_empty_template_id_inherits_the_parents():
 
     assert child.template_id == PARENT_REF          # Agent 对象
     assert reg.record_of(child.id).template_id == PARENT_REF   # 以及 record（恢复期的真相源）
-    assert template.id == "tpl_parent"              # 解出来的也是父那份
+    assert template.id == PARENT_REF                # 解出来的也是父那份
 
 
 async def test_an_explicit_template_id_is_not_overwritten_by_inheritance():
@@ -117,7 +117,7 @@ async def test_an_explicit_template_id_is_not_overwritten_by_inheritance():
     )
 
     assert child.template_id == OTHER_REF
-    assert template.id == "tpl_other"
+    assert template.id == OTHER_REF
 
 
 async def test_inheritance_needs_a_parent_so_a_root_still_falls_back():
@@ -127,7 +127,7 @@ async def test_inheritance_needs_a_parent_so_a_root_still_falls_back():
     agent, template = await reg.instantiate(
         template_id="", session_id=SID, tenant_id="default")
 
-    assert template.id == "tpl_other"               # 母版，不是「某个父」
+    assert template.id == OTHER_REF                 # 母版，不是「某个父」
     assert agent.parent_agent_id is None
 
 
@@ -153,14 +153,14 @@ async def test_a_parent_that_does_not_know_its_own_template_hands_down_nothing()
     child, template = await reg.instantiate(
         template_id="", session_id=SID, tenant_id="default", parent_agent_id=ROOT)
 
-    assert template.id == "tpl_other"               # 兜底在解析那一层生效，不是父那份
-    # record 存的是**母版自己的 id**，而且是裸的：`routable_template_id = template_id
-    # or template.id`，空 template_id 让它取了 `template.id`（provider 内部的 local
-    # name），`_normalise_template_id` 对它归一不出前缀。这是空值路径的既有形状、不是
-    # 本次改动引入的——而本次改动恰好让它更少见（从前每个不填模板的 delegate 都走这里，
-    # 现在只剩 root 与「父也不知道自己是谁」两格）。哪天把它收紧成 `agent:tpl_other`，
-    # 这一行会红，那是对的。
-    assert child.template_id == "tpl_other"
+    assert template.id == OTHER_REF                 # 兜底在解析那一层生效，不是父那份
+    # record 存的是**母版自己的 id，规范形态**：空 `template_id` 让
+    # `routable_template_id = template_id or template.id` 取了 `template.id`，而它自
+    # 2026-10-07 起就是 `provider:name`（provider 在 `get_template` 出口贴的归属前缀）。
+    # 从前这里存的是裸 `tpl_other`——`_normalise_template_id` 管的是 `__`→`:`、对裸 id
+    # 归一不出前缀，于是空值路径会把一个在多 provider 部署下不唯一的 id 写进身份。
+    assert child.template_id == OTHER_REF
+    assert ":" in child.template_id                 # 没有任何一处还该看见裸 id
 
 
 async def test_inheritance_does_not_disturb_the_llm_rule_next_door():
@@ -243,6 +243,6 @@ async def test_a_delegated_task_without_a_template_runs_on_the_parents_template(
     binding = await runner.assemble(task.id)
 
     assert binding is not None
-    assert binding.template.id == "tpl_parent"              # 父那份，不是母版
+    assert binding.template.id == PARENT_REF                # 父那份，不是母版
     assert binding.agent.template_id == PARENT_REF          # record 一并钉住
     assert binding.agent.parent_agent_id == ROOT

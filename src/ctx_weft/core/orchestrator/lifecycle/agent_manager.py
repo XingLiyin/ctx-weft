@@ -772,14 +772,17 @@ class AgentLifecycleManager:
                 template_id, None, ctx=resolve_ctx,
             )
 
-        # 存储用的 id 必须是**可路由**的规范形态（`provider:name`）。三个候选各有问题，
-        # 所以这里显式归一：
-        #   - `template.id`  是 provider 内部的 local name（`ipmaster`）——裸 id，
-        #     `get_template` 按前缀精确路由、裸的一律抛，恢复时根本找不回来；
+        # 存储用的 id 必须是**可路由**的规范形态（`provider:name`）——存错的后果是恢复期
+        # 静默降级用 MemoryConfig()/LoopConfig() 默认值。两个候选：
         #   - 入参 `template_id` **形态不唯一**：host 建根 agent 时给的是规范形态
         #     （`agent:ipmaster`），而 LLM 委派子 agent 时给的是 LLM-facing 的
-        #     qualified 名（`agent__researcher`，见 `delegate_task` 的 subagent_template）；
-        #   - 两者都存错，后果一样：恢复期静默降级用 MemoryConfig()/LoopConfig() 默认值。
+        #     qualified 名（`agent__researcher`，见 `delegate_task` 的 subagent_template），
+        #     所以要过一次归一；
+        #   - `template.id` **自 2026-10-07 起就是规范形态**（provider 在 `get_template`
+        #     出口贴了归属前缀，见 `AgentTemplate.id` 的字段注释），拿来当回落是安全的。
+        #     从前它是裸 local name（`ipmaster`），那时这条回落只在 `template_id` 为空
+        #     时触发、而归一化又救不了裸 id（`_normalise_template_id` 管的是 `__`→`:`），
+        #     于是空值路径会把一个裸 id 存进 record——那正是前缀下移要消灭的东西。
         # `resolve_qualified` 把 `provider__name` 折回 `provider:name`，已是规范形态的
         # 原样返回（它未命中就返回字面值），所以一次调用覆盖两种入参。
         routable_template_id = template_id or template.id

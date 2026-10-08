@@ -12,6 +12,7 @@ compact / recognize_intent 回退 act facet，observe 家族不回退、由装�
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from pathlib import Path
 
@@ -58,9 +59,16 @@ class LocalAgentTemplateProvider(AgentCapabilityProvider):
     async def get_template(
         self, template_id: str, version: str | None, ctx: ProviderContext,
     ) -> AgentTemplate | None:
+        """入参是局部名（目录名/SOUL 的 name），出口贴归属前缀——见协议的 ⚠。
+
+        只在 return 那一行贴：`scan()` 来的 `t.id` 是 loader 读出来的裸名，内部匹配与
+        `list()` 的 `cap.id` 拼装都照旧用它。`replace` 是浅拷贝、与 `t` 共享 identity
+        dict，但 loader 每次 scan 都重新 load（热更新友好，见模块 docstring），手上这份
+        本来就没有别人在用。
+        """
         for _, t in self._loader.scan(self._root):
             if t.id == template_id:
-                return t
+                return dataclasses.replace(t, id=f"{PROVIDER_NAME}:{t.id}")
         return None
 
     async def describe(self, ctx: ProviderContext) -> CapabilityProviderInfo:

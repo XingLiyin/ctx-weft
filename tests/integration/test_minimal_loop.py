@@ -53,7 +53,14 @@ class InlineAgentTemplateProvider(AgentCapabilityProvider):
         ]
 
     async def get_template(self, template_id, version, ctx) -> AgentTemplate | None:
-        return self._templates.get(template_id)
+        """与真 provider 同契约：内部按裸名存取，出口贴归属前缀（协议的 ⚠）。
+
+        fixture 里的 `AgentTemplate(id="tpl_echo")` 写的是**局部名**——跟 SOUL.md 的
+        `name:` 一个位置，所以 `register` 的键、`list()` 的 `cap.id` 拼装都不动。
+        """
+        import dataclasses
+        t = self._templates.get(template_id)
+        return None if t is None else dataclasses.replace(t, id=f"{self.name}:{t.id}")
 
     async def describe(self, ctx) -> CapabilityProviderInfo:
         return CapabilityProviderInfo(

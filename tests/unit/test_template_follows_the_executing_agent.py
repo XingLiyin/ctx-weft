@@ -115,7 +115,7 @@ async def test_a_user_message_to_a_sub_agent_uses_the_sub_agents_template():
 
     assert binding is not None
     assert binding.agent_id == SUB
-    assert binding.template.id == "tpl_sub"          # 它自己的出身，不是 root 的
+    assert binding.template.id == "agent:tpl_sub"    # 它自己的出身，不是 root 的
     assert binding.agent.template_id == "agent:tpl_sub"   # 与 record 一致，两处不再打架
 
 
@@ -130,7 +130,7 @@ async def test_a_user_message_to_the_root_agent_still_uses_the_root_template():
 
     assert binding is not None
     assert binding.agent_id == ROOT
-    assert binding.template.id == "tpl_echo"
+    assert binding.template.id == "agent:tpl_echo"
 
 
 async def test_a_missing_template_id_falls_back_to_the_hosts_master_template(caplog):
@@ -148,7 +148,7 @@ async def test_a_missing_template_id_falls_back_to_the_hosts_master_template(cap
         binding = await runner.assemble(task.id)
 
     assert binding is not None
-    assert binding.template.id == "tpl_echo"         # 母版，恰好与 root 同名（配置如此）
+    assert binding.template.id == "agent:tpl_echo"   # 母版，恰好与 root 同名（配置如此）
     assert binding.agent.template_id == ""           # record 仍然诚实地说「我不知道」
     assert "解析不出来" in caplog.text                # 每次装配都留痕，不静默
 
