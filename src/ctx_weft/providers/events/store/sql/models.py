@@ -48,7 +48,16 @@ class EventModel(Base):
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    tenant_id: Mapped[str] = mapped_column(String(64), default="default")
+    # ⚠️ **256 不是 64**：`tenant` 是**宿主定义的不透明字符串**，core 不解释它
+    # （`ProviderContext.tenant_id` 只写「多租户预留」），所以不能假设它短。实际宿主
+    # （NetliveCoworkPy）的租户 id 是 `"{surrogate_id}:{cowork_id}"`——两段拼起来远超
+    # 64。装不下的后果是**两种后端表现相反**：Postgres 写入时直接抛
+    # `value too long for character varying(64)`，SQLite 不认长度、静默存进去，于是同
+    # 一份代码在 SQLite 上测试全绿、上 Postgres 必炸。
+    # 宿主把本表映射进自己的 Base 时长度由宿主说了算（它那边已是 256），本列只在
+    # core 自己 `create_all` 的库上生效（测试 / 单机 SQLite / 直连 core 的 Postgres）
+    # ——最后那一格正是这次放宽要救的。
+    tenant_id: Mapped[str] = mapped_column(String(256), default="default")
     type: Mapped[str] = mapped_column(String(128), index=True)
     sequence: Mapped[int] = mapped_column(Integer)
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
