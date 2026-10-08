@@ -45,7 +45,7 @@ def _lm() -> AgentLifecycleManager:
         event_bus=_Bus(),
         model_resolver=lambda a, m: _Client(),
     )
-    lm.register_session("s1", tenant_id="default", fallback_template_id=TPL)
+    lm.register_session("s1", tenant_id="default")
     return lm
 
 
@@ -91,14 +91,16 @@ async def test_materialize_unknown_id_falls_back_and_never_raises(caplog):
     """恢复期缺口降级，不抛 —— 与 agents_from_projection 的既有口径一致。
 
     `session_id` / `tenant_id` 是**调用方给的**（2026-09-19 起必传）：补出来的占位记录按
-    它们归属，registry 不再去猜「最近一次 register_session 的会话」。`template_id` 仍取
-    该 session 登记项里的 `fallback_template_id`——那是 registry 自己的账。
+    它们归属，registry 不再去猜「最近一次 register_session 的会话」。`template_id` 则
+    **留空**（2026-09-30）——从前取该 session 登记项里的 `fallback_template_id`，那让一个
+    来历不明的占位 record 直接冒充 root；兜底归装配那一刻的
+    `RuntimeConfig.fallback_template_ref`。
     """
     lm = _lm()
     got, _rm = lm.materialize("agt_never_seen", session_id="s1", tenant_id="default")
     assert got.id == "agt_never_seen"
     assert got.session_id == "s1"     # 按调用方给的归属，不是猜的
-    assert got.template_id  # 回落到 session 的 fallback_template_id
+    assert got.template_id == ""      # 占位就是占位，不借会话的模板
     assert lm.has("agt_never_seen")  # 就地补登记，第二次不再警告
 
 
@@ -115,10 +117,10 @@ async def test_materialize_honours_the_given_session_not_the_most_recent_one():
     `Agent` 对象归属错会话，用 `rec.tenant_id` 发出的 AGENT_* 事件也带着错 tenant 落库。
     """
     lm = _lm()                                  # 已登记 s1
-    lm.register_session("s_older", tenant_id="tenant-older", fallback_template_id=TPL)
-    lm.register_session("s_newer", tenant_id="tenant-newer", fallback_template_id=TPL)
+    lm.register_session("s_older", tenant_id="tenant-older")
+    lm.register_session("s_newer", tenant_id="tenant-newer")
     # 回头处理较早那个（register_session 是 setdefault，不会把 s_older 移到末尾）
-    lm.register_session("s_older", tenant_id="tenant-older", fallback_template_id=TPL)
+    lm.register_session("s_older", tenant_id="tenant-older")
 
     got, _rm = lm.materialize(
         "agt_unregistered", session_id="s_older", tenant_id="tenant-older")

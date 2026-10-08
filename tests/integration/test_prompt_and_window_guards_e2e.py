@@ -48,7 +48,8 @@ def _runtime(llm, *, hitl_timeout_sec=None, memory=None):
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     rt = make_runtime(llm=llm, agent_provider=resolver,
-                      config=RuntimeConfig(hitl_timeout_sec=hitl_timeout_sec))
+                      config=RuntimeConfig(hitl_timeout_sec=hitl_timeout_sec,
+                                           fallback_template_ref="agent:tpl_echo"))
     rt.providers.register_memory(memory or InMemoryMemoryProvider())
     return rt
 

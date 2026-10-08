@@ -33,7 +33,10 @@ def session_from_projection(proj: SessionView) -> Session:
         failure_counter=proj.failure_counter,
         llm_provider=proj.llm_account or None,
         llm_model=proj.llm_model or None,
-        config={"template_id": proj.template_id},
+        # `config` 不再带 template_id（2026-09-30）：core 内部零读者，而「这个会话属于哪个
+        # 智能体」那件事 host 是从 `SessionCreated` 事件 payload 折进自己的 sessions 行的
+        # （投影字段 `SessionView.template_id` 照旧），从来不经这个 dataclass。留着它只是
+        # 给「会话有一份自己的模板」这个已经删掉的概念再开一个后门。
         created_at=_as_utc_opt(proj.created_at),
     )
 

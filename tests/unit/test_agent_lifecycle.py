@@ -241,7 +241,7 @@ async def test_load_rebuilds_children_index_for_cold_recovery():
         "grandkid": AgentView(id="grandkid", parent_agent_id="kid1", spawn_depth=2),
     }
 
-    n = await reg.load(views, session_id="s1", tenant_id="default", fallback_template_id="tpl")
+    n = await reg.load(views, session_id="s1", tenant_id="default")
 
     assert n == 4
     assert reg.children_of("root") == {"kid1", "kid2"}
@@ -256,7 +256,7 @@ async def test_load_tolerates_parent_outside_batch():
     reg = _reg()
     views = {"orphan": AgentView(id="orphan", parent_agent_id="not-in-this-batch", spawn_depth=1)}
 
-    n = await reg.load(views, session_id="s1", tenant_id="default", fallback_template_id="tpl")
+    n = await reg.load(views, session_id="s1", tenant_id="default")
 
     assert n == 1
     assert reg.has("orphan")
@@ -273,8 +273,8 @@ async def test_load_is_idempotent_for_children_index():
         "root": AgentView(id="root"),
         "kid1": AgentView(id="kid1", parent_agent_id="root", spawn_depth=1),
     }
-    await reg.load(views, session_id="s1", tenant_id="default", fallback_template_id="tpl")
-    await reg.load(views, session_id="s1", tenant_id="default", fallback_template_id="tpl")
+    await reg.load(views, session_id="s1", tenant_id="default")
+    await reg.load(views, session_id="s1", tenant_id="default")
 
     assert reg.children_of("root") == {"kid1"}
 
@@ -594,7 +594,7 @@ async def test_rebuild_view_and_load_agree_on_status():
     view = await rebuild_view(_MemStore(evs), "s1")
 
     reg = _reg()
-    n = await reg.load(view.agents, session_id="s1", tenant_id="default", fallback_template_id="tpl")
+    n = await reg.load(view.agents, session_id="s1", tenant_id="default")
 
     assert n == 1
     assert view.agents["a1"].status == "waiting_human"

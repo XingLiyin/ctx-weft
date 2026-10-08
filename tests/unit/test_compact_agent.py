@@ -34,6 +34,7 @@ from ctx_weft.protocols.agent import CompactReceipt
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft import RuntimeConfig
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -56,7 +57,11 @@ async def _idle_agent():
     # 富余几条：agent 层大概率触发一次 summarize_for_compact，供了 task_id 的用例
     # 还可能再触发一次 task 层坍缩——两条 mock 响应打底，用不完也不报错。
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")] * 3)
-    rt = make_runtime(llm=llm, agent_provider=resolver)
+    # 占位 record（手工 materialize 一个从未 instantiate 过的 agent）没有自己的模板——
+    # registry 不再借会话那份（2026-09-30）。兜底由 host 声明的母版负责，这里把它配上，
+    # 走的是与生产同一条链路：RuntimeConfig.fallback_template_ref → TemplateLookup。
+    rt = make_runtime(llm=llm, agent_provider=resolver,
+                      config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
 
@@ -88,7 +93,7 @@ async def _idle_agent():
             metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
 
     rt._agent_lifecycle_manager.register_session(
-        SID, tenant_id="default", fallback_template_id=f"agent:{tmpl.id}",
+        SID, tenant_id="default",
     )
     rt._agent_lifecycle_manager.materialize(AID, session_id=SID, tenant_id="default")
     return rt

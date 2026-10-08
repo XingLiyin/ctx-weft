@@ -17,6 +17,7 @@ import pytest
 from ctx_weft.protocols import BLOB_REF_PREFIX, ImagePart, ProviderContext
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import ToolResultDelivery, UserTurnDelivery
+from ctx_weft import RuntimeConfig
 from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
@@ -239,7 +240,11 @@ async def _runtime_with_events(events, *, event_blob_store=None):
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="resumed")] * 8)
     llm.last_request = None
-    rt = make_runtime(llm=llm, agent_provider=resolver)
+    # 存量事件流：`_session_prelude` 只发过 SESSION_CREATED，没有 AGENT_INSTANTIATED，
+    # 所以装填出来的 root agent 没有自己的 template_id（2026-09-30 起 registry 不再借
+    # 会话那份）。这类老会话靠 host 声明的母版恢复——把它配上，钉住这条兜底链路。
+    rt = make_runtime(llm=llm, agent_provider=resolver,
+                      config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     rt.providers.register_memory(InMemoryMemoryProvider())
     store = event_blob_store if event_blob_store is not None else _StubEventBlobStore()
     if isinstance(store, _StubEventBlobStore):

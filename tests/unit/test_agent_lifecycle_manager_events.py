@@ -60,7 +60,7 @@ def _lm(bus, *, max_depth=3):
         template_lookup=TemplateLookup(providers=providers), event_bus=bus,
         model_resolver=lambda a, m: _Client(),
     )
-    lm.register_session("s1", tenant_id="default", fallback_template_id=TPL)
+    lm.register_session("s1", tenant_id="default")
     return lm
 
 

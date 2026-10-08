@@ -25,6 +25,7 @@ from ctx_weft.protocols import (
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft import RuntimeConfig
 from tests.integration.test_hitl_e2e_v2 import _ActRouterLLM, _poll
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider, make_echo_template, make_runtime,
@@ -58,7 +59,12 @@ async def test_crash_between_result_event_and_memory_keeps_the_image_retrievable
     mem = InMemoryMemoryProvider()
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    rt = make_runtime(llm=llm, agent_provider=resolver)
+    # 夹具的事件流只发 SESSION_CREATED，没有 AGENT_INSTANTIATED（恢复用的最小夹具，
+    # agent 的出身不是这些用例的关注点），所以装填出来的 agent 没有自己的 template_id——
+    # 而 registry 不再借会话那份（2026-09-30）。配上 host 声明的母版，装配时由
+    # TemplateLookup 兜底，与生产同一条链路。
+    rt = make_runtime(llm=llm, agent_provider=resolver,
+                      config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     rt.providers.register_memory(mem)
 
     tcid = mint_call_id(anchor="asst_i", ordinal=0, raw_id="tc1", turn_seq=0)

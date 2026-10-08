@@ -93,6 +93,7 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft import RuntimeConfig
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider, make_echo_template, make_runtime,
 )
@@ -150,7 +151,8 @@ async def test_every_emitted_event_has_nonempty_origin():
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = _RouterLLM()
-    rt: CtxWeftRuntime = make_runtime(llm=llm, agent_provider=resolver)
+    rt: CtxWeftRuntime = make_runtime(llm=llm, agent_provider=resolver,
+                                      config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     rt.providers.register_memory(InMemoryMemoryProvider())
 
     seen: list[tuple[str, str]] = []
@@ -305,7 +307,8 @@ async def test_compact_agent_run_events_have_runtime_origin():
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
-    rt: CtxWeftRuntime = make_runtime(llm=llm, agent_provider=resolver)
+    rt: CtxWeftRuntime = make_runtime(llm=llm, agent_provider=resolver,
+                                      config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
 
@@ -325,7 +328,7 @@ async def test_compact_agent_run_events_have_runtime_origin():
             content=f"turn {i}", role="user", timestamp=ts + timedelta(seconds=i),
             metadata={"origin_task_id": f"root{i}", "parent_task_id": None}), pctx)
 
-    rt._agent_lifecycle_manager.register_session(sid, tenant_id="default", fallback_template_id="agent:tpl_echo")
+    rt._agent_lifecycle_manager.register_session(sid, tenant_id="default")
     rt._agent_lifecycle_manager.materialize(aid, session_id=sid, tenant_id="default")
 
     seen: list[Event] = []

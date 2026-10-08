@@ -49,6 +49,7 @@ from ctx_weft.protocols import (
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft import RuntimeConfig
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 from tests._snapshot_helpers import seed_snapshot
 from tests._event_helpers import append_one
@@ -73,7 +74,12 @@ def _make_runtime() -> tuple[CtxWeftRuntime, InMemoryMemoryProvider, list]:
     # max_retries 然后落 FAILED。
     llm = MockLLMAdapter(responses=[MockResponse(text="recovered recap") for _ in range(8)],
                          observer_verdict="success")
-    runtime = make_runtime(llm=llm, agent_provider=resolver)
+    # 夹具的事件流只发 SESSION_CREATED，没有 AGENT_INSTANTIATED（恢复用的最小夹具，
+    # agent 的出身不是这些用例的关注点），所以装填出来的 agent 没有自己的 template_id——
+    # 而 registry 不再借会话那份（2026-09-30）。配上 host 声明的母版，装配时由
+    # TemplateLookup 兜底，与生产同一条链路。
+    runtime = make_runtime(llm=llm, agent_provider=resolver,
+                           config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 

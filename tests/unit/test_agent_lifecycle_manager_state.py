@@ -56,8 +56,8 @@ async def test_instantiate_registers_a_record():
 
 async def test_register_session_is_reentrant():
     lm = _lm()
-    lm.register_session("s1", tenant_id="t1", fallback_template_id="agent:tpl_echo")
-    lm.register_session("s1", tenant_id="OTHER", fallback_template_id="OTHER")
+    lm.register_session("s1", tenant_id="t1")
+    lm.register_session("s1", tenant_id="OTHER")
     # 已存在则保留原状态——与 SessionRegistry.register_session 同口径
     assert lm._sessions["s1"].tenant_id == "t1"
 
@@ -79,8 +79,8 @@ async def test_instantiate_parent_fallback_uses_this_calls_session_not_most_rece
     在 s2 之后才给 s1 spawn 子 agent 会把 s1 的孩子错记成 s2 的 tenant。
     """
     lm = _lm()
-    lm.register_session("s1", tenant_id="tenant_1", fallback_template_id="agent:tpl_echo")
-    lm.register_session("s2", tenant_id="tenant_2", fallback_template_id="agent:tpl_echo")
+    lm.register_session("s1", tenant_id="tenant_1")
+    lm.register_session("s2", tenant_id="tenant_2")
     child, _ = await lm.instantiate(
         template_id="agent:tpl_echo", session_id="s1", tenant_id="tenant_1",
         parent_agent_id="agt_ghost_parent_never_registered",

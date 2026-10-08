@@ -49,8 +49,8 @@ def _reg():
         event_bus=_Bus(),
         model_resolver=lambda a, m: _Client(),
     )
-    reg.register_session("s1", tenant_id="default", fallback_template_id=TPL)
-    reg.register_session("s2", tenant_id="default", fallback_template_id=TPL)
+    reg.register_session("s1", tenant_id="default")
+    reg.register_session("s2", tenant_id="default")
     return reg
 
 

@@ -71,8 +71,17 @@ class DuplicateAgentId(CtxWeftError):
 
 @dataclass
 class _SessionDefaults:
+    """一个 session 在 registry 里的默认语境。
+
+    **只剩 tenant_id**（2026-09-30）：从前还有一个 `fallback_template_id`，装的是这个
+    会话的模板，供 `load()` / `_register_fallback` 在 agent 自己的 `template_id` 缺失时
+    借用。那是「会话有一份自己的模板」这个概念的最后一处住所——借来的结果是一个身份
+    不明的 agent 直接冒充 root（跑 root 的 identity 与 capability 授权，且这个错误自洽、
+    没有任何一处会再发现）。兜底的唯一住所现在是 `RuntimeConfig.fallback_template_ref`：
+    host 显式声明的母版，由 `TemplateLookup.get_template` 内部消化。
+    """
+
     tenant_id: str
-    fallback_template_id: str
 
 
 @dataclass
@@ -252,13 +261,9 @@ class AgentLifecycleManager:
 
     # ── 登记 ─────────────────────────────────────────────────────────────
 
-    def register_session(
-        self, session_id: str, *, tenant_id: str, fallback_template_id: str,
-    ) -> None:
+    def register_session(self, session_id: str, *, tenant_id: str) -> None:
         """纳入管理。已存在则保留原状态（重入安全），与 SessionRegistry 同口径。"""
-        self._sessions.setdefault(
-            session_id, _SessionDefaults(tenant_id=tenant_id, fallback_template_id=fallback_template_id),
-        )
+        self._sessions.setdefault(session_id, _SessionDefaults(tenant_id=tenant_id))
 
     def _drop(self, ids: set[str]) -> int:
         """把这批 agent 从 `_agents` 与 `_children` 索引里摘干净，返回真正摘掉的条数。
@@ -527,7 +532,6 @@ class AgentLifecycleManager:
         *,
         session_id: str,
         tenant_id: str,
-        fallback_template_id: str,
         protected_current_tasks: "set[str] | None" = None,
     ) -> int:
         """恢复期喂入：把 reducer 折出的 `AgentView` 逐条装填进 registry。
@@ -540,8 +544,10 @@ class AgentLifecycleManager:
         真正的 template 配置（取代 `agents_from_projection` 留下的 dataclass
         默认值，那是本 Task 有意修正的行为）。
 
-        `view.template_id` 为空（存量事件流子 agent 没发过 AgentInstantiated）
-        → 回落 `fallback_template_id`；模板解析失败 → `logger.warning` 后用
+        `view.template_id` 为空（存量事件流子 agent 没发过 AgentInstantiated）→ 留空并
+        `logger.warning`，**不再借会话的模板**（2026-09-30：那是让一个身份不明的 agent
+        冒充 root，兜底归 `RuntimeConfig.fallback_template_ref`，由 `TemplateLookup` 消化）；
+        模板解析失败 → `logger.warning` 后用
         `MemoryConfig()`/`LoopConfig()` 默认值继续。**绝不抛**：这条路要在
         恢复路径的每个 session 上都跑通，抛一次就卡住整条恢复链——回落而非
         报错的口径与 `_register_fallback` 一致。唯一的例外是**身份冲突**：某个 id 已被
@@ -577,9 +583,7 @@ class AgentLifecycleManager:
                     f"agent_id {av.id} is registered to session {live.session_id!r}, "
                     f"but the event log of session {session_id!r} claims it too"
                 )
-        self.register_session(
-            session_id, tenant_id=tenant_id, fallback_template_id=fallback_template_id,
-        )
+        self.register_session(session_id, tenant_id=tenant_id)
         ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
         n = 0
         # 广播只认「这次调用之前 registry 里确实还没有这条记录」的 agent——记在覆盖
@@ -598,7 +602,18 @@ class AgentLifecycleManager:
         # 到达 = 新事实发生」的假设本就合理，广播不该在没有新事实时重复兑现它）。
         cold_ids = {av.id for av in agent_views.values() if av.id not in self._agents}
         for av in agent_views.values():
-            template_id = av.template_id or fallback_template_id
+            template_id = av.template_id
+            if not template_id:
+                # 存量事件流的恢复期缺口（没发过 AgentInstantiated）。留空往下走：
+                # `_resolve_for_recovery("")` 解不出 → 默认 config + warning；真正的兜底
+                # 在 `TemplateLookup.get_template` 那一层（host 的 fallback_template_ref），
+                # 装配时才生效，registry 不替它猜。
+                logger.warning(
+                    "AgentLifecycleManager.load: agent %s (session %s) has no template_id "
+                    "in the projection; loading it with an empty one —装配时将由 "
+                    "RuntimeConfig.fallback_template_ref 兜底（未配则 TemplateNotFoundError）",
+                    av.id, session_id,
+                )
             template = await self._resolve_for_recovery(template_id, av.id, ctx)
             if template is not None:
                 resolved_template_id = template_id
@@ -944,7 +959,7 @@ class AgentLifecycleManager:
         跟「当前这次」并不是一回事）。签名里带上，那条猜的分支就不必存在。
 
         未登记的 id（恢复期缺口——比如事件流里缺这个 agent 的 `AgentInstantiated`）走
-        「按 session 的 fallback_template_id 就地补登记 + WARNING」而不是 KeyError：
+        「就地补登记一条空模板的占位 record + WARNING」而不是 KeyError：
         回落而非报错是刻意的，与 `load()` 装填时模板解析失败的口径一致——
         授权按模板做策略，重启后把未知模板判成「无权限」会让老会话直接跑不动，
         把恢复期的一个缺口变成崩溃是净损失。
@@ -994,20 +1009,21 @@ class AgentLifecycleManager:
         已登记的会话不会被移到末尾，所以「最近一次」跟「当前这次」并不是一回事。两个
         调用方手上本来都有确凿语境，那条猜的分支因此删除。
 
-        `template_id` 仍取自该 session 的登记项（`fallback_template_id`）——那是 registry
-        自己的账，不是调用方该操心的；session 没登记过则留空，与 `load()` 对无法解析的
-        模板同一口径（回落默认配置，不判成「无权限」）。
+        `template_id` **留空**（2026-09-30）：从前取该 session 登记项里的
+        `fallback_template_id`，也就是会话的模板——那让一个来历不明的 agent 直接继承了
+        root 的人格与 capability 授权，而它本来只是恢复期的一个缺口。留空之后装配那一刻
+        由 `TemplateLookup` 按 `RuntimeConfig.fallback_template_ref`（host 声明的母版）兜底，
+        没配则 `TemplateNotFoundError`——一个占位 record 该被看见，不该冒充别人。
         """
         logger.warning(
             "AgentLifecycleManager: unregistered agent %s in session %s; "
-            "falling back to a session default (recovery-time gap, degrading not crashing)",
+            "registering an empty-template placeholder (recovery-time gap, degrading not crashing)",
             agent_id, session_id,
         )
-        defaults = self._sessions.get(session_id)
         rec = _AgentRecord(
             session_id=session_id,
             tenant_id=tenant_id,
-            template_id=defaults.fallback_template_id if defaults is not None else "",
+            template_id="",
             parent_agent_id=None,
             spawn_depth=0,
             memory_config=MemoryConfig(),

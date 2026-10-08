@@ -36,9 +36,15 @@ def _fake_resolved_model() -> ResolvedModel:
 def _make_runtime_and_session():
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    )
 
-    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
+    # 模板要真的能解出来：`_relaunch_task_recap` 现在按 agent record 的 template_id 现解
+    # （从前由调用方连同会话模板一起传进来，那会让子 agent 的 recap 跑 root 的 identity）。
+    provider = InlineAgentTemplateProvider()
+    provider.register(make_echo_template())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=provider)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
@@ -53,7 +59,9 @@ def _make_runtime_and_session():
     task_manager = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
     task_manager.set_session(session)
 
-    template = object()  # 具体属性不参与本方法逻辑；仅作为不透明句柄经 state.extra 透传
+    # `_relaunch_task_recap` 不再收模板（它按 agent 自己的出身解），这个占位只为保持
+    # fixture 的解包形状不变，本文件的用例都不再把它传下去。
+    template = object()
     agent_id = "agt_1"
     return runtime, session, template, task_manager, task, agent_id, memory
 
@@ -94,7 +102,7 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
     task.status = "FINISHED"
 
     def _fake_materialize(self, agent_id, *, session_id=None, tenant_id=None):
-        return (Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
+        return (Agent(id=agent_id, session_id=session.id, template_id="agent:tpl_echo",
                        tenant_id=session.tenant_id), _fake_resolved_model())
 
     monkeypatch.setattr(AgentLifecycleManager, "materialize", _fake_materialize)
@@ -116,7 +124,7 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
     monkeypatch.setattr(rt_mod, "launch_recap", _fake_launch, raising=False)
 
     await runtime._relaunch_task_recap(
-        session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
+        session=session, task_manager=task_manager,
         task=task, agent_id=agent_id, boundary="finish",
     )
     await asyncio.sleep(0)
@@ -139,7 +147,7 @@ async def test_relaunch_is_best_effort_swallows_errors(minimal_runtime_with_sess
     monkeypatch.setattr(AgentLifecycleManager, "materialize", _boom)
 
     await runtime._relaunch_task_recap(
-        session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
+        session=session, task_manager=task_manager,
         task=task, agent_id=agent_id, boundary="finish",
     )  # 不应抛出
 
@@ -171,7 +179,7 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
     task.status = "SUSPENDED"  # 委派挂起中崩溃的形态
 
     def _fake_materialize(self, agent_id, *, session_id=None, tenant_id=None):
-        return (Agent(id=agent_id, session_id=session.id, template_id="tpl_echo",
+        return (Agent(id=agent_id, session_id=session.id, template_id="agent:tpl_echo",
                        tenant_id=session.tenant_id), _fake_resolved_model())
 
     monkeypatch.setattr(AgentLifecycleManager, "materialize", _fake_materialize)
@@ -189,7 +197,7 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
     monkeypatch.setattr(rt_mod, "launch_recap", _fake_launch, raising=False)
 
     await runtime._relaunch_task_recap(
-        session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
+        session=session, task_manager=task_manager,
         task=task, agent_id=agent_id, boundary="dispatch",
     )
     await asyncio.sleep(0)

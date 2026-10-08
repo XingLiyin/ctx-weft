@@ -27,6 +27,7 @@ from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft import RuntimeConfig
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -118,7 +119,8 @@ async def bus_after_recap_run() -> _RecapRun:
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = _RouterLLM()
-    runtime = make_runtime(llm=llm, agent_provider=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver,
+                           config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     seen: list = []
@@ -187,7 +189,8 @@ async def test_compact_agent_run_has_start_and_finish():
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
-    runtime = make_runtime(llm=llm, agent_provider=resolver)
+    runtime = make_runtime(llm=llm, agent_provider=resolver,
+                           config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 
@@ -213,7 +216,7 @@ async def test_compact_agent_run_has_start_and_finish():
                  "root_agent_id": aid, "llm_model": "mock", "context_limit": 180000},
     ))
     runtime._agent_lifecycle_manager.register_session(
-        sid, tenant_id="default", fallback_template_id="agent:tpl_echo",
+        sid, tenant_id="default",
     )
     runtime._agent_lifecycle_manager.materialize(
         aid, session_id=sid, tenant_id="default")

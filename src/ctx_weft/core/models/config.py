@@ -15,6 +15,15 @@ class RuntimeConfig:
     # 模板解析不出来时改用的 ref（规范形式 'provider:name'）。空 = 不回落，照抛
     # TemplateNotFoundError（历史行为）。core 不解释这个值，只把它当 ref 再解析一次——
     # 「有一个兜底模板」是 host 的部署约定，不是框架不变量。见 TemplateLookup.get_template。
+    #
+    # **2026-09-30 起它是「模板解析不出来」的唯一兜底**，分量比刚引入时重：那之前
+    # registry 还有一条借道——agent 自己的 template_id 缺失（存量事件流没发过
+    # AgentInstantiated、或 materialize 补出来的占位 record）时借该 session 的模板。那条
+    # 借道已删（它让一个身份不明的 agent 直接冒充 root，跑 root 的 identity 与 capability
+    # 授权，且错误自洽、无人会再发现）。于是：
+    #   - 配了它 → 这类 agent 装配时用这份母版，每次留一条 warning。
+    #   - 没配   → 装配抛 TemplateNotFoundError('')，会话跑不动。
+    # 有存量会话要恢复的部署应当配上。
     fallback_template_ref: str = ""
     # 事件提交策略（spec: event-commit）：required（默认）= emit 先经 CommitGate 确认
     # 存储提交再对外通知，存储失败显式抛 PersistenceUnavailableError 并隔离会话；

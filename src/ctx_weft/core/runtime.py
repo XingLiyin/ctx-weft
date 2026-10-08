@@ -1652,18 +1652,13 @@ class CtxWeftRuntime:
                 reserved_output_tokens=reserved_output_tokens,
                 with_root_task=False,
             )
-            # 模板在 create_session 内部已解析并校验过一次（入口即拒、不落库）；这里
-            # 再取一份对象给 runner 用，与 `start_session` 的写法一致。
-            template = await self._template_lookup.get_template(
-                template_id, None,
-                ctx=ProviderContext(session_id=session.id, tenant_id=tenant_id),
-            )
+            # 模板在 create_session 内部已解析并校验过一次（入口即拒、不落库），这里
+            # 不再取第二份：runner 不持有模板，装配时按执行 agent 现解
+            # （`_SessionTaskRunner._template_of`）。
             task_manager.set_unhealthy_check(
                 lambda sid: self.storage_health(sid) is not None)
             task_manager.set_runner(self._make_task_runner(
                 session=session,
-                template=template,
-                template_id=template_id,
                 lm=sm.agent_lifecycle_manager,
                 memory=memory,
                 task_manager=task_manager,
@@ -1761,14 +1756,6 @@ class CtxWeftRuntime:
         else:
             # 有活 owner 就把新 root task 推进它（单例）；没有才由 resume_session 新建。
             existing = self._task_managers.get(params.session_id) if params.session_id else None
-            # 复用活 owner 时，新 root task 一进队就可能被别处的 drain（并发的 pause /
-            # send_message）派发出去——若那一刻 runner 还是上一轮的，这一轮的 run 结果就
-            # 写进了上一轮的 TurnHandle。所以模板在推 task **之前**解析好，下面拿到 task
-            # 后同步装上新 runner，中间不留 await。
-            template = await self._template_lookup.get_template(
-                params.template_id, None,
-                ctx=ProviderContext(session_id=params.session_id or "", tenant_id=params.tenant_id),
-            )
             session, root_task, task_manager = await sm.resume_session(
                 session_id=params.session_id,
                 event_store=self.event_store,
@@ -1798,20 +1785,15 @@ class CtxWeftRuntime:
             _storage_health=self.storage_health,
         )
 
-        if not params.resume:
-            # resume 分支已在推 root task 之前解析过模板（见上）——那一步不能挪到这里，
-            # 复用活 owner 时中间不能留 await。
-            template = await self._template_lookup.get_template(
-                params.template_id,
-                None,
-                ctx=ProviderContext(session_id=session.id, tenant_id=params.tenant_id),
-            )
+        # 这一段到 `set_runner` **不留 await**：resume 复用活 owner 时，新 root task 一进队
+        # 就可能被别处的 drain（并发的 pause / send_message）派发出去，若那一刻 runner 还是
+        # 上一轮的，这一轮的 run 结果就写进上一轮的 TurnHandle。从前为此要把模板解析特意
+        # 提到推 task 之前（两条分支各解一次、彼此点名）；runner 不再持有模板之后，这里
+        # 已经没有任何需要 await 的准备工作，那个约束自然成立。
         task_manager.set_unhealthy_check(
             lambda sid: self.storage_health(sid) is not None)  # spec: event-commit
         task_manager.set_runner(self._make_task_runner(
             session=session,
-            template=template,
-            template_id=params.template_id,
             lm=lm,
             memory=memory,
             task_manager=task_manager,
@@ -2397,8 +2379,6 @@ class CtxWeftRuntime:
         self,
         *,
         session: Session,
-        template: "AgentTemplate",
-        template_id: str,
         lm: AgentLifecycleManager,
         memory: MemoryProvider,
         task_manager: TaskManager,
@@ -2409,9 +2389,12 @@ class CtxWeftRuntime:
         不再收 llm_account/llm_model：这次要用的模型由 assemble() 经
         `AgentLifecycleManager.materialize`/`resolve_model` 按 agent record 的
         `ModelChoice` 现解，不再是 runner 构造期就定死的会话级值。
+
+        **也不再收 template/template_id**（2026-09-30，同一条理由的第二次应用）：模板
+        同样由 assemble() 按执行 agent 的 record 现解，见 `_SessionTaskRunner._template_of`。
         """
         return _SessionTaskRunner(
-            runtime=self, session=session, template=template, template_id=template_id,
+            runtime=self, session=session,
             lm=lm, memory=memory,
             task_manager=task_manager,
             handle=handle,
@@ -2548,10 +2531,10 @@ class CtxWeftRuntime:
         if sess_proj is None:
             raise RuntimeError(f"Session {session_id!r} not found in event store")
 
-        template_id = sess_proj.template_id
-        if not template_id:
-            raise RuntimeError(f"Session {session_id!r} has no template_id — cannot recover")
-
+        # 从前这里先取 `sess_proj.template_id`，空则抛「cannot recover」——那道门只服务
+        # 于「按会话模板建 runner」这一件事，而 runner 不再持有模板（每个 agent 装配时
+        # 按自己的 record 现解，见 `_SessionTaskRunner._template_of`），门也就没了依据。
+        # 会话的那份 template_id 仍在投影里，但只是 host 的展示/策略字段。
         from ctx_weft.core.control.converters import (
             session_from_projection,
             task_from_projection,
@@ -2619,14 +2602,10 @@ class CtxWeftRuntime:
 
         lm = self._agent_lifecycle_manager
         # 跨重启后本进程的 registry 可能是空的：下游经 assemble() 触发的
-        # materialize() 一旦撞见未登记的 agent id，需要这份 session 语境才能
-        # 回落到正确的 fallback_template_id，而不是「""（无模板）」。幂等：
-        # 已登记则不覆盖（同 SessionRegistry.register_session 口径）。
-        lm.register_session(session.id, tenant_id=session.tenant_id, fallback_template_id=template_id)
-        template = await self._template_lookup.get_template(
-            template_id, None,
-            ctx=ProviderContext(session_id=session.id, tenant_id=session.tenant_id),
-        )
+        # materialize() 一旦撞见未登记的 agent id，需要这份 session 语境才能给它补出
+        # 正确的 session_id/tenant_id（`_register_fallback`）。幂等：已登记则不覆盖
+        # （同 SessionRegistry.register_session 口径）。
+        lm.register_session(session.id, tenant_id=session.tenant_id)
         task_manager = TaskManager(
             session_id=session.id,
             event_bus=self._event_bus,
@@ -2642,8 +2621,9 @@ class CtxWeftRuntime:
         # 「新 TM 顶替活 TM」而设，单例之后那种顶替不再发生。
         task_manager.restore(all_tasks, terminal_ids, parked_task_ids=parked_task_ids)
 
-        # 各 agent 取自己的 template_id（AgentInstantiated 事件投影而来）；投影里没有的
-        # （存量事件流）回落 session 模板——喂进 registry，registry 就是那份缓存。
+        # 各 agent 取自己的 template_id（AgentInstantiated 事件投影而来）——喂进 registry，
+        # registry 就是那份缓存。投影里没有的（存量事件流）留空，装配时由 host 声明的
+        # `fallback_template_ref` 兜底，不再借会话的模板。
         # 与 `rebuild_session` 共用同一条装填路径（`_load_agents_of`），折叠逻辑只此一份
         # （Task 11）：这里为此重付一次 `rebuild_view` 的代价，换来两处永不漂移。
         await self._load_agents_of(session.id, tenant_id=session.tenant_id)
@@ -2652,8 +2632,6 @@ class CtxWeftRuntime:
             lambda sid: self.storage_health(sid) is not None)  # spec: event-commit
         task_manager.set_runner(self._make_task_runner(
             session=session,
-            template=template,
-            template_id=template_id,
             lm=lm,
             memory=self.providers.get_memory(),
             task_manager=task_manager,
@@ -2676,7 +2654,7 @@ class CtxWeftRuntime:
             if t is None:
                 continue
             await self._relaunch_task_recap(
-                session=session, template=template, template_id=template_id,
+                session=session,
                 task_manager=task_manager, task=t,
                 agent_id=info.get("agent_id") or t.assigned_agent_id or "",
                 boundary=info.get("boundary") or "finish",
@@ -2840,13 +2818,17 @@ class CtxWeftRuntime:
         return None
 
     async def _relaunch_task_recap(
-        self, *, session: Session, template: "AgentTemplate", template_id: str,
+        self, *, session: Session,
         task_manager: TaskManager, task: Task, agent_id: str, boundary: str,
     ) -> None:
         """恢复：重建 LoopState 重跑一个被崩溃打断的段 recap，登记到传入 TM（track_background）。
 
         close 边界（finish/normal）：先从 memory 读占位 finish 对 tool_call_id + 据 task 状态定 outcome，
         register_close_synth，使重跑经 replace_finish_report 替换占位对。best-effort：任何一步失败记日志、跳过。
+
+        **模板按 `agent_id` 自己的出身解**（2026-09-30）：从前它由调用方连同会话模板一起
+        传进来，于是一个子 agent 被打断的段 recap 会用 root 的 identity 重跑——而 recap
+        的产物是要写回那个 agent 记忆的。同 `_SessionTaskRunner._template_of` 的口径。
         """
         import dataclasses as _dc
 
@@ -2856,9 +2838,7 @@ class CtxWeftRuntime:
             # 水合，不新建：这是重跑一个已存在 agent 打断的段 recap。register_session
             # 保证跨重启后 registry 为空时 materialize 的回落有正确的 session 语境
             # （幂等：session 已登记则不覆盖）。
-            lm.register_session(
-                session.id, tenant_id=session.tenant_id, fallback_template_id=template_id,
-            )
+            lm.register_session(session.id, tenant_id=session.tenant_id)
             agent, rm = lm.materialize(
                 agent_id, session_id=session.id, tenant_id=session.tenant_id)
             # 窗口以 session.context_limit/reserved_output_tokens 为准（host 配置的预算
@@ -2867,6 +2847,10 @@ class CtxWeftRuntime:
                 context_limit=session.context_limit,
                 reserved_output_tokens=session.reserved_output_tokens,
             ))
+            template = await self._template_lookup.get_template(
+                agent.template_id, None,
+                ctx=ProviderContext(session_id=session.id, tenant_id=session.tenant_id),
+            )
             memory = self.providers.get_memory()
             scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
             provider_ctx = self._build_provider_ctx(session, task, agent)
@@ -3046,22 +3030,23 @@ class CtxWeftRuntime:
             proj = view.sessions.get(session_id)
             if proj is None:
                 raise RuntimeError(f"Session {session_id!r} not found in event store")
-            if not proj.template_id:
-                raise RuntimeError(f"Session {session_id!r} has no template_id — cannot compact")
 
             session = session_from_projection(proj)
             pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
             # 水合，不新建：target_agent_id 是已存在 agent。register_session 保证跨
             # 重启后 registry 为空时 materialize 的回落有正确的 session 语境（幂等）。
-            lm.register_session(
-                session.id, tenant_id=session.tenant_id, fallback_template_id=proj.template_id,
-            )
+            lm.register_session(session.id, tenant_id=session.tenant_id)
             agent, rm = lm.materialize(
                 target_agent_id, session_id=session.id, tenant_id=session.tenant_id)
             # materialize 不返回 template（它只读 record，不碰 TemplateLookup）——
             # state.extra 仍需要它（CompactStep 经 extra["template"] 读），单独取一次。
+            #
+            # 按 `agent.template_id` 解，不是会话那份（2026-09-30）：压的是这一个 agent 的
+            # 上下文，折叠用的 identity 必须是它自己的。同时也让上面那道
+            # 「session has no template_id — cannot compact」的守卫失去依据——压缩一个
+            # 子 agent 从来不需要会话的模板，那道门删掉了。
             template = await self._template_lookup.get_template(
-                proj.template_id, None, ctx=pctx,
+                agent.template_id, None, ctx=pctx,
             )
             # 手动 compact_agent 是「强制立即压」的一次性操作，不受预算门控（escalating_compact
             # 按 token_estimate vs target_tokens 判断是否需要压）——context_tokens=context_limit
@@ -3754,10 +3739,10 @@ class CtxWeftRuntime:
                 "root agent, pass agent_id=<root_agent_id> explicitly."
             )
         if s.use_subagent and not s.subagent_template:
-            # 入口自己 instantiate（见下），故必须手握**规范形式**的模板 id。会话的那一份
-            # 只活在 `_SessionTaskRunner._template_id` 里（`Session` 不带该字段，agent
-            # record 里存的是裸 id、不可逆向规范化），没有可靠的默认可回落——与其猜，
-            # 不如要求调用方说清楚要造一个什么型号的 agent。
+            # 入口自己 instantiate（见下），故必须手握**规范形式**的模板 id。没有可靠的
+            # 默认可回落——「会话的模板」这个概念已经删干净了（2026-09-30），而 host 配的
+            # `fallback_template_ref` 是给「解析不出来」兜底的母版，不是「没说要造什么」的
+            # 答案。与其猜，不如要求调用方说清楚要造一个什么型号的 agent。
             raise ValueError(
                 "dispatch_task: settings.subagent_template is required when "
                 "use_subagent=True (qualified form, e.g. 'agent:researcher')"
@@ -4537,12 +4522,14 @@ class CtxWeftRuntime:
         随时间漂移。
 
         **绝不抛**：`ALM.load()` 自己的纪律是「这条路抛一次就卡住整条恢复链」
-        （见其 docstring）——本方法与它
-        同一口径。session 投影缺失、或有投影但 `template_id` 为空（两者都是恢复期
-        真实会遇到的缺口：事件日志损坏、或存量会话从未记过模板）→ 记一条 warning、
-        用 `""` 当 fallback 传给 `ALM.load()`（它已经对无法解析的模板回落默认
-        配置），照常继续装填该 session 能装填的 agent，不中断整条恢复链、也不让
-        这一个 session 的缺口拖累其余 session。
+        （见其 docstring）——本方法与它同一口径。session 投影缺失（事件日志损坏这类恢复期
+        真实缺口）只影响 tenant 的取法，照常继续装填该 session 能装填的 agent，不中断
+        整条恢复链、也不让这一个 session 的缺口拖累其余 session。
+
+        **不再从投影取会话模板**（2026-09-30）：`ALM.load()` 从前收一个
+        `fallback_template_id`，装的就是这里读出来的 `sess_proj.template_id`，供 agent
+        自己的模板缺失时借用。那条借道已删——兜底归 `RuntimeConfig.fallback_template_ref`，
+        在装配解析模板那一刻生效。
         """
         from ctx_weft.core.control.reducers import rebuild_view
 
@@ -4552,23 +4539,17 @@ class CtxWeftRuntime:
             tenant_id = (
                 sess_proj.tenant_id if sess_proj is not None else self._DEFAULT_TENANT
             ) or self._DEFAULT_TENANT
-        if sess_proj is None or not sess_proj.template_id:
-            logger.warning(
-                "_load_agents_of: session %s has no projection or no template_id; "
-                "loading its agents with an empty fallback template "
-                "(recovery-time gap, degrading not crashing)",
-                session_id,
-            )
-            fallback_template_id = ""
-        else:
-            fallback_template_id = sess_proj.template_id
+        # 从前这里还要从投影取一份 `sess_proj.template_id` 当 `load()` 的
+        # `fallback_template_id`（agent 自己的模板缺失时借会话那份）。已删：借来的结果是
+        # 一个身份不明的 agent 冒充 root，兜底归 `RuntimeConfig.fallback_template_ref`，
+        # 在装配解析模板那一刻才生效（见 `TemplateLookup.get_template`）。
         # 未提交窗口里的 task（spec 2026-09-09）折不进 `view`——它们的 `TASK_CREATED`
         # 还没落盘。把它们的 id 交给 `load()`，让它别拿日志折出来的旧值把路由判据倒回去。
         tm = self._task_managers.get(session_id)
         protected = set(tm.open_round_task_ids) if tm is not None else set()
         loaded = await self._agent_lifecycle_manager.load(
             view.agents, session_id=session_id,
-            tenant_id=tenant_id, fallback_template_id=fallback_template_id,
+            tenant_id=tenant_id,
             protected_current_tasks=protected,
         )
         return loaded, tenant_id
@@ -5133,6 +5114,15 @@ class _SessionTaskRunner:
     registry（`lm`），恢复路径由 `recover_agent`/`rebuild_session` 经共用的
     `_load_agents_of` 显式调 `lm.load()` 装填。
     assigned_agent_id 回填 / started_at / TASK_STARTED 均归 TaskManager（两阶段契约）。
+
+    **不持有模板**（2026-09-30）：从前这里有一对 `_template`/`_template_id` 字段，
+    装的是建 runner 那一刻按「会话的模板」解出来的那份，`assemble` 的非 subagent
+    分支直接把它配给执行 agent。那是错的——runner 是 per-session 的，而执行 agent
+    不是：`send_message` 可以把新一轮开在任意一个 park 中的子 agent 上
+    （`_start_task_for_agent` 建的 task 是 `use_subagent=False`，正好落那个分支），
+    于是子 agent 跑的是 root 的人格与 root 的 capability 授权。模板的唯一真相是
+    agent record 的 `template_id`（`AgentInstantiated` 钉死的出身），所以现在每次
+    `assemble` 按执行 agent 现解，见 `_template_of`。
     """
 
     def __init__(
@@ -5140,8 +5130,6 @@ class _SessionTaskRunner:
         *,
         runtime: "CtxWeftRuntime",
         session: Session,
-        template: "AgentTemplate",
-        template_id: str,
         lm: AgentLifecycleManager,
         memory: MemoryProvider,
         task_manager: TaskManager,
@@ -5149,8 +5137,6 @@ class _SessionTaskRunner:
     ) -> None:
         self._runtime = runtime
         self._session = session
-        self._template = template
-        self._template_id = template_id
         self._registry = lm
         self._memory = memory
         self._task_manager = task_manager
@@ -5171,10 +5157,15 @@ class _SessionTaskRunner:
         match t.settings:
             case NormalTaskSettings(use_subagent=True) as s:
                 ctx = ProviderContext(session_id=sess_id, tenant_id=tenant_id)
+                # 只有真新建才需要它（要造一个什么型号的 agent）；已有 assigned 的那条路
+                # 读 agent record 自己的出身，见下。从前这里以 `or self._template_id`
+                # 回落「会话的模板」，那个回落连带把重派发/恢复也拖进了 root 的模板——
+                # 兜底的唯一住所现在是 `RuntimeConfig.fallback_template_ref`（host 声明的
+                # 母版），由 `TemplateLookup.get_template` 内部消化，装配层不再自备一份。
                 sub_tmpl_id = (
                     await self._runtime._template_lookup.resolve_qualified(s.subagent_template, ctx)
                     if s.subagent_template else ""
-                ) or self._template_id
+                )
                 # 分支判据：t.assigned_agent_id 是否为空。真新建走 instantiate——
                 # Registry 内部会按因果顺序发 AgentSpawned/SpawnRejected/AgentInstantiated；
                 # 已有值时只是按同一 id 重新水合对象（重派发 / 恢复），走 materialize
@@ -5198,12 +5189,12 @@ class _SessionTaskRunner:
                 else:
                     agent, rm = self._registry.materialize(
                         t.assigned_agent_id, session_id=sess_id, tenant_id=tenant_id)
-                    # materialize 不返回 template；沿用原行为按 sub_tmpl_id 重新解析
-                    # （与 create 分支同一个来源，agent 出身早已由 AgentInstantiated
-                    # 事件钉住，这里只是要一份可用的 AgentTemplate 对象）。
-                    tmpl = await self._runtime._template_lookup.get_template(
-                        sub_tmpl_id, None, ctx=ctx,
-                    )
+                    # materialize 不返回 template（它只读 record，不碰 TemplateLookup）
+                    # → 按这个 agent **自己**的出身解一份。从前这里解的是 `sub_tmpl_id`
+                    # （settings 里那个 subagent_template），两者在重派发/恢复时并不总是
+                    # 同一个值：settings 可能没带模板（那时旧代码回落会话模板），而 agent
+                    # 的出身早已由 `AgentInstantiated` 钉死——record 才是真相。
+                    tmpl = await self._template_of(agent, ctx)
                 # 窗口仍以 session.context_limit/reserved_output_tokens 为准——那是
                 # host 经 SessionStartParams 显式配置的预算天花板（必填字段，独立于
                 # ModelChoice/rm），与「用哪个模型」是两件事：host 完全可能故意配一个
@@ -5255,8 +5246,17 @@ class _SessionTaskRunner:
                     context_limit=self._session.context_limit,
                     reserved_output_tokens=self._session.reserved_output_tokens,
                 ))
+                # **模板跟着执行 agent，不跟着 session**（2026-09-30 修）。从前这里是
+                # `template=self._template`（建 runner 时按会话模板解出的那份）：root task
+                # 恰好对，而 `send_message` 投给一个 park 中的子 agent 时，开出的新 task
+                # 正是 `use_subagent=False`、落这条分支——于是那个子 agent 跑 root 的
+                # identity 与 root 的 capability 授权（它自己 `capability_refs` 里的
+                # forbidden 一并失效），而同一次 run 的
+                # `provider_ctx.agent_template_id` 报的又是它自己的模板，两者自相矛盾。
+                tmpl = await self._template_of(
+                    agent, ProviderContext(session_id=sess_id, tenant_id=tenant_id))
                 initial = await self._reconcile_or(t, agent, "prepare")
-                return AgentBinding(agent_id=agent.id, agent=agent, template=self._template,
+                return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
                                     initial_step=initial, run_id=generate_id("run"), model=rm)
 
     # ── 阶段 2：执行 ─────────────────────────────────────────────────────────
@@ -5306,6 +5306,29 @@ class _SessionTaskRunner:
         return s.run_outcome
 
     # ── helpers（原闭包内嵌函数）───────────────────────────────────────────────
+
+    async def _template_of(
+        self, agent: "Agent", ctx: "ProviderContext",
+    ) -> "AgentTemplate":
+        """这个 agent 的模板——每次装配按它自己的出身现解。
+
+        真相源是 agent record 的 `template_id`（`AgentInstantiated` 钉死、经
+        `materialize` 带出来的那个），**不是** session、也不是 task settings：一个
+        session 里同时跑着不同型号的 agent 是常态（委派出来的子 agent、`send_message`
+        直接投给某个 park 中的子 agent），把会话那份配给它们就是让它们冒充 root。
+
+        代价是每次装配付一次 `get_template`，而 `LocalAgentTemplateProvider` 每次都
+        重新扫盘（热更新友好是它有意的设计）。**不做「与会话模板相同就复用」的短路**：
+        那等于把「用谁的模板」这个判断又交回给一个 per-session 的字段，而它正是本次
+        要删掉的东西。
+
+        解不出来不在这里兜底：`TemplateLookup.get_template` 自带
+        `RuntimeConfig.fallback_template_ref`（host 声明的母版）那一层，连母版都解不出
+        才抛——那时已经不是「某个模板没装好」，而是部署坏了，该大声报。
+        """
+        return await self._runtime._template_lookup.get_template(
+            agent.template_id, None, ctx=ctx,
+        )
 
     async def _reconcile_or(self, t: "Task", agent: "Agent", base: str) -> str:
         """base initial_step；若该 task 最近 assistant turn 有 dangling tool_call → reconcile。"""

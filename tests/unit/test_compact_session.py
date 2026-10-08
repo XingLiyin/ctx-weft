@@ -19,6 +19,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft import RuntimeConfig
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -33,7 +34,11 @@ def _runtime() -> CtxWeftRuntime:
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
-    rt = make_runtime(llm=llm, agent_provider=resolver)
+    # 占位 record（手工 materialize 一个从未 instantiate 过的 agent）没有自己的模板——
+    # registry 不再借会话那份（2026-09-30）。兜底由 host 声明的母版负责，这里把它配上，
+    # 走的是与生产同一条链路：RuntimeConfig.fallback_template_ref → TemplateLookup。
+    rt = make_runtime(llm=llm, agent_provider=resolver,
+                      config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     rt.providers.register_memory(InMemoryMemoryProvider())
     return rt
 
@@ -47,7 +52,7 @@ async def test_compact_agent_rejects_busy_session() -> None:
     rt = _runtime()
     sid, aid = "ses_busy", "agt_root"
     rt._agent_lifecycle_manager.register_session(
-        sid, tenant_id="default", fallback_template_id="agent:tpl_echo",
+        sid, tenant_id="default",
     )
     rt._agent_lifecycle_manager.materialize(aid, session_id=sid, tenant_id="default")
     rt._busy_sessions.add(sid)  # simulate an active drain
@@ -84,7 +89,8 @@ async def test_compact_agent_uses_agent_lifecycle_managers_current_model_not_sta
 
     from ctx_weft.core import ProviderRegistry
     providers = ProviderRegistry()
-    rt = make_runtime(llm=old_llm, agent_provider=resolver, providers=providers)
+    rt = make_runtime(llm=old_llm, agent_provider=resolver, providers=providers,
+                      config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     rt.providers.register_llm_provider(_TwoModelResolver())
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
@@ -120,7 +126,7 @@ async def test_compact_agent_uses_agent_lifecycle_managers_current_model_not_sta
     # 先水合 record（生产路径里这一步发生在 root agent 实例化时；此处手工建 session
     # 只走了 event_store，registry 还没见过这个 agent_id）。
     rt._agent_lifecycle_manager.register_session(
-        sid, tenant_id="default", fallback_template_id=f"agent:{tmpl.id}",
+        sid, tenant_id="default",
     )
     rt._agent_lifecycle_manager.materialize(aid, session_id=sid, tenant_id="default")
 
@@ -148,7 +154,11 @@ async def test_compact_agent_folds_agent_layer() -> None:
     # summarize_for_compact；本例 task_id="" 的当前 task 层无材料可折，L3 guard 拦下、不再空调
     # 第二次 LLM，故只需 1 条 mock 响应。
     llm = MockLLMAdapter(responses=[MockResponse(text="SUMMARY")])
-    rt = make_runtime(llm=llm, agent_provider=resolver)
+    # 占位 record（手工 materialize 一个从未 instantiate 过的 agent）没有自己的模板——
+    # registry 不再借会话那份（2026-09-30）。兜底由 host 声明的母版负责，这里把它配上，
+    # 走的是与生产同一条链路：RuntimeConfig.fallback_template_ref → TemplateLookup。
+    rt = make_runtime(llm=llm, agent_provider=resolver,
+                      config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
 
@@ -187,7 +197,7 @@ async def test_compact_agent_folds_agent_layer() -> None:
     # 只走了 event_store，registry 还没见过这个 agent_id——compact_agent 现在先经
     # record_of() 校验存在性，未注册的 agent_id 会被当成 AgentNotFound 挡在门外）。
     rt._agent_lifecycle_manager.register_session(
-        sid, tenant_id="default", fallback_template_id=f"agent:{tmpl.id}",
+        sid, tenant_id="default",
     )
     rt._agent_lifecycle_manager.materialize(aid, session_id=sid, tenant_id="default")
 

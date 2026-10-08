@@ -49,7 +49,8 @@ def _build(llm, *, hitl_timeout_sec, memory=None, event_store=None, register=Non
     resolver.register(make_echo_template())
     kwargs = {"event_store": event_store} if event_store is not None else {}
     rt = make_runtime(llm=llm, agent_provider=resolver,
-                      config=RuntimeConfig(hitl_timeout_sec=hitl_timeout_sec), **kwargs)
+                      config=RuntimeConfig(hitl_timeout_sec=hitl_timeout_sec,
+                                           fallback_template_ref="agent:tpl_echo"), **kwargs)
     rt.providers.register_memory(memory or InMemoryMemoryProvider())
     if register is not None:
         register(rt)

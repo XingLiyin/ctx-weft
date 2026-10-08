@@ -50,7 +50,7 @@ def _reg(resolver=None):
         event_bus=_Bus(),
         model_resolver=resolver or (lambda a, m: _Client()),
     )
-    reg.register_session("s1", tenant_id="default", fallback_template_id=TPL)
+    reg.register_session("s1", tenant_id="default")
     return reg
 
 

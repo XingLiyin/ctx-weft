@@ -57,8 +57,7 @@ async def test_load_fills_records_from_views():
         "agt_b": AgentView(id="agt_b", spawn_depth=1, parent_agent_id="agt_a",
                            template_id=TPL),
     }
-    n = await lm.load(views, session_id="s1", tenant_id="default",
-                      fallback_template_id=TPL)
+    n = await lm.load(views, session_id="s1", tenant_id="default")
     assert n == 2
     assert lm.has("agt_a") and lm.has("agt_b")
     assert lm._agents["agt_b"].spawn_depth == 1
@@ -70,33 +69,37 @@ async def test_load_resolves_template_config_not_dataclass_defaults():
     lm = _lm()
     tmpl = make_echo_template()
     views = {"agt_a": AgentView(id="agt_a", template_id=TPL)}
-    await lm.load(views, session_id="s1", tenant_id="default",
-                  fallback_template_id=TPL)
+    await lm.load(views, session_id="s1", tenant_id="default")
     got, _rm = lm.materialize("agt_a", session_id="s1", tenant_id="default")
     assert got.memory_config == tmpl.memory_config
     assert got.loop_config == tmpl.loop_config
 
 
-async def test_empty_template_id_falls_back():
+async def test_empty_template_id_stays_empty_and_warns(caplog):
     """存量事件流里子 agent 没发过 AgentInstantiated → template_id 为空。
 
-    回落而非报错是刻意的：授权按模板做策略，重启后把未知模板判成
-    「无权限」会让老会话直接跑不动。
+    **留空，不借会话的模板**（2026-09-30）。从前这里回落该 session 登记项里的
+    `fallback_template_id`，于是一个身份不明的 agent 直接继承 root 的人格与 capability
+    授权，而这个错误是自洽的——没有任何一处会再发现它本该是别的。装填照旧不抛（授权按
+    模板做策略，重启后把未知模板判成「无权限」会让老会话跑不动），兜底挪到装配解析模板
+    那一刻，由 host 声明的 `RuntimeConfig.fallback_template_ref` 负责。
     """
+    import logging
     lm = _lm()
     views = {"agt_a": AgentView(id="agt_a", template_id="")}
-    await lm.load(views, session_id="s1", tenant_id="default",
-                  fallback_template_id=TPL)
-    assert lm.template_id_of("agt_a")
+    with caplog.at_level(logging.WARNING):
+        n = await lm.load(views, session_id="s1", tenant_id="default")
+    assert n == 1
+    assert lm.has("agt_a")
+    assert lm.template_id_of("agt_a") == ""      # 不冒充 root
+    assert "no template_id" in caplog.text       # 但要留痕
 
 
 async def test_load_is_idempotent():
     lm = _lm()
     views = {"agt_a": AgentView(id="agt_a", template_id=TPL)}
-    await lm.load(views, session_id="s1", tenant_id="default",
-                  fallback_template_id=TPL)
-    await lm.load(views, session_id="s1", tenant_id="default",
-                  fallback_template_id=TPL)
+    await lm.load(views, session_id="s1", tenant_id="default")
+    await lm.load(views, session_id="s1", tenant_id="default")
     assert len(lm._agents) == 1
 
 
@@ -104,7 +107,6 @@ async def test_unresolvable_template_id_falls_back_to_default_config_not_raises(
     """恢复期缺口降级，不抛——模板查不到时用 MemoryConfig()/LoopConfig() 默认值继续。"""
     lm = _lm()
     views = {"agt_a": AgentView(id="agt_a", template_id="agent:does_not_exist")}
-    n = await lm.load(views, session_id="s1", tenant_id="default",
-                      fallback_template_id=TPL)
+    n = await lm.load(views, session_id="s1", tenant_id="default")
     assert n == 1
     assert lm.has("agt_a")
