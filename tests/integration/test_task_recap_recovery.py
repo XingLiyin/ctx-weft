@@ -8,9 +8,27 @@ RUNNING). On ``/resume`` the old ``_recover_session_locked`` found no resumable 
 (the only task is terminal) and raised ``RuntimeError("has no resumable tasks")`` →
 the resume click hung.
 
-Test A reproduces that stuck state and asserts recover_session re-runs the pending
+Test A reproduces that stuck state and asserts recover_agent re-runs the pending
 recap and finalizes the session to SUCCEEDED. Test B guards the genuinely-empty
 projection: a session with no tasks at all must still raise RuntimeError.
+
+Task 16 note: ``SessionFinished`` itself (and the SessionRegistry state machine that
+used to emit it) is retired — the SM was demoted to a plain agent registry in Task 15.
+The tests below used to pin ``TaskQueueDrained`` instead (the TM aggregate signal that
+``SessionFinished`` was translated from). Task 12 (2026-09-04, events-v2 §5) retired
+that signal too — ``TaskManager.announce_queue_state`` stopped emitting it, since its
+one consumer (the session state machine) was already gone. ``finalize_idle_session``
+still computes the same terminal verdict, it just writes it directly onto the
+``TaskManager``-held ``Session`` object instead of broadcasting it as an event. Two of
+the tests below spy on ``finalize_idle_session``'s ``status`` argument directly (by the
+time ``recover_agent()`` returns, the session may already be fully released and the
+``TaskManager`` gone from ``runtime._task_managers``, so reading ``tm.session.status``
+back after the fact isn't reliable there); the third reads ``tm.session.status`` off a
+``TaskManager`` reference captured while it's still guaranteed live. They still don't
+assert on the event-store projection's ``session_status`` reaching a terminal value,
+because nothing emits ``SessionFinished`` any more to drive that reducer branch — that's
+an accepted consequence of session-state ownership moving to the host
+(docs/events-v2.md §2.1.1), not a regression this file should guard against.
 """
 
 from __future__ import annotations
@@ -22,15 +40,19 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.core.events.types import Event, EventType
-from ctx_weft.core.orchestrator.control_capability import BACKGROUND_PROCESS_REPORT_NAME
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.core.capabilities.control_tools import COLLECT_PROCESS_REPORT_NAME
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
 )
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft import RuntimeConfig
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests._snapshot_helpers import seed_snapshot
+from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
 
@@ -47,8 +69,17 @@ def _make_runtime() -> tuple[CtxWeftRuntime, InMemoryMemoryProvider, list]:
     resolver.register(make_echo_template())
     # Enough plain-text responses to outlast the observe ReAct loop
     # (max_turns_per_observe defaults to 5) without exhausting the mock.
-    llm = MockLLMAdapter(responses=[MockResponse(text="recovered recap") for _ in range(8)])
-    runtime = make_runtime(llm=llm, agent_provider=resolver)
+    # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被机械
+    # 判 success（`_mechanical_verdict` 判 continue）——不给这条路由，task 会一路重试到
+    # max_retries 然后落 FAILED。
+    llm = MockLLMAdapter(responses=[MockResponse(text="recovered recap") for _ in range(8)],
+                         observer_verdict="success")
+    # 夹具的事件流只发 SESSION_CREATED，没有 AGENT_INSTANTIATED（恢复用的最小夹具，
+    # agent 的出身不是这些用例的关注点），所以装填出来的 agent 没有自己的 template_id——
+    # 而 registry 不再借会话那份（2026-09-30）。配上 host 声明的母版，装配时由
+    # TemplateLookup 兜底，与生产同一条链路。
+    runtime = make_runtime(llm=llm, agent_provider=resolver,
+                           config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 
@@ -76,9 +107,9 @@ def _ev(seq: int, type_, **payload) -> Event:
     )
 
 
-async def test_stuck_finish_session_recovers_and_finalizes() -> None:
+async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
     """root task FINISHED + TaskRecapStarted (no Done) + session projection RUNNING
-    (no SESSION_FINISHED) → recover_session re-runs the recap and finalizes SUCCEEDED."""
+    (no SESSION_FINISHED) → recover_agent re-runs the recap and finalizes SUCCEEDED."""
     runtime, mem, seen = _make_runtime()
     sid, tid, aid = "ses_recap", "tsk_recap", "agt_root"
 
@@ -88,20 +119,27 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
         _ev(2, EventType.RUN_STARTED),
         _ev(3, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
             "assigned_agent_id": aid, "creator_agent_id": aid}),
         _ev(4, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         _ev(5, EventType.TASK_FINISHED, task_id=tid,
             outcome="success", summary="done", outputs={"result": "ok"}),
-        _ev(6, EventType.TASK_FINALIZED, task_id=tid, outputs={"result": "ok"}),
+        # TaskFinalized 的真实发射侧只带 {task_id, outcome}（finalize.py:766）——
+        # outputs 已由上面的 TASK_FINISHED 折进投影，这里不再伪造它。
+        _ev(6, EventType.TASK_FINALIZED, task_id=tid, outcome="success"),
         # Crash mid finish-boundary observe: STARTED persisted, DONE never was.
         _ev(7, EventType.TASK_RECAP_STARTED, task_id=tid, boundary="finish", agent_id=aid),
     ]
     for e in seed:
-        await runtime.event_store.append(e)
+        await append_one(runtime.event_store, e)
 
     # Pre-crash state: session projection is still RUNNING (no SESSION_FINISHED).
     view_before = await rebuild_view(runtime.event_store, sid)
     assert view_before.sessions[sid].status == "RUNNING"
+    assert view_before.tasks[tid].outputs == {"result": "ok"}
 
     # Seed the placeholder finish pair in memory so _relaunch's close-synth path can
     # locate the finish_task tool_call and supersede the placeholder Process Report.
@@ -120,29 +158,44 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
         metadata={"origin_task_id": tid, "tool_call_id": fin_tcid},
     ), pctx)
 
-    # ── Recover ────────────────────────────────────────────────────────────────
-    await runtime.recover_session(sid)
+    # finalize_idle_session's terminal verdict used to be observable as a
+    # TaskQueueDrained(final_status) event; 2026-09-04 (Task 12, events-v2 §5) retired
+    # that broadcast (its one consumer, the session state machine, was already gone).
+    # Spy on the call itself instead — by the time recover_agent() returns, the
+    # session may already be fully released (`_release_session` pops the TaskManager
+    # out of `runtime._task_managers`), so reading `tm.session.status` back after the
+    # fact isn't reliable; capturing the argument at the call site is.
+    finalized: list[str] = []
+    orig_finalize = TaskManager.finalize_idle_session
 
-    # finalize_idle_session awaits the relaunched recap before emitting SESSION_FINISHED,
+    async def _spy_finalize(self, status, *, _orig=orig_finalize):
+        finalized.append(status)
+        return await _orig(self, status)
+
+    monkeypatch.setattr(TaskManager, "finalize_idle_session", _spy_finalize)
+
+    # ── Recover ────────────────────────────────────────────────────────────────
+    # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
+    # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
+    await runtime.rebuild_session(sid)
+    await runtime.recover_agent(aid)
+
+    # finalize_idle_session awaits the relaunched recap before finalizing the session,
     # so it should already be persisted; drain any stragglers defensively.
     tm = runtime._task_managers.get(sid)
     if tm is not None and tm._background_asyncio_tasks:
         await asyncio.gather(*list(tm._background_asyncio_tasks), return_exceptions=True)
 
-    # SESSION_FINISHED(SUCCEEDED) was emitted.
-    finished = [
-        e for e in seen
-        if getattr(e, "type", None) == EventType.SESSION_FINISHED
-        and (e.payload or {}).get("final_status") == "SUCCEEDED"
-    ]
-    assert finished, (
-        "expected SESSION_FINISHED(SUCCEEDED) after recovery; got "
-        f"{[(getattr(e, 'type', None), (e.payload or {}).get('final_status')) for e in seen]}"
+    assert finalized == ["SUCCEEDED"], (
+        f"expected finalize_idle_session to finalize SUCCEEDED exactly once, got {finalized!r}"
     )
 
-    # The projection is now terminal — a repeated recovery would no longer hang.
-    view = await rebuild_view(runtime.event_store, sid)
-    assert view.sessions[sid].status == "SUCCEEDED"
+    # NOTE: the event-store *projection*'s session_status can no longer reach a
+    # terminal value here — nothing emits SessionFinished any more (Task 15/16), and
+    # reducers.py's session_status write only happens on that event. This is an
+    # accepted consequence of the ownership move (per docs/events-v2.md §2.1.1, the
+    # host now aggregates "is the session busy" itself rather than core broadcasting
+    # a precomputed verdict); it is not something this test should assert on any more.
 
     # The pending recap was closed out (TASK_RECAP_DONE emitted by the re-run's finally).
     assert any(
@@ -152,10 +205,10 @@ async def test_stuck_finish_session_recovers_and_finalizes() -> None:
     ), "expected TASK_RECAP_DONE from the relaunched recap"
 
 
-async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
+async def test_stuck_failed_session_recovers_and_finalizes_failed(monkeypatch) -> None:
     """Variant of Test A seeded with TASK_FAILED (+ FAILURE_THRESHOLD_HIT) instead of
     TASK_FINISHED: finalize_idle_session's FAILED branch (``session.failure_counter > 0``
-    in ``_recover_session_locked``) must emit SESSION_FINISHED(FAILED), not SUCCEEDED.
+    in ``_recover_session_locked``) must report TaskQueueDrained(FAILED), not SUCCEEDED.
 
     ``session.failure_counter`` is only incremented by the FAILURE_THRESHOLD_HIT reducer
     rule (``TASK_FAILED`` alone does not touch it — see
@@ -172,21 +225,28 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
         _ev(2, EventType.RUN_STARTED),
         _ev(3, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
             "assigned_agent_id": aid, "creator_agent_id": aid}),
         _ev(4, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         _ev(5, EventType.TASK_FAILED, task_id=tid,
             error_code="TASK_FAILED_AT_RUN", error_message="boom", retry_count=3),
         _ev(6, EventType.FAILURE_THRESHOLD_HIT, failure_counter=1, threshold=1),
-        _ev(7, EventType.TASK_FINALIZED, task_id=tid, error="boom"),
+        # TaskFinalized 的真实发射侧只带 {task_id, outcome}（finalize.py:766）——
+        # error 已由上面的 TASK_FAILED 折进投影，这里不再伪造它。
+        _ev(7, EventType.TASK_FINALIZED, task_id=tid, outcome="fail"),
         # Crash mid finish-boundary observe: STARTED persisted, DONE never was.
         _ev(8, EventType.TASK_RECAP_STARTED, task_id=tid, boundary="finish", agent_id=aid),
     ]
     for e in seed:
-        await runtime.event_store.append(e)
+        await append_one(runtime.event_store, e)
 
     # Pre-crash state: task FAILED, session projection failure_counter > 0, still RUNNING.
     view_before = await rebuild_view(runtime.event_store, sid)
     assert view_before.tasks[tid].status == "FAILED"
+    assert view_before.tasks[tid].error == "boom"
     assert view_before.sessions[sid].failure_counter > 0
     assert view_before.sessions[sid].status == "RUNNING"
 
@@ -208,26 +268,30 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed() -> None:
         metadata={"origin_task_id": tid, "tool_call_id": fin_tcid},
     ), pctx)
 
+    # See the identically-worded note in test_stuck_finish_session_recovers_and_
+    # finalizes just above for why this spies on finalize_idle_session's argument
+    # rather than pinning a TaskQueueDrained event (Task 12 retired it, events-v2 §5).
+    finalized: list[str] = []
+    orig_finalize = TaskManager.finalize_idle_session
+
+    async def _spy_finalize(self, status, *, _orig=orig_finalize):
+        finalized.append(status)
+        return await _orig(self, status)
+
+    monkeypatch.setattr(TaskManager, "finalize_idle_session", _spy_finalize)
+
     # ── Recover ────────────────────────────────────────────────────────────────
-    await runtime.recover_session(sid)
+    await runtime.rebuild_session(sid)
+    await runtime.recover_agent(aid)
 
     tm = runtime._task_managers.get(sid)
     if tm is not None and tm._background_asyncio_tasks:
         await asyncio.gather(*list(tm._background_asyncio_tasks), return_exceptions=True)
 
-    # SESSION_FINISHED(FAILED) was emitted — not SUCCEEDED (Test A's happy path).
-    finished = [
-        e for e in seen
-        if getattr(e, "type", None) == EventType.SESSION_FINISHED
-        and (e.payload or {}).get("final_status") == "FAILED"
-    ]
-    assert finished, (
-        "expected SESSION_FINISHED(FAILED) after recovery of a failed session; got "
-        f"{[(getattr(e, 'type', None), (e.payload or {}).get('final_status')) for e in seen]}"
+    # finalize_idle_session finalized FAILED — not SUCCEEDED (Test A's happy path).
+    assert finalized == ["FAILED"], (
+        f"expected finalize_idle_session to finalize FAILED exactly once, got {finalized!r}"
     )
-
-    view = await rebuild_view(runtime.event_store, sid)
-    assert view.sessions[sid].status == "FAILED"
 
     # The pending finish-boundary recap was still closed out despite the failure.
     assert any(
@@ -258,7 +322,7 @@ class _RoutingLLM(MockLLMAdapter):
     @staticmethod
     def _is_background_observe(request) -> bool:
         tools = getattr(request, "tools", None) or []
-        return any(getattr(t, "name", "") == BACKGROUND_PROCESS_REPORT_NAME for t in tools)
+        return any(getattr(t, "name", "") == COLLECT_PROCESS_REPORT_NAME for t in tools)
 
     def complete(self, request, stream: bool = True):
         self.last_request = request
@@ -278,10 +342,10 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
 
     Simulates a crash where the root task was interrupted mid-act (e.g. an LLM outage,
     TaskSuspended persisted) while a background observe segment recap was also
-    mid-flight (TaskRecapStarted boundary="interrupt", no Done). recover_session must
+    mid-flight (TaskRecapStarted boundary="interrupt", no Done). recover_agent must
     do BOTH: re-queue/re-dispatch the SUSPENDED task (TaskManager.restore) AND
     re-launch the pending recap (_relaunch_task_recap) — and the re-fold guard in
-    background_observe._run_background_observe must let it fold exactly once (no
+    background_observe._run_recap must let it fold exactly once (no
     duplicate TaskRecapDone / no hang). The resumed task then runs to completion
     (its own normal-boundary close triggers a *second*, unrelated recap — expected,
     accepted best-effort concurrency per spec §5.1/§3.6), and the session reaches a
@@ -296,6 +360,10 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
         _ev(2, EventType.RUN_STARTED),
         _ev(3, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
             "assigned_agent_id": aid, "creator_agent_id": aid}),
         _ev(4, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         # Crash mid interrupt-boundary observe while the task itself is suspended
@@ -304,7 +372,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
         _ev(6, EventType.TASK_RECAP_STARTED, task_id=tid, boundary="interrupt", agent_id=aid),
     ]
     for e in seed:
-        await runtime.event_store.append(e)
+        await append_one(runtime.event_store, e)
 
     # Route the routing-aware mock LLM in for this test (the module-level _make_runtime
     # builds a plain MockLLMAdapter; swap it for one that separates the two concurrent
@@ -313,8 +381,9 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
         responses=[MockResponse(text="resumed and done")],
         recap_responses=[
             MockResponse(tool_calls=[
-                ToolCall(id=f"tc_recap_{i}", name=BACKGROUND_PROCESS_REPORT_NAME,
-                          arguments={"act_recap": "recovered recap"}),
+                ToolCall(id=f"tc_recap_{i}", name=COLLECT_PROCESS_REPORT_NAME,
+                          arguments={"task_status": "success",
+                                     "act_recap": "recovered recap"}),
             ])
             for i in range(4)
         ],
@@ -326,7 +395,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
 
     # Seed one un-folded raw LLM_RESPONSE so the interrupt-boundary recap's re-fold
     # guard sees active raw and takes the real fold path (rather than the "already
-    # folded, nothing to do" no-op skip — see background_observe._run_background_observe).
+    # folded, nothing to do" no-op skip — see background_observe._run_recap).
     scope = MemoryAddress(session_id=sid, task_id=tid, agent_id=aid)
     pctx = ProviderContext(session_id=sid, tenant_id="default", task_id=tid, agent_id=aid)
     await mem.ingest(MemoryEvent(
@@ -335,17 +404,22 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     ), pctx)
 
     # ── Recover ────────────────────────────────────────────────────────────────
-    await runtime.recover_session(sid)
+    await runtime.rebuild_session(sid)
+    await runtime.recover_agent(aid)
 
     # Drive to quiescence: repeatedly gather whatever background tasks the TM is
     # tracking (the relaunched recap, plus any recap the resumed task's own close
-    # spawns) until the session projection reaches a terminal status.
+    # spawns) until the resumed task itself reaches a terminal status. Task 16 retired
+    # SessionFinished (SessionRegistry's state machine was demoted to an agent registry
+    # in Task 15), and with it every live path that could ever move the event-store
+    # projection's session_status off RUNNING — polling on the task's own status is
+    # the still-real completion signal for this loop.
     tm = runtime._task_managers.get(sid)
     for _ in range(100):
         if tm is not None and tm._background_asyncio_tasks:
             await asyncio.gather(*list(tm._background_asyncio_tasks), return_exceptions=True)
         view = await rebuild_view(runtime.event_store, sid)
-        if view.sessions[sid].status not in ("RUNNING", "INTERRUPTED"):
+        if view.tasks[tid].status in ("FINISHED", "FAILED", "CANCELED"):
             break
         await asyncio.sleep(0.02)
 
@@ -370,10 +444,15 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     ]
     assert recap_done, "expected TASK_RECAP_DONE from the relaunched interrupt-boundary recap"
 
-    # Recovery composed both threads to completion — the session ends up terminal,
-    # not stuck in RUNNING/INTERRUPTED.
-    assert view.sessions[sid].status in ("SUCCEEDED", "FAILED"), (
-        f"expected terminal session status after recovery, got {view.sessions[sid].status!r}"
+    # Recovery composed both threads to completion — the TM-held Session reaches a
+    # terminal status (2026-09-04 Task 12 retired TaskQueueDrained, the aggregate
+    # signal that used to feed the now-retired SessionFinished translation; see the
+    # note above the polling loop — the verdict is written directly onto
+    # ``tm.session.status`` now, not broadcast as an event).
+    assert tm is not None, "expected a TaskManager to still be registered for the session"
+    assert tm.session is not None and tm.session.status in ("SUCCEEDED", "FAILED"), (
+        f"expected the session to reach a terminal status after recovery, got "
+        f"{tm.session.status if tm.session is not None else None!r}"
     )
 
 
@@ -381,53 +460,99 @@ async def test_no_tasks_at_all_still_raises() -> None:
     """A session with no tasks at all is a genuinely empty/broken projection and must
     still raise RuntimeError (the empty-session guard)."""
     runtime, _mem, _seen = _make_runtime()
-    sid, aid = "ses_recap", "agt_root"
+    aid = "agt_root"
 
-    await runtime.event_store.append(_ev(
+    await append_one(runtime.event_store, _ev(
         1, EventType.SESSION_CREATED, user_prompt="do it",
         template_id="agent:tpl_echo", root_agent_id=aid))
 
+    await runtime.rebuild_session("ses_recap")
     with pytest.raises(RuntimeError, match="no resumable tasks"):
-        await runtime.recover_session(sid)
+        await runtime.recover_agent(aid)
+
+
+async def test_all_tasks_terminal_with_a_pruned_snapshot_does_not_raise() -> None:
+    """`test_no_tasks_at_all_still_raises` 的孪生反面：**所有 task 都已终态**的会话，
+    在快照被裁过（v2，`prune_view_for_snapshot`）之后恢复，不得抛「no resumable tasks」。
+
+    裁剪之后这类会话的 `view.tasks` 是空的——与「从来没有过 task」在集合上不可区分。
+    闸门若按 `not all_tasks` 判，就会把一个正常完工的会话当成坏投影抛错，正是本文件
+    docstring 里记的那个「resume 点了没反应」的老 bug。判据因此改用 `view.tasks_total`。
+
+    ⚠️ 这条**必须有快照参与**：不写快照时 `rebuild_view` 走全量回放、`view.tasks` 是
+    全量的，裁剪不参与，旧判据同样是绿的（上面那条 Test A 就是这样）。
+    """
+    from ctx_weft.core.control.reducers import prune_view_for_snapshot
+
+    runtime, _mem, _seen = _make_runtime()
+    sid, tid, aid = "ses_recap", "tsk_done", "agt_root"
+
+    seed = [
+        _ev(1, EventType.SESSION_CREATED, user_prompt="do it",
+            template_id="agent:tpl_echo", root_agent_id=aid),
+        _ev(2, EventType.TASK_CREATED, task={
+            "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
+            "assigned_agent_id": aid, "creator_agent_id": aid}),
+        _ev(3, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
+        _ev(4, EventType.TASK_FINISHED, task_id=tid, outcome="success",
+            summary="done", outputs={"result": "ok"}),
+    ]
+    for e in seed:
+        await append_one(runtime.event_store, e)
+
+    # 按生产口径写一张**裁过的**快照，并让它成为可用基底
+    head = await runtime.event_store.committed_head(sid)
+    pruned = prune_view_for_snapshot(await rebuild_view(runtime.event_store, sid))
+    assert pruned.tasks == {}, "前置条件：唯一的 task 已终态，活闭包为空"
+    assert pruned.tasks_total == 1
+    await seed_snapshot(runtime.event_store, sid, pruned, cut=head, reason="test")
+
+    # 恢复读到的就是那份空 tasks —— 闸门必须靠 tasks_total 认出「这不是坏投影」
+    view = await rebuild_view(runtime.event_store, sid)
+    assert view.tasks == {} and view.tasks_total == 1
+
+    await runtime.rebuild_session(sid)
+    await runtime.recover_agent(aid)   # 不抛即通过（没有活可重排，但会话是好的）
 
 
 async def test_resume_does_not_read_the_whole_event_stream() -> None:
-    """`recover_session` 折段 recap 时**不发任何额外查询**——它搭 `rebuild_view` 的车。
+    """恢复时折段 recap **不发任何额外查询**——它搭 `rebuild_view` 的车。
 
-    这条走的是真实恢复路径（`/resume` → `recover_session` → `_recover_session_locked`），
-    而不是直接调折叠：护住的正是「调用点用错工具」这件事。它经历过两版收紧——
+    走的是真实恢复路径（`/resume` → `recover_agent` → `restore_session`），而不是直接调
+    折叠：护住的正是「调用点用错工具」这件事。这条护栏经历过两版收紧——
 
-    1. 最初这里是 `read_by_session(session_id)`，每次用户点「继续」都把整条流读一遍
-       （实测一条 3 万事件的会话约 3.5 秒 / 130MB）；
+    1. 最初这里是 `read_by_session(session_id)`（该方法已于 2026-09-21 从协议删除），
+       每次用户点「继续」都把整条流读一遍
+       （实测 3 万事件 ≈ 3.5s / 130MB），且与快照有没有无关；
     2. 然后收窄成「只读那两种类型」，代价降到 272ms / 5.1MB，但**仍随会话长度线性增长**
        ——recap 事件只增不减，1 万个 task 就是 ~2.7s / 51MB；
     3. 现在它是投影字段（`RunStateView.pending_recap`），随快照 + 增量走。
 
-    所以断言同时钉两件事：不读整条流（第 1 版的病），**也不为它单发类型查询**（第 2 版的
-    病）。后者是这次收紧新加的——只钉 `full_reads == 0` 的话，退回第 2 版不会变红。
+    所以断言同时钉死两件事：不读整条流（第 1 版的病），**也不为它单发类型查询**（第 2 版
+    的病）。后者正是这次收紧新加的——只钉 `full_reads == 0` 的话，退回第 2 版不会变红。
     """
-    from ctx_weft.core.state.event_store import InMemoryEventStore
+    runtime, _mem, _seen = _make_runtime()
+    store = runtime.event_store
+    full_reads = [0]
+    typed_reads: list[tuple[str, ...]] = []
+    orig_range = store.read_range
 
-    class _CountingStore(InMemoryEventStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self.full_reads = 0
-            self.typed_reads: list[tuple[str, ...]] = []
+    # 从前这里数 `read_by_session`。那个方法 2026-09-21 从协议删了，而「不存在的方法被调
+    # 0 次」由语言保证。改数**无界的 read_range**（after=0 且无上界 = 整条会话）——那是删掉
+    # 它之后仅剩的整条会话读法，也就是这条守卫真正要防的形状。
+    async def _counting(session_id, **k):
+        if k.get("after_position", 0) == 0 and k.get("through_position") is None:
+            full_reads[0] += 1
+        if k.get("include_types"):
+            # 「按类型收窄的那种读」2026-09-21 并进了 read_range，两笔账都从这里收。
+            typed_reads.append(tuple(str(t) for t in k["include_types"]))
+        return await orig_range(session_id, **k)
 
-        async def read_by_session(self, session_id: str):
-            self.full_reads += 1
-            return await super().read_by_session(session_id)
-
-        async def read_session_events_of_types(self, session_id: str, types):
-            self.typed_reads.append(tuple(str(t) for t in types))
-            return await super().read_session_events_of_types(session_id, types)
-
-    resolver = InlineAgentTemplateProvider()
-    resolver.register(make_echo_template())
-    llm = MockLLMAdapter(responses=[MockResponse(text="recovered recap") for _ in range(8)])
-    store = _CountingStore()
-    runtime = make_runtime(llm=llm, agent_provider=resolver, event_store=store)
-    runtime.providers.register_memory(InMemoryMemoryProvider())
+    store.read_range = _counting               # type: ignore[method-assign]
 
     sid, tid, aid = "ses_recap", "tsk_recap", "agt_root"
     for e in [
@@ -435,17 +560,23 @@ async def test_resume_does_not_read_the_whole_event_stream() -> None:
             template_id="agent:tpl_echo", root_agent_id=aid),
         _ev(2, EventType.TASK_CREATED, task={
             "id": tid, "status": "ACTIVE", "title": "T", "kind": "reasoning",
+            # 崩溃恢复的种子：**无人值守**。这些用例驱动的是「进程死掉之后把 task 捡
+            # 回来跑完」，没有人在等下一条消息；不标的话纯文本收尾会 park 等一个永远
+            # 不来的人（判据自 2026-09-22 起是「有没有人在」）。
+            "unattended": True,
             "assigned_agent_id": aid, "creator_agent_id": aid}),
         _ev(3, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
         _ev(4, EventType.TASK_FINISHED, task_id=tid, outcome="success", summary="done"),
         _ev(5, EventType.TASK_RECAP_STARTED, task_id=tid, boundary="finish", agent_id=aid),
     ]:
-        await store.append(e)
+        await append_one(store, e)
 
-    await runtime.recover_session(sid)
+    await runtime.rebuild_session(sid)
+    await runtime.recover_agent(aid)
 
-    assert store.full_reads == 0, (
-        f"恢复路径不该读整条事件流，实际读了 {store.full_reads} 次")
-    recap_reads = [t for t in store.typed_reads if any("TaskRecap" in x for x in t)]
+    assert full_reads[0] == 0, (
+        f"恢复路径不该读整条事件流，实际读了 {full_reads[0]} 次")
+    recap_reads = [t for t in typed_reads
+                   if any("TaskRecap" in x for x in t)]
     assert recap_reads == [], (
         f"段 recap 现在是投影字段，不该再为它单发类型查询，实际发了 {recap_reads}")

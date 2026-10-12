@@ -18,6 +18,7 @@ from ctx_weft.protocols import (
     LLMCallError, LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall,
 )
 from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
+from ctx_weft.providers.llm._modality import downgrade_for_text_only
 from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
 from ctx_weft.providers.llm.text_calls import (
     ContentGate, merge_content as _merge_content, unwrap_raw_arguments,
@@ -31,6 +32,11 @@ _ANTHROPIC_VERSION = "2023-06-01"
 
 _NON_RETRIABLE_CODES = frozenset({400, 401, 403, 404})
 _RETRIABLE_CODES     = frozenset({429, 500, 502, 503, 504})
+
+# I2: 空白/空 tool_result 的占位内容——查证 Anthropic 对 tool_result.content 为空字符串
+# / 空数组同样 400（与其对纯空/纯空白 text block 的拒绝同源），故不能像 assistant 分支
+# 那样兜底成 "" 或 []，必须是非空的合法 block。
+_EMPTY_TOOL_RESULT_CONTENT: list[dict[str, str]] = [{"type": "text", "text": "(empty)"}]
 
 
 class AnthropicAdapter(LLMClient):
@@ -299,9 +305,24 @@ class AnthropicAdapter(LLMClient):
             "Content-Type": "application/json",
         }
 
+    def _prepare_messages(self, request: LLMRequest) -> list[LLMMessage]:
+        """出网前的模态处置——**本类是纯文本 adapter**，图片降级成文本占位并告警。
+
+        能力由「注册了哪个 adapter 类」表达（spec 2026-08-28 §2「类型即声明」）：
+        要发图请用 ``AnthropicMultimodalAdapter``，它覆盖本方法为原样透传。
+
+        接缝开在这里而不是改 ``_serialize_messages``：后者已经能正确处理图片 part
+        （``_parts_to_blocks`` 都在），两种 adapter 的唯一区别是**图片能不能活着走到
+        它面前**。故 ``_serialize_messages`` 一字不改。
+
+        纯文本请求返回同一对象、不记日志（无图会话逐字节不受影响）。
+        """
+        return downgrade_for_text_only(
+            request, adapter_hint="AnthropicMultimodalAdapter")
+
     def _build_payload(self, request: LLMRequest) -> dict[str, Any]:
         model = request.model if request.model and request.model != "mock" else self._model
-        messages = _serialize_messages(request.messages)
+        messages = _serialize_messages(self._prepare_messages(request))
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -316,6 +337,20 @@ class AnthropicAdapter(LLMClient):
         if request.tools:
             payload["tools"] = _map_tools(request.tools)
         return payload
+
+
+class AnthropicMultimodalAdapter(AnthropicAdapter):
+    """支持图片输入的 Anthropic adapter。
+
+    与基类的唯一区别：``_prepare_messages`` 原样透传，图片得以走到
+    ``_serialize_messages`` 面前被拼成 Anthropic image block。
+
+    能力由类型表达（spec 2026-08-28 §2）——host 注册哪个类，就是在声明该账号下的
+    模型收不收图。core 对此零判断。
+    """
+
+    def _prepare_messages(self, request: LLMRequest) -> list[LLMMessage]:
+        return request.messages
 
 
 def _parse_tool_blocks(blocks: dict[int, dict[str, Any]]) -> list[ToolCall]:
@@ -340,9 +375,11 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
             continue
         if m.role == "assistant":
             content_blocks: list[dict] = []
-            text = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
-            if text:
-                content_blocks.append({"type": "text", "text": text})
+            if isinstance(m.content, str):
+                if m.content:
+                    content_blocks.append({"type": "text", "text": m.content})
+            else:
+                content_blocks.extend(_parts_to_blocks(m.content))
             for tc in (m.tool_calls or []):
                 content_blocks.append({
                     "type": "tool_use",
@@ -352,13 +389,29 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                     # OpenAI 那样回吐原始文本）；真畸形无法解包时保持原样，交 gateway 报错。
                     "input": unwrap_raw_arguments(tc.get("input", tc.get("arguments", {}))),
                 })
-            result.append({"role": "assistant", "content": content_blocks or text})
+            # content_blocks 为空 ⟹ 兜底的 "" 与拍扁结果一致；两条分支达成"为空"的条件不同，
+            # 且不对称——str 分支：m.content 为空串才不进 if（纯空白 str 仍会产出 text block，
+            # 不受此收紧影响）；parts 分支：_parts_to_blocks 会跳过空/纯空白文本 part（不是
+            # 「每个 part 恰好产出一个 block」，该不变式已不成立），故纯空白 TextPart 若不伴随
+            # 图片/tool_calls 时 content_blocks 才会为空。
+            result.append({"role": "assistant", "content": content_blocks or ""})
             i += 1
         elif m.role == "tool":
             tool_results: list[dict] = []
             while i < len(messages) and messages[i].role == "tool":
                 tm = messages[i]
-                content = tm.content if isinstance(tm.content, str) else _parts_to_text(tm.content)
+                # I2: parts 形态经 _parts_to_blocks 会把纯空白/空 TextPart 滤掉（同 I1），
+                # 若唯一的 part 就是空白文本，结果是 `content: []`——Anthropic 大概率因此
+                # 400（已查证：tool_result.content 为空字符串同样被拒，"text content blocks
+                # must be non-empty" 系列报告一致；见报告 I2 小节）。str 形态则原样透传
+                # "   "，同一份"空白工具输出"两种形态因此产出不一致的 wire。这里让两条路径
+                # 收敛到同一个占位文本块，而不是空字符串/空列表——占位块保证非空、可被
+                # provider 接受，且不改变非空白文本的既有行为（正常文本 str/parts 均不受影响）。
+                if isinstance(tm.content, str):
+                    content: Any = tm.content if tm.content.strip() else _EMPTY_TOOL_RESULT_CONTENT
+                else:
+                    blocks = _parts_to_blocks(tm.content)
+                    content = blocks if blocks else _EMPTY_TOOL_RESULT_CONTENT
                 if tm.tool_call_id:
                     tool_results.append({
                         "type": "tool_result",
@@ -374,7 +427,8 @@ def _serialize_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                 i += 1
             result.append({"role": "user", "content": tool_results})
         else:
-            content = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
+            content = (m.content if isinstance(m.content, str)
+                       else _parts_to_blocks(m.content))
             result.append({"role": m.role, "content": content})
             i += 1
     return result
@@ -384,10 +438,51 @@ def _parts_to_text(parts: Any) -> str:
     if isinstance(parts, str):
         return parts
     if isinstance(parts, list):
-        return " ".join(
-            p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
-        )
+        texts: list[str] = []
+        for p in parts:
+            # dict 形态 part 的分支已删（Phase 3c Task E/E2）：dict 是**协议违规**，已在
+            # ``LLMMessage`` / ``MemoryRecord`` / ``MemoryEvent`` 三处 ``__post_init__``
+            # 边界归一成 dataclass；留着分支会让后来者以为 dict 是受支持的形态。
+            if hasattr(p, "text"):
+                texts.append(p.text)
+            # else: 非文本 dataclass part（ImagePart 等）——跳过，语义对齐 core/utils.content_to_text
+        return " ".join(texts)
     return str(parts)
+
+
+def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
+    """把 ContentPart 列表转成 Anthropic wire blocks（文本 → text block，图片 → image block）。
+
+    到达本函数时 source_type 已恒为 "base64"——**这不是数据模型的性质，而是上游的
+    保证**：Phase 3b 起图片在入口被外部化成 ``blob:<sha>`` ref，由
+    ``core.loop.llm_gateway.stream_llm`` 在出网前（本函数之前的最后一个 async 关口）
+    调 ``rehydrate_content`` 还原回 base64（架构裁定 T0：本函数是同步的，
+    ``MemoryBlobStore.get`` 是 async，没法在这里 await）。取不到图时上游已把该 part 降级成
+    文本占位，故本函数无需处理 ref。**绕过 gateway 直调 adapter 的路径上此保证不成立**，
+    那条路上的 ref 会被当 base64 写进 payload。"""
+    blocks: list[dict[str, Any]] = []
+    for p in parts:
+        # dict 形态 part 的分支已删（Phase 3c Task E/E2）：dict 是**协议违规**，已在
+        # ``LLMMessage.__post_init__``（本函数入参恒为 ``LLMMessage.content``）与
+        # ``MemoryRecord`` / ``MemoryEvent`` 三处边界归一成 dataclass，到这里不再有 dict。
+        # 万一有（绕过构造器直调本函数），落到最后一支 → ``getattr`` 取不到 → 当作空文本
+        # 跳过，不会 raise：adapter 在同步出网主路径上，任何 raise 都会掀掉整个 LLM 请求。
+        if getattr(p, "type", None) == "image":
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": p.media_type,
+                    "data": p.data,
+                },
+            })
+        else:
+            # I1: 同上对 None 兜底；注意不能改成 `or str(p)`——那会把无 .text 属性的
+            # 对象整个 repr 当文本泄漏进发给模型的文本（Phase 2 修过的同类泄漏）。
+            text = getattr(p, "text", None) or ""
+            if text.strip():  # 同上：纯空白块与空块同属 provider 400 的一类（spec §13）
+                blocks.append({"type": "text", "text": text})
+    return blocks
 
 
 def _map_tools(tools: list[LLMTool]) -> list[dict[str, Any]]:

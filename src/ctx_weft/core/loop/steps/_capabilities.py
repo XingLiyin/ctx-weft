@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import logging
 
-from ctx_weft.core.orchestrator.capability_resolver import CapabilityResolver
-from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
-from ctx_weft.core.orchestrator.skill_executor_capability import SkillExecutorCapabilityProvider
-from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.core.capabilities.resolver import CapabilityResolver
+from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
+from ctx_weft.core.capabilities.skill_executor import SkillExecutorCapabilityProvider
+from ctx_weft.core.models.task import NormalTaskSettings
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,10 @@ async def resolve_capabilities(state, ctx) -> list:
 
     resolved = await CapabilityResolver().resolve(
         template=template, task=state.task, providers=other_providers, ctx=ctx.provider_ctx,
+        # 内建那批（控制工具 / skill executor）已在上面绑好，但它们被从 `other_providers`
+        # 里摘出去了——不告诉 resolver 的话，模板里声明它们为 required 的每一条都会报一条
+        # "not found"，而那些工具其实就在工具面里。
+        already_bound={c.id for c in builtin_caps},
     )
     return builtin_caps + resolved
 
@@ -51,13 +55,21 @@ async def resolve_and_bind(state, ctx) -> list:
     控制工具是 session 全局的（每个 agent 都拿全部、生命周期为 session），注册到 cache 全局区
     （register_global，不随 per-run evict 逐出）；其余 per-run 解析的能力（skill/mcp/agent）按
     per-agent put。返回的 bound 仍含全部（供本 run 的 assembly）。
+
+    模板的 forbidden 集合一并交给 cache：解析路径靠它把禁用能力过滤掉，而运行期经
+    `pin` 加进来的能力不走解析路径——cache 记着这份集合才挡得住（模板禁用是硬边界，
+    运行期绕不过去）。
     """
-    from ctx_weft.core.orchestrator.control_capability import PROVIDER_NAME as _CONTROL
+    from ctx_weft.core.capabilities.control_tools import PROVIDER_NAME as _CONTROL
     bound = await resolve_capabilities(state, ctx)
     if ctx.capability_cache is not None:
+        template = state.extra.get("template")
+        forbidden_ids = {
+            ref.capability_id for ref in template.capability_refs if ref.mode == "forbidden"
+        } if template is not None else set()
         _control_prefix = f"{_CONTROL}:"
         control = [c for c in bound if c.id.startswith(_control_prefix)]
         other = [c for c in bound if not c.id.startswith(_control_prefix)]
         ctx.capability_cache.register_global(control)
-        ctx.capability_cache.put(state.agent.id, other)
+        ctx.capability_cache.put(state.agent.id, other, forbidden_ids=forbidden_ids)
     return bound

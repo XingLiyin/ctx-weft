@@ -9,12 +9,12 @@
 
 from __future__ import annotations
 
-from ctx_weft.core.orchestrator.control_capability import (
+from ctx_weft.core.capabilities.control_tools import (
     ControlContext,
     finish_task,
     _CONTROL_TOOLS,
 )
-from ctx_weft.core.state.models import Task
+from ctx_weft.core.models.task import Task
 
 
 def _ctx(task: Task) -> ControlContext:

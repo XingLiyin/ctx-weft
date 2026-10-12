@@ -10,7 +10,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     AgentTemplate, CapabilityEvent, CapabilityProviderInfo, IdentityFacet, LoopConfig,
     MemoryConfig, MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext,
@@ -19,13 +19,15 @@ from ctx_weft.protocols import (
 import dataclasses as _dc
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
-from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
-from ctx_weft.core.runtime import ProviderRegistry
-from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
-from ctx_weft.core.state.models import LoopGuard, Session, Task
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
+from ctx_weft.core.registry import ProviderRegistry
+from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
+from ctx_weft.core.models.agent import LoopGuard
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
@@ -93,6 +95,7 @@ def _act_only_template() -> AgentTemplate:
     )
 
 
+
 class _UsageInflatingMock(MockLLMAdapter):
     """usage 层面抬高 prompt_tokens（act 级 context_limit 命中的确定性触发器）。
 
@@ -104,6 +107,7 @@ class _UsageInflatingMock(MockLLMAdapter):
         self._override = prompt_tokens_override
 
     async def complete(self, request, stream: bool = True):
+        import dataclasses as _dc
         async for chunk in super().complete(request, stream=stream):
             if (self._override and chunk.kind == "usage" and chunk.usage is not None):
                 u = chunk.usage
@@ -115,22 +119,41 @@ class _UsageInflatingMock(MockLLMAdapter):
             yield chunk
 
 
-async def test_context_limit_retry_folds_segment_e2e():
+async def test_context_limit_retry_without_recap_keeps_raw_and_defers_to_background_e2e(
+        monkeypatch):
+    """机械退出 retry 且**无可用 LLM observer** → 判决无摘要 → 段折降级保 raw，摘要交后台。
+
+    改前：`_rule_observe` 用机械合成文本（"Ran N conversation round(s)." 等）当 act_recap，
+    前台同步折出一条 TASK_COMPACT_SUMMARY。用户裁定禁止任何机械合成摘要后，机械判决的
+    act_recap 恒为空，`_fold_retry_segment` 按其既有口径「空则不折、段保 raw（不写占位摘要）」
+    降级——真摘要改由这里 launch 的 background observe（boundary="mechanical"）异步产，
+    下一轮 `_run_loop` 入口 `await_pending_recap` 保证它先落地。
+
+    `_fold_retry_segment` 真折叠那条路径由 tests/unit/test_observe_retry_fold.py 专测覆盖。
+    """
+    launched: list[str] = []
+
+    def _spy(state, ctx, *, boundary):
+        launched.append(boundary)
+        return None
+
+    monkeypatch.setattr(
+        "ctx_weft.core.loop.background.launch_recap", _spy)
+
     resolver = InlineAgentTemplateProvider()
-    # 本测试钉「retry 段折」路径本体：关短段免折门（mock 段仅几 token，
-    # 默认阈值 400 下会免折保 raw——那是另一条已单测的路径）。
+    # 关短段免折门，隔离出「空 recap 才是不折的原因」（短段免折是另一条已单测的路径）。
     # max_context_recoveries=0 关掉上下文恢复：本例钉的是**恢复关闭/耗尽之后**那条老路
-    # （context_limit → observe → 强制 retry → 段折）。恢复开着时 ActStep 会把 context_limit
-    # 路由回 PrepareStep 压缩续跑、根本不进 observe，那条路由由 test_context_recovery_e2e.py 专测。
+    # （context_limit → observe → 强制 retry → 段折降级）。恢复本身开着时 ActStep 会把
+    # context_limit 路由回 PrepareStep 压缩续跑、根本不进 observe，那条路由由
+    # test_context_recovery_e2e.py 专测。
     tpl = _dc.replace(_act_only_template(),
                       loop_config=LoopConfig(short_segment_token_threshold=0,
                                              max_context_recoveries=0))
     resolver.register(tpl)
-    # 机械退出现在只可能发生在**带 tool call 的回合**上（纯文本回合优先走
-    # `_finish_plain_text_turn` 收尾），所以 20-token 极限窗口不再可行——它塞不下工具
-    # schema。改用 usage 注入触发：停机线 0.9*3000=2700 < 注入的 2800，tokenizer 不动，
-    # prepare 侧估算仍走真实计数、不在压缩处提前分叉。
-    # output_reserve=0：effective_limit 不为 reserved_output_tokens 吞光（Task 4 引入）
+    # spec: tool-schema-budget 后，窗口须容得下「地板 + 工具面预留」否则 prepare 期
+    # assemble 直接溢出（20-token 极限窗口不再可行）。act 级 context_limit 命中改由
+    # usage 注入触发（停机线 0.9*3000=2700 < 注入的 2800）：tokenizer 不动，prepare 侧
+    # 估算仍走真实计数、不在压缩处提前分叉。
     llm = _UsageInflatingMock(
         responses=_working_turn(1),
         context_limit=3000, output_reserve=0, prompt_tokens_override=2800)
@@ -141,26 +164,35 @@ async def test_context_limit_retry_folds_segment_e2e():
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_actonly", user_prompt="do a long task")
 
-    # 机械退出 → retry（非终态），本轮 attempt 折成段摘要、raw 删除、USER_PROMPT 保留
-    assert state.verdict is not None and state.verdict.task_outcome == "retry"
+    # 结局逐字不变：机械退出 → retry（非终态）
+    assert state.verdict is not None and state.verdict.task_outcome == "continue"
     assert state.task.status == "PENDING"
     assert not getattr(state.task, "process_report", None)  # retry 不写 process_report
+    assert state.verdict.act_recap == "", "机械判决不得产出任何合成摘要"
+    assert launched == ["mechanical"], "摘要须交 background observe 产"
 
     mem = runtime.providers.get_memory()
     pctx = ProviderContext(session_id=state.session.id, agent_id=state.agent.id)
     n_summary = await mem.count_recent(state.scope, [T.TASK_COMPACT_SUMMARY], pctx)
     n_user = await mem.count_recent(state.scope, [T.USER_PROMPT], pctx)
     n_raw = await mem.count_recent(state.scope, [T.LLM_RESPONSE], pctx)
-    assert n_summary >= 1, "retry 应写至少一条 TASK_COMPACT_SUMMARY 段摘要"
+    assert n_summary == 0, "空 recap 不得写占位段摘要"
     assert n_user >= 1, "USER_PROMPT 锚必须保留"
-    assert n_raw == 0, "本轮 attempt 的 LLM_RESPONSE raw 应被折叠删除"
+    assert n_raw >= 1, "降级 = 段保 raw，信息不丢"
 
 
 async def test_normal_finish_still_works_e2e():
     """正常收尾回归：整条 loop 仍跑通到 FINISHED（Task 3 去 process_report 渲染不破主流程）。"""
     resolver = InlineAgentTemplateProvider()
     resolver.register(_act_only_template())
-    llm = MockLLMAdapter(responses=[MockResponse(text="Here is the final answer.")])  # 正常 context_limit
+    # 以 `finish_task` 收尾（2026-09-28）：本例的模板是 act-only（无 observe facet），于是
+    # 判决必然走机械路径，而纯文本收尾在那条路上已不再判 success——`_mechanical_verdict`
+    # 判它 continue（机械判决没法知道那段正文交付了没有，安全默认只能是「没完」）。
+    # 没有 observer 的 agent 想终结任务，只剩明确调 `finish_task` 这一条路，本例照此排。
+    llm = MockLLMAdapter(responses=[MockResponse(
+        text="Here is the final answer.",
+        tool_calls=[ToolCall(id="tc_fin", name="control__finish_task", arguments={})],
+    )])
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
@@ -194,8 +226,14 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     # assemble 直接 ContextOverflowError）。改用与本文件另一例同构的 usage 注入触发：
     # 窗口 3000、停机线 0.9*3000=2700 < 注入的 2800 → 每个 run 的第一轮必命中 context_limit；
     # 而 prepare 的 compact 门从第二个 run 起由真实基线（2800 ≥ 0.8*3000）打开。
+    # `observer_verdict`：本例的段摘要全部来自 `mechanical` 边界的后台 observe，它需要一份
+    # recap 才会折段。此前这份 recap 是后台观察**偷吃一条 act 响应**、拿它的正文当 recap 得来的
+    # ——2026-09-27 给 `MockLLMAdapter` 加的观察兜底堵住了偷吃（那个偷吃会把 act 队列的序号整个
+    # 错开），于是必须显式应这一轮。判决值在这里无关：`mechanical` 边界不产 verdict
+    # （`background_observe._judges`），传 "continue" 只是为了让兜底回一个带 `act_recap` 的回合。
     llm = _UsageInflatingMock(responses=_working_turn(200), context_limit=3000,
-                              output_reserve=0, prompt_tokens_override=2800)
+                              output_reserve=0, prompt_tokens_override=2800,
+                              observer_verdict="continue")
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
@@ -206,14 +244,16 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     pctx = ProviderContext(session_id=sid, tenant_id="default")
     _reg = ProviderRegistry()
     _reg.register_capability(resolver)
-    lm = LifecycleManager(template_lookup=TemplateLookup(_reg))
-    agent, template = await lm.instantiate_agent(
+    lm = AgentLifecycleManager(template_lookup=TemplateLookup(_reg), event_bus=runtime.event_bus,
+                       model_resolver=runtime._resolve_llm)
+    agent, template = await lm.instantiate(
         template_id="agent:tpl_mr", session_id=sid, tenant_id="default", ctx=pctx)
+    resolved_model = lm.resolve_model(agent.id)
     session = Session(id=sid, user_prompt="do a long task", status="RUNNING",
                       tenant_id="default", root_agent_id=agent.id, llm_provider="",
                       created_at=now_utc())
-    session.context_limit = llm.context_limit
-    session.reserved_output_tokens = llm.output_reserve
+    session.context_limit = resolved_model.context_limit
+    session.reserved_output_tokens = resolved_model.reserved_output_tokens
     agent = _dc.replace(agent, loop_guard=LoopGuard(
         context_limit=session.context_limit,
         reserved_output_tokens=session.reserved_output_tokens))
@@ -233,15 +273,17 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     for r in range(4):
         task.status = "ACTIVE"       # 复位（finalize 上一轮把它标成 PENDING/retry）
         task.retry_count = 0         # 由本循环掌控轮数，不让 max_retries 提前收尾
-        # observe 的 `_apply_assessment` 每次判决都置 actor_done=True（含 retry），生产路径由
-        # `TaskManager._run_task` 在每个 run 前复位——本测试绕过它直接循环 `_execute_task`，
-        # 故手工补上这一句。漏了它，第二个 run 的 act 会在第一轮工具跑完后直接按 actor_done
-        # 退出（旧代码里 context_limit 排在 actor_done 之前，恰好把这个洞盖住了）。
+        # observe 的 `_apply_assessment` 会置 actor_done=True，生产路径由
+        # `TaskManager._run_task` 在每个 run 入口复位（见 observe.py 该函数的 docstring）——
+        # 本测试绕过 _run_task 直接循环 `_execute_task`，这一句是那个复位的等价物。
+        # 本分支上机械判决走的是「直接返回 retry、不经 _apply_assessment」那条，所以漏了它
+        # 也碰巧不咬人；但 act 现在把 actor_done 判在 context_limit **之前**，一旦这个巧合
+        # 变了，第二个 run 就会在第一轮工具跑完后直接按 actor_done 退出。
         task.actor_done = False
         state, _ = await runtime._execute_task(
             session=session, task=task, agent=agent, template=template,
-            run_id=f"run{r}", memory=mem, task_manager=tm)
-        assert state.verdict is not None and state.verdict.task_outcome == "retry"
+            run_id=f"run{r}", memory=mem, resolved_model=resolved_model, task_manager=tm)
+        assert state.verdict is not None and state.verdict.task_outcome == "continue"
 
     ups = await mem.recall_recent(state.scope, [T.USER_PROMPT], 100, pctx)
     collapsed = [u.content for u in ups if COLLAPSE_DELIM in u.content]

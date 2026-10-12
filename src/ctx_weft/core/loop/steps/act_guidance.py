@@ -25,7 +25,7 @@ guidance 内容分两类（composer 拼在末条 user 尾部；## Capabilities �
   只发不入 memory，随任务终结自然消失，且 priority 1 比段摘要（动态档 4）更难被预算裁掉。
 - **静态段**（指针级，刻意压缩）：finish 收尾、无关新请求 finish+delegate 双发、
   ask_user 三条只留一句提醒。完整协议已有三处承载——SOUL、工具 description、
-  以及机械兜底（observer 的 success-without-outputs→retry 护栏、interactive
+  以及机械兜底（observer 的 success-without-outputs→retry 护栏、有人在场时
   纯文本自动 park），此处不再复读全文。
 """
 
@@ -33,32 +33,22 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from ctx_weft.core.orchestrator.control_capability import (
+from ctx_weft.core.capabilities.control_tools import (
     ASK_USER_NAME,
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
 )
-from ctx_weft.core.utils import as_utc, content_to_text
+from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
+from ctx_weft.core.utils.content import content_to_text
+from ctx_weft.core.utils.task_ref import task_label
+from ctx_weft.core.utils.clock import as_utc
 
-_TERMINAL_STATUSES = frozenset({"FINISHED", "FAILED", "CANCELED"})
-_TASK_LABEL_MAX = 80
+_TERMINAL_STATUSES = TERMINAL_TASK_STATUSES  # 词表见 core.domain.status
 _SUBTASK_RESULT_MAX = 150
 
 
-def _task_label(t) -> str:
-    """任务树里一行的标签：title 优先；无 title 用开启该 task 的 prompt 首行（截断）；再无回退 id。"""
-    title = (t.title or "").strip()
-    if title:
-        return title
-    prompt = (getattr(t, "user_prompt", None) or "").strip()
-    if prompt:
-        first = prompt.splitlines()[0].strip()
-        return first[:_TASK_LABEL_MAX] + "…" if len(first) > _TASK_LABEL_MAX else first
-    return f"(untitled {t.id[:6]})"
-
-
 def _nonterminal_tasks(task_manager) -> list:
-    """session 内非终态 task（PENDING/ACTIVE/SUSPENDED/TO_BE_OBSERVED），无 task_manager 时空表。"""
+    """session 内非终态 task（`_TERMINAL_STATUSES` 的补集），无 task_manager 时空表。"""
     if task_manager is None:
         return []
     return [t for t in task_manager.all_tasks() if t.status not in _TERMINAL_STATUSES]
@@ -108,7 +98,7 @@ def _subtask_result_snippet(t) -> str:
 def _session_task_tree(task, task_manager) -> str:
     """把 session 内**非终态** task 渲染成缩进任务树，当前 task 以 ``▶`` 标注。
 
-    - 仅列非终态（PENDING/ACTIVE/SUSPENDED/TO_BE_OBSERVED）——终态不刷屏、只留「还没做完的活」。
+    - 仅列非终态（`_TERMINAL_STATUSES` 的补集）——终态不刷屏、只留「还没做完的活」。
     - 按 parent_task_id 建树；父节点被过滤掉（终态/缺失）的非终态 task 提升到 root 层，避免孤儿丢失。
       roots 及同层子节点按 created_at 升序。
     - 只要有 ≥1 个非终态 task 就出树（含 root 独自 act 时只列它自己一行）——root 派生子任务后即转
@@ -132,7 +122,7 @@ def _session_task_tree(task, task_manager) -> str:
         for t in children.get(node_id, []):
             indent = "  " * depth
             marker = "▶ " if t.id == task.id else ""
-            lines.append(f"{indent}- [{t.status}] {marker}{_task_label(t)}")
+            lines.append(f"{indent}- [{t.status}] {marker}{task_label(t)}")
             _walk(t.id, depth + 1)
 
     _walk(None, 0)
@@ -146,19 +136,20 @@ def build_resume_cue(task, task_manager) -> str:
     清单的提示（具体条目由 build_act_guidance 的 ALREADY COMPLETED 段承载，
     此处不重复展开）。
     """
-    title = (task.title or "").strip()
-    task_ref = f"the task: {title}" if title else "the task above"
+    ref = task_label(task) if getattr(task, "id", None) else ""
+    subject = f"the task: {ref}" if ref else "the task above"
     cue = (
-        f"You are still working on {task_ref}, resuming from the state recorded above. "
+        f"You are still working on {subject}, resuming from the state recorded above. "
         "Review the conversation for what has already been done — do not redo it — and "
         "continue with only the remaining work."
     )
     if _finished_subtasks(task, task_manager):
         cue += (
             " Parts of it have ALREADY been delegated to sub-tasks that are now complete — "
-            "they are listed with their results in the situational notes below. Never execute "
-            "that work a second time: instead of redoing or re-delegating it, build on those "
-            "results and judge what, if anything, still remains."
+            "they are listed with their results in the situational notes below. Do not execute "
+            "that work a second time: build on those results and judge what, if anything, still "
+            "remains. The exception is a result the review note flags as falling short — for "
+            "that piece you decide whether to delegate it afresh or handle it yourself."
         )
     return cue
 
@@ -168,15 +159,15 @@ def build_act_guidance(task, task_manager) -> str:
 
     段序 = 当前任务锚定 → plan 全景（任务树）→ 已完成子任务清单 → 静态指针。
     锚定行每个 act 回合都有：fresh 回合虽与同消息前部的 ``## Current Task`` 框
-    略有重复，但长对话/续跑/interactive 追问回合里该框远在历史深处，此处是
+    略有重复，但长对话/续跑/追问回合里该框远在历史深处，此处是
     生成点附近唯一的任务锚。description 不重复（由 Current Task 框承载）。
     session 仅剩当前 task 一个非终态节点时，任务树整段不出现。
     """
     parts: list[str] = ["---"]
 
-    title = (task.title or "").strip()
+    ref = task_label(task) if getattr(task, "id", None) else ""
     parts.append(
-        f"Current task: {title}" if title
+        f"Current task: {ref}" if ref
         else "Current task: (as framed in the conversation above)"
     )
     parts.append("")
@@ -199,21 +190,27 @@ def build_act_guidance(task, task_manager) -> str:
         parts.append(
             "## Your current task has ALREADY been delegated to the sub-tasks below, and they "
             "are ALREADY COMPLETED — the digest under each is what it produced (full results "
-            "are in the conversation above). That work is done and must never be executed a "
-            "second time: Do NOT redo their work yourself and do NOT delegate them again. Your "
-            "next step is to judge whether any work still remains for the task goal beyond "
-            "these results — if it does, do only that part, building on what they produced:"
+            "are in the conversation above). Treat that work as done: do NOT redo it yourself "
+            "and do NOT delegate it again merely to have it repeated. Your next step is to "
+            "judge whether any work still remains for the task goal beyond these results — if "
+            "it does, do only that part, building on what they produced. The one exception is a "
+            "result that the review note below says does not actually achieve its goal: for "
+            "that piece it is YOUR call — delegate a fresh sub-task for it, or just do it "
+            "yourself, whichever is the better use of this turn:"
         )
         for t in done:
-            parts.append(f"- [FINISHED] {_task_label(t)}")
+            parts.append(f"- [FINISHED] {task_label(t)}")
             snippet = _subtask_result_snippet(t)
             if snippet:
                 parts.append(f"    → {snippet}")
         parts.append("")
 
+    # review 的 note 也是「某个子任务产出不合格」的唯一入口（observer 只写判决与提示，
+    # 不动任何 task 状态；reopen 已于 2026-09-19 删除）。上面那段的「例外」指的就是这里。
     hint = (getattr(task, "next_step_hint", None) or "").strip()
     if hint:
-        parts.append("## Note from the review of your previous attempt:")
+        parts.append("## Note from the review of your previous attempt "
+                     "(it may name a sub-task whose result falls short):")
         parts.append(hint)
         parts.append("")
 
@@ -225,17 +222,32 @@ def build_act_guidance(task, task_manager) -> str:
         "user as your normal message text and call it in that same turn; the message text is "
         "the reply and the deliverable, not the tool arguments (details in the tool description)."
     )
-    if task.interaction_mode == "interactive":
+    if not task.unattended:
         parts.append(
             finish_core
-            + " In this interactive task a plain-text reply keeps the task open and hands "
-            "the floor to the user — the right move mid-conversation; finish only when the "
-            "whole request is served."
+            + " Someone is there: a plain-text reply keeps the task open and hands the floor "
+            "to them — the right move mid-conversation; finish only when the whole request "
+            "is served."
         )
-    elif has_other_tasks:
-        parts.append(finish_core + " Do not start the other tasks yourself.")
     else:
-        parts.append(finish_core)
+        # 无人值守（2026-09-28）：与上面那句对称的另一半。此前这一支什么都没说，而两边的
+        # 纯文本语义恰好相反——有人在场时纯文本是**正确的**中途动作（park，把话语权交回去），
+        # 无人值守时它什么也不是：没人会读那段话，任务也不会因此结束。
+        #
+        # 而这条现在有牙齿：`observe._mechanical_verdict` 对 `normal` 收尾判 continue（机械判决
+        # 没有任何办法知道那段正文交付了没有，安全默认只能是「没完」），于是不调 finish_task
+        # 就是一轮轮重跑，撞上 `max_retries` 后 task 落 FAILED / RETRY_EXHAUSTED。说清楚比让它
+        # 自己撞上去便宜得多。
+        unattended_note = (
+            " No one is there to read a reply: a prose answer alone does not end this task and "
+            "nobody will follow up on it. When the goal is achieved you must call it in the same "
+            "turn as your final reply, or this task will just be run again until its attempt "
+            "limit runs out."
+        )
+        if has_other_tasks:
+            parts.append(finish_core + unattended_note + " Do not start the other tasks yourself.")
+        else:
+            parts.append(finish_core + unattended_note)
     parts.append(
         f"If the user's latest message is an unrelated NEW request, emit `{FINISH_TASK_NAME}` "
         f"AND `{DELEGATE_TASK_NAME}` together in ONE response — finishing alone would lose "

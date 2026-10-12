@@ -4,7 +4,8 @@
   agents/
     default/
       SOUL.md    frontmatter(name/version/description/tools/loop_config) + body(actor soul)
-      ROLE.md    frontmatter(tools) + body(observer role)（可选）
+      ROLE.md    frontmatter(tools) + body(observer role)（可选；缺了 = 这个 agent 没有
+                 observer，见 core/loop/steps/observe.py::has_observe_role 的三个下游）
 
 SOUL.md frontmatter 示例：
   ---
@@ -45,6 +46,8 @@ from ctx_weft.protocols.template import (
 )
 
 logger = logging.getLogger(__name__)
+
+
 
 
 class TemplateLoader:
@@ -182,8 +185,11 @@ def _parse_loop_config(raw: dict) -> LoopConfig:
     return LoopConfig(
         max_turns_per_act=int(raw.get("max_turns_per_act", 50)),
         max_turns_per_observe=int(raw.get("max_turns_per_observe", 5)),
-        max_turns_per_agent=int(raw.get("max_turns_per_agent", 20)),
-        timeout_per_step_sec=int(raw.get("timeout_per_step_sec", 120)),
+        # 这是**配置 schema 的字段名**（模板作者面向），不是判别值。它与
+        # CancelReason.FAILURE_THRESHOLD 今天恰好同名，但两者是各自独立演进的契约：
+        # 前者对模板作者、后者对 host。若把 key 绑上枚举，日后改判别值的名字会让
+        # 加载器静默去读不存在的 YAML key、回落默认值——配置失效且无测试可抓。
+        # 故此处**刻意保留裸字面量**，与相邻的 max_turns_per_act 等一致。
         failure_threshold=int(raw.get("failure_threshold", 3)),
         max_spawn_depth=int(raw.get("max_spawn_depth", 4)),
         compact_token_ratio=float(raw.get("compact_token_ratio", 0.8)),
@@ -264,15 +270,3 @@ def _parse_yaml(text: str) -> dict[str, Any]:
         i += 1
 
     return result
-
-
-# ── 默认 facet 合并（自 host resolver.py 上移）───────────────────────────────
-
-DEFAULT_MERGE_PURPOSES = ("compact", "recognize_intent", "observe")
-
-
-def merge_default_facets(template: AgentTemplate, default: AgentTemplate, purposes) -> None:
-    """Fill the template's missing identity facets (in-place) from the default template."""
-    for purpose in purposes:
-        if purpose not in template.identity and purpose in default.identity:
-            template.identity[purpose] = default.identity[purpose]

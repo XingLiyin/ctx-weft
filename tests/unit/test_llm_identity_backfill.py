@@ -1,18 +1,23 @@
-"""session.llm_model/llm_provider 回填：全新会话经真实创建路径跑任务，LLM 请求/响应
-事件须携带实际解析出的 model/account，而非 "mock" 兜底。
+"""全新会话经真实创建路径跑任务，LLM 请求/响应事件须携带实际解析出的 model/account，
+而非 "mock" 兜底。
 
-修复背景：resolve_llm_identity 以 session.llm_model 为真值，但三条创建路径
-（run_single_task / SessionManager.create_session / resume_session）从不写该字段——
+背景（批次 B 之前）：resolve_llm_identity 以 session.llm_model 为真值，但三条创建路径
+（run_single_task / SessionRegistry.create_session / resume_session）从不写该字段——
 host 即便显式传了 model，事件仍恒报 "mock"；依赖账号 default_model 时更无处可读。
-真值收口在 _execute_task 的 _resolve_llm：解析出的 _FixedModelClient 公开
-model/account，执行前回填空缺的 session 字段。
+当时的修法是 _execute_task 执行前把解析出的 client 身份**回填**进 session 空缺字段。
+
+批次 B 把回填删了：真值改住 `AgentLifecycleManager._AgentRecord.llm`（`ModelChoice`，可空 =
+跟随账号默认），派发时经 `resolve_model` 现解出 `ResolvedModel`（client + 身份 + 窗口），
+直接进 `LoopState.resolved_model`，不再经过 session 这一站——回填的副作用是把
+`("", "")`「跟随账号默认」这个含义钉成具体模型名，账号默认从此对该会话失效。
+本文件不再断言 session.llm_model/llm_provider 被回填；只断言事件本身携带的身份正确。
 """
 from __future__ import annotations
 
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols import (
     AgentCapability,
     AgentCapabilityProvider,
@@ -25,7 +30,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.provider import LLMAccount, LLMProvider, ModelConfig, _FixedModelClient
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import make_runtime
 
 
@@ -137,7 +142,10 @@ def test_provider_get_client_carries_resolved_identity():
 @pytest.mark.asyncio
 async def test_events_carry_resolved_default_model():
     """host 不显式传 model（依赖账号 default_model）→ 事件报实际解析出的模型，非 mock。"""
-    resolver = _OneAccountResolver(MockLLMAdapter(responses=[MockResponse(text="hi")]))
+    # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被
+    # 机械判 success（`_mechanical_verdict` 判 continue）——要让它终结得让 observer 去判。
+    resolver = _OneAccountResolver(MockLLMAdapter(
+        responses=[MockResponse(text="hi")], observer_verdict="success"))
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 
@@ -155,15 +163,15 @@ async def test_events_carry_resolved_default_model():
     for ev in finished:
         assert ev.payload["llm_model"] == "real-model-x", ev.payload
         assert ev.payload["llm_account"] == "acct-main", ev.payload
-    # session 真值已回填（后续切换恢复 / host 读值同源）
-    assert state.session.llm_model == "real-model-x"
-    assert state.session.llm_provider == "acct-main"
 
 
 @pytest.mark.asyncio
 async def test_events_carry_explicit_model():
     """host 显式传 model/account → 事件按传入值计账。"""
-    resolver = _OneAccountResolver(MockLLMAdapter(responses=[MockResponse(text="hi")]))
+    # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被
+    # 机械判 success（`_mechanical_verdict` 判 continue）——要让它终结得让 observer 去判。
+    resolver = _OneAccountResolver(MockLLMAdapter(
+        responses=[MockResponse(text="hi")], observer_verdict="success"))
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 
@@ -209,7 +217,7 @@ async def test_events_carry_bare_adapter_model():
     runtime.providers.register_memory(InMemoryMemoryProvider())
     events = _collect_llm_events(runtime)
 
-    _handle, state = await runtime.run_single_task(
+    _handle, _state = await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="say hello",
     )
 
@@ -217,18 +225,3 @@ async def test_events_carry_bare_adapter_model():
     assert started
     for ev in started:
         assert ev.payload["model"] == "env-model-a", ev.payload
-    assert state.session.llm_model == "env-model-a"
-
-
-@pytest.mark.asyncio
-async def test_backfill_keeps_explicit_session_values():
-    """回填只补空缺：session 已有值（切换模型恢复路径写入）不被解析默认值覆盖。"""
-    resolver = _OneAccountResolver(MockLLMAdapter(responses=[MockResponse(text="hi")]))
-    runtime = _make_runtime(resolver)
-
-    _handle, state = await runtime.run_single_task(
-        template_id="agent:tpl_echo", user_prompt="say hello",
-        llm_account="acct-b", llm_model="explicit-y",
-    )
-    assert state.session.llm_model == "explicit-y"
-    assert state.session.llm_provider == "acct-b"

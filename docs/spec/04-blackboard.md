@@ -1,6 +1,6 @@
 # 04 · Blackboard / Topic 语义
 
-> 真相源：`ARCHITECTURE.md §Blackboard`、`providers/memory_blackboard/in_memory.py`、
+> 真相源：`ARCHITECTURE.md §Blackboard`、`providers/memory/in_memory/provider.py`、
 > `core/loop/driver._ensure_blackboard_subscriptions`、`assembler/sources/blackboard.py`
 
 **核心认知**：没有独立的 blackboard 存储。blackboard / 短期记忆 / 长期记忆是同一个 `MemoryProvider`

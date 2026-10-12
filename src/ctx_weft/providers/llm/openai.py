@@ -19,6 +19,7 @@ from ctx_weft.protocols import (
     LLMClient,
 )
 from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
+from ctx_weft.providers.llm._modality import downgrade_for_text_only
 from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
 from ctx_weft.providers.llm.text_calls import ContentGate, merge_content as _merge_content
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -29,6 +30,18 @@ _OPENAI_API_URL = "https://api.openai.com"
 
 _NON_RETRIABLE_CODES = frozenset({400, 401, 403, 404})
 _RETRIABLE_CODES     = frozenset({429, 500, 502, 503, 504})
+
+# OpenAI 的 role="tool" 只接受纯文本，图片必须重定位到随后的 user 消息（Phase 3c Task B）。
+# 这条标记把「图去哪了」告诉模型，替代改前的**静默丢弃**。
+#
+# **必须逐字节确定**（同用户裁定 D2 的缓存理由）：不得含 blob sha / 随机 id / 时间戳 /
+# 跨调用计数器——tool 结果处在缓存前缀的中段，标记每次不同会把其后的整段前缀缓存砸掉。
+# 同一段内的多张图共用同一条标记，不加序号（图按 tool 消息顺序合并进同一条 user 消息，
+# 模型不需要靠序号对齐）。
+# 本仓所有图片占位的清单见 `core/media/refs.py` 模块 docstring（L6 收口，裁定 R1）。
+# 这一条是**单向渲染、永不回读**，故留在 wire 层不搬进 `core/media/`；
+# 只有 L0.5 的占位需要被解析回来。文案为英文，与清单里其余四条一致。
+_TOOL_IMAGE_NOTICE = "\n\n[image see the following message]"
 
 
 class OpenAIAdapter(LLMClient):
@@ -287,9 +300,24 @@ class OpenAIAdapter(LLMClient):
             "Content-Type": "application/json",
         }
 
+    def _prepare_messages(self, request: LLMRequest) -> list[LLMMessage]:
+        """出网前的模态处置——**本类是纯文本 adapter**，图片降级成文本占位并告警。
+
+        能力由「注册了哪个 adapter 类」表达（spec 2026-08-28 §2「类型即声明」）：
+        要发图请用 ``OpenAIMultimodalAdapter``，它覆盖本方法为原样透传。
+
+        降级之后 ``_serialize_messages`` 里的 tool 图重定位（``_TOOL_IMAGE_NOTICE``）
+        天然空转：已无 image part，``relocated`` 恒为空，一条 user 消息都不追加。
+        故那段逻辑不需要任何改动。
+
+        纯文本请求返回同一对象、不记日志（无图会话逐字节不受影响）。
+        """
+        return downgrade_for_text_only(
+            request, adapter_hint="OpenAIMultimodalAdapter")
+
     def _build_payload(self, request: LLMRequest) -> dict[str, Any]:
         model = request.model if request.model and request.model != "mock" else self._model
-        messages = _serialize_messages(request.system, request.messages)
+        messages = _serialize_messages(request.system, self._prepare_messages(request))
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -305,6 +333,21 @@ class OpenAIAdapter(LLMClient):
             if self._tool_choice is not None:
                 payload["tool_choice"] = self._tool_choice
         return payload
+
+
+class OpenAIMultimodalAdapter(OpenAIAdapter):
+    """支持图片输入的 OpenAI adapter。
+
+    与基类的唯一区别：``_prepare_messages`` 原样透传，图片得以走到
+    ``_serialize_messages`` 面前——被拼成 ``image_url`` data URL，且 ``role="tool"``
+    里的图按既有逻辑重定位到随后的 user 消息（OpenAI 的 tool 只收纯文本）。
+
+    能力由类型表达（spec 2026-08-28 §2）——host 注册哪个类，就是在声明该账号下的
+    模型收不收图。core 对此零判断。
+    """
+
+    def _prepare_messages(self, request: LLMRequest) -> list[LLMMessage]:
+        return request.messages
 
 
 def _resolve_tc_index(
@@ -376,9 +419,12 @@ def _serialize_messages(
     if system:
         result.append({"role": "system", "content": system})
 
-    for m in messages:
+    i = 0
+    while i < len(messages):
+        m = messages[i]
         if m.role == "assistant" and m.tool_calls:
-            content: Any = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
+            content: Any = (m.content if isinstance(m.content, str)
+                            else _parts_to_blocks(m.content))
             tc_list = [
                 {
                     "id": tc.get("id", ""),
@@ -394,19 +440,45 @@ def _serialize_messages(
             if m.reasoning_content:
                 msg["reasoning_content"] = m.reasoning_content
             result.append(msg)
+            i += 1
         elif m.role == "tool":
-            content = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
-            result.append({
-                "role": "tool",
-                "tool_call_id": m.tool_call_id or "",
-                "content": content,
-            })
+            # 批处理**整段连续 tool 消息**（与 anthropic.py 的 tool 分支同构）：每条仍只发
+            # 文本，图片攒起来，整段结束后合并成一条 user 消息追加（见 _TOOL_IMAGE_NOTICE）。
+            relocated: list[Any] = []
+            while i < len(messages) and messages[i].role == "tool":
+                tm = messages[i]
+                if isinstance(tm.content, str):
+                    # 纯文本 str 形态：原样透传，wire 逐字节不变。
+                    content = tm.content
+                else:
+                    images = [p for p in (tm.content or [])
+                              if getattr(p, "type", None) == "image"]
+                    text = _parts_to_text(tm.content)
+                    if images:
+                        relocated.extend(images)
+                        # 纯图片结果（text 为空）时不拼前导空行——OpenAI 的 tool content
+                        # 为空会被拒（同 anthropic.py 的 _EMPTY_TOOL_RESULT_CONTENT 理由），
+                        # 标记本身就是那条非空占位。
+                        content = (f"{text}{_TOOL_IMAGE_NOTICE}" if text
+                                   else _TOOL_IMAGE_NOTICE.lstrip("\n"))
+                    else:
+                        content = text
+                result.append({
+                    "role": "tool",
+                    "tool_call_id": tm.tool_call_id or "",
+                    "content": content,
+                })
+                i += 1
+            if relocated:
+                result.append({"role": "user", "content": _parts_to_blocks(relocated)})
         else:
-            content = m.content if isinstance(m.content, str) else _parts_to_text(m.content)
+            content = (m.content if isinstance(m.content, str)
+                       else _parts_to_blocks(m.content))
             entry: dict[str, Any] = {"role": m.role, "content": content}
             if m.role == "assistant" and m.reasoning_content:
                 entry["reasoning_content"] = m.reasoning_content
             result.append(entry)
+            i += 1
 
     return result
 
@@ -415,10 +487,47 @@ def _parts_to_text(parts: Any) -> str:
     if isinstance(parts, str):
         return parts
     if isinstance(parts, list):
-        return " ".join(
-            p.get("text", "") if isinstance(p, dict) else str(p) for p in parts
-        )
+        texts: list[str] = []
+        for p in parts:
+            # dict 形态 part 的分支已删（Phase 3c Task E/E2）：dict 是**协议违规**，已在
+            # ``LLMMessage`` / ``MemoryRecord`` / ``MemoryEvent`` 三处 ``__post_init__``
+            # 边界归一成 dataclass；留着分支会让后来者以为 dict 是受支持的形态。
+            if hasattr(p, "text"):
+                texts.append(p.text)
+            # else: 非文本 dataclass part（ImagePart 等）——跳过，语义对齐 core/utils.content_to_text
+        return " ".join(texts)
     return str(parts)
+
+
+def _parts_to_blocks(parts: Any) -> list[dict[str, Any]]:
+    """把 ContentPart 列表转成 OpenAI wire blocks（文本 → text block，图片 → image_url block）。
+
+    到达本函数时 source_type 已恒为 "base64"——**这不是数据模型的性质，而是上游的
+    保证**：Phase 3b 起图片在入口被外部化成 ``blob:<sha>`` ref，由
+    ``core.loop.llm_gateway.stream_llm`` 在出网前（本函数之前的最后一个 async 关口）
+    调 ``rehydrate_content`` 还原回 base64（架构裁定 T0：本函数是同步的，
+    ``MemoryBlobStore.get`` 是 async，没法在这里 await）。取不到图时上游已把该 part 降级成
+    文本占位，故本函数无需处理 ref。**绕过 gateway 直调 adapter 的路径上此保证不成立**，
+    那条路上的 ref 会被拼进 data URL。"""
+    blocks: list[dict[str, Any]] = []
+    for p in parts:
+        # dict 形态 part 的分支已删（Phase 3c Task E/E2）：dict 是**协议违规**，已在
+        # ``LLMMessage.__post_init__``（本函数入参恒为 ``LLMMessage.content``）与
+        # ``MemoryRecord`` / ``MemoryEvent`` 三处边界归一成 dataclass，到这里不再有 dict。
+        # 万一有（绕过构造器直调本函数），落到最后一支 → ``getattr`` 取不到 → 当作空文本
+        # 跳过，不会 raise：adapter 在同步出网主路径上，任何 raise 都会掀掉整个 LLM 请求。
+        if getattr(p, "type", None) == "image":
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{p.media_type};base64,{p.data}"},
+            })
+        else:
+            # I1: 同上对 None 兜底；注意不能改成 `or str(p)`——那会把无 .text 属性的
+            # 对象整个 repr 当文本泄漏进发给模型的文本（Phase 2 修过的同类泄漏）。
+            text = getattr(p, "text", None) or ""
+            if text.strip():  # 同上：纯空白块与空块同属 provider 400 的一类（spec §13）
+                blocks.append({"type": "text", "text": text})
+    return blocks
 
 
 def _map_tools(tools: list[LLMTool]) -> list[dict[str, Any]]:

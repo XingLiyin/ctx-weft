@@ -1,6 +1,6 @@
 # 01 · 事件类型与结构
 
-> 真相源：`src/ctx_weft/core/events/types.py`
+> 真相源：`src/ctx_weft/protocols/events.py`
 
 ---
 
@@ -32,13 +32,81 @@
 未登记类型不得发出（`makeEvent` 对未登记类型直接报错）。按域分组：
 
 ### Session / Run / Step
-`SessionCreated` `SessionResumed` `SessionStatusChanged` `SessionFinished` `SessionPausedHitl`
-`RunStarted` `RunPaused` `RunResumed` `RunCanceled` `RunFinished`
+`SessionCreated` `SessionResumed` `SessionFinished`
+`RunStarted` `RunCanceled` `RunFinished` `RunInterrupted`
 `StepStarted` `StepCompleted` `StepFailed`
 
+> **2026-09-05：`SessionInterrupted` / `SessionWaiting` / `SessionRunning` 已连枚举
+> 一并删除**（`docs/events-v2.md` §5.8）。它们生于 2026-09-02、死于 09-03，全程落在
+> `master` 之后的分支内部——`master` 的 `EventType` 里从来没有这三个名字，任何存量
+> 事件流都不可能含有它们，退役闸门天然成立。`SessionFinished` **仍在枚举里**，只是
+> 同样已停发，进 L 档（存量日志重放要用）。
+>
+> **已过期（2026-09-03 agent-centric 改造）**：这几条已随会话状态机
+> （`session_state.py`）整体删除而**全部停发**——不再由任何组件发出（含
+> `SessionRegistry`，原 `SessionManager`）。「会话状态」这个概念本身不再存在：状态
+> 整体搬到了各 agent 自己身上，见 `docs/upgrade/2026-09-03-agent-centric-interaction.md`
+> 第 5 节与新增的 5 个 `AGENT_*` 事件。以下段落保留描述这四条曾经的语义供历史对照：
+> `SessionInterrupted`（停着且异常，等 `/resume`）/ `SessionWaiting`（停着但正常，
+> 都在等人）/ `SessionRunning`（重新开跑）/ `SessionFinished`（终态）。它们说「会话
+> 到了什么状态」，不带命令语气。
+>
+> **L 档（只读存量，不得再发射）**：`SessionStatusChanged` `SessionPausedHitl`
+> `SessionFinished`。
+> 前者是事实流里唯一的命令式事件（「把状态写成 X」），6 个发射点混着三类不同的东西，
+> 已按上面四条拆解；后者的两档（`PAUSED` / `PAUSED_HITL`）在新值域里合并成单一
+> `WAITING`。**reducer 的读分支保留**——存量日志还要回放。详见 `docs/events-v2.md` §5
+> 与 `docs/upgrade/2026-09-02-session-status-ownership.md`。
+>
+> `RunInterrupted{reason, error_code?, error_message?}`：**这次执行**被外部打断。
+> **只由 `runtime._run_loop` 发**，两支各发一次、无条件（run 死了就是死了）；
+> 它**不写 task 状态**——task 停在哪由 task 域的 `TaskInterrupted` 说。
+> 两支的 payload 不同形：run 崩溃带 `{reason:"run_crash", error_code, error_message}`；
+> LLM outage 只带 `{reason:"llm_outage", error_message}`。
+> **`reason` 只作溯源，判据是事件类型本身。**
+>
+> `RunFinished{outcome, final_status?, will_retry, total_events, total_turns, error?,
+> error_type?}`：一次 run 执行结束，**无论成败必发**——host 靠它关 SSE。`outcome`
+> 是权威字段（`RunOutcomeKind` 五值：`completed` / `awaiting_human` /
+> `suspended_on_children` / `interrupted` / `canceled`），说的是**这次执行自己**
+> 怎么收场，不是 task 状态。`final_status`（装 `task.status`）**已废弃**，保留一个
+> 发布周期供旧断言过渡，下个周期删除（2026-09-02 task-status-ownership 重构 Task 3/4）。
+
 ### Task
-`TaskCreated` `TaskStarted` `TaskSuspended` `TaskResumed` `TaskFinished` `TaskFailed`
-`TaskCanceled` `TaskFinalized` `TaskRequeued` `BlackboardPublished`
+`TaskCreated` `TaskStarted` `TaskSuspended` `TaskAwaitingHuman` `TaskInterrupted`
+`TaskResumed` `TaskFinished`
+`TaskFailed` `TaskCanceled` `TaskFinalized` `TaskRequeued` `BlackboardPublished`
+
+> `TaskSuspended` 从三义收窄到**一义**：只表示「等子任务完成」（payload 带
+> `summary` / `spawn_titles`）。另两义各自成型：等人 → `TaskAwaitingHuman{hitl_id}`
+> （task → `AWAITING_HUMAN`），被打断 →
+> `TaskInterrupted{reason, error_code, error_message, retry_count}`（task → `INTERRUPTED`）。
+> **判据是类型，不是 payload 里的 `reason` 字面量。**
+>
+> `TaskInterrupted` 发在**重试判定之后**：崩溃后还能原地重试的那一支发的是
+> `TaskRequeued`（task → `PENDING`），不是这条。run 层同时发的 `RunInterrupted`
+> 说的是另一件事（那次执行死了），不写 task 状态。
+
+> `TaskFinalized{task_id, outcome, outputs:{output, summary}, error}`：**只记结果，
+> 不改状态**（状态是 `TaskFinished` / `TaskFailed` 的事）。交付物两段分开送
+> （2026-09-05）：`output` 是**答复正文本身**——收尾回合的 assistant 正文；`summary`
+> 是 agent 调 `finish_task` 时给的 `deliverables_summary`，写给 reviewer 的交付物自评
+> 清单。**两段绝不可合成一串**：host 打印「最终答复」只取 `output`，混在一起就会把
+> agent 的自评清单当答案打出来。判据以 `task.outputs` 为准绳——observer 判 retry 驳回
+> 会把它置空，此时两段一起归空，不送已被驳回的废稿。`output` 恒为**纯文本**：这个字段
+> 的消费者是 host 的 `tasks.outputs_json` 与 CLI 打印，多模态交付物走 blob store 那条
+> 正路，不让事件载荷背图片。reducer 侧不折这两个字段（见 `03-reducer-rules.md`）。
+
+### ~~TaskManager 信号（会话状态机的输入）~~ · 已删除
+
+> `TaskQueueBlocked` / `TaskQueueInterrupted` / `TaskQueueDrained` 于 2026-09-04 停发、
+> 2026-09-05 连枚举一并删除（`docs/events-v2.md` §5.8）。原义：TM 报「队列此刻是什么
+> 形状」，`SessionRegistry` 据此推会话状态；payload 依次是 `{count}` / `{reason}` /
+> `{final_status}`。消费者（会话状态机）随 `SessionRegistry` 降格退役后它们就没了读者，
+> 而 `master` 从未有过这三个类型，存量流里也不会有。
+>
+> 想做「这一轮跑完了」的判断，改用本轮 task 的终态事件（`TaskFinished` / `TaskFailed` /
+> `TaskCanceled`），即 `TurnHandle.wait_for_finish()` 用的那套判据。
 
 ### Agent
 `AgentInstantiated` `AgentSpawned` `AgentStatusChanged` `AgentWaiting` `AgentFinalized` `SpawnRejected`
@@ -54,14 +122,16 @@
 `CapabilityInvoked` `CapabilityProgress` `CapabilityFinished` `CapabilityFailed` `CapabilityCanceled`
 
 ### ActStep / ObserveStep
-`ActTurnStarted` `ActTurnCompleted` `MaxTurnsReached` `ObserveCompleted`
+`ActTurnStarted` `ActTurnCompleted` `MaxTurnsReached` `ObserveStarted` `ObserveCompleted`
 
 ### Memory
 `MemoryIngested` `CompactTriggered` `CompactDispatched` `MemoryCompactStarted`
 `MemoryCompacted` `MemoryCompactFailedFallback` `BlackboardSubscribed`
 
 ### HITL
-`HitlRequired` `HitlApproved` `HitlAnswered` `HitlRejected` `HitlModified` `HitlTimeout` `HitlCancelled`
+`HitlRequired` `HitlApproved` `HitlAnswered` `HitlRejected` `HitlModified` `HitlTimeout` `HitlCancelled` `HitlOpened` `HitlResolved`
+
+> `HitlOpened` 取代 `HitlRequired` + `SessionPausedHitl`；`HitlResolved` 取代 5 个 resolve 事件（`HitlApproved` / `HitlModified` / `HitlAnswered` / `HitlRejected` / `HitlCancelled`）。
 
 ### Guard
 `TokenBudgetWarning` `TokenBudgetExceeded` `FailureThresholdHit` `MaxConcurrentAgentsExceeded`

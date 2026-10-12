@@ -13,8 +13,8 @@ import pytest
 
 from ctx_weft.core.loop.driver import COMPACT_NOOP_KEY, CONTEXT_RECOVERY_COUNT_KEY
 from ctx_weft.core.loop.steps.act import _account_tokens, _can_recover_context
-from ctx_weft.core.state.models import LoopGuard
-from ctx_weft.core.utils import effective_limit
+from ctx_weft.core.models.agent import LoopGuard
+from ctx_weft.core.utils.estimate import effective_limit
 from ctx_weft.protocols import LLMUsage, MemoryAddress
 from ctx_weft.protocols.template import LoopConfig
 

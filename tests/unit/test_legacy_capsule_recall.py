@@ -12,13 +12,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.core.utils.estimate import estimate_tokens
 
 import pytest
 
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 

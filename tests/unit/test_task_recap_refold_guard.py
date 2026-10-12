@@ -3,9 +3,12 @@ from datetime import UTC, datetime
 
 import pytest
 from types import SimpleNamespace
-import ctx_weft.core.loop.steps.background_observe as bo
-from ctx_weft.core.events import EventType
+from ctx_weft.core.loop.background import recap as recap_mod
+from ctx_weft.core.loop.background import runner
+from ctx_weft.core.loop import finish_pair as fp
+from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols import MemoryEvent, MemoryEventType
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 
 
 @pytest.mark.asyncio
@@ -21,9 +24,9 @@ async def test_compact_boundary_skips_when_no_active_raw(fake_state_ctx, monkeyp
     async def _react(*a, **k):
         called["react"] = True
         return None, ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="interrupt")
+    await recap_mod._run_recap(state, ctx, boundary="interrupt")
 
     assert called["react"] is False  # 护栏跳过，未跑 LLM observe
 
@@ -39,11 +42,11 @@ async def test_close_boundary_not_guarded(fake_state_ctx, monkeypatch):
     called = {"react": False}
     async def _react(*a, **k):
         called["react"] = True
-        from ctx_weft.core.orchestrator.control_capability import ControlResult
-        return ControlResult(content="r", metadata={}), ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+        from ctx_weft.core.capabilities.control_tools import ControlResult
+        return ControlResult(content="r", metadata={K.OBSERVER_ACT_RECAP: "r"}), ""
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="finish")
+    await recap_mod._run_recap(state, ctx, boundary="finish")
 
     assert called["react"] is True  # close 边界照常跑
 
@@ -55,23 +58,26 @@ async def test_close_boundary_exception_pops_close_synth(fake_state_ctx, monkeyp
     异常被吞（不外抛），finally 仍发 TASK_RECAP_DONE。"""
     state, ctx = fake_state_ctx
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
-    bo.register_close_synth(state.task.id, "tcall_x", state.scope, "success")
+    fp.register_close_synth(state.task.id, "tcall_x", state.scope, "success")
 
     async def _boom(*a, **k):
         raise RuntimeError("llm outage")
-    monkeypatch.setattr(bo, "run_observe_react", _boom)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _boom)
 
-    await bo._run_background_observe(state, ctx, boundary="finish")  # 不应外抛
+    await recap_mod._run_recap(state, ctx, boundary="finish")  # 不应外抛
 
-    assert bo.pop_close_synth(state.task.id) is None, "异常路径应弹掉登记（防泄漏）"
+    assert fp.pop_close_synth(state.task.id) is None, "异常路径应弹掉登记（防泄漏）"
     done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
     assert len(done_events) == 1
 
 
 @pytest.mark.asyncio
-async def test_short_segment_kept_raw_no_llm_call(fake_state_ctx, monkeypatch):
-    """短段免折：本段 active raw token ≤ short_segment_token_threshold → 不跑后台 LLM、
-    不折叠（raw 保持 active、无 TASK_COMPACT_SUMMARY），finally 仍发 TASK_RECAP_DONE。"""
+async def test_short_segment_on_summary_only_boundary_skips_the_llm(fake_state_ctx, monkeypatch):
+    """短段免折（只摘要的边界）：不跑后台 LLM、不折叠，finally 仍发 TASK_RECAP_DONE。
+
+    边界从 `plain_text` 换成 `interrupt`，因为 S5 起前者要产 verdict——**免折不免判**，
+    见下一条。只摘要的边界没有判定可产，短段就该整段跳过。
+    """
     state, ctx = fake_state_ctx
     state.agent.loop_config = SimpleNamespace(
         compact_keep_last=2, max_turns_per_observe=3,
@@ -81,9 +87,9 @@ async def test_short_segment_kept_raw_no_llm_call(fake_state_ctx, monkeypatch):
     async def _react(*a, **k):
         called["react"] = True
         return None, ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="plain_text")
+    await recap_mod._run_recap(state, ctx, boundary="interrupt")
 
     assert called["react"] is False  # 短段直接跳过，连 LLM 都不跑
     n_raw = await ctx.memory.count_recent(
@@ -112,14 +118,14 @@ async def test_segment_over_threshold_folds_as_before(fake_state_ctx, monkeypatc
         type=MemoryEventType.LLM_RESPONSE, address=state.scope,
         content="second llm", role="assistant",
         timestamp=datetime(2024, 1, 1, 12, 0, 0, 4, tzinfo=UTC)), ctx.provider_ctx)
-    from ctx_weft.core.orchestrator.control_capability import ControlResult
+    from ctx_weft.core.capabilities.control_tools import ControlResult
     called = {"react": False}
     async def _react(*a, **k):
         called["react"] = True
-        return ControlResult(content="segment recap", metadata={}), ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+        return ControlResult(content="segment recap", metadata={K.OBSERVER_ACT_RECAP: "segment recap"}), ""
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="plain_text")
+    await recap_mod._run_recap(state, ctx, boundary="plain_text")
 
     assert called["react"] is True
     n_raw = await ctx.memory.count_recent(
@@ -136,14 +142,14 @@ async def test_close_boundary_ignores_short_segment_gate(fake_state_ctx, monkeyp
         compact_keep_last=2, max_turns_per_observe=3,
         short_segment_token_threshold=10**9,  # 巨大阈值也拦不住 close 路径
     )
-    from ctx_weft.core.orchestrator.control_capability import ControlResult
+    from ctx_weft.core.capabilities.control_tools import ControlResult
     called = {"react": False}
     async def _react(*a, **k):
         called["react"] = True
-        return ControlResult(content="r", metadata={}), ""
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+        return ControlResult(content="r", metadata={K.OBSERVER_ACT_RECAP: "r"}), ""
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
-    await bo._run_background_observe(state, ctx, boundary="finish")
+    await recap_mod._run_recap(state, ctx, boundary="finish")
 
     assert called["react"] is True
 
@@ -155,30 +161,30 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
     """端到端（真实 ctx.memory，不 mock count_recent）：同一 task 背靠背两次 interrupt
     边界 observe——第一次真实折叠该段（LLM_RESPONSE 被 supersede），第二次落到该段
     count_recent(LLM_RESPONSE)==0，护栏应跳过其 LLM/observe 工作，但 finally 仍须为
-    两次启动各发一条 TASK_RECAP_DONE，且 await_pending_background_observe 对被跳过的
+    两次启动各发一条 TASK_RECAP_DONE，且 await_pending_recap 对被跳过的
     第二个任务也要正常收尾（不挂起、不报错）。
 
-    若把 _run_background_observe 里的护栏摘掉，第二次也会真的调 run_observe_react，
+    若把 _run_recap 里的护栏摘掉，第二次也会真的调 run_observe_react，
     本测试的 call_count 断言会失败（变成 2）。
     """
     state, ctx = fake_state_ctx
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
 
-    from ctx_weft.core.orchestrator.control_capability import ControlResult
+    from ctx_weft.core.capabilities.control_tools import ControlResult
 
     calls: list[int] = []
 
     async def _react(*a, **k):
         calls.append(1)
-        return ControlResult(content=f"S{len(calls)}", metadata={}), ""
+        return ControlResult(content=f"S{len(calls)}", metadata={K.OBSERVER_ACT_RECAP: f"S{len(calls)}"}), ""
 
-    monkeypatch.setattr(bo, "run_observe_react", _react)
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
 
     # 背靠背发起两次同 task interrupt observe（不 await 第一个就发第二个），
     # 同 task 锁下第一次先真正折叠，第二次落到已折叠的段上。
-    t1 = bo.launch_background_observe(state, ctx, boundary="interrupt")
-    t2 = bo.launch_background_observe(state, ctx, boundary="interrupt")
+    t1 = runner.launch_recap(state, ctx, boundary="interrupt")
+    t2 = runner.launch_recap(state, ctx, boundary="interrupt")
     await asyncio.gather(t1, t2)
 
     # 1) 第一次真的跑了、折了段：该段 active LLM_RESPONSE 计数归零
@@ -196,7 +202,40 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
     done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
     assert len(done_events) == 2, f"两次启动都应发 TASK_RECAP_DONE，实得 {len(done_events)} 条"
 
-    # 4) await_pending_background_observe 对被跳过的第二个任务也能正常收尾（不挂起/不报错）
+    # 4) await_pending_recap 对被跳过的第二个任务也能正常收尾（不挂起/不报错）
     await asyncio.wait_for(
-        bo.await_pending_background_observe(state.task.id), timeout=1.0,
+        runner.await_pending_recap(state.task.id), timeout=1.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_short_segment_on_plain_text_still_judges(fake_state_ctx, monkeypatch):
+    """**免折不免判**（S5）：`plain_text` 的短段照跑 LLM 拿 verdict，但仍不折。
+
+    判定不能按回合长度省掉——一句话的回合既可能是交付完了，也可能是 LLM 问了个问题，
+    而那正是这个机制要区分的东西。短段的 recap 常比原文还长，折它才是净亏。
+    """
+    state, ctx = fake_state_ctx
+    state.agent.loop_config = SimpleNamespace(
+        compact_keep_last=2, max_turns_per_observe=3,
+        short_segment_token_threshold=400,
+    )
+    called = {"react": False}
+
+    async def _react(*a, **k):
+        called["react"] = True
+        return ControlResult(content="话术", metadata={K.OBSERVER_ACT_RECAP: "短段 recap"}), ""
+
+    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
+
+    await recap_mod._run_recap(state, ctx, boundary="plain_text")
+
+    assert called["react"] is True, "短段也要跑判定"
+    n_raw = await ctx.memory.count_recent(
+        state.scope, [MemoryEventType.LLM_RESPONSE], ctx.provider_ctx,
+    )
+    assert n_raw == 1, "短段的 raw 仍应保持 active——免的是折，不是判"
+    n_summary = await ctx.memory.count_recent(
+        state.scope, [MemoryEventType.TASK_COMPACT_SUMMARY], ctx.provider_ctx,
+    )
+    assert n_summary == 0, "短段仍不产 TASK_COMPACT_SUMMARY"

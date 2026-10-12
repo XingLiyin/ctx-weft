@@ -2,7 +2,7 @@
 
 两个用途：
 1. 相关任务通信：pull 当前 task 订阅的 topic → kind=blackboard, target=messages
-   - intent=subtask     → 自己派生的子任务结果（observe 渲染为可 review/reopen 段）
+   - intent=subtask     → 自己派生的子任务结果（observe 渲染为可 review 段）
    - intent=predecessor → 同 plan 前序结果（observe 渲染为只读段）
 2. 跨 session 长期上下文：pull session 订阅的 topic
    - intent=long_term_background → kind=background, target=system
@@ -17,7 +17,8 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils import content_to_text, generate_id
+from ctx_weft.core.utils.content import content_to_text
+from ctx_weft.core.utils.ids import generate_id
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest

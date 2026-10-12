@@ -40,22 +40,19 @@ adapter 不应重复实现以上不变式——已在 core 层集中保证。
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import random
 from collections.abc import AsyncIterator
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
-from ctx_weft.core.events.types import EventType
+from ctx_weft.core.utils.content import rehydrate_content, redact_content_for_event
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
-from ctx_weft.core.utils import (
-    dynamic_max_tokens,
-    estimate_content_tokens,
-    estimate_tool_calls_tokens,
-)
-
+from ctx_weft.core.utils.estimate import dynamic_max_tokens, estimate_content_tokens, estimate_tool_calls_tokens
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
 
@@ -73,25 +70,21 @@ PROMPT_EST_BASE_KEY = "prompt_est_base"
 PROMPT_EST_SEG_KEY = "prompt_est_seg"
 
 
+
 def resolve_llm_identity(state) -> tuple[str, str]:
-    """本次 LLM 调用实际使用的 ``(model, account)``。
+    """本次 LLM 调用实际使用的 (model, account)。
 
-    真值取 ``session.llm_model / llm_provider``——运行时正是用这两个字段解析
-    ``ctx.llm``（runtime._resolve_llm），切换模型/账号也同步更新它们；agent.runtime
-    仅作回退（模板注入场景），最后兜底 ``"mock"``（未配置/测试场景，adapter 会用
-    自身配置的 model 替换）。account 无兜底语义，缺省空串。
-
-    背景：此前请求事件只报 ``agent.runtime.get("llm_model", "mock")``（runtime 从不
-    填 llm_model → 恒为 "mock"），host 云端上报又在响应处理时读「当前会话账号」，
-    与「该次调用实际账号」存在切换竞态——事件自带真值后两处都有账可对。
+    真值是 state.resolved_model —— 派发时由 AgentLifecycleManager 解出的那一个。
+    此前读 session.llm_model 并两级兜底到 agent.runtime / "mock"，那两级
+    永远命中不了（runtime 从不填 agent.runtime["llm_model"]），于是未配置
+    时恒报 "mock"。ResolvedModel 永远是解析过的确定值，报不出假数据。
     """
-    session = state.session
-    model = (
-        getattr(session, "llm_model", None)
-        or state.agent.runtime.get("llm_model", "mock")
-    )
-    account = getattr(session, "llm_provider", None) or ""
-    return model, account
+    rm = state.resolved_model
+    if rm is None:
+        raise RuntimeError(
+            "resolve_llm_identity: state.resolved_model must be set before dispatch"
+        )
+    return rm.model, rm.account
 
 
 def drop_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
@@ -123,7 +116,14 @@ def drop_dangling_tool_calls(messages: list[LLMMessage]) -> list[LLMMessage]:
 
 
 def _is_empty_content(content: "str | list[ContentPart]") -> bool:
-    """内容是否为「空」：空串/纯空白，或空列表/仅含空白 TextPart。非文本块（图片等）视为有内容。"""
+    """内容是否为「空」：空串/纯空白，或空列表/仅含空白 TextPart。非文本块（图片等）视为有内容。
+
+    与 composer._is_blank_content 语义相近但**不同**——本函数对字符串/TextPart 文本都
+    做 ``.strip()``（纯空白 "   " 判空），composer 那份不 strip（纯空白判非空）。两者共存
+    今日安全仅因为 legalize_messages 链路最终经本函数把纯空白消息滤掉；composer 侧的
+    "   " 不是本函数意义上的「空」不会传导成 bug，纯属两处判据本就不追求一致——但这是个
+    没写下来的非局部不变式，改动任一处前请先看 tests/unit/test_composer_vs_gateway_blank_content.py
+    钉住的那对语义。"""
     if isinstance(content, str):
         return not content.strip()
     if not content:
@@ -206,7 +206,25 @@ def reorder_tool_results_after_calls(messages: list[LLMMessage]) -> list[LLMMess
     存在」查不出这种**错位**。本步按 owner 把每个 tool result 移到其 assistant tool_call 之后，
     并按该 assistant 的 ``tool_calls`` 顺序排列。无 owner（没有任何 assistant 调用该 id）的
     孤儿 tool 原地保留，交 :func:`drop_orphan_tool_results` 处理；只搬不删、不补。
+
+    存量歧义留痕（spec: conversation-integrity）：新数据的 id 在摄入点铸为全局唯一，
+    命中「同一 id 被多个 assistant 携带」只可能来自改造前的裸 wire id 记录——行为维持
+    现状（结果在每个携带者后各发一遍），但 MUST 留痕不静默。
     """
+    owner_counts: dict[str, int] = {}
+    for m in messages:
+        if m.role == "assistant":
+            for tc in m.tool_calls:
+                tcid = tc.get("id")
+                if tcid:
+                    owner_counts[tcid] = owner_counts.get(tcid, 0) + 1
+    dup_ids = [tcid for tcid, n in owner_counts.items() if n > 1]
+    if dup_ids:
+        logger.error(
+            "stream_llm: %d tool_call_id(s) each claimed by multiple assistant messages "
+            "(legacy bare-wire ids? their results will be duplicated after every owner): %s",
+            len(dup_ids), dup_ids,
+        )
     owned_ids = {
         tc.get("id")
         for m in messages
@@ -272,7 +290,7 @@ def _estimate_message_tokens(m: LLMMessage, count) -> int:
     """单条消息的 provider 计费估算（往大了估）：文本 content + 图片 part + framing +
     tool_calls 参数 + reasoning_content。
 
-    计费项定义在 core.utils（``estimate_content_tokens`` / ``estimate_tool_calls_tokens``）——
+    计费项定义在 core.utils.estimate（``estimate_content_tokens`` / ``estimate_tool_calls_tokens``）——
     单一真源，prepare/composer 对 memory 记录/装配消息共用同口径。tool_calls 的 arguments、
     reasoning、图片此前都没计入，是"单轮新增里一坨数不到的东西 > margin"致 400 的洞。
 
@@ -290,14 +308,15 @@ def _estimate_request_tokens(request: "LLMRequest", count) -> int:
 
     每条消息经 :func:`_estimate_message_tokens` 计全部计费项（文本 + tool_calls 参数 +
     reasoning + 图片 + framing）。含本轮新加的 role="tool" result。``count``：文本费率
-    回调，caller 传 ``tokenizer.count``（已校准）。
+    回调，caller 传 ``tokenizer.count``（已校准）。tools 面费率走单一真源
+    ``estimate_tools_tokens``（与 prepare 首估同口径）。
     """
+    from ctx_weft.core.utils.estimate import estimate_tools_tokens
+
     total = count(request.system or "")
     for m in request.messages:
         total += _estimate_message_tokens(m, count)
-    for t in request.tools:
-        total += count(t.name) + count(t.description or "")
-        total += count(json.dumps(t.input_schema, ensure_ascii=False))
+    total += estimate_tools_tokens(request.tools, count)
     return total
 
 
@@ -308,6 +327,11 @@ def request_prompt_estimate(tokenizer, request: "LLMRequest", loop_guard, baseli
       真实基线 + 仅 ``messages[baseline_msg_count:]``（本轮新增尾段，如工具结果）的估算。
       基线前的历史采信 provider 真实测量值、不重估——避免 len//4 对 CJK 历史大头系统性低估
       （正是它把整份重估压到基线之下、漏掉本轮增量而导致 max_tokens 过大 400 的根因）。
+      **工具面追踪（spec: tool-schema-budget）**：请求的工具面指纹（规范化定义哈希，
+      覆盖 name+description+schema）与 guard 记录的上次指纹不同时，估算计入 schema 差值
+      （新面估算 − 上次面估算）——运行期 pin 大 schema 后估算立即增长；工具面不变时
+      增量行为与旧口径逐字节一致（纯消息增量）。首次记录（旧签名为空）不加减值——
+      真实基线已含当时的工具面。
     - **首次 / 一次性**（无循环内基线）：``max(整份估算, context_tokens)``——整份估算打底，
       并不低于上一步真实测量值（更保守，永不 400；上步后若发生压缩，偏大只是少给输出）。
 
@@ -319,16 +343,42 @@ def request_prompt_estimate(tokenizer, request: "LLMRequest", loop_guard, baseli
     的真实值（正是本函数存在的校准动机场景：启发式低估、被真实基线兜住），若回喂用 floor 后
     的返回值会产出 ratio≈1 的假样本、把伺服系统性拖向 1；估算段是 floor 前的值，不受污染。
     """
+    from ctx_weft.core.utils.estimate import estimate_tools_tokens, tools_signature
+
     ctx_tokens = getattr(loop_guard, "context_tokens", 0) if loop_guard is not None else 0
+
+    def _track_tools() -> int:
+        """指纹变化时返回 schema 差值（新 − 上次），并推进 guard 记录；不变返回 0。
+        首次（旧签名为空）只记录不加值（真实基线已含当时的面）。guard 字段经
+        getattr 读写——SimpleNamespace 测试替身与旧持久化快照都兼容。"""
+        if loop_guard is None:
+            return 0
+        sig = tools_signature(request.tools)
+        last_sig = getattr(loop_guard, "last_tools_signature", "")
+        if sig == last_sig:
+            return 0
+        new_est = estimate_tools_tokens(request.tools, tokenizer.count)
+        delta = 0
+        if last_sig:
+            delta = new_est - getattr(loop_guard, "last_tools_est", 0)
+        try:
+            loop_guard.last_tools_signature = sig
+            loop_guard.last_tools_est = new_est
+        except Exception:  # pragma: no cover —— 只读替身（防御，不影响估算本身）
+            pass
+        return delta
+
     if baseline_msg_count is not None and ctx_tokens > 0:
         delta = sum(
             _estimate_message_tokens(m, tokenizer.count)
             for m in request.messages[baseline_msg_count:]
         )
+        delta += _track_tools()
         request.metadata[PROMPT_EST_BASE_KEY] = ctx_tokens
         request.metadata[PROMPT_EST_SEG_KEY] = delta
         return ctx_tokens + delta
     full = _estimate_request_tokens(request, tokenizer.count)
+    _track_tools()
     request.metadata[PROMPT_EST_BASE_KEY] = 0
     request.metadata[PROMPT_EST_SEG_KEY] = full
     return max(full, ctx_tokens)
@@ -347,6 +397,20 @@ def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
     used = request.prompt_token_estimate
     if used is None:
         return
+    # spec: tool-schema-budget——发送前超限不硬拒（明示决策，design D4）：估算存在误差，
+    # 硬拒会误伤真实可发请求；超限信号转为 max_tokens 按含工具面的 used 自然收紧 +
+    # WARNING 留痕 + 既有 compact 比例机制在下轮 prepare 触发压缩。provider 400 仍是
+    # 最终防线（且自愈退避在）。
+    reserve = max(0, getattr(loop_guard, "reserved_output_tokens", 0))
+    eff_window = max(0, loop_guard.context_limit - reserve)
+    if used > eff_window:
+        logger.warning(
+            "prompt estimate %d exceeds effective window %d "
+            "(tools_signature=%s, tools_est=%d) — request proceeds with tightened "
+            "max_tokens; compaction will trigger on next prepare if the ratio holds",
+            used, eff_window,
+            getattr(loop_guard, "last_tools_signature", ""),
+            getattr(loop_guard, "last_tools_est", 0))
     llm = ctx.llm
     # margin 比例制：固定值只兜小 prompt 的估算残差，误差随体量按比例放大 → margin 也按比例。
     margin = max(
@@ -368,10 +432,39 @@ def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
 
 
 async def stream_llm(
-    llm: "LLMClient", request: "LLMRequest", *, stream: bool = True
+    llm: "LLMClient", request: "LLMRequest", *, stream: bool = True,
+    blob_store: "Any" = None, provider_ctx: "Any" = None,
 ) -> AsyncIterator["LLMChunk"]:
-    """发送前合法化 ``request.messages``，再流式转发 ``llm.complete`` 的 chunk。"""
+    """发送前合法化 ``request.messages``、把 blob ref 还原成 base64，再流式转发 chunk。
+
+    ⚠️ **本函数不做任何模态门控**（spec 2026-08-28-multimodal-adapter-dispatch）：
+    图片原样送到 ``LLMClient`` 面前，发多模态还是降级成占位由实现方决定。曾经这里
+    有一个 ``_gate_tool_images``，只降 ``role == "tool"`` 的图——它的前提是「用户递的
+    图在入口已被视觉门控拒掉」，入口门控删除后该前提不成立，覆盖面必须扩到所有角色，
+    而那正是 adapter 的 ``_prepare_messages`` 在做的事。留在这里就是第二处会分叉的判据。
+
+    已知代价：本函数对纯文本 adapter 一样会 rehydrate 每一个 blob ref（blob get +
+    base64 编码，单图最大 5 MiB），rehydrate 完之后 adapter 的 ``_prepare_messages``
+    才把它们降级成占位丢弃——这一趟读取白费了。这是「core 不判模态」换来的已知浪费；
+    要消除它就得让本函数重新知道 adapter 的能力，那正是本设计明确拒绝重新引入的
+    第二判据。不要在这里加判断。
+
+    rehydrate 落在这里而非 adapter（架构裁定 T0）：adapter 的序列化链
+    （``_build_payload`` / ``_serialize_messages`` / ``_parts_to_blocks``）全是同步
+    函数，而 ``MemoryBlobStore.get`` 是 async。本函数是出网前最后一个 async 关口，一处
+    覆盖三家 adapter。
+
+    ``blob_store`` / ``provider_ctx`` 均**带默认值 None**：不传时整段 rehydrate 不
+    执行，既有调用方与既有测试行为逐字节不变。刻意用显式参数而不是模块级单例——
+    blob store 是 per-runtime 依赖，藏进全局状态会让测试互相污染。
+    """
     request.messages = legalize_messages(request.messages)
+    if blob_store is not None:
+        request.messages = [
+            dataclasses.replace(m, content=await rehydrate_content(
+                m.content, blob_store=blob_store, ctx=provider_ctx))
+            for m in request.messages
+        ]
     async for chunk in llm.complete(request, stream=stream):
         yield chunk
 
@@ -449,8 +542,58 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
     - 非 outage 的 retriable（如 _finalize 截断）与永久错 → 原样抛出（保留既有语义）。
     - 预算（max_attempts / max_duration）耗尽 → LLMOutageError。
     - 退避期间尊重 cancel_token。
+
+    「流式侧」4 种 LLM_* 事件（REQUEST_STARTED / PROMPT_SENT / TOKEN_STREAMED /
+    REASONING_STREAMED）在此发射（task-4 收敛，spec 2026-09-03 §9.5），对所有调用方
+    无条件发射——不看 ``state.origin``。
+
+    Task 4 曾在这里挂过一道临时门禁（``_STREAM_EVENT_ORIGINS``，只放行
+    ``LOOP_ACT``/``LOOP_COMPACT``），因为当时 observe.py 的 ``run_observe_react``
+    还在自己发一套同形事件（前台 LLM_*、后台 BACKGROUND_OBSERVE_*），放行会重复发射/
+    串号。Task 5 删掉了 observe.py 那套自发射，改成所有调用方（act / compact /
+    observe / background_observe）统一由本函数发 LLM_*，只靠 ``state.origin``
+    （``EventOrigin.LOOP_OBSERVE`` / ``LOOP_BACKGROUND_OBSERVE`` 等）区分前台/后台
+    （docs/events-v2.md §3.6：V2 之前这是靠 BackgroundObserve* 那族独立类型做的，
+    合并后由 origin 承担）——门禁因此整个删除。
+
+    ``LLM_RESPONSE_FINISHED`` 各调用方自己发射（依赖各自的收尾逻辑：act 依赖软打断
+    决策，见 task-4 brief；compact 是单次调用直出；observe/background_observe 共用
+    ``run_observe_react``，Task 5 起也在那里补发）。
+
+    request_id：与 act.py 侧 ``_run_llm_turn`` 用同一个确定性公式
+    ``f"req_{agent.id}_{state.sequence_counter}"`` 独立算出——两边都在「本次 LLM
+    调用的任何事件被发射之前」求值（act.py 在调用本函数之前；本函数在 while 重试
+    循环、也就是第一次 emit 之前），因此 ``state.sequence_counter`` 两处读到的是
+    同一个值，算出来天然相等，不需要新增参数或跨函数传值。
+
+    ``apply_dynamic_max_tokens`` 的调用位置（task-6 复审修复第二轮）：故意排在
+    LLM_REQUEST_STARTED/LLM_PROMPT_SENT 发射**之后**，而不是紧挨在函数开头——这样
+    「进了这段代码往下走」就蕴含「STARTED 已经发出」，调用方（如
+    ``recognize_intent.py``）的收尾逻辑不必自己猜「STARTED 到底发没发」就能决定该不该
+    补发 ``LLM_RESPONSE_FINISHED``。两个事件的 payload 都不读 ``request.max_tokens``，
+    挪后不改变事件内容；``apply_dynamic_max_tokens`` 仍在真正发起 LLM 调用（下面
+    ``stream_llm``）之前完成，行为不变。
     """
     from ctx_weft.protocols import LLMCallError  # local to avoid re-export confusion
+
+    bus = getattr(ctx, "event_bus", None)
+    emit_stream_events = bus is not None and state is not None
+    request_id: str | None = None
+    if emit_stream_events:
+        agent = state.agent
+        request_id = f"req_{agent.id}_{state.sequence_counter}"
+        model, llm_account = resolve_llm_identity(state)
+        turn = request.metadata.get("turn", 0)
+        await bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={
+            "request_id": request_id, "model": model, "llm_account": llm_account,
+            "turn": turn}))
+        await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
+            "request_id": request_id, "turn": turn, "system": request.system,
+            "messages": [
+                {"role": m.role, "content": redact_content_for_event(m.content)}
+                for m in request.messages
+            ],
+            "tool_names": [t.name for t in request.tools]}))
 
     loop_guard = getattr(getattr(state, "agent", None), "loop_guard", None)
     apply_dynamic_max_tokens(ctx, request, loop_guard)
@@ -466,7 +609,20 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
     while True:
         yielded_anything = False
         try:
-            async for chunk in stream_llm(ctx.llm, request):
+            async for chunk in stream_llm(
+                ctx.llm, request,
+                blob_store=getattr(ctx, "blob_store", None),
+                provider_ctx=getattr(ctx, "provider_ctx", None),
+            ):
+                if emit_stream_events:
+                    if chunk.kind == "token":
+                        await bus.emit(make_event(
+                            state, EventType.LLM_TOKEN_STREAMED,
+                            payload={"request_id": request_id, "delta": chunk.text}))
+                    elif chunk.kind == "reasoning":
+                        await bus.emit(make_event(
+                            state, EventType.LLM_REASONING_STREAMED,
+                            payload={"request_id": request_id, "delta": chunk.text}))
                 yielded_anything = True
                 yield chunk
             return  # success

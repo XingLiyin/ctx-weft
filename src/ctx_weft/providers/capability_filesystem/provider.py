@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any
 
-from ctx_weft.core.utils import generate_id
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.capability import (
     Capability,
     CapabilityEvent,
@@ -275,7 +275,7 @@ async def shell(
             runner.cancel()
 
 
-@tool(purposes=["act", "compact"], side_effects=False, spillable=False)
+@tool(purposes=["act", "compact"], side_effects=False, spillable=False, recovery_policy="idempotent")
 async def read_file(
     path: Annotated[str, "File path; relative paths are resolved against the workspace"],
     offset: Annotated[int | None, "1-based start line (line mode; default 1)"] = None,
@@ -582,7 +582,8 @@ class FilesystemConfig:
 # ── Provider ──────────────────────────────────────────────────────────────────
 
 
-class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCapabilityProvider):
+class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink,
+                              SessionScopedCapabilityProvider):
     """文件系统工具 provider：shell, read_file, write_file, edit_file, glob, grep + per-session workspace。
 
     实现三个面向 core 的契约：ToolCapabilityProvider（invoke 六个工具）、SpillSink（spill 落盘）、
@@ -628,7 +629,12 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
         logger.info("Filesystem: registered workspace for session %s → %s", session_id, path)
 
     def deregister_session(self, session_id: str) -> None:
-        """SessionScopedCapabilityProvider：session 结束时由 core 调用，释放 workspace 映射。"""
+        """SessionScopedCapabilityProvider：会话被**逐出内存**时由 core 调用，释放映射。
+
+        触发点是 `forget_session` / `purge_session`，**不是「会话跑完」**（2026-09-08
+        生命周期改造前是后者）。所以宿主在每条执行入口之前都要确保重新登记——映射是
+        内存缓存，真值住在宿主自己的存储里（本 provider 不认识那个存储，也不该认识）。
+        """
         self._workspaces.pop(session_id, None)
 
     def workspace_for(self, ctx: ProviderContext) -> str | None:
@@ -636,14 +642,20 @@ class FilesystemToolsProvider(ToolCapabilityProvider, SpillSink, SessionScopedCa
         return self._workspaces.get(ctx.session_id)
 
     async def spill(self, content: str, ctx: ProviderContext, *, name_hint: str = "") -> str:
-        """SpillSink：把超长内容落盘到该 session 的 workspace，返回落盘路径；未登记则 raise。"""
+        """SpillSink：把超长内容落盘到该 session 的 workspace，返回**取回说明**；未登记则 raise。
+
+        说明里点名 `fs__read_file`——落盘的文件就在 workspace 里，本 provider 自己的读取
+        工具能翻页读回来。只给一条路径的话，模型得自己猜该用哪个工具、传什么参数。
+        """
         ws = self.workspace_for(ctx)
         if ws is None:
             raise RuntimeError(f"no workspace registered for session {ctx.session_id!r}")
         safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in (name_hint or "out"))
         file_path = Path(ws) / "tool_outputs" / f"{safe}_{generate_id('spill')}.txt"
         await asyncio.to_thread(self._write_text, file_path, content)
-        return str(file_path)
+        return (f"Full text saved to {file_path} — read it with "
+                f"{FS_PROVIDER_NAME}__read_file(path='{file_path}', offset=1, limit=500) "
+                f"and page with the offset it suggests.")
 
     @staticmethod
     def _write_text(file_path: Path, content: str) -> None:

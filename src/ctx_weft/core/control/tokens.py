@@ -1,4 +1,4 @@
-"""CancelToken / PauseToken / Deadline.
+"""CancelToken / PauseToken.
 
 Phase 6 §6.1. 用于在 step 边界检查控制信号。
 """
@@ -6,8 +6,7 @@ Phase 6 §6.1. 用于在 step 边界检查控制信号。
 from __future__ import annotations
 
 import asyncio
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 class CancelToken:
@@ -47,25 +46,6 @@ class PauseToken:
     async def wait_paused(self) -> None:
         """Resolve once paused (mirror of CancelToken.wait for the soft-stop signal)."""
         await self._paused.wait()
-
-
-@dataclass
-class Deadline:
-    """Absolute wall-clock deadline."""
-
-    deadline_at: float = field(default_factory=lambda: time.monotonic() + 3600)
-
-    @property
-    def remaining_sec(self) -> float:
-        return max(0.0, self.deadline_at - time.monotonic())
-
-    @property
-    def is_expired(self) -> bool:
-        return time.monotonic() >= self.deadline_at
-
-    def raise_if_expired(self) -> None:
-        if self.is_expired:
-            raise TimeoutError("Deadline exceeded")
 
 
 @dataclass

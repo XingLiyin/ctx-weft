@@ -72,8 +72,6 @@ class LoopConfig:
 
     max_turns_per_act: int = 50
     max_turns_per_observe: int = 5       # ObserveStep ReAct 循环上限
-    max_turns_per_agent: int = 20
-    timeout_per_step_sec: int = 120
     failure_threshold: int = 3
     max_spawn_depth: int = 4
     compact_token_ratio: float = 0.8
@@ -88,6 +86,11 @@ class LoopConfig:
     compact_message_delta: int = 20      # DEPRECATED（2026-07-01）：compact 改纯预算驱动，本字段不再被读
     compact_keep_last: int = 6           # 保留底线（非触发门）：agent 层折叠保留的胶囊数；更老的折成摘要
     collapse_keep_last: int = 3          # 保留底线（非触发门）：task 坍缩保留的最近段摘要条数
+    # L0.5 图片降级（image fold/replay 子设计 §6/§12）：escalating_compact 在 L1 之前把
+    # memory 里的真图换成含 ref 的文本占位，保留**最近这么多张**不降（按图片张数数，一条
+    # 记录可以只降一部分）。模型对最近几张图的依赖最强，且降级可逆（media:get_image 取回）。
+    # §12 记为未决参数，暂定 2，待实测校准——故做成配置项而非常量。
+    compact_keep_recent_images: int = 2
     # 派发前压缩阈值：派发工具调用执行前，若本轮 prompt token / context_limit >= 此值，
     # 先对父自身 task 层对话压缩一次（fold_task），使父 resume 更精简、inherit 快照为
     # 压缩后版本。0 = 关闭（默认）。通常设得比 compact_token_ratio 更早触发。
@@ -119,7 +122,23 @@ class LoopConfig:
 class AgentTemplate:
     """Agent 实例化的蓝图。core 通过 AgentCapabilityProvider 读取。"""
 
+    #: **规范形态 `provider:name`**（2026-10-07 起）——可直接当 ref 用：喂给
+    #: `TemplateLookup.get_template`、存进 agent record、落进事件流都成立。
+    #:
+    #: 前缀是**归属标记**，由 provider 在 `get_template()` 的出口贴上（用它自己的
+    #: `name`），因为只有 provider 知道自己叫什么。目录/DB 里的那个裸名是 provider
+    #: 的内部坐标（`AgentCapability.template_name`、`get_template` 的入参都是它），
+    #: 两者不是一回事，别拿这个字段去查 provider 的内部表。
+    #:
+    #: 从前它是裸的 local name，于是解析结果不携带归属：拿到一个 AgentTemplate 的人
+    #: 无法知道该补哪个前缀，`instantiate` 只能把裸 id 存进 record，而那在多 provider
+    #: 部署下不唯一——恢复期按前缀精确路由找不回来，只能靠「逐个 provider 试、命中多个
+    #: 取第一个 + warning」去猜。语义写在这里而不只写在调用点，就是为了不再让每个
+    #: 调用点各自假设一遍。
     id: str
+    #: 套件作者在 SOUL.md 里写的 `name:`。**core 不读**——仅供 provider / host 做展示
+    #: 与按名查找（host 的 `TemplateStore.find_by_name` 是唯一真实消费者）。
+    #: 身份一律用 `id`：它才是可路由的那个。
     name: str
     version: str  # semver；既是 template 版本也是 identity 版本
 

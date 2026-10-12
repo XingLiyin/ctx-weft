@@ -1,7 +1,8 @@
 """CompactStep：长对话压缩，由 PrepareStep 内联直调（不再以 task 形式调度）。
 
   - 作用域 = 当前 state.scope（当前 task + agent）。
-  - escalating_compact：预算驱动的 L1→L2→L3 升级编排（替旧的双阈值并行折 _compact_scope）。
+  - escalating_compact：预算驱动的 L0.5→L1→L2→L3 升级编排（替旧的双阈值并行折 _compact_scope）。
+    L0.5 = 图片降级（media.demote_for_budget，无 LLM、可逆），排在所有折叠之前（子设计 §6）。
     传入 token_estimate，未达 compact_target_ratio（回退 compact_token_ratio）× context_limit
     时空跑；否则按序试 L1 fold_root_experience（agent 层折叠成 AGENT_COMPACT_SUMMARY）→
     L2 demote_kept_capsules（L1 保留胶囊里 rich→lean 降级，无 LLM）→ L3 collapse_task_layer
@@ -15,19 +16,29 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
 from ctx_weft.core.assembler.assembler import ContextRequest
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.llm_gateway import request_prompt_estimate, stream_llm_resilient
-from ctx_weft.core.utils import content_to_text, effective_limit, now_utc
+from ctx_weft.core.loop.llm_gateway import (
+    request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
+)
+# 模块级 import（**实测不成环**）：`core.media` 的模块级依赖只到 `core.utils.content` /
+# `protocols`，不回指 `core.loop`。若日后 media 模块级引入了 `core.loop` 的东西，
+# 这里要退回函数级 import。
+from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
+from ctx_weft.core.utils.content import content_to_text, image_tokens
+from ctx_weft.core.utils.estimate import effective_limit
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols import (
-    LLMRequest, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
+    LLMRequest, LLMUsage, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,6 +46,76 @@ logger = logging.getLogger(__name__)
 # v2 P3a：类型清单改 kind 视图。task 层全量视图（对话 + 段摘要 + audit）= 旧
 # _TASK_LAYER_TYPES/_TASK_BODY_TYPES 五类型；跨 task 聚合用半址（task_id=None）。
 _TASK_VIEW_KINDS = [MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT]
+
+# ── 结构化 digest（spec: compact-fidelity）───────────────────────────────────
+# 五小节契约（cue 见 composer 的两域 instruction）；Evidence 允许缺，其余必需。
+DIGEST_SECTIONS = ("Goal", "Constraints", "Done", "Remaining", "Evidence")
+REQUIRED_DIGEST_SECTIONS = DIGEST_SECTIONS[:4]
+
+_DIGEST_SECTION_RE = {
+    name: re.compile(rf"^## {name}[ \t]*\n(.*?)(?=^## |\Z)", re.S | re.M)
+    for name in DIGEST_SECTIONS
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class ParsedDigest:
+    """解析后的 digest：text 为落库形态（结构化时即原文），degraded 标降级。
+
+    sections 供断言/评测消费（name → 小节正文；Evidence 可缺）。降级 = 整文作 digest
+    （散文 digest 仍可用，不重试不中断——重试一次 LLM 调用换不回格式保证）。
+    """
+
+    text: str
+    degraded: bool
+    sections: dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+def parse_structured_digest(text: str) -> ParsedDigest:
+    """宽松解析（spec: compact-fidelity）：抓 `## <Name>` 小节；Goal/Constraints/
+    Done/Remaining 任一缺失（或空）→ 整文作 digest、degraded=True。旧散文 digest
+    （本 change 之前的数据）天然走降级路径，无需迁移。"""
+    sections: dict[str, str] = {}
+    for name in DIGEST_SECTIONS:
+        m = _DIGEST_SECTION_RE[name].search(text)
+        if m and m.group(1).strip():
+            sections[name] = m.group(1).strip()
+    degraded = any(name not in sections for name in REQUIRED_DIGEST_SECTIONS)
+    return ParsedDigest(text=text, degraded=degraded, sections=sections)
+
+
+async def _resolve_digest(value) -> ParsedDigest:
+    """把 summarize 的产物（ParsedDigest / 旧测试桩的裸 str / 取值的零参协程）归一。
+
+    兼容裸 str 是刻意的：既有测试大量 monkeypatch summarize_for_compact 返回 str，
+    落库点不应对替身形态敏感（str → 无小节 → degraded，语义自洽）。"""
+    if dataclasses.is_dataclass(value) and isinstance(value, ParsedDigest):
+        return value
+    if isinstance(value, str):
+        return parse_structured_digest(value)
+    if inspect.isawaitable(value):
+        return await _resolve_digest(await value)
+    if callable(value):
+        return await _resolve_digest(value())
+    raise TypeError(f"unsupported digest payload: {type(value)!r}")
+
+
+def _media_enabled(ctx) -> bool:
+    """L0.5 与 §6.1 前置降级的总闸：只有真接了**可外部化**的 `MemoryBlobStore` 时才跑。
+
+    未注册（`LoopContext.blob_store is None`）或注册的是 `NullMemoryBlobStore`
+    （`can_externalize=False`）时，视图里根本不可能存在 `source_type == "ref"` 的图，
+    降级必然返回 0；提前短路省掉整级的读操作，坐实子设计 §10「不接 MemoryBlobStore 时行为
+    与改造前完全一致」——包括**一次多余的 memory 读都不发**。
+
+    ⚠️ 这**不是** Task 2 判断题 2 拒绝的「第二处 registry 探询」。那条拒的是拿 registry
+    当「哪些 part 该降」的判据（已注册但存量记录仍是 inline base64 时会放行并把图弄丢）。
+    选谁降级仍然只由 `policy.demotable_ref` 的 ref 判据决定；本闸只能让降级**少做**，
+    不能让它多做。代价是一个边角：曾接过 blob store、现已摘掉的宿主，存量 ref 图不再
+    被降级——那些图本来也 rehydrate 不回来了。
+    """
+    store = getattr(ctx, "blob_store", None)
+    return store is not None and bool(getattr(store, "can_externalize", False))
 
 
 def _agent_half(scope) -> MemoryAddress:
@@ -44,15 +125,60 @@ def _agent_half(scope) -> MemoryAddress:
 
 async def summarize_for_compact(
     state: LoopState, ctx: LoopContext, *, scope: str = "task"
-) -> str:
-    """装配 purpose="compact" 上下文 + 一次 LLM 摘要，返回摘要文本。
+) -> ParsedDigest:
+    """装配 purpose="compact" 上下文 + 一次 LLM 摘要，返回解析后的 digest。
 
     scope 选 cue（composer 据 extra["compact_scope"] 分流）："task"=整段执行摘要（默认，
-    observe 兜底与坍缩共用）；"agent"=派发经验摘要。
+    observe 兜底与坍缩共用）；"agent"=派发经验摘要。两域 cue 均要求五小节结构（spec:
+    compact-fidelity）；产出经 parse_structured_digest 宽松解析——缺必需节整文降级
+    （degraded=True），不重试、不中断。
 
     LLM 摘要是 compact 的硬依赖（compact + observe 回退档共用本函数）：瞬时故障由
     stream_llm_resilient 自愈，自愈耗尽抛 LLMOutageError → 走 INTERRUPTED。**不再**在
     LLM 失败时静默退化为纯截断（旧的 except Exception 兜底已移除）。
+
+    task-4 复审修复（第二轮）：``model`` 曾用 ``agent.runtime.get("llm_model", "mock")``
+    ——inline compact 路径下 ``agent.runtime`` 从不会被写入 ``llm_model``（正常任务执行
+    materialize() 出来的 Agent 就是空 runtime），这行代码因此在那条路径下恒回落
+    ``"mock"``。改用同子系统其余调用方（act.py 等）已经在用的 ``resolve_llm_identity``
+    ——真值来自 ``state.resolved_model``，是派发时 ``AgentLifecycleManager.resolve_model`` 解出的
+    那一个，compact 的三条调用路径（inline PrepareStep 触发 / ``_maybe_predispatch_compact``
+    / 独立的 ``compact_agent``）用的都是已经带 ``resolved_model`` 的 ``LoopState``（前两者
+    共享 ``_execute_task`` 构造的那份，同一份 state 上 act.py 的 ``resolve_llm_identity``
+    早就在成功调用；后者是 ``runtime.py::compact_agent`` 显式 ``resolved_model=rm`` 构造
+    的孤儿 run），故不额外加 try/except 兜底——真出现 None 就该炸，不吞。
+
+    真实调查结论（供风险评估）：这次修复前，实际发给 LLM 服务商的模型**并不是**字面上的
+    "mock"——``providers/llm/anthropic.py``/``openai.py`` 的 ``_build_payload`` 都已有
+    ``model = request.model if request.model and request.model != "mock" else self._model``
+    这行兜底替换（``anthropic.py`` 的 ``model`` 属性文档字符串原话：「实际调用一直用它替换
+    "mock"……事件账面须与之同源」），而 ``self._model``（client 构造时配置的模型）与
+    ``AgentLifecycleManager.resolve_model()`` 在 ``choice.model`` 为空时的回落值（``getattr(client,
+    "model", "")``）同源，与 ``state.resolved_model.model`` 基本一致。也就是说**运行时
+    行为本身不受影响**（真实 adapter 早已在暗中纠正这个 "mock" 哨兵），本次修复修的是
+    「事件 payload 撒谎」而非「调错模型」——`docs/events-v2.md` §3.6 要求 model/llm_account
+    是「实际用的那个」，撒谎的是事件，不是调用（`MockLLMAdapter` 例外：它没有这层兜底，
+    ``last_request.model`` 会原样收到调用方传入的值——`compact.py` 里那处
+    ``agent.runtime={"llm_model": rm.model}`` 桥接就是专给它搭的，见 `runtime.py`
+    ``compact_agent``；本次改动后这座桥不再是唯一支撑，`resolve_llm_identity` 本身就
+    正确，桥不拆但也不再是必需）。
+
+    task-4 复审修复（第一轮）：compact 走的这次 LLM 调用现在也经 gateway 的门禁（origin==
+    LOOP_COMPACT）自动获得 LLM_REQUEST_STARTED/LLM_PROMPT_SENT/LLM_TOKEN_STREAMED/
+    LLM_REASONING_STREAMED；本函数补发收尾的 LLM_RESPONSE_FINISHED——两边必须成对，
+    否则 host SSE 看到的是一条永远等不到收尾的挂死请求。payload 字段名/取值方式照抄
+    act.py 那份（``_run_llm_turn``）。request_id 用同一个确定性公式独立算出（同
+    act.py 的手法，见 llm_gateway.stream_llm_resilient 文档字符串）：两边都在本次
+    调用任何事件发射前求值，天然一致，不需要新增参数或跨函数传值。
+
+    收尾事件的发射条件与 gateway 那 4 个流式事件**同一个门禁**（``bus is not None`` 且
+    ``state.origin == EventOrigin.LOOP_COMPACT``），而不是只看 ``bus``——否则本函数万一
+    在别的 origin 下被调用（目前实际不会，但别指望调用方永远守规矩），会发一条没有配对
+    REQUEST_STARTED 的孤儿 RESPONSE_FINISHED，比不发更糟。``bus is None``（多数单测的
+    ctx 不接总线）时事件收发跳过——`state.sequence_counter` 在这些最小化 state 上不一定
+    存在，故 request_id 的计算放在同一个 guard 里，不会在 bus 缺失时因缺字段而崩；
+    ``resolve_llm_identity`` 则不受这个 guard 保护（见上，本就该在 bus 缺失时也正确解析、
+    正确发送）。
     """
     agent = state.agent
     request = ContextRequest(
@@ -68,8 +194,9 @@ async def summarize_for_compact(
     )
     compact_prompt = await ctx.assembler.assemble(request)
 
+    model, llm_account = resolve_llm_identity(state)
     llm_request = LLMRequest(
-        model=agent.runtime.get("llm_model", "mock"),
+        model=model,
         system=compact_prompt.system,
         messages=compact_prompt.messages,
         tools=[],
@@ -77,11 +204,34 @@ async def summarize_for_compact(
     # 一次性调用（无循环内基线）→ baseline=None，走 max(整份估算, context_tokens)。
     llm_request.prompt_token_estimate = request_prompt_estimate(
         ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), None)
+
+    bus = getattr(ctx, "event_bus", None)
+    # 同 gateway 那 4 个流式事件一个门禁：bus 存在 且 origin==LOOP_COMPACT（见上方 docstring）。
+    should_emit_finished = bus is not None and getattr(state, "origin", None) == EventOrigin.LOOP_COMPACT
+    req_id = f"req_{agent.id}_{state.sequence_counter}" if should_emit_finished else None
+
     summary_text = ""
+    reasoning_text = ""
+    usage = LLMUsage()
     async for chunk in stream_llm_resilient(ctx, state, llm_request):
         if chunk.kind == "token":
             summary_text += chunk.text
-    return summary_text
+        elif chunk.kind == "reasoning":
+            reasoning_text += chunk.text
+        elif chunk.kind == "usage" and chunk.usage is not None:
+            usage = chunk.usage
+
+    if should_emit_finished:
+        await bus.emit(make_event(
+            state, EventType.LLM_RESPONSE_FINISHED,
+            payload={
+                "request_id": req_id, "content": summary_text, "reasoning": reasoning_text,
+                "tool_calls": [],
+                "usage": dataclasses.asdict(usage),
+                "llm_model": model, "llm_account": llm_account,
+                "finish_reason": "stop", "turn": 0}))
+    # spec: compact-fidelity——落库前宽松解析（缺必需节整文降级，不中断）。
+    return parse_structured_digest(summary_text)
 
 
 # 坍缩 USER_PROMPT 的两节分隔标记；再坍缩时据此切出「原始消息」节，保持有界。
@@ -163,7 +313,7 @@ def _worth_collapsing(fold: list) -> bool:
 
 async def collapse_task_layer(
     state, ctx, keep_last: int,
-    summary_text: "str | Callable[[], Awaitable[str]]",
+    summary_text: "str | ParsedDigest | Callable[[], Awaitable[str | ParsedDigest]]",
 ) -> int:
     """task compact（二级压缩）：把当前 task 层早期回合（含原始 USER_PROMPT 与 observer 的
     `## Progress So Far`）整体坍缩成一条新 USER_PROMPT，content = 原始消息 + COLLAPSE_DELIM +
@@ -172,11 +322,11 @@ async def collapse_task_layer(
 
     坍缩物是 USER_PROMPT 而非 assistant 摘要：composer 据 mtype=="user_prompt"+task_id 定位当前
     task 贴 `## Current Task/## Current Message` 框，故当前运行 task 坍缩后框架不丢；已结束胶囊被
-    跨 task 召回时它就是一条背景 message。
+    跨 task 召回时它就是一条背景 message。degraded 标记随 metadata 落库（spec: compact-fidelity）。
 
     `summary_text` 可以是算好的文本（兼容裸 str 的旧测试桩），也可以是**取摘要的零参 async
-    函数**（`escalating_compact` 传的就是后者）：摘要在切分与 no-op 判定**之后**才求值——无可折
-    之物时不花那次 LLM。
+    函数**（`escalating_compact` 传的就是后者）：摘要在切分、no-op 判定、折区图片降级**之后**
+    才求值——无可折之物时不花那次 LLM，且摘要输入里不会有即将被降级的真图（同 L1 的顺序）。
     """
     memory = ctx.memory
     recs = await memory.load_view(
@@ -185,6 +335,23 @@ async def collapse_task_layer(
     if not _worth_collapsing(fold):
         return 0
 
+    # §6.1：折叠范围内的残留真图**先无条件降级**（不受 keep_recent 保护）。L0.5 保住了
+    # 最近 keep_recent 张，升级到这一级时它们恰好可能落进折区；不降的话下面取 `original`
+    # 节走 content_to_text 会把它们静默拍扁——最老的图留下了可取回的占位，最新的反而
+    # 痕迹全无，优先级完全颠倒。降级后 ref 随 `original` 节一起活下来。
+    if _media_enabled(ctx) and await demote_all(
+        memory, [r.id for r in fold], ctx.provider_ctx,
+        address=state.scope, scope=MemoryScope.TASK, kinds=_TASK_VIEW_KINDS,
+    ):
+        # 🔴 必须重新 load_view：降级是 fold(旧 id, 新事件)，**record id 全换了**。
+        # 拿降级前采集的 id 去下面那次 fold，被降过的一条都 supersede 不掉 → 同一段
+        # 对话在视图里出现两次；且手里这份 recs 已过期，用它取 `original` 节拿到的仍是
+        # 真图，照旧被拍扁，本段的目的完全落空。
+        recs = await memory.load_view(
+            state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
+        fold, kept = _split_for_collapse(recs, keep_last)
+        if not _worth_collapsing(fold):
+            return 0
 
     # 「原始消息」节 = 折区最早一条 user 回合的原文（已坍缩过则取其原始节，保持有界）
     original = ""
@@ -199,18 +366,28 @@ async def collapse_task_layer(
     anchor_ts = anchor_src.timestamp - timedelta(microseconds=1)
 
     ids = [r.id for r in fold]
-    if callable(summary_text):
-        summary_text = await summary_text()
+    digest = await _resolve_digest(summary_text)
+    collapsed = f"{original}{COLLAPSE_DELIM}{digest.text or '[Context compacted]'}"
     # v2 P3d：遗忘+坍缩物一次原子 fold（旧徒手 supersede+ingest 有崩溃丢摘要窗口）
     await memory.fold(ids, [
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
             address=state.scope,
-            content=f"{original}{COLLAPSE_DELIM}{summary_text or '[Context compacted]'}",
+            content=collapsed,
             timestamp=anchor_ts,
             role="user",
             metadata={"task_id": state.scope.task_id, "collapsed": True,
-                      "keep_last": keep_last, "folded_count": len(fold)},
+                      "keep_last": keep_last, "folded_count": len(fold),
+                      "digest_degraded": digest.degraded},
+            # 上面 §6.1 的前置降级把折区的真图换成了 L0.5 占位，`original` 节又把其中
+            # 一部分逐字带进了坍缩物——那些 ref 于是**仍在视图里、仍被 get_image 定位得到**，
+            # 而承载它们的原记录正要被这一次 fold 全部 supersede。占位是文本，GC 的 mark
+            # 判据（`collect_blob_refs`）只看结构化字段，不声明就等于让引用归零：宽限期一过
+            # 字节被回收，模型读到「call media:get_image(...) to bring it back」，换回来的却是
+            # `[image unavailable]`——L0.5 承诺的「可逆」在这一步失效。
+            # 只声明**幸存在坍缩物里**的那些（`placeholder_refs` 的口径），没进来的那些
+            # 本就再也定位不到，一并声明只会让字节永远回收不掉。
+            blob_refs=placeholder_refs(collapsed),
         ),
     ], ctx.provider_ctx)
     return len(ids)
@@ -272,7 +449,9 @@ async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
     for r in [*body, *agent_recs]:
         text = r.content if isinstance(r.content, str) else content_to_text(r.content)
-        total += ctx.llm.tokenizer.count(text)
+        # 图片另计：不计入则降级图片的 freed_tokens 恒为 0，escalating_compact 的
+        # est 不减、误判该级白跑而继续升级（见 spec 2026-08-20-multimodal-design §6.5）。
+        total += ctx.llm.tokenizer.count(text) + image_tokens(r.content)
     return total
 
 
@@ -308,8 +487,10 @@ async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
     return len(top)
 
 
-async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: int,
-                               summary_text: str) -> int:
+async def fold_root_experience(
+        state: LoopState, ctx: LoopContext, keep_last: int,
+        summary_text: "str | ParsedDigest | Callable[[], Awaitable[str | ParsedDigest]]",
+) -> int:
     """跨层折叠 fold：task 的详细度只 3 级（spec 2026-06-29 重订，删 L1 黑盒中间态）。
 
     - **执行中**：RUNNING/SUSPENDED → task 层 raw（每条工具调用展开），不在本函数管辖。
@@ -326,6 +507,12 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
 
     跨层 supersede 一次原子提交（ids 跨 task 层胶囊 + agent 层对话,provider 按 id 生效、不按
     scope 过滤）。返回 supersede 的总条数。
+
+    `summary_text` 可以是**已算好的摘要文本**，也可以是一个**取摘要的零参 async 函数**
+    （Task 5b / P4-L10）：§6.1 的前置降级必须发生在摘要生成**之前**，否则折区里的真图
+    会被 `content_to_text` 静默拍扁进摘要输入（连占位都没有），随后记录被 supersede——
+    正是 §6.1 要防的「最新的图反而痕迹全无」。摘要由本函数在降级 + 重新 `load_view`
+    之后才求值，调用方因此不必把降级逻辑（依赖折区 ids）搬到自己那边去。
     """
     memory = ctx.memory
     # AGENT 视图默认 kinds（对话+摘要）；legacy dispatch 配对已在 load_view 内归一，升序即时序。
@@ -383,21 +570,56 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
     fold_top = top if keep_last <= 0 else top[:-keep_last]
     fold_set = _expand(fold_top)        # 整体折成摘要的单元（含其子树）
 
-    ids: list = []
-    # 折掉 fold_set 单元的 task 层胶囊（user 回合 + 段摘要等；address.task_id 标来源）
-    for r in body_recs:
-        if (r.address.task_id if r.address else r.metadata.get("task_id")) in fold_set:
-            ids.append(r.id)
-    # + 其 agent 层 conversation turn（finish 对 + dispatch 对，同 origin 同命运）+ 旧摘要
-    for r in recs:
-        if (r.kind is MemoryKind.CONVERSATION_TURN
-                and r.metadata.get("origin_task_id") in fold_set):
-            ids.append(r.id)
-        elif r.kind is MemoryKind.SUMMARY:
-            ids.append(r.id)  # 旧摘要并入新摘要
+    def _collect(agent_recs: list, task_recs: list) -> list:
+        """本次要 supersede 的 id 全集。降级会换掉 record id，故这一步必须能重跑。"""
+        out: list = []
+        # 折掉 fold_set 单元的 task 层胶囊（user 回合 + 段摘要等；address.task_id 标来源）
+        for r in task_recs:
+            if (r.address.task_id if r.address else r.metadata.get("task_id")) in fold_set:
+                out.append(r.id)
+        # + 其 agent 层 conversation turn（finish 对 + dispatch 对，同 origin 同命运）+ 旧摘要
+        for r in agent_recs:
+            if (r.kind is MemoryKind.CONVERSATION_TURN
+                    and r.metadata.get("origin_task_id") in fold_set):
+                out.append(r.id)
+            elif r.kind is MemoryKind.SUMMARY:
+                out.append(r.id)  # 旧摘要并入新摘要
+        return out
 
+    ids = _collect(recs, body_recs)
     if not ids:
         return 0
+
+    # §6.1：折叠范围内的残留真图先无条件降级（不受 keep_recent 保护），理由同
+    # collapse_task_layer 处。折区横跨两个视图，故两次 demote_all（各自 load_view）。
+    if _media_enabled(ctx):
+        demoted = await demote_all(
+            memory, ids, ctx.provider_ctx, address=_agent_half(state.scope),
+            scope=MemoryScope.TASK, kinds=_TASK_VIEW_KINDS)
+        demoted += await demote_all(
+            memory, ids, ctx.provider_ctx, address=_agent_half(state.scope),
+            scope=MemoryScope.AGENT)
+        if demoted:
+            # 🔴 必须重新 load_view + 重算 ids：降级换掉了 record id，拿旧 id 去下面那次
+            # fold，被降过的一条都 supersede 不掉 → 同一段对话在视图里出现两次
+            # （旧的没被 supersede、新的补偿记录也活着），而摘要已按旧内容生成。
+            recs = await memory.load_view(
+                _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
+            body_recs = await memory.load_view(
+                _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx,
+                kinds=_TASK_VIEW_KINDS)
+            ids = _collect(recs, body_recs)
+            if not ids:
+                return 0
+
+    # 🔴 摘要在这里才求值——**必须在上面那次前置降级之后**（Task 5b，修 P4-L10）。
+    # 反过来（旧序：调用方先算好摘要再传进来）的话，折区里那些被 L0.5 的 keep_recent
+    # 保下来的**最新的**图会先被 `content_to_text` 拍扁进摘要输入（连占位都没有、
+    # ref 彻底没了），紧接着记录就被下面的 `fold()` supersede → 老图留下可取回的占位、
+    # 最新的图反而痕迹全无，正是 §6.1 开头写的「优先级完全颠倒」。
+    # 兼容裸 str / 零参协程（既有测试桩形态）——统一经 _resolve_digest（spec:
+    # compact-fidelity，degraded 随 metadata 落库）。
+    digest = await _resolve_digest(summary_text)
 
     # 折出新摘要：仅当确有单元被折时写（纯遗忘 = fold(ids, [])）
     if not fold_top:
@@ -419,15 +641,21 @@ async def fold_root_experience(state: LoopState, ctx: LoopContext, keep_last: in
         if (r.address.task_id if r.address else r.metadata.get("task_id")) in surviving:
             kept_ts.append(r.timestamp)
     anchor_ts = (min(kept_ts) if kept_ts else now_utc())
+    folded_summary = digest.text or "[Experience compacted]"
     # v2 P3d：跨层遗忘 + 新摘要一次原子 fold（关旧「raw 已删而摘要未写」窗口）
     await memory.fold(ids, [
         MemoryEvent(
             kind=MemoryKind.SUMMARY, scope=MemoryScope.AGENT,
             address=state.scope,
-            content=summary_text or "[Experience compacted]",
+            content=folded_summary,
             timestamp=anchor_ts - timedelta(microseconds=1),
             role="user",
-            metadata={"keep_last": keep_last, "folded_count": len(fold_top)},
+            metadata={"keep_last": keep_last, "folded_count": len(fold_top),
+                      "digest_degraded": digest.degraded},
+            # 同 collapse_task_layer 处：摘要输入里含 L0.5 占位（§6.1 的前置降级刚写下），
+            # 模型**可能**把某个 ref 逐字抄进摘要。抄进来了就仍能被 get_image 定位到，
+            # 故必须声明；没抄进来则 `placeholder_refs` 返回空表，这里恒为 no-op。
+            blob_refs=placeholder_refs(folded_summary),
         ),
     ], ctx.provider_ctx)
     return len(ids)
@@ -501,7 +729,7 @@ async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -
 async def escalating_compact(
     state: LoopState, ctx: LoopContext, *, token_estimate: int, trigger: str = "compact"
 ) -> list[Any]:
-    """预算驱动升级式 compact（替 _compact_scope）：L1 agent 折 → L2 rich→lean → L3 坍当前 task，
+    """预算驱动升级式 compact（替 _compact_scope）：L0.5 图片降级 → L1 agent 折 → L2 rich→lean → L3 坍当前 task，
     每级后用 _active_memory_tokens 的增量从 token_estimate 累减，降到 target 以下即停。
     级间不完整重装配（Q4=c，调用方进 act 前重装配一次校正）。无 context_limit 或已达标 → []。"""
     agent = state.agent
@@ -516,6 +744,8 @@ async def escalating_compact(
     target_tokens = int(eff * target_ratio)
     keep_last = lc.compact_keep_last
     collapse_keep = getattr(lc, "collapse_keep_last", keep_last)
+    # §12 未决参数，暂定 2 —— 从 loop_config 读（与 compact_keep_last 等同构），不硬编码。
+    keep_recent_images = getattr(lc, "compact_keep_recent_images", 2)
 
     est = token_estimate
     if est < target_tokens:
@@ -552,6 +782,8 @@ async def escalating_compact(
         nonlocal est, last_tokens
         # 不变量：前一级的 after 直接当这一级的 before 复用，只在 _active_memory_tokens 是纯快照读、
         # 且两次 _apply 之间没有其他改动内存的操作时才成立。未来若在级间插入其他写操作，须重新测量。
+        # 故 L1 的「前置降级 + 摘要 + fold」整体作为**一个** level_coro 交给本函数（Task 5b）：
+        # 把降级提到 _apply 之外会破坏这个前提，且降级省下的 token 要么被重复计入、要么彻底丢掉。
         before = last_tokens if last_tokens is not None else await _active_memory_tokens(state, ctx)
         n = await level_coro if inspect.isawaitable(level_coro) else level_coro
         after = await _active_memory_tokens(state, ctx)
@@ -560,10 +792,38 @@ async def escalating_compact(
         last_tokens = after
         return n, freed
 
+    # L0.5 · 图片降级（子设计 §6：排在所有折叠之前）
+    # 三条理由：无 LLM（不花一次调用）、单位收益最高（一张图按当前口径最低 1600 token，
+    # 满额 5MB 图 40960）、**可逆**（占位仍在原位，模型随时 media:get_image 取回）。
+    # L1/L2/L3 折的是记录本身，一旦执行位置就没了；所以先花可逆的额度。
+    # 未接 MemoryBlobStore 时 _media_enabled 直接短路，本级连一次 memory 读都不发（§10）。
+    if _media_enabled(ctx):
+        n, freed = await _apply(demote_for_budget(
+            ctx.memory, _agent_half(state.scope), ctx.provider_ctx,
+            keep_recent=keep_recent_images, scope=MemoryScope.TASK,
+            kinds=_TASK_VIEW_KINDS))
+        if n:
+            # 注：本级的 n 是**图片张数**，不是记录条数（记录并没有被折走，只是被重写）。
+            # 仍填进 superseded_count 以与各级同构、让 MemoryCompactFinished 的聚合口径
+            # 不必分叉；真正无歧义的计数在 demoted_images。
+            events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
+                "superseded_count": n, "demoted_images": n, "layer": "task",
+                "source": "demote_images", "trigger": trigger, "freed_tokens": freed}))
+    if est < target_tokens:
+        return _finish(events)
+
     # L1 · agent 折（仅当有可折顶层单元）
     if await _count_root_residues(state, ctx) > keep_last:
-        summary_agent = await summarize_for_compact(state, ctx, scope="agent")
-        n, freed = await _apply(fold_root_experience(state, ctx, keep_last, summary_agent))
+        # 🔴 传的是「取摘要的函数」而不是摘要文本（Task 5b，修 P4-L10）：摘要必须在
+        # `fold_root_experience` 内部的 §6.1 前置降级**之后**才生成，否则折区里的真图
+        # 先被拍扁进摘要输入（连 ref 都不剩）再被 supersede。折区 ids 只有函数内部
+        # 算得出，故把摘要推迟进去，而不是把降级提到外面来。
+        # 这样整级（降级 + 摘要 + fold）仍是交给 `_apply` 的**一步**，`_apply` 的
+        # 「前一级 after 复用为本级 before」不变量不受影响，降级省下的 token 也自然
+        # 计进本级的 freed（既不重复计入 L0.5，也不丢）。
+        n, freed = await _apply(fold_root_experience(
+            state, ctx, keep_last,
+            lambda: summarize_for_compact(state, ctx, scope="agent")))
         if n:
             events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
                 "superseded_count": n, "layer": "agent", "source": "root_experience",
@@ -600,8 +860,9 @@ async def escalating_compact(
     task_n = len(_rendered_only(await ctx.memory.load_view(
         state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)))
     if task_n > collapse_keep:
-        # 传「取摘要的函数」而非摘要文本：按回合切之后 L3 可能发现无可折之物而 no-op，
-        # 先算好就白烧一次 LLM。
+        # 传「取摘要的函数」而非摘要文本（同 L1）：按回合切之后 L3 可能发现无可折之物而
+        # no-op，先算好就白烧一次 LLM；且折区图片降级发生在 collapse_task_layer 内部，
+        # 摘要必须在那之后生成，否则摘要输入里仍是真图。
         n, freed = await _apply(collapse_task_layer(
             state, ctx, collapse_keep,
             lambda: summarize_for_compact(state, ctx, scope="task")))

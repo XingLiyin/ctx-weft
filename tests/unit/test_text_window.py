@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator._text_window import TextWindowConfig, window_text
+from ctx_weft.core.capabilities._text_window import TextWindowConfig, window_text
 
 CFG = TextWindowConfig(default_lines=5, max_chars=64, max_line_chars=10)
 LONG = "".join(f"line{i}\n" for i in range(1, 101))

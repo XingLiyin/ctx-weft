@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.errors import TemplateNotFoundError
-from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
-from ctx_weft.core.runtime import ProviderRegistry
+from ctx_weft.core.models.errors import TemplateNotFoundError
+from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
+from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.protocols.capability import (
     AgentCapability, AgentCapabilityProvider, CapabilityProviderInfo,
 )

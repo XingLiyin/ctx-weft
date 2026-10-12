@@ -2,7 +2,8 @@
 
 覆盖 task-9-brief.md 「机制设计（全量）」的 _trip_failure_threshold 步骤 1-8：
 - 事件序：FAILURE_THRESHOLD_HIT → TASK_CANCELED*（非 root）→ TASK_FAILED(root) →
-  SESSION_STATUS_CHANGED(FAILED, reason="failure_threshold")。
+  TASK_QUEUE_DRAINED(final_status=FAILED)。Task 6 起会话终态由 SessionRegistry 据这条
+  聚合信号发 SessionFinished，TM 不再自己发 SESSION_STATUS_CHANGED/SESSION_FINISHED。
 - 队列/挂起任务全 CANCELED，root FAILED（error_code=TASK_FAILED_BY_THRESHOLD）。
 - 幂等闩：第 4 败不重进 trip、不重发事件。
 - 封闸后 _flush_staged 丢弃本轮 staged 子任务。
@@ -14,11 +15,13 @@
 
 from __future__ import annotations
 
-from ctx_weft.core.events.types import EventType
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.task_queue import QueueEntry
-from ctx_weft.core.state.models import Session, Task
-from ctx_weft.core.utils import now_utc
+from ctx_weft.protocols.events import EventType
+from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.queue import QueueEntry
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
+from ctx_weft.core.utils.clock import now_utc
 from tests.unit._stub_runner import StubRunner
 
 
@@ -65,7 +68,13 @@ async def _fail_n_times(tm: TaskManager, task_ids: list[str]) -> None:
 
 
 async def test_trip_event_sequence_on_third_failure() -> None:
-    """3 连败：THRESHOLD_HIT → TASK_CANCELED*（非 root）→ TASK_FAILED(root) → SESSION_STATUS_CHANGED(FAILED)。"""
+    """3 连败：THRESHOLD_HIT → TASK_CANCELED*（非 root）→ TASK_FAILED(root) → session.status=FAILED。
+
+    2026-09-04（Task 12，events-v2 §5）起第 8 步不再额外发一条会话级 TaskQueueDrained
+    落定终态——`_trip_failure_threshold` 直接把 `session.status` 写成 "FAILED"（trip
+    序列 8 号步骤，紧接在 6 号步骤 TASK_FAILED 之后、同一次同步调用内），已经没有
+    独立事件可用来做「在 TASK_FAILED 之后」的顺序断言，改成直接断言这个值。
+    """
     bus = _CapturingBus()
     tm, session = _tm(bus)
     root = _root()
@@ -79,13 +88,10 @@ async def test_trip_event_sequence_on_third_failure() -> None:
     assert EventType.FAILURE_THRESHOLD_HIT in types
     hit_idx = types.index(EventType.FAILURE_THRESHOLD_HIT)
     failed_idx = types.index(EventType.TASK_FAILED)
-    status_idx = max(i for i, t in enumerate(types) if t == EventType.SESSION_STATUS_CHANGED
-                      and bus.events[i].payload.get("new_status") == "FAILED")
-    assert hit_idx < failed_idx < status_idx
-    session_status_event = bus.events[status_idx]
-    assert session_status_event.payload.get("reason") == "failure_threshold"
+    assert hit_idx < failed_idx
+    assert EventType.SESSION_STATUS_CHANGED not in types
+    assert "TaskQueueDrained" not in [str(t) for t in types]
     assert session.status == "FAILED"
-    assert EventType.SESSION_FINISHED in types
 
 
 async def test_queue_and_suspended_tasks_canceled_root_failed() -> None:
@@ -216,7 +222,7 @@ async def test_ack_tasks_and_failures_passed_to_finalizer() -> None:
         captured["ack_ids"] = sorted(t.id for t in ack_tasks)
         captured["failures"] = failures
 
-    tm.set_threshold_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(threshold_finalizer=_finalizer))
     await _fail_n_times(tm, ["d1", "d2", "d3"])
 
     assert captured["root"] is root
@@ -251,7 +257,7 @@ async def test_suspended_started_task_routed_to_cancel_finalizer() -> None:
         captured["ids"] = sorted(t.id for t in tasks)
         captured["reason"] = reason
 
-    tm.set_cancel_finalizer(_cancel_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_cancel_finalizer))
     await _fail_n_times(tm, ["d1", "d2", "d3"])
 
     assert captured["ids"] == ["framed_susp"]
@@ -279,7 +285,7 @@ async def test_cancel_inflight_called_for_inflight_non_root_and_root() -> None:
         called.append(tid)
         return True
 
-    tm.set_cancel_inflight(_cancel_inflight)
+    tm.set_hooks(TaskManagerHooks(cancel_inflight=_cancel_inflight))
 
     await _fail_n_times(tm, ["c1", "c2", "c3"])
 
@@ -316,7 +322,13 @@ async def test_root_already_terminal_skips_finalization() -> None:
 
 
 async def test_cancel_pending_hitl_invoked_before_terminal_status() -> None:
-    """cancel_pending_hitl 在 SESSION_STATUS_CHANGED(FAILED) 之前被 await 调用。"""
+    """cancel_pending_hitl 在终态落定（→ 收尾）之前被 await 调用。
+
+    2026-09-04（Task 12，events-v2 §5）起 trip 序列第 8 步不再发 TASK_QUEUE_DRAINED
+    （`announce_queue_state` 已停发）——`session.status = "FAILED"` 直接写定,紧接着
+    调 `_fire_session_done()`。没有事件可拦截了,改拦 `_fire_session_done` 本身的调用
+    时机（它是终态写定之后**唯一**还在的、可挂钩的收尾点）。
+    """
     bus = _CapturingBus()
     tm, session = _tm(bus)
     root = _root()
@@ -329,15 +341,15 @@ async def test_cancel_pending_hitl_invoked_before_terminal_status() -> None:
     async def _cancel_hitl():
         call_order.append("cancel_hitl")
 
-    tm.set_cancel_pending_hitl(_cancel_hitl)
-    orig_emit = tm._emit
+    tm.set_hooks(TaskManagerHooks(cancel_pending_hitl=_cancel_hitl))
+    orig_fire_session_done = tm._fire_session_done
 
-    async def _tracking_emit(event_type, task_id=None, payload=None):
-        if event_type == EventType.SESSION_STATUS_CHANGED and (payload or {}).get("new_status") == "FAILED":
+    async def _tracking_fire_session_done():
+        if session.status == "FAILED":
             call_order.append("session_failed")
-        await orig_emit(event_type, task_id=task_id, payload=payload)
+        await orig_fire_session_done()
 
-    tm._emit = _tracking_emit
+    tm._fire_session_done = _tracking_fire_session_done
 
     await _fail_n_times(tm, ["c1", "c2", "c3"])
 

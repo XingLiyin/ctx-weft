@@ -6,11 +6,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.events import EventType
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.protocols.events import EventType
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
@@ -18,7 +18,7 @@ from ctx_weft.protocols.capability import (
     ToolCapability,
     ToolCapabilityProvider,
 )
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
 class _Echo(ToolCapabilityProvider):
@@ -46,6 +46,7 @@ def _state_ctx():
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
         scope=scope,
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),

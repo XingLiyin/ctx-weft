@@ -1,6 +1,6 @@
 {
   "name": "compact-task",
-  "description": "记忆压缩子任务作为普通 task 被跟踪（CompactTaskSettings）；compact 域事件（CompactTriggered/Dispatched/MemoryCompactStarted/MemoryCompacted）对投影是 no-op。主任务状态不受影响。",
+  "description": "记忆压缩子任务作为普通 task 被跟踪（CompactTaskSettings）；compact 域事件（CompactTriggered/Dispatched/MemoryCompactStarted/MemoryCompacted）对投影是 no-op。主任务状态不受影响。task 状态所有权重构（2026-09-02）后 TaskFinished 由 TaskManager 发、不带 run_id。",
   "runId": "s1",
   "events": [
     { "id": "evt_0001", "runId": "run_1", "sequence": 1, "sessionId": "s1",
@@ -22,8 +22,9 @@
       "type": "MemoryCompactStarted", "timestamp": "2026-06-05T00:00:07Z", "payload": {} },
     { "id": "evt_0008", "runId": "run_1", "sequence": 8, "sessionId": "s1", "taskId": "tsk_compact",
       "type": "MemoryCompacted", "timestamp": "2026-06-05T00:00:08Z", "payload": { "kept_last": 6 } },
-    { "id": "evt_0009", "runId": "run_1", "sequence": 9, "sessionId": "s1", "taskId": "tsk_compact",
-      "type": "TaskFinished", "timestamp": "2026-06-05T00:00:09Z", "payload": {} }
+    { "id": "evt_0009", "runId": null, "sequence": 0, "sessionId": "s1", "taskId": "tsk_compact",
+      "type": "TaskFinished", "timestamp": "2026-06-05T00:00:09Z",
+      "payload": { "outcome": "success", "summary": "", "outputs": null } }
   ],
   "expected": {
     "tasks": {

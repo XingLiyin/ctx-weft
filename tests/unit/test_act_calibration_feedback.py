@@ -33,8 +33,9 @@ class _RecordingBus:
 
 class _FakeGateway:
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id=None):
-        from ctx_weft.core.orchestrator.control_capability import ControlResult
-        return ControlResult(content="DONE")
+        from types import SimpleNamespace
+        # 返回形态对齐生产 InvocationResult（含 is_error）
+        return SimpleNamespace(content="DONE", is_error=False, metadata={})
 
 
 class _SpyTokenizer(HeuristicTokenizer):
@@ -71,17 +72,21 @@ def _make_state(*, context_tokens: int = 0):
     task = SimpleNamespace(
         id="t1", parent_task_id="p1", status="RUNNING",
         observer_outcome=None, process_report=None,
+        # act 的提交点（spec 2026-09-09）会调 persist_user_prompt——这两个字段是它的判据。
+        # 本文件只测一次 LLM turn，没有待落库的 user_prompt：标成「已落库」即 no-op。
+        user_prompt=None, user_prompt_in_memory=True,
     )
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
     from ctx_weft.core.loop.driver import LoopState
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
+        resolved_model=SimpleNamespace(model="deepseek-v4-pro", account="deepseek-rj"),
     )
 
 
 def _make_ctx(event_bus, tokenizer: HeuristicTokenizer):
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
 

@@ -5,14 +5,14 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import (
     DISPATCH_TOOLS,
     SILENT_TOOLS,
     CapabilityGateway,
 )
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
@@ -20,7 +20,7 @@ from ctx_weft.protocols.capability import (
     ToolCapability,
     ToolCapabilityProvider,
 )
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
 class _Echo(ToolCapabilityProvider):
@@ -52,6 +52,7 @@ def _state_ctx():
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
         scope=scope,
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),
@@ -90,7 +91,7 @@ def test_classification_sets_are_qualified() -> None:
     assert "control__delegate_task" in DISPATCH_TOOLS
     assert "control__finish_task" in SILENT_TOOLS
     # background observe 终止工具：silent，不入 task 对话（task close 后才跑，否则污染冻结对话）
-    assert "control__collect_process_report" in SILENT_TOOLS
+    assert "control__report_task_outcome" in SILENT_TOOLS
     assert "delegate_task" not in DISPATCH_TOOLS  # bare no longer matches
 
 
@@ -99,7 +100,7 @@ async def test_control_tool_resolves_from_global_region_when_agent_uncached() ->
     resolves them even when the per-agent snapshot is empty — e.g. a fire-and-forget background
     observe invoking collect_process_report AFTER its run ended and the per-agent cache was evicted.
     """
-    from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
+    from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 
     mem, state, ctx = _state_ctx()
     provider = ControlCapabilityProvider()
@@ -111,18 +112,18 @@ async def test_control_tool_resolves_from_global_region_when_agent_uncached() ->
         memory=mem, event_bus=InProcessEventBus(),
     )
     res = await gw.invoke(
-        "control__collect_process_report",
-        {"act_recap": "段总结X"}, state, ctx,
+        "control__report_task_outcome",
+        {"task_status": "success", "act_recap": "段总结X"}, state, ctx,
     )
     assert res.is_error is False, f"expected resolved via global region, got: {res.content}"
-    assert res.content == "段总结X"
+    assert "段总结X" in res.content
 
 
-async def test_collect_process_report_silent_no_task_ingest() -> None:
-    """collect_process_report 是 SILENT：gateway 不把 TOOL_INVOCATION/TOOL_RESULT 写进 task 对话
+async def test_observer_report_silent_no_task_ingest() -> None:
+    """report_task_outcome 是 SILENT：gateway 不把 TOOL_INVOCATION/TOOL_RESULT 写进 task 对话
     （否则 background observe 在 task close 后调用会污染冻结对话、泄漏进后续 task prompt），
     但仍正常返回 ControlResult.content——background observe 据此取报告落 close 槽。"""
-    from ctx_weft.core.orchestrator.control_capability import ControlCapabilityProvider
+    from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
     from ctx_weft.protocols import MemoryEventType
 
     mem, state, ctx = _state_ctx()
@@ -134,17 +135,17 @@ async def test_collect_process_report_silent_no_task_ingest() -> None:
         memory=mem, event_bus=InProcessEventBus(),
     )
     res = await gw.invoke(
-        "control__collect_process_report",
-        {"act_recap": "段总结Y"}, state, ctx,
+        "control__report_task_outcome",
+        {"task_status": "success", "act_recap": "段总结Y"}, state, ctx,
     )
     assert res.is_error is False
-    assert res.content == "段总结Y"  # 返回值不受 SILENT 影响
+    assert "段总结Y" in res.content  # 返回值不受 SILENT 影响
 
     scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     tool_recs = await mem.recall_recent(
         scope, [MemoryEventType.TOOL_INVOCATION, MemoryEventType.TOOL_RESULT], 100, ctx.provider_ctx)
     assert tool_recs == [], (
-        f"collect_process_report 不得把 TOOL_INVOCATION/TOOL_RESULT 写进 task 对话; "
+        f"report_task_outcome 不得把 TOOL_INVOCATION/TOOL_RESULT 写进 task 对话; "
         f"found {[(r.type, r.content[:30]) for r in tool_recs]}"
     )
 

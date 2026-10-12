@@ -404,7 +404,7 @@ def test_observer_messages_inject_resources_and_keep_role() -> None:
     task = SimpleNamespace(title="T", description="d", user_prompt="up",
                            user_prompt_in_memory=False, process_report=None)
     request = SimpleNamespace(task=task)
-    msgs = DefaultComposer()._build_observer_messages(blocks, request)
+    msgs = DefaultComposer()._build_observe_messages(blocks, request)
     user_msgs = [m for m in msgs if m.role == "user"]
     assert "### Available Tools" in user_msgs[0].content
     # 条目只有名字 + 入参签名，描述随 tools 参数下发、不重复进正文
@@ -534,7 +534,7 @@ def test_resumed_task_directive_and_capabilities_on_history_pointer_on_fallback(
     # the trailing dynamic-context message: without extra["act_resume_cue"] the composer's
     # structural fallback line anchors the task and asks to continue with the remaining work
     # (canonical cue lives in act_guidance.py); the full listing stays off it — pointer only
-    assert "You are still working on the task: T" in last
+    assert "You are still working on the task: 'T'" in last
     assert "continue with only the remaining work" in last
     assert "### Available Tools" not in last
     assert "Capabilities section of the current task message above" in last
@@ -556,7 +556,7 @@ def test_facet_purpose_gets_no_resume_filler_cue_rides_new_trailing_user() -> No
     task = SimpleNamespace(title="T", description="d", user_prompt="the original ask",
                            user_prompt_in_memory=True, process_report=None, outputs=None)
     request = SimpleNamespace(task=task, purpose="observe")
-    msgs = DefaultComposer()._build_observer_messages(blocks, request)
+    msgs = DefaultComposer()._build_observe_messages(blocks, request)
     # no act resume filler anywhere
     assert all("You are still working on" not in (m.content or "") for m in msgs)
     # the cue message is the LAST message of the list (nothing after it)
@@ -588,7 +588,7 @@ def test_observer_capabilities_on_current_task_turn_not_prepended() -> None:
     task = SimpleNamespace(title="T", description="d", user_prompt="the original ask",
                            user_prompt_in_memory=True, process_report=None, outputs=None)
     request = SimpleNamespace(task=task)  # no purpose attr → non-act (observe) path
-    msgs = DefaultComposer()._build_observer_messages(blocks, request)
+    msgs = DefaultComposer()._build_observe_messages(blocks, request)
     user_msgs = [m for m in msgs if m.role == "user"]
     assert len(user_msgs) >= 2
     first, last = user_msgs[0].content, user_msgs[-1].content

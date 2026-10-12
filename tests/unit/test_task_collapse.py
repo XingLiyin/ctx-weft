@@ -5,11 +5,11 @@ import pytest
 
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, collapse_task_layer
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider as InMemoryBlackboard
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider as InMemoryBlackboard
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext,
 )
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 
 pytestmark = pytest.mark.asyncio
 
@@ -100,8 +100,7 @@ async def test_escalating_compact_l3_uses_collapse_keep_last(monkeypatch):
         kept_arg["keep_last"] = keep_last
         # escalating_compact 交来的是「取摘要的函数」（惰性：真 collapse 在确定要折之后才求值）。
         # 替身照真实实现去求值，本用例钉的「L3 产出一次 task 摘要」才有意义。
-        if callable(summary_text):
-            await summary_text()
+        await cm._resolve_digest(summary_text)
         return 3
 
     monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
@@ -172,7 +171,7 @@ async def test_escalating_l3_fires_on_segment_only_accumulation(monkeypatch):
 async def test_collapsed_user_prompt_gets_current_task_frame():
     from ctx_weft.core.assembler.assembler import ContextBlock
     from ctx_weft.core.assembler.composer import DefaultComposer
-    from ctx_weft.core.utils import content_to_text
+    from ctx_weft.core.utils.content import content_to_text
 
     collapsed = f"原始请求：做 X{COLLAPSE_DELIM}已完成 step1/step2"
     blk = ContextBlock(id="u", source="agent_recall", kind="history", target="messages",

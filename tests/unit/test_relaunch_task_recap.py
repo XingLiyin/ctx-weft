@@ -7,22 +7,44 @@ import asyncio
 import pytest
 
 import ctx_weft.core.runtime as rt_mod
-from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.model import ResolvedModel
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.models.agent import Agent
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import qualify
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
+
+
+class _Client:
+    account = "acct_default"
+    model = "mdl_default"
+    context_limit = 200_000
+    output_reserve = 8192
+
+
+def _fake_resolved_model() -> ResolvedModel:
+    c = _Client()
+    return ResolvedModel(client=c, account=c.account, model=c.model,
+                         context_limit=c.context_limit, reserved_output_tokens=c.output_reserve)
 
 
 def _make_runtime_and_session():
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    )
 
-    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
+    # 模板要真的能解出来：`_relaunch_task_recap` 现在按 agent record 的 template_id 现解
+    # （从前由调用方连同会话模板一起传进来，那会让子 agent 的 recap 跑 root 的 identity）。
+    provider = InlineAgentTemplateProvider()
+    provider.register(make_echo_template())
+    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=provider)
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
@@ -37,7 +59,9 @@ def _make_runtime_and_session():
     task_manager = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
     task_manager.set_session(session)
 
-    template = object()  # 具体属性不参与本方法逻辑；仅作为不透明句柄经 state.extra 透传
+    # `_relaunch_task_recap` 不再收模板（它按 agent 自己的出身解），这个占位只为保持
+    # fixture 的解包形状不变，本文件的用例都不再把它传下去。
+    template = object()
     agent_id = "agt_1"
     return runtime, session, template, task_manager, task, agent_id, memory
 
@@ -77,12 +101,11 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
     tcid = await _seed_finish_pair(memory, session, task, agent_id)
     task.status = "FINISHED"
 
-    async def _fake_instantiate(self, *, template_id, session_id, tenant_id, existing_agent_id, ctx, parent_agent=None):
-        agent = Agent(id=existing_agent_id, session_id=session_id, template_id=template_id,
-                      template_version="v1", status="IDLE", tenant_id=tenant_id)
-        return agent, template
+    def _fake_materialize(self, agent_id, *, session_id=None, tenant_id=None):
+        return (Agent(id=agent_id, session_id=session.id, template_id="agent:tpl_echo",
+                       tenant_id=session.tenant_id), _fake_resolved_model())
 
-    monkeypatch.setattr(LifecycleManager, "instantiate_agent", _fake_instantiate)
+    monkeypatch.setattr(AgentLifecycleManager, "materialize", _fake_materialize)
 
     captured = {}
 
@@ -98,10 +121,10 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
         launched["boundary"] = boundary
         return asyncio.create_task(asyncio.sleep(0))
 
-    monkeypatch.setattr(rt_mod, "launch_background_observe", _fake_launch, raising=False)
+    monkeypatch.setattr(rt_mod, "launch_recap", _fake_launch, raising=False)
 
     await runtime._relaunch_task_recap(
-        session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
+        session=session, task_manager=task_manager,
         task=task, agent_id=agent_id, boundary="finish",
     )
     await asyncio.sleep(0)
@@ -118,13 +141,13 @@ async def test_relaunch_is_best_effort_swallows_errors(minimal_runtime_with_sess
     """任何一步失败：不得抛出，只记日志跳过（best-effort）。"""
     runtime, session, template, task_manager, task, agent_id, memory = minimal_runtime_with_session
 
-    async def _boom(self, *args, **kwargs):
+    def _boom(self, *args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(LifecycleManager, "instantiate_agent", _boom)
+    monkeypatch.setattr(AgentLifecycleManager, "materialize", _boom)
 
     await runtime._relaunch_task_recap(
-        session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
+        session=session, task_manager=task_manager,
         task=task, agent_id=agent_id, boundary="finish",
     )  # 不应抛出
 
@@ -155,12 +178,11 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
     runtime, session, template, task_manager, task, agent_id, memory = minimal_runtime_with_session
     task.status = "SUSPENDED"  # 委派挂起中崩溃的形态
 
-    async def _fake_instantiate(self, *, template_id, session_id, tenant_id, existing_agent_id, ctx, parent_agent=None):
-        agent = Agent(id=existing_agent_id, session_id=session_id, template_id=template_id,
-                      template_version="v1", status="IDLE", tenant_id=tenant_id)
-        return agent, template
+    def _fake_materialize(self, agent_id, *, session_id=None, tenant_id=None):
+        return (Agent(id=agent_id, session_id=session.id, template_id="agent:tpl_echo",
+                       tenant_id=session.tenant_id), _fake_resolved_model())
 
-    monkeypatch.setattr(LifecycleManager, "instantiate_agent", _fake_instantiate)
+    monkeypatch.setattr(AgentLifecycleManager, "materialize", _fake_materialize)
 
     registered = []
     monkeypatch.setattr(rt_mod, "register_close_synth",
@@ -172,10 +194,10 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
         launched["boundary"] = boundary
         return asyncio.create_task(asyncio.sleep(0))
 
-    monkeypatch.setattr(rt_mod, "launch_background_observe", _fake_launch, raising=False)
+    monkeypatch.setattr(rt_mod, "launch_recap", _fake_launch, raising=False)
 
     await runtime._relaunch_task_recap(
-        session=session, template=template, template_id="tpl_echo", task_manager=task_manager,
+        session=session, task_manager=task_manager,
         task=task, agent_id=agent_id, boundary="dispatch",
     )
     await asyncio.sleep(0)

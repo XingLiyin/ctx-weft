@@ -3,11 +3,12 @@
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.task_runner import AgentBinding
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.runner import AgentBinding
 from ctx_weft.core.runtime import _SessionTaskRunner
-from ctx_weft.core.state.models import Session, Task
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
@@ -127,9 +128,9 @@ def _exec_runner(rt, tm, *, root_agent_id="agr") -> _SessionTaskRunner:
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
                    status="RUNNING", token_budget=0, root_agent_id=root_agent_id)
     return _SessionTaskRunner(
-        runtime=rt, session=sess, template=None, template_id="tmpl",
-        lm=None, memory=None, llm_account=None, llm_model=None,
-        task_manager=tm, default_run_id="run1", handle=None,
+        runtime=rt, session=sess,
+        lm=None, memory=None,
+        task_manager=tm, handle=None,
     )
 
 
@@ -208,9 +209,11 @@ async def test_pause_session_keeps_queued_root_task():
 
 async def test_pause_task_targets_single_run():
     # 定向暂停单个在途 task，其他 task 不受影响；task 不在跑→False
+    # `_pause_task` 是内部原语（`pause_agent`/`pause_session` 仅有的两个调用方），
+    # 这里直接调用它测的就是这个原语本身。
     rt = _rt()
     a = rt._register_run_tokens("s1", "ta")
     b = rt._register_run_tokens("s1", "tb")
-    assert rt.pause_task("s1", "ta") is True
+    assert rt._pause_task("s1", "ta") is True
     assert a.pause.is_paused and not b.pause.is_paused
-    assert rt.pause_task("s1", "nope") is False    # 不在跑 → False
+    assert rt._pause_task("s1", "nope") is False    # 不在跑 → False

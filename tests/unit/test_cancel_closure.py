@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from ctx_weft.core.utils.task_ref import task_ref
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
@@ -22,12 +24,14 @@ from ctx_weft.core.loop.steps.finalize import (
     _put_dispatch_result,
     synthesize_cancel_closure,
 )
-from ctx_weft.core.orchestrator.task_manager import TaskManager
-from ctx_weft.core.orchestrator.task_queue import QueueEntry
-from ctx_weft.core.state.models import NormalTaskSettings, Session, Task
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.queue import QueueEntry
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import NormalTaskSettings, Task
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 from tests.unit._stub_runner import StubRunner
 
@@ -57,7 +61,7 @@ async def _seed_running_ack(mem, child: Task) -> None:
     ctx = _ctx()
     ts, tcid = await _ensure_dispatch_frame(mem, parent_scope, child, ctx)
     await _put_dispatch_result(
-        mem, parent_scope, child, _dispatch_running_ack(child.title), ts, ctx, replace=False,
+        mem, parent_scope, child, _dispatch_running_ack(task_ref(child)), ts, ctx, replace=False,
         tool_call_id=tcid,
     )
 
@@ -79,7 +83,7 @@ async def test_same_agent_started_task_ack_replaced_and_nested_finish_pair() -> 
     # ack 终态化：旧 running ack 被 supersede，只剩一条取消文案（配对 tool_call_id=call-1）
     ack = [r for r in tool_recs if r.metadata.get("tool_call_id") == "call-1"]
     assert len(ack) == 1
-    assert "Sub-task 'Child c1' was cancelled before completion (user_cancel)" in ack[0].content
+    assert "Sub-task 'Child c1' (c1) was cancelled before completion (user_cancel)" in ack[0].content
     assert "its partial execution below is incomplete" in ack[0].content
 
     # 嵌套 finish 对（同 agent 共享 scope）：assistant 槽收尾标记 + tool 槽 [outcome=cancelled]
@@ -204,7 +208,7 @@ async def test_cancel_all_routes_only_started_tasks_zero_writes_for_unstarted() 
         captured["ids"] = sorted(t.id for t in tasks)
         captured["reason"] = reason
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
     await tm.cancel_all(reason="user_cancel")
 
     assert captured["ids"] == ["a"]  # unstarted "b" never reaches the finalizer
@@ -228,7 +232,7 @@ async def test_cancel_all_routes_started_root_too() -> None:
     async def _finalizer(tasks, reason):
         captured["ids"] = [t.id for t in tasks]
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
     await tm.cancel_all(reason="user_cancel")
 
     assert captured["ids"] == ["root"]
@@ -244,7 +248,7 @@ async def test_inflight_cancel_funnel_signal_time_no_call_terminal_time_one_call
     async def _finalizer(tasks, reason):
         calls.append((sorted(t.id for t in tasks), reason))
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
 
     inflight = Task(
         id="c1", session_id="s1", status="ACTIVE", parent_task_id="root",
@@ -272,7 +276,7 @@ async def test_race_normal_finish_does_not_call_cancel_finalizer() -> None:
     async def _finalizer(tasks, reason):
         calls.append(tasks)
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
 
     task = Task(
         id="c1", session_id="s1", status="ACTIVE", parent_task_id="root",
@@ -296,7 +300,7 @@ async def test_unstarted_task_cancel_never_calls_finalizer() -> None:
     async def _finalizer(tasks, reason):
         calls.append(tasks)
 
-    tm.set_cancel_finalizer(_finalizer)
+    tm.set_hooks(TaskManagerHooks(cancel_finalizer=_finalizer))
 
     task = Task(id="c1", session_id="s1", status="PENDING", parent_task_id="root",
                settings=NormalTaskSettings())

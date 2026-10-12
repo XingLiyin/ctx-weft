@@ -21,28 +21,24 @@ import logging
 from typing import Callable
 
 from ctx_weft.core.assembler import ContextRequest
-from ctx_weft.core.events import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import (
-    COMPACT_NOOP_KEY, LoopContext, LoopState, Step, StepOutcome, make_event,
+    COMPACT_NOOP_KEY,
+    RECOGNIZE_INTENT_PENDING_KEY,
+    LoopContext, LoopState, Step, StepOutcome, make_event,
 )
 from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
 from ctx_weft.core.loop.steps.act_guidance import build_act_guidance, build_resume_cue
-from ctx_weft.core.orchestrator.skill_executor_capability import (
+from ctx_weft.core.capabilities.skill_executor import (
     EXEC_SCRIPT_NAME,
     LIST_FILES_NAME,
     READ_FILE_NAME,
 )
 from ctx_weft.core.loop.steps.recognize_intent import (
-    launch_recognize_intent,
     should_recognize_intent,
 )
-from ctx_weft.core.state.models import NormalTaskSettings
-from ctx_weft.core.utils import (
-    effective_limit,
-    estimate_content_tokens,
-    estimate_tokens,
-    estimate_tool_calls_tokens,
-)
+from ctx_weft.core.models.task import NormalTaskSettings
+from ctx_weft.core.utils.estimate import effective_limit, estimate_content_tokens, estimate_tokens, estimate_tool_calls_tokens
 from ctx_weft.protocols import MemoryEventType
 from ctx_weft.protocols.capability import SkillCapability
 
@@ -71,7 +67,7 @@ def wrap_skill_instructions(instructions: str) -> str:
 def _estimate_record_tokens(r, count: Callable[[str], int] | None = None) -> int:
     """一条 memory 记录的 compact 估算：content + tool_calls 参数（在 metadata）+ reasoning。
 
-    与 gateway._estimate_message_tokens 同口径（同 core.utils 计费项），使 prepare 的触发估算
+    与 gateway._estimate_message_tokens 同口径（同 core.utils.estimate 计费项），使 prepare 的触发估算
     不再漏 tool_calls 参数/图片/framing（此前只 join content 文本、且丢弃非 str content）。
 
     count：文本费率经 count 回调走 tokenizer（通常是 ``ctx.llm.tokenizer.count``，已校准）；
@@ -86,6 +82,12 @@ def _estimate_record_tokens(r, count: Callable[[str], int] | None = None) -> int
     return total
 
 
+def _staged_memory(state, ctx) -> list:
+    """当前 task 这一轮暂存、还没落盘的 memory 写入（没开窗 / 无 TaskManager → 空）。"""
+    staged = getattr(getattr(ctx, "task_manager", None), "staged_memory", None)
+    return staged(state.task.id) if staged is not None else []
+
+
 def _estimate_assembled_tokens(prompt, count: Callable[[str], int] | None = None) -> int:
     """无真实基线（首轮/一次性）时对整份装配 prompt 的估算：system + 每条消息（含 tool_calls
     参数/图片/framing）+ tools schema。
@@ -96,6 +98,8 @@ def _estimate_assembled_tokens(prompt, count: Callable[[str], int] | None = None
     count：文本费率经 count 回调走 tokenizer（通常是 ``ctx.llm.tokenizer.count``，已校准）；
     None 回退未校准启发式（纯单测/无 llm 场景）。
     """
+    from ctx_weft.core.utils.estimate import estimate_tools_tokens
+
     c = count or estimate_tokens
     total = c(prompt.system or "")
     for m in prompt.messages:
@@ -103,9 +107,7 @@ def _estimate_assembled_tokens(prompt, count: Callable[[str], int] | None = None
             m.tool_calls, count=count)
         if getattr(m, "reasoning_content", None):
             total += c(m.reasoning_content)
-    for t in getattr(prompt, "tools", None) or []:
-        total += c(t.name) + c(t.description or "")
-        total += c(json.dumps(t.input_schema, ensure_ascii=False))
+    total += estimate_tools_tokens(getattr(prompt, "tools", None), count)
     return total
 
 
@@ -141,11 +143,22 @@ class PrepareStep(Step):
         if purpose == "act" and isinstance(settings, NormalTaskSettings):
             act_guidance = build_act_guidance(state.task, ctx.task_manager)
             act_resume_cue = build_resume_cue(state.task, ctx.task_manager)
+            # `next_step_hint` 是**一次性转向**：给下一次 act attempt 用，用过就作废。
+            # 2026-09-22 之前它没有清除点，只靠「下次 observer 判决覆写」——而 observe
+            # 走机械判决那几条路（无 observe ROLE / LLM 失败 / 已取消）压根不调
+            # `report_task_outcome`，覆写就不会发生，上一轮的 hint 会继续出现在再下一轮，
+            # 变成过期指令。此前少见是因为 root task 极少产 hint；纯文本回合改由后台
+            # observer 判定之后它变成常态，必须在消费点显式清掉。
+            state.task.next_step_hint = None
         else:
             act_guidance = ""
             act_resume_cue = ""
 
         def _assemble():
+            # 这一轮暂存、还没落盘的对话记录（用户消息 / HITL 答复 / 答复回灌的工具结果，
+            # 见 `ingest_or_stage`）。LLM 开口之前这一轮要用的恰恰是它们，所以装配时叠加进
+            # 历史。**每次装配现取**：压缩前会先提交，那之后它们已经在 memory 里了。
+            staged = _staged_memory(state, ctx)
             return ctx.assembler.assemble(ContextRequest(
                 purpose=purpose,
                 scope=state.scope,
@@ -160,6 +173,7 @@ class PrepareStep(Step):
                     "skill_name": skill_name,
                     "act_guidance": act_guidance,
                     "act_resume_cue": act_resume_cue,
+                    "staged_memory": staged,
                 },
             ))
 
@@ -169,6 +183,11 @@ class PrepareStep(Step):
 
         # ── 5. compact 触发：命中则跑升级式 compact，再在压缩后 memory 上重装配一次（Q4=c 校正）──
         if await self._should_compact(state, ctx, token_estimate):
+            # **先提交再压缩**：压缩（L0.5 图片降级 / L1 / L3）只折 memory，够不着这一轮暂存
+            # 的记录——带图的第一条消息、带图的答复就一张也降不了。提交让它们落盘、进入
+            # 压缩的视野；代价是这一轮从此不可撤（LLM 开口前按暂停也不再丢弃）。
+            from ctx_weft.core.loop.steps.act import _commit_round
+            await _commit_round(state, ctx)
             from ctx_weft.core.loop.steps.compact import escalating_compact
             compact_events = await escalating_compact(
                 state, ctx, token_estimate=token_estimate, trigger="compact")
@@ -186,9 +205,23 @@ class PrepareStep(Step):
                 ev.type == EventType.MEMORY_COMPACTED for ev in compact_events)
             prompt = await _assemble()
 
-        # ── 6. 会话意图识别：root task 首轮（无标题）时旁路快照运行，与后续 act 并发（不阻塞）──
+        # ── 6. 会话意图识别：root task 首轮（无标题）判定在这里，**起飞在 act 的提交点** ──
+        #
+        # 判定留在这里是因为只有这里手握 `bound_capabilities`；起飞挪到提交点是因为
+        # 旁路只该为**真的发生过**的那一轮花一次 LLM 调用。
+        #
+        # 别再把 `launch_` 挪回这一行。曾经挪回来过一次，理由是「第一句就按暂停的会话
+        # 到不了提交点、会没有名字」——那个理由是**夸大的**：判据是「root task 且无
+        # title」，那一轮夭折之后 title 仍是空的，下一轮 PrepareStep 照样判定成立、照样
+        # 在那一轮的提交点起飞。代价只是标题晚一轮，不是永远没有。
+        #
+        # 而挪回来的代价是实打实的：root task 从**第二句**起每一轮都开未提交窗口
+        # （消息注入既有 task 的那两条路 `begin_round(target.id, owns_task=False)`），
+        # 只要它的 title 还是空的（旁路失败 / 模型没调 update_task_metadata / 上一轮的
+        # 旁路还在飞），判据就成立——旁路于是跑在窗口里：这一轮被撤销时它的整串事件
+        # 随缓冲一起丢掉，那次 LLM 调用白烧。
         if should_recognize_intent(state.task) and bound_capabilities:
-            launch_recognize_intent(state, ctx)
+            state.extra[RECOGNIZE_INTENT_PENDING_KEY] = True
 
         # ── 7. 发事件 + 返回 ─────────────────────────────────────────────────
         return StepOutcome(
@@ -216,7 +249,8 @@ class PrepareStep(Step):
         if not skill_name or not ctx.skill_provider_index:
             return ""
         skill_cap = (
-            ctx.capability_cache.get_by_qualified_name(state.agent.id, skill_name)
+            ctx.capability_cache.get_by_qualified_name(
+                state.agent.id, skill_name, task_id=state.task.id)
             if ctx.capability_cache else None
         )
         if not isinstance(skill_cap, SkillCapability):
@@ -273,6 +307,11 @@ class PrepareStep(Step):
                     if r.kind is MemoryKind.CONVERSATION_TURN and r.role in ("user", "assistant")
                 ]
                 new_records = convo[guard.context_message_count:]
+                # 暂存区里的回合同样会被装配进 prompt（见 `_assemble`），一并计入。
+                new_records += [
+                    ev for ev in _staged_memory(state, ctx)
+                    if ev.kind is MemoryKind.CONVERSATION_TURN and ev.role in ("user", "assistant")
+                ]
                 count = ctx.llm.tokenizer.count
                 delta = sum(_estimate_record_tokens(r, count) for r in new_records)
                 return guard.context_tokens + delta, True

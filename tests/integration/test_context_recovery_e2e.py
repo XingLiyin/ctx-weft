@@ -22,14 +22,18 @@ import logging
 import pytest
 
 from ctx_weft.core.loop.steps import compact as cm
-from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
+from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, ParsedDigest
 from ctx_weft.protocols import (
     AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
     MemoryEventType as T, ProviderContext, ToolCall,
 )
-from ctx_weft.core.events import EventType
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.protocols.events import EventType
+from ctx_weft.providers.llm.mock import (
+    MockLLMAdapter,
+    MockResponse,
+    is_observer_request,
+)
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_compact_flow_e2e import _NOOP_NAME, _NoopToolProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
@@ -53,7 +57,17 @@ _CTX_LIMIT, _INFLATED = 3000, 2800
 
 
 def _template(**loop_kwargs) -> AgentTemplate:
-    """act-only（无 observe facet）→ 机械退出走规则 observe，不必脚本化 observe LLM。
+    """带 observe facet → 收尾由 observer 判（`_wire` 的 `observer_verdict="success"` 供货）。
+
+    2026-09-28 之前这里刻意**不带** observe facet（「机械退出走规则 observe，不必脚本化
+    observe LLM」）。现在不行了：纯文本收尾在机械路径上判 continue（`_mechanical_verdict`
+    没有任何办法知道那段正文交付了没有，安全默认只能是「没完」），于是一个没有 observer 的
+    agent 回一段正文永远到不了终态——而 `test_plain_text_finish_wins_over_the_stop_line` 的
+    docstring 早就写着「该不该算做完是 observer 的事」，那就得真有一个 observer。
+    脚本化的代价是零：`observer_verdict="success"` 一行供货，不占 act 响应池。
+
+    `_CrossThenSettleMock` 把判定回合从三本账（`_calls` / `seen` / `shapes`）里全滤掉了，
+    所以 `inflate_on` 的序号、`seen` 的条数一个都没动。
 
     `collapse_keep_last=1`：L3 按回合切，保留区至少要装下越线的那一整轮；时间线上只要越线
     之前还有**一轮**历史，L3 就有东西可折。默认的 3 会把这个最小时间线整个保留下来（各级全
@@ -63,7 +77,8 @@ def _template(**loop_kwargs) -> AgentTemplate:
     lc.update(loop_kwargs)
     return AgentTemplate(
         id="tpl_recover", name="recover", version="0.1.0",
-        identity={"act": IdentityFacet(text="You are a worker. Keep working.")},
+        identity={"act": IdentityFacet(text="You are a worker. Keep working."),
+                  "observe": IdentityFacet(text="You are the reviewer.")},
         description="context-recovery e2e", capability_refs=[],
         memory_config=MemoryConfig(), loop_config=LoopConfig(**lc),
     )
@@ -89,6 +104,14 @@ class _CrossThenSettleMock(MockLLMAdapter):
         self.shapes: list[list[tuple]] = []
 
     async def complete(self, request, stream: bool = True):
+        # 判定回合完全不计账（2026-09-28）：`_calls` / `seen` / `shapes` 三本账都只记 act。
+        # 模板加上 observe facet 之后每次收尾都多一次 observer 调用，若计进去，`inflate_on`
+        # 的序号、`seen` 的条数、`shapes` 的下标全要跟着漂——而这三样断言说的都是「actor
+        # 发了什么」。滤掉它，本文件既有的每一条序号/条数断言逐字保持原意。
+        if is_observer_request(request):
+            async for chunk in super().complete(request, stream=stream):
+                yield chunk
+            return
         self._calls += 1
         inflate = self._calls in self._inflate_on
         self.seen.append("\n".join(
@@ -124,20 +147,21 @@ def _wire(monkeypatch, *, digest=_DIGEST, responses=None, inflate_on=frozenset({
     """装好一个 runtime：摘要打桩免真实 LLM、注册 noop 工具与 in-memory provider。"""
     if digest is not None:
         async def _fake_summ(state, ctx, *, scope="task"):
-            # `summarize_for_compact` 在本分支上返回裸字符串（结构化 digest 是后来的事），
-            # 五小节文本照样原样落进坍缩物——本文件断言的是「Remaining 节活着进了续跑的
-            # prompt」，与解析与否无关。
-            return digest
+            return ParsedDigest(text=digest, degraded=False, sections={})
         monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
     # 后台 observe 与本文件无关，挡掉以免多消耗 mock 响应。
     monkeypatch.setattr(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         lambda state, ctx, *, boundary: None)
 
     resolver = InlineAgentTemplateProvider()
     resolver.register(_template(**loop_kwargs))
+    # `observer_verdict="success"`：本文件的 actor 一律以一段正文收尾，而 2026-09-28 起纯文本
+    # 不再被机械判 success（`_mechanical_verdict` 判 continue）。给整个 _wire 加是安全的：
+    # 以 max_turns / context_limit 结束的段照旧被 `execute` 那道强制覆盖压成 continue，重试
+    # 路径一个字没变。
     llm = _CrossThenSettleMock(responses=responses or _working_then_done(),
-                               inflate_on=inflate_on,
+                               inflate_on=inflate_on, observer_verdict="success",
                                context_limit=_CTX_LIMIT, output_reserve=0)
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
@@ -277,10 +301,11 @@ async def test_gives_up_when_compaction_cannot_free_anything(monkeypatch):
     assert steps.count("prepare") == 2, f"应在第一次恢复无果后就放弃，实际 {steps}"
     assert "observe" in steps, steps
     # 退回老路：机械退出 → 强制 retry
-    assert state.verdict is not None and state.verdict.task_outcome == "retry"
+    assert state.verdict is not None and state.verdict.task_outcome == "continue"
     # 只看 escalating_compact 那一类折叠（trigger="compact"）。退回老路后 observe 的
-    # `_fold_retry_segment` 会合法地折一次段（trigger="observe_retry"）——那是 retry 路径
-    # 本来的动作，不是「压缩有效」的证据，不能混进来。
+    # `_fold_retry_segment` 也会发 MEMORY_COMPACTED（trigger="observe_retry"）——那是 retry
+    # 路径本来的动作，不是「压缩有效」的证据。本分支上它恰好不发（机械判决的 act_recap 为空
+    # → 段保 raw），但断言不该依赖这个巧合：换个分支或改了机械判决就会误红。
     assert not [p for p in _types(seen, EventType.MEMORY_COMPACTED)
                 if p.get("trigger") == "compact"], "恢复驱动的压缩本例应一无所获"
 
@@ -360,7 +385,7 @@ async def test_quota_exhaustion_falls_back_to_the_retry_path(monkeypatch):
     assert _steps(seen).count("prepare") == 3, f"配额 2 → 恰好恢复两次，实际 {_steps(seen)}"
     assert [p for p in _types(seen, EventType.MEMORY_COMPACTED)
             if p.get("trigger") == "compact"], "本例的压缩是有效的（与 give-up 那条相区分）"
-    assert state.verdict is not None and state.verdict.task_outcome == "retry"
+    assert state.verdict is not None and state.verdict.task_outcome == "continue"
 
 
 async def test_recovery_disabled_keeps_legacy_retry_path(monkeypatch):
@@ -370,4 +395,4 @@ async def test_recovery_disabled_keeps_legacy_retry_path(monkeypatch):
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
     assert _steps(seen).count("prepare") == 1
-    assert state.verdict is not None and state.verdict.task_outcome == "retry"
+    assert state.verdict is not None and state.verdict.task_outcome == "continue"

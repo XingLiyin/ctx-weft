@@ -1,4 +1,4 @@
-from ctx_weft.core.config import RuntimeConfig
+from ctx_weft.core.models.config import RuntimeConfig
 
 
 def test_runtime_config_self_heal_defaults():

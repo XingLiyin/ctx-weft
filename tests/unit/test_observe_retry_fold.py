@@ -5,7 +5,7 @@ import pytest
 
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext
 
 pytestmark = pytest.mark.asyncio
@@ -39,7 +39,7 @@ async def test_retry_folds_current_attempt_and_deletes_raw():
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
-    verdict = SimpleNamespace(task_outcome="retry", act_recap="本段摘要：调了工具X", reported=False)
+    verdict = SimpleNamespace(task_outcome="continue", act_recap="本段摘要：调了工具X", reported=False)
 
     events = []
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
@@ -71,7 +71,7 @@ async def test_retry_accumulates_prior_segments():
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
-    verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要②", reported=False)
+    verdict = SimpleNamespace(task_outcome="continue", act_recap="段摘要②", reported=False)
 
     events = []
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
@@ -102,7 +102,7 @@ async def test_retry_short_segment_kept_raw():
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
-    verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要：短段不该写我", reported=False)
+    verdict = SimpleNamespace(task_outcome="continue", act_recap="段摘要：短段不该写我", reported=False)
 
     events = []
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
@@ -129,7 +129,7 @@ async def test_retry_long_segment_still_folds_when_threshold_set():
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             run_id="r1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
-    verdict = SimpleNamespace(task_outcome="retry", act_recap="段摘要", reported=False)
+    verdict = SimpleNamespace(task_outcome="continue", act_recap="段摘要", reported=False)
 
     events = []
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, events)
@@ -155,8 +155,15 @@ async def test_non_retry_outcome_does_not_fold():
     assert not any(r.type == T.TASK_COMPACT_SUMMARY for r in recs)
 
 
-def test_should_use_llm_forces_on_context_limit():
-    template = SimpleNamespace(identity={"observe": object()})
+def test_should_use_llm_on_root_context_limit():
+    """root + `context_limit` 走 LLM observe。
+
+    结论没变，**理由换了**：2026-09-28 前这是一条特例（`_should_use_llm` 里那句「机械退出即使
+    root 也强制 LLM」），存在只为绕开同一函数里的 root 降级门——机械退出要一份可信 act_recap
+    去当段摘要。root 门删掉之后那条特例成了死码，一并删了；现在它绿是因为**根本没有 root
+    降级可绕**。
+    """
+    template = SimpleNamespace(identity={"observe": SimpleNamespace(text="ROLE")})
     state = SimpleNamespace(
         extra={"template": template},
         act_exit_reason="context_limit",

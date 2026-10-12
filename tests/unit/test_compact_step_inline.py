@@ -122,6 +122,9 @@ def _state(context_tokens=1000):
         transcript=[],
         sequence_counter=0,
         extra={"template": None, "bound_capabilities": []},
+        # resolve_llm_identity 的真值来源（task-4 复审第二轮：summarize_for_compact
+        # 不再读 agent.runtime.get("llm_model")，那个键正常任务执行永远不会被写入）。
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
 
 
@@ -160,4 +163,5 @@ async def test_compact_noop_when_nothing_foldable():
 async def test_summarize_for_compact_returns_llm_text():
     from ctx_weft.core.loop.steps.compact import summarize_for_compact
     out = await summarize_for_compact(_state(), _ctx(_FakeMemory({})))
-    assert out == "SUMMARY"
+    # spec: compact-fidelity——返回 ParsedDigest；散文输出整文落库 + degraded。
+    assert out.text == "SUMMARY" and out.degraded is True

@@ -10,14 +10,17 @@
 
 from __future__ import annotations
 
+from ctx_weft.core.utils.task_ref import task_ref
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.loop.steps.finalize import _dispatch_running_ack, _ensure_dispatch_frame, _put_dispatch_result
-from ctx_weft.core.state.models import Session, Task
-from ctx_weft.core.utils import now_utc
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
@@ -63,7 +66,7 @@ async def _seed_running_ack(memory, session, child: Task) -> None:
                                    task_id=child.parent_task_id, agent_id=child.creator_agent_id)
     ts, tcid = await _ensure_dispatch_frame(memory, parent_scope, child, provider_ctx)
     await _put_dispatch_result(
-        memory, parent_scope, child, _dispatch_running_ack(child.title), ts, provider_ctx,
+        memory, parent_scope, child, _dispatch_running_ack(task_ref(child)), ts, provider_ctx,
         replace=False, tool_call_id=tcid,
     )
 

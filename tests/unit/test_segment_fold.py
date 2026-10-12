@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from ctx_weft.core.loop.steps.segment_fold import SegmentFoldResult, segment_fold
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.utils.content import collect_blob_refs
+from ctx_weft.core.loop.fold import SegmentFoldResult, segment_fold
+from ctx_weft.core.media.refs import encode_image_placeholder
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
@@ -106,6 +108,26 @@ async def test_segment_tail_anchor_does_not_use_now() -> None:
     assert contents == ["UP1", "recap", "UP-new"], f"摘要不得越过新消息: {contents}"
 
 
+async def test_summary_declares_surviving_placeholder_refs() -> None:
+    """`_protected` 只护住 user 回合与 SUMMARY，role=tool 记录会被折进 to_archive。
+    若 LLM 摘要逐字带着其中一条的 L0.5 占位向前走，供体记录被本次 fold supersede，
+    占位的活引用只剩新摘要记录能扛——GC 的 mark 判据必须能在它身上看见这条 ref。"""
+    ref = "blob:" + "d" * 64
+    placeholder = encode_image_placeholder(ref, "image/png")
+    m = InMemoryMemoryProvider()
+    await m.ingest(_turn("UP1", 0, "user"), _ctx())
+    await m.ingest(_turn(placeholder, 1, "tool"), _ctx())   # 供体：折区内、role=tool
+
+    summary_text = f"did the thing; {placeholder}"
+    await segment_fold(m, _ADDR, MemoryScope.TASK, summary_text, _ctx())
+
+    view = await m.load_view(_ADDR, MemoryScope.TASK, _ctx())
+    summary_rec = next(r for r in view if r.kind is MemoryKind.SUMMARY)
+    assert ref in collect_blob_refs(summary_rec), (
+        "折叠产出的摘要没有声明幸存占位的 ref，GC 会在宽限期后误删"
+    )
+
+
 async def test_counts_reported() -> None:
     m = InMemoryMemoryProvider()
     await m.ingest(_turn("UP1", 0, "user"), _ctx())
@@ -116,3 +138,58 @@ async def test_counts_reported() -> None:
     # before：UP+A+T = 3；after：UP + 摘要 = 2
     assert result.events_before == 3
     assert result.events_after == 2
+
+
+# ── 段界水位线（2026-09-22）───────────────────────────────────────────────────
+#
+# 后台 observe 是 fire-and-forget，它判完时人可能已经开口、新的 USER_PROMPT 已落库。
+# 段界若仍动态查找，那条新消息就成了「最后一条 user 回合」，折叠池随之变空——要折的
+# 那一段一条都没折，摘要还落到 `now_utc()` 分支排到末尾。这两条用例正是那个 bug 与
+# 它的修法。
+
+async def test_without_watermark_a_late_user_turn_steals_the_boundary() -> None:
+    """不设水位线时的既有行为：新 UP 抢走段界，上一段一条都没折。"""
+    m = InMemoryMemoryProvider()
+    await m.ingest(_turn("UP1", 0, "user"), _ctx())
+    await m.ingest(_turn("A1", 1, "assistant"), _ctx())
+    await m.ingest(_turn("A2", 2, "assistant"), _ctx())
+    await m.ingest(_turn("UP2-人中途开口", 3, "user"), _ctx())
+
+    res = await segment_fold(m, _ADDR, MemoryScope.TASK, "段摘要", _ctx())
+
+    contents = [c for _k, c in await _view(m)]
+    # A1/A2 一条没折，摘要还排到了所有记录的末尾——正是水位线要治的那个形态。
+    assert contents == ["UP1", "A1", "A2", "UP2-人中途开口", "段摘要"]
+    assert res.events_after == res.events_before + 1           # 只多了一条摘要
+
+
+async def test_watermark_keeps_the_boundary_at_launch_time() -> None:
+    """钉住水位线：要折的仍是原来那段，摘要落回新 UP 之前。"""
+    m = InMemoryMemoryProvider()
+    await m.ingest(_turn("UP1", 0, "user"), _ctx())
+    await m.ingest(_turn("A1", 1, "assistant"), _ctx())
+    await m.ingest(_turn("A2", 2, "assistant"), _ctx())
+    watermark = _T0 + timedelta(minutes=2)                     # 后台 observe 开跑的时刻
+    await m.ingest(_turn("UP2-人中途开口", 3, "user"), _ctx())
+
+    await segment_fold(m, _ADDR, MemoryScope.TASK, "段摘要", _ctx(), watermark)
+
+    contents = [c for _k, c in await _view(m)]
+    assert "A1" not in contents and "A2" not in contents       # 折掉了
+    assert contents == ["UP1", "段摘要", "UP2-人中途开口"]      # 摘要锚在新 UP 之前
+
+
+async def test_watermark_does_not_swallow_the_new_user_turn() -> None:
+    """水位线之后的记录既不进折叠池，也不被 supersede——它是下一段的开头。"""
+    m = InMemoryMemoryProvider()
+    await m.ingest(_turn("UP1", 0, "user"), _ctx())
+    await m.ingest(_turn("A1", 1, "assistant"), _ctx())
+    await m.ingest(_turn("A2", 2, "assistant"), _ctx())
+    watermark = _T0 + timedelta(minutes=2)
+    await m.ingest(_turn("UP2", 3, "user"), _ctx())
+    await m.ingest(_turn("A3", 4, "assistant"), _ctx())        # 下一段已经开跑
+
+    await segment_fold(m, _ADDR, MemoryScope.TASK, "段摘要", _ctx(), watermark)
+
+    contents = [c for _k, c in await _view(m)]
+    assert contents == ["UP1", "段摘要", "UP2", "A3"]

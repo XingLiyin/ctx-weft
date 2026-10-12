@@ -8,12 +8,12 @@ The causal order must be Session → Agent → Task.
 
 from __future__ import annotations
 
-from ctx_weft.core.events.bus import InProcessEventBus
-from ctx_weft.core.events.types import EventType
-from ctx_weft.core.orchestrator.lifecycle_manager import LifecycleManager
-from ctx_weft.core.orchestrator.session_manager import SessionManager
-from ctx_weft.core.orchestrator.template_lookup import TemplateLookup
-from ctx_weft.core.runtime import ProviderRegistry
+from ctx_weft.providers.events import InProcessEventBus
+from ctx_weft.protocols.events import EventType
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.lifecycle.session_registry import SessionRegistry
+from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
+from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.protocols import (
     AgentCapabilityProvider,
     AgentTemplate,
@@ -40,6 +40,15 @@ class _Resolver(AgentCapabilityProvider):
         return CapabilityProviderInfo(name=self.name)
 
 
+class _Client:
+    """model_resolver 的桩返回值——构造期注入、无默认值，测试替身须显式给出。"""
+
+    def __init__(self, account="acct_default", model="mdl_default",
+                 context_limit=200_000, output_reserve=8192):
+        self.account, self.model = account, model
+        self.context_limit, self.output_reserve = context_limit, output_reserve
+
+
 def _template() -> AgentTemplate:
     return AgentTemplate(
         id="tpl", name="t", version="1",
@@ -59,12 +68,21 @@ async def test_session_created_emitted_before_task_created() -> None:
     resolver = _Resolver(_template())
     _reg = ProviderRegistry()
     _reg.register_capability(resolver)
-    sm = SessionManager(
-        lifecycle_manager=LifecycleManager(template_lookup=TemplateLookup(_reg)),
+    sm = SessionRegistry(
+        agent_lifecycle_manager=AgentLifecycleManager(
+            template_lookup=TemplateLookup(_reg), event_bus=bus,
+            model_resolver=lambda a, m: _Client(),
+        ),
         event_bus=bus,
     )
     await sm.create_session(template_id="agent:tpl", user_prompt="你好", context_limit=1000)
 
     assert EventType.SESSION_CREATED in order
+    assert EventType.AGENT_INSTANTIATED in order
     assert EventType.TASK_CREATED in order
-    assert order.index(EventType.SESSION_CREATED) < order.index(EventType.TASK_CREATED)
+    # 完整因果序：Session → Agent → Task（docstring 顶部所述）。
+    assert (
+        order.index(EventType.SESSION_CREATED)
+        < order.index(EventType.AGENT_INSTANTIATED)
+        < order.index(EventType.TASK_CREATED)
+    )

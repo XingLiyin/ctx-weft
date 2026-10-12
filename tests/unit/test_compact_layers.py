@@ -10,13 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, CompactStep
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
-from ctx_weft.core.state.models import Task
+from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio
@@ -62,7 +62,7 @@ async def _run_compact(mem) -> None:
     session = SimpleNamespace(id="s1", tenant_id="default", goal="")
     state = LoopState(run_id="r1", session=session, task=task, agent=agent,
                       scope=_scope(), extra={"template": None, "bound_capabilities": []},
-                      transcript=[])
+                      transcript=[], resolved_model=SimpleNamespace(model="mock", account=""))
     ctx = LoopContext(assembler=_FakeAssembler(), llm=_FakeLLM(), memory=mem,
                       event_bus=InProcessEventBus(), provider_ctx=_pctx())
     await CompactStep().execute(state, ctx)
@@ -120,7 +120,7 @@ async def test_finalize_retry_no_process_report_no_user_message() -> None:
     """retry：observe 分析结果已由折叠出的 TASK_COMPACT_SUMMARY 段摘要承载；finalize 不再写
     process_report/process_report_at，也不注入 user message（spec 2026-07-01 §3.1）。"""
     task = Task(id="T1", session_id="s1", status="PENDING", title="X")
-    task.observer_outcome = "retry"
+    task.observer_outcome = "continue"
     mem = InMemoryMemoryProvider()
     state = LoopState(
         run_id="r1",
@@ -128,8 +128,9 @@ async def test_finalize_retry_no_process_report_no_user_message() -> None:
         task=task,
         agent=SimpleNamespace(id="ag1", loop_config=SimpleNamespace(compact_keep_last=6)),
         scope=MemoryAddress(session_id="s1", task_id="T1", agent_id="ag1"),
-        verdict=SimpleNamespace(task_outcome="retry", act_recap="missing X; do Y next",
+        verdict=SimpleNamespace(task_outcome="continue", act_recap="missing X; do Y next",
                                 task_summary=""),
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem,
@@ -139,7 +140,9 @@ async def test_finalize_retry_no_process_report_no_user_message() -> None:
 
     assert task.process_report is None  # 不再写 process_report（旧 Progress So Far 字段路径已废）
     assert task.process_report_at is None
-    assert task.retry_count == 1
+    # retry_count 的 +1 归 TaskManager（Task 4：处置表算新值、TM 写回）——finalize 里
+    # 再加一次会让重试预算一轮烧两格。这里断言 finalize **没动**它。
+    assert task.retry_count == 0
     recs = await mem.recall_recent(
         MemoryAddress(session_id="s1", task_id="T1", agent_id="ag1"), [T.USER_PROMPT], 10, _pctx()
     )

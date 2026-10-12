@@ -1,7 +1,6 @@
 """v2 词汇 + 旧词汇读侧归一化（v2 设计 §2/§6）。
 
 全仓唯一认识旧 type 词汇的地方：
-- MemoryKind：v2 内容种类（封死，永不为新机制扩——新机制 = 新 metadata 约定）
 - LEGACY_TRIPLE：旧 type → (kind, layer, role 约束)，读侧归一化 / 过渡期双词汇匹配的唯一映射
 - kind_of / layer_of：事件的 kind/layer 归一（显式字段优先，旧 type 兜底）
 - matches_legacy_type：过渡期桥接——一条记录（新旧词汇皆可）是否命中一个旧 type 请求
@@ -12,22 +11,17 @@ OBSERVER_SUMMARY 刻意不映射：写侧已死（P1），存量行不进任何�
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.protocols.memory import EVENT_LAYER, MemoryEventType, MemoryScope
+from ctx_weft.protocols.memory import (
+    EVENT_LAYER,
+    MemoryEventType,
+    MemoryKind,  # noqa: F401  # 兼容 re-export：MemoryKind 是 v2 正典词汇，已归位 memory.py
+    MemoryScope,
+)
 
 if TYPE_CHECKING:
     from ctx_weft.protocols.memory import MemoryRecord
-
-
-class MemoryKind(StrEnum):
-    """v2 内容种类（设计 §2）。判据：不同 kind = provider 可施加不同存储/索引/保留策略。"""
-
-    CONVERSATION_TURN = "conversation_turn"  # 对话回合（user/assistant/tool），各 scope 通用
-    SUMMARY = "summary"                      # 遗忘补偿：段摘要 / 经验摘要（fold 的 replacement）
-    TOOL_AUDIT = "tool_audit"                # 真实能力调用审计；默认不进视图装配
-    PUBLICATION = "publication"              # topic 发布；按流读取（recall_topic）
 
 
 # 旧 type → (kind, layer, role 约束)。role=None 表示该词汇不含 role 约束。

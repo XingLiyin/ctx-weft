@@ -12,9 +12,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils import (
-    PROGRESS_SO_FAR_HEADING, content_to_text, generate_id,
-)
+from ctx_weft.core.utils.content import content_to_text, image_tokens
+from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryEventType
 
 if TYPE_CHECKING:
@@ -35,6 +34,16 @@ ASSISTANT_SUMMARY_NOTE = (
     "forward; it is not your reply to the user. Continue the current task from it and call tools as "
     "needed — do not imitate the summary's form when you answer.]"
 )
+
+
+# 当前任务「上一段执行复述」的统一渲染标题：composer 的非压缩 retry 进度块、以及压缩
+# 复用 act_recap 的 task 层段摘要（role=assistant、task_conversation 来源）都冠以此标题，
+# 确保观察者/actor 总能识别「先前进度」锚点。
+#
+# 改造前住在 `core/utils.py`，理由写的是「供 composer 与 _history 共享」——实际
+# **唯一的 src 消费者就是本模块**（composer 只经本模块的渲染函数间接用到），
+# 测试也早已从这里引。归位到渲染它的地方。
+PROGRESS_SO_FAR_HEADING = "## Progress So Far"
 
 
 def annotate_assistant_summary(text: str) -> str:
@@ -83,6 +92,10 @@ def record_to_history_block(
             text = f"{PROGRESS_SO_FAR_HEADING}\n{text}"
         # 尾注对当前段摘要与跨 task 胶囊一视同仁：两者都以 assistant 身份出现，都会被模仿。
         text = annotate_assistant_summary(text)
+    # 摘要恒为纯文本（spec §8），三个包装器只作用于它，故走原字符串路径；
+    # 非摘要记录原样保留 record.content —— 拍扁会丢图（spec §6.4）。
+    _is_summary = etype == MemoryEventType.TASK_COMPACT_SUMMARY
+    block_content = text if _is_summary else record.content
     md = {
         "role": role,
         "type": etype,
@@ -106,8 +119,15 @@ def record_to_history_block(
         source=source,
         kind="history",
         target="messages",
-        content=text,
+        content=block_content,
         priority=slot_priority("history", str(etype)),
-        token_estimate=record.metadata.get("token_count") or request.token_counter(text),
+        # 文本计数沿用既有口径（含存量 metadata['token_count']），图片另行补齐——
+        # 不变量：任何写 metadata['token_count'] 的路径都必须只数文本（当前 src/ 内无写入方，
+        # 这是给外部/legacy 导入留的口子）。若未来某个阶段改用 estimate_content_tokens（它本身
+        # 就含图片）去落这个字段，此处的 image_tokens(...) 相加就会把每张图片重复计一遍。
+        token_estimate=(
+            (record.metadata.get("token_count") or request.token_counter(text))
+            + image_tokens(record.content)
+        ),
         metadata=md,
     )

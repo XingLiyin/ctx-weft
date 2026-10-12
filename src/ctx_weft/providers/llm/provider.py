@@ -12,13 +12,19 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from ctx_weft.core.utils import default_output_reserve
+from ctx_weft.core.utils.estimate import default_output_reserve
 from ctx_weft.protocols import LLMClient, LLMMessage, LLMRequest
 from ctx_weft.providers.llm.store import LLMAccountStoreProtocol
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_STYLES = {"anthropic", "openai"}
+# 纯文本与多模态是**两个 style**，不是一个 style 加一个开关——能力由「注册了哪个
+# adapter 类」表达（spec 2026-08-28-multimodal-adapter-dispatch §2「类型即声明」）。
+# 存量 account 的 "anthropic" / "openai" 行为不变，仍拿到纯文本 adapter，零迁移。
+SUPPORTED_STYLES = {
+    "anthropic", "anthropic-multimodal",
+    "openai", "openai-multimodal",
+}
 
 # 模型可用性探测的补全预算。不用 1：个别推理模型对极小 max_tokens 会直接拒绝，
 # 取一个小而安全的值——只需请求被接受、流能跑完，不关心实际产出多少 token。
@@ -40,7 +46,7 @@ class LLMAccount:
     """One API endpoint + credentials + list of available models."""
 
     name: str
-    style: str          # "anthropic" | "openai"
+    style: str          # 见 24 行上方 SUPPORTED_STYLES（"anthropic" | "anthropic-multimodal" | "openai" | "openai-multimodal"）
     api_key: str
     base_url: str = ""
     models: list[ModelConfig] = field(default_factory=list)
@@ -325,17 +331,29 @@ class LLMProvider:
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _build_adapter(self, account: LLMAccount) -> LLMClient:
-        if account.style == "anthropic":
-            from ctx_weft.providers.llm.anthropic import AnthropicAdapter
-            return AnthropicAdapter(
+        # 分派必须精确匹配：fetch_models / verify_model 两个 ungated call site 靠 _build_adapter
+        # 自己拒绝未知 style。前缀匹配会让 "anthropicX" 这样的近似值也被接受（降级成纯文本），
+        # 破坏了入口防御（只有 register_account 经过 SUPPORTED_STYLES 门控）。故必须精确匹配。
+        style = account.style
+        if style in ("anthropic", "anthropic-multimodal"):
+            from ctx_weft.providers.llm.anthropic import (
+                AnthropicAdapter,
+                AnthropicMultimodalAdapter,
+            )
+            cls = AnthropicMultimodalAdapter if style == "anthropic-multimodal" else AnthropicAdapter
+            return cls(
                 api_key=account.api_key,
                 base_url=account.base_url or "https://api.anthropic.com",
                 timeout_sec=account.timeout_sec,
                 max_http_retries=self._max_http_retries,
             )
-        if account.style == "openai":
-            from ctx_weft.providers.llm.openai import OpenAIAdapter
-            return OpenAIAdapter(
+        if style in ("openai", "openai-multimodal"):
+            from ctx_weft.providers.llm.openai import (
+                OpenAIAdapter,
+                OpenAIMultimodalAdapter,
+            )
+            cls = OpenAIMultimodalAdapter if style == "openai-multimodal" else OpenAIAdapter
+            return cls(
                 api_key=account.api_key,
                 base_url=account.base_url or "https://api.openai.com",
                 timeout_sec=account.timeout_sec,

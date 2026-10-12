@@ -23,7 +23,7 @@ from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.protocols import (
     MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext,
 )
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 
@@ -176,7 +176,8 @@ async def test_l3_single_round_is_left_alone_without_spending_a_summary():
 async def test_escalating_passes_l3_summary_lazily(monkeypatch):
     """`escalating_compact` 交给 L3 的是**取摘要的函数**，不是先算好的文本（同 L1 的做法）。
 
-    先算好的代价：按回合切后 L3 可能 no-op，摘要就白算了。
+    先算好有两个代价：按回合切后 L3 可能 no-op，摘要白算；以及折区图片降级发生在
+    `collapse_task_layer` 内部，先算摘要会让摘要输入里仍是真图（L1 为此专门改过顺序）。
     """
     summarized: list[str] = []
     captured: list = []

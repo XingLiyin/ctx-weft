@@ -1,7 +1,7 @@
 """崩溃恢复 → reconcile 端到端:mid-tool 重启后重跑未完成的工具,而非裸重发 LLM（spec/07 §6/§9）。
 
 构造一个"崩在工具批次中途"的持久态:事件流有 session+task,memory 里有一条带 dangling tool_call
-的 assistant LLM_RESPONSE（无对应 TOOL_RESULT）。recover_session 后,_resolve 的 dangling 检测应把
+的 assistant LLM_RESPONSE（无对应 TOOL_RESULT）。recover_agent 后,_resolve 的 dangling 检测应把
 initial_step 路由到 reconcile,由 ReconcileStep 经 gateway 重跑该工具(写出真实 TOOL_RESULT),再进 act。
 """
 
@@ -15,7 +15,7 @@ from unittest import mock
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.events.types import Event, EventType
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols import (
     MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext,
 )
@@ -23,8 +23,13 @@ from ctx_weft.protocols.capability import (
     CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
 )
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.protocols import MemoryScope as _MS
+from ctx_weft.protocols.memory import MemoryKind as _MK
+from ctx_weft import RuntimeConfig
+_MEM_TASK_SCOPE = _MS.TASK
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
 
@@ -36,7 +41,10 @@ class _RecordingTool(ToolCapabilityProvider):
         self.invoked: list[dict] = []
 
     async def list(self, ctx) -> list[ToolCapability]:
-        return [ToolCapability(id="test:web", name="web", description="fetch a page")]
+        # wp6（spec: tool-operations）：声明 idempotent —— 崩溃后同 op_id 重跑恰好一次。
+        # 默认 reviewed 的行为由 test_tool_outcome_not_rerun.py 钉（作结、不重跑）。
+        return [ToolCapability(id="test:web", name="web", description="fetch a page",
+                               recovery_policy="idempotent")]
 
     async def retrieve(self, ctx) -> list[ToolCapability]:
         return await self.list(ctx)        # 让 CapabilityResolver 绑定 web 进 cache
@@ -59,13 +67,21 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[MockResponse(text="done"), MockResponse(text="done")])
-    runtime = make_runtime(llm=llm, agent_provider=resolver)
+    # 夹具的事件流只发 SESSION_CREATED，没有 AGENT_INSTANTIATED（恢复用的最小夹具，
+    # agent 的出身不是这些用例的关注点），所以装填出来的 agent 没有自己的 template_id——
+    # 而 registry 不再借会话那份（2026-09-30）。配上 host 声明的母版，装配时由
+    # TemplateLookup 兜底，与生产同一条链路。
+    runtime = make_runtime(llm=llm, agent_provider=resolver,
+                           config=RuntimeConfig(fallback_template_ref="agent:tpl_echo"))
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
     tool = _RecordingTool()
     runtime.providers.register_capability(tool)
 
-    sid, tid, aid, tcid = "ses_r", "tsk_r", "agt_root", "tc1"
+    from ctx_weft.core.utils.ids import mint_call_id
+    # tool_call 的 id 是摄入点铸造的内部标识——它同时就是账本键。
+    tcid = mint_call_id(anchor="rec_r", ordinal=0, raw_id="tc1", turn_seq=0)
+    sid, tid, aid = "ses_r", "tsk_r", "agt_root"
     ts = datetime(2026, 6, 13, tzinfo=timezone.utc)
 
     def ev(seq, type_, **payload):
@@ -83,7 +99,7 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
         ev(4, EventType.TASK_STARTED, task_id=tid, assigned_agent_id=aid),
     ]
     for e in seed:
-        await runtime.event_store.append(e)
+        await append_one(runtime.event_store, e)
 
     # memory:崩在工具批次中途 —— assistant turn 含 dangling tool_call "web",无 TOOL_RESULT。
     scope = MemoryAddress(session_id=sid, task_id=tid, agent_id=aid)
@@ -94,11 +110,25 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
         timestamp=ts, role="assistant",
         metadata={"tool_calls": [{"id": tcid, "name": "test__web", "input": {"url": "x"}}]}), pctx)
 
+    # 注入「崩溃前调用过」的事实：一条 CapabilityInvoked、没有 Finished
+    # ——这正是账本时代 `status=started` 的等价物，idempotent 分支的输入。
+    from ctx_weft.core.utils.clock import now_utc as _now
+    from ctx_weft.protocols.events import Event as _Ev, EventType as _ET
+
+    await append_one(runtime.event_store, _Ev(
+        id="evt_seed_invoked", type=_ET.CAPABILITY_INVOKED, session_id=sid,
+        run_id="r_seed", sequence=1, timestamp=_now(),
+        payload={"tool_call_id": tcid, "invocation_id": "inv_first",
+                 "capability_name": "test__web", "capability_id": "test:web"}))
+
+    # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
+    # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
+    await runtime.rebuild_session(sid)
     with mock.patch(
-        "ctx_weft.core.loop.steps.background_observe.launch_background_observe",
+        "ctx_weft.core.loop.background.launch_recap",
         return_value=None,
     ):
-        await runtime.recover_session(sid)
+        await runtime.recover_agent(aid)
         for _ in range(50):
             if tool.invoked:
                 break

@@ -1,4 +1,4 @@
-from ctx_weft.core.config import RuntimeConfig
+from ctx_weft.core.models.config import RuntimeConfig
 
 
 def test_defaults_match_legacy():
@@ -8,7 +8,6 @@ def test_defaults_match_legacy():
     assert c.task_max_concurrent == 4
     assert c.task_max_retries == 3
     assert c.default_token_budget == 200_000
-    assert c.default_task_timeout_ms == 60_000
 
 
 def test_overrides():

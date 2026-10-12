@@ -10,14 +10,27 @@ from typing import Any
 import pytest
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.state.models import NormalTaskSettings
+from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.protocols import (
     MemoryEvent,
     MemoryEventType,
     MemoryAddress,
     ProviderContext,
 )
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+
+def _template_with_role():
+    from ctx_weft.protocols.template import (
+        AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
+    )
+
+    return AgentTemplate(
+        id="tpl1", name="tpl1", version="1.0.0",
+        identity={"act": IdentityFacet(text="SOUL"),
+                  "observe": IdentityFacet(text="ROLE")},
+        capability_refs=[], memory_config=MemoryConfig(), loop_config=LoopConfig(),
+    )
 
 
 def _ts(offset_us: int) -> datetime:
@@ -73,7 +86,15 @@ async def fake_state_ctx():
     # Minimal agent with required attributes
     agent = SimpleNamespace(
         id="a1",
-        loop_config=SimpleNamespace(compact_keep_last=2),
+        # 字段须与 protocols/template.py::LoopConfig 的默认值一致。
+        # 缺字段的后果不是「测试报错」而是「测试假绿」：被测代码读到不存在的属性抛
+        # AttributeError，而 _run_recap 之类会整段吞掉它，于是用例走的是
+        # 异常路径却自称验了成功路径。实测探针确认曾有 1 条如此（详见下）。
+        loop_config=SimpleNamespace(
+            compact_keep_last=2,
+            max_turns_per_observe=5,          # LoopConfig 默认
+            short_segment_token_threshold=400,  # LoopConfig 默认
+        ),
         runtime={"llm_model": "mock"},
         loop_guard=SimpleNamespace(context_limit=100000, context_tokens=1000),
     )
@@ -83,11 +104,15 @@ async def fake_state_ctx():
         id="t1",
         parent_task_id=None,
         title="",
+        # 总账 C5（批次二 Task 5）：background recap 现在自己的 run 也发
+        # RunStarted/RunFinished，`final_status` 取 `state.task.status`（照抄
+        # `_run_loop` 的实际发射点）——缺了这个字段就不是「测试假绿」而是
+        # AttributeError 直接炸穿，所以补上，不是行为放宽。
+        status="ACTIVE",
         user_prompt="hello user",
         user_prompt_in_memory=True,
         process_report="",
         session_id="s1",
-        tracking_task_ids=[],
     )
 
     # Minimal session
@@ -100,7 +125,13 @@ async def fake_state_ctx():
         task=task,
         agent=agent,
         scope=scope,
-        extra={"template": None, "bound_capabilities": []},
+        # 带 observe facet 的最小模板：`has_observe_role`（2026-09-28）是「有没有
+        # observer」的判据，后台判定档、前台 LLM observe、`finish_park` 让位三条路都认它。
+        # template=None 会让这三条路全部降级成机械判决，用例就不是在测它自称测的东西了。
+        extra={"template": _template_with_role(), "bound_capabilities": []},
+        # resolve_llm_identity 的真值来源（批次 B）：这里从不真的发 LLM 请求
+        # （complete() 被各测试自行打桩），但仍给个占位，防止误触真实调用时 AttributeError。
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
 
     # Fake task_manager with no-op track_background

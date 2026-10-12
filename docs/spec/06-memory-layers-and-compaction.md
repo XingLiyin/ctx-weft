@@ -13,7 +13,7 @@
 >   `TASK_DISPATCH_RESULT` 配对回填取代**。blackboard 的 topic 通道（`recall_topic` / 订阅 / predecessor）保留。
 > - observe 的 outcome 集合由 `success|failed|active|needs_user_input` 改为 `active|retry|success|fail|ask_human`。
 >
-> 真相源（待改造）：`protocols/memory.py`、`providers/memory_blackboard/in_memory.py`、
+> 真相源（待改造）：`protocols/memory.py`、`providers/memory/in_memory/provider.py`、
 > `host/providers/memory/postgres.py`、`core/assembler/sources/*`、`core/loop/steps/{reason,act,observe,finalize,compact}.py`、
 > `core/loop/capability_gateway.py`、`core/orchestrator/control_capability.py`。
 

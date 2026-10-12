@@ -16,7 +16,7 @@ from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.guidance import GuidanceSource
 from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
-from ctx_weft.core.utils import estimate_tokens
+from ctx_weft.core.utils.estimate import estimate_tokens
 
 
 def _task(id, title="", status="PENDING", parent=None, description="", created_at=None,
@@ -28,11 +28,11 @@ def _task(id, title="", status="PENDING", parent=None, description="", created_a
     )
 
 
-def _cur(title="", description="", mode="auto", id="t1", next_step_hint=None):
+def _cur(title="", description="", unattended=True, id="t1", next_step_hint=None):
     """当前 task（build_act_guidance 第一参）。"""
     return SimpleNamespace(
         id=id, title=title, description=description,
-        interaction_mode=mode, user_prompt="", next_step_hint=next_step_hint,
+        unattended=unattended, user_prompt="", next_step_hint=next_step_hint,
     )
 
 
@@ -67,7 +67,7 @@ def test_no_hint_omits_the_section_entirely():
 def test_hint_section_absent_for_task_without_the_field():
     """旧数据 / 替身 task 无该字段 → getattr 兜底，不炸、不出段。"""
     legacy = SimpleNamespace(id="t1", title="T", description="",
-                             interaction_mode="auto", user_prompt="")
+                             unattended=True, user_prompt="")
     g = build_act_guidance(legacy, _tm())
     assert "## Note from the review of your previous attempt" not in g
 
@@ -77,7 +77,7 @@ def test_lone_root_still_shows_itself_in_tree():
     cur = _task("t1", "Current", "ACTIVE")
     g = build_act_guidance(_cur(title="Current", id="t1"), _tm(tasks=[cur]))
     assert "## The overall plan (▶ = your current task):" in g
-    assert "- [ACTIVE] ▶ Current" in g
+    assert "- [ACTIVE] ▶ 'Current' (t1)" in g
     assert "do NOT do them yourself" not in g
     assert "Do not start the other tasks yourself." not in g
     assert "control__finish_task" in g
@@ -95,18 +95,19 @@ def test_anchor_line_always_present_description_not_duplicated():
     # 每个 act 回合都有当前任务锚定行（长对话里 ## Current Task 框远在历史深处）；
     # description 不重复（由 Current Task 框承载）。
     g = build_act_guidance(_cur(title="T", description="D"), _tm())
-    assert "Current task: T" in g.split("\n")
+    assert "Current task: 'T' (t1)" in g.split("\n")
     assert "Description: D" not in g
 
 
-def test_anchor_line_falls_back_when_untitled():
+def test_anchor_line_uses_bare_id_when_untitled():
+    """无标题时锚定行退化为裸 id——id 本身就是可用的句柄，比「见上文」有信息量。"""
     g = build_act_guidance(_cur(title=""), _tm())
-    assert "Current task: (as framed in the conversation above)" in g
+    assert "Current task: t1" in g.split("\n")
 
 
 def test_ask_user_reminder_present_in_all_modes():
-    for mode in ("auto", "interactive"):
-        g = build_act_guidance(_cur(title="T", mode=mode), _tm())
+    for unattended in (True, False):
+        g = build_act_guidance(_cur(title="T", unattended=unattended), _tm())
         assert "control__ask_user" in g
 
 
@@ -127,8 +128,8 @@ def test_tree_lists_nonterminal_with_status_and_current_marker():
     sib = _task("t2", "Publish", "PENDING")
     g = build_act_guidance(_cur(id="t1"), _tm(tasks=[cur, sib]))
     assert "## The overall plan" in g
-    assert "- [ACTIVE] ▶ Write report" in g
-    assert "- [PENDING] Publish" in g
+    assert "- [ACTIVE] ▶ 'Write report' (t1)" in g
+    assert "- [PENDING] 'Publish' (t2)" in g
     assert "do NOT do them yourself" in g
     assert "Do not start the other tasks yourself." in g
 
@@ -154,8 +155,8 @@ def test_child_task_indented_under_parent():
     parent = _task("t1", "Parent", "SUSPENDED")
     child = _task("t2", "Child", "PENDING", parent="t1")
     g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, child]))
-    assert "- [SUSPENDED] ▶ Parent" in g
-    assert "  - [PENDING] Child" in g
+    assert "- [SUSPENDED] ▶ 'Parent' (t1)" in g
+    assert "  - [PENDING] 'Child' (t2)" in g
 
 
 def test_orphan_nonterminal_promoted_to_root():
@@ -163,8 +164,8 @@ def test_orphan_nonterminal_promoted_to_root():
     cur = _task("t1", "Current", "ACTIVE")
     orphan = _task("t2", "Orphan", "PENDING", parent="tX")
     g = build_act_guidance(_cur(id="t1"), _tm(tasks=[cur, orphan]))
-    assert "- [PENDING] Orphan" in g
-    assert "  - [PENDING] Orphan" not in g
+    assert "- [PENDING] 'Orphan' (t2)" in g
+    assert "  - [PENDING] 'Orphan' (t2)" not in g
 
 
 def test_untitled_task_uses_start_prompt_as_label():
@@ -172,7 +173,7 @@ def test_untitled_task_uses_start_prompt_as_label():
     cur = _task("t1", "Current", "ACTIVE")
     root = _task("tsk_01", "", "ACTIVE", user_prompt="Summarize the quarterly report\nand email it")
     g = build_act_guidance(_cur(id="t1"), _tm(tasks=[cur, root]))
-    assert "- [ACTIVE] Summarize the quarterly report" in g
+    assert "- [ACTIVE] 'Summarize the quarterly report'" in g
     assert "(untitled" not in g
 
 
@@ -189,7 +190,8 @@ def test_untitled_task_no_prompt_falls_back_to_id_prefix():
     cur = _task("t1", "Current", "ACTIVE")
     blank = _task("abcdef123456", "", "PENDING")
     g = build_act_guidance(_cur(id="t1"), _tm(tasks=[cur, blank]))
-    assert "(untitled abcdef)" in g
+    # 无标题且无 prompt → 裸 id（此前只印前 6 位，取不回来）
+    assert "- [PENDING] abcdef123456" in g
 
 
 def test_finished_children_listed_with_no_redo_emphasis():
@@ -199,12 +201,27 @@ def test_finished_children_listed_with_no_redo_emphasis():
     c2 = _task("t3", "Draft", "FINISHED", parent="t1")
     g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1, c2]))
     assert "ALREADY COMPLETED" in g
-    assert "Do NOT redo their work" in g
-    assert "- [FINISHED] Research" in g
-    assert "- [FINISHED] Draft" in g
+    assert "do NOT redo it yourself" in g
+    assert "- [FINISHED] 'Research' (t2)" in g
+    assert "- [FINISHED] 'Draft' (t3)" in g
     # 树里仍只有非终态节点
-    assert "▶ Parent" in g
+    assert "▶ 'Parent' (t1)" in g
     assert "  - [FINISHED]" not in g.split("ALREADY COMPLETED")[0]
+
+
+def test_finished_children_ban_has_an_explicit_exception_for_bad_results():
+    """勿重做是**默认**，不是绝对——review note 点名的那一个由 actor 自己决定。
+
+    这条例外是 reopen 删除（2026-09-19）之后「子任务产出不合格怎么办」的唯一出口：
+    observer 只在 next_step_hint 里指名，重派还是自己做归 actor。少了这句，上面那条
+    禁令就把唯一的出口也堵死了——observer 手里并没有任何能重跑子任务的工具。
+    """
+    parent = _task("t1", "Parent", "ACTIVE")
+    c1 = _task("t2", "Research", "FINISHED", parent="t1")
+    g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
+    assert "The one exception" in g
+    assert "YOUR call" in g
+    assert "delegate a fresh sub-task" in g
 
 
 def test_finished_child_renders_outputs_result_snippet():
@@ -212,7 +229,7 @@ def test_finished_child_renders_outputs_result_snippet():
     parent = _task("t1", "Parent", "ACTIVE")
     c1 = _task("t2", "Research", "FINISHED", parent="t1", outputs="Found 3 key sources on X.")
     g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
-    assert "- [FINISHED] Research" in g
+    assert "- [FINISHED] 'Research'" in g
     assert "    → Found 3 key sources on X." in g
 
 
@@ -239,7 +256,7 @@ def test_finished_child_no_result_renders_title_only():
     parent = _task("t1", "Parent", "ACTIVE")
     c1 = _task("t2", "Research", "FINISHED", parent="t1")
     g = build_act_guidance(_cur(id="t1"), _tm(tasks=[parent, c1]))
-    assert "- [FINISHED] Research" in g
+    assert "- [FINISHED] 'Research'" in g
     assert "→" not in g.split("ALREADY COMPLETED")[1]
 
 
@@ -282,8 +299,8 @@ def test_mixed_naive_aware_created_at_does_not_crash_sort():
     # 两序都跑一遍，确保比较两侧混排都归一（naive<aware 与 aware<naive 各触发一次）。
     for tasks in ([parent, c_recovered, c_live], [parent, c_live, c_recovered]):
         g = build_act_guidance(_cur(id="t1"), _tm(tasks=tasks))
-        assert "- [FINISHED] Recovered" in g
-        assert "- [FINISHED] Live" in g
+        assert "- [FINISHED] 'Recovered' (t2)" in g
+        assert "- [FINISHED] 'Live' (t3)" in g
 
 
 def test_finished_children_of_other_tasks_not_listed():
@@ -308,20 +325,53 @@ def test_failed_canceled_children_not_listed_as_completed():
     assert "CanceledChild" not in g
 
 
-def test_interactive_mode_keeps_pause_note_with_tree():
+def test_attended_task_keeps_pause_note_with_tree():
     cur = _task("t1", "Cur", "ACTIVE")
     sib = _task("t2", "Other", "PENDING")
-    g = build_act_guidance(_cur(mode="interactive", id="t1"), _tm(tasks=[cur, sib]))
+    g = build_act_guidance(_cur(unattended=False, id="t1"), _tm(tasks=[cur, sib]))
     assert "## The overall plan" in g
     assert "keeps the task open" in g
 
 
 def test_finish_reminder_leads_with_completion_gate():
     # 判据在前：仅目标完全达成才 finish，措辞不得以收尾为默认动作。
-    for mode in ("interactive", "autonomous"):
-        g = build_act_guidance(_cur(mode=mode), _tm())
+    for unattended in (False, True):
+        g = build_act_guidance(_cur(unattended=unattended), _tm())
         assert "ONLY once the task goal is fully achieved" in g
         assert "keep working instead of finishing" in g
+
+
+def test_unattended_task_is_told_prose_alone_does_not_end_it():
+    """无人值守下纯文本不算收尾——这一支此前什么都没说。
+
+    两边的纯文本语义恰好相反，而只有一边写了出来：有人在场时纯文本是**正确的**中途动作
+    （park，把话语权交回去，见 `test_attended_task_keeps_pause_note_with_tree`）；无人值守时
+    它什么也不是，没人会读那段话。
+
+    2026-09-28 起这条有牙齿了：`observe._mechanical_verdict` 对 `normal` 收尾判 continue，
+    于是不调 `finish_task` 就是一轮轮重跑，撞上 `max_retries` 后落 FAILED / RETRY_EXHAUSTED。
+    这段常驻文案是**预防**（这一轮别犯），`observe._PLAIN_TEXT_NEEDS_FINISH` 那句一次性 hint
+    是**补救**（上一轮已经犯了）。两处都得在。
+    """
+    g = build_act_guidance(_cur(unattended=True), _tm())
+    assert "does not end this task" in g
+    assert "attempt limit" in g, "没说清后果——模型不知道拖着不 finish 会失败"
+    # 有人值守那一支不该收到这段：那里纯文本正是该做的事
+    attended = build_act_guidance(_cur(unattended=False), _tm())
+    assert "does not end this task" not in attended
+    assert "keeps the task open" in attended
+
+
+def test_unattended_with_siblings_keeps_both_notes():
+    """带兄弟任务时，「别自己去开那些任务」与纯文本那句必须同时在。
+
+    这一支原本是 `elif has_other_tasks`，加纯文本那句时容易把它改成互斥的二选一。
+    """
+    cur = _task("t1", "Cur", "ACTIVE")
+    sib = _task("t2", "Other", "PENDING")
+    g = build_act_guidance(_cur(unattended=True, id="t1"), _tm(tasks=[cur, sib]))
+    assert "Do not start the other tasks yourself" in g
+    assert "does not end this task" in g
 
 
 # ── 装配管线：GuidanceSource + composer 落位 ──────────────────────────────────
@@ -380,7 +430,7 @@ def test_composer_places_capabilities_before_guidance_at_tail():
 def test_resume_cue_anchors_task_and_remaining_work():
     from ctx_weft.core.loop.steps.act_guidance import build_resume_cue
     cue = build_resume_cue(_cur(title="Fix importer", id="t1"), _tm())
-    assert "the task: Fix importer" in cue
+    assert "the task: 'Fix importer' (t1)" in cue
     assert "do not redo" in cue and "remaining work" in cue
     # 无已完成子任务 → 不指向 guidance 清单
     assert "situational notes" not in cue
@@ -391,10 +441,12 @@ def test_resume_cue_points_to_completed_list_only_when_children_finished():
     parent = _task("t1", "Parent", "ACTIVE")
     child = _task("t2", "Research", "FINISHED", parent="t1")
     cue = build_resume_cue(_cur(title="Parent", id="t1"), _tm(tasks=[parent, child]))
-    assert "situational notes" in cue and "re-delegating" in cue
-    # 无 title 回退
+    assert "situational notes" in cue and "a second time" in cue
+    # 同 build_act_guidance：勿重做是默认，review note 点名的那一个由 actor 自己决定
+    assert "you decide" in cue
+    # 无 title → 退化为裸 id（仍是可用句柄，不再是「见上文」）
     cue2 = build_resume_cue(_cur(title="", id="t1"), _tm())
-    assert "the task above" in cue2
+    assert "the task: t1" in cue2
 
 
 def test_composer_uses_extra_resume_cue_as_turn_opener():

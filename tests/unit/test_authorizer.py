@@ -13,16 +13,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.auth import (
-    AllowAllAuthorizer,
-    AllowListAuthorizer,
-    AuthorizationDecision,
-    Authorizer,
-)
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
+from ctx_weft.providers.authorizer import AllowAllAuthorizer, AllowListAuthorizer
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway, _sanitize
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
+from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
@@ -30,7 +26,7 @@ from ctx_weft.protocols.capability import (
     ToolCapability,
     ToolCapabilityProvider,
 )
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -47,51 +43,57 @@ def _cap(cid: str = "test:echo", name: str = "echo") -> ToolCapability:
     return ToolCapability(id=cid, name=name, description="Echo back the input.")
 
 
-def _ctx() -> ProviderContext:
-    return ProviderContext(session_id="s1", tenant_id="default")
+def _ctx(template_id: str = "tmpl_a") -> ProviderContext:
+    return ProviderContext(
+        session_id="s1", tenant_id="default", agent_id="agt_1", agent_template_id=template_id,
+    )
 
 
 # ── 1. AllowAll / 2. AllowList ────────────────────────────────────────────────────
 
 
+async def _allowed_ids(auth, caps, ctx) -> set[str]:
+    """filter 删除后的等价物：逐个 authorize，收集放行的 id。"""
+    return {c.id for c in caps if (await auth.authorize(c, ctx)).allowed}
+
+
 async def test_allow_all_passes_everything() -> None:
     caps = [_cap("a:x", "x"), _cap("b:y", "y")]
-    out = await AllowAllAuthorizer().filter(caps, _agent(), _task(), _ctx())
-    assert {c.id for c in out} == {"a:x", "b:y"}
+    assert await _allowed_ids(AllowAllAuthorizer(), caps, _ctx()) == {"a:x", "b:y"}
 
 
 async def test_allow_list_whitelist() -> None:
     auth = AllowListAuthorizer(allow_map={"tmpl_a": {"a:x"}})
-    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _agent(), _task(), _ctx())
-    assert {c.id for c in out} == {"a:x"}
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    assert await _allowed_ids(auth, caps, _ctx()) == {"a:x"}
 
 
 async def test_allow_list_denylist_wins() -> None:
     auth = AllowListAuthorizer(deny_map={"tmpl_a": {"b:y"}})
-    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _agent(), _task(), _ctx())
-    assert {c.id for c in out} == {"a:x"}
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    assert await _allowed_ids(auth, caps, _ctx()) == {"a:x"}
 
 
 async def test_allow_list_unknown_template_falls_back_to_allow() -> None:
     auth = AllowListAuthorizer(allow_map={"other": {"a:x"}})
-    out = await auth.filter([_cap("a:x", "x"), _cap("b:y", "y")], _agent("tmpl_a"), _task(), _ctx())
-    assert {c.id for c in out} == {"a:x", "b:y"}  # tmpl_a 不在 allow_map → 不限制
+    caps = [_cap("a:x", "x"), _cap("b:y", "y")]
+    # tmpl_a 不在 allow_map → 不限制
+    assert await _allowed_ids(auth, caps, _ctx("tmpl_a")) == {"a:x", "b:y"}
 
 
 async def test_allow_list_empty_set_blocks_all() -> None:
     auth = AllowListAuthorizer(allow_map={"tmpl_a": set()})
-    out = await auth.filter([_cap("a:x", "x")], _agent(), _task(), _ctx())
-    assert out == []
+    assert await _allowed_ids(auth, [_cap("a:x", "x")], _ctx()) == set()
 
 
 async def test_authorize_returns_decision() -> None:
-    d = await AllowAllAuthorizer().authorize(_cap(), _agent(), _task(), _ctx())
+    d = await AllowAllAuthorizer().authorize(_cap(), _ctx())
     assert isinstance(d, AuthorizationDecision) and d.allowed is True
 
 
 async def test_allow_list_deny_carries_message() -> None:
     auth = AllowListAuthorizer(allow_map={"tmpl_a": set()}, deny_message="blocked by policy")
-    d = await auth.authorize(_cap("a:x", "x"), _agent(), _task(), _ctx())
+    d = await auth.authorize(_cap("a:x", "x"), _ctx())
     assert d.allowed is False and d.message == "blocked by policy"
 
 
@@ -129,11 +131,14 @@ def _state_ctx():
     session = SimpleNamespace(id="s1", tenant_id="default")
     task = _task()
     scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
-    state = LoopState(run_id="run_1", session=session, task=task, agent=agent, scope=scope)
+    state = LoopState(run_id="run_1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
     ctx = LoopContext(
         assembler=None, llm=None, memory=InMemoryMemoryProvider(),
         event_bus=InProcessEventBus(),
-        provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1"),
+        provider_ctx=ProviderContext(
+            session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1",
+            agent_template_id="tmpl_a",
+        ),
     )
     return state, ctx
 
@@ -182,12 +187,12 @@ async def test_gateway_unknown_tool_errors() -> None:
 
 
 class _ModifyAuthorizer(Authorizer):
-    async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
+    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
         return AuthorizationDecision(allowed=True, message="be careful", modified_arguments={"text": "override"})
 
 
 class _DenyMsgAuthorizer(Authorizer):
-    async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
+    async def authorize(self, capability, ctx, arguments=None, *, tool_call_id="") -> AuthorizationDecision:
         return AuthorizationDecision(allowed=False, message="not in this context")
 
 
@@ -245,3 +250,98 @@ def test_sanitize_redacts_sensitive_headers() -> None:
 def test_sanitize_passes_through_without_headers() -> None:
     args = {"command": "ls"}
     assert _sanitize(args) == {"command": "ls"}
+
+
+# ── 6. gateway 必须传 ProviderContext（不是 LoopContext）给 authorizer ──────────────
+
+
+async def test_gateway_passes_provider_context_not_loop_context() -> None:
+    """gateway 必须把 ProviderContext（而非 LoopContext）交给 authorizer。
+
+    回归 latent bug：capability_gateway 曾把 LoopContext 传给形参 ctx: ProviderContext。
+    三个内置实现都不读 ctx 所以没爆，但 host 自写 authorizer 读 ctx.session_id 会 AttributeError。
+    """
+    seen: dict = {}
+
+    class _CtxSpy(Authorizer):
+        async def authorize(self, capability, ctx, arguments=None, *, tool_call_id=""):
+            seen["ctx"] = ctx
+            return AuthorizationDecision(allowed=True)
+
+    provider = _EchoProvider()
+    gw, _ = _gateway(provider, authorizers={"test:echo": _CtxSpy()})
+    state, ctx = _state_ctx()
+    await gw.invoke("test__echo", {"text": "hi"}, state, ctx)
+
+    got = seen["ctx"]
+    assert isinstance(got, ProviderContext)
+    assert got.session_id == "s1"
+    assert got.agent_template_id == "tmpl_a"
+
+
+def test_authorizer_contract_lives_in_protocols() -> None:
+    from ctx_weft.protocols import AuthorizationDecision as PD
+    from ctx_weft.protocols import Authorizer as PA
+    from ctx_weft.protocols.capability import AuthorizationDecision as CD
+    from ctx_weft.protocols.capability import Authorizer as CA
+
+    assert PA is CA and PD is CD
+
+
+def test_protocols_capability_has_no_core_dependency() -> None:
+    """契约层不得反向依赖 core（含 TYPE_CHECKING、含相对导入）。"""
+    import ast
+    import importlib.util
+    import pathlib
+
+    import ctx_weft.protocols.capability as m
+
+    def _is_core(name: str) -> bool:
+        return name == "ctx_weft.core" or name.startswith("ctx_weft.core.")
+
+    src = pathlib.Path(m.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=m.__file__)
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_core(alias.name):
+                    offenders.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                base = node.module or ""
+            else:
+                # 相对导入（如 `from ..core import x`）按 __package__ 解析成绝对路径再判定。
+                dotted = "." * node.level + (node.module or "")
+                base = importlib.util.resolve_name(dotted, m.__package__)
+            if _is_core(base):
+                offenders.append(base)
+            for alias in node.names:
+                target = f"{base}.{alias.name}" if base else alias.name
+                if _is_core(target):
+                    offenders.append(target)
+
+    assert offenders == [], f"protocols 反向依赖 core: {offenders}"
+
+
+def test_builtin_authorizers_live_in_providers() -> None:
+    from ctx_weft.providers.authorizer import (
+        AllowAllAuthorizer,
+        AllowListAuthorizer,
+        HumanConfirmationAuthorizer,
+    )
+
+    assert issubclass(AllowAllAuthorizer, Authorizer)
+    assert issubclass(AllowListAuthorizer, Authorizer)
+    assert issubclass(HumanConfirmationAuthorizer, Authorizer)
+
+
+def test_core_auth_package_is_gone() -> None:
+    """不留 re-export shim：旧路径必须彻底消失。"""
+    import importlib
+
+    import pytest
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("ctx_weft.core.auth")

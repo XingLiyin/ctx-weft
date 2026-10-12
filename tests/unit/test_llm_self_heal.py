@@ -8,7 +8,7 @@ from ctx_weft.protocols import LLMCallError, LLMChunk, LLMOutageError, LLMReques
 from ctx_weft.core.loop import llm_gateway
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient, _sleep_cancellable as _real_sleep
 from ctx_weft.core.control.tokens import CancelToken
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 
 pytestmark = pytest.mark.asyncio
 
@@ -96,6 +96,18 @@ def _req():
     return LLMRequest(model="m", system="s", messages=[])
 
 
+def _state():
+    """最小 state：足以让 stream_llm_resilient 的流式侧事件真正跑（Task 5 删掉了
+    origin 门禁后，gateway 对任何非 None 的 state 都无条件发射，需要 .agent /
+    .resolved_model / .sequence_counter 才不会在 resolve_llm_identity/req_id 处炸。"""
+    return SimpleNamespace(
+        agent=SimpleNamespace(id="a1", loop_guard=None),
+        resolved_model=SimpleNamespace(model="m", account="acct"),
+        sequence_counter=0,
+        origin="",
+    )
+
+
 async def test_self_heals_then_succeeds_no_duplicate():
     llm = _FakeLLM([
         {"kind": "fail_pre"},
@@ -103,7 +115,7 @@ async def test_self_heals_then_succeeds_no_duplicate():
         {"kind": "ok", "tokens": ["Hel", "lo"]},
     ])
     bus = _Bus()
-    chunks = await _drain(stream_llm_resilient(_ctx(llm, bus=bus, config=_cfg()), SimpleNamespace(), _req()))
+    chunks = await _drain(stream_llm_resilient(_ctx(llm, bus=bus, config=_cfg()), _state(), _req()))
     text = "".join(c.text for c in chunks if c.kind == "token")
     assert text == "Hello"          # only the successful attempt's tokens, no dup
     assert llm.calls == 3

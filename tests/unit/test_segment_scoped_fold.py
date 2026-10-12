@@ -7,7 +7,7 @@ Bug：短段免折（is_short_segment）让上一段 raw 以 active 状态跨过
 修复契约（三层收口）：
 1. apply_compact 新增 since_last：归档池限定在「最后一条 active since_last 类型记录之后」；
 2. is_short_segment 只统计当前段（末条 UP 之后）的 raw；
-3. 两个折叠调用方（_run_background_observe 非 close 分支、_fold_retry_segment）传
+3. 两个折叠调用方（_run_recap 非 close 分支、_fold_retry_segment）传
    since_last=USER_PROMPT——更早的短段 raw 永久保 raw（「短 → 原文成胶囊」）。
 """
 
@@ -19,23 +19,27 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctx_weft.core.loop.steps.background_observe as bo
-import ctx_weft.core.loop.steps.observe as _obs_mod
+import ctx_weft.core.loop.observing as _obs_mod
+from ctx_weft.core.loop.background import recap as recap_mod
+from ctx_weft.core.loop.background import runner
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
-from ctx_weft.core.orchestrator.control_capability import (
-    BACKGROUND_PROCESS_REPORT_NAME,
+from ctx_weft.core.capabilities.control_tools import (
+    REPORT_TASK_OUTCOME_NAME,
     ControlResult,
 )
 from ctx_weft.protocols import (
+    ImagePart,
     MemoryEvent,
     MemoryEventType,
     MemoryScope,
     MemoryAddress,
     ProviderContext,
+    TextPart,
 )
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from ctx_weft.core.loop.steps.segment_fold import segment_fold
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.loop.fold import segment_fold
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 
 MT = MemoryEventType
 
@@ -133,7 +137,7 @@ async def test_is_short_segment_counts_only_current_segment():
         timestamp=_ts(55), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await bo.is_short_segment(state, ctx) is True, \
+    assert await recap_mod.is_short_segment(state, ctx) is True, \
         "免折门只该看当前段（末条 UP 之后）的 raw"
 
 
@@ -146,7 +150,7 @@ async def test_is_short_segment_long_current_segment_not_short():
         timestamp=_ts(60), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await bo.is_short_segment(state, ctx) is False
+    assert await recap_mod.is_short_segment(state, ctx) is False
 
 
 async def test_is_short_segment_single_llm_reply_is_short_regardless_of_tokens():
@@ -166,7 +170,25 @@ async def test_is_short_segment_single_llm_reply_is_short_regardless_of_tokens()
         timestamp=_ts(80), role="tool"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await bo.is_short_segment(state, ctx) is True,         "单条 LLM 回复的段不该折，无论多长"
+    assert await recap_mod.is_short_segment(state, ctx) is True,         "单条 LLM 回复的段不该折，无论多长"
+
+
+async def test_is_short_segment_counts_image_parts():
+    """当前段文本极短但带图 → 图片 token 使其超阈值，必须判非 short。
+
+    _seed_two_segments 的当前段是 A2a(assistant) + A2b(tool)，只有 1 条 assistant
+    回合会命中单回复门直接 True；故再补一条带图的 assistant 回合凑够 2 条。
+    """
+    mem = InMemoryMemoryProvider()
+    await _seed_two_segments(mem)
+    await mem.ingest(MemoryEvent(
+        type=MT.LLM_RESPONSE, address=_SCOPE,
+        content=[TextPart(text="ok"), ImagePart(data="ZGF0YQ==", media_type="image/png")],
+        timestamp=_ts(55), role="assistant"), _PCTX)
+    state, ctx = _short_seg_state_ctx(mem, threshold=400)
+
+    assert await recap_mod.is_short_segment(state, ctx) is False, \
+        "一张图 1600 token 已超阈值 400，不得因图算 0 而误判短段免折"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,7 +199,7 @@ async def test_is_short_segment_single_llm_reply_is_short_regardless_of_tokens()
 def _make_tool_call_chunk(name: str, call_id: str = "tc1"):
     return SimpleNamespace(
         kind="tool_call",
-        tool_call=SimpleNamespace(id=call_id, name=name, arguments={"task_process_report": "S2"}),
+        tool_call=SimpleNamespace(id=call_id, name=name, arguments={"act_recap": "S2"}),
         text="", usage=None,
     )
 
@@ -190,13 +212,21 @@ def _make_usage_chunk():
 
 
 async def _fake_stream(ctx, state, request):
-    yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+    # 判定档（`plain_text`）的 terminal tool 是 `report_task_outcome`——2026-09-28 起两档是两个
+    # 工具，名字对不上 `run_observe_react` 就不会终止，报告只能从 last_text 兜底取。
+    yield _make_tool_call_chunk(REPORT_TASK_OUTCOME_NAME)
     yield _make_usage_chunk()
 
 
 class _FakeGateway:
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
-        return ControlResult(content="S2")
+        # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
+        # 读该字段判定 terminal 失败，缺字段会 AttributeError。
+        from types import SimpleNamespace
+        return SimpleNamespace(content="Assessment recorded: outcome=success. S2",
+                               is_error=False,
+                               metadata={K.OBSERVER_ACT_RECAP: "S2",
+                                         K.OBSERVER_OUTCOME: "success"})
 
 
 @pytest.mark.asyncio
@@ -220,7 +250,7 @@ async def test_background_fold_after_short_skip_keeps_previous_segment_raw(
         type=MT.LLM_RESPONSE, address=state.scope, content="A2 当前段",
         timestamp=datetime.now(UTC), role="assistant"), ctx.provider_ctx)
 
-    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+    await runner.launch_recap(state, ctx, boundary="plain_text")
 
     chrono = await _chrono(ctx.memory, state.scope, ctx.provider_ctx)
     contents = [r.content for r in chrono]
@@ -251,7 +281,7 @@ async def test_fold_retry_segment_keeps_previous_segment_raw():
         llm=SimpleNamespace(tokenizer=HeuristicTokenizer()),
         task_manager=None,
     )
-    verdict = Verdict(task_outcome="retry", act_recap="S2", reported=True)
+    verdict = Verdict(task_outcome="continue", act_recap="S2", reported=True)
 
     await ObserveStep()._fold_retry_segment(state, ctx, verdict, [])
 

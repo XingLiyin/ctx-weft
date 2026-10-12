@@ -5,23 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctx_weft.core.loop.steps.observe as _obs_mod
-from ctx_weft.core.events import EventType
-from ctx_weft.core.loop.steps.observe import (
-    BACKGROUND_OBSERVE_REACT_EVENTS, run_observe_react,
-)
-from ctx_weft.core.orchestrator.control_capability import ControlResult
+import ctx_weft.core.loop.observing as _obs_mod
+from ctx_weft.protocols.events import EventOrigin, EventType
+from ctx_weft.core.loop.observing import run_observe_react
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryAddress
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-
-_LLM_EVENT_TYPES = {
-    EventType.LLM_REQUEST_STARTED, EventType.LLM_PROMPT_SENT,
-    EventType.LLM_TOKEN_STREAMED, EventType.LLM_RESPONSE_FINISHED,
-}
-_BACKGROUND_EVENT_TYPES = {
-    EventType.BACKGROUND_OBSERVE_REQUEST_STARTED, EventType.BACKGROUND_OBSERVE_PROMPT_SENT,
-    EventType.BACKGROUND_OBSERVE_TOKEN_STREAMED, EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED,
-}
 
 pytestmark = pytest.mark.asyncio
 
@@ -35,23 +23,29 @@ class _FakeEventBus:
 
 
 class _RecordingEventBus:
-    """Records emitted event types so tests can assert which events fired."""
+    """Records emitted events (and their types) so tests can assert which fired."""
 
     def __init__(self):
+        self.events = []
         self.types = []
 
     async def emit(self, event) -> None:
+        self.events.append(event)
         self.types.append(event.type)
 
 
 class _FakeGateway:
-    """Returns ControlResult(content=tool_content) for any tool invocation."""
+    """Returns a success result (content=tool_content) for any tool invocation.
+
+    返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react 读该字段
+    判定 terminal 失败，缺字段会 AttributeError。
+    """
 
     def __init__(self, tool_content: str):
         self._tool_content = tool_content
 
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
-        return ControlResult(content=self._tool_content)
+        return SimpleNamespace(content=self._tool_content, is_error=False, metadata={})
 
 
 def _make_tool_call_chunk(name: str, call_id: str = "tc1"):
@@ -105,12 +99,13 @@ def _make_state():
         agent=agent,
         scope=scope,
         extra={"template": None, "bound_capabilities": []},
+        resolved_model=SimpleNamespace(model="mock", account=""),
     )
     return state
 
 
-def _make_ctx(tool_content: str, event_bus=None):
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+def _make_ctx(tool_content: str, event_bus=None, gateway=None):
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import ProviderContext
     mem = InMemoryMemoryProvider()
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
@@ -133,7 +128,7 @@ def _make_ctx(tool_content: str, event_bus=None):
         memory=mem,
         event_bus=event_bus or _FakeEventBus(),
         provider_ctx=pctx,
-        capability_gateway=_FakeGateway(tool_content),
+        capability_gateway=gateway or _FakeGateway(tool_content),
     )
     return ctx
 
@@ -160,7 +155,6 @@ async def test_helper_returns_tool_content_when_control_tool_called(monkeypatch)
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name="report_task_outcome",
     )
@@ -197,7 +191,6 @@ async def test_plain_text_round_nudged_then_terminal(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name="collect_process_report",
     )
@@ -230,7 +223,6 @@ async def test_helper_returns_none_when_no_tool_called(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name="report_task_outcome",
     )
@@ -257,7 +249,6 @@ async def test_helper_last_text_from_final_round(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name="report_task_outcome",
     )
@@ -284,7 +275,6 @@ async def test_helper_token_accounting(monkeypatch):
         system="SYS",
         messages=[],
         tools=[],
-        request_id_prefix="test",
         max_rounds=1,
         terminal_tool_name="report_task_outcome",
     )
@@ -320,7 +310,6 @@ async def test_ask_user_does_not_terminate_loop(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=1,
         terminal_tool_name=TERMINAL_TOOL,
     )
@@ -333,12 +322,11 @@ async def test_ask_user_does_not_terminate_loop(monkeypatch):
     assert last_text == "thinking about user question"
 
 
-async def test_background_event_types_emit_background_not_llm(monkeypatch):
-    """background path (event_types=BACKGROUND_OBSERVE_REACT_EVENTS): emits BackgroundObserve*
-    events, NEVER the generic LLM_* events.
-
-    core 不感知前端可见性——只发独立类型；host 据此决定后台 observe 的 LLM 交互不进前端对话流。
-    """
+async def test_response_finished_type_and_origin_follow_state_origin(monkeypatch):
+    """Task 5：不再有 event_types 参数区分前台/后台——run_observe_react 自己只发一种类型
+    （LLM_RESPONSE_FINISHED，其它 4 个「流式侧」事件由 gateway 发，这里 stream_llm_resilient
+    整个被 monkeypatch 掉不会跑到那段）。前台/后台的区别只体现在事件的 origin 字段上，
+    origin 随 state.origin 走，run_observe_react 本身不感知也不分支。"""
 
     async def _fake_stream(ctx, state, request):
         yield _make_token_chunk("thinking")
@@ -347,26 +335,23 @@ async def test_background_event_types_emit_background_not_llm(monkeypatch):
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
 
-    bus = _RecordingEventBus()
-    state = _make_state()
-    ctx = _make_ctx(tool_content="REPORT", event_bus=bus)
+    for origin in (EventOrigin.LOOP_OBSERVE, EventOrigin.LOOP_BACKGROUND_OBSERVE):
+        bus = _RecordingEventBus()
+        state = _make_state()
+        state.origin = origin
+        ctx = _make_ctx(tool_content="REPORT", event_bus=bus)
 
-    await run_observe_react(
-        state, ctx,
-        system="SYS",
-        messages=[],
-        tools=[],
-        request_id_prefix="bgobs",
-        max_rounds=1,
-        terminal_tool_name="collect_process_report",
-        event_types=BACKGROUND_OBSERVE_REACT_EVENTS,
-    )
+        await run_observe_react(
+            state, ctx,
+            system="SYS",
+            messages=[],
+            tools=[],
+            max_rounds=1,
+            terminal_tool_name="collect_process_report",
+        )
 
-    emitted_llm = [t for t in bus.types if t in _LLM_EVENT_TYPES]
-    emitted_bg = [t for t in bus.types if t in _BACKGROUND_EVENT_TYPES]
-    assert emitted_llm == [], f"background path must emit NO LLM_* events, got {emitted_llm}"
-    assert EventType.BACKGROUND_OBSERVE_PROMPT_SENT in emitted_bg
-    assert EventType.BACKGROUND_OBSERVE_RESPONSE_FINISHED in emitted_bg
+        assert bus.types == [EventType.LLM_RESPONSE_FINISHED], (origin, bus.types)
+        assert bus.events[0].origin == origin
 
 
 async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
@@ -383,10 +368,11 @@ async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
 
     class _RichGateway:
         async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
-            return ControlResult(content="recap", metadata={"task_summary": "sum"})
+            return SimpleNamespace(
+                content="recap", is_error=False, metadata={"task_summary": "sum"})
 
     state = _make_state()
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
 
@@ -418,44 +404,12 @@ async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
         system="SYS",
         messages=[LLMMessage(role="user", content="observe this")],
         tools=[],
-        request_id_prefix="test",
         max_rounds=3,
         terminal_tool_name=TERMINAL,
     )
     assert result is not None
     assert result.content == "recap"
     assert result.metadata.get("task_summary") == "sum"
-
-
-async def test_default_event_types_emit_llm(monkeypatch):
-    """observe path (default event_types): emits the generic LLM_* events (regression guard)."""
-
-    async def _fake_stream(ctx, state, request):
-        yield _make_token_chunk("thinking")
-        yield _make_tool_call_chunk("report_task_outcome")
-        yield _make_usage_chunk()
-
-    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
-
-    bus = _RecordingEventBus()
-    state = _make_state()
-    ctx = _make_ctx(tool_content="REPORT", event_bus=bus)
-
-    await run_observe_react(
-        state, ctx,
-        system="SYS",
-        messages=[],
-        tools=[],
-        request_id_prefix="obs",
-        max_rounds=1,
-        terminal_tool_name="report_task_outcome",
-    )  # event_types defaults to OBSERVE_REACT_EVENTS
-
-    emitted_llm = [t for t in bus.types if t in _LLM_EVENT_TYPES]
-    emitted_bg = [t for t in bus.types if t in _BACKGROUND_EVENT_TYPES]
-    assert EventType.LLM_PROMPT_SENT in emitted_llm
-    assert EventType.LLM_RESPONSE_FINISHED in emitted_llm
-    assert emitted_bg == [], f"observe path must emit NO BackgroundObserve* events, got {emitted_bg}"
 
 
 class _RecordingBusFull:
@@ -466,6 +420,99 @@ class _RecordingBusFull:
 
     async def emit(self, event) -> None:
         self.events.append(event)
+
+
+# ── terminal 工具失败不终止循环（spec: capability-gateway）────────────────────
+
+
+class _FlakyTerminalGateway:
+    """第 1 次调用返回 is_error=True（如参数非法被 gateway 拒），之后返回成功。"""
+
+    def __init__(self, error_content: str, ok_content: str):
+        self._error = error_content
+        self._ok = ok_content
+        self.calls = 0
+
+    async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
+        self.calls += 1
+        if self.calls == 1:
+            return SimpleNamespace(content=self._error, is_error=True, metadata={})
+        return SimpleNamespace(content=self._ok, is_error=False, metadata={})
+
+
+class _AlwaysErrorGateway:
+    """每次调用都返回 is_error=True——钉轮次耗尽的兜底。"""
+
+    def __init__(self, error_content: str):
+        self._error = error_content
+
+    async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
+        return SimpleNamespace(content=self._error, is_error=True, metadata={})
+
+
+async def test_terminal_tool_error_does_not_terminate_loop(monkeypatch):
+    """terminal 工具首调失败（is_error=True）→ 循环不终止；错误回灌后次调成功 →
+    返回成功结果，错误文案不进入结果。"""
+    requests = []
+
+    async def _fake_stream(ctx, state, request):
+        requests.append(request)
+        yield _make_token_chunk("round text")
+        yield _make_tool_call_chunk("collect_process_report")
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+
+    ERR = "[Error: invalid arguments for 'control__report_task_outcome': 'act_recap' is required]"
+    OK = "RECAP"
+    gw = _FlakyTerminalGateway(ERR, OK)
+    state = _make_state()
+    ctx = _make_ctx(tool_content="unused", gateway=gw)
+
+    result, last_text = await run_observe_react(
+        state, ctx,
+        system="SYS",
+        messages=[LLMMessage(role="user", content="observe this")],
+        tools=[],
+        max_rounds=3,
+        terminal_tool_name="collect_process_report",
+    )
+
+    assert gw.calls == 2, "首轮错误后应重试而非终止"
+    assert result is not None
+    assert result.content == OK
+    assert ERR not in str(result.content)
+    # 错误内容须回灌进第二轮请求（模型据此改参）
+    assert any(m.role == "tool" and ERR in str(m.content) for m in requests[1].messages)
+
+
+async def test_terminal_tool_error_exhausts_rounds_returns_none(monkeypatch):
+    """terminal 工具连续失败直至轮次耗尽 → 返回 (None, last_text) 兜底，
+    不把错误文案当终止结果。"""
+
+    async def _fake_stream(ctx, state, request):
+        yield _make_token_chunk("trying")
+        yield _make_tool_call_chunk("report_task_outcome")
+        yield _make_usage_chunk()
+
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
+
+    ERR = "[Error: invalid arguments for 'control__report_task_outcome': ...]"
+    gw = _AlwaysErrorGateway(ERR)
+    state = _make_state()
+    ctx = _make_ctx(tool_content="unused", gateway=gw)
+
+    result, last_text = await run_observe_react(
+        state, ctx,
+        system="SYS",
+        messages=[LLMMessage(role="user", content="observe this")],
+        tools=[],
+        max_rounds=2,
+        terminal_tool_name="report_task_outcome",
+    )
+
+    assert result is None
+    assert last_text == "trying"
 
 
 async def test_response_finished_payload_carries_usage_split(monkeypatch):
@@ -488,7 +535,7 @@ async def test_response_finished_payload_carries_usage_split(monkeypatch):
 
     await run_observe_react(
         state, ctx, system="SYS", messages=[], tools=[],
-        request_id_prefix="test", max_rounds=1,
+        max_rounds=1,
         terminal_tool_name="report_task_outcome",
     )
 

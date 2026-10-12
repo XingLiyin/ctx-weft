@@ -1,6 +1,21 @@
-"""HITL park 信号 + 热→冷驱逐 + approval 冷路径（spec/07 §5/§7/§8）。"""
+"""HitlPark 信号本身，以及 `_run_loop` 对它的处理（挂起而非失败）。
+
+原先本文件还覆盖 `defer`、`HitlManager.wait/wait_for_decision` 的双出口、以及
+approval 的冷路径短路。三者都随重设计消失或换了归属：
+
+- `AuthorizationDecision.defer` 已删——它只能说「挂起」、说不出问什么，于是 authorizer
+  必须自己先去登记请求（耦合的源头）。取代它的是 `needs_human: HitlAsk`，见
+  `test_gateway_authz_hitl.py` 与 `test_authorizer_human_stateless.py`。
+- `wait()` 抛 `HitlPark` / `wait_for_decision()` 返 `None` 这组双出口已合并成
+  `HitlWaiter.wait()` 单一出口（驱逐返 `None`，翻译成 park 的权力只在 gateway）：
+  `test_hitl_waiter.py` + `test_gateway_*_needs_human` 的驱逐用例。
+- 冷决定短路：`test_gateway_authz_hitl.py::test_a_cached_decision_short_circuits_without_asking_again`
+  与 `test_hitl_registry_load.py`。
+"""
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,80 +34,32 @@ def test_hitl_park_carries_ids() -> None:
     assert p.hitl_id == "hit_1" and p.tool_call_id == "tc1"
 
 
-def test_authorization_decision_has_defer_default_false() -> None:
-    from ctx_weft.core.auth.authorizer import AuthorizationDecision
-    assert AuthorizationDecision(allowed=True).defer is False
+async def test_run_loop_catches_park_returns_awaiting_human() -> None:
+    """_run_loop 必须接住 HitlPark、报出 awaiting_human 结局、且不抛（不落 FAILED）。
 
-
-async def test_gateway_defer_raises_park_and_skips_provider() -> None:
-    from types import SimpleNamespace
-    from collections.abc import AsyncIterator
-    from ctx_weft.core.auth import AuthorizationDecision, Authorizer
-    from ctx_weft.core.events.bus import InProcessEventBus
-    from ctx_weft.core.loop.capability_gateway import CapabilityGateway
-    from ctx_weft.core.loop.driver import LoopContext, LoopState
-    from ctx_weft.core.loop.park import HitlPark
-    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-    from ctx_weft.protocols import MemoryAddress, ProviderContext
-    from ctx_weft.protocols.capability import (
-        CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider)
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
-
-    cap = ToolCapability(id="test:echo", name="echo", description="e")
-
-    class _Prov(ToolCapabilityProvider):
-        name = "test"
-        def __init__(self): self.invoked = False
-        async def list(self, ctx): return [cap]
-        async def retrieve(self, ctx): return [cap]
-        async def describe(self, ctx): return CapabilityProviderInfo(name=self.name, capability_count=1)
-        def invoke(self, cid, args, ctx) -> AsyncIterator[CapabilityEvent]: return self._run()
-        async def _run(self):
-            self.invoked = True
-            yield CapabilityEvent(kind="result", payload={"content": "x"})
-        async def cancel(self, iid, ctx): return None
-
-    class _DeferAuth(Authorizer):
-        async def authorize(self, capability, agent, task, ctx, arguments=None, *, tool_call_id=""):
-            return AuthorizationDecision(allowed=False, defer=True)
-
-    prov = _Prov()
-    cache = CapabilityCache(); cache.put("agt_1", [cap])
-    gw = CapabilityGateway(capability_cache=cache, capability_providers=[prov],
-                           memory=InMemoryMemoryProvider(), event_bus=InProcessEventBus(),
-                           provider_authorizers={"test:echo": _DeferAuth()})
-    agent = SimpleNamespace(id="agt_1", template_id="tmpl_a", session_id="s1")
-    session = SimpleNamespace(id="s1", tenant_id="default")
-    task = SimpleNamespace(id="tsk_1")
-    scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
-    state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope)
-    ctx = LoopContext(assembler=None, llm=None, memory=InMemoryMemoryProvider(),
-                      event_bus=InProcessEventBus(),
-                      provider_ctx=ProviderContext(session_id="s1", tenant_id="default",
-                                                   task_id="tsk_1", agent_id="agt_1"))
-    with pytest.raises(HitlPark):
-        await gw.invoke("test__echo", {"text": "hi"}, state, ctx, tool_call_id="tcZ")
-    assert prov.invoked is False
-
-
-async def test_run_loop_catches_park_returns_suspended() -> None:
-    """_run_loop must catch HitlPark, set task SUSPENDED, and NOT raise (no FAILED)."""
+    Task 4 起 task.status / TaskAwaitingHuman 都不在 run 里落地：run 只交回
+    `RunOutcome(kind=awaiting_human, hitl_id=...)`，TaskManager 据它写状态发事件
+    （TM 侧的对照断言见 tests/unit/test_task_manager_owns_status.py）。
+    """
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import CtxWeftRuntime, ProviderRegistry
-    from ctx_weft.core.events import EventType
-    from ctx_weft.core.events.bus import InProcessEventBus
+    from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
+    from ctx_weft.protocols.events import EventType
+    from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.loop.park import HitlPark
-    from ctx_weft.core.orchestrator.capability_cache import CapabilityCache
-    from ctx_weft.core.state.models import Agent, LoopGuard, Session, Task
+    from ctx_weft.core.capabilities.cache import CapabilityCache
+    from ctx_weft.core.models.agent import Agent, LoopGuard
+    from ctx_weft.core.models.session import Session
+    from ctx_weft.core.models.task import Task
     from ctx_weft.protocols import (
         LoopConfig,
         MemoryConfig,
         MemoryAddress,
         ProviderContext,
     )
-    from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     # ── real objects ──────────────────────────────────────────────────────────
@@ -114,15 +81,13 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
         id="agt_p1",
         session_id="s_park_1",
         template_id="tpl_test",
-        template_version="0.1",
-        status="RUNNING",
         tenant_id="default",
         loop_guard=LoopGuard(),
         memory_config=MemoryConfig(),
         loop_config=LoopConfig(),
     )
     scope = MemoryAddress(session_id="s_park_1", task_id="tsk_park_1", agent_id="agt_p1")
-    state = LoopState(run_id="run_p1", session=session, task=task, agent=agent, scope=scope)
+    state = LoopState(run_id="run_p1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
 
     # ── stub driver that raises HitlPark immediately ──────────────────────────
     class _ParkingDriver:
@@ -177,93 +142,27 @@ async def test_run_loop_catches_park_returns_suspended() -> None:
     )
 
     # ── assertions ───────────────────────────────────────────────────────────
-    assert task.status == "SUSPENDED", f"expected SUSPENDED, got {task.status!r}"
+    # run 侧不写 task 状态了；park 的全部信息落在 RunOutcome 上，交给 TaskManager。
+    assert task.status == "ACTIVE", f"run 不该改 task.status, got {task.status!r}"
+    outcome = final_state.run_outcome
+    assert outcome is not None and outcome.kind is RunOutcomeKind.AWAITING_HUMAN
+    assert outcome.hitl_id == "req_park"
 
     run_finished = next((e for e in collected if e.type == EventType.RUN_FINISHED), None)
     assert run_finished is not None, "RUN_FINISHED not emitted"
-    assert run_finished.payload["final_status"] == "SUSPENDED"
+    assert run_finished.payload["outcome"] == "awaiting_human"
     assert run_finished.payload.get("error") is None
 
     task_failed_events = [e for e in collected if e.type == "TaskFailed"]
     assert task_failed_events == [], f"unexpected TaskFailed events: {task_failed_events}"
 
-    # Phase 3：冷 park 也补发 TASK_SUSPENDED，使 task 投影状态 = 内存状态(SUSPENDED)，
-    # 消除"投影停在 ACTIVE、与在等人脱节"的漂移。
-    task_suspended = [e for e in collected if e.type == EventType.TASK_SUSPENDED]
-    assert len(task_suspended) == 1, f"expected one TASK_SUSPENDED, got {len(task_suspended)}"
-    assert task_suspended[0].task_id == "tsk_park_1"
+    # park 是 **task 级事实**：这个 task 卡住了、卡它的是哪个 HITL 请求——但它由
+    # TaskManager 宣布（Task 4：task 状态事件只从 TM 出），run 里一条都不该有。
+    assert [e for e in collected if e.type == EventType.TASK_AWAITING_HUMAN] == []
+    assert [e for e in collected if e.type == EventType.TASK_SUSPENDED] == []
 
 
-async def test_timeout_evicts_to_cold_keeps_pending() -> None:
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-    from ctx_weft.core.loop.park import HitlPark
-    mgr = HitlManager(timeout_sec=0)
-    rid = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tc1")
-    with pytest.raises(HitlPark):
-        await mgr.wait(rid)
-    assert mgr.get(rid).status == "pending"        # 仍 pending（hot→cold，不是 timeout 终态）
-    assert mgr.list_pending()
-    resolved, was_hot = await mgr.resolve_answer(rid, "late answer")
-    assert resolved.status == "accepted" and was_hot is False
-
-
-async def test_answer_before_timeout_is_hot_and_wins() -> None:
-    import asyncio
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-    mgr = HitlManager(timeout_sec=None)             # never times out
-    rid = await mgr.request(form="question", session_id="s1", task_id="t1", tool_call_id="tc1")
-    waiter = asyncio.create_task(mgr.wait(rid))
-    await asyncio.sleep(0)
-    resolved, was_hot = await mgr.resolve_answer(rid, "answered")
-    assert was_hot is True
-    assert (await waiter).status == "accepted"
-
-
-async def test_authorize_cold_uses_resolved_decision_no_new_hitl() -> None:
-    from types import SimpleNamespace
-    from ctx_weft.core.auth import HumanConfirmationAuthorizer
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-    from ctx_weft.protocols import ProviderContext
-    from ctx_weft.protocols.capability import ToolCapability
-
-    mgr = HitlManager()
-    rid = await mgr.request(form="approval", session_id="s1", task_id="t1", tool_call_id="tcZ")
-    await mgr.approve(rid, modified_arguments={"command": "ls -la"})
-
-    authz = HumanConfirmationAuthorizer(hitl_manager=mgr)
-    cap = ToolCapability(id="fs:bash_exec", name="bash_exec", description="run")
-    agent = SimpleNamespace(id="a1", template_id="t", session_id="s1")
-    d = await authz.authorize(cap, agent, SimpleNamespace(id="t1"),
-                              ProviderContext(session_id="s1", tenant_id="default"),
-                              {"command": "ls"}, tool_call_id="tcZ")
-    assert d.allowed and d.modified_arguments == {"command": "ls -la"}
-    assert len(mgr.list_pending()) == 0     # 未新建
-
-
-async def test_authorize_cold_no_future_does_not_keyerror() -> None:
-    """restart 后：rebuild_pending(无 future) + 冷 resolve → authorize 必须短路（否则 wait() KeyError）。"""
-    from types import SimpleNamespace
-    from ctx_weft.core.auth import HumanConfirmationAuthorizer
-    from ctx_weft.core.state.models import HitlRequest
-    from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-    from ctx_weft.protocols import ProviderContext
-    from ctx_weft.protocols.capability import ToolCapability
-
-    mgr = HitlManager()
-    # 模拟 restart：从 view 重建 pending（无 future）
-    mgr.rebuild_pending({
-        "hit_1": HitlRequest(id="hit_1", form="approval", session_id="s1",
-                             task_id="t1", capability_id="fs:bash_exec", tool_call_id="tcR"),
-    })
-    # 冷应答（无 future → was_hot False）
-    _resolved, was_hot = await mgr.resolve_approve("hit_1", modified_arguments={"command": "ls -la"})
-    assert was_hot is False
-
-    authz = HumanConfirmationAuthorizer(hitl_manager=mgr)
-    cap = ToolCapability(id="fs:bash_exec", name="bash_exec", description="run")
-    agent = SimpleNamespace(id="a1", template_id="t", session_id="s1")
-    # reconcile 再入：必须用缓存决定、不调 wait()（否则 KeyError：无 future）
-    d = await authz.authorize(cap, agent, SimpleNamespace(id="t1"),
-                              ProviderContext(session_id="s1", tenant_id="default"),
-                              {"command": "ls"}, tool_call_id="tcR")
-    assert d.allowed and d.modified_arguments == {"command": "ls -la"}
+def test_authorizer_filter_is_gone():
+    """filter 零调用点，且对 HumanConfirmation 会真的发一个 HITL 请求并等人——是陷阱。"""
+    from ctx_weft.protocols.capability import Authorizer
+    assert not hasattr(Authorizer, "filter")

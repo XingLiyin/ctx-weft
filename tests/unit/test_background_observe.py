@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from ctx_weft.core.loop.background import boundaries
+from ctx_weft.core.loop.background import recap as recap_mod
+from ctx_weft.core.loop.background import runner
+from ctx_weft.core.loop import finish_pair as fp
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
+
 import pytest
 
-import ctx_weft.core.loop.steps.background_observe as bo
-import ctx_weft.core.loop.steps.observe as _obs_mod
-from ctx_weft.core.orchestrator.control_capability import (
-    BACKGROUND_PROCESS_REPORT_NAME,
+import ctx_weft.core.loop.observing as _obs_mod
+from ctx_weft.core.capabilities.control_tools import (
+    COLLECT_PROCESS_REPORT_NAME,
+    REPORT_TASK_OUTCOME_NAME,
     ControlResult,
 )
 from ctx_weft.protocols import MemoryEventType
@@ -19,17 +25,17 @@ from ctx_weft.protocols import MemoryEventType
 @pytest.fixture(autouse=True)
 def _clear_module_state():
     """Clear module-level dicts between tests to avoid cross-test lock/event-loop pollution."""
-    bo._task_locks.clear()
-    bo._task_pending.clear()
-    bo._orphan_tasks.clear()
-    bo._close_report.clear()
-    bo._close_synth.clear()
+    recap_mod._task_locks.clear()
+    runner._task_pending.clear()
+    runner._orphan_tasks.clear()
+    fp._close_report.clear()
+    fp._close_synth.clear()
     yield
-    bo._task_locks.clear()
-    bo._task_pending.clear()
-    bo._orphan_tasks.clear()
-    bo._close_report.clear()
-    bo._close_synth.clear()
+    recap_mod._task_locks.clear()
+    runner._task_pending.clear()
+    runner._orphan_tasks.clear()
+    fp._close_report.clear()
+    fp._close_synth.clear()
 
 
 # ── helpers shared by new ReAct-based tests ───────────────────────────────────
@@ -38,7 +44,7 @@ def _clear_module_state():
 def _make_tool_call_chunk(name: str, call_id: str = "tc1"):
     return SimpleNamespace(
         kind="tool_call",
-        tool_call=SimpleNamespace(id=call_id, name=name, arguments={"task_process_report": "段总结X"}),
+        tool_call=SimpleNamespace(id=call_id, name=name, arguments={"act_recap": "段总结X"}),
         text="",
         usage=None,
     )
@@ -85,13 +91,34 @@ class _FakeGateway:
         self._report_text = report_text
 
     async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
-        return ControlResult(content=self._report_text)
+        # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
+        # 读该字段判定 terminal 失败，缺字段会 AttributeError。
+        # 对齐 `report_task_outcome` 的真实返回：content 是给 LLM 看的话术，干净的
+        # recap 在 metadata 里（2026-09-22 起后台与前台同一个 terminal tool）。
+        return SimpleNamespace(
+            content=f"Assessment recorded: outcome=success. {self._report_text}",
+            is_error=False,
+            metadata={K.OBSERVER_OUTCOME: "success",
+                      K.OBSERVER_ACT_RECAP: self._report_text,
+                      K.OBSERVER_TASK_SUMMARY: ""},
+        )
 
 
 async def _fake_stream_collect_process_report(ctx, state, request):
-    """Fake LLM that calls collect_process_report once."""
+    """Fake LLM that calls collect_process_report once —— **只摘要那一档**的 terminal tool。"""
     yield _make_token_chunk("thinking...")
-    yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+    yield _make_tool_call_chunk(COLLECT_PROCESS_REPORT_NAME)
+    yield _make_usage_chunk()
+
+
+async def _fake_stream_report_task_outcome(ctx, state, request):
+    """判定那一档的 terminal tool（2026-09-28 起两档是两个工具）。
+
+    名字必须对得上 `run_observe_react` 的 `terminal_tool_name`，否则那个循环不会终止——
+    它会一直跑到 max_rounds，terminal_result 恒为 None，报告只能从 last_text 兜底取。
+    """
+    yield _make_token_chunk("judging...")
+    yield _make_tool_call_chunk(REPORT_TASK_OUTCOME_NAME)
     yield _make_usage_chunk()
 
 
@@ -114,7 +141,7 @@ async def test_launch_produces_summary_and_folds(monkeypatch, fake_state_ctx):
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
 
-    t = bo.launch_background_observe(state, ctx, boundary="interrupt")
+    t = runner.launch_recap(state, ctx, boundary="interrupt")
     await t
     # apply_compact 被调、产出 TASK_COMPACT_SUMMARY、UP 保留
     from ctx_weft.protocols import MemoryEventType as MT
@@ -141,14 +168,14 @@ async def test_serialized_per_task(monkeypatch, fake_state_ctx):
     async def slow_stream(c, s, req):
         order.append("start")
         await asyncio.sleep(0.01)
-        yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+        yield _make_tool_call_chunk(COLLECT_PROCESS_REPORT_NAME)
         yield _make_usage_chunk()
         order.append("end")
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", slow_stream)
     _neutralize_refold_guard(monkeypatch, ctx)
-    t1 = bo.launch_background_observe(state, ctx, boundary="interrupt")
-    t2 = bo.launch_background_observe(state, ctx, boundary="interrupt")
+    t1 = runner.launch_recap(state, ctx, boundary="interrupt")
+    t2 = runner.launch_recap(state, ctx, boundary="interrupt")
     await asyncio.gather(t1, t2)
     assert order == ["start", "end", "start", "end"]  # 串行，不交错
 
@@ -156,7 +183,7 @@ async def test_serialized_per_task(monkeypatch, fake_state_ctx):
 @pytest.mark.asyncio
 async def test_await_pending_waits_for_latest_when_two_launched(monkeypatch, fake_state_ctx):
     """Regression: when two observes launch for the same task_id, the first completing
-    must NOT clear _task_pending — await_pending_background_observe must wait for the
+    must NOT clear _task_pending — await_pending_recap must wait for the
     second (latest) observe to finish.
     """
     state, ctx = fake_state_ctx
@@ -176,21 +203,21 @@ async def test_await_pending_waits_for_latest_when_two_launched(monkeypatch, fak
         else:
             await asyncio.sleep(0.05)
             second_done = True
-        yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+        yield _make_tool_call_chunk(COLLECT_PROCESS_REPORT_NAME)
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", vary_speed)
     _neutralize_refold_guard(monkeypatch, ctx)
 
-    t1 = bo.launch_background_observe(state, ctx, boundary="interrupt")
-    t2 = bo.launch_background_observe(state, ctx, boundary="interrupt")
+    t1 = runner.launch_recap(state, ctx, boundary="interrupt")
+    t2 = runner.launch_recap(state, ctx, boundary="interrupt")
 
     await asyncio.sleep(0.01)
 
-    await bo.await_pending_background_observe(state.task.id)
+    await runner.await_pending_recap(state.task.id)
 
     assert second_done, (
-        "await_pending_background_observe returned before the second (latest) observe "
+        "await_pending_recap returned before the second (latest) observe "
         "finished — _task_pending was incorrectly cleared by the first task's callback"
     )
     await asyncio.gather(t1, t2)
@@ -208,7 +235,7 @@ async def test_failure_swallowed(monkeypatch, fake_state_ctx):
         yield  # make it an async generator
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", boom)
-    t = bo.launch_background_observe(state, ctx, boundary="interrupt")
+    t = runner.launch_recap(state, ctx, boundary="interrupt")
     await t  # 不抛
     assert t.exception() is None
 
@@ -225,7 +252,7 @@ async def test_background_interrupt_writes_segment_summary(monkeypatch, fake_sta
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
 
-    t = bo.launch_background_observe(state, ctx, boundary="interrupt")
+    t = runner.launch_recap(state, ctx, boundary="interrupt")
     await t
 
     from ctx_weft.protocols import MemoryEventType as MT
@@ -243,14 +270,14 @@ async def test_background_close_no_memory_writes_slot(monkeypatch, fake_state_ct
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
 
-    t = bo.launch_background_observe(state, ctx, boundary="finish")
+    t = runner.launch_recap(state, ctx, boundary="finish")
     await t
 
     from ctx_weft.protocols import MemoryEventType as MT
     recs = await ctx.memory.recall_recent(
         state.scope, [MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
     assert recs == []
-    result = bo.pop_close_report(state.task.id)
+    result = fp.pop_close_report(state.task.id)
     assert result is not None
 
 
@@ -271,7 +298,7 @@ async def test_two_plain_text_observes_accumulate_both_summaries(monkeypatch, fa
     state, ctx = fake_state_ctx  # task 层预置 [UP1, LLM, TOOL]
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
-    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_report_task_outcome)
 
     class _CountingGateway:
         """Distinct report per observe so we can tell S1 from S2."""
@@ -281,12 +308,20 @@ async def test_two_plain_text_observes_accumulate_both_summaries(monkeypatch, fa
 
         async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
             self.n += 1
-            return ControlResult(content=f"S{self.n}")
+            # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
+            # 读该字段判定 terminal 失败，缺字段会 AttributeError。
+            return SimpleNamespace(
+                content=f"Assessment recorded: outcome=success. S{self.n}",
+                is_error=False,
+                metadata={K.OBSERVER_OUTCOME: "success",
+                          K.OBSERVER_ACT_RECAP: f"S{self.n}",
+                          K.OBSERVER_TASK_SUMMARY: ""},
+            )
 
     ctx.capability_gateway = _CountingGateway()
 
     # ── observe1：折掉预置 [LLM, TOOL]，留 UP1，产 S1 ──
-    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+    await runner.launch_recap(state, ctx, boundary="plain_text")
 
     s1 = await ctx.memory.recall_recent(state.scope, [MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
     assert len(s1) == 1 and s1[0].content == "S1"
@@ -303,7 +338,7 @@ async def test_two_plain_text_observes_accumulate_both_summaries(monkeypatch, fa
     await asyncio.sleep(0.005)
 
     # ── observe2：折掉 reply2，留 UP1/UP2/S1，产 S2 ──
-    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+    await runner.launch_recap(state, ctx, boundary="plain_text")
 
     recs = await ctx.memory.recall_recent(
         state.scope, [MT.USER_PROMPT, MT.LLM_RESPONSE, MT.TOOL_RESULT, MT.TASK_COMPACT_SUMMARY],
@@ -332,7 +367,7 @@ async def test_plain_text_reply_falls_back_to_last_text(monkeypatch, fake_state_
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _text_only)
-    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+    await runner.launch_recap(state, ctx, boundary="plain_text")
 
     recs = await ctx.memory.recall_recent(
         state.scope, [MemoryEventType.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
@@ -354,7 +389,7 @@ async def test_no_usable_report_keeps_raw(monkeypatch, fake_state_ctx):
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
-    await bo.launch_background_observe(state, ctx, boundary="plain_text")
+    await runner.launch_recap(state, ctx, boundary="plain_text")
 
     from ctx_weft.protocols import MemoryEventType as MT
     recs = await ctx.memory.recall_recent(
@@ -378,9 +413,9 @@ async def test_no_usable_report_close_does_not_fill_slot(monkeypatch, fake_state
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
-    await bo.launch_background_observe(state, ctx, boundary="finish")
+    await runner.launch_recap(state, ctx, boundary="finish")
 
-    assert bo.pop_close_report(state.task.id) is None, "无可用报告不得占用 close_report 槽"
+    assert fp.pop_close_report(state.task.id) is None, "无可用报告不得占用 close_report 槽"
 
 
 @pytest.mark.asyncio
@@ -415,15 +450,15 @@ async def test_no_usable_report_close_preserves_existing_finish_pair(monkeypatch
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
-    bo.register_close_synth(state.task.id, "tc9", state.scope, "success")
-    await bo.launch_background_observe(state, ctx, boundary="finish")
+    fp.register_close_synth(state.task.id, "tc9", state.scope, "success")
+    await runner.launch_recap(state, ctx, boundary="finish")
 
     turns = await ctx.memory.recall_recent(
         state.scope, [MT.AGENT_CONVERSATION_TURN], 100, ctx.provider_ctx)
     contents = sorted(r.content for r in turns)
     assert contents == ["finalize recap", "finalize summary"], \
         f"finish 对不得被占位符重写，实得 {contents}"
-    assert bo._close_synth == {}, "close_synth 登记须被弹掉防泄漏"
+    assert fp._close_synth == {}, "close_synth 登记须被弹掉防泄漏"
 
 
 @pytest.mark.asyncio
@@ -443,7 +478,7 @@ async def test_background_zero_state_pollution(monkeypatch, fake_state_ctx):
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
 
     before = (state.task.status, state.task.actor_done, state.task.observer_outcome)
-    t = bo.launch_background_observe(state, ctx, boundary="finish")
+    t = runner.launch_recap(state, ctx, boundary="finish")
     await t
     assert (state.task.status, state.task.actor_done, state.task.observer_outcome) == before
 
@@ -473,7 +508,7 @@ async def test_dispatch_boundary_folds_segment(monkeypatch, fake_state_ctx):
         metadata={"task_id": state.task.id, "outcome": "suspended"}), ctx.provider_ctx)
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
 
-    await bo.launch_background_observe(state, ctx, boundary="dispatch")
+    await runner.launch_recap(state, ctx, boundary="dispatch")
 
     recs = await ctx.memory.recall_recent(
         state.scope,
@@ -503,7 +538,7 @@ async def test_dispatch_boundary_short_segment_kept_raw(monkeypatch, fake_state_
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
 
-    await bo.launch_background_observe(state, ctx, boundary="dispatch")
+    await runner.launch_recap(state, ctx, boundary="dispatch")
 
     from ctx_weft.protocols import MemoryEventType as MT
     recs = await ctx.memory.recall_recent(
@@ -529,7 +564,7 @@ async def test_dispatch_boundary_refold_guard_skips(monkeypatch, fake_state_ctx)
     await ctx.memory.supersede([r.id for r in _raws], ctx.provider_ctx)
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
 
-    await bo.launch_background_observe(state, ctx, boundary="dispatch")
+    await runner.launch_recap(state, ctx, boundary="dispatch")
 
     from ctx_weft.protocols import MemoryEventType as MT
     recs = await ctx.memory.recall_recent(
@@ -548,12 +583,12 @@ async def test_dispatch_recap_completes_benignly_after_cancel(monkeypatch, fake_
 
     async def slow_stream(c, s, req):
         await asyncio.sleep(0.02)  # 给取消留出交叉窗口
-        yield _make_tool_call_chunk(BACKGROUND_PROCESS_REPORT_NAME)
+        yield _make_tool_call_chunk(COLLECT_PROCESS_REPORT_NAME)
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", slow_stream)
 
-    t = bo.launch_background_observe(state, ctx, boundary="dispatch")
+    t = runner.launch_recap(state, ctx, boundary="dispatch")
     state.task.status = "CANCELED"  # recap 在跑时取消坐实
     await t
 
@@ -579,15 +614,15 @@ async def test_segment_fold_failure_keeps_raw_and_does_not_raise(
     ctx.capability_gateway = _FakeGateway("段总结X")
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
-    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_collect_process_report)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_report_task_outcome)
 
     async def boom(*args, **kwargs):
         raise RuntimeError("fold backend down")
 
-    monkeypatch.setattr("ctx_weft.core.loop.steps.segment_fold.segment_fold", boom)
+    monkeypatch.setattr("ctx_weft.core.loop.fold.segment_fold", boom)
 
-    with caplog.at_level(logging.ERROR, logger="ctx_weft.core.loop.steps.background_observe"):
-        t = bo.launch_background_observe(state, ctx, boundary="plain_text")
+    with caplog.at_level(logging.ERROR, logger="ctx_weft.core.loop.background"):
+        t = runner.launch_recap(state, ctx, boundary="plain_text")
         await t
 
     assert t.exception() is None, "运行时故障不得抛出（fire-and-forget 降级）"
@@ -598,3 +633,204 @@ async def test_segment_fold_failure_keeps_raw_and_does_not_raise(
     raw = await ctx.memory.recall_recent(
         state.scope, [MT.LLM_RESPONSE], 100, ctx.provider_ctx)
     assert raw, "段必须保 raw"
+
+
+# ── build_finish_slots：折叠产出必须声明幸存占位的 ref（GC mark 判据）───────────
+
+
+@pytest.mark.asyncio
+async def test_replace_finish_report_declares_surviving_placeholder_refs():
+    """`_replace_finish_report` 用 `memory.fold` 把旧 finish 对 supersede 掉、换上新槽。
+    若新槽正文（act_recap / task_summary）逐字带着 L0.5 占位向前走，旧的供体记录正被
+    这次 fold 干掉——占位的活引用只剩新槽记录能扛，`build_finish_slots` 必须替两个调用方
+    （这里的 fold 路径、以及 finalize._synthesize_dispatch_pair 的裸 ingest 路径）都声明。
+    """
+    from datetime import datetime, timezone
+
+    from ctx_weft.core.utils.content import collect_blob_refs
+    from ctx_weft.core.media.refs import encode_image_placeholder
+    from ctx_weft.protocols import (
+        MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext,
+    )
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+    ref = "blob:" + "e" * 64
+    placeholder = encode_image_placeholder(ref, "image/png")
+
+    mem = InMemoryMemoryProvider()
+    pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
+    scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
+    ts = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
+    tool_call_id = "tc1"
+
+    # 占位 finish 对（两槽）：assistant 挂 tool_calls，tool 是 process report——都带着
+    # 供体占位，即将被本次 fold 全部 supersede。
+    await mem.ingest(MemoryEvent(
+        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
+        content=f"placeholder recap {placeholder}", timestamp=ts, role="assistant",
+        metadata={"origin_task_id": "t1", "parent_task_id": None,
+                  "tool_calls": [{"id": tool_call_id, "name": "control:finish_task", "input": {}}]},
+    ), pctx)
+    await mem.ingest(MemoryEvent(
+        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
+        content="placeholder report", timestamp=ts, role="tool",
+        metadata={"origin_task_id": "t1", "tool_call_id": tool_call_id},
+    ), pctx)
+
+    await fp.replace_finish_report(
+        mem, pctx, scope, "t1", tool_call_id,
+        act_recap=f"did the thing {placeholder}", task_summary="summary body",
+        outcome="done", title="task title",
+    )
+
+    agent_addr = MemoryAddress(session_id="s1", agent_id="a1")
+    view = await mem.load_view(agent_addr, MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    recap_rec = next(r for r in view if r.role == "assistant" and "did the thing" in r.content)
+    assert ref in collect_blob_refs(recap_rec), (
+        "折叠重写的 finish 对没有声明幸存占位的 ref，GC 会在宽限期后误删"
+    )
+
+
+# ── 判决与折叠的顺序（2026-09-27）──────────────────────────────────────────────
+#
+# 判 success 会经带外 finalize 走 close（写 finish 对 + 折末段 raw），而那条路**刻意不产段
+# 摘要**——`finalize._supersede_final_raw_segment` 的不变量是「末段 raw 与真实 Process Report
+# 至少存其一」，段摘要与 finish 对同时存在就是把同一段记了两遍。
+#
+# 所以「这一段归谁记账」只有拿到判决才知道，不能先折了再判。此前（2280761 起）plain_text
+# 判 success 就是先折后判，两份都写。
+
+
+class _VerdictTM:
+    """带外入口的最小替身：只回「接不接受」。
+
+    **刻意不调 `finalize`**：本组用例钉的是「折不折」这条分支，判据只是带外入口的返回值。
+    「判 success 时 finalize 必须被调、且排在仲裁之后 / `_settle` 之前」那条契约由真
+    `TaskManager` 的用例钉（`tests/unit/test_out_of_band_verdict.py`），不在这里用替身自证
+    ——替身自证等于让测试去核对自己的假设。
+    """
+
+    def __init__(self, *, accepted: bool = True) -> None:
+        self._accepted = accepted
+        self.submitted: list[str] = []
+
+    async def apply_out_of_band_verdict(self, task_id, outcome, **kw) -> bool:
+        self.submitted.append(outcome.verdict)
+        return self._accepted
+
+
+def _verdict_gateway(verdict: str, recap: str = "段摘要文本"):
+    class _G:
+        async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id):
+            return SimpleNamespace(
+                content=f"Assessment recorded: outcome={verdict}.",
+                is_error=False,
+                metadata={K.OBSERVER_OUTCOME: verdict,
+                          K.OBSERVER_ACT_RECAP: recap,
+                          K.OBSERVER_TASK_SUMMARY: ""},
+            )
+
+    return _G()
+
+
+async def _run_judging(monkeypatch, state, ctx, *, boundary, verdict, accepted=True,
+                       judging=None):
+    # 不带 short_segment_token_threshold → 阈值取 0 → 短段门关闭，照常折叠（与本文件其他
+    # 用例同一手法）。预置段只有一条 assistant，带上真实默认阈值会被判成短段而免折。
+    state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
+    state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
+    ctx.capability_gateway = _verdict_gateway(verdict)
+    tm = _VerdictTM(accepted=accepted)
+    ctx.task_manager = tm
+    # 判定档与摘要档的 terminal tool 不同名，替身要跟着分：`_run_judging` 也被
+    # `boundary="interrupt"`（不判）那条用例复用，故按 `_judges` 选，不写死。
+    # `judging=` 显式覆盖留给「边界该判、但这个 agent 没有 observer」那一档（见下）。
+    if judging is None:
+        judging = boundaries.judges(boundary)
+    stream = (_fake_stream_report_task_outcome if judging
+              else _fake_stream_collect_process_report)
+    monkeypatch.setattr(_obs_mod, "stream_llm_resilient", stream)
+    await runner.launch_recap(state, ctx, boundary=boundary)
+    return tm
+
+
+async def _summaries(state, ctx) -> list:
+    return await ctx.memory.recall_recent(
+        state.scope, [MemoryEventType.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["plain_text", "finish_park"])
+async def test_a_closing_verdict_leaves_the_segment_to_the_finish_pair(
+        monkeypatch, fake_state_ctx, boundary):
+    """判 success 且仲裁接受 → 这一段归 close 的 finish 对，**不产段摘要**。"""
+    state, ctx = fake_state_ctx
+    tm = await _run_judging(monkeypatch, state, ctx, boundary=boundary, verdict="success")
+
+    assert tm.submitted == ["success"], "前提不成立：判决压根没提交"
+    assert await _summaries(state, ctx) == [], (
+        "判 success 之后还产了段摘要——同一段会被记两遍（段摘要 + close 的 finish 对）")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["plain_text", "finish_park"])
+async def test_a_retry_verdict_still_folds_the_segment(monkeypatch, fake_state_ctx, boundary):
+    """判 retry → 维持 park，没有 close，这一段仍归段摘要（下一轮 act 要靠它看见进度）。"""
+    state, ctx = fake_state_ctx
+    tm = await _run_judging(monkeypatch, state, ctx, boundary=boundary, verdict="continue")
+
+    assert tm.submitted == ["continue"]
+    assert len(await _summaries(state, ctx)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_verdict_still_folds_the_segment(monkeypatch, fake_state_ctx):
+    """仲裁拒（人先开口）→ task 一个字段都没动，这一段同样要有人记。
+
+    水位线保证只折这次 launch 之前的记录，人刚说的那句话不会被卷进来。
+    """
+    state, ctx = fake_state_ctx
+    tm = await _run_judging(
+        monkeypatch, state, ctx, boundary="plain_text", verdict="success", accepted=False)
+
+    assert tm.submitted == ["success"]
+    assert len(await _summaries(state, ctx)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["plain_text", "finish_park"])
+async def test_no_observe_role_downgrades_the_judging_tier_to_recap(
+        monkeypatch, fake_state_ctx, boundary):
+    """模板没有 ROLE → 让位边界也不判，只产段摘要（2026-09-28）。
+
+    判定档的条件是 `_judges(boundary)` **与** `has_observe_role(state)` 相与。没有 observer
+    还去判，等于让 actor 顶着自己的 SOUL 判自己——装配层此前正是这么回退的，现在 observe
+    家族缺 facet 不再回退 act。
+
+    与之配套：`act.py` 里 `finish_park` 那条让位判据也认同一个 `has_observe_role`，所以这两个
+    边界在无 ROLE 的模板上其实只剩 `plain_text` 到得了（让位给用户不需要 observer），
+    `finish_park` 压根不会发生。这里两个都测，钉的是本函数自己的分档不看边界名。
+    """
+    import dataclasses
+
+    state, ctx = fake_state_ctx
+    tpl = state.extra["template"]
+    state.extra["template"] = dataclasses.replace(
+        tpl, identity={k: v for k, v in tpl.identity.items() if k != "observe"})
+
+    tm = await _run_judging(monkeypatch, state, ctx, boundary=boundary,
+                            verdict="success", judging=False)
+
+    assert tm.submitted == [], "没有 observer 还是提交了判决"
+    assert len(await _summaries(state, ctx)) == 1, "降成只摘要档之后段摘要仍要产"
+
+
+@pytest.mark.asyncio
+async def test_a_non_judging_boundary_never_asks_the_entry(monkeypatch, fake_state_ctx):
+    """不判的边界连带外入口都不碰——那份判决已由别处给出，覆盖它是纯破坏。"""
+    state, ctx = fake_state_ctx
+    tm = await _run_judging(monkeypatch, state, ctx, boundary="interrupt", verdict="success")
+
+    assert tm.submitted == []
+    assert len(await _summaries(state, ctx)) == 1
+

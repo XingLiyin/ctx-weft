@@ -20,8 +20,11 @@ class _Assembler:
 
 def _state_ctx():
     agent = SimpleNamespace(runtime={"llm_model": "mock"})
+    # resolved_model 是 resolve_llm_identity 的真值来源（task-4 复审第二轮：
+    # summarize_for_compact 不再读 agent.runtime.get("llm_model")）。
     state = SimpleNamespace(agent=agent, scope=None, task=None, session=None,
-                            extra={}, transcript=[])
+                            extra={}, transcript=[],
+                            resolved_model=SimpleNamespace(model="mock", account=""))
     ctx = SimpleNamespace(assembler=_Assembler(), llm=SimpleNamespace(tokenizer=HeuristicTokenizer()),
                           cancel_token=None, event_bus=None, config=None)
     return state, ctx
@@ -34,7 +37,9 @@ async def test_summarize_for_compact_returns_llm_text(monkeypatch):
     monkeypatch.setattr(compact_mod, "stream_llm_resilient", _ok)
     state, ctx = _state_ctx()
     out = await compact_mod.summarize_for_compact(state, ctx)
-    assert out == "summary"
+    # spec: compact-fidelity——返回解析后的 digest：散文输出（无五小节）整文落库 + degraded。
+    assert out.text == "summary"
+    assert out.degraded is True
 
 
 async def test_summarize_for_compact_propagates_outage(monkeypatch):

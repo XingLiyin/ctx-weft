@@ -2,18 +2,20 @@
 
 这个账从前是独立函数 `fold_pending_task_recap` + 恢复路径上一次按类型收窄的查询。查询随
 会话长度线性增长（实测 1000 个 task 的会话：取回 1999 条折出 1 个，272ms / 5.1MB，每次
-`/resume` 付一遍），所以它搬进了投影（`RunStateView.pending_recap`），与 `pending_hitl`
-同一档待遇——**折叠实现只此一处**（`_apply`），不与旧函数并存。
+`/resume` 付一遍），所以它搬进了投影（`RunStateView.pending_recap`）——**折叠实现只此一
+处**（`_apply`），不与旧函数并存：feat 把 HITL 移出投影的理由正是「两份口径不同的折叠会
+漂移」。
 """
 
 from ctx_weft.core.control.reducers import (
     deserialize_view,
+    prune_view_for_snapshot,
     reduce_events,
     serialize_view,
 )
-from ctx_weft.core.events import Event
-from ctx_weft.core.events.types import EventType
-from ctx_weft.core.utils import generate_id, now_utc
+from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.ids import generate_id
+from ctx_weft.protocols.events import Event, EventType
 
 
 def _ev(type_, payload):
@@ -88,28 +90,28 @@ def test_pending_recap_survives_a_snapshot_round_trip():
     assert back.pending_recap == {"t_stuck": {"boundary": "finish", "agent_id": "a1"}}
 
 
-def test_old_blob_without_the_key_deserializes_to_empty():
-    """存量 blob 没有这个键 → 空 dict，不是 KeyError。
+def test_snapshot_prune_does_not_drop_pending_recap():
+    """⚠️ 裁快照**不得**按 task 存活性过滤它。
 
-    本分支的 `RunSnapshot` 没有 `projection_version`，没有东西能把老 blob 判废，所以新投影
-    字段只能靠这里的默认值兜——这条钉的就是「兜得住、不炸」。代价是部署后每个会话的第一次
-    恢复可能把「有崩溃打断的 recap」读成「没有」；下一轮对话结束写新快照就自愈（见
-    `deserialize_view` 的 docstring）。
+    recap 跑在 finish 边界上，待重跑的那条往往属于一个已 FINISHED、已被
+    `prune_view_for_snapshot` 裁掉的 task。跟着裁就等于把这个机制关掉。
+    """
+    view = reduce_events([
+        _ev(EventType.TASK_RECAP_STARTED,
+            {"task_id": "t_done_but_stuck", "boundary": "finish", "agent_id": "a1"}),
+    ], run_id="ses1")
+    assert view.tasks == {}, "前提：这个 task 根本不在投影里"
+
+    pruned = prune_view_for_snapshot(view)
+
+    assert pruned.pending_recap == {
+        "t_done_but_stuck": {"boundary": "finish", "agent_id": "a1"}}
+
+
+def test_old_blob_without_the_key_deserializes_to_empty():
+    """v2 及更早的 blob 没有这个键 → 空 dict，不是 KeyError。
+
+    那类 blob 已因 projection_version 不匹配被判不可用、走全量回放（全量回放会正确折出
+    它），所以这条只钉形态完整性——但它得是**形态**完整，不能炸。
     """
     assert deserialize_view({"session_id": "ses1"}).pending_recap == {}
-
-
-def test_delta_apply_onto_an_old_view_still_accrues_the_account():
-    """老快照当增量基底时，**增量里**的 recap 事件仍会正常记账。
-
-    即「缺键」只丢快照位点之前的账，不会把这个机制整个关掉——自愈靠的就是这一点。
-    """
-    from ctx_weft.core.control.reducers import apply_events
-
-    base = deserialize_view({"session_id": "ses1"})          # 老 blob，无该键
-    view = apply_events([
-        _ev(EventType.TASK_RECAP_STARTED,
-            {"task_id": "t_new", "boundary": "finish", "agent_id": "a1"}),
-    ], base)
-
-    assert view.pending_recap == {"t_new": {"boundary": "finish", "agent_id": "a1"}}

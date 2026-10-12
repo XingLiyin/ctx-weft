@@ -78,6 +78,12 @@ Loop Engine          reason → act → observe → finalize
 EventBus             事件总线，所有状态变更的唯一出口
 ```
 
+> **证据投递（尚未实现）**：知识检索（KnowledgeProvider）与语义召回（recall_semantic）命中的内容目前**被装配、进预算、然后在渲染层丢弃**——`reference` / `summary` 两类块没有渲染路径。这是已知缺口，投递与相关性裁剪留待后续单独实现。在那之前装配层对它们发 warning（`no rendering path for block kind(s)`），不留静默盲区。
+>
+> **工具面预算口径（2026-09 起，spec: context-budget）**：装配预算先扣工具面预留（名称 + 描述 + 入参 schema，按能力快照现算，`AssembledPrompt.metadata.tools_reserved_tokens` 可读）——工具声明不参与裁剪，预算压力由预留承担；溢出报错仍报真窗口。act 循环内增量估算追踪工具面指纹（覆盖 name+description+schema 的规范化定义哈希——同名工具 schema 更新可感知）：运行期 pin 大 schema 后估算立即增长（`max_tokens` 随之收紧）；工具面不变时增量行为与旧口径一致。发送前超限**不硬拒**（明示决策）：收紧 max_tokens + WARNING 留痕 + 既有比例机制触发下轮压缩。估算与实际 usage 的偏差留工具面分项记录（指纹/估算/实测同现于回喂日志）。
+>
+> **压缩摘要保真（2026-09 起，spec: compact-fidelity）**：task 域（L3 坍缩）与 agent 域（L1 折叠）的压缩 digest 按五个固定小节生成——`## Goal / ## Constraints / ## Done / ## Remaining / ## Evidence`（Evidence 可缺）；落库前宽松解析，缺必需小节整文降级存档（metadata `digest_degraded: true`）、不中断压缩。`## Evidence` 引用可回取的工具产出（`results__read_tool_output(invocation_id=...)`）。验收分三层：管道层与请求层（cue 契约）在 CI（`tests/unit/test_compact_fidelity.py`）；**语义质量层不入 CI**——真模型是否按 cue 保留约束，发布前人工运行 `python benchmarks/compact_fidelity_eval.py`（需真实 LLM key）。**不可逆边界**：对话文本原文在 fold 后不可恢复（既有 supersede 语义不变，本契约不承诺原文回取）；可回取面仅限工具产出（结果存储）与图片（既有 ref 机制）。段摘要（act_recap / Progress So Far）不在本契约范围（逐段生成、消费方为观察锚点，见 ARCHITECTURE）。
+
 这些**协议**是对外的接入面。外部系统只需实现其中一个协议，ctx-weft 自动用上（LLM 详见
 [LLM 接入](#llm-接入) 一节）：
 
@@ -102,7 +108,7 @@ EventBus             事件总线，所有状态变更的唯一出口
 import asyncio
 from ctx_weft import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.testing import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     AgentCapability, AgentCapabilityProvider, AgentTemplate,
     CapabilityProviderInfo, IdentityFacet, LoopConfig, MemoryConfig,
@@ -335,8 +341,6 @@ template = AgentTemplate(
     loop_config=LoopConfig(
         max_turns_per_act=10,       # 单个 ActStep 最多多少轮 LLM 调用
         max_turns_per_observe=5,
-        max_turns_per_agent=20,
-        timeout_per_step_sec=120,
         failure_threshold=3,
         max_spawn_depth=4,          # 子 agent 最大嵌套深度
         compact_token_ratio=0.8,    # token 占 context_limit 比例超过则压缩
@@ -449,7 +453,7 @@ from ctx_weft.providers.llm import LLMProvider, LLMAccount, ModelConfig
 
 provider = LLMProvider(store)          # store 实现 LLMAccountStoreProtocol(save/delete/list_all)
 provider.register_account(LLMAccount(
-    name="claude", style="anthropic",  # 仅支持 "anthropic" / "openai"
+    name="claude", style="anthropic",  # 取值见下方「style 取值」段落
     api_key="sk-...", base_url="",      # base_url 留空走各家默认
     models=[ModelConfig(name="claude-sonnet-4-6", context_limit=200_000)],  # output_reserve 缺省=按窗口尺寸
     default_model="claude-sonnet-4-6", timeout_sec=120,
@@ -464,8 +468,16 @@ runtime.providers.register_llm_provider(provider)
 > SDK core 不读环境变量。从环境变量自举一个默认账号（`bootstrap_from_env`）由上层应用
 > 在子类中实现（host 的 `LLMProvider` 子类读自己约定前缀的环境变量）。
 
-> 内置 `AnthropicAdapter` / `OpenAIAdapter` 由 `LLMProvider` 按 `style` 自动构造。
+> 内置 `AnthropicAdapter` / `OpenAIAdapter`（纯文本）与 `AnthropicMultimodalAdapter` /
+> `OpenAIMultimodalAdapter`（收图片）均由 `LLMProvider` 按 `style` 自动构造。
 > `run_single_task` / `SessionStartParams` 里的 `llm_account` / `llm_model` 会透传给 `get_client()`。
+
+`style` 取值：`"anthropic"` / `"openai"`（纯文本）与 `"anthropic-multimodal"` /
+`"openai-multimodal"`（收图片）。**能力由类型表达**——注册哪个 style，就是在声明
+该账号下的模型收不收图。纯文本 adapter 收到图片时会降级成 `[image ...]` 文本占位
+并记一条 warning，**不中断会话**；core 对模态零判断，全程透传到 `LLMClient` 面前。
+自写 adapter 时，`complete()` 收到的 `LLMMessage.content` 可能是
+`list[ContentPart]`，如何处置完全由你决定。
 
 ---
 
@@ -485,6 +497,7 @@ runtime = CtxWeftRuntime(
     providers=providers,              # 必需含至少一个 AgentCapabilityProvider
     llm=my_llm_adapter,               # 可选，LLM 兜底（未注册 llm provider 时用）
     hitl_manager=None,                # 可选，默认自动创建
+    event_bus=None,                   # 可选，默认 InProcessEventBus；注入以接 Redis / NATS / 跨进程
     event_store=None,                 # 可选，默认 InMemoryEventStore（自动订阅 event_bus）
 )
 ```
@@ -500,7 +513,8 @@ runtime = CtxWeftRuntime(
 | `run_single_task(...)` | 单任务端到端，**等待完成** | `(RunHandle, LoopState)` |
 | `start_session(params)` | 新建会话，多 agent 编排，**异步后台跑** | `RunHandle` |
 | `start_session(params)`（带 `session_id`） | 恢复已有会话续跑 | `RunHandle` |
-| `recover()` / `recover_session(id)` | 进程重启后的崩溃恢复 | `int` / `None` |
+| `rebuild_session(id)` | 把一条冷会话装填回内存（**只装填，不跑**） | `int` |
+| `recover_agent(agent_id)` | 续跑一个被打断的 agent（装填 + 建 TM + drain） | `None` |
 | `interrupt_session(id)` | 协作式取消正在跑的 session | `bool` |
 
 ### run_single_task() — 单任务直跑
@@ -571,16 +585,30 @@ compact 由 ReasonStep 命中阈值后内联直调 CompactStep；metadata_filler
 
 ### 崩溃恢复
 
-进程重启后救活之前无终态的 session，**在所有 provider 注册完成、接收新请求之前**调用：
+**恢复是用户驱动的：用到哪条会话，就装填哪条。** 启动时不做任何预热——从前那个扫「全部 active session」的
+`runtime.recover()` 已于 2026-09-09 删除（它的活跃判据只增不减，开销与历史会话数线性增长且永不收敛）。
 
 ```python
-count = await runtime.recover()
-# recover() 直接查 EventStore（无需 host 投影表）据事件决策、且**无回调、不 drain**:
-#   · 有未解决 pending HITL 的 session → 只 rebuild 内存 HitlManager,保持 PAUSED_HITL,等应答;
-#   · 其余（崩溃前在跑）→ core emit SessionStatusChanged(INTERRUPTED),host 既有事件订阅者
-#     （投影/SSE）按事件自行反映,等用户 /resume。
-# 故 load_sessions_from_db 须排在 recover() 之后,从更新后的投影把状态灌回内存缓存。返回处理的 session 数
+# ① 装填：把一条冷会话的内存态喂回来。只读事件日志，**不建 TaskManager、不跑任何东西**。
+#    幂等，随便调。进程重启后、或宿主的 LRU 把它逐出（forget_session）之后，都用这条拉回来。
+n = await runtime.rebuild_session(session_id)      # 返回装填的 agent 条数
+
+# ② 之后才谈操作这条会话里的 agent：
+await runtime.send_message(agent_id, "继续", session_id=session_id)   # 接着聊
+await runtime.recover_agent(agent_id)                                 # 续跑被打断的
 ```
+
+⚠️ **顺序不能反。** agent record 是只增不删的**缓存**，一次 miss 只说明「还没喂进来」，事实一直在事件日志里。
+但 core 不会替你去找那条会话——事件按 session 分区存，`agent_id` 没有反向索引，「只有 agent_id」时唯一的找法
+是扫全部会话。所以：
+
+- `send_message` 撞上 miss 时，**带了 `session_id` 就自愈**（精确装填那一个 session），没带就抛 `AgentNotLoaded`。
+- `recover_agent` 没有 session 语境，撞上 miss 一律抛 `AgentNotLoaded`。宿主该先 `rebuild_session`。
+
+`AgentNotLoaded` 是 `AgentNotFound` 的子类，既有的 `except AgentNotFound` 照样接住；想区分「没装填」与
+「真不存在」的再按它分支。
+
+宿主的投影表（`load_sessions_from_db` 那类）不再需要排在某个全局恢复步骤之后——按会话装填，各自独立。
 
 恢复流程的内部细节见 [ARCHITECTURE.md §会话生命周期与崩溃恢复](./ARCHITECTURE.md#会话生命周期与崩溃恢复)。
 
@@ -603,6 +631,14 @@ class RunHandle:
 ---
 
 ## 事件系统
+
+> **对话配对完整性（2026-09 起，spec: conversation-integrity）**：assistant 回合摄入时把 LLM 分配的 tool_call wire id 替换为内部唯一标识（`tc_{seq36}_{ord36}_{hash12}`，`[a-z0-9_]`、≤64 字符）——模型复用 `call_1` 这类短 id 不再造成跨轮次/跨任务的结果错配。**值域迁移注记**：事件 payload（`CapabilityInvoked` / `CapabilityFinished` / `LLMResponseFinished.tool_calls`）与 HITL 请求中的 `tool_call_id` 从裸 wire id 变为内部标识；原始 id 保留在 assistant 记录 metadata（`tool_calls[].raw_id`，伴随 `op_id`）供追溯。宿主面板若按 id 展示/匹配需知悉；存量记录不迁移（配对行为不回退，重复歧义在发送前留 ERROR 痕迹）。
+>
+> **快照恢复（2026-09 起，spec: snapshot-recovery）**：快照边界 = 已确认提交位置（`committed_head` 一致切面），恢复增量按 position 区间；旧格式快照自动忽略并全量重建，无需手工迁移事件数据（存量库回填用 `scripts/migrate_event_positions.py`）。
+>
+> **执行时长/轮数限制（2026-09 起）**：core **不提供**任务级 deadline 或轮数上限——这是宿主的策略，不是 SDK 的职责。需要超时就在宿主侧计时并调 `cancel_task` / `cancel_agent`；需要 provider 级超时就在 provider 自己的工具实现里做。三个从未被执行的旧字段（`max_turns_per_agent` / `timeout_per_step_sec` / `Task.timeout_ms`）**已删除**——它们声明了限制却无任何运行时消费者，留着只会让宿主以为有防线。`max_turns_per_act` / `max_turns_per_observe` 等**真正生效**的循环上限不受影响。
+
+> **提交策略（2026-09 起，spec: event-commit）**：默认 `event_commit_policy="required"`——事件先经提交门确认存储写入、再对外通知（存储失败显式抛 `PersistenceUnavailableError` 并隔离会话）。**自定义 EventBus 必须实现 `attach_commit_gate` 扩展**，否则 required 模式构造期失败；不接受该约束的宿主可显式配置 `RuntimeConfig(event_commit_policy="best_effort")` 退回旧的吞错路径（启动告警、不可靠恢复）。
 
 所有状态变更都通过事件总线发布，append-only。
 
@@ -660,12 +696,20 @@ async for ev in runtime.event_bus.stream(EventFilter(session_id="ses_xxx")):
 
 ## 内置 Provider
 
+### 工具长输出的收敛与回取（spec: tool-result-recovery）
+
+工具输出超过 `spill_threshold`（默认 4000 字符）时：全文交给 **`SpillSink`**（core 对「超长输出去哪」的唯一契约，靠 `isinstance` 从已注册 provider 里发现），上下文（对话与 memory）只承载**收敛版** = sink 返回的**取回说明**（整句由 sink 自己写，点名用哪个工具取回；gateway 原样嵌入）+ 全长 + 头部预览 + **尾部预览**（`spill_preview_chars` / `spill_tail_chars`）。
+
+宿主注册哪种 sink 决定能力上限：`FilesystemToolsProvider` 落盘进 workspace，说明里点名 `fs__read_file(path=..., offset=1, limit=500)`；**`ResultsCapabilityProvider`** 落进内存 LRU 并自带 `results__read_tool_output(invocation_id, offset | tail, limit)` 工具，**模型能分页/尾部取回全文**（invocation_id 每次执行一枚，取最新收敛文本里的值）。该 provider 同时是 SpillSink 与 ToolCapabilityProvider，注册一次两个角色齐备。**都不注册**则超长输出硬截断。
+
+四个重放/补写入口（账本 completed 短路重放、恢复补写、裁决作结、宿主补录）统一过收敛——重放时再 spill 一次即可：可回读的 sink 借此在逐出/重启后重新入库，落盘的 sink 重写同名文件无害。无 sink 或 spill 抛错 → 收敛版显式标注 `not recoverable`，不留取不回来的引用。
+
 ### InMemoryMemoryProvider
 
 零依赖，用于开发/测试：
 
 ```python
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 providers.register_memory(InMemoryMemoryProvider())
 # recall_recent ✓ / recall_topic ✓ / recall_semantic ✗（返空）；线程不安全，仅单进程/测试
 ```
@@ -796,8 +840,9 @@ runtime.hitl_manager.reject(request_id, reason="不允许该操作")
 给敏感 capability 挂鉴权器，在 invoke 前拦截：
 
 ```python
-from ctx_weft.core.auth import (
-    Authorizer, AllowAllAuthorizer, AllowListAuthorizer, HumanConfirmationAuthorizer,
+from ctx_weft.protocols.capability import Authorizer
+from ctx_weft.providers.authorizer import (
+    AllowAllAuthorizer, AllowListAuthorizer, HumanConfirmationAuthorizer,
 )
 
 # 方式 ①：注册 capability 时传入
@@ -963,7 +1008,7 @@ assert llm.last_request.system.startswith("You are")
 import pytest
 from ctx_weft import CtxWeftRuntime, ProviderRegistry
 from ctx_weft.testing import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     AgentCapability, AgentCapabilityProvider, AgentTemplate,
     CapabilityProviderInfo, IdentityFacet, LoopConfig, MemoryConfig,
@@ -1000,6 +1045,199 @@ async def test_single_task(runtime):
 ```
 
 ---
+
+## 升级须知（多模态 adapter dispatch）
+
+- **破坏性变更：`ModelConfig.supports_vision` 已删除。** 若你的账号配置里还带着
+  `ModelConfig(..., supports_vision=True)`，升级后构造会直接失败——把这个参数
+  从你的配置里删掉。视觉能力不再是挂在 `ModelConfig` 上的一个字段，入口也不再
+  做任何视觉门控（旧的 `VisionNotSupportedError` / `error_code=VISION_NOT_SUPPORTED`
+  一并删除）。
+- **能力现在由「注册了哪个 adapter 类」表达。** 用 `LLMProvider` 的宿主改用
+  `style` 字符串声明：纯文本传 `"anthropic"` / `"openai"`，收图片传
+  `"anthropic-multimodal"` / `"openai-multimodal"`；直接 `llm=` 一个 `LLMClient`
+  的宿主，则由你传的是 `AnthropicAdapter`/`OpenAIAdapter` 还是
+  `AnthropicMultimodalAdapter`/`OpenAIMultimodalAdapter`（或自定义等价类）决定。
+- **行为变化：图片不再在入口被拒绝。** 携带图片（`ImagePart`）的会话现在会被
+  正常接受、落库，并按既有规则外部化到 `MemoryBlobStore`——不论当前挂的是哪种
+  adapter。纯文本 adapter 会在**出网前**把图片降级成 `[image {media_type}]`
+  文本占位并记一条 warning（每次请求最多一条），**不中断会话**。
+  实际影响：即使当前账号绑定的是纯文本 adapter，图片依然会占用 memory / blob
+  storage 与 token 预算——换来的是，日后把该账号切到对应的多模态 adapter，
+  同一份既有历史立刻可以看图，不需要重新携带一次。
+- 若你的宿主此前依赖入口拒绝携图请求（例如用 `VisionNotSupportedError` 做业务
+  分支），升级后需要自己在应用层做等价判断——core 不再替你拒绝。
+
+## 升级须知（双 blob store）
+
+- **破坏性变更：携图会话默认失败，除非显式注册 `EventBlobStore`。** 事件库的口径是
+  **恒不含字节、恒可回读**，没有例外分支——升级到本版本后，任何携带图片
+  （`ImagePart`）的会话会在入口即以 `BlobStoreRequiredError`
+  （`error_code=BLOB_STORE_REQUIRED`）失败，**除非**在 `ProviderRegistry` 上调用
+  `register_event_blob_store()` 注册一个能外部化的 `EventBlobStore` 实现。这是刻意
+  的严格默认：没有 event blob store 就无处安放字节，只能在入口拒绝，而不是让图片
+  的原始字节悄悄进事件库、之后再无处收拾。纯文本会话不受影响，行为逐字节不变。
+  若你的宿主此前携图跑过（不管是否接了 `MemoryBlobStore`），升级后需要额外注册
+  `EventBlobStore` 才能继续工作；宿主若共用同一份存储服务两侧，同一个实现类可以
+  同时满足 `MemoryBlobStore` 与 `EventBlobStore` 两个协议（本仓自带的
+  `providers/blob/fs/FsBlobStore` 已经同时实现两者，注册两次即可；`SqlMemoryProvider`
+  自 2026-08-29 起**不再**实现这两个协议，只维护引用边，见下面「blob 字节移出
+  memory」一节）。
+- **行为变化：入口内容里已经是 `source_type == "ref"` 的图片 part，不再进事件流。**
+  典型场景是宿主把从 memory 读回来的内容（其中的图已被外部化成 memory ref）原样再
+  提交一次。这类 part 的 ref 属于 **memory 命名空间**，event blob store 永远解不开，
+  故事件侧会把它降级成 `[image {media_type}]` 文本占位并记一条 warning；**memory 侧
+  照旧保留该图**。也就是说：进程内与后续 memory 读取都看得见图，但**崩溃恢复后从事件
+  流重建出来的那份只剩文本占位**。宿主若有「回读—再提交」的用法，请改为提交原始
+  base64（或自己先把字节取回来再提交），不要依赖 ref 原样透传。
+- **回读有且仅有一条 core 内置路径：会话恢复。** `Runtime._restore_task_prompts`
+  （`core/content.py::hydrate_event_content`）在 `_recover_session_locked` 里把
+  重放出来的 event ref 过桥转回 memory ref，逐 task 逐字段包 try/except，失败时
+  `logger.error(exc_info=True)` 并降级为占位，不拖垮整场恢复——这是两个 blob
+  世界之间**唯一**的桥，方向单一，由 event 侧发起。除此之外 core 不会主动从
+  事件流回读图片字节，读侧走的仍是 memory 侧的 `MemoryBlobStore`。其他场景
+  （例如导入到一个新的 memory 实例、或做纯事件重放）想把图片字节取回来，
+  仍需宿主自己调用 `EventBlobStore.get(ref, ctx)`。若重启后**没再注册**
+  `EventBlobStore`，重放出来的 event ref 无从解开，走与「取不回字节」完全相同的降级
+  （占位 + warning）——绝不会原样流进 memory 侧的 task 字段。
+- **两侧的 ref 是两个独立的命名空间。** memory 侧与 event 侧各自 put、各自拿
+  自己的 ref，core 从不比较两者、也从不拿一侧的 ref 去另一侧解。宿主自
+  2026-08-28 起可以分开注册两个实现——`providers/blob/fs/FsBlobStore` 是可
+  直接用的内容寻址示例，可以各建一个实例分别注册为 `MemoryBlobStore` 与
+  `EventBlobStore`。共用同一个实例（如 `providers/blob/fs/FsBlobStore`）时，回收
+  必须同时喂两侧的活引用——只喂 memory 侧的 `live_blob_refs()` 会把事件流仍需要
+  的字节当孤儿删掉，而 `EventStore` 协议目前没有对应的活引用计算可用，分开部署
+  两个实例可回避该陷阱（详见「blob 字节移出 memory」一节与
+  `docs/host-migration-to-sql-memory.md`）。
+
+## 升级须知（providers 目录重组）
+
+**破坏性变更：provider 的 import 路径全部变了。** 按「领域 → 协议 → 变体」重组，
+不留兼容 shim：
+
+| 旧 | 新 |
+|---|---|
+| `ctx_weft.providers.memory_blackboard` | `ctx_weft.providers.memory.in_memory` |
+| `ctx_weft.providers.memory_sql` | `ctx_weft.providers.memory.sql` |
+| `ctx_weft.providers.blob_fs` | `ctx_weft.providers.blob.fs` |
+
+`ctx_weft.providers.events.bus` / `ctx_weft.providers.events.store` **不在上表里**——
+它们现在是子包而不是模块，但各自的 `__init__.py` 仍 re-export `InProcessEventBus` /
+`InMemoryEventStore`，所以 `from ctx_weft.providers.events.bus import InProcessEventBus`
+与 `from ctx_weft.providers.events.store import InMemoryEventStore` 照样能 import，
+和改造前一样，`ctx_weft.providers.events` 顶层也一样。真正挪动的只是私有实现模块名
+（`bus.py` → `bus/in_process/bus.py`、`store.py` → `store/in_memory/store.py`），
+没人应该直接 import 那两个私有模块，因此不构成破坏性变更。
+
+## 升级须知（blob 字节移出 memory）
+
+- **破坏性变更：`SqlMemoryProvider` 不再实现 `MemoryBlobStore` / `EventBlobStore`。**
+  它只维护 `memory_blob_refs` 引用边（那部分需要与 ingest 同事务），字节归 blob store。
+
+  **强烈建议分开部署两个 blob store 实例**——一个只挂 `MemoryBlobStore`、一个只挂
+  `EventBlobStore`，各自按各自的策略回收，不必互相当心：
+
+  ```python
+  memory_blobs = FsBlobStore(Path("/var/lib/app/memory-blobs"))
+  event_blobs = FsBlobStore(Path("/var/lib/app/event-blobs"))
+  registry.register_memory_blob_store(memory_blobs)
+  registry.register_event_blob_store(event_blobs)
+  ```
+
+  共用同一个实例给两侧在类型上是允许的（`FsBlobStore` 恰好同时满足两个协议），但这是
+  实现层的巧合，不是推荐做法——见下面「回收方式变了」。
+
+- **`ProviderRegistry.get_memory_blob_store()` 不再自动回落到 memory provider。**
+  现在与 `get_event_blob_store()` 一样只有两级：显式注册 > `NullMemoryBlobStore`。
+  没注册就是「不接 blob」，携图会话会在入口被拒（`BlobStoreRequiredError`）。
+
+- **回收方式变了。** 原先 `await memory.collect_blobs()` 一步搞定，现在是标准的
+  mark-sweep 两步——mark 在 memory（它持有引用边），sweep 在 blob store（它持有字节）。
+  **分开部署时**（推荐），mark 只需 memory 侧的活引用：
+
+  ```python
+  await memory_blobs.collect(await memory.live_blob_refs())
+  ```
+
+  ⚠️ **若你选择共用同一个 blob store 实例给两侧**，上面这行是**错的**——
+  `live_blob_refs()` 只枚举 memory 侧的活引用，会把事件流仍需要的字节当孤儿删掉。
+  `EventStore` 协议目前**没有**对应的活引用枚举接口可用于补全另一半，core 不提供
+  现成方案；共用实例时必须自己另想办法算出两侧活引用的并集再喂给 `collect`，
+  否则就只回收 memory 侧不再需要、且确定不在事件流里被引用的那部分。这正是
+  上面建议分开部署的原因——分开之后这个陷阱不存在。
+
+## 升级须知（HITL 契约两维化 + 多模态出口）
+
+- **破坏性变更：`HitlRequest.status` 已删除，换成 `outcome`。**
+  `status` 的四值 `Literal["pending","accepted","rejected","cancelled"]` 是按「批准一次
+  工具调用」造的，却要同时服务 `question`（accepted = 人答了）与 `wait`（accepted = 人
+  发了条消息）。现在是：
+
+  ```python
+  req.outcome     # str，开放值域。"" = 未决；"accepted"/"rejected"/"cancelled" 是内建值
+  req.resolved    # 推导属性：bool(outcome)
+  req.accepted    # 推导属性：outcome == "accepted"
+  req.resolve(o)  # 终局的唯一写入点
+  ```
+
+  host 定义了自己的 `form`，现在也能定义自己的 `outcome`。空串是未决哨兵，不要占用。
+  `HitlStatus` 已从 `ctx_weft.protocols` 移出，改用 `HitlOutcome` 与
+  `HITL_OUTCOME_ACCEPTED` / `HITL_OUTCOME_REJECTED` / `HITL_OUTCOME_CANCELLED`。
+
+- **破坏性变更：`AuthorizationDecision.message` 放宽为 `str | list[ContentPart]`。**
+  自实现 Authorizer 只**写** str 的不受影响；**读** `decision.message` 的要处理 parts
+  （用 `core.content.split_for_tool_result` 或 `core.utils.content_to_text`）。
+
+- **破坏性变更：`Authorizer.filter()` 已删除。** 它零调用点，且对
+  `HumanConfirmationAuthorizer` 会真的发出一个 HITL 请求并等人——把「列出可见工具」
+  变成「逐个求批」。需要装配期可见性过滤请自行实现，并显式排除会挂起的 authorizer。
+
+- **行为变更：`ask_user` 与 approval 备注现在会把人贴的图带给模型。** 此前这两条出口
+  用 `content_to_text` 展平，非文本 part 被静默丢弃（连占位都不留）。工具结果因此可能
+  是 `list[ContentPart]` 而非 `str`——`InvocationResult.content` 早已声明为该联合类型，
+  host 通常无感。
+
+- **不变**：事件类型、事件 payload 形状、`RunSnapshot` 序列化、golden 数据。
+  旧事件日志与旧快照原样可读，无需迁移。
+
+## 升级须知（事件持久化）
+
+- **`InMemoryEventStore` 不再接受 `event_bus=` 参数，`append()` 也不再过滤瞬态事件。**
+  订阅与过滤都归新的 `EventPersister`。若你此前直接调 `event_store.append()`，注意
+  每 token 一个的流式 delta 现在会真的落库——改用 `EventPersister` 或自己加过滤。
+
+- **接线改用 `CtxWeftRuntime(event_store=..., snapshot_every_n=...)`。**
+  `attach_persistence` 现在由 `CtxWeftRuntime.__init__` 内部调用，接线的正确顺序是
+  **先建 store，再把它传进 runtime 构造器**——不要先建 runtime、再自己额外调一次
+  `attach_persistence(runtime.event_bus, my_store)`：那样默认的 `InMemoryEventStore`
+  仍然是 runtime 内部已经接好的那份，`recover()` / `rebuild_view` 等所有读路径读的
+  还是它，你自己接的 store 只会被写、永远不会被读，等于白写一份、事件还多存一遍。
+
+  ```python
+  my_store = InMemoryEventStore()  # 或任意自定义 EventStore
+  runtime = CtxWeftRuntime(event_store=my_store, snapshot_every_n=50)
+  # runtime.persistence 是 attach_persistence() 返回的 PersistenceHandle
+  # ...
+  await runtime.persistence.detach()
+  ```
+
+  `snapshot_every_n > 0` 时会一并接上 `SnapshotWriter`（**默认 0 = 不接**，现有行为
+  零变化）。接上之后崩溃恢复从 O(全部事件) 全量回放退化成「最新快照 + 增量」。
+  顺序（persister 必须先于 snapshot writer）由 `attach_persistence` 保证，宿主不需要
+  也不应该自己分别 subscribe。想在 `CtxWeftRuntime` 之外单独使用事件总线（例如测试里
+  只测 store 往返），仍可以直接调 `attach_persistence(bus, store, snapshot_every_n=N)`
+  ——但那是脱离 runtime 的独立用法，不要在已经传了 `event_store=` 的 runtime 上重复调。
+
+- **新增 SQL 事件持久化**（需 `ctx-weft[sql]`）：
+
+  ```python
+  from ctx_weft.providers.events.store.sql import open_sqlite_event_store
+
+  async with open_sqlite_event_store("app-events.db") as store:
+      runtime = CtxWeftRuntime(event_store=store, snapshot_every_n=50)
+      # runtime 的 recover() / rebuild_view 等读路径现在读的就是这个 SQL store，
+      # 重启后可以从它恢复。
+  ```
 
 ## 限制与约束
 

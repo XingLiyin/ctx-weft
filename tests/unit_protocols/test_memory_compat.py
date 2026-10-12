@@ -72,5 +72,5 @@ def test_matches_legacy_type_bridges_vocabularies() -> None:
 def test_legacy_dispatch_shim_moved_but_forwarded() -> None:
     """legacy_dispatch 移入 protocols/_legacy_dispatch；原位置薄转发保兼容。"""
     from ctx_weft.protocols._legacy_dispatch import normalize_legacy_dispatch as new_fn
-    from ctx_weft.core.loop.steps.legacy_dispatch import normalize_legacy_dispatch as old_fn
+    from ctx_weft.protocols._legacy_dispatch import normalize_legacy_dispatch as old_fn
     assert old_fn is new_fn

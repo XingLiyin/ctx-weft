@@ -7,7 +7,7 @@ crashed on arithmetic (e.g. grep before_context). See _parse_annotated.
 
 from typing import Annotated, Optional
 
-from ctx_weft.core.utils import _parse_annotated, extract_schema
+from ctx_weft.core.capabilities.schema import _parse_annotated, extract_schema
 
 
 def test_optional_int_is_integer():

@@ -13,13 +13,18 @@
 
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
-from ctx_weft.protocols.context import ContentPart, ProviderContext
+from ctx_weft.protocols.context import (
+    BLOB_REF_PREFIX,  # noqa: F401  # 刻意的 re-export：既有调用点仍从这里取
+    ContentPart,
+    ProviderContext,
+    normalize_content_parts,
+)
 
 
 # ── Event types ───────────────────────────────────────────────────────────────
@@ -94,6 +99,19 @@ class MemoryScope(StrEnum):
 MemoryLayer = MemoryScope
 
 
+class MemoryKind(StrEnum):
+    """v2 内容种类（设计 §2）。判据：不同 kind = provider 可施加不同存储/索引/保留策略。
+
+    与 MemoryScope 正交：kind 答「这是什么内容」，scope 答「这条记忆归谁」。
+    封死——永不为新机制扩，新机制 = 新 metadata 约定（见 MemoryEventType docstring）。
+    """
+
+    CONVERSATION_TURN = "conversation_turn"  # 对话回合（user/assistant/tool），各 scope 通用
+    SUMMARY = "summary"                      # 遗忘补偿：段摘要 / 经验摘要（fold 的 replacement）
+    TOOL_AUDIT = "tool_audit"                # 真实能力调用审计；默认不进视图装配
+    PUBLICATION = "publication"              # topic 发布；按流读取（recall_topic）
+
+
 # 事件类型 → 层（spec/06 §3）。唯一映射，ingest/recall 据此选 scope key。
 # 注：「type 唯一决定层」已在松动——apply_compact 显式传 layer、provider recall 宽容混层；
 # 目标形态下 layer 是 MemoryEvent 显式字段，本映射仅为 legacy 类型兜底（见 MemoryEventType docstring）。
@@ -150,19 +168,28 @@ class MemoryEvent:
 
     type: MemoryEventType | None = None
     address: MemoryAddress | None = None  # 归档坐标（v2 §3 终名，原 scope 字段）
-    content: str | list[ContentPart] | None = None  # 必给；显式空串合法（占位回合）
+    content: str | list[ContentPart] | None = None  # 必给；显式空串合法（占位回合）。可能是 list[ContentPart]（多模态）；宿主 provider 必须能持久化并原样返回，见 MemoryProvider 多模态契约
     timestamp: datetime | None = None
     # 调用方预生成 record id（v2 设计 §4 · 2026-07-27 增补，投影化前置）。
     # 给定 → provider 必须采用并按 id 幂等（重复 ingest = no-op）；None → provider 生成。
     id: str | None = None
-    # v2 词汇（设计 §2）：kind = 内容种类（memory_compat.MemoryKind），scope = 归属范围
-    # （MemoryScope 枚举，原 layer 字段）。前向引用避免 memory ↔ memory_compat 循环 import。
-    kind: "Any | None" = None
+    # v2 词汇（设计 §2）：kind = 内容种类，scope = 归属范围（原 layer 字段）。
+    kind: MemoryKind | None = None
     scope: MemoryScope | None = None
     role: Literal["user", "assistant", "system", "tool"] | None = None
     topic: str | None = None  # 用于 topic-style 事件（含父子 task 通信）
     causation_id: str | None = None  # 关联上游 event
     metadata: dict = field(default_factory=dict)
+    # GC 的 mark 输入（缺陷 2026-08-27）：本事件引用了哪些 blob，但**没有**以结构化
+    # ImagePart(source_type="ref") 形式出现在 content 里。
+    #
+    # 唯一的填写方——L0.5 降级（core/media/fold.py）：它把 ImagePart(ref) 换成文本
+    # 占位，ref 就此掉进自由文本，provider 再也扫不出来 → 引用归零 → 字节被回收 →
+    # media:get_image 取不回，L0.5 承诺的「可逆」失效。
+    #
+    # 普通写侧**不必填**：content 里结构化的 ref part 由 collect_blob_refs 自动采集。
+    # provider 建引用边时一律走 core.content.collect_blob_refs，不得自行判断。
+    blob_refs: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # 误型 loud（字段终名切换护栏）：旧习惯 scope=<坐标> / address=<枚举> 静默换义
@@ -197,6 +224,15 @@ class MemoryEvent:
                     raise ValueError(
                         f"AGENT-scoped v2 event requires agent_id; got {self.address!r}")
 
+        # 写侧归一（Phase 3c Task E2），与读侧 MemoryRecord 对称：dict 形态 part 是
+        # 协议违规（本字段类型声明即 str | list[ContentPart]）。今日写侧 content 全由
+        # core 构造（都是 dataclass），但宿主直接 ingest(MemoryEvent(content=[dict]))
+        # 时 dict 会原样落库、读侧再归一回来——结果正确，只是往返多绕一圈，且写读两侧
+        # 语义不对称。放在全部校验**之后**：content=None 等既有报错路径不得被归一抢先。
+        # 共用实现见 core.content.normalize_content_parts（经 protocols.context 的惰性
+        # 绑定转调，层序 + 热路径理由同 MemoryRecord.__post_init__）。
+        self.content = normalize_content_parts(self.content)
+
 
 @dataclass
 class MemoryRecord:
@@ -214,10 +250,37 @@ class MemoryRecord:
     role: Literal["user", "assistant", "system", "tool"] | None = None
     topic: str | None = None
     score: float | None = None  # 仅 recall_semantic 时填
-    kind: "Any | None" = None            # v2：memory_compat.MemoryKind（避循环 import 不注真型）
+    kind: MemoryKind | None = None       # v2：内容种类
     scope: MemoryScope | None = None     # v2：归属范围（终名，原 layer 字段）
     address: "MemoryAddress | None" = None  # v2：来源回显（归档坐标）
     metadata: dict = field(default_factory=dict)
+    # 与 MemoryEvent.blob_refs 对称的读侧回显（缺陷 2026-08-27）。
+    # provider 必须还原它——否则一条被降级过两次的记录，第一次降的 ref 在第二次
+    # 重建补偿事件时就没人认领了（core/media/fold.py::_rebuild 要累积它）。
+    blob_refs: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """把 dict 形态的 content 归一回 ContentPart dataclass（多模态 Phase 3c）。
+
+        ``content`` 的类型声明就是 ``str | list[ContentPart]``，多模态契约第 2 条要求
+        「召回时原样返回——形态必与入库时相同」。JSON 往返的 provider 若回吐
+        ``[{"type":"text","text":"hi"}]`` 就是**协议违规**，后果实测过两条且互相掩护：
+        ``image_part_count`` 把文本计成图（多算 1600 token），``content_to_text``
+        返回空串（摘要器完全看不见内容）——token 涨了看着"内容很多"，实际内容全丢。
+
+        修法落在**类型自己的边界**而不是每个读取方：core 读 memory 有 11 个调用点
+        （act/compact/finalize/prepare/reconcile/segment_fold/background_observe/
+        runtime/agent_recall/blackboard/long_memory），逐个兜底既漏又会随新调用点
+        腐化；而任何 provider——含未来的第三方——都必须构造 MemoryRecord。判据
+        ``not hasattr(p,"text")`` 因此保持冻结（用户裁定 D1），不为违规形态解冻。
+
+        归一实现是三处边界共用的 ``core.content.normalize_content_parts``
+        （Phase 3c Task E2 抽取；另两处是 ``MemoryEvent`` 与 ``LLMMessage``）——spec §3①
+        要求形态转换收在归一层，三处各抄一份正是它要防的散点。快路径与「已合规不重建」
+        的性能性质由该函数保证。经 ``protocols.context.normalize_content_parts`` 这个
+        **惰性绑定**转调（层序 + 热路径理由见该绑定的 docstring）。
+        """
+        self.content = normalize_content_parts(self.content)
 
 
 @dataclass
@@ -230,7 +293,7 @@ class Subscription:
     session_id: str
     topic: str
     cursor: int  # 已读到的 seq_no
-    # subtask=自己派生的子任务结果（可 review/reopen）；predecessor=同 plan 前序结果（只读）；
+    # subtask=自己派生的子任务结果（可 review）；predecessor=同 plan 前序结果（只读）；
     # long_term_*=跨 session 长期上下文。
     intent: Literal["subtask", "predecessor", "long_term_background", "long_term_project_log"]
     task_id: str = ""
@@ -256,7 +319,37 @@ class MemoryProviderInfo:
 
 @runtime_checkable
 class MemoryProvider(Protocol):
-    """统一 memory：摄取所有事件 + 多模召回。单实例，必需。"""
+    """统一 memory：摄取所有事件 + 多模召回。单实例，必需。
+
+    【多租户隔离契约】
+    ``ProviderContext.tenant_id`` 是**硬隔离边界**，不是标签。宿主可自带 session_id
+    （见 ``start_session``），故「同 session_id、不同 tenant」是可达状态——provider
+    **必须**按租户分区，否则就是跨租户数据泄漏（实测发生过）。要求：
+    1. ingest 时记录 ``ctx.tenant_id``（归一后）随行落库；
+    2. 所有读接口（``load_view`` / ``recall_topic`` / ``recall_semantic`` /
+       ``list_subscriptions``）只返回**本租户**的行——即便 session_id / task_id /
+       agent_id / topic 全部撞车；
+    3. 归一：``None`` 与空串一律视为 ``"default"``（与 ``ProviderContext.tenant_id``
+       的字段默认值一致），**写读两侧必须用同一个归一**。这条不是洁癖：串接不一致
+       时若各自比原值，读侧会静默返空（「会话突然失忆」），比泄漏更难诊断；
+    4. 隐式的**跨行扫描**同样按租户分区——典型是 topic 发布的覆盖语义（下方
+       ``recall_topic``）：一个租户的发布绝不能把另一个租户同 topic 的行标为
+       superseded（它甚至读不到那些行）；订阅表同理，唯一键须含 tenant。
+    5. 尚未收口的一处（记录在案，不属本契约要求）：**记录 id 的命名空间仍是全局的**
+       ——``ingest`` 的按 id 幂等与 ``fold`` 的按 id 遗忘都不看 tenant。它们是调用方
+       显式给出 id 的操作，与「隐式扫描」不同类；要改需先定 id 是全局唯一还是租户内
+       唯一。宿主若跨租户复用记录 id，须自行保证。
+
+    【多模态无损存取契约】
+    MemoryEvent.content 可能是 str 或 list[ContentPart]（后者为多模态，含文本与图片）。宿主 provider 必须：
+    1. 持久化时保持原样——若 ingest 接收 list[ContentPart]，则无损保存整体结构；
+    2. 召回时原样返回——load_view / recall_topic / recall_semantic 返回的 MemoryRecord.content
+       形态必与入库时相同（str 返 str，list 返 list，无转换）；
+    3. 落库推荐形态：``ctx_weft.core.utils.content.content_to_jsonable`` 用于持久化前的 JSON 序列化
+      （ContentPart 是普通 dataclass，需过此转换才能 json.dumps；取回时用 ``content_from_jsonable`` 还原）；
+    4. 禁止在持久化层拍扁成纯文本——装配期是否拍扁为 str 由框架决定（见 composer.py），
+       provider 的职责仅是无损存取。
+    """
 
     name: str
 
@@ -305,7 +398,7 @@ class MemoryProvider(Protocol):
         address: "MemoryAddress",
         scope: MemoryScope,
         ctx: ProviderContext,
-        kinds: "list[Any] | None" = None,
+        kinds: list[MemoryKind] | None = None,
     ) -> list[MemoryRecord]:
         """工作记忆回放（v2 设计 §4）：返回该归属分区**全量幸存**记录，**时间正序**。
 
@@ -319,6 +412,9 @@ class MemoryProvider(Protocol):
           SESSION → task_id/agent_id 非 None=ValueError。
         - 返回前经 memory_compat.normalize_view（legacy dispatch 配对 + kind/layer 重打）；
           record.address 回显来源归档地址。
+        - **租户隔离**（见类 docstring）：只返回 ``ctx.tenant_id``（归一后）分区内的行。
+          同 session_id 的另一个租户的记录必须不可见；反之本租户的行一条都不能少
+          （修过头 → 返空 = 会话失忆）。
         """
         ...
 
@@ -336,6 +432,12 @@ class MemoryProvider(Protocol):
         """按 topic 拉取（自 since seq_no 之后），返回 (events, new_cursor)。
 
         必需实现。父子 task 通信 + 跨 session 订阅式上下文用。
+
+        - 覆盖语义（黑板）：同 topic 的 PUBLICATION 只保留最新一条，旧的标 superseded；
+          其它 kind 的带 topic 记录累积保留。``BlackboardSource`` 依赖这条。
+        - **租户隔离**（见类 docstring）：topic 名跨租户撞车同样可达（宿主自定的
+          long_term_* topic 是常态），故按 ``ctx.tenant_id``（归一后）过滤；上面的
+          覆盖扫描也**只在本租户分区内**进行。
         """
         ...
 
@@ -350,6 +452,8 @@ class MemoryProvider(Protocol):
         """语义相似度召回。可选——core 默认实现返空；外部实现核心能力。
 
         Provider 通过 describe() 声明是否支持。
+        **租户隔离**（见类 docstring）同样适用：向量检索也必须按 ``ctx.tenant_id``
+        预过滤，否则相似度会直接把别的租户的内容捞出来。
         """
         ...
 
@@ -364,7 +468,11 @@ class MemoryProvider(Protocol):
         ctx: ProviderContext,
         task_id: str = "",
     ) -> str:
-        """task 订阅 topic；返回 subscription id。幂等：同 (session, task, topic) 重复订阅保留游标。"""
+        """task 订阅 topic；返回 subscription id。幂等：同 (session, task, topic) 重复订阅保留游标。
+
+        幂等的唯一键**须含 tenant**（见类 docstring 第 4 条）：否则同 session_id 的
+        另一个租户会撞上幂等分支、拿到别人的订阅与游标。
+        """
         ...
 
     @abstractmethod
@@ -374,7 +482,11 @@ class MemoryProvider(Protocol):
         ctx: ProviderContext,
         task_id: str | None = None,
     ) -> list[Subscription]:
-        """列出订阅。task_id 给定时只返回该 task 的订阅 + session 级订阅（task_id=""）；None 返回全部。"""
+        """列出订阅。task_id 给定时只返回该 task 的订阅 + session 级订阅（task_id=""）；None 返回全部。
+
+        "全部" 仍以租户为界——只返回 ``ctx.tenant_id``（归一后）分区内的订阅
+        （topic 名与 intent 同样是租户数据）。
+        """
         ...
 
     # v2 P4b-2：apply_compact / supersede 自协议删除——写面收敛为 ingest + fold。
@@ -387,3 +499,83 @@ class MemoryProvider(Protocol):
     async def describe(self, ctx: ProviderContext) -> MemoryProviderInfo:
         """返回 provider 能力声明。"""
         ...
+
+
+# ── Blob 存储（多模态字节侧）─────────────────────────────────────────────────
+
+
+class MemoryBlobStore(ABC):
+    """core 的「二进制 sink」契约：存取图片等二进制内容，core 只见 ref。
+
+    与 ``protocols.filesystem.SpillSink`` 同形——core 不直接碰存储，只知道
+    「有个 sink 能存能取」。
+
+    **本协议与 MemoryProvider 同处一个模块，但刻意不是它的方法**（裁定 D4）：
+    D4 论证的是**引用边**（哪个 part 指向哪个 blob ref）该与 ingest 同事务，
+    不是**字节**该进 RDBMS——字节侧可以是文件系统 / 对象存储等任意独立部署，
+    memory 只需持有、维护引用边（见 ``MemoryProvider.live_blob_refs()``），
+    不必是字节的持有者。语义上这仍是 memory 多模态支持的字节侧，与上面
+    ``MemoryProvider`` 的【多模态无损存取契约】（part 结构侧）是同一件事的两面，
+    宿主实现多模态 memory 时应在本模块一次读全。
+    保持独立 ABC 而不并入 ``MemoryProvider``，是因为两者的能力**正交**：字节放在哪
+    （文件系统 / 对象存储 / 数据库）与记忆怎么存是两个独立的部署决策，宿主换其中一个
+    不应被迫换另一个。仓内实现见 ``ctx_weft.providers.blob.fs.FsBlobStore``
+    （它同时也满足 ``EventBlobStore``，那是实现层的方便，不是协议层的关系）。
+
+    ⚠️ 历史：Phase 3b 曾把本协议挂在 ``FilesystemToolsProvider`` 上（裁定 D5 移除），
+    随后 ``SqlMemoryProvider`` 曾同时实现它、由 ``ProviderRegistry`` 自动解析
+    （spec 2026-08-29 §5 移除——D4 论证的是引用边该与 ingest 同事务，不是字节该进 RDBMS）。
+    现在字节侧只由显式注册决定。
+
+    put 必须**内容寻址且幂等**：同样的 data 返回同样的 ref，重复调用不重复存。
+    这同时给到三件事：写入端去重、重放安全、以及 rehydrate 字节稳定——同一 ref
+    每次还原出的 base64 完全一致，Anthropic 的 prompt cache 前缀不会被打碎。
+
+    get 对不存在 / 已回收的 ref 返回 None，**不得 raise**：blob 过期、宿主换机、
+    GC 误删都会发生，调用方据此降级为文本占位，绝不因取图失败中断 loop。
+    """
+
+    @property
+    def can_externalize(self) -> bool:
+        """本 store 是否真的能存——``NullMemoryBlobStore`` 返回 False。
+
+        调用方据此**先探询、再决定**，而不是调用 put 并捕获 NotImplementedError：
+        后者会把「响亮失败」降级成控制流，让真正的接线错误也被静默吞掉
+        （Phase 1 终审契约）。基类默认 True，既有实现无需改动。
+        """
+        return True
+
+    @abstractmethod
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        ...
+
+    @abstractmethod
+    async def get(
+        self, ref: str, ctx: ProviderContext
+    ) -> "tuple[bytes, str] | None":
+        ...
+
+
+class NullMemoryBlobStore(MemoryBlobStore):
+    """未注册 MemoryBlobStore 时的默认实现——保证不接 blob 的宿主行为完全不变。
+
+    put 刻意抛错：Phase 1 内没有任何调用方（外部化在 Phase 3），抛错可在
+    Phase 3 接线错误时立刻暴露，而不是静默产出一个假 ref。调用方（
+    ``core.content.normalize_content``）先探询 can_externalize 决定是否外部化，
+    **不**捕获这里的 NotImplementedError——它仍是接线错误的响亮信号。
+    """
+
+    @property
+    def can_externalize(self) -> bool:
+        return False
+
+    async def put(self, data: bytes, media_type: str, ctx: ProviderContext) -> str:
+        raise NotImplementedError(
+            "No MemoryBlobStore registered; register one via "
+            "ProviderRegistry.register_memory_blob_store() before externalizing content."
+        )
+
+    async def get(
+        self, ref: str, ctx: ProviderContext
+    ) -> "tuple[bytes, str] | None":
+        return None

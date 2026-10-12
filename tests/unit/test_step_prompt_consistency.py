@@ -20,13 +20,16 @@ from ctx_weft.core.assembler.composer import (
     _RECOGNIZE_INTENT_INSTRUCTION,
     DefaultComposer,
 )
-from ctx_weft.core.utils import content_to_text
+from ctx_weft.core.utils.content import content_to_text
 
 PURPOSES = ["act", "observe", "compact", "recognize_intent"]
 
 # stable substrings of each step's trailing cue (see composer module constants)
 _STEP_CUE = {
-    "observe": "act as the observer",
+    # 2026-09-28：observe 的 cue 重写成「边界事实 + 调哪个工具 + 这次填哪些字段」，开场那句
+    # 「Now act as the observer…」随之消失（角色由 ROLE facet 讲，cue 不再复述）。哨兵改用
+    # 那句必然出现的工具指令。
+    "observe": "call `control__report_task_outcome` exactly once",
     "compact": "act as a memory compactor",
     "recognize_intent": "set this task's metadata",
 }
@@ -96,7 +99,7 @@ def _build_for_purpose(blocks: list[ContextBlock], purpose: str):
     if purpose == "act":
         return c._build_actor_messages(blocks, req)
     if purpose == "observe":
-        return c._build_observer_messages(blocks, req)
+        return c._build_observe_messages(blocks, req)
     if purpose == "compact":
         return c._build_facet_trailing_messages(blocks, req, _COMPACTION_INSTRUCTION)
     if purpose == "recognize_intent":

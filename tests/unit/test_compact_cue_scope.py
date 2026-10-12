@@ -6,7 +6,8 @@ from ctx_weft.core.assembler.composer import (
     DefaultComposer, _AGENT_COMPACTION_INSTRUCTION, _COMPACTION_INSTRUCTION,
 )
 from ctx_weft.core.assembler.assembler import ContextBlock
-from ctx_weft.core.utils import content_to_text, estimate_tokens
+from ctx_weft.core.utils.content import content_to_text
+from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio
@@ -74,9 +75,11 @@ async def test_summarize_for_compact_threads_scope(monkeypatch):
         return
 
     agent = SimpleNamespace(runtime={}, )
+    # resolve_llm_identity 的真值来自 resolved_model（task-4 复审第二轮：summarize_for_compact
+    # 不再读 agent.runtime.get("llm_model")，那个键正常任务执行永远不会被写入）。
     state = SimpleNamespace(
         agent=agent, scope=SimpleNamespace(), task=SimpleNamespace(), session=SimpleNamespace(),
-        extra={})
+        extra={}, resolved_model=SimpleNamespace(model="mock-model", account=""))
     ctx = SimpleNamespace(assembler=_FakeAssembler(), llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
     monkeypatch.setattr(compact_mod, "stream_llm_resilient", _fake_stream)
 

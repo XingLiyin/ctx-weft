@@ -17,10 +17,12 @@ from ctx_weft.core.loop.steps.compact import (
     fold_root_experience,
 )
 from ctx_weft.core.loop.steps.prepare import PrepareStep
-from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.core.models.agent import Agent
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
-from ctx_weft.providers.memory_blackboard.in_memory import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 pytestmark = pytest.mark.asyncio
 
@@ -77,8 +79,7 @@ class _FakeLLM:
 
 
 def _agent(cfg: LoopConfig, context_limit: int = 1000) -> Agent:
-    a = Agent(id="ag1", session_id="s1", template_id="tpl", template_version="1",
-              status="RUNNING", loop_config=cfg)
+    a = Agent(id="ag1", session_id="s1", template_id="tpl", loop_config=cfg)
     a.loop_guard.context_limit = context_limit
     # 本文件用小尺度 context_limit（如 1000）模拟 token 预算比率，与真实 reserved_output_tokens
     # 默认值 8192 不在同一量纲（会把 effective_limit 吞成 0）；清零以保留 eff == context_limit
@@ -95,7 +96,7 @@ def _state(active: Task, cfg: LoopConfig, context_limit: int = 1000,
     # 门总是打开）——迁移自旧 count-based _compact_scope 的测试显式传本参数模拟"未达预算"。
     agent.loop_guard.context_tokens = context_limit if context_tokens is None else context_tokens
     return LoopState(run_id="run1", session=session, task=active,
-                     agent=agent, scope=_sc(active.id, "ag1"))
+                     agent=agent, scope=_sc(active.id, "ag1"), resolved_model=SimpleNamespace(model="mock", account=""))
 
 
 def _loop_ctx(mem, tm, *, with_assembler: bool = False):

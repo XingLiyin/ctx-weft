@@ -1,4 +1,7 @@
-"""interactive vs auto task + finish_task + 临时 guidance 注入。
+"""纯文本回合的两种归宿（有人在场 park / 无人值守即产出）+ finish_task + 临时 guidance 注入。
+
+判据 2026-09-22 起是 `Task.unattended`——`interaction_mode` 已删（它是个 task 级静态
+配置，却在回答一个逐回合的语义）。文件名沿用旧称，内容测的是同一组语义。
 
 - interactive 任务 actor 纯文本 → HITL input 冷 park（等用户），不产出、不完成。
 - auto 任务 actor 纯文本 → 文本即 outputs，路由 observe。
@@ -10,38 +13,79 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.assembler.assembler import AssembledPrompt
-from ctx_weft.core.events.bus import InProcessEventBus
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.park import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep
 from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
-from ctx_weft.core.orchestrator.hitl_manager import HitlManager
-from ctx_weft.core.state.models import Agent, NormalTaskSettings, Session, Task
+from ctx_weft.core.models.agent import Agent
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     LLMMessage, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
 )
+from ctx_weft.protocols.hitl import PREFACE_NORMAL, UserTurnDelivery
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.hitl_env import make_hitl
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 
 
-def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
+def _template(*, observe_role: bool):
+    """最小 template。``observe_role`` = 这个 agent 有没有 observer（ROLE facet）。
+
+    没有 observer 的模板（2026-09-28 起 ROLE 不再从 default 借）在三条路上降级：前台
+    observe 走机械判决、后台判定档降成只摘要档、`finish_task` 不再让位。
+    """
+    from ctx_weft.protocols.template import (
+        AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
+    )
+
+    identity = {"act": IdentityFacet(text="SOUL")}
+    if observe_role:
+        identity["observe"] = IdentityFacet(text="ROLE")
+    return AgentTemplate(
+        id="t", name="t", version="1.0.0", identity=identity,
+        capability_refs=[], memory_config=MemoryConfig(), loop_config=LoopConfig(),
+    )
+
+
+def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
+                   parent_task_id: str | None = None, gateway=None,
+                   observe_role: bool = True):
+    """返回 (state, ctx, task, registry, mem)。第 4 项是 `HitlRegistry`——`list_pending`
+    的持有者从 `HitlManager` 换成了它，断言口径不变（仍是「这个 session 上挂着哪些未决
+    请求」）。
+
+    参数 2026-09-22 从 `interaction_mode: str` 换成 `unattended: bool`：纯文本回合的
+    归宿判据改成了「有没有人在」（`interaction_mode` 随 S7 删除）。映射是逐字的——
+    旧的 `"auto"`（自治、纯文本即产出）≡ `unattended=True`，旧的 `"interactive"`
+    （让位等人）≡ `unattended=False`。
+
+    ``parent_task_id`` / ``gateway`` 是 2026-09-27 加的（S-b）：root 的 `finish_task` 现在也
+    让位，而「是不是 root」与「工具真被调过」正是那条路由的两个判据——前者要能摆出子任务，
+    后者要一个能把 `task.actor_done` 置上的 gateway（见
+    `tests/unit/test_finish_task_parks_on_root.py`）。两者都默认不变。
+    """
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
-    hitl = HitlManager(event_bus=bus)
+    hitl_service, hitl = make_hitl(bus)
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING", token_budget=0)
     task = Task(
         id="t1", session_id="s1", status="ACTIVE",
         title="Greet", description="say hi politely",
-        interaction_mode=interaction_mode, settings=NormalTaskSettings(),
+        unattended=unattended, settings=NormalTaskSettings(),
+        parent_task_id=parent_task_id,
     )
-    agent = Agent(id="ag1", session_id="s1", template_id="t", template_version="1", status="RUNNING")
+    agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     # composer 形态：guidance 已拼在末条 user 尾部（ActStep 不再自行注入）。
     guidance = build_act_guidance(task, None)
@@ -51,29 +95,37 @@ def _act_state_ctx(interaction_mode: str, llm: MockLLMAdapter):
     )
     state = LoopState(
         run_id="r1", session=session, task=task, agent=agent, scope=scope, assembled_prompt=prompt,
+        resolved_model=SimpleNamespace(model="mock", account=""),
+        extra={"template": _template(observe_role=observe_role)},
     )
     ctx = LoopContext(
         assembler=None, llm=llm, memory=mem, event_bus=bus,
         provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1"),
-        hitl_manager=hitl,
+        hitl=hitl_service,
+        capability_gateway=gateway,
     )
     return state, ctx, task, hitl, mem
 
 
 async def test_interactive_plain_text_parks_for_user() -> None:
     llm = MockLLMAdapter(responses=[MockResponse(text="Hi! Anything else?")])
-    state, ctx, task, hitl, mem = _act_state_ctx("interactive", llm)
+    state, ctx, task, hitl, mem = _act_state_ctx(False, llm)
 
     with pytest.raises(HitlPark):
         await ActStep().execute(state, ctx)
 
-    assert task.status == "SUSPENDED"
-    assert state.session.status == "PAUSED"           # 纯文本软待命 = PAUSED（区别于 ask_user 的 PAUSED_HITL）
-    assert task.outputs is None                       # 纯文本不是产出
+    # park 不写 task 状态（Task 4）：AWAITING_HUMAN 由 TaskManager 据 RunOutcome 落。
+    assert task.status == "ACTIVE"
+    # 纯文本**就是**这一段的产出（2026-09-24 修）：park 之前必须先合成 `outputs`，
+    # 否则 `report_task_outcome` 的 success-without-outputs 护栏会把 observer 的
+    # success 改判 retry，park 的 task 永远终结不了。见
+    # `tests/unit/test_outputs_synthesized_before_park.py`。
+    assert task.outputs == "Hi! Anything else?"
     pend = hitl.list_pending("s1")
     assert len(pend) == 1
     assert pend[0].form == "wait"
-    assert pend[0].capability_id.endswith(":wait_for_user")
+    # 续跑方式由 delivery 显式声明——取代旧的 `capability_id` sentinel（spec §5）。
+    assert pend[0].delivery == UserTurnDelivery(task_id="t1", preface=PREFACE_NORMAL)
 
     # guidance 只在发送的 prompt（装配期已拼入），不入 memory
     sent = llm.last_request.messages[-1].content
@@ -84,7 +136,7 @@ async def test_interactive_plain_text_parks_for_user() -> None:
 
 async def test_auto_plain_text_completes() -> None:
     llm = MockLLMAdapter(responses=[MockResponse(text="Hi! Anything else?")])
-    state, ctx, task, hitl, _mem = _act_state_ctx("auto", llm)
+    state, ctx, task, hitl, _mem = _act_state_ctx(True, llm)
 
     outcome = await ActStep().execute(state, ctx)
 
@@ -127,7 +179,9 @@ async def test_guidance_injected_into_prompt_not_memory() -> None:
     _handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hello")
 
     # 发送的 prompt 含 guidance
-    sent = llm.last_request.messages[-1].content
+    # `last_act_request` 而非 `last_request`：2026-09-28 起 root 的收尾也过前台 observe
+    # （`_should_use_llm` 删掉了 root 降级），一次 run 的最后一个 request 是观察者的。
+    sent = llm.last_act_request.messages[-1].content
     assert "finish_task" in sent
     # memory 的 USER_PROMPT 不含 guidance（仅原始用户输入）
     ctxp = ProviderContext(session_id=state.session.id, agent_id=state.agent.id)

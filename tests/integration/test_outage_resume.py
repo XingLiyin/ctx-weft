@@ -1,16 +1,28 @@
 """End-to-end: transient LLM outage interrupts a session; /resume re-drives to completion.
 
 Two invariants:
-1. After outage: task is SUSPENDED (non-terminal), NOT FAILED; SessionStatusChanged(INTERRUPTED) emitted.
-2. After resume with healthy LLM: task reaches FINISHED; session not left INTERRUPTED/FAILED.
+1. After outage: task is SUSPENDED (non-terminal), NOT FAILED; the root agent goes
+   ``interrupted`` (AgentInterrupted emitted).
+2. After resume with healthy LLM: task reaches FINISHED; agent not left interrupted.
 3. Idempotent: a second outage+resume cycle behaves identically; final resume completes.
 
+Task 16 note: ``SessionInterrupted`` (and the SessionRegistry state machine that used to
+emit it) is retired — the SM was demoted to a plain agent registry in Task 15. These
+assertions now pin the agent-level ALM verdict (``AgentInterrupted`` / ``status_of() ==
+"interrupted"``) instead: TaskInterrupted (the task-domain fact TaskManager still emits
+on this exact path) drives the ALM five-state machine the same way TaskQueueInterrupted
+used to drive SM, so the observation point moves down one layer without losing strength.
+The event-store projection's ``session_status`` can no longer reach ``INTERRUPTED``
+either (nothing emits the retired event to drive that reducer branch any more), so this
+file stops asserting on it — an accepted consequence of session-state ownership moving
+to the host (docs/events-v2.md §2.1.1), not a regression.
+
 API contract (confirmed by reading runtime.py):
-- ``start_session(params)`` → ``RunHandle``; emits SESSION_CREATED so the event store can
-  be queried by ``recover_session``.  ``run_single_task`` is a phase-1 compat shim that
-  does NOT emit SESSION_CREATED, making ``recover_session`` fail with "not found".
+- ``start_session(params)`` → ``TurnHandle``; emits SESSION_CREATED so the event store can
+  be queried by ``recover_agent``.  ``run_single_task`` is a phase-1 compat shim that
+  does NOT emit SESSION_CREATED, making ``recover_agent`` fail with "not found".
 - ``handle.wait_for_finish(timeout)`` streams events until RunFinished (or timeout).
-- ``recover_session(session_id)`` → ``None``; re-queues non-terminal tasks and launches
+- ``recover_agent(agent_id)`` → ``None``; re-queues non-terminal tasks and launches
   drain as ``asyncio.create_task`` (fire-and-forget).
 - Task status and session status are read back via ``rebuild_view`` from the event store.
 
@@ -28,13 +40,15 @@ import asyncio
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.config import RuntimeConfig
+from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.core.events.types import EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import LLMOutageError, ToolCall
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory_blackboard import InMemoryMemoryProvider
+from ctx_weft.providers.llm.mock import (
+    MockLLMAdapter, MockResponse, is_observer_request,
+)
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
@@ -48,9 +62,10 @@ def _finish_task_response(text: str = "done") -> MockResponse:
 
     start_session creates the root task with interaction_mode='interactive', which
     requires the LLM to call control__finish_task (not plain-text reply).
+    交付物 = 收尾回合正文（finish_task 不带未声明参数，spec: capability-gateway）。
     """
-    return MockResponse(tool_calls=[
-        ToolCall(id="tc1", name="control__finish_task", arguments={"result": text}),
+    return MockResponse(text=text, tool_calls=[
+        ToolCall(id="tc1", name="control__finish_task", arguments={}),
     ])
 
 
@@ -94,6 +109,11 @@ class _FlakyLLM(MockLLMAdapter):
                 return self._stream(resp, request)
             # If ri_responses exhausted, return empty text response.
             return self._stream(MockResponse(text=""), request)
+        # 判定回合不算 act，也不烧故障预算（2026-09-27）：S-b 起 root 的 finish_task 也
+        # park + 后台判定，让那次观察去撞 outage 等于既烧掉一个故障名额、又让 verdict 永不
+        # 抵达（≡ retry，task 停在 park）。交给基类——那边的 `observer_verdict` 开关会回判决。
+        if is_observer_request(request):
+            return super().complete(request, stream=stream)
         # Act calls: fail for the first `fail_for` times, then succeed.
         if self._raised < self._fail_for:
             self._raised += 1
@@ -145,7 +165,7 @@ async def _wait_for_task_finished(
 ) -> None:
     """Poll rebuild_view until at least one task reaches FINISHED.
 
-    recover_session() launches drain as an asyncio background task
+    recover_agent() launches drain as an asyncio background task
     (asyncio.create_task inside _register_and_drain), so we must yield control
     until the drain completes.
     """
@@ -163,34 +183,56 @@ async def _wait_for_interrupted_event(
     seen: list,
     timeout: float = 5.0,
 ) -> None:
-    """Wait until a new SessionStatusChanged(INTERRUPTED) event appears in the spy list.
+    """Wait until a new AgentInterrupted event appears in the spy list.
 
-    recover_session() launches drain as asyncio.create_task, so we need to yield
-    to the event loop and poll until the event is captured by the spy.
+    recover_agent() launches drain as asyncio.create_task, so we need to yield
+    to the event loop and poll until the event is captured by the spy. (Task 16:
+    SessionInterrupted is retired along with the SessionRegistry state machine —
+    AgentInterrupted is the still-live successor signal, see module docstring.)
     """
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         has_interrupted = any(
-            getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-            and (e.payload or {}).get("new_status") == "INTERRUPTED"
+            getattr(e, "type", None) == EventType.AGENT_INTERRUPTED
             for e in seen
         )
         if has_interrupted:
             return
         await asyncio.sleep(0.02)
-    raise TimeoutError("Did not receive SessionStatusChanged(INTERRUPTED) within timeout")
+    raise TimeoutError("Did not receive AgentInterrupted within timeout")
+
+
+def _agent_not_left_interrupted(seen: list, agent_id: str) -> bool:
+    """True unless this agent's most recent ALM event in ``seen`` is AgentInterrupted.
+
+    Deliberately event-log-based rather than a live ``status_of(agent_id)`` check: a
+    session that finishes draining releases its agent registry records
+    (``CtxWeftRuntime._release_session`` → ``AgentLifecycleManager.release_session``), so by
+    the time "after resume" assertions run following a successful completion the
+    agent may already be gone from the registry — that's expected, not a bug. Also
+    tolerant of a ``seen.clear()`` between phases (test_idempotent_outage_resume_
+    completes does this): if this agent has no ALM event at all in the current
+    window, there is nothing to have left it interrupted, so that counts as fine too.
+    """
+    alm_types = (EventType.AGENT_RUNNING, EventType.AGENT_IDLE,
+                 EventType.AGENT_INTERRUPTED, EventType.AGENT_WAITING_HUMAN)
+    relevant = [e for e in seen
+                if getattr(e, "agent_id", None) == agent_id and getattr(e, "type", None) in alm_types]
+    if not relevant:
+        return True
+    return getattr(relevant[-1], "type", None) != EventType.AGENT_INTERRUPTED
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 
 async def test_outage_then_resume_completes():
-    """Single outage → INTERRUPTED; then recover_session re-drives to FINISHED.
+    """Single outage → INTERRUPTED; then recover_agent re-drives to FINISHED.
 
     With _DEFAULT_MAX_ATTEMPTS=1 (patched above), the first complete() call raises
     LLMOutageError immediately and stream_llm_resilient exhausts its budget after 1
     attempt, propagating LLMOutageError to _run_loop which sets task SUSPENDED.
-    After recover_session(), _FlakyLLM(fail_for=1) succeeds (raised >= fail_for), so
+    After recover_agent(), _FlakyLLM(fail_for=1) succeeds (raised >= fail_for), so
     the resume re-drive produces a normal response and task reaches FINISHED.
     """
     # Act responses (only consumed by non-recognize_intent LLM calls):
@@ -198,6 +240,8 @@ async def test_outage_then_resume_completes():
     # Recognize-intent responses (separate queue, never fail):
     # - Extra buffers for any background recognize_intent tasks from leftover runs.
     llm = _FlakyLLM(
+        # 见 _FlakyLLM.complete 里判定回合那一支。
+        observer_verdict="success",
         fail_for=1,
         responses=[_finish_task_response("done")],
         ri_responses=[MockResponse(text=""), MockResponse(text=""), MockResponse(text="")],
@@ -236,19 +280,21 @@ async def test_outage_then_resume_completes():
         f"Task must not be terminal after transient outage, got {[t.status for t in tasks_after_outage]}"
     )
 
-    # A SessionStatusChanged(INTERRUPTED) must have been emitted.
+    # An AgentInterrupted must have been emitted, and the root agent's ALM status
+    # must reflect it (Task 16: replaces the retired session-level SessionInterrupted).
     interrupted_events = [
         e for e in seen
-        if getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-        and (e.payload or {}).get("new_status") == "INTERRUPTED"
+        if getattr(e, "type", None) == EventType.AGENT_INTERRUPTED
     ]
-    assert interrupted_events, "Expected SessionStatusChanged(INTERRUPTED) after outage"
+    assert interrupted_events, "Expected AgentInterrupted after outage"
 
-    # Session status in the event store must reflect INTERRUPTED.
     sess_after_outage = view_after_outage.sessions.get(session_id)
     assert sess_after_outage is not None
-    assert sess_after_outage.status == "INTERRUPTED", (
-        f"Expected session INTERRUPTED after outage, got {sess_after_outage.status!r}"
+    root_agent_id = sess_after_outage.root_agent_id
+    assert root_agent_id
+    assert runtime._agent_lifecycle_manager.status_of(root_agent_id) == "interrupted", (
+        f"Expected root agent {root_agent_id!r} interrupted after outage, got "
+        f"{runtime._agent_lifecycle_manager.status_of(root_agent_id)!r}"
     )
 
     # No TASK_FAILED must have been emitted.
@@ -257,8 +303,8 @@ async def test_outage_then_resume_completes():
     )
 
     # ── Resume with healthy LLM ────────────────────────────────────────────────
-    # recover_session() returns None; drain runs as asyncio background task.
-    result = await runtime.recover_session(session_id)
+    # recover_agent() returns None; drain runs as asyncio background task.
+    result = await runtime.recover_agent(root_agent_id)
     assert result is None  # confirm the API contract (returns None)
 
     # Wait for the async drain to complete.
@@ -274,8 +320,8 @@ async def test_outage_then_resume_completes():
 
     sess = view.sessions.get(session_id)
     assert sess is not None
-    assert sess.status not in ("INTERRUPTED", "FAILED"), (
-        f"Session must not be left INTERRUPTED/FAILED after successful resume; got {sess.status!r}"
+    assert _agent_not_left_interrupted(seen, root_agent_id), (
+        f"Root agent {root_agent_id!r} must not be left interrupted after successful resume"
     )
 
 
@@ -288,12 +334,14 @@ async def test_idempotent_outage_resume_completes():
       - Initial run: call 1 raises → SUSPENDED.
       - First resume re-drive: call 2 raises → SUSPENDED again.
       - Second resume re-drive: call 3 succeeds → FINISHED.
-    No exception must leak out of recover_session(); the final state must be FINISHED.
+    No exception must leak out of recover_agent(); the final state must be FINISHED.
     """
     # Act responses (two failures + one success): fail 1 (first run), fail 2 (first resume),
     # then succeed on the second resume.
     # Recognize-intent responses: extra buffers for concurrent/leftover RI tasks.
     llm = _FlakyLLM(
+        # 见 _FlakyLLM.complete 里判定回合那一支。
+        observer_verdict="success",
         fail_for=2,
         responses=[_finish_task_response("ok")],
         ri_responses=[
@@ -330,15 +378,17 @@ async def test_idempotent_outage_resume_completes():
     )
     sess_after_first = view_after_first.sessions.get(session_id)
     assert sess_after_first is not None
-    assert sess_after_first.status == "INTERRUPTED", (
-        f"Expected session INTERRUPTED after first outage, got {sess_after_first.status!r}"
+    root_agent_id = sess_after_first.root_agent_id
+    assert root_agent_id
+    assert runtime._agent_lifecycle_manager.status_of(root_agent_id) == "interrupted", (
+        f"Expected root agent {root_agent_id!r} interrupted after first outage, got "
+        f"{runtime._agent_lifecycle_manager.status_of(root_agent_id)!r}"
     )
     interrupted_1 = [
         e for e in seen
-        if getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-        and (e.payload or {}).get("new_status") == "INTERRUPTED"
+        if getattr(e, "type", None) == EventType.AGENT_INTERRUPTED
     ]
-    assert interrupted_1, "Expected INTERRUPTED after first outage"
+    assert interrupted_1, "Expected AgentInterrupted after first outage"
 
     # No TASK_FAILED in the first cycle.
     assert not [e for e in seen if getattr(e, "type", None) == EventType.TASK_FAILED], (
@@ -347,10 +397,10 @@ async def test_idempotent_outage_resume_completes():
 
     # ── First resume → second outage → still SUSPENDED ────────────────────────
     seen.clear()
-    await runtime.recover_session(session_id)
+    await runtime.recover_agent(root_agent_id)
 
     # Wait until the second outage fires: poll the spy list for the new
-    # SessionStatusChanged(INTERRUPTED) event from the background drain.
+    # SessionInterrupted event from the background drain.
     await _wait_for_interrupted_event(seen)
 
     view_mid = await rebuild_view(runtime.event_store, session_id)
@@ -363,16 +413,16 @@ async def test_idempotent_outage_resume_completes():
     )
     sess_mid = view_mid.sessions.get(session_id)
     assert sess_mid is not None
-    assert sess_mid.status == "INTERRUPTED", (
-        f"Expected session INTERRUPTED after second outage, got {sess_mid.status!r}"
+    assert runtime._agent_lifecycle_manager.status_of(root_agent_id) == "interrupted", (
+        f"Expected root agent {root_agent_id!r} interrupted after second outage, got "
+        f"{runtime._agent_lifecycle_manager.status_of(root_agent_id)!r}"
     )
 
-    # _wait_for_interrupted_event already confirmed INTERRUPTED is in seen.
+    # _wait_for_interrupted_event already confirmed AgentInterrupted is in seen.
     assert any(
-        getattr(e, "type", None) == EventType.SESSION_STATUS_CHANGED
-        and (e.payload or {}).get("new_status") == "INTERRUPTED"
+        getattr(e, "type", None) == EventType.AGENT_INTERRUPTED
         for e in seen
-    ), "Expected INTERRUPTED again after second outage"
+    ), "Expected AgentInterrupted again after second outage"
 
     # No TASK_FAILED in any outage cycle.
     assert not [e for e in seen if getattr(e, "type", None) == EventType.TASK_FAILED], (
@@ -381,7 +431,7 @@ async def test_idempotent_outage_resume_completes():
 
     # ── Second resume → healthy LLM → FINISHED ────────────────────────────────
     seen.clear()
-    await runtime.recover_session(session_id)
+    await runtime.recover_agent(root_agent_id)
     await _wait_for_task_finished(runtime, session_id)
 
     view_final = await rebuild_view(runtime.event_store, session_id)
@@ -392,6 +442,6 @@ async def test_idempotent_outage_resume_completes():
 
     sess_final = view_final.sessions.get(session_id)
     assert sess_final is not None
-    assert sess_final.status not in ("INTERRUPTED", "FAILED"), (
-        f"Session must not be left INTERRUPTED/FAILED after final resume; got {sess_final.status!r}"
+    assert _agent_not_left_interrupted(seen, root_agent_id), (
+        f"Root agent {root_agent_id!r} must not be left interrupted after final resume"
     )
