@@ -13,7 +13,7 @@ from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.protocols import LLMMessage, LLMRequest
-from ctx_weft.providers.llm.stream import ensure_collected_stream
+from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.llm_gateway import (

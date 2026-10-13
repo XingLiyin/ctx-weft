@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
-from ctx_weft.providers.llm.stream import ensure_collected_stream
+from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.core.loop.driver import (
     ACT_TURNS_USED_KEY, COMPACT_NOOP_KEY, CONTEXT_RECOVERY_COUNT_KEY,
     HOT_REPLY_ROUND_KEY, RECOGNIZE_INTENT_PENDING_KEY, ROUND_COMMITTED_KEY,

@@ -22,7 +22,7 @@ from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.capability import ToolCapability
-from ctx_weft.providers.llm.stream import ensure_collected_stream
+from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 
 logger = logging.getLogger(__name__)
 

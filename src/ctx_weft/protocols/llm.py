@@ -24,7 +24,9 @@ Knowledge / Template 并列）。包含两个**相互独立**的扩展点：
 from __future__ import annotations
 
 from abc import abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -259,6 +261,59 @@ class LLMStreamResult:
     usage: LLMUsage = field(default_factory=LLMUsage)
     finish_reason: str | None = None
     provider_state: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class LLMStreamBuffers:
+    """Request-owned wire buffers shared with a parser, never copied by the collector."""
+
+    content_text: str = ""
+    tool_buffers: dict[int, dict[str, Any]] = field(default_factory=dict)
+
+
+class LLMStreamParser(Protocol):
+    """Provider-specific interpretation of the shared buffers and continuation metadata."""
+
+    def visible_text(self) -> str: ...
+    def provider_state(
+        self, reasoning_blocks: dict[int, str], incomplete: set[int],
+        tools: tuple[ToolCall, ...],
+    ) -> dict[str, Any]: ...
+    def release(self) -> None: ...
+
+
+class LLMStreamWriter(Protocol):
+    """Optional core-owned collection context; providers depend only on this contract.
+
+    Plain adapters can simply yield LLMChunk objects without using this interface.
+    Parsers that need accumulated wire text borrow the buffers via begin_attempt()
+    and attach their parser before yielding chunks. They write raw text into those
+    buffers; the collector records emitted reasoning and tracks visible lengths.
+    begin_attempt() resets the result, so retries may call it only before output
+    has been delivered. Extensions are per-attempt compatibility state.
+    """
+
+    def begin_attempt(self) -> LLMStreamBuffers: ...
+    def attach_parser(self, parser: LLMStreamParser) -> None: ...
+    def extension(self, key: str, factory: Callable[[], Any]) -> Any: ...
+
+
+_STREAM_WRITER: ContextVar[LLMStreamWriter | None] = ContextVar("llm_stream_writer", default=None)
+
+
+def current_stream_writer() -> LLMStreamWriter | None:
+    """Return the writer supplied by the current reader, if any."""
+    return _STREAM_WRITER.get()
+
+
+@contextmanager
+def stream_writer_context(writer: LLMStreamWriter) -> Iterator[None]:
+    """Scope the protocol connection to a single read; restore it on every exit."""
+    token = _STREAM_WRITER.set(writer)
+    try:
+        yield
+    finally:
+        _STREAM_WRITER.reset(token)
 
 
 @runtime_checkable

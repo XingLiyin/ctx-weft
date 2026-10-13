@@ -20,7 +20,7 @@ from ctx_weft.protocols import (
 from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
 from ctx_weft.providers.llm._modality import downgrade_for_text_only
 from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
-from ctx_weft.providers.llm.stream import CollectedLLMStream
+from ctx_weft.providers.llm._stream_parsing import begin_parsed_attempt
 from ctx_weft.providers.llm.text_calls import unwrap_raw_arguments
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
@@ -95,19 +95,16 @@ class AnthropicAdapter(LLMClient):
         return True
 
     def complete(self, request: LLMRequest, stream: bool = True) -> AsyncIterator[LLMChunk]:
-        return self.open_stream(request, stream)
+        return self._stream(request)
 
-    def open_stream(self, request: LLMRequest, stream: bool = True) -> CollectedLLMStream:
-        return CollectedLLMStream(lambda owner: self._stream(request, owner), raw_text=True)
-
-    async def _stream(self, request: LLMRequest, owner: CollectedLLMStream) -> AsyncIterator[LLMChunk]:
+    async def _stream(self, request: LLMRequest) -> AsyncIterator[LLMChunk]:
         payload = self._build_payload(request)
         headers = self._headers()
         url = f"{self._base_url}/v1/messages"
 
         produced = False  # 是否已向消费者吐过 chunk（流已开始）
         for attempt in range(self._max_http_retries):
-            state = owner.new_attempt()
+            state = begin_parsed_attempt()
             input_tokens: int | None = None
             cache_read = 0
             cache_write = 0

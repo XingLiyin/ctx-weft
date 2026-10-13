@@ -26,7 +26,7 @@ from datetime import timedelta
 from typing import Any
 
 from ctx_weft.core.assembler.assembler import ContextRequest
-from ctx_weft.providers.llm.stream import ensure_collected_stream
+from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (

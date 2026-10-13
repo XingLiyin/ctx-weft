@@ -52,7 +52,7 @@ from ctx_weft.core.utils.content import rehydrate_content, redact_content_for_ev
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.utils.estimate import dynamic_max_tokens, estimate_content_tokens, estimate_tool_calls_tokens
-from ctx_weft.providers.llm.stream import DelegatingLLMStream
+from ctx_weft.core.loop.llm_stream import DelegatingLLMStream
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
 

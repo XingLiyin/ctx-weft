@@ -9,28 +9,19 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from ctx_weft.protocols.llm import LLMChunk, LLMStream, LLMStreamResult, LLMUsage, ToolCall
-from ctx_weft.providers.llm.text_calls import ContentGate, clean_visible, merge_content
-
-
-class ReasoningCandidate:
-    """Existing non-delta compatibility rule, owned by the request state."""
-
-    def __init__(self) -> None:
-        self.held = ""
-        self.delta_seen = False
-
-    def observe(self, text: str) -> None:
-        if text and not self.delta_seen:
-            self.held = text if self.held and text.startswith(self.held) else self.held + text
-
-    def take(self) -> str:
-        text, self.held = self.held, ""
-        return text
+from ctx_weft.protocols.llm import (
+    LLMChunk,
+    LLMStream,
+    LLMStreamBuffers,
+    LLMStreamParser,
+    LLMStreamResult,
+    LLMUsage,
+    ToolCall,
+    stream_writer_context,
+)
 
 
 @dataclass(frozen=True)
@@ -45,54 +36,24 @@ class _Position:
 class StreamState:
     """The only mutable full-content owner for one underlying request attempt."""
 
-    def __init__(self, *, raw_text: bool = False) -> None:
-        self.raw_text = raw_text
-        self.content_text = ""
-        self.gate = ContentGate()
-        self.tool_buffers: dict[int, dict[str, Any]] = {}
-        self.reasoning_candidate = ReasoningCandidate()
+    def __init__(self) -> None:
+        self.buffers = LLMStreamBuffers()
+        self._parser: LLMStreamParser | None = None
+        self._extensions: dict[str, Any] = {}
         self._reasoning: list[tuple[int | None, str]] = []
-        self._thinking: dict[int, dict[str, Any]] = {}
         self._tools: list[ToolCall] = []
         self._delivered = _Position()
         self._accepted = _Position()
         self._final: LLMStreamResult | None = None
         self._closed_result: LLMStreamResult | None = None
 
-    def feed_text(self, text: str) -> str:
-        self.content_text = merge_content(self.content_text, text)
-        return self.gate.feed(self.content_text)
+    @property
+    def content_text(self) -> str:
+        return self.buffers.content_text
 
-    def feed_tool(
-        self,
-        index: int,
-        *,
-        call_id: str = "",
-        name: str = "",
-        arguments: str = "",
-        append_name: bool = False,
-        reset: bool = False,
-    ) -> None:
-        if reset:
-            self.tool_buffers[index] = {"id": "", "name": "", "arguments": ""}
-        buf = self.tool_buffers.setdefault(index, {"id": "", "name": "", "arguments": ""})
-        if call_id:
-            buf["id"] = call_id
-        if name:
-            buf["name"] = buf["name"] + name if append_name else name
-        if arguments:
-            buf["arguments"] = merge_content(buf["arguments"], arguments)
-
-    def start_thinking(self, index: int) -> None:
-        self._thinking[index] = {"signature": "", "closed": False}
-
-    def signature(self, index: int, signature: str) -> None:
-        if index in self._thinking:
-            self._thinking[index]["signature"] = signature
-
-    def stop_block(self, index: int) -> None:
-        if index in self._thinking:
-            self._thinking[index]["closed"] = True
+    @property
+    def tool_buffers(self) -> dict[int, dict[str, Any]]:
+        return self.buffers.tool_buffers
 
     def record(self, chunk: LLMChunk) -> None:
         p = self._delivered
@@ -104,8 +65,8 @@ class StreamState:
             p.finish_reason,
         )
         if chunk.kind == "token":
-            if not self.raw_text:
-                self.content_text += chunk.text
+            if self._parser is None:
+                self.buffers.content_text += chunk.text
             text += len(chunk.text)
         elif chunk.kind == "reasoning":
             index = getattr(chunk, "reasoning_index", None)
@@ -127,7 +88,7 @@ class StreamState:
         self._accepted = self._delivered
 
     def _result(self, position: _Position) -> LLMStreamResult:
-        visible = clean_visible(self.content_text) if self.raw_text else self.content_text
+        visible = self._parser.visible_text() if self._parser is not None else self.content_text
         remaining = position.reasoning
         parts: list[str] = []
         block_parts: dict[int, list[str]] = {}
@@ -144,31 +105,19 @@ class StreamState:
         single_block = len(block_parts) == 1 and all(
             index is not None for index, _ in self._reasoning
         )
-        blocks = [
-            {
-                "type": "thinking",
-                "thinking": reasoning_text
-                if single_block and index in block_parts
-                else "".join(block_parts.get(index, ())),
-                "signature": info["signature"],
-            }
-            for index, info in self._thinking.items()
-            if info["closed"] and info["signature"] and index not in incomplete
-        ]
+        reasoning_blocks = {
+            index: reasoning_text if single_block else "".join(parts)
+            for index, parts in block_parts.items()
+        }
+        tools = tuple(self._tools[: position.tools])
         provider_state = (
-            {
-                "anthropic": {
-                    "thinking_blocks": blocks,
-                    "tool_call_ids": tuple(tc.id for tc in self._tools[: position.tools]),
-                }
-            }
-            if blocks
-            else {}
+            self._parser.provider_state(reasoning_blocks, incomplete, tools)
+            if self._parser is not None else {}
         )
         return LLMStreamResult(
             text=visible[: position.text],
             reasoning=reasoning_text,
-            tool_calls=tuple(self._tools[: position.tools]),
+            tool_calls=tools,
             usage=position.usage or LLMUsage(),
             finish_reason=position.finish_reason,
             provider_state=provider_state,
@@ -202,12 +151,14 @@ class StreamState:
             self._release_buffers()
 
     def _release_buffers(self) -> None:
-        self.content_text = ""
+        self.buffers.content_text = ""
         self.tool_buffers.clear()
         self._reasoning.clear()
-        self._thinking.clear()
         self._tools.clear()
-        self.reasoning_candidate.held = ""
+        self._extensions.clear()
+        if self._parser is not None:
+            self._parser.release()
+            self._parser = None
 
     def get_final_result(self) -> LLMStreamResult:
         if self._final is None:
@@ -215,32 +166,29 @@ class StreamState:
         return self._final
 
 
-_CURRENT_STATE: ContextVar[StreamState | None] = ContextVar("llm_stream_state", default=None)
-
-
-def current_stream_state() -> StreamState | None:
-    """Compatibility transforms can use the current request's state, never adapter state."""
-    return _CURRENT_STATE.get()
-
-
 class CollectedLLMStream:
     def __init__(
         self,
         source: AsyncIterator[LLMChunk] | Callable[[CollectedLLMStream], AsyncIterator[LLMChunk]],
-        *,
-        raw_text: bool = False,
     ) -> None:
-        self.state = StreamState(raw_text=raw_text)
+        self.state = StreamState()
         self._source = source(self) if callable(source) else source
         self._finished = False
         self._closed = False
         self._reading = False
         self._read_task: asyncio.Task[Any] | None = None
 
-    def new_attempt(self) -> StreamState:
-        self.state = StreamState(raw_text=self.state.raw_text)
-        _CURRENT_STATE.set(self.state)
-        return self.state
+    def begin_attempt(self) -> LLMStreamBuffers:
+        self.state = StreamState()
+        return self.state.buffers
+
+    def attach_parser(self, parser: LLMStreamParser) -> None:
+        self.state._parser = parser
+
+    def extension(self, key: str, factory: Callable[[], Any]) -> Any:
+        if key not in self.state._extensions:
+            self.state._extensions[key] = factory()
+        return self.state._extensions[key]
 
     def __aiter__(self) -> CollectedLLMStream:
         return self
@@ -252,19 +200,18 @@ class CollectedLLMStream:
             raise RuntimeError("A model stream supports only one reader.")
         self._reading = True
         self._read_task = asyncio.current_task()
-        token = _CURRENT_STATE.set(self.state)
-        try:
-            chunk = await self._source.__anext__()
-            self.state.record(chunk)
-            return chunk
-        except StopAsyncIteration:
-            self._finished = True
-            self.state.finish()
-            raise
-        finally:
-            _CURRENT_STATE.reset(token)
-            self._reading = False
-            self._read_task = None
+        with stream_writer_context(self):
+            try:
+                chunk = await self._source.__anext__()
+                self.state.record(chunk)
+                return chunk
+            except StopAsyncIteration:
+                self._finished = True
+                self.state.finish()
+                raise
+            finally:
+                self._reading = False
+                self._read_task = None
 
     def accept_current(self) -> None:
         self.state.accept_current()
