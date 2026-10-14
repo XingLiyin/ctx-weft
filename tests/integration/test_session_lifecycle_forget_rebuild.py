@@ -160,8 +160,13 @@ async def test_rebuild_session_brings_it_back_without_running_anything():
     assert rt._agent_lifecycle_manager.has(aid)
     assert rt.get_agent(aid).status == "idle"
     assert [a.agent_id for a in rt.list_agents(session_id=sid)] == [aid]
-    # 只装填：不建 TaskManager、不派发。要续跑得另外走 recover_agent。
-    assert sid not in rt._task_managers, "rebuild_* 不建 TM、不 drain"
+    # 冷准备建立 owner，但不入队、不执行；真正激活留给输入交付或显式恢复。
+    tm = rt._task_managers[sid]
+    assert tm.get_task(tid).status == "FINISHED"
+    assert tm._queue.pending_count() == 0
+    assert tm.running_task_ids() == set()
+    assert rt._prepared_recoveries[sid][0] is tm
+    assert sid not in rt._step_executions, "冷准备不启动前后台 step"
 
     # 装填回来的 task 状态确实是终态（说明读的是事件日志，不是凭空造的）
     view = await rebuild_view(rt.event_store, sid)
@@ -436,17 +441,19 @@ async def test_a_forgotten_session_runs_a_full_new_round_end_to_end():
 
 async def test_forget_then_rebuild_then_send_also_runs():
     """host 可能先 `rebuild_session`（比如 `_root_agent_id` 那一步）再发消息——
-    装填过一次之后，`send_message` 走的是热路径（`record_of` 命中，不再自愈），
-    TM 那一半仍要由 `_start_task_for_agent` 的探测接住。"""
+    send_message 复用准备好的 owner，在输入交付后才激活任务。"""
     rt = _make_runtime()
     sid, aid, _ = await _run_one_round(rt)
     assert rt.forget_session(sid) is True
 
     assert await rt.rebuild_session(sid) == 1
     assert rt._agent_lifecycle_manager.has(aid)
-    assert sid not in rt._task_managers, "rebuild 不建 TM"
+    prepared_tm = rt._task_managers[sid]
+    assert prepared_tm._queue.pending_count() == 0
 
     handle = await rt.send_message(aid, "第二轮", session_id=sid)
+    assert rt._task_managers[sid] is prepared_tm
+    assert sid not in rt._prepared_recoveries
 
     async def _done() -> bool:
         view = await rebuild_view(rt.event_store, sid)
@@ -573,16 +580,19 @@ async def test_a_finished_session_is_not_settled():
     assert "AgentInterrupted" not in seen
 
 
-async def test_recover_agent_does_not_settle_before_running_it():
-    """分工：`rebuild_session` 装填 + 裁定（不跑）；`recover_agent` 装填 + 跑（不裁定）。
+async def test_recover_agent_cold_preparation_settles_without_starting_steps():
+    """recover_agent 的准备档也走统一冷装填，校准状态但不启动执行。"""
+    rt = _make_runtime()
+    sid, aid = "S_prepare", "agt_crashed"
+    await _seed_crashed_running(rt, sid, aid)
+    await rt._load_agents_of(sid)
+    assert rt.get_agent(aid).status == "running"
 
-    后者装填完立刻 restore + drain，agent 马上拿到真的 `AGENT_RUNNING`；在那之前插一条
-    `AgentInterrupted` 只会让宿主界面闪一下中断态。
-    """
-    import inspect
+    await rt.recover_agent(aid, keep_alive=True)
 
-    from ctx_weft.core.runtime import CtxWeftRuntime
-
-    src = inspect.getsource(CtxWeftRuntime._recover_session_locked)
-    assert "_settle_crashed_agents" not in src, "续跑路径不该裁定"
-    assert "_settle_crashed_agents" in inspect.getsource(CtxWeftRuntime.rebuild_session)
+    assert rt.get_agent(aid).status == "interrupted"
+    tm = rt._task_managers[sid]
+    assert rt._prepared_recoveries[sid][0] is tm
+    assert tm._queue.pending_count() == 0
+    assert tm.running_task_ids() == set()
+    assert sid not in rt._step_executions

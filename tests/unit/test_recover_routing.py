@@ -35,6 +35,7 @@ from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import HitlAsk, HitlReply, ToolResultDelivery
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -83,6 +84,7 @@ def _capture_interrupted_broadcast(runtime) -> list[str]:
 
 async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
     runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    runtime.providers.register_memory(InMemoryMemoryProvider())
     store = runtime.event_store
 
     # A: 有未解决 pending HITL，agent 崩溃前停在 waiting_human → 只装填 HitlRegistry，
@@ -143,6 +145,7 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
 async def test_recover_multi_hitl_partial_resolve_still_pending() -> None:
     """两个 pending、只解决一个 → 仍 pending → 重建剩余、重发 AGENT_WAITING_HUMAN 而非 interrupted。"""
     runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    runtime.providers.register_memory(InMemoryMemoryProvider())
     store = runtime.event_store
     await append_one(store, _ev(1, "M", EventType.SESSION_CREATED, template_id="t",
                             root_agent_id="agtM"))

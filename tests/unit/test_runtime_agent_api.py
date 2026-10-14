@@ -140,7 +140,7 @@ async def test_get_agent_unknown_raises():
 async def test_send_message_rejects_running_agent():
     """spec 4.1：忙碌直接报错，不排队。"""
     rt = _rt()
-    _plant(rt, "a1", None, status="running")
+    _plant_live_task(rt, "a1", "t1", task_status="ACTIVE", agent_status="running")
     with pytest.raises(AgentBusyError):
         await rt.send_message("a1", "hi")
 

@@ -233,6 +233,9 @@ def _recover_runtime_with_regression_guard():
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+    runtime.providers.register_memory(InMemoryMemoryProvider())
     signals: list = []
 
     async def _cap(ev):
@@ -362,6 +365,8 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     for e in seed:
         await append_one(runtime.event_store, e)
 
+    # 完整的热 owner 同时拥有 ALM 记录；rebuild 不再回放覆盖活 owner。
+    await runtime._load_agents_of("ses_1")
     await runtime.rebuild_session("ses_1")
     await runtime.recover_agent("agt_root")
     await asyncio.sleep(0)
@@ -388,6 +393,9 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+
+    runtime.providers.register_memory(InMemoryMemoryProvider())
 
     rebuild_calls: list = []
     import ctx_weft.core.control.reducers as _reducers

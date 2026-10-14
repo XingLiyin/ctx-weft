@@ -1,13 +1,4 @@
-"""终审 CRITICAL 1 回归：`send_message` 到一个只被 `recover()` 装填过 ALM、从没真正
-跑起来过（没有 TaskManager）的 agent，必须自愈建出 TM 并把消息塞进去，不是裸
-`KeyError`。
-
-复现手法照抄 `tests/unit/test_recover_loads_agents.py`：直接把最小事件集写进
-event store 再调 `recover()`，模拟「进程重启，这个 agent 在崩溃前就已经 idle，
-之后再也没被 `/resume` 或冷 HITL 应答碰过」——`recover()` 只装填
-`AgentLifecycleManager`（`_load_agents_of`），从不建 `_task_managers`（`recover()`
-自己的 docstring："这里 nothing drains/runs"）。
-"""
+"""冷准备后的 send_message：复用同一个 TaskManager，交付输入后再激活。"""
 
 from __future__ import annotations
 
@@ -49,13 +40,10 @@ async def _noop_drain(self) -> None:
     return None
 
 
-async def test_send_message_self_heals_a_cold_recovered_agents_missing_task_manager(
+async def test_send_message_reuses_a_cold_prepared_task_manager(
     monkeypatch,
 ) -> None:
-    """seed SESSION_CREATED + AGENT_INSTANTIATED + AGENT_IDLE for "agt_1" in session "A";
-    recover() 装填 ALM 但不建 TM; send_message("agt_1", "hi") 此前会撞见裸
-    ``KeyError: 'A'``——现在必须成功返回一个可用的 TurnHandle，且自愈建出的 TM
-    真的挂进了 `_task_managers`。"""
+    """冷准备建立 owner，send_message 必须复用它并在输入交付后激活。"""
     monkeypatch.setattr(TaskManager, "drain", _noop_drain)  # 不真的派发到 LLM
 
     rt = _runtime_with_registered_template()
@@ -69,14 +57,17 @@ async def test_send_message_self_heals_a_cold_recovered_agents_missing_task_mana
     n = await rebuild_all_active(rt)
     assert n == 1
     assert {a.agent_id for a in rt.list_agents()} == {aid}
-    assert sid not in rt._task_managers, "recover() 不该建 TM——这是本 bug 的前提条件"
+    prepared_tm = rt._task_managers[sid]
+    assert not prepared_tm._queue.has_pending()
+    assert rt._prepared_recoveries[sid][0] is prepared_tm
 
     handle = await rt.send_message(aid, "hi")
 
     assert handle.agent_id == aid
     assert handle.session_id == sid
     assert handle.task_id
-    assert sid in rt._task_managers, "send_message 必须自愈建出并保留一个活的 TM"
+    assert rt._task_managers[sid] is prepared_tm
+    assert sid not in rt._prepared_recoveries
     tm = rt._task_managers[sid]
     assert tm.get_task(handle.task_id) is not None
     assert tm.get_task(handle.task_id).status not in ("FINISHED", "FAILED", "CANCELED")
@@ -99,7 +90,7 @@ async def test_send_message_fast_path_does_not_rebuild_when_session_already_live
     await append_one(rt.event_store, _ev(3, sid, EventType.AGENT_IDLE, agent_id=aid))
     await rebuild_all_active(rt)
 
-    # 先自愈一次，把 TM 建起来、留活。
+    # 先交付一条消息，激活已准备的 TM。
     first = await rt.send_message(aid, "hi")
     tm = rt._task_managers[sid]
     # 模拟这条消息对应的 task 已经跑完终态——下一条消息会再次落到

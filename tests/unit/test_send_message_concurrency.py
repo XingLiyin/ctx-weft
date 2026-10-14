@@ -1,10 +1,8 @@
 """回归：并发 `send_message` 撞上「ALM 有 record、TaskManager 没了」时，不得重建出
 第二个 TaskManager 顶替第一个。
 
-`_start_task_for_agent` 探到 `tm is None` 会调 `recover_agent(keep_alive=True)`。
-`recover_agent` 拿 per-session 锁串行化，但 `_recover_session_locked` 的「复用活
-owner」快路径此前要求 `resumed_task_id is not None`——而 `keep_alive` 这条路径恒为
-None，于是第二个调用即便在锁内看见第一个刚建好的活 TM，也照样再建一个顶掉它。
+send_message 在判断任务状态前通过 rebuild_session 准备 owner。
+per-session 锁串行化准备过程；第二个调用必须复用第一个刚建好的活 TM。
 
 顶替之后，第一个调用手上的 `tm` 局部变量指向已被顶替的 TM_A（`is_current()` 为
 False）：它 push 进去的 task 不会被派发，`drain()` 也被 `_is_current` 守卫挡住。
@@ -12,7 +10,7 @@ False）：它 push 进去的 task 不会被派发，`drain()` 也被 `_is_curre
 （`running_task_ids()`），刚 push 还没派发的不在里面。
 
 复现要点：纯内存 provider 下所有 await 都同步完成，`gather` 的第一个协程会一口气
-跑完、根本不交错。真实部署里 `_recover_session_locked`（读事件库重建投影）和
+跑完、根本不交错。真实部署里 `_rebuild_session_locked`（读事件库重建投影）和
 `_validate_and_normalize_content`（内容校验/外部化，带图时还要写 blob store）都是
 真 IO。测试在这两处各插一个让出点，把那个真实的交错还原出来。
 """
@@ -27,7 +25,6 @@ from ctx_weft.protocols.events import Event, EventType
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider, make_echo_template, make_runtime,
 )
-from tests.unit._legacy_recover import rebuild_all_active
 from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
@@ -43,16 +40,14 @@ def _ev(seq, sid, type_, *, agent_id=None, task_id=None, **payload):
 
 
 async def _seed_idle_agent(rt, sid: str, aid: str) -> None:
-    """最小事件集 + `recover()`：装填 ALM 但**不建 TM**（`recover()` 自己的纪律：
-    "startup runs nothing"）——即「agent 在、TM 不在」这个状态，与会话跑完被
-    `_release_session` 回收后的状态同形。"""
+    """只预置 ALM，模拟并发 send_message 都需要建立冷 owner 的入口。"""
     await append_one(rt.event_store, _ev(1, sid, EventType.SESSION_CREATED,
                                     template_id="agent:tpl_echo", root_agent_id=aid))
     await append_one(rt.event_store, _ev(2, sid, EventType.AGENT_INSTANTIATED, agent_id=aid,
                                     template_id="agent:tpl_echo"))
     await append_one(rt.event_store, _ev(3, sid, EventType.AGENT_IDLE, agent_id=aid))
-    await rebuild_all_active(rt)
-    assert sid not in rt._task_managers, "前提条件：recover() 不该建 TM"
+    await rt._load_agents_of(sid)
+    assert sid not in rt._task_managers
 
 
 async def test_concurrent_send_message_does_not_supersede_the_task_manager(monkeypatch):
@@ -65,11 +60,11 @@ async def test_concurrent_send_message_does_not_supersede_the_task_manager(monke
     monkeypatch.setattr(TaskManager, "drain", _noop_drain)
 
     # 让出点①：重建时读事件库
-    orig_locked = CtxWeftRuntime._recover_session_locked
+    orig_locked = CtxWeftRuntime._rebuild_session_locked
     async def _slow_locked(self, session_id, **kw):
         await asyncio.sleep(0)
         return await orig_locked(self, session_id, **kw)
-    monkeypatch.setattr(CtxWeftRuntime, "_recover_session_locked", _slow_locked)
+    monkeypatch.setattr(CtxWeftRuntime, "_rebuild_session_locked", _slow_locked)
 
     # 让出点②：push 之前的内容校验/外部化。第一条多等一会儿，确保第二条的重建
     # （含读事件库）完整跑完——这正是「push 落到已被顶替的 TM 上」那个最坏交错。
@@ -90,9 +85,9 @@ async def test_concurrent_send_message_does_not_supersede_the_task_manager(monke
 
     built: list[int] = []
     orig_reg = CtxWeftRuntime._register_and_drain
-    def _spy(self, session, tm):
+    def _spy(self, session, tm, **kwargs):
         built.append(id(tm))
-        return orig_reg(self, session, tm)
+        return orig_reg(self, session, tm, **kwargs)
     monkeypatch.setattr(CtxWeftRuntime, "_register_and_drain", _spy)
 
     h1, h2 = await asyncio.gather(

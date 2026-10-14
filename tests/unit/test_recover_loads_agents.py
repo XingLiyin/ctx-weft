@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import pytest
 
 from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.unit._legacy_recover import rebuild_all_active
 from tests._event_helpers import append_one
@@ -49,6 +50,7 @@ async def _seed_crashed_session(store, sid: str, root_agent_id: str) -> None:
 async def test_recover_populates_agent_registry() -> None:
     """核心回归：重启后 list_agents 立刻看得见，不必等某条冷应答。"""
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    rt.providers.register_memory(InMemoryMemoryProvider())
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
 
     assert rt.list_agents(session_id="S1") == []      # 装填前
@@ -64,6 +66,7 @@ async def test_recover_returns_agent_count_not_session_count() -> None:
     agent 总数 3 与 session 数 2 刻意不相等，防止巧合数值让断言退化成没意义的检查。
     """
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    rt.providers.register_memory(InMemoryMemoryProvider())
     store = rt.event_store
     await _seed_crashed_session(store, "S1", "agt_root_1")
     await _seed_crashed_session(store, "S2", "agt_root_2")
@@ -79,6 +82,7 @@ async def test_recover_returns_agent_count_not_session_count() -> None:
 
 async def test_get_agent_works_right_after_recover() -> None:
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    rt.providers.register_memory(InMemoryMemoryProvider())
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
     await rebuild_all_active(rt)
     d = rt.get_agent("agt_root")
@@ -93,6 +97,7 @@ async def test_load_broadcasts_current_status() -> None:
         seen.append(ev)
 
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    rt.providers.register_memory(InMemoryMemoryProvider())
     rt.event_bus.subscribe(None, recorder)
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
 
@@ -107,6 +112,7 @@ async def test_load_broadcasts_current_status() -> None:
 async def test_broadcast_carries_the_folded_status_not_a_default() -> None:
     """有未决 HITL 的 agent 恢复后必须是 waiting_human，不是被字段默认值重置成 idle。"""
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    rt.providers.register_memory(InMemoryMemoryProvider())
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
     await rebuild_all_active(rt)
     assert rt.get_agent("agt_root").status == "waiting_human"
@@ -134,6 +140,7 @@ async def test_crashed_running_is_settled_to_interrupted_and_terminated_stays_si
         seen.append(ev)
 
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    rt.providers.register_memory(InMemoryMemoryProvider())
     rt.event_bus.subscribe(None, recorder)
     store = rt.event_store
     await _seed_crashed_session(store, "S1", "agt_root")
@@ -184,6 +191,7 @@ async def test_no_task_queue_events_are_emitted() -> None:
         seen.append(ev)
 
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
+    rt.providers.register_memory(InMemoryMemoryProvider())
     rt.event_bus.subscribe(None, recorder)
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
 

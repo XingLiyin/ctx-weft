@@ -227,7 +227,7 @@ def _legacy_answered_user_turn() -> list[Event]:
 # ── runtime 装配 ────────────────────────────────────────────────────────────
 
 
-async def _runtime_with_events(events, *, event_blob_store=None):
+async def _runtime_with_events(events, *, event_blob_store=None, prepare=True):
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
@@ -254,10 +254,13 @@ async def _runtime_with_events(events, *, event_blob_store=None):
         await append_one(rt.event_store, e)
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，从前那条「按 agent 扫全部 active session」的 sweep 已删）。
-    # 这里补的正是宿主的真实第一步（`ensure_core_warm` → `rebuild_session`），结果与
-    # 从前 core 替调用方扫出来的等价，只是明说了是哪条会话。**只喂内存，不建 TM、
-    # 不跑任何东西**，所以下面每条用例要验的恢复语义一点没被提前执行。
-    await rt.rebuild_session(SID)
+    # 宿主的第一步是 ensure_core_warm → rebuild_session。
+    # 冷准备会建立 TM，但不执行；手工构造热 owner 的测试只需预置 ALM 和 HITL。
+    if prepare:
+        await rt.rebuild_session(SID)
+    else:
+        await rt._load_agents_of(SID)
+        await rt.rebuild_hitl(SID)
     rt._test_llm = llm
     return rt
 
@@ -586,7 +589,7 @@ async def test_resume_on_a_live_owner_neither_rebuilds_nor_backfills():
     from ctx_weft.core.orchestrator.task.manager import TaskManager
     from tests.unit._stub_runner import StubRunner
 
-    rt = await _runtime_with_events(_resolved_user_turn_never_injected())
+    rt = await _runtime_with_events(_resolved_user_turn_never_injected(), prepare=False)
     live = TaskManager(session_id=SID, event_bus=rt.event_bus, max_concurrent=1)
     live.set_session(Session(id=SID, tenant_id="default", user_prompt="do it",
                              status="RUNNING", root_agent_id=AID, token_budget=0))
