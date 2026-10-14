@@ -1,0 +1,5 @@
+{% if role_section %}{{ role_section }}
+
+---
+
+{% endif %}现在为这个任务设定元数据：调用 `{{ update_task_metadata }}` 恰好一次。`title` 与 `description` 两项**必填且不得为空**——即使指令很短或含糊，也要据现有信息给出尽力而为的值，绝不要传空字符串。只有在方向已经明确时才补 `session_goal`（它是唯一可留空的字段）。然后就停下，不要再调别的工具。

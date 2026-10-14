@@ -4,16 +4,22 @@ version = "0.1.0"
 description = "Protocol-based Agent Runtime Core: Knowledge / Memory / Capability."
 requires-python = ">=3.11"
 dependencies = [
+    "jinja2>=3.1",
     "jsonschema>=4.0",
     "mcp>=1.27.2",
     "python-ulid>=2.0",
+    # agent template 的 frontmatter 解析（providers/agent_template_local）。基础依赖而非
+    # extra：模板加载是「几乎每个部署都要」的那一类，而此前它靠一个手写的 YAML 子集解析器
+    # 撑着，失败形态是**静默解析错**——`#` 注释会吃掉下一个列表项、行尾注释会并进值、
+    # `false` 解析成字符串 `"false"`（于是 `bool()` 判真）。那种错比缺一个依赖危险得多。
+    "pyyaml>=6.0",
     "typing-extensions>=4.0",
 ]
 
 [project.optional-dependencies]
 builtin = ["httpx>=0.27", "psutil>=5.9.0"]
 mcp     = ["httpx>=0.27", "mcp>=1.27.1"]
-skills  = ["httpx>=0.27", "psutil>=5.9.0", "pyyaml>=6.0"]
+skills  = ["httpx>=0.27", "psutil>=5.9.0"]
 llm     = ["httpx>=0.27"]
 sql     = ["sqlalchemy>=2.0", "aiosqlite>=0.19"]
 dev     = [

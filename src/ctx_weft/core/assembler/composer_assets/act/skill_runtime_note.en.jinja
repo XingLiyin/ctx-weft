@@ -1,0 +1,2 @@
+---
+**Runtime note (overrides any 'run python ...' wording above):** This skill's files are NOT in your working directory. To run ANY script the instructions reference, you MUST call the `{{ exec_script }}` tool — e.g. `{{ exec_script }}(script_path='scripts/foo.py', args='...')` — never run `python scripts/foo.py` yourself (the path will not resolve). To read a skill file use `{{ read_file }}`; to list skill files use `{{ list_files }}`. Do not build absolute paths by hand. Applies to local and remote skills alike.

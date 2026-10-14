@@ -244,11 +244,11 @@ class _PlaceholderReadingLLM:
         if "control__update_task_metadata" in _tool_names(payload):  # recognize_intent 旁路快照
             self.calls.append("intent")
             return "", []
-        if "control__report_task_outcome" in _tool_names(payload):
+        if "control__report_observation" in _tool_names(payload):
             # 判定回合。2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），而
             # verdict 缺失 ≡ retry——不应这一轮，task 停在 AWAITING_HUMAN，等终态的用例超时。
             self.calls.append("observe")
-            return "", [ToolCall(id=self._tid(), name="control__report_task_outcome",
+            return "", [ToolCall(id=self._tid(), name="control__report_observation",
                                  arguments={"task_status": "success", "act_recap": "seg",
                                             "task_summary": "ok"})]
         pending = [r for r in _refs_offered(payload) if r not in self.asked]

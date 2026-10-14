@@ -2,10 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.assembler.composer import (
-    DefaultComposer, _AGENT_COMPACTION_INSTRUCTION, _COMPACTION_INSTRUCTION,
-)
 from ctx_weft.core.assembler.assembler import ContextBlock
+from ctx_weft.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.prompts import BLOCK_FALLBACK, connector
 from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -40,22 +39,33 @@ async def _last_user(scope):
     return content_to_text([m for m in prompt.messages if m.role == "user"][-1].content)
 
 
+_ROLE = "## Your Current Role\n\nCOMPACTOR"
+_TASK_PROMPT = connector("compact.prompt.task", role_section=_ROLE)
+_AGENT_PROMPT = connector("compact.prompt.agent", role_section=_ROLE)
+
+
 async def test_task_scope_uses_task_cue():
     text = await _last_user("task")
-    assert _COMPACTION_INSTRUCTION in text
-    assert _AGENT_COMPACTION_INSTRUCTION not in text
+    assert _TASK_PROMPT in text
+    assert _AGENT_PROMPT not in text
 
 
 async def test_agent_scope_uses_agent_cue():
     text = await _last_user("agent")
-    assert _AGENT_COMPACTION_INSTRUCTION in text
-    assert _COMPACTION_INSTRUCTION not in text
+    assert _AGENT_PROMPT in text
+    assert _TASK_PROMPT not in text
 
 
 async def test_default_scope_is_task():
     text = await _last_user(None)
-    assert _COMPACTION_INSTRUCTION in text
-    assert _AGENT_COMPACTION_INSTRUCTION not in text
+    assert _TASK_PROMPT in text
+    assert _AGENT_PROMPT not in text
+
+
+async def test_missing_compact_facet_uses_the_core_compaction_fallback():
+    prompt = await DefaultComposer().compose([_user("do X")], _req("task"))
+    last = content_to_text([m for m in prompt.messages if m.role == "user"][-1].content)
+    assert BLOCK_FALLBACK["compact"] in last
 
 
 async def test_summarize_for_compact_threads_scope(monkeypatch):

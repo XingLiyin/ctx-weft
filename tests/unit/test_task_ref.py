@@ -9,11 +9,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.assembler import ContextBlock
-from ctx_weft.core.loop.steps.act_guidance import build_act_guidance, build_resume_cue
+from ctx_weft.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.composer_guidance import build_act_guidance, build_resume_cue
 from ctx_weft.core.utils.task_ref import task_ref, task_ref_parts
-
 
 # ── 规范形式 ─────────────────────────────────────────────────────────────────
 

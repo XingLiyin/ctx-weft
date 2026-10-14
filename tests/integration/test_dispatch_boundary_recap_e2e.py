@@ -28,14 +28,10 @@ pytestmark = pytest.mark.asyncio
 
 
 def _is_background_recap(request) -> bool:
-    """只摘要那一档后台 observe 的判据：**工具名**。
-
-    2026-09-22 到 2026-09-28 之间两档共用 `report_task_outcome`，工具名分流失效，这里曾改成嗅
-    cue 开头那句「Status of the current task:」。现在 `collect_process_report` 拆回真工具
-    （判定档桌上才有判决工具），判据回到工具名——比嗅文案稳得多。
-    """
-    names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
-    return "control__collect_process_report" in names
+    """Both modes advertise one tool; only judging prompts require task_status."""
+    names = {t.name for t in request.tools}
+    text = "\n".join(str(m.content) for m in request.messages)
+    return "control__report_observation" in names and "`task_status`" not in text
 
 class _RouterLLM(MockLLMAdapter):
     """按 request.tools 路由；act 次序：root delegate → child finish → root finish。"""
@@ -61,13 +57,13 @@ class _RouterLLM(MockLLMAdapter):
             self._bg_calls += 1
             report = "DISPATCH段摘要" if self._bg_calls == 1 else "CLOSE复述"
             return self._stream(MockResponse(tool_calls=[
-                ToolCall(id=self._id("bg"), name="control__collect_process_report",
+                ToolCall(id=self._id("bg"), name="control__report_observation",
                          arguments={"act_recap": report, "task_summary": report}),
             ]), request)
 
-        if "control__report_task_outcome" in names:  # 判定档（这里只有子任务的前台 LLM observe）
+        if "control__report_observation" in names:  # 判定档（这里只有子任务的前台 LLM observe）
             return self._stream(MockResponse(tool_calls=[
-                ToolCall(id=self._id("obs"), name="control__report_task_outcome",
+                ToolCall(id=self._id("obs"), name="control__report_observation",
                          arguments={"task_status": "success",
                                     "act_recap": "done",
                                     "task_summary": "done"}),
@@ -82,7 +78,7 @@ class _RouterLLM(MockLLMAdapter):
                                     "task_prompt": "do the delegated work"}),
             ]), request)
         # 子任务 act 与 root resume 后的 act：finish（text=收尾正文，落 task.outputs——
-        # 子任务走 LLM observe，report_task_outcome 的 success 护栏要求 task.outputs 非空）
+        # 子任务走 LLM observe，report_observation 的 success 护栏要求 task.outputs 非空）
         return self._stream(MockResponse(text="done", tool_calls=[
             ToolCall(id=self._id("fin"), name="control__finish_task",
                      arguments={"deliverables_summary": "done"}),

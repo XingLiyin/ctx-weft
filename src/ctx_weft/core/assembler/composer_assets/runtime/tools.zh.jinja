@@ -1,0 +1,42 @@
+{# 工具调用和结果包装；capability_gateway / act / observing 使用。工具自身的正文不在这里。
+每个具名 macro 是一个独立事件提示，参数就是输入契约；文件本身不整段发送。 #}
+
+{% macro unknown_tool(tool) -%}
+[错误：未知工具“{{ tool }}”]
+{%- endmacro %}
+
+{% macro provider_missing(capability) -%}
+[错误：找不到能力“{{ capability }}”对应的 provider]
+{%- endmacro %}
+
+{% macro gateway_missing(tool) -%}
+[错误：未配置 CapabilityGateway，已跳过工具“{{ tool }}”]
+{%- endmacro %}
+
+{% macro invalid_json_args(excerpt, tool) -%}
+[错误：工具“{{ tool }}”的参数无效：参数不是可解析的合法 JSON。你发送的是：{{ excerpt }}——请使用格式正确的 JSON 参数对象重新调用]
+{%- endmacro %}
+
+{% macro invalid_arguments(error, tool) -%}
+[错误：工具“{{ tool }}”的参数无效：{{ error }}]
+{%- endmacro %}
+
+{% macro tool_stream_error(code, message) -%}
+[错误 {{ code }}：{{ message }}]
+{%- endmacro %}
+
+{% macro tool_output_truncated(head, original_length, recovery, tail, threshold) -%}
+[工具输出已截断：{{ original_length }} 个字符超过 {{ threshold }} 字符限制。{{ recovery }}]
+--- 预览（前 {{ head | length }} 个字符）---
+{{ head }}{% if tail %}
+--- 末尾（后 {{ tail | length }} 个字符）---
+{{ tail }}{% endif %}
+{%- endmacro %}
+
+{% macro spill_unrecoverable() -%}
+完整文本无法恢复（未配置 spill sink，或写入失败）——以下内容是仅存部分。
+{%- endmacro %}
+
+{% macro no_output() -%}
+（没有输出）
+{%- endmacro %}

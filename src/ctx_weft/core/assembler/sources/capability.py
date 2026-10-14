@@ -6,8 +6,9 @@
 
 三路最终都由 composer 渲染进 "## Capabilities" 段、拼到**末条 user message 尾部**
 （所有 purpose 一致；不进 system——见 composer.py 槽位总览）。
-purpose 门控：三类能力都按 cap.purposes 过滤；skill/agent 默认 purposes=["act"]，
-故 observe / compact / recognize_intent 看不到 Skills / Sub-Agents 段。
+能力门控：Composer definition 先映射到兼容 capability purpose，三类能力都按 cap.purposes
+过滤；skill/agent 默认 purposes=["act"]，
+故所有非 act purpose 都看不到 Skills / Sub-Agents 段。
 """
 
 from __future__ import annotations
@@ -67,12 +68,16 @@ class CapabilitySource:
         tools: list[ToolCapability] = []
         skills: list[SkillCapability] = []
         agents: list[AgentCapability] = []
+        from ctx_weft.core.assembler.request_policy import capability_purpose_for_request
+
+        capability_purpose = capability_purpose_for_request(request)
 
         for cap in request.bound_capabilities:
-            # purpose 门控对三类能力一致：tool / skill / agent 都按 cap.purposes 过滤。
+            # definition 导出的 capability purpose 对三类能力一致：tool / skill / agent 都按
+            # cap.purposes 过滤。
             # skill / agent 默认 purposes=["act"]（委派只发生在 act），故 observe / compact /
             # recognize_intent 不再看到 "Available Skills" / "Available Sub-Agents"。
-            if request.purpose not in cap.purposes:
+            if capability_purpose not in cap.purposes:
                 continue
             if isinstance(cap, ToolCapability):
                 tools.append(cap)
@@ -94,7 +99,7 @@ class CapabilitySource:
 
         # metadata["llm_tool"] 仍随块携带（qualified 名的既有断言点在读它），但它不再是
         # AssembledPrompt.tools 的来源——工具面已改由 cache 现算（见 build_llm_tools 文档）。
-        llm_tool_by_name = {t.name: t for t in build_llm_tools(tools, request.purpose)}
+        llm_tool_by_name = {t.name: t for t in build_llm_tools(tools, capability_purpose)}
 
         for cap in tools:
             qname = qualify(cap.id)

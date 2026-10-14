@@ -1,8 +1,4 @@
-"""IdentitySource：background_observe facet 缺失 → 回退 observe（ROLE.md）→ 到此为止。
-
-observe 家族（observe / background_observe / background_recap）**不回退 act**
-（2026-09-28）：见 `sources/identity.py::_OBSERVE_PURPOSES`。其余 purpose 照旧回退。
-"""
+"""Identity facets depend on observation judgement, never execution channel."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -20,8 +16,8 @@ def _template(identity: dict):
     return SimpleNamespace(id="tpl", version="1", identity=identity)
 
 
-def _req(purpose, template):
-    return SimpleNamespace(purpose=purpose, template=template, extra={}, token_counter=estimate_tokens)
+def _req(purpose, template, judge_task=True):
+    return SimpleNamespace(purpose=purpose, template=template, extra={"judge_task": judge_task}, token_counter=estimate_tokens)
 
 
 async def _facets(req):
@@ -31,30 +27,38 @@ async def _facets(req):
 @pytest.mark.asyncio
 async def test_background_observe_falls_back_to_observe():
     tpl = _template({"act": _facet("SOUL"), "observe": _facet("ROLE-OBSERVE")})
-    blocks = await _facets(_req("background_observe", tpl))
+    blocks = await _facets(_req("observe", tpl))
     assert blocks[0].content == "ROLE-OBSERVE"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("purpose", ["observe", "background_observe", "background_recap"])
-async def test_observe_family_does_not_fall_back_to_act(purpose):
-    """没有 ROLE 就是没有 observer——不拿 actor 的 SOUL 冒充一个。"""
+async def test_background_recap_falls_back_to_compact():
+    tpl = _template({"act": _facet("SOUL"), "observe": _facet("ROLE"),
+                     "compact": _facet("COMPACT-RECAP")})
+    blocks = await _facets(_req("observe", tpl, judge_task=False))
+    assert blocks[0].content == "COMPACT-RECAP"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "purpose", ["observe", "compact"])
+async def test_observe_and_compact_purposes_do_not_fall_back_to_act(purpose):
+    """没有专属块就不产 identity——不拿 actor 的 SOUL 冒充 observer/压缩纪律。"""
     tpl = _template({"act": _facet("SOUL")})
     assert await _facets(_req(purpose, tpl)) == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("purpose", ["compact", "recognize_intent"])
-async def test_the_actors_own_purposes_still_fall_back_to_act(purpose):
-    """压自己的对话、认自己的意图——拿 SOUL 当人格是对的。"""
+async def test_recognize_intent_still_falls_back_to_act():
+    """给自己的任务命名仍可拿 SOUL 当人格。"""
     tpl = _template({"act": _facet("SOUL")})
-    blocks = await _facets(_req(purpose, tpl))
+    blocks = await _facets(_req("recognize_intent", tpl))
     assert blocks[0].content == "SOUL"
 
 
 @pytest.mark.asyncio
-async def test_background_observe_prefers_own_facet():
+async def test_unused_facet_cannot_override_observe():
     tpl = _template({"act": _facet("SOUL"), "observe": _facet("ROLE"),
-                     "background_observe": _facet("BG")})
-    blocks = await _facets(_req("background_observe", tpl))
-    assert blocks[0].content == "BG"
+                     "unused": _facet("BG")})
+    blocks = await _facets(_req("observe", tpl))
+    assert blocks[0].content == "ROLE"

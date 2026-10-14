@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from tests.step_helpers import patch_observe_start
 
 import ctx_weft.core.runtime as rt_mod
 from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
@@ -121,7 +122,7 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
         launched["boundary"] = boundary
         return asyncio.create_task(asyncio.sleep(0))
 
-    monkeypatch.setattr(rt_mod, "launch_recap", _fake_launch, raising=False)
+    patch_observe_start(monkeypatch, _fake_launch)
 
     await runtime._relaunch_task_recap(
         session=session, task_manager=task_manager,
@@ -194,7 +195,7 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
         launched["boundary"] = boundary
         return asyncio.create_task(asyncio.sleep(0))
 
-    monkeypatch.setattr(rt_mod, "launch_recap", _fake_launch, raising=False)
+    patch_observe_start(monkeypatch, _fake_launch)
 
     await runtime._relaunch_task_recap(
         session=session, task_manager=task_manager,

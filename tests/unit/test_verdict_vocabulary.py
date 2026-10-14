@@ -11,7 +11,7 @@
 `task_failure_reason` 对 `retry` 曾是必填，一个正常的提问没有 blocker，要么编一个、要么换个
 status。判 success 的代价是实打实的：task 就此终结，用户正要说的那一轮被丢掉。
 
-纯文本 park 这条路上**没有机械护栏**能挡住它：`report_task_outcome` 那道
+纯文本 park 这条路上**没有机械护栏**能挡住它：`report_observation` 那道
 success-without-outputs 护栏读 `task.outputs`，而 park 前合成的 outputs 正是那段提问本身、非空
 ——护栏原地失效（本文件最后一条钉住这个事实，免得有人以为还有一层保险）。
 
@@ -29,7 +29,8 @@ import logging
 
 import pytest
 
-from ctx_weft.core.capabilities.control_tools import ControlContext, report_task_outcome
+from ctx_weft.core.capabilities.control_tools import ControlContext
+from tests.unit.observation_helpers import submit_and_apply
 from ctx_weft.core.models.task import Task
 from ctx_weft.core.orchestrator.task.disposition import (
     RunOutcome,
@@ -141,14 +142,14 @@ def test_an_unknown_verdict_never_kills_the_task(raw: object) -> None:
 
 def test_the_tool_normalizes_retry_to_continue() -> None:
     t = _task(outputs="partial")
-    res = report_task_outcome(task_status="retry", act_recap="还差一步", ctx=_ctx(t))
+    res = submit_and_apply(task_status="retry", act_recap="还差一步", ctx=_ctx(t))
     assert t.observer_outcome == VERDICT_CONTINUE
     assert res.metadata["observer_outcome"] == VERDICT_CONTINUE
 
 
 def test_the_tool_normalizes_garbage_to_continue() -> None:
     t = _task(outputs="partial")
-    report_task_outcome(task_status="mostly done?", act_recap="r", ctx=_ctx(t))
+    submit_and_apply(task_status="mostly done?", act_recap="r", ctx=_ctx(t))
     assert t.observer_outcome == VERDICT_CONTINUE
 
 
@@ -159,7 +160,7 @@ def test_a_continue_verdict_needs_no_failure_reason() -> None:
     字段就只能编。空着不得引起降级、不得写脏 task.error。
     """
     t = _task(outputs="一段提问")
-    report_task_outcome(task_status=VERDICT_CONTINUE, act_recap="在等用户回答", ctx=_ctx(t))
+    submit_and_apply(task_status=VERDICT_CONTINUE, act_recap="在等用户回答", ctx=_ctx(t))
     assert t.observer_outcome == VERDICT_CONTINUE
     assert t.error is None, "没有受阻原因时不该在 task 上留下空的死因"
 
@@ -178,18 +179,18 @@ def test_the_no_outputs_guard_cannot_catch_a_question() -> None:
     cue 的边界提醒）保证。谁将来想省掉那几段文案，先看这条测试。
     """
     asking = _task(outputs="这两个方案你想选哪个？")
-    report_task_outcome(task_status=VERDICT_SUCCESS, act_recap="问了用户", ctx=_ctx(asking))
+    submit_and_apply(task_status=VERDICT_SUCCESS, act_recap="问了用户", ctx=_ctx(asking))
     assert asking.observer_outcome == VERDICT_SUCCESS, (
         "护栏若在此触发，说明它的判据变了——这条测试的前提（只靠 prompt）要重估")
 
     # 对照：真的没有产出时，护栏照旧把 success 降成 continue。
     empty = _task(outputs=None)
-    report_task_outcome(task_status=VERDICT_SUCCESS, act_recap="什么也没产出", ctx=_ctx(empty))
+    submit_and_apply(task_status=VERDICT_SUCCESS, act_recap="什么也没产出", ctx=_ctx(empty))
     assert empty.observer_outcome == VERDICT_CONTINUE
 
 
 def test_the_guard_downgrades_to_continue_not_to_retry() -> None:
     t = _task(outputs=None)
-    res = report_task_outcome(task_status=VERDICT_SUCCESS, act_recap="r", ctx=_ctx(t))
+    res = submit_and_apply(task_status=VERDICT_SUCCESS, act_recap="r", ctx=_ctx(t))
     assert res.metadata["observer_outcome"] == VERDICT_CONTINUE
     assert "retry" not in res.content, f"确认话术里不该再出现旧词：{res.content!r}"

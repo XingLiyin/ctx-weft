@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from ctx_weft.core.control.tokens import CancelToken, PauseToken
-from ctx_weft.core.loop.park import HitlPark
+from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.loop.steps.act import INTERRUPTED_MARK, ActStep, interrupt_edit_note
 from ctx_weft.protocols import LLMChunk, MemoryEventType
 from ctx_weft.protocols.hitl import (

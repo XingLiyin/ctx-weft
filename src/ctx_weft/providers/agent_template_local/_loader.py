@@ -37,6 +37,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from ctx_weft.protocols.template import (
     AgentTemplate,
     CapabilityRef,
@@ -139,13 +141,35 @@ class TemplateLoader:
 # ── 解析工具 ──────────────────────────────────────────────────────────────────
 
 def _parse_md(content: str) -> tuple[dict[str, Any], str]:
-    """分离 YAML frontmatter 和 body 文本。"""
+    """分离 YAML frontmatter 和 body 文本。
+
+    frontmatter 走 `yaml.safe_load`（2026-10-09）。此前是一个手写的 YAML 子集解析器，
+    从 host 上移 loader 时一起带过来的，**没有任何地方写过为什么手写**。它的问题不是
+    「支持的语法少」，而是不支持的语法一律**静默解析错**：
+
+      - `#` 注释行会把紧随其后的列表项吃掉（ROLE.md 的 `required:` 里加一行注释，
+        `report_observation` 就此消失，只摘要档没有 terminal tool 可调）；
+      - 行尾注释并进值（`name: default  # 默认` → agent 名字带上注释）；
+      - 行内列表 `tools: [a, b]` 变成一个字符串，整条 tools 失效；
+      - 一切标量都是 str，于是 `use_long_term: false` → `"false"` → `bool()` 判真，
+        那个配置项**一直是失效的**。
+
+    换掉之前对两仓现存的 24 个 facet 文件做过比对：PyYAML 一个都解析不了的是 0 个，唯一
+    差异是 `mcp_servers:` 空值（`''` vs `None`），而 loader 不读它。
+
+    **解析失败直接抛**（不回落空 dict）：frontmatter 坏了意味着 name/version/tools 全部
+    丢失，静默当成「没有配置」比报错危险。`TemplateLoader.scan` 已经 per-template 捕获并
+    `logger.exception`，所以一个坏模板只会被跳过，不会拖垮运行时。
+    """
     if not content.startswith("---"):
         return {}, content.strip()
     end = content.find("\n---", 3)
     if end == -1:
         return {}, content.strip()
-    fm = _parse_yaml(content[3:end].strip())
+    fm = yaml.safe_load(content[3:end]) or {}
+    if not isinstance(fm, dict):
+        raise ValueError(
+            f"frontmatter must be a YAML mapping, got {type(fm).__name__}")
     body = content[end + 4:].strip()
     return fm, body
 
@@ -209,64 +233,3 @@ def _parse_memory_config(raw: dict) -> MemoryConfig:
         use_long_term=bool(raw.get("use_long_term", True)),
         subscribed_blackboard_topics=raw.get("subscribed_blackboard_topics") or [],
     )
-
-
-def _parse_yaml(text: str) -> dict[str, Any]:
-    """轻量 YAML 解析：支持简单键值、列表、嵌套 dict、折叠字符串。"""
-    result: dict[str, Any] = {}
-    lines = text.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if not line or line.startswith("#") or line.startswith(" "):
-            i += 1
-            continue
-        if ":" not in line:
-            i += 1
-            continue
-
-        key, _, raw = line.partition(":")
-        key = key.strip()
-        raw = raw.strip()
-
-        if raw == ">":
-            parts: list[str] = []
-            i += 1
-            while i < len(lines) and lines[i].startswith("  "):
-                parts.append(lines[i].strip())
-                i += 1
-            result[key] = " ".join(parts)
-            continue
-
-        if raw == "|":
-            parts = []
-            i += 1
-            while i < len(lines) and lines[i].startswith("  "):
-                parts.append(lines[i][2:])
-                i += 1
-            result[key] = "\n".join(parts)
-            continue
-
-        if not raw:
-            # 列表或嵌套 dict
-            i += 1
-            if i < len(lines) and lines[i].strip().startswith("- "):
-                items: list[str] = []
-                while i < len(lines) and lines[i].strip().startswith("- "):
-                    items.append(lines[i].strip()[2:].strip())
-                    i += 1
-                result[key] = items
-            elif i < len(lines) and lines[i].startswith("  "):
-                nested: list[str] = []
-                while i < len(lines) and (not lines[i] or lines[i].startswith("  ")):
-                    nested.append(lines[i][2:] if lines[i].startswith("  ") else "")
-                    i += 1
-                result[key] = _parse_yaml("\n".join(nested))
-            else:
-                result[key] = ""
-            continue
-
-        result[key] = raw.strip('"').strip("'")
-        i += 1
-
-    return result

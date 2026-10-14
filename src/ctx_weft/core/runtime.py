@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
+from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.assembler import (
     ContextAssembler,
     PriorityBudgetStrategy,
@@ -47,10 +48,10 @@ from ctx_weft.core.hitl.registry import (
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
 from ctx_weft.core.hitl.service import HitlService
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
-from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
+from ctx_weft.core.loop.driver import ExecutionRegistry, LoopContext, LoopState, StepDriver, make_event
 from ctx_weft.core.loop.hitl_waiter import HitlWaiter
 from ctx_weft.core.hitl.registry import reply_memory_id
-from ctx_weft.core.loop.park import HitlPark, RoundDiscarded
+from ctx_weft.core.loop.signals import HitlPark, RoundDiscarded
 from ctx_weft.core.loop.steps import (
     ActStep,
     FinalizeStep,
@@ -58,8 +59,7 @@ from ctx_weft.core.loop.steps import (
     PrepareStep,
     RecognizeIntentStep,
 )
-from ctx_weft.core.loop.finish_pair import register_close_synth
-from ctx_weft.core.loop.background import launch_recap
+from ctx_weft.core.loop.task_memory_fold import register_close_synth
 from ctx_weft.core.loop.steps.compact import CompactStep
 from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
@@ -342,6 +342,7 @@ class TurnHandle:
     # 存储不可用健康查询（spec: event-commit）：runtime 构造时注入；None（测试替身）
     # 表示无健康面，wait_for_finish 按旧行为等超时。
     _storage_health: "Callable[[str], str | None] | None" = None
+    _pending_observe: "Callable[[str, str], str | None] | None" = None
 
     async def events(self) -> AsyncIterator[Event]:
         from ctx_weft.protocols.events import EventFilter
@@ -368,7 +369,7 @@ class TurnHandle:
         `RunFinished`——一轮 run 结束不等于这条 task 结束（还可能有 finalize、还可能
         被重排再跑一轮）；而即便等到了三个终态事件之一（同 `TERMINAL_TASK_STATUSES`），
         触发它的那次 close 边界后台 observe 仍可能还没跑完——它是 `ObserveStep` 里
-        fire-and-forget 出去的（`background.launch_recap`），
+        由 `StepDriver.start("observe", ...)` 放到后台执行，
         与「task 进终态」这两件事之间没有天然的先后保证，只是一场 asyncio 调度竞态
         （下面第 2 部分有实测证据）。`TaskFailed`/`TaskCanceled` 不受影响——见下面
         「不会挂起」——依旧在终态事件到达后就近乎立即返回。
@@ -391,7 +392,7 @@ class TurnHandle:
         `wait_for_finish` 比只等 `TaskFinished` 更早返回，达不到「等收尾」的目的
         （已从终态集合里删掉，不再引用它）。真正滞后于 `TaskFinished` 的是 close 边界
         后台 observe 自己的完成——它在 `ObserveStep` 里以 `asyncio.create_task`
-        fire-and-forget 方式登记进 `_task_pending[task_id]`（这一步发生在
+        fire-and-forget 方式登记进会话的 `ExecutionRegistry`（这一步发生在
         `TaskFinalized`/`TaskFinished` 之前，同一协程、无 await 间隔，先后关系恒定），
         但**登记**与**跑完**是两回事——它的执行体、连同它自己的 `TaskRecapStarted/
         Done`，何时被事件循环调度、相对 `TaskFinished` 谁先谁后，是一场纯粹的 asyncio
@@ -425,22 +426,22 @@ class TurnHandle:
 
         ## 4. `TaskRecapDone` 必须钉死到具体那次 launch（2026-09-04 二轮修复）
 
-        `_task_pending[task_id]` 只挂**最新一次** launch；同一个 task 一生里可能有
+        `ExecutionRegistry.latest[(task_id, "observe")]` 只挂**最新一次** launch；同一个 task 一生里可能有
         多次 fire-and-forget 后台 observe（`interrupt`/`mechanical`/`dispatch`/
         `finish` 等不同 boundary，跨 suspend/resume、重试多轮发生），不重叠只是
         **通常**情况，不是**保证**情况——上一轮 launch 的 `TaskRecapDone` 完全可能在
         这一轮终态事件之后、这一轮 `TaskRecapDone` 之前才姗姗来迟地送达。第一版实现
         只按 `ev2.type is EventType.TASK_RECAP_DONE` 匹配，等到的可能是**任意一次**
         launch 发的、不一定是这一次终态触发的那次——同一个 bug 在更窄的窗口里复现。
-        `pending_recap_run_id` 返回的不是 bool，是这一次在途 launch 的
-        `run_id`（`launch_recap` 给每次 launch 铸的独立 `run_id`，
+        `ExecutionRegistry.pending_run_id` 返回的不是 bool，是这一次在途执行的
+        `run_id`（`StepDriver.start` 给每次执行铸的独立 `run_id`，
         `make_event` 把它写进事件信封；`TaskRecapDone` 不例外——见其 docstring）；
         下面同时匹配 `ev2.type` 与 `ev2.run_id == pending_run_id`，把「等哪次折叠」
         钉死到具体那次 launch，不是「这个 task_id 底下随便哪次」。
 
         ## 5. 为什么不会挂起
 
-        `pending_recap_run_id` 只做一次同步字典读（无 await，见其
+        `ExecutionRegistry.pending_run_id` 只做同步字典读（无 await，见其
         docstring）：终态事件到达那一刻，若查到确有在途后台任务，才继续在同一条流上
         等**那次 launch 自己的** `TaskRecapDone`；查不到（这次终态没触发 close 边界，
         或走的是熔断收尾等从不 launch 它的路径）就是 no-op，立即返回——不会为不存在
@@ -484,7 +485,6 @@ class TurnHandle:
         事件（重试等罕见情形）不会重新触发它。
         """
         from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
-        from ctx_weft.core.loop.background import pending_recap_run_id
         from ctx_weft.protocols.events import EventFilter
         terminal = {
             et for et, st in TASK_STATUS_BY_EVENT.items() if st in TERMINAL_TASK_STATUSES
@@ -517,7 +517,8 @@ class TurnHandle:
                         if waiting_for_run_id is not None and ev.run_id == waiting_for_run_id:
                             return self._state
                     if waiting_for_run_id is None and ev.type in terminal:
-                        pending_run_id = pending_recap_run_id(self.task_id)
+                        pending_run_id = (self._pending_observe(self.session_id, self.task_id)
+                                          if self._pending_observe else None)
                         if pending_run_id is None:
                             return self._state
                         if pending_run_id in seen_recap_run_ids:
@@ -759,6 +760,7 @@ class CtxWeftRuntime:
         # compact 等一次性操作的忙位（原先借 _cancel_tokens dict 占位）。
         self._busy_sessions: set[str] = set()
         self._task_managers: dict[str, TaskManager] = {}
+        self._step_executions: dict[str, ExecutionRegistry] = {}
         # 会话状态的唯一住所。从前 SessionRegistry 是每次调用 new 一个的临时对象
         # （无状态、用完即弃），状态因此无处可放，被 TaskManager / runtime / reducer
         # 各写一份。见 docs/events-v2.md §2.1.1。
@@ -934,7 +936,6 @@ class CtxWeftRuntime:
 
     async def pause_session(self, session_id: str) -> bool:
         """软打断（spec 2026-07-05）：放弃其余在途/排队任务，只留 root agent 当前那一轮。
-
         - 置 _pausing 闩锁：其间新派发的 root agent run 出生即 paused（被 _try_resume_parent
           重排后在 act 首检查点 park，不烧 LLM）——但续跑点名额一次性（_pause_claimed）：
           在途 root run 被 pause 或首个 root run born-pause 即认领，窗口内其后的 root run
@@ -1783,6 +1784,7 @@ class CtxWeftRuntime:
             template_id=params.template_id,
             event_bus=self._event_bus,
             _storage_health=self.storage_health,
+            _pending_observe=self._pending_observe_run_id,
         )
 
         # 这一段到 `set_runner` **不留 await**：resume 复用活 owner 时，新 root task 一进队
@@ -2156,6 +2158,7 @@ class CtxWeftRuntime:
         self._release_round(session_id)
         self._task_managers.pop(session_id, None)
         self._agent_lifecycle_manager.forget_session(session_id)
+        self._step_executions.pop(session_id, None)
         self._session_registry.forget_session(session_id)
         for _p in self.providers.get_capability_providers():
             if isinstance(_p, SessionScopedCapabilityProvider):
@@ -2315,8 +2318,7 @@ class CtxWeftRuntime:
                     memory, parent_scope, t, provider_ctx)
                 await _put_dispatch_result(
                     memory, parent_scope, t,
-                    f"Sub-task {task_ref(t)} was cancelled mid-run (session failure threshold hit); "
-                    f"its partial execution below is incomplete.",
+                    runtime_prompt('threshold_subtask_cancelled', ref=task_ref(t)),
                     ts, provider_ctx, replace=True, tool_call_id=tool_call_id,
                 )
             except Exception:
@@ -2338,10 +2340,7 @@ class CtxWeftRuntime:
                 )
                 await _synthesize_dispatch_pair(
                     memory, scope, root_task,
-                    act_recap=(
-                        "Session failure threshold was hit (N consecutive sub-task failures); "
-                        "terminating this task."
-                    ),
+                    act_recap=runtime_prompt('threshold_tripped_recap'),
                     task_summary=summary,
                     outcome="fail",
                     provider_ctx=provider_ctx,
@@ -2832,7 +2831,7 @@ class CtxWeftRuntime:
         """
         import dataclasses as _dc
 
-        from ctx_weft.core.loop.background import CLOSE_BOUNDARIES
+        from ctx_weft.core.loop.steps.observe import CLOSE_BOUNDARIES
         try:
             lm = self._agent_lifecycle_manager
             # 水合，不新建：这是重跑一个已存在 agent 打断的段 recap。register_session
@@ -2865,7 +2864,7 @@ class CtxWeftRuntime:
                 run_id=generate_id("run"), session=session, task=task, agent=agent,
                 scope=scope, extra={"template": template}, resolved_model=rm,
                 # 孤儿 run：不走 StepDriver.run，构造时显式钉住 origin，否则
-                # launch_recap 内部经 make_event(state, ...) 发的
+                # 后台 ObserveStep 内部经 make_event(state, ...) 发的
                 # 事件 origin 都会是空串。
                 origin=EventOrigin.LOOP_BACKGROUND_OBSERVE,
             )
@@ -2876,7 +2875,7 @@ class CtxWeftRuntime:
                     # raw_fold_scope=scope：pending close recap 只在规则 observe 占位 close 时
                     # 存在（延迟折叠，raw 尚 active），重跑替换成功后补删；对已折 raw 是幂等 no-op。
                     register_close_synth(task.id, tcid, scope, outcome, scope)
-            launch_recap(state, loop_ctx, boundary=boundary)
+            loop_ctx.steps.start("observe", state, loop_ctx, options={"boundary": boundary})
         except Exception:
             logger.exception("recover: failed to relaunch task recap for task=%s", task.id)
 
@@ -3334,6 +3333,7 @@ class CtxWeftRuntime:
             template_id=rec.template_id,
             event_bus=self._event_bus,
             _storage_health=self.storage_health,
+            _pending_observe=self._pending_observe_run_id,
         )
 
     async def _hydrate_agent_for_send(self, agent_id: str, session_id: str | None) -> None:
@@ -3866,6 +3866,7 @@ class CtxWeftRuntime:
             template_id=template_id,
             event_bus=self._event_bus,
             _storage_health=self.storage_health,
+            _pending_observe=self._pending_observe_run_id,
         )
 
     async def reply_to_hitl(self, reply: "HitlReply") -> "HitlRequestView | None":
@@ -3965,8 +3966,8 @@ class CtxWeftRuntime:
                 _tm.begin_round(pending.task_id, owns_task=False, hitl_id=pending.id)
                 round_task_id = pending.task_id
         # `defer`：冷热都只登记待终局，`HitlResolved` 留到 act 的提交点才发。热投递的
-        # 协程醒来后由 gateway 重新武装提交点（`_rearm_commit_point_after_hot_reply`）；
-        # LLM 开口前被暂停则走热撤销（`act._discard_round_if_uncommitted`）。
+        # 协程醒来后由 gateway 调用 commit.rearm_after_hot_reply 重新武装提交点；
+        # LLM 开口前被暂停则走热撤销（commit.discard_uncommitted_round）。
         try:
             resolved = await self.hitl.resolve(reply, defer=bool(round_task_id))
         except BaseException:
@@ -4158,7 +4159,7 @@ class CtxWeftRuntime:
         # 新输入。2026-09-22 拆除——问题的根不在时间戳（`segment_fold` 的锚点早就取
         # `following[0].timestamp - 1μs`、不用 `now_utc()`），在段界是动态查找的：新
         # USER_PROMPT 一落库就成了「最后一条 user 回合」，折叠池随之变空。改由
-        # `launch_recap` 钉住段界水位线，迟到的折叠自己落回原位，这里不必
+        # `StepDriver.start` 钉住段界水位线，迟到的折叠自己落回原位，这里不必
         # 再等。人的回复因此不为任何后台 LLM 往返买单。
 
         # agent_id 必须是本 task 对话真正所在的 agent scope——AgentRecallSource 用
@@ -4188,10 +4189,11 @@ class CtxWeftRuntime:
         )
 
         if outcome == HITL_OUTCOME_REJECTED:
-            content = (content_with_prefix(message, "Human declined: ")
-                       if message else "Human rejected the request.")
+            declined_prefix = runtime_prompt("human_declined", message="")
+            content = (content_with_prefix(message, declined_prefix)
+                       if message else runtime_prompt('human_rejected'))
         else:
-            content = message or "(no response)"
+            content = message or runtime_prompt('no_response')
             # ① 中途打断（未吐 token）续接：补「上一条请求已取消」说明
             # （preface = PREFACE_AFTER_INTERRUPT_EDIT）。
             if is_edit_interrupt:
@@ -4776,6 +4778,10 @@ class CtxWeftRuntime:
             memory_blob_store=self.providers.get_memory_blob_store(),
         )
 
+    def _pending_observe_run_id(self, session_id: str, task_id: str) -> str | None:
+        registry = self._step_executions.get(session_id)
+        return registry.pending_run_id(task_id, "observe") if registry else None
+
     def _build_loop_ctx(
         self,
         assembler: ContextAssembler,
@@ -4789,6 +4795,8 @@ class CtxWeftRuntime:
         pause_token: "PauseToken | None" = None,
     ) -> LoopContext:
         return LoopContext(
+            steps=self._build_step_driver("prepare", executions=self._step_executions.setdefault(
+                provider_ctx.session_id, ExecutionRegistry())),
             assembler=assembler,
             llm=llm,
             memory=memory,
@@ -4811,7 +4819,7 @@ class CtxWeftRuntime:
         )
 
     @staticmethod
-    def _build_step_driver(initial_step: str) -> StepDriver:
+    def _build_step_driver(initial_step: str, *, executions=None) -> StepDriver:
         return StepDriver(
             steps={
                 "prepare": PrepareStep(),
@@ -4824,6 +4832,7 @@ class CtxWeftRuntime:
                 "reconcile": ReconcileStep(),
             },
             initial_step=initial_step,
+            executions=executions if executions is not None else ExecutionRegistry(),
         )
 
     async def _run_loop(
@@ -4857,7 +4866,7 @@ class CtxWeftRuntime:
         #
         # recap 的护栏区（幂等护栏/短段门/事件 emit）在其自吞 try 之外、可能以异常终结，
         # 故此处防御吞掉（降级 = 不等待、段保 raw）；shield 保证 run 被取消时不牵连 recap。
-        # **正确性那一半已由段界水位线接管**（`launch_recap` 钉住段界，
+        # **正确性那一半已由段界水位线接管**（`StepDriver.start` 钉住段界，
         # `segment_fold` 按它算折叠池）：迟到的折叠不再抢走段界、也不再排到新消息之后。
         #
         # **剩下的是性能**：不等的话首次装配可能读到上一轮尚未被 supersede 的 raw，拿
@@ -5092,7 +5101,8 @@ class CtxWeftRuntime:
             # 第一步就已经有事件要发」这个理论缝隙里生效，不代表任何具体子步骤。
             origin=EventOrigin.LOOP_DRIVER,
         )
-        driver = self._build_step_driver(initial_step)
+        driver = loop_ctx.steps
+        driver.initial_step = initial_step
         state = await self._run_loop(state, loop_ctx, driver, run_id, initial_step, task, agent)
         handle = TurnHandle(
             session_id=session.id,
@@ -5102,6 +5112,7 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
             _state=state,
             _storage_health=self.storage_health,
+            _pending_observe=self._pending_observe_run_id,
         )
         return state, handle
 

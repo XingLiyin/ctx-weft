@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 
+from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome
 from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
 from ctx_weft.core.utils.ids import is_internal_call_id
@@ -211,8 +212,7 @@ class ReconcileStep(Step):
         """
         await self._backfill_memory(
             state, ctx, op_id, tc,
-            f"[Operation outcome unverified] 工具 {tc['name']} 的这次调用在崩溃前没有"
-            f"留下账本记录，无法确定副作用是否已发生。不要重试这次调用。",
+            runtime_prompt('operation_unverified_no_record', tool=tc["name"]),
             gateway=gateway, via="unverifiable")
         logger.info("ReconcileStep: %s concluded without re-running (no ledger record)", op_id)
 

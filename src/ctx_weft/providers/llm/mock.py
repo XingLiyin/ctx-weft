@@ -26,8 +26,8 @@ class MockResponse:
     reasoning_tokens: int = 0
 
 
-#: 判定工具的对外名（`qualify("control:report_task_outcome")`）。
-OBSERVER_TOOL = "control__report_task_outcome"
+#: 判定工具的对外名（`qualify("control:report_observation")`）。
+OBSERVER_TOOL = "control__report_observation"
 
 
 def is_observer_request(request) -> bool:

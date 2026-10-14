@@ -91,14 +91,14 @@ def test_classification_sets_are_qualified() -> None:
     assert "control__delegate_task" in DISPATCH_TOOLS
     assert "control__finish_task" in SILENT_TOOLS
     # background observe 终止工具：silent，不入 task 对话（task close 后才跑，否则污染冻结对话）
-    assert "control__report_task_outcome" in SILENT_TOOLS
+    assert "control__report_observation" in SILENT_TOOLS
     assert "delegate_task" not in DISPATCH_TOOLS  # bare no longer matches
 
 
 async def test_control_tool_resolves_from_global_region_when_agent_uncached() -> None:
     """Control tools live in the cache's session-global region (register_global), so the gateway
     resolves them even when the per-agent snapshot is empty — e.g. a fire-and-forget background
-    observe invoking collect_process_report AFTER its run ended and the per-agent cache was evicted.
+    observe invoking report_observation AFTER its run ended and the per-agent cache was evicted.
     """
     from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 
@@ -112,15 +112,15 @@ async def test_control_tool_resolves_from_global_region_when_agent_uncached() ->
         memory=mem, event_bus=InProcessEventBus(),
     )
     res = await gw.invoke(
-        "control__report_task_outcome",
+        "control__report_observation",
         {"task_status": "success", "act_recap": "段总结X"}, state, ctx,
     )
     assert res.is_error is False, f"expected resolved via global region, got: {res.content}"
-    assert "段总结X" in res.content
+    assert res.metadata["observer_act_recap"] == "段总结X"
 
 
 async def test_observer_report_silent_no_task_ingest() -> None:
-    """report_task_outcome 是 SILENT：gateway 不把 TOOL_INVOCATION/TOOL_RESULT 写进 task 对话
+    """report_observation 是 SILENT：gateway 不把 TOOL_INVOCATION/TOOL_RESULT 写进 task 对话
     （否则 background observe 在 task close 后调用会污染冻结对话、泄漏进后续 task prompt），
     但仍正常返回 ControlResult.content——background observe 据此取报告落 close 槽。"""
     from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
@@ -135,17 +135,17 @@ async def test_observer_report_silent_no_task_ingest() -> None:
         memory=mem, event_bus=InProcessEventBus(),
     )
     res = await gw.invoke(
-        "control__report_task_outcome",
+        "control__report_observation",
         {"task_status": "success", "act_recap": "段总结Y"}, state, ctx,
     )
     assert res.is_error is False
-    assert "段总结Y" in res.content  # 返回值不受 SILENT 影响
+    assert res.metadata["observer_act_recap"] == "段总结Y"  # SILENT does not discard metadata
 
     scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
     tool_recs = await mem.recall_recent(
         scope, [MemoryEventType.TOOL_INVOCATION, MemoryEventType.TOOL_RESULT], 100, ctx.provider_ctx)
     assert tool_recs == [], (
-        f"report_task_outcome 不得把 TOOL_INVOCATION/TOOL_RESULT 写进 task 对话; "
+        f"report_observation 不得把 TOOL_INVOCATION/TOOL_RESULT 写进 task 对话; "
         f"found {[(r.type, r.content[:30]) for r in tool_recs]}"
     )
 

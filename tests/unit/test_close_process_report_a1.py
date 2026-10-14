@@ -14,9 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.background import runner
-from ctx_weft.core.loop import finish_pair as fp
-from ctx_weft.core.loop.finish_pair import (
+from ctx_weft.core.loop import task_memory_fold as fp
+from ctx_weft.core.loop.task_memory_fold import (
     pop_close_report,
     register_close_synth,
     replace_finish_report,
@@ -182,7 +181,7 @@ async def test_a1_placeholder_then_async_replace() -> None:
     )
 
     # 模拟 bg 回调：先 pop_close_synth（正如 _run_recap 那样），再调 _replace_finish_report
-    from ctx_weft.core.loop.finish_pair import pop_close_synth
+    from ctx_weft.core.loop.task_memory_fold import pop_close_synth
     popped = pop_close_synth("t1")
     assert popped is not None, "pop_close_synth must return the registered synth"
     p_tool_call_id, p_scope, p_outcome, p_raw_fold_scope = popped
@@ -231,11 +230,12 @@ async def test_a1_no_await_blocking(monkeypatch) -> None:
     """_synthesize_dispatch_pair 不调 await_pending_recap（非阻塞）。"""
     called = []
 
-    async def _fake_await(task_id: str) -> None:
+    async def _fake_await(self, task_id: str, step="observe") -> None:
         called.append(task_id)
 
     # Monkeypatch the function in the background_observe module
-    monkeypatch.setattr(runner, "await_pending_recap", _fake_await)
+    from ctx_weft.core.loop.driver import ExecutionRegistry
+    monkeypatch.setattr(ExecutionRegistry, "wait", _fake_await)
 
     mem = InMemoryMemoryProvider()
     tsc = _task_scope("t1")
@@ -357,7 +357,7 @@ async def test_synthesize_dispatch_pair_two_segments() -> None:
 @pytest.mark.filterwarnings("ignore::pytest.PytestWarning")
 def test_finish_tool_text_falls_back():
     """_finish_tool_text 优先用 task_summary；空则退 act_recap；都空给占位（不掺 outputs）。"""
-    from ctx_weft.core.loop.finish_pair import _finish_tool_text
+    from ctx_weft.core.loop.task_memory_fold import _finish_tool_text
     # task_summary（process report）优先；空则退 act_recap；都空给占位（不掺 outputs——outputs 在 call 入参）
     assert _finish_tool_text("综合 process report", "recap", "success") == "综合 process report"
     assert _finish_tool_text("", "recap", "success") == "recap"

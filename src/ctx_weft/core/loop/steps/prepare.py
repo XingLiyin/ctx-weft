@@ -16,45 +16,42 @@ retry，而是路由回本步（见 `act._can_recover_context`）——本步照
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Callable
 
 from ctx_weft.core.assembler import ContextRequest
-from ctx_weft.protocols.events import EventType
+from ctx_weft.core.assembler.composer_guidance import (
+    collect_guidance_context,
+    collect_resume_context,
+)
+from ctx_weft.core.assembler.prompts import connector
+from ctx_weft.core.loop.commit import commit_round, defer_until_commit
 from ctx_weft.core.loop.driver import (
     COMPACT_NOOP_KEY,
-    RECOGNIZE_INTENT_PENDING_KEY,
-    LoopContext, LoopState, Step, StepOutcome, make_event,
+    LoopContext,
+    LoopState,
+    Step,
+    StepOutcome,
+    make_event,
 )
 from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
-from ctx_weft.core.loop.steps.act_guidance import build_act_guidance, build_resume_cue
-from ctx_weft.core.capabilities.skill_executor import (
-    EXEC_SCRIPT_NAME,
-    LIST_FILES_NAME,
-    READ_FILE_NAME,
-)
-from ctx_weft.core.loop.steps.recognize_intent import (
-    should_recognize_intent,
-)
+from ctx_weft.core.loop.steps.recognize_intent import should_recognize_intent
 from ctx_weft.core.models.task import NormalTaskSettings
-from ctx_weft.core.utils.estimate import effective_limit, estimate_content_tokens, estimate_tokens, estimate_tool_calls_tokens
-from ctx_weft.protocols import MemoryEventType
+from ctx_weft.core.utils.estimate import (
+    effective_limit,
+    estimate_content_tokens,
+    estimate_tokens,
+    estimate_tool_calls_tokens,
+)
 from ctx_weft.protocols.capability import SkillCapability
+from ctx_weft.protocols.events import EventType
 
 logger = logging.getLogger(__name__)
 
 
-_SKILL_SCRIPT_RUNTIME_NOTE = (
-    "---\n"
-    "**Runtime note (overrides any 'run python ...' wording above):** "
-    "This skill's files are NOT in your working directory. To run ANY script the "
-    f"instructions reference, you MUST call the `{EXEC_SCRIPT_NAME}` tool — e.g. "
-    f"`{EXEC_SCRIPT_NAME}(script_path='scripts/foo.py', args='...')` — never run "
-    "`python scripts/foo.py` yourself (the path will not resolve). To read a skill "
-    f"file use `{READ_FILE_NAME}`; to list skill files use `{LIST_FILES_NAME}`. "
-    "Do not build absolute paths by hand. Applies to local and remote skills alike."
-)
+#: 盖掉 skill 正文里可能出现的「run python ...」写法：skill 的文件不在工作目录里。
+#: 正文与三个工具名的注入见 Composer act asset 的 `act.skill_runtime_note`。
+_SKILL_SCRIPT_RUNTIME_NOTE = connector("act.skill_runtime_note")
 
 
 def wrap_skill_instructions(instructions: str) -> str:
@@ -137,22 +134,21 @@ class PrepareStep(Step):
         # ── 4. 装配 prompt ────────────────────────────────────────────────────
         purpose = settings.purpose if isinstance(settings, NormalTaskSettings) else "act"
 
-        # 运行时态势文本（仅 act + 普通任务；authorship 见 act_guidance.py）：
-        # guidance 经 extra → GuidanceSource → composer 恒拼末条 user 尾部；
-        # resume cue 经 extra → composer 在历史以 assistant/tool 收尾时垫续跑回合。
+        # 先快照、后消费 hint；压缩后的重装配复用同一快照。
+        # GuidanceSource 在预算裁剪前渲染；resume 在 composer 判断需要续跑回合时渲染。
         if purpose == "act" and isinstance(settings, NormalTaskSettings):
-            act_guidance = build_act_guidance(state.task, ctx.task_manager)
-            act_resume_cue = build_resume_cue(state.task, ctx.task_manager)
+            act_guidance_context = collect_guidance_context(state.task, ctx.task_manager)
+            act_resume_context = collect_resume_context(state.task, ctx.task_manager)
             # `next_step_hint` 是**一次性转向**：给下一次 act attempt 用，用过就作废。
             # 2026-09-22 之前它没有清除点，只靠「下次 observer 判决覆写」——而 observe
             # 走机械判决那几条路（无 observe ROLE / LLM 失败 / 已取消）压根不调
-            # `report_task_outcome`，覆写就不会发生，上一轮的 hint 会继续出现在再下一轮，
+            # `report_observation`，覆写就不会发生，上一轮的 hint 会继续出现在再下一轮，
             # 变成过期指令。此前少见是因为 root task 极少产 hint；纯文本回合改由后台
             # observer 判定之后它变成常态，必须在消费点显式清掉。
             state.task.next_step_hint = None
         else:
-            act_guidance = ""
-            act_resume_cue = ""
+            act_guidance_context = None
+            act_resume_context = None
 
         def _assemble():
             # 这一轮暂存、还没落盘的对话记录（用户消息 / HITL 答复 / 答复回灌的工具结果，
@@ -171,8 +167,8 @@ class PrepareStep(Step):
                 extra={
                     "skill_instructions": skill_instructions,
                     "skill_name": skill_name,
-                    "act_guidance": act_guidance,
-                    "act_resume_cue": act_resume_cue,
+                    "act_guidance_context": act_guidance_context,
+                    "act_resume_context": act_resume_context,
                     "staged_memory": staged,
                 },
             ))
@@ -186,8 +182,7 @@ class PrepareStep(Step):
             # **先提交再压缩**：压缩（L0.5 图片降级 / L1 / L3）只折 memory，够不着这一轮暂存
             # 的记录——带图的第一条消息、带图的答复就一张也降不了。提交让它们落盘、进入
             # 压缩的视野；代价是这一轮从此不可撤（LLM 开口前按暂停也不再丢弃）。
-            from ctx_weft.core.loop.steps.act import _commit_round
-            await _commit_round(state, ctx)
+            await commit_round(state, ctx)
             from ctx_weft.core.loop.steps.compact import escalating_compact
             compact_events = await escalating_compact(
                 state, ctx, token_estimate=token_estimate, trigger="compact")
@@ -205,23 +200,11 @@ class PrepareStep(Step):
                 ev.type == EventType.MEMORY_COMPACTED for ev in compact_events)
             prompt = await _assemble()
 
-        # ── 6. 会话意图识别：root task 首轮（无标题）判定在这里，**起飞在 act 的提交点** ──
-        #
-        # 判定留在这里是因为只有这里手握 `bound_capabilities`；起飞挪到提交点是因为
-        # 旁路只该为**真的发生过**的那一轮花一次 LLM 调用。
-        #
-        # 别再把 `launch_` 挪回这一行。曾经挪回来过一次，理由是「第一句就按暂停的会话
-        # 到不了提交点、会没有名字」——那个理由是**夸大的**：判据是「root task 且无
-        # title」，那一轮夭折之后 title 仍是空的，下一轮 PrepareStep 照样判定成立、照样
-        # 在那一轮的提交点起飞。代价只是标题晚一轮，不是永远没有。
-        #
-        # 而挪回来的代价是实打实的：root task 从**第二句**起每一轮都开未提交窗口
-        # （消息注入既有 task 的那两条路 `begin_round(target.id, owns_task=False)`），
-        # 只要它的 title 还是空的（旁路失败 / 模型没调 update_task_metadata / 上一轮的
-        # 旁路还在飞），判据就成立——旁路于是跑在窗口里：这一轮被撤销时它的整串事件
-        # 随缓冲一起丢掉，那次 LLM 调用白烧。
+        # ── 6. 元信息补全：此处决定是否需要，commit 决定何时可以启动 ──
+        # 未提交时只登记；若本轮已因压缩提前提交，则现在启动。每个 run 只启动一次。
+        # 不在可撤销窗口内发模型请求，否则整轮撤销会丢弃它的事件并浪费调用。
         if should_recognize_intent(state.task) and bound_capabilities:
-            state.extra[RECOGNIZE_INTENT_PENDING_KEY] = True
+            defer_until_commit(state, ctx)
 
         # ── 7. 发事件 + 返回 ─────────────────────────────────────────────────
         return StepOutcome(

@@ -17,7 +17,7 @@ from ctx_weft.core.utils.event import emit_event
 from ctx_weft.core.orchestrator.task.failure_threshold import plan_threshold_trip
 from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from ctx_weft.core.models.errors import crash_error_code, crash_run_outcome
-from ctx_weft.core.loop.park import RoundDiscarded
+from ctx_weft.core.loop.signals import RoundDiscarded
 from ctx_weft.core.orchestrator.task.disposition import (
     Disposition,
     RunOutcome,
@@ -1056,7 +1056,7 @@ class TaskManager:
         「current_task 已终态 → `_start_task_for_agent` 建新 task」，不会丢。
 
         observer 的三个文本字段由调用方传进来在锁内一并写：后台 observe 跑在
-        `readonly` 的 ControlContext 上（见 `ControlContext.readonly`），工具自己没写，
+        ObserveStep 返回的结果上，提交工具不写 task，
         判决被拒时它们也就不该落地。
 
         ``finalize``：**带外收尾**——在「状态已写定」与「转移已宣布」之间那个窗口里跑

@@ -92,9 +92,9 @@ class _RouterLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:  # recognize_intent
             return self._stream(MockResponse(text=""), request)
-        if "control__report_task_outcome" in names:   # 判定回合（前台或后台）
+        if "control__report_observation" in names:   # 判定回合（前台或后台）
             return self._stream(MockResponse(tool_calls=[ToolCall(
-                id=self._id(), name="control__report_task_outcome",
+                id=self._id(), name="control__report_observation",
                 arguments={"task_status": "success", "act_recap": "seg", "task_summary": "ok"},
             )]), request)
         # act：finish_task 收尾（interaction_mode=interactive 的 root task 只能靠工具调用收尾，
@@ -183,13 +183,13 @@ class _FinishRouterLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:
             return self._stream(MockResponse(text=""), request)
-        if "control__report_task_outcome" in names:
+        if "control__report_observation" in names:
             # 判定回合。2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），而
             # verdict 缺失 ≡ retry——不应这一轮，task 停在 AWAITING_HUMAN，下面等 FINISHED 就
             # 永远等不到。本类整个覆写了 `complete`，走不到 `MockLLMAdapter` 里那条同名兜底
             # （而且那条兜底刻意不替人判 success）。
             return self._stream(MockResponse(tool_calls=[ToolCall(
-                id=self._id(), name="control__report_task_outcome",
+                id=self._id(), name="control__report_observation",
                 arguments={"task_status": "success", "act_recap": "seg", "task_summary": "ok"},
             )]), request)
         return self._stream(
@@ -268,12 +268,12 @@ class _WireCapturingAnthropicAdapter(AnthropicMultimodalAdapter):
         names = {t.get("name", "") for t in (payload.get("tools") or [])}
         if "control__update_task_metadata" in names:
             return self._fake_stream(text="", tool_calls=[])
-        if "control__report_task_outcome" in names:
+        if "control__report_observation" in names:
             # 判定回合。2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），而
             # verdict 缺失 ≡ retry——不应这一轮，`_run_multimodal_session` 里那句
             # 「expected FINISHED」就永远等不到。
             return self._fake_stream(text="", tool_calls=[ToolCall(
-                id=self._id(), name="control__report_task_outcome",
+                id=self._id(), name="control__report_observation",
                 arguments={"task_status": "success", "act_recap": "seg", "task_summary": "ok"},
             )])
         return self._fake_stream(

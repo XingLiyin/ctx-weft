@@ -11,13 +11,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.llm_gateway import resolve_llm_identity
 from ctx_weft.core.loop.steps.act import _run_llm_turn
-from ctx_weft.core.loop.observing import run_observe_react
+from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryAddress
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-
 
 # ── minimal fakes（与 test_observe_react_helper 同构，自包含避免跨测试文件 import）──
 
@@ -104,9 +103,9 @@ class _FakeLLM:
 
 
 def _make_ctx(event_bus, *, llm=None):
-    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-    from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class _FakeAssembler:
         async def assemble(self, req):
@@ -183,14 +182,14 @@ async def test_observe_request_events_carry_resolved_model_identity():
     bus = _RecordingBus()
     state = _make_state(
         model="deepseek-v4-pro", account="deepseek-rj", origin=EventOrigin.LOOP_OBSERVE)
-    llm = _FakeLLM(chunks=[_make_tool_call_chunk("report_task_outcome"), _make_usage_chunk()])
+    llm = _FakeLLM(chunks=[_make_tool_call_chunk("report_observation"), _make_usage_chunk()])
     ctx = _make_ctx(bus, llm=llm)
 
-    await run_observe_react(
+    await ObserveStep()._run_react(
         state, ctx, system="SYS",
         messages=[LLMMessage(role="user", content="observe")],
         tools=[], max_rounds=1,
-        terminal_tool_name="report_task_outcome",
+        terminal_tool_name="report_observation",
     )
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED][0]

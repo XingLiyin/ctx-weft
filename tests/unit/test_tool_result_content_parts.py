@@ -14,23 +14,24 @@
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.loop.background import recap as recap_mod
-from ctx_weft.protocols.capability import AuthorizationDecision, Authorizer
-from ctx_weft.protocols.events import EventType
-from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.core.loop.capability_gateway import CapabilityGateway
-from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.capabilities.cache import CapabilityCache
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
+from ctx_weft.core.loop.capability_gateway import CapabilityGateway
+from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver
+from ctx_weft.core.loop.steps import observe as recap_mod
 from ctx_weft.protocols import ImagePart, MemoryAddress, ProviderContext, TextPart
 from ctx_weft.protocols.capability import (
+    AuthorizationDecision,
+    Authorizer,
     CapabilityEvent,
     CapabilityProviderInfo,
     ToolCapability,
     ToolCapabilityProvider,
 )
+from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.filesystem import SpillSink
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 
 # 一段够长、能在 repr 里被一眼认出的假 base64。
 FAKE_B64 = "QUJDREVG" * 200
@@ -346,7 +347,7 @@ async def test_reader_background_observe_recap_does_not_crash_on_parts(fake_stat
     AttributeError，而该异常被 `_run_recap` 整段吞掉（只 log），于是
     **段摘要静默丢失、段保 raw**。所以断言必须钉在「segment_fold 真的被调用且拿到文本」，
     而不是「没抛异常」——后者在吞异常的函数里恒成立。"""
-    import ctx_weft.core.loop.fold as sf
+    import ctx_weft.core.loop.task_memory_fold as sf
 
     state, ctx = fake_state_ctx
     res, _, _ = await _run(_Prov("  recap text  ", [_img()],
@@ -361,17 +362,17 @@ async def test_reader_background_observe_recap_does_not_crash_on_parts(fake_stat
     async def _not_short(*a, **k):
         return False
 
-    monkeypatch.setattr(recap_mod, "is_short_segment", _not_short)
+    monkeypatch.setattr(recap_mod.ObserveStep, "_is_short_segment", _not_short)
 
     folded: list = []
 
     async def _spy_fold(memory, scope, mscope, summary, pctx, *a, **k):
         folded.append(summary)
 
-    monkeypatch.setattr(recap_mod, "run_observe_react", _fake_react)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _fake_react)
     monkeypatch.setattr(sf, "segment_fold", _spy_fold)
 
-    await recap_mod._run_recap(state, ctx, boundary="interrupt")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
 
     assert folded == ["recap text"], f"段摘要没落到 segment_fold（实得 {folded!r}）"
     assert FAKE_B64 not in folded[0]

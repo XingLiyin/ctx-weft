@@ -12,14 +12,11 @@ the last user message is identical.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextBlock
-from ctx_weft.core.assembler.composer import (
-    _COMPACTION_INSTRUCTION,
-    _RECOGNIZE_INTENT_INSTRUCTION,
-    DefaultComposer,
-)
+from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.utils.content import content_to_text
 
 PURPOSES = ["act", "observe", "compact", "recognize_intent"]
@@ -29,8 +26,9 @@ _STEP_CUE = {
     # 2026-09-28：observe 的 cue 重写成「边界事实 + 调哪个工具 + 这次填哪些字段」，开场那句
     # 「Now act as the observer…」随之消失（角色由 ROLE facet 讲，cue 不再复述）。哨兵改用
     # 那句必然出现的工具指令。
-    "observe": "call `control__report_task_outcome` exactly once",
-    "compact": "act as a memory compactor",
+    "observe": "call `control__report_observation` exactly once",
+    # 角色声明和压缩原则归 COMPACT facet；cue 只讲本次的提交协议。
+    "compact": "Submit the digest as plain text",
     "recognize_intent": "set this task's metadata",
 }
 
@@ -79,7 +77,7 @@ def _multi_turn_blocks() -> list[ContextBlock]:
     """A realistic act conversation: user → assistant(tool_call) → tool → assistant."""
     return [
         _identity_block("PERSONA"),
-        _cap_block("report_task_outcome", "tool", "report the outcome"),
+        _cap_block("report_observation", "tool", "report the outcome"),
         _cap_block("docx", "skill", "make a docx"),
         _cap_block("planner", "agent", "a planning subagent"),
         _directive_block("Do the thing"),
@@ -95,16 +93,8 @@ def _build_for_purpose(blocks: list[ContextBlock], purpose: str):
     # user_prompt_in_memory=True → the history user IS the task message (no extra context turn)
     task = SimpleNamespace(title="T", description="d", user_prompt="the original ask",
                            user_prompt_in_memory=True, process_report=None, outputs=None)
-    req = SimpleNamespace(task=task, purpose=purpose)
-    if purpose == "act":
-        return c._build_actor_messages(blocks, req)
-    if purpose == "observe":
-        return c._build_observe_messages(blocks, req)
-    if purpose == "compact":
-        return c._build_facet_trailing_messages(blocks, req, _COMPACTION_INSTRUCTION)
-    if purpose == "recognize_intent":
-        return c._build_facet_trailing_messages(blocks, req, _RECOGNIZE_INTENT_INSTRUCTION)
-    raise AssertionError(purpose)
+    req = SimpleNamespace(task=task, purpose=purpose, token_counter=len)
+    return asyncio.run(c.compose(blocks, req)).messages
 
 
 def _conv_signature(msgs):
@@ -167,7 +157,8 @@ def test_each_step_appends_its_role_and_cue_on_last_user() -> None:
     blocks = _multi_turn_blocks()
     for p, cue in _STEP_CUE.items():
         last = [m for m in _build_for_purpose(blocks, p) if m.role == "user"][-1].content
-        assert "## Your Current Role" in last and "PERSONA" in last, f"{p} missing role facet on last user"
+        heading = "## Evaluation Principles" if p == "observe" else "## Your Current Role"
+        assert heading in last and "PERSONA" in last, f"{p} missing role facet on last user"
         assert cue in last, f"{p} missing its cue on last user"
 
 

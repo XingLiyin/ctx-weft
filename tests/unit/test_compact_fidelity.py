@@ -186,18 +186,24 @@ async def test_guard_cue_mutation_fails_request_assertion(monkeypatch):
     注意：不使用「固定 mock 摘要存活」证 cue（其输出不随 cue 变化）——cue 契约
     的唯一 CI 守卫是请求断言层。
     """
-    from ctx_weft.core.assembler import composer as composer_mod
+    from ctx_weft.core.assembler.prompts import PromptTemplate
     llm = _CaptureLLM(_SCRIPTED_DIGEST)
 
     async def _stream(ctx, state, request):
         async for c in llm.complete(request):
             yield c
     monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
-    monkeypatch.setattr(
-        composer_mod, "_COMPACTION_INSTRUCTION",
-        composer_mod._COMPACTION_INSTRUCTION.replace(
-            "## Constraints — user-imposed constraints and hard limits that must keep "
-            "being honored (write \"none\" only if truly none).\n", ""))
+    real_instruction = PromptTemplate.instruction
+
+    def _mutated_instruction(self, context):
+        rendered = real_instruction(self, context)
+        if self.name == "entries/compact.en.jinja" and context["scope"] == "task":
+            rendered = rendered.replace(
+                "## Constraints — user-imposed constraints and hard limits that must keep "
+                "being honored (write \"none\" only if truly none).\n", "")
+        return rendered
+
+    monkeypatch.setattr(PromptTemplate, "instruction", _mutated_instruction)
     state, ctx, mem, scope = _state_ctx(llm)
     await summarize_for_compact(state, ctx, scope="task")
     with pytest.raises(AssertionError, match="Constraints"):

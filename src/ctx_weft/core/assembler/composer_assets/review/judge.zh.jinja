@@ -1,0 +1,12 @@
+{# 判断模式的追加要求；前置上下文由 observe 入口统一插入。 #}{% if plain_text_yielded %}
+
+只要那段消息在向用户要任何东西，任务就没有结束：判 `continue`——决不判 `success`，也决不判 `fail`。{% endif %}{% if finish_park_yielded %}
+
+一段仍在向用户要东西的收尾消息，不是一个已完成的任务：判 `continue`——决不判 `success`，也决不判 `fail`。{% endif %}
+
+按你上面那份职责里的标准判断这个任务完成了没有，然后调用 `{{ report_observation }}` 恰好一次——不要调别的工具。不必反复权衡：画面清楚了就调。
+
+`task_status` 与 `act_recap` 恒为必填；其余字段按工具上各自写明的条件填。{% if subtasks %}
+
+{{ subtasks_heading }}（它们的结果在上文对话里；若需要在 `next_step_hint` 里点出某一个，请用它完整的 task_id）：
+{{ subtasks }}{% endif %}

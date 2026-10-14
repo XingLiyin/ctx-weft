@@ -1,0 +1,6 @@
+{# A missing role produces no section; fallback selection belongs to request policy. #}
+{%- if body -%}
+{{ heading }}
+
+{{ body }}
+{%- endif -%}

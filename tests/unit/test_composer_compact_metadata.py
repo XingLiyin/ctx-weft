@@ -44,7 +44,8 @@ async def test_compact_system_is_act_facet_and_persona_in_trailing():
 
     last_user = [m for m in prompt.messages if m.role == "user"][-1].content
     assert "## Your Current Role\n\nCOMPACT-PERSONA" in last_user  # persona under a heading
-    assert "act as a memory compactor" in last_user  # compaction cue present
+    assert "Submit the digest as plain text" in last_user  # 本次提交协议由 cue 承担
+    assert "act as a memory compactor" not in last_user  # 压缩角色/原则归 COMPACT facet
     assert "do the thing" in last_user              # actor conversation reused
     assert prompt.tools == []
 
@@ -62,3 +63,16 @@ async def test_metadata_system_is_act_facet_and_persona_in_trailing():
     # 工具数组不再由 composer 产出（它只管散文段）：LLM 工具面改由 AssembledPrompt.tools_fn
     # 现读 CapabilityCache，覆盖见 tests/unit/test_assembled_prompt_live_tools.py。
     assert prompt.tools == []
+
+
+async def test_plan_then_emit_is_identical_to_compose():
+    """新编译边界只分阶段，不改变既有 compose 产物。"""
+    blocks = [_identity("COMPACT-PERSONA"), _bg("BG")]
+    request = _req("compact")
+    composer = DefaultComposer()
+
+    plan = await composer.plan(blocks, request)
+    emitted = composer.emit(plan, request)
+    composed = await composer.compose(blocks, request)
+
+    assert emitted == composed

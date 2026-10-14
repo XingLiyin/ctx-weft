@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from ctx_weft.core.loop.driver import StepDriver
 from ctx_weft.core.loop.steps.recognize_intent import (
     RecognizeIntentStep,
     should_recognize_intent,
-    launch_recognize_intent,
 )
 
 
@@ -34,7 +34,9 @@ async def test_launch_runs_step_on_snapshot(monkeypatch):
 
     monkeypatch.setattr(RecognizeIntentStep, "execute", _fake_execute)
 
-    state = SimpleNamespace(
+    from ctx_weft.core.loop.driver import LoopState
+
+    state = LoopState(
         run_id="orig-run",
         sequence_counter=5,
         session=SimpleNamespace(id="s1", tenant_id="default"),
@@ -60,7 +62,7 @@ async def test_launch_runs_step_on_snapshot(monkeypatch):
 
     ctx = SimpleNamespace(task_manager=None, event_bus=_FakeEventBus())
 
-    task = launch_recognize_intent(state, ctx)
+    task = StepDriver.for_context(ctx).start("recognize_intent", state, ctx)
     await task
 
     assert seen["bound"] == ["CAP"]

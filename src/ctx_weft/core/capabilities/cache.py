@@ -47,7 +47,7 @@ class CapabilityCache:
     # background observe 常在本 run 收尾 evict 之后才真正跑到（装配读 get、派发读
     # get_by_qualified_name），per-agent 槽那时已空。与 per-agent（_store/_by_*）互补：
     # put 存 per-run 解析的 skill/mcp/agent；register_global 存控制工具
-    # （report_task_outcome / collect_process_report / finish_task …）。
+    # （report_observation / report_observation / finish_task …）。
     #
     # **key 不含 agent_id，内容是「所有跑过的 agent 注册过的控制工具」的并集**
     # （register_global 只写不删）。所以模板 forbidden 在这里裁不掉——解析期过滤掉的那条，

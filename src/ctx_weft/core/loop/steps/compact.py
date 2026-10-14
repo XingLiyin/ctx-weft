@@ -10,8 +10,8 @@
     的增量从估算里累减，降到 target 以下即停。
   - L1/L2 各有可折性 guard（无可折对象则跳过）；L3 无 guard，只要预算门开就会试（内部
     collapse_task_layer 自己在 ≤keep_last 时 noop）。
-  - 注：observe(max_turns) 与 background_observe 仍走 apply_compact 写 TASK_COMPACT_SUMMARY
-    形成胶囊，不在此文件改动范围内。
+  - ObserveStep 的前台重试与后台观察通过 segment_fold 写 TASK_COMPACT_SUMMARY，
+    与这里的预算压缩分开调度。
 """
 
 from __future__ import annotations
@@ -24,22 +24,31 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
-from ctx_weft.core.assembler.assembler import ContextRequest
-from ctx_weft.protocols.events import EventOrigin, EventType
+from ctx_weft.core.assembler import CompactIntent, ContextRequest
+from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
-    request_prompt_estimate, resolve_llm_identity, stream_llm_resilient,
+    request_prompt_estimate,
+    resolve_llm_identity,
+    stream_llm_resilient,
 )
+
 # 模块级 import（**实测不成环**）：`core.media` 的模块级依赖只到 `core.utils.content` /
 # `protocols`，不回指 `core.loop`。若日后 media 模块级引入了 `core.loop` 的东西，
 # 这里要退回函数级 import。
 from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
+from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.estimate import effective_limit
-from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols import (
-    LLMRequest, LLMUsage, MemoryAddress, MemoryEvent, MemoryEventType, MemoryKind, MemoryScope,
+    LLMRequest,
+    LLMUsage,
+    MemoryAddress,
+    MemoryEvent,
+    MemoryKind,
+    MemoryScope,
 )
+from ctx_weft.protocols.events import EventOrigin, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +200,7 @@ async def summarize_for_compact(
         bound_capabilities=state.extra.get("bound_capabilities", []),
         token_counter=ctx.llm.tokenizer.count,
         extra={"compact_scope": scope},
+        intent=CompactIntent(scope="agent" if scope == "agent" else "task"),
     )
     compact_prompt = await ctx.assembler.assemble(request)
 
@@ -367,7 +377,7 @@ async def collapse_task_layer(
 
     ids = [r.id for r in fold]
     digest = await _resolve_digest(summary_text)
-    collapsed = f"{original}{COLLAPSE_DELIM}{digest.text or '[Context compacted]'}"
+    collapsed = f"{original}{COLLAPSE_DELIM}{digest.text or runtime_prompt('context_compacted')}"
     # v2 P3d：遗忘+坍缩物一次原子 fold（旧徒手 supersede+ingest 有崩溃丢摘要窗口）
     await memory.fold(ids, [
         MemoryEvent(
@@ -641,7 +651,7 @@ async def fold_root_experience(
         if (r.address.task_id if r.address else r.metadata.get("task_id")) in surviving:
             kept_ts.append(r.timestamp)
     anchor_ts = (min(kept_ts) if kept_ts else now_utc())
-    folded_summary = digest.text or "[Experience compacted]"
+    folded_summary = digest.text or runtime_prompt('experience_compacted')
     # v2 P3d：跨层遗忘 + 新摘要一次原子 fold（关旧「raw 已删而摘要未写」窗口）
     await memory.fold(ids, [
         MemoryEvent(

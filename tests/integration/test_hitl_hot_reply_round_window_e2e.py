@@ -66,7 +66,7 @@ class _ScriptedLLM(_ActRouterLLM):
     def complete(self, request, stream: bool = True):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if ("control__update_task_metadata" in names
-                or "control__report_task_outcome" in names):
+                or "control__report_observation" in names):
             # metadata 与 observe 两类回合都交给基类——**都不该消费剧本**。observe 这条
             # 是 2026-09-22 起必需的：`plain_text` 边界的后台 observe 现在也跑 LLM
             # （「免折不免判」），不拦住的话它会偷吃剧本里的下一项，把时序整个打乱。

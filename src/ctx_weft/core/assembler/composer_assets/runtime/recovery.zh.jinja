@@ -1,0 +1,10 @@
+{# 执行中断后的不确定副作用；gateway / reconcile 明确禁止未经授权的重试。
+每个具名 macro 是一个独立事件提示，参数就是输入契约；文件本身不整段发送。 #}
+
+{% macro operation_unverified_no_record(tool) -%}
+[操作结果未经验证] 工具 {{ tool }} 的这次调用在崩溃前没有留下账本记录，无法确定副作用是否已发生。不要重试这次调用。
+{%- endmacro %}
+
+{% macro operation_unverified_no_rerun_authorizer(tool) -%}
+[操作结果未经验证] 工具 {{ tool }} 在执行中被中断，没有注册重跑授权，无法确定副作用是否已发生。不要重试这次调用。
+{%- endmacro %}

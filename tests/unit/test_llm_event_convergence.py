@@ -13,12 +13,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.background import recap as recap_mod
 from ctx_weft.core.loop import llm_gateway
+from ctx_weft.core.loop.driver import StepDriver
 from ctx_weft.core.loop.steps import act
 from ctx_weft.core.loop.steps.act import _run_llm_turn
-from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.protocols import LLMUsage, MemoryAddress
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 _MOVED_TYPES = {
@@ -111,9 +111,9 @@ def _make_state():
 
 
 def _make_ctx(event_bus):
-    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-    from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class _FakeAssembler:
         async def assemble(self, req):
@@ -195,9 +195,9 @@ def _make_compact_state(*, origin: str = EventOrigin.LOOP_COMPACT):
 
 
 def _make_compact_ctx(event_bus, *, llm=None):
-    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-    from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     return LoopContext(
         assembler=_FakeCompactAssembler(),
@@ -328,9 +328,9 @@ async def test_compact_stays_silent_on_response_finished_under_wrong_origin():
 
 @pytest.mark.asyncio
 async def test_predispatch_compact_swaps_origin_to_compact_and_restores_on_success(monkeypatch):
-    from ctx_weft.core.loop.steps.act import _maybe_predispatch_compact
     from ctx_weft.core.loop import capability_gateway as _cap_mod
     from ctx_weft.core.loop.steps import compact as _compact_mod
+    from ctx_weft.core.loop.steps.act import _maybe_predispatch_compact
 
     dispatch_tool_name = next(iter(_cap_mod.DISPATCH_TOOLS))
     tool_calls = [SimpleNamespace(name=dispatch_tool_name, id="tc1", arguments={})]
@@ -353,9 +353,9 @@ async def test_predispatch_compact_swaps_origin_to_compact_and_restores_on_succe
 
 @pytest.mark.asyncio
 async def test_predispatch_compact_restores_origin_even_on_exception(monkeypatch):
-    from ctx_weft.core.loop.steps.act import _maybe_predispatch_compact
     from ctx_weft.core.loop import capability_gateway as _cap_mod
     from ctx_weft.core.loop.steps import compact as _compact_mod
+    from ctx_weft.core.loop.steps.act import _maybe_predispatch_compact
 
     dispatch_tool_name = next(iter(_cap_mod.DISPATCH_TOOLS))
     tool_calls = [SimpleNamespace(name=dispatch_tool_name, id="tc1", arguments={})]
@@ -394,7 +394,7 @@ def test_react_event_types_indirection_is_gone():
 def test_run_observe_react_has_no_event_types_param():
     from ctx_weft.core.loop.steps import observe
 
-    sig = inspect.signature(observe.run_observe_react)
+    sig = inspect.signature(observe.ObserveStep._run_react)
     assert "event_types" not in sig.parameters
     # request_id 方案改用与 gateway 相同的确定性公式独立算出，prefix 形参随之失去用途。
     assert "request_id_prefix" not in sig.parameters
@@ -420,16 +420,16 @@ async def test_observe_path_events_share_origin_and_request_id():
     """observe 前台：gateway 的 4 个流式事件 + run_observe_react 自己补发的收尾事件，
     5 个事件共用一个 request_id，且 origin 全部是 loop.observe（state.origin 由调用方
     设好，run_observe_react 不用管、也不该管——它只管跑 ReAct）。"""
-    from ctx_weft.core.loop.observing import run_observe_react
+    from ctx_weft.core.loop.steps.observe import ObserveStep
 
     bus = _RecordingBus()
     state = _make_state()
     state.origin = EventOrigin.LOOP_OBSERVE
     ctx = _make_ctx(bus)
 
-    await run_observe_react(
+    await ObserveStep()._run_react(
         state, ctx, system="SYS", messages=[], tools=[],
-        max_rounds=1, terminal_tool_name="report_task_outcome",
+        max_rounds=1, terminal_tool_name="report_observation",
     )
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
@@ -453,16 +453,16 @@ async def test_background_observe_path_events_share_origin_and_request_id():
     （同 background_observe.py:_run_recap 在调 run_observe_react 前做的事）
     ——同样 5 个事件的 origin 全部随之变成 loop.background_observe，且从不出现已废弃的
     BACKGROUND_OBSERVE_* 类型。"""
-    from ctx_weft.core.loop.observing import run_observe_react
+    from ctx_weft.core.loop.steps.observe import ObserveStep
 
     bus = _RecordingBus()
     state = _make_state()
     state.origin = EventOrigin.LOOP_BACKGROUND_OBSERVE
     ctx = _make_ctx(bus)
 
-    await run_observe_react(
+    await ObserveStep()._run_react(
         state, ctx, system="SYS", messages=[], tools=[],
-        max_rounds=1, terminal_tool_name="collect_process_report",
+        max_rounds=1, terminal_tool_name="report_observation",
     )
 
     five = [e for e in bus.events if e.type in (
@@ -529,9 +529,9 @@ def _make_recognize_intent_state():
 
 
 def _make_recognize_intent_ctx(event_bus, *, llm=None, config=None):
-    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-    from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class _FakeRIAssembler:
         async def assemble(self, req):
@@ -587,8 +587,8 @@ async def test_recognize_intent_events_share_origin_and_request_id():
 async def test_recognize_intent_self_heals_via_resilient_gateway():
     """切网关的直接收益：裸 stream_llm 没有退避重试，切到 stream_llm_resilient 后，
     首次瞬时故障（outage）应被自愈层原地重试并最终成功，不冒泡成异常。"""
-    from ctx_weft.protocols import LLMCallError
     from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+    from ctx_weft.protocols import LLMCallError
 
     class _FlakyLLM:
         tokenizer = HeuristicTokenizer()
@@ -642,8 +642,8 @@ async def test_recognize_intent_pairs_events_on_permanent_llm_failure():
     """不可重试的永久失败（retriable=False）：LLM_REQUEST_STARTED 已经发出（gateway
     无条件发），except 分支必须补发 LLM_RESPONSE_FINISHED（finish_reason="error"），
     异常本身被就地吞掉、不冒泡（既有设计，见上）。"""
-    from ctx_weft.protocols import LLMCallError
     from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+    from ctx_weft.protocols import LLMCallError
 
     class _PermFailLLM:
         tokenizer = HeuristicTokenizer()
@@ -671,8 +671,8 @@ async def test_recognize_intent_pairs_events_on_permanent_llm_failure():
 async def test_recognize_intent_pairs_events_on_retry_exhausted():
     """瞬时故障但重试预算耗尽（LLMOutageError）：同上，REQUEST_STARTED 只发一次
     （gateway 在整个重试循环外发一次，不随 attempt 重发），RESPONSE_FINISHED 必须补上。"""
-    from ctx_weft.protocols import LLMCallError
     from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+    from ctx_weft.protocols import LLMCallError
 
     class _AlwaysOutageLLM:
         tokenizer = HeuristicTokenizer()
@@ -715,10 +715,9 @@ async def test_recognize_intent_swallowed_llm_failure_still_reports_run_complete
     outcome=completed——因为异常从未逃出 RecognizeIntentStep.execute()。这不是「谎报」的
     新缺陷，是该 commit 明确选择的既有口径：只有真正逃出这段代码的未捕获异常才记
     interrupted。若日后要翻案，改这条测试的断言。"""
-    from ctx_weft.protocols import LLMCallError
-    from ctx_weft.core.loop.driver import LoopState
-    from ctx_weft.core.loop.steps.recognize_intent import launch_recognize_intent
+    from ctx_weft.core.loop.driver import LoopState, StepDriver
     from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
+    from ctx_weft.protocols import LLMCallError
 
     class _PermFailLLM:
         tokenizer = HeuristicTokenizer()
@@ -739,7 +738,7 @@ async def test_recognize_intent_swallowed_llm_failure_still_reports_run_complete
         resolved_model=inner_state.resolved_model,
     )
 
-    task = launch_recognize_intent(outer_state, ctx)
+    task = StepDriver.for_context(ctx).start("recognize_intent", outer_state, ctx)
     await task
 
     finished_runs = [e for e in bus.events if e.type == EventType.RUN_FINISHED]
@@ -843,7 +842,7 @@ async def test_background_observe_origin_pinned_on_refold_guard_early_exit(
 
     monkeypatch.setattr(ctx.memory, "load_view", _empty_view)
 
-    await recap_mod._run_recap(state, ctx, boundary="interrupt")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
 
     assert ctx.event_bus.emitted
     origins = {e.origin for e in ctx.event_bus.emitted}
@@ -862,7 +861,7 @@ async def test_background_observe_origin_pinned_on_short_segment_early_exit(fake
     state, ctx = fake_state_ctx
     state.origin = EventOrigin.LOOP_ACT  # 模拟 act.py interrupt 边界快照带进来的「错误」origin
 
-    await recap_mod._run_recap(state, ctx, boundary="plain_text")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "plain_text"})
 
     assert ctx.event_bus.emitted
     origins = {e.origin for e in ctx.event_bus.emitted}
@@ -880,16 +879,16 @@ async def test_observe_multi_round_request_id_and_turn_increment():
     """审查者手工验证过多轮机制（round 内 5 个事件共用一个 request_id、跨轮各不相同，
     turn 依次递增）成立，但此前没有回归测试钉住——补上。默认 `_FakeLLM` 每轮都只吐
     纯文本 + usage、从不产 tool_call，配 max_rounds=3 保证跑满 3 轮不提前终止。"""
-    from ctx_weft.core.loop.observing import run_observe_react
+    from ctx_weft.core.loop.steps.observe import ObserveStep
 
     bus = _RecordingBus()
     state = _make_state()
     state.origin = EventOrigin.LOOP_OBSERVE
     ctx = _make_ctx(bus)
 
-    await run_observe_react(
+    await ObserveStep()._run_react(
         state, ctx, system="SYS", messages=[], tools=[],
-        max_rounds=3, terminal_tool_name="report_task_outcome",
+        max_rounds=3, terminal_tool_name="report_observation",
     )
 
     finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]

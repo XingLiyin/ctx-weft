@@ -147,7 +147,7 @@ class _ActRouterLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:
             return self._stream(MockResponse(text=""), request)
-        if "control__report_task_outcome" in names:
+        if "control__report_observation" in names:
             # observe 回合——**不消费 act 队列**。2026-09-22 起 `plain_text` 边界的后台
             # observe 也跑 LLM（「免折不免判」：短回合恰恰是提问最典型的形态），此前短段
             # 门让它在调 LLM 之前就早退，于是这个分支从来不需要存在；没有它，后台会偷吃
@@ -163,7 +163,7 @@ class _ActRouterLLM(MockLLMAdapter):
                 min(self._obs_idx, len(self._observer_verdicts) - 1)]
             self._obs_idx += 1
             return self._stream(MockResponse(tool_calls=[ToolCall(
-                id=f"obs_bg{self._obs_idx}", name="control__report_task_outcome",
+                id=f"obs_bg{self._obs_idx}", name="control__report_observation",
                 arguments={"task_status": verdict, "act_recap": "观察者：本段小结"},
             )]), request)
         self.act_requests.append(request)

@@ -295,7 +295,7 @@ async def test_composer_splits_subtask_and_predecessor_sections() -> None:
         "Phase 3: blackboard predecessor section must not appear in observer prompt"
     )
     # Judgment cue must still be present.
-    assert "report_task_outcome" in text
+    assert "report_observation" in text
 
 
 async def test_composer_no_related_results_when_empty() -> None:
@@ -311,4 +311,4 @@ async def test_composer_no_related_results_when_empty() -> None:
     joined = " ".join(m.content for m in msgs if isinstance(m.content, str))
     assert "Your sub-task results" not in joined   # Phase 3: old blackboard heading removed
     assert "## Your sub-tasks" not in joined        # no extra["subtasks"] → no cue section
-    assert "report_task_outcome" in joined          # 仍带判定提示
+    assert "report_observation" in joined          # 仍带判定提示

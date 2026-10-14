@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.loop.park import HitlPark
+from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task

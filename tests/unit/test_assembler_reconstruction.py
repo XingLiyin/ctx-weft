@@ -62,4 +62,4 @@ async def test_observer_reuses_act_conversation_plus_observe_message() -> None:
     assert "round1 reply" in joined and "round2 reply" in joined  # 全部轮次
     assert "dispatch stuff" in joined                             # act 风格：派发日志一并复用
     assert "OBSERVER ROLE" in joined                              # 尾部 observe ROLE
-    assert "report_task_outcome" in joined                        # 判定提示
+    assert "report_observation" in joined                        # 判定提示

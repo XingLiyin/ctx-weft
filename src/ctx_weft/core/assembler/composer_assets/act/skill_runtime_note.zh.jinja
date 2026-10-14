@@ -1,0 +1,2 @@
+---
+**运行说明（优先于上文任何「run python ...」之类的写法）：** 这个 skill 的文件**不在**你的工作目录里。要运行说明中提到的任何脚本，你**必须**调用 `{{ exec_script }}` 工具——例如 `{{ exec_script }}(script_path='scripts/foo.py', args='...')`——绝不要自己执行 `python scripts/foo.py`（那个路径解析不出来）。读 skill 文件用 `{{ read_file }}`，列 skill 文件用 `{{ list_files }}`。不要手工拼绝对路径。本地与远端 skill 一律适用。

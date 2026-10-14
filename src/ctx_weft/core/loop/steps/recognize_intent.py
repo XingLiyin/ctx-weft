@@ -1,6 +1,6 @@
 """RecognizeIntentStep: single-shot step that fills task title/description and session goal.
 
-Launched concurrently with ActStep (see launch_recognize_intent) on a snapshot of the loop
+Launched concurrently with ActStep (through StepDriver.start, after commit) on a snapshot of the loop
 state, reusing the capability set PrepareStep already bound. Assembles with
 purpose="recognize_intent"; CapabilitySource auto-filters tools to update_task_metadata.
 Skips entirely if the title is already set or no recognize_intent tool is bound.
@@ -8,102 +8,24 @@ Skips entirely if the title is already set or no recognize_intent tool is bound.
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import logging
 from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
-    stream_llm_resilient, request_prompt_estimate, resolve_llm_identity,
+    request_prompt_estimate,
+    resolve_llm_identity,
+    stream_llm_resilient,
 )
-from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
-from ctx_weft.protocols.events import EventOrigin, EventType
-from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.capability import ToolCapability
+from ctx_weft.protocols.events import EventType
 
 logger = logging.getLogger(__name__)
-
-# Strong refs to fire-and-forget tasks when no TaskManager is available (avoids GC).
-_background_tasks: set[asyncio.Task] = set()
-
 
 def should_recognize_intent(task: Any) -> bool:
     """True when this is the root task (no parent) and still lacks a title."""
     return getattr(task, "parent_task_id", None) is None and not getattr(task, "title", "")
-
-
-def launch_recognize_intent(state: LoopState, ctx: LoopContext) -> asyncio.Task:
-    """Fire-and-forget: run RecognizeIntentStep concurrently with act on a snapshot state.
-
-    The snapshot shares agent/task/scope/session (read-mostly) but has its own run_id,
-    sequence_counter and a copied extra dict, so it never corrupts the live act state.
-    Returns the created asyncio.Task (callers may ignore it).
-    """
-    snapshot = LoopState(
-        run_id=generate_id("run"),
-        session=state.session,
-        task=state.task,
-        agent=state.agent,
-        scope=state.scope,
-        extra=dict(state.extra),
-        resolved_model=state.resolved_model,
-        # 孤儿 run：不走 StepDriver.run 的每步 origin 赋值机制（Task 2 的
-        # `_STEP_ORIGIN`），构造时就得显式钉住，否则这里发的全部事件
-        # （含下面 RUN_STARTED/RUN_FINISHED）origin 都会是空串。
-        origin=EventOrigin.LOOP_RECOGNIZE_INTENT,
-    )
-
-    async def _run() -> None:
-        # 总账 C5：这段快照造了自己的 run_id 却从没配起止事件——host 会看到凭空
-        # 出现又凭空消失的 run。补齐（payload 结构照抄 `_run_loop` 的实际发射点，
-        # 见 task-5-report）；这条路径没有 StepDriver 也没有 RunOutcome，
-        # `initial_step` 用它实际跑的那个 step 名 "recognize_intent"。
-        await ctx.event_bus.emit(make_event(snapshot, EventType.RUN_STARTED, payload={
-            "run_id": snapshot.run_id,
-            "initial_step": "recognize_intent",
-        }))
-        run_error: Exception | None = None
-        was_cancelled = False
-        try:
-            await RecognizeIntentStep().execute(snapshot, ctx)
-        except asyncio.CancelledError:
-            # F2：CancelledError 不是 Exception 子类，下面的 except Exception 接不住——
-            # 接不住则 run_error 仍是 None，RunFinished 会谎报 completed。记下来，供
-            # finally 里的 RunFinished.outcome 用（在异常继续传播之前发出，见下）。
-            #
-            # 这里**要重新抛出**——与 runtime.py::_run_loop 的 except asyncio.CancelledError
-            # 刻意不同，不是疏漏：_run_loop 吞是因为它把取消结果转成了 RunOutcome{kind=
-            # CANCELED} 这个**返回值契约**塞回调用方；这里没有这种契约，虽是
-            # fire-and-forget、没人 await 结果，但没理由让协作取消在这里被悄悄吸收掉。
-            was_cancelled = True
-            raise
-        except Exception as exc:
-            run_error = exc
-            logger.exception("recognize_intent concurrent run failed (ignored)")
-        finally:
-            await ctx.event_bus.emit(make_event(snapshot, EventType.RUN_FINISHED, payload={
-                "outcome": (
-                    RunOutcomeKind.CANCELED.value if was_cancelled
-                    else RunOutcomeKind.COMPLETED.value if run_error is None
-                    else RunOutcomeKind.INTERRUPTED.value
-                ),
-                "final_status": snapshot.task.status,
-                "will_retry": False,
-                "total_events": snapshot.sequence_counter,
-                "total_turns": len(snapshot.transcript),
-                "error": str(run_error) if run_error else None,
-                "error_type": type(run_error).__name__ if run_error else None,
-            }))
-
-    task = asyncio.create_task(_run())
-    tm = getattr(ctx, "task_manager", None)
-    if tm is not None and hasattr(tm, "track_background"):
-        tm.track_background(task)
-    else:
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
-    return task
 
 
 class RecognizeIntentStep(Step):
@@ -136,7 +58,7 @@ class RecognizeIntentStep(Step):
             return StepOutcome(next_step=None)
 
         # ── Assemble prompt via shared assembler (CapabilitySource filters by purpose) ──
-        from ctx_weft.core.assembler.assembler import ContextRequest
+        from ctx_weft.core.assembler import ContextRequest, MetadataIntent
 
         request = ContextRequest(
             purpose="recognize_intent",
@@ -147,6 +69,7 @@ class RecognizeIntentStep(Step):
             template=state.extra.get("template"),
             bound_capabilities=bound,
             token_counter=ctx.llm.tokenizer.count,
+            intent=MetadataIntent(),
         )
         prompt = await ctx.assembler.assemble(request)
 
@@ -229,7 +152,7 @@ class RecognizeIntentStep(Step):
             # （总账 C5）已经明确裁定的既有设计——「正常路径（含内部已捕获、降级处理的
             # 失败）记 completed，只有真正逃出这段代码的未捕获异常才记 interrupted」。
             # recognize_intent 是尽力而为的元数据补全（失败不影响 task 主流程），outer
-            # `launch_recognize_intent._run()` 因此仍会把这次失败报成
+            # `StepDriver._run_background()` 因此仍会把这次失败报成
             # RUN_FINISHED(outcome=COMPLETED)——按该文档化的既定口径延续，未在本次改动中
             # 变更（复审记录见 task-6-report.md）。
             await ctx.event_bus.emit(make_event(

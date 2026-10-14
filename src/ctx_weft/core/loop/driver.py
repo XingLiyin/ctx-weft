@@ -5,38 +5,119 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import dataclasses
 import logging
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
 from ctx_weft.core.assembler import AssembledPrompt, ContextAssembler
-from ctx_weft.core.utils.event import new_event
-from ctx_weft.protocols.events import Event, EventBus, EventStore, EventType
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
-
+from ctx_weft.core.utils.event import new_event
 from ctx_weft.protocols import (
-    LLMClient, MemoryEvent, MemoryKind, MemoryScope, MemoryProvider, MemoryAddress, ProviderContext,
+    LLMClient,
+    MemoryAddress,
+    MemoryEvent,
+    MemoryKind,
+    MemoryProvider,
+    MemoryScope,
+    ProviderContext,
 )
-from ctx_weft.protocols.events import EventOrigin
+from ctx_weft.protocols.events import Event, EventBus, EventOrigin, EventStore, EventType
 
 if TYPE_CHECKING:
-    from ctx_weft.core.loop.steps.observe import Verdict
-    from ctx_weft.core.loop.steps.act import TurnRecord
-    from ctx_weft.core.control.tokens import CancelToken, PauseToken
-    from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.capabilities.cache import CapabilityCache
+    from ctx_weft.core.control.tokens import CancelToken, PauseToken
+    from ctx_weft.core.hitl.service import HitlService
+    from ctx_weft.core.loop.capability_gateway import CapabilityGateway
+    from ctx_weft.core.loop.hitl_waiter import HitlWaiter
+    from ctx_weft.core.loop.steps.act import TurnRecord
+    from ctx_weft.core.loop.steps.observe import ObservationResult, Verdict
     from ctx_weft.core.orchestrator import TaskManager
     from ctx_weft.core.orchestrator.model import ResolvedModel
     from ctx_weft.core.orchestrator.task.disposition import RunOutcome
-    from ctx_weft.core.hitl.service import HitlService
-    from ctx_weft.core.loop.hitl_waiter import HitlWaiter
     from ctx_weft.protocols.capability import CapabilityProvider
 
 logger = logging.getLogger(__name__)
+
+
+class ExecutionMode(StrEnum):
+    """Scheduling mode; it does not select the model purpose or tool surface."""
+    FOREGROUND = "foreground"
+    BACKGROUND = "background"
+
+
+@dataclass(frozen=True)
+class StepExecution:
+    """Per-invocation options, isolated from concurrent steps.
+
+    Background started_at is captured synchronously at launch, before the task
+    first runs. Observe uses it as the upper bound of the segment being folded.
+    """
+    mode: ExecutionMode = ExecutionMode.FOREGROUND
+    options: dict[str, Any] = field(default_factory=dict)
+    started_at: datetime | None = None
+
+
+@dataclass
+class ExecutionRegistry:
+    """Session-owned background tasks; latest indices never replace the full set."""
+    tasks: dict[str, asyncio.Task] = field(default_factory=dict)
+    latest: dict[tuple[str, str], str] = field(default_factory=dict)
+    _guards: dict[tuple[str, str], tuple[asyncio.Lock, int]] = field(default_factory=dict)
+
+    def register(self, run_id: str, task_id: str, step: str, task: asyncio.Task) -> None:
+        key = (task_id, step)
+        self.tasks[run_id] = task
+        self.latest[key] = run_id
+
+        def complete(done):
+            self.tasks.pop(run_id, None)
+            if self.latest.get(key) == run_id:
+                self.latest.pop(key, None)
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(complete)
+
+    def pending_run_id(self, task_id: str, step: str = "observe") -> str | None:
+        """Read the latest in-flight run without waiting.
+
+        TurnHandle uses this identity to match TaskRecapDone on its existing
+        event subscription, rather than waiting for an arbitrary earlier run.
+        """
+        run_id = self.latest.get((task_id, step))
+        task = self.tasks.get(run_id)
+        return run_id if task is not None and not task.done() else None
+
+    async def wait(self, task_id: str, step: str = "observe") -> None:
+        """Wait for the current run without propagating waiter cancellation to it."""
+        run_id = self.pending_run_id(task_id, step)
+        if run_id is not None:
+            await asyncio.shield(self.tasks[run_id])
+
+    @asynccontextmanager
+    async def task_guard(self, task_id: str, step: str):
+        """Serialize same-task work; keep the lock alive while any waiter owns it."""
+        key = (task_id, step)
+        lock, users = self._guards.get(key, (asyncio.Lock(), 0))
+        self._guards[key] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            _, users = self._guards[key]
+            if users == 1:
+                del self._guards[key]
+            else:
+                self._guards[key] = (lock, users - 1)
 
 
 # ── Step / StepOutcome ────────────────────────────────────────────────────────
@@ -85,6 +166,7 @@ class LoopState:
     act_exit_reason: str = ""
     # 由 ObserveStep 写入
     verdict: Verdict | None = None
+    observation: ObservationResult | None = None
 
     #: 本次 run 的结局，由 loop 在结束前填好、交给 TaskManager 决定 task 处置。
     #: loop 报「发生了什么」，不报「task 该变成什么」——后者是 TM 的活
@@ -159,17 +241,19 @@ class LoopContext:
     # blob store：出网前把 ref 还原成 base64 用（Phase 3b）。默认 None → 不 rehydrate，
     # 既有构造点与既有测试行为逐字节不变。
     blob_store: "Any" = None
+    steps: "StepDriver | None" = None
+    execution: StepExecution = field(default_factory=StepExecution)
 
 
-#: `state.extra` 键：本轮是否已过提交点（`act._commit_round` 的幂等标志）。
+#: `state.extra` 键：本轮是否已过提交点（`commit.commit_round` 的幂等标志）。
 ROUND_COMMITTED_KEY = "_round_committed"
 #: `state.extra` 键：本轮是由一条**热应答**开出来的（值 = 那个 hitl_id）。由 gateway 在
-#: 协程被叫醒时写（`_rearm_commit_point_after_hot_reply`）。act 据此把「LLM 开口前的
-#: 暂停」走成热撤销而不是整轮丢弃，见 `act._discard_round_if_uncommitted`。
+#: 协程被叫醒时写（`commit.rearm_after_hot_reply`）。act 据此把「LLM 开口前的
+#: 暂停」走成热撤销而不是整轮丢弃，见 `commit.discard_uncommitted_round`。
 HOT_REPLY_ROUND_KEY = "_hot_reply_round"
 #: `state.extra` 键：`PrepareStep` 判定该跑 recognize_intent，但要等提交点才起飞。
 #: 判定留在 prepare 是因为只有那里手握 `bound_capabilities`；起飞在提交点是因为
-#: 旁路只该为**真的发生过**的那一轮花一次 LLM 调用（见 `act._commit_round`）。
+#: 旁路只该为**真的发生过**的那一轮花一次 LLM 调用（见 `commit.commit_round`）。
 RECOGNIZE_INTENT_PENDING_KEY = "_recognize_intent_pending"
 #: `state.extra` 键：本 run 已用掉的「上下文恢复」次数（act 越过停机线 → 回 prepare
 #: 压缩续跑）。配额见 `LoopConfig.max_context_recoveries`；耗尽后退回 observe/retry。
@@ -315,10 +399,141 @@ _STEP_ORIGIN: dict[str, str] = {
 
 @dataclass
 class StepDriver:
-    """驱动 Step 链。从 initial_step 开始，按 outcome.next_step 顺序执行。"""
+    """Drive foreground chains and isolated background invocations.
+
+    run/execute await foreground work; start returns a tracked background Task.
+    Only foreground outcomes may select the next step.
+    """
 
     steps: dict[str, Step]
     initial_step: str = "prepare"
+    executions: ExecutionRegistry = field(default_factory=ExecutionRegistry)
+
+    @staticmethod
+    def for_context(ctx) -> "StepDriver":
+        """Use the injected driver, or attach one for standalone step callers."""
+        driver = getattr(ctx, "steps", None)
+        if driver is None:
+            from ctx_weft.core.loop.steps.observe import ObserveStep
+            from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
+            driver = StepDriver({"observe": ObserveStep(),
+                                 "recognize_intent": RecognizeIntentStep()})
+            ctx.steps = driver
+        return driver
+
+    def _resolve(self, name: str, mode: ExecutionMode) -> Step:
+        step = self.steps.get(name)
+        if step is None:
+            raise ValueError(f"Step '{name}' not registered")
+        allowed = {
+            "observe": {ExecutionMode.FOREGROUND, ExecutionMode.BACKGROUND},
+            "recognize_intent": {ExecutionMode.BACKGROUND},
+        }.get(name, {ExecutionMode.FOREGROUND})
+        if mode not in allowed:
+            raise ValueError(f"Step '{name}' cannot execute in {mode}")
+        return step
+
+    async def execute(self, name, state, ctx, *, options=None) -> StepOutcome:
+        """Execute one foreground step; return its patch to the caller."""
+        _, outcome = await self._execute_foreground(name, state, ctx, options=options)
+        return outcome
+
+    async def _execute_foreground(self, name, state, ctx, *, options=None):
+        step = self._resolve(name, ExecutionMode.FOREGROUND)
+        local_ctx = copy.copy(ctx)
+        local_ctx.steps = self
+        local_ctx.execution = StepExecution(options=dict(options or {}))
+        state.origin = _STEP_ORIGIN.get(name, EventOrigin.LOOP_DRIVER)
+        return await self._execute_step(step, state, local_ctx, foreground=True)
+
+    async def _execute_step(self, step, state, ctx, *, foreground):
+        if foreground:
+            await ctx.event_bus.emit(make_event(
+                state, EventType.STEP_STARTED, {"step_name": step.name},
+                origin=EventOrigin.LOOP_DRIVER))
+        try:
+            outcome = await step.execute(state, ctx)
+            if not foreground and outcome.next_step is not None:
+                raise ValueError("A background step cannot advance the foreground chain")
+        except Exception as exc:
+            if foreground:
+                await ctx.event_bus.emit(make_event(
+                    state, EventType.STEP_FAILED,
+                    {"step_name": step.name, "error_code": type(exc).__name__,
+                     "error_message": str(exc)}, origin=EventOrigin.LOOP_DRIVER))
+            raise
+        # Keep the existing patch-before-events order and the chain's state ownership.
+        state = state.apply_patch(outcome.state_patch)
+        for event in outcome.events:
+            await ctx.event_bus.emit(event)
+        if foreground:
+            await ctx.event_bus.emit(make_event(
+                state, EventType.STEP_COMPLETED,
+                {"step_name": step.name, "next_step": outcome.next_step},
+                origin=EventOrigin.LOOP_DRIVER))
+        return state, outcome
+
+    def start(self, name, state, ctx, *, options=None) -> asyncio.Task:
+        """Launch a snapshot with its own run id, sequence and context.
+
+        Task/session/agent objects remain shared: business changes still go
+        through the existing managers. Transient run fields are isolated.
+        """
+        from ctx_weft.core.utils.clock import now_utc
+        from ctx_weft.core.utils.ids import generate_id
+
+        step = self._resolve(name, ExecutionMode.BACKGROUND)
+        snapshot = dataclasses.replace(
+            state, run_id=generate_id("run"), sequence_counter=0,
+            extra=dict(state.extra), transcript=list(state.transcript),
+            observation=None, verdict=None, run_outcome=None,
+            origin=(EventOrigin.LOOP_BACKGROUND_OBSERVE if name == "observe"
+                    else _STEP_ORIGIN.get(name, EventOrigin.LOOP_DRIVER)),
+        )
+        if name == "recognize_intent":
+            snapshot.transcript = []
+        local_ctx = copy.copy(ctx)
+        local_ctx.steps = self
+        local_ctx.run_phase = RunPhase()
+        local_ctx.execution = StepExecution(
+            ExecutionMode.BACKGROUND, dict(options or {}), now_utc())
+        task = asyncio.create_task(self._run_background(step, snapshot, local_ctx))
+        self.executions.register(snapshot.run_id, state.task.id, name, task)
+        tm = getattr(ctx, "task_manager", None)
+        if tm is not None and hasattr(tm, "track_background"):
+            tm.track_background(task)
+        return task
+
+    async def _run_background(self, step, state, ctx) -> StepOutcome:
+        from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
+
+        # Preserve existing event payloads; this label is not a prompt purpose.
+        initial = "background_observe" if step.name == "observe" else step.name
+        await ctx.event_bus.emit(make_event(state, EventType.RUN_STARTED, {
+            "run_id": state.run_id, "initial_step": initial}))
+        error = None
+        cancelled = False
+        try:
+            state, outcome = await self._execute_step(step, state, ctx, foreground=False)
+            return outcome
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except Exception as exc:
+            error = exc
+            logger.exception("Background step %s failed", step.name)
+            raise
+        finally:
+            await ctx.event_bus.emit(make_event(state, EventType.RUN_FINISHED, {
+                "outcome": (RunOutcomeKind.CANCELED.value if cancelled else
+                            RunOutcomeKind.INTERRUPTED.value if error else
+                            RunOutcomeKind.COMPLETED.value),
+                "final_status": state.task.status, "will_retry": False,
+                "total_events": state.sequence_counter, "total_turns": len(state.transcript),
+                "error": str(error) if error else None,
+                "error_type": type(error).__name__ if error else None,
+            }))
+
 
     async def _ensure_blackboard_subscriptions(self, state: LoopState, ctx: LoopContext) -> None:
         """No-op since Phase 3 (2026-06-30).
@@ -374,52 +589,6 @@ class StepDriver:
             if tok is not None and tok.is_cancelled:
                 tok.raise_if_cancelled()
 
-            step = self.steps.get(next_step_name)
-            if step is None:
-                raise ValueError(f"Step '{next_step_name}' not registered")
-
-            # 每步开始前写 state.origin（driver 发的三条 STEP_* 事件覆盖为 LOOP_DRIVER）
-            state.origin = _STEP_ORIGIN.get(step.name, EventOrigin.LOOP_DRIVER)
-
-            # emit StepStarted
-            start_ev = make_event(
-                state, EventType.STEP_STARTED, {"step_name": step.name},
-                origin=EventOrigin.LOOP_DRIVER,
-            )
-            await ctx.event_bus.emit(start_ev)
-
-            try:
-                outcome = await step.execute(state, ctx)
-            except Exception as e:
-                error_dict = {
-                    "step_name": step.name,
-                    "error_code": type(e).__name__,
-                    "error_message": str(e),
-                }
-                fail_ev = make_event(
-                    state, EventType.STEP_FAILED,
-                    error_dict,
-                    origin=EventOrigin.LOOP_DRIVER,
-                )
-                await ctx.event_bus.emit(fail_ev)
-                raise
-
-            # apply state patch
-            if outcome.state_patch:
-                state = state.apply_patch(outcome.state_patch)
-
-            # emit collected events
-            for ev in outcome.events:
-                await ctx.event_bus.emit(ev)
-
-            # emit StepCompleted
-            done_ev = make_event(
-                state, EventType.STEP_COMPLETED,
-                {"step_name": step.name, "next_step": outcome.next_step},
-                origin=EventOrigin.LOOP_DRIVER,
-            )
-            await ctx.event_bus.emit(done_ev)
-
+            state, outcome = await self._execute_foreground(next_step_name, state, ctx)
             yield outcome
-
             next_step_name = outcome.next_step

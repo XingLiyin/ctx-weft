@@ -18,8 +18,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
-from ctx_weft.core.loop.background.boundaries import judges
-from ctx_weft.core.loop.background.verdict import submit_verdict
+from ctx_weft.core.loop.steps.observe import judges
+from ctx_weft.core.loop.steps.observe import submit_verdict
 
 
 class _RecordingTM:
@@ -158,7 +158,7 @@ async def test_rejected_verdict_is_not_an_error() -> None:
 # memory 那一半）要一整套 memory/llm 替身，混在一个用例里只会让规则本身读不清。两者怎么
 # 组装、由谁调，钉在下一节。
 
-from ctx_weft.core.loop.background.verdict import (  # noqa: E402
+from ctx_weft.core.loop.steps.observe import (  # noqa: E402
     _close_park_bubble,
     _out_of_band_finalize,
 )

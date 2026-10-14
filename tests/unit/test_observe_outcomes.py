@@ -1,7 +1,7 @@
-"""observe 三态机 + report_task_outcome 枚举。
+"""observe 三态机 + report_observation 枚举。
 
 锁定：
-- report_task_outcome 接受 success/retry/fail，写 task.observer_outcome（**不写
+- report_observation 接受 success/retry/fail，写 task.observer_outcome（**不写
   task.status**：判决归 loop、状态归 TaskManager，见 task_disposition.disposition_for）
 - 护栏：success 但无 outputs → 降级 retry
 - 非法值（含旧 active/ask_human）→ retry
@@ -14,10 +14,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from ctx_weft.core.capabilities.control_tools import ControlContext
+from ctx_weft.core.capabilities.control_tools import report_observation as submit_observation
 from ctx_weft.core.loop.steps.observe import ObserveStep
-from ctx_weft.core.capabilities.control_tools import ControlContext, report_task_outcome
 from ctx_weft.core.models.task import Task
 from ctx_weft.protocols.events import EventType
+from tests.step_helpers import patch_observe_start
 
 
 def _task(**kw) -> Task:
@@ -31,19 +33,28 @@ def _ctx(task: Task) -> ControlContext:
     )
 
 
-# ── report_task_outcome 五态 ──────────────────────────────────────────────────
+def report_observation(*, ctx, **arguments):
+    """Exercise submission plus the step-owned assessment, not tool side effects."""
+    step = ObserveStep()
+    submitted = submit_observation(ctx=ctx, **arguments)
+    observation = step._interpret_submission(SimpleNamespace(task=ctx.task), submitted)
+    step._apply_assessment(ctx.task, observation.verdict)
+    return submitted
+
+
+# ── report_observation 五态 ──────────────────────────────────────────────────
 
 
 def test_assessment_success() -> None:
     t = _task(outputs="done")
-    report_task_outcome(task_status="success", act_recap="ok", ctx=_ctx(t))
+    report_observation(task_status="success", act_recap="ok", ctx=_ctx(t))
     assert t.observer_outcome == "success"
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
 def test_assessment_fail() -> None:
     t = _task(outputs="x")
-    report_task_outcome(
+    report_observation(
         task_status="fail", act_recap="bad", task_failure_reason="root cause", ctx=_ctx(t)
     )
     assert t.observer_outcome == "fail"
@@ -54,7 +65,7 @@ def test_assessment_fail() -> None:
 def test_assessment_retry_records_blocker() -> None:
     """retry 判决的 task_failure_reason（本轮受阻原因）落 task.error——耗尽降级时即真死因。"""
     t = _task(outputs="partial")
-    report_task_outcome(
+    report_observation(
         task_status="continue", act_recap="more needed",
         task_failure_reason="登录页有人机校验，自动化被拦", ctx=_ctx(t),
     )
@@ -66,14 +77,14 @@ def test_assessment_success_clears_stale_blocker() -> None:
     """上一轮 retry 留下的受阻原因不得残留在 FINISHED 任务上。"""
     t = _task(outputs="done")
     t.error = "旧受阻原因"
-    report_task_outcome(task_status="success", act_recap="ok", ctx=_ctx(t))
+    report_observation(task_status="success", act_recap="ok", ctx=_ctx(t))
     assert t.error is None
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
 
 def test_assessment_retry() -> None:
     t = _task(outputs="partial")
-    report_task_outcome(
+    report_observation(
         task_status="continue", act_recap="more needed", next_step_hint="do X", ctx=_ctx(t)
     )
     assert t.observer_outcome == "continue"
@@ -89,7 +100,7 @@ def test_assessment_retry() -> None:
 
 def test_assessment_success_without_outputs_downgrades_to_retry() -> None:
     t = _task(outputs=None)
-    report_task_outcome(task_status="success", act_recap="claims done", ctx=_ctx(t))
+    report_observation(task_status="success", act_recap="claims done", ctx=_ctx(t))
     assert t.observer_outcome == "continue"  # 护栏：无终稿 → 重试
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
@@ -98,7 +109,7 @@ def test_guardrail_hint_goes_to_next_step_hint_not_process_report() -> None:
     """success-without-outputs 护栏文案是给下一轮的一次性指令 → 落 next_step_hint，
     不得混进 act_recap（否则会随段摘要永久留在已完成任务的历史里）。"""
     t = _task(outputs=None)
-    report_task_outcome(task_status="success", act_recap="claims done", ctx=_ctx(t))
+    report_observation(task_status="success", act_recap="claims done", ctx=_ctx(t))
     assert t.process_report == "claims done", (
         f"guardrail text must not pollute the permanent recap; got {t.process_report!r}"
     )
@@ -108,7 +119,7 @@ def test_guardrail_hint_goes_to_next_step_hint_not_process_report() -> None:
 def test_next_step_hint_and_guardrail_combine_in_hint_field() -> None:
     """两处一次性文本（observer 的 hint + 护栏）并存时都落 next_step_hint，act_recap 仍纯净。"""
     t = _task(outputs=None)
-    report_task_outcome(
+    report_observation(
         task_status="success", act_recap="claims done", next_step_hint="do X", ctx=_ctx(t)
     )
     assert t.process_report == "claims done"
@@ -118,13 +129,13 @@ def test_next_step_hint_and_guardrail_combine_in_hint_field() -> None:
 def test_no_hint_leaves_field_empty() -> None:
     """无一次性转向时 next_step_hint 为空——guidance 不出该段。"""
     t = _task(outputs="done")
-    report_task_outcome(task_status="success", act_recap="ok", ctx=_ctx(t))
+    report_observation(task_status="success", act_recap="ok", ctx=_ctx(t))
     assert not t.next_step_hint
 
 
 def test_assessment_invalid_defaults_to_retry() -> None:
     t = _task(outputs="x")
-    report_task_outcome(task_status="active", act_recap="r", ctx=_ctx(t))
+    report_observation(task_status="active", act_recap="r", ctx=_ctx(t))
     assert t.observer_outcome == "continue"  # 'active' 不在工具允许集
 
 
@@ -157,7 +168,7 @@ def test_mechanical_verdict_plain_text_exit_is_continue_with_a_finish_reminder()
     机械判决**没有任何办法**知道那段正文有没有交付目标——它只看得见「这一段是怎么停的」。
     那它的安全默认就必须是「没完」：continue 可回头（retry），success 是终态、不可逆。同一条
     原则已在另外两处落地（`normalize_verdict` 认不出的值归 continue 而决不归 fail、
-    `report_task_outcome` 的 success-without-outputs 护栏把 success 改判 continue）。
+    `report_observation` 的 success-without-outputs 护栏把 success 改判 continue）。
 
     于是「一个 task 怎么才算成功」收敛成一句话：**actor 明确调了 `finish_task`**。
 
@@ -180,7 +191,7 @@ def test_mechanical_verdict_actor_done_is_success() -> None:
     """唯一还判 success 的一格：actor 明确调了 `finish_task`。
 
     注意这一格仍然**无条件**——不看 `task.outputs`、不看子任务成败。那道
-    success-without-outputs 护栏长在 `report_task_outcome` 里，机械判决不经过它。
+    success-without-outputs 护栏长在 `report_observation` 里，机械判决不经过它。
     """
     t = _task()
     v = ObserveStep()._mechanical_verdict(_state("actor_done", t))
@@ -221,7 +232,7 @@ def test_root_normal_exit_is_judged_by_the_llm() -> None:
 
     此前这里断言 `is False`（`_should_use_llm` 对 `parent_task_id is None` 降级走机械判决），
     而 `_mechanical_verdict` 把 `normal`/`actor_done` **无条件**映射成 success——那道
-    success-without-outputs 护栏长在 `report_task_outcome` 里、不在机械判决的路上。于是 root
+    success-without-outputs 护栏长在 `report_observation` 里、不在机械判决的路上。于是 root
     上「这个 task 到底完没完」全凭 actor 自己说，零复核。
 
     不对称到了荒谬的程度：纯文本回合（S5，`plain_text` 边界）要被判、让位的 finish_task
@@ -271,10 +282,10 @@ def test_task_model_has_task_summary_field():
     assert t.task_summary == "comprehensive"
 
 
-def test_report_task_outcome_writes_act_recap_and_task_summary() -> None:
+def test_report_observation_writes_act_recap_and_task_summary() -> None:
     task = _task(outputs="done")
     ctx = _ctx(task)
-    report_task_outcome(
+    report_observation(
         task_status="success",
         act_recap="本轮我创建了 skill 文件并验证",
         task_summary="整段：看模板→写 SKILL.md→写脚本→验证，已就绪",
@@ -288,45 +299,34 @@ def test_report_task_outcome_writes_act_recap_and_task_summary() -> None:
 # ── persona prompt 守护 ───────────────────────────────────────────────────────
 
 
-def test_the_observer_fallback_carries_the_judgement_criteria() -> None:
-    """模板没有任何 ROLE facet 时的兜底身份，必须仍带着那条最要紧的准则。
+def test_the_only_block_fallback_is_the_compaction_discipline() -> None:
+    """块缺省只剩一条：COMPACT（压缩纪律）。ROLE 没有缺省——没有 ROLE 就等于不判。
 
-    这条测试**取代**了原先那个 `test_default_role_prompt_uses_two_fields`：它从 core 去读
-    `Loome-02/resources/agents/default/ROLE.md`，而那份 ROLE 自两仓拆分起就住在 host 仓，
-    路径失效、长期红着。ROLE 的守护搬去 host（它是那些文件的主人），core 这边守自己的兜底。
+    这条测试**取代**了原先那两个（judge 版与 recap 版兜底身份的守护）。judge 版 2026-10-08
+    删除：它不可达（判定路径被 `has_observe_role` 把门，那个判据要求 facet 正文非空），而且
+    方向是错的——用一份框架自带的审查准则去顶替「这个 agent 怎么审查任务」，比不判更难发现。
 
-    为什么兜底不能只有一句自我介绍（2026-09-28 的新分工）：「怎么判」整段归 ROLE，cue 只说
-    「这一次做什么」、schema 只说「字段是什么」——那么没有 ROLE 的 agent 就等于什么判断准则都
-    没有。而「向用户要东西一律 continue」这条**没有任何机械护栏**兜着，只能靠文字。
+    recap 版没有被删，是**归位**：它一直就是压缩纪律，只是被挂在 ROLE 位上当「只摘要档的
+    ROLE」，所以当年得从判定版手抄一份再删掉判决词汇。现在它是 COMPACT 块的缺省，由
+    background_recap / compact 两条路径共用。
+
+    守的还是同两件事：证据纪律在；判决词汇**不在**（这一档的工具面里没有判决工具，schema
+    里也没有任何字段收 `continue`/`success`/`fail`——ROLE 位上要求它判，就是 prompt 命令
+    模型做工具面不允许的事）。
     """
-    from ctx_weft.core.assembler.composer import _OBSERVER_ROLE_JUDGE_FALLBACK as fb
+    from ctx_weft.core.assembler.prompts import BLOCK_FALLBACK
 
-    assert "never re-execute" in fb and "never decide on the actor's behalf" in fb
-    assert "is not evidence" in fb, "证据准则丢了"
-    assert "`continue`: never `success`, never `fail`" in fb, "「在问人就不是完成」这条丢了"
-    # 字段语义不在这里（那在工具 schema 上），别把 ROLE 写成第二份契约。
-    for leaked in ("## Progress So Far", "whichever comes later", "First person"):
-        assert leaked not in fb, f"兜底身份复述了字段语义：{leaked!r}"
+    assert set(BLOCK_FALLBACK) == {"compact"}, "块缺省多了一条，先确认它为什么必须存在"
+    fb = BLOCK_FALLBACK["compact"]
+    lower = fb.lower()
 
-
-def test_the_recap_fallback_carries_no_judgement_at_all() -> None:
-    """只摘要档的兜底身份**不得**谈判决（2026-09-28 从判定版拆出来）。
-
-    这一档的工具面里没有判决工具、schema 里没有任何字段收 `continue`/`success`/`fail`。ROLE
-    位上要求它判，就是 prompt 命令模型做工具面不允许的事——三面分工那一轮刚消灭的形状。而且
-    这一档正是「没有 ROLE 的 agent」唯一到得了的观察路径，兜底文案在这里最要紧。
-    """
-    from ctx_weft.core.assembler.composer import _OBSERVER_ROLE_RECAP_FALLBACK as fb
-
-    assert "never re-execute" in fb and "never decide on the actor's behalf" in fb
+    assert "never re-execute" in lower and "never decide on the actor's behalf" in lower
+    assert "do not treat the actor's narration of its own work as evidence" in fb, "证据纪律丢了"
     for leaked in ("judge", "`continue`", "`success`", "`fail`", "task_status"):
-        assert leaked not in fb, f"只摘要档的兜底身份谈了判决：{leaked!r}"
-
-
-
-# ── 非 LLM 路径：机械判决 + 转 background observe（Task 4）────────────────────
-
-
+        assert leaked not in fb, f"压缩纪律里谈了判决：{leaked!r}"
+    # 字段语义不在这里（那在工具 schema 上），别把块缺省写成第二份契约。
+    for leaked in ("## Progress So Far", "whichever comes later", "First person"):
+        assert leaked not in fb, f"块缺省复述了字段语义：{leaked!r}"
 def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
                     parent_task_id="t0", cancelled=False):
     """ObserveStep.execute() 的最小搭台：默认「无 observe ROLE 的子任务」= 机械路径。"""
@@ -395,9 +395,7 @@ def _capture_launches(monkeypatch) -> list[str]:
         launched.append(boundary)
         return None
 
-    monkeypatch.setattr(
-        "ctx_weft.core.loop.background.launch_recap", _fake
-    )
+    patch_observe_start(monkeypatch, _fake)
     return launched
 
 

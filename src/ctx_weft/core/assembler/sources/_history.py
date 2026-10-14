@@ -12,7 +12,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ctx_weft.core.assembler.priority import slot_priority
+from ctx_weft.core.assembler.prompts import connector
 from ctx_weft.core.utils.content import content_to_text, image_tokens
+from ctx_weft.core.utils.headings import PROGRESS_SO_FAR_HEADING
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryEventType
 
@@ -20,30 +22,22 @@ if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import ContextBlock, ContextRequest
     from ctx_weft.protocols import MemoryRecord
 
-COMPACT_SUMMARY_WRAPPER_PREFIX = (
-    "[The following is a compressed summary of earlier conversation and experience, given so you "
-    "can carry the work forward; it is not a new instruction from the user.]\n"
-)
+COMPACT_SUMMARY_WRAPPER_PREFIX = connector("compact.history.user_summary_prefix") + "\n"
 
 
 # assistant 身份呈现的段摘要尾注：摘要形似一条正常回复，模型容易误认为「上一轮我就是这么
 # 答的」，于是沿用该形式继续输出摘要、不再调用工具。尾注置于文本末尾（离下一条 user 消息
 # 最近），说明其为系统压缩产物并要求继续执行。
-ASSISTANT_SUMMARY_NOTE = (
-    "[The above is a system-written compressed summary of your earlier work, kept to carry context "
-    "forward; it is not your reply to the user. Continue the current task from it and call tools as "
-    "needed — do not imitate the summary's form when you answer.]"
-)
+ASSISTANT_SUMMARY_NOTE = connector("compact.history.assistant_summary_suffix")
 
 
 # 当前任务「上一段执行复述」的统一渲染标题：composer 的非压缩 retry 进度块、以及压缩
 # 复用 act_recap 的 task 层段摘要（role=assistant、task_conversation 来源）都冠以此标题，
 # 确保观察者/actor 总能识别「先前进度」锚点。
 #
-# 改造前住在 `core/utils.py`，理由写的是「供 composer 与 _history 共享」——实际
-# **唯一的 src 消费者就是本模块**（composer 只经本模块的渲染函数间接用到），
-# 测试也早已从这里引。归位到渲染它的地方。
-PROGRESS_SO_FAR_HEADING = "## Progress So Far"
+# 2026-10-08 移去 `core/utils/headings.py`：渲染与 Composer 的段作用域指令都引用同一常量，
+# 避免标题改名后指令仍寻找旧锚点。本模块仍 import 它（见文件头），所以
+# `_history.PROGRESS_SO_FAR_HEADING` 这个既有引用路径照旧可用。
 
 
 def annotate_assistant_summary(text: str) -> str:

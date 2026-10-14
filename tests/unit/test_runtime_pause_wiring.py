@@ -9,6 +9,7 @@ from ctx_weft.core.models.task import Task
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.event import emit_event
+from ctx_weft.protocols import ProviderContext
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
@@ -31,10 +32,27 @@ def test_build_loop_ctx_wires_pause_token():
     pause = PauseToken()
     ctx = rt._build_loop_ctx(
         assembler=None, llm=rt._resolve_llm(None, None), memory=None,
-        provider_ctx=None, gateway=None, skill_index={},
+        provider_ctx=ProviderContext(session_id="session"), gateway=None, skill_index={},
         cancel_token=CancelToken(), task_manager=None, pause_token=pause,
     )
     assert ctx.pause_token is pause
+
+
+def test_step_execution_registry_is_shared_only_within_a_session():
+    rt = _rt()
+
+    def build(session_id):
+        return rt._build_loop_ctx(
+            assembler=None, llm=rt._resolve_llm(None, None), memory=None,
+            provider_ctx=ProviderContext(session_id=session_id),
+            gateway=None, skill_index={}, cancel_token=None, task_manager=None)
+
+    first, second, other = build("s1"), build("s1"), build("s2")
+    assert first.steps is not second.steps
+    assert first.steps.executions is second.steps.executions
+    assert first.steps.executions is not other.steps.executions
+    assert first.steps.executions is rt._step_executions["s1"]
+    assert {"prepare", "act", "observe", "recognize_intent"} <= first.steps.steps.keys()
 
 
 # ── 2026-09-04 spec §7.1 / §8：pause_task 内部化，pause_session 语义不变 ──

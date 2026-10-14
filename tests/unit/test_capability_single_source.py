@@ -194,7 +194,7 @@ async def test_live_tool_surface_matches_pre_refactor_pipeline() -> None:
         async def list(self, ctx):
             return [
                 _tool("control:finish_task", purposes=["act"]),
-                _tool("control:report_task_outcome", purposes=["observe"]),  # act 面看不到
+                _tool("control:report_observation", purposes=["observe"]),  # act 面看不到
             ]
 
     class _SkillExec(SkillExecutorCapabilityProvider):

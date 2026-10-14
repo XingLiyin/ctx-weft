@@ -43,10 +43,10 @@ class _FinishLLM(MockLLMAdapter):
         names = {getattr(t, "name", "") for t in (getattr(request, "tools", None) or [])}
         if "control__update_task_metadata" in names:
             return self._stream(MockResponse(text=""), request)
-        if "control__report_task_outcome" in names:
+        if "control__report_observation" in names:
             self._n += 1
             return self._stream(MockResponse(tool_calls=[
-                ToolCall(id=f"bg{self._n}", name="control__report_task_outcome",
+                ToolCall(id=f"bg{self._n}", name="control__report_observation",
                          arguments={"task_status": "success", "act_recap": "done", "task_summary": "done"}),
             ]), request)
         return self._stream(MockResponse(text="done", tool_calls=[

@@ -24,8 +24,15 @@ import pytest
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, ParsedDigest
 from ctx_weft.protocols import (
-    AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
-    MemoryEventType as T, ProviderContext, ToolCall,
+    AgentTemplate,
+    IdentityFacet,
+    LoopConfig,
+    MemoryConfig,
+    ProviderContext,
+    ToolCall,
+)
+from ctx_weft.protocols import (
+    MemoryEventType as T,
 )
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import (
@@ -36,6 +43,7 @@ from ctx_weft.providers.llm.mock import (
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_compact_flow_e2e import _NOOP_NAME, _NoopToolProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+from tests.step_helpers import patch_observe_start
 
 pytestmark = pytest.mark.asyncio
 
@@ -150,9 +158,7 @@ def _wire(monkeypatch, *, digest=_DIGEST, responses=None, inflate_on=frozenset({
             return ParsedDigest(text=digest, degraded=False, sections={})
         monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
     # 后台 observe 与本文件无关，挡掉以免多消耗 mock 响应。
-    monkeypatch.setattr(
-        "ctx_weft.core.loop.background.launch_recap",
-        lambda state, ctx, *, boundary: None)
+    patch_observe_start(monkeypatch, lambda state, ctx, *, boundary: None)
 
     resolver = InlineAgentTemplateProvider()
     resolver.register(_template(**loop_kwargs))

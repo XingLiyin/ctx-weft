@@ -18,10 +18,8 @@ from types import SimpleNamespace
 import pytest
 
 import ctx_weft.core.loop.steps.act as act
-from ctx_weft.core.loop import background as background_pkg
-from ctx_weft.core.loop.background import runner
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.loop.park import HitlPark
+from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import NormalTaskSettings, Task
@@ -36,6 +34,7 @@ from ctx_weft.protocols.hitl import (
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.hitl_env import make_hitl
+from tests.step_helpers import patch_observe_start
 
 pytestmark = pytest.mark.asyncio
 
@@ -93,7 +92,7 @@ def _spy_observe(monkeypatch) -> list[str]:
         launched.append(boundary)
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    monkeypatch.setattr(background_pkg, "launch_recap", _fake, raising=False)
+    patch_observe_start(monkeypatch, _fake)
     return launched
 
 

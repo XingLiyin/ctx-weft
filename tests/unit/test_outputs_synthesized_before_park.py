@@ -5,7 +5,7 @@
 `_cold_park` 抛 `HitlPark` 释放协程，`ActStep.execute` 就地中断——循环**之后**那次
 `_synthesize_final_outputs` 永远执行不到。于是 park 的 task 恒 `outputs=None`。
 
-`report_task_outcome` 有一道 success-without-outputs 护栏（「没有最终产出就不许判成功」），
+`report_observation` 有一道 success-without-outputs 护栏（「没有最终产出就不许判成功」），
 它读的正是 `task.outputs`。两者一凑：**park 的 task 永远不会被判成功终结**——observer
 报 success，工具就地改判 retry，task 停在 park 等一个其实已经不需要的人，DAG 后继永远
 放不行。
@@ -25,7 +25,8 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.capabilities.control_tools import (
-    ControlContext, ControlMetaKey as K, report_task_outcome,
+    ControlContext,
+    report_observation,
 )
 from ctx_weft.core.loop.steps.act import _synthesize_final_outputs
 from ctx_weft.core.models.task import NormalTaskSettings, Task
@@ -84,10 +85,11 @@ def test_empty_transcript_is_skipped() -> None:
 def _verdict(task: Task) -> str:
     """模拟后台 observe（readonly）报 success，返回工具**实际**落定的判决。"""
     ctx = ControlContext(session_id="s1", task_id="t1", agent_id="ag1", task=task,
-                         task_manager=None, session=None, readonly=True)
-    res = report_task_outcome(task_status="success", act_recap="说了段话",
+                         task_manager=None, session=None)
+    res = report_observation(task_status="success", act_recap="说了段话",
                               task_summary="小结", ctx=ctx)
-    return res.metadata[K.OBSERVER_OUTCOME]
+    from ctx_weft.core.loop.steps.observe import ObserveStep
+    return ObserveStep()._interpret_submission(_state(task), res, background=True).verdict.task_outcome
 
 
 def test_without_outputs_the_guard_downgrades_success() -> None:
@@ -108,7 +110,7 @@ async def test_act_sets_outputs_on_plain_text_turn(unattended: bool) -> None:
 
     `unattended=False` 那一格正是回归点——它会 park，而 park 抛 `HitlPark`。
     """
-    from ctx_weft.core.loop.park import HitlPark
+    from ctx_weft.core.loop.signals import HitlPark
     from ctx_weft.core.loop.steps.act import ActStep
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from tests.integration.test_interactive_task import _act_state_ctx

@@ -4,7 +4,7 @@
 
 `finish_task` 在 root 上此前是**零复核**的：`observe._should_use_llm` 对
 `parent_task_id is None` 降级走机械判决，而 `_mechanical_verdict` 把 `actor_done` 无条件
-映射成 success；那道 success-without-outputs 护栏又长在 `report_task_outcome` 里、不在机械
+映射成 success；那道 success-without-outputs 护栏又长在 `report_observation` 里、不在机械
 判决的路上。于是同一个 agent 的两种收尾一个被判、一个不被：
 
     说了段话就停下      → park + 后台判定（S5）
@@ -31,14 +31,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop import background as background_pkg
-from ctx_weft.core.loop.background import runner
-from ctx_weft.core.loop.park import HitlPark
+from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep
 from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.hitl import PREFACE_NORMAL, UserTurnDelivery
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from tests.integration.test_interactive_task import _act_state_ctx
+from tests.step_helpers import patch_observe_start
 
 pytestmark = pytest.mark.asyncio
 
@@ -85,7 +84,7 @@ def _spy_launch(monkeypatch) -> list[str]:
         seen.append(boundary)
         return asyncio.ensure_future(asyncio.sleep(0))
 
-    monkeypatch.setattr(background_pkg, "launch_recap", _fake, raising=False)
+    patch_observe_start(monkeypatch, _fake)
     return seen
 
 
@@ -112,7 +111,7 @@ async def test_root_finish_task_parks_with_the_finish_park_boundary(monkeypatch)
 
     # park 不写 task 状态（Task 4）：AWAITING_HUMAN 由 TaskManager 据 RunOutcome 落。
     assert task.status == "ACTIVE"
-    # 产出必须在 park **之前**合成好：否则 `report_task_outcome` 的 success-without-outputs
+    # 产出必须在 park **之前**合成好：否则 `report_observation` 的 success-without-outputs
     # 护栏会把判决改判 retry，这个 task 永远终结不了（2026-09-24 那个坑的同形复现）。
     assert task.outputs, "park 之前没合成 outputs——判决会被护栏改判 retry"
 

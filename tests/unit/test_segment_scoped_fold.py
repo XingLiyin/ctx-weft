@@ -19,27 +19,26 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctx_weft.core.loop.observing as _obs_mod
-from ctx_weft.core.loop.background import recap as recap_mod
-from ctx_weft.core.loop.background import runner
-from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
+import ctx_weft.core.loop.steps.observe as _obs_mod
 from ctx_weft.core.capabilities.control_tools import (
-    REPORT_TASK_OUTCOME_NAME,
-    ControlResult,
+    REPORT_OBSERVATION_NAME,
 )
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
+from ctx_weft.core.loop.driver import StepDriver
+from ctx_weft.core.loop.task_memory_fold import segment_fold
+from ctx_weft.core.loop.steps import observe as recap_mod
+from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
 from ctx_weft.protocols import (
     ImagePart,
+    MemoryAddress,
     MemoryEvent,
     MemoryEventType,
     MemoryScope,
-    MemoryAddress,
     ProviderContext,
     TextPart,
 )
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-from ctx_weft.core.loop.fold import segment_fold
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 
 MT = MemoryEventType
 
@@ -127,6 +126,31 @@ def _short_seg_state_ctx(mem: InMemoryMemoryProvider, threshold: int):
     return state, ctx
 
 
+async def test_is_short_segment_disabled_threshold():
+    mem = InMemoryMemoryProvider()
+    await _seed_two_segments(mem)
+    state, ctx = _short_seg_state_ctx(mem, threshold=0)
+
+    assert await recap_mod.ObserveStep()._is_short_segment(state, ctx) is False
+
+
+async def test_is_short_segment_watermark_excludes_later_user_turn():
+    """后台观察的水位线固定原段，不被稍后到达的用户消息重置。"""
+    mem = InMemoryMemoryProvider()
+    await _seed_two_segments(mem)
+    await mem.ingest(MemoryEvent(
+        type=MT.LLM_RESPONSE, address=_SCOPE, content="长" * 4000,
+        timestamp=_ts(60), role="assistant"), _PCTX)
+    await mem.ingest(MemoryEvent(
+        type=MT.USER_PROMPT, address=_SCOPE, content="下一问",
+        timestamp=_ts(70), role="user"), _PCTX)
+    state, ctx = _short_seg_state_ctx(mem, threshold=400)
+    step = recap_mod.ObserveStep()
+
+    assert await step._is_short_segment(state, ctx, watermark=_ts(60)) is False
+    assert await step._is_short_segment(state, ctx) is True
+
+
 async def test_is_short_segment_counts_only_current_segment():
     """段一 raw 超阈值、当前段 raw 极短 → 仍判 short（旧实现把段一也计入 → False）。"""
     mem = InMemoryMemoryProvider()
@@ -137,7 +161,7 @@ async def test_is_short_segment_counts_only_current_segment():
         timestamp=_ts(55), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await recap_mod.is_short_segment(state, ctx) is True, \
+    assert await recap_mod.ObserveStep()._is_short_segment(state, ctx) is True, \
         "免折门只该看当前段（末条 UP 之后）的 raw"
 
 
@@ -150,7 +174,7 @@ async def test_is_short_segment_long_current_segment_not_short():
         timestamp=_ts(60), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await recap_mod.is_short_segment(state, ctx) is False
+    assert await recap_mod.ObserveStep()._is_short_segment(state, ctx) is False
 
 
 async def test_is_short_segment_single_llm_reply_is_short_regardless_of_tokens():
@@ -170,7 +194,7 @@ async def test_is_short_segment_single_llm_reply_is_short_regardless_of_tokens()
         timestamp=_ts(80), role="tool"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await recap_mod.is_short_segment(state, ctx) is True,         "单条 LLM 回复的段不该折，无论多长"
+    assert await recap_mod.ObserveStep()._is_short_segment(state, ctx) is True,         "单条 LLM 回复的段不该折，无论多长"
 
 
 async def test_is_short_segment_counts_image_parts():
@@ -187,7 +211,7 @@ async def test_is_short_segment_counts_image_parts():
         timestamp=_ts(55), role="assistant"), _PCTX)
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
 
-    assert await recap_mod.is_short_segment(state, ctx) is False, \
+    assert await recap_mod.ObserveStep()._is_short_segment(state, ctx) is False, \
         "一张图 1600 token 已超阈值 400，不得因图算 0 而误判短段免折"
 
 
@@ -212,9 +236,9 @@ def _make_usage_chunk():
 
 
 async def _fake_stream(ctx, state, request):
-    # 判定档（`plain_text`）的 terminal tool 是 `report_task_outcome`——2026-09-28 起两档是两个
+    # 判定档（`plain_text`）的 terminal tool 是 `report_observation`——2026-09-28 起两档是两个
     # 工具，名字对不上 `run_observe_react` 就不会终止，报告只能从 last_text 兜底取。
-    yield _make_tool_call_chunk(REPORT_TASK_OUTCOME_NAME)
+    yield _make_tool_call_chunk(REPORT_OBSERVATION_NAME)
     yield _make_usage_chunk()
 
 
@@ -250,7 +274,7 @@ async def test_background_fold_after_short_skip_keeps_previous_segment_raw(
         type=MT.LLM_RESPONSE, address=state.scope, content="A2 当前段",
         timestamp=datetime.now(UTC), role="assistant"), ctx.provider_ctx)
 
-    await runner.launch_recap(state, ctx, boundary="plain_text")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "plain_text"})
 
     chrono = await _chrono(ctx.memory, state.scope, ctx.provider_ctx)
     contents = [r.content for r in chrono]

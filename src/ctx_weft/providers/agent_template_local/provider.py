@@ -5,9 +5,10 @@
 
 **不做「缺 facet 从 default 模板借」**（2026-09-28 移出）：那是部署约定，不是模板加载的
 一部分——「有一个叫 default 的母版」是宿主的产品概念。缺 facet 时的兜底全在 core 自己手里：
-compact / recognize_intent 回退 act facet，observe 家族不回退、由装配层的通用 observer 文案
-接手（见 `core/assembler/sources/identity.py::_OBSERVE_PURPOSES`）。宿主要「借母版」就在它自己
-的 AgentCapabilityProvider 里做。
+observe 判决档使用 ROLE + COMPACT、摘要档只使用 COMPACT；observer 与 compact 都不
+回退 act，其中缺失的压缩纪律由 composer 的 core fallback 补上。recognize_intent 仍回退
+act facet。规则见 `core/assembler/sources/identity.py`；宿主要「借母版」就在它自己的
+AgentCapabilityProvider 里做。
 """
 
 from __future__ import annotations

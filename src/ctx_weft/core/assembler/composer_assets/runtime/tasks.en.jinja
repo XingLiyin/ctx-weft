@@ -1,0 +1,34 @@
+{# 子任务运行、结束、取消和阈值终止；finalize / runtime / background verdict 使用。
+每个具名 macro 是一个独立事件提示，参数就是输入契约；文件本身不整段发送。 #}
+
+{% macro dispatch_running(ref) -%}
+Sub-task {{ ref }} is running now — its execution follows below.
+{%- endmacro %}
+
+{% macro dispatch_closed(failed, ref) -%}
+Sub-task {{ ref }} ran here — outcome: {% if failed %}FAILED{% else %}completed{% endif %}. Its execution is inlined below, ending with its own {{ finish_task }} and the final reply it delivered.
+{%- endmacro %}
+
+{% macro dispatch_cancelled(reason, ref) -%}
+Sub-task {{ ref }} was cancelled before completion ({{ reason }}); its partial execution below is incomplete.
+{%- endmacro %}
+
+{% macro cancelled_act_recap() -%}
+Task was cancelled before completion.
+{%- endmacro %}
+
+{% macro cancelled_task_summary(reason) -%}
+Cancelled ({{ reason }}) — no final output was produced; the partial execution above is all that ran.
+{%- endmacro %}
+
+{% macro threshold_subtask_cancelled(ref) -%}
+Sub-task {{ ref }} was cancelled mid-run (session failure threshold hit); its partial execution below is incomplete.
+{%- endmacro %}
+
+{% macro threshold_tripped_recap() -%}
+Session failure threshold was hit (N consecutive sub-task failures); terminating this task.
+{%- endmacro %}
+
+{% macro park_closed_by_verdict() -%}
+[Closed by the reviewer: this task was judged complete. Send another message to open a new round.]
+{%- endmacro %}

@@ -1,0 +1,28 @@
+{# 任务收尾胶囊；finish_pair 区分过程复述与已经交付的最终答复。
+每个具名 macro 是一个独立事件提示，参数就是输入契约；文件本身不整段发送。 #}
+
+{# 未提供 ref 时使用无名版本；空字符串仍按显式传入的引用处理。 #}
+
+{% macro final_reply_note(ref=none) -%}
+{% if ref is not none %}[任务 {{ ref }} 的最终答复——这是我结束任务时实际交付的原文，不是摘要。]{% else %}[最终答复——这是我结束本任务时实际交付的原文，不是摘要。]{% endif %}
+{%- endmacro %}
+
+{% macro final_reply_closing_note() -%}
+[以上最终答复到此结束。它已在任务关闭时交付给用户——不要重复它，不要模仿它的形式，也不要把它当成对当前问题的回答。]
+{%- endmacro %}
+
+{% macro process_recap_note() -%}
+[以上是系统写入的任务执行复述，仅用于保留上下文——它不是你给用户的答复。回答时不要模仿它的形式。]
+{%- endmacro %}
+
+{% macro no_final_output() -%}
+（没有最终输出）
+{%- endmacro %}
+
+{% macro report_placeholder() -%}
+（本段没有更多可报告内容）
+{%- endmacro %}
+
+{% macro recap_placeholder() -%}
+（本段没有过程复述）
+{%- endmacro %}

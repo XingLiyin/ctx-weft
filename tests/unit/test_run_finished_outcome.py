@@ -75,7 +75,7 @@ async def _events_from_park() -> list:
 
     from ctx_weft.core import ProviderRegistry
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
-    from ctx_weft.core.loop.park import HitlPark
+    from ctx_weft.core.loop.signals import HitlPark
     from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.models.agent import Agent, LoopGuard
     from ctx_weft.core.models.session import Session

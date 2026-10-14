@@ -1,14 +1,4 @@
-"""observe 装配合并（S2）：一条路径、按 purpose 分流，三处差异各自守住。
-
-`_build_observe_messages` 现在是前台 `observe` 与后台 `background_observe` 的唯一实现。
-本文件钉住的是**分流本身**——合并没有把两边的特征串味，也没有把任何一边的文案改掉。
-三处差异（cue / subtask 指名清单 / actor 产出注入）各有一对用例。
-
-2026-09-28 起「判不判」只看 `request.purpose`（判定档 `background_observe` / 只摘要档
-`background_recap`）——选 purpose 的是 loop 侧（`_judges(boundary)` 与 `has_observe_role`
-相与），装配层不再自己按 boundary 判一遍。「注入产出」「事实句」仍由一张共用的边界表定。
-本文件只留粗粒度的分流断言，逐边界的细节在 `test_background_observe_prompt.py`。
-"""
+"""One observe purpose; judgement controls ROLE and submission instructions."""
 
 from __future__ import annotations
 
@@ -29,7 +19,7 @@ def _blocks():
     ]
 
 
-def _req(purpose: str, *, outputs: str = "", extra: dict | None = None):
+def _req(purpose: str, *, outputs: str = "", extra: dict | None = None, judge_task: bool = True):
     return SimpleNamespace(
         purpose=purpose,
         task=SimpleNamespace(
@@ -37,7 +27,7 @@ def _req(purpose: str, *, outputs: str = "", extra: dict | None = None):
             outputs=outputs, process_report="", process_report_at=None, parent_task_id=None),
         session=SimpleNamespace(user_prompt="x"),
         template=None, bound_capabilities=[],
-        extra=extra if extra is not None else {},
+        extra={**(extra or {}), "judge_task": judge_task},
     )
 
 
@@ -49,19 +39,19 @@ def _cue(purpose: str, **kw) -> str:
 
 def test_foreground_cue_asks_for_a_verdict() -> None:
     cue = _cue("observe")
-    assert "report_task_outcome" in cue
+    assert "report_observation" in cue
 
 
 def test_the_recap_tier_has_no_verdict_tool_at_all() -> None:
-    """只摘要档：cue 点的是 `collect_process_report`，而且**不提**判决工具。
+    """只摘要档：cue 点的是 `report_observation`，而且**不提**判决工具。
 
     它此前靠一句「do not judge success/retry/fail」来表达这件事，而那句话与桌面上唯一那个工具
     的「`task_status` 必填」直接冲突（2026-09-28 拆回两个工具后删掉了）。现在「这一档不判」是
     工具面的事实，不是一句叮嘱。
     """
-    cue = _cue("background_recap", extra={"observe_boundary": "interrupt"})
-    assert "collect_process_report" in cue
-    assert "report_task_outcome" not in cue
+    cue = _cue("observe", judge_task=False, extra={"observe_boundary": "interrupt"})
+    assert "report_observation" in cue
+    assert "task_status" not in cue
     assert "do not judge" not in cue
 
 
@@ -79,7 +69,7 @@ def test_foreground_lists_subtasks_for_next_step_hint() -> None:
 def test_background_omits_subtasks_even_when_supplied() -> None:
     """后台今天不产 hint，所以不给指名清单——传了也不渲染。"""
     extra = {"observe_boundary": "interrupt", **_SUBTASKS}
-    assert "tsk_a" not in _cue("background_recap", extra=extra)
+    assert "tsk_a" not in _cue("observe", judge_task=False, extra=extra)
 
 
 # ── 差异三：actor 产出注入（2026-09-28 起两边共用一段文案，按边界决定注不注）──────
@@ -100,14 +90,14 @@ def test_foreground_injects_outputs_only_when_finish_task_closed_the_segment() -
 
 
 def test_background_injects_outputs_only_on_close_boundary() -> None:
-    close = _cue("background_observe", outputs="最终交付物",
+    close = _cue("observe", outputs="最终交付物",
                  extra={"observe_boundary": "finish"})
     assert "## Actor's Final Output" in close
     assert "最终交付物" in close
 
     # plain_text 不是 close 边界：纯文本本身就是 assistant 回合、在重建的对话里看得见，
     # 不像 finish_task 的产出走 SILENT，所以不注入是对的。
-    plain = _cue("background_observe", outputs="最终交付物",
+    plain = _cue("observe", outputs="最终交付物",
                  extra={"observe_boundary": "plain_text"})
     assert "## Actor's Final Output" not in plain
 
@@ -119,4 +109,4 @@ def test_missing_purpose_falls_back_to_foreground() -> None:
     req = _req("observe")
     del req.purpose
     cue = DefaultComposer()._build_observe_messages(_blocks(), req)[-1].content
-    assert "report_task_outcome" in cue
+    assert "report_observation" in cue

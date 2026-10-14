@@ -1,14 +1,16 @@
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
-from ctx_weft.core.loop.background import recap as recap_mod
-from ctx_weft.core.loop.background import runner
-from ctx_weft.core.loop import finish_pair as fp
-from ctx_weft.protocols.events import EventType
-from ctx_weft.protocols import MemoryEvent, MemoryEventType
+
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
+from ctx_weft.core.capabilities.control_tools import ControlResult
+from ctx_weft.core.loop import task_memory_fold as fp
+from ctx_weft.core.loop.driver import StepDriver
+from ctx_weft.core.loop.steps import observe as recap_mod
+from ctx_weft.protocols import MemoryEvent, MemoryEventType
+from ctx_weft.protocols.events import EventType
 
 
 @pytest.mark.asyncio
@@ -24,9 +26,9 @@ async def test_compact_boundary_skips_when_no_active_raw(fake_state_ctx, monkeyp
     async def _react(*a, **k):
         called["react"] = True
         return None, ""
-    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
-    await recap_mod._run_recap(state, ctx, boundary="interrupt")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
 
     assert called["react"] is False  # 护栏跳过，未跑 LLM observe
 
@@ -44,9 +46,9 @@ async def test_close_boundary_not_guarded(fake_state_ctx, monkeypatch):
         called["react"] = True
         from ctx_weft.core.capabilities.control_tools import ControlResult
         return ControlResult(content="r", metadata={K.OBSERVER_ACT_RECAP: "r"}), ""
-    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
-    await recap_mod._run_recap(state, ctx, boundary="finish")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
     assert called["react"] is True  # close 边界照常跑
 
@@ -62,9 +64,9 @@ async def test_close_boundary_exception_pops_close_synth(fake_state_ctx, monkeyp
 
     async def _boom(*a, **k):
         raise RuntimeError("llm outage")
-    monkeypatch.setattr(recap_mod, "run_observe_react", _boom)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _boom)
 
-    await recap_mod._run_recap(state, ctx, boundary="finish")  # 不应外抛
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})  # 不应外抛
 
     assert fp.pop_close_synth(state.task.id) is None, "异常路径应弹掉登记（防泄漏）"
     done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
@@ -87,9 +89,9 @@ async def test_short_segment_on_summary_only_boundary_skips_the_llm(fake_state_c
     async def _react(*a, **k):
         called["react"] = True
         return None, ""
-    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
-    await recap_mod._run_recap(state, ctx, boundary="interrupt")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
 
     assert called["react"] is False  # 短段直接跳过，连 LLM 都不跑
     n_raw = await ctx.memory.count_recent(
@@ -123,9 +125,9 @@ async def test_segment_over_threshold_folds_as_before(fake_state_ctx, monkeypatc
     async def _react(*a, **k):
         called["react"] = True
         return ControlResult(content="segment recap", metadata={K.OBSERVER_ACT_RECAP: "segment recap"}), ""
-    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
-    await recap_mod._run_recap(state, ctx, boundary="plain_text")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "plain_text"})
 
     assert called["react"] is True
     n_raw = await ctx.memory.count_recent(
@@ -147,9 +149,9 @@ async def test_close_boundary_ignores_short_segment_gate(fake_state_ctx, monkeyp
     async def _react(*a, **k):
         called["react"] = True
         return ControlResult(content="r", metadata={K.OBSERVER_ACT_RECAP: "r"}), ""
-    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
-    await recap_mod._run_recap(state, ctx, boundary="finish")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
     assert called["react"] is True
 
@@ -179,12 +181,12 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
         calls.append(1)
         return ControlResult(content=f"S{len(calls)}", metadata={K.OBSERVER_ACT_RECAP: f"S{len(calls)}"}), ""
 
-    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
     # 背靠背发起两次同 task interrupt observe（不 await 第一个就发第二个），
     # 同 task 锁下第一次先真正折叠，第二次落到已折叠的段上。
-    t1 = runner.launch_recap(state, ctx, boundary="interrupt")
-    t2 = runner.launch_recap(state, ctx, boundary="interrupt")
+    t1 = StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
+    t2 = StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
     await asyncio.gather(t1, t2)
 
     # 1) 第一次真的跑了、折了段：该段 active LLM_RESPONSE 计数归零
@@ -204,7 +206,7 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
 
     # 4) await_pending_recap 对被跳过的第二个任务也能正常收尾（不挂起/不报错）
     await asyncio.wait_for(
-        runner.await_pending_recap(state.task.id), timeout=1.0,
+        StepDriver.for_context(ctx).executions.wait(state.task.id), timeout=1.0,
     )
 
 
@@ -226,9 +228,9 @@ async def test_short_segment_on_plain_text_still_judges(fake_state_ctx, monkeypa
         called["react"] = True
         return ControlResult(content="话术", metadata={K.OBSERVER_ACT_RECAP: "短段 recap"}), ""
 
-    monkeypatch.setattr(recap_mod, "run_observe_react", _react)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
-    await recap_mod._run_recap(state, ctx, boundary="plain_text")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "plain_text"})
 
     assert called["react"] is True, "短段也要跑判定"
     n_raw = await ctx.memory.count_recent(

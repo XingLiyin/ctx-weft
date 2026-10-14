@@ -9,11 +9,14 @@ import logging
 from typing import Any
 
 from ctx_weft.core.loop.driver import (
-    LoopContext, LoopState, Step, StepOutcome, _persist_user_prompt,
+    LoopContext,
+    LoopState,
+    Step,
+    StepDriver,
+    StepOutcome,
+    _persist_user_prompt,
 )
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
-from ctx_weft.core.utils.clock import now_utc
-from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +54,8 @@ class SuspendStep(Step):
         # resume 竞态由 launch 时钉住的段界水位线接管（2026-09-22 起 `_run_loop` 入口那道
         # 屏障已拆除，`await_pending_recap` 只剩测试在调）：迟到的折叠只认这次 launch 之前
         # 的记录，不抢段界、也不排到新消息之后。
-        from ctx_weft.core.loop.background import launch_recap
-        launch_recap(state, ctx, boundary="dispatch")
+        StepDriver.for_context(ctx).start(
+            "observe", state, ctx, options={"boundary": "dispatch", "judge_task": False})
 
         run_outcome = RunOutcome(
             kind=RunOutcomeKind.SUSPENDED_ON_CHILDREN,

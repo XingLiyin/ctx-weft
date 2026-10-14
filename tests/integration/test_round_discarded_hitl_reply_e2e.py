@@ -60,7 +60,7 @@ class _StallsBeforeFirstChunkLLM(MockLLMAdapter):
         """
         tools = getattr(request, "tools", None) or []
         names = {getattr(t, "name", "") for t in tools}
-        return bool(names & {"control__update_task_metadata", "control__report_task_outcome"})
+        return bool(names & {"control__update_task_metadata", "control__report_observation"})
 
     def complete(self, request, stream=True):
         self.last_request = request

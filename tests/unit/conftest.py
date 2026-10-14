@@ -109,6 +109,7 @@ async def fake_state_ctx():
         # `_run_loop` 的实际发射点）——缺了这个字段就不是「测试假绿」而是
         # AttributeError 直接炸穿，所以补上，不是行为放宽。
         status="ACTIVE",
+        outputs=None,
         user_prompt="hello user",
         user_prompt_in_memory=True,
         process_report="",
@@ -145,7 +146,7 @@ async def fake_state_ctx():
     # Minimal assembler and LLM (won't be called — summarize_for_compact is monkeypatched)
     class _FakeAssembler:
         async def assemble(self, request: Any) -> Any:
-            return SimpleNamespace(system="SYS", messages=[], tools=[])
+            return SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")])
 
     class _FakeLLM:
         def __init__(self) -> None:

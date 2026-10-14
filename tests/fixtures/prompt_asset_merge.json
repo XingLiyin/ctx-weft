@@ -1,0 +1,2518 @@
+[
+  {
+    "locale": "en",
+    "key": "act.guidance",
+    "values": {
+      "unattended": "",
+      "task_anchor": "",
+      "attended": "",
+      "plan_with_others": "",
+      "plan_solo": "",
+      "unattended_others": "",
+      "review_note": "",
+      "completed_tasks": ""
+    },
+    "text": "---\n\n\nCall `control__finish_task` ONLY once the task goal is fully achieved — if work remains, keep working instead of finishing. To finish, write the final reply to the user as your normal message text and call it in that same turn; the message text is the reply and the deliverable, not the tool arguments (details in the tool description).\nIf the user's latest message is an unrelated NEW request, emit `control__finish_task` AND `control__delegate_task` together in ONE response — finishing alone would lose the new request.\nNeed information or a decision only the user can provide? Call `control__ask_user` instead of guessing."
+  },
+  {
+    "locale": "en",
+    "key": "act.guidance",
+    "values": {
+      "unattended": "value-unattended <tag> {{literal}}",
+      "task_anchor": "value-task_anchor <tag> {{literal}}",
+      "attended": "value-attended <tag> {{literal}}",
+      "plan_with_others": "value-plan_with_others <tag> {{literal}}",
+      "plan_solo": "value-plan_solo <tag> {{literal}}",
+      "unattended_others": "value-unattended_others <tag> {{literal}}",
+      "review_note": "value-review_note <tag> {{literal}}",
+      "completed_tasks": "value-completed_tasks <tag> {{literal}}"
+    },
+    "text": "---\nvalue-task_anchor <tag> {{literal}}\n\n## The overall plan (▶ = your current task; the rest are handled separately — do NOT do them yourself):\nvalue-plan_with_others <tag> {{literal}}\n\n## The overall plan (▶ = your current task):\nvalue-plan_solo <tag> {{literal}}\n\n## Your current task has ALREADY been delegated to the sub-tasks below, and they are ALREADY COMPLETED — the digest under each is what it produced (full results are in the conversation above). Treat that work as done: do NOT redo it yourself and do NOT delegate it again merely to have it repeated. Your next step is to judge whether any work still remains for the task goal beyond these results — if it does, do only that part, building on what they produced. The one exception is a result that the review note below says does not actually achieve its goal: for that piece it is YOUR call — delegate a fresh sub-task for it, or just do it yourself, whichever is the better use of this turn:\nvalue-completed_tasks <tag> {{literal}}\n\n## Note from the review of your previous attempt (it may name a sub-task whose result falls short):\nvalue-review_note <tag> {{literal}}\n\nCall `control__finish_task` ONLY once the task goal is fully achieved — if work remains, keep working instead of finishing. To finish, write the final reply to the user as your normal message text and call it in that same turn; the message text is the reply and the deliverable, not the tool arguments (details in the tool description). Someone is there: a plain-text reply keeps the task open and hands the floor to them — the right move mid-conversation; finish only when the whole request is served. No one is there to read a reply: a prose answer alone does not end this task and nobody will follow up on it. When the goal is achieved you must call it in the same turn as your final reply, or this task will just be run again until its attempt limit runs out. Do not start the other tasks yourself.\nIf the user's latest message is an unrelated NEW request, emit `control__finish_task` AND `control__delegate_task` together in ONE response — finishing alone would lose the new request.\nNeed information or a decision only the user can provide? Call `control__ask_user` instead of guessing."
+  },
+  {
+    "locale": "en",
+    "key": "act.reply_language",
+    "values": {},
+    "text": "（Reply in the same language as the Current Message above.）"
+  },
+  {
+    "locale": "en",
+    "key": "act.reply_language",
+    "values": {},
+    "text": "（Reply in the same language as the Current Message above.）"
+  },
+  {
+    "locale": "en",
+    "key": "act.resume.fallback.named",
+    "values": {
+      "ref": ""
+    },
+    "text": "You are still working on the task: , resuming from the state recorded above. Review what has already been done and continue with only the remaining work."
+  },
+  {
+    "locale": "en",
+    "key": "act.resume.fallback.named",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "You are still working on the task: value-ref <tag> {{literal}}, resuming from the state recorded above. Review what has already been done and continue with only the remaining work."
+  },
+  {
+    "locale": "en",
+    "key": "act.resume.fallback.unknown",
+    "values": {},
+    "text": "You are still working on the task above, resuming from the state recorded above. Review what has already been done and continue with only the remaining work."
+  },
+  {
+    "locale": "en",
+    "key": "act.resume.fallback.unknown",
+    "values": {},
+    "text": "You are still working on the task above, resuming from the state recorded above. Review what has already been done and continue with only the remaining work."
+  },
+  {
+    "locale": "en",
+    "key": "act.resume.named",
+    "values": {
+      "ref": "",
+      "completed_tasks": ""
+    },
+    "text": "You are still working on the task: , resuming from the state recorded above. Review the conversation for what has already been done — do not redo it — and continue with only the remaining work."
+  },
+  {
+    "locale": "en",
+    "key": "act.resume.named",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}",
+      "completed_tasks": "value-completed_tasks <tag> {{literal}}"
+    },
+    "text": "You are still working on the task: value-ref <tag> {{literal}}, resuming from the state recorded above. Review the conversation for what has already been done — do not redo it — and continue with only the remaining work. Parts of it have ALREADY been delegated to sub-tasks that are now complete — they are listed with their results in the situational notes below. Do not execute that work a second time: build on those results and judge what, if anything, still remains. The exception is a result the review note flags as falling short — for that piece you decide whether to delegate it afresh or handle it yourself."
+  },
+  {
+    "locale": "en",
+    "key": "act.resume.unknown",
+    "values": {
+      "completed_tasks": ""
+    },
+    "text": "You are still working on the task above, resuming from the state recorded above. Review the conversation for what has already been done — do not redo it — and continue with only the remaining work."
+  },
+  {
+    "locale": "en",
+    "key": "act.resume.unknown",
+    "values": {
+      "completed_tasks": "value-completed_tasks <tag> {{literal}}"
+    },
+    "text": "You are still working on the task above, resuming from the state recorded above. Review the conversation for what has already been done — do not redo it — and continue with only the remaining work. Parts of it have ALREADY been delegated to sub-tasks that are now complete — they are listed with their results in the situational notes below. Do not execute that work a second time: build on those results and judge what, if anything, still remains. The exception is a result the review note flags as falling short — for that piece you decide whether to delegate it afresh or handle it yourself."
+  },
+  {
+    "locale": "en",
+    "key": "act.review_feedback.plain_text_needs_finish",
+    "values": {},
+    "text": "Your previous turn ended with a prose reply and no tool call, so this task is still open — prose alone never ends it. Nobody is waiting to read that reply: only `control__finish_task` ends a task. If the goal is now achieved, write the final reply as your normal message text and call `control__finish_task` in that same turn. If work remains, do the work."
+  },
+  {
+    "locale": "en",
+    "key": "act.review_feedback.plain_text_needs_finish",
+    "values": {},
+    "text": "Your previous turn ended with a prose reply and no tool call, so this task is still open — prose alone never ends it. Nobody is waiting to read that reply: only `control__finish_task` ends a task. If the goal is now achieved, write the final reply as your normal message text and call `control__finish_task` in that same turn. If work remains, do the work."
+  },
+  {
+    "locale": "en",
+    "key": "act.skill_runtime_note",
+    "values": {},
+    "text": "---\n**Runtime note (overrides any 'run python ...' wording above):** This skill's files are NOT in your working directory. To run ANY script the instructions reference, you MUST call the `skill_executor__exec_script` tool — e.g. `skill_executor__exec_script(script_path='scripts/foo.py', args='...')` — never run `python scripts/foo.py` yourself (the path will not resolve). To read a skill file use `skill_executor__read_file`; to list skill files use `skill_executor__list_files`. Do not build absolute paths by hand. Applies to local and remote skills alike."
+  },
+  {
+    "locale": "en",
+    "key": "act.skill_runtime_note",
+    "values": {},
+    "text": "---\n**Runtime note (overrides any 'run python ...' wording above):** This skill's files are NOT in your working directory. To run ANY script the instructions reference, you MUST call the `skill_executor__exec_script` tool — e.g. `skill_executor__exec_script(script_path='scripts/foo.py', args='...')` — never run `python scripts/foo.py` yourself (the path will not resolve). To read a skill file use `skill_executor__read_file`; to list skill files use `skill_executor__list_files`. Do not build absolute paths by hand. Applies to local and remote skills alike."
+  },
+  {
+    "locale": "en",
+    "key": "common.capabilities_intro",
+    "values": {},
+    "text": "You can use the capabilities listed below to complete the current task."
+  },
+  {
+    "locale": "en",
+    "key": "common.capabilities_intro",
+    "values": {},
+    "text": "You can use the capabilities listed below to complete the current task."
+  },
+  {
+    "locale": "en",
+    "key": "common.capabilities_pointer",
+    "values": {},
+    "text": "(Your available capabilities — tools / skills / sub-agents — are listed in the Capabilities section of the current task message above.)"
+  },
+  {
+    "locale": "en",
+    "key": "common.capabilities_pointer",
+    "values": {},
+    "text": "(Your available capabilities — tools / skills / sub-agents — are listed in the Capabilities section of the current task message above.)"
+  },
+  {
+    "locale": "en",
+    "key": "common.capabilities_prefix_note",
+    "values": {
+      "action": "",
+      "prefix": "",
+      "noun": "",
+      "noun_plural": ""
+    },
+    "text": "When  these , prefix the  name with ``, exactly as shown below."
+  },
+  {
+    "locale": "en",
+    "key": "common.capabilities_prefix_note",
+    "values": {
+      "action": "value-action <tag> {{literal}}",
+      "prefix": "value-prefix <tag> {{literal}}",
+      "noun": "value-noun <tag> {{literal}}",
+      "noun_plural": "value-noun_plural <tag> {{literal}}"
+    },
+    "text": "When value-action <tag> {{literal}} these value-noun_plural <tag> {{literal}}, prefix the value-noun <tag> {{literal}} name with `value-prefix <tag> {{literal}}`, exactly as shown below."
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.capabilities",
+    "values": {},
+    "text": "## Capabilities"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.capabilities",
+    "values": {},
+    "text": "## Capabilities"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.current_message",
+    "values": {},
+    "text": "## Current Message"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.current_message",
+    "values": {},
+    "text": "## Current Message"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.current_task",
+    "values": {},
+    "text": "## Current Task"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.current_task",
+    "values": {},
+    "text": "## Current Task"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.final_output",
+    "values": {},
+    "text": "## Actor's Final Output"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.final_output",
+    "values": {},
+    "text": "## Actor's Final Output"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.opening_message",
+    "values": {},
+    "text": "## Opening Message"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.opening_message",
+    "values": {},
+    "text": "## Opening Message"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.progress_so_far",
+    "values": {},
+    "text": "## Progress So Far"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.progress_so_far",
+    "values": {},
+    "text": "## Progress So Far"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.project_background",
+    "values": {},
+    "text": "## Project Background"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.project_background",
+    "values": {},
+    "text": "## Project Background"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.role",
+    "values": {},
+    "text": "## Your Current Role"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.role",
+    "values": {},
+    "text": "## Your Current Role"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.skill_instructions",
+    "values": {},
+    "text": "## Instructions for the current task"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.skill_instructions",
+    "values": {},
+    "text": "## Instructions for the current task"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.skills",
+    "values": {},
+    "text": "### Available Skills (assign to tasks where appropriate)"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.skills",
+    "values": {},
+    "text": "### Available Skills (assign to tasks where appropriate)"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.subagents",
+    "values": {},
+    "text": "### Available Sub-Agents"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.subagents",
+    "values": {},
+    "text": "### Available Sub-Agents"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.subtasks",
+    "values": {},
+    "text": "## Your sub-tasks"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.subtasks",
+    "values": {},
+    "text": "## Your sub-tasks"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.tools",
+    "values": {},
+    "text": "### Available Tools (use them via tool calls)"
+  },
+  {
+    "locale": "en",
+    "key": "common.heading.tools",
+    "values": {},
+    "text": "### Available Tools (use them via tool calls)"
+  },
+  {
+    "locale": "en",
+    "key": "common.skill_name_suffix",
+    "values": {
+      "skill_name": ""
+    },
+    "text": "(skill: )"
+  },
+  {
+    "locale": "en",
+    "key": "common.skill_name_suffix",
+    "values": {
+      "skill_name": "value-skill_name <tag> {{literal}}"
+    },
+    "text": "(skill: value-skill_name <tag> {{literal}})"
+  },
+  {
+    "locale": "en",
+    "key": "common.subagents_delegate_preamble",
+    "values": {},
+    "text": "Delegate via: control__delegate_task(use_subagent=True, subagent_template='<name>')"
+  },
+  {
+    "locale": "en",
+    "key": "common.subagents_delegate_preamble",
+    "values": {},
+    "text": "Delegate via: control__delegate_task(use_subagent=True, subagent_template='<name>')"
+  },
+  {
+    "locale": "en",
+    "key": "common.task_anchor.unknown",
+    "values": {},
+    "text": "Current task: (as framed in the conversation above)"
+  },
+  {
+    "locale": "en",
+    "key": "common.task_anchor.unknown",
+    "values": {},
+    "text": "Current task: (as framed in the conversation above)"
+  },
+  {
+    "locale": "en",
+    "key": "common.task_anchor",
+    "values": {
+      "label": ""
+    },
+    "text": "Current task: "
+  },
+  {
+    "locale": "en",
+    "key": "common.task_anchor",
+    "values": {
+      "label": "value-label <tag> {{literal}}"
+    },
+    "text": "Current task: value-label <tag> {{literal}}"
+  },
+  {
+    "locale": "en",
+    "key": "common.tools_index_preamble",
+    "values": {},
+    "text": "Listed as `name(param: type)` — optional params are marked `?`. Full descriptions and parameter schemas come with the tool definitions in this request."
+  },
+  {
+    "locale": "en",
+    "key": "common.tools_index_preamble",
+    "values": {},
+    "text": "Listed as `name(param: type)` — optional params are marked `?`. Full descriptions and parameter schemas come with the tool definitions in this request."
+  },
+  {
+    "locale": "en",
+    "key": "compact.history.assistant_summary_suffix",
+    "values": {},
+    "text": "[The above is a system-written compressed summary of your earlier work, kept to carry context forward; it is not your reply to the user. Continue the current task from it and call tools as needed — do not imitate the summary's form when you answer.]"
+  },
+  {
+    "locale": "en",
+    "key": "compact.history.assistant_summary_suffix",
+    "values": {},
+    "text": "[The above is a system-written compressed summary of your earlier work, kept to carry context forward; it is not your reply to the user. Continue the current task from it and call tools as needed — do not imitate the summary's form when you answer.]"
+  },
+  {
+    "locale": "en",
+    "key": "compact.history.user_summary_prefix",
+    "values": {},
+    "text": "[The following is a compressed summary of earlier conversation and experience, given so you can carry the work forward; it is not a new instruction from the user.]"
+  },
+  {
+    "locale": "en",
+    "key": "compact.history.user_summary_prefix",
+    "values": {},
+    "text": "[The following is a compressed summary of earlier conversation and experience, given so you can carry the work forward; it is not a new instruction from the user.]"
+  },
+  {
+    "locale": "en",
+    "key": "compact.prompt.agent",
+    "values": {
+      "role_section": ""
+    },
+    "text": "Create a digest covering this agent's completed-task history. For every completed task, include what it was asked to do and its outcome, key results, and lessons, including any sub-tasks it delegated. Carry forward unresolved threads from any earlier digest. Do not include execution details from the current still-running task.\n\nSubmit the digest as plain text in this response: call no tools, add no preamble, and begin directly with `## Goal`. Do not mention where the covered range starts or ends, the compaction process, or input boundary markers such as `## Progress So Far`. Write EXACTLY these five sections, each opened by its heading on its own line:\n## Goal — what this body of work is about, overall.\n## Constraints — constraints and hard limits that carried across tasks and must keep being honored (write \"none\" only if truly none).\n## Done — each completed task with its outcome and key lessons.\n## Remaining — threads that earlier digests left open and are still unfinished (write \"none\" only if nothing remains).\n## Evidence — references to crucial tool outputs a future turn can read back, one per line, like `- results__read_tool_output(invocation_id='<id>', tail=200): what it contains`; omit this section if no large output matters.\nEvery section except Evidence must be present."
+  },
+  {
+    "locale": "en",
+    "key": "compact.prompt.agent",
+    "values": {
+      "role_section": "value-role_section <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\nCreate a digest covering this agent's completed-task history. For every completed task, include what it was asked to do and its outcome, key results, and lessons, including any sub-tasks it delegated. Carry forward unresolved threads from any earlier digest. Do not include execution details from the current still-running task.\n\nSubmit the digest as plain text in this response: call no tools, add no preamble, and begin directly with `## Goal`. Do not mention where the covered range starts or ends, the compaction process, or input boundary markers such as `## Progress So Far`. Write EXACTLY these five sections, each opened by its heading on its own line:\n## Goal — what this body of work is about, overall.\n## Constraints — constraints and hard limits that carried across tasks and must keep being honored (write \"none\" only if truly none).\n## Done — each completed task with its outcome and key lessons.\n## Remaining — threads that earlier digests left open and are still unfinished (write \"none\" only if nothing remains).\n## Evidence — references to crucial tool outputs a future turn can read back, one per line, like `- results__read_tool_output(invocation_id='<id>', tail=200): what it contains`; omit this section if no large output matters.\nEvery section except Evidence must be present."
+  },
+  {
+    "locale": "en",
+    "key": "compact.prompt.task",
+    "values": {
+      "role_section": ""
+    },
+    "text": "Create a progress digest covering the ENTIRE task execution so far — from the user's original request through everything done since — for a future turn to continue from.\n\nSubmit the digest as plain text in this response: call no tools, add no preamble, and begin directly with `## Goal`. Do not mention where the covered range starts or ends, the compaction process, or input boundary markers such as `## Progress So Far`. Write EXACTLY these five sections, each opened by its heading on its own line:\n## Goal — the task's objective, one or two sentences.\n## Constraints — user-imposed constraints and hard limits that must keep being honored (write \"none\" only if truly none).\n## Done — what has been completed: key results, decisions made, important tool outputs.\n## Remaining — unfinished threads, open problems, and failure causes still to be addressed (write \"none\" only if nothing remains).\n## Evidence — references to crucial tool outputs a future turn can read back, one per line, like `- results__read_tool_output(invocation_id='<id>', tail=200): what it contains`; omit this section if no large output matters.\nEvery section except Evidence must be present; keep each section as short as the material allows."
+  },
+  {
+    "locale": "en",
+    "key": "compact.prompt.task",
+    "values": {
+      "role_section": "value-role_section <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\nCreate a progress digest covering the ENTIRE task execution so far — from the user's original request through everything done since — for a future turn to continue from.\n\nSubmit the digest as plain text in this response: call no tools, add no preamble, and begin directly with `## Goal`. Do not mention where the covered range starts or ends, the compaction process, or input boundary markers such as `## Progress So Far`. Write EXACTLY these five sections, each opened by its heading on its own line:\n## Goal — the task's objective, one or two sentences.\n## Constraints — user-imposed constraints and hard limits that must keep being honored (write \"none\" only if truly none).\n## Done — what has been completed: key results, decisions made, important tool outputs.\n## Remaining — unfinished threads, open problems, and failure causes still to be addressed (write \"none\" only if nothing remains).\n## Evidence — references to crucial tool outputs a future turn can read back, one per line, like `- results__read_tool_output(invocation_id='<id>', tail=200): what it contains`; omit this section if no large output matters.\nEvery section except Evidence must be present; keep each section as short as the material allows."
+  },
+  {
+    "locale": "en",
+    "key": "compact.role_fallback",
+    "values": {},
+    "text": "You condense completed execution into a durable record that later turns or other agents can continue from. The trailing instruction defines this turn's scope, output shape, and submission channel; take those mechanics from there and the compression standard from here.\n\nWrite only from evidence visible in the conversation: tool calls and their results, files and data produced, and errors as returned. Distinguish attempted from achieved; do not treat the actor's narration of its own work as evidence. Never re-execute the work and never decide on the actor's behalf. Your record replaces the material it covers, so preserve what later work needs: user constraints; decisions already made and their reasons; unfinished threads and failure causes; the current goal; references to bulky evidence; and concrete state and findings sufficient to act on. Prefer these over step-by-step narrative. Carry forward what an earlier digest preserved instead of presenting it as new progress."
+  },
+  {
+    "locale": "en",
+    "key": "compact.role_fallback",
+    "values": {},
+    "text": "You condense completed execution into a durable record that later turns or other agents can continue from. The trailing instruction defines this turn's scope, output shape, and submission channel; take those mechanics from there and the compression standard from here.\n\nWrite only from evidence visible in the conversation: tool calls and their results, files and data produced, and errors as returned. Distinguish attempted from achieved; do not treat the actor's narration of its own work as evidence. Never re-execute the work and never decide on the actor's behalf. Your record replaces the material it covers, so preserve what later work needs: user constraints; decisions already made and their reasons; unfinished threads and failure causes; the current goal; references to bulky evidence; and concrete state and findings sufficient to act on. Prefer these over step-by-step narrative. Carry forward what an earlier digest preserved instead of presenting it as new progress."
+  },
+  {
+    "locale": "en",
+    "key": "metadata.prompt",
+    "values": {
+      "role_section": ""
+    },
+    "text": "Now set this task's metadata: call `control__update_task_metadata` exactly once. Both `title` and `description` are REQUIRED and must be non-empty — always provide a best-effort value even if the instruction is short or vague; never pass empty strings. Add `session_goal` only if the direction is now clear (it is the only optional field). Then stop and call no other tools."
+  },
+  {
+    "locale": "en",
+    "key": "metadata.prompt",
+    "values": {
+      "role_section": "value-role_section <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\nNow set this task's metadata: call `control__update_task_metadata` exactly once. Both `title` and `description` are REQUIRED and must be non-empty — always provide a best-effort value even if the instruction is short or vague; never pass empty strings. Add `session_goal` only if the direction is now clear (it is the only optional field). Then stop and call no other tools."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.actor_done",
+    "values": {},
+    "text": "The actor called `finish_task` to declare this task done."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.actor_done",
+    "values": {},
+    "text": "The actor called `finish_task` to declare this task done."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.context_limit",
+    "values": {},
+    "text": "The segment was cut short by the context limit, not by the actor."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.context_limit",
+    "values": {},
+    "text": "The segment was cut short by the context limit, not by the actor."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.dispatch",
+    "values": {},
+    "text": "The actor delegated a sub-task; this task is suspended until the sub-task returns (the dispatch pair above names it)."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.dispatch",
+    "values": {},
+    "text": "The actor delegated a sub-task; this task is suspended until the sub-task returns (the dispatch pair above names it)."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.finish",
+    "values": {},
+    "text": "The actor closed this task out with `finish_task`."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.finish",
+    "values": {},
+    "text": "The actor closed this task out with `finish_task`."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.finish_park",
+    "values": {},
+    "text": "The actor called `finish_task` to declare this task done and yielded the floor — the user is waiting."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.finish_park",
+    "values": {},
+    "text": "The actor called `finish_task` to declare this task done and yielded the floor — the user is waiting."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.interrupt",
+    "values": {},
+    "text": "The user interrupted this segment part-way through."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.interrupt",
+    "values": {},
+    "text": "The user interrupted this segment part-way through."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.max_turns",
+    "values": {},
+    "text": "The segment was cut short by the per-segment turn limit, not by the actor."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.max_turns",
+    "values": {},
+    "text": "The segment was cut short by the per-segment turn limit, not by the actor."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.mechanical",
+    "values": {},
+    "text": "This segment was already judged by rule, with no LLM observer — your recap is the only account of it."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.mechanical",
+    "values": {},
+    "text": "This segment was already judged by rule, with no LLM observer — your recap is the only account of it."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.normal",
+    "values": {},
+    "text": "The actor ended the segment with its closing message; it did not call `finish_task`."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.normal",
+    "values": {},
+    "text": "The actor ended the segment with its closing message; it did not call `finish_task`."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.plain_text",
+    "values": {},
+    "text": "The actor replied in prose and yielded the floor — the user is waiting."
+  },
+  {
+    "locale": "en",
+    "key": "review.boundary.plain_text",
+    "values": {},
+    "text": "The actor replied in prose and yielded the floor — the user is waiting."
+  },
+  {
+    "locale": "en",
+    "key": "review.judge",
+    "values": {
+      "subtasks": "",
+      "finish_park_yielded": "",
+      "task_anchor": "",
+      "role_section": "",
+      "final_output": "",
+      "plain_text_yielded": "",
+      "boundary": ""
+    },
+    "text": "\n\n\n\nCoverage for `act_recap`: include only the actor's work after the most recent `## Progress So Far` or the latest user message in the conversation, whichever is later, through the end of this segment described above. On the first observation, start with the actor's work after the task-opening user message. Do not repeat anything at or before that starting boundary. This recap will become the next `## Progress So Far` if the task continues.\n\nThese markers locate the source range only; they are not recap content. In `act_recap`, do not mention `## Progress So Far`, the user-message boundary, where the range starts or ends, or that you are summarizing. Write the recap itself directly.\n\nJudge whether the task is complete, by the standard in your role above, and call `control__report_task_outcome` exactly once — no other tools. Don't over-think it: call as soon as the picture is clear.\n\n`task_status` and `act_recap` are always required; fill the remaining fields on the conditions the tool states for each."
+  },
+  {
+    "locale": "en",
+    "key": "review.judge",
+    "values": {
+      "subtasks": "value-subtasks <tag> {{literal}}",
+      "finish_park_yielded": "value-finish_park_yielded <tag> {{literal}}",
+      "task_anchor": "value-task_anchor <tag> {{literal}}",
+      "role_section": "value-role_section <tag> {{literal}}",
+      "final_output": "value-final_output <tag> {{literal}}",
+      "plain_text_yielded": "value-plain_text_yielded <tag> {{literal}}",
+      "boundary": "value-boundary <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\nvalue-task_anchor <tag> {{literal}}\n\nvalue-boundary <tag> {{literal}}\n\nCoverage for `act_recap`: include only the actor's work after the most recent `## Progress So Far` or the latest user message in the conversation, whichever is later, through the end of this segment described above. On the first observation, start with the actor's work after the task-opening user message. Do not repeat anything at or before that starting boundary. This recap will become the next `## Progress So Far` if the task continues.\n\nThese markers locate the source range only; they are not recap content. In `act_recap`, do not mention `## Progress So Far`, the user-message boundary, where the range starts or ends, or that you are summarizing. Write the recap itself directly.\n\n## Actor's Final Output\n\nvalue-final_output <tag> {{literal}}\n\n(The above is the final result the actor submitted — the only authoritative evidence of what this segment produced, and it is NOT part of the conversation above. Summarize the segment faithfully from it; do not invent tool calls, steps, or artifacts that did not actually happen.)\n\nIf that message asks the user for anything at all, the task is not over: judge `continue` — never `success`, never `fail`.\n\nA closing message that still asks the user for something is not a completed task: judge `continue` — never `success`, never `fail`.\n\nJudge whether the task is complete, by the standard in your role above, and call `control__report_task_outcome` exactly once — no other tools. Don't over-think it: call as soon as the picture is clear.\n\n`task_status` and `act_recap` are always required; fill the remaining fields on the conditions the tool states for each.\n\n## Your sub-tasks (their results are in the conversation above; refer to one by its exact task_id if you need to flag it in `next_step_hint`):\nvalue-subtasks <tag> {{literal}}"
+  },
+  {
+    "locale": "en",
+    "key": "review.react_nudge",
+    "values": {
+      "terminal_tool": ""
+    },
+    "text": "Submit the summary above by calling the `` tool (put the content in the tool arguments); do not reply in plain text."
+  },
+  {
+    "locale": "en",
+    "key": "review.react_nudge",
+    "values": {
+      "terminal_tool": "value-terminal_tool <tag> {{literal}}"
+    },
+    "text": "Submit the summary above by calling the `value-terminal_tool <tag> {{literal}}` tool (put the content in the tool arguments); do not reply in plain text."
+  },
+  {
+    "locale": "en",
+    "key": "review.recap",
+    "values": {
+      "task_anchor": "",
+      "role_section": "",
+      "final_output": "",
+      "closed": "",
+      "boundary": ""
+    },
+    "text": "\n\n\n\nCoverage for `act_recap`: include only the actor's work after the most recent `## Progress So Far` or the latest user message in the conversation, whichever is later, through the end of this segment described above. On the first observation, start with the actor's work after the task-opening user message. Do not repeat anything at or before that starting boundary. This recap will become the next `## Progress So Far` if the task continues.\n\nThese markers locate the source range only; they are not recap content. In `act_recap`, do not mention `## Progress So Far`, the user-message boundary, where the range starts or ends, or that you are summarizing. Write the recap itself directly.\n\nRecord what happened: call `control__collect_process_report` exactly once — no other tools.\n\nFill `act_recap`."
+  },
+  {
+    "locale": "en",
+    "key": "review.recap",
+    "values": {
+      "task_anchor": "value-task_anchor <tag> {{literal}}",
+      "role_section": "value-role_section <tag> {{literal}}",
+      "final_output": "value-final_output <tag> {{literal}}",
+      "closed": "value-closed <tag> {{literal}}",
+      "boundary": "value-boundary <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\nvalue-task_anchor <tag> {{literal}}\n\nvalue-boundary <tag> {{literal}}\n\nCoverage for `act_recap`: include only the actor's work after the most recent `## Progress So Far` or the latest user message in the conversation, whichever is later, through the end of this segment described above. On the first observation, start with the actor's work after the task-opening user message. Do not repeat anything at or before that starting boundary. This recap will become the next `## Progress So Far` if the task continues.\n\nThese markers locate the source range only; they are not recap content. In `act_recap`, do not mention `## Progress So Far`, the user-message boundary, where the range starts or ends, or that you are summarizing. Write the recap itself directly.\n\n## Actor's Final Output\n\nvalue-final_output <tag> {{literal}}\n\n(The above is the final result the actor submitted — the only authoritative evidence of what this segment produced, and it is NOT part of the conversation above. Summarize the segment faithfully from it; do not invent tool calls, steps, or artifacts that did not actually happen.)\n\nRecord what happened: call `control__collect_process_report` exactly once — no other tools.\n\nFill `act_recap`. Also fill `task_summary` — the task has ended, so that field carries the whole task's process report."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.authorizer_needs_human_unsupported",
+    "values": {
+      "authorizer": ""
+    },
+    "text": "[Error:  returned NeedsHuman but does not implement HumanGatedAuthorizer]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.authorizer_needs_human_unsupported",
+    "values": {
+      "authorizer": "value-authorizer <tag> {{literal}}"
+    },
+    "text": "[Error: value-authorizer <tag> {{literal}} returned NeedsHuman but does not implement HumanGatedAuthorizer]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.blocked_by_human",
+    "values": {
+      "message": ""
+    },
+    "text": "[Blocked by human: ]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.blocked_by_human",
+    "values": {
+      "message": "value-message <tag> {{literal}}"
+    },
+    "text": "[Blocked by human: value-message <tag> {{literal}}]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.cancelled_act_recap",
+    "values": {},
+    "text": "Task was cancelled before completion."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.cancelled_act_recap",
+    "values": {},
+    "text": "Task was cancelled before completion."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.cancelled_task_summary",
+    "values": {
+      "reason": ""
+    },
+    "text": "Cancelled () — no final output was produced; the partial execution above is all that ran."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.cancelled_task_summary",
+    "values": {
+      "reason": "value-reason <tag> {{literal}}"
+    },
+    "text": "Cancelled (value-reason <tag> {{literal}}) — no final output was produced; the partial execution above is all that ran."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.capability_not_authorized",
+    "values": {
+      "tool": ""
+    },
+    "text": "[Error: capability '' not authorized]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.capability_not_authorized",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[Error: capability 'value-tool <tag> {{literal}}' not authorized]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.context_compacted",
+    "values": {},
+    "text": "[Context compacted]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.context_compacted",
+    "values": {},
+    "text": "[Context compacted]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.dispatch_cancelled",
+    "values": {
+      "reason": "",
+      "ref": ""
+    },
+    "text": "Sub-task  was cancelled before completion (); its partial execution below is incomplete."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.dispatch_cancelled",
+    "values": {
+      "reason": "value-reason <tag> {{literal}}",
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "Sub-task value-ref <tag> {{literal}} was cancelled before completion (value-reason <tag> {{literal}}); its partial execution below is incomplete."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.dispatch_closed",
+    "values": {
+      "failed": "",
+      "ref": ""
+    },
+    "text": "Sub-task  ran here — outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.dispatch_closed",
+    "values": {
+      "failed": "value-failed <tag> {{literal}}",
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "Sub-task value-ref <tag> {{literal}} ran here — outcome: FAILED. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.dispatch_running",
+    "values": {
+      "ref": ""
+    },
+    "text": "Sub-task  is running now — its execution follows below."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.dispatch_running",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "Sub-task value-ref <tag> {{literal}} is running now — its execution follows below."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.experience_compacted",
+    "values": {},
+    "text": "[Experience compacted]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.experience_compacted",
+    "values": {},
+    "text": "[Experience compacted]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.final_reply_closing_note",
+    "values": {},
+    "text": "[End of that final reply. It was delivered to the user when the task closed — do not repeat it, do not imitate its form, and do not treat it as the answer to whatever is being asked now.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.final_reply_closing_note",
+    "values": {},
+    "text": "[End of that final reply. It was delivered to the user when the task closed — do not repeat it, do not imitate its form, and do not treat it as the answer to whatever is being asked now.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.final_reply_note",
+    "values": {
+      "ref": ""
+    },
+    "text": "[Final reply for task  — the answer I delivered on finishing it, verbatim; not a summary.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.final_reply_note",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "[Final reply for task value-ref <tag> {{literal}} — the answer I delivered on finishing it, verbatim; not a summary.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.final_reply_note_untitled",
+    "values": {},
+    "text": "[Final reply — the answer I delivered on finishing this task, verbatim; not a summary.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.final_reply_note_untitled",
+    "values": {},
+    "text": "[Final reply — the answer I delivered on finishing this task, verbatim; not a summary.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.gateway_missing",
+    "values": {
+      "tool": ""
+    },
+    "text": "[Error: CapabilityGateway not configured, tool '' skipped]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.gateway_missing",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[Error: CapabilityGateway not configured, tool 'value-tool <tag> {{literal}}' skipped]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.human_declined",
+    "values": {
+      "message": ""
+    },
+    "text": "Human declined: "
+  },
+  {
+    "locale": "en",
+    "key": "runtime.human_declined",
+    "values": {
+      "message": "value-message <tag> {{literal}}"
+    },
+    "text": "Human declined: value-message <tag> {{literal}}"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.human_note",
+    "values": {
+      "note": "",
+      "result": ""
+    },
+    "text": "[Human note: ]\n"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.human_note",
+    "values": {
+      "note": "value-note <tag> {{literal}}",
+      "result": "value-result <tag> {{literal}}"
+    },
+    "text": "[Human note: value-note <tag> {{literal}}]\nvalue-result <tag> {{literal}}"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.human_rejected",
+    "values": {},
+    "text": "Human rejected the request."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.human_rejected",
+    "values": {},
+    "text": "Human rejected the request."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.interrupt_edit_preface",
+    "values": {
+      "previous": ""
+    },
+    "text": "(I cancelled my previous request: \"\" — replacing it with the request below.)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.interrupt_edit_preface",
+    "values": {
+      "previous": "value-previous <tag> {{literal}}"
+    },
+    "text": "(I cancelled my previous request: \"value-previous <tag> {{literal}}\" — replacing it with the request below.)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.invalid_arguments",
+    "values": {
+      "tool": "",
+      "error": ""
+    },
+    "text": "[Error: invalid arguments for '': ]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.invalid_arguments",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}",
+      "error": "value-error <tag> {{literal}}"
+    },
+    "text": "[Error: invalid arguments for 'value-tool <tag> {{literal}}': value-error <tag> {{literal}}]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.invalid_json_args",
+    "values": {
+      "excerpt": "",
+      "tool": ""
+    },
+    "text": "[Error: invalid arguments for '': arguments were not valid JSON and could not be parsed. You sent:  — re-send the call with a well-formed JSON arguments object]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.invalid_json_args",
+    "values": {
+      "excerpt": "value-excerpt <tag> {{literal}}",
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[Error: invalid arguments for 'value-tool <tag> {{literal}}': arguments were not valid JSON and could not be parsed. You sent: value-excerpt <tag> {{literal}} — re-send the call with a well-formed JSON arguments object]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.no_final_output",
+    "values": {},
+    "text": "(no final output)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.no_final_output",
+    "values": {},
+    "text": "(no final output)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.no_output",
+    "values": {},
+    "text": "(no output)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.no_output",
+    "values": {},
+    "text": "(no output)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.no_reply",
+    "values": {},
+    "text": "(no reply)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.no_reply",
+    "values": {},
+    "text": "(no reply)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.no_response",
+    "values": {},
+    "text": "(no response)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.no_response",
+    "values": {},
+    "text": "(no response)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.operation_unverified_no_record",
+    "values": {
+      "tool": ""
+    },
+    "text": "[Operation outcome unverified] 工具  的这次调用在崩溃前没有留下账本记录，无法确定副作用是否已发生。不要重试这次调用。"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.operation_unverified_no_record",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[Operation outcome unverified] 工具 value-tool <tag> {{literal}} 的这次调用在崩溃前没有留下账本记录，无法确定副作用是否已发生。不要重试这次调用。"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.operation_unverified_no_rerun_authorizer",
+    "values": {
+      "tool": ""
+    },
+    "text": "[Operation outcome unverified] 工具  在执行中被中断，没有注册重跑授权，无法确定副作用是否已发生。不要重试这次调用。"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.operation_unverified_no_rerun_authorizer",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[Operation outcome unverified] 工具 value-tool <tag> {{literal}} 在执行中被中断，没有注册重跑授权，无法确定副作用是否已发生。不要重试这次调用。"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.park_closed_by_verdict",
+    "values": {},
+    "text": "[Closed by the reviewer: this task was judged complete. Send another message to open a new round.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.park_closed_by_verdict",
+    "values": {},
+    "text": "[Closed by the reviewer: this task was judged complete. Send another message to open a new round.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.process_recap_note",
+    "values": {},
+    "text": "[The above is a system-written recap of how this task was carried out, kept for context — it is not your reply to the user. Do not imitate its form when you answer.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.process_recap_note",
+    "values": {},
+    "text": "[The above is a system-written recap of how this task was carried out, kept for context — it is not your reply to the user. Do not imitate its form when you answer.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.provider_missing",
+    "values": {
+      "capability": ""
+    },
+    "text": "[Error: no provider found for '']"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.provider_missing",
+    "values": {
+      "capability": "value-capability <tag> {{literal}}"
+    },
+    "text": "[Error: no provider found for 'value-capability <tag> {{literal}}']"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.provider_needs_human_unsupported",
+    "values": {
+      "provider": ""
+    },
+    "text": "[Error:  yielded needs_human but does not implement HumanResumable]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.provider_needs_human_unsupported",
+    "values": {
+      "provider": "value-provider <tag> {{literal}}"
+    },
+    "text": "[Error: value-provider <tag> {{literal}} yielded needs_human but does not implement HumanResumable]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.recap_placeholder",
+    "values": {},
+    "text": "(no process recap for this segment)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.recap_placeholder",
+    "values": {},
+    "text": "(no process recap for this segment)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.report_placeholder",
+    "values": {},
+    "text": "(nothing further to report for this segment)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.report_placeholder",
+    "values": {},
+    "text": "(nothing further to report for this segment)"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.spill_unrecoverable",
+    "values": {},
+    "text": "Full text is NOT recoverable (no spill sink configured, or the spill failed) — what follows is all that remains."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.spill_unrecoverable",
+    "values": {},
+    "text": "Full text is NOT recoverable (no spill sink configured, or the spill failed) — what follows is all that remains."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.threshold_subtask_cancelled",
+    "values": {
+      "ref": ""
+    },
+    "text": "Sub-task  was cancelled mid-run (session failure threshold hit); its partial execution below is incomplete."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.threshold_subtask_cancelled",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "Sub-task value-ref <tag> {{literal}} was cancelled mid-run (session failure threshold hit); its partial execution below is incomplete."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.threshold_tripped_recap",
+    "values": {},
+    "text": "Session failure threshold was hit (N consecutive sub-task failures); terminating this task."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.threshold_tripped_recap",
+    "values": {},
+    "text": "Session failure threshold was hit (N consecutive sub-task failures); terminating this task."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.tool_output_truncated",
+    "values": {
+      "tail": "",
+      "recovery": "",
+      "threshold": "",
+      "head": "",
+      "original_length": ""
+    },
+    "text": "[Tool output truncated:  chars exceeded -char limit. ]\n--- preview (first 0 chars) ---\n"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.tool_output_truncated",
+    "values": {
+      "tail": "value-tail <tag> {{literal}}",
+      "recovery": "value-recovery <tag> {{literal}}",
+      "threshold": "value-threshold <tag> {{literal}}",
+      "head": "value-head <tag> {{literal}}",
+      "original_length": "value-original_length <tag> {{literal}}"
+    },
+    "text": "[Tool output truncated: value-original_length <tag> {{literal}} chars exceeded value-threshold <tag> {{literal}}-char limit. value-recovery <tag> {{literal}}]\n--- preview (first 28 chars) ---\nvalue-head <tag> {{literal}}\n--- tail (last 28 chars) ---\nvalue-tail <tag> {{literal}}"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.tool_stream_error",
+    "values": {
+      "code": "",
+      "message": ""
+    },
+    "text": "[Error : ]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.tool_stream_error",
+    "values": {
+      "code": "value-code <tag> {{literal}}",
+      "message": "value-message <tag> {{literal}}"
+    },
+    "text": "[Error value-code <tag> {{literal}}: value-message <tag> {{literal}}]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.unattended_authz_note",
+    "values": {},
+    "text": "this task runs unattended in the background — there is nobody who could approve this tool call, so it is denied. Continue without it, or finish the task and say what you could not do."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.unattended_authz_note",
+    "values": {},
+    "text": "this task runs unattended in the background — there is nobody who could approve this tool call, so it is denied. Continue without it, or finish the task and say what you could not do."
+  },
+  {
+    "locale": "en",
+    "key": "runtime.unattended_tool_note",
+    "values": {},
+    "text": "[No human available: this task runs unattended in the background, so nobody can respond. Continue with what you already know, or finish the task and state what blocked you.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.unattended_tool_note",
+    "values": {},
+    "text": "[No human available: this task runs unattended in the background, so nobody can respond. Continue with what you already know, or finish the task and state what blocked you.]"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.unknown_tool",
+    "values": {
+      "tool": ""
+    },
+    "text": "[Error: unknown tool '']"
+  },
+  {
+    "locale": "en",
+    "key": "runtime.unknown_tool",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[Error: unknown tool 'value-tool <tag> {{literal}}']"
+  },
+  {
+    "locale": "zh",
+    "key": "act.guidance",
+    "values": {
+      "unattended": "",
+      "task_anchor": "",
+      "attended": "",
+      "plan_with_others": "",
+      "plan_solo": "",
+      "unattended_others": "",
+      "review_note": "",
+      "completed_tasks": ""
+    },
+    "text": "---\n\n\n只有在任务目标**完全达成**之后才调用 `control__finish_task`——还有活没干完就继续干，别收尾。收尾的做法是：把给用户的最终答复写成你的**普通消息正文**，并在同一个回合里调用它；消息正文才是答复与交付物，不是工具参数（细节见该工具的描述）。\n如果用户最新的这条消息是一个**无关的新诉求**，就在**同一次回复**里同时发出 `control__finish_task` 和 `control__delegate_task`——只收尾会把那个新诉求丢掉。\n需要只有用户才能提供的信息或决定？调用 `control__ask_user`，不要猜。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.guidance",
+    "values": {
+      "unattended": "value-unattended <tag> {{literal}}",
+      "task_anchor": "value-task_anchor <tag> {{literal}}",
+      "attended": "value-attended <tag> {{literal}}",
+      "plan_with_others": "value-plan_with_others <tag> {{literal}}",
+      "plan_solo": "value-plan_solo <tag> {{literal}}",
+      "unattended_others": "value-unattended_others <tag> {{literal}}",
+      "review_note": "value-review_note <tag> {{literal}}",
+      "completed_tasks": "value-completed_tasks <tag> {{literal}}"
+    },
+    "text": "---\nvalue-task_anchor <tag> {{literal}}\n\n## 总体计划（▶ = 你当前的任务；其余任务另有安排，**不要**自己去做）：\nvalue-plan_with_others <tag> {{literal}}\n\n## 总体计划（▶ = 你当前的任务）：\nvalue-plan_solo <tag> {{literal}}\n\n## 你当前的任务**已经**派发给了下列子任务，而它们**已经完成**——每一条下面的摘要就是它产出的东西（完整结果在上文对话里）。把那部分工作当成已完成：**不要**自己重做，也**不要**仅为了让它重跑一遍而再派发一次。你接下来要判断的是：在这些结果之外，任务目标是否还有未完成的部分——若有，只做那一部分，并在它们的产出之上继续。唯一的例外是下方复核注记指出「某条结果其实没有达成其目标」：那一条怎么办由**你**定——为它新派一个子任务，或者干脆自己做，哪个更划算就选哪个：\nvalue-completed_tasks <tag> {{literal}}\n\n## 对你上一次尝试的复核注记（其中可能点名了某个产出不达标的子任务）：\nvalue-review_note <tag> {{literal}}\n\n只有在任务目标**完全达成**之后才调用 `control__finish_task`——还有活没干完就继续干，别收尾。收尾的做法是：把给用户的最终答复写成你的**普通消息正文**，并在同一个回合里调用它；消息正文才是答复与交付物，不是工具参数（细节见该工具的描述）。 现在有人在场：一条纯正文回复会让任务保持打开、并把话语权交回给对方——这是对话进行中的正确动作；只有整个诉求都已满足时才收尾。 没有人会读你的回复：光一段正文答复既结束不了这个任务，也不会有人接着跟进。目标达成时你**必须**在写最终答复的同一个回合里调用它，否则这个任务只会被反复重跑，直到尝试次数耗尽。 不要自己去动那些别的任务。\n如果用户最新的这条消息是一个**无关的新诉求**，就在**同一次回复**里同时发出 `control__finish_task` 和 `control__delegate_task`——只收尾会把那个新诉求丢掉。\n需要只有用户才能提供的信息或决定？调用 `control__ask_user`，不要猜。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.reply_language",
+    "values": {},
+    "text": "（请用与上面「当前消息」相同的语言回复。）"
+  },
+  {
+    "locale": "zh",
+    "key": "act.reply_language",
+    "values": {},
+    "text": "（请用与上面「当前消息」相同的语言回复。）"
+  },
+  {
+    "locale": "zh",
+    "key": "act.resume.fallback.named",
+    "values": {
+      "ref": ""
+    },
+    "text": "你仍在做任务：，现在从上文记录的状态继续。请盘点哪些已经做过了，然后只做剩下的部分。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.resume.fallback.named",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "你仍在做任务：value-ref <tag> {{literal}}，现在从上文记录的状态继续。请盘点哪些已经做过了，然后只做剩下的部分。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.resume.fallback.unknown",
+    "values": {},
+    "text": "你仍在做上文任务，现在从上文记录的状态继续。请盘点哪些已经做过了，然后只做剩下的部分。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.resume.fallback.unknown",
+    "values": {},
+    "text": "你仍在做上文任务，现在从上文记录的状态继续。请盘点哪些已经做过了，然后只做剩下的部分。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.resume.named",
+    "values": {
+      "ref": "",
+      "completed_tasks": ""
+    },
+    "text": "你仍在做任务：，现在从上文记录的状态继续。请先从对话里盘点哪些已经做过了——不要重做——然后只做剩下的部分。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.resume.named",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}",
+      "completed_tasks": "value-completed_tasks <tag> {{literal}}"
+    },
+    "text": "你仍在做任务：value-ref <tag> {{literal}}，现在从上文记录的状态继续。请先从对话里盘点哪些已经做过了——不要重做——然后只做剩下的部分。 其中一部分**已经**派发给了子任务，而它们现在已完成——下方的态势注记里连同结果一并列出。不要把那部分活再做第二遍：在它们的产出之上继续，并判断还剩下什么（如果还剩的话）。例外是复核注记标出「不达标」的那条结果——那一条是重新派发还是自己做，由你定。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.resume.unknown",
+    "values": {
+      "completed_tasks": ""
+    },
+    "text": "你仍在做上文任务，现在从上文记录的状态继续。请先从对话里盘点哪些已经做过了——不要重做——然后只做剩下的部分。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.resume.unknown",
+    "values": {
+      "completed_tasks": "value-completed_tasks <tag> {{literal}}"
+    },
+    "text": "你仍在做上文任务，现在从上文记录的状态继续。请先从对话里盘点哪些已经做过了——不要重做——然后只做剩下的部分。 其中一部分**已经**派发给了子任务，而它们现在已完成——下方的态势注记里连同结果一并列出。不要把那部分活再做第二遍：在它们的产出之上继续，并判断还剩下什么（如果还剩的话）。例外是复核注记标出「不达标」的那条结果——那一条是重新派发还是自己做，由你定。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.review_feedback.plain_text_needs_finish",
+    "values": {},
+    "text": "你上一个回合以正文回复收尾、没有调用任何工具，所以这个任务仍然是打开的——光有正文永远结束不了它。没有人在等着读那段回复：只有 `control__finish_task` 能结束一个任务。如果目标现在已经达成，就把最终答复写成你的普通消息正文，并在**同一个回合**里调用 `control__finish_task`。如果还有活没干完，就去把它干完。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.review_feedback.plain_text_needs_finish",
+    "values": {},
+    "text": "你上一个回合以正文回复收尾、没有调用任何工具，所以这个任务仍然是打开的——光有正文永远结束不了它。没有人在等着读那段回复：只有 `control__finish_task` 能结束一个任务。如果目标现在已经达成，就把最终答复写成你的普通消息正文，并在**同一个回合**里调用 `control__finish_task`。如果还有活没干完，就去把它干完。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.skill_runtime_note",
+    "values": {},
+    "text": "---\n**运行说明（优先于上文任何「run python ...」之类的写法）：** 这个 skill 的文件**不在**你的工作目录里。要运行说明中提到的任何脚本，你**必须**调用 `skill_executor__exec_script` 工具——例如 `skill_executor__exec_script(script_path='scripts/foo.py', args='...')`——绝不要自己执行 `python scripts/foo.py`（那个路径解析不出来）。读 skill 文件用 `skill_executor__read_file`，列 skill 文件用 `skill_executor__list_files`。不要手工拼绝对路径。本地与远端 skill 一律适用。"
+  },
+  {
+    "locale": "zh",
+    "key": "act.skill_runtime_note",
+    "values": {},
+    "text": "---\n**运行说明（优先于上文任何「run python ...」之类的写法）：** 这个 skill 的文件**不在**你的工作目录里。要运行说明中提到的任何脚本，你**必须**调用 `skill_executor__exec_script` 工具——例如 `skill_executor__exec_script(script_path='scripts/foo.py', args='...')`——绝不要自己执行 `python scripts/foo.py`（那个路径解析不出来）。读 skill 文件用 `skill_executor__read_file`，列 skill 文件用 `skill_executor__list_files`。不要手工拼绝对路径。本地与远端 skill 一律适用。"
+  },
+  {
+    "locale": "zh",
+    "key": "common.capabilities_intro",
+    "values": {},
+    "text": "你可以使用下面列出的能力来完成当前任务。"
+  },
+  {
+    "locale": "zh",
+    "key": "common.capabilities_intro",
+    "values": {},
+    "text": "你可以使用下面列出的能力来完成当前任务。"
+  },
+  {
+    "locale": "zh",
+    "key": "common.capabilities_pointer",
+    "values": {},
+    "text": "（你可用的能力——工具 / skill / 子 agent——列在上文「当前任务」那条消息的能力清单一节里。）"
+  },
+  {
+    "locale": "zh",
+    "key": "common.capabilities_pointer",
+    "values": {},
+    "text": "（你可用的能力——工具 / skill / 子 agent——列在上文「当前任务」那条消息的能力清单一节里。）"
+  },
+  {
+    "locale": "zh",
+    "key": "common.capabilities_prefix_note",
+    "values": {
+      "action": "",
+      "prefix": "",
+      "noun": "",
+      "noun_plural": ""
+    },
+    "text": "这些时，名前要加 `` 前缀，与下面列出的写法完全一致。"
+  },
+  {
+    "locale": "zh",
+    "key": "common.capabilities_prefix_note",
+    "values": {
+      "action": "value-action <tag> {{literal}}",
+      "prefix": "value-prefix <tag> {{literal}}",
+      "noun": "value-noun <tag> {{literal}}",
+      "noun_plural": "value-noun_plural <tag> {{literal}}"
+    },
+    "text": "value-action <tag> {{literal}}这些value-noun_plural <tag> {{literal}}时，value-noun <tag> {{literal}}名前要加 `value-prefix <tag> {{literal}}` 前缀，与下面列出的写法完全一致。"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.capabilities",
+    "values": {},
+    "text": "## Capabilities"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.capabilities",
+    "values": {},
+    "text": "## Capabilities"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.current_message",
+    "values": {},
+    "text": "## Current Message"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.current_message",
+    "values": {},
+    "text": "## Current Message"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.current_task",
+    "values": {},
+    "text": "## Current Task"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.current_task",
+    "values": {},
+    "text": "## Current Task"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.final_output",
+    "values": {},
+    "text": "## Actor's Final Output"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.final_output",
+    "values": {},
+    "text": "## Actor's Final Output"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.opening_message",
+    "values": {},
+    "text": "## Opening Message"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.opening_message",
+    "values": {},
+    "text": "## Opening Message"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.progress_so_far",
+    "values": {},
+    "text": "## Progress So Far"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.progress_so_far",
+    "values": {},
+    "text": "## Progress So Far"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.project_background",
+    "values": {},
+    "text": "## Project Background"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.project_background",
+    "values": {},
+    "text": "## Project Background"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.role",
+    "values": {},
+    "text": "## Your Current Role"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.role",
+    "values": {},
+    "text": "## Your Current Role"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.skill_instructions",
+    "values": {},
+    "text": "## Instructions for the current task"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.skill_instructions",
+    "values": {},
+    "text": "## Instructions for the current task"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.skills",
+    "values": {},
+    "text": "### Available Skills (assign to tasks where appropriate)"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.skills",
+    "values": {},
+    "text": "### Available Skills (assign to tasks where appropriate)"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.subagents",
+    "values": {},
+    "text": "### Available Sub-Agents"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.subagents",
+    "values": {},
+    "text": "### Available Sub-Agents"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.subtasks",
+    "values": {},
+    "text": "## Your sub-tasks"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.subtasks",
+    "values": {},
+    "text": "## Your sub-tasks"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.tools",
+    "values": {},
+    "text": "### Available Tools (use them via tool calls)"
+  },
+  {
+    "locale": "zh",
+    "key": "common.heading.tools",
+    "values": {},
+    "text": "### Available Tools (use them via tool calls)"
+  },
+  {
+    "locale": "zh",
+    "key": "common.skill_name_suffix",
+    "values": {
+      "skill_name": ""
+    },
+    "text": "（技能：）"
+  },
+  {
+    "locale": "zh",
+    "key": "common.skill_name_suffix",
+    "values": {
+      "skill_name": "value-skill_name <tag> {{literal}}"
+    },
+    "text": "（技能：value-skill_name <tag> {{literal}}）"
+  },
+  {
+    "locale": "zh",
+    "key": "common.subagents_delegate_preamble",
+    "values": {},
+    "text": "派发方式：control__delegate_task(use_subagent=True, subagent_template='<name>')"
+  },
+  {
+    "locale": "zh",
+    "key": "common.subagents_delegate_preamble",
+    "values": {},
+    "text": "派发方式：control__delegate_task(use_subagent=True, subagent_template='<name>')"
+  },
+  {
+    "locale": "zh",
+    "key": "common.task_anchor.unknown",
+    "values": {},
+    "text": "当前任务：（即上文对话中界定的那个任务）"
+  },
+  {
+    "locale": "zh",
+    "key": "common.task_anchor.unknown",
+    "values": {},
+    "text": "当前任务：（即上文对话中界定的那个任务）"
+  },
+  {
+    "locale": "zh",
+    "key": "common.task_anchor",
+    "values": {
+      "label": ""
+    },
+    "text": "当前任务："
+  },
+  {
+    "locale": "zh",
+    "key": "common.task_anchor",
+    "values": {
+      "label": "value-label <tag> {{literal}}"
+    },
+    "text": "当前任务：value-label <tag> {{literal}}"
+  },
+  {
+    "locale": "zh",
+    "key": "common.tools_index_preamble",
+    "values": {},
+    "text": "下面按 `name(param: type)` 的形式列出——可选参数标 `?`。完整的描述与参数 schema 随本次请求的工具定义一起下发。"
+  },
+  {
+    "locale": "zh",
+    "key": "common.tools_index_preamble",
+    "values": {},
+    "text": "下面按 `name(param: type)` 的形式列出——可选参数标 `?`。完整的描述与参数 schema 随本次请求的工具定义一起下发。"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.history.assistant_summary_suffix",
+    "values": {},
+    "text": "[以上是系统写入的早先工作压缩摘要，用于延续上下文；它不是你给用户的答复。请据此继续当前任务并按需调用工具——回答时不要模仿摘要的形式。]"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.history.assistant_summary_suffix",
+    "values": {},
+    "text": "[以上是系统写入的早先工作压缩摘要，用于延续上下文；它不是你给用户的答复。请据此继续当前任务并按需调用工具——回答时不要模仿摘要的形式。]"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.history.user_summary_prefix",
+    "values": {},
+    "text": "[以下是对早先对话与经验的压缩摘要，供你继续推进工作；它不是用户的新指令。]"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.history.user_summary_prefix",
+    "values": {},
+    "text": "[以下是对早先对话与经验的压缩摘要，供你继续推进工作；它不是用户的新指令。]"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.prompt.agent",
+    "values": {
+      "role_section": ""
+    },
+    "text": "为这个 agent 已完成的任务历史生成一份摘要。每个已完成任务都要包含它被要求做什么，以及结局、关键成果与教训，包括它派发的子任务。延续上文更早摘要里仍未解决的线头；不要写当前仍在执行的任务的过程细节。\n\n在本次回复中以纯文本提交摘要：不调用任何工具，不加前言，直接从 `## Goal` 开始。不要提及覆盖范围从哪里开始或到哪里结束、压缩过程，也不要输出 `## Progress So Far` 之类用于定位原文的边界标记。严格按下列五个小节书写，每节以自己的标题独占一行开头：\n## Goal — 这一批工作整体上是在做什么。\n## Constraints — 跨任务延续下来、后续必须继续遵守的约束与硬性限制（确实没有才写 \"none\"）。\n## Done — 每个已完成的任务，连同它的结局与关键教训。\n## Remaining — 先前摘要留下、至今仍未完成的线头（确实没有剩余才写 \"none\"）。\n## Evidence — 指向关键工具输出的引用，供后续回合回读，每行一条，形如 `- results__read_tool_output(invocation_id='<id>', tail=200): 它里面是什么`；没有大段输出值得留则整节省略。\n除 Evidence 外每一节都必须出现。"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.prompt.agent",
+    "values": {
+      "role_section": "value-role_section <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\n为这个 agent 已完成的任务历史生成一份摘要。每个已完成任务都要包含它被要求做什么，以及结局、关键成果与教训，包括它派发的子任务。延续上文更早摘要里仍未解决的线头；不要写当前仍在执行的任务的过程细节。\n\n在本次回复中以纯文本提交摘要：不调用任何工具，不加前言，直接从 `## Goal` 开始。不要提及覆盖范围从哪里开始或到哪里结束、压缩过程，也不要输出 `## Progress So Far` 之类用于定位原文的边界标记。严格按下列五个小节书写，每节以自己的标题独占一行开头：\n## Goal — 这一批工作整体上是在做什么。\n## Constraints — 跨任务延续下来、后续必须继续遵守的约束与硬性限制（确实没有才写 \"none\"）。\n## Done — 每个已完成的任务，连同它的结局与关键教训。\n## Remaining — 先前摘要留下、至今仍未完成的线头（确实没有剩余才写 \"none\"）。\n## Evidence — 指向关键工具输出的引用，供后续回合回读，每行一条，形如 `- results__read_tool_output(invocation_id='<id>', tail=200): 它里面是什么`；没有大段输出值得留则整节省略。\n除 Evidence 外每一节都必须出现。"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.prompt.task",
+    "values": {
+      "role_section": ""
+    },
+    "text": "为**整个**任务至今的执行过程生成一份进度摘要——覆盖从用户最初的诉求到此后做过的一切，供后续回合据它继续工作。\n\n在本次回复中以纯文本提交摘要：不调用任何工具，不加前言，直接从 `## Goal` 开始。不要提及覆盖范围从哪里开始或到哪里结束、压缩过程，也不要输出 `## Progress So Far` 之类用于定位原文的边界标记。严格按下列五个小节书写，每节以自己的标题独占一行开头：\n## Goal — 本任务的目标，一两句话。\n## Constraints — 用户施加的约束与硬性限制，后续必须继续遵守（确实没有才写 \"none\"）。\n## Done — 已经完成的事：关键结果、已做的决定、重要的工具输出。\n## Remaining — 未完成的线头、仍悬着的问题、以及还需处理的失败原因（确实没有剩余才写 \"none\"）。\n## Evidence — 指向关键工具输出的引用，供后续回合回读，每行一条，形如 `- results__read_tool_output(invocation_id='<id>', tail=200): 它里面是什么`；没有大段输出值得留则整节省略。\n除 Evidence 外每一节都必须出现；每节按材料允许的长度尽量短。"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.prompt.task",
+    "values": {
+      "role_section": "value-role_section <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\n为**整个**任务至今的执行过程生成一份进度摘要——覆盖从用户最初的诉求到此后做过的一切，供后续回合据它继续工作。\n\n在本次回复中以纯文本提交摘要：不调用任何工具，不加前言，直接从 `## Goal` 开始。不要提及覆盖范围从哪里开始或到哪里结束、压缩过程，也不要输出 `## Progress So Far` 之类用于定位原文的边界标记。严格按下列五个小节书写，每节以自己的标题独占一行开头：\n## Goal — 本任务的目标，一两句话。\n## Constraints — 用户施加的约束与硬性限制，后续必须继续遵守（确实没有才写 \"none\"）。\n## Done — 已经完成的事：关键结果、已做的决定、重要的工具输出。\n## Remaining — 未完成的线头、仍悬着的问题、以及还需处理的失败原因（确实没有剩余才写 \"none\"）。\n## Evidence — 指向关键工具输出的引用，供后续回合回读，每行一条，形如 `- results__read_tool_output(invocation_id='<id>', tail=200): 它里面是什么`；没有大段输出值得留则整节省略。\n除 Evidence 外每一节都必须出现；每节按材料允许的长度尽量短。"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.role_fallback",
+    "values": {},
+    "text": "你负责把已经发生的执行过程压缩成一份可供后续回合或其他 agent 继续工作的持久记录。尾部指令会规定本次的覆盖范围、输出形状和提交方式；这些操作要求以尾部指令为准，压缩标准则以这里为准。\n\n只根据对话中可见的证据来写：工具调用及其结果、产出的文件与数据、原样返回的错误。把「尝试过」与「已经达成」分开，不要把执行者对自身工作的叙述当作证据。不重新执行已发生的工作，也不替执行者作决定。这份记录会替代它覆盖的原始内容，因此优先保留后续工作需要的信息：用户约束、已经作出的决定及理由、未完成线头与失败原因、当前目标、可回读的大块证据引用，以及足以继续动手的具体状态与发现；这些都比逐步叙事更重要。上文更早摘要保住的内容要继续保留，不要把它当成新进展。"
+  },
+  {
+    "locale": "zh",
+    "key": "compact.role_fallback",
+    "values": {},
+    "text": "你负责把已经发生的执行过程压缩成一份可供后续回合或其他 agent 继续工作的持久记录。尾部指令会规定本次的覆盖范围、输出形状和提交方式；这些操作要求以尾部指令为准，压缩标准则以这里为准。\n\n只根据对话中可见的证据来写：工具调用及其结果、产出的文件与数据、原样返回的错误。把「尝试过」与「已经达成」分开，不要把执行者对自身工作的叙述当作证据。不重新执行已发生的工作，也不替执行者作决定。这份记录会替代它覆盖的原始内容，因此优先保留后续工作需要的信息：用户约束、已经作出的决定及理由、未完成线头与失败原因、当前目标、可回读的大块证据引用，以及足以继续动手的具体状态与发现；这些都比逐步叙事更重要。上文更早摘要保住的内容要继续保留，不要把它当成新进展。"
+  },
+  {
+    "locale": "zh",
+    "key": "metadata.prompt",
+    "values": {
+      "role_section": ""
+    },
+    "text": "现在为这个任务设定元数据：调用 `control__update_task_metadata` 恰好一次。`title` 与 `description` 两项**必填且不得为空**——即使指令很短或含糊，也要据现有信息给出尽力而为的值，绝不要传空字符串。只有在方向已经明确时才补 `session_goal`（它是唯一可留空的字段）。然后就停下，不要再调别的工具。"
+  },
+  {
+    "locale": "zh",
+    "key": "metadata.prompt",
+    "values": {
+      "role_section": "value-role_section <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\n现在为这个任务设定元数据：调用 `control__update_task_metadata` 恰好一次。`title` 与 `description` 两项**必填且不得为空**——即使指令很短或含糊，也要据现有信息给出尽力而为的值，绝不要传空字符串。只有在方向已经明确时才补 `session_goal`（它是唯一可留空的字段）。然后就停下，不要再调别的工具。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.actor_done",
+    "values": {},
+    "text": "执行者调用了 `finish_task`，宣布这个任务已完成。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.actor_done",
+    "values": {},
+    "text": "执行者调用了 `finish_task`，宣布这个任务已完成。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.context_limit",
+    "values": {},
+    "text": "本段是被上下文长度上限截断的，不是执行者主动停的。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.context_limit",
+    "values": {},
+    "text": "本段是被上下文长度上限截断的，不是执行者主动停的。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.dispatch",
+    "values": {},
+    "text": "执行者派发了子任务；本任务挂起，等子任务返回（上文的派发记录里写了是哪个）。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.dispatch",
+    "values": {},
+    "text": "执行者派发了子任务；本任务挂起，等子任务返回（上文的派发记录里写了是哪个）。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.finish",
+    "values": {},
+    "text": "执行者用 `finish_task` 收掉了这个任务。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.finish",
+    "values": {},
+    "text": "执行者用 `finish_task` 收掉了这个任务。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.finish_park",
+    "values": {},
+    "text": "执行者调用了 `finish_task` 宣布任务完成，并把话语权交回给用户——用户正在等着。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.finish_park",
+    "values": {},
+    "text": "执行者调用了 `finish_task` 宣布任务完成，并把话语权交回给用户——用户正在等着。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.interrupt",
+    "values": {},
+    "text": "用户在本段执行途中打断了它。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.interrupt",
+    "values": {},
+    "text": "用户在本段执行途中打断了它。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.max_turns",
+    "values": {},
+    "text": "本段是被单段回合上限截断的，不是执行者主动停的。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.max_turns",
+    "values": {},
+    "text": "本段是被单段回合上限截断的，不是执行者主动停的。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.mechanical",
+    "values": {},
+    "text": "本段已由规则判决过，没有 LLM 观察者参与——你写的这份记述是它唯一的记录。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.mechanical",
+    "values": {},
+    "text": "本段已由规则判决过，没有 LLM 观察者参与——你写的这份记述是它唯一的记录。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.normal",
+    "values": {},
+    "text": "执行者以一段收尾消息结束了本段，**没有**调用 `finish_task`。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.normal",
+    "values": {},
+    "text": "执行者以一段收尾消息结束了本段，**没有**调用 `finish_task`。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.plain_text",
+    "values": {},
+    "text": "执行者用正文回复后把话语权交回给用户——用户正在等着。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.boundary.plain_text",
+    "values": {},
+    "text": "执行者用正文回复后把话语权交回给用户——用户正在等着。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.judge",
+    "values": {
+      "subtasks": "",
+      "finish_park_yielded": "",
+      "task_anchor": "",
+      "role_section": "",
+      "final_output": "",
+      "plain_text_yielded": "",
+      "boundary": ""
+    },
+    "text": "\n\n\n\n`act_recap` 的本次覆盖范围：起点取对话中最近的 `## Progress So Far` 与最近一条用户消息中较晚的那个，只记录该点之后、直到上面所述本段结束位置之间 actor 新做的工作。若这是首次观察，则从开启任务的用户消息之后开始。不要重复起点及其之前的内容；任务继续时，这份复述会成为下一轮的 `## Progress So Far`。\n\n这些标记只用于定位原文范围，不属于复述内容。`act_recap` 里不要提及 `## Progress So Far`、用户消息边界、范围从哪里开始或到哪里结束，也不要解释自己正在做总结；直接写复述结果。\n\n按你上面那份职责里的标准判断这个任务完成了没有，然后调用 `control__report_task_outcome` 恰好一次——不要调别的工具。不必反复权衡：画面清楚了就调。\n\n`task_status` 与 `act_recap` 恒为必填；其余字段按工具上各自写明的条件填。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.judge",
+    "values": {
+      "subtasks": "value-subtasks <tag> {{literal}}",
+      "finish_park_yielded": "value-finish_park_yielded <tag> {{literal}}",
+      "task_anchor": "value-task_anchor <tag> {{literal}}",
+      "role_section": "value-role_section <tag> {{literal}}",
+      "final_output": "value-final_output <tag> {{literal}}",
+      "plain_text_yielded": "value-plain_text_yielded <tag> {{literal}}",
+      "boundary": "value-boundary <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\nvalue-task_anchor <tag> {{literal}}\n\nvalue-boundary <tag> {{literal}}\n\n`act_recap` 的本次覆盖范围：起点取对话中最近的 `## Progress So Far` 与最近一条用户消息中较晚的那个，只记录该点之后、直到上面所述本段结束位置之间 actor 新做的工作。若这是首次观察，则从开启任务的用户消息之后开始。不要重复起点及其之前的内容；任务继续时，这份复述会成为下一轮的 `## Progress So Far`。\n\n这些标记只用于定位原文范围，不属于复述内容。`act_recap` 里不要提及 `## Progress So Far`、用户消息边界、范围从哪里开始或到哪里结束，也不要解释自己正在做总结；直接写复述结果。\n\n## Actor's Final Output\n\nvalue-final_output <tag> {{literal}}\n\n（以上是执行者提交的最终结果——它是本段产出了什么的唯一权威证据，而且它**不属于**上文对话的一部分。请据它如实概括本段；不要虚构没有真正发生过的工具调用、步骤或产物。）\n\n只要那段消息在向用户要任何东西，任务就没有结束：判 `continue`——决不判 `success`，也决不判 `fail`。\n\n一段仍在向用户要东西的收尾消息，不是一个已完成的任务：判 `continue`——决不判 `success`，也决不判 `fail`。\n\n按你上面那份职责里的标准判断这个任务完成了没有，然后调用 `control__report_task_outcome` 恰好一次——不要调别的工具。不必反复权衡：画面清楚了就调。\n\n`task_status` 与 `act_recap` 恒为必填；其余字段按工具上各自写明的条件填。\n\n## Your sub-tasks（它们的结果在上文对话里；若需要在 `next_step_hint` 里点出某一个，请用它完整的 task_id）：\nvalue-subtasks <tag> {{literal}}"
+  },
+  {
+    "locale": "zh",
+    "key": "review.react_nudge",
+    "values": {
+      "terminal_tool": ""
+    },
+    "text": "请调用 `` 工具来提交上面那份内容（把内容放进工具参数里）；不要用正文回复。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.react_nudge",
+    "values": {
+      "terminal_tool": "value-terminal_tool <tag> {{literal}}"
+    },
+    "text": "请调用 `value-terminal_tool <tag> {{literal}}` 工具来提交上面那份内容（把内容放进工具参数里）；不要用正文回复。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.recap",
+    "values": {
+      "task_anchor": "",
+      "role_section": "",
+      "final_output": "",
+      "closed": "",
+      "boundary": ""
+    },
+    "text": "\n\n\n\n`act_recap` 的本次覆盖范围：起点取对话中最近的 `## Progress So Far` 与最近一条用户消息中较晚的那个，只记录该点之后、直到上面所述本段结束位置之间 actor 新做的工作。若这是首次观察，则从开启任务的用户消息之后开始。不要重复起点及其之前的内容；任务继续时，这份复述会成为下一轮的 `## Progress So Far`。\n\n这些标记只用于定位原文范围，不属于复述内容。`act_recap` 里不要提及 `## Progress So Far`、用户消息边界、范围从哪里开始或到哪里结束，也不要解释自己正在做总结；直接写复述结果。\n\n记录发生了什么：调用 `control__collect_process_report` 恰好一次——不要调别的工具。\n\n填写 `act_recap`。"
+  },
+  {
+    "locale": "zh",
+    "key": "review.recap",
+    "values": {
+      "task_anchor": "value-task_anchor <tag> {{literal}}",
+      "role_section": "value-role_section <tag> {{literal}}",
+      "final_output": "value-final_output <tag> {{literal}}",
+      "closed": "value-closed <tag> {{literal}}",
+      "boundary": "value-boundary <tag> {{literal}}"
+    },
+    "text": "value-role_section <tag> {{literal}}\n\n---\n\nvalue-task_anchor <tag> {{literal}}\n\nvalue-boundary <tag> {{literal}}\n\n`act_recap` 的本次覆盖范围：起点取对话中最近的 `## Progress So Far` 与最近一条用户消息中较晚的那个，只记录该点之后、直到上面所述本段结束位置之间 actor 新做的工作。若这是首次观察，则从开启任务的用户消息之后开始。不要重复起点及其之前的内容；任务继续时，这份复述会成为下一轮的 `## Progress So Far`。\n\n这些标记只用于定位原文范围，不属于复述内容。`act_recap` 里不要提及 `## Progress So Far`、用户消息边界、范围从哪里开始或到哪里结束，也不要解释自己正在做总结；直接写复述结果。\n\n## Actor's Final Output\n\nvalue-final_output <tag> {{literal}}\n\n（以上是执行者提交的最终结果——它是本段产出了什么的唯一权威证据，而且它**不属于**上文对话的一部分。请据它如实概括本段；不要虚构没有真正发生过的工具调用、步骤或产物。）\n\n记录发生了什么：调用 `control__collect_process_report` 恰好一次——不要调别的工具。\n\n填写 `act_recap`。 同时填写 `task_summary`——任务已经结束，所以那个字段承载整个任务的过程报告。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.authorizer_needs_human_unsupported",
+    "values": {
+      "authorizer": ""
+    },
+    "text": "[错误： 返回了 NeedsHuman，但未实现 HumanGatedAuthorizer]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.authorizer_needs_human_unsupported",
+    "values": {
+      "authorizer": "value-authorizer <tag> {{literal}}"
+    },
+    "text": "[错误：value-authorizer <tag> {{literal}} 返回了 NeedsHuman，但未实现 HumanGatedAuthorizer]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.blocked_by_human",
+    "values": {
+      "message": ""
+    },
+    "text": "[已被人类阻止：]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.blocked_by_human",
+    "values": {
+      "message": "value-message <tag> {{literal}}"
+    },
+    "text": "[已被人类阻止：value-message <tag> {{literal}}]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.cancelled_act_recap",
+    "values": {},
+    "text": "任务在完成前被取消。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.cancelled_act_recap",
+    "values": {},
+    "text": "任务在完成前被取消。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.cancelled_task_summary",
+    "values": {
+      "reason": ""
+    },
+    "text": "已取消（）——没有产生最终输出；实际执行的只有上面的部分过程。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.cancelled_task_summary",
+    "values": {
+      "reason": "value-reason <tag> {{literal}}"
+    },
+    "text": "已取消（value-reason <tag> {{literal}}）——没有产生最终输出；实际执行的只有上面的部分过程。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.capability_not_authorized",
+    "values": {
+      "tool": ""
+    },
+    "text": "[错误：能力“”未获授权]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.capability_not_authorized",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[错误：能力“value-tool <tag> {{literal}}”未获授权]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.context_compacted",
+    "values": {},
+    "text": "[上下文已压缩]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.context_compacted",
+    "values": {},
+    "text": "[上下文已压缩]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.dispatch_cancelled",
+    "values": {
+      "reason": "",
+      "ref": ""
+    },
+    "text": "子任务  在完成前被取消（）；下方的部分执行过程尚未完成。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.dispatch_cancelled",
+    "values": {
+      "reason": "value-reason <tag> {{literal}}",
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "子任务 value-ref <tag> {{literal}} 在完成前被取消（value-reason <tag> {{literal}}）；下方的部分执行过程尚未完成。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.dispatch_closed",
+    "values": {
+      "failed": "",
+      "ref": ""
+    },
+    "text": "子任务  在此执行——结果：已完成。其执行过程内联在下方，以它自己的 control__finish_task 和交付的最终答复收尾。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.dispatch_closed",
+    "values": {
+      "failed": "value-failed <tag> {{literal}}",
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "子任务 value-ref <tag> {{literal}} 在此执行——结果：失败。其执行过程内联在下方，以它自己的 control__finish_task 和交付的最终答复收尾。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.dispatch_running",
+    "values": {
+      "ref": ""
+    },
+    "text": "子任务  正在运行——其执行过程列在下方。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.dispatch_running",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "子任务 value-ref <tag> {{literal}} 正在运行——其执行过程列在下方。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.experience_compacted",
+    "values": {},
+    "text": "[经验已压缩]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.experience_compacted",
+    "values": {},
+    "text": "[经验已压缩]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.final_reply_closing_note",
+    "values": {},
+    "text": "[以上最终答复到此结束。它已在任务关闭时交付给用户——不要重复它，不要模仿它的形式，也不要把它当成对当前问题的回答。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.final_reply_closing_note",
+    "values": {},
+    "text": "[以上最终答复到此结束。它已在任务关闭时交付给用户——不要重复它，不要模仿它的形式，也不要把它当成对当前问题的回答。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.final_reply_note",
+    "values": {
+      "ref": ""
+    },
+    "text": "[任务  的最终答复——这是我结束任务时实际交付的原文，不是摘要。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.final_reply_note",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "[任务 value-ref <tag> {{literal}} 的最终答复——这是我结束任务时实际交付的原文，不是摘要。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.final_reply_note_untitled",
+    "values": {},
+    "text": "[最终答复——这是我结束本任务时实际交付的原文，不是摘要。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.final_reply_note_untitled",
+    "values": {},
+    "text": "[最终答复——这是我结束本任务时实际交付的原文，不是摘要。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.gateway_missing",
+    "values": {
+      "tool": ""
+    },
+    "text": "[错误：未配置 CapabilityGateway，已跳过工具“”]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.gateway_missing",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[错误：未配置 CapabilityGateway，已跳过工具“value-tool <tag> {{literal}}”]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.human_declined",
+    "values": {
+      "message": ""
+    },
+    "text": "人类拒绝了请求："
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.human_declined",
+    "values": {
+      "message": "value-message <tag> {{literal}}"
+    },
+    "text": "人类拒绝了请求：value-message <tag> {{literal}}"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.human_note",
+    "values": {
+      "note": "",
+      "result": ""
+    },
+    "text": "[用户备注：]\n"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.human_note",
+    "values": {
+      "note": "value-note <tag> {{literal}}",
+      "result": "value-result <tag> {{literal}}"
+    },
+    "text": "[用户备注：value-note <tag> {{literal}}]\nvalue-result <tag> {{literal}}"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.human_rejected",
+    "values": {},
+    "text": "人类拒绝了该请求。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.human_rejected",
+    "values": {},
+    "text": "人类拒绝了该请求。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.interrupt_edit_preface",
+    "values": {
+      "previous": ""
+    },
+    "text": "（我取消了上一条请求：“”——以下面的请求替代它。）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.interrupt_edit_preface",
+    "values": {
+      "previous": "value-previous <tag> {{literal}}"
+    },
+    "text": "（我取消了上一条请求：“value-previous <tag> {{literal}}”——以下面的请求替代它。）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.invalid_arguments",
+    "values": {
+      "tool": "",
+      "error": ""
+    },
+    "text": "[错误：工具“”的参数无效：]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.invalid_arguments",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}",
+      "error": "value-error <tag> {{literal}}"
+    },
+    "text": "[错误：工具“value-tool <tag> {{literal}}”的参数无效：value-error <tag> {{literal}}]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.invalid_json_args",
+    "values": {
+      "excerpt": "",
+      "tool": ""
+    },
+    "text": "[错误：工具“”的参数无效：参数不是可解析的合法 JSON。你发送的是：——请使用格式正确的 JSON 参数对象重新调用]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.invalid_json_args",
+    "values": {
+      "excerpt": "value-excerpt <tag> {{literal}}",
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[错误：工具“value-tool <tag> {{literal}}”的参数无效：参数不是可解析的合法 JSON。你发送的是：value-excerpt <tag> {{literal}}——请使用格式正确的 JSON 参数对象重新调用]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.no_final_output",
+    "values": {},
+    "text": "（没有最终输出）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.no_final_output",
+    "values": {},
+    "text": "（没有最终输出）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.no_output",
+    "values": {},
+    "text": "（没有输出）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.no_output",
+    "values": {},
+    "text": "（没有输出）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.no_reply",
+    "values": {},
+    "text": "（没有回复）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.no_reply",
+    "values": {},
+    "text": "（没有回复）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.no_response",
+    "values": {},
+    "text": "（没有回复）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.no_response",
+    "values": {},
+    "text": "（没有回复）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.operation_unverified_no_record",
+    "values": {
+      "tool": ""
+    },
+    "text": "[操作结果未经验证] 工具  的这次调用在崩溃前没有留下账本记录，无法确定副作用是否已发生。不要重试这次调用。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.operation_unverified_no_record",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[操作结果未经验证] 工具 value-tool <tag> {{literal}} 的这次调用在崩溃前没有留下账本记录，无法确定副作用是否已发生。不要重试这次调用。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.operation_unverified_no_rerun_authorizer",
+    "values": {
+      "tool": ""
+    },
+    "text": "[操作结果未经验证] 工具  在执行中被中断，没有注册重跑授权，无法确定副作用是否已发生。不要重试这次调用。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.operation_unverified_no_rerun_authorizer",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[操作结果未经验证] 工具 value-tool <tag> {{literal}} 在执行中被中断，没有注册重跑授权，无法确定副作用是否已发生。不要重试这次调用。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.park_closed_by_verdict",
+    "values": {},
+    "text": "[已由复核者关闭：本任务被判定为完成。请再发一条消息以开启新一轮。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.park_closed_by_verdict",
+    "values": {},
+    "text": "[已由复核者关闭：本任务被判定为完成。请再发一条消息以开启新一轮。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.process_recap_note",
+    "values": {},
+    "text": "[以上是系统写入的任务执行复述，仅用于保留上下文——它不是你给用户的答复。回答时不要模仿它的形式。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.process_recap_note",
+    "values": {},
+    "text": "[以上是系统写入的任务执行复述，仅用于保留上下文——它不是你给用户的答复。回答时不要模仿它的形式。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.provider_missing",
+    "values": {
+      "capability": ""
+    },
+    "text": "[错误：找不到能力“”对应的 provider]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.provider_missing",
+    "values": {
+      "capability": "value-capability <tag> {{literal}}"
+    },
+    "text": "[错误：找不到能力“value-capability <tag> {{literal}}”对应的 provider]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.provider_needs_human_unsupported",
+    "values": {
+      "provider": ""
+    },
+    "text": "[错误： 产生了 needs_human，但未实现 HumanResumable]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.provider_needs_human_unsupported",
+    "values": {
+      "provider": "value-provider <tag> {{literal}}"
+    },
+    "text": "[错误：value-provider <tag> {{literal}} 产生了 needs_human，但未实现 HumanResumable]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.recap_placeholder",
+    "values": {},
+    "text": "（本段没有过程复述）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.recap_placeholder",
+    "values": {},
+    "text": "（本段没有过程复述）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.report_placeholder",
+    "values": {},
+    "text": "（本段没有更多可报告内容）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.report_placeholder",
+    "values": {},
+    "text": "（本段没有更多可报告内容）"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.spill_unrecoverable",
+    "values": {},
+    "text": "完整文本无法恢复（未配置 spill sink，或写入失败）——以下内容是仅存部分。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.spill_unrecoverable",
+    "values": {},
+    "text": "完整文本无法恢复（未配置 spill sink，或写入失败）——以下内容是仅存部分。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.threshold_subtask_cancelled",
+    "values": {
+      "ref": ""
+    },
+    "text": "子任务  在执行途中被取消（触发 session 失败阈值）；下方的部分执行并不完整。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.threshold_subtask_cancelled",
+    "values": {
+      "ref": "value-ref <tag> {{literal}}"
+    },
+    "text": "子任务 value-ref <tag> {{literal}} 在执行途中被取消（触发 session 失败阈值）；下方的部分执行并不完整。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.threshold_tripped_recap",
+    "values": {},
+    "text": "已触发 session 失败阈值（连续 N 个子任务失败）；正在终止本任务。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.threshold_tripped_recap",
+    "values": {},
+    "text": "已触发 session 失败阈值（连续 N 个子任务失败）；正在终止本任务。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.tool_output_truncated",
+    "values": {
+      "tail": "",
+      "recovery": "",
+      "threshold": "",
+      "head": "",
+      "original_length": ""
+    },
+    "text": "[工具输出已截断： 个字符超过  字符限制。]\n--- 预览（前 0 个字符）---\n"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.tool_output_truncated",
+    "values": {
+      "tail": "value-tail <tag> {{literal}}",
+      "recovery": "value-recovery <tag> {{literal}}",
+      "threshold": "value-threshold <tag> {{literal}}",
+      "head": "value-head <tag> {{literal}}",
+      "original_length": "value-original_length <tag> {{literal}}"
+    },
+    "text": "[工具输出已截断：value-original_length <tag> {{literal}} 个字符超过 value-threshold <tag> {{literal}} 字符限制。value-recovery <tag> {{literal}}]\n--- 预览（前 28 个字符）---\nvalue-head <tag> {{literal}}\n--- 末尾（后 28 个字符）---\nvalue-tail <tag> {{literal}}"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.tool_stream_error",
+    "values": {
+      "code": "",
+      "message": ""
+    },
+    "text": "[错误 ：]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.tool_stream_error",
+    "values": {
+      "code": "value-code <tag> {{literal}}",
+      "message": "value-message <tag> {{literal}}"
+    },
+    "text": "[错误 value-code <tag> {{literal}}：value-message <tag> {{literal}}]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.unattended_authz_note",
+    "values": {},
+    "text": "此任务在后台无人值守运行——没有人能够批准这次工具调用，因此调用被拒绝。请在不用它的情况下继续，或者结束任务并说明哪些事情无法完成。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.unattended_authz_note",
+    "values": {},
+    "text": "此任务在后台无人值守运行——没有人能够批准这次工具调用，因此调用被拒绝。请在不用它的情况下继续，或者结束任务并说明哪些事情无法完成。"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.unattended_tool_note",
+    "values": {},
+    "text": "[没有可用的人：此任务在后台无人值守运行，因此无人能够回应。请根据已有信息继续，或者结束任务并说明阻碍。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.unattended_tool_note",
+    "values": {},
+    "text": "[没有可用的人：此任务在后台无人值守运行，因此无人能够回应。请根据已有信息继续，或者结束任务并说明阻碍。]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.unknown_tool",
+    "values": {
+      "tool": ""
+    },
+    "text": "[错误：未知工具“”]"
+  },
+  {
+    "locale": "zh",
+    "key": "runtime.unknown_tool",
+    "values": {
+      "tool": "value-tool <tag> {{literal}}"
+    },
+    "text": "[错误：未知工具“value-tool <tag> {{literal}}”]"
+  }
+]

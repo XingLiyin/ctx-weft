@@ -1,46 +1,12 @@
-"""`send_message` 建**新 task** 时，必须先等该 agent 上一轮仍在飞的后台折叠。
-
-## 这条保证原来漏在哪
-
-`_run_loop` 入口的「段 recap 强一致」（spec 2026-07-16 §2）从前只有 task 一个轴：
-
-    await await_pending_recap(task.id)
-
-`_task_pending` 按 `task_id` 键，所以它覆盖的是「**同一个 task** 的下一轮 run」——
-retry、resume、reconcile 重放。而 agent-centric 那批改造新增的
-`send_message` → `_start_task_for_agent` 建的是**新 task**：新 task 的 task 轴是空的，
-上一轮那次仍在飞的 close 边界折叠挂在旧 `task_id` 下，**没有任何人等它**。
-
-窗口不是偶发而是必然：close 边界的 `launch_recap` 恒在 `TaskFinished`
-**之前**登记（同协程、无 await 间隔，见 `TurnHandle.wait_for_finish` docstring 第 2 节），
-所以调用方一见到终态就发下一条消息时，折叠一定还在飞。
-
-后果是静默的：新 task 的首次装配走 `AgentRecallSource` → `recall_recent_by_agent`，
-那个查询过滤 `scope is MemoryScope.TASK and not is_superseded`——折叠没落地时，上一轮的
-raw 还没被 supersede，于是它们**整段**进了新一轮的 prompt，而不是折出来的那一条胶囊。
-不报错、不产生错误内容，只是白胀一轮的量（长会话上会顶到 context 上限）。
-
-原修法是把等待从 task 轴提到 agent 轴：两轴同步登记，`_run_loop` 入口都等。
-
-## 2026-09-22：两道屏障一并拆除，这个窗口被**接受**为代价
-
-拆除的依据是那次的另一半改造——**段界水位线**（`launch_recap` 钉住段界，
-`segment_fold` 按它算折叠池）。它治的是真正的正确性问题：迟到的折叠会抢走段界、把
-折叠池变空，摘要落到 `now_utc()` 分支排到新消息之后（见 tests/unit/test_segment_fold.py）。
-
-上面描述的那个窗口**不是正确性问题**：不报错、不产生错误内容，只是 prompt 白胀一轮。
-用它换掉「人回复要等一次后台 LLM 往返」，已确认接受。下面第 2 条用例因此反了过来——
-它现在守的是「不等」，以及守住两轴登记本身（水位线之外，`TurnHandle.wait_for_finish`
-与 `_fire_session_done` 仍在用这两个槽）。
-"""
+"""New foreground runs do not wait for a previous observation to finish."""
 
 from __future__ import annotations
 
 import asyncio
 
 import pytest
+from ctx_weft.core.loop.driver import ExecutionRegistry
 
-from ctx_weft.core.loop.background import runner
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider, make_echo_template, make_runtime,
@@ -49,79 +15,45 @@ from tests.integration.test_minimal_loop import (
 pytestmark = pytest.mark.asyncio
 
 
-def _clear_registries() -> None:
-    runner._task_pending.clear()
-    runner._task_pending_run_id.clear()
-    runner._agent_pending.clear()
-
-
-@pytest.fixture(autouse=True)
-def _isolated_pending_registries():
-    """两个登记表是模块级全局的，用例之间必须互不残留。"""
-    _clear_registries()
-    yield
-    _clear_registries()
-
-
-# ── 1. 登记 / 清理的两轴对称 ──────────────────────────────────────────────────
-
-
-async def test_agent_axis_waits_until_the_pending_fold_completes():
-    """`await_..._for_agent` 真的挂住，直到那次折叠跑完。"""
+async def test_registry_waits_until_the_pending_fold_completes():
+    registry = ExecutionRegistry()
     release = asyncio.Event()
-    finished = False
-
-    async def _fold() -> None:
-        nonlocal finished
-        await release.wait()
-        finished = True
-
-    runner._agent_pending["agt_1"] = asyncio.create_task(_fold())
-
-    waiter = asyncio.create_task(runner.await_pending_recap_for_agent("agt_1"))
-    await asyncio.sleep(0)          # 让 waiter 真正挂上去
-    assert not waiter.done(), "折叠还没跑完，等待方不该返回"
-    assert not finished
-
+    task = asyncio.create_task(release.wait())
+    registry.register("run", "task", "observe", task)
+    waiter = asyncio.create_task(registry.wait("task"))
+    await asyncio.sleep(0)
+    assert not waiter.done()
     release.set()
     await asyncio.wait_for(waiter, timeout=1)
-    assert finished, "等待方返回时，折叠必须已经落地"
+    assert registry.pending_run_id("task") is None
 
 
-async def test_agent_axis_is_a_noop_when_nothing_is_in_flight():
-    """无 pending 零开销直通——不能为不存在的后台任务空等。"""
-    await asyncio.wait_for(
-        runner.await_pending_recap_for_agent("agt_never_launched"), timeout=1)
-
+async def test_registry_wait_is_a_noop_without_pending_work():
+    registry = ExecutionRegistry()
+    await asyncio.wait_for(registry.wait("task"), timeout=1)
     done = asyncio.create_task(asyncio.sleep(0))
     await done
-    runner._agent_pending["agt_2"] = done
-    await asyncio.wait_for(
-        runner.await_pending_recap_for_agent("agt_2"), timeout=1)
+    registry.register("run", "task", "observe", done)
+    await asyncio.wait_for(registry.wait("task"), timeout=1)
+    assert registry.pending_run_id("task") is None
 
 
-async def test_clear_pending_clears_both_axes_but_only_its_own_registration():
-    """done 回调按身份比对后清两个轴；被更晚一次 launch 覆盖过的 key 不能误删。"""
-    t_old = asyncio.create_task(asyncio.sleep(0))
-    await t_old
-    runner._task_pending["tsk_1"] = t_old
-    runner._agent_pending["agt_1"] = t_old
-
-    runner._clear_pending(t_old, "tsk_1", "agt_1")
-    assert "tsk_1" not in runner._task_pending
-    assert "agt_1" not in runner._agent_pending
-
-    # 覆盖场景：新 launch 已经占了同一个 key，旧任务的 done 回调不该动它
-    t_new = asyncio.create_task(asyncio.sleep(0))
-    await t_new
-    runner._task_pending["tsk_2"] = t_new
-    runner._agent_pending["agt_2"] = t_new
-    runner._clear_pending(t_old, "tsk_2", "agt_2")
-    assert runner._task_pending["tsk_2"] is t_new, "旧回调把新登记删掉了"
-    assert runner._agent_pending["agt_2"] is t_new
-
-
-# ── 2. 真正的回归：新 task 的 run 不得越过在途折叠 ────────────────────────────
+async def test_old_completion_does_not_clear_new_registration():
+    registry = ExecutionRegistry()
+    release = asyncio.Event()
+    old = asyncio.create_task(asyncio.sleep(0))
+    new = asyncio.create_task(release.wait())
+    registry.register("old", "task", "observe", old)
+    registry.register("new", "task", "observe", new)
+    await old
+    await asyncio.sleep(0)
+    assert registry.pending_run_id("task") == "new"
+    assert "old" not in registry.tasks
+    release.set()
+    await new
+    await asyncio.sleep(0)
+    assert not registry.tasks
+    assert not registry.latest
 
 
 async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
@@ -164,7 +96,9 @@ async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
         await release.wait()
         fold_done = True
 
-    runner._agent_pending[agent_id] = asyncio.create_task(_slow_fold())
+    pending = asyncio.create_task(_slow_fold())
+    runtime._step_executions[handle.session_id].register(
+        "previous-observe", handle.task_id, "observe", pending)
 
     llm_saw_fold_done.clear()
     send = asyncio.create_task(runtime.send_message(agent_id, "第二轮"))
@@ -177,6 +111,7 @@ async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
     )
 
     release.set()
+    await pending
     handle2 = await asyncio.wait_for(send, timeout=30)
     await handle2.wait_for_finish(timeout=30)
 

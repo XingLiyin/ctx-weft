@@ -558,7 +558,7 @@ async def stream_llm_resilient(ctx, state, request) -> AsyncIterator["LLMChunk"]
 
     ``LLM_RESPONSE_FINISHED`` 各调用方自己发射（依赖各自的收尾逻辑：act 依赖软打断
     决策，见 task-4 brief；compact 是单次调用直出；observe/background_observe 共用
-    ``run_observe_react``，Task 5 起也在那里补发）。
+    ``ObserveStep._run_react``，Task 5 起也在那里补发）。
 
     request_id：与 act.py 侧 ``_run_llm_turn`` 用同一个确定性公式
     ``f"req_{agent.id}_{state.sequence_counter}"`` 独立算出——两边都在「本次 LLM

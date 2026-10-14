@@ -19,7 +19,7 @@ ContextSource 是数据获取接口。
     BudgetStrategy.apply  超限时按保护阶梯裁剪（阶梯见 priority.py，
           │               动态覆盖与配对丢弃见 budget.py）
           ▼  kept blocks
-    Composer.compose      按 request.purpose 渲染（槽位布局见 composer.py）
+    Composer.compose      将 request.intent（旧 purpose 可兼容映射）编译成 definition 后渲染
           │
           ▼
     AssembledPrompt（system / messages / tools / token_count）
@@ -38,22 +38,22 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
+from ctx_weft.core.utils.estimate import effective_limit, estimate_tokens
 from ctx_weft.protocols import (
     AgentTemplate,
     LLMMessage,
     LLMTool,
-    LoopConfig,
-    MemoryProvider,
     MemoryAddress,
+    MemoryProvider,
     ProviderContext,
     Purpose,
 )
-from ctx_weft.core.utils.estimate import effective_limit, estimate_tokens
 from ctx_weft.protocols.knowledge import KnowledgeProvider
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from ctx_weft.core.assembler.composer import PromptIntent
     from ctx_weft.core.models.agent import Agent
     from ctx_weft.core.models.session import Session
     from ctx_weft.core.models.task import Task
@@ -66,10 +66,9 @@ if TYPE_CHECKING:
 class ContextRequest:
     """装配请求。
 
-    purpose 标识装配的 prompt 给哪个 LLM 调用阶段消费：
-      - "act"     → PrepareStep 装配给下一个 ActStep 的 LLM 用
-      - "observe" → ObserveStep 装配给自己的 LLM 用
-      - "compact" → CompactStep 装配给摘要 LLM 用
+    purpose selects both the prompt and the capability surface. ReviewIntent
+    controls optional task judgement; CompactIntent controls compression scope.
+    Foreground/background execution does not change the purpose.
     """
 
     purpose: Purpose
@@ -83,6 +82,8 @@ class ContextRequest:
     # 默认回退未校准启发式（测试/无 llm 场景）。sources/composer 统一经它计数。
     token_counter: Callable[[str], int] = estimate_tokens
     extra: dict[str, Any] = field(default_factory=dict)
+    # Optional compilation options; their purpose must match the request.
+    intent: "PromptIntent | None" = None
 
 
 # ── ContextBlock ──────────────────────────────────────────────────────────────
@@ -273,8 +274,14 @@ class ContextAssembler:
 
     def _tools_reservation(self, request: ContextRequest) -> tuple[int, str]:
         """装配期工具面预留与指纹（紧凑口径：compact / 无 cache → (0, "")）。"""
+        from ctx_weft.core.assembler.request_policy import (
+            capability_purpose_for_request,
+            resolve_prompt_policy,
+        )
+
         cache = self.deps.capability_cache
-        if cache is None or request.purpose == "compact":
+        definition = resolve_prompt_policy(request)
+        if cache is None or definition.capability_purpose == "compact":
             return 0, ""
         from ctx_weft.core.assembler.sources.capability import build_llm_tools
         from ctx_weft.core.utils.estimate import estimate_tools_tokens, tools_signature
@@ -282,7 +289,8 @@ class ContextAssembler:
         agent_id = getattr(request.agent, "id", "") or self.deps.agent_id
         task_id = getattr(request.task, "id", "") or getattr(
             self.deps.provider_ctx, "task_id", "")
-        snapshot = build_llm_tools(cache.available(agent_id, task_id), request.purpose)
+        capability_purpose = capability_purpose_for_request(request)
+        snapshot = build_llm_tools(cache.available(agent_id, task_id), capability_purpose)
         return estimate_tools_tokens(snapshot, request.token_counter), tools_signature(snapshot)
 
     def _install_live_tools(self, prompt: AssembledPrompt, request: ContextRequest) -> None:
@@ -292,11 +300,17 @@ class ContextAssembler:
         对象——运行期 pin 进来的能力若不走这条闭包就永远不可见。渲染仍复用
         `build_llm_tools`（同一个 purpose 过滤），故活工具面与散文段清单不可能算出两套。
 
-        compact 不装：它的工具面按契约恒为空（composer 的 else 分支），装了会凭空长出工具。
+        compact 不装：它的工具面按契约恒为空，装了会凭空长出工具。
         cache 缺失（直接构造 assembler 的测试路径）也不装，保持旧行为。
         """
+        from ctx_weft.core.assembler.request_policy import (
+            capability_purpose_for_request,
+            resolve_prompt_policy,
+        )
+
         cache = self.deps.capability_cache
-        if cache is None or request.purpose == "compact":
+        definition = resolve_prompt_policy(request)
+        if cache is None or definition.capability_purpose == "compact":
             return
         from ctx_weft.core.assembler.sources.capability import build_llm_tools
 
@@ -305,8 +319,9 @@ class ContextAssembler:
         agent_id = getattr(request.agent, "id", "") or self.deps.agent_id
         task_id = getattr(request.task, "id", "") or getattr(
             self.deps.provider_ctx, "task_id", "")
-        purpose = request.purpose
-        prompt.tools_fn = lambda: build_llm_tools(cache.available(agent_id, task_id), purpose)
+        capability_purpose = capability_purpose_for_request(request)
+        prompt.tools_fn = lambda: build_llm_tools(
+            cache.available(agent_id, task_id), capability_purpose)
 
     async def _collect(self, source: ContextSource, request: ContextRequest) -> list[ContextBlock]:
         blocks: list[ContextBlock] = []

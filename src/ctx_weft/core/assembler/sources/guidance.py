@@ -1,13 +1,7 @@
-"""GuidanceSource：act 运行时态势 guidance → kind="guidance" block。
+"""Render the Act guidance snapshot into a budget-visible guidance block.
 
-文本由 PrepareStep 构建（loop/steps/act_guidance.py：session 任务树 + 已完成
-子任务清单 + 指针级收尾提醒）并经 request.extra["act_guidance"] 传入——数据源
-是 task_manager，走 extra 传值使装配层不反向依赖 orchestrator（与
-skill_instructions → directive 同一模式）。
-
-composer 恒把它拼到**末条 user message 最尾部**（Capabilities 之后，整个 prompt
-的收口；仅 act purpose 渲染）。收编进装配管线后，它参与 budget 裁剪与
-AssembledPrompt.token_count 记账——此前由 ActStep 事后注入时二者均不可见。
+Legacy extra["act_guidance"] text remains accepted when no snapshot is supplied.
+The composer places this block at the original trailing-user position.
 """
 
 from __future__ import annotations
@@ -23,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class GuidanceSource:
-    """把 request.extra["act_guidance"] 包成 guidance block；无文本时不产块。"""
+    """Render a snapshot, or accept legacy text; omit empty guidance."""
 
     name = "guidance"
 
@@ -33,8 +27,13 @@ class GuidanceSource:
         deps: "AssemblerDeps",
     ) -> AsyncIterator["ContextBlock"]:
         from ctx_weft.core.assembler.assembler import ContextBlock
+        from ctx_weft.core.assembler.prompts import load_prompt_template
 
-        text: str = (request.extra or {}).get("act_guidance", "")
+        extra = request.extra or {}
+        snapshot = extra.get("act_guidance_context")
+        # Render before budgeting so the existing priority and estimate remain valid.
+        text = (load_prompt_template("act").render("guidance", snapshot)
+                if snapshot is not None else extra.get("act_guidance", ""))
         if not text:
             return
         yield ContextBlock(

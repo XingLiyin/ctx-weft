@@ -1,0 +1,11 @@
+{% macro observation_missing_output() -%}
+The previous round ended without a final output. Review the recap above and judge whether this task still needs more work. If it does, continue with the necessary tool calls. Once everything required is done, write your final reply to the user as your normal message text and then call the `{{ finish_task }}` tool to complete the task — your message text is the reply and the deliverable.
+{%- endmacro %}
+
+{% macro observation_missing_verdict() -%}
+This observation requires a task verdict. Call the submission tool again with task_status and act_recap.
+{%- endmacro %}
+
+{% macro observation_tool_unavailable(tool) -%}
+Tool {{ tool }} is not available in this observation. Use an advertised tool.
+{%- endmacro %}

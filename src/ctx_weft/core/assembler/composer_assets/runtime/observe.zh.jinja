@@ -1,0 +1,11 @@
+{% macro observation_missing_output() -%}
+上一轮没有最终产出。请回顾执行记录，判断任务还需要完成哪些工作；完成所有要求后，先给出最终答复，再调用 `{{ finish_task }}` 完成任务。
+{%- endmacro %}
+
+{% macro observation_missing_verdict() -%}
+本次观察需要任务判决。请重新调用提交工具，同时填写 task_status 与 act_recap。
+{%- endmacro %}
+
+{% macro observation_tool_unavailable(tool) -%}
+本次观察不能调用工具 {{ tool }}。请使用本次提供的工具。
+{%- endmacro %}

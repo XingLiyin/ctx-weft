@@ -15,7 +15,7 @@ from ctx_weft.core.loop.steps.act import _reconcile_finish_vs_dispatch
 from ctx_weft.core.capabilities.control_tools import (
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
-    REPORT_TASK_OUTCOME_NAME,
+    REPORT_OBSERVATION_NAME,
 )
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.protocols import ToolCall
@@ -95,9 +95,9 @@ def test_delegate_only_no_reconcile() -> None:
 
 
 def test_non_dispatch_control_tool_does_not_trigger() -> None:
-    """finish + 非派发控制工具（report_task_outcome）不触发改投。"""
+    """finish + 非派发控制工具（report_observation）不触发改投。"""
     state, tm = _state(parent="G"), _FakeTM()
-    _run(state, tm, [_tc(FINISH_TASK_NAME), _tc(REPORT_TASK_OUTCOME_NAME)])
+    _run(state, tm, [_tc(FINISH_TASK_NAME), _tc(REPORT_OBSERVATION_NAME)])
 
     assert tm.detached == []
     assert state.task.suspend_requested is True

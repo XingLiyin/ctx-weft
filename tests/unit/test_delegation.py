@@ -229,8 +229,8 @@ class _AssessProvider(ToolCapabilityProvider):
     name = "control"
 
     def _cap(self) -> ToolCapability:
-        return ToolCapability(id="control:report_task_outcome",
-                              name="report_task_outcome", description="verdict")
+        return ToolCapability(id="control:report_observation",
+                              name="report_observation", description="verdict")
 
     async def list(self, ctx):
         return [self._cap()]
@@ -265,11 +265,11 @@ async def test_delegate_plan_returns_envelope_ack() -> None:
 
 @pytest.mark.asyncio
 async def test_gateway_silent_tool_writes_nothing_to_task_layer() -> None:
-    """report_task_outcome（编排/裁决）不入 task 对话——其 HITL 回复改由 finalize 注入。"""
+    """report_observation（编排/裁决）不入 task 对话——其 HITL 回复改由 finalize 注入。"""
     mem = InMemoryMemoryProvider()
     cache = CapabilityCache()
-    cap = ToolCapability(id="control:report_task_outcome",
-                         name="report_task_outcome", description="verdict")
+    cap = ToolCapability(id="control:report_observation",
+                         name="report_observation", description="verdict")
     cache.put("agt_1", [cap])
     gw = CapabilityGateway(
         capability_cache=cache, capability_providers=[_AssessProvider()],
@@ -289,7 +289,7 @@ async def test_gateway_silent_tool_writes_nothing_to_task_layer() -> None:
         provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1"),
     )
 
-    await gw.invoke("control__report_task_outcome", {"x": 1}, state, ctx, tool_call_id="tc_a")
+    await gw.invoke("control__report_observation", {"x": 1}, state, ctx, tool_call_id="tc_a")
 
     pctx = ProviderContext(session_id="s1", tenant_id="default")
     inv = await mem.recall_recent(scope, [MemoryEventType.TOOL_INVOCATION], 10, pctx)

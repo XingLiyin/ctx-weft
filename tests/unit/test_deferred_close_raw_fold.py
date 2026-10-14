@@ -12,21 +12,21 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctx_weft.core.loop.observing as _obs_mod
-from ctx_weft.core.loop.background import recap as recap_mod
-from ctx_weft.core.loop.background import runner
-from ctx_weft.core.loop import finish_pair as fp
-from ctx_weft.core.loop.steps.finalize import finalize_task_memory
+import ctx_weft.core.loop.steps.observe as _obs_mod
 from ctx_weft.core.capabilities.control_tools import (
-    COLLECT_PROCESS_REPORT_NAME,
+    REPORT_OBSERVATION_NAME,
     ControlResult,
 )
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
+from ctx_weft.core.loop import task_memory_fold as fp
+from ctx_weft.core.loop.driver import StepDriver
+from ctx_weft.core.loop.steps import observe as recap_mod
+from ctx_weft.core.loop.steps.finalize import finalize_task_memory
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 
 pytestmark = pytest.mark.asyncio
 
@@ -36,13 +36,9 @@ _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 @pytest.fixture(autouse=True)
 def _clear_bg_state():
-    recap_mod._task_locks.clear()
-    runner._task_pending.clear()
     fp._close_report.clear()
     fp._close_synth.clear()
     yield
-    recap_mod._task_locks.clear()
-    runner._task_pending.clear()
     fp._close_report.clear()
     fp._close_synth.clear()
 
@@ -191,7 +187,7 @@ async def test_same_agent_child_defers_with_child_task_scope() -> None:
 def _tool_call_chunk():
     return SimpleNamespace(
         kind="tool_call",
-        tool_call=SimpleNamespace(id="tc_obs", name=COLLECT_PROCESS_REPORT_NAME,
+        tool_call=SimpleNamespace(id="tc_obs", name=REPORT_OBSERVATION_NAME,
                                   arguments={"task_status": "success", "act_recap": "真报告act"}),
         text="", usage=None,
     )
@@ -212,7 +208,7 @@ class _FakeGateway:
         # 返回形态对齐生产 InvocationResult（含 is_error）——run_observe_react
         # 读该字段判定 terminal 失败，缺字段会 AttributeError。
         from types import SimpleNamespace
-        # 对齐 `report_task_outcome`：content 是话术，干净的 recap 在 metadata 里。
+        # 对齐 `report_observation`：content 是话术，干净的 recap 在 metadata 里。
         return SimpleNamespace(
             content="Assessment recorded: outcome=success. 真报告act",
             is_error=False,
@@ -251,7 +247,7 @@ async def test_bg_replace_success_folds_raw(monkeypatch, fake_state_ctx) -> None
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _stream)
     fp.register_close_synth(state.task.id, "tc9", state.scope, "success", state.scope)
-    await runner.launch_recap(state, ctx, boundary="finish")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
     turns = await ctx.memory.recall_recent(
         state.scope, [T.AGENT_CONVERSATION_TURN], 100, ctx.provider_ctx)
@@ -277,7 +273,7 @@ async def test_bg_no_usable_report_keeps_raw_and_placeholder(monkeypatch, fake_s
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
     fp.register_close_synth(state.task.id, "tc9", state.scope, "success", state.scope)
-    await runner.launch_recap(state, ctx, boundary="finish")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
     raw = await ctx.memory.recall_recent(
         state.scope, [T.LLM_RESPONSE, T.TOOL_RESULT], 100, ctx.provider_ctx)

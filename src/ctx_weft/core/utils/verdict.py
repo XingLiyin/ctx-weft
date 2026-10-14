@@ -15,7 +15,7 @@
   short"）。一个正常的提问没有任何 blocker——观察者要么编一个，要么换个 status。
 
 而判 success 的代价是实打实的：task 就此终结，用户正要说的那一轮被丢掉，park 气泡被收口。
-纯文本 park 这条路上**没有任何机械护栏**能挡住它——`report_task_outcome` 那道
+纯文本 park 这条路上**没有任何机械护栏**能挡住它——`report_observation` 那道
 success-without-outputs 护栏读的是 `task.outputs`，而 park 前合成的 outputs 正是那段提问本身，
 非空，护栏原地失效。所以只剩词面与字段契约这两个抓手，两个都得对。
 

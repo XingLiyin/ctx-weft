@@ -89,15 +89,17 @@ import time
 
 import pytest
 
+from ctx_weft import RuntimeConfig
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft import RuntimeConfig
-from tests.integration.test_minimal_loop import (
-    InlineAgentTemplateProvider, make_echo_template, make_runtime,
-)
 from tests._event_helpers import all_events, append_one
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 
 class _RouterLLM(MockLLMAdapter):
@@ -227,12 +229,15 @@ async def test_capability_gateway_events_have_loop_capability_gateway_origin():
     from collections.abc import AsyncIterator
     from types import SimpleNamespace
 
+    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.loop.driver import LoopContext, LoopState
-    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.protocols import MemoryAddress, ProviderContext
     from ctx_weft.protocols.capability import (
-        CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
+        CapabilityEvent,
+        CapabilityProviderInfo,
+        ToolCapability,
+        ToolCapabilityProvider,
     )
     from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

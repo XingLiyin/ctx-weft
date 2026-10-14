@@ -48,13 +48,13 @@ def test_recognize_intent_gets_text_not_empty():
 
 from types import SimpleNamespace
 
-from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.act import _run_llm_turn
-from ctx_weft.core.loop.observing import run_observe_react
+from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
 from ctx_weft.protocols import LLMUsage, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import ToolCapability
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
@@ -160,11 +160,11 @@ async def test_observe_prompt_sent_event_has_no_base64():
     state = _make_state(origin=EventOrigin.LOOP_OBSERVE)
     ctx = _make_ctx(bus, llm=_FakeLLM(chunks=[_make_usage_chunk()]))
 
-    await run_observe_react(
+    await ObserveStep()._run_react(
         state, ctx, system="SYS",
         messages=[LLMMessage(role="user", content=[TextPart(text="看图"), _img()])],
         tools=[], max_rounds=1,
-        terminal_tool_name="report_task_outcome",
+        terminal_tool_name="report_observation",
     )
 
     sent = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT][0]

@@ -1,0 +1,10 @@
+{# 仅续跑时使用。ref=None 表示无任务引用；full_context=False 保留旧 fallback 措辞；
+completed_tasks=True 时，正常版提示使用已完成子任务的结果，不重复执行。 #}
+{%- if ref is not none %}You are still working on the task: {{ ref }}, resuming from the state recorded above.
+{%- else %}You are still working on the task above, resuming from the state recorded above.
+{%- endif %}
+{%- if full_context %} Review the conversation for what has already been done — do not redo it — and continue with only the remaining work.
+{%- if completed_tasks %} Parts of it have ALREADY been delegated to sub-tasks that are now complete — they are listed with their results in the situational notes below. Do not execute that work a second time: build on those results and judge what, if anything, still remains. The exception is a result the review note flags as falling short — for that piece you decide whether to delegate it afresh or handle it yourself.
+{%- endif %}
+{%- else %} Review what has already been done and continue with only the remaining work.
+{%- endif %}

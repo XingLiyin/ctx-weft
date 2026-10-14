@@ -21,25 +21,42 @@ from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.protocols import (
-    MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext, ToolCall,
+    MemoryAddress,
+    MemoryEvent,
+    MemoryKind,
+    MemoryScope,
+    ProviderContext,
+    ToolCall,
 )
 from ctx_weft.protocols.capability import (
-    AuthorizationDecision, Authorizer, CapabilityEvent, CapabilityProviderInfo, ToolCapability,
+    AuthorizationDecision,
+    Authorizer,
+    CapabilityEvent,
+    CapabilityProviderInfo,
+    ToolCapability,
     ToolCapabilityProvider,
 )
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events, append_one
 from tests.integration.test_hitl_e2e_v2 import _ActRouterLLM, _all_request_text, _finish_call, _poll
 from tests.integration.test_hitl_hot_reply_round_window_e2e import (
-    STALL_AFTER_CHUNK, STALL_BEFORE_CHUNK, _ask, _ask_user_results, _next_question,
-    _ScriptedLLM, _stored_types,
+    STALL_AFTER_CHUNK,
+    STALL_BEFORE_CHUNK,
+    _ask,
+    _ask_user_results,
+    _next_question,
+    _ScriptedLLM,
+    _stored_types,
 )
 from tests.integration.test_minimal_loop import (
-    InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
 )
-from tests._event_helpers import all_events, append_one
+from tests.step_helpers import suppress_observe_start
 
 pytestmark = pytest.mark.asyncio
 
@@ -148,10 +165,7 @@ async def test_restart_after_crash_mid_commit_uses_the_new_answer() -> None:
     await rt2.rebuild_hitl(sid)
     pending = [p for p in rt2.hitl_registry.list_pending(session_id=sid) if p.id == q1.id]
     assert pending, "重启后问题必须回到待答"
-    with mock.patch(
-        "ctx_weft.core.loop.background.launch_recap",
-        return_value=None,
-    ):
+    with suppress_observe_start():
         await rt2.reply_to_hitl(HitlReply(
             hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="NEW_ANSWER"))
         await _poll(lambda: llm2.act_requests or None, timeout=8.0)
@@ -208,10 +222,7 @@ async def test_recovery_restores_an_appended_message_from_the_event_log(message_
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
     await rt.rebuild_session(sid)
-    with mock.patch(
-        "ctx_weft.core.loop.background.launch_recap",
-        return_value=None,
-    ):
+    with suppress_observe_start():
         await rt.recover_agent(aid)
         await _poll(lambda: llm.act_requests or None)
 

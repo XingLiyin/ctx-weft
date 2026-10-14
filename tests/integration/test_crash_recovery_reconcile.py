@@ -14,22 +14,34 @@ from unittest import mock
 
 import pytest
 
+from ctx_weft import RuntimeConfig
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols import (
-    MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext,
+    MemoryAddress,
+    MemoryEvent,
+    MemoryEventType,
+    ProviderContext,
 )
+from ctx_weft.protocols import MemoryScope as _MS
 from ctx_weft.protocols.capability import (
-    CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
+    CapabilityEvent,
+    CapabilityProviderInfo,
+    ToolCapability,
+    ToolCapabilityProvider,
 )
+from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.protocols.memory import MemoryKind as _MK
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft.protocols import MemoryScope as _MS
-from ctx_weft.protocols.memory import MemoryKind as _MK
-from ctx_weft import RuntimeConfig
+from tests.step_helpers import suppress_observe_start
+
 _MEM_TASK_SCOPE = _MS.TASK
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 from tests._event_helpers import append_one
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -113,7 +125,8 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
     # 注入「崩溃前调用过」的事实：一条 CapabilityInvoked、没有 Finished
     # ——这正是账本时代 `status=started` 的等价物，idempotent 分支的输入。
     from ctx_weft.core.utils.clock import now_utc as _now
-    from ctx_weft.protocols.events import Event as _Ev, EventType as _ET
+    from ctx_weft.protocols.events import Event as _Ev
+    from ctx_weft.protocols.events import EventType as _ET
 
     await append_one(runtime.event_store, _Ev(
         id="evt_seed_invoked", type=_ET.CAPABILITY_INVOKED, session_id=sid,
@@ -124,10 +137,7 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
     await runtime.rebuild_session(sid)
-    with mock.patch(
-        "ctx_weft.core.loop.background.launch_recap",
-        return_value=None,
-    ):
+    with suppress_observe_start():
         await runtime.recover_agent(aid)
         for _ in range(50):
             if tool.invoked:

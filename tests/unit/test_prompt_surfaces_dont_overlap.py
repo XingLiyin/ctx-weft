@@ -5,7 +5,7 @@ observer 看到的 prompt 由三面拼成，分工是：
 | 面 | 回答什么 | 住在哪 |
 |---|---|---|
 | 工具 schema | 字段**是什么**：语义、何时必填、写到哪儿去 | `capabilities/control_tools.py` |
-| 尾部 cue | **这一次**：本段怎么结束的、调哪个工具、填哪几格 | `assembler/composer.py` |
+| 尾部 cue | **这一次**：本段起止范围、怎么结束、调哪个工具、填哪几格 | `assembler/composer.py` |
 | ROLE.md | **怎么判**：什么算完成、什么算证据、continue 与 fail 的分界 | **宿主仓**（业务方维护） |
 
 2026-09-28 那轮改造把分工定下来了，但只拆了最明显的几处，一次事后审计又抓出四处残留 ——
@@ -24,6 +24,7 @@ import typing
 import pytest
 
 from ctx_weft.core.assembler import composer as C
+from ctx_weft.core.assembler.prompts import connector
 from ctx_weft.core.capabilities import control_tools as CT
 from ctx_weft.core.utils.headings import FINAL_OUTPUT_HEADING, SUBTASKS_HEADING
 
@@ -40,8 +41,32 @@ def _field_descs(fn) -> dict[str, str]:
     return out
 
 
-_OUTCOME_DESCS = _field_descs(CT.report_task_outcome)
-_JUDGMENT_CUE = C._judgment_cue("plain_text")
+_OUTCOME_DESCS = _field_descs(CT.report_observation)
+
+
+def _judgment_prompt(boundary: str, *, final_output: str = "") -> str:
+    context = connector(
+        "review.context",
+        task_anchor="TASK",
+        boundary=C._boundary_fact(boundary),
+        final_output=final_output,
+    )
+    return context + connector(
+        "review.judge",
+        plain_text_yielded=boundary == "plain_text",
+        finish_park_yielded=boundary == "finish_park",
+        subtasks="",
+    )
+
+
+def _yielded_reminder(boundary: str) -> str:
+    return next(
+        paragraph for paragraph in _judgment_prompt(boundary).split("\n\n")
+        if "judge `continue`" in paragraph
+    )
+
+
+_JUDGMENT_CUE = _judgment_prompt("plain_text")
 
 
 def test_the_helper_actually_reads_the_schema() -> None:
@@ -92,6 +117,21 @@ def test_the_fill_conditions_do_live_on_the_schema() -> None:
     assert "LEAVE IT EMPTY" in _OUTCOME_DESCS["task_failure_reason"]
 
 
+def test_segment_scope_lives_on_the_shared_review_cue_not_the_field_schema() -> None:
+    """「从哪里记到哪里」是每次 review 的操作区间，不是 act_recap 的字段定义。"""
+    scope = _judgment_prompt("normal")
+    assert "## Progress So Far" in scope
+    assert "latest user message" in scope
+    assert "whichever is later" in scope
+    assert "end of this segment" in scope
+    assert "markers locate the source range only" in scope
+    assert "Write the recap itself directly" in scope
+
+    desc = _OUTCOME_DESCS["act_recap"]
+    for leaked in ("## Progress So Far", "whichever is later", "starting boundary"):
+        assert leaked not in desc
+
+
 # ── ② schema 不写职权规则 ─────────────────────────────────────────────────────
 
 
@@ -120,20 +160,20 @@ def test_the_hint_field_still_says_what_it_carries() -> None:
 # ── ③ 让位边界的顶针：只留结论 ────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("boundary", sorted(C._YIELDED_REMINDER))
+@pytest.mark.parametrize("boundary", ("finish_park", "plain_text"))
 def test_the_yielded_reminder_carries_the_whole_conclusion(boundary: str) -> None:
     """顶针必须把**两个否定都**说出来。
 
     改造前 `plain_text` 那句只说「judge continue」，没说「决不 fail」—— 而判 fail 比判 success
     更糟（success 只是丢掉一轮对话，fail 是把一个没出错的任务钉死）。
     """
-    text = C._YIELDED_REMINDER[boundary]
+    text = _yielded_reminder(boundary)
     assert "`continue`" in text
     assert "never `success`" in text
     assert "never `fail`" in text
 
 
-@pytest.mark.parametrize("boundary", sorted(C._YIELDED_REMINDER))
+@pytest.mark.parametrize("boundary", ("finish_park", "plain_text"))
 def test_the_yielded_reminder_does_not_re_enumerate(boundary: str) -> None:
     """列举归 ROLE，顶针只顶结论。
 
@@ -141,7 +181,7 @@ def test_the_yielded_reminder_does_not_re_enumerate(boundary: str) -> None:
     （「只有用户能做的动作」）—— 抄一半是最容易漂的形态：ROLE 加第六项时没人会想到还要来改
     这里。这条也顺带保住顶针的短小，它处在 prompt 尾部 recency 最强的位置。
     """
-    text = C._YIELDED_REMINDER[boundary]
+    text = _yielded_reminder(boundary)
     for enumerated in ("missing information", "a choice", "a confirmation"):
         assert enumerated not in text, f"{boundary} 的顶针又开始列举了：{enumerated!r}"
     assert len(text) < 200, f"{boundary} 的顶针涨到 {len(text)} 字符，八成又在抄 ROLE"
@@ -179,8 +219,8 @@ def test_the_injected_output_section_uses_the_shared_heading() -> None:
     class _R:
         task = _T()
 
-    section = C._finish_result_section(_R())
-    assert section.startswith(FINAL_OUTPUT_HEADING + "\n\n")
+    section = _judgment_prompt("finish", final_output=C._finish_result_text(_R()))
+    assert f"{FINAL_OUTPUT_HEADING}\n\n交付物正文" in section
     # 变异防御：把常量改了，渲染出来的标题必须跟着变（而不是两处各一份字面量）
     assert FINAL_OUTPUT_HEADING in section
     assert section.count("Actor's Final Output") == 1

@@ -903,7 +903,7 @@ def downgrade_images_to_text(
     """把图片 part 换成确定性文本占位 ``[image {media_type}]``；不改原对象。
 
     用于 composer 的 per-purpose 策略（用户裁定 D2）：只有 ``act`` 需要模型真看图，
-    ``compact`` / ``observe`` / ``background_observe`` / ``recognize_intent`` 一律降级。
+    ``compact`` / ``observe`` / ``recognize_intent`` 一律降级。
     其中 compaction 恰在上下文超预算时触发，不降级就等于「在最贵的时刻多打一发最大的
     请求」。
 

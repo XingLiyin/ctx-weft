@@ -1,0 +1,4 @@
+{# One informational line per subtask; append a note only when present. #}
+{%- for task in subtasks -%}
+- {{ task.ref }} [{{ task.outcome }}]{% if task.note %} — {{ task.note }}{% endif %}{% if not loop.last %}
+{% endif %}{% endfor %}

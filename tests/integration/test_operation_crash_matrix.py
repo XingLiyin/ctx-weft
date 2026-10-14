@@ -224,8 +224,8 @@ async def test_ot14_delegate_completed_reentry_no_duplicate_children():
     cache = CapabilityCache()
     from ctx_weft.protocols.capability import ToolCapability as TC
     for name in ("delegate_task", "delegate_plan", "finish_task",
-                 "report_task_outcome", "update_task_metadata",
-                 "collect_process_report", "ask_user"):
+                 "report_observation", "update_task_metadata",
+                 "report_observation", "ask_user"):
         cache.register_global([TC(id=f"control:{name}", name=name, description="d")])
     gw = CapabilityGateway(
         capability_cache=cache, capability_providers=[control],

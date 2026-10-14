@@ -3,33 +3,47 @@
 用真实 runtime（`run_single_task`）与真实 memory 驱动整条 prepare→act→observe→finalize。
 """
 
+import dataclasses as _dc
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from datetime import datetime, timedelta, UTC
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft.protocols import (
-    AgentTemplate, CapabilityEvent, CapabilityProviderInfo, IdentityFacet, LoopConfig,
-    MemoryConfig, MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext,
-    ToolCall, ToolCapability, ToolCapabilityProvider,
-)
-import dataclasses as _dc
+from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
-from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
-from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
-from ctx_weft.core.registry import ProviderRegistry
-from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 from ctx_weft.core.models.agent import LoopGuard
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
+from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
+from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.protocols import (
+    AgentTemplate,
+    CapabilityEvent,
+    CapabilityProviderInfo,
+    IdentityFacet,
+    LoopConfig,
+    MemoryAddress,
+    MemoryConfig,
+    MemoryEvent,
+    ProviderContext,
+    ToolCall,
+    ToolCapability,
+    ToolCapabilityProvider,
+)
+from ctx_weft.protocols import (
+    MemoryEventType as T,
+)
+from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+from tests.step_helpers import patch_observe_start
 
 pytestmark = pytest.mark.asyncio
 _BASE = datetime(2026, 7, 1, tzinfo=UTC)
@@ -137,8 +151,7 @@ async def test_context_limit_retry_without_recap_keeps_raw_and_defers_to_backgro
         launched.append(boundary)
         return None
 
-    monkeypatch.setattr(
-        "ctx_weft.core.loop.background.launch_recap", _spy)
+    patch_observe_start(monkeypatch, _spy)
 
     resolver = InlineAgentTemplateProvider()
     # 关短段免折门，隔离出「空 recap 才是不折的原因」（短段免折是另一条已单测的路径）。

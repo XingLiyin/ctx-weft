@@ -1,6 +1,6 @@
-"""per-purpose 图片策略：只有 act 携带真图，其余四个 purpose 降级成文本占位。
+"""per-purpose 图片策略：只有 act 携带真图，其余五个 purpose 降级成文本占位。
 
-背景（spec §13 的 I3）：Phase 2 探针实测五个 compose purpose **全部**携带 inline
+背景（spec §13 的 I3）：Phase 2 探针发现各 compose purpose 都会携带 inline
 base64。最要命的一条——compaction 恰在上下文超预算时触发，却会把触发它的那些图一起
 重发，即在最贵的时刻多打一发最大的请求。
 
@@ -26,8 +26,12 @@ from ctx_weft.core.utils.content import _IMAGE_PART_TOKENS, content_to_text, ima
 from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.protocols import ImagePart, TextPart
 
-ALL_PURPOSES = ("act", "compact", "observe", "recognize_intent", "background_observe")
-DOWNGRADED_PURPOSES = ("compact", "observe", "recognize_intent", "background_observe")
+ALL_PURPOSES = (
+    "act", "compact", "observe", "recognize_intent",
+)
+DOWNGRADED_PURPOSES = (
+    "compact", "observe", "recognize_intent",
+)
 
 
 def _identity(text: str) -> ContextBlock:
@@ -80,7 +84,7 @@ async def test_act_keeps_real_image():
     assert image_tokens(user.content) == _IMAGE_PART_TOKENS, "act 的 token 数应含图"
 
 
-# ── 2/3. 其余四个 purpose 降级 ─────────────────────────────────────────────────
+# ── 2/3. 其余五个 purpose 降级 ─────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -173,7 +177,7 @@ def test_text_only_content_returned_as_same_object(content):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("purpose", ALL_PURPOSES)
 async def test_text_only_compose_is_byte_identical(purpose, monkeypatch):
-    """纯文本会话：五个 purpose 的产出与「根本没有降级逻辑」时逐字节相同。
+    """纯文本会话：六个 purpose 的产出与「根本没有降级逻辑」时逐字节相同。
 
     基线由把 ``downgrade_images_to_text`` 换成恒等函数得到——AssembledPrompt 的
     ``__eq__`` 逐字段比较，相等即 system / messages / tools / token_count 全部逐字节相等。

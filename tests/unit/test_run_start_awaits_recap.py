@@ -14,21 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.background import runner
-from ctx_weft.core.loop.driver import LoopState
+from ctx_weft.core.loop.driver import ExecutionRegistry, LoopState
 from ctx_weft.core.runtime import CtxWeftRuntime
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryAddress
 
 pytestmark = pytest.mark.asyncio
-
-
-@pytest.fixture(autouse=True)
-def _clear_pending():
-    runner._task_pending.clear()
-    yield
-    runner._task_pending.clear()
 
 
 class _FakeBus:
@@ -41,6 +33,7 @@ class _RecordingDriver:
 
     def __init__(self, order: list):
         self._order = order
+        self.executions = ExecutionRegistry()
 
     async def run(self, state, ctx):
         self._order.append("driver_started")
@@ -78,10 +71,11 @@ async def test_run_start_does_not_wait_for_pending_recap():
 
     state, task, agent = _make_state_and_task()
     recap = asyncio.create_task(slow_recap())
-    runner._task_pending[task.id] = recap
+    driver = _RecordingDriver(order)
+    driver.executions.register("recap-run", task.id, "observe", recap)
 
     await CtxWeftRuntime._run_loop(
-        _fake_runtime_self(), state, None, _RecordingDriver(order),
+        _fake_runtime_self(), state, None, driver,
         "r1", "prepare", task, agent,
     )
 
@@ -95,9 +89,10 @@ async def test_run_start_passthrough_without_pending():
     """无 pending：直通，driver 正常执行。"""
     order: list = []
     state, task, agent = _make_state_and_task()
+    driver = _RecordingDriver(order)
 
     await CtxWeftRuntime._run_loop(
-        _fake_runtime_self(), state, None, _RecordingDriver(order),
+        _fake_runtime_self(), state, None, driver,
         "r1", "prepare", task, agent,
     )
 
@@ -117,10 +112,11 @@ async def test_run_start_unaffected_by_errored_recap():
 
     state, task, agent = _make_state_and_task()
     recap = asyncio.create_task(errored_recap())
-    runner._task_pending[task.id] = recap
+    driver = _RecordingDriver(order)
+    driver.executions.register("recap-run", task.id, "observe", recap)
 
     await CtxWeftRuntime._run_loop(
-        _fake_runtime_self(), state, None, _RecordingDriver(order),
+        _fake_runtime_self(), state, None, driver,
         "r1", "prepare", task, agent,
     )
 

@@ -13,6 +13,8 @@ ActStep 只调 gateway.invoke()，拿回 InvocationResult，不感知内部细�
 
 from __future__ import annotations
 
+from ctx_weft.core.loop.commit import rearm_after_hot_reply
+
 import asyncio
 import contextlib
 import dataclasses
@@ -24,9 +26,8 @@ from typing import TYPE_CHECKING, Any
 
 import jsonschema
 
+from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.utils.content import (
-    content_with_prefix,
-    content_with_suffix,
     legalize_tool_result_parts,
     normalize_content_parts,
     redact_content_for_event,
@@ -69,16 +70,8 @@ _REDACT_HEADERS = frozenset({"authorization", "cookie", "x-api-key", "x-auth-tok
 # 无人值守撞上 HITL 时的两句措辞（`ask_user` 例外，它的文本住在 control_tools）。
 # 授权侧这一句被合成进一个「人拒绝了」的 `HitlDecision`，由发起方 authorizer 原样
 # 转成 `AuthorizationDecision.message`，最终以 `[Blocked by human: ...]` 回灌 LLM。
-_UNATTENDED_AUTHZ_NOTE = (
-    "this task runs unattended in the background — there is nobody who could approve "
-    "this tool call, so it is denied. Continue without it, or finish the task and say "
-    "what you could not do."
-)
-_UNATTENDED_TOOL_NOTE = (
-    "[No human available: this task runs unattended in the background, so nobody can "
-    "respond. Continue with what you already know, or finish the task and state what "
-    "blocked you.]"
-)
+_UNATTENDED_AUTHZ_NOTE = runtime_prompt('unattended_authz_note')
+_UNATTENDED_TOOL_NOTE = runtime_prompt('unattended_tool_note')
 
 # 畸形 {"_raw": ...} 报错里回吐原文的上限：畸形原文可能是大 write_file 的几 KB 内容，
 # 整段回灌会炸 context，超长截断。
@@ -98,18 +91,17 @@ _PLAN_DISPATCH_TOOLS = frozenset({
     qualify(f"{CONTROL}:delegate_plan"),
 })
 
-# 编排/裁决型控制工具：其结果是状态信号、不入 task 对话——例如 report_task_outcome 的 HITL 回复
+# 编排/裁决型控制工具：其结果是状态信号、不入 task 对话——例如 report_observation 的 HITL 回复
 # 改由 finalize 以 role=user 注入。（ask_user 的人类答复是 actor 输入，仍写 task 层。）
 # finish_task 同理：反转契约后它是无参收尾标记，最终答复即助手消息正文、canonical 出口是
 # task.outputs（ActStep 收尾时合成），标记本身不入 task 对话。
-# collect_process_report 是 background observe 的终止工具：result 由 run_observe_react 取出落
+# report_observation 是 observe 的终止工具：result 由 ObserveStep._run_react 取出落
 # close report 槽（→ Process Report），且 background observe 在 task close 后才跑，若入 task 对话
 # 会污染已冻结的对话且不被 supersede（泄漏进后续 task prompt）。
 SILENT_TOOLS = frozenset({
-    qualify(f"{CONTROL}:report_task_outcome"),
+    qualify(f"{CONTROL}:report_observation"),
     qualify(f"{CONTROL}:update_task_metadata"),
     qualify(f"{CONTROL}:finish_task"),
-    qualify(f"{CONTROL}:collect_process_report"),
 })
 
 
@@ -231,18 +223,10 @@ async def converge_tool_output(
     # `fs__read_file` 并给出路径，可回读的给出可照抄的 `results__read_tool_output(...)`。
     # core 若统一套一句「full text at {ref}」，对两种 sink 都不准确——一个路径究竟是
     # 「宿主侧的文件」还是「我能读的东西」，模型只能猜，猜错就是白跑一轮工具。
-    parts = [
-        f"[Tool output truncated: {original_length} chars exceeded "
-        f"{threshold}-char limit. "
-        + (recovery or "Full text is NOT recoverable (no spill sink configured, or "
-                       "the spill failed) — what follows is all that remains.")
-        + "]"
-    ]
-
-    body = [f"--- preview (first {len(head)} chars) ---", head]
-    if tail:
-        body += [f"--- tail (last {len(tail)} chars) ---", tail]
-    return "\n".join(parts) + "\n" + "\n".join(body)
+    return runtime_prompt(
+        "tool_output_truncated", original_length=original_length, threshold=threshold,
+        recovery=recovery or runtime_prompt("spill_unrecoverable"), head=head, tail=tail,
+    )
 
 
 def tool_audit_record_id(tool_call_id: str) -> str | None:
@@ -439,7 +423,7 @@ class CapabilityGateway:
         # 非内部标识（裸 wire id：无铸造的测试替身、宿主直构 gateway）→ None → 账本
         # 全程旁路。判据放在这里而不是调用侧，是因为它同时消掉了旧设计里
         # 那个独立 `provider_ctx.operation_id` 字段的所有权转移——共享可变字段忘了清
-        # 就会泄漏到后续无关 invoke（后台 observe 的 collect_process_report 曾因此命中
+        # 就会泄漏到后续无关 invoke（后台 observe 的 report_observation 曾因此命中
         # 别的操作的 completed 短路、回放错结果）。改成普通入参之后泄漏不可能发生。
         ledger_key = tool_call_id if is_internal_call_id(tool_call_id) else None
 
@@ -449,7 +433,8 @@ class CapabilityGateway:
         if cap is None or cap.kind != "tool":
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,
-                f"[Error: unknown tool '{tool_name}']", is_dispatch, is_silent, tool_call_id,
+                runtime_prompt('unknown_tool', tool=tool_name),
+                is_dispatch, is_silent, tool_call_id,
             )
 
         # 第四维 `invocation_key`：**同一次调用**才算合法重入（复审 I3）。用原始参数，
@@ -567,8 +552,7 @@ class CapabilityGateway:
             # 收敛成一条工具结果错误，安全不变式仍然成立（绝不放行）。
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,
-                f"[Error: {type(authorizer).__name__} returned NeedsHuman but does not "
-                f"implement HumanGatedAuthorizer]",
+                runtime_prompt('authorizer_needs_human_unsupported', authorizer=type(authorizer).__name__),
                 is_dispatch, is_silent, tool_call_id,
             )
         if not decision.allowed:
@@ -580,14 +564,13 @@ class CapabilityGateway:
             # 后面而非文本后面——两个前后缀必须都落在同一个 TextPart 里。
             if decision.message:
                 note_text, note_parts = split_for_tool_result(decision.message)
-                blocked_text = content_with_suffix(
-                    content_with_prefix(note_text, "[Blocked by human: "), "]")
+                blocked_text = runtime_prompt("blocked_by_human", message=note_text)
                 content = (
                     normalize_content_parts([TextPart(text=blocked_text), *note_parts])
                     if note_parts else blocked_text
                 )
             else:
-                content = f"[Error: capability '{tool_name}' not authorized]"
+                content = runtime_prompt('capability_not_authorized', tool=tool_name)
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id, content, is_dispatch, is_silent, tool_call_id,
             )
@@ -607,9 +590,7 @@ class CapabilityGateway:
             excerpt = raw if len(raw) <= _RAW_ERROR_MAX_LEN else raw[:_RAW_ERROR_MAX_LEN] + " …(truncated)"
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,
-                f"[Error: invalid arguments for '{tool_name}': arguments were not valid JSON "
-                f"and could not be parsed. You sent: {excerpt} — re-send the call with a "
-                f"well-formed JSON arguments object]",
+                runtime_prompt('invalid_json_args', tool=tool_name, excerpt=excerpt),
                 is_dispatch, is_silent, tool_call_id,
             )
         # 剥掉 schema 未声明的顶层键（对任意调用生效）。放在 _raw 兜底之后，避免把哨兵剥空
@@ -621,7 +602,7 @@ class CapabilityGateway:
         if err is not None:
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,
-                f"[Error: invalid arguments for '{tool_name}': {err}]",
+                runtime_prompt('invalid_arguments', tool=tool_name, error=str(err)),
                 is_dispatch, is_silent, tool_call_id,
             )
         # 审计副本（spec: capability-gateway「执行参数与审计参数分离」）：只进事件与
@@ -635,7 +616,8 @@ class CapabilityGateway:
         if provider is None:
             return await self._error_and_record(
                 state, ctx, tool_name, invocation_id,
-                f"[Error: no provider found for '{cap.id}']", is_dispatch, is_silent, tool_call_id,
+                runtime_prompt('provider_missing', capability=cap.id),
+                is_dispatch, is_silent, tool_call_id,
             )
 
         # 5. 关窗：这一轮已经不可撤销了（spec: event-commit / tool-operations）。
@@ -660,9 +642,9 @@ class CapabilityGateway:
         # 之前必须能撤回——在这里关窗就把撤回的机会提前掐掉了（答复连同回灌出来的工具结果
         # 此刻还在窗口的暂存区里）。真要**新开**一个问题时，`_resolve_human` 会在登记之前
         # 关窗（问题必须看得见）。
-        from ctx_weft.core.loop.steps.act import _commit_round
+        from ctx_weft.core.loop.commit import commit_round
         if tool_name != ASK_USER_NAME:
-            await _commit_round(state, ctx)
+            await commit_round(state, ctx)
 
         # 6. 记录 invocation（事件 + TOOL_INVOCATION / delegate conversation turn 入 memory）——审计通道
         await self._record_invocation(state, ctx, tool_name, cap, invocation_id, audit_args, is_dispatch, is_silent, tool_call_id)
@@ -709,7 +691,7 @@ class CapabilityGateway:
                     ASK_USER_UNATTENDED_RESULT if tool_name == ASK_USER_NAME
                     else _UNATTENDED_TOOL_NOTE])
             except Exception as _park_exc:
-                from ctx_weft.core.loop.park import HitlPark as _HP
+                from ctx_weft.core.loop.signals import HitlPark as _HP
                 if not isinstance(_park_exc, _HP):
                     raise
                 # 停在人那儿这件事由 **HITL 自己的账**表达（registry 的未决请求 +
@@ -726,8 +708,7 @@ class CapabilityGateway:
                     if not isinstance(provider, HumanResumable):
                         return await self._error_and_record(
                             state, ctx, tool_name, invocation_id,
-                            f"[Error: {type(provider).__name__} yielded needs_human but does "
-                            f"not implement HumanResumable]",
+                            runtime_prompt('provider_needs_human_unsupported', provider=type(provider).__name__),
                             is_dispatch, is_silent, tool_call_id,
                         )
                     # 重入是**新调用** resume（不是恢复挂起的生成器）——局部状态已随原生成器
@@ -746,7 +727,7 @@ class CapabilityGateway:
             # 空文本但流里带了非文本 part（例如 ask_user 只回了一张图）时，别说
             # 「(no output)」——那会让模型以为真的什么都没拿到，图却已经在 content 里了。
             # 其余分支（真的什么都没有 / is_error）逐字节保留原行为。
-            text = "" if is_error or streamed.parts else "(no output)"
+            text = "" if is_error or streamed.parts else runtime_prompt('no_output')
         # spec: tool-result-recovery——全文先行，收敛后置：store put（失败显式标记）→
         # 账本 completed 持**收敛前全文**（修 tool-operations「完整规范化结果」的 spill
         # 截断偏离）→ 收敛 → human note / 事件 / memory 只见收敛版。
@@ -757,7 +738,7 @@ class CapabilityGateway:
         # 顺序为「备注图 → 工具图」，与文本顺序一致（[Human note: …] 也在工具输出之前）。
         note_text, note_parts = split_for_tool_result(decision.message)
         if note_text or note_parts:
-            text = f"[Human note: {note_text}]\n{text}"
+            text = runtime_prompt("human_note", note=note_text, result=text)
         content: str | list[ContentPart] = text
         # provider 在 result content 里交上来的非文本 part 要补上入口那三件套
         # （校验 / 外部化），**不合格的换占位、恒不抛**——见 `legalize_tool_result_parts`。
@@ -966,8 +947,7 @@ class CapabilityGateway:
                 elif ev.kind == "error":
                     out.is_error = True
                     out.texts.append(
-                        f"[Error {ev.payload.get('code', 'ERR')}: "
-                        f"{ev.payload.get('message', '')}]"
+                        runtime_prompt('tool_stream_error', code=str(ev.payload.get("code", "ERR")), message=str(ev.payload.get("message", "")))
                     )
                 elif ev.kind == "pin":
                     # 「把这批能力加进当前 task 的可用面」。**与 needs_human 相反，不 break**：
@@ -1071,9 +1051,8 @@ class CapabilityGateway:
         """
         unverified = AuthorizationDecision(
             allowed=False, result_is_error=False,
-            message=(f"[Operation outcome unverified] 工具 {cap.name} 在执行中被中断，"
-                     f"没有注册重跑授权，无法确定副作用是否已发生。不要重试这次调用。"))
-        from ctx_weft.core.loop.park import HitlPark
+            message=runtime_prompt('operation_unverified_no_rerun_authorizer', tool=cap.name))
+        from ctx_weft.core.loop.signals import HitlPark
         # 内部折叠出来的事实**不直接递给宿主**：`OperationFacts` 带着 result / outcome /
         # truncated 这些内核内务，宿主既不该读也不该据以分支。转成对外的只读视图。
         record = RerunContext(
@@ -1198,8 +1177,8 @@ class CapabilityGateway:
             return cached.id, cached.effective_decision
         # 要**新开**一个问题：它必须立刻看得见。开着的未提交窗口会把 `HitlOpened` 挡在
         # 缓冲里，人就永远看不到这个问题（step 5 对 `ask_user` 不关窗，见那里）。
-        from ctx_weft.core.loop.steps.act import _commit_round
-        await _commit_round(state, ctx)
+        from ctx_weft.core.loop.commit import commit_round
+        await commit_round(state, ctx)
         req = await ctx.hitl.open(
             ask,
             session_id=ctx.provider_ctx.session_id,
@@ -1217,9 +1196,9 @@ class CapabilityGateway:
         human = await ctx.waiter.wait(req.id)
         if human is None:
             # 热窗口被驱逐 → 不放行也不拒绝。守住安全不变式：绝不调 provider.invoke。
-            from ctx_weft.core.loop.park import HitlPark
+            from ctx_weft.core.loop.signals import HitlPark
             raise HitlPark(hitl_id=req.id, tool_call_id=tool_call_id)
-        _rearm_commit_point_after_hot_reply(state, ctx, req.id)
+        rearm_after_hot_reply(state, ctx, req.id)
         return req.id, human
 
     @staticmethod
@@ -1268,34 +1247,6 @@ class CapabilityGateway:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _rearm_commit_point_after_hot_reply(
-    state: "LoopState", ctx: "LoopContext", hitl_id: str,
-) -> None:
-    """热应答把协程叫醒之后，给「这一轮」重新武装提交点（spec 2026-09-09）。
-
-    `reply_to_hitl` 为这条答复开了未提交窗口，决定也只是待终局。被叫醒的 run 早就过过
-    一次提交点（`ROUND_COMMITTED_KEY` 是 run 级幂等标志），不清掉它，`_commit_round`
-    永远是 no-op：窗口要到 run 结束才关，期间该 task 的事件全挡在缓冲里，host 看不见
-    下一个问题——连续提问时「第二个问题答了没用、一直让人重答」就是这么来的。
-
-    只在**这条答复自己开的窗**上做（`round_hitl_id` 对得上）。窗若是别的应答开的
-    （例如冷续跑的一轮里，reconcile 重放的工具又热等了一次授权），那一轮本来就没提交，
-    标志本就是 False，也轮不到这里决定怎么撤。
-
-    同时记下 `HOT_REPLY_ROUND_KEY`：这一轮若在 LLM 开口前被暂停，act 要走**热撤销**
-    （撤回答复后 park），而不是整轮 `RoundDiscarded`——这个 run 的 `RUN_STARTED` 早已
-    落盘，把它的结尾连同缓冲一起丢掉，日志里就留下一个永不结束的 run。
-    """
-    tm = ctx.task_manager
-    if tm is None or not tm.is_round_open(state.task.id):
-        return
-    if tm.round_hitl_id(state.task.id) != hitl_id:
-        return
-    from ctx_weft.core.loop.driver import HOT_REPLY_ROUND_KEY, ROUND_COMMITTED_KEY
-    state.extra[ROUND_COMMITTED_KEY] = False
-    state.extra[HOT_REPLY_ROUND_KEY] = hitl_id
-
-
 def _human_reply_as_result(
     human: "HitlDecision", ask: "HitlAsk",
 ) -> "_ToolStream":
@@ -1316,7 +1267,8 @@ def _human_reply_as_result(
     """
     text, parts = split_for_tool_result(human.message)
     if human.outcome == HITL_OUTCOME_REJECTED:
-        text = f"Human declined: {text}" if text else "Human rejected the request."
+        text = (runtime_prompt('human_declined', message=text)
+                if text else runtime_prompt('human_rejected'))
     elif not text and not parts:
         text = ask.prompt
     return _ToolStream(texts=[text] if text else [], parts=parts)

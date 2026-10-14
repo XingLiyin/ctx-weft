@@ -9,7 +9,7 @@ runner 直接交回 `RunOutcome(CANCELED)`）。**接缝本身**——`_run_loop
 `TaskManager._run_task`。
 
 第二条（R17）：**observer 判 fail 之后、finalize 之前命中取消**，终态从 FAILED 变成
-CANCELED。旧路径 `report_task_outcome` 判 fail 时就地写 `task.status="FAILED"`，
+CANCELED。旧路径 `report_observation` 判 fail 时就地写 `task.status="FAILED"`，
 `_run_loop` 的 `except CancelledError` 里那道 `if task.status not in (...)` 守卫挡住
 覆写 → 终态 FAILED → `on_task_finished(FAILED)` → `failure_counter += 1`（可触发熔断）。
 新路径 observe 只写 `task.observer_outcome`，取消时 `task.status` 仍是 ACTIVE →
@@ -29,7 +29,8 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.tokens import CancelToken
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, StepOutcome
 from ctx_weft.core.capabilities.cache import CapabilityCache
-from ctx_weft.core.capabilities.control_tools import ControlContext, report_task_outcome
+from ctx_weft.core.capabilities.control_tools import ControlContext
+from tests.unit.observation_helpers import submit_and_apply
 from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.orchestrator.task.runner import AgentBinding
@@ -70,7 +71,7 @@ class _SpyBus:
 class _CancelAtBoundaryStep:
     """一个 step：跑完之后置取消——取消因此**落在 step 边界**（driver.run 循环顶部）。
 
-    `report_verdict` 为真时先真调 `report_task_outcome(fail)`，复现 R17 的场景：
+    `report_verdict` 为真时先真调 `report_observation(fail)`，复现 R17 的场景：
     observer 已判死，但 FinalizeStep 还没来得及跑。
     """
 
@@ -82,7 +83,7 @@ class _CancelAtBoundaryStep:
 
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
         if self._report:
-            report_task_outcome(
+            submit_and_apply(
                 task_status="fail",
                 act_recap="tried and failed",
                 task_summary="",

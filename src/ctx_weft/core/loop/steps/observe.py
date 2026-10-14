@@ -1,358 +1,512 @@
-"""ObserveStep：评估 actor transcript，产出 verdict。
+"""Observe execution: task judgement (optional) and execution-history recap.
 
-- 有 observe ROLE → LLM 多轮 ReAct（用 report_task_outcome 工具）
-- 否则 → **机械判决**：只从 transcript + exit_reason 定三态结局，**不产任何摘要**；
-  摘要改由 background observe 异步产（用户裁定：不允许任何机械合成的摘要）。
-
-走机械判决的场景（**只剩降级**，2026-09-28）：
-  1. template 未配置 identity["observe"]（assigned agent 无 ROLE，装不出 observer）
-  2. LLM 调用失败，或耗尽轮次没调 report_task_outcome
-  3. 本 run 已被取消——不再烧多轮 LLM。注意这是**选路径**，不是检查点：observe 是
-     「整理现状」，取消到达时降级但仍走完并交出 verdict，绝不半途中止（用户裁定）。
-
-2026-09-28 从这张单子上删掉了「root task（parent_task_id is None）」那一条。它不是降级、
-是一个**按身份免检**的口子：机械判决对 `normal`/`actor_done` 无条件判 success，于是 root 上
-「这个 task 完没完」全凭 actor 自己说。见 `_should_use_llm`。
+The driver selects foreground/background execution. This step owns observation,
+judgement and settlement in both modes.
 """
-
 from __future__ import annotations
 
 import dataclasses
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.core.assembler import ContextRequest
-from ctx_weft.protocols.events import EventType
-from ctx_weft.protocols import MemoryScope
-from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.observing import has_observe_role, run_observe_react
-from ctx_weft.core.capabilities.control_tools import (
-    FINISH_TASK_NAME,
-    REPORT_TASK_OUTCOME_NAME,
+from ctx_weft.core.assembler import ContextRequest, ReviewIntent
+from ctx_weft.core.assembler.prompts import connector, runtime_prompt
+from ctx_weft.core.capabilities.control_tools import REPORT_OBSERVATION_NAME
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
+from ctx_weft.core.loop.driver import (
+    ExecutionMode,
+    LoopContext,
+    LoopState,
+    Step,
+    StepDriver,
+    StepExecution,
+    StepOutcome,
+    make_event,
 )
+from ctx_weft.core.loop.llm_gateway import (
+    request_prompt_estimate,
+    resolve_llm_identity,
+    stream_llm_resilient,
+)
+from ctx_weft.core.loop.task_memory_fold import (
+    pop_close_synth,
+    put_close_report,
+    replace_finish_report,
+)
+from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
+from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.content import content_to_text, image_tokens
+from ctx_weft.core.utils.ids import generate_id, mint_turn_call_ids
 from ctx_weft.core.utils.verdict import (
     VERDICT_CONTINUE,
     VERDICT_FAIL,
     VERDICT_SUCCESS,
     normalize_verdict,
 )
+from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryScope
+from ctx_weft.protocols.events import EventType
 
 if TYPE_CHECKING:
-    from ctx_weft.core.models.task import Task
+    from ctx_weft.core.capabilities.control_tools import ControlResult
 
 logger = logging.getLogger(__name__)
+_PLAIN_TEXT_NEEDS_FINISH = connector("act.review_feedback.plain_text_needs_finish")
 
 
-#: 机械判决对纯文本收尾（`act_exit_reason == "normal"`）判 continue 时给下一轮的一次性转向。
-#:
-#: 落到 `task.next_step_hint` → `act_guidance` 渲染成「## Note from the review of your previous
-#: attempt」→ `prepare` 消费后清掉（一次性，见 `prepare.py` 那句 `next_step_hint = None`）。
-#:
-#: 它是**事后补救**；预防写在 `act_guidance` 的 unattended 分支里（那段常驻文案明说纯文本不算
-#: 收尾）。两处都要有：常驻那句管「这一轮别犯」，这一句管「上一轮已经犯了」。
-_PLAIN_TEXT_NEEDS_FINISH = (
-    "Your previous turn ended with a prose reply and no tool call, so this task is still open — "
-    f"prose alone never ends it. Nobody is waiting to read that reply: only `{FINISH_TASK_NAME}` "
-    "ends a task. If the goal is now achieved, write the final reply as your normal message text "
-    f"and call `{FINISH_TASK_NAME}` in that same turn. If work remains, do the work."
-)
+CLOSE_BOUNDARIES = {"finish", "normal"}
+JUDGING_BOUNDARIES = {"plain_text", "finish_park"}
+
+
+def judges(boundary: str) -> bool:
+    return boundary in JUDGING_BOUNDARIES
+
+
+def has_observe_role(state: "Any") -> bool:
+    """A nonempty host ROLE enables judgement and finish-park review.
+
+    Missing ROLE causes mechanical fallback in the step. Background observation
+    defaults to recap-only for those agents; the actor does not park finish for
+    a judgement that cannot run.
+    """
+    template = state.extra.get("template")
+    if template is None:
+        return False
+    facet = template.identity.get("observe")
+    # getattr：与 composer 取 facet 正文的口径一致（手构 request / 鸭子类型替身在本仓很常见）
+    return facet is not None and bool((getattr(facet, "text", "") or "").strip())
+
+
+def _execution(ctx) -> StepExecution:
+    return getattr(ctx, "execution", StepExecution())
 
 
 def _is_own_root(task) -> bool:
-    """root task 判定（与 finalize._close_one 保持一致）。
-
-    True  → session root（parent_task_id is None）或跨 agent own-root（cross_agent）。
-    False → 同 agent 子任务（parent 非空且 creator==assigned）。
-    非 root 不触发后台 observe（它们用 LLM observe 向 parent 上报，max_turns 同步 compact）。
-    """
-    same_agent = task.creator_agent_id == task.assigned_agent_id
-    cross_agent = bool(task.parent_task_id) and not same_agent
-    return task.parent_task_id is None or cross_agent
+    return task.parent_task_id is None or task.creator_agent_id != task.assigned_agent_id
 
 
 @dataclass
 class Verdict:
-    """Observer 输出（三态）。"""
-    task_outcome: str   # "success" | "continue" | "fail"（见 core.utils.verdict）
-    act_recap: str      # 诚实复述本段 act 做了什么 → finish 对 assistant；retry 作 Progress So Far
-    task_summary: str = ""  # 整段综合总结（执行历程+结果）→ finish 对 tool 槽（仅终态有意义）
-    reported: bool = False  # 本轮是否真的走成 report_task_outcome；压缩摘要据此取信
-    #: 给下一次 act attempt 的一次性转向 → `task.next_step_hint`（由 `execute` 落地）。
-    #:
-    #: 只有机械判决用得上：LLM 路径的 hint 由 `report_task_outcome` 自己写进 task，这里恒空。
-    #: 它与判决**绑在同一个对象上**是有意的——机械判决判 continue 总得给出一个「下一轮该干什么
-    #: 不一样的事」，分开放两处必然有一处先漂。
+    """Final business judgement, not a task-status transition."""
+    task_outcome: str
+    act_recap: str
+    task_summary: str = ""
+    reported: bool = False
     next_step_hint: str = ""
+    failure_reason: str = ""
+
+
+@dataclass
+class ObservationResult:
+    """A recap may exist without a verdict, and a mechanical verdict without a recap."""
+    act_recap: str = ""
+    task_summary: str = ""
+    verdict: Verdict | None = None
+
+    def metadata(self) -> dict:
+        result = {K.OBSERVER_ACT_RECAP: self.act_recap,
+                  K.OBSERVER_TASK_SUMMARY: self.task_summary}
+        if self.verdict is not None:
+            result.update({
+                K.OBSERVER_OUTCOME: self.verdict.task_outcome,
+                K.OBSERVER_NEXT_STEP_HINT: self.verdict.next_step_hint,
+                K.OBSERVER_FAILURE_REASON: self.verdict.failure_reason,
+            })
+        return result
 
 
 class ObserveStep(Step):
     name = "observe"
 
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
-        events: list[Any] = []
+        execution = _execution(ctx)
+        boundary = self.boundary_or_exit(state, execution.options.get("boundary"))
+        background = execution.mode == ExecutionMode.BACKGROUND
+        judge_task = execution.options.get(
+            "judge_task", judges(boundary) and has_observe_role(state) if background else True)
+        if background:
+            return await self._execute_background(state, ctx, boundary, judge_task)
 
-        # 起点事件：先于下面任何分流决策（含取消 token 读取）——观测的开始时刻，
-        # 与 ObserveCompleted 成对，同形于后台 TaskRecapStarted/Done。payload 只放
-        # task_id：是否用 LLM 在起点还没定（取决于取消状态与 _should_use_llm），不猜。
-        events.append(make_event(
-            state, EventType.OBSERVE_STARTED,
-            payload={"task_id": state.task.id},
-        ))
-
-        # 取消时不跑多轮 LLM observe：observe 是「整理现状」，**不中止**（用户裁定）——
-        # 这里读 token 只为**选路径**，绝不是检查点：不 raise_if_cancelled、不提前 return，
-        # observe 照常走完并交出 verdict（next_step="finalize"）。半途中止会留下既无判决、
-        # 也没整理干净记忆的 task，比多等几轮更糟。但也不该在用户已按下取消后再烧几轮
-        # LLM —— 降级走机械判决，摘要交后台 observe 产。
-        tok = getattr(ctx, "cancel_token", None)
-        cancelled = tok is not None and tok.is_cancelled
-
-        verdict: Verdict | None = None
-        if (not cancelled) and self._should_use_llm(state):
-            try:
-                verdict = await self._llm_observe(state, ctx, events)
-            except Exception as exc:
-                logger.warning(
-                    "ObserveStep LLM call failed, degrading to mechanical verdict: %s", exc)
-                verdict = None
-        # used_llm = 判决**真的**出自 LLM observer（不是「尝试过 LLM」）：LLM 抛异常或
-        # 耗尽轮次没调 report_task_outcome 时同样落机械判决，那份判决没有摘要，
-        # 一律要转 background observe 补。
-        used_llm = verdict is not None
-        if verdict is None:
-            verdict = self._mechanical_verdict(state)
-
-        # 机械退出（max_turns/context_limit）：任务未完成、只是耗尽 turn/context，非终态——
-        # 强制 retry 重排（覆盖 success/fail）；用 replace 保留 summary 与 reported 标记。
-        if (state.act_exit_reason in ("max_turns", "context_limit")
-                and verdict.task_outcome != VERDICT_CONTINUE):
-            verdict = dataclasses.replace(verdict, task_outcome=VERDICT_CONTINUE)
-            self._apply_assessment(state.task, verdict)
-
-        # 机械判决带出来的一次性转向落到 task（唯一来源：纯文本收尾判 continue 时那句「去调
-        # finish_task」）。LLM 路径的 hint 由 `report_task_outcome` 自己写，`verdict.next_step_hint`
-        # 恒空，这里是 no-op——所以不会覆盖 observer 写的那份。
-
-        if verdict.next_step_hint:
-            state.task.next_step_hint = verdict.next_step_hint
-
-        # retry（三来源：max_turns/context_limit/observer-retry）→ 前台同步段折：
-        # 本轮 attempt raw 折成一条 TASK_COMPACT_SUMMARY（复用 act_recap），删本轮 raw。
-        # 「马上要重跑」故同步做好，下个 run 一进 prepare 即见折后段摘要。
-        if verdict.task_outcome == VERDICT_CONTINUE:
-            await self._fold_retry_segment(state, ctx, verdict, events)
-
-        # close 边界：root task 在 actor_done（finish_task 收尾 → boundary="finish"）或
-        # normal（actor 产出最终文本正常结束 → boundary="normal"）时触发后台异步 observe，
-        # 产段摘要 + 折 raw。root 的单次终结点——task 只 close 一次，_close_report 槽写一次、
-        # 弹一次，不存在乱序复用。
-        # 注：纯文本暂停（plain_text 边界）由 act.py:_finish_plain_text_turn 单独触发，不经此处。
-        # max_turns/context_limit 走同步 _fold_retry_segment；非 root 不触发（它们走 LLM observe）。
-        #
-        # `not used_llm` 这道门（2026-09-28，随 `_should_use_llm` 删掉 root 降级一起加）：
-        # 这次后台调用的**全部用途**就是替机械判决补一份摘要。前台真判过之后它不只是多余，
-        # 而是有害——`has_llm_summary = verdict.reported` 为真时 close 当场就把真摘要写进
-        # finish 对、末段 raw 同步折，但 `_synthesize_dispatch_pair` 仍会 `register_close_synth`
-        # 登记（槽空），于是这次后台只摘要档回来后 `_replace_finish_report` 会把前台那份好摘要
-        # **覆盖**成 recap-only 的产物。一次白烧的 LLM 换一次内容降级。
-        launched = False
-        if (not used_llm and state.act_exit_reason in ("normal", "actor_done")
-                and verdict.task_outcome != VERDICT_CONTINUE and _is_own_root(state.task)):
-            from ctx_weft.core.loop.background import launch_recap
-            boundary = "finish" if state.act_exit_reason == "actor_done" else "normal"
-            launch_recap(state, ctx, boundary=boundary)
-            launched = True
-
-        # 机械判决没有摘要（用户裁定：不允许任何机械合成的摘要）→ 交后台产真 recap。
-        # 上面 close 边界那支已经 launch 过的不再重复：重复 launch 虽有 per-task 锁兜着，
-        # 但会多发一对 TaskRecapStarted/Done。
-        if not used_llm and not launched:
-            from ctx_weft.core.loop.background import launch_recap
-            launch_recap(state, ctx, boundary="mechanical")
-
-        events.append(make_event(
-            state, EventType.OBSERVE_COMPLETED,
-            payload={
-                "task_id": state.task.id,
-                "outcome": verdict.task_outcome,
-                "summary_length": len(verdict.act_recap),
-                "used_llm": used_llm,
-            },
-        ))
-
-        return StepOutcome(
-            next_step="finalize",
-            state_patch={"verdict": verdict},
-            events=events,
-        )
-
-    # ── LLM 路径 ──────────────────────────────────────────────────────────────
-
-    async def _llm_observe(
-        self,
-        state: LoopState,
-        ctx: LoopContext,
-        events: list[Any],
-    ) -> Verdict | None:
-        """LLM ReAct 循环：装配 observe prompt → 最多 max_turns_per_observe 轮 LLM 调用。
-
-        每轮：若 LLM 调用 report_task_outcome → 立即返回 verdict；
-              若 LLM 返回纯文本 → 继续下一轮（最多 max_turns_per_observe 次）。
-        对齐 miniAgents Observer._llm_observe 多轮循环。
-        """
-        agent = state.agent
-        max_rounds = agent.loop_config.max_turns_per_observe
-
-        cache = ctx.capability_cache
-        bound_caps = (
-            cache.get(agent.id)
-            if cache is not None and cache.has_agent(agent.id)
-            else []
-        )
-        subtasks: list[dict] = []
-        tm = ctx.task_manager
-        if tm is not None:
-            for cid in tm.children_of(state.task.id):
-                child = tm.get_task(cid)
-                if child is None:
-                    continue
-                entry = {
-                    "task_id": child.id,
-                    "title": child.title or "",
-                    "outcome": (child.status or "").lower(),
-                }
-                # spec: task-handoff——依赖阻塞取消的子任务带解释性 note（error_code
-                # 区分于用户取消），父观察面据此知道「没跑是因为前序失败」。
-                if child.status == "CANCELED" and child.error_code:
-                    entry["note"] = child.error or child.error_code
-                subtasks.append(entry)
-        request = ContextRequest(
-            purpose="observe",
-            scope=state.scope,
-            task=state.task,
-            agent=agent,
-            session=state.session,
-            template=state.extra.get("template"),
-            bound_capabilities=bound_caps,
-            token_counter=ctx.llm.tokenizer.count,
-            # 边界也传给前台（2026-09-28）：装配层据它出「这一段是怎么结束的」那句事实，
-            # 以及要不要注入 actor 产出。此前前台不传，只能用一段写死「调了 finish_task」
-            # 的文案——`normal`（纯文本收尾）那格是假话，与同条 prompt 的其余部分打架。
-            extra={"subtasks": subtasks,
-                   "observe_boundary": state.act_exit_reason or "normal"},
-        )
-        prompt = await ctx.assembler.assemble(request)
-
-        terminal_result, last_text = await run_observe_react(
-            state, ctx,
-            system=prompt.system,
-            messages=list(prompt.messages),
-            tools=prompt.tools,
-            max_rounds=max_rounds,
-            terminal_tool_name=REPORT_TASK_OUTCOME_NAME,
-        )
-
-        if terminal_result is not None:
-            # report_task_outcome 已写 task.observer_outcome / task.process_report / task.task_summary
-            return Verdict(
-                task_outcome=normalize_verdict(state.task.observer_outcome or VERDICT_SUCCESS),
-                act_recap=state.task.process_report or last_text[:500],
-                task_summary=state.task.task_summary or "",
-                reported=True,
-            )
-
-        # 没走成 report_task_outcome → 本次 LLM observe 视为未产出判决，交给调用方
-        # 落机械判决 + background observe（返回 None 而非在此合成，见 execute）。
-        logger.warning(
-            "ObserveStep: LLM did not call report_task_outcome in %d rounds, "
-            "degrading to mechanical verdict", max_rounds)
-        return None
-
-    # ── 机械判决（无摘要）─────────────────────────────────────────────────────
-
-    def _mechanical_verdict(self, state: LoopState) -> Verdict:
-        """无可用 LLM observer 时的判决：**只定结局，不产摘要**。
-
-        摘要由 background observe 异步产出（用户裁定：不允许任何机械合成的摘要）。
-        act_recap 留空——`_fold_retry_segment` 对空摘要的口径是「不折、段保 raw」
-        （见其 docstring），不会写占位。
-
-        判据只有两个——`act_exit_reason`（这一段是怎么结束的）与 transcript 空不空。**两个
-        都不描述「活干成了没有」**，所以这张表只能表达「谁把这一段停下来的」：
-
-          actor_done                           → success   ← 只有明确调了 finish_task 才算成功
-          normal（纯文本收尾）                 → continue + 提醒去调 finish_task
-          max_turns / context_limit（机械退出）→ continue
-          空 transcript                        → fail
-
-        `normal → continue`（2026-09-28 改，此前是 success）：机械判决**没有任何办法**知道那段
-        正文有没有交付目标，那它的安全默认就必须是「没完」而不是「完了」——「没完」可回头
-        （retry），「完了」是终态、不可逆。同一条原则已经写在另外两处：`normalize_verdict` 把
-        认不出的值归 continue 而决不归 fail，`report_task_outcome` 的 success-without-outputs
-        护栏把 success 改判 continue。于是「一个 task 怎么才算成功」收敛成一句话：**actor 明确
-        调了 `finish_task`**。
-
-        **LLM 判定那条路不受此约束**，那里判 `normal` 为 success 是合法的：observer 手里有
-        `task.outputs`、有正文、有 ROLE 的准则，它做的是一次真判断。用机械规则去覆盖真判断，
-        方向正好相反。两档策略不同不是疏漏——差别在于一个有判断力、一个没有。
-
-        空 transcript → fail 这条**产不出最终的 fail**：transcript 每轮 break 前都 append 过、
-        且跨上下文恢复累加（`act.py` 那句 `transcript = list(state.transcript)`），所以「空」
-        只可能是循环体一次都没进，而那必然走 `for...else` → `exit_reason="max_turns"`，随后被
-        `execute` 里那道强制覆盖改写成 continue。留着它是为了别让「零回合」悄悄落到下面某条。
-
-        不写 task 状态：判决三态经 FinalizeStep 的 RunOutcome 交 TaskManager 处置
-        （删掉的 `_rule_observe` 里那句 `_apply_assessment` 只写 observer_outcome /
-        task_summary / actor_done，均无下游依赖——observer_outcome 只被 LLM 路径回读，
-        actor_done 在下一轮 `TaskManager._run_task` 入口被重置为 False）。`next_step_hint`
-        同样只是随 Verdict 带出去，由 `execute` 落地。
-        """
-        if not state.transcript:
-            return Verdict(task_outcome=VERDICT_FAIL, act_recap="")
-        if state.act_exit_reason in ("max_turns", "context_limit"):
-            return Verdict(task_outcome=VERDICT_CONTINUE, act_recap="")
-        if state.act_exit_reason == "normal":
-            return Verdict(task_outcome=VERDICT_CONTINUE, act_recap="",
-                           next_step_hint=_PLAIN_TEXT_NEEDS_FINISH)
-        return Verdict(task_outcome=VERDICT_SUCCESS, act_recap="")
+        events = [make_event(state, EventType.OBSERVE_STARTED, {"task_id": state.task.id})]
+        result = await self._observe(state, ctx, events, judge_task, boundary)
+        verdict = result.verdict
+        used_llm = verdict is not None and verdict.reported
+        if verdict is not None:
+            if used_llm:
+                self._apply_assessment(state.task, verdict)
+            elif boundary in ("max_turns", "context_limit"):
+                state.task.observer_outcome = verdict.task_outcome
+                state.task.task_summary = verdict.task_summary
+                state.task.actor_done = True
+            if verdict.next_step_hint:
+                state.task.next_step_hint = verdict.next_step_hint
+            if verdict.task_outcome == VERDICT_CONTINUE:
+                await self._fold_retry_segment(state, ctx, verdict, events)
+            if not used_llm:
+                recap_boundary = "mechanical"
+                if (state.act_exit_reason in ("normal", "actor_done")
+                        and verdict.task_outcome != VERDICT_CONTINUE and _is_own_root(state.task)):
+                    recap_boundary = "finish" if state.act_exit_reason == "actor_done" else "normal"
+                StepDriver.for_context(ctx).start(
+                    "observe", state, ctx,
+                    options={"boundary": recap_boundary, "judge_task": False})
+        events.append(make_event(state, EventType.OBSERVE_COMPLETED, {
+            "task_id": state.task.id, "outcome": verdict.task_outcome if verdict else "",
+            "summary_length": len(result.act_recap), "used_llm": used_llm}))
+        return self._outcome(result, "finalize" if judge_task else None, events)
 
     @staticmethod
-    def _apply_assessment(task: Task, verdict: Verdict) -> None:
-        """把规则 observe 的判决写进 task，对齐 report_task_outcome。
+    def _outcome(result, next_step=None, events=None):
+        patch = {"observation": result}
+        if result.verdict is not None:
+            patch["verdict"] = result.verdict
+        return StepOutcome(next_step, state_patch=patch, events=events or [])
 
-        **只写判决，不写状态**（Task 4）：三态 verdict 经 FinalizeStep 的 RunOutcome
-        交给 TaskManager，由处置表决定 task 落 FINISHED / FAILED / PENDING。这里原本
-        的 `task.status = ...` 是判决越界写状态，已删。
+    async def _observe(self, state, ctx, events, judge_task, boundary):
+        result = ObservationResult()
+        tok = getattr(ctx, "cancel_token", None)
+        background = _execution(ctx).mode == ExecutionMode.BACKGROUND
+        cancelled = tok is not None and tok.is_cancelled
+        if ((background or not cancelled)
+                and (not judge_task or self._should_use_llm(state))):
+            try:
+                result = await self._llm_observe(state, ctx, events)
+            except Exception as exc:
+                logger.warning("ObserveStep LLM failed; retaining raw history: %s", exc)
+        if judge_task:
+            verdict = result.verdict
+            if verdict is None:
+                verdict = dataclasses.replace(
+                    self._mechanical_verdict(state, boundary),
+                    act_recap=result.act_recap, task_summary=result.task_summary)
+            if boundary in ("max_turns", "context_limit"):
+                verdict = dataclasses.replace(verdict, task_outcome=VERDICT_CONTINUE)
+            result.verdict = verdict
+        return result
+
+    def boundary_or_exit(self, state, boundary=None) -> str:
+        return boundary or state.act_exit_reason or "normal"
+
+    async def _llm_observe(self, state, ctx, events) -> ObservationResult:
+        execution = _execution(ctx)
+        background = execution.mode == ExecutionMode.BACKGROUND
+        boundary = self.boundary_or_exit(state, execution.options.get("boundary"))
+        judge_task = execution.options.get(
+            "judge_task", judges(boundary) and has_observe_role(state) if background else True)
+        cache = ctx.capability_cache
+        # Session-global control tools survive per-agent cache eviction.
+        bound = cache.get(state.agent.id) if cache is not None else []
+        extra = {"observe_boundary": boundary}
+        if judge_task:
+            extra["subtasks"] = self._subtask_handles(state, ctx)
+        request = ContextRequest(
+            purpose="observe", scope=state.scope, task=state.task, agent=state.agent,
+            session=state.session, template=state.extra.get("template"),
+            bound_capabilities=bound, token_counter=ctx.llm.tokenizer.count,
+            extra=extra, intent=ReviewIntent(judge_task=judge_task),
+        )
+        prompt = await ctx.assembler.assemble(request)
+        submitted, last_text = await self._run_react(
+            state, ctx, system=prompt.system, messages=list(prompt.messages),
+            tools=prompt.tools, max_rounds=state.agent.loop_config.max_turns_per_observe,
+            terminal_tool_name=REPORT_OBSERVATION_NAME,
+            validate_submission=lambda result: self._submission_error(result, judge_task=judge_task),
+        )
+        return self._interpret_submission(state, submitted, last_text,
+                                          judge_task=judge_task, background=background)
+
+    async def _run_react(
+        self,
+        state: "Any",
+        ctx: "Any",
+        *,
+        system: str,
+        messages: "list[LLMMessage]",
+        tools: "Any",
+        max_rounds: int,
+        terminal_tool_name: str,
+        validate_submission: Callable[[Any], str | None] | None = None,
+    ) -> "tuple[ControlResult | None, str]":
+        """Run observation rounds until a valid terminal submission or the round limit.
+
+        Returns the accepted tool result (or None) and the last nonempty text.
+        Only advertised tools may execute; submission validation comes from this step.
+        This method does not apply task judgement or fold memory.
+
+        The driver supplies the foreground/background event origin. The LLM gateway
+        emits streaming events; this method emits LLM_RESPONSE_FINISHED.
         """
-        task.observer_outcome = verdict.task_outcome
+        agent = state.agent
+        model, llm_account = resolve_llm_identity(state)
+        current_messages = list(messages)
+        last_text = ""
+        # 动态 max_tokens 的增量基线：上一轮实际发送条数（本轮 usage 对应的真实 prompt 基线）。
+        baseline_msg_count: int | None = None
+
+        for round_num in range(max_rounds):
+            # req_id：与 llm_gateway.stream_llm_resilient 内部同一确定性公式独立算出（同
+            # act.py._run_llm_turn 的手法）——两边都在本次 LLM 调用任何事件发射前求值，故
+            # state.sequence_counter 两处读到同一个值，天然一致，不需要新增参数或跨函数传值。
+            req_id = f"req_{agent.id}_{state.sequence_counter}"
+
+            sent_msg_count = len(current_messages)  # 本轮发送条数（append 前）→ 下轮增量基线
+            llm_request = LLMRequest(
+                model=model,
+                system=system,
+                messages=list(current_messages),
+                tools=tools,
+            )
+            llm_request.prompt_token_estimate = request_prompt_estimate(
+                ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
+            # turn：gateway 从 metadata["turn"] 取（spec §9.4 统一口径：LLM_* 事件一律用 turn，
+            # 不用 round）；round_num 仍是本函数内部的轮次计数局部变量，只是不再直接进 payload。
+            llm_request.metadata["turn"] = round_num
+
+            accumulated_text = ""
+            reasoning_text = ""
+            tool_calls = []
+            usage = LLMUsage()
+
+            async for chunk in stream_llm_resilient(ctx, state, llm_request):
+                if chunk.kind == "token":
+                    accumulated_text += chunk.text
+                elif chunk.kind == "reasoning":
+                    reasoning_text += chunk.text
+                elif chunk.kind == "tool_call" and chunk.tool_call is not None:
+                    tool_calls.append(chunk.tool_call)
+                elif chunk.kind == "usage" and chunk.usage is not None:
+                    usage = chunk.usage
+
+            if accumulated_text:
+                last_text = accumulated_text
+
+            # 摄入前铸造内部调用标识（spec: conversation-integrity，与 act._run_llm_turn 同口径）：
+            # observer 回合不入 task 层 memory（工具是 SILENT/控制面），锚仅取唯一性、不持久；
+            # live 消息面（current_messages 的 tool_call↔result 配对）与事件 payload 用同一份值。
+            if tool_calls:
+                tool_calls = [
+                    m.call for m in mint_turn_call_ids(
+                        tool_calls, anchor=generate_id("asst"), turn_seq=round_num)
+                ]
+
+            # 更新 loop_guard（对齐 miniAgents _run_observer：取 actor/observer 的最大值）
+            if usage.prompt_tokens > 0:
+                agent.loop_guard.context_tokens = max(
+                    agent.loop_guard.context_tokens, usage.prompt_tokens
+                )
+                baseline_msg_count = sent_msg_count  # 真实刷新才前移基线（否则下轮退回整份估算）
+            # 同步累加 session.token_used
+            state.session.token_used += usage.prompt_tokens + usage.completion_tokens
+
+            await ctx.event_bus.emit(make_event(
+                state, EventType.LLM_RESPONSE_FINISHED,
+                payload={
+                    "request_id": req_id,
+                    "content": accumulated_text,
+                    "reasoning": reasoning_text,
+                    "tool_calls": [
+                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls
+                    ],
+                    "usage": dataclasses.asdict(usage),
+                    # 本次调用实际使用的模型/账号（host 云端上报按此计账，不受切换竞态影响）
+                    "llm_model": model,
+                    "llm_account": llm_account,
+                    "finish_reason": "tool_use" if tool_calls else "stop",
+                    "turn": round_num,
+                },
+            ))
+
+            if not tool_calls:
+                # 纯文本轮不直接放弃：observer 常把复述写成正文而忘了调 terminal 工具——
+                # 还有剩余轮次时催促其改用工具提交后重试；耗尽轮次才返回 (None, last_text)。
+                if round_num + 1 >= max_rounds:
+                    break
+                current_messages.append(LLMMessage(
+                    role="assistant", content=accumulated_text or runtime_prompt('no_reply'),
+                ))
+                current_messages.append(LLMMessage(
+                    role="user",
+                    content=connector("review.react_nudge", terminal_tool=terminal_tool_name),
+                ))
+                continue
+
+            current_messages.append(LLMMessage(
+                role="assistant",
+                content=accumulated_text,
+                tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls],
+            ))
+
+            terminal_result = None
+            for tc in tool_calls:
+                if tc.name not in {tool.name for tool in tools}:
+                    content = runtime_prompt("observation_tool_unavailable", tool=tc.name)
+                elif ctx.capability_gateway is not None:
+                    result = await ctx.capability_gateway.invoke(
+                        tool_name=tc.name,
+                        arguments=tc.arguments,
+                        state=state,
+                        ctx=ctx,
+                        tool_call_id=tc.id,
+                    )
+                    content = result.content
+                    # terminal 工具的失败（is_error，如参数非法）不终止循环：错误内容照常 append
+                    # 进 messages（下方）供模型下一轮改参重试；只有成功结果才是终止结果。否则一次
+                    # 坏调用的错误文案会被当成 Process Report 终结整个观察（spec: capability-gateway）。
+                    if tc.name == terminal_tool_name and not result.is_error:
+                        error = validate_submission(result) if validate_submission else None
+                        if error:
+                            content = error
+                        else:
+                            terminal_result = result
+                else:
+                    logger.warning(
+                        "run_observe_react: no CapabilityGateway for tool '%s'", tc.name
+                    )
+                    content = runtime_prompt('gateway_missing', tool=tc.name)
+                current_messages.append(LLMMessage(
+                    role="tool",
+                    content=content,
+                    tool_call_id=tc.id,
+                ))
+
+            if terminal_result is not None:
+                return terminal_result, last_text
+
+        return None, last_text
+
+    def _interpret_submission(self, state, submitted, last_text="", *, judge_task=True, background=False) -> ObservationResult:
+        meta = (submitted.metadata or {}) if submitted is not None else {}
+        recap = meta.get(K.OBSERVER_ACT_RECAP, "") or ""
+        # Preserve the existing background plain-text recap fallback; it is never a verdict.
+        if background and not recap:
+            recap = content_to_text(last_text or "").strip()
+        elif submitted is not None and not recap:
+            recap = content_to_text(last_text or "")[:500]
+        result = ObservationResult(recap, meta.get(K.OBSERVER_TASK_SUMMARY, "") or "")
+        if judge_task and submitted is not None and meta.get(K.OBSERVER_OUTCOME):
+            outcome = normalize_verdict(meta[K.OBSERVER_OUTCOME])
+            hint = meta.get(K.OBSERVER_NEXT_STEP_HINT, "") or ""
+            hint = f"Next Step Hint: {hint}" if hint else ""
+            # A successful model verdict still requires an actual final deliverable.
+            if outcome == VERDICT_SUCCESS and not state.task.outputs:
+                outcome = VERDICT_CONTINUE
+                missing_output = runtime_prompt("observation_missing_output")
+                hint = f"{hint}\n\n{missing_output}" if hint else missing_output
+            failure_reason = meta.get(K.OBSERVER_FAILURE_REASON, "") or ""
+            if outcome == VERDICT_SUCCESS:
+                failure_reason = ""
+            result.verdict = Verdict(outcome, result.act_recap, result.task_summary,
+                                     reported=True, next_step_hint=hint,
+                                     failure_reason=failure_reason)
+        return result
+
+    def _submission_error(self, result, *, judge_task=True) -> str | None:
+        if judge_task and not str((result.metadata or {}).get(K.OBSERVER_OUTCOME) or "").strip():
+            return runtime_prompt("observation_missing_verdict")
+        return None
+
+    def _mechanical_verdict(self, state, boundary=None) -> Verdict:
+        boundary = self.boundary_or_exit(state, boundary)
+        # A parked segment is not evidence of task completion. Failed background
+        # judgement must never silently release successors or close the task.
+        if boundary in ("plain_text", "finish_park"):
+            return Verdict(VERDICT_CONTINUE, "")
+        if not state.transcript:
+            return Verdict(VERDICT_FAIL, "")
+        if boundary in ("max_turns", "context_limit"):
+            return Verdict(VERDICT_CONTINUE, "")
+        if boundary == "normal":
+            return Verdict(VERDICT_CONTINUE, "", next_step_hint=_PLAIN_TEXT_NEEDS_FINISH)
+        return Verdict(VERDICT_SUCCESS, "")
+
+    @staticmethod
+    def _apply_assessment(task, verdict: Verdict) -> None:
+        """Apply an accepted foreground assessment, never task.status."""
+        task.process_report = verdict.act_recap
+        task.process_report_at = now_utc()
         task.task_summary = verdict.task_summary
+        task.next_step_hint = verdict.next_step_hint or None
+        task.observer_outcome = verdict.task_outcome
         task.actor_done = True
+        task.error = None if verdict.task_outcome == VERDICT_SUCCESS else (
+            verdict.failure_reason or None)
 
-    # ── 条件判断 ──────────────────────────────────────────────────────────────
-
-    def _should_use_llm(self, state: LoopState) -> bool:
-        """唯一的降级理由：**装不出 observer**（assigned agent 没有 observe ROLE facet）。
-
-        2026-09-28 删掉了这里的 `parent_task_id is None → return False`。那道门让 root 的
-        正常收尾（`normal` / `actor_done`）永远走机械判决，而机械判决对这两个退出原因是
-        **无条件 success**（见 `_mechanical_verdict`）——那道 success-without-outputs 护栏长在
-        `report_task_outcome` 里、不在机械判决的路上。于是 root 上「宣布完成」这件事零复核，
-        任务完没完全凭 actor 自己说。攻不破的不对称：纯文本回合（S5）和让位的 finish_task
-        （S-b）都要被判，唯独不让位的那条收尾不被判。
-
-        它当初的理由是「非 root 才需要向 parent 上报」——把「要不要上报」和「要不要复核」
-        当成了同一件事。现在分开：上报是子任务的事，复核是每个收尾的事。
-
-        同时删掉了 `max_turns`/`context_limit` 那条强制 LLM 的前置——它当年存在**只为**绕开
-        上面那道 root 门（root 机械退出也得有可信 act_recap 去当段摘要），门没了它就是死码。
-
-        代价：无人值守 root 每次收尾多一次前台 LLM 往返。其实 LLM 总次数不变——此前那次
-        判决虽是机械的，摘要仍要靠一次后台 observe 补（`boundary="finish"/"normal"`），现在
-        前台一次就把判决和摘要一起拿到，那次后台调用随之取消（见 `execute` 里的 `used_llm`
-        门）。真正变的是它从后台挪到了前台关键路径上。
-        """
+    def _should_use_llm(self, state) -> bool:
         return has_observe_role(state)
+
+    @staticmethod
+    def _subtask_handles(state, ctx) -> list[dict]:
+        tm = getattr(ctx, "task_manager", None)
+        if tm is None or not hasattr(tm, "children_of"):
+            return []
+        out = []
+        for cid in tm.children_of(state.task.id):
+            child = tm.get_task(cid)
+            if child is None:
+                continue
+            entry = {"task_id": child.id, "title": child.title or "",
+                     "outcome": (child.status or "").lower()}
+            if child.status == "CANCELED" and child.error_code:
+                entry["note"] = child.error or child.error_code
+            out.append(entry)
+        return out
+
+    async def _is_short_segment(
+        self,
+        state: "LoopState", ctx: "LoopContext", watermark: "datetime | None" = None,
+    ) -> bool:
+        """短段免折门：**当前段**（最后一条 active USER_PROMPT 之后）满足以下任一即为短段：
+
+        - 段内 LLM 回复（role=assistant 回合）≤ 1 条——**不看 token**：一条回复折成摘要
+          是净亏（recap 常比原文还长，且原文对下一轮信息更全），折它只是白花一次 LLM；
+        - 段内 raw token ≤ short_segment_token_threshold。
+
+        「短 → 原文成胶囊」决策（finalize._is_short_leaf）在段级的判定，
+        `ObserveStep._execute_background`（plain_text/interrupt 边界）与
+        `ObserveStep._fold_retry_segment`（retry 段折）共用。配置缺失（手构 state /
+        单测）→ False = 门关闭，照常折叠。
+
+        段作用域（2026-07-21）：只数末条 UP 之后的 raw，与折叠的 since_last=USER_PROMPT
+        对齐——免折残留的前段 raw 不计入，否则「前段累积 + 当前段极短」会被误判为可折，
+        而折叠又只折当前段，产出比原文还长的摘要。
+        """
+        threshold = getattr(state.agent.loop_config, "short_segment_token_threshold", 0)
+        if threshold <= 0:
+            return False
+        from ctx_weft.protocols import MemoryKind, MemoryScope
+
+        # v2 P3a：TASK 视图（对话 + audit，无 SUMMARY——旧类型清单不含段摘要）升序；
+        # 段界 = 末条 role=user 回合，其后即当前段 raw。
+        view = await ctx.memory.load_view(
+            state.scope, MemoryScope.TASK, ctx.provider_ctx,
+            kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT],
+        )
+        # 段界水位线（2026-09-22，同 `segment_fold`）：只认这段后台 observe 开跑时就已存在
+        # 的记录。不设限的话，人中途说的话会成为新段界，把「当前段」判成空段而误判为短段。
+        if watermark is not None:
+            view = [r for r in view if r.timestamp <= watermark]
+        seg_records: list = []
+        for r in view:
+            if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user":
+                seg_records = []  # 新段界：清空重计
+                continue
+            seg_records.append(r)
+        # 单回复段免折（2026-08-19）：token 再多也不折——见 docstring。
+        n_llm = sum(1 for r in seg_records
+                    if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "assistant")
+        if n_llm <= 1:
+            return True
+        seg_text = " ".join(
+            r.content if isinstance(r.content, str) else content_to_text(r.content)
+            for r in seg_records
+        )
+        # 保留「join 后数一次」的文本口径（逐条估算会引入 4×N 的 framing 漂移），
+        # 图片另行求和补上——不补则图片密集段被误判短段免折、该段 raw 永久保留。
+        seg_images = sum(image_tokens(r.content) for r in seg_records)
+        return ctx.llm.tokenizer.count(seg_text) + seg_images <= threshold
 
     async def _fold_retry_segment(
         self, state: LoopState, ctx: LoopContext, verdict: Verdict, events: list[Any]
@@ -365,15 +519,13 @@ class ObserveStep(Step):
         仅当 verdict.task_outcome=="continue" 才折（三来源：max_turns/context_limit/observer 判未完）；
         其余 outcome 不折，no-op。
 
-        act_recap 来源：本轮真走成 report_task_outcome（reported）用其可信 report，否则用 verdict.act_recap
-        （root 机械退出经 _should_use_llm 强制 LLM 已产出）。空则不折、段保 raw（不写占位摘要）。
-        短段免折（fold.is_short_segment，与段边界折叠同门）：当前段（末条 UP
+        act_recap 来自本轮 observation；空则不折、段保 raw（不写占位摘要）。
+        短段免折（ObserveStep._is_short_segment，与段边界折叠同门）：当前段（末条 UP
         之后）active raw 低于 short_segment_token_threshold 时不折——recap 常比短原文更长，
         raw 原样留给下个 attempt 反而信息更全；attempt 之间无新 UP，raw 在段内跨 attempt
         累积，超阈值后下一次 retry 一并折叠。折叠带 since_last=USER_PROMPT（段作用域，
         2026-07-21）：交互任务中若有免折残留的前段 raw，不被跨段合折。
         """
-        from ctx_weft.core.loop.fold import is_short_segment
 
         if verdict.task_outcome != VERDICT_CONTINUE:
             return
@@ -384,15 +536,14 @@ class ObserveStep(Step):
                 state.task.id,
             )
             return
-        if await is_short_segment(state, ctx):
+        if await self._is_short_segment(state, ctx):
             logger.info(
                 "_fold_retry_segment: short segment kept raw (task=%s); skip fold",
                 state.task.id,
             )
             return
-        # v2 P3c：策展上移——段作用域折叠（只折当前段、护 user 回合与既有摘要、
-        # 锚点/段尾语义）由框架侧 segment_fold 执行原子 fold（与 bg 段折同门）。
-        from ctx_weft.core.loop.fold import segment_fold
+        # 与后台观察共用段作用域原子折叠，保护 user 回合与既有摘要。
+        from ctx_weft.core.loop.task_memory_fold import segment_fold
         result = await segment_fold(
             ctx.memory, state.scope, MemoryScope.TASK, summary, ctx.provider_ctx,
         )
@@ -404,3 +555,270 @@ class ObserveStep(Step):
             "layer": "task",
             "trigger": "observe_retry",
         }))
+
+    async def _execute_background(self, state, ctx, boundary, judging):
+        watermark = _execution(ctx).started_at
+        await ctx.event_bus.emit(make_event(
+            state, EventType.TASK_RECAP_STARTED,
+            {"task_id": state.task.id, "boundary": boundary, "agent_id": state.agent.id}))
+        try:
+            async with StepDriver.for_context(ctx).executions.task_guard(state.task.id, "observe"):
+                # 重跑幂等护栏（恢复重跑时才生效）：非 close 边界若该段已无 active raw，说明上次
+                # 崩溃前已折叠（raw 被 supersede），再折会产冗余胶囊 → 跳过（finally 仍发 DONE）。
+                # 正常运行时该段刚产生 raw、计数 > 0，护栏为 no-op。
+                if boundary not in CLOSE_BOUNDARIES:
+                    from ctx_weft.protocols import MemoryKind, MemoryScope
+                    view = await ctx.memory.load_view(
+                        state.scope, MemoryScope.TASK, ctx.provider_ctx,
+                        kinds=[MemoryKind.CONVERSATION_TURN],
+                    )
+                    # 旧口径 = LLM_RESPONSE 计数 = assistant 回合
+                    n_raw = sum(1 for r in view if r.role == "assistant")
+                    if n_raw == 0:
+                        logger.info(
+                            "task recap re-fold guard: segment already folded (task=%s); skip",
+                            state.task.id,
+                        )
+                        return self._outcome(ObservationResult())
+                    # 短段免折（_is_short_segment）：当前段（末条 UP 之后）active raw 低于阈值时
+                    # 跳过折叠——花一次后台 LLM 调用换一段常比原文还长的摘要不划算。跳过 = 该段
+                    # **永久**保 raw（与观察失败的降级同语义）：后续折叠带 since_last=USER_PROMPT
+                    # 只折各自的当前段，免折残留不会被跨段合折。
+                    short_segment = await self._is_short_segment(state, ctx, watermark)
+                    if short_segment and not judging:
+                        logger.info(
+                            "short segment kept raw (task=%s boundary=%s); skip fold",
+                            state.task.id, boundary,
+                        )
+                        return self._outcome(ObservationResult())
+                try:
+                    observation = await self._observe(state, ctx, [], judging, boundary)
+                    meta = observation.metadata()
+                    act_recap = observation.act_recap.strip()
+                    task_summary = observation.task_summary
+                    if not act_recap:
+                        # 无任何可用报告：与异常路径同语义——段保 raw，不写占位摘要、不动 finish 对。
+                        if boundary in CLOSE_BOUNDARIES:
+                            pop_close_synth(state.task.id)  # 弹掉登记防泄漏；finalize 占位 finish 对保持原样
+                        logger.warning(
+                            "background observe produced no usable report (task=%s boundary=%s); "
+                            "segment kept raw", state.task.id, boundary,
+                        )
+                        return self._outcome(ObservationResult())
+                    # **判决先落地，折叠再决定**（2026-09-27）：判 success 会经带外 finalize 走
+                    # close（写 finish 对 + 折末段 raw），而那条路**刻意不产段摘要**——
+                    # `finalize._supersede_final_raw_segment` 的不变量是「末段 raw 与真实 Process
+                    # Report 至少存其一」，段摘要与 finish 对同时存在就是把同一段记了两遍。所以
+                    # 「这一段归谁记账」只有拿到判决才知道，不能先折了再判。
+                    #
+                    # 判 retry/fail、判决缺失、仲裁被拒（人先开口）→ 没有 close，段摘要照产；
+                    # 人先开口那一支还多一层保障：段界水位线让折叠只认这次 launch 之前的记录，
+                    # 新那条 user 回合不会被卷进来。
+                    closed = await submit_verdict(state, ctx, meta) if judging else False
+
+                    if boundary in CLOSE_BOUNDARIES:
+                        synth = pop_close_synth(state.task.id)  # sync check-and-clear（无 await）
+                        if synth is not None:
+                            tool_call_id, scope, outcome, raw_fold_scope = synth
+                            from ctx_weft.core.loop.steps.finalize import _output_text
+                            await replace_finish_report(
+                                ctx.memory, ctx.provider_ctx, scope, state.task.id,
+                                tool_call_id, act_recap, task_summary, outcome,
+                                state.task.title or "",
+                                # raw 此刻才折 → 答复随之补进锚点槽（占位两槽升三槽）
+                                # getattr 兜底：本路径异常被整段吞掉并「保 raw」，缺字段的
+                                # task 替身若在此炸 AttributeError，真报告就永远替换不上去。
+                                final_reply=(_output_text(getattr(state.task, "outputs", None))
+                                             if raw_fold_scope is not None else ""),
+                            )
+                            if raw_fold_scope is not None:
+                                # 真摘要已替换进 finish 对 → 补删末段 raw（延迟折叠收口，
+                                # spec 2026-07-20：占位 close 不即折，真报告落地才折）。
+                                from ctx_weft.core.loop.steps.finalize import (
+                                    _supersede_final_raw_segment,
+                                )
+                                await _supersede_final_raw_segment(
+                                    ctx.memory, raw_fold_scope, ctx.provider_ctx)
+                        else:
+                            # root 的 finish/normal 是终结点（单次 close）：槽写一次弹一次，不存在
+                            # 跨 rerun 乱序覆盖（retry 仅在机械退出时产生，不经此路径）。
+                            put_close_report(state.task.id, act_recap, task_summary)
+                    elif not short_segment and not closed:
+                        # v2 P3c：策展上移——段作用域折叠（护 user 回合与既有段摘要、锚点/
+                        # 段尾语义，与 observe._fold_retry_segment 同门）由框架侧 segment_fold
+                        # 执行原子 fold。旧 apply_compact 的 TypeError 协议错配特判随之消亡
+                        # （segment_fold 是框架内函数，签名错配不再是运行时 provider 风险）。
+                        #
+                        # `short_segment` 为真时跳到这里之外：**免折不免判**（2026-09-22）——
+                        # 判定必须跑（短回合恰恰是提问最典型的形态），但短段的 recap 常比原文
+                        # 还长，折它是净亏，段保 raw。
+                        from ctx_weft.core.loop.task_memory_fold import segment_fold
+                        await segment_fold(
+                            ctx.memory, state.scope, MemoryScope.TASK, act_recap,
+                            ctx.provider_ctx, watermark,
+                        )
+                    return self._outcome(observation)
+                except Exception:
+                    # close 边界防泄漏：finalize 可能已 register_close_synth，本次失败后永远无人
+                    # 消费（task_id 唯一 + close 单入口），弹掉——与「无可用报告」分支对称。
+                    # 已知残余窗口（接受，不另引状态同步）：bg 比 finalize 先死时登记发生在 pop
+                    # 之后，仍漏一条；对称地，bg 先写 _close_report 而 finalize 异常中止也漏。
+                    # 两者触发概率与单次代价（几百字节/次）都低一个量级。
+                    if boundary in CLOSE_BOUNDARIES:
+                        pop_close_synth(state.task.id)
+                    logger.exception("background observe failed (ignored); segment kept raw")
+                    return self._outcome(ObservationResult())
+
+        finally:
+            await ctx.event_bus.emit(make_event(
+                state, EventType.TASK_RECAP_DONE, {"task_id": state.task.id}))
+
+
+
+_PARK_CLOSED_BY_VERDICT = runtime_prompt('park_closed_by_verdict')
+
+async def submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> bool:
+    """把 observer 的判决交给 TaskManager 的带外入口。
+
+    返回 **这次判决是否把 task close 掉了**（= 判 success 且仲裁接受）。调用方据它决定
+    这一段归谁记账：close 掉了就由带外 finalize 的 finish 对承载，**不能再产段摘要**
+    （`finalize._supersede_final_raw_segment` 的不变量：同一段不记两遍）。
+
+    **verdict 缺失 ≡ retry**：拿不到判决（LLM 失败、没调 terminal tool、字段为空）就
+    什么都不提交，task 维持 park 等人。默认态是 park，只有 success 触发状态转移——
+    绝不因为观察失败而静默放行 DAG 后继。
+
+    带外入口自己做仲裁（task 是否仍在 `AWAITING_HUMAN`），这里不必先查一遍：人可能在
+    这两行之间开口，查了也不作数。
+    """
+    raw = (meta.get(K.OBSERVER_OUTCOME) or "").strip()
+    # 空 = 压根没判（工具没被调 / LLM 失败）→ 维持 park。非空才归一：`retry` 是别名，
+    # 认不出的归 continue。**不能**把空串也喂进 normalize_verdict——那会把「没判决」
+    # 变成「判了 continue」，两者对本函数的意义相同（都维持 park），但日志会说谎。
+    verdict = normalize_verdict(raw) if raw else ""
+    if not verdict:
+        logger.info(
+            "background observe produced no verdict (task=%s); staying parked", state.task.id)
+        return False
+    tm = getattr(ctx, "task_manager", None)
+    if tm is None or not hasattr(tm, "apply_out_of_band_verdict"):
+        logger.warning(
+            "background observe: no TaskManager to submit the verdict to (task=%s)",
+            state.task.id)
+        return False
+    outcome = RunOutcome(
+        kind=RunOutcomeKind.COMPLETED,
+        verdict=verdict,
+        summary=meta.get(K.OBSERVER_TASK_SUMMARY, "") or "",
+        outputs=getattr(state.task, "outputs", None),
+        error=meta.get(K.OBSERVER_FAILURE_REASON, "") or "",
+    )
+    accepted = await tm.apply_out_of_band_verdict(
+        state.task.id, outcome,
+        process_report=meta.get(K.OBSERVER_ACT_RECAP, "") or "",
+        task_summary=meta.get(K.OBSERVER_TASK_SUMMARY, "") or "",
+        next_step_hint=meta.get(K.OBSERVER_NEXT_STEP_HINT, "") or "",
+        # 带外收尾：只在真发生转移（success）时被调，跑在「状态已写定」与「转移已宣布」
+        # 之间。见 `apply_out_of_band_verdict` 的 docstring 对那个窗口的三条约束。
+        finalize=partial(_out_of_band_finalize, state, ctx, meta),
+    )
+    logger.info(
+        "background observe verdict '%s' for task %s: %s",
+        verdict, state.task.id, "accepted" if accepted else "rejected (the user spoke first)")
+    return bool(accepted) and verdict == VERDICT_SUCCESS
+
+
+async def _out_of_band_finalize(
+    state: "LoopState", ctx: "LoopContext", meta: dict,
+) -> None:
+    """判 success 终结了这个 task 之后的收尾——**`FinalizeStep` 在这条路上没跑过**。
+
+    park 在 `ActStep` 里抛 `HitlPark`，driver 到不了 observe/finalize。于是 S5/S6 之后每个
+    「park → 后台判 success」的 task 都跳过了整个 `FinalizeStep`，而它是三件事的唯一发生地：
+
+    - `finalize_task_memory` → `_close_one`：bubble 给 parent、同 agent 派发 ack 终态化、
+      写 finish 对、折末段 raw。**子任务漏得最重**——parent 醒来只看到「派发框 + 停在
+      running 的 ack」，拿不到任何产出。
+    - `BLACKBOARD_PUBLISHED`（topic=task.id）：parent `recall_topic(task.id)` 的正路。
+    - `TASK_FINALIZED`：host 的 `tasks.outputs_json` / `error` 两列。S5 起一直是空的。
+
+    所以这里把 `apply_task_close` + `task_finalized_event` 照原样跑一遍，两个调用方共用同
+    一份实现（不是在这里另写一份镜像——`synthesize_cancel_closure` 就是那样来的，它的
+    docstring 自己承认在镜像 `_close_one`，两份必然漂）。
+
+    The independent observation run carries the task scope and final-output anchors.
+
+    `has_llm_summary=True`：判决方就是 LLM，`act_recap` 是真摘要，close 即折末段 raw，不走
+    「占位 + `replace_finish_report` 替换」那条为「finalize 先跑、bg 后到」设计的延迟路径
+    ——带外路径顺序正好反过来。
+
+    事件用这份快照发，于是带着 `LOOP_BACKGROUND_OBSERVE` 的 origin。这是对的：host 按
+    origin 把后台事件挡在**会话状态折叠**和**对话流**之外（两者都不该被一段后台工作改写），
+    而投影更新器的 `TASK_FINALIZED` 支不按 origin 过滤，`outputs_json` 照样落库。
+
+    best-effort 在调用方：`apply_out_of_band_verdict` 把本函数包在 try 里，抛了也照常宣布
+    转移——状态已是终态，不宣布会让槽位永不释放、交互线永久占着。
+    """
+    from ctx_weft.core.loop.steps.finalize import apply_task_close, task_finalized_event
+
+    events = await apply_task_close(
+        state, state.task, ctx,
+        outcome=VERDICT_SUCCESS,
+        act_recap=meta.get(K.OBSERVER_ACT_RECAP, "") or "",
+        task_summary=meta.get(K.OBSERVER_TASK_SUMMARY, "") or "",
+        has_llm_summary=True,
+    )
+    events.append(task_finalized_event(state, state.task, outcome=VERDICT_SUCCESS))
+    for event in events:
+        await ctx.event_bus.emit(event)
+    await _close_park_bubble(state, ctx)
+
+
+async def _close_park_bubble(state: "LoopState", ctx: "LoopContext") -> None:
+    """判 success 终结了这个 task 之后，收口它 park 时开的那个「等你说话」气泡。
+
+    **不分 root 与子任务**（2026-09-27 定）：task 被判完成了，那个让位入口就用掉了。人后面
+    还想说话就再发一条消息——`send_message` 看到 `current_task_id` 已终态，自己会开新的一轮
+    （`_start_task_for_agent`），根本不需要留着这个气泡当入口。
+
+    留着它的代价是实打实的，两头都疼：
+
+    - 宿主折会话状态时气泡**优先于** task 终态（`SessionStatusFold.status` 里 `pending_hitl`
+      排在 `terminal` 之前），于是会话永久停在 PAUSED——SSE 的终态收口不触发，投影里
+      `sessions.status` 一直 PAUSED，重启还被 `list_active_session_ids` 当活会话捞回来，
+      `session_is_quiescent` 也一律拒绝逐出（宿主的空闲逐出器形同虚设）。
+    - 子任务更糟：线已经交回 parent（`_try_resume_parent` 随即接管），再没有人会来答它，
+      每个这样的子任务留一个、会累积。
+
+    `faedd25` 曾为 root 保下这个气泡，两条理由只有一条成立，而那条也只是「会话会显示
+    已完成」——判决说它完成了，显示已完成是实话。另一条「投递路径跟着状态分叉」本就与气泡
+    无关：`send_message` 的路由只看 `current_task_id` 是否终态（`_task_is_terminal`），从不
+    看气泡；那个分叉来自「判决抵达 vs 人先开口」的仲裁，收不收气泡都在。
+
+    按 **task + user_turn 投递** 双重过滤：task 收窄是因为同一 agent 上可能还挂着别的
+    请求（某个兄弟任务的 `ask_user`），投递收窄是因为「等人开口」和「等人拍板」是两回事
+    ——后者即便挂在这个 task 上也该由它自己的路径处置，本函数只认前者。
+
+    只在 `success` 时被调到（带外入口只在真发生转移时调 `finalize`）。`retry`/`fail` 维持
+    park，那个气泡正是它等人的入口。
+
+    best-effort：收不掉只记日志。判决已经落定，不能让收尾把它变成异常。
+    """
+    from ctx_weft.protocols.hitl import UserTurnDelivery
+
+    task = state.task
+    hitl = getattr(ctx, "hitl", None)
+    if hitl is None or getattr(hitl, "registry", None) is None:
+        return
+    try:
+        for req in hitl.registry.list_pending(state.session.id):
+            if req.task_id != task.id or not isinstance(req.delivery, UserTurnDelivery):
+                continue
+            await hitl.cancel(req.id, message=_PARK_CLOSED_BY_VERDICT)
+            logger.info(
+                "closed the park bubble %s of task %s (judged complete; the next message "
+                "opens a new round)", req.id, task.id)
+    except Exception:
+        logger.exception(
+            "failed to close the park bubble of task %s; it will stay pending and hold the "
+            "session at PAUSED", task.id)

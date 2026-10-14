@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.models.discriminators import TaskErrorCode
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
-from ctx_weft.core.loop.finish_pair import (
+from ctx_weft.core.loop.task_memory_fold import (
     build_finish_slots,
     pop_close_report,
     register_close_synth,
@@ -44,7 +45,7 @@ def _dispatch_running_ack(ref: str) -> str:
     ``ref`` 是 `task_ref` 的规范称呼（标题 + id）。带 id 是必须的：这条会在重建对话里
     **顶掉** delegate 时那条带 id 的活回执，只印标题的话模型下一回合就拿不到句柄了。
     """
-    return f"Sub-task {ref} is running now — its execution follows below."
+    return runtime_prompt("dispatch_running", ref=ref)
 
 
 # 同 agent 派发：派发对 tool 结果（不含任何子任务结果，spec 2026-06-30 §2.5）。
@@ -62,12 +63,7 @@ def _dispatch_ack(ref: str, outcome: str) -> str:
          紧随其后的 user 回合（子任务的 task_prompt，非用户发言），否则易被读成用户插话。
     刻意保持指针级长度：每个派发都会复读一份。
     """
-    verdict = "FAILED" if outcome == "fail" else "completed"
-    return (
-        f"Sub-task {ref} ran here — outcome: {verdict}. Its execution is inlined "
-        f"below, ending with its own {qualify('control:finish_task')} and the final reply "
-        "it delivered."
-    )
+    return runtime_prompt("dispatch_closed", ref=ref, failed=outcome == "fail")
 
 # 派发框的叙事工具名（仅出现在重建历史的 tool_calls 里，非可调用能力）。
 START_TASK_NAME = qualify("control:start_task")
@@ -474,11 +470,8 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
     cross_agent = bool(task.parent_task_id) and not same_agent
     is_own_root = (task.parent_task_id is None) or cross_agent
 
-    act_recap = "Task was cancelled before completion."
-    task_summary = (
-        f"Cancelled ({reason_text}) — no final output was produced; "
-        f"the partial execution above is all that ran."
-    )
+    act_recap = runtime_prompt('cancelled_act_recap')
+    task_summary = runtime_prompt('cancelled_task_summary', reason=reason_text)
 
     if task.parent_task_id:
         parent_scope = MemoryAddress(
@@ -490,10 +483,7 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
             # 整体跳过，不补铸空框（补铸出的框只会带取消时刻，与「派发框=started_at」的不变量矛盾）。
             return
         frame_ts, frame_tcid = found
-        ack_text = (
-            f"Sub-task {task_ref(task)} was cancelled before completion ({reason_text}); "
-            f"its partial execution below is incomplete."
-        )
+        ack_text = runtime_prompt("dispatch_cancelled", ref=task_ref(task), reason=reason_text)
         await _put_dispatch_result(
             memory, parent_scope, task, ack_text, frame_ts, provider_ctx, replace=True,
             tool_call_id=frame_tcid,
@@ -573,7 +563,7 @@ async def apply_task_close(
     「park → 后台判 success」的 task 都跳过了整个 `FinalizeStep`，而本函数里这两件事
     （加上 `task_finalized_event`）此前只在那里发生过。子任务漏得最重：parent 醒来只看到
     「派发框 + 停在 running 的 ack」，拿不到任何产出。调用方见
-    `background.verdict._out_of_band_finalize`。
+    `steps.observe._out_of_band_finalize`。
 
     两道 `mem_content` 门与拆出来之前逐字相同：close 要 `terminal and mem_content`
     （terminal 由调用方判），blackboard 要 `outcome == "success" and mem_content`。
@@ -681,7 +671,7 @@ class FinalizeStep(Step):
 
         # 判 continue 但超过重试上限 → 降级 fail（不再重试）。专属 error_code 区分「程序按上限
         # 熔断」与 observer 主动判死；死因 = 最后一轮 retry 判决暂存的受阻原因（task.error，
-        # report_task_outcome 判 continue 且确有阻塞时写入），机械退出轮没有判决则为空。
+        # report_observation 判 continue 且确有阻塞时写入），机械退出轮没有判决则为空。
         # **本地降级只为收尾副作用服务**（下面的 close/bubble/blackboard 与 TASK_FINALIZED
         # 的 outcome），不再决定 task 状态：状态与 TaskFailed 事件由 TM 据同一条判据算出
         # （disposition_for 的 exhausted 分支）。两处判据逐字同形，改一处必须改另一处。

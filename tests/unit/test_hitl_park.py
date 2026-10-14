@@ -23,13 +23,13 @@ pytestmark = pytest.mark.asyncio
 
 
 def test_hitl_park_is_base_exception_not_exception() -> None:
-    from ctx_weft.core.loop.park import HitlPark
+    from ctx_weft.core.loop.signals import HitlPark
     assert issubclass(HitlPark, BaseException)
     assert not issubclass(HitlPark, Exception)
 
 
 def test_hitl_park_carries_ids() -> None:
-    from ctx_weft.core.loop.park import HitlPark
+    from ctx_weft.core.loop.signals import HitlPark
     p = HitlPark(hitl_id="hit_1", tool_call_id="tc1")
     assert p.hitl_id == "hit_1" and p.tool_call_id == "tc1"
 
@@ -48,7 +48,7 @@ async def test_run_loop_catches_park_returns_awaiting_human() -> None:
     from ctx_weft.protocols.events import EventType
     from ctx_weft.providers.events import InProcessEventBus
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
-    from ctx_weft.core.loop.park import HitlPark
+    from ctx_weft.core.loop.signals import HitlPark
     from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.models.agent import Agent, LoopGuard
     from ctx_weft.core.models.session import Session

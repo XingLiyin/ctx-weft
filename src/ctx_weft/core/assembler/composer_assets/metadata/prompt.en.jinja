@@ -1,0 +1,5 @@
+{% if role_section %}{{ role_section }}
+
+---
+
+{% endif %}Now set this task's metadata: call `{{ update_task_metadata }}` exactly once. Both `title` and `description` are REQUIRED and must be non-empty — always provide a best-effort value even if the instruction is short or vague; never pass empty strings. Add `session_goal` only if the direction is now clear (it is the only optional field). Then stop and call no other tools.

@@ -1,12 +1,8 @@
-"""HitlWaiter：热等待的持有者。**协程栈的事只发生在这一层。**
+"""HITL 热等待：通过 FutureWaitSlot 等待人工答复。
 
-`core/hitl` 管账、不认识协程；本模块管栈、不管账。旧实现把两者混在一个类里，
-于是必须在函数体内延迟 import `core.loop.park` 来躲循环依赖——那个延迟 import
-是边界画错的自白（spec §0/§3）。
-
-驱逐**不是失败**：它是热→冷降级。`wait()` 返回 `None`，请求保持未决，答案晚到
-照常走冷路径。把「被驱逐」翻译成 `HitlPark` 是 `CapabilityGateway` 的事，不是本
-模块的事——本模块连 park 都不认识。
+core/hitl 维护请求和决定，本模块维护协程等待槽。
+wait() 返回决定或 None；None 表示本次等待不继续走热路径，并不代表请求失败。
+CapabilityGateway 决定何时抛出 HitlPark，本模块不依赖 loop 的控制流信号。
 """
 
 from __future__ import annotations

@@ -25,14 +25,20 @@ from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events, append_one
 from tests.integration.test_hitl_e2e_v2 import _ActRouterLLM, _poll
 from tests.integration.test_hitl_hot_reply_round_window_e2e import (
-    STALL_BEFORE_CHUNK, _ask, _next_question, _ScriptedLLM,
+    STALL_BEFORE_CHUNK,
+    _ask,
+    _next_question,
+    _ScriptedLLM,
 )
 from tests.integration.test_minimal_loop import (
-    InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
 )
-from tests._event_helpers import all_events, append_one
+from tests.step_helpers import suppress_observe_start
 
 pytestmark = pytest.mark.asyncio
 
@@ -88,10 +94,7 @@ async def test_answered_reply_is_injected_even_while_another_question_is_pending
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
     await rt.rebuild_session(SID)
-    with mock.patch(
-        "ctx_weft.core.loop.background.launch_recap",
-        return_value=None,
-    ):
+    with suppress_observe_start():
         await rt.recover_agent(AID)
         await asyncio.sleep(0.3)
 

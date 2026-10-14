@@ -17,24 +17,31 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.assembler.assembler import AssembledPrompt
-from ctx_weft.providers.events import InProcessEventBus
+from ctx_weft.core.assembler.composer_guidance import build_act_guidance
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.loop.park import HitlPark
+from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep
-from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
-    LLMMessage, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
+    LLMMessage,
+    MemoryAddress,
+    MemoryEventType,
+    ProviderContext,
+    ToolCall,
 )
 from ctx_weft.protocols.hitl import PREFACE_NORMAL, UserTurnDelivery
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.hitl_env import make_hitl
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -46,7 +53,10 @@ def _template(*, observe_role: bool):
     observe 走机械判决、后台判定档降成只摘要档、`finish_task` 不再让位。
     """
     from ctx_weft.protocols.template import (
-        AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
+        AgentTemplate,
+        IdentityFacet,
+        LoopConfig,
+        MemoryConfig,
     )
 
     identity = {"act": IdentityFacet(text="SOUL")}
@@ -117,7 +127,7 @@ async def test_interactive_plain_text_parks_for_user() -> None:
     # park 不写 task 状态（Task 4）：AWAITING_HUMAN 由 TaskManager 据 RunOutcome 落。
     assert task.status == "ACTIVE"
     # 纯文本**就是**这一段的产出（2026-09-24 修）：park 之前必须先合成 `outputs`，
-    # 否则 `report_task_outcome` 的 success-without-outputs 护栏会把 observer 的
+    # 否则 `report_observation` 的 success-without-outputs 护栏会把 observer 的
     # success 改判 retry，park 的 task 永远终结不了。见
     # `tests/unit/test_outputs_synthesized_before_park.py`。
     assert task.outputs == "Hi! Anything else?"

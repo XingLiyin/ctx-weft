@@ -1,0 +1,219 @@
+{
+  "runtime": {
+    "authorizer_needs_human_unsupported": {
+      "values": {
+        "authorizer": "value-authorizer <tag> {literal}"
+      },
+      "text": "[Error: value-authorizer <tag> {literal} returned NeedsHuman but does not implement HumanGatedAuthorizer]"
+    },
+    "blocked_by_human": {
+      "values": {
+        "message": "value-message <tag> {literal}"
+      },
+      "text": "[Blocked by human: value-message <tag> {literal}]"
+    },
+    "cancelled_act_recap": {
+      "values": {},
+      "text": "Task was cancelled before completion."
+    },
+    "cancelled_task_summary": {
+      "values": {
+        "reason": "value-reason <tag> {literal}"
+      },
+      "text": "Cancelled (value-reason <tag> {literal}) \u2014 no final output was produced; the partial execution above is all that ran."
+    },
+    "capability_not_authorized": {
+      "values": {
+        "tool": "value-tool <tag> {literal}"
+      },
+      "text": "[Error: capability 'value-tool <tag> {literal}' not authorized]"
+    },
+    "context_compacted": {
+      "values": {},
+      "text": "[Context compacted]"
+    },
+    "experience_compacted": {
+      "values": {},
+      "text": "[Experience compacted]"
+    },
+    "final_reply_closing_note": {
+      "values": {},
+      "text": "[End of that final reply. It was delivered to the user when the task closed \u2014 do not repeat it, do not imitate its form, and do not treat it as the answer to whatever is being asked now.]"
+    },
+    "final_reply_note": {
+      "values": {
+        "ref": "value-ref <tag> {literal}"
+      },
+      "text": "[Final reply for task value-ref <tag> {literal} \u2014 the answer I delivered on finishing it, verbatim; not a summary.]"
+    },
+    "final_reply_note_untitled": {
+      "values": {},
+      "text": "[Final reply \u2014 the answer I delivered on finishing this task, verbatim; not a summary.]"
+    },
+    "gateway_missing": {
+      "values": {
+        "tool": "value-tool <tag> {literal}"
+      },
+      "text": "[Error: CapabilityGateway not configured, tool 'value-tool <tag> {literal}' skipped]"
+    },
+    "human_declined": {
+      "values": {
+        "message": "value-message <tag> {literal}"
+      },
+      "text": "Human declined: value-message <tag> {literal}"
+    },
+    "human_rejected": {
+      "values": {},
+      "text": "Human rejected the request."
+    },
+    "interrupt_edit_preface": {
+      "values": {
+        "previous": "value-previous <tag> {literal}"
+      },
+      "text": "(I cancelled my previous request: \"value-previous <tag> {literal}\" \u2014 replacing it with the request below.)"
+    },
+    "invalid_arguments": {
+      "values": {
+        "error": "value-error <tag> {literal}",
+        "tool": "value-tool <tag> {literal}"
+      },
+      "text": "[Error: invalid arguments for 'value-tool <tag> {literal}': value-error <tag> {literal}]"
+    },
+    "invalid_json_args": {
+      "values": {
+        "excerpt": "value-excerpt <tag> {literal}",
+        "tool": "value-tool <tag> {literal}"
+      },
+      "text": "[Error: invalid arguments for 'value-tool <tag> {literal}': arguments were not valid JSON and could not be parsed. You sent: value-excerpt <tag> {literal} \u2014 re-send the call with a well-formed JSON arguments object]"
+    },
+    "no_final_output": {
+      "values": {},
+      "text": "(no final output)"
+    },
+    "no_output": {
+      "values": {},
+      "text": "(no output)"
+    },
+    "no_reply": {
+      "values": {},
+      "text": "(no reply)"
+    },
+    "no_response": {
+      "values": {},
+      "text": "(no response)"
+    },
+    "operation_unverified_no_record": {
+      "values": {
+        "tool": "value-tool <tag> {literal}"
+      },
+      "text": "[Operation outcome unverified] \u5de5\u5177 value-tool <tag> {literal} \u7684\u8fd9\u6b21\u8c03\u7528\u5728\u5d29\u6e83\u524d\u6ca1\u6709\u7559\u4e0b\u8d26\u672c\u8bb0\u5f55\uff0c\u65e0\u6cd5\u786e\u5b9a\u526f\u4f5c\u7528\u662f\u5426\u5df2\u53d1\u751f\u3002\u4e0d\u8981\u91cd\u8bd5\u8fd9\u6b21\u8c03\u7528\u3002"
+    },
+    "operation_unverified_no_rerun_authorizer": {
+      "values": {
+        "tool": "value-tool <tag> {literal}"
+      },
+      "text": "[Operation outcome unverified] \u5de5\u5177 value-tool <tag> {literal} \u5728\u6267\u884c\u4e2d\u88ab\u4e2d\u65ad\uff0c\u6ca1\u6709\u6ce8\u518c\u91cd\u8dd1\u6388\u6743\uff0c\u65e0\u6cd5\u786e\u5b9a\u526f\u4f5c\u7528\u662f\u5426\u5df2\u53d1\u751f\u3002\u4e0d\u8981\u91cd\u8bd5\u8fd9\u6b21\u8c03\u7528\u3002"
+    },
+    "park_closed_by_verdict": {
+      "values": {},
+      "text": "[Closed by the reviewer: this task was judged complete. Send another message to open a new round.]"
+    },
+    "process_recap_note": {
+      "values": {},
+      "text": "[The above is a system-written recap of how this task was carried out, kept for context \u2014 it is not your reply to the user. Do not imitate its form when you answer.]"
+    },
+    "provider_missing": {
+      "values": {
+        "capability": "value-capability <tag> {literal}"
+      },
+      "text": "[Error: no provider found for 'value-capability <tag> {literal}']"
+    },
+    "provider_needs_human_unsupported": {
+      "values": {
+        "provider": "value-provider <tag> {literal}"
+      },
+      "text": "[Error: value-provider <tag> {literal} yielded needs_human but does not implement HumanResumable]"
+    },
+    "recap_placeholder": {
+      "values": {},
+      "text": "(no process recap for this segment)"
+    },
+    "report_placeholder": {
+      "values": {},
+      "text": "(nothing further to report for this segment)"
+    },
+    "spill_unrecoverable": {
+      "values": {},
+      "text": "Full text is NOT recoverable (no spill sink configured, or the spill failed) \u2014 what follows is all that remains."
+    },
+    "threshold_subtask_cancelled": {
+      "values": {
+        "ref": "value-ref <tag> {literal}"
+      },
+      "text": "Sub-task value-ref <tag> {literal} was cancelled mid-run (session failure threshold hit); its partial execution below is incomplete."
+    },
+    "threshold_tripped_recap": {
+      "values": {},
+      "text": "Session failure threshold was hit (N consecutive sub-task failures); terminating this task."
+    },
+    "tool_stream_error": {
+      "values": {
+        "code": "value-code <tag> {literal}",
+        "message": "value-message <tag> {literal}"
+      },
+      "text": "[Error value-code <tag> {literal}: value-message <tag> {literal}]"
+    },
+    "unattended_authz_note": {
+      "values": {},
+      "text": "this task runs unattended in the background \u2014 there is nobody who could approve this tool call, so it is denied. Continue without it, or finish the task and say what you could not do."
+    },
+    "unattended_tool_note": {
+      "values": {},
+      "text": "[No human available: this task runs unattended in the background, so nobody can respond. Continue with what you already know, or finish the task and state what blocked you.]"
+    },
+    "unknown_tool": {
+      "values": {
+        "tool": "value-tool <tag> {literal}"
+      },
+      "text": "[Error: unknown tool 'value-tool <tag> {literal}']"
+    }
+  },
+  "dispatch": {
+    "": {
+      "running": "Sub-task  is running now \u2014 its execution follows below.",
+      "success": "Sub-task  ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
+      "fail": "Sub-task  ran here \u2014 outcome: FAILED. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
+      "continue": "Sub-task  ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered."
+    },
+    "Task (t1)": {
+      "running": "Sub-task Task (t1) is running now \u2014 its execution follows below.",
+      "success": "Sub-task Task (t1) ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
+      "fail": "Sub-task Task (t1) ran here \u2014 outcome: FAILED. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
+      "continue": "Sub-task Task (t1) ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered."
+    },
+    "Task {literal}": {
+      "running": "Sub-task Task {literal} is running now \u2014 its execution follows below.",
+      "success": "Sub-task Task {literal} ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
+      "fail": "Sub-task Task {literal} ran here \u2014 outcome: FAILED. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
+      "continue": "Sub-task Task {literal} ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered."
+    }
+  },
+  "finish": {
+    "": {
+      "reply": "[Final reply \u2014 the answer I delivered on finishing this task, verbatim; not a summary.]\n\nfinal result\n\n[End of that final reply. It was delivered to the user when the task closed \u2014 do not repeat it, do not imitate its form, and do not treat it as the answer to whatever is being asked now.]",
+      "recap": "(no process recap for this segment)\n\n[The above is a system-written recap of how this task was carried out, kept for context \u2014 it is not your reply to the user. Do not imitate its form when you answer.]"
+    },
+    "Task (t1)": {
+      "reply": "[Final reply for task Task (t1) \u2014 the answer I delivered on finishing it, verbatim; not a summary.]\n\nfinal result\n\n[End of that final reply. It was delivered to the user when the task closed \u2014 do not repeat it, do not imitate its form, and do not treat it as the answer to whatever is being asked now.]",
+      "recap": "Task (t1)\n\n[The above is a system-written recap of how this task was carried out, kept for context \u2014 it is not your reply to the user. Do not imitate its form when you answer.]"
+    },
+    "Task {literal}": {
+      "reply": "[Final reply for task Task {literal} \u2014 the answer I delivered on finishing it, verbatim; not a summary.]\n\nfinal result\n\n[End of that final reply. It was delivered to the user when the task closed \u2014 do not repeat it, do not imitate its form, and do not treat it as the answer to whatever is being asked now.]",
+      "recap": "Task {literal}\n\n[The above is a system-written recap of how this task was carried out, kept for context \u2014 it is not your reply to the user. Do not imitate its form when you answer.]"
+    }
+  },
+  "spill": {
+    "0": "[Tool output truncated: 15 chars exceeded 6-char limit. Full text is NOT recoverable (no spill sink configured, or the spill failed) \u2014 what follows is all that remains.]\n--- preview (first 3 chars) ---\nabc",
+    "4": "[Tool output truncated: 15 chars exceeded 6-char limit. Full text is NOT recoverable (no spill sink configured, or the spill failed) \u2014 what follows is all that remains.]\n--- preview (first 3 chars) ---\nabc\n--- tail (last 4 chars) ---\nlmno"
+  }
+}

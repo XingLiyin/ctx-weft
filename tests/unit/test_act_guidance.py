@@ -1,8 +1,8 @@
 """act guidance：build_act_guidance 内容 + GuidanceSource/composer 装配落位。
 
-内容契约（loop/steps/act_guidance.py）：session 任务树 + 已完成子任务清单（动态段）
+内容契约（assembler/composer_guidance.py）：session 任务树 + 已完成子任务清单（动态段）
 + finish/切换/ask_user 指针级提醒（静态段，完整协议在工具 description/SOUL/observer 护栏）。
-装配契约：PrepareStep → extra["act_guidance"] → GuidanceSource（kind="guidance"）→
+装配契约：PrepareStep → extra["act_guidance_context"] 快照 → GuidanceSource（kind="guidance"）→
 composer 恒拼末条 user 最尾部（仅 act purpose；其后至多再补一行 Capabilities 指针，
 清单全文随当前 task 回合落在 cache 前缀内）。
 """
@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.composer_guidance import build_act_guidance
 from ctx_weft.core.assembler.sources.guidance import GuidanceSource
-from ctx_weft.core.loop.steps.act_guidance import build_act_guidance
 from ctx_weft.core.utils.estimate import estimate_tokens
 
 
@@ -428,7 +428,7 @@ def test_composer_places_capabilities_before_guidance_at_tail():
 
 
 def test_resume_cue_anchors_task_and_remaining_work():
-    from ctx_weft.core.loop.steps.act_guidance import build_resume_cue
+    from ctx_weft.core.assembler.composer_guidance import build_resume_cue
     cue = build_resume_cue(_cur(title="Fix importer", id="t1"), _tm())
     assert "the task: 'Fix importer' (t1)" in cue
     assert "do not redo" in cue and "remaining work" in cue
@@ -437,7 +437,7 @@ def test_resume_cue_anchors_task_and_remaining_work():
 
 
 def test_resume_cue_points_to_completed_list_only_when_children_finished():
-    from ctx_weft.core.loop.steps.act_guidance import build_resume_cue
+    from ctx_weft.core.assembler.composer_guidance import build_resume_cue
     parent = _task("t1", "Parent", "ACTIVE")
     child = _task("t2", "Research", "FINISHED", parent="t1")
     cue = build_resume_cue(_cur(title="Parent", id="t1"), _tm(tasks=[parent, child]))

@@ -20,8 +20,8 @@ import pytest
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.loop.steps.observe import Verdict
 from ctx_weft.core.loop.steps.suspend import SuspendStep
-from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.core.models.task import NormalTaskSettings, Task
+from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryConfig,
@@ -127,14 +127,14 @@ async def run_until_suspend(*, titles: list[str]):
     # finally 块（无条件发 TASK_RECAP_DONE）会在测试结束后抛 "exception was never
     # retrieved"。段里没有任何 CONVERSATION_TURN → n_raw==0 幂等护栏立即 return，
     # 不会真的调 LLM。
-    from ctx_weft.core.loop.background import await_pending_recap
+    from ctx_weft.core.loop.driver import StepDriver
     from ctx_weft.providers.events import InProcessEventBus
     ctx = _loop_ctx(mem)
     ctx.event_bus = InProcessEventBus()
     outcome = await SuspendStep().execute(state, ctx)
     state.run_outcome = outcome.state_patch.get("run_outcome")
     # 等后台 recap task 真正跑完（它的幂等护栏会立即 return），不留悬空 task 到测试之外。
-    await await_pending_recap(task.id)
+    await StepDriver.for_context(ctx).executions.wait(task.id)
     return state
 
 
@@ -152,9 +152,9 @@ async def run_until_park():
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import ProviderRegistry
-    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
-    from ctx_weft.core.loop.park import HitlPark
     from ctx_weft.core.capabilities.cache import CapabilityCache
+    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
+    from ctx_weft.core.loop.signals import HitlPark
     from ctx_weft.core.models.agent import Agent, LoopGuard
     from ctx_weft.core.models.session import Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
@@ -254,8 +254,8 @@ async def run_until_cancel():
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import ProviderRegistry
-    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.capabilities.cache import CapabilityCache
+    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.models.agent import Agent, LoopGuard
     from ctx_weft.core.models.session import Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig
@@ -321,8 +321,8 @@ async def run_until_crash(exc: BaseException):
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import ProviderRegistry
-    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.capabilities.cache import CapabilityCache
+    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.models.agent import Agent, LoopGuard
     from ctx_weft.core.models.session import Session
     from ctx_weft.protocols import LoopConfig as RTLoopConfig

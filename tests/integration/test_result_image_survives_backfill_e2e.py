@@ -16,21 +16,30 @@ from unittest import mock
 
 import pytest
 
+from ctx_weft import RuntimeConfig
 from ctx_weft.core.media.fold import placeholder_refs
 from ctx_weft.core.utils.content import content_to_text, redact_content_for_event
 from ctx_weft.core.utils.ids import mint_call_id
 from ctx_weft.protocols import (
-    ImagePart, MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext, TextPart,
+    ImagePart,
+    MemoryAddress,
+    MemoryEvent,
+    MemoryKind,
+    MemoryScope,
+    ProviderContext,
+    TextPart,
 )
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft import RuntimeConfig
+from tests._event_helpers import append_one
 from tests.integration.test_hitl_e2e_v2 import _ActRouterLLM, _poll
 from tests.integration.test_minimal_loop import (
-    InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
 )
-from tests._event_helpers import append_one
+from tests.step_helpers import suppress_observe_start
 
 pytestmark = pytest.mark.asyncio
 
@@ -107,10 +116,7 @@ async def test_crash_between_result_event_and_memory_keeps_the_image_retrievable
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
     await rt.rebuild_session(SID)
-    with mock.patch(
-        "ctx_weft.core.loop.background.launch_recap",
-        return_value=None,
-    ):
+    with suppress_observe_start():
         await rt.recover_agent(AID)
         await _poll(lambda: llm.act_requests or None, timeout=8.0)
 

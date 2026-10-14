@@ -54,9 +54,9 @@ async def test_get_template_miss_returns_none(tmp_path: Path) -> None:
 async def test_no_facet_is_ever_borrowed_from_another_template(tmp_path: Path) -> None:
     """缺 facet **不从 default 借**（2026-09-28 移出：那是宿主的部署约定）。
 
-    缺 facet 时的兜底全在 core 自己手里——compact / recognize_intent 由 IdentitySource 回退
-    act，observe 家族不回退、走装配层的通用 observer 文案。所以这里只钉一件事：本 provider
-    交出去的 template 就是磁盘上那一份，没有任何东西被别的模板填过。
+    缺 facet 时的兜底全在 core 自己手里：recognize_intent 可回退 act；observer 不回退；
+    compact 与 background_recap 缺压缩纪律时由 composer 的 core fallback 补齐。所以这里只
+    钉一件事：本 provider 交出去的 template 就是磁盘上那一份，没有被别的模板填过。
     """
     _make_dir(tmp_path, "default", role="DEF-ROLE", compact="DEF-COMPACT", metadata="DEF-MD")
     _make_dir(tmp_path, "foo")

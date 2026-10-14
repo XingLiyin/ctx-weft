@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextBlock
@@ -81,7 +82,7 @@ def test_actor_system_has_only_soul_and_background() -> None:
         _cap_block("researcher", "agent", "a research subagent"),
         _directive_block("Instructions for skill 'x':\nDo the thing"),
     ]
-    system = DefaultComposer()._build_actor_system(blocks)
+    system = asyncio.run(DefaultComposer().plan(blocks, _fresh_task_request())).system
     assert "SOUL TEXT" in system
     assert "## Project Background" in system and "BG TEXT" in system
     assert "### Available Tools" not in system
@@ -382,13 +383,15 @@ def test_tools_without_provider_name_render_flat() -> None:
 
 def test_observer_system_excludes_resources_and_directive() -> None:
     template = SimpleNamespace(identity={"act": SimpleNamespace(text="ACT SOUL")})
-    request = SimpleNamespace(template=template)
+    request = _fresh_task_request()
+    request.template = template
+    request.purpose = "observe"
     blocks = [
         _background_block("BG TEXT"),
-        _cap_block("report_task_outcome", "tool", "report the outcome"),
+        _cap_block("report_observation", "tool", "report the outcome"),
         _directive_block("Instructions for skill 'x':\nDo the thing"),
     ]
-    system = DefaultComposer()._build_act_system(blocks, request)
+    system = asyncio.run(DefaultComposer().plan(blocks, request)).system
     assert "ACT SOUL" in system
     assert "## Project Background" in system and "BG TEXT" in system
     assert "### Available Tools" not in system
@@ -399,7 +402,7 @@ def test_observer_system_excludes_resources_and_directive() -> None:
 def test_observer_messages_inject_resources_and_keep_role() -> None:
     blocks = [
         _identity_block("OBSERVER ROLE"),  # purpose=observe → identity block is the ROLE
-        _cap_block("report_task_outcome", "tool", "report the outcome"),
+        _cap_block("report_observation", "tool", "report the outcome"),
     ]
     task = SimpleNamespace(title="T", description="d", user_prompt="up",
                            user_prompt_in_memory=False, process_report=None)
@@ -408,7 +411,7 @@ def test_observer_messages_inject_resources_and_keep_role() -> None:
     user_msgs = [m for m in msgs if m.role == "user"]
     assert "### Available Tools" in user_msgs[0].content
     # 条目只有名字 + 入参签名，描述随 tools 参数下发、不重复进正文
-    assert "- report_task_outcome()" in user_msgs[0].content
+    assert "- report_observation()" in user_msgs[0].content
     assert "report the outcome" not in user_msgs[0].content
     joined = "\n".join(m.content for m in msgs if isinstance(m.content, str))
     assert "OBSERVER ROLE" in joined
@@ -548,7 +551,7 @@ def test_facet_purpose_gets_no_resume_filler_cue_rides_new_trailing_user() -> No
     listing rides the current-task user turn (cache prefix), same as act."""
     blocks = [
         _identity_block("OBSERVER ROLE"),
-        _cap_block("report_task_outcome", "tool", "report the outcome"),
+        _cap_block("report_observation", "tool", "report the outcome"),
         _history_block("user", "## Current Message\nthe original ask", "1"),
         _history_block("assistant", "did some work", "2"),
         _history_block("tool", "big tool result", "3"),
@@ -579,7 +582,7 @@ def test_observer_capabilities_on_current_task_turn_not_prepended() -> None:
     message keeps only the one-line pointer alongside the ROLE + judgment cue."""
     blocks = [
         _identity_block("OBSERVER ROLE"),  # purpose=observe → identity block is the ROLE
-        _cap_block("report_task_outcome", "tool", "report the outcome"),
+        _cap_block("report_observation", "tool", "report the outcome"),
         _cap_block("docx", "skill", "make a docx"),
         _cap_block("planner", "agent", "a planning subagent"),
         _history_block("user", "## Current Message\nthe original ask", "1"),

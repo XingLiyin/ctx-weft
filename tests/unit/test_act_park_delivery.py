@@ -10,7 +10,7 @@ from ctx_weft.core.hitl.registry import HitlRegistry
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
 from ctx_weft.core.hitl.service import HitlService
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.loop.park import HitlPark
+from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.hitl import (

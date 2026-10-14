@@ -1,5 +1,7 @@
 import pytest
-from ctx_weft.core.loop.background import recap as recap_mod
+
+from ctx_weft.core.loop.driver import StepDriver
+from ctx_weft.core.loop.steps import observe as recap_mod
 from ctx_weft.protocols.events import EventType
 
 
@@ -14,9 +16,9 @@ async def test_started_and_done_emitted_on_success(fake_state_ctx, monkeypatch):
     async def _fake_react(*a, **k):
         from ctx_weft.core.capabilities.control_tools import ControlResult
         return ControlResult(content="recap text", metadata={"task_summary": "sum"}), ""
-    monkeypatch.setattr(recap_mod, "run_observe_react", _fake_react)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _fake_react)
 
-    await recap_mod._run_recap(state, ctx, boundary="interrupt")
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
 
     kinds = _recap_types(ctx.event_bus.emitted)
     assert kinds == [EventType.TASK_RECAP_STARTED, EventType.TASK_RECAP_DONE]
@@ -26,9 +28,9 @@ async def test_started_and_done_emitted_on_success(fake_state_ctx, monkeypatch):
 async def test_done_emitted_even_on_exception(fake_state_ctx, monkeypatch):
     async def _boom(*a, **k):
         raise RuntimeError("observe blew up")
-    monkeypatch.setattr(recap_mod, "run_observe_react", _boom)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _boom)
 
-    await recap_mod._run_recap(state=fake_state_ctx[0], ctx=fake_state_ctx[1], boundary="interrupt")
+    await StepDriver.for_context(fake_state_ctx[1]).start("observe", *fake_state_ctx, options={"boundary": "interrupt"})
 
     kinds = _recap_types(fake_state_ctx[1].event_bus.emitted)
     assert EventType.TASK_RECAP_STARTED in kinds

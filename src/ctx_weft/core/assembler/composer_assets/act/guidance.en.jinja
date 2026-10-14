@@ -1,0 +1,29 @@
+{#
+本片段渲染后追加在 act 最末 user 尾部（不是独立 system，也不保存到 memory）。
+阅读顺序 / 出现条件：
+  --- + 当前任务锚：始终有；
+  总体计划：plan_with_others / plan_solo 非空时显示对应版本；
+  已完成子任务与结果摘要：completed_tasks 非空时显示；
+  上轮复核注记：review_note 非空时显示，来自本轮消费的一次性 hint；
+  收尾规则：始终有；attended / unattended 分别补充有人/无人值守规则；
+  不要处理其它任务：unattended_others 为真时追加；
+  无关新请求的交接规则、向用户询问信息的规则：始终有。
+这些是渲染条件，不是输出的小节标题；具体模型可见正文从下面的 --- 开始。
+#}---
+{{ task_anchor }}
+
+{% if plan_with_others %}## The overall plan (▶ = your current task; the rest are handled separately — do NOT do them yourself):
+{{ plan_with_others }}
+
+{% endif %}{% if plan_solo %}## The overall plan (▶ = your current task):
+{{ plan_solo }}
+
+{% endif %}{% if completed_tasks %}## Your current task has ALREADY been delegated to the sub-tasks below, and they are ALREADY COMPLETED — the digest under each is what it produced (full results are in the conversation above). Treat that work as done: do NOT redo it yourself and do NOT delegate it again merely to have it repeated. Your next step is to judge whether any work still remains for the task goal beyond these results — if it does, do only that part, building on what they produced. The one exception is a result that the review note below says does not actually achieve its goal: for that piece it is YOUR call — delegate a fresh sub-task for it, or just do it yourself, whichever is the better use of this turn:
+{{ completed_tasks }}
+
+{% endif %}{% if review_note %}## Note from the review of your previous attempt (it may name a sub-task whose result falls short):
+{{ review_note }}
+
+{% endif %}Call `{{ finish_task }}` ONLY once the task goal is fully achieved — if work remains, keep working instead of finishing. To finish, write the final reply to the user as your normal message text and call it in that same turn; the message text is the reply and the deliverable, not the tool arguments (details in the tool description).{% if attended %} Someone is there: a plain-text reply keeps the task open and hands the floor to them — the right move mid-conversation; finish only when the whole request is served.{% endif %}{% if unattended %} No one is there to read a reply: a prose answer alone does not end this task and nobody will follow up on it. When the goal is achieved you must call it in the same turn as your final reply, or this task will just be run again until its attempt limit runs out.{% endif %}{% if unattended_others %} Do not start the other tasks yourself.{% endif %}
+If the user's latest message is an unrelated NEW request, emit `{{ finish_task }}` AND `{{ delegate_task }}` together in ONE response — finishing alone would lose the new request.
+Need information or a decision only the user can provide? Call `{{ ask_user }}` instead of guessing.

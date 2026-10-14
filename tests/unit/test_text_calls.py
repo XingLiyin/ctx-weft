@@ -219,7 +219,7 @@ def test_scan_tool_code_pretty_multiline_json_with_escaped_quotes():
         "前面一些正文\n"
         "<tool_code>\n"
         "{\n"
-        '  "tool": "collect_process_report",\n'
+        '  "tool": "report_observation",\n'
         '  "args": {\n'
         '    "act_recap": "responded to greeting \\"你好\\" with a welcome",\n'
         '    "task_summary": "用户多次发送\\"你好\\"，actor 每次以中文回应"\n'
@@ -230,7 +230,7 @@ def test_scan_tool_code_pretty_multiline_json_with_escaped_quotes():
     name, calls = scan_text_tool_calls(text)
     assert name == "wrapped"
     assert len(calls) == 1
-    assert calls[0].name == "collect_process_report"
+    assert calls[0].name == "report_observation"
     # 转义引号被 json.loads 正确还原为字面量双引号
     assert '"你好"' in calls[0].arguments["act_recap"]
     assert calls[0].arguments["task_summary"].startswith('用户多次发送"你好"')

@@ -25,8 +25,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctx_weft.core.loop.observing as _obs_mod
-from ctx_weft.core.loop.background import runner
+import ctx_weft.core.loop.steps.observe as _obs_mod
+from ctx_weft.core.loop.driver import StepDriver
 from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
 from ctx_weft.protocols.events import EventType
 
@@ -45,7 +45,7 @@ async def test_cancellation_reraises_and_run_finished_reports_canceled_first(
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _cancelled)
 
-    t = runner.launch_recap(state, ctx, boundary="interrupt")
+    t = StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
     with pytest.raises(asyncio.CancelledError):
         await t  # 必须重新抛出——不是「吞、不重抛」（那是 _run_loop 的口径，这里不适用）
 

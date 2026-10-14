@@ -17,7 +17,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.background import runner
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
 from ctx_weft.protocols.events import EventType
@@ -51,7 +50,6 @@ async def _harness(monkeypatch):
     """runtime + 一条按顺序记录「ingest / emit」的探针。"""
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     
-    monkeypatch.setattr(runner, "_task_pending", {})
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
     rt.providers.register_memory(InMemoryMemoryProvider())
 

@@ -26,7 +26,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.background import runner
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import (
@@ -71,7 +70,7 @@ async def _fold_trailing_segment(mem: InMemoryMemoryProvider) -> None:
                                  timestamp=_ts(1), role="user"), pctx)
     await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, address=scope, content="上一轮回复",
                                  timestamp=_ts(2), role="assistant"), pctx)
-    from ctx_weft.core.loop.fold import segment_fold
+    from ctx_weft.core.loop.task_memory_fold import segment_fold
     await segment_fold(mem, scope, MemoryScope.TASK, "段摘要", pctx)
 
 
@@ -146,13 +145,15 @@ async def test_inject_user_reply_does_not_await_pending_recap(monkeypatch):
     mem = _RecordingMem()
     runtime.providers.register_memory(mem)
 
-    monkeypatch.setattr(runner, "_task_pending", {})
+    from ctx_weft.core.loop.driver import ExecutionRegistry
+    registry = runtime._step_executions.setdefault("s1", ExecutionRegistry())
 
     async def _slow_fold():
         await asyncio.sleep(0.05)
         order.append("fold")
 
-    runner._task_pending["t1"] = asyncio.ensure_future(_slow_fold())
+    pending = asyncio.create_task(_slow_fold())
+    registry.register("recap-run", "t1", "observe", pending)
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
     task = Task(id="t1", session_id="s1", status="SUSPENDED",
@@ -176,5 +177,5 @@ async def test_inject_user_reply_does_not_await_pending_recap(monkeypatch):
     assert order == ["ingest"], (
         f"回复的注入不该等折叠落地（段界水位线已接管正确性），got {order}"
     )
-    await runner._task_pending["t1"]
+    await pending
     assert order == ["ingest", "fold"]

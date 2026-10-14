@@ -1,4 +1,4 @@
-"""IdentitySource：读 template.identity[purpose]，渲染为 identity 段。"""
+"""IdentitySource：收集用途角色；judge 额外收集 compact 总结原则。"""
 
 from __future__ import annotations
 
@@ -12,23 +12,12 @@ if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
 
 
-#: observe 家族：前台 observe 与它的两档后台。这三个 purpose **不回退 act**。
-#:
-#: 其余 purpose（compact / recognize_intent）缺 facet 时仍回退 act——它们是 actor 自己的
-#: 内部工序（压自己的对话、认自己的意图），拿 SOUL 当人格是对的。observe 不是：它的全部
-#: 意义在于**不是 actor**，回退 act 等于让 actor 顶着自己的人格判自己，而且 system 提示
-#: 本来就是同一段 SOUL（`composer._build_act_system`），等于同一段人格出现两遍。
-#:
-#: 这三个 purpose 缺 facet 时**不产 identity block**，由 `composer._OBSERVER_ROLE_FALLBACK`
-#: 兜一份框架自带的通用 observer 准则。
-_OBSERVE_PURPOSES = ("observe", "background_observe", "background_recap")
-
-
 class IdentitySource:
-    """从 template.identity 取对应 purpose 的 facet，渲染为 identity ContextBlock。
+    """从 template.identity 取用途所需的 facet，分别生成 identity ContextBlock。
 
-    缺失某 purpose 时 fallback 到 facets["act"]（详见设计文档 §4.6.6）——
-    **observe 家族除外**，见 `_OBSERVE_PURPOSES`。
+    Facet 的选择与 fallback 是编译策略，唯一实现位于
+    ``request_policy.select_identity_facet``；本 Source 只把结果适配成可参与预算的 block。
+    judge 同时评价任务和生成摘要，compact 作为独立 block 保留来源与 token 预算。
     """
 
     name = "identity"
@@ -43,32 +32,38 @@ class IdentitySource:
         template = request.template
         if template is None:
             return
-        # 两档后台 observe（判定 `background_observe` / 只摘要 `background_recap`）都复用
-        # observe 的 ROLE facet——观察者的判断准则与「这一次要不要判」无关。
-        facet = template.identity.get(request.purpose)
-        if facet is None and request.purpose in ("background_observe", "background_recap"):
-            facet = template.identity.get("observe")
-        if facet is None and request.purpose not in _OBSERVE_PURPOSES:
-            facet = template.identity.get("act")
+        from ctx_weft.core.assembler.request_policy import (
+            resolve_prompt_policy,
+            select_identity_facet,
+        )
+
+        definition = resolve_prompt_policy(request)
+        facet = select_identity_facet(template, definition.facet)
+        facets = [(definition.facet, facet)]
+        if definition.template == "observe" and definition.judge_task:
+            facets.append(("compact", select_identity_facet(template, "compact")))
+        for facet_name, selected in facets:
+            if selected is None:
+                continue
+            text = selected.text
+            yield ContextBlock(
+                id=generate_id("blk"),
+                source="identity",
+                kind="identity",
+                target="system",
+                content=text,
+                priority=slot_priority("identity"),  # 身份与总结原则均不可裁
+                token_estimate=request.token_counter(text),
+                metadata={
+                    "template_id": template.id,
+                    "template_version": template.version,
+                    "facet_purpose": facet_name,
+                    "style": selected.style,
+                },
+            )
+
         if facet is None:
             return
-
-        text = facet.text
-        yield ContextBlock(
-            id=generate_id("blk"),
-            source="identity",
-            kind="identity",
-            target="system",
-            content=text,
-            priority=slot_priority("identity"),  # 最高，几乎不可裁
-            token_estimate=request.token_counter(text),
-            metadata={
-                "template_id": template.id,
-                "template_version": template.version,
-                "facet_purpose": request.purpose,
-                "style": facet.style,
-            },
-        )
 
         # Skill instructions（Level 2）由 PrepareStep 加载后传入 request.extra
         skill_instructions: str = request.extra.get("skill_instructions", "")

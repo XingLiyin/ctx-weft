@@ -13,26 +13,44 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, ToolCall
+from ctx_weft.core.assembler.prompts import runtime_prompt
+from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME
+from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
+from ctx_weft.core.loop.commit import commit_round, discard_uncommitted_round
 from ctx_weft.core.loop.driver import (
-    ACT_TURNS_USED_KEY, COMPACT_NOOP_KEY, CONTEXT_RECOVERY_COUNT_KEY,
-    HOT_REPLY_ROUND_KEY, RECOGNIZE_INTENT_PENDING_KEY, ROUND_COMMITTED_KEY,
-    LoopContext, LoopState, Step, StepOutcome, make_event,
+    ACT_TURNS_USED_KEY,
+    COMPACT_NOOP_KEY,
+    CONTEXT_RECOVERY_COUNT_KEY,
+    LoopContext,
+    LoopState,
+    Step,
+    StepDriver,
+    StepOutcome,
+    make_event,
 )
 from ctx_weft.core.loop.llm_gateway import (
-    PROMPT_EST_BASE_KEY, PROMPT_EST_SEG_KEY, request_prompt_estimate, resolve_llm_identity,
+    PROMPT_EST_BASE_KEY,
+    PROMPT_EST_SEG_KEY,
+    request_prompt_estimate,
+    resolve_llm_identity,
     stream_llm_resilient,
 )
-from ctx_weft.protocols.events import EventOrigin, EventType
-from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
-from ctx_weft.core.loop.park import HitlPark, RoundDiscarded
-from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME
+from ctx_weft.core.loop.signals import HitlPark
+from ctx_weft.core.loop.steps.observe import has_observe_role
 from ctx_weft.core.models.task import NormalTaskSettings
-from ctx_weft.core.loop.observing import has_observe_role
-from ctx_weft.core.utils.estimate import effective_limit
 from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.estimate import effective_limit
 from ctx_weft.core.utils.ids import MintedCall, generate_id, mint_turn_call_ids
-from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
+from ctx_weft.protocols import (
+    LLMMessage,
+    LLMRequest,
+    LLMUsage,
+    MemoryEvent,
+    MemoryKind,
+    MemoryScope,
+    ToolCall,
+)
+from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.protocols.hitl import (
     HITL_FORM_WAIT,
     PREFACE_AFTER_INTERRUPT,
@@ -186,7 +204,7 @@ class ActStep(Step):
         # 离开 act 的循环 = 这一轮已经推进到别的步骤（suspend / prepare 压缩续跑 / observe），
         # 那些步骤直接读 memory、不认暂存区，所以先提交：暂存的答复与消息此刻落盘。
         # 热应答醒来后一个 chunk 都没等到就走到这里（例如同批的 finish_task），也算数。
-        await _commit_round(state, ctx)
+        await commit_round(state, ctx)
 
         # 路由优先级：suspend > 上下文恢复 > observe。
         #
@@ -222,7 +240,7 @@ class ActStep(Step):
         # `suspend_requested`，上面已经路由去 suspend 了）。它此前在 root 上是**零复核**的
         # ——`observe._should_use_llm` 对 `parent_task_id is None` 降级走机械判决，而
         # `_mechanical_verdict` 把 `actor_done` 无条件映射成 success，那道
-        # success-without-outputs 护栏又长在 `report_task_outcome` 里、不在机械判决的路上。
+        # success-without-outputs 护栏又长在 `report_observation` 里、不在机械判决的路上。
         # 于是「说了段话要被判、明确宣布做完了反而不被判」，等于给 LLM 留了一个绕开复核的
         # 开关。改成与纯文本同一条归宿：park + 后台判定。
         #
@@ -238,7 +256,7 @@ class ActStep(Step):
         # 全部意义就是「先别收尾，等 observer 复核」，而 park 之后**前台 ObserveStep 跑不到**
         # ——`HitlPark` 在 `runtime._run_loop` 那里 unwind 的是 `driver.run` 整个循环。于是
         # park 之后系统里唯一的判决来源就是后台那次带外判决；模板没有 ROLE 时它降成只摘要
-        # 档（`background.recap` 里 `judges` 与 `has_observe_role` 相与），没人再终结这个
+        # 档（ObserveStep 里 judges 与 has_observe_role 相与），没人再终结这个
         # task，root 就永远停在 AWAITING_HUMAN。
         #
         # 所以没有 observer 时**压根不让位**：走下面那个 `StepOutcome` 回 observe，机械判决
@@ -246,7 +264,7 @@ class ActStep(Step):
         # （`boundary="finish"`）——即 S-b 之前那条本来就在的路。
         #
         # 位置在 `_synthesize_final_outputs` **之后**：park 的 task 恒 `outputs=None` 会让
-        # 护栏把 success 改判 retry（2026-09-24 那个坑，见该函数 docstring）。`_commit_round`
+        # 护栏把 success 改判 retry（2026-09-24 那个坑，见该函数 docstring）。`commit_round`
         # 也已经在本轮第一个 chunk 就跑过了，与纯文本 park 同样是「已提交之后才 park」。
         if (
             next_step == "observe"
@@ -356,92 +374,6 @@ async def _stream_until_stop(agen: Any, ctx: LoopContext) -> "AsyncIterator[Any]
         await agen.aclose()
 
 
-async def _commit_round(state: LoopState, ctx: LoopContext) -> None:
-    """提交本轮：LLM 开口了，这一轮算数（spec 2026-09-09）。**幂等**，每个 chunk 都调。
-
-    在此之前，这一轮的两样东西还没落地：
-
-    1. `TASK_CREATED` / `TASK_STARTED` / `RUN_STARTED` / `LLM_PROMPT_SENT` 攒在总线的
-       未提交窗口里（只到达了进程内状态机，见 `EventBus` 类 docstring）；
-    2. 把这一轮唤醒的那条 HITL 答复还停在**待终局**（`pending_decision`），
-       `HitlResolved` 一直没发——日志里那个气泡仍是 pending。
-    3. 这一轮的 memory 写入（用户消息、HITL 答复、由答复回灌的工具结果）暂存在窗口里
-       （`ingest_or_stage`），memory 里还没有它们。提交时钩子先发 `HitlResolved`、再按序
-       落盘——**终局事实先于答复进 memory**。
-    4. `recognize_intent` 还没起飞（判定在 `PrepareStep`，起飞在这里）——旁路只该为
-       **真的发生过**的那一轮花一次 LLM 调用。它跑在 root task 上，而 root task 从第二句
-       起每一轮都开窗，放在 prepare 起飞就会在窗口里跑、被撤销时整串事件白丢。
-
-    暂存的记录压缩够不着（L0.5 图片降级 / L1 / L3 只折 memory）。所以 PrepareStep 判定要
-    压缩时**先提交**再压缩——代价是那一轮不再可撤，换来带图的第一条消息照样能被降级
-    （`test_media_fold_replay_e2e` 钉住）。act 离开循环去别的步骤之前同样先提交：那些步骤
-    直接读 memory，而这一轮已经推进到了别处，算数。
-
-    顺序不可换：`TASK_CREATED` 必须最先出闸，它是下游 reducer 与 host 建 task 键的那一条；
-    `recognize_intent` 必须在它之后起飞，它会发自己的一串事件，且要写 `task.title/description`
-    ——那两个字段正是窗口里 `TASK_CREATED` 的 payload 在出闸那一刻现算的来源。
-    """
-    if state.extra.get(ROUND_COMMITTED_KEY):
-        return
-
-    # 两阶段终局的第二阶段（那条把这一轮唤醒的答复——HITL 应答 / `send_message` 对旧
-    # 气泡的收口——现在才算数、`HitlResolved` 在此刻才发）由 `commit_round` 的钩子完成，
-    # 见 `TaskManagerHooks.commit_round`。
-    tm = ctx.task_manager
-    if tm is not None:
-        await tm.commit_round(state.task.id)
-    # **成功之后才置位**：提交失败（存储不可用）时异常上抛、标志保持 False，下一个提交点
-    # （或 `_run_task` 的收尾兜底）会重试，而不是以为已经提交过了。
-    state.extra[ROUND_COMMITTED_KEY] = True
-    # 这一轮算数了，它就不再是「可热撤销的一轮」。
-    state.extra.pop(HOT_REPLY_ROUND_KEY, None)
-
-    if state.extra.pop(RECOGNIZE_INTENT_PENDING_KEY, False):
-        from ctx_weft.core.loop.steps.recognize_intent import launch_recognize_intent
-        launch_recognize_intent(state, ctx)
-
-
-
-async def _discard_round_if_uncommitted(state: LoopState, ctx: LoopContext) -> None:
-    """用户在 LLM 开口之前按了停 → 整轮丢弃（spec 2026-09-09）。已提交则原样返回。
-
-    只对**由一条用户消息新开出来的 task**（`send_message` 的新建分支，`TaskManager`
-    给它开了未提交窗口）成立。注入既有 task 的那两条路径（agent 本就在
-    `AWAITING_HUMAN` / 挂起等子任务）不在此列——那个 task 早就提交过、是一段正在进行的
-    对话，丢不得；它们照常 park 出续跑气泡，只是那条刚注入的用户消息同样还没落 memory，
-    所以照样零残留。
-
-    本函数只抛信号：`RoundDiscarded` 一路 unwind 到 `_run_task`，由 `discard_round` 收尾。
-    memory 这边无事可做——这一轮的用户消息 / 答复只在窗口的暂存区里（`ingest_or_stage`），
-    随窗口一起扔掉。
-
-    **一条事件都不发**：task 状态事件的发射点只有 TaskManager 一处（Task 4 的不变式，
-    `test_task_manager_owns_status` 有静态守卫盯着）。把 agent 送回 `idle` 的那条
-    `TASK_CANCELED`、以及关窗丢弃，都在 `TaskManager.discard_provisional` 里按正确顺序完成。
-    """
-    if state.extra.get(ROUND_COMMITTED_KEY):
-        return
-    tm = ctx.task_manager
-    if tm is None or not tm.is_round_open(state.task.id):
-        return
-
-    hot_hitl_id = state.extra.pop(HOT_REPLY_ROUND_KEY, "")
-    if hot_hitl_id:
-        # **热撤销**：这一轮是一条热应答开出来的——同一个 run 醒来接着跑，还没等到 LLM
-        # 开口就被暂停了。不能整轮 `RoundDiscarded`：这个 run 的 `RUN_STARTED` 早已落盘，
-        # 连它的结尾一起丢掉，日志里就是一个永不结束的 run。
-        #
-        # 于是分两半：答复这一半撤掉（答复退回待答；缓冲的事件与暂存的工具结果随窗口丢弃，
-        # memory 里本来就没有），run 这一半照常 park 在那个问题上——正是「人还没答」的世界，
-        # `RUN_FINISHED` / `TaskAwaitingHuman` 如实落盘，重答走冷路径。
-        await tm.abandon_round(state.task.id)
-        req = ctx.hitl.registry.get(hot_hitl_id) if ctx.hitl is not None else None
-        raise HitlPark(hitl_id=hot_hitl_id,
-                       tool_call_id=req.tool_call_id if req is not None else "")
-
-    raise RoundDiscarded(state.task.id)
-
-
 @dataclass
 class _LLMTurnOutput:
     """单轮 LLM 流式产出。"""
@@ -503,7 +435,7 @@ async def _run_llm_turn(
         # 那种回合 `chunk.kind` 恒不是 "token"，等 token 就是永远等不到、整轮永不提交。
         # 这也正是 gateway 内部 `yielded_anything` 的那条界（首 chunk 之前失败可重试、
         # 之后断流直接抛 outage）——同一条界，这里把它从 gateway 的局部规则升成整轮的。
-        await _commit_round(state, ctx)
+        await commit_round(state, ctx)
         if chunk.kind == "token":
             ctx.run_phase.produced = True
             text += chunk.text
@@ -528,14 +460,13 @@ async def _run_llm_turn(
 
     if interrupted:
         # ⓪ 一个 chunk 都没到就被中止 → 整轮丢弃，不 park、不留任何痕迹。
-        await _discard_round_if_uncommitted(state, ctx)   # 命中则 raises RoundDiscarded
+        await discard_uncommitted_round(state, ctx)   # 命中则 raises RoundDiscarded
         # ② 已吐 token：把半截 assistant 文本入 memory 并标注「被用户打断」；
         # ① 已开口但本回合没吐正文（纯工具调用后被打断）：不留记录。随后 park 待用户续接。
         has_partial = bool(text.strip() or reasoning.strip())
         await _commit_interrupted_partial(state, ctx, text, reasoning, turn_num)
         if _is_own_root(state.task):
-            from ctx_weft.core.loop.background import launch_recap
-            launch_recap(state, ctx, boundary="interrupt")
+            StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
         await _park_for_interrupt(state, ctx, edit=not has_partial)
 
     # 摄入前铸造内部调用标识（spec: conversation-integrity）：LLM 复用 wire id（call_1
@@ -543,7 +474,7 @@ async def _run_llm_turn(
     # 事件 payload、memory 记录、current_messages、gateway/HITL 全部消费同一次铸造的
     # 值。锚 = 预铸的 assistant 记录 id（ingest 经 MemoryEvent.id 采纳，见
     # _ingest_assistant_turn），跨平面一致且与 tool_call_id 派生同源。observe 的
-    # run_observe_react 对自己的回合同口径（live 平面，不入 memory）。
+    # ObserveStep._run_react 对自己的回合同口径（live 平面，不入 memory）。
     anchor = generate_id("asst")
     minted: list[MintedCall] = []
     if tool_calls:
@@ -774,15 +705,14 @@ async def _execute_tool_calls(
         # 工具间命中：软打断 → 本 tc 及之后全部「未开始」→ 补「已取消」+ park；硬取消 → CancelledError。
         if _interrupt_pending(ctx):
             # 这一轮若还没提交（热应答醒来、到下一个提交点之前），暂停就是撤回那条答复：
-            # 走 `_discard_round_if_uncommitted`（热撤销 → park 在原问题上，抛出）。剩下的
+            # 走 `discard_uncommitted_round`（热撤销 → park 在原问题上，抛出）。剩下的
             # 工具调用**不补**结果——人重答之后 reconcile 会把它们当作从未开始的调用执行。
-            await _discard_round_if_uncommitted(state, ctx)
+            await discard_uncommitted_round(state, ctx)
             for rest in tool_calls[i:]:
                 await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
             ctx.run_phase.in_tool_loop = False
             if _is_own_root(state.task):
-                from ctx_weft.core.loop.background import launch_recap
-                launch_recap(state, ctx, boundary="interrupt")
+                StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
             await _park_for_interrupt(state, ctx)
         if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
             ctx.cancel_token.raise_if_cancelled()
@@ -794,14 +724,13 @@ async def _execute_tool_calls(
             if _interrupt_pending(ctx):
                 # 同上。被打断的这个工具若已过 gateway step 5，这一轮已提交，下面这句 no-op；
                 # 没过 step 5 就意味着 provider 从未被调用，当作没开始即可。
-                await _discard_round_if_uncommitted(state, ctx)
+                await discard_uncommitted_round(state, ctx)
                 await _ingest_synthetic_tool_result(state, ctx, tc, INTERRUPTED_MARK, interrupted=True)
                 for rest in tool_calls[i + 1:]:
                     await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
                 ctx.run_phase.in_tool_loop = False
                 if _is_own_root(state.task):
-                    from ctx_weft.core.loop.background import launch_recap
-                    launch_recap(state, ctx, boundary="interrupt")
+                    StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
                 await _park_for_interrupt(state, ctx)
             if ctx.cancel_token is not None:
                 ctx.cancel_token.raise_if_cancelled()  # 硬取消
@@ -866,7 +795,7 @@ def _synthesize_final_outputs(state: LoopState, transcript: list) -> None:
 
     **必须能在 park 之前被调到**（2026-09-24 修）：park 走 `_cold_park` 抛 `HitlPark`
     释放协程，`ActStep.execute` 就地中断——循环之后那次合成永远执行不到。于是 park 的
-    task 恒 `outputs=None`，而 `report_task_outcome` 的 success-without-outputs 护栏据它
+    task 恒 `outputs=None`，而 `report_observation` 的 success-without-outputs 护栏据它
     把 success 改判 retry，**park 的 task 因此永远不会被判成功终结、DAG 后继永远放不行**。
     日志里的形态是 `arguments={'task_status':'success'}` 而
     `result="Assessment recorded: outcome=retry."`。
@@ -934,12 +863,12 @@ async def _invoke_tool(tc: ToolCall, state: LoopState, ctx: LoopContext) -> Any:
         )
 
     # 降级：无 gateway 时的最简路径（保持向后兼容）
-    from ctx_weft.core.loop.capability_gateway import CapabilityGateway, InvocationResult
+    from ctx_weft.core.loop.capability_gateway import InvocationResult
     logger.warning("No CapabilityGateway in LoopContext; tool '%s' cannot be dispatched", tc.name)
     return InvocationResult(
         invocation_id="noop",
         tool_name=tc.name,
-        content=f"[Error: CapabilityGateway not configured, tool '{tc.name}' skipped]",
+        content=runtime_prompt('gateway_missing', tool=tc.name),
         is_error=True,
     )
 
@@ -1044,7 +973,7 @@ def _interrupt_edit_prefix(prev_request: str) -> str:
     prev = (prev_request or "").strip()
     if not prev:
         return ""
-    return f'(I cancelled my previous request: "{prev}" — replacing it with the request below.)\n\n'
+    return runtime_prompt('interrupt_edit_preface', previous=prev) + "\n\n"
 
 
 def interrupt_edit_note(prev_request: str, new_input: str) -> str:
@@ -1154,8 +1083,7 @@ async def _park_await_user(
     # 压根到不了前台 observe（它在这里就 park 了），于是子任务的这一段既没人判也没人折。
     # 并发不会因此失控：单交互线闸门保证一个 session 同时只有一条非 unattended 的线
     # （见 `TaskManager._interactive_line_held`）。
-    from ctx_weft.core.loop.background import launch_recap
-    launch_recap(state, ctx, boundary=boundary)
+    StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": boundary})
     await _cold_park(state, ctx, PREFACE_NORMAL, unattended=state.task.unattended)
 
 
@@ -1163,14 +1091,13 @@ async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
     """协作式停止点：软打断（pause）→ park；硬取消（cancel）→ CancelledError。
 
     提交点之前命中（act 第一轮的循环顶部，LLM 还没被调用过）→ 整轮丢弃而非 park，
-    见 `_discard_round_if_uncommitted`。
+    见 `discard_uncommitted_round`。
     """
     if _interrupt_pending(ctx):
-        await _discard_round_if_uncommitted(state, ctx)   # 命中则 raises RoundDiscarded
+        await discard_uncommitted_round(state, ctx)   # 命中则 raises RoundDiscarded
         edit = not ctx.run_phase.produced and not ctx.run_phase.in_tool_loop
         if _is_own_root(state.task):
-            from ctx_weft.core.loop.background import launch_recap
-            launch_recap(state, ctx, boundary="interrupt")
+            StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
         await _park_for_interrupt(state, ctx, edit=edit)  # raises HitlPark
     tok = ctx.cancel_token
     if tok is not None and tok.is_cancelled:
