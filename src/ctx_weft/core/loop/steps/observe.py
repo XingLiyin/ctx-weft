@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from collections.abc import Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
@@ -32,6 +33,7 @@ from ctx_weft.core.loop.llm_gateway import (
     resolve_llm_identity,
     stream_llm_resilient,
 )
+from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.core.loop.task_memory_fold import (
     pop_close_synth,
     put_close_report,
@@ -47,7 +49,7 @@ from ctx_weft.core.utils.verdict import (
     VERDICT_SUCCESS,
     normalize_verdict,
 )
-from ctx_weft.protocols import LLMMessage, LLMRequest, LLMUsage, MemoryScope
+from ctx_weft.protocols import LLMMessage, LLMRequest, MemoryScope
 from ctx_weft.protocols.events import EventType
 
 if TYPE_CHECKING:
@@ -265,20 +267,13 @@ class ObserveStep(Step):
             # 不用 round）；round_num 仍是本函数内部的轮次计数局部变量，只是不再直接进 payload。
             llm_request.metadata["turn"] = round_num
 
-            accumulated_text = ""
-            reasoning_text = ""
-            tool_calls = []
-            usage = LLMUsage()
-
-            async for chunk in stream_llm_resilient(ctx, state, llm_request):
-                if chunk.kind == "token":
-                    accumulated_text += chunk.text
-                elif chunk.kind == "reasoning":
-                    reasoning_text += chunk.text
-                elif chunk.kind == "tool_call" and chunk.tool_call is not None:
-                    tool_calls.append(chunk.tool_call)
-                elif chunk.kind == "usage" and chunk.usage is not None:
-                    usage = chunk.usage
+            stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
+            async with aclosing(stream):
+                async for _ in stream:
+                    stream.accept_current()
+            result = stream.get_final_result()
+            accumulated_text, reasoning_text = result.text, result.reasoning
+            tool_calls, usage = list(result.tool_calls), result.usage
 
             if accumulated_text:
                 last_text = accumulated_text
@@ -326,6 +321,7 @@ class ObserveStep(Step):
                     break
                 current_messages.append(LLMMessage(
                     role="assistant", content=accumulated_text or runtime_prompt('no_reply'),
+                    provider_state=result.provider_state,
                 ))
                 current_messages.append(LLMMessage(
                     role="user",
@@ -337,6 +333,7 @@ class ObserveStep(Step):
                 role="assistant",
                 content=accumulated_text,
                 tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls],
+                provider_state=result.provider_state,
             ))
 
             terminal_result = None

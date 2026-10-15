@@ -35,6 +35,7 @@ from ctx_weft.core.loop.llm_gateway import (
     resolve_llm_identity,
     stream_llm_resilient,
 )
+from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.loop.steps.observe import has_observe_role
 from ctx_weft.core.models.task import NormalTaskSettings
@@ -130,7 +131,7 @@ class ActStep(Step):
             state.extra["assistant_record_id"] = persisted_turn.record_id
             current_messages.append(LLMMessage(
                 role="assistant", content=turn.text, tool_calls=asst_tool_dicts,
-                reasoning_content=turn.reasoning or None))
+                reasoning_content=turn.reasoning or None, provider_state=turn.provider_state))
             turn_record = TurnRecord(
                 turn=turn_num, messages_sent=list(current_messages),
                 assistant_text=turn.text, tool_calls=turn.tool_calls, usage=turn.usage)
@@ -386,6 +387,7 @@ class _LLMTurnOutput:
     # tool_calls 内的 id 已是内部标识；minted 保留原始 wire id / ordinal 供落库伴随字段。
     anchor: str = ""
     minted: list[MintedCall] = dataclasses.field(default_factory=list)
+    provider_state: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 async def _run_llm_turn(
@@ -414,14 +416,11 @@ async def _run_llm_turn(
     # PROMPT_EST_BASE_KEY/PROMPT_EST_SEG_KEY 的做法），不新增函数参数。
     llm_request.metadata["turn"] = turn_num
 
-    text = ""
-    reasoning = ""
-    tool_calls: list[ToolCall] = []
-    usage = LLMUsage()
     interrupted = False
+    stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
 
     async for chunk in _stream_until_stop(
-        stream_llm_resilient(ctx, state, llm_request), ctx,
+        stream, ctx,
     ):
         tok = ctx.cancel_token
         if _interrupt_pending(ctx):
@@ -438,17 +437,15 @@ async def _run_llm_turn(
         await commit_round(state, ctx)
         if chunk.kind == "token":
             ctx.run_phase.produced = True
-            text += chunk.text
-        elif chunk.kind == "reasoning":
-            reasoning += chunk.text
-        elif chunk.kind == "tool_call" and chunk.tool_call is not None:
-            tool_calls.append(chunk.tool_call)
         elif chunk.kind == "tool_call_partial":
             # 工具调用参数流式期间的心跳：不携带数据，仅为让上面的暂停/取消检查点
             # 有机会触发（adapter 累积工具调用参数时不产出 token）。此处刻意不累积。
             pass
-        elif chunk.kind == "usage" and chunk.usage is not None:
-            usage = chunk.usage
+        stream.accept_current()
+
+    result = stream.partial_result()
+    text, reasoning, usage = result.text, result.reasoning, result.usage
+    tool_calls = list(result.tool_calls)
 
     # 流在**首个 chunk 到达之前**被停止信号掐断时，上面的循环体一次都没执行到——
     # 判定必须补在循环之后，否则一次 TTFT 窗口里的暂停会被当成「流正常结束」。
@@ -513,7 +510,7 @@ async def _run_llm_turn(
 
     return _LLMTurnOutput(
         text=text, reasoning=reasoning, tool_calls=tool_calls, usage=usage,
-        anchor=anchor, minted=minted)
+        anchor=anchor, minted=minted, provider_state=result.provider_state)
 
 
 def _can_recover_context(state: LoopState) -> bool:

@@ -18,7 +18,6 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.assembler.assembler import AssembledPrompt
-from ctx_weft.core.assembler.composer_guidance import build_act_guidance
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep
@@ -97,8 +96,12 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
     )
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
-    # composer 形态：guidance 已拼在末条 user 尾部（ActStep 不再自行注入）。
-    guidance = build_act_guidance(task, None)
+    # Assembler 责任不在这个 ActStep fixture 内；用一段已渲染的最小 guidance
+    # 保留「只出现在发送 prompt，不落 memory」这个边界条件。
+    guidance = (
+        "Write the final reply to the user as normal message text and call "
+        "`control__finish_task` in the same turn."
+    )
     prompt = AssembledPrompt(
         system="", messages=[LLMMessage(role="user", content=f"hi\n\n{guidance}")],
         tools=[], token_count=1,
