@@ -31,14 +31,11 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
         return 100000, True
     async def _resolve(state, ctx):
         return []
-    async def _skill(state, ctx, name):
-        return ""
     async def _should(state, ctx, est):
         return True
 
     monkeypatch.setattr(rs, "_estimate_tokens", _est)
     monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.resolve_and_bind", _resolve)
-    monkeypatch.setattr(rs, "_load_skill_instructions", _skill)
     monkeypatch.setattr(rs, "_should_compact", _should)
 
     agent = SimpleNamespace(
@@ -102,15 +99,11 @@ async def test_reason_stashes_bound_capabilities(monkeypatch):
     async def _resolve(state, ctx):
         return sentinel
 
-    async def _skill(state, ctx, name):
-        return ""
-
     async def _should(state, ctx, est):
         return False  # no compaction this run
 
     monkeypatch.setattr(rs, "_estimate_tokens", _est)
     monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.resolve_and_bind", _resolve)
-    monkeypatch.setattr(rs, "_load_skill_instructions", _skill)
     monkeypatch.setattr(rs, "_should_compact", _should)
 
     agent = SimpleNamespace(

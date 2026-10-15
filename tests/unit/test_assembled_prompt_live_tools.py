@@ -11,8 +11,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import (
-    AssemblerDeps,
     AssembledPrompt,
+    AssemblerDeps,
     ContextAssembler,
     ContextRequest,
 )
@@ -91,17 +91,18 @@ def test_tools_fn_exception_falls_back_to_snapshot() -> None:
 # ── assembler 接线 ─────────────────────────────────────────────────────────────
 
 
-class _StubComposer:
-    async def compose(self, blocks, request):
-        return AssembledPrompt(system="", messages=[], tools=[], token_count=0)
-
-
 def _req(purpose: str) -> ContextRequest:
     session = SimpleNamespace(id="s1", context_limit=100_000, reserved_output_tokens=1024)
     return ContextRequest(
         purpose=purpose,
         scope=SimpleNamespace(session_id="s1", task_id="tsk_1", agent_id="agt_1"),
-        task=SimpleNamespace(id="tsk_1"),
+        task=SimpleNamespace(
+            id="tsk_1",
+            title="Task",
+            description="",
+            user_prompt="do it",
+            user_prompt_in_memory=False,
+        ),
         agent=SimpleNamespace(id="agt_1"),
         session=session,
         template=None,
@@ -111,14 +112,12 @@ def _req(purpose: str) -> ContextRequest:
 
 
 def _assembler(cache) -> ContextAssembler:
-    from ctx_weft.core.assembler.budget import PriorityBudgetStrategy
     deps = AssemblerDeps(
         memory=None, knowledge_providers=[],
         provider_ctx=SimpleNamespace(session_id="s1", task_id="tsk_1", agent_id="agt_1"),
-        capability_cache=cache, agent_id="agt_1",
+        capability_cache=cache,
     )
-    return ContextAssembler(sources=[], budget=PriorityBudgetStrategy(),
-                            composer=_StubComposer(), deps=deps)
+    return ContextAssembler(sources=[], deps=deps)
 
 
 async def test_assemble_installs_live_tools_fn() -> None:
@@ -139,7 +138,7 @@ async def test_assemble_leaves_compact_tools_empty() -> None:
     assert prompt.tools == []
 
 
-async def test_assemble_without_cache_keeps_composer_tools() -> None:
+async def test_assemble_without_cache_keeps_compiled_tools() -> None:
     cache = None
     prompt = await _assembler(cache).assemble(_req("act"))
     assert prompt.tools == []

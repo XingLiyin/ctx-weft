@@ -1,0 +1,44 @@
+{# 人工交互、授权与无人值守；runtime 和 capability_gateway 在对应事件发生时插入。
+每个具名 macro 是一个独立事件提示，参数就是输入契约；文件本身不整段发送。 #}
+
+{% macro authorizer_needs_human_unsupported(authorizer) -%}
+[错误：{{ authorizer }} 返回了 NeedsHuman，但未实现 HumanGatedAuthorizer]
+{%- endmacro %}
+
+{% macro provider_needs_human_unsupported(provider) -%}
+[错误：{{ provider }} 产生了 needs_human，但未实现 HumanResumable]
+{%- endmacro %}
+
+{% macro blocked_by_human(message) -%}
+[已被人类阻止：{{ message }}]
+{%- endmacro %}
+
+{% macro capability_not_authorized(tool) -%}
+[错误：能力“{{ tool }}”未获授权]
+{%- endmacro %}
+
+{% macro unattended_authz_note() -%}
+此任务在后台无人值守运行——没有人能够批准这次工具调用，因此调用被拒绝。请在不用它的情况下继续，或者结束任务并说明哪些事情无法完成。
+{%- endmacro %}
+
+{% macro unattended_tool_note() -%}
+[没有可用的人：此任务在后台无人值守运行，因此无人能够回应。请根据已有信息继续，或者结束任务并说明阻碍。]
+{%- endmacro %}
+
+{% macro human_note(note, result) -%}
+[用户备注：{{ note }}]
+{{ result }}
+{%- endmacro %}
+
+{% macro human_declined(message) -%}
+人类拒绝了请求：{{ message }}
+{%- endmacro %}
+
+{% macro human_rejected() -%}
+人类拒绝了该请求。
+{%- endmacro %}
+
+{% macro no_response() -%}
+（没有回复）
+{%- endmacro %}
+

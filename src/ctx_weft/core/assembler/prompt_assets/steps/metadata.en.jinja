@@ -1,0 +1,14 @@
+{% import "steps/_shared.en.jinja" as shared with context %}
+
+{% macro continuation(ctx) -%}{% if ctx.needs_pointer %}{{ shared.capability_pointer() }}{% endif %}{%- endmacro %}
+
+{% macro instruction(ctx) -%}
+{{ continuation(ctx) }}{% if ctx.needs_pointer %}{{ "\n\n" }}{% endif %}{% if ctx.role %}{{ shared.role(ctx.role) }}
+
+---
+
+{% endif %}Now set this task's metadata: call `{{ update_task_metadata }}` exactly once. Both `title` and `description` are REQUIRED and must be non-empty — always provide a best-effort value even if the instruction is short or vague; never pass empty strings. Add `session_goal` only if the direction is now clear (it is the only optional field). Then stop and call no other tools.
+{%- endmacro %}
+
+{% include "steps/_assemble.jinja" %}
+

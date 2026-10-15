@@ -14,7 +14,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.assembler import ContextRequest, ReviewIntent
-from ctx_weft.core.assembler.prompts import connector, runtime_prompt
+from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.capabilities.control_tools import REPORT_OBSERVATION_NAME
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop.driver import (
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from ctx_weft.core.capabilities.control_tools import ControlResult
 
 logger = logging.getLogger(__name__)
-_PLAIN_TEXT_NEEDS_FINISH = connector("act.review_feedback.plain_text_needs_finish")
+_PLAIN_TEXT_NEEDS_FINISH = runtime_prompt("plain_text_needs_finish")
 
 
 CLOSE_BOUNDARIES = {"finish", "normal"}
@@ -329,7 +329,7 @@ class ObserveStep(Step):
                 ))
                 current_messages.append(LLMMessage(
                     role="user",
-                    content=connector("review.react_nudge", terminal_tool=terminal_tool_name),
+                    content=runtime_prompt("react_nudge", terminal_tool=terminal_tool_name),
                 ))
                 continue
 

@@ -1,0 +1,168 @@
+{#
+This is the shared executable step program, not model-visible prose. Python supplies
+semantic facts; this file owns placement, order, priorities and required content.
+#}
+{% do prompt.system(ctx.soul, priority=0, required=true, group="identity") %}
+{% if ctx.project_background %}
+  {% set background = ("\n\n---\n\n" if ctx.soul else "") ~ "## Project Background\n\n" ~ ctx.project_background %}
+  {% do prompt.system(background, priority=1, group="background") %}
+{% endif %}
+
+{% for item in history %}
+  {% do prompt.message(
+      item.message,
+      ref=item.ref,
+      priority=item.priority,
+      required=item.current_prompt,
+      timestamp=item.timestamp
+  ) %}
+  {% do prompt.before(
+      item.ref, shared.history_before(item), priority=item.priority,
+      required=item.current_prompt
+  ) %}
+  {% do prompt.after(
+      item.ref, shared.history_after(item), priority=item.priority,
+      required=item.current_prompt
+  ) %}
+{% endfor %}
+
+{% set state = namespace(
+    anchor_ref=anchor_ref,
+    latest_ref=latest_ref,
+    first_user_ref=first_user_ref,
+    last_user_ref=last_user_ref,
+    last_ref=last_ref,
+    last_role=last_role,
+    fresh_ref=none,
+    resume_ref=none,
+    standalone_cap_ref=none
+) %}
+
+{% if not user_prompt_in_memory %}
+  {% set state.fresh_ref = prompt.user(
+      shared.fresh(ctx), priority=0, required=true, merge=false,
+      group="current-task"
+  ) %}
+  {% if state.fresh_ref %}
+    {% if not state.anchor_ref %}{% set state.anchor_ref = state.fresh_ref %}{% endif %}
+    {% if not state.first_user_ref %}{% set state.first_user_ref = state.fresh_ref %}{% endif %}
+    {% set state.last_user_ref = state.fresh_ref %}
+    {% set state.last_ref = state.fresh_ref %}
+    {% set state.last_role = "user" %}
+  {% endif %}
+{% endif %}
+
+{% if purpose == "act" and state.last_ref and state.last_role != "user" %}
+  {% set state.resume_ref = prompt.user(
+      resume(ctx), priority=0, required=true, merge=false,
+      group="current-task-resume"
+  ) %}
+  {% if state.resume_ref %}
+    {% if not state.first_user_ref %}{% set state.first_user_ref = state.resume_ref %}{% endif %}
+    {% set state.last_user_ref = state.resume_ref %}
+    {% set state.last_ref = state.resume_ref %}
+    {% set state.last_role = "user" %}
+  {% endif %}
+{% endif %}
+
+{% set directive_ref = state.anchor_ref or state.last_user_ref if purpose == "act" else state.first_user_ref %}
+{% set cap_ref = state.anchor_ref or state.last_user_ref if ctx.capability_sections else none %}
+
+{% for item in history %}
+  {% set base_slots = [] %}
+  {% if user_prompt_in_memory and item.ref == state.anchor_ref %}
+    {% do base_slots.append("context") %}
+    {% if state.anchor_ref != state.latest_ref %}{% do base_slots.append("opening") %}{% endif %}
+  {% endif %}
+  {% if user_prompt_in_memory and item.ref == state.latest_ref %}{% do base_slots.append("input") %}{% endif %}
+  {% if item.ref == directive_ref and purpose != "act" %}
+    {% set directive_slots = ["directive_before"] %}
+    {% do prompt.before(
+        item.ref, shared.before(item, directive_slots, ctx), priority=directive_priority
+    ) %}
+  {% endif %}
+  {% set base_priority = 0 if item.current_prompt else item.priority %}
+  {% do prompt.before(
+      item.ref, shared.before(item, base_slots, ctx),
+      priority=base_priority, required=item.current_prompt
+  ) %}
+  {% do prompt.after(
+      item.ref, shared.after(item, base_slots, ctx),
+      priority=base_priority, required=item.current_prompt
+  ) %}
+  {% if item.ref == directive_ref and purpose == "act" %}
+    {% set directive_slots = ["directive_after"] %}
+    {% do prompt.after(
+        item.ref, shared.after(item, directive_slots, ctx), priority=directive_priority
+    ) %}
+  {% endif %}
+  {% if item.ref == cap_ref %}
+    {% set resource_slots = ["resources"] %}
+    {% do prompt.after(
+        item.ref, shared.after(item, resource_slots, ctx), priority=capabilities_priority
+    ) %}
+  {% endif %}
+{% endfor %}
+
+{% for generated_ref in [state.fresh_ref, state.resume_ref] if generated_ref %}
+  {% if generated_ref == directive_ref %}
+    {% set directive_slots = ["directive_after" if purpose == "act" else "directive_before"] %}
+    {% do prompt.before(
+        generated_ref, shared.before(none, directive_slots, ctx), priority=directive_priority
+    ) %}
+    {% do prompt.after(
+        generated_ref, shared.after(none, directive_slots, ctx), priority=directive_priority
+    ) %}
+  {% endif %}
+  {% if generated_ref == cap_ref %}
+    {% set resource_slots = ["resources"] %}
+    {% do prompt.after(
+        generated_ref, shared.after(none, resource_slots, ctx), priority=capabilities_priority
+    ) %}
+  {% endif %}
+{% endfor %}
+
+{# Generic recalled context stays as source data until this purpose program chooses
+   its placement. Every source block remains independently trimmable. #}
+{% set source_ref = state.anchor_ref or state.last_user_ref %}
+{% for source in source_blocks %}
+  {% if source_ref %}
+    {% do prompt.after(
+        source_ref, "\n\n" ~ shared.context_block(source),
+        priority=3 if source.kind == "blackboard" else 7,
+        group=source.group, timestamp=source.timestamp
+    ) %}
+  {% else %}
+    {% set emitted = prompt.user(
+        shared.context_block(source), priority=3 if source.kind == "blackboard" else 7,
+        merge=false, group=source.group
+    ) %}
+    {% if emitted %}
+      {% if not state.first_user_ref %}{% set state.first_user_ref = emitted %}{% endif %}
+      {% set state.last_user_ref = emitted %}
+      {% set state.last_ref = emitted %}
+      {% set state.last_role = "user" %}
+    {% endif %}
+  {% endif %}
+{% endfor %}
+
+{% if ctx.capability_sections and not cap_ref %}
+  {% set state.standalone_cap_ref = prompt.user(
+      shared.capabilities(ctx.capability_sections), priority=capabilities_priority, merge=false,
+      group="capabilities"
+  ) %}
+  {% set cap_ref = state.standalone_cap_ref %}
+  {% if cap_ref %}
+    {% set state.last_ref = cap_ref %}
+    {% set state.last_role = "user" %}
+  {% endif %}
+{% endif %}
+
+{% do ctx.update({"needs_pointer": cap_ref is not none and cap_ref != state.last_ref}) %}
+
+{% if purpose == "act" %}
+  {% do prompt.user(continuation(ctx), priority=1, merge=true, group="act-guidance") %}
+{% else %}
+  {% do prompt.user(instruction(ctx), priority=0, required=true, merge=true, group="purpose-instruction") %}
+{% endif %}
+

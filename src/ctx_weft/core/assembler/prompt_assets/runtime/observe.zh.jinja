@@ -1,0 +1,20 @@
+{% macro observation_missing_output() -%}
+上一轮没有最终产出。请回顾执行记录，判断任务还需要完成哪些工作；完成所有要求后，先给出最终答复，再调用 `{{ finish_task }}` 完成任务。
+{%- endmacro %}
+
+{% macro observation_missing_verdict() -%}
+本次观察需要任务判决。请重新调用提交工具，同时填写 task_status 与 act_recap。
+{%- endmacro %}
+
+{% macro observation_tool_unavailable(tool) -%}
+本次观察不能调用工具 {{ tool }}。请使用本次提供的工具。
+{%- endmacro %}
+
+{% macro plain_text_needs_finish() -%}
+你上一个回合以正文回复收尾、没有调用任何工具，所以这个任务仍然是打开的——光有正文永远结束不了它。没有人在等着读那段回复：只有 `{{ finish_task }}` 能结束一个任务。如果目标现在已经达成，就把最终答复写成你的普通消息正文，并在**同一个回合**里调用 `{{ finish_task }}`。如果还有活没干完，就去把它干完。
+{%- endmacro %}
+
+{% macro react_nudge(terminal_tool) -%}
+请调用 `{{ terminal_tool }}` 工具来提交上面那份内容（把内容放进工具参数里）；不要用正文回复。
+{%- endmacro %}
+

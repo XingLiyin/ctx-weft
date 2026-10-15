@@ -1,14 +1,14 @@
 """BlackboardSource：MemoryProvider.recall_topic → blackboard / background blocks。
 
 两个用途：
-1. 相关任务通信：pull 当前 task 订阅的 topic → kind=blackboard, target=messages
+1. 相关任务通信：pull 当前 task 订阅的 topic → kind=blackboard
    - intent=subtask     → 自己派生的子任务结果（observe 渲染为可 review 段）
    - intent=predecessor → 同 plan 前序结果（observe 渲染为只读段）
 2. 跨 session 长期上下文：pull session 订阅的 topic
-   - intent=long_term_background → kind=background, target=system
-   - intent=long_term_project_log → kind=blackboard, target=messages
+   - intent=long_term_background → kind=background
+   - intent=long_term_project_log → kind=blackboard
 
-intent 透传到 block.metadata，由 composer 决定渲染分段。
+intent 透传到 block.metadata，由 purpose template 决定渲染分段。
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.core.utils.ids import generate_id
 
 if TYPE_CHECKING:
@@ -46,13 +44,10 @@ class BlackboardSource:
         for sub in subscriptions:
             # 按 intent 决定 block 落位
             if sub.intent == "long_term_background":
-                target = "system"
                 kind = "background"
             elif sub.intent == "long_term_project_log":
-                target = "messages"
                 kind = "blackboard"
             else:  # subtask / predecessor — 相关任务结果，intent 透传给 composer 分段渲染
-                target = "messages"
                 kind = "blackboard"
 
             records, _new_cursor = await deps.memory.recall_topic(
@@ -63,24 +58,17 @@ class BlackboardSource:
             # 注意：cursor 更新由 PrepareStep 完成后批量提交；这里只读
 
             for record in records:
-                text = (
-                    content_to_text(record.content)
-                    if not isinstance(record.content, str)
-                    else record.content
-                )
                 yield ContextBlock(
                     id=generate_id("blk"),
                     source=f"blackboard:{sub.topic}",
                     kind=kind,  # type: ignore[arg-type]
-                    target=target,  # type: ignore[arg-type]
-                    content=text,
-                    priority=slot_priority(kind),
-                    token_estimate=request.token_counter(text),
                     metadata={
+                        "channel": "topic",
                         "topic": sub.topic,
                         "intent": sub.intent,
                         "memory_event_id": record.id,
                         "title": record.metadata.get("title", ""),
                         "outcome": record.metadata.get("outcome", ""),
                     },
+                    value=record,
                 )

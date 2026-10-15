@@ -1,8 +1,0 @@
-{# Omit the whole section when the resource index is empty. #}
-{%- if resources -%}
-{{ heading }}
-
-{% include 'common/capabilities_intro.en.jinja' %}
-
-{{ resources }}
-{%- endif -%}

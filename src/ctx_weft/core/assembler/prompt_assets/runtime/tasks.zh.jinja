@@ -1,0 +1,35 @@
+{# 子任务运行、结束、取消和阈值终止；finalize / runtime / background verdict 使用。
+每个具名 macro 是一个独立事件提示，参数就是输入契约；文件本身不整段发送。 #}
+
+{% macro dispatch_running(ref) -%}
+子任务 {{ ref }} 正在运行——其执行过程列在下方。
+{%- endmacro %}
+
+{% macro dispatch_closed(failed, ref) -%}
+子任务 {{ ref }} 在此执行——结果：{% if failed %}失败{% else %}已完成{% endif %}。其执行过程内联在下方，以它自己的 {{ finish_task }} 和交付的最终答复收尾。
+{%- endmacro %}
+
+{% macro dispatch_cancelled(reason, ref) -%}
+子任务 {{ ref }} 在完成前被取消（{{ reason }}）；下方的部分执行过程尚未完成。
+{%- endmacro %}
+
+{% macro cancelled_act_recap() -%}
+任务在完成前被取消。
+{%- endmacro %}
+
+{% macro cancelled_task_summary(reason) -%}
+已取消（{{ reason }}）——没有产生最终输出；实际执行的只有上面的部分过程。
+{%- endmacro %}
+
+{% macro threshold_subtask_cancelled(ref) -%}
+子任务 {{ ref }} 在执行途中被取消（触发 session 失败阈值）；下方的部分执行并不完整。
+{%- endmacro %}
+
+{% macro threshold_tripped_recap() -%}
+已触发 session 失败阈值（连续 N 个子任务失败）；正在终止本任务。
+{%- endmacro %}
+
+{% macro park_closed_by_verdict() -%}
+[已由复核者关闭：本任务被判定为完成。请再发一条消息以开启新一轮。]
+{%- endmacro %}
+

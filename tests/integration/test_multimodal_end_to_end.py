@@ -550,7 +550,7 @@ async def test_compact_assembly_carries_no_image_while_act_still_does() -> None:
     runtime, memory, state, _llm = await _run_multimodal_session(blob_store=None)
 
     ctxp = ProviderContext(session_id=state.session.id, agent_id=state.agent.id)
-    assembler = runtime._build_assembler(memory, ctxp, {})
+    assembler = runtime._build_assembler(memory, ctxp)
 
     def _request(purpose: str, extra: dict) -> ContextRequest:
         return ContextRequest(

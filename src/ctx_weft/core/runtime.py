@@ -17,13 +17,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
-from ctx_weft.core.assembler.prompts import runtime_prompt
-from ctx_weft.core.assembler import (
-    ContextAssembler,
-    PriorityBudgetStrategy,
-)
+from ctx_weft.core.assembler import ContextAssembler
 from ctx_weft.core.assembler.assembler import AssemblerDeps
-from ctx_weft.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.assembler.sources import (
     AgentRecallSource,
     BlackboardSource,
@@ -108,7 +104,6 @@ from ctx_weft.protocols.capability import (
     AgentCapabilityProvider,
     CapabilityProvider,
     SessionScopedCapabilityProvider,
-    SkillCapabilityProvider,
     qualify,
 )
 from ctx_weft.protocols.events import EventBus, PersistenceUnavailableError
@@ -2773,12 +2768,12 @@ class CtxWeftRuntime:
             memory = self.providers.get_memory()
             scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
             provider_ctx = self._build_provider_ctx(session, task, agent)
-            skill_index = self._skill_provider_index()
-            assembler = self._build_assembler(memory, provider_ctx, skill_index)
+            assembler = self._build_assembler(
+                memory, provider_ctx, task_manager=task_manager)
             gateway = self._build_gateway(memory)
             llm = rm.client
             loop_ctx = self._build_loop_ctx(
-                assembler, llm, memory, provider_ctx, gateway, skill_index, None, task_manager,
+                assembler, llm, memory, provider_ctx, gateway, None, task_manager,
             )
             state = LoopState(
                 run_id=generate_id("run"), session=session, task=task, agent=agent,
@@ -3000,12 +2995,11 @@ class CtxWeftRuntime:
 
             memory = self.providers.get_memory()
             provider_ctx = self._build_provider_ctx(session, task, agent)
-            skill_index = self._skill_provider_index()
-            assembler = self._build_assembler(memory, provider_ctx, skill_index)
+            assembler = self._build_assembler(memory, provider_ctx)
             gateway = self._build_gateway(memory)
             llm = rm.client
             loop_ctx = self._build_loop_ctx(
-                assembler, llm, memory, provider_ctx, gateway, skill_index, token, None,
+                assembler, llm, memory, provider_ctx, gateway, token, None,
             )
 
             scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
@@ -4649,32 +4643,21 @@ class CtxWeftRuntime:
             skill_name=task.settings.skill_name if isinstance(task.settings, NormalTaskSettings) else "",
         )
 
-    def _skill_provider_index(self) -> dict:
-        # provider_name → SkillCapabilityProvider，供 PrepareStep 加载 Level2 capabilities
-        return {
-            p.name: p
-            for p in self.providers.get_capability_providers()
-            if isinstance(p, SkillCapabilityProvider)
-        }
-
     def _build_assembler(
         self,
         memory: MemoryProvider,
         provider_ctx: ProviderContext,
-        skill_index: dict,
+        task_manager: "TaskManager | None" = None,
     ) -> ContextAssembler:
         deps = AssemblerDeps(
             memory=memory,
             knowledge_providers=self.providers.get_knowledge_providers(),
             provider_ctx=provider_ctx,
-            skill_provider_index=skill_index,
+            capability_cache=self._capability_cache,
+            task_manager=task_manager,
             capability_provider_index={
                 p.name: p for p in self.providers.get_capability_providers()
             },
-            # 工具面唯一真相源：assembler 据此给 AssembledPrompt 装活工具面闭包
-            # （每轮读 .tools 都问 cache 现算，见 ContextAssembler._install_live_tools）。
-            capability_cache=self._capability_cache,
-            agent_id=provider_ctx.agent_id,
         )
         return ContextAssembler(
             sources=[
@@ -4687,8 +4670,6 @@ class CtxWeftRuntime:
                 KnowledgeRetrievalSource(),
                 GuidanceSource(),
             ],
-            budget=PriorityBudgetStrategy(),
-            composer=DefaultComposer(),
             deps=deps,
         )
 
@@ -4723,7 +4704,6 @@ class CtxWeftRuntime:
         memory: MemoryProvider,
         provider_ctx: ProviderContext,
         gateway: CapabilityGateway,
-        skill_index: dict,
         cancel_token: CancelToken | None,
         task_manager: "TaskManager | None",
         pause_token: "PauseToken | None" = None,
@@ -4739,7 +4719,6 @@ class CtxWeftRuntime:
             capability_cache=self._capability_cache,
             capability_providers=self.providers.get_capability_providers(),
             capability_gateway=gateway,
-            skill_provider_index=skill_index,
             cancel_token=cancel_token,
             task_manager=task_manager,
             event_store=self.event_store,
@@ -5011,15 +4990,24 @@ class CtxWeftRuntime:
         scope_agent_id: str | None = None,
     ) -> tuple[LoopState, TurnHandle]:
         provider_ctx = self._build_provider_ctx(session, task, agent)
-        skill_index = self._skill_provider_index()
-        assembler = self._build_assembler(memory, provider_ctx, skill_index)
+        assembler = self._build_assembler(
+            memory, provider_ctx, task_manager=task_manager)
         gateway = self._build_gateway(memory)
         # 这次 run 实际用的 client——调用方（AgentBinding.model / run_single_task 的
         # resolved_model）已经解好，这里不再自己解析。三样东西各归各位：选择住
         # agent record，身份/窗口住这份 ResolvedModel，都不回填进 session
         # （回填冻结账号默认的问题见 agent_lifecycle_manager.py ModelChoice 的 docstring）。
         llm = resolved_model.client
-        loop_ctx = self._build_loop_ctx(assembler, llm, memory, provider_ctx, gateway, skill_index, cancel_token, task_manager, pause_token=pause_token)
+        loop_ctx = self._build_loop_ctx(
+            assembler,
+            llm,
+            memory,
+            provider_ctx,
+            gateway,
+            cancel_token,
+            task_manager,
+            pause_token=pause_token,
+        )
 
         scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=scope_agent_id or agent.id)
         state = LoopState(

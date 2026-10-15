@@ -1,7 +1,7 @@
 """跨层的 prompt 标题契约字符串。
 
 `SUBTASKS_HEADING` 必须住在这里而不是任何一个包里：它的两个消费者是
-`assembler/composer.py`（渲染那一段）与 `capabilities/control_tools.py`
+`assembler/prompt_assets`（渲染那一段）与 `capabilities/control_tools.py`
 （`report_observation` 的 `next_step_hint` 描述里指路「按这一段列出的标题+id 指名」），
 而 `assembler -> capabilities` 已经存在（composer 引控制工具的限定名），放进 assembler
 会让 capabilities 反向引它、成环。

@@ -1,0 +1,37 @@
+{% import "steps/_shared.en.jinja" as shared with context %}
+
+{% macro resume_text(ref, full_context, completed_tasks) -%}
+{% if ref %}You are still working on the task: {{ ref }}, resuming from the state recorded above.{% else %}You are still working on the task above, resuming from the state recorded above.{% endif %}{% if full_context %} Review the conversation for what has already been done — do not redo it — and continue with only the remaining work.{% if completed_tasks %} Parts of it have ALREADY been delegated to sub-tasks that are now complete — they are listed with their results in the situational notes below. Do not execute that work a second time: build on those results and judge what, if anything, still remains. The exception is a result the review note flags as falling short — for that piece you decide whether to delegate it afresh or handle it yourself.{% endif %}{% else %} Review what has already been done and continue with only the remaining work.{% endif %}
+{%- endmacro %}
+
+{% macro resume(ctx) -%}
+{% if ctx.resume_snapshot %}{{ resume_text(ctx.resume_snapshot.ref, true, ctx.resume_snapshot.completed_tasks) }}{% else %}{{ resume_text(ctx.task_ref if ctx.title else none, false, false) }}{% endif %}
+{%- endmacro %}
+
+{% macro guidance(state) -%}
+---
+{{ shared.task_anchor(state.task_ref) }}
+
+{% if state.plan_tasks %}{% if state.has_other_tasks %}## The overall plan (▶ = your current task; the rest are handled separately — do NOT do them yourself):
+{% else %}## The overall plan (▶ = your current task):
+{% endif %}{% for item in state.plan_tasks %}{{ "  " * item.depth }}- [{{ item.status }}] {% if item.current %}▶ {% endif %}{{ item.ref }}
+{% endfor %}
+
+{% endif %}{% if state.completed_tasks %}## Your current task has ALREADY been delegated to the sub-tasks below, and they are ALREADY COMPLETED — the digest under each is what it produced (full results are in the conversation above). Treat that work as done: do NOT redo it yourself and do NOT delegate it again merely to have it repeated. Your next step is to judge whether any work still remains for the task goal beyond these results — if it does, do only that part, building on what they produced. The one exception is a result that the review note below says does not actually achieve its goal: for that piece it is YOUR call — delegate a fresh sub-task for it, or just do it yourself, whichever is the better use of this turn:
+{% for item in state.completed_tasks %}- [FINISHED] {{ item.ref }}
+{% if item.result %}    → {{ item.result }}
+{% endif %}{% endfor %}
+
+{% endif %}{% if state.review_note %}## Note from the review of your previous attempt (it may name a sub-task whose result falls short):
+{{ state.review_note }}
+
+{% endif %}Call `{{ finish_task }}` ONLY once the task goal is fully achieved — if work remains, keep working instead of finishing. To finish, write the final reply to the user as your normal message text and call it in that same turn; the message text is the reply and the deliverable, not the tool arguments (details in the tool description).{% if state.attended %} Someone is there: a plain-text reply keeps the task open and hands the floor to them — the right move mid-conversation; finish only when the whole request is served.{% endif %}{% if state.unattended %} No one is there to read a reply: a prose answer alone does not end this task and nobody will follow up on it. When the goal is achieved you must call it in the same turn as your final reply, or this task will just be run again until its attempt limit runs out.{% endif %}{% if state.unattended_others %} Do not start the other tasks yourself.{% endif %}
+If the user's latest message is an unrelated NEW request, emit `{{ finish_task }}` AND `{{ delegate_task }}` together in ONE response — finishing alone would lose the new request.
+Need information or a decision only the user can provide? Call `{{ ask_user }}` instead of guessing.
+{%- endmacro %}
+
+{% macro continuation(ctx) -%}
+{% if ctx.guidance %}{{ guidance(ctx.guidance) }}{% endif %}{% if ctx.guidance and ctx.needs_pointer %}{{ "\n\n" }}{% endif %}{% if ctx.needs_pointer %}{{ shared.capability_pointer() }}{% endif %}
+{%- endmacro %}
+
+{% include "steps/_assemble.jinja" %}

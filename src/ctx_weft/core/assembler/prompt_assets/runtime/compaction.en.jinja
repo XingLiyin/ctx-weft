@@ -1,0 +1,11 @@
+{# 压缩未产出正文时的占位；task / agent 的事实仍分开。
+每个具名 macro 是一个独立事件提示，参数就是输入契约；文件本身不整段发送。 #}
+
+{% macro context_compacted() -%}
+[Context compacted]
+{%- endmacro %}
+
+{% macro experience_compacted() -%}
+[Experience compacted]
+{%- endmacro %}
+

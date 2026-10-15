@@ -1,27 +1,25 @@
 """CapabilitySource：按 cap.kind 分三路产出 capabilities blocks。
 
-  kind="tool"   → 携 LLMTool 的 block（进 AssembledPrompt.tools，LLM 可直接调用）
-  kind="skill"  → "### Available Skills" 条目
-  kind="agent"  → "### Available Sub-Agents" 条目
+  kind="tool"   → raw ToolCapability
+  kind="skill"  → raw SkillCapability
+  kind="agent"  → raw AgentCapability
 
-三路最终都由 composer 渲染进 "## Capabilities" 段、拼到**末条 user message 尾部**
-（所有 purpose 一致；不进 system——见 composer.py 槽位总览）。
-能力门控：Composer definition 先映射到兼容 capability purpose，三类能力都按 cap.purposes
-过滤；skill/agent 默认 purposes=["act"]，
-故所有非 act purpose 都看不到 Skills / Sub-Agents 段。
+Source 从 cache 的当前可用面返回原始能力；无 cache 的独立使用场景回退到
+request.bound_capabilities。purpose 模板负责用途过滤、分组、排版和落位。
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.capability import (
     AgentCapability,
     Capability,
     SkillCapability,
+    SkillCapabilityProvider,
     ToolCapability,
     qualify,
 )
@@ -31,19 +29,11 @@ if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
 
 
+logger = logging.getLogger(__name__)
+
+
 def build_llm_tools(caps: list[Capability], purpose: str) -> list[LLMTool]:
-    """capability 列表 → LLM 线上工具数组（按 purpose 与 kind=="tool" 过滤）。
-
-    **模块级纯函数，不是 CapabilityCache 的方法**：LLMTool 是 LLM 线上格式、属渲染层，
-    cache 只是存储；把它挂上去会让存储层认识线上协议。散文段渲染（下面的 fetch）与
-    活工具面（assembler 装在 AssembledPrompt.tools_fn 上的闭包）共用这一份，两条路
-    因此不可能算出不同的工具集。
-
-    **但两条路可以不等长，这是刻意的**：散文段是 ContextBlock，会被 budget 按预算裁剪；
-    工具数组读 cache，不受裁剪。于是预算吃紧时，prompt 里介绍到的工具可能少于 API 实际
-    提供的。取舍方向明确——工具数组是权威声明、散文段是补充说明；宁可模型能调到一个没被
-    介绍的工具，也不要它被告知了却调不到。
-    """
+    """Build the frozen LLM tool snapshot for one purpose."""
     return [
         LLMTool(
             name=qualify(cap.id),
@@ -65,20 +55,18 @@ class CapabilitySource:
     ) -> AsyncIterator["ContextBlock"]:
         from ctx_weft.core.assembler.assembler import ContextBlock
 
+        cache = getattr(deps, "capability_cache", None)
+        if cache is None:
+            capabilities = request.bound_capabilities
+        else:
+            agent_id = getattr(request.agent, "id", "") or request.scope.agent_id
+            task_id = getattr(request.task, "id", "") or request.scope.task_id
+            capabilities = cache.available(agent_id, task_id)
+
         tools: list[ToolCapability] = []
         skills: list[SkillCapability] = []
         agents: list[AgentCapability] = []
-        from ctx_weft.core.assembler.request_policy import capability_purpose_for_request
-
-        capability_purpose = capability_purpose_for_request(request)
-
-        for cap in request.bound_capabilities:
-            # definition 导出的 capability purpose 对三类能力一致：tool / skill / agent 都按
-            # cap.purposes 过滤。
-            # skill / agent 默认 purposes=["act"]（委派只发生在 act），故 observe / compact /
-            # recognize_intent 不再看到 "Available Skills" / "Available Sub-Agents"。
-            if capability_purpose not in cap.purposes:
-                continue
+        for cap in capabilities:
             if isinstance(cap, ToolCapability):
                 tools.append(cap)
             elif isinstance(cap, SkillCapability):
@@ -97,32 +85,23 @@ class CapabilitySource:
             provider = provider_index.get(pname)
             return pname, (getattr(provider, "description", "") if provider else "")
 
-        # metadata["llm_tool"] 仍随块携带（qualified 名的既有断言点在读它），但它不再是
-        # AssembledPrompt.tools 的来源——工具面已改由 cache 现算（见 build_llm_tools 文档）。
-        llm_tool_by_name = {t.name: t for t in build_llm_tools(tools, capability_purpose)}
-
         for cap in tools:
             qname = qualify(cap.id)
-            llm_tool = llm_tool_by_name[qname]
             provider_name, provider_description = _provider_meta(cap.id)
             yield ContextBlock(
                 id=generate_id("blk"),
                 source="capability",
                 kind="capabilities",
-                target="system",
-                content=cap.description,
-                priority=slot_priority("capabilities"),
-                token_estimate=request.token_counter(cap.description),
                 metadata={
                     "capability_id": cap.id,
                     "capability_name": qname,  # qualified: rendered into "Available Tools" prose
                     "capability_kind": "tool",
                     "input_schema": cap.input_schema,
                     "side_effects": cap.side_effects,
-                    "llm_tool": llm_tool,
                     "provider_name": provider_name,
                     "provider_description": provider_description,
                 },
+                value=cap,
             )
 
         # ── kind="skill" → 每个 skill 独立 block，由 composer 聚合成列表 ──────
@@ -132,10 +111,6 @@ class CapabilitySource:
                 id=generate_id("blk"),
                 source="capability",
                 kind="capabilities",
-                target="system",
-                content=cap.description,
-                priority=slot_priority("capabilities"),
-                token_estimate=request.token_counter(cap.description),
                 metadata={
                     "capability_id": cap.id,
                     "capability_name": qualify(cap.id),
@@ -143,7 +118,42 @@ class CapabilitySource:
                     "provider_name": provider_name,
                     "provider_description": provider_description,
                 },
+                value=cap,
             )
+
+        selected_skill = getattr(
+            getattr(getattr(request, "task", None), "settings", None),
+            "skill_name",
+            "",
+        )
+        if request.purpose == "act" and selected_skill:
+            selected = next(
+                (cap for cap in skills if qualify(cap.id) == selected_skill),
+                None,
+            )
+            if selected is not None:
+                provider_name = selected.id.rsplit(":", 1)[0]
+                provider = provider_index.get(provider_name)
+                if isinstance(provider, SkillCapabilityProvider):
+                    try:
+                        definition = await provider.load_definition(
+                            selected.name,
+                            deps.provider_ctx,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "CapabilitySource: failed to load skill definition for '%s'",
+                            selected_skill,
+                        )
+                    else:
+                        if definition is not None and definition.instructions:
+                            yield ContextBlock(
+                                id=generate_id("blk"),
+                                source="capability:skill-definition",
+                                kind="directive",
+                                metadata={"kind": "skill_instructions"},
+                                value=definition,
+                            )
 
         # ── kind="agent" → 每个 agent 独立 block，由 composer 聚合成列表 ────────
         for cap in agents:
@@ -152,10 +162,6 @@ class CapabilitySource:
                 id=generate_id("blk"),
                 source="capability",
                 kind="capabilities",
-                target="system",
-                content=cap.description,
-                priority=slot_priority("capabilities"),
-                token_estimate=request.token_counter(cap.description),
                 metadata={
                     "capability_id": cap.id,
                     "capability_name": qualify(cap.id),
@@ -163,4 +169,5 @@ class CapabilitySource:
                     "provider_name": provider_name,
                     "provider_description": provider_description,
                 },
+                value=cap,
             )

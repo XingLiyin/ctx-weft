@@ -24,12 +24,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.assembler.priority import slot_priority
-from ctx_weft.core.assembler.sources._history import record_to_history_block, wrap_compact_summary
-from ctx_weft.core.utils.content import content_to_text
-from ctx_weft.core.utils.ids import generate_id
+from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryRecord, MemoryScope
-from ctx_weft.protocols.memory_compat import legacy_type_of as _legacy_type_of
 
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
@@ -37,7 +33,7 @@ if TYPE_CHECKING:
 # v2（P3a）：召回改 load_view——task 层 body = TASK 视图默认 kinds（CONVERSATION_TURN+SUMMARY，
 # 与旧 _TASK_TYPES 四类型等价）；agent 层 = AGENT 视图默认 kinds（覆盖旧 _AGENT_TYPES，legacy
 # dispatch 配对已在 normalize_view 内完成）。全量幸存、升序——体量边界由 close/compact 的
-# fold + BudgetStrategy 负责，不在召回处截断。
+# fold + PromptBuilder 负责，不在召回处截断。
 
 
 #: TASK 视图默认召回的 kinds（与 `load_view` 默认口径一致：TOOL_AUDIT 不进装配）。
@@ -67,8 +63,6 @@ class AgentRecallSource:
         request: "ContextRequest",
         deps: "AssemblerDeps",
     ) -> AsyncIterator["ContextBlock"]:
-        from ctx_weft.core.assembler.assembler import ContextBlock
-
         # ── 1) task 层 body：按 agent_id 跨 task 聚合（半址，显式 task_id=None）──
         task_records = await deps.memory.load_view(
             MemoryAddress(session_id=request.scope.session_id,
@@ -76,12 +70,9 @@ class AgentRecallSource:
             MemoryScope.TASK,
             deps.provider_ctx,
         )
-        # 当前 task 的段摘要冠 ## Progress So Far（record_to_history_block 按 task_id 匹配）；
-        # 跨 task 胶囊不冠。current_task_id 取正在装配的 scope.task_id。
-        current_task_id = getattr(request.scope, "task_id", None)
         for idx, record in enumerate(task_records):  # load_view 已升序（旧→新）
             yield record_to_history_block(
-                record, source="agent_recall", idx=idx, request=request, current_task_id=current_task_id
+                record, source="agent_recall", idx=idx
             )
         # 叠加这一轮暂存、还没落盘的 task 层记录（PrepareStep 经 extra 递进来，见
         # `TaskManager.stage_memory`）。渲染与 memory 里的记录完全同一条路；排序由 composer
@@ -100,8 +91,7 @@ class AgentRecallSource:
         # 暂存事件的 metadata**——那份 metadata 稍后要原样落库，不该掺进装配期算出来的值。
         for i, ev in enumerate(staged):
             yield record_to_history_block(
-                _staged_record(ev), source="agent_recall", idx=base + i, request=request,
-                current_task_id=current_task_id,
+                _staged_record(ev), source="agent_recall", idx=base + i,
             )
 
         # ── 2) agent 层残留 / 经验 ──
@@ -121,28 +111,13 @@ class AgentRecallSource:
             elif r.kind is MemoryKind.CONVERSATION_TURN:
                 conversation.append(r)
 
-        def _ts(rec) -> str:
-            return rec.timestamp.isoformat() if getattr(rec, "timestamp", None) else ""
-
-        for s in summaries:
-            text = content_to_text(s.content) if not isinstance(s.content, str) else s.content
-            text = wrap_compact_summary(text)
-            yield ContextBlock(
-                id=generate_id("blk"),
-                source="agent_recall",
-                kind="history",
-                target="messages",
-                content=text,
-                priority=slot_priority("history", "agent_compact_summary"),
-                token_estimate=request.token_counter(text),
-                metadata={"role": "user",
-                          "type": s.type or _legacy_type_of(s.kind, s.scope, s.role),
-                          "timestamp": _ts(s),
-                          "seq_no": s.metadata.get("seq_no", 0)},
+        for idx, s in enumerate(summaries):
+            yield record_to_history_block(
+                s, source="agent_recall", idx=idx,
             )
 
         # finish 对 + dispatch 对（均为 agent 层 conversation turn）统一按时序渲染：assistant 携
         # tool_calls、tool 携 tool_call_id（record_to_history_block 据 role 无损重建）。悬空 tool_call
         # （在途 dispatch 尚无 result）由 llm_gateway 的 drop_dangling_tool_calls 兜底。
         for idx, c in enumerate(conversation):  # load_view 已升序
-            yield record_to_history_block(c, source="agent_recall", idx=idx, request=request)
+            yield record_to_history_block(c, source="agent_recall", idx=idx)

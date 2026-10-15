@@ -16,15 +16,9 @@ retry，而是路由回本步（见 `act._can_recover_context`）——本步照
 
 from __future__ import annotations
 
-import logging
 from typing import Callable
 
 from ctx_weft.core.assembler import ContextRequest
-from ctx_weft.core.assembler.composer_guidance import (
-    collect_guidance_context,
-    collect_resume_context,
-)
-from ctx_weft.core.assembler.prompts import connector
 from ctx_weft.core.loop.commit import commit_round, defer_until_commit
 from ctx_weft.core.loop.driver import (
     COMPACT_NOOP_KEY,
@@ -43,22 +37,7 @@ from ctx_weft.core.utils.estimate import (
     estimate_tokens,
     estimate_tool_calls_tokens,
 )
-from ctx_weft.protocols.capability import SkillCapability
 from ctx_weft.protocols.events import EventType
-
-logger = logging.getLogger(__name__)
-
-
-#: 盖掉 skill 正文里可能出现的「run python ...」写法：skill 的文件不在工作目录里。
-#: 正文与三个工具名的注入见 Composer act asset 的 `act.skill_runtime_note`。
-_SKILL_SCRIPT_RUNTIME_NOTE = connector("act.skill_runtime_note")
-
-
-def wrap_skill_instructions(instructions: str) -> str:
-    """Append the exec_script runtime note after a non-empty SKILL.md body."""
-    if not instructions:
-        return ""
-    return f"{instructions}\n\n{_SKILL_SCRIPT_RUNTIME_NOTE}"
 
 
 def _estimate_record_tokens(r, count: Callable[[str], int] | None = None) -> int:
@@ -126,29 +105,9 @@ class PrepareStep(Step):
         # 供下游步骤复用（compact 内联、recognize_intent 并发）：单次解析，多步共享。
         state.extra["bound_capabilities"] = bound_capabilities
 
-        # ── 3. skill instructions ─────────────────────────────────────────────
+        # ── 3. prompt purpose ─────────────────────────────────────────────────
         settings = state.task.settings
-        skill_name = settings.skill_name if isinstance(settings, NormalTaskSettings) else ""
-        skill_instructions = await self._load_skill_instructions(state, ctx, skill_name)
-
-        # ── 4. 装配 prompt ────────────────────────────────────────────────────
         purpose = settings.purpose if isinstance(settings, NormalTaskSettings) else "act"
-
-        # 先快照、后消费 hint；压缩后的重装配复用同一快照。
-        # GuidanceSource 在预算裁剪前渲染；resume 在 composer 判断需要续跑回合时渲染。
-        if purpose == "act" and isinstance(settings, NormalTaskSettings):
-            act_guidance_context = collect_guidance_context(state.task, ctx.task_manager)
-            act_resume_context = collect_resume_context(state.task, ctx.task_manager)
-            # `next_step_hint` 是**一次性转向**：给下一次 act attempt 用，用过就作废。
-            # 2026-09-22 之前它没有清除点，只靠「下次 observer 判决覆写」——而 observe
-            # 走机械判决那几条路（无 observe ROLE / LLM 失败 / 已取消）压根不调
-            # `report_observation`，覆写就不会发生，上一轮的 hint 会继续出现在再下一轮，
-            # 变成过期指令。此前少见是因为 root task 极少产 hint；纯文本回合改由后台
-            # observer 判定之后它变成常态，必须在消费点显式清掉。
-            state.task.next_step_hint = None
-        else:
-            act_guidance_context = None
-            act_resume_context = None
 
         def _assemble():
             # 这一轮暂存、还没落盘的对话记录（用户消息 / HITL 答复 / 答复回灌的工具结果，
@@ -165,10 +124,6 @@ class PrepareStep(Step):
                 bound_capabilities=bound_capabilities,
                 token_counter=ctx.llm.tokenizer.count,
                 extra={
-                    "skill_instructions": skill_instructions,
-                    "skill_name": skill_name,
-                    "act_guidance_context": act_guidance_context,
-                    "act_resume_context": act_resume_context,
                     "staged_memory": staged,
                 },
             ))
@@ -200,6 +155,11 @@ class PrepareStep(Step):
                 ev.type == EventType.MEMORY_COMPACTED for ev in compact_events)
             prompt = await _assemble()
 
+        # GuidanceSource 已完成本轮所有可能的读取后，再消费一次性转向。这样 Prepare
+        # 不需要知道 source 的收集函数，compact 后的第二次 assemble 也仍能看到同一 hint。
+        if purpose == "act" and isinstance(settings, NormalTaskSettings):
+            state.task.next_step_hint = None
+
         # ── 6. 元信息补全：此处决定是否需要，commit 决定何时可以启动 ──
         # 未提交时只登记；若本轮已因压缩提前提交，则现在启动。每个 run 只启动一次。
         # 不在可撤销窗口内发模型请求，否则整轮撤销会丢弃它的事件并浪费调用。
@@ -225,33 +185,6 @@ class PrepareStep(Step):
         )
 
     # ── private helpers ───────────────────────────────────────────────────────
-
-    async def _load_skill_instructions(
-        self, state: LoopState, ctx: LoopContext, skill_name: str
-    ) -> str:
-        if not skill_name or not ctx.skill_provider_index:
-            return ""
-        skill_cap = (
-            ctx.capability_cache.get_by_qualified_name(
-                state.agent.id, skill_name, task_id=state.task.id)
-            if ctx.capability_cache else None
-        )
-        if not isinstance(skill_cap, SkillCapability):
-            return ""
-        provider_name = skill_cap.id.rsplit(":", 1)[0]
-        skill_provider = ctx.skill_provider_index.get(provider_name)
-        if skill_provider is None:
-            return ""
-        try:
-            defn = await skill_provider.load_definition(skill_cap.name, ctx.provider_ctx)
-            if defn:
-                # 原始 SKILL.md 正文 + exec_script 运行时说明（追加在正文之后，
-                # recency 最强）；skill 名 + 标题层级由 composer 装配进
-                # "## Instructions for the current task" 段。
-                return wrap_skill_instructions(defn.instructions)
-        except Exception:
-            logger.exception("PrepareStep: failed to load skill definition for '%s'", skill_name)
-        return ""
 
     async def _should_compact(
         self, state: LoopState, ctx: LoopContext, token_estimate: int

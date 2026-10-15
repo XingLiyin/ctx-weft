@@ -1,0 +1,67 @@
+{% import "steps/_shared.en.jinja" as shared with context %}
+
+{% macro continuation(ctx) -%}{% if ctx.needs_pointer %}{{ shared.capability_pointer() }}{% endif %}{%- endmacro %}
+
+{% macro boundary(kind) -%}
+{% if kind == "actor_done" %}The actor called `finish_task` to declare this task done.{% elif kind == "context_limit" %}The segment was cut short by the context limit, not by the actor.{% elif kind == "dispatch" %}The actor delegated a sub-task; this task is suspended until the sub-task returns (the dispatch pair above names it).{% elif kind == "finish" %}The actor closed this task out with `finish_task`.{% elif kind == "finish_park" %}The actor called `finish_task` to declare this task done and yielded the floor — the user is waiting.{% elif kind == "interrupt" %}The user interrupted this segment part-way through.{% elif kind == "max_turns" %}The segment was cut short by the per-segment turn limit, not by the actor.{% elif kind == "mechanical" %}This segment was already judged by rule, with no LLM observer — your recap is the only account of it.{% elif kind == "plain_text" %}The actor replied in prose and yielded the floor — the user is waiting.{% else %}The actor ended the segment with its closing message; it did not call `finish_task`.{% endif %}
+{%- endmacro %}
+
+{% macro review_context(ctx) -%}
+{{ shared.task_anchor(ctx.task_label) }}
+
+{{ boundary(ctx.boundary_kind) }}
+
+Coverage for `act_recap`: include only the actor's work after the most recent `{{ progress_heading }}` or the latest user message in the conversation, whichever is later, through the end of this segment described above. On the first observation, start with the actor's work after the task-opening user message. Do not repeat anything at or before that starting boundary. This recap will become the next `{{ progress_heading }}` if the task continues.
+
+These markers locate the source range only; they are not recap content. In `act_recap`, do not mention `{{ progress_heading }}`, the user-message boundary, where the range starts or ends, or that you are summarizing. Write the recap itself directly.{% if ctx.final_output %}
+
+{{ final_output_heading }}
+
+{{ ctx.final_output }}
+
+(The above is the final result the actor submitted — the only authoritative evidence of what this segment produced, and it is NOT part of the conversation above. Summarize the segment faithfully from it; do not invent tool calls, steps, or artifacts that did not actually happen.){% endif %}
+{%- endmacro %}
+
+{% macro judge(ctx) -%}
+{% if ctx.plain_text_yielded %}
+
+If that message asks the user for anything at all, the task is not over: judge `continue` — never `success`, never `fail`.{% endif %}{% if ctx.finish_park_yielded %}
+
+A closing message that still asks the user for something is not a completed task: judge `continue` — never `success`, never `fail`.{% endif %}
+
+Judge whether the task is complete, by the standard in your role above, and call `{{ report_observation }}` exactly once — no other tools. Don't over-think it: call as soon as the picture is clear.
+
+`task_status` and `act_recap` are always required; fill the remaining fields on the conditions the tool states for each.{% if ctx.subtasks %}
+
+{{ subtasks_heading }} (their results are in the conversation above; refer to one by its exact task_id if you need to flag it in `next_step_hint`):
+{{ shared.subtasks(ctx.subtasks) }}{% endif %}
+{%- endmacro %}
+
+{% macro recap(ctx) -%}
+Record what happened: call `{{ report_observation }}` exactly once — no other tools.
+
+Fill `act_recap`.{% if ctx.closed %} Also fill `task_summary` — the task has ended, so that field carries the whole task's process report.{% endif %} Do not fill task verdict, failure reason, or next-step hint fields.
+{%- endmacro %}
+
+{% macro body(ctx) -%}
+{% if ctx.evaluation_role %}## Evaluation Principles
+
+{{ ctx.evaluation_role }}
+
+---
+
+{% endif %}## Summary Principles
+
+{% if ctx.summary_principles %}{{ ctx.summary_principles }}{% else %}{{ shared.compact_fallback() }}{% endif %}
+
+---
+
+{{ review_context(ctx) }}{% if ctx.judge_task %}{{ "\n" }}{{ judge(ctx) }}{% else %}{{ "\n\n" }}{{ recap(ctx) }}{% endif %}
+{%- endmacro %}
+
+{% macro instruction(ctx) -%}
+{{ continuation(ctx) }}{% if ctx.needs_pointer %}{{ "\n\n" }}{% endif %}{{ body(ctx) }}
+{%- endmacro %}
+
+{% include "steps/_assemble.jinja" %}
+

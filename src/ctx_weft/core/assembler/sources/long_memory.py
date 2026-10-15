@@ -8,7 +8,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from ctx_weft.core.assembler.priority import slot_priority
 from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.core.utils.ids import generate_id
 
@@ -49,21 +48,14 @@ class SemanticRecallSource:
         )
 
         for record in records:
-            text = (
-                content_to_text(record.content)
-                if not isinstance(record.content, str)
-                else record.content
-            )
             yield ContextBlock(
                 id=generate_id("blk"),
                 source="long_memory",
                 kind="summary",
-                target="messages",
-                content=text,
-                priority=slot_priority("summary"),
-                token_estimate=request.token_counter(text),
                 metadata={
+                    "channel": "semantic",
                     "score": record.score,
                     "memory_event_id": record.id,
                 },
+                value=record,
             )

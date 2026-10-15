@@ -1,0 +1,37 @@
+{% import "steps/_shared.zh.jinja" as shared with context %}
+
+{% macro resume_text(ref, full_context, completed_tasks) -%}
+{% if ref %}你仍在做任务：{{ ref }}，现在从上文记录的状态继续。{% else %}你仍在做上文任务，现在从上文记录的状态继续。{% endif %}{% if full_context %}请先从对话里盘点哪些已经做过了——不要重做——然后只做剩下的部分。{% if completed_tasks %} 其中一部分**已经**派发给了子任务，而它们现在已完成——下方的态势注记里连同结果一并列出。不要把那部分活再做第二遍：在它们的产出之上继续，并判断还剩下什么（如果还剩的话）。例外是复核注记标出「不达标」的那条结果——那一条是重新派发还是自己做，由你定。{% endif %}{% else %}请盘点哪些已经做过了，然后只做剩下的部分。{% endif %}
+{%- endmacro %}
+
+{% macro resume(ctx) -%}
+{% if ctx.resume_snapshot %}{{ resume_text(ctx.resume_snapshot.ref, true, ctx.resume_snapshot.completed_tasks) }}{% else %}{{ resume_text(ctx.task_ref if ctx.title else none, false, false) }}{% endif %}
+{%- endmacro %}
+
+{% macro guidance(state) -%}
+---
+{{ shared.task_anchor(state.task_ref) }}
+
+{% if state.plan_tasks %}{% if state.has_other_tasks %}## 总体计划（▶ = 你当前的任务；其余任务另有安排，**不要**自己去做）：
+{% else %}## 总体计划（▶ = 你当前的任务）：
+{% endif %}{% for item in state.plan_tasks %}{{ "  " * item.depth }}- [{{ item.status }}] {% if item.current %}▶ {% endif %}{{ item.ref }}
+{% endfor %}
+
+{% endif %}{% if state.completed_tasks %}## 你当前的任务**已经**派发给了下列子任务，而它们**已经完成**——每一条下面的摘要就是它产出的东西（完整结果在上文对话里）。把那部分工作当成已完成：**不要**自己重做，也**不要**仅为了让它重跑一遍而再派发一次。你接下来要判断的是：在这些结果之外，任务目标是否还有未完成的部分——若有，只做那一部分，并在它们的产出之上继续。唯一的例外是下方复核注记指出「某条结果其实没有达成其目标」：那一条怎么办由**你**定——为它新派一个子任务，或者干脆自己做，哪个更划算就选哪个：
+{% for item in state.completed_tasks %}- [FINISHED] {{ item.ref }}
+{% if item.result %}    → {{ item.result }}
+{% endif %}{% endfor %}
+
+{% endif %}{% if state.review_note %}## 对你上一次尝试的复核注记（其中可能点名了某个产出不达标的子任务）：
+{{ state.review_note }}
+
+{% endif %}只有在任务目标**完全达成**之后才调用 `{{ finish_task }}`——还有活没干完就继续干，别收尾。收尾的做法是：把给用户的最终答复写成你的**普通消息正文**，并在同一个回合里调用它；消息正文才是答复与交付物，不是工具参数（细节见该工具的描述）。{% if state.attended %} 现在有人在场：一条纯正文回复会让任务保持打开、并把话语权交回给对方——这是对话进行中的正确动作；只有整个诉求都已满足时才收尾。{% endif %}{% if state.unattended %} 没有人会读你的回复：光一段正文答复既结束不了这个任务，也不会有人接着跟进。目标达成时你**必须**在写最终答复的同一个回合里调用它，否则这个任务只会被反复重跑，直到尝试次数耗尽。{% endif %}{% if state.unattended_others %} 不要自己去动那些别的任务。{% endif %}
+如果用户最新的这条消息是一个**无关的新诉求**，就在**同一次回复**里同时发出 `{{ finish_task }}` 和 `{{ delegate_task }}`——只收尾会把那个新诉求丢掉。
+需要只有用户才能提供的信息或决定？调用 `{{ ask_user }}`，不要猜。
+{%- endmacro %}
+
+{% macro continuation(ctx) -%}
+{% if ctx.guidance %}{{ guidance(ctx.guidance) }}{% endif %}{% if ctx.guidance and ctx.needs_pointer %}{{ "\n\n" }}{% endif %}{% if ctx.needs_pointer %}{{ shared.capability_pointer() }}{% endif %}
+{%- endmacro %}
+
+{% include "steps/_assemble.jinja" %}

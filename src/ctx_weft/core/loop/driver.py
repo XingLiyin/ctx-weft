@@ -218,8 +218,6 @@ class LoopContext:
     capability_cache: CapabilityCache|None = None
     capability_providers: list[CapabilityProvider]|None = None
     capability_gateway: CapabilityGateway|None = None
-    authorizer: Any = None
-    skill_provider_index: dict = None  # provider_name → SkillCapabilityProvider；PrepareStep 用于加载 Level2
     # 控制令牌（Phase 6）
     cancel_token: CancelToken|None = None
     pause_token: PauseToken|None = None

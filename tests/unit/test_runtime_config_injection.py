@@ -42,7 +42,7 @@ def test_hitl_timeout_reaches_the_waiter_that_actually_waits():
     loop_ctx = rt._build_loop_ctx(
         assembler=None, llm=None, memory=None,
         provider_ctx=ProviderContext(session_id="s1", tenant_id="default"),
-        gateway=None, skill_index={}, cancel_token=None, task_manager=None,
+        gateway=None, cancel_token=None, task_manager=None,
     )
     assert loop_ctx.waiter is not None, "loop context 必须带 waiter，否则热等待根本不存在"
     assert loop_ctx.waiter._timeout_sec == 42, (

@@ -11,7 +11,13 @@ run 已取消）压根不调 `report_observation`，覆写就不会发生，上�
 
 from __future__ import annotations
 
-from ctx_weft.core.assembler.composer_guidance import build_act_guidance
+from types import SimpleNamespace
+
+import pytest
+
+from ctx_weft.core.assembler.builder import PromptBuilder
+from ctx_weft.core.assembler.context import PromptContext
+from ctx_weft.core.assembler.sources.guidance import GuidanceSource
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 
 
@@ -20,15 +26,28 @@ def _task(hint: str | None) -> Task:
                 next_step_hint=hint, settings=NormalTaskSettings())
 
 
-def test_guidance_renders_the_hint() -> None:
+async def _guidance(task: Task) -> str:
+    request = SimpleNamespace(
+        purpose="act", task=task, extra={}, intent=None, template=None,
+        session=SimpleNamespace(context_limit=20_000, reserved_output_tokens=0),
+    )
+    deps = SimpleNamespace(task_manager=None)
+    blocks = [block async for block in GuidanceSource().fetch(request, deps)]
+    prompt = PromptBuilder(len).compile(PromptContext(request, tuple(blocks)))
+    return "\n".join(str(message.content) for message in prompt.messages)
+
+
+@pytest.mark.asyncio
+async def test_guidance_renders_the_hint() -> None:
     """前提：hint 确实会进 prompt——否则下面「清掉」测的是个空动作。"""
-    g = build_act_guidance(_task("Next Step Hint: 先取凭据"), None)
+    g = await _guidance(_task("Next Step Hint: 先取凭据"))
     assert "先取凭据" in g
     assert "Note from the review of your previous attempt" in g
 
 
-def test_guidance_without_hint_omits_the_section() -> None:
-    g = build_act_guidance(_task(None), None)
+@pytest.mark.asyncio
+async def test_guidance_without_hint_omits_the_section() -> None:
+    g = await _guidance(_task(None))
     assert "Note from the review of your previous attempt" not in g
 
 

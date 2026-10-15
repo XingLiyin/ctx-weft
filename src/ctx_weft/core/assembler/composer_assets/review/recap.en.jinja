@@ -1,3 +1,0 @@
-{# 只摘要模式的提交要求；前置上下文由 observe 入口统一插入。 #}Record what happened: call `{{ report_observation }}` exactly once — no other tools.
-
-Fill `act_recap`.{% if closed %} Also fill `task_summary` — the task has ended, so that field carries the whole task's process report.{% endif %} Do not fill task verdict, failure reason, or next-step hint fields.

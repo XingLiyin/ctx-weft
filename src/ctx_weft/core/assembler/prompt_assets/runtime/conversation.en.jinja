@@ -1,0 +1,11 @@
+{# 对话修复；observer 的空回复占位、用户修改请求的前缀。
+每个具名 macro 是一个独立事件提示，参数就是输入契约；文件本身不整段发送。 #}
+
+{% macro no_reply() -%}
+(no reply)
+{%- endmacro %}
+
+{% macro interrupt_edit_preface(previous) -%}
+(I cancelled my previous request: "{{ previous }}" — replacing it with the request below.)
+{%- endmacro %}
+

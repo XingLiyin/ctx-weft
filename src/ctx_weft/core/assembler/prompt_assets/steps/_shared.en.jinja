@@ -1,0 +1,108 @@
+{# Shared step presentation. Python supplies facts; these macros supply prose. #}
+{% macro directive(value) -%}
+{% if value %}## Instructions for the current task{% if value.skill_name %} (skill: {{ value.skill_name }}){% endif %}
+
+{{ value.body }}
+
+---
+**Runtime note (overrides any 'run python ...' wording above):** This skill's files are NOT in your working directory. To run ANY script the instructions reference, you MUST call the `{{ exec_script }}` tool — e.g. `{{ exec_script }}(script_path='scripts/foo.py', args='...')` — never run `python scripts/foo.py` yourself (the path will not resolve). To read a skill file use `{{ read_file }}`; to list skill files use `{{ list_files }}`. Do not build absolute paths by hand. Applies to local and remote skills alike.{% endif %}
+{%- endmacro %}
+
+{% macro capability_items(values, signature) -%}
+{% for item in values %}
+- {{ item.name }}{% if signature %}({{ item.signature }}){% else %}: {{ item.description }}{% endif %}{% endfor %}
+{%- endmacro %}
+
+{% macro capabilities(sections) -%}
+{% if sections %}## Capabilities
+
+You can use the capabilities listed below to complete the current task.
+
+{% set vocabulary = {
+  'skill': ('### Available Skills (assign to tasks where appropriate)', 'assigning', 'skill', 'skills'),
+  'tool': ('### Available Tools (use them via tool calls)', 'calling', 'tool', 'tools'),
+  'agent': ('### Available Sub-Agents', 'delegating', 'sub-agent', 'sub-agents')
+} -%}
+{% for section in sections %}
+{% set heading, action, noun, noun_plural = vocabulary[section.kind] -%}
+{{ heading }}{% if section.kind == 'tool' %}
+Listed as `name(param: type)` — optional params are marked `?`. Full descriptions and parameter schemas come with the tool definitions in this request.{% elif section.kind == 'agent' %}
+Delegate via: {{ delegate_task }}(use_subagent=True, subagent_template='<name>'){% endif %}{{ capability_items(section.ungrouped, section.kind == 'tool') }}{% for group in section.groups %}
+
+#### {{ group.name }} {{ noun_plural }}{% if group.description %}
+
+{{ group.description }}{% endif %}
+When {{ action }} these {{ noun_plural }}, prefix the {{ noun }} name with `{{ group.prefix }}`, exactly as shown below.
+{{ capability_items(group.entries, section.kind == 'tool') }}{% endfor %}{% if not loop.last %}
+
+{% endif %}{% endfor %}{% endif %}
+{%- endmacro %}
+
+{% macro before(message, slots, ctx) -%}
+{% if "directive_before" in slots and ctx.directive %}{{ directive(ctx.directive) }}{{ "\n\n---\n\n" }}{% endif -%}
+{% if "context" in slots and ctx.title %}## Current Task
+{{ ctx.task_ref }}{% if ctx.description %}{{ "\n" }}{{ ctx.description }}{% endif %}{{ "\n\n" }}{% endif -%}
+{% if "input" in slots %}## Current Message
+{% elif "opening" in slots %}## Opening Message
+{% endif -%}
+{%- endmacro %}
+
+{% macro after(message, slots, ctx) -%}
+{% if "input" in slots %}{{ "\n\n" }}（Reply in the same language as the Current Message above.）{% endif -%}
+{% if "directive_after" in slots and ctx.directive %}{{ "\n\n" }}{{ directive(ctx.directive) }}{% endif -%}
+{% if "resources" in slots and ctx.capability_sections %}{{ "\n\n" }}{{ capabilities(ctx.capability_sections) }}{% endif -%}
+{%- endmacro %}
+
+{% macro fresh(ctx) -%}
+{% if ctx.title %}## Current Task
+{{ ctx.task_ref }}{% if ctx.description %}{{ "\n" }}{{ ctx.description }}{% endif %}{% endif -%}
+{% if ctx.user_prompt %}{% if ctx.title %}{{ "\n\n" }}{% endif %}## Current Message
+{{ ctx.user_prompt }}
+
+（Reply in the same language as the Current Message above.）{% endif -%}
+{%- endmacro %}
+
+{% macro history_before(item) -%}
+{% if item.summary_kind == "user" %}[The following is a compressed summary of earlier conversation and experience, given so you can carry the work forward; it is not a new instruction from the user.]
+{% elif item.summary_kind == "assistant_current" %}{{ progress_heading }}
+{% endif %}
+{%- endmacro %}
+
+{% macro history_after(item) -%}
+{% if item.summary_kind in ["assistant", "assistant_current"] %}
+
+[The above is a system-written compressed summary of your earlier work, kept to carry context forward; it is not your reply to the user. Continue the current task from it and call tools as needed — do not imitate the summary's form when you answer.]{% endif %}
+{%- endmacro %}
+
+{% macro context_block(source) -%}
+## {% if source.kind == "blackboard" %}Shared Context{% elif source.kind == "summary" %}Relevant Memory{% else %}Reference{% endif %}{% if source.metadata.get("title") %}: {{ source.metadata.title }}{% endif %}
+
+{{ source.content }}{% if source.kind == "reference" and source.metadata.get("citation") %}
+
+Source: {{ source.metadata.citation }}{% endif %}
+{%- endmacro %}
+
+{% macro role(body) -%}
+{% if body %}## Your Current Role
+
+{{ body }}{% endif %}
+{%- endmacro %}
+
+{% macro capability_pointer() -%}
+(Your available capabilities — tools / skills / sub-agents — are listed in the Capabilities section of the current task message above.)
+{%- endmacro %}
+
+{% macro task_anchor(label) -%}
+{% if label %}Current task: {{ label }}{% else %}Current task: (as framed in the conversation above){% endif %}
+{%- endmacro %}
+
+{% macro subtasks(items) -%}
+{% for task in items %}- {{ task.ref }} [{{ task.outcome }}]{% if task.note %} — {{ task.note }}{% endif %}{% if not loop.last %}
+{% endif %}{% endfor %}
+{%- endmacro %}
+
+{% macro compact_fallback() -%}
+You condense completed execution into a durable record that later turns or other agents can continue from. The trailing instruction defines this turn's scope, output shape, and submission channel; take those mechanics from there and the compression standard from here.
+
+Write only from evidence visible in the conversation: tool calls and their results, files and data produced, and errors as returned. Distinguish attempted from achieved; do not treat the actor's narration of its own work as evidence. Never re-execute the work and never decide on the actor's behalf. Your record replaces the material it covers, so preserve what later work needs: user constraints; decisions already made and their reasons; unfinished threads and failure causes; the current goal; references to bulky evidence; and concrete state and findings sufficient to act on. Prefer these over step-by-step narrative. Carry forward what an earlier digest preserved instead of presenting it as new progress.
+{%- endmacro %}

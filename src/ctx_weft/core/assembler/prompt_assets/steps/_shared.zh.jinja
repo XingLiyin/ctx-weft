@@ -1,0 +1,108 @@
+{# 中文 step 模板仍保留协议标题，提示正文使用中文。 #}
+{% macro directive(value) -%}
+{% if value %}## Instructions for the current task{% if value.skill_name %} （技能：{{ value.skill_name }}）{% endif %}
+
+{{ value.body }}
+
+---
+**运行说明（优先于上文任何「run python ...」之类的写法）：** 这个 skill 的文件**不在**你的工作目录里。要运行说明中提到的任何脚本，你**必须**调用 `{{ exec_script }}` 工具——例如 `{{ exec_script }}(script_path='scripts/foo.py', args='...')`——绝不要自己执行 `python scripts/foo.py`（那个路径解析不出来）。读 skill 文件用 `{{ read_file }}`，列 skill 文件用 `{{ list_files }}`。不要手工拼绝对路径。本地与远端 skill 一律适用。{% endif %}
+{%- endmacro %}
+
+{% macro capability_items(values, signature) -%}
+{% for item in values %}
+- {{ item.name }}{% if signature %}({{ item.signature }}){% else %}: {{ item.description }}{% endif %}{% endfor %}
+{%- endmacro %}
+
+{% macro capabilities(sections) -%}
+{% if sections %}## Capabilities
+
+你可以使用下面列出的能力来完成当前任务。
+
+{% set vocabulary = {
+  'skill': ('### Available Skills (assign to tasks where appropriate)', '分配', 'skill', 'skill'),
+  'tool': ('### Available Tools (use them via tool calls)', '调用', 'tool', 'tool'),
+  'agent': ('### Available Sub-Agents', '派发', 'sub-agent', 'sub-agent')
+} -%}
+{% for section in sections %}
+{% set heading, action, noun, noun_plural = vocabulary[section.kind] -%}
+{{ heading }}{% if section.kind == 'tool' %}
+下面按 `name(param: type)` 的形式列出——可选参数标 `?`。完整的描述与参数 schema 随本次请求的工具定义一起下发。{% elif section.kind == 'agent' %}
+派发方式：{{ delegate_task }}(use_subagent=True, subagent_template='<name>'){% endif %}{{ capability_items(section.ungrouped, section.kind == 'tool') }}{% for group in section.groups %}
+
+#### {{ group.name }} {{ noun_plural }}{% if group.description %}
+
+{{ group.description }}{% endif %}
+{{ action }}这些{{ noun_plural }}时，{{ noun }}名前要加 `{{ group.prefix }}` 前缀，与下面列出的写法完全一致。
+{{ capability_items(group.entries, section.kind == 'tool') }}{% endfor %}{% if not loop.last %}
+
+{% endif %}{% endfor %}{% endif %}
+{%- endmacro %}
+
+{% macro before(message, slots, ctx) -%}
+{% if "directive_before" in slots and ctx.directive %}{{ directive(ctx.directive) }}{{ "\n\n---\n\n" }}{% endif -%}
+{% if "context" in slots and ctx.title %}## Current Task
+{{ ctx.task_ref }}{% if ctx.description %}{{ "\n" }}{{ ctx.description }}{% endif %}{{ "\n\n" }}{% endif -%}
+{% if "input" in slots %}## Current Message
+{% elif "opening" in slots %}## Opening Message
+{% endif -%}
+{%- endmacro %}
+
+{% macro after(message, slots, ctx) -%}
+{% if "input" in slots %}{{ "\n\n" }}（请用与上面「当前消息」相同的语言回复。）{% endif -%}
+{% if "directive_after" in slots and ctx.directive %}{{ "\n\n" }}{{ directive(ctx.directive) }}{% endif -%}
+{% if "resources" in slots and ctx.capability_sections %}{{ "\n\n" }}{{ capabilities(ctx.capability_sections) }}{% endif -%}
+{%- endmacro %}
+
+{% macro fresh(ctx) -%}
+{% if ctx.title %}## Current Task
+{{ ctx.task_ref }}{% if ctx.description %}{{ "\n" }}{{ ctx.description }}{% endif %}{% endif -%}
+{% if ctx.user_prompt %}{% if ctx.title %}{{ "\n\n" }}{% endif %}## Current Message
+{{ ctx.user_prompt }}
+
+（请用与上面「当前消息」相同的语言回复。）{% endif -%}
+{%- endmacro %}
+
+{% macro history_before(item) -%}
+{% if item.summary_kind == "user" %}[以下是对早先对话与经验的压缩摘要，供你继续推进工作；它不是用户的新指令。]
+{% elif item.summary_kind == "assistant_current" %}{{ progress_heading }}
+{% endif %}
+{%- endmacro %}
+
+{% macro history_after(item) -%}
+{% if item.summary_kind in ["assistant", "assistant_current"] %}
+
+[以上是系统写入的早先工作压缩摘要，用于延续上下文；它不是你给用户的答复。请据此继续当前任务并按需调用工具——回答时不要模仿摘要的形式。]{% endif %}
+{%- endmacro %}
+
+{% macro context_block(source) -%}
+## {% if source.kind == "blackboard" %}Shared Context{% elif source.kind == "summary" %}Relevant Memory{% else %}Reference{% endif %}{% if source.metadata.get("title") %}: {{ source.metadata.title }}{% endif %}
+
+{{ source.content }}{% if source.kind == "reference" and source.metadata.get("citation") %}
+
+Source: {{ source.metadata.citation }}{% endif %}
+{%- endmacro %}
+
+{% macro role(body) -%}
+{% if body %}## Your Current Role
+
+{{ body }}{% endif %}
+{%- endmacro %}
+
+{% macro capability_pointer() -%}
+（你可用的能力——工具 / skill / 子 agent——列在上文「当前任务」那条消息的能力清单一节里。）
+{%- endmacro %}
+
+{% macro task_anchor(label) -%}
+{% if label %}当前任务：{{ label }}{% else %}当前任务：（即上文对话中界定的那个任务）{% endif %}
+{%- endmacro %}
+
+{% macro subtasks(items) -%}
+{% for task in items %}- {{ task.ref }} [{{ task.outcome }}]{% if task.note %} — {{ task.note }}{% endif %}{% if not loop.last %}
+{% endif %}{% endfor %}
+{%- endmacro %}
+
+{% macro compact_fallback() -%}
+你负责把已经发生的执行过程压缩成一份可供后续回合或其他 agent 继续工作的持久记录。尾部指令会规定本次的覆盖范围、输出形状和提交方式；这些操作要求以尾部指令为准，压缩标准则以这里为准。
+
+只根据对话中可见的证据来写：工具调用及其结果、产出的文件与数据、原样返回的错误。把「尝试过」与「已经达成」分开，不要把执行者对自身工作的叙述当作证据。不重新执行已发生的工作，也不替执行者作决定。这份记录会替代它覆盖的原始内容，因此优先保留后续工作需要的信息：用户约束、已经作出的决定及理由、未完成线头与失败原因、当前目标、可回读的大块证据引用，以及足以继续动手的具体状态与发现；这些都比逐步叙事更重要。上文更早摘要保住的内容要继续保留，不要把它当成新进展。
+{%- endmacro %}

@@ -1,0 +1,67 @@
+{% import "steps/_shared.zh.jinja" as shared with context %}
+
+{% macro continuation(ctx) -%}{% if ctx.needs_pointer %}{{ shared.capability_pointer() }}{% endif %}{%- endmacro %}
+
+{% macro boundary(kind) -%}
+{% if kind == "actor_done" %}执行者调用了 `finish_task`，宣布这个任务已完成。{% elif kind == "context_limit" %}本段是被上下文长度上限截断的，不是执行者主动停的。{% elif kind == "dispatch" %}执行者派发了子任务；本任务挂起，等子任务返回（上文的派发记录里写了是哪个）。{% elif kind == "finish" %}执行者用 `finish_task` 收掉了这个任务。{% elif kind == "finish_park" %}执行者调用了 `finish_task` 宣布任务完成，并把话语权交回给用户——用户正在等着。{% elif kind == "interrupt" %}用户在本段执行途中打断了它。{% elif kind == "max_turns" %}本段是被单段回合上限截断的，不是执行者主动停的。{% elif kind == "mechanical" %}本段已由规则判决过，没有 LLM 观察者参与——你写的这份记述是它唯一的记录。{% elif kind == "plain_text" %}执行者用正文回复后把话语权交回给用户——用户正在等着。{% else %}执行者以一段收尾消息结束了本段，**没有**调用 `finish_task`。{% endif %}
+{%- endmacro %}
+
+{% macro review_context(ctx) -%}
+{{ shared.task_anchor(ctx.task_label) }}
+
+{{ boundary(ctx.boundary_kind) }}
+
+`act_recap` 的本次覆盖范围：起点取对话中最近的 `{{ progress_heading }}` 与最近一条用户消息中较晚的那个，只记录该点之后、直到上面所述本段结束位置之间 actor 新做的工作。若这是首次观察，则从开启任务的用户消息之后开始。不要重复起点及其之前的内容；任务继续时，这份复述会成为下一轮的 `{{ progress_heading }}`。
+
+这些标记只用于定位原文范围，不属于复述内容。`act_recap` 里不要提及 `{{ progress_heading }}`、用户消息边界、范围从哪里开始或到哪里结束，也不要解释自己正在做总结；直接写复述结果。{% if ctx.final_output %}
+
+{{ final_output_heading }}
+
+{{ ctx.final_output }}
+
+（以上是执行者提交的最终结果——它是本段产出了什么的唯一权威证据，而且它**不属于**上文对话的一部分。请据它如实概括本段；不要虚构没有真正发生过的工具调用、步骤或产物。）{% endif %}
+{%- endmacro %}
+
+{% macro judge(ctx) -%}
+{% if ctx.plain_text_yielded %}
+
+只要那段消息在向用户要任何东西，任务就没有结束：判 `continue`——决不判 `success`，也决不判 `fail`。{% endif %}{% if ctx.finish_park_yielded %}
+
+一段仍在向用户要东西的收尾消息，不是一个已完成的任务：判 `continue`——决不判 `success`，也决不判 `fail`。{% endif %}
+
+按你上面那份职责里的标准判断这个任务完成了没有，然后调用 `{{ report_observation }}` 恰好一次——不要调别的工具。不必反复权衡：画面清楚了就调。
+
+`task_status` 与 `act_recap` 恒为必填；其余字段按工具上各自写明的条件填。{% if ctx.subtasks %}
+
+{{ subtasks_heading }}（它们的结果在上文对话里；若需要在 `next_step_hint` 里点出某一个，请用它完整的 task_id）：
+{{ shared.subtasks(ctx.subtasks) }}{% endif %}
+{%- endmacro %}
+
+{% macro recap(ctx) -%}
+记录发生了什么：调用 `{{ report_observation }}` 恰好一次——不要调别的工具。
+
+填写 `act_recap`。{% if ctx.closed %} 同时填写 `task_summary`——任务已经结束，所以那个字段承载整个任务的过程报告。{% endif %} 不要填写任务判决、失败原因或下一轮提示字段。
+{%- endmacro %}
+
+{% macro body(ctx) -%}
+{% if ctx.evaluation_role %}## 评价原则
+
+{{ ctx.evaluation_role }}
+
+---
+
+{% endif %}## 总结原则
+
+{% if ctx.summary_principles %}{{ ctx.summary_principles }}{% else %}{{ shared.compact_fallback() }}{% endif %}
+
+---
+
+{{ review_context(ctx) }}{% if ctx.judge_task %}{{ "\n" }}{{ judge(ctx) }}{% else %}{{ "\n\n" }}{{ recap(ctx) }}{% endif %}
+{%- endmacro %}
+
+{% macro instruction(ctx) -%}
+{{ continuation(ctx) }}{% if ctx.needs_pointer %}{{ "\n\n" }}{% endif %}{{ body(ctx) }}
+{%- endmacro %}
+
+{% include "steps/_assemble.jinja" %}
+
