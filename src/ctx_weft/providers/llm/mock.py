@@ -139,7 +139,10 @@ class MockLLMAdapter(LLMClient):
     def supports_tool_calling(self) -> bool:
         return True
 
-    def complete(
+    def complete(self, request: LLMRequest, stream: bool = True) -> AsyncIterator[LLMChunk]:
+        return self._complete(request, stream)
+
+    def _complete(
         self,
         request: LLMRequest,
         stream: bool = True,
