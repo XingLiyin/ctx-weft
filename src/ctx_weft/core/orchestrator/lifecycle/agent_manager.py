@@ -156,6 +156,7 @@ class AgentLifecycleManager:
     _INPUT_BY_EVENT: ClassVar[dict[str, AgentInput]] = {
         EventType.TASK_STARTED: AgentInput.TASK_STARTED,
         EventType.TASK_AWAITING_HUMAN: AgentInput.AWAITING_HUMAN,
+        EventType.TASK_REVIEWING: AgentInput.SETTLED,
         EventType.TASK_HUMAN_RESOLVED: AgentInput.HUMAN_RESOLVED,
         EventType.TASK_INTERRUPTED: AgentInput.INTERRUPTED,
         EventType.TASK_RESUMED: AgentInput.RESUMED,
@@ -205,19 +206,32 @@ class AgentLifecycleManager:
         证据表明还有别的「语义上不该发生」的组合需要在这一层补挡；再加会变成
         replicate TaskManager 的不变量、猜它可能错在哪，属于过度防御。
         """
+        if ev.type == EventType.TASK_CREATED:
+            task = (ev.payload or {}).get("task", {})
+            if task.get("origin_tool_name") == "control__switch_task":
+                self.set_current_task(task.get("assigned_agent_id", ""), task.get("id", ""))
+            return
         inp = self._INPUT_BY_EVENT.get(ev.type)
         if inp is None:
             return
         agent_id = ev.agent_id or (ev.payload or {}).get("assigned_agent_id")
         if not agent_id or agent_id not in self._agents:
             return
-        if ev.task_id:
-            self._agents[agent_id].current_task_id = ev.task_id
+        if ((ev.payload or {}).get("reason") == "user_topic_switch"
+                and self._agents[agent_id].current_task_id != ev.task_id):
+            return  # A late review belongs to the old task, not the new execution.
         p = ev.payload or {}
+        task_id = ev.task_id
+        if ev.type == EventType.TASK_REVIEWING:
+            successor = p.get("successor", {}).get("task", {})
+            if successor.get("assigned_agent_id") == agent_id:
+                task_id = successor.get("id") or task_id
+        if task_id:
+            self._agents[agent_id].current_task_id = task_id
         await self.apply_input(
             agent_id,
             inp,
-            task_id=ev.task_id,
+            task_id=task_id,
             hitl_id=str(p.get("hitl_id", "")),
             reason=str(p.get("reason", "")) or _SETTLE_REASON.get(ev.type, ""),
         )

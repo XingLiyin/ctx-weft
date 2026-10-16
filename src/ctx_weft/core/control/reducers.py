@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 # 落在本文件而不是单独模块：`reduce_events` 是它唯一的消费者，就在下方几十行处用到。
 TASK_STATUS_BY_EVENT: dict[EventType, TaskStatus] = {
     EventType.TASK_STARTED: "ACTIVE",
+    EventType.TASK_REVIEWING: "REVIEWING",
     EventType.TASK_SUSPENDED: "SUSPENDED",
     EventType.TASK_AWAITING_HUMAN: "AWAITING_HUMAN",
     # 被打断由 task 域的 TASK_INTERRUPTED 写；run 域的 RUN_INTERRUPTED 只说
@@ -351,6 +352,9 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "unattended": t.unattended,
                 "port_key": t.port_key,
                 "origin_tool_call_id": t.origin_tool_call_id,
+                "replaces_task_id": t.replaces_task_id,
+                "switched_to_task_id": t.switched_to_task_id,
+                "switch_reason": t.switch_reason,
                 "origin_tool_name": t.origin_tool_name,
                 "settings_raw": t.settings_raw,
                 "dag_deps": t.dag_deps,
@@ -425,6 +429,9 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             # 存量快照无 port_key → 按 unattended 回落（两者曾是同一个字段兼任的两件事）。
             port_key=t.get("port_key", default_port_for(t.get("unattended", False))),
             origin_tool_call_id=t.get("origin_tool_call_id", ""),
+            replaces_task_id=t.get("replaces_task_id", ""),
+            switched_to_task_id=t.get("switched_to_task_id", ""),
+            switch_reason=t.get("switch_reason", ""),
             origin_tool_name=t.get("origin_tool_name", ""),
             settings_raw=t.get("settings_raw", {}),
             dag_deps=t.get("dag_deps", []),
@@ -1007,6 +1014,9 @@ def _apply(view: RunStateView, ev: Event) -> None:
                     "port_key", default_port_for(task_data.get("unattended", False)),
                 ),
                 origin_tool_call_id=task_data.get("origin_tool_call_id", ""),
+                replaces_task_id=task_data.get("replaces_task_id", ""),
+                switched_to_task_id=task_data.get("switched_to_task_id", ""),
+                switch_reason=task_data.get("switch_reason", ""),
                 origin_tool_name=task_data.get("origin_tool_name", ""),
                 settings_raw=task_data.get("settings", {}),
                 dag_deps=task_data.get("dag_deps", []),
@@ -1071,6 +1081,21 @@ def _apply(view: RunStateView, ev: Event) -> None:
         view.task_status = "PENDING"
 
     elif t in TASK_STATUS_BY_EVENT and ev.task_id:
+        if t == EventType.TASK_REVIEWING and p.get("successor"):
+            successor = p["successor"]
+            _apply(view, replace(ev, type=EventType.TASK_CREATED,
+                                 task_id=successor["task"]["id"], payload=successor))
+        if t == EventType.TASK_REVIEWING and p.get("replaced_task_ids"):
+            successor_id = p["successor"]["task"]["id"]
+            for tid in p["replaced_task_ids"]:
+                old = view.tasks.get(tid)
+                if old is not None:
+                    old.status = "REVIEWING"
+                    old.switched_to_task_id = successor_id
+                    old.switch_reason = p.get("switch_reason", "")
+            for tid, deps in p.get("rewired_dependencies", {}).items():
+                if tid in view.tasks:
+                    view.tasks[tid].dag_deps = list(deps)
         task = view.tasks.get(ev.task_id)
         if task is not None:
             task.status = TASK_STATUS_BY_EVENT[t]
@@ -1092,11 +1117,11 @@ def _apply(view: RunStateView, ev: Event) -> None:
         # （见 runtime 的 outage 支 `error_code=InterruptReason.LLM_OUTAGE`），一旦
         # 将来有谁给 TaskFailed 也塞一个非 TaskErrorCode 的码，那个 `!=` 会静默放行。
         # 闩位与 `TaskManager._threshold_tripped` 同源同形，不看任何自由文本。
-        if t == EventType.TASK_FAILED:
+        if t == EventType.TASK_FAILED and p.get("reason") != "user_topic_switch":
             sess = view.sessions.get(ev.session_id)
             if sess is not None and not sess.threshold_tripped:
                 sess.failure_counter += 1
-        elif t == EventType.TASK_FINISHED:
+        elif t == EventType.TASK_FINISHED and p.get("reason") != "user_topic_switch":
             sess = view.sessions.get(ev.session_id)
             if sess is not None:
                 sess.failure_counter = 0

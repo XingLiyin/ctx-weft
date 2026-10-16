@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ctx_weft.core.assembler.prompts import runtime_prompt
-from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME
+from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME, SWITCH_TASK_NAME
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.core.loop.commit import commit_round, discard_uncommitted_round
 from ctx_weft.core.loop.driver import (
@@ -177,6 +177,9 @@ class ActStep(Step):
             _reconcile_finish_vs_dispatch(state, ctx, turn.tool_calls)
 
             # 7) actor 收尾 —— 同样**优先于** context_limit：任务已经做完了，没有可续的跑。
+            if state.task.switch_requested:
+                exit_reason = "task_switch"
+                break
             if state.task.actor_done:
                 exit_reason = "actor_done"
                 break
@@ -206,6 +209,18 @@ class ActStep(Step):
         # 那些步骤直接读 memory、不认暂存区，所以先提交：暂存的答复与消息此刻落盘。
         # 热应答醒来后一个 chunk 都没等到就走到这里（例如同批的 finish_task），也算数。
         await commit_round(state, ctx)
+
+        if exit_reason == "task_switch":
+            from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
+
+            state.transcript = transcript
+            state.task.switch_review_started = True
+            StepDriver.for_context(ctx).start(
+                "observe", state, ctx, options={"boundary": "task_switch"})
+            return StepOutcome(None, state_patch={
+                "transcript": transcript, "act_exit_reason": exit_reason,
+                "run_outcome": RunOutcome(kind=RunOutcomeKind.TASK_SWITCHED),
+            })
 
         # 路由优先级：suspend > 上下文恢复 > observe。
         #
@@ -694,6 +709,13 @@ async def _execute_tool_calls(
     硬取消 → CancelledError；被 park 的工具 → task 转 SUSPENDED 并上抛（spec/07 §7）。
     """
     tool_results: list[dict] = []
+    if any(tc.name == SWITCH_TASK_NAME for tc in tool_calls) and len(tool_calls) != 1:
+        message = "switch_task must be called alone. Resubmit the switch as a single tool call."
+        for tc in tool_calls:
+            await _ingest_synthetic_tool_result(state, ctx, tc, message)
+            tool_results.append({"tool_call_id": tc.id, "name": tc.name,
+                                 "result": message, "is_error": True})
+        return tool_results
     ctx.run_phase.in_tool_loop = True
 
     for i, tc in enumerate(tool_calls):

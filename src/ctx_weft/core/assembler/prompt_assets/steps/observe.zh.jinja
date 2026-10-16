@@ -3,7 +3,7 @@
 {% macro continuation(ctx) -%}{% if ctx.needs_pointer %}{{ shared.capability_pointer() }}{% endif %}{%- endmacro %}
 
 {% macro boundary(kind) -%}
-{% if kind == "actor_done" %}执行者调用了 `finish_task`，宣布这个任务已完成。{% elif kind == "context_limit" %}本段是被上下文长度上限截断的，不是执行者主动停的。{% elif kind == "dispatch" %}执行者派发了子任务；本任务挂起，等子任务返回（上文的派发记录里写了是哪个）。{% elif kind == "finish" %}执行者用 `finish_task` 收掉了这个任务。{% elif kind == "finish_park" %}执行者调用了 `finish_task` 宣布任务完成，并把话语权交回给用户——用户正在等着。{% elif kind == "interrupt" %}用户在本段执行途中打断了它。{% elif kind == "max_turns" %}本段是被单段回合上限截断的，不是执行者主动停的。{% elif kind == "mechanical" %}本段已由规则判决过，没有 LLM 观察者参与——你写的这份记述是它唯一的记录。{% elif kind == "plain_text" %}执行者用正文回复后把话语权交回给用户——用户正在等着。{% else %}执行者以一段收尾消息结束了本段，**没有**调用 `finish_task`。{% endif %}
+{% if kind == "task_switch" %}用户已将旧目标切换为新任务。旧任务不会继续执行，新任务独立运行。{% elif kind == "actor_done" %}执行者调用了 `finish_task`，宣布这个任务已完成。{% elif kind == "context_limit" %}本段是被上下文长度上限截断的，不是执行者主动停的。{% elif kind == "dispatch" %}执行者派发了子任务；本任务挂起，等子任务返回（上文的派发记录里写了是哪个）。{% elif kind == "finish" %}执行者用 `finish_task` 收掉了这个任务。{% elif kind == "finish_park" %}执行者调用了 `finish_task` 宣布任务完成，并把话语权交回给用户——用户正在等着。{% elif kind == "interrupt" %}用户在本段执行途中打断了它。{% elif kind == "max_turns" %}本段是被单段回合上限截断的，不是执行者主动停的。{% elif kind == "mechanical" %}本段已由规则判决过，没有 LLM 观察者参与——你写的这份记述是它唯一的记录。{% elif kind == "plain_text" %}执行者用正文回复后把话语权交回给用户——用户正在等着。{% else %}执行者以一段收尾消息结束了本段，**没有**调用 `finish_task`。{% endif %}
 {%- endmacro %}
 
 {% macro review_context(ctx) -%}
@@ -23,6 +23,8 @@
 {%- endmacro %}
 
 {% macro judge(ctx) -%}
+{% if ctx.terminal_only %}{% if ctx.switch_reason %}Reason for goal replacement: {{ ctx.switch_reason }}
+{% endif %}只评估旧任务原有目标：已达成返回 success，未达成返回 fail，绝不能返回 continue。失败时在 task_failure_reason 中说明未完成内容及用户切换目标的背景；task_summary 记录已完成和剩余工作，next_step_hint 留空。根据真实执行证据判定；本次切换判定不要求旧任务另有最终答复。{% endif %}
 {% if ctx.plain_text_yielded %}
 
 只要那段消息在向用户要任何东西，任务就没有结束：判 `continue`——决不判 `success`，也决不判 `fail`。{% endif %}{% if ctx.finish_park_yielded %}

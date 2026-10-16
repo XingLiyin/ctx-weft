@@ -57,6 +57,7 @@ WAITING: str = "WAITING"
 TaskStatus = Literal[
     "PENDING",
     "ACTIVE",
+    "REVIEWING",         # execution handed off; background terminal review pending
     "SUSPENDED",         # 等子任务完成——**只剩这一个语义**
     "AWAITING_HUMAN",    # 被 HITL 挂起，需要人来解决
     "INTERRUPTED",       # 被外部打断（LLM outage / run 崩溃），等 /resume

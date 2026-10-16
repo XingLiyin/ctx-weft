@@ -77,6 +77,12 @@ class TaskQueue:
             return entry
         return None
 
+    def replace_dependencies(self, old_ids: set[str], successor_id: str) -> None:
+        for entry in self._entries:
+            if entry.blocked_by.intersection(old_ids):
+                entry.blocked_by.difference_update(old_ids)
+                entry.blocked_by.add(successor_id)
+
     def mark_running(self, task_id: str) -> None:
         self._running.add(task_id)
 

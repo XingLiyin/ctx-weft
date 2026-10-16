@@ -210,6 +210,12 @@ class Task:
     # 跳过最终产出合成），每次 _run_task 派发时归零。
     # 它**不是** task 状态：task 落不落 SUSPENDED 由 TaskManager 据 RunOutcome 定
     # （Task 4）。此前这个意图借 `task.status = "SUSPENDED"` 表达，是判决越界写状态。
+    replaces_task_id: str = ""
+    switched_to_task_id: str = ""
+    switch_reason: str = ""
+    switch_review_started: bool = False
+    switch_requested: bool = False  # transient routing intent; status belongs to TaskManager
+    switch_review_ready: Any = field(default=None, repr=False, compare=False)
     suspend_requested: bool = False
     # observe 裁决（三态）：success|retry|fail。retry 置 status=PENDING 重排（机械退出也归 retry）。
     observer_outcome: str | None = None

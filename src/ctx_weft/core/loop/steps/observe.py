@@ -60,7 +60,7 @@ _PLAIN_TEXT_NEEDS_FINISH = runtime_prompt("plain_text_needs_finish")
 
 
 CLOSE_BOUNDARIES = {"finish", "normal"}
-JUDGING_BOUNDARIES = {"plain_text", "finish_park"}
+JUDGING_BOUNDARIES = {"plain_text", "finish_park", "task_switch"}
 
 
 def judges(boundary: str) -> bool:
@@ -128,7 +128,7 @@ class ObserveStep(Step):
         boundary = self.boundary_or_exit(state, execution.options.get("boundary"))
         background = execution.mode == ExecutionMode.BACKGROUND
         judge_task = execution.options.get(
-            "judge_task", judges(boundary) and has_observe_role(state) if background else True)
+            "judge_task", (boundary == "task_switch" or judges(boundary) and has_observe_role(state)) if background else True)
         if background:
             return await self._execute_background(state, ctx, boundary, judge_task)
 
@@ -173,7 +173,7 @@ class ObserveStep(Step):
         background = _execution(ctx).mode == ExecutionMode.BACKGROUND
         cancelled = tok is not None and tok.is_cancelled
         if ((background or not cancelled)
-                and (not judge_task or self._should_use_llm(state))):
+                and (boundary == "task_switch" or not judge_task or self._should_use_llm(state))):
             try:
                 result = await self._llm_observe(state, ctx, events)
             except Exception as exc:
@@ -187,6 +187,9 @@ class ObserveStep(Step):
             if boundary in ("max_turns", "context_limit"):
                 verdict = dataclasses.replace(verdict, task_outcome=VERDICT_CONTINUE)
             result.verdict = verdict
+            if boundary == "task_switch" and not result.act_recap:
+                result.act_recap = verdict.act_recap or verdict.failure_reason
+                result.verdict = dataclasses.replace(verdict, act_recap=result.act_recap)
         return result
 
     def boundary_or_exit(self, state, boundary=None) -> str:
@@ -197,7 +200,7 @@ class ObserveStep(Step):
         background = execution.mode == ExecutionMode.BACKGROUND
         boundary = self.boundary_or_exit(state, execution.options.get("boundary"))
         judge_task = execution.options.get(
-            "judge_task", judges(boundary) and has_observe_role(state) if background else True)
+            "judge_task", (boundary == "task_switch" or judges(boundary) and has_observe_role(state)) if background else True)
         cache = ctx.capability_cache
         # Session-global control tools survive per-agent cache eviction.
         bound = cache.get(state.agent.id) if cache is not None else []
@@ -208,17 +211,17 @@ class ObserveStep(Step):
             purpose="observe", scope=state.scope, task=state.task, agent=state.agent,
             session=state.session, template=state.extra.get("template"),
             bound_capabilities=bound, token_counter=ctx.llm.tokenizer.count,
-            extra=extra, intent=ReviewIntent(judge_task=judge_task),
+            extra=extra, intent=ReviewIntent(judge_task=judge_task, terminal_only=boundary == "task_switch"),
         )
         prompt = await ctx.assembler.assemble(request)
         submitted, last_text = await self._run_react(
             state, ctx, system=prompt.system, messages=list(prompt.messages),
             tools=prompt.tools, max_rounds=state.agent.loop_config.max_turns_per_observe,
             terminal_tool_name=REPORT_OBSERVATION_NAME,
-            validate_submission=lambda result: self._submission_error(result, judge_task=judge_task),
+            validate_submission=lambda result: self._submission_error(result, judge_task=judge_task, terminal_only=boundary == "task_switch"),
         )
         return self._interpret_submission(state, submitted, last_text,
-                                          judge_task=judge_task, background=background)
+                                          judge_task=judge_task, background=background, terminal_only=boundary == "task_switch")
 
     async def _run_react(
         self,
@@ -374,7 +377,7 @@ class ObserveStep(Step):
 
         return None, last_text
 
-    def _interpret_submission(self, state, submitted, last_text="", *, judge_task=True, background=False) -> ObservationResult:
+    def _interpret_submission(self, state, submitted, last_text="", *, judge_task=True, background=False, terminal_only=False) -> ObservationResult:
         meta = (submitted.metadata or {}) if submitted is not None else {}
         recap = meta.get(K.OBSERVER_ACT_RECAP, "") or ""
         # Preserve the existing background plain-text recap fallback; it is never a verdict.
@@ -388,7 +391,7 @@ class ObserveStep(Step):
             hint = meta.get(K.OBSERVER_NEXT_STEP_HINT, "") or ""
             hint = f"Next Step Hint: {hint}" if hint else ""
             # A successful model verdict still requires an actual final deliverable.
-            if outcome == VERDICT_SUCCESS and not state.task.outputs:
+            if outcome == VERDICT_SUCCESS and not state.task.outputs and not terminal_only:
                 outcome = VERDICT_CONTINUE
                 missing_output = runtime_prompt("observation_missing_output")
                 hint = f"{hint}\n\n{missing_output}" if hint else missing_output
@@ -400,7 +403,15 @@ class ObserveStep(Step):
                                      failure_reason=failure_reason)
         return result
 
-    def _submission_error(self, result, *, judge_task=True) -> str | None:
+    def _submission_error(self, result, *, judge_task=True, terminal_only=False) -> str | None:
+        if terminal_only:
+            meta = result.metadata or {}
+            if meta.get(K.OBSERVER_OUTCOME) not in (VERDICT_SUCCESS, VERDICT_FAIL):
+                return "This review requires a terminal task_status: success or fail. continue is not allowed."
+            if meta.get(K.OBSERVER_OUTCOME) == VERDICT_FAIL and not str(meta.get(K.OBSERVER_FAILURE_REASON) or "").strip():
+                return "A failed terminal review requires task_failure_reason describing the unfinished goal."
+            if meta.get(K.OBSERVER_NEXT_STEP_HINT):
+                return "Leave next_step_hint empty; this task cannot resume."
         if judge_task and not str((result.metadata or {}).get(K.OBSERVER_OUTCOME) or "").strip():
             return runtime_prompt("observation_missing_verdict")
         return None
@@ -409,6 +420,9 @@ class ObserveStep(Step):
         boundary = self.boundary_or_exit(state, boundary)
         # A parked segment is not evidence of task completion. Failed background
         # judgement must never silently release successors or close the task.
+        if boundary == "task_switch":
+            return Verdict(VERDICT_FAIL, "Terminal review could not establish completion.",
+                           failure_reason="Terminal review failed or produced no valid verdict after the user switched goals.")
         if boundary in ("plain_text", "finish_park"):
             return Verdict(VERDICT_CONTINUE, "")
         if not state.transcript:
@@ -554,16 +568,22 @@ class ObserveStep(Step):
         }))
 
     async def _execute_background(self, state, ctx, boundary, judging):
+        if boundary == "task_switch":
+            ready = getattr(state.task, "switch_review_ready", None)
+            if ready is not None:
+                await ready.wait()
         watermark = _execution(ctx).started_at
         await ctx.event_bus.emit(make_event(
             state, EventType.TASK_RECAP_STARTED,
             {"task_id": state.task.id, "boundary": boundary, "agent_id": state.agent.id}))
         try:
             async with StepDriver.for_context(ctx).executions.task_guard(state.task.id, "observe"):
+                if boundary == "task_switch" and state.task.status != "REVIEWING":
+                    return self._outcome(ObservationResult())
                 # 重跑幂等护栏（恢复重跑时才生效）：非 close 边界若该段已无 active raw，说明上次
                 # 崩溃前已折叠（raw 被 supersede），再折会产冗余胶囊 → 跳过（finally 仍发 DONE）。
                 # 正常运行时该段刚产生 raw、计数 > 0，护栏为 no-op。
-                if boundary not in CLOSE_BOUNDARIES:
+                if boundary not in CLOSE_BOUNDARIES and boundary != "task_switch":
                     from ctx_weft.protocols import MemoryKind, MemoryScope
                     view = await ctx.memory.load_view(
                         state.scope, MemoryScope.TASK, ctx.provider_ctx,
@@ -588,6 +608,8 @@ class ObserveStep(Step):
                             state.task.id, boundary,
                         )
                         return self._outcome(ObservationResult())
+                if boundary == "task_switch":
+                    short_segment = False
                 try:
                     observation = await self._observe(state, ctx, [], judging, boundary)
                     meta = observation.metadata()
@@ -722,7 +744,8 @@ async def submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> 
     logger.info(
         "background observe verdict '%s' for task %s: %s",
         verdict, state.task.id, "accepted" if accepted else "rejected (the user spoke first)")
-    return bool(accepted) and verdict == VERDICT_SUCCESS
+    return bool(accepted) and (verdict == VERDICT_SUCCESS or (
+        getattr(state.task, "switch_requested", False) and verdict == VERDICT_FAIL))
 
 
 async def _out_of_band_finalize(
@@ -760,12 +783,12 @@ async def _out_of_band_finalize(
 
     events = await apply_task_close(
         state, state.task, ctx,
-        outcome=VERDICT_SUCCESS,
+        outcome=meta.get(K.OBSERVER_OUTCOME) or VERDICT_SUCCESS,
         act_recap=meta.get(K.OBSERVER_ACT_RECAP, "") or "",
         task_summary=meta.get(K.OBSERVER_TASK_SUMMARY, "") or "",
         has_llm_summary=True,
     )
-    events.append(task_finalized_event(state, state.task, outcome=VERDICT_SUCCESS))
+    events.append(task_finalized_event(state, state.task, outcome=meta.get(K.OBSERVER_OUTCOME) or VERDICT_SUCCESS))
     for event in events:
         await ctx.event_bus.emit(event)
     await _close_park_bubble(state, ctx)

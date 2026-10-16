@@ -102,6 +102,7 @@ class EventType(StrEnum):
     # ── Task 域 ──
     TASK_CREATED = "TaskCreated"
     TASK_STARTED = "TaskStarted"
+    TASK_REVIEWING = "TaskReviewing"
     TASK_SUSPENDED = "TaskSuspended"
     # ── task/run 层「为什么停」（2026-09-02 所有权重构）──
     # 从前三件事都压在 TASK_SUSPENDED 的 reason 字面量里，消费方只能匹配字符串。

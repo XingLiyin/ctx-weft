@@ -208,7 +208,7 @@ def _final_reply_block(ref: str, reply: str) -> str:
 
 def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outcome: str,
                        act_recap: str, task_summary: str, final_reply: str,
-                       base, tool_call_id: str) -> list[MemoryEvent]:
+                       base, tool_call_id: str, switched: bool = False) -> list[MemoryEvent]:
     """finish 对的槽位事件。close 合成与 bg 事后重写共用，保证两处形态永远一致。
 
     `final_reply` 非空 → **三槽**：
@@ -246,6 +246,12 @@ def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outco
             blob_refs=placeholder_refs(content),
         )
 
+    if switched:
+        return [
+            turn(_recap_block(act_recap), base, "assistant", {}),
+            turn("[Task switched; terminal review] " + report,
+                 base + timedelta(microseconds=1), "assistant", {}),
+        ]
     if reply:
         return [
             turn(_recap_block(act_recap), base, "assistant", {}),

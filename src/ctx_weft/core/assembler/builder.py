@@ -350,13 +350,15 @@ def _prompt_facts(context) -> dict[str, Any]:
     )
     if template_name == "observe":
         ctx.update(
+            switch_reason=getattr(task, "switch_reason", ""),
+            terminal_only=bool(getattr(request.intent, "terminal_only", False)),
             evaluation_role=role if judge_task else "",
             summary_principles=getattr(compact, "text", "") if compact else "",
         )
         boundary = extra.get("observe_boundary") or "normal"
         supported_boundaries = {
             "actor_done", "finish", "finish_park", "normal", "plain_text",
-            "max_turns", "context_limit", "interrupt", "dispatch", "mechanical",
+            "max_turns", "context_limit", "interrupt", "dispatch", "mechanical", "task_switch",
         }
         ref = task_label(task) if getattr(task, "id", None) else ""
         outputs = getattr(task, "outputs", None)

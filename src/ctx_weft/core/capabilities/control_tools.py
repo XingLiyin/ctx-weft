@@ -48,6 +48,7 @@ _SKIP: frozenset[str] = frozenset({"ctx"})
 # Qualified (LLM-facing) names for the built-in control tools. Use these anywhere
 # a control tool is named to the LLM (prompts, docstrings shown as descriptions).
 FINISH_TASK_NAME = qualify(f"{PROVIDER_NAME}:finish_task")
+SWITCH_TASK_NAME = qualify(f"{PROVIDER_NAME}:switch_task")
 DELEGATE_TASK_NAME = qualify(f"{PROVIDER_NAME}:delegate_task")
 DELEGATE_PLAN_NAME = qualify(f"{PROVIDER_NAME}:delegate_plan")
 ASK_USER_NAME = qualify(f"{PROVIDER_NAME}:ask_user")
@@ -190,7 +191,7 @@ def delegate_task(
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Delegate ONE new sub-task to run separately; the current task suspends until its sub-tasks finish. To finish your OWN task instead, use control__finish_task."""
+    """Delegate ONE new sub-task to run separately; the current task suspends until its sub-tasks finish. To finish your OWN task instead, use control__finish_task. To replace the user goal, use control__switch_task."""
     from ctx_weft.core.models.task import Task as TaskModel
 
     if ctx is None or ctx.task_manager is None or ctx.task is None:
@@ -232,6 +233,71 @@ def delegate_task(
     # spec: task-handoff——回执带标题 + id：id 是模型后续审核/引用的稳定句柄，标题让
     # 它对得上自己刚派的是哪一个。
     return ControlResult(content=f"Sub-task {task_ref(child)} scheduled.")
+
+
+@control_tool(purposes=["act"])
+def switch_task(
+    title: Annotated[str, "Short title for the new task"],
+    description: Annotated[str, "Goal and scope of the new task; describe WHAT, not orchestration"],
+    task_prompt: Annotated[str, "The replacement instruction and necessary context"],
+    target_task_id: Annotated[str, "OLD task to replace. Empty means current task. Only current task or its ancestors; never a sibling, unrelated, or terminal task."] = "",
+    reason: Annotated[str, "Why the goal is being replaced. Required when targeting an ancestor; not a verdict on completion."] = "",
+    *,
+    ctx: ControlContext = None,
+) -> ControlResult:
+    """Replace the current task or an ancestor and its unfinished descendants with a new task in the same parent position. Old tasks receive terminal background review. Do not use for follow-ups, temporary interruptions, or parallel additions. Call alone."""
+    import asyncio
+    from copy import deepcopy
+
+    from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
+    from ctx_weft.core.models.task import Task as TaskModel
+
+    if ctx is None or ctx.task_manager is None or ctx.task is None:
+        raise ValueError("switch_task requires an active task and TaskManager")
+    target = ctx.task
+    requested_id = target_task_id.strip() or target.id
+    seen: set[str] = set()
+    while target.id != requested_id:
+        if target.id in seen or not target.parent_task_id:
+            raise ValueError("target_task_id must identify the current task or one of its ancestors")
+        seen.add(target.id)
+        target = ctx.task_manager.get_task(target.parent_task_id)
+        if target is None:
+            raise ValueError("Target ancestor is unavailable")
+    if target.session_id != ctx.session_id or target.tenant_id != ctx.task.tenant_id:
+        raise ValueError("Target must belong to the same session and tenant")
+    if target.status in TERMINAL_TASK_STATUSES or target.status == "REVIEWING" or target.switched_to_task_id:
+        raise ValueError("The target task is already terminal or being replaced")
+    if target.id != ctx.task_id and not reason.strip():
+        raise ValueError("reason is required when replacing an ancestor")
+    if not all(value.strip() for value in (title, description, task_prompt)):
+        raise ValueError("title, description and task_prompt must be nonempty")
+    if ctx.task.switch_requested:
+        raise ValueError("A task switch is already pending")
+    settings = deepcopy(target.settings) if isinstance(target.settings, NormalTaskSettings) else NormalTaskSettings()
+    settings.spawn_titles = []
+    settings.skill_name = ""
+    if target.assigned_agent_id:
+        settings.inherit_memory = False  # The replacement reuses this agent's existing memory.
+    settings.inherit_from_agent_id = target.assigned_agent_id or ctx.agent_id
+    new_task = TaskModel(
+        id=generate_id("tsk"), session_id=ctx.session_id, status="PENDING",
+        tenant_id=target.tenant_id, parent_task_id=target.parent_task_id,
+        creator_agent_id=target.creator_agent_id or ctx.agent_id,
+        assigned_agent_id=target.assigned_agent_id or ctx.agent_id,
+        title=title, description=description, user_prompt=task_prompt,
+        origin_tool_call_id=(target.origin_tool_call_id if target.parent_task_id else ctx.tool_call_id) or None,
+        origin_tool_name=(target.origin_tool_name if target.parent_task_id else SWITCH_TASK_NAME),
+        unattended=target.unattended, port_key=target.port_key,
+        dag_deps=list(target.dag_deps), priority=target.priority,
+        settings=settings, created_at=now_utc(),
+        replaces_task_id=target.id, switch_reason=reason.strip(),
+    )
+    ctx.task_manager.stage_task(new_task, parent_task_id=target.parent_task_id, owner_task_id=ctx.task_id)
+    ctx.task.switch_review_ready = asyncio.Event()
+    ctx.task.switch_requested = True
+    ctx.task.actor_done = True
+    return ControlResult(content=f"Switch requested: replace {task_ref(target)} with {task_ref(new_task)}. The new task will start next.")
 
 
 @control_tool(purposes=["act"])
@@ -332,7 +398,7 @@ def finish_task(
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Finish the CURRENT task and hand off to review — call ONLY when the task goal is fully achieved; if work remains, keep working instead. Write your final reply to the user as your normal message text in this same turn — that message IS the reply shown to the user and the deliverable handed off; this tool just ends the task. The optional `deliverables_summary` is a brief recap of concrete artifacts for the reviewer, NOT your answer. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that)."""
+    """Finish the CURRENT task and hand off to review — call ONLY when the task goal is fully achieved; if work remains, keep working instead. Write your final reply to the user as your normal message text in this same turn — that message IS the reply shown to the user and the deliverable handed off; this tool just ends the task. The optional `deliverables_summary` is a brief recap of concrete artifacts for the reviewer, NOT your answer. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that). If the user replaces the current goal, use control__switch_task instead."""
     if ctx is not None and ctx.task is not None:
         # task.outputs 由 ActStep 收尾时合成（收尾回合正文 + deliverables_summary，spec 2026-07-01）；
         # 此处不写 outputs。actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe。

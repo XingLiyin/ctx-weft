@@ -66,6 +66,9 @@ class TaskView:
     # 认不出自己的派发框，子任务 close 时既不闭合父的 ack、也不合成 finish 对（胶囊丢失）。
     # memory 侧另有 child_task_id 做一等事实，本字段是 in-run 快捷路径 + 存量数据回退。
     origin_tool_call_id: str = ""
+    replaces_task_id: str = ""
+    switched_to_task_id: str = ""
+    switch_reason: str = ""
     origin_tool_name: str = ""
     settings_raw: dict[str, Any] = field(default_factory=dict)
     dag_deps: list[str] = field(default_factory=list)

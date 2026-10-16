@@ -115,6 +115,7 @@ class TaskManager:
         self._session: Session | None = None  # 注入后供 failure_counter 维护使用
         self._event_bus: "EventBus | None" = event_bus
         self._background_asyncio_tasks: set[asyncio.Task] = set()
+        self._session_done_waiter: asyncio.Task | None = None
         #: 一次性接线的 7 个回调（见 hooks.py）。整体替换，不逐字段合并。
         self._hooks = TaskManagerHooks()
         # spec: event-commit：会话存储健康检查（runtime 注入；None = 无健康面）。
@@ -207,7 +208,7 @@ class TaskManager:
 
         for t in all_tasks:
             self._tasks[t.id] = t
-            if t.parent_task_id:
+            if t.parent_task_id and not t.switched_to_task_id:
                 self._parent_map[t.id] = t.parent_task_id
                 self._children_of.setdefault(t.parent_task_id, set()).add(t.id)
 
@@ -220,7 +221,7 @@ class TaskManager:
             return
 
         for t in all_tasks:
-            if t.status in TERMINAL_TASK_STATUSES:
+            if t.status in TERMINAL_TASK_STATUSES or t.status == "REVIEWING":
                 continue
             if isinstance(t.settings, (CompactTaskSettings, MetadataFillerTaskSettings)):
                 continue  # obsolete ephemeral helpers — never re-scheduled (recovery is condition-based)
@@ -631,13 +632,16 @@ class TaskManager:
         task: Task,
         blocked_by: list[str] | None = None,
         parent_task_id: str | None = None,
+        *,
+        owner_task_id: str | None = None,
     ) -> None:
         """把子任务投入当前 run 的缓冲区，延迟到 _flush_staged 才真正入队。
 
-        与 push_task 同签名；调度顺序问题（同批次 FIFO）由 _flush_staged 统一处理。
-        缓冲按 parent_task_id 分桶，避免 max_concurrent>1 时并发 run 的 spawn 串台。
+        调度顺序问题（同批次 FIFO）由 _flush_staged 统一处理。
+        owner_task_id 指定负责 flush 的 run；默认沿用 parent_task_id。
+        切换任务时 owner 是旧任务，parent 为空，新任务从创建起就是独立 root。
         """
-        key = parent_task_id or ""
+        key = owner_task_id or parent_task_id or ""
         self._staged.setdefault(key, []).append((task, blocked_by, parent_task_id))
         logger.debug("TaskManager.stage_task: %s under parent=%s", task.id, key)
 
@@ -672,6 +676,9 @@ class TaskManager:
         相对更早批次仍是 LIFO（深度优先）。
         """
         staged = self._staged.pop(task_id, None)
+        owner = self._tasks.get(task_id)
+        if staged and owner is not None and owner.switched_to_task_id:
+            staged = [entry for entry in staged if entry[0].id == owner.switched_to_task_id]
         if not staged:
             return
         if self._pause_abandon or self._cancelled:
@@ -817,6 +824,8 @@ class TaskManager:
             # 上一轮的挂起意图不得带进这一轮：父任务被子任务唤醒后重跑，若 delegate 置的
             # suspend_requested 还留着，ActStep 会再路由去 SuspendStep、父永远醒不过来。
             task.suspend_requested = False
+            task.switch_requested = False
+            task.switch_review_ready = None
 
         # ── 阶段 1：装配（assemble）────────────────────────────────────────
         # 失败发生在 TASK_STARTED 之前 → 投影不会出现幽灵 ACTIVE；与执行失败
@@ -1002,9 +1011,79 @@ class TaskManager:
             # 的 root 发协作取消，那次取消的 CANCELED 不得盖回已写定的 FAILED。run 侧的
             # 同一守卫是 `_run_loop` 的 cancel_takes_effect（它据此决定发不发 RUN_CANCELED）。
             return task.status
+        if task is not None and task.switched_to_task_id:
+            return task.status  # A replaced run cannot overwrite its review or final verdict.
+        if outcome.kind is RunOutcomeKind.TASK_SWITCHED:
+            return await self._apply_task_switch(task_id)
         disp = self._decide_and_write(task_id, outcome)
         await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload)
         return disp.status
+
+    async def _apply_task_switch(self, caller_id: str) -> str:
+        staged = self._staged.get(caller_id, [])
+        if len(staged) != 1 or not staged[0][0].replaces_task_id:
+            raise ValueError("Task switch requires one staged replacement")
+        successor = staged[0][0]
+        target = self._tasks[successor.replaces_task_id]
+        affected: set[str] = set()
+        pending = [target.id]
+        while pending:
+            tid = pending.pop()
+            if tid in affected:
+                continue
+            task = self._tasks[tid]
+            if task.status in TERMINAL_TASK_STATUSES or task.switched_to_task_id:
+                continue
+            affected.add(tid)
+            pending.extend(self._children_of.get(tid, ()))
+        if caller_id not in affected:
+            raise ValueError("Switch target no longer contains the caller")
+        # Freeze the whole branch before any await. Late runs must preserve REVIEWING.
+        for tid in affected:
+            task = self._tasks[tid]
+            task.status = "REVIEWING"
+            task.switch_requested = True
+            task.switched_to_task_id = successor.id
+            task.switch_reason = successor.switch_reason
+            task.next_step_hint = None
+            self._queue.cancel(tid)
+            if tid != caller_id:
+                self._staged.pop(tid, None)
+            parent = self._parent_map.pop(tid, None)
+            if parent:
+                self._children_of.get(parent, set()).discard(tid)
+        if successor.parent_task_id:
+            self._children_of.setdefault(successor.parent_task_id, set()).add(successor.id)
+        self._tasks[successor.id] = successor
+        rewired: dict[str, list[str]] = {}
+        for task in self._tasks.values():
+            if task.id not in affected and affected.intersection(task.dag_deps):
+                task.dag_deps = list(dict.fromkeys(
+                    successor.id if dep in affected else dep for dep in task.dag_deps))
+                rewired[task.id] = task.dag_deps
+        self._queue.replace_dependencies(affected, successor.id)
+        successor.dag_deps = [dep for dep in successor.dag_deps if dep not in affected]
+        await self._emit(EventType.TASK_REVIEWING, task_id=caller_id, payload={
+            "reason": "user_topic_switch", "switch_reason": successor.switch_reason,
+            "replaced_task_ids": sorted(affected), "rewired_dependencies": rewired,
+            "successor": task_payload(successor, user_prompt_jsonable=successor.user_prompt),
+        })
+        for tid in affected - {caller_id}:
+            await self._emit(EventType.TASK_REVIEWING, task_id=tid, payload={
+                "reason": "user_topic_switch",
+                "switch_reason": successor.switch_reason,
+                "successor": task_payload(successor, user_prompt_jsonable=successor.user_prompt),
+            })
+        for tid in affected:
+            if self._hooks.retire_switched_input is not None:
+                await self._hooks.retire_switched_input(self._tasks[tid])
+        for tid in affected - {caller_id}:
+            if tid in self._running_tasks:
+                if self._hooks.cancel_inflight is not None:
+                    self._hooks.cancel_inflight(tid)
+            else:
+                await self._settle(tid, "REVIEWING")
+        return "REVIEWING"
 
     def _decide_and_write(self, task_id: str, outcome: RunOutcome) -> "Disposition":
         """结局 → 处置，并就地把状态写进 task。**纯同步、不发事件**。
@@ -1044,6 +1123,9 @@ class TaskManager:
         finalize: "Callable[[], Awaitable[None]] | None" = None,
     ) -> bool:
         """**带外判决**：一条不属于任何活跃 run 的结局（2026-09-22）。
+
+        切换后的 REVIEWING 只接受 success / fail，两者都进入终态收尾。
+        下述「只有 success 收尾、其余维持 park」专指 AWAITING_HUMAN。
 
         唯一调用方是后台 observe：park 之后 run 就地结束了（`_cold_park` 抛 `HitlPark`
         释放协程），它判完时这个 task 没有任何 run 在跑，`_close_report` 那条「同 run 内
@@ -1085,13 +1167,18 @@ class TaskManager:
         """
         async with self._lock:
             task = self._tasks.get(task_id)
-            if task is None or task.status != "AWAITING_HUMAN":
+            if task is None or task.status not in ("AWAITING_HUMAN", "REVIEWING"):
                 logger.info(
                     "out-of-band verdict rejected for task %s (status=%s): it is no longer "
                     "parked — the user spoke first",
                     task_id, getattr(task, "status", "<missing>"),
                 )
                 return False
+            terminal_only = task.status == "REVIEWING"
+            if terminal_only and outcome.verdict not in ("success", "fail"):
+                return False
+            if terminal_only:
+                task.switch_requested = True
             if process_report:
                 task.process_report = process_report
                 task.process_report_at = now_utc()
@@ -1103,7 +1190,7 @@ class TaskManager:
             verdict = normalize_verdict(outcome.verdict) if outcome.verdict else ""
             if verdict:
                 task.observer_outcome = verdict
-            if verdict != VERDICT_SUCCESS:
+            if verdict != VERDICT_SUCCESS and not terminal_only:
                 # retry / fail → 维持 park。字段已写（hint 供下一轮 act 用），但不转移
                 # 状态：观察者说「没做完」时，在有人在场的会话里该由人决定下一步。
                 logger.info(
@@ -1112,7 +1199,13 @@ class TaskManager:
                     verdict, task_id,
                 )
                 return True
+            if terminal_only:
+                task.error = outcome.error or None
+                task.error_code = outcome.error_code or None
+                task.next_step_hint = None
             disp = self._decide_and_write(task_id, outcome)
+            if terminal_only:
+                disp.payload["reason"] = "user_topic_switch"
 
         if finalize is not None:
             try:
@@ -1132,6 +1225,17 @@ class TaskManager:
         出口逻辑与旧路径逐字相同，只是判据从「loop 写进 task.status 的值」换成了
         「处置表算出来的状态」。
         """
+        if status == "REVIEWING":
+            async with self._lock:
+                self._release_slot(task_id)
+            task = self._tasks.get(task_id)
+            if task is not None and task.switch_review_ready is not None:
+                task.switch_review_ready.set()
+            if task is not None and not task.switch_review_started and self._hooks.review_switched_task is not None:
+                task.switch_review_started = True
+                await self._hooks.review_switched_task(task)
+            await self.drain()
+            return
         if status in _PARKED_STATUSES:
             # 子任务已由 control tool 推入队列；parent 等待所有子任务完成后
             # 由 _try_resume_parent 重新入队，此处只需移出 running set 并 drain。
@@ -1436,7 +1540,7 @@ class TaskManager:
 
         # ── failure_counter 维护 ──────────────────────────────────────────────
         if self._session is not None:
-            if status == "FAILED":
+            if status == "FAILED" and not (task and task.switch_requested):
                 self._session.failure_counter += 1
                 self._recent_failures.append((
                     # 标题 + id：这份清单会被渲进 root 的 finish 对（runtime 的阈值收尾），
@@ -1452,7 +1556,7 @@ class TaskManager:
                 ):
                     await self._trip_failure_threshold()
                     return
-            elif status == "FINISHED":
+            elif status == "FINISHED" and not (task and task.switch_requested):
                 self._session.failure_counter = 0  # 成功时重置
                 self._recent_failures.clear()  # 随 counter 同步清空
             elif status == "CANCELED":
@@ -1783,7 +1887,7 @@ class TaskManager:
 
     def _blocked_or_interrupted(self) -> bool:
         """还有非终态停顿的任务在等人/等 /resume——会话不算走完。"""
-        return any(t.status in _PARKED_STATUSES for t in self._tasks.values())
+        return any(t.status in _PARKED_STATUSES or t.status == "REVIEWING" for t in self._tasks.values())
 
     async def _fire_session_idle(self) -> None:
         """会话空闲挂起（park/suspend，非终结）：通知 runtime 回收 per-run 控制信号。
@@ -1803,6 +1907,11 @@ class TaskManager:
         2026-09-04（Task 12）起不再报队列状态——`announce_queue_state` 已停发
         （events-v2 §5），幂等因此全靠 `_on_session_done` 侧的回收本身幂等。
         """
+        # Reviews must not await one another during terminal settlement.
+        if asyncio.current_task() in self._background_asyncio_tasks:
+            if self._session_done_waiter is None or self._session_done_waiter.done():
+                self._session_done_waiter = asyncio.create_task(self._fire_session_done())
+            return
         # 等待所有后台协程完成，确保 RecognizeIntent 等事件全部 emit 后再关闭 SSE 流
         if self._background_asyncio_tasks:
             await asyncio.gather(*list(self._background_asyncio_tasks), return_exceptions=True)
@@ -1909,7 +2018,7 @@ class TaskManager:
         紧随其后的这次调用会对同一个 hitl_id 重复发 `TaskHumanResolved`——配对就不再是一对一。
         """
         t = self._tasks.get(task_id)
-        if t is None or t.status in TERMINAL_TASK_STATUSES:
+        if t is None or t.status in TERMINAL_TASK_STATUSES or t.status == "REVIEWING":
             return
         if task_id in self._running_tasks:
             return
@@ -1951,7 +2060,7 @@ class TaskManager:
         requeued: list[str] = []
         for t in self._tasks.values():
             if (t.id in terminal or t.id in self._running_tasks or t.id in queued
-                    or t.id in parked
+                    or t.id in parked or t.status == "REVIEWING"
                     or isinstance(t.settings, (CompactTaskSettings, MetadataFillerTaskSettings))):
                 continue
             if t.status == "SUSPENDED":
@@ -1996,7 +2105,7 @@ class TaskManager:
         交给调用方，见 `_resume_in_existing_tm` / `_try_resume_parent` 的既有先例）。
         """
         t = self._tasks.get(task_id)
-        if t is None or t.status in _TERMINAL_STATUSES:
+        if t is None or t.status in _TERMINAL_STATUSES or t.status == "REVIEWING":
             return False
         if task_id in self._running_tasks:
             return False
@@ -2178,6 +2287,9 @@ def task_payload(task: Task, *, user_prompt_jsonable: "str | list[dict] | None")
             "unattended": task.unattended,
             "port_key": task.port_key,
             "origin_tool_call_id": task.origin_tool_call_id or "",
+            "replaces_task_id": task.replaces_task_id,
+            "switched_to_task_id": task.switched_to_task_id,
+            "switch_reason": task.switch_reason,
             "origin_tool_name": task.origin_tool_name or "",
             "settings": settings_d,
             "result": None,

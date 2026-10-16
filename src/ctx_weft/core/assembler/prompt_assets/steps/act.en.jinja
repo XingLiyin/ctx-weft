@@ -26,7 +26,7 @@
 {{ state.review_note }}
 
 {% endif %}Call `{{ finish_task }}` ONLY once the task goal is fully achieved — if work remains, keep working instead of finishing. To finish, write the final reply to the user as your normal message text and call it in that same turn; the message text is the reply and the deliverable, not the tool arguments (details in the tool description).{% if state.attended %} Someone is there: a plain-text reply keeps the task open and hands the floor to them — the right move mid-conversation; finish only when the whole request is served.{% endif %}{% if state.unattended %} No one is there to read a reply: a prose answer alone does not end this task and nobody will follow up on it. When the goal is achieved you must call it in the same turn as your final reply, or this task will just be run again until its attempt limit runs out.{% endif %}{% if state.unattended_others %} Do not start the other tasks yourself.{% endif %}
-If the user's latest message is an unrelated NEW request, emit `{{ finish_task }}` AND `{{ delegate_task }}` together in ONE response — finishing alone would lose the new request.
+When a new instruction replaces a goal, call `{{ switch_task }}` alone. target_task_id identifies the OLD task: empty means current task, or use an ancestor ID to replace that entire branch (root ID for the whole root goal). Supply reason when targeting an ancestor. The new task takes the old parent position; old unfinished tasks receive terminal review. Never target siblings, unrelated tasks, or completed tasks. Follow-ups, temporary interruptions, and parallel additions are not replacements.
 Need information or a decision only the user can provide? Call `{{ ask_user }}` instead of guessing.
 {%- endmacro %}
 

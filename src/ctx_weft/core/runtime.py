@@ -1861,6 +1861,10 @@ class CtxWeftRuntime:
             cancel_pending_hitl=lambda sid=session.id: self._cancel_session_hitl(
                 sid, message=CancelReason.FAILURE_THRESHOLD),
             cancel_inflight=lambda tid, sid=session.id: self._cancel_run_token(sid, tid),
+            review_switched_task=lambda task, sess=session, tm=task_manager: self._relaunch_task_recap(
+                session=sess, task_manager=tm, task=task,
+                agent_id=task.assigned_agent_id or task.creator_agent_id or sess.root_agent_id or "", boundary="task_switch"),
+            retire_switched_input=self._retire_switched_input,
             # 丢弃一轮时把 TM 够不到的两样东西撤回来：memory 里那条用户消息、
             # 被这条消息收口的旧 HITL 气泡。见 `_revert_round`。
             revert_round=lambda tid, sid=session.id: self._revert_round(sid, tid),
@@ -2282,7 +2286,15 @@ class CtxWeftRuntime:
         }
         tm.requeue_resumable(parked)
         await tm.dispose_blocked_dependents()
-        for tid, info in prepared[2].items():
+        pending_recaps = dict(prepared[2])
+        for task in tm.all_tasks():
+            if task.status == "REVIEWING":
+                task.switch_requested = True
+                pending_recaps[task.id] = {
+                    "boundary": "task_switch",
+                    "agent_id": task.assigned_agent_id or task.creator_agent_id or session.root_agent_id,
+                }
+        for tid, info in pending_recaps.items():
             task = tm.get_task(tid)
             if task is not None:
                 await self._relaunch_task_recap(
@@ -2338,6 +2350,16 @@ class CtxWeftRuntime:
         return settled
 
     # ── 熔断真终结（Task 10 runtime 侧）───────────────────────────────────────
+
+    async def _retire_switched_input(self, task: Task) -> None:
+        for req in list(self.hitl_registry.list_pending(session_id=task.session_id)):
+            if req.task_id == task.id:
+                try:
+                    await self.hitl.cancel(req.id, message="Task goal replaced")
+                except PersistenceUnavailableError:
+                    raise
+                except Exception:
+                    logger.exception("Failed to retire replaced task input %s", req.id)
 
     async def _cancel_session_hitl(self, session_id: str, *, message: CancelReason) -> None:
         """取消该 session 全部未决 pending HITL（best-effort，逐个 cancel）。两个调用方：
@@ -3321,7 +3343,7 @@ class CtxWeftRuntime:
         task = tm.get_task(task_id)
         if task is None:
             return True
-        return task.status in TERMINAL_TASK_STATUSES
+        return task.status in TERMINAL_TASK_STATUSES or task.status == "REVIEWING"
 
     async def _inject_user_turn(
         self, task_id: str, content: "str | list[ContentPart]", *, session_id: str,
@@ -4832,7 +4854,7 @@ class CtxWeftRuntime:
             # CANCELED。本 run 不再写 task.status（Task 4：状态归 TM），故把「本来会不会
             # 翻成 CANCELED」记成局部量给下面 RUN_CANCELED 的守卫用；task 侧的同一守卫
             # 长在 TaskManager 的处置入口（终态已坐实 → 不应用 run 的结局）。
-            cancel_takes_effect = task.status not in TERMINAL_TASK_STATUSES
+            cancel_takes_effect = task.status not in TERMINAL_TASK_STATUSES and not task.switched_to_task_id
             # 取消来源（总账 A3 剩下的一条）：token 是本 runtime 的协作取消；否则是外部
             # asyncio 取消（进程 shutdown / `wait_for` 超时）。二者产生同一个
             # `CancelledError`，只有 token 自己能区分。`cancel_token` 不是 `_run_loop`

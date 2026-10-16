@@ -62,6 +62,9 @@ class TaskManagerHooks:
     #: TASK_CANCELED 由 run 结束后的 `apply_run_outcome` 发；root 由 trip 序列先标 FAILED。
     cancel_inflight: "Callable[[str], bool] | None" = None
 
+    review_switched_task: "Callable[[Task], Coroutine[Any, Any, None]] | None" = None
+    retire_switched_input: "Callable[[Task], Coroutine[Any, Any, None]] | None" = None
+
     #: 「撤销这一轮里**不属于 TM** 的那部分」（两阶段提交的丢弃路径，spec 2026-09-09）。
     #: 由 `discard_round` / `abandon_round` 在关窗**之前**调用：`hitl.release` 把这一轮
     #: 收下的答复退回 pending，并清暂停闩锁。memory 不在其列——这一轮的写入只在快照的

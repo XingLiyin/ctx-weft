@@ -47,6 +47,11 @@ class ReviewIntent:
     """Observe the latest segment; judgement is optional."""
 
     judge_task: bool = True
+    terminal_only: bool = False
+
+    def __post_init__(self) -> None:
+        if self.terminal_only and not self.judge_task:
+            raise ValueError("terminal_only requires judge_task")
 
 
 @dataclass(frozen=True)
@@ -279,7 +284,8 @@ class ContextAssembler:
         from ctx_weft.core.assembler.sources.capability import build_llm_tools
 
         capabilities = [block.value for block in context.get("capabilities")]
-        return build_llm_tools(capabilities, context.request.purpose)
+        return build_llm_tools(capabilities, context.request.purpose,
+                               terminal_only=bool(getattr(context.request.intent, "terminal_only", False)))
 
     def _install_live_tools(
         self,
@@ -297,7 +303,8 @@ class ContextAssembler:
         task_id = getattr(request.task, "id", "") or request.scope.task_id
         purpose = request.purpose
         prompt.tools_fn = lambda: build_llm_tools(
-            cache.available(agent_id, task_id), purpose)
+            cache.available(agent_id, task_id), purpose,
+            terminal_only=bool(getattr(request.intent, "terminal_only", False)))
 
     async def _collect(self, source: ContextSource, request: ContextRequest) -> list[ContextBlock]:
         blocks: list[ContextBlock] = []

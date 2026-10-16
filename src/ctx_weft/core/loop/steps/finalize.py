@@ -391,7 +391,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     # 判据只看 parent_task_id + mem_content：origin_tool_call_id 是瞬态字段，重启重建后为 None，
     # 曾经把它写进条件 → 跨重启收尾的子任务整段 bubble 被跳过（父的 ack 停在 running、finish 对
     # 不合成 = 胶囊丢失），而末段 raw 照删。配对 id 现由框自己给出，不再需要它当门槛。
-    if task.parent_task_id and mem_content:
+    if task.parent_task_id and mem_content and not getattr(task, "switched_to_task_id", ""):
         parent_scope = _parent_scope_of(state, task)
         # 框通常已由 ensure_dispatch_frame_at_start（子 start 时）铸好，_ensure_dispatch_frame 在此
         # 幂等命中；仅对没走过 start 钩子的路径（旧数据 / start 与 close 之间崩溃）才真正补铸。
@@ -426,7 +426,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                 raw_fold_scope=raw_fold_scope, final_reply=final_reply)
 
     # 2) 自身 finish 对：own root（session 根或跨 agent 根）close 时无条件在 own scope 合成
-    if is_own_root and mem_content:
+    if (is_own_root or getattr(task, "switched_to_task_id", "")) and mem_content:
         await _synthesize_dispatch_pair(memory, state.scope, task, act_recap, task_summary, outcome,
                                         ctx.provider_ctx, raw_fold_scope=raw_fold_scope,
                                         final_reply=final_reply)
@@ -535,6 +535,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
         title=task.title or "", outcome=outcome, act_recap=act_recap,
         task_summary=task_summary, final_reply=embed_reply, base=base,
         tool_call_id=tool_call_id,
+        switched=getattr(task, "switch_requested", False),
     ):
         await memory.ingest(event, provider_ctx)
 
@@ -637,6 +638,7 @@ def task_finalized_event(state, task, *, outcome: str):
         state, EventType.TASK_FINALIZED,
         payload={
             "task_id": task.id,
+            **({"reason": "user_topic_switch"} if getattr(task, "switch_requested", False) else {}),
             "outcome": outcome,
             "outputs": {
                 "output": (extra.get("final_body", "") or deliverable) if deliverable else "",

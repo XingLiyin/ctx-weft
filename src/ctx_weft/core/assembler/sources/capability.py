@@ -32,9 +32,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def build_llm_tools(caps: list[Capability], purpose: str) -> list[LLMTool]:
+def build_llm_tools(caps: list[Capability], purpose: str, *, terminal_only: bool = False) -> list[LLMTool]:
     """Build the frozen LLM tool snapshot for one purpose."""
-    return [
+    tools = [
         LLMTool(
             name=qualify(cap.id),
             description=cap.description,
@@ -43,6 +43,26 @@ def build_llm_tools(caps: list[Capability], purpose: str) -> list[LLMTool]:
         for cap in caps
         if isinstance(cap, ToolCapability) and purpose in cap.purposes
     ]
+
+    if terminal_only:
+        from copy import deepcopy
+
+        from ctx_weft.core.capabilities.control_tools import REPORT_OBSERVATION_NAME
+
+        for tool in tools:
+            if tool.name != REPORT_OBSERVATION_NAME:
+                continue
+            tool.input_schema = deepcopy(tool.input_schema)
+            props = tool.input_schema.get("properties", {})
+            if "task_status" in props:
+                props["task_status"] = {"type": "string", "enum": ["success", "fail"],
+                                        "description": "Final verdict on the old goal; continue is not allowed."}
+                props.get("next_step_hint", {}).update(description="Leave empty: the old task will not resume.")
+                props["task_failure_reason"] = {"type": "string", "description": "Required for fail: explain the unfinished original goal and the user topic switch. Empty for success."}
+                required = tool.input_schema.setdefault("required", [])
+                if "task_status" not in required:
+                    required.append("task_status")
+    return tools
 
 
 class CapabilitySource:

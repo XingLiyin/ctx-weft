@@ -31,6 +31,7 @@ __all__ = ["Disposition", "RunOutcome", "RunOutcomeKind", "disposition_for"]
 class RunOutcomeKind(StrEnum):
     """一次 run 是怎么结束的。**run 自己的词表**，不是 task 状态。"""
 
+    TASK_SWITCHED = "task_switched"
     COMPLETED = "completed"                        # step 链跑到头，带 observer 判决
     AWAITING_HUMAN = "awaiting_human"              # HITL 冷 park
     SUSPENDED_ON_CHILDREN = "suspended_on_children"  # 等子任务
@@ -94,6 +95,9 @@ def disposition_for(
       `task.error`（对应这里的 `outcome.error`）。未耗尽的 retry 分支同样先
       `task.retry_count += 1` 再把新值写进 payload。
     """
+    if outcome.kind is RunOutcomeKind.TASK_SWITCHED:
+        return Disposition("REVIEWING", "TaskReviewing", {"reason": "user_topic_switch"})
+
     if outcome.kind is RunOutcomeKind.AWAITING_HUMAN:
         return Disposition("AWAITING_HUMAN", "TaskAwaitingHuman",
                            {"hitl_id": outcome.hitl_id})
