@@ -22,6 +22,8 @@ class QueryResult(Generic[T]):
 
 @dataclass(frozen=True)
 class InitializationReport:
+    """Host-side aggregate of explicitly selected session initialization results."""
+
     checked_sessions: int
     interrupted_session_ids: list[str]
     interrupted_task_ids: list[str]
@@ -48,6 +50,7 @@ class SessionStateSummary:
 class SessionInitializationResult:
     """An initialization-time cut, including sessions requiring no new repairs.
 
+    Returned to concurrent first callers only; repeat initialization returns None.
     This is not a live query cache. A fresh runtime reconstructs these results
     even when an earlier process committed repairs but lost its host projection.
     """

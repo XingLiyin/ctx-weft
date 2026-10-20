@@ -1,4 +1,5 @@
 """Recover real non-close folds and failed HITL commits without losing application work."""
+
 import asyncio
 
 import pytest
@@ -8,9 +9,10 @@ from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderC
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
-from tests.integration.test_lifecycle_crash_boundaries import run_worker, restart
-from tests.integration.test_observe_lifecycle_crashes import assert_lifecycles
+from tests._initialization import initialize_all
 from tests.integration._lifecycle_crash_worker import make_lifecycle_runtime
+from tests.integration.test_lifecycle_crash_boundaries import restart, run_worker
+from tests.integration.test_observe_lifecycle_crashes import assert_lifecycles
 
 pytestmark = pytest.mark.asyncio
 
@@ -29,7 +31,7 @@ async def recover_and_drain(store, memory, mode, snapshot):
 async def assert_cold_recovery_is_noop(store, memory, mode, root):
     head = await store.committed_head("crash-session")
     again, _ = make_lifecycle_runtime(store, memory, mode)
-    await again.initialize()
+    await initialize_all(again)
     await again.recover_agent(root, session_id="crash-session")
     tm = again._task_managers["crash-session"]
     while tm._background_asyncio_tasks:

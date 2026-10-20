@@ -6,17 +6,21 @@ import os
 import sys
 from pathlib import Path
 
+from tests._initialization import initialize_all
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from ctx_weft import SessionStartParams
-from ctx_weft.protocols import LLMChunk, ToolCall, MemoryKind, MemoryScope
+from ctx_weft.protocols import LLMChunk, MemoryKind, MemoryScope, ToolCall
 from ctx_weft.protocols.events import EventType, PersistenceUnavailableError
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests.integration.test_minimal_loop import (
-    InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
 )
 from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
 
@@ -96,8 +100,8 @@ async def worker(directory, mode, cut, recovering=False):
             report_waiting = asyncio.Event()
             observe_calls = []
             if mode == "mechanical" or handoff:
-                from ctx_weft.core.loop.steps.observe import ObserveStep
                 from ctx_weft.core.loop.driver import ExecutionMode
+                from ctx_weft.core.loop.steps.observe import ObserveStep
                 original_execute = ObserveStep.execute
                 async def assert_single_background(self, state, ctx):
                     assert ctx.execution.mode == ExecutionMode.BACKGROUND
@@ -124,8 +128,8 @@ async def worker(directory, mode, cut, recovering=False):
                         os._exit(73)
                     finalize_module.synthesize_cancel_closure = crash_cancel
             if "late_subscribe" in mode and not recovering:
-                from ctx_weft.core.loop.steps.observe import ObserveStep
                 from ctx_weft.core.loop.steps.finalize import FinalizeStep
+                from ctx_weft.core.loop.steps.observe import ObserveStep
                 class FinishError(OSError):
                     retriable = False
                 async def fail_finalize(self, state, ctx):
@@ -153,8 +157,8 @@ async def worker(directory, mode, cut, recovering=False):
                 TaskManager.apply_run_outcome = release_before_disposition
 
             if handoff and not recovering and "cancel" not in mode and "late_subscribe" not in mode:
-                from ctx_weft.core.loop.steps.observe import ObserveStep
                 from ctx_weft.core.loop.steps.finalize import FinalizeStep
+                from ctx_weft.core.loop.steps.observe import ObserveStep
                 if "early" in mode:
                     original_finalize = FinalizeStep.execute
                     async def ordered_finalize(self, state, ctx):
@@ -290,7 +294,7 @@ async def worker(directory, mode, cut, recovering=False):
                 return receipt
 
             store.append_batch = crash_after_commit
-            await rt.initialize()
+            await initialize_all(rt)
             if recovering:
                 session = await rt.get_session("crash-session")
                 await rt.recover_agent(session.data.root_agent_id, session_id="crash-session")

@@ -1,8 +1,11 @@
 """Exit after a real input commit, or while its recovery writes are in progress."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -11,8 +14,8 @@ from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests._snapshot_helpers import seed_snapshot
-from tests.integration.test_user_journey_audit import JourneyLLM, SID, answer, idle
 from tests.integration.test_foreground_observe_interrupt import runtime
+from tests.integration.test_user_journey_audit import SID, JourneyLLM, answer, idle
 
 
 async def run(path, entry, snapshot, recovering):
@@ -28,12 +31,12 @@ async def run(path, entry, snapshot, recovering):
                         os._exit(73)
                     return result
                 memory.ingest = ingest
-                await rt.initialize()
+                await initialize_all(rt)
                 await rt.rebuild_session(SID, strict=True)
                 aid = rt._task_managers[SID].session.root_agent_id
                 await rt.recover_agent(aid, session_id=SID)
             else:
-                await rt.initialize()
+                await initialize_all(rt)
                 h = await rt.start_session(SessionStartParams.create(session_id=SID,
                     template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
                     context_limit=100000))

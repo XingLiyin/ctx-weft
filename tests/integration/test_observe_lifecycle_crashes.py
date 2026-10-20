@@ -1,4 +1,5 @@
 """All four observe stages on actual foreground and recap execution paths."""
+
 import asyncio
 
 import pytest
@@ -7,8 +8,9 @@ from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
-from tests.integration.test_lifecycle_crash_boundaries import run_worker, restart
+from tests._initialization import initialize_all
 from tests.integration._lifecycle_crash_worker import make_lifecycle_runtime
+from tests.integration.test_lifecycle_crash_boundaries import restart, run_worker
 
 pytestmark = pytest.mark.asyncio
 
@@ -91,7 +93,7 @@ async def test_foreground_and_recap_real_crash(tmp_path, mode, snapshot, cut):
                            (turn.metadata.get("tool_calls") or [])) for turn in turns) == 1
             head = await store.committed_head("crash-session")
             again, _ = make_lifecycle_runtime(store, memory, mode)
-            await again.initialize()
+            await initialize_all(again)
             await again.recover_agent(root, session_id="crash-session")
             assert await store.committed_head("crash-session") == head
 
@@ -125,7 +127,7 @@ async def test_crash_again_while_applying_foreground_result(tmp_path, mode, snap
             assert sum(r.event.type == EventType.TASK_FINISHED for r in rows) == 1
             head = await store.committed_head("crash-session")
             again, _ = make_lifecycle_runtime(store, memory, mode)
-            await again.initialize()
+            await initialize_all(again)
             await again.recover_agent(root, session_id="crash-session")
             assert await store.committed_head("crash-session") == head
 

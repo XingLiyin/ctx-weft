@@ -32,6 +32,7 @@ from ctx_weft.protocols import (
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 
 pytestmark = pytest.mark.asyncio
 
@@ -233,7 +234,7 @@ async def run_until_outage():
                            config=RuntimeConfig(llm_self_heal_max_attempts=1))
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     _handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="hi")
     return state

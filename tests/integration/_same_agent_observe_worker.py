@@ -1,8 +1,11 @@
 """Crash the real delegate/observe/finalize path for same-agent children."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -12,10 +15,14 @@ from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.protocols import ToolCall
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
-from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests.integration.test_dispatch_boundary_recap_e2e import _RouterLLM
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 
 class ChildLLM(_RouterLLM):
@@ -110,7 +117,7 @@ async def worker(path, order, size, cut, recovering=False):
                         await finalized.wait()
                     return await original_observe(self, state, ctx, events)
                 ObserveStep._llm_observe = ordered_report
-            await rt.initialize()
+            await initialize_all(rt)
             if recovering:
                 from ctx_weft.core.control.reducers import rebuild_view
                 view = await rebuild_view(store, "child-session")

@@ -10,7 +10,6 @@ from collections.abc import AsyncIterator
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime, ProviderRegistry
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.protocols import (
     AgentCapability,
     AgentCapabilityProvider,
@@ -19,12 +18,14 @@ from ctx_weft.protocols import (
     CapabilityRef,
     IdentityFacet,
     LoopConfig,
+    MemoryAddress,
     MemoryConfig,
     MemoryEventType,
-    MemoryAddress,
     ProviderContext,
 )
+from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 
 
 class InlineAgentTemplateProvider(AgentCapabilityProvider):
@@ -120,7 +121,7 @@ async def test_minimal_echo_loop() -> None:
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     # ── Run ──────────────────────────────────────────────────────────────────
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo",
         user_prompt="say hello",
@@ -182,7 +183,7 @@ async def test_prompt_structure_matches_miniagents() -> None:
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     _handle, _state = await runtime.run_single_task(
         template_id="agent:tpl_echo",
         user_prompt="hello there",

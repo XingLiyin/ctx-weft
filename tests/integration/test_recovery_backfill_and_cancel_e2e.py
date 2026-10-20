@@ -26,6 +26,7 @@ from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import all_events, append_one
+from tests._initialization import initialize_all
 from tests.integration.test_hitl_e2e_v2 import _ActRouterLLM, _poll
 from tests.integration.test_hitl_hot_reply_round_window_e2e import (
     STALL_BEFORE_CHUNK,
@@ -93,10 +94,10 @@ async def test_answered_reply_is_injected_even_while_another_question_is_pending
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.rebuild_session(SID)
     with suppress_observe_start():
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.recover_agent(AID)
         await asyncio.sleep(0.3)
 
@@ -119,14 +120,14 @@ async def test_answered_reply_is_injected_even_while_another_question_is_pending
 async def test_cancel_session_closes_open_rounds_and_finalizes_claimed_replies() -> None:
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1"))
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
@@ -134,7 +135,7 @@ async def test_cancel_session_closes_open_rounds_and_finalizes_claimed_replies()
     assert tm.is_round_open(q1.task_id) and rt.hitl_registry.get(q1.id).claim_pending, (
         "前提：这条应答收下了、那一轮还开着（LLM 没开口）")
 
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.cancel_session(sid) is True
     await asyncio.sleep(0.4)
 
@@ -152,13 +153,13 @@ async def test_cancel_session_closes_open_rounds_and_finalizes_claimed_replies()
 async def test_forget_session_refuses_while_a_round_is_open() -> None:
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1"))
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
@@ -177,7 +178,7 @@ async def test_quiescence_accounts_for_open_rounds_and_claimed_replies() -> None
     """
     llm = _ScriptedLLM([MockResponse(text="all done", tool_calls=[])])
     rt = _runtime(llm)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
@@ -186,7 +187,7 @@ async def test_quiescence_accounts_for_open_rounds_and_claimed_replies() -> None
     wait = await _poll(lambda: [p for p in rt.hitl_registry.list_pending(session_id=sid)
                                 if p.form == "wait"] or None)
     task_id, agent_id = wait[0].task_id, wait[0].agent_id
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.cancel_session(sid) is True
     await _poll(lambda: rt.session_is_quiescent(sid) or None, timeout=8.0)
 

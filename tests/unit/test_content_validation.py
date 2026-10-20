@@ -1,10 +1,12 @@
+
 import base64
 
 import pytest
 
-from ctx_weft.core.utils.content import content_has_image, validate_content
 from ctx_weft.core.models.errors import InvalidContentError
+from ctx_weft.core.utils.content import content_has_image, validate_content
 from ctx_weft.protocols import ImagePart, TextPart
+from tests._initialization import initialize_all
 
 _PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 100).decode()
 
@@ -153,7 +155,7 @@ async def test_run_single_task_rejects_image_before_persisting_anything_without_
     )
 
     with pytest.raises(BlobStoreRequiredError):
-        await runtime.initialize()
+        await initialize_all(runtime)
         await runtime.run_single_task(
             template_id="agent:tpl_echo",
             user_prompt=[TextPart(text="看这张图"), ImagePart(data=_PNG, media_type="image/png")],
@@ -191,7 +193,7 @@ async def test_start_session_plain_text_does_not_eagerly_resolve_llm():
     runtime = make_runtime(agent_provider=templates)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -231,7 +233,7 @@ async def test_start_session_plain_text_resolver_never_called():
 
     runtime._resolve_llm = _counting_resolve
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -277,7 +279,7 @@ async def test_start_session_dict_text_does_not_eagerly_resolve_llm():
     runtime._resolve_llm = _counting_resolve
 
     with pytest.raises(InvalidContentError):
-        await runtime.initialize()
+        await initialize_all(runtime)
         await runtime.start_session(
             SessionStartParams.create(
                 template_id="agent:tpl_echo",

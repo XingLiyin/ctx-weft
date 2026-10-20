@@ -297,6 +297,10 @@ class SnapshotWriter:
         # `serialize_view`：那个函数的语义是「全字段序列化」，一堆往返测试依赖它不丢东西；
         # 裁剪是快照写入侧的策略，显式一步、可单独测。契约因此是
         # `blob == serialize_view(prune(fold(0..C)))`，见 `prune_view_for_snapshot`。
+        current_task_statuses = {
+            agent.current_task_id: view.tasks[agent.current_task_id].status
+            for agent in view.agents.values() if agent.current_task_id in view.tasks
+        }
         view = prune_view_for_snapshot(view)
         # ── 落盘：一条 `StateSnapshot` 事件 ──────────────────────────────────
         # **不经 EventBus，直接 `append_batch`**：走 bus 会投给 SSE 转译 / 投影更新器 /
@@ -314,7 +318,8 @@ class SnapshotWriter:
             # `view` 在上面第 243 行已经裁过（`prune_view_for_snapshot`）——裁剪是写入策略，
             # 编码器不碰它。
             payload=snapshot_event_payload(
-                view, cut=head, chain_depth=depth, reason=reason),
+                view, cut=head, chain_depth=depth, reason=reason,
+                current_task_statuses=current_task_statuses),
         )
         await self._store.append_batch(
             session_id, f"snapshot:{session_id}:{head}", [snap_event])

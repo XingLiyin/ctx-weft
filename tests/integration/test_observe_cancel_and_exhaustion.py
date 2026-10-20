@@ -1,14 +1,19 @@
 """Cancellation ownership and exhausted mechanical reports on real runtime paths."""
+
 import pytest
 
 from ctx_weft.core.control.reducers import rebuild_view, reduce_events
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests.integration.test_lifecycle_crash_boundaries import run_worker
-from tests.integration.test_observe_application_recovery import recover_and_drain, assert_cold_recovery_is_noop
-from tests.integration.test_single_observe_recovery import stored_content, baseline
+from tests.integration.test_observe_application_recovery import (
+    assert_cold_recovery_is_noop,
+    recover_and_drain,
+)
 from tests.integration.test_observe_lifecycle_crashes import assert_lifecycles
+from tests.integration.test_single_observe_recovery import baseline, stored_content
 
 pytestmark = pytest.mark.asyncio
 
@@ -105,8 +110,9 @@ async def test_exhaustion_after_real_retry_keeps_terminal_report(tmp_path, tmp_p
 
 async def test_public_cancel_does_not_overwrite_an_already_committed_verdict(tmp_path, monkeypatch):
     import asyncio
-    from ctx_weft import SessionStartParams
+
     import ctx_weft.core.loop.steps.observe as observe
+    from ctx_weft import SessionStartParams
     from tests.integration._lifecycle_crash_worker import make_lifecycle_runtime
     committed = asyncio.Event()
     release = asyncio.Event()
@@ -119,7 +125,7 @@ async def test_public_cancel_does_not_overwrite_an_already_committed_verdict(tmp
     async with open_sqlite_event_store(tmp_path / "events.db") as store:
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             rt, _ = make_lifecycle_runtime(store, memory, "finish_park")
-            await rt.initialize()
+            await initialize_all(rt)
             handle = await rt.start_session(SessionStartParams.create(
                 session_id="crash-session", template_id="agent:tpl_echo", user_prompt="work", context_limit=100000))
             await asyncio.wait_for(committed.wait(), 10)

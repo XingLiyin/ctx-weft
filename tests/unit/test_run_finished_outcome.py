@@ -14,13 +14,13 @@ fixture（仓里不存在），改用与 Task 2 的 `test_loop_reports_outcome.p
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from ctx_weft.protocols.events import EventType
+from tests._initialization import initialize_all
 
 pytestmark = pytest.mark.asyncio
 
@@ -65,7 +65,7 @@ async def _events_from_outage() -> list:
 
     runtime._event_bus.emit = _spy
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
     return seen
 
@@ -75,9 +75,9 @@ async def _events_from_park() -> list:
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import ProviderRegistry
+    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.loop.signals import HitlPark
-    from ctx_weft.core.capabilities.cache import CapabilityCache
     from ctx_weft.core.models.agent import Agent, LoopGuard
     from ctx_weft.core.models.session import Session
     from ctx_weft.core.models.task import Task
@@ -156,7 +156,7 @@ async def _events_from_normal() -> list:
 
     runtime._event_bus.emit = _spy
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="say hello")
     return seen
 
@@ -167,8 +167,8 @@ async def _events_from_cancel() -> list:
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import ProviderRegistry
-    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.capabilities.cache import CapabilityCache
+    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.models.agent import Agent, LoopGuard
     from ctx_weft.core.models.session import Session
     from ctx_weft.core.models.task import Task
@@ -228,8 +228,8 @@ async def _events_from_crash(exc: BaseException) -> tuple[list, BaseException]:
     from collections.abc import AsyncIterator
 
     from ctx_weft.core import ProviderRegistry
-    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.capabilities.cache import CapabilityCache
+    from ctx_weft.core.loop.driver import LoopContext, LoopState, StepOutcome
     from ctx_weft.core.models.agent import Agent, LoopGuard
     from ctx_weft.core.models.session import Session
     from ctx_weft.core.models.task import Task

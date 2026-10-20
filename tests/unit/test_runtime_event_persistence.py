@@ -33,6 +33,7 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.events import Event
 from ctx_weft.providers.events.store.sql import SqlEventStore, open_sqlite_event_store
+from tests._initialization import initialize_all
 
 
 class _StubAgents(AgentCapabilityProvider):
@@ -83,7 +84,7 @@ async def _sql_store(tmp_path) -> AsyncIterator[SqlEventStore]:
 async def test_runtime_persists_events_into_the_injected_sql_store(tmp_path) -> None:
     async with _sql_store(tmp_path) as store:
         runtime = CtxWeftRuntime(providers=_make_registry(), event_store=store)
-        await runtime.initialize()
+        await initialize_all(runtime)
 
         assert runtime.event_store is store  # 不是内部默认的 InMemoryEventStore
 
@@ -110,7 +111,7 @@ async def test_no_double_write_via_attach_persistence_single_entry_point(
 
     async with _sql_store(tmp_path) as store:
         runtime = CtxWeftRuntime(providers=_make_registry(), event_store=store)
-        await runtime.initialize()
+        await initialize_all(runtime)
 
         with caplog.at_level(logging.ERROR):
             await runtime.event_bus.emit(_ev(1, "SessionCreated"))
@@ -124,14 +125,14 @@ async def test_no_double_write_via_attach_persistence_single_entry_point(
 
 
 from ctx_weft.core.models.config import RuntimeConfig
-from tests._snapshot_helpers import latest_snapshot
 from tests._event_helpers import all_events
+from tests._snapshot_helpers import latest_snapshot
 
 
 async def test_snapshot_every_n_zero_means_no_snapshot_writer(tmp_path) -> None:
     async with _sql_store(tmp_path) as store:
         runtime = CtxWeftRuntime(providers=_make_registry(), event_store=store)
-        await runtime.initialize()
+        await initialize_all(runtime)
         assert runtime.persistence.snapshot_writer is None
 
 
@@ -140,7 +141,7 @@ async def test_snapshot_every_n_positive_attaches_and_writes_snapshot(tmp_path) 
         runtime = CtxWeftRuntime(
             providers=_make_registry(), event_store=store, snapshot_every_n=1
         )
-        await runtime.initialize()
+        await initialize_all(runtime)
         assert runtime.persistence.snapshot_writer is not None
 
         await runtime.event_bus.emit(_ev(1, "SessionCreated"))
@@ -165,7 +166,7 @@ async def test_detach_stops_persistence(tmp_path) -> None:
         runtime = CtxWeftRuntime(
             providers=_make_registry(), event_store=store,
             config=RuntimeConfig(event_commit_policy="best_effort"))
-        await runtime.initialize()
+        await initialize_all(runtime)
 
         await runtime.event_bus.emit(_ev(1, "SessionCreated"))
         assert len(await all_events(store, "s1")) == 1
@@ -182,7 +183,7 @@ async def test_required_mode_persists_via_gate_not_persister(tmp_path) -> None:
     detach 句柄是空壳，事件照常落库（先确认提交、再通知）。"""
     async with _sql_store(tmp_path) as store:
         runtime = CtxWeftRuntime(providers=_make_registry(), event_store=store)
-        await runtime.initialize()
+        await initialize_all(runtime)
         assert runtime.persistence.persister is None
 
         await runtime.event_bus.emit(_ev(1, "SessionCreated"))

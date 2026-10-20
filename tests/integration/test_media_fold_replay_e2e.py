@@ -44,10 +44,9 @@ from typing import Any
 
 import pytest
 
-from ctx_weft.core.utils.content import content_to_jsonable
-from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.media.refs import find_image_placeholders
 from ctx_weft.core.runtime import SessionStartParams
+from ctx_weft.core.utils.content import content_to_jsonable
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
     ImagePart,
@@ -65,18 +64,19 @@ from ctx_weft.protocols.capability import (
     ToolCapability,
     ToolCapabilityProvider,
 )
-from ctx_weft.protocols.events import EventBlobStore
+from ctx_weft.protocols.events import Event, EventBlobStore, EventType
 from ctx_weft.protocols.memory import MemoryBlobStore
 from ctx_weft.providers.blob.fs import FsBlobStore
 from ctx_weft.providers.llm.anthropic import AnthropicMultimodalAdapter
 from ctx_weft.providers.llm.openai import _TOOL_IMAGE_NOTICE, OpenAIMultimodalAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events, append_one
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import all_events, append_one
 
 # 两张**不同**的真字节图。全链路上任何一处把 A 和 B 弄混、或把 ref 解成别的 blob，
 # 逐字节断言都会当场炸——这正是不用「非空/不以 blob: 开头」做判据的理由。
@@ -404,7 +404,7 @@ async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
     # 至于「取回的图还在不在视图里」：2026-09-28 起一律**不在**——root 的收尾也过前台 observe，
     # 判决带真摘要 → `_close_one` 当场折末段 raw。看那一刻之前的状态用
     # `_view_before_close_fold`（见 `_FoldSnapshottingMemory`），不要靠时序去蹲。
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_prompt() if prompt is None else prompt,
@@ -957,9 +957,9 @@ async def test_recovery_converts_event_refs_into_memory_refs(runtime_with_images
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session(sid)
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent(aid)
 
     tm = runtime._task_managers[sid]
@@ -1066,11 +1066,11 @@ async def test_restore_task_prompts_isolates_one_bad_task_and_logs_error(
     for e in events:
         await append_one(runtime.event_store, e)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session(sid)
     import logging
     with caplog.at_level(logging.ERROR, logger="ctx_weft.core.runtime"):
-        await runtime.initialize()
+        await initialize_all(runtime)
         await runtime.recover_agent(aid)  # 必须不抛——整场恢复不能因一个 task 坏数据而死
 
     tm = runtime._task_managers[sid]

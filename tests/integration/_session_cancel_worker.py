@@ -1,8 +1,11 @@
 """Public session cancellation at real stream, commit and retraction boundaries."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -14,8 +17,16 @@ from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests._event_helpers import all_events
-from tests.integration.test_hitl_hot_reply_round_window_e2e import _ScriptedLLM, _ask, _next_question
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests.integration.test_hitl_hot_reply_round_window_e2e import (
+    _ask,
+    _next_question,
+    _ScriptedLLM,
+)
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
 
 SID = "user-cancel"
@@ -50,7 +61,7 @@ async def worker(path, mode, cut):
                     return receipt
                 memory.ingest = ingest
                 rt = runtime(store, memory, _FinishEveryTaskLLM(), recovering=True)
-                await rt.initialize()
+                await initialize_all(rt)
                 await rt.rebuild_session(SID, strict=True)
                 raise AssertionError("recovery did not repair the missing committed input")
             llm = _ScriptedLLM([_ask("q", "What should I do?")]) if mode == "hot" else _FinishEveryTaskLLM()
@@ -71,7 +82,7 @@ async def worker(path, mode, cut):
                     return response()
                 llm.complete = hold_metadata
             rt = runtime(store, memory, llm)
-            await rt.initialize()
+            await initialize_all(rt)
             async def background_finished(event):
                 if event.type == "RunFinished" and event.origin == "loop.recognize_intent":
                     metadata_finished.set()

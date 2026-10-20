@@ -40,16 +40,23 @@ import asyncio
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.protocols.events import EventType
+from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import LLMOutageError, ToolCall
+from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import (
-    MockLLMAdapter, MockResponse, is_observer_request,
+    MockLLMAdapter,
+    MockResponse,
+    is_observer_request,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests._initialization import initialize_all
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -260,7 +267,7 @@ async def test_outage_then_resume_completes():
     runtime._event_bus.emit = _spy
 
     # ── Initial run (uses start_session so SESSION_CREATED is persisted) ──────
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(_new_params())
     session_id = handle.session_id
 
@@ -306,7 +313,7 @@ async def test_outage_then_resume_completes():
 
     # ── Resume with healthy LLM ────────────────────────────────────────────────
     # recover_agent() returns None; drain runs as asyncio background task.
-    await runtime.initialize()
+    await initialize_all(runtime)
     result = await runtime.recover_agent(root_agent_id)
     assert result is None  # confirm the API contract (returns None)
 
@@ -366,7 +373,7 @@ async def test_idempotent_outage_resume_completes():
     runtime._event_bus.emit = _spy
 
     # ── First run → outage → SUSPENDED ────────────────────────────────────────
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(_new_params())
     session_id = handle.session_id
 
@@ -401,7 +408,7 @@ async def test_idempotent_outage_resume_completes():
 
     # ── First resume → second outage → still SUSPENDED ────────────────────────
     seen.clear()
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent(root_agent_id)
 
     # Wait until the second outage fires: poll the spy list for the new
@@ -436,7 +443,7 @@ async def test_idempotent_outage_resume_completes():
 
     # ── Second resume → healthy LLM → FINISHED ────────────────────────────────
     seen.clear()
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent(root_agent_id)
     await _wait_for_task_finished(runtime, session_id)
 

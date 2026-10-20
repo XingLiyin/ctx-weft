@@ -18,6 +18,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import overload
 
 from sqlalchemy import and_, cast, exists, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -27,7 +28,9 @@ from ctx_weft.protocols.events import (
     CommitReceipt,
     Event,
     EventConflictError,
+    EventReadProjection,
     EventStore,
+    ProjectedStoredEvent,
     StoredEvent,
 )
 from ctx_weft.providers._sqlalchemy import make_session_factory
@@ -37,6 +40,8 @@ from ctx_weft.providers.events.store.sql.models import (
     EventModel,
     SessionHeadModel,
 )
+
+from .projection import projected_columns, row_to_projected
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +83,8 @@ class SqlEventStore(EventStore):
         两个连接争用同会话时天然串行化。batch 表主键承担幂等与并发下的最终判定：竞态
         重放撞 PK → 回滚后走比对路径（原 receipt / EventConflictError）。
         """
+        if any(not isinstance(event, Event) for event in events):
+            raise TypeError("Only complete Event records can be appended")
         if not events:
             raise ValueError("append_batch: empty batch")
         for e in events:
@@ -199,6 +206,7 @@ class SqlEventStore(EventStore):
 
     # ── 读 ────────────────────────────────────────────────────────────────────
 
+    @overload
     async def read_range(
         self,
         session_id: str,
@@ -209,7 +217,35 @@ class SqlEventStore(EventStore):
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
         related_task_id: str = "",
-    ) -> list[StoredEvent]:
+        projection: None = None,
+    ) -> list[StoredEvent]: ...
+
+    @overload
+    async def read_range(
+        self,
+        session_id: str,
+        *,
+        after_position: int = 0,
+        through_position: int | None = None,
+        include_types: tuple[str, ...] = (),
+        exclude_types: tuple[str, ...] = (),
+        task_id: str = "",
+        related_task_id: str = "",
+        projection: EventReadProjection,
+    ) -> list[ProjectedStoredEvent]: ...
+
+    async def read_range(
+        self,
+        session_id: str,
+        *,
+        after_position: int = 0,
+        through_position: int | None = None,
+        include_types: tuple[str, ...] = (),
+        exclude_types: tuple[str, ...] = (),
+        task_id: str = "",
+        related_task_id: str = "",
+        projection: EventReadProjection | None = None,
+    ) -> list[StoredEvent] | list[ProjectedStoredEvent]:
         """按 position 升序读 (after, through]；只含已提交（position 非空）的事件。
 
         四个过滤器的语义见协议。`task_id` 那条的 OR-NULL 安全阀是**故意**的，改动前先看那边
@@ -258,18 +294,35 @@ class SqlEventStore(EventStore):
                     and_(EventModel.type == "TaskReviewing",
                          or_(successor_id == tid, replaced, rewired)),
                 ))
+            columns = projected_columns(projection) if projection is not None else [EventModel]
             result = await db.execute(
-                select(EventModel).where(*conds).order_by(EventModel.position))
+                select(*columns).where(*conds).order_by(EventModel.position))
+            if projection is not None:
+                return [row_to_projected(row) for row in result.mappings()]
             return [StoredEvent(event=_row_to_event(r), position=r.position)
                     for r in result.scalars().all()]
 
+    @overload
     async def read_last_of_type(
-        self, session_id: str, type_: str,
-    ) -> "StoredEvent | None":
+        self, session_id: str, type_: str, *,
+        projection: None = None,
+    ) -> StoredEvent | None: ...
+
+    @overload
+    async def read_last_of_type(
+        self, session_id: str, type_: str, *,
+        projection: EventReadProjection,
+    ) -> ProjectedStoredEvent | None: ...
+
+    async def read_last_of_type(
+        self, session_id: str, type_: str, *,
+        projection: EventReadProjection | None = None,
+    ) -> StoredEvent | ProjectedStoredEvent | None:
         """取该会话最后一条指定类型的已提交事件（position 最大）。只读一条。"""
         async with self._factory() as db:
+            columns = projected_columns(projection) if projection is not None else [EventModel]
             result = await db.execute(
-                select(EventModel)
+                select(*columns)
                 .where(
                     EventModel.session_id == session_id,
                     EventModel.type == str(type_),
@@ -278,6 +331,9 @@ class SqlEventStore(EventStore):
                 .order_by(EventModel.position.desc())
                 .limit(1)
             )
+            if projection is not None:
+                row = result.mappings().one_or_none()
+                return row_to_projected(row) if row is not None else None
             row = result.scalar_one_or_none()
             if row is None:
                 return None

@@ -11,15 +11,18 @@
 from __future__ import annotations
 
 import asyncio
+from typing import overload
 
 from ctx_weft.protocols.events import (
     CommitReceipt,
     Event,
     EventConflictError,
+    EventReadProjection,
     EventStore,
+    ProjectedStoredEvent,
     StoredEvent,
 )
-
+from ctx_weft.providers.events.store.projection import project_stored_event
 
 # ── InMemoryEventStore ────────────────────────────────────────────────────────
 
@@ -54,6 +57,8 @@ class InMemoryEventStore(EventStore):
 
         **不过滤瞬态事件**（spec 2026-08-29 §6.4）：那是订阅策略，归 EventPersister。
         """
+        if any(not isinstance(event, Event) for event in events):
+            raise TypeError("Only complete Event records can be appended")
         if not events:
             raise ValueError("append_batch: empty batch")
         for e in events:
@@ -106,6 +111,7 @@ class InMemoryEventStore(EventStore):
 
     # ── 读 ────────────────────────────────────────────────────────────────────
 
+    @overload
     async def read_range(
         self,
         session_id: str,
@@ -116,7 +122,35 @@ class InMemoryEventStore(EventStore):
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
         related_task_id: str = "",
-    ) -> list[StoredEvent]:
+        projection: None = None,
+    ) -> list[StoredEvent]: ...
+
+    @overload
+    async def read_range(
+        self,
+        session_id: str,
+        *,
+        after_position: int = 0,
+        through_position: int | None = None,
+        include_types: tuple[str, ...] = (),
+        exclude_types: tuple[str, ...] = (),
+        task_id: str = "",
+        related_task_id: str = "",
+        projection: EventReadProjection,
+    ) -> list[ProjectedStoredEvent]: ...
+
+    async def read_range(
+        self,
+        session_id: str,
+        *,
+        after_position: int = 0,
+        through_position: int | None = None,
+        include_types: tuple[str, ...] = (),
+        exclude_types: tuple[str, ...] = (),
+        task_id: str = "",
+        related_task_id: str = "",
+        projection: EventReadProjection | None = None,
+    ) -> list[StoredEvent] | list[ProjectedStoredEvent]:
         """四个过滤器的语义见协议；`task_id` 的 OR-NULL 安全阀与 SQL 侧逐字同口径。"""
         want = {str(t) for t in include_types}
         skip = {str(t) for t in exclude_types}
@@ -145,17 +179,30 @@ class InMemoryEventStore(EventStore):
                     related |= tid in (p.get("rewired_dependencies") or {})
                 if not related:
                     continue
-            out.append(se)
+            out.append(project_stored_event(se, projection) if projection is not None else se)
         return out
 
+    @overload
     async def read_last_of_type(
-        self, session_id: str, type_: str,
-    ) -> "StoredEvent | None":
+        self, session_id: str, type_: str, *,
+        projection: None = None,
+    ) -> StoredEvent | None: ...
+
+    @overload
+    async def read_last_of_type(
+        self, session_id: str, type_: str, *,
+        projection: EventReadProjection,
+    ) -> ProjectedStoredEvent | None: ...
+
+    async def read_last_of_type(
+        self, session_id: str, type_: str, *,
+        projection: EventReadProjection | None = None,
+    ) -> StoredEvent | ProjectedStoredEvent | None:
         """取该会话最后一条指定类型的事件（position 最大）。只读一条。"""
         want = str(type_)
         for se in reversed(self._stored.get(session_id, [])):
             if se.event.type == want:
-                return se
+                return project_stored_event(se, projection) if projection is not None else se
         return None
 
     async def committed_head(self, session_id: str) -> int:

@@ -1,13 +1,15 @@
 """Agent state and task dispatch remain separate during cancellation."""
+
 import asyncio
 
 import pytest
 
 from ctx_weft.core.models.task import Task
+from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON, AgentInput
 from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
-from ctx_weft.core.orchestrator.lifecycle.agent_state import AgentInput, AGENT_CANCEL_REASON
+from tests._initialization import initialize_all
 from tests.unit.test_out_of_band_verdict import _tm
-from tests.unit.test_runtime_agent_api import _rt, _plant
+from tests.unit.test_runtime_agent_api import _plant, _rt
 
 
 async def test_task_tree_scope_and_active_run_order():
@@ -54,7 +56,7 @@ async def test_failed_interruption_persistence_does_not_cancel_tasks(monkeypatch
     lm._agents["agent"].current_task_id = "task"
     tm = rt._task_managers["s1"]
     tm.register_task(Task(id="task", session_id="s1", status="AWAITING_HUMAN", assigned_agent_id="agent"))
-    await rt.initialize()
+    await initialize_all(rt)
     async def fail(event):
         raise OSError("interruption commit failed")
     monkeypatch.setattr(lm.event_bus, "emit", fail)
@@ -106,8 +108,12 @@ async def test_concurrent_cancel_finalizers_publish_one_completion():
 
 
 def test_snapshot_retains_unfinished_cancel_effects_and_their_ancestor():
+    from ctx_weft.core.control.reducers import (
+        deserialize_view,
+        prune_view_for_snapshot,
+        serialize_view,
+    )
     from ctx_weft.core.control.types import RunStateView, TaskView
-    from ctx_weft.core.control.reducers import prune_view_for_snapshot, serialize_view, deserialize_view
     view = RunStateView(run_id="", session_id="s1", task_id="", agent_id="")
     view.tasks["root"] = TaskView(id="root", session_id="s1", status="CANCELED", finalized=True,
                                   error=AGENT_CANCEL_REASON + "test")
@@ -132,7 +138,12 @@ async def test_durable_accepted_verdict_is_restored_before_interrupt_arbitration
 
 
 def test_interruption_cause_survives_new_agent_execution_in_task_projection():
-    from ctx_weft.core.control.reducers import reduce_events, serialize_view, deserialize_view, prune_view_for_snapshot
+    from ctx_weft.core.control.reducers import (
+        deserialize_view,
+        prune_view_for_snapshot,
+        reduce_events,
+        serialize_view,
+    )
     from ctx_weft.core.utils.event import new_event
     from ctx_weft.protocols.events import EventOrigin
     def event(kind, tid, payload):
@@ -203,7 +214,7 @@ async def test_repeated_cancel_of_cascaded_agent_does_not_select_unrelated_task(
     lm._agents["agent"].status_reason = "parent canceled"
     tm = rt._task_managers["s1"]
     tm.register_task(Task(id="unrelated", session_id="s1", status="PENDING", assigned_agent_id="agent"))
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.cancel_agent("agent") == []
     assert tm.get_task("unrelated").status == "PENDING"
 
@@ -223,6 +234,7 @@ async def test_active_cancel_commit_failure_keeps_nonterminal_state(monkeypatch)
 
 async def test_lost_cancel_receipt_reuses_committed_time_and_finalizes_once():
     from datetime import datetime, timezone
+
     from ctx_weft.core.control.types import TaskView
     from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
     tm, bus = _tm()

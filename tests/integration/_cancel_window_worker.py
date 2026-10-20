@@ -1,15 +1,18 @@
 """Crash real task dispatch and cancellation commits, retaining unrelated live work."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
 
+from tests._initialization import initialize_all
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+import ctx_weft.core.loop.steps.observe as observe
 from ctx_weft import SessionStartParams
 from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT, rebuild_view, reduce_events
-import ctx_weft.core.loop.steps.observe as observe
 from ctx_weft.core.runtime import _SessionTaskRunner
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
@@ -105,7 +108,7 @@ async def worker(path, stage, fault, recovering=False):
                     # snapshot has correctly pruned an already-finalized task.
                     history = reduce_events([r.event for r in await store.read_range("tree-session")], "")
                     grand = next(t.id for t in history.tasks.values() if str(t.user_prompt) == target_name)
-                await rt.initialize()
+                await initialize_all(rt)
                 await rt.recover_agent(root, session_id="tree-session")
                 raise AssertionError("recovery did not reach crash boundary")
 
@@ -135,7 +138,7 @@ async def worker(path, stage, fault, recovering=False):
                     await release.wait()
                 return result
             observe.prepare_foreground_observe = prepare
-            await rt.initialize()
+            await initialize_all(rt)
             handle = await rt.start_session(SessionStartParams.create(session_id="tree-session",
                 template_id="agent:tpl_echo", user_prompt="TREE ROOT", context_limit=100000, unattended=True))
             root = handle.agent_id

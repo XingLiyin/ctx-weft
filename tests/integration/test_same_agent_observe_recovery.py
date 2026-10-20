@@ -1,4 +1,5 @@
 """Same-agent child reports survive every handoff cut without losing the answer."""
+
 import asyncio
 import subprocess
 import sys
@@ -6,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from ctx_weft.core.control.reducers import rebuild_view, reduce_events, prune_view_for_snapshot
+from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view, reduce_events
 from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests._snapshot_helpers import seed_snapshot
 from tests.integration._same_agent_observe_worker import make_child_runtime
 from tests.integration.test_observe_lifecycle_crashes import assert_lifecycles
@@ -47,7 +49,7 @@ async def recover(store, memory, size, snapshot=False):
         await seed_snapshot(store, "child-session", prune_view_for_snapshot(await rebuild_view(store, "child-session")),
                             cut=await store.committed_head("child-session"))
     rt, llm = make_child_runtime(store, memory, size, recovering=True)
-    await rt.initialize()
+    await initialize_all(rt)
     root = (await rt.get_session("child-session")).data.root_agent_id
     await rt.recover_agent(root, session_id="child-session")
     tm = rt._task_managers["child-session"]

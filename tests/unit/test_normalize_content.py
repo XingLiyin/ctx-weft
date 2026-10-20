@@ -10,16 +10,17 @@ import hashlib
 
 import pytest
 
-from ctx_weft.core.utils.content import normalize_content, validate_content
 from ctx_weft.core.models.errors import InvalidContentError
+from ctx_weft.core.utils.content import normalize_content, validate_content
 from ctx_weft.protocols import (
     BLOB_REF_PREFIX,
-    MemoryBlobStore,
     ImagePart,
+    MemoryBlobStore,
     NullMemoryBlobStore,
     ProviderContext,
     TextPart,
 )
+from tests._initialization import initialize_all
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"x" * 100
 _PNG = base64.b64encode(_PNG_BYTES).decode()
@@ -262,7 +263,7 @@ async def test_rejected_content_never_reaches_blob_store():
     runtime = _make_runtime_with_store(store)
 
     with pytest.raises(InvalidContentError):
-        await runtime.initialize()
+        await initialize_all(runtime)
         await runtime.run_single_task(
             template_id="agent:tpl_echo",
             user_prompt=[TextPart(text="看"),
@@ -278,7 +279,7 @@ async def test_run_single_task_externalizes_valid_image():
     store = _CountingStore()
     runtime = _make_runtime_with_store(store)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     _handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo",
         user_prompt=[TextPart(text="看"), ImagePart(data=_PNG, media_type="image/png")],
@@ -301,7 +302,7 @@ async def test_run_single_task_plain_text_never_touches_store():
     store = _CountingStore()
     runtime = _make_runtime_with_store(store)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hello")
 
     assert store.put_calls == 0
@@ -319,7 +320,7 @@ async def test_start_session_externalizes_under_the_real_session_id():
     store = _CountingStore()
     runtime = _make_runtime_with_store(store)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=[TextPart(text="看"), ImagePart(data=_PNG, media_type="image/png")],
@@ -329,7 +330,7 @@ async def test_start_session_externalizes_under_the_real_session_id():
         assert store.put_calls == 1
         assert store.ctx_session_ids == [handle.session_id]
     finally:
-        await runtime.initialize()
+        await initialize_all(runtime)
         await runtime.cancel_session(handle.session_id)
 
 
@@ -340,7 +341,7 @@ async def test_start_session_plain_text_never_touches_store():
     store = _CountingStore()
     runtime = _make_runtime_with_store(store)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt="hello",
@@ -349,7 +350,7 @@ async def test_start_session_plain_text_never_touches_store():
     try:
         assert store.put_calls == 0
     finally:
-        await runtime.initialize()
+        await initialize_all(runtime)
         await runtime.cancel_session(handle.session_id)
 
 

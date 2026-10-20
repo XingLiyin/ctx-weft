@@ -1,9 +1,11 @@
 """Finish real work, crash its background judgement, then finish the user journey."""
+
 import pytest
 
 from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests._snapshot_helpers import seed_snapshot
 from tests.integration._lifecycle_crash_worker import make_lifecycle_runtime
 from tests.integration._session_cancel_worker import wait_until
@@ -24,7 +26,7 @@ async def test_finished_actor_background_judgement_preserves_result_and_allows_n
                 await seed_snapshot(store, SID, prune_view_for_snapshot(await rebuild_view(store, SID)),
                     cut=await store.committed_head(SID), overrides={"projection_version": 10})
             rt, llm = make_lifecycle_runtime(store, memory, mode)
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.rebuild_session(SID, strict=True)
             tm = rt._task_managers[SID]
             history = await store.read_range(SID, include_types=["TaskCreated"])

@@ -1,15 +1,18 @@
 """Exit immediately after real foreground-to-recap handoff commits."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ctx_weft import SessionStartParams
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
-from tests.integration.test_foreground_observe_interrupt import runtime, InterruptedReviewLLM, SID
+from tests.integration.test_foreground_observe_interrupt import SID, InterruptedReviewLLM, runtime
 from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
 
 
@@ -27,7 +30,7 @@ async def worker(path, cut, recovering):
                 return result
 
             store.append_batch = append
-            await rt.initialize()
+            await initialize_all(rt)
             if recovering:
                 await rt.rebuild_session(SID, strict=True)
                 root = rt._task_managers[SID].session.root_agent_id

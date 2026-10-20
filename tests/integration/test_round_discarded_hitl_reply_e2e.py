@@ -29,12 +29,13 @@ from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import all_events
 
 pytestmark = pytest.mark.asyncio
 
@@ -102,7 +103,7 @@ async def _user_texts(rt, session_id: str, agent_id: str, task_id: str) -> list[
 async def _wait_for_wait_bubble(rt, session_id: str, timeout: float = 5.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        await rt.initialize()
+        await initialize_all(rt)
         pending = [v for v in [item.data for item in await rt.list_pending_hitl(session_id=session_id)] if v.form == "wait"]
         if pending:
             return pending[0]
@@ -116,7 +117,7 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
         context_limit=_MOCK_CONTEXT_LIMIT)
     rt = _runtime(llm)
 
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi",
         context_limit=_MOCK_CONTEXT_LIMIT))
@@ -130,7 +131,7 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
 
     # ── 用户回答那个气泡，LLM 卡在首个 chunk 之前 ────────────────────────────
     llm.stalling = True
-    await rt.initialize()
+    await initialize_all(rt)
     view = await rt.reply_to_hitl(HitlReply(
         hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
         message=_RETRACTED))
@@ -139,7 +140,7 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     assert rt.hitl_registry.get(bubble.id).claim_pending is True
     assert rt.hitl_registry.get(bubble.id).resolved is False
     # 收下之后它就不该再出现在未决列表里 —— 否则 host 会让人对着刚答过的问题再答一次。
-    await rt.initialize()
+    await initialize_all(rt)
     assert bubble.id not in [v.id for v in [item.data for item in await rt.list_pending_hitl(session_id=sid)]]
 
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
@@ -151,7 +152,7 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     assert not any(e.run_id == replying_run_id or _RETRACTED in str(e.payload) for e in during), during
 
     # ── 按下暂停 ────────────────────────────────────────────────────────────
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session(sid) is True
     await asyncio.sleep(0.5)
 
@@ -176,7 +177,7 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     # ② 气泡回到 pending —— (a) 方案的核心：撤销之后 RAM 与日志都停在「人还没回答」
     req = rt.hitl_registry.get(bubble.id)
     assert req.claim_pending is False and req.resolved is False
-    await rt.initialize()
+    await initialize_all(rt)
     assert bubble.id in [v.id for v in [item.data for item in await rt.list_pending_hitl(session_id=sid)]], (
         "被撤销的那次应答之后，气泡必须重新出现在未决列表里，人才能重答"
     )
@@ -196,7 +197,7 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     # ⑥ 重答一次照常跑起来（会话没被这次撤销搞坏）
     llm.stalling = False
     retyped = "ok, a different question then"
-    await rt.initialize()
+    await initialize_all(rt)
     view2 = await rt.reply_to_hitl(HitlReply(
         hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
         message=retyped))
@@ -241,7 +242,7 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
         context_limit=_MOCK_CONTEXT_LIMIT)
     rt = _runtime(llm)
 
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi",
         context_limit=_MOCK_CONTEXT_LIMIT))
@@ -250,11 +251,11 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
     task_id = bubble.task_id
 
     llm.stalling = True
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(hitl_id=bubble.id, outcome="accepted",
                                      agent_id=bubble.agent_id, message=_RETRACTED))
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.pause_session(sid)
     await asyncio.sleep(0.5)
 
@@ -264,7 +265,7 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
     # ——这条测试曾经因此假绿过一次。
     rt._evict_session_memory(sid)
     rt.hitl_registry.forget_session(sid)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.rebuild_hitl(sid)
     rebuilt = rt.hitl_registry.get(bubble.id)
     assert rebuilt is not None, "重建之后这个气泡必须还在（撤销不发事件，日志里它仍是未决）"
@@ -274,7 +275,7 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
 
     llm.stalling = False
     retyped = "restart then retype"
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.reply_to_hitl(HitlReply(
         hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
         message=retyped)) is not None

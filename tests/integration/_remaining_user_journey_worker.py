@@ -1,9 +1,12 @@
 """Each stage runs in a separate operating-system process against the real stores."""
+
 import asyncio
 import json
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -26,7 +29,7 @@ async def main(path, scenario, variant, stage):
         async with open_sqlite_memory(path / "memory.db") as memory:
             provider = BoundaryStore(store, scenario, variant, stage)
             rt, llm, _tool = runtime(path, provider, memory, scenario, variant, stage)
-            await rt.initialize()
+            await initialize_all(rt)
             try:
                 if stage in {"hot", "prepare"}:
                     data = await prepare(rt, llm, path, store, scenario, variant, stage)

@@ -11,6 +11,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tests._initialization import initialize_all
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -19,14 +21,18 @@ from ctx_weft.core import CtxWeftRuntime  # noqa: E402
 from ctx_weft.core.runtime import SessionStartParams  # noqa: E402
 from ctx_weft.protocols import ToolCall  # noqa: E402
 from ctx_weft.protocols.capability import (  # noqa: E402
-    CapabilityEvent, CapabilityProviderInfo, ToolCapability,
+    CapabilityEvent,
+    CapabilityProviderInfo,
+    ToolCapability,
     ToolCapabilityProvider,
 )
 from ctx_weft.providers.events.store.sql.store import open_sqlite_event_store  # noqa: E402
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse  # noqa: E402
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory  # noqa: E402
 from tests.integration.test_minimal_loop import (  # noqa: E402
-    InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
 )
 
 TOOL_SLEEP_SEC = 3.0
@@ -110,7 +116,11 @@ class _RouterLLM(MockLLMAdapter):
 
 def _template():
     from ctx_weft.protocols import (
-        AgentTemplate, CapabilityRef, IdentityFacet, LoopConfig, MemoryConfig,
+        AgentTemplate,
+        CapabilityRef,
+        IdentityFacet,
+        LoopConfig,
+        MemoryConfig,
     )
     return AgentTemplate(
         id="tpl_verify", name="verify_agent", version="0.1.0",
@@ -149,7 +159,7 @@ async def ot05_worker(workdir: Path) -> dict:
         rt = make_runtime(llm=llm, agent_provider=resolver, event_store=store)
         rt.providers.register_capability(tool)
         rt.providers.register_memory(memory)
-        await rt.initialize()
+        await initialize_all(rt)
         handle = await rt.start_session(SessionStartParams.create(
             template_id="agent:tpl_verify", user_prompt="do the effect",
             context_limit=100_000))
@@ -174,7 +184,7 @@ async def ot05_recover(workdir: Path) -> dict:
         rt.providers.register_capability(tool)
         rt.providers.register_memory(memory)
         try:
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.recover_agent(ids["agent_id"])
         except Exception:
             pass  # 恢复期异常不影响判据：O-T05 只看外部副作用计数是否仍为 1
@@ -183,9 +193,6 @@ async def ot05_recover(workdir: Path) -> dict:
 
 
 import json  # noqa: E402
-
-
-
 
 if __name__ == "__main__":
     mode, wd = sys.argv[1], Path(sys.argv[2])

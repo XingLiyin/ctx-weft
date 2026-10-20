@@ -63,8 +63,8 @@ state 传递方式完全没在本 task 的改动清单里）。
 
 from __future__ import annotations
 
-import collections
 import asyncio
+import collections
 import inspect
 
 import pytest
@@ -74,6 +74,7 @@ from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -199,7 +200,7 @@ async def _two_turn_session():
 
     rt.event_bus.subscribe(None, recorder)
 
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
@@ -211,7 +212,7 @@ async def _two_turn_session():
         f"第一轮应以纯文本冷 park 收尾，实际 status={state.task.status if state else None}"
     )
 
-    await rt.initialize()
+    await initialize_all(rt)
     h2 = await rt.send_message(handle.agent_id, "second turn")
     assert h2.task_id == handle.task_id, (
         "第一轮以 AWAITING_HUMAN（非终态）收尾，send_message 应注入同一个 task，"

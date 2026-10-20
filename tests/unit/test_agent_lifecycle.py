@@ -8,10 +8,10 @@ import pytest
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.models.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
+from ctx_weft.core.models.task import Task
 from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager, _AgentRecord
 from ctx_weft.core.orchestrator.lifecycle.agent_state import AgentInput
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.models.task import Task
 from ctx_weft.protocols.events import (
     EVENT_TYPES,
     L_TIER_EVENT_TYPES,
@@ -656,7 +656,7 @@ def test_retired_session_types_not_emitted_in_core():
     for py in pathlib.Path("src/ctx_weft/core").rglob("*.py"):
         text = py.read_text(encoding="utf-8")
         for m in members:
-            if f"EventType.{m}" in text and "reducers.py" not in str(py):
+            if f"EventType.{m}" in text and py.name not in {"reducers.py", "startup_view.py"}:
                 hits.append(f"{py}:{m}")
     assert hits == [], f"停发类型仍在被发射：{hits}"
 

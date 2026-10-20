@@ -24,6 +24,7 @@ from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import HitlAsk, UserTurnDelivery
 from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -66,7 +67,7 @@ async def _live_session(monkeypatch):
     await append_one(rt.event_store, _ev(3, EventType.AGENT_IDLE, agent_id=_AID))
     await rebuild_all_active(rt)
 
-    await rt.initialize()
+    await initialize_all(rt)
     first = await rt.send_message(_AID, "讲个笑话")
     tm = rt._task_managers[_SID]
 
@@ -101,7 +102,7 @@ async def test_the_bubble_outlives_the_finished_task(monkeypatch) -> None:
 async def test_the_next_message_starts_a_new_task(monkeypatch) -> None:
     """气泡留着**不影响路由**：`send_message` 只看 `current_task_id` 是否终态。"""
     rt, _tm, finished_id, _hid = await _live_session(monkeypatch)
-    await rt.initialize()
+    await initialize_all(rt)
     second = await rt.send_message(_AID, "再讲一个")
     assert second.task_id != finished_id, "应当新开一轮，而不是注进已终结的 task"
 
@@ -122,7 +123,7 @@ async def test_the_next_message_closes_the_stale_bubble(monkeypatch) -> None:
     的那个担心是错的。）
     """
     rt, _tm, _tid, _hid = await _live_session(monkeypatch)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.send_message(_AID, "再讲一个")
     assert _pending(rt) == []
 
@@ -130,7 +131,7 @@ async def test_the_next_message_closes_the_stale_bubble(monkeypatch) -> None:
 async def test_a_fresh_park_still_works_after_that(monkeypatch) -> None:
     """收口是针对**旧**气泡的：新一轮自己再 park 时照常开得出来。"""
     rt, _tm, _tid, _hid = await _live_session(monkeypatch)
-    await rt.initialize()
+    await initialize_all(rt)
     second = await rt.send_message(_AID, "再讲一个")
     again = await rt.hitl.open(
         HitlAsk(form="wait", delivery=UserTurnDelivery(task_id=second.task_id, preface="")),

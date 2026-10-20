@@ -1,8 +1,11 @@
 """Exercise session cancellation with a full pool and multiple queued tasks per agent."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -15,7 +18,11 @@ from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests.integration._cancel_tree_worker import TreeLLM
 from tests.integration._session_cancel_worker import wait_until
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 SID = "queued-session-cancel"
 
@@ -41,7 +48,7 @@ async def worker(path, fault, recovering=False):
     async with open_sqlite_event_store(path / "events.db") as store:
         async with open_sqlite_memory(path / "memory.db") as memory:
             rt, llm = runtime(store, memory, recovering=recovering)
-            await rt.initialize()
+            await initialize_all(rt)
             if recovering:
                 view = await rebuild_view(store, SID)
                 target = next(t.id for t in view.tasks.values() if t.user_prompt == "QUEUED ONE")

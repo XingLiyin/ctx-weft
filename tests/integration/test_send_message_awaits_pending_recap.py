@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from ctx_weft.core.loop.driver import ExecutionRegistry
 
+from ctx_weft.core.loop.driver import ExecutionRegistry
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
-    InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -84,7 +87,7 @@ async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     from ctx_weft.core.runtime import SessionStartParams
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="第一轮", context_limit=200_000,
     ))
@@ -103,7 +106,7 @@ async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
         "previous-observe", handle.task_id, "observe", pending)
 
     llm_saw_fold_done.clear()
-    await runtime.initialize()
+    await initialize_all(runtime)
     send = asyncio.create_task(runtime.send_message(agent_id, "第二轮"))
 
     # 给新 run 充分的调度机会：屏障拆掉之后，它该在 `release` 之前就把 LLM 调起来。

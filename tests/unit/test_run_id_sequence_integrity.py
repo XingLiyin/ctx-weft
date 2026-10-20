@@ -21,21 +21,21 @@ import collections
 import time
 from dataclasses import dataclass
 
-from tests.runtime_helpers import wait_for_park
-
 import pytest
 
+from ctx_weft import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft import RuntimeConfig
+from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import append_one
+from tests.runtime_helpers import wait_for_park
 
 pytestmark = pytest.mark.asyncio
 
@@ -134,7 +134,7 @@ async def bus_after_recap_run() -> _RecapRun:
 
     runtime._event_bus.emit = _spy
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
@@ -224,7 +224,7 @@ async def test_compact_agent_run_has_start_and_finish():
     runtime._agent_lifecycle_manager.materialize(
         aid, session_id=sid, tenant_id="default")
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.compact_agent(aid)
 
     _assert_no_duplicate_sequence(seen)

@@ -18,13 +18,14 @@ import pytest
 
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import HitlReply
+from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
 from tests.unit._legacy_recover import rebuild_all_active
-from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
 
@@ -80,7 +81,7 @@ async def test_legacy_cold_hitl_reply_resumes_via_session_id_fallback() -> None:
     reply = HitlReply(hitl_id=hid, outcome="accepted", agent_id="", message="ship it")
 
     # 这是本次修复要守住的行为：不抛 AgentNotFound，且真的把会话续上。
-    await rt.initialize()
+    await initialize_all(rt)
     view = await rt.reply_to_hitl(reply)
 
     assert view is not None
@@ -104,5 +105,5 @@ async def test_legacy_cold_hitl_reply_without_fix_would_raise_agent_not_found() 
     await rebuild_all_active(rt)
 
     with pytest.raises(AgentNotFound):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.recover_agent("", resumed_task_id=tid, hitl_id=hid)

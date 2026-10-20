@@ -1,21 +1,27 @@
 """Real runtime/SQLite regressions for submission, pruning and settlement repair."""
+
 import asyncio
 import dataclasses
 
 import pytest
 
 from ctx_weft import SessionStartParams
-from ctx_weft.core.control.reducers import rebuild_view, reduce_events, prune_view_for_snapshot
+from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view, reduce_events
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests._snapshot_helpers import seed_snapshot
-from tests.integration._queued_session_cancel_worker import SID, drain, runtime
 from tests.integration._cancel_tree_worker import TreeLLM
+from tests.integration._queued_session_cancel_worker import SID, drain, runtime
 from tests.integration._session_cancel_worker import wait_until
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 from tests.integration.test_queued_session_cancel_recovery import content
 
 pytestmark = pytest.mark.asyncio
@@ -31,7 +37,7 @@ async def setup_queue(store, memory, *, snapshots=False):
                       snapshot_every_n=1 if snapshots else 0,
                       config=RuntimeConfig(task_max_concurrent=1))
     rt.providers.register_memory(memory)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(session_id=SID,
         template_id="agent:tpl_echo", user_prompt="TREE ROOT", context_limit=100000, unattended=True))
     await asyncio.wait_for(llm.grandchild_started.wait(), 15)
@@ -108,7 +114,7 @@ async def test_generic_cancel_finalization_recovers_across_old_snapshot(tmp_path
                 return await original_read(*args, **kwargs)
             store.read_range = bounded_read
             try:
-                await cold.initialize()
+                await initialize_all(cold)
             finally:
                 store.read_range = original_read
             await cold.rebuild_session(SID, strict=True)
@@ -121,7 +127,7 @@ async def test_generic_cancel_finalization_recovers_across_old_snapshot(tmp_path
                 cold.clear_storage_isolation(SID)
             store.append_batch = original
             cold2, _ = runtime(store, memory, recovering=True)
-            await cold2.initialize()
+            await initialize_all(cold2)
             await cold2.rebuild_session(SID, strict=True)
             await cold2.recover_agent(first.agent_id, session_id=SID)
             await drain(cold2)
@@ -179,8 +185,8 @@ async def test_pause_commits_selected_queue_atomically_before_removal(tmp_path, 
 @pytest.mark.parametrize("receipt_lost", [False, True])
 @pytest.mark.parametrize("entry", ["recover", "cancel"])
 async def test_terminal_receipt_repair_releases_slot_and_wakes_report(tmp_path, monkeypatch, status, receipt_lost, entry):
-    from tests.integration._lifecycle_crash_worker import make_lifecycle_runtime
     from ctx_weft.core.loop.steps.observe import ObserveStep
+    from tests.integration._lifecycle_crash_worker import make_lifecycle_runtime
     if status == "FAILED":
         original_verdict = ObserveStep._mechanical_verdict
         monkeypatch.setattr(ObserveStep, "_mechanical_verdict", lambda self, *args:
@@ -188,7 +194,7 @@ async def test_terminal_receipt_repair_releases_slot_and_wakes_report(tmp_path, 
     async with open_sqlite_event_store(tmp_path / "events.db") as store:
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             rt, _ = make_lifecycle_runtime(store, memory, "mechanical")
-            await rt.initialize()
+            await initialize_all(rt)
             original, read = store.append_batch, store.read_range
             report_waiting = asyncio.Event()
             event_type = "TaskFinished" if status == "FINISHED" else "TaskFailed"
@@ -243,7 +249,7 @@ async def test_terminal_receipt_repair_releases_slot_and_wakes_report(tmp_path, 
             before = await content(memory, view.tasks.values())
             head = await store.committed_head(SID)
             cold, _ = make_lifecycle_runtime(store, memory, "mechanical")
-            await cold.initialize()
+            await initialize_all(cold)
             await cold.rebuild_session(SID, strict=True)
             await cold.recover_agent(handle.agent_id, session_id=SID)
             await drain(cold)
@@ -265,7 +271,7 @@ async def test_pause_batch_process_crash_preserves_entire_selection(tmp_path, cu
     async with open_sqlite_event_store(tmp_path / "events.db") as store:
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             cold, _ = runtime(store, memory, recovering=True)
-            await cold.initialize()
+            await initialize_all(cold)
             await cold.rebuild_session(SID, strict=True)
             history = await full_view(store)
             queued = [t for t in history.tasks.values() if str(t.user_prompt).startswith("QUEUED")]

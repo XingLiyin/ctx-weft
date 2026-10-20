@@ -1,4 +1,5 @@
 """Cancel a real delegated tree, finish unaffected work, then reuse a child agent."""
+
 import asyncio
 
 import pytest
@@ -8,9 +9,14 @@ from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests.integration._cancel_tree_worker import TreeLLM
 from tests.integration._session_cancel_worker import wait_until
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
 from tests.integration.test_user_journey_audit import assert_event_contract
 
@@ -58,7 +64,7 @@ async def test_cancel_tree_preserves_queued_work_and_child_agent_reuse(tmp_path,
             rt = make_runtime(llm=llm, agent_provider=provider, event_store=store,
                               config=RuntimeConfig(task_max_concurrent=2))
             rt.providers.register_memory(memory)
-            await rt.initialize()
+            await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
                 template_id="agent:tpl_echo", user_prompt="TREE ROOT", context_limit=100000, unattended=True))
             await asyncio.wait_for(llm.grandchild_started.wait(), 10)

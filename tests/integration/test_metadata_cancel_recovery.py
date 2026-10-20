@@ -1,4 +1,5 @@
 """Slow metadata cannot hold cancellation hostage or cancel an independent report."""
+
 import asyncio
 import subprocess
 import sys
@@ -9,7 +10,8 @@ import pytest
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
-from tests.integration._metadata_cancel_worker import SID, REPLY, content
+from tests._initialization import initialize_all
+from tests.integration._metadata_cancel_worker import REPLY, SID, content
 from tests.integration._session_cancel_worker import runtime, wait_until
 from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
 
@@ -64,7 +66,7 @@ async def test_cancel_recovery_keeps_run_order_and_report_handoff(tmp_path, mode
     async with open_sqlite_event_store(tmp_path / "events.db") as store:
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             rt = runtime(store, memory, _FinishEveryTaskLLM(), recovering=True)
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.rebuild_session(SID, strict=True)
             root = (await rebuild_view(store, SID)).sessions[SID].root_agent_id
             await rt.cancel_session(SID)
@@ -86,7 +88,7 @@ async def test_cancel_recovery_keeps_run_order_and_report_handoff(tmp_path, mode
             head = await store.committed_head(SID)
             await rt.cancel_session(SID)
             rt2 = runtime(store, memory, _FinishEveryTaskLLM(), recovering=True)
-            await rt2.initialize()
+            await initialize_all(rt2)
             await rt2.rebuild_session(SID, strict=True)
             await rt2.recover_agent(root, session_id=SID)
             await wait_until(lambda: not rt2._task_managers[SID]._background_asyncio_tasks)

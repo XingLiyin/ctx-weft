@@ -23,16 +23,26 @@ from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.models.errors import SessionBusyError
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import (
-    MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext,
+    MemoryAddress,
+    MemoryEvent,
+    MemoryKind,
+    MemoryScope,
+    ProviderContext,
 )
 from ctx_weft.protocols.hitl import HitlAsk, HitlDecision, UserTurnDelivery
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_hitl_e2e_v2 import _poll
 from tests.integration.test_hitl_hot_reply_round_window_e2e import (
-    STALL_BEFORE_CHUNK, _ask, _next_question, _ScriptedLLM,
+    STALL_BEFORE_CHUNK,
+    _ask,
+    _next_question,
+    _ScriptedLLM,
 )
 from tests.integration.test_minimal_loop import (
-    InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -62,13 +72,13 @@ async def test_staged_records_sort_after_everything_already_in_memory() -> None:
     """L7：暂存记录的排序键要和落盘后可比——取视图里的最大序号往后排。"""
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(
         __import__("ctx_weft.protocols.hitl", fromlist=["HitlReply"]).HitlReply(
             hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1"))
@@ -86,10 +96,11 @@ async def test_staged_records_sort_after_everything_already_in_memory() -> None:
     view = await mem.load_view(scope, MemoryScope.TASK, pctx,
                                kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY])
     # 装配一次，触发叠加路径给暂存记录补序号
+    from types import SimpleNamespace
+
     from ctx_weft.core.assembler.assembler import ContextRequest
     from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
     from ctx_weft.core.utils.estimate import estimate_tokens
-    from types import SimpleNamespace
 
     deps = SimpleNamespace(memory=mem, provider_ctx=pctx)
     request = SimpleNamespace(
@@ -114,12 +125,12 @@ async def test_compact_refuses_while_a_round_is_open() -> None:
     """
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid, aid = handle.session_id, handle.agent_id
     q1 = await _next_question(rt, sid)
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.cancel_session(sid) is True
     await _poll(lambda: rt.session_is_quiescent(sid) or None, timeout=8.0)
     tm = rt._task_managers[sid]
@@ -127,7 +138,7 @@ async def test_compact_refuses_while_a_round_is_open() -> None:
     # ① 开着的窗
     tm.begin_round(q1.task_id, owns_task=False)
     with pytest.raises(SessionBusyError):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.compact_agent(aid)
     tm.drop_round_buffer(q1.task_id)
 
@@ -138,7 +149,7 @@ async def test_compact_refuses_while_a_round_is_open() -> None:
         stage="tool", created_at=TS)
     rt.hitl_registry.claim(req.id, HitlDecision(outcome="accepted", message="later"))
     with pytest.raises(SessionBusyError):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.compact_agent(aid)
 
 
@@ -150,7 +161,7 @@ async def test_only_the_same_tasks_bubble_follows_the_round() -> None:
     """
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id

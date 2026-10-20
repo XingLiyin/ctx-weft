@@ -1,24 +1,26 @@
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from ctx_weft.core.models.session import Session
 from ctx_weft.core.orchestrator.lifecycle.session_registry import SessionRegistry
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.core.models.session import Session
-from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.llm.provider import _FixedModelClient
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
 
@@ -115,7 +117,7 @@ async def test_run_single_task_root_task_description_is_text_not_truncated_parts
 
     runtime._execute_task = _fake_execute_task  # type: ignore[method-assign]
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt=_content(),
     )
@@ -145,8 +147,8 @@ class _CapturingBus:
 
 def _session_registry(bus) -> SessionRegistry:
     from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
-    from ctx_weft.core.registry import ProviderRegistry
     from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
+    from ctx_weft.core.registry import ProviderRegistry
 
     templates = InlineAgentTemplateProvider()
     templates.register(make_echo_template())
@@ -202,8 +204,8 @@ async def test_resume_session_without_jsonable_falls_back_to_the_text_prompt():
     """resume 分支与 create 同一判据——两处都写事件，不能只加固一处。"""
     from unittest.mock import MagicMock
 
-    from ctx_weft.protocols.events import Event
     from ctx_weft.core.utils.ids import generate_id
+    from ctx_weft.protocols.events import Event
     from ctx_weft.providers.events import InMemoryEventStore
 
     bus = _CapturingBus()

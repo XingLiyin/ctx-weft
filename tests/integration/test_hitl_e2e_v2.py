@@ -21,18 +21,16 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 
-from tests.runtime_helpers import wait_for_park
-
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.models.config import RuntimeConfig
-from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.core.runtime import SessionStartParams
+from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.protocols import (
-    MemoryKind,
     ImagePart,
     MemoryEventType,
+    MemoryKind,
     ProviderContext,
     TextPart,
     ToolCall,
@@ -48,11 +46,13 @@ from ctx_weft.protocols.hitl import HitlReply, ToolResultDelivery, UserTurnDeliv
 from ctx_weft.providers.authorizer import HumanConfirmationAuthorizer
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
+from tests.runtime_helpers import wait_for_park
 
 pytestmark = pytest.mark.asyncio
 
@@ -265,7 +265,7 @@ async def test_hot_approval_rewrites_arguments_and_result_reaches_the_model() ->
                         observer_verdicts=["success"])
     runtime, tool = _make_runtime_with_bash_tool(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
     ))
@@ -276,7 +276,7 @@ async def test_hot_approval_rewrites_arguments_and_result_reaches_the_model() ->
     assert req.form == "approval"
     assert isinstance(req.delivery, ToolResultDelivery)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     view = await runtime.reply_to_hitl(HitlReply(
         hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
         modified_arguments={"command": "ls -l"},
@@ -324,7 +324,7 @@ async def test_cold_approval_reconciles_and_invokes_the_tool_exactly_once() -> N
                         observer_verdicts=["success"])
     runtime, tool = _make_runtime_with_bash_tool(llm, hitl_timeout_sec=0)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
     ))
@@ -341,7 +341,7 @@ async def test_cold_approval_reconciles_and_invokes_the_tool_exactly_once() -> N
     req = pending[0]
     assert req.form == "approval"
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     view = await runtime.reply_to_hitl(HitlReply(
         hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
         modified_arguments={"command": "ls -l"},
@@ -397,7 +397,7 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
     runtime.providers.register_memory(memory)
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="set up the db", context_limit=100_000,
     ))
@@ -416,7 +416,7 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
         TextPart(text="It's postgres"),
         ImagePart(data=_IMAGE_B64, media_type="image/png"),
     ]
-    await runtime.initialize()
+    await initialize_all(runtime)
     view = await runtime.reply_to_hitl(HitlReply(
         hitl_id=req.id, outcome="accepted", agent_id=req.agent_id, message=reply_message,
     ))
@@ -490,7 +490,7 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
@@ -509,7 +509,7 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
 
     reply = HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
                       message="use postgres too")
-    await runtime.initialize()
+    await initialize_all(runtime)
     first_view = await runtime.reply_to_hitl(reply)
     assert first_view is not None and first_view.outcome == "accepted"
 
@@ -531,7 +531,7 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
     assert "use postgres too" in injected[0].content
 
     # 重复应答：hitl_id 已终局 → resolve() 幂等返回 None，不触发第二次冷续跑。
-    await runtime.initialize()
+    await initialize_all(runtime)
     second_view = await runtime.reply_to_hitl(reply)
     assert second_view is None, "a duplicate reply to an already-resolved HITL must be a no-op"
 

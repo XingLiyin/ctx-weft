@@ -25,6 +25,7 @@ from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.events.bus.in_process.bus import InProcessEventBus
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -304,7 +305,7 @@ async def test_wait_for_finish_returns_after_deferred_fold_lands():
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="say hello", context_limit=100_000,
     ))
@@ -349,7 +350,7 @@ async def test_start_session_returns_turn_handle():
     rt = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
 
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))

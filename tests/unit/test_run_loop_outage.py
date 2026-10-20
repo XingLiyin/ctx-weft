@@ -1,13 +1,19 @@
 """_run_loop routes LLMOutageError to INTERRUPTED, not FAILED."""
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.models.config import RuntimeConfig
-from ctx_weft.providers.llm.mock import MockLLMAdapter
-from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import LLMOutageError
 from ctx_weft.protocols.events import EventType
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -41,7 +47,7 @@ async def test_outage_marks_session_interrupted_not_failed():
         return await orig_emit(ev)
     runtime._event_bus.emit = _spy
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
 
     # task must NOT be terminal-failed

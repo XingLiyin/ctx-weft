@@ -2,10 +2,11 @@
 
 import pytest
 
-from ctx_weft.core.control.reducers import rebuild_view, prune_view_for_snapshot
+from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view
 from ctx_weft.core.utils.event import new_event
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events import InMemoryEventStore
+from tests._initialization import initialize_all
 from tests._snapshot_helpers import seed_snapshot
 from tests.unit.test_runtime_initialization_queries import append, container, runtime
 
@@ -51,7 +52,7 @@ async def test_restart_preserves_durable_task_state(store, snapshot, status, eve
                      (event, "t", h.root_agent_id, {"assigned_agent_id": h.root_agent_id}))
     await snapshot_if_requested(store, h.session_id, snapshot)
     restarted = runtime(store)
-    await restarted.initialize()
+    await initialize_all(restarted)
     rows = await store.read_range(h.session_id)
     assert not any(row.event.type == EventType.SESSION_STATUS_CHANGED for row in rows)
     expected = "INTERRUPTED" if status in {"ACTIVE", "PENDING"} else status
@@ -59,7 +60,7 @@ async def test_restart_preserves_durable_task_state(store, snapshot, status, eve
     assert not restarted._task_managers
     assert restarted._agent_lifecycle_manager.all_agent_ids() == []
     head = await store.committed_head(h.session_id)
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     assert await store.committed_head(h.session_id) == head
     await restarted.rebuild_session(h.session_id, strict=True)
     assert (await restarted.get_task(h.session_id, "t")).data.status == expected
@@ -75,7 +76,7 @@ async def test_restart_before_first_dispatch_is_interrupted_and_explicitly_resum
                   "user_prompt": "saved request"}}))
     await snapshot_if_requested(store, h.session_id, snapshot)
     restarted = runtime(store)  # max_concurrent=0 keeps explicit requeue observable.
-    result, = (await restarted.initialize()).sessions
+    result, = (await initialize_all(restarted)).sessions
     assert result.state.root_task_status == "INTERRUPTED"
     assert result.state.has_interrupted_agents and not result.state.has_running_agents
     assert not restarted._task_managers
@@ -105,13 +106,13 @@ async def test_pending_task_with_durable_hitl_remains_a_human_wait(store, delive
         session_id=h.session_id, task_id="pending", agent_id=h.root_agent_id,
         stage="authz", unattended=False)
     restarted = runtime(store)
-    report = await restarted.initialize()
+    report = await initialize_all(restarted)
     assert not report.interrupted_task_ids
     assert (await restarted.get_task(h.session_id, "pending")).data.status == "AWAITING_HUMAN"
     assert (await restarted.get_agent(h.root_agent_id, session_id=h.session_id)).data.status == "waiting_human"
     assert [row.data.id for row in await restarted.list_pending_hitl(session_id=h.session_id)] == [req.id]
     head = await store.committed_head(h.session_id)
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     assert await store.committed_head(h.session_id) == head
 
 
@@ -127,7 +128,7 @@ async def test_pending_child_recovery_preserves_suspended_parent(store):
         (EventType.TASK_CREATED, "child", "child-agent",
          {"task": {"id": "child", "parent_task_id": "parent", "assigned_agent_id": "child-agent"}}))
     restarted = runtime(store)
-    result, = (await restarted.initialize()).sessions
+    result, = (await initialize_all(restarted)).sessions
     assert result.state.has_interrupted_agents
     assert (await restarted.get_task(h.session_id, "parent")).data.status == "SUSPENDED"
     assert (await restarted.get_task(h.session_id, "child")).data.status == "INTERRUPTED"
@@ -148,7 +149,7 @@ async def test_pending_successor_recovery_preserves_reviewing_predecessor(store)
          {"successor": {"task": {"id": "new", "assigned_agent_id": h.root_agent_id}},
           "replaced_task_ids": ["old"]}))
     restarted = runtime(store)
-    result, = (await restarted.initialize()).sessions
+    result, = (await initialize_all(restarted)).sessions
     assert result.state.root_task_id == "new" and result.state.root_task_status == "INTERRUPTED"
     assert (await restarted.get_task(h.session_id, "old")).data.status == "REVIEWING"
 
@@ -165,7 +166,7 @@ async def test_repeated_initialize_does_not_interrupt_live_queued_work(store):
     await tm.push_task(Task(id="queued", session_id=h.session_id, status="PENDING",
                            assigned_agent_id=h.root_agent_id, user_prompt="queued"))
     head = await store.committed_head(h.session_id)
-    await rt.initialize()
+    await initialize_all(rt)
     assert (await rt.get_task(h.session_id, "queued")).data.status == "PENDING"
     assert await store.committed_head(h.session_id) == head
     assert [entry.task_id for entry in tm._queue.peek_all()] == ["queued"]
@@ -192,12 +193,12 @@ async def test_restart_closes_unfinished_foreground_run(store, snapshot, cut):
         await store.append_batch(h.session_id, end.id, [end])
         await append(store, h.session_id, (EventType.TASK_FINISHED, "t", h.root_agent_id, {}))
     await snapshot_if_requested(store, h.session_id, snapshot)
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     rows = await store.read_range(h.session_id, include_types=(EventType.RUN_FINISHED,))
     assert [row.event.run_id for row in rows] == ["lost-run"], (
         f"restart left execution open after {cut}")
     head = await store.committed_head(h.session_id)
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     assert await store.committed_head(h.session_id) == head
 
 
@@ -256,7 +257,7 @@ async def test_run_recovery_reads_only_snapshot_delta(store, monkeypatch, scenar
 
     with monkeypatch.context() as patch:
         patch.setattr(store, "read_range", delta_only)
-        await runtime(store).initialize()
+        await initialize_all(runtime(store))
     assert len(reads) == (2 if scenario == "terminal_task_background" else 1)
     rows = await original_read(sid, after_position=head)
     run_events = [r.event for r in rows if r.event.run_id == "cross-snapshot-run"]
@@ -268,7 +269,7 @@ async def test_run_recovery_reads_only_snapshot_delta(store, monkeypatch, scenar
         assert all(ev.task_id == "t" and ev.agent_id == aid for ev in run_events)
     assert not (await rebuild_view(store, sid)).open_runs
     settled_head = await store.committed_head(sid)
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     assert await store.committed_head(sid) == settled_head
 
 
@@ -285,7 +286,7 @@ async def test_old_snapshot_without_run_state_falls_back_to_log(store):
     await seed_snapshot(store, h.session_id, view,
                         cut=await store.committed_head(h.session_id),
                         overrides={"projection_version": 6, "state_blob": blob})
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     rows = await store.read_range(h.session_id, include_types=(EventType.RUN_FINISHED,))
     assert [(r.event.run_id, r.event.sequence) for r in rows] == [("old-open-run", 7)]
 
@@ -295,7 +296,11 @@ async def test_old_snapshot_without_run_state_falls_back_to_log(store):
 @pytest.mark.parametrize("cut", ["opened", "deferred", "retracted", "resolved", "closed"])
 async def test_restart_at_hitl_event_boundary(store, snapshot, delivery_kind, cut):
     from ctx_weft.protocols.hitl import (
-        HitlAsk, HitlReply, NoResumeDelivery, ToolResultDelivery, UserTurnDelivery,
+        HitlAsk,
+        HitlReply,
+        NoResumeDelivery,
+        ToolResultDelivery,
+        UserTurnDelivery,
     )
 
     old = runtime(store)
@@ -320,13 +325,13 @@ async def test_restart_at_hitl_event_boundary(store, snapshot, delivery_kind, cu
             await old.hitl.close(req)
     await snapshot_if_requested(store, h.session_id, snapshot)
     rt = runtime(store)
-    await rt.initialize()
+    await initialize_all(rt)
     pending = cut in {"opened", "deferred", "retracted"}
     expected = "AWAITING_HUMAN" if pending and delivery_kind != "notification" else "INTERRUPTED"
     assert (await rt.get_task(h.session_id, "t")).data.status == expected
     assert bool(await rt.list_pending_hitl(session_id=h.session_id)) == pending
     head = await store.committed_head(h.session_id)
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     assert await store.committed_head(h.session_id) == head
     await rt.rebuild_session(h.session_id, strict=True)
     assert bool(await rt.list_pending_hitl(session_id=h.session_id)) == pending

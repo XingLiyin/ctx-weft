@@ -4,7 +4,8 @@
 >
 > 想知道**怎么调用 SDK**，见 [README.md](./README.md)。这里的内容对编写自定义 Provider、调试事件流、扩展引擎有帮助，但日常使用不必读。
 
-启动与装填的当前边界：同步构造 → `await initialize()`（只校准持久崩溃事实）→ 查询或工作。
+启动与装填的当前边界：同步构造完成公共接线；已有会话执行前 `await initialize(session_id)` 校准持久崩溃事实。
+同一会话初始化共享 Task，成功后只保留 ID；纯查询不初始化，不枚举其他会话。
 查询优先内存、回退事件临时投影，不登记运行对象。已有会话只由 `rebuild_session` 统一
 装填 Session、Agent、HITL、TaskManager 及接线；开启工作入口在同一会话锁内先确保装填。
 `_bind_task_manager` 保持唯一 owner 守卫，TaskManager 构造统一复用 SessionRegistry 的工厂。

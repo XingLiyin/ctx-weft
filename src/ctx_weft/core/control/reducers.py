@@ -21,7 +21,7 @@ from ctx_weft.core.utils.content import (
     content_from_jsonable,
     content_to_jsonable,
 )
-from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.protocols.events import Event, EventType, ProjectedEvent
 from ctx_weft.protocols.hitl import (
     HITL_FORM_QUESTION,
     HITL_FORM_WAIT,
@@ -102,6 +102,8 @@ _AGENT_STATUS_BY_EVENT: dict[str, str] = {
 def apply_events(events: list[Event], view: RunStateView) -> RunStateView:
     """在已有 RunStateView 上增量应用事件列表（快照恢复后的 delta replay）。"""
     for ev in events:
+        if isinstance(ev, ProjectedEvent):
+            raise TypeError("Partial events require the startup projection reducer")
         if not view.session_id:
             view.session_id = ev.session_id
         if not view.task_id and ev.task_id:
@@ -618,6 +620,7 @@ class SnapshotFacts:
 
 def snapshot_event_payload(
     view: RunStateView, *, cut: int, chain_depth: int, reason: str,
+    current_task_statuses: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """把一张快照打成 `StateSnapshot` 事件的 payload。
 
@@ -628,12 +631,19 @@ def snapshot_event_payload(
     之前自己裁。编解码器只管把给它的东西打成载荷——混进策略之后，任何想「原样存一张 view」的
     调用方（测试、工具）都会被悄悄改掉内容。
     """
+    from .startup_view import STARTUP_SNAPSHOT_VERSION, startup_snapshot_blob
+
+    blob = serialize_view(view)
     return {
-        _SNAP_BLOB: serialize_view(view),
+        _SNAP_BLOB: blob,
         _SNAP_CUT: cut,
         _SNAP_VERSION: _PROJECTION_VERSION,
         _SNAP_DEPTH: chain_depth,
         _SNAP_REASON: reason,
+        # Same cut and state machine, without execution bodies. This is part of
+        # the existing snapshot, not an independently maintained startup cache.
+        "startup_state_blob": startup_snapshot_blob(blob, current_task_statuses),
+        "startup_projection_version": STARTUP_SNAPSHOT_VERSION,
     }
 
 
@@ -842,10 +852,11 @@ async def rebuild_view(event_store: Any, session_id: str, *, through_position: i
     return view
 
 
-async def restore_legacy_canceled_tasks(event_store, session_id, view, head):
+async def restore_legacy_canceled_tasks(event_store, session_id, view, head, *, projection=None):
     """Upgrade the old pruning policy using task facts only, never run history."""
+    options = {"projection": projection} if projection is not None else {}
     rows = await event_store.read_range(session_id, through_position=head,
-        include_types=(EventType.TASK_CANCELED, EventType.TASK_FINALIZED))
+        include_types=(EventType.TASK_CANCELED, EventType.TASK_FINALIZED), **options)
     unclosed = set()
     for row in rows:
         event = row.event
@@ -858,8 +869,13 @@ async def restore_legacy_canceled_tasks(event_store, session_id, view, head):
     if missing:
         rows = await event_store.read_range(session_id, through_position=head,
             include_types=tuple({EventType.TASK_CREATED, EventType.TASK_FINALIZED,
-                                 EventType.TASK_REVIEWING, *TASK_STATUS_BY_EVENT}))
-        history = reduce_events([r.event for r in rows], session_id)
+                                 EventType.TASK_REVIEWING, *TASK_STATUS_BY_EVENT}), **options)
+        if projection is None:
+            history = reduce_events([r.event for r in rows], session_id)
+        else:
+            from .startup_view import StartupRecoveryView, apply_startup_events
+            history = apply_startup_events([r.event for r in rows],
+                StartupRecoveryView(run_id=session_id, session_id="", task_id="", agent_id=""))
         view.tasks.update({tid: history.tasks[tid] for tid in missing if tid in history.tasks})
 
 
@@ -898,6 +914,8 @@ def reduce_events(events: list[Event], run_id: str) -> RunStateView:
     )
 
     for ev in events:
+        if isinstance(ev, ProjectedEvent):
+            raise TypeError("Partial events require the startup projection reducer")
         if not view.session_id:
             view.session_id = ev.session_id
         if not view.task_id and ev.task_id:

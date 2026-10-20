@@ -3,13 +3,14 @@
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
+from ctx_weft.core.models.session import Session
+from ctx_weft.core.models.task import Task
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.orchestrator.task.runner import AgentBinding
 from ctx_weft.core.runtime import _SessionTaskRunner
-from ctx_weft.core.models.session import Session
-from ctx_weft.core.models.task import Task
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.providers.llm.mock import MockLLMAdapter
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
 pytestmark = pytest.mark.asyncio
@@ -58,7 +59,7 @@ async def test_pause_session_partitions_root_run_vs_rest():
     sub_tokens = rt._register_run_tokens("s1", "t_sub")
     await tm.push_task(_task("t_q"))     # 排队中一个
 
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session("s1") is True
     # root agent 那一轮：pause → park；不 cancel
     assert root_tokens.pause.is_paused and not root_tokens.cancel.is_cancelled
@@ -81,7 +82,7 @@ async def test_pause_session_inflight_root_run_claims_resume_point():
     tm._running_agents["t_root"] = "agr"
     root_tokens = rt._register_run_tokens("s1", "t_root")
 
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session("s1") is True
     assert root_tokens.pause.is_paused is True           # 在途那一轮 = 唯一续跑点
     late = rt._register_run_tokens("s1", "t_requeued", root_run=True)
@@ -98,7 +99,7 @@ async def test_pause_session_unknown_task_runs_are_cancelled():
     tm._running_agents["t_keepalive"] = "agr"
     rt._register_run_tokens("s1", "t_keepalive")
     stale = rt._register_run_tokens("s1", "t_stale")   # 旧代 run，当前 TM 不认识
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session("s1") is True
     assert stale.cancel.is_cancelled is True
 
@@ -106,7 +107,7 @@ async def test_pause_session_unknown_task_runs_are_cancelled():
 async def test_pause_session_idle_session_is_noop_false():
     rt = _rt()
     _wire(rt)   # TM 存在但无在跑、无排队 → is_done
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session("s1") is False
     assert "s1" not in rt._pausing
 
@@ -206,7 +207,7 @@ async def test_pause_session_keeps_queued_root_task():
     root_task.assigned_agent_id = "agr"
     await tm.push_task(root_task)
 
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session("s1") is True
     # root 未被弃子取消、仍在队列待派发
     assert tm.get_task("t_root").status != "CANCELED"

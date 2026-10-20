@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tests._initialization import initialize_all
+
 
 async def rebuild_all_active(rt: Any) -> int:
     """把 store 里出现过的每条 session 都 `rebuild_session` 一遍，返回装填的 agent 总数。
@@ -41,6 +43,6 @@ async def rebuild_all_active(rt: Any) -> int:
         f"rebuild_all_active 只支持 InMemoryEventStore，收到 {type(store).__name__}")
     total = 0
     for sid in list(session_ids.keys()):
-        await rt.initialize()
+        await initialize_all(rt)
         total += await rt.rebuild_session(sid)
     return total

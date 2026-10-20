@@ -9,16 +9,22 @@ SUSPENDED 只是 run 内的过渡值——真会话里它随即被 `_suspend_tas
 INTERRUPTED，compat 路径（run_single_task）因为没人接手才把它留在了 SUSPENDED。
 现在两条路径都走同一张处置表，落的都是 INTERRUPTED。
 """
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft.protocols.events import EventType
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests._initialization import initialize_all
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -66,7 +72,7 @@ async def test_overflow_marks_task_suspended_not_failed():
     TaskManager.register_task = _spy_register
     try:
         with pytest.raises(ContextOverflowError):
-            await runtime.initialize()
+            await initialize_all(runtime)
             await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
     finally:
         TaskManager.register_task = orig_register

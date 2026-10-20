@@ -1,9 +1,12 @@
 """Exercise actor start uncertainty and cancellation settlement through public APIs."""
+
 import asyncio
 import os
 import sys
 from dataclasses import replace
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -41,7 +44,7 @@ async def worker(path, stage, fault, mode):
 
             _SessionTaskRunner.execute = execute
             observe.prepare_foreground_observe = prepare
-            await rt.initialize()
+            await initialize_all(rt)
             handle = await rt.start_session(SessionStartParams.create(session_id="tree-session",
                 template_id="agent:tpl_echo", user_prompt="TREE ROOT", context_limit=100000, unattended=True))
             await asyncio.wait_for(llm.grandchild_started.wait() if stage == "active" else entered.wait(), 10)

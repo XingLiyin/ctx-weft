@@ -18,13 +18,14 @@ from datetime import datetime, timezone
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
-from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import NormalTaskSettings, Task
+from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.protocols.events import Event, EventType
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.llm.mock import MockLLMAdapter
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.unit._stub_runner import StubRunner
 
@@ -233,6 +234,8 @@ def _plant_agent(rt: CtxWeftRuntime, agent_id: str, session_id: str) -> None:
     registry-miss 自愈路径（自愈会去扫事件日志，而这两个 session 压根没有事件）。
     """
     from ctx_weft.core.orchestrator.lifecycle.agent_manager import _AgentRecord
+    # This lock test deliberately plants an already initialized in-process owner.
+    rt._initialized_sessions.add(session_id)
     rt._agent_lifecycle_manager._agents[agent_id] = _AgentRecord(
         session_id=session_id, tenant_id="default", template_id="tpl",
         parent_agent_id=None, spawn_depth=0, memory_config=None, loop_config=None,
@@ -259,9 +262,9 @@ async def test_recover_agent_serialized_per_session(monkeypatch) -> None:
 
     monkeypatch.setattr("ctx_weft.core.control.reducers.rebuild_view", fake_rebuild_view)
 
-    await rt.initialize()
+    await initialize_all(rt)
     t1 = asyncio.create_task(rt.recover_agent("a1"))
-    await rt.initialize()
+    await initialize_all(rt)
     t2 = asyncio.create_task(rt.recover_agent("a1"))
     await asyncio.sleep(0.02)  # 两个都尝试进入锁
     assert active["max"] == 1, "per-session 锁应串行化两次 recover（峰值并发=1）"
@@ -288,9 +291,9 @@ async def test_recover_agent_different_sessions_not_serialized(monkeypatch) -> N
 
     monkeypatch.setattr("ctx_weft.core.control.reducers.rebuild_view", fake_rebuild_view)
 
-    await rt.initialize()
+    await initialize_all(rt)
     t1 = asyncio.create_task(rt.recover_agent("aA"))
-    await rt.initialize()
+    await initialize_all(rt)
     t2 = asyncio.create_task(rt.recover_agent("aB"))
     await asyncio.sleep(0.02)
     assert active["max"] == 2, "不同 session 的 recover 应能并发（峰值并发=2）"

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 from ctx_weft.core.assembler import ContextAssembler
 from ctx_weft.core.control.reducers import read_task_view, rebuild_view, reduce_events
 from ctx_weft.core.models.config import RuntimeConfig
-from ctx_weft.protocols.runtime import InitializationReport, QueryResult, SessionDetail, TaskDetail
+from ctx_weft.protocols.runtime import QueryResult, SessionDetail, SessionInitializationResult, TaskDetail
 from ctx_weft.core.assembler.assembler import AssemblerDeps
 from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.assembler.sources import (
@@ -498,7 +498,6 @@ def _session_command(
 
         @functools.wraps(method)
         async def command(self, *args, **kwargs):
-            self._require_initialized()
             bound = signature.bind(self, *args, **kwargs).arguments
             sid = bound.get("session_id")
             aid = bound.get("agent_id")
@@ -520,6 +519,17 @@ def _session_command(
                     return await method(self, *args, **kwargs)
                 raise AgentNotLoaded(
                     "pass session_id for a cold command, or call rebuild_session(session_id) first")
+            # Nested commands already run under the outer command's calibration
+            # check. In particular, an optional missing-session purge must not
+            # spawn an initialization task that waits for its own caller's lock.
+            if self._session_lock_owners.get(sid) is not asyncio.current_task():
+                try:
+                    await self.initialize(sid)
+                except SessionNotFound:
+                    if load_session not in {"optional", "skip"}:
+                        if missing_session_as_agent:
+                            raise AgentNotFound(f"unknown agent {aid!r} in session {sid!r}") from None
+                        raise
             async with self._session_guard(sid):
                 if load_session == "skip":
                     return await method(self, *args, **kwargs)
@@ -710,21 +720,49 @@ class CtxWeftRuntime:
         self._resume_locks: dict[str, asyncio.Lock] = {}
         self._session_lock_owners: dict[str, asyncio.Task] = {}
         self._loaded_sessions: set[str] = set()
-        self._initialize_lock = asyncio.Lock()
-        self._initialized = False
-        self._initialization_report: InitializationReport | None = None
+        self._initialized_sessions: set[str] = set()
+        self._initializing_sessions: dict[str, asyncio.Task] = {}
+        # Wiring is synchronous and does no history I/O. Recovery is per session.
+        self._attach_runtime()
 
-    async def initialize(self) -> InitializationReport:
-        """Calibrate durable crash state, then attach observers; never load sessions."""
-        async with self._initialize_lock:
-            if self._initialized:
-                return deepcopy(self._initialization_report)
-            from ctx_weft.core.control.startup import calibrate_startup
-            report = await calibrate_startup(self.event_store)
-            self._attach_runtime()
-            self._initialization_report = report
-            self._initialized = True
-            return deepcopy(report)
+    async def initialize(self, session_id: str) -> SessionInitializationResult | None:
+        """Autonomously recover one session before execution, without loading owners.
+
+        Concurrent callers share one task, shielded from waiter cancellation.
+        Return the recovery report to those callers; subsequent calls return None.
+        Only successful session IDs survive completion, never tasks or reports.
+        Read-only queries do not require initialization or trigger crash repairs.
+        """
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id must be a non-empty string")
+        if session_id in self._initialized_sessions:
+            return None
+        task = self._initializing_sessions.get(session_id)
+        if task is None:
+            task = asyncio.create_task(self._initialize_session_once(session_id))
+            self._initializing_sessions[session_id] = task
+
+            def completed(done):
+                if self._initializing_sessions.get(session_id) is done:
+                    self._initializing_sessions.pop(session_id, None)
+                # Retrieve failures even when every waiter disconnected.
+                if not done.cancelled():
+                    done.exception()
+
+            task.add_done_callback(completed)
+        result = await asyncio.shield(task)
+        return deepcopy(result)
+
+    async def _initialize_session_once(self, session_id: str) -> SessionInitializationResult | None:
+        from ctx_weft.core.control.startup import calibrate_session
+
+        async with self._session_guard(session_id):
+            # A concurrent creation may have initialized this session while we waited.
+            if session_id in self._initialized_sessions:
+                return None
+            result = await calibrate_session(self.event_store, session_id)
+            self._initialized_sessions.add(session_id)
+            return result
 
     def _attach_runtime(self) -> None:
         # 提交策略分岔（spec: event-commit，change reliability-wp3）：
@@ -768,11 +806,6 @@ class CtxWeftRuntime:
 
         self._agent_lifecycle_manager.attach_to_bus()
         self._session_registry.attach_to_bus()
-
-    def _require_initialized(self) -> None:
-        if not self._initialized:
-            from ctx_weft.core.models.errors import RuntimeNotInitializedError
-            raise RuntimeNotInitializedError("await runtime.initialize() before using the runtime")
 
     def _session_lock(self, session_id: str) -> asyncio.Lock:
         return self._resume_locks.setdefault(session_id, asyncio.Lock())
@@ -945,12 +978,10 @@ class CtxWeftRuntime:
 
     def storage_health(self, session_id: str) -> str | None:
         """None = 健康；否则返回隔离原因（storage_unavailable）。"""
-        self._require_initialized()
         return self._storage_unavailable.get(session_id)
 
     def clear_storage_isolation(self, session_id: str) -> None:
         """宿主确认存储恢复后解除隔离（恢复流程须先按 batch_id 收口未知提交）。"""
-        self._require_initialized()
         if self._storage_unavailable.pop(session_id, None) is not None:
             logger.info("session %s storage isolation cleared", session_id)
 
@@ -972,7 +1003,6 @@ class CtxWeftRuntime:
         run**（`_cancel_run_token`），run 收尾后 agent 落回 idle、仍然活着——不是把它们
         挨个 `pause_agent` 一遍（2026-09-04 spec §7.1）。
         """
-        self._require_initialized()
         per = self._run_tokens.get(session_id, {})
         tm = self._task_managers.get(session_id)
         if not per and (tm is None or tm.is_done()):
@@ -1051,7 +1081,6 @@ class CtxWeftRuntime:
         # 只看 TM 的旧判据会让这些会话**静默早退**：`/cancel` 什么都没做就返回 False，
         # 未决提问留成「有 HitlOpened 无终局事件」的孤儿，重启后 `rebuild_hitl` 又把它
         # 当未决恢复出来（总账 A10 要防的正是这个）。
-        self._require_initialized()
         per = self._run_tokens.get(session_id, {})
         task_manager = self._task_managers.get(session_id)
         has_agents = bool(self._agent_lifecycle_manager.agent_ids_of_session(session_id))
@@ -1164,7 +1193,6 @@ class CtxWeftRuntime:
         cold recovery derives that same scope from the existing terminal fact.
         """
         from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
-        self._require_initialized()
         lm = self._agent_lifecycle_manager
         rec = lm.record_of(agent_id)
         if rec is None:
@@ -1365,7 +1393,6 @@ class CtxWeftRuntime:
         agent id 列表——暂停本身是异步生效的，返回时这些 agent 多半仍是 `running`，
         真正落 `waiting_human` 要等它们各自跑到下一个检查点。
         """
-        self._require_initialized()
         reg = self._agent_lifecycle_manager
         rec = reg.record_of(agent_id)
         if rec is None:
@@ -1414,7 +1441,6 @@ class CtxWeftRuntime:
         真事件发生，不由调用方越过 TaskManager 直接拍。真正的 `running` 由续跑
         起来之后的那次**真实** `TASK_STARTED` 事件驱动。
         """
-        self._require_initialized()
         reg = self._agent_lifecycle_manager
         if not reg.has(agent_id):
             raise AgentNotFound(f"unknown agent: {agent_id}")
@@ -1460,7 +1486,6 @@ class CtxWeftRuntime:
         reason: str = "user_selected",
     ) -> bool:
         """host 入口：把 `(llm_account, llm_model)` 包成 `ModelChoice`，转发给 registry。"""
-        self._require_initialized()
         return await self._agent_lifecycle_manager.set_agent_llm(
             agent_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
         )
@@ -1473,7 +1498,6 @@ class CtxWeftRuntime:
 
         返回值 = 真正改动了 record 的 agent 数（幂等 no-op 不计数）。
         """
-        self._require_initialized()
         return await self._agent_lifecycle_manager.set_session_llm(
             session_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
         )
@@ -1494,7 +1518,6 @@ class CtxWeftRuntime:
 
         60 处测试在用，返回的句柄已带 `agent_id`，与 agent-centric 不冲突——保留它是
         纯收益、删它是纯成本。"""
-        self._require_initialized()
         from ctx_weft.core.utils.content import content_to_text
 
         sid = session_id or generate_id("ses")
@@ -1587,6 +1610,7 @@ class CtxWeftRuntime:
             self._bind_task_manager(sid, task_manager)
             # 同理登记 session，使 /hitl 等入口在这条路径上也查得到该 session。
             self._session_registry.register_session(sid, tenant_id=tenant_id)
+            self._initialized_sessions.add(sid)
 
             for p in self.providers.get_capability_providers():
                 if isinstance(p, ControlCapabilityProvider):
@@ -1672,7 +1696,6 @@ class CtxWeftRuntime:
         """
         # 单例（`_bind_task_manager`）：给一个本进程里已经有主的 session_id 再建一次，
         # 会造出第二个 TM、第二条 SESSION_CREATED。入口即拒，先于任何持久化。
-        self._require_initialized()
         session_id = session_id or generate_id("ses")
         if session_id and self._session_in_memory(session_id):
             raise SessionAlreadyExistsError(session_id)
@@ -1726,7 +1749,6 @@ class CtxWeftRuntime:
                                   session_id=<id> → new session with that host-provided ID).
         params.resume is True  → resume existing session (root_agent_id recovered from events).
         """
-        self._require_initialized()
         import dataclasses as _dc
 
         # 单例（`_bind_task_manager`）：「新建」一个本进程里已经有主的 session_id 会造出
@@ -1746,6 +1768,8 @@ class CtxWeftRuntime:
             raise ValueError("session_id is required when resume=True")
         # Mint before any persisted creation event so every opening uses the same lock.
         sid = params.session_id or generate_id("ses")
+        if params.resume:
+            await self.initialize(sid)
         normalized, user_prompt_event_jsonable = await self._validate_and_normalize_content(
             params.user_prompt, sid, tenant_id=params.tenant_id,
         )
@@ -1930,6 +1954,7 @@ class CtxWeftRuntime:
             on_task_terminal=lambda tid, sid=session.id: self._on_task_terminal(sid, tid),
         ))
 
+        self._initialized_sessions.add(session.id)
         self._loaded_sessions.add(session.id)
         if start_tasks:
             asyncio.create_task(task_manager.drain())
@@ -2066,7 +2091,6 @@ class CtxWeftRuntime:
         判据放在 runtime 而不是 ALM：这三样分属 `_task_managers` / `hitl_registry` /
         `AgentLifecycleManager`，只有组合根同时认识它们。
         """
-        self._require_initialized()
         tm = self._task_managers.get(session_id)
         if tm is not None and not tm.is_done():
             return False
@@ -2104,7 +2128,6 @@ class CtxWeftRuntime:
         两条重建路径并行，正是这把锁存在的理由。它按 session 数有界、体量微小，不回收
         是构造期就定下的（见 `__init__` 里那行注释）。
         """
-        self._require_initialized()
         if self._session_lock(session_id).locked() or not self.session_is_quiescent(session_id):
             logger.info("forget_session: %s 还没安静下来（在跑 / 有人在等），不逐出", session_id)
             return False
@@ -2124,7 +2147,6 @@ class CtxWeftRuntime:
         **不看同 session 其他 agent，也不看 task 队列**：那是 `forget_session` 的粒度。
         这里只对这一个 agent 负责。
         """
-        self._require_initialized()
         rec = self._agent_lifecycle_manager.record_of(agent_id)
         if rec is None:
             return False
@@ -2167,7 +2189,6 @@ class CtxWeftRuntime:
         内存，不跑任何东西；会话本就不在事件日志里则装填出 0 条，后面几步自然全是
         no-op。
         """
-        self._require_initialized()
         try:
             if not self._agent_lifecycle_manager.agent_ids_of_session(session_id):
                 await self.rebuild_session(session_id)
@@ -2192,6 +2213,7 @@ class CtxWeftRuntime:
             logger.exception("purge_session: close_resolved failed for %s", session_id)
         self.hitl_registry.forget_session(session_id)
         self._evict_session_memory(session_id)
+        self._initialized_sessions.discard(session_id)
 
     def _evict_session_memory(self, session_id: str) -> None:
         """无条件把该 session 的运行时内存摘干净。`forget_session`（过判据之后）与
@@ -2228,11 +2250,17 @@ class CtxWeftRuntime:
     ) -> int:
         """Ensure one complete owner, without execution. Return its agent count.
 
-        Startup crash calibration is performed by initialize(), not materialization.
+        Crash calibration is performed by initialize(session_id) before materialization.
         An existing owner is reused; missing members are repaired without replacing
         live records. strict=True raises on absence or failure; the compatibility
         non-strict path returns zero after rolling back an incomplete cold load."""
-        self._require_initialized()
+        if self._session_lock_owners.get(session_id) is not asyncio.current_task():
+            try:
+                await self.initialize(session_id)
+            except SessionNotFound:
+                if strict:
+                    raise
+                return 0
         lock = self._session_guard(session_id)
         async with lock:
             return await self._rebuild_session_locked(
@@ -2571,7 +2599,6 @@ class CtxWeftRuntime:
         through rebuild_session. Without resumed_task_id the existing behavior is
         session-wide requeue; HITL internals target the answered task explicitly.
         keep_alive only ensures materialization, with no drain or model calls."""
-        self._require_initialized()
         if session_id is not None:
             await self.rebuild_session(session_id, strict=True)
         rec = self._agent_lifecycle_manager.record_of(agent_id)
@@ -2591,7 +2618,6 @@ class CtxWeftRuntime:
 
     async def prepare_agent(self, agent_id: str) -> None:
         """Compatibility wrapper; rebuild_session owns all cold preparation."""
-        self._require_initialized()
         rec = self._agent_lifecycle_manager.record_of(agent_id)
         if rec is None:
             raise AgentNotLoaded(f"agent {agent_id!r} is not loaded")
@@ -3181,7 +3207,6 @@ class CtxWeftRuntime:
         honoured mid-compact — ``CompactStep`` does not poll the pause token — but the
         idle-guard still prevents a new compact/drain from starting on this session.
         """
-        self._require_initialized()
         import dataclasses as _dc
 
         from ctx_weft.core.control.converters import session_from_projection
@@ -3370,7 +3395,6 @@ class CtxWeftRuntime:
         return reduce_events([row.event for row in rows], session_id)
 
     async def get_session(self, session_id: str) -> QueryResult[SessionDetail]:
-        self._require_initialized()
         async with self._session_guard(session_id):
             tm = self._task_managers.get(session_id)
             loaded = tm is not None and tm.session is not None
@@ -3387,7 +3411,6 @@ class CtxWeftRuntime:
             return self._query_result(detail, "memory" if loaded else "events", loaded, position)
 
     async def get_task(self, session_id: str, task_id: str) -> QueryResult[TaskDetail]:
-        self._require_initialized()
         async with self._session_guard(session_id):
             tm = self._task_managers.get(session_id)
             task = tm.get_task(task_id) if tm is not None else None
@@ -3406,7 +3429,6 @@ class CtxWeftRuntime:
         self, session_id: str, *, agent_id: str | None = None,
         statuses: list[str] | None = None, limit: int = 100,
     ) -> list[QueryResult[TaskDetail]]:
-        self._require_initialized()
         if limit <= 0:
             raise ValueError("limit must be positive")
         async with self._session_guard(session_id):
@@ -3428,7 +3450,6 @@ class CtxWeftRuntime:
     async def get_agent(
         self, agent_id: str, *, session_id: str | None = None,
     ) -> QueryResult[AgentDetail]:
-        self._require_initialized()
         rec = self._agent_lifecycle_manager.record_of(agent_id)
         if session_id is None:
             if rec is None:
@@ -3457,7 +3478,6 @@ class CtxWeftRuntime:
         self, *, session_id: str | None = None, parent_agent_id: str | None = None,
         include_terminated: bool = False,
     ) -> list[QueryResult[AgentSummary]]:
-        self._require_initialized()
         if session_id is None:
             # No implicit cross-partition scan; the unscoped API lists loaded members.
             return [self._query_result(a, "memory", True) for a in self._list_agents_memory(
@@ -3485,7 +3505,6 @@ class CtxWeftRuntime:
     async def list_pending_hitl(
         self, *, session_id: str | None = None, agent_id: str | None = None,
     ):
-        self._require_initialized()
         if session_id is None and agent_id is not None:
             rec = self._agent_lifecycle_manager.record_of(agent_id)
             if rec is None:
@@ -3644,7 +3663,6 @@ class CtxWeftRuntime:
         （见 `Task.port_key`）。注入分支沿用那个 task 自己的口：一条消息不该把一个正在
         跟某个对端往返的 task 改接到别处。
         """
-        self._require_initialized()
         reg = self._agent_lifecycle_manager
         rec = reg.record_of(agent_id)
         if rec is None:
@@ -4067,7 +4085,6 @@ class CtxWeftRuntime:
         task 终态事件 + 那次 close 边界 recap，与会话级句柄同一条；拿不到的只是
         `LoopState`。要终局信息就读 task 投影或订 `handle.events()`。
         """
-        self._require_initialized()
         import dataclasses as _dc
 
         from ctx_weft.core.models.errors import SessionNotFound
@@ -4248,7 +4265,6 @@ class CtxWeftRuntime:
         未知 `hitl_id` 时 `pending` 为 `None`，这一步不拦（未知 id 的报错留给
         `HitlService.resolve` 的 `KeyError`，与改动前行为一致）。
         """
-        self._require_initialized()
         pending = self.hitl_registry.get(reply.hitl_id)
         sid = session_id or (pending.session_id if pending is not None else None)
         if sid is None:
@@ -4890,7 +4906,6 @@ class CtxWeftRuntime:
         """Compatibility entry: materialize the complete session, then count pending HITL.
 
         Never creates a separate partial registry or TaskManager."""
-        self._require_initialized()
         await self.rebuild_session(session_id, strict=True)
         return len(self.hitl_registry.list_pending(session_id=session_id))
 

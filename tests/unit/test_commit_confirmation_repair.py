@@ -1,4 +1,5 @@
 """Unknown receipts preserve batch identity and sufficient cold-recovery facts."""
+
 import asyncio
 
 import pytest
@@ -9,6 +10,7 @@ from ctx_weft.core.utils.event import new_event
 from ctx_weft.protocols.events import EventType, PersistenceUnavailableError
 from ctx_weft.providers.events.bus.in_process.bus import InProcessEventBus
 from ctx_weft.providers.events.store.in_memory.store import InMemoryEventStore
+from tests._initialization import initialize_all
 from tests._snapshot_helpers import seed_snapshot
 from tests.unit.test_runtime_initialization_queries import append, container, runtime
 
@@ -18,9 +20,9 @@ pytestmark = pytest.mark.asyncio
 @pytest.mark.parametrize("receipt_lost", [False, True])
 async def test_stopped_requeue_submission_consumes_retry_budget_once(receipt_lost):
     from ctx_weft.core.models.task import Task
-    from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
     from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
+    from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     store = InMemoryEventStore()
     bus = InProcessEventBus()
     bus.attach_commit_gate(CommitGate(store))
@@ -141,9 +143,9 @@ async def test_startup_repairs_missing_idle_after_finalized_task(status, snapsho
         assert view.tasks["done"].finalized
         await seed_snapshot(store, "s1", view, cut=await store.committed_head("s1"))
     fresh = runtime(store)
-    await fresh.initialize()
+    await initialize_all(fresh)
     view = await rebuild_view(store, "s1")
     assert view.agents[handle.root_agent_id].status == "idle"
     head = await store.committed_head("s1")
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     assert await store.committed_head("s1") == head

@@ -17,13 +17,12 @@
 
 from __future__ import annotations
 
-from tests.runtime_helpers import wait_for_park
-
 import pytest
 
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols.events import Event
 from ctx_weft.protocols.hitl import HitlReply, ToolResultDelivery
+from tests._initialization import initialize_all
 from tests.integration.test_hitl_e2e_v2 import (
     _BASH_CALL,
     _ActRouterLLM,
@@ -31,6 +30,7 @@ from tests.integration.test_hitl_e2e_v2 import (
     _make_runtime_with_bash_tool,
     _poll,
 )
+from tests.runtime_helpers import wait_for_park
 from tests.unit._legacy_recover import rebuild_all_active
 
 pytestmark = pytest.mark.asyncio
@@ -53,7 +53,7 @@ async def test_hot_approval_session_events_all_carry_the_sessions_tenant() -> No
 
     runtime._event_bus.subscribe(None, _record)  # type: ignore[attr-defined]
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
         tenant_id=TENANT,
@@ -65,7 +65,7 @@ async def test_hot_approval_session_events_all_carry_the_sessions_tenant() -> No
     assert req.form == "approval"
     assert isinstance(req.delivery, ToolResultDelivery)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     view = await runtime.reply_to_hitl(
         HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id)
     )
@@ -100,7 +100,7 @@ async def test_recovery_queue_signal_carries_the_recovered_sessions_tenant() -> 
     llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()])
     runtime, _tool = _make_runtime_with_bash_tool(llm, hitl_timeout_sec=0)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
         tenant_id=TENANT,

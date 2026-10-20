@@ -21,11 +21,11 @@ read_last_of_type / read_session_events_of_types——快照不在其中，它�
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, overload, runtime_checkable
 
 if TYPE_CHECKING:
     # 仅类型注解用；`protocols/events.py` 运行时只依赖 stdlib 的现状不变
@@ -509,6 +509,58 @@ class StoredEvent:
 
 
 @dataclass(frozen=True)
+class EventReadProjection:
+    """Select payload paths per event type without filtering event envelopes.
+
+    Paths are tuples of object keys; ``*`` projects every object value or array
+    element. An empty path retains the entire subtree. Unlisted types have an
+    empty payload. Missing keys stay missing; JSON null/false/empty values retain
+    their types. Metadata is omitted unless explicitly requested. Stores must
+    apply row filters against the original event, before projecting its fields.
+    """
+
+    payload_fields_by_type: Mapping[str, tuple[tuple[str, ...], ...]]
+    include_metadata: bool = False
+
+    def __post_init__(self) -> None:
+        from types import MappingProxyType
+
+        normalized = {}
+        for kind, paths in self.payload_fields_by_type.items():
+            paths = tuple(tuple(path) for path in paths)
+            if any(not isinstance(key, str) or not key for path in paths for key in path):
+                raise ValueError("Projection paths must contain nonempty string keys")
+            normalized[str(kind)] = paths
+        object.__setattr__(self, "payload_fields_by_type", MappingProxyType(normalized))
+
+
+@dataclass
+class ProjectedEvent:
+    """An explicitly incomplete read record; never a persistable/full Event."""
+
+    id: str
+    run_id: str
+    sequence: int
+    session_id: str
+    type: str
+    timestamp: datetime
+    tenant_id: str = "default"
+    task_id: str | None = None
+    agent_id: str | None = None
+    origin: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    causation_id: str | None = None
+    schema_version: int = 1
+
+
+@dataclass(frozen=True)
+class ProjectedStoredEvent:
+    event: ProjectedEvent
+    position: int
+
+
+@dataclass(frozen=True)
 class CommitReceipt:
     """一次批次提交的确认：batch_id + 按提交顺序排列的 StoredEvent。
 
@@ -616,6 +668,34 @@ class EventStore(Protocol):
         """原子提交一批事件，返回带提交位置的 receipt。"""
         ...
 
+    @overload
+    async def read_range(
+        self,
+        session_id: str,
+        *,
+        after_position: int = 0,
+        through_position: int | None = None,
+        include_types: "tuple[str, ...]" = (),
+        exclude_types: "tuple[str, ...]" = (),
+        task_id: str = "",
+        related_task_id: str = "",
+        projection: None = None,
+    ) -> list[StoredEvent]: ...
+
+    @overload
+    async def read_range(
+        self,
+        session_id: str,
+        *,
+        after_position: int = 0,
+        through_position: int | None = None,
+        include_types: "tuple[str, ...]" = (),
+        exclude_types: "tuple[str, ...]" = (),
+        task_id: str = "",
+        related_task_id: str = "",
+        projection: EventReadProjection,
+    ) -> list[ProjectedStoredEvent]: ...
+
     @abstractmethod
     async def read_range(
         self,
@@ -627,8 +707,13 @@ class EventStore(Protocol):
         exclude_types: "tuple[str, ...]" = (),
         task_id: str = "",
         related_task_id: str = "",
-    ) -> "list[StoredEvent]":
+        projection: EventReadProjection | None = None,
+    ) -> list[StoredEvent] | list[ProjectedStoredEvent]:
         """按 position 升序读取 (after_position, through_position] 的已提交事件。
+
+        ``projection=None`` returns complete StoredEvent records. An explicit
+        projection returns ProjectedStoredEvent records, preserving all envelope
+        fields and positions. Row selection is independent of field projection.
 
         **本协议唯一的区间读**。四个过滤器都是可选的，都作用在同一个 position 区间上：
 
@@ -690,10 +775,23 @@ class EventStore(Protocol):
     # 拿自己的清单逐条调 `Runtime.rebuild_hitl(session_id)` / `rebuild_session(session_id)`
     # ——那两条都走快照 + 增量（`rebuild_view`），O(delta)。
 
+    @overload
+    async def read_last_of_type(
+        self, session_id: str, type_: str, *,
+        projection: None = None,
+    ) -> StoredEvent | None: ...
+
+    @overload
+    async def read_last_of_type(
+        self, session_id: str, type_: str, *,
+        projection: EventReadProjection,
+    ) -> ProjectedStoredEvent | None: ...
+
     @abstractmethod
     async def read_last_of_type(
-        self, session_id: str, type_: str,
-    ) -> "StoredEvent | None":
+        self, session_id: str, type_: str, *,
+        projection: EventReadProjection | None = None,
+    ) -> StoredEvent | ProjectedStoredEvent | None:
         """按提交序取该会话**最后一条**指定类型的事件；没有则 None。
 
         通用读原语，同样不带特定类型的语义。存在的理由是「取最新那一条」必须只读**一条**

@@ -9,18 +9,19 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
-from tests.unit._stub_runner import StubRunner
-from tests.unit._legacy_recover import rebuild_all_active
+from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from tests._event_helpers import append_one
+from tests._initialization import initialize_all
+from tests.unit._legacy_recover import rebuild_all_active
+from tests.unit._stub_runner import StubRunner
 
 pytestmark = pytest.mark.asyncio
 
 
 def test_restore_keeps_hitl_parked_task_suspended() -> None:
-    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.models.task import Task
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     tm = TaskManager(session_id="s1")
     parked = Task(id="t1", session_id="s1", status="SUSPENDED")
     tm.restore([parked], terminal_ids=set(), parked_task_ids={"t1"})
@@ -29,8 +30,8 @@ def test_restore_keeps_hitl_parked_task_suspended() -> None:
 
 
 def test_restore_requeues_suspended_on_children_when_all_terminal() -> None:
-    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.models.task import Task
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     tm = TaskManager(session_id="s1")
     parent = Task(id="p", session_id="s1", status="SUSPENDED")
     child = Task(id="c", session_id="s1", status="FINISHED", parent_task_id="p")
@@ -39,8 +40,8 @@ def test_restore_requeues_suspended_on_children_when_all_terminal() -> None:
 
 
 def test_restore_parked_ids_default_none_is_old_behavior() -> None:
-    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.models.task import Task
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     tm = TaskManager(session_id="s1")
     parent = Task(id="p", session_id="s1", status="SUSPENDED")
     tm.restore([parent], terminal_ids=set())   # no parked_task_ids → old behavior: requeue
@@ -50,11 +51,16 @@ def test_restore_parked_ids_default_none_is_old_behavior() -> None:
 async def test_recover_agent_rebuilds_pending_hitl_and_parks() -> None:
     import asyncio
     from datetime import datetime, timezone
+
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.protocols.events import Event, EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider,
+        make_echo_template,
+        make_runtime,
+    )
 
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
@@ -85,9 +91,9 @@ async def test_recover_agent_rebuilds_pending_hitl_and_parks() -> None:
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session("ses_1")
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent("agt_root")
     await asyncio.sleep(0)
 
@@ -101,8 +107,8 @@ def test_restore_keeps_active_parked_task_out_of_queue() -> None:
 
     park 判据应看"有无未决 HITL"（parked_task_ids），而非 task.status==SUSPENDED。
     """
-    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.models.task import Task
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     tm = TaskManager(session_id="s1")
     parked = Task(id="t1", session_id="s1", status="ACTIVE")   # 审批热等 → ACTIVE
     tm.restore([parked], terminal_ids=set(), parked_task_ids={"t1"})
@@ -121,9 +127,9 @@ def _tm_with_hooks():
     `TaskManager._emit` 对 `event_bus=None` 是 no-op（既有语义），本文件这两条用例
     从来不关心事件本身，只关心收尾走哪条分支。
     """
-    from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
     from ctx_weft.core.models.session import Session
+    from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
 
     session = Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING", token_budget=0)
     tm = TaskManager(session_id="s1", max_concurrent=1)
@@ -215,7 +221,7 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     await rebuild_all_active(runtime)
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     # 面板 vs 一句话的区分仍在，只是原始事实（delivery）搬去了 host 的只读入口。
-    await runtime.initialize()
+    await initialize_all(runtime)
     pending = [item.data for item in await runtime.list_pending_hitl(session_id="ses_1")]
     assert isinstance(pending[0].delivery, ToolResultDelivery)
 
@@ -251,6 +257,7 @@ def _recover_runtime_with_regression_guard():
 
 def _mk_ev(seq, type_, **payload):
     from datetime import datetime, timezone
+
     from ctx_weft.protocols.events import Event
     task_id = payload.pop("task_id", None)
     return Event(id=f"e{seq}", run_id="r1", sequence=seq, session_id="ses_1", type=type_,
@@ -283,7 +290,7 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
     await rebuild_all_active(runtime)
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     # wait-only 不应误标「有面板」——前端会等一个不存在的面板。
-    await runtime.initialize()
+    await initialize_all(runtime)
     pending = [item.data for item in await runtime.list_pending_hitl(session_id="ses_1")]
     assert isinstance(pending[0].delivery, UserTurnDelivery)
 
@@ -310,7 +317,7 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
 
     await rebuild_all_active(runtime)
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
-    await runtime.initialize()
+    await initialize_all(runtime)
     pending = {r.id: r for r in [item.data for item in await runtime.list_pending_hitl(session_id="ses_1")]}
     assert isinstance(pending["h1"].delivery, UserTurnDelivery)
     assert isinstance(pending["h2"].delivery, ToolResultDelivery)
@@ -326,14 +333,19 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     """
     import asyncio
     from datetime import datetime, timezone
+
     from ctx_weft.core import CtxWeftRuntime
-    from ctx_weft.protocols.events import Event, EventType
     from ctx_weft.core.models.session import Session
     from ctx_weft.core.models.task import NormalTaskSettings, Task
     from ctx_weft.core.orchestrator.task.manager import TaskManager
+    from ctx_weft.protocols.events import Event, EventType
     from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider,
+        make_echo_template,
+        make_runtime,
+    )
 
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
@@ -371,11 +383,11 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
         await append_one(runtime.event_store, e)
 
     # 完整的热 owner 同时拥有 ALM 记录；rebuild 不再回放覆盖活 owner。
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime._load_agents_of("ses_1")
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session("ses_1")
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent("agt_root")
     await asyncio.sleep(0)
 
@@ -393,10 +405,11 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     `set_session_llm` 两条独立命令（Task 9）。
     """
     import asyncio
+
     from ctx_weft.core import CtxWeftRuntime
-    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.models.session import Session
     from ctx_weft.core.models.task import NormalTaskSettings, Task
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
@@ -443,8 +456,9 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     tm.register_task(Task(id="tsk_A", session_id="ses_1", status="SUSPENDED", settings=NormalTaskSettings()))
     runtime._task_managers["ses_1"] = tm
     runtime._loaded_sessions.add("ses_1")
+    runtime._initialized_sessions.add("ses_1")  # Already-live synthetic owner.
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent("agt", resumed_task_id="tsk_A")
     for _ in range(10):
         await asyncio.sleep(0)
@@ -455,9 +469,10 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
 
 
 async def test_crash_mid_batch_routes_to_reconcile() -> None:
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
+
     from ctx_weft.core.runtime import _task_has_dangling_tool_call
-    from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext
+    from ctx_weft.protocols import MemoryAddress, MemoryEventType, ProviderContext
     from ctx_weft.protocols.memory import MemoryEvent
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 

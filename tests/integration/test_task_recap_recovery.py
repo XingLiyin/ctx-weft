@@ -38,21 +38,30 @@ from datetime import datetime, timezone
 
 import pytest
 
+from ctx_weft import RuntimeConfig
 from ctx_weft.core import CtxWeftRuntime
+from ctx_weft.core.capabilities.control_tools import REPORT_OBSERVATION_NAME
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.core.capabilities.control_tools import REPORT_OBSERVATION_NAME
 from ctx_weft.protocols import (
-    MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
+    MemoryAddress,
+    MemoryEvent,
+    MemoryEventType,
+    ProviderContext,
+    ToolCall,
 )
 from ctx_weft.protocols.capability import qualify
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft import RuntimeConfig
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
-from tests._snapshot_helpers import seed_snapshot
 from tests._event_helpers import append_one
+from tests._initialization import initialize_all
+from tests._snapshot_helpers import seed_snapshot
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -177,9 +186,9 @@ async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
     # ── Recover ────────────────────────────────────────────────────────────────
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session(sid)
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent(aid)
 
     # finalize_idle_session awaits the relaunched recap before finalizing the session,
@@ -283,9 +292,9 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed(monkeypatch) -
     monkeypatch.setattr(TaskManager, "finalize_idle_session", _spy_finalize)
 
     # ── Recover ────────────────────────────────────────────────────────────────
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session(sid)
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent(aid)
 
     tm = runtime._task_managers.get(sid)
@@ -408,9 +417,9 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     ), pctx)
 
     # ── Recover ────────────────────────────────────────────────────────────────
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session(sid)
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent(aid)
 
     # Drive to quiescence: repeatedly gather whatever background tasks the TM is
@@ -472,10 +481,10 @@ async def test_no_tasks_at_all_still_raises() -> None:
         1, EventType.SESSION_CREATED, user_prompt="do it",
         template_id="agent:tpl_echo", root_agent_id=aid))
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session("ses_recap")
     with pytest.raises(RuntimeError, match="no resumable tasks"):
-        await runtime.initialize()
+        await initialize_all(runtime)
         await runtime.recover_agent(aid)
 
 
@@ -523,9 +532,9 @@ async def test_all_tasks_terminal_with_a_pruned_snapshot_does_not_raise() -> Non
     view = await rebuild_view(runtime.event_store, sid)
     assert view.tasks == {} and view.tasks_total == 1
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session(sid)
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.recover_agent(aid)   # 不抛即通过（没有活可重排，但会话是好的）
 
 
@@ -561,7 +570,7 @@ async def test_resume_uses_snapshot_or_bounded_history(tmp_path, snapshot) -> No
 
             store.read_range = counting
             runtime, _ = make_lifecycle_runtime(store, memory, "finish_park")
-            await runtime.initialize()
+            await initialize_all(runtime)
             await runtime.rebuild_session(sid, strict=True)
             # No snapshot requires the initial projection replay. A valid snapshot
             # must avoid unbounded replay even while a terminal task awaits recap.

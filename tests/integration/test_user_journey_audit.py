@@ -3,6 +3,7 @@
 Only provider I/O and model latency are controlled. Runtime entry points, task
 dispatch, observation, HITL, persistence and memory folding execute normally.
 """
+
 import asyncio
 import json
 import subprocess
@@ -17,9 +18,13 @@ from ctx_weft.protocols import LLMChunk, MemoryAddress, MemoryScope, ProviderCon
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests.integration._session_cancel_worker import wait_until
 from tests.integration.test_foreground_observe_interrupt import runtime
-from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM, _is_background_observe
+from tests.integration.test_send_message_after_session_done import (
+    _FinishEveryTaskLLM,
+    _is_background_observe,
+)
 
 pytestmark = pytest.mark.asyncio
 SID = "whole-user-journey"
@@ -154,7 +159,7 @@ async def test_repeated_edit_retract_finish_restart_and_next_task(tmp_path, entr
             store.append_batch = slow_old_report
             llm = JourneyLLM(late)
             rt = runtime(store, memory, llm, short)
-            await rt.initialize()
+            await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
                 template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
                 context_limit=100000))
@@ -196,7 +201,7 @@ async def test_repeated_edit_retract_finish_restart_and_next_task(tmp_path, entr
             before = [(r.id, r.content) for r in records]
             head = await store.committed_head(SID)
             cold = runtime(store, memory, _FinishEveryTaskLLM(), short)
-            await cold.initialize()
+            await initialize_all(cold)
             await cold.rebuild_session(SID, strict=True)
             await cold.recover_agent(h.agent_id, session_id=SID)
             await idle(cold)
@@ -214,7 +219,7 @@ async def test_immediate_input_from_confirmed_pause_notice_remains_retractable(t
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             llm = JourneyLLM()
             rt = runtime(store, memory, llm, False)
-            await rt.initialize()
+            await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
                 template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
                 context_limit=100000))
@@ -267,7 +272,7 @@ async def test_resume_after_input_commit_failure_finishes_and_accepts_next_work(
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             llm = JourneyLLM()
             rt = runtime(store, memory, llm, False)
-            await rt.initialize()
+            await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
                 template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
                 context_limit=100000))
@@ -352,7 +357,7 @@ async def test_cold_input_recovery_preserves_request_through_to_next_task(tmp_pa
                 return await original(event, ctx)
             if recovery_fault == "memory_write":
                 memory.ingest = ingest
-            await rt.initialize()
+            await initialize_all(rt)
             try:
                 await rt.rebuild_session(SID, strict=True)
             except OSError:
@@ -385,7 +390,7 @@ async def test_cold_input_recovery_preserves_request_through_to_next_task(tmp_pa
             head = await store.committed_head(SID)
             before = [(r.id, r.content) for r in records]
             again = runtime(store, memory, _FinishEveryTaskLLM(), False)
-            await again.initialize()
+            await initialize_all(again)
             await again.rebuild_session(SID, strict=True)
             await again.recover_agent(h.agent_id, session_id=SID)
             await idle(again)
@@ -399,13 +404,14 @@ async def test_cold_input_recovery_preserves_request_through_to_next_task(tmp_pa
 @pytest.mark.parametrize("finish_fault", ["before", "unknown"])
 async def test_uncertain_input_then_repeated_finish_failure_retains_original_run(tmp_path, finish_fault):
     from copy import deepcopy
+
     from ctx_weft.protocols.events import PersistenceUnavailableError
 
     async with open_sqlite_event_store(tmp_path / "events.db") as store:
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             llm = JourneyLLM()
             rt = runtime(store, memory, llm, False)
-            await rt.initialize()
+            await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
                 template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
                 context_limit=100000))

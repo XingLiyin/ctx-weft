@@ -16,11 +16,14 @@ import pytest
 
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols.events import Event, EventType
+from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
-    InlineAgentTemplateProvider, make_echo_template, make_runtime,
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
 )
 from tests.unit._legacy_recover import rebuild_all_active
-from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
 _TS = datetime(2026, 6, 13, tzinfo=UTC)
@@ -83,7 +86,7 @@ async def test_load_no_longer_rewinds_current_task_id(monkeypatch):
     reg = rt._agent_lifecycle_manager
     assert reg.record_of(aid).current_task_id == "tsk_old"
 
-    await rt.initialize()
+    await initialize_all(rt)
     first = await rt.send_message(aid, "new question", session_id=sid)
     assert reg.record_of(aid).current_task_id == first.task_id
 
@@ -92,6 +95,6 @@ async def test_load_no_longer_rewinds_current_task_id(monkeypatch):
     assert reg.record_of(aid).current_task_id == first.task_id, "路由判据被热重装倒回了"
 
     # 判据没倒回 → 下一条消息并进同一个 task，不再凭空多开一个
-    await rt.initialize()
+    await initialize_all(rt)
     second = await rt.send_message(aid, "another question", session_id=sid)
     assert second.task_id == first.task_id

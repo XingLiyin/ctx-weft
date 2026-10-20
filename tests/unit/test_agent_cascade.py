@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from ctx_weft.core.models.errors import AgentNotFound, AgentNotRunningError
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
+from ctx_weft.core.models.errors import AgentNotFound, AgentNotRunningError
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import (
     HITL_FORM_QUESTION,
@@ -15,9 +15,12 @@ from ctx_weft.protocols.hitl import (
     ToolResultDelivery,
     UserTurnDelivery,
 )
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.unit.test_runtime_agent_api import (
-    _plant, _plant_live_task, _reach_commit_point,
+    _plant,
+    _plant_live_task,
+    _reach_commit_point,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -34,7 +37,7 @@ async def test_cancel_does_not_terminate_descendant_agents():
     _plant(rt, "kid2", "root")
     _plant(rt, "grandkid", "kid1")
 
-    await rt.initialize()
+    await initialize_all(rt)
     killed = await rt.cancel_agent("root", reason="user")
     assert killed == ["root"]
     assert rt._agent_lifecycle_manager.status_of("root") == "terminated"
@@ -49,7 +52,7 @@ async def test_cancel_emits_termination_only_for_the_target_agent():
     seen = []
     rt._event_bus.subscribe(None, lambda ev: seen.append(ev) or _noop())
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.cancel_agent("root", reason="user")
     term = {e.agent_id: e.payload for e in seen if e.type == EventType.AGENT_TERMINATED}
     assert term["root"]["cascaded_from"] is None
@@ -80,14 +83,14 @@ async def test_cancel_finalizes_pending_hitl(monkeypatch):
     monkeypatch.setattr(rt, "_list_pending_hitl_memory", _fake_list, raising=False)
     monkeypatch.setattr(rt.hitl, "cancel", _fake_cancel, raising=False)
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.cancel_agent("a1")
     assert canceled == ["h1"]
 
 
 async def test_cancel_unknown_agent_is_noop():
     rt = _rt()
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.cancel_agent("ghost") == []
 
 
@@ -115,7 +118,7 @@ async def test_cancel_only_finalizes_hitl_of_target_agent(monkeypatch):
     monkeypatch.setattr(rt, "_list_pending_hitl_memory", _fake_list, raising=False)
     monkeypatch.setattr(rt.hitl, "cancel", _fake_cancel, raising=False)
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.cancel_agent("a1")
 
     assert canceled == ["h1"]
@@ -149,7 +152,7 @@ async def test_cancel_finalizes_hitl_before_agent_terminated_event(monkeypatch):
     monkeypatch.setattr(rt.hitl, "cancel", _fake_cancel, raising=False)
     rt._event_bus.subscribe(None, _on_event)
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.cancel_agent("a1")
 
     assert order == ["hitl_canceled:h1", "agent_terminated:a1"]
@@ -173,7 +176,7 @@ async def test_pause_agent_signals_running_descendants_only():
     root_tokens = rt._register_run_tokens("s1", "t_root")
     kid_tokens = rt._register_run_tokens("s1", "t_kid")
 
-    await rt.initialize()
+    await initialize_all(rt)
     paused = await rt.pause_agent("root")
 
     assert set(paused) == {"root", "busy_kid"}, "idle 的子孙不动"
@@ -191,7 +194,7 @@ async def test_pause_agent_skips_running_agent_with_no_live_run_token():
     rt._agent_lifecycle_manager._agents["root"].current_task_id = "t_root"
     # 故意不注册 run token
 
-    await rt.initialize()
+    await initialize_all(rt)
     paused = await rt.pause_agent("root")
 
     assert paused == []
@@ -202,14 +205,14 @@ async def test_pause_agent_non_running_raises():
     rt = _rt()
     _plant(rt, "a1", None, status="idle")
     with pytest.raises(AgentNotRunningError):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.pause_agent("a1")
 
 
 async def test_pause_agent_unknown_raises():
     rt = _rt()
     with pytest.raises(AgentNotFound):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.pause_agent("ghost")
 
 
@@ -263,7 +266,7 @@ async def test_resume_agent_resolves_the_pause_bubble_via_cold_resume(monkeypatc
     monkeypatch.setattr(rt, "recover_agent", _fake_recover_agent)
     req = await _open_pause_bubble(rt, agent_id="root", task_id="t_root")
 
-    await rt.initialize()
+    await initialize_all(rt)
     resumed = await rt.resume_agent("root")
 
     assert resumed == ["root"]
@@ -280,7 +283,7 @@ async def test_resume_agent_does_not_answer_a_real_ask_user_question(monkeypatch
     monkeypatch.setattr(rt, "recover_agent", _unreachable_recover_agent)
     req = await _open_ask_user_bubble(rt, agent_id="root", task_id="t_root")
 
-    await rt.initialize()
+    await initialize_all(rt)
     resumed = await rt.resume_agent("root")
 
     assert resumed == []
@@ -294,7 +297,7 @@ async def test_resume_agent_does_not_touch_plain_text_wait_bubble(monkeypatch):
     monkeypatch.setattr(rt, "recover_agent", _unreachable_recover_agent)
     req = await _open_plain_text_wait_bubble(rt, agent_id="root", task_id="t_root")
 
-    await rt.initialize()
+    await initialize_all(rt)
     resumed = await rt.resume_agent("root")
 
     assert resumed == []
@@ -318,7 +321,7 @@ async def test_resume_agent_cascades_to_waiting_human_descendants_only(monkeypat
     r1 = await _open_pause_bubble(rt, agent_id="root", task_id="t_root")
     r2 = await _open_pause_bubble(rt, agent_id="kid", task_id="t_kid", edit=True)
 
-    await rt.initialize()
+    await initialize_all(rt)
     resumed = await rt.resume_agent("root")
 
     assert set(resumed) == {"root", "kid"}
@@ -330,7 +333,7 @@ async def test_resume_agent_cascades_to_waiting_human_descendants_only(monkeypat
 async def test_resume_agent_unknown_raises():
     rt = _rt()
     with pytest.raises(AgentNotFound):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.resume_agent("ghost")
 
 
@@ -349,19 +352,19 @@ async def test_send_message_finalizes_all_pending_hitl_of_target_agent():
     _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
     req = await _open_ask_user_bubble(rt, agent_id="a1", task_id="t1")
 
-    await rt.initialize()
+    await initialize_all(rt)
     tid = (await rt.send_message("a1", "please continue without answering that")).task_id
 
     assert tid == "t1"
     # 两阶段（spec 2026-09-09）：收口先落成「待终局」——对调用方而言这个气泡已经不是
     # 未决的（`list_pending` 立刻就不列它了），只是要等这一轮的 LLM 真的开口才终局。
     assert rt.hitl_registry.get(req.id).claim_pending is True
-    await rt.initialize()
+    await initialize_all(rt)
     assert [v for v in [item.data for item in await rt.list_pending_hitl(session_id="s1")] if v.agent_id == "a1"] == []
 
     await _reach_commit_point(rt)
     assert rt.hitl_registry.get(req.id).resolved is True
-    await rt.initialize()
+    await initialize_all(rt)
     assert [v for v in [item.data for item in await rt.list_pending_hitl(session_id="s1")] if v.agent_id == "a1"] == []
 
 
@@ -373,7 +376,7 @@ async def test_send_message_does_not_touch_other_agents_pending_hitl():
     req_a1 = await _open_ask_user_bubble(rt, agent_id="a1", task_id="t1")
     req_a2 = await _open_ask_user_bubble(rt, agent_id="a2", task_id="t2")
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.send_message("a1", "hello")
 
     await _reach_commit_point(rt)
@@ -395,9 +398,9 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     没有本次修复时：第 3 步之后 `stale_bubble` 仍未终局，第 5 步 `resume_agent`
     会命中它、触发 `recover_agent`（这里桩成必炸），断言失败，复现该缺口。
     """
-    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.core.models.session import Session
     from ctx_weft.core.models.task import Task
+    from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     rt = _rt()
@@ -425,7 +428,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     tm.drain = _noop_drain  # type: ignore[method-assign]
 
     # 1. 真实暂停信号递送（root 此刻仍是 running，暂停异步生效）。
-    await rt.initialize()
+    await initialize_all(rt)
     paused = await rt.pause_agent("root")
     assert paused == ["root"]
     assert root_tokens.pause.is_paused is True
@@ -438,7 +441,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
 
     # 3. 用户此刻改口，发了条新消息（没有专门回答那条暂停气泡）——这正是本次修复
     #    要收口的缺口：send_message 必须把这条陈旧气泡终局掉。
-    await rt.initialize()
+    await initialize_all(rt)
     tid = (await rt.send_message("root", "actually let's change the plan")).task_id
     assert tid == "t_root"
     # 两阶段（spec 2026-09-09）：收口先落成待终局。**本用例要防的危害与终不终局无关**
@@ -447,7 +450,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     assert rt.hitl_registry.get(stale_bubble.id).claim_pending is True, (
         "send_message 必须收口这条陈旧暂停气泡；否则它会一直挂在 pending 列表里"
     )
-    await rt.initialize()
+    await initialize_all(rt)
     assert stale_bubble.id not in [v.id for v in [item.data for item in await rt.list_pending_hitl(session_id="s1")]]
     await _reach_commit_point(rt, task_id="t_root")
     assert rt.hitl_registry.get(stale_bubble.id).resolved is True
@@ -464,7 +467,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
     #    气泡已经被第 3 步收口，此刻 pending 列表里只有真问题（ToolResultDelivery），
     #    `_pause_bubble_of` 的类型过滤天然不会命中它。
     monkeypatch.setattr(rt, "recover_agent", _unreachable_recover_agent)
-    await rt.initialize()
+    await initialize_all(rt)
     resumed = await rt.resume_agent("root")
 
     assert resumed == [], "不该有任何气泡被当成暂停续跑气泡放行"

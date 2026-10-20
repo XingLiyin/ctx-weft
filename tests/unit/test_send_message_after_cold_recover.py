@@ -8,13 +8,14 @@ import pytest
 
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.protocols.events import Event, EventType
+from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
 from tests.unit._legacy_recover import rebuild_all_active
-from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
 
@@ -56,13 +57,13 @@ async def test_send_message_reuses_a_cold_prepared_task_manager(
 
     n = await rebuild_all_active(rt)
     assert n == 1
-    await rt.initialize()
+    await initialize_all(rt)
     assert {a.agent_id for a in [item.data for item in await rt.list_agents()]} == {aid}
     prepared_tm = rt._task_managers[sid]
     assert not prepared_tm._queue.has_pending()
     assert rt._prepared_recoveries[sid][0] is prepared_tm
 
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.send_message(aid, "hi")
 
     assert handle.agent_id == aid
@@ -93,7 +94,7 @@ async def test_send_message_fast_path_does_not_rebuild_when_session_already_live
     await rebuild_all_active(rt)
 
     # 先交付一条消息，激活已准备的 TM。
-    await rt.initialize()
+    await initialize_all(rt)
     first = await rt.send_message(aid, "hi")
     tm = rt._task_managers[sid]
     # 模拟这条消息对应的 task 已经跑完终态——下一条消息会再次落到
@@ -109,7 +110,7 @@ async def test_send_message_fast_path_does_not_rebuild_when_session_already_live
 
     monkeypatch.setattr(rt, "recover_agent", _spy_recover_agent, raising=False)
 
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.send_message(aid, "second message")
 
     assert called == [], "session 已活，不该再走 recover_agent 重建"

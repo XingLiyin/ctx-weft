@@ -1,9 +1,12 @@
 """Run each public user workflow phase in a fresh OS process."""
+
 import asyncio
 import json
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -26,7 +29,7 @@ async def main(path, scenario, stage, variant):
             provider = SlowApprovalStore(store) if scenario == "approval" and variant == "hot" else store
             rt, a, b, tool = runtime(provider, memory, scenario,
                                       "initial" if stage in {"prepare", "hot"} else "continued", variant)
-            await rt.initialize()
+            await initialize_all(rt)
             if stage in {"prepare", "hot"}:
                 data = await prepare(rt, a, store, memory, scenario, variant)
                 if stage == "prepare":

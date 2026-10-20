@@ -75,7 +75,19 @@ def test_legacy_read_only_members_still_exist():
 _KNOWN_READ_ONLY_MODULES = frozenset({
     "protocols/events.py",              # EventType 定义 + TRANSIENT_EVENT_TYPES 等只读集合
     "core/control/reducers.py",         # 主 reducer：折叠存量日志，读这 13 个类型的分支都在这
+    "core/control/startup_view.py",     # 启动字段投影及只读恢复；不构造、不提交任何事件
 })
+
+
+def test_startup_projection_reader_never_constructs_or_commits_events():
+    import ast
+
+    source = _SRC / "core" / "control" / "startup_view.py"
+    calls = [node for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
+             if isinstance(node, ast.Call)]
+    forbidden = {"Event", "new_event", "_emit", "emit", "emit_batch", "append_batch"}
+    assert not [getattr(call.func, "id", getattr(call.func, "attr", "")) for call in calls
+                if getattr(call.func, "id", getattr(call.func, "attr", "")) in forbidden]
 
 #: 已知的死分支引用：某个模块在**活总线**上消费某个 L 档字符串，但那条分支已经永久
 #: 不可达（判据恒假，不抛错、不误写）。与 `_KNOWN_READ_ONLY_MODULES` 语义不同——那张表

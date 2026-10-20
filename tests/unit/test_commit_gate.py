@@ -12,13 +12,14 @@ import pytest
 
 from ctx_weft.core.events.commit_gate import CommitGate
 from ctx_weft.protocols.events import (
+    Event,
     EventType,
     PersistenceUnavailableError,
     StoredEvent,
 )
 from ctx_weft.providers.events import InMemoryEventStore, InProcessEventBus
-from ctx_weft.protocols.events import Event
 from tests._event_helpers import all_events
+from tests._initialization import initialize_all
 
 _T0 = datetime(2026, 9, 11, tzinfo=UTC)
 
@@ -109,8 +110,8 @@ class _ForeignBus:
 
 
 def test_required_rejects_unsupported_bus():
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template
     from ctx_weft.core import CtxWeftRuntime
+    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template
 
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
@@ -137,7 +138,7 @@ async def test_best_effort_accepts_unsupported_bus_with_warning(caplog):
     with caplog.at_level(logging.WARNING):
         rt = _runtime_with_bus_cfg(resolver, _ForeignBus(),
                                    RuntimeConfig(event_commit_policy="best_effort"))
-    await rt.initialize()
+    await initialize_all(rt)
     assert rt.persistence is not None                  # 旧观察者路径
     assert any("best_effort" in r.message for r in caplog.records)
 

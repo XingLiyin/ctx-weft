@@ -1,19 +1,22 @@
 """Process exits at committed observe handoff facts, including a second recovery."""
+
 import asyncio
-import sys
 import os
+import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ctx_weft.core.control.reducers import rebuild_view, prune_view_for_snapshot
+from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests._snapshot_helpers import seed_snapshot
-from tests.integration.test_foreground_observe_interrupt import runtime, InterruptedReviewLLM, SID
-from tests.integration.test_observe_interrupt_repair import start, request_turn
-from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
 from tests.integration._session_cancel_worker import wait_until
+from tests.integration.test_foreground_observe_interrupt import SID, InterruptedReviewLLM, runtime
+from tests.integration.test_observe_interrupt_repair import request_turn, start
+from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
 
 
 async def worker(path, cut, short):
@@ -39,7 +42,7 @@ async def worker(path, cut, short):
 
             store.append_batch = append
             if recovering:
-                await rt.initialize()
+                await initialize_all(rt)
                 await rt.rebuild_session(SID, strict=True)
                 tm = rt._task_managers[SID]
                 tm._max_concurrent = 0

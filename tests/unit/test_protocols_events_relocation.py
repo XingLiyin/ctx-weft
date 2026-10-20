@@ -18,10 +18,9 @@ TASK_STATUS_BY_EVENT 不进 protocols）、包根导出、以及 shim 不得复�
 """
 
 from __future__ import annotations
+
 from tests._event_helpers import all_events
-
-
-
+from tests._initialization import initialize_all
 
 
 def test_task_status_map_stays_in_core() -> None:
@@ -106,8 +105,7 @@ def test_implementations_do_not_enter_protocols() -> None:
     本任务只保证「不在 protocols」；Task 3 会把它们从 core 搬进 providers。
     """
     import ctx_weft.protocols.events as pe
-    from ctx_weft.providers.events import InProcessEventBus
-    from ctx_weft.providers.events import InMemoryEventStore
+    from ctx_weft.providers.events import InMemoryEventStore, InProcessEventBus
 
     assert InProcessEventBus is not None and InMemoryEventStore is not None
     assert not hasattr(pe, "InProcessEventBus")
@@ -116,9 +114,8 @@ def test_implementations_do_not_enter_protocols() -> None:
 
 def test_implementations_still_satisfy_the_relocated_protocols() -> None:
     """re-export 若产生了同名副本，这条会红——runtime_checkable 认的是具体类对象。"""
-    from ctx_weft.providers.events import InProcessEventBus
-    from ctx_weft.providers.events import InMemoryEventStore
     from ctx_weft.protocols.events import EventBus, EventStore
+    from ctx_weft.providers.events import InMemoryEventStore, InProcessEventBus
 
     assert isinstance(InProcessEventBus(), EventBus)
     assert isinstance(InMemoryEventStore(), EventStore)
@@ -245,7 +242,7 @@ async def test_runtime_still_gets_a_working_default_store() -> None:
     )
 
     # 订阅链路仍要能用：emit 之后 event_store 收得到（自动订阅 bus 后异步投递）。
-    await rt.initialize()
+    await initialize_all(rt)
     await rt._event_bus.emit(Event(
         id="evt_0001", run_id="run_1", sequence=1, session_id="ses_1",
         type="SessionCreated", timestamp=datetime(2026, 8, 28, tzinfo=timezone.utc),

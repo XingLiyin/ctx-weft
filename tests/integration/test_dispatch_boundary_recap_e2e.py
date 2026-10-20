@@ -14,13 +14,13 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import MemoryEventType, MemoryAddress, ProviderContext, ToolCall
+from ctx_weft.protocols import MemoryAddress, MemoryEventType, ProviderContext, ToolCall
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
-
-
-    InlineAgentTemplateProvider, make_echo_template,
+    InlineAgentTemplateProvider,
+    make_echo_template,
     make_runtime,
 )
 
@@ -111,7 +111,7 @@ async def test_dispatch_boundary_recap_e2e():
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="delegate then finish",

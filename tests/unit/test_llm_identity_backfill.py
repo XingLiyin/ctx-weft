@@ -17,7 +17,6 @@ from __future__ import annotations
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols import (
     AgentCapability,
     AgentCapabilityProvider,
@@ -28,11 +27,12 @@ from ctx_weft.protocols import (
     MemoryConfig,
     ProviderContext,
 )
+from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.provider import LLMAccount, LLMProvider, ModelConfig, _FixedModelClient
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import make_runtime
-
 
 # ── minimal fakes（自包含，避免跨测试文件 import）─────────────────────────────
 
@@ -149,7 +149,7 @@ async def test_events_carry_resolved_default_model():
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     _handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="say hello",
     )
@@ -176,7 +176,7 @@ async def test_events_carry_explicit_model():
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="say hello",
         llm_account="acct-b", llm_model="explicit-y",
@@ -219,7 +219,7 @@ async def test_events_carry_bare_adapter_model():
     runtime.providers.register_memory(InMemoryMemoryProvider())
     events = _collect_llm_events(runtime)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     _handle, _state = await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="say hello",
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from ctx_weft.protocols.events import Event, EventOrigin
+from tests._initialization import initialize_all
 
 
 def _ev(**kw) -> Event:
@@ -164,7 +165,7 @@ async def test_every_emitted_event_has_nonempty_origin():
 
     rt._event_bus.subscribe(None, _spy)
 
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
@@ -350,7 +351,7 @@ async def test_compact_agent_run_events_have_runtime_origin():
 
     rt._event_bus.subscribe(None, _spy)
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.compact_agent(aid)
 
     run_events = [ev for ev in seen if ev.type in (EventType.RUN_STARTED, EventType.RUN_FINISHED)]

@@ -1,21 +1,28 @@
 """Real task-tree cancellation across agents, including failures and crash recovery."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from ctx_weft import SessionStartParams
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols import LLMChunk, ToolCall
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
+from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 
 class TreeLLM(_FinishEveryTaskLLM):
@@ -130,7 +137,7 @@ async def worker(path, cut, recovering=False):
                     os._exit(73)
                 return result
             memory.ingest = ingest
-            await rt.initialize()
+            await initialize_all(rt)
             if recovering:
                 await rt.recover_agent(root_agent, session_id="tree-session")
                 tm = rt._task_managers["tree-session"]

@@ -7,15 +7,21 @@ task 级的 TaskInterrupted（同样带 reason/error_code）。2026-09-04（Task
 的会话状态机）早已退役——恢复期的可观测性改由 AGENT_* 现状广播承担（Task 11），实时路径
 上则是 TaskInterrupted 本身驱动 AgentLifecycleManager 五态机转 interrupted。
 """
+
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.models.config import RuntimeConfig
-from ctx_weft.providers.llm.mock import MockLLMAdapter
-from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import LLMOutageError
 from ctx_weft.protocols.events import EventType
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,7 +49,7 @@ async def test_outage_interrupt_carries_llm_outage_reason():
         seen.append(ev)
     runtime._event_bus.subscribe(None, _spy)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
 
     interrupts = [e for e in seen if getattr(e, "type", None) == EventType.RUN_INTERRUPTED]

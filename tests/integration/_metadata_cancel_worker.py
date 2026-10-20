@@ -1,22 +1,29 @@
 """Cancel through public APIs while independent model producers are still active."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ctx_weft import SessionStartParams
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, ToolCall
-from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.protocols.events import PersistenceUnavailableError
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
+from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests.integration._session_cancel_worker import runtime, wait_until
 from tests.integration.test_hitl_hot_reply_round_window_e2e import (
-    _ScriptedLLM, _ask, _next_question, STALL_BEFORE_CHUNK)
+    STALL_BEFORE_CHUNK,
+    _ask,
+    _next_question,
+    _ScriptedLLM,
+)
 
 SID = "metadata-cancel"
 REPLY = "RETRACT THIS REPLY"
@@ -92,7 +99,7 @@ async def worker(path, mode, cut):
                 return actor()
             llm.complete = complete
             rt = runtime(store, memory, llm)
-            await rt.initialize()
+            await initialize_all(rt)
 
             async def notice(event):
                 if event.type == "RunFinished" and event.origin == "loop.recognize_intent":

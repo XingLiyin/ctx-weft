@@ -17,10 +17,8 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.assembler.assembler import ContextRequest
-from ctx_weft.core.utils.content import _IMAGE_PLACEHOLDER_TMPL
-from ctx_weft.protocols.events import EventType
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.core.utils.content import _IMAGE_PART_TOKENS, content_to_text
+from ctx_weft.core.utils.content import _IMAGE_PART_TOKENS, _IMAGE_PLACEHOLDER_TMPL, content_to_text
 from ctx_weft.protocols import (
     ImagePart,
     LLMChunk,
@@ -30,18 +28,19 @@ from ctx_weft.protocols import (
     TextPart,
     ToolCall,
 )
-from ctx_weft.protocols.events import EventBlobStore
+from ctx_weft.protocols.events import EventBlobStore, EventType
 from ctx_weft.protocols.memory import BLOB_REF_PREFIX, MemoryBlobStore
 from ctx_weft.providers.blob.fs import FsBlobStore
 from ctx_weft.providers.llm.anthropic import AnthropicAdapter, AnthropicMultimodalAdapter
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import all_events
 
 _MULTIMODAL_PROMPT = [
     TextPart(text="describe this image"),
@@ -124,7 +123,7 @@ async def test_multimodal_prompt_completes_one_actor_round_without_crashing() ->
     runtime.providers.register_memory(memory)
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -150,8 +149,8 @@ async def test_multimodal_prompt_completes_one_actor_round_without_crashing() ->
 async def test_task_label_does_not_crash_on_multimodal_user_prompt() -> None:
     """退而求其次的直接单元覆盖（防端到端 fixture 未来漂移时这条根因仍被盯住）：
     task_label 对 title="" 的多模态-prompt task 不抛 AttributeError。"""
-    from ctx_weft.core.utils.task_ref import task_label
     from ctx_weft.core.models.task import Task
+    from ctx_weft.core.utils.task_ref import task_label
 
     task = Task(
         id="t1", session_id="s1", status="ACTIVE",
@@ -216,7 +215,7 @@ async def _run_and_collect_context_assembled_tokens(user_prompt) -> int:
     runtime.providers.register_memory(memory)
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -325,7 +324,7 @@ async def test_multimodal_prompt_reaches_wire_payload_as_image_block() -> None:
     runtime.providers.register_memory(memory)
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -412,7 +411,7 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
     if blob_store is not None:
         runtime.providers.register_memory_blob_store(blob_store)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -622,7 +621,7 @@ async def _run_text_only_session(*, blob_store):
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
     runtime.providers.register_memory_blob_store(blob_store)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -768,7 +767,7 @@ async def test_event_refs_and_memory_refs_are_independent(runtime_with_two_blob_
     import json
 
     runtime, mem_store, evt_store = runtime_with_two_blob_stores
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_MULTIMODAL_PROMPT,
@@ -828,7 +827,7 @@ async def test_event_blob_anchors_to_the_real_session_when_only_event_store_exis
     evt_store = _PrefixedEventBlobStore()
     runtime.providers.register_event_blob_store(evt_store)   # 刻意不注册 memory blob store
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_MULTIMODAL_PROMPT,

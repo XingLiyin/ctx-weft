@@ -24,6 +24,7 @@ from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 from tests.integration.test_hitl_e2e_v2 import _ActRouterLLM, _all_request_text, _poll
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
@@ -79,10 +80,10 @@ async def test_recovery_restores_a_started_tasks_prompt_from_the_event_log(promp
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
-    await runtime.initialize()
+    await initialize_all(runtime)
     await runtime.rebuild_session(sid)
     with suppress_observe_start():
-        await runtime.initialize()
+        await initialize_all(runtime)
         await runtime.recover_agent(aid)
         await _poll(lambda: llm.act_requests or None)
         await asyncio.sleep(0.2)

@@ -1,4 +1,5 @@
 """Two real questions, withdraw one answer, finish, restart and send more work."""
+
 import asyncio
 
 import pytest
@@ -9,10 +10,20 @@ from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests.integration._session_cancel_worker import wait_until
 from tests.integration.test_hitl_e2e_v2 import _all_request_text, _finish_call
-from tests.integration.test_hitl_hot_reply_round_window_e2e import _ScriptedLLM, _ask, _next_question, STALL_BEFORE_CHUNK
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests.integration.test_hitl_hot_reply_round_window_e2e import (
+    STALL_BEFORE_CHUNK,
+    _ask,
+    _next_question,
+    _ScriptedLLM,
+)
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
 from tests.integration.test_user_journey_audit import assert_event_contract
 
@@ -43,7 +54,7 @@ async def test_two_questions_with_retraction_then_restart_and_new_task(tmp_path,
             llm = _ScriptedLLM([_ask("q1", "First decision?"), q2,
                 STALL_BEFORE_CHUNK, _finish_call()], observer_verdicts=["success"])
             rt = runtime(store, memory, llm, timeout)
-            await rt.initialize()
+            await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
                 template_id="agent:tpl_echo", user_prompt="PROCESS_REQUEST", context_limit=100000))
             first = await _next_question(rt, SID)
@@ -65,7 +76,7 @@ async def test_two_questions_with_retraction_then_restart_and_new_task(tmp_path,
             if restart_after_retraction:
                 llm = _ScriptedLLM([_finish_call()], observer_verdicts=["success"])
                 rt = runtime(store, memory, llm, timeout)
-                await rt.initialize()
+                await initialize_all(rt)
                 await rt.rebuild_session(SID, strict=True)
                 tm = rt._task_managers[SID]
             await rt.reply_to_hitl(HitlReply(hitl_id=second.id, agent_id=h.agent_id,
@@ -89,7 +100,7 @@ async def test_two_questions_with_retraction_then_restart_and_new_task(tmp_path,
                 return [(r.id, r.content) for r in records]
             before, head = await content(), await store.committed_head(SID)
             cold = runtime(store, memory, _FinishEveryTaskLLM(), timeout)
-            await cold.initialize()
+            await initialize_all(cold)
             await cold.rebuild_session(SID, strict=True)
             await cold.recover_agent(h.agent_id, session_id=SID)
             await wait_until(lambda: not cold._task_managers[SID]._background_asyncio_tasks)

@@ -14,21 +14,19 @@ import asyncio
 
 import pytest
 
-from tests.runtime_helpers import close_runtime
-
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import ToolCall
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
-
-
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
+from tests.runtime_helpers import close_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -137,7 +135,7 @@ async def test_send_message_injects_into_suspended_parent_and_survives_child_wak
     llm = _GatedRouterLLM()
     runtime = runtime_factory(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -163,7 +161,7 @@ async def test_send_message_injects_into_suspended_parent_and_survives_child_wak
 
     # 2. send_message：必须走注入分支（不新建 task），且此刻子任务尚未完成
     #    （被 release_gate 挡住），消除真实场景里的竞态窗口。
-    await runtime.initialize()
+    await initialize_all(runtime)
     tid = (await runtime.send_message(root_agent_id, MARKER_TEXT)).task_id
     assert tid == root_task_id, "current_task 未终态 -> 必须注入现有 task，不新建"
 

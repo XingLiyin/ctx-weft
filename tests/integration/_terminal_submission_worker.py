@@ -1,16 +1,19 @@
 """Crash at the atomic queued cancellation boundary, or during its recovery."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests.integration._queued_session_cancel_worker import SID, runtime
 from tests.integration.test_terminal_submission_repair import setup_queue
-from tests.integration._queued_session_cancel_worker import runtime, SID
 
 
 async def worker(path, cut):
@@ -39,7 +42,7 @@ async def worker(path, cut):
 
             store.append_batch = append
             if cut == "recover_finalized":
-                await rt.initialize()
+                await initialize_all(rt)
                 await rt.rebuild_session(SID, strict=True)
                 await rt.recover_agent(owner, session_id=SID)
             else:

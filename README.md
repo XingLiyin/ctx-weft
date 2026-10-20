@@ -8,23 +8,26 @@ ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力�
 
 ## Runtime 初始化与按需装填
 
-构造保持同步；使用任何业务接口前，宿主必须完成异步初始化：
+构造同步完成公共接线，不枚举或读取历史。已有会话在执行前按 ID 初始化：
 
 ```python
 runtime = CtxWeftRuntime(providers=providers, event_store=event_store)
-report = await runtime.initialize()
+result = await runtime.initialize(session_id)
 ```
 
-`initialize()` 分批枚举事件分区，用快照和增量事件校准上次进程遗留的执行，
-将意外中断写回事件存储。它不装填会话、不创建 TaskManager、不启动模型或任务。
-初始化可并发调用，成功后重复调用直接返回报告；失败允许重试。
-自定义 EventStore 需实现 `list_session_ids(after_session_id=None, limit=100)`。
-启动校准针对单进程独占的存储范围，不是多进程接管机制。
+`initialize(session_id)` 自主读取该会话的快照与轻量增量，补写崩溃中断事实；不装填执行对象、
+不启动模型或任务。Host 可以只在启动时初始化需要立即校准的会话，其余延后到首次使用。
+执行入口和 `rebuild_session` 也会确保初始化；新建成功的会话直接视为已初始化。
+纯查询与历史浏览不触发初始化或恢复写入。
 
-`report.sessions` 包含每个有效会话校准前后的位置、校准后的轻量状态事实与本次提交的
-`startup_events`（含提交位置）。没有新增补偿的会话也返回摘要，宿主可直接校准自己的投影，
-避免再次读取快照和回放增量。根任务已被快照裁掉时，仅按根任务补读所需状态。
-报告是初始化时的固定切面，不是运行期状态缓存；数据库表和快照格式不变。
+同一会话的并发调用共享 Task，取消单个等待者不取消恢复；不同会话可并行。
+成功后只保留 session_id，Task 和报告不常驻。首次调用及其并发等待者返回各自独立的
+`SessionInitializationResult`，后续调用返回 `None`；失败不记成功，允许重试。
+缓存逐出保留初始化标记，`purge_session` 清除标记。该契约适用于单进程独占的存储范围。
+
+结果包含会话校准前后的位置、轻量状态摘要与本次提交的 `startup_events`；没有新增修复时
+首次调用仍返回摘要。报告是初始化时的固定切面，当前状态应通过查询接口获取。
+Host 应在执行前同步恢复报告到自己的投影；投影失败后的重试由 Host 保留待完成的写入。
 
 `get_session`、`get_task`、`list_tasks`、`get_agent`、`list_agents`、`list_pending_hitl`
 均为异步查询。单条返回 `QueryResult`，列表返回 `list[QueryResult]`：
@@ -206,7 +209,6 @@ runtime = CtxWeftRuntime(
 # 4. 运行一个任务：template_id 须为规范形式 provider:name——本 provider 注册的
 #    前缀是 "agent"（DictAgentTemplateProvider.name），故 "my_agent" → "agent:my_agent"。
 async def main():
-    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:my_agent",
         user_prompt="What is the meaning of life?",
@@ -544,7 +546,6 @@ runtime = CtxWeftRuntime(
     event_bus=None,                   # 可选，默认 InProcessEventBus；注入以接 Redis / NATS / 跨进程
     event_store=None,                 # 可选，默认 InMemoryEventStore（自动订阅 event_bus）
 )
-await runtime.initialize()
 ```
 
 构造时 **ControlCapabilityProvider**（内置控制工具）与 **SkillExecutorCapabilityProvider**

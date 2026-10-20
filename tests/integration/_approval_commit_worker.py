@@ -1,10 +1,13 @@
 """Inject storage failures at an actual user's hot approval reply."""
+
 import asyncio
 import copy
 import json
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -63,7 +66,7 @@ async def main(path, mode, stage):
             provider = DecisionStore(store, mode if stage in {"hot", "source", "recrash"} else "normal")
             rt, a, b, tool = runtime(provider, memory, "approval",
                                       "initial" if stage in {"hot", "source"} else "continued", "hot")
-            await rt.initialize()
+            await initialize_all(rt)
             if stage in {"hot", "source"}:
                 data = await prepare(rt, a, store, memory, "approval", "hot")
                 save(path, data)

@@ -1,4 +1,5 @@
 """Public-entry regressions for interrupted reviews, immutable input and hot recovery."""
+
 import asyncio
 import subprocess
 import sys
@@ -13,8 +14,9 @@ from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
-from tests.integration.test_foreground_observe_interrupt import runtime, InterruptedReviewLLM, SID
+from tests._initialization import initialize_all
 from tests.integration._session_cancel_worker import wait_until
+from tests.integration.test_foreground_observe_interrupt import SID, InterruptedReviewLLM, runtime
 
 pytestmark = pytest.mark.asyncio
 _NORMAL_SEGMENTS = {}
@@ -68,7 +70,7 @@ async def drained(rt, sid=SID):
 
 
 async def start(rt, llm):
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(session_id=SID,
         template_id="agent:tpl_echo", user_prompt="OLD REQUEST", unattended=True, context_limit=100000))
     await asyncio.wait_for(llm.review_started.wait(), 10)
@@ -206,7 +208,7 @@ async def test_recovered_foreground_has_real_cancel_lifecycle(tmp_path, stop):
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             llm = InterruptedReviewLLM()
             rt = runtime(store, memory, llm, False)
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.rebuild_session(sid, strict=True)
             tm = rt._task_managers[sid]
             aid = tm.session.root_agent_id
@@ -240,7 +242,7 @@ async def test_recovered_foreground_retries_original_run_envelopes(tmp_path, unk
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             llm = InterruptedReviewLLM()
             rt = runtime(store, memory, llm, False)
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.rebuild_session(sid, strict=True)
             tm = rt._task_managers[sid]
             aid = tm.session.root_agent_id
@@ -295,7 +297,7 @@ async def test_cancel_during_recovered_foreground_registration_is_not_lost(tmp_p
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             llm = InterruptedReviewLLM()
             rt = runtime(store, memory, llm, False)
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.rebuild_session(sid, strict=True)
             tm = rt._task_managers[sid]
             aid = tm.session.root_agent_id
@@ -324,9 +326,13 @@ async def test_cancel_during_recovered_foreground_registration_is_not_lost(tmp_p
 @pytest.mark.parametrize("entry", ["send", "reply"])
 @pytest.mark.parametrize("report_first", [False, True])
 async def test_same_agent_child_has_durable_recap_and_new_turn(tmp_path, monkeypatch, short, entry, report_first):
-    from tests.integration.test_dispatch_boundary_recap_e2e import _RouterLLM, _is_background_recap
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
     from ctx_weft.core.loop.steps.observe import ObserveStep
+    from tests.integration.test_dispatch_boundary_recap_e2e import _is_background_recap, _RouterLLM
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider,
+        make_echo_template,
+        make_runtime,
+    )
     entered, release, new_actor = asyncio.Event(), asyncio.Event(), asyncio.Event()
     body = ObserveStep._background_body
     async def hold_report(self, state, ctx, boundary, judging):
@@ -369,7 +375,7 @@ async def test_same_agent_child_has_durable_recap_and_new_turn(tmp_path, monkeyp
             llm = ChildReviewLLM()
             rt = make_runtime(llm=llm, agent_provider=provider, event_store=store)
             rt.providers.register_memory(memory)
-            await rt.initialize()
+            await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
                 template_id="agent:tpl_echo", user_prompt="ROOT DELEGATE", unattended=True, context_limit=100000))
             await asyncio.wait_for(llm.started.wait(), 10)
@@ -519,7 +525,7 @@ async def test_handoff_process_crashes_and_legacy_snapshot(tmp_path, tmp_path_fa
                 return original(request, stream)
             llm.complete = complete
             rt = runtime(store, memory, llm, short)
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.rebuild_session(SID, strict=True)
             tm = rt._task_managers[SID]
             tm._max_concurrent = 0
@@ -543,7 +549,7 @@ async def test_handoff_process_crashes_and_legacy_snapshot(tmp_path, tmp_path_fa
             before = await content(memory, view.tasks.values())
             head = await store.committed_head(SID)
             cold = runtime(store, memory, _FinishEveryTaskLLM(), short)
-            await cold.initialize()
+            await initialize_all(cold)
             await cold.rebuild_session(SID, strict=True)
             cold._task_managers[SID]._max_concurrent = 0
             await cold.recover_agent(tm.session.root_agent_id, session_id=SID)

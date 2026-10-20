@@ -1,4 +1,5 @@
 """Queued cancellation retries survive missing receipts and repeated process crashes."""
+
 import asyncio
 import subprocess
 import sys
@@ -6,11 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from ctx_weft.core.control.reducers import rebuild_view, prune_view_for_snapshot, reduce_events
+from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view, reduce_events
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests._snapshot_helpers import seed_snapshot
-from tests.integration._queued_session_cancel_worker import SID, runtime, drain
+from tests.integration._queued_session_cancel_worker import SID, drain, runtime
 
 pytestmark = pytest.mark.asyncio
 WORKER = Path(__file__).with_name("_queued_session_cancel_worker.py")
@@ -55,7 +57,7 @@ async def test_queued_session_cancel_recovers(tmp_path, snapshot, fault):
                 await seed_snapshot(store, SID, prune_view_for_snapshot(await rebuild_view(store, SID)),
                                     cut=await store.committed_head(SID))
             rt, llm = runtime(store, memory, recovering=True)
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.rebuild_session(SID, strict=True)
             # Recover the terminated agent, without reissuing cancel_session.
             await rt.recover_agent(owner, session_id=SID)
@@ -84,7 +86,7 @@ async def test_queued_session_cancel_recovers(tmp_path, snapshot, fault):
             await rt.cancel_session(SID)
             await drain(rt)
             rt2, llm2 = runtime(store, memory, recovering=True)
-            await rt2.initialize()
+            await initialize_all(rt2)
             await rt2.rebuild_session(SID, strict=True)
             await rt2.recover_agent(owner, session_id=SID)
             await drain(rt2)

@@ -1,4 +1,5 @@
 """User cancellation closes actual streams before retracting their event windows."""
+
 import asyncio
 import subprocess
 import sys
@@ -10,7 +11,8 @@ from ctx_weft.core.control.reducers import rebuild_view, reduce_events
 from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
-from tests.integration._session_cancel_worker import SID, RETRACTED, runtime, wait_until
+from tests._initialization import initialize_all
+from tests.integration._session_cancel_worker import RETRACTED, SID, runtime, wait_until
 from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
 
 pytestmark = pytest.mark.asyncio
@@ -52,7 +54,7 @@ async def test_user_cancel_releases_stream_dispatch_and_slots(tmp_path, mode):
                         MemoryScope.AGENT, ProviderContext(session_id=SID, tenant_id="default"))
                     assert not any(RETRACTED in str(r.content) for r in records)
             head = await store.committed_head(SID)
-            await runtime(store, memory, _FinishEveryTaskLLM(), recovering=True).initialize()
+            await initialize_all(runtime(store, memory, _FinishEveryTaskLLM(), recovering=True))
             assert await store.committed_head(SID) == head
 
 
@@ -70,7 +72,7 @@ async def test_user_cancel_process_crash_recovery(tmp_path, mode, cut):
     async with open_sqlite_event_store(tmp_path / "events.db") as store:
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             rt = runtime(store, memory, _FinishEveryTaskLLM(), recovering=True)
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.rebuild_session(SID, strict=True)
             # A crash before any durable cancellation fact leaves the previous
             # conversation recoverable. The user may issue Cancel again.
@@ -92,6 +94,6 @@ async def test_user_cancel_process_crash_recovery(tmp_path, mode, cut):
             await rt.cancel_session(SID)
             assert await store.committed_head(SID) == head
             rt2 = runtime(store, memory, _FinishEveryTaskLLM(), recovering=True)
-            await rt2.initialize()
+            await initialize_all(rt2)
             assert await store.committed_head(SID) == head
             assert not (await rebuild_view(store, SID)).open_runs

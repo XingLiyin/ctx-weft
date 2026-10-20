@@ -23,8 +23,6 @@ from __future__ import annotations
 import asyncio
 import time
 
-from tests.runtime_helpers import wait_for_park
-
 import pytest
 
 from ctx_weft.core.runtime import SessionStartParams
@@ -32,6 +30,8 @@ from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import HitlReply, ToolResultDelivery, UserTurnDelivery
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events
+from tests._initialization import initialize_all
 from tests.integration.test_hitl_e2e_v2 import (
     _BASH_CALL,
     _ActRouterLLM,
@@ -43,7 +43,7 @@ from tests.integration.test_minimal_loop import (
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import all_events
+from tests.runtime_helpers import wait_for_park
 
 pytestmark = pytest.mark.asyncio
 
@@ -86,7 +86,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
                           observer_verdicts=["success"])
     runtime, tool = _make_runtime_with_bash_tool(llm, hitl_timeout_sec=0)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
     ))
@@ -102,7 +102,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     assert req.form == "approval"
     assert isinstance(req.delivery, ToolResultDelivery)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     view = await runtime.reply_to_hitl(HitlReply(
         hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
         modified_arguments={"command": "ls -l"},
@@ -139,7 +139,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
@@ -156,7 +156,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
 
     reply = HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
                       message="use postgres too")
-    await runtime.initialize()
+    await initialize_all(runtime)
     first_view = await runtime.reply_to_hitl(reply)
     assert first_view is not None and first_view.outcome == "accepted"
 
@@ -177,7 +177,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     assert resolved[0].payload.get("hitl_id") == req.id
 
     # 重复应答是 no-op（resolve() 对已终局请求幂等返回 None），不该催生第二条。
-    await runtime.initialize()
+    await initialize_all(runtime)
     second_view = await runtime.reply_to_hitl(reply)
     assert second_view is None
     await asyncio.sleep(0.05)

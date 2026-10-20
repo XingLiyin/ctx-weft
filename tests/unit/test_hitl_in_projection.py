@@ -24,6 +24,7 @@ from ctx_weft.core.control.reducers import (
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.events import InMemoryEventStore
 from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 
 pytestmark = pytest.mark.asyncio
 
@@ -137,7 +138,7 @@ async def test_rebuild_hitl_reads_no_hitl_query_at_all() -> None:
     rt.providers.register_memory(InMemoryMemoryProvider())
     await _seed(store, n_noise=200)
 
-    await rt.initialize()
+    await initialize_all(rt)
     n = await rt.rebuild_hitl(_SID)
 
     assert n == 1, f"应装填那条仍未决的，实际 {n}"

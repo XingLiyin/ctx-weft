@@ -15,13 +15,14 @@ import asyncio
 
 import pytest
 
-from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.control.reducers import rebuild_view
+from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import LLMCallError
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -88,7 +89,7 @@ async def test_crash_retry_then_suspend_order() -> None:
         seen.append(ev)
     runtime._event_bus.subscribe(None, _spy)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="hi",
                                   context_limit=_MOCK_CONTEXT_LIMIT))
@@ -131,7 +132,7 @@ async def test_outage_emits_both_run_and_task_interrupted() -> None:
         seen.append(ev)
     runtime._event_bus.subscribe(None, _spy)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     _handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="hi")
 

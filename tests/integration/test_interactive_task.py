@@ -35,6 +35,7 @@ from ctx_weft.protocols.hitl import PREFACE_NORMAL, UserTurnDelivery
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.hitl_env import make_hitl
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
@@ -171,7 +172,7 @@ async def test_finish_task_finishes_task_end_to_end() -> None:
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     _handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="compute")
 
     assert state.task.status == "FINISHED"
@@ -190,7 +191,7 @@ async def test_guidance_injected_into_prompt_not_memory() -> None:
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     _handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hello")
 
     # 发送的 prompt 含 guidance

@@ -7,11 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from ctx_weft.core.control.reducers import rebuild_view, prune_view_for_snapshot
+from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view
 from ctx_weft.core.models.discriminators import TaskErrorCode
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests._snapshot_helpers import seed_snapshot
 from tests.integration._lifecycle_crash_worker import make_lifecycle_runtime
 
@@ -33,10 +34,10 @@ async def restart(store, memory, mode, snapshot):
         await seed_snapshot(store, "crash-session", view,
                             cut=await store.committed_head("crash-session"))
     rt, _ = make_lifecycle_runtime(store, memory, mode)
-    await rt.initialize()
+    await initialize_all(rt)
     head = await store.committed_head("crash-session")
     again, _ = make_lifecycle_runtime(store, memory, mode)
-    await again.initialize()
+    await initialize_all(again)
     assert await store.committed_head("crash-session") == head
     return rt
 
@@ -84,7 +85,12 @@ async def test_observe_real_process_crash(tmp_path, snapshot, mode, cut):
                 expected_output = "completed answer" if mode == "plain_text" else "done"
                 assert all(row.data.outputs == expected_output for row in tasks)
                 assert sum(row.event.type == EventType.TASK_FINALIZED for row in rows) == 1
-                from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+                from ctx_weft.protocols import (
+                    MemoryAddress,
+                    MemoryKind,
+                    MemoryScope,
+                    ProviderContext,
+                )
                 provider_ctx = ProviderContext(session_id="crash-session", tenant_id="default")
                 publications = await memory.load_view(MemoryAddress(session_id="crash-session"),
                     MemoryScope.SESSION, provider_ctx, kinds=[MemoryKind.PUBLICATION])
@@ -100,7 +106,7 @@ async def test_observe_real_process_crash(tmp_path, snapshot, mode, cut):
             await rt.recover_agent(root)
             assert await store.committed_head("crash-session") == head
             again, _ = make_lifecycle_runtime(store, memory, mode)
-            await again.initialize()
+            await initialize_all(again)
             await again.recover_agent(root, session_id="crash-session")
             assert await store.committed_head("crash-session") == head
 
@@ -131,7 +137,7 @@ async def test_crash_again_during_observe_recovery(tmp_path, snapshot, cut):
             assert starts and all(ends.count(run_id) == 1 for run_id in starts)
             head = await store.committed_head("crash-session")
             again, _ = make_lifecycle_runtime(store, memory, "finish_park")
-            await again.initialize()
+            await initialize_all(again)
             await again.recover_agent(root, session_id="crash-session")
             assert await store.committed_head("crash-session") == head
 

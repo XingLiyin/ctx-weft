@@ -28,13 +28,14 @@ from ctx_weft.protocols.events import EventFilter, EventType
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events
+from tests._initialization import initialize_all
 from tests.integration.test_hitl_e2e_v2 import _ActRouterLLM, _all_request_text, _finish_call, _poll
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import all_events
 
 pytestmark = pytest.mark.asyncio
 
@@ -123,7 +124,7 @@ async def _ask_user_results(rt, sid, req) -> list[str]:
 async def test_second_hot_question_is_visible_to_live_subscribers() -> None:
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), _ask("tc2", "Q2?"), STALL_AFTER_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=None)            # 永不驱逐 = 恒走热路径
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
@@ -140,7 +141,7 @@ async def test_second_hot_question_is_visible_to_live_subscribers() -> None:
     try:
         q1 = await _next_question(rt, sid)
         await _poll(lambda: (EventType.HITL_OPENED, q1.id) in seen or None)
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.reply_to_hitl(HitlReply(
             hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1"))
 
@@ -148,7 +149,7 @@ async def test_second_hot_question_is_visible_to_live_subscribers() -> None:
         # 修复前：Q1 的 HitlResolved 与 Q2 的 HitlOpened 都卡在窗口缓冲里，这里超时。
         await _poll(lambda: (EventType.HITL_OPENED, q2.id) in seen or None)
         assert (EventType.HITL_RESOLVED, q1.id) in seen
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.reply_to_hitl(HitlReply(
             hitl_id=q2.id, outcome="accepted", agent_id=q2.agent_id, message="A2"))
 
@@ -169,14 +170,14 @@ async def test_ask_user_reply_is_retracted_by_pause_before_first_chunk(hitl_time
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK, _finish_call()],
                        observer_verdicts=["success"])
     rt = _runtime(llm, hitl_timeout_sec=hitl_timeout_sec)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
 
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)                  # 冷路径：等 park 落定
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="RETRACTED"))
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
@@ -189,7 +190,7 @@ async def test_ask_user_reply_is_retracted_by_pause_before_first_chunk(hitl_time
         "暂存的答复必须叠加进这一轮装配给 LLM 的 prompt")
 
     # ── 按暂停：答复撤回 ─────────────────────────────────────────────────────
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session(sid) is True
     tm = rt._task_managers[sid]
     await _poll(lambda: tm.get_task(q1.task_id).status == "AWAITING_HUMAN" or None)
@@ -208,7 +209,7 @@ async def test_ask_user_reply_is_retracted_by_pause_before_first_chunk(hitl_time
     assert types.count(EventType.RUN_STARTED) == types.count(EventType.RUN_FINISHED)
 
     # ── 重答：照常生效，模型只看见新答复 ─────────────────────────────────────
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="RETYPED"))
     await _poll(lambda: tm.get_task(q1.task_id).status == "FINISHED" or None)
@@ -228,19 +229,19 @@ async def test_ask_user_reply_is_retracted_by_pause_before_first_chunk(hitl_time
 async def test_replying_to_an_already_resolved_request_opens_no_window() -> None:
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_AFTER_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=None)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
 
     q1 = await _next_question(rt, sid)
     reply = HitlReply(hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1")
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.reply_to_hitl(reply) is not None
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
     await _poll(lambda: rt.hitl_registry.get(q1.id).resolved or None)
     # 双击 / 陈旧页签重放：幂等 None，且不得开出一扇永远没人关的窗。
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.reply_to_hitl(reply) is None
     assert not rt._task_managers[sid].open_round_task_ids
 
@@ -254,14 +255,14 @@ async def test_reply_is_committed_when_the_round_ends_without_a_chunk(hitl_timeo
     """
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), *([FAIL_BEFORE_CHUNK] * 10)])
     rt = _runtime(llm, hitl_timeout_sec=hitl_timeout_sec)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
 
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1"))
 
@@ -303,14 +304,14 @@ async def test_ask_user_reply_enters_memory_only_after_hitl_resolved(hitl_timeou
         InMemoryMemoryProvider(), rt,
         lambda ev: ev.role == "tool" and ev.metadata.get("tool_name") == "control__ask_user")
     rt.providers.register_memory(spy)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
 
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="ANSWER"))
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)

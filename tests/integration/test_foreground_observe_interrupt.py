@@ -1,4 +1,5 @@
 """Interrupt an actual foreground review, then deliver a replacement user turn."""
+
 import asyncio
 import dataclasses
 
@@ -9,9 +10,14 @@ from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols import LLMChunk
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests.integration._session_cancel_worker import wait_until
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 from tests.integration.test_send_message_after_session_done import _FinishEveryTaskLLM
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 
 pytestmark = pytest.mark.asyncio
 SID = "foreground-observe-interrupt"
@@ -59,7 +65,7 @@ async def test_observe_pause_closes_stream_and_replaces_prompt(tmp_path, short, 
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             llm = InterruptedReviewLLM()
             rt = runtime(store, memory, llm, short)
-            await rt.initialize()
+            await initialize_all(rt)
             handle = await rt.start_session(SessionStartParams.create(session_id=SID,
                 template_id="agent:tpl_echo", user_prompt="OLD REQUEST", unattended=True,
                 context_limit=100000))
@@ -90,7 +96,7 @@ async def test_observe_pause_closes_stream_and_replaces_prompt(tmp_path, short, 
                 llm = _FinishEveryTaskLLM()
                 rt = runtime(store, memory, llm, short)
                 head = await store.committed_head(SID)
-                await rt.initialize()
+                await initialize_all(rt)
                 await rt.rebuild_session(SID, strict=True)
                 await rt.recover_agent(handle.agent_id, session_id=SID)
                 await rt.recover_agent(handle.agent_id, session_id=SID)
@@ -114,6 +120,7 @@ async def test_interrupt_handoff_survives_process_and_recovery_crashes(tmp_path,
     import subprocess
     import sys
     from pathlib import Path
+
     from tests.integration.test_queued_session_cancel_recovery import content
     worker = Path(__file__).with_name("_foreground_observe_interrupt_worker.py")
     for cut, recovering in [("HitlOpened", False), *([(second_crash, True)] if second_crash else [])]:
@@ -124,7 +131,7 @@ async def test_interrupt_handoff_survives_process_and_recovery_crashes(tmp_path,
     async with open_sqlite_event_store(tmp_path / "events.db") as store:
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             rt = runtime(store, memory, _FinishEveryTaskLLM(), False)
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.rebuild_session(SID, strict=True)
             tm = rt._task_managers[SID]
             agent_id = tm.session.root_agent_id

@@ -36,15 +36,15 @@ from ctx_weft.protocols.capability import (
     SessionScopedCapabilityProvider,
     SkillCapability,
     SkillCapabilityProvider,
-    SkillIndexConsumer,
     SkillDefinition,
+    SkillIndexConsumer,
     ToolCapability,
     ToolCapabilityProvider,
 )
 from ctx_weft.protocols.context import (
     BLOB_REF_PREFIX,
-    ContentPart,
     Citation,
+    ContentPart,
     ImagePart,
     ProviderContext,
     TextPart,
@@ -56,9 +56,12 @@ from ctx_weft.protocols.events import (
     EventBlobStore,
     EventBus,
     EventFilter,
+    EventReadProjection,
     EventStore,
     EventType,
     NullEventBlobStore,
+    ProjectedEvent,
+    ProjectedStoredEvent,
     SubscriptionHandle,
 )
 from ctx_weft.protocols.filesystem import FS_PROVIDER_NAME, FsTool, SpillSink
@@ -83,11 +86,20 @@ from ctx_weft.protocols.hitl import (
     ToolResultDelivery,
     UserTurnDelivery,
 )
+from ctx_weft.protocols.knowledge import (
+    KnowledgeDoc,
+    KnowledgeProvider,
+    KnowledgeProviderInfo,
+    KnowledgeQuery,
+)
 from ctx_weft.protocols.llm import (
+    RAW_ARGS_KEY,
     # adapter 契约：实现一个 LLM adapter 所需的全部类型
     LLMCallError,
     LLMChunk,
     LLMClient,
+    # resolver 契约：仅多账号 LLM provider 需要
+    LLMClientResolver,
     LLMMessage,
     LLMOutageError,
     LLMRequest,
@@ -96,36 +108,35 @@ from ctx_weft.protocols.llm import (
     LLMStreamParser,
     LLMStreamResult,
     LLMStreamWriter,
-    current_stream_writer,
-    StreamingLLMClient,
     LLMTool,
     LLMUsage,
-    RAW_ARGS_KEY,
-    ToolCall,
+    StreamingLLMClient,
     Tokenizer,
-    # resolver 契约：仅多账号 LLM provider 需要
-    LLMClientResolver,
-)
-from ctx_weft.protocols.knowledge import (
-    KnowledgeDoc,
-    KnowledgeProvider,
-    KnowledgeProviderInfo,
-    KnowledgeQuery,
+    ToolCall,
+    current_stream_writer,
 )
 from ctx_weft.protocols.memory import (
-    MemoryBlobStore,
-    NullMemoryBlobStore,
     EVENT_LAYER,
     MemoryAddress,
+    MemoryBlobStore,
     MemoryEvent,
     MemoryEventType,
     MemoryKind,
     MemoryLayer,
-    MemoryScope,
     MemoryProvider,
     MemoryProviderInfo,
     MemoryRecord,
+    MemoryScope,
+    NullMemoryBlobStore,
     Subscription,
+)
+from ctx_weft.protocols.runtime import (
+    InitializationReport,
+    QueryResult,
+    SessionDetail,
+    SessionInitializationResult,
+    SessionStateSummary,
+    TaskDetail,
 )
 from ctx_weft.protocols.template import (
     AgentTemplate,
@@ -133,11 +144,6 @@ from ctx_weft.protocols.template import (
     IdentityFacet,
     LoopConfig,
     MemoryConfig,
-)
-
-from ctx_weft.protocols.runtime import (
-    InitializationReport, QueryResult, SessionDetail, SessionInitializationResult,
-    SessionStateSummary, TaskDetail,
 )
 
 __all__ = [
@@ -169,6 +175,9 @@ __all__ = [
     "EventBus",
     "EventFilter",
     "EventStore",
+    "EventReadProjection",
+    "ProjectedEvent",
+    "ProjectedStoredEvent",
     "EventType",
     "NullEventBlobStore",
     "SubscriptionHandle",

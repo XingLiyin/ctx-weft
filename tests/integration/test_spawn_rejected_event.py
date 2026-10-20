@@ -13,12 +13,12 @@ import dataclasses as _dc
 
 import pytest
 
-from tests.runtime_helpers import close_runtime
-
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
@@ -28,7 +28,7 @@ from tests.integration.test_subagent_instantiated_event import (
     SUB_TEMPLATE_ID,
     _SpawnLLM,
 )
-from tests._event_helpers import all_events
+from tests.runtime_helpers import close_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -68,7 +68,7 @@ async def test_depth_limit_emits_spawn_rejected(runtime_factory):
     llm = _SpawnLLM()
     runtime = runtime_factory(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -89,7 +89,7 @@ async def test_spawn_rejected_names_the_parent_not_a_phantom_child(runtime_facto
     llm = _SpawnLLM()
     runtime = runtime_factory(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -109,7 +109,7 @@ async def test_rejected_spawn_produces_no_agent_instantiated(runtime_factory):
     llm = _SpawnLLM()
     runtime = runtime_factory(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",

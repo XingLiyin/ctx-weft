@@ -42,6 +42,7 @@ from ctx_weft.protocols import (
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.step_helpers import patch_observe_start
 
@@ -174,7 +175,7 @@ async def test_context_limit_retry_without_recap_keeps_raw_and_defers_to_backgro
     runtime.providers.register_memory(InMemoryMemoryProvider())
     runtime.providers.register_capability(_NoopToolProvider())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_actonly", user_prompt="do a long task")
 
@@ -210,7 +211,7 @@ async def test_normal_finish_still_works_e2e():
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_actonly", user_prompt="say hi")
 

@@ -26,25 +26,26 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
-from ctx_weft.core.control.tokens import CancelToken
-from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, StepOutcome
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.core.capabilities.control_tools import ControlContext
-from tests.unit.observation_helpers import submit_and_apply
-from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
-from ctx_weft.core.orchestrator.task.manager import TaskManager
-from ctx_weft.core.orchestrator.task.runner import AgentBinding
+from ctx_weft.core.control.tokens import CancelToken
+from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, StepOutcome
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.models.errors import AgentNotFound
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
+from ctx_weft.core.orchestrator.task.disposition import RunOutcomeKind
+from ctx_weft.core.orchestrator.task.manager import TaskManager
+from ctx_weft.core.orchestrator.task.runner import AgentBinding
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
+from tests.unit.observation_helpers import submit_and_apply
 from tests.unit.test_runtime_agent_api import _plant
 
 pytestmark = pytest.mark.asyncio
@@ -363,7 +364,7 @@ async def test_cancel_session_terminates_every_agent() -> None:
     session_id, root_id, child_id = "s3", "root", "kid"
     await _wire_multi_agent_session(rt, session_id, "t1", root_id, child_id)
 
-    await rt.initialize()
+    await initialize_all(rt)
     result = await rt.cancel_session(session_id)
 
     assert result is True
@@ -371,21 +372,21 @@ async def test_cancel_session_terminates_every_agent() -> None:
     assert terminated_ids == {root_id, child_id}
 
     # 取消 ≠ 逐出：record 还在，状态是终态。
-    await rt.initialize()
+    await initialize_all(rt)
     assert (await rt.get_agent(root_id)).data.status == "terminated"
-    await rt.initialize()
+    await initialize_all(rt)
     assert (await rt.get_agent(child_id)).data.status == "terminated"
     # 默认过滤掉终态 agent（避免列表随时间膨胀），显式要才给。
-    await rt.initialize()
+    await initialize_all(rt)
     assert [item.data for item in await rt.list_agents(session_id=session_id)] == []
-    await rt.initialize()
+    await initialize_all(rt)
     assert {a.agent_id for a in [item.data for item in await rt.list_agents(session_id=session_id, include_terminated=True)]} == {
         root_id, child_id}
 
     # 逐出之后才真的查无此 agent。
     assert rt.forget_session(session_id) is True, "全部 terminated → 安静了，该能忘掉"
     with pytest.raises(AgentNotFound):
-        await rt.initialize()
+        await initialize_all(rt)
         (await rt.get_agent(root_id)).data
 
 

@@ -15,8 +15,6 @@ import asyncio
 
 import pytest
 
-from tests.runtime_helpers import close_runtime
-
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
@@ -24,14 +22,14 @@ from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import all_events
-
-
+from tests.runtime_helpers import close_runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -140,7 +138,7 @@ async def test_subagent_instantiation_emits_event_with_own_template(runtime_fact
     llm = _SpawnLLM()
     runtime = runtime_factory(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -170,7 +168,7 @@ async def test_replayed_view_gives_subagent_its_own_template(runtime_factory):
     llm = _SpawnLLM()
     runtime = runtime_factory(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -203,7 +201,7 @@ async def test_agent_spawned_emitted_with_parent_and_subtask(runtime_factory):
     llm = _SpawnLLM()
     runtime = runtime_factory(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -234,7 +232,7 @@ async def test_agent_spawned_precedes_agent_instantiated(runtime_factory):
     llm = _SpawnLLM()
     runtime = runtime_factory(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",

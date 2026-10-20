@@ -1,4 +1,5 @@
 """cancel_agent cancels the current task tree without selecting unrelated tasks."""
+
 import asyncio
 import subprocess
 import sys
@@ -6,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from ctx_weft.core.control.reducers import rebuild_view, reduce_events, prune_view_for_snapshot
+from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view, reduce_events
 from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
+from tests._initialization import initialize_all
 from tests._snapshot_helpers import seed_snapshot
 from tests.integration._cancel_tree_worker import make_tree_runtime
 
@@ -29,7 +31,7 @@ async def recover(store, memory, snapshot):
         await seed_snapshot(store, "tree-session", prune_view_for_snapshot(await rebuild_view(store, "tree-session")),
                             cut=await store.committed_head("tree-session"))
     rt, llm = make_tree_runtime(store, memory, recovering=True)
-    await rt.initialize()
+    await initialize_all(rt)
     root = (await rt.get_session("tree-session")).data.root_agent_id
     await rt.recover_agent(root, session_id="tree-session")
     tm = rt._task_managers["tree-session"]

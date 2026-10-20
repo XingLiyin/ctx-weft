@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from ctx_weft import RuntimeConfig, RuntimeNotInitializedError, SessionStartParams
+from ctx_weft import RuntimeConfig, SessionStartParams
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.models.errors import SessionAlreadyExistsError
 from ctx_weft.core.utils.event import new_event
@@ -14,7 +14,12 @@ from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events import InMemoryEventStore
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+from tests._initialization import initialize_all
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -94,7 +99,7 @@ def runtime(store=None, *, max_concurrent=0):
 
 
 async def container(rt, sid="s1"):
-    await rt.initialize()
+    await initialize_all(rt)
     return await rt.create_session(template_id="agent:tpl_echo", context_limit=100_000, session_id=sid)
 
 
@@ -123,7 +128,7 @@ async def test_initialize_and_rebuild_accept_pruned_dependency_without_timestamp
     assert view.tasks["live"].created_at is not None
     await seed_snapshot(store, h.session_id, view, cut=await store.committed_head(h.session_id))
     rt = runtime(store)
-    assert (await rt.initialize()).checked_sessions == 1
+    assert (await initialize_all(rt)).checked_sessions == 1
     assert (await rt.get_task(h.session_id, "dep")).data.outputs == "done"
     await rt.rebuild_session(h.session_id, strict=True)
     assert rt._task_managers[h.session_id].get_task("live") is not None
@@ -202,16 +207,12 @@ async def test_wait_does_not_bypass_deferred_recap_on_terminal_event(monkeypatch
     await handle.wait_for_finish(timeout=0.1)
 
 
-async def test_initialize_is_required_and_concurrent_idempotent():
+async def test_new_sessions_do_not_require_global_initialize():
     rt = runtime()
-    with pytest.raises(RuntimeNotInitializedError):
-        await rt.get_session("s1")
-    with pytest.raises(RuntimeNotInitializedError):
-        await rt.create_session(template_id="agent:tpl_echo", context_limit=1000)
-    reports = await asyncio.gather(*(rt.initialize() for _ in range(8)))
-    assert reports == [reports[0]] * 8
-    assert rt._task_managers == {}
-    assert rt._agent_lifecycle_manager.all_agent_ids() == []
+    h = await rt.create_session(template_id="agent:tpl_echo", context_limit=1000)
+    assert h.session_id in rt._initialized_sessions
+    assert await rt.initialize(h.session_id) is None
+    assert (await rt.get_session(h.session_id)).loaded
 
 
 async def test_slim_dependency_queries_keep_details_after_loading():
@@ -313,7 +314,7 @@ async def test_startup_calibrates_without_loading_and_preserves_waits():
         (EventType.TASK_REVIEWING, "review", None, {}),
     )
     rt = runtime(store)
-    report = await rt.initialize()
+    report = await initialize_all(rt)
     assert report.interrupted_task_ids == ["active", "queued"]
     assert report.interrupted_session_ids == [h.session_id]
     assert not rt._task_managers and not rt._session_registry._states
@@ -328,23 +329,27 @@ async def test_startup_calibrates_without_loading_and_preserves_waits():
     rows = await store.read_range(h.session_id)
     assert not any(row.event.type == EventType.SESSION_STATUS_CHANGED for row in rows)
     head = await store.committed_head(h.session_id)
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     assert await store.committed_head(h.session_id) == head
 
 
-async def test_initialization_failure_can_retry_without_partial_wiring(monkeypatch):
-    rt = runtime()
-    original = rt.event_store.list_session_ids
-    async def fail(**kwargs):
+async def test_initialization_failure_can_retry_without_duplicate_wiring(monkeypatch):
+    store = InMemoryEventStore()
+    h = await container(runtime(store))
+    rt = runtime(store)
+    subscribers = dict(rt.event_bus._subscribers)
+    original = store.committed_head
+    async def fail(*args, **kwargs):
         raise OSError("unavailable")
-    monkeypatch.setattr(rt.event_store, "list_session_ids", fail)
+    monkeypatch.setattr(store, "committed_head", fail)
     with pytest.raises(OSError):
-        await rt.initialize()
-    assert not rt._initialized
-    assert not rt.event_bus._subscribers
-    monkeypatch.setattr(rt.event_store, "list_session_ids", original)
-    await rt.initialize()
-    assert rt._initialized
+        await rt.initialize(h.session_id)
+    assert not rt._initialized_sessions and not rt._initializing_sessions
+    assert rt.event_bus._subscribers == subscribers
+    monkeypatch.setattr(store, "committed_head", original)
+    await rt.initialize(h.session_id)
+    assert rt._initialized_sessions == {h.session_id}
+    assert rt.event_bus._subscribers == subscribers
 
 
 async def test_query_cold_hot_and_evicted_without_loading():
@@ -489,7 +494,7 @@ async def test_sql_restart_calibration_and_queries(tmp_path):
         )
     async with open_sqlite_event_store(path) as store:
         rt = runtime(store)
-        report = await rt.initialize()
+        report = await initialize_all(rt)
         assert report.interrupted_task_ids == ["crashed"]
         task = await rt.get_task(h.session_id, "crashed")
         assert task.data.status == "INTERRUPTED" and task.source == "events"
@@ -504,7 +509,7 @@ async def test_wait_after_terminal_and_repeated_wait_are_immediate():
     rt = runtime(max_concurrent=4)
     rt._llm = _FinishEveryTaskLLM()
     rt._config = RuntimeConfig()
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="finish", context_limit=100_000,
         unattended=True))
@@ -564,11 +569,11 @@ async def test_initialize_retry_after_commit_does_not_duplicate_facts(monkeypatc
         raise OSError("commit acknowledgement lost")
     monkeypatch.setattr(store, "append_batch", lose_confirmation)
     with pytest.raises(OSError):
-        await rt.initialize()
+        await initialize_all(rt)
     head = await store.committed_head(h.session_id)
-    assert not rt._initialized and not rt._task_managers
+    assert not rt._initialized_sessions and not rt._task_managers
     monkeypatch.setattr(store, "append_batch", original)
-    await rt.initialize()
+    await initialize_all(rt)
     assert await store.committed_head(h.session_id) == head
     facts = await store.read_range(h.session_id, include_types=(EventType.TASK_INTERRUPTED,))
     assert len(facts) == 1
@@ -585,7 +590,7 @@ async def test_startup_closes_abandoned_run_envelope():
                       tenant_id="default", origin="test", run_id="abandoned",
                       task_id="active", agent_id=h.root_agent_id)
     await store.append_batch(h.session_id, start.id, [start])
-    await runtime(store).initialize()
+    await initialize_all(runtime(store))
     rows = await store.read_range(h.session_id,
                                   include_types=(EventType.RUN_INTERRUPTED, EventType.RUN_FINISHED))
     assert [r.event.type for r in rows] == [EventType.RUN_INTERRUPTED, EventType.RUN_FINISHED]
@@ -606,7 +611,7 @@ async def test_startup_preserves_a_durable_hot_human_wait():
                         session_id=h.session_id, task_id="active", agent_id=h.root_agent_id,
                         stage="authz", unattended=False)
     rt = runtime(store)
-    report = await rt.initialize()
+    report = await initialize_all(rt)
     assert not report.interrupted_task_ids
     assert (await rt.get_task(h.session_id, "active")).data.status == "AWAITING_HUMAN"
     assert (await rt.get_agent(h.root_agent_id, session_id=h.session_id)).data.status == "waiting_human"

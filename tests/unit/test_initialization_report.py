@@ -5,9 +5,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ctx_weft.core.control.reducers import rebuild_view, prune_view_for_snapshot
+from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events import InMemoryEventStore
+from tests._initialization import initialize_all
 from tests._snapshot_helpers import seed_snapshot
 from tests.unit.test_runtime_initialization_queries import append, container, runtime
 
@@ -32,7 +33,7 @@ async def test_report_is_after_commit_and_survives_a_second_process_losing_the_r
     before = await store.committed_head(h.session_id)
     rt = runtime(store)
     rt.get_task = AsyncMock(side_effect=AssertionError("no public query during initialize"))
-    report = await rt.initialize()
+    report = await initialize_all(rt)
     result, = report.sessions
     assert result.before_position == before
     assert result.committed_position == await store.committed_head(h.session_id)
@@ -45,12 +46,12 @@ async def test_report_is_after_commit_and_survives_a_second_process_losing_the_r
     # The host never received the first report. A fresh SDK emits no duplicate
     # repairs, but must still provide the fully calibrated state for the host.
     restarted = runtime(store)
-    second, = (await restarted.initialize()).sessions
+    second, = (await initialize_all(restarted)).sessions
     assert second.startup_events == []
     assert second.before_position == second.committed_position == result.committed_position
     assert second.state == result.state
     report.sessions.clear()
-    assert len((await rt.initialize()).sessions) == 1
+    assert await rt.initialize(h.session_id) is None
 
 
 @pytest.mark.parametrize("base_kind", ["full", "slim", "pruned"])
@@ -77,7 +78,7 @@ async def test_summary_reads_pruned_root_only_and_accepts_status_only_snapshot(s
     monkeypatch.setattr(store, "read_range", read)
     last = AsyncMock(wraps=store.read_last_of_type)
     monkeypatch.setattr(store, "read_last_of_type", last)
-    report = await runtime(store).initialize()
+    report = await initialize_all(runtime(store))
     result, = report.sessions
     assert result.startup_events == [] and result.state.root_task_status == "FINISHED"
     assert result.state.root_task_id == "root-task"
@@ -103,10 +104,10 @@ async def test_lost_commit_confirmation_yields_no_success_report_then_recovers(s
         raise OSError("commit confirmation lost")
     monkeypatch.setattr(store, "append_batch", lose_confirmation)
     with pytest.raises(OSError, match="confirmation lost"):
-        await rt.initialize()
-    assert not rt._initialized and rt._initialization_report is None
+        await initialize_all(rt)
+    assert not rt._initialized_sessions and not rt._initializing_sessions
     committed = await store.committed_head(h.session_id)
     monkeypatch.setattr(store, "append_batch", original)
-    result, = (await rt.initialize()).sessions
+    result, = (await initialize_all(rt)).sessions
     assert result.startup_events == [] and result.committed_position == committed
     assert result.state.has_interrupted_agents and result.state.root_task_status == "INTERRUPTED"

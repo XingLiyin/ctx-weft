@@ -1,8 +1,11 @@
 """Real provisional batch and derived AgentIdle failures, including late delivery."""
+
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+from tests._initialization import initialize_all
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -38,7 +41,7 @@ async def worker(path, stage, fault, cut):
                         os._exit(73)
                     return receipt
                 store.append_batch = recover_append
-                await rt.initialize()
+                await initialize_all(rt)
                 await rt.recover_agent(root, session_id="tree-session")
                 raise AssertionError("second recovery crash was not reached")
 
@@ -70,7 +73,7 @@ async def worker(path, stage, fault, cut):
                         llm.tree_actors = 2  # The delegated child streams instead of delegating again.
                     return original_complete(request, stream)
                 llm.complete = complete
-            await rt.initialize()
+            await initialize_all(rt)
             root_handle = await rt.start_session(SessionStartParams.create(session_id="tree-session",
                 template_id="agent:tpl_echo", user_prompt="FIRST" if stage == "batch" else "TREE ROOT",
                 context_limit=100000, unattended=True))

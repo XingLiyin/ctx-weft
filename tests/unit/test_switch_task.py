@@ -9,13 +9,16 @@ import pytest
 from ctx_weft.core.assembler import ReviewIntent
 from ctx_weft.core.assembler.sources.capability import build_llm_tools
 from ctx_weft.core.capabilities.control_tools import (
-    ControlContext, SWITCH_TASK_NAME, _CONTROL_TOOLS,
-    report_observation, switch_task,
+    _CONTROL_TOOLS,
+    SWITCH_TASK_NAME,
+    ControlContext,
+    report_observation,
+    switch_task,
 )
 from ctx_weft.core.control.reducers import _apply
 from ctx_weft.core.control.types import RunStateView
 from ctx_weft.core.loop.steps.act import ActStep, _execute_tool_calls
-from ctx_weft.core.loop.steps.observe import ObserveStep, ObservationResult, Verdict
+from ctx_weft.core.loop.steps.observe import ObservationResult, ObserveStep, Verdict
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
@@ -23,6 +26,7 @@ from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from tests._initialization import initialize_all
 from tests.integration.test_interactive_task import _act_state_ctx
 from tests.step_helpers import patch_observe_start
 from tests.unit.test_observe_react_helper import _make_ctx, _make_state
@@ -193,7 +197,11 @@ async def test_conflicting_batch_executes_no_tools(monkeypatch):
 @pytest.mark.parametrize("old_verdict", ["success", "fail"])
 async def test_runtime_new_goal_runs_before_old_review_and_late_review_keeps_agent_running(monkeypatch, old_verdict):
     from ctx_weft.core.runtime import SessionStartParams
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider,
+        make_echo_template,
+        make_runtime,
+    )
 
     review_started, release_review = asyncio.Event(), asyncio.Event()
     new_started, release_new = asyncio.Event(), asyncio.Event()
@@ -249,7 +257,7 @@ async def test_runtime_new_goal_runs_before_old_review_and_late_review_keeps_age
             old_closed.set()
 
     rt.event_bus.subscribe(None, record)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="switch to new request", context_limit=100_000))
     try:
         await asyncio.wait_for(new_started.wait(), 5)
@@ -261,7 +269,7 @@ async def test_runtime_new_goal_runs_before_old_review_and_late_review_keeps_age
         assert successor.status == "ACTIVE"
         release_review.set()
         await asyncio.wait_for(old_closed.wait(), 5)
-        await rt.initialize()
+        await initialize_all(rt)
         agent = (await rt.get_agent(handle.agent_id)).data
         assert agent.current_task_id == successor.id
         assert agent.status == "running"
@@ -303,9 +311,10 @@ def test_switch_review_prompt_uses_terminal_contract(locale, monkeypatch):
 
 
 async def test_recovery_keeps_old_task_in_review_and_only_enqueues_successor():
+    from dataclasses import replace
+
     from ctx_weft.core.control.converters import task_from_projection
     from ctx_weft.core.orchestrator.task.manager import task_payload
-    from dataclasses import replace
     tm, old, ctx, bus = setup_switch()
     switch_task("new", "new goal", "new request", ctx=ctx)
     old_payload = task_payload(old, user_prompt_jsonable="old request")
@@ -332,11 +341,12 @@ def test_switch_target_must_be_current_or_ancestor(target_id):
 
 
 async def test_ancestor_switch_rewires_parent_dependencies_and_survives_replay():
+    from dataclasses import replace
+
     from ctx_weft.core.control.converters import task_from_projection
+    from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
     from ctx_weft.core.orchestrator.task.manager import task_payload
     from ctx_weft.core.orchestrator.task.queue import QueueEntry
-    from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
-    from dataclasses import replace
 
     tm, caller, ctx, bus = setup_switch()
     parent = Task(id="parent", session_id="s1", status="SUSPENDED", assigned_agent_id="root-agent")
@@ -401,7 +411,11 @@ async def test_ancestor_switch_rewires_parent_dependencies_and_survives_replay()
 async def test_subtask_replacement_completes_parent_before_old_review(monkeypatch, use_subagent, replace_ancestor):
     from ctx_weft.core.runtime import SessionStartParams
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
+    from tests.integration.test_minimal_loop import (
+        InlineAgentTemplateProvider,
+        make_echo_template,
+        make_runtime,
+    )
 
     release_old = asyncio.Event()
     replacement_done = asyncio.Event()
@@ -452,7 +466,7 @@ async def test_subtask_replacement_completes_parent_before_old_review(monkeypatc
             replacement_done.set()
 
     rt.event_bus.subscribe(None, record)
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="parent goal", context_limit=100_000))
     try:
         await asyncio.wait_for(replacement_done.wait(), 5)

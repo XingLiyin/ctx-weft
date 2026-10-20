@@ -1,15 +1,16 @@
 """Runtime: pause_session = 弃子（只留 root agent 那一轮继续跑，其余在途 run 与排队子任务全部弃）；
 cancel_session = 硬取消（cancel 全部在途 run + cancel-all，会话终态 CANCELED）。"""
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
-from datetime import UTC, datetime
-
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.hitl.registry import PendingHitl
 from ctx_weft.core.models.session import Session
+from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
 from ctx_weft.protocols.hitl import (
     HITL_FORM_WAIT,
     PREFACE_AFTER_INTERRUPT,
@@ -18,11 +19,10 @@ from ctx_weft.protocols.hitl import (
     HitlDecision,
     UserTurnDelivery,
 )
-from ctx_weft.core.utils.clock import now_utc
-from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.unit.test_runtime_agent_api import _plant
 
@@ -54,7 +54,7 @@ async def test_pause_session_without_tm_cancels_all_runs():
     rt = _runtime()
     a = rt._register_run_tokens("s1", "t1")
     b = rt._register_run_tokens("s1", "t2")
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session("s1") is True
     assert a.cancel.is_cancelled and b.cancel.is_cancelled
 
@@ -88,7 +88,7 @@ async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
             await before_cancel()
 
     rt._task_managers["s1"] = _TM()
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.cancel_session("s1") is True
     assert tokens.cancel.is_cancelled is True
     assert drained["called"] is True
@@ -96,9 +96,9 @@ async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
 
 async def test_unknown_session_returns_false():
     rt = _runtime()
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session("nope") is False
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.cancel_session("nope") is False
 
 

@@ -40,6 +40,7 @@ from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.llm.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import all_events, append_one
+from tests._initialization import initialize_all
 from tests.integration.test_hitl_e2e_v2 import _ActRouterLLM, _all_request_text, _finish_call, _poll
 from tests.integration.test_hitl_hot_reply_round_window_e2e import (
     STALL_AFTER_CHUNK,
@@ -74,7 +75,7 @@ def _build(llm, *, hitl_timeout_sec, memory=None, event_store=None, register=Non
 
 
 async def _start(rt):
-    await rt.initialize()
+    await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     return handle.session_id
@@ -108,7 +109,7 @@ async def test_commit_retries_after_hitl_resolved_fails_once() -> None:
     await asyncio.sleep(0.2)
     calls = _fail_hitl_resolved(rt, times=1)
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="ANSWER"))
 
@@ -133,7 +134,7 @@ async def test_commit_failure_halts_without_losing_the_reply() -> None:
     await asyncio.sleep(0.2)
     calls = _fail_hitl_resolved(rt, times=None)
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="ANSWER"))
     await _poll(lambda: calls["n"] >= 1 and not rt._task_managers[sid]._dispatch_tasks or None, timeout=8.0)
@@ -160,7 +161,7 @@ async def test_restart_after_crash_mid_commit_uses_the_new_answer() -> None:
     q1 = await _next_question(rt1, sid)
     await asyncio.sleep(0.2)
     calls = _fail_hitl_resolved(rt1, times=None)
-    await rt1.initialize()
+    await initialize_all(rt1)
     await rt1.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="OLD_ANSWER"))
     await _poll(lambda: calls["n"] >= 1 and not rt1._task_managers[sid]._dispatch_tasks or None, timeout=8.0)
@@ -175,12 +176,12 @@ async def test_restart_after_crash_mid_commit_uses_the_new_answer() -> None:
     # ── 「重启」：新 runtime，同一份事件日志与 memory ────────────────────────────
     llm2 = _ScriptedLLM([STALL_AFTER_CHUNK])
     rt2 = _build(llm2, hitl_timeout_sec=0, memory=memory, event_store=rt1.event_store)
-    await rt2.initialize()
+    await initialize_all(rt2)
     await rt2.rebuild_hitl(sid)
     pending = [p for p in rt2.hitl_registry.list_pending(session_id=sid) if p.id == q1.id]
     assert pending, "重启后问题必须回到待答"
     with suppress_observe_start():
-        await rt2.initialize()
+        await initialize_all(rt2)
         await rt2.reply_to_hitl(HitlReply(
             hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="NEW_ANSWER"))
         await _poll(lambda: llm2.act_requests or None, timeout=8.0)
@@ -237,10 +238,10 @@ async def test_recovery_restores_an_appended_message_from_the_event_log(message_
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.rebuild_session(sid)
     with suppress_observe_start():
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.recover_agent(aid)
         await _poll(lambda: llm.act_requests or None)
 
@@ -256,7 +257,7 @@ async def test_injected_message_is_recorded_in_the_event_log() -> None:
     sid = await _start(rt)
     wait = await _poll(lambda: [p for p in rt.hitl_registry.list_pending(session_id=sid)
                                 if p.form == "wait"] or None)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.send_message(wait[0].agent_id, MESSAGE, session_id=sid)
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
     await asyncio.sleep(0.2)
@@ -324,11 +325,11 @@ async def test_pause_between_tools_after_a_hot_reply_retracts_it() -> None:
     sid = await _start(rt)
     q1 = await _next_question(rt, sid)
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="RETRACTED"))
     await asyncio.wait_for(authz.entered.wait(), timeout=5.0)
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session(sid) is True
     tm = rt._task_managers[sid]
     await _poll(lambda: tm.get_task(q1.task_id).status == "AWAITING_HUMAN" or None, timeout=8.0)
@@ -345,7 +346,7 @@ async def test_pause_between_tools_after_a_hot_reply_retracts_it() -> None:
 
     # 重答：答复生效，那个没开始的工具被当作首执执行一次。
     authz.slow = False
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="RETYPED"))
     await _poll(lambda: tm.get_task(q1.task_id).status == "FINISHED" or None, timeout=8.0)
@@ -371,7 +372,7 @@ async def test_rejected_reply_does_not_leave_a_window_open() -> None:
 
     rt.hitl._intake.normalize = reject
     with pytest.raises(ValueError):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.reply_to_hitl(HitlReply(
             hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="bad"))
     tm = rt._task_managers[sid]
@@ -379,7 +380,7 @@ async def test_rejected_reply_does_not_leave_a_window_open() -> None:
     assert q1.id in [p.id for p in rt.hitl_registry.list_pending(session_id=sid)]
 
     rt.hitl._intake.normalize = real
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="GOOD"))
     await _poll(lambda: rt.hitl_registry.get(q1.id).resolved or None, timeout=8.0)
@@ -392,11 +393,11 @@ async def test_duplicate_reply_keeps_the_original_window() -> None:
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
     reply = HitlReply(hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1")
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.reply_to_hitl(reply) is not None
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
 
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.reply_to_hitl(reply) is None          # 并发的重复应答：幂等
     tm = rt._task_managers[sid]
     assert tm.is_round_open(q1.task_id), "别人开的窗不得被重复应答撤掉"
@@ -413,7 +414,7 @@ async def test_injecting_into_an_open_hot_round_does_not_commit_it() -> None:
     rt = _build(llm, hitl_timeout_sec=None)
     sid = await _start(rt)
     q1 = await _next_question(rt, sid)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1"))
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)

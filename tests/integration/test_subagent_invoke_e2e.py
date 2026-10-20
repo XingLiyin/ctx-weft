@@ -27,14 +27,13 @@ from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import all_events
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import all_events
-
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -178,7 +177,7 @@ async def test_subagent_runs_its_own_loop_and_result_flows_back():
     llm = _RecordingRouterLLM()
     runtime = _make_runtime(llm)
 
-    await runtime.initialize()
+    await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -240,7 +239,10 @@ async def test_subagent_runs_its_own_loop_and_result_flows_back():
 
     # ── 6. 记忆侧：父 scope 派发对已终态化（running ack 被 result 替换）──────
     from ctx_weft.protocols import (
-        MemoryAddress, MemoryKind, MemoryScope, ProviderContext,
+        MemoryAddress,
+        MemoryKind,
+        MemoryScope,
+        ProviderContext,
     )
 
     memory = runtime.providers.get_memory()

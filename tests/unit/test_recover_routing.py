@@ -31,18 +31,19 @@ from datetime import datetime, timezone
 import pytest
 
 from ctx_weft.core import CtxWeftRuntime
+from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import HitlAsk, HitlReply, ToolResultDelivery
-from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
 from tests.unit._legacy_recover import rebuild_all_active
-from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
 
@@ -223,9 +224,9 @@ async def test_recover_agent_resolves_session_from_the_record() -> None:
     rt = _runtime_for_recover_agent()
     session_id, root_agent_id = await _crashed_session(rt)
     await rebuild_all_active(rt)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.recover_agent(root_agent_id)          # 不传 session_id 也能跑通
-    await rt.initialize()
+    await initialize_all(rt)
     assert (await rt.get_agent(root_agent_id)).data.session_id == session_id
 
 
@@ -239,7 +240,7 @@ async def test_recover_agent_unknown_raises() -> None:
 
     rt = _runtime_for_recover_agent()
     with pytest.raises(AgentNotFound):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.recover_agent("agt_nope")
 
 
@@ -271,19 +272,19 @@ async def test_recover_agent_refuses_a_cold_registry_then_works_after_rebuild_se
     assert rt._agent_lifecycle_manager.record_of(root_agent_id) is None
 
     with pytest.raises(AgentNotLoaded) as exc:
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.recover_agent(root_agent_id)
     # 宿主既有的 `except AgentNotFound` 必须照样接住（子类，不是新的顶层类型）。
     assert isinstance(exc.value, AgentNotFound)
     assert "rebuild_session" in str(exc.value), "报错要告诉调用方下一步做什么"
 
     # 装填之后同一句调用照常跑通——被推翻的是「core 替你找」，不是这条路径本身。
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.rebuild_session(session_id)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.recover_agent(root_agent_id)
 
-    await rt.initialize()
+    await initialize_all(rt)
     assert (await rt.get_agent(root_agent_id)).data.session_id == session_id
     assert [r.id for r in rt.hitl_registry.list_pending(session_id=session_id)] == ["hit_1"]
 
@@ -342,11 +343,11 @@ async def test_cold_hitl_reply_hydrates_only_its_own_session_not_a_sweep() -> No
     assert rt._agent_lifecycle_manager.record_of(aid1) is None
     assert rt._agent_lifecycle_manager.record_of(aid2) is None
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(hitl_id=req1.id, outcome="accepted", agent_id=aid1))
 
     # S1 被精确装填——这次续跑真正需要的那个 session。
-    await rt.initialize()
+    await initialize_all(rt)
     assert (await rt.get_agent(aid1)).data.session_id == sid1
     # tsk_1 仍有一个未决请求（hit_2）挂着，保持 parked：断言不必陪一整条 LLM run 走完。
     assert [r.id for r in rt.hitl_registry.list_pending(session_id=sid1)] == \
@@ -354,7 +355,7 @@ async def test_cold_hitl_reply_hydrates_only_its_own_session_not_a_sweep() -> No
 
     # S2 一个字节都没被碰——sweep 没有发生，只有 S1 被喂进 ALM。
     assert rt._agent_lifecycle_manager.record_of(aid2) is None
-    await rt.initialize()
+    await initialize_all(rt)
     cold = await rt.list_agents(session_id=sid2)
     assert all(item.source == "events" and not item.loaded for item in cold)
     assert rt._agent_lifecycle_manager.record_of(aid2) is None

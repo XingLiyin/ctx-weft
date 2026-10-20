@@ -16,8 +16,13 @@ from ctx_weft.protocols.hitl import (
     ToolResultDelivery,
     UserTurnDelivery,
 )
-from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template, make_runtime
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests._initialization import initialize_all
+from tests.integration.test_minimal_loop import (
+    InlineAgentTemplateProvider,
+    make_echo_template,
+    make_runtime,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -31,7 +36,7 @@ def _runtime() -> CtxWeftRuntime:
 
 
 async def _warm(rt, session_id):
-    await rt.initialize()
+    await initialize_all(rt)
     if session_id not in rt._task_managers:
         await rt.create_session(template_id="agent:tpl_echo", session_id=session_id,
                                 context_limit=100_000)
@@ -104,7 +109,7 @@ async def test_reply_returns_the_view_and_drives_resume_by_delivery():
     await _warm(rt, "s1")
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
                              agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
-    await rt.initialize()
+    await initialize_all(rt)
     view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                             agent_id=req.agent_id))
     assert view is not None and view.outcome == "accepted"
@@ -121,7 +126,7 @@ async def test_user_turn_delivery_injects_instead_of_reconciling():
     await _warm(rt, "s1")
     req = await rt.hitl.open(_ask_user_turn("t1"), session_id="s1", task_id="t1",
                              agent_id="agent-a", stage="tool", unattended=False)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                      agent_id=req.agent_id, message="继续"))
     assert calls[0][0] == "inject_user_turn"
@@ -132,7 +137,7 @@ async def test_no_resume_delivery_triggers_nothing():
     await _warm(rt, "s1")
     req = await rt.hitl.open(_ask_no_resume(), session_id="s1", task_id="t1",
                              agent_id="agent-a", stage="tool", unattended=False)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="cancelled", agent_id=req.agent_id))
     assert calls == []
 
@@ -144,7 +149,7 @@ async def test_a_claimed_hot_reply_does_not_trigger_cold_resume():
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
                              agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
     rt.hitl_registry.attach_slot(req.id, _AcceptingSlot())
-    await rt.initialize()
+    await initialize_all(rt)
     view = await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                             agent_id=req.agent_id))
     # 不能只看 calls == []——resolve() 失败（未知 id / 已终局）时同样不产生任何 call，
@@ -159,9 +164,9 @@ async def test_replying_twice_resumes_at_most_once():
     await _warm(rt, "s1")
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
                              agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id))
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.reply_to_hitl(
         HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id)
     ) is None
@@ -193,7 +198,7 @@ async def test_empty_agent_id_falls_back_to_session_id_not_recover_agent():
                              tool_call_id="call_1", stage="tool", unattended=False)  # 无 agent_id -> 落到默认空串
     assert req.agent_id == ""
 
-    await rt.initialize()
+    await initialize_all(rt)
     await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=""))
 
     assert recover_agent_calls == [], "空 agent_id 不该再喂给 recover_agent"
@@ -229,7 +234,7 @@ async def test_reply_with_a_disallowed_image_media_type_is_rejected_and_stays_pe
     rt._event_bus.subscribe(None, _record)  # type: ignore[attr-defined]
 
     with pytest.raises(InvalidContentError):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.reply_to_hitl(HitlReply(
             hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
             message=[ImagePart(data="AAAA", media_type="image/bmp")],
@@ -257,7 +262,7 @@ async def test_a_failed_cold_resume_after_commit_is_logged_loudly_and_still_rais
 
     with caplog.at_level("ERROR"):
         with pytest.raises(RuntimeError, match="owner TM rebuild exploded"):
-            await rt.initialize()
+            await initialize_all(rt)
             await rt.reply_to_hitl(HitlReply(hitl_id=req.id, outcome="accepted",
                                              agent_id=req.agent_id))
 
@@ -282,19 +287,19 @@ async def test_list_pending_hitl_returns_views_not_core_records():
     await rt.hitl.open(_ask_tool_result("call_2"), session_id="s2", task_id="t9",
                        tool_call_id="call_2", stage="tool", unattended=False)
 
-    await rt.initialize()
+    await initialize_all(rt)
     all_pending = [item.data for item in await rt.list_pending_hitl()]
     assert len(all_pending) == 2
     assert all(isinstance(v, HitlRequestView) for v in all_pending)
     assert not any(hasattr(v, "tool_call_id") or hasattr(v, "slot") for v in all_pending)
 
-    await rt.initialize()
+    await initialize_all(rt)
     only_s1 = [item.data for item in await rt.list_pending_hitl(session_id="s1")]
     assert [v.id for v in only_s1] == [req.id]
 
     # 经 service 终局（不走 reply_to_hitl，那会去事件库找一个本测试没建的会话）
     await rt.hitl.resolve(HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id))
-    await rt.initialize()
+    await initialize_all(rt)
     assert [item.data for item in await rt.list_pending_hitl(session_id="s1")] == []
 
 
@@ -308,7 +313,7 @@ async def test_reply_to_hitl_rejects_agent_id_mismatch():
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
                              agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
     with pytest.raises(ValueError):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.reply_to_hitl(
             HitlReply(hitl_id=req.id, outcome="accepted", agent_id="wrong-agent")
         )
@@ -328,7 +333,7 @@ async def test_reply_to_hitl_agent_id_mismatch_rejected_before_any_side_effect()
     rt._event_bus.subscribe(None, _record)  # type: ignore[attr-defined]
 
     with pytest.raises(ValueError):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.reply_to_hitl(
             HitlReply(hitl_id=req.id, outcome="accepted", agent_id="wrong-agent")
         )
@@ -344,7 +349,7 @@ async def test_reply_to_hitl_agent_id_match_proceeds_normally():
     await _warm(rt, "s1")
     req = await rt.hitl.open(_ask_tool_result("call_1"), session_id="s1", task_id="t1",
                              agent_id="agent-a", tool_call_id="call_1", stage="tool", unattended=False)
-    await rt.initialize()
+    await initialize_all(rt)
     view = await rt.reply_to_hitl(
         HitlReply(hitl_id=req.id, outcome="accepted", agent_id="agent-a")
     )

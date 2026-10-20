@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from ctx_weft import RuntimeConfig
 from ctx_weft.protocols import (
     LoopConfig,
     MemoryAddress,
@@ -34,13 +35,13 @@ from ctx_weft.protocols.agent import CompactReceipt
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft import RuntimeConfig
+from tests._event_helpers import append_one
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
     make_echo_template,
     make_runtime,
 )
-from tests._event_helpers import append_one
 
 pytestmark = pytest.mark.asyncio
 
@@ -101,7 +102,7 @@ async def _idle_agent():
 
 async def test_compact_agent_returns_receipt():
     rt = await _idle_agent()
-    await rt.initialize()
+    await initialize_all(rt)
     r = await rt.compact_agent(AID)
     assert isinstance(r, CompactReceipt)
     assert r.agent_id == AID
@@ -111,14 +112,14 @@ async def test_compact_agent_returns_receipt():
 async def test_transient_task_id_is_flagged():
     """不传 task_id 时返回的是内存载体 id，事件库里查不到——这条此前只写在 docstring 里。"""
     rt = await _idle_agent()
-    await rt.initialize()
+    await initialize_all(rt)
     r = await rt.compact_agent(AID)
     assert r.task_id_is_transient is True
 
 
 async def test_supplied_task_id_is_not_transient():
     rt = await _idle_agent()
-    await rt.initialize()
+    await initialize_all(rt)
     r = await rt.compact_agent(AID, task_id="root0")
     assert r.task_id == "root0"
     assert r.task_id_is_transient is False
@@ -129,7 +130,7 @@ async def test_unknown_agent_raises():
 
     rt = await _idle_agent()
     with pytest.raises(AgentNotFound):
-        await rt.initialize()
+        await initialize_all(rt)
         await rt.compact_agent("agt_nope")
 
 

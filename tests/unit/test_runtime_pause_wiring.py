@@ -12,6 +12,7 @@ from ctx_weft.core.utils.event import emit_event
 from ctx_weft.protocols import ProviderContext
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.mock import MockLLMAdapter
+from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.unit.test_runtime_agent_api import _plant
 
@@ -106,14 +107,14 @@ async def test_pause_session_leaves_non_root_agents_alive():
     root_tokens = rt._register_run_tokens("s1", "t_root")
     child_tokens = rt._register_run_tokens("s1", "t_child")
 
-    await rt.initialize()
+    await initialize_all(rt)
     assert await rt.pause_session("s1") is True
 
     # root：pause（唯一续跑点）；非 root：cancel 掉它的在途 run，agent 本身原封不动。
     assert root_tokens.pause.is_paused is True
     assert child_tokens.cancel.is_cancelled is True
     assert reg.status_of(child_id) == "running"          # 没被直接拍成 terminated
-    await rt.initialize()
+    await initialize_all(rt)
     assert (await rt.get_agent(child_id)).data.status != "terminated"
 
     # 真实世界里这条被 cancel 的 run 会在自己的收尾点发一条 TASK_CANCELED，经 ALM
