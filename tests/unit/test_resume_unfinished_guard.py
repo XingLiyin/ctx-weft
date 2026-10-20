@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from ctx_weft.core.models.session import Session
+
 import pytest
 
 from ctx_weft.core.models.errors import UnfinishedTasksError
@@ -52,7 +54,7 @@ async def test_resume_refuses_active_leftover() -> None:
     await append_one(runtime.event_store, _ev(3, EventType.TASK_STARTED, task_id="t1"))
 
     with pytest.raises(UnfinishedTasksError) as ei:
-        await sm.resume_session("ses_1", runtime.event_store, user_prompt="next")
+        await sm.resume_session("ses_1", runtime.event_store, user_prompt="next", task_manager=sm._new_task_manager(Session(id="ses_1", user_prompt="", status="RUNNING")))
     assert ei.value.session_id == "ses_1"
     assert "t1" in ei.value.task_ids
 
@@ -66,7 +68,7 @@ async def test_resume_refuses_suspended_leftover() -> None:
     await append_one(runtime.event_store, _ev(4, EventType.TASK_SUSPENDED, task_id="t1"))
 
     with pytest.raises(UnfinishedTasksError):
-        await sm.resume_session("ses_1", runtime.event_store, user_prompt="next")
+        await sm.resume_session("ses_1", runtime.event_store, user_prompt="next", task_manager=sm._new_task_manager(Session(id="ses_1", user_prompt="", status="RUNNING")))
 
 
 async def test_resume_allows_terminal_and_helper_tasks() -> None:
@@ -84,6 +86,6 @@ async def test_resume_allows_terminal_and_helper_tasks() -> None:
     await append_one(runtime.event_store, _ev(6, EventType.TASK_STARTED, task_id="t2"))
 
     session, root_task, tm = await sm.resume_session(
-        "ses_1", runtime.event_store, user_prompt="next")
+        "ses_1", runtime.event_store, user_prompt="next", task_manager=sm._new_task_manager(Session(id="ses_1", user_prompt="", status="RUNNING")))
     assert session.id == "ses_1" and session.status == "RUNNING"
     assert root_task.id and tm.get_task(root_task.id) is not None

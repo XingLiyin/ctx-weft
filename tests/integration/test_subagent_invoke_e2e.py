@@ -178,6 +178,7 @@ async def test_subagent_runs_its_own_loop_and_result_flows_back():
     llm = _RecordingRouterLLM()
     runtime = _make_runtime(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",

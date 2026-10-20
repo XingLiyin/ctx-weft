@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from dataclasses import replace
 
 import pytest
 
@@ -40,6 +41,40 @@ def _collector() -> tuple[list[Event], object]:
 
 
 # ── 总线层 ────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("origin", ["runtime", "loop.background_observe", "loop.recognize_intent"])
+async def test_new_round_cannot_retract_an_already_started_background_run(origin):
+    bus = InProcessEventBus()
+    seen, handler = _collector()
+    bus.subscribe(None, handler)
+    start = replace(_ev(1, EventType.RUN_STARTED), origin=origin)
+    await bus.emit(start)
+    bus.begin_provisional("tsk_1")
+    # The actor's reply belongs to the new window, the existing producer does not.
+    reply = replace(_ev(2, EventType.LLM_TOKEN_STREAMED), run_id="actor", origin="loop.act")
+    progress = replace(_ev(3, EventType.LLM_RESPONSE_FINISHED), origin=origin)
+    finish = replace(_ev(4, EventType.RUN_FINISHED), origin=origin)
+    await bus.emit(reply)
+    await bus.emit(progress)
+    await bus.emit(finish)
+    bus.discard_provisional("tsk_1")
+    assert seen == [start, progress, finish]
+    assert not bus._background_runs
+
+
+async def test_durable_recap_started_during_new_round_survives_retraction():
+    bus = InProcessEventBus()
+    seen, handler = _collector()
+    bus.subscribe(None, handler)
+    bus.begin_provisional("tsk_1")
+    start = replace(_ev(1, EventType.RUN_STARTED), origin="loop.background_observe")
+    finish = replace(_ev(2, EventType.RUN_FINISHED), origin="loop.background_observe")
+    await bus.emit(start)
+    await bus.emit(finish)
+    bus.discard_provisional("tsk_1")
+    assert seen == [start, finish]
+    assert not bus._background_runs
 
 
 async def test_window_holds_events_from_ordinary_subscribers_but_not_provisional_ones():

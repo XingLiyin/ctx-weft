@@ -32,7 +32,7 @@ def test_build_loop_ctx_wires_pause_token():
     pause = PauseToken()
     ctx = rt._build_loop_ctx(
         assembler=None, llm=rt._resolve_llm(None, None), memory=None,
-        provider_ctx=ProviderContext(session_id="session"), gateway=None, skill_index={},
+        provider_ctx=ProviderContext(session_id="session"), gateway=None,
         cancel_token=CancelToken(), task_manager=None, pause_token=pause,
     )
     assert ctx.pause_token is pause
@@ -45,7 +45,7 @@ def test_step_execution_registry_is_shared_only_within_a_session():
         return rt._build_loop_ctx(
             assembler=None, llm=rt._resolve_llm(None, None), memory=None,
             provider_ctx=ProviderContext(session_id=session_id),
-            gateway=None, skill_index={}, cancel_token=None, task_manager=None)
+            gateway=None, cancel_token=None, task_manager=None)
 
     first, second, other = build("s1"), build("s1"), build("s2")
     assert first.steps is not second.steps
@@ -106,13 +106,15 @@ async def test_pause_session_leaves_non_root_agents_alive():
     root_tokens = rt._register_run_tokens("s1", "t_root")
     child_tokens = rt._register_run_tokens("s1", "t_child")
 
+    await rt.initialize()
     assert await rt.pause_session("s1") is True
 
     # root：pause（唯一续跑点）；非 root：cancel 掉它的在途 run，agent 本身原封不动。
     assert root_tokens.pause.is_paused is True
     assert child_tokens.cancel.is_cancelled is True
     assert reg.status_of(child_id) == "running"          # 没被直接拍成 terminated
-    assert rt.get_agent(child_id).status != "terminated"
+    await rt.initialize()
+    assert (await rt.get_agent(child_id)).data.status != "terminated"
 
     # 真实世界里这条被 cancel 的 run 会在自己的收尾点发一条 TASK_CANCELED，经 ALM
     # （_INPUT_BY_EVENT[TASK_CANCELED] = SETTLED）落回 idle——这里补一条同形的事件，

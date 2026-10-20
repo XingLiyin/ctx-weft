@@ -9,7 +9,7 @@ from ctx_weft.core.loop.driver import ExecutionMode, StepExecution
 from ctx_weft.core.loop.steps import observe as observing
 from ctx_weft.core.loop.steps.observe import ObservationResult, ObserveStep, Verdict
 from ctx_weft.core.models.task import Task
-from ctx_weft.protocols import IdentityFacet
+from ctx_weft.protocols import IdentityFacet, LoopConfig, MemoryEvent, MemoryKind, MemoryScope
 from tests.unit.test_observe_react_helper import (
     _make_ctx,
     _make_state,
@@ -19,6 +19,7 @@ from tests.unit.test_observe_react_helper import (
 
 def state():
     result = _make_state()
+    result.agent.loop_config = LoopConfig(short_segment_token_threshold=0, max_turns_per_observe=3)
     result.task = Task(id="t1", session_id="s1", status="ACTIVE", outputs="Delivered",
                        parent_task_id="parent")
     result.extra["template"] = NS(identity={"observe": IdentityFacet(text="ROLE")})
@@ -45,6 +46,9 @@ async def test_same_tool_and_purpose_with_optional_judgement(monkeypatch, standa
             return NS(content=submitted.content, metadata=submitted.metadata, is_error=False)
 
     ctx = _make_ctx("", gateway=Gateway())
+    from ctx_weft.core.utils.clock import now_utc
+    await ctx.memory.ingest(MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+        address=current.scope, role="assistant", content="Delivered", timestamp=now_utc()), ctx.provider_ctx)
     original = ctx.assembler.assemble
 
     async def assemble(request):

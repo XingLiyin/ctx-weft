@@ -80,6 +80,7 @@ async def test_legacy_cold_hitl_reply_resumes_via_session_id_fallback() -> None:
     reply = HitlReply(hitl_id=hid, outcome="accepted", agent_id="", message="ship it")
 
     # 这是本次修复要守住的行为：不抛 AgentNotFound，且真的把会话续上。
+    await rt.initialize()
     view = await rt.reply_to_hitl(reply)
 
     assert view is not None
@@ -103,4 +104,5 @@ async def test_legacy_cold_hitl_reply_without_fix_would_raise_agent_not_found() 
     await rebuild_all_active(rt)
 
     with pytest.raises(AgentNotFound):
+        await rt.initialize()
         await rt.recover_agent("", resumed_task_id=tid, hitl_id=hid)

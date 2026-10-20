@@ -109,6 +109,8 @@ async def fake_state_ctx():
         # `_run_loop` 的实际发射点）——缺了这个字段就不是「测试假绿」而是
         # AttributeError 直接炸穿，所以补上，不是行为放宽。
         status="ACTIVE",
+        started_at=None,
+        finished_at=None,
         outputs=None,
         user_prompt="hello user",
         user_prompt_in_memory=True,

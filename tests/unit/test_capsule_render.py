@@ -4,7 +4,7 @@
 （assistant tool_calls=[control__finish_task] + tool tool_call_id 配对）：
 
 1. AgentRecallSource.fetch 能正确渲染为 assistant+tool 两块（不丢弃）。
-2. DefaultComposer._history_to_messages 产出 assistant(tool_calls=[finish_task]) + tool(tool_call_id)。
+2. PromptBuilder 的历史投影产出 assistant(tool_calls=[finish_task]) + tool(tool_call_id)。
 3. drop_orphan_tool_results 不把 tool 块判为孤儿丢弃（配对完整时）。
 4. 孤立（无前序 assistant）的 tool 块确实被 drop_orphan_tool_results 丢弃（边界保护）。
 """
@@ -16,7 +16,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextRequest
-from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.llm_gateway import drop_orphan_tool_results
 from ctx_weft.protocols import (
@@ -28,6 +27,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import history_messages
 
 pytestmark = pytest.mark.asyncio
 
@@ -110,8 +110,8 @@ async def test_agent_recall_renders_finish_pair() -> None:
 
     blocks = await _collect(mem, scope)
 
-    asst_blocks = [b for b in blocks if b.metadata.get("role") == "assistant"]
-    tool_blocks = [b for b in blocks if b.metadata.get("role") == "tool"]
+    asst_blocks = [b for b in blocks if b.value.role == "assistant"]
+    tool_blocks = [b for b in blocks if b.value.role == "tool"]
 
     assert asst_blocks, "assistant block (finish_task tool_call) must be rendered"
     assert tool_blocks, "tool block (Process Report) must be rendered"
@@ -119,7 +119,7 @@ async def test_agent_recall_renders_finish_pair() -> None:
     # assistant 块携带正确的 tool_calls
     finish_tool_calls = [
         tc for b in asst_blocks
-        for tc in b.metadata.get("tool_calls", [])
+        for tc in b.value.metadata.get("tool_calls", [])
         if tc.get("name") == _FINISH_TASK_NAME
     ]
     assert finish_tool_calls, f"finish_task tool_call not found in assistant blocks; got {asst_blocks}"
@@ -127,9 +127,12 @@ async def test_agent_recall_renders_finish_pair() -> None:
     assert finish_tool_calls[0]["input"]["result"] == outputs_text
 
     # tool 块携带匹配的 tool_call_id
-    matched_tool = [b for b in tool_blocks if b.metadata.get("tool_call_id") == tool_call_id]
+    matched_tool = [
+        b for b in tool_blocks
+        if b.value.metadata.get("tool_call_id") == tool_call_id
+    ]
     assert matched_tool, "tool block must carry matching tool_call_id"
-    assert "Process Report" in matched_tool[0].content
+    assert "Process Report" in matched_tool[0].value.content
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,7 +141,7 @@ async def test_agent_recall_renders_finish_pair() -> None:
 
 
 async def test_composer_renders_finish_pair_as_llm_messages() -> None:
-    """DefaultComposer 把 finish 对渲染成 assistant(tool_calls) + tool(tool_call_id) LLMMessage。"""
+    """PromptBuilder 把 finish 对投影成 assistant(tool_calls) + tool(tool_call_id)。"""
     mem = InMemoryMemoryProvider()
     scope = _sc()
     tool_call_id = "ftc-002"
@@ -164,7 +167,7 @@ async def test_composer_renders_finish_pair_as_llm_messages() -> None:
     )
 
     blocks = await _collect(mem, scope)
-    messages = DefaultComposer()._history_to_messages(blocks)
+    messages = history_messages(blocks, task_id="t1")
 
     roles = [m.role for m in messages]
     assert "assistant" in roles, f"assistant message missing; roles={roles}"
@@ -219,7 +222,7 @@ async def test_drop_orphan_preserves_finish_pair() -> None:
     )
 
     blocks = await _collect(mem, scope)
-    messages = DefaultComposer()._history_to_messages(blocks)
+    messages = history_messages(blocks, task_id="t1")
 
     # 确认消息列表合法（含 assistant + tool 配对）
     before_count = len([m for m in messages if m.role == "tool"])
@@ -295,7 +298,7 @@ async def test_finish_pair_survives_alongside_conversation() -> None:
     )
 
     blocks = await _collect(mem, scope)
-    messages = DefaultComposer()._history_to_messages(blocks)
+    messages = history_messages(blocks, task_id="t1")
     after = drop_orphan_tool_results(messages)
 
     # finish 对的 tool 消息必须存活

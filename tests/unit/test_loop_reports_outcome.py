@@ -69,7 +69,7 @@ async def _finalize_state(mem, *, verdict_outcome: str, summary: str, retry_coun
     session = SimpleNamespace(id="s1", tenant_id="default")
     return SimpleNamespace(run_id="r1", sequence_counter=0, session=session,
                            scope=scope, task=task, agent=agent, verdict=verdict,
-                           run_outcome=None)
+                           run_outcome=None, extra={})
 
 
 async def run_until_finalize(*, verdict: str, summary: str = "", retry_count: int = 0):
@@ -124,7 +124,7 @@ async def run_until_suspend(*, titles: list[str]):
                  memory_config=MemoryConfig(), loop_config=LoopConfig())
     state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
     # launch_recap 是 fire-and-forget：给它一个真 event_bus，否则它的
-    # finally 块（无条件发 TASK_RECAP_DONE）会在测试结束后抛 "exception was never
+    # finally 块（无条件发 OBSERVE_APPLIED）会在测试结束后抛 "exception was never
     # retrieved"。段里没有任何 CONVERSATION_TURN → n_raw==0 幂等护栏立即 return，
     # 不会真的调 LLM。
     from ctx_weft.core.loop.driver import StepDriver
@@ -233,6 +233,7 @@ async def run_until_outage():
                            config=RuntimeConfig(llm_self_heal_max_attempts=1))
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
+    await runtime.initialize()
     _handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="hi")
     return state

@@ -39,12 +39,11 @@ async def test_outage_interrupt_carries_llm_outage_reason():
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     seen = []
-    orig_emit = runtime._event_bus.emit
     async def _spy(ev):
         seen.append(ev)
-        return await orig_emit(ev)
-    runtime._event_bus.emit = _spy
+    runtime._event_bus.subscribe(None, _spy)
 
+    await runtime.initialize()
     await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
 
     interrupts = [e for e in seen if getattr(e, "type", None) == EventType.RUN_INTERRUPTED]

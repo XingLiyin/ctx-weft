@@ -32,11 +32,22 @@ def test_counter_field_carried():
 
 
 async def test_guidance_source_uses_request_counter():
+    """GuidanceSource only snapshots state; PromptBuilder owns token accounting."""
     from ctx_weft.core.assembler.sources.guidance import GuidanceSource
+    from tests.assembler_testkit import compile_prompt
 
     req = _request(lambda t: 42)
-    req.extra = {"act_guidance": "some guidance text"}
+    req.task.unattended = False
+    req.task.title = "Task"
+    req.task.description = ""
+    req.task.user_prompt = ""
+    req.task.user_prompt_in_memory = True
+    req.task.outputs = ""
+    req.session.context_limit = 100_000
+    req.session.reserved_output_tokens = 0
     blocks = []
     async for b in GuidanceSource().fetch(req, SimpleNamespace()):
         blocks.append(b)
-    assert blocks and blocks[0].token_estimate == 42
+    assert blocks and isinstance(blocks[0].value, dict)
+    assert not hasattr(blocks[0], "token_estimate")
+    assert compile_prompt(blocks, req).token_count > 0

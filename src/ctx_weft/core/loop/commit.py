@@ -132,5 +132,6 @@ def rearm_after_hot_reply(
         return
     if tm.round_hitl_id(state.task.id) != hitl_id:
         return
+    tm.bind_round_run(state.task.id, state.run_id, starts_run=False)
     state.extra[ROUND_COMMITTED_KEY] = False
     state.extra[HOT_REPLY_ROUND_KEY] = hitl_id

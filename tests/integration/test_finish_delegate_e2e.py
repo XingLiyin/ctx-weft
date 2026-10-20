@@ -132,6 +132,7 @@ async def test_finish_plus_delegate_same_batch_e2e():
 
     runtime._event_bus.emit = _spy
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="root request", context_limit=100_000,

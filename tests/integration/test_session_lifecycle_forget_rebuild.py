@@ -105,6 +105,7 @@ async def _wait_until(predicate, timeout=10.0, interval=0.02):
 
 
 async def _run_one_round(rt: CtxWeftRuntime):
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
@@ -127,8 +128,10 @@ async def test_finishing_a_session_keeps_it_in_memory():
 
     assert sid in rt._task_managers, "TaskManager 留着"
     assert rt._agent_lifecycle_manager.has(aid), "agent record 留着"
-    assert rt.get_agent(aid).status == "idle", "agent 回 idle，不是消失"
-    assert [a.agent_id for a in rt.list_agents(session_id=sid)] == [aid]
+    await rt.initialize()
+    assert (await rt.get_agent(aid)).data.status == "idle", "agent 回 idle，不是消失"
+    await rt.initialize()
+    assert [a.agent_id for a in [item.data for item in await rt.list_agents(session_id=sid)]] == [aid]
 
 
 async def test_forget_session_evicts_everything():
@@ -140,9 +143,13 @@ async def test_forget_session_evicts_everything():
     assert sid not in rt._task_managers
     assert sid not in rt._run_tokens
     assert not rt._agent_lifecycle_manager.has(aid)
-    assert rt.list_agents(session_id=sid) == []
+    await rt.initialize()
+    queried = await rt.list_agents(session_id=sid)
+    assert [item.data.agent_id for item in queried] == [aid]
+    assert all(item.source == "events" and not item.loaded for item in queried)
     with pytest.raises(AgentNotFound):
-        rt.get_agent(aid)
+        await rt.initialize()
+        (await rt.get_agent(aid)).data
     assert rt._session_registry.agent_ids_of(sid) == set(), "成员登记表也一并收（此前只增不减）"
 
     rt.forget_session(sid)   # 幂等
@@ -154,12 +161,15 @@ async def test_rebuild_session_brings_it_back_without_running_anything():
     sid, aid, tid = await _run_one_round(rt)
     rt.forget_session(sid)
 
+    await rt.initialize()
     n = await rt.rebuild_session(sid)
 
     assert n == 1
     assert rt._agent_lifecycle_manager.has(aid)
-    assert rt.get_agent(aid).status == "idle"
-    assert [a.agent_id for a in rt.list_agents(session_id=sid)] == [aid]
+    await rt.initialize()
+    assert (await rt.get_agent(aid)).data.status == "idle"
+    await rt.initialize()
+    assert [a.agent_id for a in [item.data for item in await rt.list_agents(session_id=sid)]] == [aid]
     # 冷准备建立 owner，但不入队、不执行；真正激活留给输入交付或显式恢复。
     tm = rt._task_managers[sid]
     assert tm.get_task(tid).status == "FINISHED"
@@ -175,6 +185,7 @@ async def test_rebuild_session_brings_it_back_without_running_anything():
 
 async def test_rebuild_session_on_an_unknown_session_returns_zero_and_does_not_raise():
     rt = _make_runtime()
+    await rt.initialize()
     assert await rt.rebuild_session("ses_never_existed") == 0
 
 
@@ -268,20 +279,25 @@ async def test_purge_session_terminates_then_evicts_unconditionally():
     rt._agent_lifecycle_manager._agents[aid].status = "waiting_human"
     assert rt.forget_session(sid) is False
 
+    await rt.initialize()
     await rt.purge_session(sid)
 
     assert sid not in rt._task_managers
     assert not rt._agent_lifecycle_manager.has(aid)
     assert rt._session_registry.agent_ids_of(sid) == set()
     with pytest.raises(AgentNotFound):
-        rt.get_agent(aid)
+        await rt.initialize()
+        (await rt.get_agent(aid)).data
 
 
 async def test_purge_session_is_idempotent_and_safe_on_an_unknown_session():
     rt = _make_runtime()
+    await rt.initialize()
     await rt.purge_session("ses_never_existed")     # 不抛
     sid, _, _ = await _run_one_round(rt)
+    await rt.initialize()
     await rt.purge_session(sid)
+    await rt.initialize()
     await rt.purge_session(sid)                      # 幂等
 
 
@@ -291,9 +307,11 @@ async def test_purge_does_not_touch_the_event_log():
     rt = _make_runtime()
     sid, aid, _ = await _run_one_round(rt)
 
+    await rt.initialize()
     await rt.purge_session(sid)
     assert not rt._agent_lifecycle_manager.has(aid)
 
+    await rt.initialize()
     assert await rt.rebuild_session(sid) == 1
     assert rt._agent_lifecycle_manager.has(aid)
 
@@ -318,6 +336,7 @@ async def test_purge_rebuilds_a_cold_session_before_terminating_it():
         return await orig(agent_id, **kw)
 
     rt.cancel_agent = _spy   # type: ignore[method-assign]
+    await rt.initialize()
     await rt.purge_session(sid)
 
     assert canceled == [aid], "冷会话必须先装填回来，终结才落得到实处"
@@ -367,6 +386,7 @@ async def test_purge_session_drops_the_hitl_records():
     sid, aid, _ = await _run_one_round(rt)
     hid = _plant_hitl(rt, sid, aid, resolved=True)
 
+    await rt.initialize()
     await rt.purge_session(sid)
 
     assert rt.hitl_registry.get(hid) is None
@@ -380,6 +400,7 @@ async def test_purge_does_not_touch_other_sessions_hitl_records():
     hid_a = _plant_hitl(rt, sid_a, aid_a, resolved=True)
     hid_b = _plant_hitl(rt, sid_b, aid_b, resolved=True)
 
+    await rt.initialize()
     await rt.purge_session(sid_a)
 
     assert rt.hitl_registry.get(hid_a) is None
@@ -423,6 +444,7 @@ async def test_a_forgotten_session_runs_a_full_new_round_end_to_end():
     assert not rt._agent_lifecycle_manager.has(aid)
     assert sid not in rt._task_managers
 
+    await rt.initialize()
     handle = await rt.send_message(aid, "第二轮", session_id=sid)
 
     async def _second_done() -> bool:
@@ -433,7 +455,8 @@ async def test_a_forgotten_session_runs_a_full_new_round_end_to_end():
     await _wait_until(_second_done)
 
     # 跑完之后一切照旧：agent 回 idle、两轮的 task 都在、还能再来一轮。
-    assert rt.get_agent(aid).status == "idle"
+    await rt.initialize()
+    assert (await rt.get_agent(aid)).data.status == "idle"
     view = await rebuild_view(rt.event_store, sid)
     assert {t.status for t in view.tasks.values()} == {"FINISHED"}
     assert len(view.tasks) == 2
@@ -446,11 +469,13 @@ async def test_forget_then_rebuild_then_send_also_runs():
     sid, aid, _ = await _run_one_round(rt)
     assert rt.forget_session(sid) is True
 
+    await rt.initialize()
     assert await rt.rebuild_session(sid) == 1
     assert rt._agent_lifecycle_manager.has(aid)
     prepared_tm = rt._task_managers[sid]
     assert prepared_tm._queue.pending_count() == 0
 
+    await rt.initialize()
     handle = await rt.send_message(aid, "第二轮", session_id=sid)
     assert rt._task_managers[sid] is prepared_tm
     assert sid not in rt._prepared_recoveries
@@ -471,6 +496,7 @@ async def test_two_forget_send_cycles_in_a_row():
 
     for i in range(2):
         assert rt.forget_session(sid) is True, f"第 {i+1} 轮逐出失败"
+        await rt.initialize()
         handle = await rt.send_message(aid, f"第 {i+2} 轮", session_id=sid)
 
         async def _done(tid=handle.task_id) -> bool:
@@ -532,11 +558,13 @@ async def test_rebuild_settles_a_crashed_running_agent_to_interrupted():
 
     rt.event_bus.subscribe(None, recorder)
 
+    await rt.initialize()
     n = await rt.rebuild_session(sid)
 
     assert n == 1
-    assert rt.get_agent(aid).status == "interrupted", "崩溃残影的 running 必须被判掉"
-    assert seen == ["AgentInterrupted"], f"该发且只发一条真转移事件，实得 {seen}"
+    await rt.initialize()
+    assert (await rt.get_agent(aid)).data.status == "interrupted", "崩溃残影的 running 必须被判掉"
+    assert seen == [], "启动校准直接提交，不通过总线广播或装填"
 
 
 async def test_settling_is_idempotent_across_repeated_rebuilds():
@@ -544,6 +572,7 @@ async def test_settling_is_idempotent_across_repeated_rebuilds():
     rt = _make_runtime()
     sid, aid = "S_crash2", "agt_crashed"
     await _seed_crashed_running(rt, sid, aid)
+    await rt.initialize()
     await rt.rebuild_session(sid)
 
     seen: list[str] = []
@@ -555,9 +584,11 @@ async def test_settling_is_idempotent_across_repeated_rebuilds():
     rt.event_bus.subscribe(None, recorder)
 
     rt.forget_session(sid)          # 逐出，逼下一次走完整装填
+    await rt.initialize()
     await rt.rebuild_session(sid)
 
-    assert rt.get_agent(aid).status == "interrupted"
+    await rt.initialize()
+    assert (await rt.get_agent(aid)).data.status == "interrupted"
     assert seen == [], f"重复装填不该重复发转移事件，实得 {seen}"
 
 
@@ -574,9 +605,11 @@ async def test_a_finished_session_is_not_settled():
             seen.append(ev.type)
 
     rt.event_bus.subscribe(None, recorder)
+    await rt.initialize()
     await rt.rebuild_session(sid)
 
-    assert rt.get_agent(aid).status == "idle"
+    await rt.initialize()
+    assert (await rt.get_agent(aid)).data.status == "idle"
     assert "AgentInterrupted" not in seen
 
 
@@ -585,12 +618,14 @@ async def test_recover_agent_cold_preparation_settles_without_starting_steps():
     rt = _make_runtime()
     sid, aid = "S_prepare", "agt_crashed"
     await _seed_crashed_running(rt, sid, aid)
-    await rt._load_agents_of(sid)
-    assert rt.get_agent(aid).status == "running"
+    await rt.initialize()
+    assert (await rt.get_agent(aid, session_id=sid)).data.status == "interrupted"
 
-    await rt.recover_agent(aid, keep_alive=True)
+    await rt.initialize()
+    await rt.recover_agent(aid, session_id=sid, keep_alive=True)
 
-    assert rt.get_agent(aid).status == "interrupted"
+    await rt.initialize()
+    assert (await rt.get_agent(aid)).data.status == "interrupted"
     tm = rt._task_managers[sid]
     assert rt._prepared_recoveries[sid][0] is tm
     assert tm._queue.pending_count() == 0

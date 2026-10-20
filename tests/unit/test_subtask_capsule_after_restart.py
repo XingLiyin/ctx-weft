@@ -26,7 +26,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.control.converters import task_from_projection
 from ctx_weft.core.control.reducers import reduce_events
@@ -44,6 +43,7 @@ from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, Prov
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import history_messages
 
 pytestmark = pytest.mark.asyncio
 
@@ -125,11 +125,11 @@ def _restart_roundtrip(task: Task) -> Task:
 
 
 async def _compose_parent_messages(mem):
-    """REAL AgentRecallSource → REAL DefaultComposer：父续跑时装配出的 message 序列。"""
+    """REAL AgentRecallSource → REAL PromptBuilder：父续跑时装配出的 message 序列。"""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=_task_scope(PARENT), token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
-    return [m for m, *_ in DefaultComposer()._history_to_messages_with_sources(blocks)]
+    return history_messages(blocks, task_id=PARENT)
 
 
 def _labels(messages) -> list[str]:

@@ -102,7 +102,8 @@ async def _user_texts(rt, session_id: str, agent_id: str, task_id: str) -> list[
 async def _wait_for_wait_bubble(rt, session_id: str, timeout: float = 5.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        pending = [v for v in rt.list_pending_hitl(session_id=session_id) if v.form == "wait"]
+        await rt.initialize()
+        pending = [v for v in [item.data for item in await rt.list_pending_hitl(session_id=session_id)] if v.form == "wait"]
         if pending:
             return pending[0]
         await asyncio.sleep(0.02)
@@ -115,6 +116,7 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
         context_limit=_MOCK_CONTEXT_LIMIT)
     rt = _runtime(llm)
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi",
         context_limit=_MOCK_CONTEXT_LIMIT))
@@ -123,10 +125,12 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     # interactive 的 root task 说完一段纯文本就 park 出一个 wait 气泡 —— 这就是 D 类的起点。
     bubble = await _wait_for_wait_bubble(rt, sid)
     task_id = bubble.task_id
-    types_before = await _stored_types(rt, sid)
+    events_before = await all_events(rt.event_store, sid)
+    ids_before = {e.id for e in events_before}
 
     # ── 用户回答那个气泡，LLM 卡在首个 chunk 之前 ────────────────────────────
     llm.stalling = True
+    await rt.initialize()
     view = await rt.reply_to_hitl(HitlReply(
         hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
         message=_RETRACTED))
@@ -135,15 +139,19 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     assert rt.hitl_registry.get(bubble.id).claim_pending is True
     assert rt.hitl_registry.get(bubble.id).resolved is False
     # 收下之后它就不该再出现在未决列表里 —— 否则 host 会让人对着刚答过的问题再答一次。
-    assert bubble.id not in [v.id for v in rt.list_pending_hitl(session_id=sid)]
+    await rt.initialize()
+    assert bubble.id not in [v.id for v in [item.data for item in await rt.list_pending_hitl(session_id=sid)]]
 
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
     assert rt._agent_lifecycle_manager.record_of(aid).status == "running"
-    assert await _stored_types(rt, sid) == types_before, (
-        "首个 chunk 之前，这一轮不得往事件日志里写任何东西（HitlResolved 也不许）"
-    )
+    # Prior actors, metadata and recap may finish while this round is provisional.
+    # Only the replying run and the withdrawn input belong to the new window.
+    replying_run_id = rt._task_managers[sid]._rounds[task_id].run_id
+    during = [e for e in await all_events(rt.event_store, sid) if e.id not in ids_before]
+    assert not any(e.run_id == replying_run_id or _RETRACTED in str(e.payload) for e in during), during
 
     # ── 按下暂停 ────────────────────────────────────────────────────────────
+    await rt.initialize()
     assert await rt.pause_session(sid) is True
     await asyncio.sleep(0.5)
 
@@ -152,11 +160,12 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     # `HitlResolved` 从来没发过 —— 被撤回的那句话不在日志里，这是两阶段买到的东西。
     # 而撤回这件事本身要留痕：不留的话「这条气泡被答过又撤了」跨不过重启，重答时
     # memory 的幂等键就会撞上上一次留下的 superseded 记录（见 ⑦ 与下一个用例）。
-    types_after = await _stored_types(rt, sid)
-    assert types_after == types_before + [EventType.HITL_REPLY_RETRACTED], (
-        f"这一轮只该留下那一条不含正文的撤回事实；实得 {types_after[len(types_before):]}"
-    )
-    retraction = (await all_events(rt.event_store, sid))[-1]
+    after = [e for e in await all_events(rt.event_store, sid) if e.id not in ids_before
+             and (e.run_id == replying_run_id or e.type == EventType.HITL_REPLY_RETRACTED)]
+    assert not any(e.type == EventType.HITL_RESOLVED and e.payload.get("hitl_id") == bubble.id
+                   for e in await all_events(rt.event_store, sid))
+    assert [e.type for e in after] == [EventType.HITL_REPLY_RETRACTED]
+    retraction = next(e for e in after if e.type == EventType.HITL_REPLY_RETRACTED)
     assert retraction.payload == {"hitl_id": bubble.id}, (
         f"撤回事件不得带正文——被撤回的话留在日志里就白撤了：{retraction.payload}"
     )
@@ -167,7 +176,8 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     # ② 气泡回到 pending —— (a) 方案的核心：撤销之后 RAM 与日志都停在「人还没回答」
     req = rt.hitl_registry.get(bubble.id)
     assert req.claim_pending is False and req.resolved is False
-    assert bubble.id in [v.id for v in rt.list_pending_hitl(session_id=sid)], (
+    await rt.initialize()
+    assert bubble.id in [v.id for v in [item.data for item in await rt.list_pending_hitl(session_id=sid)]], (
         "被撤销的那次应答之后，气泡必须重新出现在未决列表里，人才能重答"
     )
 
@@ -186,6 +196,7 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     # ⑥ 重答一次照常跑起来（会话没被这次撤销搞坏）
     llm.stalling = False
     retyped = "ok, a different question then"
+    await rt.initialize()
     view2 = await rt.reply_to_hitl(HitlReply(
         hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
         message=retyped))
@@ -230,6 +241,7 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
         context_limit=_MOCK_CONTEXT_LIMIT)
     rt = _runtime(llm)
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi",
         context_limit=_MOCK_CONTEXT_LIMIT))
@@ -238,9 +250,11 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
     task_id = bubble.task_id
 
     llm.stalling = True
+    await rt.initialize()
     await rt.reply_to_hitl(HitlReply(hitl_id=bubble.id, outcome="accepted",
                                      agent_id=bubble.agent_id, message=_RETRACTED))
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
+    await rt.initialize()
     await rt.pause_session(sid)
     await asyncio.sleep(0.5)
 
@@ -248,7 +262,9 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
     # 真正的重启 = **注册表先空掉**再从事件重建。只调 `rebuild_hitl` 不够：它对内存里
     # 已有的活记录是保留的（`load_snapshot` 的既有纪律），那样测到的还是同一个内存对象
     # ——这条测试曾经因此假绿过一次。
+    rt._evict_session_memory(sid)
     rt.hitl_registry.forget_session(sid)
+    await rt.initialize()
     await rt.rebuild_hitl(sid)
     rebuilt = rt.hitl_registry.get(bubble.id)
     assert rebuilt is not None, "重建之后这个气泡必须还在（撤销不发事件，日志里它仍是未决）"
@@ -258,6 +274,7 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
 
     llm.stalling = False
     retyped = "restart then retype"
+    await rt.initialize()
     assert await rt.reply_to_hitl(HitlReply(
         hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
         message=retyped)) is not None

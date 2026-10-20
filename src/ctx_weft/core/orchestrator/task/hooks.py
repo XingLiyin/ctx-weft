@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from ctx_weft.core.control.types import TaskView
     from ctx_weft.core.models.task import Task
 
 __all__ = ["TaskManagerHooks"]
@@ -59,7 +60,7 @@ class TaskManagerHooks:
     cancel_pending_hitl: "Callable[[], Coroutine[Any, Any, None]] | None" = None
 
     #: 「对指定在途 task 发协作取消信号」。只发信号不代表任务立即终结——非 root 的
-    #: TASK_CANCELED 由 run 结束后的 `apply_run_outcome` 发；root 由 trip 序列先标 FAILED。
+    #: TASK_CANCELED 由 run 结束后的 `apply_run_outcome` 发；熔断 root 同样等 run 结束后落 FAILED。
     cancel_inflight: "Callable[[str], bool] | None" = None
 
     review_switched_task: "Callable[[Task], Coroutine[Any, Any, None]] | None" = None
@@ -74,13 +75,16 @@ class TaskManagerHooks:
     #: 「用户按了暂停」变成一次 run 崩溃。
     revert_round: "Callable[[str], Coroutine[Any, Any, None]] | None" = None
 
+    #: 在回合批次冻结前加入已有 HitlResolved 事实，与新消息同批提交。
+    #: 失败向上传播，原窗口保留供确认和重试。
+    prepare_round_commit: "Callable[[str], Coroutine[Any, Any, None]] | None" = None
+
     #: 「这一轮算数了，把**不属于 TM** 的那部分也落定」——`revert_round` 的对偶。
-    #: 参数：(task_id, 暂存的 memory 写入)。由 `commit_round` 在补投缓冲**之后**调用，
-    #: 顺序固定：① 把该 task 上待终局的 HITL 答复终局（发 `HitlResolved`）；② 把暂存的
-    #: memory 写入按序落盘——**终局事实先于答复进 memory**。
+    #: 参数：(task_id, 暂存的 memory 写入)。由 `commit_round` 在批次确认**之后**调用，
+    #: 顺序固定：① 发布已确认的 HITL claim 状态；② 把暂存的 memory 写入按序落盘。
     #: 收在这里而不是散在各提交点，是因为提交点不止一个——act 的首 chunk、gateway 调工具前、
     #: act 离开循环前、prepare 压缩前、`_run_task` 的收尾兜底、消息并进在跑 task 的就地
-    #: 提交。best-effort，抛异常只记日志。
+    #: 提交。异常向上传播，原快照保留，已确认的事实不撤销。
     commit_round: "Callable[[str, list[Any]], Coroutine[Any, Any, None]] | None" = None
 
     #: 「这个 task 停下来等的那个问题，此刻是不是已经有答复了」——run 收尾时的自检判据。
@@ -127,3 +131,11 @@ class TaskManagerHooks:
     #: 区别于 `on_session_done`：那是终结回调；这是「暂停待续接」的信号，供 runtime
     #: 回收按 run 计的控制信号。可多次触发；回调须幂等。
     on_session_idle: "Callable[[], Coroutine[Any, Any, None]] | None" = None
+
+    # Runtime-owned resources only; task traversal and decisions remain in TM.
+    cancel_guard: "Callable[..., Any] | None" = None
+    tree_cancel_finalizer: "Callable[[list[Task], str], Coroutine[Any, Any, None]] | None" = None
+
+    # Existing control projection; used to reconcile a lost commit acknowledgement.
+    read_task_state: "Callable[[str], Coroutine[Any, Any, TaskView | None]] | None" = None
+    confirm_task_settled: "Callable[[Task], Coroutine[Any, Any, None]] | None" = None

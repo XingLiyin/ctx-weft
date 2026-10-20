@@ -102,7 +102,7 @@ class PendingHitl:
     #: `pending_decision` 的请求在事件日志里也仍然只有 `HitlOpened`，所以崩溃重启后
     #: 它如实地回到 pending，人重答一次即可。那正是要的语义。
     #:
-    #: 热投递（有活等待槽）不走这条：那条路上没有「新一轮」，`HitlService` 就地提交。
+    #: ask_user 的冷热答复都可走两阶段；不可撤销的审批在事件确认后直接终局，再热投递。
     pending_decision: HitlDecision | None = None
     #: `pending_decision` 配套的事件载荷（`ReplyIntake.normalize` 的产物）。提交时才
     #: 发 `HitlResolved`，那时不能拿 `decision.message` 重算——它已是 memory 侧的 ref。
@@ -238,6 +238,10 @@ class HitlRegistry:
         )
         self._requests[hitl_id] = req
         return req
+
+    def publish(self, req: PendingHitl) -> PendingHitl:
+        """Install an opening only after its original event batch is confirmed."""
+        return self._requests.setdefault(req.id, req)
 
     def attach_slot(self, hitl_id: str, slot: WaitSlot) -> None:
         req = self._requests.get(hitl_id)

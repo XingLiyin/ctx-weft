@@ -64,7 +64,7 @@ async def _failed_state(mem, *, task_error: str | None, act_recap: str):
     agent = SimpleNamespace(id="ag2", loop_config=LoopConfig())
     session = SimpleNamespace(id="s1", tenant_id="default")
     return SimpleNamespace(run_id="r1", sequence_counter=0, session=session,
-                           scope=scope, task=task, agent=agent, verdict=verdict)
+                           scope=scope, task=task, agent=agent, verdict=verdict, extra={})
 
 
 def _task_failed_payload(step_outcome, task) -> dict:
@@ -91,7 +91,7 @@ async def _retry_exhausted_state(mem, *, task_error: str | None):
     agent = SimpleNamespace(id="ag2", loop_config=LoopConfig())
     session = SimpleNamespace(id="s1", tenant_id="default")
     return SimpleNamespace(run_id="r1", sequence_counter=0, session=session,
-                           scope=scope, task=task, agent=agent, verdict=verdict)
+                           scope=scope, task=task, agent=agent, verdict=verdict, extra={})
 
 
 async def test_retry_exhausted_downgrade_has_own_code_and_blocker() -> None:

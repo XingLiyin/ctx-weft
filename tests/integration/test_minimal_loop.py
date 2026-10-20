@@ -120,6 +120,7 @@ async def test_minimal_echo_loop() -> None:
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
     # ── Run ──────────────────────────────────────────────────────────────────
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo",
         user_prompt="say hello",
@@ -181,6 +182,7 @@ async def test_prompt_structure_matches_miniagents() -> None:
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
+    await runtime.initialize()
     _handle, _state = await runtime.run_single_task(
         template_id="agent:tpl_echo",
         user_prompt="hello there",

@@ -111,6 +111,7 @@ async def test_dispatch_boundary_recap_e2e():
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="delegate then finish",

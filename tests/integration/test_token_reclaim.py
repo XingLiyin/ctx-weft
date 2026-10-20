@@ -25,6 +25,7 @@ async def test_idle_park_reclaims_tokens_keeps_task_manager():
     llm = _FlakyLLM(fail_for=1, responses=[], ri_responses=[MockResponse(text="")] * 3)
     rt = _make_runtime(llm)
 
+    await rt.initialize()
     handle = await rt.start_session(_new_params())
     sid = handle.session_id
     await _wait_for_run_finish(handle)
@@ -39,6 +40,7 @@ async def test_idle_park_reclaims_tokens_keeps_task_manager():
     # 2026-09-08 生命周期改造前这里断言的是「cancel 必须回收 TaskManager」。现在回收
     # 只由显式 forget_session 触发：取消 = 这一轮不跑了，不等于这条会话不要了——用户
     # 多半还要看它的历史、甚至接着聊，而那时 TM 还在就不必重建一份。
+    await rt.initialize()
     assert await rt.cancel_session(sid) is True
     assert sid not in rt._run_tokens, "per-run 控制信号照旧随取消清掉"
     assert sid in rt._task_managers, "取消不逐出：TaskManager 留到显式 forget_session"
@@ -47,4 +49,5 @@ async def test_idle_park_reclaims_tokens_keeps_task_manager():
     assert rt.forget_session(sid) is True, "已终结、已空闲 → 该能忘掉"
     assert sid not in rt._task_managers, "forget_session 必须回收 TaskManager"
     assert sid not in rt._run_tokens
-    assert rt.list_agents(session_id=sid) == [], "agent record 一并逐出"
+    await rt.initialize()
+    assert [item.data for item in await rt.list_agents(session_id=sid)] == [], "agent record 一并逐出"

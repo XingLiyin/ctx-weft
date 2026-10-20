@@ -9,7 +9,7 @@
 2. 快照不可用时那趟**正当的**全量重放也要分批，不把整条流驻留内存。
 
 段 recap 后来**连收窄查询都不发了**：收窄只把斜率降了 15 倍，它仍随会话长度线性增长
-（recap 事件只增不减），所以那个账进了投影（`RunStateView.pending_recap`）。这条路的护栏
+（recap 事件只增不减），所以那个账进了投影（`RunStateView.pending_observe`）。这条路的护栏
 在 `tests/unit/test_fold_pending_task_recap.py`（折叠 + 快照往返）与
 `tests/integration/test_task_recap_recovery.py::test_resume_does_not_read_the_whole_event_stream`
 （真实 `/resume` 上一次 recap 查询都不发）。
@@ -95,10 +95,10 @@ async def _seed(store: InMemoryEventStore, n_noise: int) -> None:
     for i in range(1, n_noise + 1):
         await append_one(store, _ev(i, EventType.RUN_FINISHED, outcome="completed"))
     # 一对完成的（started + done）+ 一对被崩溃打断的（只有 started）
-    await append_one(store, _ev(n_noise + 1, EventType.TASK_RECAP_STARTED,
+    await append_one(store, _ev(n_noise + 1, EventType.OBSERVE_STARTED,
                            task_id="t_done", boundary="finish", agent_id="agt_root"))
-    await append_one(store, _ev(n_noise + 2, EventType.TASK_RECAP_DONE, task_id="t_done"))
-    await append_one(store, _ev(n_noise + 3, EventType.TASK_RECAP_STARTED,
+    await append_one(store, _ev(n_noise + 2, EventType.OBSERVE_APPLIED, task_id="t_done"))
+    await append_one(store, _ev(n_noise + 3, EventType.OBSERVE_STARTED,
                            task_id="t_stuck", boundary="finish", agent_id="agt_root"))
 
 
@@ -142,7 +142,7 @@ async def test_recap_fold_lives_in_the_projection_not_in_a_query() -> None:
 
     assert store.typed_reads == [], "重放折出这个账，不发类型查询"
     # _seed 的最后一条是 t_stuck 的 started（无 done），t_done 那对已销账
-    assert set(view.pending_recap) == {"t_stuck"}
+    assert set(view.pending_observe) == {"t_stuck"}
 
 
 # ── 2. 快照不可用时的全量重放：按 position 区间分批 ─────────────────────────

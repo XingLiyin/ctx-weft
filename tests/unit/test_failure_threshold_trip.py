@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from ctx_weft.core.orchestrator.task.manager import TaskManager
@@ -26,6 +28,10 @@ from tests.unit._stub_runner import StubRunner
 
 
 class _CapturingBus:
+    async def emit_batch(self, events):
+        for event in events:
+            await self.emit(event)
+
     def __init__(self) -> None:
         self.events: list = []
 
@@ -291,7 +297,46 @@ async def test_cancel_inflight_called_for_inflight_non_root_and_root() -> None:
 
     assert "inflight_child" in called
     assert "root" in called
-    assert root.status == "FAILED"  # root 先标 FAILED 再对在跑 root 调 cancel_inflight
+    assert root.status == "ACTIVE"  # Terminal settlement waits for the root's execution exit.
+    assert "root" in tm._pending_threshold_roots
+
+
+async def test_root_exit_waits_for_trip_commit_and_settles_only_once():
+    from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    class DelayedBus(_CapturingBus):
+        async def emit(self, event):
+            if event.type == EventType.FAILURE_THRESHOLD_HIT:
+                entered.set()
+                await release.wait()
+            await super().emit(event)
+
+    bus = DelayedBus()
+    tm, session = _tm(bus, threshold=1)
+    root = _root(status="ACTIVE", started_at=now_utc())
+    tm.register_task(root)
+    tm._running_tasks.add(root.id)
+    tm.register_task(_child("failed"))
+    trip = asyncio.create_task(_fail_n_times(tm, ["failed"]))
+    await entered.wait()
+    completion = asyncio.create_task(tm.apply_run_outcome(
+        root.id, RunOutcome(kind=RunOutcomeKind.CANCELED)))
+    await asyncio.sleep(0)
+    assert not completion.done() and root.status == "ACTIVE"
+    # Root exits while trip cleanup is yielding, before its root loop executes.
+    async def await_root_exit():
+        await completion
+    tm.set_hooks(TaskManagerHooks(cancel_pending_hitl=await_root_exit))
+    release.set()
+    await trip
+    assert await completion == "FAILED"
+    assert session.failure_counter == 1  # The aggregate root failure is not another failure.
+    root_failed = [event for event in bus.events
+                   if event.type == EventType.TASK_FAILED and event.task_id == root.id]
+    assert len(root_failed) == 1
+    assert _types(bus).index(EventType.FAILURE_THRESHOLD_HIT) < bus.events.index(root_failed[0])
 
 
 async def test_root_already_terminal_skips_finalization() -> None:

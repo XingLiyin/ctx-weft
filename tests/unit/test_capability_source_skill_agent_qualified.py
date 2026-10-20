@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from ctx_weft.core.assembler.sources.capability import CapabilitySource
 from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.protocols.capability import AgentCapability, SkillCapability
+from tests.assembler_testkit import compile_prompt, prompt_request
 
 
 async def _blocks(cap):
@@ -34,25 +35,35 @@ async def _blocks_for(cap, purpose):
     return [b async for b in CapabilitySource().fetch(request, deps=None)]
 
 
-async def test_skill_filtered_out_for_non_act_purposes() -> None:
-    # skill defaults to purposes=["act"] → delegation only happens in act
+async def test_source_returns_skill_raw_for_every_purpose() -> None:
+    """Source 只收集；purpose 过滤属于最终编译。"""
     cap = SkillCapability(id="local_skill:pdf-tools", name="pdf-tools", description="d")
-    assert await _blocks_for(cap, "act")  # present in act
+    assert await _blocks_for(cap, "act")
     for purpose in ("observe", "compact", "recognize_intent"):
-        assert await _blocks_for(cap, purpose) == [], f"skill leaked into {purpose}"
+        block = (await _blocks_for(cap, purpose))[0]
+        assert block.value is cap
 
 
-async def test_agent_filtered_out_for_non_act_purposes() -> None:
+async def test_source_returns_agent_raw_for_every_purpose() -> None:
     cap = AgentCapability(id="agent:planner", name="planner", template_name="planner",
                           description="d")
-    assert await _blocks_for(cap, "act")  # present in act
+    assert await _blocks_for(cap, "act")
     for purpose in ("observe", "compact", "recognize_intent"):
-        assert await _blocks_for(cap, purpose) == [], f"agent leaked into {purpose}"
+        block = (await _blocks_for(cap, purpose))[0]
+        assert block.value is cap
 
 
-async def test_skill_with_explicit_purpose_honored() -> None:
-    # explicit purposes override the act-only default
+async def test_jinja_compile_honors_capability_purposes() -> None:
     cap = SkillCapability(id="local_skill:reviewer", name="reviewer", description="d",
                           purposes=["act", "observe"])
-    assert await _blocks_for(cap, "observe")          # shown where declared
-    assert await _blocks_for(cap, "compact") == []    # not elsewhere
+    blocks = await _blocks_for(cap, "compact")
+
+    observe = compile_prompt(blocks, prompt_request(purpose="observe"))
+    compact = compile_prompt(blocks, prompt_request(purpose="compact"))
+    observe_text = observe.system + "\n" + "\n".join(
+        str(message.content) for message in observe.messages)
+    compact_text = compact.system + "\n" + "\n".join(
+        str(message.content) for message in compact.messages)
+
+    assert "local_skill__reviewer" in observe_text
+    assert "local_skill__reviewer" not in compact_text

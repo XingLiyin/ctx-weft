@@ -155,7 +155,8 @@ def _new_params(prompt: str = "hi") -> SessionStartParams:
 
 async def _wait_for_run_finish(handle, timeout: float = 5.0) -> None:
     """Wait for the handle's run to emit RunFinished (with a short timeout)."""
-    await handle.wait_for_finish(timeout=timeout)
+    from tests.runtime_helpers import wait_for_park
+    await wait_for_park(handle, timeout=timeout)
 
 
 async def _wait_for_task_finished(
@@ -259,6 +260,7 @@ async def test_outage_then_resume_completes():
     runtime._event_bus.emit = _spy
 
     # ── Initial run (uses start_session so SESSION_CREATED is persisted) ──────
+    await runtime.initialize()
     handle = await runtime.start_session(_new_params())
     session_id = handle.session_id
 
@@ -304,6 +306,7 @@ async def test_outage_then_resume_completes():
 
     # ── Resume with healthy LLM ────────────────────────────────────────────────
     # recover_agent() returns None; drain runs as asyncio background task.
+    await runtime.initialize()
     result = await runtime.recover_agent(root_agent_id)
     assert result is None  # confirm the API contract (returns None)
 
@@ -363,6 +366,7 @@ async def test_idempotent_outage_resume_completes():
     runtime._event_bus.emit = _spy
 
     # ── First run → outage → SUSPENDED ────────────────────────────────────────
+    await runtime.initialize()
     handle = await runtime.start_session(_new_params())
     session_id = handle.session_id
 
@@ -397,6 +401,7 @@ async def test_idempotent_outage_resume_completes():
 
     # ── First resume → second outage → still SUSPENDED ────────────────────────
     seen.clear()
+    await runtime.initialize()
     await runtime.recover_agent(root_agent_id)
 
     # Wait until the second outage fires: poll the spy list for the new
@@ -431,6 +436,7 @@ async def test_idempotent_outage_resume_completes():
 
     # ── Second resume → healthy LLM → FINISHED ────────────────────────────────
     seen.clear()
+    await runtime.initialize()
     await runtime.recover_agent(root_agent_id)
     await _wait_for_task_finished(runtime, session_id)
 

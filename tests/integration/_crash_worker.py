@@ -149,6 +149,7 @@ async def ot05_worker(workdir: Path) -> dict:
         rt = make_runtime(llm=llm, agent_provider=resolver, event_store=store)
         rt.providers.register_capability(tool)
         rt.providers.register_memory(memory)
+        await rt.initialize()
         handle = await rt.start_session(SessionStartParams.create(
             template_id="agent:tpl_verify", user_prompt="do the effect",
             context_limit=100_000))
@@ -173,6 +174,7 @@ async def ot05_recover(workdir: Path) -> dict:
         rt.providers.register_capability(tool)
         rt.providers.register_memory(memory)
         try:
+            await rt.initialize()
             await rt.recover_agent(ids["agent_id"])
         except Exception:
             pass  # 恢复期异常不影响判据：O-T05 只看外部副作用计数是否仍为 1

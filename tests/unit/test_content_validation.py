@@ -153,6 +153,7 @@ async def test_run_single_task_rejects_image_before_persisting_anything_without_
     )
 
     with pytest.raises(BlobStoreRequiredError):
+        await runtime.initialize()
         await runtime.run_single_task(
             template_id="agent:tpl_echo",
             user_prompt=[TextPart(text="看这张图"), ImagePart(data=_PNG, media_type="image/png")],
@@ -190,6 +191,7 @@ async def test_start_session_plain_text_does_not_eagerly_resolve_llm():
     runtime = make_runtime(agent_provider=templates)
     runtime.providers.register_memory(InMemoryMemoryProvider())
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -229,6 +231,7 @@ async def test_start_session_plain_text_resolver_never_called():
 
     runtime._resolve_llm = _counting_resolve
 
+    await runtime.initialize()
     await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -274,6 +277,7 @@ async def test_start_session_dict_text_does_not_eagerly_resolve_llm():
     runtime._resolve_llm = _counting_resolve
 
     with pytest.raises(InvalidContentError):
+        await runtime.initialize()
         await runtime.start_session(
             SessionStartParams.create(
                 template_id="agent:tpl_echo",

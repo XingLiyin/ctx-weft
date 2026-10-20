@@ -22,15 +22,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.assembler.assembler import ContextBlock
-from ctx_weft.core.assembler.budget import PriorityBudgetStrategy
-from ctx_weft.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.builder import PromptBuilder
 from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.core.utils.content import content_from_jsonable, content_to_jsonable
 from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.utils.content import _IMAGE_BYTES_PER_TOKEN, _IMAGE_PART_TOKENS, image_byte_size, image_part_count, image_tokens
-from ctx_weft.core.utils.estimate import effective_limit, estimate_tokens
+from ctx_weft.core.utils.estimate import effective_limit, estimate_content_tokens, estimate_tokens
 from ctx_weft.protocols import (
     ImagePart,
     MemoryAddress,
@@ -41,8 +39,10 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     TextPart,
+    LLMMessage,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import compile_prompt, prompt_request
 
 # 仓内典型预算（见 core/state/models.py:132、core/control/types.py:32-33，
 # 以及 protocols/template.py:79 的 compact_token_ratio）。
@@ -251,16 +251,20 @@ def _record(rid: str, content, ts: datetime) -> MemoryEvent:
 
 def _assembler_request():
     task = SimpleNamespace(user_prompt_in_memory=True, process_report=None,
-                           title="T", description="D", user_prompt="look", id="t1")
+                           title="T", description="D", user_prompt="look", id="t1",
+                           outputs=None, unattended=False)
     template = SimpleNamespace(identity={"act": SimpleNamespace(text="ACT-SOUL", style=None)})
-    return SimpleNamespace(purpose="act", task=task, template=template, extra={},
-                           token_counter=estimate_tokens)
+    return prompt_request(task_id="t1", task=task, template=template,
+                          session=SimpleNamespace(
+                              context_limit=_CONTEXT_LIMIT,
+                              reserved_output_tokens=_RESERVE,
+                          ),
+                          token_counter=estimate_tokens)
 
 
 def _blocks_from(records, request):
     return [
-        record_to_history_block(r, "task_conversation", i,
-                                request=request, current_task_id="t1")
+        record_to_history_block(r, "task_conversation", i)
         for i, r in enumerate(records)
     ]
 
@@ -303,7 +307,9 @@ async def test_self_healing_chain_big_images_trigger_compact_then_fold_drops_the
     before = await memory.load_view(addr, MemoryScope.TASK, ctxp)
     assert len(before) == 4
     blocks_before = _blocks_from(before, request)
-    total_before = sum(b.token_estimate for b in blocks_before)
+    total_before = sum(
+        estimate_content_tokens(block.value.content, count=request.token_counter)
+        for block in blocks_before)
 
     # ① 估算真的把字节压力算进去了，且越过了 compact 触发比。
     assert await _should_compact(total_before), \
@@ -315,7 +321,7 @@ async def test_self_healing_chain_big_images_trigger_compact_then_fold_drops_the
     assert not await _should_compact(legacy_total), \
         f"旧口径 {legacy_total} token 不该触发 compact（这就是缺陷）"
 
-    prompt_before = await DefaultComposer().compose(blocks_before, request)
+    prompt_before = compile_prompt(blocks_before, request)
     assert _images_in(prompt_before) == 4
 
     # ③ fold 掉最老的三条（compact 的既有动作），不写补偿摘要以隔离变量。
@@ -324,10 +330,12 @@ async def test_self_healing_chain_big_images_trigger_compact_then_fold_drops_the
     after = await memory.load_view(addr, MemoryScope.TASK, ctxp)
     assert len(after) == 1, "fold 后 load_view 只应返回幸存的一条"
     blocks_after = _blocks_from(after, request)
-    total_after = sum(b.token_estimate for b in blocks_after)
+    total_after = sum(
+        estimate_content_tokens(block.value.content, count=request.token_counter)
+        for block in blocks_after)
 
     # ④ 链条闭合：装配携带的图片数下降，估算回落到触发比以下。
-    prompt_after = await DefaultComposer().compose(blocks_after, request)
+    prompt_after = compile_prompt(blocks_after, request)
     assert _images_in(prompt_after) == 1
     assert total_after < total_before
     assert not await _should_compact(total_after)
@@ -357,22 +365,18 @@ async def test_floor_of_big_images_overflows_with_correct_image_count():
         role="user",
         metadata={"task_id": "t1", "type": "user_prompt"},
     )
-    request = _assembler_request()
-    block = record_to_history_block(record, "task_conversation", 0,
-                                    request=request, current_task_id="t1")
-    pinned = ContextBlock(
-        id=block.id, source=block.source, kind=block.kind, target=block.target,
-        content=block.content, priority=6, token_estimate=block.token_estimate,
-        metadata={**block.metadata, "type": "user_prompt", "task_id": "t1",
-                  "timestamp": "", "role": "user"},
+    assert estimate_content_tokens(record.content, count=estimate_tokens) > _EFF
+    builder = PromptBuilder(estimate_tokens)
+    builder.message(
+        LLMMessage(role="user", content=record.content),
+        ref="current", priority=0, required=True,
     )
-    assert pinned.token_estimate > _EFF, "5 张满额图应当自己就顶穿地板"
-
-    req = SimpleNamespace(task=SimpleNamespace(id="t1"),
-                          session=SimpleNamespace(context_limit=_CONTEXT_LIMIT,
-                                                  reserved_output_tokens=_RESERVE))
     with pytest.raises(ContextOverflowError) as ei:
-        await PriorityBudgetStrategy().apply([pinned], token_limit=_EFF, request=req)
+        builder.build(
+            _EFF,
+            context_limit=_CONTEXT_LIMIT,
+            reserved_output_tokens=_RESERVE,
+        )
     assert ei.value.image_count == n
     assert ei.value.effective_limit == _EFF
     assert ei.value.context_limit == _CONTEXT_LIMIT

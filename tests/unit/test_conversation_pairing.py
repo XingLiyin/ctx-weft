@@ -13,8 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.assembler.assembler import ContextBlock
-from ctx_weft.core.assembler.budget import PriorityBudgetStrategy
-from ctx_weft.core.assembler.composer import DefaultComposer
+from ctx_weft.core.assembler.builder import PromptBuilder
 from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.core.loop.llm_gateway import legalize_messages, reorder_tool_results_after_calls
 from ctx_weft.core.loop.steps.act import _ingest_assistant_turn
@@ -39,6 +38,7 @@ from ctx_weft.protocols import (
 from ctx_weft.providers.llm.anthropic import _serialize_messages as _anthropic_serialize
 from ctx_weft.providers.llm.openai import _serialize_messages as _openai_serialize
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import history_messages
 
 # ── 铸造原语 ──────────────────────────────────────────────────────────────────
 
@@ -197,10 +197,10 @@ def _pairing_records(raw_id: str = "call_1"):
 def _to_messages(records):
     req = SimpleNamespace(token_counter=lambda t: max(1, len(t) // 3))
     blocks = [
-        record_to_history_block(r, "agent_recall", i, request=req, current_task_id="t1")
+        record_to_history_block(r, "agent_recall", i)
         for i, r in enumerate(records)
     ]
-    return DefaultComposer()._history_to_messages_with_sources(blocks)
+    return [(message, None, None) for message in history_messages(blocks, task_id="t1")]
 
 
 def test_rebuild_pairs_each_result_to_its_true_owner():
@@ -300,11 +300,23 @@ def _dup_raw_blocks(task_a: str, task_b: str):
 
 
 def test_coalesce_groups_by_true_owner_across_tasks():
-    blocks = _dup_raw_blocks("tA", "tB")
-    units = PriorityBudgetStrategy._coalesce_tool_pairs(blocks)
-    by_first = {u[0].id: sorted(b.id for b in u) for u in units}
-    assert by_first["a1"] == ["a1", "r1"]  # 旧 result 不归到新调用下
-    assert by_first["a2"] == ["a2", "r2"]
+    builder = PromptBuilder(len)
+    for suffix in ("1", "2"):
+        call_id = f"call-{suffix}"
+        builder.message(
+            LLMMessage(role="assistant", content="", tool_calls=[{
+                "id": call_id, "name": "tool", "input": {},
+            }]),
+            ref=f"a{suffix}", priority=6,
+        )
+        builder.message(
+            LLMMessage(role="tool", content=f"result-{suffix}", tool_call_id=call_id),
+            ref=f"r{suffix}", priority=6,
+        )
+    groups = {operation.ref: operation.group for operation in builder._operations}
+    assert groups["a1"] == groups["r1"]
+    assert groups["a2"] == groups["r2"]
+    assert groups["a1"] != groups["a2"]
 
 
 def _req(task_id="cur"):
@@ -316,15 +328,22 @@ def _req(task_id="cur"):
 
 @pytest.mark.asyncio
 async def test_pruning_drops_call_and_result_as_unit():
-    """超限裁剪丢 a1 单元 → r1 同批消失；幸存面无孤立 result。"""
-    blocks = _dup_raw_blocks("tA", "tB")
-    kept = await PriorityBudgetStrategy().apply(blocks, token_limit=200, request=_req())
-    assert {b.id for b in kept} == {"a2", "r2"}  # 最老单元（a1+r1）整体丢弃
-    kept_tools = {b.metadata.get("tool_call_id") for b in kept if b.metadata.get("role") == "tool"}
-    kept_calls = {
-        tc["id"] for b in kept if b.metadata.get("tool_calls") for tc in b.metadata["tool_calls"]
-    }
-    assert kept_tools == kept_calls  # 无孤立 result / 无悬挂 call
+    builder = PromptBuilder(len)
+    for suffix, timestamp in (("1", "2026-01-01"), ("2", "2026-01-02")):
+        call_id = f"call-{suffix}"
+        builder.message(
+            LLMMessage(role="assistant", content="", tool_calls=[{
+                "id": call_id, "name": "tool", "input": {},
+            }]), ref=f"a{suffix}", priority=6, timestamp=timestamp)
+        builder.message(
+            LLMMessage(role="tool", content="x" * 20, tool_call_id=call_id),
+            ref=f"r{suffix}", priority=6, timestamp=timestamp)
+    group_tokens = {}
+    for operation in builder._operations:
+        group_tokens[operation.group] = group_tokens.get(operation.group, 0) + operation.token_count
+    prompt = builder.build(max(group_tokens.values()))
+    assert builder.refs == ("a2", "r2")
+    assert [message.role for message in prompt.messages] == ["assistant", "tool"]
 
 
 # ── 存量裸 id：行为不回退 + 歧义留痕 ──────────────────────────────────────────
@@ -428,10 +447,10 @@ async def test_rebuild_after_fold_keeps_pairing():
     view = await mem.load_view(state.scope, MemoryScope.TASK, ctx.provider_ctx)
     req = SimpleNamespace(token_counter=lambda t: max(1, len(t) // 3))
     blocks = [
-        record_to_history_block(r, "agent_recall", i, request=req, current_task_id="t1")
+        record_to_history_block(r, "agent_recall", i)
         for i, r in enumerate(view)
     ]
-    msgs = [m for m, *_ in DefaultComposer()._history_to_messages_with_sources(blocks)]
+    msgs = history_messages(blocks, task_id="t1")
     out = legalize_messages(msgs)
 
     # 幸存轮配对完整：assistant(tool_call) 紧邻其唯一 result，无孤立/重复/悬挂。

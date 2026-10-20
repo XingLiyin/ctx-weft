@@ -62,11 +62,13 @@ async def test_staged_records_sort_after_everything_already_in_memory() -> None:
     """L7：暂存记录的排序键要和落盘后可比——取视图里的最大序号往后排。"""
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
+    await rt.initialize()
     await rt.reply_to_hitl(
         __import__("ctx_weft.protocols.hitl", fromlist=["HitlReply"]).HitlReply(
             hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1"))
@@ -96,8 +98,8 @@ async def test_staged_records_sort_after_everything_already_in_memory() -> None:
     blocks = [b async for b in AgentRecallSource().fetch(request, deps)]
     # 按记录 id 精确挑出暂存那些块：暂存里还有一条 TOOL_AUDIT，它不进 prompt、不产块。
     staged_ids = {e.id for e in staged}
-    staged_seq = [b.metadata["seq_no"] for b in blocks
-                  if b.metadata.get("memory_event_id") in staged_ids]
+    staged_seq = [b.metadata["sequence"] for b in blocks
+                  if b.value.id in staged_ids]
     assert staged_seq, "暂存的对话记录必须被叠加进历史"
     memory_seq = [r.metadata.get("seq_no", 0) for r in view if r.metadata]
     assert min(staged_seq) > max(memory_seq or [0]), (
@@ -112,10 +114,12 @@ async def test_compact_refuses_while_a_round_is_open() -> None:
     """
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid, aid = handle.session_id, handle.agent_id
     q1 = await _next_question(rt, sid)
+    await rt.initialize()
     assert await rt.cancel_session(sid) is True
     await _poll(lambda: rt.session_is_quiescent(sid) or None, timeout=8.0)
     tm = rt._task_managers[sid]
@@ -123,6 +127,7 @@ async def test_compact_refuses_while_a_round_is_open() -> None:
     # ① 开着的窗
     tm.begin_round(q1.task_id, owns_task=False)
     with pytest.raises(SessionBusyError):
+        await rt.initialize()
         await rt.compact_agent(aid)
     tm.drop_round_buffer(q1.task_id)
 
@@ -133,6 +138,7 @@ async def test_compact_refuses_while_a_round_is_open() -> None:
         stage="tool", created_at=TS)
     rt.hitl_registry.claim(req.id, HitlDecision(outcome="accepted", message="later"))
     with pytest.raises(SessionBusyError):
+        await rt.initialize()
         await rt.compact_agent(aid)
 
 
@@ -144,6 +150,7 @@ async def test_only_the_same_tasks_bubble_follows_the_round() -> None:
     """
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_BEFORE_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id

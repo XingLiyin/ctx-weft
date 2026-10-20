@@ -54,15 +54,13 @@ async def test_pause_session_without_tm_cancels_all_runs():
     rt = _runtime()
     a = rt._register_run_tokens("s1", "t1")
     b = rt._register_run_tokens("s1", "t2")
+    await rt.initialize()
     assert await rt.pause_session("s1") is True
     assert a.cancel.is_cancelled and b.cancel.is_cancelled
 
 
 async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
-    """2026-09-04 spec §7.2 起，在途 run 的取消经 `cancel_agent`（对 `running` 目标
-    内部调 `_cancel_run_token`）覆盖，runtime 不再自己遍历 `_run_tokens`——因此这里
-    要有一个 `running` 且 `current_task_id="t1"` 的 agent record，`cancel_agent` 才会
-    找到并取消这个 run token（与 `_plant_live_task` 同一手法）。"""
+    """Session stop signals precede round cleanup and queue cancellation."""
     rt = _runtime()
     tokens = rt._register_run_tokens("s1", "t1")
     _plant(rt, "ag1", None, session_id="s1", status="running")
@@ -70,13 +68,27 @@ async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
     drained = {"called": False}
 
     class _TM:
+        def begin_cancel(self):
+            assert not tokens.cancel.is_cancelled
+
+        async def wait_for_round_dispatches(self):
+            assert tokens.cancel.is_cancelled
+
+        def current_task_for_agent(self, agent_id, fallback=None):
+            return None
+
         def is_done(self):
             return False          # active drain in flight → _on_done reclaims after cancel completes
 
         async def cancel_all(self, *, reason=""):
             drained["called"] = True
 
+        async def cancel_session_agent_tasks(self, agent_id, reason, *, before_cancel):
+            assert tokens.cancel.is_cancelled
+            await before_cancel()
+
     rt._task_managers["s1"] = _TM()
+    await rt.initialize()
     assert await rt.cancel_session("s1") is True
     assert tokens.cancel.is_cancelled is True
     assert drained["called"] is True
@@ -84,7 +96,9 @@ async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
 
 async def test_unknown_session_returns_false():
     rt = _runtime()
+    await rt.initialize()
     assert await rt.pause_session("nope") is False
+    await rt.initialize()
     assert await rt.cancel_session("nope") is False
 
 

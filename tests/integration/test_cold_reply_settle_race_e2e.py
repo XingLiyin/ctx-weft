@@ -79,6 +79,7 @@ async def test_reply_during_the_settle_window_still_wakes_the_task(gated_step) -
 
     with mock.patch.object(TaskManager, gated_step,
                            gate.wrap(getattr(TaskManager, gated_step))):
+        await rt.initialize()
         handle = await rt.start_session(SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
         sid = handle.session_id
@@ -95,6 +96,7 @@ async def test_reply_during_the_settle_window_still_wakes_the_task(gated_step) -
             # run 已经 park（问题已开出），但还卡在收尾序列里 —— 正是那道竞态窗口。
             await asyncio.wait_for(gate.entered.wait(), timeout=5.0)
             q1 = await _next_question(rt, sid)
+            await rt.initialize()
             view = await rt.reply_to_hitl(HitlReply(
                 hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="ANSWER"))
             assert view is not None
@@ -149,6 +151,7 @@ async def test_parking_without_an_answer_is_not_requeued() -> None:
     """反例：没人应答的正常冷 park，收尾自检不得把它重排起来（否则判据退化成无条件重排）。"""
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), _finish_call()])
     rt = _runtime(llm)
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id

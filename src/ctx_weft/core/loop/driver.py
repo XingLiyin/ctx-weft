@@ -10,7 +10,7 @@ import copy
 import dataclasses
 import logging
 from abc import abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -72,30 +72,90 @@ class ExecutionRegistry:
     """Session-owned background tasks; latest indices never replace the full set."""
     tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     latest: dict[tuple[str, str], str] = field(default_factory=dict)
+    observe_runs: dict[str, str] = field(default_factory=dict)
+    recovering_observe_tasks: set[str] = field(default_factory=set)
+    metadata_stops: dict[str, tuple[str, Callable[[], None]]] = field(default_factory=dict)
+    metadata_commits: dict[str, list[Event]] = field(default_factory=dict)
     _guards: dict[tuple[str, str], tuple[asyncio.Lock, int]] = field(default_factory=dict)
 
-    def register(self, run_id: str, task_id: str, step: str, task: asyncio.Task) -> None:
+    _finish_waiters: dict[str, set[asyncio.Event]] = field(default_factory=dict)
+    @asynccontextmanager
+    async def finish_notification(self, task_id):
+        """Register before reading durable slots, so readiness cannot be missed."""
+        event = asyncio.Event()
+        waiters = self._finish_waiters.setdefault(task_id, set())
+        waiters.add(event)
+        try:
+            yield event
+        finally:
+            waiters.discard(event)
+            if not waiters:
+                self._finish_waiters.pop(task_id, None)
+
+    def notify_finish(self, task_id):
+        for event in self._finish_waiters.get(task_id, ()):
+            event.set()
+
+    def register(self, run_id: str, task_id: str, step: str, task: asyncio.Task,
+                 *, stop_metadata: Callable[[], None] | None = None, observe_id: str = "") -> None:
         key = (task_id, step)
         self.tasks[run_id] = task
         self.latest[key] = run_id
+        if observe_id:
+            self.observe_runs[observe_id] = run_id
+        if stop_metadata is not None:
+            self.metadata_stops[run_id] = (task_id, stop_metadata)
 
         def complete(done):
             self.tasks.pop(run_id, None)
+            self.metadata_stops.pop(run_id, None)
             if self.latest.get(key) == run_id:
                 self.latest.pop(key, None)
+            if observe_id and self.observe_runs.get(observe_id) == run_id:
+                self.observe_runs.pop(observe_id, None)
             if not done.cancelled():
                 done.exception()
         task.add_done_callback(complete)
 
+    def stop_metadata(self, task_id: str | None = None) -> None:
+        """Signal live metadata producers even after their actor token was deregistered."""
+        for owner, stop in list(self.metadata_stops.values()):
+            if task_id is None or owner == task_id:
+                stop()
+
+    async def emit_metadata_event(self, bus, event: Event) -> None:
+        """Retain original completion envelopes until their commit is confirmed."""
+        self.metadata_commits.setdefault(event.run_id, []).append(event)
+        await self.confirm_metadata_commits(bus, event.run_id)
+
+    async def confirm_metadata_commits(self, bus, run_id=None) -> None:
+        for rid in [run_id] if run_id is not None else list(self.metadata_commits):
+            pending = self.metadata_commits.get(rid, [])
+            while pending:
+                await bus.emit(pending[0])
+                pending.pop(0)
+            self.metadata_commits.pop(rid, None)
+
+    async def finish_metadata(self, bus) -> None:
+        """Join only stopped metadata producers, then repair uncertain receipts."""
+        tasks = [self.tasks[rid] for rid in list(self.metadata_stops) if rid in self.tasks]
+        await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+        await self.confirm_metadata_commits(bus)
+
     def pending_run_id(self, task_id: str, step: str = "observe") -> str | None:
         """Read the latest in-flight run without waiting.
 
-        TurnHandle uses this identity to match TaskRecapDone on its existing
+        TurnHandle uses this identity to match ObserveApplied on its existing
         event subscription, rather than waiting for an arbitrary earlier run.
         """
         run_id = self.latest.get((task_id, step))
         task = self.tasks.get(run_id)
         return run_id if task is not None and not task.done() else None
+
+    def observe_is_live(self, observe_id: str) -> bool:
+        """An older report can still run after the task's latest report has ended."""
+        task = self.tasks.get(self.observe_runs.get(observe_id))
+        return task is not None and not task.done()
 
     async def wait(self, task_id: str, step: str = "observe") -> None:
         """Wait for the current run without propagating waiter cancellation to it."""
@@ -356,16 +416,21 @@ async def _persist_user_prompt(state, ctx) -> None:
     `user_prompt_in_memory` 在暂存时就置真——它回答的是「装配时能不能从历史里找到这条
     提问」，而暂存的记录装配时看得见；窗口被丢弃时由 `TaskManager.discard_round` 还原。
     """
-    task = state.task
+    await persist_task_prompt(state.task, state.scope, ctx.memory, ctx.provider_ctx,
+                              task_manager=getattr(ctx, "task_manager", None))
+
+
+async def persist_task_prompt(task, scope, memory, provider_ctx, *, task_manager=None) -> None:
+    """Share the stable prompt record between execution and committed-input recovery."""
     if not task.user_prompt or task.user_prompt_in_memory:
         return
     from ctx_weft.core.utils.clock import now_utc
     await ingest_or_stage(
-        ctx.memory,
+        memory,
         MemoryEvent(
             id=task_prompt_record_id(task.id, task.user_prompt),
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
-            address=state.scope,
+            address=scope,
             # 原样落库（含多模态）：这是图片在改造前第一次消失的地方。
             # 装配期是否拍扁由框架决定（Phase 2），落库必须无损。
             content=task.user_prompt,
@@ -373,8 +438,8 @@ async def _persist_user_prompt(state, ctx) -> None:
             role="user",
             metadata={"task_id": task.id},
         ),
-        ctx.provider_ctx,
-        task_manager=getattr(ctx, "task_manager", None),
+        provider_ctx,
+        task_manager=task_manager,
         task_id=task.id,
     )
     task.user_prompt_in_memory = True
@@ -442,6 +507,19 @@ class StepDriver:
         local_ctx.steps = self
         local_ctx.execution = StepExecution(options=dict(options or {}))
         state.origin = _STEP_ORIGIN.get(name, EventOrigin.LOOP_DRIVER)
+        if name == "observe":
+            from ctx_weft.core.loop.steps.act import _interrupt_checkpoint
+            await _interrupt_checkpoint(state, local_ctx)
+            from ctx_weft.core.loop.steps.observe import prepare_foreground_observe
+            boundary = local_ctx.execution.options.get("boundary") or state.act_exit_reason or "normal"
+            result = await prepare_foreground_observe(state, local_ctx, boundary,
+                local_ctx.execution.options.get("judge_task", True))
+            if result is not None:
+                await self.start_durable("observe", state, local_ctx, options={
+                    **local_ctx.execution.options, "boundary": local_ctx.execution.options["report_boundary"],
+                    "judge_task": False})
+                outcome = StepOutcome("finalize", state_patch={"observation": result, "verdict": result.verdict})
+                return state.apply_patch(outcome.state_patch), outcome
         return await self._execute_step(step, state, local_ctx, foreground=True)
 
     async def _execute_step(self, step, state, ctx, *, foreground):
@@ -454,6 +532,8 @@ class StepDriver:
             if not foreground and outcome.next_step is not None:
                 raise ValueError("A background step cannot advance the foreground chain")
         except Exception as exc:
+            if step.name == "finalize" or ctx.execution.options.get("execution_mode") == "foreground":
+                self.executions.notify_finish(state.task.id)
             if foreground:
                 await ctx.event_bus.emit(make_event(
                     state, EventType.STEP_FAILED,
@@ -462,14 +542,27 @@ class StepDriver:
             raise
         # Keep the existing patch-before-events order and the chain's state ownership.
         state = state.apply_patch(outcome.state_patch)
+        from ctx_weft.core.loop.steps.observe import emit_effect
         for event in outcome.events:
-            await ctx.event_bus.emit(event)
+            await emit_effect(state, ctx, event)
         if foreground:
             await ctx.event_bus.emit(make_event(
                 state, EventType.STEP_COMPLETED,
                 {"step_name": step.name, "next_step": outcome.next_step},
                 origin=EventOrigin.LOOP_DRIVER))
         return state, outcome
+
+    async def start_durable(self, name, state, ctx, *, options=None) -> asyncio.Task:
+        """Commit observe intent before creating an ephemeral background task."""
+        options = dict(options or {})
+        tm = getattr(ctx, "task_manager", None)
+        if (name == "observe" and not options.get("observe_id")
+                and callable(getattr(tm, "commit_round", None))):
+            await tm.commit_round(state.task.id)
+        if name == "observe":
+            from ctx_weft.core.loop.steps.observe import request_background_observe
+            await request_background_observe(state, ctx, options)
+        return self.start(name, state, ctx, options=options)
 
     def start(self, name, state, ctx, *, options=None) -> asyncio.Task:
         """Launch a snapshot with its own run id, sequence and context.
@@ -493,10 +586,29 @@ class StepDriver:
         local_ctx = copy.copy(ctx)
         local_ctx.steps = self
         local_ctx.run_phase = RunPhase()
+        segment_end_at = (options or {}).get("segment_end_at")
         local_ctx.execution = StepExecution(
-            ExecutionMode.BACKGROUND, dict(options or {}), now_utc())
+            ExecutionMode.BACKGROUND, dict(options or {}),
+            datetime.fromisoformat(segment_end_at) if segment_end_at else now_utc())
+        cancel_token = getattr(local_ctx, "cancel_token", None)
+        if name == "observe":
+            # A report owns its own lifetime. Actor cancellation must not abort
+            # a later recap retry or accidentally park the background producer.
+            local_ctx.cancel_token = None
+            local_ctx.pause_token = None
+        if name == "recognize_intent":
+            from ctx_weft.core.control.tokens import CancelToken
+            # Metadata can outlive the actor. Its stop must not cancel an older
+            # observation that happens to share the actor's original context.
+            local_ctx.cancel_token = CancelToken()
+            if cancel_token is not None and cancel_token.is_cancelled:
+                local_ctx.cancel_token.cancel()
+            cancel_token = local_ctx.cancel_token
         task = asyncio.create_task(self._run_background(step, snapshot, local_ctx))
-        self.executions.register(snapshot.run_id, state.task.id, name, task)
+        self.executions.register(snapshot.run_id, state.task.id, name, task,
+            observe_id=(options or {}).get("observe_id", "") if name == "observe" else "",
+            stop_metadata=(cancel_token.cancel
+                           if name == "recognize_intent" and cancel_token is not None else None))
         tm = getattr(ctx, "task_manager", None)
         if tm is not None and hasattr(tm, "track_background"):
             tm.track_background(task)
@@ -513,16 +625,17 @@ class StepDriver:
         cancelled = False
         try:
             state, outcome = await self._execute_step(step, state, ctx, foreground=False)
-            return outcome
         except asyncio.CancelledError:
             cancelled = True
+            if ctx.execution.options.get("execution_mode") == "foreground":
+                self.executions.notify_finish(state.task.id)
             raise
         except Exception as exc:
             error = exc
             logger.exception("Background step %s failed", step.name)
             raise
         finally:
-            await ctx.event_bus.emit(make_event(state, EventType.RUN_FINISHED, {
+            finished = make_event(state, EventType.RUN_FINISHED, {
                 "outcome": (RunOutcomeKind.CANCELED.value if cancelled else
                             RunOutcomeKind.INTERRUPTED.value if error else
                             RunOutcomeKind.COMPLETED.value),
@@ -530,7 +643,13 @@ class StepDriver:
                 "total_events": state.sequence_counter, "total_turns": len(state.transcript),
                 "error": str(error) if error else None,
                 "error_type": type(error).__name__ if error else None,
-            }))
+            })
+            if step.name == "recognize_intent":
+                await self.executions.emit_metadata_event(ctx.event_bus, finished)
+            else:
+                await ctx.event_bus.emit(finished)
+        return outcome
+
 
 
     async def _ensure_blackboard_subscriptions(self, state: LoopState, ctx: LoopContext) -> None:
@@ -577,16 +696,21 @@ class StepDriver:
 
         next_step_name: str | None = self.initial_step
 
-        while next_step_name is not None:
-            # 软打断（interrupt）由 act 的 checkpoint 负责 park，这里不硬取消（否则 step 间命中会误终态）；
-            # 仅硬取消（cancel 模式）在 step 边界抛 CancelledError。
-            # 曾经 CancelToken 上挂过 mode 字段区分 pause/cancel 两种模式，`mode == "cancel"`
-            # 这个条件是那段历史的残留；pause 模式早已退役、CancelToken 现在没有 mode 属性，
-            # getattr 恒回落默认值 "cancel"，条件恒真——删掉，不是漏判。
-            tok = ctx.cancel_token
-            if tok is not None and tok.is_cancelled:
-                tok.raise_if_cancelled()
+        try:
+            while next_step_name is not None:
+                # 软打断（interrupt）由 act 的 checkpoint 负责 park，这里不硬取消（否则 step 间命中会误终态）；
+                # 仅硬取消（cancel 模式）在 step 边界抛 CancelledError。
+                # 曾经 CancelToken 上挂过 mode 字段区分 pause/cancel 两种模式，`mode == "cancel"`
+                # 这个条件是那段历史的残留；pause 模式早已退役、CancelToken 现在没有 mode 属性，
+                # getattr 恒回落默认值 "cancel"，条件恒真——删掉，不是漏判。
+                tok = ctx.cancel_token
+                if tok is not None and tok.is_cancelled:
+                    tok.raise_if_cancelled()
 
-            state, outcome = await self._execute_foreground(next_step_name, state, ctx)
-            yield outcome
-            next_step_name = outcome.next_step
+                state, outcome = await self._execute_foreground(next_step_name, state, ctx)
+                yield outcome
+                next_step_name = outcome.next_step
+        finally:
+            # Wake close observers even when cancellation/failure skips FinalizeStep.
+            # They must re-read durable slots, never infer success from this signal.
+            self.executions.notify_finish(state.task.id)

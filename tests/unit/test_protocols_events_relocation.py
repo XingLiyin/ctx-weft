@@ -245,6 +245,7 @@ async def test_runtime_still_gets_a_working_default_store() -> None:
     )
 
     # 订阅链路仍要能用：emit 之后 event_store 收得到（自动订阅 bus 后异步投递）。
+    await rt.initialize()
     await rt._event_bus.emit(Event(
         id="evt_0001", run_id="run_1", sequence=1, session_id="ses_1",
         type="SessionCreated", timestamp=datetime(2026, 8, 28, tzinfo=timezone.utc),

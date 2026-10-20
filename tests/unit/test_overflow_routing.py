@@ -66,6 +66,7 @@ async def test_overflow_marks_task_suspended_not_failed():
     TaskManager.register_task = _spy_register
     try:
         with pytest.raises(ContextOverflowError):
+            await runtime.initialize()
             await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
     finally:
         TaskManager.register_task = orig_register

@@ -47,14 +47,6 @@ _REPLY = "已把 config 解析拆到 config/parse.py，入口保持 load_config(
 FINISH_TASK = qualify("control:finish_task")
 
 
-@pytest.fixture(autouse=True)
-def _clear_bg_state():
-    fp._close_report.clear()
-    fp._close_synth.clear()
-    yield
-    fp._close_report.clear()
-    fp._close_synth.clear()
-
 
 def _pctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
@@ -225,9 +217,14 @@ async def test_deferred_close_upgrades_to_three_slots_on_bg_report() -> None:
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
-    fp._close_report["t1"] = ("bg 真 recap", "bg 真 summary")
 
     await _close(mem, _task(), scope, has_llm_summary=False)
+    target_scope, call, policy = await fp.find_finish_target(mem, _pctx(), scope, "t1")
+    await fp.replace_finish_report(mem, _pctx(), target_scope, "t1", call,
+                                  "bg 真 recap", "bg 真 summary", policy["outcome"], _task().title,
+                                  final_reply=_REPLY)
+    from ctx_weft.core.loop.steps.finalize import _supersede_final_raw_segment
+    await _supersede_final_raw_segment(mem, scope, _pctx())
 
     turns = await _agent_turns(mem)
     assert len(turns) == 3, f"bg 报告已到 → 升三槽；实得 {[(r.role, r.content[:24]) for r in turns]}"
@@ -240,16 +237,15 @@ async def test_deferred_close_upgrades_to_three_slots_on_bg_report() -> None:
 async def test_bg_replacement_does_not_clobber_the_anchor() -> None:
     """bg 事后重写 finish 对时锚点不能被当成 recap 槽冲掉——它才是挂着 finish_task 的那条，
     按 tool_call_id 找 assistant 会先命中它。"""
-    from ctx_weft.core.loop.task_memory_fold import pop_close_synth, replace_finish_report
+    from ctx_weft.core.loop.task_memory_fold import replace_finish_report
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
     task = _task()
 
     await _close(mem, task, scope, has_llm_summary=True)
-    synth = pop_close_synth("t1")
-    assert synth is not None, "前提：close 登记了 bg 替换槽"
-    tool_call_id, synth_scope, outcome, _raw = synth
+    synth_scope, tool_call_id, policy = await fp.find_finish_target(mem, _pctx(), scope, "t1")
+    outcome = policy["outcome"]
     await replace_finish_report(mem, _pctx(), synth_scope, "t1", tool_call_id,
                                  "bg 真 recap", "bg 真 summary", outcome, task.title,
                                  final_reply=_REPLY)
@@ -266,8 +262,8 @@ async def test_bg_replacement_does_not_clobber_the_anchor() -> None:
 
 async def test_rendered_messages_put_finish_call_on_the_reply() -> None:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextRequest
-    from ctx_weft.core.assembler.composer import DefaultComposer
     from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
+    from tests.assembler_testkit import history_messages
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
@@ -277,7 +273,7 @@ async def test_rendered_messages_put_finish_call_on_the_reply() -> None:
     req = ContextRequest(purpose="act", scope=_sc("t2"), task=None, agent=None, session=None,
                          template=None, bound_capabilities=[])
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
-    msgs = DefaultComposer()._history_to_messages(blocks)
+    msgs = history_messages(blocks, task_id="t2")
 
     tail = msgs[-3:]
     assert [m.role for m in tail] == ["assistant", "assistant", "tool"], \
@@ -297,10 +293,8 @@ async def test_dispatch_ack_points_at_the_final_reply() -> None:
 async def test_closed_capsule_summary_has_no_progress_heading() -> None:
     """`## Progress So Far` 是「当前 task 上一段的复述」标题。闭合后的胶囊由**别的** task
     装配，段摘要不得再冠这个标题（否则新任务会把旧任务的进度读成自己的）。"""
-    from ctx_weft.core.assembler.sources._history import (
-        PROGRESS_SO_FAR_HEADING,
-        record_to_history_block,
-    )
+    from ctx_weft.core.assembler.sources._history import record_to_history_block
+    from tests.assembler_testkit import compile_prompt, prompt_request
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await mem.ingest(_ev(T.USER_PROMPT, scope, "hello", 0, role="user", task_id="t1"), _pctx())
@@ -310,15 +304,16 @@ async def test_closed_capsule_summary_has_no_progress_heading() -> None:
     view = await mem.load_view(scope, MemoryScope.TASK, _pctx(),
                                kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY])
     summary = next(r for r in view if r.role == "assistant")
-    request = SimpleNamespace(scope=scope, token_counter=len)
+    block = record_to_history_block(summary, source="agent_recall", idx=0)
+    assert block.value is summary, "source 必须保持原始记忆，不在这里加标题"
 
-    own = record_to_history_block(summary, source="agent_recall", idx=0,
-                                  request=request, current_task_id="t1")
-    other = record_to_history_block(summary, source="agent_recall", idx=0,
-                                    request=request, current_task_id="t2")
-    assert own.content.startswith(PROGRESS_SO_FAR_HEADING), "当前 task 自己的段摘要仍要冠标题"
-    assert PROGRESS_SO_FAR_HEADING not in other.content, \
-        f"跨 task（闭合胶囊）不得冠 Progress So Far；实得 {other.content!r}"
+    own = compile_prompt([block], prompt_request(task_id="t1"))
+    other = compile_prompt([block], prompt_request(task_id="t2"))
+    own_text = "\n".join(str(message.content) for message in own.messages)
+    other_text = "\n".join(str(message.content) for message in other.messages)
+    assert "## Progress So Far" in own_text, "当前 task 自己的段摘要仍要冠标题"
+    assert "## Progress So Far" not in other_text, \
+        f"跨 task（闭合胶囊）不得冠 Progress So Far；实得 {other_text!r}"
 
 
 # ─── recap 槽的收束尾注 ──────────────────────────────────────────────────────
@@ -358,7 +353,6 @@ async def test_bg_rewritten_recap_keeps_the_note() -> None:
     """bg 事后用真报告重写 recap 槽时，注解不能丢（两处形态共用 build_finish_slots）。"""
     from ctx_weft.core.loop.task_memory_fold import (
         PROCESS_RECAP_NOTE,
-        pop_close_synth,
         replace_finish_report,
     )
     mem = InMemoryMemoryProvider()
@@ -367,7 +361,8 @@ async def test_bg_rewritten_recap_keeps_the_note() -> None:
     task = _task()
 
     await _close(mem, task, scope, has_llm_summary=True)
-    tool_call_id, synth_scope, outcome, _raw = pop_close_synth("t1")
+    synth_scope, tool_call_id, policy = await fp.find_finish_target(mem, _pctx(), scope, "t1")
+    outcome = policy["outcome"]
     await replace_finish_report(mem, _pctx(), synth_scope, "t1", tool_call_id,
                                  "bg 真 recap", "bg 真 summary", outcome, task.title)
 

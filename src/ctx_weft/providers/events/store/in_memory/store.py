@@ -37,6 +37,14 @@ class InMemoryEventStore(EventStore):
         self._batches: dict[str, CommitReceipt] = {}      # batch_id → receipt
         self._event_batch: dict[str, str] = {}            # event.id → batch_id（身份守卫）
 
+    async def list_session_ids(
+        self, *, after_session_id: str | None = None, limit: int = 100,
+    ) -> list[str]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        return sorted(sid for sid in self._stored
+                      if after_session_id is None or sid > after_session_id)[:limit]
+
     # ── 写（有序提交扩展：原子批次）──────────────────────────────────────
 
     async def append_batch(
@@ -107,6 +115,7 @@ class InMemoryEventStore(EventStore):
         include_types: tuple[str, ...] = (),
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
+        related_task_id: str = "",
     ) -> list[StoredEvent]:
         """四个过滤器的语义见协议；`task_id` 的 OR-NULL 安全阀与 SQL 侧逐字同口径。"""
         want = {str(t) for t in include_types}
@@ -124,6 +133,18 @@ class InMemoryEventStore(EventStore):
             # 只排除**明确属于别的 task** 的：无归属（None / 空串）的照样取回。
             if task_id and se.event.task_id and se.event.task_id != task_id:
                 continue
+            if related_task_id:
+                ev, tid = se.event, related_task_id
+                p = ev.payload or {}
+                related = ev.task_id == tid
+                if ev.type == "TaskCreated":
+                    related |= (p.get("task") or {}).get("id") == tid
+                elif ev.type == "TaskReviewing":
+                    related |= ((p.get("successor") or {}).get("task") or {}).get("id") == tid
+                    related |= tid in (p.get("replaced_task_ids") or [])
+                    related |= tid in (p.get("rewired_dependencies") or {})
+                if not related:
+                    continue
             out.append(se)
         return out
 

@@ -12,15 +12,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.hitl.registry import HitlRegistry, PendingHitl
 from ctx_weft.core.hitl.reply_intake import ReplyIntake
-from ctx_weft.core.utils.event import emit_event
 from ctx_weft.core.utils.clock import now_utc
+from ctx_weft.core.utils.event import emit_event, new_event
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.protocols.hitl import (
@@ -35,12 +38,19 @@ from ctx_weft.protocols.hitl import (
 )
 
 if TYPE_CHECKING:
-    from ctx_weft.protocols.events import EventBus
     from ctx_weft.protocols import ContentPart
+    from ctx_weft.protocols.events import Event, EventBus
 
 logger = logging.getLogger(__name__)
 
 _ORIGIN = EventOrigin.HITL_SERVICE
+
+
+@dataclass
+class _ResolutionCommit:
+    decision: HitlDecision
+    event: Event
+    confirming: asyncio.Future[bool] | None = None
 
 
 def delivery_to_payload(delivery: Delivery) -> dict[str, Any]:
@@ -92,6 +102,12 @@ class HitlService:
         self._intake = reply_intake
         self._new_id = id_factory
         self._now = clock
+        # Original unconfirmed opening batches, never exposed as replyable requests.
+        self._pending_opens = {}
+        self._round_resolutions = {}
+        # Original immediate-decision batches. Until confirmed, the request and
+        # its real waiting slot remain pending in the registry.
+        self._pending_resolutions: dict[str, _ResolutionCommit] = {}
 
     async def open(
         self,
@@ -105,6 +121,8 @@ class HitlService:
         unattended: bool,
         invocation_key: str = "",
         tenant_id: str = "default",
+        observe_request: dict | None = None,
+        preceding_events: tuple = (),
     ) -> PendingHitl:
         """登记一个请求并发 `HitlOpened`。同 `(session_id, tool_call_id, stage,
         invocation_key)` 复用既有请求且**不重发事实**。
@@ -131,13 +149,19 @@ class HitlService:
             session_id, tool_call_id, stage, invocation_key=invocation_key or None)
         if existing is not None:
             return existing
-        req = self.registry.open(
+        pending = next((req for req, _ in self._pending_opens.values()
+                        if (req.session_id, req.task_id, req.tool_call_id, req.stage, req.invocation_key)
+                        == (session_id, task_id, tool_call_id, stage, invocation_key)), None)
+        if pending is not None:
+            await self.confirm_opens(session_id, task_id=task_id)
+            return self.registry.get(pending.id)
+        req = HitlRegistry().open(
             ask, hitl_id=self._new_id(), session_id=session_id, task_id=task_id,
             agent_id=agent_id, tool_call_id=tool_call_id, stage=stage, created_at=self._now(),
             invocation_key=invocation_key, tenant_id=tenant_id,
         )
         logger.info("HITL opened [%s]: %s (%s)", req.form, req.id, req.prompt[:80])
-        await self._emit(EventType.HITL_OPENED, req, {
+        event = self._make_event(EventType.HITL_OPENED, req, {
             "hitl_id": req.id,
             "form": req.form,
             "delivery": delivery_to_payload(req.delivery),
@@ -152,8 +176,26 @@ class HitlService:
             "agent_id": req.agent_id,
             "resume_state": req.resume_state,
             "reply_as_result": req.reply_as_result,
+            **({"observe_request": observe_request} if observe_request else {}),
         })
+        self._pending_opens[req.id] = (req, (*preceding_events, event))
+        await self.confirm_opens(session_id, task_id=task_id)
         return req
+
+    async def confirm_opens(self, session_id, *, task_id=None):
+        """Retry the exact opening transaction, then publish its in-memory request."""
+        for rid, (req, events) in list(self._pending_opens.items()):
+            if req.session_id != session_id or task_id is not None and req.task_id != task_id:
+                continue
+            await self._bus.emit_batch(events, on_committed=lambda req=req: self.registry.publish(req))
+            self._pending_opens.pop(rid, None)
+
+    async def confirm_resolutions(self, session_id):
+        """Confirm original immediate decisions during same-process recovery."""
+        for rid, pending in list(self._pending_resolutions.items()):
+            req = self.registry.get(rid)
+            if req is not None and req.session_id == session_id:
+                await self._commit_immediate(req, pending.decision, None)
 
     async def resolve(self, reply: HitlReply, *, defer: bool = False) -> PendingHitl | None:
         """终局一个请求。已终局 / 已有待终局答复 → `None`（幂等 no-op，不重发事实）；
@@ -193,6 +235,16 @@ class HitlService:
         decision = HitlDecision(outcome=HITL_OUTCOME_CANCELLED, message=normalized)
         return await self._commit(req, decision, event_payload, defer=defer)
 
+    async def stage_commits(self, session_id, task_id):
+        """Put existing HitlResolved facts in the same retractable message batch."""
+        for req in self.registry.claim_pending_for_task(session_id, task_id):
+            if req.id not in self._round_resolutions:
+                event = self._make_event(EventType.HITL_RESOLVED, req,
+                    self._resolved_payload(req, req.effective_decision, req.pending_event_payload,
+                                           claimed=req.claimed))
+                self._round_resolutions[req.id] = event
+                await self._bus.emit(event)
+
     async def commit(self, hitl_id: str) -> PendingHitl | None:
         """两阶段的第二阶段：待终局 → 终局 + 发 `HitlResolved`。
 
@@ -200,18 +252,21 @@ class HitlService:
         """
         payload_carrier = self.registry.get(hitl_id)
         event_payload = payload_carrier.pending_event_payload if payload_carrier else None
-        resolved = self.registry.commit_claim(hitl_id, self._now())
+        staged = self._round_resolutions.get(hitl_id)
+        resolved = self.registry.commit_claim(hitl_id, staged.timestamp if staged else self._now())
         if resolved is None:
             return None
         try:
-            await self._emit_resolved(resolved, resolved.decision, event_payload,
-                                      claimed=resolved.claimed)
+            if staged is None:
+                await self._emit_resolved(resolved, resolved.decision, event_payload,
+                                          claimed=resolved.claimed)
         except BaseException:
             # 事实没落盘 → 内存里也不能算终局。退回待终局（答复与载荷原样保留），让
             # 调用方的提交整体失败、稍后重试；不退回的话，内存说「答完了」、日志说「还悬着」，
             # 而提交钩子若照常把答复写进 memory，重启后人重答会被 id 幂等静默吞掉。
             self.registry.uncommit_claim(hitl_id)
             raise
+        self._round_resolutions.pop(hitl_id, None)
         resolved.pending_event_payload = None
         self.registry.gc()
         return resolved
@@ -232,6 +287,7 @@ class HitlService:
         的顺序纪律），而那道闸正是按 task_id 定的——带上 task_id 这条事件就会落进缓冲、
         随之被一起丢掉，等于没发。与 `RoundCommitted` / `RoundDiscarded` 同一处理。
         """
+        self._round_resolutions.pop(hitl_id, None)
         released = self.registry.release_claim(hitl_id)
         if released is None:
             return None
@@ -258,48 +314,73 @@ class HitlService:
         *,
         defer: bool = False,
     ) -> PendingHitl | None:
-        """状态转移 → 取槽 → 投递 → 发事实。
+        """Immediate decisions commit before delivery; retractable replies claim.
 
-        转移与取槽在 `registry.resolve()` / `registry.claim()` 里同步完成
-        （无 await ⟹ 原子），因此「热投递」与「冷续跑」互斥、不双投。投递与发事实
-        在其后，不占原子段。
-
-        ``defer=True`` 时走 `claim()`：冷热都只登记待终局。热投递的协程拿到的是
-        `pending_decision`，提交点由 gateway 在它醒来时重新武装，所以不会「拿着一份
-        永远不终局的答复继续跑」。
+        An unconfirmed immediate batch wins over later submissions: retry its
+        original event, including when the storage receipt was lost.
         """
-        transferred = (
-            self.registry.claim(req.id, decision, message_event_payload) if defer
-            else self.registry.resolve(req.id, decision, self._now())
-        )
+        if not defer or req.id in self._pending_resolutions:
+            return await self._commit_immediate(req, decision, message_event_payload)
+        transferred = self.registry.claim(req.id, decision, message_event_payload)
         if transferred is None:
-            return None                              # 已终局 / 已待终局：幂等 no-op
+            return None
         resolved, slot = transferred
-        claimed = False
+        resolved.claimed = self._deliver(slot, decision, resolved.id)
+        return resolved
+
+    @staticmethod
+    def _deliver(slot, decision, hitl_id):
         if slot is not None:
-            # deliver 声明为不抛（-> bool），但对一个已完成的 future 再次 set 会抛
-            # InvalidStateError。转移已不可逆——这里若真抛出且不接住，请求就停在
-            # 「已终局」却没有 HitlResolved 事实，跨重启无法恢复。发事实的义务优先于
-            # 让这个异常继续传播。
             try:
-                claimed = bool(slot.deliver(decision))
+                return bool(slot.deliver(decision))
             except Exception:
                 logger.exception(
                     "HitlService._commit: slot.deliver raised for hitl_id=%s; "
-                    "treating as unclaimed and still emitting HitlResolved", resolved.id)
-                claimed = False
-        resolved.claimed = claimed
-        if defer:
-            # 冷热同一口径：待终局，事件留到 act 的提交点再发（`commit`）。
-            #
-            # 热投递曾经在这里就地终局，理由是「协程就地醒来，没有新一轮可撤销」。那不对：
-            # 人答完之后到 LLM 真的开口之前，用户同样可能按暂停，而那时整轮（这条答复、
-            # 它回灌出来的工具结果）都还没发生。被叫醒的协程由 gateway 重新武装提交点
-            # （`_resolve_human`），暂停则由 act 走热撤销（`_discard_round_if_uncommitted`）。
-            return resolved
-        await self._emit_resolved(resolved, decision, message_event_payload, claimed=claimed)
-        self.registry.gc()
-        return resolved
+                    "treating as unclaimed", hitl_id)
+        return False
+
+    async def _commit_immediate(self, req, decision, message_event_payload):
+        pending = self._pending_resolutions.get(req.id)
+        if pending is None:
+            if req.resolved:
+                return None
+            decision = deepcopy(decision)
+            # At durable commit no waiter has consumed this decision yet.
+            # Actual hot/cold routing uses req.claimed after publication, never
+            # the process-local hint in an event recovered by a new process.
+            event = self._make_event(EventType.HITL_RESOLVED, req,
+                self._resolved_payload(req, decision, message_event_payload, claimed=False))
+            pending = _ResolutionCommit(decision, deepcopy(event))
+            self._pending_resolutions[req.id] = pending
+        while self._pending_resolutions.get(req.id) is pending:
+            if pending.confirming is not None:
+                # Wait for durable confirmation, not subscriber notification.
+                # A notification may itself ask Runtime to recover the session.
+                await asyncio.shield(pending.confirming)
+                continue
+            confirmed = asyncio.get_running_loop().create_future()
+            pending.confirming = confirmed
+
+            def publish():
+                transferred = self.registry.resolve(req.id, pending.decision, pending.event.timestamp)
+                if transferred is not None:
+                    resolved, slot = transferred
+                    resolved.claimed = self._deliver(slot, pending.decision, req.id)
+                self._pending_resolutions.pop(req.id, None)
+                self.registry.gc()
+                confirmed.set_result(True)
+
+            # Bypass retractable rounds. The exact envelope and event/batch ID
+            # survive failure; publication is synchronous after confirmation
+            # and before subscribers can consume/close this decision.
+            try:
+                await self._bus.emit_batch((pending.event,), on_committed=publish)
+            finally:
+                pending.confirming = None
+                if not confirmed.done():
+                    confirmed.set_result(False)
+            return req if req.resolved else None
+        return None  # A concurrent retry already committed and delivered.
 
     async def _emit_resolved(
         self,
@@ -309,7 +390,12 @@ class HitlService:
         *,
         claimed: bool,
     ) -> None:
-        """发 `HitlResolved`。一步终局与两阶段提交共用，载荷口径只此一份。"""
+        """发两阶段提交的 `HitlResolved`，与立即提交共用载荷构造。"""
+        await self._emit(EventType.HITL_RESOLVED, resolved,
+            self._resolved_payload(resolved, decision, message_event_payload, claimed=claimed))
+
+    @staticmethod
+    def _resolved_payload(resolved, decision, message_event_payload, *, claimed):
         payload: dict[str, Any] = {
             "hitl_id": resolved.id,
             "outcome": decision.outcome,
@@ -321,7 +407,7 @@ class HitlService:
             payload["message"] = message_event_payload
         if decision.modified_arguments is not None:
             payload["modified_arguments"] = decision.modified_arguments
-        await self._emit(EventType.HITL_RESOLVED, resolved, payload)
+        return payload
 
     async def close(self, req: PendingHitl) -> bool:
         """给一条**已终局**的请求盖「已了结」章：发 `HitlClosed`。返回有没有真盖上。
@@ -429,8 +515,10 @@ class HitlService:
         return n
 
     async def _emit(self, event_type: EventType, req: PendingHitl, payload: dict) -> None:
-        await emit_event(
-            self._bus,
+        await self._bus.emit(self._make_event(event_type, req, payload))
+
+    def _make_event(self, event_type, req, payload):
+        return new_event(
             event_type,
             session_id=req.session_id,
             tenant_id=req.tenant_id,

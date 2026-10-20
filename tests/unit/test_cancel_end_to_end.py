@@ -57,6 +57,12 @@ class _SpyBus:
         self._inner = inner
         self.events: list = []
 
+    async def emit_batch(self, events, *, on_committed=None):
+        if on_committed is not None:
+            on_committed()
+        for event in events:
+            await self.emit(event)
+
     async def emit(self, event) -> None:
         self.events.append(event)
         await self._inner.emit(event)
@@ -75,7 +81,7 @@ class _CancelAtBoundaryStep:
     observer 已判死，但 FinalizeStep 还没来得及跑。
     """
 
-    name = "observe"
+    name = "checkpoint"
 
     def __init__(self, token: CancelToken, *, report_verdict: bool = False) -> None:
         self._tok = token
@@ -133,9 +139,9 @@ class _LoopRunner:
             provider_ctx=provider_ctx, capability_cache=CapabilityCache(),
             cancel_token=self._token,
         )
-        driver = StepDriver(steps={"observe": self._step}, initial_step="observe")
+        driver = StepDriver(steps={"checkpoint": self._step}, initial_step="checkpoint")
         s = await self._runtime._run_loop(
-            state, ctx, driver, run_id=state.run_id, initial_step="observe",
+            state, ctx, driver, run_id=state.run_id, initial_step="checkpoint",
             task=task, agent=self._agent,
         )
         return s.run_outcome
@@ -238,7 +244,7 @@ async def _run_loop_with(
         cancel_token=token,
     )
     return await runtime._run_loop(
-        state, ctx, driver, run_id=state.run_id, initial_step="observe",
+        state, ctx, driver, run_id=state.run_id, initial_step="checkpoint",
         task=task, agent=agent,
     )
 
@@ -246,7 +252,7 @@ async def _run_loop_with(
 class _CancelTokenAtBoundaryStep:
     """跑完之后置取消 token——由 driver 的 step 边界检查点抛出 CancelledError。"""
 
-    name = "observe"
+    name = "checkpoint"
 
     def __init__(self, token: CancelToken) -> None:
         self._tok = token
@@ -269,8 +275,8 @@ class _ExternalCancelDriver:
 async def _run_until_token_cancel() -> tuple[LoopState, _SpyBus]:
     runtime, session, agent, task, bus = _make_loop_fixture()
     token = CancelToken()
-    driver = StepDriver(steps={"observe": _CancelTokenAtBoundaryStep(token)},
-                        initial_step="observe")
+    driver = StepDriver(steps={"checkpoint": _CancelTokenAtBoundaryStep(token)},
+                        initial_step="checkpoint")
     state = await _run_loop_with(runtime, session, agent, task, bus, driver, token)
     return state, bus
 
@@ -333,6 +339,7 @@ async def _wire_multi_agent_session(
     task = Task(id=task_id, session_id=session_id, status="SUSPENDED", tenant_id="default")
     tm.register_task(task)
     rt._task_managers[session_id] = tm
+    rt._loaded_sessions.add(session_id)
     rt._session_registry.register_session(session_id, tenant_id="default")
     _plant(rt, root_id, None, session_id=session_id, status="idle")
     _plant(rt, child_id, root_id, session_id=session_id, status="idle")
@@ -356,6 +363,7 @@ async def test_cancel_session_terminates_every_agent() -> None:
     session_id, root_id, child_id = "s3", "root", "kid"
     await _wire_multi_agent_session(rt, session_id, "t1", root_id, child_id)
 
+    await rt.initialize()
     result = await rt.cancel_session(session_id)
 
     assert result is True
@@ -363,28 +371,30 @@ async def test_cancel_session_terminates_every_agent() -> None:
     assert terminated_ids == {root_id, child_id}
 
     # 取消 ≠ 逐出：record 还在，状态是终态。
-    assert rt.get_agent(root_id).status == "terminated"
-    assert rt.get_agent(child_id).status == "terminated"
+    await rt.initialize()
+    assert (await rt.get_agent(root_id)).data.status == "terminated"
+    await rt.initialize()
+    assert (await rt.get_agent(child_id)).data.status == "terminated"
     # 默认过滤掉终态 agent（避免列表随时间膨胀），显式要才给。
-    assert rt.list_agents(session_id=session_id) == []
-    assert {a.agent_id for a in rt.list_agents(session_id=session_id, include_terminated=True)} == {
+    await rt.initialize()
+    assert [item.data for item in await rt.list_agents(session_id=session_id)] == []
+    await rt.initialize()
+    assert {a.agent_id for a in [item.data for item in await rt.list_agents(session_id=session_id, include_terminated=True)]} == {
         root_id, child_id}
 
     # 逐出之后才真的查无此 agent。
     assert rt.forget_session(session_id) is True, "全部 terminated → 安静了，该能忘掉"
     with pytest.raises(AgentNotFound):
-        rt.get_agent(root_id)
+        await rt.initialize()
+        (await rt.get_agent(root_id)).data
 
 
-async def test_cancel_session_no_longer_walks_run_tokens_itself() -> None:
-    """结构性守卫：那圈自己遍历 `_run_tokens` 拍 cancel 的代码应当消失。
-
-    `cancel_agent` 对 `running` 目标内部就会调 `_cancel_run_token`，覆盖同一批
-    在途 run，`cancel_session` 不需要再自己走一遍（2026-09-04 spec §7.2）。
-    """
+async def test_cancel_session_keeps_agent_termination_in_cancel_agent() -> None:
+    """Early run stop signals do not move agent state ownership into runtime."""
     import inspect
 
     from ctx_weft.core.runtime import CtxWeftRuntime
 
     src = inspect.getsource(CtxWeftRuntime.cancel_session)
     assert "tokens.cancel.cancel()" not in src
+    assert "await self.cancel_agent(" in src

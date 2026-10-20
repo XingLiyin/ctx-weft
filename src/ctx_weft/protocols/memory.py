@@ -392,6 +392,14 @@ class MemoryProvider(Protocol):
 
     # ── 召回（read，三种模式）──
 
+    async def read_records(self, record_ids: list[str], ctx: ProviderContext) -> list[MemoryRecord]:
+        """Read immutable records, including superseded ones, within ctx's tenant/session.
+
+        Pending observe requests retain these references until ObserveApplied.
+        Providers that archive folded records must keep them addressable by ID.
+        """
+        raise NotImplementedError("memory provider must support immutable record reads")
+
     @abstractmethod
     async def load_view(
         self,

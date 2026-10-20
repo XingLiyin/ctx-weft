@@ -133,8 +133,11 @@ async def test_rebuild_hitl_reads_no_hitl_query_at_all() -> None:
     resolver.register(make_echo_template())
     store = _CountingStore()
     rt = make_runtime(agent_provider=resolver, event_store=store)
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+    rt.providers.register_memory(InMemoryMemoryProvider())
     await _seed(store, n_noise=200)
 
+    await rt.initialize()
     n = await rt.rebuild_hitl(_SID)
 
     assert n == 1, f"应装填那条仍未决的，实际 {n}"

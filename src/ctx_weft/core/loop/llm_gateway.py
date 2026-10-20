@@ -620,6 +620,7 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
         await bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={
             "request_id": request_id, "model": model, "llm_account": llm_account,
             "turn": turn}))
+        owner.request_started = True
         await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
             "request_id": request_id, "turn": turn, "system": request.system,
             "messages": [

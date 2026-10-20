@@ -127,7 +127,7 @@ class SnapshotWriter:
 
         不变式：**有快照 ⟹ 到它的 `committed_head` 为止，memory 效果都已落地。** 恢复路径
         「以快照为准」全靠它——一张领先的快照就是静默的数据丢失（它说某件事做完了，所以
-        `pending_recap` / HITL `resolved` 里没有它，而 memory 里其实没有）。
+        `pending_observe` / HITL `resolved` 里没有它，而 memory 里其实没有）。
 
         为什么需要这道门：未提交窗口下的顺序是
 
@@ -254,6 +254,9 @@ class SnapshotWriter:
                 through_position=head, exclude_types=REPLAY_EXCLUDE_TYPES)
             view = apply_events(
                 [se.event for se in delta], deserialize_view(base.state_blob))
+            if base.projection_version == 10:
+                from .reducers import restore_legacy_canceled_tasks
+                await restore_legacy_canceled_tasks(self._store, session_id, view, head)
             folded, depth, anchored = len(delta), base.chain_depth + 1, False
         else:
             # ── 重锚：全量折，但**分批读**─────────────────────────────────

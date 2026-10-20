@@ -388,6 +388,19 @@ class SqlMemoryProvider(MemoryProvider):
 
     # ── 读（3）────────────────────────────────────────────────────────────────
 
+    async def read_records(self, record_ids, ctx):
+        if not record_ids:
+            return []
+        async with self._factory() as db:
+            result = await db.execute(select(MemoryEventModel).where(
+                MemoryEventModel.id.in_(record_ids),
+                _tenant_expr(MemoryEventModel.tenant) == normalize_tenant(ctx.tenant_id),
+                MemoryEventModel.session_id == ctx.session_id,
+            ).order_by(MemoryEventModel.timestamp.asc(), MemoryEventModel.seq_no.asc()))
+            rows = list(result.scalars().all())
+            declared = await _declared_refs(db, rows)
+            return normalize_view([_row_to_record(r, declared.get(r.id)) for r in rows])
+
     async def load_view(
         self,
         address: MemoryAddress,

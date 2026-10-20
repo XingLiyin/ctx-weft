@@ -1,7 +1,7 @@
 """快照不得领先于 memory：**有快照 ⟹ 到它的 `committed_head` 为止，memory 效果都已落地。**
 
 这条不变式是恢复路径「以快照为准」的前提。立不起来的话，一张领先的快照就是**静默的数据丢失**
-——它说某件事做完了（所以 `pending_recap` / HITL `resolved` 里没有它），而 memory 里其实没有。
+——它说某件事做完了（所以 `pending_observe` / HITL `resolved` 里没有它），而 memory 里其实没有。
 
 违规是真实可达的，不是假想。未提交窗口下的顺序是：
 

@@ -134,7 +134,7 @@ async def test_is_short_segment_disabled_threshold():
     assert await recap_mod.ObserveStep()._is_short_segment(state, ctx) is False
 
 
-async def test_is_short_segment_watermark_excludes_later_user_turn():
+async def test_is_short_segment_segment_end_at_excludes_later_user_turn():
     """后台观察的水位线固定原段，不被稍后到达的用户消息重置。"""
     mem = InMemoryMemoryProvider()
     await _seed_two_segments(mem)
@@ -147,7 +147,7 @@ async def test_is_short_segment_watermark_excludes_later_user_turn():
     state, ctx = _short_seg_state_ctx(mem, threshold=400)
     step = recap_mod.ObserveStep()
 
-    assert await step._is_short_segment(state, ctx, watermark=_ts(60)) is False
+    assert await step._is_short_segment(state, ctx, segment_end_at=_ts(60)) is False
     assert await step._is_short_segment(state, ctx) is True
 
 

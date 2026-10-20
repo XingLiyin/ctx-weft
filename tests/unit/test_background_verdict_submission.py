@@ -1,16 +1,7 @@
-"""S5：后台 observe 在 `plain_text` 边界产 verdict 并提交带外入口。
+"""后台判决交给 TaskManager 仲裁，带外收尾发送真实事件并关闭本任务的 park 气泡。
 
-这是整个改造的**第一个行为切换点**：root task 说完一段纯文本 park 之后，不再无限期停
-着——observer 判 success 就终结并放行 DAG 后继，判 retry/fail 则维持 park 等人。
-
-三条不变量在这里守住：
-- **只有 `plain_text` 判定**。其余边界的判定已由别处给出（`mechanical` 刚机械判过、
-  close 边界是 actor 自己宣布的），后台再判一次会把那份判决覆盖掉。
-- **verdict 缺失 ≡ retry**。拿不到判决就什么都不提交，task 维持 park。默认态是 park，
-  只有 success 触发状态转移——绝不因为观察失败而静默放行后继。
-- **免折不免判**。短段仍跑判定（短回合恰恰是提问最典型的形态），只是不折。
-- **判 success 就收 park 气泡**，不分 root 与子任务：让位入口已经用掉了，人后面还想说话由
-  `send_message` 开新的一轮——见下方那一节。
+机械判决已随 ObserveRequested 固定时，后台只生成报告；需要 LLM 判决的路径才提交新判决。
+状态转换的真实 TaskManager 契约由 test_out_of_band_verdict.py 覆盖。
 """
 
 from __future__ import annotations
@@ -18,6 +9,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
+from ctx_weft.core.loop.driver import make_event
+from ctx_weft.core.models.task import Task
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.steps.observe import judges
 from ctx_weft.core.loop.steps.observe import submit_verdict
 
@@ -44,7 +38,7 @@ class _RecordingTM:
 
 
 def _state():
-    return SimpleNamespace(task=SimpleNamespace(id="t1", outputs="交付物"))
+    return SimpleNamespace(task=Task(id="t1", session_id="s1", status="ACTIVE", outputs="交付物"), extra={})
 
 
 def _ctx(tm):
@@ -195,9 +189,10 @@ def _ctx_with_hitl(hitl):
 
 def _state_with_session(*, parent: str | None = None, creator="ag_1", assigned="ag_1"):
     return SimpleNamespace(
-        task=SimpleNamespace(id="t1", outputs="交付物", parent_task_id=parent,
+        task=Task(id="t1", session_id="s1", status="FINISHED", outputs="交付物", parent_task_id=parent,
                              creator_agent_id=creator, assigned_agent_id=assigned),
         session=SimpleNamespace(id="s1"),
+        extra={},
     )
 
 
@@ -272,7 +267,7 @@ class _Bus:
         self.emitted.append(event)
 
 
-async def test_out_of_band_finalize_runs_close_and_emits_its_events(monkeypatch) -> None:
+async def test_out_of_band_finalize_runs_close_and_emits_its_events(monkeypatch, fake_state_ctx) -> None:
     """**要害**：带外收尾把 `apply_task_close` 的产物发出去，并补上 `TASK_FINALIZED`。
 
     不发 TASK_FINALIZED 的后果是 host 的 `tasks.outputs_json` 恒空——S5 起一直如此。
@@ -283,18 +278,22 @@ async def test_out_of_band_finalize_runs_close_and_emits_its_events(monkeypatch)
 
     async def _fake_close(state, task, ctx, **kw):
         calls["close"] = kw
-        return ["close-event"]
+        return [make_event(state, EventType.MEMORY_INGESTED, {"source": "root_finish_pair"})]
 
     monkeypatch.setattr(fin, "apply_task_close", _fake_close)
-    monkeypatch.setattr(fin, "task_finalized_event",
-                        lambda state, task, *, outcome: f"finalized:{outcome}")
 
     bus = _Bus()
-    state = _state_with_session(parent="t0")
-    ctx = SimpleNamespace(hitl=_Hitl([]), event_bus=bus)
+    state, ctx = fake_state_ctx
+    state.task = _state_with_session(parent="t0").task
+    state.extra["observe_id"] = "obs-test"
+    ctx.hitl = _Hitl([])
+    ctx.event_bus = bus
     await _out_of_band_finalize(state, ctx, _meta())
 
-    assert bus.emitted == ["close-event", "finalized:success"]
+    assert [e.type for e in bus.emitted] == [EventType.MEMORY_INGESTED, EventType.TASK_FINALIZED]
+    assert all(e.causation_id == "obs-test" for e in bus.emitted)
+    await _out_of_band_finalize(state, ctx, _meta())
+    assert len(bus.emitted) == 2
     assert calls["close"]["outcome"] == "success"
     assert calls["close"]["act_recap"] == "做了甲乙丙"
     assert calls["close"]["task_summary"] == "全程小结"
@@ -302,7 +301,7 @@ async def test_out_of_band_finalize_runs_close_and_emits_its_events(monkeypatch)
     assert calls["close"]["has_llm_summary"] is True
 
 
-async def test_out_of_band_finalize_also_closes_the_bubble(monkeypatch) -> None:
+async def test_out_of_band_finalize_also_closes_the_bubble(monkeypatch, fake_state_ctx) -> None:
     """收尾与收气泡是同一次带外动作的两半，别让将来有人只接一半。"""
     import ctx_weft.core.loop.steps.finalize as fin
 
@@ -310,11 +309,13 @@ async def test_out_of_band_finalize_also_closes_the_bubble(monkeypatch) -> None:
         return []
 
     monkeypatch.setattr(fin, "apply_task_close", _fake_close)
-    monkeypatch.setattr(fin, "task_finalized_event", lambda *a, **kw: "finalized")
 
     hitl = _Hitl([_Bubble("hit_1", "t1")])
-    ctx = SimpleNamespace(hitl=hitl, event_bus=_Bus())
-    await _out_of_band_finalize(_state_with_session(parent="t0"), ctx, _meta())
+    state, ctx = fake_state_ctx
+    state.task = _state_with_session(parent="t0").task
+    ctx.hitl = hitl
+    ctx.event_bus = _Bus()
+    await _out_of_band_finalize(state, ctx, _meta())
     assert hitl.cancelled == ["hit_1"]
 
 

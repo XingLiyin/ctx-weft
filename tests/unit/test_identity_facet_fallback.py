@@ -1,64 +1,98 @@
-"""Identity facets depend on observation judgement, never execution channel."""
+"""IdentitySource collects the template; Jinja selects the step facet."""
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from ctx_weft.core.assembler.sources.identity import IdentitySource
-from ctx_weft.core.utils.estimate import estimate_tokens
+from tests.assembler_testkit import compile_prompt, prompt_request
 
 
-def _facet(text): return SimpleNamespace(text=text, style="")
+def _facet(text):
+    return SimpleNamespace(text=text, style="")
 
 
 def _template(identity: dict):
     return SimpleNamespace(id="tpl", version="1", identity=identity)
 
 
-def _req(purpose, template, judge_task=True):
-    return SimpleNamespace(purpose=purpose, template=template, extra={"judge_task": judge_task}, token_counter=estimate_tokens)
+def _request(purpose, template, judge_task=True):
+    return prompt_request(
+        purpose=purpose,
+        template=template,
+        extra={"judge_task": judge_task},
+    )
 
 
-async def _facets(req):
-    return [b async for b in IdentitySource().fetch(req, SimpleNamespace())]
+async def _blocks(request):
+    return [block async for block in IdentitySource().fetch(request, SimpleNamespace())]
 
 
-@pytest.mark.asyncio
-async def test_background_observe_falls_back_to_observe():
-    tpl = _template({"act": _facet("SOUL"), "observe": _facet("ROLE-OBSERVE")})
-    blocks = await _facets(_req("observe", tpl))
-    assert blocks[0].content == "ROLE-OBSERVE"
+def _text(prompt):
+    return prompt.system + "\n" + "\n".join(
+        str(message.content) for message in prompt.messages)
 
 
-@pytest.mark.asyncio
-async def test_background_recap_falls_back_to_compact():
-    tpl = _template({"act": _facet("SOUL"), "observe": _facet("ROLE"),
-                     "compact": _facet("COMPACT-RECAP")})
-    blocks = await _facets(_req("observe", tpl, judge_task=False))
-    assert blocks[0].content == "COMPACT-RECAP"
+async def test_identity_source_returns_raw_template():
+    template = _template({"act": _facet("SOUL")})
+    block = (await _blocks(_request("act", template)))[0]
+
+    assert block.value is template
+    assert block.kind == "identity"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "purpose", ["observe", "compact"])
-async def test_observe_and_compact_purposes_do_not_fall_back_to_act(purpose):
-    """没有专属块就不产 identity——不拿 actor 的 SOUL 冒充 observer/压缩纪律。"""
-    tpl = _template({"act": _facet("SOUL")})
-    assert await _facets(_req(purpose, tpl)) == []
+async def test_observe_uses_observe_facet():
+    template = _template({"act": _facet("SOUL"), "observe": _facet("ROLE-OBSERVE")})
+    request = _request("observe", template)
+
+    assert "ROLE-OBSERVE" in _text(compile_prompt(await _blocks(request), request))
 
 
-@pytest.mark.asyncio
-async def test_recognize_intent_still_falls_back_to_act():
-    """给自己的任务命名仍可拿 SOUL 当人格。"""
-    tpl = _template({"act": _facet("SOUL")})
-    blocks = await _facets(_req("recognize_intent", tpl))
-    assert blocks[0].content == "SOUL"
+async def test_background_recap_uses_compact_facet():
+    template = _template({
+        "act": _facet("SOUL"),
+        "observe": _facet("ROLE"),
+        "compact": _facet("COMPACT-RECAP"),
+    })
+    request = _request("observe", template, judge_task=False)
+    text = _text(compile_prompt(await _blocks(request), request))
+
+    assert "COMPACT-RECAP" in text
+    assert "ROLE\n" not in text
 
 
-@pytest.mark.asyncio
+async def test_observe_without_facet_does_not_use_act_as_role():
+    template = _template({"act": _facet("SOUL")})
+    request = _request("observe", template)
+    prompt = compile_prompt(await _blocks(request), request)
+    messages = "\n".join(str(message.content) for message in prompt.messages)
+
+    assert "## Your Current Role\n\nSOUL" not in messages
+
+
+async def test_compact_without_facet_does_not_use_act_as_role():
+    template = _template({"act": _facet("SOUL")})
+    request = _request("compact", template)
+    prompt = compile_prompt(await _blocks(request), request)
+    messages = "\n".join(str(message.content) for message in prompt.messages)
+
+    assert "## Your Current Role\n\nSOUL" not in messages
+
+
+async def test_recognize_intent_falls_back_to_act():
+    template = _template({"act": _facet("SOUL")})
+    request = _request("recognize_intent", template)
+
+    assert "SOUL" in _text(compile_prompt(await _blocks(request), request))
+
+
 async def test_unused_facet_cannot_override_observe():
-    tpl = _template({"act": _facet("SOUL"), "observe": _facet("ROLE"),
-                     "unused": _facet("BG")})
-    blocks = await _facets(_req("observe", tpl))
-    assert blocks[0].content == "ROLE"
+    template = _template({
+        "act": _facet("SOUL"),
+        "observe": _facet("ROLE"),
+        "unused": _facet("BG"),
+    })
+    request = _request("observe", template)
+    text = _text(compile_prompt(await _blocks(request), request))
+
+    assert "ROLE" in text
+    assert "BG" not in text

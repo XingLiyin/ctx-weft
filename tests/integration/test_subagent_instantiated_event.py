@@ -15,6 +15,8 @@ import asyncio
 
 import pytest
 
+from tests.runtime_helpers import close_runtime
+
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
@@ -134,10 +136,11 @@ async def _wait_for_subagent_task(runtime, session_id, timeout=8.0):
     )
 
 
-async def test_subagent_instantiation_emits_event_with_own_template():
+async def test_subagent_instantiation_emits_event_with_own_template(runtime_factory):
     llm = _SpawnLLM()
-    runtime = _make_runtime(llm)
+    runtime = runtime_factory(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -162,11 +165,12 @@ async def test_subagent_instantiation_emits_event_with_own_template():
     assert instantiated[-1].payload.get("template_id") == SUB_TEMPLATE_CANONICAL
 
 
-async def test_replayed_view_gives_subagent_its_own_template():
+async def test_replayed_view_gives_subagent_its_own_template(runtime_factory):
     """端到端闭环：发射 + 折叠合起来，重放出的 AgentView 带子模板而非 root 模板。"""
     llm = _SpawnLLM()
-    runtime = _make_runtime(llm)
+    runtime = runtime_factory(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -195,10 +199,11 @@ async def test_replayed_view_gives_subagent_its_own_template():
 # 会出现「先 Spawned、后 Rejected」的自相矛盾事件对。
 
 
-async def test_agent_spawned_emitted_with_parent_and_subtask():
+async def test_agent_spawned_emitted_with_parent_and_subtask(runtime_factory):
     llm = _SpawnLLM()
-    runtime = _make_runtime(llm)
+    runtime = runtime_factory(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -224,11 +229,12 @@ async def test_agent_spawned_emitted_with_parent_and_subtask():
     assert ev.task_id == sub_task.id
 
 
-async def test_agent_spawned_precedes_agent_instantiated():
+async def test_agent_spawned_precedes_agent_instantiated(runtime_factory):
     """因果顺序：先「这次 spawn 被准了」，再「诞生的 agent 长这样」。"""
     llm = _SpawnLLM()
-    runtime = _make_runtime(llm)
+    runtime = runtime_factory(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -247,3 +253,17 @@ async def test_agent_spawned_precedes_agent_instantiated():
     ]
 
     assert order[:2] == [EventType.AGENT_SPAWNED, EventType.AGENT_INSTANTIATED]
+
+
+@pytest.fixture
+async def runtime_factory():
+    runtimes = []
+
+    def create(llm):
+        runtime = _make_runtime(llm)
+        runtimes.append(runtime)
+        return runtime
+
+    yield create
+    for runtime in runtimes:
+        await close_runtime(runtime)

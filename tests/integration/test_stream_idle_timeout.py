@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMMessage, LLMRequest
@@ -43,7 +44,9 @@ async def _stalling_server(token: bytes):
                 + token
             )
             await writer.drain()
-            await asyncio.sleep(30)  # stall: connection stays open, no more bytes
+            # Stall until the client's read timeout closes the socket.  Waiting
+            # for EOF avoids leaving 30-second handler tasks behind in the full suite.
+            await reader.read()
         except (ConnectionError, asyncio.CancelledError):
             pass
         finally:
@@ -60,13 +63,21 @@ async def _stalling_server(token: bytes):
 async def _assert_stall_raises_outage(adapter):
     req = LLMRequest(model="m", system="", messages=[LLMMessage(role="user", content="hi")])
 
+    # This is a loopback transport test.  Do not let machine-level proxy
+    # settings route localhost through a proxy during the full test suite.
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(timeout=adapter._timeout, trust_env=False)
+
     async def _drain():
         return [c async for c in adapter.complete(req, stream=True)]
 
     # 8s budget >> the 1s idle timeout; a hang (regression) trips wait_for instead.
-    with pytest.raises(LLMCallError) as exc:
-        await asyncio.wait_for(_drain(), timeout=8)
-    assert exc.value.outage is True, "mid-stream stall must be tagged outage"
+    try:
+        with pytest.raises(LLMCallError) as exc:
+            await asyncio.wait_for(_drain(), timeout=8)
+        assert exc.value.outage is True, "mid-stream stall must be tagged outage"
+    finally:
+        await adapter._client.aclose()
 
 
 async def test_anthropic_midstream_stall_raises_outage():

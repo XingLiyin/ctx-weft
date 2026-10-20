@@ -28,6 +28,12 @@ class _CapturingBus:
     def __init__(self) -> None:
         self.events: list = []
 
+    async def emit_batch(self, events, *, on_committed=None):
+        if on_committed is not None:
+            on_committed()
+        for event in events:
+            await self.emit(event)
+
     async def emit(self, event) -> None:  # noqa: ANN001
         self.events.append(event)
 

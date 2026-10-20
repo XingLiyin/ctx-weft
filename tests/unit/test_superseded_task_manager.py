@@ -259,7 +259,9 @@ async def test_recover_agent_serialized_per_session(monkeypatch) -> None:
 
     monkeypatch.setattr("ctx_weft.core.control.reducers.rebuild_view", fake_rebuild_view)
 
+    await rt.initialize()
     t1 = asyncio.create_task(rt.recover_agent("a1"))
+    await rt.initialize()
     t2 = asyncio.create_task(rt.recover_agent("a1"))
     await asyncio.sleep(0.02)  # 两个都尝试进入锁
     assert active["max"] == 1, "per-session 锁应串行化两次 recover（峰值并发=1）"
@@ -286,7 +288,9 @@ async def test_recover_agent_different_sessions_not_serialized(monkeypatch) -> N
 
     monkeypatch.setattr("ctx_weft.core.control.reducers.rebuild_view", fake_rebuild_view)
 
+    await rt.initialize()
     t1 = asyncio.create_task(rt.recover_agent("aA"))
+    await rt.initialize()
     t2 = asyncio.create_task(rt.recover_agent("aB"))
     await asyncio.sleep(0.02)
     assert active["max"] == 2, "不同 session 的 recover 应能并发（峰值并发=2）"

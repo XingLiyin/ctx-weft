@@ -166,6 +166,8 @@ class EventType(StrEnum):
     ACT_TURN_STARTED = "ActTurnStarted"
     ACT_TURN_COMPLETED = "ActTurnCompleted"
     MAX_TURNS_REACHED = "MaxTurnsReached"
+    OBSERVE_REQUESTED = "ObserveRequested"  # durable intent, including an already determined mechanical verdict
+    OBSERVE_APPLIED = "ObserveApplied"      # all planned result application has completed
     OBSERVE_STARTED = "ObserveStarted"                 # observe 起点（与 Completed 成对）
     OBSERVE_COMPLETED = "ObserveCompleted"
     # ── Memory 域 ──
@@ -270,9 +272,9 @@ class EventType(StrEnum):
     BACKGROUND_OBSERVE_PROMPT_SENT = "BackgroundObservePromptSent"
     BACKGROUND_OBSERVE_TOKEN_STREAMED = "BackgroundObserveTokenStreamed"
     BACKGROUND_OBSERVE_RESPONSE_FINISHED = "BackgroundObserveResponseFinished"
-    # ── TaskRecap 域（background observe 的持久化生命周期标记；崩溃恢复据此重跑，
-    #     与逐轮 BACKGROUND_OBSERVE_* 流式事件不同——这两条是"整段 recap 起/止"的记账）──
-    TASK_RECAP_STARTED = "TaskRecapStarted"   # payload: {task_id, boundary, agent_id}
+    # ── Legacy TaskRecap：停发，仅用于旧日志回放；由统一 Observe 生命周期取代 ──
+    TASK_RECAP_REQUESTED = "TaskRecapRequested"  # durable scheduling intent, before enqueue
+    TASK_RECAP_STARTED = "TaskRecapStarted"   # payload: {task_id, boundary, agent_id, observe_id}
     TASK_RECAP_DONE = "TaskRecapDone"         # payload: {task_id}
     # ── 观察者背压（spec: event-commit）：观察者队列溢出丢弃的实时通报。transient
     #     不落库——补读走持久日志（payload 带 position 区间，read_range 可回放）──
@@ -342,6 +344,7 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = frozenset({
 # `tests/unit/test_no_dead_event_types.py` 从这里 import，不再自建平行注册表。
 L_TIER_EVENT_TYPES: frozenset[str] = frozenset({
     "SessionStatusChanged", "SessionPausedHitl",
+    "TaskRecapRequested", "TaskRecapStarted", "TaskRecapDone",
     "HitlRequired", "HitlApproved", "HitlAnswered", "HitlRejected",
     "HitlModified", "HitlCancelled",
     # Task 5（2026-09-03-agent-centric-interaction）：observe.py 的 ReactEventTypes 间接层
@@ -418,6 +421,15 @@ class EventBus(Protocol):
     @abstractmethod
     async def emit(self, event: Event) -> None: ...
 
+    async def emit_batch(self, events: tuple[Event, ...], *, on_committed=None) -> None:
+        """Atomically commit existing envelopes before notifying subscribers.
+
+        Required for multi-task lifecycle transitions; must not degrade to a
+        sequence of individually committed events. A synchronous on_committed
+        callback publishes local state after confirmation and before notification.
+        """
+        raise NotImplementedError("event bus must support atomic emit_batch")
+
     @abstractmethod
     def subscribe(
         self,
@@ -445,11 +457,22 @@ class EventBus(Protocol):
     # ── 未提交窗口（默认 no-op，见类 docstring）────────────────────────────────
 
     def begin_provisional(self, task_id: str) -> None:
-        """开窗：此后该 task 的事件只投给 provisional 订阅者，其余按序缓冲。
+        """开窗：本轮事件只投给 provisional 订阅者，其余按序缓冲。
+
+        开窗前已启动的独立后台 run 保持自己的事件生命周期，不能因同 task 的
+        新用户回合被撤销而丢失其后续事件。前台 run 的热回复仍属于本轮缓冲。
 
         幂等——重复开窗不清空已有缓冲（`retry` 重排会重进同一条路径）。
         """
         return None
+
+    def bind_provisional_run(self, task_id: str, run_id: str) -> None:
+        """Bind the round's actor, including a hot reply continuing an existing run."""
+        return None
+
+    def is_run_provisional(self, task_id: str, run_id: str) -> bool:
+        """Whether this run's events still await confirmation in a round."""
+        return False
 
     async def commit_provisional(self, task_id: str) -> None:
         """关窗并**按发生顺序**把缓冲补投给其余订阅者。未开窗时 no-op。"""
@@ -578,6 +601,12 @@ class EventStore(Protocol):
     #
     # 调用方直接用 `append_batch`；测试夹具里那个动作收在 `tests/_event_helpers.append_one`。
 
+    async def list_session_ids(
+        self, *, after_session_id: str | None = None, limit: int = 100,
+    ) -> list[str]:
+        """Enumerate event partitions by ID; no lifecycle inference or materialization."""
+        raise NotImplementedError("EventStore must implement list_session_ids for startup calibration")
+
     # ── 有序提交（必须实现；spec: event-log）──────────────────────────────────
 
     @abstractmethod
@@ -597,6 +626,7 @@ class EventStore(Protocol):
         include_types: "tuple[str, ...]" = (),
         exclude_types: "tuple[str, ...]" = (),
         task_id: str = "",
+        related_task_id: str = "",
     ) -> "list[StoredEvent]":
         """按 position 升序读取 (after_position, through_position] 的已提交事件。
 
@@ -610,6 +640,9 @@ class EventStore(Protocol):
           归属的 `CapabilityInvoked` 漏掉，capability gateway 就以为那次调用没跑过 → 静默重跑
           一个有副作用的工具；而多取回几条只是多折几下。**这条语义两个实现必须逐字一致**，
           由 `tests/unit/test_read_primitives_conformance.py` 对两者跑同一套用例钉住。
+        - `related_task_id` 非空 → 严格匹配任务归属，包括 TaskCreated.task.id，以及
+          TaskReviewing 的 successor、replaced_task_ids 和 rewired_dependencies。
+          不包含无归属行；用于任务详情读取，不改变上面的宽松 task_id 过滤契约。
 
         **通用读原语，不带任何特定类型的语义**——调用方（core）自己填要读/要排除什么。
 

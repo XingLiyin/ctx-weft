@@ -40,6 +40,8 @@ class SessionView:
     #: ——trip 序列第 6 步给 root 判死也发 TaskFailed，那是聚合结果、不是第 N+1 次
     #: 新败，重复计入会让恢复后的计数比内存真值多一。
     threshold_tripped: bool = False
+    threshold_root_task_ids: list[str] = field(default_factory=list)
+    threshold_cancel_task_ids: list[str] = field(default_factory=list)
     created_at: datetime | None = None
 
 
@@ -49,6 +51,8 @@ class TaskView:
 
     id: str
     session_id: str
+    # False for status-only dependency records retained by recovery snapshots.
+    details_complete: bool = field(default=True, kw_only=True)
     status: str = "PENDING"
     title: str = ""
     description: str = ""
@@ -83,6 +87,7 @@ class TaskView:
     blocked_by_task_id: str | None = None
     created_at: datetime | None = None
     finished_at: datetime | None = None
+    finalized: bool = False
 
 
 @dataclass
@@ -104,6 +109,7 @@ class AgentView:
     # reducers._AGENT_STATUS_BY_EVENT）。跨重启存活——`load()` 据此重建
     # `_AgentRecord.status`，否则冷恢复后每个 agent 都会被重置成 idle。
     status: str = "idle"
+    status_reason: str = ""
     # 该 agent 正在处理的 task（AGENT_* 事件的 task_id 非空时同步）。
     current_task_id: str | None = None
 
@@ -164,7 +170,7 @@ class RunStateView:
 
     #: 被崩溃打断的段 recap：{task_id: {"boundary", "agent_id"}}。
     #:
-    #: 某 task 有 `TASK_RECAP_STARTED` 而无其后的 `TASK_RECAP_DONE`，说明那段 background
+    #: 某 task 有持久化 observe 意图（或旧日志的 `OBSERVE_STARTED`）而无 `OBSERVE_APPLIED`，说明那段 background
     #: observe 的 memory 写没落完，恢复据此重跑。
     #:
     #: **为什么它该进投影**：这个判断没有时间下界——几个月前那条无 done 的 started 今天
@@ -173,12 +179,18 @@ class RunStateView:
     #: 1999 条折出 1 个，272ms / 5.1MB）。进了投影就随快照 + 增量走，变成 O(delta)。
     #:
     #: **为什么它进得起投影**（不像 `tasks` 那样要裁）：每个条目由它自己的
-    #: `TASK_RECAP_DONE` 删掉，所以大小 = 「崩溃打断且尚未修复的 recap 数」≈ 0~2，
+    #: `OBSERVE_APPLIED` 删掉，所以大小 = 「崩溃打断且尚未修复的 recap 数」≈ 0~2，
     #: 与会话长度无关。
     #:
     #: ⚠️ **不得按 task 存活性裁**：recap 跑在 finish 边界上，待重跑的 recap 往往属于一个
     #: 已 FINISHED 的 task——拿 `tasks` 的活闭包过滤它会把它们全丢掉。
-    pending_recap: dict[str, dict] = field(default_factory=dict)
+    pending_observe: dict[str, dict] = field(default_factory=dict)
+    # New keys are observe_id; values include task_id/boundary/agent_id/segment_end_at.
+    # Legacy Started/Done pairs without an identity retain their task_id key.
+
+    # Only unfinished executions survive snapshots, independent of task pruning.
+    # run_id -> {task_id, agent_id, sequence}; every event advances its sequence.
+    open_runs: dict[str, dict] = field(default_factory=dict)
 
     sessions: dict[str, SessionView] = field(default_factory=dict)
     tasks: dict[str, TaskView] = field(default_factory=dict)

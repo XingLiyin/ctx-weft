@@ -70,6 +70,14 @@ class InMemoryMemoryProvider(MemoryProvider):
 
     name = "in_memory"
 
+    async def read_records(self, record_ids, ctx):
+        wanted = set(record_ids)
+        records = [self._to_record(s) for s in self._events
+                   if s.id in wanted and s.tenant == normalize_tenant(ctx.tenant_id)
+                   and s.event.address.session_id == ctx.session_id]
+        records.sort(key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
+        return normalize_view(records)
+
     def __init__(self) -> None:
         self._events: list[_StoredEvent] = []
         self._seq_counters: dict[str, int] = {}  # (tenant, session, agent) → seq

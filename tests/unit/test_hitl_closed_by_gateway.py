@@ -513,7 +513,7 @@ def test_task_terminal_hook_is_awaited():
 
     from ctx_weft.core.orchestrator.task.manager import TaskManager
 
-    src = inspect.getsource(TaskManager.on_task_finished)
+    src = inspect.getsource(TaskManager._on_task_finished)
     assert "await self._hooks.on_task_terminal(" in src
 
 

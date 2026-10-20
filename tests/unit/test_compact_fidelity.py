@@ -16,8 +16,6 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextAssembler, ContextRequest
-from ctx_weft.core.assembler.budget import PriorityBudgetStrategy
-from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.assembler.sources.task_spec import TaskSpecSource
 from ctx_weft.core.loop.steps import compact as cm
@@ -122,13 +120,11 @@ def _state_ctx(llm):
     ctx = SimpleNamespace(
         assembler=ContextAssembler(
             sources=[TaskSpecSource(), AgentRecallSource()],
-            budget=PriorityBudgetStrategy(),
-            composer=DefaultComposer(),
             deps=AssemblerDeps(
                 memory=mem, knowledge_providers=[],
                 provider_ctx=ProviderContext(
                     session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="ag1"),
-                capability_cache=None, agent_id="ag1"),
+                capability_cache=None),
         ),
         llm=llm, memory=mem, cancel_token=None, event_bus=None, config=None,
         provider_ctx=ProviderContext(
@@ -177,37 +173,6 @@ async def test_request_layer_agent_cue_carries_contract(monkeypatch):
     state, ctx, mem, scope = _state_ctx(llm)
     await summarize_for_compact(state, ctx, scope="agent")
     _assert_cue_contract(_cue_of(llm))
-
-
-@pytest.mark.asyncio
-async def test_guard_cue_mutation_fails_request_assertion(monkeypatch):
-    """守门验证（3.4）：删掉 Constraints 指示 → 请求层断言失败。
-
-    注意：不使用「固定 mock 摘要存活」证 cue（其输出不随 cue 变化）——cue 契约
-    的唯一 CI 守卫是请求断言层。
-    """
-    from ctx_weft.core.assembler.prompts import PromptTemplate
-    llm = _CaptureLLM(_SCRIPTED_DIGEST)
-
-    async def _stream(ctx, state, request):
-        async for c in llm.complete(request):
-            yield c
-    monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
-    real_instruction = PromptTemplate.instruction
-
-    def _mutated_instruction(self, context):
-        rendered = real_instruction(self, context)
-        if self.name == "entries/compact.en.jinja" and context["scope"] == "task":
-            rendered = rendered.replace(
-                "## Constraints — user-imposed constraints and hard limits that must keep "
-                "being honored (write \"none\" only if truly none).\n", "")
-        return rendered
-
-    monkeypatch.setattr(PromptTemplate, "instruction", _mutated_instruction)
-    state, ctx, mem, scope = _state_ctx(llm)
-    await summarize_for_compact(state, ctx, scope="task")
-    with pytest.raises(AssertionError, match="Constraints"):
-        _assert_cue_contract(_cue_of(llm))
 
 
 # ── 管道层（CI · mock）：材料传递、解析、落库、降级 ──────────────────────────

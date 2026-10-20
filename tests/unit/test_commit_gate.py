@@ -127,7 +127,7 @@ def _runtime_with_bus(resolver, bus):
     return CtxWeftRuntime(providers=providers, event_bus=bus)
 
 
-def test_best_effort_accepts_unsupported_bus_with_warning(caplog):
+async def test_best_effort_accepts_unsupported_bus_with_warning(caplog):
     from ctx_weft.core.models.config import RuntimeConfig
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_echo_template
 
@@ -137,6 +137,7 @@ def test_best_effort_accepts_unsupported_bus_with_warning(caplog):
     with caplog.at_level(logging.WARNING):
         rt = _runtime_with_bus_cfg(resolver, _ForeignBus(),
                                    RuntimeConfig(event_commit_policy="best_effort"))
+    await rt.initialize()
     assert rt.persistence is not None                  # 旧观察者路径
     assert any("best_effort" in r.message for r in caplog.records)
 

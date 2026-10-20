@@ -41,6 +41,7 @@ async def test_outage_marks_session_interrupted_not_failed():
         return await orig_emit(ev)
     runtime._event_bus.emit = _spy
 
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
 
     # task must NOT be terminal-failed

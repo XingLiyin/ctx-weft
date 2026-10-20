@@ -17,6 +17,9 @@ from ctx_weft.protocols.events import EventType
 
 
 class _CapturingBus:
+    async def emit_batch(self, events):
+        self.events.extend(events)
+
     def __init__(self) -> None:
         self.events: list = []
 
@@ -266,3 +269,52 @@ async def test_finalize_is_not_called_for_retry() -> None:
 
 async def _noop() -> None:
     return None
+
+
+async def test_cancel_wins_against_late_verdict():
+    tm, bus = _tm()
+    task = _parked(tm, outputs="answer")
+    assert await tm.cancel_stopped_task(task.id, "user canceled")
+    assert not await tm.apply_out_of_band_verdict(task.id, _success(), process_report="obsolete")
+    assert task.status == "CANCELED"
+    assert task.process_report is None
+    assert _types(bus) == [EventType.TASK_CANCELED]
+    assert not await tm.cancel_stopped_task(task.id, "again")
+
+
+async def test_committed_verdict_wins_before_cancel_even_before_task_finished():
+    import asyncio
+    tm, bus = _tm()
+    task = _parked(tm, outputs="answer")
+    committed = asyncio.Event()
+    release = asyncio.Event()
+    async def before_apply(accepted, disposition):
+        assert accepted and disposition.status == "FINISHED"
+    async def finalize():
+        committed.set()
+        await release.wait()
+    producer = asyncio.create_task(tm.apply_out_of_band_verdict(task.id, _success(),
+        before_apply=before_apply, finalize=finalize))
+    await committed.wait()
+    assert EventType.TASK_FINISHED not in _types(bus)
+    assert not await tm.cancel_stopped_task(task.id, "late cancel")
+    release.set()
+    assert await producer
+    assert task.status == "FINISHED"
+    assert _types(bus) == [EventType.TASK_FINISHED]
+
+
+async def test_failed_cancel_commit_does_not_revoke_observer():
+    import pytest
+    tm, bus = _tm()
+    task = _parked(tm, outputs="answer")
+    original = bus.emit
+    async def fail(event):
+        raise OSError("cancel commit failed")
+    bus.emit = fail
+    with pytest.raises(OSError, match="cancel commit failed"):
+        await tm.cancel_stopped_task(task.id, "cancel")
+    assert task.status == "AWAITING_HUMAN"
+    bus.emit = original
+    assert await tm.apply_out_of_band_verdict(task.id, _success())
+    assert task.status == "FINISHED"

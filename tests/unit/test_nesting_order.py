@@ -14,7 +14,7 @@ G2：场景中的短叶子 task 保留 raw body。
 G3：长 task 的 body = [user 锚点 + 段摘要]，末 raw 段被 supersede。
 G4：跨 agent 子（不同 agent_id）的 body 不进父 prompt（仅黑盒 dispatch result）。
 
-驱动 REAL `AgentRecallSource` + REAL `DefaultComposer._history_to_messages_with_sources`
+驱动 REAL `AgentRecallSource` + REAL `PromptBuilder` 历史投影
 （生产排序 + tool_call/tool_call_id 无损重建），与 test_open_closed_recall.py /
 test_dispatch_fold_golden.py 同范式。
 
@@ -32,7 +32,6 @@ from ctx_weft.core.utils.estimate import estimate_tokens
 
 import pytest
 
-from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.finalize import (
     _supersede_final_raw_segment,
@@ -43,6 +42,7 @@ from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import history_messages
 
 pytestmark = pytest.mark.asyncio
 
@@ -120,12 +120,11 @@ async def _ingest_finish_pair(mem, scope, *, task_id, parent_task_id, outputs,
 
 
 async def _compose_messages(mem, agent_scope):
-    """REAL AgentRecallSource.fetch → REAL DefaultComposer 排序/重建 → list[LLMMessage]."""
+    """REAL AgentRecallSource.fetch → REAL PromptBuilder 排序/投影 → list[LLMMessage]."""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
-    triples = DefaultComposer()._history_to_messages_with_sources(blocks)
-    return [m for m, *_ in triples]
+    return history_messages(blocks, task_id=agent_scope.task_id or "")
 
 
 def _make_task(task_id, agent_id, *, parent_task_id=None, creator_agent_id=None,
@@ -295,27 +294,27 @@ async def test_g1_naive_seqno_primary_would_misorder() -> None:
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
 
     # 正确排序（timestamp-primary）：C finish 在 P 续跑(t=9) 之前
-    correct = sorted(blocks, key=lambda b: (b.metadata.get("timestamp", ""),
-                                            b.metadata.get("seq_no", 0)))
+    correct = sorted(blocks, key=lambda b: (b.value.timestamp,
+                                            b.metadata.get("sequence", 0)))
     c_finish_correct = [i for i, b in enumerate(correct)
-                        if b.metadata.get("role") == "assistant"
+                        if b.value.role == "assistant"
                         and any(tc.get("name", "").endswith("finish_task")
-                                for tc in b.metadata.get("tool_calls", []))]
+                                for tc in b.value.metadata.get("tool_calls", []))]
     p_resume_correct = [i for i, b in enumerate(correct)
-                        if b.content == "P 续跑"]
+                        if b.value.content == "P 续跑"]
     assert c_finish_correct and p_resume_correct
     assert c_finish_correct[0] < p_resume_correct[0], (
         "timestamp-primary: C finish (logical t=8) must precede P resume (t=9)"
     )
 
     # 错误排序（seq_no-primary，跨 scope 不可比）：C finish 晚 ingest → 被推后
-    naive = sorted(blocks, key=lambda b: (b.metadata.get("seq_no", 0),
-                                          b.metadata.get("timestamp", "")))
+    naive = sorted(blocks, key=lambda b: (b.metadata.get("sequence", 0),
+                                          b.value.timestamp))
     c_finish_naive = [i for i, b in enumerate(naive)
-                      if b.metadata.get("role") == "assistant"
+                      if b.value.role == "assistant"
                       and any(tc.get("name", "").endswith("finish_task")
-                              for tc in b.metadata.get("tool_calls", []))]
-    p_resume_naive = [i for i, b in enumerate(naive) if b.content == "P 续跑"]
+                              for tc in b.value.metadata.get("tool_calls", []))]
+    p_resume_naive = [i for i, b in enumerate(naive) if b.value.content == "P 续跑"]
     assert c_finish_naive[0] > p_resume_naive[0], (
         "seq_no-primary WOULD mis-order C finish after P resume — confirms test discriminates "
         "the design's central ordering claim"

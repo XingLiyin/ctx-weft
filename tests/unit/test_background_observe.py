@@ -14,18 +14,7 @@ from ctx_weft.core.capabilities.control_tools import (
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop import task_memory_fold as fp
 from ctx_weft.core.loop.driver import StepDriver
-from ctx_weft.core.loop.steps import observe as recap_mod
 from ctx_weft.protocols import MemoryEventType
-
-
-@pytest.fixture(autouse=True)
-def _clear_module_state():
-    """Clear module-level dicts between tests to avoid cross-test lock/event-loop pollution."""
-    fp._close_report.clear()
-    fp._close_synth.clear()
-    yield
-    fp._close_report.clear()
-    fp._close_synth.clear()
 
 
 # ── helpers shared by new ReAct-based tests ───────────────────────────────────
@@ -63,16 +52,20 @@ def _neutralize_refold_guard(monkeypatch, ctx) -> None:
     from datetime import datetime, timezone
 
     from ctx_weft.protocols import MemoryEventType as MT
-    from ctx_weft.protocols import MemoryKind, MemoryRecord, MemoryScope
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryRecord, MemoryScope
 
     async def fake_load_view(address, scope, pctx, kinds=None):
         return [MemoryRecord(
             id="guard", type=MT.LLM_RESPONSE, content="x",
-            timestamp=datetime.now(timezone.utc), role="assistant",
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc), role="assistant",
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+            address=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         )]
 
     monkeypatch.setattr(ctx.memory, "load_view", fake_load_view)
+    async def fake_read_records(ids, pctx):
+        return await fake_load_view(None, None, pctx) if "guard" in ids else []
+    monkeypatch.setattr(ctx.memory, "read_records", fake_read_records)
 
 
 class _FakeGateway:
@@ -174,7 +167,7 @@ async def test_serialized_per_task(monkeypatch, fake_state_ctx):
 @pytest.mark.asyncio
 async def test_await_pending_waits_for_latest_when_two_launched(monkeypatch, fake_state_ctx):
     """Regression: when two observes launch for the same task_id, the first completing
-    must NOT clear _task_pending — await_pending_recap must wait for the
+    must NOT clear _task_pending — await_pending_observe must wait for the
     second (latest) observe to finish.
     """
     state, ctx = fake_state_ctx
@@ -208,7 +201,7 @@ async def test_await_pending_waits_for_latest_when_two_launched(monkeypatch, fak
     await StepDriver.for_context(ctx).executions.wait(state.task.id)
 
     assert second_done, (
-        "await_pending_recap returned before the second (latest) observe "
+        "await_pending_observe returned before the second (latest) observe "
         "finished — _task_pending was incorrectly cleared by the first task's callback"
     )
     await asyncio.gather(t1, t2)
@@ -253,8 +246,8 @@ async def test_background_interrupt_writes_segment_summary(monkeypatch, fake_sta
 
 
 @pytest.mark.asyncio
-async def test_background_close_no_memory_writes_slot(monkeypatch, fake_state_ctx):
-    """boundary="finish": run 后无 TASK_COMPACT_SUMMARY；结果落 _close_report 槽"""
+async def test_background_close_waits_for_persisted_finish(monkeypatch, fake_state_ctx):
+    """boundary="finish": Completed 后等待 finish 对，应用报告后才销账"""
     state, ctx = fake_state_ctx
     ctx.capability_gateway = _FakeGateway("段总结X")
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
@@ -262,14 +255,22 @@ async def test_background_close_no_memory_writes_slot(monkeypatch, fake_state_ct
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_report_observation)
 
     t = StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
+    for _ in range(100):
+        if any(e.type == "ObserveCompleted" for e in ctx.event_bus.emitted):
+            break
+        await asyncio.sleep(0.01)
+    assert not t.done(), "a report in Completed is not applied before finish slots exist"
+    from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
+    await _synthesize_dispatch_pair(ctx.memory, state.scope, state.task, "", "", "success", ctx.provider_ctx)
+    StepDriver.for_context(ctx).executions.notify_finish(state.task.id)
     await t
 
     from ctx_weft.protocols import MemoryEventType as MT
     recs = await ctx.memory.recall_recent(
         state.scope, [MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
     assert recs == []
-    result = fp.pop_close_report(state.task.id)
-    assert result is not None
+    target = await fp.find_finish_target(ctx.memory, ctx.provider_ctx, state.scope, state.task.id)
+    assert target is not None
 
 
 @pytest.mark.asyncio
@@ -406,7 +407,7 @@ async def test_no_usable_report_close_does_not_fill_slot(monkeypatch, fake_state
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
-    assert fp.pop_close_report(state.task.id) is None, "无可用报告不得占用 close_report 槽"
+    assert not any(e.type == "MemoryCompacted" for e in ctx.event_bus.emitted)
 
 
 @pytest.mark.asyncio
@@ -441,7 +442,6 @@ async def test_no_usable_report_close_preserves_existing_finish_pair(monkeypatch
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
-    fp.register_close_synth(state.task.id, "tc9", state.scope, "success")
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
     turns = await ctx.memory.recall_recent(
@@ -449,7 +449,6 @@ async def test_no_usable_report_close_preserves_existing_finish_pair(monkeypatch
     contents = sorted(r.content for r in turns)
     assert contents == ["finalize recap", "finalize summary"], \
         f"finish 对不得被占位符重写，实得 {contents}"
-    assert fp._close_synth == {}, "close_synth 登记须被弹掉防泄漏"
 
 
 @pytest.mark.asyncio
@@ -468,6 +467,8 @@ async def test_background_zero_state_pollution(monkeypatch, fake_state_ctx):
         state.task.observer_outcome = None
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream_report_observation)
 
+    from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
+    await _synthesize_dispatch_pair(ctx.memory, state.scope, state.task, "", "", "success", ctx.provider_ctx)
     before = (state.task.status, state.task.actor_done, state.task.observer_outcome)
     t = StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
     await t
@@ -565,8 +566,7 @@ async def test_dispatch_boundary_refold_guard_skips(monkeypatch, fake_state_ctx)
 
 @pytest.mark.asyncio
 async def test_dispatch_recap_completes_benignly_after_cancel(monkeypatch, fake_state_ctx):
-    """SUSPENDED 期间被取消：在途 dispatch recap 事后完成——不抛错、照常折段、
-    不回写 task 状态（spec 2026-07-16 §2 并发边界：接受，不加同步）。"""
+    """A canceled task rejects obsolete recap memory application without failing."""
     state, ctx = fake_state_ctx
     ctx.capability_gateway = _FakeGateway("段总结X")
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
@@ -588,7 +588,7 @@ async def test_dispatch_recap_completes_benignly_after_cancel(monkeypatch, fake_
     from ctx_weft.protocols import MemoryEventType as MT
     recs = await ctx.memory.recall_recent(
         state.scope, [MT.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
-    assert len(recs) == 1, "折的是取消前已存在的 raw——照常成段摘要（良性）"
+    assert len(recs) == 0, "取消收尾拥有记忆，旧 recap 不得继续折叠原文"
 
 
 @pytest.mark.asyncio

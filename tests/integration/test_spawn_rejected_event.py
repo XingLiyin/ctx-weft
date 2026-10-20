@@ -13,6 +13,8 @@ import dataclasses as _dc
 
 import pytest
 
+from tests.runtime_helpers import close_runtime
+
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols.events import EventType
@@ -62,10 +64,11 @@ async def _wait_for_event(runtime, session_id, event_type, timeout=8.0):
     )
 
 
-async def test_depth_limit_emits_spawn_rejected():
+async def test_depth_limit_emits_spawn_rejected(runtime_factory):
     llm = _SpawnLLM()
-    runtime = _make_runtime(llm)
+    runtime = runtime_factory(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -81,11 +84,12 @@ async def test_depth_limit_emits_spawn_rejected():
     assert ev.payload.get("attempted_subtask_id")
 
 
-async def test_spawn_rejected_names_the_parent_not_a_phantom_child():
+async def test_spawn_rejected_names_the_parent_not_a_phantom_child(runtime_factory):
     """子 agent 没诞生，envelope 的 agent_id 必须是**父**——没有子 id 可填。"""
     llm = _SpawnLLM()
-    runtime = _make_runtime(llm)
+    runtime = runtime_factory(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -100,11 +104,12 @@ async def test_spawn_rejected_names_the_parent_not_a_phantom_child():
     assert rejected[-1].agent_id == root_agent_id
 
 
-async def test_rejected_spawn_produces_no_agent_instantiated():
+async def test_rejected_spawn_produces_no_agent_instantiated(runtime_factory):
     """被拒 = 没有 agent 诞生。两个事件的分工正靠这条守住。"""
     llm = _SpawnLLM()
-    runtime = _make_runtime(llm)
+    runtime = runtime_factory(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
@@ -123,3 +128,17 @@ async def test_rejected_spawn_produces_no_agent_instantiated():
     ]
 
     assert born_for_subtask == []
+
+
+@pytest.fixture
+async def runtime_factory():
+    runtimes = []
+
+    def create(llm):
+        runtime = _make_runtime(llm)
+        runtimes.append(runtime)
+        return runtime
+
+    yield create
+    for runtime in runtimes:
+        await close_runtime(runtime)

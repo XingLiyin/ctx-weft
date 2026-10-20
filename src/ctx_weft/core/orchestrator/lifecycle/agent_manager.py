@@ -6,6 +6,7 @@ Capability 解析已移至 PrepareStep（CapabilityResolver），
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -13,6 +14,7 @@ from typing import ClassVar, Protocol
 
 from ctx_weft.core.control.types import AgentView
 from ctx_weft.core.utils.event import emit_event
+from ctx_weft.core.utils.event import new_event
 from ctx_weft.core.models.errors import AgentBusyError, AgentNotFound, AgentTerminatedError, CtxWeftError
 from ctx_weft.core.orchestrator.lifecycle.agent_state import AgentInput, next_agent_transition
 from ctx_weft.core.orchestrator.model import ModelChoice, ModelResolver, ResolvedModel
@@ -95,6 +97,7 @@ class _AgentRecord:
     loop_config: LoopConfig
     llm: ModelChoice = field(default_factory=ModelChoice)
     status: str = "idle"                     # spec 3.1 五态机的当前值
+    status_reason: str = ""
     current_task_id: str | None = None       # 消息路由据此判断新建还是复用 task
     #: 实例化时刻。恢复路径（`load`）留 None——`AgentView` 不带该字段，
     #: 硬造一个「恢复时刻」当创建时刻是在撒谎。host 侧要精确值可读
@@ -123,6 +126,7 @@ class AgentRecordView:
     status: str
     current_task_id: str | None
     created_at: datetime | None
+    status_reason: str = ""
 
 
 @dataclass
@@ -145,6 +149,8 @@ class AgentLifecycleManager:
     # forget_session / forget_agent 必须把摘除的 agent 从键和所有值集合里都清掉，否则
     # descendants_of 会经由悬垂引用「复活」已逐出的 agent（见二者内注释）。
     _children: dict[str, set[str]] = field(default_factory=dict)
+    _transition_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
+    _pending_idle: dict[str, Event] = field(default_factory=dict, init=False, repr=False)
 
     # ── ALM：TASK_* 驱动五态机，发 AGENT_* ─────────────────────────────────
 
@@ -221,20 +227,27 @@ class AgentLifecycleManager:
                 and self._agents[agent_id].current_task_id != ev.task_id):
             return  # A late review belongs to the old task, not the new execution.
         p = ev.payload or {}
+        rec = self._agents[agent_id]
+        if rec.status == "terminated":
+            return
         task_id = ev.task_id
         if ev.type == EventType.TASK_REVIEWING:
             successor = p.get("successor", {}).get("task", {})
             if successor.get("assigned_agent_id") == agent_id:
                 task_id = successor.get("id") or task_id
-        if task_id:
-            self._agents[agent_id].current_task_id = task_id
         await self.apply_input(
             agent_id,
             inp,
             task_id=task_id,
             hitl_id=str(p.get("hitl_id", "")),
             reason=str(p.get("reason", "")) or _SETTLE_REASON.get(ev.type, ""),
+            expected_task_id=ev.task_id if inp is AgentInput.SETTLED else None,
         )
+
+    async def confirm_settled(self, agent_id: str, task_id: str) -> None:
+        """Reconcile a confirmed task terminal fact, without inspecting other tasks."""
+        await self.apply_input(agent_id, AgentInput.SETTLED, task_id=task_id,
+                               expected_task_id=task_id, reason="task_settled")
 
     async def apply_input(
         self,
@@ -245,6 +258,7 @@ class AgentLifecycleManager:
         hitl_id: str = "",
         reason: str = "",
         cascaded_from: str | None = None,
+        expected_task_id: str | None = None,
     ) -> bool:
         """状态转移与事件发射的**唯一入口**。返回是否真的发生了转移。
 
@@ -252,26 +266,49 @@ class AgentLifecycleManager:
         任何要驱动五态机的调用方都不得绕过本方法直接改 `rec.status` 或直接
         `event_bus.emit`，否则「转移即发事件」这条不变量会被绕开一半。
         """
-        rec = self._agents.get(agent_id)
-        if rec is None:
-            return False
-        tr = next_agent_transition(
-            rec.status, inp,
-            task_id=task_id, hitl_id=hitl_id, reason=reason, cascaded_from=cascaded_from,
-        )
-        if tr is None:
-            return False
-        rec.status = tr.status
-        await emit_event(
-            self.event_bus, tr.event_type,
-            session_id=rec.session_id,
-            tenant_id=rec.tenant_id,
-            origin=_ORIGIN,
-            task_id=task_id,
-            agent_id=agent_id,
-            payload=dict(tr.payload),
-        )
-        return True
+        async with self._transition_locks.setdefault(agent_id, asyncio.Lock()):
+            rec = self._agents.get(agent_id)
+            if rec is None:
+                return False
+            if (inp is AgentInput.SETTLED and rec.current_task_id
+                    and rec.current_task_id != (expected_task_id or task_id)):
+                return False
+            pending = self._pending_idle.get(agent_id)
+            if pending is not None and pending.task_id != rec.current_task_id:
+                self._pending_idle.pop(agent_id, None)
+                pending = None
+            tr = next_agent_transition(
+                rec.status, inp,
+                task_id=task_id, hitl_id=hitl_id, reason=reason, cascaded_from=cascaded_from,
+            )
+            if tr is None:
+                if rec.status != "terminated" and task_id:
+                    rec.current_task_id = task_id
+                return False
+            previous = rec.status, rec.status_reason, rec.current_task_id
+            rec.status, rec.status_reason = tr.status, reason
+            if task_id:
+                rec.current_task_id = task_id
+            try:
+                event = (pending if inp is AgentInput.SETTLED and pending is not None else new_event(
+                    tr.event_type,
+                    session_id=rec.session_id,
+                    tenant_id=rec.tenant_id,
+                    origin=_ORIGIN,
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    payload=dict(tr.payload),
+                ))
+                if inp is AgentInput.SETTLED:
+                    self._pending_idle[agent_id] = event
+                    rec.status_reason = event.payload.get("reason", reason)
+                await self.event_bus.emit(event)
+            except BaseException:
+                rec.status, rec.status_reason, rec.current_task_id = previous
+                raise
+            if inp is AgentInput.SETTLED or inp is AgentInput.TASK_STARTED:
+                self._pending_idle.pop(agent_id, None)
+            return True
 
     # ── 登记 ─────────────────────────────────────────────────────────────
 
@@ -290,6 +327,8 @@ class AgentLifecycleManager:
         操作一个幽灵。这就是「悬垂引用」的具体后果。
         """
         removed = {aid for aid in ids if self._agents.pop(aid, None) is not None}
+        for aid in removed:
+            self._pending_idle.pop(aid, None)
         for aid in ids:
             self._children.pop(aid, None)
         if removed:
@@ -382,6 +421,7 @@ class AgentLifecycleManager:
             parent_agent_id=rec.parent_agent_id,
             spawn_depth=rec.spawn_depth,
             status=rec.status,
+            status_reason=rec.status_reason,
             current_task_id=rec.current_task_id,
             created_at=rec.created_at,
         )
@@ -614,7 +654,6 @@ class AgentLifecycleManager:
         # 发起下一轮 `recover_agent()`，两个 TaskManager 竞争同一个 session，
         # 任务卡死在 INTERRUPTED 永不完成（不是这个测试脆弱，是这类消费者对「事件
         # 到达 = 新事实发生」的假设本就合理，广播不该在没有新事实时重复兑现它）。
-        cold_ids = {av.id for av in agent_views.values() if av.id not in self._agents}
         for av in agent_views.values():
             template_id = av.template_id
             if not template_id:
@@ -660,6 +699,7 @@ class AgentLifecycleManager:
                 # 重置成 idle，即使它重启前正处于 waiting_human（有未决 HITL 挂着），
                 # 导致 `assert_can_receive` 错误放行、`send_message` 的路由判断失准。
                 status=av.status,
+                status_reason=av.status_reason,
                 current_task_id=current_task_id,
             )
             if av.parent_agent_id is not None:
@@ -679,28 +719,6 @@ class AgentLifecycleManager:
                 # 不会留下指向「已被移除的 agent」的悬垂值。
                 self._children.setdefault(av.parent_agent_id, set()).add(av.id)
             n += 1
-
-        # 恢复期现状广播（2026-09-04 spec §6.4）：装填完把折出来的状态照实发一遍，
-        # 取代此前由 runtime 代 TaskManager 发的队列聚合信号（那条信号的消费者
-        # SessionRegistry 早已不订阅它）。只对上面记下的 `cold_ids` 发——见那段注释。
-        #
-        # 「恢复不是一种状态」：这里发的是**现状**不是新状态，不引入 RECOVERING
-        # 之类的值域，也不经状态机——`apply_input` 是给真实转移用的，这里是把已经
-        # 成立的事实广播出去，走同一个发射点（ALM 是 AGENT_* 的唯一发射者）。
-        #
-        # `terminated` 不发：它是粘滞终态，host 投影里本就已经是终态，重发没有信息。
-        for av in agent_views.values():
-            if av.id not in cold_ids:
-                continue
-            event_type = self._RECOVERY_BROADCAST_BY_STATUS.get(av.status)
-            if event_type is None:
-                continue
-            await emit_event(
-                self.event_bus, event_type,
-                session_id=session_id, tenant_id=tenant_id,
-                origin=_ORIGIN, task_id=av.current_task_id, agent_id=av.id,
-                payload={"reason": "recovered"},
-            )
 
         return n
 

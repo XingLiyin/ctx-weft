@@ -85,7 +85,9 @@ async def test_recover_agent_rebuilds_pending_hitl_and_parks() -> None:
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
+    await runtime.initialize()
     await runtime.rebuild_session("ses_1")
+    await runtime.initialize()
     await runtime.recover_agent("agt_root")
     await asyncio.sleep(0)
 
@@ -213,7 +215,8 @@ async def test_recover_emits_paused_hitl_for_pending_session() -> None:
     await rebuild_all_active(runtime)
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     # 面板 vs 一句话的区分仍在，只是原始事实（delivery）搬去了 host 的只读入口。
-    pending = runtime.list_pending_hitl(session_id="ses_1")
+    await runtime.initialize()
+    pending = [item.data for item in await runtime.list_pending_hitl(session_id="ses_1")]
     assert isinstance(pending[0].delivery, ToolResultDelivery)
 
 
@@ -280,7 +283,8 @@ async def test_recover_emits_paused_for_wait_only_pending() -> None:
     await rebuild_all_active(runtime)
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
     # wait-only 不应误标「有面板」——前端会等一个不存在的面板。
-    pending = runtime.list_pending_hitl(session_id="ses_1")
+    await runtime.initialize()
+    pending = [item.data for item in await runtime.list_pending_hitl(session_id="ses_1")]
     assert isinstance(pending[0].delivery, UserTurnDelivery)
 
 
@@ -306,7 +310,8 @@ async def test_recover_emits_paused_hitl_when_wait_mixed_with_question() -> None
 
     await rebuild_all_active(runtime)
     assert signals == [], f"已退役的 SessionStatusChanged 不应重新出现: {signals}"
-    pending = {r.id: r for r in runtime.list_pending_hitl(session_id="ses_1")}
+    await runtime.initialize()
+    pending = {r.id: r for r in [item.data for item in await runtime.list_pending_hitl(session_id="ses_1")]}
     assert isinstance(pending["h1"].delivery, UserTurnDelivery)
     assert isinstance(pending["h2"].delivery, ToolResultDelivery)
 
@@ -366,8 +371,11 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
         await append_one(runtime.event_store, e)
 
     # 完整的热 owner 同时拥有 ALM 记录；rebuild 不再回放覆盖活 owner。
+    await runtime.initialize()
     await runtime._load_agents_of("ses_1")
+    await runtime.initialize()
     await runtime.rebuild_session("ses_1")
+    await runtime.initialize()
     await runtime.recover_agent("agt_root")
     await asyncio.sleep(0)
 
@@ -434,7 +442,9 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     tm.set_runner(StubRunner(tm, _runner))
     tm.register_task(Task(id="tsk_A", session_id="ses_1", status="SUSPENDED", settings=NormalTaskSettings()))
     runtime._task_managers["ses_1"] = tm
+    runtime._loaded_sessions.add("ses_1")
 
+    await runtime.initialize()
     await runtime.recover_agent("agt", resumed_task_id="tsk_A")
     for _ in range(10):
         await asyncio.sleep(0)

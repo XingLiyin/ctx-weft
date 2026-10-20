@@ -164,10 +164,11 @@ async def test_every_emitted_event_has_nonempty_origin():
 
     rt._event_bus.subscribe(None, _spy)
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
-    await handle.wait_for_finish(timeout=5.0)
+    await _poll(lambda: bool(rt.hitl_registry.list_pending(session_id=handle.session_id)))
     # background observe / recognize_intent 是 fire-and-forget：主 run 的
     # RunFinished 不代表它们也发完了，等三个 run（主 + recap + recognize_intent）
     # 各自的 RunFinished 落地。
@@ -195,6 +196,12 @@ async def test_hitl_service_emits_with_hitl_service_origin():
     from ctx_weft.protocols.hitl import HitlAsk, HitlReply, ToolResultDelivery
 
     class _RecordingBus:
+        async def emit_batch(self, events, *, on_committed=None):
+            if on_committed is not None:
+                on_committed()
+            for event in events:
+                await self.emit(event)
+
         def __init__(self) -> None:
             self.events: list[Event] = []
 
@@ -343,6 +350,7 @@ async def test_compact_agent_run_events_have_runtime_origin():
 
     rt._event_bus.subscribe(None, _spy)
 
+    await rt.initialize()
     await rt.compact_agent(aid)
 
     run_events = [ev for ev in seen if ev.type in (EventType.RUN_STARTED, EventType.RUN_FINISHED)]

@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import logging
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
@@ -215,7 +216,7 @@ class ActStep(Step):
 
             state.transcript = transcript
             state.task.switch_review_started = True
-            StepDriver.for_context(ctx).start(
+            await StepDriver.for_context(ctx).start_durable(
                 "observe", state, ctx, options={"boundary": "task_switch"})
             return StepOutcome(None, state_patch={
                 "transcript": transcript, "act_exit_reason": exit_reason,
@@ -434,29 +435,21 @@ async def _run_llm_turn(
     interrupted = False
     stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
 
-    async for chunk in _stream_until_stop(
-        stream, ctx,
-    ):
-        tok = ctx.cancel_token
-        if _interrupt_pending(ctx):
-            interrupted = True          # ② 软打断：停收 token，下面提交半截
-            break
-        if tok is not None and tok.is_cancelled:
-            tok.raise_if_cancelled()    # 硬取消 → CancelledError
-        # ── 提交点：本轮第一个 chunk ──────────────────────────────────────────
-        # 「一轮对话直到 LLM 真的开口才算发生」（spec 2026-09-09）。判据是**任意
-        # chunk**，不是第一个 token：模型第一句就调工具、一个字都不吐的回合很常见，
-        # 那种回合 `chunk.kind` 恒不是 "token"，等 token 就是永远等不到、整轮永不提交。
-        # 这也正是 gateway 内部 `yielded_anything` 的那条界（首 chunk 之前失败可重试、
-        # 之后断流直接抛 outage）——同一条界，这里把它从 gateway 的局部规则升成整轮的。
-        await commit_round(state, ctx)
-        if chunk.kind == "token":
-            ctx.run_phase.produced = True
-        elif chunk.kind == "tool_call_partial":
-            # 工具调用参数流式期间的心跳：不携带数据，仅为让上面的暂停/取消检查点
-            # 有机会触发（adapter 累积工具调用参数时不产出 token）。此处刻意不累积。
-            pass
-        stream.accept_current()
+    # A stop and a chunk can arrive together. A body exception/break does not
+    # close an async generator automatically; await closure before run unwind.
+    async with aclosing(_stream_until_stop(stream, ctx)) as chunks:
+        async for chunk in chunks:
+            tok = ctx.cancel_token
+            if _interrupt_pending(ctx):
+                interrupted = True
+                break
+            if tok is not None and tok.is_cancelled:
+                tok.raise_if_cancelled()
+            # Any first chunk commits the round, including a tool call with no text.
+            await commit_round(state, ctx)
+            if chunk.kind == "token":
+                ctx.run_phase.produced = True
+            stream.accept_current()
 
     result = stream.partial_result()
     text, reasoning, usage = result.text, result.reasoning, result.usage
@@ -477,8 +470,6 @@ async def _run_llm_turn(
         # ① 已开口但本回合没吐正文（纯工具调用后被打断）：不留记录。随后 park 待用户续接。
         has_partial = bool(text.strip() or reasoning.strip())
         await _commit_interrupted_partial(state, ctx, text, reasoning, turn_num)
-        if _is_own_root(state.task):
-            StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
         await _park_for_interrupt(state, ctx, edit=not has_partial)
 
     # 摄入前铸造内部调用标识（spec: conversation-integrity）：LLM 复用 wire id（call_1
@@ -730,8 +721,6 @@ async def _execute_tool_calls(
             for rest in tool_calls[i:]:
                 await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
             ctx.run_phase.in_tool_loop = False
-            if _is_own_root(state.task):
-                StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
             await _park_for_interrupt(state, ctx)
         if ctx.cancel_token is not None and ctx.cancel_token.is_cancelled:
             ctx.cancel_token.raise_if_cancelled()
@@ -748,8 +737,6 @@ async def _execute_tool_calls(
                 for rest in tool_calls[i + 1:]:
                     await _ingest_synthetic_tool_result(state, ctx, rest, CANCELLED_MARK, cancelled=True)
                 ctx.run_phase.in_tool_loop = False
-                if _is_own_root(state.task):
-                    StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
                 await _park_for_interrupt(state, ctx)
             if ctx.cancel_token is not None:
                 ctx.cancel_token.raise_if_cancelled()  # 硬取消
@@ -1003,6 +990,8 @@ def interrupt_edit_note(prev_request: str, new_input: str) -> str:
 
 async def _cold_park(
     state: LoopState, ctx: LoopContext, preface: str, *, unattended: bool,
+    observe_boundary: str | None = None, await_user_turn: int | None = None,
+    preceding_events: tuple = (),
 ) -> None:
     """起 wait_for_user 冷 park：登记 HITL 请求 + 抛 HitlPark（task 落 AWAITING_HUMAN
     由 TaskManager 据 RunOutcome 定）。
@@ -1021,6 +1010,13 @@ async def _cold_park(
     续跑方式由 **delivery 显式声明**，不再靠 `form == "wait"` + sentinel capability_id
     这组跨三个模块的魔法字符串（spec §5）。
     """
+    observe_request = None
+    if observe_boundary is not None:
+        from ctx_weft.core.loop.steps.observe import make_observe_request, capture_context
+        observe_request = make_observe_request(
+            state, observe_boundary,
+            observe_boundary in {"plain_text", "finish_park", "task_switch"} and has_observe_role(state))
+        await capture_context(state, ctx, observe_request)
     req = await ctx.hitl.open(
         HitlAsk(
             form=HITL_FORM_WAIT,
@@ -1032,13 +1028,21 @@ async def _cold_park(
         stage=HITL_STAGE_TOOL,
         unattended=unattended,
         tenant_id=state.session.tenant_id,
+        observe_request=observe_request,
+        **({"preceding_events": preceding_events} if preceding_events else {}),
     )
+    if await_user_turn is not None:
+        await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
+            "turn": await_user_turn, "reason": "await_user"}))
+    if observe_request is not None:
+        await StepDriver.for_context(ctx).start_durable(
+            "observe", state, ctx, options=observe_request)
     # 不建等待槽 —— 本调用方随即 park 释放协程而非 await，应答必然走冷续跑。
     raise HitlPark(hitl_id=req.id)
 
 
 async def _park_for_interrupt(
-    state: LoopState, ctx: LoopContext, *, edit: bool = False,
+    state: LoopState, ctx: LoopContext, *, edit: bool = False, preceding_events: tuple = (),
 ) -> None:
     """人按了暂停键 → park 等他续接。**对无人值守守卫豁免**（`unattended=False`）。
 
@@ -1051,7 +1055,9 @@ async def _park_for_interrupt(
     token 且未进工具 → after_interrupt_edit（续接时需补一句「上一条请求被取消」）。
     """
     preface = PREFACE_AFTER_INTERRUPT_EDIT if edit else PREFACE_AFTER_INTERRUPT
-    await _cold_park(state, ctx, preface, unattended=False)
+    await _cold_park(state, ctx, preface, unattended=False,
+                     observe_boundary="interrupt",
+                     preceding_events=preceding_events)
 
 
 async def _park_await_user(
@@ -1093,8 +1099,6 @@ async def _park_await_user(
             state.task.id,
         )
         return
-    await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
-        "turn": turn_num, "reason": "await_user"}))
     # 纯文本暂停 = 软待命(允许但不强制回复) → PAUSED,区别于 ask_user 的 PAUSED_HITL。
     #
     # 2026-09-22 去掉了这里的 `_is_own_root` 闸：子任务的纯文本回合同样 park、同样要
@@ -1102,8 +1106,8 @@ async def _park_await_user(
     # 压根到不了前台 observe（它在这里就 park 了），于是子任务的这一段既没人判也没人折。
     # 并发不会因此失控：单交互线闸门保证一个 session 同时只有一条非 unattended 的线
     # （见 `TaskManager._interactive_line_held`）。
-    StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": boundary})
-    await _cold_park(state, ctx, PREFACE_NORMAL, unattended=state.task.unattended)
+    await _cold_park(state, ctx, PREFACE_NORMAL, unattended=state.task.unattended,
+                     observe_boundary=boundary, await_user_turn=turn_num)
 
 
 async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
@@ -1115,8 +1119,6 @@ async def _interrupt_checkpoint(state: LoopState, ctx: LoopContext) -> None:
     if _interrupt_pending(ctx):
         await discard_uncommitted_round(state, ctx)   # 命中则 raises RoundDiscarded
         edit = not ctx.run_phase.produced and not ctx.run_phase.in_tool_loop
-        if _is_own_root(state.task):
-            StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
         await _park_for_interrupt(state, ctx, edit=edit)  # raises HitlPark
     tok = ctx.cancel_token
     if tok is not None and tok.is_cancelled:

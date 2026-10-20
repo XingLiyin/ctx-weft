@@ -52,9 +52,9 @@ class SuspendStep(Step):
         # dispatch 段边界（spec 2026-07-16）：父坐实 SUSPENDED 后 fire-and-forget 后台
         # recap，折派发前 raw——挂起空窗跑 LLM。所有委派父生效（不加 _is_own_root 门控）；
         # resume 竞态由 launch 时钉住的段界水位线接管（2026-09-22 起 `_run_loop` 入口那道
-        # 屏障已拆除，`await_pending_recap` 只剩测试在调）：迟到的折叠只认这次 launch 之前
+        # 屏障已拆除，`await_pending_observe` 只剩测试在调）：迟到的折叠只认这次 launch 之前
         # 的记录，不抢段界、也不排到新消息之后。
-        StepDriver.for_context(ctx).start(
+        await StepDriver.for_context(ctx).start_durable(
             "observe", state, ctx, options={"boundary": "dispatch", "judge_task": False})
 
         run_outcome = RunOutcome(

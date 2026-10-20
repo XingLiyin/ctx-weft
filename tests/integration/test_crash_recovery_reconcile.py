@@ -136,8 +136,10 @@ async def test_crash_mid_tool_reinvokes_dangling_via_reconcile() -> None:
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
+    await runtime.initialize()
     await runtime.rebuild_session(sid)
     with suppress_observe_start():
+        await runtime.initialize()
         await runtime.recover_agent(aid)
         for _ in range(50):
             if tool.invoked:

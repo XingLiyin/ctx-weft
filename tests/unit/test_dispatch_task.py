@@ -67,6 +67,7 @@ async def _runtime_with_session(*, responses: list[MockResponse] | None = None):
 
     rt.event_bus.subscribe(None, _cap)
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="root turn", context_limit=180_000,
     ))
@@ -89,6 +90,7 @@ async def test_fresh_tree_has_no_parent_and_does_not_touch_root_agent():
     rt, sid, root, events = await _runtime_with_session()
     before = len(events)
 
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "background job",
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
@@ -118,6 +120,7 @@ async def test_port_key_lands_on_the_task():
     """
     rt, sid, root, _ = await _runtime_with_session()
 
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "顺便问一句",
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo",
@@ -139,6 +142,7 @@ async def test_unattended_without_port_key_falls_back_to_no_port():
     """
     rt, sid, root, _ = await _runtime_with_session()
 
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "background job",
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
@@ -158,6 +162,7 @@ async def test_explicit_main_port_with_unattended_is_the_third_cell():
     """
     rt, sid, root, _ = await _runtime_with_session()
 
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "nightly report",
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
@@ -177,6 +182,7 @@ async def test_derived_subtree_records_parent_and_depth():
     rt, sid, root, events = await _runtime_with_session()
     before = len(events)
 
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "derived job", agent_id=root,
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
@@ -212,6 +218,7 @@ async def test_replay_rebuilds_the_same_forest(derive: bool):
     """
     rt, sid, root, _ = await _runtime_with_session()
 
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "job", agent_id=(root if derive else None),
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
@@ -242,12 +249,14 @@ async def test_busy_agent_rejects_execution_but_allows_parenting():
 
     before = len(events)
     with pytest.raises(AgentBusyError):
+        await rt.initialize()
         await rt.dispatch_task(sid, "run it on A", agent_id=root)
     assert events[before:] == [], "拒绝路径零副作用：不发事件"
     assert len(rt._task_managers[sid].all_tasks()) == 1, "也不入队"
     assert len(rt._agent_lifecycle_manager.agent_ids_of_session(sid)) == 1, "也不建 agent"
 
     # 同一个 running 的 A，当血缘父放行
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "graft a subtree onto busy A", agent_id=root,
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
@@ -264,8 +273,10 @@ async def test_terminated_agent_rejected_in_both_roles():
     rt._agent_lifecycle_manager._agents[root].status = "terminated"
 
     with pytest.raises(AgentTerminatedError):
+        await rt.initialize()
         await rt.dispatch_task(sid, "x", agent_id=root)
     with pytest.raises(AgentTerminatedError):
+        await rt.initialize()
         await rt.dispatch_task(
             sid, "x", agent_id=root,
             settings=NormalTaskSettings(use_subagent=True,
@@ -275,6 +286,7 @@ async def test_terminated_agent_rejected_in_both_roles():
 async def test_unknown_agent_rejected():
     rt, sid, _root, _ = await _runtime_with_session()
     with pytest.raises(AgentNotFound):
+        await rt.initialize()
         await rt.dispatch_task(sid, "x", agent_id="agt_nope")
 
 
@@ -290,6 +302,7 @@ async def test_derived_subtree_leaves_no_dispatch_frame_in_parent_scope():
     before = len(await mem.recall_recent(
         root_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 100, ctx))
 
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "derived job", agent_id=root,
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo",
@@ -312,6 +325,7 @@ async def test_fresh_tree_can_inherit_from_an_unrelated_agent():
     """血缘与记忆来源是正交的两个轴：无父的新树照样能拿 root 的上下文。"""
     rt, sid, root, _ = await _runtime_with_session()
 
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "continue from root's context",
         settings=NormalTaskSettings(
@@ -354,6 +368,7 @@ async def test_entry_validation_rejects_with_zero_side_effects(kwargs, why):
     before = len(events)
 
     with pytest.raises(ValueError):
+        await rt.initialize()
         await rt.dispatch_task(sid, "x", **kwargs)
 
     assert events[before:] == [], f"{why} —— 拒绝路径不得发任何事件"
@@ -362,6 +377,7 @@ async def test_entry_validation_rejects_with_zero_side_effects(kwargs, why):
 async def test_settings_accepts_raw_dict():
     """host 从 JSON 配置直接喂 —— 与 SessionStartParams.create(initial_task=dict) 同口径。"""
     rt, sid, _root, _ = await _runtime_with_session()
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "job",
         settings={"use_subagent": True, "subagent_template": "agent:tpl_echo"},
@@ -401,6 +417,7 @@ async def test_dispatch_works_where_resume_is_blocked_by_unfinished_tasks():
     rt.event_bus.subscribe(None, _cap)
 
     # root task 是 interactive 的（`_make_root_task_manager` 的口径）→ 纯文本即 park
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="root turn", context_limit=180_000,
     ))
@@ -415,6 +432,7 @@ async def test_dispatch_works_where_resume_is_blocked_by_unfinished_tasks():
 
     # resume 那条路在此状态下是关着的
     with pytest.raises(UnfinishedTasksError):
+        await rt.initialize()
         await rt.start_session(SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="another turn",
             context_limit=180_000, session_id=sid, resume=True,
@@ -422,6 +440,7 @@ async def test_dispatch_works_where_resume_is_blocked_by_unfinished_tasks():
 
     # 派发这条路开着，且不发 SessionResumed
     before = len(events)
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "an independent tree, while another task is parked",
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
@@ -437,6 +456,7 @@ async def test_dispatch_works_where_resume_is_blocked_by_unfinished_tasks():
 
 async def test_handle_agent_is_addressable_afterwards():
     rt, sid, _root, _ = await _runtime_with_session()
+    await rt.initialize()
     h = await rt.dispatch_task(
         sid, "job",
         settings=NormalTaskSettings(use_subagent=True, subagent_template="agent:tpl_echo"),
@@ -445,8 +465,10 @@ async def test_handle_agent_is_addressable_afterwards():
     await h.wait_for_finish(timeout=10.0)
 
     assert h.agent_id
-    assert rt.get_agent(h.agent_id) is not None
+    await rt.initialize()
+    assert (await rt.get_agent(h.agent_id)).data is not None
     # 跑完之后还能对这个 id 继续说话（开出下一轮）
+    await rt.initialize()
     nxt = await rt.send_message(h.agent_id, "and one more thing", session_id=sid)
     assert nxt.task_id != h.task_id
     assert nxt.agent_id == h.agent_id
@@ -459,6 +481,7 @@ async def test_dispatch_onto_existing_idle_agent_creates_no_new_agent():
     rt, sid, root, events = await _runtime_with_session()
     before = len(events)
 
+    await rt.initialize()
     h = await rt.dispatch_task(sid, "run on root", agent_id=root, unattended=True)
     await h.wait_for_finish(timeout=10.0)
 
@@ -482,6 +505,7 @@ async def _container(**kw):
         events.append(ev)
 
     rt.event_bus.subscribe(None, _cap)
+    await rt.initialize()
     sh = await rt.create_session(
         template_id="agent:tpl_echo", context_limit=180_000, **kw)
     return rt, sh, events
@@ -518,6 +542,7 @@ async def test_dispatch_into_a_container_session_runs(onto_root: bool):
     kwargs = ({"agent_id": sh.root_agent_id} if onto_root else
               {"settings": NormalTaskSettings(use_subagent=True,
                                               subagent_template="agent:tpl_echo")})
+    await rt.initialize()
     h = await rt.dispatch_task(sh.session_id, "first job", unattended=True, **kwargs)
     await h.wait_for_finish(timeout=10.0)
 
@@ -534,6 +559,7 @@ async def test_container_session_rejects_duplicate_session_id():
     rt, sh, _ = await _container(session_id="ses_fixed")
     assert sh.session_id == "ses_fixed"
     with pytest.raises(SessionAlreadyExistsError):
+        await rt.initialize()
         await rt.create_session(template_id="agent:tpl_echo", context_limit=180_000,
                                 session_id="ses_fixed")
 

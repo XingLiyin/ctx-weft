@@ -57,6 +57,7 @@ async def test_compact_agent_rejects_busy_session() -> None:
     rt._agent_lifecycle_manager.materialize(aid, session_id=sid, tenant_id="default")
     rt._busy_sessions.add(sid)  # simulate an active drain
     with pytest.raises(SessionBusyError):
+        await rt.initialize()
         await rt.compact_agent(aid)
 
 
@@ -65,6 +66,7 @@ async def test_compact_agent_unknown_agent_raises() -> None:
 
     rt = _runtime()
     with pytest.raises(AgentNotFound):
+        await rt.initialize()
         await rt.compact_agent("agt_missing")
 
 
@@ -131,10 +133,12 @@ async def test_compact_agent_uses_agent_lifecycle_managers_current_model_not_sta
     rt._agent_lifecycle_manager.materialize(aid, session_id=sid, tenant_id="default")
 
     # host 先经 registry 的真相源换模型……
+    await rt.initialize()
     changed = await rt.set_agent_llm(aid, llm_model="model-new")
     assert changed is True
 
     # ……再手动 compact：materialize() 拿到的 client 与 model 必须同源一致。
+    await rt.initialize()
     await rt.compact_agent(aid)
 
     assert old_llm.last_request is None, "旧模型不该被调用"
@@ -201,6 +205,7 @@ async def test_compact_agent_folds_agent_layer() -> None:
     )
     rt._agent_lifecycle_manager.materialize(aid, session_id=sid, tenant_id="default")
 
+    await rt.initialize()
     result = await rt.compact_agent(aid)
 
     assert result.session_id == sid

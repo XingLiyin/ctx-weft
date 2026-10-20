@@ -7,8 +7,11 @@ from ctx_weft.core.models.errors import (
     AgentNotLoaded,
     AgentNotRunningError,
     AgentTerminatedError,
+    RuntimeNotInitializedError,
     SessionAlreadyExistsError,
     SessionBusyError,
+    SessionNotFound,
+    TaskNotFound,
 )
 from ctx_weft.core.models.task import (
     CompactTaskSettings,
@@ -26,6 +29,10 @@ from ctx_weft.core.runtime import (
 from ctx_weft.protocols.agent import AgentDetail, AgentSummary, CompactReceipt
 from ctx_weft.protocols.events import EventStore
 from ctx_weft.protocols.hitl import HitlReply, HitlRequestView
+from ctx_weft.protocols.runtime import (
+    InitializationReport, QueryResult, SessionDetail, SessionInitializationResult,
+    SessionStateSummary, TaskDetail,
+)
 from ctx_weft.providers.events import InMemoryEventStore
 
 __all__ = [
@@ -35,6 +42,12 @@ __all__ = [
     "SessionStartParams",
     "TurnHandle",
     "SessionHandle",
+    "InitializationReport",
+    "SessionInitializationResult",
+    "SessionStateSummary",
+    "QueryResult",
+    "SessionDetail",
+    "TaskDetail",
     # 运行时配置：`CtxWeftRuntime(config=...)` 要求宿主传它，故它必须在受支持的
     # 导出面上——否则「只从顶层与 protocols 取名字」这条纪律对它无解，宿主只能深挖
     # `core.models.config`（迁移期实测踩到）。
@@ -54,6 +67,9 @@ __all__ = [
     "AgentTerminatedError",
     "SessionAlreadyExistsError",
     "SessionBusyError",
+    "RuntimeNotInitializedError",
+    "SessionNotFound",
+    "TaskNotFound",
     # 事件
     "EventStore",
     "InMemoryEventStore",

@@ -174,6 +174,9 @@ async def test_born_cancel_no_frame_skips_entirely() -> None:
 
 
 class _CapturingBus:
+    async def emit_batch(self, events):
+        self.events.extend(events)
+
     def __init__(self) -> None:
         self.events: list = []
 

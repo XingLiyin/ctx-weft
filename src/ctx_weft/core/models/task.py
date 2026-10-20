@@ -127,6 +127,8 @@ class Task:
     id: str
     session_id: str
     status: TaskStatus
+    # Recovery may retain a dependency solely for scheduling status checks.
+    details_complete: bool = field(default=True, kw_only=True)
     tenant_id: str = "default"
 
     assigned_agent_id: str | None = None
@@ -237,3 +239,4 @@ class Task:
     # 排在子 body 之前、反映真实启动顺序（避免 created_at 的兄弟碰撞/乱序）。每次 run 重置。
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    finalized: bool = False

@@ -23,6 +23,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+from tests.runtime_helpers import wait_for_park
+
 import pytest
 
 from ctx_weft.core.runtime import SessionStartParams
@@ -84,12 +86,13 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
                           observer_verdicts=["success"])
     runtime, tool = _make_runtime_with_bash_tool(llm, hitl_timeout_sec=0)
 
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
     ))
     sid = handle.session_id
 
-    state = await handle.wait_for_finish(timeout=5.0)
+    state = await wait_for_park(handle, timeout=5.0)
     assert state is not None and state.task.status == "AWAITING_HUMAN"
     assert tool.invocations == 0
 
@@ -99,6 +102,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     assert req.form == "approval"
     assert isinstance(req.delivery, ToolResultDelivery)
 
+    await runtime.initialize()
     view = await runtime.reply_to_hitl(HitlReply(
         hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
         modified_arguments={"command": "ls -l"},
@@ -135,12 +139,13 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
     sid = handle.session_id
 
-    state = await handle.wait_for_finish(timeout=5.0)
+    state = await wait_for_park(handle, timeout=5.0)
     assert state is not None and state.task.status == "AWAITING_HUMAN"
 
     pending = runtime.hitl_registry.list_pending(session_id=sid)
@@ -151,6 +156,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
 
     reply = HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id,
                       message="use postgres too")
+    await runtime.initialize()
     first_view = await runtime.reply_to_hitl(reply)
     assert first_view is not None and first_view.outcome == "accepted"
 
@@ -171,6 +177,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
     assert resolved[0].payload.get("hitl_id") == req.id
 
     # 重复应答是 no-op（resolve() 对已终局请求幂等返回 None），不该催生第二条。
+    await runtime.initialize()
     second_view = await runtime.reply_to_hitl(reply)
     assert second_view is None
     await asyncio.sleep(0.05)

@@ -8,18 +8,19 @@ Skips entirely if the title is already set or no recognize_intent tool is bound.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from contextlib import aclosing
 from typing import Any
 
-from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
+from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepDriver, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
     request_prompt_estimate,
     resolve_llm_identity,
     stream_llm_resilient,
 )
-from ctx_weft.core.loop.llm_stream import ensure_collected_stream
+from ctx_weft.core.loop.llm_stream import ensure_collected_stream, stream_until_cancel
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.events import EventType
 
@@ -36,6 +37,9 @@ class RecognizeIntentStep(Step):
     name = "recognize_intent"
 
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
+        token = getattr(ctx, "cancel_token", None)
+        if token is not None:
+            token.raise_if_cancelled()
         target_task = state.task
         target_task_id = target_task.id
 
@@ -74,6 +78,8 @@ class RecognizeIntentStep(Step):
             intent=MetadataIntent(),
         )
         prompt = await ctx.assembler.assemble(request)
+        if token is not None:
+            token.raise_if_cancelled()
 
         from ctx_weft.protocols import LLMRequest
 
@@ -120,10 +126,23 @@ class RecognizeIntentStep(Step):
         # （llm_gateway.py，同一轮复审修复）——进了这段代码往下走，就意味着 STARTED
         # 已经发出，下面的 except 分支据此才需要、也才能安全地补发 LLM_RESPONSE_FINISHED。
         stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
+        registry = StepDriver.for_context(ctx).executions
         try:
-            async with aclosing(stream):
-                async for _ in stream:
+            async with aclosing(stream_until_cancel(stream, token)) as chunks:
+                async for _ in chunks:
                     stream.accept_current()
+            if token is not None:
+                token.raise_if_cancelled()
+        except asyncio.CancelledError:
+            if getattr(stream, "request_started", False):
+                partial = stream.partial_result()
+                await registry.emit_metadata_event(ctx.event_bus, make_event(state, EventType.LLM_RESPONSE_FINISHED,
+                    payload={"request_id": req_id, "content": partial.text,
+                             "reasoning": partial.reasoning, "tool_calls": [],
+                             "usage": dataclasses.asdict(partial.usage),
+                             "llm_model": model, "llm_account": llm_account,
+                             "finish_reason": "cancelled"}))
+            raise
         except Exception as exc:
             partial = stream.partial_result()
             if getattr(exc, "retriable", False):
@@ -144,7 +163,7 @@ class RecognizeIntentStep(Step):
             # `StepDriver._run_background()` 因此仍会把这次失败报成
             # RUN_FINISHED(outcome=COMPLETED)——按该文档化的既定口径延续，未在本次改动中
             # 变更（复审记录见 task-6-report.md）。
-            await ctx.event_bus.emit(make_event(
+            await registry.emit_metadata_event(ctx.event_bus, make_event(
                 state, EventType.LLM_RESPONSE_FINISHED,
                 payload={
                     "request_id": req_id, "content": partial.text, "reasoning": partial.reasoning,
@@ -163,7 +182,7 @@ class RecognizeIntentStep(Step):
         # LLM_RESPONSE_FINISHED：gateway 只发流式侧 4 个事件，收尾事件由各调用方自己发
         # （同 act.py / compact.py 的既定分工）——否则 LLM_REQUEST_STARTED 有始无终，host
         # SSE 会看到一条永远等不到收尾的挂死请求。payload 结构照抄 act.py::_run_llm_turn。
-        await ctx.event_bus.emit(make_event(
+        await registry.emit_metadata_event(ctx.event_bus, make_event(
             state, EventType.LLM_RESPONSE_FINISHED,
             payload={
                 "request_id": req_id, "content": text, "reasoning": reasoning,
@@ -177,6 +196,8 @@ class RecognizeIntentStep(Step):
                 "finish_reason": "tool_use" if tool_name else "stop"}))
 
         if tool_name and ctx.capability_gateway is not None:
+            if token is not None:
+                token.raise_if_cancelled()
             await ctx.capability_gateway.invoke(
                 tool_name=tool_name,
                 arguments=tool_args,

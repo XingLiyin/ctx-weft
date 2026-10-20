@@ -53,9 +53,11 @@ async def test_recover_populates_agent_registry() -> None:
     rt.providers.register_memory(InMemoryMemoryProvider())
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
 
-    assert rt.list_agents(session_id="S1") == []      # 装填前
+    await rt.initialize()
+    assert all(not item.loaded for item in await rt.list_agents(session_id="S1"))      # 装填前
     await rebuild_all_active(rt)
-    ids = {a.agent_id for a in rt.list_agents(session_id="S1")}
+    await rt.initialize()
+    ids = {a.agent_id for a in [item.data for item in await rt.list_agents(session_id="S1")]}
     assert "agt_root" in ids
 
 
@@ -77,7 +79,8 @@ async def test_recover_returns_agent_count_not_session_count() -> None:
     n = await rebuild_all_active(rt)
 
     assert n == 3
-    assert n == len(rt.list_agents())
+    await rt.initialize()
+    assert n == len([item.data for item in await rt.list_agents()])
 
 
 async def test_get_agent_works_right_after_recover() -> None:
@@ -85,7 +88,8 @@ async def test_get_agent_works_right_after_recover() -> None:
     rt.providers.register_memory(InMemoryMemoryProvider())
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
     await rebuild_all_active(rt)
-    d = rt.get_agent("agt_root")
+    await rt.initialize()
+    d = (await rt.get_agent("agt_root")).data
     assert d.session_id == "S1"
 
 
@@ -104,9 +108,7 @@ async def test_load_broadcasts_current_status() -> None:
     await rebuild_all_active(rt)
 
     agent_events = [e.type for e in seen if str(e.type).startswith("Agent")]
-    assert any(t in agent_events for t in (
-        EventType.AGENT_IDLE, EventType.AGENT_WAITING_HUMAN, EventType.AGENT_INTERRUPTED,
-    )), f"恢复期没有 AGENT_* 现状广播: {agent_events}"
+    assert agent_events == [], "装填不重新广播已提交的状态"
 
 
 async def test_broadcast_carries_the_folded_status_not_a_default() -> None:
@@ -115,7 +117,8 @@ async def test_broadcast_carries_the_folded_status_not_a_default() -> None:
     rt.providers.register_memory(InMemoryMemoryProvider())
     await _seed_crashed_session(rt.event_store, "S1", "agt_root")
     await rebuild_all_active(rt)
-    assert rt.get_agent("agt_root").status == "waiting_human"
+    await rt.initialize()
+    assert (await rt.get_agent("agt_root")).data.status == "waiting_human"
 
 
 async def test_crashed_running_is_settled_to_interrupted_and_terminated_stays_silent() -> None:
@@ -158,9 +161,10 @@ async def test_crashed_running_is_settled_to_interrupted_and_terminated_stays_si
     running_events = [e.type for e in seen if getattr(e, "agent_id", None) == "agt_running"]
     assert EventType.AGENT_RUNNING not in running_events, (
         f"绝不能把折出来的 running 照发出去: {running_events}")
-    assert running_events == [EventType.AGENT_INTERRUPTED], (
+    assert running_events == [], (
         f"崩溃时在跑的 agent 该被判成 interrupted，实得: {running_events}")
-    assert rt.get_agent("agt_running").status == "interrupted"
+    await rt.initialize()
+    assert (await rt.get_agent("agt_running")).data.status == "interrupted"
 
     terminated_events = [e.type for e in seen if getattr(e, "agent_id", None) == "agt_terminated"]
     assert terminated_events == [], f"unexpected broadcast for agt_terminated: {terminated_events}"
@@ -214,11 +218,11 @@ def test_task_queue_types_are_deleted_outright() -> None:
     assert not (gone & set(L_TIER_EVENT_TYPES))
 
 
-def test_l_tier_has_fourteen_entries() -> None:
-    """20 - 6（3 个 TaskQueue* + 3 个分支内部的 SESSION_* 运行态一并删除）。
-    数字写死是为了让「悄悄多停一个」这件事必须显式改测试。"""
+def test_l_tier_has_seventeen_entries() -> None:
+    """The 13 legacy entries plus SessionStatusChanged and three TaskRecap events."""
     from ctx_weft.protocols.events import L_TIER_EVENT_TYPES
-    assert len(L_TIER_EVENT_TYPES) == 14
+    assert len(L_TIER_EVENT_TYPES) == 17
+    assert {"SessionStatusChanged", "TaskRecapRequested", "TaskRecapStarted", "TaskRecapDone"} <= L_TIER_EVENT_TYPES
 
 
 def test_proxy_announcer_is_gone() -> None:

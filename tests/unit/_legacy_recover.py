@@ -41,5 +41,6 @@ async def rebuild_all_active(rt: Any) -> int:
         f"rebuild_all_active 只支持 InMemoryEventStore，收到 {type(store).__name__}")
     total = 0
     for sid in list(session_ids.keys()):
+        await rt.initialize()
         total += await rt.rebuild_session(sid)
     return total

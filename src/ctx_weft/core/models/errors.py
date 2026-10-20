@@ -25,6 +25,10 @@ class CtxWeftError(Exception):
 # ── 状态相关 ───────────────────────────────────────────────────────────────────
 
 
+class RuntimeNotInitializedError(CtxWeftError):
+    code = "RUNTIME_NOT_INITIALIZED"
+
+
 class AgentNotFound(CtxWeftError):
     code = "AGENT_NOT_FOUND"
 

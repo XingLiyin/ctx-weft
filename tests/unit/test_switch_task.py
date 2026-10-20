@@ -249,6 +249,7 @@ async def test_runtime_new_goal_runs_before_old_review_and_late_review_keeps_age
             old_closed.set()
 
     rt.event_bus.subscribe(None, record)
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="switch to new request", context_limit=100_000))
     try:
         await asyncio.wait_for(new_started.wait(), 5)
@@ -260,7 +261,8 @@ async def test_runtime_new_goal_runs_before_old_review_and_late_review_keeps_age
         assert successor.status == "ACTIVE"
         release_review.set()
         await asyncio.wait_for(old_closed.wait(), 5)
-        agent = rt.get_agent(handle.agent_id)
+        await rt.initialize()
+        agent = (await rt.get_agent(handle.agent_id)).data
         assert agent.current_task_id == successor.id
         assert agent.status == "running"
         assert old.status == ("FINISHED" if old_verdict == "success" else "FAILED")
@@ -450,6 +452,7 @@ async def test_subtask_replacement_completes_parent_before_old_review(monkeypatc
             replacement_done.set()
 
     rt.event_bus.subscribe(None, record)
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="parent goal", context_limit=100_000))
     try:
         await asyncio.wait_for(replacement_done.wait(), 5)

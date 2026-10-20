@@ -66,6 +66,7 @@ async def _live_session(monkeypatch):
     await append_one(rt.event_store, _ev(3, EventType.AGENT_IDLE, agent_id=_AID))
     await rebuild_all_active(rt)
 
+    await rt.initialize()
     first = await rt.send_message(_AID, "讲个笑话")
     tm = rt._task_managers[_SID]
 
@@ -81,7 +82,7 @@ async def _live_session(monkeypatch):
 
 
 def _pending(rt) -> list[str]:
-    return [v.id for v in rt.list_pending_hitl(session_id=_SID) if not v.resolved]
+    return [v.id for v in rt.hitl_registry.list_pending(session_id=_SID) if not v.resolved]
 
 
 # ── 判决终结 task 之后，气泡还在 ────────────────────────────────────────────────
@@ -100,6 +101,7 @@ async def test_the_bubble_outlives_the_finished_task(monkeypatch) -> None:
 async def test_the_next_message_starts_a_new_task(monkeypatch) -> None:
     """气泡留着**不影响路由**：`send_message` 只看 `current_task_id` 是否终态。"""
     rt, _tm, finished_id, _hid = await _live_session(monkeypatch)
+    await rt.initialize()
     second = await rt.send_message(_AID, "再讲一个")
     assert second.task_id != finished_id, "应当新开一轮，而不是注进已终结的 task"
 
@@ -120,6 +122,7 @@ async def test_the_next_message_closes_the_stale_bubble(monkeypatch) -> None:
     的那个担心是错的。）
     """
     rt, _tm, _tid, _hid = await _live_session(monkeypatch)
+    await rt.initialize()
     await rt.send_message(_AID, "再讲一个")
     assert _pending(rt) == []
 
@@ -127,6 +130,7 @@ async def test_the_next_message_closes_the_stale_bubble(monkeypatch) -> None:
 async def test_a_fresh_park_still_works_after_that(monkeypatch) -> None:
     """收口是针对**旧**气泡的：新一轮自己再 park 时照常开得出来。"""
     rt, _tm, _tid, _hid = await _live_session(monkeypatch)
+    await rt.initialize()
     second = await rt.send_message(_AID, "再讲一个")
     again = await rt.hitl.open(
         HitlAsk(form="wait", delivery=UserTurnDelivery(task_id=second.task_id, preface="")),

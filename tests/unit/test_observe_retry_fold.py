@@ -37,7 +37,7 @@ async def test_retry_folds_current_attempt_and_deletes_raw():
     state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"),
                             agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(compact_keep_last=6)),
                             session=SimpleNamespace(id="s", tenant_id="tn"),
-                            run_id="r1", sequence_counter=0)
+                            run_id="r1", sequence_counter=0, extra={})
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
     verdict = SimpleNamespace(task_outcome="continue", act_recap="本段摘要：调了工具X", reported=False)
 
@@ -69,7 +69,7 @@ async def test_retry_accumulates_prior_segments():
     state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"),
                             agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(compact_keep_last=6)),
                             session=SimpleNamespace(id="s", tenant_id="tn"),
-                            run_id="r1", sequence_counter=0)
+                            run_id="r1", sequence_counter=0, extra={})
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
     verdict = SimpleNamespace(task_outcome="continue", act_recap="段摘要②", reported=False)
 
@@ -100,7 +100,7 @@ async def test_retry_short_segment_kept_raw():
                             agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(
                                 compact_keep_last=6, short_segment_token_threshold=400)),
                             session=SimpleNamespace(id="s", tenant_id="tn"),
-                            run_id="r1", sequence_counter=0)
+                            run_id="r1", sequence_counter=0, extra={})
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
     verdict = SimpleNamespace(task_outcome="continue", act_recap="段摘要：短段不该写我", reported=False)
 
@@ -127,7 +127,7 @@ async def test_retry_long_segment_still_folds_when_threshold_set():
                             agent=SimpleNamespace(id="a", loop_config=SimpleNamespace(
                                 compact_keep_last=6, short_segment_token_threshold=1)),
                             session=SimpleNamespace(id="s", tenant_id="tn"),
-                            run_id="r1", sequence_counter=0)
+                            run_id="r1", sequence_counter=0, extra={})
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(), llm=_llm())
     verdict = SimpleNamespace(task_outcome="continue", act_recap="段摘要", reported=False)
 

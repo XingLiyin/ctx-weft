@@ -65,6 +65,7 @@ async def _events_from_outage() -> list:
 
     runtime._event_bus.emit = _spy
 
+    await runtime.initialize()
     await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
     return seen
 
@@ -155,6 +156,7 @@ async def _events_from_normal() -> list:
 
     runtime._event_bus.emit = _spy
 
+    await runtime.initialize()
     await runtime.run_single_task(template_id="agent:tpl_echo", user_prompt="say hello")
     return seen
 

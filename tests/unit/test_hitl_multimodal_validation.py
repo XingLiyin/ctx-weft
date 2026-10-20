@@ -133,6 +133,7 @@ async def _pending(rt: CtxWeftRuntime, session_id: str = "ses-hitl",
                    form: str = "wait") -> str:
     """开一个未决请求。`NoResumeDelivery` 是刻意的——本文件测的是应答**内容管线**，
     不该顺带触发一次 session 续跑。"""
+    await rt.initialize()
     req = await rt.hitl.open(
         HitlAsk(form=form, delivery=NoResumeDelivery()),
         session_id=session_id, task_id="tsk-1", stage="tool", unattended=False,
@@ -146,6 +147,7 @@ async def _reply(rt: CtxWeftRuntime, hid: str, message, *, outcome: str = "accep
     没传 `agent_id` 时那就是真实值 `""`），不是拍脑袋的占位值——防呆校验本身不是
     本文件的测试对象，但仍要让它按真实记录通过，而不是悄悄绕过。"""
     agent_id = rt.hitl_registry.get(hid).agent_id
+    await rt.initialize()
     return await rt.reply_to_hitl(HitlReply(
         hitl_id=hid, outcome=outcome, agent_id=agent_id, message=message,
         modified_arguments=modified_arguments,
@@ -348,11 +350,13 @@ async def test_all_three_entry_points_reject_malformed_base64_before_any_put():
     rt.providers.register_memory(memory)
 
     with pytest.raises(InvalidContentError):
+        await rt.initialize()
         await rt.run_single_task(template_id="agent:tpl_echo", user_prompt=bad)
     assert store.put_calls == 0
     assert memory._events == [], "入口即拒、不落库"
 
     with pytest.raises(InvalidContentError):
+        await rt.initialize()
         await rt.start_session(SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt=bad, context_limit=128_000,
         ))
@@ -597,6 +601,7 @@ async def _pending_with_tenant(rt, *, session_id: str, tenant_id: str) -> str:
     """开一个**带 tenant** 的未决请求——生产路径就是这么开的
     （`capability_gateway` 传 `ctx.provider_ctx.tenant_id`、`act` 传
     `state.session.tenant_id`）。"""
+    await rt.initialize()
     req = await rt.hitl.open(
         HitlAsk(form="wait", delivery=NoResumeDelivery()),
         session_id=session_id, task_id="tsk-1", stage="tool", unattended=False,

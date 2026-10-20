@@ -63,6 +63,7 @@ def _echo_runtime(llm=None):
 
 async def _run_first_round(rt) -> tuple[str, str, str]:
     """起一个 session 并等第一轮真正收尾（含 `_fire_session_done` 的 gather）。"""
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="first question", context_limit=100_000,
     ))
@@ -152,9 +153,11 @@ async def test_resume_on_a_live_owner_requeues_in_place_without_rebuilding(monke
     ran: list[str] = []
     tm = _live_owner(rt, ran)
 
+    await rt.initialize()
     await rt.recover_agent("agt")                 # /resume：不带 resumed_task_id
     for _ in range(10):
         await asyncio.sleep(0)
+    await rt.initialize()
     await rt.recover_agent("agt")                 # 再按一次：幂等
     for _ in range(10):
         await asyncio.sleep(0)
@@ -172,6 +175,7 @@ async def test_cold_answer_for_a_task_the_live_owner_does_not_hold_is_refused():
     tm = _live_owner(rt, [])
 
     with pytest.raises(RuntimeError, match="does not own task"):
+        await rt.initialize()
         await rt.recover_agent("agt", resumed_task_id="tsk_unknown")
     assert rt._task_managers["ses_1"] is tm
 
@@ -185,6 +189,7 @@ async def test_start_session_refuses_to_create_a_session_id_that_already_exists(
     owner = rt._task_managers[sid]
 
     with pytest.raises(SessionAlreadyExistsError):
+        await rt.initialize()
         await rt.start_session(SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="again", context_limit=100_000,
             session_id=sid,
@@ -201,6 +206,7 @@ async def test_start_session_resume_pushes_into_the_live_task_manager():
     sid, aid, first = await _run_first_round(rt)
     owner = rt._task_managers[sid]
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="second question", context_limit=100_000,
         session_id=sid, resume=True,
@@ -226,6 +232,7 @@ async def test_start_session_resume_sees_unfinished_work_that_is_only_in_memory(
         creator_agent_id=aid, settings=NormalTaskSettings()))
 
     with pytest.raises(UnfinishedTasksError):
+        await rt.initialize()
         await rt.start_session(SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="second question",
             context_limit=100_000, session_id=sid, resume=True,
@@ -240,6 +247,7 @@ async def test_run_single_task_refuses_a_session_that_already_has_an_owner():
     rt._task_managers["ses_owned"] = TaskManager("ses_owned", event_bus=rt.event_bus)
 
     with pytest.raises(SessionAlreadyExistsError):
+        await rt.initialize()
         await rt.run_single_task(
             session_id="ses_owned", template_id="agent:tpl_echo", user_prompt="hi")
 
@@ -257,6 +265,7 @@ async def test_run_single_task_owns_the_session_only_while_it_runs(monkeypatch):
 
     monkeypatch.setattr(CtxWeftRuntime, "_execute_task", _spy)
 
+    await rt.initialize()
     handle, _state = await rt.run_single_task(template_id="agent:tpl_echo", user_prompt="hi")
 
     assert seen == [True], "跑的这段时间里它的 TM 就是这个 session 的 owner"

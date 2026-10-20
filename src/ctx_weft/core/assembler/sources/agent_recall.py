@@ -63,6 +63,12 @@ class AgentRecallSource:
         request: "ContextRequest",
         deps: "AssemblerDeps",
     ) -> AsyncIterator["ContextBlock"]:
+        fixed = (getattr(request, "extra", None) or {}).get("observe_records")
+        if fixed is not None:
+            for idx, record in enumerate(fixed):
+                if record.kind in (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY):
+                    yield record_to_history_block(record, source="agent_recall", idx=idx)
+            return
         # ── 1) task 层 body：按 agent_id 跨 task 聚合（半址，显式 task_id=None）──
         task_records = await deps.memory.load_view(
             MemoryAddress(session_id=request.scope.session_id,
@@ -70,6 +76,9 @@ class AgentRecallSource:
             MemoryScope.TASK,
             deps.provider_ctx,
         )
+        end = (getattr(request, "extra", None) or {}).get("observe_end_at")
+        if end is not None:
+            task_records = [r for r in task_records if r.timestamp <= end]
         for idx, record in enumerate(task_records):  # load_view 已升序（旧→新）
             yield record_to_history_block(
                 record, source="agent_recall", idx=idx
@@ -103,6 +112,8 @@ class AgentRecallSource:
             deps.provider_ctx,
         )
 
+        if end is not None:
+            agent_records = [r for r in agent_records if r.timestamp <= end]
         summaries: list = []
         conversation: list = []
         for r in agent_records:

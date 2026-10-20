@@ -195,6 +195,7 @@ async def test_recovers_in_place_without_spending_a_retry(monkeypatch, caplog):
     """主路径：越线 → 回 prepare 压缩 → 续跑收尾。不吃 retry，且无悬挂 tool_call。"""
     runtime, llm, seen = _wire(monkeypatch)
     with caplog.at_level(logging.ERROR, logger="ctx_weft.core.loop.llm_gateway"):
+        await runtime.initialize()
         handle, state = await runtime.run_single_task(
             template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
@@ -251,6 +252,7 @@ async def test_tool_result_is_persisted_before_compaction(monkeypatch):
     被剥空删掉（模型看不到自己调过这些工具）。
     """
     runtime, llm, seen = _wire(monkeypatch)
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
@@ -277,6 +279,7 @@ async def test_turn_budget_is_not_reset_by_recovery(monkeypatch):
     # 预算只有 1 轮 → 越线必须发生在第 1 次调用上。这一轮之前没有可折历史，L3 会 no-op，但
     # 第一次恢复不采信「压不动」旗，照样回 prepare——本例要看的正是恢复之后轮数预算没被重置。
     runtime, llm, seen = _wire(monkeypatch, max_turns_per_act=1, inflate_on={1})
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
@@ -300,6 +303,7 @@ async def test_gives_up_when_compaction_cannot_free_anything(monkeypatch):
     runtime, llm, seen = _wire(monkeypatch, collapse_keep_last=99,
                                responses=[_working(i) for i in range(4)],
                                inflate_on={1, 2, 3, 4})
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
@@ -326,6 +330,7 @@ async def test_plain_text_finish_wins_over_the_stop_line(monkeypatch):
     runtime, llm, seen = _wire(
         monkeypatch, responses=[MockResponse(text="Here is the final answer.")],
         inflate_on={1})   # 唯一这一轮就越线
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
@@ -342,6 +347,7 @@ async def test_actor_done_wins_over_the_stop_line(monkeypatch):
                      tool_calls=[ToolCall(id="tc_f", name="control__finish_task",
                                           arguments={"deliverables_summary": ""})]),
     ], inflate_on={1})
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
@@ -363,6 +369,7 @@ async def test_suspend_wins_over_the_stop_line(monkeypatch):
                                           arguments={"title": "sub", "description": "do part",
                                                      "task_prompt": "do part"})]),
     ], inflate_on={1})
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
@@ -385,6 +392,7 @@ async def test_quota_exhaustion_falls_back_to_the_retry_path(monkeypatch):
     runtime, llm, seen = _wire(monkeypatch, max_context_recoveries=2,
                                responses=[_working(i) for i in range(12)],
                                inflate_on=set(range(2, 13)))
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
@@ -397,6 +405,7 @@ async def test_quota_exhaustion_falls_back_to_the_retry_path(monkeypatch):
 async def test_recovery_disabled_keeps_legacy_retry_path(monkeypatch):
     """`max_context_recoveries=0` → 行为回到改造前：context_limit 直接退 observe → retry。"""
     runtime, llm, seen = _wire(monkeypatch, max_context_recoveries=0)
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 

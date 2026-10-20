@@ -117,7 +117,7 @@ async def test_user_prompt_after_trailing_fold_sorts_newest():
 # ── Fix 1: resume barrier ──────────────────────────────────────────────────────
 
 
-async def test_inject_user_reply_does_not_await_pending_recap(monkeypatch):
+async def test_inject_user_reply_does_not_await_pending_observe(monkeypatch):
     """_inject_user_reply 不再等在途后台折叠——2026-09-22 拆除那道屏障。
 
     原先要等，理由是「折叠摘要的时间戳必须早于新消息，否则迟到的摘要会越到新消息之后、

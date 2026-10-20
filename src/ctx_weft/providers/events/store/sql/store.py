@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import and_, cast, exists, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -53,6 +53,18 @@ class SqlEventStore(EventStore):
         # 策略**，删错一张的后果是恢复退化甚至找不到可用基底——store 不该做这个决定。快照
         # 变成事件之后，保留归入事件保留策略，这个参数连带整张 event_snapshots 表一起删了。
         self._factory = session_factory
+
+    async def list_session_ids(
+        self, *, after_session_id: str | None = None, limit: int = 100,
+    ) -> list[str]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        # Events also cover legacy partitions without a session-head row.
+        query = select(EventModel.session_id).distinct().order_by(EventModel.session_id)
+        if after_session_id is not None:
+            query = query.where(EventModel.session_id > after_session_id)
+        async with self._factory() as db:
+            return list((await db.scalars(query.limit(limit))).all())
 
     # ── 写（有序提交扩展：原子批次）──────────────────────────────────────
 
@@ -196,6 +208,7 @@ class SqlEventStore(EventStore):
         include_types: tuple[str, ...] = (),
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
+        related_task_id: str = "",
     ) -> list[StoredEvent]:
         """按 position 升序读 (after, through]；只含已提交（position 非空）的事件。
 
@@ -220,6 +233,31 @@ class SqlEventStore(EventStore):
                 EventModel.task_id == "",
             ))
         async with self._factory() as db:
+            if related_task_id:
+                tid = related_task_id
+                if db.get_bind().dialect.name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import JSONB
+
+                    payload = cast(EventModel.payload_json, JSONB)
+                    created_id = payload["task"]["id"].astext
+                    successor_id = payload["successor"]["task"]["id"].astext
+                    replaced = payload["replaced_task_ids"].contains([tid])
+                    rewired = payload["rewired_dependencies"].has_key(tid)
+                else:
+                    created_id = func.json_extract(EventModel.payload_json, "$.task.id")
+                    successor_id = func.json_extract(EventModel.payload_json, "$.successor.task.id")
+                    members = func.json_each(
+                        EventModel.payload_json, "$.replaced_task_ids").table_valued("value")
+                    replaced = exists(select(1).select_from(members).where(members.c.value == tid))
+                    rewired = func.json_type(
+                        EventModel.payload_json,
+                        '$.rewired_dependencies.' + json.dumps(tid)).isnot(None)
+                conds.append(or_(
+                    EventModel.task_id == tid,
+                    and_(EventModel.type == "TaskCreated", created_id == tid),
+                    and_(EventModel.type == "TaskReviewing",
+                         or_(successor_id == tid, replaced, rewired)),
+                ))
             result = await db.execute(
                 select(EventModel).where(*conds).order_by(EventModel.position))
             return [StoredEvent(event=_row_to_event(r), position=r.position)

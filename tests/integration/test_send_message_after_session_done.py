@@ -108,6 +108,7 @@ def _make_runtime() -> CtxWeftRuntime:
 
 async def test_send_message_works_after_the_session_was_released():
     rt = _make_runtime()
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="first question", context_limit=100_000,
     ))
@@ -126,10 +127,13 @@ async def test_send_message_works_after_the_session_was_released():
     # ── 新契约：跑完**不**逐出。TM 与 agent record 都还在。 ────────────────────
     assert rt._agent_lifecycle_manager.has(aid), "跑完不该摘 agent record"
     assert sid in rt._task_managers, "跑完不该拆 TaskManager"
-    assert [a.agent_id for a in rt.list_agents(session_id=sid)] == [aid]
-    assert rt.get_agent(aid).status == "idle", "task 终态不是 agent 终态（spec 3.1）"
+    await rt.initialize()
+    assert [a.agent_id for a in [item.data for item in await rt.list_agents(session_id=sid)]] == [aid]
+    await rt.initialize()
+    assert (await rt.get_agent(aid)).data.status == "idle", "task 终态不是 agent 终态（spec 3.1）"
 
     # ── 核心断言：这一句改造前抛 AgentNotFound ────────────────────────────────
+    await rt.initialize()
     second = await rt.send_message(aid, "second question", session_id=sid)
 
     assert second.agent_id == aid
@@ -152,6 +156,7 @@ async def test_send_message_self_heals_after_an_explicit_forget_session():
     但持有方会主动收，收完之后这条路必须还通。
     """
     rt = _make_runtime()
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="first question", context_limit=100_000,
     ))
@@ -168,8 +173,12 @@ async def test_send_message_self_heals_after_an_explicit_forget_session():
     rt.forget_session(sid)
     assert not rt._agent_lifecycle_manager.has(aid)
     assert sid not in rt._task_managers
-    assert rt.list_agents(session_id=sid) == []
+    await rt.initialize()
+    cold = await rt.list_agents(session_id=sid)
+    assert [item.data.agent_id for item in cold] == [aid]
+    assert all(item.source == "events" and not item.loaded for item in cold)
 
+    await rt.initialize()
     second = await rt.send_message(aid, "second question", session_id=sid)
     assert second.task_id and second.task_id != first_task
     assert rt._agent_lifecycle_manager.has(aid), "自愈必须把 record 装填回来"
@@ -193,6 +202,7 @@ async def test_send_message_without_session_id_refuses_instead_of_sweeping():
     from ctx_weft.core.models.errors import AgentNotFound, AgentNotLoaded
 
     rt = _make_runtime()
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="first question", context_limit=100_000,
     ))
@@ -208,11 +218,13 @@ async def test_send_message_without_session_id_refuses_instead_of_sweeping():
     rt.forget_session(sid)
 
     with pytest.raises(AgentNotLoaded) as exc:
+        await rt.initialize()
         await rt.send_message(aid, "second question")        # 不传 session_id
     assert isinstance(exc.value, AgentNotFound)
     assert "session_id" in str(exc.value), "报错要告诉调用方缺的是什么"
 
     # 补齐 session_id 就照常跑通——路径本身没被拿掉，只是不再替调用方猜。
+    await rt.initialize()
     second = await rt.send_message(aid, "second question", session_id=sid)
     assert second.task_id and second.task_id != first_task
 
@@ -224,6 +236,8 @@ async def test_truly_unknown_agent_still_raises_agent_not_found():
 
     rt = _make_runtime()
     with pytest.raises(AgentNotFound):
+        await rt.initialize()
         await rt.send_message("agt_does_not_exist", "hello")
     with pytest.raises(AgentNotFound):
+        await rt.initialize()
         await rt.send_message("agt_does_not_exist", "hello", session_id="ses_nope")

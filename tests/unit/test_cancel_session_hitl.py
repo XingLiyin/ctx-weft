@@ -114,6 +114,7 @@ async def runtime_without_hitl():
 async def test_cancel_session_resolves_pending_hitl(runtime_with_pending_hitl):
     rt, bus, session_id, hitl_id = runtime_with_pending_hitl
 
+    await rt.initialize()
     await rt.cancel_session(session_id)
 
     resolved = [e for e in bus.events if e.type == EventType.HITL_RESOLVED]
@@ -129,6 +130,7 @@ async def test_cancel_session_resolves_pending_hitl_with_non_default_tenant(
     default tenant，钉住 `service.py:200` `tenant_id=req.tenant_id` 这条透传。"""
     rt, bus, session_id, hitl_id, tenant_id = runtime_with_pending_hitl_non_default_tenant
 
+    await rt.initialize()
     await rt.cancel_session(session_id)
 
     resolved = [e for e in bus.events if e.type == EventType.HITL_RESOLVED]
@@ -151,6 +153,7 @@ async def test_hitl_cancelled_before_session_terminal(runtime_with_pending_hitl)
     """
     rt, bus, session_id, _ = runtime_with_pending_hitl
 
+    await rt.initialize()
     await rt.cancel_session(session_id)
 
     types = [e.type for e in bus.events]
@@ -169,5 +172,6 @@ async def test_hitl_cancelled_before_session_terminal(runtime_with_pending_hitl)
 async def test_cancel_session_without_pending_hitl_is_noop(runtime_without_hitl):
     """没有未决 HITL 时不该多发任何 HITL 事件。"""
     rt, bus, session_id = runtime_without_hitl
+    await rt.initialize()
     await rt.cancel_session(session_id)
     assert [e for e in bus.events if e.type == EventType.HITL_RESOLVED] == []

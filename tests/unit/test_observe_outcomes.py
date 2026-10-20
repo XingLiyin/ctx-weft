@@ -314,18 +314,18 @@ def test_the_only_block_fallback_is_the_compaction_discipline() -> None:
     里也没有任何字段收 `continue`/`success`/`fail`——ROLE 位上要求它判，就是 prompt 命令
     模型做工具面不允许的事）。
     """
-    from ctx_weft.core.assembler.prompts import BLOCK_FALLBACK
+    from tests.assembler_testkit import compile_prompt, prompt_request
 
-    assert set(BLOCK_FALLBACK) == {"compact"}, "块缺省多了一条，先确认它为什么必须存在"
-    fb = BLOCK_FALLBACK["compact"]
+    prompt = compile_prompt([], prompt_request(purpose="compact"))
+    fb = "\n".join(str(message.content) for message in prompt.messages)
     lower = fb.lower()
 
     assert "never re-execute" in lower and "never decide on the actor's behalf" in lower
     assert "do not treat the actor's narration of its own work as evidence" in fb, "证据纪律丢了"
     for leaked in ("judge", "`continue`", "`success`", "`fail`", "task_status"):
         assert leaked not in fb, f"压缩纪律里谈了判决：{leaked!r}"
-    # 字段语义不在这里（那在工具 schema 上），别把块缺省写成第二份契约。
-    for leaked in ("## Progress So Far", "whichever comes later", "First person"):
+    # 压缩模板可以引用历史边界标记，但不能复活旧的范围/人称契约。
+    for leaked in ("whichever comes later", "First person"):
         assert leaked not in fb, f"块缺省复述了字段语义：{leaked!r}"
 def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
                     parent_task_id="t0", cancelled=False):
@@ -354,7 +354,8 @@ def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
     agent = SimpleNamespace(
         id="ag1",
         loop_config=SimpleNamespace(max_turns_per_observe=1, compact_keep_last=2,
-                                    short_segment_token_threshold=0),
+                                    short_segment_token_threshold=0, short_task_turn_cap=2,
+                                    short_task_token_threshold=0),
         runtime={"llm_model": "mock"},
         loop_guard=SimpleNamespace(context_limit=100_000, context_tokens=0),
     )
@@ -370,8 +371,10 @@ def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
     )
 
     class _Bus:
+        def __init__(self):
+            self.emitted = []
         async def emit(self, event):
-            pass
+            self.emitted.append(event)
 
     tok = CancelToken()
     if cancelled:
@@ -386,6 +389,11 @@ def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
         cancel_token=tok,
     )
     return state, ctx
+
+
+async def _foreground_observe(state, ctx):
+    from ctx_weft.core.loop.driver import StepDriver
+    return await StepDriver({"observe": ObserveStep()}).execute("observe", state, ctx)
 
 
 def _capture_launches(monkeypatch) -> list[str]:
@@ -404,7 +412,7 @@ async def test_non_llm_path_emits_no_synthetic_summary(monkeypatch) -> None:
     """机械判决路径不得产出任何合成摘要文本（用户裁定）。"""
     _capture_launches(monkeypatch)
     state, ctx = _mech_state_ctx()
-    outcome = await ObserveStep().execute(state, ctx)
+    outcome = await _foreground_observe(state, ctx)
     assert outcome.state_patch["verdict"].act_recap == ""
 
 
@@ -413,7 +421,7 @@ async def test_non_llm_path_launches_background_observe(monkeypatch) -> None:
     """摘要改由 background observe 产。"""
     launched = _capture_launches(monkeypatch)
     state, ctx = _mech_state_ctx()
-    await ObserveStep().execute(state, ctx)
+    await _foreground_observe(state, ctx)
     assert launched == ["mechanical"], "非 LLM 路径必须转 background observe"
 
 
@@ -428,7 +436,7 @@ async def test_close_boundary_not_double_launched(monkeypatch) -> None:
     for reason, expected in [("normal", "mechanical"), ("actor_done", "finish")]:
         launched = _capture_launches(monkeypatch)
         state, ctx = _mech_state_ctx(exit_reason=reason, parent_task_id=None)
-        await ObserveStep().execute(state, ctx)
+        await _foreground_observe(state, ctx)
         assert launched == [expected], reason
 
 
@@ -442,11 +450,11 @@ async def test_mechanical_verdict_full_mapping_through_execute(monkeypatch) -> N
         ("actor_done", "success"),       # 唯一的 success
     ]:
         state, ctx = _mech_state_ctx(exit_reason=exit_reason)
-        outcome = await ObserveStep().execute(state, ctx)
+        outcome = await _foreground_observe(state, ctx)
         assert outcome.state_patch["verdict"].task_outcome == expected, exit_reason
 
     state, ctx = _mech_state_ctx(transcript=[])
-    outcome = await ObserveStep().execute(state, ctx)
+    outcome = await _foreground_observe(state, ctx)
     assert outcome.state_patch["verdict"].task_outcome == "fail"
 
 
@@ -461,7 +469,7 @@ async def test_mechanical_continue_lands_the_finish_reminder_on_the_task(monkeyp
     _capture_launches(monkeypatch)
     state, ctx = _mech_state_ctx(exit_reason="normal")
     assert state.task.next_step_hint is None
-    await ObserveStep().execute(state, ctx)
+    await _foreground_observe(state, ctx)
     hint = state.task.next_step_hint or ""
     assert "finish_task" in hint, f"提醒没落到 task 上，实得 {hint!r}"
 
@@ -474,13 +482,13 @@ async def test_mechanical_success_does_not_leave_a_hint(monkeypatch) -> None:
     """
     _capture_launches(monkeypatch)
     state, ctx = _mech_state_ctx(exit_reason="actor_done")
-    await ObserveStep().execute(state, ctx)
+    await _foreground_observe(state, ctx)
     assert not state.task.next_step_hint
 
 
 @pytest.mark.asyncio
 async def test_cancelled_run_skips_llm_observe(monkeypatch) -> None:
-    """取消时不跑 LLM ReAct，走机械判决 + background observe（observe 本身不中止）。"""
+    """A hard stop before observe exits immediately, as it does before act."""
     called = False
 
     async def _never(*a, **kw):
@@ -491,15 +499,12 @@ async def test_cancelled_run_skips_llm_observe(monkeypatch) -> None:
     monkeypatch.setattr(ObserveStep, "_llm_observe", _never)
     launched = _capture_launches(monkeypatch)
     state, ctx = _mech_state_ctx(has_role=True, cancelled=True)
-    outcome = await ObserveStep().execute(state, ctx)
-    assert not called, "取消后不应再跑多轮 LLM observe"
-    assert outcome.next_step == "finalize", "observe 仍须走完，不得中止"
-    # 判决就是机械映射对 `normal` 的那一格（2026-09-28 起 continue）。它**不会**让已取消的
-    # task 被重排：driver 在每个 step 边界都查 token 并抛 `CancelledError`
-    # （driver.py 的 `raise_if_cancelled`），observe 之后那次检查先于 finalize 命中，
-    # run_outcome 落 CANCELED、task 落 CANCELED，这份 verdict 到不了 `disposition_for`。
-    assert outcome.state_patch["verdict"].task_outcome == "continue"
-    assert launched == ["mechanical"], "取消是降级，不是中止——摘要仍交 background observe"
+    import asyncio
+    with pytest.raises(asyncio.CancelledError):
+        await _foreground_observe(state, ctx)
+    assert not called
+    assert not launched
+
 
 
 def test_no_mechanical_synthetic_summary_text_left_in_source() -> None:
@@ -531,22 +536,36 @@ def test_to_be_observed_is_gone() -> None:
 
 
 @pytest.mark.asyncio
-async def test_observe_emits_started_and_completed(monkeypatch) -> None:
-    """observe 的起止成对，与后台 recap 的 TaskRecapStarted/Done 同形。"""
+async def test_mechanical_request_precedes_async_report_completion(monkeypatch) -> None:
+    """The immediate decision is durable; the mocked report continuation has not completed."""
     _capture_launches(monkeypatch)
     state, ctx = _mech_state_ctx()
-    outcome = await ObserveStep().execute(state, ctx)
-    types = [e.type for e in outcome.events]
-    assert EventType.OBSERVE_STARTED in types
-    assert EventType.OBSERVE_COMPLETED in types
-    assert types.index(EventType.OBSERVE_STARTED) < types.index(EventType.OBSERVE_COMPLETED)
+    outcome = await _foreground_observe(state, ctx)
+    types = [e.type for e in ctx.event_bus.emitted]
+    assert types == [EventType.OBSERVE_REQUESTED]
+    assert EventType.OBSERVE_COMPLETED not in types
+    requested = next(e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_REQUESTED)
+    assert requested.payload["verdict"]["task_outcome"] == outcome.state_patch["verdict"].task_outcome
+    assert requested.payload["judge_task"] is False
 
 
 @pytest.mark.asyncio
 async def test_observe_started_payload_is_task_id_only(monkeypatch) -> None:
-    """起点事件 payload 只放 task_id——是否用 LLM 在起点还没定，不能猜。"""
+    """The start event identifies the same task and observation."""
     _capture_launches(monkeypatch)
     state, ctx = _mech_state_ctx()
-    outcome = await ObserveStep().execute(state, ctx)
-    started = next(e for e in outcome.events if e.type == EventType.OBSERVE_STARTED)
-    assert started.payload == {"task_id": state.task.id}
+    await _foreground_observe(state, ctx)
+    started = next(e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_REQUESTED)
+    assert started.payload["task_id"] == state.task.id
+    assert started.payload["observe_id"]
+
+
+@pytest.mark.parametrize("boundary", ["max_turns", "context_limit"])
+async def test_requested_mechanical_limit_without_completed_turn_retains_continue(monkeypatch, boundary):
+    """Persist the effective verdict, including the limit-boundary override."""
+    _capture_launches(monkeypatch)
+    state, ctx = _mech_state_ctx(exit_reason=boundary, transcript=[])
+    outcome = await _foreground_observe(state, ctx)
+    requested = next(e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_REQUESTED)
+    assert requested.payload["verdict"]["task_outcome"] == "continue"
+    assert outcome.state_patch["verdict"].task_outcome == "continue"

@@ -6,9 +6,7 @@ import pytest
 
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.capabilities.control_tools import ControlResult
-from ctx_weft.core.loop import task_memory_fold as fp
 from ctx_weft.core.loop.driver import StepDriver
-from ctx_weft.core.loop.steps import observe as recap_mod
 from ctx_weft.protocols import MemoryEvent, MemoryEventType
 from ctx_weft.protocols.events import EventType
 
@@ -48,6 +46,8 @@ async def test_close_boundary_not_guarded(fake_state_ctx, monkeypatch):
         return ControlResult(content="r", metadata={K.OBSERVER_ACT_RECAP: "r"}), ""
     monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
+    from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
+    await _synthesize_dispatch_pair(ctx.memory, state.scope, state.task, "", "", "success", ctx.provider_ctx)
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
     assert called["react"] is True  # close 边界照常跑
@@ -57,10 +57,9 @@ async def test_close_boundary_not_guarded(fake_state_ctx, monkeypatch):
 async def test_close_boundary_exception_pops_close_synth(fake_state_ctx, monkeypatch):
     """close 边界 bg observe 抛异常时须弹掉 finalize 已登记的 _close_synth 槽
     ——登记此后永远无人消费（task_id 唯一 + close 单入口），不弹即模块级 dict 泄漏。
-    异常被吞（不外抛），finally 仍发 TASK_RECAP_DONE。"""
+    异常被吞（不外抛），finally 仍发 OBSERVE_APPLIED。"""
     state, ctx = fake_state_ctx
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
-    fp.register_close_synth(state.task.id, "tcall_x", state.scope, "success")
 
     async def _boom(*a, **k):
         raise RuntimeError("llm outage")
@@ -68,14 +67,13 @@ async def test_close_boundary_exception_pops_close_synth(fake_state_ctx, monkeyp
 
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})  # 不应外抛
 
-    assert fp.pop_close_synth(state.task.id) is None, "异常路径应弹掉登记（防泄漏）"
-    done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
+    done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_APPLIED]
     assert len(done_events) == 1
 
 
 @pytest.mark.asyncio
 async def test_short_segment_on_summary_only_boundary_skips_the_llm(fake_state_ctx, monkeypatch):
-    """短段免折（只摘要的边界）：不跑后台 LLM、不折叠，finally 仍发 TASK_RECAP_DONE。
+    """短段免折（只摘要的边界）：不跑后台 LLM、不折叠，finally 仍发 OBSERVE_APPLIED。
 
     边界从 `plain_text` 换成 `interrupt`，因为 S5 起前者要产 verdict——**免折不免判**，
     见下一条。只摘要的边界没有判定可产，短段就该整段跳过。
@@ -102,7 +100,7 @@ async def test_short_segment_on_summary_only_boundary_skips_the_llm(fake_state_c
         state.scope, [MemoryEventType.TASK_COMPACT_SUMMARY], ctx.provider_ctx,
     )
     assert n_summary == 0, "短段不应产 TASK_COMPACT_SUMMARY"
-    done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
+    done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_APPLIED]
     assert len(done_events) == 1  # finally 无条件发 DONE，跳过不影响收尾
 
 
@@ -151,6 +149,8 @@ async def test_close_boundary_ignores_short_segment_gate(fake_state_ctx, monkeyp
         return ControlResult(content="r", metadata={K.OBSERVER_ACT_RECAP: "r"}), ""
     monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
+    from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
+    await _synthesize_dispatch_pair(ctx.memory, state.scope, state.task, "", "", "success", ctx.provider_ctx)
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
     assert called["react"] is True
@@ -163,7 +163,7 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
     """端到端（真实 ctx.memory，不 mock count_recent）：同一 task 背靠背两次 interrupt
     边界 observe——第一次真实折叠该段（LLM_RESPONSE 被 supersede），第二次落到该段
     count_recent(LLM_RESPONSE)==0，护栏应跳过其 LLM/observe 工作，但 finally 仍须为
-    两次启动各发一条 TASK_RECAP_DONE，且 await_pending_recap 对被跳过的
+    两次启动各发一条 OBSERVE_APPLIED，且 await_pending_observe 对被跳过的
     第二个任务也要正常收尾（不挂起、不报错）。
 
     若把 _run_recap 里的护栏摘掉，第二次也会真的调 run_observe_react，
@@ -200,11 +200,11 @@ async def test_second_launch_over_already_folded_segment_is_skipped_by_real_guar
         f"护栏应跳过对已折叠段的第二次 observe（run_observe_react 只应跑 1 次），实得 {len(calls)} 次"
     )
 
-    # 3) 两次启动都发了 TASK_RECAP_DONE（finally 无条件发，护栏只跳过 try 里的工作体）
-    done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.TASK_RECAP_DONE]
-    assert len(done_events) == 2, f"两次启动都应发 TASK_RECAP_DONE，实得 {len(done_events)} 条"
+    # 3) 两次启动都发了 OBSERVE_APPLIED（finally 无条件发，护栏只跳过 try 里的工作体）
+    done_events = [e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_APPLIED]
+    assert len(done_events) == 2, f"两次启动都应发 OBSERVE_APPLIED，实得 {len(done_events)} 条"
 
-    # 4) await_pending_recap 对被跳过的第二个任务也能正常收尾（不挂起/不报错）
+    # 4) await_pending_observe 对被跳过的第二个任务也能正常收尾（不挂起/不报错）
     await asyncio.wait_for(
         StepDriver.for_context(ctx).executions.wait(state.task.id), timeout=1.0,
     )

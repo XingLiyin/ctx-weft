@@ -47,6 +47,9 @@ logger = logging.getLogger(__name__)
 # `core/state/models.py`，放进 protocols 会让协议层反向依赖 core。
 #
 # 落在本文件而不是单独模块：`reduce_events` 是它唯一的消费者，就在下方几十行处用到。
+# Legacy request names stay confined to the history reader/reducer.
+OBSERVE_REQUEST_EVENT_TYPES = (EventType.OBSERVE_REQUESTED, "TaskRecapRequested", EventType.HITL_OPENED)
+
 TASK_STATUS_BY_EVENT: dict[EventType, TaskStatus] = {
     EventType.TASK_STARTED: "ACTIVE",
     EventType.TASK_REVIEWING: "REVIEWING",
@@ -120,7 +123,7 @@ def prune_view_for_snapshot(view: RunStateView) -> RunStateView:
     ~50 条持久事件付一次；增量写还要把整份 blob 过一遍 deserialize→serialize 往返。裁完
     之后 blob 的大小只跟「当前有多少活」有关，与会话跑了多久无关。
 
-    **闭包三类，判据全部来自真实消费者：**
+    **保留范围，判据全部来自真实消费者：**
 
     1. **非终态 task** → 全字段。`TaskManager.restore` 要重排它们，driver 立刻要读
        `user_prompt` 等。
@@ -136,7 +139,13 @@ def prune_view_for_snapshot(view: RunStateView) -> RunStateView:
        判永久阻塞）。**状态要如实留，不能只留 FINISHED 的**——漏掉 FAILED/CANCELED 的
        前驱会让 `_find_blocked_forever` 认不出永久阻塞，那个后继就永远卡在队列里。
 
-    其余一律丢弃：它们终态，且既不是任何活 task 的子任务、也不是它的依赖，没有消费者。
+    4. `pending_observe` 引用的任务 → 全字段。恢复收尾需要任务的 prompt、产出和身份，
+       任务终态不表示收尾已完成；这一类优先于依赖任务的精简规则。
+
+    5. 显式中断 agent 的当前任务，以及尚无 TaskFinalized 的中断取消任务 → 全字段；
+       同时保留取消来源祖先，恢复按任务树补齐收尾，不另存取消账。
+
+    其余终态历史任务丢弃。查询详情从原始事件补读，不把精简记录视作完整详情。
 
     **唯一的已知分叉，无害。** 丢掉的 task 之后仍可能收到一条 `TASK_FINALIZED`（它在
     task 终态**之后**才发，只写 `finished_at`）。`_apply` 那一支是 `view.tasks.get()`，
@@ -156,19 +165,41 @@ def prune_view_for_snapshot(view: RunStateView) -> RunStateView:
                 if t.status not in TERMINAL_TASK_STATUSES}
     child_ids = {tid for tid, t in view.tasks.items()
                  if t.parent_task_id and t.parent_task_id in live_ids}
-    keep_full = live_ids | child_ids
+    keep_full = live_ids | child_ids | {
+        info.get("task_id", key) for key, info in view.pending_observe.items()}
+
+    # Agent termination is an existing state fact. Retain its current task
+    # and task ancestors needed to finish cancellation after a partial commit.
+    from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
+    keep_full.update(a.current_task_id for a in view.agents.values()
+                     if a.status == "terminated" and a.status_reason.startswith(AGENT_CANCEL_REASON)
+                     and a.current_task_id in view.tasks)
+    # A terminal task may still need its failed AgentIdle transition repaired.
+    keep_full.update(a.current_task_id for a in view.agents.values()
+                     if a.status in ("running", "interrupted") and a.current_task_id in view.tasks)
+    keep_full.update(tid for tid, task in view.tasks.items()
+                     if task.status == "CANCELED" and not task.finalized)
+    for tid in list(keep_full):
+        seen = set()
+        task = view.tasks.get(tid)
+        while task is not None and task.parent_task_id and task.parent_task_id not in seen:
+            seen.add(task.parent_task_id)
+            task = view.tasks.get(task.parent_task_id)
+            if task is not None and (task.error or "").startswith(AGENT_CANCEL_REASON):
+                keep_full.add(task.id)
 
     dep_ids: set[str] = set()
     for tid in live_ids:
         dep_ids.update(view.tasks[tid].dag_deps or ())
     dep_ids -= keep_full
 
-    tasks: dict[str, TaskView] = {tid: view.tasks[tid] for tid in keep_full}
+    tasks: dict[str, TaskView] = {tid: view.tasks[tid] for tid in keep_full if tid in view.tasks}
     for tid in dep_ids:
         dep = view.tasks.get(tid)
         if dep is None:
             continue          # 引用了投影里没有的 id（数据异常）——跳过，不造占位
-        tasks[tid] = TaskView(id=dep.id, session_id=dep.session_id, status=dep.status)
+        tasks[tid] = TaskView(id=dep.id, session_id=dep.session_id, status=dep.status,
+                              details_complete=False)
 
     return replace(view, tasks=tasks)
 
@@ -305,10 +336,11 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
         "tasks_total": view.tasks_total,
         # 不裁：它由自己的 DONE 销账，不随会话长度增长（见字段 docstring）。
         "hitl": _hitl_to_blob(view.hitl),
-        "pending_recap": {
-            tid: {"boundary": info.get("boundary", ""), "agent_id": info.get("agent_id", "")}
-            for tid, info in view.pending_recap.items()
+        "pending_observe": {
+            tid: dict(info)
+            for tid, info in view.pending_observe.items()
         },
+        "open_runs": {rid: dict(info) for rid, info in view.open_runs.items()},
         "sessions": {
             sid: {
                 "id": s.id,
@@ -334,6 +366,8 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "reserved_output_tokens": s.reserved_output_tokens,
                 "failure_counter": s.failure_counter,
                 "threshold_tripped": s.threshold_tripped,
+                "threshold_root_task_ids": list(s.threshold_root_task_ids),
+                "threshold_cancel_task_ids": list(s.threshold_cancel_task_ids),
                 "created_at": _dt(s.created_at),
             }
             for sid, s in view.sessions.items()
@@ -342,6 +376,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
             tid: {
                 "id": t.id,
                 "session_id": t.session_id,
+                "details_complete": t.details_complete,
                 "status": t.status,
                 "title": t.title,
                 "description": t.description,
@@ -369,6 +404,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "blocked_by_task_id": getattr(t, "blocked_by_task_id", None),
                 "created_at": _dt(t.created_at),
                 "finished_at": _dt(t.finished_at),
+                "finalized": t.finalized,
             }
             for tid, t in view.tasks.items()
         },
@@ -381,6 +417,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "llm_account": a.llm_account,
                 "llm_model": a.llm_model,
                 "status": a.status,
+                "status_reason": a.status_reason,
                 "current_task_id": a.current_task_id,
             }
             for aid, a in view.agents.items()
@@ -409,6 +446,8 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             reserved_output_tokens=s.get("reserved_output_tokens", 8192),
             failure_counter=s.get("failure_counter", 0),
             threshold_tripped=s.get("threshold_tripped", False),
+            threshold_root_task_ids=list(s.get("threshold_root_task_ids", [])),
+            threshold_cancel_task_ids=list(s.get("threshold_cancel_task_ids", [])),
             created_at=_dt(s.get("created_at")),
         )
 
@@ -417,6 +456,7 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
         tasks[tid] = TaskView(
             id=t["id"],
             session_id=t.get("session_id", ""),
+            details_complete=t.get("details_complete", True),
             status=t.get("status", "UNKNOWN"),
             title=t.get("title", ""),
             description=t.get("description", ""),
@@ -444,6 +484,7 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             blocked_by_task_id=t.get("blocked_by_task_id"),
             created_at=_dt(t.get("created_at")),
             finished_at=_dt(t.get("finished_at")),
+            finalized=t.get("finalized", False),
         )
 
     agents: dict[str, AgentView] = {}
@@ -459,6 +500,7 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             llm_model=a.get("llm_model", ""),
             # 旧快照无该键 → 回落默认值 "idle"/None，与其余字段同口径（零数据迁移）。
             status=a.get("status", "idle"),
+            status_reason=a.get("status_reason", ""),
             current_task_id=a.get("current_task_id"),
         )
 
@@ -481,10 +523,11 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
         # 走全量回放（全量回放会正确折出它），所以这里的回落只是形态完整性——**这正是
         # bump 版本号换来的东西**：不必为「老快照里没有这个字段」另留一条兜底查询。
         hitl=_hitl_from_blob(data.get("hitl") or {}),
-        pending_recap={
-            tid: {"boundary": v.get("boundary", ""), "agent_id": v.get("agent_id", "")}
-            for tid, v in (data.get("pending_recap") or {}).items()
+        pending_observe={
+            tid: dict(v)
+            for tid, v in (data.get("pending_observe") or {}).items()
         },
+        open_runs={rid: dict(info) for rid, info in (data.get("open_runs") or {}).items()},
         sessions=sessions,
         tasks=tasks,
         agents=agents,
@@ -504,7 +547,7 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
 #: **回滚安全**——v1 的代码读到 v2 blob 会因版本不匹配走全量回放，而不是把一份裁过的
 #: tasks 当全量用（那会让 `restore` 静默少掉 task）。代价是存量快照集体失效一次、
 #: 各会话首次写快照时全量重锚一次。
-#: v3（2026-09-20）：blob 新增 `pending_recap`（段 recap 的待重跑账，从前是恢复路径上
+#: v3（2026-09-20）：blob 新增 `pending_observe`（段 recap 的待重跑账，从前是恢复路径上
 #: 一次独立的按类型收窄查询）。必须 bump：v2 的 blob 没有这个键，拿它当增量基底会让
 #: 「崩溃打断的 recap」静默变成「没有待重跑的」，那段 memory 写就永远补不上了。bump 之后
 #: v2 blob 判不可用 → 全量回放 → 正确折出该字段，无需任何迁移分支。
@@ -512,7 +555,17 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
 #: 折叠）。必须 bump：v3 的 blob 没有这个键，拿它当增量基底会让**未决 HITL 集合凭空为空**
 #: ——`parked_task_ids` 随之为空，于是「人还没答，任务却自己跑起来了」。这是这套版本号防的
 #: 最严重的一种退化，不是性能问题。
-_PROJECTION_VERSION = 4
+# v5: explicit completeness for pruned task records. Older snapshots replay from
+# the log rather than guessing completeness from legitimately empty fields.
+# v6: independent observe identities and durable threshold cleanup targets.
+# v7: unfinished runs and their latest sequence must survive the snapshot cut.
+# Older snapshots cannot prove absence of open runs; replay their logs instead.
+# v8: unified pending_observe retains completed decisions and applied effect markers.
+# v9: preserve agent interruption cause and task finalization facts across snapshots.
+# v10: retain terminal current tasks until missing agent settlement is repaired.
+# v11: retain every unfinished cancellation closure, independent of its reason.
+# v10 upgrades read task facts only; their run projection is already complete.
+_PROJECTION_VERSION = 11
 
 
 #: 全量重放要排掉的类型：状态快照事件本身。
@@ -631,7 +684,7 @@ def snapshot_is_usable(
         return False
     if getattr(snapshot, "last_commit_position", None) is None:
         return False
-    if getattr(snapshot, "projection_version", 1) != _PROJECTION_VERSION:
+    if getattr(snapshot, "projection_version", 1) not in (10, _PROJECTION_VERSION):
         return False
     if snapshot.last_commit_position > head:
         return False
@@ -733,7 +786,7 @@ async def replay_session(
         cursor = upper
 
 
-async def rebuild_view(event_store: Any, session_id: str) -> RunStateView:
+async def rebuild_view(event_store: Any, session_id: str, *, through_position: int | None = None) -> RunStateView:
     """按快照+增量或全量回放重建 RunStateView（spec: snapshot-recovery，wp4 改造）。
 
     恢复**只有一条口径**：position 一致切面。有序提交是 `EventStore` 的必需部分，
@@ -762,7 +815,8 @@ async def rebuild_view(event_store: Any, session_id: str) -> RunStateView:
         session_id, EventType.STATE_SNAPSHOT)
     snapshot = snapshot_facts_from_event(stored.event if stored else None)
 
-    head = await event_store.committed_head(session_id)
+    head = (await event_store.committed_head(session_id)
+            if through_position is None else through_position)
     if snapshot_is_usable(snapshot, head):
         view = deserialize_view(snapshot.state_blob)
         # 增量同样排掉快照事件：这一段里可能还有别的快照（比如这张之后又写过一张、而它
@@ -773,16 +827,65 @@ async def rebuild_view(event_store: Any, session_id: str) -> RunStateView:
             through_position=head,
             exclude_types=REPLAY_EXCLUDE_TYPES,
         )
-        return apply_events([se.event for se in delta], view)
+        apply_events([se.event for se in delta], view)
+        if snapshot.projection_version == 10:
+            await restore_legacy_canceled_tasks(event_store, session_id, view, head)
+        return view
     # 全量：忽略快照（存量/损坏/超前），按提交序重放；重造快照由 writer 负责。
     #
     # 分批走 `replay_session`（同一文件，见那里为什么它在 core 而不在协议上）。这里不传
     # `through_position`：恢复要的就是「现在」的全部，锚在进去那一刻的 head。
     view = RunStateView(run_id=session_id, session_id="", task_id="", agent_id="")
     async for batch in replay_session(
-            event_store, session_id, exclude_types=REPLAY_EXCLUDE_TYPES):
+            event_store, session_id, through_position=head, exclude_types=REPLAY_EXCLUDE_TYPES):
         apply_events(batch, view)
     return view
+
+
+async def restore_legacy_canceled_tasks(event_store, session_id, view, head):
+    """Upgrade the old pruning policy using task facts only, never run history."""
+    rows = await event_store.read_range(session_id, through_position=head,
+        include_types=(EventType.TASK_CANCELED, EventType.TASK_FINALIZED))
+    unclosed = set()
+    for row in rows:
+        event = row.event
+        if event.type == EventType.TASK_CANCELED:
+            unclosed.add(event.task_id)
+        else:
+            unclosed.discard(event.task_id)
+    missing = {tid for tid in unclosed
+               if tid not in view.tasks or not view.tasks[tid].details_complete}
+    if missing:
+        rows = await event_store.read_range(session_id, through_position=head,
+            include_types=tuple({EventType.TASK_CREATED, EventType.TASK_FINALIZED,
+                                 EventType.TASK_REVIEWING, *TASK_STATUS_BY_EVENT}))
+        history = reduce_events([r.event for r in rows], session_id)
+        view.tasks.update({tid: history.tasks[tid] for tid in missing if tid in history.tasks})
+
+
+async def read_task_view(event_store, session_id: str, task_id: str, *, through_position: int,
+                         use_snapshot: bool = True):
+    """Read one complete task without hydrating owners or replaying other tasks' history."""
+    stored = (await event_store.read_last_of_type(session_id, EventType.STATE_SNAPSHOT)
+              if use_snapshot else None)
+    snapshot = snapshot_facts_from_event(stored.event if stored else None)
+    view = RunStateView(run_id=session_id, session_id=session_id, task_id=task_id, agent_id="")
+    after = 0
+    if (stored is not None and stored.position <= through_position
+            and snapshot_is_usable(snapshot, through_position)):
+        base = deserialize_view(snapshot.state_blob)
+        task = base.tasks.get(task_id)
+        if task is not None and task.details_complete:
+            view = base
+            after = snapshot.last_commit_position
+    rows = await event_store.read_range(
+        session_id, after_position=after, through_position=through_position,
+        include_types=tuple({EventType.TASK_CREATED, EventType.TASK_FINALIZED,
+                             EventType.RECOGNIZE_INTENT_TOOL_CALL, *TASK_STATUS_BY_EVENT}),
+        related_task_id=task_id,
+    )
+    apply_events([row.event for row in rows], view)
+    return view.tasks.get(task_id)
 
 
 def reduce_events(events: list[Event], run_id: str) -> RunStateView:
@@ -839,27 +942,64 @@ def _rebuild_agents(view: RunStateView) -> None:
             av.parent_agent_id = None
             _inferred.add(sess.root_agent_id)
 
-    # Subagent tasks sorted by creation time (parent tasks precede children in event stream)
-    ordered = sorted(view.tasks.values(), key=lambda t: t.created_at or datetime.min)
-    for task in ordered:
+    # Establish relationships before deriving depths. Snapshot task order and wall
+    # clocks say nothing about ancestry; pruned dependency tasks have no timestamp.
+    subagents: set[str] = set()
+    for task in view.tasks.values():
         aid = task.assigned_agent_id
         if not aid or aid in _inferred:
             continue
-        use_subagent = task.settings_raw.get("use_subagent", False)
-        creator = task.creator_agent_id
-        if use_subagent and creator and creator in view.agents:
-            depth = view.agents[creator].spawn_depth + 1
-        else:
-            depth = 0
         av = _agent_slot(view, aid)
-        av.spawn_depth = depth
-        av.parent_agent_id = creator or None
+        # A snapshot can retain ancestry after its originating task was pruned.
+        # Later conversation tasks must not replace that recorded relationship.
+        if av.parent_agent_id is None and av.spawn_depth == 0:
+            creator = task.creator_agent_id
+            av.parent_agent_id = creator if creator and creator != aid else None
+        if task.settings_raw.get("use_subagent", False) or av.spawn_depth > 0:
+            subagents.add(aid)
         _inferred.add(aid)
+
+    pending = set(subagents)
+    while pending:
+        ready = {aid for aid in pending
+                 if view.agents[aid].parent_agent_id not in pending}
+        if not ready:
+            # Malformed cyclic ancestry must not hang recovery or invent depths.
+            logger.warning("Cyclic agent ancestry during recovery: %s", sorted(pending))
+            break
+        for aid in ready:
+            av = view.agents[aid]
+            parent = view.agents.get(av.parent_agent_id)
+            if parent is not None:
+                av.spawn_depth = parent.spawn_depth + 1
+        pending -= ready
 
 
 def _apply(view: RunStateView, ev: Event) -> None:
-    t = ev.type
+    t = {"TaskRecapRequested": EventType.OBSERVE_REQUESTED,
+         "TaskRecapStarted": EventType.OBSERVE_STARTED,
+         "TaskRecapDone": EventType.OBSERVE_APPLIED}.get(ev.type, ev.type)
     p: dict[str, Any] = ev.payload or {}
+    if ev.run_id in view.open_runs:
+        info = view.open_runs[ev.run_id]
+        info["sequence"] = max(info["sequence"], ev.sequence)
+
+    owner = ev.causation_id or p.get("observe_id")
+    pending = view.pending_observe.get(owner)
+    if pending is not None:
+        if t in (EventType.TASK_FINALIZED, EventType.BLACKBOARD_PUBLISHED,
+                 EventType.MEMORY_INGESTED, EventType.MEMORY_COMPACTED):
+            key = f"{t}:{p.get('source', '')}"
+            effects = pending.setdefault("effects", [])
+            if key not in effects:
+                effects.append(key)
+        elif t in TASK_STATUS_BY_EVENT:
+            pending["settled"] = True
+
+    if t in {EventType.TASK_INTERRUPTED, EventType.TASK_CANCELED, EventType.TASK_REQUEUED} and p.get("reason") != "crash_recovery":
+        for info in view.pending_observe.values():
+            if info.get("task_id") == ev.task_id and info.get("verdict") and owner != info.get("observe_id"):
+                info["abandoned"] = True
 
     # ── Run / Step ────────────────────────────────────────────────────────────
     if t == EventType.STEP_STARTED:
@@ -871,10 +1011,15 @@ def _apply(view: RunStateView, ev: Event) -> None:
         # TM 派发时发）。recap / recognize_intent 等观测型 run 也会发 RunStarted，
         # 若这里再写 ACTIVE，纯文本冷 park 场景下会把已经 AWAITING_HUMAN 的 task 错误
         # 拉回 ACTIVE——标量与逐 task 视图自相矛盾。会话状态同样不在此写：run 是任务
-        # 级的，会话状态归 SessionRegistry（docs/events-v2.md §2.1.1）。
-        pass
+        # 级的，会话状态归 host（docs/events-v2.md §2.1.1）。
+        previous = view.open_runs.get(ev.run_id, {})
+        if ev.run_id:
+            view.open_runs[ev.run_id] = {
+                "task_id": ev.task_id, "agent_id": ev.agent_id,
+                "sequence": max(previous.get("sequence", 0), ev.sequence),
+            }
     elif t == EventType.RUN_FINISHED:
-        pass   # run 的记账，不承载状态——它在 §3.2 已是 O 档
+        view.open_runs.pop(ev.run_id, None)
 
     # ── Session projection ────────────────────────────────────────────────────
     elif t == EventType.SESSION_CREATED:
@@ -901,6 +1046,8 @@ def _apply(view: RunStateView, ev: Event) -> None:
         sess = view.sessions.get(ev.session_id)
         if sess is not None:
             sess.threshold_tripped = True
+            sess.threshold_root_task_ids = list(p.get("root_task_ids", []))
+            sess.threshold_cancel_task_ids = list(p.get("cancel_task_ids", []))
 
     elif t == EventType.SESSION_RESUMED:
         sess = view.sessions.get(ev.session_id)
@@ -908,6 +1055,8 @@ def _apply(view: RunStateView, ev: Event) -> None:
             # 续跑开新一轮 → 清闩。与内存侧同形：`resume_session` 造的是全新 Session
             # 与全新 TaskManager（`_threshold_tripped` 回到 False），新一轮的失败照常计。
             sess.threshold_tripped = False
+            sess.threshold_root_task_ids = []
+            sess.threshold_cancel_task_ids = []
             _up = p.get("user_prompt")
             if _up is not None:
                 sess.user_prompt = content_from_jsonable(_up)
@@ -915,7 +1064,8 @@ def _apply(view: RunStateView, ev: Event) -> None:
         view.session_status = "RUNNING"
 
     elif t == EventType.SESSION_STATUS_CHANGED:
-        # L 档：只读存量日志（新代码不再发这条通用 setter）。与兄弟分支
+        # Legacy logs only: session lifecycle status is maintained by the host.
+        # 与兄弟分支
         # SESSION_PAUSED_HITL 同口径——旧值域里的 PAUSED / PAUSED_HITL 在新词表
         # 里不存在，必须**翻译进当前词表**再写，否则重放存量日志会往
         # `session_status` 写一个类型里没有的值（models.py 的承诺）。
@@ -991,6 +1141,13 @@ def _apply(view: RunStateView, ev: Event) -> None:
         agent = view.agents.get(ev.agent_id)
         if agent is not None and agent.status != "terminated":
             agent.status = _AGENT_STATUS_BY_EVENT[t]
+            agent.status_reason = p.get("reason", "")
+            if t == EventType.AGENT_TERMINATED and ev.task_id:
+                from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
+                task = view.tasks.get(ev.task_id)
+                if (task is not None and task.status not in TERMINAL_TASK_STATUSES
+                        and agent.status_reason.startswith(AGENT_CANCEL_REASON)):
+                    task.error = agent.status_reason
             if ev.task_id:
                 agent.current_task_id = ev.task_id
 
@@ -1133,10 +1290,17 @@ def _apply(view: RunStateView, ev: Event) -> None:
                 if "outputs" in p:
                     task.outputs = p.get("outputs")
             elif t in (EventType.TASK_FAILED, EventType.TASK_INTERRUPTED):
+                task.error_code = p.get("error_code") or task.error_code
                 msg = p.get("error_message")
-                if msg:
+                from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
+                explicit_cancel = (t == EventType.TASK_INTERRUPTED and p.get("reason") == "crash_recovery"
+                                         and (task.error or "").startswith(AGENT_CANCEL_REASON))
+                if msg and not explicit_cancel:
                     task.error = msg
             elif t == EventType.TASK_CANCELED:
+                task.finalized = False
+                task.finished_at = (datetime.fromisoformat(p["finished_at"])
+                                    if p.get("finished_at") else ev.timestamp)
                 # spec: task-handoff——依赖阻塞取消的结局码与阻塞源随 TASK_CANCELED
                 # payload 持久化；不读则回放后只剩 CANCELED、原因不可解释。
                 # 用户侧取消（reason 文本）也顺手折进 error，供恢复后观察面解释。
@@ -1145,7 +1309,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
                     task.error_code = code
                     task.blocked_by_task_id = p.get("blocked_by_task_id") or None
                 msg = p.get("reason") or p.get("error_message")
-                if msg and not task.error:
+                if msg:
                     task.error = msg
 
     elif t == EventType.TASK_FINALIZED and ev.task_id:
@@ -1156,26 +1320,35 @@ def _apply(view: RunStateView, ev: Event) -> None:
             # TaskFinished/TaskFailed/TaskInterrupted 一个来源（总账 A1）——两处都写会让
             # 先到的 TaskFinalized 覆盖或清空后到的成果，正是 A1 当初要治的那个漂移。
             task.finished_at = ev.timestamp
+            task.finalized = True
 
     # ── 段 recap（被崩溃打断的 background observe）──────────────────────────────
     # started 记账、done 销账，剩下的就是要重跑的。**这里是唯一的折叠实现**——从前它是
     # 独立函数 `fold_pending_task_recap` + 恢复路径上一次按类型收窄的查询，那条查询随会话
-    # 长度线性增长（见 `RunStateView.pending_recap`）。搬进来而不是并存：feat 把 HITL 移出
+    # 长度线性增长（见 `RunStateView.pending_observe`）。搬进来而不是并存：feat 把 HITL 移出
     # 投影的理由正是「两份口径不同的折叠会漂移」，同一条原则在这里就是「只留一份」。
     #
     # 键取 payload 的 `task_id` 而不是 `ev.task_id`：这两个事件把它写在 payload 里，
     # 事件头上的 task_id 在段边界上可能是父任务。
-    elif t in (EventType.TASK_RECAP_STARTED, EventType.TASK_RECAP_DONE):
+    elif t in (EventType.OBSERVE_REQUESTED, EventType.OBSERVE_STARTED,
+               EventType.OBSERVE_COMPLETED, EventType.OBSERVE_APPLIED):
         rtid = p.get("task_id", "")
-        if rtid:
-            if t == EventType.TASK_RECAP_STARTED:
-                # 同 task_id last-write-wins：重跑失败会再发一条 started。
-                view.pending_recap[rtid] = {
-                    "boundary": p.get("boundary", ""),
-                    "agent_id": p.get("agent_id", ""),
-                }
+        # Old foreground Completed events carry no recoverable observation identity.
+        if rtid and (p.get("observe_id") or t != EventType.OBSERVE_COMPLETED):
+            key = p.get("observe_id") or rtid
+            if t == EventType.OBSERVE_APPLIED:
+                view.pending_observe.pop(key, None)
             else:
-                view.pending_recap.pop(rtid, None)
+                info = view.pending_observe.setdefault(key, {})
+                for name in ("task_id", "observe_id", "boundary", "agent_id", "segment_end_at",
+                             "judge_task", "execution_mode", "verdict", "disposition",
+                             "report_boundary", "short_leaf", "context_record_ids"):
+                    if name in p:
+                        info[name] = p[name]
+                if t == EventType.OBSERVE_STARTED and p.get("observe_id"):
+                    info["started"] = True
+                if t == EventType.OBSERVE_COMPLETED:
+                    info["completion"] = dict(p)
 
     # ── LLM / Context ─────────────────────────────────────────────────────────
     elif t == EventType.PREPARE_COMPLETED:
@@ -1193,6 +1366,9 @@ def _apply(view: RunStateView, ev: Event) -> None:
     # 喂进来，不是查回去）。
     if t in HITL_FOLD_EVENT_TYPES:
         apply_hitl_event(ev, view.hitl)
+        if t == EventType.HITL_OPENED and p.get("observe_request"):
+            _apply(view, replace(ev, type=EventType.OBSERVE_REQUESTED,
+                                 payload=p["observe_request"]))
 
     # ── HITL 会话状态 ──────────────────────────────────────────────────────────
     elif t in (
@@ -1460,6 +1636,10 @@ def fold_hitl_snapshot(
             # 直接 pop，一条**旧**请求的了结会把**新**请求的决定连带删掉 → 同一个工具重新
             # 求批。`_decision_owner` 是这一步的本地账。
             #
+            # Older hot producers could close before HitlResolved committed.
+            # Closed is authoritative consumption even in those historical logs;
+            # otherwise the original pending entry survives while opened is gone.
+            snap.pending.pop(rid, None)
             snap.resolved.pop(rid, None)
             req = opened.pop(rid, None)
             if req is not None and req.tool_call_id:
@@ -1537,7 +1717,7 @@ def fold_hitl_snapshot(
 # 还省一层：未决 HITL 的年龄没有上界所以不能截尾，而 dangling tool_call 必定在最后一个
 # assistant 回合之后，读最近一段即可。
 #
-# 段 recap 曾经也在这一档，后来进了投影（`RunStateView.pending_recap`）：它和 HITL 一样
+# 段 recap 曾经也在这一档，后来进了投影（`RunStateView.pending_observe`）：它和 HITL 一样
 # 没有年龄上界，但它的账**自己会销**（每条由它的 DONE 删掉），所以进得起快照；HITL 的
 # 未决集则由 `HitlRegistry` 持有，投影里不另存一份。
 

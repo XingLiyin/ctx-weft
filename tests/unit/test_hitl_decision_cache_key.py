@@ -16,6 +16,12 @@ STAGE_TOOL = "tool"
 
 
 class _RecordingBus:
+    async def emit_batch(self, events, *, on_committed=None):
+        if on_committed is not None:
+            on_committed()
+        for event in events:
+            await self.emit(event)
+
     def __init__(self) -> None:
         self.events: list[Event] = []
 

@@ -820,7 +820,7 @@ async def test_recognize_intent_gateway_max_tokens_failure_still_pairs_events():
 
 
 # ── Task 5 复审修复 R1：origin 必须在 _run_recap 入口钉住，覆盖 ──
-# RUN_STARTED/TASK_RECAP_STARTED 以及两条早退路径（re-fold 幂等护栏、短段免折）——
+# RUN_STARTED/OBSERVE_STARTED 以及两条早退路径（re-fold 幂等护栏、短段免折）——
 # 这几处此前发射时用的还是调用方快照进来的 origin（LOOP_OBSERVE / LOOP_ACT），只有
 # 走到 run_observe_react 那句才被改写成 LOOP_BACKGROUND_OBSERVE，两条早退路径根本
 # 走不到那句。
@@ -831,7 +831,7 @@ async def test_background_observe_origin_pinned_on_refold_guard_early_exit(
     fake_state_ctx, monkeypatch,
 ):
     """re-fold 幂等护栏早退（非 close 边界、视图内无 active raw）：函数体内已经发出的
-    RUN_STARTED/TASK_RECAP_STARTED，以及 finally 里的 TASK_RECAP_DONE/RUN_FINISHED，
+    RUN_STARTED/OBSERVE_STARTED，以及 finally 里的 OBSERVE_APPLIED/RUN_FINISHED，
     origin 必须全部是 loop.background_observe——即使调用方快照带进来的是别的 origin。"""
     
     state, ctx = fake_state_ctx
@@ -848,8 +848,8 @@ async def test_background_observe_origin_pinned_on_refold_guard_early_exit(
     origins = {e.origin for e in ctx.event_bus.emitted}
     assert origins == {EventOrigin.LOOP_BACKGROUND_OBSERVE}, origins
     types_seen = {e.type for e in ctx.event_bus.emitted}
-    assert {EventType.RUN_STARTED, EventType.TASK_RECAP_STARTED,
-            EventType.TASK_RECAP_DONE, EventType.RUN_FINISHED} <= types_seen
+    assert {EventType.RUN_STARTED, EventType.OBSERVE_STARTED,
+            EventType.OBSERVE_APPLIED, EventType.RUN_FINISHED} <= types_seen
 
 
 @pytest.mark.asyncio
@@ -867,8 +867,8 @@ async def test_background_observe_origin_pinned_on_short_segment_early_exit(fake
     origins = {e.origin for e in ctx.event_bus.emitted}
     assert origins == {EventOrigin.LOOP_BACKGROUND_OBSERVE}, origins
     types_seen = {e.type for e in ctx.event_bus.emitted}
-    assert {EventType.RUN_STARTED, EventType.TASK_RECAP_STARTED,
-            EventType.TASK_RECAP_DONE, EventType.RUN_FINISHED} <= types_seen
+    assert {EventType.RUN_STARTED, EventType.OBSERVE_STARTED,
+            EventType.OBSERVE_APPLIED, EventType.RUN_FINISHED} <= types_seen
 
 
 # ── Task 5 复审修复 R3：≥2 轮回归，钉住 request_id/turn 跨轮的行为 ──

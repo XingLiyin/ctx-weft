@@ -93,7 +93,7 @@ async def test_llm_switch_survives_a_full_replay_and_reload():
     # 事件」——那条断言钉的正是本 task 要修的缺口（重启后 host 投影冻在崩溃前
     # 状态,直到某条冷路径偶然把 ALM 重新装填）。这里没设置 llm 之外的任何状态
     # 事件,AgentView.status 因此是字段默认值 "idle" → 广播 AgentIdle。
-    assert [e.type for e in fresh_bus.events] == [EventType.AGENT_IDLE]
+    assert fresh_bus.events == []  # Materialization must not replay durable facts onto the bus.
 
 
 async def test_session_llm_switch_also_survives_replay_for_every_agent():

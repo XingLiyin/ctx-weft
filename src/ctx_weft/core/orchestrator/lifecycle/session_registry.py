@@ -287,6 +287,8 @@ class SessionRegistry:
         None）。session 的 TM 是单例——有活 owner 时新 root task 就推进它，不另建一个
         去顶替它；没有才新建。活 owner 的内存状态也一并参与下面的「弃轮禁止」判定：
         未提交窗口里的 task（spec 2026-09-09）还没落盘，只看事件视图会漏掉它们。"""
+        if task_manager is None:
+            raise RuntimeError("resume_session requires the owner from rebuild_session")
         from ctx_weft.core.control.reducers import rebuild_view
         user_prompt_event_jsonable = _event_jsonable_or_fallback(
             user_prompt, user_prompt_event_jsonable, "resume_session",

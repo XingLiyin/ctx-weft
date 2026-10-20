@@ -41,6 +41,10 @@ class TaskRunner(Protocol):
 
     async def assemble(self, task_id: str) -> "AgentBinding | None": ...
 
+    async def confirm_finished(self, task_id: str) -> None:
+        """Confirm a stopped actor's original start/finish before task cancellation."""
+        ...
+
     async def execute(
         self, binding: "AgentBinding", task_id: str,
     ) -> "RunOutcome | None":

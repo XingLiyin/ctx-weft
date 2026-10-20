@@ -113,8 +113,10 @@ async def test_recovery_keeps_exactly_one_prompt(status_event, record_id) -> Non
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
+    await rt.initialize()
     await rt.rebuild_session(SID)
     with suppress_observe_start():
+        await rt.initialize()
         await rt.recover_agent(AID)
         await _poll(lambda: llm.act_requests or None, timeout=8.0)
         await asyncio.sleep(0.2)
@@ -149,8 +151,10 @@ async def test_requeued_task_with_revised_prompt_still_writes_it() -> None:
         kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK, address=scope,
         content=PROMPT, timestamp=TS, role="user", metadata={"task_id": TID}), pctx)
 
+    await rt.initialize()
     await rt.rebuild_session(SID)
     with suppress_observe_start():
+        await rt.initialize()
         await rt.recover_agent(AID)
         await _poll(lambda: llm.act_requests or None, timeout=8.0)
         await asyncio.sleep(0.2)
@@ -167,6 +171,7 @@ async def test_requeued_task_with_revised_prompt_still_writes_it() -> None:
 async def test_reply_to_a_terminal_task_opens_no_window() -> None:
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_AFTER_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
@@ -176,6 +181,7 @@ async def test_reply_to_a_terminal_task_opens_no_window() -> None:
     tm = rt._task_managers[sid]
     tm.get_task(q1.task_id).status = "CANCELED"          # task 已终态：重排必然 no-op
 
+    await rt.initialize()
     view = await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1"))
     assert view is not None and view.outcome == "accepted"
@@ -188,6 +194,7 @@ async def test_reply_to_a_terminal_task_opens_no_window() -> None:
 async def test_no_resume_delivery_opens_no_window() -> None:
     llm = _ScriptedLLM([_ask("tc1", "Q1?"), STALL_AFTER_CHUNK])
     rt = _runtime(llm, hitl_timeout_sec=0)
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
     sid = handle.session_id
@@ -197,6 +204,7 @@ async def test_no_resume_delivery_opens_no_window() -> None:
     from ctx_weft.protocols.hitl import NoResumeDelivery
     rt.hitl_registry.get(q1.id).delivery = NoResumeDelivery()   # 纯通知：没有续跑
 
+    await rt.initialize()
     assert await rt.reply_to_hitl(HitlReply(
         hitl_id=q1.id, outcome="accepted", agent_id=q1.agent_id, message="A1")) is not None
     assert not rt._task_managers[sid].open_round_task_ids
@@ -233,8 +241,10 @@ async def test_truncated_recorded_result_is_not_backfilled() -> None:
         metadata={"tool_calls": [{"id": tcid, "name": "fs__read_file",
                                   "input": {"path": "x"}}]}), pctx)
 
+    await rt.initialize()
     await rt.rebuild_session(SID)
     with suppress_observe_start():
+        await rt.initialize()
         await rt.recover_agent(AID)
         await _poll(lambda: llm.act_requests or None, timeout=8.0)
         await asyncio.sleep(0.2)

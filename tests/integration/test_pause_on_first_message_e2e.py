@@ -86,7 +86,8 @@ def _runtime(llm):
 async def _wait_for_wait_bubble(rt, session_id: str, timeout: float = 5.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        pending = [v for v in rt.list_pending_hitl(session_id=session_id) if v.form == "wait"]
+        await rt.initialize()
+        pending = [v for v in [item.data for item in await rt.list_pending_hitl(session_id=session_id)] if v.form == "wait"]
         if pending:
             return pending[0]
         await asyncio.sleep(0.02)
@@ -99,6 +100,7 @@ async def test_pause_on_the_very_first_message_parks_and_stays_usable() -> None:
         context_limit=_MOCK_CONTEXT_LIMIT)
     rt = _runtime(llm)
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="第一句就想撤回",
         context_limit=_MOCK_CONTEXT_LIMIT))
@@ -115,6 +117,7 @@ async def test_pause_on_the_very_first_message_parks_and_stays_usable() -> None:
     )
 
     # ② 按暂停：必须**当场**生效（TTFT 窗口里；改造前这里要等首个 chunk）
+    await rt.initialize()
     assert await rt.pause_session(sid) is True
     bubble = await _wait_for_wait_bubble(rt, sid)
     assert bubble.task_id == root_task_id
@@ -134,6 +137,7 @@ async def test_pause_on_the_very_first_message_parks_and_stays_usable() -> None:
 
     # ⑤ 回答那个气泡：会话继续
     llm.stalling = False
+    await rt.initialize()
     view = await rt.reply_to_hitl(HitlReply(
         hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
         message="算了，换个问题"))
@@ -170,12 +174,14 @@ async def test_pause_immediately_after_start_before_the_run_is_dispatched() -> N
         context_limit=_MOCK_CONTEXT_LIMIT)
     rt = _runtime(llm)
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="立刻就撤",
         context_limit=_MOCK_CONTEXT_LIMIT))
     sid, aid = handle.session_id, handle.agent_id
 
     # **不等** llm.stalled：抢在 run 派发之前/之中按停。
+    await rt.initialize()
     paused = await rt.pause_session(sid)
     assert paused is True, "pause_session 返回 False = 什么都没做，会话会永久滞留 RUNNING"
 
@@ -188,6 +194,7 @@ async def test_pause_immediately_after_start_before_the_run_is_dispatched() -> N
 
     # 续跑：回答那个气泡，会话必须真的跑起来。
     llm.stalling = False
+    await rt.initialize()
     assert await rt.reply_to_hitl(HitlReply(
         hitl_id=bubble.id, outcome="accepted", agent_id=bubble.agent_id,
         message="继续")) is not None
@@ -223,6 +230,7 @@ async def test_new_task_branch_does_not_re_run_recognize_intent() -> None:
     rt = _runtime(llm)
 
     # `unattended=True` → root task 的纯文本回合即产出，跑完落终态。
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="第一句",
         context_limit=_MOCK_CONTEXT_LIMIT, unattended=True))
@@ -236,6 +244,7 @@ async def test_new_task_branch_does_not_re_run_recognize_intent() -> None:
     assert after_first_round >= 1, "第一轮该给会话起名"
 
     # root 已终态 → 这条新消息走「新建 task」那条分支，**会开未提交窗口**。
+    await rt.initialize()
     turn = await rt.send_message(aid, "第二句", session_id=sid)
     new_task = tm.get_task(turn.task_id)
     assert new_task is not None and new_task.parent_task_id is None, (

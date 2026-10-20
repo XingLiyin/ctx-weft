@@ -6,6 +6,50 @@ ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力�
 
 > 本文是**使用参考**。想了解循环引擎、任务编排、崩溃恢复等**内部实现逻辑**，见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
+## Runtime 初始化与按需装填
+
+构造保持同步；使用任何业务接口前，宿主必须完成异步初始化：
+
+```python
+runtime = CtxWeftRuntime(providers=providers, event_store=event_store)
+report = await runtime.initialize()
+```
+
+`initialize()` 分批枚举事件分区，用快照和增量事件校准上次进程遗留的执行，
+将意外中断写回事件存储。它不装填会话、不创建 TaskManager、不启动模型或任务。
+初始化可并发调用，成功后重复调用直接返回报告；失败允许重试。
+自定义 EventStore 需实现 `list_session_ids(after_session_id=None, limit=100)`。
+启动校准针对单进程独占的存储范围，不是多进程接管机制。
+
+`report.sessions` 包含每个有效会话校准前后的位置、校准后的轻量状态事实与本次提交的
+`startup_events`（含提交位置）。没有新增补偿的会话也返回摘要，宿主可直接校准自己的投影，
+避免再次读取快照和回放增量。根任务已被快照裁掉时，仅按根任务补读所需状态。
+报告是初始化时的固定切面，不是运行期状态缓存；数据库表和快照格式不变。
+
+`get_session`、`get_task`、`list_tasks`、`get_agent`、`list_agents`、`list_pending_hitl`
+均为异步查询。单条返回 `QueryResult`，列表返回 `list[QueryResult]`：
+
+```python
+result = await runtime.get_session(session_id)
+print(result.data.status, result.source, result.loaded)
+task = (await runtime.get_task(session_id, task_id)).data
+agents = await runtime.list_agents(session_id=session_id)
+```
+
+已装填对象从内存读取；未装填或未保留的历史对象从事件流推断，查询不触发装填。
+`source` 为 `memory` / `events`，事件结果带 `committed_position`。
+不指定 Session 的列表只枚举已装填对象；冷 Agent 查询需要 `session_id` 定址。
+恢复快照可能裁掉终态任务，历史任务查询会补读原始任务事件。
+
+`rebuild_session()` 是已有会话唯一装填入口，只装填、不执行。同一会话的 owner
+TaskManager 只创建一份。`start_session(resume=True)`、`send_message`、`dispatch_task`、
+`recover_agent` 和需续跑的 HITL 应答会在会话锁内自动确保装填，不要求宿主提前装填。
+冷 `reply_to_hitl(reply, session_id=...)` 和 `recover_agent(agent_id, session_id=...)`
+需要 Session 定址信息。`rebuild_hitl`、`prepare_agent` 保留为统一装填的兼容入口。
+
+`TurnHandle.wait_for_finish()` 只在任务终态且相关收尾完成后正常返回，超时抛
+`TimeoutError`；人工等待不是完成。稳定的任务状态和产出请通过 `get_task()` 读取。
+
 ---
 
 ## 目录
@@ -162,6 +206,7 @@ runtime = CtxWeftRuntime(
 # 4. 运行一个任务：template_id 须为规范形式 provider:name——本 provider 注册的
 #    前缀是 "agent"（DictAgentTemplateProvider.name），故 "my_agent" → "agent:my_agent"。
 async def main():
+    await runtime.initialize()
     handle, state = await runtime.run_single_task(
         template_id="agent:my_agent",
         user_prompt="What is the meaning of life?",
@@ -496,26 +541,29 @@ providers.register_capability(LocalAgentTemplateProvider(Path("resources/templat
 runtime = CtxWeftRuntime(
     providers=providers,              # 必需含至少一个 AgentCapabilityProvider
     llm=my_llm_adapter,               # 可选，LLM 兜底（未注册 llm provider 时用）
-    hitl_manager=None,                # 可选，默认自动创建
     event_bus=None,                   # 可选，默认 InProcessEventBus；注入以接 Redis / NATS / 跨进程
     event_store=None,                 # 可选，默认 InMemoryEventStore（自动订阅 event_bus）
 )
+await runtime.initialize()
 ```
 
 构造时 **ControlCapabilityProvider**（内置控制工具）与 **SkillExecutorCapabilityProvider**
 会**自动注册**，无需手动添加。常用属性：`runtime.event_bus` / `runtime.event_store` /
-`runtime.hitl_manager` / `runtime.providers`。
+`runtime.hitl` / `runtime.hitl_registry` / `runtime.providers`。
 
-运行/控制入口共 **5 种**：
+主要运行入口：
 
 | 方法 | 用途 | 返回 |
 |------|------|------|
-| `run_single_task(...)` | 单任务端到端，**等待完成** | `(RunHandle, LoopState)` |
-| `start_session(params)` | 新建会话，多 agent 编排，**异步后台跑** | `RunHandle` |
-| `start_session(params)`（带 `session_id`） | 恢复已有会话续跑 | `RunHandle` |
+| `run_single_task(...)` | 单任务便利入口 | `(TurnHandle, LoopState)` |
+| `create_session(...)` | 新建空容器 | `SessionHandle` |
+| `start_session(params)` | 新建会话并派发首条任务 | `TurnHandle` |
+| `start_session(params)`（`resume=True`） | 在已有会话开启新 root 轮次 | `TurnHandle` |
+| `send_message(agent_id, content, ...)` | 继续对话，按需自动装填 | `TurnHandle` |
+| `dispatch_task(session_id, content, ...)` | 派发新任务，按需自动装填 | `TurnHandle` |
 | `rebuild_session(id)` | 装填冷会话的 HITL、agent 与 TaskManager（**只装填，不跑**） | `int` |
 | `recover_agent(agent_id)` | 复用准备好的 owner，激活任务并 drain（缺 owner 时先统一冷准备） | `None` |
-| `interrupt_session(id)` | 协作式取消正在跑的 session | `bool` |
+| `cancel_session(id)` | 取消会话范围工作 | `bool` |
 
 ### run_single_task() — 单任务直跑
 
@@ -673,10 +721,11 @@ class Event:
 事件类型在 `ctx_weft.core.events.types.EVENT_TYPES` 中**冻结**（业务代码不得发未登记类型）：
 
 - **Run/Step**：`RunStarted` `RunFinished` `RunCanceled` `RunPaused` `RunResumed` `StepStarted` `StepCompleted` `StepFailed`
-- **Session**：`SessionCreated` `SessionStatusChanged` `SessionFinished` `SessionPausedHitl`
+- **Session**：`SessionCreated` `SessionResumed`；会话状态由 host 维护，`SessionStatusChanged`、`SessionFinished`、`SessionPausedHitl` 已停发，仅兼容旧日志。
 - **LLM**：`LLMRequestStarted` `LLMTokenStreamed` `LLMResponseFinished`
 - **Capability**：`CapabilityStarted` `CapabilityProgress` `CapabilityFinished`
 - **Task**：`TaskStarted` `TaskFinished` `TaskFailed` `TaskSuspended` `TaskCanceled`
+- **Observe**：`ObserveRequested` `ObserveStarted` `ObserveCompleted` `ObserveApplied`；前后台统一，旧 `TaskRecap*` 已停发。
 - **Memory**：`MemoryIngested` `MemoryCompactionStarted` `MemoryCompacted`
 
 `RunFinished.payload` 含 `final_status` / `will_retry` / `total_events` / `total_turns` / `error` / `error_type`。

@@ -22,6 +22,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.protocols.memory_compat import legacy_type_of
 
 T = MemoryEventType
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
@@ -63,8 +64,11 @@ async def test_capsule_renders_body_and_finish_pair():
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=scope, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
-    blocks.sort(key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)))
-    types = [b.metadata.get("type") for b in blocks]
+    blocks.sort(key=lambda b: (b.value.timestamp, b.metadata.get("sequence", 0)))
+    types = [
+        b.value.type or legacy_type_of(b.value.kind, b.value.scope, b.value.role)
+        for b in blocks
+    ]
 
     # task 层 body 类型仍由 AgentRecallSource 读到（recall_recent_by_agent）
     assert T.USER_PROMPT in types
@@ -75,18 +79,19 @@ async def test_capsule_renders_body_and_finish_pair():
     assert T.TASK_DISPATCH not in types, "root self-residue must not use TASK_DISPATCH anymore"
 
     # 归并序：user(UP) → assistant(summary) → assistant(finish_task) → tool(Process Report)
-    history = [b for b in blocks if b.metadata.get("type") in (
-        T.USER_PROMPT, T.TASK_COMPACT_SUMMARY, T.AGENT_CONVERSATION_TURN)]
-    roles = [b.metadata.get("role") for b in history]
+    history = [b for b in blocks if (
+        b.value.type or legacy_type_of(b.value.kind, b.value.scope, b.value.role)
+    ) in (T.USER_PROMPT, T.TASK_COMPACT_SUMMARY, T.AGENT_CONVERSATION_TURN)]
+    roles = [b.value.role for b in history]
     assert len(history) == 4, f"expected 4 history blocks (body + finish pair), got {len(history)}: {roles}"
     assert roles == ["user", "assistant", "assistant", "tool"], f"got roles={roles}"
 
     # user block carries original prompt (task layer)
-    assert "把 ppt 转 pdf" in history[0].content
+    assert "把 ppt 转 pdf" in history[0].value.content
     # assistant summary block carries compaction content (TASK_COMPACT_SUMMARY, task layer)
-    assert "会话目标" in history[1].content
+    assert "会话目标" in history[1].value.content
     # finish_task tool_call (agent layer finish pair)
-    finish_tc = history[2].metadata.get("tool_calls", [])
+    finish_tc = history[2].value.metadata.get("tool_calls", [])
     assert finish_tc and finish_tc[0].get("name", "").endswith("finish_task")
     # task_summary（process report）in tool 回合（agent layer）
-    assert _task_summary in history[3].content
+    assert _task_summary in history[3].value.content

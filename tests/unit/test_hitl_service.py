@@ -23,6 +23,12 @@ T0 = datetime(2026, 9, 1, tzinfo=UTC)
 
 
 class RecordingBus:
+    async def emit_batch(self, events, *, on_committed=None):
+        for event in events:
+            await self.emit(event)
+        if on_committed is not None:
+            on_committed()
+
     def __init__(self) -> None:
         self.events: list[Event] = []
 
@@ -147,9 +153,12 @@ async def test_resolve_marks_claimed_true_when_a_hot_slot_takes_it():
     await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1", stage=STAGE_AUTHZ, unattended=False)
     slot = FakeSlot()
     svc.registry.attach_slot("hit_1", slot)
-    await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id="", message="go"))
+    resolved = await svc.resolve(HitlReply(hitl_id="hit_1", outcome="accepted", agent_id="", message="go"))
     assert slot.delivered.message == "go"
-    assert bus.payload_of(EventType.HITL_RESOLVED)["claimed"] is True
+    assert resolved.claimed is True
+    # The event is durable before actual delivery. Runtime routes by the live
+    # returned request; recovered decisions are always cold.
+    assert bus.payload_of(EventType.HITL_RESOLVED)["claimed"] is False
 
 
 async def test_resolve_marks_claimed_false_when_no_slot():
@@ -248,3 +257,60 @@ async def test_service_never_imports_runtime_or_loop():
 
     src = inspect.getsource(mod)
     assert "core.loop" not in src and "core.runtime" not in src
+
+
+async def test_cold_cancel_commit_failure_remains_pending_and_retryable():
+    from ctx_weft.protocols.events import PersistenceUnavailableError
+
+    class FailingBus(RecordingBus):
+        fail = True
+        async def emit(self, event):
+            if self.fail and event.type == EventType.HITL_RESOLVED:
+                raise PersistenceUnavailableError("unconfirmed cancellation")
+            await super().emit(event)
+
+    bus = FailingBus()
+    svc = _service(bus)
+    await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1",
+                   stage=STAGE_AUTHZ, unattended=False)
+    with pytest.raises(PersistenceUnavailableError):
+        await svc.cancel("hit_1", message="completed")
+    req = svc.registry.get("hit_1")
+    assert not req.resolved and req.resolved_at is None
+    assert svc.registry.list_pending("s1") == [req]
+    assert bus.types() == [EventType.HITL_OPENED]
+    bus.fail = False
+    await svc.cancel("hit_1", message="completed")
+    assert req.resolved
+    assert await svc.cancel("hit_1", message="completed") is None
+    assert bus.types().count(EventType.HITL_RESOLVED) == 1
+
+
+async def test_open_is_replyable_only_after_confirmation_and_before_notification():
+    from ctx_weft.protocols.events import PersistenceUnavailableError
+    from ctx_weft.providers.events.bus.in_process.bus import InProcessEventBus
+
+    bus = InProcessEventBus()
+    svc = _service(bus)
+    attempts = []
+    class Gate:
+        async def commit(self, events, *, batch_id=""):
+            attempts.append((batch_id, tuple(events)))
+            assert not svc.registry.list_pending("s1")
+            if len(attempts) == 1:
+                raise PersistenceUnavailableError("opening receipt unavailable")
+            return []
+    bus.attach_commit_gate(Gate())
+    answered = []
+    async def answer(event):
+        req = svc.registry.get(event.payload["hitl_id"])
+        assert req is not None
+        answered.append(await svc.resolve(HitlReply(hitl_id=req.id, agent_id="",
+            outcome="accepted", message="immediate reply"), defer=True))
+    bus.subscribe(EventType.HITL_OPENED, answer)
+    with pytest.raises(PersistenceUnavailableError):
+        await svc.open(_ask(), session_id="s1", task_id="t1", tool_call_id="call_1",
+                       stage=STAGE_AUTHZ, unattended=False)
+    assert not svc.registry.list_pending("s1") and not answered
+    await svc.confirm_opens("s1")
+    assert len(answered) == 1 and attempts[0] == attempts[1]

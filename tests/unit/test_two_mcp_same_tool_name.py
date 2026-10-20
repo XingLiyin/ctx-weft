@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
-from ctx_weft.core.assembler.sources.capability import CapabilitySource
+from ctx_weft.core.assembler.sources.capability import CapabilitySource, build_llm_tools
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
@@ -50,7 +50,9 @@ async def test_two_servers_same_tool_name_coexist_and_route() -> None:
     # 2. The LLM sees two distinct qualified names.
     request = SimpleNamespace(bound_capabilities=[a._cap(), b._cap()], purpose="act",
                               token_counter=estimate_tokens)
-    names = {blk.metadata["llm_tool"].name async for blk in CapabilitySource().fetch(request, deps=None)}
+    blocks = [blk async for blk in CapabilitySource().fetch(request, deps=None)]
+    names = {tool.name for tool in build_llm_tools(
+        [block.value for block in blocks], request.purpose)}
     assert names == {"mcp__a__search", "mcp__b__search"}
 
     # 3. Each qualified name routes to its own provider.

@@ -97,6 +97,7 @@ async def test_unattended_session_finishes_instead_of_parking_on_hitl() -> None:
     llm = _RouterLLM(act_responses=[_BASH_CALL, _finish_call()])
     runtime, tool = _runtime_with_gated_tool(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="run ls nightly",
         context_limit=100_000, unattended=True,
@@ -125,6 +126,7 @@ async def test_send_message_unattended_marks_the_task_it_opens() -> None:
     llm = _RouterLLM(act_responses=[_finish_call("tc_a"), _finish_call("tc_b")])
     runtime, _tool = _runtime_with_gated_tool(llm)
 
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="first", context_limit=100_000,
     ))
@@ -134,6 +136,7 @@ async def test_send_message_unattended_marks_the_task_it_opens() -> None:
     assert first.task.unattended is False
     assert not first.task.unattended
 
+    await runtime.initialize()
     new_handle = await runtime.send_message(handle.agent_id, "second", unattended=True)
     tm = runtime._task_managers[handle.session_id]
     task = tm.get_task(new_handle.task_id)

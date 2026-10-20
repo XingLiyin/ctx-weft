@@ -82,6 +82,7 @@ async def test_storage_failure_isolates_session_no_fake_success():
     # 存储从出生就死：第一条 emit（SessionCreated）的提交确认即失败——start_session
     # 响亮失败（spec: event-commit「不伪装成功」），而非返回一个注定悬空的句柄。
     with pytest.raises(PersistenceUnavailableError):
+        await runtime.initialize()
         await runtime.start_session(SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="hello", context_limit=100_000,
         ))
@@ -117,6 +118,7 @@ async def test_sql_drop_table_isolates_and_stops_scheduling(tmp_path):
                 conn.close()
 
         runtime.event_bus.subscribe(None, _observe)
+        await runtime.initialize()
         handle = await runtime.start_session(SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="hello", context_limit=100_000,
         ))
@@ -143,6 +145,7 @@ async def test_best_effort_keeps_old_swallow_contract():
         notified.append(event.type if isinstance(event.type, str) else event.type.value)
 
     runtime.event_bus.subscribe(None, _observe)
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hello", context_limit=100_000,
     ))

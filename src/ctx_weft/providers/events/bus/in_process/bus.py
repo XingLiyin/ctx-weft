@@ -8,7 +8,7 @@
 
 提交门（spec: event-commit，change reliability-wp3）：``attach_commit_gate`` 之后，
 窗口外事件 **先经 gate 确认存储提交、再 fanout**（required 语义）；未提交窗口在
-``commit_provisional`` 时**整批一次**提交（round batch_id，失败缓冲保留可重试）。
+``commit_provisional`` 时按固定批次提交，确认期间追加的事件进入后续批次。
 观察者队列溢出的丢弃以 ``EventsDropped`` 元事件通报（payload 带 position，可按
 ``read_range`` 补读）。``required=True`` 订阅者的 handler 异常穿出 emit——必要状态
 消费者的失败不再被吞。
@@ -20,14 +20,16 @@ import asyncio
 import contextvars
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 
 from ctx_weft.protocols.events import (
     TRANSIENT_EVENT_TYPES,
-    EventType,
     Event,
     EventBus,
     EventFilter,
+    EventOrigin,
+    EventType,
     SubscriptionHandle,
 )
 
@@ -66,14 +68,16 @@ class _Subscriber:
 
 @dataclass
 class _RoundWindow:
-    """一个未提交窗口：round batch_id + 按序缓冲的事件。
-
-    batch_id 在窗口开启时确定（TM 生成传入或首事件推导），提交失败重试**不换**——
-    WP2 的 append_batch 幂等据此保证「同 batch_id 重试恰好提交一次」。
-    """
+    """An immutable pending batch plus later events awaiting their own batch ID."""
 
     batch_id: str
     events: list[Event]
+    independent_runs: frozenset[str] = frozenset()
+    frozen: tuple[Event, ...] = ()
+    positions: dict[str, int] | None = None
+    notified: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    owner: asyncio.Task | None = None
 
 
 class InProcessEventBus(EventBus):
@@ -86,6 +90,11 @@ class InProcessEventBus(EventBus):
         self._lock = asyncio.Lock()
         #: task_id → 未提交窗口（见 `EventBus` 类 docstring）。键存在即「窗口开着」。
         self._provisional: dict[str, _RoundWindow] = {}
+        # Background producers already started outside a future user-message
+        # window keep their own lifetime; retracting that message cannot eat
+        # their remaining events (especially RunFinished).
+        self._background_runs: dict[str, str] = {}
+        self._actor_runs: dict[str, str] = {}
         #: 提交门（required 模式；None = 未接——best_effort 旧路径）
         self._gate = None
 
@@ -95,7 +104,28 @@ class InProcessEventBus(EventBus):
         """接入提交门（spec: event-commit）。emit/commit_provisional 先经 gate 确认。"""
         self._gate = gate
 
+    async def emit_batch(self, events, *, on_committed=None) -> None:
+        """Commit one immutable, non-retractable lifecycle batch before notification.
+
+        The caller retains the original envelopes until this returns. Retrying uses
+        the same first event ID and therefore confirms the same atomic transaction.
+        """
+        if not events:
+            return
+        stored = await self._gate.commit(events, batch_id=events[0].id) if self._gate else []
+        positions = {row.event.id: row.position for row in stored}
+        if on_committed is not None:
+            on_committed()
+        for event in events:
+            await self._fanout(event, to_provisional=True, to_rest=True,
+                               position=positions.get(event.id))
+
     async def emit(self, event: Event) -> None:
+        if event.type == EventType.RUN_STARTED and event.origin == EventOrigin.LOOP_BACKGROUND_OBSERVE:
+            self._track_background_run(event)
+            window = self._provisional.get(event.task_id or "")
+            if window is not None:
+                window.independent_runs = window.independent_runs | {event.run_id}
         task_id = getattr(event, "task_id", "") or ""
         window_key = task_id
         window = self._provisional.get(task_id) if task_id else None
@@ -103,6 +133,8 @@ class InProcessEventBus(EventBus):
             # 派生事件常无 task_id：经执行上下文继承当前窗口，不逃逸（方案 §4.6）
             window_key = _current_round.get() or ""
             window = self._provisional.get(window_key) if window_key else None
+        if window is not None and event.run_id in window.independent_runs:
+            window = None
         if window is not None:
             # 未提交窗口：进程内状态机立刻看到，其余人等提交。顺序由这条 list 保住——
             # 提交时原样重放，`TASK_CREATED` 先于 `TASK_STARTED` 这类次序不会被打乱。
@@ -115,10 +147,22 @@ class InProcessEventBus(EventBus):
             return
         # 窗口外：required 语义——先确认提交，再对外通知。瞬态事件不逐条确认（gate 过滤）。
         position: int | None = None
+        if event.type == EventType.RUN_STARTED and event.origin != EventOrigin.RUNTIME:
+            self._track_background_run(event)
         if self._gate is not None and event.type not in TRANSIENT_EVENT_TYPES:
             stored = await self._gate.commit([event])  # 失败 → PersistenceUnavailableError
             position = stored[0].position if stored else None
+        if event.type in (EventType.RUN_STARTED, EventType.RUN_FINISHED):
+            self._track_background_run(event)
         await self._fanout(event, to_provisional=True, to_rest=True, position=position)
+
+    def _track_background_run(self, event: Event) -> None:
+        if event.type == EventType.RUN_STARTED and event.run_id:
+            runs = self._actor_runs if event.origin == EventOrigin.RUNTIME else self._background_runs
+            runs[event.run_id] = event.task_id or ""
+        elif event.type == EventType.RUN_FINISHED:
+            self._background_runs.pop(event.run_id, None)
+            self._actor_runs.pop(event.run_id, None)
 
     async def _fanout(
         self, event: Event, *, to_provisional: bool, to_rest: bool,
@@ -272,30 +316,63 @@ class InProcessEventBus(EventBus):
         """
         if not task_id:
             return
-        self._provisional.setdefault(task_id, _RoundWindow(batch_id=batch_id, events=[]))
+        self._provisional.setdefault(task_id, _RoundWindow(batch_id=batch_id, events=[],
+            independent_runs=frozenset(rid for rid, tid in
+                (*self._background_runs.items(), *self._actor_runs.items()) if tid == task_id)))
+
+    def bind_provisional_run(self, task_id: str, run_id: str) -> None:
+        window = self._provisional.get(task_id)
+        if window is not None:
+            window.independent_runs = window.independent_runs - {run_id}
+
+    def is_run_provisional(self, task_id: str, run_id: str) -> bool:
+        window = self._provisional.get(task_id)
+        return window is not None and run_id not in window.independent_runs
 
     async def commit_provisional(self, task_id: str) -> None:
-        """关窗：**整批一次**提交（spec: event-commit），成功才补投其余订阅者。
+        """Confirm fixed batches in order, then close the window.
 
-        提交失败（PersistenceUnavailableError）：窗口原样放回（缓冲保留、batch_id 不变），
-        调用方可原样重试——WP2 幂等保证不双写。provisional 订阅者在 emit 时已收过，
-        这里只补其余人，不重复投递。
+        An uncertain batch keeps its ID and copied envelopes. Later emissions
+        remain buffered separately. Provisional subscribers already saw them;
+        only confirmed batches are delivered to ordinary subscribers.
         """
-        window = self._provisional.pop(task_id, None)
-        if window is None or not window.events:
+        window = self._provisional.get(task_id)
+        if window is None or window.owner is asyncio.current_task():
             return
-        positions: list[int | None] = [None] * len(window.events)
-        if self._gate is not None:
-            batch_id = window.batch_id or f"round:{task_id}:{window.events[0].id}"
+        async with window.lock:
+            window.owner = asyncio.current_task()
             try:
-                stored = await self._gate.commit(window.events, batch_id=batch_id)
-            except Exception:
-                self._provisional[task_id] = window   # 失败放回：缓冲保留、batch_id 不变
-                raise
-            by_id = {se.event.id: se.position for se in stored}
-            positions = [by_id.get(e.id) for e in window.events]
-        for event, pos in zip(window.events, positions):
-            await self._fanout(event, to_provisional=False, to_rest=True, position=pos)
+                while self._provisional.get(task_id) is window:
+                    if not window.frozen:
+                        if not window.events:
+                            self._provisional.pop(task_id, None)
+                            return
+                        window.frozen = tuple(deepcopy(window.events))
+                        window.events.clear()
+                        if not window.batch_id:
+                            window.batch_id = f"round:{task_id}:{window.frozen[0].id}"
+                    if window.positions is None:
+                        stored = (await self._gate.commit(list(window.frozen), batch_id=window.batch_id)
+                                  if self._gate is not None else [])
+                        window.positions = {se.event.id: se.position for se in stored}
+                    while window.notified < len(window.frozen):
+                        event = window.frozen[window.notified]
+                        self._track_background_run(event)
+                        await self._fanout(event, to_provisional=False, to_rest=True,
+                                           position=window.positions.get(event.id))
+                        window.notified += 1
+                    # New events belong to a new immutable batch. Keep the window
+                    # visible throughout I/O so additions cannot escape ahead of it.
+                    window.frozen = ()
+                    window.batch_id = ""
+                    window.positions = None
+                    window.notified = 0
+            finally:
+                window.owner = None
+
+    def has_pending_commit(self, task_id: str) -> bool:
+        window = self._provisional.get(task_id)
+        return window is not None and bool(window.frozen)
 
     def discard_provisional(self, task_id: str) -> None:
         """关窗并丢弃缓冲——这一轮当作没发生过。未开窗时 no-op。
@@ -311,7 +388,7 @@ class InProcessEventBus(EventBus):
         window = self._provisional.get(task_id)
         if window is None:
             return set()
-        return {e.agent_id for e in window.events if getattr(e, "agent_id", None)}
+        return {e.agent_id for e in (*window.frozen, *window.events) if getattr(e, "agent_id", None)}
 
     async def stream(self, filter: EventFilter) -> AsyncIterator[Event]:
         """订阅流——返回 async iterator。调用方需要负责 unsubscribe。"""

@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from tests.runtime_helpers import wait_for_park
+
 import pytest
 
 from ctx_weft.core.runtime import SessionStartParams
@@ -41,7 +43,7 @@ async def test_hot_approval_session_events_all_carry_the_sessions_tenant() -> No
     `tenant_id != "acme"` 的事件——`SessionCreated` 本就正确，`TaskCreated`（root task）
     与 `HitlOpened`/`HitlResolved` 是本次要收口的三处里的两处。
     """
-    llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()])
+    llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()], observer_verdicts=["success"])
     runtime, tool = _make_runtime_with_bash_tool(llm)
 
     events: list[Event] = []
@@ -51,6 +53,7 @@ async def test_hot_approval_session_events_all_carry_the_sessions_tenant() -> No
 
     runtime._event_bus.subscribe(None, _record)  # type: ignore[attr-defined]
 
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
         tenant_id=TENANT,
@@ -62,6 +65,7 @@ async def test_hot_approval_session_events_all_carry_the_sessions_tenant() -> No
     assert req.form == "approval"
     assert isinstance(req.delivery, ToolResultDelivery)
 
+    await runtime.initialize()
     view = await runtime.reply_to_hitl(
         HitlReply(hitl_id=req.id, outcome="accepted", agent_id=req.agent_id)
     )
@@ -96,12 +100,13 @@ async def test_recovery_queue_signal_carries_the_recovered_sessions_tenant() -> 
     llm = _ActRouterLLM(act_responses=[_BASH_CALL, _finish_call()])
     runtime, _tool = _make_runtime_with_bash_tool(llm, hitl_timeout_sec=0)
 
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
         tenant_id=TENANT,
     ))
     sid = handle.session_id
-    state = await handle.wait_for_finish(timeout=5.0)
+    state = await wait_for_park(handle, timeout=5.0)
     assert state is not None and state.task.status == "AWAITING_HUMAN"
     pending = runtime.hitl_registry.list_pending(session_id=sid)
     assert len(pending) == 1
@@ -123,6 +128,5 @@ async def test_recovery_queue_signal_carries_the_recovered_sessions_tenant() -> 
 
     broadcasts = [e for e in events
                   if e.type in ("AgentIdle", "AgentWaitingHuman", "AgentInterrupted")]
-    assert len(broadcasts) == 1, broadcasts
-    assert broadcasts[0].session_id == sid
-    assert broadcasts[0].tenant_id == TENANT
+    assert broadcasts == [], "Materialization does not rebroadcast committed states"
+    assert runtime2._task_managers[sid].session.tenant_id == TENANT

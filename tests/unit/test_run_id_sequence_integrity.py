@@ -21,6 +21,8 @@ import collections
 import time
 from dataclasses import dataclass
 
+from tests.runtime_helpers import wait_for_park
+
 import pytest
 
 from ctx_weft.core.runtime import SessionStartParams
@@ -132,10 +134,11 @@ async def bus_after_recap_run() -> _RecapRun:
 
     runtime._event_bus.emit = _spy
 
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
-    state = await handle.wait_for_finish(timeout=5.0)
+    state = await wait_for_park(handle, timeout=5.0)
     assert state is not None and state.task.status == "AWAITING_HUMAN"
 
     # background recap 与 recognize_intent 都是 fire-and-forget：wait_for_finish
@@ -164,7 +167,7 @@ async def test_background_observe_does_not_reuse_main_run_sequence(bus_after_rec
     """
     recap_run_ids = {
         e.run_id for e in bus_after_recap_run.events
-        if e.type == EventType.TASK_RECAP_STARTED
+        if e.type == EventType.OBSERVE_STARTED
     }
     assert recap_run_ids, "fixture 没有触发 background observe（TaskRecapStarted 缺失）"
     for rid in recap_run_ids:
@@ -221,6 +224,7 @@ async def test_compact_agent_run_has_start_and_finish():
     runtime._agent_lifecycle_manager.materialize(
         aid, session_id=sid, tenant_id="default")
 
+    await runtime.initialize()
     await runtime.compact_agent(aid)
 
     _assert_no_duplicate_sequence(seen)

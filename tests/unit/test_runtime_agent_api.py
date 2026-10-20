@@ -35,6 +35,11 @@ def _plant(rt, agent_id, parent, session_id="s1", status="idle"):
     )
     if parent is not None:
         reg._children.setdefault(parent, set()).add(agent_id)
+    if session_id not in rt._task_managers:
+        from ctx_weft.core.models.session import Session
+        session = Session(id=session_id, user_prompt="", status="RUNNING", root_agent_id=agent_id)
+        owner = rt._session_registry._new_task_manager(session)
+        rt._register_and_drain(session, owner, start_tasks=False)
 
 
 async def _reach_commit_point(rt, *, session_id="s1", task_id="t1"):
@@ -81,6 +86,7 @@ def _plant_live_task(rt, agent_id, task_id, *, task_status, agent_status, sessio
     )
     tm.register_task(task)
     rt._task_managers[session_id] = tm
+    rt._loaded_sessions.add(session_id)
 
     async def _noop_drain():
         return None
@@ -94,7 +100,8 @@ async def test_list_agents_returns_flat_list():
     _plant(rt, "root", None)
     _plant(rt, "kid", "root")
 
-    out = rt.list_agents(session_id="s1")
+    await rt.initialize()
+    out = [item.data for item in await rt.list_agents(session_id="s1")]
     assert {a.agent_id for a in out} == {"root", "kid"}
     assert all(isinstance(a, AgentSummary) for a in out)
     kid = next(a for a in out if a.agent_id == "kid")
@@ -107,7 +114,8 @@ async def test_list_agents_filtered_by_parent():
     _plant(rt, "kid1", "root")
     _plant(rt, "grandkid", "kid1")
 
-    out = rt.list_agents(session_id="s1", parent_agent_id="root")
+    await rt.initialize()
+    out = [item.data for item in await rt.list_agents(session_id="s1", parent_agent_id="root")]
     assert {a.agent_id for a in out} == {"kid1"}, "只返回直接子 agent"
 
 
@@ -116,8 +124,10 @@ async def test_list_agents_excludes_terminated_by_default():
     _plant(rt, "alive", None)
     _plant(rt, "dead", None, status="terminated")
 
-    assert {a.agent_id for a in rt.list_agents(session_id="s1")} == {"alive"}
-    assert {a.agent_id for a in rt.list_agents(session_id="s1", include_terminated=True)} == {
+    await rt.initialize()
+    assert {a.agent_id for a in [item.data for item in await rt.list_agents(session_id="s1")]} == {"alive"}
+    await rt.initialize()
+    assert {a.agent_id for a in [item.data for item in await rt.list_agents(session_id="s1", include_terminated=True)]} == {
         "alive", "dead",
     }
 
@@ -125,7 +135,8 @@ async def test_list_agents_excludes_terminated_by_default():
 async def test_get_agent_returns_detail():
     rt = _rt()
     _plant(rt, "root", None)
-    d = rt.get_agent("root")
+    await rt.initialize()
+    d = (await rt.get_agent("root")).data
     assert isinstance(d, AgentDetail)
     assert d.template_id == "tpl"
     assert d.session_id == "s1"
@@ -134,7 +145,8 @@ async def test_get_agent_returns_detail():
 async def test_get_agent_unknown_raises():
     rt = _rt()
     with pytest.raises(AgentNotFound):
-        rt.get_agent("ghost")
+        await rt.initialize()
+        (await rt.get_agent("ghost")).data
 
 
 async def test_send_message_rejects_running_agent():
@@ -142,6 +154,7 @@ async def test_send_message_rejects_running_agent():
     rt = _rt()
     _plant_live_task(rt, "a1", "t1", task_status="ACTIVE", agent_status="running")
     with pytest.raises(AgentBusyError):
+        await rt.initialize()
         await rt.send_message("a1", "hi")
 
 
@@ -149,6 +162,7 @@ async def test_send_message_rejects_terminated_agent():
     rt = _rt()
     _plant(rt, "a1", None, status="terminated")
     with pytest.raises(AgentTerminatedError):
+        await rt.initialize()
         await rt.send_message("a1", "hi")
 
 
@@ -156,6 +170,7 @@ async def test_send_message_validates_session_id_when_given():
     rt = _rt()
     _plant(rt, "a1", None, session_id="s1")
     with pytest.raises(ValueError):
+        await rt.initialize()
         await rt.send_message("a1", "hi", session_id="s-other")
 
 
@@ -174,6 +189,7 @@ async def test_send_message_reuses_live_task(monkeypatch):
     monkeypatch.setattr(rt, "_inject_user_turn", _fake_inject, raising=False)
     monkeypatch.setattr(rt, "_task_is_terminal", lambda _s, _t: False, raising=False)
 
+    await rt.initialize()
     tid = (await rt.send_message("a1", "hello")).task_id
     assert tid == "t-live"
     assert injected == [("t-live", "hello")]
@@ -193,6 +209,7 @@ async def test_send_message_creates_new_task_when_current_is_terminal(monkeypatc
     monkeypatch.setattr(rt, "_start_task_for_agent", _fake_new_task, raising=False)
     monkeypatch.setattr(rt, "_task_is_terminal", lambda _s, _t: True, raising=False)
 
+    await rt.initialize()
     tid = (await rt.send_message("a1", "hello")).task_id
     assert tid == "t-new"
     assert created == ["a1"]
@@ -212,6 +229,7 @@ async def test_inject_requeue_does_not_emit_task_human_resolved():
     rt = _rt()
     _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
 
+    await rt.initialize()
     tid = (await rt.send_message("a1", "please continue")).task_id
     assert tid == "t1"
 
@@ -235,6 +253,7 @@ async def test_inject_requeue_leaves_agent_idle_not_running():
     rt = _rt()
     _plant_live_task(rt, "a1", "t1", task_status="INTERRUPTED", agent_status="interrupted")
 
+    await rt.initialize()
     await rt.send_message("a1", "resume with this extra context")
 
     assert rt._agent_lifecycle_manager.status_of("a1") == "idle", (
@@ -249,11 +268,13 @@ async def test_send_message_twice_in_a_row_is_not_rejected_as_busy():
     rt = _rt()
     _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
 
+    await rt.initialize()
     tid1 = (await rt.send_message("a1", "first message")).task_id
     assert tid1 == "t1"
 
     # 第一次注入之后 task 仍是同一个未终态 task（只是被塞回队列，没被 drain 真派发），
     # 第二次消息应该继续走注入分支、落到同一个 task，而不是被拒绝。
+    await rt.initialize()
     tid2 = (await rt.send_message("a1", "second message right after")).task_id
     assert tid2 == "t1"
 
@@ -268,7 +289,7 @@ async def test_start_session_agent_id_is_addressable_root_agent():
     """
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    llm = MockLLMAdapter(responses=[
+    llm = MockLLMAdapter(observer_verdict="success", responses=[
         MockResponse(text="done", tool_calls=[
             ToolCall(id="tc1", name="control__finish_task", arguments={}),
         ]),
@@ -276,6 +297,7 @@ async def test_start_session_agent_id_is_addressable_root_agent():
     rt = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt="hi",
@@ -284,7 +306,8 @@ async def test_start_session_agent_id_is_addressable_root_agent():
     await handle.wait_for_finish(timeout=5.0)
 
     assert handle.agent_id
-    detail = rt.get_agent(handle.agent_id)
+    await rt.initialize()
+    detail = (await rt.get_agent(handle.agent_id)).data
     assert detail.session_id == handle.session_id
     assert detail.parent_agent_id is None
 
@@ -311,10 +334,12 @@ async def test_summary_carries_created_at_for_live_agents():
     rt = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
-    [summary] = [a for a in rt.list_agents(session_id=handle.session_id)
+    await rt.initialize()
+    [summary] = [a for a in [item.data for item in await rt.list_agents(session_id=handle.session_id)]
                  if a.agent_id == handle.agent_id]
     assert summary.created_at is not None
 
@@ -323,7 +348,8 @@ async def test_list_agents_without_session_id_spans_sessions():
     rt = _rt()
     _plant(rt, "agt_a", None, session_id="s1")
     _plant(rt, "agt_b", None, session_id="s2")
-    ids = {a.agent_id for a in rt.list_agents()}
+    await rt.initialize()
+    ids = {a.agent_id for a in [item.data for item in await rt.list_agents()]}
     assert {"agt_a", "agt_b"} <= ids
 
 
@@ -331,7 +357,8 @@ async def test_list_agents_session_id_still_filters():
     rt = _rt()
     _plant(rt, "agt_a", None, session_id="s1")
     _plant(rt, "agt_b", None, session_id="s2")
-    assert [a.agent_id for a in rt.list_agents(session_id="s1")] == ["agt_a"]
+    await rt.initialize()
+    assert [a.agent_id for a in [item.data for item in await rt.list_agents(session_id="s1")]] == ["agt_a"]
 
 
 # ── 2026-09-04 spec §3.3：send_message 返回 TurnHandle ─────────────────────
@@ -345,6 +372,7 @@ async def test_send_message_returns_turn_handle():
     rt = _rt()
     _plant_live_task(rt, "a1", "t1", task_status="AWAITING_HUMAN", agent_status="waiting_human")
 
+    await rt.initialize()
     h = await rt.send_message("a1", "hello")
 
     assert isinstance(h, TurnHandle)
@@ -369,6 +397,7 @@ async def test_new_task_branch_yields_a_different_task_id():
     rt = _rt()
     _plant_live_task(rt, "a1", "t-old", task_status="FINISHED", agent_status="idle")
 
+    await rt.initialize()
     h = await rt.send_message("a1", "again")
 
     assert h.task_id != "t-old"
@@ -380,6 +409,7 @@ async def test_inject_branch_reuses_the_live_task_id():
     rt = _rt()
     _plant_live_task(rt, "agt_1", "tsk_live",
                      task_status="AWAITING_HUMAN", agent_status="waiting_human")
+    await rt.initialize()
     h = await rt.send_message("agt_1", "外部消息")
     assert h.task_id == "tsk_live"
     assert h.agent_id == "agt_1"

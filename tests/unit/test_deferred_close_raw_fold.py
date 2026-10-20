@@ -15,12 +15,10 @@ import pytest
 import ctx_weft.core.loop.steps.observe as _obs_mod
 from ctx_weft.core.capabilities.control_tools import (
     REPORT_OBSERVATION_NAME,
-    ControlResult,
 )
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop import task_memory_fold as fp
 from ctx_weft.core.loop.driver import StepDriver
-from ctx_weft.core.loop.steps import observe as recap_mod
 from ctx_weft.core.loop.steps.finalize import finalize_task_memory
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
@@ -34,16 +32,6 @@ T = MemoryEventType
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-@pytest.fixture(autouse=True)
-def _clear_bg_state():
-    fp._close_report.clear()
-    fp._close_synth.clear()
-    yield
-    fp._close_report.clear()
-    fp._close_synth.clear()
-
-
-# ─── finalize 侧 helpers（对齐 test_close_task.py）────────────────────────────
 
 def _pctx() -> ProviderContext:
     return ProviderContext(session_id="s1", tenant_id="default")
@@ -109,10 +97,8 @@ async def test_close_without_llm_summary_keeps_raw_and_registers_fold() -> None:
 
     assert await _active_raw(mem, scope), \
         "无 LLM 总结时 close 不得删末段 raw（占位 finish 对不承载执行内容）"
-    synth = fp._close_synth.get("t1")
-    assert synth is not None, "占位路径须登记 _close_synth 等 bg 替换"
-    assert len(synth) == 4 and synth[3] == scope, \
-        f"登记须带 raw_fold_scope（task scope）供 bg 替换后补删；实得 {synth!r}"
+    target = await fp.find_finish_target(mem, _pctx(), scope, "t1")
+    assert target is not None and not target[2]["preserve_raw"]
 
 
 # ─── TEST 2: 有 LLM 总结的 close 照旧同步删 raw（回归）──────────────────────
@@ -141,19 +127,22 @@ async def test_slot_hit_folds_raw_immediately() -> None:
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
     task = _root_task()
-    fp._close_report["t1"] = ("bg_act", "bg_sum")
 
     await finalize_task_memory(mem, _state(task, scope), task, "out", "success",
                                _loop_ctx(mem), act_recap="占位 recap", task_summary="",
                                has_llm_summary=False)
 
+    import asyncio
+    from ctx_weft.core.loop.steps.observe import ObservationResult, apply_close_report
+    state = _state(task, scope)
+    state.extra = {"observe_id": "obs-long-report"}
+    await apply_close_report(state, _loop_ctx(mem), ObservationResult("bg_act", "bg_sum"), asyncio.Event())
     turns = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _pctx())
     tool = [r for r in turns if r.role == "tool"]
     assert tool and tool[0].content == "[task: 'Root' (t1)] bg_sum", \
         f"slot 命中 finish tool 应为真报告；实得 {[r.content for r in tool]!r}"
     assert await _active_raw(mem, scope) == [], \
         "真摘要已落地（slot 命中替换后）应立即补删末段 raw"
-    assert "t1" not in fp._close_synth, "slot 命中不需要再登记异步替换"
 
 
 # ─── TEST 4: 同 agent 子任务延迟折叠登记的 raw scope = 子 task scope ──────────
@@ -163,7 +152,6 @@ async def test_same_agent_child_defers_with_child_task_scope() -> None:
     子任务自己的 task scope（raw 所在层），不是 finish 对所在的 parent scope。"""
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1")
-    parent_scope = _sc("p1")
     await _seed_long_conv(mem, child_scope)
     child = Task(id="c1", session_id="s1", status="FINISHED", tenant_id="default",
                  assigned_agent_id="ag1", creator_agent_id="ag1", parent_task_id="p1",
@@ -175,11 +163,9 @@ async def test_same_agent_child_defers_with_child_task_scope() -> None:
                                has_llm_summary=False)
 
     assert await _active_raw(mem, child_scope), "无 LLM 总结时子任务末段 raw 也须保留"
-    synth = fp._close_synth.get("c1")
-    assert synth is not None and len(synth) == 4
-    assert synth[3] == child_scope, \
-        f"raw_fold_scope 应为子 task scope（raw 所在层）；实得 {synth[3]!r}"
-    assert synth[1] == parent_scope, "finish 对 scope 应仍为 parent scope（嵌套合成）"
+    target = await fp.find_finish_target(mem, _pctx(), child_scope, "c1")
+    assert target is not None and not target[2]["preserve_raw"]
+    assert target[0].task_id == "p1"
 
 
 # ─── bg 侧：替换成功 → 补删；无可用报告 → raw 保留 ───────────────────────────
@@ -222,13 +208,13 @@ async def _preset_placeholder_pair(mem, scope, task_id: str, pctx) -> None:
     await mem.ingest(MemoryEvent(
         type=T.AGENT_CONVERSATION_TURN, address=scope, content="占位 recap",
         timestamp=ts, role="assistant",
-        metadata={"origin_task_id": task_id,
+        metadata={"origin_task_id": task_id, "finish_policy": {"preserve_raw": False, "outcome": "success", "slot_count": 2},
                   "tool_calls": [{"id": "tc9", "name": "control__finish_task", "input": {}}]},
     ), pctx)
     await mem.ingest(MemoryEvent(
         type=T.AGENT_CONVERSATION_TURN, address=scope, content="占位 summary",
         timestamp=ts, role="tool",
-        metadata={"origin_task_id": task_id, "tool_call_id": "tc9"},
+        metadata={"origin_task_id": task_id, "finish_policy": {"preserve_raw": False, "outcome": "success", "slot_count": 2}, "tool_call_id": "tc9"},
     ), pctx)
 
 
@@ -246,7 +232,6 @@ async def test_bg_replace_success_folds_raw(monkeypatch, fake_state_ctx) -> None
         yield _usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _stream)
-    fp.register_close_synth(state.task.id, "tc9", state.scope, "success", state.scope)
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
     turns = await ctx.memory.recall_recent(
@@ -272,7 +257,6 @@ async def test_bg_no_usable_report_keeps_raw_and_placeholder(monkeypatch, fake_s
         yield _usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
-    fp.register_close_synth(state.task.id, "tc9", state.scope, "success", state.scope)
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "finish"})
 
     raw = await ctx.memory.recall_recent(
@@ -282,4 +266,3 @@ async def test_bg_no_usable_report_keeps_raw_and_placeholder(monkeypatch, fake_s
         state.scope, [T.AGENT_CONVERSATION_TURN], 100, ctx.provider_ctx)
     assert sorted(r.content for r in turns) == ["占位 recap", "占位 summary"], \
         "占位 finish 对保持原样"
-    assert fp._close_synth == {}, "登记须弹掉防泄漏"

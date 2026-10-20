@@ -83,6 +83,7 @@ async def test_load_no_longer_rewinds_current_task_id(monkeypatch):
     reg = rt._agent_lifecycle_manager
     assert reg.record_of(aid).current_task_id == "tsk_old"
 
+    await rt.initialize()
     first = await rt.send_message(aid, "new question", session_id=sid)
     assert reg.record_of(aid).current_task_id == first.task_id
 
@@ -91,5 +92,6 @@ async def test_load_no_longer_rewinds_current_task_id(monkeypatch):
     assert reg.record_of(aid).current_task_id == first.task_id, "路由判据被热重装倒回了"
 
     # 判据没倒回 → 下一条消息并进同一个 task，不再凭空多开一个
+    await rt.initialize()
     second = await rt.send_message(aid, "another question", session_id=sid)
     assert second.task_id == first.task_id

@@ -4,6 +4,44 @@
 >
 > 想知道**怎么调用 SDK**，见 [README.md](./README.md)。这里的内容对编写自定义 Provider、调试事件流、扩展引擎有帮助，但日常使用不必读。
 
+启动与装填的当前边界：同步构造 → `await initialize()`（只校准持久崩溃事实）→ 查询或工作。
+查询优先内存、回退事件临时投影，不登记运行对象。已有会话只由 `rebuild_session` 统一
+装填 Session、Agent、HITL、TaskManager 及接线；开启工作入口在同一会话锁内先确保装填。
+`_bind_task_manager` 保持唯一 owner 守卫，TaskManager 构造统一复用 SessionRegistry 的工厂。
+装填不 drain、不恢复 recap；真正执行前才激活 deferred recovery。
+`SessionStatusChanged` 已停发，仅兼容旧日志；会话状态由 host 维护，启动校准只补写 run、task、agent 与 HITL 恢复事实。
+投影和快照保存未结束 run 的任务、agent 及最大 sequence；`RunFinished` 将该 run 销账，
+任务裁剪不裁这份执行信息。启动校准复用快照加增量，不再另读完整 run 历史；旧版本快照回退全量日志。
+
+前后台 observe 共用 `ObserveRequested → ObserveStarted → ObserveCompleted → ObserveApplied`。
+机械判决在前台调度入口由同步方法先返回，随后将 `verdict`、任务处置计划及
+`judge_task=false` 写入 `ObserveRequested`。前台直接进入 finalize，不调用 ObserveStep；
+后台沿同一个 `observe_id` 执行一次 ObserveStep 生成报告。执行是否判决只由 `judge_task` 控制。
+前台收尾的崩溃恢复由 runtime 负责，observe 内不再手动推进 FinalizeStep。
+LLM 执行后才确定的判决仍写入 `ObserveCompleted`。机械判决驱动的收尾允许早于报告完成，
+但 `ObserveApplied` 必须晚于任务处置与报告应用。报告订阅任务状态通知后读取持久化事实，
+因此晚订阅不依赖历史通知；应用时校验 finish 记录的 observe 归属，并与取消收尾串行。
+执行逻辑和四个事件的组装、发送统一位于 `core/loop/steps/observe.py`；driver 在调度前调用意图持久化入口，TaskManager 在仲裁和结算位置调用 observe 提供的回调。
+Requested 在执行前持久化（park 时嵌入 `HitlOpened`），Started 在观察前立即写入；Completed
+保存报告及执行后确定的判决。机械判决路径由 Requested 先于任务收尾，Completed 先于报告应用；
+LLM 判决路径由 Completed 先于判决应用。Applied 只在结果应用完成后销账。
+`TaskRecapRequested/Started/Done` 已停发，仅供旧日志重放。快照保存 `pending_observe` 的结果、
+已完成副作用与任务状态提交标记。冷恢复已有 Completed 时不再调用模型，沿原决定幂等补完。
+前台仍由 TaskManager 在 RunFinished 后落任务状态；机械判决与异步报告属于同一次 observe。
+收尾报告交接以完整持久化的 finish 对为准：其 metadata 保存原文保留策略和槽位数量；后台在真实报告写入、必要折叠完成后才发送 Applied。前后台先后次序仅影响等待，进程内通知只唤醒，不承载报告或恢复决定。
+前台 observe 可协作暂停/取消；暂停时旧 Completed（放弃判决）、旧 Applied 与携带新
+recap 请求的 HitlOpened 原子提交。气泡提交确认后才可回复；失败重试复用原事件封套。
+热恢复先确认停止 run 的原始起止事件，再按已提交交接事实补齐等待状态、槽位释放和 recap。
+未完成判决的冷恢复由 TaskManager 持有前台槽位和 dispatch，注册真实暂停/取消令牌；
+已接受的判决只恢复收尾。root、跨 agent 和同 agent 子任务的暂停均安排 report-only recap。
+observe 请求通过 `context_record_ids` 固定输入记录；memory 的 `read_records` 按原 ID
+读取含 superseded 的记录，并保持租户/会话隔离。装配、短段门与折叠共用这份范围；
+后续收尾已经接管的段不再追加旧摘要。旧快照遗漏引用时，从原请求事件补齐。
+新 user 回合的 HitlResolved 与消息回合在同一批提交，确认后才发布 claim 状态、写入暂存
+memory；首字前撤销仍丢弃整批，并恢复原气泡。
+熔断的 `FailureThresholdHit` 先持久化 root 失败及清场目标；在途 root 的 `TaskFailed`
+必须晚于其前台 `RunFinished`。启动校准独立闭合所有遗留 run，再兑现尚未完成的熔断决定。
+
 ---
 
 ## 目录
@@ -393,6 +431,12 @@ v2 里「子任务结果怎么到父」有三条，全部落在 memory、由 `Ag
 ### 取消 / 暂停
 
 `cancel_session`（`:906`：先取消 HITL → `cancel_all` 清队 → 逐 agent `cancel_agent` 转 terminated）；`cancel_agent`（`:965`）；`pause_session`（`:828`）/ `pause_agent`（`:1111`）/ `resume_agent`（`:1157`）。取消经 RunTokens 广播到该 session 全部在途 run（§7）；统一取消胶囊闭合 `synthesize_cancel_closure`（`core/loop/steps/finalize.py:569`）。
+
+`cancel_agent(agent_id)` 通过 AgentManager 仅持久化指定 agent 的 `AgentTerminated` 状态，再由 TaskManager 选择当前实际任务并取消任务子树，包括由其他 agent 执行的后代 task；不沿 agent 血缘终止子 agent，也不扫描 agent 归属来取消无关任务。运行任务保持 `RunFinished → TaskCanceled → TaskFinalized`。恢复复用 agent 终态和任务生命周期事实，采用相同的 task 子树取消范围，不新增终止意图或独立取消账。
+
+TaskManager 用实际调度协程句柄判断执行是否仍存活，调度占位不等于活跃 run。装配前后和注册 run 令牌后均检查已有的任务树取消标记；装配结束时已取消的任务不调用 actor。`TaskCanceled` 确认提交后才更新内存终态；重试通过现有控制投影（有效快照加事件增量）核对提交事实，复用已提交的取消时间，并按 `TaskFinalized` 跳过已完成的副作用。取消记忆与 HITL 收尾完成后唤醒 observe，让其重读持久化事实，因此确认丢失时无需重复发取消事件。
+
+机械 observe 的最终报告按持久化 disposition 交接，包括同 agent 子任务；按 task ID 和 observe 归属找到父 scope 中的 finish 对。短任务替换报告但保留原文；长任务先完整写入报告及答复锚点，再删除原文，最后发送 `ObserveApplied`。
 
 ### `run_single_task`（compat）
 

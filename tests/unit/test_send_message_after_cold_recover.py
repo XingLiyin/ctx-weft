@@ -56,11 +56,13 @@ async def test_send_message_reuses_a_cold_prepared_task_manager(
 
     n = await rebuild_all_active(rt)
     assert n == 1
-    assert {a.agent_id for a in rt.list_agents()} == {aid}
+    await rt.initialize()
+    assert {a.agent_id for a in [item.data for item in await rt.list_agents()]} == {aid}
     prepared_tm = rt._task_managers[sid]
     assert not prepared_tm._queue.has_pending()
     assert rt._prepared_recoveries[sid][0] is prepared_tm
 
+    await rt.initialize()
     handle = await rt.send_message(aid, "hi")
 
     assert handle.agent_id == aid
@@ -91,6 +93,7 @@ async def test_send_message_fast_path_does_not_rebuild_when_session_already_live
     await rebuild_all_active(rt)
 
     # 先交付一条消息，激活已准备的 TM。
+    await rt.initialize()
     first = await rt.send_message(aid, "hi")
     tm = rt._task_managers[sid]
     # 模拟这条消息对应的 task 已经跑完终态——下一条消息会再次落到
@@ -106,6 +109,7 @@ async def test_send_message_fast_path_does_not_rebuild_when_session_already_live
 
     monkeypatch.setattr(rt, "recover_agent", _spy_recover_agent, raising=False)
 
+    await rt.initialize()
     handle = await rt.send_message(aid, "second message")
 
     assert called == [], "session 已活，不该再走 recover_agent 重建"

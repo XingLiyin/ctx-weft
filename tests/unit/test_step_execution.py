@@ -15,6 +15,69 @@ from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols.events import EventOrigin, EventType
 
 
+async def test_older_observe_stays_live_after_latest_report_finishes():
+    registry = ExecutionRegistry()
+    release = asyncio.Event()
+    older = asyncio.create_task(release.wait())
+    latest = asyncio.create_task(asyncio.sleep(0))
+    registry.register("old-run", "task", "observe", older, observe_id="old-observe")
+    registry.register("latest-run", "task", "observe", latest, observe_id="latest-observe")
+    await latest
+    assert registry.pending_run_id("task") is None
+    assert registry.observe_is_live("old-observe")
+    assert not registry.observe_is_live("latest-observe")
+    release.set()
+    await older
+    assert not registry.observe_is_live("old-observe")
+
+
+async def test_durable_observe_intent_precedes_enqueue_and_survives_commit_failure(fake_state_ctx):
+    state, ctx = fake_state_ctx
+    executed = []
+
+    async def execute(snapshot, local_ctx):
+        executed.append(snapshot.run_id)
+        return StepOutcome(None)
+
+    driver = StepDriver({"observe": NS(name="observe", execute=execute)})
+    emit = ctx.event_bus.emit
+
+    async def fail(event):
+        raise OSError("intent commit failed")
+
+    ctx.event_bus.emit = fail
+    with pytest.raises(OSError):
+        await driver.start_durable("observe", state, ctx, options={"boundary": "interrupt"})
+    assert not driver.executions.tasks and not executed
+    ctx.event_bus.emit = emit
+    task = await driver.start_durable("observe", state, ctx, options={"boundary": "interrupt"})
+    assert ctx.event_bus.emitted[0].type == EventType.OBSERVE_REQUESTED
+    assert not executed
+    await task
+
+
+async def test_two_observe_intents_for_one_task_are_independent(fake_state_ctx):
+    from ctx_weft.core.control.reducers import reduce_events, serialize_view, deserialize_view
+
+    state, ctx = fake_state_ctx
+    async def execute(snapshot, local_ctx):
+        return StepOutcome(None)
+    driver = StepDriver({"observe": NS(name="observe", execute=execute)})
+    first = await driver.start_durable("observe", state, ctx, options={"boundary": "interrupt"})
+    second = await driver.start_durable("observe", state, ctx, options={"boundary": "dispatch"})
+    await asyncio.gather(first, second)
+    view = reduce_events(ctx.event_bus.emitted, state.run_id)
+    assert len(view.pending_observe) == 2
+    view = deserialize_view(serialize_view(view))
+    keys = list(view.pending_observe)
+    assert all(view.pending_observe[key]["segment_end_at"] for key in keys)
+    done = make_event(state, EventType.OBSERVE_APPLIED,
+                      {"task_id": state.task.id, "observe_id": keys[0]})
+    from ctx_weft.core.control.reducers import apply_events
+    apply_events([done], view)
+    assert list(view.pending_observe) == [keys[1]]
+
+
 @pytest.mark.parametrize("name", ["observe", "recognize_intent"])
 async def test_background_snapshot_context_and_lifecycle(fake_state_ctx, name):
     state, ctx = fake_state_ctx
@@ -122,7 +185,9 @@ async def test_foreground_event_order_and_options(fake_state_ctx):
     async def execute(current, local_ctx):
         assert current is state
         assert local_ctx.execution.mode == ExecutionMode.FOREGROUND
-        assert local_ctx.execution.options == {"judge_task": True}
+        assert local_ctx.execution.options["judge_task"] is True
+        assert local_ctx.execution.options["observe_id"]
+        assert local_ctx.execution.options["execution_mode"] == "foreground"
         return StepOutcome("finalize", events=[
             make_event(current, EventType.OBSERVE_STARTED, {"task_id": current.task.id})])
 
@@ -130,8 +195,9 @@ async def test_foreground_event_order_and_options(fake_state_ctx):
     result = await driver.execute("observe", state, ctx, options={"judge_task": True})
     assert result.next_step == "finalize"
     assert [e.type for e in ctx.event_bus.emitted] == [
-        EventType.STEP_STARTED, EventType.OBSERVE_STARTED, EventType.STEP_COMPLETED]
-    assert [e.sequence for e in ctx.event_bus.emitted] == [1, 2, 3]
+        EventType.OBSERVE_REQUESTED, EventType.STEP_STARTED,
+        EventType.OBSERVE_STARTED, EventType.STEP_COMPLETED]
+    assert [e.sequence for e in ctx.event_bus.emitted] == [1, 2, 3, 4]
     assert ctx.execution.options == {}
 
 
@@ -218,3 +284,28 @@ async def test_registries_isolate_sessions_even_with_equal_task_ids():
         async with second.task_guard("task", "observe"):
             pass
     await task
+
+
+async def test_mechanical_request_failure_never_executes_observe_or_schedules_report(monkeypatch):
+    from tests.unit.test_observe_outcomes import _mech_state_ctx
+    from ctx_weft.core.loop.steps.observe import ObserveStep
+    state, ctx = _mech_state_ctx(exit_reason="actor_done")
+    invoked = []
+    async def forbidden(*args):
+        invoked.append("execute")
+        raise AssertionError("foreground must not execute ObserveStep")
+    def forbidden_start(*args, **kwargs):
+        invoked.append("start")
+        raise AssertionError("uncommitted intent must not start a report")
+    async def fail(event):
+        assert event.type == EventType.OBSERVE_REQUESTED
+        assert event.payload["judge_task"] is False
+        assert event.payload["verdict"]["task_outcome"] == "success"
+        raise OSError("requested commit failed")
+    monkeypatch.setattr(ObserveStep, "execute", forbidden)
+    driver = StepDriver({"observe": ObserveStep()})
+    monkeypatch.setattr(driver, "start", forbidden_start)
+    ctx.event_bus.emit = fail
+    with pytest.raises(OSError, match="requested commit failed"):
+        await driver.execute("observe", state, ctx)
+    assert not invoked and not driver.executions.tasks

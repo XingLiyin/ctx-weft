@@ -101,6 +101,7 @@ async def _idle_agent():
 
 async def test_compact_agent_returns_receipt():
     rt = await _idle_agent()
+    await rt.initialize()
     r = await rt.compact_agent(AID)
     assert isinstance(r, CompactReceipt)
     assert r.agent_id == AID
@@ -110,12 +111,14 @@ async def test_compact_agent_returns_receipt():
 async def test_transient_task_id_is_flagged():
     """不传 task_id 时返回的是内存载体 id，事件库里查不到——这条此前只写在 docstring 里。"""
     rt = await _idle_agent()
+    await rt.initialize()
     r = await rt.compact_agent(AID)
     assert r.task_id_is_transient is True
 
 
 async def test_supplied_task_id_is_not_transient():
     rt = await _idle_agent()
+    await rt.initialize()
     r = await rt.compact_agent(AID, task_id="root0")
     assert r.task_id == "root0"
     assert r.task_id_is_transient is False
@@ -126,6 +129,7 @@ async def test_unknown_agent_raises():
 
     rt = await _idle_agent()
     with pytest.raises(AgentNotFound):
+        await rt.initialize()
         await rt.compact_agent("agt_nope")
 
 

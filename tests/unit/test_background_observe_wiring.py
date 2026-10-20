@@ -1,24 +1,16 @@
-"""Task 5 & 13: 在交互 / finish 段边界接线 launch_recap 的接线单测。
-
-测试四个触发点（均为 root-gated）：
-  1. observe.py ask_human 边界（act_exit_reason="normal"，root task）→ 触发一次
-  2. observe.py root normal-exit finish（act_exit_reason="actor_done"，root task）→ 触发一次
-  3. act.py 软打断 park（`_park_for_interrupt`，root task）→ 触发一次
-  4. act.py 纯文本暂停 park（`_park_await_user`，root task）→ 触发一次（Task 13）
-  5. 子任务（parent_task_id 非空、同 agent）走相同路径 → 不触发
-"""
+"""Observe dispatch follows the shared driver; mechanical verdicts request one report."""
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from ctx_weft.core.loop.driver import LoopContext, LoopState
+from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver
+from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
@@ -28,7 +20,6 @@ from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     LLMChunk,
     MemoryAddress,
-    MemoryEventType,
     ProviderContext,
 )
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -86,6 +77,8 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
         loop_config=SimpleNamespace(
             max_turns_per_observe=1,
             compact_keep_last=2,
+            short_task_turn_cap=4,
+            short_task_token_threshold=1000,
         ),
         runtime={"llm_model": "mock"},
         loop_guard=SimpleNamespace(context_limit=100_000, context_tokens=0),
@@ -103,8 +96,11 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
     )
 
     class _FakeEventBus:
+        def __init__(self):
+            self.emitted = []
+
         async def emit(self, event: Any) -> None:
-            pass
+            self.emitted.append(event)
 
     class _FakeAssembler:
         async def assemble(self, request: Any) -> Any:
@@ -128,87 +124,41 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
     return state, ctx
 
 
-# ── observe.py: ask_human boundary (act_exit_reason="normal", root task) ─────
-
-
-async def test_observe_ask_human_boundary_fires_for_root(monkeypatch):
-    """root task, act_exit_reason='normal' → launch_recap called once."""
+@pytest.mark.parametrize("child,boundary,report_boundary", [
+    (False, "max_turns", "mechanical"),
+    (False, "actor_done", "finish"),
+    (True, "actor_done", "finish"),
+])
+async def test_mechanical_verdict_requests_one_report(monkeypatch, child, boundary, report_boundary):
+    task = (_make_child_task if child else _make_root_task)(actor_done=boundary == "actor_done")
+    state, ctx = _make_observe_state_ctx(task, boundary)
+    state.transcript.append({"role": "assistant", "content": "done"})
     launched = []
+    pending = []
 
-    def fake_launch(state, ctx, *, boundary=""):
-        launched.append((state.task.id,))
-        fut = asyncio.get_event_loop().create_future()
-        fut.set_result(None)
-        return asyncio.ensure_future(asyncio.sleep(0))
+    def start(self, name, state, ctx, *, options=None):
+        assert name == "observe"
+        requested, = ctx.event_bus.emitted
+        assert requested.type == EventType.OBSERVE_REQUESTED
+        launched.append(dict(options))
+        pending.append(asyncio.create_task(asyncio.sleep(0)))
+        return pending[-1]
 
-
-    # Patch launch_recap in observe module's namespace
-    import ctx_weft.core.loop.steps.observe as obs_mod
-    patch_observe_start(monkeypatch, fake_launch)
-
-    task = _make_root_task()
-    state, ctx = _make_observe_state_ctx(task, act_exit_reason="normal")
-
-    await ObserveStep().execute(state, ctx)
-
-    assert len(launched) == 1, f"Expected 1 launch, got {len(launched)}"
-
-
-# ── observe.py: root normal-exit finish (act_exit_reason="actor_done") ────────
-
-
-async def test_observe_finish_fires_for_root(monkeypatch):
-    """root task, act_exit_reason='actor_done' → launch_recap called once."""
-    launched = []
-
-    def fake_launch(state, ctx, *, boundary=""):
-        launched.append((state.task.id,))
-        return asyncio.ensure_future(asyncio.sleep(0))
-
-    patch_observe_start(monkeypatch, fake_launch)
-
-    task = _make_root_task(actor_done=True)
-    state, ctx = _make_observe_state_ctx(task, act_exit_reason="actor_done")
-
-    await ObserveStep().execute(state, ctx)
-
-    assert len(launched) == 1, f"Expected 1 launch, got {len(launched)}"
-
-
-# ── observe.py: child task does NOT fire ─────────────────────────────────────
-
-
-async def test_observe_child_task_does_not_fire_close_boundary(monkeypatch):
-    """child task（parent_task_id 非空、同 agent）→ 不触发 close 边界（finish/normal）。
-
-    Task 4 起它仍会 launch 一次，但边界是 "mechanical"：该子任务无 observe ROLE
-    （template=None）→ 走机械判决，判决无摘要，摘要交 background observe 补。
-    close 边界仍严格只属 root——mechanical 不在 CLOSE_BOUNDARIES，不写 _close_report。
-    """
-    launched = []
-
-    def fake_launch(state, ctx, *, boundary=""):
-        launched.append((state.task.id, boundary))
-        return asyncio.ensure_future(asyncio.sleep(0))
-
-    patch_observe_start(monkeypatch, fake_launch)
-
-    child = _make_child_task(actor_done=True)
-    state, ctx = _make_observe_state_ctx(child, act_exit_reason="actor_done")
-
-    await ObserveStep().execute(state, ctx)
-
-    from ctx_weft.core.loop.steps.observe import CLOSE_BOUNDARIES
-    assert launched == [("t2", "mechanical")], launched
-    assert not [b for _, b in launched if b in CLOSE_BOUNDARIES], (
-        f"child task must never take a close boundary, got {launched}")
-
-
-# ── observe.py: 前台真判过 → close 边界那次后台调用取消（2026-09-28）──────────
+    monkeypatch.setattr(StepDriver, "start", start)
+    outcome = await StepDriver.for_context(ctx).execute("observe", state, ctx)
+    assert outcome.next_step == "finalize"
+    options, = launched
+    requested, = ctx.event_bus.emitted
+    assert options["observe_id"] == requested.payload["observe_id"]
+    assert options["judge_task"] is requested.payload["judge_task"] is False
+    assert options["verdict"] == requested.payload["verdict"]
+    assert options["verdict"]["task_outcome"] == ("continue" if boundary == "max_turns" else "success")
+    assert options["boundary"] == report_boundary
+    await asyncio.gather(*pending)
 
 
 def _spy_launch(monkeypatch) -> list:
-    """把 `launch_recap` 换成记录器，返回 (task_id, boundary) 列表。"""
+    """把 driver 的后台 observe 启动换成记录器，返回 (task_id, boundary) 列表。"""
     launched: list = []
 
     def fake_launch(state, ctx, *, boundary=""):
@@ -224,18 +174,8 @@ def _with_observe_role(state) -> None:
     state.extra["template"] = SimpleNamespace(identity={"observe": SimpleNamespace(text="ROLE")})
 
 
-async def test_foreground_verdict_cancels_the_close_boundary_recap(monkeypatch):
-    """前台 LLM 真报了判决 → close 边界**不发**后台 observe。
-
-    这道门是随「删掉 `_should_use_llm` 的 root 降级」一起加的，删不得：那次后台调用的全部
-    用途就是替机械判决补一份摘要，前台报过之后它不只是多余，而是**有害**。
-
-    `has_llm_summary = verdict.reported`（finalize）为真时，close 当场就把真摘要写进 finish
-    对、末段 raw 同步折。但 `_synthesize_dispatch_pair` 仍带 `register_bg=True`，此刻
-    `pop_close_report` 必然是空的（后台才刚 launch），于是走 `register_close_synth` 登记；
-    等这次只摘要档回来，`_replace_finish_report` 就把前台那份好摘要**覆盖**成 recap-only 的
-    产物。一次白烧的 LLM 换一次内容降级。
-    """
+async def test_foreground_verdict_and_report_use_one_observe(monkeypatch):
+    """前台 LLM 在同一次 observe 中生成判决和报告，不另起后台调用。"""
     launched = _spy_launch(monkeypatch)
     from ctx_weft.core.loop.steps.observe import ObservationResult, Verdict
 
@@ -250,20 +190,17 @@ async def test_foreground_verdict_cancels_the_close_boundary_recap(monkeypatch):
     state, ctx = _make_observe_state_ctx(task, act_exit_reason="actor_done")
     _with_observe_role(state)
 
-    outcome = await ObserveStep().execute(state, ctx)
+    outcome = await StepDriver.for_context(ctx).execute("observe", state, ctx)
 
     assert launched == [], f"前台已产判决，不该再发任何后台 observe；实得 {launched}"
     assert outcome.state_patch["verdict"].reported is True
+    stages = [e for e in ctx.event_bus.emitted if e.type.startswith("Observe")]
+    assert [e.type for e in stages] == [EventType.OBSERVE_REQUESTED, EventType.OBSERVE_STARTED, EventType.OBSERVE_COMPLETED]
+    assert len({e.payload["observe_id"] for e in stages}) == 1
 
 
-async def test_a_failed_foreground_verdict_still_gets_the_close_boundary_recap(monkeypatch):
-    """同一格的另一半：前台 LLM 落空（抛异常 / 耗尽轮次没调工具）→ close 边界照发。
-
-    这是那整套 close 机制（`_close_report` / `_close_synth` / `_replace_finish_report` /
-    延迟折叠）在 2026-09-28 之后的**唯一**存在理由——它从「root 的常规路径」降级成「前台
-    判决没摘要时的兜底」，但不能删：机械判决的 `act_recap` 是空的，末段 raw 的账要么由这次
-    后台 recap 记，要么永久保 raw。
-    """
+async def test_failed_foreground_verdict_stays_in_the_same_observe(monkeypatch):
+    """LLM failure falls back within the existing observe, without a second request."""
     launched = _spy_launch(monkeypatch)
 
     async def boom(self, state, ctx, events):
@@ -275,10 +212,12 @@ async def test_a_failed_foreground_verdict_still_gets_the_close_boundary_recap(m
     state, ctx = _make_observe_state_ctx(task, act_exit_reason="actor_done")
     _with_observe_role(state)
 
-    outcome = await ObserveStep().execute(state, ctx)
+    outcome = await StepDriver.for_context(ctx).execute("observe", state, ctx)
 
-    assert launched == [("t1", "finish")], launched
-    # 机械判决兜底，且它没有摘要——正是上面那次后台调用要补的东西。
+    assert launched == []
+    stages = [event.type for event in ctx.event_bus.emitted if event.type.startswith("Observe")]
+    assert stages == [EventType.OBSERVE_REQUESTED, EventType.OBSERVE_STARTED, EventType.OBSERVE_COMPLETED]
+    # No valid LLM report: retain the raw segment rather than launch another observe.
     assert outcome.state_patch["verdict"].reported is False
     assert outcome.state_patch["verdict"].act_recap == ""
 
@@ -287,7 +226,7 @@ async def test_a_failed_foreground_verdict_still_gets_the_close_boundary_recap(m
 
 
 async def test_act_soft_interrupt_fires_for_root(monkeypatch):
-    """act soft-interrupt park (_park_for_interrupt, root task) → launch_recap called once."""
+    """act soft-interrupt park (_park_for_interrupt, root task) → background observe starts once."""
     from ctx_weft.core.assembler.assembler import AssembledPrompt
     from ctx_weft.core.control.tokens import PauseToken
     from ctx_weft.core.loop.steps.act import ActStep
@@ -341,7 +280,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
 # ── act.py: soft-interrupt park does NOT fire for child ──────────────────────
 
 
-async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
+async def test_act_soft_interrupt_child_task_schedules_recap(monkeypatch):
     """act soft-interrupt park with child task → launch_recap NOT called."""
     from ctx_weft.core.assembler.assembler import AssembledPrompt
     from ctx_weft.core.control.tokens import PauseToken
@@ -389,14 +328,14 @@ async def test_act_soft_interrupt_child_task_does_not_fire(monkeypatch):
     with pytest.raises(HitlPark):
         await ActStep().execute(state, ctx)
 
-    assert len(launched) == 0, f"Expected 0 launches for child soft-interrupt, got {len(launched)}"
+    assert len(launched) == 1, "same-agent child interruption also needs a durable recap"
 
 
 # ── act.py: plain-text pause fires for root (Task 13) ───────────────────────
 
 
 async def test_act_plain_text_pause_fires_for_root(monkeypatch):
-    """act plain-text pause (_park_await_user, root task, interactive) → launch_recap called once."""
+    """act plain-text pause (_park_await_user, root task, interactive) → background observe starts once."""
     from ctx_weft.core.loop.steps.act import _finish_plain_text_turn
     from ctx_weft.providers.events import InProcessEventBus
     from tests.hitl_env import make_hitl
@@ -499,8 +438,11 @@ def _make_suspend_state_ctx(task: Task):
     )
 
     class _FakeEventBus:
+        def __init__(self):
+            self.emitted = []
+
         async def emit(self, event: Any) -> None:
-            pass
+            self.emitted.append(event)
 
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=_FakeEventBus(),

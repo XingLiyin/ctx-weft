@@ -1,4 +1,4 @@
-"""Task 6: runtime 重跑 recap 辅助方法（_find_finish_pair_tool_call_id / _relaunch_task_recap）。"""
+"""冷恢复调度与共享的持久化 finish 对查找。"""
 
 from __future__ import annotations
 
@@ -35,13 +35,12 @@ def _fake_resolved_model() -> ResolvedModel:
 
 
 def _make_runtime_and_session():
-    from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.providers.llm.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider, make_echo_template, make_runtime,
     )
 
-    # 模板要真的能解出来：`_relaunch_task_recap` 现在按 agent record 的 template_id 现解
+    # 模板要真的能解出来：`_relaunch_observe` 现在按 agent record 的 template_id 现解
     # （从前由调用方连同会话模板一起传进来，那会让子 agent 的 recap 跑 root 的 identity）。
     provider = InlineAgentTemplateProvider()
     provider.register(make_echo_template())
@@ -60,7 +59,7 @@ def _make_runtime_and_session():
     task_manager = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
     task_manager.set_session(session)
 
-    # `_relaunch_task_recap` 不再收模板（它按 agent 自己的出身解），这个占位只为保持
+    # `_relaunch_observe` 不再收模板（它按 agent 自己的出身解），这个占位只为保持
     # fixture 的解包形状不变，本文件的用例都不再把它传下去。
     template = object()
     agent_id = "agt_1"
@@ -87,6 +86,9 @@ async def _seed_finish_pair(memory: InMemoryMemoryProvider, session: Session, ta
         ),
         pctx,
     )
+    await memory.ingest(MemoryEvent(
+        type=MemoryEventType.AGENT_CONVERSATION_TURN, address=scope,
+        content="report", role="tool", timestamp=datetime(2026, 6, 12, tzinfo=UTC), metadata={"origin_task_id": task.id, "tool_call_id": tcid}), pctx)
     return tcid
 
 
@@ -96,10 +98,10 @@ def minimal_runtime_with_session():
     return runtime, session, template, task_manager, task, agent_id, memory
 
 
-async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_session, monkeypatch):
+async def test_relaunch_does_not_reinfer_finish_policy(minimal_runtime_with_session, monkeypatch):
     """close 边界重跑：从 memory 读到 finish 对 tool_call_id 后 register_close_synth，并以该 boundary 重跑。"""
     runtime, session, template, task_manager, task, agent_id, memory = minimal_runtime_with_session
-    tcid = await _seed_finish_pair(memory, session, task, agent_id)
+    await _seed_finish_pair(memory, session, task, agent_id)
     task.status = "FINISHED"
 
     def _fake_materialize(self, agent_id, *, session_id=None, tenant_id=None):
@@ -124,17 +126,13 @@ async def test_relaunch_registers_close_synth_for_finish(minimal_runtime_with_se
 
     patch_observe_start(monkeypatch, _fake_launch)
 
-    await runtime._relaunch_task_recap(
+    await runtime._relaunch_observe(
         session=session, task_manager=task_manager,
         task=task, agent_id=agent_id, boundary="finish",
     )
     await asyncio.sleep(0)
 
-    assert captured["task_id"] == task.id
-    assert captured["tool_call_id"] == tcid
-    assert captured["outcome"] == "success"
-    # 延迟折叠（spec 2026-07-20）：重跑替换成功后按 task scope 补删末段 raw
-    assert captured["raw_fold_scope"] == captured["scope"]
+    assert captured == {}, "runtime must not recreate a raw-fold decision from task status"
     assert launched["boundary"] == "finish"
 
 
@@ -147,7 +145,7 @@ async def test_relaunch_is_best_effort_swallows_errors(minimal_runtime_with_sess
 
     monkeypatch.setattr(AgentLifecycleManager, "materialize", _boom)
 
-    await runtime._relaunch_task_recap(
+    await runtime._relaunch_observe(
         session=session, task_manager=task_manager,
         task=task, agent_id=agent_id, boundary="finish",
     )  # 不应抛出
@@ -158,19 +156,11 @@ async def test_find_finish_pair_tool_call_id_found_and_none():
     scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent_id)
     pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id, task_id=task.id, agent_id=agent_id)
 
-    from ctx_weft.core import CtxWeftRuntime
-    from ctx_weft.providers.llm.mock import MockLLMAdapter
-    from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
-
-    runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
-
-    # 无占位 finish 对 → None
-    got_none = await runtime._find_finish_pair_tool_call_id(memory, scope, task.id, pctx)
-    assert got_none is None
-
+    from ctx_weft.core.loop.task_memory_fold import find_finish_target
+    assert await find_finish_target(memory, pctx, scope, task.id) is None
     tcid = await _seed_finish_pair(memory, session, task, agent_id)
-    got = await runtime._find_finish_pair_tool_call_id(memory, scope, task.id, pctx)
-    assert got == tcid
+    target = await find_finish_target(memory, pctx, scope, task.id)
+    assert target[1] == tcid
 
 
 async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_session, monkeypatch):
@@ -197,7 +187,7 @@ async def test_relaunch_dispatch_boundary_no_close_synth(minimal_runtime_with_se
 
     patch_observe_start(monkeypatch, _fake_launch)
 
-    await runtime._relaunch_task_recap(
+    await runtime._relaunch_observe(
         session=session, task_manager=task_manager,
         task=task, agent_id=agent_id, boundary="dispatch",
     )

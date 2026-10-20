@@ -7,7 +7,7 @@ from ctx_weft.protocols.events import EventType
 
 def _recap_types(bus_events):
     return [e.type for e in bus_events if e.type in (
-        EventType.TASK_RECAP_STARTED, EventType.TASK_RECAP_DONE)]
+        EventType.OBSERVE_STARTED, EventType.OBSERVE_APPLIED)]
 
 
 @pytest.mark.asyncio
@@ -21,7 +21,7 @@ async def test_started_and_done_emitted_on_success(fake_state_ctx, monkeypatch):
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
 
     kinds = _recap_types(ctx.event_bus.emitted)
-    assert kinds == [EventType.TASK_RECAP_STARTED, EventType.TASK_RECAP_DONE]
+    assert kinds == [EventType.OBSERVE_STARTED, EventType.OBSERVE_APPLIED]
 
 
 @pytest.mark.asyncio
@@ -33,5 +33,5 @@ async def test_done_emitted_even_on_exception(fake_state_ctx, monkeypatch):
     await StepDriver.for_context(fake_state_ctx[1]).start("observe", *fake_state_ctx, options={"boundary": "interrupt"})
 
     kinds = _recap_types(fake_state_ctx[1].event_bus.emitted)
-    assert EventType.TASK_RECAP_STARTED in kinds
-    assert EventType.TASK_RECAP_DONE in kinds  # 异常出口也发 DONE
+    assert EventType.OBSERVE_STARTED in kinds
+    assert EventType.OBSERVE_APPLIED in kinds  # 异常出口也发 DONE

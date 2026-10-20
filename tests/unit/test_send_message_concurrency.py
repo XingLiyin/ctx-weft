@@ -46,7 +46,7 @@ async def _seed_idle_agent(rt, sid: str, aid: str) -> None:
     await append_one(rt.event_store, _ev(2, sid, EventType.AGENT_INSTANTIATED, agent_id=aid,
                                     template_id="agent:tpl_echo"))
     await append_one(rt.event_store, _ev(3, sid, EventType.AGENT_IDLE, agent_id=aid))
-    await rt._load_agents_of(sid)
+    await rt.initialize()
     assert sid not in rt._task_managers
 
 
@@ -90,6 +90,7 @@ async def test_concurrent_send_message_does_not_supersede_the_task_manager(monke
         return orig_reg(self, session, tm, **kwargs)
     monkeypatch.setattr(CtxWeftRuntime, "_register_and_drain", _spy)
 
+    await rt.initialize()
     h1, h2 = await asyncio.gather(
         rt.send_message(aid, "first", session_id=sid),
         rt.send_message(aid, "second", session_id=sid),

@@ -56,6 +56,9 @@ class RunOutcome:
     # crash 入口必须显式传 `getattr(exc, "retriable", True)`。
     retriable: bool = False
     hitl_id: str = ""            # AWAITING_HUMAN
+    observe_id: str = ""
+    observe_disposition: dict | None = None
+    observe_report_pending: bool = False
     spawn_titles: tuple[str, ...] = ()   # SUSPENDED_ON_CHILDREN
 
 

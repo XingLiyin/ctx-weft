@@ -97,6 +97,28 @@ async def test_last_of_type_is_none_when_absent(store) -> None:
     assert await store.read_last_of_type("s_other", EventType.MEMORY_COMPACTED) is None
 
 
+async def test_related_task_filter_includes_cross_task_facts_and_respects_cut(store):
+    from dataclasses import replace
+
+    events = [
+        replace(_ev(1, EventType.TASK_CREATED), task_id="other", payload={"task": {"id": "target"}}),
+        replace(_ev(2, EventType.TASK_REVIEWING), task_id="other", payload={
+            "successor": {"task": {"id": "target"}}}),
+        replace(_ev(3, EventType.TASK_REVIEWING), task_id="other", payload={
+            "replaced_task_ids": ["target"]}),
+        replace(_ev(4, EventType.TASK_REVIEWING), task_id="other", payload={
+            "rewired_dependencies": {"target": ["new"]}}),
+        replace(_ev(5, EventType.TASK_FINISHED), task_id="target"),
+        replace(_ev(6, EventType.TASK_FINISHED), task_id=None),
+        replace(_ev(7, EventType.TASK_FINISHED), task_id="other"),
+        replace(_ev(8, EventType.TASK_FINISHED), task_id="target"),
+    ]
+    await store.append_batch(_SID, "related", events)
+    rows = await store.read_range(_SID, after_position=1, through_position=7, related_task_id="target")
+    assert [row.position for row in rows] == [2, 3, 4, 5]
+    assert len(await store.read_range(_SID, task_id="target")) == 3  # Existing NULL-safe filter.
+
+
 # ── read_range(exclude_types=) ────────────────────────────────────────────────
 
 

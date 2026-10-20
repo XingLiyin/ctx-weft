@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextRequest
-from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.protocols import (
     MemoryEvent,
@@ -16,6 +15,7 @@ from ctx_weft.protocols import (
     ProviderContext,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import history_messages
 
 pytestmark = pytest.mark.asyncio
 
@@ -51,7 +51,7 @@ async def test_open_tasks_of_agent_all_visible() -> None:
     await mem.ingest(_ev(T.USER_PROMPT, _sc("tB"), "do B", 2, role="user"), _ctx())
 
     blocks = await _collect(mem, _sc("tB"))  # assembling for active task tB
-    contents = {b.content for b in blocks}
+    contents = {b.value.content for b in blocks}
     assert {"do A", "A reply", "do B"} <= contents  # sibling tA conversation visible
 
 
@@ -69,8 +69,8 @@ async def test_closed_task_shows_dispatch_pair_and_hides_unpaired() -> None:
     blocks = await _collect(mem, _sc("t1"))
     tool_call_ids = [
         tc["id"]
-        for b in blocks if b.metadata.get("role") == "assistant"
-        for tc in b.metadata.get("tool_calls", [])
+        for b in blocks if b.value.role == "assistant"
+        for tc in b.value.metadata.get("tool_calls", [])
     ]
     assert "d1" in tool_call_ids       # paired dispatch rendered
     assert "d2" not in tool_call_ids   # unpaired dispatch hidden
@@ -85,7 +85,7 @@ async def test_composer_merges_open_conv_and_residue_by_timestamp() -> None:
                          tool_call_id="d1"), _ctx())
 
     blocks = await _collect(mem, _sc("t1"))
-    messages = DefaultComposer()._history_to_messages(blocks)
+    messages = history_messages(blocks, task_id="t1")
     roles = [m.role for m in messages]
     assert roles == ["user", "assistant", "tool"]
     assert messages[1].tool_calls[0]["id"] == "d1"

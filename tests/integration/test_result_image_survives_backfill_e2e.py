@@ -115,8 +115,10 @@ async def test_crash_between_result_event_and_memory_keeps_the_image_retrievable
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
+    await rt.initialize()
     await rt.rebuild_session(SID)
     with suppress_observe_start():
+        await rt.initialize()
         await rt.recover_agent(AID)
         await _poll(lambda: llm.act_requests or None, timeout=8.0)
 

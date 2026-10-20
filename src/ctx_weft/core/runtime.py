@@ -8,16 +8,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
+import inspect
 import logging
 from collections.abc import AsyncIterator, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
 from ctx_weft.core.assembler import ContextAssembler
+from ctx_weft.core.control.reducers import read_task_view, rebuild_view, reduce_events
+from ctx_weft.core.models.config import RuntimeConfig
+from ctx_weft.protocols.runtime import InitializationReport, QueryResult, SessionDetail, TaskDetail
 from ctx_weft.core.assembler.assembler import AssemblerDeps
 from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.assembler.sources import (
@@ -55,7 +61,6 @@ from ctx_weft.core.loop.steps import (
     PrepareStep,
     RecognizeIntentStep,
 )
-from ctx_weft.core.loop.task_memory_fold import register_close_synth
 from ctx_weft.core.loop.steps.compact import CompactStep
 from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
@@ -80,6 +85,8 @@ from ctx_weft.core.models.errors import (
     AgentNotLoaded,
     AgentNotRunningError,
     SessionAlreadyExistsError,
+    SessionNotFound,
+    TaskNotFound,
     crash_error_code,
     crash_run_outcome,
 )
@@ -109,6 +116,7 @@ from ctx_weft.protocols.capability import (
 from ctx_weft.protocols.events import EventBus, PersistenceUnavailableError
 from ctx_weft.protocols.hitl import (
     HITL_OUTCOME_ACCEPTED,
+    HITL_OUTCOME_CANCELLED,
     PREFACE_AFTER_INTERRUPT,
     PREFACE_AFTER_INTERRUPT_EDIT,
     HitlReply,
@@ -338,6 +346,7 @@ class TurnHandle:
     # 表示无健康面，wait_for_finish 按旧行为等超时。
     _storage_health: "Callable[[str], str | None] | None" = None
     _pending_observe: "Callable[[str, str], str | None] | None" = None
+    _is_finished: Any = None
 
     async def events(self) -> AsyncIterator[Event]:
         from ctx_weft.protocols.events import EventFilter
@@ -347,181 +356,51 @@ class TurnHandle:
             yield ev
 
     async def wait_for_finish(self, timeout: float = 300.0) -> LoopState | None:
-        """阻塞到该 task 的这轮交互**完全落定**，或超时。
+        """Wait for task termination and memory settlement; raise TimeoutError on expiry.
 
-        **契约（调用方能指望什么）**：一旦本方法返回（非超时路径），这条 task 不仅已经
-        进了终态（FINISHED/FAILED/CANCELED），该次终态触发的一切收尾副作用——尤其是
-        close 边界后台 observe 的段折叠/胶囊化（spec 2026-07-20 延迟折叠）——也已经
-        落地在 memory 里。host 典型用法是 `send_message` → `await wait_for_finish()`
-        → 从 memory 读回对话渲染给用户；如果这时折叠还没落地，读到的就是还没胶囊化的
-        原始 raw 记录，渲染出来的对话是「半成品」。这不是可选的锦上添花，是这个句柄
-        「finished」这个词本身的含义——返回了就必须是真的处理完了，不能是「处理完了，
-        除了数据还没就绪」。**这是一份新确立的保证，不是旧行为的复原**：改造前的
-        `RunFinished`-based 等待同样不保证这一点——`test_dispatch_boundary_recap_e2e`
-        在这轮改造的起点提交上就以约 1/3 的概率失败。
-
-        为什么不能见到第一个终态事件就返回：判据是 **task 终态事件**，不是
-        `RunFinished`——一轮 run 结束不等于这条 task 结束（还可能有 finalize、还可能
-        被重排再跑一轮）；而即便等到了三个终态事件之一（同 `TERMINAL_TASK_STATUSES`），
-        触发它的那次 close 边界后台 observe 仍可能还没跑完——它是 `ObserveStep` 里
-        由 `StepDriver.start("observe", ...)` 放到后台执行，
-        与「task 进终态」这两件事之间没有天然的先后保证，只是一场 asyncio 调度竞态
-        （下面第 2 部分有实测证据）。`TaskFailed`/`TaskCanceled` 不受影响——见下面
-        「不会挂起」——依旧在终态事件到达后就近乎立即返回。
-
-        ## 1. `EventType.TASK_FINISHED`/`TASK_FAILED`/`TASK_CANCELED` 不写字面量
-
-        `test_task_manager_owns_status.py::test_only_task_manager_emits_task_status_events`
-        是一道全树 AST 守卫——「只有 TaskManager 能发 task 状态事件」，判据不分「发射」
-        与「查表读」，`runtime.py` 不在它的 `_ALLOWED` 白名单里。改从 `reducers.
-        TASK_STATUS_BY_EVENT`（该守卫已放行的文件）按值反查终态三个事件类型，绕开
-        字面量，语义不变——那张表本就是「事件类型 → 任务状态」的单一真源。
-
-        ## 2. 实测事件顺序：曾经的假设是错的
-
-        2026-09-04 之前的版本把 `TaskFinalized` 也塞进终态集合，指望它比 `TaskFinished`
-        晚到、借它的时序当「收尾已完工」的替身。用真实 e2e 场景订阅总线实测（见
-        `fix-wait-for-finish-report.md`）发现时序恰恰相反——`TaskFinalized` 由
-        `FinalizeStep` 在本轮 run **内**发出，落在 `TaskManager.apply_run_outcome` 发
-        的 `TaskFinished` **之前**；「先到先得」的判据下，把它加进终态集合只会让
-        `wait_for_finish` 比只等 `TaskFinished` 更早返回，达不到「等收尾」的目的
-        （已从终态集合里删掉，不再引用它）。真正滞后于 `TaskFinished` 的是 close 边界
-        后台 observe 自己的完成——它在 `ObserveStep` 里以 `asyncio.create_task`
-        fire-and-forget 方式登记进会话的 `ExecutionRegistry`（这一步发生在
-        `TaskFinalized`/`TaskFinished` 之前，同一协程、无 await 间隔，先后关系恒定），
-        但**登记**与**跑完**是两回事——它的执行体、连同它自己的 `TaskRecapStarted/
-        Done`，何时被事件循环调度、相对 `TaskFinished` 谁先谁后，是一场纯粹的 asyncio
-        调度竞态。
-
-        ## 3. 被否决的替代方案：直接 `await` 那个 `asyncio.Task`
-
-        第一版实现直接等后台 observe 的 `asyncio.Task` 对象本身
-        （`background.await_pending_recap` + `asyncio.shield`，
-        `_run_loop` 入口、`_inject_user_reply` 用的正是这条路）。这条路被**实测证否**：
-        `TaskManager._fire_session_done` 也在等同一个后台任务收尾（`asyncio.gather(
-        *self._background_asyncio_tasks)`），且它的等待从 `_run_task` 发出
-        `TaskFinished` 到调用那次 `gather` 之间只隔几行同步代码、中途不把控制权交还
-        事件循环，故**总是先于** `wait_for_finish` 注册上这个等待。若这里也去 `shield`
-        同一个 `asyncio.Task` 对象，两个等待者都挂在它的完成回调清单上，`_fire_session_
-        done` 先注册、先被唤醒——它会抢在 `wait_for_finish` 前面跑完 `on_session_done`。
-        复现：`test_runtime_agent_api.py::test_start_session_agent_id_is_addressable_
-        root_agent` 在那版实现下会于 `wait_for_finish` 返回后 `get_agent()` 查无此
-        agent（`AgentNotFound`）——session 已经在返回前被拆了。
-
-        （2026-09-08 生命周期改造后 `on_session_done` 只剩 `_release_round`，不再拆
-        TM/agent，这条竞态的**后果**已经没那么严重；但下面「继续消费这条事件流」的
-        写法本身仍然成立，不因此回退——先注册先唤醒的顺序问题依旧存在。）
-
-        改成继续消费**这条已经在订阅的事件流**、等它上面的 `TaskRecapDone` 就不撞这
-        个问题：后台 observe 在 `finally` 里先 `emit(TaskRecapDone)`——这一步只是把
-        事件放进各订阅者自己的队列，不等任何人处理——之后才真正从协程函数 return、它
-        的 `asyncio.Task` 才转入 done 态；事件总线上的那次唤醒排在 Task-done 的唤醒
-        **之前**，`wait_for_finish` 借着「早就在等这条流」的订阅比 `_fire_session_done`
-        的 `gather` 更早被唤醒返回，不会撞见会话已经被拆完的中间态。
-
-        ## 4. `TaskRecapDone` 必须钉死到具体那次 launch（2026-09-04 二轮修复）
-
-        `ExecutionRegistry.latest[(task_id, "observe")]` 只挂**最新一次** launch；同一个 task 一生里可能有
-        多次 fire-and-forget 后台 observe（`interrupt`/`mechanical`/`dispatch`/
-        `finish` 等不同 boundary，跨 suspend/resume、重试多轮发生），不重叠只是
-        **通常**情况，不是**保证**情况——上一轮 launch 的 `TaskRecapDone` 完全可能在
-        这一轮终态事件之后、这一轮 `TaskRecapDone` 之前才姗姗来迟地送达。第一版实现
-        只按 `ev2.type is EventType.TASK_RECAP_DONE` 匹配，等到的可能是**任意一次**
-        launch 发的、不一定是这一次终态触发的那次——同一个 bug 在更窄的窗口里复现。
-        `ExecutionRegistry.pending_run_id` 返回的不是 bool，是这一次在途执行的
-        `run_id`（`StepDriver.start` 给每次执行铸的独立 `run_id`，
-        `make_event` 把它写进事件信封；`TaskRecapDone` 不例外——见其 docstring）；
-        下面同时匹配 `ev2.type` 与 `ev2.run_id == pending_run_id`，把「等哪次折叠」
-        钉死到具体那次 launch，不是「这个 task_id 底下随便哪次」。
-
-        ## 5. 为什么不会挂起
-
-        `ExecutionRegistry.pending_run_id` 只做同步字典读（无 await，见其
-        docstring）：终态事件到达那一刻，若查到确有在途后台任务，才继续在同一条流上
-        等**那次 launch 自己的** `TaskRecapDone`；查不到（这次终态没触发 close 边界，
-        或走的是熔断收尾等从不 launch 它的路径）就是 no-op，立即返回——不会为不存在
-        的后台任务空等，故 `TaskFailed`/`TaskCanceled` 依旧能及时返回。整个等待仍套
-        在原有的 `asyncio.timeout(timeout)` 里，超时预算不变；成功/超时两条路径都
-        仍然 `return self._state`。
-
-        ## 6. `ev2.type` 的比较用 `==`，不用 `is`（2026-09-04 三轮修复）
-
-        `EventBus` 是宿主可自行实现的协议（docs 明确把换成 Redis Streams 当作支持的
-        范例）；序列化往返一趟的宿主总线，投出来的 `.type` 会是裸 `str`，不再是
-        `EventType` 枚举成员实例。`EventType` 是 `StrEnum`，`EventType.TASK_RECAP_DONE
-        == "TaskRecapDone"` 恒真（值相等），但 `is` 是身份比较——裸 `str` 与枚举成员
-        永远不是同一个对象，`is` 恒假。第一版实现里 `ev2.type is EventType.
-        TASK_RECAP_DONE` 在本仓库内从未出过问题（`make_event`/`new_event` 造出来的
-        永远是真枚举实例），但换一个把事件类型还原成裸字符串的宿主总线，这个判据会
-        悄无声息地永远不匹配——`wait_for_finish` 不会抛异常，会耗光整个 `timeout`
-        再落到超时兜底返回，宿主体感就是「挂住了」。终态事件那处 `ev.type in
-        terminal` 判据本就用集合成员测试（`in` 走 `__hash__`/`__eq__`，`StrEnum` 与
-        裸字符串两边一致，天然兼容），不受影响、不用改；只有这一处 `is` 改成 `==`。
-
-        ## 7. recap 先到、终态后到也不能挂住（终审 IMPORTANT 3）
-
-        上面第 5 节的判据默认了「先见终态、再等 recap」这个到达顺序，但两者是各自
-        独立发出的事件，顺序不是保证的：close 边界的后台 observe 可能在
-        `emit(RUN_FINISHED)` 内部让出控制权的那个窗口里，比 `TaskFinished` 更早把
-        它自己的 `TaskRecapDone` 送上总线。原实现的外层循环只在 `ev.type in
-        terminal` 时才有反应，先到的 `TaskRecapDone` 被当成"不认识的事件"直接丢弃
-        （**流是单向消费的，丢过去的事件读不回来**）；等终态事件终于到达、内层循环
-        才开始等那个 `run_id`——可它已经过去了，`pending.done()` 此刻仍是 `False`
-        （后台任务是否已经跑完与它的 `TaskRecapDone` 是否已经送达是两回事，见第 5
-        节），内层循环于是无休止地等一条不会再来的事件，直到 `timeout` 耗尽才靠
-        兜底返回——不抛异常，只是静默地把调用方晾到超时。
-
-        修法：不再假定顺序，全程只用**一个**循环，边走边把见到的每个 `TaskRecapDone`
-        记进 `seen_recap_run_ids`（按 `run_id`，不区分它是不是这次终态触发的那次
-        ——反正只在真等到终态、拿到 `pending_run_id` 之后才去查这张表）。终态事件
-        到达时，`pending_run_id` 若已经在这张"提前到账"的表里，直接返回，不再进入
-        任何等待；否则才转入"接下来盯住这一个 run_id"的模式，继续消费同一条流。
-        `waiting_for_run_id is None` 这道门保证这个决策只做一次——后续再来的终态
-        事件（重试等罕见情形）不会重新触发它。
+        LoopState remains a compatibility result. Use runtime.get_task for stable
+        results on handles returned by send_message or dispatch_task.
         """
         from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
-        from ctx_weft.protocols.events import EventFilter
-        terminal = {
-            et for et, st in TASK_STATUS_BY_EVENT.items() if st in TERMINAL_TASK_STATUSES
-        }
+
+        terminal = {et for et, status in TASK_STATUS_BY_EVENT.items()
+                    if status in TERMINAL_TASK_STATUSES}
+        queue = asyncio.Queue()
+
+        async def receive(event):
+            if (event.agent_id == self.agent_id and event.task_id == self.task_id
+                    and (event.type in terminal or event.type == EventType.OBSERVE_APPLIED)):
+                queue.put_nowait(event)
+
+        # Subscribe synchronously before the first await; no late-subscription gap.
+        subscription = self.event_bus.subscribe(None, receive)
+        terminal_seen = False
+        seen_recaps = set()
         try:
             async with asyncio.timeout(timeout):
-                stream = self.event_bus.stream(
-                    EventFilter(agent_id=self.agent_id, task_id=self.task_id)
-                ).__aiter__()
-                seen_recap_run_ids: set[str] = set()
-                waiting_for_run_id: str | None = None
-                # 轮询式消费（spec: event-commit）：存储隔离后**没有事件再流出**，
-                # 健康检查不能只在「收到事件」时做——每个 tick 先查健康再等下一条，
-                # 0.25s 内把 PersistenceUnavailableError 交给宿主，不等通用超时。
                 while True:
                     if self._storage_health is not None:
                         reason = self._storage_health(self.session_id)
                         if reason is not None:
-                            raise PersistenceUnavailableError(
-                                f"session {self.session_id!r} is storage_unavailable: "
-                                f"{reason}")
+                            raise PersistenceUnavailableError(reason)
+                    if self._is_finished is not None and await self._is_finished(
+                            self.session_id, self.task_id):
+                        return self._state
+                    if terminal_seen and self._is_finished is None:
+                        recap = (self._pending_observe(self.session_id, self.task_id)
+                                 if self._pending_observe else None)
+                        if recap is None or recap in seen_recaps:
+                            return self._state
                     try:
-                        ev = await asyncio.wait_for(stream.__anext__(), timeout=0.25)
+                        event = await asyncio.wait_for(queue.get(), timeout=0.25)
                     except TimeoutError:
-                        continue          # 本 tick 无事件：回到健康检查
-                    except StopAsyncIteration:
-                        break
-                    if ev.type == EventType.TASK_RECAP_DONE:
-                        seen_recap_run_ids.add(ev.run_id)
-                        if waiting_for_run_id is not None and ev.run_id == waiting_for_run_id:
-                            return self._state
-                    if waiting_for_run_id is None and ev.type in terminal:
-                        pending_run_id = (self._pending_observe(self.session_id, self.task_id)
-                                          if self._pending_observe else None)
-                        if pending_run_id is None:
-                            return self._state
-                        if pending_run_id in seen_recap_run_ids:
-                            return self._state
-                        waiting_for_run_id = pending_run_id
-        except TimeoutError:
-            pass
-        return self._state
+                        continue
+                    if event.type in terminal:
+                        terminal_seen = True
+                    elif event.type == EventType.OBSERVE_APPLIED:
+                        seen_recaps.add(event.run_id)
+        finally:
+            await subscription.unsubscribe()
 
 
 async def _task_has_dangling_tool_call(memory, scope, provider_ctx) -> bool:
@@ -588,6 +467,90 @@ def _suspended_on_live_children(task_manager: "TaskManager", task: "Task") -> bo
     return False
 
 
+def _task_detail(task):
+    return TaskDetail(
+        task.id, task.session_id, task.assigned_agent_id or None,
+        task.creator_agent_id or None, task.parent_task_id or None,
+        task.status, task.title, task.description, deepcopy(task.outputs),
+        task.error, task.error_code, task.created_at, task.finished_at,
+    )
+
+
+def _session_command(
+    *,
+    load_session: Literal["required", "optional", "skip"],
+    allow_missing_session: bool = False,
+    missing_session_as_agent: bool = False,
+    skip_no_resume_reply: bool = False,
+):
+    """Serialize addressing, optional materialization and command delivery.
+
+    required raises on a missing session; optional uses non-strict rebuilding;
+    skip operates only on loaded state. allow_missing_session delegates unresolved
+    addresses to the command. missing_session_as_agent preserves agent-facing
+    lookup errors. skip_no_resume_reply avoids loading for notification replies.
+    """
+    if load_session not in {"required", "optional", "skip"}:
+        raise ValueError(f"unknown session loading policy: {load_session!r}")
+
+    def decorate(method):
+        signature = inspect.signature(method)
+
+        @functools.wraps(method)
+        async def command(self, *args, **kwargs):
+            self._require_initialized()
+            bound = signature.bind(self, *args, **kwargs).arguments
+            sid = bound.get("session_id")
+            aid = bound.get("agent_id")
+            if aid:
+                rec = self._agent_lifecycle_manager.record_of(aid)
+                if rec is not None:
+                    if sid is not None and sid != rec.session_id:
+                        raise ValueError("agent_id does not belong to session_id")
+                    sid = rec.session_id
+            reply = bound.get("reply")
+            if reply is not None:
+                pending = self.hitl_registry.get(reply.hitl_id)
+                if pending is not None:
+                    if sid is not None and sid != pending.session_id:
+                        raise ValueError("HITL request does not belong to session_id")
+                    sid = pending.session_id
+            if sid is None:
+                if allow_missing_session:
+                    return await method(self, *args, **kwargs)
+                raise AgentNotLoaded(
+                    "pass session_id for a cold command, or call rebuild_session(session_id) first")
+            async with self._session_guard(sid):
+                if load_session == "skip":
+                    return await method(self, *args, **kwargs)
+                if (skip_no_resume_reply and reply is not None and pending is not None
+                        and isinstance(pending.delivery, NoResumeDelivery)):
+                    return await method(self, *args, **kwargs)
+                if load_session == "optional":
+                    await self._rebuild_session_locked(sid, strict=False)
+                else:
+                    try:
+                        await self._rebuild_session_locked(sid, strict=True)
+                    except SessionNotFound:
+                        if missing_session_as_agent:
+                            raise AgentNotFound(f"unknown agent {aid!r} in session {sid!r}") from None
+                        raise
+                return await method(self, *args, **kwargs)
+
+        return command
+
+    return decorate
+
+
+@dataclass
+class _ActorRunCommit:
+    """Original actor envelopes retained until their commits are confirmed."""
+
+    started: Event
+    start_confirmed: bool = False
+    finished: Event | None = None
+
+
 class CtxWeftRuntime:
     """Top-level runtime.
 
@@ -615,6 +578,11 @@ class CtxWeftRuntime:
             from ctx_weft.providers.events import InProcessEventBus
             event_bus = InProcessEventBus()
         self._event_bus: EventBus = event_bus
+        if self._config.event_commit_policy not in ("required", "best_effort"):
+            raise ValueError("event_commit_policy must be 'required' or 'best_effort'")
+        if (self._config.event_commit_policy == "required"
+                and not callable(getattr(event_bus, "attach_commit_gate", None))):
+            raise ValueError("required event bus must implement attach_commit_gate")
         # HITL：构造期一次性接线，**没有 setter、没有半成品窗口**。裸构造即生产形态
         # （spec 2026-09-01 重设计 §3）。`_normalize_hitl_content` 是与 start_session /
         # run_single_task 共用的内容校验 + 外部化方法（Phase 3c Task A），此处原样接进
@@ -651,45 +619,7 @@ class CtxWeftRuntime:
         # 存储不可用健康表（spec: event-commit）：session_id → 原因。CommitGate 失败时
         # **先标记后抛**；公开查询走 storage_health()。内存态——崩溃后由持久日志重建。
         self._storage_unavailable: dict[str, str] = {}
-        # 提交策略分岔（spec: event-commit，change reliability-wp3）：
-        # - required（默认）：CommitGate 接进 emit 路径（提交确认先于通知）；persister
-        #   不再接线；SnapshotWriter（若启用）单独接——它消费的已是确认提交流。
-        # - best_effort：旧 attach_snapshotting 路径（吞存储错误），启动告警、不可靠恢复。
-        policy = self._config.event_commit_policy
-        if policy not in ("required", "best_effort"):
-            raise ValueError(
-                f"event_commit_policy must be 'required' or 'best_effort', got {policy!r}")
-        if policy == "required":
-            attacher = getattr(self._event_bus, "attach_commit_gate", None)
-            if not callable(attacher):
-                raise ValueError(
-                    "event_commit_policy='required' 需要支持提交门的事件总线（实现 "
-                    "EventBus.attach_commit_gate：emit/commit_provisional 在 fanout 前 "
-                    "先经 gate 确认存储提交）。InProcessEventBus 已支持；自定义总线请实现"
-                    "该扩展，或显式配置 event_commit_policy='best_effort' 并接受丢事件风险。")
-            from ctx_weft.core.events.commit_gate import CommitGate
-            self._event_bus.attach_commit_gate(CommitGate(
-                self.event_store, on_unavailable=self._mark_storage_unavailable))
-            from ctx_weft.providers.events import PersistenceHandle
-            writer = None
-            if snapshot_every_n > 0:
-                from ctx_weft.core.control.snapshot_writer import SnapshotWriter
-                writer = SnapshotWriter(self.event_store, self._event_bus,
-                                        every_n_events=snapshot_every_n,
-                                        memory_settled=self._memory_settled)
-            # handle 统一暴露：required 模式 persister=None（提交走 gate）、writer 可 detach。
-            self.persistence = PersistenceHandle(None, writer)
-        else:
-            logger.warning(
-                "event_commit_policy='best_effort'：存储失败将被吞掉（不可靠恢复）；"
-                "仅建议显式接受丢事件的观测用途。")
-            # 旧路径（spec 2026-08-29 §6.4 + final review R15）：persister 必须先于
-            # snapshot writer 订阅；handle 存公开属性 persistence 供宿主 detach。
-            from ctx_weft.core.control.snapshot_writer import attach_snapshotting
-            self.persistence = attach_snapshotting(
-                self._event_bus, self.event_store, every_n=snapshot_every_n,
-                memory_settled=self._memory_settled)
-
+        self._snapshot_every_n = snapshot_every_n
         # Auto-register 内置 providers（与用户注册的 providers 无关）
         control_provider = ControlCapabilityProvider()
         self.providers.register_capability(control_provider)
@@ -736,7 +666,6 @@ class CtxWeftRuntime:
         # ALM 的输入端：只认 TASK_*（_INPUT_BY_EVENT），发 AGENT_*。与
         # SessionRegistry.attach_to_bus 之间无顺序依赖——两者各订各的事件类型，互不
         # 消费对方发出的事件（docs/events-v2.md §2.1.1，Task 12）。
-        self._agent_lifecycle_manager.attach_to_bus()
 
         # Capability cache (per-session, shared across all agents in runtime)
         self._capability_cache = CapabilityCache()
@@ -745,6 +674,8 @@ class CtxWeftRuntime:
         # 注销（_SessionTaskRunner.execute）——pause/cancel 经 registry 必达全部在途 run
         # （spec 2026-07-05）。
         self._run_tokens: dict[str, dict[str, RunTokens]] = {}
+        # Execution lifecycle only: never background runs or cancellation intents.
+        self._pending_actor_runs: dict[tuple[str, str], _ActorRunCommit] = {}
         # pause 弃子进行中的 session：新派发 run 的 PauseToken 出生即 paused
         # （root agent 任务被重排后，新 run 在 act 首个 checkpoint 立即 park）。
         self._pausing: set[str] = set()
@@ -773,11 +704,98 @@ class CtxWeftRuntime:
         )
         # SM 的输入端：只认 TaskManager 的四类事件（_INPUT_BY_EVENT），本 task
         # 之后 TM 还没开始发这三条信号，运行时行为不变（docs/events-v2.md §2.1.1）。
-        self._session_registry.attach_to_bus()
         # Per-session resume 锁：串行化同一 session 的 recover_agent，避免重叠的冷 HITL 应答 /
         # /resume 并发建出两个 TaskManager、两套 drain 竞争派发（spec/07 §9）。惰性建、不回收
         # （体量微小、按 session 数有界）。
         self._resume_locks: dict[str, asyncio.Lock] = {}
+        self._session_lock_owners: dict[str, asyncio.Task] = {}
+        self._loaded_sessions: set[str] = set()
+        self._initialize_lock = asyncio.Lock()
+        self._initialized = False
+        self._initialization_report: InitializationReport | None = None
+
+    async def initialize(self) -> InitializationReport:
+        """Calibrate durable crash state, then attach observers; never load sessions."""
+        async with self._initialize_lock:
+            if self._initialized:
+                return deepcopy(self._initialization_report)
+            from ctx_weft.core.control.startup import calibrate_startup
+            report = await calibrate_startup(self.event_store)
+            self._attach_runtime()
+            self._initialization_report = report
+            self._initialized = True
+            return deepcopy(report)
+
+    def _attach_runtime(self) -> None:
+        # 提交策略分岔（spec: event-commit，change reliability-wp3）：
+        # - required（默认）：CommitGate 接进 emit 路径（提交确认先于通知）；persister
+        #   不再接线；SnapshotWriter（若启用）单独接——它消费的已是确认提交流。
+        # - best_effort：旧 attach_snapshotting 路径（吞存储错误），启动告警、不可靠恢复。
+        policy = self._config.event_commit_policy
+        if policy not in ("required", "best_effort"):
+            raise ValueError(
+                f"event_commit_policy must be 'required' or 'best_effort', got {policy!r}")
+        if policy == "required":
+            attacher = getattr(self._event_bus, "attach_commit_gate", None)
+            if not callable(attacher):
+                raise ValueError(
+                    "event_commit_policy='required' 需要支持提交门的事件总线（实现 "
+                    "EventBus.attach_commit_gate：emit/commit_provisional 在 fanout 前 "
+                    "先经 gate 确认存储提交）。InProcessEventBus 已支持；自定义总线请实现"
+                    "该扩展，或显式配置 event_commit_policy='best_effort' 并接受丢事件风险。")
+            from ctx_weft.core.events.commit_gate import CommitGate
+            self._event_bus.attach_commit_gate(CommitGate(
+                self.event_store, on_unavailable=self._mark_storage_unavailable))
+            from ctx_weft.providers.events import PersistenceHandle
+            writer = None
+            if self._snapshot_every_n > 0:
+                from ctx_weft.core.control.snapshot_writer import SnapshotWriter
+                writer = SnapshotWriter(self.event_store, self._event_bus,
+                                        every_n_events=self._snapshot_every_n,
+                                        memory_settled=self._memory_settled)
+            # handle 统一暴露：required 模式 persister=None（提交走 gate）、writer 可 detach。
+            self.persistence = PersistenceHandle(None, writer)
+        else:
+            logger.warning(
+                "event_commit_policy='best_effort'：存储失败将被吞掉（不可靠恢复）；"
+                "仅建议显式接受丢事件的观测用途。")
+            # 旧路径（spec 2026-08-29 §6.4 + final review R15）：persister 必须先于
+            # snapshot writer 订阅；handle 存公开属性 persistence 供宿主 detach。
+            from ctx_weft.core.control.snapshot_writer import attach_snapshotting
+            self.persistence = attach_snapshotting(
+                self._event_bus, self.event_store, every_n=self._snapshot_every_n,
+                memory_settled=self._memory_settled)
+
+        self._agent_lifecycle_manager.attach_to_bus()
+        self._session_registry.attach_to_bus()
+
+    def _require_initialized(self) -> None:
+        if not self._initialized:
+            from ctx_weft.core.models.errors import RuntimeNotInitializedError
+            raise RuntimeNotInitializedError("await runtime.initialize() before using the runtime")
+
+    def _session_lock(self, session_id: str) -> asyncio.Lock:
+        return self._resume_locks.setdefault(session_id, asyncio.Lock())
+
+    @contextlib.asynccontextmanager
+    async def _session_guard(self, session_id: str):
+        # Reentry is allowed only for this asyncio task, never an inherited context.
+        current = asyncio.current_task()
+        if self._session_lock_owners.get(session_id) is current:
+            yield
+            return
+        async with self._session_lock(session_id):
+            self._session_lock_owners[session_id] = current
+            try:
+                yield
+            finally:
+                self._session_lock_owners.pop(session_id, None)
+
+    def _session_is_loaded(self, session_id: str) -> bool:
+        tm = self._task_managers.get(session_id)
+        return (session_id in self._loaded_sessions and tm is not None
+                and tm.session is not None
+                and bool(self._agent_lifecycle_manager.record_of(tm.session.root_agent_id or "")))
 
     @property
     def event_bus(self) -> EventBus:
@@ -905,9 +923,11 @@ class CtxWeftRuntime:
         self._run_tokens.setdefault(session_id, {})[task_id] = tokens
         return tokens
 
-    def _deregister_run_tokens(self, session_id: str, task_id: str) -> None:
+    def _deregister_run_tokens(self, session_id: str, task_id: str, *, expected=None) -> None:
         per = self._run_tokens.get(session_id)
         if per is None:
+            return
+        if expected is not None and per.get(task_id) is not expected:
             return
         per.pop(task_id, None)
         if not per:
@@ -925,13 +945,16 @@ class CtxWeftRuntime:
 
     def storage_health(self, session_id: str) -> str | None:
         """None = 健康；否则返回隔离原因（storage_unavailable）。"""
+        self._require_initialized()
         return self._storage_unavailable.get(session_id)
 
     def clear_storage_isolation(self, session_id: str) -> None:
         """宿主确认存储恢复后解除隔离（恢复流程须先按 batch_id 收口未知提交）。"""
+        self._require_initialized()
         if self._storage_unavailable.pop(session_id, None) is not None:
             logger.info("session %s storage isolation cleared", session_id)
 
+    @_session_command(load_session="skip")
     async def pause_session(self, session_id: str) -> bool:
         """软打断（spec 2026-07-05）：放弃其余在途/排队任务，只留 root agent 当前那一轮。
         - 置 _pausing 闩锁：其间新派发的 root agent run 出生即 paused（被 _try_resume_parent
@@ -949,6 +972,7 @@ class CtxWeftRuntime:
         run**（`_cancel_run_token`），run 收尾后 agent 落回 idle、仍然活着——不是把它们
         挨个 `pause_agent` 一遍（2026-09-04 spec §7.1）。
         """
+        self._require_initialized()
         per = self._run_tokens.get(session_id, {})
         tm = self._task_managers.get(session_id)
         if not per and (tm is None or tm.is_done()):
@@ -1009,16 +1033,15 @@ class CtxWeftRuntime:
         tokens.pause.pause()
         return True
 
+    @_session_command(load_session="skip")
     async def cancel_session(self, session_id: str) -> bool:
         """硬取消：清队列 + 该 session 下**每个 agent** 经 `cancel_agent` 显式转
         `terminated`（2026-09-04 spec §7.2）。
 
         memory 保留。开新对话由调用方另起（新 /messages → 同 session_id 的 new run）。
 
-        收成三步：① `_cancel_session_hitl` 终局未决 HITL；② `cancel_all` 清队列；
-        ③ 对该 session 下每个 agent 调 `cancel_agent`——唯一的 agent 终态入口，它对
-        `running` 目标内部会调 `_cancel_run_token`，在途 run 的协作取消由它覆盖，
-        不再需要 runtime 自己遍历 `_run_tokens` 拍 `cancel()`。
+        先关闭派发、向在途 run 送达停止信号，等待开窗回合的执行者完成收尾再撤销回合。
+        随后终局未决 HITL、清队列；每个 agent 仍经 `cancel_agent` 进入终态。
         """
         # 「有没有东西要取消」的判据看三处，不是只看 TaskManager 在不在内存里：
         # ALM 里还登记着 agent（跑完的会话 record 常驻，旧入口也可能只装填 ALM），
@@ -1028,6 +1051,7 @@ class CtxWeftRuntime:
         # 只看 TM 的旧判据会让这些会话**静默早退**：`/cancel` 什么都没做就返回 False，
         # 未决提问留成「有 HitlOpened 无终局事件」的孤儿，重启后 `rebuild_hitl` 又把它
         # 当未决恢复出来（总账 A10 要防的正是这个）。
+        self._require_initialized()
         per = self._run_tokens.get(session_id, {})
         task_manager = self._task_managers.get(session_id)
         has_agents = bool(self._agent_lifecycle_manager.agent_ids_of_session(session_id))
@@ -1037,6 +1061,19 @@ class CtxWeftRuntime:
         # 取消前判定会话是否已空闲挂起（无在跑任务）。RUNNING：在途 task 经 CancelToken→checkpoint
         # 协作取消→on_task_finished→is_done→_fire_session_done→_on_done 自行回收，故此处不抢着回收。
         idle = task_manager is not None and task_manager.is_done()
+        # Deliver stop signals while execution ownership still exists. Closing a
+        # provisional window first loses both the task and its cancellation route.
+        if task_manager is not None:
+            task_manager.begin_cancel()
+        for task_id in list(per):
+            self._cancel_run_token(session_id, task_id)
+        executions = self._step_executions.get(session_id)
+        if executions is not None:
+            executions.stop_metadata()
+        if task_manager is not None:
+            await task_manager.wait_for_round_dispatches()
+        if executions is not None:
+            await executions.finish_metadata(self._event_bus)
         # ① 未决的 ask_user 一并终局，且**先于**下面 cancel_all 触发的会话终态——
         # 与熔断 trip 序列同一条纪律（HITL 终局须先于会话终态）。不终局的代价在重启后：
         # rebuild_hitl 按「有 HitlOpened 无终局事件」折 pending，会把已取消会话的
@@ -1065,18 +1102,13 @@ class CtxWeftRuntime:
             await self.hitl.close_resolved(session_id)
         except Exception:
             logger.exception("cancel_session: close_resolved failed for %s", session_id)
-        # ② 清队列。
-        if task_manager is not None:
-            await task_manager.cancel_all(reason=CancelReason.USER_CANCEL)
-        # ③ 逐个 agent 终态化。cancel_agent 是唯一的 agent 终态入口，它对 running
-        # 目标内部会调 _cancel_run_token——在途 run 的协作取消由它覆盖，runtime 不再
-        # 自己遍历 _run_tokens（2026-09-04 spec §7.2）。上面的 _cancel_session_hitl
-        # 已经把该 session 全部未决 HITL 收口过一轮，cancel_agent 内部对
-        # waiting_human 的 HITL 终局分支这里必是 no-op——HITL 终局先于 agent 终态的
-        # 纪律因此自动成立，不需要在这里再插一次序。
-        #
+        # Persist each agent's existing session-canceled terminal fact before its
+        # task effects. Recovery can derive the full owned task set, not just the
+        # routing hint for its most recently queued task.
         for aid in list(self._agent_lifecycle_manager.agent_ids_of_session(session_id)):
             await self.cancel_agent(aid, reason="session_canceled")
+        if task_manager is not None:
+            await task_manager.cancel_all(reason=CancelReason.USER_CANCEL)
         if idle:
             # 已暂停/中断（无在跑 task）的会话被取消：cancel_all 不经 _fire_session_done，
             # _on_done 不会触发，故在此显式清掉这一轮的控制信号残余。
@@ -1091,60 +1123,76 @@ class CtxWeftRuntime:
 
     # ── Agent 级取消（Task 19）───────────────────────────────────────────────
 
+    async def _read_persisted_task(self, session_id, task_id):
+        # rebuild_view uses a valid snapshot plus its event delta, including a commit
+        # whose receipt was lost before EventBus could notify its subscribers.
+        head = await self.event_store.committed_head(session_id)
+        task = (await rebuild_view(self.event_store, session_id, through_position=head)).tasks.get(task_id)
+        if task is None or not task.details_complete:
+            task = (await self._historical_task_view(session_id, through_position=head)).tasks.get(task_id)
+        return task
+
+    async def _confirm_task_settled(self, task):
+        agent_id = task.assigned_agent_id or task.creator_agent_id
+        if agent_id:
+            await self._agent_lifecycle_manager.confirm_settled(agent_id, task.id)
+        registry = self._step_executions.get(task.session_id)
+        if registry is not None:
+            registry.notify_finish(task.id)
+
+    async def _finalize_canceled_tasks(self, session, tasks, reason):
+        await self._finalize_cancel_memory(session, tasks, reason, strict=True)
+        tids = {task.id for task in tasks}
+        for req in list(self.hitl_registry.list_pending(session_id=session.id)):
+            if req.task_id in tids:
+                await self.hitl.cancel(req.id, message=CancelReason.USER_CANCEL)
+        for tid in tids:
+            await self.hitl.close_resolved(session.id, task_id=tid)
+        registry = self._step_executions.get(session.id)
+        if registry is not None:
+            for tid in tids:
+                registry.notify_finish(tid)
+
     async def cancel_agent(self, agent_id: str, *, reason: str | None = None) -> list[str]:
-        """终止 agent 及其全部子孙（spec 6）。返回被终结的 agent id 列表。
+        """Terminate the agent and cancel its current task subtree through TaskManager.
 
-        级联向下展开（`AgentLifecycleManager.descendants_of`，自带成环防御），避免孤儿子
-        agent 永远挂着无人管。每个目标按各自**当前**状态分别处理，再统一转
-        `terminated`：
-        - `waiting_human`：先终局它名下的未决 HITL——按 `agent_id` 过滤
-          （`_cancel_pending_hitl_of`），不殃及同 session 其他 agent 的未决提问。
-          `_cancel_session_hitl` 是 session 粒度，这里要的是 agent 粒度，不能复用。
-        - `running`：`_cancel_run_token` 对其在途 run 发协作取消信号——按 task_id
-          索引，不是 TaskManager 的会话级 `cancel_all`。只发信号，不代表立即终结：
-          `TASK_CANCELED` 是否发出由 run 收尾时的既有守卫按 task 状态判定，这里不等。
-        - `idle` / `interrupted`：无需额外动作，直接转 `terminated`。
-
-        全部转移经 `AgentLifecycleManager.apply_input` 一处发生——那是状态转移与事件发射的
-        唯一入口，不允许绕过它自己拼 AgentTerminated 事件。对已经是 `terminated`
-        的目标，`apply_input` 按五态机定义返回 False，天然跳过、不重复终结。
-
-        HITL 终局必须**先于**该 agent 转 `terminated`——与 `cancel_session` 里
-        `_cancel_session_hitl` 先于 `cancel_all` 同一条纪律：重启后 `rebuild_hitl`
-        按「有 HitlOpened 无终局事件」把已取消的提问当未决恢复出来，顺序错了会把这条
-        恢复不变量搞坏（见 `_cancel_session_hitl` 调用处注释）。
-
-        `agent_id` 直接指定的那个 `cascaded_from=None`；因级联被带上的子孙传发起者
-        的 `agent_id`，供 host 侧区分「用户直接点了取消」还是「祖先被取消带下来的」。
-
-        agent 不存在 -> 返回空列表，不抛错（幂等友好，与 `AgentLifecycleManager.has()` 之类
-        既有「查无則静默」的读路径同一口径）。
+        AgentTerminated is the durable state fact preceding task cancellation. Repeating
+        the call repairs incomplete task effects without emitting another termination.
+        Descendant agents retain their own lifecycles even when they execute canceled tasks.
+        Unrelated tasks are not selected by agent ancestry or ownership. The
+        session_canceled reason used by cancel_session covers all owned tasks;
+        cold recovery derives that same scope from the existing terminal fact.
         """
-        reg = self._agent_lifecycle_manager
-        if not reg.has(agent_id):
+        from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
+        self._require_initialized()
+        lm = self._agent_lifecycle_manager
+        rec = lm.record_of(agent_id)
+        if rec is None:
             return []
-
-        targets = [agent_id, *reg.descendants_of(agent_id)]
-        killed: list[str] = []
-        for aid in targets:
-            rec = reg.record_of(aid)
-            if rec is None or rec.status == "terminated":
-                continue
-
-            if rec.status == "waiting_human":
-                await self._cancel_pending_hitl_of(aid, session_id=rec.session_id)
-            if rec.status == "running" and rec.current_task_id:
-                self._cancel_run_token(rec.session_id, rec.current_task_id)
-
-            ok = await reg.apply_input(
-                aid,
-                AgentInput.CANCEL,
-                task_id=rec.current_task_id,
-                reason=reason or "canceled",
-                cascaded_from=None if aid == agent_id else agent_id,
-            )
-            if ok:
-                killed.append(aid)
+        if rec.status == "terminated" and not rec.status_reason.startswith(AGENT_CANCEL_REASON):
+            return []
+        if rec.session_id not in self._task_managers:
+            await self.rebuild_session(rec.session_id, tenant_id=rec.tenant_id, strict=True)
+            rec = lm.record_of(agent_id)
+        tm = self._task_managers.get(rec.session_id)
+        current = (tm.current_task_for_agent(agent_id, rec.current_task_id)
+                   if tm is not None and rec.status != "terminated" else rec.current_task_id)
+        cause = (rec.status_reason if rec.status == "terminated" else
+                 AGENT_CANCEL_REASON + (reason or "canceled"))
+        if not current:
+            await self._cancel_pending_hitl_of(agent_id, session_id=rec.session_id)
+        killed = []
+        async def terminate():
+            if await lm.apply_input(agent_id, AgentInput.CANCEL, task_id=current, reason=cause):
+                killed.append(agent_id)
+        if tm is not None and cause == AGENT_CANCEL_REASON + "session_canceled":
+            await tm.cancel_session_agent_tasks(agent_id, cause, before_cancel=terminate)
+        elif tm is not None and current:
+            # Serialize the agent state commit with observe verdict acceptance.
+            # On persistence failure no task changes or run signals have occurred.
+            await tm.cancel_task_tree(current, cause, before_cancel=terminate)
+        else:
+            await terminate()
         return killed
 
     async def _cancel_pending_hitl_of(
@@ -1162,7 +1210,7 @@ class CtxWeftRuntime:
         没有可撤销的一轮。`_inject_user_turn` 传 True——旧气泡的收口跟着新消息那一轮走，
         用户在 LLM 开口之前按暂停时它要回到 pending（spec 2026-09-09）。
         """
-        for v in self.list_pending_hitl(session_id=session_id):
+        for v in self._list_pending_hitl_memory(session_id=session_id):
             if v.agent_id != agent_id or v.resolved:
                 continue
             # `defer_only_task_id`：只有这个 task 的气泡跟着这一轮走，其余立即收口
@@ -1288,6 +1336,7 @@ class CtxWeftRuntime:
 
     # ── Agent 级暂停 / 恢复（Task 20）────────────────────────────────────────
 
+    @_session_command(load_session="skip", allow_missing_session=True)
     async def pause_agent(self, agent_id: str, *, reason: str | None = None) -> list[str]:
         """暂停 agent 及其全部**当前 running** 的子孙（spec 7）。
 
@@ -1316,6 +1365,7 @@ class CtxWeftRuntime:
         agent id 列表——暂停本身是异步生效的，返回时这些 agent 多半仍是 `running`，
         真正落 `waiting_human` 要等它们各自跑到下一个检查点。
         """
+        self._require_initialized()
         reg = self._agent_lifecycle_manager
         rec = reg.record_of(agent_id)
         if rec is None:
@@ -1334,7 +1384,8 @@ class CtxWeftRuntime:
                 paused.append(aid)
         return paused
 
-    async def resume_agent(self, agent_id: str) -> list[str]:
+    @_session_command(load_session="required")
+    async def resume_agent(self, agent_id: str, *, session_id: str | None = None) -> list[str]:
         """恢复 agent 及其全部**由暂停产生**的等待气泡（spec 7；R24）。
 
         `resume_agent` **不能**无差别恢复 `waiting_human` 的子孙——那个状态同时是
@@ -1363,6 +1414,7 @@ class CtxWeftRuntime:
         真事件发生，不由调用方越过 TaskManager 直接拍。真正的 `running` 由续跑
         起来之后的那次**真实** `TASK_STARTED` 事件驱动。
         """
+        self._require_initialized()
         reg = self._agent_lifecycle_manager
         if not reg.has(agent_id):
             raise AgentNotFound(f"unknown agent: {agent_id}")
@@ -1408,6 +1460,7 @@ class CtxWeftRuntime:
         reason: str = "user_selected",
     ) -> bool:
         """host 入口：把 `(llm_account, llm_model)` 包成 `ModelChoice`，转发给 registry。"""
+        self._require_initialized()
         return await self._agent_lifecycle_manager.set_agent_llm(
             agent_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
         )
@@ -1420,6 +1473,7 @@ class CtxWeftRuntime:
 
         返回值 = 真正改动了 record 的 agent 数（幂等 no-op 不计数）。
         """
+        self._require_initialized()
         return await self._agent_lifecycle_manager.set_session_llm(
             session_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
         )
@@ -1440,110 +1494,104 @@ class CtxWeftRuntime:
 
         60 处测试在用，返回的句柄已带 `agent_id`，与 agent-centric 不冲突——保留它是
         纯收益、删它是纯成本。"""
+        self._require_initialized()
         from ctx_weft.core.utils.content import content_to_text
 
         sid = session_id or generate_id("ses")
         # 单例：这条路径自己建一个 TM 跑到底——session 若已有主，就会与既有 TM 并存。
         # 入口即拒，先于下面任何持久化。
-        if self._session_in_memory(sid):
-            raise SessionAlreadyExistsError(sid)
-        ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
-        # 入口即拒、不落库：格式/blob 门控须在任何持久化（Session/Task/事件）之前完成
-        # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全——
-        # 且必须先于 instantiate()：那一步会发 AgentInstantiated 事件，是这条路径上
-        # 第一个「persist」，llm 不可解析须在它之前失败，而非之后（此调用只为早失败，
-        # 结果不留用——agent 的窗口由下面 instantiate(llm=...) 内部按同一份 choice
-        # 重新解出，registry 不缓存 client，这里的返回值即弃是设计的一部分）。
-        self._resolve_llm(llm_account, llm_model)
-        # validate → normalize 的顺序与另外两个入口共用同一个方法，不再各写一遍。
-        # event 侧产物在这条路径上没有**入口事件**载得下它（run_single_task 自己
-        # register_task、不经 push_task，也不发 SESSION_CREATED），但它必须挂到 Task 上：
-        # 这条路径产出的 task 与另外两个入口共用同一份 `user_prompt_event_jsonable`
-        # 契约（`Task` 的字段注释），入口不同不该让 task 上的字段形态不同。
-        # 代价是携图时会在 event blob store 里留一份暂时无人引用的字节；不为此加分支，
-        # 是因为「三入口共用同一个真源」这条不变量比省掉一次 compat 路径上的 put 更值钱
-        # （宿主的 event blob 回收本就按自己的保留策略走，见 EventBlobStore 协议）。
-        user_prompt, user_prompt_event_jsonable = await self._validate_and_normalize_content(
-            user_prompt, sid, tenant_id=tenant_id,
-        )
-        lm = self._agent_lifecycle_manager
+        async with self._session_guard(sid):
+            if self._session_in_memory(sid) or await self.event_store.committed_head(sid):
+                raise SessionAlreadyExistsError(sid)
+            ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
+            # 入口即拒、不落库：格式/blob 门控须在任何持久化（Session/Task/事件）之前完成
+            # （spec 2026-08-24 Phase 3a）。_resolve_llm 是纯查表，此处先行调用安全——
+            # 且必须先于 instantiate()：那一步会发 AgentInstantiated 事件，是这条路径上
+            # 第一个「persist」，llm 不可解析须在它之前失败，而非之后（此调用只为早失败，
+            # 结果不留用——agent 的窗口由下面 instantiate(llm=...) 内部按同一份 choice
+            # 重新解出，registry 不缓存 client，这里的返回值即弃是设计的一部分）。
+            self._resolve_llm(llm_account, llm_model)
+            # validate → normalize 的顺序与另外两个入口共用同一个方法，不再各写一遍。
+            # event 侧产物在这条路径上没有**入口事件**载得下它（run_single_task 自己
+            # register_task、不经 push_task，也不发 SESSION_CREATED），但它必须挂到 Task 上：
+            # 这条路径产出的 task 与另外两个入口共用同一份 `user_prompt_event_jsonable`
+            # 契约（`Task` 的字段注释），入口不同不该让 task 上的字段形态不同。
+            # 代价是携图时会在 event blob store 里留一份暂时无人引用的字节；不为此加分支，
+            # 是因为「三入口共用同一个真源」这条不变量比省掉一次 compat 路径上的 put 更值钱
+            # （宿主的 event blob 回收本就按自己的保留策略走，见 EventBlobStore 协议）。
+            user_prompt, user_prompt_event_jsonable = await self._validate_and_normalize_content(
+                user_prompt, sid, tenant_id=tenant_id,
+            )
+            lm = self._agent_lifecycle_manager
 
-        # llm= 传选择（可空）——不是身份：这条创建路径唯一发 AgentInstantiated 的地方，
-        # 选择须住进 agent record，事件层才有真值可报（批次 B）。
-        agent, template = await lm.instantiate(
-            template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
-            llm=ModelChoice(account=llm_account or "", model=llm_model or ""),
-        )
-        # 这次实际要用的 (client, 身份, 窗口)——agent.loop_guard 已由 instantiate()
-        # 内部的 materialize() 按同一份 choice 解出并 stamp，此处只是再取一份供
-        # session 窗口对齐 + _execute_task 使用（不缓存，现解现弃）。
-        resolved_model = lm.resolve_model(agent.id)
+            # llm= 传选择（可空）——不是身份：这条创建路径唯一发 AgentInstantiated 的地方，
+            # 选择须住进 agent record，事件层才有真值可报（批次 B）。
+            agent, template = await lm.instantiate(
+                template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
+                llm=ModelChoice(account=llm_account or "", model=llm_model or ""),
+            )
+            # 这次实际要用的 (client, 身份, 窗口)——agent.loop_guard 已由 instantiate()
+            # 内部的 materialize() 按同一份 choice 解出并 stamp，此处只是再取一份供
+            # session 窗口对齐 + _execute_task 使用（不缓存，现解现弃）。
+            resolved_model = lm.resolve_model(agent.id)
 
-        session = Session(
-            id=sid,
-            user_prompt=content_to_text(user_prompt),
-            status="RUNNING",
-            tenant_id=tenant_id,
-            root_agent_id=agent.id,
-            llm_provider=llm_account or "",
-            llm_model=llm_model or "",
-            created_at=now_utc(),
-        )
-        session.context_limit = resolved_model.context_limit
-        session.reserved_output_tokens = resolved_model.reserved_output_tokens
-        # instantiate() 刻意不解模型（惰性不变量，见 agent_lifecycle_manager.py 的
-        # _DEFAULT_CONTEXT_LIMIT 注释）；这条 compat 路径立刻要跑真实的一次 dispatch，
-        # 在此显式 stamp 上面已经解出的 resolved_model。
-        import dataclasses as _dc
-        agent = _dc.replace(agent, loop_guard=LoopGuard(
-            context_limit=resolved_model.context_limit,
-            reserved_output_tokens=resolved_model.reserved_output_tokens,
-        ))
-        task = Task(
-            id=generate_id("tsk"),
-            session_id=sid,
-            status="ACTIVE",
-            tenant_id=tenant_id,
-            assigned_agent_id=agent.id,
-            creator_agent_id=agent.id,
-            title="User Request",
-            description=content_to_text(user_prompt)[:200],
-            user_prompt=user_prompt,
-            user_prompt_event_jsonable=user_prompt_event_jsonable,
-            # 无人值守（2026-09-22）：这条入口的语义就是「跑到完成再返回」，没有人会
-            # 发下一条消息。不标的话，纯文本收尾会 park 等一个永远不来的人——判据自
-            # `interaction_mode` 退场后只剩「有没有人在」，而这里答案明确是没有。
-            unattended=True,
-            # 同理不接任何交互口：没有对端可往返，产出由本方法同步返回给调用方。
-            port_key=PORT_NONE,
-            created_at=now_utc(),
-        )
+            session = Session(
+                id=sid,
+                user_prompt=content_to_text(user_prompt),
+                status="RUNNING",
+                tenant_id=tenant_id,
+                root_agent_id=agent.id,
+                llm_provider=llm_account or "",
+                llm_model=llm_model or "",
+                created_at=now_utc(),
+            )
+            session.context_limit = resolved_model.context_limit
+            session.reserved_output_tokens = resolved_model.reserved_output_tokens
+            # instantiate() 刻意不解模型（惰性不变量，见 agent_lifecycle_manager.py 的
+            # _DEFAULT_CONTEXT_LIMIT 注释）；这条 compat 路径立刻要跑真实的一次 dispatch，
+            # 在此显式 stamp 上面已经解出的 resolved_model。
+            import dataclasses as _dc
+            agent = _dc.replace(agent, loop_guard=LoopGuard(
+                context_limit=resolved_model.context_limit,
+                reserved_output_tokens=resolved_model.reserved_output_tokens,
+            ))
+            task = Task(
+                id=generate_id("tsk"),
+                session_id=sid,
+                status="ACTIVE",
+                tenant_id=tenant_id,
+                assigned_agent_id=agent.id,
+                creator_agent_id=agent.id,
+                title="User Request",
+                description=content_to_text(user_prompt)[:200],
+                user_prompt=user_prompt,
+                user_prompt_event_jsonable=user_prompt_event_jsonable,
+                # 无人值守（2026-09-22）：这条入口的语义就是「跑到完成再返回」，没有人会
+                # 发下一条消息。不标的话，纯文本收尾会 park 等一个永远不来的人——判据自
+                # `interaction_mode` 退场后只剩「有没有人在」，而这里答案明确是没有。
+                unattended=True,
+                # 同理不接任何交互口：没有对端可往返，产出由本方法同步返回给调用方。
+                port_key=PORT_NONE,
+                created_at=now_utc(),
+            )
 
-        task_manager = TaskManager(
-            session_id=sid,
-            event_bus=self._event_bus,
-            max_concurrent=self._config.task_max_concurrent,
-            task_max_retries=self._config.task_max_retries,
-            autonomous_requeue_max=self._config.autonomous_requeue_max,
-            autonomous_requeue_backoff_base_sec=(
-                self._config.autonomous_requeue_backoff_base_sec),
-        )
-        task_manager.set_session(session)
-        task_manager.register_task(task)
-        # compat 路径不经 _register_and_drain（没有队列、没有 drain），但 TM 一样要登记为
-        # 这个 session 的 owner：跑的这段时间里若有别的入口（send_message 冷启动的
-        # recover_agent 等）来找这个 session 的 TM，必须撞上这一个，而不是再建一个与它
-        # 并存（单例，见 `_bind_task_manager`）。跑完在下面的 finally 里摘掉——这个 TM
-        # 没有 runner、没挂回调，留在册里会让之后的续跑拿到一个派发不了的 TM；摘掉之后
-        # 续跑照旧从事件日志重建，与改动前一致。
-        self._bind_task_manager(sid, task_manager)
-        # 同理登记 session，使 /hitl 等入口在这条路径上也查得到该 session。
-        self._session_registry.register_session(sid, tenant_id=tenant_id)
+            task_manager = self._session_registry._new_task_manager(session)
+            task_manager.set_session(session)
+            task_manager.register_task(task)
+            # compat 路径不经 _register_and_drain（没有队列、没有 drain），但 TM 一样要登记为
+            # 这个 session 的 owner：跑的这段时间里若有别的入口（send_message 冷启动的
+            # recover_agent 等）来找这个 session 的 TM，必须撞上这一个，而不是再建一个与它
+            # 并存（单例，见 `_bind_task_manager`）。跑完在下面的 finally 里摘掉——这个 TM
+            # 没有 runner、没挂回调，留在册里会让之后的续跑拿到一个派发不了的 TM；摘掉之后
+            # 续跑照旧从事件日志重建，与改动前一致。
+            self._bind_task_manager(sid, task_manager)
+            # 同理登记 session，使 /hitl 等入口在这条路径上也查得到该 session。
+            self._session_registry.register_session(sid, tenant_id=tenant_id)
 
-        for p in self.providers.get_capability_providers():
-            if isinstance(p, ControlCapabilityProvider):
-                p.register_session(sid, task_manager, session)
-                break
+            for p in self.providers.get_capability_providers():
+                if isinstance(p, ControlCapabilityProvider):
+                    p.register_session(sid, task_manager, session)
+                    break
         try:
             try:
                 state, handle = await self._execute_task(
@@ -1564,11 +1612,9 @@ class CtxWeftRuntime:
             # compat 路径没有队列、不经 _run_task，但一样要有人消费 run 的结局——
             # 否则 outage / park / 取消在这条路径上没人写 task 状态、没人发 task 事件
             # （Task 4 之前是 _run_loop 自己写自己发）。兜底同 _run_task。
-            await task_manager.apply_run_outcome(
-                task.id,
-                state.run_outcome or RunOutcome(
-                    kind=RunOutcomeKind.COMPLETED, verdict="success"),
-            )
+            run_outcome = state.run_outcome or RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="success")
+            await task_manager.apply_run_outcome(task.id, run_outcome)
+            await task_manager.finish_observe(run_outcome, task.id)
         finally:
             # **不 forget_session**：2026-09-04（Task 12）起这里不再代 TM 报队列状态
             # （`announce_queue_state` 已停发，events-v2 §5），但仍然不 forget——
@@ -1626,6 +1672,8 @@ class CtxWeftRuntime:
         """
         # 单例（`_bind_task_manager`）：给一个本进程里已经有主的 session_id 再建一次，
         # 会造出第二个 TM、第二条 SESSION_CREATED。入口即拒，先于任何持久化。
+        self._require_initialized()
+        session_id = session_id or generate_id("ses")
         if session_id and self._session_in_memory(session_id):
             raise SessionAlreadyExistsError(session_id)
 
@@ -1635,10 +1683,10 @@ class CtxWeftRuntime:
         # 与 `start_session` 同一把 per-session 锁：从「查有没有活 owner」到「新 TM 登记
         # 上」之间有 await，同一 session 上的并发入口插进来会各建一个。session_id 交给
         # 下游现铸时不可能撞车，不必拿锁。
-        lock = (self._resume_locks.setdefault(session_id, asyncio.Lock()) if session_id
+        lock = (self._session_guard(session_id) if session_id
                 else contextlib.nullcontext())
         async with lock:
-            if session_id and self._session_in_memory(session_id):
+            if session_id and (self._session_in_memory(session_id) or await self.event_store.committed_head(session_id)):
                 raise SessionAlreadyExistsError(session_id)   # 锁内复查
             session, _no_root_task, task_manager = await sm.create_session(
                 template_id=template_id,
@@ -1678,6 +1726,7 @@ class CtxWeftRuntime:
                                   session_id=<id> → new session with that host-provided ID).
         params.resume is True  → resume existing session (root_agent_id recovered from events).
         """
+        self._require_initialized()
         import dataclasses as _dc
 
         # 单例（`_bind_task_manager`）：「新建」一个本进程里已经有主的 session_id 会造出
@@ -1693,35 +1742,15 @@ class CtxWeftRuntime:
         # 模态处置归 LLMClient 实现方，core 全程透传。原先为了视觉门控要在这里
         # 惰性解析 LLM，现在整段不碰 LLM，「纯文本不提前解析 LLM」自动成立。
         # 顺序关键：validate 先于 normalize——被拒的内容不该在 blob store 留垃圾。
-        blob_store = self.providers.get_memory_blob_store()
-        # blob 落盘要一个 session 锚点（宿主按 session_id 登记 workspace），所以
-        # 能外部化时必须把 session_id 定下来并透传给 create_session，否则外部化用的
-        # session 与真正创建的 session 会是两个 id。
-        # 判据必须**两个 store 取或**：memory 侧不可外部化时 event 侧仍会独立把内容
-        # ref 化（`content_to_event_jsonable`，且 `validate_content` 的门控只看 event
-        # store），只看 memory 侧会让「memory Null + event 真」这一受支持的组合把
-        # `session_id=""` 喂给 event blob 的 put，而 create_session 随后又另生成一个真 id。
-        can_externalize_either = (
-            blob_store.can_externalize or self.providers.get_event_blob_store().can_externalize
-        )
-        sid = params.session_id or (generate_id("ses") if can_externalize_either else None)
+        if params.resume and not params.session_id:
+            raise ValueError("session_id is required when resume=True")
+        # Mint before any persisted creation event so every opening uses the same lock.
+        sid = params.session_id or generate_id("ses")
         normalized, user_prompt_event_jsonable = await self._validate_and_normalize_content(
-            params.user_prompt, sid or "", tenant_id=params.tenant_id,
+            params.user_prompt, sid, tenant_id=params.tenant_id,
         )
-        if sid is not None:
-            # 两侧都不能外部化时 sid 恒为 params.session_id（可能是 None），此处不改写，
-            # 与从前逐字节一致；memory 不可外部化时 `normalized` 就是 params.user_prompt
-            # 同一对象，故这一支对纯 event 组合也是无害的。
-            params = _dc.replace(params, session_id=sid, user_prompt=normalized)
-
-        # 从「查有没有活 owner」到「新 TM 登记上」之间有好几个 await：同一 session 上的
-        # 另一个入口（并发的 start_session、send_message 冷启动时的 recover_agent 重建）
-        # 若插进来，两边都会以为没有 TM、各建一个。与 `_recover_session_locked` 持同一把
-        # per-session 锁，把这一段串行化。session_id 此刻仍为空（交给 create_session
-        # 现铸）时不可能撞车，不必拿锁。
-        lock_id = params.session_id
-        async with (self._resume_locks.setdefault(lock_id, asyncio.Lock()) if lock_id
-                    else contextlib.nullcontext()):
+        params = _dc.replace(params, session_id=sid, user_prompt=normalized)
+        async with self._session_guard(sid):
             return await self._start_session_locked(
                 params, memory=memory, user_prompt_event_jsonable=user_prompt_event_jsonable,
             )
@@ -1735,6 +1764,8 @@ class CtxWeftRuntime:
         lm = sm.agent_lifecycle_manager
 
         if not params.resume:
+            if params.session_id and await self.event_store.committed_head(params.session_id):
+                raise SessionAlreadyExistsError(params.session_id)
             # 锁内复查：入口那道判重之后、拿到锁之前，并发的同 id 调用可能已经建好了。
             if params.session_id and self._session_in_memory(params.session_id):
                 raise SessionAlreadyExistsError(params.session_id)
@@ -1755,7 +1786,10 @@ class CtxWeftRuntime:
             )
         else:
             # 有活 owner 就把新 root task 推进它（单例）；没有才由 resume_session 新建。
-            existing = self._task_managers.get(params.session_id) if params.session_id else None
+            if not params.session_id:
+                raise ValueError("session_id is required when resume=True")
+            await self._rebuild_session_locked(params.session_id, tenant_id=params.tenant_id, strict=True)
+            existing = self._task_managers[params.session_id]
             session, root_task, task_manager = await sm.resume_session(
                 session_id=params.session_id,
                 event_store=self.event_store,
@@ -1784,6 +1818,7 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
             _storage_health=self.storage_health,
             _pending_observe=self._pending_observe_run_id,
+            _is_finished=self._task_is_settled,
         )
 
         # 这一段到 `set_runner` **不留 await**：resume 复用活 owner 时，新 root task 一进队
@@ -1861,7 +1896,7 @@ class CtxWeftRuntime:
             cancel_pending_hitl=lambda sid=session.id: self._cancel_session_hitl(
                 sid, message=CancelReason.FAILURE_THRESHOLD),
             cancel_inflight=lambda tid, sid=session.id: self._cancel_run_token(sid, tid),
-            review_switched_task=lambda task, sess=session, tm=task_manager: self._relaunch_task_recap(
+            review_switched_task=lambda task, sess=session, tm=task_manager: self._relaunch_observe(
                 session=sess, task_manager=tm, task=task,
                 agent_id=task.assigned_agent_id or task.creator_agent_id or sess.root_agent_id or "", boundary="task_switch"),
             retire_switched_input=self._retire_switched_input,
@@ -1872,6 +1907,7 @@ class CtxWeftRuntime:
             human_answer_ready=lambda tid, hid, sid=session.id: self._hitl_answer_ready(
                 sid, tid, hid),
             # 提交一轮：待终局的 HITL 答复终局，再落盘暂存的 memory 写入。见 `_commit_round_writes`。
+            prepare_round_commit=lambda tid, sid=session.id: self.hitl.stage_commits(sid, tid),
             commit_round=lambda tid, staged, sid=session.id: self._commit_round_writes(
                 sid, tid, staged),
             threshold_finalizer=lambda root, ack_tasks, failures, sess=session: (
@@ -1880,6 +1916,12 @@ class CtxWeftRuntime:
             # funnel 三处调用点共用同一注入点。
             cancel_finalizer=lambda tasks, reason, sess=session: (
                 self._finalize_cancel_memory(sess, tasks, reason)),
+            read_task_state=lambda tid, sid=session.id: self._read_persisted_task(sid, tid),
+            cancel_guard=lambda tid, name="finish_report", sid=session.id: self._step_executions.setdefault(
+                sid, ExecutionRegistry()).task_guard(tid, name),
+            tree_cancel_finalizer=lambda tasks, reason, sess=session: self._finalize_canceled_tasks(
+                sess, tasks, reason),
+            confirm_task_settled=self._confirm_task_settled,
             on_session_done=_on_done,
             on_session_idle=_on_idle,
             # task 落终态 → 两件事，见 `_on_task_terminal`。挂在终态而非 run 收尾，因为同一个
@@ -1888,6 +1930,7 @@ class CtxWeftRuntime:
             on_task_terminal=lambda tid, sid=session.id: self._on_task_terminal(sid, tid),
         ))
 
+        self._loaded_sessions.add(session.id)
         if start_tasks:
             asyncio.create_task(task_manager.drain())
 
@@ -1917,16 +1960,17 @@ class CtxWeftRuntime:
 
         不变式：**有快照 ⟹ 到它的 `committed_head` 为止，memory 效果都已落地。** 恢复路径
         「以快照为准」全靠它；一张领先的快照是静默的数据丢失（它说某件事做完了，所以
-        `pending_recap` / HITL `resolved` 里没有它，而 memory 里其实没有）。
+        `pending_observe` / HITL `resolved` 里没有它，而 memory 里其实没有）。
 
-        判据只有一条：**该 session 有没有开着的未提交窗口**。开着就意味着这一轮的 memory
+        恢复尚未补齐必需输入时不能写快照；正常执行再检查有没有开着的未提交窗口。
+        开着窗口就意味着这一轮的 memory
         写入还在暂存区（`ingest_or_stage`），而缓冲里的事件已经先于它们被补投——
         `TaskManager.commit_round` 的顺序是「补投 → 钩子（落盘暂存）→ 关窗」，而
         `SnapshotWriter` 是 rest 订阅者，在补投那一步就被叫醒了。实测见
         `tests/unit/test_snapshot_not_ahead_of_memory.py`。
 
-        窗口之外 memory 是同步直落的（`ingest_or_stage` 的另一支），而 `RunFinished` 在 run
-        体末尾的 `finally` 里发——那时这条 run 自己的写入已经落定。所以「没有开着的窗」就是
+        恢复完成后，窗口之外 memory 是同步直落的（`ingest_or_stage` 的另一支），而 `RunFinished` 在 run
+        体末尾的 `finally` 里发——那时这条 run 自己的写入已经落定。所以「恢复完成且没有开着的窗」就是
         这个不变式的充分条件。
 
         **这个判断为什么必须在 core**：它读的是 `TaskManager` 的窗口状态，而 provider 只看得
@@ -1938,6 +1982,8 @@ class CtxWeftRuntime:
         tm = self._task_managers.get(session_id)
         if tm is None:
             return True
+        if getattr(tm, "recovery_pending", False):
+            return False
         checker = getattr(tm, "any_round_open", None)
         if not callable(checker):
             return True          # 鸭子类型的 TM 替身（单测）——不因此挡住快照
@@ -2020,6 +2066,7 @@ class CtxWeftRuntime:
         判据放在 runtime 而不是 ALM：这三样分属 `_task_managers` / `hitl_registry` /
         `AgentLifecycleManager`，只有组合根同时认识它们。
         """
+        self._require_initialized()
         tm = self._task_managers.get(session_id)
         if tm is not None and not tm.is_done():
             return False
@@ -2057,7 +2104,8 @@ class CtxWeftRuntime:
         两条重建路径并行，正是这把锁存在的理由。它按 session 数有界、体量微小，不回收
         是构造期就定下的（见 `__init__` 里那行注释）。
         """
-        if not self.session_is_quiescent(session_id):
+        self._require_initialized()
+        if self._session_lock(session_id).locked() or not self.session_is_quiescent(session_id):
             logger.info("forget_session: %s 还没安静下来（在跑 / 有人在等），不逐出", session_id)
             return False
         self._evict_session_memory(session_id)
@@ -2076,14 +2124,17 @@ class CtxWeftRuntime:
         **不看同 session 其他 agent，也不看 task 队列**：那是 `forget_session` 的粒度。
         这里只对这一个 agent 负责。
         """
+        self._require_initialized()
         rec = self._agent_lifecycle_manager.record_of(agent_id)
         if rec is None:
             return False
-        if rec.status not in self._QUIESCENT_AGENT_STATUSES:
+        if self._session_lock(rec.session_id).locked() or rec.status not in self._QUIESCENT_AGENT_STATUSES:
             logger.info("forget_agent: agent %s 处于 %s，不逐出", agent_id, rec.status)
             return False
+        self._loaded_sessions.discard(rec.session_id)
         return self._agent_lifecycle_manager.forget_agent(agent_id)
 
+    @_session_command(load_session="optional")
     async def purge_session(self, session_id: str) -> None:
         """**销毁**一条会话的运行时存在：终结还在跑的一切，然后把内存清干净。
 
@@ -2116,6 +2167,7 @@ class CtxWeftRuntime:
         内存，不跑任何东西；会话本就不在事件日志里则装填出 0 条，后面几步自然全是
         no-op。
         """
+        self._require_initialized()
         try:
             if not self._agent_lifecycle_manager.agent_ids_of_session(session_id):
                 await self.rebuild_session(session_id)
@@ -2162,6 +2214,7 @@ class CtxWeftRuntime:
             tm.drop_round_buffer(_tid)
         self._release_round(session_id)
         self._task_managers.pop(session_id, None)
+        self._loaded_sessions.discard(session_id)
         self._prepared_recoveries.pop(session_id, None)
         self._agent_lifecycle_manager.forget_session(session_id)
         self._step_executions.pop(session_id, None)
@@ -2173,18 +2226,14 @@ class CtxWeftRuntime:
     async def rebuild_session(
         self, session_id: str, *, tenant_id: str | None = None, strict: bool = False,
     ) -> int:
-        """Load agents, HITL and the session's sole TaskManager, without execution.
+        """Ensure one complete owner, without execution. Return its agent count.
 
-        A cold running agent becomes interrupted; waiting_human stays parked.
-        Tasks retain their persisted status and are not queued. No drain, recap
-        or model call starts here. A live owner is reused without replaying over
-        its uncommitted state. Return the number of loaded agents (0 if absent).
-
-        strict=True propagates preparation failures to execution callers. The
-        default retains best-effort HITL/calibration behavior, but never publishes
-        a TaskManager after an incomplete load. Host-supplied tenant_id wins.
-        """
-        lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
+        Startup crash calibration is performed by initialize(), not materialization.
+        An existing owner is reused; missing members are repaired without replacing
+        live records. strict=True raises on absence or failure; the compatibility
+        non-strict path returns zero after rolling back an incomplete cold load."""
+        self._require_initialized()
+        lock = self._session_guard(session_id)
         async with lock:
             return await self._rebuild_session_locked(
                 session_id, tenant_id=tenant_id, strict=strict)
@@ -2192,34 +2241,44 @@ class CtxWeftRuntime:
     async def _rebuild_session_locked(
         self, session_id: str, *, tenant_id: str | None = None, strict: bool = False,
     ) -> int:
-        existing = self._task_managers.get(session_id)
-        if existing is not None and existing.is_alive():
-            return len(self._agent_lifecycle_manager.agent_ids_of_session(session_id))
-
         from ctx_weft.core.control.reducers import rebuild_view
+        from ctx_weft.core.models.errors import SessionNotFound
 
-        # One local view feeds all three registries; never cache a recovery view.
+        existing = self._task_managers.get(session_id)
+        if self._session_is_loaded(session_id):
+            return len(self._agent_lifecycle_manager.agent_ids_of_session(session_id))
         view = await rebuild_view(self.event_store, session_id)
-        hitl_loaded = True
+        if session_id not in view.sessions:
+            if strict:
+                raise SessionNotFound(session_id)
+            return 0
+        if existing is not None:
+            # An owner is never replaced. Repair only missing members, not live records.
+            if not existing.session.root_agent_id:
+                existing.session.root_agent_id = view.sessions[session_id].root_agent_id
+            missing = {aid: av for aid, av in view.agents.items()
+                       if self._agent_lifecycle_manager.record_of(aid) is None}
+            await self._agent_lifecycle_manager.load(
+                missing, session_id=session_id,
+                tenant_id=existing.session.tenant_id)
+            if existing._runner is None:
+                existing.set_runner(self._make_task_runner(
+                    session=existing.session, lm=self._agent_lifecycle_manager,
+                    memory=self.providers.get_memory(), task_manager=existing))
+            self._register_and_drain(existing.session, existing, start_tasks=False)
+            return len(self._agent_lifecycle_manager.agent_ids_of_session(session_id))
         try:
             await self._load_hitl_view(session_id, view)
-        except Exception:
-            if strict:
-                raise
-            hitl_loaded = False
-            logger.exception("rebuild_session: rebuild_hitl failed for %s", session_id)
-        n, tenant_id = await self._load_agents_view(session_id, view, tenant_id=tenant_id)
-        self._session_registry.register_session(session_id, tenant_id=tenant_id)
-        try:
-            await self._settle_crashed_agents(session_id, strict=True)
-        except Exception:
-            if strict:
-                raise
-            logger.exception("rebuild_session: calibration failed for %s", session_id)
+            n, actual_tenant = await self._load_agents_view(session_id, view, tenant_id=tenant_id)
+            await self._load_task_manager_view(session_id, view, tenant_id=actual_tenant)
             return n
-        if hitl_loaded and session_id in view.sessions:
-            await self._load_task_manager_view(session_id, view, tenant_id=tenant_id)
-        return n
+        except BaseException as exc:
+            self._evict_session_memory(session_id)
+            self.hitl_registry.forget_session(session_id)
+            if strict or not isinstance(exc, Exception):
+                raise
+            logger.exception("rebuild_session: incomplete load rolled back (%s)", session_id)
+            return 0
 
     async def _load_task_manager_view(self, session_id: str, view, *, tenant_id: str) -> None:
         """Construct and publish a fully loaded owner, with no execution queue."""
@@ -2230,24 +2289,26 @@ class CtxWeftRuntime:
         sess_proj = view.sessions[session_id]
         session = session_from_projection(sess_proj)
         session.tenant_id = tenant_id
+        recap_task_ids = {info.get("task_id", key) for key, info in view.pending_observe.items()}
+        missing_recaps = {tid for tid in recap_task_ids
+                          if tid not in view.tasks or not view.tasks[tid].details_complete}
+        if missing_recaps:
+            history = await self._historical_task_view(session_id)
+            for tid in missing_recaps:
+                if tid not in history.tasks:
+                    raise TaskNotFound(f"missing task for pending recap: {tid}")
+                view.tasks[tid] = history.tasks[tid]
         all_tasks = [task_from_projection(tp) for tp in view.tasks.values()]
         await self._restore_task_prompts(all_tasks, session_id, session.tenant_id)
         resumable = [t for t in all_tasks if t.status not in TERMINAL_TASK_STATUSES]
         await self._verify_task_prompts_in_memory(resumable, session_id, session.tenant_id)
         lm = self._agent_lifecycle_manager
         lm.register_session(session.id, tenant_id=session.tenant_id)
-        task_manager = TaskManager(
-            session_id=session.id,
-            event_bus=self._event_bus,
-            max_concurrent=self._config.task_max_concurrent,
-            task_max_retries=self._config.task_max_retries,
-            autonomous_requeue_max=self._config.autonomous_requeue_max,
-            autonomous_requeue_backoff_base_sec=(
-                self._config.autonomous_requeue_backoff_base_sec),
-        )
+        task_manager = self._session_registry._new_task_manager(session)
         task_manager.set_session(session)
         terminal_ids = {t.id for t in all_tasks if t.status in TERMINAL_TASK_STATUSES}
         task_manager.restore(all_tasks, terminal_ids, enqueue=False)
+        task_manager.set_recovery_pending(True)
         task_manager.set_unhealthy_check(lambda sid: self.storage_health(sid) is not None)
         task_manager.set_runner(self._make_task_runner(
             session=session, lm=lm, memory=self.providers.get_memory(),
@@ -2260,10 +2321,11 @@ class CtxWeftRuntime:
         except Exception:
             if self._task_managers.get(session_id) is task_manager:
                 self._task_managers.pop(session_id, None)
+                self._loaded_sessions.discard(session_id)
             raise
         # Retain only deferred recovery work, not the replayed session view.
         self._prepared_recoveries[session_id] = (
-            task_manager, view.tasks_total, dict(view.pending_recap))
+            task_manager, view.tasks_total, dict(view.pending_observe))
 
     async def _activate_prepared_tasks_locked(
         self, tm: "TaskManager", *, skip_hitl_id: str = "",
@@ -2273,83 +2335,58 @@ class CtxWeftRuntime:
         Caller holds the session's resume lock. Hot owners have no deferred work.
         Recaps can call a model, so they belong here, never in rebuild_session.
         """
+        from ctx_weft.core.loop.steps.observe import blocks_actor_recovery
         session = tm.session
         if session is None:
             raise RuntimeError("TaskManager has no session")
         prepared = self._prepared_recoveries.get(session.id)
         if prepared is None or prepared[0] is not tm:
             return
+        await tm.restore_observe_decisions(prepared[2])
+        from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
+        lm = self._agent_lifecycle_manager
+        for aid in lm.agent_ids_of_session(session.id):
+            rec = lm.record_of(aid)
+            if rec.status == "terminated" and rec.status_reason.startswith(AGENT_CANCEL_REASON):
+                if rec.status_reason == AGENT_CANCEL_REASON + "session_canceled":
+                    await tm.cancel_session_agent_tasks(aid, rec.status_reason)
+                elif rec.current_task_id:
+                    await tm.cancel_task_tree(rec.current_task_id, rec.status_reason)
+        await tm.recover_canceled_tasks()
         await self._inject_resolved_user_turns(session, tm, skip_hitl_id=skip_hitl_id)
         parked = {
             r.task_id for r in self.hitl_registry.list_pending(session_id=session.id)
             if r.task_id
         }
+        parked.update(info.get("task_id", key) for key, info in prepared[2].items()
+                      if blocks_actor_recovery(info))
         tm.requeue_resumable(parked)
         await tm.dispose_blocked_dependents()
-        pending_recaps = dict(prepared[2])
+        pending_observes = dict(prepared[2])
         for task in tm.all_tasks():
-            if task.status == "REVIEWING":
+            if task.status == "REVIEWING" and not any(
+                    info.get("task_id", key) == task.id for key, info in pending_observes.items()):
                 task.switch_requested = True
-                pending_recaps[task.id] = {
+                pending_observes[task.id] = {
                     "boundary": "task_switch",
                     "agent_id": task.assigned_agent_id or task.creator_agent_id or session.root_agent_id,
                 }
-        for tid, info in pending_recaps.items():
+        prepared[2].update(pending_observes)
+        for key, info in pending_observes.items():
+            tid = info.get("task_id", key)
             task = tm.get_task(tid)
             if task is not None:
-                await self._relaunch_task_recap(
+                started = await self._relaunch_observe(
                     session=session, task_manager=tm, task=task,
                     agent_id=info.get("agent_id") or task.assigned_agent_id or "",
                     boundary=info.get("boundary") or "finish",
+                    recovery_info=info if info.get("observe_id") else {"observe_id": tid},
                 )
-        self._prepared_recoveries.pop(session.id, None)
-
-    async def _settle_crashed_agents(self, session_id: str, *, strict: bool = False) -> int:
-        """装填之后：把「折出来是 running、而此刻没有任何 run 在跑它」的 agent 判成
-        `interrupted`。返回真的发生了转移的条数。
-
-        **这是恢复期裁定，属于 core。** `ALM.load()` 把 `AgentView.status` 照实读回来，
-        崩溃时正在跑的 agent 因此回到内存里仍是 `running`；而 `_RECOVERY_BROADCAST_BY_STATUS`
-        **刻意不广播 running**（"进程刚起来没有任何 run 在跑，照发会让 host 以为有活在跑；
-        它在事件流里的真实含义是「崩溃时正在跑」"）。也就是说 core 认得出这是崩溃残留，
-        却什么都不说——留下的缺口只能由宿主自己去补，而"这个 agent 现在算什么状态"本就
-        是五态机的话语权。这一步把它说出来。
-
-        `interrupted` 正是为这件事存在的：它由 `TaskManager._suspend_task_interrupted`
-        （宿主 outage / 崩溃）驱动，语义就是"被打断、可恢复，等 `/resume` 重新派发"。
-
-        **与 `pause_agent` 那处「不要手动拍 INTERRUPTED」的告诫不冲突**：那里的 agent
-        **还在真跑**（暂停信号刚发出、run 要到下一个检查点才 park），拍 interrupted 是
-        撒谎。这里恰恰相反——能走到 `rebuild_session` 就说明该 session 的记录是刚从事件
-        日志装填回来的，这个进程里没有任何 run 属于它，`running` 是上一次进程留下的残影。
-
-        冷恢复与显式装填共用 rebuild_session；热 owner 不重放、不校准。
-
-        幂等：转移发出的 `AgentInterrupted` 会落库，下次装填折出来就是 `interrupted`，
-        `next_agent_transition` 对同态输入返回 `None`，不重复发。
-        """
-        reg = self._agent_lifecycle_manager
-        settled = 0
-        for aid in list(reg.agent_ids_of_session(session_id)):
-            rec = reg.record_of(aid)
-            if rec is None or rec.status != "running":
-                continue
-            try:
-                if await reg.apply_input(aid, AgentInput.INTERRUPTED, reason="crash_recovery",
-                                         task_id=rec.current_task_id):
-                    settled += 1
-            except Exception:
-                if strict:
-                    raise
-                # 单个 agent 判不了不该拖垮整条装填——最坏是它继续显示成在跑，
-                # 下一次装填还有机会。
-                logger.exception("_settle_crashed_agents: %s 判定中断失败", aid)
-        if settled:
-            logger.info("Recovery: session %s 有 %d 个 agent 崩溃时在跑 → 判为 interrupted，等 /resume",
-                        session_id, settled)
-        return settled
-
-    # ── 熔断真终结（Task 10 runtime 侧）───────────────────────────────────────
+                if started:
+                    prepared[2].pop(key, None)
+        if not prepared[2]:
+            self._prepared_recoveries.pop(session.id, None)
+        tm.set_recovery_pending(False)
 
     async def _retire_switched_input(self, task: Task) -> None:
         for req in list(self.hitl_registry.list_pending(session_id=task.session_id)):
@@ -2383,6 +2420,9 @@ class CtxWeftRuntime:
         finally 的 was_cancelled 守卫按 task.status 判定（熔断已先手标 FAILED 的不发）。
         找不到 token（该 task 此刻并不在跑）→ False。
         """
+        executions = self._step_executions.get(session_id)
+        if executions is not None:
+            executions.stop_metadata(task_id)
         tokens = self._run_tokens.get(session_id, {}).get(task_id)
         if tokens is None:
             return False
@@ -2453,7 +2493,6 @@ class CtxWeftRuntime:
                     task_summary=summary,
                     outcome="fail",
                     provider_ctx=provider_ctx,
-                    register_bg=False,
                 )
             except Exception:
                 logger.exception(
@@ -2461,14 +2500,15 @@ class CtxWeftRuntime:
                 )
 
     async def _finalize_cancel_memory(
-        self, session: Session, tasks: list[Task], reason: str,
+        self, session: Session, tasks: list[Task], reason: str, *, strict: bool = False,
     ) -> None:
         """统一取消胶囊闭合（Task 14）：cancel_all / 熔断清场（已启动挂起排队） / 在途协作取消
         funnel（`on_task_finished(CANCELED)`）三处调用点的公共落点，逐任务调用
         `synthesize_cancel_closure`（ack 终态化 + `[outcome=cancelled]` finish 对，find-only
         对 born-cancel 未铸框的子任务整体跳过）。
 
-        best-effort per task：单条异常记日志、不阻断其余（与 `_finalize_threshold_memory` 同一惯例）。
+        默认逐任务 best-effort；停驻取消及恢复使用 strict，失败时保留 observe 待办，
+        不能先宣布 Applied 再丢掉未完成的取消收尾。
         """
         from ctx_weft.core.loop.steps.finalize import synthesize_cancel_closure
 
@@ -2479,8 +2519,12 @@ class CtxWeftRuntime:
                     session_id=session.id, tenant_id=session.tenant_id,
                     task_id=t.id, agent_id=t.assigned_agent_id or t.creator_agent_id,
                 )
-                await synthesize_cancel_closure(memory, session.id, t, provider_ctx, reason)
+                registry = self._step_executions.setdefault(session.id, ExecutionRegistry())
+                async with registry.task_guard(t.id, "finish_report"):
+                    await synthesize_cancel_closure(memory, session.id, t, provider_ctx, reason)
             except Exception:
+                if strict:
+                    raise
                 logger.exception("_finalize_cancel_memory: closure failed for task %s", t.id)
 
     def _make_task_runner(
@@ -2510,56 +2554,26 @@ class CtxWeftRuntime:
 
     # ── Crash recovery ───────────────────────────────────────────────────────
 
+    @_session_command(load_session="required")
     async def recover_agent(
         self,
         agent_id: str,
         *,
+        session_id: str | None = None,
         user_reply: "PendingHitl | None" = None,
         resumed_task_id: str | None = None,
         hitl_id: str = "",
         keep_alive: bool = False,
     ) -> None:
-        """续跑一个 agent：复用活 owner TM，或据事件重建后 drain。
+        """Continue work using the session's unique owner.
 
-        ``keep_alive``：仅完成冷准备，复用 `rebuild_session` 的统一装填路径。
-        不入队、不 drain、不补注入答复、不启动 recap，也不对空历史或全终态历史
-        做续跑收尾。新建任务的调用方可以先取得 owner，再交付输入和激活任务。
-
-        **主键是 agent**（2026-09-04 spec §6.2）；``session_id`` 由 ALM 记录反查。
-        session 仍是串行化与资源回收的单位——per-session 锁、owner TM 复用这些
-        **实现事实**一行未改，它只是不再是对外的语义单位（spec §6.1）。
-
-        单 owner 架构（session 的 TM 是单例，见 `_bind_task_manager`）：若该 agent 所在
-        session 已有**存活的 owner TM**，一切续跑都在它身上就地进行
-        （``_recover_in_existing_tm``）——冷 HITL 应答把应答投递给它并重排被应答的
-        task，``/resume`` 把它内存里可续跑的 task 重新入队，**绝不重建一个 TM 去顶替它**。
-        仅当内存里没有 TM（进程重启 / 从未建过 / 已被 forget·purge 逐出）才从事件日志
-        重建。
-
-        不收 llm_account/llm_model：续跑路径一概不碰模型。换模型走 `set_agent_llm` /
-        `set_session_llm`，registry 是模型选择的唯一住所，续跑只负责把已经存在的选择
-        重新派发出去。
-
-        ``hitl_id``：冷 HITL 应答触发的续跑才有意义——``_resume_after_hitl`` 总是传
-        ``req.id``。纯 ``/resume``（无 hitl 语境）留空。
-
-        **装填是调用方的责任，本方法不自愈**（2026-09-21）。从前这里对 miss 会先调
-        `rebuild_agent(agent_id)` 扫全部 active session 把记录喂进来——那条 sweep 已删
-        （理由见 `rebuild_all_pending_hitl` 之后那段墓碑注释）。现在 miss 直接抛
-        `AgentNotLoaded`。
-
-        **这不会把冷 HITL 应答摔在地上**，那正是从前留着自愈的理由：`reply_to_hitl`
-        把 HITL 判成终局之后没有第二次机会，续跑失败 ⟹ 会话永久卡住。这条路今天由
-        `_resume_after_hitl` 在调用本方法**之前**的 `_hydrate_agent_for_cold_resume(req)`
-        接住——`PendingHitl` 本来就同时带着 `agent_id` 和 `session_id`，用它精确装填那
-        一个 session，比让本方法去猜精确得多、也便宜得多。`_start_task_for_agent` 那条
-        同理：它在调用本方法之前已经 `record_of` 命中过。所以两个内部调用点都到不了
-        下面这个 raise。
-
-        走到这个 raise 的只剩「宿主直接调 `recover_agent`、而这条会话还没装填」——
-        按 `rebuild_session` 定下的用户驱动模型（「用到哪条装哪条」），那本就该由宿主
-        先装填。`AgentNotLoaded` 是 `AgentNotFound` 的子类，既有的 except 照样接住。
-        """
+        A cold call needs session_id for addressing. Materialization always goes
+        through rebuild_session. Without resumed_task_id the existing behavior is
+        session-wide requeue; HITL internals target the answered task explicitly.
+        keep_alive only ensures materialization, with no drain or model calls."""
+        self._require_initialized()
+        if session_id is not None:
+            await self.rebuild_session(session_id, strict=True)
         rec = self._agent_lifecycle_manager.record_of(agent_id)
         if rec is None:
             raise AgentNotLoaded(
@@ -2567,7 +2581,7 @@ class CtxWeftRuntime:
                 f"for its session first"
             )
         session_id = rec.session_id
-        lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
+        lock = self._session_guard(session_id)
         async with lock:
             await self._recover_session_locked(
                 session_id, user_reply=user_reply,
@@ -2577,6 +2591,7 @@ class CtxWeftRuntime:
 
     async def prepare_agent(self, agent_id: str) -> None:
         """Compatibility wrapper; rebuild_session owns all cold preparation."""
+        self._require_initialized()
         rec = self._agent_lifecycle_manager.record_of(agent_id)
         if rec is None:
             raise AgentNotLoaded(f"agent {agent_id!r} is not loaded")
@@ -2605,9 +2620,16 @@ class CtxWeftRuntime:
         resumable = any(t.status not in TERMINAL_TASK_STATUSES for t in tm.all_tasks())
         if cold and not resumable and not prepared[1]:
             raise RuntimeError(f"Session {session_id!r} has no resumable tasks")
-        await self._recover_in_existing_tm(
-            tm, user_reply=user_reply, resumed_task_id=resumed_task_id, hitl_id=hitl_id,
-        )
+        try:
+            await self._recover_in_existing_tm(
+                tm, user_reply=user_reply, resumed_task_id=resumed_task_id, hitl_id=hitl_id,
+            )
+        finally:
+            # Hot failures retain the affected owner's slot/round. Do not leave
+            # unrelated queued tasks behind a session-wide preparation barrier.
+            # A cold owner still awaiting required input remains blocked.
+            if session_id not in self._prepared_recoveries:
+                tm.set_recovery_pending(False)
         if cold and not resumable:
             session = tm.session
             final_status = "FAILED" if session.failure_counter > 0 else "SUCCEEDED"
@@ -2670,7 +2692,7 @@ class CtxWeftRuntime:
                 )
                 for r in view
             )
-            if present == task.user_prompt_in_memory:
+            if present == task.user_prompt_in_memory and (present or task.status == "PENDING"):
                 continue
             if present:
                 logger.info(
@@ -2682,6 +2704,14 @@ class CtxWeftRuntime:
                     "memory (crashed between commit and flush) — re-ingesting from the event log",
                     task.id, task.status)
             task.user_prompt_in_memory = present
+            if not present and task.status != "PENDING":
+                # A committed run can be canceled immediately after materialization,
+                # before a driver ever gets a chance to flush its missing input.
+                from ctx_weft.core.loop.driver import persist_task_prompt
+                await persist_task_prompt(task,
+                    MemoryAddress(session_id=session_id, task_id=task.id,
+                                  agent_id=task.assigned_agent_id or task.creator_agent_id),
+                    memory, ctx)
 
     async def _restore_task_prompts(
         self, tasks: "list[Task]", session_id: str, tenant_id: str,
@@ -2736,31 +2766,58 @@ class CtxWeftRuntime:
                 hydrated = downgrade_images_to_text(content)
             task.user_prompt = hydrated
 
-    async def _find_finish_pair_tool_call_id(
-        self, memory: MemoryProvider, scope: MemoryAddress, task_id: str, pctx: ProviderContext,
-    ) -> str | None:
-        """从 memory 找该 task close 时写的占位 finish 对 assistant turn，返回其 finish_task tool_call id。"""
-        from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
-        fin = qualify("control:finish_task")
-        view = await memory.load_view(
-            MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
-            MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN],
-        )
-        for r in reversed(view):  # 新→旧：多副本时最新的 finish 对胜出（同旧 newest-first 语义）
-            if r.role == "assistant" and r.metadata.get("origin_task_id") == task_id:
-                for tc in (r.metadata.get("tool_calls") or []):
-                    if tc.get("name") == fin and tc.get("id"):
-                        return tc["id"]
-        return None
+    async def _restore_observe_outputs(self, session_id, task, recovery_info):
+        """Rebuild the actor's output at the original scheduling event, before retrying observe.
 
-    async def _relaunch_task_recap(
+        Use log order and the intent's foreground run, so later replies, previous
+        attempts and observer responses cannot become the recovered answer.
+        """
+        from ctx_weft.core.loop.steps.act import TurnRecord, _synthesize_final_outputs
+        from ctx_weft.protocols import ToolCall
+
+        observe_id = recovery_info.get("observe_id")
+        if not observe_id:
+            return {}  # Legacy recap events have no durable scheduling intent.
+        from ctx_weft.core.control.reducers import OBSERVE_REQUEST_EVENT_TYPES
+        rows = await self.event_store.read_range(session_id, include_types=(
+            EventType.LLM_RESPONSE_FINISHED, *OBSERVE_REQUEST_EVENT_TYPES))
+        responses = []
+        for row in rows:
+            ev = row.event
+            intent = (ev.payload.get("observe_request", {})
+                      if ev.type == EventType.HITL_OPENED else ev.payload)
+            if ev.type != EventType.LLM_RESPONSE_FINISHED:
+                if intent.get("observe_id") == observe_id:
+                    original = (await self._historical_task_view(
+                        session_id, through_position=row.position)).tasks.get(task.id)
+                    if original is not None:
+                        task.title, task.description = original.title, original.description
+                        task.user_prompt = original.user_prompt
+                        await self._restore_task_prompts([task], session_id, task.tenant_id)
+                    actor_run_id = ev.run_id or (responses[-1].run_id if responses else None)
+                    transcript = [TurnRecord(
+                        turn=response.payload.get("turn", 0), messages_sent=[],
+                        assistant_text=response.payload.get("content", ""),
+                        tool_calls=[ToolCall(**call)
+                                    for call in response.payload.get("tool_calls", [])],
+                    ) for response in responses if response.run_id == actor_run_id]
+                    from types import SimpleNamespace
+                    state = SimpleNamespace(task=task, extra={})
+                    _synthesize_final_outputs(state, transcript)
+                    state.extra["restored_transcript"] = transcript
+                    return state.extra
+            elif ev.task_id == task.id and ev.origin == EventOrigin.LOOP_ACT:
+                responses.append(ev)
+        raise RuntimeError(f"Missing observe scheduling intent: {observe_id}")
+
+    async def _relaunch_observe(
         self, *, session: Session,
         task_manager: TaskManager, task: Task, agent_id: str, boundary: str,
-    ) -> None:
+        recovery_info: dict | None = None,
+    ) -> bool:
         """恢复：重建 LoopState 重跑一个被崩溃打断的段 recap，登记到传入 TM（track_background）。
 
-        close 边界（finish/normal）：先从 memory 读占位 finish 对 tool_call_id + 据 task 状态定 outcome，
-        register_close_synth，使重跑经 replace_finish_report 替换占位对。best-effort：任何一步失败记日志、跳过。
+        close 边界由 observe 从完整持久化 finish 对恢复原文保留策略；runtime 不重新推断。
 
         **模板按 `agent_id` 自己的出身解**（2026-09-30）：从前它由调用方连同会话模板一起
         传进来，于是一个子 agent 被打断的段 recap 会用 root 的 identity 重跑——而 recap
@@ -2768,8 +2825,20 @@ class CtxWeftRuntime:
         """
         import dataclasses as _dc
 
-        from ctx_weft.core.loop.steps.observe import CLOSE_BOUNDARIES
+        from ctx_weft.core.loop.steps.observe import blocks_actor_recovery
         try:
+            if task.status == "CANCELED":
+                # Repair cancellation before the obsolete observation can publish
+                # Applied and release the task retained for recovery.
+                await self._finalize_cancel_memory(session, [task], task.error or "canceled", strict=True)
+            from copy import copy
+            context_task = copy(task)
+            recap_extra = {}
+            # Legacy Started-only recaps have no scheduling event; their task
+            # terminal event already carries outputs.
+            if recovery_info and recovery_info.get("task_id"):
+                recap_extra = await self._restore_observe_outputs(session.id, context_task, recovery_info)
+            recap_extra["observe_context_task"] = context_task
             lm = self._agent_lifecycle_manager
             # 水合，不新建：这是重跑一个已存在 agent 打断的段 recap。register_session
             # 保证跨重启后 registry 为空时 materialize 的回落有正确的 session 语境
@@ -2799,22 +2868,186 @@ class CtxWeftRuntime:
             )
             state = LoopState(
                 run_id=generate_id("run"), session=session, task=task, agent=agent,
-                scope=scope, extra={"template": template}, resolved_model=rm,
+                transcript=recap_extra.pop("restored_transcript", []), act_exit_reason=boundary,
+                scope=scope, extra={"template": template, **recap_extra,
+                    "observe_recovery": dict(recovery_info or {})}, resolved_model=rm,
                 # 孤儿 run：不走 StepDriver.run，构造时显式钉住 origin，否则
                 # 后台 ObserveStep 内部经 make_event(state, ...) 发的
                 # 事件 origin 都会是空串。
                 origin=EventOrigin.LOOP_BACKGROUND_OBSERVE,
             )
-            if boundary in CLOSE_BOUNDARIES:
-                tcid = await self._find_finish_pair_tool_call_id(memory, scope, task.id, provider_ctx)
-                if tcid is not None:
-                    outcome = "fail" if task.status == "FAILED" else "success"
-                    # raw_fold_scope=scope：pending close recap 只在规则 observe 占位 close 时
-                    # 存在（延迟折叠，raw 尚 active），重跑替换成功后补删；对已折 raw 是幂等 no-op。
-                    register_close_synth(task.id, tcid, scope, outcome, scope)
-            loop_ctx.steps.start("observe", state, loop_ctx, options={"boundary": boundary})
+            # A restarted observer has no preceding PrepareStep to bind its tools.
+            from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
+            state.extra["bound_capabilities"] = await resolve_and_bind(state, loop_ctx)
+            if recovery_info and "context_record_ids" not in recovery_info:
+                from ctx_weft.core.control.reducers import OBSERVE_REQUEST_EVENT_TYPES
+                rows = await self.event_store.read_range(session.id, include_types=OBSERVE_REQUEST_EVENT_TYPES)
+                for row in rows:
+                    payload = (row.event.payload.get("observe_request", {})
+                               if row.event.type == EventType.HITL_OPENED else row.event.payload)
+                    if payload.get("observe_id") == recovery_info.get("observe_id") and "context_record_ids" in payload:
+                        recovery_info = {**recovery_info, "context_record_ids": payload["context_record_ids"]}
+                        break
+            info = dict(recovery_info or {})
+            mechanical = bool(info.get("verdict"))
+            settled = info.get("settled") or info.get("abandoned") or task.status == "CANCELED"
+            enqueue_pending = (info.get("settled") and task.status == "PENDING"
+                               and info.get("disposition", {}).get("status") == "PENDING")
+            if mechanical and settled and not enqueue_pending:
+                launched = await loop_ctx.steps.start_durable("observe", state, loop_ctx, options={
+                    **info, "boundary": info["report_boundary"], "judge_task": False, "settled": True})
+            elif mechanical or info.get("execution_mode") == "foreground":
+                needs_judgement = (not mechanical and not info.get("completion")
+                                   and task.status not in TERMINAL_TASK_STATUSES)
+                if needs_judgement:
+                    launched = task_manager.start_foreground_recovery(task.id, agent_id,
+                        lambda: self._resume_observe_finalization(state, loop_ctx, info, foreground=True))
+                else:
+                    launched = asyncio.create_task(self._resume_observe_finalization(state, loop_ctx, info))
+                loop_ctx.steps.executions.register(state.run_id, task.id, "observe", launched,
+                    observe_id=info.get("observe_id", ""))
+                task_manager.track_background(launched)
+            else:
+                launched = await loop_ctx.steps.start_durable(
+                    "observe", state, loop_ctx, options={"boundary": boundary, **info})
+            if blocks_actor_recovery(recovery_info or {}):
+                registry = loop_ctx.steps.executions
+                registry.recovering_observe_tasks.add(task.id)
+                launched.add_done_callback(lambda _: registry.recovering_observe_tasks.discard(task.id))
+            return True
         except Exception:
             logger.exception("recover: failed to relaunch task recap for task=%s", task.id)
+            return False
+
+    async def _resume_observe_finalization(self, state, ctx, info, *, foreground=False):
+        """Recover foreground settlement here; observation never drives a step chain."""
+        from ctx_weft.core.loop.driver import ExecutionMode, StepExecution
+        from ctx_weft.core.loop.steps.observe import (
+            ObservationResult, Verdict, apply_foreground_assessment, emit_effect,
+        )
+        options = dict(info)
+        ctx.execution = StepExecution(ExecutionMode.FOREGROUND, options)
+        state.extra.update(observe_id=options["observe_id"],
+            observe_effects=list(options.get("effects", [])))
+        if options.get("completion"):
+            state.extra["observe_completion"] = options["completion"]
+        mechanical = bool(options.get("verdict"))
+        commit = None
+        tokens = None
+        if foreground:
+            state.origin = EventOrigin.LOOP_OBSERVE
+            tokens = self._register_run_tokens(state.session.id, state.task.id,
+                root_run=state.agent.id == state.session.root_agent_id)
+            ctx.cancel_token, ctx.pause_token = tokens.cancel, tokens.pause
+            if ctx.task_manager._cancelled or ctx.task_manager.is_task_tree_canceled(state.task.id):
+                tokens.cancel.cancel()
+        started = make_event(state, EventType.RUN_STARTED, {
+            "run_id": state.run_id, "initial_step": "observe_finalization_recovery"},
+            origin=EventOrigin.RUNTIME if foreground else state.origin)
+        if foreground:
+            commit = _ActorRunCommit(started)
+            self._pending_actor_runs[(state.session.id, state.task.id)] = commit
+        error = None
+        cancelled = False
+        try:
+            await ctx.event_bus.emit(started)
+            if commit is not None:
+                commit.start_confirmed = True
+            async with ctx.steps.executions.task_guard(state.task.id, "observe"):
+                if mechanical:
+                    result = ObservationResult(verdict=Verdict(**options["verdict"]))
+                    state.extra["observe_decision"] = options
+                    apply_foreground_assessment(state, result, state.act_exit_reason)
+                    state = state.apply_patch({"observation": result, "verdict": result.verdict})
+                    decision = options["disposition"]
+                    finalize = not (state.task.status in {"FINISHED", "FAILED", "CANCELED"}
+                                    and state.task.status != decision["status"])
+                    if options.get("settled"):
+                        finalize = False
+                        state.run_outcome = RunOutcome(
+                            kind=RunOutcomeKind.COMPLETED, verdict=result.verdict.task_outcome,
+                            outputs=state.task.outputs, observe_id=options["observe_id"],
+                            observe_disposition=decision, observe_report_pending=True)
+                else:
+                    if foreground:
+                        state, observed = await ctx.steps._execute_step(ObserveStep(), state, ctx, foreground=True)
+                    else:
+                        observed = await ObserveStep().execute(state, ctx)
+                        state = state.apply_patch(observed.state_patch)
+                        for event in observed.events:
+                            await emit_effect(state, ctx, event)
+                    finalize = observed.next_step == "finalize"
+                if finalize:
+                    if foreground:
+                        state.origin = EventOrigin.LOOP_FINALIZE
+                        state, finalized = await ctx.steps._execute_step(FinalizeStep(), state, ctx, foreground=True)
+                    else:
+                        finalized = await FinalizeStep().execute(state, ctx)
+                        state = state.apply_patch(finalized.state_patch)
+                        for event in finalized.events:
+                            await emit_effect(state, ctx, event)
+        except HitlPark as park:
+            state.run_outcome = RunOutcome(kind=RunOutcomeKind.AWAITING_HUMAN, hitl_id=park.hitl_id)
+        except asyncio.CancelledError:
+            cancelled = True
+            if not foreground:
+                raise
+            state.run_outcome = RunOutcome(kind=RunOutcomeKind.CANCELED)
+        except Exception as exc:
+            error = exc
+            raise
+        finally:
+            finished = make_event(state, EventType.RUN_FINISHED, {
+                "outcome": ("canceled" if cancelled else "interrupted" if error else
+                            state.run_outcome.kind.value if foreground and state.run_outcome else "completed"),
+                "final_status": state.task.status, "will_retry": False,
+                "total_events": state.sequence_counter, "total_turns": len(state.transcript),
+                "error": str(error) if error else None,
+                "error_type": type(error).__name__ if error else None,
+            }, origin=EventOrigin.RUNTIME if foreground else state.origin)
+            if commit is not None:
+                commit.finished = finished
+            try:
+                # As on the ordinary actor path, isolation retains both original
+                # envelopes. Confirmation must publish Started before Finished.
+                if commit is None or not isinstance(error, PersistenceUnavailableError):
+                    await ctx.event_bus.emit(finished)
+                    if commit is not None:
+                        self._pending_actor_runs.pop((state.session.id, state.task.id), None)
+            finally:
+                if tokens is not None:
+                    self._deregister_run_tokens(state.session.id, state.task.id, expected=tokens)
+        outcome = state.run_outcome
+        if foreground:
+            return outcome
+        if outcome is not None:
+            if not options.get("settled"):
+                status = await ctx.task_manager.apply_run_outcome(state.task.id, outcome)
+                await ctx.task_manager._settle(state.task.id, status)
+            elif outcome.observe_disposition and outcome.observe_disposition["status"] == "PENDING":
+                await ctx.task_manager._settle(state.task.id, "PENDING")
+            await ctx.task_manager.finish_observe(outcome, state.task.id)
+        if mechanical:
+            await ctx.steps.start_durable("observe", state, ctx, options={
+                **options, "boundary": options["report_boundary"], "judge_task": False, "settled": True})
+
+    async def _repair_observe_handoffs(self, tm):
+        """Restore stopped opening/observe work on a live owner from the same facts as cold load."""
+        sid = tm.session.id
+        view = await rebuild_view(self.event_store, sid)
+        await tm.reconcile_handoffs(self.hitl_registry.list_pending(session_id=sid), view.tasks)
+        registry = self._step_executions.get(sid)
+        pending = {key: info for key, info in view.pending_observe.items()
+                   if not (registry and (registry.observe_is_live(info["observe_id"])
+                           if info.get("observe_id") else
+                           registry.pending_run_id(info.get("task_id", key), "observe")))
+                   and not tm._dispatch_is_live(info.get("task_id", key))}
+        prepared = self._prepared_recoveries.get(sid)
+        if pending:
+            if prepared is None:
+                self._prepared_recoveries[sid] = (tm, view.tasks_total, pending)
+            else:
+                prepared[2].update(pending)
 
     async def _recover_in_existing_tm(
         self,
@@ -2837,6 +3070,12 @@ class CtxWeftRuntime:
 
         冷装填 owner 的补写、依赖清理和 recap 在输入交付后、首次 drain 前完成。
         """
+        from ctx_weft.core.loop.steps.observe import blocks_actor_recovery
+        tm.set_recovery_pending(True)
+        await self.hitl.confirm_opens(tm.session.id)
+        await self.hitl.confirm_resolutions(tm.session.id)
+        await tm.reconcile_stopped_tasks()
+        await self._repair_observe_handoffs(tm)
         if resumed_task_id is not None:
             if tm.get_task(resumed_task_id) is None:
                 sid = tm.session.id if tm.session is not None else "?"
@@ -2859,12 +3098,20 @@ class CtxWeftRuntime:
             r.task_id for r in self.hitl_registry.list_pending(session_id=session.id)
             if r.task_id
         }
+        prepared = self._prepared_recoveries.get(session.id)
+        if prepared is not None:
+            parked.update(info.get("task_id", key) for key, info in prepared[2].items()
+                          if blocks_actor_recovery(info))
+        registry = self._step_executions.get(session.id)
+        if registry is not None:
+            parked.update(registry.recovering_observe_tasks)
         requeued = tm.requeue_resumable(parked)
         if requeued:
             logger.info("Recovery: session %s resumed in place on its live TaskManager: %s",
                         session.id, requeued)
         await self._activate_prepared_tasks_locked(
             tm, skip_hitl_id=getattr(user_reply, "id", "") if user_reply is not None else "")
+        tm.set_recovery_pending(False)
         self._register_and_drain(session, tm)
 
     async def _resume_in_existing_tm(
@@ -2899,8 +3146,10 @@ class CtxWeftRuntime:
         await self._inject_resolved_user_turns(session, tm, skip_hitl_id=hitl_id)
         await tm.resume_task(resumed_task_id, hitl_id=hitl_id)
         await self._activate_prepared_tasks_locked(tm, skip_hitl_id=hitl_id)
+        tm.set_recovery_pending(False)
         self._register_and_drain(session, tm)
 
+    @_session_command(load_session="skip", allow_missing_session=True)
     async def compact_agent(
         self,
         agent_id: str,
@@ -2932,6 +3181,7 @@ class CtxWeftRuntime:
         honoured mid-compact — ``CompactStep`` does not poll the pause token — but the
         idle-guard still prevents a new compact/drain from starting on this session.
         """
+        self._require_initialized()
         import dataclasses as _dc
 
         from ctx_weft.core.control.converters import session_from_projection
@@ -3094,7 +3344,161 @@ class CtxWeftRuntime:
         finally:
             self._busy_sessions.discard(session_id)
 
-    def list_pending_hitl(
+    # ── Read-only host queries ──────────────────────────────────────────────
+
+    def _query_result(self, data, source, loaded, position=None):
+        return QueryResult(deepcopy(data), source, loaded, now_utc(), position)
+
+    async def _query_view(self, session_id):
+        head = await self.event_store.committed_head(session_id)
+        view = await rebuild_view(self.event_store, session_id, through_position=head)
+        if session_id not in view.sessions and session_id not in self._task_managers:
+            raise SessionNotFound(session_id)
+        return view, head
+
+    async def _historical_task_view(self, session_id, *, through_position=None):
+        # TaskReviewing can create a successor under the predecessor's task_id.
+        # Replay task facts across the partition, independently of pruned snapshots.
+        from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
+        head = (await self.event_store.committed_head(session_id)
+                if through_position is None else through_position)
+        types = tuple({EventType.TASK_CREATED, EventType.TASK_FINALIZED,
+                       EventType.RECOGNIZE_INTENT_TOOL_CALL, EventType.OBSERVE_REQUESTED,
+                       EventType.HITL_OPENED, *TASK_STATUS_BY_EVENT})
+        rows = await self.event_store.read_range(
+            session_id, through_position=head, include_types=types)
+        return reduce_events([row.event for row in rows], session_id)
+
+    async def get_session(self, session_id: str) -> QueryResult[SessionDetail]:
+        self._require_initialized()
+        async with self._session_guard(session_id):
+            tm = self._task_managers.get(session_id)
+            loaded = tm is not None and tm.session is not None
+            if loaded:
+                session = self._task_managers[session_id].session
+                position = None
+            else:
+                view, position = await self._query_view(session_id)
+                session = view.sessions[session_id]
+            detail = SessionDetail(
+                session.id, session.root_agent_id or "", session.status,
+                session.goal, session.token_budget, session.created_at,
+            )
+            return self._query_result(detail, "memory" if loaded else "events", loaded, position)
+
+    async def get_task(self, session_id: str, task_id: str) -> QueryResult[TaskDetail]:
+        self._require_initialized()
+        async with self._session_guard(session_id):
+            tm = self._task_managers.get(session_id)
+            task = tm.get_task(task_id) if tm is not None else None
+            if task is not None and task.details_complete:
+                return self._query_result(_task_detail(task), "memory", True)
+            head = await self.event_store.committed_head(session_id)
+            task = await read_task_view(self.event_store, session_id, task_id, through_position=head)
+            if task is None:
+                created = await self.event_store.read_last_of_type(session_id, EventType.SESSION_CREATED)
+                if tm is None and (created is None or created.position > head):
+                    raise SessionNotFound(session_id)
+                raise TaskNotFound(task_id)
+            return self._query_result(_task_detail(task), "events", False, head)
+
+    async def list_tasks(
+        self, session_id: str, *, agent_id: str | None = None,
+        statuses: list[str] | None = None, limit: int = 100,
+    ) -> list[QueryResult[TaskDetail]]:
+        self._require_initialized()
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        async with self._session_guard(session_id):
+            _, head = await self._query_view(session_id)
+            view = await self._historical_task_view(session_id, through_position=head)
+            results = {tid: self._query_result(_task_detail(t), "events", False, head)
+                       for tid, t in view.tasks.items()}
+            if session_id in self._task_managers:
+                for task in self._task_managers[session_id].all_tasks():
+                    if task.details_complete:
+                        results[task.id] = self._query_result(_task_detail(task), "memory", True)
+            items = [r for r in results.values()
+                     if (agent_id is None or r.data.assigned_agent_id == agent_id)
+                     and (statuses is None or r.data.status in statuses)]
+            items.sort(key=lambda r: (r.data.created_at.isoformat() if r.data.created_at else "",
+                                      r.data.task_id), reverse=True)
+            return items[:limit]
+
+    async def get_agent(
+        self, agent_id: str, *, session_id: str | None = None,
+    ) -> QueryResult[AgentDetail]:
+        self._require_initialized()
+        rec = self._agent_lifecycle_manager.record_of(agent_id)
+        if session_id is None:
+            if rec is None:
+                raise AgentNotLoaded("session_id is required for a cold agent query")
+            session_id = rec.session_id
+        async with self._session_guard(session_id):
+            rec = self._agent_lifecycle_manager.record_of(agent_id)
+            if rec is not None and rec.session_id != session_id:
+                raise ValueError("agent_id does not belong to session_id")
+            if rec is not None and session_id in self._task_managers:
+                return self._query_result(self._get_agent_memory(agent_id), "memory", True)
+            view, head = await self._query_view(session_id)
+            agent = view.agents.get(agent_id)
+            if agent is None:
+                raise AgentNotFound(agent_id)
+            task = view.tasks.get(agent.current_task_id)
+            detail = AgentDetail(
+                agent_id=agent_id, session_id=session_id, template_id=agent.template_id,
+                parent_agent_id=agent.parent_agent_id, status=agent.status,
+                current_task_id=agent.current_task_id, spawn_depth=agent.spawn_depth,
+                current_task_status=task.status if task else None,
+            )
+            return self._query_result(detail, "events", False, head)
+
+    async def list_agents(
+        self, *, session_id: str | None = None, parent_agent_id: str | None = None,
+        include_terminated: bool = False,
+    ) -> list[QueryResult[AgentSummary]]:
+        self._require_initialized()
+        if session_id is None:
+            # No implicit cross-partition scan; the unscoped API lists loaded members.
+            return [self._query_result(a, "memory", True) for a in self._list_agents_memory(
+                parent_agent_id=parent_agent_id, include_terminated=include_terminated)
+                if self._session_is_loaded(
+                    self._agent_lifecycle_manager.record_of(a.agent_id).session_id)]
+        if self._session_is_loaded(session_id):
+            return [self._query_result(a, "memory", True) for a in self._list_agents_memory(
+                session_id=session_id, parent_agent_id=parent_agent_id,
+                include_terminated=include_terminated)]
+        view, head = await self._query_view(session_id)
+        results = {}
+        for aid, agent in view.agents.items():
+            results[aid] = self._query_result(AgentSummary(
+                agent_id=aid, parent_agent_id=agent.parent_agent_id, status=agent.status,
+                current_task_id=agent.current_task_id, spawn_depth=agent.spawn_depth,
+            ), "events", False, head)
+        if session_id in self._task_managers:
+            for agent in self._list_agents_memory(session_id=session_id, include_terminated=True):
+                results[agent.agent_id] = self._query_result(agent, "memory", True)
+        return [r for r in results.values()
+                if (parent_agent_id is None or r.data.parent_agent_id == parent_agent_id)
+                and (include_terminated or r.data.status != "terminated")]
+
+    async def list_pending_hitl(
+        self, *, session_id: str | None = None, agent_id: str | None = None,
+    ):
+        self._require_initialized()
+        if session_id is None and agent_id is not None:
+            rec = self._agent_lifecycle_manager.record_of(agent_id)
+            if rec is None:
+                raise AgentNotLoaded("session_id is required for a cold HITL query")
+            session_id = rec.session_id
+        if session_id is None or self._session_is_loaded(session_id):
+            return [self._query_result(r, "memory", True) for r in self._list_pending_hitl_memory(
+                session_id=session_id, agent_id=agent_id)]
+        view, head = await self._query_view(session_id)
+        return [self._query_result(r.to_view(), "events", False, head)
+                for r in view.hitl.pending.values() if agent_id is None or r.agent_id == agent_id]
+
+    def _list_pending_hitl_memory(
         self, *, session_id: str | None = None, agent_id: str | None = None,
     ) -> "list[HitlRequestView]":
         """未决 HITL 的**只读视图**列表。两个过滤都可选、可叠加，都不传 = 全部。
@@ -3114,7 +3518,7 @@ class CtxWeftRuntime:
             for r in self.hitl_registry.list_pending(session_id=session_id, agent_id=agent_id)
         ]
 
-    def list_agents(
+    def _list_agents_memory(
         self,
         *,
         session_id: str | None = None,
@@ -3159,7 +3563,7 @@ class CtxWeftRuntime:
             ))
         return out
 
-    def get_agent(self, agent_id: str) -> "AgentDetail":
+    def _get_agent_memory(self, agent_id: str) -> "AgentDetail":
         """该 agent 的详情视图（spec 5）。未登记的 `agent_id` 抛 `AgentNotFound`。
 
         `current_task_status`：经 `_task_managers[session_id].get_task(current_task_id)`
@@ -3189,6 +3593,7 @@ class CtxWeftRuntime:
             current_task_status=task_status,
         )
 
+    @_session_command(load_session="required", missing_session_as_agent=True)
     async def send_message(
         self,
         agent_id: str,
@@ -3239,6 +3644,7 @@ class CtxWeftRuntime:
         （见 `Task.port_key`）。注入分支沿用那个 task 自己的口：一条消息不该把一个正在
         跟某个对端往返的 task 改接到别处。
         """
+        self._require_initialized()
         reg = self._agent_lifecycle_manager
         rec = reg.record_of(agent_id)
         if rec is None:
@@ -3270,7 +3676,7 @@ class CtxWeftRuntime:
         # Input is installed before cold tasks or background model work can run.
         tm = self._task_managers.get(rec.session_id)
         if tm is not None and tm.is_alive():
-            lock = self._resume_locks.setdefault(rec.session_id, asyncio.Lock())
+            lock = self._session_guard(rec.session_id)
             async with lock:
                 await self._activate_prepared_tasks_locked(tm)
                 asyncio.create_task(tm.drain())
@@ -3283,6 +3689,7 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
             _storage_health=self.storage_health,
             _pending_observe=self._pending_observe_run_id,
+            _is_finished=self._task_is_settled,
         )
 
     async def _hydrate_agent_for_send(self, agent_id: str, session_id: str | None) -> None:
@@ -3393,6 +3800,12 @@ class CtxWeftRuntime:
             session_id=session.id, tenant_id=session.tenant_id,
             task_id=target.id, agent_id=agent_id,
         )
+        bubble = self._pause_bubble_of(agent_id, session_id=session_id)
+        if bubble is not None and bubble.delivery.preface == PREFACE_AFTER_INTERRUPT_EDIT:
+            from ctx_weft.core.loop.steps.act import _interrupt_edit_prefix
+            from ctx_weft.core.utils.content import content_with_prefix
+            content = content_with_prefix(content,
+                _interrupt_edit_prefix(await self._last_user_prompt(scope, pctx)))
         normalized, _event_jsonable = await self._validate_and_normalize_content(
             content, session.id, tenant_id=session.tenant_id,
         )
@@ -3431,7 +3844,7 @@ class CtxWeftRuntime:
         # 没有为这条消息新开的 run（消息只是写进对话，等 `_try_resume_parent` 自然唤醒），
         # 没有「这一轮」可言，也就没有提交点会来关窗（spec 2026-09-09 §6）。
         stale_hitl = next(
-            (v.id for v in self.list_pending_hitl(session_id=session_id)
+            (v.id for v in self._list_pending_hitl_memory(session_id=session_id)
              if v.agent_id == agent_id and not v.resolved),
             "",
         )
@@ -3577,6 +3990,7 @@ class CtxWeftRuntime:
 
     # ── 宿主侧任务派发（spec/09）────────────────────────────────────────────────
 
+    @_session_command(load_session="required")
     async def dispatch_task(
         self,
         session_id: str,
@@ -3653,6 +4067,7 @@ class CtxWeftRuntime:
         task 终态事件 + 那次 close 边界 recap，与会话级句柄同一条；拿不到的只是
         `LoopState`。要终局信息就读 task 投影或订 `handle.events()`。
         """
+        self._require_initialized()
         import dataclasses as _dc
 
         from ctx_weft.core.models.errors import SessionNotFound
@@ -3701,7 +4116,7 @@ class CtxWeftRuntime:
             # `keep_alive=True`：这个 TM 刚建好就要被塞新 task，不能让它对「没有可恢复
             # task」得出「空历史报错」或「立刻 finalize 收尾」两个结论（见
             # `recover_agent` docstring）。session 在事件日志里不存在 → 这里抛。
-            lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
+            lock = self._session_guard(session_id)
             async with lock:
                 await self._recover_session_locked(session_id, keep_alive=True)
             tm = self._task_managers.get(session_id)
@@ -3794,7 +4209,7 @@ class CtxWeftRuntime:
         # ── 10/11/12 ─────────────────────────────────────────────────────────
         # 路由的 current_task 记在**执行者**头上，不是血缘父——派生场景下 A 并不跑它。
         reg.set_current_task(exec_agent_id, task.id)
-        lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
+        lock = self._session_guard(session_id)
         async with lock:
             await self._activate_prepared_tasks_locked(tm)
             asyncio.create_task(tm.drain())
@@ -3806,9 +4221,13 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
             _storage_health=self.storage_health,
             _pending_observe=self._pending_observe_run_id,
+            _is_finished=self._task_is_settled,
         )
 
-    async def reply_to_hitl(self, reply: "HitlReply") -> "HitlRequestView | None":
+    @_session_command(load_session="required", skip_no_resume_reply=True)
+    async def reply_to_hitl(
+        self, reply: "HitlReply", *, session_id: str | None = None,
+    ) -> "HitlRequestView | None":
         """host 应答的唯一入口。返回已终局请求的视图；已终局再答 → `None`。
 
         **冷续跑由本返回值驱动，不挂总线订阅**（spec §7.3 订正）：该总线的 handler
@@ -3829,6 +4248,13 @@ class CtxWeftRuntime:
         未知 `hitl_id` 时 `pending` 为 `None`，这一步不拦（未知 id 的报错留给
         `HitlService.resolve` 的 `KeyError`，与改动前行为一致）。
         """
+        self._require_initialized()
+        pending = self.hitl_registry.get(reply.hitl_id)
+        sid = session_id or (pending.session_id if pending is not None else None)
+        if sid is None:
+            raise AgentNotLoaded("session_id is required for a cold HITL reply")
+        if pending is None or not isinstance(pending.delivery, NoResumeDelivery):
+            await self.rebuild_session(sid, strict=True)
         pending = self.hitl_registry.get(reply.hitl_id)
         if pending is not None and reply.agent_id != pending.agent_id:
             raise ValueError(
@@ -4006,28 +4432,18 @@ class CtxWeftRuntime:
         if agent_id:
             await self.recover_agent(agent_id, **recover_kwargs)
             return
-        lock = self._resume_locks.setdefault(session_id, asyncio.Lock())
+        lock = self._session_guard(session_id)
         async with lock:
             await self._recover_session_locked(session_id, **recover_kwargs)
 
     async def _hydrate_agent_for_cold_resume(self, req: PendingHitl) -> None:
-        """在真会触发 `recover_agent` 的那一刻，用 `req.session_id` 精确装填一次——
-        只有 `_resume_after_hitl` 的 `ToolResultDelivery`/`UserTurnDelivery` 分支调用
-        本方法，`NoResumeDelivery` 不碰它（见调用点注释）。
-
-        `record_of` 命中直接跳过：热路径（registry 已装填，常态）零额外开销，不必
-        为每次应答都白付一次 `_load_agents_of` 的 `rebuild_view` 折叠代价。只有真
-        遇到 miss（冷启动 / 这个 agent 所属的 session 还没被装填过）才解一次 tenant、
-        装填这一个 session。`recover_agent` 帮不上忙：它对 miss 直接抛
-        `AgentNotLoaded`（2026-09-21 起没有 sweep 兜底了），而调用方这里明明手握
-        `session_id`——这一步是这条冷应答路径的前提，不是优化。
-        """
+        """Ensure the answered session is fully materialized through rebuild_session."""
         if self._agent_lifecycle_manager.record_of(req.agent_id) is None:
             # tenant **就在手里**：`PendingHitl.tenant_id` 由开请求的调用方从其上下文传入
             # （`HitlService.open` 的契约：「本类自己不持有、也不去解」），冷折出来的那些
             # 则由 `fold_hitl_snapshot` 从 `Event.tenant_id` 填。所以这里不必再去日志反查
             # 一个已经随请求带过来的字段。
-            await self._load_agents_of(req.session_id, tenant_id=req.tenant_id)
+            await self.rebuild_session(req.session_id, tenant_id=req.tenant_id, strict=True)
 
     async def _inject_user_reply(
         self, req: "PendingHitl", session: Session, task_manager: TaskManager,
@@ -4185,7 +4601,7 @@ class CtxWeftRuntime:
 
         幂等：按记录 id 判重（视图里已有即跳过）；已被压缩 supersede 的记录不在视图里，但
         memory 的 id 契约是「已存在的 id（含 superseded）= no-op」，再写一次也不会复活它。
-        best-effort：单条失败只记日志，不拖垮整场恢复。
+        必需输入补写失败向上传播；装填和派发不得越过尚未恢复的输入。
 
         **只读快照切面之后的那一段**（`settled_memory_floor`），不读全会话。理由是那条
         「快照不得领先于 memory」的不变式反过来用：存在一张切面为 P 的可用快照 ⟹ position
@@ -4208,7 +4624,7 @@ class CtxWeftRuntime:
             settled_memory_floor,
         )
         from ctx_weft.core.utils.content import (
-            content_from_jsonable, downgrade_images_to_text, hydrate_event_content,
+            content_from_jsonable, hydrate_event_content,
             normalize_content,
         )
         from ctx_weft.protocols import MemoryEvent
@@ -4249,17 +4665,11 @@ class CtxWeftRuntime:
                     continue
                 content = content_from_jsonable(p.get("content") or "")
                 if not isinstance(content, str):
-                    try:
-                        content = await hydrate_event_content(
-                            content, event_blob_store=event_blob_store, ctx=pctx)
-                        if blob_store.can_externalize:
-                            content = await normalize_content(
-                                content, blob_store=blob_store, ctx=pctx)
-                    except Exception:
-                        logger.error(
-                            "_restore_appended_messages: content of %s could not be restored, "
-                            "downgrading images to text", memory_id, exc_info=True)
-                        content = downgrade_images_to_text(content)
+                    content = await hydrate_event_content(
+                        content, event_blob_store=event_blob_store, ctx=pctx)
+                    if blob_store.can_externalize:
+                        content = await normalize_content(
+                            content, blob_store=blob_store, ctx=pctx)
                 raw_ts = p.get("timestamp")
                 ts = datetime.fromisoformat(raw_ts) if raw_ts else ev.timestamp
                 await memory.ingest(MemoryEvent(
@@ -4278,6 +4688,7 @@ class CtxWeftRuntime:
                 logger.exception(
                     "_restore_appended_messages: failed to restore %s of task %s",
                     memory_id, task_id)
+                raise
 
     async def _ingest_user_turn(
         self, scope: "MemoryAddress", pctx: ProviderContext,
@@ -4379,6 +4790,7 @@ class CtxWeftRuntime:
                     or req.legacy_origin
                     or not isinstance(req.delivery, UserTurnDelivery)
                     or req.effective_decision is None
+                    or req.effective_decision.outcome == HITL_OUTCOME_CANCELLED
                     or not req.task_id
                     or req.task_id in running):
                 continue
@@ -4403,6 +4815,7 @@ class CtxWeftRuntime:
                 logger.exception(
                     "_inject_resolved_user_turns: 注入失败 session=%s hitl=%s",
                     session.id, req.id)
+                raise
 
     async def _injected_reply_ids(
         self, session: Session, task_id: str, agent_id: str,
@@ -4444,38 +4857,10 @@ class CtxWeftRuntime:
         ups = [r for r in view if r.role == "user"]
         return content_to_text(ups[-1].content) if ups else ""
 
-    async def _load_agents_of(
-        self, session_id: str, *, tenant_id: str | None = None,
-    ) -> "tuple[int, str]":
-        """据事件折出该 session 的 `AgentView` 并喂进 ALM，返回 `(装填条数, 实际用的 tenant)`。
-
-        ``tenant_id``：**调用方给什么就用什么**。不给则从本方法已经折出的 session 投影里
-        照搬（`SessionView.tenant_id` —— 每条 `Event` 都带 `tenant_id`，那就是事件流里记
-        下的真值）。这不是「core 去解 tenant」：投影本来就要折，取一个字段零成本，且它是
-        搬运而非推断。
-
-        **把用掉的 tenant 一并返回**，是为了让 `rebuild_session` 的另一个消费者
-        （`register_session`）与这里同源：否则它得自己再折一次投影，或者退回写死
-        ``"default"``——那就又出现「同一条会话在两处记着不同 tenant」的漂移。
-
-        `rebuild_session` 与（Task 13 起的）单 agent 恢复共用的唯一装填路径——「恢复是
-        喂进来、不是查回去」（spec §3.1），折叠逻辑只此一份，避免两边各写一套
-        随时间漂移。
-
-        **绝不抛**：`ALM.load()` 自己的纪律是「这条路抛一次就卡住整条恢复链」
-        （见其 docstring）——本方法与它同一口径。session 投影缺失（事件日志损坏这类恢复期
-        真实缺口）只影响 tenant 的取法，照常继续装填该 session 能装填的 agent，不中断
-        整条恢复链、也不让这一个 session 的缺口拖累其余 session。
-
-        **不再从投影取会话模板**（2026-09-30）：`ALM.load()` 从前收一个
-        `fallback_template_id`，装的就是这里读出来的 `sess_proj.template_id`，供 agent
-        自己的模板缺失时借用。那条借道已删——兜底归 `RuntimeConfig.fallback_template_ref`，
-        在装配解析模板那一刻生效。
-        """
-        from ctx_weft.core.control.reducers import rebuild_view
-
-        view = await rebuild_view(self.event_store, session_id)
-        return await self._load_agents_view(session_id, view, tenant_id=tenant_id)
+    async def _load_agents_of(self, session_id: str, *, tenant_id: str | None = None):
+        """Compatibility helper; all materialization is owned by rebuild_session."""
+        n = await self.rebuild_session(session_id, tenant_id=tenant_id, strict=True)
+        return n, self._task_managers[session_id].session.tenant_id
 
     async def _load_agents_view(
         self, session_id: str, view, *, tenant_id: str | None = None,
@@ -4502,37 +4887,12 @@ class CtxWeftRuntime:
         return loaded, tenant_id
 
     async def rebuild_hitl(self, session_id: str) -> int:
-        """从事件**装填**该 session 的 HITL 内存态，返回 pending 条数。
+        """Compatibility entry: materialize the complete session, then count pending HITL.
 
-        **恢复是「喂进来」，不是「查回去」**（spec §3.1）：装填之后 registry 的一切查询
-        只读内存，绝不回落去 scan 日志。装填的完备性因此是本路径的责任——漏装的请求
-        之后谁也看不见（`list_pending` 看不见 → 任务被误重排；`resolved_for_session`
-        看不见 → 人答过的会话永远醒不过来）。
-
-        幂等，可重复调用（`load_snapshot` 对已在内存的活 pending 不覆盖）。启动 `recover`
-        用它把 PAUSED 会话的内存态填回来；应答入口也可在内存为空时按需自愈（重启后
-        registry 还没被 recover 填上时，据事件即时装填，避免应答 KeyError；spec/07 §9）。
-
-        ── 代价：**O(delta)**，不再随会话长度增长（复审 I6 的那个阶数已经去掉）──
-        这个判断没有年龄上界（三个月前开出、至今未决的请求今天仍必须被看见），所以它一度
-        只能每次冷应答把该会话**全部** HITL 事件读回来折一遍——实测 800 次人工确认的会话
-        取回 1600 条、读放大 1600×、218ms，而交互式会话里每条用户消息都是一次 `UserTurn`
-        HITL，那个量只增不减。按类型收窄只把斜率降了一档，阶数还是线性的。
-
-        现在那份活账是**投影字段**（`RunStateView.hitl`），随快照 + 增量走。截尾这条路始终
-        是错的（任何按条数/时间的界都可能踩中那条很久以前开出、至今未决的请求：`list_pending`
-        看不见它 ⟹ `parked_task_ids` 少一个 ⟹ 任务在人还没回答时就被重排跑起来），而进投影
-        不是截尾——是让那份账**自己销账**（`HitlClosed` / `outcome=cancelled`），所以它有界
-        而不是被截断。
-
-        `_hydrate_snapshot_messages` 仍在这里：blob 里的决定 message 是**事件** blob 命名空间
-        下的引用，装填进 registry 之前必须转成记忆侧的（spec §12.3.3）。它只碰非纯文本内容,
-        纯文本零 IO。
-        """
-        from ctx_weft.core.control.reducers import rebuild_view
-
-        view = await rebuild_view(self.event_store, session_id)
-        return await self._load_hitl_view(session_id, view)
+        Never creates a separate partial registry or TaskManager."""
+        self._require_initialized()
+        await self.rebuild_session(session_id, strict=True)
+        return len(self.hitl_registry.list_pending(session_id=session_id))
 
     async def _load_hitl_view(self, session_id: str, view) -> int:
         """Shared loader, including blob hydration and active-pending protection."""
@@ -4715,6 +5075,26 @@ class CtxWeftRuntime:
             memory_blob_store=self.providers.get_memory_blob_store(),
         )
 
+    async def _task_is_settled(self, session_id: str, task_id: str) -> bool:
+        tm = self._task_managers.get(session_id)
+        task = tm.get_task(task_id) if tm is not None else None
+        if task is None:
+            view = await self._historical_task_view(session_id)
+            task = view.tasks.get(task_id)
+        if task is None or task.status not in TERMINAL_TASK_STATUSES:
+            return False
+        prepared = self._prepared_recoveries.get(session_id)
+        if prepared is not None and any(
+                info.get("task_id", key) == task_id for key, info in prepared[2].items()):
+            return False
+        if self._pending_observe_run_id(session_id, task_id) is not None:
+            return False
+        # An empty execution registry also describes cold or failed-to-relaunch
+        # recaps. Only durable Done discharges the recovery obligation.
+        view = await rebuild_view(self.event_store, session_id)
+        return not any(info.get("task_id", key) == task_id
+                       for key, info in view.pending_observe.items())
+
     def _pending_observe_run_id(self, session_id: str, task_id: str) -> str | None:
         registry = self._step_executions.get(session_id)
         return registry.pending_run_id(task_id, "observe") if registry else None
@@ -4812,15 +5192,22 @@ class CtxWeftRuntime:
         # 但若这一轮触发了 context recovery 的 `prepare` 重入，第二次装配会读到折叠后的
         # 结果，同一个 run 内上下文前后不一致（变小）。不是错误，代价是 cache 前缀打穿。
 
-        await self._event_bus.emit(make_event(state, EventType.RUN_STARTED, payload={
+        started = make_event(state, EventType.RUN_STARTED, payload={
             "run_id": run_id,
             "initial_step": initial_step,
-        }, origin=EventOrigin.RUNTIME))
+        }, origin=EventOrigin.RUNTIME)
+        key = (state.session.id, task.id)
+        commit = _ActorRunCommit(started)
+        self._pending_actor_runs[key] = commit
+        if loop_ctx.task_manager is not None:
+            loop_ctx.task_manager.bind_round_run(task.id, run_id)
         run_error: BaseException | None = None
         was_cancelled = False
         cancel_takes_effect = False
         cancel_source = ""
         try:
+            await self._event_bus.emit(started)
+            commit.start_confirmed = True
             async for outcome in driver.run(state, loop_ctx):
                 if outcome.state_patch:
                     state = state.apply_patch(outcome.state_patch)
@@ -4849,11 +5236,9 @@ class CtxWeftRuntime:
             logger.info("_run_loop: task %s parked on HITL", task.id)
         except asyncio.CancelledError:
             was_cancelled = True
-            # A1 守卫的 run 侧半边：熔断 trip 会**先**把 root 判 FAILED、**再**对在跑的
-            # root 发协作取消（内部清场手段），此时这次取消不该把已坐实的终态盖回
-            # CANCELED。本 run 不再写 task.status（Task 4：状态归 TM），故把「本来会不会
-            # 翻成 CANCELED」记成局部量给下面 RUN_CANCELED 的守卫用；task 侧的同一守卫
-            # 长在 TaskManager 的处置入口（终态已坐实 → 不应用 run 的结局）。
+            # Record cancellation of this execution, without changing task status.
+            # After RunFinished, TaskManager applies any durable threshold decision
+            # as FAILED rather than turning that root task into CANCELED.
             cancel_takes_effect = task.status not in TERMINAL_TASK_STATUSES and not task.switched_to_task_id
             # 取消来源（总账 A3 剩下的一条）：token 是本 runtime 的协作取消；否则是外部
             # asyncio 取消（进程 shutdown / `wait_for` 超时）。二者产生同一个
@@ -4866,6 +5251,12 @@ class CtxWeftRuntime:
             by_token = loop_ctx.cancel_token is not None and loop_ctx.cancel_token.is_cancelled
             cancel_source = "token" if by_token else "external"
             state = state.apply_patch({"run_outcome": RunOutcome(kind=RunOutcomeKind.CANCELED)})
+            if loop_ctx.task_manager is not None:
+                try:
+                    await loop_ctx.task_manager.retract_canceled_run(task.id, run_id)
+                except PersistenceUnavailableError as exc:
+                    run_error = exc
+                    raise
         except LLMOutageError as exc:
             # Task 2（loop 产出 RunOutcome，尚无消费者）：outage 硬编码 retriable=False——
             # **不得**转发 exc.retriable（LLMOutageError.retriable 恒为 True，见
@@ -4944,23 +5335,22 @@ class CtxWeftRuntime:
                 }, origin=EventOrigin.RUNTIME))
         finally:
             self._capability_cache.evict(agent.id)
-            # A1 守卫：只有这次取消真的会让 task 翻成 CANCELED 时才发 RUN_CANCELED。熔断
-            # trip 序列会先把 root 判 FAILED 再对在跑 root 发协作取消（_cancel_inflight）——
-            # 那是内部清场手段，task 已是 FAILED，照发会让 host/postgres 投影把写定的 FAILED
-            # 盖回 CANCELED。判据 cancel_takes_effect 在 except 分支里取，与 task 侧的同一
-            # 守卫（TaskManager 的处置入口）同源。TASK_CANCELED 不在这里发了（Task 4：task
-            # 状态事件只从 TaskManager 出）。RUN_FINISHED 不受此守卫约束，无论如何都发（关 SSE）。
+            canceled_event = None
+            # RunCanceled describes the execution, not the task's terminal outcome.
+            # Existing terminal tasks are sticky. A pending threshold failure is
+            # applied by TaskManager only after this RunFinished has committed.
             if was_cancelled and cancel_takes_effect:
                 # 取消来源标签（总账 A3）落在这里，不落进 RunOutcome/TaskCanceled：
                 # RUN_CANCELED 没有任何 reducer 分支，全仓只有测试查它「发没发」，
                 # 对无人消费的事件做纯增量不必顾虑 R5（CANCELED payload 不编造 reason）。
-                await self._event_bus.emit(make_event(state, EventType.RUN_CANCELED, payload={
+                canceled_event = make_event(state, EventType.RUN_CANCELED, payload={
                     "run_id": run_id, "source": cancel_source,
-                }, origin=EventOrigin.RUNTIME))
+                }, origin=EventOrigin.RUNTIME)
             # will_retry=True suppresses SSE close on the host side.
             # cancelled → False; retriable=False → TaskManager won't retry anyway.
             will_retry = (
                 run_error is not None
+                and not isinstance(run_error, PersistenceUnavailableError)
                 and task.retry_count < task.max_retries
                 and getattr(run_error, "retriable", True)
             )
@@ -4973,23 +5363,29 @@ class CtxWeftRuntime:
                 state.run_outcome.kind if state.run_outcome is not None
                 else RunOutcomeKind.COMPLETED
             )
-            # spec: event-commit——存储隔离后 finally 的收尾事件不再发：emit 要过
-            # 提交门，会再撞同一故障并把 PersistenceUnavailableError 抛出 finally、
-            # 掩掉真正的 run_error。会话状态由健康表承载，不缺这条事件。
-            if not isinstance(run_error, PersistenceUnavailableError):
-                await self._event_bus.emit(make_event(state, EventType.RUN_FINISHED, payload={
-                    "outcome": outcome_kind.value,
+            # Keep the original envelope until confirmed, including unknown receipts.
+            # Storage isolation delays publication; it does not close the run.
+            finish = make_event(state, EventType.RUN_FINISHED, payload={
+                "outcome": outcome_kind.value,
                 # `final_status` 已废弃，下个周期删除——host 应改读上面的 `outcome`
                 # （run 词表）。Task 4 起 run 不再写 task 状态，故这里只是**发 RUN_FINISHED
                 # 那一刻** task 的状态（多半仍是 ACTIVE）：真正的终态由随后 TaskManager 的
                 # 处置写定，靠它推 task 状态的 host 一定要改。
-                    "final_status": task.status,
-                    "will_retry": will_retry,
-                    "total_events": state.sequence_counter,
-                    "total_turns": len(state.transcript),
-                    "error": str(run_error) if run_error else None,
-                    "error_type": type(run_error).__name__ if run_error else None,
-                }, origin=EventOrigin.RUNTIME))
+                "final_status": task.status,
+                "will_retry": will_retry,
+                "total_events": state.sequence_counter,
+                "total_turns": len(state.transcript),
+                "error": str(run_error) if run_error else None,
+                "error_type": type(run_error).__name__ if run_error else None,
+            }, origin=EventOrigin.RUNTIME)
+            if isinstance(run_error, PersistenceUnavailableError):
+                finish.payload["outcome"] = RunOutcomeKind.INTERRUPTED.value
+            commit.finished = finish
+            if not isinstance(run_error, PersistenceUnavailableError):
+                if canceled_event is not None:
+                    await self._event_bus.emit(canceled_event)
+                await self._event_bus.emit(finish)
+                self._pending_actor_runs.pop(key, None)
 
         if run_error is not None:
             raise run_error
@@ -5057,6 +5453,7 @@ class CtxWeftRuntime:
             _state=state,
             _storage_health=self.storage_health,
             _pending_observe=self._pending_observe_run_id,
+            _is_finished=self._task_is_settled,
         )
         return state, handle
 
@@ -5096,6 +5493,25 @@ class _SessionTaskRunner:
         self._memory = memory
         self._task_manager = task_manager
         self._handle = handle
+
+    async def confirm_finished(self, task_id: str) -> None:
+        """Confirm the original actor start and finish without executing steps."""
+        key = (self._session.id, task_id)
+        await self._runtime.hitl.confirm_opens(self._session.id, task_id=task_id)
+        commit = self._runtime._pending_actor_runs.get(key)
+        if commit is not None:
+            if commit.finished is None:
+                raise RuntimeError(f"Actor run has not stopped: {commit.started.run_id}")
+            # A buffered emit is not a persistence receipt. Confirm the owning
+            # round before retrying the original finish, retaining it on failure.
+            bus = self._runtime._event_bus
+            if bus.is_run_provisional(task_id, commit.started.run_id):
+                await self._task_manager.commit_round(task_id)
+            if not commit.start_confirmed:
+                await bus.emit(commit.started)
+                commit.start_confirmed = True
+            await bus.emit(commit.finished)
+            self._runtime._pending_actor_runs.pop(key, None)
 
     # ── 阶段 1：装配 ─────────────────────────────────────────────────────────
 
@@ -5239,6 +5655,9 @@ class _SessionTaskRunner:
         if self._task_manager.is_cancelled():
             tokens.cancel.cancel()
         try:
+            if self._task_manager.is_task_tree_canceled(task_id):
+                tokens.cancel.cancel()
+                return RunOutcome(kind=RunOutcomeKind.CANCELED)
             s, _ = await self._runtime._execute_task(
                 session=self._session,
                 task=t,
@@ -5253,7 +5672,7 @@ class _SessionTaskRunner:
                 pause_token=tokens.pause,
             )
         finally:
-            self._runtime._deregister_run_tokens(self._session.id, task_id)
+            self._runtime._deregister_run_tokens(self._session.id, task_id, expected=tokens)
         if s is None:
             return None
         if self._handle is not None:

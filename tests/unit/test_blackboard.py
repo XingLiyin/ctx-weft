@@ -22,7 +22,6 @@ from ctx_weft.core.assembler.assembler import (
     ContextBlock,
     ContextRequest,
 )
-from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.blackboard import BlackboardSource
 from ctx_weft.core.loop.driver import StepDriver
 from ctx_weft.core.orchestrator.task.manager import TaskManager
@@ -36,6 +35,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     ProviderContext,
 )
+from tests.assembler_testkit import compile_prompt
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ async def test_blackboard_source_pulls_only_current_task_subs() -> None:
     assert len(blocks_b) == 1
     assert blocks_b[0].metadata["title"] == "Build A"
     assert blocks_b[0].metadata["outcome"] == "success"
-    assert "result-A" in blocks_b[0].content
+    assert "result-A" in blocks_b[0].value.content
 
     # task C 没订阅 → 看不到
     req_c, _ = _request_for("C", m)
@@ -231,13 +231,12 @@ async def test_composer_renders_subtask_results_with_title() -> None:
     # "Your sub-task results" section. Sub-task handles now come via extra["subtasks"]
     # (Task 1). This test verifies: (a) old blackboard rendering is GONE, and (b) the new
     # extra-based path still surfaces the sub-task list.
-    comp = DefaultComposer()
     task = Task(id="T", session_id="s1", status="ACTIVE",
                 title="Parent", description="do it", user_prompt="please")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     block = ContextBlock(
-        id="b1", source="blackboard:K1", kind="blackboard", target="messages",
-        content="Q1 sales: 100", priority=2, token_estimate=5,
+        id="b1", source="blackboard:K1", kind="blackboard",
+        value=SimpleNamespace(content="Q1 sales: 100"),
         metadata={"title": "Build report", "outcome": "success", "intent": "subtask"},
     )
 
@@ -245,8 +244,8 @@ async def test_composer_renders_subtask_results_with_title() -> None:
     req_no_extra = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
-    msgs = comp._build_observe_messages([block], req_no_extra)
-    text = msgs[-1].content
+    text = "\n".join(
+        str(message.content) for message in compile_prompt([block], req_no_extra).messages)
     assert "Your sub-task results (you may confirm / reopen these):" not in text, (
         "Phase 3: blackboard subtask blocks must not render as a subtask section"
     )
@@ -256,8 +255,8 @@ async def test_composer_renders_subtask_results_with_title() -> None:
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],        extra={"subtasks": [{"task_id": "K1", "title": "Build report", "outcome": "success"}]},
     )
-    msgs2 = comp._build_observe_messages([block], req_with_extra)
-    text2 = msgs2[-1].content
+    text2 = "\n".join(
+        str(message.content) for message in compile_prompt([block], req_with_extra).messages)
     assert "## Your sub-tasks" in text2 and "K1" in text2, (
         "Phase 3: sub-task handles must appear via the extra cue"
     )
@@ -270,23 +269,22 @@ async def test_composer_splits_subtask_and_predecessor_sections() -> None:
     # Phase 3 (2026-06-30): both blackboard observer sections (subtask + predecessor) are removed.
     # Neither "Your sub-task results" nor "Upstream task results" must appear, regardless of
     # what blackboard blocks are present. The judgment cue must still be there.
-    comp = DefaultComposer()
     task = Task(id="T", session_id="s1", status="ACTIVE", title="Parent")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     sub = ContextBlock(
-        id="b1", source="blackboard:K1", kind="blackboard", target="messages",
-        content="child output", priority=2, token_estimate=5,
+        id="b1", source="blackboard:K1", kind="blackboard",
+        value=SimpleNamespace(content="child output"),
         metadata={"title": "Child", "outcome": "success", "intent": "subtask"},
     )
     pred = ContextBlock(
-        id="b2", source="blackboard:P1", kind="blackboard", target="messages",
-        content="upstream output", priority=2, token_estimate=5,
+        id="b2", source="blackboard:P1", kind="blackboard",
+        value=SimpleNamespace(content="upstream output"),
         metadata={"title": "Upstream", "outcome": "success", "intent": "predecessor"},
     )
-    text = comp._build_observe_messages([sub, pred], req)[-1].content
+    text = "\n".join(str(message.content) for message in compile_prompt([sub, pred], req).messages)
     # Both old blackboard sections must be absent.
     assert "Your sub-task results" not in text, (
         "Phase 3: blackboard subtask section must not appear in observer prompt"
@@ -301,13 +299,12 @@ async def test_composer_splits_subtask_and_predecessor_sections() -> None:
 async def test_composer_no_related_results_when_empty() -> None:
     # Phase 3: "Your sub-task results" (old blackboard heading) never appears — it was removed.
     # The extra["subtasks"] section ("## Your sub-tasks") is also absent when there are none.
-    comp = DefaultComposer()
     task = Task(id="T", session_id="s1", status="ACTIVE", title="Parent")
     session = Session(id="s1", user_prompt="go", status="RUNNING")
     req = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
-    msgs = comp._build_observe_messages([], req)
+    msgs = compile_prompt([], req).messages
     joined = " ".join(m.content for m in msgs if isinstance(m.content, str))
     assert "Your sub-task results" not in joined   # Phase 3: old blackboard heading removed
     assert "## Your sub-tasks" not in joined        # no extra["subtasks"] → no cue section

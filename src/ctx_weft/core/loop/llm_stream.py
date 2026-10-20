@@ -248,6 +248,32 @@ def ensure_collected_stream(source: AsyncIterator[LLMChunk]) -> LLMStream:
     return source if isinstance(source, LLMStream) else CollectedLLMStream(source)
 
 
+async def stream_until_cancel(source, cancel_token):
+    """Close a request before propagating cancellation, including before first byte."""
+    stopped = asyncio.create_task(cancel_token.wait()) if cancel_token is not None else None
+    reader = None
+    try:
+        while True:
+            if cancel_token is not None:
+                cancel_token.raise_if_cancelled()
+            reader = asyncio.ensure_future(source.__anext__())
+            await asyncio.wait({reader, stopped} if stopped is not None else {reader},
+                               return_when=asyncio.FIRST_COMPLETED)
+            if cancel_token is not None:
+                cancel_token.raise_if_cancelled()
+            try:
+                yield reader.result()
+            except StopAsyncIteration:
+                return
+    finally:
+        pending = [t for t in (reader, stopped) if t is not None]
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        await source.aclose()
+
+
 class DelegatingLLMStream:
     """Gateway lifecycle/retry wrapper. It owns no body or reasoning buffers."""
 
@@ -257,6 +283,7 @@ class DelegatingLLMStream:
         self._finished = False
         self._closed = False
         self._read_task: asyncio.Task[Any] | None = None
+        self.request_started = False
 
     def bind(self, source: AsyncIterator[LLMChunk]) -> LLMStream:
         self._inner = ensure_collected_stream(source)

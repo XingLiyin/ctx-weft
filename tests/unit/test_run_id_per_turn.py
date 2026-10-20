@@ -64,6 +64,7 @@ state 传递方式完全没在本 task 的改动清单里）。
 from __future__ import annotations
 
 import collections
+import asyncio
 import inspect
 
 import pytest
@@ -168,14 +169,16 @@ class _TurnRouterLLM(MockLLMAdapter):
             })])
         elif "control__report_observation" in names:
             response = MockResponse(tool_calls=[self._tc("control__report_observation", {
-                "act_recap": "said hi, awaiting the user's next message", "task_summary": "",
+                "act_recap": "said hi, awaiting the user's next message",
+                "task_status": "success" if self._act_calls > 1 else "continue",
+                "task_summary": "done" if self._act_calls > 1 else "",
             })])
         elif "control__finish_task" in names:
             self._act_calls += 1
             if self._act_calls == 1:
                 response = MockResponse(text="Hi! Anything else?")
             else:
-                response = MockResponse(tool_calls=[self._tc("control__finish_task", {})])
+                response = MockResponse(text="done", tool_calls=[self._tc("control__finish_task", {})])
         else:
             response = MockResponse(text="")
         return self._stream(response, request)
@@ -196,14 +199,19 @@ async def _two_turn_session():
 
     rt.event_bus.subscribe(None, recorder)
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))
-    state = await handle.wait_for_finish(timeout=5.0)
+    async with asyncio.timeout(5):
+        while handle._state is None:
+            await asyncio.sleep(0.01)
+    state = handle._state
     assert state is not None and state.task.status == "AWAITING_HUMAN", (
         f"第一轮应以纯文本冷 park 收尾，实际 status={state.task.status if state else None}"
     )
 
+    await rt.initialize()
     h2 = await rt.send_message(handle.agent_id, "second turn")
     assert h2.task_id == handle.task_id, (
         "第一轮以 AWAITING_HUMAN（非终态）收尾，send_message 应注入同一个 task，"

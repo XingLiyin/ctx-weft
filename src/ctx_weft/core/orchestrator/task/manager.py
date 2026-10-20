@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.models.discriminators import CancelReason, InterruptReason, TaskErrorCode
 from ctx_weft.core.models.status import PARKED_TASK_STATUSES, TERMINAL_TASK_STATUSES
-from ctx_weft.core.utils.event import emit_event
+from ctx_weft.core.utils.event import new_event
 from ctx_weft.core.orchestrator.task.failure_threshold import plan_threshold_trip
 from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
 from ctx_weft.core.models.errors import crash_error_code, crash_run_outcome
@@ -33,7 +33,7 @@ from ctx_weft.core.models.status import TaskStatus
 from ctx_weft.core.models.task import PORT_MAIN, CompactTaskSettings, MetadataFillerTaskSettings, NormalTaskSettings, Task
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols.events import PersistenceUnavailableError
-from ctx_weft.protocols.events import EventOrigin, EventType
+from ctx_weft.protocols.events import Event, EventOrigin, EventType
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -104,6 +104,8 @@ class TaskManager:
         self._children_of: dict[str, set[str]] = {}  # parent_task_id → set[child_task_ids]
         self._runner: TaskRunner | None = None
         self._running_tasks: set[str] = set()
+        # Actor/settlement handles, not cancellation state: failed commits may leave a slot behind.
+        self._dispatch_tasks: dict[str, asyncio.Task] = {}
         # 派发后登记的「真实执行 agent id」（task_id → binding.agent_id）——
         # 同 agent 串行判定对在跑任务用真值，只有队列候选才走 effective_agent_id 预测。
         self._running_agents: dict[str, str] = {}
@@ -114,6 +116,9 @@ class TaskManager:
         self._lock = asyncio.Lock()
         self._session: Session | None = None  # 注入后供 failure_counter 维护使用
         self._event_bus: "EventBus | None" = event_bus
+        # Original event envelopes, retained only while submission/receipt is pending.
+        self._pending_emissions = {}
+        self._pending_batches = {}
         self._background_asyncio_tasks: set[asyncio.Task] = set()
         self._session_done_waiter: asyncio.Task | None = None
         #: 一次性接线的 7 个回调（见 hooks.py）。整体替换，不逐字段合并。
@@ -121,6 +126,9 @@ class TaskManager:
         # spec: event-commit：会话存储健康检查（runtime 注入；None = 无健康面）。
         # drain 据此跳过隔离会话的派发——存储不可用时不再开新副作用。
         self._unhealthy_check = None
+        # Recovery may enqueue stopped tasks while required input is still being
+        # restored. Existing producers can finish; new dispatch must wait.
+        self._recovery_pending = False
         # 归属权谓词：runtime 注入，返回本 TM 是否仍是该 session 的当前 owner。
         # None = 不受管（永远视为 current，保持旧行为）。session 的 TM 是单例，活 owner
         # 不会被顶替；只有被逐出（forget/purge）之后才返回 False → 迟到的收尾变 no-op
@@ -131,6 +139,8 @@ class TaskManager:
         # ── 熔断真终结（failure threshold trip）状态 ──────────────────────────────
         # 幂等闩：trip 后在途任务再失败会重进 FAILED 分支，没有它会重复清场 + 重复发事件。
         self._threshold_tripped: bool = False
+        self._pending_threshold_roots: set[str] = set()
+        self._threshold_commit: asyncio.Future | None = None
         # spec: task-handoff——永久阻塞扫描的重入闩：处置里的 on_task_finished 会再进
         # 扫描入口，闩住后由外层不动点循环统一覆盖。
         self._in_blocked_dispose: bool = False
@@ -158,6 +168,13 @@ class TaskManager:
 
     def set_runner(self, runner: TaskRunner) -> None:
         self._runner = runner
+
+    def set_recovery_pending(self, pending: bool) -> None:
+        self._recovery_pending = pending
+
+    @property
+    def recovery_pending(self) -> bool:
+        return self._recovery_pending
 
     def set_hooks(self, hooks: TaskManagerHooks) -> None:
         """一次性装好全部回调。**整体替换**，不逐字段合并（见 TaskManagerHooks）。"""
@@ -439,9 +456,8 @@ class TaskManager:
         `_run_task` 的收尾兜底（见那里——失败、outage 耗尽、装配炸掉一律提交，
         只有用户主动中止才丢弃）。
 
-        补投之后调 `commit_round` 钩子：先把这一轮里待终局的 HITL 答复终局
-        （`HitlResolved`），再把暂存的 memory 写入按序落盘——**先有终局事实，答复才进
-        memory**。每一个提交点都经过这里，所以谁提交都不会漏掉那两步。
+        补投前把 HitlResolved 加入同一消息批次；确认后调 `commit_round` 钩子发布
+        claim 状态并按序写入暂存 memory。每个提交点都遵守「事实先确认、记忆后落盘」。
         """
         snap = self._rounds.get(task_id)
         if snap is None:
@@ -454,6 +470,8 @@ class TaskManager:
         # 重试的幂等性：事件补投用 `events_flushed` 标记跳过；钩子里的两步本身幂等——
         # 已终局的 HITL 再 commit 是 no-op，暂存记录都带 id、重复 ingest 是 no-op。
         if not snap.events_flushed:
+            if self._hooks.prepare_round_commit is not None:
+                await self._hooks.prepare_round_commit(task_id)
             # `ROUND_COMMITTED` **先于**补投，且**不带 task_id**（那道闸按 task_id 定，带上
             # 就会被自己挡住）。顺序是给 host 看的：它据此把攒着的用户消息帧 flush 出去，
             # 那一帧必须排在这一轮的 task/run 帧**之前**——用户先说话，agent 才开跑。
@@ -464,9 +482,9 @@ class TaskManager:
             if bus is not None:
                 await bus.commit_provisional(task_id)
             snap.events_flushed = True
-        # **排在补投之后**：`HitlResolved` 不能落在一个下游还没建键的 task 上（窗口里
-        # 攒着的 `TASK_*` / `RUN_STARTED` 得先出去）。**不吞异常**：钩子失败意味着终局
-        # 事实或 memory 没落定，这一轮不算提交完。
+        # The same confirmed batch contains the user input and HitlResolved.
+        # Only now publish claim state and flush staged memory. Failure retains
+        # the round for confirmation/retry without retracting committed input.
         if self._hooks.commit_round is not None:
             await self._hooks.commit_round(task_id, list(snap.staged_memory))
         self._rounds.pop(task_id, None)
@@ -503,6 +521,45 @@ class TaskManager:
         if bus is not None:
             bus.discard_provisional(task_id)
 
+    def _round_commit_started(self, task_id: str) -> bool:
+        snap = self._rounds.get(task_id)
+        pending = getattr(self._event_bus, "has_pending_commit", None)
+        return bool(snap is not None and (snap.events_flushed or pending is not None and pending(task_id)))
+
+    def bind_round_run(self, task_id: str, run_id: str, *, starts_run: bool = True) -> None:
+        """Bind the producer; only a new run's start is retractable with the round."""
+        snap = self._rounds.get(task_id)
+        if snap is not None:
+            snap.run_id = run_id
+            snap.run_started_here = starts_run
+            if self._event_bus is not None:
+                self._event_bus.bind_provisional_run(task_id, run_id)
+
+    async def retract_canceled_run(self, task_id: str, run_id: str) -> None:
+        """Keep a new run buffered through unwind; close a hot reply's window first."""
+        snap = self._rounds.get(task_id)
+        if (not self._cancelled or self._threshold_tripped
+                or snap is None or self._round_commit_started(task_id)):
+            return
+        if snap.run_id == run_id and snap.run_started_here:
+            raise RoundDiscarded(task_id)
+        # The run started before this reply. Its finish must survive retraction.
+        await self.abandon_round(task_id)
+
+    def begin_cancel(self) -> None:
+        """Stop dispatch before signaling executions or retracting their rounds."""
+        self._cancelled = True
+        for timer in list(self._autonomous_requeue_timers.values()):
+            timer.cancel()
+        self._autonomous_requeue_timers.clear()
+
+    async def wait_for_round_dispatches(self) -> None:
+        """Never remove a round beneath its producer's final event writes."""
+        executions = [self._dispatch_tasks[tid] for tid in self.open_round_task_ids
+                      if self._dispatch_is_live(tid)]
+        for execution in executions:
+            await asyncio.shield(execution)
+
     async def abandon_round(self, task_id: str) -> None:
         """只撤「这一轮」本身，**不动 task 与 run**：热应答被暂停时用（spec 2026-09-09）。
 
@@ -518,6 +575,9 @@ class TaskManager:
         之后调用方抛 `HitlPark`，task 的状态由 `apply_run_outcome` 照常落盘。
         """
         if task_id not in self._rounds:
+            return
+        if self._round_commit_started(task_id):
+            await self.commit_round(task_id)
             return
         if self._hooks.revert_round is not None:
             try:
@@ -561,6 +621,11 @@ class TaskManager:
         """
         snap = self._rounds.get(task_id)
         if snap is None:
+            return
+
+        if self._round_commit_started(task_id):
+            # An uncertain commit cannot be rolled back as an unaccepted turn.
+            await self.commit_round(task_id)
             return
 
         # ① TM 够不到的那部分
@@ -681,7 +746,7 @@ class TaskManager:
             staged = [entry for entry in staged if entry[0].id == owner.switched_to_task_id]
         if not staged:
             return
-        if self._pause_abandon or self._cancelled:
+        if self._pause_abandon or self._cancelled or self.is_task_tree_canceled(task_id):
             # pause 弃子窗口 / 硬取消（含熔断 trip 封闸）：本轮 staged 的子任务直接丢弃
             # （push 时才发 TASK_CREATED，无投影残留），防止清队后又有漏网新任务入队被派发——
             # _cancelled 分支专堵在途 run 收尾迟到的 staged 子任务变成新的搁浅任务。
@@ -772,11 +837,10 @@ class TaskManager:
         **`max_concurrent <= 0` 仍是总闸**：一个都不派，交互 task 也不例外。这条既有
         语义刻意保留——它是「这个 session 暂不派发」的表达方式，被多处依赖。
         """
+        if self._cancelled or self._recovery_pending:
+            return
         if self._runner is None:
             raise RuntimeError("No task runner registered")
-
-        if self._cancelled:
-            return
 
         while True:
             # 被同一 session 上更新的 TM 顶替（recover_agent 覆盖了 _task_managers 映射）→
@@ -785,6 +849,8 @@ class TaskManager:
             if self._hooks.is_current is not None and not self._hooks.is_current():
                 return
             async with self._lock:
+                if self._recovery_pending:
+                    return
                 if self._max_concurrent <= 0:
                     break       # 总闸（见 docstring）：一个都不派，交互 task 也不例外
                 busy_agents = {
@@ -799,6 +865,8 @@ class TaskManager:
                 running_count = len(self._running_tasks)
                 entry = self._queue.pop(
                     skip=lambda e: (
+                        self.is_task_tree_canceled(e.task_id)
+                        or
                         self._effective_agent(self._tasks.get(e.task_id)) in busy_agents
                         or self._session_unhealthy(e.task_id)
                         or (not self._task_unattended(e.task_id)
@@ -813,11 +881,38 @@ class TaskManager:
                     break
                 self._running_tasks.add(entry.task_id)
 
-            asyncio.create_task(self._run_task(entry.task_id))
+            self._dispatch_tasks[entry.task_id] = asyncio.create_task(self._run_task(entry.task_id))
 
     async def _run_task(self, task_id: str) -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        self._dispatch_tasks[task_id] = current
+        try:
+            await self._run_task_body(task_id)
+        except PersistenceUnavailableError:
+            logger.error("Task %s halted: session storage unavailable", task_id)
+        finally:
+            if self._dispatch_tasks.get(task_id) is current:
+                self._dispatch_tasks.pop(task_id, None)
+
+    def _dispatch_is_live(self, task_id: str) -> bool:
+        execution = self._dispatch_tasks.get(task_id)
+        return execution is not None and not execution.done()
+
+    async def _finish_canceled_dispatch(self, task_id: str) -> None:
+        if not await self._commit_round_or_halt(task_id):
+            return
+        async with self._lock:
+            task = self._tasks[task_id]
+            await self._commit_task_cancellation(task, {"reason": self._task_tree_cancel_reason(task_id)})
+        await self._settle(task_id, task.status)
+
+    async def _run_task_body(self, task_id: str) -> None:
         assert self._runner is not None
         task = self._tasks.get(task_id)
+        if task is not None and self.is_task_tree_canceled(task_id):
+            await self._finish_canceled_dispatch(task_id)
+            return
         if task is not None:
             task.status = "ACTIVE"
             task.actor_done = False
@@ -839,6 +934,9 @@ class TaskManager:
             logger.error("Task %s halted: session storage unavailable", task_id)
             return
         except Exception as e:
+            if self.is_task_tree_canceled(task_id):
+                await self._finish_canceled_dispatch(task_id)
+                return
             logger.exception("Task %s assembly failed: %s", task_id, e)
             # 装配就炸了也算数（同下方收尾兜底的理由）：先提交，再发失败事件。
             if not await self._commit_round_or_halt(task_id):
@@ -847,9 +945,18 @@ class TaskManager:
                 task_id, error=str(e), exc=e, reason=InterruptReason.ASSEMBLY_FAILURE,
             )
             return
+        if self.is_task_tree_canceled(task_id):
+            await self._finish_canceled_dispatch(task_id)
+            return
         if binding is None:
             # task 已不存在（装配空转）：镜像旧行为（runner 首行 get_task None 即返回）
             await self.on_task_finished(task_id, status="FINISHED")
+            return
+
+        if task_id in self._pending_threshold_roots:
+            # Trip occurred during assembly; no RunStarted exists for this attempt.
+            await self._fail_threshold_root(task_id)
+            await self.on_task_finished(task_id, status="FAILED")
             return
 
         # 回填「真正用于执行的 agent id」+ 真实启动时刻；TASK_STARTED 由 TM 发，
@@ -909,12 +1016,13 @@ class TaskManager:
             #
             # 位置要在 `apply_run_outcome` **之前**：那一句会发 task 状态事件，得先让
             # 窗口里攒的 `TASK_CREATED` 出去，不然状态事件会先于创建事件落盘。
-            if not await self._commit_round_or_halt(task_id):
+            if not await self._commit_round_or_halt(task_id, run_id=binding.run_id):
                 return
             status = await self.apply_run_outcome(task_id, outcome)
             # runner 正常跑完才把本轮 spawn 的子任务入队（“一轮跑完之后 push”）
             await self._flush_staged(task_id)
             await self._settle(task_id, status)
+            await self.finish_observe(outcome, task_id)
             # **收尾的最后一步**：这次停下来等的问题若已经有答复，说明那条应答落在了本段
             # 收尾里、它的重排被「还在跑」挡掉了。槽位此刻已经释放，补做即可。
             if outcome.kind is RunOutcomeKind.AWAITING_HUMAN:
@@ -930,7 +1038,7 @@ class TaskManager:
             else:
                 logger.exception("Task %s failed: %s", task_id, e)
             # 同上：崩溃也算数，先提交再发终态事件。
-            if not await self._commit_round_or_halt(task_id):
+            if not await self._commit_round_or_halt(task_id, run_id=binding.run_id):
                 return
             # 崩溃入口：结局的构造在 `crash_run_outcome` 一处（retriable 的取法是崩溃
             # 专用的，与 outage 支硬编码的 False 不同源——契约见那个工厂的 docstring）。
@@ -975,7 +1083,7 @@ class TaskManager:
         await self.resume_task(task_id, hitl_id=hitl_id)
         await self.drain()
 
-    async def _commit_round_or_halt(self, task_id: str) -> bool:
+    async def _commit_round_or_halt(self, task_id: str, *, run_id: str | None = None) -> bool:
         """`_run_task` 的收尾兜底提交。失败 → 记日志、返回 False，调用方就地停住。
 
         与 `PersistenceUnavailableError` 两个既有分支同一处置：不处置 task（状态事件
@@ -987,6 +1095,9 @@ class TaskManager:
         里发生，同级的 `except PersistenceUnavailableError` 接不住，异常逃出 `_run_task`，
         `_running_tasks` 不清理，agent 在进程内一直显示忙。
         """
+        snapshot = self._rounds.get(task_id)
+        if run_id and snapshot is not None and snapshot.run_id != run_id:
+            return True  # A reply already opened the next input's independent window.
         try:
             await self.commit_round(task_id)
         except Exception:
@@ -1004,20 +1115,69 @@ class TaskManager:
         retry_count、发事件。返回落定的状态，供调用方选出口。公开是因为`run_single_task`
         那条 compat 路径（没有队列、不经 `_run_task`）也要消费同一份结局。
         """
-        task = self._tasks.get(task_id)
-        if (task is not None and outcome.kind is not RunOutcomeKind.COMPLETED
-                and task.status in _TERMINAL_STATUSES):
-            # 终态守卫（见 _TERMINAL_STATUSES）：熔断 trip 先把 root 判 FAILED、再对在跑
-            # 的 root 发协作取消，那次取消的 CANCELED 不得盖回已写定的 FAILED。run 侧的
-            # 同一守卫是 `_run_loop` 的 cancel_takes_effect（它据此决定发不发 RUN_CANCELED）。
-            return task.status
-        if task is not None and task.switched_to_task_id:
-            return task.status  # A replaced run cannot overwrite its review or final verdict.
+        if task_id in self._pending_threshold_roots:
+            return await self._fail_threshold_root(task_id)
         if outcome.kind is RunOutcomeKind.TASK_SWITCHED:
+            task = self._tasks.get(task_id)
+            if task is not None and (task.status in _TERMINAL_STATUSES or task.switched_to_task_id):
+                return task.status
             return await self._apply_task_switch(task_id)
-        disp = self._decide_and_write(task_id, outcome)
-        await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload)
-        return disp.status
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if (task is not None and outcome.kind is not RunOutcomeKind.COMPLETED
+                    and task.status in _TERMINAL_STATUSES):
+                # Existing terminal outcomes remain sticky. Deferred trip decisions
+                # are consumed above, after execution exit, before this generic guard.
+                return task.status
+            if task is not None and task.switched_to_task_id:
+                return task.status  # A replaced run cannot overwrite its review or final verdict.
+            cancel_reason = self._task_tree_cancel_reason(task_id)
+            if task is not None and outcome.kind is RunOutcomeKind.CANCELED:
+                payload = dict(disposition_for(outcome, retry_count=task.retry_count,
+                                               max_retries=task.max_retries).payload)
+                if cancel_reason:
+                    payload["reason"] = cancel_reason
+                await self._commit_task_cancellation(task, payload)
+                return task.status
+            disp = self._decide_and_write(task_id, outcome, apply=False)
+            if disp.status == "CANCELED" and cancel_reason:
+                canceled_at = now_utc()
+                disp.payload.update(reason=cancel_reason, finished_at=canceled_at.isoformat())
+                task.error = cancel_reason
+                task.finished_at = canceled_at
+            if outcome.observe_id:
+                disp.payload["observe_id"] = outcome.observe_id
+            await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload, committed=True)
+            self._decide_and_write(task_id, outcome)
+            return disp.status
+
+    async def resume_observe_decision(self, task_id, decision, *, observe_id, outcome,
+                                      settled, finalize):
+        """Apply an already accepted durable decision; never arbitrate or judge again."""
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or self.is_task_tree_canceled(task_id) or (
+                    task.status in _TERMINAL_STATUSES and task.status != decision["status"]):
+                return False
+            task.outputs = outcome.outputs
+            task.observer_outcome = outcome.verdict
+            task.error = outcome.error or None
+            task.switch_requested = decision["payload"].get("reason") == "user_topic_switch"
+            if not settled:
+                task.status = decision["status"]
+        await finalize()
+        if not settled:
+            payload = dict(decision["payload"])
+            if decision["event_type"] == "TaskFinished":
+                payload["outputs"] = outcome.outputs
+            payload["observe_id"] = observe_id
+            await self._emit(EventType(decision["event_type"]), task_id=task_id, payload=payload)
+            await self._settle(task_id, decision["status"])
+        return True
+
+    async def finish_observe(self, outcome, task_id):
+        from ctx_weft.core.loop.steps.observe import finish_observe
+        await finish_observe(outcome, task_id, self._emit)
 
     async def _apply_task_switch(self, caller_id: str) -> str:
         staged = self._staged.get(caller_id, [])
@@ -1085,19 +1245,23 @@ class TaskManager:
                 await self._settle(tid, "REVIEWING")
         return "REVIEWING"
 
-    def _decide_and_write(self, task_id: str, outcome: RunOutcome) -> "Disposition":
+    def _decide_and_write(self, task_id: str, outcome: RunOutcome, *, apply=True) -> "Disposition":
         """结局 → 处置，并就地把状态写进 task。**纯同步、不发事件**。
 
         抽出来是为了让带外判决（`apply_out_of_band_verdict`）能在**同一个锁内**完成
         「仲裁 + 转移」——事件发射带 await，留在锁里会把临界区撑开，那正是竞态的来源。
         """
         task = self._tasks.get(task_id)
-        disp = disposition_for(
+        disp = (Disposition(status=outcome.observe_disposition["status"],
+                            event_type=outcome.observe_disposition["event_type"],
+                            payload=dict(outcome.observe_disposition["payload"])) if outcome.observe_disposition else disposition_for(
             outcome,
             retry_count=task.retry_count if task is not None else 0,
             max_retries=task.max_retries if task is not None else self._task_max_retries,
-        )
-        if task is not None:
+        ))
+        if outcome.observe_disposition and disp.event_type == "TaskFinished":
+            disp.payload["outputs"] = outcome.outputs
+        if task is not None and apply:
             task.status = disp.status
             if disp.event_type == "TaskRequeued":
                 # **处置表不 mutate**：新的 retry_count 只在 payload 里，必须在这里写回，
@@ -1112,6 +1276,351 @@ class TaskManager:
                     task.error_code = outcome.error_code
         return disp
 
+    async def recover_canceled_tasks(self) -> None:
+        from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
+        # Durable task cancellation owns its closure, regardless of the entry point.
+        roots = {task.id: task.error for task in self._tasks.values()
+                 if task.status not in ("FINISHED", "FAILED")
+                 and (task.error or "").startswith(AGENT_CANCEL_REASON)}
+        for tid, reason in roots.items():
+            await self.cancel_task_tree(tid, reason)
+        for task in list(self._tasks.values()):
+            if task.status == "CANCELED" and not self._dispatch_is_live(task.id):
+                await self.on_task_finished(task.id, "CANCELED")
+
+    async def reconcile_stopped_tasks(self):
+        """Finish original submissions and release stopped owners before requeueing."""
+        for (event_type, tid), event in list(self._pending_emissions.items()):
+            if tid and not self._dispatch_is_live(tid):
+                await self._event_bus.emit_batch((event,))
+                if event_type == EventType.TASK_REQUEUED and tid in self._tasks:
+                    self._tasks[tid].retry_count = event.payload["retry_count"]
+                self._pending_emissions.pop((event_type, tid), None)
+        confirm = getattr(self._runner, "confirm_finished", None)
+        if confirm is not None:
+            for task in list(self._tasks.values()):
+                if not self._dispatch_is_live(task.id):
+                    if task.id in self._running_tasks:
+                        await self.commit_round(task.id)
+                    await confirm(task.id)
+        if self._hooks.read_task_state is None:
+            return
+        for task in list(self._tasks.values()):
+            if self._dispatch_is_live(task.id):
+                continue
+            persisted = await self._hooks.read_task_state(task.id)
+            if persisted is None:
+                continue
+            if persisted.status not in _TERMINAL_STATUSES:
+                if task.id in self._running_tasks:
+                    task.status = persisted.status
+                    # No dispatch owns this slot any more. Requeueing is deferred
+                    # until input/observe recovery has finished in the runtime.
+                    async with self._lock:
+                        self._release_slot(task.id)
+                        if task.status == "PENDING" and not any(
+                                entry.task_id == task.id for entry in self._queue.peek_all()):
+                            self._queue.push(QueueEntry(task_id=task.id, session_id=self._session_id))
+                continue
+            task.status, task.finished_at = persisted.status, persisted.finished_at
+            task.error, task.finalized = persisted.error, persisted.finalized
+            if task.status == "CANCELED" or task.id in self._running_tasks:
+                await self.on_task_finished(task.id, task.status)
+            elif self._hooks.confirm_task_settled is not None:
+                await self._hooks.confirm_task_settled(task)
+
+    async def reconcile_handoffs(self, requests, persisted_tasks):
+        """A committed UserTurn opening owns the stopped foreground handoff."""
+        from ctx_weft.protocols.hitl import UserTurnDelivery
+        for req in requests:
+            task = self._tasks.get(req.task_id)
+            if (task is None or not isinstance(req.delivery, UserTurnDelivery)
+                    or task.status in _TERMINAL_STATUSES or self._dispatch_is_live(task.id)):
+                continue
+            confirm = getattr(self._runner, "confirm_finished", None)
+            if confirm is not None:
+                await confirm(task.id)
+            persisted = persisted_tasks.get(task.id)
+            if persisted is None or persisted.status != "AWAITING_HUMAN":
+                status = await self.apply_run_outcome(task.id,
+                    RunOutcome(kind=RunOutcomeKind.AWAITING_HUMAN, hitl_id=req.id))
+            else:
+                status = task.status = persisted.status
+            if task.id in self._running_tasks:
+                await self._settle(task.id, status)
+
+    def start_foreground_recovery(self, task_id, agent_id, execute):
+        """Own the slot and dispatch of a recovered foreground execution."""
+        if self._dispatch_is_live(task_id):
+            return self._dispatch_tasks[task_id]
+        self._queue.cancel(task_id)
+        self._running_tasks.add(task_id)
+        self._running_agents[task_id] = agent_id
+        async def run():
+            try:
+                task = self._tasks[task_id]
+                task.status = "ACTIVE"
+                await self._emit(EventType.TASK_STARTED, task_id=task_id,
+                                 payload={"assigned_agent_id": agent_id})
+                outcome = await execute()
+                if outcome is not None:
+                    status = await self.apply_run_outcome(task_id, outcome)
+                    await self._settle(task_id, status)
+                    await self.finish_observe(outcome, task_id)
+                    if outcome.kind is RunOutcomeKind.AWAITING_HUMAN:
+                        await self._wake_if_already_answered(task_id, outcome.hitl_id)
+            except PersistenceUnavailableError:
+                logger.error("Recovered foreground %s halted: storage unavailable", task_id)
+            finally:
+                if self._dispatch_tasks.get(task_id) is asyncio.current_task():
+                    self._dispatch_tasks.pop(task_id, None)
+        job = asyncio.create_task(run())
+        self._dispatch_tasks[task_id] = job
+        return job
+
+    async def restore_observe_decisions(self, pending_observes):
+        """Restore already accepted verdict ownership before cancellation arbitration."""
+        async with self._lock:
+            for info in pending_observes.values():
+                completion = info.get("completion") or {}
+                decision = completion.get("disposition") or {}
+                task = self._tasks.get(info.get("task_id"))
+                if (task is not None and task.status not in _TERMINAL_STATUSES
+                        and completion.get("accepted") and completion.get("action") == "close"
+                        and decision.get("status") in ("FINISHED", "FAILED")):
+                    task.status = decision["status"]
+                    from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
+                    if task.status == "FINISHED" and (task.error or "").startswith(AGENT_CANCEL_REASON):
+                        task.error = None
+
+    def current_task_for_agent(self, agent_id: str, fallback: str | None = None) -> str | None:
+        """Dispatch ownership outranks a routing hint for a newly queued task."""
+        for tid in self._running_tasks:
+            task = self._tasks.get(tid)
+            if task is not None and task.status == "ACTIVE" and self._agent_id_of(tid) == agent_id:
+                return tid
+        task = self._tasks.get(fallback)
+        return fallback if task is not None and (task.assigned_agent_id or task.creator_agent_id) == agent_id else None
+
+    def _task_tree_cancel_reason(self, task_id: str) -> str:
+        from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
+        seen = set()
+        task = self._tasks.get(task_id)
+        while task is not None and task.id not in seen:
+            seen.add(task.id)
+            if (task.error or "").startswith(AGENT_CANCEL_REASON):
+                return task.error
+            task = self._tasks.get(task.parent_task_id)
+        return ""
+
+    def is_task_tree_canceled(self, task_id: str) -> bool:
+        task = self._tasks.get(task_id)
+        if task is not None and task.status in ("FINISHED", "FAILED"):
+            return False
+        return bool(self._task_tree_cancel_reason(task_id))
+
+    async def _finalize_tree_cancellations(self, tasks, reason):
+        from contextlib import nullcontext
+        if self._hooks.tree_cancel_finalizer is None:
+            if self._hooks.cancel_finalizer is not None:
+                for task in tasks:
+                    if not task.finalized and task.started_at:
+                        await self._hooks.cancel_finalizer([task], reason)
+                        task.finalized = True
+            return
+        for task in tasks:
+            guard = self._hooks.cancel_guard(task.id, "cancel_finalization") if self._hooks.cancel_guard else nullcontext()
+            async with guard:
+                if task.finalized:
+                    continue
+                if self._hooks.read_task_state is not None:
+                    persisted = await self._hooks.read_task_state(task.id)
+                    if persisted is not None and persisted.status == "CANCELED" and persisted.finalized:
+                        task.finalized = True
+                        continue
+                await self._hooks.tree_cancel_finalizer([task], reason)
+                await self._emit(EventType.TASK_FINALIZED, task_id=task.id,
+                    payload={"task_id": task.id, "outcome": "cancelled",
+                             "outputs": {"output": "", "summary": ""}, "error": reason})
+                task.finalized = True
+
+    async def _confirm_task_submission(self, task_id):
+        """Confirm the original stopped producer before considering cancellation."""
+        # A stopped coroutine can still own an unconfirmed RunFinished.
+        # Also covers a new dispatch taking over an interrupted settlement.
+        confirm = getattr(self._runner, "confirm_finished", None)
+        if confirm is not None:
+            await confirm(task_id)
+        for key, event in list(self._pending_emissions.items()):
+            if key[1] == task_id and key[0] in (EventType.TASK_FINISHED, EventType.TASK_FAILED):
+                if self._event_bus is not None:
+                    await self._event_bus.emit(event)
+                self._pending_emissions.pop(key, None)
+
+    async def _commit_task_cancellation(self, task, payload):
+        """Caller holds _lock. Reconcile an unknown receipt before any cancellation effects."""
+        await self._confirm_task_submission(task.id)
+        if self._hooks.read_task_state is not None:
+            persisted = await self._hooks.read_task_state(task.id)
+            if persisted is not None and persisted.status in _TERMINAL_STATUSES:
+                finalized = persisted.finalized or (task.status == "CANCELED" and task.finalized)
+                task.status = persisted.status
+                task.finished_at = persisted.finished_at
+                task.error = persisted.error
+                task.finalized = finalized
+                if task.status == "CANCELED" and self._hooks.confirm_task_settled is not None:
+                    await self._hooks.confirm_task_settled(task)
+                return
+        elif task.status == "CANCELED":
+            return
+        canceled_at = now_utc()
+        if payload.get("reason"):
+            payload = {**payload, "finished_at": canceled_at.isoformat()}
+        event = await self._emit(EventType.TASK_CANCELED, task_id=task.id, payload=payload, committed=True)
+        canceled_at = datetime.fromisoformat(event.payload["finished_at"]) if event.payload.get("finished_at") else event.timestamp
+        task.status = "CANCELED"
+        task.finished_at = canceled_at
+        task.error = payload.get("reason") or payload.get("error_message") or task.error
+        task.finalized = False
+
+    async def cancel_task_tree(self, task_id: str, reason: str, *, before_cancel=None) -> list[str]:
+        """Cancel one task subtree, independently of its executing agents."""
+        return await self._cancel_task_trees([task_id], reason, before_cancel=before_cancel)
+
+    async def cancel_session_agent_tasks(self, agent_id: str, reason: str, *, before_cancel=None) -> list[str]:
+        """Session cancellation covers every task assigned to this terminated agent.
+
+        The caller persists AgentTerminated(session_canceled) under the same lock
+        before task effects. Ordinary cancel_agent continues to select one tree.
+        """
+        return await self._cancel_task_trees(None, reason, agent_id=agent_id,
+                                             before_cancel=before_cancel)
+
+    async def _cancel_task_trees(self, roots, reason, *, agent_id=None, before_cancel=None):
+        """Commit cancellation before removing tasks; derive retries from task state."""
+        targets, seen = [], set()
+        cooperative_runs = set()
+        async with self._lock:
+            if before_cancel is not None:
+                await before_cancel()
+            pending = list(roots) if roots is not None else [
+                task.id for task in self._tasks.values()
+                if (task.status not in {"FINISHED", "FAILED"} or task.id in self._running_tasks)
+                and (agent_id is None or (task.assigned_agent_id or task.creator_agent_id) == agent_id)]
+            while pending:
+                tid = pending.pop()
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                targets.append(tid)
+                pending.extend(self._children_of.get(tid, ()))
+            for tid in targets:
+                task = self._tasks.get(tid)
+                if task is not None and task.status not in _TERMINAL_STATUSES:
+                    task.error = reason
+                if task is not None and self._dispatch_is_live(tid) and task.status in ("ACTIVE", "CANCELED"):
+                    cooperative_runs.add(tid)
+                    if task.status == "ACTIVE":
+                        self._signal_cancel(tid)
+        canceled = []
+        from contextlib import AsyncExitStack
+        async with AsyncExitStack() as guards:
+            for tid in sorted(targets):
+                if self._hooks.cancel_guard:
+                    await guards.enter_async_context(self._hooks.cancel_guard(tid))
+                if tid not in cooperative_runs:
+                    await self.commit_round(tid)
+            async with self._lock:
+                key = ("task_status", tuple(sorted(targets)))
+                events = self._pending_batches.get(key)
+                if events is None:
+                    pending_events = []
+                    for tid in targets:
+                        task = self._tasks.get(tid)
+                        if task is None or tid in cooperative_runs:
+                            continue
+                        await self._confirm_task_submission(tid)
+                        persisted = await self._hooks.read_task_state(tid) if self._hooks.read_task_state else None
+                        if persisted is not None and persisted.status in _TERMINAL_STATUSES:
+                            task.status, task.finished_at = persisted.status, persisted.finished_at
+                            task.error, task.finalized = persisted.error, persisted.finalized
+                            if self._hooks.confirm_task_settled:
+                                await self._hooks.confirm_task_settled(task)
+                        if task.status not in _TERMINAL_STATUSES:
+                            pending_events.append(new_event(EventType.TASK_CANCELED,
+                                session_id=self._session_id,
+                                tenant_id=self._session.tenant_id if self._session else "default",
+                                origin=_ORIGIN, task_id=tid, agent_id=self._agent_id_of(tid),
+                                payload={"reason": reason, "finished_at": now_utc().isoformat()}))
+                    events = tuple(pending_events)
+                    self._pending_batches[key] = events
+                confirmed = False
+                if events and self._hooks.read_task_state:
+                    states = [await self._hooks.read_task_state(e.task_id) for e in events]
+                    confirmed = all(t is not None and t.status == "CANCELED" for t in states)
+                    if confirmed and self._hooks.confirm_task_settled:
+                        # Repair derived settlement before advancing to a later
+                        # lifecycle event; the original subscriber may have failed.
+                        for event in events:
+                            await self._hooks.confirm_task_settled(self._tasks[event.task_id])
+                if events and not confirmed and self._event_bus is not None:
+                    await self._event_bus.emit_batch(events)
+                for event in events:
+                    task = self._tasks[event.task_id]
+                    task.status, task.error = "CANCELED", event.payload["reason"]
+                    task.finished_at = datetime.fromisoformat(event.payload["finished_at"])
+                    task.finalized = False
+                self._pending_batches.pop(key, None)
+                for tid in targets:
+                    task = self._tasks.get(tid)
+                    if task is None or tid in cooperative_runs:
+                        continue
+                    if task.status == "CANCELED":
+                        queued = self._queue.cancel(tid)
+                        if not task.finalized or tid in self._running_tasks or queued:
+                            self._running_tasks.add(tid)
+                            canceled.append(task)
+        # Successful/failed outcomes with lost receipts retain their original outcome.
+        for tid in targets:
+            task = self._tasks.get(tid)
+            if task is not None and task.status in ("FINISHED", "FAILED") and not self._dispatch_is_live(tid):
+                if tid in self._running_tasks:
+                    await self.on_task_finished(tid, task.status)
+                elif self._hooks.confirm_task_settled:
+                    await self._hooks.confirm_task_settled(task)
+        await self._finalize_tree_cancellations(canceled, reason)
+        for task in canceled:
+            if not self._dispatch_is_live(task.id):
+                job = asyncio.create_task(self._settle_tree_cancellation(task.id))
+                self._dispatch_tasks[task.id] = job
+                self.track_background(job)
+        return targets
+
+    async def _settle_tree_cancellation(self, task_id: str) -> None:
+        try:
+            await self._settle(task_id, "CANCELED")
+        finally:
+            if self._dispatch_tasks.get(task_id) is asyncio.current_task():
+                self._dispatch_tasks.pop(task_id, None)
+
+    async def cancel_stopped_task(self, task_id: str, reason: str) -> bool:
+        """Claim a stopped task against observation under the verdict lock.
+
+        The caller serializes this claim with report application. Active runs
+        continue to use cooperative cancellation and publish RunFinished first.
+        """
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.status not in ("AWAITING_HUMAN", "REVIEWING", "INTERRUPTED"):
+                return False
+            canceled_at = now_utc()
+            await self._emit(EventType.TASK_CANCELED, task_id=task_id,
+                             payload={"reason": reason, "finished_at": canceled_at.isoformat()})
+            task.status = "CANCELED"
+            task.error = reason
+            task.finished_at = canceled_at
+            return True
+
     async def apply_out_of_band_verdict(
         self,
         task_id: str,
@@ -1121,6 +1630,7 @@ class TaskManager:
         task_summary: str = "",
         next_step_hint: str = "",
         finalize: "Callable[[], Awaitable[None]] | None" = None,
+        before_apply=None,
     ) -> bool:
         """**带外判决**：一条不属于任何活跃 run 的结局（2026-09-22）。
 
@@ -1167,15 +1677,20 @@ class TaskManager:
         """
         async with self._lock:
             task = self._tasks.get(task_id)
-            if task is None or task.status not in ("AWAITING_HUMAN", "REVIEWING"):
+            if (task is None or task.status not in ("AWAITING_HUMAN", "REVIEWING")
+                    or self.is_task_tree_canceled(task_id)):
                 logger.info(
                     "out-of-band verdict rejected for task %s (status=%s): it is no longer "
-                    "parked — the user spoke first",
+                    "parked — another disposition won",
                     task_id, getattr(task, "status", "<missing>"),
                 )
+                if before_apply is not None:
+                    await before_apply(False, None)
                 return False
             terminal_only = task.status == "REVIEWING"
             if terminal_only and outcome.verdict not in ("success", "fail"):
+                if before_apply is not None:
+                    await before_apply(False, None)
                 return False
             if terminal_only:
                 task.switch_requested = True
@@ -1191,6 +1706,8 @@ class TaskManager:
             if verdict:
                 task.observer_outcome = verdict
             if verdict != VERDICT_SUCCESS and not terminal_only:
+                if before_apply is not None:
+                    await before_apply(True, None)
                 # retry / fail → 维持 park。字段已写（hint 供下一轮 act 用），但不转移
                 # 状态：观察者说「没做完」时，在有人在场的会话里该由人决定下一步。
                 logger.info(
@@ -1203,6 +1720,12 @@ class TaskManager:
                 task.error = outcome.error or None
                 task.error_code = outcome.error_code or None
                 task.next_step_hint = None
+            planned = disposition_for(outcome, retry_count=task.retry_count, max_retries=task.max_retries)
+            if terminal_only:
+                planned.payload["reason"] = "user_topic_switch"
+            if before_apply is not None:
+                await before_apply(True, planned)
+            task.outputs = outcome.outputs
             disp = self._decide_and_write(task_id, outcome)
             if terminal_only:
                 disp.payload["reason"] = "user_topic_switch"
@@ -1211,10 +1734,14 @@ class TaskManager:
             try:
                 await finalize()
             except Exception:
+                if before_apply is not None:
+                    raise
                 logger.exception(
                     "out-of-band finalize failed for task %s; announcing the transition "
                     "anyway (the task is already terminal; skipping the announcement would "
                     "strand the slot and hold the interaction line forever)", task_id)
+        if outcome.observe_id:
+            disp.payload["observe_id"] = outcome.observe_id
         await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload)
         await self._settle(task_id, disp.status)
         return True
@@ -1314,6 +1841,10 @@ class TaskManager:
             async with self._lock:
                 self._release_slot(task_id)
             await self.drain()
+            return
+        if task_id in self._pending_threshold_roots:
+            await self._fail_threshold_root(task_id)
+            await self.on_task_finished(task_id, status="FAILED")
             return
         # 不可重试的错误（如认证失败 / 上下文溢出），不重试、直接挂起等恢复
         if exc is not None and not getattr(exc, "retriable", True):
@@ -1498,6 +2029,21 @@ class TaskManager:
             await self._fire_session_idle()
 
     async def on_task_finished(self, task_id: str, status: TaskStatus) -> None:
+        task = self._tasks.get(task_id)
+        if status == "CANCELED" and task is not None:
+            from contextlib import nullcontext
+            guard = (self._hooks.cancel_guard(task_id, "cancel_settlement")
+                     if self._hooks.cancel_guard else nullcontext())
+            async with guard:
+                if task.finalized and task_id not in self._running_tasks:
+                    return
+                # Keep dispatch ownership if finalization fails or loses its receipt.
+                await self._finalize_tree_cancellations([task], task.error or "cancelled")
+                await self._on_task_finished(task_id, status)
+            return
+        await self._on_task_finished(task_id, status)
+
+    async def _on_task_finished(self, task_id: str, status: TaskStatus) -> None:
         # task 落终态 → 通知外部回收挂在 task 上的运行期状态（当前是 CapabilityCache 的 pin）。
         # **这里就是「终态」那条路**：`_settle` 判 retry（status == "PENDING"）时先 return，
         # 根本走不到这个函数，所以重试自动保住 pin，不需要额外判据。best-effort：清理失败
@@ -1507,6 +2053,10 @@ class TaskManager:
                 await self._hooks.on_task_terminal(task_id)
             except Exception:
                 logger.exception("TaskManager: on_task_terminal callback failed for %s", task_id)
+
+        task = self._tasks.get(task_id)
+        if task is not None and self._hooks.confirm_task_settled is not None:
+            await self._hooks.confirm_task_settled(task)
 
         async with self._lock:
             self._clear_running(task_id)
@@ -1521,7 +2071,8 @@ class TaskManager:
             task = self._tasks.get(task_id)
             if task:
                 task.status = status
-                task.finished_at = now_utc()
+                if task.finished_at is None:
+                    task.finished_at = now_utc()
 
         # ── 取消胶囊闭合 funnel（Task 14）───────────────────────────────────────
         # 在途协作取消的任务：发信号时（cancel_all 的 CancelToken / 熔断的 cancel_inflight）
@@ -1531,16 +2082,11 @@ class TaskManager:
         # （status 只会是 FINISHED/FAILED，与本 if 互斥）。未真正 start 过的任务（started_at 为
         # 空）不会有派发框/own scope 可闭，交由 synthesize_cancel_closure 的 find-only 兜底判定
         # 即可，这里额外用 started_at 提前短路只是省一次无意义调用。
-        if status == "CANCELED" and task is not None and task.started_at \
-                and self._hooks.cancel_finalizer is not None:
-            try:
-                await self._hooks.cancel_finalizer([task], task.error or "cancelled")
-            except Exception:
-                logger.exception("TaskManager: cancel_finalizer callback failed for %s", task_id)
-
+        # Tree cancellation was strictly finalized before releasing its slot.
         # ── failure_counter 维护 ──────────────────────────────────────────────
         if self._session is not None:
-            if status == "FAILED" and not (task and task.switch_requested):
+            if status == "FAILED" and not (task and (
+                    task.switch_requested or task.error_code == TaskErrorCode.BY_THRESHOLD)):
                 self._session.failure_counter += 1
                 self._recent_failures.append((
                     # 标题 + id：这份清单会被渲进 root 的 finish 对（runtime 的阈值收尾），
@@ -1569,6 +2115,7 @@ class TaskManager:
                 # 会话终态交给正常收敛路径（同 _pause_abandon 的豁免形态）。
                 if (
                     not self._pause_abandon
+                    and not (task is not None and task.error == CancelReason.PAUSE_ABANDON)
                     and not self._threshold_tripped
                     and not (task is not None and task.error_code == TaskErrorCode.BLOCKED_BY_FAILED_DEP)
                 ):
@@ -1646,22 +2193,34 @@ class TaskManager:
                     # `_find_blocked_forever` 已过滤过；真到这里说明登记表被并发改动，
                     # 必须 break 而非 continue——重扫会原样再返回同一条，成死循环。
                     break
-                task.status = "CANCELED"
+                await self._commit_task_cancellation(task, {
+                    "error_code": TaskErrorCode.BLOCKED_BY_FAILED_DEP,
+                    "blocked_by_task_id": dep_id, "reason": f"dependency_failed:{dep_id}"})
                 task.error_code = TaskErrorCode.BLOCKED_BY_FAILED_DEP
-                task.error = f"blocked by failed/canceled predecessor {dep_id}"
-                task.finished_at = now_utc()
                 self._queue.cancel(task_id)
-                await self._emit(
-                    EventType.TASK_CANCELED, task_id=task_id,
-                    payload={
-                        "error_code": TaskErrorCode.BLOCKED_BY_FAILED_DEP,
-                        "blocked_by_task_id": dep_id,
-                        "reason": f"dependency_failed:{dep_id}",
-                    },
-                )
                 await self.on_task_finished(task_id, status="CANCELED")
         finally:
             self._in_blocked_dispose = False
+
+    async def _fail_threshold_root(self, task_id: str) -> str:
+        """Apply a durable trip decision after the root's execution has exited."""
+        if self._threshold_commit is not None:
+            await asyncio.shield(self._threshold_commit)
+        task = self._tasks[task_id]
+        task.status = "FAILED"
+        task.error_code = TaskErrorCode.BY_THRESHOLD
+        task.error = "Session failure threshold reached"
+        task.finished_at = now_utc()
+        await self._emit(EventType.TASK_FAILED, task_id=task_id, payload={
+            "error_code": task.error_code, "error_message": task.error})
+        self._pending_threshold_roots.discard(task_id)
+        if self._hooks.threshold_finalizer is not None:
+            try:
+                await self._hooks.threshold_finalizer(task if task.started_at else None, [],
+                                                     list(self._recent_failures))
+            except Exception:
+                logger.exception("Deferred threshold finalizer failed for %s", task_id)
+        return "FAILED"
 
     async def _trip_failure_threshold(self) -> None:
         """连败达阈值：真终结——清场 + root 判死 + 会话终态，而非裸终结。
@@ -1680,13 +2239,29 @@ class TaskManager:
             self._session_id, counter, threshold,
         )
 
+        # Commit the complete decision before cleanup or cancellation can yield.
+        async with self._lock:
+            pending = [entry.task_id for entry in self._queue.peek_all()]
+        plan = plan_threshold_trip(
+            self._tasks, pending_ids=pending, running_ids=self._running_tasks)
+        self._pending_threshold_roots.update(plan.signal_roots)
+        self._threshold_commit = asyncio.get_running_loop().create_future()
         # 2) FAILURE_THRESHOLD_HIT，payload 带本轮已知连败清单
-        await self._emit(EventType.FAILURE_THRESHOLD_HIT, payload={
-            "failure_counter": counter,
-            "threshold": threshold,
-            "failures": [{"title": title, "reason": reason}
-                         for title, reason in self._recent_failures],
-        })
+        try:
+            await self._emit(EventType.FAILURE_THRESHOLD_HIT, payload={
+                "failure_counter": counter,
+                "threshold": threshold,
+                "root_task_ids": list(plan.fail_roots),
+                "cancel_task_ids": list(dict.fromkeys(
+                    (*plan.cancel_queued, *plan.cancel_suspended, *plan.signal_inflight))),
+                "failures": [{"title": title, "reason": reason}
+                             for title, reason in self._recent_failures],
+            })
+        except BaseException as exc:
+            self._threshold_commit.set_exception(exc)
+            self._threshold_commit.exception()  # Retrieve even when no root was in flight.
+            raise
+        self._threshold_commit.set_result(None)
 
         # 3) 取消该 session 所有未决 pending HITL（best-effort）：HitlCancelled 须全部
         #    先于会话终态发出，防止 host 投影翻态早于 hitl 侧收尾。
@@ -1697,22 +2272,16 @@ class TaskManager:
                 logger.exception("TaskManager: cancel_pending_hitl callback failed")
 
         # 清场**分类**交纯函数（见 failure_threshold.py）；**顺序**留在这里。
-        async with self._lock:
-            pending = self._queue.drain_pending()
-        plan = plan_threshold_trip(
-            self._tasks, pending_ids=pending, running_ids=self._running_tasks,
-        )
+        # Keep queued entries until each durable cancellation is confirmed. The
+        # existing FailureThresholdHit plan retains the remaining selection.
 
         # 4) 清队 + 5) 取消挂起：非 root 直接标 CANCELED + 发事件。
         #    发事件的顺序仍是「先清队条目、后挂起条目」，与改造前一致。
         for tid in (*plan.cancel_queued, *plan.cancel_suspended):
             t = self._tasks[tid]
-            t.status = "CANCELED"
-            t.finished_at = now_utc()
-            await self._emit(
-                EventType.TASK_CANCELED, task_id=tid,
-                payload={"reason": CancelReason.FAILURE_THRESHOLD},
-            )
+            await self._commit_task_cancellation(t, {"reason": CancelReason.FAILURE_THRESHOLD})
+            self._queue.cancel(tid)
+            await self._finalize_tree_cancellations([t], CancelReason.FAILURE_THRESHOLD)
 
         # 5b) 在途非 root：只发协作取消信号，不发事件（其 TASK_CANCELED 由 run 结束后的
         #     `apply_run_outcome` 发；finish 对交由 on_task_finished 的取消胶囊闭合 funnel；
@@ -1732,11 +2301,13 @@ class TaskManager:
                 logger.exception(
                     "TaskManager: cancel_finalizer callback failed (threshold cleanup)")
 
-        # 6) root 判 FAILED。**先标 FAILED 再**对在跑的 root 发 cancel_inflight——顺序
-        #    保证两道守卫都接得住：task 侧是 `apply_run_outcome` 的终态守卫（不把 FAILED
-        #    盖回 CANCELED）；run 侧是 `_run_loop` 的 cancel_takes_effect（不发 RUN_CANCELED）。
+        # 6) Idle roots settle now; dispatched roots settle from apply_run_outcome,
+        # after their own RunFinished. Use the immutable plan even if one exits
+        # while the cleanup above awaits I/O.
         root_we_failed_and_started: Task | None = None
         for tid in plan.fail_roots:
+            if tid in plan.signal_roots:
+                continue
             t = self._tasks[tid]
             t.status = "FAILED"
             t.error_code = TaskErrorCode.BY_THRESHOLD
@@ -1772,40 +2343,19 @@ class TaskManager:
         await self._fire_session_done()
 
     async def cancel_all(self, *, reason: str = "") -> None:
-        """硬取消整条 session 链：清空 pending 队列并标 CANCELED，会话置 CANCELED。
+        """Cancel session tasks without consuming their retry source before commit.
 
-        在途 task 不在此处理——由 CancelToken → act checkpoint → CancelledError →
-        `_run_loop` 交回 `RunOutcome(CANCELED)` → `apply_run_outcome` 置该 task CANCELED
-        → on_task_finished（其 drain() 被 _cancelled 守卫挡住，
-        finish 对经 on_task_finished 的取消胶囊闭合 funnel 补写，见 Task 14）。
-
-        标态后立即对已启动的任务（`started_at` 非空——含 root：root 没有 origin_tool_call_id，
-        但 synthesize_cancel_closure 的 own-root 形态不需要框，仍要闭合自己的 scope）经
-        `_cancel_finalizer` 闭合胶囊（ack 终态化 + `[outcome=cancelled]` finish 对）。未启动
-        的任务从未铸框/写过任何 memory，跳过——零 memory 写。
+        Live dispatches settle after RunFinished. Stopped/queued tasks use the same
+        commit confirmation and finalization path as tree cancellation; cold owners
+        need not have reconstructed their queue for this scan to find every task.
         """
-        self._cancelled = True
-        # 在飞的自治退避定时器一并取消：它们醒来后本来也会自检 `_cancelled` 而静默退出，
-        # 但那意味着最多再挂 120s。硬取消让 session 立刻关得干净。
-        for timer in list(self._autonomous_requeue_timers.values()):
-            timer.cancel()
-        self._autonomous_requeue_timers.clear()
-        async with self._lock:
-            pending = self._queue.drain_pending()
-        to_close: list[Task] = []
-        for tid in pending:
-            t = self._tasks.get(tid)
-            if t is not None:
-                t.status = "CANCELED"
-                t.finished_at = now_utc()
-                if t.started_at:
-                    to_close.append(t)
-            await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": reason})
-        if to_close and self._hooks.cancel_finalizer is not None:
-            try:
-                await self._hooks.cancel_finalizer(to_close, reason or CancelReason.USER_CANCEL)
-            except Exception:
-                logger.exception("TaskManager: cancel_finalizer callback failed (cancel_all)")
+        self.begin_cancel()
+        await self._cancel_task_trees(None, reason or CancelReason.USER_CANCEL)
+        # Join only canceled settlement jobs, never background observe producers.
+        settlements = [job for tid, job in self._dispatch_tasks.items()
+                       if self._tasks[tid].status == "CANCELED" and job is not asyncio.current_task()]
+        for job in settlements:
+            await asyncio.shield(job)
         if self._session is not None:
             self._session.status = "CANCELED"
 
@@ -1850,7 +2400,8 @@ class TaskManager:
         payload: dict | None = None,
         *,
         agent_id: str | None = None,
-    ) -> None:
+        committed: bool = False,
+    ) -> Event:
         """构造并发出一个 session/task 级别的事件（无 LoopState）。
 
         V2 §0：envelope 管身份。``agent_id`` 未显式传且有 ``task_id`` 时自动解析
@@ -1858,19 +2409,23 @@ class TaskManager:
         无 ``task_id``（如 ``FAILURE_THRESHOLD_HIT`` 这类会话级聚合信号）则 agent_id
         保持 None，不乱填。
         """
-        await emit_event(
-            self._event_bus,
-            event_type,
-            session_id=self._session_id,
-            tenant_id=self._session.tenant_id if self._session else "default",
-            origin=_ORIGIN,
-            task_id=task_id,
-            agent_id=(
-                agent_id if agent_id is not None
-                else (self._agent_id_of(task_id) if task_id is not None else None)
-            ),
-            payload=payload,
-        )
+        key = (event_type, task_id)
+        event = self._pending_emissions.get(key)
+        if event is None:
+            event = new_event(event_type, session_id=self._session_id,
+                tenant_id=self._session.tenant_id if self._session else "default",
+                origin=_ORIGIN, task_id=task_id,
+                agent_id=agent_id if agent_id is not None else (
+                    self._agent_id_of(task_id) if task_id is not None else None),
+                payload=payload)
+            self._pending_emissions[key] = event
+        if self._event_bus is not None:
+            if committed:
+                await self._event_bus.emit_batch((event,))
+            else:
+                await self._event_bus.emit(event)
+        self._pending_emissions.pop(key, None)
+        return event
 
     def _final_status(self) -> str:
         """全部终态时的会话结论。failure_counter > 0 表示本轮有任务失败。
@@ -1907,8 +2462,12 @@ class TaskManager:
         2026-09-04（Task 12）起不再报队列状态——`announce_queue_state` 已停发
         （events-v2 §5），幂等因此全靠 `_on_session_done` 侧的回收本身幂等。
         """
-        # Reviews must not await one another during terminal settlement.
-        if asyncio.current_task() in self._background_asyncio_tasks:
+        # A canceled dispatch must finish its own writes without joining unrelated
+        # metadata/report producers. The existing waiter still owns session close.
+        current = asyncio.current_task()
+        if (current in self._background_asyncio_tasks
+                or (self._cancelled and self._background_asyncio_tasks
+                    and current is not self._session_done_waiter)):
             if self._session_done_waiter is None or self._session_done_waiter.done():
                 self._session_done_waiter = asyncio.create_task(self._fire_session_done())
             return
@@ -2162,7 +2721,7 @@ class TaskManager:
         return self._hooks.is_current is None or self._hooks.is_current()
 
     def running_task_ids(self) -> set[str]:
-        """当前正在执行（已派发、_run_task 未返回）的 task id 集合。"""
+        """Occupied dispatch slots, including unfinished settlement after a failed commit."""
         return set(self._running_tasks)
 
     def running_agent_of(self, task_id: str) -> str | None:
@@ -2194,29 +2753,37 @@ class TaskManager:
         不把 session 置 CANCELED（pause 弃子不是用户取消）。
         """
         async with self._lock:
-            entries = self._queue.peek_all()
-            self._queue.drain_pending()
-            busy_agents = set(self._running_agents.values())
-            keep = keep_agent is not None and keep_agent not in busy_agents
-            cancelled: list[str] = []
-            for e in entries:
-                if keep and self._effective_agent(self._tasks.get(e.task_id)) == keep_agent:
-                    self._queue.push(e)  # 保留：相对顺序按原队列顺序回填
-                else:
-                    cancelled.append(e.task_id)
+            key = "abandon_pending"
+            events = self._pending_batches.get(key)
+            if events is None:
+                busy_agents = set(self._running_agents.values())
+                keep = keep_agent is not None and keep_agent not in busy_agents
+                entries = [e for e in self._queue.peek_all()
+                           if not (keep and self._effective_agent(self._tasks.get(e.task_id)) == keep_agent)]
+                events = tuple(new_event(EventType.TASK_CANCELED,
+                    session_id=self._session_id,
+                    tenant_id=self._session.tenant_id if self._session else "default",
+                    origin=_ORIGIN, task_id=e.task_id, agent_id=self._agent_id_of(e.task_id),
+                    payload={"reason": reason, "finished_at": now_utc().isoformat()}) for e in entries)
+                self._pending_batches[key] = events
+            if self._event_bus is not None:
+                await self._event_bus.emit_batch(events)
+            cancelled = [e.task_id for e in events]
+            for event in events:
+                task = self._tasks.get(event.task_id)
+                if task is not None:
+                    task.status = "CANCELED"
+                    task.error = event.payload["reason"]
+                    task.finished_at = datetime.fromisoformat(event.payload["finished_at"])
+                self._queue.cancel(event.task_id)
+            self._pending_batches.pop(key, None)
         for tid in cancelled:
-            t = self._tasks.get(tid)
-            if t is not None:
-                t.status = "CANCELED"
-                t.finished_at = now_utc()
-            await self._emit(EventType.TASK_CANCELED, task_id=tid, payload={"reason": reason})
-        # 队列弃子不经 on_task_finished，不会自动触发父任务重排：若某 SUSPENDED 父任务的
-        # 子任务此刻**全部**还在排队（无一在途），无人调用 _try_resume_parent → 父任务永不
-        # 重排、会话滞留 RUNNING 且无续跑点。此处对每个被弃子任务补触发重排检查（幂等：
-        # 兄弟仍在途时 all_done 不成立、由其 on_task_finished 接力；父已 ACTIVE 不二次入队）。
-        for tid in cancelled:
+            task = self._tasks.get(tid)
+            if task is not None:
+                await self._finalize_tree_cancellations([task], task.error)
             await self._try_resume_parent(tid)
         return cancelled
+
 
 
 @dataclass
@@ -2233,6 +2800,10 @@ class RoundSnapshot:
 
     owns_task: bool
     hitl_id: str = ""
+    #: The producer consuming this input, including a continuing hot-reply run.
+    run_id: str = ""
+    #: Retraction may erase a new run, but must retain a continuing run's finish.
+    run_started_here: bool = False
     task_status: str = ""
     retry_count: int = 0
     outputs: Any | None = None

@@ -53,7 +53,7 @@ async def _recall_blocks(mem: InMemoryMemoryProvider, agent_scope: MemoryAddress
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
-    blocks.sort(key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)))
+    blocks.sort(key=lambda b: (b.value.timestamp, b.metadata.get("sequence", 0)))
     return blocks
 
 
@@ -97,25 +97,25 @@ async def test_legacy_mirrored_capsule_recalled_in_order() -> None:
     blocks = await _recall_blocks(mem, asc)
 
     # 应召回到 3 条 AGENT_CONVERSATION_TURN（旧式镜像）
-    act_blocks = [b for b in blocks if b.metadata.get("type") == T.AGENT_CONVERSATION_TURN]
+    act_blocks = [b for b in blocks if b.value.type == T.AGENT_CONVERSATION_TURN]
     assert len(act_blocks) == 3, (
         f"G7: expected 3 legacy AGENT_CONVERSATION_TURN blocks, got {len(act_blocks)}: "
-        f"{[(b.metadata.get('role'), b.content[:40]) for b in act_blocks]}"
+        f"{[(b.value.role, b.value.content[:40]) for b in act_blocks]}"
     )
 
     # 按 (timestamp, seq_no) 升序：user → assistant → tool
-    roles = [b.metadata.get("role") for b in act_blocks]
+    roles = [b.value.role for b in act_blocks]
     assert roles == ["user", "assistant", "tool"], (
         f"G7: legacy blocks must appear in ascending timestamp order (user→assistant→tool); "
         f"got roles={roles}"
     )
 
     # 内容验证
-    assert "请分析这份报告" in act_blocks[0].content, (
-        f"G7: user block content mismatch: {act_blocks[0].content!r}"
+    assert "请分析这份报告" in act_blocks[0].value.content, (
+        f"G7: user block content mismatch: {act_blocks[0].value.content!r}"
     )
-    assert "Process Report:" in act_blocks[2].content, (
-        f"G7: tool block must contain Process Report: {act_blocks[2].content!r}"
+    assert "Process Report:" in act_blocks[2].value.content, (
+        f"G7: tool block must contain Process Report: {act_blocks[2].value.content!r}"
     )
 
 
@@ -150,19 +150,19 @@ async def test_legacy_multi_task_mirrored_capsule_order() -> None:
         )
 
     blocks = await _recall_blocks(mem, asc)
-    act_blocks = [b for b in blocks if b.metadata.get("type") == T.AGENT_CONVERSATION_TURN]
+    act_blocks = [b for b in blocks if b.value.type == T.AGENT_CONVERSATION_TURN]
     assert len(act_blocks) == 6, (
         f"G7 multi-task: expected 6 legacy blocks, got {len(act_blocks)}"
     )
 
     # 全局时序：任务 A 的 3 条（t=1,2,3）在任务 B 的 3 条（t=4,5,6）之前
-    timestamps = [b.metadata.get("timestamp", "") for b in act_blocks]
+    timestamps = [b.value.timestamp for b in act_blocks]
     assert timestamps == sorted(timestamps), (
         f"G7 multi-task: legacy blocks must be in ascending timestamp order; got {timestamps}"
     )
 
     # 前 3 属于任务 A，后 3 属于任务 B
-    contents_a = [b.content for b in act_blocks[:3]]
-    contents_b = [b.content for b in act_blocks[3:]]
+    contents_a = [b.value.content for b in act_blocks[:3]]
+    contents_b = [b.value.content for b in act_blocks[3:]]
     assert any("任务A" in c for c in contents_a), "G7: first 3 blocks should be task A"
     assert any("任务B" in c for c in contents_b), "G7: last 3 blocks should be task B"

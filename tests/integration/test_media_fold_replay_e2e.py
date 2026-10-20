@@ -404,6 +404,7 @@ async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
     # 至于「取回的图还在不在视图里」：2026-09-28 起一律**不在**——root 的收尾也过前台 observe，
     # 判决带真摘要 → `_close_one` 当场折末段 raw。看那一刻之前的状态用
     # `_view_before_close_fold`（见 `_FoldSnapshottingMemory`），不要靠时序去蹲。
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_prompt() if prompt is None else prompt,
@@ -956,7 +957,9 @@ async def test_recovery_converts_event_refs_into_memory_refs(runtime_with_images
 
     # 装填是调用方的责任（2026-09-21：`recover_agent` 对 registry miss 直接抛
     # `AgentNotLoaded`，按 agent 扫全库的 sweep 已删）。只喂内存，不建 TM、不跑。
+    await runtime.initialize()
     await runtime.rebuild_session(sid)
+    await runtime.initialize()
     await runtime.recover_agent(aid)
 
     tm = runtime._task_managers[sid]
@@ -1063,9 +1066,11 @@ async def test_restore_task_prompts_isolates_one_bad_task_and_logs_error(
     for e in events:
         await append_one(runtime.event_store, e)
 
+    await runtime.initialize()
     await runtime.rebuild_session(sid)
     import logging
     with caplog.at_level(logging.ERROR, logger="ctx_weft.core.runtime"):
+        await runtime.initialize()
         await runtime.recover_agent(aid)  # 必须不抛——整场恢复不能因一个 task 坏数据而死
 
     tm = runtime._task_managers[sid]

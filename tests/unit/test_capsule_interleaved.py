@@ -16,12 +16,12 @@ from ctx_weft.core.utils.estimate import estimate_tokens
 
 import pytest
 
-from ctx_weft.core.assembler.composer import DefaultComposer
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, _dispatch_ack
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import history_messages
 
 pytestmark = pytest.mark.asyncio
 
@@ -339,7 +339,7 @@ async def test_embedded_process_report_in_outputs():
 
 async def test_e2e_same_agent_subtask_no_400() -> None:
     """端到端相邻性守护（spec 2026-06-30 §2.5）：parent delegate 同 agent 子任务，close 后经
-    AgentRecallSource + DefaultComposer 归并，每个 tool message 紧跟其 assistant tool_call，
+    AgentRecallSource + PromptBuilder 历史投影归并，每个 tool message 紧跟其 assistant tool_call，
     且 delegate → _DISPATCH_ACK 严格相邻、子 body 排在 ack 之后、finish 对相邻。
     Guards the 400 fix end-to-end.
     """
@@ -408,12 +408,11 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
         },
     ), pctx)
 
-    # Compose messages via real AgentRecallSource + DefaultComposer
+    # Project messages via real AgentRecallSource + PromptBuilder history mapping.
     deps = SimpleNamespace(memory=mem, provider_ctx=pctx)
     req = SimpleNamespace(scope=asc, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
-    triples = DefaultComposer()._history_to_messages_with_sources(blocks)
-    messages = [m for m, *_ in triples]
+    messages = history_messages(blocks, task_id="P")
 
     # ── Helper: every tool message must immediately follow an assistant with matching tool_call ──
     def _assert_tool_follows_call(msgs):

@@ -53,6 +53,7 @@ def task_from_projection(proj: TaskView) -> Task:
     return Task(
         id=proj.id,
         session_id=proj.session_id,
+        details_complete=proj.details_complete,
         status=proj.status,  # type: ignore[arg-type]
         tenant_id=proj.tenant_id,
         title=proj.title,
@@ -77,5 +78,6 @@ def task_from_projection(proj: TaskView) -> Task:
         error_code=proj.error_code,
         created_at=_as_utc_opt(proj.created_at),
         finished_at=_as_utc_opt(proj.finished_at),
+        finalized=proj.finalized,
         user_prompt_in_memory=prompt_in_memory,
     )

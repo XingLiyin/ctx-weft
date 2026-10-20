@@ -124,6 +124,7 @@ async def test_multimodal_prompt_completes_one_actor_round_without_crashing() ->
     runtime.providers.register_memory(memory)
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -205,8 +206,8 @@ class _FinishRouterLLM(MockLLMAdapter):
 
 
 async def _run_and_collect_context_assembled_tokens(user_prompt) -> int:
-    """驱动一次完整 start_session 回合，返回 PrepareStep 真实装配（PriorityBudgetStrategy +
-    DefaultComposer 全链路）产出的 CONTEXT_ASSEMBLED.token_count（生产事件，非测试自己算的）。"""
+    """驱动一次完整 start_session 回合，返回 PrepareStep 经 PromptBuilder + Jinja
+    产出的 CONTEXT_ASSEMBLED.token_count（生产事件，非测试自己算的）。"""
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = _FinishRouterLLM()
@@ -215,6 +216,7 @@ async def _run_and_collect_context_assembled_tokens(user_prompt) -> int:
     runtime.providers.register_memory(memory)
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -233,9 +235,9 @@ async def _run_and_collect_context_assembled_tokens(user_prompt) -> int:
 
 @pytest.mark.asyncio
 async def test_assembled_token_count_higher_with_image_than_text_only() -> None:
-    """Phase 0 遗留义务 1（spec §6.5）：composer.py:400 的 image_tokens(m.content) 曾因
-    composer 一律拍扁 m.content 恒为 str 而恒返回 0。这里驱动完整装配链
-    （start_session → PrepareStep → ContextAssembler.assemble → DefaultComposer.compose），
+    """Phase 0 遗留义务 1（spec §6.5）：历史实现曾把 m.content 拍成 str，导致
+    image_tokens(m.content) 恒为 0。这里驱动完整装配链
+    （start_session → PrepareStep → ContextAssembler.assemble → PromptBuilder.compile），
     从生产事件 CONTEXT_ASSEMBLED 里取真实 token_count，断言含图会话 > 同等文本会话
     （二者共享同一段文本 "describe this image"，唯一变量是多出的 ImagePart）。"""
     text_tokens = await _run_and_collect_context_assembled_tokens(_TEXT_ONLY_PROMPT)
@@ -323,6 +325,7 @@ async def test_multimodal_prompt_reaches_wire_payload_as_image_block() -> None:
     runtime.providers.register_memory(memory)
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -409,6 +412,7 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
     if blob_store is not None:
         runtime.providers.register_memory_blob_store(blob_store)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -537,7 +541,7 @@ async def test_without_blob_store_memory_and_wire_stay_inline_base64() -> None:
 @pytest.mark.asyncio
 async def test_compact_assembly_carries_no_image_while_act_still_does() -> None:
     """覆盖 3（compaction 不再带图）：拿一次真实会话跑完后**真实 memory 里的记录**，
-    经**真实装配链**（runtime._build_assembler → PriorityBudgetStrategy → DefaultComposer）
+    经**真实装配链**（runtime._build_assembler → PromptBuilder + Jinja）
     各装配一次 ``purpose="compact"`` 与 ``purpose="act"``：
 
     - compact 的 messages 里**一个 ImagePart 都没有**（Task 4 的 per-purpose 降级）；
@@ -618,6 +622,7 @@ async def _run_text_only_session(*, blob_store):
     runtime.providers.register_event_blob_store(_StubEventBlobStore())
     runtime.providers.register_memory_blob_store(blob_store)
 
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo",
@@ -763,6 +768,7 @@ async def test_event_refs_and_memory_refs_are_independent(runtime_with_two_blob_
     import json
 
     runtime, mem_store, evt_store = runtime_with_two_blob_stores
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_MULTIMODAL_PROMPT,
@@ -822,6 +828,7 @@ async def test_event_blob_anchors_to_the_real_session_when_only_event_store_exis
     evt_store = _PrefixedEventBlobStore()
     runtime.providers.register_event_blob_store(evt_store)   # 刻意不注册 memory blob store
 
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_MULTIMODAL_PROMPT,

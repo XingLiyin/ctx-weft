@@ -50,6 +50,8 @@ _SRC = _REPO_ROOT / "src" / "ctx_weft"
 #: **按仓根相对路径认，不按 basename**——按 basename 放行会连带豁免 `src/` 下任何
 #: 同名新文件（再出现一个 `reducers.py` / `events.py` 就白白开了个口子）。
 _ALLOWED = {
+    # Startup appends interruption facts without constructing a TaskManager.
+    "src/ctx_weft/core/control/startup.py",
     "src/ctx_weft/core/orchestrator/task/manager.py",
     "src/ctx_weft/protocols/events.py",
     "src/ctx_weft/core/control/reducers.py",
@@ -250,6 +252,12 @@ def _task_status_writes(path: pathlib.Path) -> list[int]:
 class _CapturingBus:
     def __init__(self) -> None:
         self.events: list = []
+
+    async def emit_batch(self, events, *, on_committed=None):
+        if on_committed is not None:
+            on_committed()
+        for event in events:
+            await self.emit(event)
 
     async def emit(self, event) -> None:
         self.events.append(event)

@@ -1,4 +1,4 @@
-"""FinalizeStep：task 收尾——写 memory + blackboard publish + 更新 task 状态。
+"""FinalizeStep：持久化收尾记忆和黑板，向 TaskManager 报告结局。
 
 miniAgents 对齐版：
 - memory 内容 = task.outputs + "\\n\\nProcess Report: " + verdict.act_recap（合并写入）
@@ -15,9 +15,6 @@ from ctx_weft.core.models.discriminators import TaskErrorCode
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.task_memory_fold import (
     build_finish_slots,
-    pop_close_report,
-    register_close_synth,
-    replace_finish_report,
 )
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
@@ -201,7 +198,7 @@ def _parent_scope_of(state, task) -> MemoryAddress:
 
 
 async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, provider_ctx,
-                               *, replace: bool, tool_call_id: str) -> None:
+                               *, replace: bool, tool_call_id: str, operation_id: str = "") -> None:
     """写派发对的 tool 槽（tool_call_id 由 `_ensure_dispatch_frame` / `_find_dispatch_frame`
     给出，与框配对）。
 
@@ -223,13 +220,17 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
     stale = [r.id for r in recs
              if r.role == "tool"
              and (_is_frame_of(r, task) or r.metadata.get("tool_call_id") == tool_call_id)]
+    from ctx_weft.core.loop.steps.observe import record_id
+    result_id = record_id(operation_id, "dispatch_result", task.id, parent_scope)
+    if result_id and result_id in stale:
+        return
     if stale and not replace:
         return
     # v2 P3d：旧 ack 遗忘 + 终态写入一次原子 fold（stale 空 = 纯写入）
     await memory.fold(stale, [
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
-            content=content, timestamp=ts, role="tool",
+            content=content, timestamp=ts, role="tool", id=result_id,
             metadata={"origin_task_id": task.parent_task_id,
                       "child_task_id": task.id,
                       "tool_call_id": tool_call_id},
@@ -323,9 +324,11 @@ async def finalize_task_memory(memory, state, task, mem_content: str, outcome: s
     bg 替换真摘要落地后补删（默认 True 保守 = 旧行为，close 即折）。
     """
     descendants = _descendant_task_ids(task.id, ctx.task_manager)
-    short = await _is_short_leaf(
-        memory, state.scope, task, state.agent.loop_config, ctx, bool(descendants),
-    )
+    completion = getattr(state, "extra", {}).get("observe_completion", {})
+    short = (getattr(state, "extra", {}).get("observe_decision") or completion).get("short_leaf")
+    if short is None:
+        short = await _is_short_leaf(
+            memory, state.scope, task, state.agent.loop_config, ctx, bool(descendants))
     return await _close_one(
         memory, state, task, mem_content, outcome, ctx,
         short=short, act_recap=act_recap, task_summary=task_summary,
@@ -372,12 +375,11 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     段（短任务留全 raw）——`short` 决定 body raw-vs-压末段（spec §3.2）。返回事件列表。
 
     延迟折叠（spec 2026-07-20）：`has_llm_summary=False`（规则 observe 占位）时末段 raw 不在
-    close 时删，`raw_fold_scope` 随 finish 对合成登记下去，bg 替换真摘要后补删；bg 失败则
+    close 时删；保留策略随 finish 对持久化，bg 替换真摘要后按原决定补删；bg 失败则
     raw 永久保留（降级 = 保 raw，信息不丢）。
     """
-    # Terminal finalize is single-entry by construction (retry is non-terminal; restore reschedules
-    # only non-terminal tasks; re-dispatch uses a new task id), so the residue/bubble writes here
-    # need no idempotency guard. [2026-06-23]
+    # A committed observation can be replayed after a crash during close. Its operation
+    # identity gives finish slots, dispatch results and publications stable record IDs.
     events: list[Any] = []
     same_agent = task.creator_agent_id == task.assigned_agent_id
     cross_agent = bool(task.parent_task_id) and not same_agent
@@ -405,6 +407,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             await _put_dispatch_result(
                 memory, parent_scope, task, f"{report_prefix}{mem_content}", frame_ts,
                 ctx.provider_ctx, replace=True, tool_call_id=frame_tcid,
+                operation_id=getattr(state, "extra", {}).get("observe_id", ""),
             )
             events.append(make_event(
                 state, EventType.MEMORY_INGESTED,
@@ -419,17 +422,22 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             await _put_dispatch_result(
                 memory, parent_scope, task, _dispatch_ack(task_ref(task), outcome), frame_ts,
                 ctx.provider_ctx, replace=True, tool_call_id=frame_tcid,
+                operation_id=getattr(state, "extra", {}).get("observe_id", ""),
             )
             # 嵌套合成子自己的 finish 对（写进共享 agent scope，@close 时刻）
             await _synthesize_dispatch_pair(
                 memory, parent_scope, task, act_recap, task_summary, outcome, ctx.provider_ctx,
-                raw_fold_scope=raw_fold_scope, final_reply=final_reply)
+                raw_fold_scope=raw_fold_scope, final_reply=final_reply, preserve_raw=short,
+                operation_id=getattr(state, "extra", {}).get("observe_id", ""),
+                completed_at=getattr(state, "extra", {}).get("observe_completion", {}).get("completed_at", ""))
 
     # 2) 自身 finish 对：own root（session 根或跨 agent 根）close 时无条件在 own scope 合成
     if (is_own_root or getattr(task, "switched_to_task_id", "")) and mem_content:
         await _synthesize_dispatch_pair(memory, state.scope, task, act_recap, task_summary, outcome,
                                         ctx.provider_ctx, raw_fold_scope=raw_fold_scope,
-                                        final_reply=final_reply)
+                                        final_reply=final_reply, preserve_raw=short,
+                                        operation_id=getattr(state, "extra", {}).get("observe_id", ""),
+                                        completed_at=getattr(state, "extra", {}).get("observe_completion", {}).get("completed_at", ""))
         events.append(make_event(
             state, EventType.MEMORY_INGESTED,
             payload={"memory_event_type": MemoryEventType.AGENT_CONVERSATION_TURN.value,
@@ -465,6 +473,8 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
          `MemoryAddress(session_id, task.id, task.assigned_agent_id or task.creator_agent_id)`。
     finish 对 `register_bg=False`：这不是正常 close 流程产生的，没有对应的后台 observe 会来替换它，
     登记只会累积永不消费的状态（同熔断收尾路径的既有惯例）。
+    取消是粘滞终态：按 task 固定记录 ID，按持久化取消时间固定槽位时间；
+    重放半写入的 finish 对或父 ack 时不追加新记录。
     """
     same_agent = task.creator_agent_id == task.assigned_agent_id
     cross_agent = bool(task.parent_task_id) and not same_agent
@@ -486,12 +496,13 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
         ack_text = runtime_prompt("dispatch_cancelled", ref=task_ref(task), reason=reason_text)
         await _put_dispatch_result(
             memory, parent_scope, task, ack_text, frame_ts, provider_ctx, replace=True,
-            tool_call_id=frame_tcid,
+            tool_call_id=frame_tcid, operation_id=f"cancel:{task.id}",
         )
         if same_agent:
             await _synthesize_dispatch_pair(
                 memory, parent_scope, task, act_recap, task_summary, "cancelled", provider_ctx,
-                register_bg=False,
+                operation_id=f"cancel:{task.id}",
+                completed_at=(task.finished_at.isoformat() if task.finished_at else ""),
             )
             return
 
@@ -502,55 +513,44 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
         )
         await _synthesize_dispatch_pair(
             memory, own_scope, task, act_recap, task_summary, "cancelled", provider_ctx,
-            register_bg=False,
+            operation_id=f"cancel:{task.id}",
+            completed_at=(task.finished_at.isoformat() if task.finished_at else ""),
         )
 
 
 async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_summary: str,
-                                    outcome: str, provider_ctx, *, register_bg: bool = True,
-                                    raw_fold_scope=None, final_reply: str = "") -> None:
-    """close 合成 agent 层 finish 对（spec 2026-06-30 两段化）：
-    assistant{content=act_recap + finish_task 调用} / tool{content=task_summary 综合总结}。
-    own-root：占位先写，bg close observe 产新两段后经 replace_finish_report 替换（A1）。
+                                    outcome: str, provider_ctx, *,
+                                    raw_fold_scope=None, final_reply: str = "", preserve_raw: bool | None = None,
+                                    operation_id: str = "", completed_at: str = "") -> None:
+    """Persist finish slots with the original raw-retention policy.
 
-    register_bg=False（熔断收尾等 runtime 侧一次性合成路径）：跳过 pop_close_report /
-    register_close_synth / replace_finish_report 整段 bg-observe 联动——这条 finish 对不是
-    正常 close 流程产生的、没有对应的后台 observe 会来替换它，登记只会累积永不消费的状态。
-
-    raw_fold_scope（spec 2026-07-20 延迟折叠）：非 None = close 时占位、末段 raw 尚未删，
-    此 scope 即 raw 所在 task 层。slot 命中（bg 真摘要已到）→ 替换后立即补删；否则随
-    register_close_synth 登记，bg 替换成功后补删。register_bg=False 路径忽略（取消/熔断
-    收尾从不折 raw）。
+    Background reports replace only a complete pair. No report is handed off
+    through process-local state.
     """
-    base = now_utc()
-    tool_call_id = generate_id("tcall")
+    from ctx_weft.core.loop.steps.observe import record_id
+    from datetime import datetime
+    base = datetime.fromisoformat(completed_at) if completed_at else now_utc()
+    tool_call_id = record_id(operation_id, "finish_call", scope, task.id) or generate_id("tcall")
     # 占位 close（raw_fold_scope 非 None = 末段 raw 还没折）先写两槽：答复此刻仍在 raw 里，
     # 提前塞锚点会让它出现两遍；等 bg 真报告落地、raw 真被折时由 replace_finish_report 升三槽。
     embed_reply = "" if raw_fold_scope is not None else final_reply
     # 反转契约（spec 2026-07-01）：finish_task 退化为无参收尾标记（答复不再塞进 input.result）。
     # 槽位形态见 build_finish_slots：有答复 → recap / 答复+finish_task / 报告 三槽，
     # 无答复 → recap+finish_task / 报告 两槽。
-    for event in build_finish_slots(
+    slots = build_finish_slots(
         scope=scope, task_id=task.id, parent_task_id=task.parent_task_id,
         title=task.title or "", outcome=outcome, act_recap=act_recap,
         task_summary=task_summary, final_reply=embed_reply, base=base,
         tool_call_id=tool_call_id,
         switched=getattr(task, "switch_requested", False),
-    ):
+    )
+    policy = {"preserve_raw": (raw_fold_scope is None and not final_reply) if preserve_raw is None else preserve_raw,
+              "outcome": outcome, "slot_count": len(slots), "observe_id": operation_id}
+    for index, event in enumerate(slots):
+        event.metadata["finish_policy"] = policy
+        event.id = record_id(operation_id, "finish", scope, task.id, index)
         await memory.ingest(event, provider_ctx)
 
-    if register_bg:
-        bg = pop_close_report(task.id)
-        if bg is not None:
-            bg_recap, bg_summary = bg
-            await replace_finish_report(memory, provider_ctx, scope, task.id, tool_call_id,
-                                         bg_recap, bg_summary, outcome, task.title or "",
-                                         final_reply=(final_reply if raw_fold_scope else ""))
-            if raw_fold_scope is not None:
-                # 真摘要已落地（slot 命中替换完成）→ 立即补删末段 raw（延迟折叠的即时分支）
-                await _supersede_final_raw_segment(memory, raw_fold_scope, provider_ctx)
-        else:
-            register_close_synth(task.id, tool_call_id, scope, outcome, raw_fold_scope)
 
 
 async def apply_task_close(
@@ -571,7 +571,10 @@ async def apply_task_close(
     mem_content 在这里现算（`task.outputs` + `task_summary or act_recap`），两个调用方
     因此不会各算一份、算歪一份。
     """
+    from ctx_weft.core.loop.steps.observe import record_id
     events: list[Any] = []
+    if "BlackboardPublished:" in getattr(state, "extra", {}).get("observe_effects", []):
+        return events
     mem_content = _build_memory_content(task.outputs, task_summary or act_recap)
     if not mem_content:
         return events
@@ -590,6 +593,8 @@ async def apply_task_close(
         await ctx.memory.ingest(
             MemoryEvent(
                 kind=MemoryKind.PUBLICATION, scope=MemoryScope.SESSION,
+                id=record_id(
+                    getattr(state, "extra", {}).get("observe_id", ""), "blackboard", task.id),
                 address=state.scope,
                 content=mem_content,
                 timestamp=now_utc(),
@@ -663,21 +668,27 @@ class FinalizeStep(Step):
         # 交给 TaskManager 的结局：用 observer 的**原值** outcome，不经下面 retry_exhausted
         # 的重试耗尽降级——那是 TM 的活（task_disposition.disposition_for），loop 只报
         # 「observer 说了什么」。task 状态与状态事件都不在本 step 落地了（Task 4）。
+        extra = getattr(state, "extra", {})
         run_outcome = RunOutcome(
             kind=RunOutcomeKind.COMPLETED,
             verdict=outcome,
             summary=summary,
             outputs=task.outputs,
             error=task.error or "",
+            observe_id=extra.get("observe_id", ""),
+            observe_disposition=(extra.get("observe_decision") or extra.get("observe_completion", {})).get("disposition"),
+            observe_report_pending=bool(extra.get("observe_decision", {}).get("verdict")),
         )
 
         # 判 continue 但超过重试上限 → 降级 fail（不再重试）。专属 error_code 区分「程序按上限
         # 熔断」与 observer 主动判死；死因 = 最后一轮 retry 判决暂存的受阻原因（task.error，
         # report_observation 判 continue 且确有阻塞时写入），机械退出轮没有判决则为空。
-        # **本地降级只为收尾副作用服务**（下面的 close/bubble/blackboard 与 TASK_FINALIZED
-        # 的 outcome），不再决定 task 状态：状态与 TaskFailed 事件由 TM 据同一条判据算出
-        # （disposition_for 的 exhausted 分支）。两处判据逐字同形，改一处必须改另一处。
-        retry_exhausted = outcome == VERDICT_CONTINUE and task.retry_count >= task.max_retries
+        # 本地降级只决定收尾副作用；已有持久化 disposition 时直接采用它，避免
+        # 冷恢复重算重试预算，把已确定的 FAILED 当 continue 并清掉最终输出。
+        # 没有持久化判决的旧路径仍按 TaskManager 同一预算规则处理。
+        decision = run_outcome.observe_disposition
+        retry_exhausted = outcome == VERDICT_CONTINUE and (
+            decision["status"] == "FAILED" if decision else task.retry_count >= task.max_retries)
         if retry_exhausted:
             outcome = VERDICT_FAIL
             task.observer_outcome = VERDICT_FAIL
@@ -688,7 +699,7 @@ class FinalizeStep(Step):
         # `apply_task_close` 自己算——两个调用方各算一份必然有一份算歪。
 
         # 1) 统一 close + blackboard（`apply_task_close`，与带外 finalize 共用同一份）。
-        if terminal:
+        if terminal and "TaskFinalized:" not in getattr(state, "extra", {}).get("observe_effects", []):
             events.extend(await apply_task_close(
                 state, task, ctx, outcome=outcome, act_recap=summary,
                 task_summary=task_summary,

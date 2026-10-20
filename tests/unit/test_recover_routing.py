@@ -135,9 +135,9 @@ async def test_recover_routes_by_pending_hitl(monkeypatch) -> None:
     assert runtime.hitl_registry.find_for_tool_call("B", "tcA", HITL_STAGE_TOOL) is None
     assert runtime.hitl_registry.list_pending(session_id="B") == []
     # 无 pending 的两个 → 被进程重启打断，等 /resume。
-    assert set(interrupted) == {"B", "C"}
+    assert interrupted == []  # Loaded state is queried, not rebroadcast.
     # 有人在等回话的那个 → AGENT_WAITING_HUMAN，不是 interrupted（绝不把 parked 任务孤立）。
-    assert waiting_human == ["A"]
+    assert waiting_human == []
     # 不再断言 `runtime._session_registry.status_of(...)`（该方法本身已在 Task 15 被
     # 摘除）——现在的观测点换成了 AGENT_* 现状广播本身，见模块 docstring。
 
@@ -163,7 +163,7 @@ async def test_recover_multi_hitl_partial_resolve_still_pending() -> None:
     assert {r.id for r in runtime.hitl_registry.list_pending(session_id="M")} == {"h2"}
     assert n == 1                                                 # 一个 session、一个 agent
     assert interrupted == []
-    assert waiting_human == ["M"]
+    assert waiting_human == []
 
 
 # ── 2026-09-04 spec §6.2：恢复入口换轴 ─────────────────────────────────────
@@ -223,8 +223,10 @@ async def test_recover_agent_resolves_session_from_the_record() -> None:
     rt = _runtime_for_recover_agent()
     session_id, root_agent_id = await _crashed_session(rt)
     await rebuild_all_active(rt)
+    await rt.initialize()
     await rt.recover_agent(root_agent_id)          # 不传 session_id 也能跑通
-    assert rt.get_agent(root_agent_id).session_id == session_id
+    await rt.initialize()
+    assert (await rt.get_agent(root_agent_id)).data.session_id == session_id
 
 
 async def test_recover_agent_unknown_raises() -> None:
@@ -237,6 +239,7 @@ async def test_recover_agent_unknown_raises() -> None:
 
     rt = _runtime_for_recover_agent()
     with pytest.raises(AgentNotFound):
+        await rt.initialize()
         await rt.recover_agent("agt_nope")
 
 
@@ -268,16 +271,20 @@ async def test_recover_agent_refuses_a_cold_registry_then_works_after_rebuild_se
     assert rt._agent_lifecycle_manager.record_of(root_agent_id) is None
 
     with pytest.raises(AgentNotLoaded) as exc:
+        await rt.initialize()
         await rt.recover_agent(root_agent_id)
     # 宿主既有的 `except AgentNotFound` 必须照样接住（子类，不是新的顶层类型）。
     assert isinstance(exc.value, AgentNotFound)
     assert "rebuild_session" in str(exc.value), "报错要告诉调用方下一步做什么"
 
     # 装填之后同一句调用照常跑通——被推翻的是「core 替你找」，不是这条路径本身。
+    await rt.initialize()
     await rt.rebuild_session(session_id)
+    await rt.initialize()
     await rt.recover_agent(root_agent_id)
 
-    assert rt.get_agent(root_agent_id).session_id == session_id
+    await rt.initialize()
+    assert (await rt.get_agent(root_agent_id)).data.session_id == session_id
     assert [r.id for r in rt.hitl_registry.list_pending(session_id=session_id)] == ["hit_1"]
 
 
@@ -335,14 +342,19 @@ async def test_cold_hitl_reply_hydrates_only_its_own_session_not_a_sweep() -> No
     assert rt._agent_lifecycle_manager.record_of(aid1) is None
     assert rt._agent_lifecycle_manager.record_of(aid2) is None
 
+    await rt.initialize()
     await rt.reply_to_hitl(HitlReply(hitl_id=req1.id, outcome="accepted", agent_id=aid1))
 
     # S1 被精确装填——这次续跑真正需要的那个 session。
-    assert rt.get_agent(aid1).session_id == sid1
+    await rt.initialize()
+    assert (await rt.get_agent(aid1)).data.session_id == sid1
     # tsk_1 仍有一个未决请求（hit_2）挂着，保持 parked：断言不必陪一整条 LLM run 走完。
     assert [r.id for r in rt.hitl_registry.list_pending(session_id=sid1)] == \
         [r.id for r in rt.hitl_registry.list_pending(session_id=sid1) if r.tool_call_id == "tcB"]
 
     # S2 一个字节都没被碰——sweep 没有发生，只有 S1 被喂进 ALM。
     assert rt._agent_lifecycle_manager.record_of(aid2) is None
-    assert rt.list_agents(session_id=sid2) == []
+    await rt.initialize()
+    cold = await rt.list_agents(session_id=sid2)
+    assert all(item.source == "events" and not item.loaded for item in cold)
+    assert rt._agent_lifecycle_manager.record_of(aid2) is None

@@ -115,6 +115,7 @@ async def test_run_single_task_root_task_description_is_text_not_truncated_parts
 
     runtime._execute_task = _fake_execute_task  # type: ignore[method-assign]
 
+    await runtime.initialize()
     await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt=_content(),
     )
@@ -219,6 +220,7 @@ async def test_resume_session_without_jsonable_falls_back_to_the_text_prompt():
 
     await sm.resume_session(
         session_id="ses-resume", event_store=store, user_prompt="第二轮",
+        task_manager=sm._new_task_manager(Session(id="ses-resume", user_prompt="", status="RUNNING")),
     )
 
     resumed = next(e for e in bus.events if e.type == "SessionResumed")

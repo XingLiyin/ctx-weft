@@ -105,6 +105,7 @@ async def test_pause_before_first_chunk_discards_the_whole_round() -> None:
     # `send_message` 才走「新建 task」那条分支（`_start_task_for_agent`），也才有未提交
     # 窗口可言。interactive 的 root task 会 park 在 wait 气泡上，下一条消息注入的是同一个
     # 既有 task，不开窗口（那条路径的暂停仍然照常 park，只是现在**当场**生效了）。
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi",
         context_limit=_MOCK_CONTEXT_LIMIT, unattended=True))
@@ -117,6 +118,7 @@ async def test_pause_before_first_chunk_discards_the_whole_round() -> None:
 
     # ── 第二轮：新建 task（未提交窗口），LLM 卡在首个 chunk 之前 ────────────────
     llm.stalling = True
+    await rt.initialize()
     turn = await rt.send_message(aid, _DISCARDED_PROMPT, session_id=sid)
     await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
 
@@ -130,6 +132,7 @@ async def test_pause_before_first_chunk_discards_the_whole_round() -> None:
     )
 
     # ── 按下暂停 ────────────────────────────────────────────────────────────────
+    await rt.initialize()
     assert await rt.pause_session(sid) is True
     await asyncio.sleep(0.5)
 
@@ -157,6 +160,7 @@ async def test_pause_before_first_chunk_discards_the_whole_round() -> None:
 
     # ⑤ 下一条消息照常开新一轮（会话没被这次丢弃搞坏）
     llm.stalling = False
+    await rt.initialize()
     again = await rt.send_message(aid, "ok, different question", session_id=sid)
     assert again.task_id != turn.task_id
     await asyncio.sleep(0.5)

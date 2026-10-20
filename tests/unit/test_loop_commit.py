@@ -15,9 +15,9 @@ from ctx_weft.core.loop.signals import HitlPark, RoundDiscarded
 
 
 def context():
-    state = NS(task=NS(id="task"), extra={})
+    state = NS(task=NS(id="task"), run_id="actor", extra={})
     manager = NS(commit_round=AsyncMock(), is_round_open=lambda tid: True,
-                 round_hitl_id=lambda tid: "hitl", abandon_round=AsyncMock())
+                 round_hitl_id=lambda tid: "hitl", abandon_round=AsyncMock(), bind_round_run=Mock())
     ctx = NS(task_manager=manager, steps=NS(start=Mock()), hitl=None)
     return state, ctx
 
@@ -73,6 +73,7 @@ async def test_hot_reply_rearms_only_its_own_window():
     rearm_after_hot_reply(state, ctx, "other")
     assert state.extra[ROUND_COMMITTED_KEY]
     rearm_after_hot_reply(state, ctx, "hitl")
+    ctx.task_manager.bind_round_run.assert_called_once_with("task", "actor", starts_run=False)
     assert not state.extra[ROUND_COMMITTED_KEY]
     assert state.extra[HOT_REPLY_ROUND_KEY] == "hitl"
     with pytest.raises(HitlPark):

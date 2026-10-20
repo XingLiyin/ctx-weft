@@ -90,22 +90,23 @@ async def test_wait_for_finish_ignores_run_finished():
     waiter = asyncio.create_task(h.wait_for_finish(timeout=0.3))
     await asyncio.sleep(0)
     await bus.emit(_ev(id="e1", type="RunFinished"))
-    await asyncio.wait_for(waiter, timeout=2.0)   # 靠超时返回，不是靠 RunFinished
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(waiter, timeout=2.0)
 
 
 async def test_wait_for_finish_ignores_an_earlier_overlapping_launchs_recap_done():
     """二轮修复的回归守卫（2026-09-04）：`_task_pending` 只挂最新一次 launch，但同一个
     task 一生里可能有多次 fire-and-forget 后台 observe（`interrupt`/`mechanical`/
     `dispatch`/`finish` 等不同 boundary，跨 suspend/resume、重试多轮发生），不重叠只是
-    **通常**情况——上一轮（例如 `interrupt`/`mechanical` 边界）launch 的 `TaskRecapDone`
-    完全可能在这一轮终态事件之后、这一轮（close 边界）自己的 `TaskRecapDone` 之前才
+    **通常**情况——上一轮（例如 `interrupt`/`mechanical` 边界）launch 的 `ObserveApplied`
+    完全可能在这一轮终态事件之后、这一轮（close 边界）自己的 `ObserveApplied` 之前才
     姗姗来迟地送达。`wait_for_finish` 若只按事件类型匹配，会把这条迟到的、不相干的
-    `TaskRecapDone` 误当成「这次终态触发的那次折叠」，提前返回——同一个 bug 在更窄的
+    `ObserveApplied` 误当成「这次终态触发的那次折叠」，提前返回——同一个 bug 在更窄的
     窗口里复现。
 
     这里不跑真实 runtime（两次真实 launch 重叠是一场难以确定性复现的调度竞态），直接
     摆弄 `background_observe` 的模块级登记表，模拟「更早一次 launch 仍在途、这次终态
-    事件之后才等到它迟到的 TaskRecapDone」这个精确场景——与
+    事件之后才等到它迟到的 ObserveApplied」这个精确场景——与
     `test_wait_for_finish_returns_after_deferred_fold_lands` 互补：那条测真实折叠
     落地，这条测「等的必须是对的那次」。"""
     
@@ -130,35 +131,35 @@ async def test_wait_for_finish_ignores_an_earlier_overlapping_launchs_recap_done
         for _ in range(5):
             await asyncio.sleep(0)
 
-        # 更早一次（interrupt/mechanical 边界）launch 的 TaskRecapDone 迟到——run_id
+        # 更早一次（interrupt/mechanical 边界）launch 的 ObserveApplied 迟到——run_id
         # 对不上这次登记的 "run_close_launch"。
-        await bus.emit(_ev(id="e2", type=EventType.TASK_RECAP_DONE, run_id="run_earlier_launch"))
+        await bus.emit(_ev(id="e2", type=EventType.OBSERVE_APPLIED, run_id="run_earlier_launch"))
         for _ in range(5):
             await asyncio.sleep(0)
         assert not waiter.done(), (
-            "wait_for_finish 不该被更早一次 launch 的 TaskRecapDone 提前放行"
+            "wait_for_finish 不该被更早一次 launch 的 ObserveApplied 提前放行"
         )
 
-        # 这次 launch 自己的 TaskRecapDone 才是真正该等的那个。
-        await bus.emit(_ev(id="e3", type=EventType.TASK_RECAP_DONE, run_id="run_close_launch"))
+        # 这次 launch 自己的 ObserveApplied 才是真正该等的那个。
+        await bus.emit(_ev(id="e3", type=EventType.OBSERVE_APPLIED, run_id="run_close_launch"))
         await asyncio.wait_for(waiter, timeout=2.0)
     finally:
         h._pending_observe = None
 
 
-async def test_wait_for_finish_matches_task_recap_done_by_value_not_identity():
-    """三轮修复的回归守卫（2026-09-04）：`ev2.type` 与 `EventType.TASK_RECAP_DONE` 的
+async def test_wait_for_finish_matches_observe_applied_by_value_not_identity():
+    """三轮修复的回归守卫（2026-09-04）：`ev2.type` 与 `EventType.OBSERVE_APPLIED` 的
     匹配必须用 `==`（值相等），不能用 `is`（身份相等）。
 
     `EventBus` 是宿主可自行实现的协议（docs 明确把换成 Redis Streams 当作支持的范例）；
     序列化往返一趟的宿主总线，投出来的 `.type` 会是裸 `str`，不再是 `EventType` 枚举
-    成员实例——`EventType` 是 `StrEnum`，`EventType.TASK_RECAP_DONE == "TaskRecapDone"`
+    成员实例——`EventType` 是 `StrEnum`，`EventType.OBSERVE_APPLIED == "ObserveApplied"`
     恒真，但两者 `is` 恒假（裸 str 与枚举成员永远不是同一个对象）。若判据用 `is`，这
-    条真正该等的 `TaskRecapDone`（`run_id` 对得上）会被裸字符串这个事实悄无声息地
+    条真正该等的 `ObserveApplied`（`run_id` 对得上）会被裸字符串这个事实悄无声息地
     滤掉——`wait_for_finish` 不抛异常，会耗光整个 `timeout` 才落到超时兜底返回，宿主
     体感就是「挂住了」。
 
-    这里构造的 `TaskRecapDone` 事件 `type` 字段是裸字符串 `"TaskRecapDone"`（模拟一个
+    这里构造的 `ObserveApplied` 事件 `type` 字段是裸字符串 `"ObserveApplied"`（模拟一个
     序列化往返的宿主总线投出来的事件），`run_id` 与登记的在途 launch 一致——断言
     `wait_for_finish` 依然认得出它、正常返回，而不是耗光 `timeout` 才靠超时兜底返回。"""
     
@@ -184,7 +185,7 @@ async def test_wait_for_finish_matches_task_recap_done_by_value_not_identity():
         # 裸字符串 type（不是 EventType 枚举成员）——模拟序列化往返的宿主总线；
         # run_id 与登记的在途 launch 一致，`wait_for_finish` 该认得出它。
         t0 = asyncio.get_running_loop().time()
-        await bus.emit(_ev(id="e2", type="TaskRecapDone", run_id="run_close_launch"))
+        await bus.emit(_ev(id="e2", type="ObserveApplied", run_id="run_close_launch"))
 
         await asyncio.wait_for(waiter, timeout=2.0)
         elapsed = asyncio.get_running_loop().time() - t0
@@ -193,26 +194,26 @@ async def test_wait_for_finish_matches_task_recap_done_by_value_not_identity():
         # LoopState），区分不出「匹配上了」和「超时了」，只有耗时能区分。
         assert elapsed < 0.2, (
             f"wait_for_finish 耗时 {elapsed:.3f}s——像是靠 0.3s 超时兜底返回的，"
-            "说明 TaskRecapDone 没被裸字符串 type 认出来"
+            "说明 ObserveApplied 没被裸字符串 type 认出来"
         )
     finally:
         h._pending_observe = None
 
 
 async def test_wait_for_finish_does_not_hang_when_recap_done_arrives_before_terminal():
-    """终审 IMPORTANT 3 回归：`TaskRecapDone` 先于终态事件到达时不能挂住。
+    """终审 IMPORTANT 3 回归：`ObserveApplied` 先于终态事件到达时不能挂住。
 
-    原实现的外层循环只在 `ev.type in terminal` 时才有反应；先到的 `TaskRecapDone`
+    原实现的外层循环只在 `ev.type in terminal` 时才有反应；先到的 `ObserveApplied`
     被当成"不认识的事件"直接丢弃（流是单向消费的，丢过去的事件读不回来）。等终态
     事件终于到达、内层循环才开始等那个 `run_id`——它已经过去了，`pending.done()`
-    此刻仍是 `False`（后台任务是否跑完与它的 `TaskRecapDone` 是否已送达是两回事），
+    此刻仍是 `False`（后台任务是否跑完与它的 `ObserveApplied` 是否已送达是两回事），
     内层循环于是无休止地等一条不会再来的事件，直到 `timeout` 耗尽才靠兜底返回——
     不抛异常，只是把调用方晾到超时（这正是最坏的失败形态）。
 
     本测试给 `wait_for_finish` 一个短 `timeout`：修复后必须远早于这个超时返回
-    （证明是被"提前到账"的 `TaskRecapDone` 放行的，不是靠超时兜底）；未修复时会
+    （证明是被"提前到账"的 `ObserveApplied` 放行的，不是靠超时兜底）；未修复时会
     原地耗尽这个 `timeout` 才返回——用耗时区分两者，与
-    `test_wait_for_finish_matches_task_recap_done_by_value_not_identity` 同一手法。
+    `test_wait_for_finish_matches_observe_applied_by_value_not_identity` 同一手法。
     """
     
     class _NeverDoneTask:
@@ -230,8 +231,8 @@ async def test_wait_for_finish_does_not_hang_when_recap_done_arrives_before_term
             await asyncio.sleep(0)
 
         t0 = asyncio.get_running_loop().time()
-        # TaskRecapDone 先到账——这次终态触发的那次折叠先落地，事件先送达。
-        await bus.emit(_ev(id="e1", type=EventType.TASK_RECAP_DONE, run_id="run_close_launch"))
+        # ObserveApplied 先到账——这次终态触发的那次折叠先落地，事件先送达。
+        await bus.emit(_ev(id="e1", type=EventType.OBSERVE_APPLIED, run_id="run_close_launch"))
         for _ in range(5):
             await asyncio.sleep(0)
         # 终态事件随后才到。
@@ -241,7 +242,7 @@ async def test_wait_for_finish_does_not_hang_when_recap_done_arrives_before_term
         elapsed = asyncio.get_running_loop().time() - t0
         assert elapsed < 0.2, (
             f"wait_for_finish 耗时 {elapsed:.3f}s——像是靠 0.3s 超时兜底返回的，"
-            "说明先到账的 TaskRecapDone 没被记住，白等了一条已经过去的事件"
+            "说明先到账的 ObserveApplied 没被记住，白等了一条已经过去的事件"
         )
     finally:
         h._pending_observe = None
@@ -303,6 +304,7 @@ async def test_wait_for_finish_returns_after_deferred_fold_lands():
     memory = InMemoryMemoryProvider()
     runtime.providers.register_memory(memory)
 
+    await runtime.initialize()
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="say hello", context_limit=100_000,
     ))
@@ -342,11 +344,12 @@ async def test_start_session_returns_turn_handle():
     """
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    llm = MockLLMAdapter(responses=[MockResponse(text="done", tool_calls=[
+    llm = MockLLMAdapter(observer_verdict="success", responses=[MockResponse(text="done", tool_calls=[
         ToolCall(id="tc1", name="control__finish_task", arguments={})])])
     rt = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
 
+    await rt.initialize()
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
     ))

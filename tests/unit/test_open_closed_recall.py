@@ -24,6 +24,7 @@ from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, Prov
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.protocols.memory_compat import legacy_type_of
 
 pytestmark = pytest.mark.asyncio
 
@@ -97,8 +98,13 @@ async def _recall_blocks(mem: InMemoryMemoryProvider, agent_scope: MemoryAddress
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
-    blocks.sort(key=lambda b: (b.metadata.get("timestamp", ""), b.metadata.get("seq_no", 0)))
+    blocks.sort(key=lambda b: (b.value.timestamp, b.metadata.get("sequence", 0)))
     return blocks
+
+
+def _type(block):
+    record = block.value
+    return record.type or legacy_type_of(record.kind, record.scope, record.role)
 
 
 # ─── (a) 已结束 root task：召回含 body + finish 对 ─────────────────────────────
@@ -123,30 +129,30 @@ async def test_finished_root_task_recall_yields_body_and_finish_pair() -> None:
     await _synthesize_dispatch_pair(mem, asc, task, "已完成 JWT 改造", task_summary_text, "success", _pctx())
 
     blocks = await _recall_blocks(mem, asc)
-    types = [b.metadata.get("type") for b in blocks]
+    types = [_type(b) for b in blocks]
 
     # ① task 层 body 仍在（USER_PROMPT + TASK_COMPACT_SUMMARY）
     assert T.USER_PROMPT in types, f"finished task body (USER_PROMPT) must be recalled; types={types}"
     assert T.TASK_COMPACT_SUMMARY in types, f"finished task body (TASK_COMPACT_SUMMARY) must be recalled; types={types}"
 
     # ② agent 层 finish 对（AGENT_CONVERSATION_TURN，2 条）
-    act_blocks = [b for b in blocks if b.metadata.get("type") == T.AGENT_CONVERSATION_TURN]
+    act_blocks = [b for b in blocks if _type(b) == T.AGENT_CONVERSATION_TURN]
     assert len(act_blocks) == 2, (
         f"finished task must yield exactly 2 AGENT_CONVERSATION_TURN (finish pair); "
-        f"got {[(b.metadata.get('role'), b.content[:40]) for b in act_blocks]}"
+        f"got {[(b.value.role, b.value.content[:40]) for b in act_blocks]}"
     )
-    roles = [b.metadata.get("role") for b in act_blocks]
+    roles = [b.value.role for b in act_blocks]
     assert roles == ["assistant", "tool"], f"finish pair must be [assistant, tool]; got {roles}"
 
     # finish_task tool_call 在 assistant 回合
-    finish_tc = act_blocks[0].metadata.get("tool_calls", [])
+    finish_tc = act_blocks[0].value.metadata.get("tool_calls", [])
     assert finish_tc and finish_tc[0].get("name", "").endswith("finish_task"), (
         f"finish pair assistant must have finish_task tool_call; got {finish_tc}"
     )
 
     # task_summary（process report）在 tool 回合
-    assert task_summary_text in act_blocks[1].content, (
-        f"finish pair tool must contain task_summary; got {act_blocks[1].content!r}"
+    assert task_summary_text in act_blocks[1].value.content, (
+        f"finish pair tool must contain task_summary; got {act_blocks[1].value.content!r}"
     )
 
     # 验证判据：body 在 task 层未被 supersede（task-resident 设计）
@@ -175,17 +181,17 @@ async def test_running_task_recall_yields_body_no_finish_pair() -> None:
     # 不 close（status=RUNNING，无 finish 对写入 agent 层）
 
     blocks = await _recall_blocks(mem, asc)
-    types = [b.metadata.get("type") for b in blocks]
+    types = [_type(b) for b in blocks]
 
     # body 存在（task 层）
     assert T.USER_PROMPT in types, f"running task body (USER_PROMPT) must be recalled; types={types}"
     assert T.LLM_RESPONSE in types, f"running task body (LLM_RESPONSE) must be recalled; types={types}"
 
     # 无 finish 对（无 AGENT_CONVERSATION_TURN）
-    act_blocks = [b for b in blocks if b.metadata.get("type") == T.AGENT_CONVERSATION_TURN]
+    act_blocks = [b for b in blocks if _type(b) == T.AGENT_CONVERSATION_TURN]
     assert not act_blocks, (
         f"running task must NOT have finish pair (AGENT_CONVERSATION_TURN); "
-        f"got {[(b.metadata.get('role'), b.content[:40]) for b in act_blocks]}"
+        f"got {[(b.value.role, b.value.content[:40]) for b in act_blocks]}"
     )
 
 
@@ -203,10 +209,10 @@ async def test_paused_task_recall_yields_body_no_finish_pair() -> None:
     # 暂停：status=SUSPENDED，未 close，无 finish 对
 
     blocks = await _recall_blocks(mem, asc)
-    types = [b.metadata.get("type") for b in blocks]
+    types = [_type(b) for b in blocks]
 
     assert T.USER_PROMPT in types, "paused task body must be recalled"
-    act_blocks = [b for b in blocks if b.metadata.get("type") == T.AGENT_CONVERSATION_TURN]
+    act_blocks = [b for b in blocks if _type(b) == T.AGENT_CONVERSATION_TURN]
     assert not act_blocks, (
         f"paused task must NOT have finish pair; got {act_blocks}"
     )
@@ -258,11 +264,11 @@ async def test_cross_agent_child_body_isolated_from_parent() -> None:
     parent_blocks = await _recall_blocks(mem, parent_asc)
 
     # 父应召回自己的 UP
-    types = [b.metadata.get("type") for b in parent_blocks]
+    types = [_type(b) for b in parent_blocks]
     assert T.USER_PROMPT in types, "parent's own USER_PROMPT must be recalled"
 
     # 父不应看到子 body（USER_PROMPT / TASK_COMPACT_SUMMARY / LLM_RESPONSE 属于子 agent 的 task 层）
-    contents = [b.content or "" for b in parent_blocks]
+    contents = [b.value.content or "" for b in parent_blocks]
     assert not any("子任务：收集 X 数据" in c for c in contents), (
         f"parent recall must NOT surface child's task-layer USER_PROMPT (cross-agent isolation); "
         f"found in: {[c[:60] for c in contents if '子任务' in c]}"

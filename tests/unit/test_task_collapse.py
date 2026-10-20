@@ -169,21 +169,24 @@ async def test_escalating_l3_fires_on_segment_only_accumulation(monkeypatch):
 
 
 async def test_collapsed_user_prompt_gets_current_task_frame():
-    from ctx_weft.core.assembler.assembler import ContextBlock
-    from ctx_weft.core.assembler.composer import DefaultComposer
+    from ctx_weft.core.assembler.sources._history import record_to_history_block
     from ctx_weft.core.utils.content import content_to_text
+    from ctx_weft.protocols import MemoryKind, MemoryRecord, MemoryScope
+    from tests.assembler_testkit import compile_prompt, prompt_request
 
     collapsed = f"原始请求：做 X{COLLAPSE_DELIM}已完成 step1/step2"
-    blk = ContextBlock(id="u", source="agent_recall", kind="history", target="messages",
-                       content=collapsed, priority=3, token_estimate=1,
-                       metadata={"role": "user", "type": "user_prompt", "timestamp": "1",
-                                 "task_id": "t1"})
+    record = MemoryRecord(
+        id="u", type=T.USER_PROMPT, kind=MemoryKind.CONVERSATION_TURN,
+        scope=MemoryScope.TASK,
+        address=MemoryAddress(session_id="s", task_id="t1", agent_id="a"),
+        content=collapsed, timestamp=_BASE, role="user", metadata={"task_id": "t1"})
+    block = record_to_history_block(record, "agent_recall", 0)
     task = SimpleNamespace(id="t1", title="任务标题", description="", user_prompt="做 X",
                            user_prompt_in_memory=True, process_report=None,
-                           process_report_at=None, outputs=None)
-    req = SimpleNamespace(task=task, purpose="act")
+                           process_report_at=None, outputs=None, unattended=False)
+    request = prompt_request(task_id="t1", task=task)
 
-    msgs = DefaultComposer()._build_actor_messages([blk], req)
+    msgs = compile_prompt([block], request).messages
     framed = content_to_text(msgs[-1].content) if msgs else ""
     joined = "\n".join(content_to_text(m.content) for m in msgs)
     assert "## Current Task" in joined and "任务标题" in joined

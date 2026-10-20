@@ -4,10 +4,8 @@ segment_fold 将当前段 raw 折叠为 SUMMARY，保留用户锚点及既有摘
 build_finish_slots / replace_finish_report 构造或替换任务收尾记录。
 
 ObserveStep 决定是否折叠，本模块负责折叠哪些记录及如何写入。
-Finalize 与 Observe 的先后顺序通过两个交接槽协调：
-- _close_report：摘要先到，Finalize 取走后直接构造真实报告。
-- _close_synth：Finalize 先写占位，Observe 取得句柄后替换真实报告。
-raw_fold_scope 非空表示末段 raw 尚未折叠；调用方在真实报告落地后再处理。
+Finalize 持久化 finish 对和原文保留策略，Observe 只替换完整记录。
+进程内通知仅用于唤醒，报告交接不依赖内存槽。
 """
 
 from __future__ import annotations
@@ -58,23 +56,30 @@ async def segment_fold(
     layer: MemoryScope,
     summary: str,
     ctx: ProviderContext,
-    watermark: "datetime | None" = None,
+    segment_end_at: "datetime | None" = None,
+    *, operation_id: str = "", context_record_ids: list[str] | None = None,
 ) -> SegmentFoldResult:
     """折叠当前段并原子写入段摘要；返回前后计数与摘要 id。
 
-    ``watermark``：段界水位线（2026-09-22）。给定时**只把它之前就已存在的记录**看作
+    ``segment_end_at``：段结束时间（2026-09-22）。给定时**只把它之前就已存在的记录**看作
     「当前段」——后台 observe 是 fire-and-forget，它判完时人可能已经开口，新的
     USER_PROMPT 已经落库。段界若仍动态查找，那条新消息就成了「最后一条 user 回合」，
     于是折叠池空、`to_archive` 空、`summary_ts` 落到 `now_utc()` 分支排到末尾，而要折
-    的那一段一条都没折——锚点逻辑根本没机会生效。钉住水位线之后，迟到的折叠自己落回
+    的那一段一条都没折——锚点逻辑根本没机会生效。固定段结束时间之后，迟到的折叠自己落回
     原位，调用方不必为此等待。None = 不设限（前台同步段折用，它没有迟到可言）。
     """
     view = await memory.load_view(address, layer, ctx, kinds=_VIEW_KINDS)
     events_before = len(view)
+    current = {r.id for r in view}
+    selected = view
+    if context_record_ids is not None:
+        selected = [r for r in await memory.read_records(context_record_ids, ctx)
+                    if r.scope == layer and r.address.task_id == address.task_id
+                    and r.kind in _VIEW_KINDS]
 
-    # 段界与折叠池都只在水位线之内认；`following`（锚点）仍看**完整** view——新来的
+    # 段界与折叠池都只在段结束时间之前认；`following`（锚点）仍看**完整** view——新来的
     # USER_PROMPT 正是要被它认出来，好让摘要锚到它之前 1μs。
-    in_scope = view if watermark is None else [r for r in view if r.timestamp <= watermark]
+    in_scope = selected if segment_end_at is None else [r for r in selected if r.timestamp <= segment_end_at]
 
     # 段界：最后一条 role=user 回合之后为折叠池；无 user 回合 → 整分区（防御，同旧行为）
     boundary_idx = next(
@@ -85,6 +90,11 @@ async def segment_fold(
     pool = in_scope[pool_start:]
 
     to_archive = [r for r in pool if not _protected(r)]
+
+    if context_record_ids is not None and (not to_archive or any(r.id not in current for r in to_archive)):
+        # A later closure/fold already owns this segment. Never append a stale
+        # summary at the new turn's tail or replace its accepted report.
+        return SegmentFoldResult(events_before, events_before, "")
 
     # 锚点（视图已按 (timestamp, seq_no) 升序 = 渲染序，用下标定位）
     if to_archive:
@@ -98,7 +108,13 @@ async def segment_fold(
     else:
         summary_ts = now_utc()
 
+    from ctx_weft.core.loop.steps.observe import record_id
+    summary_id = record_id(operation_id, "segment_summary", address, layer)
+    if summary_id and any(r.id == summary_id for r in view):
+        return SegmentFoldResult(events_before=events_before, events_after=events_before,
+                                 summary_event_id=summary_id)
     summary_event = MemoryEvent(
+        id=summary_id,
         kind=MemoryKind.SUMMARY,
         scope=layer,
         address=address,
@@ -119,19 +135,6 @@ async def segment_fold(
         summary_event_id=new_ids[0] if new_ids else "",
     )
 
-
-# ── 交接槽 ────────────────────────────────────────────────────────────────────
-
-# close 路径结果槽：task_id → (act_recap, task_summary)（finalize Task 8 通过 pop_close_report 取用）
-_close_report: dict[str, tuple[str, str]] = {}
-
-# close 路径合成槽：task_id → (tool_call_id, scope, outcome, raw_fold_scope)
-# finalize 先到时登记，bg 回调后替换 finish tool 记录；raw_fold_scope 非 None 时
-# 替换成功后按它补删末段 raw（spec 2026-07-20 延迟折叠——占位 close 不即折）。
-_close_synth: dict[str, tuple] = {}
-
-
-# ── finish 对的构造 ───────────────────────────────────────────────────────────
 
 def _finish_report_prefix(ref: str, outcome: str) -> str:
     """finish 对 tool 槽的前缀：`[task: '<title>' (<id>)] ` 标明归属（+ fail 标记）。
@@ -267,33 +270,36 @@ def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outco
 
 # ── 占位替换 ──────────────────────────────────────────────────────────────────
 
-def put_close_report(task_id: str, act_recap: str, task_summary: str) -> None:
-    """后台先到：把真摘要放进槽，等 finalize close 时取。**不写 memory**。"""
-    _close_report[task_id] = (act_recap, task_summary)
-
-
-def pop_close_report(task_id: str) -> tuple[str, str] | None:
-    """取走 close 路径产出的 (act_recap, task_summary)；不存在则返回 None。"""
-    return _close_report.pop(task_id, None)
-
-
-def register_close_synth(task_id: str, tool_call_id: str, scope, outcome: str,
-                         raw_fold_scope=None) -> None:
-    """finalize 先到时登记：finish 对已合成，待 bg 回调替换 Process Report。
-
-    raw_fold_scope 非 None = close 时是占位 finish 对、末段 raw 未删（task scope），
-    bg 替换成功后按它补删；bg 失败/无报告 → 不删（降级 = 保 raw）。"""
-    _close_synth[task_id] = (tool_call_id, scope, outcome, raw_fold_scope)
-
-
-def pop_close_synth(task_id: str) -> tuple | None:
-    """bg 回调取走合成登记；不存在则返回 None。"""
-    return _close_synth.pop(task_id, None)
+async def find_finish_target(memory, provider_ctx, scope, task_id, *, legacy_outcome="success"):
+    """Read a complete persisted finish pair; partial writes are not ready."""
+    from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
+    turns = await memory.load_view(
+        MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
+        MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    own = [r for r in turns if r.metadata.get("origin_task_id") == task_id]
+    for assistant in reversed(own):
+        if assistant.role != "assistant":
+            continue
+        for call in assistant.metadata.get("tool_calls") or []:
+            if call.get("name") != qualify("control:finish_task"):
+                continue
+            tools = [r for r in own if r.role == "tool" and
+                     r.metadata.get("tool_call_id") == call.get("id")]
+            if not tools:
+                continue
+            policy = assistant.metadata.get("finish_policy")
+            # Historical pairs have no policy: retain raw rather than invent a fold.
+            if policy is None:
+                policy = {"preserve_raw": True, "outcome": legacy_outcome, "slot_count": 2}
+            if len(own) < policy["slot_count"]:
+                continue
+            return assistant.address, call["id"], dict(policy)
+    return None
 
 
 async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
                                  tool_call_id: str, act_recap: str, task_summary: str,
-                                 outcome: str, title: str, *, final_reply: str = "") -> None:
+                                 outcome: str, title: str, *, final_reply: str = "", operation_id: str = "") -> None:
     """supersede 本 task 的 finish 对占位，按新 act_recap / task_summary 整体重写。
     按 (tool_call_id + origin_task_id) 定位，不再靠 'Process Report:' 文本（spec 2026-06-30 §2.4）。
 
@@ -322,10 +328,8 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
     recap_slot = [r for r in turns
                   if r.role == "assistant" and r.metadata.get("origin_task_id") == task_id
                   and not r.metadata.get("tool_calls")]
-    if not asst and not tool:
-        logger.warning("A1 _replace_finish_report: no finish 对 for task=%s tcid=%s; skip (best-effort)",
-                       task_id, tool_call_id)
-        return
+    if not asst or not tool:
+        raise RuntimeError(f"Incomplete finish pair for task={task_id} call={tool_call_id}")
 
     first = (recap_slot or asst or tool)[0]
     ts = first.timestamp
@@ -351,4 +355,14 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
                       "tool_calls": existing_anchor.metadata.get("tool_calls"),
                       "final_reply": True},
         ))
+    policy = first.metadata.get("finish_policy")
+    if policy is not None:
+        for event in events:
+            event.metadata["finish_policy"] = {**policy, "slot_count": len(events)}
+    if operation_id:
+        from ctx_weft.core.loop.steps.observe import record_id
+        for index, event in enumerate(events):
+            event.id = record_id(operation_id, "replace_finish", scope, task_id, index)
+        if any(r.id == events[0].id for r in (*recap_slot, *asst, *tool)):
+            return
     await memory.fold([r.id for r in (*recap_slot, *asst, *tool)], events, provider_ctx)

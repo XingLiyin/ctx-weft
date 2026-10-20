@@ -149,6 +149,7 @@ async def test_events_carry_resolved_default_model():
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 
+    await runtime.initialize()
     _handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="say hello",
     )
@@ -175,6 +176,7 @@ async def test_events_carry_explicit_model():
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 
+    await runtime.initialize()
     await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="say hello",
         llm_account="acct-b", llm_model="explicit-y",
@@ -217,6 +219,7 @@ async def test_events_carry_bare_adapter_model():
     runtime.providers.register_memory(InMemoryMemoryProvider())
     events = _collect_llm_events(runtime)
 
+    await runtime.initialize()
     _handle, _state = await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="say hello",
     )

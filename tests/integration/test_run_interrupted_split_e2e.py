@@ -84,14 +84,11 @@ async def _wait_for(seen: list, type_: str, timeout: float = 10.0) -> None:
 async def test_crash_retry_then_suspend_order() -> None:
     runtime = _runtime(_CrashLLM(responses=[]))
     seen: list = []
-    orig = runtime._event_bus.emit
-
     async def _spy(ev):
         seen.append(ev)
-        return await orig(ev)
+    runtime._event_bus.subscribe(None, _spy)
 
-    runtime._event_bus.emit = _spy
-
+    await runtime.initialize()
     handle = await runtime.start_session(
         SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="hi",
                                   context_limit=_MOCK_CONTEXT_LIMIT))
@@ -130,14 +127,11 @@ async def test_outage_emits_both_run_and_task_interrupted() -> None:
 
     runtime = _runtime(_OutageLLM(responses=[]))
     seen: list = []
-    orig = runtime._event_bus.emit
-
     async def _spy(ev):
         seen.append(ev)
-        return await orig(ev)
+    runtime._event_bus.subscribe(None, _spy)
 
-    runtime._event_bus.emit = _spy
-
+    await runtime.initialize()
     _handle, state = await runtime.run_single_task(
         template_id="agent:tpl_echo", user_prompt="hi")
 

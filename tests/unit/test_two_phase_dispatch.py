@@ -19,6 +19,12 @@ from tests.unit._stub_runner import StubRunner
 class _CapturingBus:
     events: list = field(default_factory=list)
 
+    async def emit_batch(self, events, *, on_committed=None):
+        if on_committed is not None:
+            on_committed()
+        for event in events:
+            await self.emit(event)
+
     async def emit(self, event: Event) -> None:
         self.events.append(event)
 

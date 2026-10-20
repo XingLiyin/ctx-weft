@@ -18,6 +18,8 @@ from enum import StrEnum
 from ctx_weft.core.models.status import TERMINAL_AGENT_STATUSES
 
 
+AGENT_CANCEL_REASON = "cancel_agent:"
+
 class AgentInput(StrEnum):
     """状态机输入。由 ALM 从 TASK_* 事件类型翻译而来——判据是类型，不是 payload 文本。"""
 
