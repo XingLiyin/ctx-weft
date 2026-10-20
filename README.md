@@ -1294,6 +1294,31 @@ async def test_single_task(runtime):
       # 重启后可以从它恢复。
   ```
 
+## 原生发布 wheel（Cython）
+
+日常开发仍使用普通源码 wheel。发布时可将同一份源码编译为原生扩展：
+
+```powershell
+uv run --no-sync --with Cython==3.2.4 --with setuptools --with wheel python scripts/build_cython_wheel.py
+```
+
+Windows 构建机需安装 MSVC C++ Build Tools 和 Windows SDK。产物位于 `dist/native/`，
+例如 `ctx_weft-0.1.0-cp311-cp311-win_amd64.whl`，绑定构建时的 Python ABI 和平台。
+编译在 `build/` 临时目录完成，不改写 `src/`；原 wheel 的依赖、extras、Jinja 资源均保留，
+Python 模块（包括包初始化模块）替换为原生扩展。原生代码仍可逆向，Jinja 资源仍为明文。
+
+也可以编译指定源码 wheel：
+
+```powershell
+uv run --no-sync --with Cython==3.2.4 --with setuptools --with wheel python scripts/build_cython_wheel.py --source-wheel dist/ctx_weft-0.1.0-py3-none-any.whl
+```
+
+源码 wheel 携带 `build_ctx_weft_cython.py` 构建脚本，宿主无需访问 core 仓库即可编译。
+原生 wheel 中的 `_cython_imports.json` 记录 Python 导入候选，供宿主的 PyInstaller hook
+收集编译后无法通过字节码分析发现的依赖。函数签名、类型注解和工具描述 docstring 保留。
+固定使用 Cython 3.2.4；3.3.0 会对 `tuple[str, ...]` 中的 `StrEnum` 元素施加额外类型检查，
+即使关闭注解类型推断也会改变事件存储的 Python 语义。
+
 ## 限制与约束
 
 - **单进程**：EventBus 是进程内实现，不跨进程。多进程需替换为 Redis Streams 等外部总线。

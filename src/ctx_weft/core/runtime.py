@@ -5525,110 +5525,111 @@ class _SessionTaskRunner:
         sess_id = self._session.id
         tenant_id = self._session.tenant_id
 
-        match t.settings:
-            case NormalTaskSettings(use_subagent=True) as s:
-                ctx = ProviderContext(session_id=sess_id, tenant_id=tenant_id)
-                # 只有真新建才需要它（要造一个什么型号的 agent）；已有 assigned 的那条路
-                # 读 agent record 自己的出身，见下。从前这里以 `or self._template_id`
-                # 回落「会话的模板」，那个回落连带把重派发/恢复也拖进了 root 的模板——
-                # 兜底的唯一住所现在是 `RuntimeConfig.fallback_template_ref`（host 声明的
-                # 母版），由 `TemplateLookup.get_template` 内部消化，装配层不再自备一份。
-                sub_tmpl_id = (
-                    await self._runtime._template_lookup.resolve_qualified(s.subagent_template, ctx)
-                    if s.subagent_template else ""
+        # Cython 3.2 does not support structural pattern matching.
+        s = t.settings
+        if isinstance(s, NormalTaskSettings) and s.use_subagent is True:
+            ctx = ProviderContext(session_id=sess_id, tenant_id=tenant_id)
+            # 只有真新建才需要它（要造一个什么型号的 agent）；已有 assigned 的那条路
+            # 读 agent record 自己的出身，见下。从前这里以 `or self._template_id`
+            # 回落「会话的模板」，那个回落连带把重派发/恢复也拖进了 root 的模板——
+            # 兜底的唯一住所现在是 `RuntimeConfig.fallback_template_ref`（host 声明的
+            # 母版），由 `TemplateLookup.get_template` 内部消化，装配层不再自备一份。
+            sub_tmpl_id = (
+                await self._runtime._template_lookup.resolve_qualified(s.subagent_template, ctx)
+                if s.subagent_template else ""
+            )
+            # 分支判据：t.assigned_agent_id 是否为空。真新建走 instantiate——
+            # Registry 内部会按因果顺序发 AgentSpawned/SpawnRejected/AgentInstantiated；
+            # 已有值时只是按同一 id 重新水合对象（重派发 / 恢复），走 materialize
+            # （零事件、只读 record，不会把 spawn_depth 重算成 0）。SpawnDepthExceeded
+            # 由 instantiate 内部发完 SpawnRejected 后原样上抛，此处不再捕获。
+            if not t.assigned_agent_id:
+                agent, tmpl = await self._registry.instantiate(
+                    template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
+                    # `or None`：`instantiate` 的判据是 `is not None`，空串会被当成
+                    # 一个真父落进 `_register_fallback("")`，给一个不存在的 agent 建
+                    # record。创建者为空 = 无父 = 森林里的一棵新树（spec/09 §3.1），
+                    # 这正是 `_rebuild_agents` 重放时 `creator or None` 的同一口径——
+                    # 两边必须字字对齐，否则内存态与重放态的 parent/depth 会分叉。
+                    parent_agent_id=t.creator_agent_id or None,
+                    task_id=t.id, ctx=ctx,
                 )
-                # 分支判据：t.assigned_agent_id 是否为空。真新建走 instantiate——
-                # Registry 内部会按因果顺序发 AgentSpawned/SpawnRejected/AgentInstantiated；
-                # 已有值时只是按同一 id 重新水合对象（重派发 / 恢复），走 materialize
-                # （零事件、只读 record，不会把 spawn_depth 重算成 0）。SpawnDepthExceeded
-                # 由 instantiate 内部发完 SpawnRejected 后原样上抛，此处不再捕获。
-                if not t.assigned_agent_id:
-                    agent, tmpl = await self._registry.instantiate(
-                        template_id=sub_tmpl_id, session_id=sess_id, tenant_id=tenant_id,
-                        # `or None`：`instantiate` 的判据是 `is not None`，空串会被当成
-                        # 一个真父落进 `_register_fallback("")`，给一个不存在的 agent 建
-                        # record。创建者为空 = 无父 = 森林里的一棵新树（spec/09 §3.1），
-                        # 这正是 `_rebuild_agents` 重放时 `creator or None` 的同一口径——
-                        # 两边必须字字对齐，否则内存态与重放态的 parent/depth 会分叉。
-                        parent_agent_id=t.creator_agent_id or None,
-                        task_id=t.id, ctx=ctx,
-                    )
-                    # instantiate() 刻意不解模型（惰性不变量）；这里现解一次供
-                    # AgentBinding.model——不缓存，现解现弃是设计的一部分
-                    # （LLMClientResolver 才是那层缓存）。
-                    rm = self._registry.resolve_model(agent.id)
-                else:
-                    agent, rm = self._registry.materialize(
-                        t.assigned_agent_id, session_id=sess_id, tenant_id=tenant_id)
-                    # materialize 不返回 template（它只读 record，不碰 TemplateLookup）
-                    # → 按这个 agent **自己**的出身解一份。从前这里解的是 `sub_tmpl_id`
-                    # （settings 里那个 subagent_template），两者在重派发/恢复时并不总是
-                    # 同一个值：settings 可能没带模板（那时旧代码回落会话模板），而 agent
-                    # 的出身早已由 `AgentInstantiated` 钉死——record 才是真相。
-                    tmpl = await self._template_of(agent, ctx)
-                # 窗口仍以 session.context_limit/reserved_output_tokens 为准——那是
-                # host 经 SessionStartParams 显式配置的预算天花板（必填字段，独立于
-                # ModelChoice/rm），与「用哪个模型」是两件事：host 完全可能故意配一个
-                # 小于模型真实窗口的预算。rm 只贡献 client/身份，不覆盖这里。
-                agent = _dc.replace(agent, loop_guard=LoopGuard(
-                    context_limit=self._session.context_limit,
-                    reserved_output_tokens=self._session.reserved_output_tokens,
-                ))
-                t.assigned_agent_id = agent.id
-                if s.inherit_memory and not t.user_prompt_in_memory:
-                    # 继承源三级，**显式优先**（spec/09 §6）：
-                    #   ① settings.inherit_from_agent_id —— host 直接锚定，绕过推导。
-                    #      血缘与记忆来源是正交的两个轴：跨树继承（新树 agent 拿 root
-                    #      的上下文）只能由这一级表达。
-                    #   ② 父任务的 agent —— 委派子任务的既有行为。
-                    #   ③ 上一条 root task 的 agent —— 直派 sub-agent 的 root 回合没有
-                    #      parent_task_id，不回落它的话子 agent 会空手起跑。
-                    # ②③ 逐字保留，存量行为零变化。
-                    src_aid, src_tid = s.inherit_from_agent_id, None
-                    if not src_aid:
-                        src_t = (
-                            self._task_manager.get_task(t.parent_task_id) if t.parent_task_id
-                            else _latest_prior_root_task(self._task_manager, t)
-                        )
-                        if src_t:
-                            src_aid = src_t.assigned_agent_id or src_t.creator_agent_id or ""
-                            src_tid = src_t.id
-                    if src_aid:
-                        await _copy_memory_for_inherit(
-                            source_agent_id=src_aid, child_task=t, sub_agent=agent,
-                            memory=self._memory, session_id=sess_id, tenant_id=tenant_id,
-                            source_task_id=src_tid,
-                        )
-                initial = await self._reconcile_or(t, agent, "prepare")
-                return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
-                                    initial_step=initial, run_id=generate_id("run"), model=rm)
-
-            case _:
-                # 非 subagent 任务在**创建者**的 agent scope 上跑（延续创建者对话），
-                # 而非一律 root——否则 subagent 派生的非 subagent 子会跑进 root scope、丢失
-                # 创建者上下文并污染 root。scope 键与调度串行判定共用 effective_agent_id 单一真相。
+                # instantiate() 刻意不解模型（惰性不变量）；这里现解一次供
+                # AgentBinding.model——不缓存，现解现弃是设计的一部分
+                # （LLMClientResolver 才是那层缓存）。
+                rm = self._registry.resolve_model(agent.id)
+            else:
                 agent, rm = self._registry.materialize(
-                    effective_agent_id(t, self._session.root_agent_id or ""),
-                    session_id=sess_id, tenant_id=tenant_id,
-                )
-                # 见上面 subagent 分支同一条注释：窗口以 session 配置为准，rm 只贡献
-                # client/身份。
-                agent = _dc.replace(agent, loop_guard=LoopGuard(
-                    context_limit=self._session.context_limit,
-                    reserved_output_tokens=self._session.reserved_output_tokens,
-                ))
-                # **模板跟着执行 agent，不跟着 session**（2026-09-30 修）。从前这里是
-                # `template=self._template`（建 runner 时按会话模板解出的那份）：root task
-                # 恰好对，而 `send_message` 投给一个 park 中的子 agent 时，开出的新 task
-                # 正是 `use_subagent=False`、落这条分支——于是那个子 agent 跑 root 的
-                # identity 与 root 的 capability 授权（它自己 `capability_refs` 里的
-                # forbidden 一并失效），而同一次 run 的
-                # `provider_ctx.agent_template_id` 报的又是它自己的模板，两者自相矛盾。
-                tmpl = await self._template_of(
-                    agent, ProviderContext(session_id=sess_id, tenant_id=tenant_id))
-                initial = await self._reconcile_or(t, agent, "prepare")
-                return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
-                                    initial_step=initial, run_id=generate_id("run"), model=rm)
+                    t.assigned_agent_id, session_id=sess_id, tenant_id=tenant_id)
+                # materialize 不返回 template（它只读 record，不碰 TemplateLookup）
+                # → 按这个 agent **自己**的出身解一份。从前这里解的是 `sub_tmpl_id`
+                # （settings 里那个 subagent_template），两者在重派发/恢复时并不总是
+                # 同一个值：settings 可能没带模板（那时旧代码回落会话模板），而 agent
+                # 的出身早已由 `AgentInstantiated` 钉死——record 才是真相。
+                tmpl = await self._template_of(agent, ctx)
+            # 窗口仍以 session.context_limit/reserved_output_tokens 为准——那是
+            # host 经 SessionStartParams 显式配置的预算天花板（必填字段，独立于
+            # ModelChoice/rm），与「用哪个模型」是两件事：host 完全可能故意配一个
+            # 小于模型真实窗口的预算。rm 只贡献 client/身份，不覆盖这里。
+            agent = _dc.replace(agent, loop_guard=LoopGuard(
+                context_limit=self._session.context_limit,
+                reserved_output_tokens=self._session.reserved_output_tokens,
+            ))
+            t.assigned_agent_id = agent.id
+            if s.inherit_memory and not t.user_prompt_in_memory:
+                # 继承源三级，**显式优先**（spec/09 §6）：
+                #   ① settings.inherit_from_agent_id —— host 直接锚定，绕过推导。
+                #      血缘与记忆来源是正交的两个轴：跨树继承（新树 agent 拿 root
+                #      的上下文）只能由这一级表达。
+                #   ② 父任务的 agent —— 委派子任务的既有行为。
+                #   ③ 上一条 root task 的 agent —— 直派 sub-agent 的 root 回合没有
+                #      parent_task_id，不回落它的话子 agent 会空手起跑。
+                # ②③ 逐字保留，存量行为零变化。
+                src_aid, src_tid = s.inherit_from_agent_id, None
+                if not src_aid:
+                    src_t = (
+                        self._task_manager.get_task(t.parent_task_id) if t.parent_task_id
+                        else _latest_prior_root_task(self._task_manager, t)
+                    )
+                    if src_t:
+                        src_aid = src_t.assigned_agent_id or src_t.creator_agent_id or ""
+                        src_tid = src_t.id
+                if src_aid:
+                    await _copy_memory_for_inherit(
+                        source_agent_id=src_aid, child_task=t, sub_agent=agent,
+                        memory=self._memory, session_id=sess_id, tenant_id=tenant_id,
+                        source_task_id=src_tid,
+                    )
+            initial = await self._reconcile_or(t, agent, "prepare")
+            return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
+                                initial_step=initial, run_id=generate_id("run"), model=rm)
+
+        else:
+            # 非 subagent 任务在**创建者**的 agent scope 上跑（延续创建者对话），
+            # 而非一律 root——否则 subagent 派生的非 subagent 子会跑进 root scope、丢失
+            # 创建者上下文并污染 root。scope 键与调度串行判定共用 effective_agent_id 单一真相。
+            agent, rm = self._registry.materialize(
+                effective_agent_id(t, self._session.root_agent_id or ""),
+                session_id=sess_id, tenant_id=tenant_id,
+            )
+            # 见上面 subagent 分支同一条注释：窗口以 session 配置为准，rm 只贡献
+            # client/身份。
+            agent = _dc.replace(agent, loop_guard=LoopGuard(
+                context_limit=self._session.context_limit,
+                reserved_output_tokens=self._session.reserved_output_tokens,
+            ))
+            # **模板跟着执行 agent，不跟着 session**（2026-09-30 修）。从前这里是
+            # `template=self._template`（建 runner 时按会话模板解出的那份）：root task
+            # 恰好对，而 `send_message` 投给一个 park 中的子 agent 时，开出的新 task
+            # 正是 `use_subagent=False`、落这条分支——于是那个子 agent 跑 root 的
+            # identity 与 root 的 capability 授权（它自己 `capability_refs` 里的
+            # forbidden 一并失效），而同一次 run 的
+            # `provider_ctx.agent_template_id` 报的又是它自己的模板，两者自相矛盾。
+            tmpl = await self._template_of(
+                agent, ProviderContext(session_id=sess_id, tenant_id=tenant_id))
+            initial = await self._reconcile_or(t, agent, "prepare")
+            return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
+                                initial_step=initial, run_id=generate_id("run"), model=rm)
 
     # ── 阶段 2：执行 ─────────────────────────────────────────────────────────
 

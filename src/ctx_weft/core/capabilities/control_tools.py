@@ -63,6 +63,15 @@ _ACT_RECAP_DESC = (
     "you called, and whether anything failed. First person, faithful to what actually ran."
 )
 
+# Keep the annotation expression static so Cython preserves Annotated metadata.
+_NEXT_STEP_HINT_DESC = (
+    "Optional. If there are obvious risks, blockers, or important concerns the next actor turn should be "
+    "aware of, describe them here. Leave empty if nothing notable. "
+    "This is also where you flag a sub-task whose result does not actually achieve its goal: "
+    f"name it (title + id, as listed under '{SUBTASKS_HEADING}') and say what is wrong and "
+    "what must be different."
+)
+
 # delegate_plan 的 actor-visible ack 及 gateway 配对 tool result 内容。
 _PLAN_DISPATCH_ACK = ("Plan created. Its sub-tasks will now be started one by one "
                       "via start_task.")
@@ -443,15 +452,11 @@ def report_observation(
     ] = "",
     next_step_hint: Annotated[
         str,
-        "Optional. If there are obvious risks, blockers, or important concerns the next actor turn should be "
-        "aware of, describe them here. Leave empty if nothing notable. "
         # 这里只说「这个字段也承载这件事」。**「你不决定下一步」那条职权规则不写在这里**
         # （2026-09-28 删）：它是 ROLE 的地盘，而 ROLE 已有一份近乎逐字的同款文本——连
         # `## Your sub-tasks` 这个标题名都两边各存一份。字段描述越界写职权规则，与「ROLE 越界
         # 写字段契约」是同一个病的两个方向。
-        "This is also where you flag a sub-task whose result does not actually achieve its goal: "
-        f"name it (title + id, as listed under '{SUBTASKS_HEADING}') and say what is wrong and "
-        "what must be different.",
+        _NEXT_STEP_HINT_DESC,
     ] = "",
     *,
     ctx: ControlContext = None,
