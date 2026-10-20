@@ -108,7 +108,11 @@ async def calibrate_startup(store) -> InitializationReport:
                         affected_agents.add(aid)
                         settled_agents.add(aid)
                     continue
-                if task.status != "ACTIVE":
+                # A crash can land after TaskCreated commits but before the first
+                # TaskStarted. The new process has no queue/runner for PENDING
+                # work either; expose explicit recovery rather than phantom RUNNING.
+                # Preserve REVIEWING and SUSPENDED dependency/switch semantics.
+                if task.status not in {"ACTIVE", "PENDING"}:
                     continue
                 if task.id in waiting:
                     events.append(new_event(
@@ -117,6 +121,8 @@ async def calibrate_startup(store) -> InitializationReport:
                         task_id=task.id, agent_id=aid,
                         payload={"hitl_id": waiting[task.id].id},
                     ))
+                    if aid:
+                        affected_agents.add(aid)
                     continue
                 events.append(new_event(
                     EventType.TASK_INTERRUPTED, session_id=sid,

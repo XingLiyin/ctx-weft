@@ -54,7 +54,7 @@ async def test_restart_preserves_durable_task_state(store, snapshot, status, eve
     await restarted.initialize()
     rows = await store.read_range(h.session_id)
     assert not any(row.event.type == EventType.SESSION_STATUS_CHANGED for row in rows)
-    expected = "INTERRUPTED" if status == "ACTIVE" else status
+    expected = "INTERRUPTED" if status in {"ACTIVE", "PENDING"} else status
     assert (await restarted.get_task(h.session_id, "t")).data.status == expected
     assert not restarted._task_managers
     assert restarted._agent_lifecycle_manager.all_agent_ids() == []
@@ -64,6 +64,111 @@ async def test_restart_preserves_durable_task_state(store, snapshot, status, eve
     await restarted.rebuild_session(h.session_id, strict=True)
     assert (await restarted.get_task(h.session_id, "t")).data.status == expected
     assert await store.committed_head(h.session_id) == head
+
+
+@pytest.mark.parametrize("snapshot", [False, True], ids=["log", "snapshot"])
+async def test_restart_before_first_dispatch_is_interrupted_and_explicitly_resumable(store, snapshot):
+    old = runtime(store)
+    h = await container(old)
+    await append(store, h.session_id, (EventType.TASK_CREATED, "pending", h.root_agent_id,
+        {"task": {"id": "pending", "assigned_agent_id": h.root_agent_id,
+                  "user_prompt": "saved request"}}))
+    await snapshot_if_requested(store, h.session_id, snapshot)
+    restarted = runtime(store)  # max_concurrent=0 keeps explicit requeue observable.
+    result, = (await restarted.initialize()).sessions
+    assert result.state.root_task_status == "INTERRUPTED"
+    assert result.state.has_interrupted_agents and not result.state.has_running_agents
+    assert not restarted._task_managers
+    await restarted.rebuild_session(h.session_id, strict=True)
+    tm = restarted._task_managers[h.session_id]
+    assert tm.recovery_pending and tm.is_done()
+    assert not restarted._run_tokens.get(h.session_id)
+    await restarted.recover_agent(h.root_agent_id)
+    assert not tm.recovery_pending
+    assert [entry.task_id for entry in tm._queue.peek_all()] == ["pending"]
+    assert tm.get_task("pending").status == "PENDING"
+    # Repeated resume cannot enqueue the same task twice.
+    await restarted.recover_agent(h.root_agent_id)
+    assert [entry.task_id for entry in tm._queue.peek_all()] == ["pending"]
+
+
+@pytest.mark.parametrize("delivery_kind", ["tool", "user"])
+async def test_pending_task_with_durable_hitl_remains_a_human_wait(store, delivery_kind):
+    from ctx_weft.protocols.hitl import HitlAsk, ToolResultDelivery, UserTurnDelivery
+
+    old = runtime(store)
+    h = await container(old)
+    await append(store, h.session_id, (EventType.TASK_CREATED, "pending", h.root_agent_id,
+        {"task": {"id": "pending", "assigned_agent_id": h.root_agent_id}}))
+    delivery = ToolResultDelivery("call") if delivery_kind == "tool" else UserTurnDelivery("pending")
+    req = await old.hitl.open(HitlAsk(form="approval", delivery=delivery),
+        session_id=h.session_id, task_id="pending", agent_id=h.root_agent_id,
+        stage="authz", unattended=False)
+    restarted = runtime(store)
+    report = await restarted.initialize()
+    assert not report.interrupted_task_ids
+    assert (await restarted.get_task(h.session_id, "pending")).data.status == "AWAITING_HUMAN"
+    assert (await restarted.get_agent(h.root_agent_id, session_id=h.session_id)).data.status == "waiting_human"
+    assert [row.data.id for row in await restarted.list_pending_hitl(session_id=h.session_id)] == [req.id]
+    head = await store.committed_head(h.session_id)
+    await runtime(store).initialize()
+    assert await store.committed_head(h.session_id) == head
+
+
+async def test_pending_child_recovery_preserves_suspended_parent(store):
+    old = runtime(store)
+    h = await container(old)
+    await append(store, h.session_id,
+        (EventType.TASK_CREATED, "parent", h.root_agent_id,
+         {"task": {"id": "parent", "assigned_agent_id": h.root_agent_id}}),
+        (EventType.TASK_SUSPENDED, "parent", h.root_agent_id, {}),
+        (EventType.AGENT_INSTANTIATED, None, "child-agent",
+         {"template_id": "agent:tpl_echo", "parent_agent_id": h.root_agent_id}),
+        (EventType.TASK_CREATED, "child", "child-agent",
+         {"task": {"id": "child", "parent_task_id": "parent", "assigned_agent_id": "child-agent"}}))
+    restarted = runtime(store)
+    result, = (await restarted.initialize()).sessions
+    assert result.state.has_interrupted_agents
+    assert (await restarted.get_task(h.session_id, "parent")).data.status == "SUSPENDED"
+    assert (await restarted.get_task(h.session_id, "child")).data.status == "INTERRUPTED"
+    await restarted.rebuild_session(h.session_id, strict=True)
+    await restarted.recover_agent(h.root_agent_id)
+    tm = restarted._task_managers[h.session_id]
+    assert tm.get_task("parent").status == "SUSPENDED"
+    assert [entry.task_id for entry in tm._queue.peek_all()] == ["child"]
+
+
+async def test_pending_successor_recovery_preserves_reviewing_predecessor(store):
+    old = runtime(store)
+    h = await container(old)
+    await append(store, h.session_id,
+        (EventType.TASK_CREATED, "old", h.root_agent_id,
+         {"task": {"id": "old", "assigned_agent_id": h.root_agent_id}}),
+        (EventType.TASK_REVIEWING, "old", h.root_agent_id,
+         {"successor": {"task": {"id": "new", "assigned_agent_id": h.root_agent_id}},
+          "replaced_task_ids": ["old"]}))
+    restarted = runtime(store)
+    result, = (await restarted.initialize()).sessions
+    assert result.state.root_task_id == "new" and result.state.root_task_status == "INTERRUPTED"
+    assert (await restarted.get_task(h.session_id, "old")).data.status == "REVIEWING"
+
+
+async def test_repeated_initialize_does_not_interrupt_live_queued_work(store):
+    from ctx_weft.core.models.task import Task
+
+    rt = runtime(store)
+    h = await container(rt)
+    await rt.rebuild_session(h.session_id, strict=True)
+    # Hold dispatch, so this is a real queued task rather than an active run.
+    tm = rt._task_managers[h.session_id]
+    tm._max_concurrent = 0
+    await tm.push_task(Task(id="queued", session_id=h.session_id, status="PENDING",
+                           assigned_agent_id=h.root_agent_id, user_prompt="queued"))
+    head = await store.committed_head(h.session_id)
+    await rt.initialize()
+    assert (await rt.get_task(h.session_id, "queued")).data.status == "PENDING"
+    assert await store.committed_head(h.session_id) == head
+    assert [entry.task_id for entry in tm._queue.peek_all()] == ["queued"]
 
 
 @pytest.mark.parametrize("snapshot", [False, True], ids=["log", "snapshot"])

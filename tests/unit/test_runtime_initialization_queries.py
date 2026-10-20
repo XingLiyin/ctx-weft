@@ -314,7 +314,7 @@ async def test_startup_calibrates_without_loading_and_preserves_waits():
     )
     rt = runtime(store)
     report = await rt.initialize()
-    assert report.interrupted_task_ids == ["active"]
+    assert report.interrupted_task_ids == ["active", "queued"]
     assert report.interrupted_session_ids == [h.session_id]
     assert not rt._task_managers and not rt._session_registry._states
     assert rt._agent_lifecycle_manager.all_agent_ids() == []
@@ -322,7 +322,7 @@ async def test_startup_calibrates_without_loading_and_preserves_waits():
     view = await rebuild_view(store, h.session_id)
     assert view.tasks["active"].status == "INTERRUPTED"
     assert view.tasks["waiting"].status == "AWAITING_HUMAN"
-    assert view.tasks["queued"].status == "PENDING"
+    assert view.tasks["queued"].status == "INTERRUPTED"
     assert view.tasks["review"].status == "REVIEWING"
     assert view.agents[h.root_agent_id].status == "interrupted"
     rows = await store.read_range(h.session_id)
