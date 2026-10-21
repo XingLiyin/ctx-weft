@@ -11,12 +11,12 @@ import json
 import httpx
 import pytest
 
-import ctx_weft.providers.llm._stream_parsing as stream_module
+import ctx_weft.providers.llm.adapters._stream_parsing as stream_module
 from ctx_weft.core.loop.steps.act import ActStep, _ingest_assistant_turn, _run_llm_turn
 from ctx_weft.protocols import EventType, MemoryEventType
 from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.providers.llm.openai import OpenAIAdapter
-from ctx_weft.providers.llm.text_calls import ContentGate
+from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.text_calls import ContentGate
 from tests.integration.test_interactive_task import _act_state_ctx
 
 

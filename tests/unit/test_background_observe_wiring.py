@@ -231,7 +231,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
     from ctx_weft.core.control.tokens import PauseToken
     from ctx_weft.core.loop.steps.act import ActStep
     from ctx_weft.protocols import LLMMessage
-    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
     from tests.hitl_env import make_hitl
 
     launched = []
@@ -286,7 +286,7 @@ async def test_act_soft_interrupt_child_task_schedules_recap(monkeypatch):
     from ctx_weft.core.control.tokens import PauseToken
     from ctx_weft.core.loop.steps.act import ActStep
     from ctx_weft.protocols import LLMMessage
-    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
     from tests.hitl_env import make_hitl
 
     launched = []

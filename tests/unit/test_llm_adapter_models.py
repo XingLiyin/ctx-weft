@@ -4,8 +4,9 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from ctx_weft.providers.llm.anthropic import AnthropicAdapter
-from ctx_weft.providers.llm.openai import OpenAIAdapter
+from ctx_weft.protocols.llm import LLMMessage, LLMRequest
+from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
+from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
 
 
 def _mock_client(handler) -> httpx.AsyncClient:
@@ -52,3 +53,42 @@ async def test_list_models_raises_on_http_error():
     a._client = _mock_client(handler)
     with pytest.raises(httpx.HTTPStatusError):
         await a.list_models()
+
+
+@pytest.mark.parametrize("adapter_type,operation", [
+    (OpenAIAdapter, "chat/completions"),
+    (AnthropicAdapter, "messages"),
+])
+async def test_subclass_url_policy_applies_to_generation_and_discovery(adapter_type, operation):
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, str(request.url)))
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        event = (
+            '{"choices":[{"delta":{},"finish_reason":"stop"}]}'
+            if operation == "chat/completions"
+            else '{"type":"message_delta","delta":{"stop_reason":"end_turn"}}'
+        )
+        return httpx.Response(200, text=f"data: {event}\n\n")
+
+    class CustomAdapter(adapter_type):
+        def _api_url(self, operation):
+            return f"{self._base_url}/custom/{operation}"
+
+        def _make_client(self):
+            return _mock_client(handler)
+
+    adapter = CustomAdapter(api_key="k", base_url="https://gateway.test")
+    try:
+        assert await adapter.list_models() == ["m"]
+        request = LLMRequest("m", "", [LLMMessage(role="user", content="hi")], max_tokens=32)
+        chunks = [chunk async for chunk in adapter.complete(request)]
+        assert any(chunk.kind == "done" for chunk in chunks)
+    finally:
+        await adapter._client.aclose()
+    assert seen == [
+        ("GET", "https://gateway.test/custom/models"),
+        ("POST", f"https://gateway.test/custom/{operation}"),
+    ]

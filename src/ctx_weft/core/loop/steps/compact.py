@@ -153,7 +153,7 @@ async def summarize_for_compact(
     的孤儿 run），故不额外加 try/except 兜底——真出现 None 就该炸，不吞。
 
     真实调查结论（供风险评估）：这次修复前，实际发给 LLM 服务商的模型**并不是**字面上的
-    "mock"——``providers/llm/anthropic.py``/``openai.py`` 的 ``_build_payload`` 都已有
+    "mock"——``providers/llm/adapters/anthropic.py``/``openai.py`` 的 ``_build_payload`` 都已有
     ``model = request.model if request.model and request.model != "mock" else self._model``
     这行兜底替换（``anthropic.py`` 的 ``model`` 属性文档字符串原话：「实际调用一直用它替换
     "mock"……事件账面须与之同源」），而 ``self._model``（client 构造时配置的模型）与

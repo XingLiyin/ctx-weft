@@ -24,8 +24,8 @@ from ctx_weft.protocols.memory import (
     MemoryEventType,
     MemoryRecord,
 )
-from ctx_weft.providers.llm.anthropic import _serialize_messages as anth
-from ctx_weft.providers.llm.openai import _serialize_messages as oai
+from ctx_weft.providers.llm.adapters.anthropic import _serialize_messages as anth
+from ctx_weft.providers.llm.adapters.openai import _serialize_messages as oai
 
 _PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmM"

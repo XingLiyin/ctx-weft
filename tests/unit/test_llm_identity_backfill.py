@@ -12,6 +12,7 @@ host 即便显式传了 model，事件仍恒报 "mock"；依赖账号 default_mo
 `("", "")`「跟随账号默认」这个含义钉成具体模型名，账号默认从此对该会话失效。
 本文件不再断言 session.llm_model/llm_provider 被回填；只断言事件本身携带的身份正确。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -28,7 +29,8 @@ from ctx_weft.protocols import (
     ProviderContext,
 )
 from ctx_weft.protocols.events import EventType
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm import ModelCapabilities, ModelLimits
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.provider import LLMAccount, LLMProvider, ModelConfig, _FixedModelClient
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
@@ -49,7 +51,9 @@ class _InlineAgentTemplateProvider(AgentCapabilityProvider):
     async def list(self, ctx: ProviderContext) -> list[AgentCapability]:
         return []
 
-    async def get_template(self, template_id: str, version, ctx: ProviderContext) -> AgentTemplate | None:
+    async def get_template(
+        self, template_id: str, version, ctx: ProviderContext
+    ) -> AgentTemplate | None:
         return self._templates.get(template_id)
 
     async def describe(self, ctx: ProviderContext) -> CapabilityProviderInfo:
@@ -74,21 +78,29 @@ def _echo_template() -> AgentTemplate:
 
 class _FakeStore:
     def save(self, account) -> None: ...
-    def delete(self, name) -> bool: return True
-    def list_all(self) -> list: return []
+    def delete(self, name) -> bool:
+        return True
+
+    def list_all(self) -> list:
+        return []
 
 
 class _OneAccountResolver:
     """镜像 LLMProvider.get_client 的默认解析：account/model 缺省时落到唯一账号+默认模型。"""
 
-    def __init__(self, adapter, *, account: str = "acct-main", default_model: str = "real-model-x") -> None:
+    def __init__(
+        self, adapter, *, account: str = "acct-main", default_model: str = "real-model-x"
+    ) -> None:
         self._adapter = adapter
         self._account = account
         self._default_model = default_model
 
     def get_client(self, account=None, model=None):
         return _FixedModelClient(
-            self._adapter, model or self._default_model, 128_000, 8_192,
+            self._adapter,
+            model or self._default_model,
+            128_000,
+            8_192,
             account=account or self._account,
         )
 
@@ -118,7 +130,11 @@ def _collect_llm_events(runtime: CtxWeftRuntime) -> list:
 
 def test_fixed_model_client_exposes_identity():
     client = _FixedModelClient(
-        MockLLMAdapter(responses=[]), "real-model-x", 128_000, 8_192, account="acct-main",
+        MockLLMAdapter(responses=[]),
+        "real-model-x",
+        128_000,
+        8_192,
+        account="acct-main",
     )
     assert client.model == "real-model-x"
     assert client.account == "acct-main"
@@ -127,8 +143,20 @@ def test_fixed_model_client_exposes_identity():
 def test_provider_get_client_carries_resolved_identity():
     p = LLMProvider(_FakeStore())
     p.register_account(
-        LLMAccount(name="acct-main", style="openai", api_key="sk", base_url="https://x",
-                   models=[ModelConfig("real-model-x", 128_000)], default_model="real-model-x"),
+        LLMAccount(
+            name="acct-main",
+            api_key="sk",
+            base_url="https://x",
+            models=[
+                ModelConfig(
+                    name="real-model-x",
+                    limit=ModelLimits(128000, output=None),
+                    protocol="openai",
+                    capabilities=ModelCapabilities(),
+                )
+            ],
+            default_model="real-model-x",
+        ),
         persist=False,
     )
     client = p.get_client(None, None)  # 双缺省 → 唯一账号 + default_model
@@ -144,14 +172,16 @@ async def test_events_carry_resolved_default_model():
     """host 不显式传 model（依赖账号 default_model）→ 事件报实际解析出的模型，非 mock。"""
     # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被
     # 机械判 success（`_mechanical_verdict` 判 continue）——要让它终结得让 observer 去判。
-    resolver = _OneAccountResolver(MockLLMAdapter(
-        responses=[MockResponse(text="hi")], observer_verdict="success"))
+    resolver = _OneAccountResolver(
+        MockLLMAdapter(responses=[MockResponse(text="hi")], observer_verdict="success")
+    )
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 
     await initialize_all(runtime)
     _handle, state = await runtime.run_single_task(
-        template_id="agent:tpl_echo", user_prompt="say hello",
+        template_id="agent:tpl_echo",
+        user_prompt="say hello",
     )
 
     assert state.task.status == "FINISHED"
@@ -171,15 +201,18 @@ async def test_events_carry_explicit_model():
     """host 显式传 model/account → 事件按传入值计账。"""
     # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被
     # 机械判 success（`_mechanical_verdict` 判 continue）——要让它终结得让 observer 去判。
-    resolver = _OneAccountResolver(MockLLMAdapter(
-        responses=[MockResponse(text="hi")], observer_verdict="success"))
+    resolver = _OneAccountResolver(
+        MockLLMAdapter(responses=[MockResponse(text="hi")], observer_verdict="success")
+    )
     runtime = _make_runtime(resolver)
     events = _collect_llm_events(runtime)
 
     await initialize_all(runtime)
     await runtime.run_single_task(
-        template_id="agent:tpl_echo", user_prompt="say hello",
-        llm_account="acct-b", llm_model="explicit-y",
+        template_id="agent:tpl_echo",
+        user_prompt="say hello",
+        llm_account="acct-b",
+        llm_model="explicit-y",
     )
 
     started = [e for e in events if e.type == EventType.LLM_REQUEST_STARTED]
@@ -195,8 +228,8 @@ async def test_events_carry_explicit_model():
 def test_bare_adapters_expose_model():
     """AnthropicAdapter/OpenAIAdapter 公开 model：host 把 env 模型构造进裸 adapter
     直传 llm= 时，回填才有真值可读（实际调用一直用 _model 替换 "mock"，账面须同源）。"""
-    from ctx_weft.providers.llm.anthropic import AnthropicAdapter
-    from ctx_weft.providers.llm.openai import OpenAIAdapter
+    from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
+    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
 
     assert AnthropicAdapter(api_key="k", model="env-model-a").model == "env-model-a"
     assert OpenAIAdapter(api_key="k", model="env-model-b").model == "env-model-b"
@@ -214,14 +247,16 @@ async def test_events_carry_bare_adapter_model():
     templates = _InlineAgentTemplateProvider()
     templates.register(_echo_template())
     runtime = make_runtime(
-        llm=_ModelMock(responses=[MockResponse(text="hi")]), agent_provider=templates,
+        llm=_ModelMock(responses=[MockResponse(text="hi")]),
+        agent_provider=templates,
     )
     runtime.providers.register_memory(InMemoryMemoryProvider())
     events = _collect_llm_events(runtime)
 
     await initialize_all(runtime)
     _handle, _state = await runtime.run_single_task(
-        template_id="agent:tpl_echo", user_prompt="say hello",
+        template_id="agent:tpl_echo",
+        user_prompt="say hello",
     )
 
     started = [e for e in events if e.type == EventType.LLM_REQUEST_STARTED]

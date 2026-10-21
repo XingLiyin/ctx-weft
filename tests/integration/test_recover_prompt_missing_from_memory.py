@@ -21,7 +21,7 @@ from ctx_weft import RuntimeConfig
 from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext
 from ctx_weft.protocols.events import Event, EventType
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import append_one
 from tests._initialization import initialize_all

@@ -19,7 +19,7 @@ from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import ToolCall
 from ctx_weft.providers.authorizer import HumanConfirmationAuthorizer
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
 from tests.integration.test_hitl_e2e_v2 import (

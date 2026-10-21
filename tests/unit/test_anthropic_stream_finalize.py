@@ -5,7 +5,7 @@ import json
 import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMMessage, LLMRequest
-from ctx_weft.providers.llm.anthropic import AnthropicAdapter
+from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
 
 
 class _FakeResp:

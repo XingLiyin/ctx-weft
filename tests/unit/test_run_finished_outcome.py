@@ -29,7 +29,7 @@ async def _events_from_outage() -> list:
     """同 test_run_loop_outage.py::test_outage_marks_session_interrupted_not_failed 的搭台。"""
     from ctx_weft.core.models.config import RuntimeConfig
     from ctx_weft.protocols import LLMOutageError
-    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
@@ -133,7 +133,7 @@ async def _events_from_park() -> list:
 
 async def _events_from_normal() -> list:
     """同 test_minimal_loop.py::test_minimal_echo_loop 的搭台，加 spy 收事件。"""
-    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,

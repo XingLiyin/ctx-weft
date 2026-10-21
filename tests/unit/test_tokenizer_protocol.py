@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from ctx_weft.protocols.llm import LLMClient, Tokenizer
-from ctx_weft.providers.llm.anthropic import AnthropicAdapter
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.llm.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
 from ctx_weft.providers.llm.provider import _FixedModelClient
 
 

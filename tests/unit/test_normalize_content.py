@@ -226,7 +226,7 @@ def test_validate_content_still_rejects_url_source():
 def _make_runtime_with_store(store):
     from types import SimpleNamespace
 
-    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.llm.provider import _FixedModelClient
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (

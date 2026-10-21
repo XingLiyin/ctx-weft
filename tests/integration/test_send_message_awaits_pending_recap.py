@@ -66,7 +66,7 @@ async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
     模块 docstring）。它现在守的是那次拆除真的生效了：新一轮不为上一轮的后台 LLM 往返
     买单。代价是这一轮的装配可能读到尚未 supersede 的 raw——prompt 白胀一轮，已接受。
     """
-    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 
     fold_done = False
     release = asyncio.Event()

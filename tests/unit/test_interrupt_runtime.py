@@ -20,7 +20,7 @@ from ctx_weft.protocols.hitl import (
     UserTurnDelivery,
 )
 from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType
-from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime

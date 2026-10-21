@@ -18,27 +18,35 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.llm.provider import (
-    SUPPORTED_STYLES,
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.config import (
+    SUPPORTED_PROTOCOLS,
     LLMAccount,
-    LLMProvider,
+    LLMModelNotFoundError,
+    LLMProtocol,
+    ModelCapabilities,
     ModelConfig,
+    ModelLimits,
 )
+from ctx_weft.providers.llm.provider import LLMProvider
 from ctx_weft.providers.llm.store import LLMAccountStoreProtocol
 
 if TYPE_CHECKING:  # 让类型检查器/IDE 看得到，但运行时不触发 httpx 导入
-    from ctx_weft.providers.llm.anthropic import (
+    from ctx_weft.providers.llm.adapters.anthropic import (
         AnthropicAdapter,
         AnthropicMultimodalAdapter,
     )
-    from ctx_weft.providers.llm.openai import OpenAIAdapter, OpenAIMultimodalAdapter
+    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter, OpenAIMultimodalAdapter
 
 __all__ = [
     "LLMProvider",
     "LLMAccount",
     "ModelConfig",
-    "SUPPORTED_STYLES",
+    "SUPPORTED_PROTOCOLS",
+    "LLMProtocol",
+    "ModelLimits",
+    "ModelCapabilities",
+    "LLMModelNotFoundError",
     "LLMAccountStoreProtocol",
     "MockLLMAdapter",
     "MockResponse",
@@ -51,10 +59,11 @@ __all__ = [
 
 def __getattr__(name: str):
     """惰性导出 httpx-dependent adapter（仅在被访问时才 import）。"""
-    if name in ("AnthropicAdapter", "AnthropicMultimodalAdapter"):
-        from ctx_weft.providers.llm import anthropic as _m
-        return getattr(_m, name)
-    if name in ("OpenAIAdapter", "OpenAIMultimodalAdapter"):
-        from ctx_weft.providers.llm import openai as _m
-        return getattr(_m, name)
+    if name in (
+        "AnthropicAdapter", "AnthropicMultimodalAdapter",
+        "OpenAIAdapter", "OpenAIMultimodalAdapter",
+    ):
+        from ctx_weft.providers.llm import adapters
+
+        return getattr(adapters, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -31,8 +31,8 @@ from ctx_weft.protocols import (
 from ctx_weft.protocols.events import EventBlobStore, EventType
 from ctx_weft.protocols.memory import BLOB_REF_PREFIX, MemoryBlobStore
 from ctx_weft.providers.blob.fs import FsBlobStore
-from ctx_weft.providers.llm.anthropic import AnthropicAdapter, AnthropicMultimodalAdapter
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter, AnthropicMultimodalAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import all_events
 from tests._initialization import initialize_all

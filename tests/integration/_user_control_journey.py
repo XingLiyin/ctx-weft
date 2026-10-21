@@ -20,7 +20,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.authorizer import HumanConfirmationAuthorizer
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockResponse
 from tests.integration._session_cancel_worker import wait_until
 from tests.integration.test_dispatch_boundary_recap_e2e import _is_background_recap
 from tests.integration.test_hitl_e2e_v2 import _RecordingBashTool

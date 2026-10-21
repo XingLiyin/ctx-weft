@@ -67,8 +67,8 @@ from ctx_weft.protocols.capability import (
 from ctx_weft.protocols.events import Event, EventBlobStore, EventType
 from ctx_weft.protocols.memory import MemoryBlobStore
 from ctx_weft.providers.blob.fs import FsBlobStore
-from ctx_weft.providers.llm.anthropic import AnthropicMultimodalAdapter
-from ctx_weft.providers.llm.openai import _TOOL_IMAGE_NOTICE, OpenAIMultimodalAdapter
+from ctx_weft.providers.llm.adapters.anthropic import AnthropicMultimodalAdapter
+from ctx_weft.providers.llm.adapters.openai import _TOOL_IMAGE_NOTICE, OpenAIMultimodalAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import all_events, append_one
 from tests._initialization import initialize_all

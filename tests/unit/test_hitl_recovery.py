@@ -54,7 +54,7 @@ async def test_recover_agent_rebuilds_pending_hitl_and_parks() -> None:
 
     from ctx_weft.core import CtxWeftRuntime
     from ctx_weft.protocols.events import Event, EventType
-    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
@@ -238,7 +238,7 @@ def _recover_runtime_with_regression_guard():
     那是更早一轮退役的通用 setter，一旦重新出现也要当场被抓到。
     """
     from ctx_weft.protocols.events import EventType
-    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())
@@ -339,7 +339,7 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     from ctx_weft.core.models.task import NormalTaskSettings, Task
     from ctx_weft.core.orchestrator.task.manager import TaskManager
     from ctx_weft.protocols.events import Event, EventType
-    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
@@ -410,7 +410,7 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
     from ctx_weft.core.models.session import Session
     from ctx_weft.core.models.task import NormalTaskSettings, Task
     from ctx_weft.core.orchestrator.task.manager import TaskManager
-    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
     runtime = make_runtime(llm=MockLLMAdapter(responses=[]), agent_provider=InlineAgentTemplateProvider())

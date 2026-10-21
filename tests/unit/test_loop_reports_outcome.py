@@ -213,7 +213,7 @@ async def run_until_outage():
     """同 test_run_loop_outage.py::test_outage_marks_session_interrupted_not_failed 的搭台。"""
     from ctx_weft.core.models.config import RuntimeConfig
     from ctx_weft.protocols import LLMOutageError
-    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider,
         make_echo_template,

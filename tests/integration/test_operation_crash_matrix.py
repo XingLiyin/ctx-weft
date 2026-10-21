@@ -39,7 +39,7 @@ TC_DEL = mint_call_id(anchor="rec1", ordinal=1, raw_id="tc_del", turn_seq=0)
 
 from ctx_weft.core.loop.capability_gateway import tool_result_record_id
 from ctx_weft.providers.events.store.sql.store import open_sqlite_event_store
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests.integration.test_minimal_loop import (

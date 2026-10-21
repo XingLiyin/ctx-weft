@@ -32,7 +32,7 @@ from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleMan
 from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
 from ctx_weft.core.registry import ProviderRegistry
 from ctx_weft.core.runtime import _SessionTaskRunner
-from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,

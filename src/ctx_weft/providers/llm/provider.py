@@ -1,60 +1,28 @@
-"""LLMProvider — multi-account LLM provider.
-
-Manages multiple LLMAccount configs and resolves LLMClient instances.
-Implements the LLMClientResolver protocol so it can be registered
-into ProviderRegistry via providers.register_llm_provider().
-"""
+"""Multi-account provider with per-model protocol, capabilities and limits."""
 
 from __future__ import annotations
 
 import dataclasses
 import logging
 import time
-from dataclasses import dataclass, field
 
 from ctx_weft.core.utils.estimate import default_output_reserve
-from ctx_weft.protocols import LLMClient, LLMMessage, LLMRequest
+from ctx_weft.protocols import ImagePart, LLMClient, LLMMessage, LLMRequest, TextPart
+from ctx_weft.providers.llm.config import (
+    LLMAccount,
+    LLMModelNotFoundError,
+    ModelCapabilities,
+    ModelConfig,
+    ModelLimits,
+)
 from ctx_weft.providers.llm.store import LLMAccountStoreProtocol
 
 logger = logging.getLogger(__name__)
-
-# 纯文本与多模态是**两个 style**，不是一个 style 加一个开关——能力由「注册了哪个
-# adapter 类」表达（spec 2026-08-28-multimodal-adapter-dispatch §2「类型即声明」）。
-# 存量 account 的 "anthropic" / "openai" 行为不变，仍拿到纯文本 adapter，零迁移。
-SUPPORTED_STYLES = {
-    "anthropic", "anthropic-multimodal",
-    "openai", "openai-multimodal",
-}
-
-# 模型可用性探测的补全预算。不用 1：个别推理模型对极小 max_tokens 会直接拒绝，
-# 取一个小而安全的值——只需请求被接受、流能跑完，不关心实际产出多少 token。
 _PROBE_MAX_TOKENS = 16
-
-
-@dataclass
-class ModelConfig:
-    name: str
-    context_limit: int
-    # 输入侧输出预留：None → get_client 按窗口尺寸取默认(default_output_reserve)。喂
-    # reserved_output_tokens，不参与 per-request 输出上限（那是 output_ceiling）。
-    output_reserve: int | None = None
-    output_ceiling: int | None = None  # 单次输出收紧上限；None → 网关回退 context_limit
-
-
-@dataclass
-class LLMAccount:
-    """One API endpoint + credentials + list of available models."""
-
-    name: str
-    style: str          # 见 24 行上方 SUPPORTED_STYLES（"anthropic" | "anthropic-multimodal" | "openai" | "openai-multimodal"）
-    api_key: str
-    base_url: str = ""
-    models: list[ModelConfig] = field(default_factory=list)
-    default_model: str = ""
-    timeout_sec: int = 120
-
-
-# ── Internal wrapper ──────────────────────────────────────────────────────────
+# Valid 1x1 RGB PNG; a minimal image-input probe with no external URL dependency.
+_PROBE_IMAGE_PNG = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mNoaGgAAAMEAYF1LgG8AAAAAElFTkSuQmCC"
+)
 
 
 class _FixedModelClient:
@@ -105,9 +73,7 @@ class _FixedModelClient:
         return self._adapter.supports_tool_calling
 
     def complete(self, request: LLMRequest, stream: bool = True):
-        return self._adapter.complete(
-            dataclasses.replace(request, model=self._model), stream
-        )
+        return self._adapter.complete(dataclasses.replace(request, model=self._model), stream)
 
     @property
     def tokenizer(self):
@@ -118,46 +84,38 @@ class _FixedModelClient:
 
 
 class LLMProvider:
-    """Multi-account LLM provider. Registered into ProviderRegistry.
-
-    Usage:
-        store = LLMAccountStore()
-        provider = LLMProvider(store)
-        provider.load_from_store()
-        registry.register_llm_provider(provider)
-
-        # Later, in session execution:
-        llm = provider.get_client(account="claude", model="claude-opus-4-7")
-    """
+    """Resolve configured models; reuse adapters for each account/protocol/image combination."""
 
     def __init__(self, store: LLMAccountStoreProtocol, *, max_http_retries: int = 3) -> None:
         self._accounts: dict[str, LLMAccount] = {}
-        self._adapters: dict[str, LLMClient] = {}
+        self._adapters: dict[str, dict[tuple[str, bool], LLMClient]] = {}
+        self._adapter_settings: dict[str, tuple[str, str, int]] = {}
         self._store = store
         self._max_http_retries = max_http_retries
-
-    # ── Account CRUD ──────────────────────────────────────────────────────────
 
     def register_account(self, account: LLMAccount, *, persist: bool = True) -> None:
         if account.name in self._accounts:
             raise KeyError(f"LLM account already registered: '{account.name}'")
-        if account.style not in SUPPORTED_STYLES:
-            raise ValueError(f"Unsupported style '{account.style}'. Must be one of: {SUPPORTED_STYLES}")
+        account.__post_init__()
+        for model in account.models:
+            model.__post_init__()
+        if len({m.name for m in account.models}) != len(account.models):
+            raise ValueError(f"Duplicate model names in account '{account.name}'")
         if not account.default_model and account.models:
             account.default_model = account.models[0].name
-
-        self._adapters[account.name] = self._build_adapter(account)
-        self._accounts[account.name] = account
+        if account.default_model:
+            self._model_config(account, account.default_model)
         if persist:
             self._store.save(account)
-        logger.info("LLMProvider: registered account '%s' (%s)", account.name, account.style)
+        self._accounts[account.name] = account
+        logger.info("LLMProvider: registered account '%s'", account.name)
 
     def delete_account(self, name: str) -> None:
-        if name not in self._accounts:
-            raise KeyError(f"LLM account not found: '{name}'")
-        del self._accounts[name]
-        del self._adapters[name]
+        self.get_account(name)
         self._store.delete(name)
+        del self._accounts[name]
+        self._adapters.pop(name, None)
+        self._adapter_settings.pop(name, None)
 
     def get_account(self, name: str) -> LLMAccount:
         if name not in self._accounts:
@@ -170,151 +128,210 @@ class LLMProvider:
     def is_registered(self, name: str) -> bool:
         return name in self._accounts
 
-    # ── Model management ─────────────────────────────────────────────────────
-
-    def add_model(
-        self,
-        name: str,
-        model: str,
-        context_limit: int | None = None,
-        output_reserve: int | None = None,
-        output_ceiling: int | None = None,
-    ) -> LLMAccount:
+    def add_model(self, name: str, model: ModelConfig) -> LLMAccount:
         account = self.get_account(name)
-        if not any(m.name == model for m in account.models):
-            account.models.append(ModelConfig(
-                name=model,
-                context_limit=context_limit or 128_000,
-                output_reserve=output_reserve,     # None → get_client 按窗口尺寸取默认
-                output_ceiling=output_ceiling,     # None → 网关回退 context_limit
-            ))
-        if not account.default_model:
-            account.default_model = model
-        self._store.save(account)
-        return account
+        model.__post_init__()
+        if any(m.name == model.name for m in account.models):
+            raise ValueError(f"Model '{model.name}' already exists in account '{name}'")
+        updated = dataclasses.replace(
+            account,
+            models=[*account.models, model],
+            default_model=account.default_model or model.name,
+        )
+        self._store.save(updated)
+        self._accounts[name] = updated
+        return updated
+
+    def update_model(self, name: str, model: ModelConfig) -> LLMAccount:
+        account = self.get_account(name)
+        self._model_config(account, model.name)
+        model.__post_init__()
+        updated = dataclasses.replace(
+            account, models=[model if m.name == model.name else m for m in account.models]
+        )
+        self._store.save(updated)
+        self._accounts[name] = updated
+        return updated
 
     def remove_model(self, name: str, model: str) -> LLMAccount:
         account = self.get_account(name)
-        account.models = [m for m in account.models if m.name != model]
-        if account.default_model == model:
-            account.default_model = account.models[0].name if account.models else ""
-        self._store.save(account)
-        return account
+        models = [m for m in account.models if m.name != model]
+        default = account.default_model
+        if default == model:
+            default = models[0].name if models else ""
+        updated = dataclasses.replace(account, models=models, default_model=default)
+        self._store.save(updated)
+        self._accounts[name] = updated
+        return updated
 
     def set_default_model(self, name: str, model: str) -> LLMAccount:
         account = self.get_account(name)
-        if not any(m.name == model for m in account.models):
-            raise ValueError(f"Model '{model}' not in account '{name}'")
-        account.default_model = model
-        self._store.save(account)
-        return account
+        self._model_config(account, model)
+        updated = dataclasses.replace(account, default_model=model)
+        self._store.save(updated)
+        self._accounts[name] = updated
+        return updated
 
-    # ── Client resolution ─────────────────────────────────────────────────────
-
-    def get_client(
-        self,
-        account: str | None = None,
-        model: str | None = None,
-    ) -> LLMClient:
-        """Resolve a LLMClient for the given account + model.
-
-        account=None → first registered account.
-        model=None   → account's default_model.
-        """
+    def _resolve_account(
+        self, account: str | None, model: str | None
+    ) -> tuple[LLMAccount, str | None]:
         if not self._accounts:
-            raise RuntimeError("No LLM accounts registered. Register one via LLMProvider.register_account() (or have the host register it) before resolving a client.")
-
+            raise RuntimeError(
+                "No LLM accounts registered. Register one before resolving a client."
+            )
         name = account or next(iter(self._accounts))
         if name not in self._accounts:
-            # 账号可能已被删除（会话/任务仍钉着旧账号名）→ 回退到默认账号 + 默认模型，
-            # 而不是直接 KeyError 让任务失败。沿用旧模型名会落到默认账号上不匹配，故置空。
             logger.warning("LLM account '%s' not found; falling back to default account.", name)
-            name = next(iter(self._accounts))
-            model = None
-        acc = self.get_account(name)
-        adapter = self._adapters[name]
+            name, model = next(iter(self._accounts)), None
+        return self.get_account(name), model
 
-        resolved_model = model or acc.default_model
-        if not resolved_model:
-            raise ValueError(
-                f"No model specified and account '{name}' has no default model. "
-                "Add one via LLMProvider.add_model() or set a default via LLMProvider.set_default_model()."
+    @staticmethod
+    def _model_config(account: LLMAccount, model: str | None) -> ModelConfig:
+        selected = model or account.default_model
+        config = next((m for m in account.models if m.name == selected), None)
+        if config is None:
+            raise LLMModelNotFoundError(f"Model '{selected}' not in account '{account.name}'")
+        return config
+
+    def get_model_config(self, account: str | None = None, model: str | None = None) -> ModelConfig:
+        """Pure configuration lookup; shares default resolution with get_client."""
+        acc, selected = self._resolve_account(account, model)
+        return self._model_config(acc, selected)
+
+    def get_client(self, account: str | None = None, model: str | None = None) -> LLMClient:
+        acc, selected = self._resolve_account(account, model)
+        cfg = self._model_config(acc, selected)
+        cfg.__post_init__()
+        reserve = cfg.output_reserve
+        if reserve is None:
+            reserve = default_output_reserve(cfg.limit.context)
+        return _FixedModelClient(
+            self._get_adapter(acc, cfg),
+            cfg.name,
+            cfg.limit.context,
+            reserve,
+            cfg.limit.output,
+            account=acc.name,
+        )
+
+    def _get_adapter(self, account: LLMAccount, model: ModelConfig) -> LLMClient:
+        model.__post_init__()
+        settings = (account.base_url, account.api_key, account.timeout_sec)
+        if self._adapter_settings.get(account.name) != settings:
+            self._adapters[account.name] = {}
+            self._adapter_settings[account.name] = settings
+        cache = self._adapters[account.name]
+        key = (model.protocol, "image" in model.capabilities.input)
+        if key not in cache:
+            cache[key] = self._build_adapter(account, model)
+        return cache[key]
+
+    def _build_adapter(self, account: LLMAccount, model: ModelConfig) -> LLMClient:
+        model.__post_init__()
+        image = "image" in model.capabilities.input
+        if model.protocol == "anthropic":
+            from ctx_weft.providers.llm.adapters.anthropic import (
+                AnthropicAdapter,
+                AnthropicMultimodalAdapter,
             )
 
-        model_cfg = next((m for m in acc.models if m.name == resolved_model), None)
-        ctx_limit = model_cfg.context_limit if model_cfg else 128_000
-        # output_reserve 未配（None）→ 按窗口尺寸取默认；显式值（含 0）原样采用。
-        cfg_reserve = model_cfg.output_reserve if model_cfg else None
-        reserve = cfg_reserve if cfg_reserve is not None else default_output_reserve(ctx_limit)
-        ceiling = model_cfg.output_ceiling if model_cfg else None
+            cls = AnthropicMultimodalAdapter if image else AnthropicAdapter
+        else:
+            from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter, OpenAIMultimodalAdapter
 
-        return _FixedModelClient(adapter, resolved_model, ctx_limit, reserve, ceiling, account=name)
+            cls = OpenAIMultimodalAdapter if image else OpenAIAdapter
+        return cls(
+            api_key=account.api_key,
+            base_url=account.base_url,
+            timeout_sec=account.timeout_sec,
+            max_http_retries=self._max_http_retries,
+        )
 
-    # ── Model discovery / connectivity (host-facing; not on the protocol) ──────
+    async def fetch_models(self, protocol: str, api_key: str, base_url: str) -> list[str]:
+        account = LLMAccount(name="_probe", api_key=api_key, base_url=base_url)
+        cfg = ModelConfig("_probe", protocol, ModelLimits(128_000))
+        adapter = self._build_adapter(account, cfg)
+        try:
+            return await adapter.list_models()
+        finally:
+            client = getattr(adapter, "_client", None)
+            if client is not None:
+                await client.aclose()
 
-    async def fetch_models(self, style: str, api_key: str, base_url: str = "") -> list[str]:
-        """List models for ad-hoc (unregistered) credentials. Builds a transient adapter."""
-        probe = LLMAccount(name="_probe", style=style, api_key=api_key, base_url=base_url)
-        adapter = self._build_adapter(probe)  # raises ValueError on unsupported style
-        return await adapter.list_models()
+    async def fetch_models_for_account(self, name: str, *, protocol: str) -> list[str]:
+        account = self.get_account(name)
+        cfg = ModelConfig("_probe", protocol, ModelLimits(128_000))
+        return await self._get_adapter(account, cfg).list_models()
 
-    async def fetch_models_for_account(self, name: str) -> list[str]:
-        """List models for a registered account (reuses its live adapter)."""
-        self.get_account(name)  # raises KeyError if missing
-        return await self._adapters[name].list_models()
+    async def ping(self, protocol: str, api_key: str, base_url: str) -> float:
+        started = time.perf_counter()
+        await self.fetch_models(protocol, api_key, base_url)
+        return (time.perf_counter() - started) * 1000.0
 
-    async def ping(self, style: str, api_key: str, base_url: str = "") -> float:
-        """Probe ad-hoc credentials; returns latency in ms. Raises on failure."""
-        t0 = time.perf_counter()
-        await self.fetch_models(style, api_key, base_url)
-        return (time.perf_counter() - t0) * 1000.0
+    async def ping_account(self, name: str, *, protocol: str) -> float:
+        started = time.perf_counter()
+        await self.fetch_models_for_account(name, protocol=protocol)
+        return (time.perf_counter() - started) * 1000.0
 
-    async def ping_account(self, name: str) -> float:
-        """Probe a registered account; returns latency in ms. Raises on failure."""
-        t0 = time.perf_counter()
-        await self.fetch_models_for_account(name)
-        return (time.perf_counter() - t0) * 1000.0
-
-    async def _probe_model(self, adapter: LLMClient, model: str) -> None:
-        """Send one minimal completion with `model` and drain the stream.
-
-        Validates that the model name exists AND the account has permission to
-        call it: a bad/unauthorized model makes the adapter raise LLMCallError
-        (HTTP 4xx) instead of merely listing models. Unlike fetch_models/ping,
-        this actually exercises the configured model.
-        """
+    async def _probe_model(
+        self, adapter: LLMClient, cfg: ModelConfig, *, verify_modalities: bool = True
+    ) -> None:
+        """Use image input for capability verification, plain text for routine latency checks."""
+        content: str | list[TextPart | ImagePart] = "ping"
+        if verify_modalities and "image" in cfg.capabilities.input:
+            content = []
+            if "text" in cfg.capabilities.input:
+                content.append(TextPart(text="Reply OK."))
+            content.append(ImagePart(data=_PROBE_IMAGE_PNG, media_type="image/png"))
         request = LLMRequest(
-            model=model,
+            model=cfg.name,
             system="",
-            messages=[LLMMessage(role="user", content="ping")],
+            messages=[LLMMessage(role="user", content=content)],
             max_tokens=_PROBE_MAX_TOKENS,
         )
         async for _ in adapter.complete(request, stream=True):
             pass
 
-    async def verify_model(self, style: str, api_key: str, base_url: str = "", *, model: str) -> float:
-        """Verify a model is callable with ad-hoc credentials; returns latency in ms.
+    async def verify_model(
+        self,
+        protocol: str,
+        api_key: str,
+        base_url: str,
+        *,
+        model: str,
+        capabilities: ModelCapabilities | None = None,
+    ) -> float:
+        account = LLMAccount(name="_probe", api_key=api_key, base_url=base_url)
+        cfg = ModelConfig(
+            model, protocol, ModelLimits(128_000), capabilities or ModelCapabilities()
+        )
+        adapter = self._build_adapter(account, cfg)
+        started = time.perf_counter()
+        try:
+            await self._probe_model(adapter, cfg)
+        finally:
+            client = getattr(adapter, "_client", None)
+            if client is not None:
+                await client.aclose()
+        return (time.perf_counter() - started) * 1000.0
 
-        Builds a transient adapter and runs a minimal completion. Raises on failure
-        (unsupported style, bad credentials, unknown model, no permission)."""
-        probe = LLMAccount(name="_probe", style=style, api_key=api_key, base_url=base_url)
-        adapter = self._build_adapter(probe)  # raises ValueError on unsupported style
-        t0 = time.perf_counter()
-        await self._probe_model(adapter, model)
-        return (time.perf_counter() - t0) * 1000.0
+    async def verify_model_for_account(self, name: str, model: str | ModelConfig) -> float:
+        """Accept a configured name, or a candidate config before it is saved."""
+        account = self.get_account(name)
+        cfg = model if isinstance(model, ModelConfig) else self._model_config(account, model)
+        started = time.perf_counter()
+        await self._probe_model(self._get_adapter(account, cfg), cfg)
+        return (time.perf_counter() - started) * 1000.0
 
-    async def verify_model_for_account(self, name: str, model: str) -> float:
-        """Verify a model is callable for a registered account (reuses its live adapter);
-        returns latency in ms. Raises KeyError if missing, or on call failure."""
-        self.get_account(name)  # raises KeyError if missing
-        t0 = time.perf_counter()
-        await self._probe_model(self._adapters[name], model)
-        return (time.perf_counter() - t0) * 1000.0
-
-    # ── Persistence ───────────────────────────────────────────────────────────
+    async def ping_model_for_account(self, name: str, model: str) -> float:
+        """Measure a configured model with text only; does not verify image support."""
+        account = self.get_account(name)
+        cfg = self._model_config(account, model)
+        started = time.perf_counter()
+        await self._probe_model(self._get_adapter(account, cfg), cfg, verify_modalities=False)
+        return (time.perf_counter() - started) * 1000.0
 
     def load_from_store(self) -> int:
-        """Load all accounts from store. Returns count loaded."""
         count = 0
         for account in self._store.list_all():
             if account.name in self._accounts:
@@ -324,39 +341,4 @@ class LLMProvider:
                 count += 1
             except Exception:
                 logger.exception("LLMProvider: failed to load account '%s'", account.name)
-        if count:
-            logger.info("LLMProvider: restored %d account(s) from store", count)
         return count
-
-    # ── Internal ─────────────────────────────────────────────────────────────
-
-    def _build_adapter(self, account: LLMAccount) -> LLMClient:
-        # 分派必须精确匹配：fetch_models / verify_model 两个 ungated call site 靠 _build_adapter
-        # 自己拒绝未知 style。前缀匹配会让 "anthropicX" 这样的近似值也被接受（降级成纯文本），
-        # 破坏了入口防御（只有 register_account 经过 SUPPORTED_STYLES 门控）。故必须精确匹配。
-        style = account.style
-        if style in ("anthropic", "anthropic-multimodal"):
-            from ctx_weft.providers.llm.anthropic import (
-                AnthropicAdapter,
-                AnthropicMultimodalAdapter,
-            )
-            cls = AnthropicMultimodalAdapter if style == "anthropic-multimodal" else AnthropicAdapter
-            return cls(
-                api_key=account.api_key,
-                base_url=account.base_url or "https://api.anthropic.com",
-                timeout_sec=account.timeout_sec,
-                max_http_retries=self._max_http_retries,
-            )
-        if style in ("openai", "openai-multimodal"):
-            from ctx_weft.providers.llm.openai import (
-                OpenAIAdapter,
-                OpenAIMultimodalAdapter,
-            )
-            cls = OpenAIMultimodalAdapter if style == "openai-multimodal" else OpenAIAdapter
-            return cls(
-                api_key=account.api_key,
-                base_url=account.base_url or "https://api.openai.com",
-                timeout_sec=account.timeout_sec,
-                max_http_retries=self._max_http_retries,
-            )
-        raise ValueError(f"Unsupported style: {account.style}")

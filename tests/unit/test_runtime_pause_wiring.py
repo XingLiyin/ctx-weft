@@ -11,7 +11,7 @@ from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.event import emit_event
 from ctx_weft.protocols import ProviderContext
 from ctx_weft.protocols.events import EventType
-from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
 from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 from tests.unit.test_runtime_agent_api import _plant

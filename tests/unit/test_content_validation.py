@@ -131,7 +131,7 @@ async def test_run_single_task_rejects_image_before_persisting_anything_without_
     from types import SimpleNamespace
 
     from ctx_weft.core.models.errors import BlobStoreRequiredError
-    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
     from ctx_weft.providers.llm.provider import _FixedModelClient
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import (

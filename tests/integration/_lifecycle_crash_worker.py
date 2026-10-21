@@ -15,7 +15,7 @@ from ctx_weft import SessionStartParams
 from ctx_weft.protocols import LLMChunk, MemoryKind, MemoryScope, ToolCall
 from ctx_weft.protocols.events import EventType, PersistenceUnavailableError
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockResponse
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,

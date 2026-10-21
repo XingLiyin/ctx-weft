@@ -15,7 +15,7 @@ from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.protocols import ToolCall
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockResponse
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests.integration.test_dispatch_boundary_recap_e2e import _RouterLLM
 from tests.integration.test_minimal_loop import (

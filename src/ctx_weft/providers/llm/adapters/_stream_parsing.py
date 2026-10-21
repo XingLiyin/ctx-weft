@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ctx_weft.protocols.llm import LLMStreamBuffers, ToolCall, current_stream_writer
-from ctx_weft.providers.llm.text_calls import ContentGate, clean_visible, merge_content
+from ctx_weft.providers.llm.adapters.text_calls import ContentGate, clean_visible, merge_content
 
 
 class ReasoningCandidate:

@@ -23,7 +23,7 @@ from ctx_weft.protocols import (
     MemoryEventType,
     ProviderContext,
 )
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
 

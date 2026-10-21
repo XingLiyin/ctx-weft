@@ -18,10 +18,10 @@ from ctx_weft.protocols import (
     LLMCallError, LLMChunk, LLMMessage, LLMRequest, LLMTool, LLMUsage, RAW_ARGS_KEY, ToolCall,
     LLMClient,
 )
-from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
-from ctx_weft.providers.llm._modality import downgrade_for_text_only
-from ctx_weft.providers.llm._schema import sanitize_boolean_schemas
-from ctx_weft.providers.llm._stream_parsing import begin_parsed_attempt
+from ctx_weft.providers.llm.adapters._finalize import build_finalize_chunks, parse_tool_arguments
+from ctx_weft.providers.llm.adapters._modality import downgrade_for_text_only
+from ctx_weft.providers.llm.adapters._schema import sanitize_boolean_schemas
+from ctx_weft.providers.llm.adapters._stream_parsing import begin_parsed_attempt
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 logger = logging.getLogger(__name__)
@@ -273,7 +273,7 @@ class OpenAIAdapter(LLMClient):
 
     async def list_models(self) -> list[str]:
         """List available model ids via GET {base}/v1/models. Raises on HTTP error."""
-        resp = await self._client.get(f"{self._base_url}/v1/models", headers=self._headers())
+        resp = await self._client.get(self._api_url("models"), headers=self._headers())
         resp.raise_for_status()
         data = resp.json().get("data", [])
         return [m["id"] for m in data if isinstance(m, dict) and "id" in m]
@@ -284,7 +284,11 @@ class OpenAIAdapter(LLMClient):
 
     def _chat_url(self) -> str:
         """Chat-completions endpoint. Overridable for endpoint inference."""
-        return f"{self._base_url}/v1/chat/completions"
+        return self._api_url("chat/completions")
+
+    def _api_url(self, operation: str) -> str:
+        """Standard API path. Hosts may override URL policy by subclassing."""
+        return f"{self._base_url}/v1/{operation}"
 
     def _headers(self) -> dict[str, str]:
         return {

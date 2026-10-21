@@ -12,7 +12,7 @@ from ctx_weft.core.models.errors import SessionAlreadyExistsError
 from ctx_weft.core.utils.event import new_event
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events import InMemoryEventStore
-from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (

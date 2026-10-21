@@ -18,8 +18,8 @@ from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
 from ctx_weft.protocols import EventType, LLMChunk, LLMMessage, LLMRequest
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.events import EventOrigin
-from ctx_weft.providers.llm.anthropic import AnthropicAdapter, _serialize_messages
-from ctx_weft.providers.llm.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter, _serialize_messages
+from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
 from tests.integration.test_interactive_task import _act_state_ctx
 
 
@@ -235,7 +235,7 @@ async def test_signed_thinking_is_replayed_from_the_message_after_tool_id_mintin
 
 @pytest.mark.parametrize("texts", [["", "first"], ["", "first", "second"]])
 async def test_signed_blocks_keep_their_text_and_order_including_an_empty_block(texts):
-    from ctx_weft.providers.llm._stream_parsing import begin_parsed_attempt
+    from ctx_weft.providers.llm.adapters._stream_parsing import begin_parsed_attempt
 
     async def source(owner):
         state = begin_parsed_attempt()
@@ -326,7 +326,7 @@ def test_legalization_keeps_signed_thinking_on_the_corresponding_assistant():
 
 
 async def test_inline_http_retry_discards_hidden_content_from_the_failed_attempt(monkeypatch):
-    import ctx_weft.providers.llm.openai as openai_module
+    import ctx_weft.providers.llm.adapters.openai as openai_module
 
     calls, attempts = [], []
 
@@ -349,7 +349,7 @@ async def test_inline_http_retry_discards_hidden_content_from_the_failed_attempt
         pass
 
     monkeypatch.setattr(openai_module.asyncio, "sleep", no_sleep)
-    from ctx_weft.providers.llm._stream_parsing import AdapterStreamParser
+    from ctx_weft.providers.llm.adapters._stream_parsing import AdapterStreamParser
 
     original = AdapterStreamParser.feed_text
 

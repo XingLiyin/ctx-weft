@@ -14,7 +14,7 @@ from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.authorizer import HumanConfirmationAuthorizer
 from ctx_weft.providers.blob.fs import FsBlobStore
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockResponse
 from tests.integration._session_cancel_worker import wait_until
 from tests.integration._user_control_journey import (
     SID,

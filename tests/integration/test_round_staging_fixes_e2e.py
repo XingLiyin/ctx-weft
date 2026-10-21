@@ -37,7 +37,7 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import HitlReply
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import all_events, append_one
 from tests._initialization import initialize_all

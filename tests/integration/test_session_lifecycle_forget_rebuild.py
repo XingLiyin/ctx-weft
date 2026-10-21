@@ -32,7 +32,7 @@ from ctx_weft.core.models.errors import AgentNotFound
 from ctx_weft.core.orchestrator.task.queue import QueueEntry
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import ToolCall
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import append_one
 from tests._initialization import initialize_all

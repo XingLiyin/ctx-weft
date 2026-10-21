@@ -31,7 +31,7 @@ from ctx_weft.core.orchestrator.task.queue import QueueEntry
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import all_events
 from tests._initialization import initialize_all

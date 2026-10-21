@@ -16,7 +16,7 @@ from typing import Any
 
 from ctx_weft.protocols import LLMCallError, LLMChunk, LLMUsage, RAW_ARGS_KEY, ToolCall
 from ctx_weft.core.utils.ids import generate_id
-from ctx_weft.providers.llm.text_calls import (
+from ctx_weft.providers.llm.adapters.text_calls import (
     clean_visible,
     extract_think,
     scan_text_tool_calls,

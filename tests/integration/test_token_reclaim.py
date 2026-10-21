@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockResponse
 from tests._initialization import initialize_all
 from tests.integration.test_outage_resume import (
     _FlakyLLM,

@@ -11,7 +11,7 @@ from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.content import content_to_text
 from ctx_weft.protocols import ImagePart, ProviderContext, TextPart
 from ctx_weft.protocols.events import EventBlobStore
-from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
 from ctx_weft.providers.llm.provider import _FixedModelClient
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import append_one

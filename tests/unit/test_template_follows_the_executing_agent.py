@@ -35,7 +35,7 @@ from ctx_weft.core.models.errors import TemplateNotFoundError
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.core.runtime import _SessionTaskRunner
-from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,

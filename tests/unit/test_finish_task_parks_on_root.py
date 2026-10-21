@@ -35,7 +35,7 @@ from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.loop.steps.act import ActStep
 from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.hitl import PREFACE_NORMAL, UserTurnDelivery
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from tests.integration.test_interactive_task import _act_state_ctx
 from tests.step_helpers import patch_observe_start
 

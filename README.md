@@ -494,15 +494,22 @@ class LLMClient(Protocol):
 `LLMProvider` 实现 `LLMClientResolver`，管理多账号 + 多模型，支持持久化与环境变量自举：
 
 ```python
-from ctx_weft.providers.llm import LLMProvider, LLMAccount, ModelConfig
+from ctx_weft.providers.llm import (
+    LLMProvider, LLMAccount, ModelConfig, ModelLimits, ModelCapabilities,
+)
 # 真实 adapter（需 [llm] extra）/ 测试 adapter 也都从同一入口取：
 # from ctx_weft.providers.llm import AnthropicAdapter, OpenAIAdapter, MockLLMAdapter
 
 provider = LLMProvider(store)          # store 实现 LLMAccountStoreProtocol(save/delete/list_all)
 provider.register_account(LLMAccount(
-    name="claude", style="anthropic",  # 取值见下方「style 取值」段落
-    api_key="sk-...", base_url="",      # base_url 留空走各家默认
-    models=[ModelConfig(name="claude-sonnet-4-6", context_limit=200_000)],  # output_reserve 缺省=按窗口尺寸
+    name="claude",
+    api_key="sk-...", base_url="https://api.anthropic.com",
+    models=[ModelConfig(
+        name="claude-sonnet-4-6", protocol="anthropic",
+        limit=ModelLimits(context=200_000, output=32_000),
+        capabilities=ModelCapabilities(input=["text", "image"], output=["text"]),
+        output_reserve=None,  # ctx-weft 的输入预算预留，缺省按窗口尺寸计算
+    )],
     default_model="claude-sonnet-4-6", timeout_sec=120,
 ))
 provider.load_from_store()             # 从持久化恢复
@@ -510,18 +517,19 @@ runtime.providers.register_llm_provider(provider)
 ```
 
 账号/模型管理：`register_account` / `delete_account` / `get_account` / `list_accounts` /
-`is_registered` / `add_model` / `remove_model` / `set_default_model` / `get_client(account, model)`。
+`is_registered` / `add_model(account, ModelConfig)` / `update_model(account, ModelConfig)` /
+`remove_model` / `set_default_model` / `get_model_config(account, model)` / `get_client(account, model)`。
 
 > SDK core 不读环境变量。从环境变量自举一个默认账号（`bootstrap_from_env`）由上层应用
 > 在子类中实现（host 的 `LLMProvider` 子类读自己约定前缀的环境变量）。
 
 > 内置 `AnthropicAdapter` / `OpenAIAdapter`（纯文本）与 `AnthropicMultimodalAdapter` /
-> `OpenAIMultimodalAdapter`（收图片）均由 `LLMProvider` 按 `style` 自动构造。
+> `OpenAIMultimodalAdapter`（收图片）均由 `LLMProvider` 按模型的 `protocol` 与输入能力自动构造。
 > `run_single_task` / `SessionStartParams` 里的 `llm_account` / `llm_model` 会透传给 `get_client()`。
 
-`style` 取值：`"anthropic"` / `"openai"`（纯文本）与 `"anthropic-multimodal"` /
-`"openai-multimodal"`（收图片）。**能力由类型表达**——注册哪个 style，就是在声明
-该账号下的模型收不收图。纯文本 adapter 收到图片时会降级成 `[image ...]` 文本占位
+`protocol` 取值为 `"anthropic"` / `"openai"`（Chat Completions）。输入能力为
+`["text"]` 或含 `"image"` 的列表，输出目前支持 `["text"]`。同一账号下的模型可以使用不同协议和能力，
+provider 按账号、协议和图片能力复用 adapter。纯文本 adapter 收到图片时会降级成 `[image ...]` 文本占位
 并记一条 warning，**不中断会话**；core 对模态零判断，全程透传到 `LLMClient` 面前。
 自写 adapter 时，`complete()` 收到的 `LLMMessage.content` 可能是
 `list[ContentPart]`，如何处置完全由你决定。
@@ -1102,16 +1110,37 @@ async def test_single_task(runtime):
 
 ---
 
-## 升级须知（多模态 adapter dispatch）
+## 升级须知（模型配置）
+
+- 账号移除 `style`，每个模型显式配置 `protocol="openai" | "anthropic"`。
+- 模型的 `context_limit` 移到 `limit.context`，`output_ceiling` 移到 `limit.output`；
+  `output_reserve` 仍在模型层，`None` 自动计算，`0` 表示不预留。
+- `capabilities.input=["text", "image"]` 选择图片 adapter，`["text"]` 选择文本 adapter；
+  `capabilities.output` 当前支持 `["text"]`。这份配置由 provider 消费，core loop 仍只依赖 client。
+- 账号与模型配置类型集中在 `providers/llm/config.py`；Store 契约与 tokenizer 分别保留在
+  `store.py` 和 `tokenizer.py`，`provider.py` 管理账号并返回绑定模型的 client。
+  Store 应将外部配置转换成 `LLMAccount` / `ModelConfig`；旧账号级 style 和扁平种子的迁移
+  由宿主读取入口负责。`dataclasses.asdict(account)` 可用于保存当前结构。
+- 内置 adapter 与共用辅助实现位于 `providers/llm/adapters/`。
+  仍可从 `ctx_weft.providers.llm` 导入公开 adapter 类；直接引用实现模块时请使用
+  `ctx_weft.providers.llm.adapters.openai` / `.anthropic` / `.mock`。
+  宿主共用的 `ReasoningCandidate` 从 `ctx_weft.providers.llm.adapters` 导入。
+- `add_model`、`update_model` 接收完整的 `ModelConfig`。`get_client` 要求模型已登记；
+  验证尚未保存的模型可调用 `verify_model_for_account(account, candidate_config)`。
+- 拉取模型列表和账号连通性探测需显式指定 `protocol`：
+  `fetch_models_for_account(account, protocol="openai")`、`ping_account(account, protocol="anthropic")`。
+  内置 adapter 按服务根拼接 `/v1/{operation}`；宿主可通过子类重写 `_api_url`，统一适配消息调用与模型列表的地址。
+- 运行时 client 的 `context_limit`、`output_ceiling`、`output_reserve` 属性保持原语义。
+
+## 多模态行为
 
 - **破坏性变更：`ModelConfig.supports_vision` 已删除。** 若你的账号配置里还带着
   `ModelConfig(..., supports_vision=True)`，升级后构造会直接失败——把这个参数
-  从你的配置里删掉。视觉能力不再是挂在 `ModelConfig` 上的一个字段，入口也不再
+  从你的配置里删掉，改用 `capabilities.input`。core 入口不再
   做任何视觉门控（旧的 `VisionNotSupportedError` / `error_code=VISION_NOT_SUPPORTED`
   一并删除）。
-- **能力现在由「注册了哪个 adapter 类」表达。** 用 `LLMProvider` 的宿主改用
-  `style` 字符串声明：纯文本传 `"anthropic"` / `"openai"`，收图片传
-  `"anthropic-multimodal"` / `"openai-multimodal"`；直接 `llm=` 一个 `LLMClient`
+- **能力由 provider 根据模型配置选择 adapter 类。** 用 `LLMProvider` 的宿主配置
+  每个模型的 `protocol` 和 `capabilities.input`；直接 `llm=` 一个 `LLMClient`
   的宿主，则由你传的是 `AnthropicAdapter`/`OpenAIAdapter` 还是
   `AnthropicMultimodalAdapter`/`OpenAIMultimodalAdapter`（或自定义等价类）决定。
 - **行为变化：图片不再在入口被拒绝。** 携带图片（`ImagePart`）的会话现在会被

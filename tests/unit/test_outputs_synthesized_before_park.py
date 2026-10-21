@@ -112,7 +112,7 @@ async def test_act_sets_outputs_on_plain_text_turn(unattended: bool) -> None:
     """
     from ctx_weft.core.loop.signals import HitlPark
     from ctx_weft.core.loop.steps.act import ActStep
-    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
     from tests.integration.test_interactive_task import _act_state_ctx
 
     llm = MockLLMAdapter(responses=[MockResponse(text="给用户的答复")])

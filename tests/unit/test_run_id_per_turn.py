@@ -72,7 +72,7 @@ import pytest
 from ctx_weft.core.runtime import SessionStartParams, _SessionTaskRunner
 from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.events import EventOrigin, EventType
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from ctx_weft.providers.llm.provider import LLMAccount
+    from ctx_weft.providers.llm.config import LLMAccount
 
 
 @runtime_checkable

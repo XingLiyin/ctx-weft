@@ -13,7 +13,7 @@ from ctx_weft.protocols.hitl import (
     PREFACE_AFTER_INTERRUPT_EDIT,
     UserTurnDelivery,
 )
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.integration.test_interactive_task import _act_state_ctx
 

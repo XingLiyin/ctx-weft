@@ -5,7 +5,7 @@ import json
 import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMMessage, LLMRequest, LLMTool
-from ctx_weft.providers.llm.openai import OpenAIAdapter, _resolve_tc_index, _serialize_messages
+from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter, _resolve_tc_index, _serialize_messages
 
 
 # ── Fake httpx streaming client ────────────────────────────────────────────────

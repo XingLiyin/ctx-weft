@@ -35,7 +35,7 @@ from ctx_weft.protocols import (
     MemoryEventType as T,
 )
 from ctx_weft.protocols.events import EventType
-from ctx_weft.providers.llm.mock import (
+from ctx_weft.providers.llm.adapters.mock import (
     MockLLMAdapter,
     MockResponse,
     is_observer_request,

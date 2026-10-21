@@ -15,7 +15,7 @@ from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, Tool
 from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
-from ctx_weft.providers.llm.mock import MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockResponse
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests.integration._session_cancel_worker import runtime, wait_until
 from tests.integration.test_hitl_hot_reply_round_window_e2e import (

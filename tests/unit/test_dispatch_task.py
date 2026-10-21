@@ -28,7 +28,7 @@ from ctx_weft.core.models.task import PORT_MAIN, PORT_NONE, NormalTaskSettings
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import MemoryAddress, MemoryEventType, ProviderContext, ToolCall
 from ctx_weft.protocols.events import EventType
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (

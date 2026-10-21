@@ -42,7 +42,7 @@ def test_asdict_carries_seven_keys():
 
 async def test_mock_adapter_carries_cache_split():
     from ctx_weft.protocols import LLMMessage, LLMRequest
-    from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 
     adapter = MockLLMAdapter([MockResponse(text="hi", cache_read_tokens=3, reasoning_tokens=1)])
     req = LLMRequest(model="mock", system="sys prompt",

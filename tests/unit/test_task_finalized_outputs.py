@@ -33,7 +33,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.template import LoopConfig
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_interactive_task import _act_state_ctx

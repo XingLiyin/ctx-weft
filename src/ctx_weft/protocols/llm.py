@@ -368,7 +368,8 @@ class LLMClient(Protocol):
     def output_reserve(self) -> int:
         """输入侧为输出预留的 token 量 → 喂 session.reserved_output_tokens
         （→ effective_limit → 装配预算 / compact 触发 / 限额停机）。**不**参与 per-request
-        的输出上限（那是 output_ceiling）。经 ModelConfig 配置，未配时按窗口尺寸取默认
+        的输出上限（client.output_ceiling，配置来自 ModelConfig.limit.output）。
+        经 ModelConfig.output_reserve 配置，未配时按窗口尺寸取默认
         （core.estimate.default_output_reserve）。"""
         ...
 
@@ -381,7 +382,7 @@ class LLMClient(Protocol):
     #   自行决定发多模态、降级成纯文本、还是报错。曾经有一个 duck-typed 的
     #   `supports_vision` 被 core 在入口读取并据以拒绝内容——它不在本协议上，host
     #   自写的 adapter 几乎必然读不到，于是一律被误判为无视觉能力。已删除。
-    #   内置实现的做法见 providers/llm/{anthropic,openai}.py 的 _prepare_messages。
+    #   内置实现的做法见 providers/llm/adapters/{anthropic,openai}.py 的 _prepare_messages。
 
     @property
     @abstractmethod

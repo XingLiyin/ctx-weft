@@ -3,7 +3,7 @@
 import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMUsage, ToolCall
-from ctx_weft.providers.llm._finalize import build_finalize_chunks, parse_tool_arguments
+from ctx_weft.providers.llm.adapters._finalize import build_finalize_chunks, parse_tool_arguments
 
 
 def _kinds(chunks):

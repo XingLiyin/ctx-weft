@@ -34,7 +34,7 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.events import InProcessEventBus, InMemoryEventStore
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider, make_echo_template, make_runtime,

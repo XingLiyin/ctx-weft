@@ -1,5 +1,5 @@
-from ctx_weft.providers.llm.anthropic import AnthropicAdapter
-from ctx_weft.providers.llm.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
+from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
 
 
 def test_adapters_hold_retry():

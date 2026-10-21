@@ -23,7 +23,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.events.bus.in_process.bus import InProcessEventBus
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (

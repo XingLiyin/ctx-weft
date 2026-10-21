@@ -45,7 +45,7 @@ from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import LLMOutageError, ToolCall
 from ctx_weft.protocols.events import EventType
-from ctx_weft.providers.llm.mock import (
+from ctx_weft.providers.llm.adapters.mock import (
     MockLLMAdapter,
     MockResponse,
     is_observer_request,

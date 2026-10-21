@@ -25,7 +25,7 @@ from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKi
 from ctx_weft.core.orchestrator.task.manager import TaskManager
 from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.events import EventType
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from tests._initialization import initialize_all
 from tests.integration.test_interactive_task import _act_state_ctx
 from tests.step_helpers import patch_observe_start

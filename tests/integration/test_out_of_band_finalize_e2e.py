@@ -29,7 +29,7 @@ from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderC
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import HitlAsk, UserTurnDelivery
 from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.hitl_env import make_hitl
 

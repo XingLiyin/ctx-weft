@@ -1,6 +1,6 @@
 """Parser for tool calls / <think> embedded in model text output."""
 
-from ctx_weft.providers.llm.text_calls import (
+from ctx_weft.providers.llm.adapters.text_calls import (
     DIALECTS,
     ContentGate,
     TextToolCallDialect,

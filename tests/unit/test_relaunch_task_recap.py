@@ -35,7 +35,7 @@ def _fake_resolved_model() -> ResolvedModel:
 
 
 def _make_runtime_and_session():
-    from ctx_weft.providers.llm.mock import MockLLMAdapter
+    from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
     from tests.integration.test_minimal_loop import (
         InlineAgentTemplateProvider, make_echo_template, make_runtime,
     )

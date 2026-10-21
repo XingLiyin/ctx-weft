@@ -27,7 +27,7 @@ from ctx_weft.protocols.capability import (  # noqa: E402
     ToolCapabilityProvider,
 )
 from ctx_weft.providers.events.store.sql.store import open_sqlite_event_store  # noqa: E402
-from ctx_weft.providers.llm.mock import MockLLMAdapter, MockResponse  # noqa: E402
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse  # noqa: E402
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory  # noqa: E402
 from tests.integration.test_minimal_loop import (  # noqa: E402
     InlineAgentTemplateProvider,

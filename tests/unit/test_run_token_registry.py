@@ -4,7 +4,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control import RunTokens
-from ctx_weft.providers.llm.mock import MockLLMAdapter
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
 from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
 pytestmark = pytest.mark.asyncio
