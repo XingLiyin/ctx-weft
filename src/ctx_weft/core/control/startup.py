@@ -145,10 +145,18 @@ async def calibrate_session(store, sid: str) -> SessionInitializationResult:
             # can already have pruned that terminal task, but retains agents.
             settled_agents.add(aid)
             affected_agents.add(aid)
-        if agent.status == "running" or aid in affected_agents:
-            req = waiting.get(agent.current_task_id)
-            if req is not None and req.agent_id and req.agent_id != aid:
-                req = None
+        req = waiting.get(agent.current_task_id)
+        if req is not None and req.agent_id and req.agent_id != aid:
+            req = None
+        # A new process has no executor for parked dependency/review work or a
+        # human wait whose request is gone. Preserve the task state for resume,
+        # but mark its agent interrupted even if it was already idle at the crash.
+        needs_recovery = (
+            current_task is not None
+            and current_task.status in {"SUSPENDED", "REVIEWING", "AWAITING_HUMAN", "INTERRUPTED"}
+            and req is None
+        )
+        if agent.status == "running" or aid in affected_agents or needs_recovery:
             transition = next_agent_transition(
                 agent.status,
                 (AgentInput.SETTLED if aid in settled_agents else

@@ -30,6 +30,104 @@ async def snapshot_if_requested(store, sid, snapshot):
 
 
 @pytest.mark.parametrize("snapshot", [False, True], ids=["log", "snapshot"])
+@pytest.mark.parametrize("status,task_event,agent_event", [
+    ("SUSPENDED", EventType.TASK_SUSPENDED, EventType.AGENT_IDLE),
+    ("REVIEWING", EventType.TASK_REVIEWING, EventType.AGENT_IDLE),
+    ("AWAITING_HUMAN", EventType.TASK_AWAITING_HUMAN, EventType.AGENT_WAITING_HUMAN),
+    ("INTERRUPTED", EventType.TASK_INTERRUPTED, EventType.AGENT_IDLE),
+])
+async def test_restart_marks_parked_agent_interrupted_without_rewriting_task(
+    store, snapshot, status, task_event, agent_event,
+):
+    old = runtime(store)
+    h = await container(old)
+    await append(store, h.session_id,
+        (EventType.TASK_CREATED, "t", h.root_agent_id,
+         {"task": {"id": "t", "assigned_agent_id": h.root_agent_id}}),
+        (task_event, "t", h.root_agent_id, {}),
+        (agent_event, "t", h.root_agent_id, {}))
+    await snapshot_if_requested(store, h.session_id, snapshot)
+
+    fresh = runtime(store)
+    result = await fresh.initialize(h.session_id)
+    assert result.state.root_task_status == status
+    assert result.state.root_agent_status == "interrupted"
+    assert result.state.has_interrupted_agents and not result.state.has_running_agents
+    event, = [row.event for row in result.startup_events]
+    assert (event.type, event.agent_id, event.task_id, event.payload["reason"]) == (
+        EventType.AGENT_INTERRUPTED, h.root_agent_id, "t", "crash_recovery")
+    assert not fresh._task_managers and not fresh._agent_lifecycle_manager.all_agent_ids()
+
+    head = await store.committed_head(h.session_id)
+    again = await runtime(store).initialize(h.session_id)
+    assert again.startup_events == [] and again.state == result.state
+    assert await store.committed_head(h.session_id) == head
+    await fresh.rebuild_session(h.session_id, strict=True)
+    assert (await fresh.get_task(h.session_id, "t")).data.status == status
+    assert (await fresh.get_agent(h.root_agent_id)).data.status == "interrupted"
+    assert not fresh._run_tokens
+
+
+@pytest.mark.parametrize("snapshot", [False, True], ids=["log", "snapshot"])
+@pytest.mark.parametrize("delivery_kind", ["user", "tool", "notification", "other_agent"])
+async def test_parked_agent_recovery_respects_matching_hitl(store, snapshot, delivery_kind):
+    from ctx_weft.protocols.hitl import HitlAsk, NoResumeDelivery, ToolResultDelivery, UserTurnDelivery
+
+    old = runtime(store)
+    h = await container(old)
+    await append(store, h.session_id,
+        (EventType.TASK_CREATED, "t", h.root_agent_id,
+         {"task": {"id": "t", "assigned_agent_id": h.root_agent_id}}),
+        (EventType.TASK_AWAITING_HUMAN, "t", h.root_agent_id, {}),
+        (EventType.AGENT_WAITING_HUMAN, "t", h.root_agent_id, {}))
+    delivery = (NoResumeDelivery() if delivery_kind == "notification" else
+                ToolResultDelivery("call") if delivery_kind == "tool" else UserTurnDelivery("t"))
+    req = await old.hitl.open(
+        HitlAsk(form="question", delivery=delivery), session_id=h.session_id, task_id="t",
+        agent_id="other" if delivery_kind == "other_agent" else h.root_agent_id,
+        stage="tool", unattended=False)
+    await snapshot_if_requested(store, h.session_id, snapshot)
+
+    fresh = runtime(store)
+    result = await fresh.initialize(h.session_id)
+    expected = "waiting_human" if delivery_kind in {"user", "tool"} else "interrupted"
+    assert result.state.root_agent_status == expected
+    assert result.state.root_task_status == "AWAITING_HUMAN"
+    assert [row.data.id for row in await fresh.list_pending_hitl(session_id=h.session_id)] == [req.id]
+    assert bool(result.startup_events) == (expected == "interrupted")
+
+
+@pytest.mark.parametrize("snapshot", [False, True], ids=["log", "snapshot"])
+async def test_recovered_suspended_parent_is_resumable_after_child_finished(store, snapshot):
+    old = runtime(store)
+    h = await container(old)
+    await append(store, h.session_id,
+        (EventType.TASK_CREATED, "parent", h.root_agent_id,
+         {"task": {"id": "parent", "assigned_agent_id": h.root_agent_id}}),
+        (EventType.TASK_SUSPENDED, "parent", h.root_agent_id, {}),
+        (EventType.AGENT_IDLE, "parent", h.root_agent_id, {}),
+        (EventType.AGENT_INSTANTIATED, None, "child-agent", {"template_id": "agent:tpl_echo"}),
+        (EventType.TASK_CREATED, "child", "child-agent", {"task": {
+            "id": "child", "assigned_agent_id": "child-agent",
+            "creator_agent_id": h.root_agent_id, "parent_task_id": "parent"}}),
+        (EventType.TASK_FINISHED, "child", "child-agent", {}),
+        (EventType.AGENT_IDLE, "child", "child-agent", {}))
+    await snapshot_if_requested(store, h.session_id, snapshot)
+
+    fresh = runtime(store)  # Hold dispatch so explicit recovery's queue can be inspected.
+    result = await fresh.initialize(h.session_id)
+    assert result.state.root_agent_status == "interrupted"
+    assert result.state.root_task_status == "SUSPENDED"
+    await fresh.rebuild_session(h.session_id, strict=True)
+    tm = fresh._task_managers[h.session_id]
+    assert not tm._queue.peek_all() and not fresh._run_tokens
+    await fresh.recover_agent(h.root_agent_id)
+    assert [entry.task_id for entry in tm._queue.peek_all()] == ["parent"]
+    assert tm.get_task("parent").status == "PENDING"
+    assert tm.get_task("child").status == "FINISHED"
+
+
+@pytest.mark.parametrize("snapshot", [False, True], ids=["log", "snapshot"])
 @pytest.mark.parametrize("status,event", [
     ("PENDING", None),
     ("ACTIVE", EventType.TASK_STARTED),
